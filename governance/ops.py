@@ -1258,6 +1258,9 @@ class RealOps:
         + ``--slurp`` возвращает страницы явно и только нужные поля. Любой
         неожиданный ответ —
         unknown/fail-closed, не пустой список.
+
+        `state` — как отдаёт GitHub (`OPEN|CLOSED|MERGED`); интерпретирует
+        вызывающий.
         """
         try:
             owner, name = repo_slug.split("/", 1)
@@ -1270,7 +1273,7 @@ class RealOps:
             "repository(owner:$owner,name:$name){pullRequests("
             "first:100,after:$endCursor,"
             "orderBy:{field:CREATED_AT,direction:DESC}){"
-            "nodes{number title body headRefName}"
+            "nodes{number title body headRefName state}"
             "pageInfo{hasNextPage endCursor}}}}"
         )
         done = subprocess.run(
@@ -1337,6 +1340,7 @@ class RealOps:
                             "title": item.get("title"),
                             "body": item.get("body"),
                             "head": {"ref": head_ref},
+                            "state": item.get("state"),
                         }
                     )
         return found

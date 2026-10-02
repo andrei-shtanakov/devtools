@@ -164,3 +164,13 @@ def test_unresolvable_base_is_a_finding_not_silence(tmp_path, base):
     out = cg.repo_findings(repo, base)
     assert any("баз" in f for f in out)
     assert cg.main(["--repo", str(repo), "--base", base]) == 1
+
+
+def test_plan_item_change_on_schema2_is_finding():
+    base = cg.Charter(2, "ENC", "todo://alpha/x")
+    assert cg.plan_item_change_findings(
+        "ws", base, cg.Charter(2, "ENC", "todo://alpha/y")
+    )
+    assert cg.plan_item_change_findings("ws", base, base) == []
+    assert cg.plan_item_change_findings("ws", None, base) == []  # новый charter
+    assert cg.plan_item_change_findings("ws", cg.Charter(1, None, None), base) == []

@@ -43,11 +43,16 @@ import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
 
 from governance import ssot_env
 from governance.facts import Fact, Outcome, unavailable
 from governance.ops import Ops
+from governance.policy_rule import (  # noqa: F401 — реэкспорт для потребителей
+    APPROVER_ALLOWLIST_ENV,
+    POLICY_SOURCE_FILE,
+    policy_accounts,
+    policy_source,
+)
 
 # --- Факт: есть ли PR на ветке заявки -----------------------------------
 
@@ -191,24 +196,6 @@ def merge_event(facts: dict) -> Fact[MergeEvent]:
 
 # --- Факт: создаёт ли этот мерж подпись ----------------------------------
 
-#: Ключ политики в `policy/approvers.env` репозитория `approval-policy` — И имя
-#: переменной окружения, выставление которой теперь есть ОТКАЗ (спека
-#: approval-policy S7): переменная больше не источник, а молчаливое
-#: игнорирование оставило бы оператора, действующего по старому правилу, в
-#: уверенности, что его намерение исполняется. Одно имя в двух местах —
-#: намеренно: правило волта и файл политики читаются одним словарём.
-APPROVER_ALLOWLIST_ENV = "AUTHORIZED_APPROVER_ACCOUNTS"
-
-#: Координаты источника политики — SSOT под authority-root (S8): константу
-#: в этом модуле агент перенаправил бы своим PR под агентским мержем.
-POLICY_SOURCE_FILE = (
-    Path(__file__).resolve().parent.parent
-    / "contracts"
-    / "approval-policy-source"
-    / "v1"
-    / "source.env"
-)
-
 #: Версия схемы отпечатка политики. Отпечаток обязан меняться, когда
 #: меняется СПОСОБ его вычисления, а не только состав списка, — иначе две
 #: разные политики однажды дадут одинаковую строку и запись перестанет
@@ -225,16 +212,6 @@ POLICY_REFUSAL_EMPTY = "empty"
 #: Префикс причины `invalidated` при смене версии политики (решение
 #: владельца 2026-09-22): отличим от прочих причин, запись заявки сохраняется.
 INVALIDATION_POLICY_CHANGED = "policy_changed"
-
-
-def policy_source() -> tuple[str, str, str]:
-    """(repo, ref, path) из SSOT под authority-root; RuntimeError на битом файле."""
-    what = "SSOT источника политики подписи"
-    return (
-        ssot_env.read_key(POLICY_SOURCE_FILE, "APPROVAL_POLICY_REPO", what),
-        ssot_env.read_key(POLICY_SOURCE_FILE, "APPROVAL_POLICY_REF", what),
-        ssot_env.read_key(POLICY_SOURCE_FILE, "APPROVAL_POLICY_PATH", what),
-    )
 
 
 def policy_fingerprint(accounts: Iterable[str]) -> str:
@@ -293,6 +270,21 @@ def _forbidden(kind: str, detail: str, **extra: str) -> PolicyFact:
     return Fact(Outcome.FORBIDDEN, PolicyRefusal(kind, detail, **extra), detail)
 
 
+def env_override_refusal() -> str | None:
+    """Отказ S7, если `APPROVER_ALLOWLIST_ENV` выставлена в окружении — без
+    сети и без форджи. Единственное место в devtools, читающее эту
+    переменную (страж — `test_no_module_reads_the_allowlist_from_the_environment`):
+    `policy_snapshot` и `criteria_close._policy_config_refusal` зовут эту
+    функцию, а не читают `os.environ` напрямую."""
+    if os.environ.get(APPROVER_ALLOWLIST_ENV) is None:
+        return None
+    return (
+        f"{APPROVER_ALLOWLIST_ENV} выставлена в окружении, но переменная "
+        "больше не источник политики подписи — источник репозиторий "
+        "approval-policy; снимите переменную и повторите"
+    )
+
+
 def policy_snapshot(ops: Ops, *, pinned_sha: str | None) -> PolicyFact:
     """Снимок политики из репозитория `approval-policy` (спека §4.2).
 
@@ -304,13 +296,9 @@ def policy_snapshot(ops: Ops, *, pinned_sha: str | None) -> PolicyFact:
     (`= , ,` проходит `read_key`) → `empty`. `FOUND` с пустым `accounts`
     невозможен по построению. Ни одно сообщение не упоминает учётку мержера.
     """
-    if os.environ.get(APPROVER_ALLOWLIST_ENV) is not None:
-        return _forbidden(
-            POLICY_REFUSAL_ENV,
-            f"{APPROVER_ALLOWLIST_ENV} выставлена в окружении, но переменная "
-            "больше не источник политики подписи — источник репозиторий "
-            "approval-policy; снимите переменную и повторите",
-        )
+    env_refusal = env_override_refusal()
+    if env_refusal is not None:
+        return _forbidden(POLICY_REFUSAL_ENV, env_refusal)
     try:
         repo, ref, path = policy_source()
     except RuntimeError as exc:
