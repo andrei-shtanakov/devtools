@@ -180,6 +180,37 @@ def test_find_pr_valid_list_returns_number(monkeypatch):
     assert result == 42
 
 
+# --- criteria_verify: таймаут и stderr вне протокола (#481 M-14) -----------
+
+
+def test_criteria_verify_has_timeout_and_returns_answer_on_protocol_code(
+    monkeypatch,
+):
+    calls = _install_fake_run(monkeypatch, returncode=3, stdout="{}", stderr="warn")
+
+    assert RealOps().criteria_verify("/t", "/r.json") == (3, "{}")
+    assert calls[0].kwargs["timeout"] == ops_mod.CRITERIA_VERIFY_TIMEOUT_S
+
+
+def test_criteria_verify_off_protocol_code_carries_stderr(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=1, stdout="", stderr="Traceback: boom")
+
+    code, out = RealOps().criteria_verify("/t", "/r.json")
+
+    assert code == 1 and "Traceback: boom" in out
+
+
+def test_criteria_verify_timeout_is_named_code_not_exception(monkeypatch):
+    def hang(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", hang)
+
+    code, out = RealOps().criteria_verify("/t", "/r.json")
+
+    assert code == 124 and str(ops_mod.CRITERIA_VERIFY_TIMEOUT_S) in out
+
+
 def test_prs_by_head_prefix_paginates_all_states_and_filters(monkeypatch):
     payload = [
         {
