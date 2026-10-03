@@ -127,9 +127,15 @@ def _ops(verify=(0, "")):
             self, target_dir, repo_slug, branch, title, body, label, *, draft=False
         ):
             self.calls.append(("create_pr", branch, label))
+            head = _git(target_dir, "ls-remote", "origin", f"refs/heads/{branch}")
+            _git(target_dir, "fetch", "-q", "origin", "master")
+            if self.is_ancestor(target_dir, head.split()[0], "origin/master"):
+                # как gh: ветка уже влита в base — PR создать нельзя
+                raise subprocess.CalledProcessError(
+                    1, ["gh", "pr", "create"], stderr="No commits between"
+                )
             number = 100 + len(self.existing_prs)
             self.existing_prs[branch] = number
-            head = _git(target_dir, "ls-remote", "origin", f"refs/heads/{branch}")
             self.forge_prs[number] = {
                 "dir": target_dir,
                 "branch": branch,
@@ -141,11 +147,14 @@ def _ops(verify=(0, "")):
             }
             return number
 
-        def find_pr(self, repo_slug, branch):
-            """Как `gh pr list --state open`: закрытый/влитый PR не находится."""
+        def find_pr(self, repo_slug, branch, *, any_state=False):
+            """Как `gh pr list --state open|all`: закрытый/влитый PR находится
+            только с `any_state`; сбой запроса — RuntimeError, как RealOps."""
             self.calls.append(("find_pr", branch))
+            if self.find_pr_error is not None:
+                raise RuntimeError(self.find_pr_error)
             pr = self.existing_prs.get(branch)
-            if pr is None or pr not in self.forge_prs:
+            if pr is None or pr not in self.forge_prs or any_state:
                 return pr
             return pr if self.forge_prs[pr]["facts"]["state"] == "OPEN" else None
 
@@ -1882,3 +1891,149 @@ def test_tampered_or_deleted_stamp_reissues_stamp_pr(tmp_path, monkeypatch, how)
     assert cc.run("run-1", ops) == 0
     stamps = [c[1] for c in _stamp_prs(ops)]
     assert len(stamps) == 2 and stamps[1].endswith("-stamp-2")
+
+
+# ---- #481: долг среза 1 ------------------------------------------------------
+
+
+def test_schema1_without_finalize_identity_is_not_applicable(
+    tmp_path, monkeypatch, capsys
+):
+    """M-1: прогон без идентичности результата (finalize) на charter'е схемы 1
+    — `not-applicable: schema-1` с выходом 0, публиковать нечего (гейт схему 1
+    не потребляет), а не отказ «нет идентичности результата»."""
+    _env(tmp_path, monkeypatch, charter=CH1)
+    monkeypatch.setattr(cc.runner, "_verified_result_sha", lambda s: None)
+    ops = _ops()
+    assert cc.run("run-1", ops) == 0
+    out = capsys.readouterr().out
+    assert "not-applicable: schema-1" in out and "публиковать нечего" in out
+    assert not any(c[0] in ("create_pr", "review", "merge") for c in ops.calls)
+
+
+@pytest.mark.parametrize("charter", [CH2, "---\nschema: [2\n---\n"])
+def test_schema2_without_finalize_identity_still_refused(
+    tmp_path, monkeypatch, capsys, charter
+):
+    """M-1: схема 2 (и битый frontmatter — не «схема 1») без пина — отказ."""
+    _env(tmp_path, monkeypatch, charter=charter)
+    monkeypatch.setattr(cc.runner, "_verified_result_sha", lambda s: None)
+    assert cc.run("run-1", _ops()) == 2
+    assert "нет идентичности результата" in capsys.readouterr().out
+
+
+def test_unfetched_finalize_pin_is_fetched_before_reading_bundle(tmp_path, monkeypatch):
+    """M-9: пин finalize, которого ещё нет в локальных объектах, — fetch до
+    чтения бандла по пину, а не отказ «недоступен»."""
+    _state, target, pin = _env(tmp_path, monkeypatch, charter=CH1)
+    other = tmp_path / "other"
+    origin = _git(target, "remote", "get-url", "origin")
+    subprocess.run(
+        ["git", "clone", "-q", origin, str(other)], check=True, capture_output=True
+    )
+    _commit(other, "workstreams/ws/spec/10-requirements.md", REQ + "\n")
+    _git(other, "push", "-q", "origin", "master")
+    finalize = _git(other, "rev-parse", "HEAD")
+    monkeypatch.setattr(cc.runner, "_verified_result_sha", lambda s: finalize)
+    ops = _ops()
+    assert cc.run("run-1", ops, product_sha=pin) == 0
+    assert ops.merged
+
+
+def _forget_merged(run_id="run-1"):
+    """Сбой между мержем и записью: `merged` в состоянии не записан."""
+    data = cc._load(run_id)
+    for e in data["measured"].values():
+        e.pop("merged", None)
+    cc._save(run_id, data)
+
+
+def test_merged_but_unrecorded_closure_pr_is_recorded(tmp_path, monkeypatch, capsys):
+    """M-7: PR закрытия влит, запись `merged` потеряна — повтор находит влитый
+    PR (любого состояния) и записывает факт, а не упирается в «нет коммитов»."""
+    _state, _target, pin = _env(tmp_path, monkeypatch, charter=CH1)
+    ops = _ops()
+    assert cc.run("run-1", ops) == 0
+    _forget_merged()
+    prs = sum(1 for c in ops.calls if c[0] == "create_pr")
+    # тот же ключ: product_sha прежний (верхушку сдвинул сам мерж закрытия)
+    assert cc.run("run-1", ops, product_sha=pin) == 0
+    assert sum(1 for c in ops.calls if c[0] == "create_pr") == prs
+    (entry,) = cc._load("run-1")["measured"].values()
+    assert entry["merged"] is True
+    assert "уже влит" in capsys.readouterr().out
+
+
+def test_closure_already_on_base_is_recorded_without_branch_or_pr(
+    tmp_path, monkeypatch, capsys
+):
+    """M-7: ветка ключа удалена после мержа, PR не находится — тот же текст
+    уже на origin/<base>: публикация завершена, а не `git commit` впустую."""
+    _state, target, pin = _env(tmp_path, monkeypatch, charter=CH1)
+    ops = _ops()
+    assert cc.run("run-1", ops) == 0
+    _forget_merged()
+    ops.existing_prs.clear()
+    (entry,) = cc._load("run-1")["measured"].values()
+    _git(target, "push", "-q", "origin", "--delete", entry["branch"])
+    prs = sum(1 for c in ops.calls if c[0] == "create_pr")
+    assert cc.run("run-1", ops, product_sha=pin) == 0
+    assert sum(1 for c in ops.calls if c[0] == "create_pr") == prs
+    (entry,) = cc._load("run-1")["measured"].values()
+    assert entry["merged"] is True
+    assert "уже в origin/master" in capsys.readouterr().out
+
+
+def test_reuse_of_measured_result_is_named(tmp_path, monkeypatch, capsys):
+    """M-8: повтор публикации ранее измеренного результата назван явно —
+    оператор отличает его от нового измерения."""
+    _, target, pin = _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    err = {
+        "protocol": 1,
+        "spec_runner_version": "4.5.0",
+        "request": _request(target, pin),
+        "error": {"kind": "collection-error", "retryable": False, "detail": "x"},
+    }
+    ops = _ops((3, json.dumps(err)))
+    ops.review_exit = 1
+    assert cc.run("run-1", ops) == 2
+    first = capsys.readouterr().out
+    assert "повтор публикации" not in first and "новый результат" in first
+    ops.review_exit = 0
+    assert cc.run("run-1", ops) == 0
+    assert "повтор публикации ранее измеренного результата" in capsys.readouterr().out
+
+
+def test_reuse_of_not_applicable_result_is_named(tmp_path, monkeypatch, capsys):
+    """M-8: то же на пути not-applicable."""
+    _env(tmp_path, monkeypatch, charter=CH1)
+    ops = _ops()
+    ops.review_exit = 1
+    assert cc.run("run-1", ops) == 2
+    assert "повтор публикации" not in capsys.readouterr().out
+    ops.review_exit = 0
+    assert cc.run("run-1", ops) == 0
+    assert "повтор публикации ранее измеренного результата" in capsys.readouterr().out
+
+
+def test_forge_runtime_error_is_step_refusal_not_traceback(
+    tmp_path, monkeypatch, capsys
+):
+    """M-14: сбой запроса к фордже (RuntimeError из find_pr) — отказ шага (2)
+    с причиной, а не трейсбек."""
+    _env(tmp_path, monkeypatch, charter=CH1)
+    ops = _ops()
+    ops.find_pr_error = "find_pr: gh pr list rc=1: rate limited"
+    assert cc.run("run-1", ops) == 2
+    assert "rate limited" in capsys.readouterr().out
+
+
+def test_off_protocol_verify_exit_names_diagnostic(tmp_path, monkeypatch, capsys):
+    """M-14: код выхода spec-runner вне 0/2/3 — отказ шага с его диагностикой
+    (RealOps отдаёт stderr), а не голый «код вне 0/2/3»."""
+    _env(tmp_path, monkeypatch)
+    _oracle_on(monkeypatch)
+    assert cc.run("run-1", _ops((1, "Traceback: boom"))) == 2
+    out = capsys.readouterr().out
+    assert "вне 0/2/3" in out and "Traceback: boom" in out
