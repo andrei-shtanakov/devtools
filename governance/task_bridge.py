@@ -730,7 +730,10 @@ def _control_patch(ws_id: str, task_number: int) -> str:
     return f"spec/negative-controls/{ws_id}/TASK-{task_number:03d}.patch"
 
 
-_VERSION_RE = re.compile(r"(\d+\.\d+\.\d+)")
+#: Версия целиком, с суффиксом pre/post-release (`4.5.0rc1`, `4.5.0-rc.1`):
+#: срезанный суффикс выдавал rc за релиз и пропускал его через порог
+#: оракула (#481 M-12); это же значение сверяется с эхом ответа.
+_VERSION_RE = re.compile(r"(\d+\.\d+\.\d+\S*)")
 
 
 def spec_runner_version() -> str | None:

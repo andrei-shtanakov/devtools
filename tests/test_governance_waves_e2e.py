@@ -8,9 +8,10 @@
 
 Здесь подменено ТОЛЬКО платное и внешнее: автор, гейты steward, ревьюер
 edge-check (координатор настоящий, `call` — фальшивая модель), форджа (PR,
-ревью, мерж — стенд `test_governance_approve_node`). Всё, что делает git, —
-настоящее: ветки волн, коммиты бандла, candidate/finalize, мержи в origin,
-S8, доставка tasks-спеки. Цель несёт `.gitignore` spec-runner (дословная
+ревью, мерж — стенд `test_governance_approve_node`; листинг открытых PR —
+`gh pr list`, подменён один он). Всё, что делает git, — настоящее: ветки
+волн, коммиты бандла, candidate/finalize, мержи в origin, S8, доставка
+tasks-спеки, fetch кодов charter'ов перед штампом (#481 C-a). Цель несёт `.gitignore` spec-runner (дословная
 выдержка, см. `_GITIGNORE_*`) — в нынешнем виде и в прежнем, до
 разыгнорирования `00-discovery/` (spec-runner 22.09).
 
@@ -50,6 +51,9 @@ WS_ID = "WS-T1"
 BUNDLE = f"workstreams/{WS_ID}/spec"
 SLUG = "owner/alpha"
 CODE = "ENC"
+#: Открытый candidate W1 чужого воркстрима в origin стенда: профилактика
+#: коллизии кода (спека оракула §1.2) забирает его настоящим fetch.
+FOREIGN_W1 = "spec/WS-T2-approve-1-1-1"
 PLAN_ITEM = "todo://alpha/enc-oracle"
 EDGE_CONTRACTS = Path("contracts/edge-check/v1")
 _PROFILE = Path(__file__).resolve().parent.parent / "profiles" / "team-exp.yaml"
@@ -210,9 +214,6 @@ class E2EOps(ForgeOps):
     def edge_check_level(self, state, run_dir, wave, profile_path):
         return co.run_level(state, self, run_dir, wave, profile_path, call=_edge_answer)
 
-    def charter_codes_elsewhere(self, target_dir, repo_slug, base_ref, own_ws):
-        return {}  # листинг открытых PR — gh; коллизий на стенде нет
-
     def comment(self, repo_slug: str, pr: int, body: str) -> None:
         self.comments.append((pr, body))
 
@@ -263,6 +264,7 @@ def _world(tmp_path: Path, gitignore: str) -> tuple[Path, Forge, E2EOps]:
         ("push", "-q", "-u", "origin", "master"),
     ):
         _git(seed, *args)
+    _push_foreign_w1(seed, "OTH")
     target, human = tmp_path / "target", tmp_path / "human"
     for clone in (target, human):
         subprocess.run(["git", "clone", "-q", str(origin), str(clone)], check=True)
@@ -270,6 +272,47 @@ def _world(tmp_path: Path, gitignore: str) -> tuple[Path, Forge, E2EOps]:
         _git(clone, "config", "user.name", "test")
     forge = Forge(origin=origin, merger=human)
     return target, forge, E2EOps(forge)
+
+
+def _push_foreign_w1(seed: Path, code: str) -> None:
+    """Ветка `FOREIGN_W1` в origin: charter схемы 2 воркстрима WS-T2."""
+    _git(seed, "switch", "-q", "-C", FOREIGN_W1, "master")
+    charter = seed / "workstreams" / "WS-T2" / "spec" / "00-charter.md"
+    charter.parent.mkdir(parents=True, exist_ok=True)
+    charter.write_text(
+        f"---\nschema: 2\ncode: {code}\nplan_item: todo://alpha/t2\n---\n# C\n",
+        encoding="utf-8",
+    )
+    _git(seed, "add", "-A")
+    _git(seed, "commit", "-qm", f"charter WS-T2 {code}")
+    _git(seed, "push", "-q", "--force", "origin", FOREIGN_W1)
+    _git(seed, "switch", "-q", "master")
+
+
+@pytest.fixture
+def gh_open_prs(monkeypatch) -> list[list[str]]:
+    """`gh pr list` отвечает открытым `FOREIGN_W1`; остальное — настоящее.
+
+    Подменён ровно листинг: fetch candidate и `charters_at` в
+    `RealOps.charter_codes_elsewhere` исполняются против origin стенда.
+    """
+    real_run = subprocess.run
+    calls: list[list[str]] = []
+
+    def run(argv, *args, **kwargs):
+        if list(argv[:3]) != ["gh", "pr", "list"]:
+            return real_run(argv, *args, **kwargs)
+        calls.append(list(argv))
+        out = json.dumps([{"headRefName": FOREIGN_W1}])
+        return subprocess.CompletedProcess(argv, 0, out, "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    return calls
+
+
+def _criteria_refs(target: Path) -> set[str]:
+    refs = _git(target, "for-each-ref", "--format=%(refname)", "refs/criteria-codes")
+    return set(refs.split())
 
 
 def _brief(tmp_path: Path):
@@ -303,7 +346,9 @@ def _drive(state: rs.RunState, ops: E2EOps, target: Path) -> rs.RunState:
 
 
 @pytest.mark.parametrize("rules", sorted(GITIGNORES))
-def test_waves_run_end_to_end_on_real_git(tmp_path: Path, rules: str) -> None:
+def test_waves_run_end_to_end_on_real_git(
+    tmp_path: Path, rules: str, gh_open_prs: list[list[str]]
+) -> None:
     target, forge, ops = _world(tmp_path, GITIGNORES[rules])
     state = runner.start(
         subject="сквозной прогон",
@@ -349,6 +394,11 @@ def test_waves_run_end_to_end_on_real_git(tmp_path: Path, rules: str) -> None:
     assert any(p.startswith(f"workstreams/{WS_ID}/evidence/edge-check/") for p in base)
     charter = _git(target, "show", f"origin/master:{BUNDLE}/00-charter.md")
     assert read_charter(charter).code == CODE
+    assert gh_open_prs and all(c[3:5] == ["-R", SLUG] for c in gh_open_prs)
+    assert _criteria_refs(target) == {
+        "refs/criteria-codes/master",
+        f"refs/criteria-codes/{FOREIGN_W1}",
+    }
 
     number = task_bridge.deliver_for_run(state, ops)
     _assert_clean(target, "после доставки")
@@ -361,3 +411,30 @@ def test_waves_run_end_to_end_on_real_git(tmp_path: Path, rules: str) -> None:
     )
     assert f"spec/{WS_ID}-tasks.md" in delivered
     assert any(p.startswith("spec/profiles/") for p in delivered), delivered
+
+
+def test_code_taken_by_foreign_w1_candidate_stops_before_stamp(
+    tmp_path: Path, gh_open_prs: list[list[str]]
+) -> None:
+    """Коллизия, видимая только через настоящий fetch чужого candidate W1:
+    стоп `stopped_preflight` до штампа, charter остаётся схемой 1 (#481 C-a)."""
+    target, forge, ops = _world(tmp_path, GITIGNORES["current"])
+    _push_foreign_w1(tmp_path / "seed", CODE)
+    state = runner.start(
+        subject="коллизия кода",
+        repo="alpha",
+        repo_slug=SLUG,
+        ws_id=WS_ID,
+        target_dir=str(target),
+        bundle_dir=BUNDLE,
+        profile="profiles/team-exp.yaml",
+        run_id="r-e2e-taken",
+        ops=ops,
+        brief_source=_brief(tmp_path),
+        code=CODE,
+        plan_item=PLAN_ITEM,
+    )
+    assert state.status == "stopped_preflight", state.status
+    assert not forge.prs, "W1 не открыт"
+    charter = (target / BUNDLE / "00-charter.md").read_text(encoding="utf-8")
+    assert read_charter(charter).schema == 1

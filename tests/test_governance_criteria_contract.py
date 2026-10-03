@@ -184,3 +184,34 @@ def test_drift_reads_schemas_from_schemas_dir():
 
     sig = inspect.signature(cc.drift_findings)
     assert sig.parameters["upstream_path"].default == "schemas/criteria-closure/v1"
+
+
+@pytest.mark.parametrize(
+    "installed",
+    ["4.5.0rc1", "4.5.0a2", "4.5.0b1", "4.5.0.dev3", "4.5.0-rc.1", "4.5.0-beta"],
+)
+def test_prerelease_is_below_its_release(installed):
+    """Pre-release ниже своего релиза (#481 M-12): `4.5.0rc1` — не 4.5.0,
+    оракул им недоступен. Прежний `_parts` выбрасывал `0rc1` целиком."""
+    minimum = cc.MinVersion("4.5.0")
+    assert not cc.oracle_available(installed, minimum, is_vendored=True)
+    assert cc.oracle_available(installed, cc.MinVersion("4.4.0"), is_vendored=True)
+
+
+@pytest.mark.parametrize("installed", ["4.5.0.post1", "4.5.0+local.7", "4.5.1rc1"])
+def test_post_local_and_next_prerelease_reach_the_release(installed):
+    """Post-release и local-метка не ниже релиза; rc СЛЕДУЮЩЕГО релиза выше
+    текущего — суффикс понижает только внутри своего номера."""
+    assert cc.oracle_available(installed, cc.MinVersion("4.5.0"), is_vendored=True)
+
+
+def test_prerelease_phases_are_ordered():
+    """dev < a < b < rc внутри одного номера; нераспознанный суффикс —
+    ниже любого распознанного (fail-closed)."""
+    order = ["4.5.0-weird", "4.5.0.dev1", "4.5.0a1", "4.5.0b1", "4.5.0rc1"]
+    order += ["4.5.0rc2", "4.5.0"]
+    for lower, higher in zip(order, order[1:], strict=False):
+        assert cc.oracle_available(higher, cc.MinVersion(lower), is_vendored=True)
+        assert not cc.oracle_available(
+            lower, cc.MinVersion(higher), is_vendored=True
+        ), (lower, higher)

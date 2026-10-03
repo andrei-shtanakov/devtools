@@ -2834,3 +2834,158 @@ def test_claude_isolation_keeps_operator_secrets_out(monkeypatch):
         if k not in {"CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"}
     }
     assert rest == _AGENT_ENV
+
+
+# --- charter_codes_elsewhere на настоящем git (#481 C-a) ------------------
+
+
+def _codes_world(tmp_path: Path) -> tuple[Path, Path]:
+    """bare origin + клон цели. master несёт charter'ы своего и чужого
+    воркстрима; ветки — candidate W1/W2, finalize, свой candidate и
+    посторонняя, у каждой — charter схемы 2 со своим кодом."""
+    real_run = subprocess.run
+    origin = tmp_path / "origin.git"
+    seed = tmp_path / "seed"
+    real_run(["git", "init", "-q", "--bare", "-b", "master", str(origin)], check=True)
+    real_run(["git", "init", "-q", "-b", "master", str(seed)], check=True)
+
+    def git(*args: str) -> None:
+        real_run(["git", "-C", str(seed), *args], check=True, capture_output=True)
+
+    def charter(ws: str, code: str | None) -> None:
+        path = seed / "workstreams" / ws / "spec" / "00-charter.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        meta = "spec_stage: charter"
+        if code:
+            meta = f"schema: 2\ncode: {code}\nplan_item: todo://alpha/x"
+        path.write_text(f"---\n{meta}\n---\n# C\n")
+
+    git("config", "user.email", "t@e.st")
+    git("config", "user.name", "test")
+    charter("WS-BASE", "BASE")
+    charter("WS-OWN", "OWN")
+    charter("WS-OLD", None)  # схема 1 — кода нет
+    git("add", "-A")
+    git("commit", "-q", "-m", "base")
+    git("remote", "add", "origin", str(origin))
+    git("push", "-q", "origin", "master")
+    for branch, ws, code in (
+        ("spec/WS-B-approve-1-1-1", "WS-B", "CANDW1"),
+        ("spec/WS-C-approve-2-1-1", "WS-C", "CANDW2"),
+        ("spec/WS-D-approve-1-1-1-final", "WS-D", "FINAL"),
+        ("spec/WS-OWN-approve-1-1-2", "WS-OWN", "OWNCAND"),
+        ("feature/x", "WS-F", "FEAT"),
+    ):
+        git("switch", "-q", "-c", branch, "master")
+        charter(ws, code)
+        git("add", "-A")
+        git("commit", "-q", "-m", branch)
+        git("push", "-q", "origin", branch)
+    target = tmp_path / "target"
+    real_run(["git", "clone", "-q", str(origin), str(target)], check=True)
+    return origin, target
+
+
+def _gh_listing(
+    monkeypatch, heads: list[str], *, returncode: int = 0
+) -> list[list[str]]:
+    """Подменяет ТОЛЬКО `gh` (листинг открытых PR); git идёт настоящий."""
+    real_run = subprocess.run
+    gh_calls: list[list[str]] = []
+
+    def run(argv, **kwargs):
+        if argv[0] != "gh":
+            return real_run(argv, **kwargs)
+        gh_calls.append(list(argv))
+        out = json.dumps([{"headRefName": h} for h in heads])
+        return subprocess.CompletedProcess(argv, returncode, out, "gh: boom")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", run)
+    return gh_calls
+
+
+_ALL_HEADS = [
+    "spec/WS-B-approve-1-1-1",
+    "spec/WS-C-approve-2-1-1",
+    "spec/WS-D-approve-1-1-1-final",
+    "spec/WS-OWN-approve-1-1-2",
+    "feature/x",
+]
+
+
+def test_charter_codes_elsewhere_reads_base_and_foreign_w1_candidates(
+    tmp_path, monkeypatch
+):
+    """Настоящий fetch `+refs/heads/<ref>:refs/criteria-codes/<ref>` и
+    `charters_at` (#481 C-a): коды — с верхушки base и из открытых candidate
+    W1 ЧУЖИХ воркстримов; W2, finalize, свой candidate, посторонняя ветка,
+    схема 1 и свой charter на base — мимо, лишние ref'ы не забираются."""
+    _, target = _codes_world(tmp_path)
+    gh_calls = _gh_listing(monkeypatch, _ALL_HEADS)
+    got = RealOps().charter_codes_elsewhere(str(target), REPO_SLUG, "master", "WS-OWN")
+    assert got == {"BASE": "WS-BASE", "CANDW1": "WS-B"}
+    assert gh_calls == [
+        [
+            "gh",
+            "pr",
+            "list",
+            "-R",
+            REPO_SLUG,
+            "--state",
+            "open",
+            "--limit",
+            "500",
+            "--json",
+            "headRefName",
+        ]
+    ]
+    refs = subprocess.run(
+        ["git", "-C", str(target), "for-each-ref", "--format=%(refname)"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    assert {r for r in refs if r.startswith("refs/criteria-codes/")} == {
+        "refs/criteria-codes/master",
+        "refs/criteria-codes/spec/WS-B-approve-1-1-1",
+    }
+
+
+def test_charter_codes_elsewhere_sees_base_moved_after_clone(tmp_path, monkeypatch):
+    """Читается ЖИВАЯ верхушка origin, а не устаревший локальный ref:
+    charter, влитый в origin после клона, виден без ручного fetch."""
+    origin, target = _codes_world(tmp_path)
+    late = tmp_path / "late"
+    subprocess.run(["git", "clone", "-q", str(origin), str(late)], check=True)
+    path = late / "workstreams" / "WS-LATE" / "spec" / "00-charter.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("---\nschema: 2\ncode: LATE\nplan_item: todo://alpha/y\n---\n")
+    ident = ("-c", "user.email=t@e.st", "-c", "user.name=t")
+    for args in (
+        (*ident, "add", "-A"),
+        (*ident, "commit", "-qm", "late"),
+        ("push", "-q", "origin", "master"),
+    ):
+        subprocess.run(["git", "-C", str(late), *args], check=True)
+    _gh_listing(monkeypatch, [])
+    got = RealOps().charter_codes_elsewhere(str(target), REPO_SLUG, "master", "WS-OWN")
+    assert got == {"BASE": "WS-BASE", "LATE": "WS-LATE"}
+
+
+@pytest.mark.parametrize(
+    ("heads", "rc", "needle"),
+    [
+        ([], 1, "gh pr list"),
+        (["spec/WS-GONE-approve-1-1-1"], 0, "fetch spec/WS-GONE-approve-1-1-1"),
+    ],
+    ids=["gh-fails", "candidate-gone-from-origin"],
+)
+def test_charter_codes_elsewhere_unavailable_fact_raises(
+    tmp_path, monkeypatch, heads, rc, needle
+):
+    """Недоступный факт — RuntimeError (fail-closed), а не пустой ответ:
+    отказ gh и candidate, которого уже нет в origin."""
+    _, target = _codes_world(tmp_path)
+    _gh_listing(monkeypatch, heads, returncode=rc)
+    with pytest.raises(RuntimeError, match=needle):
+        RealOps().charter_codes_elsewhere(str(target), REPO_SLUG, "master", "WS-OWN")
