@@ -100,6 +100,27 @@ def test_total_count_above_received_is_error() -> None:
     assert discover("own", {"a"}, run)[1] == "error"
 
 
+def test_pages_are_deduped_and_dedup_counts_against_total() -> None:
+    """#511: элемент, съехавший между страницами, не считается дважды —
+    ни в находках, ни в сверке с total_count."""
+    shifted = [_page([("a", 1, False), ("a", 2, False)]), _page([("a", 2, False)], 2)]
+    hits, state, _ = discover("own", {"a"}, fake({OPEN: (0, json.dumps(shifted), "")}))
+    assert state == "read" and hits == [("a", 1, False), ("a", 2, False)]
+    dup = [_page([("a", 1, False)], total=2), _page([("a", 1, False)], total=2)]
+    assert discover("own", {"a"}, fake({OPEN: (0, json.dumps(dup), "")}))[1] == (
+        "error"
+    )
+
+
+def test_total_count_changed_between_pages_is_error() -> None:
+    """#511: total_count сверяется по каждой странице, не только по первой."""
+    pages = [_page([("a", 1, False)], total=1), _page([("a", 2, False)], total=2)]
+    hits, state, detail = discover(
+        "own", {"a"}, fake({OPEN: (0, json.dumps(pages), "")})
+    )
+    assert (hits, state) == ([], "error") and "total_count" in detail
+
+
 def test_non_fleet_repos_are_ignored() -> None:
     run = fake(
         {

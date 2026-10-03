@@ -154,10 +154,18 @@ def _search(
     pages = _json(out, "[]")
     if not isinstance(pages, list):
         return None, f"поиск «{qualifier}»: битый ответ"
-    items = [item for page in pages for item in page.get("items", [])]
+    # Страницы читаются в разные моменты: элемент, сдвинутый между ними,
+    # приходит дважды — считать его по (репо, номер) один раз (#511).
+    unique: dict[tuple[Any, Any], dict[str, Any]] = {}
+    for page in pages:
+        for item in page.get("items", []):
+            unique.setdefault((item.get("repository_url"), item.get("number")), item)
+    items = list(unique.values())
     total = pages[0].get("total_count", 0) if pages else 0
     if any(page.get("incomplete_results") for page in pages):
         return None, f"поиск «{qualifier}»: incomplete_results"
+    if any(page.get("total_count", 0) != total for page in pages):
+        return None, f"поиск «{qualifier}»: total_count менялся между страницами"
     if total > len(items):
         return None, f"поиск «{qualifier}»: получено {len(items)} из {total}"
     return items, ""
