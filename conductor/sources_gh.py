@@ -21,7 +21,9 @@ from conductor.sources_git import child_env
 
 GH_TIMEOUT = 120
 Runner = Callable[[list[str]], tuple[int, str, str]]
-ISSUE_FIELDS = "title,body,state,stateReason,author,labels,updatedAt,url,closedAt"
+ISSUE_FIELDS = (
+    "title,body,state,stateReason,author,labels,updatedAt,url,closedAt,createdAt"
+)
 PR_FIELDS = (
     "title,body,state,mergedAt,author,labels,updatedAt,url,"
     "closingIssuesReferences,headRefOid,reviewDecision,statusCheckRollup,"
@@ -296,6 +298,7 @@ def fetch_record(
         "updated_at": raw.get("updatedAt", ""),
         "url": raw.get("url", ""),
         "closed_at": raw.get("closedAt"),
+        "created_at": raw.get("createdAt", ""),
         "comments": comments,
         "closing_refs": [
             f"{r['repository']['name']}#{r['number']}"

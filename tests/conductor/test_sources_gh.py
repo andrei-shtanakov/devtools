@@ -4,7 +4,13 @@ import subprocess
 import pytest
 
 import conductor.sources_gh as sources_gh
-from conductor.sources_gh import ci_state, collect_gh, discover
+from conductor.sources_gh import (
+    ISSUE_FIELDS,
+    ci_state,
+    collect_gh,
+    discover,
+    fetch_record,
+)
 
 
 def fake(responses: dict[str, tuple[int, str, str]]):
@@ -293,3 +299,17 @@ def test_run_gh_has_no_tty_and_no_prompts(monkeypatch: pytest.MonkeyPatch) -> No
     assert seen["stdin"] is subprocess.DEVNULL
     assert isinstance(env, dict) and env["GH_PROMPT_DISABLED"] == "1"
     assert "GIT_DIR" not in env
+
+
+def test_issue_record_carries_created_at() -> None:
+    # #511: возраст ожидания по from: — от создания запроса
+    raw = json.dumps({**json.loads(ISSUE), "createdAt": "2026-09-20T00:00:00Z"})
+    run = fake(
+        {
+            "issue view 1 -R own/a --json": (0, raw, ""),
+            "api --paginate --slurp repos/own/a/issues/1/comments": (0, COMMENTS, ""),
+        }
+    )
+    assert "createdAt" in ISSUE_FIELDS.split(",")
+    rec = fetch_record("own", "a", 1, False, run)
+    assert rec is not None and rec["created_at"] == "2026-09-20T00:00:00Z"

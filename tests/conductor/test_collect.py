@@ -5,7 +5,9 @@ import pytest
 
 import conductor.collect as collect_mod
 from conductor.collect import collect, read_epics, read_manifest
+from conductor.graph import build_graph
 from conductor.manifest import UMBRELLA
+from conductor.waits import prereq_state
 
 
 def _repo(path: Path, files: dict[str, str]) -> None:
@@ -225,3 +227,47 @@ def test_unmatched_repo_url_is_a_source_error_not_silence(tmp_path: Path) -> Non
     )
     assert inp.aux_state == "error"
     assert "z: repo_url" in inp.aux_detail
+
+
+def test_history_under_old_repo_name_is_keyed_canonically(tmp_path: Path) -> None:
+    # #511: ссылка прежним (GitHub-)именем — история удаления под каноническим
+    # ключом, иначе prereq_state видит missing вместо «отменено»
+    manifest = (
+        '[cores.a]\nrepo_url = "git@github.com:own/a.git"\ngit_dir = "a"\n'
+        '[cores.kb]\nrepo_url = "git@github.com:own/vault.git"\ngit_dir = "vault"\n'
+    )
+    _repo(
+        tmp_path / "a",
+        {"TODO.md": "- [ ] x @blocked_by:todo://vault/gone @owner:TBD @id:x\n"},
+    )
+    up = tmp_path / "vault-up"
+    _repo(tmp_path / "vault", {"TODO.md": "- [ ] g @owner:TBD @id:gone\n"})
+    (up / "TODO.md").write_text("- [ ] other @owner:TBD @id:other\n")
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(up),
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qam",
+            "drop",
+        ],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(tmp_path / "vault"), "fetch", "-q"], check=True)
+    inp = collect(
+        tmp_path,
+        manifest,
+        ("file", None),
+        None,
+        False,
+        lambda _: (1, "", "offline"),
+        "h",
+        "2026-09-29T12:00:00Z",
+    )
+    assert list(inp.history) == ["todo://kb/gone"]
+    assert prereq_state(build_graph(inp), inp, "todo://kb/gone") == "cancelled"

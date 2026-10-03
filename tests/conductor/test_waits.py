@@ -146,3 +146,49 @@ def test_closed_consumer_has_no_waits() -> None:
         )
         == []
     )
+
+
+WAITS_ON_Y = {
+    "a": "- [ ] x @owner:TBD @id:x @blocked_by:todo://b/y\n",
+    "b": "- [ ] other @owner:TBD @id:other\n",
+}
+
+
+def _request_for_y(**fields):
+    return record("b", 5, body="slug: y\nfrom: a\n", labels=["inbox"], **fields)
+
+
+def test_item_deleted_while_request_open_is_cancelled() -> None:
+    # #511: история удаления сильнее открытой заявки — отмена не прячется
+    w = _one(
+        _w(WAITS_ON_Y, [_request_for_y()], history={"todo://b/y": "sha-del"}),
+        "todo://a/x",
+    )
+    assert (w.prereq, w.verdict, w.reason) == ("todo://b/y", "unknown", "cancelled")
+
+
+def test_declined_request_for_missing_item_is_cancelled() -> None:
+    # #511: заявку отклонили (not_planned) — пункт не появится: отмена,
+    # а не «предпосылки нет, завести запрос?»
+    w = _one(
+        _w(WAITS_ON_Y, [_request_for_y(state="closed", state_reason="not_planned")]),
+        "todo://a/x",
+    )
+    assert (w.prereq, w.verdict, w.reason) == ("todo://b/y", "unknown", "cancelled")
+    assert w.evidence == "b#5"
+
+
+def test_from_wait_ages_from_request_creation_and_can_go_stale() -> None:
+    # #511: у ожидания по from: строки blame нет — возраст от создания запроса
+    request = record(
+        "b",
+        5,
+        body="slug: y\nfrom: a#x\n",
+        labels=["inbox"],
+        created_at="2026-09-20T00:00:00Z",
+        updated_at="2026-09-20T00:00:00Z",
+    )
+    todos = {"a": "- [ ] x @owner:TBD @id:x\n", "b": "- [ ] y @owner:TBD @id:y\n"}
+    w = _one(_w(todos, [request]), "todo://a/x")
+    assert (w.prereq, w.last_line_change_at) == ("b#5", "2026-09-20T00:00:00Z")
+    assert (w.verdict, w.reason) == ("pending", "stale")

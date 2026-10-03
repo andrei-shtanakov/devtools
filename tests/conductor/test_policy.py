@@ -66,13 +66,27 @@ def test_owner_and_decision_signals() -> None:
     assert a["todo://a/y"].block_reason == "decision-signal"
     assert a["todo://a/z"].block_reason == "foreign-owner"
     assert a["todo://a/n"].block_reason == "epic-unknown"
-    # вопрос — только где ответ меняет шаг: кандидат фокуса на уровне запуска
-    assert {n for n in a if a[n].need == "decide"} == {
-        "todo://a/x",
-        "todo://a/y",
-        "todo://a/z",
-    }
+    # вопрос — только где ответ меняет шаг: кандидат фокуса на уровне запуска;
+    # чужой владелец — не вопрос и там (§5.7)
+    assert {n for n in a if a[n].need == "decide"} == {"todo://a/x", "todo://a/y"}
     assert a["todo://a/n"].need == "implement" and not a["todo://a/n"].ask_owner
+    assert a["todo://a/z"].need == "implement" and not a["todo://a/z"].ask_owner
+
+
+def test_out_of_loop_at_launch_level_is_a_flag_not_a_question() -> None:
+    # #511: вне контура ответ владельца следующего шага не меняет (§5.7)
+    inp = inputs({"a": "- [ ] x @owner:github:own @id:x @epic:eco.focus1\n"})
+    g = build_graph(inp)
+    w = evaluate_waits(g, inp, NOW, 3)
+    rm = parse_roadmap(R3, EPICS)
+    entry = next(e for e in build_queue(g, w, rm, NOW) if e.node_id == "todo://a/x")
+    inp.todos = [
+        RepoTodo("a", None, None, "error", "нет клона") if t.repo == "a" else t
+        for t in inp.todos
+    ]
+    got = assess(entry, g, w, rm, 3, inp)
+    assert (got.delegable, got.block_reason) == ("no", "out-of-loop")
+    assert got.need == "implement" and not got.ask_owner
 
 
 def test_signals_below_launch_level_are_flags_not_questions() -> None:
@@ -201,3 +215,45 @@ def test_position_level_formula() -> None:
     g = build_graph(inp)
     entry = build_queue(g, evaluate_waits(g, inp, NOW, 3), rm, NOW)[0]
     assert position_level(entry, rm, run_level=3) == 1
+
+
+def test_stale_from_wait_on_request_marks_its_glued_item_stale() -> None:
+    # #511: застой ожидания по from: (на запросе) — застой склеенного пункта
+    request = record(
+        "b",
+        5,
+        body="slug: y\nfrom: a#x\n",
+        labels=["inbox"],
+        created_at="2026-09-20T00:00:00Z",
+        updated_at="2026-09-20T00:00:00Z",
+    )
+    got = _assess(
+        {
+            "a": "- [ ] x @owner:TBD @id:x\n",
+            "b": "- [ ] y @owner:github:own @id:y @epic:eco.focus1\n",
+        },
+        [request],
+        level=1,
+    )["todo://b/y"]
+    assert (got.need, got.action) == ("implement", "nudge")
+
+
+def test_pr_with_fresh_activity_is_not_stale_despite_old_wait_line() -> None:
+    # #511: застой PR — старая строка ожидания И тишина самого PR (§7.4)
+    old = "2026-09-01T00:00:00Z"
+    todos = {"a": "- [ ] x @owner:github:own @id:x @epic:eco.focus1 @blocked_by:b#7\n"}
+
+    def action(moved: str | None) -> str:
+        pr = record(
+            "b",
+            7,
+            is_pr=True,
+            created_at=old,
+            updated_at=moved or old,
+            last_commit_at=moved,
+        )
+        got = _assess(todos, [pr], level=1, wait_since={"todo://a/x|b#7": old})
+        return got["b!7"].action
+
+    assert action(None) == "pr_nudge"
+    assert action("2026-09-28T00:00:00Z") == "—"

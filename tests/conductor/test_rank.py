@@ -1,5 +1,5 @@
 from conductor.graph import build_graph
-from conductor.rank import build_attention, build_queue
+from conductor.rank import build_attention, build_hints, build_queue
 from conductor.roadmap import parse_roadmap
 from conductor.waits import evaluate_waits
 from tests.conductor.fixtures import EPICS, ROADMAP, inputs, record
@@ -82,3 +82,35 @@ def test_attention_is_ranked_too() -> None:
         }
     )
     assert [(e.node_id, e.rank) for e in attention] == [("todo://a/goal", 1)]
+
+
+def test_mention_is_not_a_hint_when_the_pr_implements_the_same_node() -> None:
+    # #511: связь подтверждена (@id: в теле), упоминание склеенного запроса
+    # в заголовке не даёт «связь не подтверждена»
+    todos = {
+        "a": "- [ ] g @owner:TBD @id:goal @epic:eco.focus1 @blocked_by:todo://b/y\n",
+        "b": "- [ ] y @owner:TBD @id:y\n",
+    }
+    records = [
+        record("b", 3, body="slug: y\nfrom: a\n", labels=["inbox"]),
+        record("b", 5, is_pr=True, title="docs(#3): plan", body="@id:y"),
+    ]
+    g = build_graph(inputs(todos, records))
+    assert any(e.src == "b!5" and e.type == "mentions" for e in g.edges)
+    assert build_hints(g, parse_roadmap(ROADMAP, EPICS)) == []
+
+
+def test_glued_item_inherits_the_age_of_a_from_wait() -> None:
+    # #511: ожидание по from: стоит на запросе; возраст получает его пункт
+    request = record(
+        "b",
+        5,
+        body="slug: y\nfrom: a#x\n",
+        labels=["inbox"],
+        created_at="2026-09-20T00:00:00Z",
+    )
+    queue, _ = _q(
+        {"a": "- [ ] x @owner:TBD @id:x\n", "b": "- [ ] y @owner:TBD @id:y\n"},
+        [request],
+    )
+    assert next(e for e in queue if e.node_id == "todo://b/y").line_age_days == 9

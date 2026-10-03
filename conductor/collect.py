@@ -26,7 +26,7 @@ from conductor.manifest import (
     manifest_index,
     unmatched_urls,
 )
-from conductor.model import SourceState
+from conductor.model import SourceState, item_id
 from conductor.sources_gh import (
     Runner,
     closed_event,
@@ -181,14 +181,19 @@ class _History:
             self.errors.append(str(exc))
 
     def _history(self, raw: str, nodes: dict[str, Any]) -> None:
-        repo, _, target = raw.removeprefix("todo://").partition("/")
-        if repo not in self.repos or raw in nodes:
+        name, _, target = raw.removeprefix("todo://").partition("/")
+        # прежнее (GitHub-)имя — к ключу манифеста: граф ищет историю по
+        # каноническому узлу (§3.1), не по записи человека
+        key = next(
+            (k for k, r in self.repos.items() if name in (k, r.github_name)), None
+        )
+        if key is None or (node_id := item_id(key, target)) in nodes:
             return
-        repo_dir, git_ref = self.ref(repo)
+        repo_dir, git_ref = self.ref(key)
         if git_ref is not None and (
             sha := ever_had(repo_dir, git_ref, f"@id:{target}")
         ):
-            self.history[raw] = sha
+            self.history[node_id] = sha
 
 
 def _trigger_facts(
