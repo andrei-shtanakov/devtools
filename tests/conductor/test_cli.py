@@ -225,6 +225,28 @@ def test_run_refuses_to_write_a_snapshot_violating_the_contract(
     assert "SNAPSHOT-INVALID" in capsys.readouterr().err
 
 
+def test_invalid_runs_are_pruned_too(tmp_path: Path, monkeypatch) -> None:
+    """Терм. ревью #550: прогон, отвергнутый по контракту, тоже занимает диск
+    (inputs.json) — ротация учитывает его и на пути отказа."""
+    import conductor.__main__ as cli
+
+    real = cli.to_snapshot
+
+    def broken(*a, **kw):
+        snap = real(*a, **kw)
+        snap["run_level"] = 9
+        return snap
+
+    monkeypatch.setattr(cli, "to_snapshot", broken)
+    out = tmp_path / "runs"
+    for k in range(cli.KEEP_RUNS + 5):
+        run = out / f"2026-01-01T{k:06d}Z"
+        run.mkdir(parents=True)
+        (run / "snapshot.invalid.json").write_text("{}", encoding="utf-8")
+    assert main(["run", "--replay", str(_replay(tmp_path)), "--out", str(out)]) == 1
+    assert len([d for d in out.iterdir() if d.is_dir()]) == cli.KEEP_RUNS
+
+
 def test_why_prints_wait_evidence(tmp_path: Path, capsys) -> None:
     # п. 22: свидетельство, возраст строки и последнее движение
     rep = _replay(

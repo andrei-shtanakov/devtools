@@ -126,6 +126,18 @@ def _runs(out: Path) -> list[Path]:
     return sorted(d for d in out.iterdir() if (d / "snapshot.json").is_file())
 
 
+def _rotate(out: Path) -> None:
+    """KEEP_RUNS последних прогонов, считая и отвергнутые по контракту:
+    каталог с `snapshot.invalid.json` тоже занимает диск (терм. ревью #550)."""
+    runs = sorted(
+        d
+        for d in out.iterdir()
+        if (d / "snapshot.json").is_file() or (d / "snapshot.invalid.json").is_file()
+    )
+    for old in runs[:-KEEP_RUNS]:
+        shutil.rmtree(old, ignore_errors=True)
+
+
 def _previous(out: Path) -> dict[str, Any] | None:
     """Последний читаемый снимок; битый пропускается — он только для отчёта (I7)."""
     for run in reversed(_runs(out)):
@@ -352,10 +364,10 @@ def _run(
         # дефект conductor, не входов: потребителю снимка не отдаём (§7.1)
         _write_atomic(run_dir / "snapshot.invalid.json", text)
         print(f"SNAPSHOT-INVALID: {violation}", file=sys.stderr)
+        _rotate(args.out)
         return EXIT_INTERNAL
     _write_atomic(run_dir / "snapshot.json", text)
-    for old in _runs(args.out)[:-KEEP_RUNS]:
-        shutil.rmtree(old, ignore_errors=True)
+    _rotate(args.out)
     print(render_status(result))
     return code
 

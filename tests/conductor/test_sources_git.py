@@ -242,3 +242,15 @@ def test_todo_line_numbers_match_git(tmp_path: Path) -> None:
         check=True,
     ).stdout
     assert b"@id:c" in blame
+
+
+def test_facts_read_the_same_text_as_the_core(tmp_path: Path) -> None:
+    """Терм. ревью #550: ядро (`read_todo`) и факты среза 1 (`facts._blob`,
+    `facts._file_at`) разбирают один коммит TODO.md одним и тем же текстом."""
+    from conductor import facts
+
+    clone = _commit_bytes(tmp_path, RAW_TODO)
+    todo = sg.read_todo(FleetRepo("r", "clone", "r"), tmp_path, False)
+    assert todo.state == "read" and todo.sha is not None
+    assert facts._blob(clone, todo.sha) == todo.text
+    assert facts._file_at(clone, todo.sha) == todo.text

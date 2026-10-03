@@ -2,8 +2,9 @@
 
 Только чтение: ни одна команда здесь не мутирует GitHub (срез 0). Поиск идёт
 через REST `search/issues`, потому что только он отдаёт `incomplete_results`
-и `total_count` — `gh search --json` их теряет. Обнаруживаются только
-открытые узлы: закрытые, на которые кто-то ссылается, приходят адресным
+и `total_count` — `gh search --json` их теряет. Обнаруживаются открытые
+узлы и отклонённые inbox-заявки (`DECLINED`, #511 — на них не ссылается
+никто); прочие закрытые, на которые кто-то ссылается, приходят адресным
 дочитыванием независимо от возраста (окно закрытых упиралось бы в потолок
 поиска в 1000 — замер 2026-09-29: 1310 закрытых за 30 дней).
 """
@@ -176,19 +177,33 @@ def _search(
     return items, ""
 
 
+#: Отклонённые заявки ADR-ECO-006 (#511): ожидание пункта, которого нет и
+#: на который заявку закрыли `not_planned`, — «отменено», а не «предпосылки
+#: нет». На такую заявку не ссылается ни TODO (там `todo://`), ни PR, поэтому
+#: адресное дочитывание её не находит — нужен свой поиск. Замер 2026-10-03:
+#: 3 таких против 282 открытых узлов.
+DECLINED = 'is:issue is:closed label:inbox reason:"not planned"'
+
+
 def discover(
     owner: str, fleet_names: set[str], runner: Runner
 ) -> tuple[list[tuple[str, int, bool]], SourceState, str]:
-    """Открытые issues/PR репо флота (закрытые — адресным дочитыванием)."""
-    items, problem = _search(owner, "is:open", runner)
-    if items is None:
-        return [], "error", problem
-    hits = [
-        (name, item["number"], "pull_request" in item)
-        for item in items
-        if (name := item["repository_url"].rsplit("/", 1)[-1]) in fleet_names
-    ]
-    return hits, "read", ""
+    """Открытые issues/PR репо флота и отклонённые inbox-заявки (прочие
+    закрытые — адресным дочитыванием)."""
+    found: dict[tuple[str, int], bool] = {}
+    for qualifier in ("is:open", DECLINED):
+        items, problem = _search(owner, qualifier, runner)
+        if items is None:
+            return [], "error", problem
+        for item in items:
+            name = item["repository_url"].rsplit("/", 1)[-1]
+            if name in fleet_names:
+                found.setdefault((name, item["number"]), "pull_request" in item)
+    return (
+        [(name, number, is_pr) for (name, number), is_pr in found.items()],
+        "read",
+        "",
+    )
 
 
 def _comments(
