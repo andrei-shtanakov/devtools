@@ -236,3 +236,24 @@ def test_stale_from_wait_on_request_marks_its_glued_item_stale() -> None:
         level=1,
     )["todo://b/y"]
     assert (got.need, got.action) == ("implement", "nudge")
+
+
+def test_pr_with_fresh_activity_is_not_stale_despite_old_wait_line() -> None:
+    # #511: застой PR — старая строка ожидания И тишина самого PR (§7.4)
+    old = "2026-09-01T00:00:00Z"
+    todos = {"a": "- [ ] x @owner:github:own @id:x @epic:eco.focus1 @blocked_by:b#7\n"}
+
+    def action(moved: str | None) -> str:
+        pr = record(
+            "b",
+            7,
+            is_pr=True,
+            created_at=old,
+            updated_at=moved or old,
+            last_commit_at=moved,
+        )
+        got = _assess(todos, [pr], level=1, wait_since={"todo://a/x|b#7": old})
+        return got["b!7"].action
+
+    assert action(None) == "pr_nudge"
+    assert action("2026-09-28T00:00:00Z") == "—"

@@ -9,8 +9,10 @@ unverified, а действие — `launch?`, не `launch`. Вердикт `no
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
-from typing import Literal
+from datetime import datetime
+from typing import Any, Literal
 
 from conductor.analysis import work_state
 from conductor.graph import Graph
@@ -141,7 +143,7 @@ def _need(
 
 
 def _stale(
-    entry: QueueEntry, graph: Graph, waits: list[Wait], roadmap: Roadmap
+    entry: QueueEntry, graph: Graph, waits: list[Wait], roadmap: Roadmap, now: str
 ) -> bool:
     if any(
         w.prereq is not None
@@ -151,11 +153,28 @@ def _stale(
     ):
         return True
     node = graph.nodes[entry.node_id]
+    limit = roadmap.limits["stale_after_days"]
     return (
         node.kind == "pr"
         and entry.line_age_days is not None
-        and entry.line_age_days >= roadmap.limits["stale_after_days"]
+        and entry.line_age_days >= limit
+        and _pr_quiet_days(graph.records.get(entry.node_id) or {}, now) >= limit
     )
+
+
+def _pr_quiet_days(rec: dict[str, Any], now: str) -> int:
+    """Дней без движения PR — то же понятие, что у пинков §7.4 (коммиты,
+    ready, ревью, комментарии; начало — создание). Отметок нет — тишина не
+    опровергнута. Автор комментариев здесь не фильтруется: логина App у ядра
+    нет, и свой пинок считается движением — до следующего периода."""
+    # common импортирует policy: импорт на уровне модуля дал бы цикл
+    from conductor.actions.common import pr_activity
+
+    stamps = [*pr_activity(rec, ""), rec.get("created_at") or ""]
+    dates = [datetime.fromisoformat(s) for s in stamps if s]
+    if not dates:
+        return sys.maxsize
+    return (datetime.fromisoformat(now) - max(dates)).days
 
 
 def _may_launch(
@@ -226,7 +245,7 @@ def assess(
             and _may_launch(entry, roadmap, level, hinted)
         ):
             need, actor = "decide", "owner"
-    stale = _stale(entry, graph, waits, roadmap)
+    stale = _stale(entry, graph, waits, roadmap, inputs.captured_at)
     action = _action(need, level, entry, roadmap, verdict, stale, hinted)
     return Assessment(
         entry.node_id,
