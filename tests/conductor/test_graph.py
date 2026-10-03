@@ -155,3 +155,27 @@ def test_inbox_labelled_pr_is_not_glued_to_an_item() -> None:
     )
     assert "a!7" not in g.canon
     assert not any(e.dst == "a!7" and e.type == "depends_on" for e in g.edges)
+
+
+def test_strict_refs_outside_the_fleet_are_findings_not_silence() -> None:
+    # #511: чужой репо не дочитывается — ни «предпосылки нет», ни тишины
+    g = build_graph(
+        inputs(
+            {
+                "a": "- [ ] x @owner:TBD @id:x @blocked_by:other#5\n"
+                "- [ ] y @owner:TBD @id:y @blocked_by:todo://other/z\n"
+            },
+            [record("a", 9, is_pr=True, closing_refs=["other#6"])],
+        )
+    )
+    out = {(f.subject, f.detail) for f in g.findings if f.code == "GR-REF-OUT-OF-FLEET"}
+    assert out == {
+        ("todo://a/x", "other#5"),
+        ("todo://a/y", "todo://other/z"),
+        ("a!9", "other#6"),
+    }
+    deps = {e.src: e.dst for e in g.edges if e.type == "depends_on"}
+    assert deps == {
+        "todo://a/x": "unresolved:other#5",
+        "todo://a/y": "unresolved:todo://other/z",
+    }

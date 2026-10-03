@@ -175,7 +175,8 @@ def _todo_edges(
 ) -> list[Edge]:
     """depends_on из references: plan-fields не строит edges на несуществующий
     пункт (resolved_target = None), а висячее ожидание должно остаться видимым.
-    Каждый @blocked_by даёт ребро: нераспознанный — на UNRESOLVED с находкой.
+    Каждый @blocked_by даёт ребро: нераспознанный или в репо вне флота — на
+    UNRESOLVED с находкой.
     Концы канонизируются; исходная запись — в origin."""
     edges: list[Edge] = []
     for ref in snapshot["references"]:
@@ -195,16 +196,28 @@ def _todo_edges(
                     "GR-BLOCKER-UNRESOLVABLE", "warning", ref["source_node_id"], raw
                 )
             )
-        if target is not None:
-            edges.append(
-                Edge(
-                    ref["source_node_id"],
-                    _canon_uri(target, norm),
-                    "depends_on",
-                    f"todo:{raw}",
-                )
+        if not target.startswith(UNRESOLVED) and _repo_of(target) not in norm:
+            # чужой репо не дочитывается: «предпосылки нет» было бы ложью (§3.1)
+            findings.append(
+                Finding("GR-REF-OUT-OF-FLEET", "warning", ref["source_node_id"], raw)
             )
+            target = UNRESOLVED + raw
+        edges.append(
+            Edge(
+                ref["source_node_id"],
+                _canon_uri(target, norm),
+                "depends_on",
+                f"todo:{raw}",
+            )
+        )
     return edges
+
+
+def _repo_of(node_id: str) -> str:
+    """Репо конца ребра: todo://<repo>/<id> или <repo>#<N>."""
+    if node_id.startswith("todo://"):
+        return node_id.removeprefix("todo://").split("/")[0]
+    return node_id.partition("#")[0]
 
 
 def _gh_id(rec: dict[str, Any]) -> str:
@@ -248,6 +261,11 @@ def _gh_edges(
             Edge(me, target, "implements", "pr:closes")
             for ref in rec.get("closing_refs", [])
             if (target := _norm_ref(ref, norm)) is not None
+        ]
+        findings += [
+            Finding("GR-REF-OUT-OF-FLEET", "info", me, ref)
+            for ref in rec.get("closing_refs", [])
+            if _norm_ref(ref, norm) is None
         ]
         edges += [
             Edge(me, item_id(rec["repo"], m), "implements", "pr:@id")
