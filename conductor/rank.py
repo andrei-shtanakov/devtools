@@ -193,6 +193,15 @@ def goal_paths(graph: Graph, roadmap: Roadmap) -> dict[str, set[str]]:
     return paths
 
 
+def _implemented(graph: Graph, pr: str) -> set[str]:
+    """Узлы работы, которые PR реализует структурно: связь уже подтверждена
+    (концы — так же, как цель подсказки: представитель или слабая склейка)."""
+    ends = [e.dst for e in graph.out(pr, "implements")]
+    return {graph.resolve(d) for d in ends} | {
+        graph.hint_canon[d] for d in ends if d in graph.hint_canon
+    }
+
+
 def build_hints(graph: Graph, roadmap: Roadmap) -> list[Hint]:
     """Открытый PR того же репо упоминает узел пути — подсказка, не ребро."""
     hints = set()
@@ -211,6 +220,7 @@ def build_hints(graph: Graph, roadmap: Roadmap) -> list[Hint]:
                 and (node := graph.nodes.get(target)) is not None
                 and node.is_open
                 and pr.repo == (graph.nodes.get(e.dst) or pr).repo
+                and target not in _implemented(graph, e.src)
             ):
                 hints.add(Hint(e.src, target, goal))
     return sorted(hints, key=lambda h: (h.goal, h.target, h.pr))
