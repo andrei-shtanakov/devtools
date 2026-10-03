@@ -254,3 +254,22 @@ def test_facts_read_the_same_text_as_the_core(tmp_path: Path) -> None:
     assert todo.state == "read" and todo.sha is not None
     assert facts._blob(clone, todo.sha) == todo.text
     assert facts._file_at(clone, todo.sha) == todo.text
+
+
+def test_fresh_item_reads_the_same_text_as_the_core(tmp_path: Path) -> None:
+    """#551: перепроверка перед записью (`fresh_item`) разбирает TODO.md тем
+    же нормализованным текстом, что ядро: иначе `@blocked_by` после
+    одиночного `\\r` пропадал, и мутация молча отменялась."""
+    from conductor.actions.common import fresh_item
+
+    clone = _commit_bytes(
+        tmp_path, b"- [ ] p @id:p\r@blocked_by:todo://r/z\n- [ ] z @id:z\n"
+    )
+
+    class _Fresh:
+        def git(self, repo_key: str) -> tuple[Path, str]:
+            return clone, "origin/master"
+
+    state, _, problem = fresh_item(_Fresh(), "todo://r/p")
+    assert problem is None and state is not None
+    assert "todo://r/z" in state.blocked_by

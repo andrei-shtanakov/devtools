@@ -18,7 +18,7 @@ from conductor.policy import position_level
 from conductor.rank import _entry, _reverse
 from conductor.roadmap import Roadmap
 from conductor.snapshot import Result
-from conductor.sources_git import GitError
+from conductor.sources_git import GitError, git_lines
 from conductor.waits import DATE_RE, EXISTS_RE, Wait
 
 
@@ -216,6 +216,9 @@ def fresh_item(
     code, text, _ = facts.git(repo_dir, "show", f"{ref}:{facts.TODO}")
     if code != 0:
         return None, None, f"{parts[0]}: TODO.md не прочитан"
+    # тот же текст, что у ядра (`read_todo`): иначе ожидание, которое граф
+    # видит, здесь «снято», и мутация молча отменяется (#551)
+    text = git_lines(text)
     try:
         return facts.item_state(text, parts[0], parts[1]), clone, None
     except facts.AmbiguousItem:

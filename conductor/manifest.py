@@ -76,6 +76,24 @@ def unmatched_urls(text: str) -> list[str]:
     ]
 
 
+def foreign_owner_urls(text: str) -> list[str]:
+    """Записи флота под другим владельцем GitHub, чем первая запись.
+
+    Поиск GitHub идёт по одному владельцу (`github_owner`), поэтому такое
+    репо в обнаружение не попадает — сбой источника, а не тишина (#551).
+    Поиск по нескольким владельцам — отдельный дизайн, не этот фикс.
+    """
+    try:
+        owner = github_owner(text)
+    except ValueError:
+        return []
+    return [
+        f"манифест: {key}: владелец {m.group(1)} ≠ {owner} — вне поиска GitHub"
+        for key, url, _ in _candidates(text)
+        if (m := _URL_RE.search(url)) and m.group(1).lower() != owner.lower()
+    ]
+
+
 def github_owner(text: str) -> str:
     """Владелец флота на GitHub — из repo_url первой записи."""
     for _, entry in _entries(text):
