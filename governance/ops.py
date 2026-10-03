@@ -2206,12 +2206,17 @@ class RealOps:
 
     @staticmethod
     def _ignored_files(target_dir: str, paths: list[str]) -> list[str]:
-        """Явные пути-ФАЙЛЫ, которые ignore-правила цели исключают."""
+        """Явные пути-ФАЙЛЫ, которые ignore-правила цели исключают.
+
+        `--no-index` (devtools#543): без него `check-ignore` считает
+        отслеживаемый файл неигнорируемым, а `git add` такого файла под
+        игнорируемым каталогом всё равно отказывает rc 1.
+        """
         files = [p for p in paths if (Path(target_dir) / p).is_file()]
         if not files:
             return []
         done = subprocess.run(
-            ["git", "check-ignore", "--stdin", "-z"],
+            ["git", "check-ignore", "--no-index", "--stdin", "-z"],
             cwd=target_dir,
             input="\0".join(files) + "\0",
             capture_output=True,

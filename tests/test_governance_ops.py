@@ -482,6 +482,25 @@ def test_commit_paths_explicit_ignored_file_is_committed_d1(tmp_path):
     assert _git(repo, "status", "--porcelain").stdout.strip() == ""
 
 
+def test_commit_paths_tracked_file_under_ignore_rule_is_committed(tmp_path):
+    """devtools#543: профиль стадии УЖЕ отслеживается, но лежит под
+    ignore-правилом (`/spec/*`). `git check-ignore` без `--no-index`
+    отслеживаемый файл игнорируемым не считает, а `git add` всё равно
+    отказывает rc 1 («paths are ignored») — D1 покрывал только новый файл."""
+    repo = _ignored_repo(tmp_path, "/spec/*\n!/spec/*-tasks.md\n")
+    (repo / "spec" / "profiles").mkdir(parents=True)
+    profile = "spec/profiles/workstream.yaml"
+    (repo / profile).write_text("stage: x\n", encoding="utf-8")
+    _git(repo, "add", "-f", "--", profile)
+    _git(repo, "commit", "-q", "-m", "profile")
+    (repo / "spec" / "ws-tasks.md").write_text("# tasks\n", encoding="utf-8")
+
+    RealOps().commit_paths(str(repo), ["spec/ws-tasks.md", profile], "approve")
+
+    assert _git(repo, "rev-parse", "HEAD:spec/ws-tasks.md").returncode == 0
+    assert _git(repo, "status", "--porcelain").stdout.strip() == ""
+
+
 def test_commit_paths_ignored_file_in_both_lists_d2(tmp_path):
     """devtools#479 D2: approve_node кладёт source-слой и в paths, и в
     force_paths; обычный add игнорируемого файла падал раньше add -f."""

@@ -1389,6 +1389,9 @@ class _ApproveOps(_StubOps):
         self.calls.append(("find_pr", branch))
         return self.existing_pr
 
+    def switch_to(self, target_dir: str, branch: str, start_point: str) -> None:
+        self.calls.append(("switch_to", branch, start_point))
+
 
 def test_deliver_approve_opens_pr(tmp_path: Path, monkeypatch) -> None:
     target = _target(tmp_path)
@@ -1396,6 +1399,11 @@ def test_deliver_approve_opens_pr(tmp_path: Path, monkeypatch) -> None:
     ops = _ApproveOps()
     pr = task_bridge.deliver_approve(_approve_state(target, monkeypatch), ops)
     assert pr == 77
+    # devtools#543: без открытого PR ветка штампа ставится от базы прогона
+    # заново (`switch -C`), а не берётся как есть — остаток упавшей
+    # попытки стоял бы на базе ДО исправления.
+    assert ("switch_to", "spec/WS-alpha-7-tasks-approve", "master") in ops.calls
+    assert not any(c[0] == "ensure_branch" for c in ops.calls)
     commit = next(c for c in ops.calls if c[0] == "commit_paths")
     assert commit[1] == ("spec/WS-alpha-7-tasks.md", "spec/profiles/workstream.yaml")
     assert ("push_branch", "spec/WS-alpha-7-tasks-approve") in ops.calls

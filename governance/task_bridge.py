@@ -4595,7 +4595,7 @@ def deliver_approve(
     живёт в рабочем дереве незакоммиченным — он и есть груз этого PR.
     commit_paths берёт только tasks-файл и stage-профиль.
 
-    Проверка идёт В НАЧАЛЕ функции, ДО `ops.ensure_branch`: отказ не должен
+    Проверка идёт В НАЧАЛЕ функции, ДО постановки ветки: отказ не должен
     оставлять в target созданную approve-ветку. Единственный эффект до
     ветки — эталон профиля у спеки, доставленной до #386 (см. ниже): без
     него шаг, который называет отказ, выполнить нечем.
@@ -4636,7 +4636,16 @@ def deliver_approve(
     check_approved(target_dir, ws_id, state.bundle_dir, legacy_bundle=legacy_bundle)
     branch = f"spec/{ws_id}-tasks-approve"
     existing = ops.find_pr(repo_slug, branch)
-    ops.ensure_branch(target_dir, branch)
+    if existing is None:
+        # devtools#543: открытого PR нет — ветку ставим от базы прогона
+        # заново (`switch -C`), незакоммиченный штамп едет с деревом.
+        # `ensure_branch` взял бы локальный остаток как есть: упавшая
+        # попытка оставляет ветку на базе ДО исправления, и повтор упирался
+        # в тот же отказ; остаток влитого прошлого цикла тянул бы в PR его
+        # историю.
+        ops.switch_to(target_dir, branch, state.base_ref or "master")
+    else:
+        ops.ensure_branch(target_dir, branch)
     rel = f"spec/{ws_id}-tasks.md"
     # Профиль — в списке всегда: у уже закоммиченного эталона `git add`
     # ничего не меняет, а положенный миграцией выше уезжает этим PR.
