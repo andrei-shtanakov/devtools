@@ -105,7 +105,7 @@ def test_corrupt_previous_snapshot_does_not_stop_the_run(tmp_path: Path) -> None
     rep = _replay(tmp_path)
     assert main(["run", "--replay", str(rep), "--out", str(out)]) == 0
     written = json.loads(
-        next(p for p in out.glob("2026-09-29*/snapshot.json")).read_text("utf-8")
+        next(p for p in out.glob("*-replay/snapshot.json")).read_text("utf-8")
     )
     assert written["changes_since_previous"] == {"first_run": True}
     assert not list(out.rglob("*.tmp"))
@@ -137,3 +137,102 @@ def test_why_canonicalizes_old_names_and_refuses_unknown_nodes(
     assert main(["why", "todo://prograph-vault/z", "--replay", str(rep)]) == 0
     assert capsys.readouterr().out.startswith("todo://ecosystem-kb/z")
     assert main(["why", "todo://a/typo", "--replay", str(rep)]) == 2
+
+
+# долг среза 0 (devtools#511, кластер D)
+
+
+def test_status_prints_warning_findings(tmp_path: Path, capsys) -> None:
+    # п. 17: опечатка в @blocked_by видна не только как « [условие]»
+    todos = {"a": "- [ ] g @owner:github:own @id:goal @blocked_by:spec-runner-rel\n"}
+    assert main(["status", "--replay", str(_replay(tmp_path, todos))]) == 0
+    out = capsys.readouterr().out
+    assert "GR-BLOCKER-UNRESOLVABLE todo://a/goal: spec-runner-rel" in out
+
+
+def test_missing_or_broken_replay_exit_3_with_message(tmp_path: Path, capsys) -> None:
+    # п. 18: не трассировка и не код 1
+    broken = tmp_path / "broken.json"
+    broken.write_text("{", encoding="utf-8")
+    wrong = tmp_path / "wrong.json"
+    wrong.write_text('{"version": 1, "todos": [], "x": 1}', encoding="utf-8")
+    for path in (tmp_path / "nope.json", broken, wrong):
+        assert main(["status", "--replay", str(path)]) == 3, path
+        err = capsys.readouterr().err
+        assert "входы не прочитаны" in err and len(err.strip().splitlines()) == 1
+
+
+def test_broken_manifest_exit_3_with_message(tmp_path: Path, capsys) -> None:
+    bad_toml, no_owner = tmp_path / "bad.toml", tmp_path / "noowner.toml"
+    bad_toml.write_text("[cores.a\n", encoding="utf-8")
+    no_owner.write_text('[cores.a]\ngit_dir = "a"\n', encoding="utf-8")
+    for path in (bad_toml, no_owner):
+        argv = ["status", "--no-fetch", "--root", str(tmp_path), "--manifest"]
+        assert main([*argv, str(path)]) == 3, path
+        assert "входы не прочитаны" in capsys.readouterr().err
+
+
+def test_bad_args_print_usage(capsys) -> None:
+    for argv in (["frobnicate"], ["why"], ["record"], ["--level", "9", "plan"]):
+        assert main(argv) == 2, argv
+        assert capsys.readouterr().err.startswith("usage: conductor"), argv
+
+
+def test_replay_run_does_not_overwrite_the_recorded_run(tmp_path: Path) -> None:
+    # п. 19: run_id не наследуется от записи — иначе её файлы перезаписаны
+    out, rep = tmp_path / "runs", _replay(tmp_path)
+    recorded = out / "2026-09-29T120000Z"
+    recorded.mkdir(parents=True)
+    (recorded / "snapshot.json").write_text('{"mine": 1}', encoding="utf-8")
+    assert main(["run", "--replay", str(rep), "--out", str(out)]) == 0
+    assert (recorded / "snapshot.json").read_text(encoding="utf-8") == '{"mine": 1}'
+    fresh = [d for d in out.iterdir() if d != recorded]
+    assert len(fresh) == 1 and fresh[0].name.endswith("-replay")
+    snap = json.loads((fresh[0] / "snapshot.json").read_text(encoding="utf-8"))
+    assert snap["run_id"] == fresh[0].name
+
+
+def test_status_repo_is_canonicalised_and_unknown_refused(
+    tmp_path: Path, capsys
+) -> None:
+    # п. 20: GitHub-имя → канонический ключ; незнакомое — код 2
+    rep = _replay(tmp_path, {"ecosystem-kb": "- [ ] z @owner:github:own @id:z\n"})
+    assert main(["status", "prograph-vault", "--replay", str(rep)]) == 0
+    out = capsys.readouterr().out
+    assert "все позиции ecosystem-kb:" in out and "todo://ecosystem-kb/z" in out
+    assert main(["status", "no-such-repo", "--replay", str(rep)]) == 2
+    assert "no-such-repo" in capsys.readouterr().err
+
+
+def test_run_refuses_to_write_a_snapshot_violating_the_contract(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    # п. 21: схема проверяется в _run, не только в тестах
+    import conductor.__main__ as cli
+
+    real = cli.to_snapshot
+
+    def broken(*a, **kw):
+        snap = real(*a, **kw)
+        snap["run_level"] = 9
+        return snap
+
+    monkeypatch.setattr(cli, "to_snapshot", broken)
+    out = tmp_path / "runs"
+    assert main(["run", "--replay", str(_replay(tmp_path)), "--out", str(out)]) == 1
+    assert not list(out.glob("*/snapshot.json"))
+    assert list(out.glob("*/snapshot.invalid.json"))
+    assert "SNAPSHOT-INVALID" in capsys.readouterr().err
+
+
+def test_why_prints_wait_evidence(tmp_path: Path, capsys) -> None:
+    # п. 22: свидетельство, возраст строки и последнее движение
+    rep = _replay(
+        tmp_path,
+        wait_since={"todo://a/goal|todo://b/b": "2026-09-20T00:00:00Z"},
+        movement={"todo://b/b": "2026-09-21T00:00:00Z"},
+    )
+    assert main(["why", "todo://a/goal", "--replay", str(rep)]) == 0
+    out = capsys.readouterr().out
+    assert "строка с 2026-09-20T00:00:00Z" in out
+    assert "движение 2026-09-21T00:00:00Z" in out
