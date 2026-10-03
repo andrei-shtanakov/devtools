@@ -13,6 +13,7 @@ first-parent default-ветки: нарушитель — позже влиты�
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -28,6 +29,10 @@ from governance.frontmatter import (
 CODE_RE = re.compile(r"^[A-Z]{2,6}$")
 PLAN_ITEM_RE = re.compile(r"^todo://([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)$")
 CHARTER_GLOB = "workstreams/*/spec/00-charter.md"
+UNKNOWN_REPO = (
+    "репо не опознан (нет --repo-slug, GITHUB_REPOSITORY и origin на github.com) "
+    "— plan_item не с чем сопоставить"
+)
 _TODO_ID_RE = re.compile(r"@id:([A-Za-z0-9_.-]+)")
 
 
@@ -65,9 +70,12 @@ def read_charter(text: str) -> Charter:
 
 
 def charter_findings(
-    charter: Charter, *, ws_id: str, todo_ids: set[str], repo: str
+    charter: Charter, *, ws_id: str, todo_ids: set[str], repo: str | None
 ) -> list[str]:
-    """Грамматика одного charter'а; схема 1 — без находок."""
+    """Грамматика одного charter'а; схема 1 — без находок.
+
+    `repo` — имя репо из `repo_identity`; None — не опознан (находка).
+    """
     if charter.malformed:
         return [f"{ws_id}: frontmatter charter не разбирается"]
     if charter.schema == 1:
@@ -89,6 +97,8 @@ def charter_findings(
             out.append(
                 f"{ws_id}: plan_item {charter.plan_item!r} не todo://<repo>/<id>"
             )
+        elif repo is None:
+            out.append(f"{ws_id}: {UNKNOWN_REPO}: {charter.plan_item}")
         elif m.group(1) != repo:
             out.append(f"{ws_id}: plan_item указывает на чужой репо {m.group(1)}")
         elif m.group(2) not in todo_ids:
@@ -204,12 +214,39 @@ def merge_order(repo: Path, ref: str, paths: list[str]) -> dict[str, int]:
     return out
 
 
+def origin_slug(repo: Path) -> str | None:
+    """`owner/name` из origin на github.com; иначе None."""
+    done = _git(repo, "remote", "get-url", "origin")
+    m = re.search(r"github\.com[:/]([^/]+/[^/]+?)(?:\.git)?$", done.stdout.strip())
+    return m.group(1) if done.returncode == 0 and m else None
+
+
+def resolve_slug(repo: Path, explicit: str | None) -> str | None:
+    """Slug репо: явный `--repo-slug` → `GITHUB_REPOSITORY` (CI) → origin."""
+    return explicit or os.environ.get("GITHUB_REPOSITORY") or origin_slug(repo)
+
+
+def repo_identity(repo: Path, explicit_slug: str | None) -> str | None:
+    """Имя репо в `todo://<repo>/<id>` — из slug, НЕ из имени каталога.
+
+    #481 M-5: каталог worktree (`devtools-oracle-slice1`) или неканонический
+    чекаут (`Maestro/`) давал ложное «чужой репо». Slug не установлен — None,
+    и вызывающий даёт находку: угадывать имя по каталогу — тихо неверно.
+    """
+    slug = resolve_slug(repo, explicit_slug)
+    return slug.rsplit("/", 1)[-1] if slug else None
+
+
 def _ws(path: str) -> str:
     return Path(path).parent.parent.name
 
 
-def repo_findings(repo: Path, base_ref: str | None) -> list[str]:
+def repo_findings(
+    repo: Path, base_ref: str | None, *, name: str | None = None
+) -> list[str]:
     """Все находки по репо на рабочем дереве против base (если задана).
+
+    `name` — имя репо для `plan_item`; по умолчанию — `repo_identity`.
 
     Заданная, но нерезолвящаяся база — находка (fail-closed, ревью #484):
     «базу не прочитать» ≠ «в базе нет charter'ов».
@@ -225,9 +262,10 @@ def repo_findings(repo: Path, base_ref: str | None) -> list[str]:
         p.relative_to(repo).as_posix(): read_charter(p.read_text())
         for p in sorted(repo.glob(CHARTER_GLOB))
     }
+    name = name or repo_identity(repo, None)
     out: list[str] = []
     for path, ch in head.items():
-        out += charter_findings(ch, ws_id=_ws(path), todo_ids=todo_ids, repo=repo.name)
+        out += charter_findings(ch, ws_id=_ws(path), todo_ids=todo_ids, repo=name)
     ref = base_ref or "HEAD"
     order_by_path = merge_order(repo, ref, list(head))
     collisions = collision_findings(
@@ -260,8 +298,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="charter_guard")
     parser.add_argument("--repo", type=Path, default=Path("."))
     parser.add_argument("--base", default=None)
+    parser.add_argument("--repo-slug")
     args = parser.parse_args(argv)
-    findings = repo_findings(args.repo.resolve(), args.base)
+    repo = args.repo.resolve()
+    findings = repo_findings(repo, args.base, name=repo_identity(repo, args.repo_slug))
     for f in findings:
         print(f"charter_guard: {f}")
     return 1 if findings else 0
