@@ -1,6 +1,9 @@
 import subprocess
 from pathlib import Path
 
+import pytest
+
+import conductor.collect as collect_mod
 from conductor.collect import collect, read_epics, read_manifest
 from conductor.manifest import UMBRELLA
 
@@ -152,3 +155,52 @@ def test_manifest_is_read_after_umbrella_fetch(tmp_path: Path) -> None:
     subprocess.run(["rm", "-rf", str(up)], check=True)
     text, _, errors = read_manifest(tmp_path, do_fetch=True)
     assert text == new and errors and "fetch" in errors[0]  # деградация, не отказ
+
+
+def test_history_reads_are_pinned_to_the_todo_sha(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#511: blame/log/факты читают тот же SHA, что и текст TODO, а не
+    символический ref, который конкурентный fetch может сдвинуть."""
+    manifest = (
+        '[cores.a]\nrepo_url = "git@github.com:own/a.git"\ngit_dir = "a"\n'
+        '[cores.b]\nrepo_url = "git@github.com:own/b.git"\ngit_dir = "b"\n'
+    )
+    _repo(
+        tmp_path / "a",
+        {
+            "TODO.md": (
+                "- [ ] x @blocked_by:todo://b/y @owner:TBD @id:x"
+                ' @trigger:"exists:b:TODO.md"\n'
+            )
+        },
+    )
+    _repo(tmp_path / "b", {"TODO.md": "- [x] y @owner:TBD @id:y\n"})
+    seen: list[str] = []
+
+    def spy(module: object, name: str, at: int) -> None:
+        real = getattr(module, name)
+
+        def wrapped(*args: object) -> object:
+            seen.append(str(args[at]))
+            return real(*args)
+
+        monkeypatch.setattr(module, name, wrapped)
+
+    for name in ("line_since", "last_commit_mentioning", "ever_had"):
+        spy(collect_mod, name, 1)
+    for name in ("edge_period", "first_done_commit", "path_added"):
+        spy(collect_mod.facts, name, 1)
+    inp = collect(
+        tmp_path,
+        manifest,
+        ("file", None),
+        None,
+        False,
+        lambda _: (1, "", "offline"),
+        "h",
+        "2026-09-29T12:00:00Z",
+        slice1=True,
+    )
+    shas = {t.sha for t in inp.todos if t.state == "read"}
+    assert len(seen) >= 5 and set(seen) <= shas, seen

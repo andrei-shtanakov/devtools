@@ -91,16 +91,17 @@ def read_file_at_origin(
     ref = default_ref(repo_dir)
     if ref is None:
         return None, None, "error", "нет origin/<default>"
-    code, out, err = git(repo_dir, "rev-parse", ref)
+    code, out, err = git(repo_dir, "rev-parse", "--verify", f"{ref}^{{commit}}")
     if code != 0:
         return None, None, "error", err.strip()
+    # дальше только sha: ref может сдвинуть конкурентный fetch (#511)
     sha = out.strip()
-    code, listed, err = git(repo_dir, "ls-tree", "--name-only", ref, "--", path)
+    code, listed, err = git(repo_dir, "ls-tree", "--name-only", sha, "--", path)
     if code != 0:
         return None, sha, "error", err.strip() or "ls-tree failed"
     if not listed.strip():
         return None, sha, "absent", f"{path} нет на {ref}"
-    code, text, err = git(repo_dir, "show", f"{ref}:{path}")
+    code, text, err = git(repo_dir, "show", f"{sha}:{path}")
     if code != 0:
         return None, sha, "error", err.strip() or f"show exit {code}"
     return text, sha, "read", ref
@@ -173,12 +174,20 @@ def ever_had(repo_dir: Path, ref: str, text: str, path: str = "TODO.md") -> str 
     return out.strip() or None
 
 
-def path_fact(repo_dir: Path, path: str) -> dict[str, Any]:
-    """{exists, sha, siblings} пути на origin/<default>; exists=None — ошибка."""
+def pinned_head(repo_dir: Path) -> str | None:
+    """SHA коммита origin/<default> — один раз на серию чтений (#511)."""
     ref = default_ref(repo_dir)
     if ref is None:
+        return None
+    code, out, _ = git(repo_dir, "rev-parse", "--verify", f"{ref}^{{commit}}")
+    return (out.strip() or None) if code == 0 else None
+
+
+def path_fact(repo_dir: Path, path: str) -> dict[str, Any]:
+    """{exists, sha, siblings} пути на origin/<default>; exists=None — ошибка."""
+    ref = sha = pinned_head(repo_dir)
+    if ref is None:
         return {"exists": None, "sha": None, "siblings": []}
-    sha = git(repo_dir, "rev-parse", ref)[1].strip() or None
     code, listed, _ = git(repo_dir, "ls-tree", "--name-only", ref, "--", path)
     if code != 0:
         return {"exists": None, "sha": sha, "siblings": []}

@@ -153,6 +153,29 @@ def test_shallow_clone_is_a_read_error(tmp_path: Path) -> None:
     assert todo.state == "error" and "мелкий клон" in todo.detail
 
 
+def test_text_comes_from_the_returned_sha_under_concurrent_fetch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#511: ref сдвинулся между rev-parse и show — текст всё равно от sha."""
+    clone = _clone(tmp_path, {"TODO.md": "old\n"})
+    up = tmp_path / "up"
+    (up / "TODO.md").write_text("new\n", encoding="utf-8")
+    _git(up, "commit", "-q", "-am", "new")
+    _git(clone, "fetch", "-q")
+    _git(clone, "update-ref", "refs/remotes/origin/master", "origin/master~1")
+    real = sg.git
+
+    def racing(repo_dir: Path, *args: str) -> tuple[int, str, str]:
+        if args[0] in ("ls-tree", "show"):  # «fetch» после rev-parse
+            real(repo_dir, "update-ref", "refs/remotes/origin/master", "FETCH_HEAD")
+        return real(repo_dir, *args)
+
+    monkeypatch.setattr(sg, "git", racing)
+    text, sha, state, _ = sg.read_file_at_origin(clone, "TODO.md")
+    assert sha is not None
+    assert (state, text) == ("read", real(clone, "show", f"{sha}:TODO.md")[1])
+
+
 # долг #511: номер строки TODO у скрейпера == номер строки у git blame
 # (git считает только \n; splitlines и universal newlines — больше)
 

@@ -35,13 +35,13 @@ from conductor.sources_gh import (
 )
 from conductor.sources_git import (
     GitError,
-    default_ref,
     ever_had,
     fetch,
     git,
     last_commit_mentioning,
     line_since,
     path_fact,
+    pinned_head,
     read_file_at_origin,
     read_todo,
 )
@@ -117,20 +117,31 @@ def read_authority_prefixes() -> list[str] | None:
 
 
 class _History:
-    """movement, wait_since, history и ошибки вспомогательных чтений."""
+    """movement, wait_since, history и ошибки вспомогательных чтений.
 
-    def __init__(self, root: Path, repos: dict[str, FleetRepo]) -> None:
+    Чтения репо идут по SHA, а не по символическому ref: blame номера строки
+    обязан смотреть в тот же коммит, из которого прочитан TODO, — иначе
+    конкурентный fetch разведёт текст и историю (#511). SHA прочитанного TODO
+    передаётся в shas; для остальных репо голова фиксируется один раз.
+    """
+
+    def __init__(
+        self,
+        root: Path,
+        repos: dict[str, FleetRepo],
+        shas: dict[str, str | None] | None = None,
+    ) -> None:
         self.root, self.repos = root, repos
         self.movement: dict[str, str] = {}
         self.since: dict[str, str] = {}
         self.history: dict[str, str] = {}
         self.errors: list[str] = []
-        self._refs: dict[str, str | None] = {}
+        self._refs: dict[str, str | None] = dict(shas or {})
 
     def ref(self, repo: str) -> tuple[Path, str | None]:
         repo_dir = self.root / self.repos[repo].git_dir
         if repo not in self._refs:
-            self._refs[repo] = default_ref(repo_dir)
+            self._refs[repo] = pinned_head(repo_dir)
         return repo_dir, self._refs[repo]
 
     def collect(self, snapshot: dict[str, Any], readable: set[str]) -> None:
@@ -258,9 +269,13 @@ def _slice1(
     errors: list[str],
     umbrella_dir: str = UMBRELLA,
     records: list[dict[str, Any]] | None = None,
+    hist: _History | None = None,
 ) -> dict[str, Any]:
     """Чтения среза 1: периоды рёбер, факты выполнения, появления путей,
-    extras открытых issues, очередь владельца. Сбой — ошибка источника."""
+    extras открытых issues, очередь владельца. Сбой — ошибка источника.
+
+    hist — источник зафиксированных SHA репо (те же, что у истории)."""
+    pin = (hist or _History(root, repos)).ref
     out: dict[str, Any] = {
         "done_facts": {},
         "edge_periods": {},
@@ -275,22 +290,20 @@ def _slice1(
         repo = ref["provenance"]["repo"]
         if ref["kind"] != "blocked_by" or repo not in readable:
             continue
-        repo_dir = root / repos[repo].git_dir
+        repo_dir, head = pin(repo)
         item = ref["source_node_id"].rsplit("/", 1)[-1]
         raw = ref.get("raw_ref") or ""
         try:
-            period = facts.edge_period(
-                repo_dir, default_ref(repo_dir) or "", repo, item, raw
-            )
+            period = facts.edge_period(repo_dir, head or "", repo, item, raw)
             if period is not None:
                 out["edge_periods"][f"{ref['source_node_id']}|{raw}"] = list(period)
             target = nodes.get(ref.get("resolved_target") or "")
             if target is not None and target["declared_status"] != "open":
                 t_repo = target["repo"]
-                t_dir = root / repos[t_repo].git_dir
+                t_dir, t_head = pin(t_repo)
                 sha = facts.first_done_commit(
                     t_dir,
-                    default_ref(t_dir) or "",
+                    t_head or "",
                     t_repo,
                     target["node_id"].rsplit("/", 1)[-1],
                 )
@@ -366,7 +379,7 @@ def collect(
         ],
         manifest_index(manifest_text),
     )
-    hist = _History(root, repos)
+    hist = _History(root, repos, {t.repo: t.sha for t in todos if t.state == "read"})
     hist.errors += prior_errors or []
     hist.collect(snapshot, {t.repo for t in todos if t.state == "read"})
     trigger_facts = _trigger_facts(root, repos, todos, hist.errors)
@@ -381,6 +394,7 @@ def collect(
             hist.errors,
             umbrella_dir,
             gh.records,
+            hist,
         )
         if slice1
         else {}
@@ -391,9 +405,8 @@ def collect(
             if m and fact.get("exists"):
                 repo_dir = root / repos[m.group(1)].git_dir
                 try:
-                    sha = facts.path_added(
-                        repo_dir, default_ref(repo_dir) or "", m.group(2)
-                    )
+                    # тот же SHA, на котором установлен факт exists
+                    sha = facts.path_added(repo_dir, fact.get("sha") or "", m.group(2))
                 except GitError as exc:
                     hist.errors.append(str(exc))
                     continue
