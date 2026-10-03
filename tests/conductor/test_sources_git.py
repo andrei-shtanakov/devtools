@@ -176,6 +176,33 @@ def test_text_comes_from_the_returned_sha_under_concurrent_fetch(
     assert (state, text) == ("read", real(clone, "show", f"{sha}:TODO.md")[1])
 
 
+def test_inherited_git_env_does_not_redirect_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#511: GIT_DIR/GIT_WORK_TREE вызывающего (хук, обёртка) не подменяют репо."""
+    clone = _clone(tmp_path, {"TODO.md": "mine\n"})
+    other = tmp_path / "other"
+    _git(tmp_path, "init", "-q", str(other))
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+    text, _, state, detail = sg.read_file_at_origin(clone, "TODO.md")
+    assert (state, text) == ("read", "mine\n"), detail
+
+
+def test_git_runs_without_tty_and_prompts(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_run(argv: list[str], **kw: object) -> subprocess.CompletedProcess:
+        seen.update(kw)
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(sg.subprocess, "run", fake_run)
+    sg.git(Path("."), "status")
+    env = seen["env"]
+    assert seen["stdin"] is subprocess.DEVNULL
+    assert isinstance(env, dict) and env["GIT_TERMINAL_PROMPT"] == "0"
+
+
 # долг #511: номер строки TODO у скрейпера == номер строки у git blame
 # (git считает только \n; splitlines и universal newlines — больше)
 

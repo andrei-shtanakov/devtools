@@ -1,5 +1,9 @@
 import json
+import subprocess
 
+import pytest
+
+import conductor.sources_gh as sources_gh
 from conductor.sources_gh import ci_state, collect_gh, discover
 
 
@@ -272,3 +276,20 @@ def test_malformed_json_is_a_read_failure_not_a_crash() -> None:
     assert result.state == "error" and "a#1" in result.detail
     broken = fake({**BASE, "api graphql": (0, '{"data": {}}', "")})
     assert collect_gh("own", {"a": "a"}, lambda _: set(), broken).state == "error"
+
+
+def test_run_gh_has_no_tty_and_no_prompts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#511: gh не наследует TTY и не может зависнуть на интерактивном вопросе."""
+    seen: dict[str, object] = {}
+
+    def fake_run(argv: list[str], **kw: object) -> subprocess.CompletedProcess:
+        seen.update(kw)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setenv("GIT_DIR", "/elsewhere/.git")
+    monkeypatch.setattr(sources_gh.subprocess, "run", fake_run)
+    sources_gh.run_gh(["api", "user"])
+    env = seen["env"]
+    assert seen["stdin"] is subprocess.DEVNULL
+    assert isinstance(env, dict) and env["GH_PROMPT_DISABLED"] == "1"
+    assert "GIT_DIR" not in env

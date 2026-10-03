@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from conductor.model import SourceState
+from conductor.sources_git import child_env
 
 GH_TIMEOUT = 120
 Runner = Callable[[list[str]], tuple[int, str, str]]
@@ -66,6 +67,8 @@ def run_gh(args: list[str]) -> tuple[int, str, str]:
         done = subprocess.run(
             ["gh", *args],
             capture_output=True,
+            stdin=subprocess.DEVNULL,  # без TTY: вопрос gh — сбой, не зависание
+            env=child_env(GH_PROMPT_DISABLED="1"),
             text=True,
             timeout=GH_TIMEOUT,
             check=False,

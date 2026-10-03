@@ -6,6 +6,7 @@ absent: absent означает только «пути на опубликов�
 
 from __future__ import annotations
 
+import os
 import posixpath
 import re
 import subprocess
@@ -18,6 +19,24 @@ from conductor.manifest import FleetRepo
 from conductor.model import SourceState
 
 GIT_TIMEOUT = 120
+# Переменные, которые указывают git, КАКОЙ репо читать: унаследованные от
+# хука или обёртки, они перебили бы `-C repo_dir` (#511).
+_REPO_LOCATING = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES",
+)
+
+
+def child_env(**extra: str) -> dict[str, str]:
+    """Окружение дочернего git/gh: без репо-указателей, без вопросов в TTY."""
+    env = {k: v for k, v in os.environ.items() if k not in _REPO_LOCATING}
+    return {**env, "GIT_TERMINAL_PROMPT": "0", **extra}
 
 
 def git(repo_dir: Path, *args: str) -> tuple[int, str, str]:
@@ -30,6 +49,8 @@ def git(repo_dir: Path, *args: str) -> tuple[int, str, str]:
         done = subprocess.run(
             ["git", "-C", str(repo_dir), *args],
             capture_output=True,
+            stdin=subprocess.DEVNULL,
+            env=child_env(),
             timeout=GIT_TIMEOUT,
             check=False,
         )
