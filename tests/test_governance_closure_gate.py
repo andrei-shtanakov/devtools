@@ -257,3 +257,27 @@ def test_unparsable_closure_is_named_finding(tmp_path, text, capsys):
     assert any("ws-a: frontmatter закрытия не разбирается" in e for e in errors)
     assert g.main(["--repo", str(repo), "--repo-slug", "o/repo"]) == 1
     assert "frontmatter закрытия не разбирается" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("charter", "needle"),
+    [
+        ("---\nschema: 2\ncode: [unclosed\n---\n", "frontmatter charter"),
+        ("---\nschema: 3\ncode: ENC\nplan_item: todo://repo/oracle\n---\n", "3"),
+        ("---\nschema: two\n---\n", "schema"),
+    ],
+    ids=["malformed", "schema-3", "schema-non-int"],
+)
+def test_unreadable_charter_is_red_in_gate_itself(tmp_path, charter, needle):
+    """#481 M-3: charter, чей пункт плана не установить, — красный в самом
+    гейте, а не тихий пропуск в расчёте на charter_guard."""
+    repo = make(tmp_path, done=True, closure=None)
+    (repo / "workstreams/ws-a/spec/00-charter.md").write_text(charter)
+    errors, _ = g.gate_findings(repo)
+    assert any(e.startswith("ws-a:") and needle in e for e in errors), errors
+
+
+def test_schema1_charter_is_not_gated(tmp_path):
+    repo = make(tmp_path, done=True, closure=None)
+    (repo / "workstreams/ws-a/spec/00-charter.md").write_text("# Charter\n")
+    assert g.gate_findings(repo) == ([], [])

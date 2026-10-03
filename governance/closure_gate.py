@@ -56,12 +56,20 @@ def gate_findings(
     warns: list[str] = []
     for charter_path in sorted(repo.glob("workstreams/*/spec/00-charter.md")):
         ch = charter_guard.read_charter(charter_path.read_text())
+        ws = charter_path.parent.parent.name
+        # #481 M-3: пункт плана такого charter'а не установить — красный здесь
+        # же, а не пропуск в расчёте на соседний шаг charter_guard.
+        if ch.malformed:
+            errors.append(f"{ws}: frontmatter charter не разбирается")
+            continue
+        if ch.schema not in (1, 2):
+            errors.append(f"{ws}: charter schema {ch.schema} вне словаря 1|2")
+            continue
         if ch.schema != 2 or not ch.plan_item:
             continue
         m = charter_guard.PLAN_ITEM_RE.match(ch.plan_item)
         if m is None or m.group(2) not in done:
             continue
-        ws = charter_path.parent.parent.name
         closure_path = charter_path.parent / "90-acceptance-closure.md"
         if not closure_path.exists():
             errors.append(f"@id:{m.group(2)} [x], но у {ws} нет файла закрытия")
