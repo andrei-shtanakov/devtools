@@ -1,5 +1,9 @@
 import json
+import subprocess
 
+import pytest
+
+import conductor.sources_gh as sources_gh
 from conductor.sources_gh import ci_state, collect_gh, discover
 
 
@@ -98,6 +102,27 @@ def test_incomplete_results_is_error() -> None:
 def test_total_count_above_received_is_error() -> None:
     run = fake({OPEN: (0, json.dumps([_page([("a", 1, False)], total=5)]), "")})
     assert discover("own", {"a"}, run)[1] == "error"
+
+
+def test_pages_are_deduped_and_dedup_counts_against_total() -> None:
+    """#511: элемент, съехавший между страницами, не считается дважды —
+    ни в находках, ни в сверке с total_count."""
+    shifted = [_page([("a", 1, False), ("a", 2, False)]), _page([("a", 2, False)], 2)]
+    hits, state, _ = discover("own", {"a"}, fake({OPEN: (0, json.dumps(shifted), "")}))
+    assert state == "read" and hits == [("a", 1, False), ("a", 2, False)]
+    dup = [_page([("a", 1, False)], total=2), _page([("a", 1, False)], total=2)]
+    assert discover("own", {"a"}, fake({OPEN: (0, json.dumps(dup), "")}))[1] == (
+        "error"
+    )
+
+
+def test_total_count_changed_between_pages_is_error() -> None:
+    """#511: total_count сверяется по каждой странице, не только по первой."""
+    pages = [_page([("a", 1, False)], total=1), _page([("a", 2, False)], total=2)]
+    hits, state, detail = discover(
+        "own", {"a"}, fake({OPEN: (0, json.dumps(pages), "")})
+    )
+    assert (hits, state) == ([], "error") and "total_count" in detail
 
 
 def test_non_fleet_repos_are_ignored() -> None:
@@ -251,3 +276,20 @@ def test_malformed_json_is_a_read_failure_not_a_crash() -> None:
     assert result.state == "error" and "a#1" in result.detail
     broken = fake({**BASE, "api graphql": (0, '{"data": {}}', "")})
     assert collect_gh("own", {"a": "a"}, lambda _: set(), broken).state == "error"
+
+
+def test_run_gh_has_no_tty_and_no_prompts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#511: gh не наследует TTY и не может зависнуть на интерактивном вопросе."""
+    seen: dict[str, object] = {}
+
+    def fake_run(argv: list[str], **kw: object) -> subprocess.CompletedProcess:
+        seen.update(kw)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setenv("GIT_DIR", "/elsewhere/.git")
+    monkeypatch.setattr(sources_gh.subprocess, "run", fake_run)
+    sources_gh.run_gh(["api", "user"])
+    env = seen["env"]
+    assert seen["stdin"] is subprocess.DEVNULL
+    assert isinstance(env, dict) and env["GH_PROMPT_DISABLED"] == "1"
+    assert "GIT_DIR" not in env

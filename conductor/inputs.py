@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+import types
+from dataclasses import MISSING, asdict, dataclass, field, fields
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
+from conductor.durable import write_atomic
 from conductor.model import SourceState
 
 INPUTS_VERSION = 1
@@ -64,19 +66,68 @@ class Inputs:
 
 
 def save_inputs(inputs: Inputs, path: Path) -> None:
-    """Записать входы (UTF-8, стабильный порядок ключей)."""
+    """Записать входы атомарно (UTF-8, стабильный порядок ключей).
+
+    Оборванная запись не оставляет полуфайла под именем replay-входа (#511).
+    """
     payload = {"version": INPUTS_VERSION, **asdict(inputs)}
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=1, sort_keys=True),
-        encoding="utf-8",
+    write_atomic(
+        path, json.dumps(payload, ensure_ascii=False, indent=1, sort_keys=True)
     )
 
 
+def _fits(value: Any, hint: Any) -> bool:
+    """value соответствует аннотации поля (JSON-формы: str, None, list, dict)."""
+    origin, args = get_origin(hint), get_args(hint)
+    if hint is Any:
+        return True
+    if hint is type(None):
+        return value is None
+    if origin is Literal:
+        return value in args
+    if origin in (Union, types.UnionType):
+        return any(_fits(value, a) for a in args)
+    if origin is list:
+        return isinstance(value, list) and all(_fits(v, args[0]) for v in value)
+    if origin is dict:
+        return isinstance(value, dict) and all(
+            _fits(k, args[0]) and _fits(v, args[1]) for k, v in value.items()
+        )
+    return isinstance(value, hint) and not isinstance(value, bool)
+
+
+def _record[T](cls: type[T], data: Any, where: str) -> T:
+    """Экземпляр dataclass из словаря: состав ключей и типы — или ValueError."""
+    if not isinstance(data, dict):
+        raise ValueError(f"{where}: ожидался объект")
+    hints = get_type_hints(cls)
+    known = {f.name for f in fields(cls)}
+    required = {
+        f.name
+        for f in fields(cls)
+        if f.default is MISSING and f.default_factory is MISSING
+    }
+    if extra := sorted(set(data) - known):
+        raise ValueError(f"{where}: неизвестные ключи: {', '.join(extra)}")
+    if missing := sorted(required - set(data)):
+        raise ValueError(f"{where}: нет ключей: {', '.join(missing)}")
+    for key, value in data.items():
+        if not _fits(value, hints[key]):
+            raise ValueError(f"{where}: {key}: тип не {hints[key]}")
+    return cls(**data)
+
+
 def load_inputs(path: Path) -> Inputs:
-    """Прочитать входы; чужая версия формата — ValueError."""
+    """Прочитать входы; чужая версия или форма файла — ValueError с причиной."""
     data = json.loads(path.read_text(encoding="utf-8"))
-    if data.pop("version", None) != INPUTS_VERSION:
+    if not isinstance(data, dict) or data.pop("version", None) != INPUTS_VERSION:
         raise ValueError(f"inputs version != {INPUTS_VERSION}: {path}")
-    data["todos"] = [RepoTodo(**t) for t in data["todos"]]
-    return Inputs(**data)
+    todos = data.get("todos")
+    if "todos" in data:
+        if not isinstance(todos, list):
+            raise ValueError(f"{path}: todos: ожидался список")
+        data["todos"] = [
+            _record(RepoTodo, t, f"{path}: todos[{i}]") for i, t in enumerate(todos)
+        ]
+    return _record(Inputs, data, str(path))

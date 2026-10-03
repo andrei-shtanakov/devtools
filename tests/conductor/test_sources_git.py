@@ -151,3 +151,94 @@ def test_shallow_clone_is_a_read_error(tmp_path: Path) -> None:
     )
     todo = sg.read_todo(FleetRepo("sh", "sh", "sh"), tmp_path, False)
     assert todo.state == "error" and "мелкий клон" in todo.detail
+
+
+def test_text_comes_from_the_returned_sha_under_concurrent_fetch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#511: ref сдвинулся между rev-parse и show — текст всё равно от sha."""
+    clone = _clone(tmp_path, {"TODO.md": "old\n"})
+    up = tmp_path / "up"
+    (up / "TODO.md").write_text("new\n", encoding="utf-8")
+    _git(up, "commit", "-q", "-am", "new")
+    _git(clone, "fetch", "-q")
+    _git(clone, "update-ref", "refs/remotes/origin/master", "origin/master~1")
+    real = sg.git
+
+    def racing(repo_dir: Path, *args: str) -> tuple[int, str, str]:
+        if args[0] in ("ls-tree", "show"):  # «fetch» после rev-parse
+            real(repo_dir, "update-ref", "refs/remotes/origin/master", "FETCH_HEAD")
+        return real(repo_dir, *args)
+
+    monkeypatch.setattr(sg, "git", racing)
+    text, sha, state, _ = sg.read_file_at_origin(clone, "TODO.md")
+    assert sha is not None
+    assert (state, text) == ("read", real(clone, "show", f"{sha}:TODO.md")[1])
+
+
+def test_inherited_git_env_does_not_redirect_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#511: GIT_DIR/GIT_WORK_TREE вызывающего (хук, обёртка) не подменяют репо."""
+    clone = _clone(tmp_path, {"TODO.md": "mine\n"})
+    other = tmp_path / "other"
+    _git(tmp_path, "init", "-q", str(other))
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+    text, _, state, detail = sg.read_file_at_origin(clone, "TODO.md")
+    assert (state, text) == ("read", "mine\n"), detail
+
+
+def test_git_runs_without_tty_and_prompts(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_run(argv: list[str], **kw: object) -> subprocess.CompletedProcess:
+        seen.update(kw)
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(sg.subprocess, "run", fake_run)
+    sg.git(Path("."), "status")
+    env = seen["env"]
+    assert seen["stdin"] is subprocess.DEVNULL
+    assert isinstance(env, dict) and env["GIT_TERMINAL_PROMPT"] == "0"
+
+
+# долг #511: номер строки TODO у скрейпера == номер строки у git blame
+# (git считает только \n; splitlines и universal newlines — больше)
+
+RAW_TODO = (
+    b"- [ ] a @id:a\rhidden\x0cff\xe2\x80\xa8ls\xc2\x85nel\n"
+    b"- [ ] b @id:b\r\n"
+    b"- [ ] c @id:c\n"
+)
+
+
+def _commit_bytes(tmp: Path, raw: bytes) -> Path:
+    clone = _clone(tmp, {"README": "x\n"})
+    up = tmp / "up"
+    (up / "TODO.md").write_bytes(raw)
+    _git(up, "add", "-A")
+    _git(up, "commit", "-q", "-m", "raw")
+    assert sg.fetch(clone) is None
+    return clone
+
+
+def test_file_content_is_not_newline_translated(tmp_path: Path) -> None:
+    clone = _commit_bytes(tmp_path, RAW_TODO)
+    text, _, state, _ = sg.read_file_at_origin(clone, "TODO.md")
+    assert state == "read" and text == RAW_TODO.decode("utf-8")
+
+
+def test_todo_line_numbers_match_git(tmp_path: Path) -> None:
+    clone = _commit_bytes(tmp_path, RAW_TODO)
+    todo = sg.read_todo(FleetRepo("r", "clone", "r"), tmp_path, False)
+    assert todo.state == "read" and todo.text is not None
+    lines = todo.text.splitlines()
+    assert len(lines) == RAW_TODO.count(b"\n")
+    assert "hidden" in lines[0] and "@id:b" in lines[1] and "@id:c" in lines[2]
+    blame = subprocess.run(
+        ["git", "-C", str(clone), "blame", "-p", "-L3,3", "origin/master", "TODO.md"],
+        capture_output=True,
+        check=True,
+    ).stdout
+    assert b"@id:c" in blame

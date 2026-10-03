@@ -6,7 +6,9 @@ absent: absent означает только «пути на опубликов�
 
 from __future__ import annotations
 
+import os
 import posixpath
+import re
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,17 +19,38 @@ from conductor.manifest import FleetRepo
 from conductor.model import SourceState
 
 GIT_TIMEOUT = 120
+# Переменные, которые указывают git, КАКОЙ репо читать: унаследованные от
+# хука или обёртки, они перебили бы `-C repo_dir` (#511).
+_REPO_LOCATING = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES",
+)
+
+
+def child_env(**extra: str) -> dict[str, str]:
+    """Окружение дочернего git/gh: без репо-указателей, без вопросов в TTY."""
+    env = {k: v for k, v in os.environ.items() if k not in _REPO_LOCATING}
+    return {**env, "GIT_TERMINAL_PROMPT": "0", **extra}
 
 
 def git(repo_dir: Path, *args: str) -> tuple[int, str, str]:
-    """(код, stdout, stderr); таймаут → 124, нет бинаря → 127."""
+    """(код, stdout, stderr); таймаут → 124, нет бинаря → 127.
+
+    Байты декодируются здесь, без universal newlines: `\\r` в файле остаётся
+    `\\r`, иначе строки текста разошлись бы с нумерацией git (#511).
+    """
     try:
         done = subprocess.run(
             ["git", "-C", str(repo_dir), *args],
             capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",  # битые байты — текст с заменой, не падение
+            stdin=subprocess.DEVNULL,
+            env=child_env(),
             timeout=GIT_TIMEOUT,
             check=False,
         )
@@ -35,7 +58,19 @@ def git(repo_dir: Path, *args: str) -> tuple[int, str, str]:
         return 124, "", "git timeout"
     except OSError as exc:
         return 127, "", str(exc)
-    return done.returncode, done.stdout, done.stderr
+    # битые байты — текст с заменой, не падение
+    out = done.stdout.decode("utf-8", errors="replace")
+    return done.returncode, out, done.stderr.decode("utf-8", errors="replace")
+
+
+# Разделители строк для str.splitlines(), которых git не считает (только \n);
+# \r перед \n не трогается — "\r\n" и для splitlines одна граница.
+_FOREIGN_BREAKS = re.compile("\r(?!\n)|[\x0b\x0c\x1c\x1d\x1e\x85  ]")
+
+
+def git_lines(text: str) -> str:
+    """Текст, у которого строка N по splitlines() == строка N у git (#511)."""
+    return _FOREIGN_BREAKS.sub(" ", text)
 
 
 def _verifies(repo_dir: Path, ref: str) -> bool:
@@ -77,16 +112,17 @@ def read_file_at_origin(
     ref = default_ref(repo_dir)
     if ref is None:
         return None, None, "error", "нет origin/<default>"
-    code, out, err = git(repo_dir, "rev-parse", ref)
+    code, out, err = git(repo_dir, "rev-parse", "--verify", f"{ref}^{{commit}}")
     if code != 0:
         return None, None, "error", err.strip()
+    # дальше только sha: ref может сдвинуть конкурентный fetch (#511)
     sha = out.strip()
-    code, listed, err = git(repo_dir, "ls-tree", "--name-only", ref, "--", path)
+    code, listed, err = git(repo_dir, "ls-tree", "--name-only", sha, "--", path)
     if code != 0:
         return None, sha, "error", err.strip() or "ls-tree failed"
     if not listed.strip():
         return None, sha, "absent", f"{path} нет на {ref}"
-    code, text, err = git(repo_dir, "show", f"{ref}:{path}")
+    code, text, err = git(repo_dir, "show", f"{sha}:{path}")
     if code != 0:
         return None, sha, "error", err.strip() or f"show exit {code}"
     return text, sha, "read", ref
@@ -105,6 +141,8 @@ def read_todo(repo: FleetRepo, root: Path, do_fetch: bool) -> RepoTodo:
         detail = err.strip() or "мелкий клон: история неполна (fetch --unshallow)"
         return RepoTodo(repo.key, None, None, "error", detail)
     text, sha, state, detail = read_file_at_origin(repo_dir, "TODO.md")
+    # скрейпер нумерует строки splitlines(), blame — по \n: выровнять здесь
+    text = git_lines(text) if text is not None else None
     return RepoTodo(repo.key, text, sha, state, detail)
 
 
@@ -157,12 +195,20 @@ def ever_had(repo_dir: Path, ref: str, text: str, path: str = "TODO.md") -> str 
     return out.strip() or None
 
 
-def path_fact(repo_dir: Path, path: str) -> dict[str, Any]:
-    """{exists, sha, siblings} пути на origin/<default>; exists=None — ошибка."""
+def pinned_head(repo_dir: Path) -> str | None:
+    """SHA коммита origin/<default> — один раз на серию чтений (#511)."""
     ref = default_ref(repo_dir)
     if ref is None:
+        return None
+    code, out, _ = git(repo_dir, "rev-parse", "--verify", f"{ref}^{{commit}}")
+    return (out.strip() or None) if code == 0 else None
+
+
+def path_fact(repo_dir: Path, path: str) -> dict[str, Any]:
+    """{exists, sha, siblings} пути на origin/<default>; exists=None — ошибка."""
+    ref = sha = pinned_head(repo_dir)
+    if ref is None:
         return {"exists": None, "sha": None, "siblings": []}
-    sha = git(repo_dir, "rev-parse", ref)[1].strip() or None
     code, listed, _ = git(repo_dir, "ls-tree", "--name-only", ref, "--", path)
     if code != 0:
         return {"exists": None, "sha": sha, "siblings": []}
