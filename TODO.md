@@ -2736,7 +2736,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       Задачи прежней ревизии со статусом сверх `TODO`, чей блок не опознан,
       называются поимённо: `carry.lost_status` в леджере, строки в stdout и
       ⚠️-абзац в начале тела PR ревизии — до одобрения её человеком.
-- [ ] Режим ревью спецификаций (`local.sh --spec`) у потребителей кита (inbox devtools#501, slug: review-kit-spec-mode-rollout; from: steward) @owner:github:andrei-shtanakov @id:review-kit-spec-mode-rollout @epic:eco.tooling
+- [ ] Режим ревью спецификаций (`local.sh --spec`) у потребителей кита (inbox devtools#501, slug: review-kit-spec-mode-rollout; from: steward) @owner:github:andrei-shtanakov @id:review-kit-spec-mode-rollout @epic:eco.tooling @blocked_by:steward#200
       Решение владельца 2026-10-03: промпт `review-prompt-spec.md` получают
       только заявитель (spec-runner) и devtools, остальным — по запросу
       (без файла `--spec` отказывает кодом 2 — неподключённый режим явен).
@@ -2744,3 +2744,8 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       Остальные 19 потребителей: кит-волна (красный `review-kit-drift` с
       2026-09-30) — отдельным решением владельца. Проброс режима в
       `review-pr.sh` (п.2 заявки, по желанию) — не делается без запроса.
+      Ждём steward#200: ревью #557 (blocker) — §5 спек-промпта делает чистое
+      удаление критерия нерепортуемым; раскладка промпта (этот PR и
+      spec-runner#657) — после исправления, ре-вендором исправленного файла.
+      Проброс `--spec` в `review-pr.sh` — после steward#199 (`--spec` молча
+      перезаписывает доверенный `REVIEW_PROMPT`).
