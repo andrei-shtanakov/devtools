@@ -14,9 +14,6 @@ plan_item todo://<repo>/X → рядом обязан лежать 90-acceptance
 from __future__ import annotations
 
 import argparse
-import os
-import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -179,24 +176,13 @@ def gate_findings(
     return errors, warns
 
 
-def _origin_slug(repo: Path) -> str | None:
-    done = subprocess.run(
-        ["git", "-C", str(repo), "remote", "get-url", "origin"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    m = re.search(r"github\.com[:/]([^/]+/[^/]+?)(?:\.git)?$", done.stdout.strip())
-    return m.group(1) if done.returncode == 0 and m else None
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="closure_gate")
     parser.add_argument("--repo", type=Path, default=Path("."))
     parser.add_argument("--repo-slug")
     args = parser.parse_args(argv)
     repo = args.repo.resolve()
-    slug = args.repo_slug or os.environ.get("GITHUB_REPOSITORY") or _origin_slug(repo)
+    slug = charter_guard.resolve_slug(repo, args.repo_slug)
     errors, warns = gate_findings(
         repo, slug=slug, forge=acceptance_provenance.RealForge()
     )
