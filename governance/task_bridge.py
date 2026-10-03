@@ -4595,7 +4595,7 @@ def deliver_approve(
     живёт в рабочем дереве незакоммиченным — он и есть груз этого PR.
     commit_paths берёт только tasks-файл и stage-профиль.
 
-    Проверка идёт В НАЧАЛЕ функции, ДО `ops.ensure_branch`: отказ не должен
+    Проверка идёт В НАЧАЛЕ функции, ДО постановки ветки: отказ не должен
     оставлять в target созданную approve-ветку. Единственный эффект до
     ветки — эталон профиля у спеки, доставленной до #386 (см. ниже): без
     него шаг, который называет отказ, выполнить нечем.
@@ -4636,7 +4636,43 @@ def deliver_approve(
     check_approved(target_dir, ws_id, state.bundle_dir, legacy_bundle=legacy_bundle)
     branch = f"spec/{ws_id}-tasks-approve"
     existing = ops.find_pr(repo_slug, branch)
-    ops.ensure_branch(target_dir, branch)
+    base_ref = state.base_ref or "master"
+    local_head = ops.rev_parse(target_dir, branch)
+    in_base = (
+        None
+        if local_head is None
+        else ops.is_ancestor(target_dir, local_head, base_ref)
+    )
+    if existing is None and local_head is not None and in_base is None:
+        # Терм. ревью #549 (recheck): «не знаю» не сворачивается в «нет» —
+        # иначе неустановленная свежесть ветки уходила бы в доставку.
+        raise RuntimeError(
+            f"есть ли коммит {local_head[:12]} ветки {branch} в истории "
+            f"{base_ref} — не установлено (база не резолвится в target?); "
+            "ничего не сделано, проверьте base_ref прогона и повторите"
+        )
+    if existing is None and (local_head is None or in_base):
+        # devtools#543: открытого PR нет, своей работы на ветке нет —
+        # ставим её от базы прогона заново (`switch -C`), незакоммиченный
+        # штамп едет с деревом. `ensure_branch` взял бы остаток упавшей
+        # попытки как есть, на базе ДО исправления, и повтор упирался бы
+        # в тот же отказ.
+        ops.switch_to(target_dir, branch, base_ref)
+    else:
+        # Свой коммит на ветке (крэш-окно «коммит штампа есть, PR нет»,
+        # терм. ревью #549) либо факт не установлен — ветка берётся как
+        # есть: `switch -C` унёс бы коммит штампа владельца в reflog.
+        try:
+            ops.ensure_branch(target_dir, branch)
+        except subprocess.CalledProcessError as exc:
+            # `main` ловит только RuntimeError — без перевода оператор
+            # получил бы трейсбек (терм. ревью #549, recheck).
+            raise RuntimeError(
+                f"не удалось переключиться на {branch} (rc={exc.returncode}): "
+                "на ветке есть свой коммит штампа, а правки рабочего дерева "
+                f"с ним конфликтуют — выполните `git switch {branch}` "
+                "вручную, разрешите расхождение и повторите --deliver-approve"
+            ) from exc
     rel = f"spec/{ws_id}-tasks.md"
     # Профиль — в списке всегда: у уже закоммиченного эталона `git add`
     # ничего не меняет, а положенный миграцией выше уезжает этим PR.

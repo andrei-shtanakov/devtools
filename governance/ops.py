@@ -146,6 +146,10 @@ class Ops(Protocol):
 
     def prs_by_head_prefix(self, repo_slug: str, branch_prefix: str) -> list[dict]: ...
 
+    def edit_pr(
+        self, target_dir: str, repo_slug: str, pr: int, title: str, body: str
+    ) -> None: ...
+
     def create_pr(
         self,
         target_dir: str,
@@ -1447,6 +1451,38 @@ class RealOps:
             return 127, str(exc)
         return proc.returncode, proc.stdout
 
+    def edit_pr(
+        self, target_dir: str, repo_slug: str, pr: int, title: str, body: str
+    ) -> None:
+        """`gh pr edit <pr> --title --body -R <slug>`; сбой — RuntimeError.
+
+        devtools#539: текст candidate-PR обязан следовать за составом
+        заявки — мерж этого PR и есть акт одобрения узлов, которые он
+        объявляет.
+        """
+        done = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "edit",
+                str(pr),
+                "-R",
+                repo_slug,
+                "--title",
+                title,
+                "--body",
+                body,
+            ],
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if done.returncode != 0:
+            raise RuntimeError(
+                f"edit_pr: gh pr edit {pr} rc={done.returncode}: {done.stderr.strip()}"
+            )
+
     def create_pr(
         self,
         target_dir: str,
@@ -2206,12 +2242,17 @@ class RealOps:
 
     @staticmethod
     def _ignored_files(target_dir: str, paths: list[str]) -> list[str]:
-        """Явные пути-ФАЙЛЫ, которые ignore-правила цели исключают."""
+        """Явные пути-ФАЙЛЫ, которые ignore-правила цели исключают.
+
+        `--no-index` (devtools#543): без него `check-ignore` считает
+        отслеживаемый файл неигнорируемым, а `git add` такого файла под
+        игнорируемым каталогом всё равно отказывает rc 1.
+        """
         files = [p for p in paths if (Path(target_dir) / p).is_file()]
         if not files:
             return []
         done = subprocess.run(
-            ["git", "check-ignore", "--stdin", "-z"],
+            ["git", "check-ignore", "--no-index", "--stdin", "-z"],
             cwd=target_dir,
             input="\0".join(files) + "\0",
             capture_output=True,

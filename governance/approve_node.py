@@ -1448,18 +1448,32 @@ def _publish_candidate(
             request=key,
             changed=changed,
         )
-    ops.push_branch(state.target_dir, op["branch"])
     pr = op.get("candidate_pr")
+    if pr is not None and op.get("candidate_nodes") != op["nodes"]:
+        # devtools#539: узел присоединён к заявке с уже открытым PR. Мерж
+        # PR подписывает `op['nodes']`, значит текст обязан объявить их
+        # все — и ДО push: иначе в окне между ними PR объявлял бы меньше,
+        # чем лежит в его ветке. Заявка старого формата (без
+        # `candidate_nodes`) переписывается один раз.
+        ops.edit_pr(
+            state.target_dir,
+            state.repo_slug,
+            pr,
+            _candidate_title(state, op),
+            _candidate_body(state, op, debt),
+        )
+        al.record_candidate_nodes(state, key, op["nodes"])
+    ops.push_branch(state.target_dir, op["branch"])
     if pr is None:
         pr = _adopt_or_create_pr(
             state,
             ops,
             op["branch"],
             op["head_sha"],
-            f"spec: {state.ws_id} — одобрение узлов {', '.join(op['nodes'])} (§I12)",
+            _candidate_title(state, op),
             _candidate_body(state, op, debt),
         )
-        al.record_candidate_pr(state, key, pr)
+        al.record_candidate_pr(state, key, pr, nodes=op["nodes"])
     return ApprovalOutcome(
         f"{', '.join(op['nodes'])}: вынесены на одобрение, candidate-PR "
         f"#{pr}. Одобрение совершает МЕРЖ этого PR учёткой из "
@@ -1468,6 +1482,10 @@ def _publish_candidate(
         request=key,
         changed=changed,
     )
+
+
+def _candidate_title(state: RunState, op: dict) -> str:
+    return f"spec: {state.ws_id} — одобрение узлов {', '.join(op['nodes'])} (§I12)"
 
 
 def _candidate_body(state: RunState, op: dict, debt: na.NodeDebt | None) -> str:

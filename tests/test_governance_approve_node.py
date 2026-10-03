@@ -106,6 +106,8 @@ class Forge:
     mute: set[str] = field(default_factory=set)
     #: `close_pr` не подтверждает закрытие (нет прав либо уже закрыт — #177).
     close_confirms: bool = True
+    #: Номера PR, чьи заголовок и тело правились (`edit_pr`), по порядку.
+    edits: list[int] = field(default_factory=list)
     #: Клон, которым исполняются мержи (и человеческие, и агентские).
     merger: Path | None = None
     #: Код обвязки `merge-pr.sh` для агентского мержа finalize (ADR-ECO-011
@@ -221,6 +223,18 @@ class Ops(RealOps):
             "state": "OPEN",
         }
         return number
+
+    def edit_pr(
+        self, target_dir: str, repo_slug: str, pr: int, title: str, body: str
+    ) -> None:
+        if "edit_pr" in self.forge.mute:
+            raise RuntimeError("edit_pr: gh pr edit rc=1: no network")
+        rec = self.forge.prs[pr]
+        # Голова в момент правки — чтобы тест видел порядок «текст до push».
+        rec.update(
+            title=title, body=body, head_at_edit=self.forge.head_of(rec["branch"])
+        )
+        self.forge.edits.append(pr)
 
     def close_pr(self, repo_slug: str, pr: int, comment: str) -> bool:
         if not self.forge.close_confirms:
@@ -842,6 +856,34 @@ def test_merged_candidate_is_not_joined_but_starts_a_new_attempt(
     }
     for node, fname in (("design", "20-design.md"), ("acceptance", "25-acceptance.md")):
         assert na.node_debt(node, world.base_text(fname), upstreams) is None
+
+
+def test_joined_node_is_announced_by_the_candidate_pr_text(world: World) -> None:
+    """devtools#539: мерж candidate-PR — сам акт одобрения, и финализация
+    подписывает `op['nodes']`. Присоединение узла к живой заявке обязано
+    переписать заголовок и тело PR — иначе человек мержит PR, объявляющий
+    один узел, а подписываются два. Текст правится ДО push: PR не должен
+    объявлять меньше, чем лежит в его ветке.
+    """
+    _level_three(world)
+    approve(world, "design")
+    key, op = _request_over(world, "design")
+    pr = op["candidate_pr"]
+    head_before = world.forge.head_of(op["branch"])
+    assert "Узлы: design." in world.forge.prs[pr]["body"]
+
+    approve(world, "acceptance")
+
+    rec = world.forge.prs[pr]
+    assert world.forge.edits == [pr]
+    assert "design, acceptance" in rec["title"]
+    assert "Узлы: design, acceptance." in rec["body"]
+    assert rec["head_at_edit"] == head_before, "текст правится до push"
+    assert world.state.ops[key]["candidate_nodes"] == ["design", "acceptance"]
+
+    # Возобновление без нового узла текст не трогает.
+    approve(world, "acceptance")
+    assert world.forge.edits == [pr]
 
 
 def test_unavailable_candidate_state_blocks_joining_without_writes(
