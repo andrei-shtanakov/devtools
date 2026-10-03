@@ -151,3 +151,44 @@ def test_shallow_clone_is_a_read_error(tmp_path: Path) -> None:
     )
     todo = sg.read_todo(FleetRepo("sh", "sh", "sh"), tmp_path, False)
     assert todo.state == "error" and "мелкий клон" in todo.detail
+
+
+# долг #511: номер строки TODO у скрейпера == номер строки у git blame
+# (git считает только \n; splitlines и universal newlines — больше)
+
+RAW_TODO = (
+    b"- [ ] a @id:a\rhidden\x0cff\xe2\x80\xa8ls\xc2\x85nel\n"
+    b"- [ ] b @id:b\r\n"
+    b"- [ ] c @id:c\n"
+)
+
+
+def _commit_bytes(tmp: Path, raw: bytes) -> Path:
+    clone = _clone(tmp, {"README": "x\n"})
+    up = tmp / "up"
+    (up / "TODO.md").write_bytes(raw)
+    _git(up, "add", "-A")
+    _git(up, "commit", "-q", "-m", "raw")
+    assert sg.fetch(clone) is None
+    return clone
+
+
+def test_file_content_is_not_newline_translated(tmp_path: Path) -> None:
+    clone = _commit_bytes(tmp_path, RAW_TODO)
+    text, _, state, _ = sg.read_file_at_origin(clone, "TODO.md")
+    assert state == "read" and text == RAW_TODO.decode("utf-8")
+
+
+def test_todo_line_numbers_match_git(tmp_path: Path) -> None:
+    clone = _commit_bytes(tmp_path, RAW_TODO)
+    todo = sg.read_todo(FleetRepo("r", "clone", "r"), tmp_path, False)
+    assert todo.state == "read" and todo.text is not None
+    lines = todo.text.splitlines()
+    assert len(lines) == RAW_TODO.count(b"\n")
+    assert "hidden" in lines[0] and "@id:b" in lines[1] and "@id:c" in lines[2]
+    blame = subprocess.run(
+        ["git", "-C", str(clone), "blame", "-p", "-L3,3", "origin/master", "TODO.md"],
+        capture_output=True,
+        check=True,
+    ).stdout
+    assert b"@id:c" in blame

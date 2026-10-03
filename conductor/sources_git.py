@@ -7,6 +7,7 @@ absent: absent означает только «пути на опубликов�
 from __future__ import annotations
 
 import posixpath
+import re
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,14 +21,15 @@ GIT_TIMEOUT = 120
 
 
 def git(repo_dir: Path, *args: str) -> tuple[int, str, str]:
-    """(код, stdout, stderr); таймаут → 124, нет бинаря → 127."""
+    """(код, stdout, stderr); таймаут → 124, нет бинаря → 127.
+
+    Байты декодируются здесь, без universal newlines: `\\r` в файле остаётся
+    `\\r`, иначе строки текста разошлись бы с нумерацией git (#511).
+    """
     try:
         done = subprocess.run(
             ["git", "-C", str(repo_dir), *args],
             capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",  # битые байты — текст с заменой, не падение
             timeout=GIT_TIMEOUT,
             check=False,
         )
@@ -35,7 +37,19 @@ def git(repo_dir: Path, *args: str) -> tuple[int, str, str]:
         return 124, "", "git timeout"
     except OSError as exc:
         return 127, "", str(exc)
-    return done.returncode, done.stdout, done.stderr
+    # битые байты — текст с заменой, не падение
+    out = done.stdout.decode("utf-8", errors="replace")
+    return done.returncode, out, done.stderr.decode("utf-8", errors="replace")
+
+
+# Разделители строк для str.splitlines(), которых git не считает (только \n);
+# \r перед \n не трогается — "\r\n" и для splitlines одна граница.
+_FOREIGN_BREAKS = re.compile("\r(?!\n)|[\x0b\x0c\x1c\x1d\x1e\x85  ]")
+
+
+def git_lines(text: str) -> str:
+    """Текст, у которого строка N по splitlines() == строка N у git (#511)."""
+    return _FOREIGN_BREAKS.sub(" ", text)
 
 
 def _verifies(repo_dir: Path, ref: str) -> bool:
@@ -105,6 +119,8 @@ def read_todo(repo: FleetRepo, root: Path, do_fetch: bool) -> RepoTodo:
         detail = err.strip() or "мелкий клон: история неполна (fetch --unshallow)"
         return RepoTodo(repo.key, None, None, "error", detail)
     text, sha, state, detail = read_file_at_origin(repo_dir, "TODO.md")
+    # скрейпер нумерует строки splitlines(), blame — по \n: выровнять здесь
+    text = git_lines(text) if text is not None else None
     return RepoTodo(repo.key, text, sha, state, detail)
 
 
