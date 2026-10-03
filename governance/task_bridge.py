@@ -1725,6 +1725,34 @@ class _CarryResult:
     total_tasks: int
     carried_checked_items: int
     total_checked_items: int
+    #: (заголовок прежней задачи, её статус) — начатые задачи, чей блок не
+    #: сопоставился и статус НЕ перенесён (devtools#541).
+    lost_status: tuple[tuple[str, str], ...] = ()
+
+
+def _lost_status(
+    delivered_lines: list[str], carried_blocks: set[str]
+) -> tuple[tuple[str, str], ...]:
+    """Задачи доставленной спеки со статусом сверх `TODO`, чей блок в
+    переиздании не опознан (devtools#541).
+
+    Только ОТЧЁТ, не перенос: номер задачи здесь — подпись для человека,
+    а не вторая идентичность рядом с байтами (§I11). Перенести `DONE` на
+    изменённый блок значило бы утверждать выполненным то, чего прежняя
+    работа не делала; промолчать — оплатить её повторно. Решает человек,
+    одобряющий ревизию."""
+    lost = []
+    for start, stop in _task_bounds(delivered_lines):
+        body = delivered_lines[start:stop]
+        found = _task_meta(body)
+        if found is None:
+            continue
+        status = found[1].group("status")
+        if status.upper().endswith(_CANON_STATUS):
+            continue
+        if _state_free(body) not in carried_blocks:
+            lost.append((body[0].removeprefix("### "), status))
+    return tuple(lost)
 
 
 def _carry_execution_state_with_report(text: str, delivered: str) -> _CarryResult:
@@ -1742,12 +1770,15 @@ def _carry_execution_state_with_report(text: str, delivered: str) -> _CarryResul
     carryable = prev.checked & _unique(_checklist_texts(lines))
     out = list(lines)
     matched = 0
+    carried_blocks: set[str] = set()
     for start, stop in bounds:
         body = list(lines[start:stop])
-        was = prev.status_by_block.get(_state_free(body))
+        block = _state_free(body)
+        was = prev.status_by_block.get(block)
         found = _task_meta(body)
         if was is not None and found is not None:
             matched += 1
+            carried_blocks.add(block)
             i, m = found
             body[i] = body[i][: m.start("status")] + was + body[i][m.end("status") :]
         for i, line in enumerate(body):
@@ -1756,7 +1787,12 @@ def _carry_execution_state_with_report(text: str, delivered: str) -> _CarryResul
                 body[i] = f"{c.group(1)}x{c.group(3)}{c.group('text')}"
         out[start:stop] = body
     return _CarryResult(
-        "\n".join(out), matched, len(bounds), len(carryable), total_checked
+        "\n".join(out),
+        matched,
+        len(bounds),
+        len(carryable),
+        total_checked,
+        _lost_status(delivered_lines, carried_blocks),
     )
 
 
@@ -2082,7 +2118,7 @@ def deliver(
             anchor_node_id=anchor_node_id,
             version=version,
         )
-    carry_report: dict[str, int] | None = None
+    carry_report: dict[str, object] | None = None
     if carry_from is not None or report_carry:
         # Состояние исполнения переносится ПОСЛЕ рендера и ДО записи:
         # `tasks_blob` (§I3.1) обязан считаться по ФАКТИЧЕСКИМ байтам
@@ -2099,6 +2135,7 @@ def deliver(
             "total_tasks": carried.total_tasks,
             "carried_checked_items": carried.carried_checked_items,
             "total_checked_items": carried.total_checked_items,
+            "lost_status": [list(pair) for pair in carried.lost_status],
         }
     rel = f"spec/{ws_id}-tasks.md"
     out = Path(target_dir) / rel
@@ -2151,7 +2188,9 @@ def deliver(
         if s8_verdicts is not None
         else ""
     )
-    body = (
+    lost = (carry_report or {}).get("lost_status") or []
+    lost_note = _lost_status_note(lost) + "\n\n" if lost else ""
+    body = lost_note + (
         f"Draft tasks.md-спека из behaviour-spec бандла {ws_id} "
         f"({bundle_dir}/15-behaviour-spec.md), сгенерирована task_bridge.\n\n"
         "Файлы бандла этот PR не трогает: одобренность узлов доставка "
@@ -3938,6 +3977,20 @@ def _tasks_blob_cb(state: RunState, n: int) -> Callable[[dict], None]:
     return _cb
 
 
+def _lost_status_note(lost: list) -> str:
+    """Громкий абзац о начатых задачах, чей статус не перенесён (#541)."""
+    lines = [
+        (
+            "⚠️ **Статус не перенесён** (devtools#541): блоки этих задач в "
+            "переиздании изменились, и по §I11 они приходят `TODO`. Если работа "
+            "уже сделана и покрывает новое тело — восстановите статус до "
+            "одобрения ревизии, иначе `run` заплатит за неё повторно:"
+        ),
+    ]
+    lines += [f"- {head}: была {status}" for head, status in lost]
+    return "\n".join(lines)
+
+
 def _print_carry_report(state: RunState, n: int) -> None:
     """Печать только на CLI-пути; `deliver` остаётся библиотечной."""
     carry = state.ops[f"{_REVISION_PREFIX}{n}"]["carry"]
@@ -3947,6 +4000,8 @@ def _print_carry_report(state: RunState, n: int) -> None:
         f"{carry['carried_checked_items']} of "
         f"{carry['total_checked_items']} checked items"
     )
+    if lost := carry.get("lost_status"):
+        print(_lost_status_note(lost))
 
 
 def _commit_facts_cb(

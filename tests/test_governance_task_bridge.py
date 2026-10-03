@@ -9696,12 +9696,56 @@ def test_supersede_preserves_execution_state_of_unchanged_tasks(
         "total_tasks": 1,
         "carried_checked_items": 3,
         "total_checked_items": 3,
+        "lost_status": [],
     }
     assert (
         "state carried for 1 of 1 task blocks; 3 of 3 checked items"
         in capsys.readouterr().out
     )
     assert ("show_file_for_carry", "base-sha-1", _SPEC_REL) in ops.calls
+
+
+def test_supersede_names_a_done_task_whose_status_was_not_carried(
+    tmp_path, monkeypatch, capsys
+):
+    """devtools#541: блок выполненной задачи изменился, статус по §I11 не
+    переносится — и это говорится громко, а не растворяется в «0 of N»:
+    одобренная как есть ревизия выбрала бы задачу в run и заплатила бы за
+    неё повторно. Перенос остаётся байтовым — меняется только отчёт."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _supersede_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {
+        "status": "completed",
+        "pr": 5,
+        "anchor": "СТАРЫЙ-ДРУГОЙ",
+    }
+    rs.save(state)
+    delivered = _delivered_v1(state).replace(
+        "- [x] реализовать BEH-01", "- [x] реализовать BEH-01 (старая формулировка)"
+    )
+    ops = _CarryOps(prs=[_MERGED_PR], delivered=delivered)
+    assert tb.deliver_superseded(state, ops).kind == "delivered"
+
+    text = (Path(state.target_dir) / "spec/WS-alpha-7-tasks.md").read_text(
+        encoding="utf-8"
+    )
+    assert "| ✅ DONE" not in text, "перенос по-прежнему байтовый"
+    head = _task_body(delivered, "TASK-001").split("\n", 1)[0].removeprefix("### ")
+    saved = rs.load("r-recon").ops["tasks-deliver-v2"]
+    assert saved["carry"]["lost_status"] == [[head, "✅ DONE"]]
+    out = capsys.readouterr().out
+    assert f"{head}: была ✅ DONE" in out
+    assert f"{head}: была ✅ DONE" in ops.pr_body
+
+
+def test_carry_report_lists_no_loss_when_status_carried() -> None:
+    from governance import task_bridge as tb
+
+    delivered = _executed(_render(_CARRY_DT, _CARRY_SCENARIOS), "TASK-001")
+    fresh = _render(_CARRY_DT, _CARRY_SCENARIOS, version=2)
+    assert tb._carry_execution_state_with_report(fresh, delivered).lost_status == ()
 
 
 def test_supersede_reports_zero_when_base_tasks_file_is_absent(
@@ -9728,6 +9772,7 @@ def test_supersede_reports_zero_when_base_tasks_file_is_absent(
         "total_tasks": 1,
         "carried_checked_items": 0,
         "total_checked_items": 0,
+        "lost_status": [],
     }
     assert (
         "state carried for 0 of 1 task blocks; 0 of 0 checked items"
