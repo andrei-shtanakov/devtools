@@ -2730,3 +2730,9 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       Заявка записывает `candidate_nodes` — узлы, объявленные текстом PR;
       разошлись с `nodes` → `gh pr edit` заголовка и тела ДО push, чтобы PR
       не объявлял меньше, чем подпишет финализация.
+- [x] `--supersede`: громкий отчёт о начатой задаче, чей статус не перенесён (inbox devtools#541, slug: supersede-carries-done-status; from: spec-runner#644) @owner:github:andrei-shtanakov @id:supersede-carries-done-status @epic:eco.dark-factory — PR этой ветки
+      Решение владельца 2026-10-03: перенос остаётся байтовым по §I11 (перенос
+      `DONE` по TASK-id отвергнут — изменённое тело не доказано выполненным).
+      Задачи прежней ревизии со статусом сверх `TODO`, чей блок не опознан,
+      называются поимённо: `carry.lost_status` в леджере, строки в stdout и
+      ⚠️-абзац в начале тела PR ревизии — до одобрения её человеком.
