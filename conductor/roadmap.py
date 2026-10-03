@@ -5,12 +5,14 @@ from __future__ import annotations
 import re
 import tomllib
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from conductor.model import Finding
 
 GOAL_RE = re.compile(r"^todo://[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9._-]{0,63}$")
+# RFC 3339 UTC строго: fromisoformat шире (базовый формат, неделя, пробел)
+UTC_INSTANT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$")
 LIMIT_DEFAULTS: dict[str, tuple[int, int, int]] = {
     "max_writes_per_run": (20, 1, 200),
     "max_launches_per_run": (2, 0, 10),
@@ -83,20 +85,31 @@ def _int_in(value: Any, low: int, high: int) -> bool:
     )
 
 
-def _is_utc_instant(value: Any) -> bool:
-    if not isinstance(value, str) or not value.endswith("Z"):
-        return False
+def _utc_instant(value: Any) -> str | None:
+    """writer_since → строка RFC 3339 UTC или None (не момент UTC).
+
+    Строка — строго по UTC_INSTANT_RE; TOML-datetime без кавычек — только с
+    зоной, приводится к UTC (локальное время TOML момента не задаёт).
+    """
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return None
+        return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if not isinstance(value, str) or not UTC_INSTANT_RE.match(value):
+        return None
     try:
         datetime.fromisoformat(value)
     except ValueError:
-        return False
-    return True
+        return None
+    return value
 
 
 def _limits(raw: Any, errors: list[Finding]) -> dict[str, int]:
     if raw is not None and not isinstance(raw, dict):
         errors.append(_invalid("limits должен быть таблицей"))
     table = raw if isinstance(raw, dict) else {}
+    for name in sorted(set(table) - set(LIMIT_DEFAULTS)):
+        errors.append(_invalid(f"limits: неизвестный лимит {name!r}"))
     limits: dict[str, int] = {}
     for name, (default, low, high) in LIMIT_DEFAULTS.items():
         value = table.get(name, default)
@@ -196,9 +209,10 @@ def parse_roadmap(text: str | None, epics: dict[str, dict]) -> Roadmap:
     if not isinstance(writer, str) or not writer:
         errors.append(_invalid("writer_host пуст"))
         writer = ""
-    since = data.get("writer_since", "")
-    if not _is_utc_instant(since):
-        errors.append(_invalid(f"writer_since={since!r} не RFC 3339 UTC"))
+    raw_since = data.get("writer_since", "")
+    since = _utc_instant(raw_since)
+    if since is None:
+        errors.append(_invalid(f"writer_since={raw_since!r} не RFC 3339 UTC"))
     focus = _focus(data.get("focus"), top, epics, errors, warnings)
     parked = _parked(data.get("parked"), epics, errors)
     seen = [f.epic for f in focus] + parked
@@ -209,7 +223,7 @@ def parse_roadmap(text: str | None, epics: dict[str, dict]) -> Roadmap:
     return Roadmap(
         autonomy=top,
         writer_host=writer,
-        writer_since=since if isinstance(since, str) else "",
+        writer_since=since or "",
         focus=focus,
         parked=frozenset(parked),
         limits=limits,

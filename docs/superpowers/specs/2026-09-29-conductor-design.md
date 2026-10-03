@@ -176,8 +176,9 @@ renudge_after_days   = 7          # 1..60
 Ошибки (`RM-INVALID`): неизвестный `schema_version`; `epic`, которого нет в
 `epics.toml`; эпик дважды в `focus` ∪ `parked`; эпик со статусом `done` в
 `focus`; `goal` не вида `todo://<repo>/<id>`; `autonomy` вне 0..3; лимит не
-целое или вне диапазона; `writer_host` пуст; `writer_since` не RFC 3339 UTC; неизвестное имя или повтор в
-`enabled_actions`.
+целое, вне диапазона или неизвестного имени (#511); `writer_host` пуст; `writer_since` не RFC 3339 UTC
+(строка строго `YYYY-MM-DDTHH:MM:SS[.f]Z` или TOML-datetime с зоной — приводится
+к UTC; #511); неизвестное имя или повтор в `enabled_actions`.
 При `RM-INVALID` прогон продолжается на уровне 0 **без ранжирования**, снимок
 пишется, код выхода 4 (§7.2).
 
