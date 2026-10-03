@@ -60,9 +60,13 @@ def prereq_state(graph: Graph, inputs: Inputs, prereq_id: str) -> PrereqState:
             return "unresolvable"
         if graph.source_unread(prereq_id):
             return "unread"  # не прочитано — не «нет»: вопроса не будет
+        # удаление после существования и отказ в заявке — отмена; история
+        # сильнее открытой заявки, иначе отмена пряталась бы за «в пути»
+        if inputs.history.get(prereq_id) or prereq_id in graph.declined_requests:
+            return "cancelled"
         if prereq_id in graph.pending_requests:
             return "request_open"
-        return "cancelled" if inputs.history.get(prereq_id) else "missing"
+        return "missing"
     if node.is_open:
         return "open"
     if node.closed_as is None:
@@ -137,7 +141,8 @@ def _dependency_wait(
     if state == "request_open":  # заявка отправлена, пункт ещё не заведён
         evidence = graph.pending_requests[prereq]
         return Wait(consumer, prereq, "pending", state, evidence, since, moved)
-    return Wait(consumer, prereq, "unknown", state, prereq, since, moved)
+    evidence = graph.declined_requests.get(prereq, prereq)
+    return Wait(consumer, prereq, "unknown", state, evidence, since, moved)
 
 
 def _version_mismatch(path: str, siblings: list[str]) -> bool:

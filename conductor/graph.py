@@ -10,6 +10,7 @@ accepted_as делает issue и пункт одним узлом работы:
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -63,6 +64,8 @@ class Graph:
     gh_read: bool = True
     # открытая заявка на ещё не заведённый пункт: todo://<repo>/<slug> → issue
     pending_requests: dict[str, str] = field(default_factory=dict)
+    # отклонённая (not_planned) заявка на незаведённый пункт: он не появится
+    declined_requests: dict[str, str] = field(default_factory=dict)
 
     def source_unread(self, node_id: str) -> bool:
         """Источник узла не прочитан — отсутствие узла ничего не доказывает."""
@@ -513,18 +516,31 @@ def build_graph(inputs: Inputs) -> Graph:
         partial=any(s.state in ("error", "not_queried") for s in sources),
         unread_repos=unread,
         gh_read=inputs.gh_state == "read",
-        pending_requests=_pending_requests(solid, nodes, norm),
+        pending_requests=_requests_for_missing(solid, nodes, norm, _is_open),
+        declined_requests=_requests_for_missing(solid, nodes, norm, _is_declined),
     )
 
 
-def _pending_requests(
-    records: list[dict[str, Any]], nodes: dict[str, Node], norm: dict[str, str]
+def _is_open(rec: dict[str, Any]) -> bool:
+    return rec["state"] == "open"
+
+
+def _is_declined(rec: dict[str, Any]) -> bool:
+    return rec["state"] != "open" and rec.get("state_reason") == "not_planned"
+
+
+def _requests_for_missing(
+    records: list[dict[str, Any]],
+    nodes: dict[str, Node],
+    norm: dict[str, str],
+    keep: Callable[[dict[str, Any]], bool],
 ) -> dict[str, str]:
-    """Открытая заявка (метка inbox или шапка) на пункт, которого ещё нет:
-    ожидание этого пункта — рукопожатие в процессе, а не «предпосылки нет»."""
+    """Заявка (метка inbox или шапка) на пункт, которого ещё нет, в состоянии
+    keep: открытая — рукопожатие в процессе, отклонённая — отмена; ни то, ни
+    другое не «предпосылки нет»."""
     pending: dict[str, str] = {}
     for rec in records:
-        if rec["is_pr"] or rec["state"] != "open":
+        if rec["is_pr"] or not keep(rec):
             continue
         header = _protocol_header(rec.get("body", ""))
         sender = FROM_RE.match(header[1]) if header else None
