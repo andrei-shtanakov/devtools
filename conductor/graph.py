@@ -253,6 +253,9 @@ def _gh_edges(
             Edge(me, item_id(rec["repo"], m), "implements", "pr:@id")
             for m in PR_ITEM_RE.findall(rec.get("body", ""))
         ]
+        # PR — не заявка ADR-ECO-006 и с меткой inbox: склейка увела бы его
+        # из очереди (accepted_as)
+        return edges
     if "inbox" in rec.get("labels", []):
         edges += _inbox_edges(rec, me, nodes, norm, findings, unread=unread)
     elif (header := _legacy_protocol(rec, nodes, norm)) is not None:

@@ -142,3 +142,16 @@ def test_any_unread_source_makes_graph_partial() -> None:
     assert build_graph(inputs(todos, epics_state="error")).partial
     assert build_graph(inputs(todos, roadmap_state="error")).partial
     assert build_graph(inputs(todos, aux_state="error")).partial
+
+
+def test_inbox_labelled_pr_is_not_glued_to_an_item() -> None:
+    # #511: метка inbox на PR не делает его заявкой — PR остаётся в очереди
+    pr = record("a", 7, is_pr=True, body="slug: x\nfrom: b#y\n", labels=["inbox"])
+    g = build_graph(
+        inputs(
+            {"a": "- [ ] x @owner:TBD @id:x\n", "b": "- [ ] y @owner:TBD @id:y\n"},
+            [pr],
+        )
+    )
+    assert "a!7" not in g.canon
+    assert not any(e.dst == "a!7" and e.type == "depends_on" for e in g.edges)
