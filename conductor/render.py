@@ -6,6 +6,7 @@ from collections import Counter
 
 from conductor.rank import QueueEntry
 from conductor.snapshot import Result, owner_questions
+from conductor.waits import Wait
 
 FLAGS = {
     "owner-tbd": "кандидат на делегирование: нет @owner, полномочия не проверены",
@@ -32,6 +33,19 @@ def _position(result: Result, e: QueueEntry) -> list[str]:
     age = "" if e.line_age_days is None else f"; строка ожидания ≈{e.line_age_days} дн."
     head = f"  {e.rank or '-'}  {e.node_id}  [{a.need} → {a.actor}]"
     return [head + (f"  ({flag})" if flag else ""), f"       {e.why}{age}"]
+
+
+def _findings(result: Result, top: int) -> list[str]:
+    """Находки warning/error (info — только в снимке): код, предмет, деталь."""
+    shown = [f for f in result.findings if f.severity != "info"]
+    lines = [f"находки: {len(shown)}"]
+    lines += [
+        f"  {f.code} {f.subject}" + (f": {f.detail}" if f.detail else "")
+        for f in shown[:top]
+    ]
+    if len(shown) > top:
+        lines.append(f"  … ещё {len(shown) - top} (полностью — в снимке run)")
+    return lines
 
 
 def _repo(node_id: str) -> str:
@@ -103,6 +117,7 @@ def render_status(result: Result, top: int = 15, repo: str | None = None) -> str
     stale = sum(w.reason == "stale" for w in result.waits)
     done = sum(w.verdict == "satisfied" for w in result.waits)
     lines.append(f"ожидания: выполнено {done}, застой {stale}")
+    lines += _findings(result, top)
     questions = owner_questions(result)
     lines.append(f"вопросы владельцу: {len(questions)}")
     lines += [
@@ -111,6 +126,18 @@ def render_status(result: Result, top: int = 15, repo: str | None = None) -> str
         for q in questions[:top]
     ]
     return "\n".join(lines)
+
+
+def _wait_evidence(w: Wait) -> str:
+    """Свидетельство ожидания, дата правки строки (blame) и последнее движение."""
+    parts = []
+    if w.prereq and w.evidence != w.prereq:
+        parts.append(f"свидетельство {w.evidence}")
+    if w.last_line_change_at:
+        parts.append(f"строка с {w.last_line_change_at}")
+    if w.moved:
+        parts.append(f"движение {w.moved}")
+    return f"  ({'; '.join(parts)})" if parts else ""
 
 
 def render_why(result: Result, node_id: str) -> str:
@@ -123,7 +150,11 @@ def render_why(result: Result, node_id: str) -> str:
             if w.consumer != node:
                 continue
             label = w.prereq or f"@trigger {w.evidence}"
-            lines.append("  " * (depth + 1) + f"ждёт {label} [{w.verdict}/{w.reason}]")
+            lines.append(
+                "  " * (depth + 1)
+                + f"ждёт {label} [{w.verdict}/{w.reason}]"
+                + _wait_evidence(w)
+            )
             if w.prereq and w.prereq not in seen:
                 seen.add(w.prereq)
                 frontier.append((w.prereq, depth + 1))
