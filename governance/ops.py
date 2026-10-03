@@ -72,6 +72,12 @@ _PR_CLOSURE_QUERY = (
 #: Логин ревью-контура по умолчанию — канон `review-pr.sh:66`.
 REVIEW_LOGIN_DEFAULT = "ai-prosto"
 
+#: Потолок `spec-runner verify --criteria`, с (#481 M-14). Измерение гоняет
+#: селекторы в двух прогонах (спека оракула §4.3); час — запас на крупный
+#: набор и медленную машину, а не оценка. Цель — превратить зависание в
+#: названный отказ шага, а не прервать честно долгий замер.
+CRITERIA_VERIFY_TIMEOUT_S = 3600
+
 #: Код выхода `review-pr.sh`, означающий отказ БАРЬЕРА, а не сбой прибора.
 #: Канон — контракт кодов в шапке `review-pr.sh` (devtools#258).
 REVIEW_BARRIER_EXIT = 6
@@ -1431,7 +1437,12 @@ class RealOps:
         return out
 
     def criteria_verify(self, target_dir: str, request_path: str) -> tuple[int, str]:
-        """`spec-runner verify --criteria` (контракт criteria-closure/v1, §5.1)."""
+        """`spec-runner verify --criteria` (контракт criteria-closure/v1, §5.1).
+
+        Коды протокола 0/2/3 — stdout (ответ). Код вне протокола — не ответ:
+        вместо stdout отдаётся диагностика со stderr (#481 M-14), иначе
+        отказ шага называл бы только код. Зависание — таймаут
+        `CRITERIA_VERIFY_TIMEOUT_S`, код 124 (как у `timeout(1)`)."""
         try:
             proc = subprocess.run(
                 [
@@ -1446,10 +1457,20 @@ class RealOps:
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=CRITERIA_VERIFY_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            return 124, (
+                f"spec-runner verify --criteria не завершился за "
+                f"{CRITERIA_VERIFY_TIMEOUT_S} с"
             )
         except OSError as exc:
             return 127, str(exc)
-        return proc.returncode, proc.stdout
+        if proc.returncode in (0, 2, 3):
+            return proc.returncode, proc.stdout
+        return proc.returncode, (
+            f"stderr: {proc.stderr.strip()}\nstdout: {proc.stdout.strip()}"
+        )
 
     def edit_pr(
         self, target_dir: str, repo_slug: str, pr: int, title: str, body: str

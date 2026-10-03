@@ -72,16 +72,43 @@ def test_drift_against_upstream_checkout():
         pytest.skip(notes[0])
 
 
-def test_fixtures_stay_out_of_the_selfcheck_corpus():
-    """Байты фикстур заведомо не парсятся (NUL, синтаксис): в корпусе
-    самодиагностики они роняли бы пробы ast-dup, cli-overlap, usage-graph."""
+def _corpus_exclude() -> list[str]:
     import tomllib
-
-    from selfcheck.corpus import list_corpus
 
     root = cc.CONTRACT_DIR.parents[2]
     config = tomllib.loads((root / "selfcheck.toml").read_text(encoding="utf-8"))
-    corpus = list_corpus(root, config["corpus"]["exclude"])
-    assert not [
-        p for p in corpus if p.startswith("contracts/criteria-closure/v1/fixtures/")
-    ]
+    return config["corpus"]["exclude"]
+
+
+def test_fixtures_stay_out_of_the_selfcheck_corpus():
+    """Байты фикстур заведомо не парсятся (NUL, синтаксис): в корпусе
+    самодиагностики они роняли бы пробы ast-dup, cli-overlap, usage-graph.
+
+    Пути выводятся из `FIXTURES`/`CASES`, а не префиксом-литералом (#481
+    C-c): переезд каталога не делает проверку пустой — кейсы непусты и
+    каждый, с `PIN`, отсутствует в корпусе."""
+    from selfcheck.corpus import list_corpus
+
+    root = cc.CONTRACT_DIR.parents[2]
+    corpus = set(list_corpus(root, _corpus_exclude()))
+    members = [*CASES, FIXTURES / "PIN"]
+    assert CASES and all(p.exists() for p in members)
+    leaked = [r for p in members if (r := p.relative_to(root).as_posix()) in corpus]
+    assert leaked == []
+    # и всё поддерево фикстур контракта (ревью #556): `responses/PIN` и
+    # `*.expected.json` — тоже; префикс выводится, а не пишется литералом
+    subtree = FIXTURES.parent.relative_to(root).as_posix() + "/"
+    assert (FIXTURES.parent / "responses" / "PIN").exists()
+    assert not [p for p in corpus if p.startswith(subtree)]
+
+
+def test_upstream_copy_is_excluded_in_the_producer_repo_too():
+    """`make selfcheck ARGS=--all` сканирует и spec-runner, где те же байты
+    лежат по `UPSTREAM_PATH` (#481 C-b): `[corpus] exclude` применяется к
+    каждому репо одним списком и обязан покрывать и этот путь."""
+    from selfcheck.roles import glob_match
+
+    exclude = _corpus_exclude()
+    upstream = [f"{UPSTREAM_PATH}/{p.name}" for p in [*CASES, FIXTURES / "PIN"]]
+    assert CASES and upstream
+    assert [p for p in upstream if not any(glob_match(g, p) for g in exclude)] == []

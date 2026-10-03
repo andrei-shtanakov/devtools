@@ -730,7 +730,13 @@ def _control_patch(ws_id: str, task_number: int) -> str:
     return f"spec/negative-controls/{ws_id}/TASK-{task_number:03d}.patch"
 
 
-_VERSION_RE = re.compile(r"(\d+\.\d+\.\d+)")
+#: Версия целиком, с суффиксом pre/post-release (`4.5.0rc1`, `4.5.0-rc.1`):
+#: срезанный суффикс выдавал rc за релиз и пропускал его через порог
+#: оракула (#481 M-12); это же значение сверяется с эхом ответа. Суффикс —
+#: только буквенно-цифровой после необязательного `.`/`+`/`-`: хвостовая
+#: пунктуация и примыкающий мусор (`4.5.0.`, `4.5.0,`) в версию не входят
+#: (ревью #556).
+_VERSION_RE = re.compile(r"(\d+\.\d+\.\d+(?:[.+-]?[0-9A-Za-z][0-9A-Za-z.+-]*)?)")
 
 
 def spec_runner_version() -> str | None:
@@ -748,8 +754,14 @@ def spec_runner_version() -> str | None:
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    m = _VERSION_RE.search(proc.stdout + proc.stderr)
-    return m.group(1) if proc.returncode == 0 and m else None
+    if proc.returncode != 0:
+        return None
+    # потоки — порознь, stdout первым: склейка без разделителя приклеивала
+    # начало stderr к версии без перевода строки (ревью #556)
+    for stream in (proc.stdout, proc.stderr):
+        if m := _VERSION_RE.search(stream):
+            return m.group(1).rstrip(".+-")
+    return None
 
 
 def _scenarios_code(bundle: Path) -> str | None:

@@ -141,11 +141,17 @@ def _bundle_at_pin(state, pin: str) -> dict[str, str]:
     return {n: _show(state.target_dir, pin, f"{state.bundle_dir}/{n}") for n in _NODES}
 
 
-def _verify_product(state, product_sha: str | None) -> str:
-    """Чистое дерево, HEAD == product_sha, product_sha — предок origin/<base>."""
+def _fetch_base(state) -> None:
+    """`git fetch origin <base>`; сбой — отказ шага."""
     base = state.base_ref or "master"
     if _git(state.target_dir, "fetch", "--quiet", "origin", base).returncode != 0:
         raise CloseError(f"fetch origin {base} не удался")
+
+
+def _verify_product(state, product_sha: str | None) -> str:
+    """Чистое дерево, HEAD == product_sha, product_sha — предок origin/<base>."""
+    base = state.base_ref or "master"
+    _fetch_base(state)
     tip = _git(state.target_dir, "rev-parse", f"origin/{base}").stdout.strip()
     sha = product_sha or tip
     full = _git(state.target_dir, "rev-parse", "--verify", f"{sha}^{{commit}}")
@@ -352,6 +358,47 @@ def _close_stale(state, ops: Ops, run_id: str, key: str) -> None:
             _record(run_id, other_key, closed=True)
 
 
+def _closure_on_base(state, text: str) -> bool:
+    """Файл закрытия на origin/<base> побайтово равен `text` (#481 M-7):
+    коммит от base был бы пустым. Не прочитан — отказ шага, не «нет»."""
+    on_base = _base_closure(state, state.base_ref or "master")
+    if on_base is None:
+        raise CloseError("файл закрытия в default-ветке не прочитан")
+    return on_base == text
+
+
+def _record_on_base(state, run_id: str, key: str, branch: str) -> int:
+    """Тот же текст уже в default — публикация завершена (выход 0)."""
+    base = state.base_ref or "master"
+    print(
+        f"criteria-close: закрытие с этим текстом уже в origin/{base} — "
+        "публикация завершена, факт записан"
+    )
+    _record(run_id, key, branch=branch, merged=True)
+    return 0
+
+
+def _find_closure_pr(ops: Ops, slug: str, branch: str) -> tuple[int | None, str | None]:
+    """PR ветки ключа и его состояние: сначала ОТКРЫТЫЙ, затем любого.
+
+    Любое состояние нужно (#481 M-7): влитый, но не записанный PR иначе
+    вечно упирался бы в «нет коммитов». Но у ветки бывает пара CLOSED+OPEN
+    (человек закрыл PR, повтор открыл новый), и первый элемент листинга
+    `--state all` — порядок форджи, а не наш выбор (ревью #556): закрытый
+    поверх открытого повёл бы к второму `create_pr` и вечному отказу шага.
+    """
+    pr = ops.find_pr(slug, branch)
+    if pr is not None:
+        return pr, "OPEN"
+    pr = ops.find_pr(slug, branch, any_state=True)
+    if pr is None:
+        return None, None
+    st, _ = _pr_state(ops, slug, pr)
+    if st is None:
+        raise CloseError(f"состояние PR #{pr} ветки {branch} не прочитано")
+    return pr, st
+
+
 def _publish(state, ops: Ops, run_id: str, key: str, text: str, closure: str) -> int:
     """Идемпотентная публикация под ключом: ветка несёт ключ, устаревшие PR
     закрываются, повтор после сбоя дожимает тот же текст (I1, I2)."""
@@ -360,7 +407,16 @@ def _publish(state, ops: Ops, run_id: str, key: str, text: str, closure: str) ->
         return 0
     branch = _branch(state, key)
     _close_stale(state, ops, run_id, key)
-    pr = ops.find_pr(state.repo_slug, branch)
+    pr, st = _find_closure_pr(ops, state.repo_slug, branch)
+    if pr is not None:
+        if st == "MERGED":
+            print(f"criteria-close: PR #{pr} закрытия уже влит — факт записан")
+            _record(run_id, key, pr=pr, branch=branch, merged=True)
+            return 0
+        if st == "CLOSED":
+            pr = None  # закрыт человеком — новый PR той же ветки
+    if pr is None and _closure_on_base(state, text):
+        return _record_on_base(state, run_id, key, branch)
     if pr is None:
         # Ветка уже на origin (PR закрыт или create_pr упал после push) —
         # усыновить её при совпадении содержимого, а не пушить новый коммит
@@ -874,6 +930,20 @@ def _remote_closure(state) -> dict | None:
     return meta
 
 
+def _say_result(key: str, *, reused: bool) -> None:
+    """Чей текст уходит дальше (#481 M-8): повтор ранее измеренного
+    результата назван явно — иначе «опубликовано» и «переиспользовано»
+    оператору неразличимы (возврат к прежнему содержимому берёт прежний
+    текст, а не меряет заново)."""
+    if reused:
+        print(
+            "criteria-close: повтор публикации ранее измеренного результата "
+            f"(ключ {key}) — без нового измерения"
+        )
+    else:
+        print(f"criteria-close: новый результат (ключ {key})")
+
+
 def _known(run_id: str, keys: list[str]) -> tuple[str, dict] | None:
     for k in keys:
         e = _entry(run_id, k)
@@ -1107,6 +1177,7 @@ def _measure(
                 "criteria-close: это содержимое уже измерено и опубликовано — §3.1 G6"
             )
             return 6
+        _say_result(k, reused=True)
         return k, e["closure"], e["text"]
     if remote and remote.get("content_key") in cands:
         print(
@@ -1138,7 +1209,10 @@ def _measure(
     code, out = ops.criteria_verify(state.target_dir, str(req_path))
     parsed, why = criteria_check.parse_response(code, out, _schema())
     if parsed is None:
-        print(f"criteria-close: отказ шага — {why}")
+        # код вне протокола (0/2/3): вывод — не ответ, а диагностика
+        # (RealOps отдаёт stderr, таймаут, OSError — #481 M-14)
+        detail = out.strip()[-500:] if code not in (0, 2, 3) else ""
+        print(f"criteria-close: отказ шага — {why}" + (f": {detail}" * bool(detail)))
         return 2
     resp = parsed.response
     if "request" in resp:
@@ -1262,6 +1336,7 @@ def _measure(
         if settled is not None:
             return settled
     if known is not None and not known[1].get("merged"):
+        _say_result(key, reused=True)
         return key, known[1]["closure"], known[1]["text"]  # первый результат
     if known is not None or (remote and remote.get("content_key") == key):
         prev = _measured_sha(known[1] if known else None, remote, key)
@@ -1286,13 +1361,26 @@ def _measure(
     data = _load(run_id)
     data["measured"][key] = {"closure": closure, "text": text}
     _save(run_id, data)
+    _say_result(key, reused=False)
     return key, closure, text
 
 
 def run(run_id: str, ops: Ops, *, product_sha: str | None = None) -> int:
     """0 — принято/опубликовано; 2 — отказ шага или команды; 4 — ждёт мержа
     человеком; 5 — приёмка отклонена/устарела на этом ключе; 6 — ключ
-    измерен."""
+    измерен.
+
+    Сбой внешнего вызова (форджа, git, файл прогона) — тоже отказ шага (2) с
+    причиной, а не трейсбек (#481 M-14); `CloseError` — частный случай."""
+    try:
+        return _run(run_id, ops, product_sha)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        print(f"criteria-close: отказ шага — {exc}")
+        return 2
+
+
+def _run(run_id: str, ops: Ops, product_sha: str | None) -> int:
+    """Тело `run`; исключения превращает в отказ шага обёртка."""
     state = run_state.load(run_id)
     if state.status != "completed":
         print(
@@ -1301,67 +1389,87 @@ def run(run_id: str, ops: Ops, *, product_sha: str | None = None) -> int:
         return 2
     bundle_pin = runner._verified_result_sha(state)
     if bundle_pin is None:
+        return _without_identity(state)
+    pending = _pending_acceptance(run_id)
+    if pending is not None:
+        return _advance(state, ops, run_id, pending, bundle_pin)
+    # коммит finalize мог ещё не доехать в локальные объекты (#481 M-9)
+    _fetch_base(state)
+    nodes = _bundle_at_pin(state, bundle_pin)
+    charter = charter_guard.read_charter(nodes["00-charter.md"])
+    if charter.malformed:
+        raise CloseError("frontmatter charter не разбирается")
+    sha = _verify_product(state, product_sha)
+    installed = task_bridge.spec_runner_version()
+    host = socket.gethostname()
+    na = decide_not_applicable(
+        charter,
+        spec_runner_contract.target_selector_policy(state.target_dir),
+        installed,
+        criteria_contract.read_min_version(),
+        is_vendored=criteria_contract.vendored(),
+    )
+    if na is not None:
+        key = f"{bundle_pin}:{sha}:na:{na}:{installed}"
+        entry = _entry(run_id, key) or {}
+        _say_result(key, reused=bool(entry.get("text")))
+        text = entry.get("text") or render_closure(
+            na,
+            ws_id=state.ws_id,
+            code=charter.code,
+            bundle_pin=bundle_pin,
+            product_sha=sha,
+            response_sha=None,
+            spec_runner_version=installed,
+            host=host,
+        )
+        _record(run_id, key, closure="not-applicable", text=text)
+        return _publish(state, ops, run_id, key, text, "not-applicable")
+    measured = _measure(
+        state, ops, run_id, charter, nodes, bundle_pin, sha, installed, host
+    )
+    if isinstance(measured, int):
+        return measured
+    key, closure, text = measured
+    if closure == "traced":
+        _close_stale(state, ops, run_id, key)
+        graph = criteria_graph.build_graph(
+            nodes["10-requirements.md"],
+            nodes["15-behaviour-spec.md"],
+            nodes["25-acceptance.md"],
+        )
+        human = criteria_graph.human_criteria(graph) > 0
+        _propose(state, ops, run_id, key, text, human=human)
+        return _advance(state, ops, run_id, key, bundle_pin)
+    return _publish(state, ops, run_id, key, text, closure)
+
+
+def _without_identity(state) -> int:
+    """Прогон без идентичности результата (finalize) — пина нет (#481 M-1).
+
+    Charter читается с origin/<base> (git-объекты, не рабочее дерево).
+    Схема 1 — `not-applicable: schema-1` (§3.6) с выходом 0: оракул не
+    применим, а гейт `[x]` charter'ы схемы 1 не потребляет (§7.1 п.4) —
+    публиковать нечего, и пин для этого не нужен. Иначе (схема 2; битый
+    frontmatter — не «схема 1»; charter не прочитан) — отказ: без пина
+    закрытие не измерить."""
+    _fetch_base(state)
+    base = state.base_ref or "master"
+    text = _show_or_none(
+        state.target_dir, f"origin/{base}", f"{state.bundle_dir}/{_NODES[0]}"
+    )
+    if text is not None and charter_guard.read_charter(text).schema == 1:
         print(
-            "criteria-close: у прогона нет идентичности результата (finalize) — пин неизвестен"
+            "criteria-close: not-applicable: schema-1 — charter схемы 1, у прогона "
+            "нет идентичности результата (finalize); публиковать нечего: гейт "
+            "схему 1 не потребляет"
         )
-        return 2
-    try:
-        pending = _pending_acceptance(run_id)
-        if pending is not None:
-            return _advance(state, ops, run_id, pending, bundle_pin)
-        nodes = _bundle_at_pin(state, bundle_pin)
-        charter = charter_guard.read_charter(nodes["00-charter.md"])
-        if charter.malformed:
-            raise CloseError("frontmatter charter не разбирается")
-        sha = _verify_product(state, product_sha)
-        installed = task_bridge.spec_runner_version()
-        host = socket.gethostname()
-        na = decide_not_applicable(
-            charter,
-            spec_runner_contract.target_selector_policy(state.target_dir),
-            installed,
-            criteria_contract.read_min_version(),
-            is_vendored=criteria_contract.vendored(),
-        )
-        if na is not None:
-            key = f"{bundle_pin}:{sha}:na:{na}:{installed}"
-            entry = _entry(run_id, key)
-            text = (
-                entry["text"]
-                if entry and entry.get("text")
-                else render_closure(
-                    na,
-                    ws_id=state.ws_id,
-                    code=charter.code,
-                    bundle_pin=bundle_pin,
-                    product_sha=sha,
-                    response_sha=None,
-                    spec_runner_version=installed,
-                    host=host,
-                )
-            )
-            _record(run_id, key, closure="not-applicable", text=text)
-            return _publish(state, ops, run_id, key, text, "not-applicable")
-        measured = _measure(
-            state, ops, run_id, charter, nodes, bundle_pin, sha, installed, host
-        )
-        if isinstance(measured, int):
-            return measured
-        key, closure, text = measured
-        if closure == "traced":
-            _close_stale(state, ops, run_id, key)
-            graph = criteria_graph.build_graph(
-                nodes["10-requirements.md"],
-                nodes["15-behaviour-spec.md"],
-                nodes["25-acceptance.md"],
-            )
-            human = criteria_graph.human_criteria(graph) > 0
-            _propose(state, ops, run_id, key, text, human=human)
-            return _advance(state, ops, run_id, key, bundle_pin)
-        return _publish(state, ops, run_id, key, text, closure)
-    except CloseError as exc:
-        print(f"criteria-close: отказ шага — {exc}")
-        return 2
+        return 0
+    print(
+        "criteria-close: у прогона нет идентичности результата (finalize) — "
+        "пин неизвестен"
+    )
+    return 2
 
 
 def main(argv: list[str] | None = None) -> int:
