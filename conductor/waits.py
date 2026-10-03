@@ -32,7 +32,8 @@ class Wait:
     """Ожидание consumer → prereq (prereq=None — условие @trigger).
 
     last_line_change_at — дата последней правки строки ожидания (git blame):
-    приближение возраста, не момент начала ожидания (§3.4 rev 11).
+    приближение возраста, не момент начала ожидания (§3.4 rev 11); у
+    ожидания по from: — дата создания запроса.
     """
 
     consumer: str
@@ -98,6 +99,14 @@ def _evidence(graph: Graph, prereq_id: str) -> str:
     return node.url or prereq_id
 
 
+def _request_created(graph: Graph, inputs: Inputs, request: str) -> str | None:
+    """Ожидание по from: строки в TODO не имеет — его возраст от создания
+    запроса (запись GitHub или extras среза 1)."""
+    rec = graph.records.get(request) or {}
+    extras = inputs.issue_extras.get(request) or {}
+    return rec.get("created_at") or extras.get("created_at") or None
+
+
 def _dependency_wait(
     graph: Graph,
     inputs: Inputs,
@@ -110,7 +119,11 @@ def _dependency_wait(
     consumer = graph.resolve(edge.src)
     prereq = edge.dst if edge.origin == FROM_ORIGIN else graph.resolve(edge.dst)
     state = prereq_state(graph, inputs, prereq)
-    since = inputs.wait_since.get(f"{edge.src}|{raw}")
+    since = (
+        _request_created(graph, inputs, edge.dst)
+        if edge.origin == FROM_ORIGIN
+        else inputs.wait_since.get(f"{edge.src}|{raw}")
+    )
     moved = last_movement(graph, inputs, prereq)
     if state == "done":
         return Wait(

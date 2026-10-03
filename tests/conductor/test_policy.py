@@ -215,3 +215,24 @@ def test_position_level_formula() -> None:
     g = build_graph(inp)
     entry = build_queue(g, evaluate_waits(g, inp, NOW, 3), rm, NOW)[0]
     assert position_level(entry, rm, run_level=3) == 1
+
+
+def test_stale_from_wait_on_request_marks_its_glued_item_stale() -> None:
+    # #511: застой ожидания по from: (на запросе) — застой склеенного пункта
+    request = record(
+        "b",
+        5,
+        body="slug: y\nfrom: a#x\n",
+        labels=["inbox"],
+        created_at="2026-09-20T00:00:00Z",
+        updated_at="2026-09-20T00:00:00Z",
+    )
+    got = _assess(
+        {
+            "a": "- [ ] x @owner:TBD @id:x\n",
+            "b": "- [ ] y @owner:github:own @id:y @epic:eco.focus1\n",
+        },
+        [request],
+        level=1,
+    )["todo://b/y"]
+    assert (got.need, got.action) == ("implement", "nudge")

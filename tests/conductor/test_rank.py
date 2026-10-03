@@ -98,3 +98,19 @@ def test_mention_is_not_a_hint_when_the_pr_implements_the_same_node() -> None:
     g = build_graph(inputs(todos, records))
     assert any(e.src == "b!5" and e.type == "mentions" for e in g.edges)
     assert build_hints(g, parse_roadmap(ROADMAP, EPICS)) == []
+
+
+def test_glued_item_inherits_the_age_of_a_from_wait() -> None:
+    # #511: ожидание по from: стоит на запросе; возраст получает его пункт
+    request = record(
+        "b",
+        5,
+        body="slug: y\nfrom: a#x\n",
+        labels=["inbox"],
+        created_at="2026-09-20T00:00:00Z",
+    )
+    queue, _ = _q(
+        {"a": "- [ ] x @owner:TBD @id:x\n", "b": "- [ ] y @owner:TBD @id:y\n"},
+        [request],
+    )
+    assert next(e for e in queue if e.node_id == "todo://b/y").line_age_days == 9

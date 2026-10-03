@@ -108,10 +108,13 @@ def _entry(
     epic = graph.epic_of(node_id)
     own = roadmap.focus_of(epic) if roadmap.valid else None
     klass = roadmap.klass(epic) if roadmap.valid else "background"
+    # ожидание по from: стоит на запросе — возраст получает склеенный пункт
     dated = [
         _days(now, w.last_line_change_at)
         for w in waits
-        if w.prereq == node_id and w.last_line_change_at is not None
+        if w.prereq is not None
+        and graph.resolve(w.prereq) == node_id
+        and w.last_line_change_at is not None
     ]
     age = max(dated) if dated else None
     # объединение потребителей каждой точки старта: цель PR, от которой зависит

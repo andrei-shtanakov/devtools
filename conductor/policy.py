@@ -143,7 +143,12 @@ def _need(
 def _stale(
     entry: QueueEntry, graph: Graph, waits: list[Wait], roadmap: Roadmap
 ) -> bool:
-    if any(w.prereq == entry.node_id and w.reason == "stale" for w in waits):
+    if any(
+        w.prereq is not None
+        and graph.resolve(w.prereq) == entry.node_id
+        and w.reason == "stale"
+        for w in waits
+    ):
         return True
     node = graph.nodes[entry.node_id]
     return (

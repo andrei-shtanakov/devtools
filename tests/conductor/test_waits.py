@@ -176,3 +176,19 @@ def test_declined_request_for_missing_item_is_cancelled() -> None:
     )
     assert (w.prereq, w.verdict, w.reason) == ("todo://b/y", "unknown", "cancelled")
     assert w.evidence == "b#5"
+
+
+def test_from_wait_ages_from_request_creation_and_can_go_stale() -> None:
+    # #511: у ожидания по from: строки blame нет — возраст от создания запроса
+    request = record(
+        "b",
+        5,
+        body="slug: y\nfrom: a#x\n",
+        labels=["inbox"],
+        created_at="2026-09-20T00:00:00Z",
+        updated_at="2026-09-20T00:00:00Z",
+    )
+    todos = {"a": "- [ ] x @owner:TBD @id:x\n", "b": "- [ ] y @owner:TBD @id:y\n"}
+    w = _one(_w(todos, [request]), "todo://a/x")
+    assert (w.prereq, w.last_line_change_at) == ("b#5", "2026-09-20T00:00:00Z")
+    assert (w.verdict, w.reason) == ("pending", "stale")

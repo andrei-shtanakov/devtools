@@ -1,6 +1,12 @@
 import json
 
-from conductor.sources_gh import ci_state, collect_gh, discover
+from conductor.sources_gh import (
+    ISSUE_FIELDS,
+    ci_state,
+    collect_gh,
+    discover,
+    fetch_record,
+)
 
 
 def fake(responses: dict[str, tuple[int, str, str]]):
@@ -251,3 +257,17 @@ def test_malformed_json_is_a_read_failure_not_a_crash() -> None:
     assert result.state == "error" and "a#1" in result.detail
     broken = fake({**BASE, "api graphql": (0, '{"data": {}}', "")})
     assert collect_gh("own", {"a": "a"}, lambda _: set(), broken).state == "error"
+
+
+def test_issue_record_carries_created_at() -> None:
+    # #511: возраст ожидания по from: — от создания запроса
+    raw = json.dumps({**json.loads(ISSUE), "createdAt": "2026-09-20T00:00:00Z"})
+    run = fake(
+        {
+            "issue view 1 -R own/a --json": (0, raw, ""),
+            "api --paginate --slurp repos/own/a/issues/1/comments": (0, COMMENTS, ""),
+        }
+    )
+    assert "createdAt" in ISSUE_FIELDS.split(",")
+    rec = fetch_record("own", "a", 1, False, run)
+    assert rec is not None and rec["created_at"] == "2026-09-20T00:00:00Z"
