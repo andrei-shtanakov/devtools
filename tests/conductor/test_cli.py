@@ -225,6 +225,20 @@ def test_run_refuses_to_write_a_snapshot_violating_the_contract(
     assert "SNAPSHOT-INVALID" in capsys.readouterr().err
 
 
+def test_runs_cut_before_the_snapshot_are_pruned_too(tmp_path: Path) -> None:
+    """#551: прогон, убитый таймаутом юнита до записи снимка, оставляет
+    inputs.json — ротация считает и такой каталог."""
+    from conductor.__main__ import KEEP_RUNS
+
+    out = tmp_path / "runs"
+    for k in range(KEEP_RUNS + 5):
+        run = out / f"2026-01-01T{k:06d}Z"
+        run.mkdir(parents=True)
+        (run / "inputs.json").write_text("{}", encoding="utf-8")
+    assert main(["run", "--replay", str(_replay(tmp_path)), "--out", str(out)]) == 0
+    assert len([d for d in out.iterdir() if d.is_dir()]) == KEEP_RUNS
+
+
 def test_invalid_runs_are_pruned_too(tmp_path: Path, monkeypatch) -> None:
     """Терм. ревью #550: прогон, отвергнутый по контракту, тоже занимает диск
     (inputs.json) — ротация учитывает его и на пути отказа."""

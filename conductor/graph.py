@@ -394,13 +394,19 @@ def _issue_refs(
 
 
 def _mentions(
-    rec: dict[str, Any], strong: set[tuple[str, str]], norm: dict[str, str]
+    rec: dict[str, Any],
+    strong: set[tuple[str, str]],
+    norm: dict[str, str],
+    nodes: dict[str, Node],
 ) -> list[Edge]:
     me = _gh_id(rec)
     text = _text_of(rec)
     qualified, local = _issue_refs(rec, norm)
     targets = {issue_id(repo, n) for repo, n in qualified | local}
     targets |= {item_id(norm[r], i) for r, i in TODO_REF_RE.findall(text) if r in norm}
+    # `a#9` у PR a!9 — он сам: самоссылка и сверка со strong — по уже
+    # переведённому в PR-форму узлу, иначе «a#9 ≠ a!9» проходило (#551)
+    targets = {_pr_aware(t, nodes) for t in targets}
     return [
         Edge(me, t, "mentions", "body")
         for t in sorted(targets)
@@ -501,7 +507,7 @@ def build_graph(inputs: Inputs) -> Graph:
     edges = [Edge(e.src, _pr_aware(e.dst, nodes), e.type, e.origin) for e in edges]
     strong = {(e.src, e.dst) for e in edges}
     for rec in solid:
-        edges += _mentions(rec, strong, norm)
+        edges += _mentions(rec, strong, norm, nodes)
     edges = [Edge(e.src, _pr_aware(e.dst, nodes), e.type, e.origin) for e in edges]
     sources = _sources(inputs)
     return Graph(

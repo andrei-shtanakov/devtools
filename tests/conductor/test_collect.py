@@ -229,6 +229,29 @@ def test_unmatched_repo_url_is_a_source_error_not_silence(tmp_path: Path) -> Non
     assert "z: repo_url" in inp.aux_detail
 
 
+def test_fleet_repo_of_another_owner_is_a_source_error(tmp_path: Path) -> None:
+    """#551: поиск GitHub идёт по одному владельцу (первой записи); репо
+    флота у другого владельца в него не попадает — это называется, а не
+    молчит."""
+    manifest = (
+        '[cores.a]\nrepo_url = "git@github.com:own/a.git"\ngit_dir = "a"\n'
+        '[cores.z]\nrepo_url = "git@github.com:other/z.git"\ngit_dir = "z"\n'
+    )
+    _repo(tmp_path / "a", {"TODO.md": "- [ ] x @owner:TBD @id:x\n"})
+    inp = collect(
+        tmp_path,
+        manifest,
+        ("file", None),
+        None,
+        False,
+        lambda _: (1, "", "offline"),
+        "h",
+        "2026-09-29T12:00:00Z",
+    )
+    assert inp.aux_state == "error"
+    assert "z: владелец other" in inp.aux_detail
+
+
 def test_history_under_old_repo_name_is_keyed_canonically(tmp_path: Path) -> None:
     # #511: ссылка прежним (GitHub-)именем — история удаления под каноническим
     # ключом, иначе prereq_state видит missing вместо «отменено»

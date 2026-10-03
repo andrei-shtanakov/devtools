@@ -108,6 +108,13 @@ def test_pr_implements_mentions_and_github_name_normalization() -> None:
     assert ("a#6", "ecosystem-kb#3", "mentions") in edges
 
 
+def test_pr_does_not_mention_itself_by_its_own_number() -> None:
+    """#551: заголовок «a#9» у PR a!9 — не упоминание: самоссылка
+    отбрасывалась до перевода `a#9` в `a!9`."""
+    g = build_graph(inputs({"a": ""}, [record("a", 9, is_pr=True, title="a#9")]))
+    assert not [e for e in g.edges if e.src == e.dst]
+
+
 def test_field_value_strips_quotes() -> None:
     assert field_value("from: `deployer`\r\n", "from") == "deployer"
     assert field_value("no fields", "slug") is None

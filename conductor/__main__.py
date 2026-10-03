@@ -126,13 +126,17 @@ def _runs(out: Path) -> list[Path]:
     return sorted(d for d in out.iterdir() if (d / "snapshot.json").is_file())
 
 
+#: Файлы, по которым каталог в `--out` опознаётся как прогон: `inputs.json`
+#: пишется первым, поэтому и прогон, оборванный до снимка (таймаут юнита),
+#: попадает под ротацию (#551).
+_RUN_MARKERS = ("inputs.json", "snapshot.json", "snapshot.invalid.json")
+
+
 def _rotate(out: Path) -> None:
-    """KEEP_RUNS последних прогонов, считая и отвергнутые по контракту:
-    каталог с `snapshot.invalid.json` тоже занимает диск (терм. ревью #550)."""
+    """KEEP_RUNS последних прогонов, считая отвергнутые по контракту
+    (терм. ревью #550) и оборванные до записи снимка (#551)."""
     runs = sorted(
-        d
-        for d in out.iterdir()
-        if (d / "snapshot.json").is_file() or (d / "snapshot.invalid.json").is_file()
+        d for d in out.iterdir() if any((d / m).is_file() for m in _RUN_MARKERS)
     )
     for old in runs[:-KEEP_RUNS]:
         shutil.rmtree(old, ignore_errors=True)
