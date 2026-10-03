@@ -36,6 +36,9 @@ OUT_OF_LOOP_REPOS = frozenset({"sdd-framework"})
 CONDITION_REASONS = frozenset(
     {"prose_trigger", "fact_unread", "unread", "unresolvable"}
 )
+# Чужой владелец и репо вне контура — пометки позиции, не вопросы (§5.7):
+# ответ владельца не меняет следующего шага и на уровне запуска.
+NOT_QUESTION_REASONS = frozenset({"foreign-owner", "out-of-loop"})
 Delegable = Literal["yes", "no", "unverified"]
 
 
@@ -212,7 +215,11 @@ def assess(
     reason: str | None = None
     if need == "implement":
         verdict, reason = delegable(entry.node_id, graph, inputs)
-        if verdict == "no" and _may_launch(entry, roadmap, level, hinted):
+        if (
+            verdict == "no"
+            and reason not in NOT_QUESTION_REASONS
+            and _may_launch(entry, roadmap, level, hinted)
+        ):
             need, actor = "decide", "owner"
     stale = _stale(entry, graph, waits, roadmap)
     action = _action(need, level, entry, roadmap, verdict, stale, hinted)

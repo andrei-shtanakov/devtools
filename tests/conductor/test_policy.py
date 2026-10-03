@@ -66,13 +66,27 @@ def test_owner_and_decision_signals() -> None:
     assert a["todo://a/y"].block_reason == "decision-signal"
     assert a["todo://a/z"].block_reason == "foreign-owner"
     assert a["todo://a/n"].block_reason == "epic-unknown"
-    # вопрос — только где ответ меняет шаг: кандидат фокуса на уровне запуска
-    assert {n for n in a if a[n].need == "decide"} == {
-        "todo://a/x",
-        "todo://a/y",
-        "todo://a/z",
-    }
+    # вопрос — только где ответ меняет шаг: кандидат фокуса на уровне запуска;
+    # чужой владелец — не вопрос и там (§5.7)
+    assert {n for n in a if a[n].need == "decide"} == {"todo://a/x", "todo://a/y"}
     assert a["todo://a/n"].need == "implement" and not a["todo://a/n"].ask_owner
+    assert a["todo://a/z"].need == "implement" and not a["todo://a/z"].ask_owner
+
+
+def test_out_of_loop_at_launch_level_is_a_flag_not_a_question() -> None:
+    # #511: вне контура ответ владельца следующего шага не меняет (§5.7)
+    inp = inputs({"a": "- [ ] x @owner:github:own @id:x @epic:eco.focus1\n"})
+    g = build_graph(inp)
+    w = evaluate_waits(g, inp, NOW, 3)
+    rm = parse_roadmap(R3, EPICS)
+    entry = next(e for e in build_queue(g, w, rm, NOW) if e.node_id == "todo://a/x")
+    inp.todos = [
+        RepoTodo("a", None, None, "error", "нет клона") if t.repo == "a" else t
+        for t in inp.todos
+    ]
+    got = assess(entry, g, w, rm, 3, inp)
+    assert (got.delegable, got.block_reason) == ("no", "out-of-loop")
+    assert got.need == "implement" and not got.ask_owner
 
 
 def test_signals_below_launch_level_are_flags_not_questions() -> None:
