@@ -12732,3 +12732,40 @@ def test_scenarios_line_rendered_only_with_code() -> None:
 def test_spec_runner_version_absent_binary(monkeypatch) -> None:
     monkeypatch.setenv("PATH", "")
     assert task_bridge.spec_runner_version() is None
+
+
+@pytest.mark.parametrize(
+    ("printed", "expected"),
+    [
+        ("spec-runner 4.5.0\n", "4.5.0"),
+        ("spec-runner 4.5.0rc1\n", "4.5.0rc1"),
+        ("spec-runner 4.5.0-rc.1\n", "4.5.0-rc.1"),
+        ("spec-runner 4.5.0.dev3\n", "4.5.0.dev3"),
+    ],
+)
+def test_spec_runner_version_keeps_prerelease_suffix(
+    tmp_path, monkeypatch, printed, expected
+) -> None:
+    """Суффикс pre-release не срезается (#481 M-12): `4.5.0rc1` прежде
+    читался как `4.5.0` и проходил порог оракула `MIN=4.5.0`."""
+    fake = tmp_path / "spec-runner"
+    fake.write_text(f"#!/bin/sh\nprintf '{printed}'\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert task_bridge.spec_runner_version() == expected
+
+
+def test_prerelease_spec_runner_keeps_oracle_unavailable(tmp_path, monkeypatch) -> None:
+    """Сквозная проверка порога: машина с `4.5.0rc1` не получает оракул
+    при вендоренном `MIN_SPEC_RUNNER_VERSION=4.5.0`."""
+    from governance import criteria_contract
+
+    fake = tmp_path / "spec-runner"
+    fake.write_text("#!/bin/sh\necho 'spec-runner 4.5.0rc1'\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert not criteria_contract.oracle_available(
+        task_bridge.spec_runner_version(),
+        criteria_contract.MinVersion("4.5.0"),
+        is_vendored=True,
+    )

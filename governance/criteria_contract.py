@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -50,8 +51,36 @@ def vendored(contract_dir: Path = CONTRACT_DIR) -> bool:
     return (contract_dir / "PIN").exists() and not integrity_findings(contract_dir)
 
 
-def _parts(version: str) -> tuple[int, ...]:
-    return tuple(int(p) for p in version.split(".") if p.isdigit())
+_RELEASE_RE = re.compile(r"(\d+(?:\.\d+)*)(.*)", re.DOTALL)
+_PRE_RE = re.compile(
+    r"[-._]?(dev|a|alpha|b|beta|c|rc|pre|preview)[-._]?(\d*)", re.IGNORECASE
+)
+_POST_OR_LOCAL_RE = re.compile(
+    r"(?:[-._]?(?:post|rev|r)[-._]?\d*)?(?:\+.*)?", re.IGNORECASE
+)
+_PRE_RANK = {"dev": 0, "a": 1, "alpha": 1, "b": 2, "beta": 2}
+_RELEASE_RANK = 9
+
+
+def _version_key(version: str) -> tuple[tuple[int, ...], int, int]:
+    """Ключ сравнения версий: номер релиза, затем фаза суффикса (#481 M-12).
+
+    Pre-release (PEP 440 `rc1`/`a2`/`.dev3`, semver `-rc.1`) ниже своего
+    релиза; post-release и local-метка — на уровне релиза. Нераспознанный
+    суффикс ниже любого распознанного: доказать «не ниже релиза» нечем.
+    """
+    m = _RELEASE_RE.match(version.strip())
+    if m is None:
+        return ((), -1, 0)
+    release = tuple(int(p) for p in m.group(1).split("."))
+    suffix = m.group(2)
+    if _POST_OR_LOCAL_RE.fullmatch(suffix):
+        return (release, _RELEASE_RANK, 0)
+    pre = _PRE_RE.fullmatch(suffix)
+    if pre is None:
+        return (release, -1, 0)
+    rank = _PRE_RANK.get(pre.group(1).lower(), 3)  # c/rc/pre/preview
+    return (release, rank, int(pre.group(2) or 0))
 
 
 def drift_findings(
@@ -98,4 +127,4 @@ def oracle_available(
     машины не ниже."""
     if not is_vendored or installed is None or minimum.version is None:
         return False
-    return _parts(installed) >= _parts(minimum.version)
+    return _version_key(installed) >= _version_key(minimum.version)
