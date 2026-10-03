@@ -271,8 +271,19 @@ def test_unparsable_closure_is_named_finding(tmp_path, text, capsys):
         ("---\nschema: 2\ncode: [unclosed\n---\n", "frontmatter charter"),
         ("---\nschema: 3\ncode: ENC\nplan_item: todo://repo/oracle\n---\n", "3"),
         ("---\nschema: two\n---\n", "schema"),
+        # терм. ревью #554: нестроковый plan_item — находка, не TypeError
+        ("---\nschema: 2\ncode: ENC\nplan_item: 123\n---\n", "plan_item 123"),
+        ("---\nschema: 2\ncode: ENC\n---\n", "требует plan_item"),
+        ("---\nschema: 2\ncode: ENC\nplan_item: repo#5\n---\n", "не todo://"),
     ],
-    ids=["malformed", "schema-3", "schema-non-int"],
+    ids=[
+        "malformed",
+        "schema-3",
+        "schema-non-int",
+        "plan-item-int",
+        "plan-item-absent",
+        "plan-item-not-todo",
+    ],
 )
 def test_unreadable_charter_is_red_in_gate_itself(tmp_path, charter, needle):
     """#481 M-3: charter, чей пункт плана не установить, — красный в самом

@@ -85,10 +85,18 @@ def gate_findings(
         if ch.schema not in (1, 2):
             errors.append(f"{ws}: charter schema {ch.schema} вне словаря 1|2")
             continue
-        if ch.schema != 2 or not ch.plan_item:
+        if ch.schema != 2:
             continue
-        m = charter_guard.PLAN_ITEM_RE.match(ch.plan_item)
+        # тот же класс, что M-3 (терм. ревью #554): у charter'а схемы 2 без
+        # пункта плана либо с пунктом не формы todo:// гейтовать нечего, и
+        # это красный здесь же; сырое YAML-значение — к строке, как в
+        # charter_guard, иначе int/список роняли match трейсбеком.
+        if not ch.plan_item:
+            errors.append(f"{ws}: схема 2 требует plan_item")
+            continue
+        m = charter_guard.PLAN_ITEM_RE.match(str(ch.plan_item))
         if m is None:
+            errors.append(f"{ws}: plan_item {ch.plan_item!r} не todo://<repo>/<id>")
             continue
         if name is None:
             errors.append(f"{ws}: {charter_guard.UNKNOWN_REPO}: {ch.plan_item}")
