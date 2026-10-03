@@ -204,3 +204,24 @@ def test_history_reads_are_pinned_to_the_todo_sha(
     )
     shas = {t.sha for t in inp.todos if t.state == "read"}
     assert len(seen) >= 5 and set(seen) <= shas, seen
+
+
+def test_unmatched_repo_url_is_a_source_error_not_silence(tmp_path: Path) -> None:
+    """#511: запись манифеста с не-GitHub repo_url не выпадает из флота молча."""
+    manifest = (
+        '[cores.a]\nrepo_url = "git@github.com:own/a.git"\ngit_dir = "a"\n'
+        '[cores.z]\nrepo_url = "https://git.example.com/own/z.git"\ngit_dir = "z"\n'
+    )
+    _repo(tmp_path / "a", {"TODO.md": "- [ ] x @owner:TBD @id:x\n"})
+    inp = collect(
+        tmp_path,
+        manifest,
+        ("file", None),
+        None,
+        False,
+        lambda _: (1, "", "offline"),
+        "h",
+        "2026-09-29T12:00:00Z",
+    )
+    assert inp.aux_state == "error"
+    assert "z: repo_url" in inp.aux_detail

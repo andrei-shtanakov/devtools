@@ -24,6 +24,7 @@ from conductor.manifest import (
     fleet_repos,
     github_owner,
     manifest_index,
+    unmatched_urls,
 )
 from conductor.model import SourceState
 from conductor.sources_gh import (
@@ -381,6 +382,7 @@ def collect(
     )
     hist = _History(root, repos, {t.repo: t.sha for t in todos if t.state == "read"})
     hist.errors += prior_errors or []
+    hist.errors += unmatched_urls(manifest_text)
     hist.collect(snapshot, {t.repo for t in todos if t.state == "read"})
     trigger_facts = _trigger_facts(root, repos, todos, hist.errors)
     extra = (
