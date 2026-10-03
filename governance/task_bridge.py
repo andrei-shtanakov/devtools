@@ -1725,14 +1725,24 @@ class _CarryResult:
     total_tasks: int
     carried_checked_items: int
     total_checked_items: int
-    #: (заголовок прежней задачи, её статус) — начатые задачи, чей блок не
-    #: сопоставился и статус НЕ перенесён (devtools#541).
-    lost_status: tuple[tuple[str, str], ...] = ()
+    #: (заголовок прежней задачи, её статус, вид) — начатые задачи, чей блок
+    #: не сопоставился и статус НЕ перенесён (devtools#541); вид `changed` —
+    #: задача в переиздании есть, `removed` — её DT в переиздании нет.
+    lost_status: tuple[tuple[str, str, str], ...] = ()
+
+
+def _source_dt(body: list[str]) -> str | None:
+    """DT-источник блока задачи (`Source: …#DT-NN`); у легаси-спеки — None."""
+    for line in body:
+        m = _TASK_SOURCE_RE.match(line)
+        if m is not None:
+            return m.group(1)
+    return None
 
 
 def _lost_status(
-    delivered_lines: list[str], carried_blocks: set[str]
-) -> tuple[tuple[str, str], ...]:
+    delivered_lines: list[str], fresh_lines: list[str], carried_blocks: set[str]
+) -> tuple[tuple[str, str, str], ...]:
     """Задачи доставленной спеки со статусом сверх `TODO`, чей блок в
     переиздании не опознан (devtools#541).
 
@@ -1740,7 +1750,13 @@ def _lost_status(
     а не вторая идентичность рядом с байтами (§I11). Перенести `DONE` на
     изменённый блок значило бы утверждать выполненным то, чего прежняя
     работа не делала; промолчать — оплатить её повторно. Решает человек,
-    одобряющий ревизию."""
+    одобряющий ревизию. Удалённая задача называется отдельно (терм. ревью
+    #552): «восстановите статус» про неё ложно — восстанавливать негде. Без
+    строки `Source` (легаси-спека) удаление не отличить, и задача остаётся
+    `changed` — то есть требование проверить, а не молчание."""
+    fresh_dts = {
+        _source_dt(fresh_lines[start:stop]) for start, stop in _task_bounds(fresh_lines)
+    }
     lost = []
     for start, stop in _task_bounds(delivered_lines):
         body = delivered_lines[start:stop]
@@ -1751,7 +1767,9 @@ def _lost_status(
         if status.upper().endswith(_CANON_STATUS):
             continue
         if _state_free(body) not in carried_blocks:
-            lost.append((body[0].removeprefix("### "), status))
+            dt = _source_dt(body)
+            kind = "removed" if dt is not None and dt not in fresh_dts else "changed"
+            lost.append((body[0].removeprefix("### "), status, kind))
     return tuple(lost)
 
 
@@ -1792,7 +1810,7 @@ def _carry_execution_state_with_report(text: str, delivered: str) -> _CarryResul
         len(bounds),
         len(carryable),
         total_checked,
-        _lost_status(delivered_lines, carried_blocks),
+        _lost_status(delivered_lines, lines, carried_blocks),
     )
 
 
@@ -3979,15 +3997,23 @@ def _tasks_blob_cb(state: RunState, n: int) -> Callable[[dict], None]:
 
 def _lost_status_note(lost: list) -> str:
     """Громкий абзац о начатых задачах, чей статус не перенесён (#541)."""
-    lines = [
-        (
-            "⚠️ **Статус не перенесён** (devtools#541): блоки этих задач в "
-            "переиздании изменились, и по §I11 они приходят `TODO`. Если работа "
-            "уже сделана и покрывает новое тело — восстановите статус до "
-            "одобрения ревизии, иначе `run` заплатит за неё повторно:"
-        ),
-    ]
-    lines += [f"- {head}: была {status}" for head, status in lost]
+    changed = [(h, st) for h, st, kind in lost if kind != "removed"]
+    removed = [(h, st) for h, st, kind in lost if kind == "removed"]
+    lines = ["⚠️ **Статус не перенесён** (devtools#541)."]
+    if changed:
+        lines.append(
+            "Блоки этих задач в переиздании изменились, и по §I11 они приходят "
+            "`TODO`. Если работа уже сделана и покрывает новое тело — "
+            "восстановите статус до одобрения ревизии, иначе `run` заплатит за "
+            "неё повторно:"
+        )
+        lines += [f"- {head}: была {status}" for head, status in changed]
+    if removed:
+        lines.append(
+            "Этих начатых задач в переиздании больше нет — их работа "
+            "не учитывается ничем; убедитесь, что удаление намеренное:"
+        )
+        lines += [f"- {head}: была {status}" for head, status in removed]
     return "\n".join(lines)
 
 

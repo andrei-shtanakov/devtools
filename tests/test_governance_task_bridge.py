@@ -9734,10 +9734,25 @@ def test_supersede_names_a_done_task_whose_status_was_not_carried(
     assert "| ✅ DONE" not in text, "перенос по-прежнему байтовый"
     head = _task_body(delivered, "TASK-001").split("\n", 1)[0].removeprefix("### ")
     saved = rs.load("r-recon").ops["tasks-deliver-v2"]
-    assert saved["carry"]["lost_status"] == [[head, "✅ DONE"]]
+    assert saved["carry"]["lost_status"] == [[head, "✅ DONE", "changed"]]
     out = capsys.readouterr().out
     assert f"{head}: была ✅ DONE" in out
     assert f"{head}: была ✅ DONE" in ops.pr_body
+
+
+def test_carry_report_names_a_removed_task_separately() -> None:
+    """Терм. ревью #552: задача, чей DT исчез из декомпозиции, — не
+    «изменившийся блок»: восстанавливать её статус негде."""
+    from governance import task_bridge as tb
+
+    two = [*_CARRY_DT]
+    delivered = _executed(_render(two, _CARRY_SCENARIOS), "TASK-002")
+    fresh = _render([_CARRY_DT[0]], _CARRY_SCENARIOS[:2], version=2)
+    report = tb._carry_execution_state_with_report(fresh, delivered)
+    head = _task_body(delivered, "TASK-002").split("\n", 1)[0].removeprefix("### ")
+    assert report.lost_status == ((head, "✅ DONE", "removed"),)
+    note = tb._lost_status_note([list(x) for x in report.lost_status])
+    assert "больше нет" in note and "восстановите" not in note
 
 
 def test_carry_report_lists_no_loss_when_status_carried() -> None:
