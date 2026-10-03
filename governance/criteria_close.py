@@ -378,6 +378,27 @@ def _record_on_base(state, run_id: str, key: str, branch: str) -> int:
     return 0
 
 
+def _find_closure_pr(ops: Ops, slug: str, branch: str) -> tuple[int | None, str | None]:
+    """PR ветки ключа и его состояние: сначала ОТКРЫТЫЙ, затем любого.
+
+    Любое состояние нужно (#481 M-7): влитый, но не записанный PR иначе
+    вечно упирался бы в «нет коммитов». Но у ветки бывает пара CLOSED+OPEN
+    (человек закрыл PR, повтор открыл новый), и первый элемент листинга
+    `--state all` — порядок форджи, а не наш выбор (ревью #556): закрытый
+    поверх открытого повёл бы к второму `create_pr` и вечному отказу шага.
+    """
+    pr = ops.find_pr(slug, branch)
+    if pr is not None:
+        return pr, "OPEN"
+    pr = ops.find_pr(slug, branch, any_state=True)
+    if pr is None:
+        return None, None
+    st, _ = _pr_state(ops, slug, pr)
+    if st is None:
+        raise CloseError(f"состояние PR #{pr} ветки {branch} не прочитано")
+    return pr, st
+
+
 def _publish(state, ops: Ops, run_id: str, key: str, text: str, closure: str) -> int:
     """Идемпотентная публикация под ключом: ветка несёт ключ, устаревшие PR
     закрываются, повтор после сбоя дожимает тот же текст (I1, I2)."""
@@ -386,13 +407,8 @@ def _publish(state, ops: Ops, run_id: str, key: str, text: str, closure: str) ->
         return 0
     branch = _branch(state, key)
     _close_stale(state, ops, run_id, key)
-    # PR любого состояния (#481 M-7): влитый, но не записанный (сбой между
-    # мержем и `_record`) иначе вечно упирался бы в «нет коммитов».
-    pr = ops.find_pr(state.repo_slug, branch, any_state=True)
+    pr, st = _find_closure_pr(ops, state.repo_slug, branch)
     if pr is not None:
-        st, _ = _pr_state(ops, state.repo_slug, pr)
-        if st is None:
-            raise CloseError(f"состояние PR #{pr} ветки {branch} не прочитано")
         if st == "MERGED":
             print(f"criteria-close: PR #{pr} закрытия уже влит — факт записан")
             _record(run_id, key, pr=pr, branch=branch, merged=True)

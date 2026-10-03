@@ -12741,6 +12741,9 @@ def test_spec_runner_version_absent_binary(monkeypatch) -> None:
         ("spec-runner 4.5.0rc1\n", "4.5.0rc1"),
         ("spec-runner 4.5.0-rc.1\n", "4.5.0-rc.1"),
         ("spec-runner 4.5.0.dev3\n", "4.5.0.dev3"),
+        # ревью #556: хвостовая пунктуация в версию не входит
+        ("spec-runner 4.5.0.\n", "4.5.0"),
+        ("spec-runner version: 4.5.0, build x\n", "4.5.0"),
     ],
 )
 def test_spec_runner_version_keeps_prerelease_suffix(
@@ -12753,6 +12756,18 @@ def test_spec_runner_version_keeps_prerelease_suffix(
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", str(tmp_path))
     assert task_bridge.spec_runner_version() == expected
+
+
+def test_spec_runner_version_does_not_glue_stderr_to_stdout(
+    tmp_path, monkeypatch
+) -> None:
+    """Ревью #556: версия без перевода строки в stdout и текст в stderr —
+    потоки читаются порознь, хвост stderr к версии не приклеивается."""
+    fake = tmp_path / "spec-runner"
+    fake.write_text("#!/bin/sh\nprintf 'spec-runner 4.5.0'\nprintf 'warning: x' >&2\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert task_bridge.spec_runner_version() == "4.5.0"
 
 
 def test_prerelease_spec_runner_keeps_oracle_unavailable(tmp_path, monkeypatch) -> None:

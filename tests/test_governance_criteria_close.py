@@ -1984,6 +1984,18 @@ def test_closure_already_on_base_is_recorded_without_branch_or_pr(
     assert "уже в origin/master" in capsys.readouterr().out
 
 
+def test_open_closure_pr_wins_over_closed_one_on_the_same_branch():
+    """Ревью #556: у ветки ключа пара CLOSED+OPEN (человек закрыл PR,
+    повтор открыл новый). Выбор не зависит от порядка листинга `--state
+    all`: берётся открытый — иначе второй `create_pr` и вечный отказ шага."""
+
+    class _Forge:
+        def find_pr(self, repo_slug, branch, *, any_state=False):
+            return 99 if any_state else 100  # листинг all — закрытый первым
+
+    assert cc._find_closure_pr(_Forge(), "o/r", "b") == (100, "OPEN")
+
+
 def test_reuse_of_measured_result_is_named(tmp_path, monkeypatch, capsys):
     """M-8: повтор публикации ранее измеренного результата назван явно —
     оператор отличает его от нового измерения."""

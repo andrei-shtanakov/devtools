@@ -95,6 +95,11 @@ def test_fixtures_stay_out_of_the_selfcheck_corpus():
     assert CASES and all(p.exists() for p in members)
     leaked = [r for p in members if (r := p.relative_to(root).as_posix()) in corpus]
     assert leaked == []
+    # и всё поддерево фикстур контракта (ревью #556): `responses/PIN` и
+    # `*.expected.json` — тоже; префикс выводится, а не пишется литералом
+    subtree = FIXTURES.parent.relative_to(root).as_posix() + "/"
+    assert (FIXTURES.parent / "responses" / "PIN").exists()
+    assert not [p for p in corpus if p.startswith(subtree)]
 
 
 def test_upstream_copy_is_excluded_in_the_producer_repo_too():
