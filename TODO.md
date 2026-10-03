@@ -2714,3 +2714,17 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 - [ ] conductor: единый граф ожиданий флота, активная проверка ожиданий, порядок работ по `roadmap.toml`, действия по уровням автономии 0–3, узел межрепных запросов @owner:github:andrei-shtanakov @id:conductor @epic:eco.tooling
 - [x] conductor срез 0 — советчик: граф, ожидания, порядок, `status/why/plan/run`, снимок, таймер уровня 0; приёмка — replay на сохранённых входах, верх очереди совпадает с приоритетами владельца — принят владельцем 2026-09-30: код #509 (+ #513), роадмап зонтик#47, приёмка на Mac и VPS vmi3423913 (граф complete), верх очереди совпал с приоритетами (вёл к spec-runner#620, влит); долг minor — #511, зонтик#48 @owner:github:andrei-shtanakov @id:conductor-slice-0 @epic:eco.tooling
 - [ ] conductor срез 1 — приёмка записи (спека `docs/superpowers/specs/2026-09-30-conductor-slice-1-design.md` §9; код влит #536/#538/#542): владелец создаёт GitHub App и ключ (`docs/conductor/acceptance/github-app.md`), репо песочницы `conductor-sandbox`/`-outside` и устанавливает App только на песочницу; песочница наполняется по `docs/conductor/acceptance/sandbox.md`, выдержка суток, прогон A1–A13 на VPS, квитанция по `TEMPLATE-slice1.md`; затем — установка на флот, неделя тени и ступени `enabled_actions` (`deploy/conductor/README.md`, «Срез 1 — запись») @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:conductor-slice-1
+
+## Входящие 2026-10-01/02 (inbox, приняты 2026-10-03)
+
+- [x] `--deliver-approve`: профиль стадии под ignore-правилом цели и ветка штампа на старой базе (inbox devtools#543, slug: deliver-approve-profile-add-ignored; from: spec-runner#647) @owner:github:andrei-shtanakov @id:deliver-approve-profile-add-ignored @epic:eco.dark-factory — PR этой ветки
+      Класс #487 закрыл только НОВЫЙ файл: `check-ignore` без `--no-index`
+      отслеживаемый профиль игнорируемым не считает, а `git add` под
+      игнорируемым каталогом отказывает rc 1 — теперь `--no-index`. Без
+      открытого PR ветка штампа ставится от базы прогона заново
+      (`switch_to`, `git switch -C`), штамп едет незакоммиченным с деревом.
+- [x] approve-node: текст candidate-PR следует за составом живой заявки (inbox devtools#539, slug: approve-node-pr-text-follows-claim; from: spec-runner#640) @owner:github:andrei-shtanakov @id:approve-node-pr-text-follows-claim @epic:eco.dark-factory — PR этой ветки
+      Расширение заявки остаётся (W4 — design+acceptance одной заявкой).
+      Заявка записывает `candidate_nodes` — узлы, объявленные текстом PR;
+      разошлись с `nodes` → `gh pr edit` заголовка и тела ДО push, чтобы PR
+      не объявлял меньше, чем подпишет финализация.
