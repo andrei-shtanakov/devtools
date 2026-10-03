@@ -66,7 +66,12 @@ def gate_findings(
         if not closure_path.exists():
             errors.append(f"@id:{m.group(2)} [x], но у {ws} нет файла закрытия")
             continue
-        meta, _ = split_frontmatter(closure_path.read_text())
+        try:
+            meta, _ = split_frontmatter(closure_path.read_text())
+        except ValueError as exc:
+            # #481 M-2: названная находка вместо трейсбека из `main`
+            errors.append(f"{ws}: frontmatter закрытия не разбирается: {exc}")
+            continue
         state = meta.get("closure")
         if state == "blocked":
             errors.append(f"@id:{m.group(2)} [x], но закрытие {ws} — blocked")

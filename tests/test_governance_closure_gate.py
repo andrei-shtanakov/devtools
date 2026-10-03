@@ -241,3 +241,19 @@ def test_accepted_delegates_to_provenance(tmp_path, monkeypatch):
     )
     assert any("нет акта" in e for e in errors)
     assert seen == {"spec_dir": "workstreams/ws-a/spec", "slug": "o/r", "forge": "F"}
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["просто текст без frontmatter\n", "---\nclosure: [unclosed\n---\n"],
+    ids=["no-frontmatter", "bad-yaml"],
+)
+def test_unparsable_closure_is_named_finding(tmp_path, text, capsys):
+    """#481 M-2: битый frontmatter закрытия — названная находка и exit 1,
+    а не трейсбек из `main`."""
+    repo = make(tmp_path, done=True, closure=None)
+    (repo / "workstreams/ws-a/spec/90-acceptance-closure.md").write_text(text)
+    errors, _ = g.gate_findings(repo)
+    assert any("ws-a: frontmatter закрытия не разбирается" in e for e in errors)
+    assert g.main(["--repo", str(repo), "--repo-slug", "o/repo"]) == 1
+    assert "frontmatter закрытия не разбирается" in capsys.readouterr().out
