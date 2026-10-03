@@ -2736,3 +2736,14 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       Задачи прежней ревизии со статусом сверх `TODO`, чей блок не опознан,
       называются поимённо: `carry.lost_status` в леджере, строки в stdout и
       ⚠️-абзац в начале тела PR ревизии — до одобрения её человеком.
+- [ ] Режим ревью спецификаций (`local.sh --spec`) у потребителей кита (inbox devtools#501, slug: review-kit-spec-mode-rollout; from: steward) @owner:github:andrei-shtanakov @id:review-kit-spec-mode-rollout @epic:eco.tooling @blocked_by:steward#200
+      Решение владельца 2026-10-03 (вариант A): кит `local.sh` + PIN @ steward
+      bac7975 — devtools#558 и spec-runner#657 под `attest-vendor.sh`, мерж
+      агентом; после мержа сверить, что `review-kit-drift` погас. Промпт
+      `review-prompt-spec.md` получают только spec-runner и devtools —
+      отдельными PR после исправления steward#200 (ревью devtools#557,
+      blocker: §5 делает чистое удаление критерия приёмки нерепортуемым),
+      с повторным ревью на этот сценарий. Проброс `--spec` в `review-pr.sh`
+      (п.2 заявки) — не раньше steward#199 (`--spec` молча перезаписывает
+      доверенный `REVIEW_PROMPT`). Остальные 19 потребителей в волну не
+      входят: сначала процедура на двух, массовую раскладку — отдельно.
