@@ -42,7 +42,8 @@ dev = [
 governance = ["steward", "textual>=1"]
 # conductor срез 1: JWT App (RS256). Входит в default-groups — CI (`uv sync`)
 # и служба (`uv run --frozen`) ставят её без правок .github/ и unit-файла.
-conductor = ["pyjwt[crypto]>=2.8"]
+# jsonschema — рантайм conductor: снимок сверяется со схемой до записи (#511).
+conductor = ["jsonschema>=4", "pyjwt[crypto]>=2.8"]
 selfcheck = [
     "actionlint-py==1.7.12.25",
     "deptry==0.25.1",

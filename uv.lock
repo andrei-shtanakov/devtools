@@ -226,6 +226,7 @@ dependencies = [
 
 [package.dev-dependencies]
 conductor = [
+    { name = "jsonschema" },
     { name = "pyjwt", extra = ["crypto"] },
 ]
 dev = [
@@ -254,7 +255,10 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-conductor = [{ name = "pyjwt", extras = ["crypto"], specifier = ">=2.8" }]
+conductor = [
+    { name = "jsonschema", specifier = ">=4" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.8" },
+]
 dev = [
     { name = "jsonschema", specifier = ">=4" },
     { name = "pytest", specifier = ">=8" },

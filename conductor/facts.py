@@ -20,7 +20,7 @@ from typing import Any
 import plan_fields as pf
 
 from conductor.manifest import manifest_index
-from conductor.sources_git import GitError, git
+from conductor.sources_git import GitError, git, git_lines
 
 TODO = "TODO.md"
 
@@ -106,14 +106,17 @@ def _file_at(repo_dir: Path, rev: str) -> str | None:
     if git(repo_dir, "rev-parse", "-q", "--verify", f"{rev}^{{commit}}")[0] != 0:
         return None
     code, out, _ = git(repo_dir, "show", f"{rev}:{TODO}")
-    return out if code == 0 else None
+    return git_lines(out) if code == 0 else None
 
 
 @cache
 def _blob(repo_dir: Path, sha: str) -> str | None:
-    """TODO.md в коммите sha (неизменяем — кэш по SHA); файла нет — None."""
+    """TODO.md в коммите sha (неизменяем — кэш по SHA); файла нет — None.
+
+    Переносы нормализуются так же, как у ядра (`read_todo`, #511): иначе
+    один коммит разбирался бы двумя разными текстами."""
     code, out, _ = git(repo_dir, "show", f"{sha}:{TODO}")
-    return out if code == 0 else None
+    return git_lines(out) if code == 0 else None
 
 
 @cache

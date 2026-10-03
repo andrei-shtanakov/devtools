@@ -32,7 +32,8 @@ class Wait:
     """Ожидание consumer → prereq (prereq=None — условие @trigger).
 
     last_line_change_at — дата последней правки строки ожидания (git blame):
-    приближение возраста, не момент начала ожидания (§3.4 rev 11).
+    приближение возраста, не момент начала ожидания (§3.4 rev 11); у
+    ожидания по from: — дата создания запроса.
     """
 
     consumer: str
@@ -60,9 +61,13 @@ def prereq_state(graph: Graph, inputs: Inputs, prereq_id: str) -> PrereqState:
             return "unresolvable"
         if graph.source_unread(prereq_id):
             return "unread"  # не прочитано — не «нет»: вопроса не будет
+        # удаление после существования и отказ в заявке — отмена; история
+        # сильнее открытой заявки, иначе отмена пряталась бы за «в пути»
+        if inputs.history.get(prereq_id) or prereq_id in graph.declined_requests:
+            return "cancelled"
         if prereq_id in graph.pending_requests:
             return "request_open"
-        return "cancelled" if inputs.history.get(prereq_id) else "missing"
+        return "missing"
     if node.is_open:
         return "open"
     if node.closed_as is None:
@@ -94,6 +99,14 @@ def _evidence(graph: Graph, prereq_id: str) -> str:
     return node.url or prereq_id
 
 
+def _request_created(graph: Graph, inputs: Inputs, request: str) -> str | None:
+    """Ожидание по from: строки в TODO не имеет — его возраст от создания
+    запроса (запись GitHub или extras среза 1)."""
+    rec = graph.records.get(request) or {}
+    extras = inputs.issue_extras.get(request) or {}
+    return rec.get("created_at") or extras.get("created_at") or None
+
+
 def _dependency_wait(
     graph: Graph,
     inputs: Inputs,
@@ -106,7 +119,11 @@ def _dependency_wait(
     consumer = graph.resolve(edge.src)
     prereq = edge.dst if edge.origin == FROM_ORIGIN else graph.resolve(edge.dst)
     state = prereq_state(graph, inputs, prereq)
-    since = inputs.wait_since.get(f"{edge.src}|{raw}")
+    since = (
+        _request_created(graph, inputs, edge.dst)
+        if edge.origin == FROM_ORIGIN
+        else inputs.wait_since.get(f"{edge.src}|{raw}")
+    )
     moved = last_movement(graph, inputs, prereq)
     if state == "done":
         return Wait(
@@ -137,7 +154,8 @@ def _dependency_wait(
     if state == "request_open":  # заявка отправлена, пункт ещё не заведён
         evidence = graph.pending_requests[prereq]
         return Wait(consumer, prereq, "pending", state, evidence, since, moved)
-    return Wait(consumer, prereq, "unknown", state, prereq, since, moved)
+    evidence = graph.declined_requests.get(prereq, prereq)
+    return Wait(consumer, prereq, "unknown", state, evidence, since, moved)
 
 
 def _version_mismatch(path: str, siblings: list[str]) -> bool:

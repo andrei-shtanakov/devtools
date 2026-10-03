@@ -10,6 +10,7 @@ accepted_as делает issue и пункт одним узлом работы:
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -63,6 +64,8 @@ class Graph:
     gh_read: bool = True
     # открытая заявка на ещё не заведённый пункт: todo://<repo>/<slug> → issue
     pending_requests: dict[str, str] = field(default_factory=dict)
+    # отклонённая (not_planned) заявка на незаведённый пункт: он не появится
+    declined_requests: dict[str, str] = field(default_factory=dict)
 
     def source_unread(self, node_id: str) -> bool:
         """Источник узла не прочитан — отсутствие узла ничего не доказывает."""
@@ -175,7 +178,8 @@ def _todo_edges(
 ) -> list[Edge]:
     """depends_on из references: plan-fields не строит edges на несуществующий
     пункт (resolved_target = None), а висячее ожидание должно остаться видимым.
-    Каждый @blocked_by даёт ребро: нераспознанный — на UNRESOLVED с находкой.
+    Каждый @blocked_by даёт ребро: нераспознанный или в репо вне флота — на
+    UNRESOLVED с находкой.
     Концы канонизируются; исходная запись — в origin."""
     edges: list[Edge] = []
     for ref in snapshot["references"]:
@@ -195,16 +199,28 @@ def _todo_edges(
                     "GR-BLOCKER-UNRESOLVABLE", "warning", ref["source_node_id"], raw
                 )
             )
-        if target is not None:
-            edges.append(
-                Edge(
-                    ref["source_node_id"],
-                    _canon_uri(target, norm),
-                    "depends_on",
-                    f"todo:{raw}",
-                )
+        if not target.startswith(UNRESOLVED) and _repo_of(target) not in norm:
+            # чужой репо не дочитывается: «предпосылки нет» было бы ложью (§3.1)
+            findings.append(
+                Finding("GR-REF-OUT-OF-FLEET", "warning", ref["source_node_id"], raw)
             )
+            target = UNRESOLVED + raw
+        edges.append(
+            Edge(
+                ref["source_node_id"],
+                _canon_uri(target, norm),
+                "depends_on",
+                f"todo:{raw}",
+            )
+        )
     return edges
+
+
+def _repo_of(node_id: str) -> str:
+    """Репо конца ребра: todo://<repo>/<id> или <repo>#<N>."""
+    if node_id.startswith("todo://"):
+        return node_id.removeprefix("todo://").split("/")[0]
+    return node_id.partition("#")[0]
 
 
 def _gh_id(rec: dict[str, Any]) -> str:
@@ -249,10 +265,18 @@ def _gh_edges(
             for ref in rec.get("closing_refs", [])
             if (target := _norm_ref(ref, norm)) is not None
         ]
+        findings += [
+            Finding("GR-REF-OUT-OF-FLEET", "info", me, ref)
+            for ref in rec.get("closing_refs", [])
+            if _norm_ref(ref, norm) is None
+        ]
         edges += [
             Edge(me, item_id(rec["repo"], m), "implements", "pr:@id")
             for m in PR_ITEM_RE.findall(rec.get("body", ""))
         ]
+        # PR — не заявка ADR-ECO-006 и с меткой inbox: склейка увела бы его
+        # из очереди (accepted_as)
+        return edges
     if "inbox" in rec.get("labels", []):
         edges += _inbox_edges(rec, me, nodes, norm, findings, unread=unread)
     elif (header := _legacy_protocol(rec, nodes, norm)) is not None:
@@ -492,18 +516,31 @@ def build_graph(inputs: Inputs) -> Graph:
         partial=any(s.state in ("error", "not_queried") for s in sources),
         unread_repos=unread,
         gh_read=inputs.gh_state == "read",
-        pending_requests=_pending_requests(solid, nodes, norm),
+        pending_requests=_requests_for_missing(solid, nodes, norm, _is_open),
+        declined_requests=_requests_for_missing(solid, nodes, norm, _is_declined),
     )
 
 
-def _pending_requests(
-    records: list[dict[str, Any]], nodes: dict[str, Node], norm: dict[str, str]
+def _is_open(rec: dict[str, Any]) -> bool:
+    return rec["state"] == "open"
+
+
+def _is_declined(rec: dict[str, Any]) -> bool:
+    return rec["state"] != "open" and rec.get("state_reason") == "not_planned"
+
+
+def _requests_for_missing(
+    records: list[dict[str, Any]],
+    nodes: dict[str, Node],
+    norm: dict[str, str],
+    keep: Callable[[dict[str, Any]], bool],
 ) -> dict[str, str]:
-    """Открытая заявка (метка inbox или шапка) на пункт, которого ещё нет:
-    ожидание этого пункта — рукопожатие в процессе, а не «предпосылки нет»."""
+    """Заявка (метка inbox или шапка) на пункт, которого ещё нет, в состоянии
+    keep: открытая — рукопожатие в процессе, отклонённая — отмена; ни то, ни
+    другое не «предпосылки нет»."""
     pending: dict[str, str] = {}
     for rec in records:
-        if rec["is_pr"] or rec["state"] != "open":
+        if rec["is_pr"] or not keep(rec):
             continue
         header = _protocol_header(rec.get("body", ""))
         sender = FROM_RE.match(header[1]) if header else None

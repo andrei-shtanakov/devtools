@@ -107,6 +107,13 @@ reason = "steward/jsonschema/textual — необязательные групп
 until = 2027-09-30
 
 [[allow]]
+rule = "deptry/DEP004"
+path = "conductor/snapshot.py"
+repo = "devtools"
+reason = "jsonschema — в рантайм-группе conductor (default-groups), deptry группы не различает (#511)"
+until = 2027-09-30
+
+[[allow]]
 rule = "shellcheck/SC2254"
 path = "human-merge.sh"
 repo = "devtools"

@@ -2,8 +2,9 @@
 
 Только чтение: ни одна команда здесь не мутирует GitHub (срез 0). Поиск идёт
 через REST `search/issues`, потому что только он отдаёт `incomplete_results`
-и `total_count` — `gh search --json` их теряет. Обнаруживаются только
-открытые узлы: закрытые, на которые кто-то ссылается, приходят адресным
+и `total_count` — `gh search --json` их теряет. Обнаруживаются открытые
+узлы и отклонённые inbox-заявки (`DECLINED`, #511 — на них не ссылается
+никто); прочие закрытые, на которые кто-то ссылается, приходят адресным
 дочитыванием независимо от возраста (окно закрытых упиралось бы в потолок
 поиска в 1000 — замер 2026-09-29: 1310 закрытых за 30 дней).
 """
@@ -17,10 +18,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from conductor.model import SourceState
+from conductor.sources_git import child_env
 
 GH_TIMEOUT = 120
 Runner = Callable[[list[str]], tuple[int, str, str]]
-ISSUE_FIELDS = "title,body,state,stateReason,author,labels,updatedAt,url,closedAt"
+ISSUE_FIELDS = (
+    "title,body,state,stateReason,author,labels,updatedAt,url,closedAt,createdAt"
+)
 PR_FIELDS = (
     "title,body,state,mergedAt,author,labels,updatedAt,url,"
     "closingIssuesReferences,headRefOid,reviewDecision,statusCheckRollup,"
@@ -66,6 +70,8 @@ def run_gh(args: list[str]) -> tuple[int, str, str]:
         done = subprocess.run(
             ["gh", *args],
             capture_output=True,
+            stdin=subprocess.DEVNULL,  # без TTY: вопрос gh — сбой, не зависание
+            env=child_env(GH_PROMPT_DISABLED="1"),
             text=True,
             timeout=GH_TIMEOUT,
             check=False,
@@ -154,28 +160,50 @@ def _search(
     pages = _json(out, "[]")
     if not isinstance(pages, list):
         return None, f"поиск «{qualifier}»: битый ответ"
-    items = [item for page in pages for item in page.get("items", [])]
+    # Страницы читаются в разные моменты: элемент, сдвинутый между ними,
+    # приходит дважды — считать его по (репо, номер) один раз (#511).
+    unique: dict[tuple[Any, Any], dict[str, Any]] = {}
+    for page in pages:
+        for item in page.get("items", []):
+            unique.setdefault((item.get("repository_url"), item.get("number")), item)
+    items = list(unique.values())
     total = pages[0].get("total_count", 0) if pages else 0
     if any(page.get("incomplete_results") for page in pages):
         return None, f"поиск «{qualifier}»: incomplete_results"
+    if any(page.get("total_count", 0) != total for page in pages):
+        return None, f"поиск «{qualifier}»: total_count менялся между страницами"
     if total > len(items):
         return None, f"поиск «{qualifier}»: получено {len(items)} из {total}"
     return items, ""
 
 
+#: Отклонённые заявки ADR-ECO-006 (#511): ожидание пункта, которого нет и
+#: на который заявку закрыли `not_planned`, — «отменено», а не «предпосылки
+#: нет». На такую заявку не ссылается ни TODO (там `todo://`), ни PR, поэтому
+#: адресное дочитывание её не находит — нужен свой поиск. Замер 2026-10-03:
+#: 3 таких против 282 открытых узлов.
+DECLINED = 'is:issue is:closed label:inbox reason:"not planned"'
+
+
 def discover(
     owner: str, fleet_names: set[str], runner: Runner
 ) -> tuple[list[tuple[str, int, bool]], SourceState, str]:
-    """Открытые issues/PR репо флота (закрытые — адресным дочитыванием)."""
-    items, problem = _search(owner, "is:open", runner)
-    if items is None:
-        return [], "error", problem
-    hits = [
-        (name, item["number"], "pull_request" in item)
-        for item in items
-        if (name := item["repository_url"].rsplit("/", 1)[-1]) in fleet_names
-    ]
-    return hits, "read", ""
+    """Открытые issues/PR репо флота и отклонённые inbox-заявки (прочие
+    закрытые — адресным дочитыванием)."""
+    found: dict[tuple[str, int], bool] = {}
+    for qualifier in ("is:open", DECLINED):
+        items, problem = _search(owner, qualifier, runner)
+        if items is None:
+            return [], "error", problem
+        for item in items:
+            name = item["repository_url"].rsplit("/", 1)[-1]
+            if name in fleet_names:
+                found.setdefault((name, item["number"]), "pull_request" in item)
+    return (
+        [(name, number, is_pr) for (name, number), is_pr in found.items()],
+        "read",
+        "",
+    )
 
 
 def _comments(
@@ -285,6 +313,7 @@ def fetch_record(
         "updated_at": raw.get("updatedAt", ""),
         "url": raw.get("url", ""),
         "closed_at": raw.get("closedAt"),
+        "created_at": raw.get("createdAt", ""),
         "comments": comments,
         "closing_refs": [
             f"{r['repository']['name']}#{r['number']}"

@@ -44,13 +44,14 @@ from conductor.opstate import (
 from conductor.reconcile import reconcile
 from conductor.render import render_plan, render_status, render_why
 from conductor.roadmap import Roadmap, parse_roadmap
-from conductor.snapshot import Result, evaluate, to_snapshot
+from conductor.snapshot import Result, contract_violation, evaluate, to_snapshot
 from conductor.sources_gh import run_gh
 from conductor.sources_git import default_ref, fetch, read_file_at_origin
 from conductor.stage_report import stage_report
 from conductor.writer import StopPoint, Writer
 
 EXIT_OK, EXIT_ARGS, EXIT_NO_SOURCE, EXIT_CONFIG, EXIT_STOP = 0, 2, 3, 4, 5
+EXIT_INTERNAL = 1  # снимок нарушил свой контракт — дефект conductor (#511)
 COMMANDS = ("status", "why", "plan", "run", "record", "init-state", "stage-report")
 # ежечасный таймер: неделя прогонов (~3 МБ каждый) — не растить диск общего VPS
 KEEP_RUNS = 168
@@ -123,6 +124,18 @@ def _runs(out: Path) -> list[Path]:
     if not out.is_dir():
         return []
     return sorted(d for d in out.iterdir() if (d / "snapshot.json").is_file())
+
+
+def _rotate(out: Path) -> None:
+    """KEEP_RUNS последних прогонов, считая и отвергнутые по контракту:
+    каталог с `snapshot.invalid.json` тоже занимает диск (терм. ревью #550)."""
+    runs = sorted(
+        d
+        for d in out.iterdir()
+        if (d / "snapshot.json").is_file() or (d / "snapshot.invalid.json").is_file()
+    )
+    for old in runs[:-KEEP_RUNS]:
+        shutil.rmtree(old, ignore_errors=True)
 
 
 def _previous(out: Path) -> dict[str, Any] | None:
@@ -321,7 +334,12 @@ def _run(
     cfg_error: str | None,
 ) -> int:
     result = evaluate(inputs, level_cap(args, inputs))
-    run_id = inputs.captured_at.replace(":", "")
+    # replay: id записи занят её прогоном в том же --out — свой id и суффикс
+    run_id = (
+        _now().replace(":", "") + "-replay"
+        if args.replay is not None
+        else inputs.captured_at.replace(":", "")
+    )
     snap = to_snapshot(result, inputs, run_id, _previous(args.out))
     snap["trigger"] = args.trigger
     run_dir = args.out / run_id
@@ -341,11 +359,15 @@ def _run(
             1 for j in journal if j.get("outcome") == "success"
         )
         code = max(code, write_code)
-    _write_atomic(
-        run_dir / "snapshot.json", json.dumps(snap, ensure_ascii=False, indent=1)
-    )
-    for old in _runs(args.out)[:-KEEP_RUNS]:
-        shutil.rmtree(old, ignore_errors=True)
+    text = json.dumps(snap, ensure_ascii=False, indent=1)
+    if (violation := contract_violation(snap)) is not None:
+        # дефект conductor, не входов: потребителю снимка не отдаём (§7.1)
+        _write_atomic(run_dir / "snapshot.invalid.json", text)
+        print(f"SNAPSHOT-INVALID: {violation}", file=sys.stderr)
+        _rotate(args.out)
+        return EXIT_INTERNAL
+    _write_atomic(run_dir / "snapshot.json", text)
+    _rotate(args.out)
     print(render_status(result))
     return code
 
@@ -395,11 +417,21 @@ def _config(args: argparse.Namespace) -> tuple[HostConfig | None, str | None]:
         return None, str(exc)
 
 
+def _usage_error(parser: argparse.ArgumentParser, message: str) -> int:
+    """Код 2 (§7.2) не молча: usage и причина в stderr, как у parser.error."""
+    sys.stderr.write(parser.format_usage())
+    print(f"conductor: ошибка: {message}", file=sys.stderr)
+    return EXIT_ARGS
+
+
 def main(argv: list[str] | None = None) -> int:
     """Точка входа; коды выхода — §7.2 (rev 10)."""
+    parser = _parser()
     try:
-        args = _parser().parse_args(argv)
-    except (argparse.ArgumentError, SystemExit):
+        args = parser.parse_args(argv)
+    except argparse.ArgumentError as exc:
+        return _usage_error(parser, str(exc))
+    except SystemExit:  # parser.error уже напечатал usage и причину
         return EXIT_ARGS
     if args.selftest:
         return _selftest()
@@ -413,10 +445,10 @@ def main(argv: list[str] | None = None) -> int:
         report = stage_report(args.out, since, until)
         print(json.dumps(report, ensure_ascii=False, indent=1))
         return EXIT_OK
-    if args.command not in COMMANDS or (
-        args.command in ("why", "record") and not args.target
-    ):
-        return EXIT_ARGS
+    if args.command not in COMMANDS:
+        return _usage_error(parser, f"неизвестная команда {args.command!r}")
+    if args.command in ("why", "record") and not args.target:
+        return _usage_error(parser, f"{args.command}: нужен аргумент")
     cfg, cfg_error = _config(args)
     if cfg is None:
         return _command(args, cfg, cfg_error)
@@ -430,7 +462,12 @@ def main(argv: list[str] | None = None) -> int:
 def _command(
     args: argparse.Namespace, cfg: HostConfig | None, cfg_error: str | None
 ) -> int:
-    inputs = _inputs(args, umbrella_name(cfg))
+    try:
+        inputs = _inputs(args, umbrella_name(cfg))
+    except (OSError, ValueError, TypeError) as exc:  # TOMLDecodeError — ValueError
+        # нет/битый replay, битый манифест или без владельца: источник не собран
+        print(f"входы не прочитаны: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return EXIT_NO_SOURCE
     if inputs is None:
         return EXIT_NO_SOURCE
     if all(t.state == "error" for t in inputs.todos) and inputs.gh_state != "read":
@@ -444,7 +481,13 @@ def _command(
         return _run(args, inputs, cfg, cfg_error)
     result = evaluate(inputs, args.level if args.command == "plan" else 0)
     if args.command == "status":
-        print(render_status(result, repo=args.target))
+        repo = args.target
+        if repo is not None:  # GitHub-имя → канонический ключ, как у why
+            repo = normalizer(inputs).get(repo)
+            if repo is None:
+                print(f"репо не найдено: {args.target}", file=sys.stderr)
+                return EXIT_ARGS
+        print(render_status(result, repo=repo))
     elif args.command == "why":
         node = canonical_id(args.target, normalizer(inputs))
         if result.graph.resolve(node) not in result.graph.nodes:

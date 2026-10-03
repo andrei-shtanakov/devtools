@@ -1,9 +1,22 @@
 import json
+import subprocess
 
-from conductor.sources_gh import ci_state, collect_gh, discover
+import pytest
+
+import conductor.sources_gh as sources_gh
+from conductor.sources_gh import (
+    ISSUE_FIELDS,
+    ci_state,
+    collect_gh,
+    discover,
+    fetch_record,
+)
 
 
 def fake(responses: dict[str, tuple[int, str, str]]):
+    # Поиск отклонённых заявок (#511) — пустой, если тест не задал свой.
+    responses = {DECLINED_Q: (0, json.dumps([_page([])]), ""), **responses}
+
     def run(args: list[str]) -> tuple[int, str, str]:
         key = " ".join(args)
         for prefix, answer in responses.items():
@@ -34,6 +47,7 @@ def _page(
 
 
 OPEN = "api -X GET search/issues -f q=user:own is:open"
+DECLINED_Q = f"api -X GET search/issues -f q=user:own {sources_gh.DECLINED}"
 ISSUE = json.dumps(
     {
         "title": "t",
@@ -98,6 +112,27 @@ def test_incomplete_results_is_error() -> None:
 def test_total_count_above_received_is_error() -> None:
     run = fake({OPEN: (0, json.dumps([_page([("a", 1, False)], total=5)]), "")})
     assert discover("own", {"a"}, run)[1] == "error"
+
+
+def test_pages_are_deduped_and_dedup_counts_against_total() -> None:
+    """#511: элемент, съехавший между страницами, не считается дважды —
+    ни в находках, ни в сверке с total_count."""
+    shifted = [_page([("a", 1, False), ("a", 2, False)]), _page([("a", 2, False)], 2)]
+    hits, state, _ = discover("own", {"a"}, fake({OPEN: (0, json.dumps(shifted), "")}))
+    assert state == "read" and hits == [("a", 1, False), ("a", 2, False)]
+    dup = [_page([("a", 1, False)], total=2), _page([("a", 1, False)], total=2)]
+    assert discover("own", {"a"}, fake({OPEN: (0, json.dumps(dup), "")}))[1] == (
+        "error"
+    )
+
+
+def test_total_count_changed_between_pages_is_error() -> None:
+    """#511: total_count сверяется по каждой странице, не только по первой."""
+    pages = [_page([("a", 1, False)], total=1), _page([("a", 2, False)], total=2)]
+    hits, state, detail = discover(
+        "own", {"a"}, fake({OPEN: (0, json.dumps(pages), "")})
+    )
+    assert (hits, state) == ([], "error") and "total_count" in detail
 
 
 def test_non_fleet_repos_are_ignored() -> None:
@@ -251,3 +286,75 @@ def test_malformed_json_is_a_read_failure_not_a_crash() -> None:
     assert result.state == "error" and "a#1" in result.detail
     broken = fake({**BASE, "api graphql": (0, '{"data": {}}', "")})
     assert collect_gh("own", {"a": "a"}, lambda _: set(), broken).state == "error"
+
+
+def test_run_gh_has_no_tty_and_no_prompts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#511: gh не наследует TTY и не может зависнуть на интерактивном вопросе."""
+    seen: dict[str, object] = {}
+
+    def fake_run(argv: list[str], **kw: object) -> subprocess.CompletedProcess:
+        seen.update(kw)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setenv("GIT_DIR", "/elsewhere/.git")
+    monkeypatch.setattr(sources_gh.subprocess, "run", fake_run)
+    sources_gh.run_gh(["api", "user"])
+    env = seen["env"]
+    assert seen["stdin"] is subprocess.DEVNULL
+    assert isinstance(env, dict) and env["GH_PROMPT_DISABLED"] == "1"
+    assert "GIT_DIR" not in env
+
+
+def test_issue_record_carries_created_at() -> None:
+    # #511: возраст ожидания по from: — от создания запроса
+    raw = json.dumps({**json.loads(ISSUE), "createdAt": "2026-09-20T00:00:00Z"})
+    run = fake(
+        {
+            "issue view 1 -R own/a --json": (0, raw, ""),
+            "api --paginate --slurp repos/own/a/issues/1/comments": (0, COMMENTS, ""),
+        }
+    )
+    assert "createdAt" in ISSUE_FIELDS.split(",")
+    rec = fetch_record("own", "a", 1, False, run)
+    assert rec is not None and rec["created_at"] == "2026-09-20T00:00:00Z"
+
+
+def test_declined_inbox_request_is_discovered_and_read() -> None:
+    """Терм. ревью #550 (major): отклонённая заявка не находится ни поиском
+    открытых, ни адресным дочитыванием (на неё ссылается `todo://`, а не
+    номер) — без своего поиска `declined_requests` в бою пуст, и ожидание
+    остаётся «предпосылки нет»."""
+    declined = json.dumps(
+        {
+            **json.loads(ISSUE),
+            "body": "slug: y\nfrom: a",
+            "state": "CLOSED",
+            "stateReason": "NOT_PLANNED",
+        }
+    )
+    run = fake(
+        {
+            OPEN: (0, json.dumps([_page([])]), ""),
+            DECLINED_Q: (0, json.dumps([_page([("b", 5, False)])]), ""),
+            "issue view 5 -R own/b --json": (0, declined, ""),
+            "api --paginate --slurp repos/own/b/issues/5/comments": (0, COMMENTS, ""),
+        }
+    )
+    result = collect_gh("own", {"b": "b"}, lambda _: set(), run)
+    assert result.state == "read"
+    [rec] = result.records
+    assert (rec["number"], rec["state"], rec["state_reason"]) == (
+        5,
+        "closed",
+        "not_planned",
+    )
+
+
+def test_declined_search_failure_is_error() -> None:
+    run = fake(
+        {
+            OPEN: (0, json.dumps([_page([])]), ""),
+            DECLINED_Q: (1, "", "rate limited"),
+        }
+    )
+    assert discover("own", {"a"}, run)[1] == "error"

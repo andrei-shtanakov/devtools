@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+import jsonschema  # группа dev входит в default-groups (pyproject)
 
 from conductor.analysis import dependency_adjacency, find_cycles, work_state
 from conductor.analysis import findings as graph_findings
@@ -300,3 +303,19 @@ def to_snapshot(
         "metrics": _metrics(result, questions),
         "changes_since_previous": _changes(result, previous),
     }
+
+
+def contract_violation(snap: dict[str, Any]) -> str | None:
+    """Нарушение JSON-схемы conductor-snapshot/v1 или None (#511).
+
+    Потребитель (dispatcher, stage-report) читает снимок по контракту —
+    нарушивший его снимок под именем snapshot.json не пишется.
+    """
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    error = jsonschema.exceptions.best_match(
+        jsonschema.Draft202012Validator(schema).iter_errors(snap)
+    )
+    if error is None:
+        return None
+    where = "/".join(str(p) for p in error.absolute_path) or "<корень>"
+    return f"{where}: {error.message}"
