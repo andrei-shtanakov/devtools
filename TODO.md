@@ -2721,8 +2721,10 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       Класс #487 закрыл только НОВЫЙ файл: `check-ignore` без `--no-index`
       отслеживаемый профиль игнорируемым не считает, а `git add` под
       игнорируемым каталогом отказывает rc 1 — теперь `--no-index`. Без
-      открытого PR ветка штампа ставится от базы прогона заново
-      (`switch_to`, `git switch -C`), штамп едет незакоммиченным с деревом.
+      открытого PR и без своей работы на ветке (голова — предок базы) ветка
+      штампа ставится от базы прогона заново (`switch_to`, `git switch -C`),
+      штамп едет незакоммиченным с деревом; ветка со своим коммитом
+      (крэш-окно «коммит есть, PR нет», терм. ревью #549) берётся как есть.
 - [x] approve-node: текст candidate-PR следует за составом живой заявки (inbox devtools#539, slug: approve-node-pr-text-follows-claim; from: spec-runner#640) @owner:github:andrei-shtanakov @id:approve-node-pr-text-follows-claim @epic:eco.dark-factory — PR этой ветки
       Расширение заявки остаётся (W4 — design+acceptance одной заявкой).
       Заявка записывает `candidate_nodes` — узлы, объявленные текстом PR;

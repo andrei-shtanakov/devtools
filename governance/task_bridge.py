@@ -4636,15 +4636,21 @@ def deliver_approve(
     check_approved(target_dir, ws_id, state.bundle_dir, legacy_bundle=legacy_bundle)
     branch = f"spec/{ws_id}-tasks-approve"
     existing = ops.find_pr(repo_slug, branch)
-    if existing is None:
-        # devtools#543: открытого PR нет — ветку ставим от базы прогона
-        # заново (`switch -C`), незакоммиченный штамп едет с деревом.
-        # `ensure_branch` взял бы локальный остаток как есть: упавшая
-        # попытка оставляет ветку на базе ДО исправления, и повтор упирался
-        # в тот же отказ; остаток влитого прошлого цикла тянул бы в PR его
-        # историю.
-        ops.switch_to(target_dir, branch, state.base_ref or "master")
+    base_ref = state.base_ref or "master"
+    local_head = ops.rev_parse(target_dir, branch)
+    if existing is None and (
+        local_head is None or ops.is_ancestor(target_dir, local_head, base_ref)
+    ):
+        # devtools#543: открытого PR нет, своей работы на ветке нет —
+        # ставим её от базы прогона заново (`switch -C`), незакоммиченный
+        # штамп едет с деревом. `ensure_branch` взял бы остаток упавшей
+        # попытки как есть, на базе ДО исправления, и повтор упирался бы
+        # в тот же отказ.
+        ops.switch_to(target_dir, branch, base_ref)
     else:
+        # Свой коммит на ветке (крэш-окно «коммит штампа есть, PR нет»,
+        # терм. ревью #549) либо факт не установлен — ветка берётся как
+        # есть: `switch -C` унёс бы коммит штампа владельца в reflog.
         ops.ensure_branch(target_dir, branch)
     rel = f"spec/{ws_id}-tasks.md"
     # Профиль — в списке всегда: у уже закоммиченного эталона `git add`

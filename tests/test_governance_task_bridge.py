@@ -20,6 +20,7 @@ import pytest
 from governance import bundle_dag, decomposition_guard, node_approval, task_bridge
 from governance.facts import Fact, Outcome, unavailable
 from governance.frontmatter import join_frontmatter, split_frontmatter
+from governance.ops import RealOps
 from governance.stale_adapter import blob_sha1
 
 #: Подпись одобрения в фикстурах: фиксированная, потому что её предмет —
@@ -1431,6 +1432,102 @@ def test_deliver_approve_lays_missing_profile_and_names_next_step(
     assert task_bridge.deliver_approve(state, ops) == 77
     commit = next(c for c in ops.calls if c[0] == "commit_paths")
     assert rel in commit[1]
+
+
+def _git_approve_target(tmp_path: Path) -> Path:
+    """Цель на НАСТОЯЩЕМ git: бандл и неодобренная спека в `master`, рядом
+    bare-origin; штамп владельца — незакоммиченным в рабочем дереве."""
+    target = _target(tmp_path)
+    _stamped_tasks(target, status="draft")
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", "-C", str(target), *args], check=True)
+
+    git("init", "-q", "-b", "master")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    git("add", "-A")
+    git("commit", "-q", "-m", "base")
+    git("remote", "add", "origin", str(origin))
+    git("push", "-q", "origin", "master")
+    _stamped_tasks(target)
+    return target
+
+
+class _GitApproveOps(RealOps):
+    """RealOps с подменённой форджей: git настоящий, PR — запись."""
+
+    def __init__(self, fail_push: int = 0) -> None:
+        self.fail_push = fail_push
+        self.created: list[str] = []
+
+    def find_pr(
+        self, repo_slug: str, branch: str, *, any_state: bool = False
+    ) -> int | None:
+        return None
+
+    def push_branch(self, target_dir: str, branch: str) -> None:
+        if self.fail_push:
+            self.fail_push -= 1
+            raise RuntimeError("push_branch: rc=1: сеть отвалилась")
+        super().push_branch(target_dir, branch)
+
+    def create_draft_pr(self, target_dir, repo_slug, branch, title, body, label):
+        self.created.append(branch)
+        return 77
+
+
+def _show(target: Path, ref: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(target), "show", ref],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+
+def test_deliver_approve_retry_keeps_the_stamp_commit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Терм. ревью #549 (major): крэш-окно «коммит штампа есть, PR нет» —
+    push упал после коммита. Повтор не имеет права ставить ветку от базы
+    заново: `switch -C` унёс бы коммит штампа (акт владельца) в reflog.
+    Ветка со своей работой берётся как есть и доигрывается."""
+    target = _git_approve_target(tmp_path)
+    state = _approve_state(target, monkeypatch)
+    ops = _GitApproveOps(fail_push=1)
+    with pytest.raises(RuntimeError, match="push_branch"):
+        task_bridge.deliver_approve(state, ops)
+
+    assert task_bridge.deliver_approve(state, ops) == 77
+    branch = "spec/WS-alpha-7-tasks-approve"
+    pushed = _show(target, f"origin/{branch}:spec/WS-alpha-7-tasks.md")
+    assert "status: approved" in pushed
+    assert ops.created == [branch]
+
+
+def test_deliver_approve_retry_rebases_an_empty_stale_branch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """devtools#543: попытка упала ДО коммита, ветка штампа осталась на
+    базе до исправления, а база ушла вперёд. Своей работы на ветке нет —
+    повтор ставит её от свежей базы, штамп едет с деревом."""
+    target = _git_approve_target(tmp_path)
+    branch = "spec/WS-alpha-7-tasks-approve"
+    subprocess.run(["git", "-C", str(target), "branch", branch], check=True)
+    (target / "FIX.md").write_text("fix\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(target), "add", "FIX.md"], check=True)
+    subprocess.run(["git", "-C", str(target), "commit", "-q", "-m", "fix"], check=True)
+    subprocess.run(["git", "-C", str(target), "switch", "-q", branch], check=True)
+    state = _approve_state(target, monkeypatch)
+    ops = _GitApproveOps()
+
+    assert task_bridge.deliver_approve(state, ops) == 77
+    assert _show(target, f"origin/{branch}:FIX.md") == "fix\n"
+    pushed = _show(target, f"origin/{branch}:spec/WS-alpha-7-tasks.md")
+    assert "status: approved" in pushed
 
 
 def test_deliver_approve_rerun_updates_existing_pr(tmp_path: Path, monkeypatch) -> None:
