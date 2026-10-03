@@ -1530,6 +1530,57 @@ def test_deliver_approve_retry_rebases_an_empty_stale_branch(
     assert "status: approved" in pushed
 
 
+def test_deliver_approve_unknown_ancestry_refuses_before_branching(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Терм. ревью #549 (recheck): `is_ancestor` → None — факт не
+    установлен, а не «своя работа»: отказ с причиной, ветку не трогаем."""
+
+    class _Unknown(_ApproveOps):
+        def rev_parse(self, target_dir: str, ref: str) -> str | None:
+            return (
+                "f" * 40
+                if ref.endswith("-approve")
+                else super().rev_parse(target_dir, ref)
+            )
+
+        def is_ancestor(self, target_dir: str, sha: str, ref: str) -> bool | None:
+            return None
+
+    target = _target(tmp_path)
+    _stamped_tasks(target)
+    ops = _Unknown()
+    with pytest.raises(RuntimeError, match="не установлено"):
+        task_bridge.deliver_approve(_approve_state(target, monkeypatch), ops)
+    assert [c[0] for c in ops.calls] == ["find_pr"]
+
+
+def test_deliver_approve_switch_conflict_is_a_named_refusal(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Терм. ревью #549 (recheck): `git switch` на ветку со своим коммитом
+    отказал из-за правок дерева — RuntimeError с процедурой, не трейсбек."""
+
+    class _Conflict(_ApproveOps):
+        def rev_parse(self, target_dir: str, ref: str) -> str | None:
+            return (
+                "f" * 40
+                if ref.endswith("-approve")
+                else super().rev_parse(target_dir, ref)
+            )
+
+        def is_ancestor(self, target_dir: str, sha: str, ref: str) -> bool | None:
+            return False
+
+        def ensure_branch(self, target_dir: str, branch: str) -> None:
+            raise subprocess.CalledProcessError(1, ["git", "switch", branch])
+
+    target = _target(tmp_path)
+    _stamped_tasks(target)
+    with pytest.raises(RuntimeError, match="git switch spec/WS-alpha-7-tasks-approve"):
+        task_bridge.deliver_approve(_approve_state(target, monkeypatch), _Conflict())
+
+
 def test_deliver_approve_rerun_updates_existing_pr(tmp_path: Path, monkeypatch) -> None:
     """Приёмка PR #117, круги 1–2: при открытом PR ветки второй PR не
     создаётся, но свежий незакоммиченный approve-штамп ДОСТАВЛЯЕТСЯ —
