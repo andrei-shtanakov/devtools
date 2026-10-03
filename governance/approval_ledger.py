@@ -470,9 +470,24 @@ def record_finalize_head_sha(state: RunState, key: str, head_sha: str) -> None:
     _update(state, key, finalize_head_sha=head_sha)
 
 
-def record_candidate_pr(state: RunState, key: str, pr: int) -> None:
-    """Номер candidate-PR заявки."""
-    _update(state, key, candidate_pr=pr)
+def record_candidate_pr(
+    state: RunState, key: str, pr: int, *, nodes: list[str] | None = None
+) -> None:
+    """Номер candidate-PR заявки и узлы, которые объявляет его текст.
+
+    Без `nodes` состав текста не записан, и следующая публикация
+    перепишет текст PR один раз (devtools#539) — лишняя правка, а не
+    пропущенная.
+    """
+    fields: dict[str, object] = {"candidate_pr": pr}
+    if nodes is not None:
+        fields["candidate_nodes"] = list(nodes)
+    _update(state, key, **fields)
+
+
+def record_candidate_nodes(state: RunState, key: str, nodes: list[str]) -> None:
+    """Узлы, которые объявляет текст candidate-PR после его правки (#539)."""
+    _update(state, key, candidate_nodes=list(nodes))
 
 
 def extend_request(

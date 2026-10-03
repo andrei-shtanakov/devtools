@@ -146,6 +146,10 @@ class Ops(Protocol):
 
     def prs_by_head_prefix(self, repo_slug: str, branch_prefix: str) -> list[dict]: ...
 
+    def edit_pr(
+        self, target_dir: str, repo_slug: str, pr: int, title: str, body: str
+    ) -> None: ...
+
     def create_pr(
         self,
         target_dir: str,
@@ -1446,6 +1450,38 @@ class RealOps:
         except OSError as exc:
             return 127, str(exc)
         return proc.returncode, proc.stdout
+
+    def edit_pr(
+        self, target_dir: str, repo_slug: str, pr: int, title: str, body: str
+    ) -> None:
+        """`gh pr edit <pr> --title --body -R <slug>`; сбой — RuntimeError.
+
+        devtools#539: текст candidate-PR обязан следовать за составом
+        заявки — мерж этого PR и есть акт одобрения узлов, которые он
+        объявляет.
+        """
+        done = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "edit",
+                str(pr),
+                "-R",
+                repo_slug,
+                "--title",
+                title,
+                "--body",
+                body,
+            ],
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if done.returncode != 0:
+            raise RuntimeError(
+                f"edit_pr: gh pr edit {pr} rc={done.returncode}: {done.stderr.strip()}"
+            )
 
     def create_pr(
         self,
