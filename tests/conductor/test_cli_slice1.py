@@ -91,6 +91,30 @@ def test_snapshot_writer_block_is_redacted_and_counts_executed(
     assert _snap(out)["metrics"]["actions_executed"] == 1
 
 
+def test_run_reports_partial_step_in_snapshot_and_text(
+    env,  # noqa: F811
+    monkeypatch,
+    capsys,
+) -> None:
+    """Живая приёмка A8a/#1: шаг 2 отозван посреди close_shipped — и снимок, и
+    текстовая выдача `run` должны назвать частичность (§7.6), не молчать."""
+    tmp, cfg, rep = _live_world(env, monkeypatch)  # roadmap: enabled_actions=[nudge]
+    monkeypatch.setattr(cli, "level_cap", lambda args, inputs: 3)
+    step = Step(Mutation("close", "own/a", 1), "close")
+    record = PlanRecord("close_shipped", "own/a#1", "r", 1, (step,), done_before=1)
+    monkeypatch.setattr(cli, "plan_records", lambda *a: [record])
+    out = tmp / "out"
+    argv = ["run", "--replay", str(rep), "--out", str(out), "--config", str(cfg)]
+    assert cli.main(argv) == 0
+    expected = {
+        "action": "close_shipped",
+        "subject": "own/a#1",
+        "status": "частично: шаг 2 (close) — отозван (enabled_actions)",
+    }
+    assert expected in _snap(out)["writer"]["notes"]
+    assert expected["status"] in capsys.readouterr().out
+
+
 def test_stage_report_cli_dates(tmp_path: Path, capsys) -> None:
     """Ревью #542: дата без зоны — UTC; мусор — код 2, а не трейсбек."""
     out = tmp_path / "runs"
