@@ -62,6 +62,59 @@ def test_marker_present_only_close() -> None:
     )
     recs, _ = _plan(issue, issue_extras=_extras())
     assert ops(recs) == [["close"]]
+    # §7.6: шаг 1 сделан прежним прогоном — писатель должен это знать
+    assert recs[0].done_before == 1
+
+
+def test_no_marker_done_before_is_zero() -> None:
+    recs, _ = _plan(issue_extras=_extras())
+    assert ops(recs) == [["comment", "close"]]
+    assert recs[0].done_before == 0
+
+
+def test_marker_present_but_basis_gone_is_partial() -> None:
+    """§7.5 строка 4: шаг 1 есть, основание снято — ничего не исполняем, но
+    выдача должна назвать частичность (§7.6), а не промолчать."""
+    marker = make(
+        "close",
+        node=h1("node", "a#1"),
+        period=h1("period", "0"),
+        evidence=h1("evidence", "merged:m5"),
+    )
+    issue = record(
+        "a",
+        1,
+        comments=[comment(BOT, with_marker("x", marker), "2026-09-11T00:00:00Z", 1)],
+    )
+    extras = {
+        "a#1": {
+            "created_at": "2026-09-01T00:00:00Z",
+            "period": "0",
+            "period_start": "2026-09-01T00:00:00Z",
+            "closed_by": [],
+        }
+    }
+    recs, notes = _plan(issue, issue_extras=extras)
+    assert recs == []
+    assert {
+        "action": "close_shipped",
+        "subject": "a#1",
+        "status": "частично: основание снято",
+    } in notes
+
+
+def test_no_marker_no_basis_is_silent() -> None:
+    """Двойник: ни шага 1, ни основания вообще не было — это не частичность."""
+    extras = {
+        "a#1": {
+            "created_at": "2026-09-01T00:00:00Z",
+            "period": "0",
+            "period_start": "2026-09-01T00:00:00Z",
+            "closed_by": [],
+        }
+    }
+    recs, notes = _plan(issue_extras=extras)
+    assert recs == [] and notes == []
 
 
 def test_marker_of_other_evidence_does_not_count() -> None:

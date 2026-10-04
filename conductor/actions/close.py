@@ -176,6 +176,18 @@ def close_check(
     return check
 
 
+def _closed_already(
+    events: list[tuple[Any, dict[str, Any]]], node: str, period: str
+) -> bool:
+    """Шаг 1 (комментарий подтверждения) этого периода уже есть — любое
+    доказательство: для «нет основания» (§7.5, строка 4) evidence неизвестен."""
+    node_h, period_h = h1("node", node), h1("period", period)
+    return any(
+        m.kind == "close" and m.get("node") == node_h and m.get("period") == period_h
+        for m, _ in events
+    )
+
+
 def plan_close(
     result: Result,
     inputs: Inputs,
@@ -207,6 +219,7 @@ def plan_close(
                 }
             )
             continue
+        events, _ = thread_events(graph, subject, bot)
         question: dict[str, Any] | None = None
         basis: dict[str, Any] = {}
         if state.basis_a is not None:
@@ -230,6 +243,16 @@ def plan_close(
         else:
             if state.old_basis:
                 notes.append({"finding": "GR-REOPENED", "subject": subject})
+            elif _closed_already(events, subject, state.period):
+                # §7.5 строка 4: шаг 1 уже сделан, основания больше нет — ни
+                # откатывать, ни закрывать; выдача называет частичность (§7.6)
+                notes.append(
+                    {
+                        "action": "close_shipped",
+                        "subject": subject,
+                        "status": "частично: основание снято",
+                    }
+                )
             continue
         marker = make(
             "close",
@@ -237,11 +260,11 @@ def plan_close(
             period=h1("period", state.period),
             evidence=h1("evidence", fact),
         )
-        events, _ = thread_events(graph, subject, bot)
         notes += edited_findings(graph, [subject], bot, "close_shipped")
         repo, number = target(inputs, subject)
         steps: list[Step] = []
-        if not any(m == marker for m, _ in events):
+        step1_done = any(m == marker for m, _ in events)
+        if not step1_done:
             text = f"Выполнение подтверждено: {how}. Закрываю как completed."
             steps.append(
                 Step(
@@ -273,6 +296,7 @@ def plan_close(
                 else valid,
                 # ответ владельца — основание и без ранга (§7.5 (б)); иначе ранг
                 authority(result, inputs, subject, ranked=question is None),
+                done_before=1 if step1_done else 0,
             )
         )
     return records

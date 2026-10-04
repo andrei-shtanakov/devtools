@@ -88,12 +88,23 @@ def close(n: int = 1) -> Step:
 
 
 def rec(
-    *steps: Step, action: str = "close_shipped", valid: bool = True, authority=None
+    *steps: Step,
+    action: str = "close_shipped",
+    valid: bool = True,
+    authority=None,
+    done_before: int = 0,
 ) -> PlanRecord:
     reason = None if valid else "доказательство изменилось"
     extra = {"authority": authority} if authority is not None else {}
     return PlanRecord(
-        action, "own/a#1", "rev1", 1, steps, revalidate=lambda m: reason, **extra
+        action,
+        "own/a#1",
+        "rev1",
+        1,
+        steps,
+        revalidate=lambda m: reason,
+        done_before=done_before,
+        **extra,
     )
 
 
@@ -153,10 +164,63 @@ def test_action_revocation_keeps_other_actions(w) -> None:
 
 
 def test_mid_run_revocation_partial(w) -> None:
-    reports = writer(w, rms=[roadmap(), roadmap(enabled=("nudge",))]).execute(
-        [rec(comment(), close())]
-    )
+    wr = writer(w, rms=[roadmap(), roadmap(enabled=("nudge",))])
+    reports = wr.execute([rec(comment(), close())])
     assert outcomes(reports) == ["success", "revoked_action"]
+    # §7.6: шаг 1 сделан этим же прогоном — шаг 2 отозван посреди записи
+    assert wr.notes == [
+        {
+            "action": "close_shipped",
+            "subject": "own/a#1",
+            "status": "частично: шаг 2 (close) — отозван (enabled_actions)",
+        }
+    ]
+
+
+def test_partial_note_when_earlier_step_done_in_prior_run(w) -> None:
+    """§7.6/§7.5: план несёт только шаг 2 — шаг 1 уже сделан прежним прогоном."""
+    rm = roadmap(enabled=("nudge",))
+    wr = writer(w, rms=[rm])
+    reports = wr.execute([rec(close(), done_before=1)])
+    assert outcomes(reports) == ["revoked_action"]
+    assert wr.notes == [
+        {
+            "action": "close_shipped",
+            "subject": "own/a#1",
+            "status": "частично: шаг 2 (close) — отозван (enabled_actions)",
+        }
+    ]
+
+
+def test_no_partial_note_without_earlier_done_step(w) -> None:
+    """Двойник: ни один шаг не сделан — частичности нет, запись просто отозвана."""
+    rm = roadmap(enabled=("nudge",))
+    wr = writer(w, rms=[rm])
+    reports = wr.execute([rec(close())])
+    assert outcomes(reports) == ["revoked_action"]
+    assert wr.notes == []
+
+
+def test_partial_note_for_removed_mid_sequence(w) -> None:
+    """§7.6: сбой шага 8 (ревалидация) посреди записи — тоже частично."""
+    record = PlanRecord(
+        "close_shipped",
+        "own/a#1",
+        "rev1",
+        1,
+        (comment(), close()),
+        revalidate=lambda m: "ответ изменился" if m.op == "close" else None,
+    )
+    wr = writer(w)
+    reports = wr.execute([record])
+    assert outcomes(reports) == ["success", "removed"]
+    assert wr.notes == [
+        {
+            "action": "close_shipped",
+            "subject": "own/a#1",
+            "status": "частично: шаг 2 (close) — основание снято (ответ изменился)",
+        }
+    ]
 
 
 def test_uncovered_not_sent_and_dependent_skipped(w) -> None:

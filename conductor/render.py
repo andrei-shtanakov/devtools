@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from typing import Any
 
 from conductor.rank import QueueEntry
 from conductor.snapshot import Result, owner_questions
@@ -166,6 +167,16 @@ def render_why(result: Result, node_id: str) -> str:
     )
     lines.append(entry.why if entry else "не кандидат (заблокирован или закрыт)")
     return "\n".join(lines)
+
+
+def render_partial_notes(notes: list[dict[str, Any]]) -> list[str]:
+    """Заметки §7.6 «частично» из writer.notes снимка — строка на запись."""
+    lines = [
+        f"  {n.get('subject', n.get('action', '?'))}: {n['status']}"
+        for n in notes
+        if str(n.get("status", "")).startswith("частично")
+    ]
+    return ["частичное выполнение:", *lines] if lines else []
 
 
 def render_plan(result: Result) -> str:

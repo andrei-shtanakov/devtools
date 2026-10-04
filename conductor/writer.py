@@ -92,6 +92,9 @@ class PlanRecord:
     (О §2.4: класс, фокус, `focus.autonomy`); по умолчанию — потолок прогона.
     revalidate(m) — шаг 8 §5.1: свежее чтение основания перед мутацией m;
     None — основание в силе, иначе причина снятия.
+    done_before — число шагов этого действия, уже выполненных в ПРЕЖНЕМ
+    прогоне (их нет в steps); >0 отмечает продолжение начатого действия:
+    прерывание в этом прогоне даёт заметку §7.6 «частично».
     """
 
     action: str
@@ -101,6 +104,7 @@ class PlanRecord:
     steps: tuple[Step, ...]
     revalidate: Callable[[Mutation], str | None] = field(default=_valid, compare=False)
     authority: Callable[[Roadmap, int], int] = field(default=_run_level, compare=False)
+    done_before: int = 0
 
 
 @dataclass(frozen=True)
@@ -115,6 +119,34 @@ class StepReport:
     reason: str = ""
     admissible: bool | None = None
     allowed: bool | None = None
+
+
+#: Человеко-читаемая метка причины прерывания для заметки §7.6 «частично»;
+#: исход, которого здесь нет, показывается своим именем (outcome).
+_PARTIAL_LABELS: dict[str, str] = {
+    "revoked_action": "отозван",
+    "revoked_all": "отозван",
+    "removed": "основание снято",
+    "fence": "вне покрытия",
+    "not_sent": "не отправлено",
+    "delay": "отложен",
+    "uncertain": "неопределённость",
+    "failed": "сбой",
+    "skipped_dependent": "пропущен",
+}
+
+
+def _partial_note(
+    rec: PlanRecord, step: Step, rep: StepReport, step_num: int
+) -> dict[str, str]:
+    """Заметка §7.6: шаг <step_num> не выполнен, более ранний шаг — уже есть."""
+    label = _PARTIAL_LABELS.get(rep.outcome, rep.outcome)
+    detail = f"{label} ({rep.reason})" if rep.reason else label
+    return {
+        "action": rec.action,
+        "subject": rec.subject,
+        "status": f"частично: шаг {step_num} ({step.mutation.op}) — {detail}",
+    }
 
 
 class StopPoint(Exception):
@@ -193,6 +225,7 @@ class Writer:
         self.stopped: str | None = None
         self.revoked: set[str] = set()
         self.created: dict[str, int] = {}
+        self.notes: list[dict[str, str]] = []
 
     def execute(self, records: list[PlanRecord]) -> list[StepReport]:
         """Все записи плана; StopPoint пробрасывается (имитация обрыва)."""
@@ -206,7 +239,9 @@ class Writer:
     def _record(self, rec: PlanRecord) -> list[StepReport]:
         out: list[StepReport] = []
         blocked_by = ""
-        for step in rec.steps:
+        done = rec.done_before > 0  # шаг прежнего прогона уже сделан (§7.6)
+        noted = False
+        for i, step in enumerate(rec.steps):
             if self.stopped:
                 rep = self._rep(rec, step.mutation, "revoked_all", self.stopped)
             elif blocked_by:
@@ -217,6 +252,14 @@ class Writer:
                 rep = self._step(rec, step)
                 if rep.outcome not in CONTINUE and not step.optional:
                     blocked_by = rep.outcome
+            interrupted = rep.outcome not in CONTINUE and not step.optional
+            if done and interrupted and not noted:
+                self.notes.append(
+                    _partial_note(rec, step, rep, rec.done_before + i + 1)
+                )
+                noted = True
+            if rep.outcome == "success":
+                done = True
             self._journal.write(asdict(rep))
             out.append(rep)
         return out

@@ -42,7 +42,12 @@ from conductor.opstate import (
     recover_state,
 )
 from conductor.reconcile import reconcile
-from conductor.render import render_plan, render_status, render_why
+from conductor.render import (
+    render_partial_notes,
+    render_plan,
+    render_status,
+    render_why,
+)
 from conductor.roadmap import Roadmap, parse_roadmap
 from conductor.snapshot import Result, contract_violation, evaluate, to_snapshot
 from conductor.sources_gh import run_gh
@@ -313,12 +318,14 @@ def _write_phase(
     try:
         reports = writer.execute(plan_records(result, inputs, ctx))
     except StopPoint as stop:
+        ctx.notes += writer.notes  # §7.6: частично сделанное до остановки
         block = {
             "is_writer": True,
             "reason": f"точка остановки {stop.name}",
             "notes": ctx.notes,
         }
         return EXIT_STOP, block, [{"stop_point": stop.name}]
+    ctx.notes += writer.notes  # §7.6: шаг прерван — писателю об этом видно
     if writer.stopped is not None and "OPSTATE-WRITE" in writer.stopped:
         findings.append("OPSTATE-WRITE")  # §4.6: находка в снимке и код 4
     block = {
@@ -373,6 +380,9 @@ def _run(
     _write_atomic(run_dir / "snapshot.json", text)
     _rotate(args.out)
     print(render_status(result))
+    partial = render_partial_notes((snap.get("writer") or {}).get("notes") or [])
+    if partial:
+        print("\n".join(partial))
     return code
 
 
