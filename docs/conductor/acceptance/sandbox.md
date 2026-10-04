@@ -35,7 +35,14 @@
   - [ ] Цель A5 @owner:github:<owner> @id:goal-a5 @epic:acc.focus @blocked_by:todo://conductor-sandbox/pre-a5
   - [ ] Предпосылка A5 @owner:TBD @id:pre-a5 @epic:acc.bg
   - [ ] Цель A10 @owner:github:<owner> @id:goal-a10 @epic:acc.focus @blocked_by:conductor-sandbox-outside#1
+  - [ ] Цель A3a/A3e (ранг issue X) @owner:github:<owner> @id:goal-a3x @epic:acc.focus @blocked_by:conductor-sandbox#<X>
+  - [ ] Цель A3b/A3c (ранг issue Y) @owner:github:<owner> @id:goal-a3y @epic:acc.focus @blocked_by:conductor-sandbox#<Y>
+  - [ ] Цель A3d (ранг issue Z) @owner:github:<owner> @id:goal-a3z @epic:acc.focus @blocked_by:conductor-sandbox#<Z>
   ```
+
+  Последние три строки обязательны: `close_shipped` рассматривает только открытые
+  issues **с рангом** (спека среза 1, §7.5) — без них X/Y/Z в очередь не попадут
+  (приёмка 2026-10-04).
 
 - Issues (метка `inbox`, тело начинается шапкой `slug:`/`from:`):
   - `#1 slug: goal-a4` и `#2 slug: goal-a4` — два адреса цели A4 (A4);
@@ -44,7 +51,11 @@
     с `Fixes #N`, после чего issue **переоткрыт** владельцем (основание — только ответ);
 - PR `#7` с нарочно красной проверкой (workflow `exit 1`), реализует `@id:goal-a4`,
   открыт за сутки до прогона (A6).
-- `conductor-sandbox-outside#1` — открытый issue (A10: адрес вне забора).
+- `conductor-sandbox-outside#1` — открытый issue (A10: адрес вне забора). Репо `-outside`
+  должно иметь хотя бы один коммит (например, README): пустое репо даёт ошибку чтения
+  TODO и граф `partial` (приёмка 2026-10-04).
+- Двойник A6 (красный PR без застоя) — отдельный PR на **своём** коммите: проверки GitHub
+  привязаны к SHA, PR на том же коммите подмешает чужие прогоны в ссылки пинка.
 
 Изоляция (ревью P2-4): в профиле `acceptance` зонтик — сама песочница (`umbrella_name(cfg)`):
 манифест, роадмап, эпики, очередь и состав флота читаются только из неё, настоящий зонтик
@@ -61,13 +72,13 @@
 ```bash
 sudo -u conductor git clone https://github.com/<owner>/conductor-sandbox.git /srv/conductor/acceptance/workspace/conductor-sandbox
 sudo -u conductor git clone https://github.com/<owner>/conductor-sandbox-outside.git /srv/conductor/acceptance/workspace/conductor-sandbox-outside
-sudo -u conductor uv run --frozen python -m conductor init-state --config /srv/conductor/acceptance.toml
+sudo -u conductor env GH_CONFIG_DIR=/srv/conductor/gh uv run --frozen python -m conductor init-state --config /srv/conductor/acceptance.toml
 ```
 
 Прогон сценария (после 65 минут карантина; без `--level` потолок прогона — 0 и записей нет):
 
 ```bash
-sudo -u conductor uv run --frozen python -m conductor run --root /srv/conductor/acceptance/workspace --out /srv/conductor/acceptance/runs --level 3 --config /srv/conductor/acceptance.toml
+sudo -u conductor env GH_CONFIG_DIR=/srv/conductor/gh uv run --frozen python -m conductor run --root /srv/conductor/acceptance/workspace --out /srv/conductor/acceptance/runs --level 3 --config /srv/conductor/acceptance.toml
 ```
 
 `init-state` и `run --config` берут lock хоста `/srv/conductor/state/conductor.lock` — тот
@@ -79,3 +90,7 @@ sudo -u conductor uv run --frozen python -m conductor run --root /srv/conductor/
 Таблица A1–A13 — спека среза 1, §9.3. Для каждого: `acceptance_dump.py` до,
 `acceptance.sh` (если сценарий меняет роадмап), прогон, `acceptance_dump.py` после,
 выдержка `runs/<id>/calls.jsonl` и `journal.jsonl`; всё — в квитанцию.
+
+Ручные прогоны берут тот же lock, что служба флота (`conductor.timer`, в :00, ~1,5 мин):
+занято — повторить. Без `GH_CONFIG_DIR=/srv/conductor/gh` источник `github` в ошибке.
+Пройденная приёмка — `2026-10-04-slice1.md`.
