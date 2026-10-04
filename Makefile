@@ -16,7 +16,7 @@ WORKSPACE ?= ..
 MANIFEST ?= $(WORKSPACE)/ai-orchestrators-workspace/workspace-manifest.toml
 
 .DEFAULT_GOAL := help
-.PHONY: help status fetch pull dirty branches bootstrap drift conformance catalog-fixtures graph-drift plan-check plan-check-selftest todo-context todo-work plan-check-fixture inbox issues morning evening snapshot fleet-report today salvage install arch-freshness arch-freshness-read behaviour-run spec-loop behaviour-console behaviour-tasks accept-pr preflight edge-check selfcheck selfcheck-dogfood criteria-close conductor
+.PHONY: help status fetch pull dirty branches bootstrap drift conformance catalog-fixtures graph-drift plan-check plan-check-selftest todo-context todo-work plan-check-fixture inbox issues morning evening snapshot fleet-report today salvage config-policy install arch-freshness arch-freshness-read behaviour-run spec-loop behaviour-console behaviour-tasks accept-pr preflight edge-check selfcheck selfcheck-dogfood criteria-close conductor
 
 help:
 	@echo "Цели:"
@@ -43,6 +43,7 @@ help:
 	@echo "  make fleet-report— markdown-отчёт о флоте в stdout (fleet_report.py)"
 	@echo "  make today       — что изменилось с полуночи: коммиты + незакоммиченное"
 	@echo "  make salvage     — salvage-скан: orphan worktrees / ветки без PR / unpushed default / stale locks (пусто = чисто)"
+	@echo "  make config-policy — сверка конфигов spec-runner флота с политикой contracts/fleet-config-policy (пусто = чисто)"
 	@echo "  make install     — доклонировать недостающие репо набора по манифесту зонтика"
 	@echo "  make release-drift — набор из манифеста зонтика ↔ факт на диске"
 	@echo "  make arch-freshness       — локальная диагностика drift/freshness арх-evidence (вахта — CI steward)"
@@ -85,6 +86,7 @@ snapshot:    ; @uv run --project ../github-checker github-checker snapshot --wor
 fleet-report:; @uv run --project ../github-checker github-checker snapshot --workspace .. | python3 ./fleet_report.py
 today:       ; @python3 ./recent_changes.py
 salvage:     ; @python3 ./salvage_scan.py --workspace $(WORKSPACE) --manifest $(MANIFEST)
+config-policy: ; @uv run --frozen python ./fleet_config_policy.py --workspace $(WORKSPACE) --manifest $(MANIFEST)
 
 .PHONY: release-drift
 release-drift: ; @python3 ./check-release-drift.py --workspace .. --manifest $(MANIFEST)
