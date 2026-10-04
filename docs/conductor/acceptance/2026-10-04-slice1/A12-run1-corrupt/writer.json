@@ -1,0 +1,34 @@
+{
+ "run_id": "2026-10-04T092126Z",
+ "graph_state": "complete",
+ "run_level": 1,
+ "roadmap": {
+  "source": "origin",
+  "sha": "446c6930a3c0d480e1fd681b9731ca69dec43d79",
+  "valid": true
+ },
+ "writer": {
+  "is_writer": true,
+  "reason": "запись",
+  "level_cap": 3,
+  "findings": [
+   "OPSTATE-LOST"
+  ],
+  "notes": [
+   {
+    "finding": "GR-REOPENED",
+    "subject": "conductor-sandbox#2"
+   },
+   {
+    "action": "notify_satisfied",
+    "wait": "todo://conductor-sandbox/goal-a3z|conductor-sandbox#3",
+    "reason": "канал доставки — срез 1b"
+   },
+   {
+    "action": "close_shipped",
+    "subject": "conductor-sandbox#1",
+    "status": "частично: шаг 2 (close) — отозван (карантин)"
+   }
+  ]
+ }
+}

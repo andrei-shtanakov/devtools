@@ -1,0 +1,9 @@
+{"attempt_id": "eb2b141a007942859ad20fbb42318631", "body_sha256": "e627041d40a2276f5b2c06324ce301f82b68f5edf9fe58e0068a349188f030cf", "endpoint": "/repos/andrei-shtanakov/conductor-sandbox/issues/11", "marker_key": "body", "method": "PATCH", "repo": "andrei-shtanakov/conductor-sandbox", "seq": 1, "t": "intent"}
+{"outcome": "ok", "sent": true, "seq": 1, "status": 200, "t": "result"}
+{"attempt_id": "8fc5c1dd30ed46ae88e3f52ee3918e94", "body_sha256": "25a50d8fa7944fd32cf2bd4b2b387d9d89cbc4be6c22c9428dfc002532b3e86b", "endpoint": "/repos/andrei-shtanakov/conductor-sandbox/issues/11/comments", "marker_key": "<!-- conductor:v1 q id=h1-d41c485fec2c4c2f -->", "method": "POST", "repo": "andrei-shtanakov/conductor-sandbox", "seq": 2, "t": "intent"}
+{"outcome": "ok", "sent": true, "seq": 2, "status": 201, "t": "result"}
+{"attempt_id": "6de1283985324d6d97d5e899f13a3e38", "body_sha256": "960ea9cf53a5d3ce568e17e5fe5db9e90f173f5e4c249e7e847118a5dd6d5d13", "endpoint": "/repos/andrei-shtanakov/conductor-sandbox/issues/1/comments", "marker_key": "<!-- conductor:v1 close evidence=h1-6b84456794bcaf4e node=h1-07c1abd9845f613c period=h1-410b48034f09563c -->", "method": "POST", "repo": "andrei-shtanakov/conductor-sandbox", "seq": 3, "t": "intent"}
+{"outcome": "ok", "sent": true, "seq": 3, "status": 201, "t": "result"}
+{"attempt_id": "817047b02d7a40f6a46e9842faabf1ca", "body_sha256": "00d69a1909c107db8ec12f5e73a5914be4239533b6c54a48ee84aca8b287c86f", "endpoint": "/repos/andrei-shtanakov/conductor-sandbox/issues/1", "marker_key": "close", "method": "PATCH", "repo": "andrei-shtanakov/conductor-sandbox", "seq": 4, "t": "intent"}
+{"outcome": "ok", "sent": true, "seq": 4, "status": 200, "t": "result"}
+{"t": "run-end"}

@@ -1,0 +1,11 @@
+{"attempt_id": "e1bbe443a6bd4415b8fecdb9d86e0b7b", "body_sha256": "b9ae186747912bfb069c56642deb72f86a2beec61675f534da297e5d44db6ca8", "endpoint": "/repos/andrei-shtanakov/conductor-sandbox/issues", "marker_key": "owner-queue", "method": "POST", "repo": "andrei-shtanakov/conductor-sandbox", "seq": 1, "t": "intent"}
+{"outcome": "ok", "sent": true, "seq": 1, "status": 201, "t": "result"}
+{"attempt_id": "6e4ba144c5fd4bdc87218372a11ee468", "body_sha256": "fef3a4c911b74ed116fe76ee4f94e4dcdb42126338f6ef732031ff9f89e2f614", "endpoint": "/graphql", "marker_key": "pin", "method": "POST", "repo": "andrei-shtanakov/conductor-sandbox", "seq": 2, "t": "intent"}
+{"outcome": "ok", "sent": true, "seq": 2, "status": 200, "t": "result"}
+{"attempt_id": "c01dfb0c448c42c2afa433c8ee0f869f", "body_sha256": "59030562c5238c67e844e7ba97b8bfcd57378d86d682e39f3341f0cba661aa6b", "endpoint": "/repos/andrei-shtanakov/conductor-sandbox/issues/11/comments", "marker_key": "<!-- conductor:v1 q id=h1-e34db84a8b420496 -->", "method": "POST", "repo": "andrei-shtanakov/conductor-sandbox", "seq": 3, "t": "intent"}
+{"outcome": "ok", "sent": true, "seq": 3, "status": 201, "t": "result"}
+{"attempt_id": "0f53129f6a5e474b8cd332210c7b46e3", "body_sha256": "dfe7b59c7a5022b8ffdee19269b1b78eb870f95ba58fd12c108c9364cd68f96b", "endpoint": "/repos/andrei-shtanakov/conductor-sandbox/issues/11/comments", "marker_key": "<!-- conductor:v1 q id=h1-3933065d6b5fda5b -->", "method": "POST", "repo": "andrei-shtanakov/conductor-sandbox", "seq": 4, "t": "intent"}
+{"outcome": "ok", "sent": true, "seq": 4, "status": 201, "t": "result"}
+{"attempt_id": "a95f39aedd474459a7d2f1608b9d10f0", "body_sha256": "5e71d06f1b5d73b93c3444f39ffedab8b062d6cc7037ac6b4f4130bb53db5819", "endpoint": "/repos/andrei-shtanakov/conductor-sandbox/issues/11/comments", "marker_key": "<!-- conductor:v1 q id=h1-c6c46a6cd4796cc9 -->", "method": "POST", "repo": "andrei-shtanakov/conductor-sandbox", "seq": 5, "t": "intent"}
+{"outcome": "ok", "sent": true, "seq": 5, "status": 201, "t": "result"}
+{"t": "run-end"}

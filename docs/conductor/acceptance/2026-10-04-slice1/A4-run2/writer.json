@@ -1,0 +1,35 @@
+{
+ "run_id": "2026-10-04T071155Z",
+ "graph_state": "complete",
+ "run_level": 1,
+ "roadmap": {
+  "source": "origin",
+  "sha": "80b8fb5adc5fe625cf3317367b2d20202d353fe4",
+  "valid": true
+ },
+ "writer": {
+  "is_writer": true,
+  "reason": "запись",
+  "level_cap": 3,
+  "findings": [],
+  "notes": [
+   {
+    "finding": "GR-REOPENED",
+    "subject": "conductor-sandbox#1"
+   },
+   {
+    "finding": "GR-REOPENED",
+    "subject": "conductor-sandbox#2"
+   },
+   {
+    "finding": "GR-REOPENED",
+    "subject": "conductor-sandbox#3"
+   },
+   {
+    "action": "pr_nudge",
+    "pr": "conductor-sandbox!10",
+    "reason": "нет ранга"
+   }
+  ]
+ }
+}
