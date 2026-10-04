@@ -110,7 +110,8 @@ def _section(text: str) -> dict:
 
 
 def fleet_ref(repo: Path) -> str | None:
-    """`origin/<default>` — ТОЛЬКО по remote-ссылкам; None — не установлен.
+    """`refs/remotes/origin/<default>` — ТОЛЬКО по remote-ссылкам, полным
+    именем; None — не установлен.
 
     Локальные `master`/`main` и `HEAD` сюда не годятся (терм. ревью #562):
     это состояние клона, а не флота, и незапушенная правка выглядела бы
@@ -130,7 +131,10 @@ def fleet_ref(repo: Path) -> str | None:
             ).returncode
             == 0
         ):
-            return ref.removeprefix("refs/remotes/")
+            # полное имя: короткое `origin/master` git резолвит через
+            # `refs/heads/` раньше `refs/remotes/` — локальная ветка с таким
+            # именем затенила бы флот (ревью #562)
+            return ref
     return None
 
 

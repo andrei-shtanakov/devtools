@@ -242,3 +242,37 @@ def test_origin_head_pointing_outside_remotes_is_ignored(tmp_path):
     run_git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/heads/master")
     [f] = fcp.check_repo(repo, POLICY)
     assert (f.state, f.value) == ("violation", "warn")
+
+
+def test_origin_head_is_honoured_for_a_non_master_default(tmp_path):
+    """Ревью #562 (recheck 3): default-ветка `trunk` — `origin/HEAD` здесь
+    единственный путь к ref флота (fallback master/main не спасает)."""
+    up = tmp_path / "up"
+    up.mkdir()
+    run_git(up, "init", "-q", "-b", "trunk")
+    (up / "spec-runner.config.yaml").write_text("harness_guard: strict\n")
+    run_git(up, "add", "-A")
+    run_git(up, "commit", "-q", "-m", "init")
+    repo = tmp_path / "a"
+    subprocess.run(
+        ["git", "clone", "-q", str(up), str(repo)],
+        env=GIT_ENV,
+        check=True,
+        capture_output=True,
+    )
+    assert fcp.fleet_ref(repo) == "refs/remotes/origin/trunk"
+    [f] = fcp.check_repo(repo, POLICY)
+    assert f.state == "ok"
+
+
+def test_local_branch_named_like_the_remote_does_not_shadow_it(tmp_path):
+    """Ревью #562 (recheck 3): короткое `origin/master` git резолвит через
+    `refs/heads/` раньше `refs/remotes/` — ref флота только полным именем."""
+    repo = clone_with(
+        tmp_path, "a", {"spec-runner.config.yaml": "harness_guard: warn\n"}
+    )
+    (repo / "spec-runner.config.yaml").write_text("harness_guard: strict\n")
+    run_git(repo, "commit", "-qam", "local only")
+    run_git(repo, "branch", "origin/master")
+    [f] = fcp.check_repo(repo, POLICY)
+    assert (f.state, f.value) == ("violation", "warn")
