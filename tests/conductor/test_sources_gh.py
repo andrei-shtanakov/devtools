@@ -358,3 +358,47 @@ def test_declined_search_failure_is_error() -> None:
         }
     )
     assert discover("own", {"a"}, run)[1] == "error"
+
+
+def test_app_author_is_normalised_to_bot_login() -> None:
+    """Issue/PR, созданный GitHub App, приходит из `gh ... --json author`
+    в форме `app/<slug>` — отлично от REST/`GET /app` формы `<slug>[bot]`,
+    с которой сравнивается bot login везде в conductor (owner_queue#131:
+    очередь владельца от App не распознавалась «своей»)."""
+    raw = json.dumps({**json.loads(ISSUE), "author": {"login": "app/conductorsandbox"}})
+    run = fake(
+        {
+            "issue view 1 -R own/a --json": (0, raw, ""),
+            "api --paginate --slurp repos/own/a/issues/1/comments": (0, COMMENTS, ""),
+        }
+    )
+    rec = fetch_record("own", "a", 1, False, run)
+    assert rec is not None and rec["author"] == "conductorsandbox[bot]"
+
+
+def test_human_author_login_is_unchanged() -> None:
+    raw = json.dumps({**json.loads(ISSUE), "author": {"login": "andrei-shtanakov"}})
+    run = fake(
+        {
+            "issue view 1 -R own/a --json": (0, raw, ""),
+            "api --paginate --slurp repos/own/a/issues/1/comments": (0, COMMENTS, ""),
+        }
+    )
+    rec = fetch_record("own", "a", 1, False, run)
+    assert rec is not None and rec["author"] == "andrei-shtanakov"
+
+
+def test_already_rest_form_bot_login_is_unchanged() -> None:
+    """Логин, уже отданный в форме `<slug>[bot]` (REST/GraphQL), нормализация
+    не трогает — идемпотентность на случай, если gh когда-нибудь это исправит."""
+    raw = json.dumps(
+        {**json.loads(ISSUE), "author": {"login": "conductorsandbox[bot]"}}
+    )
+    run = fake(
+        {
+            "issue view 1 -R own/a --json": (0, raw, ""),
+            "api --paginate --slurp repos/own/a/issues/1/comments": (0, COMMENTS, ""),
+        }
+    )
+    rec = fetch_record("own", "a", 1, False, run)
+    assert rec is not None and rec["author"] == "conductorsandbox[bot]"

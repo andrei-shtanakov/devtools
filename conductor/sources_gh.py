@@ -130,6 +130,18 @@ def red_checks(rollup: list[dict[str, Any]] | None) -> list[dict[str, str]]:
     return out
 
 
+def normalize_login(login: str) -> str:
+    """Логин автора из `gh ... --json author` (author.login) в форму REST/
+    `GET /app` (`<slug>[bot]`), которой везде в conductor сравнивается bot
+    login. `gh` CLI отдаёт GitHub App в своей собственной форме
+    `app/<slug>` — ни REST (`user.login`), ни GraphQL `login` её не знают;
+    без нормализации очередь владельца, созданная App, не распознаётся
+    «своей» (owner_queue.queue_issue). Человеческие и уже-`[bot]` логины
+    не трогаем — идемпотентно."""
+    prefix = "app/"
+    return login[len(prefix) :] + "[bot]" if login.startswith(prefix) else login
+
+
 def _json(out: str | None, default: str = "null") -> Any:
     """JSON ответа gh; битый ответ при коде 0 — None (сбой чтения, не падение)."""
     try:
@@ -308,7 +320,7 @@ def fetch_record(
         "state": "open" if raw.get("state") == "OPEN" else "closed",
         "state_reason": (raw.get("stateReason") or "").lower() or None,
         "merged": bool(raw.get("mergedAt")),
-        "author": (raw.get("author") or {}).get("login", ""),
+        "author": normalize_login((raw.get("author") or {}).get("login", "")),
         "labels": [lab["name"] for lab in raw.get("labels", [])],
         "updated_at": raw.get("updatedAt", ""),
         "url": raw.get("url", ""),
