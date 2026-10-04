@@ -2753,3 +2753,13 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       `local.sh` blob 2127990; ручной `review-kit-drift` — success у всех,
       где он есть (spec-runner, atp-platform, maestro, arbiter, kapelle).
       Открыто только: промпт (steward#200) и проброс (steward#199).
+
+## Политика флота для конфига spec-runner (решение владельца 2026-10-04)
+
+> Конфиг spec-runner живёт в каждом репо; часть ключей — политика флота,
+> записанная копиями, и копии разъехались молча (`harness_guard: strict`
+> только у spec-runner и devtools). SSOT политики — контракт в devtools,
+> сенсор называет отклонения; чинит владелец репо.
+
+- [x] Контракт `contracts/fleet-config-policy/v1/policy.toml` и сенсор `fleet_config_policy.py` (`make config-policy`), первый ключ — `harness_guard: strict` @owner:github:andrei-shtanakov @id:fleet-config-policy-sensor @epic:eco.tooling — PR этой ветки
+- [ ] Довести флот до политики: `make config-policy` при вводе (2026-10-04) — 8 отклонений `harness_guard`: violation (конфиг есть, ключа нет → `warn`) — arbiter, atp-platform (legacy `spec/executor.config.yaml`), dispatcher, proctor; unconfigured (tasks-спеки есть, конфига нет) — discovery, disputatio, kapelle, maestro (у maestro корневой `executor.config.yaml` spec-runner не читает). Форма доставки — решение владельца (заявки владельцам репо или волна PR) @owner:github:andrei-shtanakov @id:fleet-config-policy-rollout @epic:eco.tooling
