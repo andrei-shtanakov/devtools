@@ -26,6 +26,31 @@ GIT_ENV = {
 }
 
 POLICY = [fcp.PolicyKey("harness_guard", "strict", "warn", "tripwire")]
+# Защита подтверждается только закреплённой версией с исправлениями (#562 след.)
+PROTECTED = [
+    fcp.PolicyKey(
+        "harness_guard",
+        "strict",
+        "warn",
+        "tripwire",
+        effective_since="2.14.0",
+        protected_since="4.6.0",
+    )
+]
+UNRELEASED = [
+    fcp.PolicyKey(
+        "harness_guard",
+        "strict",
+        "warn",
+        "tripwire",
+        effective_since="2.14.0",
+        protected_since="",
+    )
+]
+
+
+def lock(version: str) -> str:
+    return f'version = 1\n\n[[package]]\nname = "spec-runner"\nversion = "{version}"\n'
 
 
 def run_git(cwd: Path, *args: str) -> None:
@@ -171,8 +196,10 @@ def test_main_is_silent_when_clean_and_exit_1_on_violation(tmp_path, capsys):
         '[cores.good]\nrepo_url = "git@github.com:o/good.git"\ngit_dir = "good"\n',
         encoding="utf-8",
     )
-    assert fcp.main(["--workspace", str(tmp_path), "--manifest", str(manifest)]) == 0
-    assert capsys.readouterr().out == ""
+    # политика соблюдена, но закреплённой версии с исправлениями нет —
+    # не «чисто», а код 3 «защита не подтверждена»
+    assert fcp.main(["--workspace", str(tmp_path), "--manifest", str(manifest)]) == 3
+    assert "не подтверждено" in capsys.readouterr().out
 
     manifest.write_text(
         manifest.read_text()
@@ -276,3 +303,137 @@ def test_local_branch_named_like_the_remote_does_not_shadow_it(tmp_path):
     run_git(repo, "branch", "origin/master")
     [f] = fcp.check_repo(repo, POLICY)
     assert (f.state, f.value) == ("violation", "warn")
+
+
+# --- режим Maestro: конфиг генерируется из project.yaml (решение 2026-10-04) ---
+
+MAESTRO = """\
+spec_runner:
+  max_retries: 3
+  extra_executor_config:
+    executor:
+      harness_guard: strict
+"""
+
+
+def test_maestro_project_yaml_is_the_source(tmp_path):
+    """disputatio: `spec-runner.config.yaml` генерирует Maestro и не трекается;
+    значение — из `extra_executor_config.executor`, а не «unconfigured»."""
+    repo = clone_with(
+        tmp_path, "a", {"project.yaml": MAESTRO, "spec/x-tasks.md": "#\n"}
+    )
+    [f] = fcp.check_repo(repo, POLICY)
+    assert (f.state, f.value, f.source) == ("ok", "strict", "project.yaml (Maestro)")
+
+
+def test_maestro_without_the_key_is_a_violation(tmp_path):
+    repo = clone_with(
+        tmp_path, "a", {"project.yaml": "spec_runner:\n  max_retries: 2\n"}
+    )
+    [f] = fcp.check_repo(repo, POLICY)
+    assert (f.state, f.value) == ("violation", "warn")
+    assert "extra_executor_config" in f.detail
+
+
+def test_project_yaml_without_spec_runner_falls_through(tmp_path):
+    repo = clone_with(
+        tmp_path,
+        "a",
+        {
+            "project.yaml": "name: x\n",
+            "spec-runner.config.yaml": "harness_guard: strict\n",
+        },
+    )
+    [f] = fcp.check_repo(repo, POLICY)
+    assert f.source == "spec-runner.config.yaml"
+
+
+# --- закреплённая версия: «защищено» только доказанно ---------------------
+
+
+def test_locked_version_below_effective_means_the_key_is_ignored(tmp_path):
+    """arbiter/atp-platform: uv.lock держит 2.9.0 — ключ из 2.14.0 молча
+    игнорируется; это не нарушение значения, но и не защита."""
+    repo = clone_with(
+        tmp_path,
+        "a",
+        {
+            "spec-runner.config.yaml": "harness_guard: strict\n",
+            "uv.lock": lock("2.9.0"),
+        },
+    )
+    [f] = fcp.check_repo(repo, PROTECTED)
+    assert f.state == "ok" and not f.protected
+    assert "2.9.0" in f.protection and "игнорируется" in f.protection
+
+
+def test_unpinned_spec_runner_is_not_confirmed(tmp_path):
+    repo = clone_with(
+        tmp_path, "a", {"spec-runner.config.yaml": "harness_guard: strict\n"}
+    )
+    [f] = fcp.check_repo(repo, PROTECTED)
+    assert not f.protected and "не закреплена" in f.protection
+
+
+def test_unreleased_fixes_confirm_nobody(tmp_path):
+    """protected_since пуст — исправления не выпущены: даже свежий пин и
+    strict не дают «защищено»."""
+    repo = clone_with(
+        tmp_path,
+        "a",
+        {
+            "spec-runner.config.yaml": "harness_guard: strict\n",
+            "uv.lock": lock("4.5.0"),
+        },
+    )
+    [f] = fcp.check_repo(repo, UNRELEASED)
+    assert not f.protected and "не выпущены" in f.protection
+
+
+@pytest.mark.parametrize(("pinned", "protected"), [("4.6.0", True), ("4.5.9", False)])
+def test_protected_only_from_the_fixing_version(tmp_path, pinned, protected):
+    repo = clone_with(
+        tmp_path,
+        "a",
+        {"spec-runner.config.yaml": "harness_guard: strict\n", "uv.lock": lock(pinned)},
+    )
+    [f] = fcp.check_repo(repo, PROTECTED)
+    assert f.protected is protected
+
+
+def test_prerelease_of_the_fixing_version_is_not_protection(tmp_path):
+    repo = clone_with(
+        tmp_path,
+        "a",
+        {
+            "spec-runner.config.yaml": "harness_guard: strict\n",
+            "uv.lock": lock("4.6.0rc1"),
+        },
+    )
+    [f] = fcp.check_repo(repo, PROTECTED)
+    assert not f.protected
+
+
+def test_main_is_silent_only_when_protection_is_proven(tmp_path, capsys):
+    clone_with(
+        tmp_path,
+        "good",
+        {
+            "spec-runner.config.yaml": "harness_guard: strict\n",
+            "uv.lock": lock("4.6.0"),
+        },
+    )
+    manifest = tmp_path / "m.toml"
+    manifest.write_text(
+        '[cores.good]\nrepo_url = "git@github.com:o/good.git"\ngit_dir = "good"\n',
+        encoding="utf-8",
+    )
+    contract = tmp_path / "policy.toml"
+    contract.write_text(
+        'schema = 1\n[[key]]\nname = "harness_guard"\nrequired = "strict"\n'
+        'default = "warn"\neffective_since = "2.14.0"\nprotected_since = "4.6.0"\n',
+        encoding="utf-8",
+    )
+    argv = ["--workspace", str(tmp_path), "--manifest", str(manifest)]
+    assert fcp.main([*argv, "--contract", str(contract)]) == 0
+    assert capsys.readouterr().out == ""

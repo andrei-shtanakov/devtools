@@ -2762,4 +2762,15 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 > сенсор называет отклонения; чинит владелец репо.
 
 - [x] Контракт `contracts/fleet-config-policy/v1/policy.toml` и сенсор `fleet_config_policy.py` (`make config-policy`), первый ключ — `harness_guard: strict` @owner:github:andrei-shtanakov @id:fleet-config-policy-sensor @epic:eco.tooling — PR этой ветки
+- [x] Сенсор: режим Maestro (`project.yaml` → `extra_executor_config.executor`) и защита по закреплённой версии spec-runner (`uv.lock` ≥ `protected_since`; пусто — не выпущены исправления, не защищён никто), exit 3 — «значения соблюдены, защита не подтверждена» (решение владельца 2026-10-04) @owner:github:andrei-shtanakov @id:fleet-config-policy-maestro-version @epic:eco.tooling — PR этой ветки
+- [ ] Поставить `protected_since` в контракте, когда выйдет релиз spec-runner с исправлениями гарда (RED/verify-first и post-GREEN — сейчас в CHANGELOG [Unreleased]) @owner:github:andrei-shtanakov @id:fleet-config-policy-protected-since @epic:eco.tooling
+- [ ] maestro: найти источник конфига spec-runner собственного репо и поддерживаемый способ задать политику — открытый пробел, не исключение (maestro#251 закрыт: dual-mode запрещает трекать конфиг, Maestro перезаписывает его без ключа) @owner:github:andrei-shtanakov @id:fleet-config-policy-maestro-self @epic:eco.tooling
+- [ ] research-bench, steward: в `project.yaml` есть `spec_runner` (Maestro сгенерирует конфиг с умолчанием `warn`) — найдены сенсором с режимом Maestro; включать ли в волну — решение владельца @owner:github:andrei-shtanakov @id:fleet-config-policy-maestro-extra @epic:eco.tooling
 - [ ] Довести флот до политики: `make config-policy` при вводе (2026-10-04) — 8 отклонений `harness_guard`: violation (конфиг есть, ключа нет → `warn`) — arbiter, atp-platform (legacy `spec/executor.config.yaml`), dispatcher, proctor; unconfigured (tasks-спеки есть, конфига нет) — discovery, disputatio, kapelle, maestro (у maestro корневой `executor.config.yaml` spec-runner не читает). Форма доставки — решение владельца (заявки владельцам репо или волна PR) @owner:github:andrei-shtanakov @id:fleet-config-policy-rollout @epic:eco.tooling
+      Решение 2026-10-04 — волна PR. Влиты: arbiter#118, atp-platform#344
+      (значение есть, но закреплён spec-runner 2.9.0 < 2.14.0 — ключ
+      игнорируется; обновление зависимости — владельцам, защищёнными не
+      считаются), dispatcher#300, proctor#74. Maestro-репо — через
+      `project.yaml`: kapelle#101, discovery#62; disputatio уже соблюдал
+      (ложное срабатывание сенсора). maestro#251 закрыт — см. пункт
+      fleet-config-policy-maestro-self.

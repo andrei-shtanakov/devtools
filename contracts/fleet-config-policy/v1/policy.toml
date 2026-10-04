@@ -12,13 +12,24 @@
 #   name     — ключ конфига spec-runner (плоский v2 или под `executor:` v1);
 #   required — требуемое значение;
 #   default  — умолчание spec-runner, когда ключа нет (оно и действует);
-#   reason   — зачем это политика флота, а не выбор репо.
+#   reason   — зачем это политика флота, а не выбор репо;
+#   effective_since — версия spec-runner, с которой ключ существует (ниже —
+#              молча игнорируется);
+#   protected_since — первая ВЫПУЩЕННАЯ версия, где защита по ключу полна;
+#              пусто — исправления ещё не выпущены, «защищено» не ставится
+#              никому (решение владельца 2026-10-04).
 schema = 1
 
 [[key]]
 name = "harness_guard"
 required = "strict"
 default = "warn"
+effective_since = "2.14.0"  # spec-runner 01f84a6 (#64, #90): harness_guard off|warn|strict
+# Дыры гарда (RED/verify-first до снимка; правки после GREEN: REVIEW_FIXED,
+# post_review, review-pr) закрыты в spec-runner master, CHANGELOG [Unreleased]
+# — ни в одной выпущенной версии их нет. Ставить версию релиза, который их
+# несёт, — когда он выйдет.
+protected_since = ""
 reason = """\
 Tripwire харнесса (spec-runner #64) проваливает попытку, правящую файлы \
 верификации (pyproject.toml, workflows, конфиг), только в strict; warn лишь \
