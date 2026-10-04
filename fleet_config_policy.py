@@ -128,29 +128,44 @@ def _vkey(version: str) -> tuple[int, int, int, int] | None:
     return int(major), int(minor), int(patch), 0 if rest else 1
 
 
-def pinned_version(repo: Path, ref: str) -> str | None:
-    """Версия spec-runner, закреплённая в `uv.lock` репо; None — не закреплена."""
+def pinned_versions(repo: Path, ref: str) -> list[tuple[str, bool]]:
+    """Записи spec-runner в `uv.lock` репо: (версия, из реестра ли).
+
+    Выпущенный артефакт — только пин из реестра (`source.registry`); git,
+    editable, path с тем же номером версии ничего не доказывают (ревью #567).
+    Пусто — не закреплена (lock нет, он не разобран или spec-runner в нём нет).
+    """
     text = _show(repo, ref, "uv.lock")
     if text is None:
-        return None
+        return []
     try:
         packages = tomllib.loads(text).get("package", [])
     except tomllib.TOMLDecodeError:
-        return None
-    for pkg in packages:
-        if pkg.get("name") == "spec-runner":
-            return str(pkg.get("version", "")) or None
-    return None
+        return []
+    return [
+        (str(pkg.get("version", "")), "registry" in (pkg.get("source") or {}))
+        for pkg in packages
+        if pkg.get("name") == "spec-runner"
+    ]
 
 
-def _protection(key: PolicyKey, pinned: str | None) -> tuple[bool, str]:
-    """Доказана ли защита: значение уже `ok`, вопрос только в версии."""
-    if pinned is None:
+def _protection(key: PolicyKey, pins: list[tuple[str, bool]]) -> tuple[bool, str]:
+    """Доказана ли защита: значение уже `ok`, вопрос только в версии.
+
+    Записей несколько (форки резолюции uv) — решает слабейшая.
+    """
+    if not pins:
         return False, "не подтверждено: версия spec-runner не закреплена в репо"
-    have = _vkey(pinned)
+    if not all(registry for _, registry in pins):
+        return (
+            False,
+            "не подтверждено: пин spec-runner не из реестра (git/editable/path)",
+        )
+    keyed = [(_vkey(v), v) for v, _ in pins]
+    if any(k is None for k, _ in keyed):
+        return False, f"не подтверждено: версия не разобрана ({[v for _, v in pins]})"
+    have, pinned = min(keyed)
     floor = _vkey(key.effective_since) if key.effective_since else None
-    if have is None:
-        return False, f"не подтверждено: версия {pinned!r} не разобрана"
     if floor is not None and have < floor:
         return False, (
             f"не подтверждено: закреплена {pinned} < {key.effective_since} — "
@@ -218,14 +233,14 @@ def check_repo(repo: Path, policy: list[PolicyKey]) -> list[Finding]:
     """Находки по всем ключам политики для одного клона, с пометкой защиты."""
     findings = _check_values(repo, policy)
     ref = fleet_ref(repo)
-    pinned = pinned_version(repo, ref) if ref is not None else None
+    pins = pinned_versions(repo, ref) if ref is not None else []
     keys = {k.name: k for k in policy}
     out = []
     for f in findings:
         if f.state != "ok":
             out.append(f)
             continue
-        protected, note = _protection(keys[f.key], pinned)
+        protected, note = _protection(keys[f.key], pins)
         out.append(replace(f, protected=protected, protection=note))
     return out
 
@@ -249,9 +264,16 @@ def _maestro_findings(
             Finding(name, k.name, "unreadable", "?", source, f"не разобран: {exc}")
             for k in policy
         ]
-    block = data.get("spec_runner") if isinstance(data, dict) else None
-    if not isinstance(block, dict):
+    # режим решает НАЛИЧИЕ ключа (ревью #567): `spec_runner:` без подключей —
+    # Maestro на умолчаниях, а не «project.yaml не про spec-runner»
+    if not isinstance(data, dict) or "spec_runner" not in data:
         return None
+    block = data["spec_runner"] if data["spec_runner"] is not None else {}
+    if not isinstance(block, dict):
+        return [
+            Finding(name, k.name, "unreadable", "?", source, "spec_runner не mapping")
+            for k in policy
+        ]
     extra = block.get("extra_executor_config") or {}
     section = extra.get("executor") if isinstance(extra, dict) else None
     section = section if isinstance(section, dict) else {}

@@ -50,7 +50,10 @@ UNRELEASED = [
 
 
 def lock(version: str) -> str:
-    return f'version = 1\n\n[[package]]\nname = "spec-runner"\nversion = "{version}"\n'
+    return (
+        f'version = 1\n\n[[package]]\nname = "spec-runner"\nversion = "{version}"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+    )
 
 
 def run_git(cwd: Path, *args: str) -> None:
@@ -437,3 +440,65 @@ def test_main_is_silent_only_when_protection_is_proven(tmp_path, capsys):
     argv = ["--workspace", str(tmp_path), "--manifest", str(manifest)]
     assert fcp.main([*argv, "--contract", str(contract)]) == 0
     assert capsys.readouterr().out == ""
+
+
+def test_git_or_editable_pin_is_not_a_released_artifact(tmp_path):
+    """Ревью #567: «защищено» — только пин на ВЫПУЩЕННЫЙ артефакт из реестра;
+    git/editable с тем же номером версии ничего не доказывает."""
+    git_lock = (
+        'version = 1\n\n[[package]]\nname = "spec-runner"\nversion = "4.6.0"\n'
+        'source = { git = "https://github.com/o/spec-runner?rev=abc#abc" }\n'
+    )
+    repo = clone_with(
+        tmp_path,
+        "a",
+        {"spec-runner.config.yaml": "harness_guard: strict\n", "uv.lock": git_lock},
+    )
+    [f] = fcp.check_repo(repo, PROTECTED)
+    assert not f.protected and "реестр" in f.protection
+
+
+def test_registry_pin_is_a_released_artifact(tmp_path):
+    reg_lock = (
+        'version = 1\n\n[[package]]\nname = "spec-runner"\nversion = "4.6.0"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+    )
+    repo = clone_with(
+        tmp_path,
+        "a",
+        {"spec-runner.config.yaml": "harness_guard: strict\n", "uv.lock": reg_lock},
+    )
+    [f] = fcp.check_repo(repo, PROTECTED)
+    assert f.protected
+
+
+def test_several_lock_entries_take_the_weakest(tmp_path):
+    """Форки резолюции uv: две записи spec-runner — решает слабейшая."""
+    two = (
+        'version = 1\n\n[[package]]\nname = "spec-runner"\nversion = "4.6.0"\n'
+        'source = { registry = "https://pypi.org/simple" }\n\n'
+        '[[package]]\nname = "spec-runner"\nversion = "2.9.0"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+    )
+    repo = clone_with(
+        tmp_path,
+        "a",
+        {"spec-runner.config.yaml": "harness_guard: strict\n", "uv.lock": two},
+    )
+    [f] = fcp.check_repo(repo, PROTECTED)
+    assert not f.protected and "2.9.0" in f.protection
+
+
+def test_empty_spec_runner_block_is_still_maestro(tmp_path):
+    """Ревью #567: `spec_runner:` без подключей — Maestro на умолчаниях, а не
+    «project.yaml не про spec-runner»; трекаемый файл тут не действует."""
+    repo = clone_with(
+        tmp_path,
+        "a",
+        {
+            "project.yaml": "spec_runner:\n",
+            "spec-runner.config.yaml": "harness_guard: strict\n",
+        },
+    )
+    [f] = fcp.check_repo(repo, POLICY)
+    assert (f.state, f.source) == ("violation", "project.yaml (Maestro)")
