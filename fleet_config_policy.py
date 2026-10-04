@@ -12,14 +12,17 @@
 `spec-runner.config.yaml` в корне, иначе legacy `spec/executor.config.yaml`;
 значение — из обёртки `executor:`, если она есть, иначе с верхнего уровня;
 нет ключа — действует умолчание spec-runner (поле `default` контракта).
-Читается `origin/<default>` — состояние флота, а не рабочее дерево клона.
+Читается `origin/<default>` — состояние флота, а не рабочее дерево клона;
+ref определяется только по remote-ссылкам, отката на HEAD нет: не
+резолвится — `unreadable`.
 
 Состояния находки:
   ok           — значение равно требуемому (не печатается);
   violation    — конфиг есть, значение (или умолчание) не то;
   unconfigured — конфига нет, но spec-runner в репо гоняется (есть
                  `spec/*tasks*.md`) — действуют умолчания;
-  unreadable   — конфиг не разобран (YAML, не mapping, `executor:` не mapping).
+  unreadable   — конфиг не разобран (YAML, не mapping, `executor:` не mapping)
+                 либо `origin/<default>` не резолвится.
 Репо без конфига и без tasks-спек — неприменимо, находок нет.
 
 Exit: 0 — нарушений нет (вывод пуст); 1 — есть нарушения/нечитаемые;
@@ -42,7 +45,7 @@ from pathlib import Path
 import yaml
 
 from clone_fleet import manifest_set
-from salvage_scan import _run_git, default_branch
+from salvage_scan import _run_git
 
 CONTRACT = (
     Path(__file__).resolve().parent / "contracts/fleet-config-policy/v1/policy.toml"
@@ -90,9 +93,9 @@ def _show(repo: Path, ref: str, path: str) -> str | None:
     return done.stdout if done.returncode == 0 else None
 
 
-def _tracked(repo: Path, ref: str) -> list[str]:
+def _tracked(repo: Path, ref: str) -> list[str] | None:
     done = _run_git(repo, "ls-tree", "-r", "--name-only", ref)
-    return done.stdout.split() if done.returncode == 0 else []
+    return done.stdout.split() if done.returncode == 0 else None
 
 
 def _section(text: str) -> dict:
@@ -106,16 +109,58 @@ def _section(text: str) -> dict:
     return section
 
 
+def fleet_ref(repo: Path) -> str | None:
+    """`origin/<default>` — ТОЛЬКО по remote-ссылкам; None — не установлен.
+
+    Локальные `master`/`main` и `HEAD` сюда не годятся (терм. ревью #562):
+    это состояние клона, а не флота, и незапушенная правка выглядела бы
+    соблюдённой политикой.
+    """
+    head = _run_git(repo, "symbolic-ref", "-q", "refs/remotes/origin/HEAD")
+    candidates = [head.stdout.strip()] if head.returncode == 0 else []
+    candidates += ["refs/remotes/origin/master", "refs/remotes/origin/main"]
+    for ref in candidates:
+        if (
+            _run_git(
+                repo, "rev-parse", "-q", "--verify", f"{ref}^{{commit}}"
+            ).returncode
+            == 0
+        ):
+            return ref.removeprefix("refs/remotes/")
+    return None
+
+
 def check_repo(repo: Path, policy: list[PolicyKey]) -> list[Finding]:
     """Находки по всем ключам политики для одного клона."""
     name = repo.name
-    branch = default_branch(repo)
-    ref = f"origin/{branch}" if branch else "HEAD"
+    ref = fleet_ref(repo)
+    if ref is None:
+        # неизвестность — не «неприменимо»: молчание зарезервировано за
+        # прочитанным и соответствующим политике конфигом (ревью #562)
+        return [
+            Finding(
+                name,
+                key.name,
+                "unreadable",
+                "?",
+                "-",
+                "origin/<default> не резолвится — конфиг флота не прочитан",
+            )
+            for key in policy
+        ]
     for path in CONFIG_PATHS:
         text = _show(repo, ref, path)
         if text is not None:
             return _check_config(name, path, text, policy)
-    if not any(TASKS_RE.match(p) for p in _tracked(repo, ref)):
+    tracked = _tracked(repo, ref)
+    if tracked is None:
+        return [
+            Finding(
+                name, key.name, "unreadable", "?", "-", f"дерево {ref} не прочитано"
+            )
+            for key in policy
+        ]
+    if not any(TASKS_RE.match(p) for p in tracked):
         return []
     return [
         Finding(

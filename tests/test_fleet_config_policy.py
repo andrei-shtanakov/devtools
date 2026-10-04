@@ -188,3 +188,38 @@ def test_main_exit_2_on_unreadable_manifest(tmp_path, capsys):
     assert (
         fcp.main(["--workspace", str(tmp_path), "--manifest", str(tmp_path / "x")]) == 2
     )
+
+
+def test_unresolvable_origin_ref_is_unreadable_not_clean(tmp_path, capsys):
+    """Терм. ревью #562 (major): нет `origin/<default>` (remote назван иначе)
+    — конфиг не прочитан, и это называется, а не красится «неприменимо»."""
+    repo = clone_with(tmp_path, "a", {"spec-runner.config.yaml": "harness_guard: warn\n"})
+    run_git(repo, "remote", "rename", "origin", "upstream")
+    [f] = fcp.check_repo(repo, POLICY)
+    assert f.state == "unreadable" and "origin" in f.detail
+    manifest = tmp_path / "m.toml"
+    manifest.write_text(
+        '[cores.a]\nrepo_url = "git@github.com:o/a.git"\ngit_dir = "a"\n',
+        encoding="utf-8",
+    )
+    assert fcp.main(["--workspace", str(tmp_path), "--manifest", str(manifest)]) == 1
+    assert "unreadable" in capsys.readouterr().out
+
+
+def test_unknown_default_branch_is_unreadable_not_head(tmp_path):
+    """Терм. ревью #562: default-ветку не определить (нет origin/HEAD, нет
+    master/main) — не откат на HEAD (это локальный клон, не флот)."""
+    up = tmp_path / "up"
+    up.mkdir()
+    run_git(up, "init", "-q", "-b", "trunk")
+    (up / "spec-runner.config.yaml").write_text("harness_guard: warn\n")
+    run_git(up, "add", "-A")
+    run_git(up, "commit", "-q", "-m", "init")
+    repo = tmp_path / "a"
+    subprocess.run(["git", "clone", "-q", str(up), str(repo)], env=GIT_ENV,
+                   check=True, capture_output=True)
+    run_git(repo, "remote", "set-head", "origin", "--delete")
+    (repo / "spec-runner.config.yaml").write_text("harness_guard: strict\n")
+    run_git(repo, "commit", "-qam", "local only")
+    [f] = fcp.check_repo(repo, POLICY)
+    assert f.state == "unreadable"
