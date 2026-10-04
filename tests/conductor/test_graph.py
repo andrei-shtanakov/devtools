@@ -108,6 +108,46 @@ def test_pr_implements_mentions_and_github_name_normalization() -> None:
     assert ("a#6", "ecosystem-kb#3", "mentions") in edges
 
 
+def test_pr_item_and_todo_ref_free_text_trailing_punctuation() -> None:
+    """Живая приёмка conductor slice-1 (sandbox PR #10, 2026-10-04): точка
+    конца предложения входила в id, извлечённый из свободной прозы — ребро
+    `implements`/`mentions` уходило на несуществующий узел с точкой в конце
+    (дефект описан в #id:goal-a4. → узел с точкой не получал ранг). Прозаические
+    экстракторы (`@id:` в теле PR, `todo://` в теле/комментариях issue) не
+    должны включать в id пунктуацию конца предложения; внутренние точки
+    (`a.b`) — сохраняются."""
+    g = build_graph(
+        inputs(
+            {"a": "- [ ] x @owner:TBD @id:x\n"},
+            [
+                record(
+                    "a",
+                    5,
+                    is_pr=True,
+                    body=(
+                        "Реализует @id:goal-a4. Также закрывает (@id:a.b), "
+                        "и в конце строки @id:x"
+                    ),
+                ),
+                record(
+                    "a",
+                    6,
+                    body="смотри todo://b/x. об этом сказано и в todo://b/y",
+                ),
+            ],
+        )
+    )
+    edges = {(e.src, e.dst, e.type) for e in g.edges}
+    assert ("a!5", "todo://a/goal-a4", "implements") in edges
+    assert ("a!5", "todo://a/a.b", "implements") in edges
+    assert ("a!5", "todo://a/x", "implements") in edges
+    assert not any(dst.endswith(".") for _, dst, typ in edges if typ == "implements")
+    mentions = {(e.src, e.dst) for e in g.edges if e.type == "mentions"}
+    assert ("a#6", "todo://b/x") in mentions
+    assert ("a#6", "todo://b/y") in mentions
+    assert not any(dst.endswith(".") for _, dst in mentions)
+
+
 def test_pr_does_not_mention_itself_by_its_own_number() -> None:
     """#551: заголовок «a#9» у PR a!9 — не упоминание: самоссылка
     отбрасывалась до перевода `a#9` в `a!9`."""

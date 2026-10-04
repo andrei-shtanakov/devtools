@@ -37,7 +37,15 @@ LEGACY_SLUG_RE = re.compile(r"^([a-z0-9][a-z0-9-]*)#([a-z0-9][a-z0-9._-]{0,63})$
 # конец ребра для @blocked_by, который не распознан: ожидание остаётся видимым
 UNRESOLVED = "unresolved:"
 LEGACY_ISSUE_RE = re.compile(r"^([a-z0-9][a-z0-9-]*)#(\d+)$")
-PR_ITEM_RE = re.compile(r"@id:([a-z0-9][a-z0-9._-]{0,63})")
+# id, извлечённый из свободной прозы (тело/комментарии issue и PR): последний
+# символ обязан быть буквой/цифрой, иначе пунктуация конца предложения
+# (`@id:goal-a4.`, `todo://repo/x.`) входит в id — найдено живой приёмкой
+# conductor slice-1 (sandbox PR #10, 2026-10-04). Внутренние `.`/`-`/`_`
+# (`a.b`) — сохраняются; это не касается структурных полей (`@id:` в TODO,
+# `todo://` URI с якорями `^...$`), у них формат гарантирован сеткой правил.
+_PROSE_ID = r"[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?"
+TODO_REF_PROSE_RE = re.compile(rf"todo://([a-z0-9][a-z0-9-]*)/({_PROSE_ID})")
+PR_ITEM_RE = re.compile(rf"@id:({_PROSE_ID})")
 ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 FROM_RE = re.compile(r"^([a-z0-9][a-z0-9-]*)(?:#([a-z0-9][a-z0-9._-]{0,63}))?(?:\s|$)")
 FROM_ORIGIN = "inbox:from"
@@ -403,7 +411,9 @@ def _mentions(
     text = _text_of(rec)
     qualified, local = _issue_refs(rec, norm)
     targets = {issue_id(repo, n) for repo, n in qualified | local}
-    targets |= {item_id(norm[r], i) for r, i in TODO_REF_RE.findall(text) if r in norm}
+    targets |= {
+        item_id(norm[r], i) for r, i in TODO_REF_PROSE_RE.findall(text) if r in norm
+    }
     # `a#9` у PR a!9 — он сам: самоссылка и сверка со strong — по уже
     # переведённому в PR-форму узлу, иначе «a#9 ≠ a!9» проходило (#551)
     targets = {_pr_aware(t, nodes) for t in targets}
