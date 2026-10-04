@@ -2764,6 +2764,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 - [x] Контракт `contracts/fleet-config-policy/v1/policy.toml` и сенсор `fleet_config_policy.py` (`make config-policy`), первый ключ — `harness_guard: strict` @owner:github:andrei-shtanakov @id:fleet-config-policy-sensor @epic:eco.tooling — PR этой ветки
 - [x] Сенсор: режим Maestro (`project.yaml` → `extra_executor_config.executor`) и защита по закреплённой версии spec-runner (`uv.lock` ≥ `protected_since`; пусто — не выпущены исправления, не защищён никто), exit 3 — «значения соблюдены, защита не подтверждена» (решение владельца 2026-10-04) @owner:github:andrei-shtanakov @id:fleet-config-policy-maestro-version @epic:eco.tooling — PR этой ветки
 - [ ] Поставить `protected_since` в контракте, когда выйдет релиз spec-runner с исправлениями гарда (RED/verify-first и post-GREEN — сейчас в CHANGELOG [Unreleased]) @owner:github:andrei-shtanakov @id:fleet-config-policy-protected-since @epic:eco.tooling
+- [ ] Пин spec-runner ≥ 2.14.0 у arbiter, atp-platform, research-bench: `uv.lock` держит 2.9.0, ключ `harness_guard` молча игнорируется; решение о версии — владельцам репо (решение владельца 2026-10-04) @owner:github:andrei-shtanakov @id:fleet-config-policy-pin-bump @epic:eco.tooling @blocked_by:arbiter#119 @blocked_by:atp-platform#345 @blocked_by:research-bench#43
 - [ ] maestro: найти источник конфига spec-runner собственного репо и поддерживаемый способ задать политику — открытый пробел, не исключение (maestro#251 закрыт: dual-mode запрещает трекать конфиг, Maestro перезаписывает его без ключа) @owner:github:andrei-shtanakov @id:fleet-config-policy-maestro-self @epic:eco.tooling @blocked_by:maestro#252
       Найдено 2026-10-04: источник — проектные конфиги Maestro, а они не
       обязаны лежать в целевом репо. Для maestro как цели Mode-2 —
@@ -2776,8 +2777,8 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       умолчанием `strict` либо сохранение ключа из конфига цели): заявка
       maestro#252. После решения — научить сенсор итоговому значению прогонов
       через Maestro.
-- [ ] research-bench, steward: в `project.yaml` есть `spec_runner` (Maestro сгенерирует конфиг с умолчанием `warn`) — найдены сенсором с режимом Maestro; включать ли в волну — решение владельца @owner:github:andrei-shtanakov @id:fleet-config-policy-maestro-extra @epic:eco.tooling
-- [ ] Довести флот до политики: `make config-policy` при вводе (2026-10-04) — 8 отклонений `harness_guard`: violation (конфиг есть, ключа нет → `warn`) — arbiter, atp-platform (legacy `spec/executor.config.yaml`), dispatcher, proctor; unconfigured (tasks-спеки есть, конфига нет) — discovery, disputatio, kapelle, maestro (у maestro корневой `executor.config.yaml` spec-runner не читает). Форма доставки — решение владельца (заявки владельцам репо или волна PR) @owner:github:andrei-shtanakov @id:fleet-config-policy-rollout @epic:eco.tooling
+- [x] research-bench, steward: в `project.yaml` есть `spec_runner` (Maestro сгенерирует конфиг с умолчанием `warn`) — найдены сенсором с режимом Maestro; включены в волну решением владельца 2026-10-04 @owner:github:andrei-shtanakov @id:fleet-config-policy-maestro-extra @epic:eco.tooling — research-bench#42; steward#201 (ключ в источнике `spec/maestro-base.yaml`, `project.yaml` — генерат `steward-compile`)
+- [x] Довести флот до политики: `make config-policy` при вводе (2026-10-04) — 8 отклонений `harness_guard`: violation (конфиг есть, ключа нет → `warn`) — arbiter, atp-platform (legacy `spec/executor.config.yaml`), dispatcher, proctor; unconfigured (tasks-спеки есть, конфига нет) — discovery, disputatio, kapelle, maestro (у maestro корневой `executor.config.yaml` spec-runner не читает). Форма доставки — решение владельца (заявки владельцам репо или волна PR) @owner:github:andrei-shtanakov @id:fleet-config-policy-rollout @epic:eco.tooling
       Решение 2026-10-04 — волна PR. Влиты: arbiter#118, atp-platform#344
       (значение есть, но закреплён spec-runner 2.9.0 < 2.14.0 — ключ
       игнорируется; обновление зависимости — владельцам, защищёнными не
@@ -2785,3 +2786,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       `project.yaml`: kapelle#101, discovery#62; disputatio уже соблюдал
       (ложное срабатывание сенсора). maestro#251 закрыт — см. пункт
       fleet-config-policy-maestro-self.
+      Итог 2026-10-04 (сенсор после волны): значение `strict` соблюдено у
+      12 из 13 репо в области; исключение — maestro (открытый пробел,
+      maestro#252). Защищённым не считается никто: исправления гарда не
+      выпущены (`protected_since` пуст).
