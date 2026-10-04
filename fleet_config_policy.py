@@ -25,8 +25,18 @@ ref определяется только по remote-ссылкам, откат
                  либо `origin/<default>` не резолвится.
 Репо без конфига и без tasks-спек — неприменимо, находок нет.
 
-Exit: 0 — нарушений нет (вывод пуст); 1 — есть нарушения/нечитаемые;
-2 — не разобраны манифест/контракт. Python 3.11+, pyyaml.
+Режим Maestro: если в `project.yaml` есть блок `spec_runner`, конфиг
+генерирует Maestro (в git он не живёт), и значение берётся из оверлея
+`spec_runner.extra_executor_config.executor` — как его вычислит Maestro.
+
+Защита ≠ значение (решение владельца 2026-10-04): `ok` по значению
+считается защитой только при версии spec-runner, закреплённой в `uv.lock`
+репо и не ниже `protected_since` контракта (первая выпущенная версия с
+исправлениями). Ниже `effective_since` ключ spec-runner молча игнорирует.
+
+Exit: 0 — всё соблюдено и защита доказана (вывод пуст); 1 — нарушения или
+нечитаемое; 3 — значения соблюдены, но защита не подтверждена; 2 — не
+разобраны манифест/контракт. Python 3.11+, pyyaml.
 
 Использование:
     ./fleet_config_policy.py --workspace .. [--manifest path] [--contract path]
@@ -39,7 +49,7 @@ import argparse
 import re
 import sys
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import yaml
@@ -63,11 +73,20 @@ class PolicyKey:
     required: str
     default: str
     reason: str
+    #: версия spec-runner, с которой ключ существует; ниже — молча игнорируется
+    effective_since: str = ""
+    #: первая выпущенная версия, где защита по ключу полна; пусто — не выпущена
+    protected_since: str = ""
 
 
 @dataclass(frozen=True)
 class Finding:
-    """Итог сверки одного ключа в одном репо."""
+    """Итог сверки одного ключа в одном репо.
+
+    `state` — соответствие ЗНАЧЕНИЯ политике; `protected` — доказана ли
+    работающая защита закреплённой версией spec-runner (решение владельца
+    2026-10-04: наличие `strict` и версии ≥ effective_since этого не доказывает).
+    """
 
     repo: str
     key: str
@@ -75,6 +94,8 @@ class Finding:
     value: str
     source: str
     detail: str
+    protected: bool = False
+    protection: str = ""
 
 
 def load_policy(path: Path) -> list[PolicyKey]:
@@ -83,9 +104,79 @@ def load_policy(path: Path) -> list[PolicyKey]:
     if data.get("schema") != 1:
         raise ValueError(f"{path}: schema {data.get('schema')!r}, ожидалась 1")
     return [
-        PolicyKey(k["name"], str(k["required"]), str(k["default"]), k.get("reason", ""))
+        PolicyKey(
+            k["name"],
+            str(k["required"]),
+            str(k["default"]),
+            k.get("reason", ""),
+            str(k.get("effective_since", "")),
+            str(k.get("protected_since", "")),
+        )
         for k in data.get("key", [])
     ]
+
+
+_VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(.*)$")
+
+
+def _vkey(version: str) -> tuple[int, int, int, int] | None:
+    """Ключ сравнения; любой суффикс (rc, dev, …) — ниже своего релиза."""
+    m = _VERSION_RE.match(version.strip())
+    if m is None:
+        return None
+    major, minor, patch, rest = m.groups()
+    return int(major), int(minor), int(patch), 0 if rest else 1
+
+
+def pinned_versions(repo: Path, ref: str) -> list[tuple[str, bool]]:
+    """Записи spec-runner в `uv.lock` репо: (версия, из реестра ли).
+
+    Выпущенный артефакт — только пин из реестра (`source.registry`); git,
+    editable, path с тем же номером версии ничего не доказывают (ревью #567).
+    Пусто — не закреплена (lock нет, он не разобран или spec-runner в нём нет).
+    """
+    text = _show(repo, ref, "uv.lock")
+    if text is None:
+        return []
+    try:
+        packages = tomllib.loads(text).get("package", [])
+    except tomllib.TOMLDecodeError:
+        return []
+    return [
+        (str(pkg.get("version", "")), "registry" in (pkg.get("source") or {}))
+        for pkg in packages
+        if pkg.get("name") == "spec-runner"
+    ]
+
+
+def _protection(key: PolicyKey, pins: list[tuple[str, bool]]) -> tuple[bool, str]:
+    """Доказана ли защита: значение уже `ok`, вопрос только в версии.
+
+    Записей несколько (форки резолюции uv) — решает слабейшая.
+    """
+    if not pins:
+        return False, "не подтверждено: версия spec-runner не закреплена в репо"
+    if not all(registry for _, registry in pins):
+        return (
+            False,
+            "не подтверждено: пин spec-runner не из реестра (git/editable/path)",
+        )
+    keyed = [(_vkey(v), v) for v, _ in pins]
+    if any(k is None for k, _ in keyed):
+        return False, f"не подтверждено: версия не разобрана ({[v for _, v in pins]})"
+    have, pinned = min(keyed)
+    floor = _vkey(key.effective_since) if key.effective_since else None
+    if floor is not None and have < floor:
+        return False, (
+            f"не подтверждено: закреплена {pinned} < {key.effective_since} — "
+            "ключ молча игнорируется"
+        )
+    if not key.protected_since:
+        return False, "не подтверждено: исправления не выпущены (protected_since пуст)"
+    fixed = _vkey(key.protected_since)
+    if fixed is None or have < fixed:
+        return False, f"не подтверждено: закреплена {pinned} < {key.protected_since}"
+    return True, f"защищено: закреплена {pinned}"
 
 
 def _show(repo: Path, ref: str, path: str) -> str | None:
@@ -139,7 +230,70 @@ def fleet_ref(repo: Path) -> str | None:
 
 
 def check_repo(repo: Path, policy: list[PolicyKey]) -> list[Finding]:
-    """Находки по всем ключам политики для одного клона."""
+    """Находки по всем ключам политики для одного клона, с пометкой защиты."""
+    findings = _check_values(repo, policy)
+    ref = fleet_ref(repo)
+    pins = pinned_versions(repo, ref) if ref is not None else []
+    keys = {k.name: k for k in policy}
+    out = []
+    for f in findings:
+        if f.state != "ok":
+            out.append(f)
+            continue
+        protected, note = _protection(keys[f.key], pins)
+        out.append(replace(f, protected=protected, protection=note))
+    return out
+
+
+def _maestro_findings(
+    name: str, text: str, policy: list[PolicyKey]
+) -> list[Finding] | None:
+    """Режим Maestro: конфиг генерируется из `project.yaml` (`spec_runner`) и
+    не трекается; None — `project.yaml` не про spec-runner.
+
+    Значение вычисляется как у Maestro (`SpecRunnerConfig.to_executor_config`):
+    произвольные ключи приходят только оверлеем `extra_executor_config`, и
+    валидны лишь под `executor:` (плоский ключ рядом с обёрткой spec-runner
+    отвергает как смешанную форму).
+    """
+    source = "project.yaml (Maestro)"
+    try:
+        data = yaml.safe_load(text) or {}
+    except yaml.YAMLError as exc:
+        return [
+            Finding(name, k.name, "unreadable", "?", source, f"не разобран: {exc}")
+            for k in policy
+        ]
+    # режим решает НАЛИЧИЕ ключа (ревью #567): `spec_runner:` без подключей —
+    # Maestro на умолчаниях, а не «project.yaml не про spec-runner»
+    if not isinstance(data, dict) or "spec_runner" not in data:
+        return None
+    block = data["spec_runner"] if data["spec_runner"] is not None else {}
+    if not isinstance(block, dict):
+        return [
+            Finding(name, k.name, "unreadable", "?", source, "spec_runner не mapping")
+            for k in policy
+        ]
+    extra = block.get("extra_executor_config") or {}
+    section = extra.get("executor") if isinstance(extra, dict) else None
+    section = section if isinstance(section, dict) else {}
+    out = []
+    for key in policy:
+        present = key.name in section
+        value = str(section[key.name]) if present else key.default
+        detail = (
+            ""
+            if present
+            else f"нет spec_runner.extra_executor_config.executor.{key.name} — "
+            f"умолчание spec-runner {key.default!r}"
+        )
+        state = "ok" if value == key.required else "violation"
+        out.append(Finding(name, key.name, state, value, source, detail))
+    return out
+
+
+def _check_values(repo: Path, policy: list[PolicyKey]) -> list[Finding]:
+    """Соответствие значений политике (без вопроса о версии)."""
     name = repo.name
     ref = fleet_ref(repo)
     if ref is None:
@@ -156,6 +310,11 @@ def check_repo(repo: Path, policy: list[PolicyKey]) -> list[Finding]:
             )
             for key in policy
         ]
+    project = _show(repo, ref, "project.yaml")
+    if project is not None:
+        maestro = _maestro_findings(name, project, policy)
+        if maestro is not None:
+            return maestro
     for path in CONFIG_PATHS:
         text = _show(repo, ref, path)
         if text is not None:
@@ -211,11 +370,12 @@ def render(findings: list[Finding], policy: list[PolicyKey]) -> str:
     required = {k.name: k.required for k in policy}
     rows = [
         f"{f.repo}\t{f.key}\t{f.state}\t{f.value} (нужно {required[f.key]})\t"
-        f"{f.source}\t{f.detail}"
+        f"{f.source}\t{f.protection or f.detail}"
         for f in findings
-        if f.state != "ok"
+        if f.state != "ok" or not f.protected
     ]
-    return "\n".join(["репо\tключ\tсостояние\tзначение\tисточник\tпримечание", *rows])
+    header = "репо\tключ\tсостояние\tзначение\tисточник\tзащита / примечание"
+    return "\n".join([header, *rows])
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -243,10 +403,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"config-policy: {git_dir}: клона нет — пропущен", file=sys.stderr)
             continue
         findings += check_repo(repo, policy)
-    if all(f.state == "ok" for f in findings):
+    if all(f.state == "ok" and f.protected for f in findings):
         return 0
     print(render(findings, policy))
-    return 1
+    return 1 if any(f.state != "ok" for f in findings) else 3
 
 
 if __name__ == "__main__":

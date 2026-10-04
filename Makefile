@@ -43,7 +43,7 @@ help:
 	@echo "  make fleet-report— markdown-отчёт о флоте в stdout (fleet_report.py)"
 	@echo "  make today       — что изменилось с полуночи: коммиты + незакоммиченное"
 	@echo "  make salvage     — salvage-скан: orphan worktrees / ветки без PR / unpushed default / stale locks (пусто = чисто)"
-	@echo "  make config-policy — сверка конфигов spec-runner флота с политикой contracts/fleet-config-policy (пусто = чисто)"
+	@echo "  make config-policy — сверка конфигов spec-runner флота с политикой contracts/fleet-config-policy (пусто = соблюдено и защита доказана; 1 — отклонения; 3 — соблюдено, защита не подтверждена)"
 	@echo "  make install     — доклонировать недостающие репо набора по манифесту зонтика"
 	@echo "  make release-drift — набор из манифеста зонтика ↔ факт на диске"
 	@echo "  make arch-freshness       — локальная диагностика drift/freshness арх-evidence (вахта — CI steward)"
