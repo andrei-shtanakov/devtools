@@ -193,7 +193,9 @@ def test_main_exit_2_on_unreadable_manifest(tmp_path, capsys):
 def test_unresolvable_origin_ref_is_unreadable_not_clean(tmp_path, capsys):
     """Терм. ревью #562 (major): нет `origin/<default>` (remote назван иначе)
     — конфиг не прочитан, и это называется, а не красится «неприменимо»."""
-    repo = clone_with(tmp_path, "a", {"spec-runner.config.yaml": "harness_guard: warn\n"})
+    repo = clone_with(
+        tmp_path, "a", {"spec-runner.config.yaml": "harness_guard: warn\n"}
+    )
     run_git(repo, "remote", "rename", "origin", "upstream")
     [f] = fcp.check_repo(repo, POLICY)
     assert f.state == "unreadable" and "origin" in f.detail
@@ -216,10 +218,27 @@ def test_unknown_default_branch_is_unreadable_not_head(tmp_path):
     run_git(up, "add", "-A")
     run_git(up, "commit", "-q", "-m", "init")
     repo = tmp_path / "a"
-    subprocess.run(["git", "clone", "-q", str(up), str(repo)], env=GIT_ENV,
-                   check=True, capture_output=True)
+    subprocess.run(
+        ["git", "clone", "-q", str(up), str(repo)],
+        env=GIT_ENV,
+        check=True,
+        capture_output=True,
+    )
     run_git(repo, "remote", "set-head", "origin", "--delete")
     (repo / "spec-runner.config.yaml").write_text("harness_guard: strict\n")
     run_git(repo, "commit", "-qam", "local only")
     [f] = fcp.check_repo(repo, POLICY)
     assert f.state == "unreadable"
+
+
+def test_origin_head_pointing_outside_remotes_is_ignored(tmp_path):
+    """Ревью #562 (recheck): `origin/HEAD`, перенаправленный на локальную
+    ветку, — не флот; читается `origin/master`, а не незапушенный коммит."""
+    repo = clone_with(
+        tmp_path, "a", {"spec-runner.config.yaml": "harness_guard: warn\n"}
+    )
+    (repo / "spec-runner.config.yaml").write_text("harness_guard: strict\n")
+    run_git(repo, "commit", "-qam", "local only")
+    run_git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/heads/master")
+    [f] = fcp.check_repo(repo, POLICY)
+    assert (f.state, f.value) == ("violation", "warn")

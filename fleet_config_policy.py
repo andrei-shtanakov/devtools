@@ -117,7 +117,11 @@ def fleet_ref(repo: Path) -> str | None:
     соблюдённой политикой.
     """
     head = _run_git(repo, "symbolic-ref", "-q", "refs/remotes/origin/HEAD")
-    candidates = [head.stdout.strip()] if head.returncode == 0 else []
+    target = head.stdout.strip()
+    # только внутрь refs/remotes/origin/: origin/HEAD, перенаправленный на
+    # локальную ветку, снова читал бы клон вместо флота (ревью #562)
+    ok = head.returncode == 0 and target.startswith("refs/remotes/origin/")
+    candidates = [target] if ok else []
     candidates += ["refs/remotes/origin/master", "refs/remotes/origin/main"]
     for ref in candidates:
         if (
