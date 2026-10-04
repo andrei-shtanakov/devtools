@@ -2,6 +2,7 @@
 
 import json
 
+from conductor.actions.owner_queue import queue_issue
 from conductor.sources_gh import (
     closed_event,
     fetch_record,
@@ -9,6 +10,7 @@ from conductor.sources_gh import (
     queue_records,
     red_checks,
 )
+from tests.conductor.slice1_fixtures import world
 
 
 def fake(responses: dict[str, list[tuple[int, str, str]]]):
@@ -265,6 +267,47 @@ def test_queue_records_any_state_with_pinned() -> None:
     assert rec is not None and rec["pinned"] is True and rec["repo_full"] == "own/ws"
     assert rec["pins_used"] == 2
     assert rec["state"] == "closed" and rec["closed_at"] == "2026-09-30T00:00:00Z"
+
+
+def test_queue_records_app_author_is_recognised_as_mine() -> None:
+    """Живая приёмка срез 1 (2026-10-04): очередь владельца, созданная App
+    (`gh issue view --json author` отдаёт `app/conductorsandbox`), не
+    распознавалась как «своя» — owner_queue.queue_issue не находил запись,
+    ответы владельца игнорировались. `queue_records` обязан нормализовать
+    автора до формы `conductorsandbox[bot]`, которой owner_queue сравнивает."""
+    app_issue_view = json.dumps({**json.loads(ISSUE_VIEW), "state": "OPEN"})
+    app_issue_view = json.dumps(
+        {**json.loads(app_issue_view), "author": {"login": "app/conductorsandbox"}}
+    )
+    search = json.dumps(
+        [{"total_count": 1, "incomplete_results": False, "items": [{"number": 11}]}]
+    )
+    pinned = json.dumps(
+        {
+            "data": {
+                "repository": {
+                    "issue": {"isPinned": True},
+                    "pinnedIssues": {"totalCount": 1},
+                }
+            }
+        }
+    )
+    run = fake(
+        {
+            "api -X GET search/issues -f q=user:own repo:own/ws label:owner-queue": [
+                (0, search, "")
+            ],
+            "issue view 11 -R own/ws": [(0, app_issue_view, "")],
+            "api --paginate --slurp repos/own/ws/issues/11/comments": [(0, "[[]]", "")],
+            "api graphql": [(0, pinned, "")],
+        }
+    )
+    records = queue_records("own", "ws", run)
+    assert records is not None
+    _, inp = world(queue_records=records)
+    mine, finding = queue_issue(inp, "conductorsandbox[bot]")
+    assert finding is None
+    assert mine is not None and mine["number"] == 11
 
 
 def test_closed_event_is_last_closed_node_id() -> None:
