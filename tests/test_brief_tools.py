@@ -707,3 +707,109 @@ def test_approve_each_refusal_reason(
     with pytest.raises(bt.BriefToolError, match=phrase):
         bt.approve(RUN_ID, 7, approve_env)
     assert "--frame engineer" not in capsys.readouterr().out
+
+
+# --- §11.3 п.6: check-merge перед человеческим мержем (Task 13) ---
+
+
+@pytest.fixture()
+def open_pr(monkeypatch) -> ToolOps:
+    ops = _ops(monkeypatch, with_pr=True)
+    ops.prs[7] = replace(
+        ops.prs[7], state="OPEN", merged_by=None, merged_at=None, merge_commit=None
+    )
+    return ops
+
+
+def test_check_merge_accepts_consistent_head(open_pr) -> None:  # T50
+    assert bt.check_merge(REPO, 7, HEAD, open_pr) == P
+
+
+@pytest.mark.parametrize(
+    "spoil",
+    [
+        "no-request",
+        "one-file",
+        "modified",
+        "two-dirs",
+        "coords",
+        "coords-ref",
+        "coords-path",
+        "extra-file",
+        "self-hash",
+        "pin-drift",
+        "not-open",
+        "not-brief-branch",
+        "wrong-base",
+    ],
+)
+def test_check_merge_refusals(open_pr, spoil) -> None:  # T50 (каждый — пара с accepts)
+    req_key, brief_key = (HEAD, f"{DIR}/{ar.FILE_NAME}"), (HEAD, f"{DIR}/brief.md")
+    if spoil == "no-request":
+        del open_pr.files[req_key]
+    elif spoil == "one-file":
+        open_pr.set_pr(files=(FILES[0],))
+    elif spoil == "modified":
+        open_pr.set_pr(files=((FILES[0][0], "modified"), FILES[1]))
+    elif spoil == "two-dirs":
+        open_pr.set_pr(files=(("a/00-discovery/brief.md", "added"), FILES[1]))
+    elif spoil == "coords":
+        open_pr.files[req_key] = ar.render(request(policy_repo="o/other"))
+    elif spoil == "coords-ref":
+        open_pr.files[req_key] = ar.render(request(policy_ref="dev"))
+    elif spoil == "coords-path":
+        open_pr.files[req_key] = ar.render(request(policy_path="x.env"))
+    elif spoil == "extra-file":
+        open_pr.set_pr(files=FILES + (("x.txt", "added"),))
+    elif spoil == "self-hash":
+        open_pr.files[brief_key] = DRAFT + "\nправка\n"
+    elif spoil == "pin-drift":
+        open_pr.add_policy(C1)
+    elif spoil == "not-open":
+        open_pr.set_pr(state="CLOSED")
+    elif spoil == "not-brief-branch":
+        open_pr.set_pr(head_ref="feature/x")
+    elif spoil == "wrong-base":
+        open_pr.set_pr(base_ref="side")
+    with pytest.raises(bt.MergeRefused):
+        bt.check_merge(REPO, 7, HEAD, open_pr)
+
+
+@pytest.mark.parametrize(("case", "mutate", "_m"), DEFECTS, ids=[d[0] for d in DEFECTS])
+def test_check_merge_ambiguous_request(open_pr, case, mutate, _m) -> None:  # T21b
+    open_pr.files[(HEAD, f"{DIR}/{ar.FILE_NAME}")] = mutate(ar.render(request()))
+    with pytest.raises(bt.MergeRefused):
+        bt.check_merge(REPO, 7, HEAD, open_pr)
+
+
+def test_check_merge_head_changed_is_retry(open_pr) -> None:  # T50
+    with pytest.raises(bt.BriefToolError) as exc:
+        bt.check_merge(REPO, 7, "9" * 40, open_pr)
+    assert exc.value.retry and not isinstance(exc.value, bt.MergeRefused)
+
+
+@pytest.mark.parametrize("fact", ["pr", "file", "policy", "default"])
+def test_check_merge_unavailable_is_retry(open_pr, fact) -> None:  # T50
+    open_pr.unavailable_facts.add(fact)
+    with pytest.raises(bt.BriefToolError) as exc:
+        bt.check_merge(REPO, 7, HEAD, open_pr)
+    assert exc.value.retry
+
+
+def test_check_merge_ignores_body_and_labels(open_pr) -> None:  # T50, T23
+    # Контракт факта brief-PR не несёт ни тела, ни меток: доказательство —
+    # только содержимое головы; «правильное» тело неверную заявку не спасает.
+    open_pr.files[(HEAD, f"{DIR}/{ar.FILE_NAME}")] = ar.render(request(ws_id="WS-2"))
+    assert "body" not in BriefPrFacts.__dataclass_fields__
+    assert bt.check_merge(REPO, 7, HEAD, open_pr) == P  # ws_id не связывает с прогоном
+
+
+@pytest.mark.parametrize(("exc", "code"), [("MergeRefused", 3), ("retry", 2)])
+def test_check_merge_cli_exit_codes(monkeypatch, capsys, exc, code) -> None:
+    def fake(repo, pr, head, ops):
+        if exc == "MergeRefused":
+            raise bt.MergeRefused("нет")
+        raise bt.BriefToolError("сеть", retry=True)
+
+    monkeypatch.setattr(bt, "check_merge", fake)
+    assert bt.main(["check-merge", "--repo", REPO, "--pr", "7", "--head", HEAD]) == code

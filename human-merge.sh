@@ -139,6 +139,32 @@ head_ref=$(printf '%s\n' "$facts" | sed -n '5p')
 [ -n "$head_ref" ] && [ "$head_ref" != "null" ] \
     || die 2 "PR ${slug}#${pr}: имя head-ветки не установлено — тип PR неизвестен, мерж не выполняется"
 
+# brief-PR (спека need-stage §11.3 п.6): заявка читается форджем по
+# ПРОВЕРЕННОЙ голове `head_oid`; мерж ниже пинуется тем же sha= — смена
+# головы между проверкой и мержем отказывает на стороне форджи. Тело и
+# метки PR в решении не участвуют. Проверяльщик исполняется из каталога
+# devtools (там пакет governance) профилем человека.
+brief_pin=""
+case "$head_ref" in
+    brief/*)
+        if [ -n "$human_profile" ]; then
+            brief_pin=$(cd "$script_dir" && GH_CONFIG_DIR="$human_profile" uv run --frozen \
+                python -m governance.brief_tools check-merge \
+                --repo "$slug" --pr "$pr" --head "$head_oid") \
+                || die $? "brief-PR ${slug}#${pr}: заявка не прошла проверку — мерж не выполняется"
+        else
+            brief_pin=$(cd "$script_dir" && uv run --frozen \
+                python -m governance.brief_tools check-merge \
+                --repo "$slug" --pr "$pr" --head "$head_oid") \
+                || die $? "brief-PR ${slug}#${pr}: заявка не прошла проверку — мерж не выполняется"
+        fi
+        brief_pin=$(printf '%s\n' "$brief_pin" | tail -n 1)
+        case "$brief_pin" in
+            *[!0-9a-f]*|"") die 2 "brief-PR ${slug}#${pr}: проверяльщик не вернул пин политики" ;;
+        esac
+        [ "${#brief_pin}" -eq 40 ] || die 2 "brief-PR ${slug}#${pr}: пин политики не 40 hex"
+        ;;
+esac
 # Версия политики, по которой судится логин. У candidate-PR (форма ветки —
 # из того же SSOT, что у merge-pr.sh) версия ЗАКРЕПЛЕНА заявкой и написана
 # в теле (`policy: <repo>@<sha>`, пишет approve_node): актуальная обязана
@@ -154,6 +180,12 @@ current=$(gh_h api graphql -f 'query=query($o:String!,$n:String!,$q:String!,$p:S
     --jq '.data.repository.ref.target.history.nodes[0].oid' 2>&1) \
     || die 2 "версия политики $p_repo не прочитана: $current"
 case "$head_ref" in
+    brief/*)
+        # Мержер авторизуется по пину, ПРОВЕРЕННОМУ вместе с заявкой; если
+        # актуальная версия ушла после проверки — мерж не создал бы годного
+        # акта (ревью части B, B1).
+        [ "$current" = "$brief_pin" ] || die 3 "политика сменилась после проверки brief-PR (пин $brief_pin, актуальная $current) — мерж не создаст годного акта"
+        version="$brief_pin" ;;
     $finalize_glob)
         # finalize — суффикс candidate-формы, проверяется ПЕРВЫМ: иначе
         # candidate-глоб накрыл бы и его (тот же порядок, что у merge-pr.sh).

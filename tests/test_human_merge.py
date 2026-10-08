@@ -50,6 +50,14 @@ esac
 """
 
 
+#: Стаб `uv`: журнал вызова (с cwd и профилем) и код проверяльщика brief-PR.
+UV_STUB = """#!/usr/bin/env bash
+echo "cwd=$(pwd) GH_CONFIG_DIR=${GH_CONFIG_DIR:-} uv $*" >> "$GH_STUB_LOG"
+[ "${UV_STUB_EXIT:-0}" = 0 ] && echo "${UV_STUB_PIN:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
+exit "${UV_STUB_EXIT:-0}"
+"""
+
+
 class Fleet:
     def __init__(self, tmp_path: Path) -> None:
         self.fleet_root = tmp_path / "fleet"
@@ -79,6 +87,9 @@ class Fleet:
         gh = self.stub_bin / "gh"
         gh.write_text(GH_STUB)
         gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
+        uv = self.stub_bin / "uv"
+        uv.write_text(UV_STUB)
+        uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
 
     def env(self, **extra: str) -> dict[str, str]:
         env = os.environ.copy()
@@ -285,3 +296,79 @@ def test_unknown_repo_and_bad_args(fleet: Fleet) -> None:
         check=False,
     )
     assert res.returncode == 2
+
+
+# --- brief-PR (спека need-stage §11.3 п.6) ---
+
+
+def _uv_calls(fleet: Fleet) -> list[str]:
+    return [ln for ln in fleet.calls() if " uv " in f" {ln}"]
+
+
+def test_brief_pr_is_checked_by_head_then_merged_with_same_sha(fleet: Fleet) -> None:
+    res = fleet.run(GH_STUB_HEADREF="brief/WS-1", GH_STUB_BODY="")
+    assert res.returncode == 0, res.stderr
+    (uv,) = _uv_calls(fleet)
+    assert f"cwd={SCRIPT.parent}" in uv
+    assert (
+        "uv run --frozen python -m governance.brief_tools check-merge "
+        f"--repo andrei-shtanakov/demo --pr 7 --head {HEAD_SHA}"
+    ) in uv
+    assert fleet.merge_calls() and f"sha={HEAD_SHA}" in fleet.merge_calls()[0]
+
+
+@pytest.mark.parametrize("code", [2, 3])
+def test_brief_pr_refusal_stops_before_merge(fleet: Fleet, code: int) -> None:
+    res = fleet.run(GH_STUB_HEADREF="brief/WS-1", UV_STUB_EXIT=str(code))
+    assert res.returncode == code
+    assert fleet.merge_calls() == []
+    assert "заявка не прошла проверку" in res.stderr
+
+
+def test_brief_pr_check_runs_under_human_profile(fleet: Fleet, tmp_path: Path) -> None:
+    profile = tmp_path / "gh-human"
+    profile.mkdir()
+    res = fleet.run(GH_STUB_HEADREF="brief/WS-1", HUMAN_GH_CONFIG_DIR=str(profile))
+    assert res.returncode == 0, res.stderr
+    (uv,) = _uv_calls(fleet)
+    assert f"GH_CONFIG_DIR={profile} uv" in uv
+
+
+def test_candidate_and_other_prs_do_not_call_the_brief_check(
+    fleet: Fleet,
+) -> None:  # T50a
+    assert fleet.run().returncode == 0  # candidate (умолчание стаба)
+    res = fleet.run(GH_STUB_HEADREF="feature/x", GH_STUB_BODY="")
+    assert res.returncode == 0, res.stderr
+    assert _uv_calls(fleet) == []
+
+
+def test_brief_pr_policy_moved_after_check_refuses(fleet: Fleet) -> None:  # B1
+    """Пин, проверенный вместе с заявкой (UV_STUB_PIN), ≠ актуальной версии,
+    прочитанной shell позже: мерж не выполняется."""
+    res = fleet.run(GH_STUB_HEADREF="brief/WS-1", GH_STUB_POLICY_SHA="b" * 40)
+    assert res.returncode == 3
+    assert fleet.merge_calls() == []
+    assert "после проверки brief-PR" in res.stderr
+
+
+def test_brief_pr_merger_is_authorized_by_the_checked_pin(fleet: Fleet) -> None:  # B1
+    res = fleet.run(GH_STUB_HEADREF="brief/WS-1")
+    assert res.returncode == 0, res.stderr
+    reads = [c for c in fleet.calls() if "api graphql" in c and "s=" in c]
+    assert reads and all("s=" + "a" * 40 in c for c in reads)
+
+
+def test_brief_pr_without_pin_from_checker_refuses(fleet: Fleet) -> None:
+    res = fleet.run(GH_STUB_HEADREF="brief/WS-1", UV_STUB_PIN="not-a-sha")
+    assert res.returncode == 2 and fleet.merge_calls() == []
+
+
+def test_brief_pr_head_race_then_recheck_of_new_head(fleet: Fleet) -> None:  # T50
+    first = fleet.run(GH_STUB_HEADREF="brief/WS-1", GH_STUB_MERGE_FAIL="1")
+    assert first.returncode == 4  # форджа отклонила: голова сменилась после проверки
+    new_head = "1" * 40
+    second = fleet.run(GH_STUB_HEADREF="brief/WS-1", GH_STUB_HEADOID=new_head)
+    assert second.returncode == 0, second.stderr
+    assert f"--head {new_head}" in _uv_calls(fleet)[-1]
+    assert f"sha={new_head}" in fleet.merge_calls()[-1]
