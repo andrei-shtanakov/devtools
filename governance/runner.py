@@ -18,6 +18,7 @@ PR человеку (`waiting_human_merge`), S8 не запускается са
 from __future__ import annotations
 
 import argparse
+import contextvars
 import hashlib
 import json
 import os
@@ -36,6 +37,7 @@ from governance import (
     acceptance_guard,
     authority_root,
     brief_input,
+    brief_provenance,
     bundle_dag,
     bundle_inputs,
     charter_guard,
@@ -56,7 +58,6 @@ from governance.frontmatter import split_frontmatter
 from governance.merge_gate import PrFacts
 from governance.ops import (
     _AUTHOR_DSL,
-    ENGINEER_BLOCKED,
     Ops,
     RealOps,
     disp_agent,
@@ -491,12 +492,23 @@ def advance(state: RunState, ops: Ops, *, lock: rl.RunLock) -> RunState:
     if op_status(state, "merge") == "completed":
         _step_s8(state, ops)
         return state
-    for step in _STEPS:
-        if state.status != "running":
-            break
-        if not step(state, ops):
-            break
+    token = _LOCK_FD.set(lock.fd)
+    try:
+        for step in _STEPS:
+            if state.status != "running":
+                break
+            if not step(state, ops):
+                break
+    finally:
+        _LOCK_FD.reset(token)
     return state
+
+
+#: Дескриптор блокировки текущего `advance` (§11.4.5): шаги, вызывающие
+#: соседа, передают его в `pass_fds`, не меняя сигнатур шагов.
+_LOCK_FD: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "_LOCK_FD", default=None
+)
 
 
 # --- Волновой режим (спека sequential-node-approval, S9/S10/S13) ----------
@@ -942,7 +954,11 @@ def resume(run_id: str, ops: Ops, *, lock: rl.RunLock) -> RunState:
         _reconcile_pr_merged_out_of_band(state, ops, lock=lock)
         return state
     if state.status in ("waiting_interview", "stopped_interview"):
-        if state.interview and state.interview.get("session_id") is None:
+        if (
+            state.interview
+            and state.interview.get("frame") != "engineer"
+            and state.interview.get("session_id") is None
+        ):
             # Сирота — координаты стадии Need без сессии: discovery не
             # зовём, оператор присоединяется вручную (спека §5.2).
             print(
@@ -1648,9 +1664,14 @@ def _interview_of(state: RunState) -> dict:
 
 
 def _interview_stop(state: RunState, reason: str) -> bool:
-    """Персистентный стоп стадии Need; координаты и session_id не трогаются."""
+    """Персистентный стоп стадии Need; координаты и session_id не трогаются.
+
+    Причина пишется в `interview.stop_reason` той же записью: у engineer
+    она машинная (`upstream_blob_mismatch: …`, `session_unverifiable: …`).
+    """
     print(f"_step_interview: {reason}")
     state.status = "stopped_interview"
+    _interview_of(state)["stop_reason"] = reason
     save(state)
     return False
 
@@ -1667,15 +1688,6 @@ def _print_answer_hint(state: RunState, reply: iv.DiscoveryReply) -> None:
     print(
         "  " + iv.answer_command(interview["session_id"], interview["stakeholder_role"])
     )
-
-
-def _upstream_path(state: RunState, spec: iv.InterviewSpec) -> str | None:
-    """Путь upstream-blob'а для engineer-фрейма; `None` для остальных."""
-    if spec.frame != "engineer":
-        return None
-    if spec.traces_to is None:
-        raise ValueError("engineer-фрейм без traces_to: upstream-blob не найти")
-    return str(run_dir(state.run_id) / "brief-input" / "00-discovery" / spec.traces_to)
 
 
 def _interview_poll(
@@ -1696,7 +1708,10 @@ def _interview_poll(
     session_id = _interview_of(state)["session_id"]
     if op_status(state, INTERVIEW_BRIEF) != "new":
         return _interview_publish(state, ops, spec, cwd)
-    reply = ops.discovery_status(session_id, cwd)
+    guard = _engineer_guard(state, ops, spec)
+    if guard is not None:
+        return _interview_stop(state, guard)
+    reply = ops.discovery_status(session_id, cwd, lock_fd=_LOCK_FD.get())
     return _interview_after_reply(state, ops, spec, cwd, reply, "status")
 
 
@@ -1790,7 +1805,10 @@ def _interview_publish(
     ):
         return _interview_reconcile_published(state, ops, spec, cwd, final)
     tmp.unlink(missing_ok=True)
-    reply = ops.discovery_brief(session_id, str(tmp), cwd)
+    guard = _engineer_guard(state, ops, spec)
+    if guard is not None:
+        return _interview_stop(state, guard)
+    reply = ops.discovery_brief(session_id, str(tmp), cwd, lock_fd=_LOCK_FD.get())
     if reply.code != 0:
         tmp.unlink(missing_ok=True)
         return _interview_after_reply(state, ops, spec, cwd, reply, "brief")
@@ -1805,8 +1823,17 @@ def _interview_publish(
         brief_input.inspect_brief(tmp)
     except brief_input.BriefInputError as exc:
         return _interview_stop(state, f"бриф не проходит inspect_brief: {exc}")
+    # §11.4.3/P4: политика и upstream могли смениться ВО ВРЕМЯ рендера —
+    # перепроверка непосредственно перед необратимой публикацией.
+    guard = _engineer_guard(state, ops, spec)
+    if guard is not None:
+        tmp.unlink(missing_ok=True)
+        return _interview_stop(state, guard)
     os.replace(tmp, final)
     source = brief_input.inspect_brief(final)  # дескриптор — по durable-пути
+    mismatch = _engineer_source_mismatch(spec, source)
+    if mismatch is not None:
+        return _interview_stop(state, mismatch)
     state.brief = source.as_state()
     _interview_of(state)["completed_at"] = datetime.now(UTC).isoformat(
         timespec="seconds"
@@ -1831,7 +1858,12 @@ def _interview_reconcile_published(
     """
     probe = final.with_name(".brief.reconcile.tmp")
     probe.unlink(missing_ok=True)
-    reply = ops.discovery_brief(_interview_of(state)["session_id"], str(probe), cwd)
+    guard = _engineer_guard(state, ops, spec)
+    if guard is not None:
+        return _interview_stop(state, guard)
+    reply = ops.discovery_brief(
+        _interview_of(state)["session_id"], str(probe), cwd, lock_fd=_LOCK_FD.get()
+    )
     try:
         if reply.code != 0:
             return _interview_stop(
@@ -1860,6 +1892,9 @@ def _interview_reconcile_published(
         source = brief_input.inspect_brief(final)
     except brief_input.BriefInputError as exc:
         return _interview_stop(state, f"recovery: inspect_brief: {exc}")
+    guard = _engineer_guard(state, ops, spec) or _engineer_source_mismatch(spec, source)
+    if guard is not None:
+        return _interview_stop(state, guard)
     state.brief = source.as_state()
     _interview_of(state)["completed_at"] = datetime.now(UTC).isoformat(
         timespec="seconds"
@@ -1910,6 +1945,10 @@ def attach_session(
     state = load(run_id)
     if state.interview is None:
         raise ValueError("у прогона нет стадии Need")
+    if state.interview.get("frame") == "engineer":
+        raise ValueError(
+            "--session для engineer запрещён: id записан до вызова (§11.4.5)"
+        )
     if state.interview.get("session_id") is not None:
         raise ValueError("session_id уже записан — замена сессии запрещена")
     if op_status(state, INTERVIEW_START) != "started":
@@ -1919,7 +1958,9 @@ def attach_session(
     spec = iv.InterviewSpec.from_state(state.interview)
     probe = run_dir(run_id) / "brief-input" / ".attach.tmp"
     probe.parent.mkdir(parents=True, exist_ok=True)
-    reply = ops.discovery_brief(session_id, str(probe), str(run_dir(run_id)))
+    reply = ops.discovery_brief(
+        session_id, str(probe), str(run_dir(run_id)), lock_fd=lock.fd
+    )
     # `cmd_brief` соседа пишет артефакт (`write_artifact`) ДО `_emit` при
     # любом коде, кроме отказа загрузки сессии (discovery `cli.py:267-283`);
     # 1/2 — отказ присоединения, отсутствующий файл — тоже отказ, не
@@ -1966,6 +2007,8 @@ def _step_interview(state: RunState, ops: Ops) -> bool:
     # Заход в стадию — единственная точка, через которую проходят все
     # маршруты.
     (run_dir(state.run_id) / INTERVIEW_FINDINGS).unlink(missing_ok=True)
+    if spec.frame == "engineer":
+        return _step_interview_engineer(state, ops, spec, cwd)
     if op_status(state, INTERVIEW_START) != "completed":
         if (
             state.interview.get("session_id") is None
@@ -1982,14 +2025,8 @@ def _step_interview(state: RunState, ops: Ops) -> bool:
             )
             return False
         _ensure_started(state, INTERVIEW_START)
-        if spec.frame == "engineer" and spec.upstream_blob is None:
-            return _interview_stop(state, ENGINEER_BLOCKED)
         reply = ops.discovery_start(
-            spec.frame,
-            spec.target,
-            spec.traces_to,
-            _upstream_path(state, spec),
-            cwd,
+            spec.frame, spec.target, spec.traces_to, None, cwd, lock_fd=_LOCK_FD.get()
         )
         if reply.code != 20:
             return _interview_stop(
@@ -2003,6 +2040,110 @@ def _step_interview(state: RunState, ops: Ops) -> bool:
         _print_answer_hint(state, reply)
         return False
     return _interview_poll(state, ops, spec, cwd)
+
+
+def _step_interview_engineer(
+    state: RunState, ops: Ops, spec: iv.InterviewSpec, cwd: str
+) -> bool:
+    """§11.4.5: engineer — write-ahead id, перепроверка, `start`/восстановление."""
+    guard = _engineer_guard(state, ops, spec)
+    if guard is not None:
+        return _interview_stop(state, guard)
+    if op_status(state, INTERVIEW_START) == "completed":
+        return _interview_poll(state, ops, spec, cwd)
+    sid = iv.engineer_session_id(state.run_id)
+    if op_status(state, INTERVIEW_START) == "started":
+        return _engineer_recover(state, ops, cwd, sid)
+    # Write-ahead: id и `interview-start: started` — одной записью ДО вызова.
+    _interview_of(state)["session_id"] = sid
+    op_start(state, INTERVIEW_START, session_id=sid)
+    reply = ops.discovery_start(
+        "engineer",
+        spec.target,
+        None,
+        str(run_dir(state.run_id) / iv.UPSTREAM_REL),
+        cwd,
+        session_id=sid,
+        lock_fd=_LOCK_FD.get(),
+    )
+    if reply.code != 20 or reply.envelope["next_action"].get("session_id") != sid:
+        reason = reply.envelope.get("operation", {}).get("reason", "")
+        return _interview_stop(state, f"start вернул {reply.code}: {reason}")
+    state.status = "waiting_interview"
+    op_complete(state, INTERVIEW_START, session_id=sid)
+    _print_answer_hint(state, reply)
+    return False
+
+
+def _engineer_recover(state: RunState, ops: Ops, cwd: str, sid: str) -> bool:
+    """§11.4.5 восстановление: только `status`; повторного `start` нет.
+
+    20/0/10/11 — сессия с нашим id есть, но её upstream через публичный
+    интерфейс не проверить (discovery#63): стоп. Иное — unknown: стоп.
+    """
+    reply = ops.discovery_status(sid, cwd, lock_fd=_LOCK_FD.get())
+    if reply.code in (20, 0, 10, 11):
+        print(
+            "_step_interview: сессия с id прогона существует, но её upstream не "
+            "проверить через публичный интерфейс (discovery#63) — продолжение: "
+            "--new-run --ws-id <fresh-id>"
+        )
+        return _interview_stop(state, f"session_unverifiable: status {reply.code}")
+    print(
+        "_step_interview: состояние сессии неизвестно — проверьте запуск "
+        "discovery и $DISCOVERY_HOME и повторите команду, либо --new-run "
+        "--ws-id <fresh-id>"
+    )
+    reason = reply.envelope.get("operation", {}).get("reason", "")
+    return _interview_stop(state, f"session_state_unknown: {reason}")
+
+
+def _engineer_guard(state: RunState, ops: Ops, spec: iv.InterviewSpec) -> str | None:
+    """§11.4.3–§11.4.5: перед КАЖДЫМ обращением к соседу и перед публикацией.
+
+    Ничего из `run.json`, кроме адреса акта (`approval_pr`) и эталона
+    `upstream_blob`, в решении не участвует: durable-копия читается заново и
+    сверяется с актом, перевыведенным из форджа (§11.1.2). Customer — `None`.
+    """
+    if spec.frame != "engineer":
+        return None
+    interview = _interview_of(state)
+    expected = iv.engineer_session_id(state.run_id)
+    recorded = interview.get("session_id")
+    # Пустой id допустим только ДО write-ahead первого `start`; после — точно
+    # `s-<run_id>-e` (удалённый/обнулённый id не переадресует прогон).
+    if recorded is None and op_status(state, INTERVIEW_START) != "new":
+        return "session_id_mismatch: id удалён после write-ahead"
+    if recorded is not None and recorded != expected:
+        return f"session_id_mismatch: {recorded!r} ≠ {expected!r}"
+    copy = run_dir(state.run_id) / iv.UPSTREAM_REL
+    try:
+        data = copy.read_bytes()
+    except OSError as exc:
+        return f"upstream_blob_mismatch: upstream.md не читается ({exc})"
+    if blob_sha1_bytes(data) != spec.upstream_blob:
+        return "upstream_blob_mismatch: durable upstream.md ≠ upstream_blob"
+    act = brief_provenance.read_act(ops, state.repo_slug, int(interview["approval_pr"]))
+    if isinstance(act, brief_provenance.Refusal):
+        return f"{act.reason}: {act.detail}"
+    for refusal in (
+        brief_provenance.check_operator_brief(act, data.decode("utf-8")),
+        brief_provenance.check_policy(ops, act),
+    ):
+        if isinstance(refusal, brief_provenance.Refusal):
+            return f"{refusal.reason}: {refusal.detail}"
+    return None
+
+
+def _engineer_source_mismatch(
+    spec: iv.InterviewSpec, source: brief_input.BriefSource
+) -> str | None:
+    """Опубликованный source-слой несёт ровно закреплённый upstream (T43)."""
+    if spec.frame != "engineer":
+        return None
+    if dict(source.source_blobs).get("discovery-customer") != spec.upstream_blob:
+        return "upstream_blob_mismatch: source-слой брифа ≠ upstream_blob"
+    return None
 
 
 def _step_branch(state: RunState, ops: Ops) -> bool:

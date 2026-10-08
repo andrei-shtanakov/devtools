@@ -2117,3 +2117,36 @@ def test_engineer_preflight_ambiguous_merged_request(  # T21a/T21b через pr
     forge.files[(MERGE, _REQ)] = mutate(_ar.render(_request()))
     with pytest.raises(spec_loop.SpecLoopError, match="request_invalid"):
         spec_loop.engineer_preflight(_operator(tmp_path), 7, ENGINEER_REPO, forge)
+
+
+def test_engineer_stop_without_session_is_not_an_orphan(  # Task 9
+    runs_root, tmp_path, monkeypatch
+) -> None:
+    """Стоп перепроверки ДО первого `start` (например, фордж недоступен):
+    у engineer `session_id` ещё пуст, но это не сирота — повтор идёт в resume."""
+    env = _LoopEnv(monkeypatch, tmp_path)
+    st = rs.new_run(
+        subject="Fleet Inbox",
+        repo="alpha",
+        repo_slug="owner/alpha",
+        ws_id="ws-eng",
+        target_dir=str(env.target),
+        bundle_dir="workstreams/ws-eng/spec",
+        profile="profiles/team-exp.yaml",
+        run_id="r-eng",
+        merge_authority="human",
+        interview={
+            **iv.InterviewSpec(
+                "engineer", "product owner", "owner/alpha", "upstream.md", "b" * 40
+            ).as_state(),
+            "approval_pr": 7,
+        },
+    )
+    st.status = "stopped_interview"
+    rs.save(st)
+    env.resume_result = st
+    _engineer_ops(monkeypatch)
+    spec_loop.main(
+        _engineer_args("--traces-to", _operator(tmp_path), "--approval-pr", "7")
+    )
+    assert [c[0] for c in env.calls] == ["resume"]

@@ -27,6 +27,7 @@ from governance import interview as iv
 from governance import run_state as rs
 from governance.stale_adapter import blob_sha1, blob_sha1_bytes
 from tests import locked_runner
+from tests.forge_fake import C1, C2, SIGNED, consistent_world
 from tests.governance_fixtures.bundles import make_bundle, make_profile
 
 GREEN_PR_FACTS: dict[str, Any] = {
@@ -175,6 +176,12 @@ class FakeOps:
     calls: list[tuple] = field(default_factory=list)
     # Очередь ответов discovery: ("start"|"status"|"brief", DiscoveryReply).
     discovery: list[tuple[str, Any]] = field(default_factory=list)
+    #: Стенд форджа engineer-маршрута (§11.4.2–§11.4.3); факты делегируются.
+    forge: Any = None
+    #: `lock_fd`, с которыми звали соседа (§11.4.5).
+    lock_fds: list[int | None] = field(default_factory=list)
+    #: Вызывается В МОМЕНТ обращения к соседу: (kind, kwargs) → None.
+    discovery_hook: Any = None
     discovery_calls: list[tuple] = field(default_factory=list)
     # Текст, который `discovery_brief` пишет в `out_path` при кодах 0/10/11/20.
     brief_text: str = ""
@@ -575,15 +582,48 @@ class FakeOps:
         session_id=None,
         lock_fd=None,
     ):
-        self.discovery_calls.append(("start", frame, target, traces_to, upstream_path))
+        call = ("start", frame, target, traces_to, upstream_path)
+        self.discovery_calls.append(call if session_id is None else (*call, session_id))
+        self.lock_fds.append(lock_fd)
+        if self.discovery_hook is not None:
+            self.discovery_hook("start", session_id)
         return self._discovery_reply("start")
 
     def discovery_status(self, session_id, cwd, *, lock_fd=None):
         self.discovery_calls.append(("status", session_id))
+        self.lock_fds.append(lock_fd)
+        if self.discovery_hook is not None:
+            self.discovery_hook("status", session_id)
         return self._discovery_reply("status")
+
+    # Факты форджа engineer-маршрута — делегирование в `FakeForge`.
+    def _forge(self) -> Any:
+        assert self.forge is not None, "факт форджа без стенда forge"
+        return self.forge
+
+    def brief_pr_fact(self, repo_slug, pr):
+        return self._forge().brief_pr_fact(repo_slug, pr)
+
+    def default_branch_fact(self, repo_slug):
+        return self._forge().default_branch_fact(repo_slug)
+
+    def pr_comments_fact(self, repo_slug, pr):
+        return self._forge().pr_comments_fact(repo_slug, pr)
+
+    def repo_file_fact(self, repo_slug, sha, path):
+        return self._forge().repo_file_fact(repo_slug, sha, path)
+
+    def policy_version_fact(self, repo_slug, branch, path):
+        return self._forge().policy_version_fact(repo_slug, branch, path)
+
+    def policy_version_fact_at(self, repo_slug, ref, path, sha):
+        return self._forge().policy_version_fact_at(repo_slug, ref, path, sha)
 
     def discovery_brief(self, session_id, out_path, cwd, *, lock_fd=None):
         self.discovery_calls.append(("brief", session_id, out_path))
+        self.lock_fds.append(lock_fd)
+        if self.discovery_hook is not None:
+            self.discovery_hook("brief", session_id)
         reply = self._discovery_reply("brief")
         # Стенд пишет артефакт при кодах 0/10/11/20, как сосед.
         if reply.code in (0, 10, 11, 20):
@@ -9342,34 +9382,6 @@ def test_interview_of_without_coordinates_is_an_explicit_error() -> None:
         runner._interview_of(state)
 
 
-def test_upstream_path_engineer_frame_needs_traces_to() -> None:
-    state = SimpleNamespace(run_id="r-eng")
-    spec = _need_spec(frame="engineer", traces_to=None)
-    with pytest.raises(ValueError, match="traces_to"):
-        runner._upstream_path(state, spec)
-    assert runner._upstream_path(state, _need_spec()) is None
-
-
-@pytest.mark.parametrize(
-    "brief",
-    [{}, {"source_paths": []}, {"source_blobs": {}}],
-)
-def test_source_layer_guard_stops_on_incomplete_descriptor(monkeypatch, brief) -> None:
-    """Ревью #530 (major): дескриптор без source_paths/source_blobs не должен
-    давать зелёный S3 — гвард останавливает шаг, ничего не сверив."""
-    from types import SimpleNamespace
-
-    stops: list[str] = []
-    monkeypatch.setattr(
-        runner, "_brief_stop", lambda state, msg: stops.append(msg) or False
-    )
-    state = SimpleNamespace(brief=brief, target_dir="t", bundle_dir="b", run_id="r")
-    ops = SimpleNamespace(rev_parse=lambda *a: "h", blob_in_commit=lambda *a: None)
-
-    assert runner._source_layer_committed(state, ops) is False
-    assert stops and "отсутствует" in stops[0]
-
-
 def test_verify_holds_child_lock_through_s8(  # ревью части A, A2
     tmp_path: Path, runs_root, monkeypatch
 ) -> None:
@@ -9510,7 +9522,9 @@ def _engineer_intake(buffer: bytes = b"---\nupstream\n") -> iv.EngineerIntake:
 
 def test_start_writes_upstream_copy_from_intake_buffer(tmp_path, runs_root) -> None:
     intake = _engineer_intake()
-    ops = FakeOps(discovery=[("start", _reply(1))])
+    # Буфер — не бриф: перепроверка стадии остановит прогон до соседа; предмет
+    # теста — durable-копия и поля интервью, записанные ДО первого шага.
+    ops = FakeOps(forge=consistent_world())
     state = locked_runner.start(
         **_start_kwargs(tmp_path, "r-eng-copy", ops),
         interview_spec=_need_spec(
@@ -9535,3 +9549,415 @@ def test_start_refuses_intake_blob_mismatch(tmp_path, runs_root) -> None:
             ),
             engineer_intake=intake,
         )
+
+
+# --- §11.4.3–§11.4.5: engineer-стадия (Task 9, часть B) ---
+
+ENGINEER_BRIEF = (
+    Path(__file__).parent / "fixtures" / "discovery_approval" / "engineer-brief.md"
+).read_text(encoding="utf-8")
+
+
+def _eng_reply(code: int, run_id: str, **over) -> iv.DiscoveryReply:
+    if code == 20:
+        over.setdefault(
+            "next_action", {"session_id": f"s-{run_id}-e", "question_id": "Q-01"}
+        )
+    return _reply(code, **over)
+
+
+def _engineer_run(tmp_path, monkeypatch, run_id, replies, forge=None):
+    forge = forge or consistent_world(monkeypatch)
+    ops = FakeOps(discovery=list(replies), forge=forge, brief_text=ENGINEER_BRIEF)
+    buffer = SIGNED.encode("utf-8")
+    state = locked_runner.start(
+        **_start_kwargs(tmp_path, run_id, ops),
+        interview_spec=_need_spec(
+            frame="engineer",
+            traces_to="upstream.md",
+            upstream_blob=blob_sha1_bytes(buffer),
+        ),
+        engineer_intake=iv.EngineerIntake(
+            buffer=buffer,
+            blob=blob_sha1_bytes(buffer),
+            approval={"pr": 7, "self_hash": "report-only"},
+            approval_pr=7,
+            source_path="/op/customer-brief.md",
+        ),
+    )
+    return ops, state
+
+
+def _stop_reason(run_id: str) -> str:
+    return str(rs.load(run_id).interview.get("stop_reason", ""))
+
+
+def test_engineer_start_uses_upstream_session_id_and_lock_fd(
+    tmp_path, runs_root, monkeypatch
+) -> None:
+    ops, state = _engineer_run(
+        tmp_path, monkeypatch, "r-e1", [("start", _eng_reply(20, "r-e1"))]
+    )
+    assert state.status == "waiting_interview"
+    call = ops.discovery_calls[0]
+    assert call[0] == "start" and call[3] is None  # traces_to соседу не уходит
+    assert call[4].endswith("brief-input/00-discovery/upstream.md")
+    assert call[5] == "s-r-e1-e"
+    assert ops.lock_fds == [ops.lock_fds[0]] and isinstance(ops.lock_fds[0], int)
+    assert state.ops["interview-start"]["status"] == "completed"
+
+
+def test_engineer_session_id_is_written_before_start(
+    tmp_path, runs_root, monkeypatch
+) -> None:
+    seen: list[object] = []
+
+    def hook(kind, session_id):
+        if kind == "start":
+            persisted = rs.load("r-e2")
+            seen.append(persisted.interview["session_id"])
+            seen.append(persisted.ops["interview-start"]["status"])
+
+    forge = consistent_world(monkeypatch)
+    ops = FakeOps(
+        discovery=[("start", _eng_reply(20, "r-e2"))],
+        forge=forge,
+        discovery_hook=hook,
+    )
+    buffer = SIGNED.encode()
+    locked_runner.start(
+        **_start_kwargs(tmp_path, "r-e2", ops),
+        interview_spec=_need_spec(
+            frame="engineer",
+            traces_to="upstream.md",
+            upstream_blob=blob_sha1_bytes(buffer),
+        ),
+        engineer_intake=iv.EngineerIntake(
+            buffer, blob_sha1_bytes(buffer), {}, 7, "/op/b.md"
+        ),
+    )
+    assert seen == ["s-r-e2-e", "started"]
+
+
+def test_upstream_copy_tamper_stops_before_neighbor(  # T34
+    tmp_path, runs_root, monkeypatch
+) -> None:
+    ops, _ = _engineer_run(
+        tmp_path, monkeypatch, "r-e3", [("start", _eng_reply(20, "r-e3"))]
+    )
+    (rs.run_dir("r-e3") / iv.UPSTREAM_REL).write_text("подмена", encoding="utf-8")
+    calls = len(ops.discovery_calls)
+    state = locked_runner.resume("r-e3", ops)
+    assert state.status == "stopped_interview"
+    assert len(ops.discovery_calls) == calls
+    assert _stop_reason("r-e3").startswith("upstream_blob_mismatch")
+
+
+def test_consistent_local_tamper_cannot_pass(  # T30 + P1 ревью r1
+    tmp_path, runs_root, monkeypatch
+) -> None:
+    """Подмена upstream.md, upstream_blob и approval В СОГЛАСИИ между собой не
+    проходит: durable-копия сверяется с актом, перевыведенным из форджа."""
+    ops, _ = _engineer_run(
+        tmp_path, monkeypatch, "r-e4", [("start", _eng_reply(20, "r-e4"))]
+    )
+    forged = SIGNED.replace("## Goals", "## Goals\n\nчужая цель\n", 1).encode()
+    (rs.run_dir("r-e4") / iv.UPSTREAM_REL).write_bytes(forged)
+    st = rs.load("r-e4")
+    st.interview["upstream_blob"] = blob_sha1_bytes(forged)
+    st.interview["approval"]["self_hash"] = "sha256:forged"
+    rs.save(st)
+    calls = len(ops.discovery_calls)
+    state = locked_runner.resume("r-e4", ops)
+    assert state.status == "stopped_interview"
+    assert len(ops.discovery_calls) == calls
+    assert _stop_reason("r-e4").startswith("operator_brief")
+
+
+def test_policy_drift_between_visits_stops(  # T29-сценарий
+    tmp_path, runs_root, monkeypatch
+) -> None:
+    ops, _ = _engineer_run(
+        tmp_path, monkeypatch, "r-e5", [("start", _eng_reply(20, "r-e5"))]
+    )
+    ops.forge.add_policy(C1)
+    calls = len(ops.discovery_calls)
+    state = locked_runner.resume("r-e5", ops)
+    assert state.status == "stopped_interview"
+    assert len(ops.discovery_calls) == calls
+    assert _stop_reason("r-e5").startswith("upstream_policy_drift")
+
+
+def test_reconfirm_resume_drift_sequence(
+    tmp_path, runs_root, monkeypatch
+) -> None:  # T28
+    ops, _ = _engineer_run(
+        tmp_path,
+        monkeypatch,
+        "r-e6",
+        [("start", _eng_reply(20, "r-e6")), ("status", _eng_reply(20, "r-e6"))],
+    )
+    ops.forge.add_policy(C1)
+    assert locked_runner.resume("r-e6", ops).status == "stopped_interview"
+    ops.forge.reconfirm(C1)
+    assert locked_runner.resume("r-e6", ops).status == "waiting_interview"
+    ops.forge.add_policy(C2)
+    assert locked_runner.resume("r-e6", ops).status == "stopped_interview"
+    assert _stop_reason("r-e6").startswith("upstream_policy_drift")
+
+
+def test_policy_change_during_render_blocks_publication(  # P4 ревью r1
+    tmp_path, runs_root, monkeypatch
+) -> None:
+    ops, _ = _engineer_run(
+        tmp_path,
+        monkeypatch,
+        "r-e7",
+        [
+            ("start", _eng_reply(20, "r-e7")),
+            ("status", _eng_reply(0, "r-e7")),
+            ("brief", _eng_reply(0, "r-e7")),
+        ],
+    )
+
+    def drift_on_brief(kind, session_id):
+        if kind == "brief":
+            ops.forge.add_policy(C1)
+
+    ops.discovery_hook = drift_on_brief
+    state = locked_runner.resume("r-e7", ops)
+    assert state.status == "stopped_interview"
+    assert not (rs.run_dir("r-e7") / "brief-input/00-discovery/brief.md").exists()
+    assert _stop_reason("r-e7").startswith("upstream_policy_drift")
+
+
+def test_engineer_publication_reaches_s1_with_upstream_source(
+    tmp_path, runs_root, monkeypatch
+) -> None:  # T43 (публикация)
+    ops, _ = _engineer_run(
+        tmp_path,
+        monkeypatch,
+        "r-e8",
+        [
+            ("start", _eng_reply(20, "r-e8")),
+            ("status", _eng_reply(0, "r-e8")),
+            ("brief", _eng_reply(0, "r-e8")),
+        ],
+    )
+    state = locked_runner.resume("r-e8", ops)
+    assert state.interview["completed_at"]
+    blobs = dict(state.brief["source_blobs"])
+    assert blobs["discovery-customer"] == blob_sha1_bytes(SIGNED.encode())
+
+
+def test_session_id_mismatch_stops(tmp_path, runs_root, monkeypatch) -> None:  # T36
+    ops, _ = _engineer_run(
+        tmp_path, monkeypatch, "r-e9", [("start", _eng_reply(20, "r-e9"))]
+    )
+    st = rs.load("r-e9")
+    st.interview["session_id"] = "s-other"
+    rs.save(st)
+    calls = len(ops.discovery_calls)
+    assert locked_runner.resume("r-e9", ops).status == "stopped_interview"
+    assert len(ops.discovery_calls) == calls
+    assert _stop_reason("r-e9").startswith("session_id_mismatch")
+
+
+@pytest.mark.parametrize("code", [20, 0, 10, 11])
+def test_recovery_with_existing_session_is_unverifiable(  # T39
+    tmp_path, runs_root, monkeypatch, code
+) -> None:
+    run_id = f"r-ea{code}"
+    ops, _ = _engineer_run(
+        tmp_path,
+        monkeypatch,
+        run_id,
+        [("start", _eng_reply(1, run_id)), ("status", _eng_reply(code, run_id))],
+    )
+    state = locked_runner.resume(run_id, ops)
+    assert state.status == "stopped_interview"
+    assert [c[0] for c in ops.discovery_calls] == ["start", "status"]
+    assert _stop_reason(run_id).startswith("session_unverifiable")
+    assert state.interview["session_id"] == f"s-{run_id}-e"
+
+
+def test_recovery_unknown_status_is_hard_stop(
+    tmp_path, runs_root, monkeypatch
+) -> None:  # T41
+    ops, _ = _engineer_run(
+        tmp_path,
+        monkeypatch,
+        "r-eb",
+        [("start", _eng_reply(1, "r-eb")), ("status", _reply(1))],
+    )
+    state = locked_runner.resume("r-eb", ops)
+    assert state.status == "stopped_interview"
+    assert [c[0] for c in ops.discovery_calls] == ["start", "status"]
+    assert _stop_reason("r-eb").startswith("session_state_unknown")
+
+
+@pytest.mark.parametrize(
+    "traces", ["[upstream.md, other.md]", "[brief.md]", "[customer.md]"]
+)
+def test_engineer_brief_must_trace_only_upstream(  # T42
+    tmp_path, runs_root, monkeypatch, traces
+) -> None:
+    run_id = "r-ec" + str(abs(hash(traces)) % 1000)
+    ops, _ = _engineer_run(
+        tmp_path,
+        monkeypatch,
+        run_id,
+        [
+            ("start", _eng_reply(20, run_id)),
+            ("status", _eng_reply(0, run_id)),
+            ("brief", _eng_reply(0, run_id)),
+        ],
+    )
+    ops.brief_text = ENGINEER_BRIEF.replace(
+        "traces_to: [upstream.md]", f"traces_to: {traces}"
+    )
+    state = locked_runner.resume(run_id, ops)
+    assert state.status == "stopped_interview"
+    assert not (rs.run_dir(run_id) / "brief-input/00-discovery/brief.md").exists()
+
+
+def test_guard_stop_before_start_is_resumable(  # не «сирота»
+    tmp_path, runs_root, monkeypatch
+) -> None:
+    forge = consistent_world(monkeypatch)
+    forge.unavailable_facts.add("pr")
+    ops, state = _engineer_run(
+        tmp_path, monkeypatch, "r-ed", [("start", _eng_reply(20, "r-ed"))], forge=forge
+    )
+    assert state.status == "stopped_interview" and ops.discovery_calls == []
+    forge.unavailable_facts.clear()
+    assert locked_runner.resume("r-ed", ops).status == "waiting_interview"
+
+
+def test_attach_session_refused_for_engineer(tmp_path, runs_root, monkeypatch) -> None:
+    ops, _ = _engineer_run(
+        tmp_path, monkeypatch, "r-ee", [("start", _eng_reply(1, "r-ee"))]
+    )
+    with pytest.raises(ValueError, match="engineer"):
+        locked_runner.attach_session("r-ee", "s-x", ops)
+
+
+# --- ревью части B, круг 1: B2, B4 ---
+
+
+@pytest.mark.parametrize("value", ["s-other", None, "", "removed"])
+def test_session_id_tamper_after_start_stops(  # T36 (B2)
+    tmp_path, runs_root, monkeypatch, value
+) -> None:
+    run_id = "r-sid-" + str(abs(hash(str(value))) % 1000)
+    ops, _ = _engineer_run(
+        tmp_path, monkeypatch, run_id, [("start", _eng_reply(20, run_id))]
+    )
+    st = rs.load(run_id)
+    if value == "removed":
+        del st.interview["session_id"]
+    else:
+        st.interview["session_id"] = value
+    rs.save(st)
+    calls = len(ops.discovery_calls)
+    assert locked_runner.resume(run_id, ops).status == "stopped_interview"
+    assert len(ops.discovery_calls) == calls
+    assert _stop_reason(run_id).startswith("session_id_mismatch")
+
+
+def test_attach_session_passes_lock_fd(tmp_path, runs_root) -> None:  # B4
+    ops = FakeOps(
+        discovery=[("start", _reply(1)), ("brief", _reply(20))],
+        brief_text=_need_brief_text(),
+    )
+    locked_runner.start(
+        **_start_kwargs(tmp_path, "r-att-fd", ops), interview_spec=_need_spec()
+    )
+    locked_runner.attach_session("r-att-fd", "s-1", ops)
+    assert ops.lock_fds and isinstance(ops.lock_fds[-1], int)
+
+
+def test_every_neighbor_call_in_engineer_flow_passes_lock_fd(  # T38 (production call sites)
+    tmp_path, runs_root, monkeypatch
+) -> None:
+    ops, _ = _engineer_run(
+        tmp_path,
+        monkeypatch,
+        "r-fds",
+        [
+            ("start", _eng_reply(20, "r-fds")),
+            ("status", _eng_reply(0, "r-fds")),
+            ("brief", _eng_reply(0, "r-fds")),
+        ],
+    )
+    locked_runner.resume("r-fds", ops)
+    assert len(ops.lock_fds) == 3 and all(isinstance(fd, int) for fd in ops.lock_fds)
+
+
+def test_only_the_discovery_port_passes_descriptors() -> None:  # T38 (git/gh-потомки)
+    """Класс, а не экземпляр: во всём `governance/` дескрипторы потомку передаёт
+    только порт discovery (`RealOps._discovery`); `close_fds=False` нет нигде —
+    git/gh-потомки блокировку прогона не наследуют (`O_CLOEXEC` + close_fds)."""
+    import ast
+
+    passing: set[str] = set()
+    root = Path(runner.__file__).parent
+    for path in sorted(root.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for func in ast.walk(tree):
+            if not isinstance(func, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            for call in ast.walk(func):
+                if not isinstance(call, ast.Call):
+                    continue
+                for kw in call.keywords:
+                    if kw.arg == "pass_fds":
+                        passing.add(f"{path.name}:{func.name}")
+                    if kw.arg == "close_fds":
+                        raise AssertionError(f"close_fds в {path.name}:{func.name}")
+    assert passing == {"ops.py:_discovery"}
+
+
+_FD_PROBE = """#!{python}
+import os, sys
+lock = os.stat(os.environ["PROBE_LOCK"])
+held = []
+for name in os.listdir("/dev/fd"):
+    try:
+        st = os.fstat(int(name))
+    except OSError:
+        continue
+    if (st.st_dev, st.st_ino) == (lock.st_dev, lock.st_ino):
+        held.append(name)
+with open(os.environ["PROBE_OUT"], "a", encoding="utf-8") as out:
+    out.write(os.path.basename(sys.argv[0]) + ":" + ",".join(held) + "\\n")
+"""
+
+
+def test_git_and_gh_children_do_not_hold_the_lock(  # T38 (git/gh-потомки)
+    tmp_path, runs_root, monkeypatch
+) -> None:
+    """Настоящие пути RealOps (`is_dirty` → git, `_graphql_repository` → gh) под
+    взятой блокировкой: потомок не видит открытого файла блокировки."""
+    import subprocess
+    import sys
+
+    from governance.ops import RealOps
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in ("git", "gh"):
+        stub = bin_dir / name
+        stub.write_text(_FD_PROBE.format(python=sys.executable), encoding="utf-8")
+        stub.chmod(0o755)
+    out = tmp_path / "probe.txt"
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    monkeypatch.setenv("PROBE_OUT", str(out))
+    with run_lock.run_lock("r-fd") as lock:
+        monkeypatch.setenv("PROBE_LOCK", str(run_lock.lock_path("r-fd")))
+        RealOps().is_dirty(str(tmp_path))
+        RealOps()._graphql_repository("query{viewer{login}}")
+        # Положительный контроль зонда: явно переданный дескриптор он видит.
+        subprocess.run([str(bin_dir / "git")], pass_fds=(lock.fd,), check=True)
+    lines = out.read_text(encoding="utf-8").splitlines()
+    assert lines == ["git:", "gh:", f"git:{lock.fd}"]

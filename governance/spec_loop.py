@@ -902,7 +902,11 @@ def _dispatch(state: rs.RunState, ops, lock: run_lock.RunLock) -> int:
             return _deliver_phase(after, ops)
         return _report_state(after)
     if state.status in ("waiting_interview", "stopped_interview"):
-        if state.interview and state.interview.get("session_id") is None:
+        if (
+            state.interview
+            and state.interview.get("frame") != "engineer"
+            and state.interview.get("session_id") is None
+        ):
             # Сирота — координаты стадии Need без записанной сессии.
             # `runner.resume` тоже отказался бы звать discovery, но кнопка
             # проверяет это САМА и не делает вызов вовсе (ruling 2, Task 10):

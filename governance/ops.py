@@ -35,7 +35,6 @@ from governance.decomposition_guard import DELIVERABLE_KINDS
 from governance.facts import Fact, Outcome, unavailable
 
 DEVTOOLS_ROOT = Path(__file__).resolve().parent.parent
-ENGINEER_BLOCKED = "engineer-маршрут ждёт discovery#49 (приём upstream при start)"
 REVIEW_GH_CONFIG_DIR = Path.home() / ".config" / "review"
 
 _PR_URL_RE = re.compile(r"/pull/(\d+)")
