@@ -564,15 +564,25 @@ class FakeOps:
         )
         return self.discovery.pop(0)[1]
 
-    def discovery_start(self, frame, target, traces_to, upstream_path, cwd):
+    def discovery_start(
+        self,
+        frame,
+        target,
+        traces_to,
+        upstream_path,
+        cwd,
+        *,
+        session_id=None,
+        lock_fd=None,
+    ):
         self.discovery_calls.append(("start", frame, target, traces_to, upstream_path))
         return self._discovery_reply("start")
 
-    def discovery_status(self, session_id, cwd):
+    def discovery_status(self, session_id, cwd, *, lock_fd=None):
         self.discovery_calls.append(("status", session_id))
         return self._discovery_reply("status")
 
-    def discovery_brief(self, session_id, out_path, cwd):
+    def discovery_brief(self, session_id, out_path, cwd, *, lock_fd=None):
         self.discovery_calls.append(("brief", session_id, out_path))
         reply = self._discovery_reply("brief")
         # Стенд пишет артефакт при кодах 0/10/11/20, как сосед.

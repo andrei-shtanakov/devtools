@@ -2289,17 +2289,97 @@ def test_discovery_start_engineer_traces_to_argv(monkeypatch, tmp_path):
     assert seen[0]["argv"][-2:] == ["--traces-to", "customer.md"]
 
 
-def test_discovery_start_refuses_upstream_until_inbox(monkeypatch, tmp_path):
+def test_discovery_start_engineer_upstream_and_session_id(monkeypatch, tmp_path):
+    """T1 (§11.4.6): upstream уходит `--upstream`, без `--traces-to`; id — write-ahead."""
+    seen = _capture(monkeypatch)
+    RealOps().discovery_start(
+        "engineer",
+        "o/alpha",
+        None,
+        str(tmp_path / "upstream.md"),
+        str(tmp_path),
+        session_id="s-r-e",
+        lock_fd=7,
+    )
+    argv = seen[0]["argv"]
+    assert argv[argv.index("start") :] == [
+        "start",
+        "--frame",
+        "engineer",
+        "--target",
+        "o/alpha",
+        "--upstream",
+        str(tmp_path / "upstream.md"),
+        "--session-id",
+        "s-r-e",
+    ]
+    assert "--traces-to" not in argv
+    assert seen[0]["pass_fds"] == (7,)
+
+
+def test_discovery_without_lock_fd_passes_no_fds(monkeypatch, tmp_path):
+    seen = _capture(monkeypatch)
+    RealOps().discovery_start("customer", "o/alpha", None, None, str(tmp_path))
+    assert seen[0]["pass_fds"] == ()
+
+
+def test_discovery_start_upstream_with_traces_to_is_synthetic_1(monkeypatch, tmp_path):
+    """T2: заданы оба — синтетический 1 ДО subprocess (инвариант порта)."""
     seen = _capture(monkeypatch)
     reply = RealOps().discovery_start(
         "engineer",
         "o/alpha",
         "customer.md",
-        str(tmp_path / "customer.md"),
+        str(tmp_path / "upstream.md"),
         str(tmp_path),
     )
-    assert seen == []  # сосед не вызван
-    assert reply.code == 1 and "discovery#49" in reply.envelope["operation"]["reason"]
+    assert seen == []
+    assert reply.code == 1 and "--upstream" in reply.envelope["operation"]["reason"]
+
+
+@pytest.mark.parametrize(
+    ("code", "stdout"),
+    [(20, None), (0, "not json"), (2, "")],
+    ids=["approve-20", "not-json", "no-envelope"],
+)
+def test_discovery_approve_impossible_forms_are_synthetic_1(
+    monkeypatch, tmp_path, code, stdout
+):
+    """T3: 20 у approve — невозможная форма; без envelope — граница."""
+    _capture(monkeypatch, returncode=code, stdout=stdout)
+    reply = RealOps().discovery_approve(
+        str(tmp_path / "b.md"), "o/alpha", 7, "d/brief.md", str(tmp_path)
+    )
+    assert reply.code == 1
+
+
+def test_discovery_approve_argv_and_refusal_code(monkeypatch, tmp_path):
+    envelope = {
+        "lifecycle": "complete",
+        "gate": "pass",
+        "readiness": "ready",
+        "next_action": {},
+        "findings": [],
+        "readiness_findings": [],
+        "operation": {"status": "refused", "reason": "brief_bytes_diverged"},
+    }
+    seen = _capture(monkeypatch, returncode=2, stdout=json.dumps(envelope))
+    reply = RealOps().discovery_approve(
+        str(tmp_path / "b.md"), "o/alpha", 7, "d/brief.md", str(tmp_path), lock_fd=5
+    )
+    argv = seen[0]["argv"]
+    assert argv[argv.index("approve") :] == [
+        "approve",
+        str(tmp_path / "b.md"),
+        "--repo",
+        "o/alpha",
+        "--pr",
+        "7",
+        "--path",
+        "d/brief.md",
+    ]
+    assert seen[0]["pass_fds"] == (5,)
+    assert reply.code == 2
 
 
 def test_discovery_status_and_brief_argv(monkeypatch, tmp_path):

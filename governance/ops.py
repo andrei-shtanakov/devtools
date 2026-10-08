@@ -278,14 +278,28 @@ class Ops(Protocol):
         traces_to: str | None,
         upstream_path: str | None,
         cwd: str,
+        *,
+        session_id: str | None = None,
+        lock_fd: int | None = None,
     ) -> _interview.DiscoveryReply: ...
 
     def discovery_status(
-        self, session_id: str, cwd: str
+        self, session_id: str, cwd: str, *, lock_fd: int | None = None
     ) -> _interview.DiscoveryReply: ...
 
     def discovery_brief(
-        self, session_id: str, out_path: str, cwd: str
+        self, session_id: str, out_path: str, cwd: str, *, lock_fd: int | None = None
+    ) -> _interview.DiscoveryReply: ...
+
+    def discovery_approve(
+        self,
+        brief_path: str,
+        repo: str,
+        pr: int,
+        path: str,
+        cwd: str,
+        *,
+        lock_fd: int | None = None,
     ) -> _interview.DiscoveryReply: ...
 
     def commit_paths(
@@ -2244,12 +2258,16 @@ class RealOps(BriefFactsMixin):
         claude = any(_harness_for(p)[0] == "claude" for p in ("AUTHOR", "REVIEW"))
         return _run_agent(argv, target_dir, claude=claude)
 
-    def _discovery(self, args: list[str], cwd: str) -> _interview.DiscoveryReply:
+    def _discovery(
+        self, args: list[str], cwd: str, lock_fd: int | None = None
+    ) -> _interview.DiscoveryReply:
         """Один вызов discovery CLI соседа + проверка границы (спека §6).
 
         `--frozen --project`: тот же способ, что у disputatio (`author_disp`).
         stdout захватывается целиком — envelope один на вызов; stderr
-        сохраняется для диагностики, но в контракт не входит.
+        сохраняется для диагностики, но в контракт не входит. `lock_fd` —
+        дескриптор блокировки прогона (§11.4.5): передаётся соседу
+        (`pass_fds`), и блокировка держится, пока жив его процесс.
         """
         argv = [
             "uv",
@@ -2261,7 +2279,12 @@ class RealOps(BriefFactsMixin):
             *args,
         ]
         done = subprocess.run(
-            argv, cwd=cwd, capture_output=True, text=True, check=False
+            argv,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+            pass_fds=(lock_fd,) if lock_fd is not None else (),
         )
         return _interview.parse_reply(done.returncode, done.stdout, done.stderr)
 
@@ -2272,28 +2295,70 @@ class RealOps(BriefFactsMixin):
         traces_to: str | None,
         upstream_path: str | None,
         cwd: str,
+        *,
+        session_id: str | None = None,
+        lock_fd: int | None = None,
     ) -> _interview.DiscoveryReply:
-        """`discovery start`. `upstream_path` — durable-копия из run_dir; до
-        discovery#49 сосед upstream не принимает — отказ ДО вызова, тем же
-        текстом, что preflight spec-loop (порт после разблокировки не меняется)."""
-        if upstream_path is not None:
+        """`discovery start` (§11.4.6). С `upstream_path` (durable-копия из
+        run_dir) — `--upstream` и НИКАКОГО `--traces-to`: сосед сам ставит
+        `upstream.md` первым в `traces_to` и отказывает на дубле. Заданы оба —
+        синтетический 1 до subprocess (инвариант порта)."""
+        if upstream_path is not None and traces_to is not None:
             return _interview.DiscoveryReply(
-                1, _interview.synthetic_envelope(ENGINEER_BLOCKED), ""
+                1,
+                _interview.synthetic_envelope(
+                    "upstream_path и traces_to вместе — upstream уходит только "
+                    "через --upstream"
+                ),
+                "",
             )
         args = ["start", "--frame", frame, "--target", target]
-        if traces_to:
+        if upstream_path is not None:
+            args += ["--upstream", upstream_path]
+        elif traces_to:
             args += ["--traces-to", traces_to]
-        return self._discovery(args, cwd)
+        if session_id is not None:
+            args += ["--session-id", session_id]
+        return self._discovery(args, cwd, lock_fd)
 
-    def discovery_status(self, session_id: str, cwd: str) -> _interview.DiscoveryReply:
-        return self._discovery(["status", "--session", session_id], cwd)
+    def discovery_status(
+        self, session_id: str, cwd: str, *, lock_fd: int | None = None
+    ) -> _interview.DiscoveryReply:
+        return self._discovery(["status", "--session", session_id], cwd, lock_fd)
 
     def discovery_brief(
-        self, session_id: str, out_path: str, cwd: str
+        self, session_id: str, out_path: str, cwd: str, *, lock_fd: int | None = None
     ) -> _interview.DiscoveryReply:
         return self._discovery(
-            ["brief", "--session", session_id, "--out", out_path], cwd
+            ["brief", "--session", session_id, "--out", out_path], cwd, lock_fd
         )
+
+    def discovery_approve(
+        self,
+        brief_path: str,
+        repo: str,
+        pr: int,
+        path: str,
+        cwd: str,
+        *,
+        lock_fd: int | None = None,
+    ) -> _interview.DiscoveryReply:
+        """`discovery approve` (§11.5): зеркало человеческого мержа в конверт.
+
+        Код 20 у `approve` — невозможная форма (интервью не идёт) ⇒
+        синтетический 1; код без envelope ловит `parse_reply`."""
+        reply = self._discovery(
+            ["approve", brief_path, "--repo", repo, "--pr", str(pr), "--path", path],
+            cwd,
+            lock_fd,
+        )
+        if reply.code == 20:
+            return _interview.DiscoveryReply(
+                1,
+                _interview.synthetic_envelope("approve вернул 20 — невозможная форма"),
+                reply.stderr,
+            )
+        return reply
 
     @staticmethod
     def _ignored_files(target_dir: str, paths: list[str]) -> list[str]:
