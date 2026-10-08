@@ -42,6 +42,30 @@ class ToolOps(FakeForge):
     dirty: bool = False
     next_pr: int = 42
     push_error: str | None = None
+    #: (код, что записать в файл или None, reason) — ответ `discovery approve`.
+    approve_reply: tuple[int, str | None, str] = (0, None, "")
+    approve_calls: int = 0
+    after_approve: object = None
+
+    def discovery_approve(self, brief_path, repo, pr, path, cwd, *, lock_fd=None):
+        from governance import interview as _iv
+
+        self.approve_calls += 1
+        code, text, reason = self.approve_reply
+        if text is not None:
+            Path(brief_path).write_text(text, encoding="utf-8")
+        if callable(self.after_approve):
+            self.after_approve()
+        envelope = {
+            "lifecycle": "complete",
+            "gate": "fail" if code == 10 else "pass",
+            "readiness": "incomplete" if code == 11 else "ready",
+            "next_action": {},
+            "findings": [],
+            "readiness_findings": [],
+            "operation": {"status": "refused" if code == 2 else "ok", "reason": reason},
+        }
+        return _iv.DiscoveryReply(code, envelope, "")
 
     def remote_branch_head_fact(self, repo_slug: str, branch: str) -> Fact[str]:
         if "remote" in self.unavailable_facts:
@@ -491,3 +515,195 @@ def test_local_commit_with_extra_path_refuses_before_push(  # B3 (до push)
     with pytest.raises(bt.BriefToolError, match="не предложение"):
         bt.propose(RUN_ID, ops)
     assert not any(c[0] == "push_branch" for c in ops.calls)
+
+
+# --- §11.5: brief-approve (Task 12) ---
+
+from governance import spec_loop  # noqa: E402
+from tests.forge_fake import SIGNED  # noqa: E402
+
+
+@pytest.fixture()
+def approve_env(tmp_path, runs_root, monkeypatch):
+    _brief_ready_run(tmp_path)
+    return _ops(monkeypatch, with_pr=True)
+
+
+def _signed_path() -> Path:
+    return rs.run_dir(RUN_ID) / bt.APPROVED_REL
+
+
+def test_approve_success_prints_engineer_command(approve_env, capsys) -> None:  # T44
+    approve_env.approve_reply = (0, SIGNED, "")
+    path = bt.approve(RUN_ID, 7, approve_env)
+    assert path == _signed_path() and path.read_text(encoding="utf-8") == SIGNED
+    out = capsys.readouterr().out
+    assert "--frame engineer" in out and "--approval-pr 7" in out and "--new-run" in out
+
+
+@pytest.mark.parametrize(
+    ("reply", "phrase"),
+    [
+        ((1, None, "boom"), "неизвестен"),
+        ((2, DRAFT, "brief_bytes_diverged"), "draft"),
+        ((2, None, "approver_not_authorized"), "не тронут"),
+        ((10, SIGNED, ""), "подпись записана"),
+        ((11, SIGNED, ""), "подпись записана"),
+        ((0, None, ""), "не зеркалит"),
+        (
+            (0, SIGNED.replace("approver: andrei-shtanakov", "approver: someone"), ""),
+            "не зеркалит",
+        ),
+    ],
+    ids=[
+        "code1",
+        "diverged",
+        "refused",
+        "code10",
+        "code11",
+        "code0-unsigned",
+        "code0-foreign-envelope",
+    ],
+)
+def test_approve_failures_print_no_engineer_command(  # T45
+    approve_env, capsys, reply, phrase
+) -> None:
+    approve_env.approve_reply = reply
+    with pytest.raises(bt.BriefToolError, match=phrase):
+        bt.approve(RUN_ID, 7, approve_env)
+    assert "--frame engineer" not in capsys.readouterr().out
+
+
+def test_policy_moved_during_approve(approve_env) -> None:  # T46
+    approve_env.approve_reply = (0, SIGNED, "")
+    approve_env.after_approve = lambda: approve_env.add_policy(C1)
+    with pytest.raises(bt.BriefToolError, match="не подтверждён"):
+        bt.approve(RUN_ID, 7, approve_env)
+
+
+def test_policy_unavailable_after_approve(approve_env) -> None:  # T46
+    approve_env.approve_reply = (0, SIGNED, "")
+    approve_env.after_approve = lambda: approve_env.unavailable_facts.add("policy")
+    with pytest.raises(bt.BriefToolError, match="не подтверждён"):
+        bt.approve(RUN_ID, 7, approve_env)
+
+
+def test_drift_before_first_approve_then_reconfirm(approve_env, capsys) -> None:  # T44a
+    approve_env.add_policy(C1)
+    with pytest.raises(bt.BriefToolError, match="policy-reconfirm:"):
+        bt.approve(RUN_ID, 7, approve_env)
+    assert approve_env.approve_calls == 0
+    approve_env.reconfirm(C1)
+    approve_env.approve_reply = (0, SIGNED, "")
+    assert bt.approve(RUN_ID, 7, approve_env) == _signed_path()
+
+
+def test_drift_after_approve_blocks_engineer_until_reconfirm(  # T44b
+    approve_env, tmp_path
+) -> None:
+    approve_env.approve_reply = (0, SIGNED, "")
+    path = bt.approve(RUN_ID, 7, approve_env)
+    approve_env.add_policy(C1)
+    with pytest.raises(spec_loop.SpecLoopError, match="upstream_policy_drift"):
+        spec_loop.engineer_preflight(str(path), 7, REPO, approve_env)
+    approve_env.reconfirm(C1)
+    assert (
+        spec_loop.engineer_preflight(str(path), 7, REPO, approve_env).approval_pr == 7
+    )
+
+
+def test_repeat_after_success_is_idempotent(approve_env) -> None:
+    approve_env.approve_reply = (0, SIGNED, "")
+    bt.approve(RUN_ID, 7, approve_env)
+    before = _signed_path().read_bytes()
+    assert bt.approve(RUN_ID, 7, approve_env) == _signed_path()
+    assert _signed_path().read_bytes() == before
+
+
+@pytest.mark.parametrize("command", ["propose", "approve"])
+def test_busy_run_exits_1_before_reading_state(  # T37 (brief-propose/brief-approve)
+    tmp_path, runs_root, monkeypatch, command
+) -> None:
+    from governance import run_lock
+
+    _brief_ready_run(tmp_path)
+    before = {p: p.read_bytes() for p in rs.run_dir(RUN_ID).rglob("*") if p.is_file()}
+
+    def no_load(run_id):
+        raise AssertionError("run.json прочитан при занятой блокировке")
+
+    monkeypatch.setattr(rs, "load", no_load)
+    argv = [command, "--run", RUN_ID] + (["--pr", "7"] if command == "approve" else [])
+    with run_lock.run_lock(RUN_ID):
+        assert bt.main(argv) == 1
+    after = {p: p.read_bytes() for p in rs.run_dir(RUN_ID).rglob("*") if p.is_file()}
+    assert after == before
+
+
+def test_foreign_file_in_place_refuses(approve_env) -> None:
+    _signed_path().parent.mkdir(parents=True, exist_ok=True)
+    _signed_path().write_text(DRAFT + "\nчужое\n", encoding="utf-8")
+    with pytest.raises(bt.BriefToolError, match="чужой"):
+        bt.approve(RUN_ID, 7, approve_env)
+    assert approve_env.approve_calls == 0
+
+
+def test_pr_of_another_run_refuses(approve_env) -> None:
+    approve_env.set_pr(
+        files=(
+            ("workstreams/WS-9/spec/00-discovery/brief.md", "added"),
+            (f"workstreams/WS-9/spec/00-discovery/{ar.FILE_NAME}", "added"),
+        )
+    )
+    for name in ("brief.md", ar.FILE_NAME):
+        approve_env.files[(MERGE, f"workstreams/WS-9/spec/00-discovery/{name}")] = (
+            approve_env.files[(MERGE, f"{DIR}/{name}")]
+        )
+    with pytest.raises(bt.BriefToolError, match="не бриф этого прогона"):
+        bt.approve(RUN_ID, 7, approve_env)
+
+
+@pytest.mark.parametrize(("case", "mutate", "_m"), DEFECTS, ids=[d[0] for d in DEFECTS])
+def test_browser_merged_ambiguous_request_refuses(
+    approve_env, case, mutate, _m
+) -> None:  # T21a/b
+    key = (MERGE, f"{DIR}/{ar.FILE_NAME}")
+    approve_env.files[key] = mutate(ar.render(request()))
+    with pytest.raises(bt.BriefToolError):
+        bt.approve(RUN_ID, 7, approve_env)
+    assert approve_env.approve_calls == 0
+
+
+def test_policy_switch_to_reconfirmed_version_during_approve(
+    approve_env,
+) -> None:  # T46
+    """Во время вызова появились новая версия C1 И подтверждение к ней: проверка
+    «до» (P) и «после» (C1) обе проходят, но версии разные — подпись могла быть
+    записана под любой из них. Ловит только сравнение «до/после»."""
+    approve_env.approve_reply = (0, SIGNED, "")
+
+    def switch() -> None:
+        approve_env.add_policy(C1)
+        approve_env.reconfirm(C1)
+
+    approve_env.after_approve = switch
+    with pytest.raises(bt.BriefToolError, match="сменилась во время approve"):
+        bt.approve(RUN_ID, 7, approve_env)
+
+
+@pytest.mark.parametrize(
+    ("reason", "writes", "phrase"),
+    [
+        ("pr_not_merged", None, "не тронут"),
+        ("approver_not_authorized", None, "не тронут"),
+        ("brief_not_in_pr", None, "не тронут"),
+        ("brief_bytes_diverged", DRAFT, "draft"),
+    ],
+)
+def test_approve_each_refusal_reason(
+    approve_env, capsys, reason, writes, phrase
+) -> None:  # T45
+    approve_env.approve_reply = (2, writes, reason)
+    with pytest.raises(bt.BriefToolError, match=phrase):
+        bt.approve(RUN_ID, 7, approve_env)
+    assert "--frame engineer" not in capsys.readouterr().out

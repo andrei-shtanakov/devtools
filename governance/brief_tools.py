@@ -14,6 +14,7 @@ CLI: `python -m governance.brief_tools {propose,approve,check-merge} …`;
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -22,6 +23,7 @@ from governance import (
     approval_facts,
     approval_request,
     brief_input,
+    brief_provenance,
     discovery_approval,
     policy_rule,
 )
@@ -289,12 +291,122 @@ def propose(run_id: str, ops) -> int:
         return _create(ops, state, branch, data, brief_text, dir_)
 
 
+def _policy_or_fail(ops, act: brief_provenance.Act) -> str:
+    got = brief_provenance.check_policy(ops, act)
+    if isinstance(got, brief_provenance.Refusal):
+        raise BriefToolError(got.detail, retry=got.retry)
+    return got.current
+
+
+def _engineer_command(state: rs.RunState, pr: int, path: Path) -> str:
+    return (
+        f"make spec-loop SUBJECT='{state.subject}' REPO={state.repo} ARGS='--need "
+        f"--frame engineer --new-run --ws-id {state.ws_id}-eng --stakeholder "
+        f"<role> --traces-to {path} --approval-pr {pr}'"
+    )
+
+
+def approve(run_id: str, pr: int, ops) -> Path:
+    """§11.5: зеркало человеческого мержа brief-PR через `discovery approve`.
+
+    Успех требует ВСЕГО вместе: акт по форджу, политика до и после вызова
+    той же версии, код 0 и перечитанный файл, честно зеркалящий мерж.
+    Возвращает путь подписанного файла (вход engineer-прогона).
+    """
+    with rl.run_lock(run_id) as lock:
+        state = rs.load(run_id)
+        act = brief_provenance.read_act(ops, state.repo_slug, pr)
+        if isinstance(act, brief_provenance.Refusal):
+            raise BriefToolError(act.detail, retry=act.retry)
+        if act.dir != proposal_dir(state):
+            raise BriefToolError(f"PR #{pr} одобряет {act.dir}, не бриф этого прогона")
+        own = (rs.run_dir(run_id) / iv.BRIEF_REL).read_text(encoding="utf-8")
+        if discovery_approval.self_hash(own) != act.brief_self_hash:
+            raise BriefToolError(f"заявка PR #{pr} — не про бриф этого прогона")
+        before = _policy_or_fail(ops, act)
+        target = rs.run_dir(run_id) / APPROVED_REL
+        merged = _fact(
+            ops.repo_file_fact(
+                state.repo_slug, act.merge_commit, f"{act.dir}/{approval_request.BRIEF}"
+            ),
+            "бриф merge-коммита",
+        )
+        if merged.outcome is not Outcome.FOUND:
+            raise BriefToolError(f"бриф в merge-коммите не найден: {merged.detail}")
+        if target.exists():
+            current = target.read_text(encoding="utf-8")
+            if discovery_approval.self_hash(current) != act.brief_self_hash:
+                raise BriefToolError(f"{target}: на месте чужой файл")
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_name(".customer-brief.tmp")
+            tmp.write_text(merged.value, encoding="utf-8")
+            os.replace(tmp, target)
+        reply = ops.discovery_approve(
+            str(target),
+            state.repo_slug,
+            pr,
+            f"{act.dir}/{approval_request.BRIEF}",
+            str(rs.run_dir(run_id)),
+            lock_fd=lock.fd,
+        )
+        try:
+            after = _policy_or_fail(ops, act)
+        except BriefToolError as exc:
+            raise BriefToolError(
+                f"итог не подтверждён: подпись могла быть записана под "
+                f"неустановленной политикой ({exc})",
+                retry=exc.retry,
+            ) from exc
+        if after != before:
+            raise BriefToolError(
+                f"итог не подтверждён: политика сменилась во время approve "
+                f"({before} → {after}); подпись могла быть записана — повторите"
+            )
+        _judge_approve(reply, target, act)
+        print("подписано; следующий шаг:")
+        print("  " + _engineer_command(state, pr, target))
+        return target
+
+
+def _judge_approve(reply, target: Path, act: brief_provenance.Act) -> None:
+    """Код вызова — подсказка для текста; истина — перечитанный файл (§11.5 п.5)."""
+    reason = reply.envelope.get("operation", {}).get("reason", "")
+    if reply.code == 1:
+        raise BriefToolError(f"итог approve неизвестен: {reason}", retry=True)
+    if reply.code == 2:
+        if reason == "brief_bytes_diverged":
+            raise BriefToolError(
+                "approve: байты разошлись со смерженными — файл откатан в draft"
+            )
+        raise BriefToolError(f"approve отказал ({reason}) — файл не тронут")
+    if reply.code in (10, 11):
+        axis = "линтер отклоняет бриф" if reply.code == 10 else "readiness=incomplete"
+        raise BriefToolError(
+            f"approve вернул {reply.code}: подпись записана, но {axis} — engineer "
+            "такой upstream не примет"
+        )
+    data = target.read_bytes()
+    refusal = brief_provenance.check_operator_brief(act, data.decode("utf-8"))
+    if refusal is not None:
+        raise BriefToolError(
+            f"approve вернул 0, но конверт не зеркалит мерж: {refusal.detail}"
+        )
+    try:
+        brief_input.check_customer_upstream(target, data)
+    except brief_input.BriefInputError as exc:
+        raise BriefToolError(f"подписанный бриф не годится в upstream: {exc}") from exc
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI обёрток brief-маршрута."""
     parser = argparse.ArgumentParser(prog="brief_tools")
     sub = parser.add_subparsers(dest="command", required=True)
     p_propose = sub.add_parser("propose", help="brief-PR из customer-прогона")
     p_propose.add_argument("--run", required=True)
+    p_approve = sub.add_parser("approve", help="зеркало мержа brief-PR")
+    p_approve.add_argument("--run", required=True)
+    p_approve.add_argument("--pr", required=True, type=int)
     args = parser.parse_args(argv)
     from governance.ops import RealOps
 
@@ -302,6 +414,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "propose":
             propose(args.run, ops)
+            return 0
+        if args.command == "approve":
+            approve(args.run, args.pr, ops)
             return 0
     except rl.LockBusy as exc:
         print(f"brief-tools: {exc}", file=sys.stderr)
