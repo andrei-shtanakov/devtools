@@ -267,7 +267,7 @@ def _origin_url(target_dir: str | Path) -> str:
     return out.stdout.strip()
 
 
-NEED_ONLY = ("frame", "stakeholder", "traces_to", "session", "new_run")
+NEED_ONLY = ("frame", "stakeholder", "traces_to", "session", "new_run", "brief_only")
 STAKEHOLDER_RULE = (
     "стадия Need запускается только при наличии реального стейкхолдера — "
     "укажите --stakeholder <role> (декларация, не проверка); без "
@@ -300,10 +300,22 @@ def build_interview_spec(args, repo_slug: str) -> iv.InterviewSpec | None:
         raise SpecLoopError("--new-run взаимоисключающ с --run-id и --session")
     if args.new_run and not args.ws_id:
         raise SpecLoopError("--new-run требует --ws-id <fresh-id>")
+    if args.brief_only and (args.frame != "customer" or args.session):
+        raise SpecLoopError(
+            "--brief-only допустим только с --need --frame customer и без "
+            "--session (§11.2)"
+        )
     if args.frame == "customer":
         if args.traces_to:
             raise SpecLoopError("customer-фрейм не принимает --traces-to")
-        return iv.InterviewSpec("customer", args.stakeholder, repo_slug, None, None)
+        return iv.InterviewSpec(
+            "customer",
+            args.stakeholder,
+            repo_slug,
+            None,
+            None,
+            brief_only=bool(args.brief_only),
+        )
     if not args.traces_to:
         raise SpecLoopError(
             "engineer-фрейм требует --traces-to <approved customer-brief>"
@@ -809,8 +821,19 @@ def _report_state(state: rs.RunState) -> int:
     return 1
 
 
+def _brief_ready(state: rs.RunState) -> int:
+    """`brief_ready` (§11.2): терминальный; печать следующего шага, код 0."""
+    print(
+        "spec-loop: бриф готов (brief_ready) — следующий шаг: "
+        f"make brief-propose RUN={state.run_id}"
+    )
+    return 0
+
+
 def _dispatch(state: rs.RunState, ops, lock: run_lock.RunLock) -> int:
     """Действие по фактическому статусу найденного прогона."""
+    if state.status == "brief_ready":
+        return _brief_ready(state)
     if state.status == "waiting_human_merge":
         after = runner.resume(state.run_id, ops, lock=lock)
         if after.status == "waiting_human_merge":
@@ -828,6 +851,8 @@ def _dispatch(state: rs.RunState, ops, lock: run_lock.RunLock) -> int:
             # дошёл ли вызов до runner.
             return _report_interview_stop(state)
         after = runner.resume(state.run_id, ops, lock=lock)
+        if after.status == "brief_ready":
+            return _brief_ready(after)
         if after.status == "waiting_interview":
             return 0
         if after.status == "stopped_interview":
@@ -865,6 +890,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--traces-to", help="approved customer-brief для engineer")
     parser.add_argument("--session", help="recovery: присоединить сессию discovery")
+    parser.add_argument(
+        "--brief-only",
+        action="store_true",
+        help="customer: после брифа — терминальный brief_ready, без S1 (§11.2)",
+    )
     parser.add_argument(
         "--new-run",
         action="store_true",
@@ -978,7 +1008,8 @@ def main(argv: list[str] | None = None) -> int:
             past_s1 = [
                 st
                 for st in matches
-                if st.status not in ("waiting_interview", "stopped_interview")
+                if st.status
+                not in ("waiting_interview", "stopped_interview", "brief_ready")
             ]
             if past_s1:
                 raise SpecLoopError(
@@ -1081,16 +1112,23 @@ def main(argv: list[str] | None = None) -> int:
                     "--new-run --ws-id <fresh-id>"
                 )
             recorded = iv.InterviewSpec.from_state(state.interview)
-            if (recorded.frame, recorded.stakeholder_role, recorded.traces_to) != (
+            if (
+                recorded.frame,
+                recorded.stakeholder_role,
+                recorded.traces_to,
+                recorded.brief_only,
+            ) != (
                 interview_spec.frame,
                 interview_spec.stakeholder_role,
                 interview_spec.traces_to,
+                interview_spec.brief_only,
             ):
                 raise SpecLoopError(
                     "координаты интервью зафиксированы стартом "
                     f"(frame={recorded.frame}, "
                     f"stakeholder={recorded.stakeholder_role!r}, "
-                    f"traces_to={recorded.traces_to!r}) — сменить их: "
+                    f"traces_to={recorded.traces_to!r}, "
+                    f"brief_only={recorded.brief_only}) — сменить их: "
                     "--new-run --ws-id"
                 )
 
@@ -1210,6 +1248,8 @@ def main(argv: list[str] | None = None) -> int:
         if started.status == "waiting_human_merge":
             print(_pause_message(started))
             return 0
+        if started.status == "brief_ready":
+            return _brief_ready(started)
         if started.status == "completed":
             return _deliver_phase(started, ops)
         if started.status == "stopped_interview":

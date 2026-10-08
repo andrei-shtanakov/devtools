@@ -9401,3 +9401,95 @@ def test_verify_holds_child_lock_through_s8(  # ревью части A, A2
     child = locked_runner.verify(parent_id, ops, "r-s8-lockc")
     assert seen == ["tried", "busy"]  # конкурент не вошёл в S8 потомка
     assert child.status == "completed"
+
+
+# --- §11.2: customer --brief-only → терминальный brief_ready (Task 7, часть B) ---
+
+
+def _brief_only_ops(extra: list | None = None) -> FakeOps:
+    return FakeOps(
+        discovery=[
+            ("start", _reply(20)),
+            ("status", _reply(0)),
+            ("brief", _reply(0)),
+            *(extra or []),
+        ],
+        brief_text=_need_brief_text(),
+    )
+
+
+def _run_tree(run_id: str) -> dict[str, bytes]:
+    root = rs.run_dir(run_id)
+    return {str(p): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+_GIT_CALLS = ("is_dirty", "ensure_branch", "switch_to", "checkout_and_pull")
+
+
+def test_brief_only_publication_ends_in_brief_ready(tmp_path, runs_root) -> None:  # T7
+    ops = _brief_only_ops()
+    locked_runner.start(
+        **_start_kwargs(tmp_path, "r-bo", ops),
+        interview_spec=_need_spec(brief_only=True),
+    )
+    state = locked_runner.resume("r-bo", ops)
+    assert state.status == "brief_ready"
+    assert state.interview["completed_at"] and state.interview["brief_blob"]
+    assert state.brief is not None and state.branch == ""
+    assert not any(c[0] in _GIT_CALLS for c in ops.calls)
+    assert rs.load("r-bo").status == "brief_ready"
+
+
+def test_brief_ready_resume_has_no_effects(tmp_path, runs_root) -> None:  # T8
+    ops = _brief_only_ops()
+    locked_runner.start(
+        **_start_kwargs(tmp_path, "r-bo2", ops),
+        interview_spec=_need_spec(brief_only=True),
+    )
+    locked_runner.resume("r-bo2", ops)
+    tree = _run_tree("r-bo2")
+    before = (len(ops.calls), len(ops.discovery_calls))
+    again = locked_runner.resume("r-bo2", ops)
+    assert again.status == "brief_ready"
+    assert _run_tree("r-bo2") == tree
+    assert (len(ops.calls), len(ops.discovery_calls)) == before
+
+
+def test_crash_before_brief_ready_write_recovers_to_brief_ready(  # T9
+    tmp_path, runs_root, monkeypatch
+) -> None:
+    ops = _brief_only_ops(extra=[("brief", _reply(0))])
+    locked_runner.start(
+        **_start_kwargs(tmp_path, "r-bo3", ops),
+        interview_spec=_need_spec(brief_only=True),
+    )
+    real_save = rs.save
+
+    def die_on_brief_ready(state):
+        if state.status == "brief_ready":
+            raise SystemExit("crash")
+        real_save(state)
+
+    monkeypatch.setattr(rs, "save", die_on_brief_ready)
+    with pytest.raises(SystemExit):
+        locked_runner.resume("r-bo3", ops)
+    monkeypatch.setattr(rs, "save", real_save)
+    persisted = rs.load("r-bo3")
+    assert persisted.ops["interview-brief"]["status"] == "started"
+    assert persisted.interview["completed_at"] is None
+    assert (rs.run_dir("r-bo3") / "brief-input/00-discovery/brief.md").exists()
+    state = locked_runner.resume("r-bo3", ops)
+    assert state.status == "brief_ready"
+    assert state.ops["interview-brief"].get("reconciled") is True
+
+
+def test_customer_without_brief_only_still_goes_to_s1(
+    tmp_path, runs_root
+) -> None:  # T10
+    ops = _brief_only_ops()
+    locked_runner.start(
+        **_start_kwargs(tmp_path, "r-nobo", ops), interview_spec=_need_spec()
+    )
+    state = locked_runner.resume("r-nobo", ops)
+    assert state.status != "brief_ready"
+    assert any(c[0] in _GIT_CALLS for c in ops.calls)

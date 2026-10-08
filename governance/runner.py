@@ -83,7 +83,7 @@ from governance.run_state import (
     validate_merge_authority,
 )
 from governance.spec_runner_contract import target_selector_policy
-from governance.stale_adapter import blob_sha1
+from governance.stale_adapter import blob_sha1, blob_sha1_bytes
 
 _ROLLUP_GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 
@@ -891,6 +891,9 @@ def resume(run_id: str, ops: Ops, *, lock: rl.RunLock) -> RunState:
     """
     rl.require(lock, run_id)
     state = load(run_id)
+    if state.status == "brief_ready":
+        # Терминальный (§11.2): ни шагов, ни соседа, ни записей.
+        return state
     if state.status == "merged_unverified":
         raise ValueError(
             f"run {run_id!r} — merged_unverified навсегда; создайте "
@@ -1784,9 +1787,7 @@ def _interview_publish(
     _interview_of(state)["completed_at"] = datetime.now(UTC).isoformat(
         timespec="seconds"
     )
-    state.status = "running"
-    op_complete(state, INTERVIEW_BRIEF, brief_blob=dict(source.source_blobs))
-    return True
+    return _interview_complete(state, spec, final, source)
 
 
 def _interview_reconcile_published(
@@ -1839,11 +1840,29 @@ def _interview_reconcile_published(
     _interview_of(state)["completed_at"] = datetime.now(UTC).isoformat(
         timespec="seconds"
     )
-    state.status = "running"
-    op_complete(
-        state, INTERVIEW_BRIEF, brief_blob=dict(source.source_blobs), reconciled=True
-    )
-    return True
+    return _interview_complete(state, spec, final, source, reconciled=True)
+
+
+def _interview_complete(
+    state: RunState,
+    spec: iv.InterviewSpec,
+    final: Path,
+    source: brief_input.BriefSource,
+    **result: object,
+) -> bool:
+    """Публикация брифа завершена: S1 либо терминальный `brief_ready` (§11.2).
+
+    Статус и `op_complete` пишутся ОДНОЙ записью `run.json`: гибель до неё
+    оставляет `interview-brief` в `started` при durable `brief.md` — повтор
+    идёт реконсиляцией §5.5 и снова приходит сюда.
+    """
+    if spec.brief_only:
+        _interview_of(state)["brief_blob"] = blob_sha1_bytes(final.read_bytes())
+        state.status = "brief_ready"
+    else:
+        state.status = "running"
+    op_complete(state, INTERVIEW_BRIEF, brief_blob=dict(source.source_blobs), **result)
+    return not spec.brief_only
 
 
 def attach_session(
@@ -3854,6 +3873,8 @@ def _print_status(state: RunState) -> None:
     print(f"pr:            {state.pr if state.pr is not None else '-'}")
     if state.remediated_by:
         print(f"remediated_by: {state.remediated_by}")
+    if state.status == "brief_ready":
+        print(f"next:          make brief-propose RUN={state.run_id}")
     print("ops:")
     for key in sorted(state.ops):
         op = state.ops[key]

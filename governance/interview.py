@@ -99,6 +99,8 @@ class InterviewSpec:
     target: str
     traces_to: str | None
     upstream_blob: str | None
+    #: customer `--brief-only` (§11.2): после брифа — терминальный `brief_ready`.
+    brief_only: bool = False
 
     def as_state(self) -> dict:
         return {
@@ -108,6 +110,7 @@ class InterviewSpec:
             "target": self.target,
             "traces_to": self.traces_to,
             "upstream_blob": self.upstream_blob,
+            "brief_only": self.brief_only,
             "brief_rel": BRIEF_REL,
             "started_at": datetime.now(UTC).isoformat(timespec="seconds"),
             "completed_at": None,
@@ -121,6 +124,7 @@ class InterviewSpec:
             target=st["target"],
             traces_to=st.get("traces_to"),
             upstream_blob=st.get("upstream_blob"),
+            brief_only=bool(st.get("brief_only", False)),
         )
 
 

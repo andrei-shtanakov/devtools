@@ -1629,3 +1629,95 @@ def test_wave_recovery_locks_before_reading_or_writing_ledger(
         assert spec_loop.main(["--subject", "Fleet Inbox", "--repo", "alpha"]) == 1
     assert rs.all_run_ids() == []  # леджер не записан мимо блокировки
     assert "другим процессом" in capsys.readouterr().out
+
+
+# --- §11.2: --brief-only (Task 7, часть B) ---
+
+
+@pytest.mark.parametrize(
+    ("argv", "needle"),
+    [
+        (["--subject", "s", "--repo", "alpha", "--brief-only"], "--need"),
+        (_need("--brief-only", "--session", "s-1"), "--brief-only"),
+        (_need("--brief-only", "--brief", "x.md"), "--brief"),
+        (
+            [
+                "--subject",
+                "s",
+                "--repo",
+                "alpha",
+                "--need",
+                "--frame",
+                "engineer",
+                "--stakeholder",
+                "r",
+                "--brief-only",
+            ],
+            "--brief-only",
+        ),
+    ],
+    ids=["without-need", "with-session", "with-brief", "engineer"],
+)
+def test_brief_only_invalid_combinations_refuse_before_run(  # T5
+    runs_root, tmp_path, monkeypatch, capsys, argv, needle
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    assert spec_loop.main(argv) == 1
+    assert env.calls == [] and rs.all_run_ids() == []
+    assert needle in capsys.readouterr().out
+
+
+def test_brief_only_customer_starts_with_flag(  # T5 двойник
+    runs_root, tmp_path, monkeypatch
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    assert spec_loop.main(_need("--brief-only")) == 0
+    assert env.calls[0][1]["interview_spec"].brief_only is True
+
+
+def test_repeat_with_other_brief_only_refuses(  # T6
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    _make_need_run(env)  # прогон стартовал без --brief-only
+    before = (rs.run_dir("r-a") / "run.json").read_bytes()
+    assert spec_loop.main(_need("--brief-only")) == 1
+    assert "brief_only" in capsys.readouterr().out
+    assert env.calls == []
+    assert (rs.run_dir("r-a") / "run.json").read_bytes() == before
+
+
+def test_new_run_allowed_next_to_brief_ready(  # T11
+    runs_root, tmp_path, monkeypatch
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    _make_need_run(env, status="brief_ready")
+    assert spec_loop.main(_need("--new-run", "--ws-id", "ws-eng")) == 0
+    assert env.calls[0][0] == "start" and env.calls[0][1]["ws_id"] == "ws-eng"
+
+
+def test_brief_ready_on_entry_prints_next_step_without_resume(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    st = _make_need_run(env, status="brief_ready")
+    st.interview["brief_only"] = True
+    rs.save(st)
+    assert spec_loop.main(_need("--brief-only")) == 0
+    assert env.calls == []
+    assert "make brief-propose RUN=r-a" in capsys.readouterr().out
+
+
+def test_first_transition_to_brief_ready_prints_next_step(  # P14
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    st = _make_need_run(env)
+    st.interview["brief_only"] = True
+    rs.save(st)
+    done = rs.load("r-a")
+    done.status = "brief_ready"
+    env.resume_result = done
+    assert spec_loop.main(_need("--brief-only")) == 0
+    assert [c[0] for c in env.calls] == ["resume"]
+    assert "make brief-propose RUN=r-a" in capsys.readouterr().out
