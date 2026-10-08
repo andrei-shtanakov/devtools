@@ -1836,6 +1836,13 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       Спека need-stage приведена в соответствие: удаление файла больше не
       привязано к переходу 20 ни в таблице §5.1, ни в §5.3.
 - [ ] E2 Engineer-маршрут стадии Need: `--frame engineer --traces-to <approved customer-brief>` — preflight с явной проверкой `status: approved`, durable-копия upstream в `brief-input/00-discovery/` с `upstream_blob`, `discovery_start(..., upstream_path)` на копию; маршрут отказывает до run-id, пока не реализован @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:spec-loop-need-engineer-route
+      **Ревизия 7 спеки (2026-10-08):** маршрут — по §11 спеки need-stage
+      (вариант А: engineer отдельным прогоном, `--approval-pr`, доказательства
+      только по форджу, write-ahead id, блокировка прогона); план —
+      `docs/superpowers/plans/2026-10-08-need-stage-engineer-route-plan-{a,b}.md`.
+      Чекбокс — после живой приёмки §11.8 (гарантия происхождения — только
+      engineer `--need`; невосстановимость после потери ответа `start` до
+      discovery#63 — принятое ограничение).
       **Разблокирован 2026-09-18.** Ждал п.1 discovery#49 (приём upstream при
       `start --frame engineer`); сосед доставил его PR-ом discovery#50
       (`49dbc2a`, master) вместе с п.2 — пункт продюсера
@@ -1867,6 +1874,10 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       маршрута, тем же PR.
 
 - [ ] Контур approval discovery-брифа: назвать акт, которым бриф получает `status: approved`, и место его подписи @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:discovery-brief-approval-act
+      **2026-10-08:** «подкоманды approve у соседа нет» устарело — discovery#57
+      доставил `discovery approve`. Остаток на нашей стороне — brief-PR с
+      заявкой (`make brief-propose`), `make brief-approve`, проверка заявки в
+      `human-merge.sh` (§11.3, §11.5 спеки); закрывается вместе с engineer-route.
       Сегодня цепочка customer → engineer внутри одного прогона держится на
       ручной правке frontmatter: `--need` выпускает бриф со `status: draft`
       (D5 дизайна need-stage — автоматически в `approved` он не превращается),
@@ -1895,6 +1906,14 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       Кода не блокирует — делает engineer-маршрут недостижимым без ручной
       правки файла.
 
+- [ ] Write-ahead id сессии и для customer-маршрута (сейчас — только engineer, §11.4.5; customer остаётся на `--session`, §5.3) @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:need-customer-write-ahead-id
+- [ ] `--repropose` brief-PR: новое предложение, когда прежний закрыт без мержа или его пин политики устарел (§11.10 Q4, вне E2) @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:brief-repropose
+- [ ] Известная дыра: E1 `--brief` с готовым engineer-брифом проверяет у upstream только `status: approved`, не происхождение подписи (гарантия §11 — только engineer `--need`, §11.10 Q5) @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:e1-brief-engineer-provenance
+- [ ] Присоединение существующей engineer-сессии по отпечатку принятого upstream вместо стопа `session_unverifiable` (§11.4.5) @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:need-engineer-session-attach @blocked_by:discovery#63
+      Живой замер 2026-10-08 (smoke T52): два одновременных `start` с одним id
+      дали `[20, 20]` в двух прогонах из трёх — гонка достройки резервации у
+      соседа реальна (discovery#63 п.3); наша блокировка прогона закрывает её
+      только для собственных процессов.
 - [x] Контрольный прогон хвоста S7: дешёвый `spec-loop --brief` на крошечном предмете доказывает §9.2 спеки need-stage — раннер САМ дошёл до `waiting_human_merge`, мерж бандл-PR сделан через `make human-merge` (учётка человека из `AUTHORIZED_APPROVER_ACCOUNTS`, сверка логина), `resume` подтвердил факт и перевёл на S8, S8 `exit=0` (не `merged_unverified`), заведён draft tasks-PR, получена approved tasks-спека; негативный контроль — мерж в обход раннера реконсилируется `_reconcile_pr_merged_out_of_band`, а не теряется @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:s7-control-run — прогон `review-pr-unreachable-base-coverage-20260921-3f8af3`, PR этой ветки
       **Штатный путь доказан живьём.** Предмет — реальный открытый хвост
       `@id:review-scope-unreachable-base-coverage`, вход `--brief`, цель —
