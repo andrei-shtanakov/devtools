@@ -259,3 +259,53 @@ def test_incomplete_policy_blob_of_later_reconfirm_is_retry(monkeypatch, blob) -
     world.repo_file_fact = via_adapter  # type: ignore[method-assign]
     got = bp.check_policy(world, act)
     assert isinstance(got, bp.Refusal) and got.retry
+
+
+def _unknown_sha_via_adapter(monkeypatch, world, unknown: str) -> None:
+    """`policy_version_fact_at` для `unknown` — настоящий адаптер RealOps на
+    записанных ответах GitHub: compare → 404, GraphQL → `object: null`."""
+    import subprocess
+
+    from governance.ops import RealOps
+
+    real = world.policy_version_fact_at
+    answers = [
+        subprocess.CompletedProcess([], 1, stdout="", stderr="HTTP 404"),
+        subprocess.CompletedProcess(
+            [], 0, stdout='{"data":{"repository":{"object":null}}}', stderr=""
+        ),
+    ]
+
+    def fact_at(repo_slug, ref, path, sha):
+        if sha != unknown:
+            return real(repo_slug, ref, path, sha)
+        queue = list(answers)
+        monkeypatch.setattr(subprocess, "run", lambda argv, **kw: queue.pop(0))
+        return RealOps().policy_version_fact_at(repo_slug, ref, path, sha)
+
+    world.policy_version_fact_at = fact_at  # type: ignore[method-assign]
+
+
+def test_reconfirm_with_unknown_sha_is_skipped_not_retried(monkeypatch) -> None:
+    """Ревью #571: чужой комментарий с выдуманным sha — недействительное
+    подтверждение (дрейф остаётся), а не вечное «повторите» (T27)."""
+    world = consistent_world(monkeypatch)
+    world.add_policy(C1)
+    unknown = "9" * 40
+    world.reconfirm(unknown, author="stranger")
+    _unknown_sha_via_adapter(monkeypatch, world, unknown)
+    got = bp.check_policy(world, _act(world))
+    _refused(got, "upstream_policy_drift")
+    assert not got.retry
+
+
+def test_request_pin_to_unknown_sha_is_final_refusal(monkeypatch) -> None:
+    """Смерженная заявка с несуществующим `policy.sha` — окончательный отказ
+    `not_policy_version` (T48), а не retry."""
+    world = consistent_world(monkeypatch)
+    unknown = "9" * 40
+    world.files[(MERGE, REQUEST)] = ar.render(request(policy_sha=unknown))
+    _unknown_sha_via_adapter(monkeypatch, world, unknown)
+    got = bp.read_act(world, REPO, PR)
+    _refused(got, "not_policy_version")
+    assert not got.retry
