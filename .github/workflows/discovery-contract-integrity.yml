@@ -24,6 +24,10 @@ jobs:
       - run: uv run --frozen tools/check_discovery_vendor.py provenance
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: uv run --frozen tools/check_discovery_approval_vendor.py consistency
+      - run: uv run --frozen tools/check_discovery_approval_vendor.py provenance
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   drift:
     if: github.event_name != 'pull_request'
@@ -36,5 +40,8 @@ jobs:
       - run: uv python install 3.12
       - run: uv sync --frozen
       - run: uv run --frozen tools/check_discovery_vendor.py drift
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: uv run --frozen tools/check_discovery_approval_vendor.py drift
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

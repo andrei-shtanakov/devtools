@@ -96,6 +96,9 @@ discovery. Часть B (`2026-10-08-need-stage-engineer-route-plan-b.md`) ст�
   `tools/gen_discovery_approval_fixture.py`
 - Create: `tests/fixtures/discovery_approval/{draft-brief.md,signed-brief.md,signed-brief.json}`
 - Modify: `pyproject.toml` (`[tool.ruff] extend-exclude`)
+- Modify: `.github/workflows/discovery-contract-integrity.yml` — обе гарантии копии в CI
+  по образцу `check_discovery_vendor`: `consistency` и `provenance` в PR, `drift` по
+  расписанию (добавлено при реализации: план исполнения это упустил)
 - Test: `tests/test_discovery_approval.py`
 
 **Interfaces:**
