@@ -182,6 +182,35 @@ def _reject_customer_path_traces(meta: dict[str, object]) -> None:
         )
 
 
+def check_customer_upstream(path: Path, data: bytes) -> None:
+    """Customer-бриф годится в upstream engineer'а (E1 и engineer-preflight §11.4.2 п.1).
+
+    Байты уже прочитаны вызывающим (preflight читает файл оператора ОДИН раз):
+    UTF-8 без CR, gate pass/`gate_passed`/блокеры (`_gate`), `frame: customer`,
+    без путевых `traces_to`, `status: approved`. Происхождение подписи здесь НЕ
+    проверяется — это `brief_provenance` (§11.4.2 п.2–7).
+    """
+    if b"\r" in data:
+        raise BriefInputError(f"upstream {path} использует CR/CRLF; нужен LF")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeError as exc:
+        raise BriefInputError(f"upstream {path} не UTF-8: {exc}") from exc
+    customer = _gate(path, text)
+    interview = customer.meta.get("interview") or {}
+    frame = interview.get("frame") if isinstance(interview, dict) else None
+    if frame != "customer":
+        raise BriefInputError(
+            f"engineer upstream {path.name!r} имеет frame={frame!r}, ожидался customer"
+        )
+    _reject_customer_path_traces(customer.meta)
+    if customer.meta.get("status") != "approved":
+        raise BriefInputError(
+            f"engineer upstream {path.name!r} не approved: "
+            f"status={customer.meta.get('status')!r}"
+        )
+
+
 def inspect_brief(path: Path) -> BriefSource:
     """Validate an input brief and resolve its effective requirements source."""
     path = path.resolve()
@@ -210,25 +239,7 @@ def inspect_brief(path: Path) -> BriefSource:
     if customer_path is None:
         raise BriefInputError(f"customer upstream {ref!r} не разрешается")
     customer_data = _read_bytes(customer_path)
-    customer_text = _decode(customer_data)
-    customer = _gate(customer_path, customer_text)
-    customer_interview = customer.meta.get("interview") or {}
-    customer_frame = (
-        customer_interview.get("frame")
-        if isinstance(customer_interview, dict)
-        else None
-    )
-    if customer_frame != "customer":
-        raise BriefInputError(
-            f"engineer upstream {ref!r} имеет frame={customer_frame!r}, "
-            "ожидался customer"
-        )
-    _reject_customer_path_traces(customer.meta)
-    if customer.meta.get("status") != "approved":
-        raise BriefInputError(
-            f"engineer upstream {ref!r} не approved: "
-            f"status={customer.meta.get('status')!r}"
-        )
+    check_customer_upstream(customer_path, customer_data)
     requirements_rel = f"00-discovery/{ref}"
     return BriefSource(
         frame="engineer",

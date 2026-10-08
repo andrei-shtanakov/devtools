@@ -60,13 +60,14 @@ import subprocess
 import sys
 import tomllib
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 
 from governance import (
     approval_branches,
     brief_input,
+    brief_provenance,
     bundle_dag,
     charter_guard,
     run_lock,
@@ -75,9 +76,9 @@ from governance import (
 )
 from governance import approval_ledger as al
 from governance import interview as iv
-from governance import ops as ops_mod
 from governance import run_state as rs
 from governance.ops import DEVTOOLS_ROOT, RealOps
+from governance.stale_adapter import blob_sha1_bytes
 
 WORKSPACE_ROOT = DEVTOOLS_ROOT.parent
 MANIFEST_PATH = (
@@ -267,7 +268,15 @@ def _origin_url(target_dir: str | Path) -> str:
     return out.stdout.strip()
 
 
-NEED_ONLY = ("frame", "stakeholder", "traces_to", "session", "new_run", "brief_only")
+NEED_ONLY = (
+    "frame",
+    "stakeholder",
+    "traces_to",
+    "session",
+    "new_run",
+    "brief_only",
+    "approval_pr",
+)
 STAKEHOLDER_RULE = (
     "стадия Need запускается только при наличии реального стейкхолдера — "
     "укажите --stakeholder <role> (декларация, не проверка); без "
@@ -306,8 +315,10 @@ def build_interview_spec(args, repo_slug: str) -> iv.InterviewSpec | None:
             "--session (§11.2)"
         )
     if args.frame == "customer":
-        if args.traces_to:
-            raise SpecLoopError("customer-фрейм не принимает --traces-to")
+        if args.traces_to or args.approval_pr is not None:
+            raise SpecLoopError(
+                "customer-фрейм не принимает --traces-to и --approval-pr"
+            )
         return iv.InterviewSpec(
             "customer",
             args.stakeholder,
@@ -316,11 +327,59 @@ def build_interview_spec(args, repo_slug: str) -> iv.InterviewSpec | None:
             None,
             brief_only=bool(args.brief_only),
         )
-    if not args.traces_to:
+    if not args.traces_to or args.approval_pr is None:
         raise SpecLoopError(
-            "engineer-фрейм требует --traces-to <approved customer-brief>"
+            "engineer-фрейм требует --traces-to <подписанный customer-бриф> и "
+            "--approval-pr <номер brief-PR> (§11.4.1)"
         )
-    raise SpecLoopError(ops_mod.ENGINEER_BLOCKED)  # D6, до discovery#49
+    if args.session:
+        raise SpecLoopError(
+            "--session для engineer запрещён: id сессии записан до вызова (§11.4.5)"
+        )
+    # Соседу уходит `--upstream <durable upstream.md>`; переносимая ссылка
+    # итогового брифа — `upstream.md`. `upstream_blob` ставит preflight.
+    return iv.InterviewSpec(
+        "engineer", args.stakeholder, repo_slug, iv.UPSTREAM_NAME, None
+    )
+
+
+def _refusal_text(refusal: brief_provenance.Refusal) -> str:
+    return refusal.detail if refusal.retry else f"{refusal.reason}: {refusal.detail}"
+
+
+def engineer_preflight(
+    path: str, approval_pr: int, repo_slug: str, ops
+) -> iv.EngineerIntake:
+    """§11.4.2: файл оператора читается ОДИН раз; всё — над буфером и фактами форджа.
+
+    До run-id, до леджера, до вызова соседа. Отказ — `SpecLoopError`; при
+    неустановленном факте форджа текст говорит «повторите», не «не одобрено».
+    """
+    try:
+        buffer = Path(path).read_bytes()
+    except OSError as exc:
+        raise SpecLoopError(f"{path}: не читается ({exc})") from exc
+    try:
+        brief_input.check_customer_upstream(Path(path), buffer)
+    except brief_input.BriefInputError as exc:
+        raise SpecLoopError(f"upstream не годится: {exc}") from exc
+    act = brief_provenance.read_act(ops, repo_slug, approval_pr)
+    if isinstance(act, brief_provenance.Refusal):
+        raise SpecLoopError(_refusal_text(act))
+    text = buffer.decode("utf-8")
+    for refusal in (
+        brief_provenance.check_operator_brief(act, text),
+        brief_provenance.check_policy(ops, act),
+    ):
+        if isinstance(refusal, brief_provenance.Refusal):
+            raise SpecLoopError(_refusal_text(refusal))
+    return iv.EngineerIntake(
+        buffer=buffer,
+        blob=blob_sha1_bytes(buffer),
+        approval=act.as_record(),
+        approval_pr=approval_pr,
+        source_path=str(path),
+    )
 
 
 def find_runs(repo: str, subject: str) -> list[rs.RunState]:
@@ -888,7 +947,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--stakeholder", help="роль реального стейкхолдера (декларация)"
     )
-    parser.add_argument("--traces-to", help="approved customer-brief для engineer")
+    parser.add_argument(
+        "--traces-to", help="engineer: подписанный customer-бриф (файл оператора)"
+    )
+    parser.add_argument(
+        "--approval-pr",
+        type=int,
+        default=None,
+        help="engineer: номер brief-PR — акта одобрения upstream (§11.4.1)",
+    )
     parser.add_argument("--session", help="recovery: присоединить сессию discovery")
     parser.add_argument(
         "--brief-only",
@@ -1131,6 +1198,12 @@ def main(argv: list[str] | None = None) -> int:
                     f"brief_only={recorded.brief_only}) — сменить их: "
                     "--new-run --ws-id"
                 )
+            if state.interview.get("approval_pr") != args.approval_pr:
+                raise SpecLoopError(
+                    "brief-PR акта зафиксирован стартом (--approval-pr "
+                    f"{state.interview.get('approval_pr')}) — сменить: "
+                    "--new-run --ws-id"
+                )
 
         if args.session:
             # Позиция намеренная (ruling 3, controller Task 10): ПОСЛЕ
@@ -1175,6 +1248,13 @@ def main(argv: list[str] | None = None) -> int:
             }
             _print_values(values)
             return _dispatch(state, ops, held[state.run_id])
+        engineer_intake = None
+        if interview_spec is not None and interview_spec.frame == "engineer":
+            # §11.4.2: до run-id, до леджера, до вызова соседа.
+            engineer_intake = engineer_preflight(
+                args.traces_to, args.approval_pr, entry.repo_slug, ops
+            )
+            interview_spec = replace(interview_spec, upstream_blob=engineer_intake.blob)
         ws_id = args.ws_id or ws_id_for(args.subject, date.today())
         rs.validate_id_component(ws_id, label="ws_id")
         collisions = []
@@ -1232,6 +1312,7 @@ def main(argv: list[str] | None = None) -> int:
             author_backend=args.author_backend,
             brief_source=supplied_brief,
             interview_spec=interview_spec,
+            engineer_intake=engineer_intake,
             authoring="legacy" if args.legacy else "waves",
             code=args.code,
             plan_item=args.plan_item,

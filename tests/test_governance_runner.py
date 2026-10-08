@@ -9493,3 +9493,45 @@ def test_customer_without_brief_only_still_goes_to_s1(
     state = locked_runner.resume("r-nobo", ops)
     assert state.status != "brief_ready"
     assert any(c[0] in _GIT_CALLS for c in ops.calls)
+
+
+# --- §11.4.4: durable upstream.md из буфера preflight (Task 8, часть B) ---
+
+
+def _engineer_intake(buffer: bytes = b"---\nupstream\n") -> iv.EngineerIntake:
+    return iv.EngineerIntake(
+        buffer=buffer,
+        blob=blob_sha1_bytes(buffer),
+        approval={"pr": 7, "self_hash": "sha256:x"},
+        approval_pr=7,
+        source_path="/op/customer-brief.md",
+    )
+
+
+def test_start_writes_upstream_copy_from_intake_buffer(tmp_path, runs_root) -> None:
+    intake = _engineer_intake()
+    ops = FakeOps(discovery=[("start", _reply(1))])
+    state = locked_runner.start(
+        **_start_kwargs(tmp_path, "r-eng-copy", ops),
+        interview_spec=_need_spec(
+            frame="engineer", traces_to="upstream.md", upstream_blob=intake.blob
+        ),
+        engineer_intake=intake,
+    )
+    copy = rs.run_dir("r-eng-copy") / iv.UPSTREAM_REL
+    assert copy.read_bytes() == intake.buffer
+    assert state.interview["approval_pr"] == 7
+    assert state.interview["upstream_source"] == "/op/customer-brief.md"
+    assert state.interview["approval"]["pr"] == 7
+
+
+def test_start_refuses_intake_blob_mismatch(tmp_path, runs_root) -> None:
+    intake = _engineer_intake()
+    with pytest.raises(ValueError, match="upstream_blob"):
+        locked_runner.start(
+            **_start_kwargs(tmp_path, "r-eng-bad", FakeOps()),
+            interview_spec=_need_spec(
+                frame="engineer", traces_to="upstream.md", upstream_blob="0" * 40
+            ),
+            engineer_intake=intake,
+        )

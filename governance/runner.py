@@ -335,6 +335,7 @@ def start(
     author_backend: str = "codex",
     brief_source: brief_input.BriefSource | None = None,
     interview_spec: iv.InterviewSpec | None = None,
+    engineer_intake: iv.EngineerIntake | None = None,
     allow_legacy_dt: bool = False,
     authoring: str = "waves",
     code: str | None = None,
@@ -432,8 +433,31 @@ def start(
         code=code,
         plan_item=plan_item,
     )
+    if engineer_intake is not None:
+        _write_engineer_upstream(state, engineer_intake)
     save(state)
     return advance(state, ops, lock=lock)
+
+
+def _write_engineer_upstream(state: RunState, intake: iv.EngineerIntake) -> None:
+    """§11.4.4: durable `upstream.md` — из буфера preflight, атомарно, до `start`.
+
+    `upstream_blob` уже стоит в координатах интервью (из того же буфера);
+    `approval` — отчёт; `approval_pr` — адрес, по которому акт перечитывается
+    из форджа при каждой перепроверке (§11.1.2).
+    """
+    if state.interview is None or state.interview.get("frame") != "engineer":
+        raise ValueError("engineer_intake без engineer-координат интервью")
+    if blob_sha1_bytes(intake.buffer) != state.interview.get("upstream_blob"):
+        raise ValueError("upstream_blob координат ≠ буферу preflight")
+    target = run_dir(state.run_id) / iv.UPSTREAM_REL
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(".upstream.tmp")
+    tmp.write_bytes(intake.buffer)
+    os.replace(tmp, target)
+    state.interview["approval"] = dict(intake.approval)
+    state.interview["approval_pr"] = intake.approval_pr
+    state.interview["upstream_source"] = intake.source_path
 
 
 def advance(state: RunState, ops: Ops, *, lock: rl.RunLock) -> RunState:

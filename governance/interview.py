@@ -87,6 +87,32 @@ def parse_reply(returncode: int, stdout: str, stderr: str) -> DiscoveryReply:
 
 
 BRIEF_REL = "brief-input/00-discovery/brief.md"
+#: Имя принятой копии upstream у соседа и у нас (§11.4.4): фиксированное.
+UPSTREAM_NAME = "upstream.md"
+UPSTREAM_REL = "brief-input/00-discovery/upstream.md"
+
+
+def engineer_session_id(run_id: str) -> str:
+    """Caller-assigned id сессии engineer'а (§11.4.5): детерминирован от прогона."""
+    return f"s-{run_id}-e"
+
+
+@dataclass(frozen=True)
+class EngineerIntake:
+    """Итог engineer-preflight (§11.4.2): проверенный буфер и отчёт об акте.
+
+    `buffer` — байты файла оператора, прочитанные ОДИН раз; durable-копия
+    пишется только из них. `approval` — `Act.as_record()` (отчёт, не источник
+    доверия: при перепроверках акт выводится из форджа по `approval_pr`).
+    """
+
+    buffer: bytes
+    blob: str
+    approval: dict
+    approval_pr: int
+    source_path: str
+
+
 _FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 
 
