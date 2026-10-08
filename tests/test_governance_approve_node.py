@@ -26,13 +26,14 @@ import pytest
 from governance import approval_facts as af
 from governance import approval_ledger as al
 from governance import approve_node as an
-from governance import bundle_dag, bundle_inputs
+from governance import bundle_dag, bundle_inputs, run_lock
 from governance import merge_gate as mg
 from governance import node_approval as na
 from governance import run_state as rs
 from governance.facts import Fact, Outcome, unavailable
 from governance.frontmatter import join_frontmatter, split_frontmatter
 from governance.ops import RealOps
+from tests import locked_runner
 
 BUNDLE = "spec"
 WS_ID = "WS-T1"
@@ -3666,7 +3667,8 @@ def test_wave_finalize_resumes_from_await_finalize_merge(
     assert al.next_step(op) is al.Step.AWAIT_FINALIZE_MERGE
     finalize_pr = op["finalize_pr"]
     # resume волны: аттестация публикует одобрение, повтор мержит агентом.
-    resumed = runner._finalize_wave(w.state, w.ops, key)
+    with run_lock.run_lock(w.state.run_id) as lock:
+        resumed = runner._finalize_wave(w.state, w.ops, key, lock=lock)
     assert w.forge.review_calls == [finalize_pr]
     assert w.state.ops[key]["status"] == al.STATUS_COMPLETED
     assert resumed.wave == 2, "переход к следующей волне — ровно один"
@@ -3681,14 +3683,13 @@ def test_reopen_makes_a_new_branch_name_and_stale_is_reapproved_by_levels(
     `reopen` создаёт `…-w2-r1` от base без файла узла и её push не даёт
     non-fast-forward; candidate над новым текстом ставит `stale`
     behaviour-spec; `stale_below_top_level` ведёт переодобрение."""
-    from governance import runner
 
     w = waves_world
     for wave, files in enumerate(_WAVE_FILES[:3], 1):
         drive_wave(w, wave, files)
     assert w.forge.head_of("spec/WS-T1-behaviour-w2") is not None
 
-    stopped = runner.reopen(w.state.run_id, "requirements", w.ops, manual=True)
+    stopped = locked_runner.reopen(w.state.run_id, "requirements", w.ops, manual=True)
     assert stopped.status == "stopped_author" and stopped.wave == 2
     assert stopped.branch == "spec/WS-T1-behaviour-w2-r1"
     assert _git(w.target, "rev-parse", "--abbrev-ref", "HEAD") == stopped.branch

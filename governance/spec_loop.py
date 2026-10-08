@@ -52,12 +52,14 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import re
 import shlex
 import subprocess
 import sys
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -67,6 +69,7 @@ from governance import (
     brief_input,
     bundle_dag,
     charter_guard,
+    run_lock,
     runner,
     task_bridge,
 )
@@ -366,8 +369,13 @@ def recover_wave_run_from_github(
     requested_ws_id: str | None,
     requested_bundle_dir: str | None,
     ops,
+    acquire: Callable[[str], None],
 ) -> rs.RunState | None:
     """Восстановить леджер ВОЛНОВОГО прогона по candidate-PR (S13).
+
+    `acquire(run_id)` — блокировка точки входа (§11.4.5): берётся сразу,
+    как только `run_id` известен, до чтения существующего леджера и до
+    записи восстановленного.
 
     Бандл-PR у волнового прогона нет; durable-факты — PR веток заявок
     `(W, K, A)` и их финализирующих форм по шаблону `patterns.env`.
@@ -477,6 +485,7 @@ def recover_wave_run_from_github(
             "восстановите леджер вручную"
         )
     run_id = run_ids.pop()
+    acquire(run_id)
     ws_id, _w, last_step, _a = max(merged)
     if run_id in rs.all_run_ids():
         raw = (rs.run_dir(run_id) / "run.json").read_text(encoding="utf-8")
@@ -800,10 +809,10 @@ def _report_state(state: rs.RunState) -> int:
     return 1
 
 
-def _dispatch(state: rs.RunState, ops) -> int:
+def _dispatch(state: rs.RunState, ops, lock: run_lock.RunLock) -> int:
     """Действие по фактическому статусу найденного прогона."""
     if state.status == "waiting_human_merge":
-        after = runner.resume(state.run_id, ops)
+        after = runner.resume(state.run_id, ops, lock=lock)
         if after.status == "waiting_human_merge":
             print(_pause_message(after))
             return 0
@@ -818,7 +827,7 @@ def _dispatch(state: rs.RunState, ops) -> int:
             # диагностика orphan-состояния не должна зависеть от того,
             # дошёл ли вызов до runner.
             return _report_interview_stop(state)
-        after = runner.resume(state.run_id, ops)
+        after = runner.resume(state.run_id, ops, lock=lock)
         if after.status == "waiting_interview":
             return 0
         if after.status == "stopped_interview":
@@ -910,6 +919,25 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    locks = contextlib.ExitStack()
+    held: dict[str, run_lock.RunLock] = {}
+
+    def acquire(run_id: str) -> None:
+        """Блокировка прогона на входе (§11.4.5); повторный вызов — no-op."""
+        if run_id not in held:
+            held[run_id] = locks.enter_context(run_lock.run_lock(run_id))
+
+    def hold(run_id: str) -> rs.RunState:
+        """Блокировка и свежее состояние под ней.
+
+        Поиск кандидатов (`find_runs`) читает леджеры без блокировки — иначе
+        не узнать, какие брать; КАЖДЫЙ найденный прогон затем блокируется и
+        перечитывается, и все решения по его статусу и координатам идут
+        только по этому перечитанному `run.json`.
+        """
+        acquire(run_id)
+        return rs.load(run_id)
+
     try:
         # Intake обязан завершиться до генерации run-id, GitHub-вызовов и
         # любых runner effects. В ledger уйдёт descriptor, не этот Path.
@@ -926,7 +954,7 @@ def main(argv: list[str] | None = None) -> int:
             brief_input.inspect_brief(Path(args.brief)) if args.brief else None
         )
         if args.run_id:
-            state = rs.load(args.run_id)
+            state = hold(args.run_id)
             if (state.repo, state.subject) != (args.repo, args.subject):
                 print(
                     f"spec-loop: run {args.run_id!r} несёт "
@@ -937,7 +965,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             matches: list[rs.RunState] = [state]
         else:
-            matches = find_runs(args.repo, args.subject)
+            matches = [hold(st.run_id) for st in find_runs(args.repo, args.subject)]
 
         if args.new_run:
             # --new-run отменяет гвард неоднозначности «--run-id» ниже:
@@ -1017,6 +1045,7 @@ def main(argv: list[str] | None = None) -> int:
                 requested_ws_id=args.ws_id,
                 requested_bundle_dir=args.bundle_dir,
                 ops=ops,
+                acquire=acquire,
             )
             if state is None:
                 # Волнового кандидата нет. Если найдётся бандл-PR прежнего
@@ -1034,6 +1063,8 @@ def main(argv: list[str] | None = None) -> int:
                     ops=ops,
                 )
             recovered = state is not None
+            if state is not None:
+                state = hold(state.run_id)
         if recovered and supplied_brief is not None:
             raise SpecLoopError(
                 "восстановленный из GitHub прогон не принимает --brief "
@@ -1074,7 +1105,9 @@ def main(argv: list[str] | None = None) -> int:
                     "прогону, а прогон с этими (repo, subject) не найден"
                 )
             try:
-                state = runner.attach_session(state.run_id, args.session, ops)
+                state = runner.attach_session(
+                    state.run_id, args.session, ops, lock=held[state.run_id]
+                )
             except ValueError as exc:
                 raise SpecLoopError(str(exc)) from exc
 
@@ -1103,7 +1136,7 @@ def main(argv: list[str] | None = None) -> int:
                 "действие": f"продолжение ({state.status})",
             }
             _print_values(values)
-            return _dispatch(state, ops)
+            return _dispatch(state, ops, held[state.run_id])
         ws_id = args.ws_id or ws_id_for(args.subject, date.today())
         rs.validate_id_component(ws_id, label="ws_id")
         collisions = []
@@ -1146,6 +1179,7 @@ def main(argv: list[str] | None = None) -> int:
             "действие": "start (новый прогон)",
         }
         _print_values(values)
+        acquire(run_id)
         started = runner.start(
             subject=args.subject,
             repo=args.repo,
@@ -1163,6 +1197,7 @@ def main(argv: list[str] | None = None) -> int:
             authoring="legacy" if args.legacy else "waves",
             code=args.code,
             plan_item=args.plan_item,
+            lock=held[run_id],
         )
         print(f"статус прогона: {started.status}")
         if started.status == "waiting_interview":
@@ -1185,6 +1220,11 @@ def main(argv: list[str] | None = None) -> int:
     except (SpecLoopError, brief_input.BriefInputError, FileNotFoundError) as exc:
         print(f"spec-loop: {exc}")
         return 1
+    except run_lock.LockBusy as exc:
+        print(f"spec-loop: {exc}")
+        return 1
+    finally:
+        locks.close()
 
 
 if __name__ == "__main__":

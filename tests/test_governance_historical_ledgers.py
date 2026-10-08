@@ -21,6 +21,7 @@ pytest.importorskip("steward")
 from governance import console_model as cm
 from governance import run_state as rs
 from governance import runner
+from tests import locked_runner
 
 _FIXTURES = Path(__file__).parent / "governance_fixtures" / "historical_ledgers"
 
@@ -107,7 +108,7 @@ def test_resume_of_a_historical_legacy_ledger_refuses_tracelessly(
     before = ledger.read_bytes()
 
     with pytest.raises(ValueError) as exc:
-        runner.resume("WS-dispatcher-229-7ed609", FakeOps())
+        locked_runner.resume("WS-dispatcher-229-7ed609", FakeOps())
 
     assert "S13" in str(exc.value) and "2026-09-23" in str(exc.value)
     assert ledger.read_bytes() == before

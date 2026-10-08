@@ -39,6 +39,7 @@ from governance.edge_check import coordinator as co
 from governance.edge_check import rules as edge_rules
 from governance.frontmatter import split_frontmatter
 from governance.stale_adapter import blob_sha1
+from tests import locked_runner
 from tests.test_governance_approve_node import (
     HUMAN,
     Forge,
@@ -341,7 +342,7 @@ def _drive(state: rs.RunState, ops: E2EOps, target: Path) -> rs.RunState:
         _merge_into_origin(
             ops.forge, candidate, login=HUMAN, when="2026-09-29T08:00:00Z"
         )
-        state = runner.resume(state.run_id, ops)
+        state = locked_runner.resume(state.run_id, ops)
     raise AssertionError(f"прогон не вышел из цикла волн: {state.status}")
 
 
@@ -350,7 +351,7 @@ def test_waves_run_end_to_end_on_real_git(
     tmp_path: Path, rules: str, gh_open_prs: list[list[str]]
 ) -> None:
     target, forge, ops = _world(tmp_path, GITIGNORES[rules])
-    state = runner.start(
+    state = locked_runner.start(
         subject="сквозной прогон",
         repo="alpha",
         repo_slug=SLUG,
@@ -420,7 +421,7 @@ def test_code_taken_by_foreign_w1_candidate_stops_before_stamp(
     стоп `stopped_preflight` до штампа, charter остаётся схемой 1 (#481 C-a)."""
     target, forge, ops = _world(tmp_path, GITIGNORES["current"])
     _push_foreign_w1(tmp_path / "seed", CODE)
-    state = runner.start(
+    state = locked_runner.start(
         subject="коллизия кода",
         repo="alpha",
         repo_slug=SLUG,
