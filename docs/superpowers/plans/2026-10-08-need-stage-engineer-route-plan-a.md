@@ -12,7 +12,7 @@ discovery. Часть B (`2026-10-08-need-stage-engineer-route-plan-b.md`) ст�
 `brief_facts`); блокировка прогона — одна на вход процесса, функции раннера требуют
 токен `RunLock`.
 
-**Tech Stack:** Python 3.13, `uv`, pytest, PyYAML, `gh` (GraphQL/REST), `fcntl.flock`.
+**Tech Stack:** Python 3.12 (как CI devtools, `requires-python = ">=3.12"`), `uv`, pytest, PyYAML, `gh` (GraphQL/REST), `fcntl.flock`.
 
 **Spec:** `docs/superpowers/specs/2026-09-15-need-stage-design.md`, ревизия 7, **§11**
 (ссылки «§11.x» — туда).
