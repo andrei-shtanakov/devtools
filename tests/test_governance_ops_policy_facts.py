@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 import subprocess
 
+import pytest
+
 from governance.facts import Outcome
 from governance.ops import RealOps
 
@@ -115,4 +117,58 @@ def test_file_found_absent_unavailable(monkeypatch) -> None:
     )
     assert RealOps().repo_file_fact(REPO, SHA, PATH).outcome is Outcome.UNAVAILABLE
     _gh(monkeypatch, None, rc=1)
+    assert RealOps().repo_file_fact(REPO, SHA, PATH).outcome is Outcome.UNAVAILABLE
+
+
+def test_file_field_missing_is_unavailable_not_absent(monkeypatch) -> None:
+    """Неполный ответ (`object: {}`) — UNAVAILABLE; ABSENT — только явный null."""
+    _gh(monkeypatch, {"data": {"repository": {"object": {}}}})
+    assert RealOps().repo_file_fact(REPO, SHA, PATH).outcome is Outcome.UNAVAILABLE
+
+
+_MISSING = object()
+_FORMS = {
+    "text": [_MISSING, None, 1, ["x"], "K=v\n"],
+    "isBinary": [_MISSING, None, 0, "false", True, False],
+    "isTruncated": [_MISSING, None, 0, "false", True, False],
+}
+
+
+def _blob(text, is_binary, is_truncated) -> dict:
+    blob = {}
+    for key, value in (
+        ("text", text),
+        ("isBinary", is_binary),
+        ("isTruncated", is_truncated),
+    ):
+        if value is not _MISSING:
+            blob[key] = value
+    return {"data": {"repository": {"object": {"file": {"object": blob}}}}}
+
+
+@pytest.mark.parametrize("text", _FORMS["text"])
+@pytest.mark.parametrize("is_binary", _FORMS["isBinary"])
+@pytest.mark.parametrize("is_truncated", _FORMS["isTruncated"])
+def test_file_fact_found_only_for_complete_text(
+    monkeypatch, text, is_binary, is_truncated
+) -> None:
+    """Перебор форм (ревью плана A8→A10): FOUND — только строковый text при
+    явных `isBinary: false` и `isTruncated: false`; всё прочее — UNAVAILABLE."""
+    _gh(monkeypatch, _blob(text, is_binary, is_truncated))
+    fact = RealOps().repo_file_fact(REPO, SHA, PATH)
+    complete = text == "K=v\n" and is_binary is False and is_truncated is False
+    assert fact.outcome is (Outcome.FOUND if complete else Outcome.UNAVAILABLE)
+
+
+@pytest.mark.parametrize(
+    "obj",
+    [
+        {"file": {}},
+        {"file": {"object": None}},
+        {"file": "x"},
+        {"file": {"object": "x"}},
+    ],
+)
+def test_file_fact_malformed_entry_is_unavailable(monkeypatch, obj) -> None:
+    _gh(monkeypatch, {"data": {"repository": {"object": obj}}})
     assert RealOps().repo_file_fact(REPO, SHA, PATH).outcome is Outcome.UNAVAILABLE

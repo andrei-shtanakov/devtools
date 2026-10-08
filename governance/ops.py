@@ -24,6 +24,12 @@ from typing import Protocol
 from urllib.parse import quote
 
 from governance import interview as _interview
+from governance.brief_facts import (
+    BriefFactsMixin,
+    BriefPrFacts,
+    DefaultBranch,
+    PrComment,
+)
 from governance.brief_input import descriptor_source_blobs, descriptor_source_paths
 from governance.decomposition_guard import DELIVERABLE_KINDS
 from governance.facts import Fact, Outcome, unavailable
@@ -223,6 +229,23 @@ class Ops(Protocol):
     ) -> Fact[str]: ...
 
     def repo_file_fact(self, repo_slug: str, sha: str, path: str) -> Fact[str]: ...
+
+    # Факты brief-маршрута (спека need-stage §11.4.6, `governance/brief_facts.py`).
+    def brief_pr_fact(self, repo_slug: str, pr: int) -> Fact[BriefPrFacts]: ...
+
+    def find_brief_pr_fact(self, repo_slug: str, head_ref: str) -> Fact[list[int]]: ...
+
+    def default_branch_fact(self, repo_slug: str) -> Fact[DefaultBranch]: ...
+
+    def pr_comments_fact(self, repo_slug: str, pr: int) -> Fact[list[PrComment]]: ...
+
+    def policy_version_fact_at(
+        self, repo_slug: str, ref: str, path: str, sha: str
+    ) -> Fact[bool]: ...
+
+    def compare_files_fact(
+        self, repo_slug: str, base: str, head: str
+    ) -> Fact[tuple[tuple[str, str], ...]]: ...
 
     def delete_remote_branch(self, repo_slug: str, branch: str) -> bool: ...
 
@@ -917,7 +940,7 @@ _AUTHOR_DSL = {
 }
 
 
-class RealOps:
+class RealOps(BriefFactsMixin):
     """RealOps: точные команды внешних эффектов (спека §5/§8)."""
 
     def ensure_branch(self, target_dir: str, branch: str) -> None:
@@ -1961,15 +1984,26 @@ class RealOps:
         commit = repository["object"]
         if commit is None:
             return Fact(Outcome.ABSENT, None, f"коммита {sha} в {repo_slug} нет")
-        entry = commit.get("file") if isinstance(commit, dict) else None
+        # Отсутствующее поле `file` — неполный ответ (или объект не коммит),
+        # а не «файла нет»: только явный `file: null` — установленное
+        # отсутствие (ревью плана engineer-маршрута, A8).
+        if not isinstance(commit, dict) or "file" not in commit:
+            return unavailable(f"{what}: ответ без поля file")
+        entry = commit["file"]
         if entry is None:
             return Fact(Outcome.ABSENT, None, f"в {repo_slug}@{sha} нет {path}")
         blob = entry.get("object") if isinstance(entry, dict) else None
-        text = blob.get("text") if isinstance(blob, dict) else None
-        if not isinstance(text, str) or (
-            isinstance(blob, dict) and (blob.get("isBinary") or blob.get("isTruncated"))
+        # Полный текст доказан только явными `isBinary: false` и
+        # `isTruncated: false` при строковом `text`: отсутствие поля, `null`
+        # и иной тип — неполный ответ, не «текст целиком» (ревью плана, A10).
+        if (
+            not isinstance(blob, dict)
+            or not isinstance(blob.get("text"), str)
+            or blob.get("isBinary") is not False
+            or blob.get("isTruncated") is not False
         ):
             return unavailable(f"{what}: содержимое не прочитано")
+        text = blob["text"]
         return Fact(Outcome.FOUND, text, f"{path}@{sha} прочитан")
 
     def local_branch_head_fact(self, target_dir: str, branch: str) -> Fact[str]:
