@@ -16,7 +16,7 @@ WORKSPACE ?= ..
 MANIFEST ?= $(WORKSPACE)/ai-orchestrators-workspace/workspace-manifest.toml
 
 .DEFAULT_GOAL := help
-.PHONY: help status fetch pull dirty branches bootstrap drift conformance catalog-fixtures graph-drift plan-check plan-check-selftest todo-context todo-work plan-check-fixture inbox issues morning evening snapshot fleet-report today salvage config-policy install arch-freshness arch-freshness-read behaviour-run spec-loop behaviour-console behaviour-tasks accept-pr preflight edge-check selfcheck selfcheck-dogfood criteria-close conductor
+.PHONY: help status fetch pull dirty branches bootstrap drift conformance catalog-fixtures graph-drift plan-check plan-check-selftest todo-context todo-work plan-check-fixture inbox issues morning evening snapshot fleet-report today salvage config-policy install arch-freshness arch-freshness-read behaviour-run spec-loop behaviour-console behaviour-tasks brief-propose brief-approve accept-pr preflight edge-check selfcheck selfcheck-dogfood criteria-close conductor
 
 help:
 	@echo "Цели:"
@@ -51,6 +51,7 @@ help:
 	@echo "  make behaviour-run ARGS=… — governance runner CLI: start|resume|verify|status (uv + группа governance)"
 	@echo "  make criteria-close ARGS='--run <id> [--product-sha <sha>]' — закрытие воркстрима по оракулу бандла (срез 2a: предложение → мерж (человеком при ручных критериях) → штамп accepted; выходы 0/2/4/5/6; флага обхода нет)"
 	@echo "  make spec-loop SUBJECT='…' REPO=… — операторская кнопка: start → мерж бандла (человек) → одобрение узлов (человек, --approve-node) → повтор той же команды → deliver tasks-спеки → approve (человек); merge-authority жёстко human, неоднозначности — fail-closed (--run-id/--ws-id через ARGS)"
+	@echo "  make brief-propose RUN=<customer-run> — brief-PR (бриф + заявка на одобрение) из прогона в brief_ready; мерж — человек (make human-merge), затем make brief-approve (спека need-stage §11.3)"
 	@echo "  make spec-loop … ARGS='--legacy' — ОТКАЗ с названной причиной (S13, 2026-09-23): прежний путь бандл-PR удалён из исполнения; --waves принимается и ничего не меняет; исторические леджеры читаются как прежде (make behaviour-console)"
 	@echo "  make spec-loop ARGS='--need --frame customer --stakeholder <role>' — стадия Need вместо готового --brief: запускает discovery-интервью, прогон паркуется в waiting_interview и печатает команду ответа стейкхолдеру; ответьте вне spec-loop и повторите ту же команду с --run-id <id> (engineer-фрейм отказан до discovery#49)"
 	@echo "  make behaviour-console ARGS=… — governance console TUI (uv + группа governance)"
@@ -105,6 +106,7 @@ behaviour-console: ; @uv run --frozen --group governance python -m governance.co
 behaviour-tasks: ; @uv run --frozen --group governance python -m governance.task_bridge $(ARGS)
 accept-pr: ; @uv run --frozen python -m governance.accept_pr $(ARGS)
 human-merge: ; @sh ./human-merge.sh $(ARGS)
+brief-propose: ; @uv run --frozen python -m governance.brief_tools propose --run "$(RUN)"
 preflight: ; @uv run --frozen python ./spec_run_preflight.py $(ARGS)
 edge-check:  ; @uv run --frozen python ./edge_check.py $(ARGS)
 conductor: ; @uv run --frozen python -m conductor $(ARGS) --root $(WORKSPACE)

@@ -171,6 +171,7 @@ class Ops(Protocol):
         label: str,
         *,
         draft: bool = False,
+        base: str | None = None,
     ) -> int: ...
 
     def create_draft_pr(
@@ -1550,8 +1551,12 @@ class RealOps(BriefFactsMixin):
         label: str,
         *,
         draft: bool = False,
+        base: str | None = None,
     ) -> int:
-        """gh pr create [--draft] [--label <label>] -R <slug>; номер из URL.
+        """gh pr create [--draft] [--label <label>] [--base <base>] -R <slug>; номер из URL.
+
+        `base` — явная база (brief-PR, §11.3): без неё gh берёт ветку по
+        умолчанию на момент вызова, а вызывающий уже прочитал её из форджа.
 
         Пустой ``label`` не передаётся вовсе (решение владельца 2026-08-31:
         лейбл `codex-review` больше не вешается — он триггерил платный
@@ -1572,6 +1577,7 @@ class RealOps(BriefFactsMixin):
         """
         draft_args = ["--draft"] if draft else []
         label_args = ["--label", label] if label else []
+        base_args = ["--base", base] if base else []
         done = subprocess.run(
             [
                 "gh",
@@ -1587,6 +1593,7 @@ class RealOps(BriefFactsMixin):
                 "--body",
                 body,
                 *label_args,
+                *base_args,
             ],
             cwd=target_dir,
             capture_output=True,
