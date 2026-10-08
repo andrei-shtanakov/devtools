@@ -1,0 +1,5 @@
+{"attempt_id": "aa34bb9228744b5a808b094a012115c0", "body_sha256": "6040cf79ff1a646461bb150405e9e6cdd406803b64356f6a65cd4241ab6f04d5", "endpoint": "/repos/andrei-shtanakov/conductor-sandbox/issues/6/comments", "marker_key": "<!-- conductor:v1 nudge n=2 p=h1-2618bd22681a8f70 wait=h1-c41760e22512998a -->", "method": "POST", "repo": "andrei-shtanakov/conductor-sandbox", "seq": 1, "t": "intent"}
+{"outcome": "ok", "sent": true, "seq": 1, "status": 201, "t": "result"}
+{"attempt_id": "61aeb539530844d0916e0920003641ef", "body_sha256": "eb672acd642328abc33259a326df1a6261b394e6fa34157f294e28a3f5342a4c", "endpoint": "/repos/andrei-shtanakov/conductor-sandbox/issues/13/comments", "marker_key": "<!-- conductor:v1 nudge n=1 p=h1-d01ad54d2959dc54 wait=h1-4d1abc53eb73242e -->", "method": "POST", "repo": "andrei-shtanakov/conductor-sandbox", "seq": 2, "t": "intent"}
+{"outcome": "ok", "sent": true, "seq": 2, "status": 201, "t": "result"}
+{"t": "run-end"}
