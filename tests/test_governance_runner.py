@@ -9961,3 +9961,177 @@ def test_git_and_gh_children_do_not_hold_the_lock(  # T38 (git/gh-потомки
         subprocess.run([str(bin_dir / "git")], pass_fds=(lock.fd,), check=True)
     lines = out.read_text(encoding="utf-8").splitlines()
     assert lines == ["git:", "gh:", f"git:{lock.fd}"]
+
+
+# --- §11.4.4 в E1: source-слой несёт закреплённый upstream (Task 10, часть B) ---
+
+
+def _published_engineer(tmp_path, monkeypatch, run_id):
+    ops, _ = _engineer_run(
+        tmp_path,
+        monkeypatch,
+        run_id,
+        [
+            ("start", _eng_reply(20, run_id)),
+            ("status", _eng_reply(0, run_id)),
+            ("brief", _eng_reply(0, run_id)),
+        ],
+    )
+    return ops, locked_runner.resume(run_id, ops)
+
+
+def _findings(run_id: str) -> str:
+    path = rs.run_dir(run_id) / "brief-findings.txt"
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+def _rerun_e1(run_id: str, ops) -> object:
+    st = rs.load(run_id)
+    st.status = "running"
+    st.ops.pop(runner.wave_key(st, "materialize-brief"), None)
+    rs.save(st)
+    return locked_runner.resume(run_id, ops)
+
+
+def test_e1_proceeds_with_intact_upstream(
+    tmp_path, runs_root, monkeypatch
+) -> None:  # T43
+    ops, state = _published_engineer(tmp_path, monkeypatch, "r-f1")
+    assert state.interview["completed_at"]
+    assert "upstream_blob_mismatch" not in _findings("r-f1")
+    _rerun_e1("r-f1", ops)
+    assert "upstream_blob_mismatch" not in _findings("r-f1")
+
+
+def test_e1_refuses_tampered_upstream_after_publication(  # T43 двойник
+    tmp_path, runs_root, monkeypatch
+) -> None:
+    ops, _ = _published_engineer(tmp_path, monkeypatch, "r-f2")
+    (rs.run_dir("r-f2") / iv.UPSTREAM_REL).write_text("подмена", encoding="utf-8")
+    after = _rerun_e1("r-f2", ops)
+    assert after.status == "stopped_author"
+    assert "GC-BRIEF-SOURCE" in _findings("r-f2")
+
+
+def test_e1_refuses_descriptor_not_matching_upstream_blob(
+    tmp_path, runs_root, monkeypatch
+) -> None:
+    ops, _ = _published_engineer(tmp_path, monkeypatch, "r-f3")
+    st = rs.load("r-f3")
+    st.interview["upstream_blob"] = "0" * 40
+    rs.save(st)
+    after = _rerun_e1("r-f3", ops)
+    assert after.status == "stopped_author"
+    assert "upstream_blob_mismatch" in _findings("r-f3")
+
+
+# --- ревью части B, круг 1 (B5): матрица engineer-стадии ---
+
+
+def test_reconfirm_sequence_continues_after_second_reconfirm(  # T28 полностью
+    tmp_path, runs_root, monkeypatch
+) -> None:
+    ops, _ = _engineer_run(
+        tmp_path,
+        monkeypatch,
+        "r-g1",
+        [
+            ("start", _eng_reply(20, "r-g1")),
+            ("status", _eng_reply(20, "r-g1")),
+            ("status", _eng_reply(20, "r-g1")),
+        ],
+    )
+    ops.forge.add_policy(C1)
+    assert locked_runner.resume("r-g1", ops).status == "stopped_interview"
+    ops.forge.reconfirm(C1, created="2026-10-09T00:00:00Z")
+    assert locked_runner.resume("r-g1", ops).status == "waiting_interview"
+    ops.forge.add_policy(C2)
+    assert locked_runner.resume("r-g1", ops).status == "stopped_interview"
+    ops.forge.reconfirm(C2, created="2026-10-10T00:00:00Z")
+    assert locked_runner.resume("r-g1", ops).status == "waiting_interview"
+
+
+def test_forged_local_confirmation_does_not_mask_drift(  # T29
+    tmp_path, runs_root, monkeypatch
+) -> None:
+    ops, _ = _engineer_run(
+        tmp_path, monkeypatch, "r-g2", [("start", _eng_reply(20, "r-g2"))]
+    )
+    ops.forge.add_policy(C1)
+    st = rs.load("r-g2")
+    st.interview["approval"]["act_policy_sha"] = C1
+    st.interview["working_policy"] = C1
+    st.ops["upstream-policy-reconfirm"] = {"status": "completed", "to": C1}
+    rs.save(st)
+    calls = len(ops.discovery_calls)
+    assert locked_runner.resume("r-g2", ops).status == "stopped_interview"
+    assert len(ops.discovery_calls) == calls
+    assert _stop_reason("r-g2").startswith("upstream_policy_drift")
+
+
+def test_act_address_changed_in_ledger_is_rechecked_from_forge(  # T30
+    tmp_path, runs_root, monkeypatch
+) -> None:
+    ops, _ = _engineer_run(
+        tmp_path, monkeypatch, "r-g3", [("start", _eng_reply(20, "r-g3"))]
+    )
+    st = rs.load("r-g3")
+    st.interview["approval_pr"] = 99  # такого brief-PR нет
+    rs.save(st)
+    calls = len(ops.discovery_calls)
+    assert locked_runner.resume("r-g3", ops).status == "stopped_interview"
+    assert len(ops.discovery_calls) == calls
+
+
+@pytest.mark.parametrize("how", ["deleted", "edited"])
+def test_reconfirm_deleted_or_edited_on_resume_stops(
+    tmp_path, runs_root, monkeypatch, how
+) -> None:  # T30
+    import dataclasses
+
+    ops, _ = _engineer_run(
+        tmp_path,
+        monkeypatch,
+        "r-g4",
+        [("start", _eng_reply(20, "r-g4")), ("status", _eng_reply(20, "r-g4"))],
+    )
+    ops.forge.add_policy(C1)
+    ops.forge.reconfirm(C1)
+    assert locked_runner.resume("r-g4", ops).status == "waiting_interview"
+    if how == "deleted":
+        ops.forge.comments[7] = []
+    else:  # отредактирован после продолжения — больше не считается
+        ops.forge.comments[7] = [
+            dataclasses.replace(c, last_edited_at="2026-10-09T02:00:00Z")
+            for c in ops.forge.comments[7]
+        ]
+    assert locked_runner.resume("r-g4", ops).status == "stopped_interview"
+    assert _stop_reason("r-g4").startswith("upstream_policy_drift")
+
+
+def test_policy_change_after_completed_at_does_not_stop(  # T35 (Q2)
+    tmp_path, runs_root, monkeypatch
+) -> None:
+    ops, state = _published_engineer(tmp_path, monkeypatch, "r-g5")
+    assert state.interview["completed_at"]
+    ops.forge.add_policy(C1)
+    after = _rerun_e1("r-g5", ops)
+    assert after.status != "stopped_interview"
+    assert "upstream_blob_mismatch" not in _findings("r-g5")
+
+
+def test_recovery_status_without_envelope_is_hard_stop(  # T41
+    tmp_path, runs_root, monkeypatch
+) -> None:
+    no_envelope = iv.parse_reply(2, "", "")  # argparse-ошибка соседа без stdout
+    assert no_envelope.code == 1
+    ops, _ = _engineer_run(
+        tmp_path,
+        monkeypatch,
+        "r-g6",
+        [("start", _eng_reply(1, "r-g6")), ("status", no_envelope)],
+    )
+    state = locked_runner.resume("r-g6", ops)
+    assert state.status == "stopped_interview"
+    assert [c[0] for c in ops.discovery_calls] == ["start", "status"]
+    assert _stop_reason("r-g6").startswith("session_state_unknown")

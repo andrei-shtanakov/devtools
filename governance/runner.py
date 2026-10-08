@@ -2229,6 +2229,15 @@ def _step_materialize_brief(state: RunState, ops: Ops) -> bool:
             state,
             "durable intake bytes не совпадают с descriptor в run.json",
         )
+    interview = state.interview or {}
+    if interview.get("frame") == "engineer" and dict(source.source_blobs).get(
+        "discovery-customer"
+    ) != interview.get("upstream_blob"):
+        # §11.4.4: source-слой несёт ровно закреплённый upstream, и после
+        # публикации тоже (Q2: политика больше не перепроверяется, байты — да).
+        return _brief_stop(
+            state, "upstream_blob_mismatch: upstream.md source-слоя ≠ upstream_blob"
+        )
 
     if op_status(state, key) == "completed":
         try:
