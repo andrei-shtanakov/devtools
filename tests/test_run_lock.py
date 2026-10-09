@@ -141,9 +141,9 @@ def test_second_entry_exits_before_reading_state(  # T37, Review Focus
     monkeypatch.setattr(spec_loop, "build_interview_spec", lambda a, s: None)
     monkeypatch.setattr(
         spec_loop,
-        "manifest_repo_entry",
-        lambda text, repo: type(
-            "E", (), {"repo_slug": "owner/alpha", "repo": "alpha"}
+        "resolve_repo_entry",
+        lambda text, repo, targets: type(
+            "E", (), {"repo_slug": "owner/alpha", "repo": "alpha", "source": "fleet"}
         )(),
     )
     monkeypatch.setattr(spec_loop, "MANIFEST_PATH", tmp_path / "m.toml")
@@ -183,9 +183,9 @@ def test_state_is_reread_under_lock(tmp_path, runs_root, monkeypatch) -> None:  
     monkeypatch.setattr(spec_loop, "build_interview_spec", lambda a, s: None)
     monkeypatch.setattr(
         spec_loop,
-        "manifest_repo_entry",
-        lambda text, repo: type(
-            "E", (), {"repo_slug": "owner/alpha", "repo": "alpha"}
+        "resolve_repo_entry",
+        lambda text, repo, targets: type(
+            "E", (), {"repo_slug": "owner/alpha", "repo": "alpha", "source": "fleet"}
         )(),
     )
     monkeypatch.setattr(spec_loop, "MANIFEST_PATH", tmp_path / "m.toml")
