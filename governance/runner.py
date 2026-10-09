@@ -47,6 +47,7 @@ from governance import (
 from governance import approval_ledger as al
 from governance import approve_node as an
 from governance import interview as iv
+from governance import run_lock as rl
 from governance.edge_check import coordinator as edge_coordinator
 from governance.edge_check import publish as edge_publish
 from governance.edge_check.rules import EdgeCheckError
@@ -338,8 +339,12 @@ def start(
     authoring: str = "waves",
     code: str | None = None,
     plan_item: str | None = None,
+    *,
+    lock: rl.RunLock,
 ) -> RunState:
     """S0: новый прогон, затем сразу `advance()` до стопа/завершения.
+
+    `lock` — блокировка ЭТОГО `run_id`, взятая точкой входа (§11.4.5).
 
     `merge_authority`/`author_backend` валидируются ПЕРВЫМИ, ДО
     резервирования `run_id` (B2 follow-up приёмки B1, minor из #88 —
@@ -361,6 +366,7 @@ def start(
     WS-lock не оставляет пустой `run.json`-заглушку под несостоявшимся
     `run_id`.
     """
+    rl.require(lock, run_id)
     validate_merge_authority(merge_authority)
     validate_author_backend(author_backend)
     validate_authoring(authoring)
@@ -427,10 +433,10 @@ def start(
         plan_item=plan_item,
     )
     save(state)
-    return advance(state, ops)
+    return advance(state, ops, lock=lock)
 
 
-def advance(state: RunState, ops: Ops) -> RunState:
+def advance(state: RunState, ops: Ops, *, lock: rl.RunLock) -> RunState:
     """Выполняет шаги S1..S8 до стопа (не-``running`` статус) либо конца.
 
     Каждая шаг-функция сама решает, продолжать ли (``True``) или прервать
@@ -452,6 +458,7 @@ def advance(state: RunState, ops: Ops) -> RunState:
     пред-мержевыми op'ами (`review`, `author-*`) — следующий resume падал
     бы в общий шаговый цикл и переигрывал их вхолостую на смерженном PR.
     """
+    rl.require(lock, state.run_id)
     if state.status == "merged_unverified":
         raise ValueError(
             f"run {state.run_id!r} — merged_unverified навсегда; создайте "
@@ -836,7 +843,7 @@ def _refuse_legacy_resume(state: RunState) -> None:
     )
 
 
-def resume(run_id: str, ops: Ops) -> RunState:
+def resume(run_id: str, ops: Ops, *, lock: rl.RunLock) -> RunState:
     """Явный подхват сохранённого run'а (спека §5).
 
     ``merged_unverified`` — отказ (навсегда, см. `advance`). Из
@@ -882,6 +889,7 @@ def resume(run_id: str, ops: Ops) -> RunState:
     только статус обратно в ``running``. Любой другой статус — обычный
     `advance()`.
     """
+    rl.require(lock, run_id)
     state = load(run_id)
     if state.status == "merged_unverified":
         raise ValueError(
@@ -900,11 +908,11 @@ def resume(run_id: str, ops: Ops) -> RunState:
     else:
         _refuse_legacy_resume(state)
     if state.status != "completed":
-        resumed = _resume_wave(state, ops)
+        resumed = _resume_wave(state, ops, lock=lock)
         if resumed is not None:
             return resumed
     if state.status == "waiting_human_merge":
-        _reconcile_pr_merged_out_of_band(state, ops)
+        _reconcile_pr_merged_out_of_band(state, ops, lock=lock)
         return state
     if state.status in ("waiting_interview", "stopped_interview"):
         if state.interview and state.interview.get("session_id") is None:
@@ -918,7 +926,7 @@ def resume(run_id: str, ops: Ops) -> RunState:
             return state
         state.status = "running"
         save(state)
-        return advance(state, ops)
+        return advance(state, ops, lock=lock)
     if state.status == "stopped_author":
         # Ревью #253: `stopped_author` НЕ гарантирует отсутствие PR — brief-
         # coverage внутри `_step_authoring` (E1) выполняется на каждом
@@ -927,14 +935,14 @@ def resume(run_id: str, ops: Ops) -> RunState:
         # (resume из stopped_review/stopped_gate доходит сюда повторно).
         # `state.pr is None` внутри реконсиляции делает вызов безопасным и
         # для «настоящего» stopped_author без PR.
-        if _reconcile_pr_merged_out_of_band(state, ops):
+        if _reconcile_pr_merged_out_of_band(state, ops, lock=lock):
             return state
         _reset_stopped_author(state)
         state.status = "running"
         save(state)
-        return advance(state, ops)
+        return advance(state, ops, lock=lock)
     if state.status in _STOPPED_RESET_OPS:
-        if _reconcile_pr_merged_out_of_band(state, ops):
+        if _reconcile_pr_merged_out_of_band(state, ops, lock=lock):
             return state
         keys = reset_ops_for(state)
         _drop_findings_of(state, keys)
@@ -942,11 +950,11 @@ def resume(run_id: str, ops: Ops) -> RunState:
             state.ops.pop(key, None)
         state.status = "running"
         save(state)
-        return advance(state, ops)
-    return advance(state, ops)
+        return advance(state, ops, lock=lock)
+    return advance(state, ops, lock=lock)
 
 
-def _resume_wave(state: RunState, ops: Ops) -> RunState | None:
+def _resume_wave(state: RunState, ops: Ops, *, lock: rl.RunLock) -> RunState | None:
     """Resume волнового прогона по СОХРАНЁННОМУ ключу заявки (ревью #343, R3).
 
     Заявка волны читается из `candidate-<w>` (`request`, write-ahead в
@@ -987,7 +995,7 @@ def _resume_wave(state: RunState, ops: Ops) -> RunState | None:
         return state
     status = op.get("status")
     if status == al.STATUS_COMPLETED:
-        return _next_wave(state, ops)
+        return _next_wave(state, ops, lock=lock)
     if status in al.TERMINAL_STATUSES:
         _stop_with_comment(
             state,
@@ -1004,7 +1012,7 @@ def _resume_wave(state: RunState, ops: Ops) -> RunState | None:
         # доигрывает тот же шаг — он идемпотентен и знает свою заявку.
         state.status = "running"
         save(state)
-        return advance(state, ops)
+        return advance(state, ops, lock=lock)
     if not op.get("merged_by"):
         facts = ops.pr_facts(state.repo_slug, pr)
         if facts.get("state") == "OPEN":
@@ -1016,10 +1024,12 @@ def _resume_wave(state: RunState, ops: Ops) -> RunState | None:
                 state.status = "waiting_human_merge"
                 save(state)
             return state
-    return _finalize_wave(state, ops, request)
+    return _finalize_wave(state, ops, request, lock=lock)
 
 
-def _finalize_wave(state: RunState, ops: Ops, request: str) -> RunState:
+def _finalize_wave(
+    state: RunState, ops: Ops, request: str, *, lock: rl.RunLock
+) -> RunState:
     """Finalize волны агентом на resume (S8): фаза 2 §I12 → scope-аттестация
     finalize-PR → повторный approve-node (агентский мерж) → следующая волна.
 
@@ -1062,7 +1072,7 @@ def _finalize_wave(state: RunState, ops: Ops, request: str) -> RunState:
         return state
     op = state.ops[request]
     if op["status"] == al.STATUS_COMPLETED:
-        return _next_wave(state, ops)
+        return _next_wave(state, ops, lock=lock)
     finalize_pr = op.get("finalize_pr")
     if finalize_pr is None:
         # Акта мержа candidate ещё нет — ждём человека.
@@ -1088,7 +1098,7 @@ def _finalize_wave(state: RunState, ops: Ops, request: str) -> RunState:
         return state
     op = state.ops[request]
     if op["status"] == al.STATUS_COMPLETED:
-        return _next_wave(state, ops)
+        return _next_wave(state, ops, lock=lock)
     _wave_pause(
         state,
         ops,
@@ -1099,7 +1109,9 @@ def _finalize_wave(state: RunState, ops: Ops, request: str) -> RunState:
     return state
 
 
-def reopen(run_id: str, node: str, ops: Ops, *, manual: bool = False) -> RunState:
+def reopen(
+    run_id: str, node: str, ops: Ops, *, manual: bool = False, lock: rl.RunLock
+) -> RunState:
     """`--reopen <node>` (S11, D2/D3): явное переоткрытие одобренного узла.
 
     `state.wave` = уровень узла + 1; ветка волны — НОВЫМ именем
@@ -1117,6 +1129,7 @@ def reopen(run_id: str, node: str, ops: Ops, *, manual: bool = False) -> RunStat
     закрытие), прогон после последней волны (op `merge` — переоткрытие
     через новый прогон). Грязное дерево — `stopped_dirty`.
     """
+    rl.require(lock, run_id)
     state = load(run_id)
     if _is_legacy_ledger(state):
         raise ValueError("--reopen — только для прогона с authoring=waves")
@@ -1197,7 +1210,7 @@ def reopen(run_id: str, node: str, ops: Ops, *, manual: bool = False) -> RunStat
         return state
     state.status = "running"
     save(state)
-    return advance(state, ops)
+    return advance(state, ops, lock=lock)
 
 
 def _verified_result_sha(state: RunState) -> str | None:
@@ -1224,7 +1237,7 @@ def _verified_result_sha(state: RunState) -> str | None:
     return str(commit) if commit else None
 
 
-def _next_wave(state: RunState, ops: Ops) -> RunState:
+def _next_wave(state: RunState, ops: Ops, *, lock: rl.RunLock) -> RunState:
     """Ровно один переход: следующая волна либо S8 после последней.
 
     После последней волны фиксируется op `merge` — та же метка «весь
@@ -1239,14 +1252,16 @@ def _next_wave(state: RunState, ops: Ops) -> RunState:
             op_complete(state, "merge", merged=True, waves=state.wave)
         state.status = "running"
         save(state)
-        return advance(state, ops)
+        return advance(state, ops, lock=lock)
     state.wave += 1
     state.status = "running"
     save(state)
-    return advance(state, ops)
+    return advance(state, ops, lock=lock)
 
 
-def _reconcile_pr_merged_out_of_band(state: RunState, ops: Ops) -> bool:
+def _reconcile_pr_merged_out_of_band(
+    state: RunState, ops: Ops, *, lock: rl.RunLock
+) -> bool:
     """PR уже ``MERGED`` — человек смержил напрямую, минуя раннер.
 
     Общая реконсиляция для ``waiting_human_merge`` и для любого
@@ -1311,7 +1326,7 @@ def _reconcile_pr_merged_out_of_band(state: RunState, ops: Ops) -> bool:
         op_complete(state, "merge", merged=True)
     state.status = "running"
     save(state)
-    advance(state, ops)
+    advance(state, ops, lock=lock)
     return True
 
 
@@ -1354,7 +1369,9 @@ def _next_verify_run_id(parent_run_id: str) -> str:
     return f"{parent_run_id}-v{attempt}"
 
 
-def verify(parent_run_id: str, ops: Ops, run_id: str | None = None) -> RunState:
+def verify(
+    parent_run_id: str, ops: Ops, run_id: str | None = None, *, lock: rl.RunLock
+) -> RunState:
     """Дочерний verification-run для `merged_unverified`-родителя (спека §5).
 
     Новый ``RunState`` с теми же координатами (repo/ws_id/target_dir/
@@ -1387,6 +1404,7 @@ def verify(parent_run_id: str, ops: Ops, run_id: str | None = None) -> RunState:
     валидируется как раньше (`_reserve_run_id` → `run_dir()` →
     `validate_id_component`).
     """
+    rl.require(lock, parent_run_id)
     parent = load(parent_run_id)
     if parent.status != "merged_unverified":
         raise ValueError(
@@ -1433,7 +1451,19 @@ def verify(parent_run_id: str, ops: Ops, run_id: str | None = None) -> RunState:
         )
     if run_id is None:
         run_id = _next_verify_run_id(parent_run_id)
+    # Потомок — НОВЫЙ прогон: его блокировку берёт сам `verify`, сразу после
+    # выбора id и до публикации леджера, и держит до конца S8 — иначе
+    # `resume(<child>)` из другого процесса исполнял бы тот же S8
+    # параллельно (ревью части A, A2). Блокировку родителя держит вход.
     _refuse_if_halted(parent.repo_slug)  # D2: последний отказ до резервирования
+    with rl.run_lock(run_id):
+        return _verify_child(parent, parent_run_id, run_id, ops)
+
+
+def _verify_child(
+    parent: RunState, parent_run_id: str, run_id: str, ops: Ops
+) -> RunState:
+    """Тело `verify` под блокировкой потомка: резерв, леджер, перенос мержа, S8."""
     _reserve_run_id(run_id)
     child = new_run(
         subject=parent.subject,
@@ -1816,7 +1846,9 @@ def _interview_reconcile_published(
     return True
 
 
-def attach_session(run_id: str, session_id: str, ops: Ops) -> RunState:
+def attach_session(
+    run_id: str, session_id: str, ops: Ops, *, lock: rl.RunLock
+) -> RunState:
     """§5.3: присоединение сироты — сессия, созданная без записи `session_id`.
 
     Допустимо только когда `interview-start` остался ``started`` и
@@ -1831,6 +1863,7 @@ def attach_session(run_id: str, session_id: str, ops: Ops) -> RunState:
     ``waiting_interview``, `interview-start` завершается с
     ``attached=True``.
     """
+    rl.require(lock, run_id)
     state = load(run_id)
     if state.interview is None:
         raise ValueError("у прогона нет стадии Need")
@@ -3958,7 +3991,6 @@ def _main(argv: list[str] | None = None) -> int:
 
     ops = RealOps()
     if args.command == "start":
-        bundle_dir = args.bundle_dir or f"workstreams/{args.ws_id}/spec"
         # Дефолтный run_id строится из ws_id — валидируем ws_id ДО генерации
         # (круг 12): битый ws_id иначе протащил бы `../`/`/` дальше в
         # автосгенерированный run_id (там его тоже поймает `run_dir()`, но
@@ -3966,7 +3998,26 @@ def _main(argv: list[str] | None = None) -> int:
         if args.run_id is None:
             validate_id_component(args.ws_id, label="ws_id")
         run_id = args.run_id or f"{args.ws_id}-{os.urandom(3).hex()}"
-        state = start(
+        lock_id = run_id
+    elif args.command == "verify":
+        lock_id = args.parent
+    else:
+        lock_id = args.run_id
+    try:
+        with rl.run_lock(lock_id) as lock:
+            state = _run_command(args, ops, lock)
+    except rl.LockBusy as exc:
+        print(f"runner: {exc}", file=sys.stderr)
+        return 1
+    _print_status(state)
+    return 0
+
+
+def _run_command(args: argparse.Namespace, ops: Ops, lock: rl.RunLock) -> RunState:
+    """Изменяющая подкоманда CLI под блокировкой точки входа (§11.4.5)."""
+    if args.command == "start":
+        bundle_dir = args.bundle_dir or f"workstreams/{args.ws_id}/spec"
+        return start(
             subject=args.subject,
             repo=args.repo,
             repo_slug=args.repo_slug,
@@ -3974,22 +4025,19 @@ def _main(argv: list[str] | None = None) -> int:
             target_dir=args.target_dir,
             bundle_dir=bundle_dir,
             profile=args.profile,
-            run_id=run_id,
+            run_id=lock.run_id,
             ops=ops,
             merge_authority=args.merge_authority,
             author_backend=args.author_backend,
             allow_legacy_dt=args.allow_legacy_dt,
             authoring=args.authoring,
+            lock=lock,
         )
-    elif args.command == "resume":
-        state = resume(args.run_id, ops)
-    elif args.command == "reopen":
-        state = reopen(args.run_id, args.node, ops, manual=args.manual)
-    else:
-        state = verify(args.parent, ops, args.run_id)
-
-    _print_status(state)
-    return 0
+    if args.command == "resume":
+        return resume(args.run_id, ops, lock=lock)
+    if args.command == "reopen":
+        return reopen(args.run_id, args.node, ops, manual=args.manual, lock=lock)
+    return verify(args.parent, ops, args.run_id, lock=lock)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,42 @@
+{
+  "discovery_commit": "94c88cc55ae29aa005855bbebf6f4ae6244a6f3b",
+  "approve_exit": 0,
+  "self_hash": "sha256:b7bd55ff95fe7dfe79faf1d2ea4501b4f2df4299034f7f428ca4b333ad271571",
+  "verify_signed": null,
+  "verify_draft": "debt_status",
+  "merge_event": {
+    "login": "andrei-shtanakov",
+    "merged_at": "2026-10-08T10:00:00Z",
+    "commit": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1"
+  },
+  "forge_calls": [
+    [
+      "pull_request",
+      "owner/alpha",
+      7
+    ],
+    [
+      "latest_commit_touching",
+      "andrei-shtanakov/approval-policy",
+      "main",
+      "policy/approvers.env"
+    ],
+    [
+      "file_at",
+      "andrei-shtanakov/approval-policy",
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "policy/approvers.env"
+    ],
+    [
+      "pull_request_files",
+      "owner/alpha",
+      7
+    ],
+    [
+      "file_at",
+      "owner/alpha",
+      "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1",
+      "workstreams/WS-1/spec/00-discovery/brief.md"
+    ]
+  ]
+}

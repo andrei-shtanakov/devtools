@@ -19,12 +19,14 @@ from governance import (
     brief_input,
     bundle_dag,
     bundle_state,
+    run_lock,
     runner,
     task_bridge,
 )
 from governance import interview as iv
 from governance import run_state as rs
 from governance.stale_adapter import blob_sha1, blob_sha1_bytes
+from tests import locked_runner
 from tests.governance_fixtures.bundles import make_bundle, make_profile
 
 GREEN_PR_FACTS: dict[str, Any] = {
@@ -562,15 +564,25 @@ class FakeOps:
         )
         return self.discovery.pop(0)[1]
 
-    def discovery_start(self, frame, target, traces_to, upstream_path, cwd):
+    def discovery_start(
+        self,
+        frame,
+        target,
+        traces_to,
+        upstream_path,
+        cwd,
+        *,
+        session_id=None,
+        lock_fd=None,
+    ):
         self.discovery_calls.append(("start", frame, target, traces_to, upstream_path))
         return self._discovery_reply("start")
 
-    def discovery_status(self, session_id, cwd):
+    def discovery_status(self, session_id, cwd, *, lock_fd=None):
         self.discovery_calls.append(("status", session_id))
         return self._discovery_reply("status")
 
-    def discovery_brief(self, session_id, out_path, cwd):
+    def discovery_brief(self, session_id, out_path, cwd, *, lock_fd=None):
         self.discovery_calls.append(("brief", session_id, out_path))
         reply = self._discovery_reply("brief")
         # Стенд пишет артефакт при кодах 0/10/11/20, как сосед.
@@ -712,7 +724,7 @@ def _need_spec(**over) -> iv.InterviewSpec:
 
 def test_need_start_20_waits_without_branch(tmp_path: Path, runs_root) -> None:
     ops = FakeOps(discovery=[("start", _reply(20))])
-    state = runner.start(
+    state = locked_runner.start(
         **_start_kwargs(tmp_path, "r-need-1", ops), interview_spec=_need_spec()
     )
     assert state.status == "waiting_interview"
@@ -729,7 +741,7 @@ def test_need_start_non_20_stops_without_session(
     tmp_path: Path, runs_root, code
 ) -> None:
     ops = FakeOps(discovery=[("start", _reply(code))])
-    state = runner.start(
+    state = locked_runner.start(
         **_start_kwargs(tmp_path, f"r-need-{code}", ops),
         interview_spec=_need_spec(),
     )
@@ -745,7 +757,7 @@ def test_need_start_non_20_stops_without_session(
 
 def _waiting_run(tmp_path: Path, runs_root, run_id: str, extra_replies: list):
     ops = FakeOps(discovery=[("start", _reply(20)), *extra_replies])
-    state = runner.start(
+    state = locked_runner.start(
         **_start_kwargs(tmp_path, run_id, ops), interview_spec=_need_spec()
     )
     assert state.status == "waiting_interview"
@@ -757,7 +769,7 @@ def test_status_20_from_waiting_keeps_ledger_bytes(
 ) -> None:
     ops, _ = _waiting_run(tmp_path, runs_root, "r-w20", [("status", _reply(20))])
     before = (rs.run_dir("r-w20") / "run.json").read_bytes()
-    state = runner.resume("r-w20", ops)
+    state = locked_runner.resume("r-w20", ops)
     assert state.status == "waiting_interview"
     assert (rs.run_dir("r-w20") / "run.json").read_bytes() == before
     out = capsys.readouterr().out
@@ -776,7 +788,7 @@ def test_status_20_with_foreign_session_id_stops(tmp_path: Path, runs_root) -> N
             )
         ],
     )
-    assert runner.resume("r-w-foreign", ops).status == "stopped_interview"
+    assert locked_runner.resume("r-w-foreign", ops).status == "stopped_interview"
 
 
 @pytest.mark.parametrize("code", [10, 11])
@@ -784,7 +796,7 @@ def test_status_10_11_stops_with_findings_and_template(
     tmp_path: Path, runs_root, code, capsys: pytest.CaptureFixture[str]
 ) -> None:
     ops, _ = _waiting_run(tmp_path, runs_root, f"r-w{code}", [("status", _reply(code))])
-    state = runner.resume(f"r-w{code}", ops)
+    state = locked_runner.resume(f"r-w{code}", ops)
     assert state.status == "stopped_interview"
     findings_path = rs.run_dir(f"r-w{code}") / "interview-findings.txt"
     assert "GC-04" in findings_path.read_text()
@@ -799,8 +811,8 @@ def test_stopped_then_status_20_returns_to_waiting(tmp_path: Path, runs_root) ->
         "r-s20",
         [("status", _reply(10)), ("status", _reply(20))],
     )
-    assert runner.resume("r-s20", ops).status == "stopped_interview"
-    state = runner.resume("r-s20", ops)
+    assert locked_runner.resume("r-s20", ops).status == "stopped_interview"
+    state = locked_runner.resume("r-s20", ops)
     assert state.status == "waiting_interview"
     assert not (rs.run_dir("r-s20") / "interview-findings.txt").exists()
 
@@ -822,10 +834,10 @@ def test_findings_do_not_survive_a_later_operational_refusal(
         f"r-stale{code}",
         [("status", _reply(10)), ("status", _reply(code))],
     )
-    assert runner.resume(f"r-stale{code}", ops).status == "stopped_interview"
+    assert locked_runner.resume(f"r-stale{code}", ops).status == "stopped_interview"
     assert (rs.run_dir(f"r-stale{code}") / "interview-findings.txt").exists()
 
-    state = runner.resume(f"r-stale{code}", ops)
+    state = locked_runner.resume(f"r-stale{code}", ops)
 
     assert state.status == "stopped_interview"
     assert not (rs.run_dir(f"r-stale{code}") / "interview-findings.txt").exists()
@@ -846,15 +858,15 @@ def test_findings_do_not_survive_a_later_brief_refusal(
         ],
         brief_text=_need_brief_text(target="owner/beta"),
     )
-    runner.start(
+    locked_runner.start(
         **_start_kwargs(tmp_path, "r-stale-brief", ops),
         interview_spec=_need_spec(),
     )
     findings = rs.run_dir("r-stale-brief") / "interview-findings.txt"
-    assert runner.resume("r-stale-brief", ops).status == "stopped_interview"
+    assert locked_runner.resume("r-stale-brief", ops).status == "stopped_interview"
     assert findings.exists()
 
-    state = runner.resume("r-stale-brief", ops)
+    state = locked_runner.resume("r-stale-brief", ops)
 
     assert state.status == "stopped_interview" and state.brief is None
     assert not findings.exists()
@@ -879,15 +891,15 @@ def test_findings_do_not_survive_the_brief_shortcut(tmp_path: Path, runs_root) -
         ],
         brief_text=_need_brief_text(target="owner/beta"),
     )
-    runner.start(
+    locked_runner.start(
         **_start_kwargs(tmp_path, "r-shortcut", ops),
         interview_spec=_need_spec(),
     )
     findings = rs.run_dir("r-shortcut") / "interview-findings.txt"
-    assert runner.resume("r-shortcut", ops).status == "stopped_interview"
+    assert locked_runner.resume("r-shortcut", ops).status == "stopped_interview"
     assert findings.exists(), "предусловие: brief 11 записал findings"
 
-    state = runner.resume("r-shortcut", ops)
+    state = locked_runner.resume("r-shortcut", ops)
 
     assert state.status == "stopped_interview" and state.brief is None
     assert not findings.exists()
@@ -898,7 +910,7 @@ def test_status_1_2_stops_and_keeps_session(
     tmp_path: Path, runs_root, code, capsys: pytest.CaptureFixture[str]
 ) -> None:
     ops, _ = _waiting_run(tmp_path, runs_root, f"r-e{code}", [("status", _reply(code))])
-    state = runner.resume(f"r-e{code}", ops)
+    state = locked_runner.resume(f"r-e{code}", ops)
     assert state.status == "stopped_interview"
     assert state.interview["session_id"] == "s-1"
     out = capsys.readouterr().out
@@ -910,10 +922,10 @@ def test_orphan_stop_resume_does_not_call_discovery(
     tmp_path: Path, runs_root, capsys: pytest.CaptureFixture[str]
 ) -> None:
     ops = FakeOps(discovery=[("start", _reply(2))])
-    runner.start(
+    locked_runner.start(
         **_start_kwargs(tmp_path, "r-orphan", ops), interview_spec=_need_spec()
     )
-    state = runner.resume("r-orphan", ops)
+    state = locked_runner.resume("r-orphan", ops)
     assert state.status == "stopped_interview"
     assert [c for c in ops.discovery_calls if c[0] != "start"] == []
     assert "--session" in capsys.readouterr().out
@@ -1000,8 +1012,10 @@ def test_status_0_brief_0_publishes_and_continues_by_e1(
         files=GREEN_BUNDLE_FILES,
     )
     _fake_wave_adapters(monkeypatch, ops)
-    runner.start(**_waves_kwargs(tmp_path, "r-pub", ops), interview_spec=_need_spec())
-    state = runner.resume("r-pub", ops)
+    locked_runner.start(
+        **_waves_kwargs(tmp_path, "r-pub", ops), interview_spec=_need_spec()
+    )
+    state = locked_runner.resume("r-pub", ops)
     assert state.interview["completed_at"]
     assert state.brief and state.brief["frame"] == "customer"
     brief = rs.run_dir("r-pub") / "brief-input" / "00-discovery" / "brief.md"
@@ -1023,8 +1037,10 @@ def test_brief_20_returns_to_waiting_without_publish(tmp_path: Path, runs_root) 
         ],
         brief_text=_need_brief_text(),
     )
-    runner.start(**_start_kwargs(tmp_path, "r-b20", ops), interview_spec=_need_spec())
-    state = runner.resume("r-b20", ops)
+    locked_runner.start(
+        **_start_kwargs(tmp_path, "r-b20", ops), interview_spec=_need_spec()
+    )
+    state = locked_runner.resume("r-b20", ops)
     assert state.status == "waiting_interview" and state.brief is None
     d = rs.run_dir("r-b20") / "brief-input" / "00-discovery"
     assert not (d / "brief.md").exists() and not (d / ".brief.tmp").exists()
@@ -1041,10 +1057,10 @@ def test_brief_non_zero_stops_without_publish(tmp_path: Path, runs_root, code) -
         ],
         brief_text=_need_brief_text(),
     )
-    runner.start(
+    locked_runner.start(
         **_start_kwargs(tmp_path, f"r-b{code}", ops), interview_spec=_need_spec()
     )
-    state = runner.resume(f"r-b{code}", ops)
+    state = locked_runner.resume(f"r-b{code}", ops)
     assert state.status == "stopped_interview" and state.brief is None
     assert not (
         rs.run_dir(f"r-b{code}") / "brief-input" / "00-discovery" / "brief.md"
@@ -1062,8 +1078,10 @@ def test_brief_0_failing_inspect_or_coordinates_stops(
         ],
         brief_text=_need_brief_text(target="owner/beta"),
     )
-    runner.start(**_start_kwargs(tmp_path, "r-bad", ops), interview_spec=_need_spec())
-    state = runner.resume("r-bad", ops)
+    locked_runner.start(
+        **_start_kwargs(tmp_path, "r-bad", ops), interview_spec=_need_spec()
+    )
+    state = locked_runner.resume("r-bad", ops)
     assert state.status == "stopped_interview" and state.brief is None
     assert not (
         rs.run_dir("r-bad") / "brief-input" / "00-discovery" / "brief.md"
@@ -1082,10 +1100,10 @@ def test_brief_0_non_utf8_stops_without_traceback(tmp_path: Path, runs_root) -> 
         ],
         brief_bytes=b"\xff\xfe invalid utf-8 brief",
     )
-    runner.start(
+    locked_runner.start(
         **_start_kwargs(tmp_path, "r-badutf8", ops), interview_spec=_need_spec()
     )
-    state = runner.resume("r-badutf8", ops)
+    state = locked_runner.resume("r-badutf8", ops)
     assert state.status == "stopped_interview" and state.brief is None
     assert not (
         rs.run_dir("r-badutf8") / "brief-input" / "00-discovery" / "brief.md"
@@ -1107,8 +1125,10 @@ def test_brief_0_with_second_participant_role_is_accepted(
         facts=GREEN_PR_FACTS,
         files=GREEN_BUNDLE_FILES,
     )
-    runner.start(**_start_kwargs(tmp_path, "r-two", ops), interview_spec=_need_spec())
-    assert runner.resume("r-two", ops).brief is not None
+    locked_runner.start(
+        **_start_kwargs(tmp_path, "r-two", ops), interview_spec=_need_spec()
+    )
+    assert locked_runner.resume("r-two", ops).brief is not None
 
 
 def _published_run(
@@ -1126,8 +1146,10 @@ def _published_run(
         facts=GREEN_PR_FACTS,
         files=GREEN_BUNDLE_FILES,
     )
-    runner.start(**_start_kwargs(tmp_path, run_id, ops), interview_spec=_need_spec())
-    state = runner.resume(run_id, ops)  # status 0 → brief 0 → replace → brief.md
+    locked_runner.start(
+        **_start_kwargs(tmp_path, run_id, ops), interview_spec=_need_spec()
+    )
+    state = locked_runner.resume(run_id, ops)  # status 0 → brief 0 → replace → brief.md
     assert state.brief is not None
     assert (rs.run_dir(run_id) / "brief-input/00-discovery/brief.md").exists()
     return ops
@@ -1153,7 +1175,7 @@ def test_crash_without_tmp_or_brief_re_renders(tmp_path: Path, runs_root) -> Non
     ops = _published_run(tmp_path, runs_root, "r-c0")
     _crash_after("r-c0", brief_present=False, tmp_present=False)
     ops.discovery = [("brief", _reply(0))]
-    state = runner.resume("r-c0", ops)
+    state = locked_runner.resume("r-c0", ops)
     assert state.brief is not None
     assert state.ops["interview-brief"]["status"] == "completed"
 
@@ -1162,7 +1184,7 @@ def test_crash_with_stale_tmp_re_renders(tmp_path: Path, runs_root) -> None:
     ops = _published_run(tmp_path, runs_root, "r-c1")
     _crash_after("r-c1", brief_present=False, tmp_present=True)
     ops.discovery = [("brief", _reply(0))]
-    state = runner.resume("r-c1", ops)
+    state = locked_runner.resume("r-c1", ops)
     assert state.brief is not None
     assert not (rs.run_dir("r-c1") / "brief-input/00-discovery/.brief.tmp").exists()
 
@@ -1174,7 +1196,7 @@ def test_crash_after_replace_reconciles_by_re_render_equality(
     before = (rs.run_dir("r-c2") / "brief-input/00-discovery/brief.md").read_bytes()
     _crash_after("r-c2", brief_present=True, tmp_present=False)
     ops.discovery = [("brief", _reply(0))]  # тот же brief_text ⇒ байты равны
-    state = runner.resume("r-c2", ops)
+    state = locked_runner.resume("r-c2", ops)
     assert state.brief is not None
     assert (
         rs.run_dir("r-c2") / "brief-input/00-discovery/brief.md"
@@ -1192,7 +1214,7 @@ def test_crash_after_replace_with_diverged_render_stops(
     _crash_after("r-c3", brief_present=True, tmp_present=False)
     ops.brief_text = _need_brief_text(roles=("po", "qa"))  # другие байты
     ops.discovery = [("brief", _reply(0))]
-    state = runner.resume("r-c3", ops)
+    state = locked_runner.resume("r-c3", ops)
     assert state.status == "stopped_interview" and state.brief is None
 
 
@@ -1202,7 +1224,7 @@ def test_crash_after_replace_requires_code_0_on_re_render(
     ops = _published_run(tmp_path, runs_root, "r-c4")
     _crash_after("r-c4", brief_present=True, tmp_present=False)
     ops.discovery = [("brief", _reply(20))]
-    assert runner.resume("r-c4", ops).status == "stopped_interview"
+    assert locked_runner.resume("r-c4", ops).status == "stopped_interview"
 
 
 def test_attach_session_only_for_orphans_and_verifies_brief(
@@ -1211,26 +1233,28 @@ def test_attach_session_only_for_orphans_and_verifies_brief(
     ops = FakeOps(
         discovery=[("start", _reply(2))], brief_text=_need_brief_text(roles=())
     )
-    runner.start(**_start_kwargs(tmp_path, "r-att", ops), interview_spec=_need_spec())
+    locked_runner.start(
+        **_start_kwargs(tmp_path, "r-att", ops), interview_spec=_need_spec()
+    )
     ops.discovery = [("brief", _reply(20))]
-    state = runner.attach_session("r-att", "s-77", ops)
+    state = locked_runner.attach_session("r-att", "s-77", ops)
     assert state.interview["session_id"] == "s-77"
     assert state.ops["interview-start"]["status"] == "completed"
     # повторное присоединение при записанном id — отказ
     with pytest.raises(ValueError):
-        runner.attach_session("r-att", "s-78", ops)
+        locked_runner.attach_session("r-att", "s-78", ops)
 
 
 def test_attach_session_rejects_foreign_role(tmp_path: Path, runs_root) -> None:
     ops = FakeOps(
         discovery=[("start", _reply(1))], brief_text=_need_brief_text(roles=("qa",))
     )
-    runner.start(
+    locked_runner.start(
         **_start_kwargs(tmp_path, "r-att-bad", ops), interview_spec=_need_spec()
     )
     ops.discovery = [("brief", _reply(20))]
     with pytest.raises(ValueError):
-        runner.attach_session("r-att-bad", "s-77", ops)
+        locked_runner.attach_session("r-att-bad", "s-77", ops)
     assert rs.load("r-att-bad").interview["session_id"] is None
 
 
@@ -1241,12 +1265,12 @@ def test_attach_session_rejects_render_codes_1_2(
     ops = FakeOps(
         discovery=[("start", _reply(1))], brief_text=_need_brief_text(roles=())
     )
-    runner.start(
+    locked_runner.start(
         **_start_kwargs(tmp_path, f"r-att-{code}", ops), interview_spec=_need_spec()
     )
     ops.discovery = [("brief", _reply(code))]
     with pytest.raises(ValueError):
-        runner.attach_session(f"r-att-{code}", "s-77", ops)
+        locked_runner.attach_session(f"r-att-{code}", "s-77", ops)
 
 
 def _brief_source(tmp_path: Path) -> brief_input.BriefSource:
@@ -1312,7 +1336,7 @@ def test_brief_materializes_after_branch_and_reaches_two_author_prompts(
     )
 
     _fake_wave_adapters(monkeypatch, ops)
-    state = runner.start(**kwargs)
+    state = locked_runner.start(**kwargs)
 
     destination = Path(state.target_dir) / state.bundle_dir / brief_input.PRIMARY_REL
     assert destination.read_bytes() == source.primary_input.read_bytes()
@@ -1355,7 +1379,7 @@ def test_brief_source_layer_is_force_added_and_verified_in_s3_commit(
     )
 
     _fake_wave_adapters(monkeypatch, ops)
-    state = runner.start(**kwargs)
+    state = locked_runner.start(**kwargs)
 
     assert state.ops[f"commit-{state.wave}"]["status"] == "completed"
     assert ops.forced_paths == [source_full]
@@ -1394,7 +1418,7 @@ def test_brief_source_layer_missing_from_commit_stops_before_push(
     )
 
     _fake_wave_adapters(monkeypatch, ops)
-    state = runner.start(**kwargs)
+    state = locked_runner.start(**kwargs)
 
     assert state.status == "stopped_author"
     assert state.ops[f"commit-{state.wave}"]["status"] != "completed"
@@ -1412,7 +1436,7 @@ def test_completed_brief_materialization_detects_destination_tamper_before_autho
 ) -> None:
     ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     source = _brief_source(tmp_path)
-    state = runner.start(
+    state = locked_runner.start(
         **_start_kwargs(
             tmp_path,
             "r-brief-tamper",
@@ -1429,7 +1453,7 @@ def test_completed_brief_materialization_detects_destination_tamper_before_autho
     rs.save(state)
     calls_before = len(ops.calls)
 
-    result = runner.advance(state, ops)
+    result = locked_runner.advance(state, ops)
 
     assert result.status == "stopped_author"
     assert len(ops.calls) == calls_before
@@ -1465,7 +1489,7 @@ def test_brief_materialization_refuses_changed_durable_intake(
     rs.save(state)
     ops = FakeOps()
 
-    result = runner.advance(state, ops)
+    result = locked_runner.advance(state, ops)
 
     assert result.status == "stopped_author"
     assert ops.authored == []
@@ -1569,7 +1593,7 @@ def test_brief_source_pin_is_required_by_prospective_gate(
                 )
             return rc
 
-    state = runner.start(
+    state = locked_runner.start(
         **_start_kwargs(
             tmp_path,
             "r-brief-unpinned",
@@ -1650,7 +1674,7 @@ def test_real_candidate_gate_accepts_materialized_brief_source(
         encoding="utf-8",
     )
     _fake_wave_adapters(monkeypatch, ops)
-    state = runner.start(**kwargs)
+    state = locked_runner.start(**kwargs)
 
     assert state.status != "stopped_gate", (
         rs.run_dir(state.run_id) / "gate-findings.txt"
@@ -1730,7 +1754,7 @@ def _repin_bundle(bundle_dir: Path) -> None:
 def test_gate_red_stops(tmp_path: Path, runs_root, monkeypatch) -> None:
     ops = FakeOps(gate_candidate=[(1, "error GC-X: bad\n")])
 
-    state = runner.start(**_start_kwargs(tmp_path, "r-gate", ops))
+    state = locked_runner.start(**_start_kwargs(tmp_path, "r-gate", ops))
 
     assert state.status == "stopped_gate"
     assert "pr" not in state.ops
@@ -1754,7 +1778,7 @@ def test_author_skips_existing_files(tmp_path: Path, runs_root, monkeypatch) -> 
         "# decomposition\n", encoding="utf-8"
     )
 
-    state = runner.start(**kwargs)
+    state = locked_runner.start(**kwargs)
 
     # Перечисление шести узлов было артефактом прежнего пути: он авторил
     # весь DAG одним проходом, и «пропущены все шесть» читалось в одном
@@ -1844,7 +1868,7 @@ def _drive_waves_to(
     """
 
     _fake_wave_adapters(monkeypatch, ops)
-    state = runner.start(**_waves_kwargs(tmp_path, run_id, ops, **over))
+    state = locked_runner.start(**_waves_kwargs(tmp_path, run_id, ops, **over))
     return _drive_waves(state, run_id, ops, wave)
 
 
@@ -1883,7 +1907,7 @@ def _drive_waves(state, run_id: str, ops: FakeOps, wave: int):
             "mergedBy": {"login": "andrei-shtanakov"},
         }
         rs.save(state)
-        state = runner.resume(run_id, ops)
+        state = locked_runner.resume(run_id, ops)
     return state
 
 
@@ -2065,9 +2089,9 @@ def test_s8_fail_marks_merged_unverified_and_opens_issue(
     assert f"from: devtools#{run_id}" in body
 
     with pytest.raises(ValueError):
-        runner.advance(state, ops)
+        locked_runner.advance(state, ops)
     with pytest.raises(ValueError):
-        runner.resume(run_id, ops)
+        locked_runner.resume(run_id, ops)
 
 
 def test_resume_after_death_between_create_issue_and_op_complete_reuses_issue(
@@ -2144,7 +2168,7 @@ def test_resume_after_death_between_create_issue_and_op_complete_reuses_issue(
         )
     )
 
-    result = runner.advance(state, ops)
+    result = locked_runner.advance(state, ops)
 
     assert result.status == "merged_unverified"
     assert len(ops.issues) == 1  # второй не создан
@@ -2222,7 +2246,7 @@ def test_verify_child_reuses_parent_remediation_issue_same_cycle(
     assert len(ops.issues) == 1
     parent_issue_number = parent.ops["remediation-issue"]["number"]
 
-    child = runner.verify(parent_id, ops, "r-s8-cycle-child")
+    child = locked_runner.verify(parent_id, ops, "r-s8-cycle-child")
 
     assert child.status == "merged_unverified"  # тоже проваливается
     assert child.remediated_by == parent_id
@@ -2251,7 +2275,7 @@ def test_verify_child_completes_parent_stays_merged_unverified(
     assert len(ops.issues) == 1  # родитель открыл ровно одно remediation-issue
 
     ops.s8_exit = 0  # находки устранены фикс-PR'ом в целевом репо
-    child = runner.verify(parent_id, ops, "r-s8-child")
+    child = locked_runner.verify(parent_id, ops, "r-s8-child")
 
     assert child.status == "completed"
     assert child.remediated_by == parent_id
@@ -2291,11 +2315,11 @@ def test_verify_refuses_when_parent_already_has_green_child(
     assert parent.status == "merged_unverified"
 
     ops.s8_exit = 0  # находки устранены фикс-PR'ом
-    child = runner.verify(parent_id, ops, "r-s8-child-green")
+    child = locked_runner.verify(parent_id, ops, "r-s8-child-green")
     assert child.status == "completed"
 
     with pytest.raises(ValueError, match="уже верифицирован"):
-        runner.verify(parent_id, ops, "r-s8-child-second")
+        locked_runner.verify(parent_id, ops, "r-s8-child-second")
 
     # Второй потомок не зарезервирован — отказ ДО _reserve_run_id.
     assert not (rs.run_dir("r-s8-child-second") / "run.json").exists()
@@ -2320,11 +2344,11 @@ def test_verify_allowed_again_after_failed_child(
     runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
 
-    failed_child = runner.verify(parent_id, ops, "r-s8-child-failed")
+    failed_child = locked_runner.verify(parent_id, ops, "r-s8-child-failed")
     assert failed_child.status == "merged_unverified"  # тоже провалился
 
     ops.s8_exit = 0  # находки устранены вторым фикс-PR'ом
-    second_child = runner.verify(parent_id, ops, "r-s8-child-retry-green")
+    second_child = locked_runner.verify(parent_id, ops, "r-s8-child-retry-green")
     assert second_child.status == "completed"
     assert second_child.remediated_by == parent_id
 
@@ -2358,11 +2382,11 @@ def test_verify_without_run_id_serializes_when_ids_collide(
 
     monkeypatch.setattr(runner, "_next_verify_run_id", lambda pid: f"{pid}-v1")
 
-    winner = runner.verify(parent_id, ops)
+    winner = locked_runner.verify(parent_id, ops)
     assert winner.run_id == f"{parent_id}-v1"
 
     with pytest.raises(ValueError, match="уже существует"):
-        runner.verify(parent_id, ops)  # "проигравший" вычисляет тот же id
+        locked_runner.verify(parent_id, ops)  # "проигравший" вычисляет тот же id
 
 
 def test_next_verify_run_id_skips_dangling_reservation(
@@ -2411,7 +2435,7 @@ def test_next_verify_run_id_skips_dangling_reservation(
     assert runner._active_verify_child(parent_id) is None
 
     ops.s8_exit = 0  # находки устранены фикс-PR'ом
-    child = runner.verify(parent_id, ops)
+    child = locked_runner.verify(parent_id, ops)
     assert child.run_id == f"{parent_id}-v2"
     assert child.status == "completed"
 
@@ -2457,7 +2481,7 @@ def test_verify_refuses_when_child_is_running(
 
     assert runner._active_verify_child(parent_id) == child_id
     with pytest.raises(ValueError, match="verify уже идёт"):
-        runner.verify(parent_id, ops)
+        locked_runner.verify(parent_id, ops)
 
 
 def test_verify_refuses_when_dangling_reservation_is_fresh(
@@ -2487,7 +2511,7 @@ def test_verify_refuses_when_dangling_reservation_is_fresh(
 
     assert runner._active_verify_child(parent_id) == dangling_id
     with pytest.raises(ValueError, match="verify уже идёт"):
-        runner.verify(parent_id, ops)
+        locked_runner.verify(parent_id, ops)
 
 
 def test_active_verify_child_ignores_merged_unverified_child(
@@ -2510,13 +2534,13 @@ def test_active_verify_child_ignores_merged_unverified_child(
     runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
 
-    failed_child = runner.verify(parent_id, ops)
+    failed_child = locked_runner.verify(parent_id, ops)
     assert failed_child.status == "merged_unverified"  # тоже провалился
 
     assert runner._active_verify_child(parent_id) is None
 
     ops.s8_exit = 0  # находки устранены вторым фикс-PR'ом
-    second_child = runner.verify(parent_id, ops)
+    second_child = locked_runner.verify(parent_id, ops)
     assert second_child.status == "completed"
 
 
@@ -2540,12 +2564,12 @@ def test_verify_without_run_id_increments_attempt_after_failed_child(
     runner._step_s8(parent, ops)
     assert parent.status == "merged_unverified"
 
-    first_child = runner.verify(parent_id, ops)
+    first_child = locked_runner.verify(parent_id, ops)
     assert first_child.run_id == f"{parent_id}-v1"
     assert first_child.status == "merged_unverified"
 
     ops.s8_exit = 0  # находки устранены вторым фикс-PR'ом
-    second_child = runner.verify(parent_id, ops)
+    second_child = locked_runner.verify(parent_id, ops)
     assert second_child.run_id == f"{parent_id}-v2"
     assert second_child.status == "completed"
 
@@ -2631,7 +2655,7 @@ def test_start_rejects_explicit_traversal_run_id(tmp_path: Path, runs_root) -> N
         "ops": FakeOps(),
     }
     with pytest.raises(ValueError):
-        runner.start(**kwargs)
+        locked_runner.start(**kwargs)
 
 
 # --- F-1/M-1: resume из stopped_* — reconciliation, не no-op ---------------
@@ -2649,7 +2673,7 @@ def test_resume_from_stopped_gate_reruns_gate_candidate(
     state = _drive_waves_to(tmp_path, run_id, ops, monkeypatch, 1)
     assert state.status == "stopped_gate"
 
-    result = runner.resume(run_id, ops)
+    result = locked_runner.resume(run_id, ops)
 
     gate_calls = [c for c in ops.calls if c[0] == "gate_check_candidate"]
     assert len(gate_calls) == 2  # S4 реально переигран, не пропущен
@@ -2677,7 +2701,7 @@ def test_green_gate_removes_findings_of_the_previous_round(
     findings_file = rs.run_dir(run_id) / "gate-findings.txt"
     assert "GC-X" in findings_file.read_text(encoding="utf-8")
 
-    result = runner.resume(run_id, ops)
+    result = locked_runner.resume(run_id, ops)
 
     assert result.ops[f"gate-candidate-{result.wave}"]["status"] == "completed"
     assert not findings_file.exists(), (
@@ -2720,7 +2744,7 @@ def test_resume_from_stopped_gate_recommits_edited_bundle(
         encoding="utf-8",
     )
 
-    result = runner.resume(run_id, ops)
+    result = locked_runner.resume(run_id, ops)
 
     new_calls = [c[0] for c in ops.calls[calls_before_resume:]]
     assert "commit_paths" in new_calls  # новый коммит, не пропущен по кэшу
@@ -2765,7 +2789,7 @@ def test_resume_from_stopped_author_reruns_unfinished_author(
     assert "author-behaviour-spec" not in state.ops
     assert state.wave == 2
 
-    result = runner.resume(run_id, ops)
+    result = locked_runner.resume(run_id, ops)
 
     assert result.ops["author-requirements"]["status"] == "completed"
     assert result.status != "stopped_author"
@@ -2908,7 +2932,7 @@ def test_gate_seam_required_absent_blocks_without_mock(
             "spec/00-charter.md": _approved("charter"),
             "spec/10-requirements.md": _approved("requirements"),
         }
-        return runner.advance(state, ops), ops
+        return locked_runner.advance(state, ops), ops
 
     absent, absent_ops = _run_to_gate("r-gate-seam-absent", with_charter=False)
     absent_text = (rs.run_dir("r-gate-seam-absent") / "gate-findings.txt").read_text(
@@ -2983,7 +3007,7 @@ def test_start_with_existing_run_id_raises_and_does_not_overwrite(
     run_id = "r-taken"
     kwargs = _waves_kwargs(tmp_path, run_id, FakeOps())
     _fake_wave_adapters(monkeypatch, FakeOps())
-    original = runner.start(**kwargs)
+    original = locked_runner.start(**kwargs)
     assert original.status != "merged_unverified"  # леджер реально живёт
     before = rs.run_dir(run_id).joinpath("run.json").read_text(encoding="utf-8")
 
@@ -3041,7 +3065,7 @@ def test_verify_with_existing_run_id_raises(
     before = rs.run_dir(taken_child_id).joinpath("run.json").read_text(encoding="utf-8")
 
     with pytest.raises(ValueError):
-        runner.verify(parent_id, ops, taken_child_id)
+        locked_runner.verify(parent_id, ops, taken_child_id)
 
     after = rs.run_dir(taken_child_id).joinpath("run.json").read_text(encoding="utf-8")
     assert after == before
@@ -3142,7 +3166,7 @@ def test_verify_child_reuses_parent_base_ref(
 
     ops.s8_exit = 0
     calls_before_verify = len(ops.calls)
-    child = runner.verify(parent_id, ops, "r-s8-sync-child")
+    child = locked_runner.verify(parent_id, ops, "r-s8-sync-child")
     child_calls = ops.calls[calls_before_verify:]
 
     assert child.base_ref == "main"
@@ -3160,7 +3184,7 @@ def test_dirty_target_dir_stops_before_branch_created(
     создано: `ensure_branch` не вызван, `commit_paths` тем более."""
     ops = FakeOps(dirty=True)
 
-    state = runner.start(**_start_kwargs(tmp_path, "r-dirty", ops))
+    state = locked_runner.start(**_start_kwargs(tmp_path, "r-dirty", ops))
 
     assert state.status == "stopped_dirty"
     assert "branch" not in state.ops
@@ -3188,7 +3212,7 @@ def test_resume_after_cleanup_from_stopped_dirty_proceeds(
     assert state.status == "stopped_dirty"
 
     ops.dirty = False  # человек прибрался
-    result = runner.resume(run_id, ops)
+    result = locked_runner.resume(run_id, ops)
 
     assert result.status != "stopped_dirty"
     assert result.ops[f"branch-{result.wave}"]["status"] == "completed"
@@ -3240,7 +3264,7 @@ def test_start_unblocked_after_verify_child_completes(
     assert parent.status == "merged_unverified"
 
     ops.s8_exit = 0  # находки устранены фикс-PR'ом
-    child = runner.verify(parent.run_id, ops, "r-lock-child2")
+    child = locked_runner.verify(parent.run_id, ops, "r-lock-child2")
     assert child.status == "completed"
 
     # Разблокировано зелёным потомком — новый прогон стартует без ValueError.
@@ -3326,7 +3350,7 @@ def test_resume_completes_when_gate_authoritative_done_but_status_stuck_running(
     rs.save(state)
     assert state.status == "running"
 
-    result = runner.advance(state, ops)
+    result = locked_runner.advance(state, ops)
 
     assert result.status == "completed"
     assert "checkout_and_pull" not in [c[0] for c in ops.calls]
@@ -3372,7 +3396,7 @@ def test_resume_completes_fail_path_when_status_stuck_running_after_gate_fail(
     rs.save(state)
     assert state.status == "running"
 
-    result = runner.advance(state, ops)
+    result = locked_runner.advance(state, ops)
 
     assert result.status == "merged_unverified"
     assert len(ops.issues) == 1
@@ -3414,7 +3438,7 @@ def test_sync_default_always_rechecked_even_if_already_completed(
     }
     rs.save(state)
 
-    result = runner.advance(state, ops)
+    result = locked_runner.advance(state, ops)
 
     assert ("checkout_and_pull", "main") in ops.calls
     assert result.status == "completed"
@@ -3469,7 +3493,7 @@ def test_resume_rebuilds_missing_s8_findings_from_op_output(
     assert not findings_file.exists()  # окно круга 8: файл не успел записаться
     assert state.status == "running"
 
-    result = runner.advance(state, ops)
+    result = locked_runner.advance(state, ops)
 
     assert result.status == "merged_unverified"
     assert findings_file.exists()
@@ -3544,7 +3568,7 @@ def test_start_rejects_invalid_merge_authority_before_reserving_run_id(
     )
 
     with pytest.raises(ValueError):
-        runner.start(**kwargs)
+        locked_runner.start(**kwargs)
 
     assert not (rs.run_dir(run_id) / "run.json").exists()
 
@@ -3568,7 +3592,7 @@ def test_start_rejects_invalid_author_backend_before_reserving_run_id(
     )
 
     with pytest.raises(ValueError):
-        runner.start(**kwargs)
+        locked_runner.start(**kwargs)
 
     assert not (rs.run_dir(run_id) / "run.json").exists()
 
@@ -3866,7 +3890,7 @@ def test_disp_anchor_dir_is_pinned_and_survives_an_environment_change(
         "XDG_STATE_HOME", str(tmp_path.parent / f"xdg-b-{tmp_path.name}")
     )
     ops.author_disp_exit = 0
-    runner.resume(run_id, ops)
+    locked_runner.resume(run_id, ops)
     assert anchor_of(ops.author_disp_calls[1][2]) == pinned
 
 
@@ -3890,7 +3914,7 @@ def test_disp_slug_is_pinned_in_run_state_and_reused_on_retry(
 
     monkeypatch.setattr(runner, "_disp_doc_slug", lambda _s: "rules-changed")
     ops.author_disp_exit = 0
-    state = runner.resume(run_id, ops)
+    state = locked_runner.resume(run_id, ops)
     assert ops.author_disp_calls[1][3] == first_slug
     assert state.ops["author-behaviour"]["status"] == "completed"
 
@@ -3920,7 +3944,7 @@ def test_disp_retry_resumes_an_existing_pipeline_dir_instead_of_run(
 
     ops.author_disp_exit = 0
     commits_before = ops.calls.count(("commit_paths", (BUNDLE_DIR,)))
-    state = runner.resume(run_id, ops)
+    state = locked_runner.resume(run_id, ops)
     assert ops.author_disp_resume == [False, True]
     assert state.ops["author-behaviour"]["status"] == "completed"
     assert state.ops["author-behaviour"].get("skipped") is False
@@ -3959,7 +3983,7 @@ def test_hand_fixed_node_without_pipeline_dir_is_accepted_after_pin(
     node.parent.mkdir(parents=True, exist_ok=True)
     node.write_text("#### BEH-01\n", encoding="utf-8")
 
-    state = runner.resume(run_id, ops)
+    state = locked_runner.resume(run_id, ops)
     assert len(ops.author_disp_calls) == 1
     assert state.ops["author-behaviour"] == {"status": "completed", "skipped": True}
 
@@ -3981,7 +4005,7 @@ def test_foreign_pipeline_dir_on_first_start_stops_instead_of_resuming(
 
     # Чужой каталог пайплайна видит шаг авторинга узла
     # behaviour-spec — это W3; до неё прогон доводится волнами.
-    state = _drive_waves(runner.start(**kwargs), run_id, ops, 3)
+    state = _drive_waves(locked_runner.start(**kwargs), run_id, ops, 3)
 
     assert state.status == "stopped_author"
     assert ops.author_disp_calls == []
@@ -4007,7 +4031,7 @@ def test_foreign_pipeline_dir_with_its_draft_still_stops(
 
     # Чужой каталог пайплайна видит шаг авторинга узла
     # behaviour-spec — это W3; до неё прогон доводится волнами.
-    state = _drive_waves(runner.start(**kwargs), run_id, ops, 3)
+    state = _drive_waves(locked_runner.start(**kwargs), run_id, ops, 3)
 
     assert state.status == "stopped_author"
     assert ops.author_disp_calls == []
@@ -4500,7 +4524,7 @@ def test_gate_stops_when_design_node_missing_from_bundle(
     ops.base_files = _all_approved()
     rs.save(state)
 
-    result = runner.advance(state, ops)
+    result = locked_runner.advance(state, ops)
 
     assert result.status == "stopped_gate"
     findings = (runner.run_dir(run_id) / "gate-findings.txt").read_text()
@@ -4981,7 +5005,7 @@ def test_start_stops_preflight_when_target_profile_lacks_design(
     kwargs = _start_kwargs(tmp_path, run_id, ops)
     _write_stale_profile(Path(kwargs["target_dir"]))
 
-    state = runner.start(**kwargs)
+    state = locked_runner.start(**kwargs)
 
     assert state.status == "stopped_preflight"
     # Преflight стоит ДО S2 (план Task 8 Step 2): ни одного оплаченного
@@ -5005,7 +5029,7 @@ def test_start_stops_preflight_when_target_profile_lacks_decomposition(
     kwargs = _start_kwargs(tmp_path, "r-preflight-no-decomp", ops)
     _write_five_node_with_acceptance_profile(Path(kwargs["target_dir"]))
 
-    state = runner.start(**kwargs)
+    state = locked_runner.start(**kwargs)
 
     assert state.status == "stopped_preflight"
     assert ops.authored == []
@@ -5023,7 +5047,7 @@ def test_start_stops_preflight_when_target_profile_lacks_acceptance(
     kwargs = _start_kwargs(tmp_path, "r-preflight-no-acc", ops)
     _write_five_node_profile(Path(kwargs["target_dir"]))
 
-    state = runner.start(**kwargs)
+    state = locked_runner.start(**kwargs)
 
     assert state.status == "stopped_preflight"
     assert ops.authored == []
@@ -5063,7 +5087,7 @@ def test_start_stops_preflight_for_non_team_exp_profile_lacking_design(
     target_dir.mkdir()
     make_profile(target_dir)  # profiles/mini.yaml — без узла design
 
-    state = runner.start(
+    state = locked_runner.start(
         subject="s",
         repo="alpha",
         repo_slug="owner/alpha",
@@ -5105,7 +5129,7 @@ def test_target_profile_declares_fail_closed_on_broken_yaml(
         is False
     )
 
-    state = runner.start(**kwargs)
+    state = locked_runner.start(**kwargs)
 
     assert state.status == "stopped_preflight"
 
@@ -5257,14 +5281,14 @@ def test_resume_after_profile_delivered_continues_run(
     profile_path = _write_stale_profile(Path(kwargs["target_dir"]))
     _fake_wave_adapters(monkeypatch, ops)
 
-    stopped = runner.start(**kwargs)
+    stopped = locked_runner.start(**kwargs)
     assert stopped.status == "stopped_preflight"
 
     # «Доставка» обновлённого профиля PR-ом (человеческий мерж authority-root):
     # дописываем узел design в target-профиль.
     profile_path.write_text(_TEAM_EXP_PROFILE_TEXT, encoding="utf-8")
 
-    resumed = runner.resume(run_id, ops)
+    resumed = locked_runner.resume(run_id, ops)
 
     assert resumed.status != "stopped_preflight"
     # Прогон поехал дальше: волна доавторила свой уровень и дошла до
@@ -5451,7 +5475,7 @@ def test_gate_stops_when_decomposition_missing_from_bundle(
     ops.base_files = _all_approved()
     rs.save(state)
 
-    result = runner.advance(state, ops)
+    result = locked_runner.advance(state, ops)
 
     assert result.status == "stopped_gate"
     findings = (runner.run_dir(run_id) / "gate-findings.txt").read_text()
@@ -5914,7 +5938,7 @@ def test_gate_stops_when_acceptance_missing_from_bundle(
     ops.base_files = _all_approved()
     rs.save(state)
 
-    result = runner.advance(state, ops)
+    result = locked_runner.advance(state, ops)
 
     assert result.status == "stopped_gate"
     findings = (runner.run_dir(run_id) / "gate-findings.txt").read_text()
@@ -7183,12 +7207,12 @@ def test_edge_findings_do_not_outlive_the_round_they_described(
         gate_candidate=[(0, ""), (1, "error GC-X: bad\n")],
     )
     run_id = "r-w-edge-stale"
-    state = runner.start(**_waves_kwargs(tmp_path, run_id, ops))
+    state = locked_runner.start(**_waves_kwargs(tmp_path, run_id, ops))
     assert state.status == "stopped_review"
     findings = rs.run_dir(run_id) / "edge-findings.txt"
     assert "EDGE-CHECK" in findings.read_text(encoding="utf-8")
 
-    result = runner.resume(run_id, ops)
+    result = locked_runner.resume(run_id, ops)
 
     assert result.status == "stopped_gate", "второй круг встал на гейте"
     assert not findings.exists(), (
@@ -7202,7 +7226,7 @@ def test_waves_run_authors_only_level_zero_and_stops_at_edge_fail(
     runs_root,
 ) -> None:
     ops = FakeOps(edge_results={"charter": "FAIL"})
-    state = runner.start(**_waves_kwargs(tmp_path, "r-w-edge", ops))
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-w-edge", ops))
     assert ops.authored == ["charter"], "авторится только уровень 0"
     assert state.wave == 1 and state.status == "stopped_review"
     findings = (rs.run_dir("r-w-edge") / "edge-findings.txt").read_text()
@@ -7227,7 +7251,7 @@ def test_waves_gate_uses_projected_profile_with_siblings(
 ) -> None:
     ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
     _fake_wave_adapters(monkeypatch, ops)
-    state = runner.start(**_waves_kwargs(tmp_path, "r-w-gate", ops))
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-w-gate", ops))
     assert state.status == "waiting_human_merge"
     gate_calls = [c for c in ops.calls if c[0] == "gate_check_candidate"]
     assert len(gate_calls) == 1
@@ -7258,7 +7282,7 @@ def test_waves_local_completeness_is_by_level(
     design; в волнах required — только узлы уровней ≤ wave−1."""
     ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
     _fake_wave_adapters(monkeypatch, ops)
-    state = runner.start(**_waves_kwargs(tmp_path, "r-w-compl", ops))
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-w-compl", ops))
     assert state.status == "waiting_human_merge"
     assert not (rs.run_dir("r-w-compl") / "gate-findings.txt").exists()
 
@@ -7270,11 +7294,11 @@ def test_waves_refuse_to_author_level_when_upstream_not_approved(
 ) -> None:
     ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
     _fake_wave_adapters(monkeypatch, ops)
-    state = runner.start(**_waves_kwargs(tmp_path, "r-w-up", ops))
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-w-up", ops))
     state.wave = 2
     state.status = "running"
     rs.save(state)
-    result = runner.advance(state, ops)
+    result = locked_runner.advance(state, ops)
     assert result.status == "stopped_stale"
     reason = (rs.run_dir("r-w-up") / "stop-reason.txt").read_text()
     assert "charter: нет в base" in reason
@@ -7288,7 +7312,7 @@ def test_waves_refuse_to_author_level_when_upstream_not_approved(
             "approved", "stale"
         ),
     }
-    resumed = runner.resume("r-w-up", ops)
+    resumed = locked_runner.resume("r-w-up", ops)
     assert resumed.status == "stopped_stale"
     assert (
         "charter: статус 'stale'"
@@ -7297,7 +7321,7 @@ def test_waves_refuse_to_author_level_when_upstream_not_approved(
 
     # Нижний уровень approved, stale нет — авторится requirements.
     ops.base_files = {f"{BUNDLE_DIR}/00-charter.md": _approved("charter")}
-    resumed = runner.resume("r-w-up", ops)
+    resumed = locked_runner.resume("r-w-up", ops)
     assert ops.authored == ["charter", "requirements"]
     assert resumed.ops["commit-2"]["status"] == "completed"
     assert resumed.status == "waiting_human_merge" and resumed.wave == 2
@@ -7313,10 +7337,10 @@ def test_waves_stopped_gate_resume_resets_only_the_wave_range(
         facts={"state": "OPEN", "baseRefName": "master"},
     )
     _fake_wave_adapters(monkeypatch, ops)
-    state = runner.start(**_waves_kwargs(tmp_path, "r-w-gate-stop", ops))
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-w-gate-stop", ops))
     assert state.status == "stopped_gate"
     assert runner.reset_ops_for(state) == ("commit-1", "gate-candidate-1", "edge-1")
-    resumed = runner.resume("r-w-gate-stop", ops)
+    resumed = locked_runner.resume("r-w-gate-stop", ops)
     assert resumed.status == "waiting_human_merge"
     assert resumed.ops["branch-1"]["status"] == "completed"
     assert resumed.ops["gate-candidate-1"]["status"] == "completed"
@@ -7334,7 +7358,7 @@ def test_waves_projection_mismatch_stops_gate(
         "verify_wave_profile_dir",
         lambda target_dir, profile, projected, level: ["roles.yaml"],
     )
-    state = runner.start(**_waves_kwargs(tmp_path, "r-w-proj", ops))
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-w-proj", ops))
     assert state.status == "stopped_gate"
     text = (rs.run_dir("r-w-proj") / "gate-findings.txt").read_text()
     assert "GC-PROFILE-PROJECTION" in text and "roles.yaml" in text
@@ -7386,7 +7410,7 @@ def test_waves_candidate_step_pauses_on_the_wave_pr(
 ) -> None:
     ops = FakeOps(facts={"state": "OPEN", "baseRefName": "main"})
     journal = _fake_wave_adapters(monkeypatch, ops)
-    state = runner.start(**_waves_kwargs(tmp_path, "r-w-cand", ops))
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-w-cand", ops))
     assert state.status == "waiting_human_merge" and state.wave == 1
     assert journal[0].startswith("propose:charter:fakehead")
     assert journal[1].startswith("publish:approve-1-0-1:")
@@ -7415,7 +7439,7 @@ def test_waves_candidate_step_records_request_before_publishing(
     оставляет запись, повтор публикует ТУ ЖЕ заявку, не заводит вторую."""
     ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
     journal = _fake_wave_adapters(monkeypatch, ops, code=3)
-    state = runner.start(**_waves_kwargs(tmp_path, "r-w-cand-3", ops))
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-w-cand-3", ops))
     assert state.status == "stopped_review"
     assert state.ops["candidate-1"] == {
         "status": "started",
@@ -7427,7 +7451,7 @@ def test_waves_candidate_step_records_request_before_publishing(
     assert len([j for j in journal if j.startswith("propose")]) == 1
 
     journal2 = _fake_wave_adapters(monkeypatch, ops, code=0)
-    resumed = runner.resume("r-w-cand-3", ops)
+    resumed = locked_runner.resume("r-w-cand-3", ops)
     assert resumed.status == "waiting_human_merge"
     assert [j.split(":")[0] for j in journal2] == ["publish"], "заявка не пересобрана"
     assert resumed.ops["candidate-1"]["request"] == "approve-1-0-1"
@@ -7473,7 +7497,7 @@ def _fake_approve_node(monkeypatch, ops: FakeOps, *, merge_on_call: int = 2):
 
 def _waiting_wave1(tmp_path, monkeypatch, ops: FakeOps, run_id: str):
     _fake_wave_adapters(monkeypatch, ops)
-    state = runner.start(**_waves_kwargs(tmp_path, run_id, ops))
+    state = locked_runner.start(**_waves_kwargs(tmp_path, run_id, ops))
     assert state.status == "waiting_human_merge" and state.wave == 1
     return state
 
@@ -7487,7 +7511,7 @@ def test_waves_resume_finalizes_merged_candidate_and_starts_next_wave(
     _waiting_wave1(tmp_path, monkeypatch, ops, "r-w-res")
     # Пока candidate открыт — стоим, approve_node не зовётся.
     calls = _fake_approve_node(monkeypatch, ops)
-    still = runner.resume("r-w-res", ops)
+    still = locked_runner.resume("r-w-res", ops)
     assert still.status == "waiting_human_merge" and calls == []
     # Человек смержил candidate.
     ops.facts = {
@@ -7496,7 +7520,7 @@ def test_waves_resume_finalizes_merged_candidate_and_starts_next_wave(
         "mergedBy": {"login": "andrei-shtanakov"},
     }
     ops.base_files = {f"{BUNDLE_DIR}/00-charter.md": _approved("charter")}
-    resumed = runner.resume("r-w-res", ops)
+    resumed = locked_runner.resume("r-w-res", ops)
     assert calls == ["charter", "charter"], "фаза 2 + агентский мерж finalize"
     assert ("review", 801) in ops.calls, "scope-аттестация finalize-PR"
     names = [c[0] for c in ops.calls]
@@ -7533,7 +7557,7 @@ def test_last_wave_records_the_finalize_merge_sha_as_identity(
     state.ops["candidate-5"] = dict(state.ops["candidate-1"])
     rs.save(state)
 
-    resumed = runner.resume("r-392-head", ops)
+    resumed = locked_runner.resume("r-392-head", ops)
 
     assert resumed.status == "completed"
     request = resumed.ops[key]
@@ -7801,7 +7825,7 @@ def test_waves_resume_after_crash_between_completed_and_next_wave(
     calls = _fake_approve_node(monkeypatch, ops)
     before = len(ops.calls)
     ops.base_files = {f"{BUNDLE_DIR}/00-charter.md": _approved("charter")}
-    resumed = runner.resume("r-w-crash", ops)
+    resumed = locked_runner.resume("r-w-crash", ops)
     assert resumed.wave == 2 and calls == []
     assert not any(c[0] == "review" for c in ops.calls[before:])
     assert ops.authored == ["charter", "requirements"]
@@ -7817,7 +7841,7 @@ def test_waves_resume_leaves_finalize_to_human_when_attestation_fails(
     _waiting_wave1(tmp_path, monkeypatch, ops, "r-w-att")
     calls = _fake_approve_node(monkeypatch, ops)
     ops.facts = {"state": "MERGED", "baseRefName": "master"}
-    resumed = runner.resume("r-w-att", ops)
+    resumed = locked_runner.resume("r-w-att", ops)
     assert calls == ["charter"], "второго approve-node (агентский мерж) нет"
     assert resumed.status == "waiting_human_merge" and resumed.wave == 1
     assert "finalize-PR #801 остаётся человеку" in ops.comments[-1]
@@ -7825,7 +7849,7 @@ def test_waves_resume_leaves_finalize_to_human_when_attestation_fails(
     assert resumed.ops["finalize-1"]["review_exit"] == 6
     # Человек смержил finalize → resume: аттестация не повторяется,
     # approve_node доводит заявку.
-    resumed = runner.resume("r-w-att", ops)
+    resumed = locked_runner.resume("r-w-att", ops)
     assert calls == ["charter", "charter"]
     assert len([c for c in ops.calls if c[0] == "review"]) == 1
     assert resumed.wave == 2
@@ -7842,7 +7866,7 @@ def test_waves_resume_on_terminal_request_stops_stale(
     state = _waiting_wave1(tmp_path, monkeypatch, ops, "r-w-term")
     key = state.ops["candidate-1"]["request"]
     al.abandon_request(state, key, "candidate закрыт без мержа")
-    resumed = runner.resume("r-w-term", ops)
+    resumed = locked_runner.resume("r-w-term", ops)
     assert resumed.status == "stopped_stale" and resumed.wave == 1
     reason = (rs.run_dir("r-w-term") / "stop-reason.txt").read_text()
     assert key in reason and "abandoned" in reason and "--reopen" in reason
@@ -7862,13 +7886,13 @@ def test_waves_last_wave_completion_enters_s8(
     state.wave = 5
     state.ops["candidate-5"] = dict(state.ops["candidate-1"])
     rs.save(state)
-    resumed = runner.resume("r-w-s8", ops)
+    resumed = locked_runner.resume("r-w-s8", ops)
     assert resumed.status == "completed" and resumed.wave == 5
     assert resumed.ops["merge"] == {"status": "completed", "merged": True, "waves": 5}
     assert ("gate_check_s8", BUNDLE_DIR) in ops.calls
     # Повторный resume — только S8 (короткое замыкание по `merge`), без волн.
     before = len(ops.calls)
-    again = runner.resume("r-w-s8", ops)
+    again = locked_runner.resume("r-w-s8", ops)
     assert again.status == "completed" and ops.calls[before:] == []
 
 
@@ -7951,10 +7975,10 @@ def test_reopen_reauthors_the_node_on_a_new_branch_name(
     ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
     _fake_wave_adapters(monkeypatch, ops)
     _fake_approve_node_full(monkeypatch, ops)
-    state = runner.start(**_waves_kwargs(tmp_path, "r-reopen", ops))
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-reopen", ops))
     assert state.status == "waiting_human_merge"
     with pytest.raises(ValueError, match="живые заявки"):
-        runner.reopen("r-reopen", "requirements", ops)
+        locked_runner.reopen("r-reopen", "requirements", ops)
     # Прогон дошёл до W5 (заявки закрыты), base несёт approved узлы ≤ W4.
     from governance import approval_ledger as al
 
@@ -7963,7 +7987,7 @@ def test_reopen_reauthors_the_node_on_a_new_branch_name(
     rs.save(state)
     ops.base_files = _all_approved()
     with pytest.raises(ValueError, match="не входит в DAG"):
-        runner.reopen("r-reopen", "tasks", ops)
+        locked_runner.reopen("r-reopen", "tasks", ops)
     (Path(state.target_dir) / BUNDLE_DIR / "10-requirements.md").write_text(
         "старый текст\n", encoding="utf-8"
     )
@@ -7975,7 +7999,7 @@ def test_reopen_reauthors_the_node_on_a_new_branch_name(
         rs.op_complete(state, key, request="approve-1-2-1")
     state.ops["approve-1-2-1"] = {"status": "completed", "nodes": ["behaviour-spec"]}
     rs.save(state)
-    reopened = runner.reopen("r-reopen", "requirements", ops)
+    reopened = locked_runner.reopen("r-reopen", "requirements", ops)
     assert reopened.wave == 2 and reopened.branch == "spec/WS-1-behaviour-w2-r1"
     assert not any(
         k in reopened.ops for k in ("branch-3", "edge-3", "candidate-3", "branch-4")
@@ -8007,14 +8031,14 @@ def test_reopen_manual_stops_for_the_operator_then_resumes(
 ) -> None:
     ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
     _fake_wave_adapters(monkeypatch, ops)
-    state = runner.start(**_waves_kwargs(tmp_path, "r-reopen-m", ops))
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-reopen-m", ops))
     from governance import approval_ledger as al
 
     al.abandon_request(state, state.ops["candidate-1"]["request"], "стенд")
     rs.save(state)
     ops.base_files = _all_approved()
     authored_before = list(ops.authored)
-    stopped = runner.reopen("r-reopen-m", "charter", ops, manual=True)
+    stopped = locked_runner.reopen("r-reopen-m", "charter", ops, manual=True)
     assert stopped.status == "stopped_author" and stopped.wave == 1
     assert stopped.branch == "spec/WS-1-behaviour-w1-r1"
     assert not (Path(stopped.target_dir) / BUNDLE_DIR / "00-charter.md").exists()
@@ -8022,7 +8046,7 @@ def test_reopen_manual_stops_for_the_operator_then_resumes(
     (Path(stopped.target_dir) / BUNDLE_DIR / "00-charter.md").write_text(
         "# charter\n\n#### CON-01: руками\n", encoding="utf-8"
     )
-    resumed = runner.resume("r-reopen-m", ops)
+    resumed = locked_runner.resume("r-reopen-m", ops)
     assert ops.authored == authored_before, "файл оператора принят как есть"
     assert resumed.status == "waiting_human_merge" and resumed.wave == 1
     assert resumed.ops["author-charter"]["skipped"] is True
@@ -8039,7 +8063,7 @@ def test_stale_level_is_reapproved_over_base_without_authoring(
     ops = FakeOps(facts={"state": "MERGED", "baseRefName": "master"})
     _fake_wave_adapters(monkeypatch, ops)
     calls = _fake_approve_node_full(monkeypatch, ops)
-    state = runner.start(**_waves_kwargs(tmp_path, "r-reapp", ops))
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-reapp", ops))
     from governance import approval_ledger as al
 
     key1 = state.ops["candidate-1"]["request"]
@@ -8054,7 +8078,7 @@ def test_stale_level_is_reapproved_over_base_without_authoring(
     ops.base_files = base
     authored_before = list(ops.authored)
     pushes_before = len([c for c in ops.calls if c[0] == "push_branch"])
-    resumed = runner.resume("r-reapp", ops)  # W2 completed → W3
+    resumed = locked_runner.resume("r-reapp", ops)  # W2 completed → W3
     assert resumed.wave == 3
     assert resumed.ops["branch-3"]["mode"] == "reapprove"
     assert ops.authored == authored_before, "авторинга нет (D2)"
@@ -8097,7 +8121,7 @@ def test_reopen_refuses_legacy_runs_and_finished_waves(
     rs.save(state)
 
     with pytest.raises(ValueError, match="authoring=waves"):
-        runner.reopen("r-legacy-reopen", "charter", ops)
+        locked_runner.reopen("r-legacy-reopen", "charter", ops)
 
 
 def test_public_start_without_authoring_creates_a_wave_run(
@@ -8121,7 +8145,7 @@ def test_public_start_without_authoring_creates_a_wave_run(
     kwargs = _waves_kwargs(tmp_path, "r-default-mode", ops)
     kwargs.pop("authoring")
 
-    state = runner.start(**kwargs)
+    state = locked_runner.start(**kwargs)
 
     assert state.authoring == "waves"
     assert state.wave == 1, "волна 1, а не 0 — иначе уровень узлов −1"
@@ -8145,7 +8169,7 @@ def test_public_start_refuses_legacy_before_reserving_the_run_id(
     kwargs["authoring"] = "legacy"
 
     with pytest.raises(ValueError) as exc:
-        runner.start(**kwargs)
+        locked_runner.start(**kwargs)
 
     message = str(exc.value)
     assert "2026-09-23" in message and "S13" in message
@@ -8193,7 +8217,7 @@ def test_resume_of_a_legacy_run_refuses_with_a_named_reason(runs_root) -> None:
     ops = FakeOps()
 
     with pytest.raises(ValueError) as exc:
-        runner.resume("r-s13-refuse", ops)
+        locked_runner.resume("r-s13-refuse", ops)
 
     message = str(exc.value)
     assert "r-s13-refuse" in message
@@ -8232,7 +8256,7 @@ def test_verify_refuses_when_parent_merge_is_not_completed(
     rs.save(parent)
 
     with pytest.raises(ValueError, match="merge"):
-        runner.verify(parent_id, ops, "r-384-child-absent")
+        locked_runner.verify(parent_id, ops, "r-384-child-absent")
 
     assert "r-384-child-absent" not in rs.all_run_ids(), (
         "каталог потомка не создан — отказ до побочных эффектов"
@@ -8273,7 +8297,7 @@ def test_verify_refuses_when_parent_head_is_empty(
     calls_before = len(ops.calls)
 
     with pytest.raises(ValueError, match="head"):
-        runner.verify(parent_id, ops, "r-391-no-head-child")
+        locked_runner.verify(parent_id, ops, "r-391-no-head-child")
 
     assert "r-391-no-head-child" not in rs.all_run_ids(), (
         "каталог потомка не создан — отказ до побочных эффектов"
@@ -8302,7 +8326,7 @@ def test_verify_child_carries_the_proven_merge_before_running_s8(
     runner._step_s8(parent, ops)
 
     ops.s8_exit = 0
-    child = runner.verify(parent_id, ops, "r-384-basis-child")
+    child = locked_runner.verify(parent_id, ops, "r-384-basis-child")
 
     assert child.ops["merge"]["status"] == "completed"
     assert child.ops["merge"]["source"] == parent_id, (
@@ -8345,7 +8369,7 @@ def test_resume_of_a_verification_child_runs_only_s8(
     # Потомок встаёт НЕтерминально: синхронизация не удалась.
     ops.s8_exit = 0
     ops.checkout_and_pull_error = "ff-only diverged"
-    child = runner.verify(parent_id, ops, "r-384-resume-child")
+    child = locked_runner.verify(parent_id, ops, "r-384-resume-child")
     assert child.status not in ("completed", "merged_unverified"), child.status
 
     # Основание — НА ДИСКЕ до повтора: повтор обязан опираться на леджер,
@@ -8356,7 +8380,7 @@ def test_resume_of_a_verification_child_runs_only_s8(
 
     ops.checkout_and_pull_error = None
     before = len(ops.calls)
-    resumed = runner.resume("r-384-resume-child", ops)
+    resumed = locked_runner.resume("r-384-resume-child", ops)
 
     names = [c[0] for c in ops.calls[before:]]
     assert "author" not in names and "create_draft_pr" not in names
@@ -8391,7 +8415,7 @@ def test_ws_lock_releases_only_after_the_child_completes(
     assert runner._blocking_merged_unverified(parent.ws_id) == parent_id
 
     # Провальная верификация лок СОХРАНЯЕТ: подтверждения так и нет.
-    failed = runner.verify(parent_id, ops, "r-384-lock-failed")
+    failed = locked_runner.verify(parent_id, ops, "r-384-lock-failed")
     assert failed.status == "merged_unverified"
     # Лок ДЕРЖИТСЯ, и держателем остаётся КОРЕНЬ ЦИКЛА (D4a). Провальный
     # потомок самостоятельным держателем не становится: нового мержа в
@@ -8401,7 +8425,7 @@ def test_ws_lock_releases_only_after_the_child_completes(
     assert runner._blocking_merged_unverified(parent.ws_id) == parent_id
 
     ops.s8_exit = 0
-    green = runner.verify(parent_id, ops, "r-384-lock-green")
+    green = locked_runner.verify(parent_id, ops, "r-384-lock-green")
     assert green.status == "completed"
     assert runner._blocking_merged_unverified(parent.ws_id) is None
     assert rs.load(parent_id).status == "merged_unverified", (
@@ -8437,18 +8461,18 @@ def test_full_lock_regression_root_failed_sibling_green_then_new_run(
 
     assert not _new_run_allowed(), "после merged_unverified — запрещён"
 
-    runner.verify(parent_id, ops, "r-384-full-failed")
+    locked_runner.verify(parent_id, ops, "r-384-full-failed")
     assert not _new_run_allowed(), "после ПРОВАЛЬНОЙ попытки — всё ещё запрещён"
 
     ops.s8_exit = 0
-    green = runner.verify(parent_id, ops, "r-384-full-green")
+    green = locked_runner.verify(parent_id, ops, "r-384-full-green")
     assert green.status == "completed"
     assert _new_run_allowed(), "успешный брат освобождает ЦИКЛ"
 
     # И это действительно разрешает новый прогон, а не только меняет
     # значение предиката: `start()` по тому же ws_id больше не отказывает.
     _fake_wave_adapters(monkeypatch, ops)
-    fresh = runner.start(
+    fresh = locked_runner.start(
         **_waves_kwargs(tmp_path, "r-384-full-fresh", ops, ws_id=ws_id)
     )
     assert fresh.run_id == "r-384-full-fresh"
@@ -8480,13 +8504,13 @@ def test_unproven_cycle_membership_keeps_holding_the_lock(
     runner._step_s8(parent, ops)
     ws_id = parent.ws_id
 
-    rogue = runner.verify(parent_id, ops, "r-384-unproven-rogue")
+    rogue = locked_runner.verify(parent_id, ops, "r-384-unproven-rogue")
     assert rogue.status == "merged_unverified"
     rogue.ops["merge"]["source"] = "r-somebody-else"
     rs.save(rogue)
 
     ops.s8_exit = 0
-    green = runner.verify(parent_id, ops, "r-384-unproven-green")
+    green = locked_runner.verify(parent_id, ops, "r-384-unproven-green")
     assert green.status == "completed"
 
     holder = runner._blocking_merged_unverified(ws_id)
@@ -8520,7 +8544,7 @@ def test_console_renders_a_verification_child_without_a_corrupt_row(
     parent = _wave_run_at_s8(tmp_path, parent_id, ops, base_ref="master")
     runner._step_s8(parent, ops)
     ops.s8_exit = 0
-    child = runner.verify(parent_id, ops, "r-384-console-child")
+    child = locked_runner.verify(parent_id, ops, "r-384-console-child")
 
     rows = {row.run_id: row for row in cm.list_runs()}
     assert set(rows) == {parent_id, "r-384-console-child"}
@@ -8555,12 +8579,12 @@ def test_grandchild_whose_parent_is_not_the_root_holds_the_lock(
     runner._step_s8(root, ops)
     ws_id = root.ws_id
 
-    child = runner.verify(root_id, ops, "r-384-chain-child")
+    child = locked_runner.verify(root_id, ops, "r-384-chain-child")
     assert child.status == "merged_unverified"
 
     # Внук: связь с ПОТОМКОМ, а не с корнем. Все прочие условия §5a у него
     # истинны — потому тест и различает именно условие 3.
-    grandchild = runner.verify("r-384-chain-child", ops, "r-384-chain-grand")
+    grandchild = locked_runner.verify("r-384-chain-child", ops, "r-384-chain-grand")
     assert grandchild.remediated_by == "r-384-chain-child"
     assert grandchild.ops["merge"]["source"] == "r-384-chain-child"
     assert grandchild.status == "merged_unverified"
@@ -8568,7 +8592,7 @@ def test_grandchild_whose_parent_is_not_the_root_holds_the_lock(
     # Корень верифицирован — но внук остаётся держателем: его цикл не
     # доказан, и снимать лок его наличием нельзя.
     ops.s8_exit = 0
-    assert runner.verify(root_id, ops, "r-384-chain-green").status == "completed"
+    assert locked_runner.verify(root_id, ops, "r-384-chain-green").status == "completed"
 
     holder = runner._blocking_merged_unverified(ws_id)
     assert holder == "r-384-chain-grand", (
@@ -8598,14 +8622,14 @@ def test_resume_of_a_completed_verification_child_does_nothing(
     runner._step_s8(parent, ops)
 
     ops.s8_exit = 0
-    child = runner.verify(parent_id, ops, "r-384-done-child")
+    child = locked_runner.verify(parent_id, ops, "r-384-done-child")
     assert child.status == "completed"
 
     ledger = rs.run_dir("r-384-done-child") / "run.json"
     before = ledger.read_bytes()
     calls_before = len(ops.calls)
 
-    again = runner.resume("r-384-done-child", ops)
+    again = locked_runner.resume("r-384-done-child", ops)
 
     assert again.status == "completed"
     assert ops.calls[calls_before:] == [], (
@@ -8638,7 +8662,7 @@ def test_historical_legacy_ledger_with_completed_merge_is_still_refused(
     # («различаем по merge») тест проходил бы по ЧУЖОЙ причине —
     # исторический прогон уходил бы в ветку потомка и отказывался там.
     with pytest.raises(ValueError, match="прежний путь авторинга удалён"):
-        runner.resume("r-384-historical", ops)
+        locked_runner.resume("r-384-historical", ops)
 
     assert ledger.read_bytes() == before
     assert ops.calls == []
@@ -8673,7 +8697,7 @@ def test_verification_child_admission_is_fail_closed(
 
     ops.s8_exit = 0
     ops.checkout_and_pull_error = "ff-only diverged"
-    child = runner.verify(parent_id, ops, "r-384-fc-child")
+    child = locked_runner.verify(parent_id, ops, "r-384-fc-child")
     ops.checkout_and_pull_error = None
 
     if damage == "no_source":
@@ -8689,7 +8713,7 @@ def test_verification_child_admission_is_fail_closed(
     # родителя страж не срабатывает вовсе, и совпадение по «S13» не
     # отличило бы одно от другого.
     with pytest.raises(ValueError, match="повтор S8 не допущен"):
-        runner.resume("r-384-fc-child", ops)
+        locked_runner.resume("r-384-fc-child", ops)
 
 
 def test_resume_refusal_of_a_legacy_run_leaves_the_ledger_byte_identical(
@@ -8704,7 +8728,7 @@ def test_resume_refusal_of_a_legacy_run_leaves_the_ledger_byte_identical(
     listing_before = sorted(p.name for p in rs.run_dir("r-s13-traceless").iterdir())
 
     with pytest.raises(ValueError):
-        runner.resume("r-s13-traceless", FakeOps())
+        locked_runner.resume("r-s13-traceless", FakeOps())
 
     assert ledger.read_bytes() == before
     assert sorted(p.name for p in rs.run_dir("r-s13-traceless").iterdir()) == (
@@ -8900,7 +8924,7 @@ def test_edge_tripwire_resume_reauthors_the_suspect_node(
         encoding="utf-8"
     )
 
-    state = runner.resume("r-plant-resume", ops)
+    state = locked_runner.resume("r-plant-resume", ops)
     assert ops.authored.count("charter") == 2
     assert state.ops["author-charter"].get("skipped") is not True
     assert state.status != "stopped_author"
@@ -8951,7 +8975,7 @@ def test_edge_tripwire_disp_removes_node_and_pipeline(
         slug,
     ]
 
-    runner.resume("r-plant-disp2", ops)
+    locked_runner.resume("r-plant-disp2", ops)
     assert len(seen) == 2
     assert seen[1][1] is False  # свежий run, не resume подозрительного
 
@@ -8990,7 +9014,7 @@ def test_edge_tripwire_moves_changed_wave_sibling(
         "25-acceptance.md",
     ]
     before = ops.authored.count("acceptance")
-    runner.resume("r-plant-sib", ops)
+    locked_runner.resume("r-plant-sib", ops)
     assert ops.authored.count("acceptance") == before + 1
 
 
@@ -9084,7 +9108,7 @@ def test_authoring_stamps_schema2_charter(
 
     ops = FakeOps(facts=GREEN_PR_FACTS)
     _fake_wave_adapters(monkeypatch, ops)
-    state = runner.start(
+    state = locked_runner.start(
         **_waves_kwargs(
             tmp_path,
             "r-schema2",
@@ -9108,7 +9132,7 @@ def test_authoring_code_taken_elsewhere_stops_before_stamp(
 
     ops = FakeOps(facts=GREEN_PR_FACTS, codes_elsewhere={"ENC": "ws-other"})
     _fake_wave_adapters(monkeypatch, ops)
-    state = runner.start(
+    state = locked_runner.start(
         **_waves_kwargs(
             tmp_path,
             "r-taken",
@@ -9141,7 +9165,7 @@ def test_resume_skip_path_stamps_existing_charter(
     (bundle / "00-charter.md").write_text("---\nspec_stage: charter\n---\n# C\n")
     ops = kwargs["ops"]
     _fake_wave_adapters(monkeypatch, ops)
-    state = runner.start(**kwargs)
+    state = locked_runner.start(**kwargs)
     charter = (Path(state.target_dir) / state.bundle_dir / "00-charter.md").read_text()
     assert charter_guard.read_charter(charter).code == "ENC"
 
@@ -9153,7 +9177,7 @@ def test_authoring_without_code_keeps_schema1(
 
     ops = FakeOps(facts=GREEN_PR_FACTS)
     _fake_wave_adapters(monkeypatch, ops)
-    state = runner.start(**_waves_kwargs(tmp_path, "r-schema1", ops))
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-schema1", ops))
     charter = (Path(state.target_dir) / state.bundle_dir / "00-charter.md").read_text()
     assert charter_guard.read_charter(charter).schema == 1
     assert not any(c[0] == "charter_codes_elsewhere" for c in ops.calls)
@@ -9344,3 +9368,36 @@ def test_source_layer_guard_stops_on_incomplete_descriptor(monkeypatch, brief) -
 
     assert runner._source_layer_committed(state, ops) is False
     assert stops and "отсутствует" in stops[0]
+
+
+def test_verify_holds_child_lock_through_s8(  # ревью части A, A2
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    ops = FakeOps(
+        review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES, s8_exit=1
+    )
+    parent_id = "r-s8-lockp"
+    parent = _wave_run_at_s8(tmp_path, parent_id, ops)
+    runner._step_s8(parent, ops)
+    assert parent.status == "merged_unverified"
+    ops.s8_exit = 0
+    seen: list[str] = []
+    real_s8 = runner._step_s8
+
+    def s8_with_competitor(state, ops_):
+        # Конкурент пытается войти РОВНО один раз; если он вошёл (блокировки
+        # потомка нет), он сам исполнит S8 — и это видно по `seen`.
+        if state.remediated_by and not seen:
+            seen.append("tried")
+            try:
+                locked_runner.resume(state.run_id, ops_)
+            except run_lock.LockBusy:
+                seen.append("busy")
+            else:
+                seen.append("entered")
+        return real_s8(state, ops_)
+
+    monkeypatch.setattr(runner, "_step_s8", s8_with_competitor)
+    child = locked_runner.verify(parent_id, ops, "r-s8-lockc")
+    assert seen == ["tried", "busy"]  # конкурент не вошёл в S8 потомка
+    assert child.status == "completed"

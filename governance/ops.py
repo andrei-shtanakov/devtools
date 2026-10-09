@@ -24,6 +24,12 @@ from typing import Protocol
 from urllib.parse import quote
 
 from governance import interview as _interview
+from governance.brief_facts import (
+    BriefFactsMixin,
+    BriefPrFacts,
+    DefaultBranch,
+    PrComment,
+)
 from governance.brief_input import descriptor_source_blobs, descriptor_source_paths
 from governance.decomposition_guard import DELIVERABLE_KINDS
 from governance.facts import Fact, Outcome, unavailable
@@ -224,6 +230,23 @@ class Ops(Protocol):
 
     def repo_file_fact(self, repo_slug: str, sha: str, path: str) -> Fact[str]: ...
 
+    # Факты brief-маршрута (спека need-stage §11.4.6, `governance/brief_facts.py`).
+    def brief_pr_fact(self, repo_slug: str, pr: int) -> Fact[BriefPrFacts]: ...
+
+    def find_brief_pr_fact(self, repo_slug: str, head_ref: str) -> Fact[list[int]]: ...
+
+    def default_branch_fact(self, repo_slug: str) -> Fact[DefaultBranch]: ...
+
+    def pr_comments_fact(self, repo_slug: str, pr: int) -> Fact[list[PrComment]]: ...
+
+    def policy_version_fact_at(
+        self, repo_slug: str, ref: str, path: str, sha: str
+    ) -> Fact[bool]: ...
+
+    def compare_files_fact(
+        self, repo_slug: str, base: str, head: str
+    ) -> Fact[tuple[tuple[str, str], ...]]: ...
+
     def delete_remote_branch(self, repo_slug: str, branch: str) -> bool: ...
 
     def delete_local_branch(self, target_dir: str, branch: str) -> bool: ...
@@ -255,14 +278,28 @@ class Ops(Protocol):
         traces_to: str | None,
         upstream_path: str | None,
         cwd: str,
+        *,
+        session_id: str | None = None,
+        lock_fd: int | None = None,
     ) -> _interview.DiscoveryReply: ...
 
     def discovery_status(
-        self, session_id: str, cwd: str
+        self, session_id: str, cwd: str, *, lock_fd: int | None = None
     ) -> _interview.DiscoveryReply: ...
 
     def discovery_brief(
-        self, session_id: str, out_path: str, cwd: str
+        self, session_id: str, out_path: str, cwd: str, *, lock_fd: int | None = None
+    ) -> _interview.DiscoveryReply: ...
+
+    def discovery_approve(
+        self,
+        brief_path: str,
+        repo: str,
+        pr: int,
+        path: str,
+        cwd: str,
+        *,
+        lock_fd: int | None = None,
     ) -> _interview.DiscoveryReply: ...
 
     def commit_paths(
@@ -917,7 +954,7 @@ _AUTHOR_DSL = {
 }
 
 
-class RealOps:
+class RealOps(BriefFactsMixin):
     """RealOps: точные команды внешних эффектов (спека §5/§8)."""
 
     def ensure_branch(self, target_dir: str, branch: str) -> None:
@@ -1961,15 +1998,26 @@ class RealOps:
         commit = repository["object"]
         if commit is None:
             return Fact(Outcome.ABSENT, None, f"коммита {sha} в {repo_slug} нет")
-        entry = commit.get("file") if isinstance(commit, dict) else None
+        # Отсутствующее поле `file` — неполный ответ (или объект не коммит),
+        # а не «файла нет»: только явный `file: null` — установленное
+        # отсутствие (ревью плана engineer-маршрута, A8).
+        if not isinstance(commit, dict) or "file" not in commit:
+            return unavailable(f"{what}: ответ без поля file")
+        entry = commit["file"]
         if entry is None:
             return Fact(Outcome.ABSENT, None, f"в {repo_slug}@{sha} нет {path}")
         blob = entry.get("object") if isinstance(entry, dict) else None
-        text = blob.get("text") if isinstance(blob, dict) else None
-        if not isinstance(text, str) or (
-            isinstance(blob, dict) and (blob.get("isBinary") or blob.get("isTruncated"))
+        # Полный текст доказан только явными `isBinary: false` и
+        # `isTruncated: false` при строковом `text`: отсутствие поля, `null`
+        # и иной тип — неполный ответ, не «текст целиком» (ревью плана, A10).
+        if (
+            not isinstance(blob, dict)
+            or not isinstance(blob.get("text"), str)
+            or blob.get("isBinary") is not False
+            or blob.get("isTruncated") is not False
         ):
             return unavailable(f"{what}: содержимое не прочитано")
+        text = blob["text"]
         return Fact(Outcome.FOUND, text, f"{path}@{sha} прочитан")
 
     def local_branch_head_fact(self, target_dir: str, branch: str) -> Fact[str]:
@@ -2210,12 +2258,16 @@ class RealOps:
         claude = any(_harness_for(p)[0] == "claude" for p in ("AUTHOR", "REVIEW"))
         return _run_agent(argv, target_dir, claude=claude)
 
-    def _discovery(self, args: list[str], cwd: str) -> _interview.DiscoveryReply:
+    def _discovery(
+        self, args: list[str], cwd: str, lock_fd: int | None = None
+    ) -> _interview.DiscoveryReply:
         """Один вызов discovery CLI соседа + проверка границы (спека §6).
 
         `--frozen --project`: тот же способ, что у disputatio (`author_disp`).
         stdout захватывается целиком — envelope один на вызов; stderr
-        сохраняется для диагностики, но в контракт не входит.
+        сохраняется для диагностики, но в контракт не входит. `lock_fd` —
+        дескриптор блокировки прогона (§11.4.5): передаётся соседу
+        (`pass_fds`), и блокировка держится, пока жив его процесс.
         """
         argv = [
             "uv",
@@ -2227,7 +2279,12 @@ class RealOps:
             *args,
         ]
         done = subprocess.run(
-            argv, cwd=cwd, capture_output=True, text=True, check=False
+            argv,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+            pass_fds=(lock_fd,) if lock_fd is not None else (),
         )
         return _interview.parse_reply(done.returncode, done.stdout, done.stderr)
 
@@ -2238,28 +2295,70 @@ class RealOps:
         traces_to: str | None,
         upstream_path: str | None,
         cwd: str,
+        *,
+        session_id: str | None = None,
+        lock_fd: int | None = None,
     ) -> _interview.DiscoveryReply:
-        """`discovery start`. `upstream_path` — durable-копия из run_dir; до
-        discovery#49 сосед upstream не принимает — отказ ДО вызова, тем же
-        текстом, что preflight spec-loop (порт после разблокировки не меняется)."""
-        if upstream_path is not None:
+        """`discovery start` (§11.4.6). С `upstream_path` (durable-копия из
+        run_dir) — `--upstream` и НИКАКОГО `--traces-to`: сосед сам ставит
+        `upstream.md` первым в `traces_to` и отказывает на дубле. Заданы оба —
+        синтетический 1 до subprocess (инвариант порта)."""
+        if upstream_path is not None and traces_to is not None:
             return _interview.DiscoveryReply(
-                1, _interview.synthetic_envelope(ENGINEER_BLOCKED), ""
+                1,
+                _interview.synthetic_envelope(
+                    "upstream_path и traces_to вместе — upstream уходит только "
+                    "через --upstream"
+                ),
+                "",
             )
         args = ["start", "--frame", frame, "--target", target]
-        if traces_to:
+        if upstream_path is not None:
+            args += ["--upstream", upstream_path]
+        elif traces_to:
             args += ["--traces-to", traces_to]
-        return self._discovery(args, cwd)
+        if session_id is not None:
+            args += ["--session-id", session_id]
+        return self._discovery(args, cwd, lock_fd)
 
-    def discovery_status(self, session_id: str, cwd: str) -> _interview.DiscoveryReply:
-        return self._discovery(["status", "--session", session_id], cwd)
+    def discovery_status(
+        self, session_id: str, cwd: str, *, lock_fd: int | None = None
+    ) -> _interview.DiscoveryReply:
+        return self._discovery(["status", "--session", session_id], cwd, lock_fd)
 
     def discovery_brief(
-        self, session_id: str, out_path: str, cwd: str
+        self, session_id: str, out_path: str, cwd: str, *, lock_fd: int | None = None
     ) -> _interview.DiscoveryReply:
         return self._discovery(
-            ["brief", "--session", session_id, "--out", out_path], cwd
+            ["brief", "--session", session_id, "--out", out_path], cwd, lock_fd
         )
+
+    def discovery_approve(
+        self,
+        brief_path: str,
+        repo: str,
+        pr: int,
+        path: str,
+        cwd: str,
+        *,
+        lock_fd: int | None = None,
+    ) -> _interview.DiscoveryReply:
+        """`discovery approve` (§11.5): зеркало человеческого мержа в конверт.
+
+        Код 20 у `approve` — невозможная форма (интервью не идёт) ⇒
+        синтетический 1; код без envelope ловит `parse_reply`."""
+        reply = self._discovery(
+            ["approve", brief_path, "--repo", repo, "--pr", str(pr), "--path", path],
+            cwd,
+            lock_fd,
+        )
+        if reply.code == 20:
+            return _interview.DiscoveryReply(
+                1,
+                _interview.synthetic_envelope("approve вернул 20 — невозможная форма"),
+                reply.stderr,
+            )
+        return reply
 
     @staticmethod
     def _ignored_files(target_dir: str, paths: list[str]) -> list[str]:

@@ -67,6 +67,7 @@ pythonpath = ["."]
 extend-exclude = [
     "contracts/criteria-closure/v1/fixtures",
     "governance/discovery_contract",
+    "contracts/discovery-approval/v1",
 ]
 
 [tool.ruff.format]

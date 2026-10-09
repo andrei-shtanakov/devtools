@@ -10,6 +10,7 @@ import pytest
 
 from governance import halt_gate, runner
 from governance import run_state as rs
+from tests import locked_runner
 
 CONTRACT = Path(__file__).resolve().parents[1] / "contracts" / "halt-admission" / "v1"
 VECTORS = json.loads((CONTRACT / "vectors.json").read_text())["vectors"]
@@ -108,13 +109,13 @@ def test_runner_start_under_a_halt_refuses_before_anything(
 
 
 def test_a_direct_start_is_gated_too(monkeypatch, runs_root, tmp_path) -> None:
-    """Ревью devtools#531: spec_loop зовёт runner.start() напрямую, мимо
+    """Ревью devtools#531: spec_loop зовёт locked_runner.start() напрямую, мимо
     main() — гейт обязан стоять в самой функции."""
     monkeypatch.setattr(
         runner, "_HALT_GATE", lambda slug: halt_gate.HaltedError("стоп-кран: on")
     )
     with pytest.raises(halt_gate.HaltedError):
-        runner.start(
+        locked_runner.start(
             subject="s",
             repo="alpha",
             repo_slug="owner/alpha",

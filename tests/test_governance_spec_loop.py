@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from governance import brief_input, spec_loop
+from governance import brief_input, run_lock, spec_loop
 from governance import interview as iv
 from governance import run_state as rs
 
@@ -478,6 +478,7 @@ class _LoopEnv:
         monkeypatch.setattr(spec_loop, "_real_ops", _NoRemoteRuns)
 
     def _start(self, **kwargs):
+        assert isinstance(kwargs.pop("lock"), run_lock.RunLock)
         self.calls.append(("start", kwargs))
         interview = (
             kwargs["interview_spec"].as_state()
@@ -511,7 +512,8 @@ class _LoopEnv:
                 state.interview["session_id"] = session_id
         return state
 
-    def _resume(self, run_id, ops):
+    def _resume(self, run_id, ops, *, lock):
+        assert isinstance(lock, run_lock.RunLock) and lock.run_id == run_id
         self.calls.append(("resume", run_id))
         return self.resume_result
 
@@ -1089,7 +1091,8 @@ def test_session_attach_calls_attach_then_resume(
     st = _make_need_run(env, status="stopped_interview", session=None)
     attached = []
 
-    def _attach(run_id, session_id, ops):
+    def _attach(run_id, session_id, ops, *, lock):
+        assert isinstance(lock, run_lock.RunLock) and lock.run_id == run_id
         attached.append((run_id, session_id))
         st.interview["session_id"] = session_id
         st.status = "waiting_interview"
@@ -1319,7 +1322,8 @@ def test_historical_bundle_pr_does_not_block_wave_recovery(
     _wave_recovery_env(tmp_path, monkeypatch, ops)
     seen: list[str] = []
 
-    def _resume(run_id, passed_ops):
+    def _resume(run_id, passed_ops, *, lock):
+        assert isinstance(lock, run_lock.RunLock) and lock.run_id == run_id
         state = rs.load(run_id)
         seen.append(run_id)
         assert state.authoring == "waves", "восстановлен волновой прогон, а не прежний"
@@ -1351,7 +1355,8 @@ def test_missing_ledger_recovers_wave_run_from_candidate_prs(
     _wave_recovery_env(tmp_path, monkeypatch, ops)
     seen: list[str] = []
 
-    def _resume(run_id, passed_ops):
+    def _resume(run_id, passed_ops, *, lock):
+        assert isinstance(lock, run_lock.RunLock) and lock.run_id == run_id
         state = rs.load(run_id)
         seen.append(run_id)
         assert state.authoring == "waves" and state.wave == 2
@@ -1560,3 +1565,67 @@ def test_bad_code_or_plan_item_refuses_before_runner(
     rc = spec_loop.main(["--subject", "Fleet Inbox", "--repo", "alpha", *extra])
     assert rc == 1
     assert env.calls == []
+
+
+# --- блокировка на входе: настоящие пути main (ревью части A, A1) ---
+
+
+def _spy_loads(monkeypatch) -> list[str]:
+    real = rs.load
+    seen: list[str] = []
+
+    def spy(run_id: str) -> rs.RunState:
+        seen.append(run_id)
+        return real(run_id)
+
+    monkeypatch.setattr(rs, "load", spy)
+    return seen
+
+
+def test_run_id_path_locks_before_first_load(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    _make_need_run(env)
+    loads = _spy_loads(monkeypatch)
+    with run_lock.run_lock("r-a"):
+        assert spec_loop.main(_need("--run-id", "r-a")) == 1
+    assert loads == [] and env.calls == []
+    assert "другим процессом" in capsys.readouterr().out
+
+
+def test_search_path_decides_only_after_locking_every_match(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    _make_need_run(env, status="stopped_interview")
+    _make_need_run(env, run_id_suffix="2", status="waiting_interview")
+    with run_lock.run_lock("r-a2"):  # второй совпавший занят другим процессом
+        assert spec_loop.main(_need("--new-run", "--ws-id", "ws-fresh")) == 1
+    assert env.calls == []  # решение «все до S1» не принято без блокировки
+    assert "другим процессом" in capsys.readouterr().out
+
+
+def test_new_run_check_uses_state_reread_under_lock(
+    runs_root, tmp_path, monkeypatch
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    st = _make_need_run(env, status="stopped_interview")
+    stale = rs.load("r-a")
+    st.status = "waiting_human_merge"  # другой процесс успел дойти до S1
+    st.branch = "spec/ws-a-behaviour"
+    rs.save(st)
+    monkeypatch.setattr(spec_loop, "find_runs", lambda repo, subject: [stale])
+    assert spec_loop.main(_need("--new-run", "--ws-id", "ws-fresh")) == 1
+    assert env.calls == []
+
+
+def test_wave_recovery_locks_before_reading_or_writing_ledger(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    ops = _WaveRecoveryOps([_wave_pr(10, 1, 0, 1), _wave_pr(11, 1, 0, 1, final=True)])
+    _wave_recovery_env(tmp_path, monkeypatch, ops)
+    with run_lock.run_lock("fleet-inbox-20260901-a1b2c3"):
+        assert spec_loop.main(["--subject", "Fleet Inbox", "--repo", "alpha"]) == 1
+    assert rs.all_run_ids() == []  # леджер не записан мимо блокировки
+    assert "другим процессом" in capsys.readouterr().out
