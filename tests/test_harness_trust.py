@@ -324,3 +324,41 @@ def test_path_reads_of_chain_modules_are_checked(
     (root / "governance" / "b.py").write_text(code)
     found = ht.violations(root, ALL, ALL)
     assert any(message in v for v in found), found
+
+
+@pytest.mark.skipif(
+    not __import__("os").environ.get("DEVTOOLS_UV_SMOKE"),
+    reason="opt-in: DEVTOOLS_UV_SMOKE=1 (настоящий uv, сборка окружения)",
+)
+def test_real_uv_form_builds_env_and_runs_checker(tmp_path: Path) -> None:
+    """Ревью #573, круг 4: боевая форма запуска исполняется настоящим `uv`.
+    `--help` разбирается ПОСЛЕ импорта цепочки (вкл. yaml) — код 0 доказывает,
+    что `--no-config` не потерял зависимости проекта."""
+    import re
+    import subprocess
+
+    script = (ROOT / "human-merge.sh").read_text(encoding="utf-8")
+    flags = re.search(r"uv run (--frozen --exact --no-config --no-env-file)", script)
+    assert flags, "форма запуска в human-merge.sh изменилась — обновите smoke"
+    done = subprocess.run(
+        [
+            "uv",
+            "run",
+            *flags.group(1).split(),
+            "python",
+            "-I",
+            str(ROOT / "governance" / "brief_merge_check.py"),
+            "--help",
+        ],
+        cwd=ROOT,
+        env={
+            **__import__("os").environ,
+            "UV_PROJECT_ENVIRONMENT": str(tmp_path / "venv"),
+            "PYTHONPATH": str(tmp_path / "evil"),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    assert "usage: brief_merge_check" in done.stdout

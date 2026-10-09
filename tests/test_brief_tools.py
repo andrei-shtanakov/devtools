@@ -827,7 +827,7 @@ def test_check_merge_ignores_body_and_labels(open_pr) -> None:  # T50, T23
 
 
 @pytest.mark.parametrize(
-    ("exc", "code"), [("ok", 0), ("MergeRefused", 3), ("retry", 2), ("other", 1)]
+    ("exc", "code"), [("ok", 0), ("MergeRefused", 11), ("retry", 10), ("other", 12)]
 )
 def test_check_merge_cli_exit_codes(monkeypatch, capsys, exc, code) -> None:
     def fake(repo, pr, head, facts):
