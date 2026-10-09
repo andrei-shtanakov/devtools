@@ -181,6 +181,12 @@ behaviour-spec узел: `codex` (дефолт, `ops.author`) или `disp` (opt
 disp-цикл. charter/requirements авторятся `codex` независимо от значения;
 переключение затрагивает только behaviour-spec (B2 Task 2).
 
+`REPO` — `git_dir` из манифеста флота (`ai-orchestrators-workspace/
+workspace-manifest.toml`). Цели живой приёмки вне флота (сейчас — `polygon`)
+перечислены в `contracts/acceptance-targets/v1/targets.toml` и берутся, только
+если репо нет в манифесте, а сам манифест прочитан без ошибок; origin
+целевого чекаута сверяется так же, как для флота.
+
 Готовый discovery-brief можно сделать source-входом нового workstream:
 
 ```bash

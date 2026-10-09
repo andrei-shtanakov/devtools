@@ -84,6 +84,11 @@ WORKSPACE_ROOT = DEVTOOLS_ROOT.parent
 MANIFEST_PATH = (
     WORKSPACE_ROOT / "ai-orchestrators-workspace" / "workspace-manifest.toml"
 )
+#: Цели живой приёмки вне флота (см. сам файл): только при отсутствии репо в
+#: манифесте флота.
+ACCEPTANCE_TARGETS_PATH = (
+    DEVTOOLS_ROOT / "contracts" / "acceptance-targets" / "v1" / "targets.toml"
+)
 
 _SLUG_MAX = 40
 
@@ -202,11 +207,16 @@ def repo_slug_from_url(url: str) -> str:
 
 @dataclass(frozen=True)
 class RepoEntry:
-    """Репо из workspace-манифеста: каталог + канонический slug."""
+    """Репо из workspace-манифеста (или списка приёмки): каталог + slug.
+
+    `source` — откуда цель: `fleet` (манифест) или `acceptance` (список целей
+    приёмки devtools); каталог в обоих случаях — `WORKSPACE_ROOT / repo`.
+    """
 
     repo: str
     repo_slug: str
     repo_url: str
+    source: str = "fleet"
 
 
 def manifest_repo_entry(manifest_text: str, repo: str) -> RepoEntry:
@@ -216,12 +226,52 @@ def manifest_repo_entry(manifest_text: str, repo: str) -> RepoEntry:
     это один репо, если repo_url у них совпадает; разные repo_url под
     одним git_dir — fail-closed.
     """
-    try:
-        data = tomllib.loads(manifest_text)
-    except tomllib.TOMLDecodeError as exc:
+    entry = _manifest_lookup(manifest_text, repo, MANIFEST_PATH)
+    if entry is None:
         raise SpecLoopError(
-            f"манифест {MANIFEST_PATH} не парсится как TOML: {exc}"
-        ) from exc
+            f"репо {repo!r} не найден в манифесте {MANIFEST_PATH} — "
+            "кнопка работает только по составу флота (SSOT)"
+        )
+    return entry
+
+
+def resolve_repo_entry(
+    manifest_text: str, repo: str, targets_text: str | None
+) -> RepoEntry:
+    """Цель `spec-loop`: манифест флота, а при ОТСУТСТВИИ репо в нём — список
+    целей приёмки devtools (решение владельца 2026-10-09).
+
+    Ошибка манифеста (не TOML, неоднозначный git_dir) — отказ без fallback:
+    список приёмки не подменяет сломанный SSOT флота. `targets_text=None` —
+    списка нет.
+    """
+    entry = _manifest_lookup(manifest_text, repo, MANIFEST_PATH)
+    if entry is not None:
+        return entry
+    if targets_text is not None:
+        try:  # цель вне флота — только одно имя каталога в WORKSPACE_ROOT
+            rs.validate_id_component(repo, label="repo")
+        except ValueError as exc:
+            raise SpecLoopError(str(exc)) from exc
+        found = _manifest_lookup(targets_text, repo, ACCEPTANCE_TARGETS_PATH)
+        if found is not None:
+            return replace(found, source="acceptance")
+    raise SpecLoopError(
+        f"репо {repo!r} нет ни в манифесте флота {MANIFEST_PATH}, ни в списке "
+        f"целей приёмки {ACCEPTANCE_TARGETS_PATH} — кнопка работает только по "
+        "SSOT"
+    )
+
+
+def _manifest_lookup(text: str, repo: str, path: Path) -> RepoEntry | None:
+    """Запись по `git_dir == repo` из TOML-файла состава; None — записи нет.
+
+    Не TOML, неоднозначный git_dir, git_dir не одним компонентом — отказ.
+    """
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise SpecLoopError(f"{path} не парсится как TOML: {exc}") from exc
     urls: set[str] = set()
 
     def walk(node: object) -> None:
@@ -234,17 +284,29 @@ def manifest_repo_entry(manifest_text: str, repo: str) -> RepoEntry:
 
     walk(data)
     if not urls:
-        raise SpecLoopError(
-            f"репо {repo!r} не найден в манифесте {MANIFEST_PATH} — "
-            "кнопка работает только по составу флота (SSOT)"
-        )
+        return None
     if len(urls) > 1:
         raise SpecLoopError(
-            f"репо {repo!r} в манифесте неоднозначен: git_dir делят "
-            f"разные repo_url {sorted(urls)!r} — почините манифест"
+            f"репо {repo!r} в {path} неоднозначен: git_dir делят "
+            f"разные repo_url {sorted(urls)!r} — почините {path.name}"
         )
     url = urls.pop()
     return RepoEntry(repo=repo, repo_slug=repo_slug_from_url(url), repo_url=url)
+
+
+def _read_ssot(path: Path, what: str) -> str:
+    """Текст SSOT-файла; не читается — отказ (fallback не разрешается)."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise SpecLoopError(f"{what} {path} не читается: {exc}") from exc
+
+
+def _read_targets() -> str | None:
+    """Список целей приёмки; нет файла — None, иная ошибка чтения — отказ."""
+    if not ACCEPTANCE_TARGETS_PATH.exists():
+        return None
+    return _read_ssot(ACCEPTANCE_TARGETS_PATH, "список целей приёмки")
 
 
 def _origin_url(target_dir: str | Path) -> str:
@@ -1047,9 +1109,13 @@ def main(argv: list[str] | None = None) -> int:
         # — взаимоисключение --need/--brief проверяется по аргументам ДО
         # чтения файла брифа (иначе несуществующий путь отказал бы чтением
         # файла, а не preflight-правилом).
-        entry = manifest_repo_entry(
-            MANIFEST_PATH.read_text(encoding="utf-8"), args.repo
+        entry = resolve_repo_entry(
+            _read_ssot(MANIFEST_PATH, "манифест флота"),
+            args.repo,
+            _read_targets(),
         )
+        if entry.source == "acceptance":
+            print(f"spec-loop: цель {entry.repo_slug} — из списка целей приёмки")
         interview_spec = build_interview_spec(args, entry.repo_slug)
         supplied_brief = (
             brief_input.inspect_brief(Path(args.brief)) if args.brief else None

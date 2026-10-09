@@ -183,6 +183,130 @@ def test_manifest_conflicting_urls_fail_closed() -> None:
         spec_loop.manifest_repo_entry(MANIFEST, "gamma")
 
 
+# --- цели приёмки вне флота (решение владельца 2026-10-09) ----------------
+
+TARGETS = """\
+[targets.polygon]
+git_dir = "polygon"
+repo_url = "https://github.com/DarkFactory-polygon/polygon.git"
+
+[targets.alpha]
+git_dir = "alpha"
+repo_url = "https://github.com/someone-else/alpha.git"
+"""
+
+
+def test_acceptance_target_used_when_absent_from_fleet() -> None:
+    entry = spec_loop.resolve_repo_entry(MANIFEST, "polygon", TARGETS)
+    assert (entry.repo, entry.repo_slug, entry.source) == (
+        "polygon",
+        "DarkFactory-polygon/polygon",
+        "acceptance",
+    )
+
+
+def test_fleet_manifest_has_priority_over_acceptance_list() -> None:
+    entry = spec_loop.resolve_repo_entry(MANIFEST, "alpha", TARGETS)
+    assert (entry.repo_slug, entry.source) == ("owner/alpha", "fleet")
+
+
+@pytest.mark.parametrize("targets", [TARGETS, None, ""])
+def test_unknown_target_refused(targets) -> None:
+    with pytest.raises(spec_loop.SpecLoopError, match="нет ни в манифесте"):
+        spec_loop.resolve_repo_entry(MANIFEST, "nope", targets)
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        "not = [toml",  # не TOML
+        MANIFEST  # неоднозначный git_dir у другой цели не мешает, а у искомой —
+        + '\n[cores.poly-a]\nrepo_url = "git@github.com:a/p.git"\ngit_dir = "polygon"\n'
+        + '\n[cores.poly-b]\nrepo_url = "git@github.com:b/p.git"\ngit_dir = "polygon"\n',
+    ],
+    ids=["broken-toml", "ambiguous-in-fleet"],
+)
+def test_broken_fleet_manifest_never_falls_back(manifest) -> None:
+    """Ошибка манифеста не разрешает fallback, даже если цель есть в списке."""
+    with pytest.raises(spec_loop.SpecLoopError) as exc:
+        spec_loop.resolve_repo_entry(manifest, "polygon", TARGETS)
+    assert "нет ни в манифесте" not in str(exc.value)
+
+
+@pytest.mark.parametrize("repo", ["../polygon", "/abs/polygon", "a/b", ".hidden"])
+def test_acceptance_lookup_accepts_only_one_dir_component(repo) -> None:
+    with pytest.raises(spec_loop.SpecLoopError, match="невалиден"):
+        spec_loop.resolve_repo_entry(MANIFEST, repo, TARGETS)
+
+
+def test_broken_acceptance_list_refused() -> None:
+    with pytest.raises(spec_loop.SpecLoopError, match="targets"):
+        spec_loop.resolve_repo_entry(MANIFEST, "polygon", "not = [toml")
+
+
+def test_shipped_acceptance_list_is_relative_and_parses() -> None:
+    """Shipped-файл: polygon, git_dir — одно имя каталога, без путей машины."""
+    import tomllib
+
+    text = spec_loop.ACCEPTANCE_TARGETS_PATH.read_text(encoding="utf-8")
+    data = tomllib.loads(text)
+    for entry in data["targets"].values():
+        rs.validate_id_component(entry["git_dir"], label="git_dir")
+    assert "/Users/" not in text and "/home/" not in text
+    entry = spec_loop.resolve_repo_entry(MANIFEST, "polygon", text)
+    assert entry.repo_slug == "DarkFactory-polygon/polygon"
+
+
+def test_manifest_unreadable_is_refused_without_fallback(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    monkeypatch.setattr(spec_loop, "MANIFEST_PATH", tmp_path / "missing.toml")
+    rc = spec_loop.main(["--subject", "s", "--repo", "polygon"])
+    assert rc == 1 and env.calls == []
+    assert "манифест флота" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("origin_ok", [True, False])
+def test_acceptance_target_keeps_origin_check(
+    runs_root, tmp_path, monkeypatch, capsys, origin_ok
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    (tmp_path / "polygon" / ".git").mkdir(parents=True)
+    targets = tmp_path / "targets.toml"
+    targets.write_text(TARGETS, encoding="utf-8")
+    monkeypatch.setattr(spec_loop, "ACCEPTANCE_TARGETS_PATH", targets)
+    origin = (
+        "https://github.com/DarkFactory-polygon/polygon.git"
+        if origin_ok
+        else "git@github.com:attacker/polygon.git"
+    )
+    monkeypatch.setattr(spec_loop, "_origin_url", lambda d: origin)
+    rc = spec_loop.main(["--subject", "s", "--repo", "polygon"])
+    out = capsys.readouterr().out
+    if origin_ok:
+        assert rc == 0 and env.calls[0][0] == "start"
+        assert env.calls[0][1]["repo_slug"] == "DarkFactory-polygon/polygon"
+        assert env.calls[0][1]["target_dir"] == str(tmp_path / "polygon")
+    else:
+        assert rc == 1 and env.calls == []
+        assert "расхождение origin" in out
+
+
+def test_target_dir_does_not_widen_the_target_set(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    """`--target-dir` не делает произвольный репо целью: цель — из SSOT, а
+    origin каталога обязан совпасть с ней."""
+    env = _LoopEnv(monkeypatch, tmp_path)
+    monkeypatch.setattr(spec_loop, "ACCEPTANCE_TARGETS_PATH", tmp_path / "none.toml")
+    rc = spec_loop.main(
+        ["--subject", "s", "--repo", "anything", "--target-dir", str(tmp_path)]
+    )
+    assert rc == 1 and env.calls == []
+    assert "нет ни в манифесте" in capsys.readouterr().out
+
+
 # --- поиск прогона ---------------------------------------------------------
 
 
