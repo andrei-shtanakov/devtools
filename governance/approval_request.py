@@ -1,7 +1,7 @@
 """Заявка на одобрение discovery-брифа (спека need-stage §11.3 п.3–3a).
 
 Один нормативный разбор для всех потребителей: brief-propose, human-merge.sh
-(через `brief_tools check-merge`), brief-approve и engineer-preflight.
+(через `brief_merge_check`), brief-approve и engineer-preflight.
 Неоднозначная заявка не доказывает назначения акта, поэтому разбор строже
 YAML: ровно один документ, только строковые ключи, дубли ключей запрещены на
 всех уровнях (`safe_load` молча берёт последний), набор ключей — ровно схема v1.

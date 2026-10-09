@@ -52,7 +52,7 @@ esac
 
 #: Стаб `uv`: журнал вызова (с cwd и профилем) и код проверяльщика brief-PR.
 UV_STUB = """#!/usr/bin/env bash
-echo "cwd=$(pwd) GH_CONFIG_DIR=${GH_CONFIG_DIR:-} uv $*" >> "$GH_STUB_LOG"
+echo "cwd=$(pwd) GH_CONFIG_DIR=${GH_CONFIG_DIR:-} UV_PROJECT_ENVIRONMENT=${UV_PROJECT_ENVIRONMENT:-} uv $*" >> "$GH_STUB_LOG"
 [ "${UV_STUB_EXIT:-0}" = 0 ] && echo "${UV_STUB_PIN:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
 exit "${UV_STUB_EXIT:-0}"
 """
@@ -306,12 +306,18 @@ def _uv_calls(fleet: Fleet) -> list[str]:
 
 
 def test_brief_pr_is_checked_by_head_then_merged_with_same_sha(fleet: Fleet) -> None:
-    res = fleet.run(GH_STUB_HEADREF="brief/WS-1", GH_STUB_BODY="")
+    # Подложенное вызывающим окружение проверки не наследуется (ревью #573).
+    res = fleet.run(
+        GH_STUB_HEADREF="brief/WS-1", GH_STUB_BODY="", UV_PROJECT_ENVIRONMENT="/evil"
+    )
     assert res.returncode == 0, res.stderr
     (uv,) = _uv_calls(fleet)
     assert f"cwd={SCRIPT.parent}" in uv
+    assert "UV_PROJECT_ENVIRONMENT=/evil" not in uv
+    assert "UV_PROJECT_ENVIRONMENT=" in uv and "brief-merge-check-venv" in uv
     assert (
-        "uv run --frozen python -m governance.brief_tools check-merge "
+        "uv run --frozen --exact --no-config --no-env-file python -I "
+        f"{SCRIPT.parent}/governance/brief_merge_check.py "
         f"--repo andrei-shtanakov/demo --pr 7 --head {HEAD_SHA}"
     ) in uv
     assert fleet.merge_calls() and f"sha={HEAD_SHA}" in fleet.merge_calls()[0]
@@ -331,7 +337,7 @@ def test_brief_pr_check_runs_under_human_profile(fleet: Fleet, tmp_path: Path) -
     res = fleet.run(GH_STUB_HEADREF="brief/WS-1", HUMAN_GH_CONFIG_DIR=str(profile))
     assert res.returncode == 0, res.stderr
     (uv,) = _uv_calls(fleet)
-    assert f"GH_CONFIG_DIR={profile} uv" in uv
+    assert f"GH_CONFIG_DIR={profile} UV_PROJECT_ENVIRONMENT=" in uv
 
 
 def test_candidate_and_other_prs_do_not_call_the_brief_check(

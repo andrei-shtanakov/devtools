@@ -91,6 +91,18 @@ def test_prefixes_read_from_the_ssot_file() -> None:
         # (решение владельца 2026-10-02). кэш байткода: unchecked-hash
         # `.pyc` подменял бы модуль без правки `.py` (M8-1).
         "governance/__pycache__/",
+        # Проверка brief-PR, которую human-merge.sh ИСПОЛНЯЕТ с полномочиями
+        # человека, вся цепочка её импортов и конфигурация зависимостей
+        # (ревью #573, решение владельца 2026-10-09; сверка цепочки —
+        # tests/test_harness_trust.py).
+        "governance/brief_merge_check",
+        "governance/brief_facts",
+        "governance/facts",
+        "governance/approval_request",
+        "governance/discovery_approval",
+        "contracts/discovery-approval/",
+        "pyproject.toml",
+        "uv.lock",
         # Правило области ревью (devtools#271): решает, дойдёт ли диф до
         # модели вообще. Агентски смерженная правка `PROSE` сняла бы
         # ревью-гейт со всех последующих PR.
@@ -215,28 +227,19 @@ def test_approval_policy_source_is_authority_root() -> None:
 
 def test_every_module_sourced_by_the_merge_scripts_is_protected() -> None:
     """Функция, вынесенная из merge-pr.sh в подключаемый файл, не вправе
-    выйти из-под authority-root и харнесс-гварда: иначе агент менял бы
-    логику гвардов своим PR (blocker ревью PR #344)."""
-    import re
-
-    from governance import accept_pr
+    выйти из-под authority-root и харнесс-гварда (blocker ревью PR #344).
+    Регэкспы на две формы запуска пропустили `uv run … python -m …`
+    (ревью #573) — проверка заменена полной цепочкой доверия с отказом на
+    нераспознанной форме: `tests/harness_trust.py`."""
+    from tests import harness_trust
 
     root = Path(__file__).resolve().parent.parent
-    sourced: set[str] = set()
-    for script in ("merge-pr.sh", "human-merge.sh"):
-        text = (root / script).read_text(encoding="utf-8")
-        sourced |= set(re.findall(r'^\. "\$script_dir/([^"]+)"', text, re.MULTILINE))
-        # Исполнение, не только подключение (ревью devtools#531): любой
-        # `python3 … "$script_dir/…"` — тоже код обвязки из дерева.
-        sourced |= set(re.findall(r'python3[^"\n]*"\$script_dir/([^"]+)"', text))
-    assert sourced == {
-        "ssot_env.sh",
-        "approval_branches.sh",
-        "governance/halt_gate.py",
-    }, sourced
-    for module in sourced:
-        assert module in authority_root.prefixes(), module
-        assert module in accept_pr._HARNESS_PREFIXES, module
+    assert (
+        harness_trust.violations(
+            root, authority_root.prefixes(), accept_pr._HARNESS_PREFIXES
+        )
+        == []
+    )
 
 
 def test_roadmap_is_authority_root() -> None:

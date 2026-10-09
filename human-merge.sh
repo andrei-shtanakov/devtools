@@ -142,19 +142,29 @@ head_ref=$(printf '%s\n' "$facts" | sed -n '5p')
 # brief-PR (спека need-stage §11.3 п.6): заявка читается форджем по
 # ПРОВЕРЕННОЙ голове `head_oid`; мерж ниже пинуется тем же sha= — смена
 # головы между проверкой и мержем отказывает на стороне форджи. Тело и
-# метки PR в решении не участвуют. Проверяльщик исполняется из каталога
-# devtools (там пакет governance) профилем человека.
+# метки PR в решении не участвуют. Проверяльщик — узкий
+# governance/brief_merge_check.py: он, вся цепочка его импортов и
+# pyproject.toml/uv.lock — под authority-root и харнесс-гвардом (ревью #573).
+# Запуск исключает подмешивание: `python -I` (без PYTHONPATH, user site и
+# cwd), закреплённые зависимости ровно по uv.lock (`--frozen --exact`) в
+# СВОЁМ окружении (UV_PROJECT_ENVIRONMENT задаётся здесь, не наследуется),
+# без uv.toml/.env (`--no-config --no-env-file`). Форму распознаёт тест
+# инварианта; иная — отказ теста.
+brief_check_env="${HOME}/.cache/devtools/brief-merge-check-venv"
 brief_pin=""
 case "$head_ref" in
     brief/*)
         if [ -n "$human_profile" ]; then
-            brief_pin=$(cd "$script_dir" && GH_CONFIG_DIR="$human_profile" uv run --frozen \
-                python -m governance.brief_tools check-merge \
+            brief_pin=$(cd "$script_dir" && GH_CONFIG_DIR="$human_profile" \
+                UV_PROJECT_ENVIRONMENT="$brief_check_env" \
+                uv run --frozen --exact --no-config --no-env-file \
+                python -I "$script_dir/governance/brief_merge_check.py" \
                 --repo "$slug" --pr "$pr" --head "$head_oid") \
                 || die $? "brief-PR ${slug}#${pr}: заявка не прошла проверку — мерж не выполняется"
         else
-            brief_pin=$(cd "$script_dir" && uv run --frozen \
-                python -m governance.brief_tools check-merge \
+            brief_pin=$(cd "$script_dir" && UV_PROJECT_ENVIRONMENT="$brief_check_env" \
+                uv run --frozen --exact --no-config --no-env-file \
+                python -I "$script_dir/governance/brief_merge_check.py" \
                 --repo "$slug" --pr "$pr" --head "$head_oid") \
                 || die $? "brief-PR ${slug}#${pr}: заявка не прошла проверку — мерж не выполняется"
         fi

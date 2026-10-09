@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from governance import approval_request as ar
+from governance import brief_merge_check as bmc
 from governance import brief_tools as bt
 from governance import interview as iv
 from governance import run_state as rs
@@ -743,7 +744,7 @@ def open_pr(monkeypatch) -> ToolOps:
 
 
 def test_check_merge_accepts_consistent_head(open_pr) -> None:  # T50
-    assert bt.check_merge(REPO, 7, HEAD, open_pr) == P
+    assert bmc.check_merge(REPO, 7, HEAD, open_pr) == P
 
 
 @pytest.mark.parametrize(
@@ -792,28 +793,28 @@ def test_check_merge_refusals(open_pr, spoil) -> None:  # T50 (каждый — 
         open_pr.set_pr(head_ref="feature/x")
     elif spoil == "wrong-base":
         open_pr.set_pr(base_ref="side")
-    with pytest.raises(bt.MergeRefused):
-        bt.check_merge(REPO, 7, HEAD, open_pr)
+    with pytest.raises(bmc.MergeRefused):
+        bmc.check_merge(REPO, 7, HEAD, open_pr)
 
 
 @pytest.mark.parametrize(("case", "mutate", "_m"), DEFECTS, ids=[d[0] for d in DEFECTS])
 def test_check_merge_ambiguous_request(open_pr, case, mutate, _m) -> None:  # T21b
     open_pr.files[(HEAD, f"{DIR}/{ar.FILE_NAME}")] = mutate(ar.render(request()))
-    with pytest.raises(bt.MergeRefused):
-        bt.check_merge(REPO, 7, HEAD, open_pr)
+    with pytest.raises(bmc.MergeRefused):
+        bmc.check_merge(REPO, 7, HEAD, open_pr)
 
 
 def test_check_merge_head_changed_is_retry(open_pr) -> None:  # T50
-    with pytest.raises(bt.BriefToolError) as exc:
-        bt.check_merge(REPO, 7, "9" * 40, open_pr)
-    assert exc.value.retry and not isinstance(exc.value, bt.MergeRefused)
+    with pytest.raises(bmc.CheckError) as exc:
+        bmc.check_merge(REPO, 7, "9" * 40, open_pr)
+    assert exc.value.retry and not isinstance(exc.value, bmc.MergeRefused)
 
 
 @pytest.mark.parametrize("fact", ["pr", "file", "policy", "default"])
 def test_check_merge_unavailable_is_retry(open_pr, fact) -> None:  # T50
     open_pr.unavailable_facts.add(fact)
-    with pytest.raises(bt.BriefToolError) as exc:
-        bt.check_merge(REPO, 7, HEAD, open_pr)
+    with pytest.raises(bmc.CheckError) as exc:
+        bmc.check_merge(REPO, 7, HEAD, open_pr)
     assert exc.value.retry
 
 
@@ -822,15 +823,23 @@ def test_check_merge_ignores_body_and_labels(open_pr) -> None:  # T50, T23
     # только содержимое головы; «правильное» тело неверную заявку не спасает.
     open_pr.files[(HEAD, f"{DIR}/{ar.FILE_NAME}")] = ar.render(request(ws_id="WS-2"))
     assert "body" not in BriefPrFacts.__dataclass_fields__
-    assert bt.check_merge(REPO, 7, HEAD, open_pr) == P  # ws_id не связывает с прогоном
+    assert bmc.check_merge(REPO, 7, HEAD, open_pr) == P  # ws_id не связывает с прогоном
 
 
-@pytest.mark.parametrize(("exc", "code"), [("MergeRefused", 3), ("retry", 2)])
+@pytest.mark.parametrize(
+    ("exc", "code"), [("ok", 0), ("MergeRefused", 3), ("retry", 2), ("other", 1)]
+)
 def test_check_merge_cli_exit_codes(monkeypatch, capsys, exc, code) -> None:
-    def fake(repo, pr, head, ops):
+    def fake(repo, pr, head, facts):
         if exc == "MergeRefused":
-            raise bt.MergeRefused("нет")
-        raise bt.BriefToolError("сеть", retry=True)
+            raise bmc.MergeRefused("нет")
+        if exc == "retry":
+            raise bmc.CheckError("сеть", retry=True)
+        if exc == "other":
+            raise bmc.CheckError("прочее")
+        return P
 
-    monkeypatch.setattr(bt, "check_merge", fake)
-    assert bt.main(["check-merge", "--repo", REPO, "--pr", "7", "--head", HEAD]) == code
+    monkeypatch.setattr(bmc, "check_merge", fake)
+    assert bmc.main(["--repo", REPO, "--pr", "7", "--head", HEAD]) == code
+    out = capsys.readouterr().out
+    assert out == (f"{P}\n" if code == 0 else "")  # stdout — только пин (B1)

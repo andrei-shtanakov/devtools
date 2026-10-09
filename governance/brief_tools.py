@@ -2,13 +2,14 @@
 
 `propose` — brief-PR (бриф + заявка на одобрение) из customer-прогона в
 `brief_ready`; `approve` — зеркало человеческого мержа через
-`discovery approve`; `check-merge` — проверка заявки brief-PR перед
-человеческим мержем (`human-merge.sh`). Ни у одной обёртки нет леджера:
-состояние предложения — в фордже, повтор восстанавливается его чтением.
+`discovery approve`. Проверка brief-PR перед человеческим мержем — НЕ здесь:
+её исполняет `human-merge.sh` с полномочиями человека, поэтому она в узком
+защищённом `governance/brief_merge_check.py` (ревью #573). Ни у одной
+обёртки нет леджера: состояние предложения — в фордже, повтор
+восстанавливается его чтением.
 
-CLI: `python -m governance.brief_tools {propose,approve,check-merge} …`;
-коды: 0 — результат есть; 1 — отказ; 2 — факт не установлен (повторите);
-3 — отказ проверки заявки (`check-merge`).
+CLI: `python -m governance.brief_tools {propose,approve} …`;
+коды: 0 — результат есть; 1 — отказ; 2 — факт не установлен (повторите).
 """
 
 from __future__ import annotations
@@ -409,63 +410,6 @@ def _judge_approve(reply, target: Path, act: brief_provenance.Act) -> None:
         raise BriefToolError(f"подписанный бриф не годится в upstream: {exc}") from exc
 
 
-class MergeRefused(BriefToolError):
-    """Заявка brief-PR не прошла проверку перед человеческим мержем (код 3)."""
-
-
-def check_merge(repo: str, pr: int, head: str, ops) -> str:
-    """§11.3 п.6: проверка brief-PR перед мержем по ПРОВЕРЕННОЙ голове `head`.
-
-    Заявка и бриф читаются форджем по `head`; мерж вызывающий пинует тем же
-    SHA. Тело и метки PR в решении не участвуют. Возвращает пин политики.
-    """
-    facts = _fact(ops.brief_pr_fact(repo, pr), f"PR #{pr}").value
-    if facts.state != "OPEN":
-        raise MergeRefused(f"brief-PR #{pr} не открыт ({facts.state})")
-    if facts.head_sha != head:
-        raise BriefToolError(
-            f"голова PR #{pr} — {facts.head_sha}, проверялась {head}: перепроверьте",
-            retry=True,
-        )
-    if not facts.head_ref.startswith("brief/"):
-        raise MergeRefused(f"PR #{pr} — не brief-PR ({facts.head_ref})")
-    default = _fact(ops.default_branch_fact(repo), "ветка по умолчанию").value
-    if facts.base_ref != default.name:
-        raise MergeRefused(f"база PR #{pr} — {facts.base_ref}, не {default.name}")
-    dir_ = brief_provenance.files_dir(facts)
-    if isinstance(dir_, brief_provenance.Refusal):
-        raise MergeRefused(dir_.detail)
-    texts = {}
-    for name in (approval_request.FILE_NAME, approval_request.BRIEF):
-        fact = _fact(ops.repo_file_fact(repo, head, f"{dir_}/{name}"), name)
-        if fact.outcome is not Outcome.FOUND:
-            raise MergeRefused(f"в голове PR нет {dir_}/{name}")
-        texts[name] = fact.value
-    try:
-        req = approval_request.parse(texts[approval_request.FILE_NAME])
-    except approval_request.RequestError as exc:
-        raise MergeRefused(f"заявка: {exc}") from exc
-    if (
-        req.policy_repo,
-        req.policy_ref,
-        req.policy_path,
-    ) != policy_rule.policy_source():
-        raise MergeRefused("координаты политики заявки ≠ SSOT")
-    try:
-        own = discovery_approval.self_hash(texts[approval_request.BRIEF])
-    except discovery_approval.NotABrief as exc:
-        raise MergeRefused(f"бриф PR: {exc}") from exc
-    if own != req.brief_self_hash:
-        raise MergeRefused("brief_self_hash заявки ≠ брифу той же головы")
-    current = _current_policy(ops)
-    if req.policy_sha != current:
-        raise MergeRefused(
-            f"политика сменилась после предложения (пин {req.policy_sha}, "
-            f"актуальная {current}) — мерж не создал бы годного акта; --repropose"
-        )
-    return req.policy_sha
-
-
 def main(argv: list[str] | None = None) -> int:
     """CLI обёрток brief-маршрута."""
     parser = argparse.ArgumentParser(prog="brief_tools")
@@ -475,10 +419,6 @@ def main(argv: list[str] | None = None) -> int:
     p_approve = sub.add_parser("approve", help="зеркало мержа brief-PR")
     p_approve.add_argument("--run", required=True)
     p_approve.add_argument("--pr", required=True, type=int)
-    p_check = sub.add_parser("check-merge", help="заявка brief-PR перед мержем")
-    p_check.add_argument("--repo", required=True)
-    p_check.add_argument("--pr", required=True, type=int)
-    p_check.add_argument("--head", required=True)
     args = parser.parse_args(argv)
     from governance.ops import RealOps
 
@@ -490,19 +430,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "approve":
             approve(args.run, args.pr, ops)
             return 0
-        if args.command == "check-merge":
-            pin = check_merge(args.repo, args.pr, args.head, ops)
-            # stdout — ТОЛЬКО проверенный пин: его забирает human-merge.sh и
-            # по нему же авторизует мержера (ревью части B, B1).
-            print(f"brief-PR #{args.pr}: заявка годна", file=sys.stderr)
-            print(pin)
-            return 0
     except rl.LockBusy as exc:
         print(f"brief-tools: {exc}", file=sys.stderr)
         return 1
-    except MergeRefused as exc:
-        print(f"brief-tools: {exc}", file=sys.stderr)
-        return 3
     except BriefToolError as exc:
         print(f"brief-tools: {exc}", file=sys.stderr)
         return 2 if exc.retry else 1
