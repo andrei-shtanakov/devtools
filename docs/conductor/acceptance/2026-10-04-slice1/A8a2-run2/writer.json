@@ -1,0 +1,32 @@
+{
+ "run_id": "2026-10-04T092010Z",
+ "graph_state": "complete",
+ "run_level": 1,
+ "roadmap": {
+  "source": "origin",
+  "sha": "74c6864c3b3a892fdf0ff49c26c15aeab1fe4093",
+  "valid": true
+ },
+ "writer": {
+  "is_writer": true,
+  "reason": "запись",
+  "level_cap": 3,
+  "findings": [],
+  "notes": [
+   {
+    "finding": "GR-REOPENED",
+    "subject": "conductor-sandbox#2"
+   },
+   {
+    "action": "notify_satisfied",
+    "wait": "todo://conductor-sandbox/goal-a3z|conductor-sandbox#3",
+    "reason": "канал доставки — срез 1b"
+   },
+   {
+    "action": "close_shipped",
+    "subject": "conductor-sandbox#1",
+    "status": "частично: шаг 2 (close) — отозван (enabled_actions)"
+   }
+  ]
+ }
+}

@@ -1,0 +1,26 @@
+{
+ "run_id": "2026-10-04T075417Z",
+ "graph_state": "complete",
+ "run_level": 1,
+ "roadmap": {
+  "source": "origin",
+  "sha": "419ea50d5f0fc717d3d991ef8c8e8e802dd4d51a",
+  "valid": true
+ },
+ "writer": {
+  "is_writer": true,
+  "reason": "запись",
+  "level_cap": 3,
+  "findings": [],
+  "notes": [
+   {
+    "finding": "GR-REOPENED",
+    "subject": "conductor-sandbox#2"
+   },
+   {
+    "finding": "GR-REOPENED",
+    "subject": "conductor-sandbox#3"
+   }
+  ]
+ }
+}

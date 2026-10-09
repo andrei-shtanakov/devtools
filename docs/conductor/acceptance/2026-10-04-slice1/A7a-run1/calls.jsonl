@@ -1,0 +1,2 @@
+{"attempt_id": "b0618e5a235745828e7943c2124c11a8", "body_sha256": "b1a71ad7f74ec35f7c2272d37225f0ecda0deedf44c51d42dafaa6716e29277c", "endpoint": "/repos/andrei-shtanakov/conductor-sandbox/issues/1/comments", "marker_key": "<!-- conductor:v1 close evidence=h1-dae656ca0a658e85 node=h1-07c1abd9845f613c period=h1-db48bc398f83b63d -->", "method": "POST", "repo": "andrei-shtanakov/conductor-sandbox", "seq": 1, "t": "intent"}
+{"outcome": "ok", "sent": true, "seq": 1, "status": 201, "t": "result"}

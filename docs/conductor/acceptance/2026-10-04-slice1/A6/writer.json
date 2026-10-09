@@ -1,0 +1,28 @@
+{
+ "run_id": "2026-10-04T081715Z",
+ "graph_state": "complete",
+ "run_level": 1,
+ "roadmap": {
+  "source": "origin",
+  "sha": "9344aa8f905ebd6d492cd9607074b292b28d2a7c",
+  "valid": true
+ },
+ "writer": {
+  "is_writer": true,
+  "reason": "запись",
+  "level_cap": 3,
+  "findings": [],
+  "notes": [
+   {
+    "action": "notify_satisfied",
+    "wait": "todo://conductor-sandbox/goal-a3x|conductor-sandbox#1",
+    "reason": "канал доставки — срез 1b"
+   },
+   {
+    "action": "notify_satisfied",
+    "wait": "todo://conductor-sandbox/goal-a3y|conductor-sandbox#2",
+    "reason": "канал доставки — срез 1b"
+   }
+  ]
+ }
+}

@@ -1,0 +1,5 @@
+{"attempt_id": "c1e722ca637b48a0aeed303e1ef9925c", "body_sha256": "9d660d68186abba10fe899c33280ff00b0488bae6af7d5635600d286c615e3fc", "endpoint": "/repos/andrei-shtanakov/conductor-sandbox/issues/11", "marker_key": "body", "method": "PATCH", "repo": "andrei-shtanakov/conductor-sandbox", "seq": 1, "t": "intent"}
+{"outcome": "ok", "sent": true, "seq": 1, "status": 200, "t": "result"}
+{"attempt_id": "bd47aab118b4469ab2d0487a6dcd58f9", "body_sha256": "4dc4865cf112d22fcc25662f955c1c946224466d492292f9b15b5ee2f38d2cda", "endpoint": "/repos/andrei-shtanakov/conductor-sandbox/issues/11/comments", "marker_key": "<!-- conductor:v1 q id=h1-ef3860cb2c793611 -->", "method": "POST", "repo": "andrei-shtanakov/conductor-sandbox", "seq": 2, "t": "intent"}
+{"outcome": "ok", "sent": true, "seq": 2, "status": 201, "t": "result"}
+{"t": "run-end"}

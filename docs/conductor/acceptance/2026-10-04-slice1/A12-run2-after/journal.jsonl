@@ -1,0 +1,2 @@
+{"action": "close_shipped", "admissible": false, "allowed": null, "op": "close", "outcome": "revoked_all", "reason": "карантин", "subject": "conductor-sandbox#1", "target": "andrei-shtanakov/conductor-sandbox#1"}
+{"action": "nudge", "admissible": null, "allowed": null, "op": "comment", "outcome": "revoked_all", "reason": "карантин", "subject": "conductor-sandbox-outside#1", "target": "andrei-shtanakov/conductor-sandbox-outside#1"}

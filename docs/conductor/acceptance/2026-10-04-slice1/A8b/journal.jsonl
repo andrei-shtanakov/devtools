@@ -1,0 +1,5 @@
+{"action": "owner_queue", "admissible": false, "allowed": null, "op": "body", "outcome": "revoked_all", "reason": "autonomy", "subject": "andrei-shtanakov/conductor-sandbox", "target": "andrei-shtanakov/conductor-sandbox#11"}
+{"action": "owner_queue", "admissible": null, "allowed": null, "op": "comment", "outcome": "revoked_all", "reason": "autonomy", "subject": "andrei-shtanakov/conductor-sandbox", "target": "andrei-shtanakov/conductor-sandbox#11"}
+{"action": "close_shipped", "admissible": null, "allowed": null, "op": "comment", "outcome": "revoked_all", "reason": "autonomy", "subject": "conductor-sandbox#3", "target": "andrei-shtanakov/conductor-sandbox#3"}
+{"action": "close_shipped", "admissible": null, "allowed": null, "op": "close", "outcome": "revoked_all", "reason": "autonomy", "subject": "conductor-sandbox#3", "target": "andrei-shtanakov/conductor-sandbox#3"}
+{"action": "nudge", "admissible": null, "allowed": null, "op": "comment", "outcome": "revoked_all", "reason": "autonomy", "subject": "conductor-sandbox-outside#1", "target": "andrei-shtanakov/conductor-sandbox-outside#1"}

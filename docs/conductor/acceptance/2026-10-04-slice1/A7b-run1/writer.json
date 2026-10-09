@@ -1,0 +1,25 @@
+{
+ "run_id": "2026-10-04T080604Z",
+ "graph_state": "complete",
+ "run_level": 1,
+ "roadmap": {
+  "source": "origin",
+  "sha": "c7c5103e83601ccf2ed2b3a814b812baef596958",
+  "valid": true
+ },
+ "writer": {
+  "is_writer": true,
+  "reason": "точка остановки after_send",
+  "notes": [
+   {
+    "finding": "GR-REOPENED",
+    "subject": "conductor-sandbox#3"
+   },
+   {
+    "action": "notify_satisfied",
+    "wait": "todo://conductor-sandbox/goal-a3y|conductor-sandbox#2",
+    "reason": "канал доставки — срез 1b"
+   }
+  ]
+ }
+}

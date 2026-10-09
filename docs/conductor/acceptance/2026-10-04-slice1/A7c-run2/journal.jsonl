@@ -1,0 +1,2 @@
+{"action": "owner_queue", "admissible": false, "allowed": null, "op": "body", "outcome": "delay", "reason": "неопределённая попытка моложе 60 мин", "subject": "andrei-shtanakov/conductor-sandbox", "target": "andrei-shtanakov/conductor-sandbox#11"}
+{"stop_point": "after_intent"}

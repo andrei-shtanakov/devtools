@@ -1,0 +1,5 @@
+{"action": "owner_queue", "admissible": false, "allowed": null, "op": "body", "outcome": "delay", "reason": "неопределённая попытка моложе 60 мин", "subject": "andrei-shtanakov/conductor-sandbox", "target": "andrei-shtanakov/conductor-sandbox#11"}
+{"action": "close_shipped", "admissible": false, "allowed": null, "op": "comment", "outcome": "delay", "reason": "неопределённая попытка моложе 60 мин", "subject": "conductor-sandbox#3", "target": "andrei-shtanakov/conductor-sandbox#3"}
+{"action": "close_shipped", "admissible": null, "allowed": null, "op": "close", "outcome": "skipped_dependent", "reason": "delay", "subject": "conductor-sandbox#3", "target": "andrei-shtanakov/conductor-sandbox#3"}
+{"action": "nudge", "admissible": false, "allowed": null, "op": "comment", "outcome": "fence", "reason": "FENCE", "subject": "conductor-sandbox-outside#1", "target": "andrei-shtanakov/conductor-sandbox-outside#1"}
+{"action": "pr_nudge", "admissible": null, "allowed": null, "op": "comment", "outcome": "revoked_action", "reason": "enabled_actions", "subject": "conductor-sandbox!10", "target": "andrei-shtanakov/conductor-sandbox#10"}

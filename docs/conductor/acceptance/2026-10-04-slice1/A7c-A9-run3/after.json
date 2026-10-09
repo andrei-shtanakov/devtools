@@ -1,0 +1,457 @@
+{
+ "repo": "andrei-shtanakov/conductor-sandbox",
+ "items": [
+  {
+   "number": 1,
+   "is_pr": false,
+   "title": "A3a: issue X — отгружено, переоткрыто",
+   "state": "closed",
+   "state_reason": "completed",
+   "labels": [],
+   "comments": [
+    {
+     "author": "conductorsandbox[bot]",
+     "created_at": "2026-10-04T07:54:48Z",
+     "updated_at": "2026-10-04T07:54:48Z",
+     "marker": {
+      "kind": "close",
+      "fields": {
+       "evidence": "h1-6b84456794bcaf4e",
+       "node": "h1-07c1abd9845f613c",
+       "period": "h1-410b48034f09563c"
+      }
+     }
+    },
+    {
+     "author": "conductorsandbox[bot]",
+     "created_at": "2026-10-04T08:01:54Z",
+     "updated_at": "2026-10-04T08:01:54Z",
+     "marker": {
+      "kind": "close",
+      "fields": {
+       "evidence": "h1-dae656ca0a658e85",
+       "node": "h1-07c1abd9845f613c",
+       "period": "h1-db48bc398f83b63d"
+      }
+     }
+    },
+    {
+     "author": "conductorsandbox[bot]",
+     "created_at": "2026-10-04T08:06:27Z",
+     "updated_at": "2026-10-04T08:06:27Z",
+     "marker": {
+      "kind": "close",
+      "fields": {
+       "evidence": "h1-0e027bf9195fbcd6",
+       "node": "h1-07c1abd9845f613c",
+       "period": "h1-68d413b932225e89"
+      }
+     }
+    },
+    {
+     "author": "conductorsandbox[bot]",
+     "created_at": "2026-10-04T08:10:03Z",
+     "updated_at": "2026-10-04T08:10:03Z",
+     "marker": {
+      "kind": "close",
+      "fields": {
+       "evidence": "h1-3febad13890255d1",
+       "node": "h1-07c1abd9845f613c",
+       "period": "h1-04ff9a714cf1da24"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "number": 2,
+   "is_pr": false,
+   "title": "A3b: issue Y — отгружено, переоткрыто",
+   "state": "open",
+   "state_reason": "reopened",
+   "labels": [],
+   "comments": [
+    {
+     "author": "conductorsandbox[bot]",
+     "created_at": "2026-10-04T07:56:12Z",
+     "updated_at": "2026-10-04T07:56:12Z",
+     "marker": {
+      "kind": "close",
+      "fields": {
+       "evidence": "h1-e3973e4049da80bd",
+       "node": "h1-5ec952489db0fa23",
+       "period": "h1-c07572b715959546"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "number": 3,
+   "is_pr": false,
+   "title": "A3d: issue Z — отгружено, переоткрыто",
+   "state": "closed",
+   "state_reason": "completed",
+   "labels": [],
+   "comments": [
+    {
+     "author": "andrei-shtanakov",
+     "created_at": "2026-10-04T08:14:50Z",
+     "updated_at": "2026-10-04T08:14:50Z",
+     "marker": {
+      "kind": "close",
+      "fields": {
+       "evidence": "h1-c593040c268e4143",
+       "node": "h1-7dc956f8d8cdb449",
+       "period": "h1-312207a54f0ea242"
+      }
+     }
+    },
+    {
+     "author": "conductorsandbox[bot]",
+     "created_at": "2026-10-04T09:17:13Z",
+     "updated_at": "2026-10-04T09:17:13Z",
+     "marker": {
+      "kind": "close",
+      "fields": {
+       "evidence": "h1-c593040c268e4143",
+       "node": "h1-7dc956f8d8cdb449",
+       "period": "h1-312207a54f0ea242"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "number": 4,
+   "is_pr": false,
+   "title": "A4: адрес цели goal-a4 (первый)",
+   "state": "open",
+   "state_reason": null,
+   "labels": [
+    "inbox"
+   ],
+   "comments": [
+    {
+     "author": "conductorsandbox[bot]",
+     "created_at": "2026-10-04T07:11:22Z",
+     "updated_at": "2026-10-04T07:11:22Z",
+     "marker": {
+      "kind": "sat",
+      "fields": {
+       "evidence": "h1-9eebf88fbd5f558f",
+       "wait": "h1-c43adc3dad8f6a71"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "number": 5,
+   "is_pr": false,
+   "title": "A4: адрес цели goal-a4 (второй)",
+   "state": "open",
+   "state_reason": null,
+   "labels": [
+    "inbox"
+   ],
+   "comments": [
+    {
+     "author": "conductorsandbox[bot]",
+     "created_at": "2026-10-04T07:11:28Z",
+     "updated_at": "2026-10-04T07:11:28Z",
+     "marker": {
+      "kind": "sat",
+      "fields": {
+       "evidence": "h1-9eebf88fbd5f558f",
+       "wait": "h1-c43adc3dad8f6a71"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "number": 6,
+   "is_pr": false,
+   "title": "A5: адрес продюсера pre-a5",
+   "state": "open",
+   "state_reason": null,
+   "labels": [
+    "inbox"
+   ],
+   "comments": [
+    {
+     "author": "andrei-shtanakov",
+     "created_at": "2026-10-03T05:35:15Z",
+     "updated_at": "2026-10-03T05:35:15Z",
+     "marker": null
+    },
+    {
+     "author": "conductorsandbox[bot]",
+     "created_at": "2026-10-04T07:13:17Z",
+     "updated_at": "2026-10-04T07:13:17Z",
+     "marker": {
+      "kind": "nudge",
+      "fields": {
+       "n": "1",
+       "p": "h1-2618bd22681a8f70",
+       "wait": "h1-c41760e22512998a"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "number": 7,
+   "is_pr": true,
+   "title": "Отгрузка для #1 (фикстура A3)",
+   "state": "closed",
+   "state_reason": null,
+   "labels": [],
+   "comments": []
+  },
+  {
+   "number": 8,
+   "is_pr": true,
+   "title": "Отгрузка для #2 (фикстура A3)",
+   "state": "closed",
+   "state_reason": null,
+   "labels": [],
+   "comments": []
+  },
+  {
+   "number": 9,
+   "is_pr": true,
+   "title": "Отгрузка для #3 (фикстура A3)",
+   "state": "closed",
+   "state_reason": null,
+   "labels": [],
+   "comments": []
+  },
+  {
+   "number": 10,
+   "is_pr": true,
+   "title": "Реализация goal-a4 (фикстура A6: красная проверка)",
+   "state": "open",
+   "state_reason": null,
+   "labels": [],
+   "comments": [
+    {
+     "author": "conductorsandbox[bot]",
+     "created_at": "2026-10-04T08:17:44Z",
+     "updated_at": "2026-10-04T08:17:44Z",
+     "marker": {
+      "kind": "prnudge",
+      "fields": {
+       "n": "1",
+       "pr": "h1-804567c1e893e3bd"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "number": 11,
+   "is_pr": false,
+   "title": "Очередь владельца (conductor)",
+   "state": "open",
+   "state_reason": null,
+   "labels": [
+    "owner-queue"
+   ],
+   "comments": [
+    {
+     "author": "conductorsandbox[bot]",
+     "created_at": "2026-10-04T07:07:13Z",
+     "updated_at": "2026-10-04T07:07:13Z",
+     "marker": {
+      "kind": "q",
+      "fields": {
+       "id": "h1-e34db84a8b420496"
+      }
+     }
+    },
+    {
+     "author": "conductorsandbox[bot]",
+     "created_at": "2026-10-04T07:07:17Z",
+     "updated_at": "2026-10-04T07:07:17Z",
+     "marker": {
+      "kind": "q",
+      "fields": {
+       "id": "h1-3933065d6b5fda5b"
+      }
+     }
+    },
+    {
+     "author": "conductorsandbox[bot]",
+     "created_at": "2026-10-04T07:07:20Z",
+     "updated_at": "2026-10-04T07:07:20Z",
+     "marker": {
+      "kind": "q",
+      "fields": {
+       "id": "h1-c6c46a6cd4796cc9"
+      }
+     }
+    },
+    {
+     "author": "andrei-shtanakov",
+     "created_at": "2026-10-04T07:08:40Z",
+     "updated_at": "2026-10-04T07:08:40Z",
+     "marker": null
+    },
+    {
+     "author": "andrei-shtanakov",
+     "created_at": "2026-10-04T07:08:41Z",
+     "updated_at": "2026-10-04T07:08:41Z",
+     "marker": null
+    },
+    {
+     "author": "andrei-shtanakov",
+     "created_at": "2026-10-04T07:08:43Z",
+     "updated_at": "2026-10-04T07:08:43Z",
+     "marker": null
+    },
+    {
+     "author": "conductorsandbox[bot]",
+     "created_at": "2026-10-04T07:54:43Z",
+     "updated_at": "2026-10-04T07:54:43Z",
+     "marker": {
+      "kind": "q",
+      "fields": {
+       "id": "h1-d41c485fec2c4c2f"
+      }
+     }
+    },
+    {
+     "author": "andrei-shtanakov",
+     "created_at": "2026-10-04T07:55:26Z",
+     "updated_at": "2026-10-04T07:55:26Z",
+     "marker": null
+    },
+    {
+     "author": "andrei-shtanakov",
+     "created_at": "2026-10-04T07:55:28Z",
+     "updated_at": "2026-10-04T07:55:28Z",
+     "marker": null
+    },
+    {
+     "author": "andrei-shtanakov",
+     "created_at": "2026-10-04T07:55:29Z",
+     "updated_at": "2026-10-04T07:55:29Z",
+     "marker": null
+    },
+    {
+     "author": "conductorsandbox[bot]",
+     "created_at": "2026-10-04T07:56:08Z",
+     "updated_at": "2026-10-04T07:56:08Z",
+     "marker": {
+      "kind": "q",
+      "fields": {
+       "id": "h1-9c04a173ccddbfc3"
+      }
+     }
+    },
+    {
+     "author": "andrei-shtanakov",
+     "created_at": "2026-10-04T07:56:46Z",
+     "updated_at": "2026-10-04T07:56:46Z",
+     "marker": null
+    },
+    {
+     "author": "andrei-shtanakov",
+     "created_at": "2026-10-04T07:56:47Z",
+     "updated_at": "2026-10-04T07:56:47Z",
+     "marker": null
+    },
+    {
+     "author": "conductorsandbox[bot]",
+     "created_at": "2026-10-04T07:57:28Z",
+     "updated_at": "2026-10-04T07:57:28Z",
+     "marker": {
+      "kind": "q",
+      "fields": {
+       "id": "h1-ef3860cb2c793611"
+      }
+     }
+    },
+    {
+     "author": "conductorsandbox[bot]",
+     "created_at": "2026-10-04T07:59:25Z",
+     "updated_at": "2026-10-04T07:59:25Z",
+     "marker": {
+      "kind": "q",
+      "fields": {
+       "id": "h1-5be3c18162b2c13b"
+      }
+     }
+    },
+    {
+     "author": "andrei-shtanakov",
+     "created_at": "2026-10-04T08:00:09Z",
+     "updated_at": "2026-10-04T08:00:09Z",
+     "marker": null
+    },
+    {
+     "author": "conductorsandbox[bot]",
+     "created_at": "2026-10-04T08:05:28Z",
+     "updated_at": "2026-10-04T08:05:28Z",
+     "marker": {
+      "kind": "q",
+      "fields": {
+       "id": "h1-b3f4176d427efccd"
+      }
+     }
+    },
+    {
+     "author": "andrei-shtanakov",
+     "created_at": "2026-10-04T08:05:51Z",
+     "updated_at": "2026-10-04T08:05:51Z",
+     "marker": null
+    },
+    {
+     "author": "conductorsandbox[bot]",
+     "created_at": "2026-10-04T08:08:58Z",
+     "updated_at": "2026-10-04T08:08:58Z",
+     "marker": {
+      "kind": "q",
+      "fields": {
+       "id": "h1-50ac25cdb82ffddd"
+      }
+     }
+    },
+    {
+     "author": "andrei-shtanakov",
+     "created_at": "2026-10-04T08:09:21Z",
+     "updated_at": "2026-10-04T08:09:21Z",
+     "marker": null
+    },
+    {
+     "author": "andrei-shtanakov",
+     "created_at": "2026-10-04T08:12:52Z",
+     "updated_at": "2026-10-04T08:12:52Z",
+     "marker": null
+    },
+    {
+     "author": "conductorsandbox[bot]",
+     "created_at": "2026-10-04T09:17:04Z",
+     "updated_at": "2026-10-04T09:17:04Z",
+     "marker": {
+      "kind": "q",
+      "fields": {
+       "id": "h1-ee97cb58a93b284d"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "number": 12,
+   "is_pr": true,
+   "title": "Реализация goal-a5 (двойник A6: красный без застоя)",
+   "state": "open",
+   "state_reason": null,
+   "labels": [],
+   "comments": []
+  }
+ ]
+}

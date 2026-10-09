@@ -1,0 +1,14 @@
+{
+ "run_id": "2026-10-04T081957Z",
+ "graph_state": "complete",
+ "run_level": 1,
+ "roadmap": {
+  "source": "origin",
+  "sha": "e26f3f02057e9ffa0d6cb840ca805366ba67bd01",
+  "valid": true
+ },
+ "writer": {
+  "is_writer": false,
+  "reason": "ID-MISMATCH: ключ App"
+ }
+}

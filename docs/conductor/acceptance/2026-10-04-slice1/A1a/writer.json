@@ -1,0 +1,40 @@
+{
+ "run_id": "2026-10-04T070450Z",
+ "graph_state": "complete",
+ "run_level": 0,
+ "roadmap": {
+  "source": "origin",
+  "sha": "690f39f6d61ca9d374b390da57f4812e757c5a1f",
+  "valid": true
+ },
+ "writer": {
+  "is_writer": true,
+  "reason": "тень",
+  "level_cap": 3,
+  "findings": [],
+  "notes": [
+   {
+    "finding": "GR-REOPENED",
+    "subject": "conductor-sandbox#1"
+   },
+   {
+    "finding": "GR-REOPENED",
+    "subject": "conductor-sandbox#2"
+   },
+   {
+    "finding": "GR-REOPENED",
+    "subject": "conductor-sandbox#3"
+   },
+   {
+    "action": "nudge",
+    "wait": "todo://conductor-sandbox/goal-a4|todo://conductor-sandbox/pre-a4",
+    "reason": "нет адреса"
+   },
+   {
+    "action": "pr_nudge",
+    "pr": "conductor-sandbox!10",
+    "reason": "нет ранга"
+   }
+  ]
+ }
+}

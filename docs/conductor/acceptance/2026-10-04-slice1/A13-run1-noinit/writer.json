@@ -1,0 +1,14 @@
+{
+ "run_id": "2026-10-04T102833Z",
+ "graph_state": "complete",
+ "run_level": 1,
+ "roadmap": {
+  "source": "origin",
+  "sha": "446c6930a3c0d480e1fd681b9731ca69dec43d79",
+  "valid": true
+ },
+ "writer": {
+  "is_writer": false,
+  "reason": "OPSTATE-UNINITIALIZED"
+ }
+}

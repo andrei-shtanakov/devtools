@@ -1,0 +1,4 @@
+exit=0
+run_id=2026-10-04T092010Z
+частичное выполнение:
+  conductor-sandbox#1: частично: шаг 2 (close) — отозван (enabled_actions)

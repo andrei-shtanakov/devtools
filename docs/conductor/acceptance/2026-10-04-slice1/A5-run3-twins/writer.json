@@ -1,0 +1,28 @@
+{
+ "is_writer": true,
+ "reason": "запись",
+ "level_cap": 3,
+ "findings": [],
+ "notes": [
+  {
+   "action": "notify_satisfied",
+   "wait": "todo://conductor-sandbox/goal-a3x|conductor-sandbox#1",
+   "reason": "канал доставки — срез 1b"
+  },
+  {
+   "action": "notify_satisfied",
+   "wait": "todo://conductor-sandbox/goal-a3y|conductor-sandbox#2",
+   "reason": "канал доставки — срез 1b"
+  },
+  {
+   "action": "notify_satisfied",
+   "wait": "todo://conductor-sandbox/goal-a3z|conductor-sandbox#3",
+   "reason": "канал доставки — срез 1b"
+  },
+  {
+   "action": "nudge",
+   "wait": "todo://conductor-sandbox/goal-a5u|todo://conductor-sandbox/pre-a5u",
+   "reason": "нет ранга"
+  }
+ ]
+}
