@@ -38,6 +38,7 @@ SAFE_COMMANDS = frozenset(
         # функции самих скриптов и подключаемых ssot_env.sh/approval_branches.sh
         # (их тела проверяются тем же разбором)
         "die", "usage", "gh_a", "gh_h", "approval_globs", "ssot_key",
+        "brief_check_failed",
     }
 )  # fmt: skip
 _KEYWORDS = {"then", "else", "do", "if", "elif", "while", "until", "!", "time"}
@@ -48,6 +49,23 @@ _PY_UV = re.compile(
     r'python -I "\$script_dir/([^"]+\.py)"(\s.*)?$'
 )
 _ASSIGN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(\"[^\"]*\"|'[^']*'|\S*)(\s+|$)")
+
+
+#: Сверка по сырому тексту, не зависящая от разбора (ревью #573, круг 3:
+#: автомат `case` пропускал команду после блока). Слово-интерпретатор
+#: (вкл. путь `/usr/bin/python3`, версию `python3.12`) и ссылка на код в
+#: дереве — только в распознанных запусках.
+_RAW_PYTHON = re.compile(r"(?<![\w.-])(?:/[\w./-]*/)?python[0-9.]*(?![\w.-])")
+_RAW_UV = re.compile(r"(?<![\w.-])uv(?![\w.-])")
+_RAW_REF = re.compile(r"\$\{?script_dir\}?/([A-Za-z0-9_./-]+)")
+_CODE_SUFFIXES = (".py", ".sh")
+
+
+def _raw_lines(text: str) -> str:
+    """Текст без строк-комментариев (сверка по сырому тексту)."""
+    return "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
 
 
 @dataclass(frozen=True)
@@ -152,19 +170,26 @@ def _strip_keywords(command: str) -> str:
 def _scan(root: Path, script: str, seen: set[str]) -> tuple[list[Launch], list[str]]:
     found: list[Launch] = []
     problems: list[str] = []
+    text = (root / script).read_text(encoding="utf-8")
+    case_depth = 0
     expect_pattern = False
-    for segment, term in _commands((root / script).read_text(encoding="utf-8")):
+    for segment, term in _commands(text):
         command, env = _strip_assignments(_strip_keywords(segment))
         command = _strip_keywords(command)
         word = command.split(" ", 1)[0] if command else ""
         if word == "case":
+            case_depth += 1
             expect_pattern = True
             continue
-        if expect_pattern and term in (")", "|"):  # шаблон ветки case (и альтернативы)
-            expect_pattern = term == "|"
+        if word == "esac":
+            case_depth = max(case_depth - 1, 0)
+            expect_pattern = False
+            continue
+        if case_depth and expect_pattern and term in (")", "|"):
+            expect_pattern = term == "|"  # шаблон ветки case (и альтернативы)
             continue
         if term == ";;":
-            expect_pattern = True
+            expect_pattern = case_depth > 0
         if term == "(" and command and " " not in command:
             continue  # определение функции `name()`; тело разбирается отдельно
         if not command:
@@ -187,7 +212,45 @@ def _scan(root: Path, script: str, seen: set[str]) -> tuple[list[Launch], list[s
             found.append(Launch(script, "py-uv", m.group(1)))
         elif word not in SAFE_COMMANDS:
             problems.append(f"{script}: нераспознанный запуск: {segment}")
+    problems += _raw_check(script, text, [x for x in found if x.script == script])
     return found, problems
+
+
+def _raw_check(script: str, text: str, own: list[Launch]) -> list[str]:
+    """Второй слой: по сырому тексту, без разбора. Число интерпретаторов и `uv`
+    — ровно по распознанным запускам; ссылка на код в дереве — только запуск."""
+    raw = _raw_lines(text)
+    problems: list[str] = []
+    py = [x for x in own if x.kind in ("py-stdlib", "py-uv")]
+    if len(_RAW_PYTHON.findall(raw)) != len(py):
+        problems.append(
+            f"{script}: упоминаний интерпретатора {len(_RAW_PYTHON.findall(raw))}, "
+            f"распознанных запусков {len(py)} — нераспознанный запуск"
+        )
+    uv = [x for x in own if x.kind == "py-uv"]
+    if len(_RAW_UV.findall(raw)) != len(uv):
+        problems.append(f"{script}: `uv` вне распознанного запуска")
+    launched = {x.path for x in own}
+    for ref in _RAW_REF.findall(raw):
+        name = ref.rsplit("/", 1)[-1]
+        is_code = ref.endswith(_CODE_SUFFIXES) or "." not in name
+        if is_code and not ref.endswith("/") and ref not in launched:
+            problems.append(f"{script}: ссылка на код {ref} вне распознанного запуска")
+    return problems
+
+
+def data_refs(root: Path, scripts=SCRIPTS) -> set[str]:
+    """Файлы данных, которые скрипты (и подключаемые файлы) читают из дерева."""
+    found, _ = launches(root, scripts)
+    files = set(scripts) | {x.path for x in found if x.kind == "source"}
+    refs: set[str] = set()
+    for f in files:
+        if (root / f).is_file():
+            for ref in _RAW_REF.findall(_raw_lines((root / f).read_text("utf-8"))):
+                name = ref.rsplit("/", 1)[-1]
+                if not (ref.endswith(_CODE_SUFFIXES) or "." not in name):
+                    refs.add(ref)
+    return refs
 
 
 def launches(root: Path, scripts=SCRIPTS) -> tuple[list[Launch], list[str]]:
@@ -431,6 +494,8 @@ def violations(
         if launch.kind == "py-uv":
             for f in UV_DEPENDENCY_FILES:
                 required.setdefault(f, f"зависимости {launch.path}")
+    for ref in data_refs(root, scripts):
+        required.setdefault(ref, "данные, читаемые скриптом мержа")
     for path, why in sorted(required.items()):
         if not _covered(path, authority_prefixes):
             problems.append(f"{path} ({why}) — вне authority-root")
@@ -449,4 +514,4 @@ def required_paths(root: Path, scripts=SCRIPTS) -> set[str]:
             out |= closure(root, launch.path)[0]
         if launch.kind == "py-uv":
             out |= set(UV_DEPENDENCY_FILES)
-    return out
+    return out | data_refs(root, scripts)

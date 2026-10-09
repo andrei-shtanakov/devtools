@@ -323,12 +323,22 @@ def test_brief_pr_is_checked_by_head_then_merged_with_same_sha(fleet: Fleet) -> 
     assert fleet.merge_calls() and f"sha={HEAD_SHA}" in fleet.merge_calls()[0]
 
 
-@pytest.mark.parametrize("code", [2, 3])
-def test_brief_pr_refusal_stops_before_merge(fleet: Fleet, code: int) -> None:
+@pytest.mark.parametrize(
+    ("code", "rc", "phrase"),
+    [
+        (3, 3, "заявка отклонена"),
+        (2, 2, "факт форджа не установлен — повторите"),
+        (1, 2, "проверяльщик не запустился (код 1)"),
+        (127, 2, "проверяльщик не запустился (код 127)"),
+    ],
+)
+def test_brief_pr_refusal_stops_before_merge(
+    fleet: Fleet, code: int, rc: int, phrase: str
+) -> None:  # ревью #573, круг 3: исходы не сворачиваются в одну фразу
     res = fleet.run(GH_STUB_HEADREF="brief/WS-1", UV_STUB_EXIT=str(code))
-    assert res.returncode == code
+    assert res.returncode == rc
     assert fleet.merge_calls() == []
-    assert "заявка не прошла проверку" in res.stderr
+    assert phrase in res.stderr
 
 
 def test_brief_pr_check_runs_under_human_profile(fleet: Fleet, tmp_path: Path) -> None:

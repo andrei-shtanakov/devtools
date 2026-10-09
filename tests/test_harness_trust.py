@@ -22,7 +22,9 @@ ROOT = Path(__file__).resolve().parent.parent
 #: элемент ниже проверяется снятием защиты.
 EXPECTED_CHAIN = [
     "approval_branches.sh",
+    "contracts/approval-branches/v1/patterns.env",
     "contracts/approval-policy-source/v1/source.env",
+    "contracts/authority-root/v1/paths.env",
     "contracts/discovery-approval/v1",
     "contracts/discovery-approval/v1/approval.py",
     "contracts/discovery-approval/v1/gate_check.py",
@@ -212,6 +214,40 @@ def test_case_patterns_and_function_definitions_are_not_launches(
     assert ht.violations(root, ALL, ALL) == []
 
 
+_CASE_BLOCK = 'case "$x" in\n    a|b) : ;;\n    *) die "нет" ;;\nesac\n'
+
+
+def test_launch_right_after_case_block_fails(tmp_path: Path) -> None:
+    """Ревью #573, круг 3: команда после `;;`/`esac`, завершённая `|`,
+    пропускалась автоматом case как «шаблон»."""
+    launch = 'pin=$(python3 -I "$script_dir/governance/new_check.py" | tail -n 1)\n'
+    root = _repo(tmp_path, _GOOD_LAUNCH + _CASE_BLOCK + launch)
+    (root / "governance" / "new_check.py").write_text("X = 1\n")
+    found = ht.violations(root, ALL, ALL)  # new_check — вне обоих списков
+    assert any(v.startswith("governance/new_check.py ") for v in found), found
+
+
+def test_raw_layer_catches_interpreter_the_parser_reads_as_pattern(
+    tmp_path: Path,
+) -> None:  # второй слой независим от разбора
+    root = _repo(tmp_path, _GOOD_LAUNCH + 'case "$x" in\n    python3) : ;;\nesac\n')
+    found = ht.violations(root, ALL, ALL)
+    assert any("упоминаний интерпретатора" in v for v in found), found
+
+
+def test_code_ref_outside_launch_fails(tmp_path: Path) -> None:
+    root = _repo(tmp_path, _GOOD_LAUNCH + 'x="$script_dir/governance/a.py"\n')
+    found = ht.violations(root, ALL, ALL)
+    assert any("ссылка на код governance/a.py" in v for v in found), found
+
+
+def test_unprotected_data_read_by_script_fails(tmp_path: Path) -> None:
+    root = _repo(tmp_path, _GOOD_LAUNCH + 'src="$script_dir/conf/x.env"\n')
+    found = ht.violations(root, ALL, ALL)
+    assert any(v.startswith("conf/x.env ") for v in found), found
+    assert ht.violations(root, (*ALL, "conf/"), (*ALL, "conf/")) == []  # двойник
+
+
 def test_tree_on_sys_path_of_the_process_fails(tmp_path: Path) -> None:
     """Ревью #573, круг 2: корень репо в sys.path впереди stdlib — подмена
     `json.py`/`argparse.py` из незащищённого корня."""
@@ -242,9 +278,18 @@ def test_entry_that_needs_tree_on_sys_path_fails(tmp_path: Path) -> None:
 def test_text_in_quotes_is_not_a_launch(tmp_path: Path) -> None:
     root = _repo(
         tmp_path,
-        _GOOD_LAUNCH + 'die 3 "мерж — \\\n. это не source и python3 не запуск"\n',
+        _GOOD_LAUNCH + 'die 3 "мерж — \\\n. это не source и не запуск"\n',
     )
     assert ht.violations(root, ALL, ALL) == []
+
+
+def test_interpreter_word_in_message_is_conservatively_refused(
+    tmp_path: Path,
+) -> None:
+    """Слой сырого текста осторожен намеренно: слово-интерпретатор даже в
+    тексте сообщения — отказ (лишний отказ дешевле пропуска)."""
+    root = _repo(tmp_path, _GOOD_LAUNCH + 'die 3 "нужен python3"\n')
+    assert any("упоминаний интерпретатора" in v for v in ht.violations(root, ALL, ALL))
 
 
 def test_stdlib_launch_with_third_party_fails(tmp_path: Path) -> None:

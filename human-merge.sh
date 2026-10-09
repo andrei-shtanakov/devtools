@@ -38,9 +38,10 @@
 #
 # Коды выхода: 0 — мерж выполнен (или показан при --dry-run); 2 —
 # аргументы/профиль/состояние PR (в т.ч. тело без строки `policy:`, версия
-# политики не прочитана); 3 — актор не авторизован (логин вне политики,
-# политика сменилась после candidate, выставленная переменная); 4 — форджа
-# отклонила мерж.
+# политики не прочитана; у brief-PR — факт форджа не установлен или
+# проверяльщик не запустился); 3 — актор не авторизован (логин вне политики,
+# политика сменилась после candidate, выставленная переменная) либо заявка
+# brief-PR отклонена; 4 — форджа отклонила мерж.
 set -eu
 
 usage() {
@@ -151,6 +152,16 @@ head_ref=$(printf '%s\n' "$facts" | sed -n '5p')
 # без uv.toml/.env (`--no-config --no-env-file`). Форму распознаёт тест
 # инварианта; иная — отказ теста.
 brief_check_env="${HOME}/.cache/devtools/brief-merge-check-venv"
+# Коды проверяльщика (brief_merge_check.main) не сворачиваются в одну фразу
+# (ревью #573, круг 3): 3 — заявка отклонена; 2 — факт не установлен,
+# повторите; прочее (1, 127 — проверяльщик не запустился) — код 2 контракта.
+brief_check_failed() {
+    case "$1" in
+        3) die 3 "brief-PR ${slug}#${pr}: заявка отклонена — мерж не выполняется" ;;
+        2) die 2 "brief-PR ${slug}#${pr}: факт форджа не установлен — повторите" ;;
+        *) die 2 "brief-PR ${slug}#${pr}: проверяльщик не запустился (код $1) — мерж не выполняется" ;;
+    esac
+}
 brief_pin=""
 case "$head_ref" in
     brief/*)
@@ -160,13 +171,13 @@ case "$head_ref" in
                 uv run --frozen --exact --no-config --no-env-file \
                 python -I "$script_dir/governance/brief_merge_check.py" \
                 --repo "$slug" --pr "$pr" --head "$head_oid") \
-                || die $? "brief-PR ${slug}#${pr}: заявка не прошла проверку — мерж не выполняется"
+                || brief_check_failed $?
         else
             brief_pin=$(cd "$script_dir" && UV_PROJECT_ENVIRONMENT="$brief_check_env" \
                 uv run --frozen --exact --no-config --no-env-file \
                 python -I "$script_dir/governance/brief_merge_check.py" \
                 --repo "$slug" --pr "$pr" --head "$head_oid") \
-                || die $? "brief-PR ${slug}#${pr}: заявка не прошла проверку — мерж не выполняется"
+                || brief_check_failed $?
         fi
         brief_pin=$(printf '%s\n' "$brief_pin" | tail -n 1)
         case "$brief_pin" in
