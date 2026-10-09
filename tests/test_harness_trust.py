@@ -86,6 +86,19 @@ _GOOD_LAUNCH = (
     "    uv run --frozen --exact --no-config --no-env-file \\\n"
     '    python -I "$script_dir/governance/entry.py" --pr 7) || exit 2\n'
 )
+#: Загрузка пакета без дерева в sys.path — та же, что в brief_merge_check.
+BOOTSTRAP = """import sys
+from pathlib import Path
+if __package__ in (None, "") and "governance" not in sys.modules:
+    import importlib.util
+    _d = Path(__file__).resolve().parent
+    _s = importlib.util.spec_from_file_location(
+        "governance", _d / "__init__.py", submodule_search_locations=[str(_d)]
+    )
+    _m = importlib.util.module_from_spec(_s)
+    sys.modules["governance"] = _m
+    _s.loader.exec_module(_m)
+"""
 ALL = (
     "governance/__init__",
     "governance/entry",
@@ -100,7 +113,9 @@ def _repo(tmp_path: Path, launch: str = _GOOD_LAUNCH, *, b_lazy: bool = False) -
     root = tmp_path / "repo"
     (root / "governance").mkdir(parents=True)
     (root / "governance" / "__init__.py").write_text("")
-    (root / "governance" / "entry.py").write_text("from governance import a\n")
+    (root / "governance" / "entry.py").write_text(
+        BOOTSTRAP + "from governance import a\n"
+    )
     if b_lazy:  # транзитивный ленивый импорт внутри функции
         (root / "governance" / "a.py").write_text(
             "def f():\n    from governance import b\n    return b\n"
@@ -159,6 +174,14 @@ def test_unprotected_link_fails(tmp_path: Path, unprotected: str, b_lazy: bool) 
         'echo "итог: $(python3 "$script_dir/governance/entry.py")"\n',  # в кавычках
         'source "$script_dir/ssot_env.sh"\n',
         'eval "$(cat "$script_dir/x")"\n',
+        # ревью #573, круг 2: формы, которые пропускал перечень «опасных» слов
+        'env python3 -I "$script_dir/governance/entry.py"\n',
+        'command python3 -I "$script_dir/governance/entry.py"\n',
+        '/usr/bin/python3 -I "$script_dir/governance/entry.py"\n',
+        'python3.12 -I "$script_dir/governance/entry.py"\n',
+        "$script_dir/governance/entry.py\n",
+        'py=python3\n$py -I "$script_dir/governance/entry.py"\n',
+        "unknown_helper --pr 7\n",
     ],
 )
 def test_unrecognized_launch_fails(tmp_path: Path, launch: str) -> None:
@@ -167,6 +190,53 @@ def test_unrecognized_launch_fails(tmp_path: Path, launch: str) -> None:
         "нераспознанный запуск" in v or "UV_PROJECT_ENVIRONMENT" in v
         for v in ht.violations(root, ALL, ALL)
     )
+
+
+def test_launch_inside_sourced_shell_file_fails(tmp_path: Path) -> None:
+    root = _repo(tmp_path, _GOOD_LAUNCH + '. "$script_dir/helper.sh"\n')
+    (root / "helper.sh").write_text('python3 "$script_dir/governance/entry.py"\n')
+    found = ht.violations(root, (*ALL, "helper.sh"), (*ALL, "helper.sh"))
+    assert any(v.startswith("helper.sh: нераспознанный запуск") for v in found), found
+
+
+def test_case_patterns_and_function_definitions_are_not_launches(
+    tmp_path: Path,
+) -> None:  # двойник детектора
+    script = (
+        _GOOD_LAUNCH
+        + 'die() {\n    echo "$1" >&2\n    exit 2\n}\n'
+        + 'case "$x" in\n    --squash|--merge) m="$1" ;;\n'
+        + '    CLEAN|HAS_HOOKS) : ;;\n    ""|*[!0-9]*) die "нет" ;;\n    *) break ;;\nesac\n'
+    )
+    root = _repo(tmp_path, script)
+    assert ht.violations(root, ALL, ALL) == []
+
+
+def test_tree_on_sys_path_of_the_process_fails(tmp_path: Path) -> None:
+    """Ревью #573, круг 2: корень репо в sys.path впереди stdlib — подмена
+    `json.py`/`argparse.py` из незащищённого корня."""
+    root = _repo(tmp_path)
+    (root / "governance" / "entry.py").write_text(
+        "import sys\nfrom pathlib import Path\n"
+        "sys.path.insert(0, str(Path(__file__).resolve().parent.parent))\n"
+        "from governance import a\n"
+    )
+    found = ht.violations(root, ALL, ALL)
+    assert any("каталог дерева в sys.path" in v for v in found), found
+
+
+def test_shadow_file_in_root_does_not_reach_the_process(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    (root / "governance" / "b.py").write_text("import json\n")
+    (root / "json.py").write_text('raise SystemExit("SHADOWED")\n')
+    assert ht.violations(root, ALL, ALL) == []  # вход грузится, подмены нет
+
+
+def test_entry_that_needs_tree_on_sys_path_fails(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    (root / "governance" / "entry.py").write_text("from governance import a\n")
+    found = ht.violations(root, ALL, ALL)
+    assert any("не загружается без дерева" in v for v in found), found
 
 
 def test_text_in_quotes_is_not_a_launch(tmp_path: Path) -> None:

@@ -9694,6 +9694,42 @@ def test_consistent_local_tamper_cannot_pass(  # T30 + P1 ревью r1
     assert _stop_reason("r-e4").startswith("operator_brief")
 
 
+def test_non_utf8_consistent_tamper_is_named_stop(
+    tmp_path, runs_root, monkeypatch
+) -> None:  # ревью #573, круг 2
+    ops, _ = _engineer_run(
+        tmp_path, monkeypatch, "r-e4u", [("start", _eng_reply(20, "r-e4u"))]
+    )
+    forged = b"\xff\xfe not utf-8"
+    (rs.run_dir("r-e4u") / iv.UPSTREAM_REL).write_bytes(forged)
+    st = rs.load("r-e4u")
+    st.interview["upstream_blob"] = blob_sha1_bytes(forged)
+    rs.save(st)
+    calls = len(ops.discovery_calls)
+    assert locked_runner.resume("r-e4u", ops).status == "stopped_interview"
+    assert len(ops.discovery_calls) == calls
+    assert _stop_reason("r-e4u").startswith("upstream_blob_mismatch")
+
+
+@pytest.mark.parametrize("broken", ["missing", None, "7", "7x", True, 0, -3])
+def test_broken_approval_pr_is_named_stop(
+    tmp_path, runs_root, monkeypatch, broken
+) -> None:  # ревью #573, круг 2
+    ops, _ = _engineer_run(
+        tmp_path, monkeypatch, "r-e4p", [("start", _eng_reply(20, "r-e4p"))]
+    )
+    st = rs.load("r-e4p")
+    if broken == "missing":
+        del st.interview["approval_pr"]
+    else:
+        st.interview["approval_pr"] = broken
+    rs.save(st)
+    calls = len(ops.discovery_calls)
+    assert locked_runner.resume("r-e4p", ops).status == "stopped_interview"
+    assert len(ops.discovery_calls) == calls
+    assert _stop_reason("r-e4p").startswith("approval_pr_invalid")
+
+
 def test_policy_drift_between_visits_stops(  # T29-сценарий
     tmp_path, runs_root, monkeypatch
 ) -> None:
@@ -9802,7 +9838,7 @@ def test_recovery_with_existing_session_is_unverifiable(  # T39
 
 
 def test_recovery_unknown_status_is_hard_stop(
-    tmp_path, runs_root, monkeypatch
+    tmp_path, runs_root, monkeypatch, capsys
 ) -> None:  # T41
     ops, _ = _engineer_run(
         tmp_path,
@@ -9814,6 +9850,9 @@ def test_recovery_unknown_status_is_hard_stop(
     assert state.status == "stopped_interview"
     assert [c[0] for c in ops.discovery_calls] == ["start", "status"]
     assert _stop_reason("r-eb").startswith("session_state_unknown")
+    # Повтор команды сюда же и вернётся — подсказка не обещает его (ревью #573).
+    out = capsys.readouterr().out
+    assert "повторите команду" not in out and "--new-run --ws-id" in out
 
 
 @pytest.mark.parametrize(

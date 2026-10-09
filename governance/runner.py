@@ -2089,10 +2089,12 @@ def _engineer_recover(state: RunState, ops: Ops, cwd: str, sid: str) -> bool:
             "--new-run --ws-id <fresh-id>"
         )
         return _interview_stop(state, f"session_unverifiable: status {reply.code}")
+    # Повтор команды сюда же и вернётся (write-ahead уже записан): прогон
+    # автоматически не восстановить (discovery#63) — путь один (ревью #573).
     print(
-        "_step_interview: состояние сессии неизвестно — проверьте запуск "
-        "discovery и $DISCOVERY_HOME и повторите команду, либо --new-run "
-        "--ws-id <fresh-id>"
+        "_step_interview: состояние сессии неизвестно — прогон автоматически не "
+        "восстановить (discovery#63); проверьте запуск discovery и "
+        "$DISCOVERY_HOME, затем продолжение: --new-run --ws-id <fresh-id>"
     )
     reason = reply.envelope.get("operation", {}).get("reason", "")
     return _interview_stop(state, f"session_state_unknown: {reason}")
@@ -2123,11 +2125,18 @@ def _engineer_guard(state: RunState, ops: Ops, spec: iv.InterviewSpec) -> str | 
         return f"upstream_blob_mismatch: upstream.md не читается ({exc})"
     if blob_sha1_bytes(data) != spec.upstream_blob:
         return "upstream_blob_mismatch: durable upstream.md ≠ upstream_blob"
-    act = brief_provenance.read_act(ops, state.repo_slug, int(interview["approval_pr"]))
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return "upstream_blob_mismatch: durable upstream.md — не UTF-8"
+    approval_pr = interview.get("approval_pr")
+    if type(approval_pr) is not int or approval_pr <= 0:
+        return f"approval_pr_invalid: {approval_pr!r} — не номер PR"
+    act = brief_provenance.read_act(ops, state.repo_slug, approval_pr)
     if isinstance(act, brief_provenance.Refusal):
         return f"{act.reason}: {act.detail}"
     for refusal in (
-        brief_provenance.check_operator_brief(act, data.decode("utf-8")),
+        brief_provenance.check_operator_brief(act, text),
         brief_provenance.check_policy(ops, act),
     ):
         if isinstance(refusal, brief_provenance.Refusal):

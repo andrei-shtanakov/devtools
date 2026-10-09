@@ -25,16 +25,29 @@ SCRIPTS = ("merge-pr.sh", "human-merge.sh")
 #: Конфигурация зависимостей, по которой `uv run --frozen --exact` ставит
 #: окружение проверяльщика.
 UV_DEPENDENCY_FILES = ("pyproject.toml", "uv.lock")
-#: Команды, которые исполняют код: в позиции команды — только в распознанной
-#: форме.
-_EXEC_WORDS = {"python", "python3", "uv", "sh", "bash", "source", ".", "exec", "eval"}
+#: Закрытый список команд, которые НЕ исполняют код из дерева (ревью #573,
+#: круг 2: перечень «опасных» слов пропускал `env python3 …`, `/usr/bin/python3`,
+#: `python3.12`, `$py …`). Любая иная команда — нераспознанный запуск (отказ),
+#: кроме распознанных форм ниже.
+SAFE_COMMANDS = frozenset(
+    {
+        "[", "test", "echo", "printf", "exit", "return", "shift", "set", "unset",
+        "local", "export", "read", "cd", "pwd", "dirname", "basename", "sed", "tr",
+        "head", "tail", "grep", "cut", "wc", "true", "false", ":", "gh", "git",
+        "jq", "sleep", "case", "esac", "fi", "done", "for", "break", "continue",
+        # функции самих скриптов и подключаемых ssot_env.sh/approval_branches.sh
+        # (их тела проверяются тем же разбором)
+        "die", "usage", "gh_a", "gh_h", "approval_globs", "ssot_key",
+    }
+)  # fmt: skip
+_KEYWORDS = {"then", "else", "do", "if", "elif", "while", "until", "!", "time"}
 _SOURCE = re.compile(r'^\.\s+"\$script_dir/([^"]+)"$')
 _PY_STDLIB = re.compile(r'^python3\s+-I\s+"\$script_dir/([^"]+\.py)"(\s.*)?$')
 _PY_UV = re.compile(
     r"^uv run --frozen --exact --no-config --no-env-file "
     r'python -I "\$script_dir/([^"]+\.py)"(\s.*)?$'
 )
-_ASSIGN = re.compile(r"^([A-Z_][A-Z0-9_]*)=(\"[^\"]*\"|'[^']*'|\S*)\s+")
+_ASSIGN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(\"[^\"]*\"|'[^']*'|\S*)(\s+|$)")
 
 
 @dataclass(frozen=True)
@@ -46,19 +59,20 @@ class Launch:
     path: str
 
 
-def _commands(text: str) -> list[str]:
+def _commands(text: str) -> list[tuple[str, str]]:
     """Команды скрипта с учётом кавычек: границы — перевод строки, `;`, `&&`,
     `||`, `|`, `(`, `)`, `{`, `}` ВНЕ кавычек; `\\`+перевод строки — пробел;
     `#` в начале слова — комментарий; `$( … )` — отдельные команды (и внутри
-    двойных кавычек). Текст в кавычках остаётся в команде как есть."""
-    commands: list[str] = []
+    двойных кавычек). Текст в кавычках остаётся в команде как есть.
+    Возвращает (команда, чем закончилась): `;;`, `)`, `(`, иное."""
+    commands: list[tuple[str, str]] = []
     stack: list[tuple[str, str]] = []  # (буфер внешней команды, состояние)
     buf, state, i, n = "", "code", 0, len(text)
 
-    def flush() -> None:
+    def flush(term: str = "") -> None:
         nonlocal buf
         if buf.strip():
-            commands.append(" ".join(buf.split()))
+            commands.append((" ".join(buf.split()), term))
         buf = ""
 
     while i < n:
@@ -103,8 +117,12 @@ def _commands(text: str) -> list[str]:
                 flush()
                 i += 2
                 continue
+            elif text.startswith(";;", i):
+                flush(";;")
+                i += 2
+                continue
             elif ch in "\n;|(){}":
-                flush()
+                flush(ch)
             else:
                 buf += ch
         i += 1
@@ -122,28 +140,66 @@ def _strip_assignments(segment: str) -> tuple[str, dict[str, str]]:
         segment = segment[m.end() :]
 
 
-def launches(root: Path, scripts=SCRIPTS) -> tuple[list[Launch], list[str]]:
-    """Распознанные запуски кода из дерева и нарушения (нераспознанные формы)."""
+def _strip_keywords(command: str) -> str:
+    while command:
+        word, _, rest = command.partition(" ")
+        if word not in _KEYWORDS:
+            return command
+        command = rest.strip()
+    return command
+
+
+def _scan(root: Path, script: str, seen: set[str]) -> tuple[list[Launch], list[str]]:
     found: list[Launch] = []
     problems: list[str] = []
+    expect_pattern = False
+    for segment, term in _commands((root / script).read_text(encoding="utf-8")):
+        command, env = _strip_assignments(_strip_keywords(segment))
+        command = _strip_keywords(command)
+        word = command.split(" ", 1)[0] if command else ""
+        if word == "case":
+            expect_pattern = True
+            continue
+        if expect_pattern and term in (")", "|"):  # шаблон ветки case (и альтернативы)
+            expect_pattern = term == "|"
+            continue
+        if term == ";;":
+            expect_pattern = True
+        if term == "(" and command and " " not in command:
+            continue  # определение функции `name()`; тело разбирается отдельно
+        if not command:
+            continue  # чистое присваивание
+        if m := _SOURCE.match(command):
+            path = m.group(1)
+            found.append(Launch(script, "source", path))
+            if path not in seen and (root / path).is_file():
+                seen.add(path)
+                more, extra = _scan(root, path, seen)
+                found += more
+                problems += extra
+        elif m := _PY_STDLIB.match(command):
+            found.append(Launch(script, "py-stdlib", m.group(1)))
+        elif m := _PY_UV.match(command):
+            if "UV_PROJECT_ENVIRONMENT" not in env:
+                problems.append(
+                    f"{script}: uv без собственного UV_PROJECT_ENVIRONMENT: {segment}"
+                )
+            found.append(Launch(script, "py-uv", m.group(1)))
+        elif word not in SAFE_COMMANDS:
+            problems.append(f"{script}: нераспознанный запуск: {segment}")
+    return found, problems
+
+
+def launches(root: Path, scripts=SCRIPTS) -> tuple[list[Launch], list[str]]:
+    """Распознанные запуски кода из дерева (вкл. подключаемые shell-файлы) и
+    нарушения: команда вне `SAFE_COMMANDS` и вне распознанных форм — отказ."""
+    found: list[Launch] = []
+    problems: list[str] = []
+    seen: set[str] = set()
     for script in scripts:
-        for segment in _commands((root / script).read_text(encoding="utf-8")):
-            if True:
-                command, env = _strip_assignments(segment)
-                word = command.split(" ", 1)[0] if command else ""
-                if m := _SOURCE.match(command):
-                    found.append(Launch(script, "source", m.group(1)))
-                elif m := _PY_STDLIB.match(command):
-                    found.append(Launch(script, "py-stdlib", m.group(1)))
-                elif m := _PY_UV.match(command):
-                    if "UV_PROJECT_ENVIRONMENT" not in env:
-                        problems.append(
-                            f"{script}: uv без собственного UV_PROJECT_ENVIRONMENT: "
-                            f"{segment}"
-                        )
-                    found.append(Launch(script, "py-uv", m.group(1)))
-                elif word in _EXEC_WORDS or word.startswith('"$script_dir'):
-                    problems.append(f"{script}: нераспознанный запуск: {segment}")
+        more, extra = _scan(root, script, seen)
+        found += more
+        problems += extra
     return found, problems
 
 
@@ -246,40 +302,64 @@ def _path_reads(root: Path, rel: str) -> tuple[list[str], list[str]]:
     return resolved, unresolved
 
 
-def _process_modules(root: Path, entry: str) -> tuple[list[str], set[str]]:
-    """Модули репо, загруженные при импорте `entry` под `python -I`, и
-    сторонние пакеты процесса (верхние имена из site-packages)."""
+@dataclass(frozen=True)
+class Probe:
+    """Боевой процесс входа: модули репо, сторонние пакеты, каталоги дерева в
+    `sys.path` и ошибка загрузки (вход не грузится сам — тоже нарушение)."""
+
+    repo_modules: list[str]
+    third_party: set[str]
+    tree_on_path: list[str]
+    error: str
+
+
+def _process_modules(root: Path, entry: str) -> Probe:
+    """Исполнить `entry` как в бою — `python -I <файл>`, без подсказок путей
+    (имя модуля не `__main__`, поэтому `main()` не зовётся) — и снять состояние."""
     probe = (
-        "import sys, importlib.util\n"
-        f"sys.path.insert(0, {str(root)!r})\n"
-        f"spec = importlib.util.spec_from_file_location('_probe', {str(root / entry)!r})\n"
-        "mod = importlib.util.module_from_spec(spec)\n"
-        "spec.loader.exec_module(mod)\n"
+        "import runpy, sys\n"
+        f"runpy.run_path({str(root / entry)!r}, run_name='_probe')\n"
+        "for p in sys.path: print('PATH', p)\n"
         "for n, m in sorted(sys.modules.items()):\n"
         "    f = getattr(m, '__file__', None)\n"
-        "    if f: print(n, f)\n"
+        "    if f: print('MOD', n, f)\n"
     )
     with tempfile.TemporaryDirectory() as pyc:
-        out = subprocess.run(
+        done = subprocess.run(
             [sys.executable, "-I", "-X", f"pycache_prefix={pyc}", "-c", probe],
             cwd="/",
             capture_output=True,
             text=True,
-            check=True,
-        ).stdout.splitlines()
-    rels = []
-    third: set[str] = set()
-    for line in out:
-        name, f = line.split(" ", 1)
-        if "site-packages" in f and not name.startswith("_virtualenv"):
-            third.add(name.split(".")[0])
+            check=False,
+        )
+    if done.returncode != 0:
+        tail = (done.stderr.strip().splitlines() or ["?"])[-1]
+        return Probe([], set(), [], tail)
+    real_root = root.resolve()
+
+    def in_tree(f: str) -> str | None:
         p = Path(f).resolve()
         if (
-            p.is_relative_to(root.resolve())
-            and ".venv" not in p.relative_to(root.resolve()).parts
+            p.is_relative_to(real_root)
+            and ".venv" not in p.relative_to(real_root).parts
         ):
-            rels.append(os.path.relpath(p, root.resolve()))
-    return rels, third
+            return os.path.relpath(p, real_root)
+        return None
+
+    rels: list[str] = []
+    third: set[str] = set()
+    tree: list[str] = []
+    for line in done.stdout.splitlines():
+        kind, _, rest = line.partition(" ")
+        if kind == "PATH" and rest and (rel := in_tree(rest)) is not None:
+            tree.append(rel)
+        elif kind == "MOD":
+            name, f = rest.split(" ", 1)
+            if "site-packages" in f and not name.startswith("_virtualenv"):
+                third.add(name.split(".")[0])
+            if (rel := in_tree(f)) is not None:
+                rels.append(rel)
+    return Probe(rels, third, tree, "")
 
 
 def closure(root: Path, entry: str) -> tuple[set[str], list[str], set[str]]:
@@ -294,8 +374,17 @@ def closure(root: Path, entry: str) -> tuple[set[str], list[str], set[str]]:
             if dep not in files:
                 files.add(dep)
                 queue.append(dep)
-    loaded, third = _process_modules(root, entry)
-    for rel in loaded:
+    probe = _process_modules(root, entry)
+    third = probe.third_party
+    if probe.error:
+        problems.append(
+            f"{entry}: не загружается без дерева в sys.path ({probe.error})"
+        )
+    problems += [
+        f"{entry}: каталог дерева в sys.path процесса — {d or '.'} (подмена модулей)"
+        for d in probe.tree_on_path
+    ]
+    for rel in probe.repo_modules:
         if rel.endswith(".py") and rel not in files:
             files.add(rel)
             queue.append(rel)

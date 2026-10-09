@@ -10,8 +10,11 @@ devtools. Поэтому он и вся цепочка его локальных
 
 Запуск — только так (форму распознаёт тест инварианта, иная — отказ):
 `uv run --frozen --exact --no-config --no-env-file python -I <этот файл> …`.
-`-I` отсекает `PYTHONPATH`, пользовательский site и текущий каталог; корень
-репо в `sys.path` кладёт сам файл — от своего расположения.
+`-I` отсекает `PYTHONPATH`, пользовательский site и текущий каталог. Ни один
+каталог дерева в `sys.path` НЕ попадает (ревью #573, круг 2: корень впереди
+stdlib дал бы подмену `json.py`/`argparse.py`, подброшенной в корень репо):
+пакет `governance` загружается явно по пути, его подмодули — только из
+каталога пакета. Инвариант это проверяет пробой боевого процесса.
 """
 
 from __future__ import annotations
@@ -19,8 +22,21 @@ from __future__ import annotations
 import sys
 from pathlib import Path, PurePosixPath
 
-if __package__ in (None, ""):  # исполнение файлом под `python -I`
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+if __package__ in (None, "") and "governance" not in sys.modules:
+    # Исполнение файлом под `python -I`: пакет — явно по пути, без дерева в
+    # sys.path (подмодули `governance.*` ищутся только в каталоге пакета).
+    import importlib.util
+
+    _pkg_dir = Path(__file__).resolve().parent
+    _spec = importlib.util.spec_from_file_location(
+        "governance",
+        _pkg_dir / "__init__.py",
+        submodule_search_locations=[str(_pkg_dir)],
+    )
+    assert _spec is not None and _spec.loader is not None
+    _pkg = importlib.util.module_from_spec(_spec)
+    sys.modules["governance"] = _pkg
+    _spec.loader.exec_module(_pkg)
 
 import argparse  # noqa: E402
 
