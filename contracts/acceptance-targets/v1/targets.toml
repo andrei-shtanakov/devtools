@@ -10,6 +10,12 @@
 # Каталог — authority-root (contracts/authority-root/v1/paths.env): правки
 # списка мержит только человек.
 
-[targets.polygon]
-git_dir = "polygon"
-repo_url = "https://github.com/DarkFactory-polygon/polygon.git"
+# Цель обязана быть публичной и проходить стоп-кран DarkFactory без
+# исключений (rulesets читаются). Гарантию проверяет opt-in проба
+# `DEVTOOLS_TARGETS_PROBE=1` (tests/test_governance_spec_loop.py): API репо
+# — visibility public, `halt_gate.check(slug)` — admit. Отдельная песочница:
+# состав песочниц conductor не делится (решение владельца 2026-10-09;
+# приватный DarkFactory-polygon/polygon на бесплатном плане — rulesets 403).
+[targets.spec-loop-sandbox]
+git_dir = "spec-loop-sandbox"
+repo_url = "https://github.com/andrei-shtanakov/spec-loop-sandbox.git"
