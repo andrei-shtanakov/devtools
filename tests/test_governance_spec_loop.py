@@ -163,24 +163,24 @@ def test_repo_slug_from_url_forms() -> None:
 
 
 def test_manifest_single_match() -> None:
-    entry = spec_loop.manifest_repo_entry(MANIFEST, "alpha")
+    entry = spec_loop.resolve_repo_entry(MANIFEST, "alpha", None)
     assert entry.repo == "alpha"
     assert entry.repo_slug == "owner/alpha"
 
 
 def test_manifest_shared_git_dir_same_url_is_one_repo() -> None:
-    entry = spec_loop.manifest_repo_entry(MANIFEST, "beta")
+    entry = spec_loop.resolve_repo_entry(MANIFEST, "beta", None)
     assert entry.repo_slug == "owner/beta"
 
 
 def test_manifest_zero_matches_fails_closed() -> None:
-    with pytest.raises(spec_loop.SpecLoopError, match="не найден"):
-        spec_loop.manifest_repo_entry(MANIFEST, "nope")
+    with pytest.raises(spec_loop.SpecLoopError, match="нет ни в манифесте"):
+        spec_loop.resolve_repo_entry(MANIFEST, "nope", None)
 
 
 def test_manifest_conflicting_urls_fail_closed() -> None:
     with pytest.raises(spec_loop.SpecLoopError, match="gamma"):
-        spec_loop.manifest_repo_entry(MANIFEST, "gamma")
+        spec_loop.resolve_repo_entry(MANIFEST, "gamma", None)
 
 
 # --- цели приёмки вне флота (решение владельца 2026-10-09) ----------------
@@ -234,9 +234,16 @@ def test_broken_fleet_manifest_never_falls_back(manifest) -> None:
 
 
 @pytest.mark.parametrize("repo", ["../polygon", "/abs/polygon", "a/b", ".hidden"])
-def test_acceptance_lookup_accepts_only_one_dir_component(repo) -> None:
+@pytest.mark.parametrize("targets", [TARGETS, None], ids=["with-list", "fleet-only"])
+def test_target_must_be_one_dir_component(repo, targets) -> None:
+    """И флот, и список приёмки: `WORKSPACE_ROOT / repo` не выходит из workspace
+    (даже если такой git_dir записан в файле состава)."""
+    manifest = (
+        MANIFEST
+        + f'\n[cores.evil]\nrepo_url = "git@github.com:o/e.git"\ngit_dir = "{repo}"\n'
+    )
     with pytest.raises(spec_loop.SpecLoopError, match="невалиден"):
-        spec_loop.resolve_repo_entry(MANIFEST, repo, TARGETS)
+        spec_loop.resolve_repo_entry(manifest, repo, targets)
 
 
 def test_broken_acceptance_list_refused() -> None:

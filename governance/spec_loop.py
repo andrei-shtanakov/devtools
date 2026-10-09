@@ -219,22 +219,6 @@ class RepoEntry:
     source: str = "fleet"
 
 
-def manifest_repo_entry(manifest_text: str, repo: str) -> RepoEntry:
-    """Ровно один репо по `git_dir == repo` из манифеста (SSOT состава).
-
-    Несколько секций могут делить один git_dir (umbrella-дистрибутивы) —
-    это один репо, если repo_url у них совпадает; разные repo_url под
-    одним git_dir — fail-closed.
-    """
-    entry = _manifest_lookup(manifest_text, repo, MANIFEST_PATH)
-    if entry is None:
-        raise SpecLoopError(
-            f"репо {repo!r} не найден в манифесте {MANIFEST_PATH} — "
-            "кнопка работает только по составу флота (SSOT)"
-        )
-    return entry
-
-
 def resolve_repo_entry(
     manifest_text: str, repo: str, targets_text: str | None
 ) -> RepoEntry:
@@ -249,10 +233,6 @@ def resolve_repo_entry(
     if entry is not None:
         return entry
     if targets_text is not None:
-        try:  # цель вне флота — только одно имя каталога в WORKSPACE_ROOT
-            rs.validate_id_component(repo, label="repo")
-        except ValueError as exc:
-            raise SpecLoopError(str(exc)) from exc
         found = _manifest_lookup(targets_text, repo, ACCEPTANCE_TARGETS_PATH)
         if found is not None:
             return replace(found, source="acceptance")
@@ -266,8 +246,15 @@ def resolve_repo_entry(
 def _manifest_lookup(text: str, repo: str, path: Path) -> RepoEntry | None:
     """Запись по `git_dir == repo` из TOML-файла состава; None — записи нет.
 
-    Не TOML, неоднозначный git_dir, git_dir не одним компонентом — отказ.
+    Несколько секций могут делить один git_dir (umbrella-дистрибутивы) — это
+    один репо, если repo_url совпадает. Не TOML, неоднозначный git_dir,
+    `repo` не одним именем каталога (`WORKSPACE_ROOT / repo` вышел бы из
+    workspace) — отказ; проверка здесь, поэтому покрывает и флот, и список.
     """
+    try:  # и флот, и список приёмки: цель — одно имя каталога в WORKSPACE_ROOT
+        rs.validate_id_component(repo, label="repo")
+    except ValueError as exc:
+        raise SpecLoopError(str(exc)) from exc
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
