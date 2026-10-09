@@ -264,6 +264,14 @@ def test_shipped_acceptance_list_is_relative_and_parses() -> None:
     assert entry.repo_slug == "DarkFactory-polygon/polygon"
 
 
+def test_acceptance_targets_list_is_authority_root() -> None:
+    """Список целей приёмки — authority-root: агентский мерж его не меняет."""
+    from governance import authority_root
+
+    rel = spec_loop.ACCEPTANCE_TARGETS_PATH.relative_to(spec_loop.DEVTOOLS_ROOT)
+    assert authority_root.touched([str(rel)]) == [str(rel)]
+
+
 def test_manifest_unreadable_is_refused_without_fallback(
     runs_root, tmp_path, monkeypatch, capsys
 ) -> None:

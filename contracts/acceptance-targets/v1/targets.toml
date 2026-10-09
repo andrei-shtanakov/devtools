@@ -7,6 +7,8 @@
 # workspace — каталога, где лежит devtools; абсолютных путей нет) и
 # `repo_url`; origin целевого чекаута сверяется с `repo_url` как и для флота.
 # Манифест флота ради песочниц не расширяется: его читают инструменты флота.
+# Каталог — authority-root (contracts/authority-root/v1/paths.env): правки
+# списка мержит только человек.
 
 [targets.polygon]
 git_dir = "polygon"

@@ -103,6 +103,9 @@ def test_prefixes_read_from_the_ssot_file() -> None:
         "contracts/discovery-approval/",
         "pyproject.toml",
         "uv.lock",
+        # Цели живой приёмки вне флота: расширяют набор целей spec-loop и
+        # задают repo_url для сверки origin (ревью #575, решение владельца).
+        "contracts/acceptance-targets/",
         # Правило области ревью (devtools#271): решает, дойдёт ли диф до
         # модели вообще. Агентски смерженная правка `PROSE` сняла бы
         # ревью-гейт со всех последующих PR.
