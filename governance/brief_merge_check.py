@@ -44,6 +44,11 @@ from governance import approval_request, discovery_approval, policy_rule  # noqa
 from governance.brief_facts import BriefFactsMixin  # noqa: E402
 from governance.facts import Fact, Outcome  # noqa: E402
 
+#: Коды выхода CLI (см. `main`); их же разбирает `human-merge.sh`.
+EXIT_RETRY = 10
+EXIT_REFUSED = 11
+EXIT_ERROR = 12
+
 
 class CheckError(Exception):
     """Проверка не дала результата; `retry` — факт не установлен, повторите."""
@@ -54,7 +59,8 @@ class CheckError(Exception):
 
 
 class MergeRefused(CheckError):
-    """Заявка brief-PR не прошла проверку (код 3)."""
+    """Заявка brief-PR не прошла проверку: код CLI `EXIT_REFUSED`
+    (human-merge.sh переводит его в свой код 3)."""
 
 
 class GhFacts(BriefFactsMixin):
@@ -143,8 +149,10 @@ def check_merge(repo: str, pr: int, head: str, facts) -> str:
 def main(argv: list[str] | None = None) -> int:
     """CLI: stdout — ТОЛЬКО проверенный пин (его забирает human-merge.sh).
 
-    Коды: 0 — годно; 2 — факт не установлен (повторите); 3 — отказ заявки;
-    1 — прочая ошибка.
+    Коды — свои, вне пространства кодов `uv` и интерпретатора (0/1/2, 127):
+    0 — годно; 10 — факт не установлен (повторите); 11 — отказ заявки;
+    12 — прочая ошибка. Иначе отказ самого `uv run` (код 2) был бы неотличим
+    от «повторите» (ревью #573, круг 4).
     """
     parser = argparse.ArgumentParser(prog="brief_merge_check")
     parser.add_argument("--repo", required=True)
@@ -155,10 +163,10 @@ def main(argv: list[str] | None = None) -> int:
         pin = check_merge(args.repo, args.pr, args.head, GhFacts())
     except MergeRefused as exc:
         print(f"brief-merge-check: {exc}", file=sys.stderr)
-        return 3
+        return EXIT_REFUSED
     except CheckError as exc:
         print(f"brief-merge-check: {exc}", file=sys.stderr)
-        return 2 if exc.retry else 1
+        return EXIT_RETRY if exc.retry else EXIT_ERROR
     print(f"brief-PR #{args.pr}: заявка годна", file=sys.stderr)
     print(pin)
     return 0

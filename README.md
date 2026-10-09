@@ -211,8 +211,11 @@ make spec-loop SUBJECT="Published workflow app" REPO=alpha \
 
 `--frame customer|engineer` обязателен вместе с `--need`, `--stakeholder
 <role>` — декларация реального стейкхолдера (не проверка, но без неё стадия
-не стартует). `engineer`-фрейм пока отказывает: `--traces-to` заблокирован
-до discovery#49. Команда запускает discovery-интервью, прогон паркуется в
+не стартует). `engineer`-фрейм требует `--traces-to <customer-brief.md>` —
+бриф, подписанный человеческим мержем brief-PR (`make brief-propose` →
+`make human-merge` → `make brief-approve`, последняя печатает готовую
+команду), и `--approval-pr <brief-PR>`; происхождение и политика подписи
+проверяются по фактам форджа (спека need-stage §11). Команда запускает discovery-интервью, прогон паркуется в
 постоянном статусе `waiting_interview` — bundle-ветка и worktree целевого
 репо ещё не создаются — и печатает точную команду ответа вида
 `discovery answer --session <id> --role <role> --file answer.yaml`.

@@ -323,13 +323,31 @@ def test_brief_pr_is_checked_by_head_then_merged_with_same_sha(fleet: Fleet) -> 
     assert fleet.merge_calls() and f"sha={HEAD_SHA}" in fleet.merge_calls()[0]
 
 
+def test_checker_exit_codes_match_the_script_contract() -> None:
+    """Ревью #574: коды проверяльщика (Python-константы) и разбор в
+    human-merge.sh — один контракт, а не два набора литералов."""
+    import re
+
+    from governance import brief_merge_check as bmc
+
+    text = SCRIPT.read_text(encoding="utf-8")
+    body = text[text.index("brief_check_failed() {") :]
+    body = body[: body.index("\n}\n")]
+    arms = dict(re.findall(r"^\s*(\d+)\) die (\d+) ", body, re.MULTILINE))
+    assert arms == {str(bmc.EXIT_REFUSED): "3", str(bmc.EXIT_RETRY): "2"}
+    # «прочее» — без «повторите»: код ошибки самого проверяльщика туда и идёт
+    assert str(bmc.EXIT_ERROR) not in arms
+
+
 @pytest.mark.parametrize(
     ("code", "rc", "phrase"),
     [
-        (3, 3, "заявка отклонена"),
-        (2, 2, "факт форджа не установлен — повторите"),
-        (1, 2, "проверяльщик не запустился (код 1)"),
-        (127, 2, "проверяльщик не запустился (код 127)"),
+        (11, 3, "заявка отклонена"),
+        (10, 2, "факт форджа не установлен — повторите"),
+        (2, 2, "проверяльщик не запустился или не дал результата (код 2)"),
+        (1, 2, "проверяльщик не запустился или не дал результата (код 1)"),
+        (12, 2, "проверяльщик не запустился или не дал результата (код 12)"),
+        (127, 2, "проверяльщик не запустился или не дал результата (код 127)"),
     ],
 )
 def test_brief_pr_refusal_stops_before_merge(
@@ -339,6 +357,8 @@ def test_brief_pr_refusal_stops_before_merge(
     assert res.returncode == rc
     assert fleet.merge_calls() == []
     assert phrase in res.stderr
+    # код `uv` никогда не выдаётся за «повторите» (ревью #573, круг 4)
+    assert ("повторите" in res.stderr) == (code == 10)
 
 
 def test_brief_pr_check_runs_under_human_profile(fleet: Fleet, tmp_path: Path) -> None:
