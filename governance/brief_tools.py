@@ -320,8 +320,8 @@ def approve(run_id: str, pr: int, ops) -> Path:
             raise BriefToolError(act.detail, retry=act.retry)
         if act.dir != proposal_dir(state):
             raise BriefToolError(f"PR #{pr} одобряет {act.dir}, не бриф этого прогона")
-        own = (rs.run_dir(run_id) / iv.BRIEF_REL).read_text(encoding="utf-8")
-        if discovery_approval.self_hash(own) != act.brief_self_hash:
+        own = rs.run_dir(run_id) / iv.BRIEF_REL
+        if _file_self_hash(own) != act.brief_self_hash:
             raise BriefToolError(f"заявка PR #{pr} — не про бриф этого прогона")
         before = _policy_or_fail(ops, act)
         target = rs.run_dir(run_id) / APPROVED_REL
@@ -334,8 +334,7 @@ def approve(run_id: str, pr: int, ops) -> Path:
         if merged.outcome is not Outcome.FOUND:
             raise BriefToolError(f"бриф в merge-коммите не найден: {merged.detail}")
         if target.exists():
-            current = target.read_text(encoding="utf-8")
-            if discovery_approval.self_hash(current) != act.brief_self_hash:
+            if _file_self_hash(target) != act.brief_self_hash:
                 raise BriefToolError(f"{target}: на месте чужой файл")
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -367,6 +366,18 @@ def approve(run_id: str, pr: int, ops) -> Path:
         print("подписано; следующий шаг:")
         print("  " + _engineer_command(state, pr, target))
         return target
+
+
+def _file_self_hash(path: Path) -> str | None:
+    """self-hash брифа в файле; не бриф (нет frontmatter, не UTF-8) — None.
+
+    None не совпадает ни с одним хэшем акта — вызывающий даёт свой названный
+    отказ, а не трейсбек (ревью #573).
+    """
+    try:
+        return discovery_approval.self_hash(path.read_text(encoding="utf-8"))
+    except (discovery_approval.NotABrief, UnicodeDecodeError):
+        return None
 
 
 def _judge_approve(reply, target: Path, act: brief_provenance.Act) -> None:

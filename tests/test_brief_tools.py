@@ -648,6 +648,27 @@ def test_foreign_file_in_place_refuses(approve_env) -> None:
     assert approve_env.approve_calls == 0
 
 
+@pytest.mark.parametrize(
+    "junk",
+    [b"", b"\xff\xfe not utf-8", b"no frontmatter at all\n"],
+    ids=["empty", "bytes", "text"],
+)
+def test_non_brief_file_in_place_is_named_refusal(approve_env, junk) -> None:
+    """Ревью #573: не бриф на месте подписанного файла — названный отказ, не трейсбек."""
+    target = rs.run_dir(RUN_ID) / bt.APPROVED_REL
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(junk)
+    with pytest.raises(bt.BriefToolError, match="чужой файл"):
+        bt.approve(RUN_ID, 7, approve_env)
+    assert approve_env.approve_calls == 0
+
+
+def test_run_brief_not_a_brief_is_named_refusal(approve_env) -> None:
+    (rs.run_dir(RUN_ID) / iv.BRIEF_REL).write_bytes(b"not a brief\n")
+    with pytest.raises(bt.BriefToolError, match="не про бриф"):
+        bt.approve(RUN_ID, 7, approve_env)
+
+
 def test_pr_of_another_run_refuses(approve_env) -> None:
     approve_env.set_pr(
         files=(
