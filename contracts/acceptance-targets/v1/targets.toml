@@ -10,6 +10,11 @@
 # Каталог — authority-root (contracts/authority-root/v1/paths.env): правки
 # списка мержит только человек.
 
-[targets.polygon]
-git_dir = "polygon"
-repo_url = "https://github.com/DarkFactory-polygon/polygon.git"
+# Цель должна проходить стоп-кран DarkFactory без исключений: rulesets
+# читаются (публичный репо или платный план). DarkFactory-polygon/polygon
+# (приватный, бесплатный план org) — rulesets 403 → refuse_unknown; заменён
+# публичной песочницей (решение владельца 2026-10-09). Проверка перед
+# внесением: `halt_gate.check(slug)` → admit_missing (не взведён).
+[targets.conductor-sandbox-outside]
+git_dir = "conductor-sandbox-outside"
+repo_url = "https://github.com/andrei-shtanakov/conductor-sandbox-outside.git"

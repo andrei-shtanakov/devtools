@@ -252,7 +252,8 @@ def test_broken_acceptance_list_refused() -> None:
 
 
 def test_shipped_acceptance_list_is_relative_and_parses() -> None:
-    """Shipped-файл: polygon, git_dir — одно имя каталога, без путей машины."""
+    """Shipped-файл: публичная песочница, git_dir — одно имя каталога, без
+    путей машины."""
     import tomllib
 
     text = spec_loop.ACCEPTANCE_TARGETS_PATH.read_text(encoding="utf-8")
@@ -260,8 +261,9 @@ def test_shipped_acceptance_list_is_relative_and_parses() -> None:
     for entry in data["targets"].values():
         rs.validate_id_component(entry["git_dir"], label="git_dir")
     assert "/Users/" not in text and "/home/" not in text
-    entry = spec_loop.resolve_repo_entry(MANIFEST, "polygon", text)
-    assert entry.repo_slug == "DarkFactory-polygon/polygon"
+    entry = spec_loop.resolve_repo_entry(MANIFEST, "conductor-sandbox-outside", text)
+    assert entry.repo_slug == "andrei-shtanakov/conductor-sandbox-outside"
+    assert "polygon" not in data["targets"]  # приватный — не проходит стоп-кран
 
 
 def test_acceptance_targets_list_is_authority_root() -> None:

@@ -182,8 +182,9 @@ disp-цикл. charter/requirements авторятся `codex` независи�
 переключение затрагивает только behaviour-spec (B2 Task 2).
 
 `REPO` — `git_dir` из манифеста флота (`ai-orchestrators-workspace/
-workspace-manifest.toml`). Цели живой приёмки вне флота (сейчас — `polygon`)
-перечислены в `contracts/acceptance-targets/v1/targets.toml` и берутся, только
+workspace-manifest.toml`). Цели живой приёмки вне флота (сейчас — `conductor-sandbox-outside`)
+перечислены в `contracts/acceptance-targets/v1/targets.toml` (authority-root;
+цель обязана проходить стоп-кран — rulesets читаются) и берутся, только
 если репо нет в манифесте, а сам манифест прочитан без ошибок; origin
 целевого чекаута сверяется так же, как для флота.
 
