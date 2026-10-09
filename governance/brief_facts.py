@@ -273,11 +273,11 @@ class BriefFactsMixin:
             ["api", f"repos/{repo_slug}/compare/{sha}...{ref}", "--jq", ".status"]
         )
         status = (out or "").strip()
+        owner, name = repo_slug.split("/", 1)
         if status not in ("ahead", "identical", "behind", "diverged"):
-            return unavailable(f"compare {sha}...{ref}: не установлено")
+            return self._sha_absent_or_unavailable(owner, name, sha, path, ref)
         if status in ("behind", "diverged"):
             return Fact(Outcome.FOUND, False, f"{sha} не в истории {ref} ({status})")
-        owner, name = repo_slug.split("/", 1)
         repository = self._graphql_repository(
             _TOUCHED_QUERY, o=owner, n=name, s=sha, p=path
         )
@@ -297,6 +297,21 @@ class BriefFactsMixin:
         return Fact(
             Outcome.FOUND, touched, f"{sha} {'менял' if touched else 'не менял'} {path}"
         )
+
+    def _sha_absent_or_unavailable(
+        self, owner: str, name: str, sha: str, path: str, ref: str
+    ) -> Fact[bool]:
+        """compare не дал статуса: несуществующий `sha` (REST 404) — установленный
+        факт «не версия», а не недоступность форджа (иначе чужой комментарий с
+        выдуманным sha навсегда держал бы «повторите»). Различает GraphQL:
+        `object: null` при прочитанном `repository` — коммита нет."""
+        repository = self._graphql_repository(
+            _TOUCHED_QUERY, o=owner, n=name, s=sha, p=path
+        )
+        if isinstance(repository, dict) and "object" in repository:
+            if repository["object"] is None:
+                return Fact(Outcome.FOUND, False, f"{sha}: такого коммита нет")
+        return unavailable(f"compare {sha}...{ref}: не установлено")
 
     def compare_files_fact(
         self, repo_slug: str, base: str, head: str

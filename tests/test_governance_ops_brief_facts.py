@@ -218,13 +218,33 @@ def test_policy_version_at_not_in_history(monkeypatch, status) -> None:  # T21c
     assert calls[0][2] == f"repos/o/policy/compare/{SHA}...main"
 
 
+_EXISTS = {"data": {"repository": {"object": {"history": {"nodes": []}}}}}
+
+
 @pytest.mark.parametrize(
-    "responses", [[(1, "")], [(0, "weird\n")], [(0, "ahead\n"), (0, {"data": None})]]
+    "responses",
+    [
+        [(1, ""), (1, "")],  # compare и проверка существования — оба сбой
+        [(1, ""), (0, {"data": None})],  # repository не прочитан
+        [(1, ""), (0, _EXISTS)],  # коммит есть, compare не дал статуса
+        [(0, "weird\n"), (0, {"data": {"repository": {}}})],  # нет поля object
+        [(0, "ahead\n"), (0, {"data": None})],
+    ],
+    ids=["both-fail", "no-repository", "exists-compare-failed", "no-object", "ahead"],
 )
 def test_policy_version_at_unavailable(monkeypatch, responses) -> None:
     _gh(monkeypatch, responses)
     fact = RealOps().policy_version_fact_at("o/policy", "main", "p.env", SHA)
     assert fact.outcome is Outcome.UNAVAILABLE
+
+
+def test_policy_version_at_unknown_sha_is_not_a_version(monkeypatch) -> None:
+    """REST compare на несуществующий sha — 404 (замер 2026-10-08); GraphQL
+    `object: null` — установленный факт «коммита нет»: не версия, не retry."""
+    calls = _gh(monkeypatch, [(1, ""), (0, {"data": {"repository": {"object": None}}})])
+    fact = RealOps().policy_version_fact_at("o/policy", "main", "p.env", SHA)
+    assert fact.outcome is Outcome.FOUND and fact.value is False
+    assert calls[1][:3] == ["gh", "api", "graphql"]
 
 
 def test_compare_files_and_cap(monkeypatch) -> None:
