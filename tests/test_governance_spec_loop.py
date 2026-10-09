@@ -261,9 +261,39 @@ def test_shipped_acceptance_list_is_relative_and_parses() -> None:
     for entry in data["targets"].values():
         rs.validate_id_component(entry["git_dir"], label="git_dir")
     assert "/Users/" not in text and "/home/" not in text
-    entry = spec_loop.resolve_repo_entry(MANIFEST, "conductor-sandbox-outside", text)
-    assert entry.repo_slug == "andrei-shtanakov/conductor-sandbox-outside"
-    assert "polygon" not in data["targets"]  # приватный — не проходит стоп-кран
+    entry = spec_loop.resolve_repo_entry(MANIFEST, "spec-loop-sandbox", text)
+    assert entry.repo_slug == "andrei-shtanakov/spec-loop-sandbox"
+
+
+@pytest.mark.skipif(
+    not __import__("os").environ.get("DEVTOOLS_TARGETS_PROBE"),
+    reason="opt-in: DEVTOOLS_TARGETS_PROBE=1 (живые запросы к GitHub)",
+)
+def test_every_acceptance_target_is_public_and_admitted_by_halt_gate() -> None:
+    """Гарантия списка: КАЖДАЯ цель публична (API репо) и проходит стоп-кран
+    тем же вызовом, что `runner.start` (`halt_gate.check`) — без исключений.
+    Приватный репо на бесплатном плане даёт refuse_unknown и здесь краснеет."""
+    import json
+    import subprocess
+    import tomllib
+
+    from governance import halt_gate
+
+    data = tomllib.loads(spec_loop.ACCEPTANCE_TARGETS_PATH.read_text("utf-8"))
+    assert data["targets"]
+    for entry in data["targets"].values():
+        slug = spec_loop.repo_slug_from_url(entry["repo_url"])
+        repo = json.loads(
+            subprocess.run(
+                ["gh", "api", f"repos/{slug}"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+        )
+        assert repo["visibility"] == "public", (slug, repo["visibility"])
+        admit, code, reason = halt_gate.check(slug)
+        assert admit, (slug, code, reason)
 
 
 def test_acceptance_targets_list_is_authority_root() -> None:

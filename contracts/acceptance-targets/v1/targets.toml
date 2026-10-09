@@ -10,11 +10,12 @@
 # Каталог — authority-root (contracts/authority-root/v1/paths.env): правки
 # списка мержит только человек.
 
-# Цель должна проходить стоп-кран DarkFactory без исключений: rulesets
-# читаются (публичный репо или платный план). DarkFactory-polygon/polygon
-# (приватный, бесплатный план org) — rulesets 403 → refuse_unknown; заменён
-# публичной песочницей (решение владельца 2026-10-09). Проверка перед
-# внесением: `halt_gate.check(slug)` → admit_missing (не взведён).
-[targets.conductor-sandbox-outside]
-git_dir = "conductor-sandbox-outside"
-repo_url = "https://github.com/andrei-shtanakov/conductor-sandbox-outside.git"
+# Цель обязана быть публичной и проходить стоп-кран DarkFactory без
+# исключений (rulesets читаются). Гарантию проверяет opt-in проба
+# `DEVTOOLS_TARGETS_PROBE=1` (tests/test_governance_spec_loop.py): API репо
+# — visibility public, `halt_gate.check(slug)` — admit. Отдельная песочница:
+# состав песочниц conductor не делится (решение владельца 2026-10-09;
+# приватный DarkFactory-polygon/polygon на бесплатном плане — rulesets 403).
+[targets.spec-loop-sandbox]
+git_dir = "spec-loop-sandbox"
+repo_url = "https://github.com/andrei-shtanakov/spec-loop-sandbox.git"
