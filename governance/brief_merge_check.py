@@ -59,7 +59,8 @@ class CheckError(Exception):
 
 
 class MergeRefused(CheckError):
-    """Заявка brief-PR не прошла проверку (код 3)."""
+    """Заявка brief-PR не прошла проверку: код CLI `EXIT_REFUSED`
+    (human-merge.sh переводит его в свой код 3)."""
 
 
 class GhFacts(BriefFactsMixin):

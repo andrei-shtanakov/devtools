@@ -337,16 +337,23 @@ def test_real_uv_form_builds_env_and_runs_checker(tmp_path: Path) -> None:
     import re
     import subprocess
 
+    evil = tmp_path / "evil"
+    evil.mkdir()
+    (evil / "yaml.py").write_text('raise SystemExit("SHADOWED")\n')  # yaml — в цепочке
     script = (ROOT / "human-merge.sh").read_text(encoding="utf-8")
-    flags = re.search(r"uv run (--frozen --exact --no-config --no-env-file)", script)
-    assert flags, "форма запуска в human-merge.sh изменилась — обновите smoke"
+    form = re.search(
+        r"uv run ((?:--[a-z-]+ )+)\\?\s*python((?: -[A-Za-z])*) "
+        r'"\$script_dir/governance/brief_merge_check\.py"',
+        script,
+    )
+    assert form, "форма запуска в human-merge.sh изменилась — обновите smoke"
     done = subprocess.run(
         [
             "uv",
             "run",
-            *flags.group(1).split(),
+            *form.group(1).split(),
             "python",
-            "-I",
+            *form.group(2).split(),
             str(ROOT / "governance" / "brief_merge_check.py"),
             "--help",
         ],
@@ -354,11 +361,12 @@ def test_real_uv_form_builds_env_and_runs_checker(tmp_path: Path) -> None:
         env={
             **__import__("os").environ,
             "UV_PROJECT_ENVIRONMENT": str(tmp_path / "venv"),
-            "PYTHONPATH": str(tmp_path / "evil"),
+            "PYTHONPATH": str(evil),  # -I обязан его отсечь
         },
         capture_output=True,
         text=True,
         check=False,
     )
-    assert done.returncode == 0, done.stderr
+    assert done.returncode == 0, done.stderr  # подменный yaml не исполнен
+    assert "SHADOWED" not in done.stderr
     assert "usage: brief_merge_check" in done.stdout
