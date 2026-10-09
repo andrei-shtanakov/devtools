@@ -35,7 +35,6 @@ from governance.decomposition_guard import DELIVERABLE_KINDS
 from governance.facts import Fact, Outcome, unavailable
 
 DEVTOOLS_ROOT = Path(__file__).resolve().parent.parent
-ENGINEER_BLOCKED = "engineer-маршрут ждёт discovery#49 (приём upstream при start)"
 REVIEW_GH_CONFIG_DIR = Path.home() / ".config" / "review"
 
 _PR_URL_RE = re.compile(r"/pull/(\d+)")
@@ -44,22 +43,6 @@ _REMOTE_BRANCH_HEAD_QUERY = (
     "query($o:String!,$n:String!,$q:String!){"
     "repository(owner:$o,name:$n){"
     "ref(qualifiedName:$q){target{oid}}}}"
-)
-
-#: Политика подписи §I12 (спека approval-policy §4.1): версия — последний
-#: коммит ветки, тронувший путь; содержимое — по `object(oid:)` +
-#: `file(path:)`, где «коммита нет» и «пути нет» — два разных положительных
-#: отсутствия (REST 404 их сливает с недоступностью).
-_POLICY_VERSION_QUERY = (
-    "query($o:String!,$n:String!,$q:String!,$p:String!){"
-    "repository(owner:$o,name:$n){ref(qualifiedName:$q){target{"
-    "... on Commit{history(first:1,path:$p){nodes{oid}}}}}}}"
-)
-_REPO_FILE_QUERY = (
-    "query($o:String!,$n:String!,$s:GitObjectID!,$p:String!){"
-    "repository(owner:$o,name:$n){object(oid:$s){"
-    "... on Commit{file(path:$p){object{"
-    "... on Blob{text isBinary isTruncated}}}}}}}"
 )
 
 #: Факты закрытия PR (спека 2026-09-28 §4.1 п.3): ОДИН запрос несёт и
@@ -172,6 +155,7 @@ class Ops(Protocol):
         label: str,
         *,
         draft: bool = False,
+        base: str | None = None,
     ) -> int: ...
 
     def create_draft_pr(
@@ -1551,8 +1535,12 @@ class RealOps(BriefFactsMixin):
         label: str,
         *,
         draft: bool = False,
+        base: str | None = None,
     ) -> int:
-        """gh pr create [--draft] [--label <label>] -R <slug>; номер из URL.
+        """gh pr create [--draft] [--label <label>] [--base <base>] -R <slug>; номер из URL.
+
+        `base` — явная база (brief-PR, §11.3): без неё gh берёт ветку по
+        умолчанию на момент вызова, а вызывающий уже прочитал её из форджа.
 
         Пустой ``label`` не передаётся вовсе (решение владельца 2026-08-31:
         лейбл `codex-review` больше не вешается — он триггерил платный
@@ -1573,6 +1561,7 @@ class RealOps(BriefFactsMixin):
         """
         draft_args = ["--draft"] if draft else []
         label_args = ["--label", label] if label else []
+        base_args = ["--base", base] if base else []
         done = subprocess.run(
             [
                 "gh",
@@ -1588,6 +1577,7 @@ class RealOps(BriefFactsMixin):
                 "--body",
                 body,
                 *label_args,
+                *base_args,
             ],
             cwd=target_dir,
             capture_output=True,
@@ -1928,97 +1918,6 @@ class RealOps(BriefFactsMixin):
         if not isinstance(oid, str) or not oid:
             return unavailable(f"head origin/{branch}: пустой SHA")
         return Fact(Outcome.FOUND, oid, f"ветка origin/{branch} стоит на {oid}")
-
-    def _graphql_repository(self, query: str, **variables: str) -> dict | None:
-        """`data.repository` ответа GraphQL либо None на ЛЮБОЙ сбой.
-
-        `-F` для всех переменных, как у `remote_branch_head_fact`: строки
-        (в т.ч. `GitObjectID`) уходят как есть, конвертируются только
-        `true/false/null/целые`.
-        """
-        argv = ["gh", "api", "graphql", "-f", f"query={query}"]
-        for key, value in variables.items():
-            argv += ["-F", f"{key}={value}"]
-        done = subprocess.run(argv, capture_output=True, text=True, check=False)
-        if done.returncode != 0:
-            return None
-        try:
-            repository = json.loads(done.stdout)["data"]["repository"]
-        except (json.JSONDecodeError, KeyError, TypeError):
-            return None
-        return repository if isinstance(repository, dict) else None
-
-    def policy_version_fact(self, repo_slug: str, branch: str, path: str) -> Fact[str]:
-        """SHA последнего коммита `branch`, тронувшего `path` (спека S5).
-
-        `ref: null` — ветки нет (ABSENT); пустая история — файла по пути
-        никогда не было (ABSENT); коммит удаления файла история включает —
-        отсутствие тогда ловит `repo_file_fact`. Любая иная форма — UNAVAILABLE.
-        """
-        owner, name = repo_slug.split("/", 1)
-        repository = self._graphql_repository(
-            _POLICY_VERSION_QUERY,
-            o=owner,
-            n=name,
-            q=f"refs/heads/{branch}",
-            p=path,
-        )
-        what = f"версия {repo_slug}:{path}@{branch}"
-        if repository is None or "ref" not in repository:
-            return unavailable(f"{what}: запрос не удался")
-        ref = repository["ref"]
-        if ref is None:
-            return Fact(Outcome.ABSENT, None, f"ветки {branch} в {repo_slug} нет")
-        try:
-            nodes = ref["target"]["history"]["nodes"]
-        except (KeyError, TypeError):
-            return unavailable(f"{what}: неожиданная форма ответа")
-        if not isinstance(nodes, list):
-            return unavailable(f"{what}: неожиданная форма истории")
-        if not nodes:
-            return Fact(
-                Outcome.ABSENT,
-                None,
-                f"{path} в {repo_slug}@{branch} никогда не было",
-            )
-        oid = nodes[0].get("oid") if isinstance(nodes[0], dict) else None
-        if not isinstance(oid, str) or not oid:
-            return unavailable(f"{what}: пустой SHA")
-        return Fact(Outcome.FOUND, oid, f"{path}: последний коммит {oid}")
-
-    def repo_file_fact(self, repo_slug: str, sha: str, path: str) -> Fact[str]:
-        """Текст `path` в коммите `sha`: FOUND / ABSENT / UNAVAILABLE."""
-        owner, name = repo_slug.split("/", 1)
-        repository = self._graphql_repository(
-            _REPO_FILE_QUERY, o=owner, n=name, s=sha, p=path
-        )
-        what = f"{repo_slug}@{sha}:{path}"
-        if repository is None or "object" not in repository:
-            return unavailable(f"{what}: запрос не удался")
-        commit = repository["object"]
-        if commit is None:
-            return Fact(Outcome.ABSENT, None, f"коммита {sha} в {repo_slug} нет")
-        # Отсутствующее поле `file` — неполный ответ (или объект не коммит),
-        # а не «файла нет»: только явный `file: null` — установленное
-        # отсутствие (ревью плана engineer-маршрута, A8).
-        if not isinstance(commit, dict) or "file" not in commit:
-            return unavailable(f"{what}: ответ без поля file")
-        entry = commit["file"]
-        if entry is None:
-            return Fact(Outcome.ABSENT, None, f"в {repo_slug}@{sha} нет {path}")
-        blob = entry.get("object") if isinstance(entry, dict) else None
-        # Полный текст доказан только явными `isBinary: false` и
-        # `isTruncated: false` при строковом `text`: отсутствие поля, `null`
-        # и иной тип — неполный ответ, не «текст целиком» (ревью плана, A10).
-        if (
-            not isinstance(blob, dict)
-            or not isinstance(blob.get("text"), str)
-            or blob.get("isBinary") is not False
-            or blob.get("isTruncated") is not False
-        ):
-            return unavailable(f"{what}: содержимое не прочитано")
-        text = blob["text"]
-        return Fact(Outcome.FOUND, text, f"{path}@{sha} прочитан")
 
     def local_branch_head_fact(self, target_dir: str, branch: str) -> Fact[str]:
         """Head локальной ветки: FOUND / ABSENT / UNAVAILABLE."""

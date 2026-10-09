@@ -60,13 +60,14 @@ import subprocess
 import sys
 import tomllib
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 
 from governance import (
     approval_branches,
     brief_input,
+    brief_provenance,
     bundle_dag,
     charter_guard,
     run_lock,
@@ -75,9 +76,9 @@ from governance import (
 )
 from governance import approval_ledger as al
 from governance import interview as iv
-from governance import ops as ops_mod
 from governance import run_state as rs
 from governance.ops import DEVTOOLS_ROOT, RealOps
+from governance.stale_adapter import blob_sha1_bytes
 
 WORKSPACE_ROOT = DEVTOOLS_ROOT.parent
 MANIFEST_PATH = (
@@ -267,7 +268,15 @@ def _origin_url(target_dir: str | Path) -> str:
     return out.stdout.strip()
 
 
-NEED_ONLY = ("frame", "stakeholder", "traces_to", "session", "new_run")
+NEED_ONLY = (
+    "frame",
+    "stakeholder",
+    "traces_to",
+    "session",
+    "new_run",
+    "brief_only",
+    "approval_pr",
+)
 STAKEHOLDER_RULE = (
     "стадия Need запускается только при наличии реального стейкхолдера — "
     "укажите --stakeholder <role> (декларация, не проверка); без "
@@ -300,15 +309,77 @@ def build_interview_spec(args, repo_slug: str) -> iv.InterviewSpec | None:
         raise SpecLoopError("--new-run взаимоисключающ с --run-id и --session")
     if args.new_run and not args.ws_id:
         raise SpecLoopError("--new-run требует --ws-id <fresh-id>")
-    if args.frame == "customer":
-        if args.traces_to:
-            raise SpecLoopError("customer-фрейм не принимает --traces-to")
-        return iv.InterviewSpec("customer", args.stakeholder, repo_slug, None, None)
-    if not args.traces_to:
+    if args.brief_only and (args.frame != "customer" or args.session):
         raise SpecLoopError(
-            "engineer-фрейм требует --traces-to <approved customer-brief>"
+            "--brief-only допустим только с --need --frame customer и без "
+            "--session (§11.2)"
         )
-    raise SpecLoopError(ops_mod.ENGINEER_BLOCKED)  # D6, до discovery#49
+    if args.frame == "customer":
+        if args.traces_to or args.approval_pr is not None:
+            raise SpecLoopError(
+                "customer-фрейм не принимает --traces-to и --approval-pr"
+            )
+        return iv.InterviewSpec(
+            "customer",
+            args.stakeholder,
+            repo_slug,
+            None,
+            None,
+            brief_only=bool(args.brief_only),
+        )
+    if not args.traces_to or args.approval_pr is None:
+        raise SpecLoopError(
+            "engineer-фрейм требует --traces-to <подписанный customer-бриф> и "
+            "--approval-pr <номер brief-PR> (§11.4.1)"
+        )
+    if args.session:
+        raise SpecLoopError(
+            "--session для engineer запрещён: id сессии записан до вызова (§11.4.5)"
+        )
+    # Соседу уходит `--upstream <durable upstream.md>`; переносимая ссылка
+    # итогового брифа — `upstream.md`. `upstream_blob` ставит preflight.
+    return iv.InterviewSpec(
+        "engineer", args.stakeholder, repo_slug, iv.UPSTREAM_NAME, None
+    )
+
+
+def _refusal_text(refusal: brief_provenance.Refusal) -> str:
+    return refusal.detail if refusal.retry else f"{refusal.reason}: {refusal.detail}"
+
+
+def engineer_preflight(
+    path: str, approval_pr: int, repo_slug: str, ops
+) -> iv.EngineerIntake:
+    """§11.4.2: файл оператора читается ОДИН раз; всё — над буфером и фактами форджа.
+
+    До run-id, до леджера, до вызова соседа. Отказ — `SpecLoopError`; при
+    неустановленном факте форджа текст говорит «повторите», не «не одобрено».
+    """
+    try:
+        buffer = Path(path).read_bytes()
+    except OSError as exc:
+        raise SpecLoopError(f"{path}: не читается ({exc})") from exc
+    try:
+        brief_input.check_customer_upstream(Path(path), buffer)
+    except brief_input.BriefInputError as exc:
+        raise SpecLoopError(f"upstream не годится: {exc}") from exc
+    act = brief_provenance.read_act(ops, repo_slug, approval_pr)
+    if isinstance(act, brief_provenance.Refusal):
+        raise SpecLoopError(_refusal_text(act))
+    text = buffer.decode("utf-8")
+    for refusal in (
+        brief_provenance.check_operator_brief(act, text),
+        brief_provenance.check_policy(ops, act),
+    ):
+        if isinstance(refusal, brief_provenance.Refusal):
+            raise SpecLoopError(_refusal_text(refusal))
+    return iv.EngineerIntake(
+        buffer=buffer,
+        blob=blob_sha1_bytes(buffer),
+        approval=act.as_record(),
+        approval_pr=approval_pr,
+        source_path=str(path),
+    )
 
 
 def find_runs(repo: str, subject: str) -> list[rs.RunState]:
@@ -809,8 +880,19 @@ def _report_state(state: rs.RunState) -> int:
     return 1
 
 
+def _brief_ready(state: rs.RunState) -> int:
+    """`brief_ready` (§11.2): терминальный; печать следующего шага, код 0."""
+    print(
+        "spec-loop: бриф готов (brief_ready) — следующий шаг: "
+        f"make brief-propose RUN={state.run_id}"
+    )
+    return 0
+
+
 def _dispatch(state: rs.RunState, ops, lock: run_lock.RunLock) -> int:
     """Действие по фактическому статусу найденного прогона."""
+    if state.status == "brief_ready":
+        return _brief_ready(state)
     if state.status == "waiting_human_merge":
         after = runner.resume(state.run_id, ops, lock=lock)
         if after.status == "waiting_human_merge":
@@ -820,7 +902,11 @@ def _dispatch(state: rs.RunState, ops, lock: run_lock.RunLock) -> int:
             return _deliver_phase(after, ops)
         return _report_state(after)
     if state.status in ("waiting_interview", "stopped_interview"):
-        if state.interview and state.interview.get("session_id") is None:
+        if (
+            state.interview
+            and state.interview.get("frame") != "engineer"
+            and state.interview.get("session_id") is None
+        ):
             # Сирота — координаты стадии Need без записанной сессии.
             # `runner.resume` тоже отказался бы звать discovery, но кнопка
             # проверяет это САМА и не делает вызов вовсе (ruling 2, Task 10):
@@ -828,6 +914,8 @@ def _dispatch(state: rs.RunState, ops, lock: run_lock.RunLock) -> int:
             # дошёл ли вызов до runner.
             return _report_interview_stop(state)
         after = runner.resume(state.run_id, ops, lock=lock)
+        if after.status == "brief_ready":
+            return _brief_ready(after)
         if after.status == "waiting_interview":
             return 0
         if after.status == "stopped_interview":
@@ -863,8 +951,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--stakeholder", help="роль реального стейкхолдера (декларация)"
     )
-    parser.add_argument("--traces-to", help="approved customer-brief для engineer")
+    parser.add_argument(
+        "--traces-to", help="engineer: подписанный customer-бриф (файл оператора)"
+    )
+    parser.add_argument(
+        "--approval-pr",
+        type=int,
+        default=None,
+        help="engineer: номер brief-PR — акта одобрения upstream (§11.4.1)",
+    )
     parser.add_argument("--session", help="recovery: присоединить сессию discovery")
+    parser.add_argument(
+        "--brief-only",
+        action="store_true",
+        help="customer: после брифа — терминальный brief_ready, без S1 (§11.2)",
+    )
     parser.add_argument(
         "--new-run",
         action="store_true",
@@ -978,7 +1079,8 @@ def main(argv: list[str] | None = None) -> int:
             past_s1 = [
                 st
                 for st in matches
-                if st.status not in ("waiting_interview", "stopped_interview")
+                if st.status
+                not in ("waiting_interview", "stopped_interview", "brief_ready")
             ]
             if past_s1:
                 raise SpecLoopError(
@@ -1081,16 +1183,29 @@ def main(argv: list[str] | None = None) -> int:
                     "--new-run --ws-id <fresh-id>"
                 )
             recorded = iv.InterviewSpec.from_state(state.interview)
-            if (recorded.frame, recorded.stakeholder_role, recorded.traces_to) != (
+            if (
+                recorded.frame,
+                recorded.stakeholder_role,
+                recorded.traces_to,
+                recorded.brief_only,
+            ) != (
                 interview_spec.frame,
                 interview_spec.stakeholder_role,
                 interview_spec.traces_to,
+                interview_spec.brief_only,
             ):
                 raise SpecLoopError(
                     "координаты интервью зафиксированы стартом "
                     f"(frame={recorded.frame}, "
                     f"stakeholder={recorded.stakeholder_role!r}, "
-                    f"traces_to={recorded.traces_to!r}) — сменить их: "
+                    f"traces_to={recorded.traces_to!r}, "
+                    f"brief_only={recorded.brief_only}) — сменить их: "
+                    "--new-run --ws-id"
+                )
+            if state.interview.get("approval_pr") != args.approval_pr:
+                raise SpecLoopError(
+                    "brief-PR акта зафиксирован стартом (--approval-pr "
+                    f"{state.interview.get('approval_pr')}) — сменить: "
                     "--new-run --ws-id"
                 )
 
@@ -1137,6 +1252,13 @@ def main(argv: list[str] | None = None) -> int:
             }
             _print_values(values)
             return _dispatch(state, ops, held[state.run_id])
+        engineer_intake = None
+        if interview_spec is not None and interview_spec.frame == "engineer":
+            # §11.4.2: до run-id, до леджера, до вызова соседа.
+            engineer_intake = engineer_preflight(
+                args.traces_to, args.approval_pr, entry.repo_slug, ops
+            )
+            interview_spec = replace(interview_spec, upstream_blob=engineer_intake.blob)
         ws_id = args.ws_id or ws_id_for(args.subject, date.today())
         rs.validate_id_component(ws_id, label="ws_id")
         collisions = []
@@ -1194,6 +1316,7 @@ def main(argv: list[str] | None = None) -> int:
             author_backend=args.author_backend,
             brief_source=supplied_brief,
             interview_spec=interview_spec,
+            engineer_intake=engineer_intake,
             authoring="legacy" if args.legacy else "waves",
             code=args.code,
             plan_item=args.plan_item,
@@ -1210,6 +1333,8 @@ def main(argv: list[str] | None = None) -> int:
         if started.status == "waiting_human_merge":
             print(_pause_message(started))
             return 0
+        if started.status == "brief_ready":
+            return _brief_ready(started)
         if started.status == "completed":
             return _deliver_phase(started, ops)
         if started.status == "stopped_interview":

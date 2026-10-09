@@ -11,11 +11,16 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from pathlib import PurePosixPath
 
 import yaml
 
-from governance import approval_facts, approval_request, discovery_approval, policy_rule
+from governance import (
+    approval_facts,
+    approval_request,
+    brief_merge_check,
+    discovery_approval,
+    policy_rule,
+)
 from governance.approval_request import ApprovalRequest
 from governance.brief_facts import BriefPrFacts
 from governance.facts import Outcome
@@ -81,22 +86,18 @@ def reconfirm_line(policy_repo: str, sha: str) -> str:
 
 
 def files_dir(facts: BriefPrFacts) -> str | Refusal:
-    """Каталог `…/00-discovery`, если изменения PR — ровно бриф и заявка (`added`)."""
-    paths = [PurePosixPath(p) for p, _ in facts.files]
-    dirs = {str(p.parent) for p in paths}
-    if (
-        len(facts.files) != 2
-        or {s for _, s in facts.files} != {"added"}
-        or len(dirs) != 1
-        or {p.name for p in paths}
-        != {approval_request.BRIEF, approval_request.FILE_NAME}
-        or PurePosixPath(next(iter(dirs))).name != "00-discovery"
-    ):
+    """Каталог `…/00-discovery`, если изменения PR — ровно бриф и заявка (`added`).
+
+    Сама форма — `brief_merge_check.proposal_dir`: её же исполняет
+    `human-merge.sh`, проверка одна (защищённая).
+    """
+    dir_ = brief_merge_check.proposal_dir(facts.files)
+    if dir_ is None:
         return Refusal(
             "pr_files",
             f"изменения PR {list(facts.files)} ≠ бриф + заявка в одном …/00-discovery",
         )
-    return next(iter(dirs))
+    return dir_
 
 
 def _version_refusal(ops, sha: str) -> Refusal | None:

@@ -38,9 +38,10 @@
 #
 # Коды выхода: 0 — мерж выполнен (или показан при --dry-run); 2 —
 # аргументы/профиль/состояние PR (в т.ч. тело без строки `policy:`, версия
-# политики не прочитана); 3 — актор не авторизован (логин вне политики,
-# политика сменилась после candidate, выставленная переменная); 4 — форджа
-# отклонила мерж.
+# политики не прочитана; у brief-PR — факт форджа не установлен или
+# проверяльщик не запустился); 3 — актор не авторизован (логин вне политики,
+# политика сменилась после candidate, выставленная переменная) либо заявка
+# brief-PR отклонена; 4 — форджа отклонила мерж.
 set -eu
 
 usage() {
@@ -139,6 +140,52 @@ head_ref=$(printf '%s\n' "$facts" | sed -n '5p')
 [ -n "$head_ref" ] && [ "$head_ref" != "null" ] \
     || die 2 "PR ${slug}#${pr}: имя head-ветки не установлено — тип PR неизвестен, мерж не выполняется"
 
+# brief-PR (спека need-stage §11.3 п.6): заявка читается форджем по
+# ПРОВЕРЕННОЙ голове `head_oid`; мерж ниже пинуется тем же sha= — смена
+# головы между проверкой и мержем отказывает на стороне форджи. Тело и
+# метки PR в решении не участвуют. Проверяльщик — узкий
+# governance/brief_merge_check.py: он, вся цепочка его импортов и
+# pyproject.toml/uv.lock — под authority-root и харнесс-гвардом (ревью #573).
+# Запуск исключает подмешивание: `python -I` (без PYTHONPATH, user site и
+# cwd), закреплённые зависимости ровно по uv.lock (`--frozen --exact`) в
+# СВОЁМ окружении (UV_PROJECT_ENVIRONMENT задаётся здесь, не наследуется),
+# без uv.toml/.env (`--no-config --no-env-file`). Форму распознаёт тест
+# инварианта; иная — отказ теста.
+brief_check_env="${HOME}/.cache/devtools/brief-merge-check-venv"
+# Коды проверяльщика (brief_merge_check.main) не сворачиваются в одну фразу
+# (ревью #573, круг 3): 3 — заявка отклонена; 2 — факт не установлен,
+# повторите; прочее (1, 127 — проверяльщик не запустился) — код 2 контракта.
+brief_check_failed() {
+    case "$1" in
+        3) die 3 "brief-PR ${slug}#${pr}: заявка отклонена — мерж не выполняется" ;;
+        2) die 2 "brief-PR ${slug}#${pr}: факт форджа не установлен — повторите" ;;
+        *) die 2 "brief-PR ${slug}#${pr}: проверяльщик не запустился (код $1) — мерж не выполняется" ;;
+    esac
+}
+brief_pin=""
+case "$head_ref" in
+    brief/*)
+        if [ -n "$human_profile" ]; then
+            brief_pin=$(cd "$script_dir" && GH_CONFIG_DIR="$human_profile" \
+                UV_PROJECT_ENVIRONMENT="$brief_check_env" \
+                uv run --frozen --exact --no-config --no-env-file \
+                python -I "$script_dir/governance/brief_merge_check.py" \
+                --repo "$slug" --pr "$pr" --head "$head_oid") \
+                || brief_check_failed $?
+        else
+            brief_pin=$(cd "$script_dir" && UV_PROJECT_ENVIRONMENT="$brief_check_env" \
+                uv run --frozen --exact --no-config --no-env-file \
+                python -I "$script_dir/governance/brief_merge_check.py" \
+                --repo "$slug" --pr "$pr" --head "$head_oid") \
+                || brief_check_failed $?
+        fi
+        brief_pin=$(printf '%s\n' "$brief_pin" | tail -n 1)
+        case "$brief_pin" in
+            *[!0-9a-f]*|"") die 2 "brief-PR ${slug}#${pr}: проверяльщик не вернул пин политики" ;;
+        esac
+        [ "${#brief_pin}" -eq 40 ] || die 2 "brief-PR ${slug}#${pr}: пин политики не 40 hex"
+        ;;
+esac
 # Версия политики, по которой судится логин. У candidate-PR (форма ветки —
 # из того же SSOT, что у merge-pr.sh) версия ЗАКРЕПЛЕНА заявкой и написана
 # в теле (`policy: <repo>@<sha>`, пишет approve_node): актуальная обязана
@@ -154,6 +201,12 @@ current=$(gh_h api graphql -f 'query=query($o:String!,$n:String!,$q:String!,$p:S
     --jq '.data.repository.ref.target.history.nodes[0].oid' 2>&1) \
     || die 2 "версия политики $p_repo не прочитана: $current"
 case "$head_ref" in
+    brief/*)
+        # Мержер авторизуется по пину, ПРОВЕРЕННОМУ вместе с заявкой; если
+        # актуальная версия ушла после проверки — мерж не создал бы годного
+        # акта (ревью части B, B1).
+        [ "$current" = "$brief_pin" ] || die 3 "политика сменилась после проверки brief-PR (пин $brief_pin, актуальная $current) — мерж не создаст годного акта"
+        version="$brief_pin" ;;
     $finalize_glob)
         # finalize — суффикс candidate-формы, проверяется ПЕРВЫМ: иначе
         # candidate-глоб накрыл бы и его (тот же порядок, что у merge-pr.sh).

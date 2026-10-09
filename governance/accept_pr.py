@@ -114,6 +114,22 @@ _HARNESS_PREFIXES = (
     # заменивший его на «всегда пускать», обезоружил бы стоп-кран и сам
     # прошёл бы под ним (blocker ревью devtools#531).
     "governance/halt_gate.py",
+    # Проверка brief-PR (ревью #573, решение владельца 2026-10-09):
+    # human-merge.sh ИСПОЛНЯЕТ brief_merge_check с полномочиями человека —
+    # он, вся цепочка его локальных импортов и конфигурация зависимостей
+    # (`uv run --frozen --exact`). Перечень сверяет tests/harness_trust.py.
+    "governance/brief_merge_check",
+    "governance/brief_facts",
+    "governance/facts",
+    "governance/approval_request",
+    "governance/discovery_approval",
+    "governance/policy_rule",
+    "governance/ssot_env",
+    "governance/__init__",
+    "contracts/discovery-approval/",
+    "contracts/approval-policy-source/",
+    "pyproject.toml",
+    "uv.lock",
 )
 _PENDING = {"PENDING", "IN_PROGRESS", "QUEUED", "WAITING", "REQUESTED", ""}
 _GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}

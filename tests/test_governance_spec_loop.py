@@ -938,8 +938,9 @@ def test_need_customer_starts_with_interview_spec(
                 "--traces-to",
                 "c.md",
             ],
-            "discovery#49",
+            "--approval-pr",
         ),
+        (_need("--approval-pr", "7"), "--approval-pr"),
     ],
 )
 def test_need_preflight_refuses_before_run_id(
@@ -1629,3 +1630,523 @@ def test_wave_recovery_locks_before_reading_or_writing_ledger(
         assert spec_loop.main(["--subject", "Fleet Inbox", "--repo", "alpha"]) == 1
     assert rs.all_run_ids() == []  # леджер не записан мимо блокировки
     assert "другим процессом" in capsys.readouterr().out
+
+
+# --- §11.2: --brief-only (Task 7, часть B) ---
+
+
+@pytest.mark.parametrize(
+    ("argv", "needle"),
+    [
+        (["--subject", "s", "--repo", "alpha", "--brief-only"], "--need"),
+        (_need("--brief-only", "--session", "s-1"), "--brief-only"),
+        (_need("--brief-only", "--brief", "x.md"), "--brief"),
+        (
+            [
+                "--subject",
+                "s",
+                "--repo",
+                "alpha",
+                "--need",
+                "--frame",
+                "engineer",
+                "--stakeholder",
+                "r",
+                "--brief-only",
+            ],
+            "--brief-only",
+        ),
+    ],
+    ids=["without-need", "with-session", "with-brief", "engineer"],
+)
+def test_brief_only_invalid_combinations_refuse_before_run(  # T5
+    runs_root, tmp_path, monkeypatch, capsys, argv, needle
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    assert spec_loop.main(argv) == 1
+    assert env.calls == [] and rs.all_run_ids() == []
+    assert needle in capsys.readouterr().out
+
+
+def test_brief_only_customer_starts_with_flag(  # T5 двойник
+    runs_root, tmp_path, monkeypatch
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    assert spec_loop.main(_need("--brief-only")) == 0
+    assert env.calls[0][1]["interview_spec"].brief_only is True
+
+
+def test_repeat_with_other_brief_only_refuses(  # T6
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    _make_need_run(env)  # прогон стартовал без --brief-only
+    before = (rs.run_dir("r-a") / "run.json").read_bytes()
+    assert spec_loop.main(_need("--brief-only")) == 1
+    assert "brief_only" in capsys.readouterr().out
+    assert env.calls == []
+    assert (rs.run_dir("r-a") / "run.json").read_bytes() == before
+
+
+def test_new_run_allowed_next_to_brief_ready(  # T11
+    runs_root, tmp_path, monkeypatch
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    _make_need_run(env, status="brief_ready")
+    assert spec_loop.main(_need("--new-run", "--ws-id", "ws-eng")) == 0
+    assert env.calls[0][0] == "start" and env.calls[0][1]["ws_id"] == "ws-eng"
+
+
+def test_brief_ready_on_entry_prints_next_step_without_resume(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    st = _make_need_run(env, status="brief_ready")
+    st.interview["brief_only"] = True
+    rs.save(st)
+    assert spec_loop.main(_need("--brief-only")) == 0
+    assert env.calls == []
+    assert "make brief-propose RUN=r-a" in capsys.readouterr().out
+
+
+def test_first_transition_to_brief_ready_prints_next_step(  # P14
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    st = _make_need_run(env)
+    st.interview["brief_only"] = True
+    rs.save(st)
+    done = rs.load("r-a")
+    done.status = "brief_ready"
+    env.resume_result = done
+    assert spec_loop.main(_need("--brief-only")) == 0
+    assert [c[0] for c in env.calls] == ["resume"]
+    assert "make brief-propose RUN=r-a" in capsys.readouterr().out
+
+
+# --- §11.4.1–§11.4.2: engineer-preflight (Task 8, часть B) ---
+
+from tests.forge_fake import (  # noqa: E402
+    DRAFT,
+    POLICY_PATH,
+    SIGNED,
+    P,
+    consistent_world,
+)
+
+ENGINEER_REPO = "owner/alpha"
+
+
+def _engineer_ops(monkeypatch):
+    """Мир форджа + пустой поиск candidate-PR (путь восстановления main)."""
+    forge = consistent_world(monkeypatch)
+    forge.prs_by_head_prefix = lambda repo_slug, prefix: []  # type: ignore[attr-defined]
+    monkeypatch.setattr(spec_loop, "_real_ops", lambda: forge)
+    return forge
+
+
+def _operator(
+    tmp_path: Path, text: str = SIGNED, name: str = "customer-brief.md"
+) -> str:
+    path = tmp_path / name
+    path.write_bytes(text.encode("utf-8"))
+    return str(path)
+
+
+def test_engineer_preflight_accepts_consistent_world(tmp_path, monkeypatch) -> None:
+    forge = consistent_world(monkeypatch)
+    intake = spec_loop.engineer_preflight(_operator(tmp_path), 7, ENGINEER_REPO, forge)
+    assert intake.buffer == SIGNED.encode() and intake.approval_pr == 7
+    assert intake.approval["act_policy_sha"] == P
+
+
+def test_operator_symlink_read_once(tmp_path, monkeypatch) -> None:  # T33
+    forge = consistent_world(monkeypatch)
+    real = tmp_path / "real.md"
+    real.write_text(SIGNED, encoding="utf-8")
+    link = tmp_path / "link.md"
+    link.symlink_to(real)
+    reads: list[str] = []
+    original = Path.read_bytes
+
+    def spy(self: Path) -> bytes:
+        reads.append(str(self))
+        return original(self)
+
+    monkeypatch.setattr(Path, "read_bytes", spy)
+    intake = spec_loop.engineer_preflight(str(link), 7, ENGINEER_REPO, forge)
+    real.write_text("подмена после чтения", encoding="utf-8")
+    assert reads == [str(link)] and intake.buffer == SIGNED.encode()
+
+
+@pytest.mark.parametrize(
+    ("case", "needle"),
+    [
+        ("draft", "approved"),
+        ("no-hash", "migration"),
+        ("edited", "self_hash"),
+        ("crlf", "CR"),
+        ("frame-engineer", "upstream не годится"),
+        ("merger-out", "merger_not_in_act_policy"),
+        ("bundle-pr", "pr_files"),
+        ("forge-down", "повторите"),
+    ],
+)
+def test_engineer_preflight_refusals(tmp_path, monkeypatch, case, needle) -> None:
+    forge = consistent_world(monkeypatch)
+    text = SIGNED
+    if case == "draft":
+        text = DRAFT
+    elif case == "no-hash":
+        text = SIGNED.replace("approved_content_hash: ", "x_hash: ")
+    elif case == "edited":
+        text = SIGNED.replace("## Goals", "## Goals\n\nправка после подписи\n", 1)
+    elif case == "crlf":
+        text = SIGNED.replace("\n", "\r\n")
+    elif case == "frame-engineer":
+        text = SIGNED.replace("frame: customer", "frame: engineer")
+    elif case == "merger-out":
+        forge.files[(P, POLICY_PATH)] = "AUTHORIZED_APPROVER_ACCOUNTS=other\n"
+    elif case == "bundle-pr":
+        forge.set_pr(files=forge.prs[7].files + (("x/30-decomposition.md", "added"),))
+    elif case == "forge-down":
+        forge.unavailable_facts.add("pr")
+    with pytest.raises(spec_loop.SpecLoopError) as exc:
+        spec_loop.engineer_preflight(_operator(tmp_path, text), 7, ENGINEER_REPO, forge)
+    assert needle in str(exc.value)
+    if case == "forge-down":
+        assert "не одобрено" not in str(exc.value)
+
+
+def test_engineer_preflight_reads_no_local_git(tmp_path, monkeypatch) -> None:  # T24
+    # FakeForge не реализует ни одного git-метода Ops: любое чтение локального
+    # git упало бы AttributeError — решение принимается только по форджу.
+    forge = consistent_world(monkeypatch)
+    spec_loop.engineer_preflight(_operator(tmp_path), 7, ENGINEER_REPO, forge)
+
+
+def _engineer_args(*extra: str) -> list[str]:
+    return [
+        "--subject",
+        "Fleet Inbox",
+        "--repo",
+        "alpha",
+        "--need",
+        "--frame",
+        "engineer",
+        "--stakeholder",
+        "product owner",
+        *extra,
+    ]
+
+
+def test_engineer_new_run_passes_intake_and_upstream_blob(
+    runs_root, tmp_path, monkeypatch
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    _engineer_ops(monkeypatch)
+    rc = spec_loop.main(
+        _engineer_args("--traces-to", _operator(tmp_path), "--approval-pr", "7")
+    )
+    assert rc == 0
+    kwargs = env.calls[0][1]
+    spec = kwargs["interview_spec"]
+    assert (spec.frame, spec.traces_to) == ("engineer", "upstream.md")
+    intake = kwargs["engineer_intake"]
+    assert spec.upstream_blob == intake.blob and intake.buffer == SIGNED.encode()
+
+
+def test_engineer_preflight_refusal_creates_no_run(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    _engineer_ops(monkeypatch)
+    rc = spec_loop.main(
+        _engineer_args("--traces-to", _operator(tmp_path, DRAFT), "--approval-pr", "7")
+    )
+    assert rc == 1 and env.calls == [] and rs.all_run_ids() == []
+
+
+def test_engineer_next_to_customer_run_needs_new_run(  # T12
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    _make_need_run(env, status="brief_ready")
+    _engineer_ops(monkeypatch)
+    rc = spec_loop.main(
+        _engineer_args("--traces-to", _operator(tmp_path), "--approval-pr", "7")
+    )
+    assert rc == 1 and env.calls == []
+    assert "--new-run --ws-id" in capsys.readouterr().out
+    rc = spec_loop.main(
+        _engineer_args(
+            "--traces-to",
+            _operator(tmp_path),
+            "--approval-pr",
+            "7",
+            "--new-run",
+            "--ws-id",
+            "ws-eng",
+        )
+    )
+    assert rc == 0 and env.calls[0][1]["ws_id"] == "ws-eng"
+
+
+def test_engineer_session_flag_refused(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    rc = spec_loop.main(
+        _engineer_args("--traces-to", "x.md", "--approval-pr", "7", "--session", "s")
+    )
+    assert rc == 1 and env.calls == []
+    assert "--session" in capsys.readouterr().out
+
+
+def test_engineer_repeat_with_other_approval_pr_refuses(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    st = rs.new_run(
+        subject="Fleet Inbox",
+        repo="alpha",
+        repo_slug="owner/alpha",
+        ws_id="ws-eng",
+        target_dir=str(env.target),
+        bundle_dir="workstreams/ws-eng/spec",
+        profile="profiles/team-exp.yaml",
+        run_id="r-eng",
+        merge_authority="human",
+        interview={
+            **iv.InterviewSpec(
+                "engineer", "product owner", "owner/alpha", "upstream.md", "b" * 40
+            ).as_state(),
+            "session_id": "s-r-eng-e",
+            "approval_pr": 7,
+        },
+    )
+    st.status = "waiting_interview"
+    rs.save(st)
+    before = (rs.run_dir("r-eng") / "run.json").read_bytes()
+    _engineer_ops(monkeypatch)
+    rc = spec_loop.main(
+        _engineer_args("--traces-to", _operator(tmp_path), "--approval-pr", "8")
+    )
+    assert rc == 1 and env.calls == []
+    assert "--approval-pr" in capsys.readouterr().out
+    assert (rs.run_dir("r-eng") / "run.json").read_bytes() == before
+
+
+# --- ревью части B, круг 1 (B5): матрица preflight на уровне spec-loop ---
+
+from tests.approval_request_cases import DEFECTS  # noqa: E402
+from tests.forge_fake import C1, DIR, MERGE  # noqa: E402
+from tests.provenance_cases import (  # noqa: E402
+    ACT_DEFECTS,
+    ACT_UNAVAILABLE,
+    OPERATOR_DEFECTS,
+    POLICY_DEFECTS,
+    POLICY_UNAVAILABLE,
+    ids,
+)
+
+_REQ = f"{DIR}/approval-request.yaml"
+
+#: Весь набор дефектов предикатов (Task 4) — через полный вход spec-loop:
+#: новая форма в `tests/provenance_cases.py` проверяется здесь автоматически.
+_PREFLIGHT_DEFECTS = (
+    [(f"act-{i}", spoil, SIGNED, reason) for i, spoil, reason in ACT_DEFECTS]
+    + [(f"operator-{i}", spoil, text, r) for i, spoil, text, r in OPERATOR_DEFECTS]
+    + [(f"policy-{i}", spoil, SIGNED, reason) for i, spoil, reason in POLICY_DEFECTS]
+)
+#: Гейт upstream (§11.4.2 п.1) срабатывает раньше чтения акта.
+_GATE_FIRST = {"operator-draft", "operator-crlf"}
+
+
+def _main_engineer(tmp_path, monkeypatch, spoil=None, text: str = SIGNED):
+    """Полный вход `spec_loop.main` engineer-прогона над миром форджа."""
+    env = _LoopEnv(monkeypatch, tmp_path)
+    forge = _engineer_ops(monkeypatch)
+    if spoil is not None:
+        spoil(forge)
+    operator = _operator(tmp_path, text)
+    rc = spec_loop.main(_engineer_args("--traces-to", operator, "--approval-pr", "7"))
+    return env, rc
+
+
+@pytest.mark.parametrize(
+    ("case", "spoil", "text", "reason"),
+    _PREFLIGHT_DEFECTS,
+    ids=[d[0] for d in _PREFLIGHT_DEFECTS],
+)
+def test_engineer_main_refuses_every_provenance_defect(  # T14–T22, T25–T27
+    runs_root, tmp_path, monkeypatch, capsys, case, spoil, text, reason
+) -> None:
+    env, rc = _main_engineer(tmp_path, monkeypatch, spoil, text)
+    out = capsys.readouterr().out
+    assert rc == 1 and env.calls == [] and rs.all_run_ids() == []
+    assert ("upstream не годится" if case in _GATE_FIRST else f"{reason}:") in out
+
+
+def test_engineer_main_accepts_consistent_world(  # двойник матрицы; T17
+    runs_root, tmp_path, monkeypatch
+) -> None:
+    # Конверт фикстуры — точное зеркало мержа; кем он вписан, не проверяется.
+    env, rc = _main_engineer(tmp_path, monkeypatch)
+    assert rc == 0 and [c[0] for c in env.calls] == ["start"]
+
+
+@pytest.mark.parametrize("fact", ACT_UNAVAILABLE + POLICY_UNAVAILABLE)
+def test_engineer_main_unavailable_each_fact(  # T31
+    runs_root, tmp_path, monkeypatch, capsys, fact
+) -> None:
+    env, rc = _main_engineer(
+        tmp_path, monkeypatch, lambda f: f.unavailable_facts.add(fact)
+    )
+    out = capsys.readouterr().out
+    assert rc == 1 and env.calls == [] and rs.all_run_ids() == []
+    assert "повторите" in out and "не одобрено" not in out
+
+
+@pytest.mark.parametrize("spoiled", [False, True], ids=["authentic", "merger-out"])
+def test_engineer_main_decides_by_forge_not_local_git(  # T24
+    runs_root, tmp_path, monkeypatch, spoiled
+) -> None:
+    """Цель — настоящий git-чекаут с верным origin, но с ПОДДЕЛЬНОЙ локальной
+    историей: «смерженные» бриф и заявка, ветка brief/WS-1. Настоящий
+    `_origin_url` читает origin; любой другой вызов git падает. Решение —
+    ровно по форджу: подлинный акт принят, испорченный — нет."""
+    import subprocess
+
+    from governance import approval_request as _ar
+    from tests.forge_fake import request as _request
+
+    real_origin = spec_loop._origin_url
+    env = _LoopEnv(monkeypatch, tmp_path)
+    monkeypatch.setattr(spec_loop, "_origin_url", real_origin)
+    target = env.target
+    (target / ".git").rmdir()
+    forged = target / DIR
+    forged.mkdir(parents=True)
+    (forged / "brief.md").write_text(SIGNED, encoding="utf-8")
+    (forged / "approval-request.yaml").write_text(
+        _ar.render(_request()), encoding="utf-8"
+    )
+    for argv in (
+        ["init", "-q", "-b", "main"],
+        ["remote", "add", "origin", "git@github.com:owner/alpha.git"],
+        ["add", "-A"],
+        ["-c", "user.name=h", "-c", "user.email=h@x", "commit", "-qm", "Merge #7"],
+        ["branch", "brief/WS-1"],
+    ):
+        subprocess.run(["git", "-C", str(target), *argv], check=True)
+    real_run = subprocess.run
+    origin_reads: list[list[str]] = []
+
+    def only_origin(argv, *args, **kwargs):
+        if argv[0] == "git":
+            assert argv[-3:] == ["remote", "get-url", "origin"], argv
+            origin_reads.append(argv)
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", only_origin)
+    forge = _engineer_ops(monkeypatch)
+    if spoiled:
+        ACT_DEFECTS[ids(ACT_DEFECTS).index("merger-out-of-p")][1](forge)
+    rc = spec_loop.main(
+        _engineer_args("--traces-to", _operator(tmp_path), "--approval-pr", "7")
+    )
+    assert origin_reads  # настоящий путь чтения origin пройден
+    assert rc == (1 if spoiled else 0)
+
+
+def test_preflight_facts_carry_no_pr_body_or_labels() -> None:  # T23
+    """Метки/тело PR, изменённые после мержа, не меняют решения: факт PR их не
+    несёт и запрос форджа их не читает — доказательство только в коммите."""
+    import dataclasses
+
+    from governance import brief_facts
+
+    names = {f.name for f in dataclasses.fields(brief_facts.BriefPrFacts)}
+    assert not names & {"body", "labels", "title"}
+    query = brief_facts._BRIEF_PR_QUERY
+    assert "labels" not in query and "body" not in query and "title" not in query
+
+
+def test_engineer_preflight_valid_reconfirm_passes(
+    tmp_path, monkeypatch
+) -> None:  # T27
+    forge = consistent_world(monkeypatch)
+    forge.add_policy(C1)
+    forge.reconfirm(C1)
+    assert spec_loop.engineer_preflight(_operator(tmp_path), 7, ENGINEER_REPO, forge)
+
+
+@pytest.mark.parametrize(
+    "spoil",
+    [
+        ("gate-fail", lambda t: t.replace("gate_passed: true", "gate_passed: false")),
+        ("path-traces", lambda t: t.replace("traces_to: []", "traces_to: [notes.md]")),
+        (
+            "blocking",
+            lambda t: t.replace(
+                "blocking_open_questions: 0", "blocking_open_questions: 2"
+            ),
+        ),
+    ],
+    ids=lambda v: v[0] if isinstance(v, tuple) else v,
+)
+def test_engineer_preflight_upstream_gate_refusals(
+    tmp_path, monkeypatch, spoil
+) -> None:  # T32
+    forge = consistent_world(monkeypatch)
+    text = spoil[1](SIGNED)
+    assert text != SIGNED
+    with pytest.raises(spec_loop.SpecLoopError, match="upstream не годится"):
+        spec_loop.engineer_preflight(_operator(tmp_path, text), 7, ENGINEER_REPO, forge)
+
+
+@pytest.mark.parametrize(("case", "mutate", "_m"), DEFECTS, ids=[d[0] for d in DEFECTS])
+def test_engineer_preflight_ambiguous_merged_request(  # T21a/T21b через preflight
+    tmp_path, monkeypatch, case, mutate, _m
+) -> None:
+    from governance import approval_request as _ar
+    from tests.forge_fake import request as _request
+
+    forge = consistent_world(monkeypatch)
+    forge.files[(MERGE, _REQ)] = mutate(_ar.render(_request()))
+    with pytest.raises(spec_loop.SpecLoopError, match="request_invalid"):
+        spec_loop.engineer_preflight(_operator(tmp_path), 7, ENGINEER_REPO, forge)
+
+
+def test_engineer_stop_without_session_is_not_an_orphan(  # Task 9
+    runs_root, tmp_path, monkeypatch
+) -> None:
+    """Стоп перепроверки ДО первого `start` (например, фордж недоступен):
+    у engineer `session_id` ещё пуст, но это не сирота — повтор идёт в resume."""
+    env = _LoopEnv(monkeypatch, tmp_path)
+    st = rs.new_run(
+        subject="Fleet Inbox",
+        repo="alpha",
+        repo_slug="owner/alpha",
+        ws_id="ws-eng",
+        target_dir=str(env.target),
+        bundle_dir="workstreams/ws-eng/spec",
+        profile="profiles/team-exp.yaml",
+        run_id="r-eng",
+        merge_authority="human",
+        interview={
+            **iv.InterviewSpec(
+                "engineer", "product owner", "owner/alpha", "upstream.md", "b" * 40
+            ).as_state(),
+            "approval_pr": 7,
+        },
+    )
+    st.status = "stopped_interview"
+    rs.save(st)
+    env.resume_result = st
+    _engineer_ops(monkeypatch)
+    spec_loop.main(
+        _engineer_args("--traces-to", _operator(tmp_path), "--approval-pr", "7")
+    )
+    assert [c[0] for c in env.calls] == ["resume"]

@@ -87,6 +87,32 @@ def parse_reply(returncode: int, stdout: str, stderr: str) -> DiscoveryReply:
 
 
 BRIEF_REL = "brief-input/00-discovery/brief.md"
+#: Имя принятой копии upstream у соседа и у нас (§11.4.4): фиксированное.
+UPSTREAM_NAME = "upstream.md"
+UPSTREAM_REL = "brief-input/00-discovery/upstream.md"
+
+
+def engineer_session_id(run_id: str) -> str:
+    """Caller-assigned id сессии engineer'а (§11.4.5): детерминирован от прогона."""
+    return f"s-{run_id}-e"
+
+
+@dataclass(frozen=True)
+class EngineerIntake:
+    """Итог engineer-preflight (§11.4.2): проверенный буфер и отчёт об акте.
+
+    `buffer` — байты файла оператора, прочитанные ОДИН раз; durable-копия
+    пишется только из них. `approval` — `Act.as_record()` (отчёт, не источник
+    доверия: при перепроверках акт выводится из форджа по `approval_pr`).
+    """
+
+    buffer: bytes
+    blob: str
+    approval: dict
+    approval_pr: int
+    source_path: str
+
+
 _FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 
 
@@ -99,6 +125,8 @@ class InterviewSpec:
     target: str
     traces_to: str | None
     upstream_blob: str | None
+    #: customer `--brief-only` (§11.2): после брифа — терминальный `brief_ready`.
+    brief_only: bool = False
 
     def as_state(self) -> dict:
         return {
@@ -108,6 +136,7 @@ class InterviewSpec:
             "target": self.target,
             "traces_to": self.traces_to,
             "upstream_blob": self.upstream_blob,
+            "brief_only": self.brief_only,
             "brief_rel": BRIEF_REL,
             "started_at": datetime.now(UTC).isoformat(timespec="seconds"),
             "completed_at": None,
@@ -121,6 +150,7 @@ class InterviewSpec:
             target=st["target"],
             traces_to=st.get("traces_to"),
             upstream_blob=st.get("upstream_blob"),
+            brief_only=bool(st.get("brief_only", False)),
         )
 
 
