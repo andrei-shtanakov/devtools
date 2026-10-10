@@ -1835,7 +1835,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       тестом: пока сессии нет, «ответьте на findings» — совет в пустоту.
       Спека need-stage приведена в соответствие: удаление файла больше не
       привязано к переходу 20 ни в таблице §5.1, ни в §5.3.
-- [ ] E2 Engineer-маршрут стадии Need: `--frame engineer --traces-to <approved customer-brief>` — preflight с явной проверкой `status: approved`, durable-копия upstream в `brief-input/00-discovery/` с `upstream_blob`, `discovery_start(..., upstream_path)` на копию; маршрут отказывает до run-id, пока не реализован @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:spec-loop-need-engineer-route
+- [ ] E2 Engineer-маршрут стадии Need: `--frame engineer --traces-to <approved customer-brief>` — preflight с явной проверкой `status: approved`, durable-копия upstream в `brief-input/00-discovery/` с `upstream_blob`, `discovery_start(..., upstream_path)` на копию; маршрут отказывает до run-id, пока не реализован @owner:github:andrei-shtanakov @epic:eco.dark-factory @blocked_by:todo://devtools/spec-loop-need-brief-human-merge-live @id:spec-loop-need-engineer-route
       **Ревизия 7 спеки (2026-10-08):** маршрут — по §11 спеки need-stage
       (вариант А: engineer отдельным прогоном, `--approval-pr`, доказательства
       только по форджу, write-ahead id, блокировка прогона); план —
@@ -1843,6 +1843,20 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       Чекбокс — после живой приёмки §11.8 (гарантия происхождения — только
       engineer `--need`; невосстановимость после потери ответа `start` до
       discovery#63 — принятое ограничение).
+      **Частичная живая приёмка §11.8 — 2026-10-10**, evidence
+      `docs/evidence/2026-10-10-engineer-route-live-run.md` (песочница
+      `andrei-shtanakov/spec-loop-sandbox`, предмет «CLI с `--version`», ответы
+      владельца в роли). Пройдено: customer `--brief-only` → brief-PR →
+      `brief-approve` → engineer `--need` до E1, оба негативных контроля.
+      Уточнения критерия по решению владельца: E1 выполнен, авторинг S1 не
+      начат (нет `profiles/team-exp.yaml` в цели); второй негативный контроль —
+      смёрженный PR недопустимого состава (`pr_files`), не настоящий бандл-PR.
+      **Чекбокс открыт (решение владельца 2026-10-10)** до оставшегося живого
+      шага — пункт `@id:spec-loop-need-brief-human-merge-live` ниже: brief-PR
+      этой приёмки смержен веб-интерфейсом, ревью brief-PR и проверка заявки в
+      `human-merge.sh` живьём не исполнены. Новое интервью ради этого не
+      запускается — ждём ближайший настоящий brief-PR. Открытые дефекты
+      приёмки: #576, #577, #580.
       **Разблокирован 2026-09-18.** Ждал п.1 discovery#49 (приём upstream при
       `start --frame engineer`); сосед доставил его PR-ом discovery#50
       (`49dbc2a`, master) вместе с п.2 — пункт продюсера
@@ -1872,6 +1886,14 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       `governance/ops.py:28`, `governance/spec_loop.py:246`) называет закрытую
       заявку: отказ верен, причина в нём — нет. Правится вместе с реализацией
       маршрута, тем же PR.
+
+- [ ] Остаток живой приёмки E2 (§11.8): на ближайшем настоящем brief-PR — ревью brief-PR → `make human-merge ARGS='<repo> <PR>'` с проверкой заявки (`brief_merge_check`) и мержем с пином проверенной head SHA → результат дописать в evidence; после этого — закрыть E2 engineer-маршрута отдельным изменением @owner:github:andrei-shtanakov @epic:eco.dark-factory @trigger:"ближайший настоящий brief-PR" @id:spec-loop-need-brief-human-merge-live
+      Частичная приёмка 2026-10-10 (`docs/evidence/2026-10-10-engineer-route-live-run.md`)
+      этот путь не прошла: brief-PR #1 песочницы смержен веб-интерфейсом.
+      Подпись подтверждена фактами форджа в `brief-approve`, но живой путь
+      `human-merge.sh` для `brief/*` (§11.3 п.6, §11.10, T50/T50a) — в объёме
+      E2 и не проверен. Новое интервью только ради проверки не запускаем
+      (решение владельца 2026-10-10).
 
 - [ ] Контур approval discovery-брифа: назвать акт, которым бриф получает `status: approved`, и место его подписи @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:discovery-brief-approval-act
       **2026-10-08:** «подкоманды approve у соседа нет» устарело — discovery#57
