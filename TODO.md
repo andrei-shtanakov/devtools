@@ -2778,7 +2778,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       Задачи прежней ревизии со статусом сверх `TODO`, чей блок не опознан,
       называются поимённо: `carry.lost_status` в леджере, строки в stdout и
       ⚠️-абзац в начале тела PR ревизии — до одобрения её человеком.
-- [ ] Режим ревью спецификаций (`local.sh --spec`) у потребителей кита (inbox devtools#501, slug: review-kit-spec-mode-rollout; from: steward) @owner:github:andrei-shtanakov @id:review-kit-spec-mode-rollout @epic:eco.tooling @blocked_by:steward#200
+- [ ] Режим ревью спецификаций (`local.sh --spec`) у потребителей кита (inbox devtools#501, slug: review-kit-spec-mode-rollout; from: steward) @owner:github:andrei-shtanakov @id:review-kit-spec-mode-rollout @epic:eco.tooling
       Решение владельца 2026-10-03 (вариант A): кит `local.sh` + PIN @ steward
       bac7975 — devtools#558 и spec-runner#657 под `attest-vendor.sh`, мерж
       агентом; после мержа сверить, что `review-kit-drift` погас. Промпт
@@ -2794,6 +2794,16 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       `local.sh` blob 2127990; ручной `review-kit-drift` — success у всех,
       где он есть (spec-runner, atp-platform, maestro, arbiter, kapelle).
       Открыто только: промпт (steward#200) и проброс (steward#199).
+      Блокеры сняты 2026-10-10: steward#199 и steward#200 закрыты 2026-10-06
+      батчем steward#203 (merge `e0ab116`). Тот же батч меняет байты кита
+      сверх пина `bac7975` — `scripts/review/local.sh`,
+      `scripts/review/build-prompt.sh` и `.github/codex/review-prompt-spec.md`,
+      поэтому остаток — не одна раскладка промпта, а: (1) ре-вендор кита на
+      `e0ab116` (сначала spec-runner и devtools, затем остальные 19 — по
+      процедуре 2026-10-04); (2) промпт `review-prompt-spec.md` у spec-runner
+      и devtools с повторным ревью на сценарий чистого удаления критерия
+      приёмки; (3) по желанию — проброс `--spec` в `review-pr.sh`. Старт
+      волны — решение владельца.
 
 ## Политика флота для конфига spec-runner (решение владельца 2026-10-04)
 
