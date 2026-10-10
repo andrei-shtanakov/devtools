@@ -226,8 +226,12 @@ make: *** [spec-loop] Error 1
   бандл-PR по имени ветки (`recover_wave_run_from_github`,
   `recover_run_from_github`). Ни один из этих шагов не вызывает discovery. Если
   бы что-то нашлось, вызов ушёл бы в продолжение прогона, а не в preflight.
-  Текст `pr_files` появляется только из `engineer_preflight`, значит preflight
-  достигнут.
+- Тот же текст `pr_files: …` выдаёт и engineer-гвард раннера
+  (`runner._engineer_guard`, тот же `read_act`). Поэтому вывод «достигнут
+  именно preflight» опирается не на сам текст, а на два факта. Первый: для пары
+  (repo, `'… (neg2)'`) прогонов нет, `find_runs` пуст, и до раннера вызов не
+  доходит. Второй: префикс `spec-loop:` — это `SpecLoopError` из `main`, а
+  гвард раннера печатает через `_interview_stop` с префиксом `_step_interview:`.
 - `run_id` генерируется (`spec_loop.py:1333`) и леджер создаётся только после
   успешного preflight. Вызовы discovery идут через порт раннера уже созданного
   прогона.
