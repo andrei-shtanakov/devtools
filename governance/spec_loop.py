@@ -244,6 +244,21 @@ def resolve_repo_entry(
     )
 
 
+def _acceptance_origin_hint(entry: RepoEntry, state: rs.RunState | None) -> str:
+    """Пояснение к отказу «расхождение origin», когда цель взята из списка
+    приёмки (devtools#577): fallback срабатывает при ЛЮБОМ отсутствии репо в
+    манифесте флота, в том числе при устаревшем клоне манифеста — тогда
+    настоящая причина не origin, а отставший манифест."""
+    if state is not None or entry.source != "acceptance":
+        return ""
+    return (
+        f"; ожидание взято из списка целей приёмки {ACCEPTANCE_TARGETS_PATH}, "
+        f"потому что репо {entry.repo!r} нет в манифесте флота {MANIFEST_PATH}"
+        " — если это репо флота, манифест мог устареть: обновите его клон "
+        "(git pull) и повторите"
+    )
+
+
 def _manifest_lookup(text: str, repo: str, path: Path) -> RepoEntry | None:
     """Запись по `git_dir == repo` из TOML-файла состава; None — записи нет.
 
@@ -1181,6 +1196,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"origin целевого чекаута {target_dir!r} = "
                 f"{origin_slug!r}, манифест/леджер ждёт "
                 f"{self_check_slug!r} — расхождение origin"
+                + _acceptance_origin_hint(entry, state)
             )
 
         ops = _real_ops()

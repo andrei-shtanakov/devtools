@@ -8,6 +8,7 @@ deliver_for_run подменяются, проверяется ТОЛЬКО де
 
 from __future__ import annotations
 
+import subprocess
 from datetime import date
 from pathlib import Path
 
@@ -265,6 +266,27 @@ def test_shipped_acceptance_list_is_relative_and_parses() -> None:
     assert entry.repo_slug == "andrei-shtanakov/spec-loop-sandbox"
 
 
+_TARGETS_PROBE_TIMEOUT = 60  # как `halt_gate._gh`: зависший gh — красный тест
+
+
+def _run_targets_probe(argv: list[str]) -> subprocess.CompletedProcess[str]:
+    """Вызов живой пробы списка целей с жёстким дедлайном (хвост ревью #578)."""
+    return subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        timeout=_TARGETS_PROBE_TIMEOUT,
+        check=True,
+    )
+
+
+def test_targets_probe_wrapper_sets_hard_timeout(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kw: captured.update(kw))
+    _run_targets_probe(["gh", "api", "repos/o/r"])
+    assert captured["timeout"] == _TARGETS_PROBE_TIMEOUT
+
+
 @pytest.mark.skipif(
     not __import__("os").environ.get("DEVTOOLS_TARGETS_PROBE"),
     reason="opt-in: DEVTOOLS_TARGETS_PROBE=1 (живые запросы к GitHub)",
@@ -274,7 +296,6 @@ def test_every_acceptance_target_is_public_and_admitted_by_halt_gate() -> None:
     тем же вызовом, что `runner.start` (`halt_gate.check`) — без исключений.
     Приватный репо на бесплатном плане даёт refuse_unknown и здесь краснеет."""
     import json
-    import subprocess
     import tomllib
 
     from governance import halt_gate
@@ -283,14 +304,7 @@ def test_every_acceptance_target_is_public_and_admitted_by_halt_gate() -> None:
     assert data["targets"]
     for entry in data["targets"].values():
         slug = spec_loop.repo_slug_from_url(entry["repo_url"])
-        repo = json.loads(
-            subprocess.run(
-                ["gh", "api", f"repos/{slug}"],
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout
-        )
+        repo = json.loads(_run_targets_probe(["gh", "api", f"repos/{slug}"]).stdout)
         assert repo["visibility"] == "public", (slug, repo["visibility"])
         admit, code, reason = halt_gate.check(slug)
         assert admit, (slug, code, reason)
@@ -338,6 +352,9 @@ def test_acceptance_target_keeps_origin_check(
     else:
         assert rc == 1 and env.calls == []
         assert "расхождение origin" in out
+        # devtools#577: отказ называет fallback и возможный устаревший манифест
+        assert "ожидание взято из списка целей приёмки" in out
+        assert "манифест мог устареть" in out
 
 
 def test_target_dir_does_not_widen_the_target_set(
@@ -1004,7 +1021,10 @@ def test_origin_mismatch_fails_closed(runs_root, tmp_path, monkeypatch, capsys) 
     rc = spec_loop.main(["--subject", "S", "--repo", "alpha"])
     assert rc == 1
     assert env.calls == []
-    assert "origin" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "origin" in out
+    # цель из манифеста флота — подсказки про fallback нет (devtools#577)
+    assert "манифест мог устареть" not in out
 
 
 def test_find_runs_ignores_empty_ledger_stub(runs_root) -> None:
