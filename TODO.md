@@ -1835,7 +1835,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       тестом: пока сессии нет, «ответьте на findings» — совет в пустоту.
       Спека need-stage приведена в соответствие: удаление файла больше не
       привязано к переходу 20 ни в таблице §5.1, ни в §5.3.
-- [ ] E2 Engineer-маршрут стадии Need: `--frame engineer --traces-to <approved customer-brief>` — preflight с явной проверкой `status: approved`, durable-копия upstream в `brief-input/00-discovery/` с `upstream_blob`, `discovery_start(..., upstream_path)` на копию; маршрут отказывает до run-id, пока не реализован @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:spec-loop-need-engineer-route
+- [x] E2 Engineer-маршрут стадии Need: `--frame engineer --traces-to <approved customer-brief>` — preflight с явной проверкой `status: approved`, durable-копия upstream в `brief-input/00-discovery/` с `upstream_blob`, `discovery_start(..., upstream_path)` на копию; маршрут отказывает до run-id, пока не реализован @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:spec-loop-need-engineer-route
       **Ревизия 7 спеки (2026-10-08):** маршрут — по §11 спеки need-stage
       (вариант А: engineer отдельным прогоном, `--approval-pr`, доказательства
       только по форджу, write-ahead id, блокировка прогона); план —
@@ -1843,6 +1843,15 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       Чекбокс — после живой приёмки §11.8 (гарантия происхождения — только
       engineer `--need`; невосстановимость после потери ответа `start` до
       discovery#63 — принятое ограничение).
+      **Закрыт 2026-10-10 живой приёмкой §11.8** — evidence
+      `docs/evidence/2026-10-10-engineer-route-live-run.md` (песочница
+      `andrei-shtanakov/spec-loop-sandbox`, предмет «CLI с `--version`», ответы
+      владельца в роли). Уточнения критерия по решению владельца: E1 выполнен,
+      авторинг S1 не начат (нет `profiles/team-exp.yaml` в цели); второй
+      негативный контроль — смёрженный PR недопустимого состава (`pr_files`), не
+      настоящий бандл-PR. Живьём не исполнены: ревью brief-PR и ветка `brief/*`
+      в `human-merge.sh` (brief-PR смержен веб-интерфейсом). Открытые дефекты
+      приёмки: #576, #577, #580.
       **Разблокирован 2026-09-18.** Ждал п.1 discovery#49 (приём upstream при
       `start --frame engineer`); сосед доставил его PR-ом discovery#50
       (`49dbc2a`, master) вместе с п.2 — пункт продюсера
