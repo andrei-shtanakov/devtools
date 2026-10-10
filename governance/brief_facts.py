@@ -112,27 +112,63 @@ _REPO_FILE_QUERY = (
 )
 
 
+def _only_not_found(payload: dict, at: tuple[str, ...]) -> bool:
+    """Все ошибки ответа — `NOT_FOUND` ровно по `at`, а значение там — null."""
+    errors = payload.get("errors")
+    if not isinstance(errors, list) or not errors:
+        return False
+    for err in errors:
+        if not isinstance(err, dict) or err.get("type") != "NOT_FOUND":
+            return False
+        if err.get("path") != list(at):
+            return False
+    node: object = payload.get("data")
+    for key in at:
+        if not isinstance(node, dict) or key not in node:
+            return False
+        node = node[key]
+    return node is None
+
+
 class BriefFactsMixin:
     """Факты форджа brief-маршрута поверх `_graphql_repository` хоста."""
 
-    def _graphql_repository(self, query: str, **variables: str) -> dict | None:
+    def _graphql_repository(
+        self,
+        query: str,
+        *,
+        not_found_at: tuple[str, ...] | None = None,
+        **variables: str,
+    ) -> dict | None:
         """`data.repository` ответа GraphQL либо None на ЛЮБОЙ сбой.
 
         `-F` для всех переменных, как у `remote_branch_head_fact`: строки
         (в т.ч. `GitObjectID`) уходят как есть, конвертируются только
         `true/false/null/целые`.
+
+        `not_found_at` — единственное исключение из «ненулевой код = сбой»:
+        GitHub на отсутствующий путь отвечает `data` с `null` в этом месте И
+        `errors: [{type: NOT_FOUND, path: <это место>}]`, а `gh` выходит с
+        кодом 1 (замер 2026-10-10, живая приёмка E2). Такой ответ принимается,
+        только если КАЖДАЯ ошибка — `NOT_FOUND` ровно по `not_found_at`, а
+        значение там — `null`; любая иная форма — сбой.
         """
         argv = ["gh", "api", "graphql", "-f", f"query={query}"]
         for key, value in variables.items():
             argv += ["-F", f"{key}={value}"]
         done = subprocess.run(argv, capture_output=True, text=True, check=False)
-        if done.returncode != 0:
-            return None
         try:
-            repository = json.loads(done.stdout)["data"]["repository"]
+            payload = json.loads(done.stdout)
+            repository = payload["data"]["repository"]
         except (json.JSONDecodeError, KeyError, TypeError):
             return None
-        return repository if isinstance(repository, dict) else None
+        if not isinstance(repository, dict):
+            return None
+        if done.returncode == 0 and "errors" not in payload:
+            return repository
+        if not_found_at is None or not _only_not_found(payload, not_found_at):
+            return None
+        return repository
 
     def policy_version_fact(self, repo_slug: str, branch: str, path: str) -> Fact[str]:
         """SHA последнего коммита `branch`, тронувшего `path` (спека S5).
@@ -176,7 +212,12 @@ class BriefFactsMixin:
         """Текст `path` в коммите `sha`: FOUND / ABSENT / UNAVAILABLE."""
         owner, name = repo_slug.split("/", 1)
         repository = self._graphql_repository(
-            _REPO_FILE_QUERY, o=owner, n=name, s=sha, p=path
+            _REPO_FILE_QUERY,
+            not_found_at=("repository", "object", "file"),
+            o=owner,
+            n=name,
+            s=sha,
+            p=path,
         )
         what = f"{repo_slug}@{sha}:{path}"
         if repository is None or "object" not in repository:
