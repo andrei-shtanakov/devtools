@@ -916,3 +916,25 @@ def test_label_removed_before_create_pr_is_named_refusal(
         bt.propose(RUN_ID, ops)
     assert not exc.value.retry and "gh label create" in str(exc.value)
     assert BRANCH in ops.remote_heads  # ветка на форджe — повтор создаст PR
+
+
+def test_unreadable_label_after_create_failure_keeps_original_diagnosis(
+    tmp_path, runs_root, monkeypatch
+) -> None:
+    """Ревью #582: сбой форджа роняет и `gh pr create`, и чтение метки —
+    отказ остаётся исходным «PR не создан … ветка уже на форджe»."""
+    _brief_ready_run(tmp_path)
+    ops = _ops(monkeypatch)
+    ops.create_error = "HTTP 502"
+    real_push = ops.push_branch
+
+    def push_then_forge_down(target_dir: str, branch: str) -> None:
+        real_push(target_dir, branch)
+        ops.unavailable_facts.add("label")
+
+    ops.push_branch = push_then_forge_down  # type: ignore[method-assign]
+    with pytest.raises(bt.BriefToolError) as exc:
+        bt.propose(RUN_ID, ops)
+    assert exc.value.retry
+    assert "PR не создан (HTTP 502)" in str(exc.value)
+    assert "ветка уже на форджe" in str(exc.value)
