@@ -76,6 +76,18 @@ class ToolOps(FakeForge):
             return Fact(Outcome.ABSENT, None, "нет ветки")
         return Fact(Outcome.FOUND, sha, "ветка")
 
+    #: Метки цели; `label_fact` — ABSENT для отсутствующей (devtools#580).
+    labels: set[str] = field(default_factory=lambda: {bt.LABEL})
+    #: Метку удаляют в момент `create_pr` (гонка после проверки до push).
+    drop_label_on_create: bool = False
+
+    def label_fact(self, repo_slug: str, name: str) -> Fact[bool]:
+        if "label" in self.unavailable_facts:
+            return unavailable("label")
+        if name not in self.labels:
+            return Fact(Outcome.ABSENT, None, "нет метки")
+        return Fact(Outcome.FOUND, True, "метка")
+
     def is_dirty(self, target_dir: str) -> bool:
         return self.dirty
 
@@ -125,6 +137,9 @@ class ToolOps(FakeForge):
         draft=False,
         base=None,
     ) -> int:
+        if self.drop_label_on_create:
+            self.labels.discard(label)
+            raise RuntimeError(f"could not add label: '{label}' not found")
         if self.create_error:
             raise RuntimeError(self.create_error)
         self.calls.append(("create_pr", branch, label, base, body))
@@ -843,3 +858,83 @@ def test_check_merge_cli_exit_codes(monkeypatch, capsys, exc, code) -> None:
     assert bmc.main(["--repo", REPO, "--pr", "7", "--head", HEAD]) == code
     out = capsys.readouterr().out
     assert out == (f"{P}\n" if code == 0 else "")  # stdout — только пин (B1)
+
+
+# --- devtools#580: метка цели проверяется до push ---
+
+_EFFECTS = ("switch_to", "commit_paths", "push_branch", "create_pr")
+
+
+def test_missing_label_refuses_before_any_effect(
+    tmp_path, runs_root, monkeypatch
+) -> None:
+    _brief_ready_run(tmp_path)
+    ops = _ops(monkeypatch)
+    ops.labels.clear()
+    with pytest.raises(bt.BriefToolError) as exc:
+        bt.propose(RUN_ID, ops)
+    assert not exc.value.retry
+    assert f"gh label create {bt.LABEL} -R {REPO}" in str(exc.value)
+    assert not any(c[0] in _EFFECTS for c in ops.calls)
+    assert BRANCH not in ops.remote_heads
+
+
+def test_unreadable_label_is_retry_without_effects(
+    tmp_path, runs_root, monkeypatch
+) -> None:
+    _brief_ready_run(tmp_path)
+    ops = _ops(monkeypatch)
+    ops.unavailable_facts.add("label")
+    with pytest.raises(bt.BriefToolError) as exc:
+        bt.propose(RUN_ID, ops)
+    assert exc.value.retry
+    assert not any(c[0] in _EFFECTS for c in ops.calls)
+
+
+def test_missing_label_on_recovery_refuses_without_pr(
+    tmp_path, runs_root, monkeypatch
+) -> None:
+    """Окно «push есть, PR нет» (так было в приёмке E2): тот же отказ."""
+    _brief_ready_run(tmp_path)
+    ops = _ops(monkeypatch)
+    ops.remote_heads[BRANCH] = HEAD
+    ops.compare[(BASE, HEAD)] = FILES
+    ops.labels.clear()
+    with pytest.raises(bt.BriefToolError) as exc:
+        bt.propose(RUN_ID, ops)
+    assert not exc.value.retry and "gh label create" in str(exc.value)
+    assert not any(c[0] == "create_pr" for c in ops.calls)
+
+
+def test_label_removed_before_create_pr_is_named_refusal(
+    tmp_path, runs_root, monkeypatch
+) -> None:
+    _brief_ready_run(tmp_path)
+    ops = _ops(monkeypatch)
+    ops.drop_label_on_create = True
+    with pytest.raises(bt.BriefToolError) as exc:
+        bt.propose(RUN_ID, ops)
+    assert not exc.value.retry and "gh label create" in str(exc.value)
+    assert BRANCH in ops.remote_heads  # ветка на форджe — повтор создаст PR
+
+
+def test_unreadable_label_after_create_failure_keeps_original_diagnosis(
+    tmp_path, runs_root, monkeypatch
+) -> None:
+    """Ревью #582: сбой форджа роняет и `gh pr create`, и чтение метки —
+    отказ остаётся исходным «PR не создан … ветка уже на форджe»."""
+    _brief_ready_run(tmp_path)
+    ops = _ops(monkeypatch)
+    ops.create_error = "HTTP 502"
+    real_push = ops.push_branch
+
+    def push_then_forge_down(target_dir: str, branch: str) -> None:
+        real_push(target_dir, branch)
+        ops.unavailable_facts.add("label")
+
+    ops.push_branch = push_then_forge_down  # type: ignore[method-assign]
+    with pytest.raises(bt.BriefToolError) as exc:
+        bt.propose(RUN_ID, ops)
+    assert exc.value.retry
+    assert "PR не создан (HTTP 502)" in str(exc.value)
+    assert "ветка уже на форджe" in str(exc.value)

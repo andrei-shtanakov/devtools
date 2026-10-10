@@ -178,6 +178,28 @@ def _expected_files(dir_: str) -> set[tuple[str, str]]:
     }
 
 
+def _require_label(ops, state: rs.RunState) -> None:
+    """Метка brief-PR есть в цели — проверка ДО push (devtools#580).
+
+    Без метки `gh pr create --label` отказывает при каждом повторе: это
+    отказ с названной причиной и командой, а не «повторите».
+    """
+    fact = _fact(ops.label_fact(state.repo_slug, LABEL), f"метка {LABEL}")
+    if fact.outcome is not Outcome.FOUND:
+        raise _missing_label(state)
+
+
+def _missing_label(state: rs.RunState) -> BriefToolError:
+    """Отказ «нет метки» с действием; поиск метки форджей регистрозависим."""
+    return BriefToolError(
+        f"в {state.repo_slug} нет метки {LABEL} — brief-PR без неё не "
+        f"создаётся; создайте её (права на репо цели): gh label create "
+        f"{LABEL} -R {state.repo_slug} (если она есть в другом регистре — "
+        "переименуйте её: gh label edit), затем "
+        f"повторите: make brief-propose RUN={state.run_id}"
+    )
+
+
 def _create(ops, state, branch: str, data: bytes, brief_text: str, dir_: str) -> int:
     default = _fact(
         ops.default_branch_fact(state.repo_slug), "ветка по умолчанию"
@@ -248,6 +270,11 @@ def _open_pr(ops, state, branch: str, default, policy_sha: str, head: str) -> in
             base=default.name,
         )
     except (RuntimeError, OSError, subprocess.CalledProcessError) as exc:
+        # Метку могли удалить после проверки до push: её УСТАНОВЛЕННОЕ
+        # отсутствие — постоянный отказ (devtools#580). Непрочитанный факт
+        # диагноз не подменяет — остаётся исходный отказ `gh pr create`.
+        if ops.label_fact(state.repo_slug, LABEL).outcome is Outcome.ABSENT:
+            raise _missing_label(state) from exc
         raise BriefToolError(
             f"PR не создан ({exc}) — повторите: make brief-propose RUN={state.run_id} "
             "(ветка уже на форджe, повтор создаст только PR)",
@@ -275,6 +302,7 @@ def propose(run_id: str, ops) -> int:
             raise BriefToolError(f"неоднозначно: у {branch} несколько PR {found}")
         if found:
             return _existing_pr(ops, state, found[0], brief_text, dir_)
+        _require_label(ops, state)
         head = ops.remote_branch_head_fact(state.repo_slug, branch)
         _fact(head, f"ветка {branch}")
         if head.outcome is Outcome.FOUND:

@@ -241,3 +241,43 @@ def test_not_found_twins_are_unavailable(monkeypatch, payload, rc) -> None:
     _gh(monkeypatch, payload, rc=rc)
     fact = RealOps().repo_file_fact(REPO, SHA, PATH)
     assert fact.outcome is Outcome.UNAVAILABLE, fact
+
+
+# --- devtools#580: метка цели ---
+
+LABEL_REPO, LABEL = "o/target", "human-merge-required"
+
+
+def test_label_found(monkeypatch) -> None:
+    calls = _gh(monkeypatch, {"data": {"repository": {"label": {"name": LABEL}}}})
+    fact = RealOps().label_fact(LABEL_REPO, LABEL)
+    assert fact.outcome is Outcome.FOUND and fact.value is True
+    assert "l=human-merge-required" in calls[0]
+
+
+def test_label_null_is_absent(monkeypatch) -> None:
+    """Живой ответ (замер 2026-10-10): `label: null`, код 0, без `errors`."""
+    _gh(monkeypatch, {"data": {"repository": {"label": None}}})
+    assert RealOps().label_fact(LABEL_REPO, LABEL).outcome is Outcome.ABSENT
+
+
+@pytest.mark.parametrize(
+    ("payload", "rc"),
+    [
+        (None, 1),
+        ({"data": {"repository": {"label": None}}}, 1),
+        ({"data": {"repository": None}}, 0),
+        ({"data": {"repository": {}}}, 0),
+        ({"data": {"repository": {"label": {"name": "other"}}}}, 0),
+        (
+            {
+                "data": {"repository": {"label": None}},
+                "errors": [{"type": "NOT_FOUND", "path": ["repository", "label"]}],
+            },
+            0,
+        ),
+    ],
+)
+def test_label_unclear_answers_are_unavailable(monkeypatch, payload, rc) -> None:
+    _gh(monkeypatch, payload, rc=rc)
+    assert RealOps().label_fact(LABEL_REPO, LABEL).outcome is Outcome.UNAVAILABLE
