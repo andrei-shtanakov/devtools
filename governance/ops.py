@@ -45,6 +45,13 @@ _REMOTE_BRANCH_HEAD_QUERY = (
     "ref(qualifiedName:$q){target{oid}}}}"
 )
 
+#: Метка репо по точному имени (регистр значим): `label: null` при коде 0 и
+#: без `errors` — установленное отсутствие (замер 2026-10-10, devtools#580).
+_LABEL_QUERY = (
+    "query($o:String!,$n:String!,$l:String!){"
+    "repository(owner:$o,name:$n){label(name:$l){name}}}"
+)
+
 #: Факты закрытия PR (спека 2026-09-28 §4.1 п.3): ОДИН запрос несёт и
 #: `state`, и хвост timeline — атомарно. REST `issues/<n>/events` отвергнут:
 #: страницы по 30 от старых к новым и нет атомарности с `state`.
@@ -220,6 +227,8 @@ class Ops(Protocol):
     def find_brief_pr_fact(self, repo_slug: str, head_ref: str) -> Fact[list[int]]: ...
 
     def default_branch_fact(self, repo_slug: str) -> Fact[DefaultBranch]: ...
+
+    def label_fact(self, repo_slug: str, name: str) -> Fact[bool]: ...
 
     def pr_comments_fact(self, repo_slug: str, pr: int) -> Fact[list[PrComment]]: ...
 
@@ -1869,6 +1878,23 @@ class RealOps(BriefFactsMixin):
             check=False,
         )
         return done.returncode == 0
+
+    def label_fact(self, repo_slug: str, name: str) -> Fact[bool]:
+        """Метка `name` в репо: FOUND / ABSENT / UNAVAILABLE (devtools#580).
+
+        Без метки `gh pr create --label` падает — это не транзиентный сбой,
+        и вызывающему нужен ответ ДО push, а не «повторите» после него.
+        """
+        owner, repo = repo_slug.split("/", 1)
+        repository = self._graphql_repository(_LABEL_QUERY, o=owner, n=repo, l=name)
+        if repository is None or "label" not in repository:
+            return unavailable(f"метка {name} в {repo_slug}: не прочитана")
+        label = repository["label"]
+        if label is None:
+            return Fact(Outcome.ABSENT, None, f"в {repo_slug} нет метки {name}")
+        if isinstance(label, dict) and label.get("name") == name:
+            return Fact(Outcome.FOUND, True, f"метка {name}")
+        return unavailable(f"метка {name} в {repo_slug}: неожиданная форма {label!r}")
 
     def remote_branch_head_fact(self, repo_slug: str, branch: str) -> Fact[str]:
         """Head удалённой ветки: FOUND / ABSENT / UNAVAILABLE.

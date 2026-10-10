@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from governance import brief_input, run_lock, spec_loop
+from governance import brief_input, halt_gate, run_lock, runner, spec_loop
 from governance import interview as iv
 from governance import run_state as rs
 
@@ -710,6 +710,37 @@ def test_no_run_starts_with_human_authority_and_prints_values(
     assert kwargs["run_id"] in out
     assert "owner/alpha" in out
     assert "waiting_human_merge" in out
+
+
+@pytest.mark.parametrize(
+    ("unread", "code"),
+    [(False, halt_gate.EXIT_HALTED), (True, halt_gate.EXIT_UNREAD)],
+)
+def test_halt_refusal_is_a_named_refusal_without_a_run(
+    runs_root, tmp_path, monkeypatch, capsys, unread, code
+) -> None:
+    """devtools#576: отказ стоп-крана — строка с причиной и код стопа, без
+    трейсбека, без прогона и леджера (настоящий `runner.start`)."""
+    real_start = spec_loop.runner.start
+    env = _LoopEnv(monkeypatch, tmp_path)
+    monkeypatch.setattr(spec_loop.runner, "start", real_start)
+    monkeypatch.setattr(
+        runner,
+        "_HALT_GATE",
+        lambda slug: halt_gate.HaltedError(
+            "стоп-кран DarkFactory (refuse_unknown): rulesets could not be listed",
+            unread=unread,
+        ),
+    )
+
+    rc = spec_loop.main(["--subject", "Fleet Inbox", "--repo", "alpha"])
+
+    assert rc == code
+    out = capsys.readouterr().out
+    assert "spec-loop: стоп-кран DarkFactory (refuse_unknown)" in out
+    assert "Traceback" not in out
+    assert rs.all_run_ids() == []
+    assert env.calls == []
 
 
 def test_new_run_accepts_brief_before_start_and_prints_source(

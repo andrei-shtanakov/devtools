@@ -70,6 +70,7 @@ from governance import (
     brief_provenance,
     bundle_dag,
     charter_guard,
+    halt_gate,
     run_lock,
     runner,
     task_bridge,
@@ -1401,6 +1402,12 @@ def main(argv: list[str] | None = None) -> int:
     except run_lock.LockBusy as exc:
         print(f"spec-loop: {exc}")
         return 1
+    except halt_gate.HaltedError as exc:
+        # Штатный отказ стоп-крана (devtools#576): `runner.start/verify/reopen`
+        # бросают его до резервирования run-id, прогона нет. Коды — как у
+        # `runner.main` и merge-pr.sh: 6 стоп действует, 2 стоп не прочитан.
+        print(f"spec-loop: {exc}")
+        return exc.exit_code
     finally:
         locks.close()
 
