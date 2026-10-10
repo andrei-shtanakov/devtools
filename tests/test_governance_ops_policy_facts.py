@@ -172,3 +172,72 @@ def test_file_fact_found_only_for_complete_text(
 def test_file_fact_malformed_entry_is_unavailable(monkeypatch, obj) -> None:
     _gh(monkeypatch, {"data": {"repository": {"object": obj}}})
     assert RealOps().repo_file_fact(REPO, SHA, PATH).outcome is Outcome.UNAVAILABLE
+
+
+#: Живой ответ GitHub на отсутствующий путь (замер 2026-10-10, приёмка E2):
+#: `data` с `file: null` И `errors` NOT_FOUND по этому месту; `gh` — код 1.
+_LIVE_NOT_FOUND = {
+    "data": {"repository": {"object": {"file": None}}},
+    "errors": [
+        {
+            "type": "NOT_FOUND",
+            "path": ["repository", "object", "file"],
+            "locations": [{"line": 1, "column": 115}],
+            "message": "Could not resolve file for path 'x/brief.md'.",
+        }
+    ],
+}
+
+
+def test_live_not_found_answer_is_absent(monkeypatch) -> None:
+    """Живая приёмка E2: без этого «файла нет» становилось «повторите», и
+    brief-propose не мог проверить базу (адаптер отбрасывал ответ с кодом 1)."""
+    _gh(monkeypatch, _LIVE_NOT_FOUND, rc=1)
+    fact = RealOps().repo_file_fact(REPO, SHA, PATH)
+    assert fact.outcome is Outcome.ABSENT, fact
+
+
+def _variant(**changes):
+    import copy
+
+    payload = copy.deepcopy(_LIVE_NOT_FOUND)
+    if "error" in changes:
+        payload["errors"][0].update(changes.pop("error"))
+    if changes.pop("extra_error", False):
+        payload["errors"].append({"type": "FORBIDDEN", "path": ["repository"]})
+    if "file" in changes:
+        payload["data"]["repository"]["object"]["file"] = changes.pop("file")
+    if changes.pop("no_data", False):
+        del payload["data"]
+    if changes.pop("no_errors", False):
+        del payload["errors"]
+    assert not changes
+    return payload
+
+
+@pytest.mark.parametrize(
+    ("payload", "rc"),
+    [
+        (_variant(error={"type": "FORBIDDEN"}), 1),  # не NOT_FOUND
+        (_variant(error={"path": ["repository", "object"]}), 1),  # не то место
+        (_variant(extra_error=True), 1),  # NOT_FOUND + иная ошибка
+        (_variant(file={"object": {"text": "x"}}), 1),  # значение там не null
+        (_variant(no_data=True), 1),  # нет data
+        (_variant(no_errors=True), 1),  # код 1 без объяснения
+        (_variant(file={"object": {"text": "x"}}), 0),  # код 0, но errors
+    ],
+    ids=[
+        "other-type",
+        "other-path",
+        "mixed-errors",
+        "not-null",
+        "no-data",
+        "rc1-no-errors",
+        "rc0-with-errors",
+    ],
+)
+def test_not_found_twins_are_unavailable(monkeypatch, payload, rc) -> None:
+    """Принимается ТОЛЬКО форма живого NOT_FOUND; всякая иная — UNAVAILABLE."""
+    _gh(monkeypatch, payload, rc=rc)
+    fact = RealOps().repo_file_fact(REPO, SHA, PATH)
+    assert fact.outcome is Outcome.UNAVAILABLE, fact
