@@ -157,7 +157,7 @@ spec-loop: прежний прогон cli-version-20261009-9c3274 остаёт�
 spec-loop: operator_brief: подпись не честная (migration)
 ```
 
-Код ненулевой, список `out/governance-runs` до и после совпадает.
+Код `make` 2 (`spec_loop.main` вернул 1), список `out/governance-runs` до и после совпадает.
 
 (Первая попытка К1 дала diff из двух изменений: удалённая строка плюс лишний
 финальный перевод строки. Она переделана, чтобы менялась ровно одна строка, и в
@@ -186,7 +186,7 @@ PR `andrei-shtanakov/spec-loop-sandbox#2`: меняет только `README.md`
 spec-loop: --new-run запрещён: прогон(ы) с этими (repo, subject) уже достигли S1: --run-id cli-version-20261009-eng-c67061 [stopped_preflight]
 ```
 
-Код 2. Engineer-прогон этой пары уже прошёл S1, и запрет повторного workstream
+Код `make` 2 (`spec_loop.main` вернул 1, `make: *** Error 1`). Engineer-прогон этой пары уже прошёл S1, и запрет повторного workstream
 (`spec_loop.main`, раньше engineer-preflight) остановил вызов. Список
 `out/governance-runs` и листинг `~/.discovery/sessions` до и после совпадают.
 
@@ -202,7 +202,7 @@ spec-loop: pr_files: изменения PR [('README.md', 'modified')] ≠ бр�
 make: *** [spec-loop] Error 1
 ```
 
-Код 2. Что наблюдалось:
+Код `make` 2 (`spec_loop.main` вернул 1, `make: *** Error 1`). Что наблюдалось:
 
 - список `out/governance-runs` до и после совпадает, новых или изменённых файлов
   под ним нет (`find -newer` от метки, поставленной перед запуском);

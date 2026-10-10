@@ -1835,7 +1835,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       тестом: пока сессии нет, «ответьте на findings» — совет в пустоту.
       Спека need-stage приведена в соответствие: удаление файла больше не
       привязано к переходу 20 ни в таблице §5.1, ни в §5.3.
-- [ ] E2 Engineer-маршрут стадии Need: `--frame engineer --traces-to <approved customer-brief>` — preflight с явной проверкой `status: approved`, durable-копия upstream в `brief-input/00-discovery/` с `upstream_blob`, `discovery_start(..., upstream_path)` на копию; маршрут отказывает до run-id, пока не реализован @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:spec-loop-need-engineer-route
+- [ ] E2 Engineer-маршрут стадии Need: `--frame engineer --traces-to <approved customer-brief>` — preflight с явной проверкой `status: approved`, durable-копия upstream в `brief-input/00-discovery/` с `upstream_blob`, `discovery_start(..., upstream_path)` на копию; маршрут отказывает до run-id, пока не реализован @owner:github:andrei-shtanakov @epic:eco.dark-factory @blocked_by:todo://devtools/spec-loop-need-brief-human-merge-live @id:spec-loop-need-engineer-route
       **Ревизия 7 спеки (2026-10-08):** маршрут — по §11 спеки need-stage
       (вариант А: engineer отдельным прогоном, `--approval-pr`, доказательства
       только по форджу, write-ahead id, блокировка прогона); план —
@@ -1887,7 +1887,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       заявку: отказ верен, причина в нём — нет. Правится вместе с реализацией
       маршрута, тем же PR.
 
-- [ ] Остаток живой приёмки E2 (§11.8): на ближайшем настоящем brief-PR — ревью brief-PR → `make human-merge ARGS='<repo> <PR>'` с проверкой заявки (`brief_merge_check`) и мержем с пином проверенной head SHA → результат дописать в evidence; после этого — закрыть E2 engineer-маршрута отдельным изменением @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:spec-loop-need-brief-human-merge-live
+- [ ] Остаток живой приёмки E2 (§11.8): на ближайшем настоящем brief-PR — ревью brief-PR → `make human-merge ARGS='<repo> <PR>'` с проверкой заявки (`brief_merge_check`) и мержем с пином проверенной head SHA → результат дописать в evidence; после этого — закрыть E2 engineer-маршрута отдельным изменением @owner:github:andrei-shtanakov @epic:eco.dark-factory @trigger:"ближайший настоящий brief-PR" @id:spec-loop-need-brief-human-merge-live
       Частичная приёмка 2026-10-10 (`docs/evidence/2026-10-10-engineer-route-live-run.md`)
       этот путь не прошла: brief-PR #1 песочницы смержен веб-интерфейсом.
       Подпись подтверждена фактами форджа в `brief-approve`, но живой путь
