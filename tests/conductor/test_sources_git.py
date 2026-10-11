@@ -37,9 +37,55 @@ def test_reads_origin_not_worktree(tmp_path: Path) -> None:
 def test_origin_head_unset_or_broken_falls_back(tmp_path: Path) -> None:
     clone = _clone(tmp_path, {"TODO.md": "x\n"})
     _git(clone, "remote", "set-head", "origin", "-d")
-    assert sg.default_ref(clone) == "origin/master"
+    assert sg.default_ref(clone) == "refs/remotes/origin/master"
     _git(clone, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/gone")
-    assert sg.default_ref(clone) == "origin/master"
+    assert sg.default_ref(clone) == "refs/remotes/origin/master"
+
+
+def test_default_branch_reachable_only_via_origin_head(tmp_path: Path) -> None:
+    """Дефолт не master/main: ref флота — только кандидат из origin/HEAD."""
+    clone = _clone(tmp_path, {"TODO.md": "- [ ] a @id:a\n"})
+    up = tmp_path / "up"
+    _git(up, "branch", "-m", "master", "trunk")
+    assert sg.fetch(clone) is None
+    _git(clone, "update-ref", "-d", "refs/remotes/origin/master")
+    assert sg.default_ref(clone) == "refs/remotes/origin/trunk"
+    text, _, state, _ = sg.read_file_at_origin(clone, "TODO.md")
+    assert (state, text) == ("read", "- [ ] a @id:a\n")
+
+
+def test_origin_head_into_local_branch_is_not_the_fleet(tmp_path: Path) -> None:
+    """origin/HEAD, перенаправленный на локальную ветку, не читает клон (#565)."""
+    clone = _clone(tmp_path, {"TODO.md": "- [ ] a @id:a\n"})
+    _git(clone, "switch", "-q", "-c", "local")
+    (clone / "TODO.md").write_text("- [x] a @id:a\n", encoding="utf-8")
+    _git(clone, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qam", "loc")
+    _git(clone, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/heads/local")
+    assert sg.default_ref(clone) == "refs/remotes/origin/master"
+    text, _, state, _ = sg.read_file_at_origin(clone, "TODO.md")
+    assert (state, text) == ("read", "- [ ] a @id:a\n")
+
+
+def test_local_branch_named_like_remote_does_not_shadow(tmp_path: Path) -> None:
+    """Локальная ветка `origin/master` не затеняет флот: ref — полным именем (#565)."""
+    clone = _clone(tmp_path, {"TODO.md": "- [ ] a @id:a\n"})
+    _git(clone, "switch", "-q", "-c", "origin/master")
+    (clone / "TODO.md").write_text("- [x] a @id:a\n", encoding="utf-8")
+    _git(clone, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qam", "loc")
+    _git(clone, "switch", "-q", "master")
+    # без origin/HEAD — запасной кандидат, где короткое имя и затенялось
+    _git(clone, "remote", "set-head", "origin", "-d")
+    assert sg.default_ref(clone) == "refs/remotes/origin/master"
+    text, _, state, _ = sg.read_file_at_origin(clone, "TODO.md")
+    assert (state, text) == ("read", "- [ ] a @id:a\n")
+    head = sg.pinned_head(clone)
+    up_head = subprocess.run(
+        ["git", "-C", str(tmp_path / "up"), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert head == up_head
 
 
 def test_no_default_branch_is_error(tmp_path: Path) -> None:

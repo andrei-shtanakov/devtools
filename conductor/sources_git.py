@@ -78,12 +78,19 @@ def _verifies(repo_dir: Path, ref: str) -> bool:
 
 
 def default_ref(repo_dir: Path) -> str | None:
-    """origin/HEAD, если указывает на коммит; иначе origin/master, origin/main."""
-    code, out, _ = git(
-        repo_dir, "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"
-    )
-    candidates = [out.strip()] if code == 0 and out.strip() else []
-    for ref in [*candidates, "origin/master", "origin/main"]:
+    """`refs/remotes/origin/<default>` полным именем: цель origin/HEAD, если она
+    внутри `refs/remotes/origin/` и указывает на коммит; иначе origin/master,
+    origin/main.
+
+    origin/HEAD, перенаправленный на локальную ветку, читал бы клон вместо
+    флота; короткое `origin/master` git резолвит через `refs/heads/` раньше
+    `refs/remotes/` — локальная ветка с таким именем затенила бы флот (#565).
+    """
+    code, out, _ = git(repo_dir, "symbolic-ref", "-q", "refs/remotes/origin/HEAD")
+    target = out.strip()
+    fleet = code == 0 and target.startswith("refs/remotes/origin/")
+    candidates = [target] if fleet else []
+    for ref in [*candidates, "refs/remotes/origin/master", "refs/remotes/origin/main"]:
         if _verifies(repo_dir, ref):
             return ref
     return None
