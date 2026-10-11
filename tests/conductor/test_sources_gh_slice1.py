@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from conductor.actions.owner_queue import queue_issue
 from conductor.sources_gh import (
     closed_event,
@@ -306,10 +308,19 @@ def test_queue_records_ignores_other_repos_from_search() -> None:
     assert not any(c.startswith("issue view") for c in run.calls)  # type: ignore[attr-defined]
 
 
-def test_queue_records_item_without_repo_is_a_read_failure() -> None:
-    """Элемент без repository_url не приписать репо — сбой чтения, не пропуск."""
+@pytest.mark.parametrize(
+    "item",
+    [
+        {"number": 3},
+        {"number": 3, "repository_url": None},
+        {"number": 3, "repository_url": ""},
+    ],
+)
+def test_queue_records_item_without_repo_is_a_read_failure(item: dict) -> None:
+    """Элемент без пригодного repository_url не приписать репо — сбой чтения,
+    не пропуск (пропуск дал бы пустую очередь и создание новой)."""
     search = json.dumps(
-        [{"total_count": 1, "incomplete_results": False, "items": [{"number": 3}]}]
+        [{"total_count": 1, "incomplete_results": False, "items": [item]}]
     )
     run = fake(
         {
