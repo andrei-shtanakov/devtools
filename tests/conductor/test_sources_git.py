@@ -42,6 +42,18 @@ def test_origin_head_unset_or_broken_falls_back(tmp_path: Path) -> None:
     assert sg.default_ref(clone) == "refs/remotes/origin/master"
 
 
+def test_default_branch_reachable_only_via_origin_head(tmp_path: Path) -> None:
+    """Дефолт не master/main: ref флота — только кандидат из origin/HEAD."""
+    clone = _clone(tmp_path, {"TODO.md": "- [ ] a @id:a\n"})
+    up = tmp_path / "up"
+    _git(up, "branch", "-m", "master", "trunk")
+    assert sg.fetch(clone) is None
+    _git(clone, "update-ref", "-d", "refs/remotes/origin/master")
+    assert sg.default_ref(clone) == "refs/remotes/origin/trunk"
+    text, _, state, _ = sg.read_file_at_origin(clone, "TODO.md")
+    assert (state, text) == ("read", "- [ ] a @id:a\n")
+
+
 def test_origin_head_into_local_branch_is_not_the_fleet(tmp_path: Path) -> None:
     """origin/HEAD, перенаправленный на локальную ветку, не читает клон (#565)."""
     clone = _clone(tmp_path, {"TODO.md": "- [ ] a @id:a\n"})
