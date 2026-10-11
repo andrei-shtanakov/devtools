@@ -469,7 +469,13 @@ def test_author_sandbox_admission_contract_starts_empty() -> None:
     data = _tomllib().loads(
         (root / "contracts/author-sandbox/v1/admitted.toml").read_text("utf-8")
     )
-    assert data == {"schema": 1, "admitted": []}
+    # Ключа нет намеренно: статический `admitted = []` запретил бы дописать
+    # `[[admitted]]` (TOML 1.0.0); отсутствие ключа — пустой допуск.
+    assert data == {"schema": 1}
+    appended = (root / "contracts/author-sandbox/v1/admitted.toml").read_text(
+        "utf-8"
+    ) + '\n[[admitted]]\nharness = "claude"\n'
+    assert _tomllib().loads(appended)["admitted"] == [{"harness": "claude"}]
 
 
 def test_author_sandbox_spawn_sites_name_existing_functions() -> None:
