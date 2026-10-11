@@ -487,8 +487,18 @@ def queue_records(owner: str, name: str, runner: Runner) -> list[dict[str, Any]]
     items, _ = _search(owner, f"repo:{owner}/{name} label:owner-queue is:issue", runner)
     if items is None:
         return None
+    # поиск ИЛИ-объединяет `user:` и `repo:`: в выдаче очереди других репо
+    # владельца (песочницы), чей номер в этом репо — чужая запись (2026-10-11)
+    own = f"/repos/{owner}/{name}".lower()
+    urls = [item.get("repository_url") for item in items]
+    # репо не определить (нет ключа, null, пусто) — сбой чтения, не «чужое»:
+    # пропуск дал бы пустую очередь и создание новой
+    if not all(isinstance(u, str) and u for u in urls):
+        return None
     out = []
-    for item in items:
+    for item, url in zip(items, urls, strict=True):
+        if not url.lower().endswith(own):
+            continue
         rec = fetch_record(owner, name, item["number"], False, runner)
         if rec is None:
             return None
