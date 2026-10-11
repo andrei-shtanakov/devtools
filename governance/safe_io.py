@@ -23,10 +23,13 @@
 from __future__ import annotations
 
 import errno
+import functools
 import os
 import stat
 import time
+import unicodedata
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -34,10 +37,31 @@ from pathlib import Path, PurePosixPath
 NOFOLLOW_ANY: int | None = getattr(os, "O_NOFOLLOW_ANY", None)
 
 _CHUNK = 65536
+#: Режим опубликованного файла узла — не зависит от umask раннера.
+_FILE_MODE = 0o644
 
 
 class SafeIOError(RuntimeError):
-    """Операция небезопасна или невозможна — вызывающий не продолжает."""
+    """Операция небезопасна или невозможна — вызывающий не продолжает.
+
+    Единственный тип отказа модуля: любой `OSError` публичной функции
+    (гонка с потомком агента, нет места, права) приходит как SafeIOError.
+    """
+
+
+def _guarded[**P, R](func: Callable[P, R]) -> Callable[P, R]:
+    """Сырой `OSError` из тела публичной функции → `SafeIOError`."""
+
+    @functools.wraps(func)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        try:
+            return func(*args, **kwargs)
+        except SafeIOError:
+            raise
+        except OSError as exc:
+            raise SafeIOError(f"{func.__name__}: {exc.strerror or exc}") from exc
+
+    return wrapper
 
 
 @dataclass(frozen=True)
@@ -74,20 +98,26 @@ def _join(root: Path, parts: tuple[str, ...]) -> str:
 
 
 def _open(
-    path: str, flags: int, dir_fd: int | None = None, *, any_component: bool = True
+    path: str,
+    flags: int,
+    dir_fd: int | None = None,
+    *,
+    any_component: bool = True,
+    mode: int = 0o777,
 ) -> int:
     """`os.open` с `O_NOFOLLOW_ANY`; `any_component=False` — для создания
     одного имени в закреплённом каталоге (`O_NOFOLLOW_ANY` с `O_CREAT` ядро
     отвергает `EINVAL`, а единственный компонент закрывает `O_NOFOLLOW`)."""
     extra = _flag() if any_component else 0
     try:
-        return os.open(path, flags | extra, dir_fd=dir_fd)
+        return os.open(path, flags | extra, mode, dir_fd=dir_fd)
     except OSError as exc:
         if exc.errno == errno.ELOOP:
             raise SafeIOError(f"{path!r}: ссылка в пути") from exc
         raise SafeIOError(f"{path!r}: {exc.strerror}") from exc
 
 
+@_guarded
 def read_regular(
     root: Path, rel: str | PurePosixPath, *, limit: int, timeout: float = 10.0
 ) -> bytes:
@@ -128,6 +158,7 @@ def _kind(mode: int) -> str:
     return "other"
 
 
+@_guarded
 def list_tree(root: Path, rel: str | PurePosixPath) -> list[Entry]:
     """Всё под `root/rel` без следования ссылкам: ссылка — элемент, не вход."""
     start = _parts(rel)
@@ -172,11 +203,13 @@ def _dir_chain(root: Path, parts: tuple[str, ...]) -> int:
     return fd
 
 
+@_guarded
 def ensure_dirs(root: Path, rel: str | PurePosixPath) -> None:
     """Создать `root/rel` и родителей цепочкой дескрипторов."""
     os.close(_dir_chain(root, _parts(rel)))
 
 
+@_guarded
 def publish(root: Path, rel: str | PurePosixPath, data: bytes) -> None:
     """Записать `data` в `root/rel` новым inode поверх конечного имени."""
     parts = _parts(rel)
@@ -197,7 +230,9 @@ def publish(root: Path, rel: str | PurePosixPath, data: bytes) -> None:
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
             dir_fd=dir_fd,
             any_component=False,
+            mode=_FILE_MODE,
         )
+        os.fchmod(fd, _FILE_MODE)  # umask не ослабляет и не усиливает режим
         try:
             view = memoryview(data)
             while view:
@@ -219,14 +254,28 @@ def publish(root: Path, rel: str | PurePosixPath, data: bytes) -> None:
         os.close(dir_fd)
 
 
+def _fold(text: str) -> str:
+    """Ключ сравнения имён на томе APFS: регистр и форма Unicode не важны."""
+    return unicodedata.normalize("NFD", text).casefold()
+
+
+def _same_or_nested(a: PurePosixPath, b: PurePosixPath) -> bool:
+    fa, fb = PurePosixPath(_fold(str(a))), PurePosixPath(_fold(str(b)))
+    return fa == fb or fa in fb.parents or fb in fa.parents
+
+
 def validate_bundle_dir(
     target_dir: Path, bundle_dir: str, *, git_dirs: tuple[Path, ...]
 ) -> PurePosixPath:
     """Контракт назначения §15: `bundle_dir` относительно канонического корня.
 
     Непустой относительный, без `..`, пустых и абсолютных компонентов, не
-    `.`, без компонента `.git`; строго внутри `target_dir` и не пересекается
-    с gitdir/common dir цели. Иначе SafeIOError — до вызова агента.
+    `.`, без компонента `.git` (в любом регистре и форме Unicode — том APFS
+    по умолчанию их не различает); существующая часть пути — без ссылок
+    (канонизация: `realpath` равен лексическому пути); строго внутри
+    `target_dir` и не пересекается с gitdir/common dir цели ни по имени (без
+    учёта регистра и формы Unicode). Иначе SafeIOError —
+    до вызова агента.
     """
     root = str(target_dir)
     if not os.path.isabs(root) or os.path.realpath(root) != root:
@@ -234,12 +283,15 @@ def validate_bundle_dir(
     if bundle_dir in ("", "."):
         raise SafeIOError("bundle_dir пустой или `.`")
     parts = _parts(bundle_dir)
-    if ".git" in parts:
+    if any(_fold(part) == ".git" for part in parts):
         raise SafeIOError(f"bundle_dir {bundle_dir!r} с компонентом .git")
-    bundle = PurePosixPath(*parts)
     full = PurePosixPath(root, *parts)
+    if _fold(os.path.realpath(str(full))) != _fold(str(full)):
+        raise SafeIOError(
+            f"bundle_dir {bundle_dir!r}: ссылка в существующей части пути"
+        )
     for git_dir in git_dirs:
         g = PurePosixPath(os.path.realpath(git_dir))
-        if full == g or g in full.parents or full in g.parents:
+        if _same_or_nested(full, g):
             raise SafeIOError(f"bundle_dir {bundle_dir!r} пересекается с gitdir {g}")
-    return bundle
+    return PurePosixPath(*parts)

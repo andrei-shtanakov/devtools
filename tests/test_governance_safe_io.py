@@ -338,3 +338,93 @@ def test_failed_publish_changes_nothing_outside_root(
     with pytest.raises(safe_io.SafeIOError):
         safe_io.publish(root, "spec/deep/00-charter.md", b"x")
     assert _snapshot(tmp_path) == before
+
+
+# --- ревью #597: режим, регистр, канонизация, контракт ошибок --------------
+
+
+@darwin_only
+@pytest.mark.parametrize("umask", [0, 0o077])
+def test_publish_mode_is_0644_regardless_of_umask(root: Path, umask: int) -> None:
+    old = os.umask(umask)
+    try:
+        safe_io.publish(root, "spec/00-charter.md", b"x")
+    finally:
+        os.umask(old)
+    mode = stat.S_IMODE((root / "spec" / "00-charter.md").stat().st_mode)
+    assert mode == 0o644
+
+
+@pytest.mark.parametrize("bundle_dir", [".GIT", ".Git", "ws/.GiT/bundle", "ws/.git"])
+def test_bundle_dir_rejects_git_component_in_any_case(
+    tmp_path: Path, bundle_dir: str
+) -> None:
+    """Том APFS по умолчанию регистронезависим: `.GIT` — это `.git`."""
+    base = Path(os.path.realpath(tmp_path))
+    with pytest.raises(safe_io.SafeIOError, match=r"\.git"):
+        safe_io.validate_bundle_dir(base, bundle_dir, git_dirs=())
+
+
+def test_bundle_dir_overlap_with_gitdir_is_case_insensitive(tmp_path: Path) -> None:
+    base = Path(os.path.realpath(tmp_path))
+    gitdir = base / "ws" / "Meta"
+    with pytest.raises(safe_io.SafeIOError, match="gitdir"):
+        safe_io.validate_bundle_dir(base, "WS/meta/bundle", git_dirs=(gitdir,))
+
+
+def test_bundle_dir_with_symlinked_component_refused_before_agent(
+    tmp_path: Path,
+) -> None:
+    """Компонент бандла — ссылка (на gitdir или вовне цели): отказ на
+    проверке назначения, а не позже на переносе (§15)."""
+    base = Path(os.path.realpath(tmp_path))
+    (base / ".git").mkdir()
+    (base / "ws").symlink_to(base / ".git")
+    with pytest.raises(safe_io.SafeIOError):
+        safe_io.validate_bundle_dir(base, "ws/spec", git_dirs=(base / ".git",))
+    outside = Path(os.path.realpath(tmp_path)) / "outside"
+    outside.mkdir()
+    (base / "ws2").symlink_to(outside)
+    with pytest.raises(safe_io.SafeIOError, match="ссылк"):
+        safe_io.validate_bundle_dir(base, "ws2/spec", git_dirs=())
+
+
+def test_bundle_dir_overlaps_gitdir_named_in_other_case(tmp_path: Path) -> None:
+    """На регистронезависимом томе `META` и `meta` — один каталог: gitdir,
+    названный в другом регистре, всё равно пересекается с бандлом."""
+    base = Path(os.path.realpath(tmp_path))
+    (base / "meta").mkdir()
+    if not (base / "META").exists():
+        pytest.skip("том регистрозависимый — псевдонима по регистру нет")
+    gitdir_alias = base / "META"
+    with pytest.raises(safe_io.SafeIOError, match="gitdir"):
+        safe_io.validate_bundle_dir(base, "meta/bundle", git_dirs=(gitdir_alias,))
+
+
+@darwin_only
+def test_list_tree_race_raises_safe_io_error(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Запись исчезла между listdir и stat (потомок агента, Z12): штатный
+    отказ SafeIOError, а не сырой OSError."""
+    (root / "f.md").write_bytes(b"x")
+
+    def vanished(*args: object, **kwargs: object) -> os.stat_result:
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(safe_io.os, "stat", vanished)
+    with pytest.raises(safe_io.SafeIOError):
+        safe_io.list_tree(root, ".")
+
+
+@darwin_only
+def test_publish_write_failure_is_safe_io_error_and_cleans_tmp(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_space(fd: int, data: object) -> int:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(safe_io.os, "write", no_space)
+    with pytest.raises(safe_io.SafeIOError, match="space"):
+        safe_io.publish(root, "spec/00-charter.md", b"x")
+    assert list((root / "spec").iterdir()) == []
