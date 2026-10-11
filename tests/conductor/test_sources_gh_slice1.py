@@ -12,6 +12,8 @@ from conductor.sources_gh import (
 )
 from tests.conductor.slice1_fixtures import world
 
+WS_URL = "https://api.github.com/repos/own/ws"
+
 
 def fake(responses: dict[str, list[tuple[int, str, str]]]):
     """Ответы по префиксу команды; список расходуется по порядку."""
@@ -241,7 +243,13 @@ ISSUE_VIEW = json.dumps(
 
 def test_queue_records_any_state_with_pinned() -> None:
     search = json.dumps(
-        [{"total_count": 1, "incomplete_results": False, "items": [{"number": 3}]}]
+        [
+            {
+                "total_count": 1,
+                "incomplete_results": False,
+                "items": [{"number": 3, "repository_url": WS_URL}],
+            }
+        ]
     )
     pinned = json.dumps(
         {
@@ -269,6 +277,50 @@ def test_queue_records_any_state_with_pinned() -> None:
     assert rec["state"] == "closed" and rec["closed_at"] == "2026-09-30T00:00:00Z"
 
 
+def test_queue_records_ignores_other_repos_from_search() -> None:
+    """Флот 2026-10-11: поиск ИЛИ-объединяет `user:` и `repo:` и вернул очередь
+    песочницы (`sandbox#11`); её номер читался в зонтике, где #11 — PR, и вся
+    очередь считалась непрочитанной. Чужие репо отбрасываются по repository_url."""
+    search = json.dumps(
+        [
+            {
+                "total_count": 1,
+                "incomplete_results": False,
+                "items": [
+                    {
+                        "number": 11,
+                        "repository_url": "https://api.github.com/repos/own/sandbox",
+                    }
+                ],
+            }
+        ]
+    )
+    run = fake(
+        {
+            "api -X GET search/issues -f q=user:own repo:own/ws label:owner-queue": [
+                (0, search, "")
+            ],
+        }
+    )
+    assert queue_records("own", "ws", run) == []
+    assert not any(c.startswith("issue view") for c in run.calls)  # type: ignore[attr-defined]
+
+
+def test_queue_records_item_without_repo_is_a_read_failure() -> None:
+    """Элемент без repository_url не приписать репо — сбой чтения, не пропуск."""
+    search = json.dumps(
+        [{"total_count": 1, "incomplete_results": False, "items": [{"number": 3}]}]
+    )
+    run = fake(
+        {
+            "api -X GET search/issues -f q=user:own repo:own/ws label:owner-queue": [
+                (0, search, "")
+            ],
+        }
+    )
+    assert queue_records("own", "ws", run) is None
+
+
 def test_queue_records_app_author_is_recognised_as_mine() -> None:
     """Живая приёмка срез 1 (2026-10-04): очередь владельца, созданная App
     (`gh issue view --json author` отдаёт `app/conductorsandbox`), не
@@ -280,7 +332,13 @@ def test_queue_records_app_author_is_recognised_as_mine() -> None:
         {**json.loads(app_issue_view), "author": {"login": "app/conductorsandbox"}}
     )
     search = json.dumps(
-        [{"total_count": 1, "incomplete_results": False, "items": [{"number": 11}]}]
+        [
+            {
+                "total_count": 1,
+                "incomplete_results": False,
+                "items": [{"number": 11, "repository_url": WS_URL}],
+            }
+        ]
     )
     pinned = json.dumps(
         {
