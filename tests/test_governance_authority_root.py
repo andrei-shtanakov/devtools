@@ -127,6 +127,16 @@ def test_prefixes_read_from_the_ssot_file() -> None:
         # `autonomy` — полномочия агента-оркестратора; merge-pr.sh читает этот
         # перечень и на PR зонтика, так что поднять их агентским мержем нельзя.
         "roadmap.toml",
+        # Песочница авторского агента — защищённая цепочка границы (ЗЦ,
+        # решение владельца 2026-10-11, дизайн §19 п.2): код границы, её
+        # тесты, тест инварианта и контракт допуска мержит только человек.
+        "governance/safe_io",
+        "governance/sandbox",
+        "governance/author_launch",
+        "tests/test_governance_safe_io",
+        "tests/test_governance_sandbox",
+        "tests/test_author_sandbox_invariant",
+        "contracts/author-sandbox/",
     }
 
 
@@ -381,3 +391,112 @@ def test_root_module_does_not_shadow_stdlib_in_gate_launch(tmp_path) -> None:
 def test_criteria_close_stays_agent_mergeable() -> None:
     """Выпуск предложения/штампа — не правило гейта: его ослабление ловит гейт."""
     assert authority_root.touched(["governance/criteria_close.py"]) == []
+
+
+# --- песочница авторского агента: защищённая цепочка (шаг H1) --------------
+
+#: Пути ЗЦ, как их видит merge-гард (префиксы `AUTHORITY_ROOT_PREFIXES`) и
+#: spec-runner (`harness_files`: конкретный файл или каталог). Префикс модуля
+#: без `.py` покрывает и `.py`, и каталог-пакет, и extension-модуль — в
+#: `harness_files` поэтому названы обе формы.
+_AUTHOR_SANDBOX_CHAIN = {
+    "governance/safe_io": ("governance/safe_io.py", "governance/safe_io"),
+    "governance/sandbox": ("governance/sandbox.py", "governance/sandbox"),
+    "governance/author_launch": (
+        "governance/author_launch.py",
+        "governance/author_launch",
+    ),
+    "tests/test_governance_safe_io": ("tests/test_governance_safe_io.py",),
+    "tests/test_governance_sandbox": (
+        "tests/test_governance_sandbox.py",
+        "tests/test_governance_sandbox_live.py",
+    ),
+    "tests/test_author_sandbox_invariant": ("tests/test_author_sandbox_invariant.py",),
+    "contracts/author-sandbox/": ("contracts",),
+}
+
+
+def _harness_files() -> list[str]:
+    import yaml
+
+    root = Path(__file__).resolve().parent.parent
+    data = yaml.safe_load((root / "spec-runner.config.yaml").read_text("utf-8"))
+    return [str(item) for item in data["harness_files"]]
+
+
+def test_author_sandbox_chain_is_in_both_protected_lists() -> None:
+    """ЗЦ (дизайн песочницы §19 п.2) защищена на обеих стадиях: мерж
+    (`AUTHORITY_ROOT_PREFIXES`) и исполнение задачи spec-runner
+    (`harness_files`). Путь, выпавший из одного перечня, снимал бы защиту
+    молча — его агент правил бы spec-runner'ом или мержил бы сам."""
+    prefixes = set(authority_root.prefixes())
+    harness = set(_harness_files())
+    for prefix, harness_entries in _AUTHOR_SANDBOX_CHAIN.items():
+        assert prefix in prefixes, prefix
+        for entry in harness_entries:
+            assert entry in harness, entry
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "governance/safe_io.py",
+        "governance/sandbox.py",
+        "governance/author_launch.py",
+        # Пакетная и extension-форма модуля не уходят из-под префикса.
+        "governance/author_launch/__init__.py",
+        "governance/sandbox.cpython-313-darwin.so",
+        "tests/test_governance_sandbox_live.py",
+        "tests/test_author_sandbox_invariant.py",
+        "contracts/author-sandbox/v1/admitted.toml",
+        "contracts/author-sandbox/v1/spawn-sites.toml",
+    ],
+)
+def test_author_sandbox_chain_paths_are_authority_root(path: str) -> None:
+    assert authority_root.touched([path, "README.md"]) == [path]
+
+
+def _tomllib():
+    import tomllib
+
+    return tomllib
+
+
+def test_author_sandbox_admission_contract_starts_empty() -> None:
+    """До шага H2 допущенных исполняемых файлов нет: граница запуска
+    отказывает любому харнессу (tasks-спека, переходный период)."""
+    root = Path(__file__).resolve().parent.parent
+    data = _tomllib().loads(
+        (root / "contracts/author-sandbox/v1/admitted.toml").read_text("utf-8")
+    )
+    assert data == {"schema": 1, "admitted": []}
+
+
+def test_author_sandbox_spawn_sites_name_existing_functions() -> None:
+    """Каждое исключение перечня мест запуска называет существующую функцию
+    существующего модуля — иначе запись молча разрешала бы место, которого
+    нет. Само правило форм запуска проверяет тест инварианта (TASK-005)."""
+    root = Path(__file__).resolve().parent.parent
+    data = _tomllib().loads(
+        (root / "contracts/author-sandbox/v1/spawn-sites.toml").read_text("utf-8")
+    )
+    assert data["schema"] == 1
+    assert data["allowed_literal_programs"] == [
+        "git",
+        "gh",
+        "tmux",
+        "spec-runner",
+        "security",
+    ]
+    for entry in [*data["site"], *data["dynamic_import"]]:
+        module = root / entry["module"]
+        assert module.is_file(), entry["module"]
+        assert entry["reason"].strip(), entry
+        if "function" in entry:
+            assert entry["count"] >= 1, entry
+            names = {
+                node.name
+                for node in ast.walk(ast.parse(module.read_text("utf-8")))
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+            assert entry["function"] in names, entry

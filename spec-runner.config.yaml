@@ -65,3 +65,18 @@ harness_files:
   - scripts/review
   - workstreams/stray-md-disables-i8-for-legacy-v1-20260922/spec
   - workstreams/i5-traceless-noop-after-abandon-20260923/spec
+  # Песочница авторского агента — защищённая цепочка (ЗЦ, дизайн §19 п.2,
+  # шаг H1): spec-runner сопоставляет конкретный файл или каталог, а не
+  # префикс, поэтому названы и `.py`, и одноимённый каталог пакета; файл,
+  # появившийся по этим путям, — тоже нарушение. `contracts/author-sandbox/`
+  # покрыт записью `contracts` выше.
+  - governance/safe_io.py
+  - governance/safe_io
+  - governance/sandbox.py
+  - governance/sandbox
+  - governance/author_launch.py
+  - governance/author_launch
+  - tests/test_governance_safe_io.py
+  - tests/test_governance_sandbox.py
+  - tests/test_governance_sandbox_live.py
+  - tests/test_author_sandbox_invariant.py
