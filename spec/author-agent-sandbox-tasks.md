@@ -38,14 +38,19 @@ approved_by: ""
 безопасного ввода-вывода, генератор профиля, проба, проверка допуска,
 единственная граница запуска агента и тесты этой цепочки, включая тест
 инварианта. Набор путей (**ЗЦ**, закрепляется в H1):
-`governance/safe_io.py`, `governance/sandbox.py`, `governance/author_launch.py`, `tests/test_governance_safe_io.py`, `tests/test_governance_sandbox.py`, `tests/test_governance_sandbox_live.py`, `tests/test_author_sandbox_invariant.py`, `contracts/author-sandbox/`.
+модули `governance/safe_io`, `governance/sandbox`, `governance/author_launch` — в `AUTHORITY_ROOT_PREFIXES` **префиксами имени модуля без `.py`** (покрывают и одноимённый пакет, и extension-модуль — приём `contracts/authority-root/v1/paths.env:103–107`; сопоставление `startswith`, `governance/authority_root.py:44–47`); тесты `tests/test_governance_safe_io.py`, `tests/test_governance_sandbox.py`, `tests/test_governance_sandbox_live.py`, `tests/test_author_sandbox_invariant.py`; `contracts/author-sandbox/` (допуск и перечень мест порождения процессов). В `harness_files` spec-runner (сопоставление по конкретному файлу или каталогу, а не префиксу) — `.py`-файлы ЗЦ и одноимённые каталоги пакетов; появление пакетной или extension-формы модуля ЗЦ запрещает тест инварианта.
 
 Единственная точка порождения авторского агента — `governance/author_launch.py`
 (сегодня это `_run_agent`, `governance/ops.py:632`, вызываемый только из
 `RealOps.author` и `RealOps.author_disp`, `:2117`, `:2184`). Раннер и `ops.py`
-под authority-root не входят: обойти границу они не могут, потому что
-порождать агента вне `author_launch` запрещено тестом инварианта (TASK-005),
-а сам тест защищён.
+под authority-root не входят. Обойти границу через них не даёт **замкнутый
+перечень мест порождения процессов** в `governance/` (TASK-005): новое место
+запуска процесса где угодно в `governance/` валит защищённый тест, пока человек
+не внесёт его в защищённый перечень. Замер 2026-10-11: 80 мест, у 70 программа —
+литерал (`git` 43, `gh` 22, `tmux` 2, `spec-runner` 2, `security` 1), 10 —
+динамические или через `sh` (`_run_agent` ×2, `edge_check/reviewer.py` ×2,
+`ops.review`, `ops.merge`, `ops._discovery`, `ops.gate_check_s8`,
+`ops.gate_check_candidate`, `brief_facts._graphql_repository`).
 
 **Кто исполняет.** После H1 пути ЗЦ входят в `harness_files`
 (`spec-runner.config.yaml`, `harness_guard: strict`) — spec-runner задачи,
@@ -63,7 +68,8 @@ approved_by: ""
   (`contracts/authority-root/v1/paths.env`) и в `harness_files`
   (`spec-runner.config.yaml`); каркас `contracts/author-sandbox/v1/admitted.toml`
   с пустым списком записей `(harness, version, realpath, sha256, macos_major,
-  profile_sha256)` и README; тест в `tests/test_governance_authority_root.py`:
+  profile_sha256)`, `contracts/author-sandbox/v1/spawn-sites.toml` с 10 местами
+  замера (модуль:функция + причина) и README; тест в `tests/test_governance_authority_root.py`:
   каждый путь ЗЦ есть в обоих перечнях, и `merge-pr.sh` отказывает
   агентскому PR, трогающему любой из них. В `_HARNESS_PREFIXES`
   (`governance/accept_pr.py`) ЗЦ не входит: это не код, который исполняет
@@ -72,10 +78,10 @@ approved_by: ""
   запускает `make sandbox-admit`, проверяет протокол и вносит предложенную
   запись в `admitted.toml` тем же PR, что и протокол `docs/evidence/`.
 
-**Переходный период.** Между мержем TASK-005 и H2 авторский вызов отказывает
-**для всех харнессов, включая claude** («не проверен под песочницей»): допуск
-пуст. Конвейер без запуска агента при этом работает (TASK-005). TASK-005 и H2
-мержить подряд. До TASK-005 действует сегодняшнее положение (без песочницы), и
+**Переходный период.** Порядок `TASK-005 → TASK-006 → H2`: весь интервал от
+мержа TASK-005 до мержа H2 авторский вызов отказывает **для всех харнессов,
+включая claude** («не проверен под песочницей»): допуск пуст. Конвейер без
+запуска агента при этом работает (TASK-005). Эти три шага мержить подряд. До TASK-005 действует сегодняшнее положение (без песочницы), и
 ничто в коде не называет его защищённым.
 
 **Платформа тестов.** CI — Ubuntu (`.github/workflows/ci.yml`). Модули
@@ -195,15 +201,23 @@ P1 | TODO   Est: 2d
 Source: docs/superpowers/specs/2026-09-29-author-agent-sandbox-design.md §11, §12, §13, §15; §16 Z12, Z13, Z14, Z17, N1, N2, N6
 
 **Checklist:**
-- [ ] `governance/author_launch.py` — **единственное** место порождения авторского агента: `launch_author(...)` и `refuse_disp(...)`; `RealOps.author` и `RealOps.author_disp` только делегируют ему; `_run_agent`, `_author_argv`, `claude_isolation` и токен связки переезжают в него
+- [ ] `governance/author_launch.py` — **единственное** место порождения авторского агента: `launch_author(target_dir, bundle_dir, file, make_prompt)` (сам создаёт каталог вызова и передаёт `make_prompt` абсолютный `output_path`) и `refuse_disp(...)`; `RealOps.author` и `RealOps.author_disp` только делегируют ему. В него переезжают `_run_agent`, `_author_argv`, `claude_isolation`, токен связки, **`agent_env()` с `AGENT_ENV_NAMES`/`AGENT_ENV_PREFIXES`** (`governance/ops.py:504–575`) и резолвер харнесса авторинга; закрепляющие их assertions (`tests/test_governance_ops.py:2723–2760`) — в защищённый тест. Модули ЗЦ импортируют только stdlib и друг друга — это проверяет тест инварианта
 - [ ] **граница** — порядок внутри `launch_author`, до создания каталога вызова и до платного вызова: ОС — macOS; `/usr/bin/sandbox-exec` есть; не вложенная песочница; харнесс резолвера (`AUTHOR_HARNESS` > `harness.env` > вшитый `codex`) = claude; допуск (TASK-003); элемент связки токена claude; `validate_bundle_dir`; каталог вызова и профиль (TASK-002); проба (TASK-004) — перед **каждым** запуском, с тем же профилем и env; затем запуск и перенос. Любой отказ — `stopped_author` с причиной, агент не запущен
 - [ ] `refuse_disp` — всегда отказ «disp вне v1»
 - [ ] отказ по харнессу — дословно по §13: «харнесс `<имя>` не поддерживается песочницей авторинга v1; поддерживается claude (`AUTHOR_HARNESS=claude`)»; нет флага, переменной или режима обхода; вшитое умолчание резолвера НЕ меняется
 - [ ] **общие входы** (`start`, `resume`, `reopen`, `advance`) — только корректность конфигурации, без требования готовности к авторингу: значение харнесса распознаётся (известное имя), `author_backend` допустим, `validate_bundle_dir`. ОС, `sandbox-exec`, допуск и «харнесс = claude» здесь **не** проверяются: конвейер без запуска агента (`reapprove`, ручной `reopen` → `resume`, `resume` на гейте или edge-check) работает при любом допустимом харнессе
 - [ ] **смысл гарантии отказа (Z17, §13 «снимок до/после»):** отказ на границе ничего не меняет в цели и бандле — снимок непосредственно перед вызовом `launch_author` равен снимку после, каталог вызова не создан, исполняемый файл-маркер агента не вызван. Предшествующие шаги конвейера (`_step_branch`, `_step_materialize_brief`) — штатные шаги, одинаковые для любой конфигурации; отказом не откатываются, и после смены конфигурации `resume` продолжает с них
 - [ ] Z17: харнесс ≠ claude, выбранный env, `harness.env` и вшитым умолчанием, на `start`, `resume`, `reopen(manual=False)`, следующей волне и повторе шага → `stopped_author` на границе с текстом §13, маркер не вызван, снимок вокруг границы неизменен
+- [ ] матрица отказов **на границе** (переносимые doubles + отдельные macOS-тесты для настоящих Darwin-условий): не-macOS (подмена платформы), нет `sandbox-exec`, вложенная песочница, пустой допуск, несовпавший допуск, нет элемента связки, проба не прошла, `disp` (в т.ч. `resume` старого прогона `author_backend=disp` с начатым пайплайном) — для каждой клетки через подключение к runner: `stopped_author` с текстом причины сохранён в состоянии, агент-маркер не вызван, каталог вызова не создан (кроме отказа пробы — там создан и удалён), переноса нет, снимок цели и бандла вокруг границы неизменен
+- [ ] позитивная пара для тех же условий (не-macOS, нет `sandbox-exec`, пустой допуск): путь конвейера **без** агента проходит
 - [ ] позитивная пара при `AUTHOR_HARNESS=codex` и пустом допуске: `reapprove` проходит; ручной цикл `reopen(manual=True)` → файл оператора → `resume` проходит без агента (по образцу `tests/test_governance_runner.py:8067–8092`); при claude и непустом допуске авторинг проходит штатно
-- [ ] **тест инварианта** `tests/test_author_sandbox_invariant.py` (ЗЦ): (1) тела `RealOps.author` и `RealOps.author_disp` — делегирование в `author_launch` (разбор AST); (2) вне `governance/author_launch.py` и `governance/sandbox.py` в `governance/` нет маркеров запуска авторского агента — `--dangerously-skip-permissions`, `bypassPermissions`, имени элемента связки токена, `sandbox-exec`; (3) каждый путь ЗЦ есть в `AUTHORITY_ROOT_PREFIXES` и в `harness_files`. Инвариант — пояс от непреднамеренного обхода, не от намеренного запутывания кода; от намеренного защищает человеческий мерж ЗЦ — это названо в докстринге теста
+- [ ] **тест инварианта** `tests/test_author_sandbox_invariant.py` (ЗЦ), разбор AST всех `governance/**/*.py`:
+  1. тела `RealOps.author` и `RealOps.author_disp` — делегирование в `author_launch`;
+  2. **замкнутый перечень мест порождения процессов** (`subprocess.*`, `os.system/exec*/spawn*/posix_spawn*`, `asyncio.create_subprocess_*`, `pty.spawn`): каждое место вне ЗЦ либо имеет литеральную программу из перечня (`git`, `gh`, `tmux`, `spec-runner`, `security`), либо внесено поимённо (`модуль:функция` + причина) в `contracts/author-sandbox/v1/spawn-sites.toml` (ЗЦ; первую версию — 10 мест замера — вносит H1); бинари харнессов (`claude`, `codex`, `disp`) и общие запускатели (`sh -c`, `bash`, `env`, `uv`, `python`, `node`) литералом вне ЗЦ — только если место в перечне; новое место — красный тест;
+  3. импорт `ctypes`, `importlib`, `multiprocessing` и `getattr`/`__import__` по модулям `subprocess`/`os` в `governance/` вне ЗЦ — красный тест;
+  4. модули ЗЦ импортируют только stdlib и друг друга; пакетной или extension-формы модуля ЗЦ нет;
+  5. каждый путь ЗЦ есть в `AUTHORITY_ROOT_PREFIXES` и в `harness_files`.
+  Mutation-тесты: прямой `subprocess.run(["codex", "exec", …])` в новом методе `ops.py`, новый helper с динамическим argv в runner, `getattr(subprocess, "run")` — каждый краснит инвариант. **Честная граница:** проверка статическая и охватывает `governance/`; запуск из кода вне `governance/`, которого авторский путь не вызывает, не охвачен — это названо в докстринге теста. Обход через изменение незащищённого файла требует нового места порождения процесса, а его без человеческого мержа перечня не внести
 - [ ] запуск: абсолютный путь из допуска, `sandbox-exec -f <профиль>`, `start_new_session=True`, `stdin=DEVNULL`, cwd = `target_dir`; env = `agent_env()` + `TMPDIR`/`CLAUDE_CODE_TMPDIR` = `<call>/tmp`, `CLAUDE_CONFIG_DIR` = `<call>/claude-config`, токен, `SSL_CERT_FILE`
 - [ ] промпт называет `bundle_dir` (чтение, `git hash-object`) и абсолютный `output_path` = `<call>/stage/<file>` (единственное место записи); DSL узлов не меняется
 - [ ] таймаут — `SIGKILL` группе, `stopped_author` «таймаут», переноса нет (Z13); после штатного выхода — `SIGKILL` группе (гигиена)
