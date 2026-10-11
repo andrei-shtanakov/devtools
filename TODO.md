@@ -2778,7 +2778,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       Задачи прежней ревизии со статусом сверх `TODO`, чей блок не опознан,
       называются поимённо: `carry.lost_status` в леджере, строки в stdout и
       ⚠️-абзац в начале тела PR ревизии — до одобрения её человеком.
-- [ ] Режим ревью спецификаций (`local.sh --spec`) у потребителей кита (inbox devtools#501, slug: review-kit-spec-mode-rollout; from: steward) @owner:github:andrei-shtanakov @id:review-kit-spec-mode-rollout @epic:eco.tooling
+- [x] Режим ревью спецификаций (`local.sh --spec`) у потребителей кита (inbox devtools#501, slug: review-kit-spec-mode-rollout; from: steward) @owner:github:andrei-shtanakov @id:review-kit-spec-mode-rollout @epic:eco.tooling
       Решение владельца 2026-10-03 (вариант A): кит `local.sh` + PIN @ steward
       bac7975 — devtools#558 и spec-runner#657 под `attest-vendor.sh`, мерж
       агентом; после мержа сверить, что `review-kit-drift` погас. Промпт
@@ -2817,6 +2817,19 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       человеческий мерж; minor-сценарий проверен (evidence, раздел
       «Ревизия промпта»). Волна кита на остальные 19 (решение владельца
       2026-10-11) — отдельно, без промпта.
+      Волна кита на 19 ВЛИТА 2026-10-11 (arbiter#120 … maestro#253, 19 PR под
+      `attest-vendor.sh`, мерж агентом): сверка по `origin/<default>` — 21/21
+      потребителя на `steward @ e0ab116`, `checksum.sh --pin` чист;
+      `review-kit-drift` — success у всех, где он есть (arbiter, dispatcher,
+      atp-platform, kapelle, maestro). Промпт `5d5551e` влит человеком
+      (devtools#587, spec-runner#669). Финальная ревизия промпта — steward
+      `3da15b9` (steward#207/#208, blob `33f1eab`), кит в ней не менялся:
+      PR этой ветки и PR в spec-runner, человеческий мерж; внешний факт по §2
+      проверен на стенде (evidence, раздел «Ревизия промпта steward
+      `3da15b9`»). Мерж обоих PR завершает раскатку; проброс `--spec` в
+      `review-pr.sh` — вне объёма (решение владельца 2026-10-10). Известный
+      остаток апстрима (шапка промпта не называет правило §1) — у steward,
+      раскатку не держит.
 
 ## Политика флота для конфига spec-runner (решение владельца 2026-10-04)
 
