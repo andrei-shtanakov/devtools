@@ -1895,7 +1895,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       E2 и не проверен. Новое интервью только ради проверки не запускаем
       (решение владельца 2026-10-10).
 
-- [ ] Контур approval discovery-брифа: назвать акт, которым бриф получает `status: approved`, и место его подписи @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:discovery-brief-approval-act
+- [x] Контур approval discovery-брифа: назвать акт, которым бриф получает `status: approved`, и место его подписи @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:discovery-brief-approval-act — акт согласован; остаток — живая проверка `@id:spec-loop-need-brief-human-merge-live`
       **2026-10-08:** «подкоманды approve у соседа нет» устарело — discovery#57
       доставил `discovery approve`. Остаток на нашей стороне — brief-PR с
       заявкой (`make brief-propose`), `make brief-approve`, проверка заявки в
@@ -1927,6 +1927,14 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       `2026-09-20-pipeline-and-polygon-decisions`, решения 2 и 8.
       Кода не блокирует — делает engineer-маршрут недостижимым без ручной
       правки файла.
+      **2026-10-11, сверка с решением владельца:** выбор акта закрыт. Акт —
+      человеческий мерж специального brief-PR с заявкой на одобрение
+      (`make brief-propose`, проверка заявки в `human-merge.sh` для
+      `brief/*`); `discovery approve` (discovery#57) отражает этот акт в
+      конверте брифа. Код влит (#571/#572/#573, спека need-stage §11).
+      Открытым остаётся не выбор акта, а живая проверка пути
+      `review → make human-merge` — пункт
+      `@id:spec-loop-need-brief-human-merge-live` выше.
 
 - [ ] Write-ahead id сессии и для customer-маршрута (сейчас — только engineer, §11.4.5; customer остаётся на `--session`, §5.3) @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:need-customer-write-ahead-id
 - [ ] `--repropose` brief-PR: новое предложение, когда прежний закрыт без мержа или его пин политики устарел (§11.10 Q4, вне E2) @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:brief-repropose
@@ -2755,7 +2763,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 
 - [ ] conductor: единый граф ожиданий флота, активная проверка ожиданий, порядок работ по `roadmap.toml`, действия по уровням автономии 0–3, узел межрепных запросов @owner:github:andrei-shtanakov @id:conductor @epic:eco.tooling
 - [x] conductor срез 0 — советчик: граф, ожидания, порядок, `status/why/plan/run`, снимок, таймер уровня 0; приёмка — replay на сохранённых входах, верх очереди совпадает с приоритетами владельца — принят владельцем 2026-09-30: код #509 (+ #513), роадмап зонтик#47, приёмка на Mac и VPS vmi3423913 (граф complete), верх очереди совпал с приоритетами (вёл к spec-runner#620, влит); долг minor — #511, зонтик#48 @owner:github:andrei-shtanakov @id:conductor-slice-0 @epic:eco.tooling
-- [ ] conductor срез 1 — приёмка записи (спека `docs/superpowers/specs/2026-09-30-conductor-slice-1-design.md` §9; код влит #536/#538/#542): владелец создаёт GitHub App и ключ (`docs/conductor/acceptance/github-app.md`), репо песочницы `conductor-sandbox`/`-outside` и устанавливает App только на песочницу; песочница наполняется по `docs/conductor/acceptance/sandbox.md`, выдержка суток, прогон A1–A13 на VPS, квитанция по `TEMPLATE-slice1.md`; затем — установка на флот, неделя тени и ступени `enabled_actions` (`deploy/conductor/README.md`, «Срез 1 — запись»). 2026-10-04: прогон A1–A13 пройден (A5 — частично); довыгон двойников A5 (фикстуры #13–#15) проведён 2026-10-08 — PASS, квитанция `docs/conductor/acceptance/2026-10-04-slice1.md` (дефекты D1–D3 → #563/#564/#566) — ждёт приёмки владельцем @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:conductor-slice-1
+- [ ] conductor срез 1 — приёмка записи (спека `docs/superpowers/specs/2026-09-30-conductor-slice-1-design.md` §9; код влит #536/#538/#542): владелец создаёт GitHub App и ключ (`docs/conductor/acceptance/github-app.md`), репо песочницы `conductor-sandbox`/`-outside` и устанавливает App только на песочницу; песочница наполняется по `docs/conductor/acceptance/sandbox.md`, выдержка суток, прогон A1–A13 на VPS, квитанция по `TEMPLATE-slice1.md`; затем — установка на флот, неделя тени и ступени `enabled_actions` (`deploy/conductor/README.md`, «Срез 1 — запись»). 2026-10-04: прогон A1–A13 пройден (A5 — частично); довыгон двойников A5 (фикстуры #13–#15) проведён 2026-10-08 — PASS, квитанция `docs/conductor/acceptance/2026-10-04-slice1.md` (дефекты D1–D3 → #563/#564/#566) — квитанция принята: devtools#569 смержен владельцем 2026-10-09 (5ea4263). 2026-10-11: App установлен на флот, `init-state` на VPS выполнен, тень на флоте идёт (профиль `fleet`, `shadow = true`, автономия зонтика 0); первый прогон тени выявил дефект чтения очереди владельца — devtools#591, вместе с #565 (devtools#590) выложен на VPS; роадмап песочницы возвращён в `autonomy = 0`, `enabled_actions = []`. Пункт открыт до решения по ступеням: неделя тени (~до 2026-10-18) → `stage-report` → решение владельца о первой ступени `enabled_actions` @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:conductor-slice-1
 
 ## Входящие 2026-10-01/02 (inbox, приняты 2026-10-03)
 
