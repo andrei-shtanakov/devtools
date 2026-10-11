@@ -706,6 +706,12 @@ def test_missing_base_oid_does_not_merge(fleet: Fleet) -> None:
         # одобряющее ревью. На нём же держится исключение для
         # `scripts/review/` — см. тест ниже.
         "attest-vendor.sh",
+        # Песочница авторского агента — защищённая цепочка (ЗЦ, дизайн §19
+        # п.2, шаг H1): границу запуска, её модули и контракт допуска мержит
+        # только человек. Пакетная форма модуля — под тем же префиксом.
+        "governance/author_launch.py",
+        "governance/sandbox/__init__.py",
+        "contracts/author-sandbox/v1/admitted.toml",
     ],
 )
 def test_authority_root_paths_block_merge(fleet: Fleet, path: str) -> None:

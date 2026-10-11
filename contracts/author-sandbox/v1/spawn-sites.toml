@@ -1,0 +1,97 @@
+# Перечень исключений правила допустимых форм запуска процессов в
+# `governance/` (дизайн `docs/superpowers/specs/2026-09-29-author-agent-sandbox-design.md`
+# §19 п.2–3; tasks-спека `spec/author-agent-sandbox-tasks.md`, H1 и TASK-005).
+#
+# Правило проверяет тест инварианта `tests/test_author_sandbox_invariant.py`
+# (TASK-005): место порождения процесса вне защищённой цепочки допустимо, если
+# программа — литерал из `allowed_literal_programs`, либо место названо здесь
+# поимённо (`module` + `function`, число мест в функции — `count`). Иначе тест
+# красный, пока человек не внесёт место сюда: каталог — authority-root.
+#
+# ГРАНИЦА ГАРАНТИЙ (§19 п.3): это защита от прямого и случайного обхода
+# границы запуска авторского агента, НЕ доказательство безопасности кода.
+# Уже разрешённые формы позволяют намеренный обход без нового места:
+# каждая программа `allowed_literal_programs` умеет исполнить произвольную
+# команду (`git` — из своей конфигурации, `alias.x=!…`, `core.sshCommand`;
+# `gh` — расширения и алиасы; `tmux new-session … <команда>`; `security`
+# имеет доступ к связке ключей), как и адаптер с произвольным argv. Новое
+# место с такой программой правило пропускает. Это остаточный риск ревью PR
+# (дизайн §17 п.11, §19 п.3); перечень не расширяется ради имитации полной
+# гарантии.
+#
+# Замер 2026-10-11 (AST, все вызовы — `subprocess.run`): 80 мест, из них 70 с
+# литеральной программой (`git` 43, `gh` 22, `tmux` 2, `spec-runner` 2,
+# `security` 1) и 10 ниже. Места `_run_agent` уходят в
+# `governance/author_launch` (ЗЦ) в TASK-005 — тем же PR их записи удаляются.
+
+schema = 1
+allowed_literal_programs = ["git", "gh", "tmux", "spec-runner", "security"]
+
+[[site]]
+module = "governance/ops.py"
+function = "_run_agent"
+count = 2
+reason = "сегодняшний запуск авторского агента (claude/codex, disp); переезжает в governance/author_launch в TASK-005"
+
+[[site]]
+module = "governance/ops.py"
+function = "review"
+count = 1
+reason = "`sh review-pr.sh` — драйвер ревью-контура (сам authority-root)"
+
+[[site]]
+module = "governance/ops.py"
+function = "merge"
+count = 1
+reason = "`merge-pr.sh` — единственный путь агентского мержа (сам authority-root)"
+
+[[site]]
+module = "governance/ops.py"
+function = "_discovery"
+count = 1
+reason = "discovery CLI соседа через `uv run --frozen --project` (стадия Need)"
+
+[[site]]
+module = "governance/ops.py"
+function = "gate_check_s8"
+count = 1
+reason = "`gate-check` steward из venv devtools либо PATH"
+
+[[site]]
+module = "governance/ops.py"
+function = "gate_check_candidate"
+count = 1
+reason = "`gate-check --candidate` steward из venv devtools либо PATH"
+
+[[site]]
+module = "governance/edge_check/reviewer.py"
+function = "harness_version"
+count = 1
+reason = "`<binary> --version` ревьюера edge-check (по умолчанию claude)"
+
+[[site]]
+module = "governance/edge_check/reviewer.py"
+function = "run_reviewer"
+count = 1
+reason = "ревьюер edge-check без инструментов в пустом каталоге; argv задаёт вызывающий — остаточный риск §19 п.3"
+
+[[site]]
+module = "governance/brief_facts.py"
+function = "_graphql_repository"
+count = 1
+reason = "`gh api graphql` с собранными аргументами (сам authority-root)"
+
+# Динамическая загрузка кода вне ЗЦ (правило п.3 инварианта): `importlib`,
+# `ctypes`, `multiprocessing`, `__import__`/`getattr` по `subprocess`/`os`.
+# Правило НЕ покрывает `exec`/`eval`/`compile`/`runpy` — названо, а не
+# закрыто (остаточный риск §19 п.3); известное место такого рода —
+# `governance/discovery_approval.py` (`exec(compile(...))` вендор-копии
+# `contracts/discovery-approval/v1/`, пин sha256; сам authority-root) —
+# записано ниже для видимости.
+[[dynamic_import]]
+module = "governance/brief_merge_check.py"
+reason = "загрузка пакета через `importlib.util` вне `sys.path` (ревью #573; сам authority-root)"
+
+[[dynamic_import]]
+module = "governance/discovery_approval.py"
+reason = "`exec(compile(...))` вендор-копии contracts/discovery-approval/v1/ с пином sha256; вне триггеров правила, записано для видимости (сам authority-root)"
