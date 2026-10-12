@@ -445,3 +445,244 @@ def test_create_call_dir_refuses_calls_inside_worktree_common_dir(
     )
     with pytest.raises(SandboxError, match="пересекается с common dir"):
         sandbox.create_call_dir(calls, "run-1", forbidden=forbidden)
+
+
+# --- допуск исполняемого файла харнесса (§14, TASK-003; Z16) -----------------
+
+CONTRACT = DEVTOOLS_ROOT / "contracts" / "author-sandbox" / "v1" / "admitted.toml"
+
+
+@pytest.fixture
+def harness(base: Path) -> tuple[Path, Path, Path]:
+    """Фейковый `claude`, оставляющий маркер при ЛЮБОМ запуске (Z16).
+
+    В PATH — ссылка `bin/claude` на `opt/claude-real`: допуск сверяет
+    `realpath`. Возвращает (каталог PATH, realpath, маркер).
+    """
+    marker = base / "marker"
+    real = base / "opt" / "claude-real"
+    real.parent.mkdir()
+    real.write_text(f'#!/bin/sh\necho "$@" > "{marker}"\n')
+    real.chmod(0o755)
+    (base / "bin").mkdir()
+    (base / "bin" / "claude").symlink_to(real)
+    return base / "bin", real, marker
+
+
+def _entry(real: Path, **override: object) -> dict[str, object]:
+    entry: dict[str, object] = {
+        "harness": "claude",
+        "version": "9.9.9",
+        "realpath": str(real),
+        "sha256": hashlib.sha256(real.read_bytes()).hexdigest(),
+        "macos_major": 26,
+        "profile_sha256": sandbox.profile_template_sha256(),
+        "evidence": "docs/evidence/x.md",
+    }
+    return {**entry, **override}
+
+
+def _toml_value(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _contract(base: Path, *entries: dict[str, object]) -> Path:
+    # копия настоящего каркаса + записи; contracts/ не трогается
+    text = CONTRACT.read_text("utf-8")
+    for entry in entries:
+        text += "\n[[admitted]]\n" + "".join(
+            f"{k} = {_toml_value(v)}\n" for k, v in entry.items()
+        )
+    path = base / "admitted.toml"
+    path.write_text(text, "utf-8")
+    return path
+
+
+@pytest.fixture
+def macos_26(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sandbox, "_macos_major", lambda: 26)
+
+
+def test_admission_refuses_missing_contract(base: Path) -> None:
+    with pytest.raises(SandboxError, match="не проверен под песочницей"):
+        sandbox.admission_check(base / "nope.toml")
+
+
+def test_admission_refuses_real_empty_contract_before_h2(
+    base: Path, harness: tuple[Path, Path, Path]
+) -> None:
+    # штатное состояние до H2: каркас без записей — отказ, кандидат не запущен
+    path_dir, _, marker = harness
+    with pytest.raises(SandboxError, match="нет записей"):
+        sandbox.admission_check(_contract(base), path=str(path_dir))
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    ("text", "match"),
+    [
+        ("schema = 2\n", "schema"),
+        ("schema = 1\nadmitted = 3\n", "не массив"),
+        ("schema = [\n", "контракт допуска"),
+    ],
+)
+def test_admission_refuses_malformed_contract(
+    base: Path, text: str, match: str
+) -> None:
+    (base / "c.toml").write_text(text)
+    with pytest.raises(SandboxError, match=match):
+        sandbox.admission_check(base / "c.toml")
+
+
+@pytest.mark.parametrize(
+    ("override", "match"),
+    [
+        ({"evidence": None}, "ровно поля"),
+        ({"extra": "x"}, "ровно поля"),
+        ({"macos_major": "26"}, "macos_major: ждали int"),
+        ({"macos_major": True}, "macos_major: ждали int"),
+        ({"sha256": "ABC"}, "sha256: ждали 64 hex"),
+        ({"profile_sha256": "0" * 63}, "profile_sha256: ждали 64 hex"),
+        ({"realpath": "bin/claude"}, "не абсолютный"),
+    ],
+)
+def test_admission_refuses_malformed_record(
+    base: Path,
+    harness: tuple[Path, Path, Path],
+    override: dict[str, object],
+    match: str,
+) -> None:
+    path_dir, real, marker = harness
+    entry = {k: v for k, v in _entry(real, **override).items() if v is not None}
+    with pytest.raises(SandboxError, match=match):
+        sandbox.admission_check(_contract(base, entry), path=str(path_dir))
+    assert not marker.exists()
+
+
+def test_admission_refuses_harness_absent_from_path(
+    base: Path, harness: tuple[Path, Path, Path]
+) -> None:
+    _, real, _ = harness
+    with pytest.raises(SandboxError, match="не найден в PATH"):
+        sandbox.admission_check(_contract(base, _entry(real)), path=str(base))
+
+
+def test_admission_refuses_unknown_executable_without_running_it(
+    base: Path, harness: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Z16: подменённый в PATH файл, которого нет в допуске — отказ, маркера
+    # нет; ни одного запуска процесса до отказа
+    path_dir, real, marker = harness
+    calls: list[object] = []
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append(a))
+    contract = _contract(
+        base, _entry(real, realpath=str(base / "opt" / "other-claude"))
+    )
+    with pytest.raises(SandboxError, match=f"{real} нет в контракте"):
+        sandbox.admission_check(contract, path=str(path_dir))
+    assert not marker.exists()
+    assert calls == []
+
+
+def test_admission_ignores_records_of_other_harness(
+    base: Path, harness: tuple[Path, Path, Path]
+) -> None:
+    path_dir, real, marker = harness
+    contract = _contract(base, _entry(real, harness="codex"))
+    with pytest.raises(SandboxError, match="нет в контракте"):
+        sandbox.admission_check(contract, path=str(path_dir))
+    assert not marker.exists()
+
+
+@darwin_only
+def test_admission_admits_exact_file_without_running_it(
+    base: Path, harness: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # совпали все четыре поля: допуск с версией ИЗ ЗАПИСИ; кандидат не
+    # исполнялся — маркера нет, единственный процесс — системный sw_vers
+    path_dir, real, marker = harness
+    argvs: list[list[str]] = []
+    real_run = subprocess.run
+
+    def spy(argv: list[str], **kwargs: object) -> object:
+        argvs.append(list(argv))
+        return real_run(argv, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(subprocess, "run", spy)
+    major = int(
+        real_run(
+            ["/usr/bin/sw_vers", "-productVersion"], capture_output=True, text=True
+        ).stdout.split(".")[0]
+    )
+    admission = sandbox.admission_check(
+        _contract(base, _entry(real, macos_major=major)), path=str(path_dir)
+    )
+    assert admission.realpath == real
+    assert admission.version == "9.9.9"
+    assert not marker.exists()
+    assert argvs == [["/usr/bin/sw_vers", "-productVersion"]]
+
+
+@darwin_only
+@pytest.mark.parametrize("field", ["sha256", "macos_major", "profile_sha256"])
+def test_admission_refuses_mismatch_naming_field(
+    base: Path, harness: tuple[Path, Path, Path], macos_26: None, field: str
+) -> None:
+    path_dir, real, marker = harness
+    wrong: dict[str, object] = {
+        "sha256": "0" * 64,
+        "macos_major": 25,
+        "profile_sha256": "f" * 64,
+    }
+    contract = _contract(base, _entry(real, **{field: wrong[field]}))
+    with pytest.raises(SandboxError, match=f"не совпали {field}$"):
+        sandbox.admission_check(contract, path=str(path_dir))
+    assert not marker.exists()
+
+
+@darwin_only
+def test_admission_refuses_changed_content_of_admitted_path(
+    base: Path, harness: tuple[Path, Path, Path], macos_26: None
+) -> None:
+    # тот же realpath, другое содержимое (обновление харнесса на месте)
+    path_dir, real, marker = harness
+    contract = _contract(base, _entry(real))
+    real.write_text(real.read_text() + "# updated\n")
+    with pytest.raises(SandboxError, match="не совпали sha256"):
+        sandbox.admission_check(contract, path=str(path_dir))
+    assert not marker.exists()
+
+
+@darwin_only
+def test_admission_picks_matching_record_among_several(
+    base: Path, harness: tuple[Path, Path, Path], macos_26: None
+) -> None:
+    path_dir, real, _ = harness
+    contract = _contract(
+        base,
+        _entry(real, version="1.0.0", macos_major=25),
+        _entry(real, version="2.0.0"),
+    )
+    assert sandbox.admission_check(contract, path=str(path_dir)).version == "2.0.0"
+
+
+@darwin_only
+def test_admission_refuses_hardlinked_candidate(
+    base: Path, harness: tuple[Path, Path, Path], macos_26: None
+) -> None:
+    # safe_io читает только st_nlink == 1: у двойника содержимое меняется мимо
+    path_dir, real, _ = harness
+    os.link(real, base / "twin")
+    with pytest.raises(SandboxError, match="st_nlink"):
+        sandbox.admission_check(_contract(base, _entry(real)), path=str(path_dir))
+
+
+@darwin_only
+def test_macos_major_reads_sw_vers() -> None:
+    import platform
+
+    assert sandbox._macos_major() == int(platform.mac_ver()[0].split(".")[0])
