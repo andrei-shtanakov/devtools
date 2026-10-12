@@ -715,3 +715,103 @@ def test_macos_major_reads_sw_vers() -> None:
     import platform
 
     assert sandbox._macos_major() == int(platform.mac_ver()[0].split(".")[0])
+
+
+# --- оценка исходов пробы (§15, TASK-004) — переносимо ---------------------
+
+
+def _all_denied() -> dict[str, str]:
+    out = {name: "EPERM" for name in sandbox.PROBE_ITEMS}
+    out.update({"allow:stage": "ok", "allow:tmp": "ok", "tty:open": "ENXIO"})
+    out.update({f"keychain:{i}": "rc=44" for i in range(4)})
+    out["keychain:canary"] = "rc=44"
+    out.update(
+        {
+            "launchd:submit": "rc=1",
+            "launchd:bootstrap": "rc=5",
+            "launchservices:open": "rc=1",
+            "apple-events": "timeout",
+        }
+    )
+    return out
+
+
+def _eval(**override: str) -> sandbox.ProbeResult:
+    return sandbox._evaluate(
+        {**_all_denied(), **override}, sandbox.PROBE_ITEMS, None, ()
+    )
+
+
+def test_evaluate_all_denied_is_ok_with_apple_events_note() -> None:
+    result = _eval()
+    assert result.ok, result.failures
+    assert result.notes == ("apple-events: нет ответа (закрытие не доказано, §17)",)
+
+
+@pytest.mark.parametrize(
+    ("item", "got", "expected"),
+    [
+        ("stand:config", "ok", "stand:config: удалось — регрессия профиля"),
+        ("stand:config", "ENOENT", "stand:config: ENOENT — сбой подготовки"),
+        ("stand:config", "EACCES", "stand:config: EACCES — сбой подготовки"),
+        ("allow:stage", "EPERM", "allow:stage: базовая половина не прошла (EPERM)"),
+        ("tty:open", "ok", "tty:open: ok"),
+        ("cron:exec", "rc=1", "cron:exec: rc=1 — не действует"),
+        ("cron:exec", "rc=0", "cron:exec: rc=0 — не действует"),
+        ("keychain:2", "rc=0", "keychain:2: rc=0 — не действует"),
+        ("keychain:canary", "rc=0", "keychain:canary: rc=0 — не действует"),
+        ("launchd:submit", "timeout", "launchd:submit: timeout — не действует"),
+        (
+            "launchd:bootstrap",
+            "prep:EPERM",
+            "launchd:bootstrap: EPERM — сбой подготовки",
+        ),
+        ("apple-events", "rc=0", "apple-events: ответили — не действует"),
+    ],
+)
+def test_evaluate_names_each_failure(item: str, got: str, expected: str) -> None:
+    assert _eval(**{item: got}).failures == (expected,)
+
+
+@pytest.mark.parametrize("got", ["ENXIO", "EPERM", "EACCES"])
+def test_evaluate_tty_accepts_each_belt(got: str) -> None:
+    assert _eval(**{"tty:open": got}).ok
+
+
+def test_evaluate_missing_item_env_and_effects() -> None:
+    out = _all_denied()
+    del out["read:bait"]
+    result = sandbox._evaluate(
+        out,
+        sandbox.PROBE_ITEMS,
+        "env: лишние ['GH_TOKEN'], недостающие []",
+        ("submit",),
+    )
+    assert result.failures == (
+        "read:bait: исхода нет — пункт не исполнен",
+        "env: лишние ['GH_TOKEN'], недостающие []",
+        "эффект вне песочницы: submit",
+    )
+
+
+def test_env_mismatch_is_exact_set_equality() -> None:
+    env = {"PATH": "/bin", "HOME": "/h"}
+    assert sandbox._env_mismatch(0, b"PATH=/bin\0HOME=/h\0", env) is None
+    assert sandbox._env_mismatch(0, b"PATH=/bin\0HOME=/h\0X=1\0", env) == (
+        "env: лишние ['X'], недостающие []"
+    )
+    assert sandbox._env_mismatch(0, b"PATH=/bin\0", env) == (
+        "env: лишние [], недостающие ['HOME']"
+    )
+    assert sandbox._env_mismatch(None, b"", env) == (
+        "env: проба окружения не прошла (код None)"
+    )
+
+
+def test_probe_inner_timeouts_fit_outer_budget() -> None:
+    # сумма внутренних потолков меньше внешнего: отказ называется пунктом
+    calls = len(re.findall(r"(?<![\w.])run\(", sandbox.PROBE_SCRIPT)) - 1  # def
+    steps = calls + len(sandbox.KEYCHAIN_PROBES) - 1  # цикл связки — один вызов
+    assert steps == 10
+    inner = (steps - 1) * sandbox.PROBE_STEP_TIMEOUT + sandbox.APPLE_EVENTS_TIMEOUT
+    assert inner + 10 < sandbox.PROBE_TIMEOUT

@@ -7,6 +7,10 @@
 Генератор — чистая функция; настоящим `sandbox-exec` его проверяет проба
 (TASK-004). TASK-002.
 
+§4, §15: `run_probe` — проба-канарейка под той же обёрткой и профилем,
+что и агент; структурированный результат с названным пунктом отказа.
+TASK-004.
+
 §14: `admission_check` допускает исполняемый файл харнесса по записи
 `contracts/author-sandbox/v1/admitted.toml` — `(realpath, sha256, macos_major,
 profile_sha256)` — НЕ исполняя кандидата. TASK-003.
@@ -18,13 +22,17 @@ profile_sha256)` — НЕ исполняя кандидата. TASK-003.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
+import signal
 import subprocess
+import sys
+import time
 import tomllib
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -377,3 +385,571 @@ def admission_check(
             return record
         misses.append(f"{record.version}: не совпали {', '.join(wrong)}")
     raise _not_admitted(f"{harness} {real} — " + "; ".join(misses))
+
+
+# --- проба-канарейка (§4, §15, TASK-004) -------------------------------------
+
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+PROBE_TIMEOUT = 60.0
+#: Потолок каждого подпроцесса внутри пробы; сумма всех внутренних
+#: потолков меньше `PROBE_TIMEOUT` — сработавшим оказывается названный
+#: пункт, а не безымянный внешний таймаут.
+PROBE_STEP_TIMEOUT = 5.0
+#: Apple Events под профилем не отвечают (F21) — ждём столько и пишем
+#: «нет ответа», а не «доставка закрыта» (§17 п.7).
+APPLE_EVENTS_TIMEOUT = 3.0
+#: Четыре пробы связки (§4 п.3): по учёткам, общий поиск, учётка модели.
+KEYCHAIN_PROBES = (
+    ("-s", "gh:github.com", "-a", "ai-prosto"),
+    ("-s", "gh:github.com", "-a", "andrei-shtanakov"),
+    ("-s", "gh:github.com"),
+    ("-s", "Claude Code-credentials"),
+)
+BAIT = Path(".config/ai-prosto/.sandbox-bait")
+#: Канарейка связки: элемент, который раннер кладёт вне песочницы перед
+#: пробой и снимает после. Ненулевой `security` по именам §4 п.3 не отличает
+#: «запрещено» от «нет элемента»; канарейка есть всегда — без обёртки её
+#: находят (код 0), под профилем — нет.
+KEYCHAIN_CANARY = "devtools-sandbox-probe"
+_LSAPPINFO = "/usr/bin/lsappinfo"
+#: Засчитанный отказ файловой операции — только запрет профиля (§15).
+_DENIED = "EPERM"
+#: `/dev/tty`: новая сессия даёт ENXIO, запрет профиля — EPERM (F28).
+_TTY_DENIED = frozenset({"EPERM", "ENXIO", "EACCES"})
+_GIT_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+
+#: Скрипт пробы: исполняется под обёрткой, только stdlib, печатает JSON
+#: исходов. Сам ничего не решает — оценку делает раннер (`_evaluate`).
+PROBE_SCRIPT = r"""
+import errno, json, os, subprocess, sys
+
+cfg = json.load(open(sys.argv[1]))
+out = {}
+
+
+def code(exc):
+    return errno.errorcode.get(exc.errno, str(exc.errno))
+
+
+def attempt(name, fn):
+    try:
+        fn()
+        out[name] = "ok"
+    except OSError as exc:
+        out[name] = code(exc)
+
+
+def create(path):
+    os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+
+
+def write(path, flags=os.O_APPEND):
+    fd = os.open(path, os.O_WRONLY | flags)
+    try:
+        os.write(fd, b"x")
+    finally:
+        os.close(fd)
+
+
+def run(name, argv, timeout=cfg["step_timeout"]):
+    try:
+        proc = subprocess.run(
+            argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout
+        )
+        out[name] = f"rc={proc.returncode}"
+    except subprocess.TimeoutExpired:
+        out[name] = "timeout"
+    except OSError as exc:
+        out[name] = code(exc)
+
+
+for name, path in cfg["sentinels"].items():
+    attempt("sentinel:" + name, lambda p=path: create(p))
+
+st, outside, stage, tmp = cfg["stand"], cfg["outside"], cfg["stage"], cfg["tmp"]
+attempt("stand:unlink-gitfile", lambda: os.unlink(st["gitfile_unlink"]))
+attempt(
+    "stand:rename-gitfile",
+    lambda: os.rename(st["gitfile_rename"], st["gitfile_rename"] + "-x"),
+)
+attempt("stand:replace-gitfile", lambda: write(st["gitfile_replace"], os.O_TRUNC))
+attempt("stand:config", lambda: write(st["config"]))
+attempt("stand:hook", lambda: create(st["hook"]))
+attempt("stand:gitdir-write", lambda: write(st["gitdir_head"]))
+attempt("stage:nested-git-dir", lambda: os.makedirs(stage + "/nested/.git"))
+attempt("stage:nested-gitfile", lambda: (os.makedirs(stage + "/nested2", exist_ok=True), create(stage + "/nested2/.git")))
+attempt("link:outside", lambda: os.link(outside, stage + "/hl"))
+attempt("link:gitfile", lambda: os.link(st["gitfile_link"], stage + "/hl-git"))
+attempt("move:outside", lambda: os.rename(cfg["outside_mv"], stage + "/moved"))
+attempt("symlink:runner-made", lambda: write(cfg["runner_link"]))
+attempt("symlink:agent-made", lambda: (os.symlink(outside, stage + "/l2"), write(stage + "/l2")))
+attempt("read:bait", lambda: open(cfg["bait"], "rb").read())
+attempt("tty:open", lambda: os.close(os.open("/dev/tty", os.O_RDWR)))
+attempt("allow:stage", lambda: (os.makedirs(stage + "/.probe/a/b"), create(stage + "/.probe/a/b/n")))
+attempt("allow:tmp", lambda: create(tmp + "/.probe"))
+
+for i, args in enumerate(cfg["keychain"]):
+    run(f"keychain:{i}", ["/usr/bin/security", "find-generic-password", *args])
+run(
+    "keychain:canary",
+    ["/usr/bin/security", "find-generic-password", "-s", cfg["keychain_canary"]],
+)
+eff = cfg["effects"]
+run("launchd:submit", ["/bin/launchctl", "submit", "-l", cfg["label_submit"], "--",
+    "/bin/sh", "-c", "echo x > " + eff + "/submit"])
+plist = tmp + "/probe.plist"
+
+
+def put(path, text, mode=0o644):
+    with open(path, "w") as fh:
+        fh.write(text)
+    os.chmod(path, mode)
+
+
+def prepared(name, fn):
+    # подготовка внутри песочницы (файлы в tmp/); не вышла — исход пункта
+    try:
+        fn()
+        return True
+    except OSError as exc:
+        out[name] = "prep:" + code(exc)
+        return False
+
+
+if prepared("launchd:bootstrap", lambda: put(plist, cfg["plist"])):
+    run("launchd:bootstrap", ["/bin/launchctl", "bootstrap", "gui/%d" % os.getuid(), plist])
+run("cron:exec", ["/usr/bin/crontab", "-l"])
+app = tmp + "/Probe.app/Contents"
+
+
+def build_app():
+    os.makedirs(app + "/MacOS")
+    put(app + "/Info.plist", cfg["app_plist"])
+    # живёт 3 с после эффекта: к оценке (проба ждёт Apple Events) раннер
+    # видит запущенный .app в lsappinfo — основной признак §15
+    put(app + "/MacOS/probe", "#!/bin/sh\necho x > " + eff + "/open\nsleep 3\n", 0o755)
+
+
+if prepared("launchservices:open", build_app):
+    run("launchservices:open", ["/usr/bin/open", "-g", "-j", tmp + "/Probe.app"])
+run("apple-events", ["/usr/bin/osascript", "-e", 'tell application "Finder" to get name'],
+    timeout=cfg["ae_timeout"])
+print(json.dumps(out))
+"""
+
+_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" \
+"http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>{label}</string>
+<key>ProgramArguments</key><array><string>/bin/sh</string><string>-c</string>
+<string>echo x &gt; {effect}</string></array>
+<key>RunAtLoad</key><true/>
+</dict></plist>
+"""
+_APP_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" \
+"http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>probe</string>
+<key>CFBundleIdentifier</key><string>{bundle_id}</string>
+<key>LSUIElement</key><true/>
+</dict></plist>
+"""
+
+
+@dataclass(frozen=True)
+class ProbeTargets:
+    """Что проба обязана НЕ суметь записать (§4 п.1, §10 п.3, §15).
+
+    `run_dir` — каталог прогона (часовые в нём — рядом с `ledger.jsonl` — и в
+    `run_dir/edge-check/`); `extra` — прочие каталоги (venv disputatio;
+    `governance/` и корень при цели «сам devtools»). Все каталоги должны
+    существовать: `ENOENT` часового — сбой подготовки, а не защита.
+    """
+
+    target_dir: Path
+    bundle_dir: PurePosixPath
+    git_dir: Path
+    common_dir: Path
+    run_dir: Path
+    home: Path
+    extra: tuple[Path, ...] = ()
+
+
+@dataclass(frozen=True)
+class ProbeResult:
+    """Исход пробы: `failures` пусты — песочница действует (§15).
+
+    Каждая строка `failures` — «пункт: исход»; `notes` — исходы, которые
+    отказом не являются, но названы (Apple Events «нет ответа», §17 п.7).
+    """
+
+    failures: tuple[str, ...]
+    notes: tuple[str, ...]
+
+    @property
+    def ok(self) -> bool:
+        return not self.failures
+
+
+def _wrap(profile_path: Path) -> list[str]:
+    """Обёртка запуска под профилем — та же, что у агента (TASK-005)."""
+    return [SANDBOX_EXEC, "-f", str(profile_path)]
+
+
+def _spawn(
+    argv: Sequence[str], *, env: Mapping[str, str], cwd: Path, timeout: float
+) -> tuple[int | None, bytes]:
+    """Новая сессия, `stdin` из `/dev/null`; по выходу/таймауту — `SIGKILL`
+    группе (гигиена, §12). Код `None` — таймаут."""
+    proc = subprocess.Popen(
+        list(argv),
+        env=dict(env),
+        cwd=cwd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+        code: int | None = proc.returncode
+    except subprocess.TimeoutExpired:
+        out, code = b"", None
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    if code is None:
+        proc.communicate()
+    return code, out
+
+
+def _git(*args: str | Path) -> None:
+    proc = subprocess.run(
+        ["git", *map(str, args)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, **_GIT_ENV},
+    )
+    if proc.returncode != 0:
+        raise SandboxError(f"стенд пробы: git {args[0]}: {proc.stderr.strip()}")
+
+
+#: Разрушающие пробы файла `.git` worktree — каждой свой worktree, иначе
+#: первая удавшаяся (`unlink`) маскирует остальные под `ENOENT`.
+_STAND_WORKTREES = ("unlink", "rename", "replace", "link")
+
+
+def _build_stand(root: Path) -> dict[str, str]:
+    """Одноразовый git-репо + worktree вне разрешённых корней (§15)."""
+    main = root / "main"
+    ident = ("-c", "user.name=probe", "-c", "user.email=probe@localhost")
+    _git("init", "-q", main)
+    _git("-C", main, *ident, "commit", "-q", "--allow-empty", "-m", "stand")
+    stand = {
+        "config": str(main / ".git" / "config"),
+        "hook": str(main / ".git" / "hooks" / "probe-hook"),
+        "common_dir": str(main / ".git"),
+    }
+    for name in _STAND_WORKTREES:
+        wt = root / f"wt-{name}"
+        _git("-C", main, "worktree", "add", "-q", "--detach", wt)
+        stand[f"gitfile_{name}"] = str(wt / ".git")
+    gitfile = Path(stand["gitfile_link"]).read_text()
+    gitdir = Path(gitfile.split("gitdir:", 1)[1].strip())
+    stand["gitdir"] = str(gitdir)
+    stand["gitdir_head"] = str(gitdir / "HEAD")
+    return stand
+
+
+def _sentinels(targets: ProbeTargets, stand: Mapping[str, str]) -> dict[str, str]:
+    """Имена часовых: уникальные, в каждом запретном каталоге (§15)."""
+    tag = f".sandbox-sentinel-{uuid.uuid4().hex}"
+    dirs: dict[str, Path] = {
+        "run_dir/edge-check": targets.run_dir / "edge-check",
+        "run_dir": targets.run_dir,
+        "home": targets.home,
+        "target_dir": targets.target_dir,
+        "bundle_dir": targets.target_dir / targets.bundle_dir,
+        "gitdir": targets.git_dir,
+        "common dir": targets.common_dir,
+        "stand gitdir": Path(stand["gitdir"]),
+        "stand common dir": Path(stand["common_dir"]),
+    }
+    dirs.update({f"extra:{p}": p for p in targets.extra})
+    by_path: dict[str, list[str]] = {}
+    for name, path in dirs.items():
+        by_path.setdefault(os.path.realpath(path), []).append(name)
+    # один каталог под двумя именами (gitdir = common dir у цели без worktree)
+    # — один часовой, иначе второй получил бы EEXIST
+    return {" = ".join(names): str(Path(p) / tag) for p, names in by_path.items()}
+
+
+#: Пункты скрипта пробы помимо часовых; исход обязан быть у каждого —
+#: пропавший пункт (а не только удавшийся) — отказ.
+PROBE_ITEMS = frozenset(
+    {
+        "stand:unlink-gitfile",
+        "stand:rename-gitfile",
+        "stand:replace-gitfile",
+        "stand:config",
+        "stand:hook",
+        "stand:gitdir-write",
+        "stage:nested-git-dir",
+        "stage:nested-gitfile",
+        "link:outside",
+        "link:gitfile",
+        "move:outside",
+        "symlink:runner-made",
+        "symlink:agent-made",
+        "read:bait",
+        "tty:open",
+        "allow:stage",
+        "allow:tmp",
+        *(f"keychain:{i}" for i in range(len(KEYCHAIN_PROBES))),
+        "keychain:canary",
+        "launchd:submit",
+        "launchd:bootstrap",
+        "cron:exec",
+        "launchservices:open",
+        "apple-events",
+    }
+)
+
+
+def _evaluate(
+    out: Mapping[str, str],
+    expected: frozenset[str],
+    env_ok: str | None,
+    effects: Sequence[str],
+) -> ProbeResult:
+    failures: list[str] = [
+        f"{name}: исхода нет — пункт не исполнен"
+        for name in sorted(expected - set(out))
+    ]
+    notes: list[str] = []
+    for name, got in out.items():
+        if name.startswith("allow:"):
+            if got != "ok":
+                failures.append(f"{name}: базовая половина не прошла ({got})")
+        elif name == "tty:open":
+            if got not in _TTY_DENIED:
+                failures.append(f"{name}: {got}")
+        elif name == "apple-events":
+            if got == "timeout":
+                notes.append("apple-events: нет ответа (закрытие не доказано, §17)")
+            elif got == "rc=0":
+                failures.append(f"{name}: ответили — не действует")
+        elif name == "cron:exec":
+            # `crontab -l` без crontab тоже ненулевой — засчитан только
+            # запрет исполнения (F20)
+            if got != _DENIED:
+                failures.append(f"{name}: {got} — не действует")
+        elif name.split(":")[0] in ("keychain", "launchd", "launchservices"):
+            if got.startswith("prep:"):
+                failures.append(f"{name}: {got[5:]} — сбой подготовки")
+            elif got == "rc=0" or got == "timeout":
+                failures.append(f"{name}: {got} — не действует")
+        elif got == "ok":
+            failures.append(f"{name}: удалось — регрессия профиля")
+        elif got != _DENIED:
+            failures.append(f"{name}: {got} — сбой подготовки")
+    if env_ok is not None:
+        failures.append(env_ok)
+    failures.extend(f"эффект вне песочницы: {e}" for e in effects)
+    return ProbeResult(tuple(failures), tuple(notes))
+
+
+def _env_mismatch(code: int | None, raw: bytes, env: Mapping[str, str]) -> str | None:
+    """Окружение внутри — ровно `env` вызова (§4 п.4); `None` — равно."""
+    if code != 0:
+        return f"env: проба окружения не прошла (код {code})"
+    inside = {item.split(b"=", 1)[0].decode() for item in raw.split(b"\0") if item}
+    if inside == set(env):
+        return None
+    extra, missing = sorted(inside - set(env)), sorted(set(env) - inside)
+    return f"env: лишние {extra}, недостающие {missing}"
+
+
+def _app_running(bundle_id: str) -> bool:
+    """Пробный `.app` запущен LaunchServices — то есть вне песочницы (F21)."""
+    proc = subprocess.run(
+        [_LSAPPINFO, "find", f"bundleID={bundle_id}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return bool(proc.stdout.strip())
+
+
+def _keychain(*args: str) -> int:
+    proc = subprocess.run(
+        ["/usr/bin/security", *args],
+        capture_output=True,
+        check=False,
+        timeout=PROBE_STEP_TIMEOUT,
+    )
+    return proc.returncode
+
+
+def _label_alive(label: str) -> bool:
+    proc = subprocess.run(
+        ["/bin/launchctl", "list", label], capture_output=True, check=False
+    )
+    return proc.returncode == 0
+
+
+def _cleanup(
+    call: CallDir,
+    sentinels: Mapping[str, str],
+    labels: Sequence[str],
+    bait: Path,
+    canary: str,
+) -> None:
+    # гигиена: процессы, запущенные из каталога вызова вне песочницы (.app
+    # при сорванной пробе стартует с задержкой ~2 с — что успели)
+    subprocess.run(["/usr/bin/pkill", "-9", "-f", str(call.root)], check=False)
+    try:
+        _keychain("delete-generic-password", "-s", canary)
+    except subprocess.TimeoutExpired:
+        pass
+    for path in sentinels.values():
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+    domain = f"gui/{os.getuid()}"
+    for label in labels:
+        for argv in (["remove", label], ["bootout", f"{domain}/{label}"]):
+            subprocess.run(["/bin/launchctl", *argv], capture_output=True, check=False)
+    try:
+        os.unlink(bait)
+    except FileNotFoundError:
+        pass
+    for sub in (call.stage, call.tmp, call.claude_config):
+        for child in os.listdir(sub):
+            target = sub / child
+            if target.is_dir() and not target.is_symlink():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+    for name in (
+        "stand",
+        "effects",
+        "probe.py",
+        "probe.json",
+        "outside.txt",
+        "outside-mv.txt",
+    ):
+        target = call.root / name
+        if target.is_dir():
+            shutil.rmtree(target)
+        elif target.exists() or target.is_symlink():
+            target.unlink()
+
+
+def run_probe(
+    call: CallDir,
+    profile: str,
+    env: Mapping[str, str],
+    targets: ProbeTargets,
+    *,
+    timeout: float = PROBE_TIMEOUT,
+) -> ProbeResult:
+    """Проба-канарейка §4/§15 под обёрткой `profile` с окружением `env`.
+
+    До пробы раннер создаёт каталоги бандла (`safe_io.ensure_dirs`, N6),
+    пишет `<call>/profile.sb` (остаётся для запуска агента), одноразовый
+    стенд и внешние образцы в `<call>` (агенту не пишется), приманку
+    `~/.config/ai-prosto/.sandbox-bait`. Следы убираются при любом исходе.
+    """
+    safe_io.ensure_dirs(targets.target_dir, targets.bundle_dir)
+    safe_io.publish(call.root, "profile.sb", profile.encode())
+    profile_path = call.root / "profile.sb"
+    labels = (
+        f"dev.devtools.sandbox-probe.{uuid.uuid4().hex}",
+        f"dev.devtools.sandbox-probe.{uuid.uuid4().hex}",
+    )
+    bait = targets.home / BAIT
+    canary = f"{KEYCHAIN_CANARY}-{uuid.uuid4().hex}"
+    app_id = labels[0] + ".app"
+    sentinels: dict[str, str] = {}
+    try:
+        secret = uuid.uuid4().hex
+        if _keychain("add-generic-password", "-s", canary, "-a", "probe", "-w", secret):
+            return ProbeResult(
+                ("keychain:canary: элемент не создан — сбой подготовки",), ()
+            )
+        stand = _build_stand(call.root / "stand")
+        sentinels = _sentinels(targets, stand)
+        effects = call.root / "effects"
+        effects.mkdir()
+        for name in ("outside.txt", "outside-mv.txt"):
+            safe_io.publish(call.root, name, b"outside\n")
+        os.symlink(call.root / "outside.txt", call.stage / ".runner-link")
+        bait.parent.mkdir(parents=True, exist_ok=True)
+        bait.write_text("bait\n")
+        cfg = {
+            "sentinels": sentinels,
+            "stand": stand,
+            "outside": str(call.root / "outside.txt"),
+            "outside_mv": str(call.root / "outside-mv.txt"),
+            "runner_link": str(call.stage / ".runner-link"),
+            "stage": str(call.stage),
+            "tmp": str(call.tmp),
+            "bait": str(bait),
+            "keychain": [list(a) for a in KEYCHAIN_PROBES],
+            "keychain_canary": canary,
+            "step_timeout": PROBE_STEP_TIMEOUT,
+            "effects": str(effects),
+            "label_submit": labels[0],
+            "plist": _PLIST.format(label=labels[1], effect=effects / "bootstrap"),
+            "app_plist": _APP_PLIST.format(bundle_id=app_id),
+            "ae_timeout": APPLE_EVENTS_TIMEOUT,
+        }
+        safe_io.publish(call.root, "probe.json", json.dumps(cfg).encode())
+        safe_io.publish(call.root, "probe.py", PROBE_SCRIPT.encode())
+        wrap = _wrap(profile_path)
+        argv = [sys.executable, "-I", "-B", str(call.root / "probe.py")]
+        code, raw = _spawn(
+            [*wrap, *argv, str(call.root / "probe.json")],
+            env=env,
+            cwd=targets.target_dir,
+            timeout=timeout,
+        )
+        if code is None:
+            return ProbeResult(("проба: таймаут — не действует",), ())
+        lines = raw.decode(errors="replace").strip().splitlines()
+        try:
+            out = json.loads(lines[-1]) if lines else {}
+        except json.JSONDecodeError:
+            out = {}
+        if code != 0 or not out:
+            return ProbeResult((f"проба: код {code}, исходов нет",), ())
+        env_code, env_raw = _spawn(
+            [*wrap, "/usr/bin/env", "-0"], env=env, cwd=targets.target_dir, timeout=10
+        )
+        time.sleep(0.5)  # эффект запущенного вне песочницы — доп. условие
+        seen = sorted(os.listdir(effects))
+        seen += [f"launchctl {label}" for label in labels if _label_alive(label)]
+        if _app_running(app_id):
+            seen.append(f"lsappinfo {app_id}")
+        outside_changed = [
+            n
+            for n in ("outside.txt", "outside-mv.txt")
+            if not (call.root / n).is_file()
+            or (call.root / n).read_bytes() != b"outside\n"
+        ]
+        expected = PROBE_ITEMS | {f"sentinel:{name}" for name in sentinels}
+        result = _evaluate(out, expected, _env_mismatch(env_code, env_raw, env), seen)
+        if outside_changed:
+            result = ProbeResult(
+                (*result.failures, f"внешний файл изменён: {outside_changed}"),
+                result.notes,
+            )
+        return result
+    finally:
+        _cleanup(call, sentinels, labels, bait, canary)
