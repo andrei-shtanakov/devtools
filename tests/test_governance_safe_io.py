@@ -428,3 +428,42 @@ def test_publish_write_failure_is_safe_io_error_and_cleans_tmp(
     with pytest.raises(safe_io.SafeIOError, match="space"):
         safe_io.publish(root, "spec/00-charter.md", b"x")
     assert list((root / "spec").iterdir()) == []
+
+
+# --- create_dir: новый каталог, существующее имя — отказ (TASK-002) ---------
+
+
+@darwin_only
+def test_create_dir_makes_new_dir_with_parents(root: Path) -> None:
+    safe_io.create_dir(root, "a/b/c")
+    assert (root / "a" / "b" / "c").is_dir()
+
+
+@darwin_only
+@pytest.mark.parametrize("kind", ["dir", "file", "symlink"])
+def test_create_dir_refuses_existing_name(root: Path, kind: str) -> None:
+    leaf = root / "c"
+    if kind == "dir":
+        leaf.mkdir()
+    elif kind == "file":
+        leaf.write_text("x")
+    else:
+        leaf.symlink_to(root / "nowhere")
+    with pytest.raises(safe_io.SafeIOError, match="уже существует"):
+        safe_io.create_dir(root, "c")
+    assert not (root / "nowhere").exists()
+
+
+@darwin_only
+def test_create_dir_refuses_symlinked_parent(root: Path, tmp_path: Path) -> None:
+    outside = Path(os.path.realpath(tmp_path)) / "outside"
+    outside.mkdir()
+    (root / "p").symlink_to(outside)
+    with pytest.raises(safe_io.SafeIOError, match="ссылка в пути"):
+        safe_io.create_dir(root, "p/c")
+    assert not any(outside.iterdir())
+
+
+def test_create_dir_refuses_empty_name(root: Path) -> None:
+    with pytest.raises(safe_io.SafeIOError):
+        safe_io.create_dir(root, "")
