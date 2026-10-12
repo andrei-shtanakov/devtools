@@ -184,7 +184,8 @@ class E2EOps(ForgeOps):
         self.comments: list[tuple[int, str]] = []
         self.issues: list[tuple[str, str]] = []
 
-    def author(self, target_dir, kind, subject, bundle_dir, brief_context=None):
+    def author(self, call, kind, subject, brief_context=None):
+        target_dir, bundle_dir = call.target_dir, call.bundle_dir
         bundle = Path(target_dir) / bundle_dir
         if kind == "charter":
             # source-гард брифа: charter пинует оба source-файла.

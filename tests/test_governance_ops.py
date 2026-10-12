@@ -9,7 +9,6 @@ stdout/stderr/returncode. Живых `git`/`gh`/`codex`/`gate-check` вызов�
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -17,6 +16,7 @@ from pathlib import Path
 import pytest
 
 import governance.ops as ops_mod
+from governance.author_launch import AuthorCall, LaunchOutcome
 from governance.facts import Outcome
 from governance.ops import RealOps
 
@@ -26,16 +26,6 @@ _EXPECTED_REMOTE_BRANCH_HEAD_QUERY = (
     "repository(owner:$o,name:$n){"
     "ref(qualifiedName:$q){target{oid}}}}"
 )
-
-
-_REAL_AUTHOR_CLAUDE_TOKEN = ops_mod._author_claude_token
-
-
-@pytest.fixture(autouse=True)
-def _no_real_keychain(monkeypatch):
-    """Тесты не ходят в настоящую связку ключей: токен claude — тестовый;
-    сценарий «элемента нет» подменяет его сам."""
-    monkeypatch.setattr(ops_mod, "_author_claude_token", lambda: "test-token")
 
 
 class RecordedCall:
@@ -609,106 +599,82 @@ def test_disp_agent_env_overrides_file(tmp_path, monkeypatch):
     assert ops_mod.disp_agent("author") == ("claude_code", "claude-opus-5")
 
 
-def test_author_command_and_prompt_contains_fields(monkeypatch):
-    monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", "/nonexistent")
-    monkeypatch.delenv("AUTHOR_HARNESS", raising=False)
-    monkeypatch.delenv("AUTHOR_MODEL", raising=False)
-    calls = _install_fake_run(monkeypatch, returncode=0)
-    ops = RealOps()
-
-    result = ops.author("/tmp/devtools", "adr", "eco-099", "/tmp/devtools/spec")
-
-    assert result == 0
-    call = calls[0]
-    assert call.argv[:5] == [
-        "codex",
-        "exec",
-        "--ephemeral",
-        "--sandbox",
-        "workspace-write",
-    ]
-    prompt = call.argv[5]
-    assert "adr" in prompt
-    assert "eco-099" in prompt
-    assert "/tmp/devtools/spec" in prompt
-    assert call.kwargs["cwd"] == "/tmp/devtools"
+# --- TASK-005 песочницы: RealOps.author/author_disp только делегируют границе ---
 
 
-def test_author_disp_resume_uses_pipeline_resume_without_task(monkeypatch):
-    """devtools#204 п.3: retry на существующем каталоге пайплайна — `disp
-    pipeline resume --slug --config --root`, без `--task` (задача уже в
-    манифесте) и без флагов санкции (на неатрибутируемом дереве сосед
-    откажет сам — fail-closed, решение оператору)."""
-    from types import SimpleNamespace
-
-    seen: list[list[str]] = []
-
-    def fake_run(argv, **kwargs):
-        seen.append(list(argv))
-        return SimpleNamespace(returncode=0)
-
-    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
-    RealOps().author_disp("/t", "task", "/cfg.toml", "beh-x", resume=True)
-    argv = seen[0]
-    assert argv[argv.index("pipeline") + 1] == "resume"
-    assert "--task" not in argv
-    assert argv[argv.index("--slug") + 1] == "beh-x"
-    assert argv[argv.index("--config") + 1] == "/cfg.toml"
-    assert argv[argv.index("--root") + 1] == "/t"
+_BRIEF_CONTEXT = {
+    "frame": "engineer",
+    "primary": "00-discovery/brief.md",
+    "requirements_source": "00-discovery/customer.md",
+    "source_paths": [
+        "00-discovery/brief.md",
+        "00-discovery/customer.md",
+    ],
+    "source_blobs": {
+        "discovery-brief": "a" * 40,
+        "discovery-customer": "b" * 40,
+    },
+}
+_CALL = AuthorCall("r1", "/runs/r1", "/t", "ws/spec", "10-requirements.md")
 
 
-def test_author_prompt_carries_dsl_and_filenames(monkeypatch):
-    monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", "/nonexistent")
-    monkeypatch.delenv("AUTHOR_HARNESS", raising=False)
-    monkeypatch.delenv("AUTHOR_MODEL", raising=False)
-    """Промпт несёт канонические имена файлов и DSL гейта (боевой прогон
-    kapelle#47: без них codex писал в своём диалекте)."""
-    calls = _install_fake_run(monkeypatch, returncode=0)
-    ops = RealOps()
+def test_real_ops_author_delegates_to_the_launch_boundary(monkeypatch):
+    """`RealOps.author` — только делегирование: исход границы возвращается
+    как есть, промпт строится по пути записи, который даёт граница."""
+    seen: list = []
+    outcome = LaunchOutcome(2, "отказ границы")
 
-    ops.author("/t", "requirements", "s", "ws/spec")
-    ops.author("/t", "behaviour-spec", "s", "ws/spec")
+    def fake_launch(call, make_prompt):
+        seen.append((call, make_prompt("/calls/r1/c/stage/10-requirements.md")))
+        return outcome
 
-    req_prompt = calls[0].argv[5]
-    assert "ws/spec/10-requirements.md" in req_prompt
-    assert "#### FR-NN:" in req_prompt
-    assert "**Priority**: Must" in req_prompt
-    assert "upstream_hashes" in req_prompt and "git hash-object" in req_prompt
-
-    beh_prompt = calls[1].argv[5]
-    assert "ws/spec/15-behaviour-spec.md" in beh_prompt
-    assert "#### BEH-NN:" in beh_prompt
-    assert "traces: [FR-NN" in beh_prompt
-    assert "checked_by" in beh_prompt
+    monkeypatch.setattr(ops_mod.author_launch, "launch_author", fake_launch)
+    assert RealOps().author(_CALL, "requirements", "s") is outcome
+    call, prompt = seen[0]
+    assert call is _CALL
+    assert "/calls/r1/c/stage/10-requirements.md" in prompt
+    assert "#### FR-NN:" in prompt
 
 
-def test_author_prompt_adds_brief_context_only_to_charter_and_requirements(
-    monkeypatch,
-):
-    monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", "/nonexistent")
-    monkeypatch.delenv("AUTHOR_HARNESS", raising=False)
-    monkeypatch.delenv("AUTHOR_MODEL", raising=False)
-    calls = _install_fake_run(monkeypatch, returncode=0)
-    ops = RealOps()
-    context = {
-        "frame": "engineer",
-        "primary": "00-discovery/brief.md",
-        "requirements_source": "00-discovery/customer.md",
-        "source_paths": [
-            "00-discovery/brief.md",
-            "00-discovery/customer.md",
-        ],
-        "source_blobs": {
-            "discovery-brief": "a" * 40,
-            "discovery-customer": "b" * 40,
-        },
-    }
+def test_real_ops_author_disp_always_refuses_without_spawning(monkeypatch):
+    """disp вне v1 (дизайн §11): отказ границы, ни одного процесса."""
 
-    ops.author("/t", "charter", "s", "ws/spec", brief_context=context)
-    ops.author("/t", "requirements", "s", "ws/spec", brief_context=context)
-    ops.author("/t", "behaviour-spec", "s", "ws/spec")
+    def boom(*a, **k):
+        raise AssertionError("процесс запущен")
 
-    charter, requirements, behaviour = [call.argv[5] for call in calls]
+    monkeypatch.setattr(ops_mod.subprocess, "run", boom)
+    monkeypatch.setattr(ops_mod.subprocess, "Popen", boom)
+    result = RealOps().author_disp("/t", "task", "/cfg.toml", "beh-x", resume=True)
+    assert result == ops_mod.author_launch.refuse_disp()
+    assert not result.ok and "disp вне v1" in result.reason
+
+
+def test_author_prompt_names_two_paths_dsl_and_filenames():
+    """Промпт называет два разных пути (дизайн §11 п.1): `bundle_dir` для
+    чтения и `git hash-object`, абсолютный `output_path` — единственное
+    место записи; несёт канонические имена файлов и DSL гейта (kapelle#47)."""
+    out = "/calls/r1/c/stage/10-requirements.md"
+    req = ops_mod.author_prompt("requirements", "s", "ws/spec", None, out)
+    assert f"Write EXACTLY one file: {out}" in req
+    assert "ws/spec/10-requirements.md" in req
+    assert "#### FR-NN:" in req
+    assert "**Priority**: Must" in req
+    assert "upstream_hashes" in req and "git hash-object" in req
+    assert "kind=requirements" in req and "'s'" in req
+
+    beh = ops_mod.author_prompt("behaviour-spec", "s", "ws/spec", None, "/o")
+    assert "ws/spec/15-behaviour-spec.md" in beh
+    assert "#### BEH-NN:" in beh
+    assert "traces: [FR-NN" in beh
+    assert "checked_by" in beh
+
+
+def test_author_prompt_adds_brief_context_only_to_charter_and_requirements():
+    charter, requirements = (
+        ops_mod.author_prompt(kind, "s", "ws/spec", _BRIEF_CONTEXT, "/o")
+        for kind in ("charter", "requirements")
+    )
+    behaviour = ops_mod.author_prompt("behaviour-spec", "s", "ws/spec", None, "/o")
     for prompt in (charter, requirements):
         assert "ws/spec/00-discovery/brief.md" in prompt
         assert "ws/spec/00-discovery/customer.md" in prompt
@@ -717,58 +683,6 @@ def test_author_prompt_adds_brief_context_only_to_charter_and_requirements(
     assert "direct traces_to edge" in charter
     assert "direct traces_to edge" not in requirements
     assert "Discovery source layer" not in behaviour
-
-
-# --- B2 Task 2: author_disp — opt-in бэкенд disp (спека §5, OQ-1) ----------
-
-
-def test_author_disp_runs_the_document_pipeline_kind(monkeypatch):
-    """Точный вектор вызова вида `document` (disputatio SPEC-002 §3.1).
-
-    Вид выводится из формы конфига, не из флага, поэтому `--config`
-    обязателен в векторе: без него disp взял бы дефолтный
-    `<root>/<DEFAULT_CONFIG_NAME>` — чужой конфиг рабочего дерева цели.
-    """
-    calls = _install_fake_run(monkeypatch, returncode=0)
-    ops = RealOps()
-
-    result = ops.author_disp(
-        "/tmp/devtools",
-        "subject='x' bundle=spec/15.md",
-        "/tmp/runs/r1/disp-doc.toml",
-        "beh-ws-42",
-    )
-
-    assert result == 0
-    call = calls[0]
-    expected_project = str(ops_mod.DEVTOOLS_ROOT.parent / "disputatio")
-    assert call.argv == [
-        "uv",
-        "run",
-        "--project",
-        expected_project,
-        "disp",
-        "pipeline",
-        "run",
-        "--task",
-        "subject='x' bundle=spec/15.md",
-        "--slug",
-        "beh-ws-42",
-        "--config",
-        "/tmp/runs/r1/disp-doc.toml",
-        "--root",
-        "/tmp/devtools",
-    ]
-    assert call.kwargs["cwd"] == "/tmp/devtools"
-
-
-def test_author_disp_returncode_passthrough(monkeypatch):
-    _install_fake_run(monkeypatch, returncode=2)
-    ops = RealOps()
-
-    result = ops.author_disp("/tmp/devtools", "task", "/tmp/c.toml", "beh-ws")
-
-    assert result == 2
 
 
 def test_no_governance_module_asks_disp_for_a_develop_mode():
@@ -1337,101 +1251,6 @@ def test_collect_gate_verdicts_absent_returns_false(tmp_path):
 
     assert ops.collect_gate_verdicts(str(target), str(tmp_path / "d.jsonl")) is False
     assert not (tmp_path / "d.jsonl").exists()
-
-
-# --- Кейс 14: харнесс авторинга (лимиты codex, парный к review-pr.sh) -------
-
-
-def _author_hermetic(monkeypatch, tmp_path, cfg: str | None = None):
-    path = tmp_path / "harness.env"
-    if cfg is not None:
-        path.write_text(cfg, encoding="utf-8")
-    monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", str(path))
-    monkeypatch.delenv("AUTHOR_HARNESS", raising=False)
-    monkeypatch.delenv("AUTHOR_MODEL", raising=False)
-
-
-def test_author_config_flips_to_claude(monkeypatch, tmp_path):
-    """Конфиг оператора переключает авторинг на claude: паритет с флотским
-    пресетом spec-runner (skip-permissions — авторинг пишет бандл и считает
-    git hash-object), изоляция от MCP/сессий оператора."""
-    _author_hermetic(
-        monkeypatch,
-        tmp_path,
-        "AUTHOR_HARNESS=claude\nAUTHOR_MODEL=claude-opus-5\n",
-    )
-    calls = _install_fake_run(monkeypatch, returncode=0)
-    ops = RealOps()
-
-    assert ops.author("/t", "charter", "s", "ws/spec") == 0
-    argv = calls[0].argv
-    assert argv[:4] == ["claude", "-p", "--model", "claude-opus-5"]
-    for flag in (
-        "--dangerously-skip-permissions",
-        "--no-session-persistence",
-        "--strict-mcp-config",
-    ):
-        assert flag in argv
-    assert "ws/spec/00-charter.md" in argv[-1]  # промпт — последним
-
-
-def test_author_claude_default_model(monkeypatch, tmp_path):
-    _author_hermetic(monkeypatch, tmp_path, "AUTHOR_HARNESS=claude\n")
-    calls = _install_fake_run(monkeypatch, returncode=0)
-    RealOps().author("/t", "charter", "s", "ws/spec")
-    argv = calls[0].argv
-    assert argv[argv.index("--model") + 1] == "claude-opus-5"
-
-
-def test_author_env_harness_ignores_config_model(monkeypatch, tmp_path):
-    """Урок ревью PR #121: харнесс со слоя env не наследует модель слоя
-    конфига — codex не получит claude-модель."""
-    _author_hermetic(
-        monkeypatch,
-        tmp_path,
-        "AUTHOR_HARNESS=claude\nAUTHOR_MODEL=claude-opus-5\n",
-    )
-    monkeypatch.setenv("AUTHOR_HARNESS", "codex")
-    calls = _install_fake_run(monkeypatch, returncode=0)
-    RealOps().author("/t", "charter", "s", "ws/spec")
-    argv = calls[0].argv
-    assert argv[:5] == [
-        "codex",
-        "exec",
-        "--ephemeral",
-        "--sandbox",
-        "workspace-write",
-    ]
-    assert "-m" not in argv
-
-
-def test_author_config_accepts_export_prefix(monkeypatch, tmp_path):
-    _author_hermetic(monkeypatch, tmp_path, "  export AUTHOR_HARNESS=claude\n")
-    calls = _install_fake_run(monkeypatch, returncode=0)
-    RealOps().author("/t", "charter", "s", "ws/spec")
-    assert calls[0].argv[0] == "claude"
-
-
-def test_author_codex_model_from_config(monkeypatch, tmp_path):
-    _author_hermetic(
-        monkeypatch,
-        tmp_path,
-        "AUTHOR_HARNESS=codex\nAUTHOR_MODEL=gpt-5.5\n",
-    )
-    calls = _install_fake_run(monkeypatch, returncode=0)
-    RealOps().author("/t", "charter", "s", "ws/spec")
-    argv = calls[0].argv
-    assert argv[argv.index("-m") + 1] == "gpt-5.5"
-    assert argv[-1].startswith("kind=charter")
-
-
-def test_author_unknown_harness_is_config_error(monkeypatch, tmp_path, capsys):
-    """Неизвестный харнесс — код 2 с причиной, не traceback: шаг authoring
-    остаётся resumable после правки конфига."""
-    _author_hermetic(monkeypatch, tmp_path, "AUTHOR_HARNESS=gemini\n")
-    _install_fake_run(monkeypatch, returncode=0)
-    assert RealOps().author("/t", "charter", "s", "ws/spec") == 2
-    assert "gemini" in capsys.readouterr().out
 
 
 # --- Task 2: DSL авторинга decomposition -----------------------------------
@@ -2647,128 +2466,6 @@ def test_logins_survive_missing_gh_binary(monkeypatch, tmp_path):
     assert RealOps().caller_login() is None
 
 
-# --- devtools#469 / дизайн песочницы §3: env авторского агента — allowlist ---
-
-_OPERATOR_ENV = {
-    "PATH": "/usr/bin",
-    "HOME": "/h",
-    "USER": "u",
-    "LOGNAME": "u",
-    "SHELL": "/bin/zsh",
-    "LANG": "C.UTF-8",
-    "TERM": "xterm",
-    "TMPDIR": "/t/",
-    "LC_ALL": "C.UTF-8",
-    "XDG_STATE_HOME": "/h/.state",
-    "ANTHROPIC_API_KEY": "own-model-key",
-    # чужая XDG_-переменная — префиксом не проходит (ревью #483)
-    "XDG_SESSION_SECRET": "x",
-    # то, что агенту попадать НЕ должно (F12 дизайна)
-    "GH_TOKEN": "x",
-    "GITHUB_TOKEN": "x",
-    "GH_CONFIG_DIR": "/h/.config/review",
-    "OPENAI_API_KEY": "x",
-    "MS_CLIENT_SECRET": "x",
-    "SPEC_RUNNER_TELEGRAM_TOKEN": "x",
-    "CLAUDECODE": "1",
-    "CLAUDE_CODE_MESSAGING_TOKEN": "x",
-    "AUTHOR_HARNESS": "codex",
-}
-_AGENT_ENV = {
-    k: v
-    for k, v in _OPERATOR_ENV.items()
-    if k
-    in {
-        "PATH",
-        "HOME",
-        "USER",
-        "LOGNAME",
-        "SHELL",
-        "LANG",
-        "TERM",
-        "TMPDIR",
-        "LC_ALL",
-        "XDG_STATE_HOME",
-        "ANTHROPIC_API_KEY",
-    }
-}
-
-
-def _operator_env(monkeypatch) -> None:
-    for name in list(os.environ):
-        monkeypatch.delenv(name, raising=False)
-    for name, value in _OPERATOR_ENV.items():
-        monkeypatch.setenv(name, value)
-    monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", "/nonexistent")
-
-
-def test_author_gets_only_the_allowlisted_env(monkeypatch):
-    """Секреты сессии оператора авторскому агенту не наследуются: env
-    вызова РАВЕН allowlist-подмножеству (равенство, не поиск трёх имён)."""
-    _operator_env(monkeypatch)
-    calls = _install_fake_run(monkeypatch)
-    RealOps().author("/t", "requirements", "s", "ws/spec")
-    assert calls[0].kwargs["env"] == _AGENT_ENV
-
-
-def test_author_disp_gets_only_the_allowlisted_env(monkeypatch):
-    """disp и агенты внутри него наследуют env процесса disp — тот же
-    allowlist."""
-    _operator_env(monkeypatch)
-    calls = _install_fake_run(monkeypatch)
-    RealOps().author_disp("/t", "task", "/cfg.toml", "beh-x")
-    assert calls[0].kwargs["env"] == _AGENT_ENV
-
-
-def test_agent_env_names_are_pinned():
-    """Перечень пинуется литералом (ревью #483): расширение allowlist'а —
-    осознанная правка теста с обоснованием, а не тихое добавление."""
-    assert ops_mod.AGENT_ENV_NAMES == {
-        "PATH",
-        "HOME",
-        "USER",
-        "LOGNAME",
-        "SHELL",
-        "TERM",
-        "TMPDIR",
-        "LANG",
-        "XDG_CACHE_HOME",
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
-        "XDG_STATE_HOME",
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_AUTH_TOKEN",
-        "ANTHROPIC_MODEL",
-        "MAX_THINKING_TOKENS",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "CLAUDE_CODE_USE_BEDROCK",
-        "CLAUDE_CODE_USE_VERTEX",
-        "AWS_REGION",
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY",
-        "AWS_SESSION_TOKEN",
-        "CLOUD_ML_REGION",
-        "ANTHROPIC_VERTEX_PROJECT_ID",
-        "HTTPS_PROXY",
-        "HTTP_PROXY",
-        "NO_PROXY",
-        "SSL_CERT_FILE",
-        "NODE_EXTRA_CA_CERTS",
-    }
-    assert ops_mod.AGENT_ENV_PREFIXES == ("LC_",)
-    assert "OPENAI_API_KEY" not in ops_mod.AGENT_ENV_NAMES
-
-
-def test_agent_env_carries_the_reviewer_model_transport():
-    """Транспорт модели авторского агента не отстаёт от ревьюера edge-check:
-    иначе на машине с прокси/CA или env-учёткой авторинг падал бы, а
-    ревью — нет."""
-    from governance.edge_check import reviewer
-
-    assert set(reviewer._ENV_ALLOWLIST) <= ops_mod.AGENT_ENV_NAMES
-
-
 def test_commit_paths_ignored_file_with_glob_metachars(tmp_path):
     """Имя с `[` (engineer-ref, ревью #220) под ignore-правилом — тоже
     распознаётся игнорируемым и форсится буквально."""
@@ -2778,142 +2475,6 @@ def test_commit_paths_ignored_file_with_glob_metachars(tmp_path):
     (repo / rel).write_text("{}\n", encoding="utf-8")
     RealOps().commit_paths(str(repo), [rel], "glob")
     assert _git(repo, "rev-parse", f"HEAD:{rel}").returncode == 0
-
-
-# --- дизайн песочницы §8 (S1): изоляция конфигурации claude на вызов ---
-
-
-def _claude_calls(monkeypatch, *, token="tok-from-keychain"):
-    """Фейк subprocess.run, который во время вызова агента фиксирует
-    settings.json изолированного каталога (после вызова его уже нет)."""
-    seen: list[dict] = []
-
-    def fake_run(argv, **kwargs):
-        env = kwargs.get("env") or {}
-        cfg = env.get("CLAUDE_CONFIG_DIR")
-        seen.append(
-            {
-                "argv": list(argv),
-                "env": env,
-                "settings": (Path(cfg) / "settings.json").read_text()
-                if cfg and (Path(cfg) / "settings.json").is_file()
-                else None,
-            }
-        )
-        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-
-    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
-    monkeypatch.setattr(ops_mod, "_author_claude_token", lambda: token)
-    return seen
-
-
-def test_claude_author_gets_isolated_config_and_keychain_token(tmp_path, monkeypatch):
-    """S1: без своего CLAUDE_CONFIG_DIR агент грузит плагины/хуки оператора
-    и пишет состояние в ~/.claude. Каталог вызова — со своим settings.json,
-    токен — из элемента связки, после вызова каталог удалён."""
-    _harness_file(tmp_path, monkeypatch, AUTHOR_HARNESS="claude")
-    seen = _claude_calls(monkeypatch)
-    RealOps().author(str(tmp_path), "requirements", "s", "ws/spec")
-    env = seen[0]["env"]
-    cfg = Path(env["CLAUDE_CONFIG_DIR"])
-    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "tok-from-keychain"
-    assert json.loads(seen[0]["settings"]) == {
-        "permissions": {"defaultMode": "bypassPermissions"}
-    }
-    assert cfg != Path.home() / ".claude"
-    assert not cfg.exists()  # удалён в finally
-    rest = {
-        k: v
-        for k, v in env.items()
-        if k not in {"CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"}
-    }
-    assert rest == ops_mod.agent_env()  # остальное — прежний allowlist
-
-
-def test_codex_author_is_not_touched_by_claude_isolation(tmp_path, monkeypatch):
-    _harness_file(tmp_path, monkeypatch, AUTHOR_HARNESS="codex")
-    seen = _claude_calls(monkeypatch)
-    RealOps().author(str(tmp_path), "requirements", "s", "ws/spec")
-    assert "CLAUDE_CONFIG_DIR" not in seen[0]["env"]
-
-
-def test_claude_author_without_keychain_token_refuses(tmp_path, monkeypatch, capsys):
-    """Нет элемента связки — отказ с причиной (код 2), агент не запущен:
-    запуска «без изоляции» не существует."""
-    _harness_file(tmp_path, monkeypatch, AUTHOR_HARNESS="claude")
-    seen = _claude_calls(monkeypatch)
-
-    def missing():
-        raise ops_mod.AgentIsolationError("нет элемента связки")
-
-    monkeypatch.setattr(ops_mod, "_author_claude_token", missing)
-    assert RealOps().author(str(tmp_path), "requirements", "s", "ws/spec") == 2
-    assert seen == []
-    assert "нет элемента связки" in capsys.readouterr().out
-
-
-@pytest.mark.parametrize(
-    ("author", "review", "isolated"),
-    [("claude", "codex", True), ("codex", "claude", True), ("codex", "codex", False)],
-)
-def test_disp_isolates_claude_config_when_any_role_is_claude(
-    tmp_path, monkeypatch, author, review, isolated
-):
-    _harness_file(
-        tmp_path,
-        monkeypatch,
-        AUTHOR_HARNESS=author,
-        AUTHOR_MODEL="m",
-        REVIEW_HARNESS=review,
-        REVIEW_MODEL="m",
-    )
-    seen = _claude_calls(monkeypatch)
-    RealOps().author_disp(str(tmp_path), "task", "/cfg.toml", "beh-x")
-    assert ("CLAUDE_CONFIG_DIR" in seen[0]["env"]) is isolated
-
-
-@pytest.mark.parametrize(
-    ("rc", "stdout", "ok"),
-    [(0, "tok\n", True), (44, "", False), (0, "  \n", False)],
-    ids=["found", "missing-item", "empty-value"],
-)
-def test_author_claude_token_reads_the_named_keychain_item(monkeypatch, rc, stdout, ok):
-    """Сама функция чтения (автофикстура её подменяет): спрашивает именно
-    элемент AUTHOR_CLAUDE_TOKEN_ITEM, отсутствие и пустое значение —
-    AgentIsolationError, а не пустой токен в env агента."""
-    monkeypatch.setattr(ops_mod, "_author_claude_token", _REAL_AUTHOR_CLAUDE_TOKEN)
-    calls = _install_fake_run(monkeypatch, returncode=rc, stdout=stdout)
-    if ok:
-        assert ops_mod._author_claude_token() == "tok"
-    else:
-        with pytest.raises(ops_mod.AgentIsolationError):
-            ops_mod._author_claude_token()
-    assert calls[0].argv == [
-        "security",
-        "find-generic-password",
-        "-s",
-        ops_mod.AUTHOR_CLAUDE_TOKEN_ITEM,
-        "-w",
-    ]
-
-
-def test_claude_isolation_keeps_operator_secrets_out(monkeypatch):
-    """Сквозная проверка на claude-пути (ревью #489): окружение оператора с
-    секретами обнулено и собрано заново; в вызов уходит allowlist + ДВА ключа
-    изоляции, и токен — из связки, не унаследованный."""
-    _operator_env(monkeypatch)
-    monkeypatch.setenv("AUTHOR_HARNESS", "claude")
-    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "inherited-token")
-    seen = _claude_calls(monkeypatch)
-    RealOps().author("/t", "requirements", "s", "ws/spec")
-    env = seen[0]["env"]
-    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "tok-from-keychain"
-    rest = {
-        k: v
-        for k, v in env.items()
-        if k not in {"CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"}
-    }
-    assert rest == _AGENT_ENV
 
 
 # --- charter_codes_elsewhere на настоящем git (#481 C-a) ------------------

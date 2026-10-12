@@ -573,3 +573,336 @@ def test_missing_probe_item_is_failure(
     assert bench.probe().failures == (
         "symlink:runner-made: исхода нет — пункт не исполнен",
     )
+
+
+# --- граница запуска: фейковый агент под настоящим профилем (TASK-005) -------
+#
+# Исполняемый файл `claude` — скрипт теста, допущенный временным контрактом
+# (настоящие realpath, sha256, macOS, шаблон профиля); связка ключей — двойник
+# токена. Всё остальное — настоящее: каталог вызова, профиль, проба, запуск
+# под `sandbox-exec`, перенос.
+
+_PARSE = r"""
+for prompt; do :; done
+out=$(printf '%s\n' "$prompt" | sed -n 's/^Write EXACTLY one file: \([^ ]*\) (.*/\1/p')
+bundle=$(printf '%s\n' "$prompt" | sed -n 's/^kind=[^ ]* subject=.* bundle_dir=\(.*\)$/\1/p')
+"""
+
+
+class Live:
+    """Цель (git), каталог прогона, допущенный фейковый `claude`."""
+
+    def __init__(self, base: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from governance import author_launch
+
+        self.base = base
+        self.target = base / "target"
+        _git("init", "-q", self.target)
+        self.run_dir = base / "runs" / "r1"
+        self.run_dir.mkdir(parents=True)
+        (self.run_dir / "ledger.jsonl").write_text("")
+        self.bin = base / "bin"
+        self.bin.mkdir()
+        self.contract = base / "admitted.toml"
+        monkeypatch.setenv("PATH", f"{self.bin}:/usr/bin:/bin:/usr/sbin:/sbin")
+        monkeypatch.setenv("XDG_STATE_HOME", str(base / "xdg"))
+        monkeypatch.setenv("AUTHOR_HARNESS", "claude")
+        monkeypatch.delenv("AUTHOR_MODEL", raising=False)
+        monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", str(base / "none"))
+        monkeypatch.setattr(author_launch, "author_claude_token", lambda: "tok")
+        monkeypatch.setattr(author_launch, "ADMITTED_CONTRACT", self.contract)
+        self.launch = author_launch
+
+    def agent(self, body: str) -> None:
+        script = self.bin / "claude"
+        script.write_text("#!/bin/sh\n" + _PARSE + body + "exit 0\n", encoding="utf-8")
+        script.chmod(0o755)
+        real = os.path.realpath(script)
+        import hashlib
+
+        self.contract.write_text(
+            "schema = 1\n\n[[admitted]]\n"
+            'harness = "claude"\nversion = "fake"\n'
+            f'realpath = "{real}"\n'
+            f'sha256 = "{hashlib.sha256(Path(real).read_bytes()).hexdigest()}"\n'
+            f"macos_major = {sandbox._macos_major()}\n"
+            f'profile_sha256 = "{sandbox.profile_template_sha256()}"\n'
+            'evidence = "test"\n',
+            encoding="utf-8",
+        )
+
+    def call(self, bundle: str, filename: str):
+        return self.launch.AuthorCall(
+            "r1", str(self.run_dir), str(self.target), bundle, filename
+        )
+
+
+@pytest.fixture
+def live(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Live:
+    return Live(Path(os.path.realpath(tmp_path)), monkeypatch)
+
+
+def _hash_object(repo: Path, rel: str) -> str:
+    return subprocess.run(
+        ["git", "-C", repo, "hash-object", rel],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
+def test_launch_n6_first_run_without_bundle_transfers_node(live: Live) -> None:
+    """N6: цель без brief, бандла и его родителей — проба зелёная, файл
+    перенесён; агент пишет только в заготовку (запись в цель — EPERM)."""
+    from governance.ops import RealOps
+
+    live.agent(
+        'printf "node\\n" > "$out"\n'
+        'printf "x" > "$bundle/escape.md" 2>/dev/null && echo escaped >> "$out"\n'
+    )
+    outcome = RealOps().author(
+        live.call("ws/new/spec", "10-requirements.md"), "requirements", "s"
+    )
+    assert outcome.ok, outcome
+    assert (live.target / "ws/new/spec/10-requirements.md").read_bytes() == b"node\n"
+    assert not (live.target / "ws/new/spec/escape.md").exists()
+    assert list((live.base / "xdg/devtools/agent-calls/r1").iterdir()) == []
+
+
+def test_launch_n1_upstream_hashes_from_the_real_bundle(live: Live) -> None:
+    """N1: `git hash-object <bundle_dir>/…` под профилем считается по
+    настоящему бандлу цели — чтение дерева цели агенту открыто."""
+    from governance.ops import RealOps
+
+    bundle = live.target / "ws/spec"
+    bundle.mkdir(parents=True)
+    (bundle / "00-charter.md").write_text("# charter\n\n#### CON-01: x\n")
+    live.agent(
+        'h=$(git hash-object "$bundle/00-charter.md")\n'
+        'printf "upstream_hashes: {charter: \\"%s\\"}\\n" "$h" > "$out"\n'
+    )
+    outcome = RealOps().author(
+        live.call("ws/spec", "10-requirements.md"), "requirements", "s"
+    )
+    assert outcome.ok, outcome
+    expected = _hash_object(live.target, "ws/spec/00-charter.md")
+    published = (bundle / "10-requirements.md").read_text()
+    assert published == f'upstream_hashes: {{charter: "{expected}"}}\n'
+
+
+def test_launch_detached_descendant_cannot_change_transferred_bytes(
+    live: Live,
+) -> None:
+    """Z12: отсоединённый потомок (`setsid`) переживает вызов и переписывает
+    заготовку и бандл — перенесённые байты неизменны."""
+    from governance.ops import RealOps
+
+    live.agent(
+        'printf "node\\n" > "$out"\n'
+        f"{sys.executable} -I -c '"
+        "import os, sys, time\n"
+        "os.setsid(); time.sleep(1.5)\n"
+        "for p in sys.argv[1:]:\n"
+        '    try: open(p, "w").write("evil")\n'
+        "    except OSError: pass\n"
+        '\' "$out" "$bundle/10-requirements.md" </dev/null >/dev/null 2>&1 &\n'
+    )
+    outcome = RealOps().author(
+        live.call("ws/spec", "10-requirements.md"), "requirements", "s"
+    )
+    assert outcome.ok, outcome
+    node = live.target / "ws/spec/10-requirements.md"
+    assert node.read_bytes() == b"node\n"
+    time.sleep(3)  # потомок отработал
+    assert node.read_bytes() == b"node\n"
+
+
+@pytest.mark.parametrize("swap", ["symlink", "fifo", "grow"])
+def test_launch_race_during_transfer_refuses_or_transfers_own_bytes(
+    live: Live, swap: str
+) -> None:
+    """Z12, гонки до/во время переноса: потомок подменяет файл узла ссылкой
+    на внешний, FIFO или растит его — исход: отказ или собственные байты
+    агента; внешний файл неизменен, наружу ничего не уходит."""
+    from governance.ops import RealOps
+
+    outside = live.base / "outside.txt"
+    outside.write_text("OUTSIDE\n")
+    action = {
+        "symlink": f"os.unlink(p); os.symlink({str(outside)!r}, p)",
+        "fifo": "os.unlink(p); os.mkfifo(p)",
+        "grow": "open(p, 'a').write('x' * (1 << 20))",
+    }[swap]
+    live.agent(
+        'printf "node\\n" > "$out"\n'
+        f"{sys.executable} -I -c '"
+        "import os, sys, time\n"
+        "os.setsid(); p = sys.argv[1]; end = time.time() + 8\n"
+        "while time.time() < end:\n"
+        "    try:\n"
+        f"        {action}\n"
+        "    except OSError: pass\n"
+        "    time.sleep(0.01)\n"
+        '\' "$out" </dev/null >/dev/null 2>&1 &\n'
+    )
+    outcome = RealOps().author(
+        live.call("ws/spec", "10-requirements.md"), "requirements", "s"
+    )
+    node = live.target / "ws/spec/10-requirements.md"
+    if outcome.ok:
+        data = node.read_bytes()
+        assert data.startswith(b"node\n") and b"OUTSIDE" not in data
+        assert not node.is_symlink()
+    else:
+        assert not node.exists()
+    assert outside.read_text() == "OUTSIDE\n"
+    time.sleep(1)
+
+
+@pytest.mark.parametrize(
+    "swap",
+    [
+        'ln -s "$OUTSIDE" "$out"',
+        'mkfifo "$out"',
+        'head -c 5000000 /dev/zero > "$out"',
+    ],
+    ids=["symlink", "fifo", "over-limit"],
+)
+def test_launch_substitution_before_transfer_is_refused(
+    live: Live, monkeypatch: pytest.MonkeyPatch, swap: str
+) -> None:
+    """Z12, подмена до переноса (детерминированно, до выхода агента): файл
+    узла — ссылка на внешний, FIFO или сверх потолка — отказ без зависания,
+    наружу ничего не уходит, внешний файл неизменен."""
+    from governance.ops import RealOps
+
+    outside = live.base / "outside.txt"
+    outside.write_text("OUTSIDE\n")
+    monkeypatch.setenv("OUTSIDE", str(outside))
+    monkeypatch.setattr(
+        live.launch, "AGENT_ENV_NAMES", live.launch.AGENT_ENV_NAMES | {"OUTSIDE"}
+    )
+    live.agent(f"{swap}\n")
+    started = time.monotonic()
+    outcome = RealOps().author(
+        live.call("ws/spec", "10-requirements.md"), "requirements", "s"
+    )
+    assert time.monotonic() - started < 60
+    assert not outcome.ok and "перенос файла узла" in outcome.reason, outcome
+    assert not (live.target / "ws/spec/10-requirements.md").exists()
+    assert outside.read_text() == "OUTSIDE\n"
+
+
+# --- через подключение к runner: вход гейта и опасное назначение (Z12, Z14) --
+
+
+@pytest.fixture
+def runner_live(live: Live, monkeypatch: pytest.MonkeyPatch):
+    pytest.importorskip("steward")
+    from governance import run_state as rs
+
+    monkeypatch.setattr(rs, "RUNS_ROOT", live.base / "runs")
+    return live
+
+
+def _runner_ops(gate_real: bool):
+    import types
+
+    from governance.ops import RealOps
+    from tests.test_governance_runner import FakeOps
+
+    class Ops(FakeOps):
+        gate_inputs: list[bytes]
+
+        def gate_check_candidate(self, target_dir, bundle_dir, profile):
+            node = Path(target_dir) / bundle_dir / "00-charter.md"
+            self.gate_inputs = [*getattr(self, "gate_inputs", []), node.read_bytes()]
+            if gate_real:
+                return RealOps().gate_check_candidate(target_dir, bundle_dir, profile)
+            return super().gate_check_candidate(target_dir, bundle_dir, profile)
+
+    ops = Ops()
+    ops.author = types.MethodType(RealOps.author, ops)  # type: ignore[method-assign]
+    return ops
+
+
+def _start(live: Live, ops, monkeypatch, run_id: str):
+    from tests import locked_runner
+    from tests.test_governance_runner import _fake_wave_adapters, _waves_kwargs
+
+    _fake_wave_adapters(monkeypatch, ops)
+    kwargs = _waves_kwargs(live.base, run_id, ops, target_dir=str(live.target))
+    return locked_runner.start(**kwargs)
+
+
+_CHARTER = "# charter\\n\\n#### CON-01: x\\n"
+
+
+def test_runner_gate_input_equals_transferred_bytes(
+    runner_live: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Z12 интеграционно: при claude и непустом допуске авторинг проходит
+    штатно; потомок агента переписывает заготовку после выхода — гейт
+    читает перенесённые байты."""
+    live = runner_live
+    live.agent(
+        f'printf "{_CHARTER}" > "$out"\n'
+        f"{sys.executable} -I -c '"
+        "import os, sys, time\n"
+        "os.setsid(); time.sleep(0.2)\n"
+        'try: open(sys.argv[1], "w").write("evil")\n'
+        "except OSError: pass\n"
+        '\' "$out" </dev/null >/dev/null 2>&1 &\n'
+    )
+    ops = _runner_ops(gate_real=False)
+    state = _start(live, ops, monkeypatch, "r-live-gate")
+    assert state.status == "waiting_human_merge", state.status
+    assert ops.gate_inputs == [b"# charter\n\n#### CON-01: x\n"]
+    assert state.ops["author-charter"]["skipped"] is False
+
+
+@pytest.mark.parametrize("trap", ["dangling-symlink", "hardlink"])
+def test_runner_z14_dangerous_destination_gets_new_inode_and_gate_refuses(
+    runner_live: Live, monkeypatch: pytest.MonkeyPatch, trap: str
+) -> None:
+    """Z14: опасное назначение ставит ДОВЕРЕННЫЙ код теста между выходом
+    агента и публикацией (заранее нельзя: существующий узел раннер штатно
+    пропускает, а агент в цель писать не может); агент пишет JSON-«хук»
+    вместо узла. Публикация заменяет само имя (новый inode), цель ссылки
+    не создаётся, двойник неизменен; настоящий гейт читает опубликованные
+    байты и отказывает."""
+    from governance import safe_io
+
+    live = runner_live
+    live.agent('printf \'{"hooks": {"x": "sh -c evil"}}\\n\' > "$out"\n')
+    hook_target = live.target / ".claude" / "settings.local.json"
+    twin = live.base / "twin.md"
+    twin.write_text("twin\n")
+    real_publish = safe_io.publish
+    trapped: list[tuple[int, int]] = []
+
+    def publish(root, rel, data):
+        dest = Path(root) / rel
+        if str(rel).endswith("00-charter.md") and Path(root) == live.target:
+            if trap == "dangling-symlink":
+                os.symlink(hook_target, dest)
+            else:
+                os.link(twin, dest)
+            before = os.lstat(dest).st_ino
+            real_publish(root, rel, data)
+            trapped.append((before, os.lstat(dest).st_ino))
+            return
+        real_publish(root, rel, data)
+
+    monkeypatch.setattr(safe_io, "publish", publish)
+    ops = _runner_ops(gate_real=True)
+    state = _start(live, ops, monkeypatch, f"r-live-z14-{trap}")
+    assert len(trapped) == 1, "публикация выполнена поверх ловушки"
+    before, after = trapped[0]
+    assert before != after, "назначение получило новый inode"
+    node = live.target / "workstreams/WS-1/spec/00-charter.md"
+    assert not node.is_symlink()
+    assert ops.gate_inputs == [b'{"hooks": {"x": "sh -c evil"}}\n']
+    assert state.status == "stopped_gate", state.status
+    assert not hook_target.exists() and not hook_target.parent.exists()
+    assert twin.read_text() == "twin\n"
