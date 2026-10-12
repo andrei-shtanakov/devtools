@@ -109,6 +109,7 @@ def test_without_nofollow_any_every_call_refuses(
         lambda: safe_io.read_regular(tmp_path, "f", limit=10),
         lambda: safe_io.list_tree(tmp_path, "."),
         lambda: safe_io.ensure_dirs(tmp_path, "a"),
+        lambda: safe_io.create_dir(tmp_path, "a"),
         lambda: safe_io.publish(tmp_path, "a/f", b"x"),
     ):
         with pytest.raises(safe_io.SafeIOError, match="только macOS"):

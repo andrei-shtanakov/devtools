@@ -76,19 +76,19 @@ class CallDir:
 
 
 def calls_root(environ: Mapping[str, str] | None = None) -> Path:
-    """Канонический корень `<calls>`, при необходимости созданный (§11).
+    """Канонический путь корня `<calls>` (§11); ничего не создаёт.
 
     `$XDG_STATE_HOME/devtools/agent-calls`, без переменной —
     `~/.local/state/devtools/agent-calls`. Относительный `XDG_STATE_HOME` —
-    отказ: его разрешение зависело бы от cwd раннера.
+    отказ: его разрешение зависело бы от cwd раннера. Корень создаёт
+    `create_call_dir` — после проверки непересечения, чтобы отказ не оставлял
+    каталогов в цели.
     """
     env = os.environ if environ is None else environ
     xdg = env.get("XDG_STATE_HOME") or str(Path.home() / ".local/state")
     if not os.path.isabs(xdg):
         raise SandboxError(f"XDG_STATE_HOME {xdg!r} не абсолютный")
-    root = Path(xdg) / "devtools" / "agent-calls"
-    root.mkdir(parents=True, exist_ok=True)
-    return Path(os.path.realpath(root))
+    return Path(os.path.realpath(Path(xdg) / "devtools" / "agent-calls"))
 
 
 def target_git_dirs(target_dir: Path) -> tuple[Path, Path]:
@@ -115,18 +115,36 @@ def target_git_dirs(target_dir: Path) -> tuple[Path, Path]:
     return Path(lines[0]), Path(lines[1])
 
 
+@dataclass(frozen=True)
+class ForbiddenRoots:
+    """Корни, с которыми каталог вызова не пересекается (§12 п.2).
+
+    Все пять полей обязательны: неполный набор не выразить, и проверка
+    непересечения не выключается значением аргумента.
+    """
+
+    target_dir: Path
+    gitdir: Path
+    common_dir: Path
+    devtools_root: Path
+    run_dir: Path
+
+    def named(self) -> tuple[tuple[str, Path], ...]:
+        return (
+            ("target_dir", self.target_dir),
+            ("gitdir", self.gitdir),
+            ("common dir", self.common_dir),
+            ("чекаут devtools", self.devtools_root),
+            ("run_dir", self.run_dir),
+        )
+
+
 def forbidden_roots(
     target_dir: Path, *, run_dir: Path, devtools_root: Path
-) -> dict[str, Path]:
-    """Корни, с которыми каталог вызова не пересекается (§12 п.2)."""
+) -> ForbiddenRoots:
+    """Набор §12 п.2 для цели: gitdir и common dir — из `git rev-parse`."""
     git_dir, common_dir = target_git_dirs(target_dir)
-    return {
-        "target_dir": target_dir,
-        "gitdir": git_dir,
-        "common dir": common_dir,
-        "чекаут devtools": devtools_root,
-        "run_dir": run_dir,
-    }
+    return ForbiddenRoots(target_dir, git_dir, common_dir, devtools_root, run_dir)
 
 
 def _check_id(kind: str, value: str) -> str:
@@ -139,14 +157,15 @@ def create_call_dir(
     calls: Path,
     run_id: str,
     *,
-    forbidden: Mapping[str, Path],
+    forbidden: ForbiddenRoots,
     call_id: str | None = None,
 ) -> CallDir:
     """Создать свежий `<calls>/<run_id>/<call>` с подкаталогами (§12 п.1–2).
 
-    `calls` — канонический корень (`calls_root`). Пересечение будущего
+    `calls` — канонический путь корня (`calls_root`). Пересечение будущего
     каталога вызова с любым из `forbidden` (ни предок, ни потомок; по
-    `realpath`) — отказ ДО создания; существующий `<call>` — отказ.
+    `realpath`) — отказ ДО создания чего-либо, в том числе самого корня;
+    существующий `<call>` — отказ.
     """
     root = str(calls)
     if not os.path.isabs(root) or os.path.realpath(root) != root:
@@ -154,16 +173,19 @@ def create_call_dir(
     run = _check_id("run_id", run_id)
     call = _check_id("call", call_id or uuid.uuid4().hex)
     path = PurePosixPath(root, run, call)
-    for name, other in forbidden.items():
+    for name, other in forbidden.named():
         real = PurePosixPath(os.path.realpath(other))
         if safe_io.paths_overlap(path, real):
             raise SandboxError(f"каталог вызова {path} пересекается с {name} {real}")
     try:
+        os.makedirs(root, exist_ok=True)
+        if os.path.realpath(root) != root:
+            raise SandboxError(f"корень вызовов {root!r} подменён ссылкой")
         safe_io.ensure_dirs(calls, run)
         safe_io.create_dir(calls, f"{run}/{call}")
         for sub in CALL_SUBDIRS:
             safe_io.create_dir(calls, f"{run}/{call}/{sub}")
-    except safe_io.SafeIOError as exc:
+    except (OSError, safe_io.SafeIOError) as exc:
         raise SandboxError(f"каталог вызова {path}: {exc}") from exc
     return CallDir(Path(path))
 
@@ -180,6 +202,9 @@ def _sbpl_path(path: Path) -> str:
     канонизации: такой путь не выражается одной строкой профиля.
     """
     raw = str(path)
+    if not os.path.isabs(raw):
+        # относительный достроился бы cwd раннера — у агента это target_dir
+        raise SandboxError(f"путь {raw!r} не абсолютный")
     _refuse_control(raw)
     real = os.path.realpath(raw)
     _refuse_control(real)  # цель ссылки тоже
@@ -202,5 +227,13 @@ def render_profile(call: CallDir, *, home: Path) -> str:
 
 
 def profile_template_sha256() -> str:
-    """sha256 шаблона профиля без подстановок — для записи допуска (§14)."""
-    return hashlib.sha256(PROFILE_TEMPLATE.encode()).hexdigest()
+    """sha256 шаблона профиля без подстановок — для записи допуска (§14).
+
+    В хэш входят и константы, которые генератор подставляет в шаблон
+    (`CALL_SUBDIRS`, `SECRET_DIRS`): ослабление запрета чтения учёток —
+    тоже дрейф профиля и обязано снимать допуск.
+    """
+    material = "\n".join(
+        (PROFILE_TEMPLATE, "\0".join(CALL_SUBDIRS), "\0".join(SECRET_DIRS))
+    )
+    return hashlib.sha256(material.encode()).hexdigest()

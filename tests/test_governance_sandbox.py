@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from governance import sandbox
-from governance.sandbox import CallDir, SandboxError
+from governance.sandbox import CallDir, ForbiddenRoots, SandboxError
 
 DEVTOOLS_ROOT = Path(__file__).resolve().parents[1]
 
@@ -54,6 +54,19 @@ def _repo(path: Path) -> Path:
         "init",
     )
     return path
+
+
+def _far(base: Path, **override: Path) -> ForbiddenRoots:
+    """Полный набор §12 п.2, заведомо вне `base/calls`; поля — переопределяемы."""
+    far = base / "far"
+    fields = {
+        "target_dir": far / "target",
+        "gitdir": far / "target" / ".git",
+        "common_dir": far / "target" / ".git",
+        "devtools_root": far / "devtools",
+        "run_dir": far / "run",
+    }
+    return ForbiddenRoots(**{**fields, **override})
 
 
 def _allow_write_terms(profile: str) -> list[tuple[str, str]]:
@@ -166,6 +179,16 @@ def test_profile_escapes_quote_and_backslash_in_path() -> None:
     assert '(subpath "/Users/o \\"p\\"/.ssh")' in profile
 
 
+@pytest.mark.parametrize(
+    ("call", "home"),
+    [("calls/run-1/c1", "/Users/op"), ("/x/calls/run-1/c1", "Users/op")],
+)
+def test_profile_refuses_relative_paths(call: str, home: str) -> None:
+    # относительный путь достроился бы cwd раннера (= target_dir агента)
+    with pytest.raises(SandboxError, match="не абсолютный"):
+        sandbox.render_profile(_call(call), home=Path(home))
+
+
 @pytest.mark.parametrize("bad", ["/x/a\nb", "/x/a\x00b", "/x/a\x7fb"])
 def test_profile_refuses_control_characters(bad: str) -> None:
     with pytest.raises(SandboxError, match="управляющим"):
@@ -191,11 +214,29 @@ def test_profile_uses_realpath_of_secret_dirs(base: Path) -> None:
     assert f'(subpath "{home}/.config/gh")' not in profile
 
 
-def test_profile_template_sha256_is_hash_of_unsubstituted_template() -> None:
-    expected = hashlib.sha256(sandbox.PROFILE_TEMPLATE.encode()).hexdigest()
-    assert sandbox.profile_template_sha256() == expected
+def test_profile_template_sha256_is_stable_and_not_of_rendered() -> None:
+    digest = sandbox.profile_template_sha256()
+    assert re.fullmatch(r"[0-9a-f]{64}", digest)
+    assert sandbox.profile_template_sha256() == digest
     rendered = sandbox.render_profile(_call(), home=Path("/Users/op"))
-    assert hashlib.sha256(rendered.encode()).hexdigest() != expected
+    assert hashlib.sha256(rendered.encode()).hexdigest() != digest
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("PROFILE_TEMPLATE", sandbox.PROFILE_TEMPLATE.replace("(deny file-ioctl", "(")),
+        ("SECRET_DIRS", (".ssh",)),
+        ("CALL_SUBDIRS", ("stage", "tmp", "claude-config", "extra")),
+    ],
+)
+def test_profile_template_sha256_tracks_profile_drift(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: object
+) -> None:
+    # ослабление любой части профиля снимает допуск (§14)
+    before = sandbox.profile_template_sha256()
+    monkeypatch.setattr(sandbox, name, value)
+    assert sandbox.profile_template_sha256() != before
 
 
 def test_profile_template_has_only_named_placeholders() -> None:
@@ -209,7 +250,7 @@ def test_profile_template_has_only_named_placeholders() -> None:
 def test_calls_root_from_xdg_state_home(base: Path) -> None:
     root = sandbox.calls_root({"XDG_STATE_HOME": str(base / "state")})
     assert root == base / "state" / "devtools" / "agent-calls"
-    assert root.is_dir()
+    assert not (base / "state").exists()  # корень создаёт create_call_dir
 
 
 def test_calls_root_default_under_home(
@@ -252,7 +293,7 @@ def test_target_git_dirs_refuses_non_repo(base: Path) -> None:
 def test_create_call_dir_makes_fresh_empty_subdirs(base: Path) -> None:
     calls = base / "calls"
     calls.mkdir()
-    call = sandbox.create_call_dir(calls, "run-1", forbidden={})
+    call = sandbox.create_call_dir(calls, "run-1", forbidden=_far(base))
     assert call.root.parent == calls / "run-1"
     assert sorted(p.name for p in call.root.iterdir()) == sorted(sandbox.CALL_SUBDIRS)
     for sub in (call.stage, call.tmp, call.claude_config):
@@ -263,20 +304,25 @@ def test_create_call_dir_makes_fresh_empty_subdirs(base: Path) -> None:
 def test_create_call_dir_ids_are_unique(base: Path) -> None:
     calls = base / "calls"
     calls.mkdir()
-    a = sandbox.create_call_dir(calls, "run-1", forbidden={})
-    b = sandbox.create_call_dir(calls, "run-1", forbidden={})
+    a = sandbox.create_call_dir(calls, "run-1", forbidden=_far(base))
+    b = sandbox.create_call_dir(calls, "run-1", forbidden=_far(base))
     assert a.root != b.root
 
 
 @darwin_only
-def test_create_call_dir_refuses_existing_call(base: Path) -> None:
-    # Z6: существующий <call> — отказ, его содержимое не трогается
+@pytest.mark.parametrize("planted", [False, True])
+def test_create_call_dir_refuses_existing_call(base: Path, planted: bool) -> None:
+    # Z6: существующий <call> — отказ на нём самом (и пустом), содержимое цело
     calls = base / "calls"
-    (calls / "run-1" / "c1" / "stage").mkdir(parents=True)
-    (calls / "run-1" / "c1" / "stage" / "planted").write_text("x")
-    with pytest.raises(SandboxError, match="уже существует"):
-        sandbox.create_call_dir(calls, "run-1", forbidden={}, call_id="c1")
-    assert (calls / "run-1" / "c1" / "stage" / "planted").read_text() == "x"
+    (calls / "run-1" / "c1").mkdir(parents=True)
+    if planted:
+        (calls / "run-1" / "c1" / "stage").mkdir()
+        (calls / "run-1" / "c1" / "stage" / "planted").write_text("x")
+    with pytest.raises(SandboxError, match="'run-1/c1': уже существует"):
+        sandbox.create_call_dir(calls, "run-1", forbidden=_far(base), call_id="c1")
+    assert sorted(os.listdir(calls / "run-1" / "c1")) == (["stage"] if planted else [])
+    if planted:
+        assert (calls / "run-1" / "c1" / "stage" / "planted").read_text() == "x"
 
 
 @darwin_only
@@ -286,7 +332,7 @@ def test_create_call_dir_refuses_symlinked_run_dir(base: Path) -> None:
     (base / "elsewhere").mkdir()
     (calls / "run-1").symlink_to(base / "elsewhere")
     with pytest.raises(SandboxError, match="ссылка в пути"):
-        sandbox.create_call_dir(calls, "run-1", forbidden={})
+        sandbox.create_call_dir(calls, "run-1", forbidden=_far(base))
     assert not any((base / "elsewhere").iterdir())
 
 
@@ -295,15 +341,17 @@ def test_create_call_dir_refuses_non_canonical_calls(base: Path) -> None:
     (base / "real").mkdir()
     (base / "alias").symlink_to(base / "real")
     with pytest.raises(SandboxError, match="не канонический"):
-        sandbox.create_call_dir(base / "alias", "run-1", forbidden={})
+        sandbox.create_call_dir(base / "alias", "run-1", forbidden=_far(base))
 
 
 @pytest.mark.parametrize("bad", ["", ".", "..", "a/b", ".hidden", "a b"])
 def test_create_call_dir_refuses_bad_ids(base: Path, bad: str) -> None:
     with pytest.raises(SandboxError):
-        sandbox.create_call_dir(base, bad, forbidden={})
+        sandbox.create_call_dir(base, bad, forbidden=_far(base))
     with pytest.raises(SandboxError):
-        sandbox.create_call_dir(base, "run-1", forbidden={}, call_id=bad or "..")
+        sandbox.create_call_dir(
+            base, "run-1", forbidden=_far(base), call_id=bad or ".."
+        )
     assert not any(base.iterdir())
 
 
@@ -327,7 +375,7 @@ def test_create_call_dir_refuses_overlap_before_creating(
     }[where]
     with pytest.raises(SandboxError, match="пересекается с run_dir"):
         sandbox.create_call_dir(
-            calls, "run-1", forbidden={"run_dir": other}, call_id="c1"
+            calls, "run-1", forbidden=_far(base, run_dir=other), call_id="c1"
         )
     assert not any(calls.iterdir())
 
@@ -340,7 +388,7 @@ def test_create_call_dir_overlap_through_symlinked_forbidden(base: Path) -> None
     (base / "alias").symlink_to(calls)
     with pytest.raises(SandboxError, match="пересекается с target_dir"):
         sandbox.create_call_dir(
-            calls, "run-1", forbidden={"target_dir": base / "alias"}
+            calls, "run-1", forbidden=_far(base, target_dir=base / "alias")
         )
 
 
@@ -351,7 +399,7 @@ def test_create_call_dir_disjoint_siblings_pass(base: Path) -> None:
     call = sandbox.create_call_dir(
         calls,
         "run-1",
-        forbidden={"target_dir": base / "calls-target", "run_dir": base / "run"},
+        forbidden=_far(base, target_dir=base / "calls-target", run_dir=base / "run"),
     )
     assert call.stage.is_dir()
 
@@ -365,13 +413,8 @@ def test_create_call_dir_for_devtools_itself_as_target(base: Path) -> None:
         run_dir=DEVTOOLS_ROOT / "out" / "governance-runs" / "run-1",
         devtools_root=DEVTOOLS_ROOT,
     )
-    assert set(forbidden) == {
-        "target_dir",
-        "gitdir",
-        "common dir",
-        "чекаут devtools",
-        "run_dir",
-    }
+    assert forbidden.target_dir == DEVTOOLS_ROOT
+    assert forbidden.common_dir == DEVTOOLS_ROOT / ".git"
     call = sandbox.create_call_dir(calls, "run-1", forbidden=forbidden)
     assert call.stage.is_dir()
 
@@ -386,7 +429,8 @@ def test_create_call_dir_refuses_calls_root_inside_target(base: Path) -> None:
     )
     with pytest.raises(SandboxError, match="пересекается с target_dir"):
         sandbox.create_call_dir(calls, "run-1", forbidden=forbidden)
-    assert not any(calls.iterdir())
+    # отказ не оставляет в цели ни одного каталога, даже корня вызовов
+    assert not (target / "state").exists()
 
 
 @darwin_only
