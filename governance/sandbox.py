@@ -391,6 +391,10 @@ def admission_check(
 
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 PROBE_TIMEOUT = 60.0
+#: Потолок каждого подпроцесса внутри пробы; сумма всех внутренних
+#: потолков меньше `PROBE_TIMEOUT` — сработавшим оказывается названный
+#: пункт, а не безымянный внешний таймаут.
+PROBE_STEP_TIMEOUT = 5.0
 #: Apple Events под профилем не отвечают (F21) — ждём столько и пишем
 #: «нет ответа», а не «доставка закрыта» (§17 п.7).
 APPLE_EVENTS_TIMEOUT = 3.0
@@ -402,6 +406,12 @@ KEYCHAIN_PROBES = (
     ("-s", "Claude Code-credentials"),
 )
 BAIT = Path(".config/ai-prosto/.sandbox-bait")
+#: Канарейка связки: элемент, который раннер кладёт вне песочницы перед
+#: пробой и снимает после. Ненулевой `security` по именам §4 п.3 не отличает
+#: «запрещено» от «нет элемента»; канарейка есть всегда — без обёртки её
+#: находят (код 0), под профилем — нет.
+KEYCHAIN_CANARY = "devtools-sandbox-probe"
+_LSAPPINFO = "/usr/bin/lsappinfo"
 #: Засчитанный отказ файловой операции — только запрет профиля (§15).
 _DENIED = "EPERM"
 #: `/dev/tty`: новая сессия даёт ENXIO, запрет профиля — EPERM (F28).
@@ -441,7 +451,7 @@ def write(path, flags=os.O_APPEND):
         os.close(fd)
 
 
-def run(name, argv, timeout=10):
+def run(name, argv, timeout=cfg["step_timeout"]):
     try:
         proc = subprocess.run(
             argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout
@@ -480,6 +490,10 @@ attempt("allow:tmp", lambda: create(tmp + "/.probe"))
 
 for i, args in enumerate(cfg["keychain"]):
     run(f"keychain:{i}", ["/usr/bin/security", "find-generic-password", *args])
+run(
+    "keychain:canary",
+    ["/usr/bin/security", "find-generic-password", "-s", cfg["keychain_canary"]],
+)
 eff = cfg["effects"]
 run("launchd:submit", ["/bin/launchctl", "submit", "-l", cfg["label_submit"], "--",
     "/bin/sh", "-c", "echo x > " + eff + "/submit"])
@@ -511,7 +525,9 @@ app = tmp + "/Probe.app/Contents"
 def build_app():
     os.makedirs(app + "/MacOS")
     put(app + "/Info.plist", cfg["app_plist"])
-    put(app + "/MacOS/probe", "#!/bin/sh\necho x > " + eff + "/open\n", 0o755)
+    # живёт 3 с после эффекта: к оценке (проба ждёт Apple Events) раннер
+    # видит запущенный .app в lsappinfo — основной признак §15
+    put(app + "/MacOS/probe", "#!/bin/sh\necho x > " + eff + "/open\nsleep 3\n", 0o755)
 
 
 if prepared("launchservices:open", build_app):
@@ -694,6 +710,7 @@ PROBE_ITEMS = frozenset(
         "allow:stage",
         "allow:tmp",
         *(f"keychain:{i}" for i in range(len(KEYCHAIN_PROBES))),
+        "keychain:canary",
         "launchd:submit",
         "launchd:bootstrap",
         "cron:exec",
@@ -757,6 +774,27 @@ def _env_mismatch(code: int | None, raw: bytes, env: Mapping[str, str]) -> str |
     return f"env: лишние {extra}, недостающие {missing}"
 
 
+def _app_running(bundle_id: str) -> bool:
+    """Пробный `.app` запущен LaunchServices — то есть вне песочницы (F21)."""
+    proc = subprocess.run(
+        [_LSAPPINFO, "find", f"bundleID={bundle_id}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return bool(proc.stdout.strip())
+
+
+def _keychain(*args: str) -> int:
+    proc = subprocess.run(
+        ["/usr/bin/security", *args],
+        capture_output=True,
+        check=False,
+        timeout=PROBE_STEP_TIMEOUT,
+    )
+    return proc.returncode
+
+
 def _label_alive(label: str) -> bool:
     proc = subprocess.run(
         ["/bin/launchctl", "list", label], capture_output=True, check=False
@@ -765,8 +803,19 @@ def _label_alive(label: str) -> bool:
 
 
 def _cleanup(
-    call: CallDir, sentinels: Mapping[str, str], labels: Sequence[str], bait: Path
+    call: CallDir,
+    sentinels: Mapping[str, str],
+    labels: Sequence[str],
+    bait: Path,
+    canary: str,
 ) -> None:
+    # гигиена: процессы, запущенные из каталога вызова вне песочницы (.app
+    # при сорванной пробе стартует с задержкой ~2 с — что успели)
+    subprocess.run(["/usr/bin/pkill", "-9", "-f", str(call.root)], check=False)
+    try:
+        _keychain("delete-generic-password", "-s", canary)
+    except subprocess.TimeoutExpired:
+        pass
     for path in sentinels.values():
         try:
             os.unlink(path)
@@ -825,8 +874,15 @@ def run_probe(
         f"dev.devtools.sandbox-probe.{uuid.uuid4().hex}",
     )
     bait = targets.home / BAIT
+    canary = f"{KEYCHAIN_CANARY}-{uuid.uuid4().hex}"
+    app_id = labels[0] + ".app"
     sentinels: dict[str, str] = {}
     try:
+        secret = uuid.uuid4().hex
+        if _keychain("add-generic-password", "-s", canary, "-a", "probe", "-w", secret):
+            return ProbeResult(
+                ("keychain:canary: элемент не создан — сбой подготовки",), ()
+            )
         stand = _build_stand(call.root / "stand")
         sentinels = _sentinels(targets, stand)
         effects = call.root / "effects"
@@ -846,10 +902,12 @@ def run_probe(
             "tmp": str(call.tmp),
             "bait": str(bait),
             "keychain": [list(a) for a in KEYCHAIN_PROBES],
+            "keychain_canary": canary,
+            "step_timeout": PROBE_STEP_TIMEOUT,
             "effects": str(effects),
             "label_submit": labels[0],
             "plist": _PLIST.format(label=labels[1], effect=effects / "bootstrap"),
-            "app_plist": _APP_PLIST.format(bundle_id=labels[0] + ".app"),
+            "app_plist": _APP_PLIST.format(bundle_id=app_id),
             "ae_timeout": APPLE_EVENTS_TIMEOUT,
         }
         safe_io.publish(call.root, "probe.json", json.dumps(cfg).encode())
@@ -877,6 +935,8 @@ def run_probe(
         time.sleep(0.5)  # эффект запущенного вне песочницы — доп. условие
         seen = sorted(os.listdir(effects))
         seen += [f"launchctl {label}" for label in labels if _label_alive(label)]
+        if _app_running(app_id):
+            seen.append(f"lsappinfo {app_id}")
         outside_changed = [
             n
             for n in ("outside.txt", "outside-mv.txt")
@@ -892,4 +952,4 @@ def run_probe(
             )
         return result
     finally:
-        _cleanup(call, sentinels, labels, bait)
+        _cleanup(call, sentinels, labels, bait, canary)

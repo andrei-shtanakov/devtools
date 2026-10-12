@@ -724,6 +724,7 @@ def _all_denied() -> dict[str, str]:
     out = {name: "EPERM" for name in sandbox.PROBE_ITEMS}
     out.update({"allow:stage": "ok", "allow:tmp": "ok", "tty:open": "ENXIO"})
     out.update({f"keychain:{i}": "rc=44" for i in range(4)})
+    out["keychain:canary"] = "rc=44"
     out.update(
         {
             "launchd:submit": "rc=1",
@@ -758,6 +759,7 @@ def test_evaluate_all_denied_is_ok_with_apple_events_note() -> None:
         ("cron:exec", "rc=1", "cron:exec: rc=1 — не действует"),
         ("cron:exec", "rc=0", "cron:exec: rc=0 — не действует"),
         ("keychain:2", "rc=0", "keychain:2: rc=0 — не действует"),
+        ("keychain:canary", "rc=0", "keychain:canary: rc=0 — не действует"),
         ("launchd:submit", "timeout", "launchd:submit: timeout — не действует"),
         (
             "launchd:bootstrap",
@@ -804,3 +806,12 @@ def test_env_mismatch_is_exact_set_equality() -> None:
     assert sandbox._env_mismatch(None, b"", env) == (
         "env: проба окружения не прошла (код None)"
     )
+
+
+def test_probe_inner_timeouts_fit_outer_budget() -> None:
+    # сумма внутренних потолков меньше внешнего: отказ называется пунктом
+    calls = len(re.findall(r"(?<![\w.])run\(", sandbox.PROBE_SCRIPT)) - 1  # def
+    steps = calls + len(sandbox.KEYCHAIN_PROBES) - 1  # цикл связки — один вызов
+    assert steps == 10
+    inner = (steps - 1) * sandbox.PROBE_STEP_TIMEOUT + sandbox.APPLE_EVENTS_TIMEOUT
+    assert inner + 10 < sandbox.PROBE_TIMEOUT

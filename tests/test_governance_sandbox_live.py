@@ -159,8 +159,36 @@ def _sentinels_under(*dirs: Path) -> list[Path]:
     ]
 
 
+def _canaries() -> int:
+    out = subprocess.run(
+        ["/usr/bin/security", "dump-keychain"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout
+    return out.count(sandbox.KEYCHAIN_CANARY + "-")
+
+
+def _call_processes(call: CallDir, wait: float = 6.0) -> str:
+    """Процессы, чья командная строка содержит каталог вызова: пробный
+    `.app` сорванной пробы (стартует с задержкой, живёт 3 с) — не дольше."""
+    deadline = time.monotonic() + wait
+    while True:
+        out = subprocess.run(
+            ["/usr/bin/pgrep", "-fl", str(call.root)],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+        if not out or time.monotonic() > deadline:
+            return out
+        time.sleep(0.1)
+
+
 def _assert_no_traces(bench: Bench) -> None:
     call = bench.call
+    assert _canaries() == 0
+    assert _call_processes(call) == ""
     assert sorted(os.listdir(call.root)) == [
         "claude-config",
         "profile.sb",
@@ -254,12 +282,15 @@ def test_probe_without_wrapper_is_red_on_every_denial(
         "launchd:bootstrap",
         "cron:exec",  # снаружи crontab исполняется (код 0 или 1 — не EPERM)
         "launchservices:open",
+        "keychain:canary",  # канарейка находится без обёртки — связка открыта
         "apple-events",
         "внешний файл изменён",
     ):
         assert item in names, (item, result.failures)
     effects = [f for f in result.failures if f.startswith("эффект вне песочницы")]
     assert any(f.endswith(": submit") for f in effects), effects
+    # основной признак F21: .app запущен LaunchServices (lsappinfo), не файл
+    assert any(f.startswith("эффект вне песочницы: lsappinfo ") for f in effects)
     # уборка — и после удавшихся «побегов»
     _assert_no_traces(bench)
 
