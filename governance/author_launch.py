@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import select
@@ -546,11 +547,12 @@ def _run_agent(
 
 def _save_transcript(
     run_dir: Path, filename: str, run: AgentRun, started: str
-) -> str | None:
+) -> tuple[str, str | None]:
     """Транскрипт попытки — в НОВЫЙ каталог `run_dir/author-transcripts/<id>/`
-    (существующее имя — отказ, прежние попытки не перезаписываются);
-    None — записан, строка — причина отказа. В evidence не публикуется:
-    в выводе инструментов могут быть прочитанные секреты."""
+    (существующее имя — отказ, прежние попытки не перезаписываются).
+    Возвращает (путь каталога относительно `run_dir`, причина отказа или
+    None). В evidence не публикуется: в выводе инструментов могут быть
+    прочитанные секреты."""
     stem = filename.rsplit(".", 1)[0]
     rel = f"{TRANSCRIPTS}/{started.replace(':', '')}-{stem}-{uuid.uuid4().hex[:8]}"
     meta = {
@@ -570,8 +572,8 @@ def _save_transcript(
             run_dir, f"{rel}/meta.json", (json.dumps(meta, indent=2) + "\n").encode()
         )
     except (safe_io.SafeIOError, OSError) as exc:
-        return f"транскрипт вызова не записан ({rel}): {exc}"
-    return None
+        return rel, f"транскрипт вызова не записан ({rel}): {exc}"
+    return rel, None
 
 
 def _transfer(call: sandbox.CallDir, ready: _Ready, filename: str) -> LaunchOutcome:
@@ -685,12 +687,18 @@ def _launch_in(
         cwd=ready.target,
         timeout=AUTHOR_TIMEOUT if timeout is None else timeout,
     )
-    unsaved = _save_transcript(ready.run_dir, call.filename, run, started)
+    rel, unsaved = _save_transcript(ready.run_dir, call.filename, run, started)
     if unsaved is not None:
         return _refuse(unsaved + " — перенос не делается")
-    code = run.code
-    if code is None:
-        return _refuse("таймаут авторского вызова — перенос не делается")
-    if code != 0:
-        return LaunchOutcome(code, f"агент вернул {code} — перенос не делается")
-    return _transfer(cdir, ready, call.filename)
+    print(f"транскрипт вызова: {ready.run_dir / rel}", file=sys.stderr)
+    if run.code is None:
+        outcome = _refuse("таймаут авторского вызова — перенос не делается")
+    elif run.code != 0:
+        outcome = LaunchOutcome(
+            run.code, f"агент вернул {run.code} — перенос не делается"
+        )
+    else:
+        outcome = _transfer(cdir, ready, call.filename)
+    if outcome.ok:
+        return outcome
+    return dataclasses.replace(outcome, reason=f"{outcome.reason}; транскрипт: {rel}")

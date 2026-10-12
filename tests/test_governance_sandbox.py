@@ -24,6 +24,7 @@ from types import SimpleNamespace
 import pytest
 
 from governance import author_launch, sandbox
+from governance.author_launch import TRANSCRIPTS
 from governance.sandbox import CallDir, ForbiddenRoots, SandboxError
 
 DEVTOOLS_ROOT = Path(__file__).resolve().parents[1]
@@ -1075,6 +1076,8 @@ def test_launch_failed_call_does_not_transfer(launch, monkeypatch, code, files, 
     _agent_writes(launch, monkeypatch, files, code=code)  # type: ignore[arg-type]
     outcome = _launch(launch)
     assert not outcome.ok and text in outcome.reason
+    (attempt,) = _transcripts(launch.run_dir)
+    assert outcome.reason.endswith(f"; транскрипт: {TRANSCRIPTS}/{attempt.name}")
     assert not (launch.target / "ws/spec/10-requirements.md").exists()
 
 
