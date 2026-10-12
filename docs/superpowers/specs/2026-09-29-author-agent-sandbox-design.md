@@ -400,7 +400,7 @@ edge-check, коммит, ревью и мерж делает раннер вн�
    DSL `ops.py:712–740`); `output_path` — **абсолютный** путь
    `<call>/stage/<file>`, единственное место записи. Родительские каталоги
    внутри заготовки агент создаёт сам (F24, F26).
-2. `tmp/` — `TMPDIR` и `CLAUDE_CODE_TMPDIR` (F22).
+2. `tmp/` — `TMPDIR` и `CLAUDE_CODE_TMPDIR` (F22); `TMPPREFIX` = `tmp/zsh` — zsh пишет временные файлы heredoc по нему, а не по `TMPDIR` (живая приёмка TASK-007: без него heredoc в Bash — EPERM).
 3. `claude-config/` — `CLAUDE_CONFIG_DIR` (§9).
 4. Устройства: `/dev/null`, `/dev/fd/*`. Терминалы — нет: агент запускается
    без управляющего терминала (§12, F28).

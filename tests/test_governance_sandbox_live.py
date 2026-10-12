@@ -690,6 +690,21 @@ def test_launch_n1_upstream_hashes_from_the_real_bundle(live: Live) -> None:
     assert published == f'upstream_hashes: {{charter: "{expected}"}}\n'
 
 
+def test_launch_zsh_heredoc_works_under_profile(live: Live) -> None:
+    """Bash-инструмент claude исполняет команды оболочкой `SHELL` (у оператора
+    zsh): heredoc пишет временный файл по `TMPPREFIX` — он обязан лежать в
+    `<call>/tmp`, иначе под профилем EPERM (стенд TASK-007)."""
+    from governance.ops import RealOps
+
+    live.agent("/bin/zsh -c 'cat <<EOF\nheredoc-ok\nEOF' > \"$out\" 2>&1\n")
+    outcome = RealOps().author(
+        live.call("ws/spec", "10-requirements.md"), "requirements", "s"
+    )
+    assert outcome.ok, outcome
+    published = (live.target / "ws/spec/10-requirements.md").read_text()
+    assert published == "heredoc-ok\n"
+
+
 def test_launch_transcript_is_written_by_runner_not_agent(live: Live) -> None:
     """Транскрипт — stdout агента, записанный раннером в `run_dir`; сам агент
     в каталог транскриптов писать не может (запретный корень §12 п.2)."""

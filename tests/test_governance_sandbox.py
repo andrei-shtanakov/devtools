@@ -1011,6 +1011,7 @@ def test_launch_probe_and_agent_share_profile_env_and_call_dir(launch):
     assert argv[-1] == f"prompt {root / 'stage' / '10-requirements.md'}"
     assert cwd == launch.target
     assert agent_env["TMPDIR"] == agent_env["CLAUDE_CODE_TMPDIR"] == str(root / "tmp")
+    assert agent_env["TMPPREFIX"] == str(root / "tmp" / "zsh")
     assert agent_env["CLAUDE_CONFIG_DIR"] == str(root / "claude-config")
     assert agent_env["CLAUDE_CODE_OAUTH_TOKEN"] == "tok"
     assert agent_env["SSL_CERT_FILE"] == "/etc/ssl/cert.pem"
@@ -1170,6 +1171,7 @@ def test_call_env_overrides_tmp_config_token_and_ca(monkeypatch):
         **{k: v for k, v in _OPERATOR_ENV.items() if k in _AGENT_SUBSET},
         "TMPDIR": "/calls/r/c/tmp",
         "CLAUDE_CODE_TMPDIR": "/calls/r/c/tmp",
+        "TMPPREFIX": "/calls/r/c/tmp/zsh",
         "CLAUDE_CONFIG_DIR": "/calls/r/c/claude-config",
         "CLAUDE_CODE_OAUTH_TOKEN": "tok-from-keychain",
         "SSL_CERT_FILE": "/etc/ssl/cert.pem",
