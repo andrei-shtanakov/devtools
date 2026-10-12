@@ -477,11 +477,16 @@ def test_author_sandbox_admission_records_are_valid_and_evidenced() -> None:
         with pytest.raises(sandbox.SandboxError, match="не проверен"):
             sandbox.load_admitted(contract)
         return
+    passed = "**Итог: ПРОШЛО — запись допуска предложена.**"
     for record in sandbox.load_admitted(contract):
         assert record.harness == "claude", "v1 допускает только claude (§13 Q1)"
+        # дрейф шаблона профиля снимает допуск: нужен новый `make sandbox-admit`
+        assert record.profile_sha256 == sandbox.profile_template_sha256()
         assert record.evidence.startswith("docs/evidence/"), record.evidence
-        evidence = (root / record.evidence).read_text("utf-8")
-        assert record.sha256 in evidence and "ПРОШЛО" in evidence, record.evidence
+        lines = (root / record.evidence).read_text("utf-8").splitlines()
+        # точная строка итога: подстрока «ПРОШЛО» есть и в «НЕ ПРОШЛО»
+        assert passed in lines, record.evidence
+        assert f"- sha256: `{record.sha256}`" in lines, record.evidence
 
 
 def test_author_sandbox_spawn_sites_name_existing_functions() -> None:
