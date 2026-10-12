@@ -196,6 +196,10 @@ def call_env(call: sandbox.CallDir, token: str) -> dict[str, str]:
         **agent_env(),
         "TMPDIR": str(call.tmp),
         "CLAUDE_CODE_TMPDIR": str(call.tmp),
+        # zsh (SHELL оператора) пишет временные файлы heredoc по TMPPREFIX,
+        # а не по TMPDIR; умолчание /tmp/zsh под профилем — EPERM (TASK-007,
+        # стенд N1: «can't create temp file for here document»)
+        "TMPPREFIX": f"{call.tmp}/zsh",
         "CLAUDE_CONFIG_DIR": str(call.claude_config),
         "CLAUDE_CODE_OAUTH_TOKEN": token,
         # операторский CA (корпоративный прокси) сильнее; системный набор —
