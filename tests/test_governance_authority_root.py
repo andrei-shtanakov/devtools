@@ -487,6 +487,8 @@ def test_author_sandbox_admission_records_are_valid_and_evidenced() -> None:
         # точная строка итога: подстрока «ПРОШЛО» есть и в «НЕ ПРОШЛО»
         assert passed in lines, record.evidence
         assert f"- sha256: `{record.sha256}`" in lines, record.evidence
+        profile = f"- шаблон профиля sha256: `{record.profile_sha256}`"
+        assert profile in lines, record.evidence  # протокол того же профиля
 
 
 def test_author_sandbox_spawn_sites_name_existing_functions() -> None:
