@@ -507,8 +507,9 @@ cron — отказ (F20); LaunchServices (`open`) — закрыт префик
 проверено — §17.
 
 **Окружение** — allowlist rev 2 (§3, `agent_env()`) плюс `TMPDIR`,
-`CLAUDE_CODE_TMPDIR`, `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_OAUTH_TOKEN` (из элемента
-связки, §3), `SSL_CERT_FILE`.
+`CLAUDE_CODE_TMPDIR`, `TMPPREFIX` (= `tmp/zsh`: zsh пишет временные файлы heredoc
+по нему, а не по `TMPDIR`, §11 п.2), `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_OAUTH_TOKEN`
+(из элемента связки, §3), `SSL_CERT_FILE`.
 
 **Таймаут вызова обязателен:** зависание под профилем — штатная форма отказа
 (F21, §8/S2). Истёк — `SIGKILL` группе, `stopped_author` «таймаут», переноса
