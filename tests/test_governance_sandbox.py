@@ -1371,3 +1371,141 @@ def _assert_dead(pid: int) -> None:
             return
         time.sleep(0.05)
     raise AssertionError(f"потомок {pid} пережил SIGKILL группе")
+
+
+# --- процедура допуска `make sandbox-admit` (TASK-006) ------------------------
+#
+# Фикстура — сырой stream-json claude 2.1.296 (замер 2026-10-12, haiku, без
+# песочницы), только события assistant/user; пути заменены на /CALL, /TARGET.
+# Форма — та, что разбирает процедура: is_error + «Exit code N» у Bash, у
+# удавшегося Write поля is_error нет вовсе.
+
+_STREAM = [
+    '{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_01Aq1Vzx6bCEFXfwHEgHG6MF", "name": "Bash", "input": {"command": "true", "description": "Run the true command"}}]}}',
+    '{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01Aq1Vzx6bCEFXfwHEgHG6MF", "content": "(Bash completed with no output)", "is_error": false}]}}',
+    '{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_01WCYVP2iUTWB9YiqTUzzg7T", "name": "Bash", "input": {"command": "false", "description": "Run the false command"}}]}}',
+    '{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01WCYVP2iUTWB9YiqTUzzg7T", "content": "Exit code 1", "is_error": true}]}}',
+    '{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_01XrwJ965LK7YxUaHy2W7TFH", "name": "Bash", "input": {"command": "exit 3", "description": "Run exit 3"}}]}}',
+    '{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01XrwJ965LK7YxUaHy2W7TFH", "content": "Exit code 3", "is_error": true}]}}',
+    '{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_01RjsmpGqznFhXQpLvNfBhGz", "name": "Bash", "input": {"command": "cd src", "description": "Change directory into src"}}]}}',
+    '{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01RjsmpGqznFhXQpLvNfBhGz", "content": "(Bash completed with no output)", "is_error": false}]}}',
+    '{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_01L3bgQFZeppvMDwDoHnSYUB", "name": "Bash", "input": {"command": "pwd", "description": "Print current working directory"}}]}}',
+    '{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01L3bgQFZeppvMDwDoHnSYUB", "content": "/TARGET/src", "is_error": false}]}}',
+    '{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_01784M7joZnauU3UcbEMLbWd", "name": "Write", "input": {"file_path": "/CALL/stage/a/b/node.md", "content": "admit-probe"}}]}}',
+    '{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01784M7joZnauU3UcbEMLbWd", "content": "File created successfully at: /CALL/stage/a/b/node.md (file state is current in your context — no need to Read it back)"}]}}',
+    '{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_01YakDTLCrqr7VJdmWoPctZq", "name": "Write", "input": {"file_path": "/TARGET/ws/spec/escape.md", "content": "x"}}]}}',
+    '{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01YakDTLCrqr7VJdmWoPctZq", "content": "EPERM: operation not permitted, open \'/TARGET/ws/spec/escape.md\'", "is_error": true}]}}',
+    '{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "DONE"}]}}',
+]
+_EXPECT = sandbox.admit_expectations(
+    "/CALL/stage/a/b/node.md", "/TARGET/ws/spec/escape.md", "/TARGET/src"
+)
+
+
+def test_parse_stream_json_pairs_uses_with_raw_results():
+    calls = sandbox.parse_stream_json(["not json", *_STREAM, '{"type":"result"}'])
+    assert [(c.tool, c.is_error) for c in calls] == [
+        ("Bash", False),
+        ("Bash", True),
+        ("Bash", True),
+        ("Bash", False),
+        ("Bash", False),
+        ("Write", False),
+        ("Write", True),
+    ]
+    assert calls[2].content == "Exit code 3"
+    assert calls[4].content == "/TARGET/src"
+
+
+def test_recorded_transcript_passes_the_admission_checks():
+    calls = sandbox.parse_stream_json(_STREAM)
+    assert sandbox.check_transcript(calls, _EXPECT) == []
+
+
+def _edited(index: int, **result: object) -> list[str]:
+    events = [json.loads(line) for line in _STREAM]
+    events[index]["message"]["content"][0].update(result)
+    return [json.dumps(e) for e in events]
+
+
+@pytest.mark.parametrize(
+    ("index", "change", "text"),
+    [
+        (3, {"content": "Exit code 2"}, "Bash false: вывод"),
+        (5, {"content": "ok", "is_error": False}, "Bash exit 3: is_error=False"),
+        (9, {"content": "/TARGET"}, "Bash pwd: вывод"),
+        (
+            13,
+            {"content": "File created", "is_error": False},
+            "escape.md: is_error=False",
+        ),
+        (11, {"content": "EPERM", "is_error": True}, "node.md: is_error=True"),
+    ],
+    ids=["false-code", "exit3-ok", "cd-lost", "escape-written", "stage-denied"],
+)
+def test_transcript_deviation_is_named(index, change, text):
+    failures = sandbox.check_transcript(
+        sandbox.parse_stream_json(_edited(index, **change)), _EXPECT
+    )
+    assert any(text in f for f in failures), failures
+
+
+def test_missing_result_skipped_and_extra_steps_fail():
+    # нет tool_result — исход не доказан: считается ошибкой, Write в
+    # заготовку тогда «не удался»
+    no_result = _STREAM[:11] + _STREAM[12:]
+    failures = sandbox.check_transcript(sandbox.parse_stream_json(no_result), _EXPECT)
+    assert any("node.md: is_error=True" in f for f in failures), failures
+    skipped = sandbox.parse_stream_json(_STREAM[2:])
+    assert "Bash true: шаг не исполнен" in sandbox.check_transcript(skipped, _EXPECT)
+    extra = [*_STREAM, _STREAM[0].replace("toolu_", "toolu_X")]
+    failures = sandbox.check_transcript(sandbox.parse_stream_json(extra), _EXPECT)
+    assert any(f.startswith("лишний вызов: Bash true") for f in failures), failures
+
+
+def _record(evidence: str = "e") -> sandbox.Admission:
+    return sandbox.Admission(
+        "claude", "2.1.296", Path("/opt/claude"), "a" * 64, 26, "b" * 64, evidence
+    )
+
+
+def test_admission_record_round_trips_through_the_contract_loader(base):
+    record = _record("docs/evidence/2026-10-12-author-sandbox-admit-2.1.296.md")
+    contract = base / "admitted.toml"
+    contract.write_text("schema = 1\n\n" + sandbox.admission_record(record))
+    assert sandbox.load_admitted(contract) == (record,)
+
+
+@pytest.mark.parametrize("failures", [[], ["Bash pwd: вывод '/x'"]])
+def test_admit_protocol_proposes_record_only_when_passed(failures):
+    text = sandbox.render_admit_protocol(
+        _record(),
+        date="2026-10-12",
+        probe=sandbox.ProbeResult((), ("apple-events: нет ответа",)),
+        failures=failures,
+        calls=sandbox.parse_stream_json(_STREAM),
+    )
+    assert "Exit code 3" in text and "нет ответа" in text
+    assert ("[[admitted]]" in text) is (not failures)
+    assert ("НЕ ПРОШЛО" in text) is bool(failures)
+
+
+def test_makefile_names_sandbox_admit():
+    makefile = (DEVTOOLS_ROOT / "Makefile").read_text()
+    target = "sandbox-admit: ; @uv run --frozen python -m governance.sandbox admit"
+    assert target in makefile
+    assert "make sandbox-admit" in makefile  # справка
+
+
+def test_admit_refuses_off_macos_without_writing_anything(base, monkeypatch):
+    """Процедура только для macOS; отказ — код 2, протокола нет, `contracts/`
+    процедура не пишет никогда (запись вносит оператор, шаг H2)."""
+    contract = DEVTOOLS_ROOT / "contracts/author-sandbox/v1/admitted.toml"
+    before = contract.read_bytes()
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    code = sandbox.admit(
+        harness_path=None, model="m", evidence_dir=base / "ev", date="2026-10-12"
+    )
+    assert code == 2
+    assert not (base / "ev").exists()
+    assert contract.read_bytes() == before

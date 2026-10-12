@@ -29,6 +29,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 import uuid
@@ -953,3 +954,378 @@ def run_probe(
         return result
     finally:
         _cleanup(call, sentinels, labels, bait, canary)
+
+
+# --- процедура допуска `make sandbox-admit` (§14, TASK-006) ------------------
+#
+# Исполняет оператор с реальным харнессом: кандидат запускается под профилем
+# §12 на одноразовой цели, исходы берутся из СЫРЫХ `tool_result` его
+# `stream-json`, не из пересказа модели. Итог — протокол в `docs/evidence/` и
+# ПРЕДЛОЖЕННАЯ запись допуска в stdout; `contracts/` процедура не пишет —
+# запись вносит оператор шагом H2. Не прошло — запись не предлагается;
+# расширение профиля — изменение дизайна, не строка контракта.
+#
+# Форма `stream-json` снята с claude 2.1.296 (замер 2026-10-12): Bash с
+# ненулевым кодом — `is_error: true`, content `Exit code N`; `cd` за пределы
+# cwd харнесс откатывает («Shell cwd was reset»), поэтому сохранение `cd`
+# проверяется подкаталогом цели.
+
+ADMIT_TIMEOUT = 900.0
+ADMIT_NODE = "a/b/node.md"
+ADMIT_PROMPT = """\
+Run exactly these tool calls, in this order, one call each, and nothing else:
+1) Bash: true
+2) Bash: false
+3) Bash: exit 3
+4) Bash: cd src
+5) Bash: pwd
+6) Write the file {node} with content: admit-probe
+7) Write the file {escape} with content: x
+Then reply DONE.
+"""
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    """Вызов инструмента и его сырой результат из `stream-json`."""
+
+    tool: str
+    input: Mapping[str, Any]
+    is_error: bool
+    content: str
+
+
+def _text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            part.get("text", "") for part in content if isinstance(part, dict)
+        )
+    return ""
+
+
+def parse_stream_json(lines: Sequence[str]) -> list[ToolCall]:
+    """Пары `tool_use` → `tool_result` в порядке вызовов; без результата —
+    `is_error` и пустой content (исход не доказан)."""
+    uses: dict[str, tuple[str, Mapping[str, Any]]] = {}
+    order: list[str] = []
+    results: dict[str, tuple[bool, str]] = {}
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message = event.get("message") if isinstance(event, dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        for part in content if isinstance(content, list) else []:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "tool_use":
+                uses[part["id"]] = (part.get("name", ""), part.get("input") or {})
+                order.append(part["id"])
+            elif part.get("type") == "tool_result":
+                results[part["tool_use_id"]] = (
+                    bool(part.get("is_error")),
+                    _text(part.get("content")),
+                )
+    return [ToolCall(*uses[i], *results.get(i, (True, ""))) for i in order]
+
+
+def admit_expectations(
+    node: str, escape: str, subdir: str
+) -> tuple[tuple[str, str, bool, str | None], ...]:
+    """(инструмент, команда/путь, ждём ошибку, ждём content) — N2, F24/F26."""
+    return (
+        ("Bash", "true", False, None),
+        ("Bash", "false", True, "Exit code 1"),
+        ("Bash", "exit 3", True, "Exit code 3"),
+        ("Bash", "cd src", False, None),
+        ("Bash", "pwd", False, subdir),
+        ("Write", node, False, None),
+        ("Write", escape, True, None),
+    )
+
+
+def _key(call: ToolCall) -> str:
+    raw = call.input.get("command" if call.tool == "Bash" else "file_path", "")
+    return str(raw).strip()
+
+
+def check_transcript(
+    calls: Sequence[ToolCall],
+    expectations: Sequence[tuple[str, str, bool, str | None]],
+) -> list[str]:
+    """Отказы протокола: шаг не исполнен, код/ошибка/вывод не те, лишний
+    вызов инструмента (модель делала не то, что просили)."""
+    failures: list[str] = []
+    left = list(calls)
+    for tool, key, want_error, want in expectations:
+        match = next((c for c in left if c.tool == tool and _key(c) == key), None)
+        name = f"{tool} {key}"
+        if match is None:
+            failures.append(f"{name}: шаг не исполнен")
+            continue
+        left.remove(match)
+        if match.is_error != want_error:
+            failures.append(
+                f"{name}: is_error={match.is_error}, ждали {want_error} "
+                f"({match.content.strip()[:200]!r})"
+            )
+        elif want is not None and match.content.strip() != want:
+            failures.append(
+                f"{name}: вывод {match.content.strip()[:200]!r}, ждали {want!r}"
+            )
+    failures += [f"лишний вызов: {c.tool} {_key(c)[:120]}" for c in left]
+    return failures
+
+
+def surface(paths: Sequence[Path]) -> set[str]:
+    """Имена первого уровня наблюдаемых каталогов (`$HOME`, `/private/tmp`)."""
+    out: set[str] = set()
+    for root in paths:
+        try:
+            out |= {str(root / name) for name in os.listdir(root)}
+        except OSError:
+            out.add(f"{root} (не читается)")
+    return out
+
+
+def admission_record(admission: Admission) -> str:
+    """Строка `[[admitted]]` для `admitted.toml` — вносит оператор (H2)."""
+    return (
+        "[[admitted]]\n"
+        f'harness = "{admission.harness}"\n'
+        f'version = "{admission.version}"\n'
+        f'realpath = "{admission.realpath}"\n'
+        f'sha256 = "{admission.sha256}"\n'
+        f"macos_major = {admission.macos_major}\n"
+        f'profile_sha256 = "{admission.profile_sha256}"\n'
+        f'evidence = "{admission.evidence}"\n'
+    )
+
+
+def render_admit_protocol(
+    admission: Admission,
+    *,
+    date: str,
+    probe: ProbeResult,
+    failures: Sequence[str],
+    calls: Sequence[ToolCall],
+) -> str:
+    """Протокол допуска для `docs/evidence/` — факты, не пересказ модели."""
+    verdict = "ПРОШЛО — запись допуска предложена" if not failures else "НЕ ПРОШЛО"
+    rows = "\n".join(
+        f"| {c.tool} | `{_key(c)[:80]}` | {c.is_error} | `{c.content.strip()[:80]}` |"
+        for c in calls
+    )
+    lines = [
+        f"# Допуск харнесса под песочницей авторинга — {date}",
+        "",
+        (
+            "Процедура `make sandbox-admit` (дизайн "
+            "`docs/superpowers/specs/2026-09-29-author-agent-sandbox-design.md` "
+            "§14; tasks-спека TASK-006)."
+        ),
+        "",
+        f"- харнесс: {admission.harness} {admission.version}",
+        f"- realpath: `{admission.realpath}`",
+        f"- sha256: `{admission.sha256}`",
+        f"- macOS: {admission.macos_major}",
+        f"- шаблон профиля sha256: `{admission.profile_sha256}`",
+        f"- проба §15: {'зелёная' if probe.ok else 'красная'}"
+        + "".join(f"\n  - {item}" for item in (*probe.failures, *probe.notes)),
+        "",
+        f"**Итог: {verdict}.**",
+        "",
+        "## Сырые `tool_result` (stream-json)",
+        "",
+        "| инструмент | вход | is_error | content |",
+        "|---|---|---|---|",
+        rows,
+        "",
+    ]
+    if failures:
+        lines += ["## Отказы", "", *(f"- {f}" for f in failures), ""]
+    else:
+        lines += [
+            "## Запись допуска (вносит оператор, шаг H2)",
+            "",
+            "```toml",
+            admission_record(admission).rstrip(),
+            "```",
+            "",
+        ]
+    return "\n".join(lines)
+
+
+def _admit_stand(base: Path) -> tuple[Path, Path]:
+    """Одноразовая цель (git, `src/`, бандл с узлом) и каталог прогона."""
+    target = base / "target"
+    _git("init", "-q", target)
+    (target / "src").mkdir()
+    (target / "ws" / "spec").mkdir(parents=True)
+    (target / "ws" / "spec" / "00-charter.md").write_text("# charter\n")
+    run_dir = base / "run"
+    (run_dir / "edge-check").mkdir(parents=True)
+    (run_dir / "ledger.jsonl").write_text("")
+    return target, run_dir
+
+
+def admit(
+    *, harness_path: str | None, model: str, evidence_dir: Path, date: str
+) -> int:
+    """`make sandbox-admit`: 0 — прошло, запись допуска в stdout; 1 — не
+    прошло (запись не предлагается); 2 — процедуру не исполнить.
+
+    Протокол пишется в `evidence_dir` при любом исходе исполненной процедуры.
+    """
+    # модули ЗЦ: граница импортирует этот модуль, поэтому — в функции
+    from governance import author_launch
+
+    if sys.platform != "darwin" or not os.path.exists(SANDBOX_EXEC):
+        print("sandbox-admit: только macOS с /usr/bin/sandbox-exec", file=sys.stderr)
+        return 2
+    found = harness_path or shutil.which("claude")
+    if not found:
+        print("sandbox-admit: claude не найден в PATH", file=sys.stderr)
+        return 2
+    real = os.path.realpath(found)
+    base = Path(os.path.realpath(tempfile.mkdtemp(prefix="devtools-admit-")))
+    call: CallDir | None = None
+    try:
+        target, run_dir = _admit_stand(base)
+        call = create_call_dir(
+            calls_root(),
+            f"admit-{uuid.uuid4().hex[:12]}",
+            forbidden=forbidden_roots(
+                target, run_dir=run_dir, devtools_root=author_launch.DEVTOOLS_ROOT
+            ),
+        )
+        env = author_launch.call_env(call, author_launch.author_claude_token())
+        git_dir, common_dir = target_git_dirs(target)
+        probe = run_probe(
+            call,
+            render_profile(call, home=Path.home()),
+            env,
+            ProbeTargets(
+                target,
+                PurePosixPath("ws/spec"),
+                git_dir,
+                common_dir,
+                run_dir,
+                Path.home(),
+            ),
+        )
+        safe_io.publish(
+            call.root,
+            "claude-config/settings.json",
+            author_launch.ISOLATED_CLAUDE_SETTINGS.encode(),
+        )
+        wrap = _wrap(call.root / "profile.sb")
+        code, out = _spawn([*wrap, real, "--version"], env=env, cwd=target, timeout=60)
+        words = out.decode(errors="replace").split()
+        version = words[0] if code == 0 and words else "unknown"
+        node, escape = call.stage / ADMIT_NODE, target / "ws" / "spec" / "escape.md"
+        watched = (Path.home(), Path("/private/tmp"))
+        before = surface(watched)
+        code, raw = _spawn(
+            [
+                *wrap,
+                real,
+                "-p",
+                "--model",
+                model,
+                "--dangerously-skip-permissions",
+                "--no-session-persistence",
+                "--strict-mcp-config",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                ADMIT_PROMPT.format(node=node, escape=escape),
+            ],
+            env=env,
+            cwd=target,
+            timeout=ADMIT_TIMEOUT,
+        )
+        new = sorted(surface(watched) - before)
+        calls = parse_stream_json(raw.decode(errors="replace").splitlines())
+        failures = [f"проба §15: {f}" for f in probe.failures]
+        if code != 0:
+            failures.append(f"харнесс вернул {code}")
+        failures += check_transcript(
+            calls, admit_expectations(str(node), str(escape), str(target / "src"))
+        )
+        if not node.is_file() or node.read_text().strip() != "admit-probe":
+            failures.append(f"файл {ADMIT_NODE} в заготовке не записан")
+        if os.path.lexists(escape):
+            failures.append("запись в дерево цели удалась")
+        if new:
+            failures.append(f"вне каталога вызова появилось: {new}")
+    except (SandboxError, safe_io.SafeIOError, OSError) as exc:
+        print(f"sandbox-admit: процедура не исполнена: {exc}", file=sys.stderr)
+        return 2
+    except author_launch.AgentIsolationError as exc:
+        print(f"sandbox-admit: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        if call is not None:
+            shutil.rmtree(call.root, ignore_errors=True)
+            try:
+                os.rmdir(call.root.parent)  # `<calls>/admit-…` — свой, пустой
+            except OSError:
+                pass
+        shutil.rmtree(base, ignore_errors=True)
+    name = f"{date}-author-sandbox-admit-{version}.md"
+    admission = Admission(
+        "claude",
+        version,
+        Path(real),
+        _file_sha256(real),
+        _macos_major(),
+        profile_template_sha256(),
+        f"docs/evidence/{name}",
+    )
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    (evidence_dir / name).write_text(
+        render_admit_protocol(
+            admission, date=date, probe=probe, failures=failures, calls=calls
+        ),
+        encoding="utf-8",
+    )
+    print(f"протокол: {evidence_dir / name}", file=sys.stderr)
+    if failures:
+        print("sandbox-admit: НЕ ПРОШЛО — запись не предлагается:", file=sys.stderr)
+        for failure in failures:
+            print(f"  - {failure}", file=sys.stderr)
+        return 1
+    print(admission_record(admission), end="")
+    return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """`python -m governance.sandbox admit [--harness-path P] [--model M]`."""
+    import argparse
+    import datetime
+
+    parser = argparse.ArgumentParser(prog="governance.sandbox")
+    sub = parser.add_subparsers(dest="command", required=True)
+    cmd = sub.add_parser("admit", help="процедура допуска харнесса (§14)")
+    cmd.add_argument("--harness-path", default=None)
+    cmd.add_argument("--model", default="claude-opus-5")
+    cmd.add_argument(
+        "--evidence-dir",
+        type=Path,
+        default=Path(__file__).resolve().parent.parent / "docs" / "evidence",
+    )
+    args = parser.parse_args(argv)
+    return admit(
+        harness_path=args.harness_path,
+        model=args.model,
+        evidence_dir=args.evidence_dir,
+        date=datetime.date.today().isoformat(),
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

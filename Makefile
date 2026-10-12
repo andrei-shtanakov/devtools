@@ -16,7 +16,7 @@ WORKSPACE ?= ..
 MANIFEST ?= $(WORKSPACE)/ai-orchestrators-workspace/workspace-manifest.toml
 
 .DEFAULT_GOAL := help
-.PHONY: help status fetch pull dirty branches bootstrap drift conformance catalog-fixtures graph-drift plan-check plan-check-selftest todo-context todo-work plan-check-fixture inbox issues morning evening snapshot fleet-report today salvage config-policy install arch-freshness arch-freshness-read behaviour-run spec-loop behaviour-console behaviour-tasks brief-propose brief-approve accept-pr preflight edge-check selfcheck selfcheck-dogfood criteria-close conductor
+.PHONY: help status fetch pull dirty branches bootstrap drift conformance catalog-fixtures graph-drift plan-check plan-check-selftest todo-context todo-work plan-check-fixture inbox issues morning evening snapshot fleet-report today salvage config-policy install arch-freshness arch-freshness-read behaviour-run spec-loop behaviour-console behaviour-tasks brief-propose brief-approve accept-pr preflight edge-check selfcheck selfcheck-dogfood criteria-close conductor sandbox-admit
 
 help:
 	@echo "Цели:"
@@ -49,6 +49,7 @@ help:
 	@echo "  make arch-freshness       — локальная диагностика drift/freshness арх-evidence (вахта — CI steward)"
 	@echo "  make arch-freshness-read  — читатель локального статуса: просрочка ⇒ unknown (exit 2)"
 	@echo "  make behaviour-run ARGS=… — governance runner CLI: start|resume|verify|status (uv + группа governance)"
+	@echo "  make sandbox-admit [ARGS='--harness-path <p> --model <m>'] — допуск харнесса под песочницей авторинга (оператор, macOS): проба + реальный claude под профилем §12, протокол в docs/evidence/, ПРЕДЛОЖЕННАЯ запись admitted.toml в stdout (contracts/ не пишет; вносит оператор, шаг H2)"
 	@echo "  make criteria-close ARGS='--run <id> [--product-sha <sha>]' — закрытие воркстрима по оракулу бандла (срез 2a: предложение → мерж (человеком при ручных критериях) → штамп accepted; выходы 0/2/4/5/6; флага обхода нет)"
 	@echo "  make spec-loop SUBJECT='…' REPO=… — операторская кнопка: start → мерж бандла (человек) → одобрение узлов (человек, --approve-node) → повтор той же команды → deliver tasks-спеки → approve (человек); merge-authority жёстко human, неоднозначности — fail-closed (--run-id/--ws-id через ARGS)"
 	@echo "  make brief-propose RUN=<customer-run> — brief-PR (бриф + заявка на одобрение) из прогона в brief_ready; мерж — человек (make human-merge), затем make brief-approve (спека need-stage §11.3)"
@@ -78,6 +79,7 @@ graph-drift: ; @python3 ./check-graph-registry-drift.py
 plan-check:  ; @uv run --frozen python ./check-plan-fields.py --root $(WORKSPACE) --manifest $(MANIFEST)
 plan-check-selftest: ; @uv run --frozen python ./check-plan-fields.py --selftest
 criteria-close: ; @uv run --frozen python -m governance.criteria_close $(ARGS)
+sandbox-admit: ; @uv run --frozen python -m governance.sandbox admit $(ARGS)
 plan-check-fixture:  ; @uv run --frozen pytest tests/test_plan_check_fixture.py -q
 inbox:       ; @uv run --frozen python ./inbox.py --root ..
 issues:      ; @uv run --frozen python ./issue_console.py --root $(WORKSPACE)
