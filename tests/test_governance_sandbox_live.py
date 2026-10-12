@@ -14,12 +14,10 @@ macOS с `/usr/bin/sandbox-exec`; иначе — skip с названной пр
 
 from __future__ import annotations
 
+import json
 import os
-import pty
-import select
 import subprocess
 import sys
-import termios
 import time
 from pathlib import Path, PurePosixPath
 
@@ -416,38 +414,52 @@ except OSError as exc:
 """
 
 
+_PTY_HARNESS = r"""
+import json, os, pty, select, subprocess, sys, termios, time
+
+steps = json.loads(sys.argv[1])
+pid, master = pty.fork()
+if pid == 0:
+    tty = os.ttyname(0)
+    for name, argv, kw in steps:
+        env = {**os.environ, "TTYPATH": kw.pop("tty", tty), "PAYLOAD": name}
+        r = subprocess.run(argv, capture_output=True, text=True, env=env, **kw)
+        os.write(1, f"[{name.lower()}] {r.returncode} {r.stdout.strip()}\n".encode())
+        time.sleep(0.3)
+        termios.tcflush(0, termios.TCIFLUSH)
+    os._exit(0)
+out = b""
+deadline = time.time() + 30
+while time.time() < deadline:
+    ready, _, _ = select.select([master], [], [], 0.5)
+    if not ready:
+        continue
+    try:
+        chunk = os.read(master, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    out += chunk
+os.waitpid(pid, 0)
+sys.stdout.write(out.decode(errors="replace"))
+"""
+
+
 def _pty_run(steps: list[tuple[str, list[str], dict[str, object]]]) -> str:
-    """В ребёнке-лидере сессии с PTY выполнить шаги; вернуть вывод мастера."""
-    pid, master = pty.fork()
-    if pid == 0:  # pragma: no cover - исполняется в ребёнке
-        tty = os.ttyname(0)
-        for name, argv, kw in steps:
-            env = {**os.environ, "TTYPATH": kw.pop("tty", tty), "PAYLOAD": name}
-            r = subprocess.run(
-                argv, capture_output=True, text=True, env=env, check=False, **kw
-            )
-            # pytest подменяет sys.stdout — пишем прямо в PTY (fd 1)
-            os.write(
-                1, f"[{name.lower()}] {r.returncode} {r.stdout.strip()}\n".encode()
-            )
-            time.sleep(0.3)
-            termios.tcflush(0, termios.TCIFLUSH)
-        os._exit(0)
-    out = b""
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        ready, _, _ = select.select([master], [], [], 0.5)
-        if not ready:
-            continue
-        try:
-            chunk = os.read(master, 4096)
-        except OSError:
-            break
-        if not chunk:
-            break
-        out += chunk
-    os.waitpid(pid, 0)
-    return out.decode(errors="replace")
+    """Шаги в ребёнке-лидере сессии с PTY; вывод мастера.
+
+    `pty.fork` — в отдельном однопоточном процессе: из многопоточного pytest
+    `forkpty()` может заклинить ребёнка (DeprecationWarning Python 3.13).
+    """
+    proc = subprocess.run(
+        [sys.executable, "-I", "-c", _PTY_HARNESS, json.dumps(steps)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    return proc.stdout
 
 
 def test_tiocsti_blocked_by_each_belt_separately(bench: Bench) -> None:
