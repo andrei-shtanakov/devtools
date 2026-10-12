@@ -22,9 +22,19 @@
 #   profile_sha256 = "<64 hex>"               # шаблона профиля §12
 #   evidence       = "docs/evidence/<файл>.md"
 #
-# До H2 записей нет: авторский вызов отказывает для любого харнесса.
+# До H2 записей не было: авторский вызов отказывал любому харнессу. Первая
+# запись — шаг H2 (2026-10-12), протокол оператора ниже по ссылке evidence.
 # Ключа `admitted` в каркасе НЕТ намеренно: статический `admitted = []`
 # запретил бы дописать первую секцию `[[admitted]]` (TOML 1.0.0 — ошибка
 # разбора). Читатель трактует отсутствие ключа как пустой допуск.
 
 schema = 1
+
+[[admitted]]
+harness = "claude"
+version = "2.1.296"
+realpath = "/Users/Andrei_Shtanakov/.local/share/claude/versions/2.1.296"
+sha256 = "c9b5341637becbd423ddffc5b254afb645682a3868cb708bbc6cc0e7bb419937"
+macos_major = 26
+profile_sha256 = "f8e135803c4b3de4872908ea285307f0fceca060fab62712277acf260ca8dd37"
+evidence = "docs/evidence/2026-10-12-author-sandbox-admit-2.1.296.md"

@@ -462,20 +462,33 @@ def _tomllib():
     return tomllib
 
 
-def test_author_sandbox_admission_contract_starts_empty() -> None:
-    """До шага H2 допущенных исполняемых файлов нет: граница запуска
-    отказывает любому харнессу (tasks-спека, переходный период)."""
+def test_author_sandbox_admission_records_are_valid_and_evidenced() -> None:
+    """Контракт допуска после шага H2: каждая запись проходит строгий
+    загрузчик границы (`sandbox.load_admitted`), и у каждой есть протокол
+    `make sandbox-admit` в `docs/evidence/`, на который она ссылается. Пустой
+    допуск (до H2) — отказ загрузчика «не проверен под песочницей»."""
+    from governance import sandbox
+
     root = Path(__file__).resolve().parent.parent
-    data = _tomllib().loads(
-        (root / "contracts/author-sandbox/v1/admitted.toml").read_text("utf-8")
-    )
-    # Ключа нет намеренно: статический `admitted = []` запретил бы дописать
-    # `[[admitted]]` (TOML 1.0.0); отсутствие ключа — пустой допуск.
-    assert data == {"schema": 1}
-    appended = (root / "contracts/author-sandbox/v1/admitted.toml").read_text(
-        "utf-8"
-    ) + '\n[[admitted]]\nharness = "claude"\n'
-    assert _tomllib().loads(appended)["admitted"] == [{"harness": "claude"}]
+    contract = root / "contracts/author-sandbox/v1/admitted.toml"
+    data = _tomllib().loads(contract.read_text("utf-8"))
+    assert data["schema"] == 1
+    if not data.get("admitted"):
+        with pytest.raises(sandbox.SandboxError, match="не проверен"):
+            sandbox.load_admitted(contract)
+        return
+    passed = "**Итог: ПРОШЛО — запись допуска предложена.**"
+    for record in sandbox.load_admitted(contract):
+        assert record.harness == "claude", "v1 допускает только claude (§13 Q1)"
+        # дрейф шаблона профиля снимает допуск: нужен новый `make sandbox-admit`
+        assert record.profile_sha256 == sandbox.profile_template_sha256()
+        assert record.evidence.startswith("docs/evidence/"), record.evidence
+        lines = (root / record.evidence).read_text("utf-8").splitlines()
+        # точная строка итога: подстрока «ПРОШЛО» есть и в «НЕ ПРОШЛО»
+        assert passed in lines, record.evidence
+        assert f"- sha256: `{record.sha256}`" in lines, record.evidence
+        profile = f"- шаблон профиля sha256: `{record.profile_sha256}`"
+        assert profile in lines, record.evidence  # протокол того же профиля
 
 
 def test_author_sandbox_spawn_sites_name_existing_functions() -> None:
