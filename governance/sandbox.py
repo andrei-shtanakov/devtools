@@ -1058,9 +1058,9 @@ def check_transcript(
 ) -> list[str]:
     """Отказы протокола: шаг не исполнен, код/ошибка/вывод не те.
 
-    Лишние вызовы инструментов — не отказ (`extra_calls`, примечание в
-    протоколе): инварианты держат ожидаемые шаги и проверки файловой системы
-    процедуры, а состав «прочих» вызовов зависит от модели."""
+    Лишний вызов, который УДАЛСЯ, — тоже отказ: он мог подменить проверяемую
+    способность (`mkdir -p` вместо Write с созданием родителей). Неудавшиеся
+    лишние вызовы (повтор запрещённой записи) — примечание (`extra_calls`)."""
     failures: list[str] = []
     left = list(calls)
     for tool, key, want_error, want in expectations:
@@ -1079,6 +1079,11 @@ def check_transcript(
             failures.append(
                 f"{name}: вывод {match.content.strip()[:200]!r}, ждали {want!r}"
             )
+    failures += [
+        f"лишний удавшийся вызов: {c.tool} {_key(c)[:120]}"
+        for c in left
+        if not c.is_error
+    ]
     return failures
 
 
@@ -1086,14 +1091,16 @@ def extra_calls(
     calls: Sequence[ToolCall],
     expectations: Sequence[tuple[str, str, bool, str | None]],
 ) -> list[str]:
-    """Вызовы сверх ожидаемых — для протокола (примечание, не отказ)."""
+    """Неудавшиеся вызовы сверх ожидаемых — примечание протокола."""
     left = list(calls)
     for tool, key, _, _ in expectations:
         match = next((c for c in left if c.tool == tool and _key(c) == key), None)
         if match is not None:
             left.remove(match)
     return [
-        f"лишний вызов: {c.tool} {_key(c)[:120]} (is_error={c.is_error})" for c in left
+        f"лишний неудавшийся вызов: {c.tool} {_key(c)[:120]}"
+        for c in left
+        if c.is_error
     ]
 
 
@@ -1201,7 +1208,8 @@ def admit(
     Кандидат фиксируется (`realpath`, sha256, macOS) ДО любого запуска.
     Красная проба §15 останавливает процедуру до запуска харнесса — как и
     граница (§15: регрессия профиля — вызов не делается). Протокол пишется
-    в `evidence_dir`, как только проба исполнена, при любом исходе.
+    в `evidence_dir` при любом исходе исполненной процедуры (коды 0 и 1);
+    код 2 — протокола нет.
     """
     # модули ЗЦ: граница импортирует этот модуль, поэтому — в функции
     from governance import author_launch

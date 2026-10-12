@@ -1450,7 +1450,7 @@ def test_transcript_deviation_is_named(index, change, text):
     assert any(text in f for f in failures), failures
 
 
-def test_missing_result_skipped_and_extra_steps_fail():
+def test_missing_result_skipped_and_extra_steps():
     # нет tool_result — исход не доказан: считается ошибкой, Write в
     # заготовку тогда «не удался»
     no_result = _STREAM[:11] + _STREAM[12:]
@@ -1458,14 +1458,43 @@ def test_missing_result_skipped_and_extra_steps_fail():
     assert any("node.md: is_error=True" in f for f in failures), failures
     skipped = sandbox.parse_stream_json(_STREAM[2:])
     assert "Bash true: шаг не исполнен" in sandbox.check_transcript(skipped, _EXPECT)
-    # лишний вызов — примечание протокола, не отказ: состав «прочих»
-    # вызовов зависит от модели, инварианты держат ожидаемые шаги
-    extra = sandbox.parse_stream_json(
+    # неудавшийся лишний вызов (без tool_result — исход не доказан) —
+    # примечание протокола; удавшийся — отказ: мог подменить способность
+    unproven = sandbox.parse_stream_json(
         [*_STREAM, _STREAM[0].replace("toolu_", "toolu_X")]
     )
-    assert sandbox.check_transcript(extra, _EXPECT) == []
-    assert sandbox.extra_calls(extra, _EXPECT) == [
-        "лишний вызов: Bash true (is_error=True)"
+    assert sandbox.check_transcript(unproven, _EXPECT) == []
+    assert sandbox.extra_calls(unproven, _EXPECT) == [
+        "лишний неудавшийся вызов: Bash true"
+    ]
+    mkdir = json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_mk",
+                        "name": "Bash",
+                        "input": {"command": "mkdir -p /CALL/stage/a/b"},
+                    }
+                ]
+            },
+        }
+    )
+    done = json.dumps(
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_mk", "content": ""}
+                ]
+            },
+        }
+    )
+    succeeded = sandbox.parse_stream_json([mkdir, done, *_STREAM])
+    assert sandbox.check_transcript(succeeded, _EXPECT) == [
+        "лишний удавшийся вызов: Bash mkdir -p /CALL/stage/a/b"
     ]
 
 
