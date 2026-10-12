@@ -23,11 +23,15 @@
 
 from __future__ import annotations
 
+import json
 import os
+import select
 import shutil
 import signal
 import subprocess
 import sys
+import time
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -247,6 +251,9 @@ def author_argv(binary: str, model: str, prompt: str) -> list[str]:
         "--dangerously-skip-permissions",
         "--no-session-persistence",
         "--strict-mcp-config",
+        "--output-format",
+        "stream-json",
+        "--verbose",
         prompt,
     ]
 
@@ -295,6 +302,16 @@ AUTHOR_TIMEOUT = 3600.0
 #: Потолок файла узла при переносе (§15).
 NODE_LIMIT = 4 << 20
 NODE_READ_TIMEOUT = 10.0
+#: Транскрипт вызова (stream-json): каталог в `run_dir` — вне записи агента
+#: (`run_dir` — запретный корень §12 п.2); потолок хранимых байт — сверх
+#: него вывод дочитывается и отбрасывается (`truncated`); после выхода агента
+#: канал дочитывается не дольше `TRANSCRIPT_GRACE` (держатель канала,
+#: ушедший из группы, — `complete: false`).
+TRANSCRIPTS = "author-transcripts"
+TRANSCRIPT_LIMIT = 32 << 20
+TRANSCRIPT_GRACE = 5.0
+_READ_CHUNK = 1 << 16
+_PUMP_TICK = 0.5
 DISP_REFUSAL = (
     "авторинг-бэкенд disp вне v1 песочницы авторинга: его координатор "
     "обязан писать в .git цели (дизайн §11). Этот прогон: уберите каталог "
@@ -442,30 +459,119 @@ def _probe_targets(ready: _Ready) -> sandbox.ProbeTargets:
     )
 
 
+@dataclass(frozen=True)
+class AgentRun:
+    """Исход запуска агента: `code` None — таймаут; `stdout` — захваченный
+    stream-json (не больше `TRANSCRIPT_LIMIT`); `seen` — всего прочитано байт;
+    `complete` — канал дочитан до EOF."""
+
+    code: int | None
+    stdout: bytes = b""
+    seen: int = 0
+    complete: bool = True
+
+    @property
+    def truncated(self) -> bool:
+        return self.seen > len(self.stdout)
+
+
+class _Capture:
+    """Чтение канала с потолком: сверх `limit` байты считаются и отбрасываются
+    (канал дочитывается — агент не блокируется на записи)."""
+
+    def __init__(self, fd: int, limit: int) -> None:
+        self.fd, self.limit = fd, limit
+        self.chunks: list[bytes] = []
+        self.kept = self.seen = 0
+        self.eof = False
+
+    def pump(self, wait: float) -> None:
+        ready, _, _ = select.select([self.fd], [], [], max(wait, 0.0))
+        if not ready:
+            return
+        chunk = os.read(self.fd, _READ_CHUNK)
+        if not chunk:
+            self.eof = True
+            return
+        self.seen += len(chunk)
+        room = self.limit - self.kept
+        if room > 0:
+            self.chunks.append(chunk[:room])
+            self.kept += min(room, len(chunk))
+
+
 def _run_agent(
     argv: list[str], *, env: Mapping[str, str], cwd: Path, timeout: float
-) -> int | None:
-    """Агент лидером новой сессии, `stdin` из `/dev/null`, вывод — в каналы
-    раннера; по выходу/таймауту — `SIGKILL` группе (гигиена §12). `None` —
-    таймаут."""
+) -> AgentRun:
+    """Агент лидером новой сессии, `stdin` из `/dev/null`, stdout — в
+    транскрипт (stderr — в каналы раннера); по выходу/таймауту — `SIGKILL`
+    группе (гигиена §12). Срок общий: чтение канала его не продлевает."""
     proc = subprocess.Popen(
         argv,
         env=dict(env),
         cwd=cwd,
         stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
         start_new_session=True,
     )
+    assert proc.stdout is not None
+    cap = _Capture(proc.stdout.fileno(), TRANSCRIPT_LIMIT)
+    deadline = time.monotonic() + timeout
     try:
-        code: int | None = proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        code = None
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+        while proc.poll() is None:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            if cap.eof:
+                try:
+                    proc.wait(timeout=left)
+                except subprocess.TimeoutExpired:
+                    pass
+                break
+            cap.pump(min(left, _PUMP_TICK))
+        code = proc.poll()
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
     if code is None:
         proc.wait()
-    return code
+    grace = time.monotonic() + TRANSCRIPT_GRACE
+    while not cap.eof and time.monotonic() < grace:
+        cap.pump(grace - time.monotonic())
+    proc.stdout.close()
+    return AgentRun(code, b"".join(cap.chunks), cap.seen, cap.eof)
+
+
+def _save_transcript(
+    run_dir: Path, filename: str, run: AgentRun, started: str
+) -> str | None:
+    """Транскрипт попытки — в НОВЫЙ каталог `run_dir/author-transcripts/<id>/`
+    (существующее имя — отказ, прежние попытки не перезаписываются);
+    None — записан, строка — причина отказа. В evidence не публикуется:
+    в выводе инструментов могут быть прочитанные секреты."""
+    stem = filename.rsplit(".", 1)[0]
+    rel = f"{TRANSCRIPTS}/{started.replace(':', '')}-{stem}-{uuid.uuid4().hex[:8]}"
+    meta = {
+        "node": filename,
+        "started": started,
+        "exit_code": run.code,
+        "bytes_seen": run.seen,
+        "bytes_kept": len(run.stdout),
+        "truncated": run.truncated,
+        "complete": run.complete,
+        "limit": TRANSCRIPT_LIMIT,
+    }
+    try:
+        safe_io.create_dir(run_dir, rel)
+        safe_io.publish(run_dir, f"{rel}/stream.jsonl", run.stdout)
+        safe_io.publish(
+            run_dir, f"{rel}/meta.json", (json.dumps(meta, indent=2) + "\n").encode()
+        )
+    except (safe_io.SafeIOError, OSError) as exc:
+        return f"транскрипт вызова не записан ({rel}): {exc}"
+    return None
 
 
 def _transfer(call: sandbox.CallDir, ready: _Ready, filename: str) -> LaunchOutcome:
@@ -572,12 +678,17 @@ def _launch_in(
         str(cdir.root / "profile.sb"),
         *author_argv(ready.binary, ready.model, prompt),
     ]
-    code = _run_agent(
+    started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    run = _run_agent(
         argv,
         env=env,
         cwd=ready.target,
         timeout=AUTHOR_TIMEOUT if timeout is None else timeout,
     )
+    unsaved = _save_transcript(ready.run_dir, call.filename, run, started)
+    if unsaved is not None:
+        return _refuse(unsaved + " — перенос не делается")
+    code = run.code
     if code is None:
         return _refuse("таймаут авторского вызова — перенос не делается")
     if code != 0:
