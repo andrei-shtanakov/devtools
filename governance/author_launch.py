@@ -193,7 +193,9 @@ def call_env(call: sandbox.CallDir, token: str) -> dict[str, str]:
         "CLAUDE_CODE_TMPDIR": str(call.tmp),
         "CLAUDE_CONFIG_DIR": str(call.claude_config),
         "CLAUDE_CODE_OAUTH_TOKEN": token,
-        "SSL_CERT_FILE": SSL_CERT_FILE,
+        # операторский CA (корпоративный прокси) сильнее; системный набор —
+        # умолчание при закрытой связке ключей (§8/S2)
+        "SSL_CERT_FILE": os.environ.get("SSL_CERT_FILE") or SSL_CERT_FILE,
     }
 
 
@@ -295,8 +297,10 @@ NODE_LIMIT = 4 << 20
 NODE_READ_TIMEOUT = 10.0
 DISP_REFUSAL = (
     "авторинг-бэкенд disp вне v1 песочницы авторинга: его координатор "
-    "обязан писать в .git цели (дизайн §11); используйте author_backend=codex "
-    "с AUTHOR_HARNESS=claude"
+    "обязан писать в .git цели (дизайн §11). Этот прогон: уберите каталог "
+    "пайплайна `.disputatio/pipelines/<slug>` цели (если есть), положите "
+    "файл узла руками и повторите resume — файл будет принят как есть. "
+    "Новый прогон: author_backend=codex с AUTHOR_HARNESS=claude"
 )
 
 

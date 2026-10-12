@@ -10377,6 +10377,9 @@ def test_boundary_refuses_disp_including_resume_of_started_pipeline(
     resumed = locked_runner.resume("r-disp-v1", ops)
     _assert_refused_at_boundary(resumed, ops, boundary, "disp вне v1")
     assert len(ops.around) == 2
+    # выход для ЭТОГО прогона назван: author_backend у него не сменить
+    reason = (rs.run_dir("r-disp-v1") / "stop-reason.txt").read_text()
+    assert "файл узла руками и повторите resume" in reason
 
 
 @pytest.mark.parametrize(

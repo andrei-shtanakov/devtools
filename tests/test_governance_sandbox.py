@@ -830,7 +830,6 @@ def test_probe_inner_timeouts_fit_outer_budget() -> None:
 _ADMISSION = sandbox.Admission(
     "claude", "2.1.296", Path("/opt/claude/bin/claude"), "0" * 64, 26, "0" * 64, "e"
 )
-_OUT = "/out/stage/10-requirements.md"
 
 
 @pytest.fixture
@@ -1170,6 +1169,8 @@ def test_call_env_overrides_tmp_config_token_and_ca(monkeypatch):
         "CLAUDE_CODE_OAUTH_TOKEN": "tok-from-keychain",
         "SSL_CERT_FILE": "/etc/ssl/cert.pem",
     }
+    monkeypatch.setenv("SSL_CERT_FILE", "/opt/corp/ca.pem")
+    assert author_launch.call_env(call, "t")["SSL_CERT_FILE"] == "/opt/corp/ca.pem"
 
 
 def test_agent_env_names_are_pinned():
