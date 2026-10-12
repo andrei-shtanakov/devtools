@@ -1,0 +1,86 @@
+{
+  "absence": [],
+  "attempt_id": "f09ab92e7ac9449293591674e4892524",
+  "bases": [
+    {
+      "path": "00-discovery/brief.md",
+      "role": "customer-brief",
+      "sha256": "0f80fc8bbdf2aaa17c1189f40c0d878999dc81e407924992e595227e5b57a01d",
+      "size": 6165
+    }
+  ],
+  "check_identity": "8ff5143c955261d694acc91c25ab51b30d02fd2c1852a1d678c1201087900aab",
+  "context": {
+    "estimate_tokens": 7610,
+    "limit_tokens": 120000,
+    "method": "utf8-bytes/4",
+    "reserve_tokens": 8000,
+    "size": 30442,
+    "unit": "utf8-bytes"
+  },
+  "criteria": [
+    {
+      "id": "R1",
+      "reason": "Оба goal'а (G-01, G-02) и оба ограничения (CON-01, CON-02) брифа отражены в charter без потери смысла, как и остальные 16 идентификаторов брифа.",
+      "status": "pass"
+    },
+    {
+      "id": "R2",
+      "reason": "Раздел «Цели» charter содержит ровно G-01 и G-02 брифа; всё добавленное сверх (принципы, расширения OUT-03, решения, стороны) — обоснования и границы, а не новые цели.",
+      "status": "pass"
+    },
+    {
+      "id": "R3",
+      "reason": "M-01 (непокрытые отказы кодом 2 в TODO: baseline 1 → 0) и ориентир NFR-02 («не более секунды») взяты из брифа буквально, остальные критерии приёмки выводимы из G-01/FR-01..03.",
+      "status": "pass"
+    }
+  ],
+  "edge": "charter-vs-customer-brief",
+  "findings": [],
+  "finished_at": "2026-10-12T17:07:14.861763+00:00",
+  "node": "charter",
+  "result_key": "72773a47a8c7409c5d4c0f9057ccc304dd7375f7b16c8268008ae50685ba095e",
+  "reviewer": {
+    "effort": null,
+    "env_passthrough": [
+      "HOME",
+      "LANG",
+      "PATH",
+      "TMPDIR",
+      "USER"
+    ],
+    "harness": "claude",
+    "harness_version": "2.1.296 (Claude Code)",
+    "model": "claude-opus-5",
+    "model_id": null
+  },
+  "rules": {
+    "id": "charter-vs-customer-brief",
+    "items": [
+      [
+        "R1",
+        "Каждая цель и ограничение брифа заказчика отражены в charter или явно отклонены с причиной."
+      ],
+      [
+        "R2",
+        "Charter не вводит целей, отсутствующих в брифе."
+      ],
+      [
+        "R3",
+        "Метрики charter выводимы из брифа."
+      ]
+    ]
+  },
+  "schema_version": 1,
+  "started_at": "2026-10-12T17:06:10.402404+00:00",
+  "subject": [
+    {
+      "path": "00-charter.md",
+      "role": "subject",
+      "sha256": "5a1b8ee75790939208736c58497f2d285223457f09fe2e25bf83fa357310518d",
+      "size": 21139
+    }
+  ],
+  "verdict": "PASS",
+  "wave": 1
+}
