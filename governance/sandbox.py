@@ -1,11 +1,15 @@
-"""Каталог вызова и профиль Seatbelt авторского агента (TASK-002).
+"""Каталог вызова, профиль Seatbelt и допуск харнесса авторского агента.
 
 Дизайн `docs/superpowers/specs/2026-09-29-author-agent-sandbox-design.md`
 §11, §12: агент пишет только в свежий каталог вызова
 `<calls>/<run_id>/<call>/{stage,tmp,claude-config}`, созданный раннером вне
 песочницы через `safe_io`; профиль генерируется из `realpath` этих каталогов.
 Генератор — чистая функция; настоящим `sandbox-exec` его проверяет проба
-(TASK-004).
+(TASK-004). TASK-002.
+
+§14: `admission_check` допускает исполняемый файл харнесса по записи
+`contracts/author-sandbox/v1/admitted.toml` — `(realpath, sha256, macos_major,
+profile_sha256)` — НЕ исполняя кандидата. TASK-003.
 
 Модуль — в защищённой цепочке песочницы (authority-root, шаг H1); импортирует
 только stdlib и модули цепочки. Граница гарантий — дизайн §17, §19 п.3.
@@ -16,11 +20,14 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shutil
 import subprocess
+import tomllib
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from governance import safe_io
 
@@ -237,3 +244,136 @@ def profile_template_sha256() -> str:
         (PROFILE_TEMPLATE, "\0".join(CALL_SUBDIRS), "\0".join(SECRET_DIRS))
     )
     return hashlib.sha256(material.encode()).hexdigest()
+
+
+# --- допуск исполняемого файла харнесса (§14, TASK-003) ---------------------
+
+#: Потолок чтения кандидата для sha256 (claude 2.1.296 — ≈240 МБ).
+ADMISSION_READ_LIMIT = 1 << 30
+ADMISSION_READ_TIMEOUT = 60.0
+_SW_VERS = "/usr/bin/sw_vers"  # системный бинарь, не кандидат
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+_FIELDS: dict[str, type] = {
+    "harness": str,
+    "version": str,
+    "realpath": str,
+    "sha256": str,
+    "macos_major": int,
+    "profile_sha256": str,
+    "evidence": str,
+}
+
+
+@dataclass(frozen=True)
+class Admission:
+    """Допущенный исполняемый файл: запускать именно `realpath` (§14)."""
+
+    harness: str
+    version: str
+    realpath: Path
+    sha256: str
+    macos_major: int
+    profile_sha256: str
+    evidence: str
+
+
+def _not_admitted(why: str) -> SandboxError:
+    return SandboxError(f"харнесс не проверен под песочницей: {why}")
+
+
+def _record(raw: Any, index: int) -> Admission:
+    if not isinstance(raw, dict) or set(raw) != set(_FIELDS):
+        raise SandboxError(f"admitted[{index}]: ждали ровно поля {sorted(_FIELDS)}")
+    for name, kind in _FIELDS.items():
+        if type(raw[name]) is not kind:
+            raise SandboxError(f"admitted[{index}].{name}: ждали {kind.__name__}")
+    for name in ("sha256", "profile_sha256"):
+        if not _HEX64.fullmatch(raw[name]):
+            raise SandboxError(f"admitted[{index}].{name}: ждали 64 hex")
+    if not os.path.isabs(raw["realpath"]):
+        raise SandboxError(f"admitted[{index}].realpath: не абсолютный")
+    return Admission(**{**raw, "realpath": Path(raw["realpath"])})
+
+
+def load_admitted(contract_path: Path) -> tuple[Admission, ...]:
+    """Записи контракта допуска; нет файла или записей — отказ (§14)."""
+    try:
+        data = tomllib.loads(contract_path.read_text("utf-8"))
+    except FileNotFoundError as exc:
+        raise _not_admitted(f"нет контракта {contract_path}") from exc
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise SandboxError(f"контракт допуска {contract_path}: {exc}") from exc
+    schema = data.get("schema")
+    if type(schema) is not int or schema != 1:  # True == 1.0 == 1 в Python
+        raise SandboxError(f"контракт допуска {contract_path}: schema != 1")
+    raw = data.get("admitted", [])
+    if not isinstance(raw, list):
+        raise SandboxError(f"контракт допуска {contract_path}: admitted не массив")
+    records = tuple(_record(item, i) for i, item in enumerate(raw))
+    if not records:
+        raise _not_admitted("в контракте допуска нет записей (до шага H2)")
+    return records
+
+
+def _macos_major() -> int:
+    """Мажорная версия macOS из `sw_vers` — кандидат не исполняется."""
+    try:
+        proc = subprocess.run(
+            [_SW_VERS, "-productVersion"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SandboxError(f"версия macOS не определена: {exc}") from exc
+    head = proc.stdout.strip().split(".")[0]
+    if proc.returncode != 0 or not head.isdigit():
+        raise SandboxError(f"версия macOS не определена: {proc.stderr.strip()}")
+    return int(head)
+
+
+def _file_sha256(real: str) -> str:
+    try:
+        data = safe_io.read_regular(
+            Path("/"),
+            real.lstrip("/"),
+            limit=ADMISSION_READ_LIMIT,
+            timeout=ADMISSION_READ_TIMEOUT,
+        )
+    except safe_io.SafeIOError as exc:
+        raise _not_admitted(f"{real}: {exc}") from exc
+    return hashlib.sha256(data).hexdigest()
+
+
+def admission_check(
+    contract_path: Path, *, harness: str = "claude", path: str | None = None
+) -> Admission:
+    """Допуск исполняемого файла `harness` из PATH раннера (§14).
+
+    `shutil.which` → `realpath` → sha256 содержимого через `safe_io` →
+    `sw_vers` → сверка `(realpath, sha256, macos_major, profile_sha256)` с
+    записями контракта. Кандидат НЕ исполняется ни с каким аргументом,
+    включая `--version`: версия берётся из записи. Иначе SandboxError с
+    названным полем расхождения.
+    """
+    records = [r for r in load_admitted(contract_path) if r.harness == harness]
+    found = shutil.which(harness, path=path)
+    if found is None:
+        raise _not_admitted(f"{harness!r} не найден в PATH раннера")
+    real = os.path.realpath(found)
+    same_path = [r for r in records if str(r.realpath) == real]
+    if not same_path:
+        raise _not_admitted(f"{harness} {real} нет в контракте допуска")
+    actual = {
+        "sha256": _file_sha256(real),
+        "macos_major": _macos_major(),
+        "profile_sha256": profile_template_sha256(),
+    }
+    misses: list[str] = []
+    for record in same_path:
+        wrong = [k for k, v in actual.items() if getattr(record, k) != v]
+        if not wrong:
+            return record
+        misses.append(f"{record.version}: не совпали {', '.join(wrong)}")
+    raise _not_admitted(f"{harness} {real} — " + "; ".join(misses))
