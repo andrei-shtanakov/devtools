@@ -1458,9 +1458,15 @@ def test_missing_result_skipped_and_extra_steps_fail():
     assert any("node.md: is_error=True" in f for f in failures), failures
     skipped = sandbox.parse_stream_json(_STREAM[2:])
     assert "Bash true: шаг не исполнен" in sandbox.check_transcript(skipped, _EXPECT)
-    extra = [*_STREAM, _STREAM[0].replace("toolu_", "toolu_X")]
-    failures = sandbox.check_transcript(sandbox.parse_stream_json(extra), _EXPECT)
-    assert any(f.startswith("лишний вызов: Bash true") for f in failures), failures
+    # лишний вызов — примечание протокола, не отказ: состав «прочих»
+    # вызовов зависит от модели, инварианты держат ожидаемые шаги
+    extra = sandbox.parse_stream_json(
+        [*_STREAM, _STREAM[0].replace("toolu_", "toolu_X")]
+    )
+    assert sandbox.check_transcript(extra, _EXPECT) == []
+    assert sandbox.extra_calls(extra, _EXPECT) == [
+        "лишний вызов: Bash true (is_error=True)"
+    ]
 
 
 def _record(evidence: str = "e") -> sandbox.Admission:
@@ -1509,3 +1515,49 @@ def test_admit_refuses_off_macos_without_writing_anything(base, monkeypatch):
     assert code == 2
     assert not (base / "ev").exists()
     assert contract.read_bytes() == before
+
+
+@pytest.fixture
+def admit_doubles(base, monkeypatch):
+    """`admit` на macOS с шпионами: проба и запуски харнесса — двойники."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(base / "xdg"))
+    monkeypatch.setattr(author_launch, "author_claude_token", lambda: "tok")
+    ns = SimpleNamespace(spawned=[], probe=sandbox.ProbeResult((), ()))
+    monkeypatch.setattr(sandbox, "run_probe", lambda *a, **k: ns.probe)
+
+    def spawn(argv, *, env, cwd, timeout):
+        ns.spawned.append(list(argv))
+        return ns.answers.pop(0)
+
+    monkeypatch.setattr(sandbox, "_spawn", spawn)
+    ns.run = lambda: sandbox.admit(
+        harness_path="/bin/echo", model="m", evidence_dir=base / "ev", date="d"
+    )
+    ns.base = base
+    return ns
+
+
+@darwin_only
+def test_admit_red_probe_never_starts_the_harness(admit_doubles, capsys):
+    """§15: регрессия профиля — вызов не делается; протокол пишется, запись
+    не предлагается."""
+    admit_doubles.probe = sandbox.ProbeResult(("sentinel:home: OK — регрессия",), ())
+    admit_doubles.answers = []
+    assert admit_doubles.run() == 1
+    assert admit_doubles.spawned == []
+    protocol = (
+        admit_doubles.base / "ev" / "d-author-sandbox-admit-unknown.md"
+    ).read_text()
+    assert "НЕ ПРОШЛО" in protocol and "харнесс не запускался" in protocol
+    assert "[[admitted]]" not in capsys.readouterr().out
+    assert list((admit_doubles.base / "xdg/devtools/agent-calls").iterdir()) == []
+
+
+@darwin_only
+def test_admit_without_candidate_version_is_refused(admit_doubles, capsys):
+    admit_doubles.answers = [(1, b""), (0, b"")]
+    assert admit_doubles.run() == 1
+    assert len(admit_doubles.spawned) == 2
+    assert "--version" in admit_doubles.spawned[0]
+    err = capsys.readouterr().err
+    assert "версия кандидата под профилем не получена" in err

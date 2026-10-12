@@ -1056,8 +1056,11 @@ def check_transcript(
     calls: Sequence[ToolCall],
     expectations: Sequence[tuple[str, str, bool, str | None]],
 ) -> list[str]:
-    """Отказы протокола: шаг не исполнен, код/ошибка/вывод не те, лишний
-    вызов инструмента (модель делала не то, что просили)."""
+    """Отказы протокола: шаг не исполнен, код/ошибка/вывод не те.
+
+    Лишние вызовы инструментов — не отказ (`extra_calls`, примечание в
+    протоколе): инварианты держат ожидаемые шаги и проверки файловой системы
+    процедуры, а состав «прочих» вызовов зависит от модели."""
     failures: list[str] = []
     left = list(calls)
     for tool, key, want_error, want in expectations:
@@ -1076,8 +1079,22 @@ def check_transcript(
             failures.append(
                 f"{name}: вывод {match.content.strip()[:200]!r}, ждали {want!r}"
             )
-    failures += [f"лишний вызов: {c.tool} {_key(c)[:120]}" for c in left]
     return failures
+
+
+def extra_calls(
+    calls: Sequence[ToolCall],
+    expectations: Sequence[tuple[str, str, bool, str | None]],
+) -> list[str]:
+    """Вызовы сверх ожидаемых — для протокола (примечание, не отказ)."""
+    left = list(calls)
+    for tool, key, _, _ in expectations:
+        match = next((c for c in left if c.tool == tool and _key(c) == key), None)
+        if match is not None:
+            left.remove(match)
+    return [
+        f"лишний вызов: {c.tool} {_key(c)[:120]} (is_error={c.is_error})" for c in left
+    ]
 
 
 def surface(paths: Sequence[Path]) -> set[str]:
@@ -1112,6 +1129,7 @@ def render_admit_protocol(
     probe: ProbeResult,
     failures: Sequence[str],
     calls: Sequence[ToolCall],
+    notes: Sequence[str] = (),
 ) -> str:
     """Протокол допуска для `docs/evidence/` — факты, не пересказ модели."""
     verdict = "ПРОШЛО — запись допуска предложена" if not failures else "НЕ ПРОШЛО"
@@ -1145,6 +1163,8 @@ def render_admit_protocol(
         rows,
         "",
     ]
+    if notes:
+        lines += ["## Примечания", "", *(f"- {n}" for n in notes), ""]
     if failures:
         lines += ["## Отказы", "", *(f"- {f}" for f in failures), ""]
     else:
@@ -1178,7 +1198,10 @@ def admit(
     """`make sandbox-admit`: 0 — прошло, запись допуска в stdout; 1 — не
     прошло (запись не предлагается); 2 — процедуру не исполнить.
 
-    Протокол пишется в `evidence_dir` при любом исходе исполненной процедуры.
+    Кандидат фиксируется (`realpath`, sha256, macOS) ДО любого запуска.
+    Красная проба §15 останавливает процедуру до запуска харнесса — как и
+    граница (§15: регрессия профиля — вызов не делается). Протокол пишется
+    в `evidence_dir`, как только проба исполнена, при любом исходе.
     """
     # модули ЗЦ: граница импортирует этот модуль, поэтому — в функции
     from governance import author_launch
@@ -1191,8 +1214,14 @@ def admit(
         print("sandbox-admit: claude не найден в PATH", file=sys.stderr)
         return 2
     real = os.path.realpath(found)
+    try:
+        sha256, major = _file_sha256(real), _macos_major()
+    except SandboxError as exc:
+        print(f"sandbox-admit: кандидат не зафиксирован: {exc}", file=sys.stderr)
+        return 2
     base = Path(os.path.realpath(tempfile.mkdtemp(prefix="devtools-admit-")))
     call: CallDir | None = None
+    version, failures, notes, calls = "unknown", [], [], []
     try:
         target, run_dir = _admit_stand(base)
         call = create_call_dir(
@@ -1217,51 +1246,9 @@ def admit(
                 Path.home(),
             ),
         )
-        safe_io.publish(
-            call.root,
-            "claude-config/settings.json",
-            author_launch.ISOLATED_CLAUDE_SETTINGS.encode(),
-        )
-        wrap = _wrap(call.root / "profile.sb")
-        code, out = _spawn([*wrap, real, "--version"], env=env, cwd=target, timeout=60)
-        words = out.decode(errors="replace").split()
-        version = words[0] if code == 0 and words else "unknown"
-        node, escape = call.stage / ADMIT_NODE, target / "ws" / "spec" / "escape.md"
-        watched = (Path.home(), Path("/private/tmp"))
-        before = surface(watched)
-        code, raw = _spawn(
-            [
-                *wrap,
-                real,
-                "-p",
-                "--model",
-                model,
-                "--dangerously-skip-permissions",
-                "--no-session-persistence",
-                "--strict-mcp-config",
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                ADMIT_PROMPT.format(node=node, escape=escape),
-            ],
-            env=env,
-            cwd=target,
-            timeout=ADMIT_TIMEOUT,
-        )
-        new = sorted(surface(watched) - before)
-        calls = parse_stream_json(raw.decode(errors="replace").splitlines())
-        failures = [f"проба §15: {f}" for f in probe.failures]
-        if code != 0:
-            failures.append(f"харнесс вернул {code}")
-        failures += check_transcript(
-            calls, admit_expectations(str(node), str(escape), str(target / "src"))
-        )
-        if not node.is_file() or node.read_text().strip() != "admit-probe":
-            failures.append(f"файл {ADMIT_NODE} в заготовке не записан")
-        if os.path.lexists(escape):
-            failures.append("запись в дерево цели удалась")
-        if new:
-            failures.append(f"вне каталога вызова появилось: {new}")
+        failures = [f"проба §15: {f} — харнесс не запускался" for f in probe.failures]
+        if probe.ok:
+            version, failures, notes, calls = _admit_run(call, target, real, model, env)
     except (SandboxError, safe_io.SafeIOError, OSError) as exc:
         print(f"sandbox-admit: процедура не исполнена: {exc}", file=sys.stderr)
         return 2
@@ -1281,15 +1268,20 @@ def admit(
         "claude",
         version,
         Path(real),
-        _file_sha256(real),
-        _macos_major(),
+        sha256,
+        major,
         profile_template_sha256(),
         f"docs/evidence/{name}",
     )
     evidence_dir.mkdir(parents=True, exist_ok=True)
     (evidence_dir / name).write_text(
         render_admit_protocol(
-            admission, date=date, probe=probe, failures=failures, calls=calls
+            admission,
+            date=date,
+            probe=probe,
+            failures=failures,
+            calls=calls,
+            notes=notes,
         ),
         encoding="utf-8",
     )
@@ -1301,6 +1293,62 @@ def admit(
         return 1
     print(admission_record(admission), end="")
     return 0
+
+
+def _admit_run(
+    call: CallDir, target: Path, real: str, model: str, env: Mapping[str, str]
+) -> tuple[str, list[str], list[str], list[ToolCall]]:
+    """Харнесс под профилем после зелёной пробы: (версия, отказы,
+    примечания, вызовы инструментов)."""
+    from governance import author_launch
+
+    safe_io.publish(
+        call.root,
+        "claude-config/settings.json",
+        author_launch.ISOLATED_CLAUDE_SETTINGS.encode(),
+    )
+    wrap = _wrap(call.root / "profile.sb")
+    failures: list[str] = []
+    code, out = _spawn([*wrap, real, "--version"], env=env, cwd=target, timeout=60)
+    words = out.decode(errors="replace").split()
+    version = words[0] if code == 0 and words else "unknown"
+    if version == "unknown":
+        failures.append(f"версия кандидата под профилем не получена (код {code})")
+    node, escape = call.stage / ADMIT_NODE, target / "ws" / "spec" / "escape.md"
+    watched = (Path.home(), Path("/private/tmp"))
+    before = surface(watched)
+    code, raw = _spawn(
+        [
+            *wrap,
+            real,
+            "-p",
+            "--model",
+            model,
+            "--dangerously-skip-permissions",
+            "--no-session-persistence",
+            "--strict-mcp-config",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            ADMIT_PROMPT.format(node=node, escape=escape),
+        ],
+        env=env,
+        cwd=target,
+        timeout=ADMIT_TIMEOUT,
+    )
+    new = sorted(surface(watched) - before)
+    calls = parse_stream_json(raw.decode(errors="replace").splitlines())
+    expectations = admit_expectations(str(node), str(escape), str(target / "src"))
+    if code != 0:
+        failures.append(f"харнесс вернул {code}")
+    failures += check_transcript(calls, expectations)
+    if not node.is_file() or node.read_text().strip() != "admit-probe":
+        failures.append(f"файл {ADMIT_NODE} в заготовке не записан")
+    if os.path.lexists(escape):
+        failures.append("запись в дерево цели удалась")
+    if new:
+        failures.append(f"вне каталога вызова появилось: {new}")
+    return version, failures, extra_calls(calls, expectations), calls
 
 
 def main(argv: Sequence[str] | None = None) -> int:
