@@ -210,6 +210,27 @@ def ensure_dirs(root: Path, rel: str | PurePosixPath) -> None:
 
 
 @_guarded
+def create_dir(root: Path, rel: str | PurePosixPath) -> None:
+    """Создать НОВЫЙ каталог `root/rel`; существующее имя — SafeIOError.
+
+    Родители создаются цепочкой дескрипторов (как `ensure_dirs`), последний
+    компонент — `mkdir(dir_fd=)` без `exist_ok`: свежий каталог не содержит
+    заранее положенных ссылок и hardlink по построению (дизайн §12 п.1).
+    """
+    parts = _parts(rel)
+    if not parts:
+        raise SafeIOError("создание каталога без имени")
+    *parents, name = parts
+    dir_fd = _dir_chain(root, tuple(parents))
+    try:
+        os.mkdir(name, 0o755, dir_fd=dir_fd)
+    except FileExistsError as exc:
+        raise SafeIOError(f"{'/'.join(parts)!r}: уже существует") from exc
+    finally:
+        os.close(dir_fd)
+
+
+@_guarded
 def publish(root: Path, rel: str | PurePosixPath, data: bytes) -> None:
     """Записать `data` в `root/rel` новым inode поверх конечного имени."""
     parts = _parts(rel)
@@ -259,7 +280,8 @@ def _fold(text: str) -> str:
     return unicodedata.normalize("NFD", text).casefold()
 
 
-def _same_or_nested(a: PurePosixPath, b: PurePosixPath) -> bool:
+def paths_overlap(a: PurePosixPath, b: PurePosixPath) -> bool:
+    """`a` и `b` совпадают или один вложен в другой (без учёта регистра)."""
     fa, fb = PurePosixPath(_fold(str(a))), PurePosixPath(_fold(str(b)))
     return fa == fb or fa in fb.parents or fb in fa.parents
 
@@ -292,6 +314,6 @@ def validate_bundle_dir(
         )
     for git_dir in git_dirs:
         g = PurePosixPath(os.path.realpath(git_dir))
-        if _same_or_nested(full, g):
+        if paths_overlap(full, g):
             raise SafeIOError(f"bundle_dir {bundle_dir!r} пересекается с gitdir {g}")
     return PurePosixPath(*parts)
