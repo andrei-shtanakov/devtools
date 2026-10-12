@@ -1,7 +1,7 @@
-"""Каталог вызова и профиль Seatbelt авторского агента (TASK-002).
+"""Каталог вызова, профиль Seatbelt и допуск харнесса (TASK-002, TASK-003).
 
 Дизайн `docs/superpowers/specs/2026-09-29-author-agent-sandbox-design.md`
-§11, §12; сценарии §16 Z6, Z7. Генератор профиля — чистая функция, его
+§11, §12, §14; сценарии §16 Z6, Z7, Z16. Генератор профиля — чистая функция, его
 тесты переносимые; создание каталога вызова идёт через `safe_io`
 (`O_NOFOLLOW_ANY`) и проверяется только на macOS. Поведение профиля под
 настоящим `sandbox-exec` — TASK-004 (`tests/test_governance_sandbox_live.py`).
@@ -491,8 +491,9 @@ def _toml_value(value: object) -> str:
 
 
 def _contract(base: Path, *entries: dict[str, object]) -> Path:
-    # копия настоящего каркаса + записи; contracts/ не трогается
-    text = CONTRACT.read_text("utf-8")
+    # собственный каркас формата контракта + записи; contracts/ не читается
+    # и не трогается — тесты не зависят от записей, внесённых шагом H2
+    text = "schema = 1\n"
     for entry in entries:
         text += "\n[[admitted]]\n" + "".join(
             f"{k} = {_toml_value(v)}\n" for k, v in entry.items()
@@ -512,7 +513,7 @@ def test_admission_refuses_missing_contract(base: Path) -> None:
         sandbox.admission_check(base / "nope.toml")
 
 
-def test_admission_refuses_real_empty_contract_before_h2(
+def test_admission_refuses_contract_without_records(
     base: Path, harness: tuple[Path, Path, Path]
 ) -> None:
     # штатное состояние до H2: каркас без записей — отказ, кандидат не запущен
@@ -522,10 +523,24 @@ def test_admission_refuses_real_empty_contract_before_h2(
     assert not marker.exists()
 
 
+def test_real_contract_is_readable_before_and_after_h2() -> None:
+    # настоящий контракт разбирается читателем: до H2 — «нет записей»,
+    # после H2 — валидные записи (формат каркаса совместим с читателем)
+    try:
+        records = sandbox.load_admitted(CONTRACT)
+    except SandboxError as exc:
+        assert "нет записей" in str(exc)
+    else:
+        assert records
+
+
 @pytest.mark.parametrize(
     ("text", "match"),
     [
         ("schema = 2\n", "schema"),
+        ("schema = true\n", "schema"),
+        ("schema = 1.0\n", "schema"),
+        ("admitted = []\n", "schema"),
         ("schema = 1\nadmitted = 3\n", "не массив"),
         ("schema = [\n", "контракт допуска"),
     ],
@@ -679,6 +694,20 @@ def test_admission_refuses_hardlinked_candidate(
     os.link(real, base / "twin")
     with pytest.raises(SandboxError, match="st_nlink"):
         sandbox.admission_check(_contract(base, _entry(real)), path=str(path_dir))
+
+
+@pytest.mark.parametrize(
+    "fail", [OSError(2, "нет sw_vers"), subprocess.TimeoutExpired("sw_vers", 10)]
+)
+def test_macos_major_failure_is_sandbox_error(
+    monkeypatch: pytest.MonkeyPatch, fail: Exception
+) -> None:
+    def boom(*_a: object, **_k: object) -> None:
+        raise fail
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    with pytest.raises(SandboxError, match="версия macOS не определена"):
+        sandbox._macos_major()
 
 
 @darwin_only
