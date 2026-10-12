@@ -14,7 +14,9 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
+import sys
 import time
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
@@ -22,6 +24,7 @@ from types import SimpleNamespace
 import pytest
 
 from governance import author_launch, sandbox
+from governance.author_launch import TRANSCRIPTS
 from governance.sandbox import CallDir, ForbiddenRoots, SandboxError
 
 DEVTOOLS_ROOT = Path(__file__).resolve().parents[1]
@@ -856,7 +859,7 @@ def launch(base: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
     def fake_agent(argv, *, env, cwd, timeout):
         ns.spawned.append((argv, dict(env), cwd))
-        return 0
+        return author_launch.AgentRun(0, b'{"type":"result"}\n', 18)
 
     monkeypatch.setattr(sandbox, "run_probe", fake_probe)
     monkeypatch.setattr(author_launch, "_run_agent", fake_agent)
@@ -1027,7 +1030,7 @@ def _agent_writes(launch, monkeypatch, files: dict[str, bytes], code: int = 0):
         for rel, data in files.items():
             (stage / rel).parent.mkdir(parents=True, exist_ok=True)
             (stage / rel).write_bytes(data)
-        return code
+        return author_launch.AgentRun(code)
 
     monkeypatch.setattr(author_launch, "_run_agent", agent)
     return seen
@@ -1073,6 +1076,8 @@ def test_launch_failed_call_does_not_transfer(launch, monkeypatch, code, files, 
     _agent_writes(launch, monkeypatch, files, code=code)  # type: ignore[arg-type]
     outcome = _launch(launch)
     assert not outcome.ok and text in outcome.reason
+    (attempt,) = _transcripts(launch.run_dir)
+    assert outcome.reason.endswith(f"; транскрипт: {TRANSCRIPTS}/{attempt.name}")
     assert not (launch.target / "ws/spec/10-requirements.md").exists()
 
 
@@ -1262,6 +1267,9 @@ def test_author_argv_runs_admitted_binary_with_pinned_flags():
         "--dangerously-skip-permissions",
         "--no-session-persistence",
         "--strict-mcp-config",
+        "--output-format",
+        "stream-json",
+        "--verbose",
         "PROMPT",
     ]
 
@@ -1339,26 +1347,26 @@ def test_check_config_refuses_unrecognised_values(
 
 def test_run_agent_kills_the_group_after_exit(base):
     pidfile = base / "pid"
-    code = author_launch._run_agent(
+    run = author_launch._run_agent(
         ["/bin/sh", "-c", f"sleep 30 & echo $! > {pidfile}; exit 0"],
         env={"PATH": "/usr/bin:/bin"},
         cwd=base,
         timeout=10,
     )
-    assert code == 0
+    assert run.code == 0
     _assert_dead(int(pidfile.read_text()))
 
 
 def test_run_agent_timeout_kills_the_group(base):
     pidfile = base / "pid"
     started = time.monotonic()
-    code = author_launch._run_agent(
+    run = author_launch._run_agent(
         ["/bin/sh", "-c", f"sleep 30 & echo $! > {pidfile}; sleep 30"],
         env={"PATH": "/usr/bin:/bin"},
         cwd=base,
         timeout=1,
     )
-    assert code is None and time.monotonic() - started < 10
+    assert run.code is None and time.monotonic() - started < 10
     _assert_dead(int(pidfile.read_text()))
 
 
@@ -1371,6 +1379,107 @@ def _assert_dead(pid: int) -> None:
             return
         time.sleep(0.05)
     raise AssertionError(f"потомок {pid} пережил SIGKILL группе")
+
+
+# --- транскрипт вызова (stream-json, TASK-007) -------------------------------
+
+
+def test_run_agent_captures_stdout(base):
+    run = author_launch._run_agent(
+        ["/bin/sh", "-c", "printf 'a\\nb\\n'; exit 3"],
+        env={"PATH": "/usr/bin:/bin"},
+        cwd=base,
+        timeout=10,
+    )
+    assert run == author_launch.AgentRun(3, b"a\nb\n", 4, True)
+    assert not run.truncated
+
+
+def test_run_agent_caps_transcript_and_drains_the_rest(base, monkeypatch):
+    """Сверх потолка байты отбрасываются, но канал дочитан — агент не
+    блокируется на записи и выходит сам."""
+    monkeypatch.setattr(author_launch, "TRANSCRIPT_LIMIT", 10)
+    run = author_launch._run_agent(
+        ["/bin/sh", "-c", "head -c 300000 /dev/zero | tr '\\0' x; exit 0"],
+        env={"PATH": "/usr/bin:/bin"},
+        cwd=base,
+        timeout=20,
+    )
+    assert run.code == 0 and run.stdout == b"x" * 10
+    assert run.seen == 300000 and run.truncated and run.complete
+
+
+def test_run_agent_detached_pipe_holder_bounded_by_grace(base, monkeypatch):
+    """Потомок в своей сессии держит канал после выхода агента: чтение
+    обрывается через `TRANSCRIPT_GRACE`, транскрипт помечен неполным."""
+    monkeypatch.setattr(author_launch, "TRANSCRIPT_GRACE", 0.5)
+    pidfile = base / "pid"
+    child = (
+        "import os,sys,time; os.setsid(); "
+        f"open({str(pidfile)!r},'w').write(str(os.getpid())); time.sleep(30)"
+    )
+    started = time.monotonic()
+    run = author_launch._run_agent(
+        [
+            "/bin/sh",
+            "-c",
+            (
+                f'echo hi; {sys.executable} -c "{child}" & '
+                f"while [ ! -s {pidfile} ]; do sleep 0.05; done; exit 0"
+            ),
+        ],
+        env={"PATH": "/usr/bin:/bin"},
+        cwd=base,
+        timeout=10,
+    )
+    try:
+        assert run.code == 0 and run.stdout == b"hi\n" and not run.complete
+        assert time.monotonic() - started < 8
+    finally:
+        os.kill(int(pidfile.read_text()), signal.SIGKILL)
+
+
+def _transcripts(run_dir: Path) -> list[Path]:
+    return sorted((run_dir / author_launch.TRANSCRIPTS).iterdir())
+
+
+@darwin_only
+def test_launch_saves_transcript_per_attempt(launch, monkeypatch):
+    """Каждая попытка — новый каталог в `run_dir` (вне записи агента), прежний
+    не перезаписан; meta называет код, объём, полноту."""
+    _agent_writes(launch, monkeypatch, {"10-requirements.md": b"node\n"})
+    assert _launch(launch).ok
+    first = _transcripts(launch.run_dir)
+    assert len(first) == 1
+    assert (first[0] / "stream.jsonl").read_bytes() == b""
+    (launch.target / "ws/spec/10-requirements.md").unlink()
+    stream = b'{"type":"user"}\n'
+    monkeypatch.setattr(
+        author_launch,
+        "_run_agent",
+        lambda argv, **kw: author_launch.AgentRun(1, stream, 99, False),
+    )
+    outcome = _launch(launch)
+    assert outcome.code == 1
+    both = _transcripts(launch.run_dir)
+    assert len(both) == 2 and first[0] in both
+    (second,) = [d for d in both if d != first[0]]
+    assert (second / "stream.jsonl").read_bytes() == stream
+    meta = json.loads((second / "meta.json").read_text())
+    assert meta["node"] == "10-requirements.md" and meta["exit_code"] == 1
+    assert meta["bytes_seen"] == 99 and meta["bytes_kept"] == len(stream)
+    assert meta["truncated"] is True and meta["complete"] is False
+
+
+@darwin_only
+def test_launch_refuses_transfer_when_transcript_unsaved(launch, monkeypatch):
+    """Ошибка записи транскрипта — явный отказ: файл узла не переносится."""
+    _agent_writes(launch, monkeypatch, {"10-requirements.md": b"node\n"})
+    (launch.run_dir / author_launch.TRANSCRIPTS).write_text("not a dir")
+    outcome = _launch(launch)
+    assert outcome.code == author_launch.REFUSED
+    assert "транскрипт вызова не записан" in outcome.reason
+    assert not (launch.target / "ws/spec/10-requirements.md").exists()
 
 
 # --- процедура допуска `make sandbox-admit` (TASK-006) ------------------------

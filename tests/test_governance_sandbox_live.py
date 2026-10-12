@@ -690,6 +690,29 @@ def test_launch_n1_upstream_hashes_from_the_real_bundle(live: Live) -> None:
     assert published == f'upstream_hashes: {{charter: "{expected}"}}\n'
 
 
+def test_launch_transcript_is_written_by_runner_not_agent(live: Live) -> None:
+    """Транскрипт — stdout агента, записанный раннером в `run_dir`; сам агент
+    в каталог транскриптов писать не может (запретный корень §12 п.2)."""
+    from governance.ops import RealOps
+
+    forged = live.run_dir / "author-transcripts" / "forged"
+    live.agent(
+        'echo \'{"type":"user","tool":"x"}\'\n'
+        f'mkdir -p "{forged}" 2>/dev/null && echo forged >> "$out"\n'
+        'printf "node\\n" >> "$out"\n'
+    )
+    outcome = RealOps().author(
+        live.call("ws/spec", "10-requirements.md"), "requirements", "s"
+    )
+    assert outcome.ok, outcome
+    assert (live.target / "ws/spec/10-requirements.md").read_bytes() == b"node\n"
+    assert not forged.exists()
+    (attempt,) = (live.run_dir / "author-transcripts").iterdir()
+    assert (attempt / "stream.jsonl").read_bytes() == b'{"type":"user","tool":"x"}\n'
+    meta = json.loads((attempt / "meta.json").read_text())
+    assert meta["exit_code"] == 0 and meta["complete"] is True
+
+
 def test_launch_detached_descendant_cannot_change_transferred_bytes(
     live: Live,
 ) -> None:
