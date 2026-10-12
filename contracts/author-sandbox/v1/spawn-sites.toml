@@ -21,17 +21,13 @@
 #
 # Замер 2026-10-11 (AST, все вызовы — `subprocess.run`): 80 мест, из них 70 с
 # литеральной программой (`git` 43, `gh` 22, `tmux` 2, `spec-runner` 2,
-# `security` 1) и 10 ниже. Места `_run_agent` уходят в
-# `governance/author_launch` (ЗЦ) в TASK-005 — тем же PR их записи удаляются.
+# `security` 1) и 10 поимённых. TASK-005 (2026-10-12): два места
+# `ops._run_agent` переехали в `governance/author_launch` (ЗЦ) вместе с
+# литеральным `security` токена связки — их записи удалены; вне ЗЦ поимённых
+# мест 8. Запись, места которой в коде больше нет, — тоже красный тест.
 
 schema = 1
 allowed_literal_programs = ["git", "gh", "tmux", "spec-runner", "security"]
-
-[[site]]
-module = "governance/ops.py"
-function = "_run_agent"
-count = 2
-reason = "сегодняшний запуск авторского агента (claude/codex, disp); переезжает в governance/author_launch в TASK-005"
 
 [[site]]
 module = "governance/ops.py"

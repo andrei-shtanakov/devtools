@@ -338,12 +338,12 @@ class FakeOps:
 
     def author(
         self,
-        target_dir: str,
+        call,
         kind: str,
         subject: str,
-        bundle_dir: str,
         brief_context: dict[str, object] | None = None,
     ) -> int:
+        target_dir, bundle_dir = call.target_dir, call.bundle_dir
         self.calls.append(("author", kind))
         self.authored.append(kind)
         self.author_contexts.append((kind, brief_context))
@@ -1325,17 +1325,16 @@ class CoveredBriefOps(FakeOps):
 
     def author(
         self,
-        target_dir,
+        call,
         kind,
         subject,
-        bundle_dir,
         brief_context=None,
     ):
+        target_dir, bundle_dir = call.target_dir, call.bundle_dir
         rc = super().author(
-            target_dir,
+            call,
             kind,
             subject,
-            bundle_dir,
             brief_context=brief_context,
         )
         if kind == "charter":
@@ -1555,21 +1554,19 @@ def test_brief_coverage_stops_after_requirements_before_next_paid_author(
         первой волны — иначе тест краснел бы не на своём предмете.
         """
 
-        def author(self, target_dir, kind, subject, bundle_dir, brief_context=None):
+        def author(self, call, kind, subject, brief_context=None):
             if kind == "requirements":
                 return FakeOps.author(
                     self,
-                    target_dir,
+                    call,
                     kind,
                     subject,
-                    bundle_dir,
                     brief_context=brief_context,
                 )
             return super().author(
-                target_dir,
+                call,
                 kind,
                 subject,
-                bundle_dir,
                 brief_context=brief_context,
             )
 
@@ -1604,17 +1601,16 @@ def test_brief_source_pin_is_required_by_prospective_gate(
     class MissingSourcePinOps(FakeOps):
         def author(
             self,
-            target_dir,
+            call,
             kind,
             subject,
-            bundle_dir,
             brief_context=None,
         ):
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
             rc = super().author(
-                target_dir,
+                call,
                 kind,
                 subject,
-                bundle_dir,
                 brief_context=brief_context,
             )
             path = Path(target_dir) / bundle_dir
@@ -1664,13 +1660,13 @@ def test_real_candidate_gate_accepts_materialized_brief_source(
     class CliBriefOps(_DtSmokeOps):
         def author(
             self,
-            target_dir,
+            call,
             kind,
             subject,
-            bundle_dir,
             brief_context=None,
         ):
-            rc = _DtSmokeOps.author(self, target_dir, kind, subject, bundle_dir)
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
+            rc = _DtSmokeOps.author(self, call, kind, subject)
             bundle = Path(target_dir) / bundle_dir
             if kind == "charter":
                 assert brief_context is not None
@@ -2807,12 +2803,12 @@ def test_resume_from_stopped_author_reruns_unfinished_author(
     original_author = ops.author
     fail_once = {"on": True}
 
-    def flaky_author(target_dir, kind, subject, bundle_dir):
+    def flaky_author(call, kind, subject):
         if kind == "requirements" and fail_once["on"]:
             fail_once["on"] = False
             ops.calls.append(("author", kind))
             return 1
-        return original_author(target_dir, kind, subject, bundle_dir)
+        return original_author(call, kind, subject)
 
     ops.author = flaky_author  # type: ignore[method-assign]
     run_id = "r-resume-author"
@@ -4142,10 +4138,9 @@ def test_gate_stops_on_dsl_empty_bundle(
     распознаваемых DSL-заголовков — стоп, а не вакуумный зелёный."""
 
     class DialectOps(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
-            rc = super().author(target_dir, kind, subject, bundle_dir)
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
+            rc = super().author(call, kind, subject)
             if kind == "behaviour-spec":
                 path = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
                 path.write_text("### BS-001 — диалект без DSL\n")
@@ -4168,10 +4163,9 @@ def test_gate_dsl_empty_design_message_names_design_grammar(
     `#### FR-NN:` / `#### BEH-NN:` requirements/behaviour-spec."""
 
     class _Ops(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
-            rc = super().author(target_dir, kind, subject, bundle_dir)
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
+            rc = super().author(call, kind, subject)
             if kind != "design":
                 return rc
             bundle = Path(target_dir) / bundle_dir
@@ -4218,10 +4212,9 @@ def test_gate_accepts_design_heading_with_nonstandard_middot_spacing(
     стороны и ложно стопил бы такой, реально распознаваемый, заголовок."""
 
     class _Ops(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
-            rc = super().author(target_dir, kind, subject, bundle_dir)
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
+            rc = super().author(call, kind, subject)
             bundle = Path(target_dir) / bundle_dir
             if kind == "requirements":
                 path = bundle / "10-requirements.md"
@@ -4274,10 +4267,9 @@ def test_gate_unpinned_draft_edge_stops_locally(
     даже когда CLI вернул 0."""
 
     class UnpinnedAuthorOps(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
-            rc = super().author(target_dir, kind, subject, bundle_dir)
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
+            rc = super().author(call, kind, subject)
             if kind == "behaviour-spec":
                 path = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
                 path.write_text(
@@ -4304,10 +4296,9 @@ def test_gate_pinned_draft_edge_passes_local_guard(
     tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     class PinnedAuthorOps(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
-            rc = super().author(target_dir, kind, subject, bundle_dir)
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
+            rc = super().author(call, kind, subject)
             if kind == "behaviour-spec":
                 path = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
                 path.write_text(
@@ -4343,10 +4334,9 @@ def test_gate_stale_draft_pin_stops_locally(
     fail-open по одному лишь наличию 40 hex."""
 
     class StalePinOps(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
-            rc = super().author(target_dir, kind, subject, bundle_dir)
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
+            rc = super().author(call, kind, subject)
             if kind == "behaviour-spec":
                 path = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
                 path.write_text(
@@ -4379,10 +4369,9 @@ def test_gate_inline_upstream_hashes_form_passes(
     проходить локальный гард наравне с блочной."""
 
     class InlinePinOps(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
-            rc = super().author(target_dir, kind, subject, bundle_dir)
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
+            rc = super().author(call, kind, subject)
             if kind == "behaviour-spec":
                 pin = blob_sha1("#### FR-01: x\n**Priority**: Must\n")
                 path = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
@@ -4416,10 +4405,9 @@ def test_gate_foreign_toplevel_key_is_not_a_pin(
     обязан быть GC-UNPINNED, не fail-open."""
 
     class ForeignKeyOps(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
-            rc = super().author(target_dir, kind, subject, bundle_dir)
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
+            rc = super().author(call, kind, subject)
             if kind == "behaviour-spec":
                 real = blob_sha1("#### FR-01: x\n**Priority**: Must\n")
                 path = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
@@ -4583,10 +4571,9 @@ def _design_pin_ops(bad_edge: str) -> type:
     записан (GC-UNPINNED-сценарий)."""
 
     class _Ops(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
-            rc = super().author(target_dir, kind, subject, bundle_dir)
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
+            rc = super().author(call, kind, subject)
             if kind != "design":
                 return rc
             bundle = Path(target_dir) / bundle_dir
@@ -4660,10 +4647,9 @@ def _design_undeclared_edge_ops(missing_edge: str) -> type:
     prospective-находкой)."""
 
     class _Ops(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
-            rc = super().author(target_dir, kind, subject, bundle_dir)
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
+            rc = super().author(call, kind, subject)
             if kind != "design":
                 return rc
             bundle = Path(target_dir) / bundle_dir
@@ -4770,10 +4756,9 @@ def _design_stale_ops(stale_edge: str) -> type:
     (GC-STALE-сценарий)."""
 
     class _Ops(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
-            rc = super().author(target_dir, kind, subject, bundle_dir)
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
+            rc = super().author(call, kind, subject)
             if kind != "design":
                 return rc
             bundle = Path(target_dir) / bundle_dir
@@ -4847,9 +4832,8 @@ def test_gate_stops_on_uncovered_architect_question(
     )
 
     class UncoveredQOps(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
             self.calls.append(("author", kind))
             self.authored.append(kind)
             bundle = Path(target_dir) / bundle_dir
@@ -4877,7 +4861,7 @@ def test_gate_stops_on_uncovered_architect_question(
                     encoding="utf-8",
                 )
                 return 0
-            return super().author(target_dir, kind, subject, bundle_dir)
+            return super().author(call, kind, subject)
 
     ops = UncoveredQOps(facts=GREEN_PR_FACTS)
     state = _drive_waves_to(tmp_path, "r-design-uncovered-q", ops, monkeypatch, 4)
@@ -5368,11 +5352,10 @@ def test_design_node_end_to_end_smoke(tmp_path: Path, runs_root, monkeypatch) ->
     )
 
     class CoveredQOps(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
             if kind not in ("requirements", "design"):
-                return super().author(target_dir, kind, subject, bundle_dir)
+                return super().author(call, kind, subject)
             self.calls.append(("author", kind))
             self.authored.append(kind)
             bundle = Path(target_dir) / bundle_dir
@@ -5535,10 +5518,9 @@ def test_gate_decomposition_unpinned_edge_stops(
     объявляет design, но `upstream_hashes` пуст."""
 
     class _Ops(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
-            rc = super().author(target_dir, kind, subject, bundle_dir)
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
+            rc = super().author(call, kind, subject)
             if kind != "decomposition":
                 return rc
             path = Path(target_dir) / bundle_dir / "30-decomposition.md"
@@ -5578,10 +5560,9 @@ def test_gate_decomposition_stale_pin_stops(
     worktree."""
 
     class _Ops(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
-            rc = super().author(target_dir, kind, subject, bundle_dir)
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
+            rc = super().author(call, kind, subject)
             if kind != "decomposition":
                 return rc
             path = Path(target_dir) / bundle_dir / "30-decomposition.md"
@@ -5623,10 +5604,9 @@ def test_gate_decomposition_undeclared_design_edge_stops(
     молча."""
 
     class _Ops(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
-            rc = super().author(target_dir, kind, subject, bundle_dir)
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
+            rc = super().author(call, kind, subject)
             if kind != "decomposition":
                 return rc
             path = Path(target_dir) / bundle_dir / "30-decomposition.md"
@@ -5665,10 +5645,9 @@ def test_gate_decomposition_dsl_empty_stops(
     ребро объявлено, но ни одного распознаваемого DT-заголовка."""
 
     class _Ops(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
-            rc = super().author(target_dir, kind, subject, bundle_dir)
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
+            rc = super().author(call, kind, subject)
             if kind != "decomposition":
                 return rc
             bundle = Path(target_dir) / bundle_dir
@@ -5714,9 +5693,8 @@ def test_gate_dt_graph_finding_stops(tmp_path: Path, runs_root, monkeypatch) -> 
     )
 
     class _Ops(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
             if kind == "behaviour-spec":
                 self.calls.append(("author", kind))
                 self.authored.append(kind)
@@ -5724,7 +5702,7 @@ def test_gate_dt_graph_finding_stops(tmp_path: Path, runs_root, monkeypatch) -> 
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(beh_two, encoding="utf-8")
                 return 0
-            return super().author(target_dir, kind, subject, bundle_dir)
+            return super().author(call, kind, subject)
 
     ops = _Ops(facts=GREEN_PR_FACTS)
     state = _drive_waves_to(tmp_path, "r-decomposition-dt-graph", ops, monkeypatch, 5)
@@ -5757,9 +5735,8 @@ def test_gate_dt_graph_non_fatal_finding_is_surfaced_as_warning(
     )
 
     class _Ops(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
             if kind == "behaviour-spec":
                 self.calls.append(("author", kind))
                 self.authored.append(kind)
@@ -5808,7 +5785,7 @@ def test_gate_dt_graph_non_fatal_finding_is_surfaced_as_warning(
                     encoding="utf-8",
                 )
                 return 0
-            return super().author(target_dir, kind, subject, bundle_dir)
+            return super().author(call, kind, subject)
 
     ops = _Ops(facts=GREEN_PR_FACTS)
     state = _drive_waves_to(tmp_path, "r-dt-graph-warning", ops, monkeypatch, 5)
@@ -5836,9 +5813,8 @@ def test_gate_dt_graph_finding_stops_on_underivable_group(
     )
 
     class _Ops(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
             if kind == "behaviour-spec":
                 self.calls.append(("author", kind))
                 self.authored.append(kind)
@@ -5887,7 +5863,7 @@ def test_gate_dt_graph_finding_stops_on_underivable_group(
                     encoding="utf-8",
                 )
                 return 0
-            return super().author(target_dir, kind, subject, bundle_dir)
+            return super().author(call, kind, subject)
 
     ops = _Ops(facts=GREEN_PR_FACTS)
     state = _drive_waves_to(
@@ -5999,10 +5975,9 @@ def test_gate_acceptance_unpinned_requirements_edge_stops(
     пин (только behaviour-spec)."""
 
     class _Ops(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
-            rc = super().author(target_dir, kind, subject, bundle_dir)
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
+            rc = super().author(call, kind, subject)
             if kind != "acceptance":
                 return rc
             bundle = Path(target_dir) / bundle_dir
@@ -6045,10 +6020,9 @@ def test_gate_acceptance_stale_behaviour_pin_stops(
     behaviour-spec в worktree."""
 
     class _Ops(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
-            rc = super().author(target_dir, kind, subject, bundle_dir)
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
+            rc = super().author(call, kind, subject)
             if kind != "acceptance":
                 return rc
             bundle = Path(target_dir) / bundle_dir
@@ -6090,10 +6064,9 @@ def test_gate_acceptance_undeclared_edge_stops(
     находкой, не пропускаться молча."""
 
     class _Ops(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
-            rc = super().author(target_dir, kind, subject, bundle_dir)
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
+            rc = super().author(call, kind, subject)
             if kind != "acceptance":
                 return rc
             path = Path(target_dir) / bundle_dir / "25-acceptance.md"
@@ -6131,10 +6104,9 @@ def test_gate_decomposition_acceptance_edge_unpinned_stops(
     пин (design запинован верно)."""
 
     class _Ops(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
-            rc = super().author(target_dir, kind, subject, bundle_dir)
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
+            rc = super().author(call, kind, subject)
             if kind != "decomposition":
                 return rc
             bundle = Path(target_dir) / bundle_dir
@@ -6182,10 +6154,9 @@ def test_gate_acceptance_dsl_empty_stops(
     Must-множества."""
 
     class _Ops(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
-            rc = super().author(target_dir, kind, subject, bundle_dir)
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
+            rc = super().author(call, kind, subject)
             if kind != "acceptance":
                 return rc
             bundle = Path(target_dir) / bundle_dir
@@ -6234,9 +6205,8 @@ def test_gate_acceptance_dsl_declaration_line_passes_dsl_empty(
     прогона, что `test_today_reality_agent_merges`)."""
 
     class _Ops(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
             if kind == "requirements":
                 self.calls.append(("author", kind))
                 self.authored.append(kind)
@@ -6271,7 +6241,7 @@ def test_gate_acceptance_dsl_declaration_line_passes_dsl_empty(
                     encoding="utf-8",
                 )
                 return 0
-            return super().author(target_dir, kind, subject, bundle_dir)
+            return super().author(call, kind, subject)
 
     ops = _Ops(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
     state = _drive_waves_to(
@@ -6315,9 +6285,8 @@ def test_gate_ac_coverage_finding_stops(tmp_path: Path, runs_root, monkeypatch) 
     )
 
     class _Ops(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
             if kind == "requirements":
                 self.calls.append(("author", kind))
                 self.authored.append(kind)
@@ -6352,7 +6321,7 @@ def test_gate_ac_coverage_finding_stops(tmp_path: Path, runs_root, monkeypatch) 
                     encoding="utf-8",
                 )
                 return 0
-            return super().author(target_dir, kind, subject, bundle_dir)
+            return super().author(call, kind, subject)
 
     ops = _Ops(facts=GREEN_PR_FACTS)
     state = _drive_waves_to(tmp_path, "r-acceptance-ac-coverage", ops, monkeypatch, 4)
@@ -6367,7 +6336,8 @@ def test_gate_ac_coverage_finding_stops(tmp_path: Path, runs_root, monkeypatch) 
 
 def _orphan_ops_class(beh_extra: str):
     class _Ops(FakeOps):
-        def author(self, target_dir, kind, subject, bundle_dir, brief_context=None):
+        def author(self, call, kind, subject, brief_context=None):
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
             if kind == "requirements":
                 self.calls.append(("author", kind))
                 self.authored.append(kind)
@@ -6375,7 +6345,7 @@ def _orphan_ops_class(beh_extra: str):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("#### FR-01: x\n**Priority**: Must\n", encoding="utf-8")
                 return 0
-            rc = super().author(target_dir, kind, subject, bundle_dir, brief_context)
+            rc = super().author(call, kind, subject, brief_context)
             if kind == "behaviour-spec":
                 path = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
                 path.write_text(
@@ -6440,9 +6410,8 @@ def test_gate_warning_survives_a_later_fatal_in_the_same_gate_call(
     )
 
     class _Warned(FakeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
             if kind == "behaviour-spec":
                 self.calls.append(("author", kind))
                 self.authored.append(kind)
@@ -6491,7 +6460,7 @@ def test_gate_warning_survives_a_later_fatal_in_the_same_gate_call(
                     encoding="utf-8",
                 )
                 return 0
-            return super().author(target_dir, kind, subject, bundle_dir)
+            return super().author(call, kind, subject)
 
     ops = _with_delivers(_Warned, "acceptance#AC-99")(facts=GREEN_PR_FACTS)
     state = _drive_waves_to(tmp_path, "r-warn-then-fatal", ops, monkeypatch, 5)
@@ -6614,7 +6583,8 @@ class _DtSmokeOps(FakeOps):
     — в отличие от дефолтного `FakeOps.author` (DT-01-solo), несёт ребро
     Depends on, нужное смоуку ниже для проверки рендера моста."""
 
-    def author(self, target_dir: str, kind: str, subject: str, bundle_dir: str) -> int:
+    def author(self, call, kind: str, subject: str) -> int:
+        target_dir, bundle_dir = call.target_dir, call.bundle_dir
         if kind == "charter":
             self.calls.append(("author", kind))
             self.authored.append(kind)
@@ -6665,7 +6635,7 @@ class _DtSmokeOps(FakeOps):
         # (super): пишет валидный 25-acceptance.md по ФАКТИЧЕСКОМУ
         # requirements/behaviour-spec этого фикстура (FR-01 Must из
         # `_dt_smoke_requirements_body`) — Task 5 плана acceptance-node.
-        return super().author(target_dir, kind, subject, bundle_dir)
+        return super().author(call, kind, subject)
 
 
 def test_decomposition_node_end_to_end_smoke_and_deliver(
@@ -6782,9 +6752,8 @@ def test_decomposition_node_smoke_bundle_with_uncovered_beh_stops_gate(
     )
 
     class _GapOps(_DtSmokeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
             if kind == "behaviour-spec":
                 self.calls.append(("author", kind))
                 self.authored.append(kind)
@@ -6799,7 +6768,7 @@ def test_decomposition_node_smoke_bundle_with_uncovered_beh_stops_gate(
                     encoding="utf-8",
                 )
                 return 0
-            return super().author(target_dir, kind, subject, bundle_dir)
+            return super().author(call, kind, subject)
 
     ops = _GapOps(facts=GREEN_PR_FACTS)
     run_id = "r-decomposition-e2e-smoke-gap"
@@ -6828,9 +6797,8 @@ def test_acceptance_node_smoke_bundle_with_uncovered_must_fr_stops_gate(
     req_gap_extra = "#### FR-02: y\n**Priority**: Should\n"
 
     class _AcGapOps(_DtSmokeOps):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
             if kind == "requirements":
                 self.calls.append(("author", kind))
                 self.authored.append(kind)
@@ -6876,7 +6844,7 @@ def test_acceptance_node_smoke_bundle_with_uncovered_must_fr_stops_gate(
                     encoding="utf-8",
                 )
                 return 0
-            return super().author(target_dir, kind, subject, bundle_dir)
+            return super().author(call, kind, subject)
 
     ops = _AcGapOps(facts=GREEN_PR_FACTS)
     run_id = "r-acceptance-e2e-smoke-gap"
@@ -6933,10 +6901,9 @@ def _strip_dt_contract(ops_cls, *, drop_version: bool, drop_delivers: bool):
     """
 
     class _Ops(ops_cls):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
-            rc = super().author(target_dir, kind, subject, bundle_dir)
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
+            rc = super().author(call, kind, subject)
             if kind != "decomposition":
                 return rc
             path = Path(target_dir) / bundle_dir / "30-decomposition.md"
@@ -7039,10 +7006,9 @@ def _with_delivers(ops_cls, source_ref: str):
     """
 
     class _Ops(ops_cls):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
-            rc = super().author(target_dir, kind, subject, bundle_dir)
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
+            rc = super().author(call, kind, subject)
             if kind != "decomposition":
                 return rc
             path = Path(target_dir) / bundle_dir / "30-decomposition.md"
@@ -7163,10 +7129,9 @@ def test_gate_rejects_an_ambiguous_delivers_source(
     """
 
     class _Doubled(_with_delivers(FakeOps, "charter#CON-01")):
-        def author(
-            self, target_dir: str, kind: str, subject: str, bundle_dir: str
-        ) -> int:
-            rc = super().author(target_dir, kind, subject, bundle_dir)
+        def author(self, call, kind: str, subject: str) -> int:
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
+            rc = super().author(call, kind, subject)
             if kind == "charter":
                 path = Path(target_dir) / bundle_dir / "00-charter.md"
                 path.write_text(
@@ -8850,17 +8815,17 @@ def test_edge_tripwire_catches_result_created_for_future_wave(
     runs_root,
     monkeypatch,
 ) -> None:
-    """Подсадка ЗАРАНЕЕ: до вызова `edge-check/` нет вовсе, после — есть
-    PASS для непроверенной волны. «Каталога нет» — тоже состояние."""
+    """Подсадка ЗАРАНЕЕ: до вызова `edge-check/` пуст (раннер создаёт его
+    до снимка — там стоит часовой пробы песочницы, §15), после — есть PASS
+    для непроверенной волны."""
     planted: list[Path] = []
 
     class _Plant(FakeOps):
-        def author(self, target_dir, kind, subject, bundle_dir, brief_context=None):
-            rc = super().author(
-                target_dir, kind, subject, bundle_dir, brief_context=brief_context
-            )
+        def author(self, call, kind, subject, brief_context=None):
+            rc = super().author(call, kind, subject, brief_context=brief_context)
             if kind == "charter":
-                assert not (rs.run_dir("r-plant-new") / "edge-check").exists()
+                edge = rs.run_dir("r-plant-new") / "edge-check"
+                assert edge.is_dir() and not any(edge.iterdir())
                 planted.append(_plant_pass("r-plant-new", 2, "requirements"))
             return rc
 
@@ -8878,10 +8843,8 @@ def test_edge_tripwire_catches_overwrite_of_existing_result(
     planted: list[Path] = []
 
     class _Overwrite(_EdgeWritingOps):
-        def author(self, target_dir, kind, subject, bundle_dir, brief_context=None):
-            rc = super().author(
-                target_dir, kind, subject, bundle_dir, brief_context=brief_context
-            )
+        def author(self, call, kind, subject, brief_context=None):
+            rc = super().author(call, kind, subject, brief_context=brief_context)
             if kind == "requirements":
                 w1 = rs.run_dir("r-plant-over") / "edge-check/w1"
                 real = min(w1.glob("*.json"))
@@ -8947,10 +8910,8 @@ def test_edge_tripwire_resume_reauthors_the_suspect_node(
     planted: list[Path] = []
 
     class _PlantOnce(FakeOps):
-        def author(self, target_dir, kind, subject, bundle_dir, brief_context=None):
-            rc = super().author(
-                target_dir, kind, subject, bundle_dir, brief_context=brief_context
-            )
+        def author(self, call, kind, subject, brief_context=None):
+            rc = super().author(call, kind, subject, brief_context=brief_context)
             if kind == "charter" and not planted:
                 planted.append(_plant_pass("r-plant-resume", 2, "requirements"))
             return rc
@@ -9030,10 +8991,9 @@ def test_edge_tripwire_moves_changed_wave_sibling(
     done: list[str] = []
 
     class _Sibling(FakeOps):
-        def author(self, target_dir, kind, subject, bundle_dir, brief_context=None):
-            rc = super().author(
-                target_dir, kind, subject, bundle_dir, brief_context=brief_context
-            )
+        def author(self, call, kind, subject, brief_context=None):
+            target_dir, bundle_dir = call.target_dir, call.bundle_dir
+            rc = super().author(call, kind, subject, brief_context=brief_context)
             if kind == "design" and not done:
                 done.append(kind)
                 bundle = Path(target_dir) / bundle_dir
@@ -9068,10 +9028,8 @@ def test_edge_tripwire_records_stop_before_moving(
     import shutil as _shutil
 
     class _Plant(FakeOps):
-        def author(self, target_dir, kind, subject, bundle_dir, brief_context=None):
-            rc = super().author(
-                target_dir, kind, subject, bundle_dir, brief_context=brief_context
-            )
+        def author(self, call, kind, subject, brief_context=None):
+            rc = super().author(call, kind, subject, brief_context=brief_context)
             if kind == "charter":
                 _plant_pass("r-plant-fail", 2, "requirements")
                 monkeypatch.setattr(
@@ -9097,10 +9055,8 @@ def test_edge_tripwire_status_survives_unexpected_failure(
     import shutil as _shutil
 
     class _Plant(FakeOps):
-        def author(self, target_dir, kind, subject, bundle_dir, brief_context=None):
-            rc = super().author(
-                target_dir, kind, subject, bundle_dir, brief_context=brief_context
-            )
+        def author(self, call, kind, subject, brief_context=None):
+            rc = super().author(call, kind, subject, brief_context=brief_context)
             if kind == "charter":
                 _plant_pass("r-plant-boom", 2, "requirements")
                 monkeypatch.setattr(
@@ -9235,10 +9191,9 @@ def _plant_config(tmp_path, monkeypatch, run_id: str, plant) -> object:
     monkeypatch.setattr(runner, "_claude_home", lambda: home / ".claude")
 
     class _Plant(FakeOps):
-        def author(self, target_dir, kind, subject, bundle_dir, brief_context=None):
-            rc = super().author(
-                target_dir, kind, subject, bundle_dir, brief_context=brief_context
-            )
+        def author(self, call, kind, subject, brief_context=None):
+            target_dir = call.target_dir
+            rc = super().author(call, kind, subject, brief_context=brief_context)
             if kind == "charter":
                 plant(Path(target_dir), home)
             return rc
@@ -9362,10 +9317,8 @@ def test_config_surface_watches_scripts_that_hooks_reference(
     monkeypatch.setattr(runner, "_claude_home", lambda: home / ".claude")
 
     class _Swap(FakeOps):
-        def author(self, target_dir, kind, subject, bundle_dir, brief_context=None):
-            rc = super().author(
-                target_dir, kind, subject, bundle_dir, brief_context=brief_context
-            )
+        def author(self, call, kind, subject, brief_context=None):
+            rc = super().author(call, kind, subject, brief_context=brief_context)
             if kind == "charter":
                 script.write_text("#!/bin/sh\ncurl evil\n", encoding="utf-8")
             return rc
@@ -10194,3 +10147,404 @@ def test_recovery_status_without_envelope_is_hard_stop(  # T41
     assert state.status == "stopped_interview"
     assert [c[0] for c in ops.discovery_calls] == ["start", "status"]
     assert _stop_reason("r-g6").startswith("session_state_unknown")
+
+
+# --- TASK-005 песочницы: граница запуска через подключение к runner ----------
+#
+# `ops.author`/`ops.author_disp` подменяются НАСТОЯЩИМИ `RealOps.author`/
+# `RealOps.author_disp` (граница `author_launch`); Darwin-условия и допуск —
+# переносимые двойники, ломается ровно одно условие клетки. Исполняемые файлы
+# `claude`/`codex` в PATH — маркеры: их запуск оставил бы файл.
+
+
+def _tree(root: Path) -> dict[str, str]:
+    """Снимок дерева цели (включая `.git`): путь → тип и sha256 байтов."""
+    import hashlib
+
+    out: dict[str, str] = {}
+    for path in sorted(root.rglob("*")):
+        rel = str(path.relative_to(root))
+        if path.is_symlink():
+            out[rel] = f"link:{os.readlink(path)}"
+        elif path.is_file():
+            out[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+        else:
+            out[rel] = "dir"
+    return out
+
+
+@pytest.fixture
+def boundary(tmp_path: Path, monkeypatch) -> SimpleNamespace:
+    from governance import author_launch, sandbox
+
+    marker = tmp_path / "agent-ran"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in ("claude", "codex"):
+        exe = bin_dir / name
+        exe.write_text(f"#!/bin/sh\necho {name} >> {marker}\n", encoding="utf-8")
+        exe.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", str(tmp_path / "no-harness.env"))
+    monkeypatch.setenv("AUTHOR_HARNESS", "claude")
+    monkeypatch.delenv("AUTHOR_MODEL", raising=False)
+    contract = tmp_path / "admitted.toml"
+    contract.write_text("schema = 1\n", encoding="utf-8")  # до шага H2
+    monkeypatch.setattr(author_launch, "ADMITTED_CONTRACT", contract)
+    monkeypatch.setattr(author_launch, "_os_name", lambda: "darwin")
+    monkeypatch.setattr(author_launch, "_has_sandbox_exec", lambda: True)
+    monkeypatch.setattr(author_launch, "_nested_sandbox", lambda: None)
+    monkeypatch.setattr(author_launch, "author_claude_token", lambda: "tok")
+    return SimpleNamespace(
+        marker=marker,
+        calls_root=tmp_path / "xdg" / "devtools" / "agent-calls",
+        launch=author_launch,
+        sandbox=sandbox,
+    )
+
+
+def _boundary_author(self, call, kind, subject, brief_context=None):
+    """Настоящая граница + снимок цели непосредственно вокруг неё."""
+    from governance.ops import RealOps
+
+    before = _tree(Path(call.target_dir))
+    self.calls.append(("author", kind))
+    outcome = RealOps.author(self, call, kind, subject, brief_context)
+    self.around = [*getattr(self, "around", []), (before, _tree(Path(call.target_dir)))]
+    return outcome
+
+
+def _boundary_author_disp(self, target_dir, task, config_path, slug, resume=False):
+    from governance.ops import RealOps
+
+    before = _tree(Path(target_dir))
+    self.author_disp_calls.append((target_dir, task, config_path, slug))
+    outcome = RealOps.author_disp(self, target_dir, task, config_path, slug, resume)
+    self.around = [*getattr(self, "around", []), (before, _tree(Path(target_dir)))]
+    return outcome
+
+
+def _through_boundary(ops: FakeOps) -> FakeOps:
+    import types
+
+    ops.author = types.MethodType(_boundary_author, ops)  # type: ignore[method-assign]
+    ops.author_disp = types.MethodType(_boundary_author_disp, ops)  # type: ignore[method-assign]
+    return ops
+
+
+def _assert_refused_at_boundary(state, ops, boundary, text: str) -> None:
+    assert state.status == "stopped_author"
+    reason = (rs.run_dir(state.run_id) / "stop-reason.txt").read_text(encoding="utf-8")
+    assert text in reason, reason
+    assert not boundary.marker.exists(), "агент-маркер вызван"
+    assert not boundary.calls_root.exists(), "каталог вызова создан"
+    around = getattr(ops, "around", [])
+    assert around, "граница не вызвана"
+    for before, after in around:
+        assert before == after, "отказ границы изменил цель или бандл"
+
+
+_HARNESS_TEXT = (
+    "харнесс `codex` не поддерживается песочницей авторинга v1; "
+    "поддерживается claude (`AUTHOR_HARNESS=claude`)"
+)
+
+
+def _codex_from(source: str, tmp_path: Path, monkeypatch) -> None:
+    """Харнесс ≠ claude, выбранный env, `harness.env` или вшитым умолчанием."""
+    monkeypatch.delenv("AUTHOR_HARNESS", raising=False)
+    if source == "env":
+        monkeypatch.setenv("AUTHOR_HARNESS", "codex")
+    elif source == "harness.env":
+        cfg = tmp_path / "harness.env"
+        cfg.write_text("AUTHOR_HARNESS=codex\n", encoding="utf-8")
+        monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", str(cfg))
+
+
+_SOURCES = ["env", "harness.env", "default"]
+
+
+@pytest.mark.parametrize("source", _SOURCES)
+def test_z17_non_claude_harness_refused_on_start_and_step_retry(
+    tmp_path: Path, runs_root, monkeypatch, boundary, source
+) -> None:
+    _codex_from(source, tmp_path, monkeypatch)
+    ops = _through_boundary(FakeOps())
+    _fake_wave_adapters(monkeypatch, ops)
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-z17-start", ops))
+    _assert_refused_at_boundary(state, ops, boundary, _HARNESS_TEXT)
+    retried = locked_runner.resume("r-z17-start", ops)
+    _assert_refused_at_boundary(retried, ops, boundary, _HARNESS_TEXT)
+    assert len(ops.around) == 2, "повтор шага снова прошёл через границу"
+    target = Path(state.target_dir) / BUNDLE_DIR / "00-charter.md"
+    assert not target.exists(), "переноса нет"
+
+
+@pytest.mark.parametrize("source", _SOURCES)
+def test_z17_non_claude_harness_refused_on_next_wave(
+    tmp_path: Path, runs_root, monkeypatch, boundary, source
+) -> None:
+    ops = FakeOps(facts={"state": "MERGED", "baseRefName": "master"})
+    _fake_wave_adapters(monkeypatch, ops)
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-z17-wave", ops))
+    assert state.status == "waiting_human_merge" and state.wave == 1
+    _codex_from(source, tmp_path, monkeypatch)
+    _through_boundary(ops)
+    stopped = _drive_waves(state, "r-z17-wave", ops, 2)
+    assert stopped.wave == 2
+    _assert_refused_at_boundary(stopped, ops, boundary, _HARNESS_TEXT)
+
+
+@pytest.mark.parametrize("source", _SOURCES)
+def test_z17_non_claude_harness_refused_on_reopen(
+    tmp_path: Path, runs_root, monkeypatch, boundary, source
+) -> None:
+    from governance import approval_ledger as al
+
+    ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
+    _fake_wave_adapters(monkeypatch, ops)
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-z17-reopen", ops))
+    al.abandon_request(state, state.ops["candidate-1"]["request"], "стенд")
+    rs.save(state)
+    ops.base_files = _all_approved()
+    _codex_from(source, tmp_path, monkeypatch)
+    _through_boundary(ops)
+    stopped = locked_runner.reopen("r-z17-reopen", "charter", ops)
+    _assert_refused_at_boundary(stopped, ops, boundary, _HARNESS_TEXT)
+
+
+_BREAKS = {
+    "not-macos": ("_os_name", lambda: "linux", "только на macOS"),
+    "no-sandbox-exec": ("_has_sandbox_exec", lambda: False, "sandbox-exec"),
+    "nested": (
+        "_nested_sandbox",
+        lambda: "вложенная песочница: sandbox_apply: Operation not permitted",
+        "вложенная песочница",
+    ),
+}
+
+
+@pytest.mark.parametrize("cell", [*_BREAKS, "empty-admission", "no-keychain"])
+def test_boundary_refusal_matrix_through_runner(
+    tmp_path: Path, runs_root, monkeypatch, boundary, cell
+) -> None:
+    """Каждая клетка: `stopped_author` с причиной в состоянии, агент-маркер
+    не вызван, каталог вызова не создан, переноса нет, снимок цели вокруг
+    границы неизменен."""
+    text = "не проверен под песочницей"
+    if cell in _BREAKS:
+        attr, value, text = _BREAKS[cell]
+        monkeypatch.setattr(boundary.launch, attr, value)
+    elif cell == "no-keychain":
+        admission = boundary.sandbox.Admission(
+            "claude", "v", Path("/opt/claude"), "0" * 64, 26, "0" * 64, "e"
+        )
+        monkeypatch.setattr(
+            boundary.sandbox, "admission_check", lambda contract, harness: admission
+        )
+
+        def missing() -> str:
+            raise boundary.launch.AgentIsolationError("нет элемента связки")
+
+        monkeypatch.setattr(boundary.launch, "author_claude_token", missing)
+        text = "нет элемента связки"
+    ops = _through_boundary(FakeOps())
+    _fake_wave_adapters(monkeypatch, ops)
+    state = locked_runner.start(**_waves_kwargs(tmp_path, f"r-cell-{cell}", ops))
+    _assert_refused_at_boundary(state, ops, boundary, text)
+    assert not (Path(state.target_dir) / BUNDLE_DIR / "00-charter.md").exists()
+
+
+def test_boundary_refuses_disp_including_resume_of_started_pipeline(
+    tmp_path: Path, runs_root, monkeypatch, boundary
+) -> None:
+    """disp вне v1: behaviour-spec узел с `author_backend=disp` — отказ на
+    границе; и `resume` старого прогона с начатым пайплайном — тоже."""
+    monkeypatch.setenv("REVIEW_HARNESS", "claude")
+    ops = FakeOps(facts={"state": "MERGED", "baseRefName": "master"})
+    _fake_wave_adapters(monkeypatch, ops)
+    import types
+
+    ops.author_disp = types.MethodType(_boundary_author_disp, ops)  # type: ignore[method-assign]
+    state = _drive_waves_to(
+        tmp_path, "r-disp-v1", ops, monkeypatch, 3, author_backend="disp"
+    )
+    assert state.wave == 3
+    _assert_refused_at_boundary(state, ops, boundary, "disp вне v1")
+    pipeline = Path(state.target_dir) / ".disputatio" / "pipelines" / state.disp_slug
+    pipeline.mkdir(parents=True)  # пайплайн «начат» прежним кодом
+    resumed = locked_runner.resume("r-disp-v1", ops)
+    _assert_refused_at_boundary(resumed, ops, boundary, "disp вне v1")
+    assert len(ops.around) == 2
+
+
+@pytest.mark.parametrize(
+    "cell", ["not-macos", "no-sandbox-exec", "empty-admission", "codex"]
+)
+def test_pipeline_without_agent_passes_under_unready_authoring(
+    tmp_path: Path, runs_root, monkeypatch, boundary, cell
+) -> None:
+    """Позитивная пара: машина не готова к авторингу (или харнесс codex при
+    пустом допуске) — переодобрение и ручной цикл `reopen --manual` →
+    файл оператора → `resume` проходят без агента."""
+    from governance import approval_ledger as al
+
+    ops = FakeOps(facts={"state": "MERGED", "baseRefName": "master"})
+    _fake_wave_adapters(monkeypatch, ops)
+    calls = _fake_approve_node_full(monkeypatch, ops)
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-pos", ops))
+    if cell in _BREAKS:
+        attr, value, _ = _BREAKS[cell]
+        monkeypatch.setattr(boundary.launch, attr, value)
+    elif cell == "codex":
+        monkeypatch.setenv("AUTHOR_HARNESS", "codex")
+    _through_boundary(ops)
+
+    # переодобрение stale-узла (§3.4) — без авторинга
+    key1 = state.ops["candidate-1"]["request"]
+    al.complete_request(state, key1)
+    state.wave = 2
+    state.ops["candidate-2"] = dict(state.ops["candidate-1"])
+    rs.save(state)
+    base = _all_approved()
+    base[f"{BUNDLE_DIR}/15-behaviour-spec.md"] = _approved("behaviour-spec").replace(
+        "approved", "stale"
+    )
+    ops.base_files = base
+    resumed = locked_runner.resume("r-pos", ops)
+    assert resumed.ops["branch-3"]["mode"] == "reapprove"
+    assert resumed.status == "waiting_human_merge"
+    assert calls == [(3, "behaviour-spec")]
+    assert getattr(ops, "around", []) == [], "граница не вызывалась"
+    assert not boundary.marker.exists()
+
+
+@pytest.mark.parametrize(
+    "cell", ["not-macos", "no-sandbox-exec", "empty-admission", "codex"]
+)
+def test_manual_reopen_cycle_passes_under_unready_authoring(
+    tmp_path: Path, runs_root, monkeypatch, boundary, cell
+) -> None:
+    from governance import approval_ledger as al
+
+    ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
+    _fake_wave_adapters(monkeypatch, ops)
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-pos-m", ops))
+    al.abandon_request(state, state.ops["candidate-1"]["request"], "стенд")
+    rs.save(state)
+    ops.base_files = _all_approved()
+    if cell in _BREAKS:
+        attr, value, _ = _BREAKS[cell]
+        monkeypatch.setattr(boundary.launch, attr, value)
+    elif cell == "codex":
+        monkeypatch.setenv("AUTHOR_HARNESS", "codex")
+    _through_boundary(ops)
+    stopped = locked_runner.reopen("r-pos-m", "charter", ops, manual=True)
+    assert stopped.status == "stopped_author"
+    (Path(stopped.target_dir) / BUNDLE_DIR / "00-charter.md").write_text(
+        "# charter\n\n#### CON-01: руками\n", encoding="utf-8"
+    )
+    resumed = locked_runner.resume("r-pos-m", ops)
+    assert resumed.status == "waiting_human_merge" and resumed.wave == 1
+    assert resumed.ops["author-charter"]["skipped"] is True
+    assert getattr(ops, "around", []) == [], "граница не вызывалась"
+    assert not boundary.marker.exists()
+
+
+@pytest.mark.parametrize(
+    ("harness", "backend", "bundle", "text"),
+    [
+        ("gemini", "codex", BUNDLE_DIR, "неизвестный AUTHOR_HARNESS"),
+        ("claude", "codex", "../outside", ".."),
+        ("claude", "codex", "ws/.git/x", ".git"),
+    ],
+)
+def test_common_entries_refuse_unrecognised_config_before_side_effects(
+    tmp_path: Path, runs_root, monkeypatch, boundary, harness, backend, bundle, text
+) -> None:
+    """Общие входы — только корректность конфигурации; неверная — отказ до
+    резервирования `run_id` (без пустого run.json)."""
+    monkeypatch.setenv("AUTHOR_HARNESS", harness)
+    ops = FakeOps()
+    with pytest.raises(ValueError, match=re.escape(text)):
+        locked_runner.start(
+            **_waves_kwargs(
+                tmp_path, "r-cfg", ops, bundle_dir=bundle, author_backend=backend
+            )
+        )
+    assert not rs.run_dir("r-cfg").exists()
+
+
+_darwin_only = pytest.mark.skipif(
+    not hasattr(os, "O_NOFOLLOW_ANY"),
+    reason="настоящий допуск и каталог вызова — O_NOFOLLOW_ANY, только Darwin",
+)
+
+
+@_darwin_only
+def test_boundary_refuses_mismatched_admission_through_runner(
+    tmp_path: Path, runs_root, monkeypatch, boundary
+) -> None:
+    """Запись допуска есть, но sha256 исполняемого файла не совпал — отказ
+    с названным полем; маркер не вызван."""
+    import shutil
+    import subprocess as sp
+
+    real = os.path.realpath(shutil.which("claude") or "")
+    boundary.launch.ADMITTED_CONTRACT.write_text(
+        "schema = 1\n\n[[admitted]]\n"
+        'harness = "claude"\nversion = "v"\n'
+        f'realpath = "{real}"\nsha256 = "{"0" * 64}"\n'
+        f"macos_major = {boundary.sandbox._macos_major()}\n"
+        f'profile_sha256 = "{boundary.sandbox.profile_template_sha256()}"\n'
+        'evidence = "e"\n',
+        encoding="utf-8",
+    )
+    ops = _through_boundary(FakeOps())
+    _fake_wave_adapters(monkeypatch, ops)
+    kwargs = _waves_kwargs(tmp_path, "r-cell-mismatch", ops)
+    sp.run(["git", "init", "-q", kwargs["target_dir"]], check=True)
+    state = locked_runner.start(**kwargs)
+    _assert_refused_at_boundary(state, ops, boundary, "не совпали sha256")
+
+
+@_darwin_only
+def test_boundary_probe_failure_through_runner_removes_call_dir(
+    tmp_path: Path, runs_root, monkeypatch, boundary
+) -> None:
+    """Отказ пробы: каталог вызова создан для неё и удалён до возврата;
+    агент не запущен, переноса нет, снимок цели вокруг границы неизменен
+    (созданные для пробы каталоги бандла снимаются)."""
+    import subprocess as sp
+
+    admission = boundary.sandbox.Admission(
+        "claude", "v", Path("/opt/claude"), "0" * 64, 26, "0" * 64, "e"
+    )
+    monkeypatch.setattr(
+        boundary.sandbox, "admission_check", lambda contract, harness: admission
+    )
+    seen: list[tuple[Path, bool]] = []
+
+    def failing_probe(call, profile, env, targets, **kw):
+        from governance import safe_io
+
+        # как настоящая проба: каталоги бандла — до пробы (N6)
+        safe_io.ensure_dirs(targets.target_dir, targets.bundle_dir)
+        seen.append((call.root, call.root.is_dir()))
+        return boundary.sandbox.ProbeResult(("stand:config: OK — регрессия",), ())
+
+    monkeypatch.setattr(boundary.sandbox, "run_probe", failing_probe)
+    ops = _through_boundary(FakeOps())
+    _fake_wave_adapters(monkeypatch, ops)
+    kwargs = _waves_kwargs(tmp_path, "r-cell-probe", ops)
+    sp.run(["git", "init", "-q", kwargs["target_dir"]], check=True)
+    state = locked_runner.start(**kwargs)
+    assert state.status == "stopped_author"
+    reason = (rs.run_dir(state.run_id) / "stop-reason.txt").read_text()
+    assert "проба песочницы не прошла" in reason and "stand:config" in reason
+    ((root, existed),) = seen
+    assert existed and not root.exists()
+    assert not boundary.marker.exists()
+    for before, after in ops.around:
+        assert before == after

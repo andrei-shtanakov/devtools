@@ -12,18 +12,19 @@ subprocess-обёртка над ним: каждый метод строит о
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import os
 import re
 import shutil
 import subprocess
-import tempfile
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import quote
 
+from governance import author_launch
 from governance import interview as _interview
+from governance.author_launch import AuthorCall, LaunchOutcome
 from governance.brief_facts import (
     BriefFactsMixin,
     BriefPrFacts,
@@ -248,12 +249,11 @@ class Ops(Protocol):
 
     def author(
         self,
-        target_dir: str,
+        call: AuthorCall,
         kind: str,
         subject: str,
-        bundle_dir: str,
         brief_context: dict[str, object] | None = None,
-    ) -> int: ...
+    ) -> LaunchOutcome | int: ...
 
     def author_disp(
         self,
@@ -262,7 +262,7 @@ class Ops(Protocol):
         config_path: str,
         slug: str,
         resume: bool = False,
-    ) -> int: ...
+    ) -> LaunchOutcome | int: ...
 
     def discovery_start(
         self,
@@ -348,20 +348,6 @@ class Ops(Protocol):
     ) -> str | None: ...
 
 
-# --- Харнесс авторинга (лимиты codex, 2026-09-03; парный слой к харнессу
-# ревьюера в review-pr.sh). Выбор: env AUTHOR_HARNESS/AUTHOR_MODEL >
-# ~/.config/ai-prosto/harness.env > вшитый codex. Модель привязана к слою
-# своего харнесса (урок ревью PR #121): харнесс со слоя выше не наследует
-# модель слоя ниже. Файл ПАРСИТСЯ (KEY=VALUE, export/отступы терпимы),
-# не исполняется.
-_HARNESS_ENV_KEYS = (
-    "AUTHOR_HARNESS",
-    "AUTHOR_MODEL",
-    "REVIEW_HARNESS",
-    "REVIEW_MODEL",
-)
-
-
 def _closure_event(node: object) -> tuple[str, str, str] | None:
     """(тип, актор, время) события timeline; None — форма не та."""
     if not isinstance(node, dict):
@@ -436,44 +422,6 @@ def _gh_user_login(env: dict[str, str] | None) -> str | None:
     return login if done.returncode == 0 and login else None
 
 
-def _harness_env_values() -> dict[str, str]:
-    """AUTHOR_*-строки операторского harness.env; нет файла — пусто."""
-    path = Path(
-        os.environ.get(
-            "AI_PROSTO_HARNESS_ENV",
-            str(Path.home() / ".config" / "ai-prosto" / "harness.env"),
-        )
-    )
-    values: dict[str, str] = {}
-    if not path.is_file():
-        return values
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if line.startswith("export "):
-            line = line[len("export ") :].lstrip()
-        for key in _HARNESS_ENV_KEYS:
-            if line.startswith(f"{key}="):
-                values[key] = line[len(key) + 1 :]
-    return values
-
-
-def _harness_for(prefix: str) -> tuple[str, str]:
-    """(harness, model) слоя `<prefix>_HARNESS`/`<prefix>_MODEL`.
-
-    Порядок тот же, что у `_author_argv`: env > harness.env > вшитый codex;
-    модель привязана к слою, из которого пришёл харнесс (env-харнесс НЕ
-    наследует модель файла).
-    """
-    cfg = _harness_env_values()
-    env_harness = os.environ.get(f"{prefix}_HARNESS", "")
-    harness = env_harness or cfg.get(f"{prefix}_HARNESS", "") or "codex"
-    if env_harness:
-        model = os.environ.get(f"{prefix}_MODEL", "")
-    else:
-        model = os.environ.get(f"{prefix}_MODEL", "") or cfg.get(f"{prefix}_MODEL", "")
-    return harness, model
-
-
 #: Харнесс операторского слоя → адаптер disputatio (`composition.py`).
 _DISP_ADAPTERS = {"claude": "claude_code", "codex": "codex"}
 
@@ -484,11 +432,11 @@ def disp_agent(role: str) -> tuple[str, str]:
     Живой прогон 2026-09-15 (spec-runner#480): сосед отверг конфиг с пустыми
     секциями — `adapter` и `model` обязательны (SPEC-002 §3.2). Источник — тот
     же харнесс-слой, что у авторинга и ревью: author ← AUTHOR_*, reviewer ←
-    REVIEW_*. Дефолт модели есть только у claude (как в `_author_argv`); у
+    REVIEW_*. Дефолт модели есть только у claude (как у авторского вызова); у
     codex его нет — без модели отказ, а не выдуманное имя.
     """
     prefix = {"author": "AUTHOR", "reviewer": "REVIEW"}[role]
-    harness, model = _harness_for(prefix)
+    harness, model = author_launch.harness_for(prefix)
     if harness not in _DISP_ADAPTERS:
         raise ValueError(f"неизвестный {prefix}_HARNESS: {harness!r} (claude|codex)")
     if not model:
@@ -497,178 +445,8 @@ def disp_agent(role: str) -> tuple[str, str]:
                 f"{prefix}_MODEL обязателен для {harness}: disputatio требует "
                 f"agents.{role}.model, дефолта у codex нет"
             )
-        model = "claude-opus-5"
+        model = author_launch.DEFAULT_CLAUDE_MODEL
     return _DISP_ADAPTERS[harness], model
-
-
-#: Переменные окружения, которые получает авторский агент (дизайн песочницы
-#: `docs/superpowers/specs/2026-09-29-author-agent-sandbox-design.md` §3,
-#: F12): env вызова собирается allowlist'ом, а не наследуется — в сессии
-#: оператора десяток секретов (API-ключи, GH_TOKEN, токены ботов), и
-#: наследование отдавало их каждому агенту. Замерено вживую 2026-09-29:
-#: claude (связка ключей), codex (`~/.codex/auth.json`) и `uv run … disp`
-#: с базовой частью работают. Каждое имя — с обоснованием:
-AGENT_ENV_NAMES = frozenset(
-    {
-        # базовое: поиск бинарей, домашний каталог (конфиги харнессов)
-        "PATH",
-        "HOME",
-        # без USER claude считает себя незалогиненным (замер I3, reviewer.py);
-        # LOGNAME — POSIX-имя входа, запасной источник у git/getpass
-        "USER",
-        "LOGNAME",
-        # codex исполняет команды через оболочку пользователя, Bash-инструмент
-        # claude тоже берёт её из SHELL; TERM — режим вывода CLI
-        "SHELL",
-        "TERM",
-        # свой TMPDIR харнесса; кодировка вывода (LC_* — префиксом ниже)
-        "TMPDIR",
-        "LANG",
-        # базы XDG — пути, не секреты (кэш uv для disp и т.п.); поимённо, не
-        # префиксом: будущая XDG_-переменная сама к агенту не попадёт
-        "XDG_CACHE_HOME",
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
-        "XDG_STATE_HOME",
-        # транспорт модели claude — тот же набор, что у ревьюера edge-check
-        # (`edge_check/reviewer.py`): учётка модели и облака — СВОИ учётные данные
-        # агента (дизайн §3: видимость своей модельной учётки принята для v1);
-        # CLAUDE_CODE_OAUTH_TOKEN до среза песочницы — унаследованный, в срезе —
-        # из отдельного элемента связки ключей (§3)
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_AUTH_TOKEN",
-        "ANTHROPIC_MODEL",
-        "MAX_THINKING_TOKENS",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "CLAUDE_CODE_USE_BEDROCK",
-        "CLAUDE_CODE_USE_VERTEX",
-        "AWS_REGION",
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY",
-        "AWS_SESSION_TOKEN",
-        "CLOUD_ML_REGION",
-        "ANTHROPIC_VERTEX_PROJECT_ID",
-        # корпоративные сети: без прокси/CA транспорт до модели не достучится
-        "HTTPS_PROXY",
-        "HTTP_PROXY",
-        "NO_PROXY",
-        "SSL_CERT_FILE",
-        "NODE_EXTRA_CA_CERTS",
-    }
-)
-# OPENAI_API_KEY НАМЕРЕННО вне перечня: codex аутентифицируется через
-# `~/.codex/auth.json` (вход ChatGPT), а ключ из env переключил бы его на
-# оплату API — молча, при том что ключ в сессии оператора выставлен.
-#: LC_* — семейство POSIX-локали (LC_ALL, LC_CTYPE, …): только имена локалей.
-AGENT_ENV_PREFIXES = ("LC_",)
-
-
-def agent_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
-    """Окружение авторского агента — allowlist из `environ` (по умолчанию
-    текущего процесса); всё прочее, включая секреты, не передаётся."""
-    source = os.environ if environ is None else environ
-    return {
-        name: value
-        for name, value in source.items()
-        if name in AGENT_ENV_NAMES or name.startswith(AGENT_ENV_PREFIXES)
-    }
-
-
-#: Элемент связки ключей с долгоживущим токеном claude для авторских вызовов
-#: (дизайн песочницы §3, §8/S1). Раннер читает его сам; агент получает
-#: токен только через env вызова — не из унаследованного окружения.
-AUTHOR_CLAUDE_TOKEN_ITEM = "devtools-author-claude-oauth"
-#: settings.json изолированного каталога конфигурации: разрешения — как у
-#: `--dangerously-skip-permissions` авторского вызова (disputatio-адаптер
-#: флагов разрешений не передаёт и опирался на ~/.claude оператора, §8/S3).
-_ISOLATED_CLAUDE_SETTINGS = '{"permissions": {"defaultMode": "bypassPermissions"}}\n'
-
-
-class AgentIsolationError(RuntimeError):
-    """Изоляцию авторского агента обеспечить нельзя — вызов не делается."""
-
-
-def _author_claude_token() -> str:
-    """Токен из связки ключей; нет элемента — AgentIsolationError."""
-    done = subprocess.run(
-        ["security", "find-generic-password", "-s", AUTHOR_CLAUDE_TOKEN_ITEM, "-w"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    token = done.stdout.strip()
-    if done.returncode != 0 or not token:
-        raise AgentIsolationError(
-            f"нет элемента связки ключей {AUTHOR_CLAUDE_TOKEN_ITEM!r} с токеном "
-            "claude (создайте `claude setup-token` + `security "
-            "add-generic-password` в отдельном терминале) — авторский вызов "
-            "claude без изоляции конфигурации не делается"
-        )
-    return token
-
-
-@contextlib.contextmanager
-def claude_isolation(env: dict[str, str]):
-    """env вызова claude со СВОИМ каталогом конфигурации (§8/S1).
-
-    Без него агент грузит плагины и хуки оператора из ~/.claude и пишет
-    туда своё состояние (session-env со скриптом хука, shell-snapshots…).
-    Каталог — временный на вызов, удаляется в finally. Преднамеренную запись
-    в ~/.claude по абсолютному пути это НЕ предотвращает — её ловит трипвайр
-    раннера, а закроет песочница.
-    """
-    token = _author_claude_token()
-    config_dir = tempfile.mkdtemp(prefix="devtools-claude-config-")
-    try:
-        (Path(config_dir) / "settings.json").write_text(
-            _ISOLATED_CLAUDE_SETTINGS, encoding="utf-8"
-        )
-        yield {**env, "CLAUDE_CONFIG_DIR": config_dir, "CLAUDE_CODE_OAUTH_TOKEN": token}
-    finally:
-        shutil.rmtree(config_dir, ignore_errors=True)
-
-
-def _run_agent(argv: list[str], cwd: str, *, claude: bool) -> int:
-    """Запуск авторского агента: env — allowlist, у claude — изоляция."""
-    if not claude:
-        return subprocess.run(argv, cwd=cwd, env=agent_env(), check=False).returncode
-    try:
-        with claude_isolation(agent_env()) as env:
-            return subprocess.run(argv, cwd=cwd, env=env, check=False).returncode
-    except AgentIsolationError as exc:
-        print(f"author: {exc}")
-        return 2
-
-
-def _author_argv(prompt: str) -> list[str]:
-    """argv авторинг-агента по выбранному харнессу; неизвестный — ValueError.
-
-    claude-ветка — паритет с флотским пресетом spec-runner для claude
-    (`--dangerously-skip-permissions`): авторинг пишет файлы бандла и
-    считает `git hash-object` для upstream_hashes, уровень доверия тот же,
-    что у codex `--sandbox workspace-write` (свой промпт конвейера в
-    целевом чекауте). --strict-mcp-config/--no-session-persistence — не
-    тащить MCP оператора и не сорить сессиями в целевом репо.
-    """
-    harness, model = _harness_for("AUTHOR")
-    if harness == "claude":
-        return [
-            "claude",
-            "-p",
-            "--model",
-            model or "claude-opus-5",
-            "--dangerously-skip-permissions",
-            "--no-session-persistence",
-            "--strict-mcp-config",
-            prompt,
-        ]
-    if harness == "codex":
-        argv = ["codex", "exec", "--ephemeral", "--sandbox", "workspace-write"]
-        if model:
-            argv += ["-m", model]
-        return [*argv, prompt]
-    raise ValueError(f"неизвестный AUTHOR_HARNESS: {harness!r} (claude|codex)")
 
 
 # Канонические имена файлов бандла (зеркало runner._AUTHOR_STEPS) и DSL-правила
@@ -945,6 +723,59 @@ _AUTHOR_DSL = {
         "group first; green means no red authoring is bought)."
     ),
 }
+
+
+def author_prompt(
+    kind: str,
+    subject: str,
+    bundle_dir: str,
+    brief_context: dict[str, object] | None,
+    output_path: str,
+) -> str:
+    """Промпт авторского вызова: два разных пути (дизайн §11 п.1).
+
+    `bundle_dir` — координата настоящего бандла относительно `target_dir`,
+    для чтения соседей, source-слоя и `git hash-object`; `output_path` —
+    абсолютный `<call>/stage/<file>`, единственное место записи агента.
+    Промпт несёт канонические имена файлов и DSL гейта (боевой прогон
+    kapelle#47: без них агент писал в своём диалекте). DSL узлов не меняется.
+    """
+    rules = _AUTHOR_DSL.get(kind, "")
+    target_file = _AUTHOR_FILENAMES.get(kind, "")
+    source_guidance = ""
+    if brief_context is not None and kind in ("charter", "requirements"):
+        paths = descriptor_source_paths(brief_context)
+        blobs = descriptor_source_blobs(brief_context)
+        requirements_source = brief_context.get("requirements_source")
+        repo_paths = [f"{bundle_dir}/{path}" for path in paths]
+        source_guidance = (
+            "\nDiscovery source layer is already materialized in this "
+            f"repository: frame={brief_context.get('frame')!r}, "
+            f"paths={repo_paths!r}, git_blob_pins={blobs!r}. Read these "
+            "files from the repository; do not rely on conversational "
+            "memory. Source IDs are immutable: preserve every FR-NN and "
+            "NFR-NN exactly. "
+            f"The requirements source is {bundle_dir}/{requirements_source}."
+        )
+        if kind == "charter":
+            source_guidance += (
+                " Declare every discovery source as a direct traces_to "
+                "edge and pin it in upstream_hashes using the supplied "
+                "git blob pins."
+            )
+    return (
+        f"kind={kind} subject={subject!r} bundle_dir={bundle_dir}\n"
+        f"The bundle lives at {bundle_dir}/ (relative to the working "
+        "directory): read neighbour nodes and the source layer there and "
+        "compute `git hash-object` there. You cannot write into the "
+        "repository.\n"
+        f"Write EXACTLY one file: {output_path} (this exact absolute path; "
+        f"it becomes {bundle_dir}/{target_file}; create parent dirs as "
+        "needed). Write nothing else anywhere.\n"
+        f"{rules}\n"
+        "Author the governance bundle content for this kind/subject."
+        f"{source_guidance}"
+    )
 
 
 class RealOps(BriefFactsMixin):
@@ -2061,61 +1892,22 @@ class RealOps(BriefFactsMixin):
 
     def author(
         self,
-        target_dir: str,
+        call: AuthorCall,
         kind: str,
         subject: str,
-        bundle_dir: str,
         brief_context: dict[str, object] | None = None,
-    ) -> int:
-        """Авторинг-агент по выбранному харнессу (см. `_author_argv`).
+    ) -> LaunchOutcome:
+        """Авторинг узла — только делегирование границе `author_launch`.
 
-        Исторически: codex exec --ephemeral --sandbox workspace-write.
-        Промпт несёт канонические имена файлов и DSL гейта (боевой прогон
-        kapelle#47: без них codex писал в своём диалекте — имена `01-`/`02-`,
-        заголовки `### BS-*`/`REQ-*` без `traces:`/`checked_by`, и всё это
-        приходилось конвертировать руками до S4).
-
-        Ошибка конфигурации харнесса — код 2 с причиной на stdout, не
-        traceback: шаг authoring остаётся resumable после правки конфига.
+        Граница проверяет машину, харнесс (только claude, §13), допуск,
+        профиль и пробу, запускает агента под песочницей и переносит файл
+        узла в бандл; промпт строит `author_prompt` с путём записи агента.
         """
-        rules = _AUTHOR_DSL.get(kind, "")
-        target_file = _AUTHOR_FILENAMES.get(kind, "")
-        source_guidance = ""
-        if brief_context is not None and kind in ("charter", "requirements"):
-            paths = descriptor_source_paths(brief_context)
-            blobs = descriptor_source_blobs(brief_context)
-            requirements_source = brief_context.get("requirements_source")
-            repo_paths = [f"{bundle_dir}/{path}" for path in paths]
-            source_guidance = (
-                "\nDiscovery source layer is already materialized in this "
-                f"repository: frame={brief_context.get('frame')!r}, "
-                f"paths={repo_paths!r}, git_blob_pins={blobs!r}. Read these "
-                "files from the repository; do not rely on conversational "
-                "memory. Source IDs are immutable: preserve every FR-NN and "
-                "NFR-NN exactly. "
-                f"The requirements source is {bundle_dir}/{requirements_source}."
-            )
-            if kind == "charter":
-                source_guidance += (
-                    " Declare every discovery source as a direct traces_to "
-                    "edge and pin it in upstream_hashes using the supplied "
-                    "git blob pins."
-                )
-        prompt = (
-            f"kind={kind} subject={subject!r} bundle_dir={bundle_dir}\n"
-            f"Write EXACTLY one file: {bundle_dir}/{target_file} "
-            "(this exact name; create parent dirs as needed).\n"
-            f"{rules}\n"
-            "Author the governance bundle content for this kind/subject."
-            f"{source_guidance}"
-        )
-        try:
-            argv = _author_argv(prompt)
-        except ValueError as exc:
-            print(f"author: {exc}")
-            return 2
-        return _run_agent(
-            argv, target_dir, claude=_harness_for("AUTHOR")[0] == "claude"
+        return author_launch.launch_author(
+            call,
+            functools.partial(
+                author_prompt, kind, subject, call.bundle_dir, brief_context
+            ),
         )
 
     def author_disp(
@@ -2125,63 +1917,15 @@ class RealOps(BriefFactsMixin):
         config_path: str,
         slug: str,
         resume: bool = False,
-    ) -> int:
-        """Вид пайплайна `document` — opt-in авторинг-бэкенд behaviour-spec узла.
+    ) -> LaunchOutcome:
+        """disp-бэкенд behaviour-spec узла — вне v1 песочницы (дизайн §11).
 
-        `resume=True` — продолжение НАЧАТОГО пайплайна того же слага
-        (devtools#204 п.3): `disp pipeline run` на существующем
-        `.disputatio/pipelines/<slug>/` отказывает по коду соседа
-        (`_check_pipeline_dir_absent`: «продолжите через resume»), поэтому
-        путь retry ровно один и выбирается по факту каталога, а не по
-        памяти прогона. У `resume` нет `--task` (задача уже в манифесте),
-        `--config` обязателен так же, как у `run` (§8.1 шаг 0 ищет журнал
-        целостности по живому `anchor_path`), флаги санкции
-        (`--discard-round`/`--adopt-external`) НЕ передаются: на
-        неатрибутируемом дереве сосед откажет сам — fail-closed, решение
-        оператору, не раннеру.
-
-        Спека §5 называла «режим `document`»; РЕЖИМА с таким именем у disp
-        нет и не было. OQ-1 закрыт иначе (disputatio#52 → их PR #64,
-        2026-09-01): приехал **вид** пайплайна `document`, и вид выводится
-        не из флага, а из формы конфига.
-
-        Форма взята из disputatio по факту, а не по нашей памяти о ней:
-
-        * команда и её флаги — `disputatio-SPEC-002-doc-pipeline.md` §3.1
-          (`disp pipeline run --slug <slug> [--task <файл|строка>]
-          [--config <toml>]`) и реализация `src/disputatio/cli.py`
-          (`_add_pipeline_common`: `--slug` обязателен, `--config` с
-          дефолтом `<root>/<DEFAULT_CONFIG_NAME>`, `--root` с дефолтом
-          `"."`). `--root` в перечне §3.1 не показан, но объявлен у всех
-          пяти команд — сверено по коду, потому что расхождение спеки и
-          реализации здесь решает реализация;
-        * форма конфига вида `document` — §3.2 того же документа: секция
-          `[pipeline]` с `document_path` (и **без** `spec_path`/`plan_path`
-          и `max_architectural_returns` — их присутствие там объявлено
-          fail-closed отказом `ConfigError`), плюс `[pipeline.checklists.doc]`
-          с обязательным `findings_item` и операторским составом
-          `[pipeline.checklists.doc.items]`.
-
-        Конфиг пишет раннер в каталог прогона до вызова: состав чеклиста —
-        операторский (§5.3), то есть решение нашего контура, а не disputatio,
-        и держать его рядом с прогоном честнее, чем в чужом репозитории.
+        Координатор disp обязан писать в `.git` цели, поэтому под профилем
+        §12 его не запустить; граница отказывает всегда, агент не стартует.
+        Возврат — отдельным срезом, где граница стоит вокруг агентских
+        подпроцессов disputatio.
         """
-        argv = [
-            "uv",
-            "run",
-            "--project",
-            str(DEVTOOLS_ROOT.parent / "disputatio"),
-            "disp",
-            "pipeline",
-            "resume" if resume else "run",
-        ]
-        if not resume:
-            argv += ["--task", task]
-        argv += ["--slug", slug, "--config", config_path, "--root", target_dir]
-        # агенты внутри disp наследуют env процесса disp — тот же allowlist
-        # и та же изоляция конфигурации, если хоть одна роль — claude
-        claude = any(_harness_for(p)[0] == "claude" for p in ("AUTHOR", "REVIEW"))
-        return _run_agent(argv, target_dir, claude=claude)
+        return author_launch.refuse_disp()
 
     def _discovery(
         self, args: list[str], cwd: str, lock_fd: int | None = None

@@ -35,6 +35,7 @@ from typing import Any
 
 from governance import (
     acceptance_guard,
+    author_launch,
     authority_root,
     brief_input,
     brief_provenance,
@@ -50,6 +51,7 @@ from governance import approval_ledger as al
 from governance import approve_node as an
 from governance import interview as iv
 from governance import run_lock as rl
+from governance.author_launch import AuthorCall, LaunchOutcome
 from governance.edge_check import coordinator as edge_coordinator
 from governance.edge_check import publish as edge_publish
 from governance.edge_check.rules import EdgeCheckError
@@ -371,6 +373,7 @@ def start(
     rl.require(lock, run_id)
     validate_merge_authority(merge_authority)
     validate_author_backend(author_backend)
+    _check_author_config(target_dir, bundle_dir, author_backend)
     validate_authoring(authoring)
     if authoring != "waves":
         # Ревью #389 (major): умолчание `new_run` — `legacy`, и оно
@@ -461,6 +464,19 @@ def _write_engineer_upstream(state: RunState, intake: iv.EngineerIntake) -> None
     state.interview["upstream_source"] = intake.source_path
 
 
+def _check_author_config(target_dir: str, bundle_dir: str, author_backend: str) -> None:
+    """Общие входы (`start`, `resume`, `reopen`, `advance`) — только
+    корректность конфигурации авторинга (дизайн песочницы §19 п.1).
+
+    Готовность машины к авторингу (ОС, `sandbox-exec`, допуск, «харнесс =
+    claude») здесь НЕ требуется: конвейер без запуска агента работает при
+    любой допустимой конфигурации; полный допуск — на границе запуска.
+    """
+    reason = author_launch.check_config(target_dir, bundle_dir, author_backend)
+    if reason is not None:
+        raise ValueError(f"конфигурация авторинга: {reason}")
+
+
 def advance(state: RunState, ops: Ops, *, lock: rl.RunLock) -> RunState:
     """Выполняет шаги S1..S8 до стопа (не-``running`` статус) либо конца.
 
@@ -492,6 +508,7 @@ def advance(state: RunState, ops: Ops, *, lock: rl.RunLock) -> RunState:
     if op_status(state, "merge") == "completed":
         _step_s8(state, ops)
         return state
+    _check_author_config(state.target_dir, state.bundle_dir, state.author_backend)
     token = _LOCK_FD.set(lock.fd)
     try:
         for step in _STEPS:
@@ -2691,7 +2708,7 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
             )
             if exit_code is None:
                 return False
-            if exit_code != 0:
+            if not isinstance(exit_code, LaunchOutcome) and exit_code != 0:
                 # Процедура, а не только факт (ревью #242, круг 3): как
                 # выйти из пинованного состояния руками.
                 print(
@@ -2705,7 +2722,17 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
                     "пайплайне отказывает (PipelineNotResumable)"
                 )
         else:
-            author_args = (state.target_dir, kind, state.subject, state.bundle_dir)
+            call = AuthorCall(
+                run_id=state.run_id,
+                run_dir=os.path.realpath(run_dir(state.run_id)),
+                target_dir=state.target_dir,
+                bundle_dir=state.bundle_dir,
+                filename=filename,
+            )
+            # Часовой пробы границы стоит в `edge-check/` прогона (§15):
+            # каталог создаётся ДО снимка трипвайра, иначе его появление во
+            # время вызова выглядело бы подсадкой.
+            (run_dir(state.run_id) / "edge-check").mkdir(exist_ok=True)
             if state.brief is not None and kind in (
                 "charter",
                 "requirements",
@@ -2715,31 +2742,49 @@ def _step_authoring(state: RunState, ops: Ops) -> bool:
                     ops,
                     _Suspect((target,), wave_targets),
                     ops.author,
-                    *author_args,
+                    call,
+                    kind,
+                    state.subject,
                     brief_context=state.brief,
                 )
             else:
-                # Preserve the exact classic API call and prompts. In
-                # particular, third-party test/fake Ops implementations with
-                # the pre-E1 signature remain valid for no-brief runs.
+                # Без brief — без `brief_context`: двойники Ops без этого
+                # параметра остаются валидны для прогонов без brief.
                 exit_code = _guard_edge_results(
                     state,
                     ops,
                     _Suspect((target,), wave_targets),
                     ops.author,
-                    *author_args,
+                    call,
+                    kind,
+                    state.subject,
                 )
             if exit_code is None:
                 return False
-        if exit_code != 0:
-            state.status = "stopped_author"
-            save(state)
+        if not _authored(state, ops, exit_code):
             return False
         if kind == "charter" and state.code and state.plan_item:
             if not _stamp_charter_schema2(state, ops, target):
                 return False
         op_complete(state, key, skipped=False, exit=exit_code)
     return True
+
+
+def _authored(state: RunState, ops: Ops, result: LaunchOutcome | int) -> bool:
+    """Исход авторского вызова → продолжать (файл узла на месте) или стоп.
+
+    Причина отказа границы и перечень лишнего в заготовке (§15 п.1)
+    сохраняются рядом с прогоном (`stop-reason.txt`). `int` — код без
+    причины (двойники Ops в тестах).
+    """
+    outcome = result if isinstance(result, LaunchOutcome) else LaunchOutcome(result)
+    if outcome.ok:
+        return True
+    body = outcome.reason or f"авторский вызов вернул {outcome.code}"
+    if outcome.quarantine:
+        body += "\nв заготовке, кроме файла узла: " + ", ".join(outcome.quarantine)
+    _stop_with_comment(state, ops, "stopped_author", body)
+    return False
 
 
 def _stamp_charter_schema2(state: RunState, ops: Ops, charter_path: Path) -> bool:
@@ -2947,10 +2992,10 @@ def _guard_edge_results(
     state: RunState,
     ops: Ops,
     suspect: _Suspect,
-    call: Callable[..., int],
+    call: Callable[..., LaunchOutcome | int],
     *args: Any,
     **kwargs: Any,
-) -> int | None:
+) -> LaunchOutcome | int | None:
     """Вызов авторского агента под трипвайром результатов edge-check.
 
     devtools#448, контракт — спека edge-check §D12a. Действующий PASS в

@@ -9,15 +9,19 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
+import json
 import os
 import re
 import subprocess
-from pathlib import Path
+import time
+from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 
 import pytest
 
-from governance import sandbox
+from governance import author_launch, sandbox
 from governance.sandbox import CallDir, ForbiddenRoots, SandboxError
 
 DEVTOOLS_ROOT = Path(__file__).resolve().parents[1]
@@ -815,3 +819,554 @@ def test_probe_inner_timeouts_fit_outer_budget() -> None:
     assert steps == 10
     inner = (steps - 1) * sandbox.PROBE_STEP_TIMEOUT + sandbox.APPLE_EVENTS_TIMEOUT
     assert inner + 10 < sandbox.PROBE_TIMEOUT
+
+
+# --- граница запуска авторского агента (TASK-005, §11–§15, §19 п.1) ----------
+#
+# Переносимые двойники Darwin-условий (ОС, `sandbox-exec`, вложенность) и
+# допуска; настоящие Darwin-условия — тесты с `darwin_only` ниже и живые в
+# `tests/test_governance_sandbox_live.py`.
+
+_ADMISSION = sandbox.Admission(
+    "claude", "2.1.296", Path("/opt/claude/bin/claude"), "0" * 64, 26, "0" * 64, "e"
+)
+_OUT = "/out/stage/10-requirements.md"
+
+
+@pytest.fixture
+def launch(base: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """Граница с двойниками всех условий §13: каждое проходит, пока тест его
+    не сломает; запуск агента и проба — шпионы."""
+    for name in ("AUTHOR_HARNESS", "AUTHOR_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("AUTHOR_HARNESS", "claude")
+    monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", str(base / "no-harness.env"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(base / "xdg"))
+    monkeypatch.setattr(author_launch, "_os_name", lambda: "darwin")
+    monkeypatch.setattr(author_launch, "_has_sandbox_exec", lambda: True)
+    monkeypatch.setattr(author_launch, "_nested_sandbox", lambda: None)
+    monkeypatch.setattr(
+        sandbox, "admission_check", lambda contract, harness: _ADMISSION
+    )
+    monkeypatch.setattr(author_launch, "author_claude_token", lambda: "tok")
+    ns = SimpleNamespace(spawned=[], probes=[], probe=sandbox.ProbeResult((), ()))
+
+    def fake_probe(call, profile, env, targets, **kw):
+        ns.probes.append((call.root, call.root.is_dir(), dict(env), targets))
+        return ns.probe
+
+    def fake_agent(argv, *, env, cwd, timeout):
+        ns.spawned.append((argv, dict(env), cwd))
+        return 0
+
+    monkeypatch.setattr(sandbox, "run_probe", fake_probe)
+    monkeypatch.setattr(author_launch, "_run_agent", fake_agent)
+    target = _repo(base / "target")
+    run_dir = base / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    ns.base, ns.target, ns.run_dir = base, target, run_dir
+    ns.calls = base / "xdg" / "devtools" / "agent-calls"
+    ns.call = author_launch.AuthorCall(
+        "r1", str(run_dir), str(target), "ws/spec", "10-requirements.md"
+    )
+    return ns
+
+
+def _launch(ns: SimpleNamespace, **kw: object) -> author_launch.LaunchOutcome:
+    return author_launch.launch_author(ns.call, lambda out: f"prompt {out}", **kw)
+
+
+def _refused_before_call_dir(ns: SimpleNamespace, outcome, text: str) -> None:
+    assert outcome.code == author_launch.REFUSED and text in outcome.reason
+    assert ns.spawned == [] and ns.probes == []
+    assert not ns.calls.exists(), "каталог вызова создан при отказе до пробы"
+    assert not (ns.target / "ws").exists(), "граница тронула бандл"
+
+
+@pytest.mark.parametrize(
+    ("attr", "value", "text"),
+    [
+        ("_os_name", lambda: "linux", "только на macOS"),
+        ("_has_sandbox_exec", lambda: False, "нет /usr/bin/sandbox-exec"),
+        (
+            "_nested_sandbox",
+            lambda: "вложенная песочница: sandbox_apply: Operation not permitted",
+            "вложенная песочница",
+        ),
+    ],
+    ids=["not-macos", "no-sandbox-exec", "nested"],
+)
+def test_launch_refuses_unsupported_machine(launch, monkeypatch, attr, value, text):
+    monkeypatch.setattr(author_launch, attr, value)
+    _refused_before_call_dir(launch, _launch(launch), text)
+
+
+@pytest.mark.parametrize("source", ["env", "harness.env", "default"])
+def test_launch_refuses_non_claude_harness_verbatim(launch, monkeypatch, source):
+    """§13 Q1 = (а): харнесс ≠ claude — отказ дословно, откуда бы он ни
+    пришёл; вшитое умолчание резолвера — codex и НЕ подменяется claude."""
+    monkeypatch.delenv("AUTHOR_HARNESS")
+    if source == "env":
+        monkeypatch.setenv("AUTHOR_HARNESS", "codex")
+    elif source == "harness.env":
+        cfg = launch.base / "harness.env"
+        cfg.write_text("AUTHOR_HARNESS=codex\n", encoding="utf-8")
+        monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", str(cfg))
+    outcome = _launch(launch)
+    assert outcome.reason == (
+        "харнесс `codex` не поддерживается песочницей авторинга v1; "
+        "поддерживается claude (`AUTHOR_HARNESS=claude`)"
+    )
+    _refused_before_call_dir(launch, outcome, "codex")
+
+
+def test_launch_checks_harness_before_admission(launch, monkeypatch):
+    def admission(contract, harness):
+        raise AssertionError("допуск проверен раньше харнесса")
+
+    monkeypatch.setattr(sandbox, "admission_check", admission)
+    monkeypatch.setenv("AUTHOR_HARNESS", "gemini")
+    _refused_before_call_dir(launch, _launch(launch), "харнесс `gemini`")
+
+
+def test_launch_refuses_empty_admission_contract(launch, monkeypatch):
+    """Штатное состояние до шага H2: допуск пуст — отказ для claude тоже."""
+    monkeypatch.undo()  # настоящий admission_check, остальные двойники заново
+    contract = launch.base / "admitted.toml"
+    contract.write_text("schema = 1\n", encoding="utf-8")
+    monkeypatch.setenv("AUTHOR_HARNESS", "claude")
+    monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", str(launch.base / "none"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(launch.base / "xdg"))
+    monkeypatch.setattr(author_launch, "_os_name", lambda: "darwin")
+    monkeypatch.setattr(author_launch, "_has_sandbox_exec", lambda: True)
+    monkeypatch.setattr(author_launch, "_nested_sandbox", lambda: None)
+    monkeypatch.setattr(sandbox, "run_probe", _never("проба"))
+    monkeypatch.setattr(author_launch, "_run_agent", _never("агент"))
+    outcome = _launch(launch, contract=contract)
+    _refused_before_call_dir(launch, outcome, "не проверен под песочницей")
+
+
+def test_launch_refuses_without_keychain_token(launch, monkeypatch):
+    def missing() -> str:
+        raise author_launch.AgentIsolationError("нет элемента связки")
+
+    monkeypatch.setattr(author_launch, "author_claude_token", missing)
+    _refused_before_call_dir(launch, _launch(launch), "нет элемента связки")
+
+
+@pytest.mark.parametrize("bundle", ["../out", "ws/.git/x", "/abs", ".", ""])
+def test_launch_refuses_bad_bundle_dir(launch, bundle):
+    launch.call = dataclasses.replace(launch.call, bundle_dir=bundle)
+    outcome = _launch(launch)
+    assert outcome.code == author_launch.REFUSED and outcome.reason
+    assert launch.spawned == [] and launch.probes == []
+    assert not launch.calls.exists()
+
+
+def test_launch_refuses_non_canonical_run_dir(launch):
+    launch.call = dataclasses.replace(launch.call, run_dir="runs/r1")
+    _refused_before_call_dir(launch, _launch(launch), "не канонический")
+
+
+def test_refuse_disp_names_v1_scope():
+    outcome = author_launch.refuse_disp()
+    assert outcome.code == author_launch.REFUSED
+    assert "disp вне v1" in outcome.reason
+
+
+def _never(what: str):
+    def boom(*a: object, **k: object) -> None:
+        raise AssertionError(f"{what} вызван")
+
+    return boom
+
+
+@darwin_only
+def test_launch_probe_failure_creates_and_removes_call_dir(launch):
+    """Отказ пробы: каталог вызова создан ДЛЯ пробы и удалён до возврата;
+    агент не запущен, бандл не тронут."""
+    launch.probe = sandbox.ProbeResult(("sentinel:target_dir: OK — регрессия",), ())
+    outcome = _launch(launch)
+    assert outcome.code == author_launch.REFUSED
+    assert "проба песочницы не прошла" in outcome.reason
+    assert "sentinel:target_dir" in outcome.reason
+    root, existed, _, targets = launch.probes[0]
+    assert existed and not root.exists()
+    assert launch.spawned == []
+    assert targets.run_dir == launch.run_dir and targets.target_dir == launch.target
+    assert not (launch.target / "ws").exists()
+
+
+@darwin_only
+def test_launch_probe_and_agent_share_profile_env_and_call_dir(launch):
+    outcome = _launch(launch)
+    assert outcome.code == author_launch.REFUSED, "агент-шпион файла не пишет"
+    (root, _, probe_env, targets) = launch.probes[0]
+    argv, agent_env, cwd = launch.spawned[0]
+    assert probe_env == agent_env
+    assert argv[:3] == [sandbox.SANDBOX_EXEC, "-f", str(root / "profile.sb")]
+    assert argv[3] == str(_ADMISSION.realpath)
+    assert argv[-1] == f"prompt {root / 'stage' / '10-requirements.md'}"
+    assert cwd == launch.target
+    assert agent_env["TMPDIR"] == agent_env["CLAUDE_CODE_TMPDIR"] == str(root / "tmp")
+    assert agent_env["CLAUDE_CONFIG_DIR"] == str(root / "claude-config")
+    assert agent_env["CLAUDE_CODE_OAUTH_TOKEN"] == "tok"
+    assert agent_env["SSL_CERT_FILE"] == "/etc/ssl/cert.pem"
+    assert targets.bundle_dir == PurePosixPath("ws/spec")
+    assert root.parent == launch.calls / "r1"
+    assert not root.exists()
+
+
+def _agent_writes(launch, monkeypatch, files: dict[str, bytes], code: int = 0):
+    seen: dict[str, object] = {}
+
+    def agent(argv, *, env, cwd, timeout):
+        stage = Path(env["CLAUDE_CONFIG_DIR"]).parent / "stage"
+        seen["settings"] = (
+            Path(env["CLAUDE_CONFIG_DIR"]) / "settings.json"
+        ).read_text()
+        for rel, data in files.items():
+            (stage / rel).parent.mkdir(parents=True, exist_ok=True)
+            (stage / rel).write_bytes(data)
+        return code
+
+    monkeypatch.setattr(author_launch, "_run_agent", agent)
+    return seen
+
+
+@darwin_only
+def test_launch_transfers_the_node_file_into_the_bundle(launch, monkeypatch):
+    """N6: бандла и его родителей нет — файл перенесён безопасной записью;
+    claude-config несёт свой settings.json; каталог вызова удалён."""
+    seen = _agent_writes(launch, monkeypatch, {"10-requirements.md": b"node\n"})
+    assert _launch(launch) == author_launch.LaunchOutcome(0)
+    assert (launch.target / "ws/spec/10-requirements.md").read_bytes() == b"node\n"
+    assert json.loads(str(seen["settings"])) == {
+        "permissions": {"defaultMode": "bypassPermissions"}
+    }
+    assert list((launch.calls / "r1").iterdir()) == []
+
+
+@darwin_only
+def test_launch_extra_in_stage_is_quarantine_list_without_transfer(launch, monkeypatch):
+    _agent_writes(
+        launch,
+        monkeypatch,
+        {"10-requirements.md": b"node\n", "x/hook.json": b"{}"},
+    )
+    outcome = _launch(launch)
+    assert outcome.code == author_launch.REFUSED
+    assert outcome.quarantine == ("x (dir)", "x/hook.json (file)")
+    assert not (launch.target / "ws/spec/10-requirements.md").exists()
+
+
+@darwin_only
+@pytest.mark.parametrize(
+    ("code", "files", "text"),
+    [
+        (3, {"10-requirements.md": b"n"}, "агент вернул 3"),
+        (None, {"10-requirements.md": b"n"}, "таймаут"),
+        (0, {}, "не записал файл узла"),
+    ],
+    ids=["nonzero", "timeout", "no-file"],
+)
+def test_launch_failed_call_does_not_transfer(launch, monkeypatch, code, files, text):
+    _agent_writes(launch, monkeypatch, files, code=code)  # type: ignore[arg-type]
+    outcome = _launch(launch)
+    assert not outcome.ok and text in outcome.reason
+    assert not (launch.target / "ws/spec/10-requirements.md").exists()
+
+
+@darwin_only
+def test_two_runs_on_one_target_keep_their_own_call_dirs_and_sentinels(
+    launch, monkeypatch
+):
+    """Два прогона с одинаковыми target_dir/bundle_dir: каталоги вызова,
+    часовые пробы и диагностика — каждый своего прогона."""
+    runs = {}
+    for run_id in ("ra", "rb"):
+        run_dir = launch.base / "runs" / run_id
+        run_dir.mkdir(parents=True)
+        call = dataclasses.replace(launch.call, run_id=run_id, run_dir=str(run_dir))
+        launch.probe = sandbox.ProbeResult((f"sentinel:run_dir {run_dir}: OK",), ())
+        runs[run_id] = (
+            run_dir,
+            author_launch.launch_author(call, lambda out: out),
+        )
+    for (run_dir, outcome), (root, _, _, targets) in zip(
+        runs.values(), launch.probes, strict=True
+    ):
+        assert targets.run_dir == run_dir
+        assert root.parent.name == run_dir.name
+        assert str(run_dir) in outcome.reason
+        assert (run_dir / "edge-check").is_dir()
+
+
+# --- политика окружения и резолвер харнесса (переехали из ops, TASK-005) ------
+
+_OPERATOR_ENV = {
+    "PATH": "/usr/bin",
+    "HOME": "/h",
+    "USER": "u",
+    "LOGNAME": "u",
+    "SHELL": "/bin/zsh",
+    "LANG": "C.UTF-8",
+    "TERM": "xterm",
+    "TMPDIR": "/t/",
+    "LC_ALL": "C.UTF-8",
+    "XDG_STATE_HOME": "/h/.state",
+    "ANTHROPIC_API_KEY": "own-model-key",
+    # чужая XDG_-переменная — префиксом не проходит (ревью #483)
+    "XDG_SESSION_SECRET": "x",
+    # то, что агенту попадать НЕ должно (F12 дизайна)
+    "GH_TOKEN": "x",
+    "GITHUB_TOKEN": "x",
+    "GH_CONFIG_DIR": "/h/.config/review",
+    "OPENAI_API_KEY": "x",
+    "MS_CLIENT_SECRET": "x",
+    "SPEC_RUNNER_TELEGRAM_TOKEN": "x",
+    "CLAUDECODE": "1",
+    "CLAUDE_CODE_MESSAGING_TOKEN": "x",
+    "CLAUDE_CODE_OAUTH_TOKEN": "inherited-token",
+    "AUTHOR_HARNESS": "codex",
+}
+_AGENT_SUBSET = {
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "TERM",
+    "TMPDIR",
+    "LC_ALL",
+    "XDG_STATE_HOME",
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+}
+
+
+def test_agent_env_is_exact_allowlist_subset():
+    """Секреты сессии оператора агенту не наследуются: env РАВЕН
+    allowlist-подмножеству (равенство, не поиск трёх имён)."""
+    expected = {k: v for k, v in _OPERATOR_ENV.items() if k in _AGENT_SUBSET}
+    assert author_launch.agent_env(_OPERATOR_ENV) == expected
+
+
+def test_call_env_overrides_tmp_config_token_and_ca(monkeypatch):
+    """§12: allowlist + корни каталога вызова, токен — из связки (не
+    унаследованный), CA — системный."""
+    for name in list(os.environ):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in _OPERATOR_ENV.items():
+        monkeypatch.setenv(name, value)
+    call = CallDir(Path("/calls/r/c"))
+    env = author_launch.call_env(call, "tok-from-keychain")
+    assert env == {
+        **{k: v for k, v in _OPERATOR_ENV.items() if k in _AGENT_SUBSET},
+        "TMPDIR": "/calls/r/c/tmp",
+        "CLAUDE_CODE_TMPDIR": "/calls/r/c/tmp",
+        "CLAUDE_CONFIG_DIR": "/calls/r/c/claude-config",
+        "CLAUDE_CODE_OAUTH_TOKEN": "tok-from-keychain",
+        "SSL_CERT_FILE": "/etc/ssl/cert.pem",
+    }
+
+
+def test_agent_env_names_are_pinned():
+    """Перечень пинуется литералом (ревью #483): расширение allowlist'а —
+    осознанная правка защищённого теста с обоснованием."""
+    assert author_launch.AGENT_ENV_NAMES == {
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "TERM",
+        "TMPDIR",
+        "LANG",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_MODEL",
+        "MAX_THINKING_TOKENS",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "AWS_REGION",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "CLOUD_ML_REGION",
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "NO_PROXY",
+        "SSL_CERT_FILE",
+        "NODE_EXTRA_CA_CERTS",
+    }
+    assert author_launch.AGENT_ENV_PREFIXES == ("LC_",)
+    assert "OPENAI_API_KEY" not in author_launch.AGENT_ENV_NAMES
+
+
+def test_agent_env_carries_the_reviewer_model_transport():
+    """Транспорт модели авторского агента не отстаёт от ревьюера edge-check."""
+    from governance.edge_check import reviewer
+
+    assert set(reviewer._ENV_ALLOWLIST) <= author_launch.AGENT_ENV_NAMES
+
+
+def _harness_cfg(base: Path, monkeypatch, text: str | None) -> None:
+    path = base / "harness.env"
+    if text is not None:
+        path.write_text(text, encoding="utf-8")
+    monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", str(path))
+    for name in ("AUTHOR_HARNESS", "AUTHOR_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.mark.parametrize(
+    ("cfg", "env", "expected"),
+    [
+        (None, {}, ("codex", "")),
+        ("AUTHOR_HARNESS=claude\nAUTHOR_MODEL=m1\n", {}, ("claude", "m1")),
+        ("  export AUTHOR_HARNESS=claude\n", {}, ("claude", "")),
+        # урок ревью PR #121: харнесс env не наследует модель файла
+        (
+            "AUTHOR_HARNESS=claude\nAUTHOR_MODEL=m1\n",
+            {"AUTHOR_HARNESS": "codex"},
+            ("codex", ""),
+        ),
+        ("AUTHOR_HARNESS=codex\n", {"AUTHOR_MODEL": "m2"}, ("codex", "m2")),
+    ],
+    ids=["default-codex", "file", "export", "env-harness-own-model", "env-model"],
+)
+def test_harness_resolver_layers(base, monkeypatch, cfg, env, expected):
+    _harness_cfg(base, monkeypatch, cfg)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    assert author_launch.harness_for("AUTHOR") == expected
+
+
+def test_author_argv_runs_admitted_binary_with_pinned_flags():
+    argv = author_launch.author_argv("/opt/claude", "", "PROMPT")
+    assert argv == [
+        "/opt/claude",
+        "-p",
+        "--model",
+        "claude-opus-5",
+        "--dangerously-skip-permissions",
+        "--no-session-persistence",
+        "--strict-mcp-config",
+        "PROMPT",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("rc", "stdout", "ok"),
+    [(0, "tok\n", True), (44, "", False), (0, "  \n", False)],
+    ids=["found", "missing-item", "empty-value"],
+)
+def test_author_claude_token_reads_the_named_keychain_item(monkeypatch, rc, stdout, ok):
+    """Спрашивается именно элемент AUTHOR_CLAUDE_TOKEN_ITEM; отсутствие и
+    пустое значение — AgentIsolationError, а не пустой токен в env агента."""
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(argv, rc, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(author_launch.subprocess, "run", fake_run)
+    if ok:
+        assert author_launch.author_claude_token() == "tok"
+    else:
+        with pytest.raises(author_launch.AgentIsolationError):
+            author_launch.author_claude_token()
+    assert seen == [
+        [
+            "security",
+            "find-generic-password",
+            "-s",
+            author_launch.AUTHOR_CLAUDE_TOKEN_ITEM,
+            "-w",
+        ]
+    ]
+
+
+# --- корректность конфигурации на общих входах (§19 п.1) ---------------------
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex"])
+def test_check_config_accepts_any_known_harness_without_machine_checks(
+    base, monkeypatch, harness
+):
+    """Общие входы не требуют готовности к авторингу: ни ОС, ни допуск, ни
+    «харнесс = claude» не проверяются — на не-git цели тоже."""
+    _harness_cfg(base, monkeypatch, None)
+    monkeypatch.setenv("AUTHOR_HARNESS", harness)
+    monkeypatch.setattr(author_launch, "_os_name", _never("ОС"))
+    monkeypatch.setattr(sandbox, "admission_check", _never("допуск"))
+    (base / "t").mkdir()
+    assert author_launch.check_config(str(base / "t"), "ws/spec", "codex") is None
+    assert author_launch.check_config(str(_repo(base / "g")), "ws/spec", "disp") is None
+
+
+@pytest.mark.parametrize(
+    ("harness", "backend", "bundle", "text"),
+    [
+        ("gemini", "codex", "ws/spec", "неизвестный AUTHOR_HARNESS"),
+        ("claude", "magic", "ws/spec", "неизвестный author_backend"),
+        ("claude", "codex", "../x", ".."),
+        ("claude", "codex", "ws/.git", ".git"),
+    ],
+)
+def test_check_config_refuses_unrecognised_values(
+    base, monkeypatch, harness, backend, bundle, text
+):
+    _harness_cfg(base, monkeypatch, None)
+    monkeypatch.setenv("AUTHOR_HARNESS", harness)
+    target = _repo(base / "g")
+    reason = author_launch.check_config(str(target), bundle, backend)
+    assert reason is not None and text in reason
+
+
+# --- `_run_agent`: новая сессия, SIGKILL группе (§12, Z13) --------------------
+
+
+def test_run_agent_kills_the_group_after_exit(base):
+    pidfile = base / "pid"
+    code = author_launch._run_agent(
+        ["/bin/sh", "-c", f"sleep 30 & echo $! > {pidfile}; exit 0"],
+        env={"PATH": "/usr/bin:/bin"},
+        cwd=base,
+        timeout=10,
+    )
+    assert code == 0
+    _assert_dead(int(pidfile.read_text()))
+
+
+def test_run_agent_timeout_kills_the_group(base):
+    pidfile = base / "pid"
+    started = time.monotonic()
+    code = author_launch._run_agent(
+        ["/bin/sh", "-c", f"sleep 30 & echo $! > {pidfile}; sleep 30"],
+        env={"PATH": "/usr/bin:/bin"},
+        cwd=base,
+        timeout=1,
+    )
+    assert code is None and time.monotonic() - started < 10
+    _assert_dead(int(pidfile.read_text()))
+
+
+def _assert_dead(pid: int) -> None:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"потомок {pid} пережил SIGKILL группе")
