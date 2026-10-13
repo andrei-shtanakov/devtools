@@ -2891,3 +2891,17 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       12 из 13 репо в области; исключение — maestro (открытый пробел,
       maestro#252). Защищённым не считается никто: исправления гарда не
       выпущены (`protected_since` пуст).
+
+## Акт утверждения через approve человека (спека rev 15 + план, devtools#611)
+
+> Спека `docs/superpowers/specs/2026-10-12-approval-act-review-design.md`, план
+> `docs/superpowers/plans/2026-10-12-approval-act-review.md` (согласован владельцем 13.10).
+> Исполнение — только subagent-driven; интеграционный обзор пути утверждения после A, B, C и
+> перед Task 19.
+
+- [ ] Часть A — чистое ядро `governance/act_*` (Tasks 1–10, 5a), PR → мерж человеком (authority-root) @owner:github:andrei-shtanakov @id:approval-act-core @epic:eco.dark-factory
+- [ ] Часть H — шаги человека: H1 (`approval-policy`: `modes.yaml`, `actors.yaml`, `AUTHORIZED_MERGER_ACCOUNTS`, rebase-merge выключен, ruleset; стенд `df-roles-probe-policy`, `df-roles-probe-devtools`), H2 (bootstrap `contracts/approval-policy-source/v2/`) @owner:github:andrei-shtanakov @id:approval-act-human-setup @epic:eco.dark-factory @blocked_by:todo://devtools/approval-act-core
+- [ ] Часть B — интеграция узла (Tasks 11–16, 12a, 13a, 15a); ворота: релиз M0 → детализация задач по фактическому API → ревью обновлённого плана → реализация @owner:github:andrei-shtanakov @id:approval-act-node @epic:eco.dark-factory @blocked_by:todo://steward/approval-facts-v3 @blocked_by:todo://devtools/approval-act-human-setup
+- [ ] Часть C — путь брифа `review/v1` (Task 17) @owner:github:andrei-shtanakov @id:approval-act-brief @epic:eco.dark-factory @blocked_by:todo://discovery/approve-review-v1 @blocked_by:todo://devtools/approval-act-node
+- [ ] Часть D — живая приёмка M3 (Task 18): стенд, затем реальный продукт; разрушительные сценарии — только на стенде по условиям Task 18 @owner:github:andrei-shtanakov @id:approval-act-acceptance-m3 @epic:eco.dark-factory @blocked_by:todo://devtools/approval-act-brief
+- [ ] Часть E — `review_v1` по умолчанию (Task 19), только после пройденной M3 @owner:github:andrei-shtanakov @id:approval-act-default-m4 @epic:eco.dark-factory @blocked_by:todo://devtools/approval-act-acceptance-m3
