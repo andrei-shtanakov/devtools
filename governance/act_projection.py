@@ -40,9 +40,10 @@ def self_hash_v(text: str, act: str | None) -> str:
     if act not in _EXCLUDED:
         raise ProjectionError(f"неизвестная версия акта: {act!r}")
     meta, body = split_frontmatter(text)
-    marker = meta.get("approval_act")
-    if marker is not None and (marker not in _EXCLUDED or marker != act):
-        raise ProjectionError(f"маркер узла {marker!r} ≠ режиму заявки {act!r}")
+    if "approval_act" in meta:
+        marker = meta["approval_act"]
+        if not isinstance(marker, str) or marker != act:
+            raise ProjectionError(f"маркер узла {marker!r} ≠ режиму заявки {act!r}")
     for key in _EXCLUDED[act]:
         meta.pop(key, None)
     return blob_sha1(join_frontmatter(meta, body))

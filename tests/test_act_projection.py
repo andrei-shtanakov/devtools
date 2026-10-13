@@ -41,3 +41,16 @@ def test_unknown_act_refused_before_parsing(
     monkeypatch.setattr(act_projection, "split_frontmatter", explode)
     with pytest.raises(ProjectionError, match="review/v9"):
         self_hash_v(NODE, "review/v9")
+
+
+@pytest.mark.parametrize("value", ["[review/v1]", "{a: 1}", "", "null", "~", "5"])
+def test_non_string_marker_refused(value: str) -> None:
+    """Нестроковый или пустой маркер — ProjectionError, не TypeError/снятие."""
+    text = STAMPED.replace("approval_act: review/v1", f"approval_act: {value}")
+    with pytest.raises(ProjectionError):
+        self_hash_v(text, "review/v1")
+
+
+def test_legacy_mode_refuses_review_marker() -> None:
+    with pytest.raises(ProjectionError):
+        self_hash_v(STAMPED, None)
