@@ -36,7 +36,10 @@ class ReviewView:
 
 @dataclass(frozen=True)
 class DeliveryView:
-    """Доставка: факты мержа и пары blob (merge, head) по путям."""
+    """Доставка: факты мержа и пары blob (merge, head) по путям.
+
+    `None` в фактах — «не установлено» (`Unavailable`); в паре blob
+    `(None, sha)` — установленное удаление пути в merge-коммите."""
 
     merged: bool
     merge_commit: str | None
@@ -44,8 +47,8 @@ class DeliveryView:
     merged_by_login: str | None
     merged_by_type_hint: str | None
     head_at_merge: str | None
-    in_base: bool
-    blobs: Mapping[str, tuple[str, str]]
+    in_base: bool | None
+    blobs: Mapping[str, tuple[str | None, str]]
 
 
 @dataclass(frozen=True)
@@ -76,7 +79,14 @@ class WaitingDelivery:
 
 Decision = Accepted | Rejected | WaitingDelivery | Unavailable
 
-_DELIVERY_FACTS = ("merge_commit", "merged_at", "merged_by_login", "head_at_merge")
+_DELIVERY_FACTS = (
+    "merge_commit",
+    "merged_at",
+    "merged_by_login",
+    "merged_by_type_hint",
+    "head_at_merge",
+    "in_base",
+)
 
 
 def _missing_fact(d: DeliveryView, effective: Mapping[str, ReviewView]) -> str | None:
@@ -123,7 +133,7 @@ def _delivery_refusal(
 ) -> Rejected | Unavailable | None:
     if d.head_at_merge != head_sha:
         return Rejected(HEAD_MOVED, f"голова при мерже {d.head_at_merge} ≠ {head_sha}")
-    if not d.in_base:
+    if d.in_base is False:
         return Rejected(NOT_IN_BASE, "merge-коммит недостижим из базы")
     for entry in request.nodes.values():
         if entry.path not in d.blobs:

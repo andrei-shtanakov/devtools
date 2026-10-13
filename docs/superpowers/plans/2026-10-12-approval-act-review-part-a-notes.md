@@ -20,11 +20,12 @@ Subagent-driven (решение владельца 13.10): на каждую и�
 | 5a | маркер `approval_act` нестрокового или пустого значения → `ProjectionError` | отказ до хеша (§7) |
 | 6 | `Refused.reason` — `compare=False` | неоднозначность по вердикту (§8.2, §10 п. 5) |
 | 7 | акт авторизуется по `review.login`, а не по ключу словаря; расхождение ключа и логина → `Unavailable` | итоговый обзор: ревью бота под ключом человека засчитывалось |
-| 7 | неустановленный факт доставки (`merge_commit`, `merged_at`, `merged_by`, `head_at_merge`, путь вне `blobs`/`self_hashes`) → `Unavailable`, не `Rejected`/`Accepted` | правило «Unavailable не превращается в Rejected» (§5.5) |
+| 7 | неустановленный факт доставки (`merge_commit`, `merged_at`, `merged_by`, `merged_by_type_hint`, `head_at_merge`, `in_base`, путь вне `blobs`/`self_hashes`) → `Unavailable`, не `Rejected`/`Accepted` | правило «Unavailable не превращается в Rejected» (§5.5) |
 | 3 | `Clock` отвергает ненормализованные метки (доли секунды, без зоны) | иначе правило равной секунды молча пропускалось |
 | 8 | разбор конверта и остановки — строгая проверка ключей и типов, ошибки YAML → `EnvelopeError` | код плана распаковывал словарь без проверки (`generation: 2.0` проходил) |
 | 9 | `permissions_refusal` → `Violation \| Unavailable \| None` вместо `str \| None` | нарушение (маркер) и неустановленный факт (без маркера) — разные исходы §6.2 б / §6.3 |
 | 2 | `valid_until` проверяется как ISO-метка с зоной; пустой `prev` в `check_transition` → `JournalError` | итоговый обзор |
+| 10 | `tests/test_act_*` и `tests/act_cases` — в authority-root и `_HARNESS_PREFIXES` | ревью #613: тесты ядра не были защищены |
 | 5a | `governance/node_approval` и `stale_adapter` в authority-root **не** добавлены | расширение authority-root меняет, кто мержит посторонние PR; нужно только с `act_premerge` (п. 8 ниже) |
 
 ## Что обязана обеспечить часть B
@@ -38,10 +39,11 @@ Subagent-driven (решение владельца 13.10): на каждую и�
    first-parent.
 4. `mode_history` строится из `ACT_MODE` **продукта доставки**, включая `""` при удалении
    записи (№38, Q8/Q9).
-5. Адаптер фактов передаёт удаление пути в merge-коммите явным значением. Сейчас
-   `DeliveryView.blobs: Mapping[str, tuple[str, str]]` — отсутствующий ключ означает «не
-   прочитано» (`Unavailable`); для установленного удаления тип нужно расширить до
-   `tuple[str | None, str]` (сравнение `(None, sha)` уже даёт `Rejected(I_BYTES)`).
+5. Адаптер фактов передаёт удаление пути в merge-коммите явным значением. ВЫПОЛНЕНО в
+   части A: `DeliveryView.blobs: Mapping[str, tuple[str | None, str]]`; отсутствующий ключ —
+   «не прочитано» (`Unavailable`), `(None, sha)` — установленное удаление →
+   `Rejected(I_BYTES)`. Также `in_base: bool | None` и `merged_by_type_hint` — факты
+   доставки: `None` → `Unavailable`; адаптер обязан передавать `False`/тип явно.
 6. `load_trust`: `source.env` и история журнала — с `origin/master`, не через `load_source`
    (тот читает рабочее дерево); трёхзначный `permissions_refusal`; `PerimeterError` →
    `Unavailable`; маркер — только для `Violation` / `HistoryViolation`; все файлы политики —

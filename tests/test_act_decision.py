@@ -177,7 +177,14 @@ def test_bot_agent_outside_merger_allowlist_refused() -> None:
 
 @pytest.mark.parametrize(
     "field_name",
-    ["merge_commit", "merged_at", "merged_by_login", "head_at_merge"],
+    [
+        "merge_commit",
+        "merged_at",
+        "merged_by_login",
+        "merged_by_type_hint",
+        "head_at_merge",
+        "in_base",
+    ],
 )
 def test_missing_delivery_fact_unavailable(field_name: str) -> None:
     """§5.5: неустановленный факт доставки — `Unavailable`, не вердикт."""
@@ -194,3 +201,11 @@ def test_unread_blob_unavailable() -> None:
 def test_missing_self_hash_unavailable() -> None:
     """Хеш проекции не вычислен — I-content не установлен."""
     assert isinstance(run(head_self_hashes={}), Unavailable)
+
+
+def test_deleted_at_merge_is_rejected_bytes() -> None:
+    """Установленное удаление пути в merge-коммите — `(None, sha)` → I_BYTES."""
+    deleted = dataclasses.replace(DELIVERY, blobs={PATH: (None, "b" * 40)})
+    result = run(delivery=deleted)
+    assert isinstance(result, Rejected)
+    assert result.code == I_BYTES
