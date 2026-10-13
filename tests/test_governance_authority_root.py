@@ -137,6 +137,10 @@ def test_prefixes_read_from_the_ssot_file() -> None:
         "tests/test_governance_sandbox",
         "tests/test_author_sandbox_invariant",
         "contracts/author-sandbox/",
+        # Акт утверждения review/v1: ядро решения и проверяльщик в обвязке мержа.
+        "governance/act_",
+        "tests/test_act_",
+        "tests/act_cases",
     }
 
 
@@ -435,6 +439,28 @@ def test_author_sandbox_chain_is_in_both_protected_lists() -> None:
         assert prefix in prefixes, prefix
         for entry in harness_entries:
             assert entry in harness, entry
+
+
+_ACT_CHAIN = ("governance/act_", "tests/test_act_", "tests/act_cases")
+
+
+def test_act_chain_is_in_both_protected_lists() -> None:
+    """Акт review/v1: ядро и его тесты защищены на обеих стадиях — мерж
+    (`AUTHORITY_ROOT_PREFIXES`) и приёмка (`_HARNESS_PREFIXES`). Тесты ядра,
+    правимые агентом, ослабили бы проверки вместе с самим ядром."""
+    prefixes = set(authority_root.prefixes())
+    harness = set(accept_pr._HARNESS_PREFIXES)
+    for prefix in _ACT_CHAIN:
+        assert prefix in prefixes, prefix
+        assert prefix in harness, prefix
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["tests/test_act_decision.py", "tests/act_cases.py", "governance/act_time.py"],
+)
+def test_act_chain_paths_are_authority_root(path: str) -> None:
+    assert authority_root.touched([path, "README.md"]) == [path]
 
 
 @pytest.mark.parametrize(
