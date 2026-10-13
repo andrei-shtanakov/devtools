@@ -1,6 +1,6 @@
 # Акт утверждения через approve человека — план реализации (devtools)
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task (решение владельца 13.10: только subagent-driven, протокол — раздел «Решения владельца», п. 3; `executing-plans` не применяется). Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** перевести человеческий акт на путях «узел бандла (§I12)» и «бриф» с мержа PR
 учёткой человека на approve-ревью человека по head SHA заявки; мерж становится доставкой и
@@ -17,7 +17,7 @@ steward), пинованным набором политик (`approval-policy` 
 `governance`) — общий читатель фактов; pytest; ruff; pyrefly.
 
 **Spec:** `docs/superpowers/specs/2026-10-12-approval-act-review-design.md` (rev 14, подписана
-владельцем 2026-10-12). План спорит со спекой, а не заменяет её: исполнитель читает обе.
+владельцем 2026-10-12; rev 15 — уточнения по решениям владельца 13.10). План спорит со спекой, а не заменяет её: исполнитель читает обе.
 
 ## Global Constraints
 
@@ -59,21 +59,46 @@ steward), пинованным набором политик (`approval-policy` 
 - Строки ≤ 88 символов, type hints, docstrings публичных функций; `uv run ruff check`,
   `uv run ruff format`, `pyrefly check` после каждой задачи.
 
-## Отступления от подписанной спеки (на подтверждение владельца)
+## Решения владельца при подписи плана (13.10)
 
-План расходится с буквой спеки rev 14 ровно в двух местах. Оба вынесены сюда, чтобы подпись
-плана была и решением по ним:
+Два прежних отступления от буквы спеки rev 14 владелец разрешил 13.10; спека уточнена до rev 15
+(§6.1 п. 2, §6.2 б, §8 №11, §11.1 №28 и правило стендовых строк, §13). План следует rev 15.
 
-1. **`allow_rebase_merge` в рантайме не проверяется (§6.1 п. 2: «проверяется при admission»).**
-   Замер 2026-10-12: `GET /repos/andrei-shtanakov/approval-policy` от `ai-prosto` (права
-   `pull` без `push`) отдаёт `allow_rebase_merge: null` — настройку мержа GitHub показывает
-   только вызывающему с правом записи, а агенту такое право запрещено периметром (§6.2 б). План:
-   поле `true` — нарушение; поле `null` — непроверенная предпосылка в результате проверки;
-   обязательная проверка — человеком при установке (§6.2 а). Следствие rebase-merge в рантайме
-   ловится формой истории (`HistoryViolation`, коммиты first-parent без PR). Альтернатива —
-   держать `unavailable`: тогда ни одно решение не будет принято никогда.
-2. **Фаза 2 приёмки на реальном продукте не нарушает периметр настоящего источника (§11.1)**
-   — сценарии №21, 28, 29, 33–37, 39, 45 закрываются ссылкой на фазу 1 стенда (Task 18).
+1. **`allow_rebase_merge` — четыре состояния (спека §6.2 б).** Замер 2026-10-12:
+   `GET /repos/andrei-shtanakov/approval-policy` от `ai-prosto` (права `pull` без `push`) отдаёт
+   `allow_rebase_merge: null` — настройку мержа GitHub показывает только вызывающему с правом
+   записи, а агенту такое право запрещено периметром. Правило рантайма:
+   - `false` — настройка проверена;
+   - `true` — нарушение периметра (маркер §6.3, `Unavailable`);
+   - `null` или поле отсутствует **в корректном ответе** — непроверенная предпосылка: решение
+     не блокирует, записывается в `Trust.unverified`; обязательная проверка — человеком при
+     установке (§6.2 а);
+   - ошибка запроса или некорректный ответ (не объект, значение не `bool`/`null`) —
+     `Unavailable` без маркера; в допустимый `null` не превращается.
+
+   **Предел обнаружения (поправка владельца к rev 9 плана).** Форма истории ловит только
+   многокоммитный rebase-merge: его промежуточные коммиты first-parent не являются
+   `merge_commit_sha` никакого PR → `HistoryViolation`. Однокоммитный rebase-merge следа не
+   оставляет: GitHub отдаёт в `merge_commit_sha` коммит, на который обновилась базовая ветка
+   (документированная семантика API; живым тестом не проверялось), так что сверка коммит ↔ PR
+   проходит, и по форме он неотличим от squash. Проверка формы истории обнаруживает
+   определённые нарушения, но **не доказывает отсутствие rebase-merge**; запрет остаётся
+   частью человеческого периметра. Однокоммитный случай зафиксирован вектором (M0) и строкой
+   приёмки №28.
+2. **Разрушительные сценарии — только на стенде (спека §11.1).** Сценарии №21, 28, 29, 33–37,
+   39, 45 на реальном продукте не ставятся: настоящий `approval-policy` ради приёмки не
+   повреждается. Их evidence фазы 1 принимается при условиях Task 18 (SHA реализаций и
+   конфигурация стенда, соответствие механизма реальной установке, пометка «проверено на
+   стенде» со ссылкой, безопасные проверки периметра и сквозной путь — на продукте).
+3. **Исполнение — subagent-driven** (`superpowers:subagent-driven-development`): свежий
+   исполнитель и независимый ревьюер на задачу; зависимые задачи — последовательно; после
+   исправлений ревью повторяется по **актуальному** коду (вердикт по прежней версии не
+   переносится). В конце каждой части (A, B, C) и перед Task 19 — общий интеграционный обзор
+   всего пути утверждения (заявка → approve → admission → решение → доставка → конверт →
+   узел/бриф): локальные ревью задач его не заменяют.
+
+Ворота перед частью B сохраняются: опубликованный M0 → детализация задач 11–17 по фактическому
+API → ревью обновлённого плана → реализация.
 
 ## Review Focus
 
@@ -173,7 +198,10 @@ def read_policy_history(transport, repo: str, branch: str, *, anchor: str,
                         ) -> tuple[Activation, ...] | HistoryViolation | Unavailable: ...
     # §6.1 п. 2–5: first-parent anchor…until (None = HEAD), только PR-мержи,
     # порядок — first-parent (старые первыми). Нарушение формы — HistoryViolation
-    # (потребитель пишет маркер §6.3), сбой чтения — Unavailable (маркер не пишется)
+    # (потребитель пишет маркер §6.3), сбой чтения — Unavailable (маркер не пишется).
+    # Многокоммитный rebase-merge → HistoryViolation (промежуточные коммиты без PR);
+    # однокоммитный неотличим от squash и возвращается как Activation — предел,
+    # не нарушение (спека §6.1 п. 2, rev 15)
 
 def read_open_review(transport, repo: str, pr: int) -> ReviewFacts | Unavailable: ...
     # предпроверка открытого PR перед агентским мержем: те же два полных прохода
@@ -3687,7 +3715,15 @@ git commit -m "feat(act): полная проверка доставки на с
   `AGENT_GH_CONFIG_DIR = Path.home() / ".config" / "review"` (переопределение
   `REVIEW_GH_CONFIG_DIR` из окружения — как `ops.py:1559`); импорт `governance.ops` запрещён
   цепочкой authority-root (Task 15).
-- Produces: `Trust(source, epochs, anchor_at)`;
+- Produces: `Trust(source, epochs, anchor_at, unverified: tuple[str, ...])` — `unverified`:
+  имена предпосылок, которые рантайм не смог проверить (пока только `"allow_rebase_merge"`);
+  решение не блокируют, в вердикт `check_delivery` не входят (это свойство контекста, а не
+  исхода) и **обязательно** записываются в evidence принятого акта: узел —
+  `record_review_act(..., unverified=trust.unverified)` → поле `unverified_premises` в
+  `run.json` (Task 13); бриф — `as_record` пишет `unverified_premises` рядом с
+  `approval_act` (Task 17); `act_premerge` печатает их в stderr перед мержем (Task 15).
+  Пустой кортеж пишется как `[]`, а не опускается: отсутствие поля в записи — дефект, а не
+  «проверено»;
   `Readers` — инжектируемые чтения (protocol): `git(args) -> Fact[str]` в чекауте devtools,
   `gh_api(path, gh_config_dir) -> Fact[dict]`, `app_installations(key_path, app_id)
   -> Fact[list[dict]]`, `activation(merge_commit) -> Activation | Unavailable`,
@@ -3728,12 +3764,15 @@ git commit -m "feat(act): полная проверка доставки на с
    нарушение (маркер).
    `allow_rebase_merge`: `GET /repos/{repo}` отдаёт настройки мержа только вызывающему с правом
    записи, которого у агента по построению нет (§6.2 б: «проверяется то, что видно без них»).
-   Поэтому рантайм: поле есть и `True` — нарушение (маркер); поля нет — **не** «подтверждено» и
-   записывается в результат как непроверенная предпосылка (**отступление 1**, раздел
-   «Отступления» — на подтверждение владельца). Обязательная проверка запрета —
-   человеком при установке (§6.2 а, `df setup-repo`, спека B). Нарушение в рантайме
-   обнаруживается по его следствию: rebase-merge даёт коммиты first-parent без
-   соответствующего PR → `HistoryViolation` (п. 6).
+   Четыре состояния (раздел «Решения владельца», п. 1): `False` — проверено; `True` —
+   нарушение (маркер, `Unavailable`); `None` или ключ отсутствует в корректном ответе (объект) —
+   **не** «подтверждено»: строка `"allow_rebase_merge"` в `Trust.unverified`, решение не
+   блокируется; ошибка запроса (`Fact` с ошибкой) или некорректный ответ (не объект; значение
+   не `bool` и не `None`) — `Unavailable` без маркера. Обязательная проверка запрета —
+   человеком при установке (§6.2 а, `df setup-repo`, спека B). **Отсутствие rebase-merge
+   рантайм не доказывает:** п. 6 ловит многокоммитный rebase-merge (промежуточные коммиты
+   first-parent без PR → `HistoryViolation`), однокоммитный по форме неотличим от squash и
+   проходит.
 5. Время якоря — `readers.activation(anchor).merged_at` **лениво**, от последней эпохи назад:
    якорь эпохи E нужен, только пока ни один более поздний якорь не предшествует T (e7: акт новой
    эпохи не требует объектов старой). Недоступное время нужного якоря → `Unavailable`;
@@ -3776,6 +3815,29 @@ def test_missing_bypass_field_not_treated_as_empty(tmp_path) -> None:
 
 def test_ruleset_without_pull_request_rule_is_violation(tmp_path) -> None:
     """Периметр: ветка источника без требования PR."""
+
+def test_rebase_setting_false_is_verified(tmp_path) -> None:
+    """allow_rebase_merge=False → Trust, unverified пуст."""
+
+def test_rebase_setting_true_records_marker(tmp_path) -> None:
+    """allow_rebase_merge=True → маркер + Unavailable."""
+
+@pytest.mark.parametrize("repo", [{"allow_rebase_merge": None}, {}])
+def test_rebase_setting_hidden_is_unverified_premise(tmp_path, repo) -> None:
+    """null и отсутствующий ключ в корректном ответе → Trust, unverified содержит
+    "allow_rebase_merge"; маркера нет."""
+
+@pytest.mark.parametrize("fact", ["error", [], {"allow_rebase_merge": "false"}])
+def test_rebase_setting_unreadable_is_unavailable(tmp_path, fact) -> None:
+    """Ошибка запроса, не-объект, значение не bool/None → Unavailable без маркера;
+    в null не превращается."""
+
+def test_single_commit_rebase_merge_not_detected() -> None:
+    """Приёмка №28, предел: история из стаба с однокоммитным rebase-merge (вектор M0)
+    принимается, как squash; тест фиксирует, что рантайм отсутствие rebase не доказывает."""
+
+def test_multi_commit_rebase_merge_records_marker(tmp_path) -> None:
+    """Приёмка №28: HistoryViolation (промежуточный коммит без PR) → маркер, Unavailable."""
 
 def test_permissions_unreadable_is_unavailable_without_marker(tmp_path) -> None:
     """Недоступное ≠ нарушение: маркер не пишется."""
@@ -3837,7 +3899,8 @@ git commit -m "feat(act): доверенный контекст — журнал
   `act_node.reopen(...)` — запись остановки в режиме `review/v1`;
   `act_node.audit_late_dismissals(state, ops, key) -> None`;
   `approval_ledger.record_review_act(state, key, accepted: Accepted, delivery: DeliveryView,
-  activation_commit: str) -> None`; `approval_ledger.record_audit(state, key, event: dict)`;
+  activation_commit: str, unverified: tuple[str, ...]) -> None` (`unverified` —
+  `Trust.unverified`, Task 12a; без значения по умолчанию); `approval_ledger.record_audit(state, key, event: dict)`;
   `HUMAN_APPROVAL_LABEL = "human-approval-required"`; `WAITING_HUMAN_APPROVAL`,
   `WAITING_DELIVERY`.
 
@@ -3903,8 +3966,12 @@ def record_review_act(
     accepted: Accepted,
     delivery: DeliveryView,
     activation_commit: str,
+    unverified: tuple[str, ...],
 ) -> None:
     """Акт review/v1 и доставка — одним write'ом (спека §7, `run.json`).
+
+    `unverified` — непроверенные рантаймом предпосылки (`Trust.unverified`),
+    пишутся всегда, пустые — как `[]`.
 
     Верхнеуровневые `merged_by`/`merged_at`/`merge_commit`/`authorization`
     обязательны: по ним `next_step` переводит заявку в FINALIZE.
@@ -3928,6 +3995,7 @@ def record_review_act(
             "merged_at": delivery.merged_at,
             "merged_by": accepted.merged_by,
         },
+        unverified_premises=list(unverified),
     )
 ```
 
@@ -3989,6 +4057,8 @@ D5 (scope-аттестация + `merge-pr.sh`), но **проверка фор�
     `WAITING_DELIVERY`; живая заявка со старым пином → `invalidated: policy_changed`
     (приёмка №8, №9);
   - смёржен, `Accepted` → `next_step(op) is Step.FINALIZE` после `record_review_act`;
+  - `unverified_premises` в `run.json`: `allow_rebase_merge` = `False` → `[]`; `None` и
+    отсутствующий ключ → `["allow_rebase_merge"]` (решение принято, предпосылка названа);
   - падения: после `record_review_act`; после создания finalize-PR; после его мержа до
     `complete_request` — каждый повтор приходит к тому же итогу без второго конверта;
   - `Unavailable` от `check_delivery` → заявка жива, повтор с доступными фактами завершает её;
@@ -4146,7 +4216,7 @@ candidate-ветка **с** меткой `human-approval-required` → запу�
 импортов); 0 → мерж с пином `sha=<head>`; иначе — `die` с её кодом. Candidate **без** метки —
 `die 3`, как сейчас (legacy-акт по-прежнему мерж человеком).
 
-`act_premerge` по порядку: `load_trust`; манифест в `--head` (нет → 3); `ACT_MODE[P] = review`
+`act_premerge` по порядку: `load_trust` (непустой `Trust.unverified` — строка `unverified premise: <имя>` в stderr, мерж не блокирует); манифест в `--head` (нет → 3); `ACT_MODE[P] = review`
 по текущей активации открытой эпохи (иначе 3); `live_policy_refusal` (3); `open_review` + D1 на
 `--head` (нет акта → 3); голова PR = `--head` (иначе 3); **граница**: последнее событие,
 способное повлиять на решение, — максимум из `submitted_at` ревью, `created_at` отзывов,
@@ -4336,14 +4406,18 @@ git commit -m "feat(act): барьер миграции по форджу и п�
   подпись: `check_operator_brief` (`brief_provenance.py:234`) требует `approver == merged_by`,
   `check_policy` (`:306`) — мержера в утверждающих, `as_record` (`:53`) пишет
   `approver = merged_by`. Для `review/v1` вводится `ActV2(repo, pr, merge_commit, merged_at, dir, brief_self_hash,
-  request, approver, review_id, delivered_by, delivered_at, activation_commit)` —
+  request, approver, review_id, delivered_by, delivered_at, activation_commit,
+  unverified_premises: tuple[str, ...])` — `unverified_premises` обязательное, без умолчания:
+  `read_act` для `review/v1` получает `Trust` (тот же, что передан в `check_delivery`) и
+  заполняет поле из `trust.unverified`;
   идентичность PR и merge-коммит сохраняются (их читают `brief_tools.approve:359` и
   `working_version:257`), `request` — заявка v2 из головы: `approver` — логин из `Accepted`,
   `delivered_by` — мержер. `check_operator_brief` сверяет `approver` штампа с `ActV2.approver`
   и `approval_review_id`, `delivered_by` — с доставкой; `check_policy` для `ActV2` не
   перепроверяет мержера (D3 уже в `check_delivery`) и сверяет `activation_commit` с пином;
   `as_record` пишет `approval_act`, `approval_review_id`, `delivered_by`, `delivered_at`
-  (§7); `_judge_approve` и все вызывающие `read_act` ветвятся по типу.
+  (§7) и `unverified_premises` из `ActV2.unverified_premises` (всегда, пустые — `[]`; тест
+  итоговой записи штампа: `False` → `[]`, `None` и нет ключа → `["allow_rebase_merge"]`); `_judge_approve` и все вызывающие `read_act` ветвятся по типу.
 - **P/W/C для `ActV2` (§6: `policy-reconfirm` сохраняет различие P/W/C).** P —
   `activation_commit` заявки; C — текущая активация открытой эпохи (`load_trust` +
   `load_ranges`); W — `working_version` с той же логикой, что сегодня
@@ -4426,12 +4500,36 @@ git commit -m "feat(act): бриф review/v1 — заявка v2, агентск
 
 **Фаза 2 — реальный продукт** (спека §11.1: «стенд, затем реальный продукт») с настоящим
 `approval-policy` после H1–H2. Продукт выбирает владелец; переключение — через барьер (Task 16).
-Прогоняется **вся** матрица §11.1, кроме сценариев, требующих нарушить периметр настоящего
-источника (выдать агенту запись, force-push/прямой push в источник, скрытый bypass, порча
-журнала): №21, 28, 29, 33, 34, 35, 36, 37, 39, 45. Для них фаза 2 ссылается на строки фазы 1.
-**Это отступление от буквы §11.1** (матрица не делает исключений): нарушить периметр
-настоящего источника ради приёмки — значит выполнить ровно то, от чего периметр защищает (§6.1).
-Отступление вынесено на подтверждение владельца при подписи плана.
+Прогоняется **вся** матрица §11.1, кроме разрушительных сценариев, требующих нарушить периметр
+настоящего источника (выдать агенту запись, force-push/прямой push или rebase-merge в источник,
+скрытый bypass, порча журнала): №21, 28, 29, 33, 34, 35, 36, 37, 39, 45. Они — **только на
+стенде** (решение владельца 13.10, спека §11.1 rev 15). Evidence фазы 1 по ним принимается при
+четырёх условиях, каждое — отдельной строкой evidence или разделом README:
+1. **Провенанс стенда:** SHA проверенной реализации devtools (`checkout_sha`); пин steward в
+   devtools (`uv.lock`); **установленная** discovery — SHA её чекаута/релиза и пин steward в её
+   `uv.lock` (discovery — не зависимость devtools, её SHA снимается с исполняемой установки, а
+   не из `uv.lock` devtools); пин вендоренного контракта заявки в devtools (`PINNED.txt`);
+   `activation_commit` стенд-источника, номер эпохи и
+   конфигурация стенда (ruleset, `bypass_actors`, CODEOWNERS, App id, `ACT_MODE`) — снимок,
+   снятый человеком в момент прогона.
+2. **Соответствие механизма реальной установке:** для каждой строки — что проверяемый путь кода
+   тот же: **те же значения всех пунктов провенанса п. 1** (SHA devtools, SHA установленной
+   discovery, пины steward у обоих, пин вендоренного контракта), та
+   же схема контракта `approval-policy-source/v2`, отличаются только данные (`repo`,
+   `bootstrap_activation`, журнал, `ACT_MODE`). Частичный дифф («не менялись такие-то файлы»)
+   соответствия не доказывает: путь сценария проходит и через `approve_node.py`,
+   `approval_ledger.py`, `brief_provenance.py`, вендоренные контракты и реализацию discovery.
+   Любое расхождение SHA или пинов — повторный стендовый прогон строки на SHA фазы 2; до него
+   строка — `not_verified`.
+3. **Пометка в итоговой матрице:** фаза 2 по этим строкам — `проверено на стенде` со ссылкой на
+   строку evidence фазы 1 (не `pass` фазы 2).
+4. **Безопасные проверки реального периметра и сквозной путь — на продукте:** самоотчёт прав
+   каждого credential процесса на настоящем источнике (№29 без выдачи записи), чтение ruleset
+   (`deletion`, `non_fast_forward`, `pull_request`), состояние `allow_rebase_merge` в
+   рантайме (ожидаемо `unverified` у агента) и его проверка человеком из установочного evidence,
+   форма истории настоящего источника от якоря (№21/№28 без порчи), валидатор журнала на
+   настоящем `epochs.yaml` (№45 без мутации), маркер отсутствует (№36), сценарии 1–4 на обоих
+   путях — сквозной путь заявка → approve → мерж App → конверт → продолжение конвейера.
 
 **Проверка таймлайна (§8, «требует проверки на стенде»).** Полнота `review_dismissed`, наличие
 `previousReviewState`, метки событий относительно `merged_at` — отдельные строки evidence.
@@ -4443,8 +4541,10 @@ evidence этого предела:
 - №34 — обнаруживший потребитель заблокирован, второй до закрытия эпохи не обязан;
 - №21 — разрыв формы истории (прямой push, пропуск данных) → `unavailable` и отказ;
   force-push человеком на предка — вне гарантии v1, evidence фиксирует, что он не обнаружен;
-- №28 — rebase-merge или коммит first-parent без PR → `unavailable`; indirect merge с формально
-  связанным PR не обнаруживается, тест фиксирует предел.
+- №28 — многокоммитный rebase-merge или коммит first-parent без PR → `unavailable`;
+  однокоммитный rebase-merge проходит сверку как squash, indirect merge с формально связанным
+  PR не обнаруживается — evidence фиксирует оба предела (стенд: включить rebase-merge
+  человеком, смержить однокоммитный и многокоммитный PR, затем вернуть `false`).
 
 Для них используются векторы CI плюс живой прогон на стенд-источнике. Нет credentials для живой
 проверки → `not_verified`; такая строка **блокирует** M4. Исключений по номерам нет.
@@ -4455,9 +4555,13 @@ evidence этого предела:
   `uv run --group governance pytest tests/test_act_acceptance_script.py -v`.
 - [ ] **Step 2:** фаза 1 — все строки §11.1 и проверки таймлайна; каждая строка evidence сразу
   пишется в файл.
-- [ ] **Step 3:** фаза 2 — перечисленные выше сценарии на реальном продукте.
-- [ ] **Step 4:** README: таблица «сценарий → фаза → pass / fail / not_verified → строка
-  evidence». Любой `fail` или `not_verified` — стоп M4, находка уходит в задачу.
+- [ ] **Step 3:** фаза 2 — все остальные строки §11.1 и безопасные проверки п. 4 выше на
+  реальном продукте; строки провенанса (п. 1) и соответствия механизма (п. 2).
+- [ ] **Step 4:** README: таблица «сценарий → фаза → pass / fail / not_verified / проверено на
+  стенде → строка evidence». Любой `fail` или `not_verified` — стоп M4, находка уходит в
+  задачу.
+- [ ] **Step 4a:** общий интеграционный обзор всего пути утверждения (раздел «Решения
+  владельца», п. 3) по актуальному коду и evidence — до Task 19.
 - [ ] **Step 5:** commit + PR devtools (evidence — данные и проза; мерж агентский, если PR не
   трогает authority-root).
 
@@ -4473,8 +4577,8 @@ evidence этого предела:
 - Modify: `CLAUDE.md` (строки `merge-pr.sh`, `human-merge.sh`, раздел мержа: акт = approve)
 
 Условие входа: README Task 18 — все строки §11.1 `pass` в фазе 1 и в фазе 2 (кроме
-подтверждённых владельцем строк фазы 2, закрытых ссылкой на фазу 1), без `fail` и
-`not_verified`. Режим по продукту по-прежнему включает `ACT_MODE` через барьер (Task 16). Этот
+разрушительных строк, помеченных в фазе 2 «проверено на стенде» при выполненных условиях 1–4
+Task 18), без `fail` и `not_verified`; интеграционный обзор Step 4a пройден. Режим по продукту по-прежнему включает `ACT_MODE` через барьер (Task 16). Этот
 шаг меняет только одно: создаёт ли установка заявки `review/v1` без явной настройки.
 
 - [ ] **Step 1:** правка теста → FAIL; **Step 2:** правка константы → PASS;
@@ -4493,7 +4597,9 @@ git commit -m "feat(act): review/v1 по умолчанию после живо�
   - контракт v3;
   - библиотека `steward.approvalfacts.v3` с интерфейсом из раздела «Интерфейс M0», включая
     `read_open_review` и `read_activation`;
-  - векторы §5.6 в `contracts/approval-facts/v3/vectors/`;
+  - векторы §5.6 в `contracts/approval-facts/v3/vectors/`, включая историю источника с
+    многокоммитным rebase-merge (`HistoryViolation`) и с однокоммитным (принят как squash —
+    вектор фиксирует предел, а не нарушение);
   - запрет пересечения `human ∩ agent`;
   - миграция `gate-check --stage release` на запись `delivery`;
   - провайдер статуса узла `node_status` для гейтов, читающих `status`: узел `review/v1` без
