@@ -6,6 +6,7 @@ import itertools
 import random
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 import pytest
 
@@ -60,6 +61,33 @@ def test_clock_orders_by_stamp_then_membership() -> None:
     assert not clock.precedes(("x", "1"), parse_ts("2026-10-12T10:00:01Z"))
     assert clock.precedes(APPROVE, parse_ts(T))
     assert not clock.precedes(DISMISS, parse_ts(T))
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    [
+        datetime(2026, 10, 12, 10, 0, 0, 500000, tzinfo=UTC),
+        datetime(2026, 10, 12, 10, 0, 0),
+    ],
+    ids=["sub-second", "naive"],
+)
+def test_precedes_rejects_unnormalised_stamp(stamp: datetime) -> None:
+    """§8.2: ненормализованная метка не должна молча выпасть из группы."""
+    with pytest.raises(ValueError):
+        Clock(parse_ts(T)).precedes(APPROVE, stamp)
+
+
+@pytest.mark.parametrize(
+    "t",
+    [
+        datetime(2026, 10, 12, 10, 0, 0, 500000, tzinfo=UTC),
+        datetime(2026, 10, 12, 10, 0, 0),
+    ],
+    ids=["sub-second", "naive"],
+)
+def test_clock_rejects_unnormalised_t(t: datetime) -> None:
+    with pytest.raises(ValueError):
+        Clock(t)
 
 
 def test_before_sets_respect_dependencies() -> None:

@@ -28,6 +28,16 @@ def parse_ts(value: str) -> datetime:
     return stamp.astimezone(UTC).replace(microsecond=0)
 
 
+def _require_normalised(stamp: datetime, what: str) -> None:
+    """Метка обязана быть результатом `parse_ts`: aware и без долей секунды.
+
+    Не нормализуем молча: ненормализованная метка — ошибка адаптера, иначе
+    событие той же секунды тихо выпало бы из группы §8.2.
+    """
+    if stamp.tzinfo is None or stamp.microsecond != 0:
+        raise ValueError(f"{what}: метка не нормализована parse_ts: {stamp!r}")
+
+
 @dataclass(frozen=True)
 class Ambiguous:
     """Вердикты при допустимых порядках различаются → `unavailable`."""
@@ -49,8 +59,15 @@ class Clock:
     t: datetime
     before: frozenset[EventKey] = frozenset()
 
+    def __post_init__(self) -> None:
+        _require_normalised(self.t, "Clock.t")
+
     def precedes(self, key: EventKey, stamp: datetime) -> bool:
-        """Событие `key` с меткой `stamp` предшествует доставке."""
+        """Событие `key` с меткой `stamp` предшествует доставке.
+
+        Ненормализованная метка (naive или с долями секунды) — `ValueError`.
+        """
+        _require_normalised(stamp, f"событие {key}")
         return stamp < self.t or (stamp == self.t and key in self.before)
 
 
