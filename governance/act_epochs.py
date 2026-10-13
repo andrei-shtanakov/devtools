@@ -16,21 +16,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-if __package__ in (None, "") and "governance" not in sys.modules:
-    # Исполнение файлом под `python -I`: пакет — явно по пути, без дерева в
-    # sys.path (подмодули `governance.*` ищутся только в каталоге пакета).
-    import importlib.util
-
-    _pkg_dir = Path(__file__).resolve().parent
-    _spec = importlib.util.spec_from_file_location(
-        "governance",
-        _pkg_dir / "__init__.py",
-        submodule_search_locations=[str(_pkg_dir)],
-    )
-    assert _spec is not None and _spec.loader is not None
-    _pkg = importlib.util.module_from_spec(_spec)
-    sys.modules["governance"] = _pkg
-    _spec.loader.exec_module(_pkg)
+if __package__ in (None, ""):
+    # Запуск файлом (`python -I`: cwd не в sys.path): корень пиненого devtools
+    # добавляется В КОНЕЦ sys.path, после stdlib, чтобы не затенять её.
+    sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 import yaml  # noqa: E402
 
