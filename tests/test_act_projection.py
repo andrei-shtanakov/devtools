@@ -54,3 +54,20 @@ def test_non_string_marker_refused(value: str) -> None:
 def test_legacy_mode_refuses_review_marker() -> None:
     with pytest.raises(ProjectionError):
         self_hash_v(STAMPED, None)
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        STAMPED.replace("Тело узла.", "Другое тело."),
+        STAMPED.replace("id: requirements", "id: design"),
+        STAMPED.replace("version: 2", "version: 2\nowner: bob"),
+    ],
+    ids=["body", "id", "added-field"],
+)
+def test_review_v1_hash_tracks_body_and_unstamped_fields(changed: str) -> None:
+    """I-content различает: тело и поля вне конверта и штампа входят в хеш.
+
+    `status`/`version` — поля конверта (`APPROVAL_ENVELOPE_KEYS`), вне хеша.
+    """
+    assert self_hash_v(changed, "review/v1") != self_hash_v(STAMPED, "review/v1")

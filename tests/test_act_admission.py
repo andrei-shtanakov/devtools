@@ -65,8 +65,8 @@ def test_refusals_with_different_reasons_are_one_verdict() -> None:
     assert not isinstance(result, Ambiguous)
 
 
-def test_differing_readers_stay_ambiguous() -> None:
-    """Другой читатель — другой вердикт: неоднозначность остаётся."""
+def test_refused_vs_admitted_across_orders_is_ambiguous() -> None:
+    """Порядки дают Refused (merge) и Admitted (review): неоднозначность."""
     same = ModeEvent(("activation", "m2"), T, "review")
 
     def decide(clock: Clock) -> Admitted | Refused | Unavailable:

@@ -107,3 +107,21 @@ def test_append_without_closing_refused() -> None:
     prev = parse_journal(ONE_OPEN)
     with pytest.raises(JournalError):
         check_transition(prev, (prev[0], Epoch(2, A2, None, None, None)))
+
+
+@pytest.mark.parametrize(
+    "value",
+    ['"not a date"', '"2026-10-20"', '"2026-10-20T10:00:00"', '"2026-13-01T00:00Z"'],
+    ids=["text", "date-only", "naive", "bad-month"],
+)
+def test_valid_until_must_be_aware_iso_timestamp(value: str) -> None:
+    """`valid_until` проверяет журнал, а не каждый потребитель по-своему."""
+    text = CLOSED_AND_OPEN.replace('"2026-10-20T10:00:00Z"', value)
+    with pytest.raises(JournalError, match="valid_until"):
+        parse_journal(text)
+
+
+def test_transition_from_empty_journal_is_journal_error() -> None:
+    """Предусловие — разобранный журнал; пустой prev — JournalError, не IndexError."""
+    with pytest.raises(JournalError):
+        check_transition((), parse_journal(ONE_OPEN))

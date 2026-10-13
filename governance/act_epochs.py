@@ -13,6 +13,8 @@ from dataclasses import dataclass, replace
 
 import yaml
 
+from governance.act_time import parse_ts
+
 SCHEMA = "approval-policy-epochs/v1"
 _CLOSING = ("last_confirmed", "valid_until", "closed_reason")
 
@@ -49,6 +51,15 @@ def _closing_values(raw: dict[str, object], position: int) -> list[str | None]:
         isinstance(v, str) and v for v in values
     ):
         raise JournalError(f"эпоха #{position}: закрыта частично")
+    valid_until = values[_CLOSING.index("valid_until")]
+    if isinstance(valid_until, str):
+        try:
+            parse_ts(valid_until)
+        except ValueError as exc:
+            raise JournalError(
+                f"эпоха #{position}: valid_until {valid_until!r} — "
+                "не ISO-метка с часовым поясом"
+            ) from exc
     return [v if isinstance(v, str) else None for v in values]
 
 
@@ -83,7 +94,13 @@ def parse_journal(text: str) -> tuple[Epoch, ...]:
 
 
 def check_transition(prev: tuple[Epoch, ...], new: tuple[Epoch, ...]) -> None:
-    """Сверка новой версии журнала с прежней (CI и каждый потребитель)."""
+    """Сверка новой версии журнала с прежней (CI и каждый потребитель).
+
+    Предусловие: обе версии — результат `parse_journal` (непусты, форма
+    проверена); нарушение предусловия — `JournalError`, не падение.
+    """
+    if not prev or not new:
+        raise JournalError("сверка перехода: журнал без эпох")
     if new == prev:
         return
     if len(new) != len(prev) + 1 or new[: len(prev) - 1] != prev[:-1]:
