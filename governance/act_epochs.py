@@ -8,12 +8,21 @@
 
 from __future__ import annotations
 
+import argparse
 import datetime
+import subprocess
+import sys
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from pathlib import Path
 
-import yaml
+if __package__ in (None, ""):  # запуск как `python governance/act_epochs.py`
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from governance.act_time import parse_ts
+import yaml  # noqa: E402
+
+from governance.act_source import SourceError, parse_source  # noqa: E402
+from governance.act_time import parse_ts  # noqa: E402
 
 SCHEMA = "approval-policy-epochs/v1"
 _CLOSING = ("last_confirmed", "valid_until", "closed_reason")
@@ -113,3 +122,82 @@ def check_transition(prev: tuple[Epoch, ...], new: tuple[Epoch, ...]) -> None:
         raise JournalError("закрытие обязано менять только поля закрытия")
     if new[-1].closed:
         raise JournalError("добавленная эпоха обязана быть открытой")
+
+
+class _BaseUnavailable(Exception):
+    """BASE_SHA не разрешается в коммит."""
+
+
+def _git(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", *args], capture_output=True, text=True, check=False)
+
+
+def _show_base(base: str, file: str) -> str | None:
+    """Содержимое файла в базовом коммите; `None` — файла там нет."""
+    if _git("rev-parse", "--git-dir").returncode != 0:
+        raise JournalError("не git-чекаут")
+    if _git("cat-file", "-e", f"{base}^{{commit}}").returncode != 0:
+        raise _BaseUnavailable(base)
+    listing = _git("ls-tree", base, "--", file)
+    if listing.returncode != 0:
+        raise JournalError(f"git ls-tree {base}: {listing.stderr.strip()}")
+    if not listing.stdout.strip():
+        return None
+    shown = _git("show", f"{base}:{file}")
+    if shown.returncode != 0:
+        raise JournalError(f"git show {base}:{file}: {shown.stderr.strip()}")
+    return shown.stdout
+
+
+def _check_bootstrap(new: tuple[Epoch, ...], source_text: str) -> None:
+    """Файла в базе нет: допустима одна открытая эпоха 1 с якорем bootstrap."""
+    try:
+        source = parse_source(source_text)
+    except SourceError as exc:
+        raise JournalError(f"source.env при bootstrap: {exc}") from exc
+    if len(new) != 1 or new[0].closed:
+        raise JournalError("bootstrap: нужна ровно одна открытая эпоха 1")
+    if new[0].anchor != source.bootstrap_activation:
+        raise JournalError("bootstrap: anchor ≠ BOOTSTRAP_ACTIVATION из source.env")
+
+
+def _read(path: str) -> str:
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise JournalError(f"{path}: не читается: {exc}") from exc
+
+
+def check_head_against_base(base: str, file: str, source_env: str) -> None:
+    """Допустимость журнала рабочего дерева относительно базового коммита."""
+    prev_text = _show_base(base, file)
+    new = parse_journal(_read(file))
+    if prev_text is None:
+        _check_bootstrap(new, _read(source_env))
+        return
+    check_transition(parse_journal(prev_text), new)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """CLI: 0 допустимо, 1 недопустимо, 2 нет BASE_SHA / плохие аргументы."""
+    parser = argparse.ArgumentParser(prog="act_epochs")
+    parser.add_argument("--check-transition", metavar="BASE_SHA", required=True)
+    parser.add_argument("--file", required=True)
+    parser.add_argument("--source-env", required=True)
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return 2 if exc.code else 0
+    try:
+        check_head_against_base(args.check_transition, args.file, args.source_env)
+    except _BaseUnavailable:
+        print(f"BASE_SHA {args.check_transition!r} не коммит", file=sys.stderr)
+        return 2
+    except JournalError as exc:
+        print(f"недопустимо: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

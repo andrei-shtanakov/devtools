@@ -1,0 +1,56 @@
+# df-trust: проверка перехода журнала эпох (`epochs.yaml`), спека A rev 16 §6.3.
+# Шаблон devtools; копируется в репо df-trust командой установки (df setup-trust).
+#
+# ПЛЕЙСХОЛДЕРЫ (заменить до коммита; пока не заменены, job падает на checkout):
+#   DEVTOOLS_REPO  — репо devtools, откуда берётся CLI (обычно
+#                    "andrei-shtanakov/devtools").
+#   DEVTOOLS_REF   — ПОЛНЫЙ 40-символьный SHA релиза devtools с Task 10a
+#                    (merge-коммит; пин, не ветка и не тег).
+#
+# Инварианты: CLI исполняется из checkout devtools по пиненому SHA, НИКОГДА из
+# дерева PR; триггер pull_request (не pull_request_target); токен только на
+# чтение; сторонние actions пинены полными commit SHA.
+name: epochs
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  DEVTOOLS_REPO: "<devtools-repo — set by df setup-trust>"
+  DEVTOOLS_REF: "<pinned-sha — set by df setup-trust>"
+
+jobs:
+  check-transition:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout df-trust (PR head / pushed commit)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Checkout pinned devtools (CLI source, not from the PR tree)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.DEVTOOLS_REPO }}
+          ref: ${{ env.DEVTOOLS_REF }}
+          path: .devtools-pinned
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - name: Fetch immutable base commit
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          echo "BASE_SHA=$BASE_SHA" >> "$GITHUB_ENV"
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+      - name: Check journal transition
+        run: |
+          set -euo pipefail
+          uv run --frozen --project .devtools-pinned \
+            python .devtools-pinned/governance/act_epochs.py \
+            --check-transition "$BASE_SHA" \
+            --file epochs.yaml --source-env source.env
