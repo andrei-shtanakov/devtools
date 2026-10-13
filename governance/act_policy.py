@@ -119,7 +119,10 @@ def classify(ps: PolicySet, login: str, type_hint: str | None) -> str:
     """Класс актора по набору (steward `classify_actor`): human|agent|unknown."""
     from steward.gatecheck.approval import ApprovalPolicy, classify_actor
 
-    policy = ApprovalPolicy(1, ps.humans, ps.agents)
+    is_bot = login.endswith("[bot]") or type_hint == "Bot"
+    # Бот никогда не human (спека D1/D3): список людей ему не показываем.
+    humans = frozenset() if is_bot else ps.humans
+    policy = ApprovalPolicy(1, humans, ps.agents)
     return classify_actor(_identity(login), type_hint, policy)
 
 

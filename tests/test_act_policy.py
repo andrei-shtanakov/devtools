@@ -29,8 +29,18 @@ def test_merger_bot_forms_agree() -> None:
     """Review Focus 2: `slug[bot]` (REST) и `slug` (GraphQL) — одна личность."""
     pytest.importorskip("steward")
     ps = parse_policy_set(COMMIT, FILES)
-    rest = classify(ps, "df-reviewer[bot]", "Bot")
-    assert rest == classify(ps, "df-reviewer", "Bot")
+    for hint in (None, "User"):
+        assert classify(ps, "df-reviewer[bot]", hint) == "agent"
+        assert classify(ps, "df-reviewer", hint) == "agent"
+
+
+@pytest.mark.parametrize("hint", [None, "Bot"])
+def test_bot_never_classified_human(hint: str | None) -> None:
+    """Бот `alice[bot]` не становится человеком из-за человека `alice`."""
+    pytest.importorskip("steward")
+    ps = parse_policy_set(COMMIT, FILES)
+    assert classify(ps, "alice", "User") == "human"
+    assert classify(ps, "alice[bot]", hint) != "human"
 
 
 def test_intersection_of_humans_and_agents_refused() -> None:
