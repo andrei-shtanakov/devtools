@@ -10,7 +10,7 @@ CODEOWNERS: его пишет агентский finalize. Он НЕ источ�
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, fields
 
 import yaml
@@ -99,9 +99,11 @@ def _load(text: str, schema: str) -> dict[str, object]:
     return data
 
 
-def _keys(data: dict[str, object], expected: set[str], what: str) -> None:
+def _keys(data: Iterable[object], expected: set[str], what: str) -> None:
     if set(data) != expected:
-        raise EnvelopeError(f"{what}: ключи {sorted(data)}, нужны {sorted(expected)}")
+        # Ключи агентского YAML могут быть разных типов: сортируем их repr.
+        got = sorted(map(repr, data))
+        raise EnvelopeError(f"{what}: ключи {got}, нужны {sorted(expected)}")
 
 
 def _str(data: Mapping[str, object], key: str) -> str:

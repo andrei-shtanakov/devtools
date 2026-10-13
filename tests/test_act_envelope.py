@@ -192,3 +192,33 @@ def test_parse_envelope_rejects_malformed(text: str) -> None:
 def test_parse_stop_rejects_malformed(text: str) -> None:
     with pytest.raises(EnvelopeError):
         parse_stop(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        render_envelope(_env(NEW)) + "1: x\n",
+        render_envelope(_env(NEW)).replace("policy:\n", "policy:\n  1: x\n"),
+        render_stop(STOP2.stop) + "1: x\n",
+    ],
+    ids=["envelope", "policy", "stop"],
+)
+def test_mixed_type_keys_are_envelope_error(text: str) -> None:
+    """Ключи разных типов (агентский YAML) — `EnvelopeError`, не `TypeError`."""
+    parse = parse_stop if "node-approval-stop" in text else parse_envelope
+    with pytest.raises(EnvelopeError):
+        parse(text)
+
+
+def test_no_delivered_request_not_approved() -> None:
+    """Узел без доставленной заявки review/v1 — «не одобрен»."""
+    for history in ([], [OLD]):
+        reason = envelope_refusal(_env(NEW), history, "design", "h" * 40, PINS, "21")
+        assert reason and "нет доставленной заявки" in reason
+
+
+def test_stop_of_other_generation_refused() -> None:
+    """Остановка обязана называть действующее поколение."""
+    stale = DeliveredStop("3" * 40, StopRecord("req", 1, "не то поколение"))
+    reason = envelope_refusal(_env(NEW), [OLD, NEW, stale], "req", "h" * 40, PINS, "21")
+    assert reason and "остановка поколения 1, действует 2" in reason

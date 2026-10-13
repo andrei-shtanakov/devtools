@@ -125,3 +125,12 @@ def test_missing_upstream_pins_refused() -> None:
     text = render_manifest(REQ).replace("upstream_pins:", "upstream_pinz:")
     with pytest.raises(RequestError, match="upstream"):
         parse_manifest(text)
+
+
+@pytest.mark.parametrize(
+    "nodes", [["requirements", 1], [1], "requirements", None], ids=str
+)
+def test_mirror_nodes_of_wrong_type_detected(nodes: object) -> None:
+    """Приёмка №13: агент переписал `nodes` — расхождение, не `TypeError`."""
+    op = {**ledger_view(REQ), "nodes": nodes}
+    assert "nodes" in (mirror_mismatch(REQ, "approve-2-1-1", op, BODY) or "")

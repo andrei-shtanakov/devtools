@@ -200,7 +200,10 @@ def mirror_mismatch(
         return f"ключ заявки {request_key} ≠ request_id манифеста {req.request_id}"
     for field, value in ledger_view(req).items():
         got = ledger_op.get(field)
-        if field == "nodes" and isinstance(got, list):
+        if field == "nodes":
+            # Агентские данные: сортировать можно только проверенные строки.
+            if not isinstance(got, list) or not all(isinstance(n, str) for n in got):
+                return "run.json: nodes расходится с манифестом"
             got = sorted(got)
         if got != value:
             return f"run.json: {field} расходится с манифестом"
