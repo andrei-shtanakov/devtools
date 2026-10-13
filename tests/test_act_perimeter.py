@@ -10,11 +10,13 @@ import pytest
 from governance.act_epochs import Epoch
 from governance.act_perimeter import (
     PerimeterError,
+    Violation,
     blocked,
     marker_path,
     permissions_refusal,
     record_violation,
 )
+from governance.act_time import Unavailable
 
 SRC = "owner/approval-policy"
 E1 = (Epoch(1, "a" * 40),)
@@ -109,22 +111,54 @@ def test_record_write_failure_is_perimeter_error(tmp_path: Path) -> None:
         record_violation(SRC, 1, "x", tmp_path)
 
 
-def test_write_permissions_refused() -> None:
-    """Приёмка №29."""
-    assert permissions_refusal({"push": True, "maintain": False, "admin": False})
+def test_write_permissions_is_violation() -> None:
+    """Приёмка №29: установленное право записи -> Violation (маркер)."""
+    got = permissions_refusal({"push": True, "maintain": False, "admin": False})
+    assert isinstance(got, Violation)
+    assert "push" in got.detail
 
 
-def test_missing_permissions_is_not_confirmation() -> None:
-    """Приёмка №33: недоступное ≠ подтверждённое."""
-    assert permissions_refusal(None)
-    assert permissions_refusal({"push": False})
+def test_missing_permissions_is_unavailable() -> None:
+    """Приёмка №33: недоступное не нарушение и не подтверждение."""
+    assert isinstance(permissions_refusal(None), Unavailable)
+    got = permissions_refusal({"push": False})
+    assert isinstance(got, Unavailable)
+    assert "maintain" in got.reason
+    assert "admin" in got.reason
 
 
-@pytest.mark.parametrize("value", [None, 0, "false", "", [], {}])
-def test_non_false_value_is_not_confirmation(value: object) -> None:
-    """Только настоящее `False` подтверждает отсутствие права."""
+@pytest.mark.parametrize("value", [None, 0, 1, "false", "", [], {}])
+def test_non_bool_value_is_unavailable(value: object) -> None:
     perms = {"push": False, "maintain": False, "admin": False, "pull": True}
-    assert permissions_refusal({**perms, "admin": value})
+    got = permissions_refusal({**perms, "admin": value})
+    assert isinstance(got, Unavailable)
+    assert "admin" in got.reason
+    assert "есть" not in got.reason
+
+
+def test_true_wins_over_missing_field() -> None:
+    """Литеральное True установлено, даже если другие поля недоступны."""
+    got = permissions_refusal({"admin": True})
+    assert isinstance(got, Violation)
+    assert "admin" in got.detail
+
+
+def test_true_wins_over_non_bool_field() -> None:
+    got = permissions_refusal({"push": "x", "maintain": True, "admin": False})
+    assert isinstance(got, Violation)
+
+
+def test_exists_oserror_blocks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(self: Path) -> bool:
+        raise OSError("denied")
+
+    monkeypatch.setattr(Path, "exists", boom)
+    assert blocked(SRC, E2, tmp_path)
+
+
+def test_corrupt_marker_text_names_recovery(tmp_path: Path) -> None:
+    _write_raw(tmp_path, "{")
+    assert "вручную" in (blocked(SRC, E2, tmp_path) or "")
 
 
 def test_read_only_passes() -> None:

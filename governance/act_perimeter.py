@@ -5,6 +5,10 @@
 появится эпоха с бОльшим номером. Канал уведомления человека — не часть
 протокола. Битый маркер блокирует (fail-closed); нечитаемый ≠ нарушение:
 маркер пишет только установленное нарушение.
+
+Отступление от «эпоха с бОльшим номером снимает блокировку»: битый или
+нечитаемый маркер блокирует и после появления новой эпохи (его номер эпохи
+неизвестен). Снятие — проверка человеком и ручное удаление файла маркера.
 """
 
 from __future__ import annotations
@@ -12,11 +16,20 @@ from __future__ import annotations
 import fcntl
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from governance.act_epochs import Epoch
+from governance.act_time import Unavailable
 
 _WRITE = ("push", "maintain", "admin")
+
+
+@dataclass(frozen=True)
+class Violation:
+    """Установленное нарушение периметра: вызывающий пишет маркер."""
+
+    detail: str
 
 
 class PerimeterError(ValueError):
@@ -85,7 +98,10 @@ def blocked(source_repo: str, epochs: Sequence[Epoch], state_home: Path) -> str 
         return None
     marked = _marked_epoch(path)
     if marked is None:
-        return f"маркер периметра {path} не читается — источник заблокирован"
+        return (
+            f"маркер периметра {path} не читается — источник заблокирован; "
+            "новая эпоха его не снимает: проверить человеком и удалить файл вручную"
+        )
     if epochs and epochs[-1].epoch > marked:
         return None
     return (
@@ -94,14 +110,27 @@ def blocked(source_repo: str, epochs: Sequence[Epoch], state_home: Path) -> str 
     )
 
 
-def permissions_refusal(permissions: Mapping[str, object] | None) -> str | None:
-    """Самоотчёт прав credential на источнике: запись → отказ; нет поля → отказ."""
-    if permissions is None or any(k not in permissions for k in _WRITE):
-        return (
-            "права credential на источнике не установлены "
-            "(недоступное ≠ подтверждённое)"
-        )
-    granted = [k for k in _WRITE if permissions[k] is not False]
+def permissions_refusal(
+    permissions: Mapping[str, object] | None,
+) -> Violation | Unavailable | None:
+    """Самоотчёт прав credential на источнике.
+
+    Литеральное `True` у push/maintain/admin — установленное нарушение
+    (`Violation`) независимо от прочих полей, в том числе недоступных.
+    Иначе отсутствующее поле или не-bool значение — `Unavailable` (право не
+    установлено ни как выданное, ни как отсутствующее; маркер не пишется).
+    Все три поля литерально `False` — `None`.
+    """
+    if permissions is None:
+        return Unavailable("права credential на источнике не получены")
+    granted = [k for k in _WRITE if permissions.get(k) is True]
     if granted:
-        return f"у credential процесса есть {', '.join(granted)} на источнике политики"
+        return Violation(
+            f"у credential процесса есть {', '.join(granted)} на источнике политики"
+        )
+    unknown = [k for k in _WRITE if type(permissions.get(k)) is not bool]
+    if unknown:
+        return Unavailable(
+            f"поле прав {', '.join(unknown)} отсутствует или не bool — не установлено"
+        )
     return None
