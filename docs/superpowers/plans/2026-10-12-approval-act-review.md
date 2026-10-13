@@ -100,6 +100,28 @@ steward), пинованным набором политик (`approval-policy` 
 Ворота перед частью B сохраняются: опубликованный M0 → детализация задач 11–17 по фактическому
 API → ревью обновлённого плана → реализация.
 
+## Ревизия спеки A rev 16 (13.10, проектирование спеки B)
+
+Корень доверия переезжает из файлов devtools в отдельный репо установки `df-trust` с защищённой
+привязкой `/etc/df/trust.toml` и чтением по снимку (спека A rev 16 §6.1 п. 1, §6.3, §6.5);
+в v1 оба источника доверия публичны, самоотчёт — по credentials процесса (§6.2). В плане
+изменены: H2 (bootstrap `df-trust` вместо файлов devtools), Task 12a п. 1 и п. 3, стенд Task 18.
+Часть A (влита, #613) не меняется в разборе: `parse_source`/`parse_journal` независимы от
+транспорта; `load_source()` выводится из контура решений в Task 12a (тест на отсутствие вызова
+из пути решения). Детализация части B на воротах учитывает эти изменения, а также спеку B
+(`2026-10-13-df-installer-design.md`):
+- в v1 оба источника доверия **публичны**, чтение содержимого без credentials; App-читателя нет;
+- самоотчёт — каждым процессом по credentials, которые он держит (спека B §6.1): `df-exec` —
+  токен machine user на **обоих** репо доверия; издатель — установки App продукта;
+- **два развёртывания** (спека B §5.4): во флоте владельца до спеки B действует Task 15a —
+  App-режим `merge-pr.sh` только для candidate/brief `review/v1`, finalize и stop прежним путём
+  ADR-ECO-011 D5; в установке `df` все четыре вида мержит издатель по нормативной таблице
+  маршрутов спеки B §5.4. Правила не смешиваются в одной установке;
+- `TrustRoot` проходит до конечных записей: `record_review_act` (узел), `ActV2` (бриф), ответ
+  издателя, строки приёмки Task 18;
+- нарушения периметра — журнал событий периметра (спека A rev 16 §6.3, спека B §6.1) вместо
+  маркер-файлов части A; пишет издатель (`record-violation`), отдельная задача на воротах части B.
+
 ## Review Focus
 
 1. **Фикстура с `Z` и с `+00:00`/дробными секундами** — метки одного события, пришедшие из REST
@@ -123,7 +145,8 @@ API → ревью обновлённого плана → реализация.
 | Часть | Задачи | Зависит от | Выход |
 |---|---|---|---|
 | A — чистое ядро | 1–10, 5a | ничего (steward только `classify_actor`, уже в пине) | PR devtools #1 (authority-root → человек) |
-| H — шаги человека | H1–H2 | Часть A влита | PR в `approval-policy`, PR devtools (контракт v2) |
+| A' — CLI журнала | 10a | Часть A влита | PR devtools (authority-root → человек) |
+| H — шаги человека | H1–H2 | 10a влита | PR в `approval-policy`, репо `df-trust` + привязка `/etc/df/trust.toml` |
 | B — интеграция узла | 11–16, 12a, 13a, 15a | **M0 steward** выпущен; H1–H2 | PR devtools #2 |
 | C — путь брифа | 17 | **M2 discovery** | PR devtools #3 |
 | D — живая приёмка M3 | 18 | B, C | evidence в devtools |
@@ -2730,6 +2753,34 @@ git commit -m "feat(act): локальная настройка установк
 
 ---
 
+## Часть A' — CLI проверки журнала (до H2)
+
+### Task 10a: `act_epochs --check-transition` и CI-шаблон `df-trust`
+
+**Files:**
+- Modify: `governance/act_epochs.py` (`main()`; CLI)
+- Create: `templates/df-trust/.github/workflows/epochs.yml` (шаблон для репо `df-trust`)
+- Test: `tests/test_act_epochs_cli.py`
+
+**Interfaces:** `python governance/act_epochs.py --check-transition <base-sha> --file epochs.yaml
+--source-env source.env` в git-чекауте `df-trust`; коды: 0 — допустимо, 1 — недопустимый переход
+или bootstrap, 2 — недоступный `BASE_SHA`/ошибка разбора аргументов.
+
+Алгоритм — H2 п. 3 (bootstrap без файла в существующем базовом коммите → ровно одна открытая
+эпоха 1 с якорем `BOOTSTRAP_ACTIVATION` из `source.env` того же head; файл есть → `check_transition`;
+`git cat-file -e <base>^{commit}` не прошёл → 2). Workflow-шаблон: `BASE_SHA` —
+`github.event.pull_request.base.sha || github.event.before`, `git fetch --no-tags --depth=1 origin
+"$BASE_SHA"`, запуск CLI из **пиненого релиза devtools** (checkout devtools по SHA, `uv run
+--frozen`), не из дерева PR.
+
+- [ ] **Step 1:** тесты (временный git-репо): запрещённая смена якоря → 1; правка закрытой эпохи →
+  1; законное атомарное закрытие → 0; bootstrap без файла в существующем базовом коммите → 0;
+  bootstrap с неверным якорем → 1; две эпохи в bootstrap → 1; несуществующий `BASE_SHA` → 2.
+- [ ] **Step 2:** RED → **Step 3:** реализация → **Step 4:** GREEN; ruff, pyrefly.
+- [ ] **Step 5:** commit + PR (authority-root → человек).
+
+---
+
 ## Часть H — шаги человека (между A и B)
 
 ### H1: Набор политик в `approval-policy`
@@ -2750,14 +2801,22 @@ git commit -m "feat(act): локальная настройка установк
 3. Мерж методом merge-commit. Записать `merge_commit` этого PR — это `bootstrap_activation`.
 4. Для приёмки M3 (Task 18, фаза 1) — отдельный стенд-источник
    `andrei-shtanakov/df-roles-probe-policy` с тем же составом файлов, теми же настройками и своим
-   bootstrap; на нём допустимы разрушительные сценарии приёмки. И стендовый forge-origin devtools
-   `andrei-shtanakov/df-roles-probe-devtools` с контрактом v2 на стенд-источник (Task 18).
+   bootstrap; на нём допустимы разрушительные сценарии приёмки. И стендовый корень доверия
+   `andrei-shtanakov/df-roles-probe-trust` (спека A rev 16; Task 18).
 
-### H2: Bootstrap контракта v2 в devtools
+### H2: Bootstrap корня доверия `df-trust` (спека A rev 16)
 
-PR devtools (authority-root, мерж человеком):
+Человек, по спеке B §6.2 (bootstrap-порядок); для флота владельца — его собственный `df-trust`.
 
-- `contracts/approval-policy-source/v2/source.env`:
+1. Создать **публичный** репо `andrei-shtanakov/df-trust` (v1: оба источника доверия публичны;
+   приватные не поддерживаются — спека A rev 16 §6.2, спека B §2.3). Начальная база — один коммит.
+   Проверить публичность и `approval-policy` (H1): существующий приватный источник — **стоп** с
+   показом публикуемого содержимого; открывает его только отдельное действие человека, тариф
+   видимость не выбирает.
+2. Ruleset дефолтной ветки: только PR, запрет force-push и удаления, `bypass_actors` пуст или из
+   `POLICY_ADMINS`; `allow_rebase_merge = false`. Ни machine user, ни App продукта доступа нет.
+3. PR с файлами (мерж человеком):
+   - `source.env`:
 
 ```
 APPROVAL_POLICY_REPO=andrei-shtanakov/approval-policy
@@ -2766,7 +2825,7 @@ BOOTSTRAP_ACTIVATION=<merge_commit из H1 п. 3>
 POLICY_ADMINS=andrei-shtanakov
 ```
 
-- `contracts/approval-policy-source/v2/epochs.yaml`:
+   - `epochs.yaml`:
 
 ```yaml
 schema: approval-policy-epochs/v1
@@ -2775,23 +2834,26 @@ epochs:
     anchor: <тот же merge_commit>
 ```
 
-- тест `tests/test_act_contract_files.py`: оба файла разбираются `parse_source` /
-  `parse_journal`, `epochs[0].anchor == source.bootstrap_activation`.
-- CI-проверка перехода журнала (§6.3: «CI devtools … сверяет новую версию с предыдущей»):
-  `main()` в `act_epochs.py` — `python governance/act_epochs.py --check-transition <base-sha>`:
-  `git cat-file -e <base-sha>^{commit}` (нет коммита → код 2, отказ CI); `git show
-  <base-sha>:contracts/approval-policy-source/v2/epochs.yaml` → `check_transition(prev, new)`;
-  файла **в существующем** базовом коммите нет (`git ls-tree` пуст) → допустим только bootstrap:
-  текущий журнал — одна открытая эпоха с якорем `BOOTSTRAP_ACTIVATION`. Базовый SHA
-  **неизменяемый**, не ветка: шаг в `ci.yml` job `test` —
-  `BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}`, перед ним
-  `git fetch --no-tags --depth=1 origin "$BASE_SHA"` (checkout сейчас неглубокий). На push в
-  `master` это `before` — версия до пуша, а не `origin/master`, уже содержащий правку.
-  Workflow — `.github/`, то есть authority-root; это тот же человеческий PR.
-- Тесты `tests/test_act_epochs_cli.py` (временный git-репо): запрещённая смена якоря →
-  ненулевой код; правка закрытой эпохи → ненулевой; законное атомарное закрытие → 0;
-  отсутствующий файл в существующем базовом коммите + bootstrap-журнал → 0; несуществующий
-  `BASE_SHA` → 2.
+   - CI `df-trust` — проверка перехода журнала, исполняемая из пиненого релиза devtools, не из
+     дерева PR. Поставляется **Task 10a до H2** (CLI, workflow-шаблон, тесты); H2 ссылается на
+     её пин. Алгоритм (реализует Task 10a):
+     - `BASE_SHA` — **неизменяемый** SHA (`github.event.pull_request.base.sha || github.event.before`),
+       перед проверкой `git fetch --no-tags --depth=1 origin "$BASE_SHA"`;
+     - `git cat-file -e <base-sha>^{commit}` не прошёл → код 2, отказ CI;
+     - файл `epochs.yaml` **есть** в базовом коммите → `check_transition(parse(prev), parse(new))`;
+     - файла **нет в существующем** базовом коммите (`git ls-tree` пуст) → допустим **только
+       bootstrap**: новый журнал — ровно одна открытая эпоха 1 с якорем `BOOTSTRAP_ACTIVATION` из
+       `source.env` того же коммита; иначе ненулевой код;
+     - тесты: запрещённая смена якоря → ненулевой; правка закрытой эпохи → ненулевой; законное
+       атомарное закрытие → 0; bootstrap в существующем базовом коммите без файла → 0; bootstrap
+       с неверным якорем → ненулевой; несуществующий `BASE_SHA` → 2.
+4. Привязка `/etc/df/trust.toml` (root): `host`, `df_trust_repository_id` (числовой),
+   `df_trust_branch`, `approval_policy_repository_id`; транспорт — только `public` (v1: оба репо
+   доверия публичны; перед публикацией человек видит содержимое — спека B §2.3).
+5. Полная проверка периметра обоих репо доверия человеком (спека A §6.2 а) → evidence.
+
+Пин CLI — merge-коммит Task 10a. Тесты (в части B, Task 12a): оба файла снимка разбираются `parse_source` / `parse_journal`,
+`epochs[0].anchor == source.bootstrap_activation`.
 
 ---
 
@@ -3715,7 +3777,10 @@ git commit -m "feat(act): полная проверка доставки на с
   `AGENT_GH_CONFIG_DIR = Path.home() / ".config" / "review"` (переопределение
   `REVIEW_GH_CONFIG_DIR` из окружения — как `ops.py:1559`); импорт `governance.ops` запрещён
   цепочкой authority-root (Task 15).
-- Produces: `Trust(source, epochs, anchor_at, unverified: tuple[str, ...])` — `unverified`:
+- Produces: `Trust(source, epochs, anchor_at, unverified: tuple[str, ...], root: TrustRoot)` —
+  `TrustRoot(host, repository_id, branch, snapshot_sha)`: идентичность и снимок корня доверия,
+  попадает в evidence каждого решения отдельно от `activation_commit` (спека A rev 16 §6.1 п. 1);
+  `unverified`:
   имена предпосылок, которые рантайм не смог проверить (пока только `"allow_rebase_merge"`);
   решение не блокируют, в вердикт `check_delivery` не входят (это свойство контекста, а не
   исхода) и **обязательно** записываются в evidence принятого акта: узел —
@@ -3724,7 +3789,9 @@ git commit -m "feat(act): полная проверка доставки на с
   `approval_act` (Task 17); `act_premerge` печатает их в stderr перед мержем (Task 15).
   Пустой кортеж пишется как `[]`, а не опускается: отсутствие поля в записи — дефект, а не
   «проверено»;
-  `Readers` — инжектируемые чтения (protocol): `git(args) -> Fact[str]` в чекауте devtools,
+  `Readers` — инжектируемые чтения (protocol): `trust_snapshot(binding) -> TrustSnapshot |
+  Unavailable` (голова закреплённой ветки `df-trust` по `repository_id`, SHA, `source.env` и все
+  версии `epochs.yaml` из этого снимка; публичное чтение без credentials),
   `gh_api(path, gh_config_dir) -> Fact[dict]`, `app_installations(key_path, app_id)
   -> Fact[list[dict]]`, `activation(merge_commit) -> Activation | Unavailable`,
   `history(anchor, until) -> tuple[Activation, ...] | Unavailable`,
@@ -3742,26 +3809,46 @@ git commit -m "feat(act): полная проверка доставки на с
 
 Обязательные проверки `load_trust` перед **каждым** решением (спека §6.2 б, §6.3), по порядку; любое
 недоступное обязательное чтение → `Unavailable` (маркер не пишется):
-1. `git fetch origin master` в чекауте devtools; `source.env` и **все версии** `epochs.yaml` —
-   из `origin/master` (`git log --first-parent --format=%H origin/master -- <path>`,
-   `git show <c>:<path>`), не из рабочего дерева. Первая версия — одна открытая эпоха с якорем
-   `BOOTSTRAP_ACTIVATION`; каждая следующая — `check_transition(prev, new)`; нарушение →
-   `Unavailable` (журнал испорчен — решение не принимается).
-2. `act_perimeter.blocked(source.repo, epochs, state_home)` → `Unavailable`.
+1. Привязка `/etc/df/trust.toml` (спека A rev 16 §6.1 п. 1; не env, не CLI, не рабочее дерево)
+   → транспорт чтения → голова закреплённой ветки `df-trust` по `repository_id` (смена
+   default branch не учитывается) → **SHA снимка фиксируется**; `source.env` и **все версии**
+   `epochs.yaml` (история файла по first-parent от снимка) читаются из этого снимка. Первая
+   версия — одна открытая эпоха с якорем `BOOTSTRAP_ACTIVATION`; каждая следующая —
+   `check_transition(prev, new)`; нарушение → `Unavailable`. SHA снимка — в `Trust` и evidence
+   отдельно от `activation_commit`. `act_source.load_source()` (файл devtools) в этом пути не
+   вызывается — тест на отсутствие вызова. Тесты подмены корня, смешения снимков и недоступной
+   истории — спека A §6.5.
+2. События периметра (спека A rev 16 §6.3, спека B §6.1): адаптер журнала событий
+   (транзакционная SQLite, открывает только издатель) → операция издателя `perimeter-status`
+   с `expected_snapshot_sha = trust.root.snapshot_sha` (завершает `pending` и вычисляет блокировку
+   относительно **того же** снимка; `stale_snapshot` → перезагрузка `load_trust`, ограниченно;
+   ответ сверяется с `Trust.root`/`Trust.epochs`) → `blocked` / `clear` / `unavailable`:
+   пространство — `root_id`; блокировка — `pending` или `registered(E)` с `E ≥` номера последней
+   эпохи; ошибка — `Unavailable`. Регистрация — `record-violation`
+   издателя (в режиме разработки — локальный писатель той же схемы); номер эпохи назначает
+   писатель. **Механизм заменяет маркер-файлы части A** (`act_perimeter.record_violation`/
+   `blocked`/`marker_path`): на воротах части B — отдельная задача «журнал событий периметра» до
+   Task 12a (схема, машина состояний, идемпотентность по `request_key`, `perimeter-status`, тесты
+   спеки B §6.1).
 3. Самоотчёт **каждого** credential процесса:
    - профиль `gh` агента (`AGENT_GH_CONFIG_DIR`), **фактический профиль мержа** (тот же выбор,
      что `merge-pr.sh:147`: `MERGE_GH_CONFIG_DIR`, иначе профиль по умолчанию обёртки) и токены
      окружения `GH_TOKEN`, `GITHUB_TOKEN` (каждый отдельно, совпадающие профили — один раз):
-     `GET /repos/{source.repo}` → `permissions_refusal`; `act_premerge` получает профиль мержа
+     `GET /repos/{source.repo}` **и** `GET /repos/{df-trust}` (оба репо доверия, каждый
+     отдельно) → `permissions_refusal`: `Violation` → маркер + `Unavailable`; `Unavailable`
+     (нет поля, 404, ошибка) → `Unavailable` без маркера; `act_premerge` получает профиль мержа
      обязательным аргументом `--merge-profile` от `merge-pr.sh` (тот же путь, которым обёртка
      затем мержит), без него — код 2;
-   - каждый ключ App в `$XDG_CONFIG_HOME/darkfactory/apps/<app-id>.pem`: JWT (как в
-     `conductor/` — `pyjwt[crypto]`) → `GET /app/installations` → установка на аккаунте-владельце
-     источника с доступом к его репо — нарушение.
-   Нарушение → `record_violation(source.repo, epochs[-1].epoch, detail)` + `Unavailable`.
-4. Ruleset доверенной ветки: `GET /repos/{repo}/rules/branches/{branch}` (Metadata: read) —
-   типы правил обязаны включать `deletion`, `non_fast_forward`, `pull_request`; отсутствие —
-   нарушение (маркер).
+   - каждый ключ App, который держит процесс: JWT (как в `conductor/` — `pyjwt[crypto]`) →
+     `GET /app/installations` и полномочия установки → установка App на `approval-policy` или
+     `df-trust` — нарушение; неизвестные полномочия установки — `Unavailable` (спека A rev 16
+     §6.2). Ключ App держит только издатель спеки B, поэтому эта проверка выполняется в его
+     процессе (`act_premerge`); `df-exec` её не выполняет. До спеки B — каталог ключей флота.
+   Нарушение → регистрация события периметра (п. 2; номер эпохи — писатель) + `Unavailable`.
+4. Ruleset доверенной ветки **каждого** репо доверия — `approval-policy` (ветка источника) и
+   `df-trust` (закреплённая ветка): `GET /repos/{repo}/rules/branches/{branch}` — типы правил
+   обязаны включать `deletion`, `non_fast_forward`, `pull_request`; отсутствие — нарушение
+   (маркер с указанием репо).
    `allow_rebase_merge`: `GET /repos/{repo}` отдаёт настройки мержа только вызывающему с правом
    записи, которого у агента по построению нет (§6.2 б: «проверяется то, что видно без них»).
    Четыре состояния (раздел «Решения владельца», п. 1): `False` — проверено; `True` —
@@ -3815,6 +3902,23 @@ def test_missing_bypass_field_not_treated_as_empty(tmp_path) -> None:
 
 def test_ruleset_without_pull_request_rule_is_violation(tmp_path) -> None:
     """Периметр: ветка источника без требования PR."""
+
+def test_df_trust_violation_alone_blocks(tmp_path) -> None:
+    """approval-policy исправен; у df-trust нет запрета force-push или токен machine user
+    имеет push в df-trust → маркер с указанием df-trust, Unavailable."""
+
+def test_self_report_404_on_trust_repo_is_unavailable(tmp_path) -> None:
+    """404/нет поля permissions на df-trust → Unavailable без маркера, не false."""
+
+def test_trust_root_in_evidence(tmp_path) -> None:
+    """Trust.root несёт repository_id, ветку и SHA снимка df-trust."""
+
+def test_perimeter_status_bound_to_trust_snapshot(tmp_path) -> None:
+    """Снимок S1/E1 у потребителя, у издателя уже S2/E2 → stale_snapshot → перезагрузка;
+    повтор того же request_id после регистрации события → blocked (не кешированный clear)."""
+
+def test_load_source_not_called_in_decision_path(tmp_path) -> None:
+    """act_source.load_source (файл devtools) не вызывается из load_trust."""
 
 def test_rebase_setting_false_is_verified(tmp_path) -> None:
     """allow_rebase_merge=False → Trust, unverified пуст."""
@@ -3899,8 +4003,9 @@ git commit -m "feat(act): доверенный контекст — журнал
   `act_node.reopen(...)` — запись остановки в режиме `review/v1`;
   `act_node.audit_late_dismissals(state, ops, key) -> None`;
   `approval_ledger.record_review_act(state, key, accepted: Accepted, delivery: DeliveryView,
-  activation_commit: str, unverified: tuple[str, ...]) -> None` (`unverified` —
-  `Trust.unverified`, Task 12a; без значения по умолчанию); `approval_ledger.record_audit(state, key, event: dict)`;
+  activation_commit: str, unverified: tuple[str, ...], trust_root: TrustRoot) -> None`
+  (`unverified` — `Trust.unverified`, `trust_root` — `Trust.root`, Task 12a; без значений по
+  умолчанию); `approval_ledger.record_audit(state, key, event: dict)`;
   `HUMAN_APPROVAL_LABEL = "human-approval-required"`; `WAITING_HUMAN_APPROVAL`,
   `WAITING_DELIVERY`.
 
@@ -3967,6 +4072,7 @@ def record_review_act(
     delivery: DeliveryView,
     activation_commit: str,
     unverified: tuple[str, ...],
+    trust_root: TrustRoot,
 ) -> None:
     """Акт review/v1 и доставка — одним write'ом (спека §7, `run.json`).
 
@@ -3996,6 +4102,12 @@ def record_review_act(
             "merged_by": accepted.merged_by,
         },
         unverified_premises=list(unverified),
+        trust_root={
+            "host": trust_root.host,
+            "repository_id": trust_root.repository_id,
+            "branch": trust_root.branch,
+            "snapshot_sha": trust_root.snapshot_sha,
+        },
     )
 ```
 
@@ -4407,7 +4519,8 @@ git commit -m "feat(act): барьер миграции по форджу и п�
   `check_policy` (`:306`) — мержера в утверждающих, `as_record` (`:53`) пишет
   `approver = merged_by`. Для `review/v1` вводится `ActV2(repo, pr, merge_commit, merged_at, dir, brief_self_hash,
   request, approver, review_id, delivered_by, delivered_at, activation_commit,
-  unverified_premises: tuple[str, ...])` — `unverified_premises` обязательное, без умолчания:
+  unverified_premises: tuple[str, ...], trust_root: TrustRoot)` — `unverified_premises` и
+  `trust_root` обязательные, без умолчания (`as_record` сериализует оба);
   `read_act` для `review/v1` получает `Trust` (тот же, что передан в `check_delivery`) и
   заполняет поле из `trust.unverified`;
   идентичность PR и merge-коммит сохраняются (их читают `brief_tools.approve:359` и
@@ -4484,13 +4597,12 @@ git commit -m "feat(act): бриф review/v1 — заявка v2, агентск
 **Фаза 1 — стенд.** Разрушительные сценарии (force-push источника, временная запись агенту,
 скрытый bypass) нельзя ставить на настоящем `approval-policy`. Поэтому стенду нужен свой
 источник политики `andrei-shtanakov/df-roles-probe-policy` — его создаёт человек по шагам H1.
-`load_trust` читает контракт источника и журнал **с `origin/<default>` чекаута devtools**
-(Task 12a), поэтому стенд получает **свой forge-origin devtools**: репо
-`andrei-shtanakov/df-roles-probe-devtools` (зеркало devtools), в дефолтной ветке которого
-`contracts/approval-policy-source/v2/` указывает на стенд-источник; правки его журнала — тоже
-только PR с мержем человеком. Приёмка исполняется из клона этого репо. Первая строка evidence —
-**фактически прочитанные** `repo`, `branch`, `bootstrap_activation`, номер эпохи и SHA
-`origin/<default>`; расхождение с ожидаемым стендом — стоп до сценариев. Подготовка стенда:
+`load_trust` читает корень доверия из `df-trust` по привязке (спека A rev 16), поэтому стенд
+получает **свой** `df-trust`: репо `andrei-shtanakov/df-roles-probe-trust` с `source.env` на
+стенд-источник и своим журналом; правки журнала — только PR с мержем человеком; стендовая
+привязка `trust.toml` указывает на него. Первая строка evidence — **фактически прочитанные**
+`repository_id` и ветка `df-trust`, SHA снимка, `repo`, `branch`, `bootstrap_activation`, номер
+эпохи; расхождение с ожидаемым стендом — стоп до сценариев. Подготовка стенда:
 - ruleset D7 на `df-roles-probe`: `dismiss_stale_reviews_on_push`, `require_last_push_approval`,
   `require_code_owner_review`;
 - CODEOWNERS — только логины `human_approvers`, владеет `/.github/`;
@@ -4538,7 +4650,9 @@ git commit -m "feat(act): бриф review/v1 — заявка v2, агентск
 «Ожидание» дословно по смыслу. Строки, чьё ожидание само является пределом гарантии, проходят
 evidence этого предела:
 - №33 — рантайм не сделал вывода «bypass нет»;
-- №34 — обнаруживший потребитель заблокирован, второй до закрытия эпохи не обязан;
+- №34/№37 — потребители **той же установки** заблокированы событием общего журнала; **другая**
+  установка до закрытия эпохи не обязана (стенд: вторая установка на отдельной машине или
+  отдельной копии `/var/lib/df`); №36 — включая `pending`, перезапуск и последующее завершение;
 - №21 — разрыв формы истории (прямой push, пропуск данных) → `unavailable` и отказ;
   force-push человеком на предка — вне гарантии v1, evidence фиксирует, что он не обнаружен;
 - №28 — многокоммитный rebase-merge или коммит first-parent без PR → `unavailable`;
@@ -4551,7 +4665,9 @@ evidence этого предела:
 
 - [ ] **Step 1:** `scripts/act_acceptance.py` пишет строку с полями `phase`, `scenario`,
   `checkout_sha`, `review_id`, `login`, `head_sha`, `request`, `activation_commit`,
-  `merge_commit`, `merged_by`, `outcome`, `expected`, `verdict`. Тест на стабах:
+  `trust_root` (host, `repository_id`, ветка, SHA снимка — **решения этого сценария**),
+  `merge_commit`, `merged_by`, `outcome`, `expected`, `verdict`. Тест: два решения на разных
+  снимках `df-trust` дают разные `trust_root` в сериализованных строках. Тест на стабах:
   `uv run --group governance pytest tests/test_act_acceptance_script.py -v`.
 - [ ] **Step 2:** фаза 1 — все строки §11.1 и проверки таймлайна; каждая строка evidence сразу
   пишется в файл.
