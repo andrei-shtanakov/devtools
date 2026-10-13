@@ -151,8 +151,12 @@ def test_uncommitted_edit_ignored(repo: Path) -> None:
     assert _invoke(repo, base).returncode == 0
 
 
-def test_not_a_git_checkout(tmp_path: Path) -> None:
-    assert _invoke(tmp_path, "f" * 40).returncode == 1
+def test_not_a_git_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Родительский репо не подхватывается: GIT_CEILING_DIRECTORIES."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    assert _invoke(plain, "f" * 40).returncode == 1
 
 
 def test_repo_defaults_to_cwd(repo: Path) -> None:

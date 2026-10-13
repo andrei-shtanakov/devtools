@@ -22,12 +22,12 @@ bootstrap; `epochs[0].anchor` всегда обязан равняться `BOOT
 На `pull_request` GitHub берёт файл workflow из самого PR: PR может переписать
 `epochs.yml`, `DEVTOOLS_REF` или заменить шаг на `true`. Поэтому в df-trust:
 
-1. job `epochs / check-transition` — **required status check** в ruleset
+1. job с контекстом `check-transition` (имя job; `epochs / check-transition` — лишь подпись в UI) — **required status check** в ruleset
    дефолтной ветки с «Require branches to be up to date before merging»
    (иначе проверка может идти против устаревшего base);
-2. `CODEOWNERS`: `/.github/ @<human>` и «Require review from Code Owners» —
-   правки workflow, а также `source.env`, ревьюит человек (CI `source.env`
-   сам не охраняет, кроме якоря эпохи 1);
+2. `CODEOWNERS`: `/.github/`, `/source.env` и `/epochs.yaml` — `@<human>`, и
+   «Require review from Code Owners»: workflow и файлы корня доверия ревьюит
+   человек (CI `source.env` сам не охраняет, кроме якоря эпохи 1);
 3. триггер включает `edited`, чтобы смена base у PR перезапускала проверку.
 
 Весь шаблон — authority-root в devtools (`templates/df-trust/`).

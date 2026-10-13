@@ -11,10 +11,12 @@
 #
 # ОБЯЗАТЕЛЬНАЯ ЗАЩИТА (без неё проверка лишь советует): на `pull_request` файл
 # workflow берётся из самого PR. Поэтому в ruleset дефолтной ветки df-trust:
-#   1. `epochs / check-transition` — REQUIRED status check, включено
+#   1. контекст `check-transition` (имя job; `epochs / check-transition` — лишь
+#      подпись в UI) — REQUIRED status check, включено
 #      "Require branches to be up to date before merging";
-#   2. CODEOWNERS: `/.github/ @<human>` + "Require review from Code Owners" —
-#      правку workflow, source.env и этого файла ревьюит человек.
+#   2. CODEOWNERS: `/.github/ @<human>`, `/source.env @<human>`,
+#      `/epochs.yaml @<human>` + "Require review from Code Owners" —
+#      файлы корня доверия и workflow ревьюит человек.
 #
 # Инварианты: CLI исполняется из checkout devtools по пиненому SHA, НИКОГДА из
 # дерева PR; триггер pull_request (не pull_request_target); токен только на
@@ -39,7 +41,7 @@ jobs:
   check-transition:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout df-trust (PR head / pushed commit)
+      - name: Checkout df-trust (pull_request: test-merge commit refs/pull/N/merge; push: pushed commit)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: df-trust
