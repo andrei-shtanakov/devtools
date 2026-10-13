@@ -176,3 +176,19 @@ def test_bad_arguments(repo: Path) -> None:
         cwd=repo, capture_output=True, text=True, check=False,
     )  # fmt: skip
     assert done.returncode == 2
+
+
+def test_isolated_mode_from_foreign_cwd(repo: Path) -> None:
+    base = _base_with(repo, None)
+    (repo / JOURNAL).write_text(OPEN_1)
+    (repo / SOURCE).write_text(_source())
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "head")
+    done = subprocess.run(
+        [
+            sys.executable, "-I", str(SCRIPT), "--check-transition", base,
+            "--repo", str(repo), "--file", JOURNAL, "--source-env", SOURCE,
+        ],
+        cwd=repo.parent, capture_output=True, text=True, check=False,
+    )  # fmt: skip
+    assert done.returncode == 0, done.stderr

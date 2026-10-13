@@ -7,7 +7,9 @@ bootstrap; `epochs[0].anchor` всегда обязан равняться `BOOT
 из `source.env`. Файлы читаются из закоммиченного HEAD (`git show`), не из
 рабочего дерева; симлинк/не-обычный файл — отказ.
 
-Перед использованием замените `DEVTOOLS_REPO` и `DEVTOOLS_REF` (полный SHA
+Перед использованием замените `DEVTOOLS_REPO`, `DEVTOOLS_REF` и ветку в
+`on.push.branches` (дефолтная ветка df-trust, `df_trust_branch`; ставит
+`df setup-trust`) (полный SHA
 релиза devtools с Task 10a). CLI запускается из checkout devtools по SHA в
 доверенной форме (`uv run --frozen --exact --no-config --no-env-file`,
 `python -I`, версия uv закреплена `UV_VERSION`); дерево PR (`df-trust/`)
