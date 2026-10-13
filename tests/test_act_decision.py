@@ -10,6 +10,7 @@ import pytest
 pytest.importorskip("steward")  # decide → classify → steward classify_actor
 
 from governance.act_decision import (  # noqa: E402
+    D1_NO_ACT,
     D3_MERGER,
     I_BYTES,
     I_CONTENT,
@@ -23,6 +24,7 @@ from governance.act_decision import (  # noqa: E402
 )
 from governance.act_policy import parse_policy_set  # noqa: E402
 from governance.act_request import NodeEntry, NodeRequest, PolicyPin  # noqa: E402
+from governance.act_time import Unavailable  # noqa: E402
 from tests.act_cases import COMMIT, FILES, code  # noqa: E402
 
 HEAD = "1" * 40
@@ -137,3 +139,58 @@ def test_agent_in_approvers_but_not_merger_refused() -> None:
 def test_not_in_base_rejected() -> None:
     not_in_base = dataclasses.replace(DELIVERY, in_base=False)
     assert isinstance(run(delivery=not_in_base), Rejected)
+
+
+def test_key_login_mismatch_unavailable() -> None:
+    """Ключ эффективного ревью ≠ его логин — факт искажён, не установлен."""
+    forged = ReviewView("1", "mallory[bot]", "User", "APPROVED", HEAD)
+    assert isinstance(run(effective={"alice": forged}), Unavailable)
+
+
+def test_bot_form_approver_with_user_hint_not_act() -> None:
+    """D1: `alice[bot]` — бот при любой подсказке, даже если внесён в approvers."""
+    files = dict(FILES)
+    files["policy/approvers.env"] = (
+        b"AUTHORIZED_APPROVER_ACCOUNTS=alice,alice[bot]\n"
+        b"AUTHORIZED_MERGER_ACCOUNTS=df-reviewer[bot]\n"
+    )
+    policy = parse_policy_set(COMMIT, files)
+    bot = ReviewView("1", "alice[bot]", "User", "APPROVED", HEAD)
+    assert code(run(effective={"alice[bot]": bot}, policy=policy)) == D1_NO_ACT
+
+
+def test_human_merger_with_bot_hint_not_via_a() -> None:
+    """D3(а): `type_hint = Bot` закрывает путь человека; в mergers его нет."""
+    hinted = dataclasses.replace(
+        DELIVERY, merged_by_login="alice", merged_by_type_hint="Bot"
+    )
+    assert code(run(delivery=hinted)) == D3_MERGER
+
+
+def test_bot_agent_outside_merger_allowlist_refused() -> None:
+    """Приёмка №6: бот-agent вне allowlist merger — доставка не засчитана."""
+    other = dataclasses.replace(
+        DELIVERY, merged_by_login="other[bot]", merged_by_type_hint="Bot"
+    )
+    assert code(run(delivery=other)) == D3_MERGER
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["merge_commit", "merged_at", "merged_by_login", "head_at_merge"],
+)
+def test_missing_delivery_fact_unavailable(field_name: str) -> None:
+    """§5.5: неустановленный факт доставки — `Unavailable`, не вердикт."""
+    missing = dataclasses.replace(DELIVERY, **{field_name: None})
+    assert isinstance(run(delivery=missing), Unavailable)
+
+
+def test_unread_blob_unavailable() -> None:
+    """Пары blob пути нет — байты не прочитаны, отказ не установлен."""
+    unread = dataclasses.replace(DELIVERY, blobs={})
+    assert isinstance(run(delivery=unread), Unavailable)
+
+
+def test_missing_self_hash_unavailable() -> None:
+    """Хеш проекции не вычислен — I-content не установлен."""
+    assert isinstance(run(head_self_hashes={}), Unavailable)
