@@ -128,6 +128,9 @@ _HARNESS_PREFIXES = (
     "governance/__init__",
     "contracts/discovery-approval/",
     "contracts/approval-policy-source/",
+    # Акт утверждения review/v1 — проверяльщик исполняется в обвязке мержа
+    # (`act_premerge`), та же категория, что `brief_merge_check`.
+    "governance/act_",
     "pyproject.toml",
     "uv.lock",
 )

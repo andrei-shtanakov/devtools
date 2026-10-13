@@ -137,6 +137,8 @@ def test_prefixes_read_from_the_ssot_file() -> None:
         "tests/test_governance_sandbox",
         "tests/test_author_sandbox_invariant",
         "contracts/author-sandbox/",
+        # Акт утверждения review/v1: ядро решения и проверяльщик в обвязке мержа.
+        "governance/act_",
     }
 
 
