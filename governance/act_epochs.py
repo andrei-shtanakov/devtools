@@ -128,52 +128,61 @@ class _BaseUnavailable(Exception):
     """BASE_SHA не разрешается в коммит."""
 
 
-def _git(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["git", *args], capture_output=True, text=True, check=False)
+def _git(repo: str, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", repo, *args], capture_output=True, text=True, check=False
+    )
 
 
-def _show_base(base: str, file: str) -> str | None:
-    """Содержимое файла в базовом коммите; `None` — файла там нет."""
-    if _git("rev-parse", "--git-dir").returncode != 0:
-        raise JournalError("не git-чекаут")
-    if _git("cat-file", "-e", f"{base}^{{commit}}").returncode != 0:
-        raise _BaseUnavailable(base)
-    listing = _git("ls-tree", base, "--", file)
+def _blob(repo: str, rev: str, file: str) -> str | None:
+    """Обычный файл (режим 100644) в коммите `rev`; `None` — его там нет.
+
+    Симлинк или иной объект — `JournalError`: потребитель читает blob.
+    """
+    listing = _git(repo, "ls-tree", rev, "--", file)
     if listing.returncode != 0:
-        raise JournalError(f"git ls-tree {base}: {listing.stderr.strip()}")
+        raise JournalError(f"git ls-tree {rev}: {listing.stderr.strip()}")
     if not listing.stdout.strip():
         return None
-    shown = _git("show", f"{base}:{file}")
+    if not listing.stdout.startswith("100644 blob "):
+        raise JournalError(f"{file} в {rev}: не обычный файл")
+    shown = _git(repo, "show", f"{rev}:{file}")
     if shown.returncode != 0:
-        raise JournalError(f"git show {base}:{file}: {shown.stderr.strip()}")
+        raise JournalError(f"git show {rev}:{file}: {shown.stderr.strip()}")
     return shown.stdout
 
 
-def _check_bootstrap(new: tuple[Epoch, ...], source_text: str) -> None:
-    """Файла в базе нет: допустима одна открытая эпоха 1 с якорем bootstrap."""
+def _head_blob(repo: str, file: str) -> str:
+    text = _blob(repo, "HEAD", file)
+    if text is None:
+        raise JournalError(f"{file}: нет в HEAD")
+    return text
+
+
+def _check_anchor(new: tuple[Epoch, ...], source_text: str) -> None:
+    """Эпоха 1 обязана держать якорь BOOTSTRAP_ACTIVATION из source.env."""
     try:
         source = parse_source(source_text)
     except SourceError as exc:
-        raise JournalError(f"source.env при bootstrap: {exc}") from exc
-    if len(new) != 1 or new[0].closed:
-        raise JournalError("bootstrap: нужна ровно одна открытая эпоха 1")
+        raise JournalError(f"source.env: {exc}") from exc
     if new[0].anchor != source.bootstrap_activation:
-        raise JournalError("bootstrap: anchor ≠ BOOTSTRAP_ACTIVATION из source.env")
+        raise JournalError("epochs[0].anchor ≠ BOOTSTRAP_ACTIVATION из source.env")
 
 
-def _read(path: str) -> str:
-    try:
-        return Path(path).read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise JournalError(f"{path}: не читается: {exc}") from exc
-
-
-def check_head_against_base(base: str, file: str, source_env: str) -> None:
-    """Допустимость журнала рабочего дерева относительно базового коммита."""
-    prev_text = _show_base(base, file)
-    new = parse_journal(_read(file))
+def check_head_against_base(
+    base: str, file: str, source_env: str, repo: str = "."
+) -> None:
+    """Допустимость журнала в HEAD репо `repo` относительно коммита `base`."""
+    if _git(repo, "rev-parse", "--git-dir").returncode != 0:
+        raise JournalError(f"{repo}: не git-чекаут")
+    if _git(repo, "cat-file", "-e", f"{base}^{{commit}}").returncode != 0:
+        raise _BaseUnavailable(base)
+    prev_text = _blob(repo, base, file)
+    new = parse_journal(_head_blob(repo, file))
+    _check_anchor(new, _head_blob(repo, source_env))
     if prev_text is None:
-        _check_bootstrap(new, _read(source_env))
+        if len(new) != 1 or new[0].closed:
+            raise JournalError("bootstrap: нужна ровно одна открытая эпоха 1")
         return
     check_transition(parse_journal(prev_text), new)
 
@@ -184,12 +193,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--check-transition", metavar="BASE_SHA", required=True)
     parser.add_argument("--file", required=True)
     parser.add_argument("--source-env", required=True)
+    parser.add_argument(
+        "--repo", default=".", help="git-чекаут df-trust (по умолч. cwd)"
+    )
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
         return 2 if exc.code else 0
     try:
-        check_head_against_base(args.check_transition, args.file, args.source_env)
+        check_head_against_base(
+            args.check_transition, args.file, args.source_env, args.repo
+        )
     except _BaseUnavailable:
         print(f"BASE_SHA {args.check_transition!r} не коммит", file=sys.stderr)
         return 2

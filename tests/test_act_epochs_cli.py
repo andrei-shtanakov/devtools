@@ -58,19 +58,30 @@ def _base_with(repo: Path, journal: str | None) -> str:
     return _git(repo, "rev-parse", "HEAD")
 
 
+def _invoke(
+    repo: Path, base: str, cwd: Path | None = None, use_flag: bool = True
+) -> subprocess.CompletedProcess[str]:
+    cmd = [
+        sys.executable, str(SCRIPT), "--check-transition", base,
+        "--file", JOURNAL, "--source-env", SOURCE,
+    ]  # fmt: skip
+    if use_flag:
+        cmd += ["--repo", str(repo)]
+    return subprocess.run(
+        cmd, cwd=cwd or repo.parent, capture_output=True, text=True, check=False
+    )
+
+
 def _run(
     repo: Path, base: str, head: str | None, source: str | None = None
 ) -> subprocess.CompletedProcess[str]:
+    """Закоммитить голову PR (журнал + source.env) и проверить."""
     if head is not None:
         (repo / JOURNAL).write_text(head)
     (repo / SOURCE).write_text(source if source is not None else _source())
-    return subprocess.run(
-        [
-            sys.executable, str(SCRIPT), "--check-transition", base,
-            "--file", JOURNAL, "--source-env", SOURCE,
-        ],
-        cwd=repo, capture_output=True, text=True, check=False,
-    )  # fmt: skip
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "head", "--allow-empty")
+    return _invoke(repo, base)
 
 
 def test_anchor_change_forbidden(repo: Path) -> None:
@@ -116,8 +127,38 @@ def test_bootstrap_malformed_source(repo: Path) -> None:
 
 def test_missing_head_file(repo: Path) -> None:
     base = _base_with(repo, OPEN_1)
-    (repo / JOURNAL).unlink()
+    _git(repo, "rm", "-q", JOURNAL)
     assert _run(repo, base, None).returncode == 1
+
+
+def test_later_pr_rewriting_bootstrap_activation(repo: Path) -> None:
+    base = _base_with(repo, OPEN_1)
+    assert _run(repo, base, OPEN_1, _source(A2)).returncode == 1
+
+
+def test_symlinked_journal_rejected(repo: Path) -> None:
+    base = _base_with(repo, OPEN_1)
+    (repo / JOURNAL).unlink()
+    (repo / "real.yaml").write_text(OPEN_1)
+    (repo / JOURNAL).symlink_to("real.yaml")
+    assert _run(repo, base, None).returncode == 1
+
+
+def test_uncommitted_edit_ignored(repo: Path) -> None:
+    base = _base_with(repo, OPEN_1)
+    assert _run(repo, base, OPEN_1).returncode == 0
+    (repo / JOURNAL).write_text(OPEN_1.replace(A1, A2))
+    assert _invoke(repo, base).returncode == 0
+
+
+def test_not_a_git_checkout(tmp_path: Path) -> None:
+    assert _invoke(tmp_path, "f" * 40).returncode == 1
+
+
+def test_repo_defaults_to_cwd(repo: Path) -> None:
+    base = _base_with(repo, OPEN_1)
+    assert _run(repo, base, OPEN_1).returncode == 0
+    assert _invoke(repo, base, cwd=repo, use_flag=False).returncode == 0
 
 
 def test_nonexistent_base_sha(repo: Path) -> None:
