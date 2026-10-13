@@ -7,7 +7,7 @@
 #   DEVTOOLS_REF   — ПОЛНЫЙ 40-символьный SHA релиза devtools с Task 10a
 #                    (merge-коммит; пин, не ветка и не тег).
 #
-#   push.branches  — дефолтная ветка df-trust (`df_trust_branch`); df setup-trust
+#   push.branches  — DF_TRUST_BRANCH_PLACEHOLDER: дефолтная ветка df-trust (`df_trust_branch`); df setup-trust
 #                    подставляет её в `on.push.branches` (в README — то же).
 #   UV_VERSION     — точная версия uv (задаётся здесь, не из дерева PR).
 #
@@ -35,7 +35,7 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
   push:
-    branches: ["<df-trust-branch — set by df setup-trust>"]
+    branches: ["DF_TRUST_BRANCH_PLACEHOLDER"]
 
 permissions:
   contents: read

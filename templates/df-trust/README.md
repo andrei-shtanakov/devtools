@@ -7,7 +7,7 @@ bootstrap; `epochs[0].anchor` всегда обязан равняться `BOOT
 из `source.env`. Файлы читаются из закоммиченного HEAD (`git show`), не из
 рабочего дерева; симлинк/не-обычный файл — отказ.
 
-Перед использованием замените `DEVTOOLS_REPO`, `DEVTOOLS_REF` и ветку в
+Перед использованием замените `DEVTOOLS_REPO`, `DEVTOOLS_REF` и ветку (`DF_TRUST_BRANCH_PLACEHOLDER`) в
 `on.push.branches` (дефолтная ветка df-trust, `df_trust_branch`; ставит
 `df setup-trust`) (полный SHA
 релиза devtools с Task 10a). CLI запускается из checkout devtools по SHA в
