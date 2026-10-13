@@ -135,6 +135,8 @@ _HARNESS_PREFIXES = (
     # агента: агентская правка теста ослабила бы проверку ядра.
     "tests/test_act_",
     "tests/act_cases",
+    # Шаблон CI корня доверия df-trust: его копирует установка.
+    "templates/df-trust/",
     "pyproject.toml",
     "uv.lock",
 )
