@@ -11,7 +11,7 @@ CODEOWNERS: его пишет агентский finalize. Он НЕ источ�
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 
 import yaml
 
@@ -19,6 +19,7 @@ from governance.act_request import NodeRequest, manifest_path
 
 ENVELOPE_SCHEMA = "node-approval-envelope/v1"
 STOP_SCHEMA = "node-approval-stop/v1"
+POLICY_KEYS = ("repo", "branch", "activation_commit", "files_sha256")
 
 
 class EnvelopeError(ValueError):
@@ -89,10 +90,51 @@ def _dump(schema: str, data: dict[str, object]) -> str:
 
 
 def _load(text: str, schema: str) -> dict[str, object]:
-    data = yaml.safe_load(text)
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise EnvelopeError(f"не YAML: {exc}") from exc
     if not isinstance(data, dict) or data.pop("schema", None) != schema:
         raise EnvelopeError(f"схема не {schema}")
     return data
+
+
+def _keys(data: dict[str, object], expected: set[str], what: str) -> None:
+    if set(data) != expected:
+        raise EnvelopeError(f"{what}: ключи {sorted(data)}, нужны {sorted(expected)}")
+
+
+def _str(data: Mapping[str, object], key: str) -> str:
+    value = data[key]
+    if type(value) is not str:
+        raise EnvelopeError(f"поле {key}: ожидалась строка")
+    return value
+
+
+def _int(data: Mapping[str, object], key: str) -> int:
+    value = data[key]
+    if type(value) is not int:
+        raise EnvelopeError(f"поле {key}: ожидалось целое")
+    return value
+
+
+def _str_map(data: Mapping[str, object], key: str) -> dict[str, str]:
+    value = data[key]
+    if not isinstance(value, dict):
+        raise EnvelopeError(f"поле {key}: ожидался словарь")
+    if not all(type(k) is str and type(v) is str for k, v in value.items()):
+        raise EnvelopeError(f"поле {key}: ожидался словарь строк")
+    return dict(value)
+
+
+def _policy(data: Mapping[str, object]) -> dict[str, object]:
+    value = data["policy"]
+    if not isinstance(value, dict):
+        raise EnvelopeError("поле policy: ожидался словарь")
+    _keys(value, set(POLICY_KEYS), "policy")
+    record: dict[str, object] = {k: _str(value, k) for k in POLICY_KEYS[:3]}
+    record["files_sha256"] = _str_map(value, "files_sha256")
+    return record
 
 
 def render_envelope(env: Envelope) -> str:
@@ -104,11 +146,21 @@ def render_envelope(env: Envelope) -> str:
 
 
 def parse_envelope(text: str) -> Envelope:
-    """Разбор конверта; неизвестная форма — `EnvelopeError`."""
-    try:
-        return Envelope(**_load(text, ENVELOPE_SCHEMA))  # pyrefly: ignore
-    except TypeError as exc:
-        raise EnvelopeError(f"конверт: {exc}") from exc
+    """Разбор конверта; любое отклонение от формы — `EnvelopeError`."""
+    data = _load(text, ENVELOPE_SCHEMA)
+    _keys(data, {f.name for f in fields(Envelope)}, "конверт")
+    return Envelope(
+        node=_str(data, "node"),
+        request_id=_str(data, "request_id"),
+        generation=_int(data, "generation"),
+        manifest_path=_str(data, "manifest_path"),
+        head_sha=_str(data, "head_sha"),
+        self_hash=_str(data, "self_hash"),
+        upstream_pins=_str_map(data, "upstream_pins"),
+        merge_commit=_str(data, "merge_commit"),
+        review_id=_str(data, "review_id"),
+        policy=_policy(data),
+    )
 
 
 def render_stop(rec: StopRecord) -> str:
@@ -117,11 +169,14 @@ def render_stop(rec: StopRecord) -> str:
 
 
 def parse_stop(text: str) -> StopRecord:
-    """Разбор записи остановки."""
-    try:
-        return StopRecord(**_load(text, STOP_SCHEMA))  # pyrefly: ignore
-    except TypeError as exc:
-        raise EnvelopeError(f"запись остановки: {exc}") from exc
+    """Разбор записи остановки; любое отклонение — `EnvelopeError`."""
+    data = _load(text, STOP_SCHEMA)
+    _keys(data, {"node", "generation", "reason"}, "запись остановки")
+    return StopRecord(
+        node=_str(data, "node"),
+        generation=_int(data, "generation"),
+        reason=_str(data, "reason"),
+    )
 
 
 def _touches(event: Event, node: str) -> bool:

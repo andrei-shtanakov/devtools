@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import dataclasses
+from typing import Any
+
+import pytest
+import yaml
 
 from governance.act_envelope import (
     DeliveredRequest,
     DeliveredStop,
     Envelope,
+    EnvelopeError,
     StopRecord,
     current_event,
     envelope_path,
@@ -91,7 +96,8 @@ def test_previous_generation_same_bytes_refused() -> None:
 def test_other_node_envelope_refused() -> None:
     """Приёмка №17."""
     other = dataclasses.replace(_env(NEW), node="design")
-    assert envelope_refusal(other, [OLD, NEW], "req", "h" * 40, PINS, "21")
+    reason = envelope_refusal(other, [OLD, NEW], "req", "h" * 40, PINS, "21")
+    assert reason and "подставлен" in reason
 
 
 def test_reopen_with_unchanged_content_stops_approval() -> None:
@@ -108,7 +114,8 @@ def test_new_generation_after_stop_approved() -> None:
 
 def test_non_monotonic_generation_refused() -> None:
     stale = DeliveredRequest("5" * 40, "a5" * 20, _req("approve-2-1-4", 2))
-    assert generation_refusal([OLD, NEW, stale], "req")
+    reason = generation_refusal([OLD, NEW, stale], "req")
+    assert reason and "не больше" in reason
 
 
 def test_envelope_with_other_policy_pin_refused() -> None:
@@ -118,3 +125,70 @@ def test_envelope_with_other_policy_pin_refused() -> None:
 
 def test_node_bytes_changed_refused() -> None:
     assert envelope_refusal(_env(NEW), [OLD, NEW], "req", "z" * 40, PINS, "21")
+
+
+def _env_doc() -> dict[str, Any]:
+    return yaml.safe_load(render_envelope(_env(NEW)))
+
+
+def _stop_doc() -> dict[str, Any]:
+    return yaml.safe_load(render_stop(STOP2.stop))
+
+
+def _mut(doc: dict[str, Any], **changes: Any) -> str:
+    out = {**doc, **changes}
+    return yaml.safe_dump({k: v for k, v in out.items() if v is not _GONE})
+
+
+_GONE = object()
+BAD_SCALARS = [2.0, True, "2", None, [2]]
+
+
+def _env_cases() -> list[str]:
+    doc = _env_doc()
+    cases = [
+        _mut(doc, schema="other/v1"),
+        _mut(doc, schema=_GONE),
+        _mut(doc, extra="x"),
+        "node: [unclosed",
+        "- a\n- b\n",
+        "",
+        _mut(doc, upstream_pins={"charter": 1}),
+        _mut(doc, upstream_pins=["charter"]),
+        _mut(doc, policy="x"),
+        _mut(doc, policy={**doc["policy"], "extra": "x"}),
+        _mut(doc, policy={**doc["policy"], "branch": 1}),
+        _mut(doc, policy={**doc["policy"], "files_sha256": {"a": 1}}),
+    ]
+    cases += [_mut(doc, generation=v) for v in BAD_SCALARS]
+    cases += [_mut(doc, node=1), _mut(doc, review_id=21)]
+    cases += [_mut(doc, **{k: _GONE}) for k in doc if k != "schema"]
+    return cases
+
+
+def _stop_cases() -> list[str]:
+    doc = _stop_doc()
+    cases = [
+        _mut(doc, schema="other/v1"),
+        _mut(doc, schema=_GONE),
+        _mut(doc, extra="x"),
+        "node: [unclosed",
+        "",
+        _mut(doc, reason=5),
+        _mut(doc, node=["req"]),
+    ]
+    cases += [_mut(doc, generation=v) for v in BAD_SCALARS]
+    cases += [_mut(doc, **{k: _GONE}) for k in doc if k != "schema"]
+    return cases
+
+
+@pytest.mark.parametrize("text", _env_cases())
+def test_parse_envelope_rejects_malformed(text: str) -> None:
+    with pytest.raises(EnvelopeError):
+        parse_envelope(text)
+
+
+@pytest.mark.parametrize("text", _stop_cases())
+def test_parse_stop_rejects_malformed(text: str) -> None:
+    with pytest.raises(EnvelopeError):
+        parse_stop(text)
