@@ -14,9 +14,15 @@
 #   1. контекст `check-transition` (имя job; `epochs / check-transition` — лишь
 #      подпись в UI) — REQUIRED status check, включено
 #      "Require branches to be up to date before merging";
-#   2. CODEOWNERS: `/.github/ @<human>`, `/source.env @<human>`,
-#      `/epochs.yaml @<human>` + "Require review from Code Owners" —
-#      файлы корня доверия и workflow ревьюит человек.
+#   2. по умолчанию (один человек): в df-trust пишут только люди (у агентов
+#      записи нет, ruleset — только PR), а мержащий человек ОБЯЗАН сам
+#      ревьюить любой PR, трогающий `/.github/`, `/source.env`, `/epochs.yaml`,
+#      особенно PR из форков (в публичном репо открыть PR может кто угодно, в
+#      т.ч. machine user; workflow такого PR исполняется на pull_request, так
+#      что зелёный CI для него недостаточен);
+#      усиление явным решением (спека B §6.2): при >=2 людях — CODEOWNERS на
+#      эти пути + "Require review from Code Owners"; число POLICY_ADMINS его
+#      автоматически не включает (один человек не может одобрить свой PR).
 #
 # Инварианты: CLI исполняется из checkout devtools по пиненому SHA, НИКОГДА из
 # дерева PR; триггер pull_request (не pull_request_target); токен только на

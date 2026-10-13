@@ -25,9 +25,16 @@ bootstrap; `epochs[0].anchor` всегда обязан равняться `BOOT
 1. job с контекстом `check-transition` (имя job; `epochs / check-transition` — лишь подпись в UI) — **required status check** в ruleset
    дефолтной ветки с «Require branches to be up to date before merging»
    (иначе проверка может идти против устаревшего base);
-2. `CODEOWNERS`: `/.github/`, `/source.env` и `/epochs.yaml` — `@<human>`, и
-   «Require review from Code Owners»: workflow и файлы корня доверия ревьюит
-   человек (CI `source.env` сам не охраняет, кроме якоря эпохи 1);
+2. по умолчанию (один человек): в df-trust пишут только люди (у агентов
+   записи нет, ruleset — только PR); мержащий человек **обязан** сам
+   ревьюить любой PR, трогающий `/.github/`, `/source.env`, `/epochs.yaml`,
+   особенно PR из форков: в публичном репо открыть PR может кто угодно (в т.ч.
+   machine user), workflow такого PR исполняется на `pull_request`, поэтому
+   зелёный CI для него недостаточен (CI `source.env` сам не охраняет, кроме
+   якоря эпохи 1). Усиление — явным решением (спека B §6.2): при >=2 людях
+   `CODEOWNERS` на эти пути и «Require review from Code Owners»; число
+   `POLICY_ADMINS` его автоматически не включает. Как обязательное правило
+   для одного человека оно заблокировало бы bootstrap и каждую правку журнала;
 3. триггер включает `edited`, чтобы смена base у PR перезапускала проверку.
 
 Весь шаблон — authority-root в devtools (`templates/df-trust/`).
