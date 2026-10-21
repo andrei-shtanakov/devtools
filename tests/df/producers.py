@@ -11,13 +11,8 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from df.digest import TreeError
+from df.platform import TAR_FLAGS, detect_platform
 
-# Task 5 replaces this with `from df.<module> import TAR_FLAGS, detect_platform`.
-TAR_FLAGS_LOCAL: tuple[str, ...] = (
-    ("--format", "pax", "--no-mac-metadata", "--no-xattrs", "--no-acls", "--no-fflags")
-    if sys.platform == "darwin"
-    else ("--format=pax", "--no-xattrs", "--no-acls", "--no-selinux")
-)
 TAR = "/usr/bin/tar" if sys.platform == "darwin" else "tar"
 _GONE_SECONDS = 5.0
 
@@ -121,7 +116,7 @@ def data_producer(tmp_path: Path, data: bytes) -> LocalProducer:
 
 def tar_producer(src: Path, *, trailer: int = 0) -> LocalProducer:
     """Producer running the system tar over `src` (plus `trailer` NUL bytes)."""
-    argv = [TAR, "-cf", "-", *TAR_FLAGS_LOCAL, "-C", str(src), "."]
+    argv = [TAR, "-cf", "-", *TAR_FLAGS[detect_platform()], "-C", str(src), "."]
     if not trailer:
         return LocalProducer(argv)
     script = f'"$@" && head -c {trailer} /dev/zero'

@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>dsAttrTypeNative:_writers_passwd</key>
+	<array>
+		<string>df-build</string>
+	</array>
+	<key>dsAttrTypeNative:accountPolicyData</key>
+	<array>
+		<string>&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"&gt;
+&lt;plist version="1.0"&gt;
+&lt;dict&gt;
+	&lt;key&gt;creationTime&lt;/key&gt;
+	&lt;real&gt;1700000000.0&lt;/real&gt;
+	&lt;key&gt;failedLoginCount&lt;/key&gt;
+	&lt;integer&gt;0&lt;/integer&gt;
+	&lt;key&gt;failedLoginTimestamp&lt;/key&gt;
+	&lt;integer&gt;0&lt;/integer&gt;
+	&lt;key&gt;passwordLastSetTime&lt;/key&gt;
+	&lt;real&gt;1700000000.0&lt;/real&gt;
+&lt;/dict&gt;
+&lt;/plist&gt;
+</string>
+	</array>
+	<key>dsAttrTypeNative:record_daemon_version</key>
+	<array>
+		<string>9040000</string>
+	</array>
+	<key>dsAttrTypeNative:unlockOptions</key>
+	<array>
+		<string>2</string>
+	</array>
+	<key>dsAttrTypeStandard:AppleMetaNodeLocation</key>
+	<array>
+		<string>/Local/Default</string>
+	</array>
+	<key>dsAttrTypeStandard:GeneratedUID</key>
+	<array>
+		<string>00000000-0000-0000-0000-000000000000</string>
+	</array>
+	<key>dsAttrTypeStandard:NFSHomeDirectory</key>
+	<array>
+		<string>/Users/df-build</string>
+	</array>
+	<key>dsAttrTypeStandard:Password</key>
+	<array>
+		<string>********</string>
+	</array>
+	<key>dsAttrTypeStandard:PrimaryGroupID</key>
+	<array>
+		<string>20</string>
+	</array>
+	<key>dsAttrTypeStandard:RealName</key>
+	<array>
+		<string>Someone Else</string>
+	</array>
+	<key>dsAttrTypeStandard:RecordName</key>
+	<array>
+		<string>df-build</string>
+	</array>
+	<key>dsAttrTypeStandard:RecordType</key>
+	<array>
+		<string>dsRecTypeStandard:Users</string>
+	</array>
+	<key>dsAttrTypeStandard:UniqueID</key>
+	<array>
+		<string>503</string>
+	</array>
+	<key>dsAttrTypeStandard:UserShell</key>
+	<array>
+		<string>/bin/zsh</string>
+	</array>
+</dict>
+</plist>

@@ -1007,7 +1007,8 @@ def test_needs_human_stops_without_done(tmp_path): ...
     reap_seconds)`; остался процесс с UID `user` — `TreeError`. Эффекты:
     `reap_user_processes()`.
   - `TAR_FLAGS: Mapping[PlatformName, tuple[str, ...]]` — §3.3 п. 3: macOS `("--format",
-    "pax", "--no-mac-metadata", "--no-xattrs", "--no-acls", "--no-fflags")`, Linux
+    "pax", "--no-mac-metadata", "--no-xattrs", "--no-acls", "--no-fflags",
+    "--no-read-sparse")`, Linux
     `("--format=pax", "--no-xattrs", "--no-acls", "--no-selinux")`.
   - `CLEANER_ARGV(root: Path) -> list[list[str]]` = `[["/bin/chmod", "u+rwx", str(root)],
     ["/usr/bin/find", str(root), "-mindepth", "1", "-type", "d", "!", "-perm", "-u+rwx",
@@ -1112,6 +1113,9 @@ def test_needs_human_stops_without_done(tmp_path): ...
     - итоговая цель — обычный файл;
     - зависимости `linked_libraries` лежат в `SYSTEM_LIB_DIRS` или проходят
       `trusted_path_problems`;
+      сужено при реализации (R26, §3.10): нативные зависимости допускаются только из системных
+      каталогов; путей поиска (rpath/runpath, `@rpath`, `@loader_path`, `$ORIGIN`) у CLI быть не
+      должно — установщик не моделирует загрузчик;
     - у скрипта с `#!` интерпретатор абсолютен и сам проходит те же проверки; `#!/usr/bin/env`
       — проблема.
 
