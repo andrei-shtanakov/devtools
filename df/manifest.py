@@ -14,7 +14,7 @@ import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
-from df.config import PY_VERSION, SHA1
+from df.config import PY_VERSION, SHA1, TOML_ERRORS
 
 MAX_MANIFEST_BYTES = 1024 * 1024
 FETCH_TIMEOUT = 30
@@ -295,7 +295,7 @@ def _resolve(
 def _load(data: bytes) -> dict[str, object]:
     try:
         return tomllib.loads(data.decode("utf-8"))
-    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+    except TOML_ERRORS as exc:
         raise ManifestError(f"invalid TOML: {exc}") from exc
 
 

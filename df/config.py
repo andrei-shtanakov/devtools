@@ -47,6 +47,8 @@ SHA1 = re.compile(r"[0-9a-f]{40}", re.ASCII)
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _NUM = r"(0|[1-9][0-9]*)"
 PY_VERSION = re.compile(rf"{_NUM}\.{_NUM}\.{_NUM}", re.ASCII)
+# Every way tomllib can fail on hostile input; deep nesting exhausts its recursion.
+TOML_ERRORS = (tomllib.TOMLDecodeError, UnicodeDecodeError, RecursionError)
 
 
 def _need(ok: bool, key: str, what: str) -> None:
@@ -63,7 +65,7 @@ def _nonempty(value: object, key: str) -> str:
 def _parse_toml(text: str, schema: str) -> dict[str, object]:
     try:
         data = tomllib.loads(text)
-    except tomllib.TOMLDecodeError as exc:
+    except TOML_ERRORS as exc:
         raise ConfigError(f"schema {schema}: invalid TOML: {exc}") from exc
     _need(data.get("schema") == schema, "schema", f"expected {schema!r}")
     return data

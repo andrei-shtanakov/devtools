@@ -110,6 +110,11 @@ def test_install_bad_toml(tmp_path: Path) -> None:
         parse_install("this is = = not toml")
 
 
+def test_install_deeply_nested_toml_is_config_error() -> None:
+    with pytest.raises(ConfigError, match="invalid TOML"):
+        parse_install("a = " + "[" * 200_000 + "]" * 200_000)
+
+
 def test_install_missing_file(tmp_path: Path) -> None:
     with pytest.raises(ConfigError):
         load_install(tmp_path / "absent.toml")

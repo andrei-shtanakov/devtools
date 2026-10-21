@@ -178,6 +178,12 @@ def test_unknown_profile_and_invalid_toml() -> None:
         parse_profile(b"not = [toml", "core")
 
 
+def test_deeply_nested_toml_is_a_named_refusal() -> None:
+    deep = b"a = " + b"[" * 200_000 + b"]" * 200_000
+    with pytest.raises(ManifestError, match="invalid TOML"):
+        parse_profile(deep, "core")
+
+
 def test_extends_cycle_and_depth() -> None:
     cyc = _fix() + '\n[df.profiles.a]\nextends = "b"\nmembers = []\n'
     cyc += '[df.profiles.b]\nextends = "a"\nmembers = []\n'
