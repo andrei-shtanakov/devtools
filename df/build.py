@@ -54,7 +54,7 @@ class BuildPlan:
 
 def build_env(plan: BuildPlan, layout: Layout) -> dict[str, str]:
     """The whole environment of a build command; nothing is inherited."""
-    tools = (str(p.parent) for p in (plan.uv, plan.git, plan.tar))
+    tools = (str(p.parent) for p in (plan.git, plan.tar, plan.uv))
     dirs = dict.fromkeys([*tools, *_SYSTEM_PATH])
     return {
         "HOME": str(layout.build_home),
@@ -65,19 +65,42 @@ def build_env(plan: BuildPlan, layout: Layout) -> dict[str, str]:
         "UV_LINK_MODE": "copy",
         "UV_NO_CONFIG": "1",
         "UV_PYTHON_PREFERENCE": "only-managed",
+        "XDG_CONFIG_HOME": str(build_work_dir(layout, plan.release_id) / "config"),
+        "GIT_ATTR_NOSYSTEM": "1",
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_TERMINAL_PROMPT": "0",
     }
 
 
+def build_work_dir(layout: Layout, release_id: str) -> Path:
+    """The build scratch tree `build_home/tmp/<release_id>`."""
+    return layout.build_home / "tmp" / release_id
+
+
+def build_src_dir(layout: Layout, release_id: str, repo: str) -> Path:
+    """The build copy of `repo`: `build_work_dir/src/<repo>`.
+
+    Task 7/10 lock resolution reads the build copy through this function.
+    """
+    return build_work_dir(layout, release_id) / "src" / repo
+
+
+def python_key(python: str, platform: PlatformName) -> str:
+    """The exact managed-Python key `cpython-<python>-<triple>`.
+
+    Passed to `uv python install`, so uv cannot pick another build (such as
+    an x86_64_v3 one) and `python_path` always matches the install.
+    """
+    return f"cpython-{python}-{PYTHON_TRIPLES[platform]}"
+
+
 def python_path(plan: BuildPlan) -> Path:
     """The interpreter `uv python install` places under the release."""
-    triple = PYTHON_TRIPLES[detect_platform()]
     version = plan.profile.python
     short = ".".join(version.split(".")[:2])
-    name = f"cpython-{version}-{triple}"
-    return plan.release_dir / "python" / name / "bin" / f"python{short}"
+    key = python_key(version, detect_platform())
+    return plan.release_dir / "python" / key / "bin" / f"python{short}"
 
 
 def build_commands(plan: BuildPlan, layout: Layout) -> list[tuple[str, list[str]]]:
@@ -134,13 +157,15 @@ def _check_plan(plan: BuildPlan, layout: Layout) -> None:
 
 def _steps(plan: BuildPlan, layout: Layout) -> Iterator[Step]:
     _check_plan(plan, layout)
-    work = layout.build_home / "tmp" / plan.release_id
+    work = build_work_dir(layout, plan.release_id)
     repos = plan.profile.repos
     git, tar, uv = str(plan.git), str(plan.tar), str(plan.uv)
-    yield "clean", [_RM, "-rf", "--", str(work)], {}
+    cache = str(layout.build_home / "cache")
+    yield "clean", [_RM, "-rf", "--", str(work), cache], {}
     targets = [
         str(work / "git"),
-        *(str(work / "src" / r.name) for r in repos),
+        str(work / "config"),
+        *(str(build_src_dir(layout, plan.release_id, r.name)) for r in repos),
         *(str(plan.release_dir / "src" / r.name) for r in repos),
     ]
     yield "mkdir", [_MKDIR, "-p", *targets], {}
@@ -156,15 +181,20 @@ def _steps(plan: BuildPlan, layout: Layout) -> Iterator[Step]:
         yield f"archive:{r.name}", pack, {}
         final = str(plan.release_dir / "src" / r.name)
         yield f"extract:{r.name}", [tar, "-xf", archive, "-C", final], {}
-        build = str(work / "src" / r.name)
+        build = str(build_src_dir(layout, plan.release_id, r.name))
         yield f"extract-build:{r.name}", [tar, "-xf", archive, "-C", build], {}
-    yield "python", [uv, "python", "install", "--no-bin", plan.profile.python], {}
+    key = python_key(plan.profile.python, detect_platform())
+    yield "python", [uv, "python", "install", "--no-bin", key], {}
     interpreter = str(python_path(plan))
     for r in repos:
         venv = {"UV_PROJECT_ENVIRONMENT": str(plan.release_dir / "venv" / r.name)}
         groups = [a for g in r.groups for a in ("--group", g)]
         sync = [uv, "sync", "--locked", "--no-editable", "--no-default-groups"]
-        sync += [*groups, "--project", str(work / "src" / r.name)]
+        sync += [
+            *groups,
+            "--project",
+            str(build_src_dir(layout, plan.release_id, r.name)),
+        ]
         yield f"sync:{r.name}", [*sync, "--python", interpreter], venv
     yield "uv-version", [uv, "--version"], {}
 

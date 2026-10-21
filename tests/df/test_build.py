@@ -11,12 +11,21 @@ from typing import Any
 import pytest
 
 from df import build
-from df.build import BuildPlan, build_commands, build_env, python_path, run_build
+from df.build import (
+    BuildPlan,
+    build_commands,
+    build_env,
+    build_src_dir,
+    build_work_dir,
+    python_key,
+    python_path,
+    run_build,
+)
 from df.config import Account, dump_accounts
 from df.journal import StepFailed
 from df.manifest import Profile, RepoPin
 from df.paths import Layout
-from df.platform import BUILD_USER, RunResult
+from df.platform import BUILD_USER, PlatformName, RunResult
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
@@ -134,18 +143,18 @@ def test_commands_exact_order_and_flags(plan: BuildPlan, layout: Layout) -> None
         ]
 
     expected = [
-        ("clean", ["/bin/rm", "-rf", "--", str(work)]),
+        ("clean", ["/bin/rm", "-rf", "--", str(work), str(layout.build_home / "cache")]),
         (
             "mkdir",
             [
-                "/bin/mkdir", "-p", f"{work}/git",
+                "/bin/mkdir", "-p", f"{work}/git", f"{work}/config",
                 f"{work}/src/devtools", f"{work}/src/steward",
                 f"{rel}/src/devtools", f"{rel}/src/steward",
             ],
         ),
         *repo_steps("devtools", "https://x/devtools.git", SHA_A),
         *repo_steps("steward", "https://x/steward.git", SHA_B),
-        ("python", [uv, "python", "install", "--no-bin", "3.12.7"]),
+        ("python", [uv, "python", "install", "--no-bin", "cpython-3.12.7-linux-x86_64-gnu"]),
         sync("devtools", ["governance"]),
         sync("steward", []),
         ("uv-version", [uv, "--version"]),
@@ -212,7 +221,9 @@ def test_build_env_has_no_inherited_vars(
     env = build_env(plan, layout)
     assert "GH_TOKEN" not in env
     assert env["HOME"] == str(layout.build_home)
-    assert env["PATH"] == "/opt/tools:/usr/bin:/bin"
+    assert env["PATH"] == "/usr/bin:/opt/tools:/bin"
+    assert env["XDG_CONFIG_HOME"] == str(layout.build_home / "tmp/rel1/config")
+    assert env["GIT_ATTR_NOSYSTEM"] == "1"
     assert env["UV_CACHE_DIR"] == str(layout.build_home / "cache")
     assert env["UV_PYTHON_INSTALL_DIR"] == str(plan.release_dir / "python")
     assert env["GIT_CONFIG_GLOBAL"] == "/dev/null"
@@ -307,3 +318,33 @@ def test_invalid_release_id_refused_before_any_command(
     assert stub.calls == []
     with pytest.raises(StepFailed):
         build_commands(bad, layout)
+
+
+@pytest.mark.parametrize("name", ["macos-arm64", "linux-x86_64"])
+def test_python_install_argv_matches_python_path(
+    plan: BuildPlan, layout: Layout, monkeypatch: pytest.MonkeyPatch, name: PlatformName
+) -> None:
+    monkeypatch.setattr(build, "detect_platform", lambda: name)
+    install = dict(build_commands(plan, layout))
+    key = install["python"][-1]
+    assert key == python_key("3.12.7", name)
+    assert python_path(plan).parent.parent.name == key
+
+
+def test_every_call_gets_exactly_build_env(plan: BuildPlan, layout: Layout) -> None:
+    stub = make_stub(plan, layout)
+    run_build(plan, layout, runner=stub)
+    base = build_env(plan, layout)
+    for call in stub.calls:
+        label = stub.label_of(call["argv"])
+        extra = {}
+        if label.startswith("sync:"):
+            venv = plan.release_dir / "venv" / label.removeprefix("sync:")
+            extra = {"UV_PROJECT_ENVIRONMENT": str(venv)}
+        assert call["env"] == base | extra
+
+
+def test_work_and_src_dir_helpers(plan: BuildPlan, layout: Layout) -> None:
+    work = build_work_dir(layout, "rel1")
+    assert work == layout.build_home / "tmp" / "rel1"
+    assert build_src_dir(layout, "rel1", "steward") == work / "src" / "steward"
