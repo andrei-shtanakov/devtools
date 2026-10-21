@@ -10,7 +10,7 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from df.config import load_accounts
+from df.config import ConfigError, load_accounts
 from df.journal import StepFailed
 from df.manifest import Profile
 from df.paths import Layout
@@ -81,7 +81,11 @@ def python_path(plan: BuildPlan) -> Path:
 
 
 def build_commands(plan: BuildPlan, layout: Layout) -> list[tuple[str, list[str]]]:
-    """`(label, argv)` in execution order (pure)."""
+    """`(label, argv)` in execution order.
+
+    Deterministic, but reads the host platform (`python_path` calls
+    `detect_platform()`). A plan whose paths do not match `layout` is refused.
+    """
     return [(label, argv) for label, argv, _env in _steps(plan, layout)]
 
 
@@ -93,6 +97,7 @@ def run_build(plan: BuildPlan, layout: Layout, *, runner: Runner = run_as) -> st
     Returns the declared uv version (stripped `uv --version` stdout). Effects:
     `run_as(df-build)+` (`releases/<id>`, `build_home/tmp`, `build_home/cache`).
     """
+    _check_plan(plan, layout)
     _check_user(layout)
     env = build_env(plan, layout)
     declared = ""
@@ -113,7 +118,22 @@ def run_build(plan: BuildPlan, layout: Layout, *, runner: Runner = run_as) -> st
     return declared
 
 
+def _check_plan(plan: BuildPlan, layout: Layout) -> None:
+    """The release id is valid and `release_dir` is its registered path."""
+    try:
+        expected = layout.release_dir(plan.release_id)
+    except ConfigError as exc:
+        raise StepFailed("build", str(exc)) from exc
+    if plan.release_dir != expected:
+        raise StepFailed(
+            "build",
+            f"release_dir {plan.release_dir}, для {plan.release_id} "
+            f"ожидается {expected}",
+        )
+
+
 def _steps(plan: BuildPlan, layout: Layout) -> Iterator[Step]:
+    _check_plan(plan, layout)
     work = layout.build_home / "tmp" / plan.release_id
     repos = plan.profile.repos
     git, tar, uv = str(plan.git), str(plan.tar), str(plan.uv)
@@ -138,7 +158,7 @@ def _steps(plan: BuildPlan, layout: Layout) -> Iterator[Step]:
         yield f"extract:{r.name}", [tar, "-xf", archive, "-C", final], {}
         build = str(work / "src" / r.name)
         yield f"extract-build:{r.name}", [tar, "-xf", archive, "-C", build], {}
-    yield "python", [uv, "python", "install", plan.profile.python], {}
+    yield "python", [uv, "python", "install", "--no-bin", plan.profile.python], {}
     interpreter = str(python_path(plan))
     for r in repos:
         venv = {"UV_PROJECT_ENVIRONMENT": str(plan.release_dir / "venv" / r.name)}

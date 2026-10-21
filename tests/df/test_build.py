@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +66,7 @@ class Stub:
         self.plan = plan
         self.replies = replies
         self.calls: list[dict[str, Any]] = []
+        self.labels_by_argv: dict[tuple[str, ...], str] = {}
 
     def __call__(self, user: str, argv: Sequence[str], **kw: Any) -> RunResult:
         self.calls.append({"user": user, "argv": list(argv), **kw})
@@ -81,8 +83,6 @@ class Stub:
 
     def label_of(self, argv: list[str]) -> str:
         return self.labels_by_argv[tuple(argv)]
-
-    labels_by_argv: dict[tuple[str, ...], str] = {}
 
 
 def make_stub(
@@ -145,7 +145,7 @@ def test_commands_exact_order_and_flags(plan: BuildPlan, layout: Layout) -> None
         ),
         *repo_steps("devtools", "https://x/devtools.git", SHA_A),
         *repo_steps("steward", "https://x/steward.git", SHA_B),
-        ("python", [uv, "python", "install", "3.12.7"]),
+        ("python", [uv, "python", "install", "--no-bin", "3.12.7"]),
         sync("devtools", ["governance"]),
         sync("steward", []),
         ("uv-version", [uv, "--version"]),
@@ -279,3 +279,31 @@ def test_build_refused_if_identity_differs(
         run_build(plan, layout, runner=stub)
     assert err.value.step == "build"
     assert stub.calls == []
+
+
+def test_release_dir_mismatch_refused_before_any_command(
+    plan: BuildPlan, layout: Layout
+) -> None:
+    bad = replace(plan, release_dir=layout.releases / "other")
+    stub = make_stub(plan, layout)
+    with pytest.raises(StepFailed) as err:
+        run_build(bad, layout, runner=stub)
+    assert err.value.step == "build"
+    assert str(bad.release_dir) in err.value.detail
+    assert str(plan.release_dir) in err.value.detail
+    assert stub.calls == []
+    with pytest.raises(StepFailed):
+        build_commands(bad, layout)
+
+
+def test_invalid_release_id_refused_before_any_command(
+    plan: BuildPlan, layout: Layout
+) -> None:
+    bad = replace(plan, release_id="..")
+    stub = make_stub(plan, layout)
+    with pytest.raises(StepFailed) as err:
+        run_build(bad, layout, runner=stub)
+    assert err.value.step == "build"
+    assert stub.calls == []
+    with pytest.raises(StepFailed):
+        build_commands(bad, layout)
