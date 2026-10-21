@@ -2905,3 +2905,13 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 - [ ] Часть C — путь брифа `review/v1` (Task 17) @owner:github:andrei-shtanakov @id:approval-act-brief @epic:eco.dark-factory @blocked_by:todo://discovery/approve-review-v1 @blocked_by:todo://devtools/approval-act-node
 - [ ] Часть D — живая приёмка M3 (Task 18): стенд, затем реальный продукт; разрушительные сценарии — только на стенде по условиям Task 18 @owner:github:andrei-shtanakov @id:approval-act-acceptance-m3 @epic:eco.dark-factory @blocked_by:todo://devtools/approval-act-brief
 - [ ] Часть E — `review_v1` по умолчанию (Task 19), только после пройденной M3 @owner:github:andrei-shtanakov @id:approval-act-default-m4 @epic:eco.dark-factory @blocked_by:todo://devtools/approval-act-acceptance-m3
+
+## Установщик df (команда darkfactory), спека B
+
+> Спека `docs/superpowers/specs/2026-10-13-df-installer-design.md` (rev 8), четыре этапа со
+> своими планами. Этап 1 — план `docs/superpowers/plans/2026-10-16-df-installer-stage1.md`
+> (принят владельцем 21.10, без r19). Исполнение —
+> subagent-driven; Task 1 (authority-root для `df/`, `tests/df/`) первой и с человеческим
+> мержем.
+
+- [ ] Установщик df (команда darkfactory), этап 1 (конфигурация, установка, модели): план `docs/superpowers/plans/2026-10-16-df-installer-stage1.md` @owner:github:andrei-shtanakov @id:df-installer-stage1 @epic:eco.dark-factory
