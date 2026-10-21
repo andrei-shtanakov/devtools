@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import itertools
 import os
 import plistlib
@@ -557,6 +558,12 @@ def test_linked_libraries_real_macho() -> None:
 
 
 POLICY_BLOB = plistlib.dumps({"creationTime": 1.0}).decode()
+#: Attributes macOS stores as native (`dscl -plist . -read /Users/_sentinel`).
+NATIVE_ATTRS = frozenset({"IsHidden"})
+
+
+def _ds_prefix(attr: str) -> str:
+    return "dsAttrTypeNative:" if attr in NATIVE_ATTRS else "dsAttrTypeStandard:"
 
 
 @dataclass
@@ -595,7 +602,7 @@ class World:
         record = self._table(path).get(path.rsplit("/", 1)[1])
         if record is None:
             return RunResult(56, b"", b"DS Error: -14136 (eDSRecordNotFound)", True)
-        data = {f"dsAttrTypeStandard:{k}": [v] for k, v in record.items()}
+        data = {f"{_ds_prefix(k)}{k}": [v] for k, v in record.items()}
         data["dsAttrTypeNative:accountPolicyData"] = [POLICY_BLOB]
         return ok(plistlib.dumps(data))
 
@@ -1613,10 +1620,28 @@ class FakeFs:
         return value
 
     def _node(self, path: os.PathLike[str] | str) -> tuple[int, int, str | None]:
+        """Like the kernel: links in the middle are followed, `..` is physical."""
         try:
-            return self.nodes[os.fspath(path)]
+            return self.nodes[self._resolve(os.fspath(path))]
         except KeyError:
             raise FileNotFoundError(path) from None
+
+    def _resolve(self, text: str) -> str:
+        parts = Path(text).parts
+        current = "/"
+        for i, part in enumerate(parts[1:], start=1):
+            if part == "..":
+                current = os.path.dirname(current)
+                continue
+            current = os.path.join(current, part)
+            node = self.nodes.get(current)
+            if node is None:
+                raise KeyError(current)
+            if node[2] is not None and i < len(parts) - 1:
+                link = node[2]
+                base = "/" if link.startswith("/") else os.path.dirname(current)
+                current = self._resolve(os.path.join(base, link))
+        return current
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(plat, "_lstat", self.lstat)
@@ -1722,7 +1747,9 @@ def test_approved_cli_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     fs.install(monkeypatch)
     heads = {"/usr/local/bin/script": b"#!/usr/local/bin/tool -x\n"}
     deps: dict[str, LibDeps | None] = {"/usr/local/bin/tool": None}
-    monkeypatch.setattr(plat, "_peek", lambda p, _n: heads.get(str(p), b"\0\0\0\0"))
+    monkeypatch.setattr(
+        plat, "_read_regular", lambda p, _n: heads.get(str(p), b"\0\0\0\0")
+    )
     monkeypatch.setattr(plat, "linked_libraries", lambda p: deps.get(str(p)))
     cli = {"tool": Path("/usr/local/bin/tool"), "script": Path("/usr/local/bin/script")}
     assert plat.approved_cli_problems(cli, "macos-arm64") == []
@@ -1751,7 +1778,7 @@ def test_approved_cli_native_dependencies(monkeypatch: pytest.MonkeyPatch) -> No
     fs.nodes["/usr/local/lib"] = (DIR | 0o755, 0, None)
     fs.nodes["/usr/local/lib/liby.dylib"] = (REG | 0o644, 0, None)
     fs.install(monkeypatch)
-    monkeypatch.setattr(plat, "_peek", lambda _p, _n: b"\xcf\xfa\xed\xfe")
+    monkeypatch.setattr(plat, "_read_regular", lambda _p, _n: b"\xcf\xfa\xed\xfe")
     found = {
         "deps": LibDeps(
             ("/usr/lib/libSystem.B.dylib", "@rpath/liby.dylib"),
@@ -1849,7 +1876,7 @@ def _fake_libs(monkeypatch: pytest.MonkeyPatch, table: dict[str, LibDeps]) -> li
         return table.get(str(path))
 
     monkeypatch.setattr(plat, "linked_libraries", linked)
-    monkeypatch.setattr(plat, "_peek", lambda _p, _n: b"\0\0\0\0")
+    monkeypatch.setattr(plat, "_read_regular", lambda _p, _n: b"\0\0\0\0")
     return calls
 
 
@@ -2085,3 +2112,379 @@ def test_cleanup_build_home_refuses_glob(
     with pytest.raises(StepFailed) as info:
         plat.cleanup_build_home(layout, rel)
     assert info.value.step == "verify"
+
+
+# --- search-directory rule R25 (fix round 2) ----------------------------------------
+
+
+def _with_files(
+    monkeypatch: pytest.MonkeyPatch, fs: FakeFs, files: dict[str, bytes]
+) -> None:
+    """Fake `_read_regular` / `_glob` over `fs` (non-binary files by default)."""
+
+    def read(path: Path, limit: int) -> bytes:
+        mode = fs.lstat(path).st_mode
+        if not stat.S_ISREG(mode):
+            raise StepFailed("cli", f"{path}: не обычный файл")
+        return files.get(str(path), b"\0\0\0\0")[:limit]
+
+    def globber(pattern: str) -> list[str]:
+        return [n for n in fs.nodes if fnmatch.fnmatchcase(n, pattern)]
+
+    monkeypatch.setattr(plat, "_read_regular", read)
+    monkeypatch.setattr(plat, "_glob", globber)
+
+
+def test_shadowing_copy_in_untrusted_ld_so_conf_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fs = _closure_fs(
+        {
+            "/etc": (DIR | 0o755, 0, None),
+            "/etc/ld.so.conf": (LIB, 0, None),
+            "/etc/ld.so.conf.d": (DIR | 0o755, 0, None),
+            "/etc/ld.so.conf.d/libc.conf": (LIB, 0, None),
+            "/usr/local/lib": (DIR | 0o2775, 0, None),  # Debian root:staff 2775
+            "/usr/local/lib/libq.so.1": (LIB, 0, None),
+            "/usr/lib": (DIR | 0o755, 0, None),
+            "/usr/lib/x86_64-linux-gnu": (DIR | 0o755, 0, None),
+            "/usr/lib/x86_64-linux-gnu/libq.so.1": (LIB, 0, None),
+        }
+    )
+    fs.install(monkeypatch)
+    _with_files(
+        monkeypatch,
+        fs,
+        {
+            "/etc/ld.so.conf": b"include /etc/ld.so.conf.d/*.conf\n",
+            "/etc/ld.so.conf.d/libc.conf": b"# libc default\n/usr/local/lib\n",
+        },
+    )
+    monkeypatch.setattr(
+        plat,
+        "linked_libraries",
+        lambda p: (
+            LibDeps(("libq.so.1",), ()) if str(p) == "/usr/local/bin/tool" else None
+        ),
+    )
+    problems = plat.approved_cli_problems(TOOL, "linux-x86_64")
+    assert "tool: /usr/local/lib: запись для группы или всех" in problems
+
+
+def test_inherited_rpath_directory_is_searched(monkeypatch: pytest.MonkeyPatch) -> None:
+    fs = _closure_fs(
+        {
+            "/usr/local/lib/liba.so": (LIB, 0, None),
+            "/usr/local/lib/libb.so": (LIB, 0, None),
+            "/opt/evil/libc.so": (LIB, 501, None),
+        }
+    )
+    fs.install(monkeypatch)
+    _with_files(monkeypatch, fs, {})
+    calls: list[str] = []
+    table = {
+        "/usr/local/bin/tool": LibDeps(("liba.so",), ("/usr/local/lib",)),
+        "/usr/local/lib/liba.so": LibDeps(("libb.so",), ("/opt/evil",)),
+        "/usr/local/lib/libb.so": LibDeps(("libc.so",), ()),  # finds it via liba
+    }
+
+    def linked(path: Path) -> LibDeps | None:
+        calls.append(str(path))
+        return table.get(str(path))
+
+    monkeypatch.setattr(plat, "linked_libraries", linked)
+    problems = plat.approved_cli_problems(TOOL, "linux-x86_64")
+    assert "tool: /opt/evil/libc.so: владелец uid 501, не root" in problems
+    assert "/opt/evil/libc.so" in calls
+
+
+@pytest.mark.parametrize("layout_kind", ["file-link", "dir-link"])
+def test_origin_through_link_checks_found_through_directory(
+    monkeypatch: pytest.MonkeyPatch, layout_kind: str
+) -> None:
+    nodes: dict[str, tuple[int, int, str | None]] = {
+        "/opt/real": (DIR | 0o755, 0, None),
+        "/opt/real/liba.so": (LIB, 0, None),
+    }
+    if layout_kind == "file-link":
+        # glibc: $ORIGIN of a library = directory of the name it was found by
+        nodes["/usr/local/lib/liba.so"] = (LNK | 0o777, 0, "/opt/real/liba.so")
+        nodes["/usr/local/lib/plugins"] = (DIR | 0o755, 501, None)
+        rpath, bad = "$ORIGIN/plugins", "/usr/local/lib/plugins"
+    else:
+        # `..` after a directory link is physical: /usr/local/lib/pkg/.. = /opt
+        nodes["/usr/local/lib/pkg"] = (LNK | 0o777, 0, "/opt/real")
+        nodes["/opt/plugins"] = (DIR | 0o755, 501, None)
+        rpath, bad = "$ORIGIN/../plugins", "/opt/plugins"
+    fs = _closure_fs(nodes)
+    fs.install(monkeypatch)
+    _with_files(monkeypatch, fs, {})
+    found_dir = "/usr/local/lib" if layout_kind == "file-link" else "/usr/local/lib/pkg"
+    table = {
+        "/usr/local/bin/tool": LibDeps(("liba.so",), (found_dir,)),
+        "/opt/real/liba.so": LibDeps((), (rpath,)),
+    }
+    monkeypatch.setattr(plat, "linked_libraries", lambda p: table.get(str(p)))
+    problems = plat.approved_cli_problems(TOOL, "linux-x86_64")
+    assert f"tool: {bad}: владелец uid 501, не root" in problems, problems
+
+
+@pytest.mark.parametrize(
+    "deps,needle",
+    [
+        (LibDeps(("libx.so",), ("$LIB/x",)), "токен не моделируется"),
+        (LibDeps(("libx.so",), ("/opt/${PLATFORM}",)), "токен не моделируется"),
+        (LibDeps(("@rpath/libx.dylib",), ()), "@rpath без путей поиска"),
+        (LibDeps(("@foo/libx.dylib",), ()), "префикс не поддерживается"),
+        (LibDeps(("libx.so",), ("",)), "не разрешён"),
+        (LibDeps(("lib/libx.so",), ()), "не разрешён"),
+    ],
+    ids=["LIB", "PLATFORM", "rpath-none", "unknown-at", "empty-rpath", "relative"],
+)
+def test_unmodelled_forms_are_problems(
+    monkeypatch: pytest.MonkeyPatch, deps: LibDeps, needle: str
+) -> None:
+    fs = _closure_fs({})
+    fs.install(monkeypatch)
+    _with_files(monkeypatch, fs, {})
+    monkeypatch.setattr(
+        plat,
+        "linked_libraries",
+        lambda p: deps if str(p) == "/usr/local/bin/tool" else None,
+    )
+    problems = plat.approved_cli_problems(TOOL, "linux-x86_64")
+    assert any(needle in p for p in problems), problems
+
+
+@pytest.mark.parametrize(
+    "conf",
+    [b"hwcap 1 nosegneg\n", b"/usr/lib=libc5\n", b"lib/relative\n", b"\xff\n"],
+    ids=["hwcap", "typed", "relative", "not-utf8"],
+)
+def test_unparsable_ld_so_conf_is_a_problem(
+    monkeypatch: pytest.MonkeyPatch, conf: bytes
+) -> None:
+    fs = _closure_fs(
+        {"/etc": (DIR | 0o755, 0, None), "/etc/ld.so.conf": (LIB, 0, None)}
+    )
+    fs.install(monkeypatch)
+    _with_files(monkeypatch, fs, {"/etc/ld.so.conf": conf})
+    monkeypatch.setattr(
+        plat,
+        "linked_libraries",
+        lambda p: LibDeps((), ()) if str(p) == "/usr/local/bin/tool" else None,
+    )
+    problems = plat.approved_cli_problems(TOOL, "linux-x86_64")
+    assert any(p.startswith("tool: /etc/ld.so.conf:") for p in problems), problems
+
+
+def test_untrusted_ld_so_conf_include_is_a_problem(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fs = _closure_fs(
+        {
+            "/etc": (DIR | 0o755, 0, None),
+            "/etc/ld.so.conf": (LIB, 0, None),
+            "/etc/ld.so.conf.d": (DIR | 0o755, 0, None),
+            "/etc/ld.so.conf.d/x.conf": (LIB | 0o666, 0, None),
+        }
+    )
+    fs.install(monkeypatch)
+    _with_files(
+        monkeypatch,
+        fs,
+        {
+            "/etc/ld.so.conf": b"include ld.so.conf.d/*.conf\n",
+            "/etc/ld.so.conf.d/x.conf": b"",
+        },
+    )
+    monkeypatch.setattr(
+        plat,
+        "linked_libraries",
+        lambda p: LibDeps((), ()) if str(p) == "/usr/local/bin/tool" else None,
+    )
+    problems = plat.approved_cli_problems(TOOL, "linux-x86_64")
+    assert "tool: /etc/ld.so.conf.d/x.conf: запись для группы или всех" in problems
+
+
+@pytest.mark.parametrize("kind", [DIR | 0o755, stat.S_IFIFO | 0o644])
+def test_candidate_not_regular_is_named_problem(
+    monkeypatch: pytest.MonkeyPatch, kind: int
+) -> None:
+    fs = _closure_fs({"/usr/local/lib/libx.dylib": (kind, 0, None)})
+    fs.install(monkeypatch)
+    _with_files(monkeypatch, fs, {})
+    calls = []
+
+    def linked(path: Path) -> LibDeps | None:
+        calls.append(str(path))
+        if str(path) == "/usr/local/bin/tool":
+            return LibDeps(("@rpath/libx.dylib",), ("/usr/local/lib",))
+        return None
+
+    monkeypatch.setattr(plat, "linked_libraries", linked)
+    problems = plat.approved_cli_problems(TOOL, "macos-arm64")
+    assert "tool: /usr/local/lib/libx.dylib: не обычный файл" in problems
+    assert calls == ["/usr/local/bin/tool"]  # the walk stops at it
+
+
+@pytest.mark.parametrize("kind", ["dir", "fifo"])
+def test_read_regular_refuses_dir_and_fifo(tmp_path: Path, kind: str) -> None:
+    target = tmp_path / "libx.dylib"
+    if kind == "dir":
+        target.mkdir()
+    else:
+        os.mkfifo(target)
+    with pytest.raises(StepFailed, match="не обычный файл"):
+        plat.linked_libraries(target)
+
+
+def test_untrusted_inspection_tools_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    fs = _good_fs()
+    fs.nodes.update(
+        {
+            "/usr/bin": (DIR | 0o755, 0, None),
+            "/usr/bin/xcrun": (REG | 0o755, 0, None),
+            "/usr/bin/readelf": (REG | 0o755, 501, None),
+            "/Applications": (DIR | 0o775, 0, None),
+            "/Applications/Xcode.app": (DIR | 0o755, 501, None),
+            "/Applications/Xcode.app/otool": (REG | 0o755, 501, None),
+        }
+    )
+    fs.install(monkeypatch)
+    xcrun = ok(b"/Applications/Xcode.app/otool\n")
+    seen: list[list[str]] = []
+
+    def run(argv: Sequence[str], **_kw: object) -> RunResult:
+        seen.append(list(argv))
+        return xcrun
+
+    monkeypatch.setattr(plat, "run_command", run)
+    for magic in (b"\xcf\xfa\xed\xfe", b"\x7fELF"):
+        monkeypatch.setattr(plat, "_read_regular", lambda _p, _n, m=magic: m)
+        with pytest.raises(StepFailed, match="не доверен"):
+            plat.linked_libraries(Path("/x"))
+    assert seen == [["/usr/bin/xcrun", "--find", "otool"]]  # nothing inspected
+
+
+def test_trusted_otool_is_run_by_its_real_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    fs = _good_fs()
+    fs.nodes.update(
+        {
+            "/usr/bin": (DIR | 0o755, 0, None),
+            "/usr/bin/xcrun": (REG | 0o755, 0, None),
+            "/Library": (DIR | 0o755, 0, None),
+            "/Library/clt": (DIR | 0o755, 0, None),
+            "/Library/clt/otool": (REG | 0o755, 0, None),
+        }
+    )
+    fs.install(monkeypatch)
+    seen: list[list[str]] = []
+
+    def run(argv: Sequence[str], **_kw: object) -> RunResult:
+        seen.append(list(argv))
+        if argv[0] == "/usr/bin/xcrun":
+            return ok(b"/Library/clt/otool\n")
+        return ok(b"/x:\n" if argv[1] == "-L" else b"")
+
+    monkeypatch.setattr(plat, "run_command", run)
+    monkeypatch.setattr(plat, "_read_regular", lambda _p, _n: b"\xcf\xfa\xed\xfe")
+    assert plat.linked_libraries(Path("/x")) == LibDeps((), ())
+    assert [a[0] for a in seen[1:]] == ["/Library/clt/otool", "/Library/clt/otool"]
+
+
+def test_parse_dscl_native_intended_attribute() -> None:
+    data = {
+        "dsAttrTypeNative:IsHidden": ["1"],
+        "dsAttrTypeNative:accountPolicyData": ["<plist/>"],
+        "dsAttrTypeStandard:UniqueID": ["401"],
+    }
+    assert plat.parse_dscl(plistlib.dumps(data)) == {"IsHidden": "1", "UniqueID": "401"}
+    data["dsAttrTypeStandard:IsHidden"] = ["0"]
+    with pytest.raises(StepFailed, match="два разных значения IsHidden"):
+        plat.parse_dscl(plistlib.dumps(data))
+
+
+@pytest.mark.parametrize("case", ["resolved-dir", "physical-dotdot"])
+def test_origin_variants_each_checked(
+    monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """Both `$ORIGIN` readings are checked, and `..` is physical, not lexical."""
+    nodes: dict[str, tuple[int, int, str | None]] = {
+        "/c": (DIR | 0o755, 0, None),
+        "/c/lib.so": (LIB, 0, None),
+    }
+    if case == "resolved-dir":
+        # found as /usr/local/lib/lib.so -> /c/lib.so; only /c/plugins is bad
+        nodes["/usr/local/lib/lib.so"] = (LNK | 0o777, 0, "/c/lib.so")
+        nodes["/usr/local/lib/plugins"] = (DIR | 0o755, 0, None)
+        nodes["/c/plugins"] = (DIR | 0o755, 501, None)
+        search, rpath, bad = "/usr/local/lib", "$ORIGIN/plugins", "/c/plugins"
+    else:
+        # found as /a/link/lib.so, /a/link -> /d/e, lib.so -> /c/lib.so:
+        # $ORIGIN/../x is /d/x physically, /a/x lexically, /x from /c
+        nodes.update(
+            {
+                "/a": (DIR | 0o755, 0, None),
+                "/a/link": (LNK | 0o777, 0, "/d/e"),
+                "/d": (DIR | 0o755, 0, None),
+                "/d/e": (DIR | 0o755, 0, None),
+                "/d/e/lib.so": (LNK | 0o777, 0, "/c/lib.so"),
+                "/d/x": (DIR | 0o755, 501, None),
+            }
+        )
+        search, rpath, bad = "/a/link", "$ORIGIN/../x", "/d/x"
+    fs = _closure_fs(nodes)
+    fs.install(monkeypatch)
+    _with_files(monkeypatch, fs, {})
+    table = {
+        "/usr/local/bin/tool": LibDeps(("lib.so",), (search,)),
+        "/c/lib.so": LibDeps((), (rpath,)),
+    }
+    monkeypatch.setattr(plat, "linked_libraries", lambda p: table.get(str(p)))
+    problems = plat.approved_cli_problems(TOOL, "linux-x86_64")
+    assert f"tool: {bad}: владелец uid 501, не root" in problems, problems
+
+
+def test_dotdot_under_system_dir_is_walked(monkeypatch: pytest.MonkeyPatch) -> None:
+    fs = _closure_fs(
+        {
+            "/usr/lib": (DIR | 0o755, 0, None),
+            "/usr/lib/lnk": (LNK | 0o777, 0, "/opt/evil/sub"),
+            "/opt/evil/sub": (DIR | 0o755, 501, None),
+        }
+    )
+    fs.install(monkeypatch)
+    _with_files(monkeypatch, fs, {})
+    deps = LibDeps((), ("/usr/lib/lnk/../x",))
+    monkeypatch.setattr(
+        plat,
+        "linked_libraries",
+        lambda p: deps if str(p) == "/usr/local/bin/tool" else None,
+    )
+    problems = plat.approved_cli_problems(TOOL, "linux-x86_64")
+    assert "tool: /opt/evil: владелец uid 501, не root" in problems, problems
+
+
+def test_candidate_lstat_error_is_not_bare_oserror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fs = _closure_fs({})
+    fs.install(monkeypatch)
+    _with_files(monkeypatch, fs, {})
+    real = fs.lstat
+
+    def lstat(path: os.PathLike[str] | str) -> SimpleNamespace:
+        if "loop" in os.fspath(path):
+            raise OSError(62, "Too many levels of symbolic links")
+        return real(path)
+
+    monkeypatch.setattr(plat, "_lstat", lstat)
+    deps = LibDeps(("libx.so",), ("/usr/local/loop",))
+    monkeypatch.setattr(
+        plat,
+        "linked_libraries",
+        lambda p: deps if str(p) == "/usr/local/bin/tool" else None,
+    )
+    problems = plat.approved_cli_problems(TOOL, "linux-x86_64")
+    assert any("/usr/local/loop" in p for p in problems), problems
