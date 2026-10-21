@@ -1471,7 +1471,6 @@ def test_cleanup_tree_root_ops_audited(
     (tree / "sub").mkdir(parents=True)
     (tree / "sub" / "f").write_bytes(b"x")
     _AUDIT["seen"] = []
-    root_paths: list[str] = []
 
     def run_as(user: str, argv: Sequence[str], **_kw: Any) -> RunResult:
         return RunResult(1, b"", b"", True)  # cleaner fails -> quarantine path
@@ -1490,7 +1489,6 @@ def test_cleanup_tree_root_ops_audited(
         for event, args in _AUDIT["seen"]:
             paths = [a for a in args if isinstance(a, (str, bytes, os.PathLike))]
             text = [os.fsdecode(p) for p in paths]
-            root_paths += text
             assert not any(t.startswith(inside) for t in text), (event, args)
             if event in ("os.rmdir", "os.rename", "os.remove"):
                 assert text[0] == "t", (event, args)
@@ -1775,12 +1773,17 @@ def test_approved_cli_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     assert dir_problems[0] == "d: /usr/local/bin/dir: не обычный файл"
     heads["/usr/local/bin/script"] = b"#!python3\n"
     problems = plat.approved_cli_problems({"s": cli["script"]}, "macos-arm64")
-    assert "не абсолютный" in problems[0]
+    assert (
+        problems[0] == "s: /usr/local/bin/script: интерпретатор python3 не абсолютный"
+    )
     # the interpreter goes through the same checks
     heads["/usr/local/bin/script"] = b"#!/usr/local/bin/tool\n"
     fs.nodes["/usr/local/bin/tool"] = (REG | 0o777, 0, None)
     problems = plat.approved_cli_problems({"s": cli["script"]}, "macos-arm64")
-    assert any("интерпретатор" in p for p in problems), problems
+    assert (
+        "s: /usr/local/bin/script: интерпретатор /usr/local/bin/tool: "
+        "запись для группы или всех"
+    ) in problems, problems
 
 
 # --- sparse files through the system tar (R24) ---------------------------------
@@ -2139,6 +2142,13 @@ def _fake_cache(path: bytes) -> bool:
     return b"nope" not in path
 
 
+RPATH_PROBLEM = "tool: /usr/local/bin/tool: путь поиска '/usr/lib' запрещён"
+
+
+def _spelled(prefix: str) -> str:
+    return f"tool: /usr/local/bin/tool: зависимость {prefix}/libz.dylib: пути поиска не поддерживаются"
+
+
 def _tool(deps: LibDeps) -> dict[str, LibDeps]:
     return {"/usr/local/bin/tool": deps}
 
@@ -2162,9 +2172,17 @@ def test_r26_program_must_be_trusted(
     "deps,platform,needle",
     [
         (ELF_OK, "linux-x86_64", None),
-        (replace(ELF_OK, loader="/usr/local/lib/ld.so"), "linux-x86_64", "загрузчик"),
+        (
+            replace(ELF_OK, loader="/usr/local/lib/ld.so"),
+            "linux-x86_64",
+            "tool: /usr/local/bin/tool: загрузчик /usr/local/lib/ld.so вне системных каталогов",
+        ),
         (MAC_OK, "macos-arm64", None),
-        (replace(MAC_OK, dyld_environment=("DYLD_X=1",)), "macos-arm64", "LC_DYLD_"),
+        (
+            replace(MAC_OK, dyld_environment=("DYLD_X=1",)),
+            "macos-arm64",
+            "tool: /usr/local/bin/tool: LC_DYLD_ENVIRONMENT DYLD_X=1 запрещён",
+        ),
     ],
     ids=["elf-system-loader", "elf-foreign-loader", "macho-plain", "macho-dyld-env"],
 )
@@ -2179,19 +2197,35 @@ def test_r26_loader_must_be_system(
     if needle is None:
         assert problems == []
     else:
-        assert any(needle in p for p in problems), problems
+        assert needle in problems, problems
 
 
 @pytest.mark.parametrize(
     "deps,platform,needle",
     [
-        (replace(MAC_OK, rpaths=("/usr/lib",)), "macos-arm64", "путь поиска"),
-        (replace(ELF_OK, rpaths=("/usr/lib",)), "linux-x86_64", "путь поиска"),
-        (LibDeps(("@rpath/libz.dylib",), ()), "macos-arm64", "пути поиска"),
-        (LibDeps(("@loader_path/libz.dylib",), ()), "macos-arm64", "пути поиска"),
-        (LibDeps(("@executable_path/libz.dylib",), ()), "macos-arm64", "пути поиска"),
-        (LibDeps(("$ORIGIN/libz.so.1",), ()), "linux-x86_64", "пути поиска"),
-        (LibDeps(("libz.dylib",), ()), "macos-arm64", "от cwd"),
+        (replace(MAC_OK, rpaths=("/usr/lib",)), "macos-arm64", RPATH_PROBLEM),
+        (replace(ELF_OK, rpaths=("/usr/lib",)), "linux-x86_64", RPATH_PROBLEM),
+        (LibDeps(("@rpath/libz.dylib",), ()), "macos-arm64", _spelled("@rpath")),
+        (
+            LibDeps(("@loader_path/libz.dylib",), ()),
+            "macos-arm64",
+            _spelled("@loader_path"),
+        ),
+        (
+            LibDeps(("@executable_path/libz.dylib",), ()),
+            "macos-arm64",
+            _spelled("@executable_path"),
+        ),
+        (
+            LibDeps(("$ORIGIN/libz.so.1",), ()),
+            "linux-x86_64",
+            "tool: /usr/local/bin/tool: зависимость $ORIGIN/libz.so.1: пути поиска не поддерживаются",
+        ),
+        (
+            LibDeps(("libz.dylib",), ()),
+            "macos-arm64",
+            "tool: /usr/local/bin/tool: зависимость libz.dylib: относительное имя, ищется от cwd",
+        ),
         (MAC_OK, "macos-arm64", None),
         (ELF_OK, "linux-x86_64", None),
     ],
@@ -2217,7 +2251,7 @@ def test_r26_search_paths_are_problems(
     if needle is None:
         assert problems == []
     else:
-        assert any(needle in p for p in problems), problems
+        assert needle in problems, problems
 
 
 @pytest.mark.parametrize(
@@ -2285,9 +2319,21 @@ def test_r26_include_glob_prefix_checked_without_matches(
     "content,owner,needle",
     [
         (b"/usr/lib/x86_64-linux-gnu/libz.so.1\n", 0, None),
-        (b"/opt/evil/libhook.so\n", 0, "/opt/evil"),
-        (b"/usr/lib/x86_64-linux-gnu/libz.so.1\n", 501, "ld.so.preload: владелец"),
-        (b"libhook.so\n", 0, "запись не разобрана"),
+        (
+            b"/opt/evil/libhook.so\n",
+            0,
+            "загрузчик ОС: /opt/evil: владелец uid 501, не root",
+        ),
+        (
+            b"/usr/lib/x86_64-linux-gnu/libz.so.1\n",
+            501,
+            "загрузчик ОС: /etc/ld.so.preload: владелец uid 501, не root",
+        ),
+        (
+            b"libhook.so\n",
+            0,
+            "загрузчик ОС: /etc/ld.so.preload: запись не разобрана: 'libhook.so'",
+        ),
     ],
     ids=["system-entry", "untrusted-entry", "untrusted-file", "relative-entry"],
 )
@@ -2304,7 +2350,7 @@ def test_r26_ld_so_preload(
     if needle is None:
         assert problems == []
     else:
-        assert any(needle in p for p in problems), problems
+        assert needle in problems, problems
 
 
 def test_r26_host_loader_not_checked_on_macos(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2404,7 +2450,10 @@ def test_n6_shim_resolving_to_bad_closure_refused(
     _shim_world(monkeypatch, f"{CLT}\n".encode())
     table = {"/usr/local/bin/tool": SHIM, CLT: LibDeps(("@rpath/x.dylib",), ())}
     problems = _policy(monkeypatch, table, "macos-arm64", CLT_NODES)
-    assert any("xcode-select →" in p and "@rpath" in p for p in problems), problems
+    assert (
+        f"tool: /usr/local/bin/tool: xcode-select → {CLT}: "
+        "зависимость @rpath/x.dylib: пути поиска не поддерживаются"
+    ) in problems, problems
 
 
 def test_n6_shim_unresolved_is_a_problem(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2711,6 +2760,8 @@ MACHO_MAGICS = [
 
 def _format_problems(monkeypatch: pytest.MonkeyPatch, head: bytes) -> list[str]:
     fs = _good_fs()
+    fs.nodes["/usr/bin"] = (DIR | 0o755, 0, None)
+    fs.nodes["/usr/bin/xcrun"] = (REG | 0o755, 0, None)  # trusted: not the refusal
     fs.install(monkeypatch)
     monkeypatch.setattr(plat, "_read_regular", lambda _p, n: head[:n])
     return plat.approved_cli_problems(TOOL, "macos-arm64")
@@ -2728,9 +2779,12 @@ def test_every_macho_magic_is_parsed_or_refused(
 
     monkeypatch.setattr(plat, "run_command", run)
     problems = _format_problems(monkeypatch, magic + bytes(60))
-    assert problems, "a Mach-O header must never pass unchecked"
-    assert not any("неизвестный формат" in p for p in problems)
-    assert any("xcrun" in p for p in problems)  # went down the Mach-O branch
+    # the Mach-O branch ran: it asked xcrun for otool and refused without CLT
+    assert seen == [["/usr/bin/xcrun", "--find", "otool"]]
+    assert problems == [
+        f"tool: {plat._NO_CLT}",
+        f"tool: {plat._INSTALL_HINT.format(name='tool')}",
+    ]
 
 
 @pytest.mark.parametrize(
