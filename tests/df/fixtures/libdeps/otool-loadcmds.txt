@@ -1,0 +1,44 @@
+       cmd LC_MAIN
+   cmdsize 24
+  entryoff 1552
+ stacksize 0
+Load command 12
+          cmd LC_LOAD_DYLIB
+      cmdsize 104
+         name /System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (offset 24)
+   time stamp 0 Thu Jan  1 04:00:00 1970
+      current version 3502.1.255
+compatibility version 150.0.0
+Load command 13
+          cmd LC_LOAD_DYLIB
+      cmdsize 56
+         name @rpath/libpython3.10.dylib (offset 24)
+   time stamp 0 Thu Jan  1 04:00:00 1970
+      current version 3.10.0
+compatibility version 3.10.0
+Load command 14
+          cmd LC_LOAD_DYLIB
+      cmdsize 56
+         name /usr/lib/libSystem.B.dylib (offset 24)
+   time stamp 0 Thu Jan  1 04:00:00 1970
+      current version 1351.0.0
+compatibility version 1.0.0
+Load command 15
+      cmd LC_FUNCTION_STARTS
+  cmdsize 16
+  dataoff 49240
+ datasize 8
+Load command 16
+      cmd LC_DATA_IN_CODE
+  cmdsize 16
+  dataoff 49248
+ datasize 0
+Load command 17
+      cmd LC_CODE_SIGNATURE
+  cmdsize 16
+  dataoff 49424
+ datasize 544
+Load command 18
+          cmd LC_RPATH
+      cmdsize 40
+         path @executable_path/../lib (offset 12)
