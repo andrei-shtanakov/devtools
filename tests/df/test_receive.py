@@ -1007,3 +1007,23 @@ def test_open_dir_refuses_planted_symlink_and_file(tmp_path: Path) -> None:
                 receive._open_dir(root_fd, parts)
     finally:
         os.close(root_fd)
+
+
+def test_remove_own_tree_oserror_is_tree_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(receive, "ROOT_UID", os.getuid())
+    _tree(tmp_path, "r", 0o755)
+    boom = OSError(errno.EBUSY, "injected")
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise boom
+
+    monkeypatch.setattr(shutil, "rmtree", fail)
+    with pytest.raises(TreeError) as info:
+        remove_own_tree(tmp_path, "r")
+    assert info.value.__cause__ is boom
+    for remove in (remove_own_tree, remove_empty_dir):
+        with pytest.raises(TreeError, match="cannot open") as info:
+            remove(tmp_path / "missing-parent", "r")
+        assert isinstance(info.value.__cause__, OSError)

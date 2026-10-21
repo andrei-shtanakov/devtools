@@ -616,35 +616,46 @@ def remove_own_tree(parent: Path, name: str) -> None:
     """Remove the root-owned tree `parent/name` durably (protocol row).
 
     Precondition: a directory owned by root (any mode). Effects: `unlink`
-    (`fault_point("unlinked")`) -> `sync_dir(parent)` before returning.
+    (`fault_point("unlinked")`) -> `sync_dir(parent)` before returning. Every
+    refusal, including an `OSError`, is a `TreeError`.
     """
-    leaf = check_name(os.fsencode(name))
-    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-    try:
-        _require_root_dir(parent_fd, leaf, parent / leaf)
-        shutil.rmtree(leaf, dir_fd=parent_fd)
-        fsutil.fault_point("unlinked", parent / leaf)
-        fsutil.sync_dir(parent_fd)
-    finally:
-        os.close(parent_fd)
+    _remove_root_dir(parent, name, _rmtree_at)
 
 
 def remove_empty_dir(parent: Path, name: str) -> None:
     """Remove the empty root-owned directory `parent/name` durably.
 
-    A missing, non-empty or foreign object is a `TreeError`. Effects:
-    `unlink` (`fault_point("unlinked")`) -> `sync_dir(parent)`.
+    A missing, non-empty or foreign object (or any `OSError`) is a
+    `TreeError`. Effects: `unlink` (`fault_point("unlinked")`) ->
+    `sync_dir(parent)`.
     """
+    _remove_root_dir(parent, name, _rmdir_at)
+
+
+def _rmtree_at(leaf: str, parent_fd: int) -> None:
+    shutil.rmtree(leaf, dir_fd=parent_fd)
+
+
+def _rmdir_at(leaf: str, parent_fd: int) -> None:
+    os.rmdir(leaf, dir_fd=parent_fd)
+
+
+def _remove_root_dir(
+    parent: Path, name: str, remove: Callable[[str, int], None]
+) -> None:
     leaf = check_name(os.fsencode(name))
-    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    target = parent / leaf
     try:
-        _require_root_dir(parent_fd, leaf, parent / leaf)
-        try:
-            os.rmdir(leaf, dir_fd=parent_fd)
-        except OSError as exc:
-            raise TreeError(f"cannot remove {parent / leaf}: {exc.strerror}") from exc
-        fsutil.fault_point("unlinked", parent / leaf)
+        parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as exc:
+        raise TreeError(f"cannot open {parent}: {exc}") from exc
+    try:
+        _require_root_dir(parent_fd, leaf, target)
+        remove(leaf, parent_fd)
+        fsutil.fault_point("unlinked", target)
         fsutil.sync_dir(parent_fd)
+    except OSError as exc:
+        raise TreeError(f"cannot remove {target}: {exc}") from exc
     finally:
         os.close(parent_fd)
 

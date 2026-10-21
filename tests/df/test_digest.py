@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import unicodedata
 from pathlib import Path, PurePosixPath
@@ -243,3 +244,64 @@ def test_noncanonical_logical_root_refused(
         check_links(tree, root)
     with pytest.raises(TreeError, match="logical root"):
         resolve_link_in_tree(tree, root, PurePosixPath("l"))
+
+
+# --- golden vector: pins the persisted encoding ----------------------------
+
+GOLDEN_DIGEST = (
+    "sha256:a56075a5c89244672a34d785aae3b9e1f77430014cefe8db34a882fcb39988ec"
+)
+
+
+def _golden_tree(root: Path) -> Path:
+    root.mkdir()
+    (root / "a").mkdir()
+    (root / "a" / "x").write_bytes(b"#!/bin/sh\n")
+    (root / "a" / "x").chmod(0o755)
+    (root / "a-b").write_bytes(b"ab\n")
+    (root / "a-b").chmod(0o644)
+    (root / "d").mkdir()
+    (root / "d" / "release.json").write_bytes(b"{}")
+    (root / "empty").mkdir()
+    os.symlink("a/x", root / "l")
+    (root / "\u00e9.txt").write_bytes(b"e")
+    (root / "\u00e9.txt").chmod(0o600)
+    (root / "release.json").write_bytes(b'{"excluded": true}')
+    return root
+
+
+def _sha(data: bytes) -> bytes:
+    return hashlib.sha256(data).hexdigest().encode()
+
+
+def test_digest_golden_vector(tmp_path: Path) -> None:
+    root = _golden_tree(tmp_path / "golden")
+    records = (
+        b"d\0a\0-\0\n"
+        + b"f\0a-b\0-\0"
+        + _sha(b"ab\n")
+        + b"\n"
+        + b"f\0a/x\0x\0"
+        + _sha(b"#!/bin/sh\n")
+        + b"\n"
+        + b"d\0d\0-\0\n"
+        + b"f\0d/release.json\0-\0"
+        + _sha(b"{}")
+        + b"\n"
+        + b"d\0empty\0-\0\n"
+        + b"l\0l\0-\0a/x\n"
+        + b"f\0\xc3\xa9.txt\0-\0"
+        + _sha(b"e")
+        + b"\n"
+    )
+    expected = f"sha256:{hashlib.sha256(records).hexdigest()}"
+    assert tree_digest(root) == expected
+    assert expected == GOLDEN_DIGEST
+
+
+def test_digest_exclude_directory_keeps_children(tmp_path: Path) -> None:
+    root = _golden_tree(tmp_path / "golden")
+    without_dir = tree_digest(root, exclude=frozenset({"release.json", "d"}))
+    assert without_dir != tree_digest(root)
+    (root / "d" / "release.json").write_bytes(b"changed")
+    assert tree_digest(root, exclude=frozenset({"release.json", "d"})) != without_dir

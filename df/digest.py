@@ -63,7 +63,29 @@ def tree_digest(
 ) -> str:
     """Return `sha256:<hex>` of the canonical tree encoding (spec 3.5).
 
-    `exclude` holds relative paths (`/`-separated) left out of the digest.
+    Normative encoding (a second implementation must match it byte for byte;
+    `tests/df/test_digest.py::test_digest_golden_vector` pins it):
+
+    - every object under `root` gets one record; `root` itself gets none.
+      Links are never followed; types other than file, directory and symbolic
+      link are refused, as are names failing `check_names` (non-UTF-8, `\n`,
+      NUL, NFC-equal siblings) and link targets containing `\n`;
+    - path: relative to `root`, components joined by `/`, no `./` prefix, no
+      trailing `/`, names exactly as on disk (UTF-8, no NFC normalization);
+    - record: `type \0 path \0 mode \0 payload \n` (no spaces), where `type` is
+      `f`, `d` or `l`; `mode` is `x` for a file with any of `st_mode & 0o111`,
+      else `-` (always `-` for `d` and `l`); `payload` is the lowercase hex
+      SHA-256 of a file's content, the raw `readlink` bytes of a link, empty
+      for a directory;
+    - order: one global sort of all records by the UTF-8 bytes of the path
+      (so `a` < `a-b` < `a/x`, since `-` is 0x2d and `/` is 0x2f), not a
+      walk with sorted children;
+    - result: `sha256:` + lowercase hex SHA-256 of the concatenated records.
+
+    `exclude` holds exact relative paths whose records are skipped, whatever
+    their type. Excluding a directory drops only its own record: its
+    children are still digested (deliberately: exclusion is for single files
+    such as `release.json`, never for hiding a subtree).
     """
     if not stat.S_ISDIR(_lstat(root).st_mode):
         raise TreeError(f"digest root is not a directory: {root}")
