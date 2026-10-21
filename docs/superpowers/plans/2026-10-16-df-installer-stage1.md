@@ -1007,7 +1007,8 @@ def test_needs_human_stops_without_done(tmp_path): ...
     reap_seconds)`; остался процесс с UID `user` — `TreeError`. Эффекты:
     `reap_user_processes()`.
   - `TAR_FLAGS: Mapping[PlatformName, tuple[str, ...]]` — §3.3 п. 3: macOS `("--format",
-    "pax", "--no-mac-metadata", "--no-xattrs", "--no-acls", "--no-fflags")`, Linux
+    "pax", "--no-mac-metadata", "--no-xattrs", "--no-acls", "--no-fflags",
+    "--no-read-sparse")`, Linux
     `("--format=pax", "--no-xattrs", "--no-acls", "--no-selinux")`.
   - `CLEANER_ARGV(root: Path) -> list[list[str]]` = `[["/bin/chmod", "u+rwx", str(root)],
     ["/usr/bin/find", str(root), "-mindepth", "1", "-type", "d", "!", "-perm", "-u+rwx",
