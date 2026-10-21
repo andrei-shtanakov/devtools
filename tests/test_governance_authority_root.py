@@ -143,6 +143,10 @@ def test_prefixes_read_from_the_ssot_file() -> None:
         "tests/act_cases",
         # Шаблон CI корня доверия df-trust (установка копирует его).
         "templates/df-trust/",
+        # Установщик df исполняется от root (stage 1, Task 1): код и тесты
+        # мержит только человек.
+        "df/",
+        "tests/df/",
     }
 
 
