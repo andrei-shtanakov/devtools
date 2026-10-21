@@ -445,7 +445,9 @@ class SpawnedProducer:
     """`Producer` (df.receive) over a process chain of a role user.
 
     Its stderr is drained by a thread into a bounded `StderrTail`, so a full
-    stderr pipe never blocks the producer and the tail can be reported.
+    stderr pipe never blocks the producer and the tail can be reported. The
+    thread owns its own descriptor (a dup) and closes it after EOF; no other
+    code closes a descriptor that thread reads.
     """
 
     def __init__(
@@ -454,12 +456,15 @@ class SpawnedProducer:
         assert proc.stdout is not None and proc.stderr is not None
         self._proc = proc
         self._stdout = proc.stdout
-        self._stderr = proc.stderr
         self._user = user
         self._reap_seconds = reap_seconds
         self._tail = StderrTail()
+        # Ownership transfer before the thread starts: only the thread holds
+        # (and closes) the stderr descriptor from here on.
+        self._drain_fd = os.dup(proc.stderr.fileno())
+        proc.stderr.close()
         self._drain = threading.Thread(
-            target=_drain_into, args=(self._stderr.fileno(), self._tail), daemon=True
+            target=_drain_into, args=(self._drain_fd, self._tail), daemon=True
         )
         self._drain.start()
 
@@ -483,7 +488,10 @@ class SpawnedProducer:
         """Kill the group, reap the role's processes, reap the child.
 
         A process of the role left alive, or a child not reaped in
-        `reap_seconds`, is a `TreeError`. The stderr tail stays readable.
+        `reap_seconds`, is a `TreeError`. The stderr tail stays readable. If
+        stderr has not reached EOF within `reap_seconds` (a writer outside
+        the role keeps it open), the daemon drain thread is left running with
+        its own descriptor and closes it at EOF; `end` never closes it.
         """
         if self._proc.returncode is None:  # a reaped leader's pid may be reused
             kill_group(self._proc.pid)
@@ -495,7 +503,6 @@ class SpawnedProducer:
         finally:
             self._stdout.close()
             self._drain.join(self._reap_seconds)
-            self._stderr.close()
         if left:
             raise TreeError(f"processes of {self._user} left: {left}")
 
@@ -505,8 +512,12 @@ class SpawnedProducer:
 
 
 def _drain_into(fd: int, tail: StderrTail) -> None:
-    while chunk := _read_chunk(fd):
-        tail.add(chunk)
+    """Thread body: read `fd` to EOF into `tail`, then close it (its owner)."""
+    try:
+        while chunk := _read_chunk(fd):
+            tail.add(chunk)
+    finally:
+        os.close(fd)
 
 
 def spawn_as(

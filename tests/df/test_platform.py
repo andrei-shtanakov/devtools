@@ -2656,3 +2656,31 @@ def test_o3_real_make_is_named_as_wrapper() -> None:
         {"make": Path("/usr/bin/make")}, "macos-arm64"
     )
     assert any("обёртка xcode-select" in p for p in problems), problems
+
+
+def test_drain_thread_owns_its_descriptor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """end() never closes the fd the drain thread reads; the thread closes it."""
+
+    class HeldStderr(FakePopen):
+        def __init__(self, argv: list[str], **kwargs: Any) -> None:
+            super().__init__(argv, **kwargs)
+            err_r, self.err_w = os.pipe()  # a writer keeps stderr open
+            self.stderr.close()
+            self.stderr = os.fdopen(err_r, "rb")
+
+    proc = HeldStderr(["tar"])
+    proc.exit_on_wait = 0
+    monkeypatch.setattr(os, "killpg", lambda _p, _s: None)
+    monkeypatch.setattr(plat, "reap_user_processes", lambda _u: [])
+    prod = plat.SpawnedProducer(proc, "df-build", 0.2)  # type: ignore[arg-type]
+    drain_fd = prod._drain_fd
+    os.write(proc.err_w, b"warn")
+    prod.end()  # the join times out: the thread is still in os.read
+    assert prod._drain.is_alive()
+    os.fstat(drain_fd)  # still open, still the thread's
+    os.close(proc.err_w)
+    prod._drain.join(5)
+    assert not prod._drain.is_alive()
+    with pytest.raises(OSError):
+        os.fstat(drain_fd)  # closed by its owner
+    assert prod.stderr_tail() == b"warn"
