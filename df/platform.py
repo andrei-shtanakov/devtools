@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import fcntl
 import functools
 import glob
 import grp
@@ -23,13 +24,14 @@ import signal
 import stat
 import subprocess
 import sys
-import tempfile
+import termios
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import IO, Literal
+from typing import Literal
 from xml.parsers.expat import ExpatError
 
 from df import fsutil
@@ -52,6 +54,8 @@ NOLOGIN_SHELLS = frozenset({"/usr/bin/false", "/usr/sbin/nologin", "/sbin/nologi
 NO_NETWORK_PROFILE = "(version 1)(allow default)(deny network*)"
 #: Reported by `reap_user_processes` when `ps` could not be read.
 UNKNOWN_PID = -1
+#: Kept tail of a child's stderr (Task 6 reports the last 4 KiB of it).
+STDERR_TAIL_BYTES = 16 << 10
 #: `returncode` of a command whose executable could not be started.
 LAUNCH_FAILED = 127
 
@@ -89,6 +93,10 @@ LD_SO_CONF = Path("/etc/ld.so.conf")
 LD_SO_PRELOAD = Path("/etc/ld.so.preload")
 #: A Mach-O linking it is an xcode-select shim (`/usr/bin/git` and friends).
 XCSELECT_LIB = "/usr/lib/libxcselect.dylib"
+_NESTED_SHIM = (
+    "обёртка xcode-select, передающая запуск другому инструменту "
+    "(например make → gnumake); как утверждённый CLI не поддерживается"
+)
 #: Free UID/GID are chosen from these ranges (macOS: 400-499, spec 3.3).
 ID_RANGE: Mapping[PlatformName, range] = {
     "macos-arm64": range(400, 500),
@@ -182,6 +190,10 @@ class RunResult:
     `launched=False`: the launch mechanism (or the executable) did not start,
     an infrastructure failure rather than a refusal of the operation.
     `timed_out=True`: the deadline passed and the process group was killed.
+    `stdout_truncated=True`: stdout went over its limit and the group was
+    killed. `stderr` is the last `STDERR_TAIL_BYTES` of the stream, read to
+    its end; `stderr_truncated=True` means earlier bytes were dropped (the
+    process is never killed for its stderr).
     """
 
     returncode: int
@@ -189,6 +201,32 @@ class RunResult:
     stderr: bytes
     launched: bool
     timed_out: bool = False
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+
+
+class StderrTail:
+    """The last `limit` bytes of a stream; thread-safe appends."""
+
+    def __init__(self, limit: int = 0) -> None:
+        self._limit = limit or STDERR_TAIL_BYTES
+        self._data = bytearray()
+        self._lock = threading.Lock()
+        self.truncated = False
+
+    def add(self, chunk: bytes) -> None:
+        """Append `chunk`, dropping the oldest bytes beyond the limit."""
+        with self._lock:
+            self._data += chunk
+            extra = len(self._data) - self._limit
+            if extra > 0:
+                del self._data[:extra]
+                self.truncated = True
+
+    def value(self) -> bytes:
+        """The kept tail."""
+        with self._lock:
+            return bytes(self._data)
 
 
 def run_command(
@@ -214,18 +252,26 @@ def run_as(
     """Run `argv` as `user`, environment built only from `env` (`env -i`).
 
     Without network: macOS `sudo -n -u <user> sandbox-exec -p <profile>`,
-    Linux `unshare --net -- setpriv --reuid=<user> ...`. On timeout the
-    session group and every process of `user` are killed.
+    Linux `unshare --net -- setpriv --reuid=<user> ...`. On timeout or a
+    stdout overflow the session group and every process of `user` are
+    killed; stderr never stops the command (only its tail is kept).
     """
     full = role_argv(detect_platform(), user, argv, env=env, network=network)
     result = _execute(
         full, env=_SYSTEM_ENV, cwd=cwd, timeout=timeout, limit=stdout_limit
     )
-    if result.timed_out:
+    if result.timed_out or result.stdout_truncated:
         reap_user_processes(user)
-    if result.launched and _mechanism_failed(result.returncode, result.stderr):
+    if _launch_failed(result):
         return replace(result, launched=False)
     return result
+
+
+def _launch_failed(result: RunResult) -> bool:
+    """The mechanism's own failure: a short stderr with its prefix and code."""
+    if not result.launched or result.stderr_truncated:
+        return False
+    return _mechanism_failed(result.returncode, result.stderr)
 
 
 def role_argv(
@@ -293,27 +339,28 @@ def _execute(
 
 
 def _collect(proc: subprocess.Popen[bytes], deadline: float, limit: int) -> RunResult:
-    """Read both pipes up to `limit` bytes each until EOF or the deadline."""
+    """Read stdout up to `limit` (more kills the group) and stderr to its end
+    into a bounded tail, until both reach EOF or the deadline."""
     assert proc.stdout is not None and proc.stderr is not None
-    buffers = {proc.stdout.fileno(): bytearray(), proc.stderr.fileno(): bytearray()}
+    out_fd, err_fd = proc.stdout.fileno(), proc.stderr.fileno()
+    out, err = bytearray(), StderrTail()
     overflow = False
     with selectors.DefaultSelector() as sel:
-        for fd in buffers:
-            sel.register(fd, selectors.EVENT_READ)
+        sel.register(out_fd, selectors.EVENT_READ)
+        sel.register(err_fd, selectors.EVENT_READ)
         while sel.get_map() and not overflow:
             left = deadline - time.monotonic()
             if left <= 0:
                 break
             for key, _ in sel.select(left):
-                try:
-                    chunk = os.read(key.fd, _READ_CHUNK)
-                except OSError:
-                    chunk = b""  # a broken pipe ends that stream
+                chunk = _read_chunk(key.fd)
                 if not chunk:
                     sel.unregister(key.fd)
-                    continue
-                buffers[key.fd] += chunk
-                overflow = overflow or len(buffers[key.fd]) > limit
+                elif key.fd == out_fd:
+                    out += chunk
+                    overflow = len(out) > limit
+                else:
+                    err.add(chunk)
     timed_out = not overflow and time.monotonic() >= deadline
     code = _finish(proc, deadline, kill=timed_out or overflow)
     if code is None:
@@ -321,11 +368,21 @@ def _collect(proc: subprocess.Popen[bytes], deadline: float, limit: int) -> RunR
         code = _finish(proc, deadline, kill=True)
     return RunResult(
         code if code is not None else -signal.SIGKILL,
-        bytes(buffers[proc.stdout.fileno()][:limit]),
-        bytes(buffers[proc.stderr.fileno()][:limit]),
+        bytes(out[:limit]),
+        err.value(),
         launched=True,
         timed_out=timed_out,
+        stdout_truncated=overflow,
+        stderr_truncated=err.truncated,
     )
+
+
+def _read_chunk(fd: int) -> bytes:
+    """One read of a child's pipe; an error ends that stream."""
+    try:
+        return os.read(fd, _READ_CHUNK)
+    except OSError:
+        return b""
 
 
 def _finish(
@@ -385,26 +442,35 @@ def _brief(result: RunResult) -> str:
 
 
 class SpawnedProducer:
-    """`Producer` (df.receive) over a process chain of a role user."""
+    """`Producer` (df.receive) over a process chain of a role user.
+
+    Its stderr is drained by a thread into a bounded `StderrTail`, so a full
+    stderr pipe never blocks the producer and the tail can be reported.
+    """
 
     def __init__(
-        self,
-        proc: subprocess.Popen[bytes],
-        user: str,
-        reap_seconds: float,
-        stderr: IO[bytes],
+        self, proc: subprocess.Popen[bytes], user: str, reap_seconds: float
     ) -> None:
-        assert proc.stdout is not None
+        assert proc.stdout is not None and proc.stderr is not None
         self._proc = proc
         self._stdout = proc.stdout
+        self._stderr = proc.stderr
         self._user = user
         self._reap_seconds = reap_seconds
-        self._stderr = stderr
+        self._tail = StderrTail()
+        self._drain = threading.Thread(
+            target=_drain_into, args=(self._stderr.fileno(), self._tail), daemon=True
+        )
+        self._drain.start()
 
     @property
     def fd(self) -> int:
         """Producer stdout."""
         return self._stdout.fileno()
+
+    def stderr_tail(self) -> bytes:
+        """The last `STDERR_TAIL_BYTES` the chain wrote to stderr so far."""
+        return self._tail.value()
 
     def wait(self, timeout: float) -> int:
         """Exit code of the direct child; not exited in time -> `TreeError`."""
@@ -417,7 +483,7 @@ class SpawnedProducer:
         """Kill the group, reap the role's processes, reap the child.
 
         A process of the role left alive, or a child not reaped in
-        `reap_seconds`, is a `TreeError`.
+        `reap_seconds`, is a `TreeError`. The stderr tail stays readable.
         """
         if self._proc.returncode is None:  # a reaped leader's pid may be reused
             kill_group(self._proc.pid)
@@ -428,9 +494,19 @@ class SpawnedProducer:
             raise TreeError("producer not reaped") from exc
         finally:
             self._stdout.close()
+            self._drain.join(self._reap_seconds)
             self._stderr.close()
         if left:
             raise TreeError(f"processes of {self._user} left: {left}")
+
+    def finish_stderr(self, timeout: float) -> None:
+        """Wait up to `timeout` for the stderr stream to reach EOF."""
+        self._drain.join(timeout)
+
+
+def _drain_into(fd: int, tail: StderrTail) -> None:
+    while chunk := _read_chunk(fd):
+        tail.add(chunk)
 
 
 def spawn_as(
@@ -445,49 +521,78 @@ def spawn_as(
     """Start `argv` as `user` with stdout as a stream (same chain as `run_as`).
 
     Own session, stdin `/dev/null`: without a controlling terminal `sudo`
-    creates no pseudo-terminal. A chain that exits within 2 s with the
-    launch mechanism's own failure is `StepFailed("run-as")`.
+    creates no pseudo-terminal. Launch check, at most 2 s: readable stdout
+    data proves the chain launched (returns at once); a chain that exits
+    with the launch mechanism's own failure is `StepFailed("run-as")`.
     """
     full = role_argv(detect_platform(), user, argv, env=env, network=network)
-    stderr = tempfile.TemporaryFile()
     try:
         proc = subprocess.Popen(
             full,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
-            stderr=stderr,
+            stderr=subprocess.PIPE,
             env=dict(_SYSTEM_ENV),
             cwd=cwd,
             start_new_session=True,
         )
     except OSError as exc:
-        stderr.close()
         raise StepFailed("run-as", f"запуск от {user} не стартовал: {exc}") from exc
-    producer = SpawnedProducer(proc, user, reap_seconds, stderr)
-    _check_launch(proc, producer, stderr, user)
+    producer = SpawnedProducer(proc, user, reap_seconds)
+    _check_launch(proc, producer, user)
     return producer
 
 
 def _check_launch(
-    proc: subprocess.Popen[bytes],
-    producer: SpawnedProducer,
-    stderr: IO[bytes],
-    user: str,
+    proc: subprocess.Popen[bytes], producer: SpawnedProducer, user: str
 ) -> None:
-    try:
-        code = proc.wait(_LAUNCH_CHECK_SECONDS)
-    except subprocess.TimeoutExpired:
+    deadline = time.monotonic() + _LAUNCH_CHECK_SECONDS
+    code = _launch_outcome(proc, producer.fd, deadline)
+    if code is None:
         return
-    stderr.seek(0)
-    head = stderr.read(4096)
-    if not _mechanism_failed(code, head):
+    producer.finish_stderr(max(deadline - time.monotonic(), 0.2))
+    tail = producer.stderr_tail()
+    if not _mechanism_failed(code, tail):
         return
     try:
         producer.end()
     except TreeError:
         pass  # the launch failure below is the reported refusal
-    detail = head.decode("utf-8", "replace").strip()
+    detail = tail.decode("utf-8", "replace").strip()
     raise StepFailed("run-as", f"запуск от {user} не стартовал: {detail}")
+
+
+def _launch_outcome(
+    proc: subprocess.Popen[bytes], fd: int, deadline: float
+) -> int | None:
+    """Exit code if the chain ended in the window; `None` once it is known to
+    run (stdout data pending, nothing consumed) or the window passed."""
+    with selectors.DefaultSelector() as sel:
+        sel.register(fd, selectors.EVENT_READ)
+        while True:
+            code = proc.poll()
+            if code is not None:
+                return code
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return None
+            if not sel.select(min(left, 0.05)):
+                continue
+            if _pending_bytes(fd) != 0:
+                return None
+            try:  # EOF on stdout: the chain is ending, take its code
+                return proc.wait(max(deadline - time.monotonic(), 0.0))
+            except subprocess.TimeoutExpired:
+                return None
+
+
+def _pending_bytes(fd: int) -> int:
+    """Bytes readable on a pipe without consuming them; -1 if unknown."""
+    try:
+        raw = fcntl.ioctl(fd, termios.FIONREAD, b"\0\0\0\0")
+    except OSError:
+        return -1
+    return int.from_bytes(raw, sys.byteorder, signed=True)
 
 
 def reap_user_processes(name: str, *, timeout: float = 5.0) -> list[int]:
@@ -1473,11 +1578,6 @@ def parse_otool_loads(text: str) -> dict[str, tuple[str, ...]]:
     return {k: tuple(v) for k, v in found.items()}
 
 
-def parse_otool_rpaths(text: str) -> tuple[str, ...]:
-    """`LC_RPATH` paths from `otool -l`."""
-    return parse_otool_loads(text).get("LC_RPATH", ())
-
-
 def parse_readelf(text: str) -> LibDeps:
     """`NEEDED` and `RPATH`/`RUNPATH` entries from `readelf -d`."""
     needed: list[str] = []
@@ -1597,14 +1697,18 @@ def approved_cli_problems(cli: Mapping[str, Path], platform: PlatformName) -> li
     - Search paths are a problem: any `RPATH`/`RUNPATH`/`LC_RPATH`, any
       dependency spelled with `@rpath`, `@loader_path`, `@executable_path` or
       containing `$`, and on macOS a dependency name without `/`.
-    - macOS: every dependency is an absolute path under `SYSTEM_LIB_DIRS`
-      (absent on disk is fine: dyld shared cache). A program linking
-      `libxcselect` is a developer shim: the tool it dispatches to
-      (`xcrun --find <name>`) passes the same policy under the shim's name.
+    - macOS: every dependency is an absolute path under `SYSTEM_LIB_DIRS`;
+      one absent on disk must be in dyld's shared cache
+      (`_dyld_shared_cache_contains_path`), else dyld would fall back. A
+      program linking `libxcselect` is a developer shim: it dispatches by its
+      own name, so the approved path's name must equal its target's, and the
+      tool `xcrun --find <name>` gives passes the same policy under the
+      shim's name; a tool that is itself such a wrapper is refused.
     - Linux: every bare soname exists in a `LOADER_DIRS` directory; the host
       loader configuration (`/etc/ld.so.conf` with its includes, include
-      glob prefixes, `/etc/ld.so.preload`) names only system or trusted
-      paths; anything unparsable is a problem.
+      glob prefixes, `/etc/ld.so.preload` entries) is always walked with the
+      trusted-path policy, system prefix or not; anything unparsable is a
+      problem.
 
     Trust boundary: system libraries are part of the OS and are not walked
     further. Named residuals (Task 13): glibc-hwcaps / legacy hwcap
@@ -1620,7 +1724,9 @@ def approved_cli_problems(cli: Mapping[str, Path], platform: PlatformName) -> li
     return problems
 
 
-def _cli_problems(path: Path, platform: PlatformName, depth: int) -> list[str]:
+def _cli_problems(
+    path: Path, platform: PlatformName, depth: int, *, in_shim: bool = False
+) -> list[str]:
     problems, target = _walk(path)
     if target is None:
         return problems
@@ -1628,14 +1734,16 @@ def _cli_problems(path: Path, platform: PlatformName, depth: int) -> list[str]:
     if final is None or not stat.S_ISREG(final[0].st_mode):
         return [*problems, f"{target}: не обычный файл"]
     try:
-        problems += _binary_problems(target, platform, depth)
+        problems += _binary_problems(path.name, target, platform, depth, in_shim)
         problems += _shebang_problems(target, platform, depth)
     except StepFailed as exc:
         problems.append(exc.detail)
     return problems
 
 
-def _binary_problems(target: Path, platform: PlatformName, depth: int) -> list[str]:
+def _binary_problems(
+    invoked: str, target: Path, platform: PlatformName, depth: int, in_shim: bool
+) -> list[str]:
     deps = linked_libraries(target)
     if deps is None:
         return []
@@ -1647,9 +1755,11 @@ def _binary_problems(target: Path, platform: PlatformName, depth: int) -> list[s
     problems += [f"{target}: путь поиска {r!r} запрещён" for r in deps.rpaths]
     for dep in deps.needed:
         problems += _dependency_problems(target, dep, platform)
-    if platform == "macos-arm64" and XCSELECT_LIB in deps.needed:
-        problems += _shim_problems(target, platform, depth)
-    return problems
+    if platform != "macos-arm64" or XCSELECT_LIB not in deps.needed:
+        return problems
+    if in_shim:
+        return [*problems, f"{target}: {_NESTED_SHIM}"]
+    return problems + _shim_problems(invoked, target, platform, depth)
 
 
 def _dependency_problems(target: Path, dep: str, platform: PlatformName) -> list[str]:
@@ -1658,25 +1768,59 @@ def _dependency_problems(target: Path, dep: str, platform: PlatformName) -> list
     if platform == "macos-arm64" and "/" not in dep:
         return [f"{target}: зависимость {dep}: относительное имя, ищется от cwd"]
     if "/" in dep:
-        if dep.startswith("/") and _is_system(Path(dep), platform):
-            return []
-        return [f"{target}: зависимость {dep} вне системных каталогов"]
+        if not dep.startswith("/") or not _is_system(Path(dep), platform):
+            return [f"{target}: зависимость {dep} вне системных каталогов"]
+        if platform == "macos-arm64" and not _exists(Path(dep)):
+            return _shared_cache_problems(target, dep)
+        return []
     if any(_exists(Path(d) / dep) for d in LOADER_DIRS[platform]):
         return []
     return [f"{target}: зависимость {dep} не найдена в системных каталогах"]
 
 
-def _shim_problems(target: Path, platform: PlatformName, depth: int) -> list[str]:
-    """The tool an xcode-select shim dispatches to passes the same policy."""
+def _shared_cache_problems(target: Path, dep: str) -> list[str]:
+    """A system library absent on disk must be in dyld's shared cache; else
+    dyld would fall back to other directories (`DYLD_FALLBACK_LIBRARY_PATH`)."""
+    contains = _shared_cache_function()
+    if contains is None:
+        return [f"{target}: зависимость {dep}: нельзя проверить кеш dyld"]
+    if contains(os.fsencode(dep)):
+        return []
+    return [f"{target}: зависимость {dep} отсутствует (fallback dyld)"]
+
+
+@functools.cache
+def _shared_cache_function() -> Callable[[bytes], bool] | None:
+    try:
+        lib = ctypes.CDLL(_LIBSYSTEM)
+    except OSError:
+        return None
+    func = getattr(lib, "_dyld_shared_cache_contains_path", None)
+    if func is None:
+        return None
+    func.argtypes = [ctypes.c_char_p]
+    func.restype = ctypes.c_bool
+    return func
+
+
+def _shim_problems(
+    invoked: str, target: Path, platform: PlatformName, depth: int
+) -> list[str]:
+    """The tool an xcode-select shim dispatches to passes the same policy.
+
+    The shim dispatches by the basename of `argv[0]`, which is the approved
+    path's own name: a link named differently from its target is refused.
+    """
+    if invoked != target.name:
+        why = f"выбирает инструмент по имени {invoked!r}, а не {target.name!r}"
+        return [f"{target}: xcode-select {why}"]
     if depth >= _MAX_SHEBANG_DEPTH:
         return [f"{target}: слишком длинная цепочка xcode-select"]
     try:
         resolved = xcrun_find(target.name)
     except StepFailed as exc:
         return [f"{target}: xcode-select: {exc.detail}"]
-    if Path(resolved) == target:
-        return [f"{target}: xcode-select указывает на сам shim"]
-    nested = _cli_problems(Path(resolved), platform, depth + 1)
+    nested = _cli_problems(Path(resolved), platform, depth + 1, in_shim=True)
     return [f"{target}: xcode-select → {p}" for p in nested]
 
 
@@ -1688,22 +1832,20 @@ def _is_system(path: Path, platform: PlatformName) -> bool:
     return any(f"{path}/".startswith(d) for d in SYSTEM_LIB_DIRS[platform])
 
 
-def _location_problems(path: Path, platform: PlatformName) -> list[str]:
-    if _is_system(path, platform):
-        return []
-    return _walk(path, missing_ok=True)[0]
-
-
 def _host_loader_problems(platform: PlatformName) -> list[str]:
-    """Linux: `ld.so.conf` directories and `ld.so.preload` entries."""
+    """Linux: `ld.so.conf` directories and `ld.so.preload` entries.
+
+    Always walked, even under a system prefix: unlike the sealed macOS system
+    volume, a directory under `/usr/lib` can be given away on Linux.
+    """
     if platform != "linux-x86_64":
         return []
     problems: list[str] = []
     dirs: list[Path] = []
     _read_ld_conf(LD_SO_CONF, dirs, problems, set(), 0)
     for directory in dict.fromkeys(dirs):
-        problems += _location_problems(directory, platform)
-    return problems + _preload_problems(platform)
+        problems += _walk(directory, missing_ok=True)[0]
+    return problems + _preload_problems()
 
 
 def _read_conf_text(path: Path, problems: list[str]) -> str | None:
@@ -1743,7 +1885,7 @@ def _read_ld_conf(
                 full = (
                     Path(pattern) if pattern.startswith("/") else path.parent / pattern
                 )
-                problems += _location_problems(_glob_prefix(full), "linux-x86_64")
+                problems += _walk(_glob_prefix(full), missing_ok=True)[0]
                 for match in sorted(_glob(str(full))):
                     _read_ld_conf(Path(match), dirs, problems, seen, depth + 1)
             continue
@@ -1764,7 +1906,7 @@ def _glob_prefix(pattern: Path) -> Path:
     return prefix
 
 
-def _preload_problems(platform: PlatformName) -> list[str]:
+def _preload_problems() -> list[str]:
     if not _exists(LD_SO_PRELOAD):
         return []
     problems: list[str] = []
@@ -1775,7 +1917,7 @@ def _preload_problems(platform: PlatformName) -> list[str]:
         if not item.startswith("/") or "$" in item:
             problems.append(f"{LD_SO_PRELOAD}: запись не разобрана: {item!r}")
             continue
-        problems += _location_problems(Path(item), platform)
+        problems += trusted_path_problems(Path(item))
     return problems
 
 

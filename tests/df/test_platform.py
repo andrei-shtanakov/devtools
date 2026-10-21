@@ -338,25 +338,44 @@ def test_whoami_as_requires_launch_and_output(
 
 
 class FakePopen:
-    """Records Popen arguments; the launch check sees a still-running chain."""
+    """Records Popen arguments; real pipes stand in for the chain's streams.
+
+    `stdout_data` is pending on stdout (the writer stays open: a running
+    chain); `stderr_data` is the whole stderr stream (then EOF).
+    """
 
     instances: list[FakePopen] = []
+    stdout_data = b"x"
+    stderr_data = b""
+    exits_at_once: int | None = None
 
     def __init__(self, argv: list[str], **kwargs: Any) -> None:
         self.argv = argv
         self.kwargs = kwargs
         self.pid = 4242
-        self.stdout = open(os.devnull, "rb")  # noqa: SIM115 - closed by end()
+        out_r, self._out_w = os.pipe()
+        err_r, err_w = os.pipe()
+        os.write(self._out_w, self.stdout_data)
+        os.write(err_w, self.stderr_data)
+        os.close(err_w)
+        self.stdout = os.fdopen(out_r, "rb")
+        self.stderr = os.fdopen(err_r, "rb")
         self.waits: list[float] = []
-        self.exit_on_wait: int | None = None
+        self.exit_on_wait: int | None = self.exits_at_once
         self.returncode: int | None = None
         FakePopen.instances.append(self)
+
+    def poll(self) -> int | None:
+        return self.exits_at_once
 
     def wait(self, timeout: float | None = None) -> int:
         self.waits.append(timeout or 0.0)
         if self.exit_on_wait is None:
             raise subprocess.TimeoutExpired(self.argv, timeout or 0.0)
         self.returncode = self.exit_on_wait
+        if self._out_w >= 0:
+            os.close(self._out_w)
+            self._out_w = -1
         return self.exit_on_wait
 
 
@@ -379,10 +398,9 @@ def test_spawn_as_new_session_no_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_spawn_as_refuses_mechanism_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     class Failing(FakePopen):
-        def __init__(self, argv: list[str], **kwargs: Any) -> None:
-            super().__init__(argv, **kwargs)
-            self.exit_on_wait = 1
-            kwargs["stderr"].write(b"sudo: a password is required\n")
+        stdout_data = b""
+        stderr_data = b"sudo: a password is required\n"
+        exits_at_once = 1
 
     monkeypatch.setattr(plat, "detect_platform", lambda: "macos-arm64")
     monkeypatch.setattr(subprocess, "Popen", Failing)
@@ -419,8 +437,7 @@ def test_spawned_producer_end_kills_group_and_user(
 
     monkeypatch.setattr(os, "killpg", killpg)
     monkeypatch.setattr(plat, "reap_user_processes", reap)
-    stderr = (tmp_path / "err").open("w+b")
-    prod = plat.SpawnedProducer(proc, "df-build", 7.0, stderr)  # type: ignore[arg-type]
+    prod = plat.SpawnedProducer(proc, "df-build", 7.0)  # type: ignore[arg-type]
     if left:
         with pytest.raises(TreeError, match="777"):
             prod.end()
@@ -428,7 +445,7 @@ def test_spawned_producer_end_kills_group_and_user(
         prod.end()
     assert calls == [f"killpg(4242,{int(plat.signal.SIGKILL)})", "reap(df-build)"]
     assert proc.waits == [7.0]
-    assert proc.stdout.closed and stderr.closed
+    assert proc.stdout.closed and proc.stderr.closed
 
 
 def test_spawned_producer_end_unreaped_child(
@@ -441,7 +458,6 @@ def test_spawned_producer_end_unreaped_child(
         proc,  # type: ignore[arg-type]
         "df-build",
         0.1,
-        (tmp_path / "err").open("w+b"),
     )
     with pytest.raises(TreeError, match="not reaped"):
         prod.end()
@@ -527,8 +543,6 @@ def test_parse_otool_and_readelf_samples() -> None:
         "LC_LOAD_DYLINKER": ("/usr/lib/dyld",),
         "LC_RPATH": ("@executable_path/../lib",),
     }
-    rpaths = plat.parse_otool_rpaths((base / "otool-loadcmds.txt").read_text())
-    assert rpaths == ("@executable_path/../lib",)
     interp = plat.parse_readelf_interp((base / "readelf-l.txt").read_text())
     assert interp == "/lib64/ld-linux-x86-64.so.2"
     assert plat.parse_readelf_interp("no program headers\n") is None
@@ -1905,7 +1919,6 @@ def test_spawned_producer_end_skips_killpg_after_reap(
         proc,  # type: ignore[arg-type]
         "df-build",
         1.0,
-        (tmp_path / "err").open("w+b"),
     )
     prod.end()
 
@@ -2102,12 +2115,19 @@ def _policy(
     platform: PlatformName,
     nodes: dict[str, tuple[int, int, str | None]] | None = None,
     files: dict[str, bytes] | None = None,
+    cli: Mapping[str, Path] = TOOL,
 ) -> list[str]:
     fs = _closure_fs({**SYS_LIBS, **(nodes or {})})
     fs.install(monkeypatch)
     _with_files(monkeypatch, fs, files or {})
     monkeypatch.setattr(plat, "linked_libraries", lambda p: table.get(str(p)))
-    return plat.approved_cli_problems(TOOL, platform)
+    monkeypatch.setattr(plat, "_shared_cache_function", lambda: _fake_cache)
+    return plat.approved_cli_problems(cli, platform)
+
+
+def _fake_cache(path: bytes) -> bool:
+    """dyld shared cache stand-in: every system path except `*nope*`."""
+    return b"nope" not in path
 
 
 def _tool(deps: LibDeps) -> dict[str, LibDeps]:
@@ -2428,3 +2448,211 @@ def test_real_mac_system_clis_pass() -> None:
         "chmod": Path("/bin/chmod"),
     }
     assert plat.approved_cli_problems(cli, "macos-arm64") == []
+
+
+# --- final fix wave ---------------------------------------------------------------
+
+
+def test_f1_large_stderr_success_keeps_tail(tmp_path: Path) -> None:
+    script = "head -c 300000 /dev/zero | tr '\\0' e >&2; printf END >&2; echo ok"
+    result = plat._execute(
+        ["/bin/sh", "-c", script], env={}, cwd=tmp_path, timeout=30, limit=1000
+    )
+    assert result.returncode == 0 and result.stdout == b"ok\n"
+    assert result.stderr.endswith(b"eeeEND")
+    assert len(result.stderr) == plat.STDERR_TAIL_BYTES
+    assert result.stderr_truncated and not result.stdout_truncated
+    assert plat.STDERR_TAIL_BYTES >= 4096  # Task 6 reports the last 4 KiB
+
+
+def test_f1_stdout_overflow_flagged(tmp_path: Path) -> None:
+    result = plat._execute(
+        ["/bin/sh", "-c", "yes"], env={}, cwd=tmp_path, timeout=20, limit=4096
+    )
+    assert result.stdout_truncated and not result.timed_out
+    assert result.returncode != 0
+
+
+@pytest.mark.parametrize(
+    "result,reaped",
+    [
+        (RunResult(0, b"", b"", True), False),
+        (RunResult(-9, b"x", b"", True, stdout_truncated=True), True),
+        (RunResult(-9, b"", b"", True, timed_out=True), True),
+        (RunResult(0, b"", b"e" * 10, True, stderr_truncated=True), False),
+    ],
+    ids=["normal", "stdout-overflow", "timeout", "stderr-tail"],
+)
+def test_f1_run_as_reaps_on_every_abnormal_exit(
+    monkeypatch: pytest.MonkeyPatch, result: RunResult, reaped: bool
+) -> None:
+    calls: list[str] = []
+    _capture_execute(monkeypatch, "macos-arm64", result)
+    monkeypatch.setattr(plat, "reap_user_processes", lambda u: calls.append(u) or [])
+    plat.run_as(
+        "df-build", ["/bin/true"], env={}, cwd=Path("/"), network=False, timeout=5
+    )
+    assert calls == (["df-build"] if reaped else [])
+
+
+def test_f1_truncated_mechanism_text_is_not_a_launch_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tail = RunResult(1, b"", b"sudo: x", True, stderr_truncated=True)
+    _capture_execute(monkeypatch, "macos-arm64", tail)
+    result = plat.run_as(
+        "df-build", ["/bin/true"], env={}, cwd=Path("/"), network=False, timeout=5
+    )
+    assert result.launched
+
+
+def test_f2_launch_check_returns_once_stdout_has_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakePopen.instances.clear()
+    monkeypatch.setattr(plat, "detect_platform", lambda: "macos-arm64")
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+    started = time.monotonic()
+    plat.spawn_as("df-build", ["/usr/bin/tar"], env={}, cwd=Path("/"), network=False)
+    assert time.monotonic() - started < 0.5
+
+
+@pytest.mark.parametrize(
+    "script,expect",
+    [
+        ("printf x; sleep 5", None),  # data pending: launched, nothing consumed
+        ("exit 3", 3),  # ended in the window: its code
+        ("exec 1>&-; sleep 0.1; exit 4", 4),  # stdout EOF, then the code
+    ],
+)
+def test_f2_launch_outcome_real_process(script: str, expect: int | None) -> None:
+    proc = subprocess.Popen(
+        ["/bin/sh", "-c", script], stdout=subprocess.PIPE, start_new_session=True
+    )
+    assert proc.stdout is not None
+    try:
+        started = time.monotonic()
+        code = plat._launch_outcome(proc, proc.stdout.fileno(), started + 2.0)
+        assert code == expect
+        assert time.monotonic() - started < 1.0
+        if expect is None:
+            assert os.read(proc.stdout.fileno(), 1) == b"x"  # not consumed
+    finally:
+        plat.kill_group(proc.pid)
+        proc.wait(5)
+        proc.stdout.close()
+
+
+def test_f3_producer_stderr_bounded_and_never_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(plat, "reap_user_processes", lambda _u: [])  # never pkill me
+    script = "head -c 2000000 /dev/zero | tr '\\0' e >&2; printf TAIL >&2; printf out"
+    proc = subprocess.Popen(
+        ["/bin/sh", "-c", script],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    prod = plat.SpawnedProducer(proc, "df-build", 5.0)
+    assert prod.wait(20) == 0  # a full stderr pipe did not block the producer
+    assert os.read(prod.fd, 16) == b"out"
+    prod.end()
+    tail = prod.stderr_tail()
+    assert tail.endswith(b"eeTAIL") and len(tail) == plat.STDERR_TAIL_BYTES
+
+
+@MACOS_ONLY
+def test_o1_shared_cache_real_paths() -> None:
+    target = Path("/usr/bin/x")
+    assert plat._shared_cache_problems(target, "/usr/lib/libSystem.B.dylib") == []
+    problems = plat._shared_cache_problems(target, "/usr/lib/libnope-df.dylib")
+    assert problems == [
+        "/usr/bin/x: зависимость /usr/lib/libnope-df.dylib отсутствует (fallback dyld)"
+    ]
+
+
+@pytest.mark.parametrize(
+    "dep,cache,needle",
+    [
+        ("/usr/lib/libSystem.B.dylib", "fake", None),
+        ("/usr/lib/libnope.dylib", "fake", "fallback dyld"),
+        ("/usr/lib/libSystem.B.dylib", "missing", "нельзя проверить кеш dyld"),
+    ],
+)
+def test_o1_absent_system_dependency_needs_shared_cache(
+    monkeypatch: pytest.MonkeyPatch, dep: str, cache: str, needle: str | None
+) -> None:
+    deps = LibDeps((dep,), (), "/usr/lib/dyld")
+    fs = _closure_fs(SYS_LIBS)
+    fs.install(monkeypatch)
+    _with_files(monkeypatch, fs, {})
+    monkeypatch.setattr(plat, "linked_libraries", lambda p: deps)
+    function = _fake_cache if cache == "fake" else None
+    monkeypatch.setattr(plat, "_shared_cache_function", lambda: function)
+    problems = plat.approved_cli_problems(TOOL, "macos-arm64")
+    if needle is None:
+        assert problems == []
+    else:
+        assert any(needle in p for p in problems), problems
+
+
+@pytest.mark.parametrize("owner,bad", [(0, False), (501, True)])
+def test_o2_ld_so_conf_dir_under_system_prefix_is_walked(
+    monkeypatch: pytest.MonkeyPatch, owner: int, bad: bool
+) -> None:
+    nodes = {**CONF_NODES, "/usr/lib/extra": (DIR | 0o755, owner, None)}
+    files = {"/etc/ld.so.conf": b"/usr/lib/extra\n"}
+    problems = _policy(monkeypatch, _tool(ELF_OK), "linux-x86_64", nodes, files)
+    assert bool(problems) is bad, problems
+
+
+@pytest.mark.parametrize("owner,bad", [(0, False), (501, True)])
+def test_o2_preload_entry_under_system_prefix_is_walked(
+    monkeypatch: pytest.MonkeyPatch, owner: int, bad: bool
+) -> None:
+    nodes = {
+        "/etc": (DIR | 0o755, 0, None),
+        "/etc/ld.so.preload": (LIB, 0, None),
+        "/usr/lib/x86_64-linux-gnu/libhook.so": (LIB, owner, None),
+    }
+    files = {"/etc/ld.so.preload": b"/usr/lib/x86_64-linux-gnu/libhook.so\n"}
+    problems = _policy(monkeypatch, _tool(ELF_OK), "linux-x86_64", nodes, files)
+    assert bool(problems) is bad, problems
+
+
+def test_o3_nested_shim_refused_with_clear_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _shim_world(monkeypatch, f"{CLT}\n".encode())
+    table = {"/usr/local/bin/tool": SHIM, CLT: SHIM}  # CLT tool is a wrapper too
+    problems = _policy(monkeypatch, table, "macos-arm64", CLT_NODES)
+    assert any("обёртка xcode-select" in p and "make → gnumake" in p for p in problems)
+    assert not any("указывает на сам shim" in p for p in problems)
+
+
+@pytest.mark.parametrize("name,bad", [("foo", True), ("tool", False)])
+def test_s7_shim_link_with_other_name_refused(
+    monkeypatch: pytest.MonkeyPatch, name: str, bad: bool
+) -> None:
+    _shim_world(monkeypatch, f"{CLT}\n".encode())
+    nodes = {**CLT_NODES, "/opt/bin": (DIR | 0o755, 0, None)}
+    nodes[f"/opt/bin/{name}"] = (LNK | 0o777, 0, "/usr/local/bin/tool")
+    table = {"/usr/local/bin/tool": SHIM, CLT: MAC_OK}
+    cli = {"x": Path(f"/opt/bin/{name}")}
+    problems = _policy(monkeypatch, table, "macos-arm64", nodes, cli=cli)
+    assert bool(problems) is bad, problems
+    if bad:
+        assert any("по имени 'foo'" in p for p in problems)
+
+
+@MACOS_ONLY
+def test_o3_real_make_is_named_as_wrapper() -> None:
+    make = Path("/Library/Developer/CommandLineTools/usr/bin/make")
+    if not make.exists() or not Path("/usr/bin/make").exists():
+        pytest.skip("needs the Command Line Tools")
+    problems = plat.approved_cli_problems(
+        {"make": Path("/usr/bin/make")}, "macos-arm64"
+    )
+    assert any("обёртка xcode-select" in p for p in problems), problems
