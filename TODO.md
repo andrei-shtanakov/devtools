@@ -2910,7 +2910,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 
 > Спека `docs/superpowers/specs/2026-10-13-df-installer-design.md` (rev 8), четыре этапа со
 > своими планами. Этап 1 — план `docs/superpowers/plans/2026-10-16-df-installer-stage1.md`
-> (рекомендован к принятию 21.10; подтверждение владельца ожидается). Исполнение —
+> (принят владельцем 21.10, без r19). Исполнение —
 > subagent-driven; Task 1 (authority-root для `df/`, `tests/df/`) первой и с человеческим
 > мержем.
 
