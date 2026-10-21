@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import select
+import signal
 import subprocess
 import sys
 import textwrap
@@ -102,7 +104,7 @@ def test_needs_human_stops_without_done(tmp_path: Path) -> None:
     with pytest.raises(NeedsHuman) as info:
         run_steps(steps, journal, run_id="r")
     assert info.value.instruction == "run the thing"
-    assert _events(journal) == [("h", "start")]
+    assert _events(journal) == [("h", "start"), ("h", "stopped")]
 
 
 def test_journal_format_and_mode(tmp_path: Path) -> None:
@@ -119,7 +121,7 @@ def test_journal_refuses_symlink(tmp_path: Path) -> None:
     target.write_text("")
     link = tmp_path / "j"
     link.symlink_to(target)
-    with pytest.raises(OSError):
+    with pytest.raises(StepFailed):
         journal_event(link, run_id="r", step="s", event="e")
 
 
@@ -161,6 +163,8 @@ def test_writer_lock_second_process_refused(tmp_path: Path) -> None:
     )
     try:
         assert proc.stdout is not None
+        ready, _, _ = select.select([proc.stdout], [], [], 10)
+        assert ready, "holder did not start"
         assert proc.stdout.readline().strip() == "held"
         with pytest.raises(StepFailed) as info:
             with writer_lock(lay):
@@ -369,6 +373,7 @@ def test_reader_odd_generation_is_transitional(tmp_path: Path) -> None:
 
 READER = textwrap.dedent(
     """
+    import os
     import sys
     from pathlib import Path
     from df.journal import read_consistent
@@ -383,8 +388,7 @@ READER = textwrap.dedent(
 
     sys.addaudithook(hook)
     read_consistent(lay, lambda: 1)
-    sys.addaudithook(lambda *a: None)
-    if any(p == str(lay.lock) for p in opened):
+    if any(os.path.basename(p) == lay.lock.name for p in opened):
         print("OPENED-LOCK")
         sys.exit(1)
     if not any(p == str(lay.generation) for p in opened):
@@ -407,3 +411,156 @@ def test_reader_never_opens_lock(tmp_path: Path) -> None:
         text=True,
     )
     assert done.returncode == 0, done.stdout + done.stderr
+
+
+@pytest.fixture
+def alarm():
+    def boom(*_: object) -> None:
+        raise TimeoutError("blocked in open()")
+
+    old = signal.signal(signal.SIGALRM, boom)
+    signal.alarm(5)
+    yield
+    signal.alarm(0)
+    signal.signal(signal.SIGALRM, old)
+
+
+def test_fifo_at_lock_refused_not_hung(tmp_path: Path, alarm: None) -> None:
+    lay = _layout(tmp_path)
+    lay.install_dir.mkdir(parents=True)
+    os.mkfifo(lay.lock, 0o600)
+    with pytest.raises(StepFailed) as info:
+        with writer_lock(lay):
+            pass
+    assert info.value.step == "lock"
+    assert str(lay.lock) in info.value.detail
+
+
+def test_fifo_at_journal_refused_not_hung(tmp_path: Path, alarm: None) -> None:
+    journal = tmp_path / "j"
+    os.mkfifo(journal, 0o600)
+    with pytest.raises(StepFailed) as info:
+        journal_event(journal, run_id="r", step="s", event="e")
+    assert info.value.step == "journal"
+    assert str(journal) in info.value.detail
+    with pytest.raises(StepFailed):
+        read_journal(journal)
+
+
+def test_fifo_at_generation_refused_not_hung(tmp_path: Path, alarm: None) -> None:
+    lay = _layout(tmp_path)
+    lay.install_dir.mkdir(parents=True)
+    os.mkfifo(lay.generation, 0o600)
+    with pytest.raises(StepFailed) as info:
+        read_consistent(lay, lambda: 1)
+    assert info.value.step == "snapshot"
+
+
+def test_created_dirs_are_0755_under_umask_077(tmp_path: Path) -> None:
+    lay = _layout(tmp_path)
+    old = os.umask(0o077)
+    try:
+        with writer_lock(lay):
+            pass
+    finally:
+        os.umask(old)
+    for d in (lay.var.parent, lay.var, lay.install_dir):
+        assert (d.stat().st_mode & 0o777) == 0o755
+    assert (lay.lock.stat().st_mode & 0o777) == 0o600
+
+
+def test_new_lock_is_0600_under_umask_277(tmp_path: Path) -> None:
+    lay = _layout(tmp_path)
+    old = os.umask(0o277)
+    try:
+        with writer_lock(lay):
+            pass
+    finally:
+        os.umask(old)
+    assert (lay.lock.stat().st_mode & 0o777) == 0o600
+
+
+def test_existing_lock_with_wrong_mode_refused(tmp_path: Path) -> None:
+    lay = _layout(tmp_path)
+    lay.install_dir.mkdir(parents=True)
+    lay.lock.write_text("")
+    lay.lock.chmod(0o644)
+    with pytest.raises(StepFailed, match="0644"):
+        with writer_lock(lay):
+            pass
+
+
+def test_existing_lock_with_extra_link_refused(tmp_path: Path) -> None:
+    lay = _layout(tmp_path)
+    lay.install_dir.mkdir(parents=True)
+    lay.lock.write_text("")
+    lay.lock.chmod(0o600)
+    os.link(lay.lock, tmp_path / "other")
+    with pytest.raises(StepFailed) as info:
+        with writer_lock(lay):
+            pass
+    assert info.value.step == "lock"
+
+
+def test_existing_lock_with_foreign_owner_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lay = _layout(tmp_path)
+    lay.install_dir.mkdir(parents=True)
+    lay.lock.write_text("")
+    lay.lock.chmod(0o600)
+    monkeypatch.setattr(os, "geteuid", lambda: os.getuid() + 1)
+    with pytest.raises(StepFailed, match="владелец"):
+        with writer_lock(lay):
+            pass
+
+
+def test_mkdir_race_reopens_existing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lay = _layout(tmp_path)
+    real = os.mkdir
+
+    def racing(name, mode=0o777, *, dir_fd=None):  # type: ignore[no-untyped-def]
+        real(name, mode, dir_fd=dir_fd)  # the "other process" wins
+        real(name, mode, dir_fd=dir_fd)  # ours: FileExistsError
+
+    monkeypatch.setattr(os, "mkdir", racing)
+    with writer_lock(lay):
+        pass
+    assert lay.install_dir.is_dir()
+
+
+def test_error_messages_name_the_kind(tmp_path: Path) -> None:
+    lay = _layout(tmp_path)
+    lay.install_dir.mkdir(parents=True)
+    lay.lock.mkdir()
+    with pytest.raises(StepFailed, match="не обычный файл"):
+        with writer_lock(lay):
+            pass
+    lay.lock.rmdir()
+    (tmp_path / "t").write_text("")
+    lay.lock.symlink_to(tmp_path / "t")
+    with pytest.raises(StepFailed, match="символическая ссылка"):
+        with writer_lock(lay):
+            pass
+
+
+def test_failed_do_is_journaled(tmp_path: Path) -> None:
+    journal = tmp_path / "j"
+
+    def do() -> None:
+        raise OSError("disk")
+
+    with pytest.raises(OSError):
+        run_steps([Step("x", lambda: False, do)], journal, run_id="r")
+    rows = read_journal(journal)
+    assert rows[-1]["event"] == "failed"
+    assert "OSError: disk" in str(rows[-1]["detail"])
+
+
+def test_read_journal_non_utf8_named(tmp_path: Path) -> None:
+    journal = tmp_path / "j"
+    journal.write_bytes(b"\xff\xfe\n")
+    with pytest.raises(ValueError, match="line 1"):
+        read_journal(journal)
