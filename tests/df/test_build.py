@@ -143,7 +143,10 @@ def test_commands_exact_order_and_flags(plan: BuildPlan, layout: Layout) -> None
         ]
 
     expected = [
-        ("clean", ["/bin/rm", "-rf", "--", str(work), str(layout.build_home / "cache")]),
+        (
+            "clean",
+            ["/bin/rm", "-rf", "--", str(work), str(layout.build_home / "cache")],
+        ),
         (
             "mkdir",
             [
@@ -154,7 +157,10 @@ def test_commands_exact_order_and_flags(plan: BuildPlan, layout: Layout) -> None
         ),
         *repo_steps("devtools", "https://x/devtools.git", SHA_A),
         *repo_steps("steward", "https://x/steward.git", SHA_B),
-        ("python", [uv, "python", "install", "--no-bin", "cpython-3.12.7-linux-x86_64-gnu"]),
+        (
+            "python",
+            [uv, "python", "install", "--no-bin", "cpython-3.12.7-linux-x86_64-gnu"],
+        ),
         sync("devtools", ["governance"]),
         sync("steward", []),
         ("uv-version", [uv, "--version"]),
