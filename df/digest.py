@@ -165,6 +165,10 @@ def resolve_link_in_tree(
     root = canonical_root(logical_root)
     if link_rel.is_absolute() or any(p in ("", ".", "..") for p in link_rel.parts):
         raise TreeError(f"link path is not relative: {link_rel}")
+    for depth in range(1, len(link_rel.parts)):
+        prefix = tree.joinpath(*link_rel.parts[:depth])
+        if not stat.S_ISDIR(_lstat(prefix).st_mode):
+            raise TreeError(f"not a directory: {'/'.join(link_rel.parts[:depth])}")
     if not stat.S_ISLNK(_lstat(tree / link_rel).st_mode):
         raise TreeError(f"not a symbolic link: {link_rel}")
     return _Resolver(tree, root).run(list(link_rel.parts))

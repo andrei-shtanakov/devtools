@@ -194,6 +194,16 @@ def test_link_through_internal_dir_link_resolves(tmp_path: Path) -> None:
     assert got == PurePosixPath("a/b/file")
 
 
+def test_link_rel_through_symlinked_parent_refused(tmp_path: Path) -> None:
+    tree = _link_tree(tmp_path, {})
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    os.symlink("a/b/file", outside / "x")
+    os.symlink(outside, tree / "d")
+    with pytest.raises(TreeError, match="not a directory"):
+        resolve_link_in_tree(tree, LR, PurePosixPath("d/x"))
+
+
 def test_link_cycle_refused(tmp_path: Path) -> None:
     tree = _link_tree(tmp_path, {"a1": "b1", "b1": "a1"})
     with pytest.raises(TreeError, match="too many"):

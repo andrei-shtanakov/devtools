@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import functools
 import os
 import sys
 from collections.abc import Callable
@@ -39,6 +40,7 @@ def _has_linux_acl(names: list[str]) -> bool:
     return not _LINUX_ACL_XATTRS.isdisjoint(names)
 
 
+@functools.cache
 def _libsystem() -> ctypes.CDLL:
     lib = ctypes.CDLL(_LIBSYSTEM, use_errno=True)
     lib.acl_get_fd_np.restype = ctypes.c_void_p

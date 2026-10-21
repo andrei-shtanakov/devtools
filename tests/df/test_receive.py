@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shutil
@@ -532,19 +533,23 @@ print(json.dumps({"error": error, "elapsed": time.monotonic() - start,
 
 
 @pytest.mark.parametrize(
-    "body",
+    ("body", "reason"),
     [
-        b"0 mtime=x\n",
-        b"99 a=b\n",
-        b"9 mtime=x",
-        b"6 =xy\n",
-        b"010 mtime=1\n",
-        b"11 size=-1\n",
-        b"12 path=a\n12 path=b\n",
-        b"11 mtime=1\n11 mtime=2\n",
+        (b"0 mtime=x\n", "invalid pax record length"),
+        (b"99 a=b\n", "runs past the header"),
+        (b"9 mtime=x", "does not end with a newline"),
+        (b"6 =xy\n", "without a valid key"),
+        (b"010 mtime=1\n", "invalid pax record length"),
+        (b"11 size=-1\n", "invalid pax size"),
+        # brief's body: each record is really 10 bytes, so the length is wrong
+        (b"12 path=a\n12 path=b\n", "does not end with a newline"),
+        (b"10 path=a\n10 path=b\n", "repeated pax key: path"),
+        (b"11 mtime=1\n11 mtime=2\n", "repeated pax key: mtime"),
     ],
 )
-def test_malformed_pax_record_refused_fast(tmp_path: Path, body: bytes) -> None:
+def test_malformed_pax_record_refused_fast(
+    tmp_path: Path, body: bytes, reason: str
+) -> None:
     result = subprocess.run(
         [sys.executable, "-c", _PAX_CHILD, str(tmp_path), body.hex()],
         cwd=REPO,
@@ -555,7 +560,7 @@ def test_malformed_pax_record_refused_fast(tmp_path: Path, body: bytes) -> None:
         check=True,
     )
     outcome = json.loads(result.stdout)
-    assert outcome["error"] is not None
+    assert reason in outcome["error"]
     assert outcome["elapsed"] < 1.0
     assert outcome["ended"] is True
     assert outcome["mode"] == 0o700
@@ -886,3 +891,119 @@ def test_remove_empty_dir_refuses_foreign_owner(
     with pytest.raises(TreeError, match="owner"):
         remove_empty_dir(tmp_path, "e")
     assert (tmp_path / "e").is_dir()
+
+
+# --- fix round 1: every refusal is a TreeError ------------------------------
+
+
+def test_long_destination_path_refused(tmp_path: Path, rel: Path) -> None:
+    """Nested 200-byte names beyond the platform PATH_MAX: refused up front."""
+    levels = int(os.pathconf(rel, "PC_PATH_MAX")) // 201 + 2
+    members: list[Member] = []
+    pax: dict[int, bytes] = {}
+    for depth in range(1, levels + 1):
+        pax[len(members)] = _pax(path="/".join(["n" * 200] * depth))
+        members.append(("placeholder", DIR))
+    pax[len(members)] = _pax(path="/".join(["n" * 200] * levels) + "/f")
+    members.append(("placeholder", 0o644, b"x"))
+    reason = _refused(tmp_path, rel, tar_bytes(members, pax=pax))
+    assert "path too long for the destination" in reason or "max_path" in reason
+
+
+def test_path_room_counts_destination_prefix(tmp_path: Path, rel: Path) -> None:
+    room = int(os.pathconf(rel, "PC_PATH_MAX")) - len(os.fsencode(rel / "r")) - 2
+    fits = "/".join(["n" * 200] * (room // 201)) or "n"
+    names = fits.split("/")
+    members: list[Member] = [("p", DIR)] * len(names)
+    pax = {i: _pax(path="/".join(names[: i + 1])) for i in range(len(names))}
+    receive_tree(producer(tmp_path, tar_bytes(members, pax=pax)), rel, "r")
+    assert (rel / "r" / fits).is_dir()
+
+
+def test_sync_failure_is_tree_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rel: Path
+) -> None:
+    boom = OSError(errno.EIO, "injected")
+
+    def fail(root: Path) -> None:
+        raise boom
+
+    monkeypatch.setattr(fsutil, "sync_tree", fail)
+    prod = producer(tmp_path, tar_bytes([("a", 0o644, b"x")]))
+    with pytest.raises(TreeError) as info:
+        receive_tree(prod, rel, "r")
+    assert info.value.__cause__ is boom
+    assert prod.ended
+
+
+def test_producer_tree_error_is_not_rewrapped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rel: Path
+) -> None:
+    prod = producer(tmp_path, tar_bytes([("a", 0o644, b"x")]))
+    own = TreeError("producer left processes behind")
+    real_end = prod.end
+
+    def end() -> None:
+        real_end()
+        raise own
+
+    monkeypatch.setattr(prod, "end", end)
+    with pytest.raises(TreeError) as info:
+        receive_tree(prod, rel, "r")
+    assert info.value is own
+
+
+def test_keyboard_interrupt_not_swallowed(tmp_path: Path, rel: Path) -> None:
+    def hook(point: str, path: str) -> None:
+        raise KeyboardInterrupt
+
+    prod = producer(tmp_path, tar_bytes([("a", 0o644, b"x")]))
+    with pytest.raises(KeyboardInterrupt):
+        receive_tree(prod, rel, "r", _hook=hook)
+    assert prod.ended
+
+
+@pytest.mark.parametrize("case", ["dir", "symlink", "root"])
+def test_body_on_bodiless_record_refused(tmp_path: Path, rel: Path, case: str) -> None:
+    if case == "symlink":
+        data = header("s", SYM, size=1, linkname="t") + b"x".ljust(512, b"\0")
+        data += bytes(1024)
+    else:
+        name = "d" if case == "dir" else "./"
+        data = tar_bytes([(name, DIR, b"x")])
+    assert "body" in _refused(tmp_path, rel, data)
+
+
+def test_bounded_reader_uses_poll_for_high_fd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(receive, "_FD_SETSIZE", 0)
+    read_fd, write_fd = os.pipe()
+    try:
+        os.write(write_fd, b"abc")
+        reader = BoundedReader(read_fd, deadline=time.monotonic() + 5, max_bytes=9)
+        assert reader.read_exact(3) == b"abc"
+        late = BoundedReader(read_fd, deadline=time.monotonic() + 0.1, max_bytes=9)
+        with pytest.raises(TreeError, match="deadline"):
+            late.read_some()
+        monkeypatch.delattr(receive.select, "poll", raising=False)
+        with pytest.raises(TreeError, match="descriptor"):
+            reader.read_some()
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+def test_open_dir_refuses_planted_symlink_and_file(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    (tmp_path / "outside").mkdir()
+    os.symlink(tmp_path / "outside", root / "d")
+    (root / "f").write_bytes(b"")
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for parts in (("d",), ("f",), ("missing",)):
+            with pytest.raises(TreeError):
+                receive._open_dir(root_fd, parts)
+    finally:
+        os.close(root_fd)

@@ -17,6 +17,7 @@ import re
 import select
 import shutil
 import stat
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -61,6 +62,9 @@ _SUPPORTED = (*_REGULAR, _HARDLINK, _SYMLINK, _DIRECTORY)
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _NEW_FILE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 _OLD_FILE = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+#: `select.select` cannot watch descriptors at or above this value.
+_FD_SETSIZE = 1024
+_DEFAULT_PATH_MAX = 1024 if sys.platform == "darwin" else 4096
 
 _Parts = tuple[str, ...]
 
@@ -129,8 +133,7 @@ class BoundedReader:
             left = self.remaining()
             if left <= 0:
                 raise TreeError("deadline exceeded while reading the stream")
-            ready, _, _ = select.select([self._fd], [], [], left)
-            if not ready:
+            if not self._wait_readable(left):
                 continue
             try:
                 chunk = os.read(self._fd, n)
@@ -140,6 +143,17 @@ class BoundedReader:
             if self.consumed > self._max_bytes:
                 raise TreeError("stream exceeds max_stream_bytes")
             return chunk
+
+    def _wait_readable(self, timeout: float) -> bool:
+        if self._fd < _FD_SETSIZE:
+            ready, _, _ = select.select([self._fd], [], [], timeout)
+            return bool(ready)
+        poll_factory = getattr(select, "poll", None)
+        if poll_factory is None:
+            raise TreeError(f"stream descriptor {self._fd} cannot be watched")
+        poller = poll_factory()
+        poller.register(self._fd, select.POLLIN)
+        return bool(poller.poll(timeout * 1000))
 
 
 @dataclass(frozen=True)
@@ -169,13 +183,27 @@ def receive_tree(
     `producer.end()` -> directories `0755`, `created` (copy complete) ->
     `sync_tree` -> `sync_dir(dst_parent)`. The producer is always ended. On
     refusal a `TreeError` is raised and the partial copy stays: this
-    function removes nothing.
+    function removes nothing. Every refusal, including an `OSError` or
+    `ValueError` of the filesystem work, is a `TreeError`.
     """
     _require_producer(producer)
+    try:
+        _receive_and_settle(producer, dst_parent, name, limits, _hook)
+    except (OSError, ValueError) as exc:
+        raise TreeError(f"cannot receive {dst_parent / name}: {exc}") from exc
+
+
+def _receive_and_settle(
+    producer: Producer,
+    dst_parent: Path,
+    name: str,
+    limits: CopyLimits,
+    hook: Callable[[str, str], None],
+) -> None:
     target = dst_parent / name
     with contextlib.ExitStack() as fds:
         try:
-            receiver = _receive(producer, dst_parent, name, limits, _hook, fds)
+            receiver = _receive(producer, dst_parent, name, limits, hook, fds)
         finally:
             producer.end()
         receiver.open_dirs()
@@ -218,10 +246,23 @@ def _receive(
     reader = BoundedReader(
         producer.fd, deadline=deadline, max_bytes=limits.max_stream_bytes
     )
-    receiver = _Receiver(reader, root_fd, limits, hook)
+    room = _path_room(dst_parent, dst_parent / leaf, limits)
+    receiver = _Receiver(reader, root_fd, limits, hook, room)
     receiver.run()
     _check_exit(producer, reader)
     return receiver
+
+
+def _path_room(dst_parent: Path, target: Path, limits: CopyLimits) -> int:
+    """Longest relative member path whose full destination path fits."""
+    try:
+        path_max = os.pathconf(dst_parent, "PC_PATH_MAX")
+    except (OSError, ValueError):
+        path_max = -1
+    if path_max <= 0:
+        path_max = _DEFAULT_PATH_MAX
+    # full path = target + "/" + rel, plus the terminating NUL
+    return min(limits.max_path, path_max - len(os.fsencode(target)) - 2)
 
 
 def _check_exit(producer: Producer, reader: BoundedReader) -> None:
@@ -343,8 +384,10 @@ class _Receiver:
         root_fd: int,
         limits: CopyLimits,
         hook: Callable[[str, str], None],
+        path_room: int,
     ) -> None:
         self.reader = reader
+        self.path_room = path_room
         self.root_fd = root_fd
         self.limits = limits
         self.hook = hook
@@ -398,13 +441,16 @@ class _Receiver:
             pax.get("path", header.name), kind == _DIRECTORY, limits=self.limits
         )
         if not parts:
-            self._root_record(kind)
-            self._discard(size)
+            self._root_record(kind, size)
             return
+        rel = "/".join(parts)
+        if len(rel.encode()) > self.path_room:
+            raise TreeError(f"path too long for the destination: {rel[:64]}...")
+        if size and kind in (_DIRECTORY, _SYMLINK):
+            raise TreeError(f"body on a directory or symbolic link record: {rel}")
         self.objects += 1
         if self.objects > self.limits.max_objects:
             raise TreeError("stream exceeds max_objects")
-        rel = "/".join(parts)
         self.hook("member", rel)
         self._claim(parts)
         try:
@@ -412,11 +458,13 @@ class _Receiver:
         except OSError as exc:
             raise TreeError(f"cannot create {rel}: {exc.strerror or exc}") from exc
 
-    def _root_record(self, kind: bytes) -> None:
+    def _root_record(self, kind: bytes, size: int) -> None:
         if kind != _DIRECTORY:
             raise TreeError("root record must be a directory")
         if not self.first:
             raise TreeError("root record must be the first member")
+        if size:
+            raise TreeError("body on the root record")
 
     def _claim(self, parts: _Parts) -> None:
         parent = parts[:-1]
@@ -521,19 +569,7 @@ class _Receiver:
         self.reader.read_exact(-size % BLOCK)
 
     def _open_dir(self, parts: _Parts) -> int:
-        """Walk accepted directories from the root by descriptors (no follow)."""
-        fd = self.root_fd
-        try:
-            for part in parts:
-                next_fd = os.open(part, _DIR_FLAGS, dir_fd=fd)
-                if fd != self.root_fd:
-                    os.close(fd)
-                fd = next_fd
-        except BaseException:
-            if fd != self.root_fd:
-                os.close(fd)
-            raise
-        return fd
+        return _open_dir(self.root_fd, parts)
 
     def open_dirs(self) -> None:
         """Give every received directory except the root mode `0755`."""
@@ -543,6 +579,28 @@ class _Receiver:
                 os.fchmod(fd, 0o755)
             finally:
                 os.close(fd)
+
+
+def _open_dir(root_fd: int, parts: _Parts) -> int:
+    """Walk directories from `root_fd` by descriptors, never following links.
+
+    Returns `root_fd` itself for no parts, else a new descriptor. A link,
+    non-directory or missing component is a `TreeError`.
+    """
+    fd = root_fd
+    try:
+        for part in parts:
+            next_fd = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            if fd != root_fd:
+                os.close(fd)
+            fd = next_fd
+    except BaseException as exc:
+        if fd != root_fd:
+            os.close(fd)
+        if isinstance(exc, OSError):
+            raise TreeError(f"cannot open directory {'/'.join(parts)}: {exc}") from exc
+        raise
+    return fd
 
 
 def _write_all(fd: int, data: bytes) -> None:
