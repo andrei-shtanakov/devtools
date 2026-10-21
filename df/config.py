@@ -78,10 +78,11 @@ def _check_keys(
 
 
 def _read(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ConfigError(f"{path}: cannot read: {exc}") from exc
+    """Read a required file through the hardened reader; absent is an error."""
+    text = _read_optional(path)
+    if text is None:
+        raise ConfigError(f"{path}: cannot read: file does not exist")
+    return text
 
 
 def _read_optional(path: Path) -> str | None:

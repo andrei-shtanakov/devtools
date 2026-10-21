@@ -330,10 +330,13 @@ def test_loaders_fail_closed_on_links(tmp_path: Path) -> None:
     os.mkfifo(fifo)
     notdir = tmp_path / "file" / "x.toml"
     (tmp_path / "file").write_text("x")
+    loaders = (load_pending, load_accounts, load_install, load_releases)
     for path in (dangling, loop, fifo, notdir):
-        with pytest.raises(ConfigError, match=path.name):
-            load_pending(path)
-        with pytest.raises(ConfigError, match=path.name):
-            load_accounts(path)
+        for loader in loaders:
+            with pytest.raises(ConfigError, match=path.name):
+                loader(path)
+    for loader in (load_install, load_releases):
+        with pytest.raises(ConfigError, match="absent.toml"):
+            loader(tmp_path / "absent.toml")
     assert load_pending(tmp_path / "absent.toml") is None
     assert load_accounts(tmp_path / "absent.toml") == {}
