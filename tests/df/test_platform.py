@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import itertools
 import os
+import plistlib
 import stat
 import subprocess
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -347,12 +349,14 @@ class FakePopen:
         self.stdout = open(os.devnull, "rb")  # noqa: SIM115 - closed by end()
         self.waits: list[float] = []
         self.exit_on_wait: int | None = None
+        self.returncode: int | None = None
         FakePopen.instances.append(self)
 
     def wait(self, timeout: float | None = None) -> int:
         self.waits.append(timeout or 0.0)
         if self.exit_on_wait is None:
             raise subprocess.TimeoutExpired(self.argv, timeout or 0.0)
+        self.returncode = self.exit_on_wait
         return self.exit_on_wait
 
 
@@ -518,8 +522,16 @@ def test_parse_otool_and_readelf_samples() -> None:
         "@rpath/libpython3.10.dylib",
         "/usr/lib/libSystem.B.dylib",
     )
+    loads = plat.parse_otool_loads((base / "otool-loadcmds.txt").read_text())
+    assert loads == {
+        "LC_LOAD_DYLINKER": ("/usr/lib/dyld",),
+        "LC_RPATH": ("@executable_path/../lib",),
+    }
     rpaths = plat.parse_otool_rpaths((base / "otool-loadcmds.txt").read_text())
     assert rpaths == ("@executable_path/../lib",)
+    interp = plat.parse_readelf_interp((base / "readelf-l.txt").read_text())
+    assert interp == "/lib64/ld-linux-x86-64.so.2"
+    assert plat.parse_readelf_interp("no program headers\n") is None
     assert plat.parse_readelf((base / "readelf-d.txt").read_text()) == LibDeps(
         ("libpcre2-8.so.0", "libz.so.1", "libc.so.6"),
         ("/opt/a/lib", "/opt/b/lib", "$ORIGIN/../lib"),
@@ -544,6 +556,9 @@ def test_linked_libraries_real_macho() -> None:
 # --- fake world of system accounts -------------------------------------------
 
 
+POLICY_BLOB = plistlib.dumps({"creationTime": 1.0}).decode()
+
+
 @dataclass
 class World:
     """System accounts as seen through `run_command` and pwd/grp."""
@@ -563,8 +578,8 @@ class World:
         argv = list(argv)
         if argv[0] == "/usr/bin/sudo":
             return ok(self.sudo[1], self.sudo[0])
-        if argv[:3] == ["/usr/bin/dscl", ".", "-read"]:
-            return self._dscl_read(argv[3])
+        if argv[:4] == ["/usr/bin/dscl", "-plist", ".", "-read"]:
+            return self._dscl_read(argv[4])
         if argv[0] == "/usr/bin/getent":
             return self._getent(argv[1], argv[2])
         self.commands.append(argv)
@@ -580,8 +595,9 @@ class World:
         record = self._table(path).get(path.rsplit("/", 1)[1])
         if record is None:
             return RunResult(56, b"", b"DS Error: -14136 (eDSRecordNotFound)", True)
-        text = "".join(f"{k}: {v}\n" for k, v in record.items())
-        return ok(f"AppleMetaNodeLocation: /Local/Default\n{text}".encode())
+        data = {f"dsAttrTypeStandard:{k}": [v] for k, v in record.items()}
+        data["dsAttrTypeNative:accountPolicyData"] = [POLICY_BLOB]
+        return ok(plistlib.dumps(data))
 
     def _getent(self, db: str, name: str) -> RunResult:
         table = self.groups if db == "group" else self.users
@@ -730,6 +746,7 @@ def _ready_world(
         ("sudo-unknown", "sudo -l"),
         ("not-in-accounts", "нет записи"),
         ("state-creating", "state"),
+        ("home-elsewhere", "в намерении"),
     ],
 )
 def test_verify_build_user_problems(
@@ -764,6 +781,10 @@ def test_verify_build_user_problems(
         world.sudo = (1, b"sudo: a password is required\n")
     elif case == "not-in-accounts":
         layout.accounts.unlink()
+    elif case == "home-elsewhere":
+        elsewhere = layout.root / "elsewhere"
+        elsewhere.mkdir(mode=0o700)
+        user["NFSHomeDirectory"] = str(elsewhere)
     elif case == "state-creating":
         _write_account(
             layout, Account("df-build", account.uid, account.gid, "creating", "t")
@@ -961,8 +982,7 @@ def test_create_never_adopts_foreign_home(
     )
     if where == "reserved-name-not-empty":
         assert (reserved / "planted").read_bytes() == b"x"
-    if where != "reserved-name-not-empty":
-        assert world.commands == []
+    assert world.commands == []  # every refusal precedes the first OS command
 
 
 def test_reserved_name_of_root_is_recreated(
@@ -1186,13 +1206,57 @@ def test_read_record_error_is_not_absence(monkeypatch: pytest.MonkeyPatch) -> No
         plat.read_record("user", "df-build")
 
 
-def test_parse_dscl_real_shape() -> None:
-    out = b"NFSHomeDirectory: /var/empty\nRealName:\n Unprivileged User\nUniqueID: -2\n"
-    assert plat.parse_dscl(out) == {
-        "NFSHomeDirectory": "/var/empty",
-        "RealName": "Unprivileged User",
-        "UniqueID": "-2",
-    }
+def test_parse_dscl_captured_records() -> None:
+    base = FIXTURES / "dscl"
+    group = plat.parse_dscl((base / "group-staff.plist").read_bytes())
+    assert group["RecordName"] == "staff, BUILTIN\\Users"
+    assert group["PrimaryGroupID"] == "20"
+    user = plat.parse_dscl((base / "user-human-df-build.plist").read_bytes())
+    assert user["UniqueID"] == "503" and user["UserShell"] == "/bin/zsh"
+    assert not any(k.startswith("dsAttrType") for k in user)  # native keys ignored
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        b"RecordName: df-build\n",
+        b"",
+        plistlib.dumps(["df-build"]),
+        plistlib.dumps({"dsAttrTypeStandard:UniqueID": "401"}),
+        plistlib.dumps({"dsAttrTypeStandard:UniqueID": [401]}),
+    ],
+    ids=["text", "empty", "not-a-dict", "not-a-list", "not-strings"],
+)
+def test_parse_dscl_unparsable_is_refusal(output: bytes) -> None:
+    with pytest.raises(StepFailed, match="неразборн"):
+        plat.parse_dscl(output)
+
+
+def test_human_df_build_refused_with_instruction(
+    monkeypatch: pytest.MonkeyPatch, layout: Layout
+) -> None:
+    world = _world(monkeypatch)
+    human = (FIXTURES / "dscl" / "user-human-df-build.plist").read_bytes()
+    real_run = world.run
+
+    def run(argv: Sequence[str], **kw: object) -> RunResult:
+        if list(argv)[-1] == "/Users/df-build" and "-read" in argv:
+            return ok(human)
+        return real_run(argv, **kw)
+
+    monkeypatch.setattr(plat, "run_command", run)
+    with pytest.raises(StepFailed, match="удалите или переименуйте"):
+        plat.create_build_user(layout)
+    assert world.commands == []
+
+
+@pytest.mark.parametrize(
+    "output",
+    [b"df-build:x:abc:20::/h:/bin/sh\n", b"df-build:x:1:2::/h:/bin/sh\nx\n", b"\xff"],
+)
+def test_parse_getent_unparsable_is_refusal(output: bytes) -> None:
+    with pytest.raises(StepFailed, match="неразборн"):
+        plat.parse_getent("user", "df-build", output)
 
 
 # --- cleanup_tree ------------------------------------------------------------
@@ -1759,3 +1823,265 @@ def test_no_root_tree_walk_in_module() -> None:
     """Root never removes a builder tree itself (spec 3.3 "Очистка", п. 2)."""
     source = Path(plat.__file__).read_text()
     assert "rmtree" not in source and "os.walk" not in source
+
+
+# --- load closure (fix round 1) ---------------------------------------------------
+
+
+def _closure_fs(extra: dict[str, tuple[int, int, str | None]]) -> FakeFs:
+    fs = _good_fs()
+    fs.nodes.update(
+        {
+            "/usr/local/lib": (DIR | 0o755, 0, None),
+            "/opt": (DIR | 0o755, 0, None),
+            "/opt/evil": (DIR | 0o777, 501, None),
+        }
+    )
+    fs.nodes.update(extra)
+    return fs
+
+
+def _fake_libs(monkeypatch: pytest.MonkeyPatch, table: dict[str, LibDeps]) -> list[str]:
+    calls: list[str] = []
+
+    def linked(path: Path) -> LibDeps | None:
+        calls.append(str(path))
+        return table.get(str(path))
+
+    monkeypatch.setattr(plat, "linked_libraries", linked)
+    monkeypatch.setattr(plat, "_peek", lambda _p, _n: b"\0\0\0\0")
+    return calls
+
+
+TOOL = {"tool": Path("/usr/local/bin/tool")}
+LIB = REG | 0o644
+
+
+def test_closure_checks_second_level_library(monkeypatch: pytest.MonkeyPatch) -> None:
+    _closure_fs(
+        {
+            "/usr/local/lib/liba.dylib": (LIB, 0, None),
+            "/usr/local/lib/libc.dylib": (LIB, 0, None),
+            "/opt/evil/libb.dylib": (LIB, 501, None),
+        }
+    ).install(monkeypatch)
+    calls = _fake_libs(
+        monkeypatch,
+        {
+            "/usr/local/bin/tool": LibDeps(("@rpath/liba.dylib",), ("/usr/local/lib",)),
+            "/usr/local/lib/liba.dylib": LibDeps(
+                ("@loader_path/libc.dylib", "/opt/evil/libb.dylib"), ()
+            ),
+            "/usr/local/lib/libc.dylib": LibDeps(("/usr/lib/libSystem.B.dylib",), ()),
+        },
+    )
+    problems = plat.approved_cli_problems(TOOL, "macos-arm64")
+    assert "tool: /opt/evil: владелец uid 501, не root" in problems
+    assert "tool: /opt/evil/libb.dylib: владелец uid 501, не root" in problems
+    # @loader_path resolved against liba's directory, and libc was walked too
+    assert "/usr/local/lib/libc.dylib" in calls
+
+
+def test_closure_executable_path_stays_with_program(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _closure_fs(
+        {
+            "/usr/local/lib/liba.dylib": (LIB, 0, None),
+            "/usr/local/bin/libx.dylib": (LIB, 0, None),
+        }
+    ).install(monkeypatch)
+    calls = _fake_libs(
+        monkeypatch,
+        {
+            "/usr/local/bin/tool": LibDeps(("/usr/local/lib/liba.dylib",), ()),
+            "/usr/local/lib/liba.dylib": LibDeps(("@executable_path/libx.dylib",), ()),
+        },
+    )
+    assert plat.approved_cli_problems(TOOL, "macos-arm64") == []
+    assert calls[-1] == "/usr/local/bin/libx.dylib"
+
+
+def test_closure_cycle_terminates(monkeypatch: pytest.MonkeyPatch) -> None:
+    _closure_fs(
+        {
+            "/usr/local/lib/liba.dylib": (LIB, 0, None),
+            "/usr/local/lib/libb.dylib": (LIB, 0, None),
+        }
+    ).install(monkeypatch)
+    a, b = "/usr/local/lib/liba.dylib", "/usr/local/lib/libb.dylib"
+    calls = _fake_libs(
+        monkeypatch,
+        {
+            "/usr/local/bin/tool": LibDeps((a,), ()),
+            a: LibDeps((b,), ()),
+            b: LibDeps((a,), ()),
+        },
+    )
+    assert plat.approved_cli_problems(TOOL, "macos-arm64") == []
+    assert calls.count(a) == 1 and calls.count(b) == 1
+
+
+def test_closure_depth_limit_is_a_problem(monkeypatch: pytest.MonkeyPatch) -> None:
+    chain = [f"/usr/local/lib/lib{i}.dylib" for i in range(6)]
+    _closure_fs({lib: (LIB, 0, None) for lib in chain}).install(monkeypatch)
+    table = {"/usr/local/bin/tool": LibDeps((chain[0],), ())}
+    table.update({lib: LibDeps((nxt,), ()) for lib, nxt in itertools.pairwise(chain)})
+    _fake_libs(monkeypatch, table)
+    monkeypatch.setattr(plat, "_MAX_LIB_DEPTH", 3)
+    problems = plat.approved_cli_problems(TOOL, "macos-arm64")
+    assert any("цепочка зависимостей длиннее 3" in p for p in problems), problems
+
+
+@pytest.mark.parametrize(
+    "loader,env,needle",
+    [
+        ("/lib64/ld-linux-x86-64.so.2", (), None),
+        ("/opt/evil/ld.so", (), "/opt/evil: владелец uid 501"),
+        ("ld.so", (), "загрузчик ld.so не абсолютный"),
+        (None, ("DYLD_INSERT_LIBRARIES=/x.dylib",), "LC_DYLD_ENVIRONMENT"),
+    ],
+)
+def test_closure_checks_program_loader(
+    monkeypatch: pytest.MonkeyPatch,
+    loader: str | None,
+    env: tuple[str, ...],
+    needle: str | None,
+) -> None:
+    _closure_fs({"/opt/evil/ld.so": (LIB | 0o755, 0, None)}).install(monkeypatch)
+    _fake_libs(monkeypatch, {"/usr/local/bin/tool": LibDeps((), (), loader, env)})
+    platform: PlatformName = "macos-arm64" if env else "linux-x86_64"
+    problems = plat.approved_cli_problems(TOOL, platform)
+    if needle is None:
+        assert problems == []
+    else:
+        assert any(needle in p for p in problems), problems
+
+
+@pytest.mark.parametrize(
+    "where,expected",
+    [
+        ("/usr/lib/x86_64-linux-gnu/libq.so.1", []),
+        (
+            "/usr/local/lib/libq.so.1",
+            ["tool: /usr/local/bin/tool: зависимость libq.so.1 не найдена"],
+        ),
+        (None, ["tool: /usr/local/bin/tool: зависимость libq.so.1 не найдена"]),
+    ],
+    ids=["loader-dir", "ld-so-conf-only", "nowhere"],
+)
+def test_closure_elf_soname_must_be_found(
+    monkeypatch: pytest.MonkeyPatch, where: str | None, expected: list[str]
+) -> None:
+    extra: dict[str, tuple[int, int, str | None]] = {
+        "/usr/lib": (DIR | 0o755, 0, None),
+        "/usr/lib/x86_64-linux-gnu": (DIR | 0o755, 0, None),
+    }
+    if where is not None:
+        extra[where] = (LIB, 0, None)
+    _closure_fs(extra).install(monkeypatch)
+    _fake_libs(monkeypatch, {"/usr/local/bin/tool": LibDeps(("libq.so.1",), ())})
+    problems = plat.approved_cli_problems(TOOL, "linux-x86_64")
+    assert problems[: len(expected)] == expected
+    assert bool(problems) == bool(expected)
+
+
+def test_closure_elf_soname_in_rpath_is_walked(monkeypatch: pytest.MonkeyPatch) -> None:
+    _closure_fs({"/opt/evil/libq.so.1": (LIB, 501, None)}).install(monkeypatch)
+    _fake_libs(
+        monkeypatch,
+        {
+            "/usr/local/bin/tool": LibDeps(
+                ("libq.so.1",), ("$ORIGIN/../../../opt/evil",)
+            )
+        },
+    )
+    problems = plat.approved_cli_problems(TOOL, "linux-x86_64")
+    assert "tool: /opt/evil/libq.so.1: владелец uid 501, не root" in problems
+
+
+# --- strict parsers of tool output (fix round 1) -------------------------------------
+
+
+@pytest.mark.parametrize(
+    "parser,text",
+    [
+        (plat.parse_otool_deps, "/x:\n\t/usr/lib/libz.dylib (weird)\n"),
+        (plat.parse_otool_deps, "/x:\nstray line\n"),
+        (plat.parse_otool_loads, "Load command 1\n      cmd LC_RPATH\n  cmdsize 32\n"),
+        (
+            plat.parse_otool_loads,
+            "Load command 1\n      cmd LC_LOAD_DYLINKER\n   name /usr/lib/dyld\n",
+        ),
+        (plat.parse_readelf, " 0x1 (NEEDED)             Shared library: libz\n"),
+        (plat.parse_readelf_interp, "  [Requesting program interpreter /lib/ld]\n"),
+    ],
+)
+def test_tool_output_unparsable_is_refusal(
+    parser: Callable[[str], object], text: str
+) -> None:
+    with pytest.raises(StepFailed, match="неразборный"):
+        parser(text)
+
+
+def test_otool_without_command_line_tools(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    binary = tmp_path / "bin"
+    binary.write_bytes(b"\xcf\xfa\xed\xfe" + bytes(60))
+    no_clt = RunResult(1, b"", b"xcrun: error: invalid active developer path", True)
+    monkeypatch.setattr(plat, "run_command", lambda _a, **_k: no_clt)
+    with pytest.raises(StepFailed, match="xcode-select --install"):
+        plat.linked_libraries(binary)
+    seen: list[list[str]] = []
+
+    def run(argv: Sequence[str], **_kw: object) -> RunResult:
+        seen.append(list(argv))
+        return ok(b"/usr/bin/otool\n") if argv[0] == "/usr/bin/xcrun" else no_clt
+
+    monkeypatch.setattr(plat, "run_command", run)
+    with pytest.raises(StepFailed, match="Command Line Tools"):
+        plat.linked_libraries(binary)
+    assert seen[0] == ["/usr/bin/xcrun", "--find", "otool"]
+
+
+# --- review minors (fix round 1) -----------------------------------------------------
+
+
+def test_spawned_producer_end_skips_killpg_after_reap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    proc = FakePopen(["tar"])
+    proc.exit_on_wait = 0
+    proc.wait(1.0)  # the consumer reaped the leader: its pid may be reused
+    monkeypatch.setattr(os, "killpg", lambda _p, _s: pytest.fail("killpg called"))
+    monkeypatch.setattr(plat, "reap_user_processes", lambda _u: [])
+    prod = plat.SpawnedProducer(
+        proc,  # type: ignore[arg-type]
+        "df-build",
+        1.0,
+        (tmp_path / "err").open("w+b"),
+    )
+    prod.end()
+
+
+def test_retry_quarantine_listing_error_is_named(
+    monkeypatch: pytest.MonkeyPatch, layout: Layout
+) -> None:
+    def denied(_fd: object) -> list[str]:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(os, "listdir", denied)
+    with pytest.raises(StepFailed) as info:
+        plat.retry_quarantine(layout)
+    assert info.value.step == "cleanup"
+
+
+@pytest.mark.parametrize("rel", ["t*", "c?che", "[t]mp", "a\\b"])
+def test_cleanup_build_home_refuses_glob(
+    monkeypatch: pytest.MonkeyPatch, layout: Layout, rel: str
+) -> None:
+    monkeypatch.setattr(plat, "run_as", lambda *_a, **_k: pytest.fail("ran"))
+    with pytest.raises(StepFailed) as info:
+        plat.cleanup_build_home(layout, rel)
+    assert info.value.step == "verify"

@@ -14,6 +14,7 @@ import errno
 import functools
 import grp
 import os
+import plistlib
 import pwd
 import re
 import selectors
@@ -28,6 +29,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Literal
+from xml.parsers.expat import ExpatError
 
 from df import fsutil
 from df.acl import acl_present_path
@@ -68,6 +70,18 @@ SYSTEM_LIB_DIRS: Mapping[PlatformName, tuple[str, ...]] = {
     "macos-arm64": ("/usr/lib/", "/System/Library/"),
     "linux-x86_64": ("/lib/", "/lib64/", "/usr/lib/", "/usr/lib64/"),
 }
+#: Directories the dynamic loader searches for an ELF soname by default.
+LOADER_DIRS: Mapping[PlatformName, tuple[str, ...]] = {
+    "macos-arm64": ("/usr/lib",),
+    "linux-x86_64": (
+        "/lib/x86_64-linux-gnu",
+        "/usr/lib/x86_64-linux-gnu",
+        "/lib64",
+        "/usr/lib64",
+        "/lib",
+        "/usr/lib",
+    ),
+}
 #: Free UID/GID are chosen from these ranges (macOS: 400-499, spec 3.3).
 ID_RANGE: Mapping[PlatformName, range] = {
     "macos-arm64": range(400, 500),
@@ -83,6 +97,8 @@ _PEEK_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 _NO_WRITE_OTHERS = stat.S_IWGRP | stat.S_IWOTH
 _MAX_HOPS = 40
 _MAX_SHEBANG_DEPTH = 4
+_MAX_LIB_DEPTH = 16
+_GLOB_CHARS = frozenset("*?[]\\")
 _LAUNCH_CHECK_SECONDS = 2.0
 _READ_CHUNK = 64 << 10
 _ROLE_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C"}
@@ -109,6 +125,7 @@ _MECHANISM_EXIT = frozenset({1, 65, 71, 125, 126, 127})
 _MECHANISM_PREFIX = (b"sudo: ", b"sandbox-exec: ", b"setpriv: ", b"unshare: ")
 _ENV_PREFIX = b"env: "
 _DSCL_NOT_FOUND = b"eDSRecordNotFound"
+_DS_STANDARD = "dsAttrTypeStandard:"
 _GETENT_NOT_FOUND = 2
 _MACHO_MAGIC = frozenset(
     {
@@ -255,8 +272,14 @@ def _execute(
         )
     except OSError as exc:
         return RunResult(LAUNCH_FAILED, b"", str(exc).encode(), launched=False)
-    with proc:
+    try:
         return _collect(proc, time.monotonic() + timeout, limit)
+    finally:
+        # Not `with proc`: its exit waits without a limit (a process stuck in
+        # uninterruptible sleep would hang the caller after the kill).
+        for pipe in (proc.stdout, proc.stderr):
+            if pipe is not None:
+                pipe.close()
 
 
 def _collect(proc: subprocess.Popen[bytes], deadline: float, limit: int) -> RunResult:
@@ -383,7 +406,8 @@ class SpawnedProducer:
         A process of the role left alive, or a child not reaped in
         `reap_seconds`, is a `TreeError`.
         """
-        kill_group(self._proc.pid)
+        if self._proc.returncode is None:  # a reaped leader's pid may be reused
+            kill_group(self._proc.pid)
         left = reap_user_processes(self._user)
         try:
             self._proc.wait(self._reap_seconds)
@@ -483,11 +507,15 @@ def _user_pids(uid: int) -> list[int] | None:
         fields = line.split()
         if not fields:
             continue
-        if len(fields) != 3 or not fields[0].isdigit() or not fields[1].isdigit():
+        if len(fields) != 3 or not all(_is_number(f) for f in fields[:2]):
             return None
         if int(fields[1]) == uid and not fields[2].startswith("Z"):
             pids.append(int(fields[0]))
     return pids
+
+
+def _is_number(text: str) -> bool:
+    return text.isascii() and text.isdigit()
 
 
 # --- sudo rules ---------------------------------------------------------------
@@ -598,8 +626,10 @@ def attr_argv(
 def read_record(kind: RecordKind, name: str) -> dict[str, str] | None:
     """Attributes of the user or group record `name`; `None` if absent.
 
-    macOS: `dscl . -read`; Linux: `getent passwd|group` (fields `uid`,
-    `gid`, `home`, `shell` / `gid`). A failed read is `StepFailed`.
+    macOS: `dscl -plist . -read` (standard attributes, without the
+    `dsAttrTypeStandard:` prefix); Linux: `getent passwd|group` (fields `uid`,
+    `gid`, `home`, `shell` / `gid`). A failed read or unparsable output is
+    `StepFailed`, never "absent"; unknown extra attributes are ignored.
     """
     if detect_platform() == "macos-arm64":
         return _read_dscl(kind, name)
@@ -608,7 +638,7 @@ def read_record(kind: RecordKind, name: str) -> dict[str, str] | None:
 
 def _read_dscl(kind: RecordKind, name: str) -> dict[str, str] | None:
     path = f"/{'Groups' if kind == 'group' else 'Users'}/{name}"
-    result = run_command([_DSCL, ".", "-read", path])
+    result = run_command([_DSCL, "-plist", ".", "-read", path])
     if result.launched and result.returncode == 0:
         return parse_dscl(result.stdout)
     if result.launched and _DSCL_NOT_FOUND in result.stdout + result.stderr:
@@ -617,19 +647,27 @@ def _read_dscl(kind: RecordKind, name: str) -> dict[str, str] | None:
 
 
 def parse_dscl(output: bytes) -> dict[str, str]:
-    """`Key: value` lines of `dscl -read`; continuation lines join with a space."""
-    record: dict[str, list[str]] = {}
-    key: str | None = None
-    for line in output.decode("utf-8", "replace").splitlines():
-        if line.startswith(" ") and key is not None:
-            record[key].append(line.strip())
+    """Standard attributes of a `dscl -plist -read` record.
+
+    Every value is an array of strings; several values join with `", "` (and
+    so never equal a single intended value). Native attributes are ignored.
+    """
+    try:
+        data = plistlib.loads(output, fmt=plistlib.FMT_XML)
+    except (plistlib.InvalidFileException, ValueError, ExpatError) as exc:
+        raise StepFailed("build-user", f"неразборный вывод dscl: {exc}") from exc
+    if not isinstance(data, dict):
+        raise StepFailed("build-user", "неразборный вывод dscl: не словарь")
+    record: dict[str, str] = {}
+    for key, values in data.items():
+        if not isinstance(key, str) or not key.startswith(_DS_STANDARD):
             continue
-        head, sep, rest = line.partition(":")
-        if not sep or not head or " " in head:
-            raise StepFailed("build-user", f"неразборный вывод dscl: {line!r}")
-        key = head
-        record[key] = [rest.strip()] if rest.strip() else []
-    return {k: " ".join(v) for k, v in record.items()}
+        if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+            raise StepFailed(
+                "build-user", f"неразборное значение dscl {key}: {values!r}"
+            )
+        record[key.removeprefix(_DS_STANDARD)] = ", ".join(values)
+    return record
 
 
 def _read_getent(kind: RecordKind, name: str) -> dict[str, str] | None:
@@ -643,11 +681,15 @@ def _read_getent(kind: RecordKind, name: str) -> dict[str, str] | None:
 
 
 def parse_getent(kind: RecordKind, name: str, output: bytes) -> dict[str, str]:
-    """Fields of one `getent passwd|group` line for `name`."""
-    lines = output.decode("utf-8", "replace").splitlines()
+    """Fields of exactly one `getent passwd|group` line for `name`."""
+    try:
+        lines = output.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        lines = []
     parts = lines[0].split(":") if len(lines) == 1 else []
     want = 4 if kind == "group" else 7
-    if len(parts) != want or parts[0] != name:
+    ids = parts[2:3] if kind == "group" else parts[2:4]
+    if len(parts) != want or parts[0] != name or not all(map(_is_number, ids)):
         raise StepFailed("build-user", f"неразборный вывод getent: {output!r}")
     if kind == "group":
         return {"gid": parts[2]}
@@ -666,8 +708,11 @@ def _op_fields(
 # --- account identity ---------------------------------------------------------
 
 
-def account_problems(account: Account) -> list[str]:
-    """Facts of the OS against the record, regardless of `state` (spec 3.2)."""
+def account_problems(account: Account, home: Path | None = None) -> list[str]:
+    """Facts of the OS against the record, regardless of `state` (spec 3.2).
+
+    With `home`, the record's home directory must also be that path.
+    """
     try:
         entry = pwd.getpwnam(account.name)
     except KeyError:
@@ -676,6 +721,8 @@ def account_problems(account: Account) -> list[str]:
     problems += _group_problems(account, entry)
     if entry.pw_shell not in NOLOGIN_SHELLS:
         problems.append(f"оболочка {entry.pw_shell} разрешает вход")
+    if home is not None and Path(entry.pw_dir) != home:
+        problems.append(f"домашний каталог {entry.pw_dir}, в намерении {home}")
     problems += _home_problems(account, Path(entry.pw_dir))
     rules = sudo_rules(account.name)
     if rules != "none":
@@ -745,7 +792,7 @@ def verify_build_user(layout: Layout) -> list[str]:
     if account is None:
         return [f"нет записи {BUILD_USER} в accounts.toml"]
     problems = [] if account.state == "ready" else [f"state = {account.state}"]
-    return problems + account_problems(account)
+    return problems + account_problems(account, layout.build_home)
 
 
 def create_build_user(layout: Layout) -> Account:
@@ -765,7 +812,7 @@ def create_build_user(layout: Layout) -> Account:
         if account.state == "ready":
             return account
         _complete(platform, layout, account)
-        problems = account_problems(account)
+        problems = account_problems(account, layout.build_home)
         if problems:
             raise StepFailed("build-user", "; ".join(problems))
         ready = replace(account, state="ready")
@@ -879,7 +926,7 @@ def _home_absent(layout: Layout, account: Account) -> bool:
     try:
         st = os.lstat(home)
     except FileNotFoundError:
-        _check_reserved(home.parent / HOME_TMP_NAME, account)
+        _clear_reserved(home.parent, account)
         return True
     if (
         not stat.S_ISDIR(st.st_mode)
@@ -892,15 +939,27 @@ def _home_absent(layout: Layout, account: Account) -> bool:
     return False
 
 
-def _check_reserved(path: Path, account: Account) -> None:
+def _clear_reserved(parent: Path, account: Account) -> None:
+    """Remove our empty reserved directory before any OS command.
+
+    Ours: a directory (not a link) owned by root or the recorded UID; the name
+    did not exist when the intent was written and only root writes `parent`.
+    Anything else, or a non-empty one, refuses; root never lists inside it.
+    """
+    path = parent / HOME_TMP_NAME
+    parent_fd = os.open(parent, _DIR_FLAGS)
     try:
-        st = os.lstat(path)
-    except FileNotFoundError:
-        return
-    if not stat.S_ISDIR(st.st_mode) or st.st_uid not in (ROOT_UID, account.uid):
-        raise StepFailed(
-            "build-user", f"каталог {path} существует, создан не darkfactory"
-        )
+        try:
+            st = os.stat(HOME_TMP_NAME, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid not in (ROOT_UID, account.uid):
+            raise StepFailed(
+                "build-user", f"каталог {path} существует, создан не darkfactory"
+            )
+        _remove_reserved(parent_fd, path)
+    finally:
+        os.close(parent_fd)
 
 
 def _make_home(layout: Layout, account: Account) -> None:
@@ -908,7 +967,6 @@ def _make_home(layout: Layout, account: Account) -> None:
     home = layout.build_home
     parent_fd = os.open(home.parent, _DIR_FLAGS)
     try:
-        _remove_reserved(parent_fd, home.parent / HOME_TMP_NAME)
         os.mkdir(HOME_TMP_NAME, 0o700, dir_fd=parent_fd)
         fsutil.fault_point("created", home.parent / HOME_TMP_NAME)
         tmp_fd = os.open(HOME_TMP_NAME, _DIR_FLAGS, dir_fd=parent_fd)
@@ -930,8 +988,6 @@ def _remove_reserved(parent_fd: int, path: Path) -> None:
     """Remove our empty reserved directory; non-empty refuses."""
     try:
         os.rmdir(HOME_TMP_NAME, dir_fd=parent_fd)
-    except FileNotFoundError:
-        return
     except OSError as exc:
         if exc.errno in (errno.ENOTEMPTY, errno.EEXIST):
             raise StepFailed(
@@ -1134,6 +1190,8 @@ def cleanup_build_home(
     `run_as(df-build)+`.
     """
     _check_name(rel, "verify")
+    if any(c in rel for c in _GLOB_CHARS):
+        raise StepFailed("verify", f"имя с метасимволом find -name: {rel!r}")
     deadline = time.monotonic() + budget
     home = layout.build_home
     target = home / rel
@@ -1173,6 +1231,8 @@ def retry_quarantine(layout: Layout) -> list[str]:
         raise StepFailed("cleanup", f"{layout.quarantine}: {exc.strerror}") from exc
     try:
         names = sorted(os.listdir(fd))
+    except OSError as exc:
+        raise StepFailed("cleanup", f"{layout.quarantine}: {exc.strerror}") from exc
     finally:
         os.close(fd)
     left: list[str] = []
@@ -1193,31 +1253,68 @@ def retry_quarantine(layout: Layout) -> list[str]:
 
 @dataclass(frozen=True)
 class LibDeps:
-    """Native dependencies of a binary and its search paths."""
+    """Native dependencies of a binary, its search paths and its loader.
+
+    `loader`: ELF `PT_INTERP` / Mach-O `LC_LOAD_DYLINKER`; `dyld_environment`:
+    Mach-O `LC_DYLD_ENVIRONMENT` entries (always a problem).
+    """
 
     needed: tuple[str, ...]
     rpaths: tuple[str, ...]
+    loader: str | None = None
+    dyld_environment: tuple[str, ...] = ()
 
 
-_OTOOL_RPATH = re.compile(r"\s*path (.*) \(offset \d+\)")
-_READELF_NEEDED = re.compile(r".*\(NEEDED\)\s+Shared library: \[(.*)\]")
-_READELF_RPATH = re.compile(r".*\((?:RPATH|RUNPATH)\)\s+Library r(?:un)?path: \[(.*)\]")
+_OTOOL_DEP = re.compile(r"\t(.+?) \(compatibility version [^()]*\)")
+_OTOOL_FIELD = re.compile(r"\s*(?:name|path) (.+) \(offset \d+\)")
+#: `otool -l` load commands whose path field is read.
+_OTOOL_PATH_CMDS = frozenset(
+    {"LC_RPATH", "LC_LOAD_DYLINKER", "LC_DYLD_ENVIRONMENT", "LC_ID_DYLIB"}
+)
+_READELF_NEEDED = re.compile(r"\s*0x[0-9a-f]+ \(NEEDED\)\s+Shared library: \[(.+)\]")
+_READELF_RPATH = re.compile(
+    r"\s*0x[0-9a-f]+ \((?:RPATH|RUNPATH)\)\s+Library r(?:un)?path: \[(.*)\]"
+)
+_READELF_INTERP = re.compile(r"\s*\[Requesting program interpreter: (.+)\]")
+_XCRUN = "/usr/bin/xcrun"
+_NO_CLT = (
+    "Command Line Tools не установлены (нужен otool): "
+    "установите командой `xcode-select --install`"
+)
 
 
 def linked_libraries(path: Path) -> LibDeps | None:
-    """Dependencies of a Mach-O (`otool`) or ELF (`readelf -d`) file.
+    """Dependencies of a Mach-O (`otool -L`, `otool -l`) or ELF (`readelf -d`,
+    `readelf -l`) file.
 
     Never `ldd`: glibc `ldd` may execute the file. Not a binary -> `None`;
-    a tool failure -> `StepFailed("cli")`.
+    a tool failure or unparsable output -> `StepFailed("cli")`.
     """
     magic = _peek(path, 4)
     if magic in _MACHO_MAGIC:
-        deps = _tool_output([_OTOOL, "-L", str(path)])
-        loads = _tool_output([_OTOOL, "-l", str(path)])
-        return LibDeps(parse_otool_deps(deps), parse_otool_rpaths(loads))
+        _require_otool()
+        loads = parse_otool_loads(_tool_output([_OTOOL, "-l", str(path)]))
+        own = set(loads.get("LC_ID_DYLIB", ()))
+        deps = parse_otool_deps(_tool_output([_OTOOL, "-L", str(path)]))
+        dylinker = loads.get("LC_LOAD_DYLINKER", ())
+        return LibDeps(
+            tuple(d for d in deps if d not in own),
+            loads.get("LC_RPATH", ()),
+            dylinker[0] if dylinker else None,
+            loads.get("LC_DYLD_ENVIRONMENT", ()),
+        )
     if magic == _ELF_MAGIC:
-        return parse_readelf(_tool_output([_READELF, "-d", str(path)]))
+        dynamic = parse_readelf(_tool_output([_READELF, "-d", str(path)]))
+        interp = parse_readelf_interp(_tool_output([_READELF, "-l", str(path)]))
+        return replace(dynamic, loader=interp)
     return None
+
+
+def _require_otool() -> None:
+    """`/usr/bin/otool` is a Command Line Tools shim; refuse clearly without them."""
+    result = run_command([_XCRUN, "--find", "otool"])
+    if not result.launched or result.returncode != 0:
+        raise StepFailed("cli", _NO_CLT)
 
 
 def _peek(path: Path, size: int) -> bytes:
@@ -1233,35 +1330,69 @@ def _peek(path: Path, size: int) -> bytes:
 
 def _tool_output(argv: list[str]) -> str:
     result = run_command(argv)
+    if b"xcrun: error" in result.stderr:
+        raise StepFailed("cli", _NO_CLT)
     if not result.launched or result.returncode != 0:
         raise StepFailed("cli", f"{' '.join(argv)}: {_brief(result)}")
-    return result.stdout.decode("utf-8", "replace")
+    try:
+        return result.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise StepFailed("cli", f"{' '.join(argv)}: вывод не UTF-8") from exc
+
+
+def _unparsable(tool: str, line: str) -> StepFailed:
+    return StepFailed("cli", f"неразборный вывод {tool}: {line!r}")
 
 
 def parse_otool_deps(text: str) -> tuple[str, ...]:
-    """Install names from `otool -L` (tab-indented lines)."""
+    """Install names from `otool -L`; header lines end with `:`."""
     found: list[str] = []
     for line in text.splitlines():
         if not line.startswith("\t"):
+            if not line.endswith(":"):
+                raise _unparsable("otool -L", line)
             continue
-        name = line.strip().rsplit(" (compatibility version", 1)[0]
-        if name not in found:
-            found.append(name)
+        match = _OTOOL_DEP.fullmatch(line)
+        if match is None:
+            raise _unparsable("otool -L", line)
+        if match.group(1) not in found:
+            found.append(match.group(1))
     return tuple(found)
+
+
+def parse_otool_loads(text: str) -> dict[str, tuple[str, ...]]:
+    """Path field of each `_OTOOL_PATH_CMDS` load command in `otool -l`.
+
+    A listed command without a parsable `name`/`path` field is refused;
+    other commands and fields are ignored.
+    """
+    found: dict[str, list[str]] = {}
+    pending: str | None = None
+    for line in text.splitlines():
+        words = line.split()
+        if words[:1] == ["cmd"] or words[:2] == ["Load", "command"]:
+            if pending is not None:
+                raise _unparsable("otool -l", f"{pending} без пути")
+            pending = words[1] if words[:1] == ["cmd"] else None
+            pending = pending if pending in _OTOOL_PATH_CMDS else None
+            continue
+        if pending is None or words[:1] not in (["name"], ["path"]):
+            continue
+        match = _OTOOL_FIELD.fullmatch(line)
+        if match is None:
+            raise _unparsable("otool -l", line)
+        values = found.setdefault(pending, [])
+        if match.group(1) not in values:
+            values.append(match.group(1))
+        pending = None
+    if pending is not None:
+        raise _unparsable("otool -l", f"{pending} без пути")
+    return {k: tuple(v) for k, v in found.items()}
 
 
 def parse_otool_rpaths(text: str) -> tuple[str, ...]:
     """`LC_RPATH` paths from `otool -l`."""
-    found: list[str] = []
-    in_rpath = False
-    for line in text.splitlines():
-        if line.strip().startswith("cmd "):
-            in_rpath = line.split() == ["cmd", "LC_RPATH"]
-            continue
-        match = _OTOOL_RPATH.fullmatch(line) if in_rpath else None
-        if match and match.group(1) not in found:
-            found.append(match.group(1))
-    return tuple(found)
+    return parse_otool_loads(text).get("LC_RPATH", ())
 
 
 def parse_readelf(text: str) -> LibDeps:
@@ -1269,11 +1400,32 @@ def parse_readelf(text: str) -> LibDeps:
     needed: list[str] = []
     rpaths: list[str] = []
     for line in text.splitlines():
-        if match := _READELF_NEEDED.fullmatch(line):
+        if "(NEEDED)" in line:
+            match = _READELF_NEEDED.fullmatch(line)
+            if match is None:
+                raise _unparsable("readelf -d", line)
             needed.append(match.group(1))
-        elif match := _READELF_RPATH.fullmatch(line):
+        elif "(RPATH)" in line or "(RUNPATH)" in line:
+            match = _READELF_RPATH.fullmatch(line)
+            if match is None:
+                raise _unparsable("readelf -d", line)
             rpaths += [p for p in match.group(1).split(":") if p]
     return LibDeps(tuple(needed), tuple(rpaths))
+
+
+def parse_readelf_interp(text: str) -> str | None:
+    """`PT_INTERP` from `readelf -l`; `None` for a file without one."""
+    found: list[str] = []
+    for line in text.splitlines():
+        if "Requesting program interpreter" not in line:
+            continue
+        match = _READELF_INTERP.fullmatch(line)
+        if match is None:
+            raise _unparsable("readelf -l", line)
+        found.append(match.group(1))
+    if len(set(found)) > 1:
+        raise _unparsable("readelf -l", f"несколько интерпретаторов {found}")
+    return found[0] if found else None
 
 
 # --- trusted paths (spec 3.10) -------------------------------------------------
@@ -1370,57 +1522,121 @@ def _cli_problems(path: Path, platform: PlatformName, depth: int) -> list[str]:
     return problems
 
 
-def _library_problems(target: Path, platform: PlatformName) -> list[str]:
-    deps = linked_libraries(target)
+def _library_problems(program: Path, platform: PlatformName) -> list[str]:
+    """The whole load closure of `program` (spec 3.10, native dependencies).
+
+    Every library resolved outside `SYSTEM_LIB_DIRS` must be trusted and its
+    own dependencies are checked the same way (visited set, depth limit).
+    """
+    deps = linked_libraries(program)
     if deps is None:
         return []
-    origin = str(target.parent)
+    exe_dir = str(program.parent)
+    problems = _loader_problems(program, deps, platform)
+    exe_rpaths, found = _search_dirs(program, deps, exe_dir, platform)
+    problems += found
+    visited = {program}
+    queue: list[tuple[Path, LibDeps, int]] = [(program, deps, 0)]
+    while queue:
+        obj, obj_deps, depth = queue.pop(0)
+        rpaths, found = _search_dirs(obj, obj_deps, exe_dir, platform)
+        problems += found
+        search = rpaths + [r for r in exe_rpaths if r not in rpaths]
+        for dep in obj_deps.needed:
+            libs, found = _resolve(obj, dep, exe_dir, search, platform)
+            problems += found
+            for lib in libs:
+                trust, target = _walk(lib)
+                problems += trust
+                if target is None or target in visited:
+                    continue
+                visited.add(target)
+                if depth + 1 >= _MAX_LIB_DEPTH:
+                    problems.append(
+                        f"{target}: цепочка зависимостей длиннее {_MAX_LIB_DEPTH}"
+                    )
+                    continue
+                sub = linked_libraries(target)
+                if sub is not None:
+                    queue.append((target, sub, depth + 1))
+    return list(dict.fromkeys(problems))
+
+
+def _loader_problems(program: Path, deps: LibDeps, platform: PlatformName) -> list[str]:
+    problems = [
+        f"{program}: LC_DYLD_ENVIRONMENT {env} запрещён"
+        for env in deps.dyld_environment
+    ]
+    if deps.loader is None:
+        return problems
+    if not deps.loader.startswith("/"):
+        return [*problems, f"{program}: загрузчик {deps.loader} не абсолютный"]
+    return problems + _location_problems(Path(deps.loader), platform)
+
+
+def _search_dirs(
+    obj: Path, deps: LibDeps, exe_dir: str, platform: PlatformName
+) -> tuple[list[Path], list[str]]:
+    """Expanded run paths of `obj` and the problems of those directories."""
+    dirs: list[Path] = []
     problems: list[str] = []
-    rpaths: list[Path] = []
     for raw in deps.rpaths:
-        expanded = _expand(raw, origin)
+        expanded = _expand(raw, str(obj.parent), exe_dir)
         if expanded is None:
-            problems.append(f"{target}: путь поиска {raw} не разрешён")
+            problems.append(f"{obj}: путь поиска {raw} не разрешён")
             continue
-        rpaths.append(expanded)
-        problems += _location_problems(expanded, platform)
-    for dep in deps.needed:
-        problems += _dependency_problems(target, dep, origin, rpaths, platform)
-    return problems
+        if expanded not in dirs:
+            dirs.append(expanded)
+            problems += _location_problems(expanded, platform)
+    return dirs, problems
 
 
-def _dependency_problems(
-    target: Path, dep: str, origin: str, rpaths: list[Path], platform: PlatformName
-) -> list[str]:
+def _resolve(
+    obj: Path, dep: str, exe_dir: str, search: list[Path], platform: PlatformName
+) -> tuple[list[Path], list[str]]:
+    """Non-system files `dep` of `obj` may load, and resolution problems."""
+    missing = [f"{obj}: зависимость {dep} не найдена"]
     if dep.startswith("@rpath/"):
-        candidates = [r / dep.removeprefix("@rpath/") for r in rpaths]
-        present = [c for c in candidates if _exists(c)]
-        if not present:
-            return [f"{target}: зависимость {dep} не найдена"]
-        return [p for c in present for p in _location_problems(c, platform)]
-    if "/" not in dep:  # ELF soname: run paths, then the system directories
-        present = [r / dep for r in rpaths if _exists(r / dep)]
-        return [p for c in present for p in _location_problems(c, platform)]
-    expanded = _expand(dep, origin)
+        found = [r / dep.removeprefix("@rpath/") for r in search]
+        found = [c for c in found if _exists(c)]
+        return (
+            [c for c in found if not _is_system(c, platform)],
+            [] if found else missing,
+        )
+    if "/" not in dep:  # ELF soname: run paths, then the loader's directories
+        found = [r / dep for r in search if _exists(r / dep)]
+        if found:
+            return [c for c in found if not _is_system(c, platform)], []
+        standard = [Path(d) / dep for d in LOADER_DIRS[platform]]
+        return [], [] if any(_exists(c) for c in standard) else missing
+    expanded = _expand(dep, str(obj.parent), exe_dir)
     if expanded is None:
-        return [f"{target}: зависимость {dep} не разрешена"]
-    return _location_problems(expanded, platform)
+        return [], [f"{obj}: зависимость {dep} не разрешена"]
+    if _is_system(expanded, platform):
+        return [], []
+    return ([expanded], []) if _exists(expanded) else ([], missing)
 
 
-def _expand(raw: str, origin: str) -> Path | None:
-    text = raw
-    for token in ("@loader_path", "@executable_path", "${ORIGIN}", "$ORIGIN"):
-        text = text.replace(token, origin)
+def _expand(raw: str, loader_dir: str, exe_dir: str) -> Path | None:
+    """Substitute `@loader_path`/`$ORIGIN` (the object's own directory) and
+    `@executable_path` (the program's); anything else unresolved is `None`."""
+    text = raw.replace("@executable_path", exe_dir)
+    for token in ("@loader_path", "${ORIGIN}", "$ORIGIN"):
+        text = text.replace(token, loader_dir)
     if not text.startswith("/") or "@" in text or "$" in text:
         return None
     return Path(os.path.normpath(text))
 
 
-def _location_problems(path: Path, platform: PlatformName) -> list[str]:
+def _is_system(path: Path, platform: PlatformName) -> bool:
     text = os.path.normpath(str(path))
-    if any(f"{text}/".startswith(d) for d in SYSTEM_LIB_DIRS[platform]):
+    return any(f"{text}/".startswith(d) for d in SYSTEM_LIB_DIRS[platform])
+
+
+def _location_problems(path: Path, platform: PlatformName) -> list[str]:
+    if _is_system(path, platform):
         return []
-    return trusted_path_problems(Path(text))
+    return trusted_path_problems(Path(os.path.normpath(str(path))))
 
 
 def _shebang_problems(target: Path, platform: PlatformName, depth: int) -> list[str]:
