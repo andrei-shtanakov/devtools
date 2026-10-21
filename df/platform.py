@@ -71,7 +71,7 @@ SYSTEM_LIB_DIRS: Mapping[PlatformName, tuple[str, ...]] = {
     "macos-arm64": ("/usr/lib/", "/System/Library/"),
     "linux-x86_64": ("/lib/", "/lib64/", "/usr/lib/", "/usr/lib64/"),
 }
-#: Directories the dynamic loader searches for an ELF soname by default.
+#: Directories where an ELF soname must be found (the loader's defaults).
 LOADER_DIRS: Mapping[PlatformName, tuple[str, ...]] = {
     "macos-arm64": ("/usr/lib",),
     "linux-x86_64": (
@@ -83,10 +83,12 @@ LOADER_DIRS: Mapping[PlatformName, tuple[str, ...]] = {
         "/usr/lib",
     ),
 }
-#: dyld's default fallback directories (a leaf name not found elsewhere).
-DYLD_FALLBACK_DIRS = ("/usr/local/lib", "/usr/lib")
 #: Linux loader configuration (its directories are searched before defaults).
 LD_SO_CONF = Path("/etc/ld.so.conf")
+#: Linux libraries loaded into every process.
+LD_SO_PRELOAD = Path("/etc/ld.so.preload")
+#: A Mach-O linking it is an xcode-select shim (`/usr/bin/git` and friends).
+XCSELECT_LIB = "/usr/lib/libxcselect.dylib"
 #: Free UID/GID are chosen from these ranges (macOS: 400-499, spec 3.3).
 ID_RANGE: Mapping[PlatformName, range] = {
     "macos-arm64": range(400, 500),
@@ -102,10 +104,8 @@ _PEEK_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 _NO_WRITE_OTHERS = stat.S_IWGRP | stat.S_IWOTH
 _MAX_HOPS = 40
 _MAX_SHEBANG_DEPTH = 4
-_MAX_LIB_DEPTH = 16
 _MAX_CONF_DEPTH = 8
 _CONF_LIMIT = 1 << 20
-_UNMODELLED_TOKENS = ("$LIB", "${LIB}", "$PLATFORM", "${PLATFORM}")
 _GLOB_CHARS = frozenset("*?[]\\")
 _LAUNCH_CHECK_SECONDS = 2.0
 _READ_CHUNK = 64 << 10
@@ -1310,6 +1310,7 @@ _READELF_RPATH = re.compile(
 )
 _READELF_INTERP = re.compile(r"\s*\[Requesting program interpreter: (.+)\]")
 _XCRUN = "/usr/bin/xcrun"
+_XCRUN_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
 _NO_CLT = (
     "Command Line Tools не установлены (нужен otool): "
     "установите командой `xcode-select --install`"
@@ -1352,17 +1353,28 @@ def _otool_path() -> str:
     which may belong to a user (a dragged-in Xcode); root runs the resolved
     binary, and only after it passes the trusted-path policy.
     """
+    otool = xcrun_find("otool")
+    _require_trusted_tool(otool)
+    return otool
+
+
+def xcrun_find(name: str) -> str:
+    """The tool an xcode-select shim runs: trusted `xcrun --find <name>` with
+    the minimal environment (never `DEVELOPER_DIR`); one absolute line."""
     _require_trusted_tool(_XCRUN)
-    result = run_command([_XCRUN, "--find", "otool"])
+    if not name or "/" in name:
+        raise StepFailed("cli", f"недопустимое имя инструмента: {name!r}")
+    result = run_command([_XCRUN, "--find", name], env=_XCRUN_ENV)
     if not result.launched or result.returncode != 0:
-        raise StepFailed("cli", _NO_CLT)
+        if name == "otool":
+            raise StepFailed("cli", _NO_CLT)
+        raise StepFailed("cli", f"xcrun --find {name}: {_brief(result)}")
     try:
         lines = result.stdout.decode("utf-8").splitlines()
     except UnicodeDecodeError:
         lines = []
     if len(lines) != 1 or not lines[0].startswith("/"):
-        raise _unparsable("xcrun --find otool", repr(result.stdout))
-    _require_trusted_tool(lines[0])
+        raise _unparsable(f"xcrun --find {name}", repr(result.stdout))
     return lines[0]
 
 
@@ -1576,18 +1588,30 @@ def _component(path: Path) -> tuple[os.stat_result, list[str]] | None:
 def approved_cli_problems(cli: Mapping[str, Path], platform: PlatformName) -> list[str]:
     """Policy of spec 3.10 for every approved CLI; empty means all pass.
 
-    Native dependencies: the check trusts the loader's *search directories*,
-    not whichever file the loader would pick. For every object of the load
-    closure, every directory the loader could consult (the object's run
-    paths, those of every ancestor and of the program, `$ORIGIN` /
-    `@loader_path` against both the directory it was found through and its
-    resolved one, the default directories and `ld.so.conf` on Linux, dyld's
-    fallback directories on macOS) must be system or trusted; every candidate
-    file in them is walked in turn. What the check does not model (`$LIB`,
-    `$PLATFORM`, `@rpath` without run paths, an unknown `@` prefix, an
-    unparsable `ld.so.conf`) is a named problem.
+    No loader model (ruling R26). Only the two supported ways of spec 3.10
+    pass: a system CLI, or a static / system-linked copy in a root directory.
+    - The program (its link target included) passes `trusted_path_problems`
+      and is a regular file; a `#!` interpreter passes the same policy.
+    - Its loader (`PT_INTERP` / `LC_LOAD_DYLINKER`) lies in `SYSTEM_LIB_DIRS`;
+      `LC_DYLD_ENVIRONMENT` is a problem.
+    - Search paths are a problem: any `RPATH`/`RUNPATH`/`LC_RPATH`, any
+      dependency spelled with `@rpath`, `@loader_path`, `@executable_path` or
+      containing `$`, and on macOS a dependency name without `/`.
+    - macOS: every dependency is an absolute path under `SYSTEM_LIB_DIRS`
+      (absent on disk is fine: dyld shared cache). A program linking
+      `libxcselect` is a developer shim: the tool it dispatches to
+      (`xcrun --find <name>`) passes the same policy under the shim's name.
+    - Linux: every bare soname exists in a `LOADER_DIRS` directory; the host
+      loader configuration (`/etc/ld.so.conf` with its includes, include
+      glob prefixes, `/etc/ld.so.preload`) names only system or trusted
+      paths; anything unparsable is a problem.
+
+    Trust boundary: system libraries are part of the OS and are not walked
+    further. Named residuals (Task 13): glibc-hwcaps / legacy hwcap
+    subdirectories of the loader directories, and `ld.so.cache` entries that
+    are not in `ld.so.conf`. Each refused CLI gets the supported way.
     """
-    problems: list[str] = []
+    problems = [f"загрузчик ОС: {p}" for p in _host_loader_problems(platform)]
     for name, path in sorted(cli.items()):
         found = _cli_problems(path, platform, 0)
         problems += [f"{name}: {p}" for p in found]
@@ -1604,243 +1628,56 @@ def _cli_problems(path: Path, platform: PlatformName, depth: int) -> list[str]:
     if final is None or not stat.S_ISREG(final[0].st_mode):
         return [*problems, f"{target}: не обычный файл"]
     try:
-        problems += _library_problems(path, target, platform)
+        problems += _binary_problems(target, platform, depth)
         problems += _shebang_problems(target, platform, depth)
     except StepFailed as exc:
         problems.append(exc.detail)
     return problems
 
 
-def _library_problems(found: Path, program: Path, platform: PlatformName) -> list[str]:
-    """The whole load closure of `program` (see `approved_cli_problems`)."""
-    deps = linked_libraries(program)
+def _binary_problems(target: Path, platform: PlatformName, depth: int) -> list[str]:
+    deps = linked_libraries(target)
     if deps is None:
         return []
-    closure = _Closure(platform, found, program)
-    return closure.run(deps)
-
-
-@dataclass(frozen=True)
-class _Object:
-    """One object of the load closure."""
-
-    found: Path  # the path the loader reaches it through (not resolved)
-    target: Path  # the resolved regular file
-    deps: LibDeps
-    inherited: tuple[Path, ...]  # run-path directories of the loading chain
-    depth: int
-
-
-class _Closure:
-    """Breadth-first walk of a load closure under the search-directory rule."""
-
-    def __init__(self, platform: PlatformName, found: Path, program: Path) -> None:
-        self.platform = platform
-        self.found = found
-        self.program = program
-        self.problems: list[str] = []
-        self.checked: set[Path] = set()
-        self.visited: set[tuple[Path, Path]] = set()
-        self.exe_origins = _origins(found, program)
-        self.exe_rpaths: tuple[Path, ...] = ()
-        self.defaults = tuple(self._default_dirs())
-
-    def run(self, deps: LibDeps) -> list[str]:
-        """Problems of the whole closure, deduplicated, in discovery order."""
-        self.problems += _loader_problems(self.program, deps, self.platform)
-        root = _Object(self.found, self.program, deps, (), 0)
-        self.exe_rpaths = tuple(self._expand_all(root, deps.rpaths))
-        self.visited.add((self.program, self.found.parent))
-        queue = [root]
-        while queue:
-            queue += self._visit(queue.pop(0))
-        return list(dict.fromkeys(self.problems))
-
-    def _visit(self, obj: _Object) -> list[_Object]:
-        own = self._expand_all(obj, obj.deps.rpaths)
-        rpaths = _unique([*own, *obj.inherited, *self.exe_rpaths])
-        search = _unique([*rpaths, *self.defaults])
-        for directory in search:
-            self._check_dir(directory)
-        inherited = tuple(_unique([*obj.inherited, *own]))
-        children: list[_Object] = []
-        for dep in obj.deps.needed:
-            for candidate in self._candidates(obj, dep, rpaths, search):
-                child = self._enter(obj, candidate, inherited)
-                if child is not None:
-                    children.append(child)
-        return children
-
-    def _candidates(
-        self, obj: _Object, dep: str, rpaths: list[Path], search: list[Path]
-    ) -> list[Path]:
-        """Existing non-system files `dep` may resolve to; problems recorded."""
-        paths = self._dep_paths(obj, dep, rpaths, search)
-        if paths is None:
-            return []
-        mac = self.platform == "macos-arm64"
-        found = [c for c in paths if _exists(c) or mac and _is_system(c, self.platform)]
-        if not found:
-            self.problems.append(f"{obj.target}: зависимость {dep} не найдена")
-        return [c for c in found if not _is_system(c, self.platform)]
-
-    def _dep_paths(
-        self, obj: _Object, dep: str, rpaths: list[Path], search: list[Path]
-    ) -> list[Path] | None:
-        if dep.startswith("@"):
-            head, _, rest = dep.partition("/")
-            if head == "@rpath":
-                if not rpaths:
-                    self.problems.append(
-                        f"{obj.target}: {dep}: @rpath без путей поиска"
-                    )
-                    return None
-                return [r / rest for r in rpaths]
-            if head not in ("@loader_path", "@executable_path"):
-                self.problems.append(f"{obj.target}: {dep}: префикс не поддерживается")
-                return None
-        if "/" not in dep:  # a bare name: every search directory
-            return [d / dep for d in search]
-        expanded = self._expand_all(obj, (dep,))
-        if not expanded:
-            return None
-        if self.platform == "macos-arm64" and dep.startswith("/"):
-            leaf = Path(dep).name  # dyld falls back to the default directories
-            expanded += [d / leaf for d in self.defaults]
-        return expanded
-
-    def _enter(
-        self, parent: _Object, candidate: Path, inherited: tuple[Path, ...]
-    ) -> _Object | None:
-        trust, target = _walk(candidate)
-        self.problems += trust
-        if target is None:
-            return None
-        final = _component(target)
-        if final is None or not stat.S_ISREG(final[0].st_mode):
-            self.problems.append(f"{target}: не обычный файл")
-            return None
-        key = (target, candidate.parent)
-        if key in self.visited:
-            return None
-        self.visited.add(key)
-        if parent.depth + 1 >= _MAX_LIB_DEPTH:
-            self.problems.append(
-                f"{target}: цепочка зависимостей длиннее {_MAX_LIB_DEPTH}"
-            )
-            return None
-        try:
-            deps = linked_libraries(target)
-        except StepFailed as exc:
-            self.problems.append(exc.detail)
-            return None
-        if deps is None:
-            return None
-        return _Object(candidate, target, deps, inherited, parent.depth + 1)
-
-    def _expand_all(self, obj: _Object, raws: Sequence[str]) -> list[Path]:
-        """Every directory each raw path may mean; unmodelled forms are problems."""
-        out: list[Path] = []
-        for raw in raws:
-            if any(token in raw for token in _UNMODELLED_TOKENS):
-                self.problems.append(f"{obj.target}: {raw!r}: токен не моделируется")
-                continue
-            texts = [raw]
-            for token, dirs in (
-                ("@executable_path", self.exe_origins),
-                ("@loader_path", _origins(obj.found, obj.target)),
-                ("${ORIGIN}", _origins(obj.found, obj.target)),
-                ("$ORIGIN", _origins(obj.found, obj.target)),
-            ):
-                if token in raw:
-                    texts = [t.replace(token, str(d)) for t in texts for d in dirs]
-            for text in texts:
-                if not text.startswith("/") or "@" in text or "$" in text:
-                    self.problems.append(f"{obj.target}: путь {raw!r} не разрешён")
-                    break
-                out.append(Path(text))
-        return _unique(out)
-
-    def _check_dir(self, directory: Path) -> None:
-        if directory in self.checked:
-            return
-        self.checked.add(directory)
-        if _is_system(directory, self.platform):
-            return
-        self.problems += _walk(directory, missing_ok=True)[0]
-
-    def _default_dirs(self) -> list[Path]:
-        if self.platform == "macos-arm64":
-            return [Path(d) for d in DYLD_FALLBACK_DIRS]
-        conf: list[Path] = []
-        self._read_ld_conf(LD_SO_CONF, conf, set(), 0)
-        return _unique([*(Path(d) for d in LOADER_DIRS[self.platform]), *conf])
-
-    def _read_ld_conf(
-        self, path: Path, dirs: list[Path], seen: set[Path], depth: int
-    ) -> None:
-        """Directories of `ld.so.conf` and its includes (each file trusted)."""
-        if path in seen or depth == 0 and not _exists(path):
-            return
-        seen.add(path)
-        if depth > _MAX_CONF_DEPTH:
-            self.problems.append(f"{path}: слишком глубокие include")
-            return
-        self.problems += trusted_path_problems(path)
-        try:
-            data = _read_regular(path, _CONF_LIMIT + 1)
-            text = data.decode("utf-8")
-        except (StepFailed, UnicodeDecodeError) as exc:
-            self.problems.append(f"{path}: не прочитан ({exc})")
-            return
-        if len(data) > _CONF_LIMIT:
-            self.problems.append(f"{path}: слишком большой")
-            return
-        for raw in text.splitlines():
-            line = raw.split("#", 1)[0].strip()
-            words = line.split()
-            if not words:
-                continue
-            if words[0] == "include":
-                for pattern in words[1:]:
-                    full = (
-                        pattern
-                        if pattern.startswith("/")
-                        else str(path.parent / pattern)
-                    )
-                    for match in sorted(_glob(full)):
-                        self._read_ld_conf(Path(match), dirs, seen, depth + 1)
-                continue
-            for item in re.split(r"[\s,:]+", line):
-                if not item.startswith("/") or "=" in item or "$" in item:
-                    self.problems.append(f"{path}: строка не разобрана: {raw!r}")
-                    break
-                dirs.append(Path(item))
-
-
-def _origins(found: Path, target: Path) -> list[Path]:
-    """`$ORIGIN` candidates: the found-through directory and the resolved one.
-
-    Paths are never normalised lexically: `..` after a link is physical, and
-    `_walk` resolves it as the kernel does.
-    """
-    return _unique([found.parent, target.parent])
-
-
-def _unique(paths: Sequence[Path]) -> list[Path]:
-    return list(dict.fromkeys(paths))
-
-
-def _loader_problems(program: Path, deps: LibDeps, platform: PlatformName) -> list[str]:
     problems = [
-        f"{program}: LC_DYLD_ENVIRONMENT {env} запрещён"
-        for env in deps.dyld_environment
+        f"{target}: LC_DYLD_ENVIRONMENT {e} запрещён" for e in deps.dyld_environment
     ]
-    if deps.loader is None:
-        return problems
-    if not deps.loader.startswith("/"):
-        return [*problems, f"{program}: загрузчик {deps.loader} не абсолютный"]
-    return problems + _location_problems(Path(deps.loader), platform)
+    if deps.loader is not None and not _is_system(Path(deps.loader), platform):
+        problems.append(f"{target}: загрузчик {deps.loader} вне системных каталогов")
+    problems += [f"{target}: путь поиска {r!r} запрещён" for r in deps.rpaths]
+    for dep in deps.needed:
+        problems += _dependency_problems(target, dep, platform)
+    if platform == "macos-arm64" and XCSELECT_LIB in deps.needed:
+        problems += _shim_problems(target, platform, depth)
+    return problems
+
+
+def _dependency_problems(target: Path, dep: str, platform: PlatformName) -> list[str]:
+    if dep.startswith("@") or "$" in dep:
+        return [f"{target}: зависимость {dep}: пути поиска не поддерживаются"]
+    if platform == "macos-arm64" and "/" not in dep:
+        return [f"{target}: зависимость {dep}: относительное имя, ищется от cwd"]
+    if "/" in dep:
+        if dep.startswith("/") and _is_system(Path(dep), platform):
+            return []
+        return [f"{target}: зависимость {dep} вне системных каталогов"]
+    if any(_exists(Path(d) / dep) for d in LOADER_DIRS[platform]):
+        return []
+    return [f"{target}: зависимость {dep} не найдена в системных каталогах"]
+
+
+def _shim_problems(target: Path, platform: PlatformName, depth: int) -> list[str]:
+    """The tool an xcode-select shim dispatches to passes the same policy."""
+    if depth >= _MAX_SHEBANG_DEPTH:
+        return [f"{target}: слишком длинная цепочка xcode-select"]
+    try:
+        resolved = xcrun_find(target.name)
+    except StepFailed as exc:
+        return [f"{target}: xcode-select: {exc.detail}"]
+    if Path(resolved) == target:
+        return [f"{target}: xcode-select указывает на сам shim"]
+    nested = _cli_problems(Path(resolved), platform, depth + 1)
+    return [f"{target}: xcode-select → {p}" for p in nested]
 
 
 def _is_system(path: Path, platform: PlatformName) -> bool:
@@ -1854,7 +1691,92 @@ def _is_system(path: Path, platform: PlatformName) -> bool:
 def _location_problems(path: Path, platform: PlatformName) -> list[str]:
     if _is_system(path, platform):
         return []
-    return trusted_path_problems(path)
+    return _walk(path, missing_ok=True)[0]
+
+
+def _host_loader_problems(platform: PlatformName) -> list[str]:
+    """Linux: `ld.so.conf` directories and `ld.so.preload` entries."""
+    if platform != "linux-x86_64":
+        return []
+    problems: list[str] = []
+    dirs: list[Path] = []
+    _read_ld_conf(LD_SO_CONF, dirs, problems, set(), 0)
+    for directory in dict.fromkeys(dirs):
+        problems += _location_problems(directory, platform)
+    return problems + _preload_problems(platform)
+
+
+def _read_conf_text(path: Path, problems: list[str]) -> str | None:
+    """A trusted, regular, bounded UTF-8 file; failures become problems."""
+    problems += trusted_path_problems(path)
+    try:
+        data = _read_regular(path, _CONF_LIMIT + 1)
+        text = data.decode("utf-8")
+    except (StepFailed, UnicodeDecodeError) as exc:
+        problems.append(f"{path}: не прочитан ({exc})")
+        return None
+    if len(data) > _CONF_LIMIT:
+        problems.append(f"{path}: слишком большой")
+        return None
+    return text
+
+
+def _read_ld_conf(
+    path: Path, dirs: list[Path], problems: list[str], seen: set[Path], depth: int
+) -> None:
+    if path in seen or depth == 0 and not _exists(path):
+        return
+    seen.add(path)
+    if depth > _MAX_CONF_DEPTH:
+        problems.append(f"{path}: слишком глубокие include")
+        return
+    text = _read_conf_text(path, problems)
+    if text is None:
+        return
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        words = line.split()
+        if not words:
+            continue
+        if words[0] == "include":
+            for pattern in words[1:]:
+                full = (
+                    Path(pattern) if pattern.startswith("/") else path.parent / pattern
+                )
+                problems += _location_problems(_glob_prefix(full), "linux-x86_64")
+                for match in sorted(_glob(str(full))):
+                    _read_ld_conf(Path(match), dirs, problems, seen, depth + 1)
+            continue
+        for item in re.split(r"[\s,:]+", line):
+            if not item.startswith("/") or "=" in item or "$" in item:
+                problems.append(f"{path}: строка не разобрана: {raw!r}")
+                break
+            dirs.append(Path(item))
+
+
+def _glob_prefix(pattern: Path) -> Path:
+    """The directory part of an include glob before its first wildcard."""
+    prefix = Path("/")
+    for part in pattern.parts[1:-1]:
+        if any(c in part for c in "*?["):
+            break
+        prefix /= part
+    return prefix
+
+
+def _preload_problems(platform: PlatformName) -> list[str]:
+    if not _exists(LD_SO_PRELOAD):
+        return []
+    problems: list[str] = []
+    text = _read_conf_text(LD_SO_PRELOAD, problems)
+    if text is None:
+        return problems
+    for item in re.split(r"[\s:]+", text.strip()) if text.strip() else []:
+        if not item.startswith("/") or "$" in item:
+            problems.append(f"{LD_SO_PRELOAD}: запись не разобрана: {item!r}")
+            continue
+        problems += _location_problems(Path(item), platform)
+    return problems
 
 
 def _shebang_problems(target: Path, platform: PlatformName, depth: int) -> list[str]:

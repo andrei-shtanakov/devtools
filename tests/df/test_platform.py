@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import fnmatch
-import itertools
 import os
 import plistlib
 import stat
@@ -11,7 +10,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1770,32 +1769,6 @@ def test_approved_cli_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     assert any("интерпретатор" in p for p in problems), problems
 
 
-def test_approved_cli_native_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
-    fs = _good_fs()
-    fs.nodes["/opt"] = (DIR | 0o755, 0, None)
-    fs.nodes["/opt/lib"] = (DIR | 0o755, 501, None)
-    fs.nodes["/opt/lib/libx.dylib"] = (REG | 0o644, 501, None)
-    fs.nodes["/usr/local/lib"] = (DIR | 0o755, 0, None)
-    fs.nodes["/usr/local/lib/liby.dylib"] = (REG | 0o644, 0, None)
-    fs.install(monkeypatch)
-    monkeypatch.setattr(plat, "_read_regular", lambda _p, _n: b"\xcf\xfa\xed\xfe")
-    found = {
-        "deps": LibDeps(
-            ("/usr/lib/libSystem.B.dylib", "@rpath/liby.dylib"),
-            ("@executable_path/../lib",),
-        )
-    }
-    monkeypatch.setattr(plat, "linked_libraries", lambda _p: found["deps"])
-    cli = {"tool": Path("/usr/local/bin/tool")}
-    assert plat.approved_cli_problems(cli, "macos-arm64") == []
-    found["deps"] = LibDeps(("/opt/lib/libx.dylib",), ())
-    problems = plat.approved_cli_problems(cli, "macos-arm64")
-    assert "tool: /opt/lib: владелец uid 501, не root" in problems
-    found["deps"] = LibDeps(("@rpath/libz.dylib",), ("/usr/local/lib",))
-    problems = plat.approved_cli_problems(cli, "macos-arm64")
-    assert any("@rpath/libz.dylib не найдена" in p for p in problems)
-
-
 # --- sparse files through the system tar (R24) ---------------------------------
 
 
@@ -1852,7 +1825,7 @@ def test_no_root_tree_walk_in_module() -> None:
     assert "rmtree" not in source and "os.walk" not in source
 
 
-# --- load closure (fix round 1) ---------------------------------------------------
+# --- approved CLI fixtures ---------------------------------------------------------
 
 
 def _closure_fs(extra: dict[str, tuple[int, int, str | None]]) -> FakeFs:
@@ -1868,163 +1841,8 @@ def _closure_fs(extra: dict[str, tuple[int, int, str | None]]) -> FakeFs:
     return fs
 
 
-def _fake_libs(monkeypatch: pytest.MonkeyPatch, table: dict[str, LibDeps]) -> list[str]:
-    calls: list[str] = []
-
-    def linked(path: Path) -> LibDeps | None:
-        calls.append(str(path))
-        return table.get(str(path))
-
-    monkeypatch.setattr(plat, "linked_libraries", linked)
-    monkeypatch.setattr(plat, "_read_regular", lambda _p, _n: b"\0\0\0\0")
-    return calls
-
-
 TOOL = {"tool": Path("/usr/local/bin/tool")}
 LIB = REG | 0o644
-
-
-def test_closure_checks_second_level_library(monkeypatch: pytest.MonkeyPatch) -> None:
-    _closure_fs(
-        {
-            "/usr/local/lib/liba.dylib": (LIB, 0, None),
-            "/usr/local/lib/libc.dylib": (LIB, 0, None),
-            "/opt/evil/libb.dylib": (LIB, 501, None),
-        }
-    ).install(monkeypatch)
-    calls = _fake_libs(
-        monkeypatch,
-        {
-            "/usr/local/bin/tool": LibDeps(("@rpath/liba.dylib",), ("/usr/local/lib",)),
-            "/usr/local/lib/liba.dylib": LibDeps(
-                ("@loader_path/libc.dylib", "/opt/evil/libb.dylib"), ()
-            ),
-            "/usr/local/lib/libc.dylib": LibDeps(("/usr/lib/libSystem.B.dylib",), ()),
-        },
-    )
-    problems = plat.approved_cli_problems(TOOL, "macos-arm64")
-    assert "tool: /opt/evil: владелец uid 501, не root" in problems
-    assert "tool: /opt/evil/libb.dylib: владелец uid 501, не root" in problems
-    # @loader_path resolved against liba's directory, and libc was walked too
-    assert "/usr/local/lib/libc.dylib" in calls
-
-
-def test_closure_executable_path_stays_with_program(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _closure_fs(
-        {
-            "/usr/local/lib/liba.dylib": (LIB, 0, None),
-            "/usr/local/bin/libx.dylib": (LIB, 0, None),
-        }
-    ).install(monkeypatch)
-    calls = _fake_libs(
-        monkeypatch,
-        {
-            "/usr/local/bin/tool": LibDeps(("/usr/local/lib/liba.dylib",), ()),
-            "/usr/local/lib/liba.dylib": LibDeps(("@executable_path/libx.dylib",), ()),
-        },
-    )
-    assert plat.approved_cli_problems(TOOL, "macos-arm64") == []
-    assert calls[-1] == "/usr/local/bin/libx.dylib"
-
-
-def test_closure_cycle_terminates(monkeypatch: pytest.MonkeyPatch) -> None:
-    _closure_fs(
-        {
-            "/usr/local/lib/liba.dylib": (LIB, 0, None),
-            "/usr/local/lib/libb.dylib": (LIB, 0, None),
-        }
-    ).install(monkeypatch)
-    a, b = "/usr/local/lib/liba.dylib", "/usr/local/lib/libb.dylib"
-    calls = _fake_libs(
-        monkeypatch,
-        {
-            "/usr/local/bin/tool": LibDeps((a,), ()),
-            a: LibDeps((b,), ()),
-            b: LibDeps((a,), ()),
-        },
-    )
-    assert plat.approved_cli_problems(TOOL, "macos-arm64") == []
-    assert calls.count(a) == 1 and calls.count(b) == 1
-
-
-def test_closure_depth_limit_is_a_problem(monkeypatch: pytest.MonkeyPatch) -> None:
-    chain = [f"/usr/local/lib/lib{i}.dylib" for i in range(6)]
-    _closure_fs({lib: (LIB, 0, None) for lib in chain}).install(monkeypatch)
-    table = {"/usr/local/bin/tool": LibDeps((chain[0],), ())}
-    table.update({lib: LibDeps((nxt,), ()) for lib, nxt in itertools.pairwise(chain)})
-    _fake_libs(monkeypatch, table)
-    monkeypatch.setattr(plat, "_MAX_LIB_DEPTH", 3)
-    problems = plat.approved_cli_problems(TOOL, "macos-arm64")
-    assert any("цепочка зависимостей длиннее 3" in p for p in problems), problems
-
-
-@pytest.mark.parametrize(
-    "loader,env,needle",
-    [
-        ("/lib64/ld-linux-x86-64.so.2", (), None),
-        ("/opt/evil/ld.so", (), "/opt/evil: владелец uid 501"),
-        ("ld.so", (), "загрузчик ld.so не абсолютный"),
-        (None, ("DYLD_INSERT_LIBRARIES=/x.dylib",), "LC_DYLD_ENVIRONMENT"),
-    ],
-)
-def test_closure_checks_program_loader(
-    monkeypatch: pytest.MonkeyPatch,
-    loader: str | None,
-    env: tuple[str, ...],
-    needle: str | None,
-) -> None:
-    _closure_fs({"/opt/evil/ld.so": (LIB | 0o755, 0, None)}).install(monkeypatch)
-    _fake_libs(monkeypatch, {"/usr/local/bin/tool": LibDeps((), (), loader, env)})
-    platform: PlatformName = "macos-arm64" if env else "linux-x86_64"
-    problems = plat.approved_cli_problems(TOOL, platform)
-    if needle is None:
-        assert problems == []
-    else:
-        assert any(needle in p for p in problems), problems
-
-
-@pytest.mark.parametrize(
-    "where,expected",
-    [
-        ("/usr/lib/x86_64-linux-gnu/libq.so.1", []),
-        (
-            "/usr/local/lib/libq.so.1",
-            ["tool: /usr/local/bin/tool: зависимость libq.so.1 не найдена"],
-        ),
-        (None, ["tool: /usr/local/bin/tool: зависимость libq.so.1 не найдена"]),
-    ],
-    ids=["loader-dir", "ld-so-conf-only", "nowhere"],
-)
-def test_closure_elf_soname_must_be_found(
-    monkeypatch: pytest.MonkeyPatch, where: str | None, expected: list[str]
-) -> None:
-    extra: dict[str, tuple[int, int, str | None]] = {
-        "/usr/lib": (DIR | 0o755, 0, None),
-        "/usr/lib/x86_64-linux-gnu": (DIR | 0o755, 0, None),
-    }
-    if where is not None:
-        extra[where] = (LIB, 0, None)
-    _closure_fs(extra).install(monkeypatch)
-    _fake_libs(monkeypatch, {"/usr/local/bin/tool": LibDeps(("libq.so.1",), ())})
-    problems = plat.approved_cli_problems(TOOL, "linux-x86_64")
-    assert problems[: len(expected)] == expected
-    assert bool(problems) == bool(expected)
-
-
-def test_closure_elf_soname_in_rpath_is_walked(monkeypatch: pytest.MonkeyPatch) -> None:
-    _closure_fs({"/opt/evil/libq.so.1": (LIB, 501, None)}).install(monkeypatch)
-    _fake_libs(
-        monkeypatch,
-        {
-            "/usr/local/bin/tool": LibDeps(
-                ("libq.so.1",), ("$ORIGIN/../../../opt/evil",)
-            )
-        },
-    )
-    problems = plat.approved_cli_problems(TOOL, "linux-x86_64")
-    assert "tool: /opt/evil/libq.so.1: владелец uid 501, не root" in problems
 
 
 # --- strict parsers of tool output (fix round 1) -------------------------------------
@@ -2114,7 +1932,7 @@ def test_cleanup_build_home_refuses_glob(
     assert info.value.step == "verify"
 
 
-# --- search-directory rule R25 (fix round 2) ----------------------------------------
+# --- host loader config, regular reads, inspection tools -----------------------------
 
 
 def _with_files(
@@ -2133,127 +1951,6 @@ def _with_files(
 
     monkeypatch.setattr(plat, "_read_regular", read)
     monkeypatch.setattr(plat, "_glob", globber)
-
-
-def test_shadowing_copy_in_untrusted_ld_so_conf_dir(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fs = _closure_fs(
-        {
-            "/etc": (DIR | 0o755, 0, None),
-            "/etc/ld.so.conf": (LIB, 0, None),
-            "/etc/ld.so.conf.d": (DIR | 0o755, 0, None),
-            "/etc/ld.so.conf.d/libc.conf": (LIB, 0, None),
-            "/usr/local/lib": (DIR | 0o2775, 0, None),  # Debian root:staff 2775
-            "/usr/local/lib/libq.so.1": (LIB, 0, None),
-            "/usr/lib": (DIR | 0o755, 0, None),
-            "/usr/lib/x86_64-linux-gnu": (DIR | 0o755, 0, None),
-            "/usr/lib/x86_64-linux-gnu/libq.so.1": (LIB, 0, None),
-        }
-    )
-    fs.install(monkeypatch)
-    _with_files(
-        monkeypatch,
-        fs,
-        {
-            "/etc/ld.so.conf": b"include /etc/ld.so.conf.d/*.conf\n",
-            "/etc/ld.so.conf.d/libc.conf": b"# libc default\n/usr/local/lib\n",
-        },
-    )
-    monkeypatch.setattr(
-        plat,
-        "linked_libraries",
-        lambda p: (
-            LibDeps(("libq.so.1",), ()) if str(p) == "/usr/local/bin/tool" else None
-        ),
-    )
-    problems = plat.approved_cli_problems(TOOL, "linux-x86_64")
-    assert "tool: /usr/local/lib: запись для группы или всех" in problems
-
-
-def test_inherited_rpath_directory_is_searched(monkeypatch: pytest.MonkeyPatch) -> None:
-    fs = _closure_fs(
-        {
-            "/usr/local/lib/liba.so": (LIB, 0, None),
-            "/usr/local/lib/libb.so": (LIB, 0, None),
-            "/opt/evil/libc.so": (LIB, 501, None),
-        }
-    )
-    fs.install(monkeypatch)
-    _with_files(monkeypatch, fs, {})
-    calls: list[str] = []
-    table = {
-        "/usr/local/bin/tool": LibDeps(("liba.so",), ("/usr/local/lib",)),
-        "/usr/local/lib/liba.so": LibDeps(("libb.so",), ("/opt/evil",)),
-        "/usr/local/lib/libb.so": LibDeps(("libc.so",), ()),  # finds it via liba
-    }
-
-    def linked(path: Path) -> LibDeps | None:
-        calls.append(str(path))
-        return table.get(str(path))
-
-    monkeypatch.setattr(plat, "linked_libraries", linked)
-    problems = plat.approved_cli_problems(TOOL, "linux-x86_64")
-    assert "tool: /opt/evil/libc.so: владелец uid 501, не root" in problems
-    assert "/opt/evil/libc.so" in calls
-
-
-@pytest.mark.parametrize("layout_kind", ["file-link", "dir-link"])
-def test_origin_through_link_checks_found_through_directory(
-    monkeypatch: pytest.MonkeyPatch, layout_kind: str
-) -> None:
-    nodes: dict[str, tuple[int, int, str | None]] = {
-        "/opt/real": (DIR | 0o755, 0, None),
-        "/opt/real/liba.so": (LIB, 0, None),
-    }
-    if layout_kind == "file-link":
-        # glibc: $ORIGIN of a library = directory of the name it was found by
-        nodes["/usr/local/lib/liba.so"] = (LNK | 0o777, 0, "/opt/real/liba.so")
-        nodes["/usr/local/lib/plugins"] = (DIR | 0o755, 501, None)
-        rpath, bad = "$ORIGIN/plugins", "/usr/local/lib/plugins"
-    else:
-        # `..` after a directory link is physical: /usr/local/lib/pkg/.. = /opt
-        nodes["/usr/local/lib/pkg"] = (LNK | 0o777, 0, "/opt/real")
-        nodes["/opt/plugins"] = (DIR | 0o755, 501, None)
-        rpath, bad = "$ORIGIN/../plugins", "/opt/plugins"
-    fs = _closure_fs(nodes)
-    fs.install(monkeypatch)
-    _with_files(monkeypatch, fs, {})
-    found_dir = "/usr/local/lib" if layout_kind == "file-link" else "/usr/local/lib/pkg"
-    table = {
-        "/usr/local/bin/tool": LibDeps(("liba.so",), (found_dir,)),
-        "/opt/real/liba.so": LibDeps((), (rpath,)),
-    }
-    monkeypatch.setattr(plat, "linked_libraries", lambda p: table.get(str(p)))
-    problems = plat.approved_cli_problems(TOOL, "linux-x86_64")
-    assert f"tool: {bad}: владелец uid 501, не root" in problems, problems
-
-
-@pytest.mark.parametrize(
-    "deps,needle",
-    [
-        (LibDeps(("libx.so",), ("$LIB/x",)), "токен не моделируется"),
-        (LibDeps(("libx.so",), ("/opt/${PLATFORM}",)), "токен не моделируется"),
-        (LibDeps(("@rpath/libx.dylib",), ()), "@rpath без путей поиска"),
-        (LibDeps(("@foo/libx.dylib",), ()), "префикс не поддерживается"),
-        (LibDeps(("libx.so",), ("",)), "не разрешён"),
-        (LibDeps(("lib/libx.so",), ()), "не разрешён"),
-    ],
-    ids=["LIB", "PLATFORM", "rpath-none", "unknown-at", "empty-rpath", "relative"],
-)
-def test_unmodelled_forms_are_problems(
-    monkeypatch: pytest.MonkeyPatch, deps: LibDeps, needle: str
-) -> None:
-    fs = _closure_fs({})
-    fs.install(monkeypatch)
-    _with_files(monkeypatch, fs, {})
-    monkeypatch.setattr(
-        plat,
-        "linked_libraries",
-        lambda p: deps if str(p) == "/usr/local/bin/tool" else None,
-    )
-    problems = plat.approved_cli_problems(TOOL, "linux-x86_64")
-    assert any(needle in p for p in problems), problems
 
 
 @pytest.mark.parametrize(
@@ -2275,7 +1972,9 @@ def test_unparsable_ld_so_conf_is_a_problem(
         lambda p: LibDeps((), ()) if str(p) == "/usr/local/bin/tool" else None,
     )
     problems = plat.approved_cli_problems(TOOL, "linux-x86_64")
-    assert any(p.startswith("tool: /etc/ld.so.conf:") for p in problems), problems
+    assert any(p.startswith("загрузчик ОС: /etc/ld.so.conf:") for p in problems), (
+        problems
+    )
 
 
 def test_untrusted_ld_so_conf_include_is_a_problem(
@@ -2304,28 +2003,9 @@ def test_untrusted_ld_so_conf_include_is_a_problem(
         lambda p: LibDeps((), ()) if str(p) == "/usr/local/bin/tool" else None,
     )
     problems = plat.approved_cli_problems(TOOL, "linux-x86_64")
-    assert "tool: /etc/ld.so.conf.d/x.conf: запись для группы или всех" in problems
-
-
-@pytest.mark.parametrize("kind", [DIR | 0o755, stat.S_IFIFO | 0o644])
-def test_candidate_not_regular_is_named_problem(
-    monkeypatch: pytest.MonkeyPatch, kind: int
-) -> None:
-    fs = _closure_fs({"/usr/local/lib/libx.dylib": (kind, 0, None)})
-    fs.install(monkeypatch)
-    _with_files(monkeypatch, fs, {})
-    calls = []
-
-    def linked(path: Path) -> LibDeps | None:
-        calls.append(str(path))
-        if str(path) == "/usr/local/bin/tool":
-            return LibDeps(("@rpath/libx.dylib",), ("/usr/local/lib",))
-        return None
-
-    monkeypatch.setattr(plat, "linked_libraries", linked)
-    problems = plat.approved_cli_problems(TOOL, "macos-arm64")
-    assert "tool: /usr/local/lib/libx.dylib: не обычный файл" in problems
-    assert calls == ["/usr/local/bin/tool"]  # the walk stops at it
+    assert (
+        "загрузчик ОС: /etc/ld.so.conf.d/x.conf: запись для группы или всех" in problems
+    )
 
 
 @pytest.mark.parametrize("kind", ["dir", "fifo"])
@@ -2405,86 +2085,346 @@ def test_parse_dscl_native_intended_attribute() -> None:
         plat.parse_dscl(plistlib.dumps(data))
 
 
-@pytest.mark.parametrize("case", ["resolved-dir", "physical-dotdot"])
-def test_origin_variants_each_checked(
-    monkeypatch: pytest.MonkeyPatch, case: str
-) -> None:
-    """Both `$ORIGIN` readings are checked, and `..` is physical, not lexical."""
-    nodes: dict[str, tuple[int, int, str | None]] = {
-        "/c": (DIR | 0o755, 0, None),
-        "/c/lib.so": (LIB, 0, None),
-    }
-    if case == "resolved-dir":
-        # found as /usr/local/lib/lib.so -> /c/lib.so; only /c/plugins is bad
-        nodes["/usr/local/lib/lib.so"] = (LNK | 0o777, 0, "/c/lib.so")
-        nodes["/usr/local/lib/plugins"] = (DIR | 0o755, 0, None)
-        nodes["/c/plugins"] = (DIR | 0o755, 501, None)
-        search, rpath, bad = "/usr/local/lib", "$ORIGIN/plugins", "/c/plugins"
-    else:
-        # found as /a/link/lib.so, /a/link -> /d/e, lib.so -> /c/lib.so:
-        # $ORIGIN/../x is /d/x physically, /a/x lexically, /x from /c
-        nodes.update(
-            {
-                "/a": (DIR | 0o755, 0, None),
-                "/a/link": (LNK | 0o777, 0, "/d/e"),
-                "/d": (DIR | 0o755, 0, None),
-                "/d/e": (DIR | 0o755, 0, None),
-                "/d/e/lib.so": (LNK | 0o777, 0, "/c/lib.so"),
-                "/d/x": (DIR | 0o755, 501, None),
-            }
-        )
-        search, rpath, bad = "/a/link", "$ORIGIN/../x", "/d/x"
-    fs = _closure_fs(nodes)
+# --- R26: approved CLI policy without a loader model (fix round 3) -------------------
+
+SYS_LIBS = {
+    "/usr/lib": (DIR | 0o755, 0, None),
+    "/usr/lib/x86_64-linux-gnu": (DIR | 0o755, 0, None),
+    "/usr/lib/x86_64-linux-gnu/libz.so.1": (LIB, 0, None),
+    "/usr/bin": (DIR | 0o755, 0, None),
+    "/usr/bin/xcrun": (REG | 0o755, 0, None),
+}
+
+
+def _policy(
+    monkeypatch: pytest.MonkeyPatch,
+    table: dict[str, LibDeps],
+    platform: PlatformName,
+    nodes: dict[str, tuple[int, int, str | None]] | None = None,
+    files: dict[str, bytes] | None = None,
+) -> list[str]:
+    fs = _closure_fs({**SYS_LIBS, **(nodes or {})})
     fs.install(monkeypatch)
-    _with_files(monkeypatch, fs, {})
-    table = {
-        "/usr/local/bin/tool": LibDeps(("lib.so",), (search,)),
-        "/c/lib.so": LibDeps((), (rpath,)),
-    }
+    _with_files(monkeypatch, fs, files or {})
     monkeypatch.setattr(plat, "linked_libraries", lambda p: table.get(str(p)))
-    problems = plat.approved_cli_problems(TOOL, "linux-x86_64")
-    assert f"tool: {bad}: владелец uid 501, не root" in problems, problems
+    return plat.approved_cli_problems(TOOL, platform)
 
 
-def test_dotdot_under_system_dir_is_walked(monkeypatch: pytest.MonkeyPatch) -> None:
-    fs = _closure_fs(
-        {
-            "/usr/lib": (DIR | 0o755, 0, None),
-            "/usr/lib/lnk": (LNK | 0o777, 0, "/opt/evil/sub"),
-            "/opt/evil/sub": (DIR | 0o755, 501, None),
-        }
+def _tool(deps: LibDeps) -> dict[str, LibDeps]:
+    return {"/usr/local/bin/tool": deps}
+
+
+MAC_OK = LibDeps(("/usr/lib/libSystem.B.dylib",), (), "/usr/lib/dyld")
+ELF_OK = LibDeps(("libz.so.1",), (), "/lib64/ld-linux-x86-64.so.2")
+
+
+@pytest.mark.parametrize("owner,bad", [(0, False), (501, True)])
+def test_r26_program_must_be_trusted(
+    monkeypatch: pytest.MonkeyPatch, owner: int, bad: bool
+) -> None:
+    nodes = {"/usr/local/bin/tool": (REG | 0o755, owner, None)}
+    problems = _policy(monkeypatch, _tool(MAC_OK), "macos-arm64", nodes)
+    assert bool(problems) is bad
+    if bad:
+        assert "tool: /usr/local/bin/tool: владелец uid 501, не root" in problems
+
+
+@pytest.mark.parametrize(
+    "deps,platform,needle",
+    [
+        (ELF_OK, "linux-x86_64", None),
+        (replace(ELF_OK, loader="/usr/local/lib/ld.so"), "linux-x86_64", "загрузчик"),
+        (MAC_OK, "macos-arm64", None),
+        (replace(MAC_OK, dyld_environment=("DYLD_X=1",)), "macos-arm64", "LC_DYLD_"),
+    ],
+    ids=["elf-system-loader", "elf-foreign-loader", "macho-plain", "macho-dyld-env"],
+)
+def test_r26_loader_must_be_system(
+    monkeypatch: pytest.MonkeyPatch,
+    deps: LibDeps,
+    platform: PlatformName,
+    needle: str | None,
+) -> None:
+    nodes = {"/usr/local/lib/ld.so": (REG | 0o755, 0, None)}  # trusted, not system
+    problems = _policy(monkeypatch, _tool(deps), platform, nodes)
+    if needle is None:
+        assert problems == []
+    else:
+        assert any(needle in p for p in problems), problems
+
+
+@pytest.mark.parametrize(
+    "deps,platform,needle",
+    [
+        (replace(MAC_OK, rpaths=("/usr/lib",)), "macos-arm64", "путь поиска"),
+        (replace(ELF_OK, rpaths=("/usr/lib",)), "linux-x86_64", "путь поиска"),
+        (LibDeps(("@rpath/libz.dylib",), ()), "macos-arm64", "пути поиска"),
+        (LibDeps(("@loader_path/libz.dylib",), ()), "macos-arm64", "пути поиска"),
+        (LibDeps(("@executable_path/libz.dylib",), ()), "macos-arm64", "пути поиска"),
+        (LibDeps(("$ORIGIN/libz.so.1",), ()), "linux-x86_64", "пути поиска"),
+        (LibDeps(("libz.dylib",), ()), "macos-arm64", "от cwd"),
+        (MAC_OK, "macos-arm64", None),
+        (ELF_OK, "linux-x86_64", None),
+    ],
+    ids=[
+        "lc-rpath",
+        "elf-rpath",
+        "at-rpath",
+        "at-loader",
+        "at-executable",
+        "dollar",
+        "macho-bare",
+        "twin-macho",
+        "twin-elf",
+    ],
+)
+def test_r26_search_paths_are_problems(
+    monkeypatch: pytest.MonkeyPatch,
+    deps: LibDeps,
+    platform: PlatformName,
+    needle: str | None,
+) -> None:
+    problems = _policy(monkeypatch, _tool(deps), platform)
+    if needle is None:
+        assert problems == []
+    else:
+        assert any(needle in p for p in problems), problems
+
+
+@pytest.mark.parametrize(
+    "dep,bad",
+    [
+        ("/usr/lib/libSystem.B.dylib", False),  # absent on disk: shared cache
+        ("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", False),
+        ("/usr/local/lib/libz.dylib", True),  # present and trusted, not system
+        ("/usr/lib/../local/lib/libz.dylib", True),
+    ],
+)
+def test_r26_macos_dependency_absolute_under_system(
+    monkeypatch: pytest.MonkeyPatch, dep: str, bad: bool
+) -> None:
+    nodes = {"/usr/local/lib/libz.dylib": (LIB, 0, None)}
+    problems = _policy(monkeypatch, _tool(LibDeps((dep,), ())), "macos-arm64", nodes)
+    assert bool(problems) is bad, problems
+
+
+@pytest.mark.parametrize(
+    "soname,bad", [("libz.so.1", False), ("libq.so.1", True), ("libmissing.so", True)]
+)
+def test_r26_linux_soname_in_loader_dirs(
+    monkeypatch: pytest.MonkeyPatch, soname: str, bad: bool
+) -> None:
+    nodes = {"/usr/local/lib/libq.so.1": (LIB, 0, None)}  # trusted, not a loader dir
+    problems = _policy(
+        monkeypatch, _tool(LibDeps((soname,), ())), "linux-x86_64", nodes
     )
-    fs.install(monkeypatch)
-    _with_files(monkeypatch, fs, {})
-    deps = LibDeps((), ("/usr/lib/lnk/../x",))
-    monkeypatch.setattr(
-        plat,
-        "linked_libraries",
-        lambda p: deps if str(p) == "/usr/local/bin/tool" else None,
+    assert bool(problems) is bad, problems
+    if bad:
+        assert f"зависимость {soname} не найдена в системных каталогах" in problems[0]
+
+
+CONF_NODES = {
+    "/etc": (DIR | 0o755, 0, None),
+    "/etc/ld.so.conf": (LIB, 0, None),
+    "/etc/ld.so.conf.d": (DIR | 0o755, 0, None),
+}
+
+
+@pytest.mark.parametrize("owner,bad", [(0, False), (501, True)])
+def test_r26_ld_so_conf_directory_trusted(
+    monkeypatch: pytest.MonkeyPatch, owner: int, bad: bool
+) -> None:
+    nodes = {**CONF_NODES, "/opt/libs": (DIR | 0o755, owner, None)}
+    files = {"/etc/ld.so.conf": b"/opt/libs\n/usr/lib/x86_64-linux-gnu\n"}
+    problems = _policy(monkeypatch, _tool(ELF_OK), "linux-x86_64", nodes, files)
+    assert bool(problems) is bad, problems
+    if bad:
+        assert problems[0] == "загрузчик ОС: /opt/libs: владелец uid 501, не root"
+
+
+@pytest.mark.parametrize("owner,bad", [(0, False), (501, True)])
+def test_r26_include_glob_prefix_checked_without_matches(
+    monkeypatch: pytest.MonkeyPatch, owner: int, bad: bool
+) -> None:
+    nodes = {**CONF_NODES, "/opt/conf.d": (DIR | 0o755, owner, None)}
+    files = {"/etc/ld.so.conf": b"include /opt/conf.d/*.conf\n"}
+    problems = _policy(monkeypatch, _tool(ELF_OK), "linux-x86_64", nodes, files)
+    assert bool(problems) is bad, problems
+
+
+@pytest.mark.parametrize(
+    "content,owner,needle",
+    [
+        (b"/usr/lib/x86_64-linux-gnu/libz.so.1\n", 0, None),
+        (b"/opt/evil/libhook.so\n", 0, "/opt/evil"),
+        (b"/usr/lib/x86_64-linux-gnu/libz.so.1\n", 501, "ld.so.preload: владелец"),
+        (b"libhook.so\n", 0, "запись не разобрана"),
+    ],
+    ids=["system-entry", "untrusted-entry", "untrusted-file", "relative-entry"],
+)
+def test_r26_ld_so_preload(
+    monkeypatch: pytest.MonkeyPatch, content: bytes, owner: int, needle: str | None
+) -> None:
+    nodes = {
+        "/etc": (DIR | 0o755, 0, None),
+        "/etc/ld.so.preload": (LIB, owner, None),
+        "/opt/evil/libhook.so": (LIB, 501, None),
+    }
+    files = {"/etc/ld.so.preload": content}
+    problems = _policy(monkeypatch, _tool(ELF_OK), "linux-x86_64", nodes, files)
+    if needle is None:
+        assert problems == []
+    else:
+        assert any(needle in p for p in problems), problems
+
+
+def test_r26_host_loader_not_checked_on_macos(monkeypatch: pytest.MonkeyPatch) -> None:
+    nodes = {"/etc": (DIR | 0o755, 0, None), "/etc/ld.so.preload": (LIB, 501, None)}
+    assert _policy(monkeypatch, _tool(MAC_OK), "macos-arm64", nodes) == []
+
+
+def test_r26_refusal_names_supported_way(monkeypatch: pytest.MonkeyPatch) -> None:
+    problems = _policy(
+        monkeypatch, _tool(LibDeps(("@rpath/x.dylib",), ())), "macos-arm64"
     )
-    problems = plat.approved_cli_problems(TOOL, "linux-x86_64")
-    assert "tool: /opt/evil: владелец uid 501, не root" in problems, problems
+    assert problems[-1] == (
+        "tool: поддерживаемый способ — системный CLI или "
+        "`sudo install -o root -m 0755 <src> /usr/local/libexec/darkfactory/bin/tool`"
+    )
 
 
-def test_candidate_lstat_error_is_not_bare_oserror(
+def test_n5_user_owned_usr_local_lib_does_not_refuse(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fs = _closure_fs({})
-    fs.install(monkeypatch)
-    _with_files(monkeypatch, fs, {})
-    real = fs.lstat
+    nodes = {"/usr/local/lib": (DIR | 0o755, 501, None)}
+    deps = LibDeps(("/usr/lib/libSystem.B.dylib",), (), "/usr/lib/dyld")
+    assert _policy(monkeypatch, _tool(deps), "macos-arm64", nodes) == []
 
-    def lstat(path: os.PathLike[str] | str) -> SimpleNamespace:
-        if "loop" in os.fspath(path):
-            raise OSError(62, "Too many levels of symbolic links")
-        return real(path)
+
+@MACOS_ONLY
+def test_n5_real_binaries_ignore_user_owned_usr_local_lib(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not Path("/Library/Developer/CommandLineTools/usr/bin/otool").exists():
+        pytest.skip("otool needs the Command Line Tools")
+    real = os.lstat
+
+    def lstat(path: os.PathLike[str] | str) -> object:
+        st = real(path)
+        if os.fspath(path).startswith("/usr/local/lib"):
+            return SimpleNamespace(st_mode=st.st_mode, st_uid=501)
+        return st
 
     monkeypatch.setattr(plat, "_lstat", lstat)
-    deps = LibDeps(("libx.so",), ("/usr/local/loop",))
-    monkeypatch.setattr(
-        plat,
-        "linked_libraries",
-        lambda p: deps if str(p) == "/usr/local/bin/tool" else None,
+    cli = {"chmod": Path("/bin/chmod"), "tar": Path("/usr/bin/tar")}
+    assert plat.approved_cli_problems(cli, "macos-arm64") == []
+
+
+def _shim_world(
+    monkeypatch: pytest.MonkeyPatch, resolved: bytes, code: int = 0
+) -> list[dict[str, str]]:
+    envs: list[dict[str, str]] = []
+
+    def run(argv: Sequence[str], **kw: Any) -> RunResult:
+        assert list(argv) == ["/usr/bin/xcrun", "--find", "tool"]
+        envs.append(dict(kw["env"]))
+        return RunResult(code, resolved, b"xcrun: error: unable to find", True)
+
+    monkeypatch.setattr(plat, "run_command", run)
+    return envs
+
+
+SHIM = LibDeps((plat.XCSELECT_LIB, "/usr/lib/libSystem.B.dylib"), (), "/usr/lib/dyld")
+CLT = "/Library/Developer/CommandLineTools/usr/bin/tool"
+CLT_NODES = {
+    "/Library": (DIR | 0o755, 0, None),
+    "/Library/Developer": (DIR | 0o755, 0, None),
+    "/Library/Developer/CommandLineTools": (DIR | 0o755, 0, None),
+    "/Library/Developer/CommandLineTools/usr": (DIR | 0o755, 0, None),
+    "/Library/Developer/CommandLineTools/usr/bin": (DIR | 0o755, 0, None),
+    CLT: (REG | 0o755, 0, None),
+    "/Applications": (DIR | 0o775, 0, None),
+    "/Applications/Xcode.app": (DIR | 0o755, 501, None),
+    "/Applications/Xcode.app/tool": (REG | 0o755, 501, None),
+}
+
+
+def test_n6_shim_resolving_to_clt_tool_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEVELOPER_DIR", "/Applications/Xcode.app")
+    envs = _shim_world(monkeypatch, f"{CLT}\n".encode())
+    table = {"/usr/local/bin/tool": SHIM, CLT: MAC_OK}
+    assert _policy(monkeypatch, table, "macos-arm64", CLT_NODES) == []
+    assert envs and all("DEVELOPER_DIR" not in e for e in envs)
+
+
+def test_n6_shim_resolving_to_foreign_tool_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _shim_world(monkeypatch, b"/Applications/Xcode.app/tool\n")
+    table = {"/usr/local/bin/tool": SHIM, "/Applications/Xcode.app/tool": MAC_OK}
+    problems = _policy(monkeypatch, table, "macos-arm64", CLT_NODES)
+    assert (
+        "tool: /usr/local/bin/tool: xcode-select → /Applications/Xcode.app: "
+        "владелец uid 501, не root"
+    ) in problems
+
+
+def test_n6_shim_resolving_to_bad_closure_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _shim_world(monkeypatch, f"{CLT}\n".encode())
+    table = {"/usr/local/bin/tool": SHIM, CLT: LibDeps(("@rpath/x.dylib",), ())}
+    problems = _policy(monkeypatch, table, "macos-arm64", CLT_NODES)
+    assert any("xcode-select →" in p and "@rpath" in p for p in problems), problems
+
+
+def test_n6_shim_unresolved_is_a_problem(monkeypatch: pytest.MonkeyPatch) -> None:
+    _shim_world(monkeypatch, b"", code=1)
+    problems = _policy(monkeypatch, _tool(SHIM), "macos-arm64", CLT_NODES)
+    assert any("xcode-select: xcrun --find tool" in p for p in problems), problems
+
+
+def test_n6_role_env_has_no_developer_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEVELOPER_DIR", "/Applications/Xcode.app")
+    calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def execute(argv: Sequence[str], **kw: Any) -> RunResult:
+        calls.append((list(argv), dict(kw["env"])))
+        return ok()
+
+    monkeypatch.setattr(plat, "detect_platform", lambda: "macos-arm64")
+    monkeypatch.setattr(plat, "_execute", execute)
+    plat.run_as(
+        "df-build", ["/usr/bin/git"], env={}, cwd=Path("/"), network=False, timeout=5
     )
-    problems = plat.approved_cli_problems(TOOL, "linux-x86_64")
-    assert any("/usr/local/loop" in p for p in problems), problems
+    plat.run_as(
+        "df-build",
+        ["/usr/bin/git"],
+        env={"DEVELOPER_DIR": "/x"},
+        cwd=Path("/"),
+        network=False,
+        timeout=5,
+    )
+    first, second = calls
+    assert not any("DEVELOPER_DIR" in a for a in first[0])
+    assert "DEVELOPER_DIR" not in first[1] and "DEVELOPER_DIR" not in second[1]
+    assert "DEVELOPER_DIR=/x" in second[0]  # only because the caller asked
+    FakePopen.instances.clear()
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+    plat.spawn_as("df-build", ["/usr/bin/tar"], env={}, cwd=Path("/"), network=False)
+    spawned = FakePopen.instances[0]
+    assert "DEVELOPER_DIR" not in spawned.kwargs["env"]
+    assert not any("DEVELOPER_DIR" in a for a in spawned.argv)
+
+
+@MACOS_ONLY
+def test_real_mac_system_clis_pass() -> None:
+    clt = Path("/Library/Developer/CommandLineTools/usr/bin")
+    if not (clt / "otool").exists() or not (clt / "git").exists():
+        pytest.skip("needs the Command Line Tools")
+    cli = {
+        "git": Path("/usr/bin/git"),
+        "tar": Path("/usr/bin/tar"),
+        "chmod": Path("/bin/chmod"),
+    }
+    assert plat.approved_cli_problems(cli, "macos-arm64") == []
