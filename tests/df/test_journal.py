@@ -116,6 +116,26 @@ def test_journal_format_and_mode(tmp_path: Path) -> None:
     assert (journal.stat().st_mode & 0o777) == 0o600
 
 
+def test_new_journal_is_0600_under_umask_277(tmp_path: Path) -> None:
+    journal = tmp_path / "j.jsonl"
+    old = os.umask(0o277)
+    try:
+        journal_event(journal, run_id="r", step="s", event="a")
+    finally:
+        os.umask(old)
+    assert (journal.stat().st_mode & 0o777) == 0o600
+    journal_event(journal, run_id="r", step="s", event="b")
+    assert [e for _, e in _events(journal)] == ["a", "b"]
+
+
+def test_existing_journal_with_wrong_mode_refused(tmp_path: Path) -> None:
+    journal = tmp_path / "j.jsonl"
+    journal.write_text("")
+    journal.chmod(0o644)
+    with pytest.raises(StepFailed, match="0644"):
+        journal_event(journal, run_id="r", step="s", event="e")
+
+
 def test_journal_refuses_symlink(tmp_path: Path) -> None:
     target = tmp_path / "t"
     target.write_text("")

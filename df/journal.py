@@ -26,7 +26,7 @@ _DIR_FOLLOW_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
 ROOT_UID = 0
 _NO_WRITE_OTHERS = stat.S_IWGRP | stat.S_IWOTH
 _LOCK_FLAGS = os.O_RDWR | _NB
-_APPEND_FLAGS = os.O_WRONLY | os.O_APPEND | os.O_CREAT | _NB
+_APPEND_FLAGS = os.O_WRONLY | os.O_APPEND | _NB
 _READ_FLAGS = os.O_RDONLY | _NB
 _GEN_MAX_BYTES = 64
 _GEN_RE = re.compile(r"0|[1-9][0-9]*")
@@ -241,23 +241,24 @@ def _file_problem(
 
 
 def _open_lock_file(dir_fd: int, path: Path) -> int:
+    return _open_private(dir_fd, path, _LOCK_FLAGS, "lock")
+
+
+def _open_private(dir_fd: int | None, path: Path, flags: int, step: str) -> int:
+    """Open a writer-side file (lock, journal): existing must be exactly 0600;
+    a missing one is created exclusively and forced to 0600 despite umask."""
     try:
-        return _open_existing_lock(dir_fd, path)
+        return _open_regular(dir_fd, path, flags, step, writer=True, exact_mode=0o600)
     except StepFailed:
-        if not _is_absent(path.name, dir_fd):
+        if not _is_absent(path, dir_fd):
             raise
-    return _create_lock_file(dir_fd, path)
+    return _create_private(dir_fd, path, flags, step)
 
 
-def _open_existing_lock(dir_fd: int, path: Path) -> int:
-    return _open_regular(
-        dir_fd, path, _LOCK_FLAGS, "lock", writer=True, exact_mode=0o600
-    )
-
-
-def _is_absent(name: str, dir_fd: int) -> bool:
+def _is_absent(path: Path, dir_fd: int | None) -> bool:
+    target = path.name if dir_fd is not None else path
     try:
-        os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        os.stat(target, dir_fd=dir_fd, follow_symlinks=False)
     except FileNotFoundError:
         return True
     except OSError:
@@ -265,14 +266,14 @@ def _is_absent(name: str, dir_fd: int) -> bool:
     return False
 
 
-def _create_lock_file(dir_fd: int, path: Path) -> int:
+def _create_private(dir_fd: int | None, path: Path, flags: int, step: str) -> int:
+    target = path.name if dir_fd is not None else path
     try:
-        flags = _LOCK_FLAGS | os.O_CREAT | os.O_EXCL
-        fd = os.open(path.name, flags, 0o600, dir_fd=dir_fd)
+        fd = os.open(target, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dir_fd)
     except FileExistsError:
-        return _open_existing_lock(dir_fd, path)
+        return _open_regular(dir_fd, path, flags, step, writer=True, exact_mode=0o600)
     except OSError as exc:
-        raise StepFailed("lock", f"{path}: {_why(exc)}") from exc
+        raise StepFailed(step, f"{path}: {_why(exc)}") from exc
     try:
         os.fchmod(fd, 0o600)
     except BaseException:
@@ -387,7 +388,7 @@ def journal_event(
         "detail": detail,
     }
     data = (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
-    fd = _open_regular(None, journal, _APPEND_FLAGS, "journal", writer=True)
+    fd = _open_private(None, journal, _APPEND_FLAGS, "journal")
     try:
         view = memoryview(data)
         while view:
