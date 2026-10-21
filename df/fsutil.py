@@ -19,6 +19,8 @@ from typing import Literal
 _IS_DARWIN = sys.platform == "darwin"
 _F_FULLFSYNC = getattr(fcntl, "F_FULLFSYNC", 51)
 _UNSUPPORTED = {errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}
+_SYSCTL = "/usr/sbin/sysctl"
+_SAFE_ENV = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
 _BOOT_ID_LINUX = Path("/proc/sys/kernel/random/boot_id")
 
 FaultKind = Literal["renamed", "unlinked", "created", "chown", "chmod"]
@@ -123,11 +125,17 @@ def sync_tree(root: Path) -> None:
 
     Symbolic links are neither followed nor opened.
     """
-    for dirpath, _dirs, files in os.walk(root, topdown=False, followlinks=False):
+    for dirpath, _dirs, files in os.walk(
+        root, topdown=False, followlinks=False, onerror=_raise
+    ):
         base = Path(dirpath)
         for name in files:
             _sync_regular(base / name)
         sync_dir(base)
+
+
+def _raise(exc: OSError) -> None:
+    raise exc
 
 
 def _sync_regular(path: Path) -> None:
@@ -144,7 +152,8 @@ def boot_id() -> str:
     """Return the current boot identifier; an empty value is an error."""
     if _IS_DARWIN:
         result = subprocess.run(
-            ["sysctl", "-n", "kern.bootsessionuuid"],
+            [_SYSCTL, "-n", "kern.bootsessionuuid"],
+            env=_SAFE_ENV,
             capture_output=True,
             text=True,
             check=True,

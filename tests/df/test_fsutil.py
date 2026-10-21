@@ -168,3 +168,38 @@ def test_boot_id_empty_is_error(monkeypatch) -> None:
     monkeypatch.setattr(fsutil.subprocess, "run", lambda *a, **k: R())
     with pytest.raises(OSError):
         boot_id()
+
+
+def test_sync_tree_missing_root_raises(tmp_path: Path) -> None:
+    with pytest.raises(OSError):
+        sync_tree(tmp_path / "absent")
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores chmod")
+def test_sync_tree_unreadable_subdir_raises(tmp_path: Path) -> None:
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "a").write_text("a")
+    sub.chmod(0)
+    try:
+        with pytest.raises(OSError):
+            sync_tree(tmp_path)
+    finally:
+        sub.chmod(0o755)
+
+
+def test_boot_id_uses_absolute_sysctl_and_minimal_env(monkeypatch) -> None:
+    seen: dict = {}
+
+    class R:
+        stdout = "uuid-1\n"
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        seen["argv"], seen["env"] = argv, kwargs.get("env")
+        return R()
+
+    monkeypatch.setattr(fsutil, "_IS_DARWIN", True)
+    monkeypatch.setattr(fsutil.subprocess, "run", fake_run)
+    assert boot_id() == "uuid-1"
+    assert seen["argv"][0] == "/usr/sbin/sysctl"
+    assert seen["env"] == {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
