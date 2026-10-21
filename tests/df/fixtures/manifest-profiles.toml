@@ -1,0 +1,50 @@
+schema_version = "0.3.0"
+
+[df.profiles.core]
+python = "3.12.13"
+members = ["devtools", "discovery", "discovery-toolkit", "disputatio", "steward", "spec-runner"]
+
+[df.profiles.core.groups]
+devtools = ["governance"]
+
+[df.profiles.impresario]
+extends = "core"
+members = ["impresario"]
+
+[cores.spec-runner]
+repo_url = "git@github.com:andrei-shtanakov/spec-runner.git"
+tag = "v2.33.2"
+sha = "6666666666666666666666666666666666666666"
+
+[cores.atp-platform]
+repo_url = "git@github.com:andrei-shtanakov/atp-platform.git"
+tag = "v1.0.0"
+
+[apps.steward]
+repo_url = "git@github.com:andrei-shtanakov/steward.git"
+sha = "5555555555555555555555555555555555555555"
+
+[apps.discovery]
+repo_url = "https://github.com/andrei-shtanakov/discovery"
+sha = "2222222222222222222222222222222222222222"
+
+[apps.discovery-toolkit]
+repo_url = "git@github.com:andrei-shtanakov/discovery-toolkit.git"
+sha = "3333333333333333333333333333333333333333"
+
+[apps.disputatio]
+repo_url = "git@github.com:andrei-shtanakov/disputatio.git"
+sha = "4444444444444444444444444444444444444444"
+
+[apps.impresario]
+repo_url = "git@github.com:andrei-shtanakov/impresario.git"
+sha = "7777777777777777777777777777777777777777"
+
+[apps.other-lab]
+repo_url = "git@git.example.com:x/other-lab.git"
+tag = "v1"
+
+[tools.devtools]
+repo_url = "git@github.com:andrei-shtanakov/devtools.git"
+tag = "-"
+sha = "1111111111111111111111111111111111111111"
