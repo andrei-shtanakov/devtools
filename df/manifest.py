@@ -7,6 +7,7 @@ collected and reported in one `ManifestError`, never just the first.
 
 from __future__ import annotations
 
+import http.client
 import re
 import tomllib
 import urllib.request
@@ -15,12 +16,14 @@ from dataclasses import dataclass
 
 MAX_MANIFEST_BYTES = 1024 * 1024
 FETCH_TIMEOUT = 30
+RAW_PREFIX = "https://raw.githubusercontent.com/"
 MEMBER_SECTIONS = ("cores", "apps", "tools")
 PROFILE_KEYS = frozenset({"python", "members", "extends", "groups"})
 
 _SHA = re.compile(r"[0-9a-f]{40}")
 _PY_VERSION = re.compile(r"\d+\.\d+\.\d+")
 _NAME = r"[A-Za-z0-9_][A-Za-z0-9_.-]*"
+_IDENT = re.compile(_NAME)
 _REPO = re.compile(rf"({_NAME})/({_NAME})")
 _URL_FORMS = (
     re.compile(rf"git@github\.com:(?P<o>{_NAME})/(?P<r>{_NAME}?)(?:\.git)?"),
@@ -58,13 +61,23 @@ class Profile:
 
 def manifest_url(repo: str, sha: str) -> str:
     """Return the raw URL of `workspace-manifest.toml` at commit `sha`."""
-    return f"https://raw.githubusercontent.com/{repo}/{sha}/workspace-manifest.toml"
+    return f"{RAW_PREFIX}{repo}/{sha}/workspace-manifest.toml"
 
 
 def _https_get(url: str) -> bytes:
-    """GET `url`, reading at most MAX_MANIFEST_BYTES + 1 bytes."""
-    with urllib.request.urlopen(url, timeout=FETCH_TIMEOUT) as resp:  # noqa: S310
-        return resp.read(MAX_MANIFEST_BYTES + 1)
+    """GET `url`, reading at most MAX_MANIFEST_BYTES + 1 bytes.
+
+    A final URL outside raw.githubusercontent.com (redirect) is refused;
+    protocol-level errors surface as `OSError`.
+    """
+    try:
+        with urllib.request.urlopen(url, timeout=FETCH_TIMEOUT) as resp:  # noqa: S310
+            final = resp.geturl()
+            if not final.startswith(RAW_PREFIX):
+                raise ManifestError(f"redirected outside {RAW_PREFIX}: {final!r}")
+            return resp.read(MAX_MANIFEST_BYTES + 1)
+    except http.client.HTTPException as exc:
+        raise OSError(f"HTTP error fetching {url}: {exc}") from exc
 
 
 def fetch_manifest(
@@ -133,6 +146,24 @@ def _pin(
     return RepoPin(name, url, sha, groups)
 
 
+def _ident_problem(kind: str, value: str) -> str | None:
+    """Shared strict check for names that become path segments or argv."""
+    if _IDENT.fullmatch(value) and ".." not in value:
+        return None
+    return f"{kind} {value!r}: must match [A-Za-z0-9_][A-Za-z0-9_.-]*, no '..'"
+
+
+def _idents(kind: str, values: list[str], problems: list[str]) -> list[str]:
+    """Return the safe values, reporting each unsafe one as a problem."""
+    good: list[str] = []
+    for value in values:
+        if bad := _ident_problem(kind, value):
+            problems.append(bad)
+        else:
+            good.append(value)
+    return good
+
+
 def _str_list(value: object, where: str, problems: list[str]) -> list[str]:
     if isinstance(value, list) and all(isinstance(v, str) for v in value):
         return list(value)
@@ -141,37 +172,68 @@ def _str_list(value: object, where: str, problems: list[str]) -> list[str]:
 
 
 def _groups_of(
-    sect: Mapping[str, object], where: str, problems: list[str]
+    sect: Mapping[str, object], members: list[str], where: str, problems: list[str]
 ) -> dict[str, tuple[str, ...]]:
+    """Validated `groups` table; keys must be in `members` (reported once)."""
     raw = sect.get("groups", {})
     if not isinstance(raw, dict):
         problems.append(f"{where}.groups: must be a table")
         return {}
-    return {
-        k: tuple(_str_list(v, f"{where}.groups.{k}", problems)) for k, v in raw.items()
-    }
+    out: dict[str, tuple[str, ...]] = {}
+    for key, value in raw.items():
+        if bad := _ident_problem(f"{where} group member", key):
+            problems.append(bad)
+            continue
+        if key not in members:
+            problems.append(f"{where}: groups for {key!r}, not a member")
+            continue
+        names = _str_list(value, f"{where}.groups.{key}", problems)
+        out[key] = tuple(_idents(f"{where} group", names, problems))
+    return out
 
 
-def _base_of(
+def _body(
+    name: str, sect: Mapping[str, object], problems: list[str]
+) -> tuple[list[str], dict[str, tuple[str, ...]]]:
+    """Validate one profile section alone: keys, members, groups."""
+    where = f"profile {name!r}"
+    for key in sorted(set(sect) - PROFILE_KEYS):
+        problems.append(f"{where}: unknown key {key!r}")
+    if "members" not in sect and "extends" not in sect:
+        problems.append(f"{where}: needs members or extends")
+    raw = _str_list(sect.get("members", []), f"{where}.members", problems)
+    members = _idents(f"{where} member", raw, problems)
+    seen: set[str] = set()
+    for member in members:
+        if member in seen:
+            problems.append(f"{where}: duplicate member {member!r}")
+        seen.add(member)
+    return members, _groups_of(sect, members, where, problems)
+
+
+def _extends_target(
     profiles: Mapping[str, object],
     name: str,
     sect: Mapping[str, object],
     problems: list[str],
-) -> Mapping[str, object] | None:
+) -> tuple[str, Mapping[str, object]] | None:
     if "extends" not in sect:
         return None
-    base_name = sect["extends"]
-    base = profiles.get(base_name) if isinstance(base_name, str) else None
-    if not isinstance(base, dict) or base_name == name:
-        problems.append(f"profile {name!r}: extends {base_name!r} is not a valid base")
+    target = sect["extends"]
+    base = profiles.get(target) if isinstance(target, str) else None
+    if isinstance(target, str) and (bad := _ident_problem("extends", target)):
+        problems.append(f"profile {name!r}: {bad}")
+        return None
+    if not isinstance(target, str) or not isinstance(base, dict) or target == name:
+        problems.append(f"profile {name!r}: extends {target!r} is not a valid base")
         return None
     if "extends" in base:
         problems.append(
-            f"profile {name!r}: extends {base_name!r} which itself extends "
+            f"profile {name!r}: extends {target!r} which itself extends "
             "(only one level, no cycles)"
         )
         return None
-    return base
+    return target, base
 
 
 def _python_of(
@@ -180,7 +242,10 @@ def _python_of(
     base: Mapping[str, object] | None,
     problems: list[str],
 ) -> str:
-    own, inherited = sect.get("python"), (base or {}).get("python")
+    own = sect.get("python")
+    inherited = None if base is None else base.get("python")
+    if base is not None and inherited is None:
+        problems.append(f"profile {name!r}: base has no python to inherit")
     for label, value in (("python", own), ("base python", inherited)):
         if value is not None and not (
             isinstance(value, str) and _PY_VERSION.fullmatch(value)
@@ -189,36 +254,28 @@ def _python_of(
     if own is not None and inherited is not None and own != inherited:
         problems.append(f"profile {name!r}: python {own!r} differs from base")
     chosen = inherited if inherited is not None else own
-    if chosen is None:
+    if chosen is None and base is None:
         problems.append(f"profile {name!r}: python is required")
     return chosen if isinstance(chosen, str) else ""
 
 
-def _collect_members(
+def _resolve(
+    profiles: Mapping[str, object],
     name: str,
     sect: Mapping[str, object],
-    base: Mapping[str, object] | None,
     problems: list[str],
-) -> tuple[list[str], dict[str, tuple[str, ...]]]:
-    where = f"profile {name!r}"
-    members = _str_list((base or {}).get("members", []), where, problems)
-    own = _str_list(sect.get("members", []), f"{where}.members", problems)
-    groups = _groups_of(base or {}, where, problems)
-    own_groups = _groups_of(sect, where, problems)
-    for key in own_groups:
-        if key not in own:
-            problems.append(f"{where}: groups for {key!r}, not an own member")
-    groups.update(own_groups)
-    seen: set[str] = set()
-    for member in [*members, *own]:
-        if member in seen:
-            problems.append(f"{where}: duplicate member {member!r}")
-        seen.add(member)
-    all_members = [*members, *own]
-    for key in groups:
-        if key not in all_members:
-            problems.append(f"{where}: groups for {key!r}, not a member")
-    return list(dict.fromkeys(all_members)), groups
+) -> tuple[str, list[str], dict[str, tuple[str, ...]]]:
+    members, groups = _body(name, sect, problems)
+    target = _extends_target(profiles, name, sect, problems)
+    base = None if target is None else target[1]
+    python = _python_of(name, sect, base, problems)
+    if target is None:
+        return python, members, groups
+    base_members, base_groups = _body(target[0], base or {}, problems)
+    for member in members:
+        if member in base_members:
+            problems.append(f"profile {name!r}: duplicate member {member!r}")
+    return python, [*base_members, *members], {**base_groups, **groups}
 
 
 def _load(data: bytes) -> dict[str, object]:
@@ -231,6 +288,8 @@ def _load(data: bytes) -> dict[str, object]:
 def parse_profile(data: bytes, profile: str) -> Profile:
     """Resolve `profile` from manifest bytes; raise ManifestError listing all
     problems (bad pins, unknown members, inheritance errors, ...)."""
+    if bad := _ident_problem("profile", profile):
+        raise ManifestError(bad)
     manifest = _load(data)
     profiles = _table(_table(manifest.get("df")).get("profiles"))
     if not profiles:
@@ -239,11 +298,8 @@ def parse_profile(data: bytes, profile: str) -> Profile:
     if not isinstance(sect, dict):
         raise ManifestError(f"unknown profile {profile!r}")
     problems: list[str] = []
-    for key in sorted(set(sect) - PROFILE_KEYS):
-        problems.append(f"profile {profile!r}: unknown key {key!r}")
-    base = _base_of(profiles, profile, sect, problems)
-    python = _python_of(profile, sect, base, problems)
-    members, groups = _collect_members(profile, sect, base, problems)
+    python, members, groups = _resolve(profiles, profile, sect, problems)
+    members = list(dict.fromkeys(members))
     pins = [_pin(manifest, m, groups.get(m, ()), problems) for m in members]
     if problems:
         raise ManifestError(problems)

@@ -201,3 +201,126 @@ def test_fetch_network_error_propagates() -> None:
 
     with pytest.raises(OSError):
         fetch_manifest("o/r", "a" * 40, opener=boom)
+
+
+BAD_IDENTS = ["../../etc", "a/b", "-rf", "a\nb", "a\x00b", "..", ".", "a..b", ""]
+
+
+@pytest.mark.parametrize("bad", BAD_IDENTS)
+def test_member_names_refused(bad: str) -> None:
+    toml = _fix() + (
+        '\n[df.profiles.evil]\npython = "3.12.13"\nmembers = [' + _toml_str(bad) + "]\n"
+    )
+    assert "member" in _problems(toml, "evil")
+
+
+def _toml_str(value: str) -> str:
+    esc = value.replace("\\", "\\\\").replace('"', '\\"')
+    esc = esc.replace("\n", "\\n").replace("\x00", "\\u0000")
+    return f'"{esc}"'
+
+
+@pytest.mark.parametrize("bad", ["--index-url=http://x", "a b", "x\ny", "../g"])
+def test_group_names_refused(bad: str) -> None:
+    toml = _replace('devtools = ["governance"]', f"devtools = [{_toml_str(bad)}]")
+    assert "group" in _problems(toml)
+
+
+def test_group_key_unsafe_and_unknown_reported_once() -> None:
+    msgs = _problems(_replace('devtools = ["governance"]', 'ghost = ["x"]'))
+    assert msgs.count("ghost") == 1
+
+
+@pytest.mark.parametrize("bad", ["../core", "-x", "a/b"])
+def test_extends_target_and_requested_profile_refused(bad: str) -> None:
+    toml = _replace('extends = "core"', f"extends = {_toml_str(bad)}")
+    assert "extends" in _problems(toml, "impresario")
+    with pytest.raises(ManifestError):
+        parse_profile(FIX.read_bytes(), bad)
+
+
+def test_base_validated_on_its_own() -> None:
+    toml = _replace('devtools = ["governance"]', 'impresario = ["g"]')
+    assert "impresario" in _problems(toml, "impresario")
+    toml = _replace('python = "3.12.13"', 'python = "3.12.13"\nbogus = 1')
+    assert "bogus" in _problems(toml, "impresario")
+
+
+def test_base_without_python_refused() -> None:
+    toml = _replace('python = "3.12.13"\n', "")
+    assert "python" in _problems(toml, "impresario")
+    assert "python" in _problems(toml, "core")
+
+
+def test_profile_needs_members_or_extends() -> None:
+    toml = _fix() + '\n[df.profiles.empty]\npython = "3.12.13"\n'
+    assert "members" in _problems(toml, "empty")
+
+
+HOSTILE_URLS = [
+    "https://github.com.evil.com/o/r.git",
+    "https://github.com/o/r/x.git",
+    "ssh://git@github.com/o/r.git",
+    "HTTPS://github.com/o/r.git",
+    "https://github.com/o/r/",
+    "https://github.com/-o/r.git",
+    "https://github.com/o/r.git\n",
+    "git@github.com:o/r/x.git",
+]
+
+
+@pytest.mark.parametrize("url", HOSTILE_URLS)
+def test_hostile_repo_urls_refused(url: str) -> None:
+    toml = _replace('"git@github.com:andrei-shtanakov/steward.git"', _toml_str(url))
+    assert "steward" in _problems(toml)
+
+
+class _Resp:
+    def __init__(self, final: str, body: bytes = b"x") -> None:
+        self.final, self.body, self.reads = final, body, []
+
+    def __enter__(self) -> _Resp:
+        return self
+
+    def __exit__(self, *_a: object) -> None:
+        return None
+
+    def geturl(self) -> str:
+        return self.final
+
+    def read(self, n: int) -> bytes:
+        self.reads.append(n)
+        return self.body[:n]
+
+
+def test_https_get_reads_at_most_cap_plus_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    resp = _Resp(manifest_url("o/r", "a" * 40), b"x" * (2**20 + 50))
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_a, **_k: resp)
+    from df.manifest import _https_get
+
+    assert len(_https_get(manifest_url("o/r", "a" * 40))) == 2**20 + 1
+    assert resp.reads == [2**20 + 1]
+
+
+def test_https_get_refuses_foreign_redirect(monkeypatch: pytest.MonkeyPatch) -> None:
+    from df.manifest import _https_get
+
+    resp = _Resp("http://evil.example/m.toml")
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_a, **_k: resp)
+    with pytest.raises(ManifestError):
+        _https_get(manifest_url("o/r", "a" * 40))
+
+
+def test_https_get_http_exception_becomes_oserror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import http.client
+
+    from df.manifest import _https_get
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise http.client.IncompleteRead(b"")
+
+    monkeypatch.setattr("urllib.request.urlopen", boom)
+    with pytest.raises(OSError):
+        _https_get(manifest_url("o/r", "a" * 40))
