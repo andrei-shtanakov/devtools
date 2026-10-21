@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tomllib
 from pathlib import Path
 
@@ -179,20 +180,24 @@ def test_releases_requires_admin_python(tmp_path: Path) -> None:
             entry(admin_python=bad)
 
 
+def _after_schema(text: str, line: str) -> str:
+    head, rest = text.split("\n", 1)
+    assert head.startswith("schema")
+    return f"{head}\n{line}\n{rest}"
+
+
 def test_releases_strict() -> None:
     text = dump_releases(ReleasesConfig((entry(),)))
     with pytest.raises(ConfigError, match="schema"):
         load_releases_text(text.replace("df/releases/v1", "df/releases/v2"))
     with pytest.raises(ConfigError, match="bogus"):
-        load_releases_text(text + "bogus = 1\n")
-    with pytest.raises(ConfigError, match="bogus"):
-        load_releases_text(text + 'bogus = "x"\n'.replace("bogus", "bogus"))
+        load_releases_text(_after_schema(text, "bogus = 1"))
 
 
 def test_releases_unknown_entry_key_and_duplicates() -> None:
     text = dump_releases(ReleasesConfig((entry(),)))
     with pytest.raises(ConfigError, match="zzz"):
-        load_releases_text(text + "zzz = 1\n")
+        load_releases_text(text.replace("status", "zzz = 1\nstatus", 1))
     dup = ReleasesConfig((entry(), entry()))
     with pytest.raises(ConfigError, match="duplicate"):
         load_releases_text(dump_releases(dup))
@@ -225,7 +230,7 @@ def test_pending_and_accounts_strict(tmp_path: Path) -> None:
     write_atomic(ap, dump_accounts(accs))
     assert load_accounts(ap) == accs
     assert load_accounts(tmp_path / "absent.toml") == {}
-    ap.write_text(dump_accounts(accs) + "extra = 1\n")
+    ap.write_text(_after_schema(dump_accounts(accs), "extra = 1"))
     with pytest.raises(ConfigError, match="extra"):
         load_accounts(ap)
     ap.write_text(dump_accounts(accs).replace("creating", "weird"))
@@ -314,3 +319,21 @@ def test_layout_rejects_bad_ids(tmp_path: Path, bad: str) -> None:
     for fn in (lay.release_dir, lay.admin_dir, lay.staging_dir, lay.staging_tree):
         with pytest.raises(ConfigError):
             fn(bad)
+
+
+def test_loaders_fail_closed_on_links(tmp_path: Path) -> None:
+    dangling = tmp_path / "dangling.toml"
+    dangling.symlink_to(tmp_path / "nowhere")
+    loop = tmp_path / "loop.toml"
+    loop.symlink_to(loop)
+    fifo = tmp_path / "fifo.toml"
+    os.mkfifo(fifo)
+    notdir = tmp_path / "file" / "x.toml"
+    (tmp_path / "file").write_text("x")
+    for path in (dangling, loop, fifo, notdir):
+        with pytest.raises(ConfigError, match=path.name):
+            load_pending(path)
+        with pytest.raises(ConfigError, match=path.name):
+            load_accounts(path)
+    assert load_pending(tmp_path / "absent.toml") is None
+    assert load_accounts(tmp_path / "absent.toml") == {}

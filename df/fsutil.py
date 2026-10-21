@@ -141,24 +141,33 @@ def _raise(exc: OSError) -> None:
 def _sync_regular(path: Path) -> None:
     if not stat.S_ISREG(os.lstat(path).st_mode):
         return
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+    fd = os.open(path, flags)
     try:
         sync_file(fd)
     finally:
         os.close(fd)
 
 
-def boot_id() -> str:
-    """Return the current boot identifier; an empty value is an error."""
-    if _IS_DARWIN:
+def _sysctl_boot_id() -> str:
+    try:
         result = subprocess.run(
             [_SYSCTL, "-n", "kern.bootsessionuuid"],
             env=_SAFE_ENV,
             capture_output=True,
             text=True,
             check=True,
+            timeout=10,
         )
-        value = result.stdout.strip()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise OSError(f"sysctl kern.bootsessionuuid failed: {exc}") from exc
+    return result.stdout.strip()
+
+
+def boot_id() -> str:
+    """Return the current boot identifier; an empty value is an error."""
+    if _IS_DARWIN:
+        value = _sysctl_boot_id()
     else:
         value = _BOOT_ID_LINUX.read_text().strip()
     if not value:

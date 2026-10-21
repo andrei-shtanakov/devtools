@@ -7,7 +7,9 @@ refusal (`ConfigError`) naming the offending key.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import stat
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -80,6 +82,28 @@ def _read(path: Path) -> str:
         return path.read_text(encoding="utf-8")
     except OSError as exc:
         raise ConfigError(f"{path}: cannot read: {exc}") from exc
+
+
+def _read_optional(path: Path) -> str | None:
+    """Read a regular file without following links; None only if absent."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        if os.path.islink(path):
+            raise ConfigError(f"{path}: dangling symbolic link") from None
+        return None
+    except OSError as exc:
+        raise ConfigError(f"{path}: cannot read: {exc}") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ConfigError(f"{path}: not a regular file")
+        with os.fdopen(fd, "rb", closefd=False) as fh:
+            return fh.read().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ConfigError(f"{path}: cannot read: {exc}") from exc
+    finally:
+        os.close(fd)
 
 
 def _digest_text(text: str) -> str:
@@ -297,9 +321,10 @@ _PENDING_REQUIRED = {"run_id", "release_id", "install_text", "install_digest"}
 
 def load_pending(path: Path) -> Pending | None:
     """Read `pending.toml`; `None` if the file does not exist."""
-    if not path.exists():
+    text = _read_optional(path)
+    if text is None:
         return None
-    data = _parse_toml(_read(path), STATE_SCHEMAS["pending.toml"])
+    data = _parse_toml(text, STATE_SCHEMAS["pending.toml"])
     _check_keys(data, _PENDING_REQUIRED, {"previous_current"}, "pending.toml")
     for key, value in data.items():
         _need(isinstance(value, str), key, "must be a string")
@@ -360,9 +385,10 @@ _ACCOUNT_KEYS = {"name", "uid", "gid", "state", "created_at"}
 
 def load_accounts(path: Path) -> dict[str, Account]:
     """Read `accounts.toml`; empty if the file does not exist."""
-    if not path.exists():
+    text = _read_optional(path)
+    if text is None:
         return {}
-    data = _parse_toml(_read(path), STATE_SCHEMAS["accounts.toml"])
+    data = _parse_toml(text, STATE_SCHEMAS["accounts.toml"])
     _check_keys(data, set(), {"account"}, "accounts.toml")
     rows = data.get("account", [])
     _need(isinstance(rows, list), "account", "must be an array of tables")

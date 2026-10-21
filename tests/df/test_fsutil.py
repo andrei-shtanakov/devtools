@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import errno
 import os
-import sys
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -111,20 +111,22 @@ def test_remove_durably_missing_is_error(tmp_path: Path) -> None:
         remove_durably(tmp_path / "absent")
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="macOS branch")
 def test_dir_fullfsync_unsupported_is_reported(monkeypatch, tmp_path: Path) -> None:
     def unsupported(fd: int, cmd: int) -> None:
         raise OSError(errno.ENOTSUP, "nope")
 
+    monkeypatch.setattr(fsutil, "_IS_DARWIN", True)
+    monkeypatch.setattr(fsutil, "_F_FULLFSYNC", 51)
     monkeypatch.setattr(fsutil.fcntl, "fcntl", unsupported)
     assert sync_dir(tmp_path) is SyncNote.FULLFSYNC_UNSUPPORTED
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="macOS branch")
 def test_dir_fullfsync_other_error_raises(monkeypatch, tmp_path: Path) -> None:
     def broken(fd: int, cmd: int) -> None:
         raise OSError(errno.EIO, "io")
 
+    monkeypatch.setattr(fsutil, "_IS_DARWIN", True)
+    monkeypatch.setattr(fsutil, "_F_FULLFSYNC", 51)
     monkeypatch.setattr(fsutil.fcntl, "fcntl", broken)
     with pytest.raises(OSError):
         sync_dir(tmp_path)
@@ -203,3 +205,19 @@ def test_boot_id_uses_absolute_sysctl_and_minimal_env(monkeypatch) -> None:
     assert boot_id() == "uuid-1"
     assert seen["argv"][0] == "/usr/sbin/sysctl"
     assert seen["env"] == {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
+
+
+def test_boot_id_sysctl_failure_is_oserror(monkeypatch) -> None:
+    def fail(argv, **kwargs):  # type: ignore[no-untyped-def]
+        assert kwargs["timeout"] == 10
+        raise subprocess.CalledProcessError(1, argv)
+
+    monkeypatch.setattr(fsutil, "_IS_DARWIN", True)
+    monkeypatch.setattr(fsutil.subprocess, "run", fail)
+    with pytest.raises(OSError):
+        boot_id()
+
+
+def test_sync_tree_does_not_hang_on_fifo(tmp_path: Path) -> None:
+    os.mkfifo(tmp_path / "fifo")
+    sync_tree(tmp_path)  # fifo is skipped, must return
