@@ -196,16 +196,127 @@ def test_writer_lock_closes_fd(tmp_path: Path) -> None:
         os.fstat(fd)
 
 
-def test_writer_lock_refuses_symlinked_ancestor(tmp_path: Path) -> None:
+def test_writer_lock_follows_system_link_above_df(tmp_path: Path) -> None:
+    """macOS: /var -> private/var is a system link and must be followed."""
+    lay = _layout(tmp_path)
+    (tmp_path / "private").mkdir()
+    (tmp_path / "var").symlink_to("private")
+    with writer_lock(lay):
+        pass
+    assert (tmp_path / "private" / "lib" / "df" / "install" / "lock").exists()
+
+
+def test_writer_lock_refuses_symlinked_var_lib_df(tmp_path: Path) -> None:
     lay = _layout(tmp_path)
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
-    (tmp_path / "var").symlink_to(elsewhere)
-    with pytest.raises(StepFailed) as info:
+    (tmp_path / "var" / "lib").mkdir(parents=True)
+    (tmp_path / "var" / "lib" / "df").symlink_to(elsewhere)
+    with pytest.raises(StepFailed, match="не каталог|символическая") as info:
         with writer_lock(lay):
             pass
     assert info.value.step == "lock"
     assert list(elsewhere.iterdir()) == []
+
+
+def test_writer_lock_refuses_symlinked_install(tmp_path: Path) -> None:
+    lay = _layout(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    lay.var.mkdir(parents=True)
+    lay.install_dir.symlink_to(elsewhere)
+    with pytest.raises(StepFailed, match="не каталог|символическая"):
+        with writer_lock(lay):
+            pass
+    assert list(elsewhere.iterdir()) == []
+
+
+@pytest.mark.parametrize("which", ["var", "lib", "df", "install"])
+@pytest.mark.parametrize("bit", [0o020, 0o002])
+def test_writer_lock_refuses_untrusted_dir_mode(
+    tmp_path: Path, which: str, bit: int
+) -> None:
+    lay = _layout(tmp_path)
+    lay.install_dir.mkdir(parents=True)
+    target = {
+        "var": tmp_path / "var",
+        "lib": tmp_path / "var" / "lib",
+        "df": lay.var,
+        "install": lay.install_dir,
+    }[which]
+    target.chmod(0o755 | bit)
+    with pytest.raises(StepFailed, match="права") as info:
+        with writer_lock(lay):
+            pass
+    assert info.value.step == "lock"
+
+
+def test_writer_lock_refuses_foreign_dir_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lay = _layout(tmp_path)
+    lay.install_dir.mkdir(parents=True)
+    monkeypatch.setattr(os, "geteuid", lambda: os.getuid() + 1)
+    with pytest.raises(StepFailed, match="владелец"):
+        with writer_lock(lay):
+            pass
+
+
+def test_writer_lock_syncs_created_dirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import df.journal as journal_mod
+
+    lay = _layout(tmp_path)
+    calls: list[int] = []
+    real = journal_mod.sync_dir
+    monkeypatch.setattr(
+        journal_mod, "sync_dir", lambda fd: (calls.append(fd), real(fd))[1]
+    )
+    with writer_lock(lay):
+        pass
+    assert len(calls) == 4  # var, lib, df, install
+    calls.clear()
+    with writer_lock(lay):
+        pass
+    assert calls == []
+
+
+def test_journal_hard_link_refused(tmp_path: Path) -> None:
+    victim = tmp_path / "victim"
+    victim.write_text("keep\n")
+    journal = tmp_path / "j"
+    os.link(victim, journal)
+    with pytest.raises(StepFailed, match="жёстких") as info:
+        journal_event(journal, run_id="r", step="s", event="e")
+    assert info.value.step == "journal"
+    assert victim.read_text() == "keep\n"
+
+
+def test_logging_failure_keeps_original_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import df.journal as journal_mod
+
+    def do() -> None:
+        raise OSError("disk")
+
+    calls: list[str] = []
+
+    def fake(journal: Path, *, event: str, **kw: object) -> None:
+        calls.append(event)
+        if event == "failed":
+            raise StepFailed("journal", "full")
+
+    monkeypatch.setattr(journal_mod, "journal_event", fake)
+    with pytest.raises(OSError) as info:
+        run_steps([Step("x", lambda: False, do)], tmp_path / "j", run_id="r")
+    assert any("не записано failed" in n for n in info.value.__notes__)
+
+
+def test_read_consistent_rejects_zero_attempts(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        read_consistent(_layout(tmp_path), lambda: 1, attempts=0)
 
 
 def test_writer_lock_refuses_symlinked_lockfile(tmp_path: Path) -> None:
@@ -509,10 +620,14 @@ def test_existing_lock_with_foreign_owner_refused(
     lay.install_dir.mkdir(parents=True)
     lay.lock.write_text("")
     lay.lock.chmod(0o600)
+    import df.journal as journal_mod
+
+    monkeypatch.setattr(journal_mod, "ROOT_UID", os.getuid())
     monkeypatch.setattr(os, "geteuid", lambda: os.getuid() + 1)
-    with pytest.raises(StepFailed, match="владелец"):
+    with pytest.raises(StepFailed, match="lock") as info:
         with writer_lock(lay):
             pass
+    assert "lock: " in str(info.value) and str(lay.lock) in info.value.detail
 
 
 def test_mkdir_race_reopens_existing(

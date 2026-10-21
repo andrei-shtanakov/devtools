@@ -17,11 +17,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from df.fsutil import sync_file, write_atomic
+from df.fsutil import sync_dir, sync_file, write_atomic
 from df.paths import Layout
 
 _NB = os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_DIR_FOLLOW_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+ROOT_UID = 0
+_NO_WRITE_OTHERS = stat.S_IWGRP | stat.S_IWOTH
 _LOCK_FLAGS = os.O_RDWR | _NB
 _APPEND_FLAGS = os.O_WRONLY | os.O_APPEND | os.O_CREAT | _NB
 _READ_FLAGS = os.O_RDONLY | _NB
@@ -63,7 +66,11 @@ class Step:
 
 @dataclass(frozen=True)
 class Stable[T]:
-    """A snapshot read under an unchanged even generation."""
+    """A snapshot accepted for the caller's mode.
+
+    Usually an even generation read twice unchanged; a writer holding the
+    lock may also build one with an odd generation (interrupted writer).
+    """
 
     value: T
     generation: int
@@ -71,7 +78,12 @@ class Stable[T]:
 
 @dataclass(frozen=True)
 class Transitional:
-    """A writer is mid-flight (odd generation); nothing was read."""
+    """The state is not settled: odd generation, nothing was read.
+
+    Callers may also build one with an even generation when they see
+    `pending.toml`; that detection belongs to snapshot code (Tasks 7/9),
+    not to `read_consistent`.
+    """
 
     generation: int
 
@@ -99,34 +111,66 @@ def _writer_lock(layout: Layout) -> Iterator[int]:
 
 
 def _open_install_dir(layout: Layout) -> int:
-    """Walk root -> install_dir, creating missing parts, refusing symlinks."""
+    """Walk root -> install_dir, creating missing parts.
+
+    Components above `layout.var` follow system links (macOS /var);
+    `df` and `install` are no-follow. Every directory must be trusted.
+    """
     parts = layout.install_dir.relative_to(layout.root).parts
+    first_nofollow = len(layout.var.relative_to(layout.root).parts) - 1
     path = layout.root
-    try:
-        fd = os.open(layout.root, _DIR_FLAGS)
-    except OSError as exc:
-        raise StepFailed("lock", f"{path}: {_why(exc)}") from exc
-    for name in parts:
+    fd = _step_open(path, lambda: os.open(path, _DIR_FOLLOW_FLAGS))
+    for i, name in enumerate(parts):
         path = path / name
-        try:
-            nxt = _open_or_make_dir(fd, name)
-        except OSError as exc:
-            raise StepFailed("lock", f"{path}: {_why(exc)}") from exc
-        finally:
-            os.close(fd)
-        fd = nxt
+        flags = _DIR_FLAGS if i >= first_nofollow else _DIR_FOLLOW_FLAGS
+        fd = _descend(fd, path, flags)
     return fd
 
 
-def _open_or_make_dir(parent_fd: int, name: str) -> int:
+def _descend(parent_fd: int, path: Path, flags: int) -> int:
+    """Open child `path.name` of `parent_fd`; always closes the parent."""
     try:
-        return os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
+        return _step_open(path, lambda: _open_or_make_dir(parent_fd, path.name, flags))
+    finally:
+        os.close(parent_fd)
+
+
+def _step_open(path: Path, opener: Callable[[], int]) -> int:
+    """Run `opener`, then require a trusted directory; fail as "lock"."""
+    try:
+        fd = opener()
+    except OSError as exc:
+        raise StepFailed("lock", f"{path}: {_why(exc)}") from exc
+    try:
+        _require_trusted_dir(fd, path)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _require_trusted_dir(fd: int, path: Path) -> None:
+    st = os.fstat(fd)
+    if st.st_uid not in (ROOT_UID, os.geteuid()):
+        raise StepFailed("lock", f"{path}: не доверенный каталог (владелец)")
+    if st.st_mode & _NO_WRITE_OTHERS:
+        raise StepFailed("lock", f"{path}: не доверенный каталог (права)")
+
+
+def _open_or_make_dir(parent_fd: int, name: str, flags: int) -> int:
+    try:
+        return os.open(name, flags, dir_fd=parent_fd)
     except FileNotFoundError:
         pass
     created = _mkdir_tolerant(parent_fd, name)
-    fd = os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
+    fd = os.open(name, flags, dir_fd=parent_fd)
     if created:
-        os.fchmod(fd, 0o755)
+        try:
+            os.fchmod(fd, 0o755)
+            sync_dir(parent_fd)
+        except BaseException:
+            os.close(fd)
+            raise
     return fd
 
 
@@ -145,34 +189,70 @@ def _why(exc: OSError) -> str:
     if exc.errno == errno.EISDIR:
         return "не обычный файл"
     if exc.errno == errno.ENOTDIR:
-        return "не каталог"
+        return "не каталог (символическая ссылка?)"
     return exc.strerror or errno.errorcode.get(exc.errno or 0, str(exc))
 
 
 def _open_regular(
-    dir_fd: int | None, path: Path, flags: int, step: str, mode: int = 0o600
+    dir_fd: int | None,
+    path: Path,
+    flags: int,
+    step: str,
+    *,
+    writer: bool = False,
+    exact_mode: int | None = None,
 ) -> int:
-    """Open without blocking or following links; only regular files pass."""
+    """Open without blocking or following links; only regular files pass.
+
+    `writer` adds the shared-file rules: owned by euid, a single link and,
+    when given, exactly `exact_mode`.
+    """
     target = path.name if dir_fd is not None else path
     try:
-        fd = os.open(target, flags, mode, dir_fd=dir_fd)
+        fd = os.open(target, flags, 0o600, dir_fd=dir_fd)
     except OSError as exc:
         raise StepFailed(step, f"{path}: {_why(exc)}") from exc
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
+    try:
+        problem = _file_problem(os.fstat(fd), writer, exact_mode)
+    except BaseException:
         os.close(fd)
-        raise StepFailed(step, f"{path}: не обычный файл")
+        raise
+    if problem is not None:
+        os.close(fd)
+        raise StepFailed(step, f"{path}: {problem}")
     return fd
+
+
+def _file_problem(
+    st: os.stat_result, writer: bool, exact_mode: int | None
+) -> str | None:
+    if not stat.S_ISREG(st.st_mode):
+        return "не обычный файл"
+    if not writer:
+        return None
+    if st.st_uid != os.geteuid():
+        return "владелец не текущий пользователь"
+    if st.st_nlink != 1:
+        return "несколько жёстких ссылок"
+    mode = stat.S_IMODE(st.st_mode)
+    if exact_mode is not None and mode != exact_mode:
+        return f"права {mode:04o}, нужны {exact_mode:04o}"
+    return None
 
 
 def _open_lock_file(dir_fd: int, path: Path) -> int:
     try:
-        fd = _open_regular(dir_fd, path, _LOCK_FLAGS, "lock")
+        return _open_existing_lock(dir_fd, path)
     except StepFailed:
         if not _is_absent(path.name, dir_fd):
             raise
-        return _create_lock_file(dir_fd, path)
-    _check_lock_file(fd, path)
-    return fd
+    return _create_lock_file(dir_fd, path)
+
+
+def _open_existing_lock(dir_fd: int, path: Path) -> int:
+    return _open_regular(
+        dir_fd, path, _LOCK_FLAGS, "lock", writer=True, exact_mode=0o600
+    )
 
 
 def _is_absent(name: str, dir_fd: int) -> bool:
@@ -190,27 +270,15 @@ def _create_lock_file(dir_fd: int, path: Path) -> int:
         flags = _LOCK_FLAGS | os.O_CREAT | os.O_EXCL
         fd = os.open(path.name, flags, 0o600, dir_fd=dir_fd)
     except FileExistsError:
-        fd = _open_regular(dir_fd, path, _LOCK_FLAGS, "lock")
-        _check_lock_file(fd, path)
-        return fd
+        return _open_existing_lock(dir_fd, path)
     except OSError as exc:
         raise StepFailed("lock", f"{path}: {_why(exc)}") from exc
-    os.fchmod(fd, 0o600)
-    return fd
-
-
-def _check_lock_file(fd: int, path: Path) -> None:
-    st = os.fstat(fd)
-    problem = None
-    if st.st_uid != os.geteuid():
-        problem = "владелец не текущий пользователь"
-    elif stat.S_IMODE(st.st_mode) != 0o600:
-        problem = f"права {stat.S_IMODE(st.st_mode):04o}, нужны 0600"
-    elif st.st_nlink != 1:
-        problem = "несколько жёстких ссылок"
-    if problem is not None:
+    try:
+        os.fchmod(fd, 0o600)
+    except BaseException:
         os.close(fd)
-        raise StepFailed("lock", f"{path}: {problem}")
+        raise
+    return fd
 
 
 def _flock_or_refuse(fd: int, path: Path) -> None:
@@ -287,7 +355,13 @@ def _parse_generation(raw: bytes) -> int:
 def read_consistent[T](
     layout: Layout, read: Callable[[], T], *, attempts: int = 3
 ) -> Stable[T] | Transitional:
-    """Read under an unchanged even generation; never opens the lock."""
+    """Read under an unchanged even generation; never opens the lock.
+
+    Exceptions from `read()` propagate as is: snapshot parts are replaced
+    atomically, so `read()` must not fail on a concurrent change.
+    """
+    if attempts < 1:
+        raise ValueError("attempts must be >= 1")
     for _ in range(attempts):
         g1 = _read_generation(layout)
         if g1 % 2 == 1:
@@ -313,7 +387,7 @@ def journal_event(
         "detail": detail,
     }
     data = (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
-    fd = _open_regular(None, journal, _APPEND_FLAGS, "journal")
+    fd = _open_regular(None, journal, _APPEND_FLAGS, "journal", writer=True)
     try:
         view = memoryview(data)
         while view:
@@ -370,11 +444,21 @@ def _run_step(step: Step, journal: Path, run_id: str, fail_after: str | None) ->
     except _Interrupted:
         raise
     except NeedsHuman as exc:
-        log("stopped", exc.instruction)
+        _log_keeping(exc, log, "stopped", exc.instruction)
         raise
     except Exception as exc:
-        log("failed", f"{type(exc).__name__}: {exc}")
+        _log_keeping(exc, log, "failed", f"{type(exc).__name__}: {exc}")
         raise
+
+
+def _log_keeping(
+    original: Exception, log: Callable[..., None], event: str, detail: str
+) -> None:
+    """Log; if logging fails, attach the error to `original` as a note."""
+    try:
+        log(event, detail)
+    except Exception as log_exc:  # noqa: BLE001 - original wins
+        original.add_note(f"журнал: не записано {event}: {log_exc}")
 
 
 def _execute(step: Step, log: Callable[..., None], fail_after: str | None) -> None:
