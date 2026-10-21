@@ -144,13 +144,17 @@ _DSCL_NOT_FOUND = b"eDSRecordNotFound"
 _DS_STANDARD = "dsAttrTypeStandard:"
 _DS_NATIVE = "dsAttrTypeNative:"
 _GETENT_NOT_FOUND = 2
+#: Every Mach-O magic: thin 32/64-bit and fat/fat64, in both byte orders.
 _MACHO_MAGIC = frozenset(
     {
-        b"\xfe\xed\xfa\xce",
-        b"\xfe\xed\xfa\xcf",
-        b"\xce\xfa\xed\xfe",
-        b"\xcf\xfa\xed\xfe",
-        b"\xca\xfe\xba\xbe",
+        b"\xfe\xed\xfa\xce",  # MH_MAGIC
+        b"\xce\xfa\xed\xfe",  # MH_CIGAM
+        b"\xfe\xed\xfa\xcf",  # MH_MAGIC_64
+        b"\xcf\xfa\xed\xfe",  # MH_CIGAM_64
+        b"\xca\xfe\xba\xbe",  # FAT_MAGIC
+        b"\xbe\xba\xfe\xca",  # FAT_CIGAM
+        b"\xca\xfe\xba\xbf",  # FAT_MAGIC_64
+        b"\xbf\xba\xfe\xca",  # FAT_CIGAM_64
     }
 )
 _ELF_MAGIC = b"\x7fELF"
@@ -1756,8 +1760,10 @@ def _binary_problems(
     invoked: str, target: Path, platform: PlatformName, depth: int, in_shim: bool
 ) -> list[str]:
     deps = linked_libraries(target)
-    if deps is None:
-        return []
+    if deps is None:  # not Mach-O or ELF: only a `#!` script is known
+        if _read_regular(target, 2).startswith(b"#!"):
+            return []
+        return [f"{target}: неизвестный формат исполняемого файла"]
     problems = [
         f"{target}: LC_DYLD_ENVIRONMENT {e} запрещён" for e in deps.dyld_environment
     ]

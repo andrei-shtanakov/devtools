@@ -1759,7 +1759,7 @@ def test_approved_cli_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     fs.nodes["/usr/local/bin/dir"] = (DIR | 0o755, 0, None)
     fs.install(monkeypatch)
     heads = {"/usr/local/bin/script": b"#!/usr/local/bin/tool -x\n"}
-    deps: dict[str, LibDeps | None] = {"/usr/local/bin/tool": None}
+    deps: dict[str, LibDeps | None] = {"/usr/local/bin/tool": LibDeps((), ())}
     monkeypatch.setattr(
         plat, "_read_regular", lambda p, _n: heads.get(str(p), b"\0\0\0\0")
     )
@@ -1888,6 +1888,15 @@ def test_otool_without_command_line_tools(
 ) -> None:
     binary = tmp_path / "bin"
     binary.write_bytes(b"\xcf\xfa\xed\xfe" + bytes(60))
+    fs = _good_fs()  # host-independent: trusted xcrun and otool on any OS
+    fs.nodes.update(
+        {
+            "/usr/bin": (DIR | 0o755, 0, None),
+            "/usr/bin/xcrun": (REG | 0o755, 0, None),
+            "/usr/bin/otool": (REG | 0o755, 0, None),
+        }
+    )
+    fs.install(monkeypatch)
     no_clt = RunResult(1, b"", b"xcrun: error: invalid active developer path", True)
     monkeypatch.setattr(plat, "run_command", lambda _a, **_k: no_clt)
     with pytest.raises(StepFailed, match="xcode-select --install"):
@@ -2684,3 +2693,71 @@ def test_drain_thread_owns_its_descriptor(monkeypatch: pytest.MonkeyPatch) -> No
     with pytest.raises(OSError):
         os.fstat(drain_fd)  # closed by its owner
     assert prod.stderr_tail() == b"warn"
+
+
+# --- executable format (PR #622 review) ------------------------------------------
+
+MACHO_MAGICS = [
+    b"\xfe\xed\xfa\xce",
+    b"\xce\xfa\xed\xfe",
+    b"\xfe\xed\xfa\xcf",
+    b"\xcf\xfa\xed\xfe",
+    b"\xca\xfe\xba\xbe",
+    b"\xbe\xba\xfe\xca",
+    b"\xca\xfe\xba\xbf",
+    b"\xbf\xba\xfe\xca",
+]
+
+
+def _format_problems(monkeypatch: pytest.MonkeyPatch, head: bytes) -> list[str]:
+    fs = _good_fs()
+    fs.install(monkeypatch)
+    monkeypatch.setattr(plat, "_read_regular", lambda _p, n: head[:n])
+    return plat.approved_cli_problems(TOOL, "macos-arm64")
+
+
+@pytest.mark.parametrize("magic", MACHO_MAGICS, ids=lambda m: m.hex())
+def test_every_macho_magic_is_parsed_or_refused(
+    monkeypatch: pytest.MonkeyPatch, magic: bytes
+) -> None:
+    seen: list[list[str]] = []
+
+    def run(argv: Sequence[str], **_kw: object) -> RunResult:
+        seen.append(list(argv))
+        return RunResult(1, b"", b"", True)
+
+    monkeypatch.setattr(plat, "run_command", run)
+    problems = _format_problems(monkeypatch, magic + bytes(60))
+    assert problems, "a Mach-O header must never pass unchecked"
+    assert not any("неизвестный формат" in p for p in problems)
+    assert any("xcrun" in p for p in problems)  # went down the Mach-O branch
+
+
+@pytest.mark.parametrize(
+    "head,unknown",
+    [
+        (b"\x00asm\x01\x00\x00\x00", True),
+        (b"MZ\x90\x00", True),
+        (b"#!/bin/sh\n", False),
+    ],
+    ids=["wasm", "pe", "script"],
+)
+def test_unknown_executable_format_is_a_problem(
+    monkeypatch: pytest.MonkeyPatch, head: bytes, unknown: bool
+) -> None:
+    fs = _good_fs()
+    fs.nodes["/bin"] = (DIR | 0o755, 0, None)
+    fs.nodes["/bin/sh"] = (REG | 0o755, 0, None)
+    fs.install(monkeypatch)
+    heads = {"/usr/local/bin/tool": head}
+    monkeypatch.setattr(plat, "_read_regular", lambda p, n: heads.get(str(p), b"")[:n])
+    monkeypatch.setattr(
+        plat,
+        "linked_libraries",
+        lambda p: LibDeps((), ()) if str(p) == "/bin/sh" else None,
+    )
+    problems = plat.approved_cli_problems(TOOL, "macos-arm64")
+    expected = "tool: /usr/local/bin/tool: неизвестный формат исполняемого файла"
+    assert (expected in problems) is unknown, problems
+    if not unknown:
+        assert problems == []
