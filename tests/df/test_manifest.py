@@ -70,7 +70,7 @@ def test_dataclasses_are_plain_and_frozen() -> None:
 def test_current_manifest_names_every_bad_entry() -> None:
     msgs = _problems(CURRENT.read_text() + CORE_SECTION)
     for name in CORE_NAMES:
-        assert name in msgs
+        assert f"member {name!r}:" in msgs
 
 
 def _replace(old: str, new: str) -> str:
@@ -80,43 +80,80 @@ def _replace(old: str, new: str) -> str:
 
 S1 = 'sha = "1111111111111111111111111111111111111111"'
 CASES: dict[str, tuple[str, str, str]] = {
-    "tag-only": (S1, "", "devtools"),
-    "short-sha": (S1, 'sha = "111111111111"', "devtools"),
-    "branch-in-sha": (S1, 'sha = "main"', "devtools"),
-    "uppercase-sha": (S1, 'sha = "' + "A" * 40 + '"', "devtools"),
-    "unknown-member": ('"steward", "spec-runner"]', '"nope", "spec-runner"]', "nope"),
+    "tag-only": (S1, "", "member 'devtools': sha must"),
+    "short-sha": (S1, 'sha = "111111111111"', "member 'devtools': sha must"),
+    "branch-in-sha": (S1, 'sha = "main"', "member 'devtools': sha must"),
+    "uppercase-sha": (S1, 'sha = "' + "A" * 40 + '"', "member 'devtools': sha must"),
+    "unknown-member": (
+        '"steward", "spec-runner"]',
+        '"nope", "spec-runner"]',
+        "member 'nope': not in",
+    ),
     "dup-key": (
         "[tools.devtools]",
         '[apps.devtools]\nrepo_url = "git@github.com:a/d.git"\n'
         'sha = "' + "9" * 40 + '"\n[tools.devtools]',
-        "devtools",
+        "member 'devtools': key found in more than one section",
     ),
-    "dup-member": ('"steward", "spec-runner"]', '"steward", "steward"]', "steward"),
+    "dup-member": (
+        '"steward", "spec-runner"]',
+        '"steward", "steward"]',
+        "duplicate member 'steward'",
+    ),
     "dup-member-base-child": (
         'members = ["impresario"]',
         'members = ["steward"]',
-        "steward",
+        "duplicate member 'steward'",
     ),
     "groups-for-non-member": (
         'devtools = ["governance"]',
         'impresario = ["x"]',
-        "impresario",
+        "groups for 'impresario', not a member",
     ),
     "child-python-differs": (
         'extends = "core"',
         'extends = "core"\npython = "3.13.0"',
-        "python",
+        "differs from base",
     ),
     "gitlab-host": (
         "git@github.com:andrei-shtanakov/steward.git",
         "git@gitlab.com:a/s.git",
-        "steward",
+        "member 'steward': repo_url",
     ),
-    "python-minor-only": ('python = "3.12.13"', 'python = "3.12"', "python"),
+    "python-minor-only": (
+        'python = "3.12.13"',
+        'python = "3.12"',
+        "must be exact X.Y.Z",
+    ),
     "unknown-profile-key": (
         'python = "3.12.13"',
         'python = "3.12.13"\nbogus = 1',
-        "bogus",
+        "unknown key 'bogus'",
+    ),
+    "python-arabic-digits": (
+        'python = "3.12.13"',
+        'python = "٣.١٢.١٣"',
+        "must be exact X.Y.Z",
+    ),
+    "python-leading-zero": (
+        'python = "3.12.13"',
+        'python = "03.12.13"',
+        "must be exact X.Y.Z",
+    ),
+    "case-collision": (
+        '"steward", "spec-runner"]',
+        '"steward", "Steward"]',
+        "differ only in case",
+    ),
+    "member-true": (
+        "[apps.steward]\n",
+        "[apps.steward]\nmember = true\n",
+        "member 'steward': workspace-member",
+    ),
+    "pyproject-elsewhere": (
+        "[apps.steward]\n",
+        '[apps.steward]\npyproject_path = "steward/packages/x/pyproject.toml"\n',
+        "member 'steward': pyproject_path",
     ),
 }
 
@@ -131,9 +168,7 @@ def test_profile_refusals(case: str) -> None:
 
 
 def test_no_profile_section() -> None:
-    text = "\n".join(ln for ln in _fix().splitlines() if "df.profiles" not in ln)
-    with pytest.raises(ManifestError):
-        parse_profile(text.encode(), "core")
+    assert "no [df.profiles]" in _problems(CURRENT.read_text())
 
 
 def test_unknown_profile_and_invalid_toml() -> None:
@@ -324,3 +359,16 @@ def test_https_get_http_exception_becomes_oserror(
     monkeypatch.setattr("urllib.request.urlopen", boom)
     with pytest.raises(OSError):
         _https_get(manifest_url("o/r", "a" * 40))
+
+
+def test_case_collision_needs_both_entries() -> None:
+    extra = '\n[apps.Steward]\nrepo_url = "git@github.com:a/s.git"\n'
+    extra += 'sha = "' + "8" * 40 + '"\n'
+    toml = _replace('"steward", "spec-runner"]', '"steward", "Steward"]') + extra
+    assert "differ only in case" in _problems(toml)
+
+
+def test_bad_extends_has_no_python_required_noise() -> None:
+    toml = _fix() + '\n[df.profiles.x]\nextends = "ghost"\nmembers = []\n'
+    msgs = _problems(toml, "x")
+    assert "not a valid base" in msgs and "python is required" not in msgs

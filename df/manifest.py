@@ -14,14 +14,14 @@ import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
+from df.config import PY_VERSION, SHA1
+
 MAX_MANIFEST_BYTES = 1024 * 1024
 FETCH_TIMEOUT = 30
 RAW_PREFIX = "https://raw.githubusercontent.com/"
 MEMBER_SECTIONS = ("cores", "apps", "tools")
 PROFILE_KEYS = frozenset({"python", "members", "extends", "groups"})
 
-_SHA = re.compile(r"[0-9a-f]{40}")
-_PY_VERSION = re.compile(r"\d+\.\d+\.\d+")
 _NAME = r"[A-Za-z0-9_][A-Za-z0-9_.-]*"
 _IDENT = re.compile(_NAME)
 _REPO = re.compile(rf"({_NAME})/({_NAME})")
@@ -89,7 +89,7 @@ def fetch_manifest(
     """
     if not _REPO.fullmatch(repo) or ".." in repo:
         raise ManifestError(f"repo {repo!r}: expected owner/name")
-    if not _SHA.fullmatch(sha):
+    if not SHA1.fullmatch(sha):
         raise ManifestError(f"sha {sha!r}: expected 40 lowercase hex")
     body = opener(manifest_url(repo, sha))
     if len(body) > MAX_MANIFEST_BYTES:
@@ -118,6 +118,17 @@ def _locate(data: Mapping[str, object], name: str) -> list[Mapping[str, object]]
     ]
 
 
+def _layout_problem(name: str, entry: Mapping[str, object]) -> str | None:
+    """The build assumes a standalone uv project at the repo root."""
+    if entry.get("member") is True:
+        return f"member {name!r}: workspace-member entries are not buildable"
+    path = entry.get("pyproject_path")
+    git_dir = entry.get("git_dir", name)
+    if path is not None and path != f"{git_dir}/pyproject.toml":
+        return f"member {name!r}: pyproject_path {path!r} is not at the repo root"
+    return None
+
+
 def _pin(
     data: Mapping[str, object],
     name: str,
@@ -132,13 +143,16 @@ def _pin(
         problems.append(f"member {name!r}: key found in more than one section")
         return None
     entry = found[0]
+    if bad := _layout_problem(name, entry):
+        problems.append(bad)
+        return None
     url = _github_url(entry.get("repo_url"))
     sha = entry.get("sha")
     ok = True
     if url is None:
         problems.append(f"member {name!r}: repo_url must be a github.com repo")
         ok = False
-    if not (isinstance(sha, str) and _SHA.fullmatch(sha)):
+    if not (isinstance(sha, str) and SHA1.fullmatch(sha)):
         problems.append(f"member {name!r}: sha must be 40 lowercase hex, got {sha!r}")
         ok = False
     if not ok or url is None or not isinstance(sha, str):
@@ -248,13 +262,13 @@ def _python_of(
         problems.append(f"profile {name!r}: base has no python to inherit")
     for label, value in (("python", own), ("base python", inherited)):
         if value is not None and not (
-            isinstance(value, str) and _PY_VERSION.fullmatch(value)
+            isinstance(value, str) and PY_VERSION.fullmatch(value)
         ):
             problems.append(f"profile {name!r}: {label} must be exact X.Y.Z")
     if own is not None and inherited is not None and own != inherited:
         problems.append(f"profile {name!r}: python {own!r} differs from base")
     chosen = inherited if inherited is not None else own
-    if chosen is None and base is None:
+    if chosen is None and base is None and "extends" not in sect:
         problems.append(f"profile {name!r}: python is required")
     return chosen if isinstance(chosen, str) else ""
 
@@ -285,6 +299,14 @@ def _load(data: bytes) -> dict[str, object]:
         raise ManifestError(f"invalid TOML: {exc}") from exc
 
 
+def _check_case_collisions(members: list[str], problems: list[str]) -> None:
+    seen: dict[str, str] = {}
+    for member in members:
+        other = seen.setdefault(member.casefold(), member)
+        if other != member:
+            problems.append(f"members {other!r} and {member!r} differ only in case")
+
+
 def parse_profile(data: bytes, profile: str) -> Profile:
     """Resolve `profile` from manifest bytes; raise ManifestError listing all
     problems (bad pins, unknown members, inheritance errors, ...)."""
@@ -300,6 +322,7 @@ def parse_profile(data: bytes, profile: str) -> Profile:
     problems: list[str] = []
     python, members, groups = _resolve(profiles, profile, sect, problems)
     members = list(dict.fromkeys(members))
+    _check_case_collisions(members, problems)
     pins = [_pin(manifest, m, groups.get(m, ()), problems) for m in members]
     if problems:
         raise ManifestError(problems)
