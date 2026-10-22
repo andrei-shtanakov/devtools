@@ -158,7 +158,7 @@ def write_mark(layout: Layout, release_id: str, mark: AcceptMark) -> None:
     configuration's or a stale `built` mark is absent and may be overwritten.
     The carried fields must equal the recorded ones. Effects: `write_atomic()`.
     """
-    if not layout.marks_dir.is_dir():
+    if not is_real_dir(layout.marks_dir):
         raise StepFailed("mark", f"нет каталога отметок {layout.marks_dir}")
     old = load_mark(layout, release_id, install_digest=mark.install_digest)
     if old is not None:
@@ -289,7 +289,7 @@ def read_facts(
     the mark for `A` (before registration), the registry entry for `intact`
     (after it); neither the profile nor the manifest is read.
     """
-    entry = _registry_entry(layout, release_id)
+    entry = registry_entry(layout, release_id)
     mark = load_mark(layout, release_id, install_digest=install_digest)
     r = root_state(layout, release_id, build_uid=build_uid)
     tree = layout.release_dir(release_id)
@@ -334,7 +334,11 @@ def read_facts(
     )
 
 
-def _registry_entry(layout: Layout, release_id: str) -> ReleaseEntry | None:
+def registry_entry(layout: Layout, release_id: str) -> ReleaseEntry | None:
+    """The entry of `release_id` in `releases.toml` (hardened reader), else `None`.
+
+    A broken registry is not a fact of the table: `StepFailed("facts")`.
+    """
     path = layout.etc / "releases.toml"
     try:
         if not os.path.lexists(path):
@@ -355,6 +359,15 @@ def _digest_equals(tree: Path, expected: str) -> bool:
         return False
     except OSError as exc:
         raise StepFailed("facts", f"{tree}: не читается: {exc}") from exc
+
+
+def is_real_dir(path: Path) -> bool:
+    """A directory by `lstat`: a link to a directory is not one."""
+    try:
+        st = os.stat(path, follow_symlinks=False)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    return stat.S_ISDIR(st.st_mode)
 
 
 def _current_is(layout: Layout, release_id: str) -> bool:
@@ -449,7 +462,7 @@ def acquire_paths(layout: Layout, pending_id: str | None) -> tuple[Path, ...]:
 
 def _sync_existing(paths: tuple[Path, ...]) -> None:
     for path in paths:
-        if path.is_dir():
+        if is_real_dir(path):
             fsutil.sync_dir(path)
 
 

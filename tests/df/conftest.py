@@ -6,8 +6,9 @@ patched); `df-build` is a distinct fake uid, kept in a virtual-owner map that
 `df.fsutil.owner_uid` — the one owner seam of every module — consults and
 `os.fchown`/`os.chown` write. The map is keyed by inode, so an entry is
 dropped when the fake sees the object removed (`os.rmdir`/`os.unlink`/
-`os.remove`) or a directory created (`os.mkdir`): a reused inode never
-inherits a stale owner. The launch
+`os.remove`), replaced (the target of `os.rename`/`os.replace`) or created
+(`os.mkdir`, `os.open` with `O_CREAT`): a reused inode never inherits a stale
+owner, and a renamed object keeps its own. The launch
 mechanism (`role_argv`) becomes a plain `env -i` exec as the current user;
 `pkill`/`ps` in `reap_user_processes` are recorded as one `process(df-build)`.
 Events of fsutil (`fault_point`, `sync_dir`, `sync_tree`) and every `run_as`
@@ -128,6 +129,7 @@ def _patch_chown(monkeypatch: pytest.MonkeyPatch, fake: FakeLayout) -> None:
 def _patch_inode_reuse(monkeypatch: pytest.MonkeyPatch, fake: FakeLayout) -> None:
     real_mkdir, real_rmdir = os.mkdir, os.rmdir
     real_unlink, real_remove = os.unlink, os.remove
+    real_rename, real_replace, real_open = os.rename, os.replace, os.open
 
     def forget(path: object, dir_fd: int | None) -> None:
         try:
@@ -147,10 +149,44 @@ def _patch_inode_reuse(monkeypatch: pytest.MonkeyPatch, fake: FakeLayout) -> Non
 
         return remove
 
+    def replacing(real: Callable[..., None]) -> Callable[..., None]:
+        def rename(
+            src: object,
+            dst: object,
+            *,
+            src_dir_fd: int | None = None,
+            dst_dir_fd: int | None = None,
+        ) -> None:
+            forget(dst, dst_dir_fd)
+            real(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+        return rename
+
+    def open_(
+        path: object, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
+    ) -> int:
+        new = bool(flags & os.O_CREAT) and not _lexists_at(path, dir_fd)
+        fd = real_open(path, flags, mode, dir_fd=dir_fd)  # type: ignore[arg-type]
+        if new:
+            st = os.fstat(fd)
+            fake.owners.pop((st.st_dev, st.st_ino), None)
+        return fd
+
     monkeypatch.setattr(os, "mkdir", mkdir)
+    monkeypatch.setattr(os, "rename", replacing(real_rename))
+    monkeypatch.setattr(os, "replace", replacing(real_replace))
+    monkeypatch.setattr(os, "open", open_)
     monkeypatch.setattr(os, "rmdir", removing(real_rmdir))
     monkeypatch.setattr(os, "unlink", removing(real_unlink))
     monkeypatch.setattr(os, "remove", removing(real_remove))
+
+
+def _lexists_at(path: object, dir_fd: int | None) -> bool:
+    try:
+        os.stat(path, dir_fd=dir_fd, follow_symlinks=False)  # type: ignore[arg-type]
+    except OSError:
+        return False
+    return True
 
 
 def _patch_fsutil(monkeypatch: pytest.MonkeyPatch, fake: FakeLayout) -> None:
