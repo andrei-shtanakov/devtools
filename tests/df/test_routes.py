@@ -47,13 +47,15 @@ from df.config import (
 )
 from df.digest import TreeError, tree_digest
 from df.journal import StepFailed, read_journal
-from df.manifest import Profile
+from df.lockset import DECLARED_LIMIT
+from df.manifest import Profile, RepoPin
 from df.paths import Layout
 from df.receive import CopyLimits
 from df.routes import (
     GUARDS,
     LATER_LEAVES,
     TARGETS,
+    RouteContext,
     acceptance_calls,
     implementation,
     route_action,
@@ -1217,6 +1219,91 @@ def test_reap_leftovers_are_a_warning(
 def test_reap_runs_the_real_reap(fl: FakeLayout) -> None:
     make_calls(fl)["reap_user_processes"]("df-build")
     assert fl.events == [("process", "df-build")]
+
+
+# ---------- distribution_problems ----------
+
+LOCK_A = b"""version = 1
+revision = 3
+
+[[package]]
+name = "app"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [{ name = "a" }]
+
+[[package]]
+name = "a"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+"""
+
+
+def _dist_calls(
+    fl: FakeLayout, repos: tuple[str, ...], refs: dict[str, Path], ctx: RouteContext
+) -> dict[str, routes.Call]:
+    pins = tuple(
+        RepoPin(r, f"https://example.invalid/{r}", "0" * 40, ()) for r in repos
+    )
+    profile = Profile("p", PY, pins)
+    plan = BuildPlan(
+        ID, fl.layout.release_dir(ID), profile, fake_uv(fl), Path("/g"), Path("/t")
+    )
+    return acceptance_calls(
+        fl.layout,
+        ID,
+        install=INSTALL,
+        profile=profile,
+        platform=plat.detect_platform(),
+        plan=plan,
+        limits=CopyLimits(),
+        refs=refs,
+        journal=fl.layout.journal,
+        run_id="run-1",
+        python_key=KEY,
+        ctx=ctx,
+    )
+
+
+def _repo(fl: FakeLayout, repo: str, lock: bytes, dists: list[tuple[str, str]]) -> Path:
+    """A trusted checkout with `lock` and a venv of registry `dists`."""
+    ref = fl.layout.verify_dir / repo
+    ref.mkdir()
+    (ref / "uv.lock").write_bytes(lock)
+    site = fl.layout.release_dir(ID) / "venv" / repo / "lib" / "python3.13"
+    site = site / "site-packages"
+    site.mkdir(parents=True)
+    for name, version in dists:
+        info = site / f"{name}-{version}.dist-info"
+        info.mkdir()
+        (info / "METADATA").write_text(f"Name: {name}\nVersion: {version}\n")
+    return ref
+
+
+def test_distribution_problems_leaf_accepts_and_keeps_installed(fl: FakeLayout) -> None:
+    ref = _repo(fl, "r1", LOCK_A, [("a", "1.0")])
+    ctx = RouteContext()
+    _dist_calls(fl, ("r1",), {"r1": ref}, ctx)["distribution_problems"]("releases/<id>")
+    assert [(d.name, d.version) for d in ctx.installed["r1"]] == [("a", "1.0")]
+    assert _journal(fl) == [("verify", "info", DECLARED_LIMIT)]
+
+
+def test_distribution_problems_leaf_lists_every_repo(fl: FakeLayout) -> None:
+    """Problems of all repos in one failure, with the named limit."""
+    r1 = _repo(fl, "r1", LOCK_A, [("a", "1.0"), ("b", "2.0")])
+    r2 = _repo(fl, "r2", b"version = 1\nrevision = 4\n", [])
+    ctx = RouteContext()
+    calls = _dist_calls(fl, ("r1", "r2", "r3"), {"r1": r1, "r2": r2}, ctx)
+    with pytest.raises(StepFailed) as exc:
+        calls["distribution_problems"]("releases/<id>")
+    assert exc.value.step == "verify"
+    detail = str(exc.value)
+    assert DECLARED_LIMIT in detail
+    assert "r1: лишнее: b 2.0" in detail
+    assert "r2: неподдерживаемый lock" in detail
+    assert "r3: нет доверенного чекаута" in detail
+    assert ctx.installed == {}
+    assert _journal(fl) == []
 
 
 # ---------- the mark wrapper ----------

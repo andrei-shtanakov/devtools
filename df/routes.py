@@ -12,7 +12,7 @@ parent; the object itself is never opened (spec 3.8). Target texts resolve
 through one exact-match table, `TARGETS`; a protocol call whose target names a
 wrapper (`WRAPS`) goes to that wrapper.
 
-`acceptance_calls` builds the implementations Task 7 owns (its protocol
+`acceptance_calls` builds the implementations Tasks 7 and 7a own (protocol
 leaves live in `df.leaves`); the other leaves (`LATER_LEAVES`) come from their
 owner tasks and Task 9 merges them.
 """
@@ -32,14 +32,17 @@ from df import platform as plat
 from df.accept import STAGE_ORDER, AcceptMark, Facts, Stage
 from df.build import BuildPlan
 from df.config import InstallConfig, config_digest
-from df.digest import check_links, release_digest, tree_digest
-from df.inputs import verify_sources
+from df.digest import TreeError, check_links, release_digest, tree_digest
+from df.inputs import InstalledDist, installed_distributions, verify_sources
 from df.journal import StepFailed, journal_event
 from df.leaves import accept_copy, prepare_dir, seal, verify_chmod
+from df.lockset import DECLARED_LIMIT, distribution_problems, expected_distributions
 from df.manifest import Profile
+from df.markers import marker_env
 from df.paths import Layout
 from df.platform import PlatformName
 from df.receive import CopyLimits
+from df.sources import UnsupportedLock
 
 #: An implementation of a route call: takes the step's target text.
 Call = Callable[[str], None]
@@ -153,7 +156,6 @@ TARGETS: Mapping[str, Target] = {
 #: `write_atomic` itself is called only for targets without a wrapper: the
 #: launcher files (texts of Task 8a) and `install.toml` (Task 9).
 LATER_LEAVES: Mapping[str, str] = {
-    "distribution_problems": "7a",
     "static_problems": "8",
     "transfer_check": "8",
     "install_admin_python": "8a",
@@ -438,10 +440,15 @@ def route_action(
 
 @dataclass
 class RouteContext:
-    """Values a leaf hands to a later step of its route (F7); taken once."""
+    """Values a leaf hands to a later step of its route (F7); taken once.
+
+    `installed` is every repo's installed list as `distribution_problems`
+    accepted it, for `release.json` `distributions_declared` (Task 9).
+    """
 
     uv_version: str | None = None
     copied_digest: str | None = None
+    installed: dict[str, list[InstalledDist]] = field(default_factory=dict)
 
 
 def acceptance_calls(
@@ -457,14 +464,16 @@ def acceptance_calls(
     journal: Path,
     run_id: str,
     python_key: str,
+    ctx: RouteContext | None = None,
 ) -> dict[str, Call]:
-    """Implementations of the route calls Task 7 owns (its leaves and WRAPS).
+    """Implementations of the route calls Tasks 7 and 7a own (leaves, WRAPS).
 
     Keys and `LATER_LEAVES` together are exactly `route_leaves()` and `WRAPS`;
     Task 9 merges the later ones. The calls share one `RouteContext`: the
     build's uv version and the copy's digest reach the next mark.
     `python_key` is the caller's admin Python key — the same value it passes
-    to `run_route`/`route_action` for the guards (one source, M5).
+    to `run_route`/`route_action` for the guards (one source, M5). A caller
+    that reads the context afterwards (Task 9) passes its own `ctx`.
     """
     leaves = _Leaves(
         layout,
@@ -478,6 +487,7 @@ def acceptance_calls(
         journal=journal,
         run_id=run_id,
         python_key=python_key,
+        ctx=ctx if ctx is not None else RouteContext(),
     )
     return leaves.calls()
 
@@ -512,6 +522,7 @@ class _Leaves:
             "check_links": self.check_links,
             "verify_chmod": lambda _t: verify_chmod(lay, rid),
             "verify_sources": self.verify_sources,
+            "distribution_problems": self.distribution_problems,
             "cleanup_build_home": self.cleanup_build_home,
             "tree_digest": self.tree_digest,
             "cleanup_tree": self.cleanup_tree,
@@ -621,6 +632,51 @@ class _Leaves:
         """
         tree = Path(*self.path(target))
         verify_sources(tree, self.profile, self.refs)
+
+    def distribution_problems(self, target: str) -> None:
+        """Check leaf: each repo's environment against its lock (spec 3.5).
+
+        The installed metadata of `venv/<repo>` against
+        `expected_distributions` of the trusted checkout's `uv.lock`, with the
+        profile's groups, the install platform and Python and the build copy
+        as the root. Problems of every repo go into one `StepFailed`; on
+        success the accepted lists go to `ctx.installed` and the journal
+        records the named limit (`DECLARED_LIMIT`).
+        """
+        tree = Path(*self.path(target))
+        env = marker_env(self.platform, self.profile.python)
+        installed: dict[str, list[InstalledDist]] = {}
+        problems: list[str] = []
+        for pin in self.profile.repos:
+            ref = self.refs.get(pin.name)
+            if ref is None:
+                problems.append(f"{pin.name}: нет доверенного чекаута")
+                continue
+            try:
+                have = installed_distributions(tree / "venv" / pin.name)
+                want = expected_distributions(
+                    (ref / "uv.lock").read_bytes(),
+                    groups=pin.groups,
+                    env=env,
+                    root_dir=build_mod.build_src_dir(
+                        self.layout, self.release_id, pin.name
+                    ),
+                )
+            except (TreeError, UnsupportedLock, OSError) as exc:
+                problems.append(f"{pin.name}: {exc}")
+                continue
+            installed[pin.name] = have
+            problems += [f"{pin.name}: {p}" for p in distribution_problems(have, want)]
+        if problems:
+            raise StepFailed("verify", "; ".join([DECLARED_LIMIT, *problems]))
+        self.ctx.installed = installed
+        journal_event(
+            self.journal,
+            run_id=self.run_id,
+            step="verify",
+            event="info",
+            detail=DECLARED_LIMIT,
+        )
 
     def cleanup_build_home(self, target: str) -> None:
         """Protocol `cleanup_build_home` on `build_home/<name>`."""
