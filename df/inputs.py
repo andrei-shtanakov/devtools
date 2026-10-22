@@ -148,21 +148,27 @@ def _check_dest(dest: Path, layout: Layout) -> None:
 
 
 def _cleanup(dest: Path, work: Path, *, raising: bool) -> None:
-    """Remove scratch; on the failure path errors must not mask the cause."""
-    try:
-        _remove(work)
-        if not raising:
-            _remove(dest)
-    except OSError:
-        if raising:
-            raise
+    """Remove scratch; on the failure path also the partial `dest`, each
+    removal on its own, and errors must not mask the cause."""
+    for path in (work,) if raising else (work, dest):
+        try:
+            _remove(path)
+        except OSError:
+            if raising:
+                raise
 
 
 def _remove(path: Path) -> None:
-    if path.is_symlink() or path.is_file():
-        path.unlink()
-    elif path.exists():
+    """Remove `path` by `lstat`: a real directory as a tree, anything else
+    (file, link, FIFO, socket) as one name; a missing name is nothing."""
+    try:
+        st = path.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(st.st_mode):
         shutil.rmtree(path)
+    else:
+        path.unlink()
 
 
 def _git_env(git: Path, work: Path) -> dict[str, str]:

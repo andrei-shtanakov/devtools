@@ -100,6 +100,35 @@ def test_reference_fetch_checks_head_and_uses_data_filter(
     assert not dest.exists()
 
 
+def test_reference_fetch_failure_removes_dest_when_work_removal_fails(
+    tmp_path: Path, layout: Layout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Paid review minor: a failed removal of the scratch `work` must not
+    leave the partial `dest`; the unpack error is what propagates."""
+    assert GIT is not None
+    pin = make_repo(tmp_path / "a", {"f": "1"}, {"evil": "/etc/passwd"})
+    dest = layout.verify_dir / "core"
+    real = inputs._remove
+
+    def failing(path: Path) -> None:
+        if path.name.endswith(".work") and path.exists():
+            raise OSError(5, "EIO")
+        real(path)
+
+    monkeypatch.setattr(inputs, "_remove", failing)
+    with pytest.raises(TreeError):
+        fetch_reference(pin, dest, git=Path(GIT), layout=layout)
+    assert not dest.exists()
+
+
+def test_remove_takes_fifo_as_one_name(tmp_path: Path) -> None:
+    fifo = tmp_path / "f"
+    os.mkfifo(fifo)
+    inputs._remove(fifo)
+    inputs._remove(tmp_path / "missing")
+    assert not os.path.lexists(fifo)
+
+
 def test_reference_fetch_dest_must_be_under_verify_dir(
     tmp_path: Path, layout: Layout
 ) -> None:
