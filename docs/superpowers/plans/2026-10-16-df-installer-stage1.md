@@ -2395,7 +2395,9 @@ F1–F16 приняты как обязательные (R44; где Ruling ме
     административной среды** (rev 8, r10): `admin_dir(id)` есть и `admin_digest(layout,
     id)` равен `expected_admin_digest` (rev 8, r5: значение, а не чтение реестра; Task 7,
     R33.F25); Python `admin_python_path(layout, expected_python, detect_platform())` — по
-    `lstat` обычный файл, и `trusted_path_problems` для него пуст. Каталога нет или
+    `lstat` обычный файл, и `trusted_path_problems` для него пуст; `admin_code_problems(layout,
+    id)` пуст (ревью, I-1: `trusted_path_problems(admin_dir)` и по каждому объекту — владелец
+    root, нет записи группы и всех, setuid/setgid, ACL и ссылок). Каталога нет или
     `TreeError` — `False`; иная `OSError` — `StepFailed("facts")` (F12). Оба ожидаемых
     значения передаются из одного источника (rev 8, r11): `mark.admin_digest`/`mark.admin_python`
     до регистрации (Task 7), запись реестра — `admin_digest`/`admin_python` — после
@@ -2423,7 +2425,8 @@ F1–F16 приняты как обязательные (R44; где Ruling ме
     Ссылку и файл с именем `df` не создаёт никогда.
   - `launcher_ready(layout, *, python: str) -> bool` (F2): вход и команда — обычные файлы
     root, `0644` и `0755`, с текстом ровно `entry_text(layout)` и `launcher_text(layout,
-    python, detect_platform())`; если `local_bin_trusted(layout)`, то и
+    python, detect_platform())`, оба проходят `trusted_path_problems` (ревью, M-3); если
+    `local_bin_trusted(layout)`, то и
     `local_bin/darkfactory` — ссылка с текстом `str(layout.launcher)` (иначе сбой между
     записью команды и `link_command` оставил бы `L` истинным без ссылки). Нет или другое —
     `False`; `ELOOP` — `False`; иная `OSError` — `StepFailed("facts")`. Оба предиката
@@ -2462,11 +2465,15 @@ F1–F16 приняты как обязательные (R44; где Ruling ме
     2. по прочитанному: `current` есть (иначе выход 2 с указанием на bootstrap), запись id
        есть и `allowed`, иначе выход 2. Отказ из-за `pending` или переходного состояния — не
        здесь, а в команде (Task 9), чтобы `doctor` его показал;
-    3. `tree_digest(admin_dir(id))` = `admin_digest`, иначе выход 2: «административный код
-       повреждён: восстановление через bootstrap»;
+    3. `admin_tree_problems(paths, id)` пуст (ревью, I-1: каталоги цепочки `root … admin/<id>`
+       — настоящие, root, без записи группы и всех; объекты `admin/<id>` — каталоги и обычные
+       файлы root без записи группы и всех, ссылок нет; ACL не читается — см. §3.9), затем
+       `tree_digest(admin_dir(id))` = `admin_digest`, иначе выход 2 с указанием на
+       bootstrap. У читателя отказ при изменившемся поколении — «состояние меняется» (n-2);
     4. `df` ещё не загружен (иначе выход 2); `sys.path.insert(0, str(admin_dir(id)))` —
        пути stdlib не трогаются;
-    5. импорт `df.state` и `df.cli` (`df.cli` обязан быть из `admin_dir(id)/df`);
+    5. импорт `df.state` и `df.cli` (`df.cli` обязан быть из `admin_dir(id)/df`; любая
+       ошибка импорта — выход 2 с указанием на bootstrap, M-2);
        `read = Transitional(g)` либо `Stable(RawSnapshot(generation=g, **parts), g)`;
        `sys.exit(main(argv, mode=mode, read=read, lock_fd=fd))`. Дальше никто снимок не
        перечитывает. `mode_of(argv)` и `WRITER_COMMANDS` — публичные: `main` обязана
@@ -2705,6 +2712,9 @@ def test_bootstrap_under_system_python_says_what_is_needed(tmp_path): ...
     `launcher_ready=lambda: launcher_ready(layout, python=<admin_python отметки или
     записи>)` — та же версия, что `expected_python` у `admin_ready`; маршрут `launcher`
     пишет `entry_text(layout)` и `launcher_text(layout, <та же версия>, platform)`.
+    Текст входа порождается из `admin_dir(id)/df/launcher_entry.py` активируемого id, и
+    `launcher_ready` сравнивает с тем же источником (ревью Task 8a, M-1: сейчас — из
+    исполняемого `df`, в спеке §3.9 записано как известное поведение).
     Команда называет Python одного релиза, поэтому откат или возобновление к релизу с
     другим `admin_python` оставляют `L` ложным для этого id: маршрут отката/возобновления
     обязан дойти до `launcher` для активного id, когда `L` ложен (F16; вход
@@ -2938,6 +2948,9 @@ def test_reader_mode_refuses_writer_subcommand(fake_world): ...
     # main(["install"], mode="reader", ...) → код 2
 def test_rollback_to_other_admin_python_rewrites_launcher(fake_world): ...
     # F16: откат к релизу с другим admin_python → маршрут доходит до launcher, L истинен
+def test_entry_text_from_activated_admin_code(fake_world): ...
+    # ревью Task 8a, M-1: вход пишется из admin/<id>/df/launcher_entry.py активируемого id;
+    # launcher_ready сравнивает с ним же — bootstrap-чекаут и код прежнего релиза не источник
 ```
 
 `fake_world` — фикстура `tests/df/conftest.py`. Подменяет только нижние операции (rev 8,
