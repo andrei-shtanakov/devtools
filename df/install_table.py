@@ -451,7 +451,10 @@ CALLS: Mapping[str, tuple[str, str]] = {
     "static_problems": ("check", ""),
     "transfer_check": (
         "builder",
-        "создаёт `build_home/tmp`, `build_home/cache`; требует, чтобы их не было",
+        (
+            "запуски от `df-build` с `HOME = build_home`; требует отсутствия "
+            "`build_home/tmp` и `build_home/cache`; ничего не удаляет"
+        ),
     ),
     "tree_digest": ("check", ""),
 }

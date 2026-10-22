@@ -1,0 +1,1186 @@
+"""Execution-chain boundary, entrypoint inventory, transfer check (spec 3.4).
+
+`static_problems` inspects a release as data (acceptance and `doctor`): what
+runs from `venv/*/bin`, which interpreter and configuration it starts with,
+what every native file loads, and what CPython reads at start. Effects: none
+(`otool`/`readelf` run as root through `linked_libraries`, never the file).
+
+`transfer_check` (spec 3.3 item 5) runs the release's own interpreters and
+every expected entrypoint as an unprivileged role without network. It never
+removes anything: leftovers of `build_home` are a refusal.
+
+Every path is compared after in-tree resolution (`resolve_in_tree`): uv's
+venvs name the managed Python through its minor-version alias link.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import stat
+import tomllib
+import unicodedata
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import Literal
+
+from df import platform as plat
+from df.build import PYTHON_TRIPLES
+from df.digest import (
+    TreeError,
+    canonical_root,
+    check_links,
+    check_name,
+    open_regular,
+    resolve_in_tree,
+)
+from df.inputs import pth_problems, read_capped, select_names
+from df.journal import StepFailed
+from df.paths import Layout
+from df.platform import PlatformName, RunResult
+
+BinClass = Literal["native", "script", "other"]
+
+#: Seconds allowed for each run of the transfer check (find, sys.path, --help).
+RUN_TIMEOUT = 60.0
+#: The whole environment of every transfer-check run besides `HOME`.
+RUN_ENV: Mapping[str, str] = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
+#: Printed by each environment's interpreter, with `-P` and with `-I`.
+SYS_PATH_PROBE = (
+    "import json,site,sys;"
+    "print(json.dumps([sys.path, site.ENABLE_USER_SITE, sys.version]))"
+)
+PYVENV_CAP = 1 << 16
+PYPROJECT_CAP = 1 << 20
+_FIND = "/usr/bin/find"
+_SITECUSTOMIZE = "sitecustomize"
+_PYVENV = "pyvenv.cfg"
+_KEY = re.compile(r"cpython-3\.(\d+)\.\d+-[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*")
+_STDLIB = re.compile(r"python3\.\d+")
+_ALIAS = re.compile(r"cpython-3\.\d+-[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*")
+_ERRORS = (TreeError, StepFailed, OSError, ValueError)
+#: Tokens naming the file's own directory (and, Mach-O, the main program's).
+_MACHO_TOKENS = ("@loader_path", "@executable_path")
+_ELF_TOKENS = ("$ORIGIN", "${ORIGIN}")
+#: Line breaks of `str.splitlines` that are not control characters.
+_LINE_BREAKS = frozenset("\u2028\u2029")
+#: Rule of a startup file: must exist, must not exist (`absent`: CPython lists
+#: it, (ж) accepts it only absent), refused, or checked by a named rule.
+StartupRule = Literal["required", "absent", "refused", "rule"]
+#: Type of an allowed or required entry, read by `lstat` (a link is never a
+#: file or a directory); `entry` is a regular file or a link.
+EntryKind = Literal["file", "dir", "link", "entry", "any"]
+
+
+@dataclass(frozen=True)
+class StartupFile:
+    """A path CPython 3.12 reads at start that changes `sys.path` or runs code.
+
+    `where` is a directory template relative to the release (`.` = its root,
+    `{venv}` = `venv/<r>`, `{py}` = `python/<key>`, `{stdlib}` =
+    `{py}/lib/python3.X`, `{minor}` = X); `name` is compared by `casefold`
+    (`*<suffix>` — any name with the suffix; `required` — exact case and the
+    type `kind`); `reader` says who reads it and when.
+    """
+
+    where: str
+    name: str
+    reader: str
+    rule: StartupRule
+    kind: EntryKind = "any"
+
+
+#: Every startup-read path the walks can reach inside the release (getpath and
+#: site.py of CPython 3.12, probes on uv 0.11.23's managed CPython 3.12.13,
+#: 22.10). getpath's searches walk `dirname` up to `/` from two starts
+#: (probed, re-review 2): the prefix walk (`lib/python3XY.zip`, then
+#: `lib/python3.X/os.py`) from the real directory of the base executable, the
+#: exec_prefix walk (`lib/python3.X/lib-dynload`) from the lexical directory of
+#: `venv/<r>/bin/python`'s link target; `home` starts neither while that is a
+#: link. Both starts are pinned by exact text (`env_paths`, `_link_text`) to
+#: `python/<alias>/bin` → `python/<key>/bin`, so every directory either walk
+#: passes inside the release is one of `chain_dirs` (allowlisted); above the
+#: release the ancestors are root's. Beyond these, the interpreter's own files (`site.py`, the
+#: stdlib) are not verified (§3.5, origin of the interpreter): (ж) cannot
+#: prove there is no startup code there.
+STARTUP_FILES: tuple[StartupFile, ...] = (
+    StartupFile(
+        "{venv}",
+        "pyvenv.cfg",
+        "getpath (первый `home`) и site.py (последние значения); правило (б)",
+        "required",
+        "file",
+    ),
+    StartupFile(
+        "{venv}/bin",
+        "pyvenv.cfg",
+        "site.py и getpath ищут его сначала в каталоге исполняемого файла",
+        "refused",
+    ),
+    StartupFile(
+        "{py}", "pyvenv.cfg", "getpath/site.py при запуске базового Python", "refused"
+    ),
+    StartupFile(
+        "{venv}/bin",
+        "*._pth",
+        "getpath: `<исполняемый>._pth` заменяет sys.path",
+        "refused",
+    ),
+    StartupFile(
+        "{py}/bin", "*._pth", "getpath: `._pth` базового исполняемого файла", "refused"
+    ),
+    StartupFile("{py}/lib", "*._pth", "getpath: `._pth` рядом с libpython", "refused"),
+    StartupFile(
+        "{py}/lib",
+        "python3{minor}.zip",
+        "getpath: ZIP_LANDMARK, всегда в sys.path",
+        "absent",
+    ),
+    StartupFile(
+        "{py}/bin",
+        "pybuilddir.txt",
+        "getpath: каталог сборки рядом с `home` подменяет lib-dynload (проба 22.10)",
+        "refused",
+    ),
+    StartupFile(
+        "{py}/bin",
+        "modules",
+        "getpath: `Modules/Setup.local` у `home` — раскладка дерева сборки (проба)",
+        "refused",
+    ),
+    StartupFile(
+        "{py}/bin",
+        "lib",
+        "getpath: оба обхода (`search_up`) начинаются с `python/<ключ>/bin`",
+        "refused",
+    ),
+    StartupFile(
+        "python",
+        "lib",
+        "getpath: `search_up` — `python/lib/python3XY.zip`, stdlib (проба)",
+        "refused",
+    ),
+    StartupFile(
+        ".",
+        "lib",
+        "getpath: `search_up` — `<релиз>/lib/python3XY.zip` (проба)",
+        "refused",
+    ),
+    StartupFile(
+        "{py}/lib",
+        "lib",
+        "getpath: при известной libpython (Linux) `search_up` от её каталога",
+        "refused",
+    ),
+    StartupFile(
+        "{stdlib}",
+        "os.py",
+        "getpath: STDLIB_LANDMARK, задаёт prefix",
+        "required",
+        "file",
+    ),
+    StartupFile(
+        "{stdlib}",
+        "lib-dynload",
+        "getpath: PLATSTDLIB_LANDMARK, в sys.path",
+        "required",
+        "dir",
+    ),
+    StartupFile(
+        "цепочка `search_up` в релизе",
+        "*",
+        "getpath: каталоги обоих обходов от закреплённых стартов до корня — `chain_dirs`",
+        "rule",
+    ),
+    StartupFile(
+        "{venv}/lib/python3.{minor}/site-packages",
+        "*.pth",
+        "site.py исполняет строки import; правило (е)",
+        "rule",
+    ),
+    StartupFile(
+        "каталоги sys.path",
+        "sitecustomize",
+        "site.py импортирует при старте; правило (ё)",
+        "rule",
+    ),
+    StartupFile(
+        "каталоги sys.path",
+        "usercustomize",
+        "site.py — только при ENABLE_USER_SITE; выключен (б), проверен (ж)",
+        "rule",
+    ),
+)
+
+
+def base_bin_names(minor: str) -> frozenset[str]:
+    """Names in `python/<key>/bin` of uv 0.11.23's managed CPython 3.X
+    (measured 22.10 on macOS arm64 and Linux x86_64); anything else there is
+    refused."""
+    v = f"3.{minor}"
+    return frozenset(
+        {
+            *("2to3", f"2to3-{v}", "idle3", f"idle{v}", "pip", "pip3", f"pip{v}"),
+            *("pydoc3", f"pydoc{v}", "python", "python3", "python3-config"),
+            *(f"python{v}", f"python{v}-config"),
+        }
+    )
+
+
+def chain_dirs(env: EnvPaths) -> dict[PurePosixPath, dict[str, EntryKind]]:
+    """Allowlisted listing of every release directory on getpath's
+    `search_up` walks from their pinned starts (`python/<alias>/bin`, the
+    alias being a link to `python/<key>`, and the real `python/<key>/bin`) to
+    the release root. Measured on the sample
+    release (uv 0.11.23, 22.10); the release root holds what the build and
+    `register` write (`src`, `venv`, `python`, `release.json`)."""
+    alias = env.alias
+    return {
+        env.py_bin: dict.fromkeys(base_bin_names(env.minor), "entry"),
+        env.python: {
+            "bin": "dir",
+            "BUILD": "file",
+            "include": "dir",
+            "lib": "dir",
+            "share": "dir",
+        },
+        PurePosixPath("python"): {
+            env.python.name: "dir",
+            alias: "link",
+            ".lock": "file",
+            ".temp": "dir",
+            ".gitignore": "file",
+        },
+        PurePosixPath("."): {
+            "src": "dir",
+            "venv": "dir",
+            "python": "dir",
+            "release.json": "file",
+        },
+    }
+
+
+#: Flags of the two (ж) runs: `-P` keeps the cwd (`build_home`, writable by
+#: `df-build`) off `sys.path`, so no module there can forge the probe's answer.
+_PROBE_FLAGS: tuple[tuple[str, ...], ...] = (("-P",), ("-I",))
+
+
+def expected_entrypoints(ref_dir: Path) -> frozenset[str]:
+    """Names of `[project.scripts]` of a packaged member (spec 3.4).
+
+    `ref_dir/pyproject.toml` of the trusted checkout is read as data. A
+    member is a package if `tool.uv.package` is `true`, or it is unset and
+    `[build-system]` exists; otherwise nothing is expected. Dynamic scripts
+    and a non-bool `package` are `ValueError`; a name unfit for a file and an
+    unreadable file are `TreeError`.
+    """
+    raw = read_capped(ref_dir / "pyproject.toml", PYPROJECT_CAP)
+    data = tomllib.loads(raw.decode("utf-8"))
+    project = _table(data, "project")
+    package = _table(_table(data, "tool"), "uv").get("package")
+    if package is not None and not isinstance(package, bool):
+        raise ValueError(f"tool.uv.package не bool: {package!r}")
+    if not (package if package is not None else "build-system" in data):
+        return frozenset()
+    dynamic = project.get("dynamic", [])
+    if not isinstance(dynamic, list) or not all(isinstance(d, str) for d in dynamic):
+        raise ValueError(f"project.dynamic не список строк: {dynamic!r}")
+    if "scripts" in dynamic:
+        raise ValueError("project.scripts объявлен dynamic: состав не задан данными")
+    scripts = _table(project, "scripts")
+    for name, value in scripts.items():
+        check_name(name.encode("utf-8"))
+        if not isinstance(value, str):
+            raise ValueError(f"project.scripts.{name}: не строка")
+    return frozenset(scripts)
+
+
+def _table(data: Mapping[str, object], key: str) -> Mapping[str, object]:
+    value = data.get(key, {})
+    if not isinstance(value, dict):
+        raise ValueError(f"{key}: не таблица")
+    return value
+
+
+def classify_bin(path: Path) -> BinClass:
+    """Class of an executable by its first bytes: Mach-O/ELF magic, `#!`.
+
+    The file must be regular (`open_regular`: a link is a `TreeError`).
+    """
+    head = _head(path, 4)
+    if head in plat.MACHO_MAGIC or head == plat.ELF_MAGIC:
+        return "native"
+    return "script" if head.startswith(b"#!") else "other"
+
+
+def _head(path: Path, size: int) -> bytes:
+    fd = open_regular(path)
+    try:
+        data = b""
+        while len(data) < size:
+            chunk = os.read(fd, size - len(data))
+            if not chunk:
+                break
+            data += chunk
+        return data
+    finally:
+        os.close(fd)
+
+
+# ---------- the environment's directories ----------
+
+
+@dataclass(frozen=True)
+class EnvPaths:
+    """Resolved in-tree directories of one environment (relative to the release).
+
+    `python` is the managed Python's real key directory `python/<key>`; the
+    rest are what CPython puts on `sys.path` or reads at start. `zip_name` is
+    `python3XY.zip`, which must be absent from `lib`.
+    """
+
+    repo: str
+    python: PurePosixPath
+    minor: str
+    bin: PurePosixPath
+    site: PurePosixPath
+
+    @property
+    def py_bin(self) -> PurePosixPath:
+        return self.python / "bin"
+
+    @property
+    def alias(self) -> str:
+        """uv's minor-version link name `cpython-3.X-<triple>` in `python/`."""
+        return _alias_of(self.python.name)
+
+    @property
+    def lib(self) -> PurePosixPath:
+        return self.python / "lib"
+
+    @property
+    def stdlib(self) -> PurePosixPath:
+        return self.lib / f"python3.{self.minor}"
+
+    @property
+    def dynload(self) -> PurePosixPath:
+        return self.stdlib / "lib-dynload"
+
+    @property
+    def zip_name(self) -> str:
+        return f"python3{self.minor}.zip"
+
+    @property
+    def interpreter(self) -> PurePosixPath:
+        return self.py_bin / f"python3.{self.minor}"
+
+
+def env_paths(release_dir: Path, repo: str) -> EnvPaths:
+    """Read `venv/<repo>/pyvenv.cfg` (rule (б)) and resolve the environment.
+
+    Parsed as CPython does (`key.strip().lower()`, `value.strip()`); exactly
+    one `home` and one `include-system-site-packages`, the latter `false`.
+    `home` is canonical, under the release and resolves in-tree to
+    `python/<key>/bin` with `<key>` = `cpython-3.X.Y-<triple>` holding
+    exactly one `lib/python3.X`. Anything else is a `TreeError` that starts
+    with `venv/<repo>: `.
+    """
+    venv = PurePosixPath("venv", repo)
+    try:
+        return _env_paths(release_dir, venv)
+    except (TreeError, OSError, ValueError) as exc:
+        raise TreeError(f"{venv}: {exc}") from exc
+
+
+def _env_paths(release_dir: Path, venv: PurePosixPath) -> EnvPaths:
+    if not _is_real_dir(release_dir / venv):
+        raise TreeError("не каталог")
+    if not _is_real_dir(release_dir / venv / "bin"):
+        raise TreeError("bin: не каталог")
+    cfg = _pyvenv_cfg(release_dir / venv)
+    home = cfg.get("home", [])
+    system = cfg.get("include-system-site-packages", [])
+    if len(home) != 1 or len(system) != 1:
+        raise TreeError(
+            f"{_PYVENV}: home {len(home)} раз, "
+            f"include-system-site-packages {len(system)} раз (нужно ровно по 1)"
+        )
+    if system[0].lower() != "false":
+        raise TreeError(f"{_PYVENV}: include-system-site-packages = {system[0]}")
+    python = _home_key(release_dir, home[0])
+    minor = _minor(release_dir, python)
+    site = PurePosixPath("lib", f"python3.{minor}", "site-packages")
+    for path in (site.parent.parent, site.parent, site):
+        if not _is_real_dir(release_dir / venv / path):
+            raise TreeError(f"{path}: не каталог")
+    return EnvPaths(venv.name, python, minor, venv / "bin", venv / site)
+
+
+def _pyvenv_cfg(venv: Path) -> dict[str, list[str]]:
+    found = select_names(venv, exact=_PYVENV)
+    if not found:
+        raise TreeError(f"нет {_PYVENV}")
+    text = read_capped(found[0], PYVENV_CAP).decode("utf-8")
+    odd = sorted({c for c in text if _is_odd_char(c)})
+    if odd:
+        raise TreeError(f"{_PYVENV}: недопустимые символы {odd!r}")
+    values: dict[str, list[str]] = {}
+    for raw in text.split("\n"):
+        line = raw.removesuffix("\r")
+        if "\r" in line:
+            raise TreeError(f"{_PYVENV}: одиночный \\r — site.py видит лишнюю строку")
+        key, sep, value = line.partition("=")
+        if sep:
+            values.setdefault(key.strip().lower(), []).append(value.strip())
+    return values
+
+
+def _is_odd_char(char: str) -> bool:
+    """A character on which `str.splitlines` and CPython's readers of
+    `pyvenv.cfg` could disagree, or any control character but tab, CR and
+    LF: the file is refused rather than read two ways. getpath splits on
+    `\n` (trailing `\r` stripped), `site.py` on universal newlines; a `\r`
+    outside `\r\n` is refused by the caller, so both see the same lines."""
+    return char not in "\t\r\n" and (
+        unicodedata.category(char) == "Cc" or char in _LINE_BREAKS
+    )
+
+
+def _home_key(release_dir: Path, home: str) -> PurePosixPath:
+    """`python/<key>` named by `home`, pinned by exact text (round 3).
+
+    `home` is exactly `<release>/python/<alias>/bin`, as uv writes it; the
+    alias link's text is exactly `<release>/python/<key>` (same minor and
+    triple), and the key dir is a real directory. Text, not resolution: a
+    walk of getpath starts from the lexical path.
+    """
+    try:
+        parts = canonical_root(home)
+    except TreeError as exc:
+        raise TreeError(f"{_PYVENV}: home не канонический: {home!r}") from exc
+    root = canonical_root(str(release_dir))
+    if parts[: len(root)] != root:
+        raise TreeError(f"{_PYVENV}: home вне релиза: {home!r}")
+    rest = parts[len(root) :]
+    if (
+        len(rest) != 3
+        or rest[0] != "python"
+        or rest[2] != "bin"
+        or not _ALIAS.fullmatch(rest[1])
+    ):
+        raise TreeError(
+            f"{_PYVENV}: home {home!r} не `<релиз>/python/<алиас>/bin` (как пишет uv)"
+        )
+    key = _alias_target(release_dir, rest[1])
+    if not _is_real_dir(release_dir / "python" / key):
+        raise TreeError(f"python/{key}: не каталог")
+    return PurePosixPath("python", key)
+
+
+def _alias_target(release_dir: Path, alias: str) -> str:
+    """The key the alias link names by its exact text `<release>/python/<key>`."""
+    link = release_dir / "python" / alias
+    if not stat.S_ISLNK(os.lstat(link).st_mode):
+        raise TreeError(f"python/{alias}: не ссылка")
+    text = os.readlink(link)
+    prefix = f"{release_dir}/python/"
+    key = text.removeprefix(prefix)
+    if (
+        not text.startswith(prefix)
+        or not _KEY.fullmatch(key)
+        or _alias_of(key) != alias
+    ):
+        raise TreeError(
+            f"python/{alias}: текст ссылки {text!r} не `<релиз>/python/<ключ>`"
+        )
+    return key
+
+
+def _alias_of(key: str) -> str:
+    """`cpython-3.X.Y-<triple>` → uv's minor alias `cpython-3.X-<triple>`."""
+    _cpython, version, triple = key.split("-", 2)
+    return f"cpython-{version.rsplit('.', 1)[0]}-{triple}"
+
+
+def _minor(release_dir: Path, python: PurePosixPath) -> str:
+    match = _KEY.fullmatch(python.name)
+    if match is None:
+        raise TreeError(f"{python}: не ключ Python")
+    lib = release_dir / python / "lib"
+    found = [p.name for p in select_names(lib, prefix="python3.")]
+    stdlib = [n for n in found if _STDLIB.fullmatch(n)]
+    if stdlib != [f"python3.{match.group(1)}"]:
+        raise TreeError(f"{python}/lib: каталоги python3.X {found}, ключ {python.name}")
+    return match.group(1)
+
+
+def _is_real_dir(path: Path) -> bool:
+    try:
+        return stat.S_ISDIR(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
+# ---------- static problems ----------
+
+
+def static_problems(
+    release_dir: Path, platform: PlatformName, expected: Mapping[str, frozenset[str]]
+) -> list[str]:
+    """Problems of the release as data (spec 3.4); empty means it passes.
+
+    Never raises for the tree: every failure is a `"<rel>: <detail>"` line.
+    The environments are exactly `expected`'s keys. Checks: (а) executables
+    of `venv/*/bin` and their two exact script forms; (б) `pyvenv.cfg`, and
+    none in `bin`; (в) every Mach-O/ELF; (г) links; (д) expected entrypoints;
+    (е) `.pth`; (ё) `sitecustomize`, `._pth` and `python3XY.zip`. Not closed
+    by them: code without distribution metadata (`DECLARED_LIMIT`).
+    """
+    problems = _guard("ссылки", lambda: check_links(release_dir, str(release_dir)))
+    envs: dict[str, EnvPaths] = {}
+    problems += _venv_set(release_dir, expected)
+    for repo in sorted(expected):
+        try:
+            envs[repo] = env_paths(release_dir, repo)
+        except TreeError as exc:
+            problems.append(str(exc))
+    python = _one_python(envs, platform, problems)
+    for env in envs.values():
+        problems += _env_problems(release_dir, env, expected[env.repo])
+    if python is not None:
+        problems += _python_tree_problems(release_dir, python)
+    py_bin = None if python is None else python.py_bin
+    problems += _NativeCheck(release_dir, platform, py_bin).problems()
+    return problems
+
+
+def _guard(label: str, check: Callable[[], list[str]]) -> list[str]:
+    try:
+        return check()
+    except _ERRORS as exc:
+        return [f"{label}: {exc}"]
+
+
+def _venv_set(release_dir: Path, expected: Mapping[str, frozenset[str]]) -> list[str]:
+    """`venv/` holds exactly the expected environments (F11)."""
+    venv = release_dir / "venv"
+    if not expected and not os.path.lexists(venv):
+        return []
+    try:
+        names = set(os.listdir(venv))
+    except OSError as exc:
+        return [f"venv: {exc.strerror or exc}"]
+    return [
+        f"venv/{n}: окружение вне профиля не проверяется"
+        for n in sorted(names - set(expected))
+    ]
+
+
+def _one_python(
+    envs: Mapping[str, EnvPaths], platform: PlatformName, problems: list[str]
+) -> EnvPaths | None:
+    """The one managed Python every environment names (F19)."""
+    keys = sorted({env.python for env in envs.values()})
+    if len(keys) > 1:
+        problems.append(f"окружения ссылаются на разные Python: {keys}")
+        return None
+    if not keys:
+        return None
+    triple = PYTHON_TRIPLES[platform]
+    if not keys[0].name.endswith(f"-{triple}"):
+        problems.append(f"{keys[0]}: Python не для платформы {platform}")
+        return None
+    return next(iter(envs.values()))
+
+
+def _env_problems(release_dir: Path, env: EnvPaths, want: frozenset[str]) -> list[str]:
+    problems = _guard(f"venv/{env.repo}", lambda: _bin_problems(release_dir, env))
+    problems += _guard(
+        f"{env.bin}", lambda: _entrypoint_problems(release_dir, env, want)
+    )
+    problems += _guard(
+        f"venv/{env.repo}", lambda: pth_problems(release_dir / "venv" / env.repo)
+    )
+    problems += _guard(f"{env.site}", lambda: _sitecustomize(release_dir, env.site))
+    return problems + _startup_problems(release_dir, env, per_env=True)
+
+
+def _python_tree_problems(release_dir: Path, env: EnvPaths) -> list[str]:
+    """(ё) for the managed Python: `sitecustomize` in its `sys.path` dirs, the
+    shared `STARTUP_FILES` and the allowlist of its `bin`."""
+    problems: list[str] = []
+    for directory in (env.stdlib, env.dynload):
+        problems += _guard(
+            str(directory), lambda d=directory: _sitecustomize(release_dir, d)
+        )
+    problems += _startup_problems(release_dir, env, per_env=False)
+    for directory, allowed in chain_dirs(env).items():
+        problems += _guard(
+            str(directory),
+            lambda d=directory, a=allowed: _chain_listing(release_dir, env, d, a),
+        )
+    return problems
+
+
+def _startup_problems(release_dir: Path, env: EnvPaths, *, per_env: bool) -> list[str]:
+    """`STARTUP_FILES` of one environment (`per_env`) or of the shared Python."""
+    values = _template_values(env)
+    problems: list[str] = []
+    for entry in STARTUP_FILES:
+        if entry.rule == "rule" or ("{venv}" in entry.where) != per_env:
+            continue
+        where = PurePosixPath(entry.where.format(**values))
+        name = entry.name.format(**values)
+        problems += _guard(
+            str(where), lambda e=entry, w=where, n=name: _startup(release_dir, e, w, n)
+        )
+    return problems
+
+
+def _template_values(env: EnvPaths) -> dict[str, str]:
+    return {
+        "venv": f"venv/{env.repo}",
+        "py": str(env.python),
+        "stdlib": str(env.stdlib),
+        "minor": env.minor,
+    }
+
+
+def _startup(
+    release_dir: Path, entry: StartupFile, where: PurePosixPath, name: str
+) -> list[str]:
+    if entry.rule == "required":
+        found = select_names(release_dir / where, exact=name)
+        if not found:
+            return [f"{where / name}: нет ({entry.reader})"]
+        if not _has_kind(found[0], entry.kind):
+            return [f"{where / name}: ожидался тип {entry.kind} ({entry.reader})"]
+        return []
+    return [
+        f"{where / p.name}: запрещён ({name}) — {entry.reader}"
+        for p in _startup_matches(release_dir / where, name)
+    ]
+
+
+def _startup_matches(directory: Path, name: str) -> list[Path]:
+    if name.startswith("*"):
+        return select_names(directory, suffix=name[1:], strict=False)
+    return select_names(directory, exact=name, strict=False)
+
+
+def _chain_listing(
+    release_dir: Path,
+    env: EnvPaths,
+    directory: PurePosixPath,
+    allowed: Mapping[str, EntryKind],
+) -> list[str]:
+    """Review round 2: one directory of the `search_up` chain holds only its
+    allowlisted names, each of its type (the alias link's text is pinned by
+    `env_paths`). A name a `STARTUP_FILES` row already refuses is not
+    reported twice."""
+    refused = _refused_patterns(env, directory)
+    problems: list[str] = []
+    for path in select_names(release_dir / directory):
+        rel = directory / path.name
+        kind = allowed.get(path.name)
+        if kind is None:
+            if not any(_startup_hit(path.name, r) for r in refused):
+                problems.append(f"{rel}: вне белого списка цепочки поиска getpath")
+        elif not _has_kind(path, kind):
+            problems.append(f"{rel}: ожидался тип {kind}")
+    return problems
+
+
+def _refused_patterns(env: EnvPaths, directory: PurePosixPath) -> set[str]:
+    values = _template_values(env)
+    return {
+        e.name.format(**values)
+        for e in STARTUP_FILES
+        if e.rule in ("refused", "absent")
+        and "{venv}" not in e.where
+        and PurePosixPath(e.where.format(**values)) == directory
+    }
+
+
+def _has_kind(path: Path, kind: EntryKind) -> bool:
+    mode = os.lstat(path).st_mode
+    return {
+        "file": stat.S_ISREG(mode),
+        "dir": stat.S_ISDIR(mode),
+        "link": stat.S_ISLNK(mode),
+        "entry": stat.S_ISREG(mode) or stat.S_ISLNK(mode),
+        "any": True,
+    }[kind]
+
+
+def _startup_hit(name: str, pattern: str) -> bool:
+    key = name.casefold()
+    if pattern.startswith("*"):
+        return key.endswith(pattern[1:])
+    return key == pattern
+
+
+def _sitecustomize(release_dir: Path, directory: PurePosixPath) -> list[str]:
+    """Any top-level `sitecustomize` module, extension or package (casefold)."""
+    found = select_names(release_dir / directory, prefix=_SITECUSTOMIZE, strict=False)
+    return [
+        f"{directory / p.name}: sitecustomize исполняется при старте Python"
+        for p in found
+        if p.name.casefold() == _SITECUSTOMIZE
+        or p.name.casefold().startswith(f"{_SITECUSTOMIZE}.")
+    ]
+
+
+def _bin_problems(release_dir: Path, env: EnvPaths) -> list[str]:
+    """(а) and F2/F4: every name of `venv/<r>/bin` that can run or configure."""
+    problems: list[str] = []
+    for name in sorted(os.listdir(release_dir / env.bin)):
+        rel = env.bin / name
+        st = os.lstat(release_dir / rel)
+        if stat.S_ISLNK(st.st_mode):
+            problems += _link_problem(release_dir, env, name)
+        elif name.casefold().startswith("python") and not _venv_bin_refused(name):
+            problems.append(_interpreter_name_problem(env, name))
+        elif stat.S_ISREG(st.st_mode) and st.st_mode & 0o111:
+            problems += _guard(
+                str(rel), lambda r=rel: _exec_problems(release_dir, env, r)
+            )
+    if not os.path.lexists(release_dir / env.bin / "python"):
+        problems.append(f"{env.bin}/python: нет интерпретатора окружения")
+    return problems
+
+
+def _venv_bin_refused(name: str) -> bool:
+    """A name a `STARTUP_FILES` row of `venv/<r>/bin` reports (`python._pth`)."""
+    return any(
+        _startup_hit(name, e.name)
+        for e in STARTUP_FILES
+        if e.where == "{venv}/bin" and e.rule != "required"
+    )
+
+
+def _interpreter_name_problem(env: EnvPaths, name: str) -> str:
+    """A `python*` name (casefold) in `venv/<r>/bin` that is not a link: uv's
+    three names must be its pinned links (a copy starts both getpath walks at
+    `home`, so the pins would be moot), any other is not uv's."""
+    rel = env.bin / name
+    if name in _link_names(env):
+        return f"{rel}: не ссылка на интерпретатор релиза"
+    return f"{rel}: посторонний интерпретатор python* (uv их не пишет)"
+
+
+def _link_names(env: EnvPaths) -> frozenset[str]:
+    """Links uv writes into a venv's `bin`; each resolves to the interpreter."""
+    return frozenset({"python", "python3", f"python3.{env.minor}"})
+
+
+def _link_text(release_dir: Path, env: EnvPaths, name: str) -> str:
+    """Round 3: the exact text uv writes for the venv's interpreter links —
+    getpath's exec_prefix walk starts from the lexical directory of `python`'s
+    target, so it is pinned to `<release>/python/<alias>/bin/python3.X`."""
+    if name == "python":
+        return f"{release_dir}/python/{env.alias}/bin/python3.{env.minor}"
+    return "python"
+
+
+def _link_problem(release_dir: Path, env: EnvPaths, name: str) -> list[str]:
+    rel = env.bin / name
+    if name not in _link_names(env):
+        return [f"{rel}: посторонняя ссылка в bin"]
+    text = os.readlink(release_dir / rel)
+    if text != _link_text(release_dir, env, name):
+        want = _link_text(release_dir, env, name)
+        return [f"{rel}: текст ссылки {text!r}, uv пишет {want!r}"]
+    try:
+        target = resolve_in_tree(release_dir, str(release_dir), rel)
+    except TreeError as exc:
+        return [f"{rel}: {exc}"]
+    if target != env.interpreter:
+        return [f"{rel}: ведёт в {target}, а не в {env.interpreter}"]
+    if classify_bin(release_dir / target) != "native":
+        return [f"{rel}: {target} не нативный исполняемый файл"]
+    return []
+
+
+def script_heads(release_dir: Path, repo: str) -> tuple[bytes, bytes]:
+    """The two exact heads uv writes for a script of `venv/<repo>` (F1):
+    a direct `#!` and, above the kernel's shebang limit, the sh trampoline.
+    Both name the environment's own `bin/python`."""
+    python = os.fsencode(release_dir / "venv" / repo / "bin" / "python")
+    direct = b"#!" + python + b"\n"
+    trampoline = b"#!/bin/sh\n'''exec' '" + python + b"' \"$0\" \"$@\"\n' '''\n"
+    return direct, trampoline
+
+
+def _exec_problems(release_dir: Path, env: EnvPaths, rel: PurePosixPath) -> list[str]:
+    kind = classify_bin(release_dir / rel)
+    if kind == "native":
+        return []  # rule (в) checks it with every Mach-O/ELF of the release
+    if kind == "other":
+        return [f"{rel}: исполняемый файл ни нативный, ни скрипт с #!"]
+    heads = script_heads(release_dir, env.repo)
+    head = _head(release_dir / rel, max(len(h) for h in heads))
+    if any(head.startswith(h) for h in heads):
+        return []
+    line = head.split(b"\n", 1)[0][:200]
+    return [f"{rel}: интерпретатор {line!r} не python своего окружения"]
+
+
+def _entrypoint_problems(
+    release_dir: Path, env: EnvPaths, want: frozenset[str]
+) -> list[str]:
+    """(д): each expected name, exact case, an executable `#!` script."""
+    problems: list[str] = []
+    for name in sorted(want):
+        try:
+            found = select_names(release_dir / env.bin, exact=name)
+        except TreeError as exc:
+            problems.append(f"{env.bin / name}: {exc}")
+            continue
+        if not found:
+            problems.append(f"{env.bin / name}: нет ожидаемого entrypoint")
+            continue
+        st = os.lstat(found[0])
+        if not stat.S_ISREG(st.st_mode) or not st.st_mode & 0o111:
+            problems.append(f"{env.bin / name}: не исполняемый обычный файл")
+        elif classify_bin(found[0]) != "script":
+            problems.append(f"{env.bin / name}: entrypoint не скрипт с #!")
+    return problems
+
+
+# ---------- (в) native files ----------
+
+
+@dataclass
+class _NativeCheck:
+    """Rule (в) over every regular Mach-O/ELF of the release (F9)."""
+
+    tree: Path
+    platform: PlatformName
+    py_bin: PurePosixPath | None
+
+    def problems(self) -> list[str]:
+        try:
+            files = list(_regular_files(self.tree, PurePosixPath()))
+        except OSError as exc:
+            return [f"обход релиза: {exc}"]
+        problems: list[str] = []
+        for rel in files:
+            try:
+                head = _head(self.tree / rel, 4)
+                if head in plat.MACHO_MAGIC or head == plat.ELF_MAGIC:
+                    problems += self.file(rel, head in plat.MACHO_MAGIC)
+            except _ERRORS as exc:
+                problems.append(f"{rel}: {exc}")
+        return problems
+
+    def file(self, rel: PurePosixPath, macho: bool) -> list[str]:
+        deps = plat.linked_libraries(self.tree / rel)
+        if deps is None:
+            return [f"{rel}: не разобран как Mach-O/ELF"]
+        out = [
+            f"{rel}: LC_DYLD_ENVIRONMENT {e} запрещён" for e in deps.dyld_environment
+        ]
+        if deps.loader is not None and not plat.is_system_path(
+            Path(deps.loader), self.platform
+        ):
+            out.append(f"{rel}: загрузчик {deps.loader} вне системных каталогов")
+        inside: list[PurePosixPath] = []
+        system: list[str] = []
+        for entry in deps.rpaths:
+            try:
+                found = self.rpath(rel, entry, macho)
+            except TreeError as exc:
+                out.append(f"{rel}: путь поиска {entry!r}: {exc}")
+                continue
+            (inside if isinstance(found, PurePosixPath) else system).append(found)
+        for dep in deps.needed:
+            out += [
+                f"{rel}: зависимость {dep}: {p}"
+                for p in self.dependency(rel, dep, macho, inside, system)
+            ]
+        return out
+
+    def rpath(self, rel: PurePosixPath, entry: str, macho: bool) -> PurePosixPath | str:
+        """An in-tree directory, or a system directory as text; else `TreeError`."""
+        text = self.substitute(rel, entry, macho)
+        if text is None:
+            if plat.is_system_path(Path(entry), self.platform):
+                return entry.rstrip("/")
+            raise TreeError("вне релиза и системных каталогов")
+        resolved = self.resolve(text)
+        if not _is_real_dir(self.tree / resolved):
+            raise TreeError(f"{resolved}: не каталог")
+        return resolved
+
+    def dependency(
+        self,
+        rel: PurePosixPath,
+        dep: str,
+        macho: bool,
+        inside: list[PurePosixPath],
+        system: list[str],
+    ) -> list[str]:
+        if (macho and dep.startswith("@rpath/")) or (not macho and "/" not in dep):
+            name = dep.removeprefix("@rpath/")
+            return self.search(rel, dep, name, inside, system, loader=not macho)
+        try:
+            text = self.substitute(rel, dep, macho)
+            if text is None:
+                return _strip(
+                    plat.dependency_problems(self.tree / rel, dep, self.platform)
+                )
+            self.regular(text)
+        except TreeError as exc:
+            return [str(exc)]
+        return []
+
+    def search(
+        self,
+        rel: PurePosixPath,
+        dep: str,
+        name: str,
+        inside: list[PurePosixPath],
+        system: list[str],
+        *,
+        loader: bool,
+    ) -> list[str]:
+        """`@rpath/x` or an ELF soname: the file's own rpaths, then (ELF) the
+        loader's system directories."""
+        for directory in inside:
+            try:
+                self.regular(str(directory / name))
+                return []
+            except TreeError:
+                continue
+        target = self.tree / rel
+        for directory in system:
+            if not plat.dependency_problems(
+                target, f"{directory}/{name}", self.platform
+            ):
+                return []
+        if loader:
+            return _strip(plat.dependency_problems(target, dep, self.platform))
+        return ["не найдена по своим путям поиска внутри релиза"]
+
+    def substitute(self, rel: PurePosixPath, text: str, macho: bool) -> str | None:
+        """`text` as an in-tree path (relative to the tree, or absolute under
+        the release); `None` for an absolute path outside the release."""
+        for token in _MACHO_TOKENS if macho else _ELF_TOKENS:
+            if text == token or text.startswith(f"{token}/"):
+                if token == "@executable_path" and rel.parent != self.py_bin:
+                    raise TreeError("@executable_path только у python/<ключ>/bin")
+                return f"{rel.parent}{text[len(token) :]}"
+        if text.startswith("@") or "$" in text or not text.startswith("/"):
+            raise TreeError("не поддерживается: подстановка или относительный путь")
+        root = str(self.tree)
+        return text if text == root or text.startswith(f"{root}/") else None
+
+    def resolve(self, text: str) -> PurePosixPath:
+        return resolve_in_tree(self.tree, str(self.tree), text)
+
+    def regular(self, text: str) -> None:
+        resolved = self.resolve(text)
+        if not stat.S_ISREG(os.lstat(self.tree / resolved).st_mode):
+            raise TreeError(f"{resolved}: не обычный файл")
+
+
+def _strip(problems: list[str]) -> list[str]:
+    """`dependency_problems` lines without their leading target path."""
+    return [p.split(": ", 1)[-1] for p in problems]
+
+
+def _regular_files(tree: Path, prefix: PurePosixPath) -> Iterator[PurePosixPath]:
+    """Every regular file, links never followed; iterative (no depth limit)."""
+    pending = [prefix]
+    while pending:
+        directory = pending.pop()
+        with os.scandir(tree / directory) as entries:
+            listing = sorted(entries, key=lambda entry: entry.name)
+        for entry in listing:
+            rel = directory / entry.name
+            if entry.is_symlink():
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                pending.append(rel)
+            elif entry.is_file(follow_symlinks=False):
+                yield rel
+
+
+# ---------- transfer check ----------
+
+
+@dataclass(frozen=True)
+class TransferResult:
+    """Problems of the transfer check and each environment's `sys.version`
+    (declared: the interpreter's own answer)."""
+
+    problems: list[str]
+    python_declared: dict[str, str]
+
+
+def transfer_check(
+    release_dir: Path,
+    layout: Layout,
+    *,
+    user: str,
+    expected: Mapping[str, frozenset[str]],
+) -> TransferResult:
+    """Run the release from `user` without network (spec 3.3 item 5).
+
+    Effects: `run_as(df-build)+`; removes nothing. First `find` as `user`:
+    any `build_home/tmp` or `build_home/cache` is a problem and nothing else
+    runs. Then for each environment its `bin/python` without `-I` (but with
+    `-P`: the cwd stays off `sys.path`) and with `-I` (rule (ж): every
+    `sys.path` element, an empty one included, must resolve in-tree to its own
+    `site-packages`, the stdlib or `lib-dynload`, or is the absent
+    `python3XY.zip`; `ENABLE_USER_SITE` false), and every expected
+    entrypoint with `--help` (rule (з): code 0 within the deadline).
+    """
+    runner = _Runner(release_dir, layout, user)
+    problems = runner.leftovers()
+    if problems:
+        return TransferResult(problems, {})
+    declared: dict[str, str] = {}
+    for repo in sorted(expected):
+        try:
+            env = env_paths(release_dir, repo)
+        except TreeError as exc:
+            problems.append(str(exc))
+            continue
+        version = runner.sys_path(env, problems)
+        if version is not None:
+            declared[repo] = version
+        for name in sorted(expected[repo]):
+            runner.help(env.bin / name, problems)
+    return TransferResult(problems, declared)
+
+
+@dataclass
+class _Runner:
+    """The runs of one transfer check, all under one outcome rule (F16)."""
+
+    release_dir: Path
+    layout: Layout
+    user: str
+
+    def run(self, argv: list[str]) -> RunResult:
+        home = self.layout.build_home
+        return plat.run_as(
+            self.user,
+            argv,
+            env={"HOME": str(home), **RUN_ENV},
+            cwd=home,
+            network=False,
+            timeout=RUN_TIMEOUT,
+        )
+
+    def leftovers(self) -> list[str]:
+        home = self.layout.build_home
+        argv = [_FIND, str(home), "-mindepth", "1", "-maxdepth", "1"]
+        argv += ["(", "-name", "tmp", "-o", "-name", "cache", ")", "-print"]
+        result = self.run(argv)
+        failed = _outcome(f"поиск остатков в {home}", result)
+        if failed is not None:  # any failure of the find is infrastructure
+            return [f"инфраструктура: {failed.removeprefix('инфраструктура: ')}"]
+        if result.stdout:
+            found = result.stdout.decode("utf-8", "replace").split()
+            return [f"остатки build_home: {found}; проверка переноса недоказательна"]
+        return []
+
+    def sys_path(self, env: EnvPaths, problems: list[str]) -> str | None:
+        """Rule (ж) for one environment; returns `sys.version` (both runs agree)."""
+        python = str(self.release_dir / env.bin / "python")
+        versions: set[str] = set()
+        for flags in _PROBE_FLAGS:
+            label = " ".join([python, *flags])
+            result = self.run([python, *flags, "-c", SYS_PATH_PROBE])
+            failed = _outcome(label, result)
+            if failed is not None:
+                problems.append(failed)
+                continue
+            try:
+                path, user_site, version = _parse_probe(result.stdout)
+            except ValueError as exc:
+                problems.append(f"{label}: ответ не разобран: {exc}")
+                continue
+            if user_site is not False:
+                problems.append(f"{label}: ENABLE_USER_SITE={user_site}")
+            problems += [f"{label}: {p}" for p in self.path_problems(env, path)]
+            versions.add(version)
+        if len(versions) > 1:
+            problems.append(f"{python}: разные sys.version с -I и без: {versions}")
+            return None
+        return versions.pop() if versions else None
+
+    def path_problems(self, env: EnvPaths, path: list[str]) -> list[str]:
+        allowed = {env.site, env.stdlib, env.dynload}
+        problems: list[str] = []
+        for item in path:
+            if not item.startswith("/"):
+                problems.append(f"sys.path {item!r}: не абсолютный путь")
+                continue
+            try:
+                resolved = resolve_in_tree(
+                    self.release_dir, str(self.release_dir), item
+                )
+            except _ERRORS as exc:  # a hostile element (NUL, too long) included
+                if not self.absent_zip(env, item):
+                    problems.append(f"sys.path {item!r}: {exc}")
+                continue
+            if resolved not in allowed:
+                problems.append(
+                    f"sys.path {item!r} → {resolved}: не проверенный каталог"
+                )
+        return problems
+
+    def absent_zip(self, env: EnvPaths, item: str) -> bool:
+        """F5: `<lib>/python3XY.zip` that does not exist (its lib is checked)."""
+        name = PurePosixPath(item)
+        if name.name != env.zip_name:
+            return False
+        try:
+            parent = resolve_in_tree(
+                self.release_dir, str(self.release_dir), name.parent
+            )
+            return parent == env.lib and not os.path.lexists(
+                self.release_dir / env.lib / env.zip_name
+            )
+        except _ERRORS:
+            return False
+
+    def help(self, script: PurePosixPath, problems: list[str]) -> None:
+        """Rule (з): `--help` exits 0 within the deadline; stdout ignored."""
+        path = str(self.release_dir / script)
+        failed = _outcome(f"{path} --help", self.run([path, "--help"]))
+        if failed is not None:
+            problems.append(failed)
+
+
+def _outcome(label: str, result: RunResult) -> str | None:
+    """One rule for every run: `None` means it ran and exited 0."""
+    tail = result.stderr[-2048:].decode("utf-8", "replace").strip()
+    if not result.launched:
+        return f"инфраструктура: {label}: запуск не состоялся: {tail}"
+    if result.timed_out:
+        return f"{label}: срок {RUN_TIMEOUT:g} с истёк"
+    if result.stdout_truncated:
+        return f"{label}: stdout переполнен"
+    if result.returncode != 0:
+        return f"{label}: код {result.returncode}: {tail}"
+    return None
+
+
+def _parse_probe(stdout: bytes) -> tuple[list[str], object, str]:
+    """`[sys.path, ENABLE_USER_SITE, sys.version]` exactly, else `ValueError`."""
+    data = json.loads(stdout.decode("utf-8"))
+    if not isinstance(data, list) or len(data) != 3:
+        raise ValueError("не список из трёх элементов")
+    path, user_site, version = data
+    if not isinstance(path, list) or not all(isinstance(p, str) for p in path):
+        raise ValueError("sys.path не список строк")
+    if not isinstance(user_site, bool) or not isinstance(version, str):
+        raise ValueError("ENABLE_USER_SITE не bool или sys.version не строка")
+    return path, user_site, version

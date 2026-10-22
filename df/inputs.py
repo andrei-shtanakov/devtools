@@ -132,7 +132,7 @@ def pth_problems(venv: Path) -> list[str]:
     """
     problems: list[str] = []
     for site in _site_packages(venv):
-        for pth in _select(site, suffix=".pth", strict=False):
+        for pth in select_names(site, suffix=".pth", strict=False):
             if pth.name == _VIRTUALENV_PTH and _is_virtualenv_pth(pth):
                 continue
             problems.append(f"{pth.relative_to(venv)}: .pth исполняет код при старте")
@@ -255,7 +255,7 @@ def _listing(directory: Path) -> list[str]:
     return names
 
 
-def _select(
+def select_names(
     directory: Path,
     *,
     prefix: str = "",
@@ -286,7 +286,7 @@ def _select(
 
 def _real_subdirs(directory: Path, **match: str) -> list[Path]:
     """Matching children that are real directories; a link or file is refused."""
-    found = _select(directory, **match)
+    found = select_names(directory, **match)
     for child in found:
         if not _is_real_dir(child):
             raise TreeError(f"{child}: ожидался настоящий каталог")
@@ -300,8 +300,8 @@ def _lib_dirs(venv: Path) -> list[Path]:
     `site-packages` behind it, so skipping it would hide what runs.
     """
     dirs: list[Path] = []
-    has_lib = (venv / "lib") in _select(venv, exact="lib")
-    for child in _select(venv, prefix="lib"):
+    has_lib = (venv / "lib") in select_names(venv, exact="lib")
+    for child in select_names(venv, prefix="lib"):
         if _is_lib64_link(child, has_lib=has_lib):
             continue
         if not _is_real_dir(child):
@@ -339,7 +339,7 @@ def _refuse_eggs(site: Path) -> None:
     invisible to the `*.dist-info` walk.
     """
     for suffix in _EGG_SUFFIXES:
-        found = _select(site, suffix=suffix, strict=False)
+        found = select_names(site, suffix=suffix, strict=False)
         if found:
             raise TreeError(f"{found[0]}: egg-метаданные не допускаются")
 
@@ -349,7 +349,7 @@ def normalize_name(name: str) -> str:
     return _NAME_RUNS.sub("-", name).lower()
 
 
-def _read_capped(path: Path, cap: int) -> bytes:
+def read_capped(path: Path, cap: int) -> bytes:
     """Read a regular file of at most `cap` bytes; never follow a link.
 
     The file is untrusted build output read by root: a link, a FIFO or a
@@ -376,11 +376,11 @@ def _read_capped(path: Path, cap: int) -> bytes:
 
 
 def _read_dist(info: Path) -> InstalledDist:
-    found = _select(info, exact="METADATA")
+    found = select_names(info, exact="METADATA")
     if not found:
         raise TreeError(f"{info}: нет METADATA")
     headers = email.parser.BytesParser().parsebytes(
-        _read_capped(found[0], METADATA_CAP), headersonly=True
+        read_capped(found[0], METADATA_CAP), headersonly=True
     )
     name, version = headers.get("Name"), headers.get("Version")
     if not name or not version:
@@ -390,12 +390,12 @@ def _read_dist(info: Path) -> InstalledDist:
 
 
 def _read_direct_url(info: Path) -> Mapping[str, object] | None:
-    found = _select(info, exact="direct_url.json")
+    found = select_names(info, exact="direct_url.json")
     if not found:
         return None
     path = found[0]
     try:
-        data = json.loads(_read_capped(path, DIRECT_URL_CAP))
+        data = json.loads(read_capped(path, DIRECT_URL_CAP))
     except ValueError as exc:
         raise TreeError(f"{path}: не JSON: {exc}") from exc
     if not isinstance(data, dict):
@@ -405,6 +405,6 @@ def _read_direct_url(info: Path) -> Mapping[str, object] | None:
 
 def _is_virtualenv_pth(pth: Path) -> bool:
     try:
-        return _read_capped(pth, PTH_CAP) in _VIRTUALENV_PTH_BODY
+        return read_capped(pth, PTH_CAP) in _VIRTUALENV_PTH_BODY
     except TreeError:
         return False

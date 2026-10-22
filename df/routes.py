@@ -12,7 +12,7 @@ parent; the object itself is never opened (spec 3.8). Target texts resolve
 through one exact-match table, `TARGETS`; a protocol call whose target names a
 wrapper (`WRAPS`) goes to that wrapper.
 
-`acceptance_calls` builds the implementations Tasks 7 and 7a own (protocol
+`acceptance_calls` builds the implementations Tasks 7, 7a and 8 own (protocol
 leaves live in `df.leaves`); the other leaves (`LATER_LEAVES`) come from their
 owner tasks and Task 9 merges them.
 """
@@ -30,6 +30,7 @@ from df import build as build_mod
 from df import install_table as table
 from df import platform as plat
 from df.accept import STAGE_ORDER, AcceptMark, Facts, Stage
+from df.boundary import expected_entrypoints, static_problems, transfer_check
 from df.build import BuildPlan
 from df.config import InstallConfig, config_digest
 from df.digest import TreeError, check_links, release_digest, tree_digest
@@ -156,8 +157,6 @@ TARGETS: Mapping[str, Target] = {
 #: `write_atomic` itself is called only for targets without a wrapper: the
 #: launcher files (texts of Task 8a) and `install.toml` (Task 9).
 LATER_LEAVES: Mapping[str, str] = {
-    "static_problems": "8",
-    "transfer_check": "8",
     "install_admin_python": "8a",
     "install_admin": "8a",
     "link_command": "8a",
@@ -446,11 +445,14 @@ class RouteContext:
     not taken: it is every repo's installed list as `distribution_problems`
     accepted it, read by the caller after the route (Task 9,
     `release.json` `distributions_declared`); it is never reset here.
+    `python_declared` likewise: each repo's `sys.version` as `transfer_check`
+    accepted it (Task 9, `release.json` `python_declared`).
     """
 
     uv_version: str | None = None
     copied_digest: str | None = None
     installed: dict[str, list[InstalledDist]] = field(default_factory=dict)
+    python_declared: dict[str, str] = field(default_factory=dict)
 
 
 def acceptance_calls(
@@ -468,7 +470,7 @@ def acceptance_calls(
     python_key: str,
     ctx: RouteContext | None = None,
 ) -> dict[str, Call]:
-    """Implementations of the route calls Tasks 7 and 7a own (leaves, WRAPS).
+    """Implementations of the route calls Tasks 7, 7a and 8 own (leaves, WRAPS).
 
     Keys and `LATER_LEAVES` together are exactly `route_leaves()` and `WRAPS`;
     Task 9 merges the later ones. The calls share one `RouteContext`: the
@@ -525,6 +527,8 @@ class _Leaves:
             "verify_chmod": lambda _t: verify_chmod(lay, rid),
             "verify_sources": self.verify_sources,
             "distribution_problems": self.distribution_problems,
+            "static_problems": self.static_problems,
+            "transfer_check": self.transfer_check,
             "cleanup_build_home": self.cleanup_build_home,
             "tree_digest": self.tree_digest,
             "cleanup_tree": self.cleanup_tree,
@@ -680,6 +684,44 @@ class _Leaves:
             event="distributions-note",
             detail=DECLARED_LIMIT,
         )
+
+    def expected(self) -> tuple[dict[str, frozenset[str]], list[str]]:
+        """Each repo's expected entrypoints from its trusted checkout (spec
+        3.4), and the problems of the repos whose inventory cannot be read."""
+        expected: dict[str, frozenset[str]] = {}
+        problems: list[str] = []
+        for pin in self.profile.repos:
+            ref = self.refs.get(pin.name)
+            if ref is None:
+                problems.append(f"{pin.name}: нет доверенного чекаута")
+                continue
+            try:
+                expected[pin.name] = expected_entrypoints(ref)
+            except (TreeError, OSError, ValueError) as exc:
+                problems.append(f"{pin.name}: инвентарь entrypoints: {exc}")
+        return expected, problems
+
+    def static_problems(self, target: str) -> None:
+        """Check leaf: the execution-chain boundary of the copy (spec 3.4)."""
+        tree = Path(*self.path(target))
+        expected, problems = self.expected()
+        problems += static_problems(tree, self.platform, expected)
+        if problems:
+            raise StepFailed("verify", "; ".join(problems))
+
+    def transfer_check(self, target: str) -> None:
+        """Builder leaf: the transfer check from `df-build` (spec 3.3 item 5);
+        on success each repo's `sys.version` goes to `ctx.python_declared`."""
+        tree = Path(*self.path(target))
+        expected, problems = self.expected()
+        if problems:
+            raise StepFailed("verify", "; ".join(problems))
+        result = transfer_check(
+            tree, self.layout, user=plat.BUILD_USER, expected=expected
+        )
+        if result.problems:
+            raise StepFailed("verify", "; ".join(result.problems))
+        self.ctx.python_declared = result.python_declared
 
     def cleanup_build_home(self, target: str) -> None:
         """Protocol `cleanup_build_home` on `build_home/<name>`."""

@@ -236,6 +236,28 @@ def resolve_link_in_tree(
     return _Resolver(tree, root).run(list(link_rel.parts))
 
 
+def resolve_in_tree(
+    tree: Path, logical_root: PurePosixPath | str, path: PurePosixPath | str
+) -> PurePosixPath:
+    """Resolve any `path` lexically inside the tree, every component.
+
+    `path` is absolute (it must lie under `logical_root`) or relative to the
+    tree. Links on the way resolve by the rule of `resolve_link_in_tree`;
+    `.`/`..` resolve lexically after them. Escape, more than 40 hops, a
+    missing component or a non-directory in the middle is a `TreeError`; any
+    other `OSError` propagates. Returns the real in-tree path relative to the
+    tree (`.` for the tree itself).
+    """
+    root = canonical_root(logical_root)
+    text = str(path)
+    parts = [p for p in text.split("/") if p]
+    if text.startswith("/"):
+        if tuple(parts[: len(root)]) != root:
+            raise TreeError(f"path outside the logical root: {text!r}")
+        parts = parts[len(root) :]
+    return _Resolver(tree, root).walk([], parts)
+
+
 class _Resolver:
     """Stack-based lexical walk over one tree (no host realpath)."""
 
@@ -246,7 +268,10 @@ class _Resolver:
 
     def run(self, link: list[str]) -> PurePosixPath:
         stack = link[:-1]
-        todo = self._substitute(stack, link)
+        return self.walk(stack, self._substitute(stack, link))
+
+    def walk(self, stack: list[str], todo: list[str]) -> PurePosixPath:
+        """Resolve the components `todo` from the in-tree directory `stack`."""
         while todo:
             part = todo.pop(0)
             if part == ".":
