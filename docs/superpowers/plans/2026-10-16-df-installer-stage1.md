@@ -2135,6 +2135,13 @@ def test_distribution_problems_leaf_lists_every_repo(fl): ...
       `required` проверяются по типу через `lstat` (`os.py` — файл, `lib-dynload` —
       каталог, N2). `usercustomize` — строка-ссылка на (б)/(ж) (N3). Выше корня релиза —
       каталоги root (предпосылка §3.10).
+    - **(б)/(а), закреплённые старты обходов** (ревью круг 3, N4/N5; пробы: prefix — от
+      реального каталога базового исполняемого файла, exec_prefix — от лексического
+      каталога цели `venv/<r>/bin/python`, `home` — не старт): `venv/<r>/bin/python` —
+      ссылка с текстом ровно `<релиз>/python/<алиас>/bin/python3.X` (копия — отказ);
+      `python3`, `python3.X` — ссылки с текстом `python`; `home` — ровно
+      `<релиз>/python/<алиас>/bin`; ссылка-алиас — с текстом `<релиз>/python/<ключ>`.
+      Сверка по тексту, не по разрешению (замер: `uv` пишет форму с алиасом).
 
     Названное ограничение (Task 7a, `DECLARED_LIMIT`): код без метаданных распределения
     `installed_distributions` не видит; (а)–(ё) его не закрывают, `RECORD` в v1 не сверяется.
@@ -2244,6 +2251,13 @@ def test_minor_alias_must_resolve_to_the_key_dir(tmp_path, deps, target): ...
 def test_prefix_walk_out_of_the_key_dir_refused(tmp_path, deps, where): ...  # как в пробе
 def test_required_landmark_type(tmp_path, deps, landmark, form): ...   # N2
 def test_usercustomize_is_a_reference_row(): ...                       # N3
+def test_minor_alias_text_is_pinned(tmp_path, deps, text): ...   # круг 3
+def test_link_target_through_unlisted_dir_refused(tmp_path, deps, where): ...
+    # N4 как в пробе: python/.temp/a/b, venv/r1/a/b, src/a/b → ключ bin
+def test_interpreter_link_text_is_pinned(tmp_path, deps, text): ...  # относит., 2 хопа, ключ
+def test_home_text_is_pinned(tmp_path, deps, home): ...   # через ссылку, форма ключа, лишнее
+def test_base_interpreter_as_link_refused(tmp_path, deps): ...
+def test_python_copy_instead_of_link_refused(tmp_path, deps): ...
 def test_expected_entrypoints_package_rules(tmp_path, text, want): ...
     # package=false → ∅; без build-system → ∅; scripts → имена; gui-scripts не входят
 def test_expected_entrypoints_refusals(tmp_path, text): ...  # dynamic, package="yes", "../x"
@@ -2290,7 +2304,8 @@ def test_twin_transfer_check_with_hidden_build_home_cleanup(monkeypatch, fl): ..
   `fix(df): pyvenv.cfg split as CPython does; (ж) probe with -P` и `docs(df): …` к нему;
   `fix(df): Task 8 review round 1 — startup-file table, lone CR, hostile sys.path` и
   `docs(df): …` к нему; `fix(df): Task 8 review round 2 — allowlist getpath's search_up
-  chain` и `docs(df): …` к нему.
+  chain` и `docs(df): …` к нему; `fix(df): Task 8 review round 3 — pin the start points of
+  getpath's walks` и `docs(df): …` к нему.
 
 ### Task 8a: Административная среда, команда `darkfactory`, bootstrap
 
@@ -3313,9 +3328,10 @@ def test_boundary_on_real_release(root_world): ...
     # колёс core (manylinux .libs, soname без RPATH); порог перехода uv на sh-трамплин;
     # sys.path обоих запусков (ж); состав python/<ключ>/bin у PBS на Linux — замерен
     # контроллером 22.10 (одноразовая VM podman amd64, uid 1000, uv 0.11.23, `uv python
-    # install 3.12.13`): те же 14 имён, что на macOS; CI подтверждает повторно. Состав
-    # python/<ключ> и python/ (chain_dirs) на Linux — не замерен, CI сверяет; известна ли
-    # getpath libpython на Linux (тогда search_up идёт и от python/<ключ>/lib); $ORIGIN у библиотеки,
+    # install 3.12.13`): те же 14 имён, что на macOS; там же python/ = {.gitignore, .lock,
+    # .temp, ссылка-алиас, каталог ключа}, python/<ключ> = {BUILD, bin, include, lib,
+    # share} — как на macOS, python/<ключ>/lib/lib на Linux нет; CI подтверждает повторно;
+    # формы текста ссылок venv и home (закреплены по замеру macOS); $ORIGIN у библиотеки,
     # загруженной через ссылку-файл в другом каталоге (glibc берёт каталог пути загрузки,
     # (в) — реальный каталог; ревью Task 8, круг 1, nit 5). Расхождение с правилами
     # (в)/(ж) — находка, не правка теста
