@@ -741,17 +741,34 @@ def _bin_problems(release_dir: Path, env: EnvPaths) -> list[str]:
         st = os.lstat(release_dir / rel)
         if stat.S_ISLNK(st.st_mode):
             problems += _link_problem(release_dir, env, name)
+        elif name.casefold().startswith("python") and not _venv_bin_refused(name):
+            problems.append(_interpreter_name_problem(env, name))
         elif stat.S_ISREG(st.st_mode) and st.st_mode & 0o111:
             problems += _guard(
                 str(rel), lambda r=rel: _exec_problems(release_dir, env, r)
             )
-    python = release_dir / env.bin / "python"
-    if not os.path.lexists(python):
+    if not os.path.lexists(release_dir / env.bin / "python"):
         problems.append(f"{env.bin}/python: нет интерпретатора окружения")
-    elif not stat.S_ISLNK(os.lstat(python).st_mode):
-        # a copy would start getpath's exec_prefix walk in the venv itself
-        problems.append(f"{env.bin}/python: не ссылка на интерпретатор релиза")
     return problems
+
+
+def _venv_bin_refused(name: str) -> bool:
+    """A name a `STARTUP_FILES` row of `venv/<r>/bin` reports (`python._pth`)."""
+    return any(
+        _startup_hit(name, e.name)
+        for e in STARTUP_FILES
+        if e.where == "{venv}/bin" and e.rule != "required"
+    )
+
+
+def _interpreter_name_problem(env: EnvPaths, name: str) -> str:
+    """A `python*` name (casefold) in `venv/<r>/bin` that is not a link: uv's
+    three names must be its pinned links (a copy starts both getpath walks at
+    `home`, so the pins would be moot), any other is not uv's."""
+    rel = env.bin / name
+    if name in _link_names(env):
+        return f"{rel}: не ссылка на интерпретатор релиза"
+    return f"{rel}: посторонний интерпретатор python* (uv их не пишет)"
 
 
 def _link_names(env: EnvPaths) -> frozenset[str]:

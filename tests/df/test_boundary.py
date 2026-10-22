@@ -244,16 +244,40 @@ def test_base_interpreter_as_link_refused(
     assert any("venv/r1/bin/python: ведёт в other/py" in p for p in found), found
 
 
+@pytest.mark.parametrize("name", ["python", "python3", "python3.12"])
 def test_python_copy_instead_of_link_refused(
-    tmp_path: Path, deps: dict[Path, LibDeps]
+    tmp_path: Path, deps: dict[Path, LibDeps], name: str
 ) -> None:
-    """Round 3: a copied interpreter would start getpath's exec_prefix walk in
-    the venv itself; `bin/python` must be uv's link."""
+    """Rounds 3 and 3-minor: each of uv's three interpreter names must be its
+    pinned link. A copy starts both getpath walks at `home` (pinned, so no
+    walk escapes), but the names are pinned as uv writes them."""
     rel = make_release(tmp_path)
-    (rel / "venv/r1/bin/python").unlink()
-    _write(rel / "venv/r1/bin/python", MACHO)
-    found = problems(rel)  # python3 / python3.12 then lead to the copy too
-    assert "venv/r1/bin/python: не ссылка на интерпретатор релиза" in found, found
+    (rel / "venv/r1/bin" / name).unlink()
+    _write(rel / "venv/r1/bin" / name, MACHO)
+    found = problems(rel)  # `python3*` links to a copied `python` lead to it too
+    assert f"venv/r1/bin/{name}: не ссылка на интерпретатор релиза" in found, found
+
+
+@pytest.mark.parametrize("name", ["python3.13", "PYTHON3", "pythonw", "Python"])
+@pytest.mark.parametrize("form", ["native", "text"])
+def test_other_python_names_in_venv_bin_refused(
+    tmp_path: Path, deps: dict[Path, LibDeps], name: str, form: str
+) -> None:
+    """Any other `python*` name (casefold), whatever its type, is refused;
+    other native binaries of wheels are not affected."""
+    rel = make_release(tmp_path)
+    for old in (rel / "venv/r1/bin").iterdir():  # APFS: a case twin is the same name
+        if old.name.casefold() == name.casefold():
+            old.unlink()
+    data, mode = (MACHO, 0o755) if form == "native" else (b"notes", 0o644)
+    _write(rel / "venv/r1/bin" / name, data, mode)
+    _write(rel / "venv/r1/bin/fastbin", MACHO)  # a wheel's native tool: fine
+    found = problems(rel)
+    assert (
+        f"venv/r1/bin/{name}: посторонний интерпретатор python* (uv их не пишет)"
+        in (found)
+    ), found
+    assert not any("fastbin" in p for p in found), found
 
 
 def test_missing_python_link_refused(tmp_path: Path, deps: dict[Path, LibDeps]) -> None:
