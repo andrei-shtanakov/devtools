@@ -641,7 +641,8 @@ class _Leaves:
         profile's groups, the install platform and Python and the build copy
         as the root. Problems of every repo go into one `StepFailed`; on
         success the accepted lists go to `ctx.installed` and the journal
-        records the named limit (`DECLARED_LIMIT`).
+        records the named limit (`DECLARED_LIMIT`) as `distributions-note`
+        (the evidence-note form of `sync-note`).
         """
         tree = Path(*self.path(target))
         env = marker_env(self.platform, self.profile.python)
@@ -674,7 +675,7 @@ class _Leaves:
             self.journal,
             run_id=self.run_id,
             step="verify",
-            event="info",
+            event="distributions-note",
             detail=DECLARED_LIMIT,
         )
 

@@ -7,11 +7,13 @@ installs are compared in the golden tests.
 from __future__ import annotations
 
 import dataclasses
+import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from df.inputs import InstalledDist
+from df.inputs import InstalledDist, normalize_name
 from df.lockset import (
     ExpectedDist,
     distribution_problems,
@@ -19,7 +21,8 @@ from df.lockset import (
     uv_config_problems,
 )
 from df.markers import marker_env
-from df.sources import SourceId, UnsupportedLock
+from df.platform import PlatformName
+from df.sources import SourceId, UnsupportedLock, source_from_direct_url
 
 ROOT_DIR = Path("/build/tmp/rel1/src/repo")
 MACOS = marker_env("macos-arm64", "3.12.13")
@@ -79,6 +82,30 @@ def test_virtual_root_excluded_editable_root_included() -> None:
     assert expected(editable) == {ROOT_DIST, registry("a")}
     directory = lock(root(deps, kind="directory"), pkg("a"))
     assert expected(directory) == {ROOT_DIST, registry("a")}
+
+
+def test_root_dir_is_taken_as_spelled_not_resolved(tmp_path: Path) -> None:
+    """uv records the `--project` path without resolving links (probe
+    22.10), so the root's identity keeps a symlinked parent as given."""
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    root_dir = tmp_path / "link" / "repo"
+    got = expected_distributions(
+        lock(root("")), groups=(), env=MACOS, root_dir=root_dir
+    )
+    assert [d.source.path for d in got] == [str(root_dir)]
+    installed_root = source_from_direct_url(
+        {"url": f"file://{root_dir}", "dir_info": {"editable": False}}
+    )
+    assert [d.source for d in got] == [installed_root]
+
+
+@pytest.mark.parametrize("root_dir", ["relative/repo", "/build/../repo"])
+def test_root_dir_must_be_absolute_and_normal(root_dir: str) -> None:
+    with pytest.raises(ValueError):
+        expected_distributions(
+            lock(root("")), groups=(), env=MACOS, root_dir=Path(root_dir)
+        )
 
 
 def test_transitive_and_markers_per_platform() -> None:
@@ -581,3 +608,107 @@ def test_devtools_own_pyproject_and_lock_pass() -> None:
         (REPO_ROOT / "uv.lock").read_bytes(),
     )
     assert problems == []
+
+
+# ---------- real locks against uv's own installs (goldens, F3) ----------
+
+LOCKS = Path(__file__).parent / "fixtures" / "locks"
+GOLDEN_CASES = [
+    ("devtools", "devtools"),
+    ("discovery", "discovery"),
+    ("discovery-toolkit", "discovery-toolkit"),
+    ("disputatio", "disputatio"),
+    ("steward", "steward"),
+    ("spec-runner", "spec-runner"),
+    ("spec-runner.dev", "spec-runner"),
+    ("devtools.governance-conductor", "devtools"),
+]
+
+
+def golden(
+    case: str, platform: PlatformName
+) -> tuple[dict[str, Any], list[InstalledDist]]:
+    """The captured JSON and its distributions as the installed side reads them."""
+    data = json.loads((LOCKS / f"{case}.{platform}.expected.json").read_text())
+    dists = [
+        InstalledDist(
+            normalize_name(d["name"]),
+            d["version"],
+            source_from_direct_url(d["direct_url"]),
+        )
+        for d in data["distributions"]
+    ]
+    return data, dists
+
+
+@pytest.mark.parametrize("platform", ["macos-arm64", "linux-x86_64"])
+@pytest.mark.parametrize("case,member", GOLDEN_CASES)
+def test_real_locks_match_golden(
+    case: str, member: str, platform: PlatformName
+) -> None:
+    """The expected set equals uv's install, root and git identity included.
+
+    `root_dir` is the capture's `--project` path from the JSON, never read
+    from `direct_url.json` (otherwise the root comparison is circular).
+    """
+    data, dists = golden(case, platform)
+    assert data["python"] == "3.12.13"
+    got = expected_distributions(
+        (LOCKS / f"{member}.uv.lock").read_bytes(),
+        groups=tuple(data["groups"]),
+        env=marker_env(platform, data["python"]),
+        root_dir=Path(data["root_dir"]),
+    )
+    assert {(e.name, e.version, _declared_view(e.source)) for e in got} == {
+        (d.name, d.version, d.source) for d in dists
+    }
+    assert len(got) == len(dists)
+    assert distribution_problems(dists, got) == []
+
+
+def _declared_view(source: SourceId) -> SourceId:
+    return SourceId("registry") if source.kind == "registry" else source
+
+
+def test_goldens_exercise_root_git_and_platform() -> None:
+    """The goldens are not vacuous: they hold a root, git sources and a
+    platform difference."""
+    _, dev = golden("devtools.governance-conductor", "macos-arm64")
+    assert {d.source.kind for d in dev} == {"registry", "git"}
+    _, steward = golden("steward", "linux-x86_64")
+    assert any(d.source.kind == "directory" for d in steward)
+    mac = {d.name for d in golden("spec-runner.dev", "macos-arm64")[1]}
+    linux = {d.name for d in golden("spec-runner.dev", "linux-x86_64")[1]}
+    assert linux - mac == {"jeepney", "secretstorage"}
+
+
+def test_exclude_newer_fixture_two_problems() -> None:
+    """A valid uv 0.11.23 lock made with `[tool.uv] exclude-newer`."""
+    fixture = LOCKS / "exclude-newer"
+    problems = uv_config_problems(
+        (fixture / "pyproject.toml").read_bytes(),
+        None,
+        (fixture / "uv.lock").read_bytes(),
+    )
+    assert [p.split(":")[0] for p in problems] == [
+        "pyproject.toml [tool.uv] exclude-newer",
+        "uv.lock [options] exclude-newer",
+    ]
+
+
+def test_stale_fixture_is_not_a_config_problem() -> None:
+    """A stale lock is `uv sync --locked`'s failure, not a config problem."""
+    fixture = LOCKS / "stale"
+    problems = uv_config_problems(
+        (fixture / "pyproject.toml").read_bytes(),
+        None,
+        (fixture / "uv.lock").read_bytes(),
+    )
+    assert problems == []
+
+
+@pytest.mark.parametrize("member", sorted({m for _, m in GOLDEN_CASES}))
+def test_real_member_locks_have_no_lock_config_problems(member: str) -> None:
+    """Lock side only: the members' pyprojects are not in the fixtures."""
+    lock_bytes = (LOCKS / f"{member}.uv.lock").read_bytes()
+    assert uv_config_problems(CLEAN_PYPROJECT, None, lock_bytes) == []

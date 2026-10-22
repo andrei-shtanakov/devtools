@@ -108,7 +108,15 @@ def expected_distributions(
     The virtual root is not in the result; an `editable`/`directory` root is,
     as the build copy `root_dir` (`--no-editable`). Anything else is
     `UnsupportedLock`.
+
+    `root_dir` must be the exact `--project` path of the build
+    (`build_src_dir`), absolute and without `..`: uv 0.11.23 records it in
+    `direct_url.json` normalised only lexically (a trailing `/` and `..` are
+    folded) and never resolves links, so it is compared as given, not
+    resolved (probe 22.10: a symlinked parent and `/tmp` stay as spelled).
     """
+    if not root_dir.is_absolute() or ".." in root_dir.parts:
+        raise ValueError(f"root_dir не абсолютный нормальный путь: {root_dir}")
     data = _load_lock(lock)
     _check_header(data)
     packages = _packages(data)

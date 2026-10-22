@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+import json
 import os
 import re
 import shutil
@@ -1285,7 +1286,31 @@ def test_distribution_problems_leaf_accepts_and_keeps_installed(fl: FakeLayout) 
     ctx = RouteContext()
     _dist_calls(fl, ("r1",), {"r1": ref}, ctx)["distribution_problems"]("releases/<id>")
     assert [(d.name, d.version) for d in ctx.installed["r1"]] == [("a", "1.0")]
-    assert _journal(fl) == [("verify", "info", DECLARED_LIMIT)]
+    assert _journal(fl) == [("verify", "distributions-note", DECLARED_LIMIT)]
+
+
+def test_distribution_problems_root_is_the_builds_project_path(
+    fl: FakeLayout,
+) -> None:
+    """The root is expected at exactly the `--project` path the build passes
+    to `uv sync` (uv records it as given, not resolved)."""
+    lock = LOCK_A.replace(b'{ virtual = "." }', b'{ editable = "." }')
+    ref = _repo(fl, "r1", lock, [("a", "1.0"), ("app", "0.1.0")])
+    calls = _dist_calls(fl, ("r1",), {"r1": ref}, RouteContext())
+    profile = Profile(
+        "p", PY, (RepoPin("r1", "https://example.invalid/r1", "0" * 40, ()),)
+    )
+    plan = BuildPlan(
+        ID, fl.layout.release_dir(ID), profile, fake_uv(fl), Path("/g"), Path("/t")
+    )
+    argv = dict(build_mod.build_commands(plan, fl.layout))["sync:r1"]
+    project = argv[argv.index("--project") + 1]
+    site = fl.layout.release_dir(ID) / "venv" / "r1" / "lib" / "python3.13"
+    info = site / "site-packages" / "app-0.1.0.dist-info"
+    (info / "direct_url.json").write_text(
+        json.dumps({"url": f"file://{project}", "dir_info": {}})
+    )
+    calls["distribution_problems"]("releases/<id>")
 
 
 def test_distribution_problems_leaf_lists_every_repo(fl: FakeLayout) -> None:
