@@ -12,8 +12,9 @@ parent; the object itself is never opened (spec 3.8). Target texts resolve
 through one exact-match table, `TARGETS`; a protocol call whose target names a
 wrapper (`WRAPS`) goes to that wrapper.
 
-`acceptance_calls` builds the implementations Task 7 owns; the other leaves
-(`LATER_LEAVES`) come from their owner tasks and Task 9 merges them.
+`acceptance_calls` builds the implementations Task 7 owns (its protocol
+leaves live in `df.leaves`); the other leaves (`LATER_LEAVES`) come from their
+owner tasks and Task 9 merges them.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ from df.config import InstallConfig, config_digest
 from df.digest import check_links, tree_digest
 from df.inputs import verify_sources
 from df.journal import StepFailed, journal_event
+from df.leaves import accept_copy, prepare_dir, release_digest, seal, verify_chmod
 from df.manifest import Profile
 from df.paths import Layout
 from df.platform import PlatformName
@@ -46,10 +48,6 @@ Where = Callable[[Layout, str, str | None], tuple[Path, str]]
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _GUARD_STEP = "route"
-
-
-def _noop(point: str, rel: str) -> None:
-    """Default test hook of `accept_copy`."""
 
 
 # ---------- targets ----------
@@ -435,54 +433,6 @@ def route_action(
     return act
 
 
-# ---------- Task 7 leaves (protocols implemented in part 7-D2) ----------
-
-
-def prepare_dir(layout: Layout, release_id: str) -> None:
-    """Protocol `prepare_dir`: `releases/<id>` made by root, handed to
-    `df-build` by `fchown` of a descriptor taken while it is root's and empty.
-
-    Effects: `created` -> `chown` -> `sync_dir(release_root)` ->
-    `sync_dir(releases)`.
-    """
-    raise NotImplementedError("7-D2")
-
-
-def verify_chmod(layout: Layout, release_id: str) -> None:
-    """Protocol `verify_chmod`: the root of `releases/<id>` becomes `0755`.
-
-    Effects: `chmod` -> `sync_dir(release_root)`.
-    """
-    raise NotImplementedError("7-D2")
-
-
-def seal(layout: Layout, release_id: str) -> None:
-    """Protocol `seal`: `releases/<id>` moves to `staging/<id>/tree`.
-
-    Effects (`new`): `created` -> `renamed` -> `sync_dir(releases)` ->
-    `sync_dir(staging)`. Effects (`reuse`): `renamed` -> `sync_dir(releases)`
-    -> `sync_dir(staging)`.
-    """
-    raise NotImplementedError("7-D2")
-
-
-def accept_copy(
-    layout: Layout,
-    release_id: str,
-    *,
-    install: InstallConfig,
-    platform: PlatformName,
-    limits: CopyLimits = CopyLimits(),
-    _hook: Callable[[str, str], None] = _noop,
-) -> str:
-    """Protocol `accept_copy`: `df-build`'s tar of `staging/<id>/tree` received
-    by root into `releases/<id>`; returns the copy's `tree_digest`.
-
-    Effects: `receive_tree()` -> `tree_digest()`.
-    """
-    raise NotImplementedError("7-D2")
-
-
 # ---------- the calls of Task 7 ----------
 
 
@@ -686,7 +636,7 @@ class _Leaves:
             self.layout, self.release_id, install_digest=self.install_digest
         )
         want = None if mark is None else mark.tree_digest
-        have = tree_digest(tree)
+        have = release_digest(tree)
         if want is None or have != want:
             raise StepFailed("verify", f"{tree}: digest {have}, отметка {want}")
 
