@@ -110,6 +110,15 @@ def _read_optional(path: Path) -> str | None:
         os.close(fd)
 
 
+def read_optional(path: Path) -> str | None:
+    """Public hardened reader: a regular file without following links.
+
+    `None` only if absent; a link, a non-regular file or an unreadable one is
+    a `ConfigError`.
+    """
+    return _read_optional(path)
+
+
 def _digest_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 

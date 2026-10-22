@@ -36,6 +36,16 @@ _RM = "/bin/rm"
 _MKDIR = "/bin/mkdir"
 _SYSTEM_PATH = ("/usr/bin", "/bin")
 
+#: Git settings shared by the build and root's reference checkout, so that
+#: `git archive` yields the same bytes in both (no user/system attributes,
+#: configuration or credentials).
+GIT_ISOLATION: Mapping[str, str] = {
+    "GIT_ATTR_NOSYSTEM": "1",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_TERMINAL_PROMPT": "0",
+}
+
 Runner = Callable[..., RunResult]
 Step = tuple[str, list[str], dict[str, str]]
 
@@ -66,11 +76,23 @@ def build_env(plan: BuildPlan, layout: Layout) -> dict[str, str]:
         "UV_NO_CONFIG": "1",
         "UV_PYTHON_PREFERENCE": "only-managed",
         "XDG_CONFIG_HOME": str(build_work_dir(layout, plan.release_id) / "config"),
-        "GIT_ATTR_NOSYSTEM": "1",
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_CONFIG_GLOBAL": "/dev/null",
-        "GIT_TERMINAL_PROMPT": "0",
+        **GIT_ISOLATION,
     }
+
+
+def git_fetch_argv(git: str, repo: str, url: str, sha: str) -> list[str]:
+    """The shallow fetch of exactly `sha` into the repository at `repo`."""
+    return [git, "-C", repo, "fetch", "-q", "--depth=1", url, sha]
+
+
+def git_rev_parse_argv(git: str, repo: str) -> list[str]:
+    """Resolve `FETCH_HEAD` of the repository at `repo`."""
+    return [git, "-C", repo, "rev-parse", "FETCH_HEAD"]
+
+
+def git_archive_argv(git: str, repo: str, archive: str, sha: str) -> list[str]:
+    """Pack the tree of `sha` into the tar file `archive`."""
+    return [git, "-C", repo, "archive", "-o", archive, sha]
 
 
 def build_work_dir(layout: Layout, release_id: str) -> Path:
@@ -173,11 +195,10 @@ def _steps(plan: BuildPlan, layout: Layout) -> Iterator[Step]:
         repo = str(work / "git" / r.name)
         archive = str(work / f"{r.name}.tar")
         yield f"init:{r.name}", [git, "init", "-q", repo], {}
-        fetch = [git, "-C", repo, "fetch", "-q", "--depth=1", r.url, r.sha]
+        fetch = git_fetch_argv(git, repo, r.url, r.sha)
         yield f"fetch:{r.name}", fetch, {}
-        rev = [git, "-C", repo, "rev-parse", "FETCH_HEAD"]
-        yield f"rev-parse:{r.name}", rev, {}
-        pack = [git, "-C", repo, "archive", "-o", archive, r.sha]
+        yield f"rev-parse:{r.name}", git_rev_parse_argv(git, repo), {}
+        pack = git_archive_argv(git, repo, archive, r.sha)
         yield f"archive:{r.name}", pack, {}
         final = str(plan.release_dir / "src" / r.name)
         yield f"extract:{r.name}", [tar, "-xf", archive, "-C", final], {}

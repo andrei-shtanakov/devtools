@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import os
+import stat
 import subprocess
 from pathlib import Path
 
@@ -118,7 +119,29 @@ def test_dir_fullfsync_unsupported_is_reported(monkeypatch, tmp_path: Path) -> N
     monkeypatch.setattr(fsutil, "_IS_DARWIN", True)
     monkeypatch.setattr(fsutil, "_F_FULLFSYNC", 51)
     monkeypatch.setattr(fsutil.fcntl, "fcntl", unsupported)
+    monkeypatch.setattr(fsutil, "_SYNC_NOTES", set())
     assert sync_dir(tmp_path) is SyncNote.FULLFSYNC_UNSUPPORTED
+
+
+def test_unsupported_fullfsync_is_collected_by_device(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Decision (a): callers drop the SyncNote, the collector keeps it (F10)."""
+
+    def unsupported(fd: int, cmd: int) -> None:
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.ENOTSUP, "nope")
+
+    monkeypatch.setattr(fsutil, "_SYNC_NOTES", set())
+    assert fsutil.sync_notes() == frozenset()
+    sync_dir(tmp_path)  # supported (or Linux): nothing collected
+    assert fsutil.sync_notes() == frozenset()
+    monkeypatch.setattr(fsutil, "_IS_DARWIN", True)
+    monkeypatch.setattr(fsutil.fcntl, "fcntl", unsupported)
+    write_atomic(tmp_path / "f", "x")  # a caller that drops the note
+    assert fsutil.sync_notes() == frozenset({os.stat(tmp_path).st_dev})
+    fsutil.reset_sync_notes()
+    assert fsutil.sync_notes() == frozenset()
 
 
 def test_dir_fullfsync_other_error_raises(monkeypatch, tmp_path: Path) -> None:

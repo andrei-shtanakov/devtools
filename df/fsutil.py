@@ -22,6 +22,10 @@ _UNSUPPORTED = {errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}
 _SYSCTL = "/usr/sbin/sysctl"
 _SAFE_ENV = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
 _BOOT_ID_LINUX = Path("/proc/sys/kernel/random/boot_id")
+# Devices (`st_dev`) where a directory refused F_FULLFSYNC in this process. Every
+# caller of `sync_dir` drops its `SyncNote`; the note is collected here instead and
+# the acceptance driver journals it for the evidence (decision (a), 2026-10-21).
+_SYNC_NOTES: set[int] = set()
 
 FaultKind = Literal["renamed", "unlinked", "created", "chown", "chmod"]
 
@@ -31,6 +35,15 @@ class SyncNote(enum.Enum):
 
     OK = "ok"
     FULLFSYNC_UNSUPPORTED = "fullfsync-unsupported"
+
+
+def owner_uid(st: os.stat_result) -> int:
+    """Owner of a stat result: the one seam every owner decision reads.
+
+    Tests replace this function to model root and `df-build` while running
+    as one user; production reads `st_uid`.
+    """
+    return st.st_uid
 
 
 def fault_point(kind: FaultKind, path: Path) -> None:
@@ -64,9 +77,20 @@ def _sync_dir_fd(fd: int) -> SyncNote:
         fcntl.fcntl(fd, _F_FULLFSYNC)
     except OSError as exc:
         if exc.errno in _UNSUPPORTED:
+            _SYNC_NOTES.add(os.fstat(fd).st_dev)
             return SyncNote.FULLFSYNC_UNSUPPORTED
         raise
     return SyncNote.OK
+
+
+def sync_notes() -> frozenset[int]:
+    """Devices where a directory sync lacked F_FULLFSYNC in this process."""
+    return frozenset(_SYNC_NOTES)
+
+
+def reset_sync_notes() -> None:
+    """Forget the collected notes (tests; a new evidence period)."""
+    _SYNC_NOTES.clear()
 
 
 def write_atomic(path: Path, text: str, mode: int = 0o644) -> None:

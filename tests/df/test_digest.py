@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import unicodedata
@@ -305,3 +306,58 @@ def test_digest_exclude_directory_keeps_children(tmp_path: Path) -> None:
     assert without_dir != tree_digest(root)
     (root / "d" / "release.json").write_bytes(b"changed")
     assert tree_digest(root, exclude=frozenset({"release.json", "d"})) != without_dir
+
+
+@pytest.mark.parametrize(
+    "code,raised",
+    [
+        (errno.ENOENT, TreeError),
+        (errno.ENOTDIR, TreeError),
+        (errno.EIO, OSError),
+        (errno.EACCES, OSError),
+        (errno.ELOOP, OSError),
+    ],
+)
+def test_digest_wraps_only_tree_changes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, code: int, raised: type
+) -> None:
+    """Only "the tree changed under us" is a `TreeError`; an I/O error
+    propagates as `OSError` so callers fail closed (7-C fix round 2)."""
+    root = tmp_path / "t"
+    root.mkdir()
+    bad = root / "f"
+    bad.write_text("x")
+    real_lstat = os.lstat
+
+    def lstat(path: object, *args: object, **kw: object) -> os.stat_result:
+        if path == bad:
+            raise OSError(code, os.strerror(code), str(path))
+        return real_lstat(path, *args, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "lstat", lstat)
+    with pytest.raises(raised) as exc:
+        tree_digest(root)
+    assert (type(exc.value) is TreeError) == (raised is TreeError)
+
+
+@pytest.mark.parametrize(
+    "code,raised", [(errno.ENOENT, TreeError), (errno.EIO, OSError)]
+)
+def test_link_resolution_wraps_only_tree_changes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, code: int, raised: type
+) -> None:
+    tree = tmp_path / "t"
+    tree.mkdir()
+    (tree / "target").write_text("x")
+    (tree / "link").symlink_to("target")
+    real_lstat = os.lstat
+
+    def lstat(path: object, *args: object, **kw: object) -> os.stat_result:
+        if Path(str(path)) == tree / "target":
+            raise OSError(code, os.strerror(code), str(path))
+        return real_lstat(path, *args, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "lstat", lstat)
+    with pytest.raises(raised) as exc:
+        resolve_link_in_tree(tree, LR, PurePosixPath("link"))
+    assert (type(exc.value) is TreeError) == (raised is TreeError)

@@ -6,6 +6,7 @@ Every function here inspects trees that the builder can no longer write
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import stat
@@ -14,7 +15,10 @@ from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 
 _CHUNK = 1 << 20
+_OPEN_REGULAR_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 _MAX_HOPS = 40
+#: `lstat` errors meaning "the tree changed (or has another shape)": `TreeError`.
+_TREE_CHANGED = frozenset({errno.ENOENT, errno.ENOTDIR})
 _FORBIDDEN_CHARS = {"\n": "newline", "\0": "NUL", "/": "slash"}
 
 
@@ -58,6 +62,17 @@ def check_names(names: Iterable[bytes]) -> list[str]:
     return result
 
 
+#: What the digest of a release copy leaves out: `release.json` is written
+#: after the copy is accepted. Every mark and check of a release copy is one
+#: call (`release_digest`), so they cannot disagree (M6).
+RELEASE_DIGEST_EXCLUDE = frozenset({"release.json"})
+
+
+def release_digest(tree: Path) -> str:
+    """`tree_digest` of a release copy, the one exclusion of marks and checks."""
+    return tree_digest(tree, exclude=RELEASE_DIGEST_EXCLUDE)
+
+
 def tree_digest(
     root: Path, *, exclude: frozenset[str] = frozenset({"release.json"})
 ) -> str:
@@ -82,6 +97,10 @@ def tree_digest(
       walk with sorted children;
     - result: `sha256:` + lowercase hex SHA-256 of the concatenated records.
 
+    A vanished entry (ENOENT, ENOTDIR on `lstat`) is a `TreeError`; any other
+    `OSError` propagates unchanged — an I/O error is not a property of the
+    tree, and callers fail closed on it.
+
     `exclude` holds exact relative paths whose records are skipped, whatever
     their type. Excluding a directory drops only its own record: its
     children are still digested (deliberately: exclusion is for single files
@@ -98,10 +117,15 @@ def tree_digest(
 
 
 def _lstat(path: Path) -> os.stat_result:
+    """`lstat`; only "the tree changed under us" (ENOENT, ENOTDIR) is a
+    `TreeError`. Any other `OSError` (EIO, EACCES, ...) propagates: an I/O
+    error is not a fact about the tree, and callers fail closed on it."""
     try:
         return os.lstat(path)
     except OSError as exc:
-        raise TreeError(f"cannot stat {path}: {exc.strerror}") from exc
+        if exc.errno in _TREE_CHANGED:
+            raise TreeError(f"cannot stat {path}: {exc.strerror}") from exc
+        raise
 
 
 def _records(directory: Path, prefix: str) -> list[tuple[bytes, bytes]]:
@@ -140,11 +164,26 @@ def _link_text(path: Path) -> bytes:
     return text
 
 
-def _file_sha256(path: Path) -> str:
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+def open_regular(path: Path) -> int:
+    """Open an untrusted file read-only and return its descriptor.
+
+    Never follows a final link and never blocks on a FIFO; anything but a
+    regular file is a `TreeError`. The caller closes the descriptor. A failed
+    `os.open` raises its `OSError`.
+    """
+    fd = os.open(path, _OPEN_REGULAR_FLAGS)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise TreeError(f"not a regular file: {path}")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _file_sha256(path: Path) -> str:
+    fd = open_regular(path)
+    try:
         digest = hashlib.sha256()
         while chunk := os.read(fd, _CHUNK):
             digest.update(chunk)
@@ -181,8 +220,9 @@ def resolve_link_in_tree(
 
     Absolute targets must lie under `logical_root`; `.`/`..` resolve
     lexically; intermediate links resolve by the same rule. Escape, a cycle
-    (more than 40 hops) or a dangling target is a `TreeError`. Returns the
-    final target relative to the tree.
+    (more than 40 hops) or a dangling target is a `TreeError`; any other
+    `OSError` (EIO, EACCES, ...) propagates. Returns the final target
+    relative to the tree.
     """
     root = canonical_root(logical_root)
     if link_rel.is_absolute() or any(p in ("", ".", "..") for p in link_rel.parts):
@@ -245,7 +285,7 @@ class _Resolver:
             return os.lstat(self.tree.joinpath(*stack))
         except FileNotFoundError as exc:
             raise TreeError(f"dangling target: {'/'.join(stack)}") from exc
-        except OSError as exc:
+        except NotADirectoryError as exc:
             raise TreeError(f"cannot resolve {'/'.join(stack)}: {exc}") from exc
 
 
