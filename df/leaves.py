@@ -99,12 +99,8 @@ def verify_chmod(layout: Layout, release_id: str) -> None:
     """
     path = layout.release_dir(release_id)
     with _refusing(_VERIFY_STEP), _open_dir(layout.releases, _VERIFY_STEP) as top:
-        before = _root_dir_at(top, path, _VERIFY_STEP)
-        fd = os.open(path.name, _DIR_FLAGS, dir_fd=top)
+        fd = _open_root_dir_at(top, path, _VERIFY_STEP)
         try:
-            after = os.fstat(fd)
-            if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
-                raise StepFailed(_VERIFY_STEP, f"{path} подменён")
             os.fchmod(fd, 0o755)
             fsutil.fault_point("chmod", path)
             fsutil.sync_dir(fd)
@@ -115,9 +111,11 @@ def verify_chmod(layout: Layout, release_id: str) -> None:
 def seal(layout: Layout, release_id: str) -> None:
     """Protocol `seal`: `releases/<id>` moves to `staging/<id>/tree`.
 
-    Variant `new` (no `staging/<id>`): the container is made root `0711`.
+    Variant `new` (no `staging/<id>`): the container is made by `mkdir`.
     Variant `reuse` (an empty `staging/<id>` of root, left by a crash after
-    its `mkdir`): no `mkdir`. The tree is touched only by `fstatat` and
+    its `mkdir`): no `mkdir`. In both the container is opened like
+    `verify_chmod`'s root and set to `0711` (not an event: a crash before
+    it under a strict umask must not leave it `0700`). The tree is touched only by `fstatat` and
     `renameat`. Effects (`new`): `created` -> `renamed` -> `sync_dir(releases)`
     -> `sync_dir(staging)`. Effects (`reuse`): `renamed` -> `sync_dir(releases)`
     -> `sync_dir(staging)`; `sync_dir(staging)` is `staging/`, then
@@ -137,14 +135,13 @@ def seal(layout: Layout, release_id: str) -> None:
         new = not _exists_at(staging, box.name)
         if new:
             os.mkdir(box.name, 0o711, dir_fd=staging)
-        _root_dir_at(staging, box, _SEAL_STEP)
-        box_fd = os.open(box.name, _DIR_FLAGS, dir_fd=staging)
+        box_fd = _open_root_dir_at(staging, box, _SEAL_STEP)
         try:
-            if new:
-                os.fchmod(box_fd, 0o711)
-                fsutil.fault_point("created", box)
-            elif os.listdir(box_fd):
+            if not new and os.listdir(box_fd):
                 raise StepFailed(_SEAL_STEP, f"{box} не пуст")
+            os.fchmod(box_fd, 0o711)
+            if new:
+                fsutil.fault_point("created", box)
             os.rename(tree.name, "tree", src_dir_fd=top, dst_dir_fd=box_fd)
             fsutil.fault_point("renamed", layout.staging_tree(release_id))
             fsutil.sync_dir(top)
@@ -234,6 +231,18 @@ def _exists_at(dir_fd: int, name: str) -> bool:
     except FileNotFoundError:
         return False
     return True
+
+
+def _open_root_dir_at(dir_fd: int, path: Path, step: str) -> int:
+    """Open `path.name` under `dir_fd` only after `fstatat` shows a root
+    directory; the opened descriptor must be that same object (dev, ino)."""
+    before = _root_dir_at(dir_fd, path, step)
+    fd = os.open(path.name, _DIR_FLAGS, dir_fd=dir_fd)
+    after = os.fstat(fd)
+    if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+        os.close(fd)
+        raise StepFailed(step, f"{path} подменён")
+    return fd
 
 
 def _root_dir_at(dir_fd: int, path: Path, step: str) -> os.stat_result:

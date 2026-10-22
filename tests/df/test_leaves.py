@@ -9,6 +9,7 @@ concretisation as the routes test (`expected_events`).
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import stat
 from collections.abc import Callable, Mapping
@@ -22,7 +23,7 @@ from df import install_table as table
 from df import platform as plat
 from df.accept import Facts, classify, load_mark, read_facts
 from df.config import Account, Pending, config_digest, dump_accounts, dump_pending
-from df.digest import TreeError, tree_digest
+from df.digest import tree_digest
 from df.journal import StepFailed
 from df.receive import CopyLimits
 from tests.df.conftest import BUILD_UID, FakeLayout, fd_path
@@ -200,21 +201,38 @@ def test_tar_failure_refuses_and_keeps_partial_for_route(
     assert classify(facts(fl)) == "copied"
 
 
-def test_copy_refusal_reports_the_stderr_tail(
-    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout
-) -> None:
-    """F21: `TreeError` -> `StepFailed("copy", "<exc>; stderr: <last 4096>")`."""
-    producer = mock.Mock()
-    producer.stderr_tail.return_value = b"x" * 5000 + b"END"
-    monkeypatch.setattr(plat, "spawn_as", lambda *a, **kw: producer)
-    monkeypatch.setattr(
-        receive, "receive_tree", mock.Mock(side_effect=TreeError("cut"))
+def test_copy_refusal_reports_the_stderr_tail(fl: FakeLayout) -> None:
+    """F21: `TreeError` -> `StepFailed("copy", "<exc>; stderr: <last 4096>")`.
+
+    Real `spawn_as` and `receive_tree` under `fake_layout`; the approved
+    `tar` is a local script: 5003 bytes of stderr, then a block that is no
+    tar header."""
+    lay = fl.layout
+    staged_tree(fl)
+    tar = lay.root.parent / "bad-tar"
+    tar.write_text(
+        "#!/bin/sh\n"
+        "/usr/bin/head -c 5000 /dev/zero | /usr/bin/tr '\\0' x >&2\n"
+        "printf END >&2\n"
+        "/usr/bin/head -c 512 /dev/zero | /usr/bin/tr '\\0' y\n"
     )
+    tar.chmod(0o755)
+    install = dataclasses.replace(
+        INSTALL, approved_cli={**INSTALL.approved_cli, "tar": tar}
+    )
+    fl.clear()
     with pytest.raises(StepFailed) as exc:
-        copy(fl)
+        leaves.accept_copy(lay, ID, install=install, platform=PLATFORM)
+    assert exc.value.step == "copy"
     head, tail = exc.value.detail.split("; stderr: ")
-    assert head == "cut"
-    assert tail == ("x" * 5000 + "END")[-4096:]
+    assert head
+    assert tail == ("x" * 5000 + "END")[-leaves.STDERR_REPORT_BYTES :]
+    assert len(tail) == 4096
+    assert normalize(fl.events) == [
+        ("created", lay.release_dir(ID)),
+        ("process", "df-build"),
+    ]
+    assert lay.release_dir(ID).is_dir()
 
 
 def test_copied_digest_and_its_check_are_one_call(fl: FakeLayout) -> None:
@@ -447,6 +465,75 @@ def test_seal_variant_events(fl: FakeLayout, variant: str) -> None:
     fl.clear()
     leaves.seal(lay, ID)
     assert normalize(fl.events) == expected_events(lay, "seal", variant, RELEASE)
+
+
+def test_seal_reuse_sets_the_container_mode(fl: FakeLayout) -> None:
+    """M1: a crash between `mkdir` and `fchmod` under umask 077 leaves an
+    empty root `0700` container; `reuse` ends it `0711`, events unchanged."""
+    lay = fl.layout
+    builder_release(fl)
+    lay.staging_dir(ID).mkdir(mode=0o700)
+    lay.staging_dir(ID).chmod(0o700)
+    fl.clear()
+    leaves.seal(lay, ID)
+    assert normalize(fl.events) == expected_events(lay, "seal", "reuse", RELEASE)
+    assert stat.S_IMODE(os.stat(lay.staging_dir(ID)).st_mode) == 0o711
+
+
+@pytest.mark.parametrize("kind", ["link", "builder", "file"])
+def test_seal_refuses_a_container_that_is_not_a_root_dir(
+    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout, kind: str
+) -> None:
+    """M2: `staging/<id>` is checked by `fstatat` before it is opened; a link,
+    a foreign directory or a file is refused and never opened."""
+    lay = fl.layout
+    builder_release(fl)
+    box = lay.staging_dir(ID)
+    if kind == "link":
+        (lay.staging / "other").mkdir(mode=0o711)
+        box.symlink_to("other")
+    elif kind == "builder":
+        fl.builder_dir(box)
+    else:
+        box.write_text("x\n")
+    opened: list[object] = []
+    fake_open = os.open
+
+    def open_(path: object, flags: int, *a: object, **kw: object) -> int:
+        opened.append(path)
+        return fake_open(path, flags, *a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "open", open_)
+    fl.clear()
+    with pytest.raises(StepFailed) as exc:
+        leaves.seal(lay, ID)
+    assert exc.value.step == "seal"
+    assert ID not in opened and fl.events == []
+    assert lay.release_dir(ID).is_dir()
+
+
+def test_open_root_dir_refuses_a_swapped_object(
+    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout
+) -> None:
+    """M2: the opened descriptor must be the object `fstatat` checked."""
+    lay = fl.layout
+    builder_release(fl)
+    box = lay.staging_dir(ID)
+    box.mkdir(mode=0o711)
+    (lay.staging / "swap").mkdir(mode=0o711)
+    fake_open = os.open
+
+    def open_(path: object, flags: int, *a: object, **kw: object) -> int:
+        if path == ID and kw.get("dir_fd") is not None:
+            box.rmdir()
+            (lay.staging / "swap").rename(box)
+        return fake_open(path, flags, *a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "open", open_)
+    with pytest.raises(StepFailed) as exc:
+        leaves.seal(lay, ID)
+    assert exc.value.step == "seal" and "подменён" in exc.value.detail
+    assert lay.release_dir(ID).is_dir()
 
 
 @pytest.mark.parametrize("content", ["tree", "file"])
