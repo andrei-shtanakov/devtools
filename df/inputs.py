@@ -44,6 +44,7 @@ DIRECT_URL_CAP = 1 << 16
 PTH_CAP = 1 << 16
 _NAME_RUNS = re.compile(r"[-_.]+")
 _VIRTUALENV_PTH_BODY = (b"import _virtualenv", b"import _virtualenv\n")
+_EGG_SUFFIXES = (".egg-info", ".egg", ".egg-link")
 
 
 @dataclass(frozen=True)
@@ -277,13 +278,6 @@ def _select(
     return found
 
 
-def _is_real_dir(path: Path) -> bool:
-    try:
-        return stat.S_ISDIR(os.lstat(path).st_mode)
-    except OSError:
-        return False
-
-
 def _real_subdirs(directory: Path, **match: str) -> list[Path]:
     """Matching children that are real directories; a link or file is refused."""
     found = _select(directory, **match)
@@ -327,7 +321,21 @@ def _site_packages(venv: Path) -> list[Path]:
             sites.extend(_real_subdirs(python, exact="site-packages"))
     if not sites:
         raise TreeError(f"{venv}: нет site-packages")
+    for site in sites:
+        _refuse_eggs(site)
     return sites
+
+
+def _refuse_eggs(site: Path) -> None:
+    """Egg metadata is refused: `importlib.metadata` reads it, uv never writes it.
+
+    A distribution behind `*.egg-info` (any case) would be installed but
+    invisible to the `*.dist-info` walk.
+    """
+    for suffix in _EGG_SUFFIXES:
+        found = _select(site, suffix=suffix, strict=False)
+        if found:
+            raise TreeError(f"{found[0]}: egg-метаданные не допускаются")
 
 
 def normalize_name(name: str) -> str:

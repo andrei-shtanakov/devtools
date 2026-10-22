@@ -414,6 +414,51 @@ def test_metadata_case_variant_refused(tmp_path: Path) -> None:
         installed_distributions(venv)
 
 
+@pytest.mark.parametrize(
+    "old,new",
+    [
+        ("site-packages", "\u017fite-packages"),  # long s: casefolds to "s"
+        ("site-packages", "site-pac\u212aages"),  # Kelvin sign: casefolds to "k"
+        ("ok-1.0.dist-info", "ok-1.0.di\u017ft-info"),
+    ],
+)
+def test_names_matching_only_after_casefold_refused(
+    tmp_path: Path, old: str, new: str
+) -> None:
+    venv = lower_venv(tmp_path)
+    target = next(venv.rglob(old))
+    target.rename(target.with_name(new))
+    assert new in os.listdir(target.parent)
+    with pytest.raises(TreeError, match="регистре") as err:
+        installed_distributions(venv)
+    assert new in str(err.value)
+
+
+@pytest.mark.parametrize(
+    "name,is_dir",
+    [
+        ("evil-1.0.egg-info", True),
+        ("evil2-1.0.egg-info", False),
+        ("evil3-1.0.EGG-INFO", True),
+        ("evil4-1.0-py3.12.egg", True),
+        ("evil5.egg-link", False),
+    ],
+)
+def test_egg_metadata_refused(tmp_path: Path, name: str, is_dir: bool) -> None:
+    venv = lower_venv(tmp_path)
+    site = next(venv.rglob("site-packages"))
+    meta = "Metadata-Version: 2.1\nName: evil\nVersion: 1.0\n"
+    if is_dir:
+        (site / name).mkdir()
+        (site / name / "PKG-INFO").write_text(meta)
+    else:
+        (site / name).write_text(meta)
+    for fn in (installed_distributions, pth_problems):
+        with pytest.raises(TreeError, match="egg") as err:
+            fn(venv)
+        assert name in str(err.value)
+
+
 def test_upper_pth_is_reported(tmp_path: Path) -> None:
     venv = lower_venv(tmp_path)
     site = next(venv.rglob("site-packages"))
