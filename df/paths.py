@@ -97,6 +97,11 @@ class Layout:
         return self.bin_dir / "darkfactory-entry.py"
 
     @property
+    def local_bin(self) -> Path:
+        """`/usr/local/bin`: the public command's link, if one is created."""
+        return self.root / "usr" / "local" / "bin"
+
+    @property
     def journal(self) -> Path:
         """Audit journal."""
         return self.install_dir / "journal.jsonl"
@@ -163,6 +168,10 @@ class Layout:
     def staging_dir(self, release_id: str) -> Path:
         """Staging directory of a release."""
         return self.staging / _check_id(release_id)
+
+    def mark_file(self, release_id: str) -> Path:
+        """Acceptance mark of a release (`df/accept/v1`)."""
+        return self.marks_dir / f"{_check_id(release_id)}.toml"
 
     def staging_tree(self, release_id: str) -> Path:
         """Builder tree inside staging."""
