@@ -54,7 +54,7 @@ from df.routes import (
     route_guard,
     run_route,
 )
-from tests.df.conftest import FakeLayout
+from tests.df.conftest import BUILD_UID, FakeLayout
 
 ID = "rel1"
 PY = "3.13.1"
@@ -173,9 +173,51 @@ CASES = [
 FAULT_KIND = {"rename": "renamed", "unlink": "unlinked"}
 
 
+#: Every target text of `ROUTES` -> its object, written from the spec
+#: independently of `routes.TARGETS` (I2); `None`: no object.
+OBJECTS: Mapping[str, Callable[[Layout], Path] | None] = {
+    "releases/<id>": lambda L: L.root / "opt/df/releases" / ID,
+    "от `df-build`": None,
+    "df-build": None,
+    "accept/<id>.toml: built": lambda L: (
+        L.root / f"var/lib/df/install/accept/{ID}.toml"
+    ),
+    "accept/<id>.toml: copied": lambda L: (
+        L.root / f"var/lib/df/install/accept/{ID}.toml"
+    ),
+    "accept/<id>.toml: max(стадия, verified)": lambda L: (
+        L.root / f"var/lib/df/install/accept/{ID}.toml"
+    ),
+    "accept/<id>.toml: admin": lambda L: (
+        L.root / f"var/lib/df/install/accept/{ID}.toml"
+    ),
+    "accept/<id>.toml": lambda L: L.root / f"var/lib/df/install/accept/{ID}.toml",
+    "releases/<id> = отметке": lambda L: L.root / "opt/df/releases" / ID,
+    "build_home/tmp": lambda L: L.build_home / "tmp",
+    "build_home/cache": lambda L: L.build_home / "cache",
+    "admin-python/.staging": lambda L: L.root / "opt/df/admin-python/.staging",
+    "admin-python/cpython-…": lambda L: L.root / "opt/df/admin-python" / KEY,
+    "admin/<id>": lambda L: L.root / "opt/df/admin" / ID,
+    "staging/<id>/tree": lambda L: L.root / "opt/df/staging" / ID / "tree",
+    "staging/<id>": lambda L: L.root / "opt/df/staging" / ID,
+    "releases/<id>/release.json": lambda L: (
+        L.root / "opt/df/releases" / ID / "release.json"
+    ),
+    "/etc/df/releases.toml": lambda L: L.root / "etc/df/releases.toml",
+    "/etc/df/install.toml": lambda L: L.root / "etc/df/install.toml",
+    "/opt/df/current": lambda L: L.root / "opt/df/current",
+    "bin/darkfactory-entry.py": lambda L: L.root / "opt/df/bin/darkfactory-entry.py",
+    "bin/darkfactory": lambda L: L.root / "opt/df/bin/darkfactory",
+    "/usr/local/bin/darkfactory": lambda L: L.root / "usr/local/bin/darkfactory",
+    "pending.toml": lambda L: L.root / "var/lib/df/install/pending.toml",
+}
+
+
 def obj(lay: Layout, target: str) -> Path:
-    parent, name = routes.where(lay, ID, target, KEY)
-    return parent / name
+    """The object of a target from the independent table `OBJECTS`."""
+    get = OBJECTS[target]
+    assert get is not None, target
+    return get(lay)
 
 
 def change_path(
@@ -198,7 +240,7 @@ def change_path(
 def dir_paths(lay: Layout, arg: str, target: str) -> list[Path]:
     """Directories a `sync_dir(<arg>)` step syncs (`staging`: both)."""
     if arg == "parent":
-        return [routes.where(lay, ID, target, KEY)[0]]
+        return [obj(lay, target).parent]
     named: Mapping[str, list[Path]] = {
         "release_root": [lay.release_dir(ID)],
         "releases": [lay.releases],
@@ -467,7 +509,7 @@ def run_case(
     expected, final = expected_route(fl.layout, name, state)
     fl.clear()
     calls = StandIns(fl).calls(**override)
-    run_route(fl.layout, ID, name, calls=calls, python_key=KEY)
+    run_route(fl.layout, ID, name, calls=calls, python_key=KEY, build_uid=BUILD_UID)
     return normalize(fl.events), expected, final
 
 
@@ -509,7 +551,7 @@ def test_routes_match_table(
     assert got == expected
     # The stand-ins changed what the guards read exactly as the model says.
     for guard in {g for gs, _c, _t in table.unfold_route(name) for g in gs}:
-        value = route_guard(fl.layout, ID, guard, python_key=KEY)
+        value = route_guard(fl.layout, ID, guard, python_key=KEY, build_uid=BUILD_UID)
         assert value == GUARD_MODEL[guard](final), guard
 
 
@@ -529,11 +571,13 @@ def test_fake_event_shapes(monkeypatch: pytest.MonkeyPatch, fl: FakeLayout) -> N
     """Carry 7 of 7-C: the reap and ownership events have the fake's shapes."""
     prepare(fl, monkeypatch, DEFAULT)
     fl.clear()
-    run_route(fl.layout, ID, "build-dir", calls=StandIns(fl).calls())
+    run_route(
+        fl.layout, ID, "build-dir", calls=StandIns(fl).calls(), build_uid=BUILD_UID
+    )
     assert ("fchown", fl.layout.release_dir(ID), fl.build_uid) in fl.events
     assert fl.owner_of(os.stat(fl.layout.release_dir(ID))) == fl.build_uid
     fl.clear()
-    run_route(fl.layout, ID, "seal", calls=StandIns(fl).calls())
+    run_route(fl.layout, ID, "seal", calls=StandIns(fl).calls(), build_uid=BUILD_UID)
     assert fl.events.count(("process", "df-build")) == 1
     assert [e for e in fl.events if e[0] == "process"] == [("process", "df-build")]
 
@@ -565,7 +609,12 @@ def _twin_fails(
             m.setattr(table, "ROUTES", {**table.ROUTES, **routes_twin})
             try:
                 run_route(
-                    fl.layout, ID, name, calls=StandIns(fl).calls(), python_key=KEY
+                    fl.layout,
+                    ID,
+                    name,
+                    calls=StandIns(fl).calls(),
+                    python_key=KEY,
+                    build_uid=BUILD_UID,
                 )
                 results.append(normalize(fl.events) == expected)
             except (OSError, StepFailed):
@@ -610,13 +659,13 @@ def test_twin_guard_dropped_is_caught(
     monkeypatch: pytest.MonkeyPatch, fl: FakeLayout
 ) -> None:
     """Spec: twins drop each guard (true by assumption); a primitive refusing
-    an absent object is the counterexample — except `r=builder` in cleanup."""
+    an absent object, a step the table did not take, or F13 refusing a
+    registered id is the counterexample — the only exception is `r=builder`
+    in cleanup."""
     for name, steps in table.ROUTES.items():
         for i, (guard, call, target) in enumerate(steps):
             if guard is None or (name, guard) == ("cleanup", "r=builder"):
                 continue
-            if guard in ("local_bin=trusted", "not reg"):
-                continue  # not an existence guard: the policy / the registry
             twin = {name: (*steps[:i], (None, call, target), *steps[i + 1 :])}
             outer = [
                 n for n, st in table.ROUTES.items() if name in {c for _g, c, _t in st}
@@ -691,12 +740,23 @@ def test_route_guard_uses_lstat_via_parent_fd(
         stats.append((str(path), dir_fd in fds, follow_symlinks))
         return real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
 
+    def other(kind: str) -> Callable[..., object]:
+        def record(*args: object, **kwargs: object) -> object:
+            others.append((kind, args))
+            raise AssertionError(f"{kind} in a guard")
+
+        return record
+
+    others: list[tuple[str, tuple[object, ...]]] = []
     monkeypatch.setattr(os, "open", open_)
     monkeypatch.setattr(os, "stat", stat_)
-    route_guard(fl.layout, ID, guard, python_key=KEY)
+    for kind in ("lstat", "scandir", "listdir"):
+        monkeypatch.setattr(os, kind, other(kind))
+    route_guard(fl.layout, ID, guard, python_key=KEY, build_uid=BUILD_UID)
     want_opened, want_names = _guard_reads(fl.layout, guard)
     assert opened == want_opened
     assert stats == [(n, True, False) for n in want_names]
+    assert others == []
 
 
 @pytest.mark.parametrize("guard", LSTAT_GUARDS)
@@ -706,20 +766,20 @@ def test_route_guard_values(
 ) -> None:
     state = _guard_state(guard) if present else DEFAULT
     prepare(fl, monkeypatch, state)
-    assert route_guard(fl.layout, ID, guard, python_key=KEY) == GUARD_MODEL[guard](
-        state
-    )
+    assert route_guard(
+        fl.layout, ID, guard, python_key=KEY, build_uid=BUILD_UID
+    ) == GUARD_MODEL[guard](state)
 
 
 def test_r_guards_tell_root_from_builder(
     monkeypatch: pytest.MonkeyPatch, fl: FakeLayout
 ) -> None:
     prepare(fl, monkeypatch, DEFAULT | {"r": "builder"})
-    assert not route_guard(fl.layout, ID, "r=root")
-    assert route_guard(fl.layout, ID, "r=builder")
+    assert not route_guard(fl.layout, ID, "r=root", build_uid=BUILD_UID)
+    assert route_guard(fl.layout, ID, "r=builder", build_uid=BUILD_UID)
     fl.set_owner(fl.layout.release_dir(ID), os.getuid())
-    assert route_guard(fl.layout, ID, "r=root")
-    assert not route_guard(fl.layout, ID, "r=builder")
+    assert route_guard(fl.layout, ID, "r=root", build_uid=BUILD_UID)
+    assert not route_guard(fl.layout, ID, "r=builder", build_uid=BUILD_UID)
 
 
 def test_r_guards_false_on_non_directory(
@@ -727,8 +787,8 @@ def test_r_guards_false_on_non_directory(
 ) -> None:
     prepare(fl, monkeypatch, DEFAULT)
     fl.layout.release_dir(ID).write_text("x")
-    assert not route_guard(fl.layout, ID, "r=root")
-    assert not route_guard(fl.layout, ID, "r=builder")
+    assert not route_guard(fl.layout, ID, "r=root", build_uid=BUILD_UID)
+    assert not route_guard(fl.layout, ID, "r=builder", build_uid=BUILD_UID)
 
 
 def test_route_guard_refuses_foreign_parent(
@@ -737,7 +797,7 @@ def test_route_guard_refuses_foreign_parent(
     prepare(fl, monkeypatch, DEFAULT | {"S": "tree"})
     fl.set_owner(fl.layout.staging_dir(ID), fl.build_uid)
     with pytest.raises(StepFailed, match="не root"):
-        route_guard(fl.layout, ID, "S=tree")
+        route_guard(fl.layout, ID, "S=tree", build_uid=BUILD_UID)
 
 
 def test_route_guard_refuses_linked_parent(
@@ -748,20 +808,20 @@ def test_route_guard_refuses_linked_parent(
     (real / "tree").mkdir(parents=True)
     fl.layout.staging_dir(ID).symlink_to(real)
     with pytest.raises(StepFailed) as exc:
-        route_guard(fl.layout, ID, "S=tree")
+        route_guard(fl.layout, ID, "S=tree", build_uid=BUILD_UID)
     assert exc.value.step == "route"
 
 
 def test_absent_parent_is_absent_name(fake_layout: FakeLayout) -> None:
     lay = fake_layout.layout
-    assert not route_guard(lay, ID, "r=root")
-    assert not route_guard(lay, ID, "S=tree")
-    assert route_guard(lay, ID, "py=absent", python_key=KEY)
+    assert not route_guard(lay, ID, "r=root", build_uid=BUILD_UID)
+    assert not route_guard(lay, ID, "S=tree", build_uid=BUILD_UID)
+    assert route_guard(lay, ID, "py=absent", python_key=KEY, build_uid=BUILD_UID)
 
 
 def test_py_guard_needs_python_key(fl: FakeLayout) -> None:
     with pytest.raises(AssertionError, match="python_key"):
-        route_guard(fl.layout, ID, "py=absent")
+        route_guard(fl.layout, ID, "py=absent", build_uid=BUILD_UID)
 
 
 def test_not_reg_reads_only_the_registry(
@@ -776,17 +836,17 @@ def test_not_reg_reads_only_the_registry(
         return real_open(path, flags, *a, **kw)  # type: ignore[arg-type]
 
     monkeypatch.setattr(os, "open", open_)
-    assert route_guard(fl.layout, ID, "not reg")
+    assert route_guard(fl.layout, ID, "not reg", build_uid=BUILD_UID)
     assert opened == []
     register(fl)
-    assert not route_guard(fl.layout, ID, "not reg")
+    assert not route_guard(fl.layout, ID, "not reg", build_uid=BUILD_UID)
     assert opened == [str(fl.layout.etc / "releases.toml")]
 
 
 def test_not_reg_broken_registry_stops(fl: FakeLayout) -> None:
     (fl.layout.etc / "releases.toml").write_text("garbage = [")
     with pytest.raises(StepFailed):
-        route_guard(fl.layout, ID, "not reg")
+        route_guard(fl.layout, ID, "not reg", build_uid=BUILD_UID)
 
 
 @pytest.mark.parametrize("problems,value", [([], True), (["x: не root"], False)])
@@ -801,7 +861,7 @@ def test_local_bin_guard_is_one_policy_call(
         return problems
 
     monkeypatch.setattr(plat, "trusted_path_problems", policy)
-    assert route_guard(fl.layout, ID, "local_bin=trusted") is value
+    assert route_guard(fl.layout, ID, "local_bin=trusted", build_uid=BUILD_UID) is value
     assert calls == [fl.layout.local_bin]
 
 
@@ -820,7 +880,9 @@ def test_cleanup_refuses_registered_before_any_step(
     register(fl)
     fl.clear()
     with pytest.raises(StepFailed) as exc:
-        run_route(fl.layout, ID, "cleanup", calls=StandIns(fl).calls())
+        run_route(
+            fl.layout, ID, "cleanup", calls=StandIns(fl).calls(), build_uid=BUILD_UID
+        )
     assert exc.value.step == "cleanup"
     assert fl.events == []
     assert fl.layout.release_dir(ID).is_dir() and fl.layout.admin_dir(ID).is_dir()
@@ -834,7 +896,7 @@ def test_nested_route_runs_through_the_interpreter(
     fl.clear()
     calls = StandIns(fl).calls()
     assert "cleanup_staging" not in calls
-    run_route(fl.layout, ID, "verify", calls=calls, python_key=KEY)
+    run_route(fl.layout, ID, "verify", calls=calls, python_key=KEY, build_uid=BUILD_UID)
     marks = [e[1:] for e in fl.events if e[0] == "call"]
     assert marks[:2] == [
         ("cleanup_tree", "staging/<id>/tree"),
@@ -879,7 +941,12 @@ def _facts_of(phase: str) -> Facts:
 def test_route_action_refuses_outside_its_phase(fl: FakeLayout) -> None:
     """F14: `seal` with the facts of `building` — refused, nothing called."""
     act = route_action(
-        fl.layout, ID, "seal", calls=StandIns(fl).calls(), python_key=KEY
+        fl.layout,
+        ID,
+        "seal",
+        calls=StandIns(fl).calls(),
+        python_key=KEY,
+        build_uid=BUILD_UID,
     )
     with pytest.raises(StepFailed) as exc:
         act(_facts_of("building"))
@@ -894,7 +961,12 @@ def test_route_action_runs_its_route_in_its_phase(
     prepare(fl, monkeypatch, DEFAULT | {"r": "builder"})
     fl.clear()
     act = route_action(
-        fl.layout, ID, "seal", calls=StandIns(fl).calls(), python_key=KEY
+        fl.layout,
+        ID,
+        "seal",
+        calls=StandIns(fl).calls(),
+        python_key=KEY,
+        build_uid=BUILD_UID,
     )
     act(_facts_of("built"))
     assert [e[1] for e in fl.events if e[0] == "call"] == [
@@ -910,7 +982,12 @@ def test_unknown_phase_runs_cleanup(fl: FakeLayout) -> None:
     f = _facts(point)
     assert accept.classify(f) == "unknown"
     act = route_action(
-        fl.layout, ID, "cleanup", calls=StandIns(fl).calls(), python_key=KEY
+        fl.layout,
+        ID,
+        "cleanup",
+        calls=StandIns(fl).calls(),
+        python_key=KEY,
+        build_uid=BUILD_UID,
     )
     act(f)
     assert fl.events == []
@@ -994,6 +1071,7 @@ def make_calls(fl: FakeLayout) -> dict[str, routes.Call]:
         refs={},
         journal=lay.journal,
         run_id="run-1",
+        python_key=KEY,
     )
 
 
@@ -1088,9 +1166,16 @@ def _no_boot_id() -> str:
 def test_built_mark_takes_boot_and_uv_of_the_build(
     monkeypatch: pytest.MonkeyPatch, fl: FakeLayout
 ) -> None:
-    monkeypatch.setattr(routes.build_mod, "run_build", lambda plan, layout, runner: UV)
+    runners: list[object] = []
+
+    def run_build(plan: BuildPlan, layout: Layout, *, runner: object) -> str:
+        runners.append(runner)
+        return UV
+
+    monkeypatch.setattr(routes.build_mod, "run_build", run_build)
     calls = make_calls(fl)
     calls["run_build"]("от `df-build`")
+    assert runners == [plat.run_as]
     calls["write_mark"]("accept/<id>.toml: built")
     mark = _mark(fl)
     assert mark is not None
@@ -1227,3 +1312,94 @@ def test_check_links_call_refuses_an_escaping_link(fl: FakeLayout) -> None:
     with pytest.raises(StepFailed) as exc:
         make_calls(fl)["check_links"]("releases/<id>")
     assert exc.value.step == "verify" and "out" in exc.value.detail
+
+
+# ---------- fix round 1 ----------
+
+
+def test_targets_agree_with_the_independent_objects(fl: FakeLayout) -> None:
+    """I2: TARGETS/where resolve every target text to the object `OBJECTS`
+    names (written from the spec, not from the code under test)."""
+    assert set(OBJECTS) == set(TARGETS)
+    for text, get in OBJECTS.items():
+        if get is None:
+            assert TARGETS[text].where is None, text
+            continue
+        parent, name = routes.where(fl.layout, ID, text, KEY)
+        assert parent / name == get(fl.layout), text
+
+
+@pytest.mark.parametrize("rel", ["tmp", "cache"])
+def test_cleanup_build_home_call_removes_only_its_target(
+    fl: FakeLayout, rel: str
+) -> None:
+    """The real `cleanup_build_home` leaf on `build_home/<rel>`: the named
+    directory goes, the other stays; only runs as `df-build`."""
+    home = fl.layout.build_home
+    for name in ("tmp", "cache"):
+        (home / name / "x").mkdir(parents=True)
+    make_calls(fl)["cleanup_build_home"](f"build_home/{rel}")
+    other = "cache" if rel == "tmp" else "tmp"
+    assert not (home / rel).exists() and (home / other / "x").is_dir()
+    assert normalize(fl.events) == [("run_as+", "df-build")]
+    fl.clear()
+    make_calls(fl)["cleanup_build_home"](f"build_home/{rel}")  # absent: success
+    assert normalize(fl.events) == [("run_as+", "df-build")]
+
+
+def test_r_guard_foreign_owner_stops(
+    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout
+) -> None:
+    """I1: owned by neither root nor df-build — StepFailed naming the owner."""
+    prepare(fl, monkeypatch, DEFAULT | {"r": "builder"})
+    fl.set_owner(fl.layout.release_dir(ID), BUILD_UID + 1)
+    for guard in ("r=root", "r=builder"):
+        with pytest.raises(StepFailed, match=str(BUILD_UID + 1)) as exc:
+            route_guard(fl.layout, ID, guard, build_uid=BUILD_UID)
+        assert exc.value.step == "route"
+
+
+def test_r_guard_needs_build_uid(
+    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout
+) -> None:
+    prepare(fl, monkeypatch, DEFAULT | {"r": "root"})
+    with pytest.raises(AssertionError, match="build_uid"):
+        route_guard(fl.layout, ID, "r=root")
+
+
+def test_rollback_forced_into_cleanup_refuses_registered(
+    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout
+) -> None:
+    """M2: F13 holds through nesting — `rollback` with its `not reg` dropped
+    enters `cleanup`, which refuses before any step."""
+    prepare(fl, monkeypatch, DEFAULT | {"r": "root", "reg": True, "pending": True})
+    fl.clear()
+    twin = (
+        (None, "cleanup", ""),
+        *table.ROUTES["rollback"][1:],
+    )
+    monkeypatch.setattr(table, "ROUTES", {**table.ROUTES, "rollback": twin})
+    with pytest.raises(StepFailed) as exc:
+        run_route(
+            fl.layout, ID, "rollback", calls=StandIns(fl).calls(), build_uid=BUILD_UID
+        )
+    assert exc.value.step == "cleanup"
+    assert fl.events == []
+    assert fl.layout.release_dir(ID).is_dir() and fl.layout.pending.exists()
+
+
+def test_final_stat_error_is_a_step_failure(
+    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout
+) -> None:
+    """M8: an error other than absence reading the name stops the route."""
+    real_stat = os.stat
+
+    def stat_(path: StrPath, **kw: object) -> os.stat_result:
+        if kw.get("dir_fd") is not None:
+            raise PermissionError(13, "denied")
+        return real_stat(path, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "stat", stat_)
+    with pytest.raises(StepFailed) as exc:
+        route_guard(fl.layout, ID, "admin=present", build_uid=BUILD_UID)
+    assert exc.value.step == "route"

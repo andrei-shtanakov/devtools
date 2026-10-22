@@ -230,7 +230,12 @@ def check_targets() -> None:
 
 
 def route_guard(
-    layout: Layout, release_id: str, guard: str, *, python_key: str | None = None
+    layout: Layout,
+    release_id: str,
+    guard: str,
+    *,
+    python_key: str | None = None,
+    build_uid: int | None = None,
 ) -> bool:
     """The value of a route guard (spec 3.3 «Маршруты»).
 
@@ -239,10 +244,12 @@ def route_guard(
     `accept/`); the object itself is never opened. `not reg` reads the registry
     through the hardened reader; `local_bin=trusted` is
     `trusted_path_problems(layout.local_bin)` empty. `py=absent` needs the
-    admin Python key (F6). A parent that is not a root-owned directory is
+    admin Python key (F6); `r=root`/`r=builder` need `build_uid`: the root of
+    `releases/<id>` owned by neither root nor `df-build` is `StepFailed`. A
+    parent that is not a root-owned directory, or any error but absence, is
     `StepFailed`; an absent parent means an absent name.
     """
-    return GUARDS[guard](layout, release_id, python_key)
+    return GUARDS[guard](layout, release_id, python_key, build_uid)
 
 
 def _lstat_in(parent: Path, *names: str) -> os.stat_result | None:
@@ -265,6 +272,9 @@ def _lstat_in(parent: Path, *names: str) -> os.stat_result | None:
             return os.stat(names[-1], dir_fd=fd, follow_symlinks=False)
         except FileNotFoundError:
             return None
+        except OSError as exc:
+            detail = f"{path / names[-1]}: {exc.strerror or exc}"
+            raise StepFailed(_GUARD_STEP, detail) from exc
     finally:
         os.close(fd)
 
@@ -284,23 +294,43 @@ def _open_dir(name: str | Path, dir_fd: int | None, path: Path) -> int | None:
     return fd
 
 
-def _root_kind(layout: Layout, release_id: str) -> str:
-    """`releases/<id>`: "root" or "builder" directory by owner, else "none"."""
-    st = _lstat_in(layout.releases, layout.release_dir(release_id).name)
+def _root_kind(layout: Layout, release_id: str, build_uid: int | None) -> str:
+    """`releases/<id>`: "root" or "builder" directory by owner, else "none".
+
+    Another owner is outside the table: `StepFailed` naming it (F20).
+    """
+    if build_uid is None:
+        raise AssertionError("build_uid is required for the r guards")
+    path = layout.release_dir(release_id)
+    st = _lstat_in(layout.releases, path.name)
     if st is None or not stat.S_ISDIR(st.st_mode):
         return "none"
-    return "root" if fsutil.owner_uid(st) == accept.ROOT_UID else "builder"
+    owner = fsutil.owner_uid(st)
+    if owner == accept.ROOT_UID:
+        return "root"
+    if owner == build_uid:
+        return "builder"
+    raise StepFailed(
+        _GUARD_STEP, f"{path}: владелец uid {owner} — ни root, ни df-build"
+    )
 
 
-def _present(where_of: Where) -> Callable[[Layout, str, str | None], bool]:
-    def present(layout: Layout, release_id: str, key: str | None) -> bool:
+Guard = Callable[[Layout, str, str | None, int | None], bool]
+
+
+def _present(where_of: Where) -> Guard:
+    def present(
+        layout: Layout, release_id: str, key: str | None, _uid: int | None
+    ) -> bool:
         parent, name = where_of(layout, release_id, key)
         return _lstat_in(parent, name) is not None
 
     return present
 
 
-def _staging_container(layout: Layout, release_id: str, _key: str | None) -> bool:
+def _staging_container(
+    layout: Layout, release_id: str, _key: str | None, _uid: int | None
+) -> bool:
     name = layout.staging_dir(release_id).name
     return (
         _lstat_in(layout.staging, name) is not None
@@ -308,7 +338,9 @@ def _staging_container(layout: Layout, release_id: str, _key: str | None) -> boo
     )
 
 
-def _staging_has_tree(layout: Layout, release_id: str, _key: str | None) -> bool:
+def _staging_has_tree(
+    layout: Layout, release_id: str, _key: str | None, _uid: int | None
+) -> bool:
     name = layout.staging_dir(release_id).name
     return _lstat_in(layout.staging, name, "tree") is not None
 
@@ -316,17 +348,17 @@ def _staging_has_tree(layout: Layout, release_id: str, _key: str | None) -> bool
 _PY_STAGING = _fixed(lambda lay: lay.admin_python, ".staging")
 
 #: Guard name -> its evaluation; keys exactly `GUARD_NAMES`.
-GUARDS: Mapping[str, Callable[[Layout, str, str | None], bool]] = {
-    "r=root": lambda lay, i, _k: _root_kind(lay, i) == "root",
-    "r=builder": lambda lay, i, _k: _root_kind(lay, i) == "builder",
+GUARDS: Mapping[str, Guard] = {
+    "r=root": lambda lay, i, _k, uid: _root_kind(lay, i, uid) == "root",
+    "r=builder": lambda lay, i, _k, uid: _root_kind(lay, i, uid) == "builder",
     "S=tree": _staging_has_tree,
     "S=container": _staging_container,
     "admin=present": _present(_admin),
     "m=present": _present(_mark),
-    "not reg": lambda lay, i, _k: accept.registry_entry(lay, i) is None,
-    "py=absent": lambda lay, i, k: not _present(_python)(lay, i, k),
+    "not reg": lambda lay, i, _k, _u: accept.registry_entry(lay, i) is None,
+    "py=absent": lambda lay, i, k, u: not _present(_python)(lay, i, k, u),
     "py-staging=present": _present(_PY_STAGING),
-    "local_bin=trusted": lambda lay, _i, _k: accept.local_bin_trusted(lay),
+    "local_bin=trusted": lambda lay, _i, _k, _u: accept.local_bin_trusted(lay),
 }
 
 
@@ -352,21 +384,23 @@ def run_route(
     *,
     calls: Mapping[str, Call],
     python_key: str | None = None,
+    build_uid: int | None = None,
 ) -> None:
     """Run `ROUTES[name]`: the only interpreter of routes.
 
     Each step's guard is read just before the step (false — skipped); a nested
     route runs recursively; any other call runs `calls[implementation(call,
-    target)](target)`.
+    target)](target)`. `python_key` and `build_uid` go to the guards.
     """
     check = ENTRY_CHECKS.get(name)
     if check is not None:
         check(layout, release_id)
+    keys = {"python_key": python_key, "build_uid": build_uid}
     for guard, call, target in table.ROUTES[name]:
-        if guard and not route_guard(layout, release_id, guard, python_key=python_key):
+        if guard and not route_guard(layout, release_id, guard, **keys):
             continue
         if is_nested(call):
-            run_route(layout, release_id, call, calls=calls, python_key=python_key)
+            run_route(layout, release_id, call, calls=calls, **keys)
         else:
             calls[implementation(call, target)](target)
 
@@ -378,6 +412,7 @@ def route_action(
     *,
     calls: Mapping[str, Call],
     python_key: str | None,
+    build_uid: int,
 ) -> Callable[[Facts], None]:
     """The action of `drive` for a row: its route, run only in its own phase.
 
@@ -388,7 +423,14 @@ def route_action(
     def act(facts: Facts) -> None:
         if table.row_of(accept.classify(facts)).action != action:
             raise StepFailed(action, "не в своей фазе")
-        run_route(layout, release_id, action, calls=calls, python_key=python_key)
+        run_route(
+            layout,
+            release_id,
+            action,
+            calls=calls,
+            python_key=python_key,
+            build_uid=build_uid,
+        )
 
     return act
 
@@ -450,7 +492,6 @@ class RouteContext:
 
     uv_version: str | None = None
     copied_digest: str | None = None
-    lock_digests: dict[str, str] = field(default_factory=dict)
 
 
 def acceptance_calls(
@@ -465,12 +506,15 @@ def acceptance_calls(
     refs: Mapping[str, Path],
     journal: Path,
     run_id: str,
+    python_key: str,
 ) -> dict[str, Call]:
     """Implementations of the route calls Task 7 owns (its leaves and WRAPS).
 
     Keys and `LATER_LEAVES` together are exactly `route_leaves()` and `WRAPS`;
     Task 9 merges the later ones. The calls share one `RouteContext`: the
     build's uv version and the copy's digest reach the next mark.
+    `python_key` is the caller's admin Python key — the same value it passes
+    to `run_route`/`route_action` for the guards (one source, M5).
     """
     leaves = _Leaves(
         layout,
@@ -483,6 +527,7 @@ def acceptance_calls(
         refs=refs,
         journal=journal,
         run_id=run_id,
+        python_key=python_key,
     )
     return leaves.calls()
 
@@ -501,6 +546,7 @@ class _Leaves:
     refs: Mapping[str, Path]
     journal: Path
     run_id: str
+    python_key: str
     ctx: RouteContext = field(default_factory=RouteContext)
 
     def calls(self) -> dict[str, Call]:
@@ -529,8 +575,7 @@ class _Leaves:
         return config_digest(self.install)
 
     def path(self, target: str) -> tuple[Path, str]:
-        key = build_mod.python_key(self.profile.python, self.platform)
-        return where(self.layout, self.release_id, target, key)
+        return where(self.layout, self.release_id, target, self.python_key)
 
     def run_build(self, _target: str) -> None:
         """Leaf `run_build` (builder); keeps the declared uv version (R29)."""
@@ -619,9 +664,13 @@ class _Leaves:
             raise StepFailed("verify", "; ".join(problems))
 
     def verify_sources(self, target: str) -> None:
-        """Check leaf: sources equal the trusted checkout (keeps lock digests)."""
+        """Check leaf: sources equal the trusted checkout.
+
+        The lock digests it returns are not kept: `release.json` (Task 10)
+        calls `verify_sources` itself for `lock_sha256`.
+        """
         tree = Path(*self.path(target))
-        self.ctx.lock_digests = verify_sources(tree, self.profile, self.refs)
+        verify_sources(tree, self.profile, self.refs)
 
     def cleanup_build_home(self, target: str) -> None:
         """Protocol `cleanup_build_home` on `build_home/<name>`."""
