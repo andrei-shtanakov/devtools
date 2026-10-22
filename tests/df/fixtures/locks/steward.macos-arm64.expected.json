@@ -1,0 +1,87 @@
+{
+  "distributions": [
+    {
+      "direct_url": null,
+      "name": "PyYAML",
+      "version": "6.0.3"
+    },
+    {
+      "direct_url": null,
+      "name": "Pygments",
+      "version": "2.20.0"
+    },
+    {
+      "direct_url": null,
+      "name": "annotated-doc",
+      "version": "0.0.4"
+    },
+    {
+      "direct_url": null,
+      "name": "attrs",
+      "version": "26.1.0"
+    },
+    {
+      "direct_url": null,
+      "name": "jsonschema",
+      "version": "4.26.0"
+    },
+    {
+      "direct_url": null,
+      "name": "jsonschema-specifications",
+      "version": "2025.9.1"
+    },
+    {
+      "direct_url": null,
+      "name": "markdown-it-py",
+      "version": "4.2.0"
+    },
+    {
+      "direct_url": null,
+      "name": "mdurl",
+      "version": "0.1.2"
+    },
+    {
+      "direct_url": null,
+      "name": "referencing",
+      "version": "0.37.0"
+    },
+    {
+      "direct_url": null,
+      "name": "rich",
+      "version": "15.0.0"
+    },
+    {
+      "direct_url": null,
+      "name": "rpds-py",
+      "version": "2026.6.3"
+    },
+    {
+      "direct_url": null,
+      "name": "shellingham",
+      "version": "1.5.4"
+    },
+    {
+      "direct_url": {
+        "dir_info": {
+          "editable": false
+        },
+        "url": "file:///private/tmp/df7a-golden/src/steward"
+      },
+      "name": "steward",
+      "version": "0.1.0"
+    },
+    {
+      "direct_url": null,
+      "name": "typer",
+      "version": "0.26.8"
+    },
+    {
+      "direct_url": null,
+      "name": "typing_extensions",
+      "version": "4.16.0"
+    }
+  ],
+  "groups": [],
+  "python": "3.12.13",
+  "root_dir": "/private/tmp/df7a-golden/src/steward"
+}

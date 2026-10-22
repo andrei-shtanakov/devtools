@@ -1,0 +1,145 @@
+{
+  "distributions": [
+    {
+      "direct_url": null,
+      "name": "PyJWT",
+      "version": "2.15.1"
+    },
+    {
+      "direct_url": null,
+      "name": "PyYAML",
+      "version": "6.0.3"
+    },
+    {
+      "direct_url": null,
+      "name": "Pygments",
+      "version": "2.20.0"
+    },
+    {
+      "direct_url": null,
+      "name": "annotated-doc",
+      "version": "0.0.5"
+    },
+    {
+      "direct_url": null,
+      "name": "attrs",
+      "version": "26.1.0"
+    },
+    {
+      "direct_url": null,
+      "name": "cffi",
+      "version": "2.1.1"
+    },
+    {
+      "direct_url": null,
+      "name": "cryptography",
+      "version": "50.0.2"
+    },
+    {
+      "direct_url": null,
+      "name": "jsonschema",
+      "version": "4.26.0"
+    },
+    {
+      "direct_url": null,
+      "name": "jsonschema-specifications",
+      "version": "2025.9.1"
+    },
+    {
+      "direct_url": null,
+      "name": "linkify-it-py",
+      "version": "2.2.0"
+    },
+    {
+      "direct_url": null,
+      "name": "markdown-it-py",
+      "version": "4.2.0"
+    },
+    {
+      "direct_url": null,
+      "name": "mdit-py-plugins",
+      "version": "0.6.1"
+    },
+    {
+      "direct_url": null,
+      "name": "mdurl",
+      "version": "0.1.2"
+    },
+    {
+      "direct_url": {
+        "subdirectory": "packages/plan-fields",
+        "url": "https://github.com/andrei-shtanakov/dispatcher",
+        "vcs_info": {
+          "commit_id": "f7f2cbcbbffc8d83870848317228c0a3487780ec",
+          "requested_revision": "f7f2cbcbbffc8d83870848317228c0a3487780ec",
+          "vcs": "git"
+        }
+      },
+      "name": "plan-fields",
+      "version": "0.11.0"
+    },
+    {
+      "direct_url": null,
+      "name": "platformdirs",
+      "version": "4.11.5"
+    },
+    {
+      "direct_url": null,
+      "name": "pycparser",
+      "version": "3.0"
+    },
+    {
+      "direct_url": null,
+      "name": "referencing",
+      "version": "0.37.0"
+    },
+    {
+      "direct_url": null,
+      "name": "rich",
+      "version": "15.0.0"
+    },
+    {
+      "direct_url": null,
+      "name": "rpds-py",
+      "version": "2026.6.3"
+    },
+    {
+      "direct_url": null,
+      "name": "shellingham",
+      "version": "1.5.4"
+    },
+    {
+      "direct_url": {
+        "url": "https://github.com/andrei-shtanakov/steward",
+        "vcs_info": {
+          "commit_id": "b77ee0ded6cd750ed092f7574969d43f043edc6e",
+          "requested_revision": "b77ee0ded6cd750ed092f7574969d43f043edc6e",
+          "vcs": "git"
+        }
+      },
+      "name": "steward",
+      "version": "0.1.0"
+    },
+    {
+      "direct_url": null,
+      "name": "textual",
+      "version": "8.2.8"
+    },
+    {
+      "direct_url": null,
+      "name": "typer",
+      "version": "0.27.2"
+    },
+    {
+      "direct_url": null,
+      "name": "typing_extensions",
+      "version": "4.16.0"
+    }
+  ],
+  "groups": [
+    "governance",
+    "conductor"
+  ],
+  "python": "3.12.13",
+  "root_dir": "/work/src/devtools"
+}

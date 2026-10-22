@@ -1,0 +1,22 @@
+{
+  "distributions": [
+    {
+      "direct_url": null,
+      "name": "PyYAML",
+      "version": "6.0.3"
+    },
+    {
+      "direct_url": {
+        "dir_info": {
+          "editable": false
+        },
+        "url": "file:///private/tmp/df7a-golden/src/discovery"
+      },
+      "name": "discovery",
+      "version": "0.1.0"
+    }
+  ],
+  "groups": [],
+  "python": "3.12.13",
+  "root_dir": "/private/tmp/df7a-golden/src/discovery"
+}

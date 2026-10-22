@@ -1,0 +1,57 @@
+{
+  "distributions": [
+    {
+      "direct_url": null,
+      "name": "PyYAML",
+      "version": "6.0.3"
+    },
+    {
+      "direct_url": null,
+      "name": "annotated-types",
+      "version": "0.8.0"
+    },
+    {
+      "direct_url": {
+        "dir_info": {
+          "editable": false
+        },
+        "url": "file:///work/src/disputatio"
+      },
+      "name": "disputatio",
+      "version": "0.1.0"
+    },
+    {
+      "direct_url": null,
+      "name": "markdown-it-py",
+      "version": "4.2.0"
+    },
+    {
+      "direct_url": null,
+      "name": "mdurl",
+      "version": "0.1.2"
+    },
+    {
+      "direct_url": null,
+      "name": "pydantic",
+      "version": "2.13.4"
+    },
+    {
+      "direct_url": null,
+      "name": "pydantic_core",
+      "version": "2.46.4"
+    },
+    {
+      "direct_url": null,
+      "name": "typing-inspection",
+      "version": "0.4.2"
+    },
+    {
+      "direct_url": null,
+      "name": "typing_extensions",
+      "version": "4.16.0"
+    }
+  ],
+  "groups": [],
+  "python": "3.12.13",
+  "root_dir": "/work/src/disputatio"
+}
