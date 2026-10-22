@@ -69,6 +69,7 @@ def make_release(
     os.symlink("python3.12", py / "bin" / "python3")
     os.symlink("python3.12", py / "bin" / "python")
     (py / "lib" / "python3.12" / "lib-dynload").mkdir(parents=True)
+    _write(py / "lib" / "python3.12" / "os.py", b"# stdlib landmark\n", 0o644)
     _write(py / "lib" / "libpython3.12.dylib", MACHO)
     os.symlink(f"{rel}/python/{KEY}", rel / "python" / ALIAS)
     for repo, names in (scripts if scripts is not None else {"r1": ("tool",)}).items():
@@ -619,6 +620,78 @@ def test_sitecustomize_refused_everywhere_on_sys_path(
     only(problems(rel), f"{SYS_PATH_DIRS[where]}/sitecustomize.py")
 
 
+def test_pyvenv_cfg_lone_cr_refused(tmp_path: Path, deps: dict[Path, LibDeps]) -> None:
+    """Review round 1, F1: a bare `\\r` is one line for getpath and us but two
+    for `site.py` (universal newlines), which keeps the last value: measured,
+    this turned the base site-packages on under `-I`."""
+    rel = make_release(tmp_path)
+    cfg = rel / "venv/r1/pyvenv.cfg"
+    cfg.write_bytes(
+        cfg.read_bytes() + b"prompt = r1\rinclude-system-site-packages = true\n"
+    )
+    only(problems(rel), "venv/r1: pyvenv.cfg", "одиночный")
+
+
+#: Each refused/absent `STARTUP_FILES` entry, at its place in the fixture.
+REFUSED_STARTUP = [e for e in boundary.STARTUP_FILES if e.rule in ("refused", "absent")]
+
+
+def _startup_path(rel: Path, entry: boundary.StartupFile) -> Path:
+    values = {"venv": "venv/r1", "py": f"python/{KEY}", "minor": "12"}
+    values["stdlib"] = f"python/{KEY}/lib/python3.12"
+    name = entry.name.format(**values).replace("*", "python")
+    return rel / entry.where.format(**values) / name
+
+
+@pytest.mark.parametrize(
+    "entry", REFUSED_STARTUP, ids=[f"{e.where}/{e.name}" for e in REFUSED_STARTUP]
+)
+@pytest.mark.parametrize("kind", ["file", "dir"])
+def test_every_refused_startup_file_is_refused(
+    tmp_path: Path, deps: dict[Path, LibDeps], entry: boundary.StartupFile, kind: str
+) -> None:
+    rel = make_release(tmp_path)
+    path = _startup_path(rel, entry)
+    if kind == "dir":
+        (path / "Setup.local").parent.mkdir(parents=True)
+        (path / "Setup.local").write_text("")
+    else:
+        _write(path, b"../../evil\n", 0o644)
+    only(problems(rel), str(path.relative_to(rel)), "запрещён")
+
+
+def test_startup_table_names_the_probed_build_markers() -> None:
+    names = {(e.where, e.name, e.rule) for e in boundary.STARTUP_FILES}
+    assert ("{py}/bin", "pybuilddir.txt", "refused") in names
+    assert ("{py}/bin", "modules", "refused") in names
+    assert ("{venv}/bin", "pyvenv.cfg", "refused") in names
+    assert ("{py}/lib", "python3{minor}.zip", "absent") in names
+
+
+@pytest.mark.parametrize("name", ["os.py", "lib-dynload"])
+def test_required_startup_landmark_missing_refused(
+    tmp_path: Path, deps: dict[Path, LibDeps], name: str
+) -> None:
+    rel = make_release(tmp_path)
+    path = rel / "python" / KEY / "lib/python3.12" / name
+    path.rmdir() if path.is_dir() else path.unlink()
+    found = problems(rel)
+    assert found and any(name in p for p in found), found
+
+
+def test_base_bin_allowlist(tmp_path: Path, deps: dict[Path, LibDeps]) -> None:
+    """Every measured name of uv's managed CPython 3.12 `bin` passes; any other
+    name is refused (the class of startup redirections, review round 1)."""
+    rel = make_release(tmp_path)
+    bin_dir = rel / "python" / KEY / "bin"
+    for name in sorted(boundary.base_bin_names("12")):
+        if not os.path.lexists(bin_dir / name):
+            _write(bin_dir / name, b"#!/bin/sh\n")
+    assert problems(rel) == []
+    _write(bin_dir / "python3.12-gdb.py", b"", 0o644)
+    only(problems(rel), "bin/python3.12-gdb.py", "не из раскладки")
+
+
 PTH_PLACES: Mapping[str, str] = {
     "venv-bin": "venv/r1/bin/python._pth",
     "python-bin": f"python/{KEY}/bin/python3.12._pth",
@@ -695,6 +768,8 @@ def test_expected_entrypoints_package_rules(
     "text",
     [
         '[project]\nname="a"\ndynamic=["scripts"]\n[build-system]\nrequires=[]\n',
+        '[project]\nname="a"\ndynamic=1\n[build-system]\nrequires=[]\n',
+        '[project]\nname="a"\ndynamic="scripts"\n[build-system]\nrequires=[]\n',
         '[project]\nname="a"\n[tool.uv]\npackage="yes"\n',
         (
             '[project]\nname="a"\n[project.scripts]\n"../x"="a:m"\n'
@@ -719,7 +794,7 @@ def test_expected_entrypoints_missing_file(tmp_path: Path) -> None:
 Run = tuple[str, tuple[str, ...], dict[str, object]]
 
 
-def sys_path(rel: Path, repo: str = "r1", *, isolated: bool = False) -> list[str]:
+def sys_path(rel: Path, repo: str = "r1") -> list[str]:
     """The measured `sys.path` (pre-flight §2.4), alias path for lib-dynload;
     `-P` and `-I` both keep the cwd (`""`) off it."""
     path = [
@@ -739,7 +814,7 @@ class FakeRunAs:
         self.runs: list[Run] = []
         self.find = RunResult(0, b"", b"", launched=True)
         self.answer: Callable[[str, bool], object] = lambda repo, isolated: [
-            sys_path(rel, repo, isolated=isolated),
+            sys_path(rel, repo),
             False,
             VERSION,
         ]
@@ -847,7 +922,7 @@ def test_launch_failure_is_problem_not_pass(runner: FakeRunAs, tmp_path: Path) -
 
 def test_runtime_sys_path_outside_refused(runner: FakeRunAs, tmp_path: Path) -> None:
     runner.answer = lambda repo, iso: [
-        [*sys_path(runner.rel, repo, isolated=iso), "/Users/x/site"],
+        [*sys_path(runner.rel, repo), "/Users/x/site"],
         False,
         VERSION,
     ]
@@ -871,7 +946,7 @@ def test_runtime_sys_path_outside_checked_dirs_refused(
     add_venv(runner.rel, "r2")
     (runner.rel / "python" / KEY / "lib/python3.12/site-packages").mkdir()
     runner.answer = lambda repo, iso: [
-        [*sys_path(runner.rel, repo, isolated=iso), f"{runner.rel}/{extra}"],
+        [*sys_path(runner.rel, repo), f"{runner.rel}/{extra}"],
         False,
         VERSION,
     ]
@@ -884,7 +959,7 @@ def test_runtime_sys_path_unresolvable_refused(
     runner: FakeRunAs, tmp_path: Path, item: str
 ) -> None:
     runner.answer = lambda repo, iso: [
-        [*sys_path(runner.rel, repo, isolated=iso), item.format(rel=runner.rel)],
+        [*sys_path(runner.rel, repo), item.format(rel=runner.rel)],
         False,
         VERSION,
     ]
@@ -912,9 +987,23 @@ def test_empty_sys_path_element_refused(
     only(run(runner, tmp_path).problems, "sys.path ''")
 
 
+@pytest.mark.parametrize("item", ["{rel}/venv/r1/x\x00y", "{rel}/venv/" + "a" * 300])
+def test_hostile_sys_path_element_is_a_problem(
+    runner: FakeRunAs, tmp_path: Path, item: str
+) -> None:
+    """Review round 1, F3: NUL or ENAMETOOLONG is a line, never an exception."""
+    runner.answer = lambda repo, iso: [
+        [*sys_path(runner.rel, repo), item.format(rel=runner.rel)],
+        False,
+        VERSION,
+    ]
+    found = run(runner, tmp_path).problems
+    assert len(found) == 2 and all("sys.path" in p for p in found), found
+
+
 def test_enable_user_site_refused(runner: FakeRunAs, tmp_path: Path) -> None:
     runner.answer = lambda repo, iso: [
-        sys_path(runner.rel, repo, isolated=iso),
+        sys_path(runner.rel, repo),
         not iso,
         VERSION,
     ]

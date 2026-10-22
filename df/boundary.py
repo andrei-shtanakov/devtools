@@ -56,7 +56,6 @@ PYVENV_CAP = 1 << 16
 PYPROJECT_CAP = 1 << 20
 _FIND = "/usr/bin/find"
 _SITECUSTOMIZE = "sitecustomize"
-_PTH = "._pth"
 _PYVENV = "pyvenv.cfg"
 _KEY = re.compile(r"cpython-3\.(\d+)\.\d+-[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*")
 _STDLIB = re.compile(r"python3\.\d+")
@@ -66,6 +65,118 @@ _MACHO_TOKENS = ("@loader_path", "@executable_path")
 _ELF_TOKENS = ("$ORIGIN", "${ORIGIN}")
 #: Line breaks of `str.splitlines` that are not control characters.
 _LINE_BREAKS = frozenset("\u2028\u2029")
+#: Rule of a startup file: must exist, must not exist (`absent`: CPython lists
+#: it, (ж) accepts it only absent), refused, or checked by a named rule.
+StartupRule = Literal["required", "absent", "refused", "rule"]
+
+
+@dataclass(frozen=True)
+class StartupFile:
+    """A path CPython 3.12 reads at start that changes `sys.path` or runs code.
+
+    `where` is a directory template (`{venv}` = `venv/<r>`, `{py}` =
+    `python/<key>`, `{stdlib}` = `{py}/lib/python3.X`, `{minor}` = X);
+    `name` is compared by `casefold` (`*<suffix>` — any name with the
+    suffix; `required` — exact case); `reader` says who reads it and when.
+    """
+
+    where: str
+    name: str
+    reader: str
+    rule: StartupRule
+
+
+#: Every startup-read path we know of (getpath and site.py of CPython 3.12,
+#: probes on uv 0.11.23's managed CPython 3.12.13, 22.10). Beyond these, the
+#: interpreter's own files (`site.py`, the stdlib) are not verified (§3.5,
+#: origin of the interpreter): (ж) cannot prove there is no startup code there.
+STARTUP_FILES: tuple[StartupFile, ...] = (
+    StartupFile(
+        "{venv}",
+        "pyvenv.cfg",
+        "getpath (первый `home`) и site.py (последние значения); правило (б)",
+        "required",
+    ),
+    StartupFile(
+        "{venv}/bin",
+        "pyvenv.cfg",
+        "site.py и getpath ищут его сначала в каталоге исполняемого файла",
+        "refused",
+    ),
+    StartupFile(
+        "{py}", "pyvenv.cfg", "getpath/site.py при запуске базового Python", "refused"
+    ),
+    StartupFile(
+        "{venv}/bin",
+        "*._pth",
+        "getpath: `<исполняемый>._pth` заменяет sys.path",
+        "refused",
+    ),
+    StartupFile(
+        "{py}/bin", "*._pth", "getpath: `._pth` базового исполняемого файла", "refused"
+    ),
+    StartupFile("{py}/lib", "*._pth", "getpath: `._pth` рядом с libpython", "refused"),
+    StartupFile(
+        "{py}/lib",
+        "python3{minor}.zip",
+        "getpath: ZIP_LANDMARK, всегда в sys.path",
+        "absent",
+    ),
+    StartupFile(
+        "{py}/bin",
+        "pybuilddir.txt",
+        "getpath: каталог сборки рядом с `home` подменяет lib-dynload (проба 22.10)",
+        "refused",
+    ),
+    StartupFile(
+        "{py}/bin",
+        "modules",
+        "getpath: `Modules/Setup.local` у `home` — раскладка дерева сборки (проба)",
+        "refused",
+    ),
+    StartupFile(
+        "{py}/bin",
+        "lib",
+        "getpath: поиск prefix по `lib/python3.X/os.py` начинается с `home`",
+        "refused",
+    ),
+    StartupFile(
+        "{stdlib}", "os.py", "getpath: STDLIB_LANDMARK, задаёт prefix", "required"
+    ),
+    StartupFile(
+        "{stdlib}",
+        "lib-dynload",
+        "getpath: PLATSTDLIB_LANDMARK, в sys.path",
+        "required",
+    ),
+    StartupFile(
+        "{venv}/lib/python3.{minor}/site-packages",
+        "*.pth",
+        "site.py исполняет строки import; правило (е)",
+        "rule",
+    ),
+    StartupFile(
+        "каталоги sys.path",
+        "sitecustomize",
+        "site.py импортирует при старте; правило (ё)",
+        "rule",
+    ),
+)
+
+
+def base_bin_names(minor: str) -> frozenset[str]:
+    """Names in `python/<key>/bin` of uv 0.11.23's managed CPython 3.X
+    (measured 22.10); anything else there is refused."""
+    v = f"3.{minor}"
+    return frozenset(
+        {
+            *("2to3", f"2to3-{v}", "idle3", f"idle{v}", "pip", "pip3", f"pip{v}"),
+            *("pydoc3", f"pydoc{v}", "python", "python3", "python3-config"),
+            *(f"python{v}", f"python{v}-config"),
+        }
+    )
+
+
 #: Flags of the two (ж) runs: `-P` keeps the cwd (`build_home`, writable by
 #: `df-build`) off `sys.path`, so no module there can forge the probe's answer.
 _PROBE_FLAGS: tuple[tuple[str, ...], ...] = (("-P",), ("-I",))
@@ -88,7 +199,10 @@ def expected_entrypoints(ref_dir: Path) -> frozenset[str]:
         raise ValueError(f"tool.uv.package не bool: {package!r}")
     if not (package if package is not None else "build-system" in data):
         return frozenset()
-    if "scripts" in project.get("dynamic", []):
+    dynamic = project.get("dynamic", [])
+    if not isinstance(dynamic, list) or not all(isinstance(d, str) for d in dynamic):
+        raise ValueError(f"project.dynamic не список строк: {dynamic!r}")
+    if "scripts" in dynamic:
         raise ValueError("project.scripts объявлен dynamic: состав не задан данными")
     scripts = _table(project, "scripts")
     for name, value in scripts.items():
@@ -223,17 +337,22 @@ def _pyvenv_cfg(venv: Path) -> dict[str, list[str]]:
     if odd:
         raise TreeError(f"{_PYVENV}: недопустимые символы {odd!r}")
     values: dict[str, list[str]] = {}
-    for line in text.split("\n"):
-        key, sep, value = line.removesuffix("\r").partition("=")
+    for raw in text.split("\n"):
+        line = raw.removesuffix("\r")
+        if "\r" in line:
+            raise TreeError(f"{_PYVENV}: одиночный \\r — site.py видит лишнюю строку")
+        key, sep, value = line.partition("=")
         if sep:
             values.setdefault(key.strip().lower(), []).append(value.strip())
     return values
 
 
 def _is_odd_char(char: str) -> bool:
-    """A character on which `str.splitlines` and CPython's own line split of
-    `pyvenv.cfg` (newlines only) could disagree, or any control character
-    but tab, CR and LF: the file is refused rather than read two ways."""
+    """A character on which `str.splitlines` and CPython's readers of
+    `pyvenv.cfg` could disagree, or any control character but tab, CR and
+    LF: the file is refused rather than read two ways. getpath splits on
+    `\n` (trailing `\r` stripped), `site.py` on universal newlines; a `\r`
+    outside `\r\n` is refused by the caller, so both see the same lines."""
     return char not in "\t\r\n" and (
         unicodedata.category(char) == "Cc" or char in _LINE_BREAKS
     )
@@ -362,31 +481,81 @@ def _env_problems(release_dir: Path, env: EnvPaths, want: frozenset[str]) -> lis
         f"venv/{env.repo}", lambda: pth_problems(release_dir / "venv" / env.repo)
     )
     problems += _guard(f"{env.site}", lambda: _sitecustomize(release_dir, env.site))
-    problems += _guard(f"{env.bin}", lambda: _pth_files(release_dir, env.bin))
-    return problems
+    return problems + _startup_problems(release_dir, env, per_env=True)
 
 
 def _python_tree_problems(release_dir: Path, env: EnvPaths) -> list[str]:
-    """(ё) for the managed Python: its `sys.path` dirs and `._pth` places."""
+    """(ё) for the managed Python: `sitecustomize` in its `sys.path` dirs, the
+    shared `STARTUP_FILES` and the allowlist of its `bin`."""
     problems: list[str] = []
     for directory in (env.stdlib, env.dynload):
         problems += _guard(
             str(directory), lambda d=directory: _sitecustomize(release_dir, d)
         )
-    for directory in (env.py_bin, env.lib):
+    problems += _startup_problems(release_dir, env, per_env=False)
+    return problems + _guard(str(env.py_bin), lambda: _base_bin(release_dir, env))
+
+
+def _startup_problems(release_dir: Path, env: EnvPaths, *, per_env: bool) -> list[str]:
+    """`STARTUP_FILES` of one environment (`per_env`) or of the shared Python."""
+    values = {
+        "venv": f"venv/{env.repo}",
+        "py": str(env.python),
+        "stdlib": str(env.stdlib),
+        "minor": env.minor,
+    }
+    problems: list[str] = []
+    for entry in STARTUP_FILES:
+        if entry.rule == "rule" or ("{venv}" in entry.where) != per_env:
+            continue
+        where = PurePosixPath(entry.where.format(**values))
+        name = entry.name.format(**values)
         problems += _guard(
-            str(directory), lambda d=directory: _pth_files(release_dir, d)
+            str(where), lambda e=entry, w=where, n=name: _startup(release_dir, e, w, n)
         )
-    problems += _guard(
-        str(env.lib),
-        lambda: [
-            f"{env.lib / p.name}: {p.name} читается из sys.path"
-            for p in select_names(
-                release_dir / env.lib, exact=env.zip_name, strict=False
-            )
-        ],
-    )
     return problems
+
+
+def _startup(
+    release_dir: Path, entry: StartupFile, where: PurePosixPath, name: str
+) -> list[str]:
+    if entry.rule == "required":
+        if select_names(release_dir / where, exact=name):
+            return []
+        return [f"{where / name}: нет ({entry.reader})"]
+    return [
+        f"{where / p.name}: запрещён ({name}) — {entry.reader}"
+        for p in _startup_matches(release_dir / where, name)
+    ]
+
+
+def _startup_matches(directory: Path, name: str) -> list[Path]:
+    if name.startswith("*"):
+        return select_names(directory, suffix=name[1:], strict=False)
+    return select_names(directory, exact=name, strict=False)
+
+
+def _base_bin(release_dir: Path, env: EnvPaths) -> list[str]:
+    """F2 of review round 1: `python/<key>/bin` holds only the measured names;
+    a name a `STARTUP_FILES` entry already refuses is not reported twice."""
+    allowed = base_bin_names(env.minor)
+    refused = {
+        e.name.format(minor=env.minor)
+        for e in STARTUP_FILES
+        if e.where == "{py}/bin" and e.rule != "required"
+    }
+    return [
+        f"{env.py_bin / p.name}: не из раскладки управляемого Python uv"
+        for p in select_names(release_dir / env.py_bin)
+        if p.name not in allowed and not any(_startup_hit(p.name, r) for r in refused)
+    ]
+
+
+def _startup_hit(name: str, pattern: str) -> bool:
+    key = name.casefold()
+    if pattern.startswith("*"):
+        return key.endswith(pattern[1:])
+    return key == pattern
 
 
 def _sitecustomize(release_dir: Path, directory: PurePosixPath) -> list[str]:
@@ -400,17 +569,9 @@ def _sitecustomize(release_dir: Path, directory: PurePosixPath) -> list[str]:
     ]
 
 
-def _pth_files(release_dir: Path, directory: PurePosixPath) -> list[str]:
-    found = select_names(release_dir / directory, suffix=_PTH, strict=False)
-    return [f"{directory / p.name}: ._pth заменяет вычисление sys.path" for p in found]
-
-
 def _bin_problems(release_dir: Path, env: EnvPaths) -> list[str]:
     """(а) and F2/F4: every name of `venv/<r>/bin` that can run or configure."""
-    problems = [
-        f"{env.bin / p.name}: второй pyvenv.cfg читается первым"
-        for p in select_names(release_dir / env.bin, exact=_PYVENV, strict=False)
-    ]
+    problems: list[str] = []
     links: dict[str, PurePosixPath] = {}
     for name in sorted(os.listdir(release_dir / env.bin)):
         rel = env.bin / name
@@ -638,17 +799,20 @@ def _strip(problems: list[str]) -> list[str]:
 
 
 def _regular_files(tree: Path, prefix: PurePosixPath) -> Iterator[PurePosixPath]:
-    """Every regular file, links never followed."""
-    with os.scandir(tree / prefix) as entries:
-        listing = sorted(entries, key=lambda entry: entry.name)
-    for entry in listing:
-        rel = prefix / entry.name
-        if entry.is_symlink():
-            continue
-        if entry.is_dir(follow_symlinks=False):
-            yield from _regular_files(tree, rel)
-        elif entry.is_file(follow_symlinks=False):
-            yield rel
+    """Every regular file, links never followed; iterative (no depth limit)."""
+    pending = [prefix]
+    while pending:
+        directory = pending.pop()
+        with os.scandir(tree / directory) as entries:
+            listing = sorted(entries, key=lambda entry: entry.name)
+        for entry in listing:
+            rel = directory / entry.name
+            if entry.is_symlink():
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                pending.append(rel)
+            elif entry.is_file(follow_symlinks=False):
+                yield rel
 
 
 # ---------- transfer check ----------
@@ -768,7 +932,7 @@ class _Runner:
                 resolved = resolve_in_tree(
                     self.release_dir, str(self.release_dir), item
                 )
-            except TreeError as exc:
+            except _ERRORS as exc:  # a hostile element (NUL, too long) included
                 if not self.absent_zip(env, item):
                     problems.append(f"sys.path {item!r}: {exc}")
                 continue
@@ -787,11 +951,11 @@ class _Runner:
             parent = resolve_in_tree(
                 self.release_dir, str(self.release_dir), name.parent
             )
-        except TreeError:
+            return parent == env.lib and not os.path.lexists(
+                self.release_dir / env.lib / env.zip_name
+            )
+        except _ERRORS:
             return False
-        return parent == env.lib and not os.path.lexists(
-            self.release_dir / env.lib / env.zip_name
-        )
 
     def help(self, script: PurePosixPath, problems: list[str]) -> None:
         """Rule (з): `--help` exits 0 within the deadline; stdout ignored."""
