@@ -1594,7 +1594,8 @@ def test_build_refused_before_any_command_if_user_unverified(): ...  # runner н
     (`implementation(call, target)`; неизвестный текст — `KeyError`, сверка при импорте).
     `LATER_LEAVES: Mapping[str, str]` — лист → задача-владелец: `distribution_problems` —
     7a (как построено: перешёл в `acceptance_calls`, R36/F2); `static_problems`,
-    `transfer_check` — 8; `install_admin_python`, `install_admin`,
+    `transfer_check` — 8 (как построено: перешли в `acceptance_calls`, R40/F6);
+    `install_admin_python`, `install_admin`,
     `link_command` — 8a; `activate`, `write_release_json`, `register` и `write_atomic`
     без обёртки — 9. Ключи `acceptance_calls` и `LATER_LEAVES` вместе — ровно
     `route_leaves()` и `WRAPS`. `python_key` — тот же, что вызывающий передаёт
@@ -1852,7 +1853,7 @@ def test_foreign_pth_refused_virtualenv_pth_allowed(tmp_path): ...
 
 Как построено (22.10): предполётная проверка `task-7a-preflight.md`, решения R36–R39
 (R36 — находки F1 в редакции дополнения A2/A4, F2–F8, F10, N1–N5, A, B; R37 — F9 к
-Task 14; R38 — три части 7a-golden / 7a-impl / 7a-paper; R39 — Linux-эталон в локальном
+Task 14, закрыт решением владельца 22.10 — см. Task 14; R38 — три части 7a-golden / 7a-impl / 7a-paper; R39 — Linux-эталон в локальном
 контейнере podman), решения владельца 22.10 о `UV_NO_CONFIG` и о раскладке окружения
 (спека §3.2, §3.4, §3.5).
 
@@ -2029,109 +2030,210 @@ def test_distribution_problems_leaf_lists_every_repo(fl): ...
 
 ### Task 8: Граница цепочки исполнения, инвентарь entrypoints и проверка переноса
 
+Как построено (22.10): предполётная проверка `task-8-preflight.md`, решение R40 (все
+строки Ruling F1–F20, N1–N5 приняты как обязательные; где Ruling меняет текст брифа —
+действует Ruling). Замеры — uv 0.11.23, macOS arm64, реалистичный релиз `core` (§2
+предполётной проверки); Linux не замерялся — замеры отданы Task 13.
+
 **Files:**
 - Create: `df/boundary.py`
-- Test: `tests/df/test_boundary.py`
+- Modify: `df/digest.py` (`resolve_in_tree`, F3); `df/platform.py` (публичные имена
+  `MACHO_MAGIC`, `ELF_MAGIC`, `dependency_problems`, `is_system_path` — только
+  переименования, F9/F10); `df/inputs.py` (публичные имена `select_names`, `read_capped` —
+  только переименования); `df/routes.py` (листья `static_problems` и `transfer_check` в
+  `acceptance_calls`, `RouteContext.python_declared`, F6); `df/install_table.py` (текст
+  `CALLS["transfer_check"]`, перерисован в спеке, F8)
+- Test: `tests/df/test_boundary.py`, `tests/df/test_digest.py` (`resolve_in_tree`),
+  `tests/df/test_routes.py` (листовые тесты и двойник)
 
 **Interfaces:**
-- Consumes: `linked_libraries`, `SYSTEM_LIB_DIRS`, `run_as`, `RunResult`,
-  `NO_NETWORK_PROFILE` (Task 5); `check_links` (Task 3);
-  `pth_problems` (Task 7, `df/inputs.py`).
+- Consumes: `linked_libraries`, `LibDeps`, `SYSTEM_LIB_DIRS`, `run_as`, `RunResult`,
+  `BUILD_USER` (Task 5; `NO_NETWORK_PROFILE` применяется внутри `run_as(..., network=False)`,
+  N4); `check_links`, `resolve_in_tree`, `open_regular`, `canonical_root`, `check_name`
+  (Task 3, `df/digest.py`); `pth_problems`, `select_names`, `read_capped` (Task 7,
+  `df/inputs.py`); `PYTHON_TRIPLES` (Task 6).
 - Produces:
-  - `expected_entrypoints(ref_dir: Path) -> frozenset[str]` — §3.4. Читает
-    `ref_dir/pyproject.toml` из доверенного чекаута как данные. Член считается пакетом,
-    если `tool.uv.package` равен `true` либо он не задан и есть `[build-system]`. Для
-    пакета — ключи `[project.scripts]`, иначе пустое множество.
-  - `BinClass = Literal["native", "script", "other"]`; `classify_bin(path: Path) -> BinClass`
-    — первые байты: магия Mach-O (`feedfacf`, `cafebabe`) или ELF (`\x7fELF`) → `native`;
-    `#!` → `script`; иное → `other`.
-  - `static_problems(release_dir: Path, platform: PlatformName, expected: Mapping[str,
-    frozenset[str]]) -> list[str]` — только данные, без исполнения; используется приёмом
-    **и** `doctor`. Эффекты: нет. Проверки:
-    - **(а)** каждый исполняемый файл в `venv/*/bin` имеет класс `native` или `script`;
-      `other` — отказ. У `script` интерпретатор — `#!/bin/sh` с трамплином uv
-      (`exec "$(dirname …)"/'python…'`) либо абсолютный путь внутри `release_dir`.
-      `#!/usr/bin/env` и иное — отказ. У `native` — проверка (в);
-    - **(б)** `pyvenv.cfg`: `home` внутри `release_dir`, `include-system-site-packages = false`;
-    - **(в)** каждый Mach-O/ELF внутри `release_dir`: зависимость разрешается внутрь релиза
-      (`@rpath`/`@loader_path`/`@executable_path`/`$ORIGIN` через свои `rpaths`, которые
-      сами внутри релиза) или в `SYSTEM_LIB_DIRS`; иное — отказ с путём файла;
-    - **(г)** `check_links(release_dir, PurePosixPath(release_dir))` пуст;
-    - **(д)** для каждого репо `r` каждое имя из `expected[r]` есть в `venv/<r>/bin`;
-      отсутствие — отказ с именем;
-    - **(е)** `pth_problems` каждого окружения пуст.
-    - **(ё)** решение владельца 22.10 (спека §3.4 «Раскладка окружения»): в поддерживаемой
-      раскладке окружения запрещены:
-      - автоматически импортируемый `sitecustomize` (`.py`/`.pyc`/расширение/пакет; имя
-        сравнивается по `casefold`, как у `_select` Task 7) в каждом каталоге `sys.path`
-        интерпретатора релиза — `venv/*/lib/python*/site-packages` и дерево управляемого
-        Python `release_dir/python/<ключ>` (`lib/python3.X`, `lib-dynload`); по пробам 7-B
-        CPython исполняет его при старте;
-      - файлы `*._pth` там, где их читает getpath CPython: рядом с `venv/*/bin/python*`, с
-        базовым исполняемым файлом (`python/<ключ>/bin`) и с libpython
-        (`python/<ключ>/lib`) — они заменяют вычисление `sys.path`.
+  - `resolve_in_tree(tree, logical_root, path) -> PurePosixPath` (`df/digest.py`) — любой
+    путь (абсолютный под логическим корнем или относительный к дереву) разрешается
+    покомпонентно тем же лексическим обходом, что `resolve_link_in_tree`; выход, висячий
+    компонент, не-каталог в середине, больше 40 переходов — `TreeError`.
+  - `expected_entrypoints(ref_dir: Path) -> frozenset[str]` — §3.4. `pyproject.toml` с
+    потолком, `tomllib`. Пакет: `tool.uv.package` равен `true`, либо не задан и есть
+    `[build-system]`; не-bool `package` — `ValueError`. Для пакета — ключи
+    `[project.scripts]` (`"scripts"` в `project.dynamic` — `ValueError`; имя, негодное для
+    файла, — `TreeError`); `[project.gui-scripts]` не входит. Иначе — пустое множество.
+  - `BinClass`, `classify_bin(path)` — первые 4 байта: любая из 8 магий Mach-O
+    (`MACHO_MAGIC`) или `ELF_MAGIC` → `native`; `#!` → `script`; иное → `other`. Чтение
+    через `open_regular`: ссылка или не обычный файл — `TreeError` (F10).
+  - `EnvPaths`, `env_paths(release_dir, repo)` — правило (б) и разрешённые каталоги
+    окружения (F3, F4, F19): `venv/<r>/pyvenv.cfg` обязателен, разбирается как у CPython
+    (`key.strip().lower()`, `value.strip()`); ровно один `home` и один
+    `include-system-site-packages` (getpath берёт первый `home`, `site.py` — последний),
+    значение `.lower() == "false"`; `home` канонический, под релизом и разрешается внутри
+    дерева в `python/<ключ>/bin`, `<ключ>` = `cpython-3.X.Y-<тройка>` с ровно одним
+    `lib/python3.X`; `venv/<r>/lib/python3.X/site-packages` — настоящие каталоги. Отказ —
+    `TreeError` с префиксом `venv/<r>: `.
+  - `script_heads(release_dir, repo) -> tuple[bytes, bytes]` — две точные формы uv (F1):
+    `#!P\n` и `#!/bin/sh\n'''exec' 'P' "$0" "$@"\n' '''\n`, `P` = `release_dir/venv/<r>/bin/python`.
+  - `static_problems(release_dir, platform, expected) -> list[str]` — только данные,
+    используется приёмом **и** `doctor`. Эффекты: нет (`otool`/`readelf` — от root через
+    `run_command`, не `run_as`). Никогда не бросает для дерева (F11): каждый отказ —
+    строка `"<rel>: <причина>"`. Окружения — ровно ключи `expected`; лишнее в `venv/` —
+    проблема. Проверки:
+    - **(а)** каждый исполняемый обычный файл в `venv/<r>/bin`: `native` (проверяет (в)) или
+      `script` с одной из двух голов `script_heads` побайтно (F1, F2: интерпретатор —
+      ровно `bin/python` своего окружения); иное — отказ. Ссылки в `bin` — только `python`,
+      `python3`, `python3.X`, каждая разрешается внутри дерева в `python/<ключ>/bin/python3.X`
+      (обычный `native`); нет `python` — отказ; иная ссылка — отказ (F2);
+    - **(б)** `env_paths` для каждого окружения; любое имя `pyvenv.cfg` (по `casefold`) в
+      `venv/<r>/bin` — отказ: `site.py` читает его первым (F4); все окружения называют один
+      и тот же `python/<ключ>`, ключ — с тройкой платформы (F19);
+    - **(в)** каждый обычный Mach-O/ELF релиза (F9): `LC_DYLD_ENVIRONMENT` — отказ;
+      загрузчик вне `SYSTEM_LIB_DIRS` — отказ; каждый путь поиска после подстановки
+      `@loader_path` / `$ORIGIN` / `${ORIGIN}` своим каталогом — внутри дерева (каталог) или
+      под `SYSTEM_LIB_DIRS`; пустой, иная подстановка, относительный, иной — отказ;
+      `@executable_path` — только у файлов в `python/<ключ>/bin`; зависимость `@rpath/x`
+      ищется по своим путям поиска; `@loader_path/x`, `$ORIGIN/x`, абсолютная внутри
+      релиза — существующий обычный файл внутри дерева; ELF-soname — свои пути, затем
+      `dependency_problems` (`LOADER_DIRS`); иное — `dependency_problems`;
+    - **(г)** `check_links(release_dir, release_dir)` пуст;
+    - **(д)** каждое имя `expected[r]` — `select_names(bin, exact=имя)` строго (совпадение
+      только по регистру — отказ, F12), обычный файл с битом исполнения, класс `script`;
+    - **(е)** `pth_problems` каждого окружения пуст (`TreeError` обхода — строка);
+    - **(ё)** решение владельца 22.10: `sitecustomize` (имя `casefold` равно
+      `sitecustomize` или начинается с `sitecustomize.`; только верхний уровень каталога) в
+      `site-packages` окружения, `python/<ключ>/lib/python3.X` и его `lib-dynload`; любой
+      `*._pth` (`casefold`) в `venv/<r>/bin`, `python/<ключ>/bin`, `python/<ключ>/lib`;
+      существующий `python/<ключ>/lib/python3XY.zip` (F5).
 
-      Каждый найденный — проблема с путём. Проверка (б) `pyvenv.cfg` **обязательна**: нет файла,
-      нет ключа `home` или `include-system-site-packages` — проблема, а не пропуск.
-      Названное ограничение сравнения состава (Task 7a, `DECLARED_LIMIT`): код без
-      метаданных распределения `installed_distributions` не видит; (а)–(ё) — статические
-      проверки раскладки, они его не закрывают, и `RECORD` в v1 не сверяется.
+    Названное ограничение (Task 7a, `DECLARED_LIMIT`): код без метаданных распределения
+    `installed_distributions` не видит; (а)–(ё) его не закрывают, `RECORD` в v1 не сверяется.
   - `TransferResult(problems: list[str], python_declared: dict[str, str])`.
-  - `transfer_check(release_dir: Path, layout: Layout, *, user: str, expected:
-    Mapping[str, frozenset[str]]) -> TransferResult` — §3.3 п. 5; вид «запуск от `df-build`»
-    (`CALLS`, rev 8 r9): ничего не удаляет. Эффекты: `run_as(df-build)+`. Сначала от `df-build` `["/usr/bin/find",
-    build_home, "-mindepth", "1", "-maxdepth", "1", "(", "-name", "tmp", "-o", "-name",
-    "cache", ")", "-print"]`: непустой вывод — проблема «остатки build_home» (их удаляют шаги
-    `cleanup_build_home` маршрута `verify` до проверки; остатки сделали бы её
-    недоказательной), код ≠ 0 — проблема инфраструктуры. Затем исполнение — **только**
-    через `run_as(user, network=False)` с окружением `HOME = layout.build_home`,
-    `PATH = /usr/bin:/bin`, `LANG = C.UTF-8`, `cwd = layout.build_home`:
-    - **(ж)** для каждого `venv/<r>/bin/python`, без `-I` и с `-I`:
-      `-c "import json,site,sys;print(json.dumps([sys.path, site.ENABLE_USER_SITE,
-      sys.version]))"`. Каждый непустой элемент `sys.path` лежит внутри `release_dir` и
-      входит в каталоги, которые проверила (ё) (иначе — проблема: запрет `sitecustomize`
-      покрывает весь `sys.path`), `ENABLE_USER_SITE` ложен. `sys.version` записывается в `python_declared[r]`;
-    - **(з)** каждый скрипт из `expected[r]` запускается с `--help`, независимо от вида
-      `shebang`: код 0 за 60 с;
-    - любой `RunResult.launched=False` — проблема инфраструктуры, а не PASS.
+  - `transfer_check(release_dir, layout, *, user, expected) -> TransferResult` — §3.3 п. 5;
+    вид `builder` (`CALLS`, F8): ничего не удаляет. Эффекты: `run_as(df-build)+`. Все
+    запуски — `run_as(user, network=False, timeout=60)` с окружением ровно `HOME =
+    layout.build_home`, `PATH = /usr/bin:/bin`, `LANG = C.UTF-8` и `cwd = build_home`
+    (F16). Одно правило исхода: `launched=False` — «инфраструктура: …», `timed_out`,
+    `stdout_truncated`, код ≠ 0 — проблема с хвостом stderr. Сначала `find build_home
+    -mindepth 1 -maxdepth 1 ( -name tmp -o -name cache ) -print`: непустой вывод —
+    «остатки build_home» и ни одного запуска дальше; любой сбой `find` — проблема
+    инфраструктуры. Затем по каждому репо `expected`:
+    - **(ж)** `venv/<r>/bin/python` без `-I` и с `-I`, `-c` печатает
+      `[sys.path, site.ENABLE_USER_SITE, sys.version]`; ответ — ровно такой список, иначе
+      проблема. Каждый непустой элемент `sys.path` абсолютный и разрешается внутри дерева в
+      **свои** каталоги (ё) этого репо (`site-packages` своего окружения, stdlib,
+      `lib-dynload`; F13); единственное исключение — отсутствующий `python3XY.zip` в
+      `python/<ключ>/lib` (F5). `ENABLE_USER_SITE` — ровно `False`. `sys.version` обоих
+      запусков совпадает и записывается в `python_declared[r]`;
+    - **(з)** каждый скрипт `expected[r]` запускается с `--help`, независимо от вида
+      `shebang`: код 0 за 60 с; stdout не читается.
+  - `df/routes.py` (F6): листья `static_problems` и `transfer_check` в `acceptance_calls`,
+    ключи сняты с `LATER_LEAVES`. Ожидаемый инвентарь — `expected_entrypoints(refs[r])` по
+    каждому репо профиля (нет чекаута или нечитаемый `pyproject.toml` — проблема).
+    `static_problems` — проблемы одним `StepFailed("verify", …)`; `transfer_check` — от
+    `BUILD_USER`, проблемы одним `StepFailed("verify", …)`, успех —
+    `RouteContext.python_declared = {repo: sys.version}` (не забирается `_take`, как
+    `installed`; его читает Task 9).
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests** (как построено)
 
 ```python
+# tests/df/test_boundary.py — синтетическая раскладка по замеру uv 0.11.23: python/<ключ>,
+# ссылка uv на минорную версию, venv через неё, скрипты с точными головами;
+# linked_libraries и run_as — заглушки
+def test_measured_layout_passes(tmp_path, deps): ...
+def test_classify_bin(tmp_path): ...                         # все 8 магий Mach-O, ELF, #!, иное
 @pytest.mark.parametrize("shebang", ["#!/usr/bin/env python3", "#!/usr/local/bin/python3"])
-def test_foreign_shebang_refused(tmp_path, shebang): ...
-def test_uv_trampoline_accepted(tmp_path): ...       # точные байты из замера uv 0.11.23
-def test_native_without_shebang_accepted(tmp_path): ...   # ELF/Mach-O заголовок, linked_libraries-заглушка
-def test_other_executable_refused(tmp_path): ...
-def test_missing_expected_entrypoint_refused(tmp_path): ...
-def test_expected_entrypoints_package_rules(tmp_path): ...   # package=false → ∅; без build-system → ∅; scripts → имена
-def test_direct_shebang_script_is_run(monkeypatch, tmp_path): ...  # прямой #!<release>/…/python, --help код 1 → проблема
-def test_pyvenv_home_outside_refused(tmp_path): ...
+def test_foreign_shebang_refused(tmp_path, deps, shebang): ...
+def test_uv_trampoline_accepted(tmp_path, deps): ...         # точные байты замера (F1)
+def test_other_script_forms_refused(tmp_path, deps, head): ...  # dirname/realpath PBS,
+    # /usr/bin/python3 в трамплине, bin/python3, python другого окружения,
+    # <release>/src/x/run.sh (F2), лишний аргумент
+def test_native_without_shebang_accepted(tmp_path, deps): ...
+def test_other_executable_refused(tmp_path, deps): ...
+@pytest.mark.parametrize("name", ["python", "python3", "python3.12"])
+def test_foreign_interpreter_link_refused(tmp_path, deps, name): ...   # F2
+def test_stray_link_in_bin_refused(tmp_path, deps): ...
+def test_missing_python_link_refused(tmp_path, deps): ...
+def test_pyvenv_home_outside_refused(tmp_path, deps): ...
+def test_pyvenv_home_must_be_canonical_python_bin(tmp_path, deps, home): ...  # ., //, lib, ..
 @pytest.mark.parametrize("defect", ["missing", "no-home", "no-include-system-site-packages"])
-def test_pyvenv_cfg_is_mandatory(tmp_path, defect): ...   # (б) решение владельца 22.10
+def test_pyvenv_cfg_is_mandatory(tmp_path, deps, defect): ...   # (б) решение владельца 22.10
+def test_pyvenv_system_site_value(tmp_path, deps, line, ok): ...  # False/false — да; true/yes — нет
+def test_pyvenv_duplicate_key_refused(tmp_path, deps, key): ...
+def test_pyvenv_cfg_in_bin_refused(tmp_path, deps, name): ...   # F4, и по casefold
+def test_environments_on_different_pythons_refused(tmp_path, deps): ...   # F19
+def test_python_of_another_platform_refused(tmp_path, deps): ...
+def test_native_dep_outside_refused(tmp_path, deps): ...     # /opt/homebrew/lib/x.dylib
+def test_rpath_origin_inside_accepted(tmp_path, deps): ...   # ELF $ORIGIN, soname в .libs
+def test_macho_rpath_and_loader_path_accepted(tmp_path, deps): ...
+def test_executable_path_in_python_bin_accepted(tmp_path, deps): ...
+def test_executable_path_outside_python_bin_refused(tmp_path, deps, libdeps): ...  # F9
+def test_native_rules_refuse(tmp_path, deps, libdeps, needle): ...  # LC_DYLD_ENVIRONMENT,
+    # загрузчик вне системы, путь поиска вне релиза, пустой, $LIB, относительный,
+    # @rpath не найден, выход через @loader_path, голое имя на macOS
+def test_rpath_inside_release_by_absolute_path_accepted(tmp_path, deps): ...
+def test_inspection_failure_is_a_problem(monkeypatch, tmp_path): ...   # F11
+def test_escaping_link_refused(tmp_path, deps): ...          # (г)
+def test_missing_expected_entrypoint_refused(tmp_path, deps): ...
+def test_entrypoint_in_wrong_case_refused(tmp_path, deps): ...   # F12
+def test_entrypoint_must_be_an_executable_script(tmp_path, deps): ...
+def test_stray_pth_refused(tmp_path, deps): ...              # (е)
+def test_untrusted_pth_walk_is_a_problem(tmp_path, deps): ...   # TreeError → строка
+def test_unexpected_environment_refused(tmp_path, deps): ...
+def test_missing_environment_refused(tmp_path, deps): ...
 @pytest.mark.parametrize("name", ["sitecustomize.py", "sitecustomize.pyc",
                                   "sitecustomize.cpython-312-darwin.so", "sitecustomize/",
                                   "SiteCustomize.py"])
-def test_sitecustomize_refused(tmp_path, name): ...       # (ё); регистр — по casefold
+def test_sitecustomize_refused(tmp_path, deps, name): ...    # (ё); регистр — по casefold
+def test_sitecustomize_lookalikes_allowed(tmp_path, deps): ...
 @pytest.mark.parametrize("where", ["venv-site-packages", "python-stdlib",
                                    "python-lib-dynload"])
-def test_sitecustomize_refused_everywhere_on_sys_path(tmp_path, where): ...  # (ё)
+def test_sitecustomize_refused_everywhere_on_sys_path(tmp_path, deps, where): ...
 @pytest.mark.parametrize("where", ["venv-bin", "python-bin", "python-lib"])
-def test_pth_underscore_file_refused(tmp_path, where): ...  # (ё) python312._pth у getpath
-def test_runtime_sys_path_outside_checked_dirs_refused(monkeypatch, tmp_path): ...
-    # (ж): элемент sys.path внутри release_dir, но не из каталогов (ё) — проблема
-def test_native_dep_outside_refused(monkeypatch, tmp_path): ...  # linked_libraries-заглушка: /opt/homebrew/lib/x.dylib
-def test_rpath_origin_inside_accepted(monkeypatch, tmp_path): ...
-def test_runtime_sys_path_outside_refused(monkeypatch, tmp_path): ...  # run_as-заглушка отдаёт /Users/x/site
-def test_launch_failure_is_problem_not_pass(monkeypatch, tmp_path): ...  # launched=False
-def test_transfer_check_refuses_build_home_leftovers(monkeypatch, tmp_path): ...
-    # S1-R9-N1: есть build_home/cache → проблема «остатки build_home», ни одного запуска
-    # entrypoints; подмена fsutil и run_as: transfer_check ничего не удаляет (это и
-    # двойник Task 7 «transfer_check со скрытой очисткой build_home», R33.F3)
+def test_pth_underscore_file_refused(tmp_path, deps, where): ...  # <exe>._pth (N5)
+def test_python_zip_present_refused(tmp_path, deps, name): ...   # F5
+def test_expected_entrypoints_package_rules(tmp_path, text, want): ...
+    # package=false → ∅; без build-system → ∅; scripts → имена; gui-scripts не входят
+def test_expected_entrypoints_refusals(tmp_path, text): ...  # dynamic, package="yes", "../x"
+def test_expected_entrypoints_missing_file(tmp_path): ...
+def test_transfer_check_passes_and_records_python_declared(runner, tmp_path): ...
+    # argv: find, python, python -I, tool --help; env/cwd/network/timeout; sys.version
+def test_direct_shebang_script_is_run(runner, tmp_path): ...   # --help код 1 → проблема
+def test_trampoline_script_is_run(runner, tmp_path): ...
+def test_help_outcomes_are_problems(runner, tmp_path, outcome, needle): ...  # срок, stdout, запуск
+def test_launch_failure_is_problem_not_pass(runner, tmp_path): ...   # launched=False
+def test_runtime_sys_path_outside_refused(runner, tmp_path): ...     # /Users/x/site
+def test_runtime_sys_path_outside_checked_dirs_refused(runner, tmp_path, extra): ...
+    # (ж): site-packages базового Python, чужого окружения (F13), bin, обход через ..
+def test_runtime_sys_path_unresolvable_refused(runner, tmp_path, item): ...
+def test_present_zip_on_sys_path_refused(runner, tmp_path): ...      # F5
+def test_enable_user_site_refused(runner, tmp_path): ...
+def test_unparsable_probe_refused(runner, tmp_path, stdout): ...
+def test_find_failure_is_infrastructure_and_nothing_runs(runner, tmp_path): ...
+def test_leftovers_stop_before_any_run(runner, tmp_path): ...
+def test_transfer_check_refuses_build_home_leftovers(fake_layout): ...
+    # S1-R9-N1: настоящий find через подменённый run_as; build_home/cache остаётся, ни одного
+    # запуска кроме find; двойник «со скрытой очисткой build_home» этот тест не проходит
+# tests/df/test_digest.py
+def test_resolve_in_tree_resolves_every_component(tmp_path, path): ...   # ссылка uv на минор
+def test_resolve_in_tree_root_and_dirs(tmp_path): ...
+def test_resolve_in_tree_refusals(tmp_path, path): ...
+def test_resolve_in_tree_cycle_refused(tmp_path): ...
+def test_resolve_in_tree_refuses_noncanonical_root(tmp_path): ...
+# tests/df/test_routes.py
+def test_boundary_leaves_pass_the_trusted_inventory(monkeypatch, fl, leaf): ...
+def test_boundary_leaves_list_every_problem(monkeypatch, fl, leaf): ...
+def test_transfer_check_in_route_only_finds(monkeypatch, fl): ...
+def test_twin_transfer_check_with_hidden_build_home_cleanup(monkeypatch, fl): ...
+    # R33.F3: события маршрута verify сравниваются и по argv запусков внутри transfer_check —
+    # токен run_as(df-build)+ один не отличает скрытое удаление от find
 ```
 
-- [ ] **Step 2–4:** FAIL → implement → PASS
-- [ ] **Step 5: Commit** `feat(df): execution-chain boundary, entrypoint inventory, transfer check`
+- [x] **Step 2–4:** FAIL → implement → PASS. Мутационная проверка правил F1–F5, F9 —
+  каждое отключённое правило валит тест (`task-8-impl-report.md`).
+- [x] **Step 5: Commit** `feat(df): execution-chain boundary, entrypoint inventory, transfer
+  check`; `docs(df): Task 8 as built; boundary rules in spec 3.4, Task 9/12/13/14 items`.
 
 ### Task 8a: Административная среда, команда `darkfactory`, bootstrap
 
@@ -2324,7 +2426,16 @@ def test_bootstrap_allows_only_init_install(tmp_path): ...
     - `manifest_repo`, `manifest_sha`, `profile`, `platform`, `created_at`;
     - `repos: [{name, url, sha, lock_sha256, groups}]`;
     - `python_declared: {repo: str}`, `uv_version_declared` (из отметки `admin`; записан
-      шагом `build`, R29, R33.F11);
+      шагом `build`, R29, R33.F11). `python_declared` — `ctx.python_declared`
+      (`RouteContext`, Task 8): `sys.version` каждого окружения, принятый листом
+      `transfer_check`;
+    - **решить в предполётной проверке Task 9** (R40/F7): `ctx.python_declared` и
+      `ctx.installed` живут только в процессе. Сбой после отметки `verified` → новый
+      процесс не повторяет `verify` → контекст пуст, и `register` не может записать
+      `release.json` (fail-closed, но установка застревает). Рекомендация: нести
+      `python_declared` в отметке начиная с `verified`, как `uv_version_declared`, а
+      `installed_distributions` перечитывать на `register` (только данные, над копией root,
+      закреплённой `tree_digest`). Гарантий не меняет: оба значения заявленные;
     - `distributions_declared: {repo: [{name, version, source}]}`. `source` — поля
       `SourceId`; для registry `index: "not declared"`. Берётся из `ctx.installed`
       (`RouteContext`, Task 7a) — того `ctx`, который `install_calls` передал
@@ -2945,7 +3056,10 @@ def test_auth_observation_has_no_content(tmp_path): ...
     - `release.inputs` — `manifest_sha`/`profile` релиза = `install.toml`;
     - `release.perms` — дерево root, без записи для группы и всех, без setuid, без ACL
       (`acl_present_path`; ошибка → `данные недоступны`);
-    - `release.boundary` — `static_problems` пуст;
+    - `release.boundary` — `static_problems(release_dir, platform, expected)` пуст, где
+      `expected = {r: expected_entrypoints(release_dir/"src"/r)}` для каждого репо релиза,
+      и только после того, как `release.digest` в норме: `src/<r>` равен доверенному
+      чекауту (доказано `verify_sources` при приёме и закреплено digest, R40/F14);
     - `trusted.paths` — `trusted_path_problems` для `/opt/df`, `/etc/df`, `/var/lib/df`,
       административного Python и команды;
     - `cli.approved`;
@@ -3134,6 +3248,13 @@ def test_dangerous_link_in_artifact_refused(root_world, target): ...
 def test_internal_absolute_links_survive_rename_and_copy(root_world): ...
 def test_missing_entrypoint_and_broken_help_refused(root_world): ...
 def test_runs_after_build_dir_and_cache_removed(root_world): ...      # dfprobe --help от df-build без сети
+def test_boundary_on_real_release(root_world): ...
+    # R40/F9, §2 предполётной проверки Task 8: настоящие static_problems и transfer_check
+    # по релизу, собранному build.py, на обеих ОС; на Ubuntu записать то, что на macOS
+    # измерено, а на Linux нет: линковку PBS-интерпретатора с libpython3.X.so.1.0 (RUNPATH
+    # $ORIGIN/../lib) и читается ли тогда lib/libpython3.X.so.1.0._pth; RPATH/RUNPATH
+    # колёс core (manylinux .libs, soname без RPATH); порог перехода uv на sh-трамплин;
+    # sys.path обоих запусков (ж). Расхождение с правилами (в)/(ж) — находка, не правка теста
 @pytest.mark.parametrize("case", ["uid0", "admin-group", "foreign-home", "not-in-accounts"])
 def test_preexisting_build_user_refused_before_build(root_world, case): ...
     # отдельная учётка-приманка; ни одного процесса сборки не запущено
@@ -3231,15 +3352,25 @@ def test_no_df_in_path(root_world): ...   # ни /opt/df/bin/df, ни /usr/local
   - lock-файлы членов в пределах поддерживаемых конструкций §3.5 (иначе установка откажет
     «неподдерживаемый lock»), а `[tool.uv]` членов — в пределах `UV_PROJECT_KEYS_0_11_23`,
     без `uv.toml` (§3.2; иначе отказ до сборки);
-  - **вопрос владельцу** (R37, F9): список групп `core` для `devtools`. План предлагает
-    только `governance`, но `devtools/pyproject.toml` называет `conductor` группой службы
-    (`default-groups`), а сборка идёт с `--no-default-groups`: без `conductor` в профиле его
-    зависимости (`pyjwt[crypto]`, `jsonschema`) в окружение не попадут.
+  - **решение владельца 22.10** (R37 закрыт, R40/F20): группы `core` для `devtools` —
+    только `governance`. `conductor` (группа службы в `default-groups`
+    `devtools/pyproject.toml`) — отдельный профиль позже, не в v1; сборка идёт с
+    `--no-default-groups`, поэтому его зависимости (`pyjwt[crypto]`, `jsonschema`) в `core`
+    намеренно не попадают. Тело issue называет решение, а не вопрос. Эталон
+    `devtools.governance-conductor` в `test_lockset.py` остаётся: он проверяет обход lock, не
+    профиль;
+  - известный блокер живой установки `core` (R40/F17): `disp --help` (disputatio fc402fe)
+    падает `ModuleNotFoundError: anyio` — `disputatio/cli.py` импортирует `anyio`, который
+    объявлен только в `[dependency-groups]`, а сборка идёт с `--no-default-groups`; проверка
+    переноса (з) законно отказывает. Исправление — у владельца:
+    https://github.com/andrei-shtanakov/disputatio/issues/159; до него живая установка
+    `core` не пройдёт.
 
   В `TODO.md` — пункт `@id:df-installer-stage1-live`: «живая установка профиля `core` на
   macOS arm64 и Ubuntu x86_64; проверка совместимости пинов и lock-файлов (`uv sync
   --locked` каждого члена на его SHA); закрывает приёмку этапа 1 по §10»,
-  `@blocked_by:todo://ai-orchestrators-workspace/df-manifest-profiles`. Там же — пункт
+  `@blocked_by:todo://ai-orchestrators-workspace/df-manifest-profiles` (и исправление
+  disputatio#159 — без него проверка переноса отказывает на `disp --help`). Там же — пункт
   с `@trigger` на смену закреплённой версии `uv`: перепроверить замером
   `UV_PROJECT_KEYS_<версия>` (дополнение A1/A2 предполётной проверки Task 7a) и таблицу
   записи пути корня в `tests/df/fixtures/locks/SOURCES.md`, переименовать константу под
