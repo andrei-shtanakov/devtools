@@ -301,3 +301,20 @@ def test_target_reached_with_last_action_is_success(
     run(fl, world, max_iter=max_iter)
     assert world.phase == "committed"
     assert len(world.called) == max_iter
+
+
+def test_negative_max_iter_rejected(fl: FakeLayout) -> None:
+    """Fix round 2: `max_iter < 0` never returns success unclassified."""
+    world = World("damaged")
+    with pytest.raises(ValueError, match="max_iter"):
+        run(fl, world, max_iter=-1)
+    assert world.reads == 0
+    assert not fl.layout.journal.exists()
+
+
+def test_max_iter_zero_still_classifies(fl: FakeLayout) -> None:
+    world = World("launched")
+    with pytest.raises(StepFailed) as exc:
+        run(fl, world, max_iter=0)
+    assert exc.value.step == "drive"
+    assert world.reads == 1 and world.called == []

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import errno
 import os
 from pathlib import Path
 
@@ -33,7 +34,7 @@ from df.config import (
     dump_releases,
 )
 from df.digest import TreeError, tree_digest
-from df.journal import StepFailed, journal_event
+from df.journal import StepFailed, journal_event, read_journal
 from df.paths import Layout
 from df.platform import RunResult
 from df.receive import remove_own_tree
@@ -773,3 +774,43 @@ def test_digest_io_error_stops_not_cleans(
 
     monkeypatch.setattr(accept, "tree_digest", refused)
     assert not facts(fl).full
+
+
+# ---------- fix round 2 ----------
+
+
+def test_digest_eio_inside_release_stops_drive_without_cleanup(
+    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout
+) -> None:
+    """An I/O error on one entry of a root-owned `releases/<id>` (m=copied) is
+    `StepFailed("facts")`, journaled; no action (cleanup) runs, the tree stays."""
+    pending(fl)
+    digest = root_tree(fl)
+    write_mark(fl.layout, ID, mark("copied", tree_digest=digest))
+    bad = fl.layout.release_dir(ID) / "src" / "app.py"
+    real_lstat = os.lstat
+
+    def lstat(path: object, *args: object, **kw: object) -> os.stat_result:
+        if path == bad:
+            raise OSError(errno.EIO, "Input/output error", str(path))
+        return real_lstat(path, *args, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "lstat", lstat)
+    with pytest.raises(StepFailed) as exc:
+        facts(fl)
+    assert exc.value.step == "facts"
+    ran: list[str] = []
+    with pytest.raises(StepFailed) as exc:
+        accept.drive(
+            fl.layout,
+            ID,
+            actions={a: (lambda f, a=a: ran.append(a)) for a in ("cleanup", "verify")},
+            read=lambda: facts(fl),
+            journal=fl.layout.journal,
+            run_id="run-1",
+        )
+    assert exc.value.step == "facts"
+    assert ran == []
+    assert bad.exists()
+    rows = read_journal(fl.layout.journal)
+    assert [(r["step"], r["event"]) for r in rows] == [("facts", "failed")]

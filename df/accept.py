@@ -502,10 +502,14 @@ def drive(
 
     Each iteration: `settle` -> `read` -> `classify`; `committed` returns,
     `damaged` stops; otherwise the row's action runs, then `settle`, and the
-    new phase must be one of the row's `post`. Failures are journaled
+    new phase must be one of the row's `post`. At most `max_iter` actions run
+    (`max_iter < 0` is a `ValueError`), then a final classification. Failures are journaled
     (`failed`) and re-raised; directory syncs that lacked F_FULLFSYNC are
     journaled as `sync-note` for the evidence (decision (a)).
     """
+
+    if max_iter < 0:
+        raise ValueError(f"max_iter must be >= 0: {max_iter}")
 
     def log(step: str, event: str, detail: str = "") -> None:
         journal_event(journal, run_id=run_id, step=step, event=event, detail=detail)
@@ -531,15 +535,22 @@ def _drive(
 ) -> None:
     # max_iter actions, then one more classification: reaching the target
     # with the last allowed action is success.
-    for done in range(max_iter + 1):
+    for _ in range(max_iter):
         facts, row = _observe(layout, release_id, read, log)
-        if row.phase == "committed":
+        if _terminal(row, log):
             return
-        if row.action == "stop":
-            _fail(log, StepFailed(row.phase, "релиз повреждён (§3.8)"))
-        if done == max_iter:
-            _fail(log, StepFailed("drive", f"нет продвижения за {max_iter} итераций"))
         _step(layout, release_id, row, facts, actions, read, log)
+    _facts, row = _observe(layout, release_id, read, log)
+    if _terminal(row, log):
+        return
+    _fail(log, StepFailed("drive", f"нет продвижения за {max_iter} итераций"))
+
+
+def _terminal(row: table.Row, log: Callable[..., None]) -> bool:
+    """`committed` is True; a `stop` row (damaged) raises; otherwise False."""
+    if row.action == "stop":
+        _fail(log, StepFailed(row.phase, "релиз повреждён (§3.8)"))
+    return row.phase == "committed"
 
 
 def _observe(
