@@ -2067,11 +2067,12 @@ def test_distribution_problems_leaf_lists_every_repo(fl): ...
     через `open_regular`: ссылка или не обычный файл — `TreeError` (F10).
   - `EnvPaths`, `env_paths(release_dir, repo)` — правило (б) и разрешённые каталоги
     окружения (F3, F4, F19): `venv/<r>/pyvenv.cfg` обязателен, разбирается как у CPython:
-    строки — только по `\n` (один хвостовой `\r` снимается), `key.strip().lower()`,
-    `value.strip()`; файл с иным разрывом строки `str.splitlines` (`\v`, `\f`,
-    `\x1c`–`\x1e`, `\x85`, U+2028/2029) или управляющим символом кроме `\t`/`\r`/`\n` —
-    отказ: иначе одна строка читалась бы нами и CPython по-разному (ревью безопасности
-    Task 8); ровно один `home` и один
+    строки — по `\n` (один хвостовой `\r` снимается), `key.strip().lower()`,
+    `value.strip()`. getpath делит по `\n`, `site.py` — по `\r`/`\n`/`\r\n` и берёт
+    последнее значение, поэтому `\r` вне `\r\n` (ревью круг 1, F1: подменял
+    `include-system-site-packages`), иной разрыв строки `str.splitlines` (`\v`, `\f`,
+    `\x1c`–`\x1e`, `\x85`, U+2028/2029) и управляющий символ кроме `\t`/`\r`/`\n` —
+    отказ; после этого строки обоих читателей и наши совпадают; ровно один `home` и один
     `include-system-site-packages` (getpath берёт первый `home`, `site.py` — последний),
     значение `.lower() == "false"`; `home` канонический, под релизом и разрешается внутри
     дерева в `python/<ключ>/bin`, `<ключ>` = `cpython-3.X.Y-<тройка>` с ровно одним
@@ -2109,6 +2110,20 @@ def test_distribution_problems_leaf_lists_every_repo(fl): ...
       `site-packages` окружения, `python/<ключ>/lib/python3.X` и его `lib-dynload`; любой
       `*._pth` (`casefold`) в `venv/<r>/bin`, `python/<ключ>/bin`, `python/<ключ>/lib`;
       существующий `python/<ключ>/lib/python3XY.zip` (F5).
+    - **(ё), класс файлов старта** (ревью круг 1, F2): `STARTUP_FILES` — одна таблица
+      `StartupFile(where, name, reader, rule)` всех путей, которые читают getpath и `site.py`
+      CPython 3.12 при старте: `pyvenv.cfg` ×3 (`venv/<r>` — обязателен, (б); `venv/<r>/bin`
+      и `python/<ключ>` — запрещены), `*._pth` у трёх мест, `python3XY.zip` (только
+      отсутствующий), у `home` = `python/<ключ>/bin` — `pybuilddir.txt`, `Modules`
+      (`Setup.local`) и `lib` (поиск prefix) — запрещены (пробы 22.10: оба маркера сборки
+      подменяют `lib-dynload`/zip даже под `-I`, `sitecustomize` из подменённого каталога
+      исполнился), ориентиры `lib/python3.X/os.py` и `lib-dynload` — обязательны; `.pth` и
+      `sitecustomize` — ссылкой на правила (е)/(ё). Проверка идёт по таблице.
+      `base_bin_names(minor)` — белый список `python/<ключ>/bin` (замер uv 0.11.23:
+      `2to3`, `2to3-3.X`, `idle3`, `idle3.X`, `pip`, `pip3`, `pip3.X`, `pydoc3`, `pydoc3.X`,
+      `python`, `python3`, `python3-config`, `python3.X`, `python3.X-config`); иное имя —
+      отказ. Вне таблицы файлы интерпретатора не сверяются (§3.5): (ж) не доказывает
+      отсутствия кода старта в них.
 
     Названное ограничение (Task 7a, `DECLARED_LIMIT`): код без метаданных распределения
     `installed_distributions` не видит; (а)–(ё) его не закрывают, `RECORD` в v1 не сверяется.
@@ -2130,7 +2145,8 @@ def test_distribution_problems_leaf_lists_every_repo(fl): ...
       Пустой элемент `sys.path` — проблема. Каждый элемент абсолютный и разрешается внутри дерева в
       **свои** каталоги (ё) этого репо (`site-packages` своего окружения, stdlib,
       `lib-dynload`; F13); единственное исключение — отсутствующий `python3XY.zip` в
-      `python/<ключ>/lib` (F5). `ENABLE_USER_SITE` — ровно `False`. `sys.version` обоих
+      `python/<ключ>/lib` (F5). Элемент, на котором разрешение бросает (NUL,
+      ENAMETOOLONG), — строка-проблема (ревью круг 1, F3). `ENABLE_USER_SITE` — ровно `False`. `sys.version` обоих
       запусков совпадает и записывается в `python_declared[r]`;
     - **(з)** каждый скрипт `expected[r]` запускается с `--help`, независимо от вида
       `shebang`: код 0 за 60 с; stdout не читается.
@@ -2170,6 +2186,7 @@ def test_pyvenv_system_site_value(tmp_path, deps, line, ok): ...  # False/false 
 def test_pyvenv_cfg_line_break_differential_refused(tmp_path, deps, joint): ...
     # «home = <внутри>\x0bhome = /elsewhere», \f, \x1c–\x1e, \x85, U+2028/2029, NUL
 def test_pyvenv_cfg_crlf_accepted(tmp_path, deps): ...
+def test_pyvenv_cfg_lone_cr_refused(tmp_path, deps): ...   # ревью круг 1, F1
 def test_pyvenv_duplicate_key_refused(tmp_path, deps, key): ...
 def test_pyvenv_cfg_in_bin_refused(tmp_path, deps, name): ...   # F4, и по casefold
 def test_environments_on_different_pythons_refused(tmp_path, deps): ...   # F19
@@ -2203,6 +2220,11 @@ def test_sitecustomize_refused_everywhere_on_sys_path(tmp_path, deps, where): ..
 @pytest.mark.parametrize("where", ["venv-bin", "python-bin", "python-lib"])
 def test_pth_underscore_file_refused(tmp_path, deps, where): ...  # <exe>._pth (N5)
 def test_python_zip_present_refused(tmp_path, deps, name): ...   # F5
+def test_every_refused_startup_file_is_refused(tmp_path, deps, entry, kind): ...
+    # каждая строка STARTUP_FILES с rule refused/absent, файлом и каталогом
+def test_startup_table_names_the_probed_build_markers(): ...
+def test_required_startup_landmark_missing_refused(tmp_path, deps, name): ...  # os.py, lib-dynload
+def test_base_bin_allowlist(tmp_path, deps): ...   # все замеренные имена — да; иное — нет
 def test_expected_entrypoints_package_rules(tmp_path, text, want): ...
     # package=false → ∅; без build-system → ∅; scripts → имена; gui-scripts не входят
 def test_expected_entrypoints_refusals(tmp_path, text): ...  # dynamic, package="yes", "../x"
@@ -2219,6 +2241,7 @@ def test_runtime_sys_path_outside_checked_dirs_refused(runner, tmp_path, extra):
 def test_runtime_sys_path_unresolvable_refused(runner, tmp_path, item): ...
 def test_present_zip_on_sys_path_refused(runner, tmp_path): ...      # F5
 def test_empty_sys_path_element_refused(runner, tmp_path, isolated): ...  # '' = cwd
+def test_hostile_sys_path_element_is_a_problem(runner, tmp_path, item): ...  # NUL, длинное
 def test_enable_user_site_refused(runner, tmp_path): ...
 def test_unparsable_probe_refused(runner, tmp_path, stdout): ...
 def test_find_failure_is_infrastructure_and_nothing_runs(runner, tmp_path): ...
@@ -2245,7 +2268,9 @@ def test_twin_transfer_check_with_hidden_build_home_cleanup(monkeypatch, fl): ..
   каждое отключённое правило валит тест (`task-8-impl-report.md`).
 - [x] **Step 5: Commit** `feat(df): execution-chain boundary, entrypoint inventory, transfer
   check`; `docs(df): Task 8 as built; boundary rules in spec 3.4, Task 9/12/13/14 items`;
-  `fix(df): pyvenv.cfg split as CPython does; (ж) probe with -P` и `docs(df): …` к нему.
+  `fix(df): pyvenv.cfg split as CPython does; (ж) probe with -P` и `docs(df): …` к нему;
+  `fix(df): Task 8 review round 1 — startup-file table, lone CR, hostile sys.path` и
+  `docs(df): …` к нему.
 
 ### Task 8a: Административная среда, команда `darkfactory`, bootstrap
 
@@ -3266,7 +3291,11 @@ def test_boundary_on_real_release(root_world): ...
     # измерено, а на Linux нет: линковку PBS-интерпретатора с libpython3.X.so.1.0 (RUNPATH
     # $ORIGIN/../lib) и читается ли тогда lib/libpython3.X.so.1.0._pth; RPATH/RUNPATH
     # колёс core (manylinux .libs, soname без RPATH); порог перехода uv на sh-трамплин;
-    # sys.path обоих запусков (ж). Расхождение с правилами (в)/(ж) — находка, не правка теста
+    # sys.path обоих запусков (ж); состав python/<ключ>/bin у PBS на Linux против
+    # base_bin_names (белый список замерен только на macOS); $ORIGIN у библиотеки,
+    # загруженной через ссылку-файл в другом каталоге (glibc берёт каталог пути загрузки,
+    # (в) — реальный каталог; ревью Task 8, круг 1, nit 5). Расхождение с правилами
+    # (в)/(ж) — находка, не правка теста
 @pytest.mark.parametrize("case", ["uid0", "admin-group", "foreign-home", "not-in-accounts"])
 def test_preexisting_build_user_refused_before_build(root_world, case): ...
     # отдельная учётка-приманка; ни одного процесса сборки не запущено
