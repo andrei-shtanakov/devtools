@@ -9,7 +9,10 @@ from __future__ import annotations
 import email.parser
 import hashlib
 import json
+import os
+import re
 import shutil
+import stat
 import tarfile
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -35,6 +38,12 @@ STDERR_REPORT_BYTES = 4096
 _FETCH_STEP = "reference-fetch"
 _VERIFY_STEP = "verify-sources"
 _VIRTUALENV_PTH = "_virtualenv.pth"
+#: Caps for files read from a release (untrusted build output).
+METADATA_CAP = 1 << 20
+DIRECT_URL_CAP = 1 << 16
+PTH_CAP = 1 << 16
+_NAME_RUNS = re.compile(r"[-_.]+")
+_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 _VIRTUALENV_PTH_BODY = (b"import _virtualenv", b"import _virtualenv\n")
 
 
@@ -50,7 +59,8 @@ class InstalledDist:
 def fetch_reference(pin: RepoPin, dest: Path, *, git: Path, layout: Layout) -> Path:
     """Fetch `pin` as root and unpack it into `dest`; return `dest`.
 
-    `dest` must lie under `layout.verify_dir`; an existing `dest` (a retry) is
+    `dest` must be a direct child of `layout.verify_dir`, which must already
+    exist as a real directory (it is never created here); an existing `dest` (a retry) is
     removed first. Git runs as the current user with the build's isolation
     (empty `HOME`/`XDG_CONFIG_HOME`, no templates, no hooks) and the same
     fetch/rev-parse/archive argv as the build. `FETCH_HEAD` must equal
@@ -62,17 +72,15 @@ def fetch_reference(pin: RepoPin, dest: Path, *, git: Path, layout: Layout) -> P
     for stale in (dest, work):
         _remove(stale)
     try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
         for sub in ("home", "config", "git"):
             (work / sub).mkdir(parents=True)
         _fetch(pin, work, git)
         dest.mkdir()
         _unpack(work / "ref.tar", dest)
     except BaseException:
-        _remove(dest)
+        _cleanup(dest, work, raising=False)
         raise
-    finally:
-        _remove(work)
+    _cleanup(dest, work, raising=True)
     return dest
 
 
@@ -102,11 +110,16 @@ def verify_sources(
 
 
 def installed_distributions(venv: Path) -> list[InstalledDist]:
-    """Name, version and source of every `*.dist-info` in `venv` (read only)."""
+    """Name, version and source of every `*.dist-info` in `venv` (read only).
+
+    Names are PEP 503 normalised. Only real directories are walked and the
+    files are read as untrusted input (no links, size caps); otherwise
+    `TreeError`.
+    """
     dists = [
         _read_dist(info)
         for site in _site_packages(venv)
-        for info in sorted(site.glob("*.dist-info"))
+        for info in _real_subdirs(site, "", ".dist-info")
     ]
     return sorted(dists, key=lambda d: (d.name, d.version))
 
@@ -115,7 +128,7 @@ def pth_problems(venv: Path) -> list[str]:
     """`.pth` files in `site-packages` except virtualenv's own (they run code)."""
     problems: list[str] = []
     for site in _site_packages(venv):
-        for pth in sorted(site.glob("*.pth")):
+        for pth in _children(site, "", ".pth"):
             if pth.name == _VIRTUALENV_PTH and _is_virtualenv_pth(pth):
                 continue
             problems.append(f"{pth.relative_to(venv)}: .pth исполняет код при старте")
@@ -124,8 +137,21 @@ def pth_problems(venv: Path) -> list[str]:
 
 def _check_dest(dest: Path, layout: Layout) -> None:
     root = layout.verify_dir
-    if dest == root or not dest.is_relative_to(root) or ".." in dest.parts:
-        raise StepFailed(_FETCH_STEP, f"{dest} вне {root}")
+    if dest.parent != root or ".." in dest.parts or dest.name in ("", "."):
+        raise StepFailed(_FETCH_STEP, f"{dest} не внутри {root}")
+    if not _is_real_dir(root):
+        raise StepFailed(_FETCH_STEP, f"{root} нет или не каталог")
+
+
+def _cleanup(dest: Path, work: Path, *, raising: bool) -> None:
+    """Remove scratch; on the failure path errors must not mask the cause."""
+    try:
+        _remove(work)
+        if not raising:
+            _remove(dest)
+    except OSError:
+        if raising:
+            raise
 
 
 def _remove(path: Path) -> None:
@@ -195,26 +221,113 @@ def _lock_digest(lock: Path, repo: str) -> str:
     return f"sha256:{hashlib.sha256(data).hexdigest()}"
 
 
+def _is_real_dir(path: Path) -> bool:
+    try:
+        return stat.S_ISDIR(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
+def _children(directory: Path, prefix: str = "", suffix: str = "") -> list[Path]:
+    """Sorted entries of `directory` by name, without following links."""
+    try:
+        names = sorted(os.listdir(directory))
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise TreeError(f"{directory}: не читается: {exc}") from exc
+    return [directory / n for n in names if n.startswith(prefix) and n.endswith(suffix)]
+
+
+def _real_subdirs(directory: Path, prefix: str, suffix: str = "") -> list[Path]:
+    """Matching children that are real directories; a link or file is refused."""
+    found: list[Path] = []
+    for child in _children(directory, prefix, suffix):
+        if not _is_real_dir(child):
+            raise TreeError(f"{child}: ожидался настоящий каталог")
+        found.append(child)
+    return found
+
+
+def _lib_dirs(venv: Path) -> list[Path]:
+    """`lib*` directories; a `lib64 -> lib` style sibling link is skipped."""
+    dirs: list[Path] = []
+    for child in _children(venv, "lib"):
+        if child.is_symlink() and _is_sibling_link(child):
+            continue
+        if not _is_real_dir(child):
+            raise TreeError(f"{child}: ожидался настоящий каталог")
+        dirs.append(child)
+    return dirs
+
+
+def _is_sibling_link(link: Path) -> bool:
+    target = os.readlink(link)
+    return "/" not in target and _is_real_dir(link.parent / target)
+
+
 def _site_packages(venv: Path) -> list[Path]:
-    return sorted(p for p in venv.glob("lib*/python*/site-packages") if p.is_dir())
+    sites: list[Path] = []
+    for lib in _lib_dirs(venv):
+        for python in _real_subdirs(lib, "python"):
+            sites.extend(_real_subdirs(python, "site-packages"))
+    return sites
+
+
+def normalize_name(name: str) -> str:
+    """The PEP 503 normalised distribution name."""
+    return _NAME_RUNS.sub("-", name).lower()
+
+
+def _read_capped(path: Path, cap: int) -> bytes:
+    """Read a regular file of at most `cap` bytes; never follow a link.
+
+    The file is untrusted build output read by root: a link, a FIFO or a
+    device is refused and an oversize file is not read past `cap + 1`.
+    """
+    try:
+        fd = os.open(path, _READ_FLAGS)
+    except OSError as exc:
+        raise TreeError(f"{path}: не открывается: {exc}") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise TreeError(f"{path}: не обычный файл")
+        data = os.read(fd, cap + 1)
+        while len(data) <= cap:
+            chunk = os.read(fd, cap + 1 - len(data))
+            if not chunk:
+                break
+            data += chunk
+    except OSError as exc:
+        raise TreeError(f"{path}: не читается: {exc}") from exc
+    finally:
+        os.close(fd)
+    if len(data) > cap:
+        raise TreeError(f"{path}: больше {cap} байт")
+    return data
 
 
 def _read_dist(info: Path) -> InstalledDist:
     headers = email.parser.BytesParser().parsebytes(
-        (info / "METADATA").read_bytes(), headersonly=True
+        _read_capped(info / "METADATA", METADATA_CAP), headersonly=True
     )
     name, version = headers.get("Name"), headers.get("Version")
     if not name or not version:
         raise TreeError(f"{info}: в METADATA нет Name/Version")
-    return InstalledDist(name, version, source_from_direct_url(_read_direct_url(info)))
+    source = source_from_direct_url(_read_direct_url(info))
+    return InstalledDist(normalize_name(name), version, source)
 
 
 def _read_direct_url(info: Path) -> Mapping[str, object] | None:
     path = info / "direct_url.json"
-    if not path.exists():
-        return None
     try:
-        data = json.loads(path.read_bytes())
+        os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise TreeError(f"{path}: не читается: {exc}") from exc
+    try:
+        data = json.loads(_read_capped(path, DIRECT_URL_CAP))
     except ValueError as exc:
         raise TreeError(f"{path}: не JSON: {exc}") from exc
     if not isinstance(data, dict):
@@ -223,6 +336,7 @@ def _read_direct_url(info: Path) -> Mapping[str, object] | None:
 
 
 def _is_virtualenv_pth(pth: Path) -> bool:
-    if pth.is_symlink() or not pth.is_file():
+    try:
+        return _read_capped(pth, PTH_CAP) in _VIRTUALENV_PTH_BODY
+    except TreeError:
         return False
-    return pth.read_bytes() in _VIRTUALENV_PTH_BODY

@@ -43,14 +43,18 @@ def canonical_repo_url(url: str) -> str:
     """Return `https://host/path` without query, fragment, `/` and `.git`.
 
     Only `https` is accepted and the host is lower-cased; anything else is a
-    `TreeError`.
+    `TreeError`. Only a `.git` suffix of the last segment is removed, never a
+    whole `/.git` segment.
     """
     parts = urllib.parse.urlsplit(url)
     if parts.scheme != "https" or not parts.hostname:
         raise TreeError(f"репозиторий не https-URL: {url!r}")
     if parts.username is not None or parts.password is not None:
         raise TreeError(f"в URL репозитория учётные данные: {url!r}")
-    path = parts.path.rstrip("/").removesuffix(".git").rstrip("/")
+    head, _, last = parts.path.rstrip("/").rpartition("/")
+    if last != ".git":
+        last = last.removesuffix(".git")
+    path = f"{head}/{last}" if last else head
     host = parts.netloc.lower()
     return f"https://{host}{path}"
 
@@ -61,12 +65,13 @@ def source_from_lock(source: Mapping[str, str], *, root_dir: Path) -> SourceId:
     `root_dir` is the build copy of the repo: the lock's project root is
     installed from there with `--no-editable`.
     """
-    if "git" in source:
-        return _git_from_lock(source["git"])
-    if source.get("editable") == "." or source.get("directory") == ".":
-        return SourceId("directory", path=str(root_dir), editable=False)
-    if "registry" in source and len(source) == 1:
-        return SourceId("registry", url=source["registry"])
+    if len(source) == 1:
+        if "git" in source:
+            return _git_from_lock(source["git"])
+        if source.get("editable") == "." or source.get("directory") == ".":
+            return SourceId("directory", path=str(root_dir), editable=False)
+        if "registry" in source:
+            return SourceId("registry", url=source["registry"])
     raise UnsupportedLock(f"неподдерживаемый источник в lock: {dict(source)!r}")
 
 
@@ -91,19 +96,22 @@ def _git_from_lock(value: str) -> SourceId:
         raise UnsupportedLock(f"commit в lock не 40 hex: {value!r}")
     url, _, query = base.partition("?")
     try:
-        pairs = urllib.parse.parse_qsl(query, strict_parsing=bool(query))
+        pairs = urllib.parse.parse_qsl(
+            query, keep_blank_values=True, strict_parsing=bool(query)
+        )
     except ValueError as exc:
         raise UnsupportedLock(f"запрос git-источника: {value!r}") from exc
+    if any(not v for _, v in pairs):
+        raise UnsupportedLock(f"пустое значение в запросе: {value!r}")
     keys = [k for k, _ in pairs]
     if len(set(keys)) != len(keys) or not set(keys) <= _QUERY_KEYS:
         raise UnsupportedLock(f"ключи запроса git-источника: {keys!r}")
     subdirectory = dict(pairs).get("subdirectory")
-    return SourceId(
-        "git",
-        url=canonical_repo_url(url),
-        subdirectory=subdirectory,
-        commit=commit,
-    )
+    try:
+        repo = canonical_repo_url(url)
+    except TreeError as exc:
+        raise UnsupportedLock(f"URL git-источника в lock: {exc}") from exc
+    return SourceId("git", url=repo, subdirectory=subdirectory, commit=commit)
 
 
 def _git_from_direct_url(

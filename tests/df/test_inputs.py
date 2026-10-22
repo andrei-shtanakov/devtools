@@ -32,7 +32,9 @@ pytestmark = pytest.mark.skipif(GIT is None, reason="git not installed")
 
 @pytest.fixture
 def layout(tmp_path: Path) -> Layout:
-    return Layout(Path(os.path.realpath(tmp_path)) / "root")
+    lay = Layout(Path(os.path.realpath(tmp_path)) / "root")
+    lay.verify_dir.mkdir(parents=True, mode=0o700)
+    return lay
 
 
 def git(repo: Path, *args: str) -> str:
@@ -64,7 +66,7 @@ def make_repo(root: Path, files: dict[str, str], links: dict[str, str]) -> RepoP
 def test_reference_fetch_unpacks_pinned_commit(tmp_path: Path, layout: Layout) -> None:
     pin = make_repo(tmp_path, {"uv.lock": "x\n", "a.txt": "a"}, {"ok": "a.txt"})
     dest = layout.verify_dir / "core"
-    dest.mkdir(parents=True)
+    dest.mkdir()
     (dest / "stale").write_text("old")
     assert GIT is not None
     got = fetch_reference(pin, dest, git=Path(GIT), layout=layout)
@@ -105,6 +107,26 @@ def test_reference_fetch_dest_must_be_under_verify_dir(
     for dest in (tmp_path / "out", layout.verify_dir, layout.verify_dir / ".." / "x"):
         with pytest.raises(StepFailed):
             fetch_reference(pin, dest, git=Path("/usr/bin/git"), layout=layout)
+
+
+def test_reference_fetch_missing_or_linked_verify_dir_refused(
+    tmp_path: Path, layout: Layout
+) -> None:
+    pin = RepoPin("core", "x", "a" * 40, ())
+    shutil.rmtree(layout.verify_dir)
+    with pytest.raises(StepFailed, match="verify"):
+        fetch_reference(
+            pin, layout.verify_dir / "core", git=Path("/usr/bin/git"), layout=layout
+        )
+    assert not layout.verify_dir.exists()
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    layout.verify_dir.symlink_to(real)
+    with pytest.raises(StepFailed, match="verify"):
+        fetch_reference(
+            pin, layout.verify_dir / "core", git=Path("/usr/bin/git"), layout=layout
+        )
+    assert list(real.iterdir()) == []
 
 
 def test_reference_fetch_env_isolated_like_build(
@@ -216,3 +238,91 @@ def test_foreign_pth_refused_virtualenv_pth_allowed(tmp_path: Path) -> None:
     assert len(problems) == 2
     assert any("evil.pth" in p for p in problems)
     assert any("_virtualenv.pth" in p for p in problems)
+
+
+def site_of(venv: Path) -> Path:
+    site = venv / "lib" / "python3.12" / "site-packages"
+    site.mkdir(parents=True, exist_ok=True)
+    return site
+
+
+def test_lib64_symlink_does_not_duplicate(tmp_path: Path) -> None:
+    venv = tmp_path / "venv"
+    site = site_of(venv)
+    make_dist(site, "reg", None)
+    (site / "evil.pth").write_text("import os")
+    (venv / "lib64").symlink_to("lib")
+    assert [d.name for d in installed_distributions(venv)] == ["reg"]
+    assert len(pth_problems(venv)) == 1
+
+
+def test_other_symlink_in_walk_refused(tmp_path: Path) -> None:
+    venv = tmp_path / "venv"
+    other = tmp_path / "other" / "python3.12" / "site-packages"
+    other.mkdir(parents=True)
+    (venv / "lib").mkdir(parents=True)
+    (venv / "lib" / "python3.12").symlink_to(other.parent)
+    with pytest.raises(TreeError):
+        installed_distributions(venv)
+    with pytest.raises(TreeError):
+        pth_problems(venv)
+
+
+def test_names_are_pep503_normalised(tmp_path: Path) -> None:
+    site = site_of(tmp_path / "venv")
+    make_dist(site, "PyYAML", None)
+    make_dist(site, "zope.interface", None)
+    got = installed_distributions(tmp_path / "venv")
+    assert [d.name for d in got] == ["pyyaml", "zope-interface"]
+
+
+def test_dist_info_symlink_refused(tmp_path: Path) -> None:
+    site = site_of(tmp_path / "venv")
+    make_dist(tmp_path / "x", "real", None)
+    (site / "real-1.0.dist-info").symlink_to(tmp_path / "x" / "real-1.0.dist-info")
+    with pytest.raises(TreeError):
+        installed_distributions(tmp_path / "venv")
+
+
+def test_metadata_symlink_fifo_oversize_missing_refused(tmp_path: Path) -> None:
+    site = site_of(tmp_path / "venv")
+    info = site / "a-1.0.dist-info"
+    info.mkdir()
+    venv = tmp_path / "venv"
+    with pytest.raises(TreeError):  # missing
+        installed_distributions(venv)
+    target = tmp_path / "foreign"
+    target.write_text("Name: a\nVersion: 1\n")
+    (info / "METADATA").symlink_to(target)
+    with pytest.raises(TreeError):
+        installed_distributions(venv)
+    (info / "METADATA").unlink()
+    os.mkfifo(info / "METADATA")
+    with pytest.raises(TreeError):  # must not hang
+        installed_distributions(venv)
+    (info / "METADATA").unlink()
+    (info / "METADATA").write_text("Name: a\nVersion: 1\n" + "x" * inputs.METADATA_CAP)
+    with pytest.raises(TreeError, match="больше"):
+        installed_distributions(venv)
+
+
+def test_direct_url_symlink_and_oversize_refused(tmp_path: Path) -> None:
+    site = site_of(tmp_path / "venv")
+    make_dist(site, "a", None)
+    du = site / "a-1.0.dist-info" / "direct_url.json"
+    du.symlink_to(tmp_path / "nowhere")
+    with pytest.raises(TreeError):
+        installed_distributions(tmp_path / "venv")
+    du.unlink()
+    du.write_text(" " * (inputs.DIRECT_URL_CAP + 1))
+    with pytest.raises(TreeError, match="больше"):
+        installed_distributions(tmp_path / "venv")
+
+
+def test_pth_symlink_fifo_oversize_are_problems(tmp_path: Path) -> None:
+    venv = tmp_path / "venv"
+    site = site_of(venv)
+    (site / "_virtualenv.pth").symlink_to(tmp_path / "x")
+    os.mkfifo(site / "f.pth")
+    (site / "big.pth").write_text("x" * (inputs.PTH_CAP + 1))
+    assert len(pth_problems(venv)) == 3

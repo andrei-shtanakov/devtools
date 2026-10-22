@@ -93,7 +93,7 @@ def _change(change: str) -> tuple[SourceId | Exception, SourceId | Exception]:
             raise AssertionError(change)
     try:
         left: SourceId | Exception = source_from_lock(lock, root_dir=R)
-    except (UnsupportedLock, TreeError) as exc:
+    except UnsupportedLock as exc:
         left = exc
     try:
         right: SourceId | Exception = source_from_direct_url(du)
@@ -160,3 +160,25 @@ def test_canonical_repo_url_refuses(url: str) -> None:
 def test_canonical_repo_url_strips() -> None:
     got = canonical_repo_url("https://GitHub.com/A/b.git/?x=1#f")
     assert got == "https://github.com/A/b"
+
+
+@pytest.mark.parametrize(
+    "lock",
+    [
+        {"git": PLAN_FIELDS_LOCK["git"], "registry": "https://x/simple"},
+        {"editable": ".", "path": "x"},
+        {"registry": "https://x/simple", "extra": "1"},
+        {"git": f"ssh://github.com/a/b#{COMMIT}"},
+        {"git": f"http://github.com/a/b#{COMMIT}"},
+        {"git": f"{DISPATCHER}?subdirectory=#{COMMIT}"},
+        {"virtual": "."},
+    ],
+)
+def test_lock_unsupported_forms(lock: dict[str, str]) -> None:
+    with pytest.raises(UnsupportedLock):
+        source_from_lock(lock, root_dir=R)
+
+
+def test_dot_git_segment_is_not_stripped() -> None:
+    assert canonical_repo_url("https://h/a/b/.git") == "https://h/a/b/.git"
+    assert canonical_repo_url("https://h/a/b.git/") == "https://h/a/b"
