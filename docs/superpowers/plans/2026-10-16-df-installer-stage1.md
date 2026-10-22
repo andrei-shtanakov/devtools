@@ -2379,6 +2379,7 @@ F1–F16 приняты как обязательные (R44; где Ruling ме
     `install_admin`, лист маршрута `admin` (rev 8, r9: Python, удаление прежнего дерева и
     отметка — соседние шаги маршрута, не этой функции). Предусловие: `admin_dir(id)` нет,
     иначе `StepFailed`, дерево не тронуто. `devtools_ref/df/` — настоящий каталог;
+    `__pycache__` и `*.pyc` не копируются (ревью, n-5);
     копируются только каталоги и обычные файлы (`O_NOFOLLOW`), ссылка, FIFO и иной тип —
     `StepFailed` (F13); права ставит `fchmod`: каталоги и файлы с битом `x` — `0755`, иные —
     `0644` (не `umask`). Копия — в `admin_dir(id)/df/` (root), `fault_point("created")`;
@@ -2397,7 +2398,11 @@ F1–F16 приняты как обязательные (R44; где Ruling ме
     R33.F25); Python `admin_python_path(layout, expected_python, detect_platform())` — по
     `lstat` обычный файл, и `trusted_path_problems` для него пуст; `admin_code_problems(layout,
     id)` пуст (ревью, I-1: `trusted_path_problems(admin_dir)` и по каждому объекту — владелец
-    root, нет записи группы и всех, setuid/setgid, ACL и ссылок). Каталога нет или
+    root, нет записи группы и всех, setuid/setgid, ACL, ссылок и байт-кода, n-5);
+    `admin_python_problems(layout, python, platform)` пуст (M-4: всё дерево
+    `admin-python/<ключ>` по правилу установки — замер uv 0.11.23: 9 относительных ссылок-
+    псевдонимов внутри дерева из 1804 объектов); `chain_link_problems` — ни одной ссылки на
+    пути к `admin/<id>` и к дереву Python (M-5: ограничение v1, вход их тоже отвергает). Каталога нет или
     `TreeError` — `False`; иная `OSError` — `StepFailed("facts")` (F12). Оба ожидаемых
     значения передаются из одного источника (rev 8, r11): `mark.admin_digest`/`mark.admin_python`
     до регистрации (Task 7), запись реестра — `admin_digest`/`admin_python` — после
@@ -2467,13 +2472,17 @@ F1–F16 приняты как обязательные (R44; где Ruling ме
        здесь, а в команде (Task 9), чтобы `doctor` его показал;
     3. `admin_tree_problems(paths, id)` пуст (ревью, I-1: каталоги цепочки `root … admin/<id>`
        — настоящие, root, без записи группы и всех; объекты `admin/<id>` — каталоги и обычные
-       файлы root без записи группы и всех, ссылок нет; ACL не читается — см. §3.9), затем
+       файлы root без записи группы и всех, ссылок и байт-кода нет; ACL не читается — см.
+       §3.9) и `interpreter_problems(paths, sys.executable)` пуст (M-4: интерпретатор в
+       `admin-python/`, путь — настоящие каталоги root без записи группы и всех, файл —
+       обычный, root, без записи группы и всех), затем
        `tree_digest(admin_dir(id))` = `admin_digest`, иначе выход 2 с указанием на
        bootstrap. У читателя отказ при изменившемся поколении — «состояние меняется» (n-2);
     4. `df` ещё не загружен (иначе выход 2); `sys.path.insert(0, str(admin_dir(id)))` —
        пути stdlib не трогаются;
     5. импорт `df.state` и `df.cli` (`df.cli` обязан быть из `admin_dir(id)/df`; любая
-       ошибка импорта — выход 2 с указанием на bootstrap, M-2);
+       ошибка импорта, в том числе `SystemExit`, — выход 2 с указанием на bootstrap, M-2,
+       n-7);
        `read = Transitional(g)` либо `Stable(RawSnapshot(generation=g, **parts), g)`;
        `sys.exit(main(argv, mode=mode, read=read, lock_fd=fd))`. Дальше никто снимок не
        перечитывает. `mode_of(argv)` и `WRITER_COMMANDS` — публичные: `main` обязана
