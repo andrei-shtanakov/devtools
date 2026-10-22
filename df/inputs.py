@@ -24,7 +24,7 @@ from df.build import (
     git_fetch_argv,
     git_rev_parse_argv,
 )
-from df.digest import TreeError, tree_digest
+from df.digest import TreeError, open_regular, tree_digest
 from df.journal import StepFailed
 from df.manifest import Profile, RepoPin
 from df.paths import Layout
@@ -43,7 +43,6 @@ METADATA_CAP = 1 << 20
 DIRECT_URL_CAP = 1 << 16
 PTH_CAP = 1 << 16
 _NAME_RUNS = re.compile(r"[-_.]+")
-_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 _VIRTUALENV_PTH_BODY = (b"import _virtualenv", b"import _virtualenv\n")
 
 
@@ -125,7 +124,11 @@ def installed_distributions(venv: Path) -> list[InstalledDist]:
 
 
 def pth_problems(venv: Path) -> list[str]:
-    """`.pth` files in `site-packages` except virtualenv's own (they run code)."""
+    """`.pth` files in `site-packages` except virtualenv's own (they run code).
+
+    A walk that cannot be trusted (links, unreadable entries) raises
+    `TreeError` instead of being reported: it fails closed.
+    """
     problems: list[str] = []
     for site in _site_packages(venv):
         for pth in _children(site, "", ".pth"):
@@ -250,10 +253,14 @@ def _real_subdirs(directory: Path, prefix: str, suffix: str = "") -> list[Path]:
 
 
 def _lib_dirs(venv: Path) -> list[Path]:
-    """`lib*` directories; a `lib64 -> lib` style sibling link is skipped."""
+    """`lib*` directories; only the platform link `lib64 -> lib` is skipped.
+
+    Every other link (any name, any target) is refused: Python may load
+    `site-packages` behind it, so skipping it would hide what runs.
+    """
     dirs: list[Path] = []
     for child in _children(venv, "lib"):
-        if child.is_symlink() and _is_sibling_link(child):
+        if _is_lib64_link(child, venv):
             continue
         if not _is_real_dir(child):
             raise TreeError(f"{child}: ожидался настоящий каталог")
@@ -261,9 +268,14 @@ def _lib_dirs(venv: Path) -> list[Path]:
     return dirs
 
 
-def _is_sibling_link(link: Path) -> bool:
-    target = os.readlink(link)
-    return "/" not in target and _is_real_dir(link.parent / target)
+def _is_lib64_link(child: Path, venv: Path) -> bool:
+    try:
+        if not stat.S_ISLNK(os.lstat(child).st_mode):
+            return False
+        target = os.readlink(child)
+    except OSError as exc:
+        raise TreeError(f"{child}: не читается: {exc}") from exc
+    return child.name == "lib64" and target == "lib" and _is_real_dir(venv / "lib")
 
 
 def _site_packages(venv: Path) -> list[Path]:
@@ -286,12 +298,10 @@ def _read_capped(path: Path, cap: int) -> bytes:
     device is refused and an oversize file is not read past `cap + 1`.
     """
     try:
-        fd = os.open(path, _READ_FLAGS)
+        fd = open_regular(path)
     except OSError as exc:
         raise TreeError(f"{path}: не открывается: {exc}") from exc
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise TreeError(f"{path}: не обычный файл")
         data = os.read(fd, cap + 1)
         while len(data) <= cap:
             chunk = os.read(fd, cap + 1 - len(data))

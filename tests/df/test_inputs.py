@@ -326,3 +326,49 @@ def test_pth_symlink_fifo_oversize_are_problems(tmp_path: Path) -> None:
     os.mkfifo(site / "f.pth")
     (site / "big.pth").write_text("x" * (inputs.PTH_CAP + 1))
     assert len(pth_problems(venv)) == 3
+
+
+def evil_site(venv: Path) -> None:
+    site = venv.parent / "evil" / "python3.12" / "site-packages"
+    site.mkdir(parents=True)
+    (site / "x.pth").write_text("import os")
+    make_dist(site, "hidden", None)
+
+
+@pytest.mark.parametrize(
+    "name,target",
+    [("lib64", "evil"), ("lib64", "."), ("lib64", ".."), ("lib32", "lib")],
+)
+def test_other_lib_links_refused(tmp_path: Path, name: str, target: str) -> None:
+    venv = tmp_path / "venv"
+    site_of(venv)
+    evil_site(venv)
+    (venv / name).symlink_to(target)
+    with pytest.raises(TreeError, match=name):
+        pth_problems(venv)
+    with pytest.raises(TreeError, match=name):
+        installed_distributions(venv)
+
+
+def test_lib64_to_evil_with_real_content_refused(tmp_path: Path) -> None:
+    venv = tmp_path / "venv"
+    site_of(venv)
+    evil = venv / "evil" / "python3.12" / "site-packages"
+    evil.mkdir(parents=True)
+    (evil / "x.pth").write_text("import os")
+    (venv / "lib64").symlink_to("evil")
+    with pytest.raises(TreeError):
+        pth_problems(venv)
+    with pytest.raises(TreeError):
+        installed_distributions(venv)
+
+
+def test_lib64_link_when_lib_is_a_link_refused(tmp_path: Path) -> None:
+    venv = tmp_path / "venv"
+    real = tmp_path / "real" / "python3.12" / "site-packages"
+    real.mkdir(parents=True)
+    venv.mkdir()
+    (venv / "lib").symlink_to(tmp_path / "real")
+    (venv / "lib64").symlink_to("lib")
+    with pytest.raises(TreeError):
+        pth_problems(venv)

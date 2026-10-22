@@ -14,6 +14,7 @@ from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 
 _CHUNK = 1 << 20
+_OPEN_REGULAR_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 _MAX_HOPS = 40
 _FORBIDDEN_CHARS = {"\n": "newline", "\0": "NUL", "/": "slash"}
 
@@ -140,11 +141,26 @@ def _link_text(path: Path) -> bytes:
     return text
 
 
-def _file_sha256(path: Path) -> str:
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+def open_regular(path: Path) -> int:
+    """Open an untrusted file read-only and return its descriptor.
+
+    Never follows a final link and never blocks on a FIFO; anything but a
+    regular file is a `TreeError`. The caller closes the descriptor. A failed
+    `os.open` raises its `OSError`.
+    """
+    fd = os.open(path, _OPEN_REGULAR_FLAGS)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise TreeError(f"not a regular file: {path}")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _file_sha256(path: Path) -> str:
+    fd = open_regular(path)
+    try:
         digest = hashlib.sha256()
         while chunk := os.read(fd, _CHUNK):
             digest.update(chunk)
