@@ -127,6 +127,11 @@ class Layout:
         return self.install_dir / "accounts.toml"
 
     @property
+    def admin_home(self) -> Path:
+        """`HOME` and cache of root's `uv` for the admin Python (scratch, `0700`)."""
+        return self.install_dir / "admin-home"
+
+    @property
     def marks_dir(self) -> Path:
         """Acceptance marks."""
         return self.install_dir / "accept"

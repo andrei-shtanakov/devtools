@@ -18,7 +18,7 @@ from unittest import mock
 
 import pytest
 
-from df import fsutil, leaves, receive, routes
+from df import admin, fsutil, leaves, receive, routes
 from df import install_table as table
 from df import platform as plat
 from df.accept import Facts, classify, load_mark, read_facts
@@ -31,8 +31,11 @@ from tests.df.test_routes import (
     BOOT,
     ID,
     INSTALL,
+    PY,
     StandIns,
+    devtools_ref,
     expected_events,
+    fake_uv,
     make_calls,
     normalize,
     obj,
@@ -671,6 +674,16 @@ def _nothing(_fl: FakeLayout) -> None:
     pass
 
 
+def _run_install_admin_python(
+    fl: FakeLayout, monkeypatch: pytest.MonkeyPatch, _v: str | None
+) -> str:
+    """The real primitive with the fixture uv (`FAKE_UV`); trusted paths."""
+    monkeypatch.setattr(plat, "trusted_path_problems", lambda _p: [])
+    fl.clear()
+    admin.install_admin_python(fl.layout, PY, uv=fake_uv(fl), platform=PLATFORM)
+    return "admin-python/cpython-…"
+
+
 #: name -> run of the real primitive in a variant; returns the target text.
 PRIMITIVES: Mapping[
     str, Callable[[FakeLayout, pytest.MonkeyPatch, str | None], str]
@@ -705,6 +718,17 @@ PRIMITIVES: Mapping[
         "staging/<id>",
     ),
     "cleanup_build_home": _run_cleanup_build_home,
+    "install_admin_python": _run_install_admin_python,
+    "install_admin": _simple(
+        devtools_ref,
+        lambda fl: admin.install_admin(
+            fl.layout, ID, devtools_ref=fl.layout.verify_dir / "devtools"
+        ),
+        "admin/<id>",
+    ),
+    "link_command": _simple(
+        _nothing, lambda fl: admin.link_command(fl.layout), "/usr/local/bin/darkfactory"
+    ),
 }
 
 

@@ -1,14 +1,16 @@
 """Tests for the route interpreter, guards and call table (Task 7, part D1).
 
 Every route runs through the real `run_route` and real guards over a
-`fake_layout`. Every call Tasks 7, 7a and 8 own (`acceptance_calls`) is real
-(7-D2);
+`fake_layout`. Every call Tasks 7, 7a, 8 and 8a own (`acceptance_calls`) is
+real (7-D2);
 only the leaves of later tasks (`LATER_LEAVES`) are stand-ins generated from
 `leaf_variants` (F3): each performs exactly its protocol's steps through the
 patched lower operations (`fault_point`, `sync_dir`, `sync_tree`, `run_as`,
 `reap_user_processes`) and changes only the objects its change steps name.
 `run_build` is real with F30's fakes: `verify_build_user`/`whoami_as`
-replaced and a local `uv` script as the plan's uv (no network). Task 9 reruns
+replaced and a local `uv` script as the plan's uv (no network); the same
+script installs a stand-in admin Python and the trusted `devtools` checkout
+is a local `df/`. Task 9 reruns
 the table with all-real calls.
 
 The expected sequence of a route is computed from the data alone: the
@@ -32,7 +34,7 @@ from typing import Any
 
 import pytest
 
-from df import accept, fsutil, routes
+from df import accept, admin, fsutil, routes
 from df import build as build_mod
 from df import install_table as table
 from df import platform as plat
@@ -69,7 +71,8 @@ from tests.df.conftest import BUILD_UID, FakeLayout
 
 ID = "rel1"
 PY = "3.13.1"
-KEY = "cpython-3.13.1-test-triple"
+SHORT = ".".join(PY.split(".")[:2])
+KEY = build_mod.python_key(PY, plat.detect_platform())
 BOOT = "boot-1"
 UV = "uv 0.9.2"
 Event = tuple[object, ...]
@@ -477,7 +480,9 @@ def prepare(fl: FakeLayout, monkeypatch: pytest.MonkeyPatch, state: State) -> No
         lay.pending.write_text("raw\n")
     trusted = bool(state["local_bin"])
     monkeypatch.setattr(
-        plat, "trusted_path_problems", lambda _p: [] if trusted else ["untrusted"]
+        plat,
+        "trusted_path_problems",
+        lambda p: ["untrusted"] if p == lay.local_bin and not trusted else [],
     )
 
 
@@ -590,16 +595,39 @@ def setup_layout(
     """The layout's directories; F30's fakes and the local uv of the plan."""
     fake_layout.make_dirs()
     uv = fake_uv(fake_layout)
-    uv.write_text(f"#!/bin/sh\n[ \"$1\" = --version ] && echo '{UV}'\nexit 0\n")
+    uv.write_text(FAKE_UV)
     uv.chmod(0o755)
+    monkeypatch.setattr(admin, "UV_ADMIN_CONFIRMED", frozenset({UV.split()[1]}))
     monkeypatch.setattr(build_mod, "verify_build_user", lambda _layout: [])
     monkeypatch.setattr(build_mod, "whoami_as", lambda _user: (BUILD_UID, BUILD_UID))
     return fake_layout
 
 
+#: The plan's uv: `--version` prints `UV`; `python install --no-bin <key>`
+#: puts a stand-in interpreter `<key>/bin/python<X.Y>` and a service file
+#: into `$UV_PYTHON_INSTALL_DIR` (as uv leaves `.lock` there); else nothing.
+FAKE_UV = f"""#!/bin/sh
+[ "$1" = --version ] && echo '{UV}' && exit 0
+if [ "$1 $2 $3" = "python install --no-bin" ]; then
+  mkdir -p "$UV_PYTHON_INSTALL_DIR/$4/bin" || exit 1
+  printf '#!/bin/sh\\n' > "$UV_PYTHON_INSTALL_DIR/$4/bin/python{SHORT}"
+  : > "$UV_PYTHON_INSTALL_DIR/.lock"
+fi
+exit 0
+"""
+
+
 def fake_uv(fl: FakeLayout) -> Path:
-    """The plan's uv: a local script (`--version` prints `UV`), outside root."""
+    """The plan's uv: a local script (`FAKE_UV`), outside root."""
     return fl.layout.root.parent / "uv"
+
+
+def devtools_ref(fl: FakeLayout) -> Path:
+    """Root's trusted `devtools` checkout: a small `df/` under `verify`."""
+    ref = fl.layout.verify_dir / "devtools"
+    (ref / "df").mkdir(parents=True, exist_ok=True)
+    (ref / "df" / "__init__.py").write_text('"""admin code"""\n')
+    return ref
 
 
 # ---------- routes match the table ----------
@@ -1164,7 +1192,7 @@ def make_calls(fl: FakeLayout) -> dict[str, routes.Call]:
         platform=plat.detect_platform(),
         plan=plan,
         limits=CopyLimits(),
-        refs={},
+        refs={"devtools": devtools_ref(fl)},
         journal=lay.journal,
         run_id="run-1",
         python_key=KEY,

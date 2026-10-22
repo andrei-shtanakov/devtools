@@ -12,9 +12,9 @@ parent; the object itself is never opened (spec 3.8). Target texts resolve
 through one exact-match table, `TARGETS`; a protocol call whose target names a
 wrapper (`WRAPS`) goes to that wrapper.
 
-`acceptance_calls` builds the implementations Tasks 7, 7a and 8 own (protocol
-leaves live in `df.leaves`); the other leaves (`LATER_LEAVES`) come from their
-owner tasks and Task 9 merges them.
+`acceptance_calls` builds the implementations Tasks 7, 7a, 8 and 8a own
+(protocol leaves live in `df.leaves` and `df.admin`); the other leaves
+(`LATER_LEAVES`) come from their owner task and Task 9 merges them.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from df import accept, fsutil, receive
+from df import accept, admin, fsutil, receive
 from df import build as build_mod
 from df import install_table as table
 from df import platform as plat
@@ -33,7 +33,7 @@ from df.accept import STAGE_ORDER, AcceptMark, Facts, Stage
 from df.boundary import expected_entrypoints, static_problems, transfer_check
 from df.build import BuildPlan
 from df.config import InstallConfig, config_digest
-from df.digest import TreeError, check_links, release_digest, tree_digest
+from df.digest import TreeError, check_links, release_digest
 from df.inputs import InstalledDist, installed_distributions, verify_sources
 from df.journal import StepFailed, journal_event
 from df.leaves import accept_copy, prepare_dir, seal, verify_chmod
@@ -155,11 +155,8 @@ TARGETS: Mapping[str, Target] = {
 
 #: Route leaves (and wrappers) implemented by later tasks, with the owner task.
 #: `write_atomic` itself is called only for targets without a wrapper: the
-#: launcher files (texts of Task 8a) and `install.toml` (Task 9).
+#: launcher files (texts of Task 8a, `df.admin`) and `install.toml` (Task 9).
 LATER_LEAVES: Mapping[str, str] = {
-    "install_admin_python": "8a",
-    "install_admin": "8a",
-    "link_command": "8a",
     "activate": "9",
     "write_release_json": "9",
     "register": "9",
@@ -470,15 +467,19 @@ def acceptance_calls(
     python_key: str,
     ctx: RouteContext | None = None,
 ) -> dict[str, Call]:
-    """Implementations of the route calls Tasks 7, 7a and 8 own (leaves, WRAPS).
+    """Implementations of the route calls Tasks 7, 7a, 8 and 8a own (leaves, WRAPS).
 
     Keys and `LATER_LEAVES` together are exactly `route_leaves()` and `WRAPS`;
     Task 9 merges the later ones. The calls share one `RouteContext`: the
     build's uv version and the copy's digest reach the next mark.
     `python_key` is the caller's admin Python key — the same value it passes
-    to `run_route`/`route_action` for the guards (one source, M5). A caller
+    to `run_route`/`route_action` for the guards (one source, M5); it must be
+    `build.python_key(profile.python, platform)`, the key the admin Python
+    is installed under (F1), else `AssertionError`. A caller
     that reads the context afterwards (Task 9) passes its own `ctx`.
     """
+    if python_key != build_mod.python_key(profile.python, platform):
+        raise AssertionError(f"python_key {python_key!r} != the profile's key")
     leaves = _Leaves(
         layout,
         release_id,
@@ -535,6 +536,9 @@ class _Leaves:
             "remove_empty_dir": self.remove_empty_dir,
             "remove_durably": self.remove_durably,
             "drop_mark": lambda _t: accept.drop_mark(lay, rid),
+            "install_admin_python": self.install_admin_python,
+            "install_admin": self.install_admin,
+            "link_command": lambda _t: admin.link_command(lay),
         }
 
     @property
@@ -603,7 +607,23 @@ class _Leaves:
         )
 
     def _admin_digest(self) -> str:
-        return tree_digest(self.layout.admin_dir(self.release_id), exclude=frozenset())
+        return admin.admin_digest(self.layout, self.release_id)
+
+    def install_admin_python(self, _target: str) -> None:
+        """Leaf `install_admin_python`: the profile's Python with the plan's
+        approved uv, under the key the guards read (F1)."""
+        admin.install_admin_python(
+            self.layout, self.profile.python, uv=self.plan.uv, platform=self.platform
+        )
+
+    def install_admin(self, _target: str) -> None:
+        """Leaf `install_admin` from root's trusted `devtools` checkout (F13)."""
+        ref = self.refs.get("devtools")
+        if ref is None:
+            raise StepFailed(
+                "admin", "профиль без devtools: нет административного кода"
+            )
+        admin.install_admin(self.layout, self.release_id, devtools_ref=ref)
 
     def reap(self, target: str) -> None:
         """Leaf `reap_user_processes`; leftovers are a journal warning (F28)."""
