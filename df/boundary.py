@@ -59,6 +59,7 @@ _SITECUSTOMIZE = "sitecustomize"
 _PYVENV = "pyvenv.cfg"
 _KEY = re.compile(r"cpython-3\.(\d+)\.\d+-[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*")
 _STDLIB = re.compile(r"python3\.\d+")
+_ALIAS = re.compile(r"cpython-3\.\d+-[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*")
 _ERRORS = (TreeError, StepFailed, OSError, ValueError)
 #: Tokens naming the file's own directory (and, Mach-O, the main program's).
 _MACHO_TOKENS = ("@loader_path", "@executable_path")
@@ -91,13 +92,17 @@ class StartupFile:
     kind: EntryKind = "any"
 
 
-#: Every startup-read path the walk can reach inside the release (getpath and
+#: Every startup-read path the walks can reach inside the release (getpath and
 #: site.py of CPython 3.12, probes on uv 0.11.23's managed CPython 3.12.13,
-#: 22.10). getpath's prefix search (`search_up` for `lib/python3XY.zip`, then
-#: `lib/python3.X/os.py`, and `lib/python3.X/lib-dynload` for exec_prefix)
-#: starts at `home` and walks up to `/`; inside the release every directory on
-#: that chain has an allowlisted listing (`CHAIN_DIRS`), above it the ancestors
-#: are root's. Beyond these, the interpreter's own files (`site.py`, the
+#: 22.10). getpath's searches walk `dirname` up to `/` from two starts
+#: (probed, re-review 2): the prefix walk (`lib/python3XY.zip`, then
+#: `lib/python3.X/os.py`) from the real directory of the base executable, the
+#: exec_prefix walk (`lib/python3.X/lib-dynload`) from the lexical directory of
+#: `venv/<r>/bin/python`'s link target; `home` starts neither while that is a
+#: link. Both starts are pinned by exact text (`env_paths`, `_link_text`) to
+#: `python/<alias>/bin` → `python/<key>/bin`, so every directory either walk
+#: passes inside the release is one of `chain_dirs` (allowlisted); above the
+#: release the ancestors are root's. Beyond these, the interpreter's own files (`site.py`, the
 #: stdlib) are not verified (§3.5, origin of the interpreter): (ж) cannot
 #: prove there is no startup code there.
 STARTUP_FILES: tuple[StartupFile, ...] = (
@@ -148,19 +153,19 @@ STARTUP_FILES: tuple[StartupFile, ...] = (
     StartupFile(
         "{py}/bin",
         "lib",
-        "getpath: поиск prefix (`search_up`) начинается с `home`",
+        "getpath: оба обхода (`search_up`) начинаются с `python/<ключ>/bin`",
         "refused",
     ),
     StartupFile(
         "python",
         "lib",
-        "getpath: `search_up` от `home` — `python/lib/python3XY.zip`, stdlib (проба)",
+        "getpath: `search_up` — `python/lib/python3XY.zip`, stdlib (проба)",
         "refused",
     ),
     StartupFile(
         ".",
         "lib",
-        "getpath: `search_up` от `home` — `<релиз>/lib/python3XY.zip` (проба)",
+        "getpath: `search_up` — `<релиз>/lib/python3XY.zip` (проба)",
         "refused",
     ),
     StartupFile(
@@ -186,7 +191,7 @@ STARTUP_FILES: tuple[StartupFile, ...] = (
     StartupFile(
         "цепочка `search_up` в релизе",
         "*",
-        "getpath: каждый каталог от `home` до корня релиза — белый список `CHAIN_DIRS`",
+        "getpath: каталоги обоих обходов от закреплённых стартов до корня — `chain_dirs`",
         "rule",
     ),
     StartupFile(
@@ -226,12 +231,12 @@ def base_bin_names(minor: str) -> frozenset[str]:
 
 def chain_dirs(env: EnvPaths) -> dict[PurePosixPath, dict[str, EntryKind]]:
     """Allowlisted listing of every release directory on getpath's
-    `search_up` chain from `home` (`python/<key>/bin`) to the release root
-    (the minor alias resolves to the same key dir). Measured on the sample
+    `search_up` walks from their pinned starts (`python/<alias>/bin`, the
+    alias being a link to `python/<key>`, and the real `python/<key>/bin`) to
+    the release root. Measured on the sample
     release (uv 0.11.23, 22.10); the release root holds what the build and
     `register` write (`src`, `venv`, `python`, `release.json`)."""
-    triple = env.python.name.split("-", 2)[2]
-    alias = f"cpython-3.{env.minor}-{triple}"
+    alias = env.alias
     return {
         env.py_bin: dict.fromkeys(base_bin_names(env.minor), "entry"),
         env.python: {
@@ -347,6 +352,11 @@ class EnvPaths:
         return self.python / "bin"
 
     @property
+    def alias(self) -> str:
+        """uv's minor-version link name `cpython-3.X-<triple>` in `python/`."""
+        return _alias_of(self.python.name)
+
+    @property
     def lib(self) -> PurePosixPath:
         return self.python / "lib"
 
@@ -439,7 +449,13 @@ def _is_odd_char(char: str) -> bool:
 
 
 def _home_key(release_dir: Path, home: str) -> PurePosixPath:
-    """`python/<key>` that `home` resolves to; `home` itself canonical."""
+    """`python/<key>` named by `home`, pinned by exact text (round 3).
+
+    `home` is exactly `<release>/python/<alias>/bin`, as uv writes it; the
+    alias link's text is exactly `<release>/python/<key>` (same minor and
+    triple), and the key dir is a real directory. Text, not resolution: a
+    walk of getpath starts from the lexical path.
+    """
     try:
         parts = canonical_root(home)
     except TreeError as exc:
@@ -447,18 +463,45 @@ def _home_key(release_dir: Path, home: str) -> PurePosixPath:
     root = canonical_root(str(release_dir))
     if parts[: len(root)] != root:
         raise TreeError(f"{_PYVENV}: home вне релиза: {home!r}")
-    try:
-        resolved = resolve_in_tree(release_dir, str(release_dir), home)
-    except TreeError as exc:
-        raise TreeError(f"{_PYVENV}: home {home!r}: {exc}") from exc
+    rest = parts[len(root) :]
     if (
-        len(resolved.parts) != 3
-        or resolved.parts[0] != "python"
-        or resolved.parts[2] != "bin"
-        or not _KEY.fullmatch(resolved.parts[1])
+        len(rest) != 3
+        or rest[0] != "python"
+        or rest[2] != "bin"
+        or not _ALIAS.fullmatch(rest[1])
     ):
-        raise TreeError(f"{_PYVENV}: home {home!r} → {resolved}: не python/<ключ>/bin")
-    return resolved.parent
+        raise TreeError(
+            f"{_PYVENV}: home {home!r} не `<релиз>/python/<алиас>/bin` (как пишет uv)"
+        )
+    key = _alias_target(release_dir, rest[1])
+    if not _is_real_dir(release_dir / "python" / key):
+        raise TreeError(f"python/{key}: не каталог")
+    return PurePosixPath("python", key)
+
+
+def _alias_target(release_dir: Path, alias: str) -> str:
+    """The key the alias link names by its exact text `<release>/python/<key>`."""
+    link = release_dir / "python" / alias
+    if not stat.S_ISLNK(os.lstat(link).st_mode):
+        raise TreeError(f"python/{alias}: не ссылка")
+    text = os.readlink(link)
+    prefix = f"{release_dir}/python/"
+    key = text.removeprefix(prefix)
+    if (
+        not text.startswith(prefix)
+        or not _KEY.fullmatch(key)
+        or _alias_of(key) != alias
+    ):
+        raise TreeError(
+            f"python/{alias}: текст ссылки {text!r} не `<релиз>/python/<ключ>`"
+        )
+    return key
+
+
+def _alias_of(key: str) -> str:
+    """`cpython-3.X.Y-<triple>` → uv's minor alias `cpython-3.X-<triple>`."""
+    _cpython, version, triple = key.split("-", 2)
+    return f"cpython-{version.rsplit('.', 1)[0]}-{triple}"
 
 
 def _minor(release_dir: Path, python: PurePosixPath) -> str:
@@ -634,8 +677,9 @@ def _chain_listing(
     allowed: Mapping[str, EntryKind],
 ) -> list[str]:
     """Review round 2: one directory of the `search_up` chain holds only its
-    allowlisted names, each of its type; the minor alias resolves to the key
-    dir. A name a `STARTUP_FILES` row already refuses is not reported twice."""
+    allowlisted names, each of its type (the alias link's text is pinned by
+    `env_paths`). A name a `STARTUP_FILES` row already refuses is not
+    reported twice."""
     refused = _refused_patterns(env, directory)
     problems: list[str] = []
     for path in select_names(release_dir / directory):
@@ -646,10 +690,6 @@ def _chain_listing(
                 problems.append(f"{rel}: вне белого списка цепочки поиска getpath")
         elif not _has_kind(path, kind):
             problems.append(f"{rel}: ожидался тип {kind}")
-        elif kind == "link" and directory == PurePosixPath("python"):
-            target = resolve_in_tree(release_dir, str(release_dir), rel)
-            if target != env.python:
-                problems.append(f"{rel}: ведёт в {target}, а не в {env.python}")
     return problems
 
 
@@ -696,18 +736,21 @@ def _sitecustomize(release_dir: Path, directory: PurePosixPath) -> list[str]:
 def _bin_problems(release_dir: Path, env: EnvPaths) -> list[str]:
     """(а) and F2/F4: every name of `venv/<r>/bin` that can run or configure."""
     problems: list[str] = []
-    links: dict[str, PurePosixPath] = {}
     for name in sorted(os.listdir(release_dir / env.bin)):
         rel = env.bin / name
         st = os.lstat(release_dir / rel)
         if stat.S_ISLNK(st.st_mode):
-            problems += _link_problem(release_dir, env, name, links)
+            problems += _link_problem(release_dir, env, name)
         elif stat.S_ISREG(st.st_mode) and st.st_mode & 0o111:
             problems += _guard(
                 str(rel), lambda r=rel: _exec_problems(release_dir, env, r)
             )
-    if "python" not in links:
+    python = release_dir / env.bin / "python"
+    if not os.path.lexists(python):
         problems.append(f"{env.bin}/python: нет интерпретатора окружения")
+    elif not stat.S_ISLNK(os.lstat(python).st_mode):
+        # a copy would start getpath's exec_prefix walk in the venv itself
+        problems.append(f"{env.bin}/python: не ссылка на интерпретатор релиза")
     return problems
 
 
@@ -716,19 +759,29 @@ def _link_names(env: EnvPaths) -> frozenset[str]:
     return frozenset({"python", "python3", f"python3.{env.minor}"})
 
 
-def _link_problem(
-    release_dir: Path, env: EnvPaths, name: str, links: dict[str, PurePosixPath]
-) -> list[str]:
+def _link_text(release_dir: Path, env: EnvPaths, name: str) -> str:
+    """Round 3: the exact text uv writes for the venv's interpreter links —
+    getpath's exec_prefix walk starts from the lexical directory of `python`'s
+    target, so it is pinned to `<release>/python/<alias>/bin/python3.X`."""
+    if name == "python":
+        return f"{release_dir}/python/{env.alias}/bin/python3.{env.minor}"
+    return "python"
+
+
+def _link_problem(release_dir: Path, env: EnvPaths, name: str) -> list[str]:
     rel = env.bin / name
     if name not in _link_names(env):
         return [f"{rel}: посторонняя ссылка в bin"]
+    text = os.readlink(release_dir / rel)
+    if text != _link_text(release_dir, env, name):
+        want = _link_text(release_dir, env, name)
+        return [f"{rel}: текст ссылки {text!r}, uv пишет {want!r}"]
     try:
         target = resolve_in_tree(release_dir, str(release_dir), rel)
     except TreeError as exc:
         return [f"{rel}: {exc}"]
     if target != env.interpreter:
         return [f"{rel}: ведёт в {target}, а не в {env.interpreter}"]
-    links[name] = target
     if classify_bin(release_dir / target) != "native":
         return [f"{rel}: {target} не нативный исполняемый файл"]
     return []

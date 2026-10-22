@@ -220,13 +220,40 @@ def test_foreign_interpreter_link_refused(
     link.unlink()
     os.symlink(f"{rel}/other/py", link)
     found = problems(rel)
-    assert any(f"venv/r1/bin/{name}: ведёт в other/py" in p for p in found), found
+    assert any(f"venv/r1/bin/{name}: текст ссылки" in p for p in found), found
 
 
 def test_stray_link_in_bin_refused(tmp_path: Path, deps: dict[Path, LibDeps]) -> None:
     rel = make_release(tmp_path)
     os.symlink("tool", rel / "venv/r1/bin/tool2")
     only(problems(rel), "venv/r1/bin/tool2", "посторонняя ссылка")
+
+
+def test_base_interpreter_as_link_refused(
+    tmp_path: Path, deps: dict[Path, LibDeps]
+) -> None:
+    """The pinned link text ends at `python/<alias>/bin/python3.X`; if that
+    name is itself a link, the real path (getpath's prefix walk start) moves:
+    resolution must still end at the key's own `python3.X`."""
+    rel = make_release(tmp_path)
+    real = rel / "python" / KEY / "bin" / "python3.12"
+    _write(rel / "other" / "py", MACHO)
+    real.unlink()
+    os.symlink(f"{rel}/other/py", real)
+    found = problems(rel)
+    assert any("venv/r1/bin/python: ведёт в other/py" in p for p in found), found
+
+
+def test_python_copy_instead_of_link_refused(
+    tmp_path: Path, deps: dict[Path, LibDeps]
+) -> None:
+    """Round 3: a copied interpreter would start getpath's exec_prefix walk in
+    the venv itself; `bin/python` must be uv's link."""
+    rel = make_release(tmp_path)
+    (rel / "venv/r1/bin/python").unlink()
+    _write(rel / "venv/r1/bin/python", MACHO)
+    found = problems(rel)  # python3 / python3.12 then lead to the copy too
+    assert "venv/r1/bin/python: не ссылка на интерпретатор релиза" in found, found
 
 
 def test_missing_python_link_refused(tmp_path: Path, deps: dict[Path, LibDeps]) -> None:
@@ -358,11 +385,14 @@ def test_environments_on_different_pythons_refused(
     tmp_path: Path, deps: dict[Path, LibDeps]
 ) -> None:
     rel = make_release(tmp_path, {"r1": ("tool",), "r2": ()})
-    other = rel / "python" / f"cpython-3.12.14-{TRIPLE}"
-    _write(other / "bin" / "python3.12", MACHO)
-    (other / "lib" / "python3.12" / "lib-dynload").mkdir(parents=True)
+    other = rel / "python" / f"cpython-3.13.1-{TRIPLE}"
+    _write(other / "bin" / "python3.13", MACHO)
+    (other / "lib" / "python3.13" / "lib-dynload").mkdir(parents=True)
+    os.symlink(str(other), rel / "python" / f"cpython-3.13-{TRIPLE}")
+    (rel / "venv/r2/lib/python3.13/site-packages").mkdir(parents=True)
     _cfg_r2 = rel / "venv/r2/pyvenv.cfg"
-    _cfg_r2.write_text(PYVENV.format(home=f"{other}/bin", repo="r2"))
+    home = f"{rel}/python/cpython-3.13-{TRIPLE}/bin"
+    _cfg_r2.write_text(PYVENV.format(home=home, repo="r2"))
     expected = {"r1": frozenset({"tool"}), "r2": frozenset()}
     found = static_problems(rel, PLATFORM, expected)
     assert any("разные Python" in p for p in found), found
@@ -784,22 +814,96 @@ def test_chain_listing_fixes_each_type(
     assert any(p.startswith(f"{path}: ожидался тип") for p in found), found
 
 
-@pytest.mark.parametrize("target", ["bin", "lib"])
-def test_minor_alias_must_resolve_to_the_key_dir(
-    tmp_path: Path, deps: dict[Path, LibDeps], target: str
+@pytest.mark.parametrize(
+    "text",
+    [
+        "{rel}/python/{key}/bin",  # another target
+        "{key}",  # relative: resolves the same, not what uv writes
+        "{rel}/python/./{key}",
+        "{rel}/python/.temp/k",  # through another in-tree link to the key dir
+    ],
+)
+def test_minor_alias_text_is_pinned(
+    tmp_path: Path, deps: dict[Path, LibDeps], text: str
 ) -> None:
-    """The venv names the key dir directly here, so only the alias rule sees it."""
+    """Round 3: the alias link's text is exactly `<release>/python/<key>`."""
     rel = make_release(tmp_path)
-    home = f"{rel}/python/{KEY}/bin"
-    (rel / "venv/r1/pyvenv.cfg").write_text(PYVENV.format(home=home, repo="r1"))
-    (rel / "venv/r1/bin/python").unlink()
-    os.symlink(f"{home}/python3.12", rel / "venv/r1/bin/python")
-    assert problems(rel) == []
+    (rel / "python" / ".temp").mkdir()
+    os.symlink(f"{rel}/python/{KEY}", rel / "python/.temp/k")
     alias = rel / "python" / ALIAS
     alias.unlink()
-    os.symlink(f"{rel}/python/{KEY}/{target}", alias)
+    os.symlink(text.format(rel=rel, key=KEY), alias)
     found = problems(rel)
-    assert any(f"python/{ALIAS}: ведёт в" in p for p in found), found
+    assert any(f"python/{ALIAS}: текст ссылки" in p for p in found), found
+
+
+def _evil_dynload(base: Path) -> None:
+    """`lib/python3.12/lib-dynload/sitecustomize.py` under `base`, as probed."""
+    _write(
+        base / "lib/python3.12/lib-dynload/sitecustomize.py", b"print('EVIL')\n", 0o644
+    )
+
+
+@pytest.mark.parametrize("where", ["python/.temp/a", "venv/r1/a", "src/a"])
+def test_link_target_through_unlisted_dir_refused(
+    tmp_path: Path, deps: dict[Path, LibDeps], where: str
+) -> None:
+    """Re-review 2, N4 as probed: getpath's exec_prefix walk starts at the
+    lexical directory of `bin/python`'s target; `<where>/b` → key `bin` with a
+    planted `<where>/lib/python3.12/lib-dynload` ran `sitecustomize` under
+    `-I`. The link text is pinned, so the target is refused."""
+    rel = make_release(tmp_path)
+    base = rel / where
+    base.mkdir(parents=True)
+    os.symlink(f"{rel}/python/{KEY}/bin", base / "b")
+    _evil_dynload(base)
+    link = rel / "venv/r1/bin/python"
+    link.unlink()
+    os.symlink(f"{base}/b/python3.12", link)
+    found = problems(rel)
+    assert any("venv/r1/bin/python: текст ссылки" in p for p in found), found
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "../../../python/{alias}/bin/python3.12",  # relative, same target
+        "{rel}/python/{alias}/bin/python3",  # two hops
+        "{rel}/python/{key}/bin/python3.12",  # key form: uv writes the alias
+    ],
+)
+def test_interpreter_link_text_is_pinned(
+    tmp_path: Path, deps: dict[Path, LibDeps], text: str
+) -> None:
+    rel = make_release(tmp_path)
+    link = rel / "venv/r1/bin/python"
+    link.unlink()
+    os.symlink(text.format(rel=rel, alias=ALIAS, key=KEY), link)
+    only(problems(rel), "venv/r1/bin/python: текст ссылки")
+
+
+@pytest.mark.parametrize(
+    "home",
+    [
+        "{rel}/python/.temp/k/bin",
+        "{rel}/python/{key}/bin",
+        "{rel}/venv/r1/k/bin",
+        "{rel}/python/{alias}/bin/extra",
+    ],
+)
+def test_home_text_is_pinned(
+    tmp_path: Path, deps: dict[Path, LibDeps], home: str
+) -> None:
+    """Round 3: `home` via an in-tree link (or the key form) resolves to the
+    key `bin` but is not what uv writes; refused by text."""
+    rel = make_release(tmp_path)
+    (rel / "python/.temp").mkdir()
+    os.symlink(f"{rel}/python/{KEY}", rel / "python/.temp/k")
+    os.symlink(f"{rel}/python/{KEY}", rel / "venv/r1/k")
+    text = home.format(rel=rel, key=KEY, alias=ALIAS)
+    (rel / "venv/r1/pyvenv.cfg").write_text(PYVENV.format(home=text, repo="r1"))
+    found = problems(rel)
+    assert any("venv/r1: pyvenv.cfg: home" in p for p in found), found
 
 
 @pytest.mark.parametrize(
