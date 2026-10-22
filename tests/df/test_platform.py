@@ -55,7 +55,7 @@ def ok(stdout: bytes = b"", code: int = 0) -> RunResult:
     return RunResult(code, stdout, b"", launched=True)
 
 
-@pytest.fixture
+@pytest.fixture()
 def layout(tmp_path: Path) -> Layout:
     root = Path(os.path.realpath(tmp_path)) / "root"
     lay = Layout(root)
@@ -723,7 +723,7 @@ class World:
         )
 
 
-@pytest.fixture
+@pytest.fixture()
 def no_chown(monkeypatch: pytest.MonkeyPatch) -> None:
     """Non-root tests: the home keeps the current user, who is the account."""
     monkeypatch.setattr(os, "fchown", lambda _fd, _u, _g: None)

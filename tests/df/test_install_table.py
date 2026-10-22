@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import re
 import textwrap
 from collections.abc import Iterator, Mapping
 from dataclasses import replace
@@ -279,11 +280,29 @@ TWINS = {
 }
 
 
+#: The fragment of check_data's message each twin must trigger.
+TWIN_CAUSES = {
+    "leaf-both-protocol-and-call": "'seal'",
+    "leaf-neither": "'run_build'",
+    "guard-without-text": "guard S=tree",
+    "guard-source-not-settled": "guard S=tree",
+    "absent-ok-not-protocol": "ABSENT_OK run_build",
+    "absent-ok-without-absent-variant": "remove_durably: no variant absent",
+    "absent-variant-with-root-change": "cleanup_tree: no variant absent",
+    "variant-without-condition": "seal: conditions",
+    "condition-without-variants": "verify_chmod: VARIANT_WHEN without variants",
+    "not-modeled-unknown-variant": "NOT_MODELED ('cleanup_tree', 'gone')",
+    "op-not-in-ops": "verify_chmod/None: op chmod",
+    "sync-of-unnamed-dir": "verify_chmod/None: sync of nowhere",
+    "enotempty-as-tree": "cleanup_tree: ENOTEMPTY is not a failed cleanup",
+}
+
+
 @pytest.mark.parametrize("twin", sorted(TWINS))
 def test_check_data_twins_fail(monkeypatch: pytest.MonkeyPatch, twin: str) -> None:
     attr, value = TWINS[twin]
     monkeypatch.setattr(it, attr, value)
-    with pytest.raises(AssertionError):
+    with pytest.raises(AssertionError, match=re.escape(TWIN_CAUSES[twin])):
         check_data()
 
 
@@ -317,5 +336,12 @@ def test_leaf_variants_and_effects() -> None:
 def test_cleanup_tree_cases_cover_selection() -> None:
     assert {v for _, v in it.CLEANUP_TREE_CASES} == set(it.variants("cleanup_tree"))
     assert set(it.CLEANUP_OUTCOME) == set(it.variants("cleanup_tree"))
+    assert it.CLEANUP_OUTCOME == {
+        "tree": "removed",
+        "link": "removed",
+        "absent": "removed",
+        "quarantine": "quarantined",
+        "failed": "failed",
+    }
     assert len(it.CLEANUP_TREE_CASES) == 2 + 2 + 2 * (2 + 1 + 1)
     assert it.cleanup_tree_variant("dir", "ok", "ENOTEMPTY", False) == "failed"
