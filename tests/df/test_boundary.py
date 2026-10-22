@@ -305,6 +305,32 @@ def test_pyvenv_system_site_value(
     assert (problems(rel) == []) is ok
 
 
+@pytest.mark.parametrize(
+    "joint",
+    ["\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029", "\x00"],
+)
+def test_pyvenv_cfg_line_break_differential_refused(
+    tmp_path: Path, deps: dict[Path, LibDeps], joint: str
+) -> None:
+    """`str.splitlines` would see a second `home` where CPython (newlines
+    only) sees one value, or the reverse: such a file is refused."""
+    rel = make_release(tmp_path)
+    cfg = rel / "venv/r1/pyvenv.cfg"
+    home = f"{rel}/python/{ALIAS}/bin"
+    text = cfg.read_text().replace(
+        f"home = {home}\n", f"home = {home}{joint}home = /opt/elsewhere/bin\n"
+    )
+    cfg.write_bytes(text.encode("utf-8"))
+    only(problems(rel), "venv/r1: pyvenv.cfg", "недопустимые символы")
+
+
+def test_pyvenv_cfg_crlf_accepted(tmp_path: Path, deps: dict[Path, LibDeps]) -> None:
+    rel = make_release(tmp_path)
+    cfg = rel / "venv/r1/pyvenv.cfg"
+    cfg.write_bytes(cfg.read_bytes().replace(b"\n", b"\r\n").replace(b"= ", b"=\t"))
+    assert problems(rel) == []
+
+
 @pytest.mark.parametrize("key", ["home", "include-system-site-packages"])
 def test_pyvenv_duplicate_key_refused(
     tmp_path: Path, deps: dict[Path, LibDeps], key: str
@@ -694,14 +720,15 @@ Run = tuple[str, tuple[str, ...], dict[str, object]]
 
 
 def sys_path(rel: Path, repo: str = "r1", *, isolated: bool = False) -> list[str]:
-    """The measured `sys.path` (pre-flight §2.4), alias path for lib-dynload."""
+    """The measured `sys.path` (pre-flight §2.4), alias path for lib-dynload;
+    `-P` and `-I` both keep the cwd (`""`) off it."""
     path = [
         f"{rel}/python/{KEY}/lib/python312.zip",
         f"{rel}/python/{KEY}/lib/python3.12",
         f"{rel}/python/{ALIAS}/lib/python3.12/lib-dynload",
         f"{rel}/venv/{repo}/lib/python3.12/site-packages",
     ]
-    return path if isolated else ["", *path]
+    return path
 
 
 class FakeRunAs:
@@ -771,7 +798,7 @@ def test_transfer_check_passes_and_records_python_declared(
             ")",
             "-print",
         ),
-        (python, "-c", boundary.SYS_PATH_PROBE),
+        (python, "-P", "-c", boundary.SYS_PATH_PROBE),
         (python, "-I", "-c", boundary.SYS_PATH_PROBE),
         (f"{runner.rel}/venv/r1/bin/tool", "--help"),
     ]
@@ -869,6 +896,20 @@ def test_present_zip_on_sys_path_refused(runner: FakeRunAs, tmp_path: Path) -> N
     _write(runner.rel / "python" / KEY / "lib" / "python312.zip", b"PK", 0o644)
     found = run(runner, tmp_path).problems
     assert len(found) == 2 and all("python312.zip" in p for p in found), found
+
+
+@pytest.mark.parametrize("isolated", [False, True])
+def test_empty_sys_path_element_refused(
+    runner: FakeRunAs, tmp_path: Path, isolated: bool
+) -> None:
+    """`-P`/`-I` keep the cwd (writable `build_home`) off `sys.path`; an empty
+    element means it is on it, and a module there could forge the answer."""
+    runner.answer = lambda repo, iso: [
+        ["", *sys_path(runner.rel, repo)] if iso == isolated else sys_path(runner.rel),
+        False,
+        VERSION,
+    ]
+    only(run(runner, tmp_path).problems, "sys.path ''")
 
 
 def test_enable_user_site_refused(runner: FakeRunAs, tmp_path: Path) -> None:

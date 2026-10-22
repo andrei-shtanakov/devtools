@@ -20,6 +20,7 @@ import os
 import re
 import stat
 import tomllib
+import unicodedata
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -46,7 +47,7 @@ BinClass = Literal["native", "script", "other"]
 RUN_TIMEOUT = 60.0
 #: The whole environment of every transfer-check run besides `HOME`.
 RUN_ENV: Mapping[str, str] = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
-#: Printed by each environment's interpreter, without and with `-I`.
+#: Printed by each environment's interpreter, with `-P` and with `-I`.
 SYS_PATH_PROBE = (
     "import json,site,sys;"
     "print(json.dumps([sys.path, site.ENABLE_USER_SITE, sys.version]))"
@@ -63,6 +64,11 @@ _ERRORS = (TreeError, StepFailed, OSError, ValueError)
 #: Tokens naming the file's own directory (and, Mach-O, the main program's).
 _MACHO_TOKENS = ("@loader_path", "@executable_path")
 _ELF_TOKENS = ("$ORIGIN", "${ORIGIN}")
+#: Line breaks of `str.splitlines` that are not control characters.
+_LINE_BREAKS = frozenset("\u2028\u2029")
+#: Flags of the two (ж) runs: `-P` keeps the cwd (`build_home`, writable by
+#: `df-build`) off `sys.path`, so no module there can forge the probe's answer.
+_PROBE_FLAGS: tuple[tuple[str, ...], ...] = (("-P",), ("-I",))
 
 
 def expected_entrypoints(ref_dir: Path) -> frozenset[str]:
@@ -213,12 +219,24 @@ def _pyvenv_cfg(venv: Path) -> dict[str, list[str]]:
     if not found:
         raise TreeError(f"нет {_PYVENV}")
     text = read_capped(found[0], PYVENV_CAP).decode("utf-8")
+    odd = sorted({c for c in text if _is_odd_char(c)})
+    if odd:
+        raise TreeError(f"{_PYVENV}: недопустимые символы {odd!r}")
     values: dict[str, list[str]] = {}
-    for line in text.splitlines():
-        key, sep, value = line.partition("=")
+    for line in text.split("\n"):
+        key, sep, value = line.removesuffix("\r").partition("=")
         if sep:
             values.setdefault(key.strip().lower(), []).append(value.strip())
     return values
+
+
+def _is_odd_char(char: str) -> bool:
+    """A character on which `str.splitlines` and CPython's own line split of
+    `pyvenv.cfg` (newlines only) could disagree, or any control character
+    but tab, CR and LF: the file is refused rather than read two ways."""
+    return char not in "\t\r\n" and (
+        unicodedata.category(char) == "Cc" or char in _LINE_BREAKS
+    )
 
 
 def _home_key(release_dir: Path, home: str) -> PurePosixPath:
@@ -656,8 +674,9 @@ def transfer_check(
 
     Effects: `run_as(df-build)+`; removes nothing. First `find` as `user`:
     any `build_home/tmp` or `build_home/cache` is a problem and nothing else
-    runs. Then for each environment its `bin/python` without and with `-I`
-    (rule (ж): every non-empty `sys.path` element resolves in-tree to its own
+    runs. Then for each environment its `bin/python` without `-I` (but with
+    `-P`: the cwd stays off `sys.path`) and with `-I` (rule (ж): every
+    `sys.path` element, an empty one included, must resolve in-tree to its own
     `site-packages`, the stdlib or `lib-dynload`, or is the absent
     `python3XY.zip`; `ENABLE_USER_SITE` false), and every expected
     entrypoint with `--help` (rule (з): code 0 within the deadline).
@@ -717,7 +736,7 @@ class _Runner:
         """Rule (ж) for one environment; returns `sys.version` (both runs agree)."""
         python = str(self.release_dir / env.bin / "python")
         versions: set[str] = set()
-        for flags in ([], ["-I"]):
+        for flags in _PROBE_FLAGS:
             label = " ".join([python, *flags])
             result = self.run([python, *flags, "-c", SYS_PATH_PROBE])
             failed = _outcome(label, result)
@@ -742,8 +761,6 @@ class _Runner:
         allowed = {env.site, env.stdlib, env.dynload}
         problems: list[str] = []
         for item in path:
-            if item == "":
-                continue
             if not item.startswith("/"):
                 problems.append(f"sys.path {item!r}: не абсолютный путь")
                 continue
