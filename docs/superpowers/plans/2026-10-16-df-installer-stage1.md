@@ -2124,6 +2124,17 @@ def test_distribution_problems_leaf_lists_every_repo(fl): ...
       `python`, `python3`, `python3-config`, `python3.X`, `python3.X-config`); иное имя —
       отказ. Вне таблицы файлы интерпретатора не сверяются (§3.5): (ж) не доказывает
       отсутствия кода старта в них.
+    - **(ё), структурное правило** (ревью круг 2, N1–N3; третья находка класса — меняется
+      механизм, не список): `chain_dirs(env)` — белый список с типом (`file`/`dir`/`link`/
+      `entry`) каждого каталога цепочки `search_up` getpath от `home` до корня релиза:
+      `python/<ключ>/bin` (14 имён, `entry`), `python/<ключ>` (`bin`, `BUILD`, `include`,
+      `lib`, `share`), `python/` (каталог ключа, ссылка на минор → каталог ключа, `.lock`,
+      `.temp`, `.gitignore`), корень (`src`, `venv`, `python`, `release.json`). Иное имя
+      (в том числе регистровый двойник) или тип — отказ. Строки таблицы для обхода:
+      `python/lib`, `<релиз>/lib`, `python/<ключ>/lib/lib` (известная libpython). Ориентиры
+      `required` проверяются по типу через `lstat` (`os.py` — файл, `lib-dynload` —
+      каталог, N2). `usercustomize` — строка-ссылка на (б)/(ж) (N3). Выше корня релиза —
+      каталоги root (предпосылка §3.10).
 
     Названное ограничение (Task 7a, `DECLARED_LIMIT`): код без метаданных распределения
     `installed_distributions` не видит; (а)–(ё) его не закрывают, `RECORD` в v1 не сверяется.
@@ -2225,6 +2236,14 @@ def test_every_refused_startup_file_is_refused(tmp_path, deps, entry, kind): ...
 def test_startup_table_names_the_probed_build_markers(): ...
 def test_required_startup_landmark_missing_refused(tmp_path, deps, name): ...  # os.py, lib-dynload
 def test_base_bin_allowlist(tmp_path, deps): ...   # все замеренные имена — да; иное — нет
+def test_chain_layout_as_measured_passes(tmp_path, deps): ...
+def test_chain_listing_refuses_anything_else(tmp_path, deps, where, form): ...
+    # 4 каталога цепочки × файл / каталог / ссылка / регистровый двойник
+def test_chain_listing_fixes_each_type(tmp_path, deps, path, form): ...
+def test_minor_alias_must_resolve_to_the_key_dir(tmp_path, deps, target): ...
+def test_prefix_walk_out_of_the_key_dir_refused(tmp_path, deps, where): ...  # как в пробе
+def test_required_landmark_type(tmp_path, deps, landmark, form): ...   # N2
+def test_usercustomize_is_a_reference_row(): ...                       # N3
 def test_expected_entrypoints_package_rules(tmp_path, text, want): ...
     # package=false → ∅; без build-system → ∅; scripts → имена; gui-scripts не входят
 def test_expected_entrypoints_refusals(tmp_path, text): ...  # dynamic, package="yes", "../x"
@@ -2270,7 +2289,8 @@ def test_twin_transfer_check_with_hidden_build_home_cleanup(monkeypatch, fl): ..
   check`; `docs(df): Task 8 as built; boundary rules in spec 3.4, Task 9/12/13/14 items`;
   `fix(df): pyvenv.cfg split as CPython does; (ж) probe with -P` и `docs(df): …` к нему;
   `fix(df): Task 8 review round 1 — startup-file table, lone CR, hostile sys.path` и
-  `docs(df): …` к нему.
+  `docs(df): …` к нему; `fix(df): Task 8 review round 2 — allowlist getpath's search_up
+  chain` и `docs(df): …` к нему.
 
 ### Task 8a: Административная среда, команда `darkfactory`, bootstrap
 
@@ -3291,8 +3311,11 @@ def test_boundary_on_real_release(root_world): ...
     # измерено, а на Linux нет: линковку PBS-интерпретатора с libpython3.X.so.1.0 (RUNPATH
     # $ORIGIN/../lib) и читается ли тогда lib/libpython3.X.so.1.0._pth; RPATH/RUNPATH
     # колёс core (manylinux .libs, soname без RPATH); порог перехода uv на sh-трамплин;
-    # sys.path обоих запусков (ж); состав python/<ключ>/bin у PBS на Linux против
-    # base_bin_names (белый список замерен только на macOS); $ORIGIN у библиотеки,
+    # sys.path обоих запусков (ж); состав python/<ключ>/bin у PBS на Linux — замерен
+    # контроллером 22.10 (одноразовая VM podman amd64, uid 1000, uv 0.11.23, `uv python
+    # install 3.12.13`): те же 14 имён, что на macOS; CI подтверждает повторно. Состав
+    # python/<ключ> и python/ (chain_dirs) на Linux — не замерен, CI сверяет; известна ли
+    # getpath libpython на Linux (тогда search_up идёт и от python/<ключ>/lib); $ORIGIN у библиотеки,
     # загруженной через ссылку-файл в другом каталоге (glibc берёт каталог пути загрузки,
     # (в) — реальный каталог; ревью Task 8, круг 1, nit 5). Расхождение с правилами
     # (в)/(ж) — находка, не правка теста
