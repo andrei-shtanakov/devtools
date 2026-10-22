@@ -397,9 +397,10 @@
       `pending` (`install_dir/pending.toml`),
       `accounts` (`install_dir/accounts.toml`), `marks_dir` (`install_dir/accept`),
       `verify_dir`, `doctor_dir`, `probes_dir`, `probe_cwd`, `build_home`;
+      `local_bin` (`usr/local/bin` под корнем; добавлено в Task 7, R33.F23);
     - `release_dir(id) -> Path`, `admin_dir(id) -> Path`, `staging_dir(id) -> Path`
       (`staging/<id>`), `staging_tree(id) -> Path` (`staging/<id>/tree`), `quarantine`
-      (`staging/.quarantine`).
+      (`staging/.quarantine`); `mark_file(id) -> Path` (`marks_dir/<id>.toml`, Task 7).
 
     `default_layout()` = `Layout(Path("/"))`. Конструктор отказывает (`ConfigError`), если
     `root != Path(os.path.realpath(root))`.
@@ -428,12 +429,18 @@
   - `Account(name: str, uid: int, gid: int, state: Literal["creating", "ready"],
     created_at: str)`; `load_accounts(path) ->
     dict[str, Account]`; `dump_accounts(...) -> str`.
+  - `read_optional(path: Path) -> str | None` — общий защищённый читатель служебных
+    файлов (обычный файл, без ссылок; нет — `None`); открыт в Task 7 для `load_mark`.
   - В `fsutil`:
     - `sync_file(fd: int) -> None`: macOS — `fcntl(fd, F_FULLFSYNC)`, Linux — `os.fsync`.
       Ошибка поднимается;
     - `sync_dir(fd_or_path: int | Path) -> SyncNote`: `os.fsync` дескриптора каталога. На
       macOS затем пробуется `F_FULLFSYNC`; `EINVAL`/`ENOTSUP` дают
-      `SyncNote.FULLFSYNC_UNSUPPORTED` (уходит в evidence), иная ошибка поднимается;
+      `SyncNote.FULLFSYNC_UNSUPPORTED` (уходит в evidence), иная ошибка поднимается.
+      Как построено (Task 7, R33.F10, решение (а)): каждый такой отказ ещё и копится в
+      процессном наборе — `sync_notes() -> frozenset[int]` (`st_dev` каталогов),
+      `reset_sync_notes()`; примитивы `SyncNote` наверх не передают, набор пишет в журнал
+      `drive` (`sync-note`), в evidence его переносит Task 13;
     - `write_atomic(path: Path, text: str, mode: int = 0o644) -> None` — протокол
       `write_atomic` (Task 7, rev 8 r7): временный файл в том же каталоге (`O_EXCL`),
       `sync_file`, `rename`, `fault_point("renamed", path)`, `sync_dir`. Эффекты: `rename` →
@@ -450,7 +457,10 @@
     - `sync_tree(root: Path) -> None` — `sync_file` каждого файла и `sync_dir` каждого
       каталога дерева root снизу вверх; ссылки не разыменовываются;
     - `boot_id() -> str`: Linux — `/proc/sys/kernel/random/boot_id`, macOS — `sysctl -n
-      kern.bootsessionuuid`. Пустое значение — ошибка.
+      kern.bootsessionuuid`. Пустое значение — ошибка;
+    - `owner_uid(st: os.stat_result) -> int` — владелец объекта для каждой проверки
+      «root или нет» (`receive`, `platform`, `journal`, `accept`): единственный шов,
+      который подменяют тесты (`fake_layout`); добавлено в Task 7 (R33.F1).
   - `dumps(data: Mapping[str, object]) -> str` в `toml_emit` — str/int/bool/list[str]/вложенные
     таблицы/массив таблиц; иные типы — `TypeError`.
 
@@ -593,7 +603,13 @@ def test_fetch_uses_raw_sha_url_and_caps_size(): ...  # opener-заглушка:
   - `class TreeError(Exception)`.
   - `tree_digest(root: Path, *, exclude: frozenset[str] = frozenset({"release.json"}))
     -> str` — `"sha256:<hex>"`. Применяется только к деревьям root, недоступным сборщику
-    (итоговая копия, административный код, доверенный чекаут). Эффекты: нет.
+    (итоговая копия, административный код, доверенный чекаут). Ошибки чтения (как
+    построено в Task 7): `TreeError` — только `ENOENT`/`ENOTDIR` (дерево изменилось при
+    обходе); иной `OSError` поднимается как есть — `read_facts` делает из него
+    `StepFailed("facts")`, а не очистку. Эффекты: нет.
+  - `open_regular(path: Path) -> int` — общий открыватель файла недоверенного дерева
+    (`O_NOFOLLOW|O_NONBLOCK`, `fstat` — обычный файл, иначе `TreeError`); его же
+    используют читатели `df/inputs.py` (Task 7).
   - `check_name(name: bytes) -> str` — общий валидатор имён для digest и приёма.
   - В `acl.py`:
     - `acl_present_fd(fd: int) -> bool`, `acl_present_path(path: Path) -> bool`. macOS:
@@ -1168,9 +1184,8 @@ def test_create_refuses_mismatch_with_intent(monkeypatch, tmp_path): ...   # п�
                                   "partial-with-login-shell", "other-name-same-uid"])
 def test_create_never_adopts_conflicting_record(monkeypatch, tmp_path, case): ...
     # → StepFailed с именем атрибута; ни одной команды dscl/useradd не выполнено
-def test_home_found_by_retry_is_settled_before_ready(fake_world): ...
-    # S1-R6-N1: rename_noreplace → сбой процесса → повтор (settle_on_acquire) → ready →
-    # сбой ОС → домашний каталог на месте; двойник без settle_on_acquire — каталога нет
+# test_home_found_by_retry_is_settled_before_ready — в Task 9 (нужен fake_world; R21,
+# R33.F22)
 def test_account_attrs_match_spec_order(): ...   # ACCOUNT_ATTRS = порядок §3.3 и модели
 def test_tar_flags_exact_per_platform(): ...
 def test_cleaner_argv_exact(): ...
@@ -1282,30 +1297,56 @@ def test_build_refused_before_any_command_if_user_unverified(): ...  # runner н
 ### Task 7: Нормативный автомат приёма и доверенный чекаут
 
 **Files:**
-- Create: `df/accept.py`, `df/install_table.py`, `df/inputs.py`, `df/sources.py`
+- Create: `df/accept.py`, `df/install_table.py`, `df/inputs.py`, `df/sources.py`,
+  `df/routes.py`, `df/leaves.py` (R35); `tests/df/conftest.py` (`fake_layout`, R33.F19)
+- Modify (как построено): `df/fsutil.py` (`owner_uid`, `sync_notes`), `df/paths.py`
+  (`local_bin`, `mark_file`), `df/config.py` (`read_optional`), `df/digest.py`
+  (`open_regular`, ошибки чтения), `df/build.py` (argv `git` и `GIT_ISOLATION` — общие с
+  `fetch_reference`), `df/receive.py`, `df/platform.py`, `df/journal.py` (шов владельца)
 - Test: `tests/df/test_accept.py`, `tests/df/test_install_table.py`, `tests/df/test_drive.py`,
-  `tests/df/test_inputs.py`, `tests/df/test_sources.py`
+  `tests/df/test_inputs.py`, `tests/df/test_sources.py`, `tests/df/test_routes.py`,
+  `tests/df/test_leaves.py`, `tests/df/test_scenarios.py`, `tests/df/test_platform.py`
+  (тест выбора, R20)
+
+Размещение (как построено, R35, R33.F18): `df/accept.py` — отметки, факты, `settle`,
+`drive`; `df/routes.py` — условия, интерпретатор, `route_action`, `TARGETS`,
+`acceptance_calls`; `df/leaves.py` — листья-протоколы `prepare_dir`, `verify_chmod`,
+`seal`, `accept_copy` и `release_digest`; `df/sources.py` — `SourceId`, `UnsupportedLock`
+и правила источника; `df/inputs.py` — `fetch_reference`, `verify_sources`, `InstalledDist`,
+`installed_distributions`, `pth_problems`.
 
 **Interfaces:**
 - Consumes: `tree_digest`, `receive_tree`, `remove_own_tree`, `TreeError` (Task 3);
   `journal_event`, `StepFailed` (Task 4); `reap_user_processes`, `spawn_as`, `run_as`,
   `cleanup_tree`, `TAR_FLAGS` (Task 5); `RepoPin`, `Profile` (Task 2); `write_atomic`, `remove_durably`,
   `sync_dir`, `boot_id`, `Account`, `load_pending`, `load_releases`, `InstallConfig` (Task 1).
+  Как построено также: `check_links`, `remove_empty_dir` (Task 3); `cleanup_build_home`,
+  `trusted_path_problems` (Task 5); `run_build`, `BuildPlan`, `python_key` (Task 6);
+  `load_accounts` (Task 1).
 - Produces:
   - `Stage = Literal["built", "copied", "verified", "admin"]`;
     `STAGE_ORDER = ("built", "copied", "verified", "admin")`.
   - `AcceptMark(install_digest: str, stage: Stage, built_boot_id: str, tree_digest: str |
-    None, admin_digest: str | None, admin_python: str | None)` — `admin_digest` и
+    None, admin_digest: str | None, admin_python: str | None, uv_version_declared: str)`
+    — `admin_digest` и
     `admin_python` (точная версия `X.Y.Z` из `Profile.python` прогона) пишутся вместе
     отметкой `admin` (rev 8, r11); TOML `layout.marks_dir/<id>.toml` (`df/accept/v1`),
-    root `0600`, только `write_atomic`.
+    root `0600`, только `write_atomic`. `uv_version_declared` (R29, R33.F11) — версия `uv`,
+    которую вернул `run_build`: её пишет отметка `built`, поздние стадии переносят её и
+    `built_boot_id` из записанной отметки без изменения (`write_mark` сверяет); Task 9
+    берёт её для `ReleaseRecord` из отметки `admin`. Форматы: `install_digest` — 64 hex
+    (как в `Pending`), `tree_digest` и `admin_digest` — `sha256:<hex>`.
   - `write_mark(layout, id, mark: AcceptMark) -> None` — обёртка протокола `write_atomic`
-    (`WRAPS`): отказывает, если новая `stage` ниже записанной. Эффекты: `write_atomic()`.
+    (`WRAPS`): отказывает (`StepFailed("mark")`), если новая `stage` ниже записанной
+    (записанная — `load_mark(…, install_digest=<новой>)`: чужая конфигурация и `built`
+    прошлой загрузки не мешают, R33.F32) или нет `marks_dir` (R33.F31). Эффекты:
+    `write_atomic()`.
   - `drop_mark(layout, id) -> None` — обёртка протокола `remove_durably` (только маршрут
     `cleanup`). Эффекты: `remove_durably()`.
   - `load_mark(layout, id, *, install_digest: str) -> AcceptMark | None`: отметка
     другой конфигурации и `built`-отметка из прошлой загрузки (`built_boot_id != boot_id()`)
-    — `None`.
+    — `None`; битая, не обычный файл или ссылка — тоже `None` (R33.F32, читатель —
+    `read_optional`; сам файл убирает шаг `m=present` маршрута `cleanup`).
   - `Facts` (frozen) — ровно факты таблицы §3.3, имена ключей таблицы:
     - `P: bool`; `reg: bool`; `cur: bool`; `L: bool`;
     - `intact: bool` — только при `reg`: корень у root, `0755`, `tree_digest` = `digest`
@@ -1319,7 +1360,9 @@ def test_build_refused_before_any_command_if_user_unverified(): ...  # runner н
       path) -> bool` = `run_as("df-build", ["/usr/bin/find", str(path), "-mindepth", "1",
       "-maxdepth", "1", "-print", "-quit"], env={"PATH": "/usr/bin:/bin", "LANG": "C"},
       cwd=layout.build_home, network=False, timeout=10.0)`; непустой вывод, код ≠ 0,
-      `launched=False` или срок → `True` (`b-full`). Root каталог сборщика не открывает;
+      `launched=False` или срок → `True` (`b-full`). Root каталог сборщика не открывает.
+      Владелец — через `fsutil.owner_uid`; не каталог или владелец ни root, ни
+      `build_uid` — вне домена: `StepFailed("facts")`, решает человек (R33.F20);
     - `full: bool` — `r` у root и `tree_digest` на диске = `mark.tree_digest` (только при
       `m ≥ copied`);
     - `A: bool` — `admin_ready(layout, id, expected_admin_digest=mark.admin_digest,
@@ -1338,8 +1381,9 @@ def test_build_refused_before_any_command_if_user_unverified(): ...  # runner н
     дерево в обоих), затем `install` → `install_dir`, `accept` → `marks_dir`, `etc_df` → `etc`,
     `opt_df` → `opt`, `releases` → `releases`, `release_root` → корень `releases/<id>`
     (только если он у root), `staging` → `staging` и `staging_dir(id)`, `admin` → `admin`,
-    `admin_python` → `admin_python`, `opt_bin` → `bin_dir`, `local_bin` → `/usr/local/bin`
-    (только если ссылка создаётся), `home_parent` → `build_home.parent`. Ручного списка
+    `admin_python` → `admin_python`, `opt_bin` → `bin_dir`, `local_bin` → `layout.local_bin`
+    (только при `local_bin_trusted(layout)` — то же определение, что у условия
+    `local_bin=trusted`, R33.F23), `home_parent` → `build_home.parent`. Ручного списка
     каталогов в `accept.py` нет.
   - `acquire_paths(layout, pending_id: str | None) -> tuple[Path, ...]` — отображение
     `acquire_dirs()` теми же правилами, `layout.quarantine` первым (как в `settle_paths`);
@@ -1350,15 +1394,26 @@ def test_build_refused_before_any_command_if_user_unverified(): ...  # runner н
     `pending.toml` (есть) → `sync_dir` каждого пути `acquire_paths(layout, id)`;
     отсутствующий пропускается. Вызывают: вход в режиме `writer` (своя stdlib-копия, Task
     8a) и `main` в режиме `bootstrap` (Task 9) — до снимка, `recover_pending` и
-    `create_build_user`. Больше никто; `drive` закрепляет своё через `settle`.
+    `create_build_user`. Больше никто; `drive` закрепляет своё через `settle`. Битый
+    `pending.toml` или id — только id-независимые пути, без отказа (R33.F33); `install_dir`
+    закрепляется один раз.
   - `read_facts(layout, release_id, *, install_digest: str, build_uid: int,
-    launcher_ready: Callable[[], bool]) -> Facts`. Версию административного Python
+    launcher_ready: Callable[[], bool], admin_ready: AdminReady) -> Facts`. Оба предиката
+    Task 8a — параметры (R33.F5): `AdminReady` — протокол с её сигнатурой `(layout, id, *,
+    expected_admin_digest, expected_python) -> bool`; Task 9 связывает `df.admin`, тесты
+    Task 7 — заглушкой. `cur` — `readlink(current) == "releases/<id>"`; `current` не
+    ссылка, битый `releases.toml` или `OSError` при digest дерева — `StepFailed("facts")`
+    (без очистки); `TreeError` digest — «не равно». Запись реестра — `registry_entry(layout,
+    id)` (тот же читатель у условия `not reg` и у проверки `cleanup`). Версию
+    административного Python
     `read_facts` берёт там же, где digest: `mark.admin_python` для `A`, `admin_python`
     записи реестра для `intact` (rev 8, r11) — ни профиль, ни манифест не читаются.
   - В `df/install_table.py` — **данные таблицы §3.3, единственный источник правил** (rev 8,
     r4): `DOMAINS: Mapping[str, tuple[object, ...]]`; `Cube = Mapping[str, frozenset[object]]`
     (отсутствующий ключ — любое значение); `Row(phase: str, cubes: tuple[Cube, ...], action:
-    str, post: frozenset[str])`; `ROWS: tuple[Row, ...]`. Значения переносятся при реализации
+    str, post: tuple[str, ...])` (`post` — в порядке таблицы: рендер байт в байт, R33.F2);
+    `ROWS: tuple[Row, ...]`; `UNKNOWN_ROW = Row("unknown", (), "cleanup", ("none",))` и
+    `row_of(phase) -> Row` (R33.F9). Значения переносятся при реализации
     из `r18-local-check/table.py` (артефакт разработки; рантайм на него не ссылается). У
     `damaged` действие `"stop"`, у `committed` — `""`. Там же — **источники
     долговечности** (rev 8, r5): `DIRS: Mapping[str, str]` (имя → текст для спеки),
@@ -1383,7 +1438,10 @@ def test_build_refused_before_any_command_if_user_unverified(): ...  # runner н
     str]]` (лист без протокола → вид, эффекты), `WRAPS: Mapping[str, str]` (обёртка → её
     протокол), `ABSENT_OK: Mapping[str, str]`, `GUARD_SOURCES: Mapping[str, tuple[str,
     ...]]`, `route_leaves() -> list[str]`, `check_data() -> None` (при импорте: у каждого
-    листа ровно одно из протокола и вида; источники каждого условия ⊆ `settle_dirs()`);
+    листа ровно одно из протокола и вида; источники каждого условия ⊆ `settle_dirs()`;
+    как построено (7-A): у каждого факта готовности `ADMIN_READY_FACTS = ("A", "intact")`
+    среди источников все `ADMIN_READY_DIRS = ("admin", "admin_python")`, `CLEANUP_OUTCOME`
+    — исход `cleanup_tree` по варианту; ключ `fact_sources` — для двойников);
     **эффекты** (rev 8, r10, r11): `leaf_variants(name: str) -> dict[str | None,
     tuple[str, ...]]` — ожидаемые последовательности событий листа по вариантам (`None` —
     единственный у листа без вариантов), `leaf_effects(name)` — она же для листа без
@@ -1409,7 +1467,9 @@ def test_build_refused_before_any_command_if_user_unverified(): ...  # runner н
   - `overlaps(rows) -> list[tuple[str, str]]` — пары строк с пересекающимися кубами (точно,
     по множествам значений); `render_table() -> str` — таблица §3.3 в Markdown, байт в байт как
     в спеке между `<!-- install-table:begin -->` и `<!-- install-table:end -->`.
-  - `classify(f: Facts) -> str` — фаза единственной строки, у которой хоть один куб содержит
+  - `classify(f: Mapping[str, object]) -> str` (как построено: в `install_table`;
+    `accept.classify(facts: Facts)` передаёт `Facts.table()` — ровно ключи `DOMAINS`) —
+    фаза единственной строки, у которой хоть один куб содержит
     точку `f`; ни одной — `"unknown"`; больше одной — `AssertionError` (ошибка программы,
     ловится тестом `test_rows_disjoint_by_cubes`). Порядка строк и «наибольшей подходящей»
     нет.
@@ -1419,17 +1479,32 @@ def test_build_refused_before_any_command_if_user_unverified(): ...  # runner н
     `StepFailed("damaged", …)`; иначе `journal_event(start)` → `actions[row.action](facts)` →
     `settle` → новая фаза ∈ `row.post`, иначе `StepFailed(row.action, "<было> → <стало>")` →
     `journal_event(done)`. `max_iter` исчерпан — `StepFailed("drive", "нет продвижения")`.
-    `drive` — единственный исполнитель действий приёма.
+    `drive` — единственный исполнитель действий приёма. Как построено: `unknown` —
+    строка `UNKNOWN_ROW` (действие `cleanup`, R33.F9); любой отказ (действие, `settle`,
+    чтение фактов, фаза вне `post`, `damaged`, нет продвижения) пишется
+    `journal_event(failed)` и поднимается дальше (R33.F29); `max_iter < 0` — `ValueError`;
+    не больше `max_iter` действий, затем последняя классификация; при выходе (успех или
+    отказ) — одна строка `sync-note` со `st_dev` из `fsutil.sync_notes()`, если набор не
+    пуст (R33.F10).
   - **Действия — исполнители маршрутов** (rev 8, r8, §3.3 «Маршруты»). `run_route(layout,
-    id, name: str, *, calls: Mapping[str, Callable[[str], None]]) -> None` — единственный
+    id, name: str, *, calls: Mapping[str, Callable[[str], None]], python_key: str | None =
+    None, build_uid: int | None = None) -> None` (`df/routes.py`, R35) — единственный
     интерпретатор `ROUTES[name]`: для каждого шага `(guard, call, target)` — если `guard` и
-    `route_guard(layout, id, guard)` ложно, шаг пропускается; иначе `calls[call](target)`,
-    а вложенный маршрут — рекурсивно. `route_guard(layout, id, guard: str) -> bool` —
-    `lstat` имени через дескриптор родителя, принадлежащего root (`releases/`, `staging/`,
+    `route_guard(layout, id, guard)` ложно, шаг пропускается; иначе
+    `calls[implementation(call, target)](target)` (обёртка `WRAPS` — по цели из `TARGETS`,
+    R33.F7), а вложенный маршрут — рекурсивно. Маршрут `cleanup` перед первым шагом читает
+    реестр (`ENTRY_CHECKS`): id записан — `StepFailed("cleanup")` (R33.F13).
+    `route_guard(layout, id, guard: str, *, python_key: str | None = None, build_uid: int |
+    None = None) -> bool` — `lstat` имени через дескриптор родителя, принадлежащего root
+    (`releases/`, `staging/`,
     `staging/<id>`, `admin/`, `admin-python/`, `accept/`; `not reg` — запись реестра под
-    блокировкой; `local_bin=trusted` — `trusted_path_problems(/usr/local/bin)`); объект не
-    открывается. **Реализации вызовов — листья** (rev 8, r9, §3.3 «Листья маршрутов»): ни
-    одна не вызывает другую реализацию из `calls` и не делает изменений вне шагов своего
+    блокировкой; `local_bin=trusted` — `local_bin_trusted(layout)`, R33.F23); объект не
+    открывается. `r=builder` — каталог с владельцем `build_uid`, иной владелец —
+    `StepFailed("route")`; `py=absent` — `admin-python/<python_key>` (`python_key` —
+    `build.python_key(profile.python, platform)`, R33.F6; без ключа — ошибка программы);
+    нет родителя — нет и имени; родитель — ссылка, не каталог или не root —
+    `StepFailed("route")`. **Реализации вызовов — листья** (rev 8, r9, §3.3 «Листья
+    маршрутов»): ни одна не вызывает другую реализацию из `calls` и не делает изменений вне шагов своего
     протокола; вид `check` — ни одного события `fsutil` и ни одного `run_as`; `builder` —
     только `run_as("df-build", …)` над объектами из `CALLS`; отсутствующий объект — успех
     только для `ABSENT_OK`. **Эффекты каждой реализации** (rev 8, r10) — строка «Эффекты:»
@@ -1444,54 +1519,105 @@ def test_build_refused_before_any_command_if_user_unverified(): ...  # runner н
     маршрут `commit-config`, маршрут `cleanup` (и вложенный маршрут `cleanup_staging`) —
     строки таблицы; откат — маршрут `rollback` (Task 9). Каждое действие первым делом
     проверяет, что `classify` свежих фактов — его строка, иначе `StepFailed(<действие>, "не
-    в своей фазе")`. Реализации вызовов (`calls`):
+    в своей фазе")`: `route_action(layout, id, action, *, calls, python_key, build_uid) ->
+    Callable[[Facts], None]` (R33.F14) — проверка, затем `run_route`; Task 9 отображает в
+    него каждое `Row.action`. Реализации вызовов (`calls`):
     - `prepare_dir(layout, id)` — протокол `prepare_dir` (rev 8, r8): `os.mkdir(id, 0o700,
       dir_fd=<releases>)`, `fd = os.open(id, O_RDONLY|O_DIRECTORY|O_NOFOLLOW,
       dir_fd=<releases>)` — каталог ещё root и пуст; `fault_point("created")`;
       `os.fchown(fd, uid, gid)` — передача, `fault_point("chown")`; `sync_dir(fd)`,
       `os.close(fd)`; `sync_dir(<releases>)`. После `fchown` путь `releases/<id>` не
-      открывается (§3.8). Эффекты: `created` → `chown` → `sync_dir(release_root)` →
+      открывается (§3.8). Как построено: `uid`/`gid` — из записи `df-build` в
+      `accounts.toml` (`load_accounts`, состояние `ready`, иначе `StepFailed("build-dir")`
+      до изменения); режим `0700` ставит `os.fchmod(fd, 0o700)` до `fault_point` (не
+      зависит от umask, не событие); нет `releases/` — `StepFailed`, каталог не создаётся
+      (R33.F31). Эффекты: `created` → `chown` → `sync_dir(release_root)` →
       `sync_dir(releases)`;
-    - `run_build` (Task 6) и `write_mark(stage=…, boot_id())`;
-    - `verify_chmod(layout, id) -> None` — протокол `verify_chmod`: `os.chmod` корня
-      `releases/<id>` в `0755` через дескриптор `releases/` (`follow_symlinks=False`),
-      `fault_point("chmod")`, `sync_dir` корня. Эффекты: `chmod` → `sync_dir(release_root)`;
+    - `run_build` (Task 6, `runner=plat.run_as`) и `write_mark` по цели шага (`TARGETS`):
+      `built` — `boot_id()` и версия `uv` от `run_build`; `copied` — digest копии;
+      `max(стадия, verified)` высшую отметку оставляет как есть (`admin` с прежними
+      `admin_digest`/`admin_python`); `admin` — `tree_digest(admin_dir(id),
+      exclude=frozenset())` (R33.F25) и `Profile.python`. Значения предыдущего шага
+      маршрута идут через `RouteContext` и берутся один раз;
+    - `verify_chmod(layout, id) -> None` — протокол `verify_chmod`: `fstatat` имени через
+      дескриптор `releases/` — каталог root, не ссылка; `open(O_RDONLY|O_DIRECTORY|
+      O_NOFOLLOW, dir_fd)` и те же `st_dev`/`st_ino`; `os.fchmod(fd, 0o755)`,
+      `fault_point("chmod")`, `sync_dir` корня. Как построено: `os.chmod(…, dir_fd=…,
+      follow_symlinks=False)` на Linux до Python 3.13 не поддержан, а корень всё равно
+      открывается для синхронизации; ссылка не разыменовывается, открывается только
+      каталог root. Эффекты: `chmod` → `sync_dir(release_root)`;
     - `seal(layout, id)` — протокол `seal` с вариантами (rev 8, r12): вариант `new` — нет
       `staging/<id>`: `mkdir staging/<id>` root `0711`, `fault_point("created")`; вариант
       `reuse` — есть пустой `staging/<id>` (повтор после сбоя за `mkdir`): `mkdir` не
       вызывается. Затем в обоих `os.rename(releases/<id>, staging/<id>/tree)`; `sync_dir`
       для `releases/`, `staging/`, `staging/<id>/`. Процессы `df-build` завершает предыдущий
       шаг маршрута `seal`. Последний `sync_dir(staging)` — оба каталога `staging/` и
-      `staging/<id>/`.
+      `staging/<id>/`. Как построено: оба варианта ставят контейнеру `0711` (`fchmod`, не
+      событие: сбой между `mkdir` и `fchmod` под umask 077 не оставит `0700`); `reuse`
+      требует пустой контейнер root (иначе `StepFailed("seal")`, контейнер не меняется);
+      контейнер открывается после `fstatat` с `O_NOFOLLOW` и теми же `st_dev`/`st_ino`,
+      `releases/<id>` — только `fstatat` и `renameat`.
       Эффекты (`new`): `created` → `renamed` → `sync_dir(releases)` → `sync_dir(staging)`.
       Эффекты (`reuse`): `renamed` → `sync_dir(releases)` → `sync_dir(staging)`.
     - `accept_copy(layout, id, *, install: InstallConfig, platform: PlatformName,
-      _hook=_noop) -> str`:
+      limits: CopyLimits = CopyLimits(), _hook=_noop) -> str` (R33.F21):
       - `producer = spawn_as("df-build", [str(install.approved_cli["tar"]),
         *TAR_FLAGS[platform], "-cf", "-", "-C", str(layout.staging_tree(id)), "."],
-        env={"PATH": "/usr/bin:/bin", "LANG": "C"}, cwd=layout.build_home, network=False)`;
-      - `receive_tree(producer, layout.releases, id, _hook=_hook)` — производитель,
+        env={"PATH": "/usr/bin:/bin", "LANG": "C"}, cwd=layout.build_home, network=False,
+        reap_seconds=limits.reap_seconds)`;
+      - `receive_tree(producer, layout.releases, id, limits=limits, _hook=_hook)` —
+        производитель,
         частичная копия и обе синхронизации протокола `accept_copy` — забота `receive_tree`
         (Task 3, п. 5); своих синхронизаций вызывающий не делает (rev 8, r10);
-      - `tree_digest` (для отметки `copied`). Возвращает digest. Вместе — протокол
+      - отказ потока (`TreeError`) — `StepFailed("copy", "<ошибка>; stderr: <последние 4096
+        байт stderr tar>")`; частичная копия остаётся до маршрута `copy-partial`;
+      - `release_digest` = `tree_digest(…, exclude={"release.json"})` — тот же вызов у
+        проверки `tree_digest` маршрута `verify` (для отметки `copied`).
+        Возвращает digest. Вместе — протокол
         `accept_copy`. Эффекты: `receive_tree()` → `tree_digest()`;
     - `remove_own_tree`, `cleanup_tree` (с `quarantine_label=id`), `remove_empty_dir`,
       `drop_mark` — для шагов маршрутов `cleanup` и `cleanup_staging`. `cleanup` при записи
       id в `releases.toml` — `StepFailed` до первого шага (никогда не удаляет
-      зарегистрированное).
-  - `fetch_reference(pin: RepoPin, dest: Path, *, git: Path) -> Path` — доверенный чекаут
-    root в `layout.verify_dir/<repo>`:
-    - `git init` / `fetch --depth=1` / `rev-parse FETCH_HEAD` (= `pin.sha`) / `archive -o`,
-      с `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_TERMINAL_PROMPT=0`;
+      зарегистрированное). Как построено (R33.F13): проверяют и вход маршрута `cleanup`,
+      и обёртка `remove_own_tree` для `releases/<id>` и `admin/<id>` — откат вне `drive`
+      тоже не трогает записанное; исход `cleanup_tree` `"failed"` — `StepFailed("cleanup")`.
+      Оставшиеся процессы шага `reap_user_processes` маршрута `seal` — предупреждение в
+      журнале, приём продолжается (R33.F28). `TreeError` обёрток `remove_own_tree` и
+      `remove_empty_dir` идёт без имени шага (вне `drive` имя даёт Task 9).
+  - `acceptance_calls(layout, id, *, install, profile, platform, plan, limits, refs,
+    journal, run_id, python_key) -> dict[str, Call]` (`df/routes.py`, R33.F7) —
+    реализации вызовов Task 7 (листья и обёртки `write_mark`, `drop_mark`) над общим
+    `RouteContext` (версия `uv` от `run_build`, digest копии от `accept_copy`).
+    `TARGETS: Mapping[str, Target]` — каждый текст цели `ROUTES` → объект и обёртка
+    (`implementation(call, target)`; неизвестный текст — `KeyError`, сверка при импорте).
+    `LATER_LEAVES: Mapping[str, str]` — лист → задача-владелец: `distribution_problems` —
+    7a; `static_problems`, `transfer_check` — 8; `install_admin_python`, `install_admin`,
+    `link_command` — 8a; `activate`, `write_release_json`, `register` и `write_atomic`
+    без обёртки — 9. Ключи `acceptance_calls` и `LATER_LEAVES` вместе — ровно
+    `route_leaves()` и `WRAPS`. `python_key` — тот же, что вызывающий передаёт
+    `run_route`/`route_action`.
+  - `fetch_reference(pin: RepoPin, dest: Path, *, git: Path, layout: Layout) -> Path` —
+    доверенный чекаут root; `dest` — прямой потомок `layout.verify_dir`, который уже есть
+    настоящим каталогом (не создаётся, R33.F31); прежний `dest` (повтор) удаляется
+    (R33.F34):
+    - `git init --template=` / `fetch --depth=1` / `rev-parse FETCH_HEAD` (= `pin.sha`) /
+      `archive -o` — argv сборки (`git_fetch_argv`, `git_rev_parse_argv`,
+      `git_archive_argv`, Task 6) с её `GIT_ISOLATION` (`GIT_CONFIG_NOSYSTEM=1`,
+      `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_TERMINAL_PROMPT=0`, `GIT_ATTR_NOSYSTEM=1`) и
+      свежими пустыми `HOME`, `XDG_CONFIG_HOME` (R33.F12);
     - распаковка — `tarfile` с `filter="data"` (это архив, созданный root из своего
       чекаута, а не поток сборщика).
 
     Код из чекаута не исполняется. Чекаут — единственный источник для сверки исходников, для
-    lock-файлов (Task 7a) и для административного кода (Task 8a).
+    lock-файлов (Task 7a) и для административного кода (Task 8a). Чекауты получает Task 9
+    до `drive`; лист `verify_sources` только сравнивает (R33.F34).
   - `verify_sources(release_dir: Path, profile: Profile, refs: Mapping[str, Path]) ->
-    dict[str, str]` — `tree_digest(release_dir/src/<r>) == tree_digest(refs[r])`; возвращает
-    `{repo: sha256(refs[r]/uv.lock)}`. Эффекты: нет.
-  - В `sources.py` — канонический вид источника §3.5, по видам:
+    dict[str, str]` — `tree_digest(release_dir/src/<r>) == tree_digest(refs[r])`, обе
+    стороны с `exclude=frozenset()` (R33.F25); расхождение — `StepFailed("verify-sources")`
+    с именем репо; возвращает `{repo: "sha256:<hex>" от refs[r]/uv.lock}` (формат
+    `tree_digest`). Эффекты: нет.
+  - В `sources.py` — канонический вид источника §3.5, по видам; там же
+    `class UnsupportedLock(Exception)` (R33.F18):
     - `SourceId(kind: Literal["registry", "git", "directory"], url: str | None,
       subdirectory: str | None, commit: str | None, path: str | None, editable: bool |
       None)`;
@@ -1504,7 +1630,7 @@ def test_build_refused_before_any_command_if_user_unverified(): ...  # runner н
       - `editable == "."` или `directory == "."` → `SourceId("directory", path=str(root_dir),
         editable=False)`; иное `editable`/`directory`/`path` — `UnsupportedLock`;
       - `registry` → `SourceId("registry", url=<индекс>)`;
-    - `source_from_direct_url(data: Mapping[str, object]) -> SourceId`:
+    - `source_from_direct_url(data: Mapping[str, object] | None) -> SourceId`:
       - нет файла → `registry` с `url=None`;
       - `vcs_info.vcs == "git"` → `url` через `canonical_repo_url`, поле `subdirectory` (нет —
         `None`), `commit_id`;
@@ -1515,9 +1641,16 @@ def test_build_refused_before_any_command_if_user_unverified(): ...  # runner н
   - `InstalledDist(name: str, version: str, source: SourceId)`;
     `installed_distributions(venv: Path) -> list[InstalledDist]` — `METADATA` (`Name`,
     `Version`) и `direct_url.json` каждого `*.dist-info` итоговой копии через
-    `source_from_direct_url`. Только чтение данных.
+    `source_from_direct_url`. Только чтение данных. Как построено (`df/inputs.py`): `Name`
+    нормализуется по PEP 503 (7a сравнивает нормализованные имена с обеих сторон);
+    обходятся только настоящие каталоги (`lstat`), единственная допустимая ссылка —
+    `lib64 -> lib` при настоящем `lib`; имена сравниваются через `casefold`, имя, совпавшее
+    лишь после него, или два совпавших — `TreeError`; файлы читаются `open_regular` с
+    пределом размера; `*.egg-info`, `*.egg`, `*.egg-link` — `TreeError` (uv их не
+    создаёт); нет окружения или `site-packages` — `TreeError`.
   - `pth_problems(venv: Path) -> list[str]` — `.pth` в `site-packages`, кроме
-    `_virtualenv.pth` с содержимым ровно `import _virtualenv`, — проблема.
+    `_virtualenv.pth` с содержимым ровно `import _virtualenv`, — проблема. Обход тот же,
+    что у `installed_distributions`; недоверенный обход — `TreeError`, а не «проблем нет».
 
 - [ ] **Step 1: Failing tests**
 
@@ -1560,9 +1693,11 @@ def test_routes_match_table(monkeypatch, fake_layout, name): ...
     # одного события и запуска; builder — только run_as("df-build", …). Сравнение —
     # последовательностей: порядок, кратность и объекты (S1-R10-N1), без схлопывания
     # повторов. Подмена функции целиком не допускается. Двойники — провал: откат в обход
-    # cleanup_staging; install_admin со скрытой write_mark; transfer_check со скрытой
-    # очисткой build_home; лишний sync_dir(releases) в accept_copy; cleanup без второго
-    # remove_own_tree; remove_own_tree с неверной целью
+    # cleanup_staging; лишний sync_dir(releases) в accept_copy; cleanup без второго
+    # remove_own_tree; remove_own_tree с неверной целью; снятое условие шага.
+    # R33.F3: листья LATER_LEAVES (7a/8/8a/9) — заглушки из leaf_variants; двойники
+    # «install_admin со скрытой write_mark» и «transfer_check со скрытой очисткой
+    # build_home» — в Tasks 8a и 8; Task 9 повторяет тест со всеми настоящими calls
 def test_accept_copy_events_exact(monkeypatch, fake_layout): ...
     # S1-R10-N1: настоящий accept_copy → receive_tree → SpawnedProducer.end: события ==
     # leaf_effects("accept_copy") — created, process(df-build), created,
@@ -1578,12 +1713,14 @@ def test_route_leaves_have_one_kind(): ...
     # VARIANT_WHEN, ключи NOT_MODELED — существующие варианты (S1-R11-N1, S1-R12-N1); у
     # ABSENT_OK вариант absent без изменений и синхронизаций root;
     # GUARD_SOURCES каждого условия ⊆ settle_dirs(); двойник без admin_python в A — провал
-def test_action_table_is_route_unfolding(): ...
-    # install_calls(...) ключи == route_leaves() ∪ WRAPS; блок install-route-calls в
-    # docstring install_actions == render_route_calls() (S1-R10-N1: без схлопывания)
-@pytest.mark.parametrize("guard", sorted(GUARD_NAMES))
+def test_plan_route_calls_is_rendering_of_data(): ...
+    # R33.F4: блок install-route-calls плана (Task 9) == render_route_calls();
+    # test_action_table_is_route_unfolding (install_calls, docstring) — в Task 9
+@pytest.mark.parametrize("guard", sorted(GUARD_NAMES - {"not reg", "local_bin=trusted"}))
 def test_route_guard_uses_lstat_via_parent_fd(monkeypatch, fake_layout, guard): ...
-    # подмена os: ни одного open/opendir объекта, только fstatat через дескриптор родителя
+    # подмена os: ни одного open/opendir объекта, только fstatat через дескриптор родителя;
+    # R33.F15: not reg (только releases.toml) и local_bin=trusted (один вызов политики) —
+    # отдельные тесты
 @pytest.mark.parametrize("stop", ["created", "chown"])
 def test_prepare_dir_transfers_by_fd(monkeypatch, fake_layout, stop): ...
     # S1-R8-N2: open до fchown, fchown/fsync/close по дескриптору; после fchown ни одного
@@ -1635,10 +1772,10 @@ def test_settle_paths_keys_are_dirs(fake_layout): ...
 def test_read_facts_admin_python_matches_model(fake_layout, python, registered): ...
     # S1-R11-N2: other-version — на диске два административных Python (3.12.7 и 3.13.1),
     # отметка / запись называет 3.13.1, а есть только 3.12.7 → A / intact ложны; есть
-    # оба → истинны по версии отметки / записи. То же для activate и release.admin
-    # (Tasks 9, 12): запись без admin_python — ConfigError разбора, не «готово»
-    # S1-R10-N2: одинаково подготовленные состояния — read_facts и
-    # r18-local-check/model.py facts: Python есть → A (до регистрации) / intact (после)
+    # оба → истинны по версии отметки / записи. R33.F8: activate и release.admin
+    # проверяют Tasks 9, 12; запись без admin_python — ConfigError разбора (Task 1)
+    # S1-R10-N2: ожидания — литеральная таблица в тесте (происхождение — facts модели
+    # r18, тест её не читает): Python есть → A (до регистрации) / intact (после)
     # истинны; нет или не проходит trusted_path_problems → ложны (verified → admin;
     # registered → damaged)
 def test_settle_syncs_exactly_settle_paths(monkeypatch, fake_layout): ...
@@ -1653,9 +1790,13 @@ def test_empty_prepared_dir_is_prepared_not_building(fake_layout): ...
 def test_tar_failure_refuses_and_keeps_partial_for_route(fake_layout): ...
     # код tar 1 (нечитаемый root-only файл) → StepFailed; частичная копия root 0700 на
     # месте, производитель завершён (S1-R10-N3); повтор: partial-copy → маршрут
-    # copy-partial удаляет остаток и продолжает до copied
+    # copy-partial удаляет остаток и продолжает до copied; при euid 0 — пропуск
+    # (R33.F35, root-вариант — Task 13); через drive — tests/df/test_scenarios.py
 def test_registered_release_never_removed(fake_layout): ...       # cleanup при записи → StepFailed
 def test_partial_tree_not_accepted_by_journal(fake_layout): ...   # журнал «copy: done», отметки нет → не copied
+def test_stray_tmp_before_registration_rebuilds(fake_layout): ...
+    # R33.F24 (FM2): .release.json.*.tmp в releases/<id> до записи реестра → full=0 →
+    # unknown → cleanup → сборка заново; ни registered, ни damaged
 def test_seal_syncs_three_dirs(monkeypatch, fake_layout): ...
 @pytest.mark.parametrize("variant", ["new", "reuse"])
 def test_seal_variant_events(monkeypatch, fake_layout, variant): ...
@@ -1684,7 +1825,14 @@ def test_source_negative_twins(change): ...   # каждое изменение 
 def test_foreign_pth_refused_virtualenv_pth_allowed(tmp_path): ...
 ```
 
-`fake_layout` работает от текущего пользователя: `build_uid = os.getuid()`. Подменяются
+`fake_layout` (`tests/df/conftest.py`, создан в Task 7, R33.F19) работает от текущего
+пользователя: `ROOT_UID` модулей — текущий uid, а у `df-build` отдельный фиктивный
+`build_uid = os.getuid() + 100000` (R33.F1); владельцев его объектов хранит виртуальная
+карта, которую читает `fsutil.owner_uid` (без неё `b-empty` и `root-700` неразличимы).
+`pwd.getpwnam("df-build")` — текущий пользователь (R33.F27); `sync_tree` — одно событие
+без `sync_dir` (R33.F16). Сценарии через `drive` — `tests/df/test_scenarios.py`:
+настоящие `read_facts`, `route_action`, `run_route`, `acceptance_calls`; заглушки —
+`LATER_LEAVES` и `admin_ready`; сбой — исключение в `fault_point`. Подменяются
 только нижние операции (rev 8, r10, S1-R10-N1), композиция листьев — настоящая:
 `os.fchown`/`os.chown` (записываются), механизм запуска `run_as`/`spawn_as` (`sudo`,
 `setpriv`, `sandbox-exec` не вызываются; команда исполняется от текущего пользователя,
@@ -1705,8 +1853,8 @@ def test_foreign_pth_refused_virtualenv_pth_allowed(tmp_path): ...
   `fixtures/locks/SOURCES.md`), `tests/df/fixtures/locks/<member>.<platform>.expected.json`
 
 **Interfaces:**
-- Consumes: `PlatformName` (Task 5); `InstalledDist`, `SourceId`, `source_from_lock`,
-  `UnsupportedLock` (Task 7).
+- Consumes: `PlatformName` (Task 5); `InstalledDist` (Task 7, `df/inputs.py`), `SourceId`,
+  `source_from_lock`, `UnsupportedLock` (Task 7, `df/sources.py`).
 - Produces:
   - `marker_env(platform: PlatformName, python: str) -> Mapping[str, str]` — восемь
     переменных §3.5. macOS: `sys_platform=darwin`, `platform_system=Darwin`,
@@ -1722,7 +1870,8 @@ def test_foreign_pth_refused_virtualenv_pth_allowed(tmp_path): ...
     Иное (`extra`, `group`, `platform_release`, `in`, `~=`, `===`, лишние токены) —
     `UnsupportedLock` с текстом маркера.
   - `ExpectedDist(name: str, version: str, source: SourceId)` (`SourceId` — Task 7). `name`
-    нормализован по PEP 503.
+    нормализован по PEP 503; `installed_distributions` (Task 7) нормализует так же —
+    сравниваются нормализованные имена с обеих сторон.
   - `expected_distributions(lock: bytes, *, groups: tuple[str, ...], env: Mapping[str,
     str], root_dir: Path) -> frozenset[ExpectedDist]` — алгоритм §3.5:
     - заголовок: `version == 1` и `revision == 3`, нет `conflicts` и `[manifest]`-ключей вне
@@ -1800,7 +1949,7 @@ def test_same_name_version_different_source_distinguished(): ...
 **Interfaces:**
 - Consumes: `linked_libraries`, `SYSTEM_LIB_DIRS`, `run_as`, `RunResult`,
   `NO_NETWORK_PROFILE` (Task 5); `check_links` (Task 3);
-  `pth_problems` (Task 7).
+  `pth_problems` (Task 7, `df/inputs.py`).
 - Produces:
   - `expected_entrypoints(ref_dir: Path) -> frozenset[str]` — §3.4. Читает
     `ref_dir/pyproject.toml` из доверенного чекаута как данные. Член считается пакетом,
@@ -1824,6 +1973,14 @@ def test_same_name_version_different_source_distinguished(): ...
     - **(д)** для каждого репо `r` каждое имя из `expected[r]` есть в `venv/<r>/bin`;
       отсутствие — отказ с именем;
     - **(е)** `pth_problems` каждого окружения пуст.
+    - **вопрос владельцу (не решено):** пробы 7-B на CPython: `sitecustomize`
+      (`.py`/`.pyc`/`.so`/пакет, по `casefold`) в `site-packages` исполняется при старте
+      интерпретатора; `*._pth` рядом с интерпретатором окружения переписывает `sys.path`.
+      Ни спека, ни (а)–(е) их не называют; станут ли они проблемами — решение владельца
+      вместе с фразой спеки, до него план их не требует. Там же — предел сравнения
+      множеств: код без метаданных распределения `installed_distributions` не видит
+      (покрытие `RECORD` или названное ограничение); (б) остаётся проверкой
+      `include-system-site-packages`.
   - `TransferResult(problems: list[str], python_declared: dict[str, str])`.
   - `transfer_check(release_dir: Path, layout: Layout, *, user: str, expected:
     Mapping[str, frozenset[str]]) -> TransferResult` — §3.3 п. 5; вид «запуск от `df-build`»
@@ -1860,7 +2017,8 @@ def test_runtime_sys_path_outside_refused(monkeypatch, tmp_path): ...  # run_as-
 def test_launch_failure_is_problem_not_pass(monkeypatch, tmp_path): ...  # launched=False
 def test_transfer_check_refuses_build_home_leftovers(monkeypatch, tmp_path): ...
     # S1-R9-N1: есть build_home/cache → проблема «остатки build_home», ни одного запуска
-    # entrypoints; подмена fsutil и run_as: transfer_check ничего не удаляет
+    # entrypoints; подмена fsutil и run_as: transfer_check ничего не удаляет (это и
+    # двойник Task 7 «transfer_check со скрытой очисткой build_home», R33.F3)
 ```
 
 - [ ] **Step 2–4:** FAIL → implement → PASS
@@ -1874,7 +2032,8 @@ def test_transfer_check_refuses_build_home_leftovers(monkeypatch, tmp_path): ...
 - Test: `tests/df/test_admin.py`, `tests/df/test_launcher_entry.py`
 
 **Interfaces:**
-- Consumes: `fetch_reference` (Task 7); `tree_digest` (Task 3); `trusted_path_problems`,
+- Consumes: `fetch_reference` (Task 7, `df/inputs.py`: ключ `layout`, `dest` — прямой
+  потомок `layout.verify_dir`); `tree_digest` (Task 3); `trusted_path_problems`,
   `approved_cli_problems` (Task 5); `write_atomic`, `Layout` (Task 1); `load_releases`
   (Task 1). Вход команды и bootstrap вызывают `df.cli.main` (Task 9) по имени; тесты этой
   задачи подкладывают заглушку `df/cli.py` во временный административный каталог.
@@ -1910,7 +2069,9 @@ def test_transfer_check_refuses_build_home_leftovers(monkeypatch, tmp_path): ...
   - `admin_ready(layout: Layout, release_id: str, *, expected_admin_digest: str,
     expected_python: str) -> bool` — **единственное определение готовности
     административной среды** (rev 8, r10): `admin_dir(id)` есть и его digest равен
-    `expected_admin_digest` (rev 8, r5: значение, а не чтение реестра); Python
+    `expected_admin_digest` (rev 8, r5: значение, а не чтение реестра) — digest
+    `tree_digest(admin_dir(id), exclude=frozenset())`, как у отметки `admin` (Task 7,
+    R33.F25; иначе `A` не истинен никогда); Python
     `admin_python_path(layout, expected_python, detect_platform())` есть (`lstat`) и
     `trusted_path_problems` для него пуст. Оба ожидаемых значения передаются из одного
     источника (rev 8, r11): `mark.admin_digest`/`mark.admin_python` до регистрации (Task
@@ -1924,14 +2085,16 @@ def test_transfer_check_refuses_build_home_leftovers(monkeypatch, tmp_path): ...
   - Маршрут `launcher` (rev 8, r9: отдельной составной функции нет): `write_atomic` входа
     (текст `launcher_entry.py`, `0644`), `write_atomic` команды (`LAUNCHER_TEXT`, `0755`) —
     своя синхронизация `bin_dir` у каждого; затем, если `/usr/local/bin` доверен (условие
-    `local_bin=trusted`: `trusted_path_problems(Path("/usr/local/bin"))` пуст), — шаг
+    `local_bin=trusted`: `local_bin_trusted(layout)` —
+    `trusted_path_problems(layout.local_bin)` пуст, Task 7 R33.F23), — шаг
     `link_command`; иначе шаг пропущен, и установка сообщает полный путь команды.
   - `link_command(layout) -> None` — протокол `link_command`: временная ссылка,
     `rename` поверх `/usr/local/bin/darkfactory`, `fault_point("renamed", …)`,
     `sync_dir(/usr/local/bin)`. Ветвления внутри нет: решение о ссылке — условие маршрута.
     Эффекты: `renamed` → `sync_dir(local_bin)`.
     Ссылку и файл с именем `df` не создаёт никогда.
-  - `launcher_ready(layout) -> bool`.
+  - `launcher_ready(layout) -> bool`. Оба предиката `read_facts` получает параметрами
+    (Task 7, R33.F5); связывает их Task 9.
   - `RAW_FIELDS = ("generation", "current_id", "releases_text", "install_text",
     "models_text", "pending_present")` — части, которые вход читает до импорта `df` (только
     stdlib, словарь в тексте entry). Тест сверяет с полями `df.state.RawSnapshot` (Task 9).
@@ -1996,6 +2159,9 @@ def test_entry_passes_full_snapshot(tmp_path, monkeypatch): ...
     # прежний raw целиком и ничего не перечитывает (audit hook: нет open install.toml в main)
 def test_entry_raw_fields_match_df_state(): ...   # RAW_FIELDS == поля df.state.RawSnapshot
 def test_admin_tree_synced_before_mark(monkeypatch, tmp_path): ...    # маршрут admin: sync_tree → sync_dir(admin) → write_mark
+def test_admin_primitives_in_protocol_table(monkeypatch, fake_layout): ...
+    # 7-D2: настоящие install_admin_python, install_admin, link_command входят в
+    # test_primitive_protocols_match_table (tests/df/test_leaves.py, до них — пропуск)
 def test_install_admin_is_leaf(monkeypatch, tmp_path): ...
     # S1-R9-N1: события install_admin == PROTOCOLS["install_admin"]: ни write_mark, ни
     # remove_own_tree, ни запуска uv; admin_dir(id) уже есть → StepFailed, дерево не тронуто
@@ -2031,8 +2197,9 @@ def test_bootstrap_allows_only_init_install(tmp_path): ...
 
 **Files:**
 - Create: `df/release.py`, `df/state.py`, `df/cli.py`, `df/install.py`
-- Test: `tests/df/test_release.py`, `tests/df/test_state.py`, `tests/df/test_install_steps.py`,
-  `tests/df/conftest.py`
+- Test: `tests/df/test_release.py`, `tests/df/test_state.py`, `tests/df/test_install_steps.py`
+- Modify: `tests/df/conftest.py` (создан в Task 7 с `fake_layout`; добавить `fake_world`,
+  R33.F19)
 
 **Interfaces:**
 - Consumes: всё из Tasks 1–8; `install_admin_python`, `install_admin`, `admin_ready`,
@@ -2047,7 +2214,8 @@ def test_bootstrap_allows_only_init_install(tmp_path): ...
       отметки `admin`, rev 8 r11);
     - `manifest_repo`, `manifest_sha`, `profile`, `platform`, `created_at`;
     - `repos: [{name, url, sha, lock_sha256, groups}]`;
-    - `python_declared: {repo: str}`, `uv_version_declared`;
+    - `python_declared: {repo: str}`, `uv_version_declared` (из отметки `admin`; записан
+      шагом `build`, R29, R33.F11);
     - `distributions_declared: {repo: [{name, version, source}]}`. `source` — поля
       `SourceId`; для registry `index: "not declared"`.
 
@@ -2093,14 +2261,17 @@ def test_bootstrap_allows_only_init_install(tmp_path): ...
     | # | Шаг | `check()` | `do()` |
     |---|---|---|---|
     | 1 | `manifest` | профиль разобран | — (чистая проверка; отказ — `StepFailed`) |
-    | 2 | `trusted-paths` | `approved_cli_problems` и `trusted_path_problems` для `/opt/df`, `/etc/df`, `/var/lib/df` пусты | создать недостающие каталоги root `0755` (`staging` и `.quarantine` — `0711`) |
+    | 2 | `trusted-paths` | `approved_cli_problems` и `trusted_path_problems` для `/opt/df`, `/etc/df`, `/var/lib/df` пусты | создать недостающие каталоги root `0755` (`staging` и `.quarantine` — `0711`; `install/accept` и `var/verify` — `0700`: примитивы Task 7 их не создают, R33.F31) |
     | 3 | `build-user` | `verify_build_user` пуст и `whoami_as` = записи | `create_build_user` |
 
     Затем `retry_quarantine` (Task 5; остаток — предупреждение в журнале) и **`drive`**
     (Task 7) с таблицей действий строк §3.3 — `install_actions(layout, cfg, pending) ->
-    Mapping[str, Callable[[Facts], None]]`. Каждое значение — `run_route(layout, id,
-    <Row.action>, calls=install_calls(layout, cfg, pending))` (rev 8 r8); `install_calls` —
-    реализации вызовов маршрутов:
+    Mapping[str, Callable[[Facts], None]]`. Каждое значение — `route_action(layout, id,
+    <Row.action>, calls=install_calls(layout, cfg, pending), python_key=<ключ Python
+    профиля>, build_uid=<uid df-build из accounts.toml>)` (Task 7, R33.F14: проверка своей
+    фазы, затем `run_route`; rev 8 r8); `install_calls` = `acceptance_calls(...)` (Task 7,
+    тот же `python_key`) и листья `LATER_LEAVES` (7a, 8, 8a, 9), R33.F7 — реализации
+    вызовов маршрутов:
 
     <!-- install-route-calls:begin -->
     | Действие | Вызовы по порядку (с условиями и объектами) |
@@ -2127,7 +2298,9 @@ def test_bootstrap_allows_only_init_install(tmp_path): ...
     Сверяют `r18-local-check/check_plan.py` и тест `test_action_table_is_route_unfolding`.
 
     Имена действий и функций сверяет тест: ключи `install_actions` = множество `Row.action`
-    без `""` и `"stop"`.
+    без `""` и `"stop"`. Чтение автомата — `read_facts` с `launcher_ready` и
+    `df.admin.admin_ready` (Task 8a), привязку сверяет тест (R33.F5). Доверенные чекауты
+    (`fetch_reference`, Task 7) — до `drive`, в `layout.verify_dir/<repo>` (R33.F34).
 
     Действие `verify` по итоговой копии — маршрут `verify`: маршрут `cleanup_staging`
     (условия — есть ли `staging/<id>/tree` и `staging/<id>`; уже удалённый staging — оба
@@ -2286,6 +2459,22 @@ def test_process_crash_after_current_rename_then_os_crash(fake_world): ...
     # сбой процесса между rename current и sync_dir(opt); повтор; затем сбой ОС модели
     # после commit-config → current и install.toml согласованы (контрпример r3-local-check)
 def test_install_actions_cover_rows(): ...
+def test_action_table_is_route_unfolding(): ...
+    # из Task 7 (R33.F4): ключи install_calls(...) == route_leaves() ∪ WRAPS; блок
+    # install-route-calls в docstring install_actions == render_route_calls()
+@pytest.mark.parametrize("name", sorted(ROUTES))
+def test_routes_match_table_with_real_calls(fake_world, name): ...
+    # R33.F3: test_routes_match_table Task 7 со всеми настоящими calls (install_calls),
+    # без заглушек LATER_LEAVES; тот же python_key, что у install_actions
+def test_read_facts_binds_admin_predicates(fake_world): ...
+    # R33.F5: drive читает факты с df.admin.admin_ready и launcher_ready
+def test_home_found_by_retry_is_settled_before_ready(fake_world): ...
+    # из Task 5 (R21, R33.F22). S1-R6-N1: rename_noreplace → сбой процесса → повтор
+    # (settle_on_acquire) → ready → сбой ОС → домашний каталог на месте; двойник без
+    # settle_on_acquire — каталога нет
+def test_rollback_failure_names_its_step(fake_world): ...
+    # 7-D2: TreeError обёрток remove_own_tree / remove_empty_dir вне drive (rollback)
+    # приходит без имени шага — recover_pending называет шаг отказа
 def test_generation_even_after_success_and_rollback(fake_world): ...
 def test_init_lock_loser_changes_nothing(fake_world): ...   # второй init при занятом lock: файлы /etc/df и /var/lib/df побайтово прежние
 def test_init_refuses_existing_install(fake_world): ...
@@ -2307,7 +2496,8 @@ r10, S1-R10-N1): механизм запуска `run_as`/`spawn_as` (как `fa
 для `install_admin_python`), а также внешние для приёма `fetch_reference`,
 `create_build_user`, `verify_build_user`, `whoami_as`. Листья маршрутов (`cleanup_tree`,
 `cleanup_build_home`, `install_admin_python`, `receive_tree`) — настоящие. Фикстура
-раскладывает фикстурное дерево релиза под `Layout(tmp_path)` с `build_uid = os.getuid()`. Модель сбоя ОС
+раскладывает фикстурное дерево релиза под `Layout(tmp_path)` поверх `fake_layout` (Task 7):
+фиктивный `build_uid` и шов `fsutil.owner_uid` (R33.F1). Модель сбоя ОС
 — обёртка над `fsutil`: она помнит несинхронизированные изменения и откатывает их при
 «сбое».
 
@@ -2615,8 +2805,9 @@ def test_auth_observation_has_no_content(tmp_path): ...
       имена каталога `/etc/df` — по листингу каталога, без открытия файлов снимка: файл схемы
       этапа > 1 — `не проверено (этап N)`; неизвестный файл — `нарушено`;
     - `release.active` — `current` → запись `allowed`;
-    - `release.digest` — пересчёт = `release.json` = `releases.toml`; иначе `нарушено:
-      релиз повреждён`;
+    - `release.digest` — пересчёт (`release_digest`, Task 7: исключён только
+      `release.json`) = `release.json` = `releases.toml`; иначе `нарушено: релиз
+      повреждён`;
     - `release.admin` — `admin_ready(layout, snap.release_id,
       expected_admin_digest=snap.entry.admin_digest,
       expected_python=snap.entry.admin_python)` — обе версии из записи снимка (rev 8, r11);
@@ -2689,7 +2880,8 @@ def test_json_lists_all_problems(fake_installed): ...
 **Interfaces:**
 - Consumes: `install_steps`, `run_steps`, `drive`, `install_actions`, `level1_checks`,
   `seal`, `accept_copy(_hook=…)`, `receive_tree(_hook=…)`, `cleanup_tree`,
-  `retry_quarantine`, `classify`, `run_as`, `spawn_as`, `whoami_as`, `main`.
+  `retry_quarantine`, `classify`, `run_as`, `spawn_as`, `whoami_as`, `main`; строки
+  `sync-note` журнала `drive` (Task 7, R33.F10).
 
 Root-тесты (`@pytest.mark.root`) пропускаются, если не выполнены `os.geteuid() == 0` и
 `DF_ROOT_ACCEPTANCE == "1"`. Раскладка — `Layout(<канонический tmp>)`, родители проходят
@@ -2776,6 +2968,10 @@ def test_root_access_observer_twins(root_world, twin): ...
     # двойники S1-R5-N4 на обеих ОС: root-потомок /bin/cat читает файл источника и
     # отбрасывает данные; root-процесс читает файл через ctypes libc.open — оба дают
     # violation; sentinel в итоге при этом отсутствует (аудит-хук Python оба пропускает)
+def test_tar_failure_as_root(root_world): ...
+    # R33.F35: root-вариант теста отказа tar Task 7 — файл, нечитаемый для df-build;
+    # bsdtar обрывает поток со stderr «tar: (null)» (отказ верен, текст беден —
+    # записать в evidence), GNU tar — код 1
 def test_cleanup_of_000_tree(root_world): ...
     # df-build создаёт непустое дерево, ставит корню и вложенным каталогам 000 и
     # останавливается: первичная очистка в releases/, повтор карантина и очистка в
@@ -2861,6 +3057,10 @@ def test_no_df_in_path(root_world): ...   # ни /opt/df/bin/df, ни /usr/local
     Совместимость утверждённого `tar` с приёмником проверяют не эти пробы, а
     `test_real_tar_stream_accepted` (Task 3, обычный прогон) и
     `test_real_tar_from_build_user_accepted` (root-прогон) на обеих ячейках матрицы.
+  - Обычный прогон на `ubuntu-24.04` впервые исполняет Linux-ветки Task 7, на macOS не
+    проверенные: `verify_chmod` (`fchmod` по дескриптору), обход окружения с
+    `lib64 -> lib`, путь дескриптора через `/proc/self/fd` в `fake_layout`, отказ GNU tar
+    кодом 1 в тесте отказа tar Task 7.
 - [ ] **Step 4: Run** — push ветки; обе ячейки матрицы зелёные. Ссылку на прогон записать в
   evidence. Evidence разделяет:
   - «фикстурная приёмка механизма: pass (macOS arm64, Ubuntu x86_64)»;
@@ -2868,6 +3068,11 @@ def test_no_df_in_path(root_world): ...   # ни /opt/df/bin/df, ни /usr/local
     ячейке (провал контролей сюда не попадает: это провал прогона);
   - «проверено внедрением сбоев: …» и «спроектировано, не испытано: отключение питания»
     (§3.3);
+  - «FULLFSYNC: каталоги без `F_FULLFSYNC` — строки `sync-note` журнала `drive`» по
+    ячейке macOS (решение (а), Task 7, R33.F10); строк нет — «все каталоги приняли
+    F_FULLFSYNC»;
+  - остаточный риск (§3.2, R33.F28): процессы `df-build`, пережившие сбой установщика во
+    время `run_build`, могут писать в будущий `releases/<id>`;
   - «изоляция харнессов: <версии> verified / not verified» (Task 11 Step 3);
   - «`core` live: blocked / not run (ждёт `df-manifest-profiles`)».
 
