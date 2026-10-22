@@ -1,0 +1,364 @@
+{
+  "distributions": [
+    {
+      "direct_url": null,
+      "name": "PyJWT",
+      "version": "2.15.0"
+    },
+    {
+      "direct_url": null,
+      "name": "PyYAML",
+      "version": "6.0.3"
+    },
+    {
+      "direct_url": null,
+      "name": "Pygments",
+      "version": "2.20.0"
+    },
+    {
+      "direct_url": null,
+      "name": "annotated-types",
+      "version": "0.7.0"
+    },
+    {
+      "direct_url": null,
+      "name": "anyio",
+      "version": "4.14.2"
+    },
+    {
+      "direct_url": null,
+      "name": "attrs",
+      "version": "25.4.0"
+    },
+    {
+      "direct_url": null,
+      "name": "build",
+      "version": "1.4.0"
+    },
+    {
+      "direct_url": null,
+      "name": "certifi",
+      "version": "2026.1.4"
+    },
+    {
+      "direct_url": null,
+      "name": "cffi",
+      "version": "2.0.0"
+    },
+    {
+      "direct_url": null,
+      "name": "charset-normalizer",
+      "version": "3.4.4"
+    },
+    {
+      "direct_url": null,
+      "name": "click",
+      "version": "8.3.1"
+    },
+    {
+      "direct_url": null,
+      "name": "cryptography",
+      "version": "50.0.0"
+    },
+    {
+      "direct_url": null,
+      "name": "docutils",
+      "version": "0.22.4"
+    },
+    {
+      "direct_url": null,
+      "name": "h11",
+      "version": "0.16.0"
+    },
+    {
+      "direct_url": null,
+      "name": "httpcore2",
+      "version": "2.12.0"
+    },
+    {
+      "direct_url": null,
+      "name": "httpx2",
+      "version": "2.12.0"
+    },
+    {
+      "direct_url": null,
+      "name": "id",
+      "version": "1.5.0"
+    },
+    {
+      "direct_url": null,
+      "name": "idna",
+      "version": "3.18"
+    },
+    {
+      "direct_url": null,
+      "name": "iniconfig",
+      "version": "2.3.0"
+    },
+    {
+      "direct_url": null,
+      "name": "jaraco.classes",
+      "version": "3.4.0"
+    },
+    {
+      "direct_url": null,
+      "name": "jaraco.context",
+      "version": "6.1.0"
+    },
+    {
+      "direct_url": null,
+      "name": "jaraco.functools",
+      "version": "4.4.0"
+    },
+    {
+      "direct_url": null,
+      "name": "jsonschema",
+      "version": "4.26.0"
+    },
+    {
+      "direct_url": null,
+      "name": "jsonschema-specifications",
+      "version": "2025.9.1"
+    },
+    {
+      "direct_url": null,
+      "name": "keyring",
+      "version": "25.7.0"
+    },
+    {
+      "direct_url": null,
+      "name": "librt",
+      "version": "0.7.8"
+    },
+    {
+      "direct_url": null,
+      "name": "linkify-it-py",
+      "version": "2.0.3"
+    },
+    {
+      "direct_url": null,
+      "name": "markdown-it-py",
+      "version": "4.0.0"
+    },
+    {
+      "direct_url": null,
+      "name": "mcp",
+      "version": "2.0.0"
+    },
+    {
+      "direct_url": null,
+      "name": "mcp-types",
+      "version": "2.0.0"
+    },
+    {
+      "direct_url": null,
+      "name": "mdit-py-plugins",
+      "version": "0.5.0"
+    },
+    {
+      "direct_url": null,
+      "name": "mdurl",
+      "version": "0.1.2"
+    },
+    {
+      "direct_url": null,
+      "name": "more-itertools",
+      "version": "10.8.0"
+    },
+    {
+      "direct_url": null,
+      "name": "mypy",
+      "version": "1.19.1"
+    },
+    {
+      "direct_url": null,
+      "name": "mypy_extensions",
+      "version": "1.1.0"
+    },
+    {
+      "direct_url": null,
+      "name": "nh3",
+      "version": "0.3.2"
+    },
+    {
+      "direct_url": null,
+      "name": "opentelemetry-api",
+      "version": "1.44.0"
+    },
+    {
+      "direct_url": null,
+      "name": "packaging",
+      "version": "26.0"
+    },
+    {
+      "direct_url": null,
+      "name": "pathspec",
+      "version": "1.0.4"
+    },
+    {
+      "direct_url": null,
+      "name": "platformdirs",
+      "version": "4.9.2"
+    },
+    {
+      "direct_url": null,
+      "name": "pluggy",
+      "version": "1.6.0"
+    },
+    {
+      "direct_url": null,
+      "name": "pycparser",
+      "version": "3.0"
+    },
+    {
+      "direct_url": null,
+      "name": "pydantic",
+      "version": "2.12.5"
+    },
+    {
+      "direct_url": null,
+      "name": "pydantic_core",
+      "version": "2.41.5"
+    },
+    {
+      "direct_url": null,
+      "name": "pyproject_hooks",
+      "version": "1.2.0"
+    },
+    {
+      "direct_url": null,
+      "name": "pyrefly",
+      "version": "0.51.1"
+    },
+    {
+      "direct_url": null,
+      "name": "pytest",
+      "version": "9.0.3"
+    },
+    {
+      "direct_url": null,
+      "name": "python-multipart",
+      "version": "0.0.31"
+    },
+    {
+      "direct_url": null,
+      "name": "readme_renderer",
+      "version": "44.0"
+    },
+    {
+      "direct_url": null,
+      "name": "referencing",
+      "version": "0.37.0"
+    },
+    {
+      "direct_url": null,
+      "name": "requests",
+      "version": "2.33.1"
+    },
+    {
+      "direct_url": null,
+      "name": "requests-toolbelt",
+      "version": "1.0.0"
+    },
+    {
+      "direct_url": null,
+      "name": "rfc3986",
+      "version": "2.0.0"
+    },
+    {
+      "direct_url": null,
+      "name": "rich",
+      "version": "14.3.1"
+    },
+    {
+      "direct_url": null,
+      "name": "rpds-py",
+      "version": "0.30.0"
+    },
+    {
+      "direct_url": null,
+      "name": "ruff",
+      "version": "0.14.14"
+    },
+    {
+      "direct_url": {
+        "dir_info": {
+          "editable": false
+        },
+        "url": "file:///private/tmp/df7a-golden/src/spec-runner"
+      },
+      "name": "spec-runner",
+      "version": "5.0.0"
+    },
+    {
+      "direct_url": null,
+      "name": "sse-starlette",
+      "version": "3.2.0"
+    },
+    {
+      "direct_url": null,
+      "name": "starlette",
+      "version": "1.3.1"
+    },
+    {
+      "direct_url": null,
+      "name": "structlog",
+      "version": "25.5.0"
+    },
+    {
+      "direct_url": null,
+      "name": "textual",
+      "version": "8.0.0"
+    },
+    {
+      "direct_url": null,
+      "name": "truststore",
+      "version": "0.10.4"
+    },
+    {
+      "direct_url": null,
+      "name": "twine",
+      "version": "6.2.0"
+    },
+    {
+      "direct_url": null,
+      "name": "types-PyYAML",
+      "version": "6.0.12.20250915"
+    },
+    {
+      "direct_url": null,
+      "name": "typing-inspection",
+      "version": "0.4.2"
+    },
+    {
+      "direct_url": null,
+      "name": "typing_extensions",
+      "version": "4.15.0"
+    },
+    {
+      "direct_url": null,
+      "name": "uc-micro-py",
+      "version": "1.0.3"
+    },
+    {
+      "direct_url": null,
+      "name": "ulid-py",
+      "version": "1.1.0"
+    },
+    {
+      "direct_url": null,
+      "name": "urllib3",
+      "version": "2.8.0"
+    },
+    {
+      "direct_url": null,
+      "name": "uvicorn",
+      "version": "0.41.0"
+    }
+  ],
+  "groups": [
+    "dev"
+  ],
+  "python": "3.12.13",
+  "root_dir": "/private/tmp/df7a-golden/src/spec-runner"
+}

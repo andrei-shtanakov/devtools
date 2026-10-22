@@ -1,0 +1,12 @@
+{
+  "distributions": [
+    {
+      "direct_url": null,
+      "name": "PyYAML",
+      "version": "6.0.3"
+    }
+  ],
+  "groups": [],
+  "python": "3.12.13",
+  "root_dir": "/private/tmp/df7a-golden/src/discovery-toolkit"
+}

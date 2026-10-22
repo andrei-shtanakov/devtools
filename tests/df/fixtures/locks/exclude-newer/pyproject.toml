@@ -1,0 +1,9 @@
+[project]
+name = "exclude-newer-fixture"
+version = "0.0.0"
+requires-python = ">=3.12"
+dependencies = ["iniconfig"]
+
+[tool.uv]
+package = false
+exclude-newer = "2024-01-01T00:00:00Z"

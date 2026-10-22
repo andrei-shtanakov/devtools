@@ -1593,7 +1593,8 @@ def test_build_refused_before_any_command_if_user_unverified(): ...  # runner н
     `TARGETS: Mapping[str, Target]` — каждый текст цели `ROUTES` → объект и обёртка
     (`implementation(call, target)`; неизвестный текст — `KeyError`, сверка при импорте).
     `LATER_LEAVES: Mapping[str, str]` — лист → задача-владелец: `distribution_problems` —
-    7a; `static_problems`, `transfer_check` — 8; `install_admin_python`, `install_admin`,
+    7a (как построено: перешёл в `acceptance_calls`, R36/F2); `static_problems`,
+    `transfer_check` — 8; `install_admin_python`, `install_admin`,
     `link_command` — 8a; `activate`, `write_release_json`, `register` и `write_atomic`
     без обёртки — 9. Ключи `acceptance_calls` и `LATER_LEAVES` вместе — ровно
     `route_leaves()` и `WRAPS`. `python_key` — тот же, что вызывающий передаёт
@@ -1849,99 +1850,182 @@ def test_foreign_pth_refused_virtualenv_pth_allowed(tmp_path): ...
 
 ### Task 7a: Ожидаемый состав из lock
 
+Как построено (22.10): предполётная проверка `task-7a-preflight.md`, решения R36–R39
+(R36 — находки F1 в редакции дополнения A2/A4, F2–F8, F10, N1–N5, A, B; R37 — F9 к
+Task 14; R38 — три части 7a-golden / 7a-impl / 7a-paper; R39 — Linux-эталон в локальном
+контейнере podman), решения владельца 22.10 о `UV_NO_CONFIG` и о раскладке окружения
+(спека §3.2, §3.4, §3.5).
+
 **Files:**
 - Create: `df/markers.py`, `df/lockset.py`
-- Test: `tests/df/test_markers.py`, `tests/df/test_lockset.py`,
-  `tests/df/fixtures/locks/<member>.uv.lock` (шесть членов `core`; SHA источника — в
-  `fixtures/locks/SOURCES.md`), `tests/df/fixtures/locks/<member>.<platform>.expected.json`
+- Modify: `df/routes.py` (лист `distribution_problems` в `acceptance_calls`, R36/F2)
+- Test: `tests/df/test_markers.py`, `tests/df/test_lockset.py`, `tests/df/test_routes.py`
+  (листовые тесты), `tests/df/fixtures/locks/<member>.uv.lock` (шесть членов `core`),
+  `tests/df/fixtures/locks/<case>.<platform>.expected.json` (8 случаев × 2 платформы),
+  `tests/df/fixtures/locks/exclude-newer/`, `tests/df/fixtures/locks/stale/`,
+  `tests/df/fixtures/locks/SOURCES.md`
 
 **Interfaces:**
-- Consumes: `PlatformName` (Task 5); `InstalledDist` (Task 7, `df/inputs.py`), `SourceId`,
-  `source_from_lock`, `UnsupportedLock` (Task 7, `df/sources.py`).
+- Consumes: `PlatformName` (Task 5); `InstalledDist`, `installed_distributions`,
+  `normalize_name` (Task 7, `df/inputs.py`); `SourceId`, `source_from_lock`,
+  `UnsupportedLock` (Task 7, `df/sources.py`); `build_src_dir` (Task 6, `df/build.py`;
+  сверено по истории — введена исправлением Task 6 e12864e).
 - Produces:
   - `marker_env(platform: PlatformName, python: str) -> Mapping[str, str]` — восемь
     переменных §3.5. macOS: `sys_platform=darwin`, `platform_system=Darwin`,
     `platform_machine=arm64`. Linux: `linux`, `Linux`, `x86_64`. Общие: `os_name=posix`,
     `implementation_name=cpython`, `platform_python_implementation=CPython`,
     `python_version=X.Y`, `python_full_version=X.Y.Z`.
-  - `evaluate(marker: str, env: Mapping[str, str]) -> bool` — грамматика §3.5:
+  - `evaluate(marker: str, env: Mapping[str, str]) -> bool` — грамматика §3.5; маркер
+    разбирается **целиком** до вычисления (неподдерживаемый хвост за `or`/`and` — отказ, F5):
     - сравнения `переменная оп 'строка'` или `'строка' оп переменная`;
     - `and`, `or` (`and` связывает сильнее), скобки;
-    - порядковые операторы — только для `python_version`/`python_full_version`, сравнение
-      кортежами целых.
+    - переменные Python — все шесть операторов, кортежи целых с дополнением нулями
+      (`python_version == '3.12.0'` истинно при `3.12`); литерал не вида `N(.N)*` — отказ;
+      строковые переменные — только `==`/`!=` (F6).
 
-    Иное (`extra`, `group`, `platform_release`, `in`, `~=`, `===`, лишние токены) —
-    `UnsupportedLock` с текстом маркера.
-  - `ExpectedDist(name: str, version: str, source: SourceId)` (`SourceId` — Task 7). `name`
-    нормализован по PEP 503; `installed_distributions` (Task 7) нормализует так же —
-    сравниваются нормализованные имена с обеих сторон.
+    Иное (`extra`, `group`, `platform_release`, `in`, `not`, `~=`, `===`, две переменные или
+    две строки, лишние токены, слишком глубокая вложенность) — `UnsupportedLock` с текстом
+    маркера.
+  - `ExpectedDist(name: str, version: str, source: SourceId)`; `name` нормализован
+    `normalize_name` (N1) — той же функцией, что у `installed_distributions`.
+  - `LOCK_TOP_KEYS`, `LOCK_MANIFEST_KEYS` и `lock_layout_problems(data) -> list[str]` —
+    **одно** множество ключей lock для проверки заголовка и для `uv_config_problems`
+    (дополнение A4): верхний уровень — `version`, `revision`, `requires-python`,
+    `resolution-markers`, `supported-markers`, `required-markers`, `manifest`, `package`;
+    `[manifest]` — `constraints`, `overrides`, `excludes`, `build-constraints`; каждый ключ
+    `[options]` и любой иной ключ — проблема с его именем.
   - `expected_distributions(lock: bytes, *, groups: tuple[str, ...], env: Mapping[str,
     str], root_dir: Path) -> frozenset[ExpectedDist]` — алгоритм §3.5:
-    - заголовок: `version == 1` и `revision == 3`, нет `conflicts` и `[manifest]`-ключей вне
-      известных — иначе `UnsupportedLock`;
+    - ошибка UTF-8/TOML/вложенности — `UnsupportedLock` (N5);
+    - заголовок: `version` и `revision` — целые 1 и 3 (`true`, `3.0` — отказ); ключи —
+      `lock_layout_problems` пуст;
+    - ключи `[[package]]` — из разрешающего списка (`name`, `version`, `source`,
+      `dependencies`, `optional-dependencies`, `dev-dependencies`, `sdist`, `wheels`,
+      `metadata`, `resolution-markers`), ключи записи зависимости — `name`, `version`,
+      `source`, `marker`, `extra`; иное — отказ с именем ключа;
     - корень — ровно один пакет с источником `virtual`/`editable`/`directory`, равным `"."`;
+    - **до обхода** (F5, ревью M1) проверяется весь lock, достижимый или нет: источник каждого
+      пакета (`source_from_lock`), каждый маркер, каждая запись разрешается ровно в одну цель
+      и каждый запрошенный ею `extra` у цели есть — отказ не зависит от платформы;
     - обход в ширину: зависимости корня и `dev-dependencies[g]` для каждой `g ∈ groups`;
-      отсутствующая группа — `UnsupportedLock`;
-    - запись зависимости с `marker` берётся, только если `evaluate` истинен;
-    - цель выбирается по `name` и, если указаны, `version`/`source`; ноль или больше одного
-      кандидата — `UnsupportedLock`;
-    - `extra` записи добавляет `optional-dependencies[e]` цели;
-    - источник — `source_from_lock(source, root_dir=root_dir)` (Task 7, §3.5); `root_dir` —
-      копия для сборки `build_home/tmp/<id>/src/<r>`. Своей нормализации здесь нет.
+      имена групп сравниваются нормализованными, как `--group` у `uv` (`my_group` =
+      `my-group`); отсутствующая группа — `UnsupportedLock`; записи групп вычисляются как
+      зависимости (маркер, `extra`); `extra` корня не выбираются — сборка не передаёт `--extra`; ключ
+      посещения — (пакет, extra) (F7);
+    - цель — по нормализованному `name` и сырым `version`/`source` записи, до проекции
+      (N2); ноль или больше одного кандидата — `UnsupportedLock`;
+    - одно имя в результате дважды — `UnsupportedLock` (uv ставит одно распределение на имя,
+      ревью M5);
+    - источник — `source_from_lock(source, root_dir=root_dir)`.
 
-    Виртуальный корень в результат не входит. Корень `editable`/`directory` входит:
-    `--no-editable` ставит его обычным распределением.
+    Виртуальный корень в результат не входит; корень `editable`/`directory` входит
+    (`--no-editable`). **Контракт `root_dir`** (замер `uv` 0.11.23, 22.10, таблица в
+    `SOURCES.md`): `uv` записывает в `direct_url.json` путь `--project` как задан —
+    нормализуя только лексически (`/` в конце и `..` сворачиваются), ссылки не разрешаются.
+    Поэтому `root_dir` — ровно путь `--project` сборки (`build_src_dir`), абсолютный и без
+    `..` (иначе `ValueError`), и не разрешается.
   - `distribution_problems(installed: Sequence[InstalledDist], expected:
-    frozenset[ExpectedDist]) -> list[str]` — сравнение множеств троек `(name, version,
-    source)` в обе стороны (лишнее и недостающее). Эффекты: нет. Правила:
-    - `git` и `directory` сравниваются по всем полям `SourceId`;
-    - для `registry` установленная сторона заявляет только вид: ожидаемый URL индекса
-      проецируется в `None` и в `release.json` пишется как `index: not declared`.
+    frozenset[ExpectedDist]) -> list[str]` — сравнение троек в обе стороны, строка на
+    различие, отсортировано (N4): `«<имя> <версия>: заявлено X, ожидается Y»`, `«лишнее: …»`,
+    `«нет: …»`; имя, установленное дважды, — проблема. `git` и `directory` — по всем полям
+    `SourceId`; `registry` ожидаемой стороны проецируется в `SourceId("registry")` (`index:
+    not declared`). Эффекты: нет. **Названное ограничение** (решение владельца 22.10,
+    дополнение B) — константа `DECLARED_LIMIT`: «метаданные распределений согласованы с lock
+    (заявлено); не доказывает отсутствия лишнего кода и происхождения файлов релиза».
+  - `UV_PINNED_VERSION = "0.11.23"`, `UV_PROJECT_KEYS_0_11_23` — разрешающий список
+    `[tool.uv]` (спека §3.2; все 11 ключей подтверждены замером `uv` 0.11.23 — таблица в
+    `SOURCES.md`; `conflicts`, `workspace`, `managed`, `dependency-groups`,
+    `build-backend` в него намеренно не входят, дополнение A2). Имя константы несёт версию:
+    смена `uv` заставляет перепроверить список замером.
+  - `uv_config_problems(pyproject: bytes, uv_toml: bytes | None, lock: bytes) -> list[str]`
+    — по доверенному чекауту: `uv.toml` есть (`not None`) — проблема независимо от
+    содержимого; ключ `[tool.uv]` вне `UV_PROJECT_KEYS_0_11_23` — `pyproject.toml [tool.uv]
+    <ключ>`; lock — `lock_layout_problems` (`uv.lock [options] <ключ>`, `uv.lock [manifest]
+    <ключ>`). Нечитаемый вход — строка-проблема, не исключение. Эффекты: нет. Потребитель —
+    Task 9, до сборки.
+  - `df/routes.py`: лист `distribution_problems` — в `acceptance_calls` рядом с
+    `verify_sources`, ключ снят с `LATER_LEAVES` (R36/F2). Для каждого репо профиля:
+    `installed_distributions(releases/<id>/venv/<r>)` против
+    `expected_distributions(refs[r]/uv.lock, groups=pin.groups, env=marker_env(platform,
+    profile.python), root_dir=build_src_dir(layout, id, r))`. Проблемы всех репо (в том
+    числе нет чекаута, `TreeError`, `UnsupportedLock`) — один `StepFailed("verify", …)` с
+    `DECLARED_LIMIT` в начале. Успех — `RouteContext.installed = {repo: [InstalledDist]}` и
+    событие журнала `distributions-note` с `DECLARED_LIMIT` (вид `<тема>-note`, как
+    `sync-note`). `installed` не забирается `_take`: его читает вызывающий после маршрута;
+    для этого `acceptance_calls(..., ctx: RouteContext | None = None)` принимает контекст
+    вызывающего (Task 9).
 
-    Сообщения говорят «заявлено», а не «проверено».
-
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests** (как построено)
 
 ```python
-@pytest.mark.parametrize("marker,expected", [
-    ("sys_platform == 'darwin'", True),
-    ("python_full_version >= '3.12' and python_full_version < '3.14'", True),
-    ("(sys_platform == 'win32') or (platform_machine == 'arm64')", True),
-    ("implementation_name != 'cpython'", False),
-])
-def test_evaluate_macos_312(marker, expected): ...
-@pytest.mark.parametrize("marker", ["extra == 'dev'", "platform_release >= '20'",
-                                    "sys_platform in 'linux darwin'",
-                                    "python_version ~= '3.12'", "sys_platform < 'z'"])
-def test_unsupported_marker(marker): ...   # → UnsupportedLock
-@pytest.mark.parametrize("member", ["devtools", "discovery", "discovery-toolkit",
-                                    "disputatio", "steward", "spec-runner"])
+def test_evaluate_macos_312(marker, expected): ...          # + F6: дополнение нулями, обратная форма, приоритет
+def test_unsupported_marker(marker): ...                    # + F5: «… or extra == 'x'», лишние токены
+def test_deep_marker_nesting_is_refused(): ...              # ревью M9
 @pytest.mark.parametrize("platform", ["macos-arm64", "linux-x86_64"])
-def test_real_locks_match_golden(member, platform): ...
-    # expected_distributions == эталон, где источник эталона — source_from_direct_url его
-    # direct_url.json: положительное равенство git/subdirectory и корня на фактах uv
-@pytest.mark.parametrize("case", ["revision-4", "conflicts", "dep-extra-marker",
-                                  "ambiguous-duplicate", "missing-group", "two-roots"])
-def test_lock_refusals(case): ...   # → UnsupportedLock
+@pytest.mark.parametrize("case,member", GOLDEN_CASES)      # 6 членов + spec-runner.dev
+def test_real_locks_match_golden(case, member, platform): ...  # + devtools.governance-conductor
+    # expected_distributions == эталон через source_from_direct_url сырого direct_url.json;
+    # root_dir — из поля JSON (argv захвата), не из direct_url.json (F3); эталон как
+    # InstalledDist → distribution_problems == []
+def test_goldens_exercise_root_git_and_platform(): ...      # не пусто: корень, git, Linux − macOS
+def test_lock_refusals(case): ...   # каждый случай — со своей причиной: revision-4, version-2,
+    # version-bool, revision-float, conflicts, options-present, manifest-dependency-metadata,
+    # manifest-members, unknown-top-key, unknown-package-key, unknown-dependency-key,
+    # dep-extra-marker, ambiguous-duplicate, zero-candidates, version-mismatch,
+    # missing-group, missing-extra, two-roots, no-root, name-twice-in-result,
+    # unreached-bad-marker/-source/-optional, unreached-ambiguous, unreached-missing-target,
+    # unreached-missing-extra, deep-nesting, not-toml, not-utf8
 def test_virtual_root_excluded_editable_root_included(): ...
 def test_extra_pulls_optional_dependencies(): ...   # pyjwt[crypto] → cryptography
+def test_extra_after_plain(): ...                   # F7a
+def test_root_extra_not_selected(): ...             # F7b
+def test_group_entry_marker_and_extra(): ...        # F7c
+def test_root_dir_is_taken_as_spelled_not_resolved(tmp_path): ...   # родитель-ссылка
 def test_missing_and_extra_installed_both_reported(): ...
 def test_git_commit_mismatch_reported_as_declared(): ...
 @pytest.mark.parametrize("change", ["url", "subdirectory", "commit", "editable-true",
                                     "registry-has-direct-url"])
-def test_source_identity_mismatch_reported(change): ...   # plan-fields из devtools/uv.lock: тот же name/version/commit, другой subdirectory → проблема
+def test_source_identity_mismatch_reported(change): ...
 def test_same_name_version_different_source_distinguished(): ...
+def test_exclude_newer_fixture_two_problems(): ...   # pyproject [tool.uv] + uv.lock [options]
+def test_stale_fixture_is_not_a_config_problem(): ...  # устаревший lock — дело --locked
+def test_setting_keys_refused(key, line): ...   # compile-bytecode, exclude-newer, no-binary, …
+def test_uv_toml_present_is_a_problem_whatever_it_holds(): ...
+def test_lock_only_options_are_a_problem_per_key(): ...   # флаг CLI при uv lock
+def test_lock_keys_shared_with_expected_distributions(case): ...
+def test_devtools_own_pyproject_and_lock_pass(): ...
+# tests/df/test_routes.py
+def test_distribution_problems_leaf_accepts_and_keeps_installed(fl): ...
+def test_distribution_problems_leaf_passes_groups_env_and_root_as_spelled(fl, tmp_path): ...  # ревью M2
+def test_distribution_problems_root_is_the_builds_project_path(fl): ...  # == --project из build_commands
+def test_distribution_problems_leaf_lists_every_repo(fl): ...
 ```
 
-- [ ] **Step 2: Эталоны.** Для каждого члена на его SHA выполнить `uv sync --locked
-  --no-editable --no-default-groups --group …` во временное окружение и записать множество
-  установленных `(name, version, source)` с полным `direct_url.json`:
-  - macOS — на машине разработчика;
-  - Linux — разовым CI-прогоном.
+- [x] **Step 2: Эталоны** (R38: часть 7a-golden; провенанс — `fixtures/locks/SOURCES.md`).
+  Для каждого члена на его SHA (origin HEAD 22.10, 40 hex; к будущим пинам `core` отношения
+  не имеет — их сверяет Task 14, F4) из копии `git archive` по каноническому пути выполнена
+  команда сборки с её окружением (`UV_NO_CONFIG=1`, `UV_LINK_MODE=copy`,
+  `UV_PYTHON_PREFERENCE=only-managed`, свой `UV_CACHE_DIR`): `uv sync --locked
+  --no-editable --no-default-groups --group … --project <root_dir> --python 3.12.13`,
+  и записано множество установленных распределений с сырым `direct_url.json` и
+  `root_dir` из argv (F3):
+  - macOS — на машине разработчика, `uv` 0.11.23;
+  - Linux — **в локальном одноразовом контейнере podman** (`ubuntu:24.04` по digest,
+    `linux/amd64`, uid 1000, проверены `x86_64`/`linux`) вместо разового CI-прогона (R39,
+    ревью M7): тот же факт `uv` с провенансом по digest образа; Task 13 повторяет чистый
+    golden-тест на Linux в CI.
 
-  Команда и SHA — в `SOURCES.md`. Эталон — факт `uv`, а не вывод нашего алгоритма.
-- [ ] **Step 3–5:** FAIL → implement → PASS
-- [ ] **Step 6: Commit** `feat(df): expected distribution set from uv.lock (restricted markers)`
+  Фикстуры `exclude-newer/` (настоящий lock `uv` 0.11.23 с `[options] exclude-newer`) и
+  `stale/` (устаревший lock без настроек) отличают неподдерживаемую настройку от
+  устаревшего lock. Скрипт захвата не поставляется. Эталон — факт `uv`, а не вывод нашего
+  алгоритма.
+- [x] **Step 3–5:** FAIL → implement → PASS
+- [x] **Step 6: Commit** `feat(df): expected distribution set from uv.lock (restricted
+  markers)`; затем `test(df): uv.lock goldens and exclude-newer fixture for Task 7a`,
+  `test(df): real-lock goldens, exclude-newer fixture, root path contract`,
+  `fix(df): Task 7a review minors`, `docs(df): Task 7a as built; owner decisions on uv
+  settings and sitecustomize/_pth`, `fix(df): Task 7a final review minors`.
 
 ### Task 8: Граница цепочки исполнения, инвентарь entrypoints и проверка переноса
 
@@ -1976,14 +2060,22 @@ def test_same_name_version_different_source_distinguished(): ...
     - **(д)** для каждого репо `r` каждое имя из `expected[r]` есть в `venv/<r>/bin`;
       отсутствие — отказ с именем;
     - **(е)** `pth_problems` каждого окружения пуст.
-    - **вопрос владельцу (не решено):** пробы 7-B на CPython: `sitecustomize`
-      (`.py`/`.pyc`/`.so`/пакет, по `casefold`) в `site-packages` исполняется при старте
-      интерпретатора; `*._pth` рядом с интерпретатором окружения переписывает `sys.path`.
-      Ни спека, ни (а)–(е) их не называют; станут ли они проблемами — решение владельца
-      вместе с фразой спеки, до него план их не требует. Там же — предел сравнения
-      множеств: код без метаданных распределения `installed_distributions` не видит
-      (покрытие `RECORD` или названное ограничение); (б) остаётся проверкой
-      `include-system-site-packages`.
+    - **(ё)** решение владельца 22.10 (спека §3.4 «Раскладка окружения»): в поддерживаемой
+      раскладке окружения запрещены:
+      - автоматически импортируемый `sitecustomize` (`.py`/`.pyc`/расширение/пакет; имя
+        сравнивается по `casefold`, как у `_select` Task 7) в каждом каталоге `sys.path`
+        интерпретатора релиза — `venv/*/lib/python*/site-packages` и дерево управляемого
+        Python `release_dir/python/<ключ>` (`lib/python3.X`, `lib-dynload`); по пробам 7-B
+        CPython исполняет его при старте;
+      - файлы `*._pth` там, где их читает getpath CPython: рядом с `venv/*/bin/python*`, с
+        базовым исполняемым файлом (`python/<ключ>/bin`) и с libpython
+        (`python/<ключ>/lib`) — они заменяют вычисление `sys.path`.
+
+      Каждый найденный — проблема с путём. Проверка (б) `pyvenv.cfg` **обязательна**: нет файла,
+      нет ключа `home` или `include-system-site-packages` — проблема, а не пропуск.
+      Названное ограничение сравнения состава (Task 7a, `DECLARED_LIMIT`): код без
+      метаданных распределения `installed_distributions` не видит; (а)–(ё) — статические
+      проверки раскладки, они его не закрывают, и `RECORD` в v1 не сверяется.
   - `TransferResult(problems: list[str], python_declared: dict[str, str])`.
   - `transfer_check(release_dir: Path, layout: Layout, *, user: str, expected:
     Mapping[str, frozenset[str]]) -> TransferResult` — §3.3 п. 5; вид «запуск от `df-build`»
@@ -1996,8 +2088,9 @@ def test_same_name_version_different_source_distinguished(): ...
     `PATH = /usr/bin:/bin`, `LANG = C.UTF-8`, `cwd = layout.build_home`:
     - **(ж)** для каждого `venv/<r>/bin/python`, без `-I` и с `-I`:
       `-c "import json,site,sys;print(json.dumps([sys.path, site.ENABLE_USER_SITE,
-      sys.version]))"`. Каждый непустой элемент `sys.path` лежит внутри `release_dir`,
-      `ENABLE_USER_SITE` ложен. `sys.version` записывается в `python_declared[r]`;
+      sys.version]))"`. Каждый непустой элемент `sys.path` лежит внутри `release_dir` и
+      входит в каталоги, которые проверила (ё) (иначе — проблема: запрет `sitecustomize`
+      покрывает весь `sys.path`), `ENABLE_USER_SITE` ложен. `sys.version` записывается в `python_declared[r]`;
     - **(з)** каждый скрипт из `expected[r]` запускается с `--help`, независимо от вида
       `shebang`: код 0 за 60 с;
     - любой `RunResult.launched=False` — проблема инфраструктуры, а не PASS.
@@ -2014,6 +2107,19 @@ def test_missing_expected_entrypoint_refused(tmp_path): ...
 def test_expected_entrypoints_package_rules(tmp_path): ...   # package=false → ∅; без build-system → ∅; scripts → имена
 def test_direct_shebang_script_is_run(monkeypatch, tmp_path): ...  # прямой #!<release>/…/python, --help код 1 → проблема
 def test_pyvenv_home_outside_refused(tmp_path): ...
+@pytest.mark.parametrize("defect", ["missing", "no-home", "no-include-system-site-packages"])
+def test_pyvenv_cfg_is_mandatory(tmp_path, defect): ...   # (б) решение владельца 22.10
+@pytest.mark.parametrize("name", ["sitecustomize.py", "sitecustomize.pyc",
+                                  "sitecustomize.cpython-312-darwin.so", "sitecustomize/",
+                                  "SiteCustomize.py"])
+def test_sitecustomize_refused(tmp_path, name): ...       # (ё); регистр — по casefold
+@pytest.mark.parametrize("where", ["venv-site-packages", "python-stdlib",
+                                   "python-lib-dynload"])
+def test_sitecustomize_refused_everywhere_on_sys_path(tmp_path, where): ...  # (ё)
+@pytest.mark.parametrize("where", ["venv-bin", "python-bin", "python-lib"])
+def test_pth_underscore_file_refused(tmp_path, where): ...  # (ё) python312._pth у getpath
+def test_runtime_sys_path_outside_checked_dirs_refused(monkeypatch, tmp_path): ...
+    # (ж): элемент sys.path внутри release_dir, но не из каталогов (ё) — проблема
 def test_native_dep_outside_refused(monkeypatch, tmp_path): ...  # linked_libraries-заглушка: /opt/homebrew/lib/x.dylib
 def test_rpath_origin_inside_accepted(monkeypatch, tmp_path): ...
 def test_runtime_sys_path_outside_refused(monkeypatch, tmp_path): ...  # run_as-заглушка отдаёт /Users/x/site
@@ -2220,7 +2326,10 @@ def test_bootstrap_allows_only_init_install(tmp_path): ...
     - `python_declared: {repo: str}`, `uv_version_declared` (из отметки `admin`; записан
       шагом `build`, R29, R33.F11);
     - `distributions_declared: {repo: [{name, version, source}]}`. `source` — поля
-      `SourceId`; для registry `index: "not declared"`.
+      `SourceId`; для registry `index: "not declared"`. Берётся из `ctx.installed`
+      (`RouteContext`, Task 7a) — того `ctx`, который `install_calls` передал
+      `acceptance_calls(..., ctx=ctx)`: списки, принятые листом `distribution_problems`.
+      Своего чтения окружения `write_release_json` не делает.
 
   - `write_release_json(release_dir: Path, rec: ReleaseRecord) -> None` — обёртка
     протокола `write_atomic` (`WRAPS`), `0644`. Эффекты: `write_atomic()`.
@@ -2273,7 +2382,8 @@ def test_bootstrap_allows_only_init_install(tmp_path): ...
     <Row.action>, calls=install_calls(layout, cfg, pending), python_key=<ключ Python
     профиля>, build_uid=<uid df-build из accounts.toml>)` (Task 7, R33.F14: проверка своей
     фазы, затем `run_route`; rev 8 r8); `install_calls` = `acceptance_calls(...)` (Task 7,
-    тот же `python_key`) и листья `LATER_LEAVES` (7a, 8, 8a, 9), R33.F7 — реализации
+    тот же `python_key`, свой `ctx: RouteContext`) и листья `LATER_LEAVES` (8, 8a, 9;
+    лист 7a уже в `acceptance_calls`), R33.F7 — реализации
     вызовов маршрутов:
 
     <!-- install-route-calls:begin -->
@@ -2304,6 +2414,13 @@ def test_bootstrap_allows_only_init_install(tmp_path): ...
     без `""` и `"stop"`. Чтение автомата — `read_facts` с `launcher_ready` и
     `df.admin.admin_ready` (Task 8a), привязку сверяет тест (R33.F5). Доверенные чекауты
     (`fetch_reference`, Task 7) — до `drive`, в `layout.verify_dir/<repo>` (R33.F34).
+
+    Настройки `uv` (спека §3.2, решение владельца 22.10, Task 7a): до `run_build` — для
+    каждого репо профиля `uv_config_problems(refs[r]/pyproject.toml,
+    refs[r]/uv.toml или None, refs[r]/uv.lock)` по доверенному чекауту. Проблемы **всех**
+    репо — один `StepFailed("build", …)` с префиксом `<repo>:` у каждой строки (файл и
+    ключ), а не первая (образец Task 2); `run_build` при этом не начинается. Файлы чекаута
+    читаются как данные; нечитаемый — проблема того же списка.
 
     Действие `verify` по итоговой копии — маршрут `verify`: маршрут `cleanup_staging`
     (условия — есть ли `staging/<id>/tree` и `staging/<id>`; уже удалённый staging — оба
@@ -2467,6 +2584,12 @@ def test_action_table_is_route_unfolding(): ...
     # install-route-calls в docstring install_actions == render_route_calls()
 @pytest.mark.parametrize("name", sorted(ROUTES))
 def test_routes_match_table_with_real_calls(fake_world, name): ...
+def test_uv_config_refused_before_build_lists_all_repos(fake_world): ...
+    # Task 7a/§3.2: два репо — [tool.uv] exclude-newer у одного, uv.toml у другого →
+    # StepFailed("build") с обоими файлами и ключами; ни одного запуска run_as(df-build)
+def test_release_json_distributions_from_route_context(fake_world): ...
+    # distributions_declared == ctx.installed листа distribution_problems; registry —
+    # index: "not declared"
     # R33.F3: test_routes_match_table Task 7 со всеми настоящими calls (install_calls),
     # без заглушек LATER_LEAVES; тот же python_key, что у install_actions
 def test_read_facts_binds_admin_predicates(fake_world): ...
@@ -2889,7 +3012,8 @@ def test_json_lists_all_problems(fake_installed): ...
 - Consumes: `install_steps`, `run_steps`, `drive`, `install_actions`, `level1_checks`,
   `seal`, `accept_copy(_hook=…)`, `receive_tree(_hook=…)`, `cleanup_tree`,
   `retry_quarantine`, `classify`, `run_as`, `spawn_as`, `whoami_as`, `main`; строки
-  `sync-note` журнала `drive` (Task 7, R33.F10).
+  `sync-note` журнала `drive` (Task 7, R33.F10) и `distributions-note` шага `verify`
+  (Task 7a).
 
 Root-тесты (`@pytest.mark.root`) пропускаются, если не выполнены `os.geteuid() == 0` и
 `DF_ROOT_ACCEPTANCE == "1"`. Раскладка — `Layout(<канонический tmp>)`, родители проходят
@@ -3079,6 +3203,11 @@ def test_no_df_in_path(root_world): ...   # ни /opt/df/bin/df, ни /usr/local
   - «FULLFSYNC: каталоги без `F_FULLFSYNC` — строки `sync-note` журнала `drive`» по
     ячейке macOS (решение (а), Task 7, R33.F10); строк нет — «все каталоги приняли
     F_FULLFSYNC»;
+  - рядом — строка `distributions-note` шага `verify` по ячейке (Task 7a): сверка состава
+    названа как есть — «метаданные распределений согласованы с lock (заявлено); не
+    доказывает отсутствия лишнего кода и происхождения файлов релиза»;
+  - версия `uv` прогона = версии в имени `UV_PROJECT_KEYS_<версия>`; иная — «список настроек
+    uv не перепроверен для <версия>», а не pass;
   - остаточный риск (§3.2, R33.F28): процессы `df-build`, пережившие сбой установщика во
     время `run_build`, могут писать в будущий `releases/<id>`;
   - «изоляция харнессов: <версии> verified / not verified» (Task 11 Step 3);
@@ -3100,12 +3229,21 @@ def test_no_df_in_path(root_world): ...   # ни /opt/df/bin/df, ни /usr/local
   - требование: у членов профиля полный `sha` (40 hex), включая `sha` у `spec-runner`;
   - пин `devtools` — на коммит с пакетом `df`;
   - lock-файлы членов в пределах поддерживаемых конструкций §3.5 (иначе установка откажет
-    «неподдерживаемый lock»).
+    «неподдерживаемый lock»), а `[tool.uv]` членов — в пределах `UV_PROJECT_KEYS_0_11_23`,
+    без `uv.toml` (§3.2; иначе отказ до сборки);
+  - **вопрос владельцу** (R37, F9): список групп `core` для `devtools`. План предлагает
+    только `governance`, но `devtools/pyproject.toml` называет `conductor` группой службы
+    (`default-groups`), а сборка идёт с `--no-default-groups`: без `conductor` в профиле его
+    зависимости (`pyjwt[crypto]`, `jsonschema`) в окружение не попадут.
 
   В `TODO.md` — пункт `@id:df-installer-stage1-live`: «живая установка профиля `core` на
   macOS arm64 и Ubuntu x86_64; проверка совместимости пинов и lock-файлов (`uv sync
   --locked` каждого члена на его SHA); закрывает приёмку этапа 1 по §10»,
-  `@blocked_by:todo://ai-orchestrators-workspace/df-manifest-profiles`.
+  `@blocked_by:todo://ai-orchestrators-workspace/df-manifest-profiles`. Там же — пункт
+  с `@trigger` на смену закреплённой версии `uv`: перепроверить замером
+  `UV_PROJECT_KEYS_<версия>` (дополнение A1/A2 предполётной проверки Task 7a) и таблицу
+  записи пути корня в `tests/df/fixtures/locks/SOURCES.md`, переименовать константу под
+  новую версию, перезахватить эталоны.
 - [ ] **Step 2: Документация** — строка `df/` в таблице CLAUDE.md и раздел README:
   - что делает этап 1;
   - первая установка: `sudo /usr/bin/python3 -I -B -S <чекаут devtools>/df/bootstrap.py init

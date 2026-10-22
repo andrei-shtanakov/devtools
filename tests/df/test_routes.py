@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+import json
 import os
 import re
 import shutil
@@ -47,13 +48,15 @@ from df.config import (
 )
 from df.digest import TreeError, tree_digest
 from df.journal import StepFailed, read_journal
-from df.manifest import Profile
+from df.lockset import DECLARED_LIMIT
+from df.manifest import Profile, RepoPin
 from df.paths import Layout
 from df.receive import CopyLimits
 from df.routes import (
     GUARDS,
     LATER_LEAVES,
     TARGETS,
+    RouteContext,
     acceptance_calls,
     implementation,
     route_action,
@@ -1217,6 +1220,169 @@ def test_reap_leftovers_are_a_warning(
 def test_reap_runs_the_real_reap(fl: FakeLayout) -> None:
     make_calls(fl)["reap_user_processes"]("df-build")
     assert fl.events == [("process", "df-build")]
+
+
+# ---------- distribution_problems ----------
+
+LOCK_A = b"""version = 1
+revision = 3
+
+[[package]]
+name = "app"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [{ name = "a" }]
+
+[[package]]
+name = "a"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+"""
+
+
+def _dist_calls(
+    fl: FakeLayout,
+    repos: tuple[str, ...],
+    refs: dict[str, Path],
+    ctx: RouteContext,
+    groups: tuple[str, ...] = (),
+) -> dict[str, routes.Call]:
+    pins = tuple(
+        RepoPin(r, f"https://example.invalid/{r}", "0" * 40, groups) for r in repos
+    )
+    profile = Profile("p", PY, pins)
+    plan = BuildPlan(
+        ID, fl.layout.release_dir(ID), profile, fake_uv(fl), Path("/g"), Path("/t")
+    )
+    return acceptance_calls(
+        fl.layout,
+        ID,
+        install=INSTALL,
+        profile=profile,
+        platform=plat.detect_platform(),
+        plan=plan,
+        limits=CopyLimits(),
+        refs=refs,
+        journal=fl.layout.journal,
+        run_id="run-1",
+        python_key=KEY,
+        ctx=ctx,
+    )
+
+
+def _repo(fl: FakeLayout, repo: str, lock: bytes, dists: list[tuple[str, str]]) -> Path:
+    """A trusted checkout with `lock` and a venv of registry `dists`."""
+    ref = fl.layout.verify_dir / repo
+    ref.mkdir()
+    (ref / "uv.lock").write_bytes(lock)
+    site = fl.layout.release_dir(ID) / "venv" / repo / "lib" / "python3.13"
+    site = site / "site-packages"
+    site.mkdir(parents=True)
+    for name, version in dists:
+        info = site / f"{name}-{version}.dist-info"
+        info.mkdir()
+        (info / "METADATA").write_text(f"Name: {name}\nVersion: {version}\n")
+    return ref
+
+
+def test_distribution_problems_leaf_accepts_and_keeps_installed(fl: FakeLayout) -> None:
+    ref = _repo(fl, "r1", LOCK_A, [("a", "1.0")])
+    ctx = RouteContext()
+    _dist_calls(fl, ("r1",), {"r1": ref}, ctx)["distribution_problems"]("releases/<id>")
+    assert [(d.name, d.version) for d in ctx.installed["r1"]] == [("a", "1.0")]
+    assert _journal(fl) == [("verify", "distributions-note", DECLARED_LIMIT)]
+
+
+def test_distribution_problems_root_is_the_builds_project_path(
+    fl: FakeLayout,
+) -> None:
+    """The root is expected at exactly the `--project` path the build passes
+    to `uv sync` (uv records it as given, not resolved)."""
+    lock = LOCK_A.replace(b'{ virtual = "." }', b'{ editable = "." }')
+    ref = _repo(fl, "r1", lock, [("a", "1.0"), ("app", "0.1.0")])
+    calls = _dist_calls(fl, ("r1",), {"r1": ref}, RouteContext())
+    profile = Profile(
+        "p", PY, (RepoPin("r1", "https://example.invalid/r1", "0" * 40, ()),)
+    )
+    plan = BuildPlan(
+        ID, fl.layout.release_dir(ID), profile, fake_uv(fl), Path("/g"), Path("/t")
+    )
+    argv = dict(build_mod.build_commands(plan, fl.layout))["sync:r1"]
+    project = argv[argv.index("--project") + 1]
+    site = fl.layout.release_dir(ID) / "venv" / "r1" / "lib" / "python3.13"
+    info = site / "site-packages" / "app-0.1.0.dist-info"
+    (info / "direct_url.json").write_text(
+        json.dumps({"url": f"file://{project}", "dir_info": {}})
+    )
+    calls["distribution_problems"]("releases/<id>")
+
+
+def test_distribution_problems_leaf_passes_groups_env_and_root_as_spelled(
+    fl: FakeLayout, tmp_path: Path
+) -> None:
+    """M2: the pin's groups, the install platform's markers and the root at
+    the unresolved build path (`build_home/tmp` is a link here) all reach
+    `expected_distributions`."""
+    here = "darwin" if plat.detect_platform() == "macos-arm64" else "linux"
+    other = "linux" if here == "darwin" else "darwin"
+    lock = (
+        b'version = 1\nrevision = 3\n\n[[package]]\nname = "app"\n'
+        b'version = "0.1.0"\nsource = { editable = "." }\n'
+        b"dependencies = ["
+        + f'{{ name = "mine", marker = "sys_platform == \'{here}\'" }}, '
+        f'{{ name = "theirs", marker = "sys_platform == \'{other}\'" }}'.encode()
+        + b']\n[package.dev-dependencies]\ng = [{ name = "grp" }]\n'
+        + b"".join(
+            f'\n[[package]]\nname = "{n}"\nversion = "1.0"\n'
+            f'source = {{ registry = "https://pypi.org/simple" }}\n'.encode()
+            for n in ("mine", "theirs", "grp")
+        )
+    )
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (fl.layout.build_home / "tmp").symlink_to(elsewhere)
+    ref = _repo(fl, "r1", lock, [("mine", "1.0"), ("grp", "1.0"), ("app", "0.1.0")])
+    project = build_mod.build_src_dir(fl.layout, ID, "r1")
+    site = fl.layout.release_dir(ID) / "venv" / "r1" / "lib" / "python3.13"
+    (site / "site-packages" / "app-0.1.0.dist-info" / "direct_url.json").write_text(
+        json.dumps({"url": f"file://{project}", "dir_info": {}})
+    )
+    ctx = RouteContext()
+    calls = _dist_calls(fl, ("r1",), {"r1": ref}, ctx, groups=("g",))
+    calls["distribution_problems"]("releases/<id>")
+    assert sorted(d.name for d in ctx.installed["r1"]) == ["app", "grp", "mine"]
+
+
+def test_distribution_problems_root_dir_contract_is_listed(
+    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout
+) -> None:
+    """A broken `root_dir` contract is a listed problem, not a bare error."""
+    ref = _repo(fl, "r1", LOCK_A, [("a", "1.0")])
+    monkeypatch.setattr(
+        build_mod, "build_src_dir", lambda _lay, _id, repo: Path("relative") / repo
+    )
+    calls = _dist_calls(fl, ("r1",), {"r1": ref}, RouteContext())
+    with pytest.raises(StepFailed) as exc:
+        calls["distribution_problems"]("releases/<id>")
+    assert "r1: root_dir" in str(exc.value)
+
+
+def test_distribution_problems_leaf_lists_every_repo(fl: FakeLayout) -> None:
+    """Problems of all repos in one failure, with the named limit."""
+    r1 = _repo(fl, "r1", LOCK_A, [("a", "1.0"), ("b", "2.0")])
+    r2 = _repo(fl, "r2", b"version = 1\nrevision = 4\n", [])
+    ctx = RouteContext()
+    calls = _dist_calls(fl, ("r1", "r2", "r3"), {"r1": r1, "r2": r2}, ctx)
+    with pytest.raises(StepFailed) as exc:
+        calls["distribution_problems"]("releases/<id>")
+    assert exc.value.step == "verify"
+    detail = str(exc.value)
+    assert DECLARED_LIMIT in detail
+    assert "r1: лишнее: b 2.0" in detail
+    assert "r2: неподдерживаемый lock" in detail
+    assert "r3: нет доверенного чекаута" in detail
+    assert ctx.installed == {}
+    assert _journal(fl) == []
 
 
 # ---------- the mark wrapper ----------
