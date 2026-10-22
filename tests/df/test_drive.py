@@ -1,6 +1,6 @@
 """Tests for the acceptance driver `drive` (Task 7, part C: fake actions).
 
-End-to-end runs through real routes come with parts 7-D/7-E.
+End-to-end runs through real routes: `test_scenarios.py` (part 7-E).
 """
 
 from __future__ import annotations
