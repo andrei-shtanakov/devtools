@@ -2066,8 +2066,12 @@ def test_distribution_problems_leaf_lists_every_repo(fl): ...
     (`MACHO_MAGIC`) или `ELF_MAGIC` → `native`; `#!` → `script`; иное → `other`. Чтение
     через `open_regular`: ссылка или не обычный файл — `TreeError` (F10).
   - `EnvPaths`, `env_paths(release_dir, repo)` — правило (б) и разрешённые каталоги
-    окружения (F3, F4, F19): `venv/<r>/pyvenv.cfg` обязателен, разбирается как у CPython
-    (`key.strip().lower()`, `value.strip()`); ровно один `home` и один
+    окружения (F3, F4, F19): `venv/<r>/pyvenv.cfg` обязателен, разбирается как у CPython:
+    строки — только по `\n` (один хвостовой `\r` снимается), `key.strip().lower()`,
+    `value.strip()`; файл с иным разрывом строки `str.splitlines` (`\v`, `\f`,
+    `\x1c`–`\x1e`, `\x85`, U+2028/2029) или управляющим символом кроме `\t`/`\r`/`\n` —
+    отказ: иначе одна строка читалась бы нами и CPython по-разному (ревью безопасности
+    Task 8); ровно один `home` и один
     `include-system-site-packages` (getpath берёт первый `home`, `site.py` — последний),
     значение `.lower() == "false"`; `home` канонический, под релизом и разрешается внутри
     дерева в `python/<ключ>/bin`, `<ключ>` = `cpython-3.X.Y-<тройка>` с ровно одним
@@ -2118,9 +2122,12 @@ def test_distribution_problems_leaf_lists_every_repo(fl): ...
     -mindepth 1 -maxdepth 1 ( -name tmp -o -name cache ) -print`: непустой вывод —
     «остатки build_home» и ни одного запуска дальше; любой сбой `find` — проблема
     инфраструктуры. Затем по каждому репо `expected`:
-    - **(ж)** `venv/<r>/bin/python` без `-I` и с `-I`, `-c` печатает
+    - **(ж)** `venv/<r>/bin/python` без `-I` (но с `-P`) и с `-I`, `-c` печатает
       `[sys.path, site.ENABLE_USER_SITE, sys.version]`; ответ — ровно такой список, иначе
-      проблема. Каждый непустой элемент `sys.path` абсолютный и разрешается внутри дерева в
+      проблема. `-P` (CPython ≥ 3.11) не ставит cwd (`build_home`, запись `df-build`) в
+      `sys.path`: иначе модуль оттуда (`json.py`) подделал бы ответ пробы; запуск без `-I`
+      по-прежнему измеряет поведение `pyvenv.cfg`/`site` (ревью безопасности Task 8).
+      Пустой элемент `sys.path` — проблема. Каждый элемент абсолютный и разрешается внутри дерева в
       **свои** каталоги (ё) этого репо (`site-packages` своего окружения, stdlib,
       `lib-dynload`; F13); единственное исключение — отсутствующий `python3XY.zip` в
       `python/<ключ>/lib` (F5). `ENABLE_USER_SITE` — ровно `False`. `sys.version` обоих
@@ -2160,6 +2167,9 @@ def test_pyvenv_home_must_be_canonical_python_bin(tmp_path, deps, home): ...  # 
 @pytest.mark.parametrize("defect", ["missing", "no-home", "no-include-system-site-packages"])
 def test_pyvenv_cfg_is_mandatory(tmp_path, deps, defect): ...   # (б) решение владельца 22.10
 def test_pyvenv_system_site_value(tmp_path, deps, line, ok): ...  # False/false — да; true/yes — нет
+def test_pyvenv_cfg_line_break_differential_refused(tmp_path, deps, joint): ...
+    # «home = <внутри>\x0bhome = /elsewhere», \f, \x1c–\x1e, \x85, U+2028/2029, NUL
+def test_pyvenv_cfg_crlf_accepted(tmp_path, deps): ...
 def test_pyvenv_duplicate_key_refused(tmp_path, deps, key): ...
 def test_pyvenv_cfg_in_bin_refused(tmp_path, deps, name): ...   # F4, и по casefold
 def test_environments_on_different_pythons_refused(tmp_path, deps): ...   # F19
@@ -2198,7 +2208,7 @@ def test_expected_entrypoints_package_rules(tmp_path, text, want): ...
 def test_expected_entrypoints_refusals(tmp_path, text): ...  # dynamic, package="yes", "../x"
 def test_expected_entrypoints_missing_file(tmp_path): ...
 def test_transfer_check_passes_and_records_python_declared(runner, tmp_path): ...
-    # argv: find, python, python -I, tool --help; env/cwd/network/timeout; sys.version
+    # argv: find, python -P, python -I, tool --help; env/cwd/network/timeout; sys.version
 def test_direct_shebang_script_is_run(runner, tmp_path): ...   # --help код 1 → проблема
 def test_trampoline_script_is_run(runner, tmp_path): ...
 def test_help_outcomes_are_problems(runner, tmp_path, outcome, needle): ...  # срок, stdout, запуск
@@ -2208,6 +2218,7 @@ def test_runtime_sys_path_outside_checked_dirs_refused(runner, tmp_path, extra):
     # (ж): site-packages базового Python, чужого окружения (F13), bin, обход через ..
 def test_runtime_sys_path_unresolvable_refused(runner, tmp_path, item): ...
 def test_present_zip_on_sys_path_refused(runner, tmp_path): ...      # F5
+def test_empty_sys_path_element_refused(runner, tmp_path, isolated): ...  # '' = cwd
 def test_enable_user_site_refused(runner, tmp_path): ...
 def test_unparsable_probe_refused(runner, tmp_path, stdout): ...
 def test_find_failure_is_infrastructure_and_nothing_runs(runner, tmp_path): ...
@@ -2233,7 +2244,8 @@ def test_twin_transfer_check_with_hidden_build_home_cleanup(monkeypatch, fl): ..
 - [x] **Step 2–4:** FAIL → implement → PASS. Мутационная проверка правил F1–F5, F9 —
   каждое отключённое правило валит тест (`task-8-impl-report.md`).
 - [x] **Step 5: Commit** `feat(df): execution-chain boundary, entrypoint inventory, transfer
-  check`; `docs(df): Task 8 as built; boundary rules in spec 3.4, Task 9/12/13/14 items`.
+  check`; `docs(df): Task 8 as built; boundary rules in spec 3.4, Task 9/12/13/14 items`;
+  `fix(df): pyvenv.cfg split as CPython does; (ж) probe with -P` и `docs(df): …` к нему.
 
 ### Task 8a: Административная среда, команда `darkfactory`, bootstrap
 
