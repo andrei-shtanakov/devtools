@@ -764,7 +764,7 @@ def test_digest_io_error_stops_not_cleans(
     def unreadable(tree: Path) -> str:
         raise PermissionError(13, "denied")
 
-    monkeypatch.setattr(accept, "tree_digest", unreadable)
+    monkeypatch.setattr(accept, "release_digest", unreadable)
     with pytest.raises(StepFailed) as exc:
         facts(fl)
     assert exc.value.step == "facts"
@@ -772,7 +772,7 @@ def test_digest_io_error_stops_not_cleans(
     def refused(tree: Path) -> str:
         raise TreeError("bad name")
 
-    monkeypatch.setattr(accept, "tree_digest", refused)
+    monkeypatch.setattr(accept, "release_digest", refused)
     assert not facts(fl).full
 
 

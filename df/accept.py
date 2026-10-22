@@ -34,7 +34,7 @@ from df.config import (
     load_releases,
     read_optional,
 )
-from df.digest import TreeError, tree_digest
+from df.digest import TreeError, release_digest
 from df.journal import StepFailed, journal_event
 from df.paths import Layout
 from df.toml_emit import dumps
@@ -354,7 +354,7 @@ def _digest_equals(tree: Path, expected: str) -> bool:
     `OSError` reading it is not a fact of the table: `StepFailed("facts")`,
     a human decides (fail-closed, no cleanup on an I/O error)."""
     try:
-        return tree_digest(tree) == expected
+        return release_digest(tree) == expected
     except TreeError:
         return False
     except OSError as exc:

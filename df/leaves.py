@@ -21,16 +21,12 @@ from pathlib import Path
 from df import accept, fsutil, receive
 from df import platform as plat
 from df.config import ConfigError, InstallConfig, load_accounts
-from df.digest import TreeError, tree_digest
+from df.digest import TreeError, release_digest
 from df.journal import StepFailed
 from df.paths import Layout
 from df.platform import PlatformName
 from df.receive import CopyLimits
 
-#: What the digest of a release copy leaves out: `release.json` is written
-#: after the copy is accepted. The `copied` mark and the route's check of it
-#: are one call (`release_digest`), so they cannot disagree (M6).
-RELEASE_DIGEST_EXCLUDE = frozenset({"release.json"})
 #: The environment of the copy's producer (`tar` as `df-build`).
 TAR_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C"}
 #: Bytes of the producer's stderr a refused copy reports (F21).
@@ -45,11 +41,6 @@ _VERIFY_STEP = "verify"
 
 def _noop(point: str, rel: str) -> None:
     """Default test hook of `accept_copy`."""
-
-
-def release_digest(tree: Path) -> str:
-    """`tree_digest` of a release copy, the one exclusion of marks and checks."""
-    return tree_digest(tree, exclude=RELEASE_DIGEST_EXCLUDE)
 
 
 def prepare_dir(layout: Layout, release_id: str) -> None:

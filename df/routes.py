@@ -32,10 +32,10 @@ from df import platform as plat
 from df.accept import STAGE_ORDER, AcceptMark, Facts, Stage
 from df.build import BuildPlan
 from df.config import InstallConfig, config_digest
-from df.digest import check_links, tree_digest
+from df.digest import check_links, release_digest, tree_digest
 from df.inputs import verify_sources
 from df.journal import StepFailed, journal_event
-from df.leaves import accept_copy, prepare_dir, release_digest, seal, verify_chmod
+from df.leaves import accept_copy, prepare_dir, seal, verify_chmod
 from df.manifest import Profile
 from df.paths import Layout
 from df.platform import PlatformName

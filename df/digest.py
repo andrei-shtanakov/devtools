@@ -62,6 +62,17 @@ def check_names(names: Iterable[bytes]) -> list[str]:
     return result
 
 
+#: What the digest of a release copy leaves out: `release.json` is written
+#: after the copy is accepted. Every mark and check of a release copy is one
+#: call (`release_digest`), so they cannot disagree (M6).
+RELEASE_DIGEST_EXCLUDE = frozenset({"release.json"})
+
+
+def release_digest(tree: Path) -> str:
+    """`tree_digest` of a release copy, the one exclusion of marks and checks."""
+    return tree_digest(tree, exclude=RELEASE_DIGEST_EXCLUDE)
+
+
 def tree_digest(
     root: Path, *, exclude: frozenset[str] = frozenset({"release.json"})
 ) -> str:

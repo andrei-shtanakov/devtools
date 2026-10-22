@@ -160,7 +160,7 @@ def test_accept_copy_refused_stream_keeps_partial(fl: FakeLayout) -> None:
 def test_tar_failure_refuses_and_keeps_partial_for_route(
     monkeypatch: pytest.MonkeyPatch, fl: FakeLayout
 ) -> None:
-    """tar exits 1 (an unreadable file) -> `StepFailed("copy")` with tar's
+    """tar fails on an unreadable file -> `StepFailed("copy")` with tar's
     stderr; the partial copy root `0700` stays and the producer is ended
     (S1-R10-N3). Retry: the facts are `partial-copy`, whose route
     `copy-partial` removes the rest and goes on to `copied`."""
@@ -178,9 +178,11 @@ def test_tar_failure_refuses_and_keeps_partial_for_route(
     finally:
         secret.chmod(0o644)
     assert exc.value.step == "copy"
-    # bsdtar stops the stream at the file, GNU tar exits 1: either way the
-    # refusal carries tar's stderr.
-    assert "; stderr: tar" in exc.value.detail
+    # bsdtar stops the stream at the file ("tar: ..."), GNU tar called by
+    # full path exits non-zero ("/usr/bin/tar: ..."): either way the refusal
+    # carries tar's stderr.
+    _, _, stderr = exc.value.detail.partition("; stderr: ")
+    assert "tar" in stderr
     release = lay.release_dir(ID)
     assert stat.S_IMODE(os.stat(release).st_mode) == 0o700
     assert ("process", "df-build") in fl.events

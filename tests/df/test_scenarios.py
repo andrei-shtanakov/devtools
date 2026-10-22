@@ -23,9 +23,8 @@ from df import install_table as table
 from df import platform as plat
 from df.accept import AcceptMark, Facts, classify, load_mark, read_facts
 from df.config import ReleaseEntry, ReleasesConfig, config_digest, dump_releases
-from df.digest import tree_digest
+from df.digest import release_digest, tree_digest
 from df.journal import StepFailed, read_journal
-from df.leaves import release_digest
 from df.paths import Layout
 from df.routes import route_action, run_route
 from tests.df.conftest import BUILD_UID, FakeLayout
