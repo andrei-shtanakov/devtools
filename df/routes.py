@@ -665,7 +665,7 @@ class _Leaves:
                         self.layout, self.release_id, pin.name
                     ),
                 )
-            except (TreeError, UnsupportedLock, OSError) as exc:
+            except (TreeError, UnsupportedLock, OSError, ValueError) as exc:
                 problems.append(f"{pin.name}: {exc}")
                 continue
             installed[pin.name] = have

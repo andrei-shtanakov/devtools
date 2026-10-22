@@ -210,6 +210,15 @@ def test_group_entry_marker_and_extra() -> None:
     }
 
 
+@pytest.mark.parametrize("group", ["my-group", "my_group", "My.Group"])
+def test_group_names_compared_normalised(group: str) -> None:
+    """uv normalises `--group my_group` to the lock key `my-group`."""
+    data = lock(
+        root('[package.dev-dependencies]\nmy-group = [{ name = "a" }]'), pkg("a")
+    )
+    assert expected(data, groups=(group,)) == {ROOT_DIST, registry("a")}
+
+
 def test_candidate_selected_by_version_and_raw_source() -> None:
     """N2: two indexes are told apart by the raw table, before projection."""
     other = 'source = { registry = "https://example.org/simple" }'
@@ -546,6 +555,10 @@ def test_clean_inputs_have_no_problems() -> None:
     [
         "package = false",
         'default-groups = ["dev"]',
+        'dev-dependencies = ["pytest"]',
+        'exclude-dependencies = ["a"]',
+        'build-constraint-dependencies = ["setuptools<80"]',
+        "required-environments = [\"sys_platform == 'darwin'\"]",
         'constraint-dependencies = ["a<2"]',
         'override-dependencies = ["a<2"]',
         "environments = [\"sys_platform == 'darwin'\"]",

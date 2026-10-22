@@ -121,6 +121,23 @@ root's `direct_url.json` `url`:
 uv normalises the path only lexically and never resolves links. A uv bump re-runs this
 probe together with the `[tool.uv]` allowlist (`UV_PROJECT_KEYS_0_11_23`).
 
+## `[tool.uv]` allowlist keys under `UV_NO_CONFIG=1` (probe 22.10)
+
+`UV_PROJECT_KEYS_0_11_23` (spec §3.2) lists keys that describe the project and survive
+`UV_NO_CONFIG=1`. Nine were probed with the Task 7a pre-flight (addendum A1: `package`,
+`default-groups`, `sources`, `constraint-dependencies`, `override-dependencies`,
+`exclude-dependencies`, `build-constraint-dependencies`, `environments`,
+`required-environments`). The remaining two were probed for the final review, with uv 0.11.23
+on macOS, current user, scratch `UV_CACHE_DIR`:
+
+| Key | Project | `uv lock --check` | `UV_NO_CONFIG=1 uv lock --check` | Twin: key removed, no-config check |
+|---|---|---|---|---|
+| `dev-dependencies = ["packaging"]` | `package = false`, dependency `iniconfig`; the lock records `[package.dev-dependencies]` and `requires-dev` | rc 0 | rc 0 | rc 1 (the check sees the key) |
+| named `[[tool.uv.index]]` `local`, `format = "flat"`, `explicit = true`, a `file://` directory holding a locally built wheel `localpkg-0.1.0`; `[tool.uv.sources] localpkg = { index = "local" }` | the lock records `source = { registry = "<that directory>" }` | rc 0 | rc 0; `UV_NO_CONFIG=1 uv sync --locked` installs `localpkg` | rc 1 (index and source removed) |
+
+Both survive `UV_NO_CONFIG=1`, so all eleven keys are confirmed for uv 0.11.23. If a key stops
+surviving after a uv bump, `uv sync --locked` refuses loudly; the bump re-runs this probe.
+
 ## Not shipped
 
 The capture script (scratch only) is not part of `df/` or `tests/` and nothing here refers to it.

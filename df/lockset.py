@@ -113,7 +113,8 @@ def expected_distributions(
     extras it asks for. Then a breadth-first walk:
 
     - from the root's dependencies and its `dev-dependencies[g]` for each
-      `g` in `groups` (a missing group is a refusal); root extras are not
+      `g` in `groups`, names compared normalised like uv's `--group` (a
+      missing group is a refusal); root extras are not
       selected — the build passes no `--extra`;
     - group entries, like dependencies, are taken when their marker is true
       in `env` and carry their `extra`;
@@ -226,6 +227,8 @@ def lock_layout_problems(data: Mapping[str, Any]) -> list[str]:
 
 
 def _table_problems(value: object, where: str, allowed: frozenset[str]) -> list[str]:
+    """One problem per key outside `allowed`; an empty table (`[options]`
+    with no key) has none, in both checks alike."""
     if not isinstance(value, dict):
         return [f"{where}: не таблица"]
     return [
@@ -444,12 +447,15 @@ class _Walk:
 
     def run(self, groups: tuple[str, ...]) -> frozenset[ExpectedDist]:
         root = self.packages[self.root]
-        dev = root.table.get("dev-dependencies", {})
+        raw_groups = root.table.get("dev-dependencies", {})
+        dev = {normalize_name(g): e for g, e in raw_groups.items()}
+        if len(dev) != len(raw_groups):
+            raise _refuse(f"{root.name}: группы совпадают после нормализации")
         start = list(root.table.get("dependencies", []))
         for group in groups:
-            if group not in dev:
+            if normalize_name(group) not in dev:
                 raise _refuse(f"{root.name}: нет группы {group!r}")
-            start += dev[group]
+            start += dev[normalize_name(group)]
         visited = {(self.root, None)}
         queue: deque[tuple[int, str | None]] = deque(self._targets(start))
         while queue:

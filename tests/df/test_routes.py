@@ -1353,6 +1353,20 @@ def test_distribution_problems_leaf_passes_groups_env_and_root_as_spelled(
     assert sorted(d.name for d in ctx.installed["r1"]) == ["app", "grp", "mine"]
 
 
+def test_distribution_problems_root_dir_contract_is_listed(
+    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout
+) -> None:
+    """A broken `root_dir` contract is a listed problem, not a bare error."""
+    ref = _repo(fl, "r1", LOCK_A, [("a", "1.0")])
+    monkeypatch.setattr(
+        build_mod, "build_src_dir", lambda _lay, _id, repo: Path("relative") / repo
+    )
+    calls = _dist_calls(fl, ("r1",), {"r1": ref}, RouteContext())
+    with pytest.raises(StepFailed) as exc:
+        calls["distribution_problems"]("releases/<id>")
+    assert "r1: root_dir" in str(exc.value)
+
+
 def test_distribution_problems_leaf_lists_every_repo(fl: FakeLayout) -> None:
     """Problems of all repos in one failure, with the named limit."""
     r1 = _repo(fl, "r1", LOCK_A, [("a", "1.0"), ("b", "2.0")])

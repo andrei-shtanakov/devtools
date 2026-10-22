@@ -1868,7 +1868,8 @@ Task 14; R38 — три части 7a-golden / 7a-impl / 7a-paper; R39 — Linux
 **Interfaces:**
 - Consumes: `PlatformName` (Task 5); `InstalledDist`, `installed_distributions`,
   `normalize_name` (Task 7, `df/inputs.py`); `SourceId`, `source_from_lock`,
-  `UnsupportedLock` (Task 7, `df/sources.py`); `build_src_dir` (Task 6).
+  `UnsupportedLock` (Task 7, `df/sources.py`); `build_src_dir` (Task 6, `df/build.py`;
+  сверено по истории — введена исправлением Task 6 e12864e).
 - Produces:
   - `marker_env(platform: PlatformName, python: str) -> Mapping[str, str]` — восемь
     переменных §3.5. macOS: `sys_platform=darwin`, `platform_system=Darwin`,
@@ -1908,8 +1909,9 @@ Task 14; R38 — три части 7a-golden / 7a-impl / 7a-paper; R39 — Linux
       пакета (`source_from_lock`), каждый маркер, каждая запись разрешается ровно в одну цель
       и каждый запрошенный ею `extra` у цели есть — отказ не зависит от платформы;
     - обход в ширину: зависимости корня и `dev-dependencies[g]` для каждой `g ∈ groups`;
-      отсутствующая группа — `UnsupportedLock`; записи групп вычисляются как зависимости
-      (маркер, `extra`); `extra` корня не выбираются — сборка не передаёт `--extra`; ключ
+      имена групп сравниваются нормализованными, как `--group` у `uv` (`my_group` =
+      `my-group`); отсутствующая группа — `UnsupportedLock`; записи групп вычисляются как
+      зависимости (маркер, `extra`); `extra` корня не выбираются — сборка не передаёт `--extra`; ключ
       посещения — (пакет, extra) (F7);
     - цель — по нормализованному `name` и сырым `version`/`source` записи, до проекции
       (N2); ноль или больше одного кандидата — `UnsupportedLock`;
@@ -1932,7 +1934,8 @@ Task 14; R38 — три части 7a-golden / 7a-impl / 7a-paper; R39 — Linux
     дополнение B) — константа `DECLARED_LIMIT`: «метаданные распределений согласованы с lock
     (заявлено); не доказывает отсутствия лишнего кода и происхождения файлов релиза».
   - `UV_PINNED_VERSION = "0.11.23"`, `UV_PROJECT_KEYS_0_11_23` — разрешающий список
-    `[tool.uv]` (спека §3.2; `conflicts`, `workspace`, `managed`, `dependency-groups`,
+    `[tool.uv]` (спека §3.2; все 11 ключей подтверждены замером `uv` 0.11.23 — таблица в
+    `SOURCES.md`; `conflicts`, `workspace`, `managed`, `dependency-groups`,
     `build-backend` в него намеренно не входят, дополнение A2). Имя константы несёт версию:
     смена `uv` заставляет перепроверить список замером.
   - `uv_config_problems(pyproject: bytes, uv_toml: bytes | None, lock: bytes) -> list[str]`
@@ -2021,7 +2024,8 @@ def test_distribution_problems_leaf_lists_every_repo(fl): ...
 - [x] **Step 6: Commit** `feat(df): expected distribution set from uv.lock (restricted
   markers)`; затем `test(df): uv.lock goldens and exclude-newer fixture for Task 7a`,
   `test(df): real-lock goldens, exclude-newer fixture, root path contract`,
-  `fix(df): Task 7a review minors`.
+  `fix(df): Task 7a review minors`, `docs(df): Task 7a as built; owner decisions on uv
+  settings and sitecustomize/_pth`, `fix(df): Task 7a final review minors`.
 
 ### Task 8: Граница цепочки исполнения, инвентарь entrypoints и проверка переноса
 
@@ -2057,11 +2061,17 @@ def test_distribution_problems_leaf_lists_every_repo(fl): ...
       отсутствие — отказ с именем;
     - **(е)** `pth_problems` каждого окружения пуст.
     - **(ё)** решение владельца 22.10 (спека §3.4 «Раскладка окружения»): в поддерживаемой
-      раскладке запрещены автоматически импортируемый `sitecustomize` в `site-packages`
-      (`.py`/`.pyc`/расширение/пакет; имя сравнивается по `casefold`, как у `_select`
-      Task 7) — по пробам 7-B CPython исполняет его при старте — и файлы `*._pth` рядом с
-      интерпретатором окружения и в `site-packages` — они переписывают `sys.path`. Каждый
-      найденный — проблема с путём. Проверка (б) `pyvenv.cfg` **обязательна**: нет файла,
+      раскладке окружения запрещены:
+      - автоматически импортируемый `sitecustomize` (`.py`/`.pyc`/расширение/пакет; имя
+        сравнивается по `casefold`, как у `_select` Task 7) в каждом каталоге `sys.path`
+        интерпретатора релиза — `venv/*/lib/python*/site-packages` и дерево управляемого
+        Python `release_dir/python/<ключ>` (`lib/python3.X`, `lib-dynload`); по пробам 7-B
+        CPython исполняет его при старте;
+      - файлы `*._pth` там, где их читает getpath CPython: рядом с `venv/*/bin/python*`, с
+        базовым исполняемым файлом (`python/<ключ>/bin`) и с libpython
+        (`python/<ключ>/lib`) — они заменяют вычисление `sys.path`.
+
+      Каждый найденный — проблема с путём. Проверка (б) `pyvenv.cfg` **обязательна**: нет файла,
       нет ключа `home` или `include-system-site-packages` — проблема, а не пропуск.
       Названное ограничение сравнения состава (Task 7a, `DECLARED_LIMIT`): код без
       метаданных распределения `installed_distributions` не видит; (а)–(ё) — статические
@@ -2078,8 +2088,9 @@ def test_distribution_problems_leaf_lists_every_repo(fl): ...
     `PATH = /usr/bin:/bin`, `LANG = C.UTF-8`, `cwd = layout.build_home`:
     - **(ж)** для каждого `venv/<r>/bin/python`, без `-I` и с `-I`:
       `-c "import json,site,sys;print(json.dumps([sys.path, site.ENABLE_USER_SITE,
-      sys.version]))"`. Каждый непустой элемент `sys.path` лежит внутри `release_dir`,
-      `ENABLE_USER_SITE` ложен. `sys.version` записывается в `python_declared[r]`;
+      sys.version]))"`. Каждый непустой элемент `sys.path` лежит внутри `release_dir` и
+      входит в каталоги, которые проверила (ё) (иначе — проблема: запрет `sitecustomize`
+      покрывает весь `sys.path`), `ENABLE_USER_SITE` ложен. `sys.version` записывается в `python_declared[r]`;
     - **(з)** каждый скрипт из `expected[r]` запускается с `--help`, независимо от вида
       `shebang`: код 0 за 60 с;
     - любой `RunResult.launched=False` — проблема инфраструктуры, а не PASS.
@@ -2102,8 +2113,13 @@ def test_pyvenv_cfg_is_mandatory(tmp_path, defect): ...   # (б) решение 
                                   "sitecustomize.cpython-312-darwin.so", "sitecustomize/",
                                   "SiteCustomize.py"])
 def test_sitecustomize_refused(tmp_path, name): ...       # (ё); регистр — по casefold
-@pytest.mark.parametrize("where", ["bin", "site-packages"])
-def test_pth_underscore_file_refused(tmp_path, where): ...  # (ё) python312._pth
+@pytest.mark.parametrize("where", ["venv-site-packages", "python-stdlib",
+                                   "python-lib-dynload"])
+def test_sitecustomize_refused_everywhere_on_sys_path(tmp_path, where): ...  # (ё)
+@pytest.mark.parametrize("where", ["venv-bin", "python-bin", "python-lib"])
+def test_pth_underscore_file_refused(tmp_path, where): ...  # (ё) python312._pth у getpath
+def test_runtime_sys_path_outside_checked_dirs_refused(monkeypatch, tmp_path): ...
+    # (ж): элемент sys.path внутри release_dir, но не из каталогов (ё) — проблема
 def test_native_dep_outside_refused(monkeypatch, tmp_path): ...  # linked_libraries-заглушка: /opt/homebrew/lib/x.dylib
 def test_rpath_origin_inside_accepted(monkeypatch, tmp_path): ...
 def test_runtime_sys_path_outside_refused(monkeypatch, tmp_path): ...  # run_as-заглушка отдаёт /Users/x/site
