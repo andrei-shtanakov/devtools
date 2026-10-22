@@ -329,7 +329,7 @@ def test_pth_symlink_fifo_oversize_are_problems(tmp_path: Path) -> None:
 
 
 def evil_site(venv: Path) -> None:
-    site = venv.parent / "evil" / "python3.12" / "site-packages"
+    site = venv / "evil" / "python3.12" / "site-packages"
     site.mkdir(parents=True)
     (site / "x.pth").write_text("import os")
     make_dist(site, "hidden", None)
@@ -372,3 +372,87 @@ def test_lib64_link_when_lib_is_a_link_refused(tmp_path: Path) -> None:
     (venv / "lib64").symlink_to("lib")
     with pytest.raises(TreeError):
         pth_problems(venv)
+
+
+def lower_venv(tmp_path: Path) -> Path:
+    venv = tmp_path / "venv"
+    make_dist(site_of(venv), "ok", None)
+    return venv
+
+
+def test_lowercase_venv_unchanged(tmp_path: Path) -> None:
+    venv = lower_venv(tmp_path)
+    assert [d.name for d in installed_distributions(venv)] == ["ok"]
+    assert pth_problems(venv) == []
+
+
+@pytest.mark.parametrize(
+    "old,new",
+    [
+        ("lib", "LIB"),
+        ("python3.12", "Python3.12"),
+        ("site-packages", "Site-Packages"),
+        ("ok-1.0.dist-info", "ok-1.0.DIST-INFO"),
+    ],
+)
+def test_case_variants_in_walk_refused(tmp_path: Path, old: str, new: str) -> None:
+    venv = lower_venv(tmp_path)
+    target = next(venv.rglob(old))
+    target.rename(target.with_name(new))
+    with pytest.raises(TreeError, match=new):
+        installed_distributions(venv)
+    if old != "ok-1.0.dist-info":
+        with pytest.raises(TreeError, match=new):
+            pth_problems(venv)
+
+
+def test_metadata_case_variant_refused(tmp_path: Path) -> None:
+    venv = lower_venv(tmp_path)
+    meta = next(venv.rglob("METADATA"))
+    meta.rename(meta.with_name("Metadata"))
+    with pytest.raises(TreeError, match="нет METADATA|Metadata"):
+        installed_distributions(venv)
+
+
+def test_upper_pth_is_reported(tmp_path: Path) -> None:
+    venv = lower_venv(tmp_path)
+    site = next(venv.rglob("site-packages"))
+    (site / "EVIL.PTH").write_text("import os")
+    (site / "_VirtualEnv.pth").write_text("import _virtualenv")
+    problems = pth_problems(venv)
+    assert len(problems) == 2 and any("EVIL.PTH" in p for p in problems)
+
+
+def test_upper_lib_with_lib64_link_refused(tmp_path: Path) -> None:
+    venv = tmp_path / "venv"
+    (venv / "LIB" / "python3.12" / "site-packages").mkdir(parents=True)
+    (venv / "LIB" / "python3.12" / "site-packages" / "e.pth").write_text("x")
+    (venv / "lib64").symlink_to("lib")
+    with pytest.raises(TreeError):
+        pth_problems(venv)
+
+
+def test_names_equal_after_casefold_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    venv = lower_venv(tmp_path)
+    site = next(venv.rglob("site-packages"))
+    real = os.listdir
+
+    def listing(path: object) -> list[str]:
+        names = real(path)  # type: ignore[call-overload]
+        return [*names, "a.pth", "A.pth"] if Path(str(path)) == site else names
+
+    monkeypatch.setattr(inputs.os, "listdir", listing)
+    with pytest.raises(TreeError, match="A.pth"):
+        pth_problems(venv)
+
+
+def test_missing_venv_or_site_packages_refused(tmp_path: Path) -> None:
+    for fn in (installed_distributions, pth_problems):
+        with pytest.raises(TreeError):
+            fn(tmp_path / "absent")
+    (tmp_path / "empty" / "lib").mkdir(parents=True)
+    for fn in (installed_distributions, pth_problems):
+        with pytest.raises(TreeError):
+            fn(tmp_path / "empty")

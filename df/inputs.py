@@ -118,7 +118,7 @@ def installed_distributions(venv: Path) -> list[InstalledDist]:
     dists = [
         _read_dist(info)
         for site in _site_packages(venv)
-        for info in _real_subdirs(site, "", ".dist-info")
+        for info in _real_subdirs(site, suffix=".dist-info")
     ]
     return sorted(dists, key=lambda d: (d.name, d.version))
 
@@ -131,7 +131,7 @@ def pth_problems(venv: Path) -> list[str]:
     """
     problems: list[str] = []
     for site in _site_packages(venv):
-        for pth in _children(site, "", ".pth"):
+        for pth in _select(site, suffix=".pth", strict=False):
             if pth.name == _VIRTUALENV_PTH and _is_virtualenv_pth(pth):
                 continue
             problems.append(f"{pth.relative_to(venv)}: .pth исполняет код при старте")
@@ -231,24 +231,65 @@ def _is_real_dir(path: Path) -> bool:
         return False
 
 
-def _children(directory: Path, prefix: str = "", suffix: str = "") -> list[Path]:
-    """Sorted entries of `directory` by name, without following links."""
+def _listing(directory: Path) -> list[str]:
+    """Sorted entry names; two names equal after `casefold()` are refused.
+
+    The filesystem may be case-insensitive (APFS), where Python resolves
+    `LIB/` or `Site-Packages/` like the lowercase names.
+    """
     try:
         names = sorted(os.listdir(directory))
-    except FileNotFoundError:
-        return []
     except OSError as exc:
         raise TreeError(f"{directory}: не читается: {exc}") from exc
-    return [directory / n for n in names if n.startswith(prefix) and n.endswith(suffix)]
+    folded: dict[str, str] = {}
+    for name in names:
+        if folded.setdefault(name.casefold(), name) != name:
+            raise TreeError(f"{directory}: {folded[name.casefold()]!r} и {name!r}")
+    return names
 
 
-def _real_subdirs(directory: Path, prefix: str, suffix: str = "") -> list[Path]:
-    """Matching children that are real directories; a link or file is refused."""
+def _select(
+    directory: Path,
+    *,
+    prefix: str = "",
+    suffix: str = "",
+    exact: str | None = None,
+    strict: bool = True,
+) -> list[Path]:
+    """The one place deciding which names the walk treats as expected.
+
+    Matching is by `casefold()`. With `strict`, a name that matches only after
+    casefolding (not in the expected case) is a `TreeError`; without it such
+    names are returned too (the caller reports them).
+    """
     found: list[Path] = []
-    for child in _children(directory, prefix, suffix):
+    for name in _listing(directory):
+        key = name.casefold()
+        if exact is not None:
+            hit, same = key == exact.casefold(), name == exact
+        else:
+            hit = key.startswith(prefix) and key.endswith(suffix)
+            same = name.startswith(prefix) and name.endswith(suffix)
+        if hit and strict and not same:
+            raise TreeError(f"{directory / name}: имя не в ожидаемом регистре")
+        if hit:
+            found.append(directory / name)
+    return found
+
+
+def _is_real_dir(path: Path) -> bool:
+    try:
+        return stat.S_ISDIR(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
+def _real_subdirs(directory: Path, **match: str) -> list[Path]:
+    """Matching children that are real directories; a link or file is refused."""
+    found = _select(directory, **match)
+    for child in found:
         if not _is_real_dir(child):
             raise TreeError(f"{child}: ожидался настоящий каталог")
-        found.append(child)
     return found
 
 
@@ -259,8 +300,9 @@ def _lib_dirs(venv: Path) -> list[Path]:
     `site-packages` behind it, so skipping it would hide what runs.
     """
     dirs: list[Path] = []
-    for child in _children(venv, "lib"):
-        if _is_lib64_link(child, venv):
+    has_lib = (venv / "lib") in _select(venv, exact="lib")
+    for child in _select(venv, prefix="lib"):
+        if _is_lib64_link(child, has_lib=has_lib):
             continue
         if not _is_real_dir(child):
             raise TreeError(f"{child}: ожидался настоящий каталог")
@@ -268,21 +310,23 @@ def _lib_dirs(venv: Path) -> list[Path]:
     return dirs
 
 
-def _is_lib64_link(child: Path, venv: Path) -> bool:
+def _is_lib64_link(child: Path, *, has_lib: bool) -> bool:
     try:
         if not stat.S_ISLNK(os.lstat(child).st_mode):
             return False
         target = os.readlink(child)
     except OSError as exc:
         raise TreeError(f"{child}: не читается: {exc}") from exc
-    return child.name == "lib64" and target == "lib" and _is_real_dir(venv / "lib")
+    return child.name == "lib64" and target == "lib" and has_lib
 
 
 def _site_packages(venv: Path) -> list[Path]:
     sites: list[Path] = []
     for lib in _lib_dirs(venv):
-        for python in _real_subdirs(lib, "python"):
-            sites.extend(_real_subdirs(python, "site-packages"))
+        for python in _real_subdirs(lib, prefix="python"):
+            sites.extend(_real_subdirs(python, exact="site-packages"))
+    if not sites:
+        raise TreeError(f"{venv}: нет site-packages")
     return sites
 
 
@@ -318,8 +362,11 @@ def _read_capped(path: Path, cap: int) -> bytes:
 
 
 def _read_dist(info: Path) -> InstalledDist:
+    found = _select(info, exact="METADATA")
+    if not found:
+        raise TreeError(f"{info}: нет METADATA")
     headers = email.parser.BytesParser().parsebytes(
-        _read_capped(info / "METADATA", METADATA_CAP), headersonly=True
+        _read_capped(found[0], METADATA_CAP), headersonly=True
     )
     name, version = headers.get("Name"), headers.get("Version")
     if not name or not version:
@@ -329,13 +376,10 @@ def _read_dist(info: Path) -> InstalledDist:
 
 
 def _read_direct_url(info: Path) -> Mapping[str, object] | None:
-    path = info / "direct_url.json"
-    try:
-        os.lstat(path)
-    except FileNotFoundError:
+    found = _select(info, exact="direct_url.json")
+    if not found:
         return None
-    except OSError as exc:
-        raise TreeError(f"{path}: не читается: {exc}") from exc
+    path = found[0]
     try:
         data = json.loads(_read_capped(path, DIRECT_URL_CAP))
     except ValueError as exc:
