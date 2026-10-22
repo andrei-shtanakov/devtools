@@ -2312,172 +2312,271 @@ def test_twin_transfer_check_with_hidden_build_home_cleanup(monkeypatch, fl): ..
 
 ### Task 8a: Административная среда, команда `darkfactory`, bootstrap
 
+Как построено (22.10): предполётная проверка `task-8a-preflight.md`, все строки Ruling
+F1–F16 приняты как обязательные (R44; где Ruling меняет текст брифа — действует Ruling).
+Решения контроллера по части 1: листья 8a (`install_admin_python`, `install_admin`,
+`link_command`) связаны в `acceptance_calls` уже в 8a, а не в Task 9;
+`install_admin_python` принимает `platform: PlatformName`; `acceptance_calls` проверяет
+`python_key == build.python_key(profile.python, platform)` (иначе `AssertionError`, F1 —
+один источник ключа); половина `test_usr_local_link_only_when_trusted` про напечатанный
+путь — в Task 9; тест хэша настоящим `uv` в CI пропускается, пока CI не закрепит `uv`
+0.11.23 (Task 13/14). Замеры — uv 0.11.23, macOS arm64; Linux (вариант сборки, хэш,
+перенос) не замерялся — живая приёмка Task 13.
+
 **Files:**
-- Create: `df/admin.py`, `df/bootstrap.py`, `df/launcher_entry.py` (текст входного файла
-  как ресурс; модуль не импортирует ничего, кроме stdlib)
-- Test: `tests/df/test_admin.py`, `tests/df/test_launcher_entry.py`
+- Create: `df/admin.py`, `df/bootstrap.py`, `df/launcher_entry.py` (вход команды; модуль
+  импортирует только stdlib, `df.paths` — лишь под `TYPE_CHECKING`)
+- Modify: `df/paths.py` (`Layout.admin_home`, F6); `df/routes.py` (листья 8a в
+  `acceptance_calls`, `_admin_digest` → `admin.admin_digest`, F12; проверка ключа Python);
+  `df/install_table.py` (текст `REQUIRES["install_admin_python"]`, перерисован в спеке)
+- Test: `tests/df/test_admin.py`, `tests/df/test_launcher_entry.py`; Modify:
+  `tests/df/test_leaves.py` (`PRIMITIVES`: настоящие листья 8a, F5), `tests/df/test_routes.py`,
+  `tests/df/test_scenarios.py` (настоящий `admin_ready`, фикстурный `uv`),
+  `tests/df/test_journal.py` (матрица поколения — общие константы, FM5),
+  `tests/df/test_accept.py` (страж `st_uid` допускает шов входа `owner_uid`)
 
 **Interfaces:**
 - Consumes: `fetch_reference` (Task 7, `df/inputs.py`: ключ `layout`, `dest` — прямой
-  потомок `layout.verify_dir`); `tree_digest` (Task 3); `trusted_path_problems`,
-  `approved_cli_problems` (Task 5); `write_atomic`, `Layout` (Task 1); `load_releases`
-  (Task 1). Вход команды и bootstrap вызывают `df.cli.main` (Task 9) по имени; тесты этой
-  задачи подкладывают заглушку `df/cli.py` во временный административный каталог.
+  потомок `layout.verify_dir`); `tree_digest`, `check_links`, `open_regular` (Task 3);
+  `trusted_path_problems`, `approved_cli_problems`, `run_command` (Task 5); `write_atomic`,
+  `Layout` (Task 1); `build.python_key`, `COMMAND_TIMEOUT` (Task 6); `UV_PINNED_VERSION`
+  (Task 7a). Вход команды и bootstrap вызывают `df.cli.main` (Task 9) по имени; тесты этой
+  задачи подкладывают заглушки `df/cli.py` и `df/state.py` во временный административный
+  каталог (F4).
 - Produces:
   - `admin_python_path(layout: Layout, python: str, platform: PlatformName) -> Path` =
-    `admin_python/cpython-<python>-<triple>/bin/python<X.Y>`.
-  - `install_admin_python(layout, python: str, *, uv: Path) -> Path` — протокол
-    `install_admin_python` (rev 8, r9), лист маршрута `admin` (условие — нет
+    `admin_python/<build.python_key(python, platform)>/bin/python<X.Y>` — ключ тот же, что
+    у сборки релиза (F1).
+  - `admin_digest(layout, release_id) -> str` = `tree_digest(admin_dir(id),
+    exclude=frozenset())` — одно определение для отметки `admin` и для `admin_ready` (F12).
+  - `install_admin_python(layout, python: str, *, uv: Path, platform: PlatformName) -> Path`
+    — протокол `install_admin_python` (rev 8, r9), лист маршрута `admin` (условие — нет
     `admin-python/cpython-…`; остаток `.staging` удаляет соседний шаг маршрута
     `remove_own_tree` — до установки, если его оставила прерванная, и после неё: `uv`
-    оставляет там служебные файлы, rev 8 r10). Предусловие: `admin_python/.staging` нет, иначе `StepFailed`. Root
-    запускает `uv python install <python>` с окружением ровно `{UV_PYTHON_INSTALL_DIR:
-    admin_python/.staging, UV_NO_CONFIG: 1, UV_PYTHON_DOWNLOADS: automatic, HOME:
-    install_dir/admin-home, UV_CACHE_DIR: install_dir/admin-home/cache, PATH:
-    /usr/bin:/bin}`, `fault_point("created")`; `sync_tree(.staging/cpython-…)`;
+    оставляет там служебные файлы, rev 8 r10). Предусловия (иначе `StepFailed("admin")`,
+    до запуска `uv`): Python ≥ 3.12 (F11, PEP 695 в `df/`); нет ни
+    `admin_python/.staging`, ни цели; `admin-home` (`Layout.admin_home`) — создаётся root
+    `0700` (`fchmod`), существующий обязан быть каталогом root ровно `0700` (F6: `uv`
+    создаёт `.lock` с `0666`); `uv --version` ∈ `UV_ADMIN_CONFIRMED =
+    {UV_PINNED_VERSION}` (F8), иначе «uv <ver>: сверка загрузки Python не подтверждена;
+    перенос Python не подтверждён». Root запускает `[uv, "python", "install", "--no-bin",
+    build.python_key(python, platform)]` (F1) под `umask 022` (сохраняется и
+    восстанавливается, F7), `timeout=COMMAND_TIMEOUT`, с окружением ровно
+    `{UV_PYTHON_INSTALL_DIR: admin_python/.staging, UV_NO_CONFIG: 1, UV_PYTHON_DOWNLOADS:
+    automatic, HOME: install_dir/admin-home, UV_CACHE_DIR: install_dir/admin-home/cache,
+    PATH: /usr/bin:/bin}`, `fault_point("created")`; проверка всего дерева
+    `.staging/cpython-…` (F7/F8: владелец root; только файлы, каталоги и ссылки; нет записи
+    группы и всех у не-ссылок; каждая ссылка относительная и разрешается внутри дерева,
+    `check_links` с логическим корнем — итоговым путём); `sync_tree(.staging/cpython-…)`;
     `os.rename` в `admin_python/cpython-…`, `fault_point("renamed")`;
-    `sync_dir(admin_python)`; `trusted_path_problems` по результату. Каталог `admin-home` —
-    root `0700`. `uv` — утверждённый CLI. Эффекты: `created` → `sync_tree(py)` → `renamed` →
-    `sync_dir(admin_python)`.
-    Предпосылка §3.9: `uv` сверяет контрольную сумму загрузки. Step 1 фиксирует её проверку
-    для версии `uv` из CI. Без подтверждения — `StepFailed("admin", "uv <ver>: сверка
-    загрузки Python не подтверждена")`.
+    `sync_dir(admin_python)`; `trusted_path_problems` по результату. `uv` — утверждённый
+    CLI. Эффекты: `created` → `sync_tree(py)` → `renamed` → `sync_dir(admin_python)`.
+    Предпосылки §3.9 (Step 1): `uv` сверяет контрольную сумму загрузки, и перенесённый
+    Python отвечает `sys.prefix` = новому пути без символических ссылок в `.staging`;
+    текстовые упоминания `.staging` в `_sysconfigdata` и `LC_ID_DYLIB` `libpython` при
+    исполнении не читаются (замер и ссылка на исходники — в docstring).
   - `install_admin(layout, release_id: str, *, devtools_ref: Path) -> None` — протокол
     `install_admin`, лист маршрута `admin` (rev 8, r9: Python, удаление прежнего дерева и
     отметка — соседние шаги маршрута, не этой функции). Предусловие: `admin_dir(id)` нет,
-    иначе `StepFailed`. `devtools_ref/df/` копируется в `admin_dir(id)/df/` (root,
-    `0644`/`0755`), `fault_point("created")`; `sync_tree(admin_dir(id))`, `sync_dir(admin)`.
+    иначе `StepFailed`, дерево не тронуто. `devtools_ref/df/` — настоящий каталог;
+    копируются только каталоги и обычные файлы (`O_NOFOLLOW`), ссылка, FIFO и иной тип —
+    `StepFailed` (F13); права ставит `fchmod`: каталоги и файлы с битом `x` — `0755`, иные —
+    `0644` (не `umask`). Копия — в `admin_dir(id)/df/` (root), `fault_point("created")`;
+    `sync_tree(admin_dir(id))`, `sync_dir(admin)`.
     Эффекты: `created` → `created` → `sync_tree(admin)` → `sync_dir(admin)` (копия частичная,
     затем полна).
     Отметку `admin` с `admin_digest = tree_digest(admin_dir(id))` пишет шаг маршрута
     `write_mark`; её `admin_python` — `Profile.python` прогона — та же версия, что ставит
-    соседний шаг маршрута (rev 8, r11). Источник — только доверенный чекаут Task 7, не дерево релиза.
+    соседний шаг маршрута (rev 8, r11). Источник — только доверенный чекаут Task 7, не дерево
+    релиза. Профиль без `devtools` в `refs` — `StepFailed("admin", "профиль без devtools: нет
+    административного кода")` в `acceptance_calls`.
   - `admin_ready(layout: Layout, release_id: str, *, expected_admin_digest: str,
     expected_python: str) -> bool` — **единственное определение готовности
-    административной среды** (rev 8, r10): `admin_dir(id)` есть и его digest равен
-    `expected_admin_digest` (rev 8, r5: значение, а не чтение реестра) — digest
-    `tree_digest(admin_dir(id), exclude=frozenset())`, как у отметки `admin` (Task 7,
-    R33.F25; иначе `A` не истинен никогда); Python
-    `admin_python_path(layout, expected_python, detect_platform())` есть (`lstat`) и
-    `trusted_path_problems` для него пуст. Оба ожидаемых значения передаются из одного
-    источника (rev 8, r11): `mark.admin_digest`/`mark.admin_python` до регистрации (Task
-    7), запись реестра — `admin_digest`/`admin_python` — после (`read_facts`, `activate`
-    под блокировкой, читатели Task 12 из `snap.entry`). Профиль и манифест предикат и
-    вызывающие не читают; `python_declared` релиза — не источник. Долговечность содержимого
-    Python предикат не читает: её обеспечивает `sync_tree` до `rename` (протокол
-    `install_admin_python`); в модели это отдельный признак, а не факт.
-  - `LAUNCHER_TEXT: str` — `#!/bin/sh\nexec <admin python> -I -B -S <entry> "$@"\n` с
-    абсолютными путями `Layout`.
+    административной среды** (rev 8, r10): `admin_dir(id)` есть и `admin_digest(layout,
+    id)` равен `expected_admin_digest` (rev 8, r5: значение, а не чтение реестра; Task 7,
+    R33.F25); Python `admin_python_path(layout, expected_python, detect_platform())` — по
+    `lstat` обычный файл, и `trusted_path_problems` для него пуст. Каталога нет или
+    `TreeError` — `False`; иная `OSError` — `StepFailed("facts")` (F12). Оба ожидаемых
+    значения передаются из одного источника (rev 8, r11): `mark.admin_digest`/`mark.admin_python`
+    до регистрации (Task 7), запись реестра — `admin_digest`/`admin_python` — после
+    (`read_facts`, `activate` под блокировкой, читатели Task 12 из `snap.entry`). Профиль и
+    манифест предикат и вызывающие не читают; `python_declared` релиза — не источник.
+    Долговечность содержимого Python предикат не читает: её обеспечивает синхронизация
+    дерева до `rename` (протокол `install_admin_python`); в модели это отдельный признак, а
+    не факт.
+  - `launcher_text(layout, python: str, platform: PlatformName) -> str` —
+    `#!/bin/sh\nexec <admin python> -I -B -S <entry> "$@"\n`, пути `Layout` через
+    `shlex.quote` (F2, F14; бывший `LAUNCHER_TEXT`: текст зависит от раскладки и Python
+    релиза, константой быть не может). `entry_text(layout) -> str` (`df/launcher_entry.py`)
+    — собственный текст модуля входа, в котором единственная строка `_ROOT = "/"` заменена
+    корнем раскладки; не ровно одна такая строка — `AssertionError`.
   - Маршрут `launcher` (rev 8, r9: отдельной составной функции нет): `write_atomic` входа
-    (текст `launcher_entry.py`, `0644`), `write_atomic` команды (`LAUNCHER_TEXT`, `0755`) —
+    (`entry_text(layout)`, `0644`), `write_atomic` команды (`launcher_text(...)`, `0755`) —
     своя синхронизация `bin_dir` у каждого; затем, если `/usr/local/bin` доверен (условие
     `local_bin=trusted`: `local_bin_trusted(layout)` —
     `trusted_path_problems(layout.local_bin)` пуст, Task 7 R33.F23), — шаг
-    `link_command`; иначе шаг пропущен, и установка сообщает полный путь команды.
+    `link_command`; иначе шаг пропущен, и установка сообщает полный путь команды (Task 9).
   - `link_command(layout) -> None` — протокол `link_command`: временная ссылка,
-    `rename` поверх `/usr/local/bin/darkfactory`, `fault_point("renamed", …)`,
-    `sync_dir(/usr/local/bin)`. Ветвления внутри нет: решение о ссылке — условие маршрута.
-    Эффекты: `renamed` → `sync_dir(local_bin)`.
+    `rename` поверх `/usr/local/bin/darkfactory` через дескриптор `local_bin`,
+    `fault_point("renamed", …)`, `sync_dir(/usr/local/bin)`. Ветвления и проверки политики
+    внутри нет: решение о ссылке — условие маршрута. Эффекты: `renamed` → `sync_dir(local_bin)`.
     Ссылку и файл с именем `df` не создаёт никогда.
-  - `launcher_ready(layout) -> bool`. Оба предиката `read_facts` получает параметрами
-    (Task 7, R33.F5); связывает их Task 9.
+  - `launcher_ready(layout, *, python: str) -> bool` (F2): вход и команда — обычные файлы
+    root, `0644` и `0755`, с текстом ровно `entry_text(layout)` и `launcher_text(layout,
+    python, detect_platform())`; если `local_bin_trusted(layout)`, то и
+    `local_bin/darkfactory` — ссылка с текстом `str(layout.launcher)` (иначе сбой между
+    записью команды и `link_command` оставил бы `L` истинным без ссылки). Нет или другое —
+    `False`; `ELOOP` — `False`; иная `OSError` — `StepFailed("facts")`. Оба предиката
+    `read_facts` получает параметрами (Task 7, R33.F5); связывает их Task 9
+    (`launcher_ready=lambda: launcher_ready(layout, python=<версия Python записи>)`).
   - `RAW_FIELDS = ("generation", "current_id", "releases_text", "install_text",
-    "models_text", "pending_present")` — части, которые вход читает до импорта `df` (только
-    stdlib, словарь в тексте entry). Тест сверяет с полями `df.state.RawSnapshot` (Task 9).
+    "models_text", "pending_present")` — части, которые вход читает до импорта `df`.
+    Тест этой задачи сверяет их с заглушкой `RawSnapshot` и со списком полей Task 9;
+    сверка с настоящим `df.state.RawSnapshot` — тест Task 9 (F4).
     Типизированные объекты вход строит после проверки digest и импорта `df`.
-  - Входной файл `darkfactory-entry.py` (нормативно, §3.9):
+  - Входной файл `darkfactory-entry.py` (нормативно, §3.9). Части `df`, нужные до импорта,
+    скопированы в модуль на stdlib, и тест гоняет каждую копию и её оригинал на одних
+    входах, враждебные включительно: `tree_digest` без исключений и `check_names`,
+    разбор поколения и `read_consistent`, открытие блокировки (`writer_lock` без создания
+    каталогов), `settle_on_acquire`/`acquire_paths`/`_pending_id`, чтение файлов
+    (`read_optional`, байты) и правила `parse_releases`. Владелец читается одним швом
+    `owner_uid`. Сам файл запускается только как `-I -B -S` (иначе отказ):
     0. режим: подкоманда ∈ {`init`, `install`, `models set`} → `writer` (требует root;
-       `flock(LOCK_EX|LOCK_NB)` на `layout.lock`, занято — выход 2, дескриптор до конца
-       процесса; **сразу затем** — своя stdlib-копия `settle_on_acquire` с путями
-       `ACQUIRE_PATHS` в тексте entry, сверяемыми тестом с `acquire_paths`, Task 7; rev 8
-       r6); иначе → `reader` (блокировку **не открывает**, с root и без; не закрепляет);
-    1. полный снимок: `writer` — одно чтение под блокировкой (нечётное поколение — прерванный
-       писатель, это не переходное состояние для него); `reader` — `g1`, чтение, `g2` по
-       правилам `read_consistent` (Task 4; своя копия в entry, сверяемая тестом): нечётное
-       `g1` или `pending_present` — **переходное состояние**; изменившееся поколение —
-       повтор, затем выход 2. Чтение: `os.readlink(current)` один раз → id, байты
-       `releases.toml`, `install.toml`, `models.toml`, наличие `pending.toml`. В переходном
-       состоянии вход читает только `current` и `releases.toml` — чтобы найти код (§3.3);
-    2. по прочитанному: запись id `allowed`, иначе выход 2. Отказ из-за `pending` или
-       переходного состояния — не здесь, а в команде (Task 9), чтобы `doctor` его показал;
-    3. `tree_digest(admin_dir(id))` (своя копия алгоритма в entry, сверяемая тестом с
-       `df.digest`) = `admin_digest`, иначе выход 2: «административный код повреждён:
-       восстановление через bootstrap»;
-    4. `sys.path.insert(0, str(admin_dir(id)))` — пути stdlib не трогаются;
-    5. `from df.state import RawSnapshot, Stable, Transitional; from df.cli import main`;
-       `read = Transitional(g)` либо `Stable(RawSnapshot(**parts), g)`;
-       `sys.exit(main(sys.argv[1:], mode=mode, read=read, lock_fd=fd))`. Дальше никто
-       снимок не перечитывает.
-  - `df/bootstrap.py` — исполняемый как скрипт: `sys.path.insert(0, <каталог над df/ по
-    __file__>)`, затем `df.cli.main(argv, mode="bootstrap", read=None, lock_fd=None)`; `main`
-    в этом режиме сама берёт `writer_lock` и читает снимок. Допустимы только `init` и
-    `install`. При активном `current` и исправной команде — отказ «используйте
-    `darkfactory`», кроме `install --recover`.
+       открытие `layout.lock` с проверками Task 4 — каталоги по пути доверены, `df` и
+       `install` без перехода по ссылке, файл обычный, свой, одна жёсткая ссылка, ровно
+       `0600`, без блокировки на FIFO; отсутствующий каталог — отказ, вход каталогов не
+       создаёт; `flock(LOCK_EX|LOCK_NB)`, занято — выход 2, дескриптор до конца
+       процесса; **сразу затем** — своя stdlib-копия `settle_on_acquire` (rev 8 r6) с
+       `acquire_paths(paths, pending_id)` входа: она равна `accept.acquire_paths` при
+       доверенном `/usr/local/bin`, а иначе шире ровно на `local_bin` — вход синхронизирует
+       его всегда, когда это настоящий каталог, и не копирует политику доверенных путей
+       (F3)); иначе → `reader` (блокировку **не открывает**, с root и без; не закрепляет);
+    1. полный снимок: `writer` — одно чтение под блокировкой (нечётное поколение и
+       `pending.toml` — не переходное состояние для него); `reader` — `g1`, чтение, `g2` по
+       правилам `read_consistent` (Task 4): нечётное `g1` или `pending_present` —
+       **переходное состояние**; изменившееся поколение — повтор, после трёх попыток выход 2.
+       Чтение: `os.readlink(current)` один раз → id (`releases/<id>`, иное — выход 2),
+       байты `releases.toml`, `install.toml`, `models.toml`, наличие `pending.toml`. В
+       переходном состоянии при нечётном `g1` вход читает только `current` и
+       `releases.toml` — чтобы найти код (§3.3);
+    2. по прочитанному: `current` есть (иначе выход 2 с указанием на bootstrap), запись id
+       есть и `allowed`, иначе выход 2. Отказ из-за `pending` или переходного состояния — не
+       здесь, а в команде (Task 9), чтобы `doctor` его показал;
+    3. `tree_digest(admin_dir(id))` = `admin_digest`, иначе выход 2: «административный код
+       повреждён: восстановление через bootstrap»;
+    4. `df` ещё не загружен (иначе выход 2); `sys.path.insert(0, str(admin_dir(id)))` —
+       пути stdlib не трогаются;
+    5. импорт `df.state` и `df.cli` (`df.cli` обязан быть из `admin_dir(id)/df`);
+       `read = Transitional(g)` либо `Stable(RawSnapshot(generation=g, **parts), g)`;
+       `sys.exit(main(argv, mode=mode, read=read, lock_fd=fd))`. Дальше никто снимок не
+       перечитывает. `mode_of(argv)` и `WRITER_COMMANDS` — публичные: `main` обязана
+       определять подкоманду так же и отказывать писателю в режиме `reader` (Task 9).
+  - `df/bootstrap.py` (F10) — исполняемый как скрипт; разбирается Python 3.9 (системный
+    `python3` macOS), чтобы сказать, что нужно: Python < 3.12 — выход 2 «нужен Python ≥
+    3.12»; запуск не как `-I -B -S` — выход 2; принимаются только `init` и `install`, иное
+    — выход 2. Затем `sys.path.insert(0, <каталог над df/ по realpath(__file__)>)` и
+    `df.cli.main(argv, mode="bootstrap", read=None, lock_fd=None)`; `main` в этом режиме
+    сама берёт `writer_lock` и читает снимок. Правило «активный `current` и исправная
+    команда — отказ „используйте `darkfactory`“» — в `main` (Task 9), после снимка;
+    `install --recover` нет.
 
-- [ ] **Step 1: Проверка предпосылки `uv`.** Найти в документации и исходниках `uv` версии
-  из CI, сверяет ли `uv python install` SHA-256 загрузки. Результат с номером версии и ссылкой
-  записать в docstring `install_admin_python`. Тест: подмена `UV_PYTHON_INSTALL_MIRROR` на
-  локальный HTTP-сервер с испорченным архивом → `uv` отказывает. Тест под маркером `network`
-  (Task 13), без сети внешнего мира. Там же — предпосылка переноса (rev 8, r9): Python,
-  установленный в `.staging` и перенесённый `rename`, отвечает `sys.prefix` = новому пути, и
-  в `admin-python/` нет ссылок внутрь `.staging`; не подтверждено для версии `uv` —
-  `StepFailed("admin", "uv <ver>: перенос Python не подтверждён")`.
-- [ ] **Step 2: Failing tests**
+- [x] **Step 1: Проверка предпосылки `uv`** (как построено, F8/F9). uv 0.11.23 сверяет
+  SHA-256 загрузки (исходники `crates/uv-python/src/downloads.rs`, ссылка и замер — в
+  docstring `install_admin_python`). `test_uv_refuses_corrupt_download` — локальное
+  зеркало `UV_PYTHON_INSTALL_MIRROR` на 127.0.0.1 с испорченным архивом, без маркера и без
+  внешней сети; пропускается, если `uv` на `PATH` не 0.11.23 (в CI — до закрепления
+  версии, Task 13/14). `test_admin_python_relocation_precondition` — настоящая загрузка,
+  opt-in `DF_NETWORK_TESTS=1`, пока Task 13 не заведёт маркер `network`: после `rename`
+  `sys.prefix == sys.base_prefix == admin_python/cpython-…`, ни одна ссылка не указывает в
+  `.staging`. Версия `uv` вне `UV_ADMIN_CONFIRMED` — отказ до запуска.
+- [x] **Step 2: Failing tests** (как построено; F4: `test_doctor_transitional_via_public_entry`
+  — в Task 12, сверка `RAW_FIELDS` с настоящим `df.state`, «доходит до committed без
+  ссылки» и «`main` ничего не перечитывает» — в Task 9)
 
 ```python
-def test_admin_code_comes_from_reference_not_release(tmp_path): ...   # подмена df/ в релизе не попадает в admin
-def test_admin_digest_mismatch_blocks_entry(tmp_path): ...            # entry: правка admin/df/cli.py → код 2 до импорта
-def test_entry_resolves_current_once(tmp_path, monkeypatch): ...      # переключение current после чтения не меняет id
-def test_entry_refuses_revoked_and_pending(tmp_path): ...
-def test_entry_modes(tmp_path): ...   # models set → writer (EX); doctor от root → reader без open(lock); занято → код 2
-def test_entry_writer_settles_before_snapshot(tmp_path, monkeypatch): ...
-    # writer: flock → sync_dir по ACQUIRE_PATHS → первое чтение current/releases.toml;
-    # reader: ни одного sync_dir (S1-R6-N1)
-def test_entry_acquire_paths_copy_matches(tmp_path): ...   # копия entry == acquire_paths
-def test_entry_reader_generation(tmp_path, monkeypatch): ...
-    # поколение меняется между g1 и g2 → повтор, затем код 2; нечётное → main получает
-    # Transitional(g) (не код 2 до импорта); pending_present при чётном → Transitional
-def test_doctor_transitional_via_public_entry(tmp_path): ...
-    # `darkfactory doctor --json` при нечётном поколении: код «уровень 1 не достигнут»,
-    # JSON {"level1": "not reached", "state": "transitional", "generation": g}
-def test_entry_passes_full_snapshot(tmp_path, monkeypatch): ...
-    # пауза после чтения entry; установка меняет current и install.toml; main получает
-    # прежний raw целиком и ничего не перечитывает (audit hook: нет open install.toml в main)
-def test_entry_raw_fields_match_df_state(): ...   # RAW_FIELDS == поля df.state.RawSnapshot
-def test_admin_tree_synced_before_mark(monkeypatch, tmp_path): ...    # маршрут admin: sync_tree → sync_dir(admin) → write_mark
-def test_admin_primitives_in_protocol_table(monkeypatch, fake_layout): ...
-    # 7-D2: настоящие install_admin_python, install_admin, link_command входят в
-    # test_primitive_protocols_match_table (tests/df/test_leaves.py, до них — пропуск)
-def test_install_admin_is_leaf(monkeypatch, tmp_path): ...
+# tests/df/test_admin.py
+def test_admin_code_comes_from_reference_not_release(fl): ...   # подмена df/ в релизе не попадает в admin
+def test_install_admin_python_argv_and_env_exact(fl): ...       # --no-bin, точный ключ, ровно 6 переменных
+def test_umask_is_set_not_inherited(fl): ...
+def test_admin_tree_check_refuses(fl, spoil): ...               # g+w, o+w, abs, escaping, dangling, fifo
+def test_unconfirmed_uv_refused(fl): ...
+def test_python_below_floor_refused_before_uv(fl, python): ...
+def test_admin_home_refused_unless_root_0700(fl, spoil): ...
+def test_admin_tree_synced_before_mark(fl): ...    # маршрут admin: sync_tree → sync_dir(admin) → write_mark
+def test_install_admin_is_leaf(fl): ...
     # S1-R9-N1: события install_admin == PROTOCOLS["install_admin"]: ни write_mark, ни
     # remove_own_tree, ни запуска uv; admin_dir(id) уже есть → StepFailed, дерево не тронуто
 @pytest.mark.parametrize("stop", ["created", "renamed"])
-def test_install_admin_python_staging_then_rename(monkeypatch, tmp_path, stop): ...
-    # uv — фикстурный исполняемый файл (аргумент uv), кладёт cpython-… и служебный файл в
-    # $UV_PYTHON_INSTALL_DIR; функция настоящая. UV_PYTHON_INSTALL_DIR =
-    # admin_python/.staging; события == leaf_effects("install_admin_python"); остановка в
-    # stop → повтор маршрута admin: created — remove_own_tree(.staging), затем установка;
-    # renamed — условие py=absent ложно, шаг пропущен, .staging удаляет следующий шаг
-def test_admin_python_relocation_precondition(tmp_path): ...   # маркер network
-    # после rename: sys.prefix == admin_python/cpython-…; ни одной ссылки внутрь .staging;
-    # иначе установка отказывает (§3.9)
-def test_entry_digest_matches_df_digest(tmp_path): ...
-def test_entry_ignores_foreign_df_and_pth(tmp_path): ...
-    # чужой пакет df в site-packages и .pth с import в окружении админ-Python: не исполняются (-I -S)
-def test_entry_writes_no_bytecode(tmp_path): ...    # два запуска: digest admin_dir не меняется
-def test_launcher_never_named_df(tmp_path): ...
-def test_usr_local_link_only_when_trusted(monkeypatch, tmp_path): ...
-    # условие маршрута local_bin=trusted ложно → link_command не вызван, полный путь в
-    # выводе; link_command сам trusted_path_problems не вызывает (S1-R9-N1); L истинен
-    # без ссылки, установка доходит до committed (S1-R10-N3: ложную ветку модель не
-    # видит — её /usr/local/bin всегда доверен)
-def test_admin_ready_uses_passed_digest_only(tmp_path): ...
+def test_install_admin_python_staging_then_rename(fl, stop): ...
+    # настоящий лист в настоящем маршруте, сбой в stop, повтор маршрута admin: created —
+    # remove_own_tree(.staging), затем установка; renamed — условие py=absent ложно
+def test_install_admin_copies_only_files_and_dirs(fl, kind): ...   # link, dir-link, fifo
+def test_install_admin_modes_by_fchmod(fl, umask): ...
+def test_admin_ready_uses_passed_digest_only(fl): ...
     # audit hook: admin_ready не открывает releases.toml и отметки; другой digest → False
-def test_bootstrap_allows_only_init_install(tmp_path): ...
+def test_admin_ready_digest_excludes_nothing(fl): ...
+def test_launcher_ready(fl, spoil): ...     # no-link, чужой текст, права, владелец
+def test_launcher_never_named_df(fl): ...
+@pytest.mark.parametrize("trusted", [False, True])
+def test_usr_local_link_only_when_trusted(fl, trusted): ...
+    # условие маршрута ложно → link_command не вызван, L истинен без ссылки;
+    # link_command сам trusted_path_problems не вызывает (S1-R9-N1)
+def test_uv_refuses_corrupt_download(tmp_path): ...             # локальное зеркало, без маркера
+def test_admin_python_relocation_precondition(tmp_path): ...    # opt-in DF_NETWORK_TESTS
+# tests/df/test_leaves.py — PRIMITIVES: настоящие install_admin_python, install_admin,
+# link_command в test_primitive_protocols_match_table (7-D2 M4)
+# tests/df/test_launcher_entry.py
+def test_entry_imports_only_stdlib_at_runtime(): ...
+def test_entry_paths_match_layout(tmp_path): ...
+def test_entry_raw_fields_match_df_state(): ...   # заглушка RawSnapshot и список полей Task 9
+def test_entry_digest_matches_df_digest(tmp_path, name): ...
+    # ссылки, FIFO, близнецы NFC и регистра, длинное имя, перевод строки, нечитаемый файл
+def test_entry_digest_golden_vector(tmp_path): ...       # общий вектор test_digest.py
+def test_entry_check_names_matches_df(names): ...         # NUL, /, \n, не UTF-8, 300 байт
+def test_entry_generation_parsing_matches_journal(tmp_path, content): ...
+    # общая матрица test_journal.py + NUL, 64/65 байт, ссылка, каталог, FIFO
+def test_entry_read_consistent_matches_journal(tmp_path, name, start, attempts): ...
+def test_entry_lock_open_matches_writer_lock(tmp_path, monkeypatch, case): ...
+    # ссылка, FIFO, каталог, 0644, две жёсткие ссылки, чужой владелец файла и каталога,
+    # g+w/o+w каталогов, ссылка вместо df/ и install/
+def test_entry_lock_creates_no_directory(tmp_path, missing): ...
+def test_entry_pending_id_matches_accept(tmp_path, case): ...
+def test_entry_acquire_paths_copy_matches(tmp_path, monkeypatch, pending_id, trusted, root_owned): ...
+    # F3: равенство при доверенном local_bin, иначе ровно на local_bin больше
+def test_entry_settle_syncs_like_settle_on_acquire(tmp_path, monkeypatch): ...
+def test_entry_releases_parse_matches_config(case): ...
+def test_entry_modes(tmp_path, monkeypatch, rec, as_root): ...
+    # models set → writer (EX: даже SH занят); doctor от root → reader без open(lock); занято → код 2
+def test_entry_writer_settles_before_snapshot(tmp_path, monkeypatch, rec, as_root): ...
+    # writer: flock → sync по acquire_paths → первое чтение current; reader: ни одного sync (S1-R6-N1)
+def test_entry_resolves_current_once(tmp_path, monkeypatch, rec, as_root): ...
+def test_entry_refuses_revoked_and_pending(tmp_path, rec, as_root): ...
+    # отозван, не зарегистрирован, нет current, чужая цель → код 2; pending → main
+def test_entry_reader_generation(tmp_path, monkeypatch, rec): ...
+    # поколение меняется → три попытки, код 2; нечётное → Transitional(g) с найденным кодом;
+    # pending_present при чётном → Transitional
+def test_entry_passes_full_snapshot(tmp_path, rec, as_root): ...
+    # пауза после чтения; установка меняет current и install.toml; main получает прежний raw
+def test_entry_reader_transitional_reaches_main(tmp_path): ...   # подпроцесс, нечётное поколение
+def test_admin_digest_mismatch_blocks_entry(tmp_path): ...       # правка admin/df/cli.py → код 2 до импорта
+def test_entry_refuses_without_isolation_flags(tmp_path): ...
+def test_entry_writes_no_bytecode(tmp_path): ...                 # два запуска: digest admin_dir не меняется
+def test_entry_ignores_foreign_df_and_pth(tmp_path, foreign_python): ...
+    # чужой df в site-packages и .pth с import: не исполняются (-I -S); без -S .pth исполняется
+def test_bootstrap_allows_only_init_install(tmp_path, argv): ...
+def test_bootstrap_requires_isolation_flags(tmp_path, flags): ...
+def test_bootstrap_root_from_own_path_through_link(tmp_path): ...
+def test_bootstrap_under_system_python_says_what_is_needed(tmp_path): ...
 ```
 
-- [ ] **Step 3–4:** FAIL → implement → PASS
-- [ ] **Step 5: Commit** `feat(df): independent admin runtime, darkfactory launcher, bootstrap`
+- [x] **Step 3–4:** FAIL → implement → PASS. Мутационная проверка: каждое отключённое
+  правило (F1, F6–F8, F11–F13, F2; на стороне входа — режим, root, блокировка, закрепление,
+  `acquire_paths`, `_pending_id`, поколение, `read_consistent`, digest, запись `allowed`,
+  `current`, импорт, флаги; bootstrap) валит тест (`task-8a-admin-report.md`,
+  `task-8a-entry-report.md`).
+- [x] **Step 5: Commit** `feat(df): administrative environment (Task 8a part 1)`;
+  `feat(df): darkfactory entry and bootstrap (Task 8a part 2)`; `docs(df): Task 8a as
+  built; entry and admin rules in spec 3.9, Task 9/12/13/14 items`.
 
 ### Task 9: Транзакция установки, регистрация, активация, команды `init` / `install`
 
@@ -2489,7 +2588,11 @@ def test_bootstrap_allows_only_init_install(tmp_path): ...
 
 **Interfaces:**
 - Consumes: всё из Tasks 1–8; `install_admin_python`, `install_admin`, `admin_ready`,
-  `link_command`, `LAUNCHER_TEXT`, `launcher_ready` (Task 8a).
+  `link_command`, `launcher_text`, `entry_text`, `launcher_ready` (Task 8a; бывший
+  `LAUNCHER_TEXT` — функция `launcher_text(layout, python, platform)`, F2). Листья
+  `install_admin_python`, `install_admin`, `link_command` уже связаны в
+  `acceptance_calls` в Task 8a (решение контроллера); `refs` без `devtools` — уже
+  `StepFailed("admin", …)` там же (F13).
 - Produces:
   - `next_release_id(layout: Layout, manifest_sha: str, platform: PlatformName) -> str` —
     наименьший `n ≥ 1`, для которого `<sha12>-<platform>-<n>` нет ни в `releases.toml`
@@ -2568,8 +2671,8 @@ def test_bootstrap_allows_only_init_install(tmp_path): ...
     <Row.action>, calls=install_calls(layout, cfg, pending), python_key=<ключ Python
     профиля>, build_uid=<uid df-build из accounts.toml>)` (Task 7, R33.F14: проверка своей
     фазы, затем `run_route`; rev 8 r8); `install_calls` = `acceptance_calls(...)` (Task 7,
-    тот же `python_key`, свой `ctx: RouteContext`) и листья `LATER_LEAVES` (8, 8a, 9;
-    лист 7a уже в `acceptance_calls`), R33.F7 — реализации
+    тот же `python_key`, свой `ctx: RouteContext`) и листья `LATER_LEAVES` (9; листья 7a,
+    8 и 8a уже в `acceptance_calls`), R33.F7 — реализации
     вызовов маршрутов:
 
     <!-- install-route-calls:begin -->
@@ -2598,7 +2701,15 @@ def test_bootstrap_allows_only_init_install(tmp_path): ...
 
     Имена действий и функций сверяет тест: ключи `install_actions` = множество `Row.action`
     без `""` и `"stop"`. Чтение автомата — `read_facts` с `launcher_ready` и
-    `df.admin.admin_ready` (Task 8a), привязку сверяет тест (R33.F5). Доверенные чекауты
+    `df.admin.admin_ready` (Task 8a), привязку сверяет тест (R33.F5):
+    `launcher_ready=lambda: launcher_ready(layout, python=<admin_python отметки или
+    записи>)` — та же версия, что `expected_python` у `admin_ready`; маршрут `launcher`
+    пишет `entry_text(layout)` и `launcher_text(layout, <та же версия>, platform)`.
+    Команда называет Python одного релиза, поэтому откат или возобновление к релизу с
+    другим `admin_python` оставляют `L` ложным для этого id: маршрут отката/возобновления
+    обязан дойти до `launcher` для активного id, когда `L` ложен (F16; вход
+    `sys.executable` с записью не сверяет — иначе восстановление через `darkfactory` было
+    бы закрыто). Без доверенного `/usr/local/bin` установка печатает полный путь команды. Доверенные чекауты
     (`fetch_reference`, Task 7) — до `drive`, в `layout.verify_dir/<repo>` (R33.F34).
 
     Настройки `uv` (спека §3.2, решение владельца 22.10, Task 7a): до `run_build` — для
@@ -2627,7 +2738,13 @@ def test_bootstrap_allows_only_init_install(tmp_path): ...
       2, «идёт или прервана административная операция: darkfactory install»;
     - `bootstrap` — только из `df/bootstrap.py`, `read is None`: `main` сама берёт
       `writer_lock`, выполняет `settle_on_acquire` и читает `read_raw`. Отсутствие блокировки
-      режим не определяет.
+      режим не определяет. После снимка: активный `current`, его запись `allowed`, `intact`
+      и `L` истинны — код 2, «используйте `darkfactory`» (Task 8a F10; флага
+      `--recover` нет). Python ≥ 3.12, флаги `-I -B -S` и подкоманды `init`/`install`
+      проверяет сам `bootstrap.py`;
+    - подкоманду `main` определяет так же, как вход (`launcher_entry.mode_of`,
+      `WRITER_COMMANDS`): подкоманда-писатель в режиме `reader` — код 2 (вход не взял
+      блокировку).
 
     Подкоманды:
     - `init --manifest-repo R --manifest-sha S --profile P --cli NAME=PATH...` — требует
@@ -2805,6 +2922,22 @@ def test_init_with_pending_and_install_toml_refused(fake_world): ...
     # файлы побайтово прежние
 def test_commands_refuse_while_pending(fake_world): ...     # models set → код 2
 def test_init_requires_root(monkeypatch): ...               # euid≠0 → код 2, «нужен sudo»
+# перенесены из Task 8a (F4, F10, F16)
+def test_entry_raw_fields_match_df_state(): ...
+    # launcher_entry.RAW_FIELDS == поля настоящего df.state.RawSnapshot
+def test_main_rereads_nothing(fake_world): ...
+    # снимок от входа; audit hook: в main нет open install.toml/releases.toml/models.toml/
+    # pending.toml и readlink current
+def test_install_committed_without_local_link(fake_world, capsys): ...
+    # local_bin=trusted ложно → link_command не вызван, L истинен без ссылки, установка
+    # доходит до committed и печатает полный путь /opt/df/bin/darkfactory
+def test_bootstrap_refuses_healthy_command(fake_world): ...
+    # current, allowed, intact, L → код 2 «используйте darkfactory»; сломанная команда
+    # (L ложен) или pending → bootstrap продолжает
+def test_reader_mode_refuses_writer_subcommand(fake_world): ...
+    # main(["install"], mode="reader", ...) → код 2
+def test_rollback_to_other_admin_python_rewrites_launcher(fake_world): ...
+    # F16: откат к релизу с другим admin_python → маршрут доходит до launcher, L истинен
 ```
 
 `fake_world` — фикстура `tests/df/conftest.py`. Подменяет только нижние операции (rev 8,
@@ -3182,6 +3315,10 @@ def test_later_stage_files_not_checked(fake_installed): ...
 def test_unknown_etc_file_broken(fake_installed): ...
 def test_same_model_author_reviewer_warns_only(fake_installed): ...
 def test_json_lists_all_problems(fake_installed): ...
+def test_doctor_transitional_via_public_entry(tmp_path): ...
+    # из Task 8a (F4): настоящий вход `darkfactory-entry.py` (подпроцесс, -I -B -S) при
+    # нечётном поколении → код «уровень 1 не достигнут», JSON {"level1": "not reached",
+    # "state": "transitional", "generation": g}
 ```
 
 - [ ] **Step 2–4:** FAIL → implement → PASS
@@ -3358,6 +3495,13 @@ def test_broken_run_as_fails_suite(root_world, monkeypatch): ...
 def test_darkfactory_command_works_and_is_immutable(root_world): ...
     # /opt/df/bin/darkfactory doctor и models list работают; два запуска не меняют digest admin и релиза
 def test_no_df_in_path(root_world): ...   # ни /opt/df/bin/df, ни /usr/local/bin/df не созданы
+def test_admin_python_on_real_host(root_world): ...
+    # Task 8a, F1/F8: на обеих ОС настоящий install_admin_python от root — точный ключ
+    # build.python_key (на Linux — вариант сборки, который выбрал uv: ключ совпал, A
+    # истинен, повтор маршрута не зацикливается), проверка всего дерева проходит; после
+    # rename sys.prefix == admin_python/<ключ>, ни одна ссылка не указывает в .staging;
+    # испорченная загрузка через локальное зеркало отвергнута. Linux до этого прогона не
+    # замерялся — расхождение с правилами F1/F7/F8 — находка, не правка теста
 ```
 
 - [ ] **Step 2: Где идёт root-прогон.** Только в одноразовых выделенных окружениях macOS
@@ -3381,6 +3525,12 @@ def test_no_df_in_path(root_world): ...   # ни /opt/df/bin/df, ни /usr/local
   - Шаги: `uv python install 3.12` → `uv sync --frozen` → обычный
     `uv run --frozen pytest -q tests/df` → root-прогон из Step 2 (контроли — внутри него,
     до отрицательных тестов).
+  - `uv` закреплён на `UV_PINNED_VERSION` (0.11.23) и здесь, и в `ci.yml` (Task 8a): иначе
+    `test_uv_refuses_corrupt_download` в CI пропускается, а `install_admin_python`
+    отказывает по `UV_ADMIN_CONFIRMED`. Маркер `network` регистрируется в
+    `tests/conftest.py`; opt-in `DF_NETWORK_TESTS` теста
+    `test_admin_python_relocation_precondition` (Task 8a, F9) заменяется этим маркером, и
+    тест идёт в обеих ячейках матрицы.
   - До прогона — **проба механизмов** тем же путём, что `run_as`/`spawn_as` (под `sudo`
     runner-а, без пароля). Неуспех — провал workflow с именем механизма, не skip:
     - **ubuntu-24.04**:
