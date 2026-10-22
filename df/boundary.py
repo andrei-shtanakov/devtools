@@ -272,9 +272,9 @@ def expected_entrypoints(ref_dir: Path) -> frozenset[str]:
 
     `ref_dir/pyproject.toml` of the trusted checkout is read as data. A
     member is a package if `tool.uv.package` is `true`, or it is unset and
-    `[build-system]` exists; otherwise nothing is expected. Dynamic scripts,
-    a non-bool `package` and a name unfit for a file are `ValueError`; an
-    unreadable file is `TreeError`.
+    `[build-system]` exists; otherwise nothing is expected. Dynamic scripts
+    and a non-bool `package` are `ValueError`; a name unfit for a file and an
+    unreadable file are `TreeError`.
     """
     raw = read_capped(ref_dir / "pyproject.toml", PYPROJECT_CAP)
     data = tomllib.loads(raw.decode("utf-8"))
