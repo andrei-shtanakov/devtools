@@ -200,6 +200,7 @@ def world(
     if pending:
         lay.pending.write_text("pending\n")
     lay.bin_dir.mkdir(parents=True)
+    make_interpreter(lay)
     lay.entry.write_text(entry_text_as_user(lay))
     return lay
 
@@ -208,8 +209,22 @@ def entry_text_as_user(lay: Layout) -> str:
     """`entry_text` with the current user as root (the subprocess has no
     monkeypatch): the one line `ROOT_UID = 0` substituted."""
     text = entry.entry_text(lay)
-    assert text.count("\nROOT_UID = 0\n") == 1
+    exe_line = "\n_EXECUTABLE = sys.executable\n"
+    assert text.count("\nROOT_UID = 0\n") == 1 and text.count(exe_line) == 1
+    text = text.replace(exe_line, f"\n_EXECUTABLE = {str(interpreter(lay))!r}\n")
     return text.replace("\nROOT_UID = 0\n", f"\nROOT_UID = {os.geteuid()}\n")
+
+
+def interpreter(lay: Layout) -> Path:
+    """The stand-in admin interpreter the entry takes as its own (M-4)."""
+    return lay.admin_python / "cpython-3.12.13-test" / "bin" / "python3.12"
+
+
+def make_interpreter(lay: Layout) -> None:
+    exe = interpreter(lay)
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"stand-in\n")
+    exe.chmod(0o755)
 
 
 def run_entry(
@@ -286,7 +301,7 @@ def as_root(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def run_in(lay: Layout, *argv: str) -> int:
-    return entry.run(list(argv), root=str(lay.root))
+    return entry.run(list(argv), root=str(lay.root), executable=str(interpreter(lay)))
 
 
 # --- the module itself --------------------------------------------------------
@@ -1426,6 +1441,12 @@ def _spoil(lay: Layout, spoil: str) -> None:
         os.symlink("cli.py", pkg / "alias.py")
     elif spoil == "opt-writable":
         lay.opt.chmod(0o777)
+    elif spoil == "bytecode":  # reviewer probe Q2
+        cache = pkg / "__pycache__"
+        cache.mkdir()
+        (cache / "cli.cpython-313.pyc").write_bytes(b"\0" * 16)
+    elif spoil == "bytecode-upper":
+        (pkg / "X.PYC").write_bytes(b"\0" * 16)
 
 
 TRUST_SPOILS = [
@@ -1434,6 +1455,8 @@ TRUST_SPOILS = [
     "admin-link",
     "inner-link",
     "opt-writable",
+    "bytecode",
+    "bytecode-upper",
 ]
 
 
@@ -1517,3 +1540,64 @@ def _stderr_of(call: Callable[[], int]) -> str:
     with contextlib.redirect_stderr(buf):
         assert call() == entry.EXIT_REFUSED
     return buf.getvalue()
+
+
+# --- fix round 1 minors: the admin interpreter (M-4), SystemExit (n-7) ------------
+
+
+def _spoil_python(lay: Layout, spoil: str) -> str:
+    exe = interpreter(lay)
+    if spoil == "outside":
+        return sys.executable
+    if spoil == "link":
+        exe.rename(exe.with_name("real"))
+        exe.symlink_to("real")
+    elif spoil == "bin-writable":
+        exe.parent.chmod(0o775)
+    elif spoil == "file-writable":
+        exe.chmod(0o777)
+    elif spoil == "admin-python-link":
+        os.rename(lay.admin_python, lay.opt / "py-elsewhere")
+        os.symlink(lay.opt / "py-elsewhere", lay.admin_python)
+    elif spoil == "missing":
+        exe.unlink()
+    return str(exe)
+
+
+PYTHON_SPOILS = [
+    "outside",
+    "link",
+    "bin-writable",
+    "file-writable",
+    "admin-python-link",
+    "missing",
+]
+
+
+@pytest.mark.parametrize("spoil", PYTHON_SPOILS)
+def test_interpreter_problems(tmp_path: Path, spoil: str) -> None:
+    lay = world(tmp_path)
+    paths = entry.EntryPaths(str(lay.root))
+    assert entry.interpreter_problems(paths, str(interpreter(lay))) == []
+    assert entry.interpreter_problems(paths, _spoil_python(lay, spoil))
+
+
+@pytest.mark.parametrize("spoil", ["file-writable", "admin-python-link"])
+def test_untrusted_interpreter_blocks_entry(tmp_path: Path, spoil: str) -> None:
+    lay = world(tmp_path)
+    _spoil_python(lay, spoil)
+    done = run_entry(lay, "doctor")
+    assert done.returncode == entry.EXIT_REFUSED, done.stdout
+    assert "административный Python не защищён" in done.stderr
+    assert "IMPORTED-CLI" not in done.stdout
+
+
+def test_entry_import_system_exit_is_refusal(tmp_path: Path) -> None:
+    """n-7: `SystemExit` raised while importing verified code is the same
+    refusal (exit 2 with the hint), not its own exit code."""
+    lay = world(tmp_path)
+    (lay.admin_dir(ID) / "df" / "cli.py").write_text("raise SystemExit(5)\n")
+    write_registry(lay, [record(ID, admin.admin_digest(lay, ID))])
+    done = run_entry(lay, "doctor")
+    assert done.returncode == entry.EXIT_REFUSED
+    assert "административный код повреждён" in done.stderr

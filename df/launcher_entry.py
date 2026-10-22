@@ -68,6 +68,11 @@ ATTEMPTS = 3
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _CURRENT_PREFIX = "releases/"
 _NO_CODE = "административный код повреждён: восстановление через bootstrap"
+_NO_PYTHON = (
+    "административный Python не защищён от записи: восстановление через bootstrap"
+)
+#: The interpreter running the entry (`bin/darkfactory` names the admin one).
+_EXECUTABLE = sys.executable
 _UNTRUSTED = "административный код не защищён от записи: восстановление через bootstrap"
 
 
@@ -172,15 +177,17 @@ def mode_of(argv: list[str]) -> str:
     return "reader"
 
 
-def run(argv: list[str], root: str = _ROOT) -> int:
+def run(argv: list[str], root: str = _ROOT, executable: str | None = None) -> int:
     """The entry (spec 3.9 items 0-5); refusals print and return 2."""
     paths = EntryPaths(root)
+    executable = _EXECUTABLE if executable is None else executable
     mode = mode_of(argv)
     lock_fd: int | None = None
     try:
         if mode == "writer":
             lock_fd = acquire(paths)
         snap = take_snapshot(paths, mode)
+        _require_trusted_interpreter(paths, executable)
         admin_dir = located_admin_dir(paths, snap, mode)
         state, main = _import_df(admin_dir)
     except (Refused, OSError) as exc:
@@ -291,21 +298,63 @@ def verified_admin_dir(paths: EntryPaths, snap: Snap) -> Path:
     return admin_dir
 
 
+def _require_trusted_interpreter(paths: EntryPaths, executable: str) -> None:
+    try:
+        problems = interpreter_problems(paths, executable)
+    except OSError as exc:
+        raise Refused("entry", f"{_NO_PYTHON} ({exc})") from exc
+    if problems:
+        raise Refused("entry", f"{_NO_PYTHON} ({'; '.join(problems)})")
+
+
+def interpreter_problems(paths: EntryPaths, executable: str) -> list[str]:
+    """The interpreter running the entry is root's admin Python (M-4).
+
+    It lies under `admin-python/`; every directory from the root to it is a
+    real directory, root's, without group or other write; the file itself is
+    a regular file (not a link), root's, without group or other write. The
+    stdlib files are not walked on every command: changing a root-owned
+    object after install needs root, and fact `A` checks the whole tree at
+    install and in `doctor` (`df.admin.admin_python_problems`). The version
+    is not compared with the record (F16: a rollback must stay recoverable).
+    """
+    exe = Path(executable)
+    if not exe.is_relative_to(paths.admin_python) or exe == paths.admin_python:
+        return [f"{exe}: не из {paths.admin_python}"]
+    path = paths.root
+    chain = [path]
+    for part in exe.parent.relative_to(paths.root).parts:
+        path = path / part
+        chain.append(path)
+    problems: list[str] = []
+    for directory in chain:
+        st = _trust_lstat(directory)
+        if st is None or not stat.S_ISDIR(st.st_mode):
+            return [*problems, f"{directory}: не каталог (ссылка или нет)"]
+        problems += _trust_problems(directory, st)
+    st = _trust_lstat(exe)
+    if st is None or not stat.S_ISREG(st.st_mode):
+        return [*problems, f"{exe}: не обычный файл"]
+    return problems + _trust_problems(exe, st)
+
+
 def admin_tree_problems(paths: EntryPaths, release_id: str) -> list[str]:
     """Trust of the admin code before root imports it (I-1).
 
     Every directory on the chain `root … /opt/df/admin/<id>` is a real
     directory (`lstat`, never a link), root's, without group or other write;
     every object in `admin/<id>` is a directory or a regular file, root's,
-    without group or other write. Links are refused although `tree_digest`
-    digests them: `install_admin` copies none. With this, only root can
-    change the tree between the digest and the import.
+    without group or other write, and not bytecode (`__pycache__`, `*.pyc`:
+    under `-B` a `.pyc` is still read, n-5). Links are refused although
+    `tree_digest` digests them: `install_admin` copies none. With this, only
+    root can change the tree between the digest and the import.
 
     ACLs are not read here (no ctypes in the entry): only the owner — root —
-    can change the mode or ACL of a root-owned object, and an ACL present
-    from creation (inherited from a directory on the chain) makes fact `A`
-    false (`df.admin.admin_code_problems`, `trusted_path_problems`), so such
-    a tree never becomes the active release. A vanished object is a
+    or a principal granted `writesecurity`/`chown` by an existing ACE can
+    change the mode or ACL of a root-owned object; any existing ACE is
+    itself an ACL, and an ACL makes fact `A` false
+    (`df.admin.admin_code_problems`, `trusted_path_problems`), so such a
+    tree never becomes the active release (n-6). A vanished object is a
     problem; any other `OSError` propagates.
     """
     admin_dir = paths.admin_dir(release_id)
@@ -327,6 +376,8 @@ def _tree_trust_problems(directory: Path) -> list[str]:
     problems: list[str] = []
     for entry in listing:
         path = Path(entry.path)
+        if _is_bytecode(entry.name):
+            problems.append(f"{path}: байт-код")
         st = _trust_lstat(path)
         if st is None:
             problems.append(f"{path}: исчез")
@@ -339,6 +390,12 @@ def _tree_trust_problems(directory: Path) -> list[str]:
         else:
             problems.append(f"{path}: не файл и не каталог")
     return problems
+
+
+def _is_bytecode(name: str) -> bool:
+    """Copy of `df.admin.is_bytecode`."""
+    folded = name.casefold()
+    return folded == "__pycache__" or folded.endswith(".pyc")
 
 
 def _trust_lstat(path: Path) -> os.stat_result | None:
@@ -365,7 +422,7 @@ def _import_df(admin_dir: Path) -> tuple[Any, Callable[..., int]]:
     try:
         state = importlib.import_module("df.state")
         cli = importlib.import_module("df.cli")
-    except Exception as exc:  # noqa: BLE001 - any import failure is broken code (M-2)
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - broken code (M-2, n-7)
         raise Refused("entry", f"{_NO_CODE} ({exc!r})") from exc
     if Path(str(cli.__file__)).parent != admin_dir / "df":
         raise Refused("entry", f"df.cli не из {admin_dir}")

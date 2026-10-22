@@ -700,6 +700,80 @@ def test_admin_ready_checks_the_admin_dir_chain(
     assert not ready(fl, digest)
 
 
+@pytest.mark.parametrize(
+    "spoil",
+    [
+        "g+w-file",
+        "o+w-dir",
+        "foreign-owner",
+        "setuid",
+        "acl",
+        "abs-link",
+        "escaping-link",
+    ],
+)
+def test_admin_ready_checks_the_whole_python_tree(
+    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout, spoil: str
+) -> None:
+    """M-4: `A` applies the install rule to the whole admin Python tree."""
+    digest = ready_world(fl)
+    assert ready(fl, digest)  # positive control
+    tree = fl.layout.admin_python / KEY
+    lib = tree / "lib"
+    lib.mkdir(mode=0o755)
+    target = lib / "os.py"
+    target.write_text("x\n")
+    assert ready(fl, digest)  # a clean extra file is fine
+    if spoil == "g+w-file":
+        target.chmod(0o664)
+    elif spoil == "o+w-dir":
+        lib.chmod(0o757)
+    elif spoil == "foreign-owner":
+        fl.set_owner(target, BUILD_UID)
+    elif spoil == "setuid":
+        target.chmod(0o4755)
+    elif spoil == "acl":
+        real = acl.acl_present_path
+        monkeypatch.setattr(acl, "acl_present_path", lambda p: p == target or real(p))
+    elif spoil == "abs-link":
+        (lib / "l").symlink_to(target)
+    else:
+        (lib / "l").symlink_to("../../..")
+    assert not ready(fl, digest)
+    assert admin.admin_python_problems(fl.layout, PY, PLATFORM)
+
+
+@pytest.mark.parametrize("which", ["admin", "admin_python"])
+def test_admin_ready_refuses_a_link_on_the_chain(fl: FakeLayout, which: str) -> None:
+    """M-5: `A` refuses what the entry refuses — a link on the chain."""
+    lay = fl.layout
+    digest = ready_world(fl)
+    real = getattr(lay, which)
+    moved = real.with_name(real.name + "-real")
+    os.rename(real, moved)
+    os.symlink(moved, real)
+    assert admin.chain_link_problems(real / "x")
+    assert not ready(fl, digest)
+
+
+def test_admin_code_refuses_bytecode_and_install_skips_it(fl: FakeLayout) -> None:
+    """n-5: `__pycache__`/`*.pyc` (casefold) never enter the admin code."""
+    lay = fl.layout
+    ref = devtools_ref(fl)
+    (ref / "df" / "__pycache__").mkdir(exist_ok=True)
+    (ref / "df" / "__pycache__" / "x.cpython-312.pyc").write_bytes(b"\0")
+    (ref / "df" / "Y.PYC").write_bytes(b"\0")
+    install_python(fl)
+    admin.install_admin(lay, ID, devtools_ref=ref)
+    pkg = lay.admin_dir(ID) / "df"
+    assert sorted(p.name for p in pkg.iterdir()) == ["__init__.py"]
+    assert admin.admin_code_problems(lay, ID) == []
+    (pkg / "__pycache__").mkdir()
+    assert admin.admin_code_problems(lay, ID)
+    digest = admin.admin_digest(lay, ID)
+    assert not ready(fl, digest)
+
+
 def test_admin_code_problems_clean_tree(fl: FakeLayout) -> None:
     ready_world(fl)
     assert admin.admin_code_problems(fl.layout, ID) == []

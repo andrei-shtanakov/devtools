@@ -221,8 +221,13 @@ def admin_tree_problems(tree: Path, final: Path) -> list[str]:
     """Problems of an installed admin Python tree, as `"<path>: <reason>"`.
 
     Every object (the root too) is root's and only a file, a directory or a
-    link; no group/other write on non-links; every link is relative and
-    resolves inside the tree, read as if it already were at `final` (F7).
+    link; no group/other write, setuid/setgid or ACL on non-links; every link
+    is relative and resolves inside the tree, read as if it already were at
+    `final` (F7). Measured on uv 0.11.23 macOS arm64 (1804 objects): the only
+    links are the 9 relative aliases uv writes (`bin/python`, `bin/python3`,
+    `bin/2to3`, `bin/idle3`, `bin/pydoc3`, `bin/python3-config`, two in
+    `lib/pkgconfig`, one man page), all inside the tree. Fact `A` applies the
+    same rule to the installed tree (`admin_python_problems`, M-4).
     """
     try:
         st = os.lstat(tree)
@@ -236,6 +241,8 @@ def admin_tree_problems(tree: Path, final: Path) -> list[str]:
             path = Path(dirpath) / name
             st = os.lstat(path)
             problems += _object_problems(path, st)
+            if not stat.S_ISLNK(st.st_mode) and acl.acl_present_path(path):
+                problems.append(f"{path}: есть ACL")
             if stat.S_ISLNK(st.st_mode) and os.readlink(path).startswith("/"):
                 problems.append(f"{path}: абсолютная ссылка {os.readlink(path)!r}")
     problems += [f"{tree}/{p}" for p in check_links(tree, PurePosixPath(final))]
@@ -272,20 +279,63 @@ def admin_digest(layout: Layout, release_id: str) -> str:
     return tree_digest(layout.admin_dir(release_id), exclude=frozenset())
 
 
+def admin_python_problems(
+    layout: Layout, python: str, platform: PlatformName
+) -> list[str]:
+    """Trust of the installed admin Python tree for fact `A` (M-4, M-5).
+
+    The whole `admin-python/<key>` tree by the install rule
+    (`admin_tree_problems`, logical root = the tree itself), and no link on
+    the chain from `/` to the tree (the entry refuses one, so `A` must too).
+    """
+    tree = layout.admin_python / build_mod.python_key(python, platform)
+    return chain_link_problems(tree) + admin_tree_problems(tree, tree)
+
+
+def chain_link_problems(path: Path) -> list[str]:
+    """A link anywhere on `/ … path` (M-5): a v1 limit, the entry refuses it.
+
+    `trusted_path_problems` follows a root-owned link by its text; the entry
+    walks real directories only, so `A` refuses what the entry refuses (a
+    host with `/opt` as a link is not supported in v1).
+    """
+    problems: list[str] = []
+    current = Path("/")
+    for part in path.parts[1:]:
+        current = current / part
+        try:
+            st = os.lstat(current)
+        except (FileNotFoundError, NotADirectoryError):
+            return [*problems, f"{current}: нет"]
+        if stat.S_ISLNK(st.st_mode):
+            problems.append(f"{current}: ссылка на пути (не поддерживается в v1)")
+    return problems
+
+
+def is_bytecode(name: str) -> bool:
+    """`__pycache__` or `*.pyc` (casefold): never part of the admin code (n-5)."""
+    folded = name.casefold()
+    return folded == "__pycache__" or folded.endswith(".pyc")
+
+
 def admin_code_problems(layout: Layout, release_id: str) -> list[str]:
     """Trust of `admin/<id>` (I-1): what root imports nobody else may write.
 
-    The chain from `/` to `admin/<id>` passes `trusted_path_problems` (ACLs
-    included); every object inside is a directory or a regular file (never a
-    link: `install_admin` copies none), root's, without group or other write
-    and setuid/setgid bits (`_object_problems`), and carries no ACL. A
-    vanished object is a `TreeError`; any other `OSError` propagates.
+    No link on the chain from `/` to `admin/<id>` (M-5) and the chain passes
+    `trusted_path_problems` (ACLs included); every object inside is a
+    directory or a regular file (never a link: `install_admin` copies none),
+    never bytecode (`is_bytecode`: under `-B` a `.pyc` is still read, n-5),
+    root's, without group or other write and setuid/setgid bits
+    (`_object_problems`), and carries no ACL. A vanished object is a
+    `TreeError`; any other `OSError` propagates.
     """
     admin = layout.admin_dir(release_id)
-    problems = list(plat.trusted_path_problems(admin))
+    problems = chain_link_problems(admin) + list(plat.trusted_path_problems(admin))
     for dirpath, dirs, files in os.walk(admin, onerror=_raise_tree):
         for name in sorted([*dirs, *files]):
             path = Path(dirpath) / name
+            if is_bytecode(name):
+                problems.append(f"{path}: байт-код в административном коде")
             st = _tree_lstat(path)
             if stat.S_ISLNK(st.st_mode):
                 problems.append(f"{path}: ссылка в административном коде")
@@ -352,6 +402,8 @@ def _copy_dir(src: Path, dst: Path) -> None:
         listing = sorted(entries, key=lambda e: e.name)
     for entry in listing:
         path = Path(entry.path)
+        if is_bytecode(entry.name):
+            continue  # sources at the pin only (n-5)
         if entry.is_symlink():
             raise StepFailed(_STEP, f"{path}: ссылка в административном коде")
         if entry.is_dir(follow_symlinks=False):
@@ -397,7 +449,9 @@ def admin_ready(
     `trusted_path_problems`, every object in it is root's, without group or
     other write, setuid/setgid or an ACL, and nothing in it is a link — I-1),
     and the admin Python of exactly `expected_python` is a regular file (by
-    `lstat`) whose path passes `trusted_path_problems`. Both values come from
+    `lstat`) whose path passes `trusted_path_problems`, and whose whole tree
+    passes `admin_python_problems` (M-4: per object, as at install; no link on
+    the chain, M-5). Both values come from
     the caller's one source (the mark, or the registry entry); nothing else
     is read. A tree the digest refuses is not ready; any other `OSError` is
     `StepFailed("facts")` (F12).
@@ -421,7 +475,16 @@ def admin_ready(
         return False
     except OSError as exc:
         raise StepFailed(_FACTS_STEP, f"{interpreter}: {exc}") from exc
-    return stat.S_ISREG(st.st_mode) and not plat.trusted_path_problems(interpreter)
+    if not stat.S_ISREG(st.st_mode) or plat.trusted_path_problems(interpreter):
+        return False
+    try:
+        return not admin_python_problems(
+            layout, expected_python, plat.detect_platform()
+        )
+    except (TreeError, FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError as exc:
+        raise StepFailed(_FACTS_STEP, f"{interpreter}: {exc}") from exc
 
 
 # ---------- the command ----------
