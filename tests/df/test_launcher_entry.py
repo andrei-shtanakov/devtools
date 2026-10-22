@@ -771,6 +771,7 @@ def test_entry_lock_creates_no_directory(tmp_path: Path, missing: str) -> None:
     )
     got = _outcome(lambda: _entry_lock(lay))
     assert got[:2] == ("refused", "lock")
+    assert got[2].endswith("каталога установки нет: восстановление через bootstrap")
     assert not lay.install_dir.exists()
 
 

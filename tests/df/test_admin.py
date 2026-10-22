@@ -16,10 +16,9 @@ import os
 import shutil
 import stat
 import subprocess
-import sys
 import tarfile
 import threading
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -579,24 +578,24 @@ def test_admin_ready_true_on_installed_env(fl: FakeLayout) -> None:
     assert ready(fl, ready_world(fl))
 
 
-_OPENED: list[list[str]] = []
-
-
-def _audit(event: str, args: tuple[object, ...]) -> None:
-    if _OPENED and event == "open":
-        _OPENED[-1].append(str(args[0]))
-
-
-sys.addaudithook(_audit)
-
-
 @pytest.fixture()
-def opened() -> Iterator[list[str]]:
-    _OPENED.append([])
-    try:
-        yield _OPENED[-1]
-    finally:
-        _OPENED.pop()
+def opened(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Paths opened during the test, via `os.open` and `io.open`/`open`."""
+    seen: list[str] = []
+    real_os_open, real_io_open = os.open, io.open
+
+    def spy_os_open(path: object, *a: object, **kw: object) -> int:
+        seen.append(str(path))
+        return real_os_open(path, *a, **kw)  # type: ignore[arg-type]
+
+    def spy_io_open(file: object, *a: object, **kw: object) -> object:
+        seen.append(str(file))
+        return real_io_open(file, *a, **kw)  # type: ignore[arg-type, call-overload]
+
+    monkeypatch.setattr(os, "open", spy_os_open)
+    monkeypatch.setattr(io, "open", spy_io_open)
+    monkeypatch.setattr("builtins.open", spy_io_open)
+    return seen
 
 
 def test_admin_ready_uses_passed_digest_only(fl: FakeLayout, opened: list[str]) -> None:

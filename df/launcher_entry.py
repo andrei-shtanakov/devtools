@@ -74,6 +74,7 @@ _NO_PYTHON = (
 #: The interpreter running the entry (`bin/darkfactory` names the admin one).
 _EXECUTABLE = sys.executable
 _UNTRUSTED = "административный код не защищён от записи: восстановление через bootstrap"
+_NO_INSTALL_DIR = "каталога установки нет: восстановление через bootstrap"
 
 
 def entry_text(layout: Layout) -> str:
@@ -682,6 +683,9 @@ def _step_open(path: Path, opener: Callable[[], int]) -> int:
     try:
         fd = opener()
     except OSError as exc:
+        if exc.errno == errno.ENOENT:
+            # spec 3.9 item 1: the entry creates no directories
+            raise Refused("lock", f"{path}: {_NO_INSTALL_DIR}") from exc
         raise Refused("lock", f"{path}: {_why(exc)}") from exc
     try:
         _require_trusted_dir(fd, path)
