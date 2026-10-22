@@ -68,34 +68,45 @@ _LINE_BREAKS = frozenset("\u2028\u2029")
 #: Rule of a startup file: must exist, must not exist (`absent`: CPython lists
 #: it, (ж) accepts it only absent), refused, or checked by a named rule.
 StartupRule = Literal["required", "absent", "refused", "rule"]
+#: Type of an allowed or required entry, read by `lstat` (a link is never a
+#: file or a directory); `entry` is a regular file or a link.
+EntryKind = Literal["file", "dir", "link", "entry", "any"]
 
 
 @dataclass(frozen=True)
 class StartupFile:
     """A path CPython 3.12 reads at start that changes `sys.path` or runs code.
 
-    `where` is a directory template (`{venv}` = `venv/<r>`, `{py}` =
-    `python/<key>`, `{stdlib}` = `{py}/lib/python3.X`, `{minor}` = X);
-    `name` is compared by `casefold` (`*<suffix>` — any name with the
-    suffix; `required` — exact case); `reader` says who reads it and when.
+    `where` is a directory template relative to the release (`.` = its root,
+    `{venv}` = `venv/<r>`, `{py}` = `python/<key>`, `{stdlib}` =
+    `{py}/lib/python3.X`, `{minor}` = X); `name` is compared by `casefold`
+    (`*<suffix>` — any name with the suffix; `required` — exact case and the
+    type `kind`); `reader` says who reads it and when.
     """
 
     where: str
     name: str
     reader: str
     rule: StartupRule
+    kind: EntryKind = "any"
 
 
-#: Every startup-read path we know of (getpath and site.py of CPython 3.12,
-#: probes on uv 0.11.23's managed CPython 3.12.13, 22.10). Beyond these, the
-#: interpreter's own files (`site.py`, the stdlib) are not verified (§3.5,
-#: origin of the interpreter): (ж) cannot prove there is no startup code there.
+#: Every startup-read path the walk can reach inside the release (getpath and
+#: site.py of CPython 3.12, probes on uv 0.11.23's managed CPython 3.12.13,
+#: 22.10). getpath's prefix search (`search_up` for `lib/python3XY.zip`, then
+#: `lib/python3.X/os.py`, and `lib/python3.X/lib-dynload` for exec_prefix)
+#: starts at `home` and walks up to `/`; inside the release every directory on
+#: that chain has an allowlisted listing (`CHAIN_DIRS`), above it the ancestors
+#: are root's. Beyond these, the interpreter's own files (`site.py`, the
+#: stdlib) are not verified (§3.5, origin of the interpreter): (ж) cannot
+#: prove there is no startup code there.
 STARTUP_FILES: tuple[StartupFile, ...] = (
     StartupFile(
         "{venv}",
         "pyvenv.cfg",
         "getpath (первый `home`) и site.py (последние значения); правило (б)",
         "required",
+        "file",
     ),
     StartupFile(
         "{venv}/bin",
@@ -137,17 +148,46 @@ STARTUP_FILES: tuple[StartupFile, ...] = (
     StartupFile(
         "{py}/bin",
         "lib",
-        "getpath: поиск prefix по `lib/python3.X/os.py` начинается с `home`",
+        "getpath: поиск prefix (`search_up`) начинается с `home`",
         "refused",
     ),
     StartupFile(
-        "{stdlib}", "os.py", "getpath: STDLIB_LANDMARK, задаёт prefix", "required"
+        "python",
+        "lib",
+        "getpath: `search_up` от `home` — `python/lib/python3XY.zip`, stdlib (проба)",
+        "refused",
+    ),
+    StartupFile(
+        ".",
+        "lib",
+        "getpath: `search_up` от `home` — `<релиз>/lib/python3XY.zip` (проба)",
+        "refused",
+    ),
+    StartupFile(
+        "{py}/lib",
+        "lib",
+        "getpath: при известной libpython (Linux) `search_up` от её каталога",
+        "refused",
+    ),
+    StartupFile(
+        "{stdlib}",
+        "os.py",
+        "getpath: STDLIB_LANDMARK, задаёт prefix",
+        "required",
+        "file",
     ),
     StartupFile(
         "{stdlib}",
         "lib-dynload",
         "getpath: PLATSTDLIB_LANDMARK, в sys.path",
         "required",
+        "dir",
+    ),
+    StartupFile(
+        "цепочка `search_up` в релизе",
+        "*",
+        "getpath: каждый каталог от `home` до корня релиза — белый список `CHAIN_DIRS`",
+        "rule",
     ),
     StartupFile(
         "{venv}/lib/python3.{minor}/site-packages",
@@ -161,12 +201,19 @@ STARTUP_FILES: tuple[StartupFile, ...] = (
         "site.py импортирует при старте; правило (ё)",
         "rule",
     ),
+    StartupFile(
+        "каталоги sys.path",
+        "usercustomize",
+        "site.py — только при ENABLE_USER_SITE; выключен (б), проверен (ж)",
+        "rule",
+    ),
 )
 
 
 def base_bin_names(minor: str) -> frozenset[str]:
     """Names in `python/<key>/bin` of uv 0.11.23's managed CPython 3.X
-    (measured 22.10); anything else there is refused."""
+    (measured 22.10 on macOS arm64 and Linux x86_64); anything else there is
+    refused."""
     v = f"3.{minor}"
     return frozenset(
         {
@@ -175,6 +222,39 @@ def base_bin_names(minor: str) -> frozenset[str]:
             *(f"python{v}", f"python{v}-config"),
         }
     )
+
+
+def chain_dirs(env: EnvPaths) -> dict[PurePosixPath, dict[str, EntryKind]]:
+    """Allowlisted listing of every release directory on getpath's
+    `search_up` chain from `home` (`python/<key>/bin`) to the release root
+    (the minor alias resolves to the same key dir). Measured on the sample
+    release (uv 0.11.23, 22.10); the release root holds what the build and
+    `register` write (`src`, `venv`, `python`, `release.json`)."""
+    triple = env.python.name.split("-", 2)[2]
+    alias = f"cpython-3.{env.minor}-{triple}"
+    return {
+        env.py_bin: dict.fromkeys(base_bin_names(env.minor), "entry"),
+        env.python: {
+            "bin": "dir",
+            "BUILD": "file",
+            "include": "dir",
+            "lib": "dir",
+            "share": "dir",
+        },
+        PurePosixPath("python"): {
+            env.python.name: "dir",
+            alias: "link",
+            ".lock": "file",
+            ".temp": "dir",
+            ".gitignore": "file",
+        },
+        PurePosixPath("."): {
+            "src": "dir",
+            "venv": "dir",
+            "python": "dir",
+            "release.json": "file",
+        },
+    }
 
 
 #: Flags of the two (ж) runs: `-P` keeps the cwd (`build_home`, writable by
@@ -493,17 +573,17 @@ def _python_tree_problems(release_dir: Path, env: EnvPaths) -> list[str]:
             str(directory), lambda d=directory: _sitecustomize(release_dir, d)
         )
     problems += _startup_problems(release_dir, env, per_env=False)
-    return problems + _guard(str(env.py_bin), lambda: _base_bin(release_dir, env))
+    for directory, allowed in chain_dirs(env).items():
+        problems += _guard(
+            str(directory),
+            lambda d=directory, a=allowed: _chain_listing(release_dir, env, d, a),
+        )
+    return problems
 
 
 def _startup_problems(release_dir: Path, env: EnvPaths, *, per_env: bool) -> list[str]:
     """`STARTUP_FILES` of one environment (`per_env`) or of the shared Python."""
-    values = {
-        "venv": f"venv/{env.repo}",
-        "py": str(env.python),
-        "stdlib": str(env.stdlib),
-        "minor": env.minor,
-    }
+    values = _template_values(env)
     problems: list[str] = []
     for entry in STARTUP_FILES:
         if entry.rule == "rule" or ("{venv}" in entry.where) != per_env:
@@ -516,13 +596,25 @@ def _startup_problems(release_dir: Path, env: EnvPaths, *, per_env: bool) -> lis
     return problems
 
 
+def _template_values(env: EnvPaths) -> dict[str, str]:
+    return {
+        "venv": f"venv/{env.repo}",
+        "py": str(env.python),
+        "stdlib": str(env.stdlib),
+        "minor": env.minor,
+    }
+
+
 def _startup(
     release_dir: Path, entry: StartupFile, where: PurePosixPath, name: str
 ) -> list[str]:
     if entry.rule == "required":
-        if select_names(release_dir / where, exact=name):
-            return []
-        return [f"{where / name}: нет ({entry.reader})"]
+        found = select_names(release_dir / where, exact=name)
+        if not found:
+            return [f"{where / name}: нет ({entry.reader})"]
+        if not _has_kind(found[0], entry.kind):
+            return [f"{where / name}: ожидался тип {entry.kind} ({entry.reader})"]
+        return []
     return [
         f"{where / p.name}: запрещён ({name}) — {entry.reader}"
         for p in _startup_matches(release_dir / where, name)
@@ -535,20 +627,52 @@ def _startup_matches(directory: Path, name: str) -> list[Path]:
     return select_names(directory, exact=name, strict=False)
 
 
-def _base_bin(release_dir: Path, env: EnvPaths) -> list[str]:
-    """F2 of review round 1: `python/<key>/bin` holds only the measured names;
-    a name a `STARTUP_FILES` entry already refuses is not reported twice."""
-    allowed = base_bin_names(env.minor)
-    refused = {
-        e.name.format(minor=env.minor)
+def _chain_listing(
+    release_dir: Path,
+    env: EnvPaths,
+    directory: PurePosixPath,
+    allowed: Mapping[str, EntryKind],
+) -> list[str]:
+    """Review round 2: one directory of the `search_up` chain holds only its
+    allowlisted names, each of its type; the minor alias resolves to the key
+    dir. A name a `STARTUP_FILES` row already refuses is not reported twice."""
+    refused = _refused_patterns(env, directory)
+    problems: list[str] = []
+    for path in select_names(release_dir / directory):
+        rel = directory / path.name
+        kind = allowed.get(path.name)
+        if kind is None:
+            if not any(_startup_hit(path.name, r) for r in refused):
+                problems.append(f"{rel}: вне белого списка цепочки поиска getpath")
+        elif not _has_kind(path, kind):
+            problems.append(f"{rel}: ожидался тип {kind}")
+        elif kind == "link" and directory == PurePosixPath("python"):
+            target = resolve_in_tree(release_dir, str(release_dir), rel)
+            if target != env.python:
+                problems.append(f"{rel}: ведёт в {target}, а не в {env.python}")
+    return problems
+
+
+def _refused_patterns(env: EnvPaths, directory: PurePosixPath) -> set[str]:
+    values = _template_values(env)
+    return {
+        e.name.format(**values)
         for e in STARTUP_FILES
-        if e.where == "{py}/bin" and e.rule != "required"
+        if e.rule in ("refused", "absent")
+        and "{venv}" not in e.where
+        and PurePosixPath(e.where.format(**values)) == directory
     }
-    return [
-        f"{env.py_bin / p.name}: не из раскладки управляемого Python uv"
-        for p in select_names(release_dir / env.py_bin)
-        if p.name not in allowed and not any(_startup_hit(p.name, r) for r in refused)
-    ]
+
+
+def _has_kind(path: Path, kind: EntryKind) -> bool:
+    mode = os.lstat(path).st_mode
+    return {
+        "file": stat.S_ISREG(mode),
+        "dir": stat.S_ISDIR(mode),
+        "link": stat.S_ISLNK(mode),
+        "entry": stat.S_ISREG(mode) or stat.S_ISLNK(mode),
+        "any": True,
+    }[kind]
 
 
 def _startup_hit(name: str, pattern: str) -> bool:

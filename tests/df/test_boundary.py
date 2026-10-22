@@ -666,6 +666,22 @@ def test_startup_table_names_the_probed_build_markers() -> None:
     assert ("{py}/bin", "modules", "refused") in names
     assert ("{venv}/bin", "pyvenv.cfg", "refused") in names
     assert ("{py}/lib", "python3{minor}.zip", "absent") in names
+    for where in ("{py}/bin", "{py}/lib", "python", "."):  # the search_up walk
+        assert (where, "lib", "refused") in names
+
+
+@pytest.mark.parametrize("where", ["", "python"])
+def test_prefix_walk_out_of_the_key_dir_refused(
+    tmp_path: Path, deps: dict[Path, LibDeps], where: str
+) -> None:
+    """Review round 2, N1 as probed: `lib/python312.zip` plus a stdlib with
+    `sitecustomize` at `python/` or the release root moved `sys.base_prefix`
+    there and ran under `-I`."""
+    rel = make_release(tmp_path)
+    lib = rel / where / "lib"
+    _write(lib / "python312.zip", b"", 0o644)
+    _write(lib / "python3.12" / "sitecustomize.py", b"print('EVIL')\n", 0o644)
+    only(problems(rel), f"{where + '/' if where else ''}lib: запрещён")
 
 
 @pytest.mark.parametrize("name", ["os.py", "lib-dynload"])
@@ -689,7 +705,126 @@ def test_base_bin_allowlist(tmp_path: Path, deps: dict[Path, LibDeps]) -> None:
             _write(bin_dir / name, b"#!/bin/sh\n")
     assert problems(rel) == []
     _write(bin_dir / "python3.12-gdb.py", b"", 0o644)
-    only(problems(rel), "bin/python3.12-gdb.py", "не из раскладки")
+    only(problems(rel), "bin/python3.12-gdb.py", "вне белого списка")
+
+
+CHAIN = {
+    ".": "",
+    "python": "python",
+    "key": f"python/{KEY}",
+    "bin": f"python/{KEY}/bin",
+}
+#: A name that matches an allowed one only by case, per chain directory.
+CASE_TWIN = {".": "Release.json", "python": ".Lock", "key": "Include", "bin": "PIP"}
+
+
+def _plant_kind(path: Path, form: str, rel: Path) -> None:
+    if form == "file":
+        _write(path, b"x", 0o644)
+    elif form == "dir":
+        path.mkdir()
+    else:  # link to an in-tree directory
+        os.symlink(f"{rel}/venv", path)
+
+
+def test_chain_layout_as_measured_passes(
+    tmp_path: Path, deps: dict[Path, LibDeps]
+) -> None:
+    """Every allowlisted name of the measured sample release, of its type."""
+    rel = make_release(tmp_path)
+    (rel / "src").mkdir()
+    _write(rel / "release.json", b"{}", 0o644)
+    for name, data in ((".lock", b""), (".gitignore", b"*")):
+        _write(rel / "python" / name, data, 0o666)
+    (rel / "python" / ".temp").mkdir()
+    for name in ("include", "share"):
+        (rel / "python" / KEY / name).mkdir()
+    _write(rel / "python" / KEY / "BUILD", b"20260611", 0o644)
+    assert problems(rel) == []
+
+
+@pytest.mark.parametrize("where", list(CHAIN))
+@pytest.mark.parametrize("form", ["file", "dir", "link", "case"])
+def test_chain_listing_refuses_anything_else(
+    tmp_path: Path, deps: dict[Path, LibDeps], where: str, form: str
+) -> None:
+    """Review round 2, N1: each directory getpath's `search_up` walks inside
+    the release (`home` → key dir → `python/` → release root) holds only its
+    allowlist; a foreign name in any form, or a case twin, is refused."""
+    rel = make_release(tmp_path)
+    directory = rel / CHAIN[where]
+    name = CASE_TWIN[where] if form == "case" else "stray"
+    _plant_kind(directory / name, "file" if form == "case" else form, rel)
+    only(problems(rel), f"{name}: вне белого списка")
+
+
+@pytest.mark.parametrize(
+    "path,form",
+    [
+        ("src", "file"),
+        ("venv-link", "link"),
+        ("python/.temp", "file"),
+        (f"python/{KEY}/BUILD", "dir"),
+        (f"python/{KEY}/share", "file"),
+        (f"python/{KEY}/bin/pip", "dir"),
+    ],
+)
+def test_chain_listing_fixes_each_type(
+    tmp_path: Path, deps: dict[Path, LibDeps], path: str, form: str
+) -> None:
+    rel = make_release(tmp_path)
+    if path == "venv-link":  # the release root's `venv` replaced by a link
+        os.rename(rel / "venv", rel / "venv.real")
+        os.symlink(f"{rel}/venv.real", rel / "venv")
+        found = problems(rel)
+        assert any(p.startswith("venv: ожидался тип dir") for p in found), found
+        return
+    _plant_kind(rel / path, form, rel)
+    found = problems(rel)
+    assert any(p.startswith(f"{path}: ожидался тип") for p in found), found
+
+
+@pytest.mark.parametrize("target", ["bin", "lib"])
+def test_minor_alias_must_resolve_to_the_key_dir(
+    tmp_path: Path, deps: dict[Path, LibDeps], target: str
+) -> None:
+    """The venv names the key dir directly here, so only the alias rule sees it."""
+    rel = make_release(tmp_path)
+    home = f"{rel}/python/{KEY}/bin"
+    (rel / "venv/r1/pyvenv.cfg").write_text(PYVENV.format(home=home, repo="r1"))
+    (rel / "venv/r1/bin/python").unlink()
+    os.symlink(f"{home}/python3.12", rel / "venv/r1/bin/python")
+    assert problems(rel) == []
+    alias = rel / "python" / ALIAS
+    alias.unlink()
+    os.symlink(f"{rel}/python/{KEY}/{target}", alias)
+    found = problems(rel)
+    assert any(f"python/{ALIAS}: ведёт в" in p for p in found), found
+
+
+@pytest.mark.parametrize(
+    "landmark,form", [("os.py", "dir"), ("os.py", "link"), ("lib-dynload", "link")]
+)
+def test_required_landmark_type(
+    tmp_path: Path, deps: dict[Path, LibDeps], landmark: str, form: str
+) -> None:
+    """Review round 2, N2: getpath tests `isfile(os.py)`/`isdir(lib-dynload)`;
+    a wrong type lets its search fall through, so the type is checked."""
+    rel = make_release(tmp_path)
+    path = rel / "python" / KEY / "lib/python3.12" / landmark
+    moved = path.with_name(f"{landmark}.real")
+    os.rename(path, moved)
+    if form == "dir":
+        path.mkdir()
+    else:
+        os.symlink(moved.name, path)
+    found = problems(rel)
+    assert any(f"{landmark}: ожидался тип" in p for p in found), found
+
+
+def test_usercustomize_is_a_reference_row() -> None:
+    rows = [e for e in boundary.STARTUP_FILES if e.name == "usercustomize"]
+    assert [e.rule for e in rows] == ["rule"] and "ENABLE_USER_SITE" in rows[0].reader
 
 
 PTH_PLACES: Mapping[str, str] = {
