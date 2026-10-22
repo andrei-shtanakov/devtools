@@ -3606,8 +3606,8 @@ def test_admin_python_on_real_host(root_world): ...
   В `TODO.md` — пункт `@id:df-installer-stage1-live`: «живая установка профиля `core` на
   macOS arm64 и Ubuntu x86_64; проверка совместимости пинов и lock-файлов (`uv sync
   --locked` каждого члена на его SHA); закрывает приёмку этапа 1 по §10»,
-  `@blocked_by:todo://ai-orchestrators-workspace/df-manifest-profiles` (и исправление
-  disputatio#159 — без него проверка переноса отказывает на `disp --help`). Там же — пункт
+  `@blocked_by:todo://ai-orchestrators-workspace/df-manifest-profiles` (disputatio#159
+  решён disputatio#160, 920b63f; пин disputatio в `core` — 920b63f или позже). Там же — пункт
   с `@trigger` на смену закреплённой версии `uv`: перепроверить замером
   `UV_PROJECT_KEYS_<версия>` (дополнение A1/A2 предполётной проверки Task 7a) и таблицу
   записи пути корня в `tests/df/fixtures/locks/SOURCES.md`, переименовать константу под
