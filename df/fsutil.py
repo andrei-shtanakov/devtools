@@ -37,6 +37,15 @@ class SyncNote(enum.Enum):
     FULLFSYNC_UNSUPPORTED = "fullfsync-unsupported"
 
 
+def owner_uid(st: os.stat_result) -> int:
+    """Owner of a stat result: the one seam every owner decision reads.
+
+    Tests replace this function to model root and `df-build` while running
+    as one user; production reads `st_uid`.
+    """
+    return st.st_uid
+
+
 def fault_point(kind: FaultKind, path: Path) -> None:
     """Window "visible, not yet durable"; tests replace this function."""
 

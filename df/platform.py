@@ -925,8 +925,8 @@ def _home_problems(account: Account, home: Path) -> list[str]:
     if not stat.S_ISDIR(st.st_mode):
         return [f"домашний каталог {home}: не каталог"]
     problems: list[str] = []
-    if st.st_uid != account.uid:
-        problems.append(f"домашний каталог {home}: владелец uid {st.st_uid}")
+    if fsutil.owner_uid(st) != account.uid:
+        problems.append(f"домашний каталог {home}: владелец uid {fsutil.owner_uid(st)}")
     if stat.S_IMODE(st.st_mode) != 0o700:
         problems.append(f"домашний каталог {home}: {stat.S_IMODE(st.st_mode):04o}")
     return problems
@@ -1083,7 +1083,7 @@ def _home_absent(layout: Layout, account: Account) -> bool:
         return True
     if (
         not stat.S_ISDIR(st.st_mode)
-        or st.st_uid != account.uid
+        or fsutil.owner_uid(st) != account.uid
         or stat.S_IMODE(st.st_mode) != 0o700
     ):
         raise StepFailed(
@@ -1106,7 +1106,10 @@ def _clear_reserved(parent: Path, account: Account) -> None:
             st = os.stat(HOME_TMP_NAME, dir_fd=parent_fd, follow_symlinks=False)
         except FileNotFoundError:
             return
-        if not stat.S_ISDIR(st.st_mode) or st.st_uid not in (ROOT_UID, account.uid):
+        if not stat.S_ISDIR(st.st_mode) or fsutil.owner_uid(st) not in (
+            ROOT_UID,
+            account.uid,
+        ):
             raise StepFailed(
                 "build-user", f"каталог {path} существует, создан не darkfactory"
             )
@@ -1688,8 +1691,8 @@ def _component(path: Path) -> tuple[os.stat_result, list[str]] | None:
     except OSError:
         return None
     problems: list[str] = []
-    if st.st_uid != ROOT_UID:
-        problems.append(f"{path}: владелец uid {st.st_uid}, не root")
+    if fsutil.owner_uid(st) != ROOT_UID:
+        problems.append(f"{path}: владелец uid {fsutil.owner_uid(st)}, не root")
     if not stat.S_ISLNK(st.st_mode) and st.st_mode & _NO_WRITE_OTHERS:
         problems.append(f"{path}: запись для группы или всех")
     try:

@@ -32,10 +32,11 @@ from df.config import (
     dump_pending,
     dump_releases,
 )
-from df.digest import tree_digest
+from df.digest import TreeError, tree_digest
 from df.journal import StepFailed, journal_event
 from df.paths import Layout
 from df.platform import RunResult
+from df.receive import remove_own_tree
 from tests.df.conftest import FakeLayout
 
 ID = "rel1"
@@ -632,8 +633,11 @@ def test_settle_on_acquire_syncs_acquire_paths(
     lay.staging_dir(ID).mkdir()
     calls = synced(monkeypatch)
     settle_on_acquire(lay)
-    existing = [p for p in acquire_paths(lay, ID) if p.is_dir()]
+    existing = [
+        p for p in acquire_paths(lay, ID) if p.is_dir() and p != lay.install_dir
+    ]
     assert calls == [lay.install_dir, *existing]
+    assert calls.count(lay.install_dir) == 1  # synced once (review minor 8)
     assert lay.build_home.parent in calls  # account home (S1-R6-N1, F22)
     assert lay.release_dir(ID) in calls and lay.staging_dir(ID) in calls
     order = acquire_paths(lay, ID)
@@ -651,7 +655,7 @@ def test_settle_on_acquire_without_pending_skips_id_paths(
     assert lay.release_dir(ID) not in calls and lay.staging_dir(ID) not in calls
     assert calls == [
         lay.install_dir,
-        *[p for p in acquire_paths(lay, None) if p.is_dir()],
+        *[p for p in acquire_paths(lay, None) if p.is_dir() and p != lay.install_dir],
     ]
 
 
@@ -669,7 +673,7 @@ def test_settle_on_acquire_with_bad_pending(
     settle_on_acquire(lay)
     assert calls == [
         lay.install_dir,
-        *[p for p in acquire_paths(lay, None) if p.is_dir()],
+        *[p for p in acquire_paths(lay, None) if p.is_dir() and p != lay.install_dir],
     ]
 
 
@@ -692,3 +696,80 @@ def test_mark_dataclass_field_order() -> None:
         "admin_python",
         "uv_version_declared",
     ]
+
+
+# ---------- one owner seam (fix round 1) ----------
+
+
+def test_remove_own_tree_refuses_builder_tree_under_fake(fl: FakeLayout) -> None:
+    """The virtual owner reaches `receive` too: a route sending a builder tree to
+    `remove_own_tree` fails in tests as it would in production."""
+    tree = fl.builder_dir(fl.layout.release_dir(ID))
+    with pytest.raises(TreeError, match="not root"):
+        remove_own_tree(fl.layout.releases, ID)
+    assert tree.is_dir()
+    fl.set_owner(tree, os.getuid())  # root's again
+    remove_own_tree(fl.layout.releases, ID)
+    assert not tree.exists()
+
+
+def test_every_owner_decision_reads_the_seam() -> None:
+    """Class guard: no df module reads `st_uid` but `fsutil.owner_uid`."""
+    df_dir = Path(__file__).resolve().parents[2] / "df"
+    readers = sorted(
+        p.name for p in df_dir.glob("*.py") if "st_uid" in p.read_text(encoding="utf-8")
+    )
+    assert readers == ["fsutil.py"]
+
+
+@pytest.mark.parametrize("how", ["rmdir", "unlink"])
+def test_virtual_owner_does_not_survive_removal(fl: FakeLayout, how: str) -> None:
+    """Review minor 5: a reused inode never inherits a stale `df-build` owner."""
+    path = fl.layout.release_dir(ID)
+    if how == "rmdir":
+        fl.builder_dir(path)
+        os.rmdir(path)
+    else:
+        path.write_text("x")
+        fl.set_owner(path, fl.build_uid)
+        path.unlink()
+    assert fl.owners == {}
+    fl.set_owner(fl.layout.admin, fl.build_uid)  # an entry on a live dir
+    path.mkdir(mode=0o700)
+    assert fsutil.owner_uid(os.lstat(path)) == os.getuid()
+    assert facts(fl).r == "root-700"
+
+
+def test_new_dir_drops_a_stale_entry(fl: FakeLayout) -> None:
+    path = fl.layout.release_dir(ID)
+    path.mkdir()
+    st = os.lstat(path)
+    os.rmdir(path)
+    fl.owners[(st.st_dev, st.st_ino)] = fl.build_uid  # stale, as after a cleaner
+    os.mkdir(path)
+    new = os.lstat(path)
+    assert (new.st_dev, new.st_ino) not in fl.owners
+
+
+def test_digest_io_error_stops_not_cleans(
+    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout
+) -> None:
+    """Review minor 4: `OSError` while digesting is `StepFailed("facts")`
+    (fail-closed); a `TreeError` reads as "differs"."""
+    pending(fl)
+    digest = root_tree(fl)
+    write_mark(fl.layout, ID, mark("copied", tree_digest=digest))
+
+    def unreadable(tree: Path) -> str:
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr(accept, "tree_digest", unreadable)
+    with pytest.raises(StepFailed) as exc:
+        facts(fl)
+    assert exc.value.step == "facts"
+
+    def refused(tree: Path) -> str:
+        raise TreeError("bad name")
+
+    monkeypatch.setattr(accept, "tree_digest", refused)
+    assert not facts(fl).full

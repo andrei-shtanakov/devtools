@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from df import fsutil
 from df.fsutil import sync_dir, sync_file, write_atomic
 from df.paths import Layout
 
@@ -151,7 +152,7 @@ def _step_open(path: Path, opener: Callable[[], int]) -> int:
 
 def _require_trusted_dir(fd: int, path: Path) -> None:
     st = os.fstat(fd)
-    if st.st_uid not in (ROOT_UID, os.geteuid()):
+    if fsutil.owner_uid(st) not in (ROOT_UID, os.geteuid()):
         raise StepFailed("lock", f"{path}: не доверенный каталог (владелец)")
     if st.st_mode & _NO_WRITE_OTHERS:
         raise StepFailed("lock", f"{path}: не доверенный каталог (права)")
@@ -230,7 +231,7 @@ def _file_problem(
         return "не обычный файл"
     if not writer:
         return None
-    if st.st_uid != os.geteuid():
+    if fsutil.owner_uid(st) != os.geteuid():
         return "владелец не текущий пользователь"
     if st.st_nlink != 1:
         return "несколько жёстких ссылок"

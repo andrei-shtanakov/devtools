@@ -5,7 +5,7 @@ table from disk, makes their sources durable before every classification
 (`settle`) and runs the loop `settle -> read -> classify -> action -> check`
 (`drive`). Actions are injected: `drive` is their only executor.
 
-Ownership is read through one seam, `owner_uid`, so a test can model root and
+Ownership is read through one seam, `fsutil.owner_uid`, so a test can model root and
 `df-build` while running as one user. Root never opens a tree of `df-build`:
 its emptiness is decided by `df-build` itself (`builder_tree_nonempty`).
 """
@@ -225,11 +225,6 @@ def classify(facts: Facts) -> str:
     return table.classify(facts.table())
 
 
-def owner_uid(st: os.stat_result) -> int:
-    """Owner of a stat result; the one seam tests use to model owners."""
-    return st.st_uid
-
-
 def builder_tree_nonempty(layout: Layout, path: Path) -> bool:
     """`df-build` decides whether its tree is empty; root never opens it.
 
@@ -270,7 +265,7 @@ def root_state(layout: Layout, release_id: str, *, build_uid: int) -> RootState:
         return "absent"
     if not stat.S_ISDIR(st.st_mode):
         raise StepFailed("facts", f"{path}: не каталог")
-    owner = owner_uid(st)
+    owner = fsutil.owner_uid(st)
     if owner == ROOT_UID:
         mode = stat.S_IMODE(st.st_mode)
         return {0o700: "root-700", 0o755: "root-755"}.get(mode, "root-x")
@@ -351,10 +346,15 @@ def _registry_entry(layout: Layout, release_id: str) -> ReleaseEntry | None:
 
 
 def _digest_equals(tree: Path, expected: str) -> bool:
+    """A tree the digest refuses (`TreeError`: its content) differs; an
+    `OSError` reading it is not a fact of the table: `StepFailed("facts")`,
+    a human decides (fail-closed, no cleanup on an I/O error)."""
     try:
         return tree_digest(tree) == expected
     except TreeError:
         return False
+    except OSError as exc:
+        raise StepFailed("facts", f"{tree}: не читается: {exc}") from exc
 
 
 def _current_is(layout: Layout, release_id: str) -> bool:
@@ -386,7 +386,7 @@ def _release_root(layout: Layout, release_id: str | None) -> tuple[Path, ...]:
         st = os.stat(path, follow_symlinks=False)
     except FileNotFoundError:
         return ()
-    root_dir = stat.S_ISDIR(st.st_mode) and owner_uid(st) == ROOT_UID
+    root_dir = stat.S_ISDIR(st.st_mode) and fsutil.owner_uid(st) == ROOT_UID
     return (path,) if root_dir else ()
 
 
@@ -465,12 +465,13 @@ def settle_on_acquire(layout: Layout) -> None:
     """Settle at lock acquisition (spec 3.3); the caller holds `writer_lock`.
 
     The install directory first, then the id of `pending.toml` (read after it
-    is durable), then every `acquire_paths` directory. An unreadable
+    is durable), then every other `acquire_paths` directory. An unreadable
     `pending.toml` or id settles only id-independent paths (F33): the
     snapshot and `recover_pending` report it.
     """
     _sync_existing((layout.install_dir,))
-    _sync_existing(acquire_paths(layout, _pending_id(layout)))
+    rest = acquire_paths(layout, _pending_id(layout))
+    _sync_existing(tuple(p for p in rest if p != layout.install_dir))
 
 
 def _pending_id(layout: Layout) -> str | None:
@@ -511,8 +512,13 @@ def drive(
 
     try:
         _drive(layout, release_id, actions, read, log, max_iter)
-    finally:
-        _journal_sync_notes(log)
+    except Exception as exc:  # noqa: BLE001 - noted, then re-raised
+        try:
+            _journal_sync_notes(log)
+        except Exception as log_exc:  # noqa: BLE001 - the original failure wins
+            exc.add_note(f"журнал: не записано sync-note: {log_exc}")
+        raise
+    _journal_sync_notes(log)
 
 
 def _drive(
@@ -523,16 +529,32 @@ def _drive(
     log: Callable[..., None],
     max_iter: int,
 ) -> None:
-    for _ in range(max_iter):
-        settle(layout, release_id)
-        facts = read()
-        row = table.row_of(classify(facts))
+    # max_iter actions, then one more classification: reaching the target
+    # with the last allowed action is success.
+    for done in range(max_iter + 1):
+        facts, row = _observe(layout, release_id, read, log)
         if row.phase == "committed":
             return
         if row.action == "stop":
             _fail(log, StepFailed(row.phase, "релиз повреждён (§3.8)"))
+        if done == max_iter:
+            _fail(log, StepFailed("drive", f"нет продвижения за {max_iter} итераций"))
         _step(layout, release_id, row, facts, actions, read, log)
-    _fail(log, StepFailed("drive", f"нет продвижения за {max_iter} итераций"))
+
+
+def _observe(
+    layout: Layout,
+    release_id: str,
+    read: Callable[[], Facts],
+    log: Callable[..., None],
+) -> tuple[Facts, table.Row]:
+    """Head of an iteration: settle, read, classify; a failure is journaled."""
+    try:
+        settle(layout, release_id)
+        facts = read()
+        return facts, table.row_of(classify(facts))
+    except Exception as exc:  # noqa: BLE001 - journaled, then re-raised
+        _fail(log, exc, "" if isinstance(exc, StepFailed) else "facts")
 
 
 def _step(

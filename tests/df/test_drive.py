@@ -232,3 +232,72 @@ def test_drive_journals_fullfsync_notes(
 def test_no_sync_note_without_notes(fl: FakeLayout) -> None:
     run(fl, World("committed"))
     assert not Path(fl.layout.journal).exists() or events(fl) == []
+
+
+# ---------- fix round 1 ----------
+
+
+def test_sync_note_failure_does_not_mask_original(
+    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout
+) -> None:
+    """Review minor 1: a broken journal plus notes keeps the original stop."""
+
+    def broken(*a: object, **k: object) -> None:
+        raise OSError("journal gone")
+
+    monkeypatch.setattr(fsutil, "_SYNC_NOTES", {3})
+    monkeypatch.setattr(accept, "journal_event", broken)
+    with pytest.raises(StepFailed) as exc:
+        run(fl, World("damaged"))
+    assert exc.value.step == "damaged"
+    notes = exc.value.__notes__
+    assert any("failed" in n for n in notes) and any("sync-note" in n for n in notes)
+
+
+@pytest.mark.parametrize(
+    "error,step",
+    [(StepFailed("facts", "не каталог"), "facts"), (OSError("io"), "facts")],
+)
+def test_facts_failure_at_iteration_head_journaled(
+    fl: FakeLayout, error: Exception, step: str
+) -> None:
+    """Review minor 2: an F20 stop or an I/O error reading facts is `failed`."""
+
+    def read() -> Facts:
+        raise error
+
+    with pytest.raises(type(error)):
+        drive(
+            fl.layout,
+            ID,
+            actions={},
+            read=read,
+            journal=fl.layout.journal,
+            run_id="run-1",
+        )
+    assert events(fl) == [(step, "failed", f"{type(error).__name__}: {error}")]
+
+
+def test_settle_failure_at_iteration_head_journaled(
+    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout
+) -> None:
+    def sync_dir(path: object) -> None:
+        raise OSError("sync")
+
+    monkeypatch.setattr(fsutil, "sync_dir", sync_dir)
+    with pytest.raises(OSError, match="sync"):
+        run(fl, World("committed"))
+    assert events(fl) == [("facts", "failed", "OSError: sync")]
+
+
+@pytest.mark.parametrize(
+    "phase,max_iter", [("committed", 0), ("launched", 1), ("active", 2)]
+)
+def test_target_reached_with_last_action_is_success(
+    fl: FakeLayout, phase: str, max_iter: int
+) -> None:
+    """Review minor 3: `max_iter` actions, then a final classification."""
+    world = World(phase)
+    run(fl, world, max_iter=max_iter)
+    assert world.phase == "committed"
+    assert len(world.called) == max_iter

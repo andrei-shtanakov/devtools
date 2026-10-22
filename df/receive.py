@@ -667,5 +667,6 @@ def _require_root_dir(parent_fd: int, leaf: str, path: Path) -> None:
         raise TreeError(f"missing: {path}") from exc
     if not stat.S_ISDIR(st.st_mode):
         raise TreeError(f"not a directory: {path}")
-    if st.st_uid != ROOT_UID:
-        raise TreeError(f"owner of {path} is uid {st.st_uid}, not root")
+    owner = fsutil.owner_uid(st)
+    if owner != ROOT_UID:
+        raise TreeError(f"owner of {path} is uid {owner}, not root")
