@@ -1311,7 +1311,8 @@ def test_build_refused_before_any_command_if_user_unverified(): ...  # runner н
 Размещение (как построено, R35, R33.F18): `df/accept.py` — отметки, факты, `settle`,
 `drive`; `df/routes.py` — условия, интерпретатор, `route_action`, `TARGETS`,
 `acceptance_calls`; `df/leaves.py` — листья-протоколы `prepare_dir`, `verify_chmod`,
-`seal`, `accept_copy` и `release_digest`; `df/sources.py` — `SourceId`, `UnsupportedLock`
+`seal`, `accept_copy` (`release_digest` — в `df/digest.py`, один вызов у отметок и
+проверок); `df/sources.py` — `SourceId`, `UnsupportedLock`
 и правила источника; `df/inputs.py` — `fetch_reference`, `verify_sources`, `InstalledDist`,
 `installed_distributions`, `pth_problems`.
 
@@ -1571,8 +1572,9 @@ def test_build_refused_before_any_command_if_user_unverified(): ...  # runner н
         (Task 3, п. 5); своих синхронизаций вызывающий не делает (rev 8, r10);
       - отказ потока (`TreeError`) — `StepFailed("copy", "<ошибка>; stderr: <последние 4096
         байт stderr tar>")`; частичная копия остаётся до маршрута `copy-partial`;
-      - `release_digest` = `tree_digest(…, exclude={"release.json"})` — тот же вызов у
-        проверки `tree_digest` маршрута `verify` (для отметки `copied`).
+      - `release_digest` (`df/digest.py`) = `tree_digest(…, exclude={"release.json"})` —
+        тот же вызов у проверки `tree_digest` маршрута `verify` и у `read_facts` (отметки
+        `copied` и записи реестра).
         Возвращает digest. Вместе — протокол
         `accept_copy`. Эффекты: `receive_tree()` → `tree_digest()`;
     - `remove_own_tree`, `cleanup_tree` (с `quarantine_label=id`), `remove_empty_dir`,
@@ -1788,7 +1790,8 @@ def test_builder_emptiness_decided_by_build_user(monkeypatch, fake_layout): ...
 def test_admin_tree_lost_falls_back_to_verified(fake_layout): ...
 def test_empty_prepared_dir_is_prepared_not_building(fake_layout): ...
 def test_tar_failure_refuses_and_keeps_partial_for_route(fake_layout): ...
-    # код tar 1 (нечитаемый root-only файл) → StepFailed; частичная копия root 0700 на
+    # tar отказывает (нечитаемый root-only файл; bsdtar рвёт поток, GNU tar по полному
+    # пути — ненулевой код, 2) → StepFailed, хвост stderr содержит «tar»; частичная копия root 0700 на
     # месте, производитель завершён (S1-R10-N3); повтор: partial-copy → маршрут
     # copy-partial удаляет остаток и продолжает до copied; при euid 0 — пропуск
     # (R33.F35, root-вариант — Task 13); через drive — tests/df/test_scenarios.py
@@ -2468,6 +2471,11 @@ def test_routes_match_table_with_real_calls(fake_world, name): ...
     # без заглушек LATER_LEAVES; тот же python_key, что у install_actions
 def test_read_facts_binds_admin_predicates(fake_world): ...
     # R33.F5: drive читает факты с df.admin.admin_ready и launcher_ready
+def test_install_digest_is_one_value(fake_world): ...
+    # из финального ревью Task 7 (M1): install_digest, с которым read_facts читает
+    # отметки, == config_digest(install), под которым их пишет acceptance_calls; одно
+    # значение передаётся обоим явно; двойник с разными значениями — drive стоит на
+    # первой post-проверке (fail-closed)
 def test_home_found_by_retry_is_settled_before_ready(fake_world): ...
     # из Task 5 (R21, R33.F22). S1-R6-N1: rename_noreplace → сбой процесса → повтор
     # (settle_on_acquire) → ready → сбой ОС → домашний каталог на месте; двойник без
@@ -2971,7 +2979,7 @@ def test_root_access_observer_twins(root_world, twin): ...
 def test_tar_failure_as_root(root_world): ...
     # R33.F35: root-вариант теста отказа tar Task 7 — файл, нечитаемый для df-build;
     # bsdtar обрывает поток со stderr «tar: (null)» (отказ верен, текст беден —
-    # записать в evidence), GNU tar — код 1
+    # записать в evidence), GNU tar — ненулевой код (2)
 def test_cleanup_of_000_tree(root_world): ...
     # df-build создаёт непустое дерево, ставит корню и вложенным каталогам 000 и
     # останавливается: первичная очистка в releases/, повтор карантина и очистка в
@@ -3057,10 +3065,10 @@ def test_no_df_in_path(root_world): ...   # ни /opt/df/bin/df, ни /usr/local
     Совместимость утверждённого `tar` с приёмником проверяют не эти пробы, а
     `test_real_tar_stream_accepted` (Task 3, обычный прогон) и
     `test_real_tar_from_build_user_accepted` (root-прогон) на обеих ячейках матрицы.
-  - Обычный прогон на `ubuntu-24.04` впервые исполняет Linux-ветки Task 7, на macOS не
-    проверенные: `verify_chmod` (`fchmod` по дескриптору), обход окружения с
+  - Linux-ветки Task 7 (`verify_chmod` — `fchmod` по дескриптору, обход окружения с
     `lib64 -> lib`, путь дескриптора через `/proc/self/fd` в `fake_layout`, отказ GNU tar
-    кодом 1 в тесте отказа tar Task 7.
+    ненулевым кодом в тесте отказа tar Task 7) исполняет уже CI PR (`tests/df` на ubuntu);
+    обычный прогон Task 13 повторяет их на обеих ячейках матрицы.
 - [ ] **Step 4: Run** — push ветки; обе ячейки матрицы зелёные. Ссылку на прогон записать в
   evidence. Evidence разделяет:
   - «фикстурная приёмка механизма: pass (macOS arm64, Ubuntu x86_64)»;
