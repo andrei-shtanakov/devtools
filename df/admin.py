@@ -22,7 +22,7 @@ import stat
 import uuid
 from pathlib import Path, PurePosixPath
 
-from df import accept, fsutil
+from df import accept, acl, fsutil
 from df import build as build_mod
 from df import platform as plat
 from df.digest import TreeError, check_links, open_regular, tree_digest
@@ -52,6 +52,7 @@ _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _NEW_FILE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 _PEEK = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 _NO_WRITE_OTHERS = stat.S_IWGRP | stat.S_IWOTH
+_SPECIAL_BITS = stat.S_ISUID | stat.S_ISGID
 _CHUNK = 1 << 20
 _PYTHON = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 _UV_VERSION = re.compile(r"uv (\S+)(?: .*)?")
@@ -251,6 +252,8 @@ def _object_problems(path: Path, st: os.stat_result) -> list[str]:
         problems.append(f"{path}: владелец uid {owner}, не root")
     if not stat.S_ISLNK(mode) and mode & _NO_WRITE_OTHERS:
         problems.append(f"{path}: запись для группы или всех")
+    if not stat.S_ISLNK(mode) and mode & _SPECIAL_BITS:
+        problems.append(f"{path}: бит setuid или setgid")
     return problems
 
 
@@ -267,6 +270,43 @@ def admin_digest(layout: Layout, release_id: str) -> str:
     The one definition for the mark `admin`, the registry and `admin_ready`.
     """
     return tree_digest(layout.admin_dir(release_id), exclude=frozenset())
+
+
+def admin_code_problems(layout: Layout, release_id: str) -> list[str]:
+    """Trust of `admin/<id>` (I-1): what root imports nobody else may write.
+
+    The chain from `/` to `admin/<id>` passes `trusted_path_problems` (ACLs
+    included); every object inside is a directory or a regular file (never a
+    link: `install_admin` copies none), root's, without group or other write
+    and setuid/setgid bits (`_object_problems`), and carries no ACL. A
+    vanished object is a `TreeError`; any other `OSError` propagates.
+    """
+    admin = layout.admin_dir(release_id)
+    problems = list(plat.trusted_path_problems(admin))
+    for dirpath, dirs, files in os.walk(admin, onerror=_raise_tree):
+        for name in sorted([*dirs, *files]):
+            path = Path(dirpath) / name
+            st = _tree_lstat(path)
+            if stat.S_ISLNK(st.st_mode):
+                problems.append(f"{path}: ссылка в административном коде")
+                continue
+            problems += _object_problems(path, st)
+            if acl.acl_present_path(path):
+                problems.append(f"{path}: есть ACL")
+    return problems
+
+
+def _raise_tree(exc: OSError) -> None:
+    if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+        raise TreeError(f"{exc.filename}: {exc.strerror}") from exc
+    raise exc
+
+
+def _tree_lstat(path: Path) -> os.stat_result:
+    try:
+        return os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        raise TreeError(f"{path}: {exc.strerror}") from exc
 
 
 def install_admin(layout: Layout, release_id: str, *, devtools_ref: Path) -> None:
@@ -352,7 +392,10 @@ def admin_ready(
 ) -> bool:
     """The one definition of a ready admin environment (spec 3.3, rev 8 r10).
 
-    `admin/<id>` is a directory whose `admin_digest` equals the passed value,
+    `admin/<id>` is a directory whose `admin_digest` equals the passed value
+    and whose trust holds (`admin_code_problems` empty: the chain to it passes
+    `trusted_path_problems`, every object in it is root's, without group or
+    other write, setuid/setgid or an ACL, and nothing in it is a link — I-1),
     and the admin Python of exactly `expected_python` is a regular file (by
     `lstat`) whose path passes `trusted_path_problems`. Both values come from
     the caller's one source (the mark, or the registry entry); nothing else
@@ -364,6 +407,8 @@ def admin_ready(
         return False
     try:
         if admin_digest(layout, release_id) != expected_admin_digest:
+            return False
+        if admin_code_problems(layout, release_id):
             return False
     except TreeError:
         return False
@@ -429,7 +474,8 @@ def launcher_ready(layout: Layout, *, python: str) -> bool:
     """Fact `L`: the command files are what this admin code generates (F2).
 
     The entry and the command are root's regular files, `0644` and `0755`,
-    with exactly `entry_text` and `launcher_text` for `python`; when
+    with exactly `entry_text` and `launcher_text` for `python`, and both pass
+    `trusted_path_problems` (chain, ACL — spec 3.10, M-3); when
     `/usr/local/bin` is trusted (`accept.local_bin_trusted`), its
     `darkfactory` is a link whose text is the command's path. Absent or
     different is false; any other `OSError` is `StepFailed("facts")`.
@@ -440,6 +486,8 @@ def launcher_ready(layout: Layout, *, python: str) -> bool:
         (layout.launcher, launcher_text(layout, python, platform), 0o755),
     )
     if not all(_file_is(path, text, mode) for path, text, mode in files):
+        return False
+    if any(plat.trusted_path_problems(path) for path, _, _ in files):
         return False
     if not accept.local_bin_trusted(layout):
         return True

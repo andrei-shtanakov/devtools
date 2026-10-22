@@ -68,6 +68,7 @@ ATTEMPTS = 3
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _CURRENT_PREFIX = "releases/"
 _NO_CODE = "административный код повреждён: восстановление через bootstrap"
+_UNTRUSTED = "административный код не защищён от записи: восстановление через bootstrap"
 
 
 def entry_text(layout: Layout) -> str:
@@ -180,7 +181,7 @@ def run(argv: list[str], root: str = _ROOT) -> int:
         if mode == "writer":
             lock_fd = acquire(paths)
         snap = take_snapshot(paths, mode)
-        admin_dir = verified_admin_dir(paths, snap)
+        admin_dir = located_admin_dir(paths, snap, mode)
         state, main = _import_df(admin_dir)
     except (Refused, OSError) as exc:
         if lock_fd is not None:
@@ -248,8 +249,21 @@ def read_current(paths: EntryPaths) -> str | None:
     return release_id
 
 
+def located_admin_dir(paths: EntryPaths, snap: Snap, mode: str) -> Path:
+    """`verified_admin_dir`; a reader's refusal under a changed generation is
+    «состояние меняется», not «повреждён» (an activation landed meanwhile)."""
+    try:
+        return verified_admin_dir(paths, snap)
+    except Refused:
+        if mode == "reader" and read_generation(paths.generation) != snap.generation:
+            raise Refused("snapshot", _CHANGING) from None
+        raise
+
+
 def verified_admin_dir(paths: EntryPaths, snap: Snap) -> Path:
-    """`admin/<id>` of `current` if its record is `allowed` and digests agree."""
+    """`admin/<id>` of `current` if its record is `allowed`, its tree is
+    trusted (`admin_tree_problems`) and digests agree — in that order, so the
+    digest reads a tree only root can change."""
     release_id = snap.parts["current_id"]
     if release_id is None:
         raise Refused("entry", "нет активного релиза: установка через bootstrap")
@@ -263,12 +277,84 @@ def verified_admin_dir(paths: EntryPaths, snap: Snap) -> Path:
         raise Refused("entry", f"релиз {release_id} отозван: {record.get('reason')}")
     admin_dir = paths.admin_dir(release_id)
     try:
+        problems = admin_tree_problems(paths, release_id)
+    except OSError as exc:
+        raise Refused("entry", f"{_UNTRUSTED} ({exc})") from exc
+    if problems:
+        raise Refused("entry", f"{_UNTRUSTED} ({'; '.join(problems)})")
+    try:
         digest = tree_digest(admin_dir)
     except (TreeError, OSError) as exc:
         raise Refused("entry", f"{_NO_CODE} ({exc})") from exc
     if digest != record["admin_digest"]:
         raise Refused("entry", _NO_CODE)
     return admin_dir
+
+
+def admin_tree_problems(paths: EntryPaths, release_id: str) -> list[str]:
+    """Trust of the admin code before root imports it (I-1).
+
+    Every directory on the chain `root … /opt/df/admin/<id>` is a real
+    directory (`lstat`, never a link), root's, without group or other write;
+    every object in `admin/<id>` is a directory or a regular file, root's,
+    without group or other write. Links are refused although `tree_digest`
+    digests them: `install_admin` copies none. With this, only root can
+    change the tree between the digest and the import.
+
+    ACLs are not read here (no ctypes in the entry): only the owner — root —
+    can change the mode or ACL of a root-owned object, and an ACL present
+    from creation (inherited from a directory on the chain) makes fact `A`
+    false (`df.admin.admin_code_problems`, `trusted_path_problems`), so such
+    a tree never becomes the active release. A vanished object is a
+    problem; any other `OSError` propagates.
+    """
+    admin_dir = paths.admin_dir(release_id)
+    chain = [paths.root]
+    for part in admin_dir.relative_to(paths.root).parts:
+        chain.append(chain[-1] / part)
+    problems: list[str] = []
+    for path in chain:
+        st = _trust_lstat(path)
+        if st is None or not stat.S_ISDIR(st.st_mode):
+            return [*problems, f"{path}: не каталог (ссылка или нет)"]
+        problems += _trust_problems(path, st)
+    return problems + _tree_trust_problems(admin_dir)
+
+
+def _tree_trust_problems(directory: Path) -> list[str]:
+    with os.scandir(directory) as entries:
+        listing = sorted(entries, key=lambda entry: entry.name)
+    problems: list[str] = []
+    for entry in listing:
+        path = Path(entry.path)
+        st = _trust_lstat(path)
+        if st is None:
+            problems.append(f"{path}: исчез")
+        elif stat.S_ISLNK(st.st_mode):
+            problems.append(f"{path}: ссылка")
+        elif stat.S_ISDIR(st.st_mode):
+            problems += _trust_problems(path, st) + _tree_trust_problems(path)
+        elif stat.S_ISREG(st.st_mode):
+            problems += _trust_problems(path, st)
+        else:
+            problems.append(f"{path}: не файл и не каталог")
+    return problems
+
+
+def _trust_lstat(path: Path) -> os.stat_result | None:
+    try:
+        return os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+
+
+def _trust_problems(path: Path, st: os.stat_result) -> list[str]:
+    problems: list[str] = []
+    if owner_uid(st) != ROOT_UID:
+        problems.append(f"{path}: владелец uid {owner_uid(st)}, не root")
+    if st.st_mode & _NO_WRITE_OTHERS:
+        problems.append(f"{path}: запись для группы или всех")
+    return problems
 
 
 def _import_df(admin_dir: Path) -> tuple[Any, Callable[..., int]]:
@@ -279,8 +365,8 @@ def _import_df(admin_dir: Path) -> tuple[Any, Callable[..., int]]:
     try:
         state = importlib.import_module("df.state")
         cli = importlib.import_module("df.cli")
-    except ImportError as exc:
-        raise Refused("entry", f"{_NO_CODE} ({exc})") from exc
+    except Exception as exc:  # noqa: BLE001 - any import failure is broken code (M-2)
+        raise Refused("entry", f"{_NO_CODE} ({exc!r})") from exc
     if Path(str(cli.__file__)).parent != admin_dir / "df":
         raise Refused("entry", f"df.cli не из {admin_dir}")
     return state, cli.main
@@ -815,7 +901,12 @@ def _file_sha256(path: Path) -> str:
 
 
 def _script() -> int:
-    """`bin/darkfactory` runs the entry with `-I -B -S`; anything else is refused."""
+    """`bin/darkfactory` runs the entry with `-I -B -S`; anything else is refused.
+
+    A signal against a wrong launcher, not a defence: the module's stdlib
+    imports above already ran, so without `-I` a shadowed stdlib module would
+    have been imported before this check (n-3).
+    """
     if not (sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode):
         print("darkfactory: вход запускается только как -I -B -S", file=sys.stderr)
         return EXIT_REFUSED

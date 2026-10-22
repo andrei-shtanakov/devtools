@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from df import admin, fsutil
+from df import acl, admin, fsutil
 from df import build as build_mod
 from df import install_table as table
 from df import platform as plat
@@ -275,6 +275,7 @@ TREE_PROBLEMS = [
     pytest.param('ln -s ../../../.. "$T/up"', "up:", id="escaping"),
     pytest.param('ln -s missing "$T/bin/dangling"', "dangling", id="dangling"),
     pytest.param('mkfifo "$T/pipe"', "не файл, не каталог", id="fifo"),
+    pytest.param(f'chmod u+s "$T/bin/python{SHORT}"', "setuid", id="setuid"),
 ]
 
 
@@ -659,6 +660,51 @@ def test_admin_ready_untrusted_chain_false(
     assert not ready(fl, digest)
 
 
+@pytest.mark.parametrize(
+    "spoil", ["world-file", "group-dir", "foreign-owner", "inner-link", "setuid", "acl"]
+)
+def test_admin_ready_false_on_untrusted_code(
+    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout, spoil: str
+) -> None:
+    """I-1(b): `A` covers the whole admin code tree, not only its digest."""
+    lay = fl.layout
+    ready_world(fl)
+    pkg = lay.admin_dir(ID) / "df"
+    target = next(p for p in sorted(pkg.iterdir()) if p.is_file())
+    if spoil == "world-file":
+        target.chmod(0o666)
+    elif spoil == "group-dir":
+        pkg.chmod(0o775)
+    elif spoil == "foreign-owner":
+        fl.set_owner(target, BUILD_UID)
+    elif spoil == "inner-link":
+        (pkg / "extra").symlink_to(target.name)
+    elif spoil == "setuid":
+        target.chmod(0o4755)
+    else:
+        real = acl.acl_present_path
+        monkeypatch.setattr(acl, "acl_present_path", lambda p: p == target or real(p))
+    digest = admin.admin_digest(lay, ID)  # the digest agrees: only trust is wrong
+    assert not ready(fl, digest)
+    assert admin.admin_code_problems(lay, ID)
+
+
+def test_admin_ready_checks_the_admin_dir_chain(
+    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout
+) -> None:
+    digest = ready_world(fl)
+    admin_dir = fl.layout.admin_dir(ID)
+    monkeypatch.setattr(
+        plat, "trusted_path_problems", lambda p: ["acl"] if p == admin_dir else []
+    )
+    assert not ready(fl, digest)
+
+
+def test_admin_code_problems_clean_tree(fl: FakeLayout) -> None:
+    ready_world(fl)
+    assert admin.admin_code_problems(fl.layout, ID) == []
+
+
 def test_admin_ready_io_error_is_step_failed(
     monkeypatch: pytest.MonkeyPatch, fl: FakeLayout
 ) -> None:
@@ -821,6 +867,23 @@ def test_launcher_ready(
         link.unlink()
         link.write_text("x\n")
     assert admin.launcher_ready(lay, python=PY) is (spoil == "none")
+
+
+@pytest.mark.parametrize("which", ["entry", "launcher"])
+def test_launcher_ready_requires_trusted_paths(
+    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout, which: str
+) -> None:
+    """M-3: an ACL or an untrusted chain on either command file makes `L` false."""
+    lay = fl.layout
+    write_command(fl, "bin/darkfactory-entry.py")
+    write_command(fl, "bin/darkfactory")
+    admin.link_command(lay)
+    assert admin.launcher_ready(lay, python=PY)  # positive control
+    bad = getattr(lay, which)
+    monkeypatch.setattr(
+        plat, "trusted_path_problems", lambda p: ["acl"] if p == bad else []
+    )
+    assert not admin.launcher_ready(lay, python=PY)
 
 
 def test_launcher_ready_ignores_link_when_untrusted(

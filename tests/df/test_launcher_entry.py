@@ -200,8 +200,16 @@ def world(
     if pending:
         lay.pending.write_text("pending\n")
     lay.bin_dir.mkdir(parents=True)
-    lay.entry.write_text(entry.entry_text(lay))
+    lay.entry.write_text(entry_text_as_user(lay))
     return lay
+
+
+def entry_text_as_user(lay: Layout) -> str:
+    """`entry_text` with the current user as root (the subprocess has no
+    monkeypatch): the one line `ROOT_UID = 0` substituted."""
+    text = entry.entry_text(lay)
+    assert text.count("\nROOT_UID = 0\n") == 1
+    return text.replace("\nROOT_UID = 0\n", f"\nROOT_UID = {os.geteuid()}\n")
 
 
 def run_entry(
@@ -263,6 +271,12 @@ def rec(monkeypatch: pytest.MonkeyPatch) -> Iterator[Recorder]:
     for call in recorder.calls:
         if call["lock_fd"] is not None:
             os.close(call["lock_fd"])
+
+
+@pytest.fixture(autouse=True)
+def _owner_is_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The test trees are the current user's: the entry takes them as root's."""
+    monkeypatch.setattr(entry, "ROOT_UID", os.geteuid())
 
 
 @pytest.fixture
@@ -376,6 +390,14 @@ def _nfc_twins(r: Path) -> None:
         pass
 
 
+def _case_twins(r: Path) -> None:
+    """`a/F` beside `a/f`; a case-insensitive FS refuses it (`O_EXCL`)."""
+    try:
+        os.close(os.open(r / "a" / "F", os.O_WRONLY | os.O_CREAT | os.O_EXCL))
+    except FileExistsError:
+        pytest.skip("case-insensitive file system: case twins cannot exist")
+
+
 def _unreadable(r: Path) -> None:
     (r / "secret").write_bytes(b"s")
     (r / "secret").chmod(0)
@@ -392,7 +414,8 @@ TREES: dict[str, Callable[[Path], None]] = {
     "name-newline": lambda r: (r / "a\nb").write_bytes(b""),
     "fifo": _fifo,
     "nfc-twins": _nfc_twins,
-    "case-twins": lambda r: (r / "B").write_bytes(b"1"),
+    "case-twins": _case_twins,
+    "upper-name": lambda r: (r / "B").write_bytes(b"1"),
     "long-name": lambda r: (r / ("n" * 255)).write_bytes(b""),
     "unreadable": _unreadable,
 }
@@ -403,7 +426,7 @@ def test_entry_digest_matches_df_digest(tmp_path: Path, name: str) -> None:
     root = _tree(tmp_path / "t", TREES[name])
     want = _outcome(lambda: tree_digest(root, exclude=frozenset()))
     assert _outcome(lambda: entry.tree_digest(root)) == want
-    if name in ("plain", "exec", "rel-link", "case-twins"):
+    if name in ("plain", "exec", "rel-link", "case-twins", "upper-name"):
         assert want[0] == "ok"
 
 
@@ -1002,9 +1025,13 @@ def test_entry_modes(
 
 
 def test_entry_writer_requires_root(
-    tmp_path: Path, rec: Recorder, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rec: Recorder,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     lay = world(tmp_path)
+    monkeypatch.setattr(entry, "ROOT_UID", os.geteuid() + 1)
     assert run_in(lay, "install") == entry.EXIT_REFUSED
     assert "требует root" in capsys.readouterr().err
     assert rec.calls == [] and not lay.lock.exists()
@@ -1380,3 +1407,113 @@ def test_bootstrap_under_system_python_says_what_is_needed(tmp_path: Path) -> No
     done = _boot(_checkout(tmp_path), "install", python=SYSTEM_PY)
     assert done.returncode == bootstrap.EXIT_REFUSED
     assert "Python >= 3.12" in done.stderr
+
+
+# --- fix round 1: trust of the admin code (I-1a), import failure (M-2), n-2 ------
+
+
+def _spoil(lay: Layout, spoil: str) -> None:
+    pkg = lay.admin_dir(ID) / "df"
+    if spoil == "world-writable":  # reviewer probe P1
+        (pkg / "cli.py").chmod(0o666)
+        pkg.chmod(0o777)
+    elif spoil == "group-writable":
+        pkg.chmod(0o775)
+    elif spoil == "admin-link":  # reviewer probe P3
+        os.rename(lay.admin, lay.opt / "elsewhere")
+        os.symlink(lay.opt / "elsewhere", lay.admin)
+    elif spoil == "inner-link":
+        os.symlink("cli.py", pkg / "alias.py")
+    elif spoil == "opt-writable":
+        lay.opt.chmod(0o777)
+
+
+TRUST_SPOILS = [
+    "world-writable",
+    "group-writable",
+    "admin-link",
+    "inner-link",
+    "opt-writable",
+]
+
+
+@pytest.mark.parametrize("spoil", TRUST_SPOILS)
+def test_untrusted_admin_code_blocks_entry(tmp_path: Path, spoil: str) -> None:
+    """I-1(a): the digest agrees (re-registered), the tree is not root-only."""
+    lay = world(tmp_path)
+    _spoil(lay, spoil)
+    write_registry(lay, [record(ID, admin.admin_digest(lay, ID))])
+    done = run_entry(lay, "doctor")
+    assert done.returncode == entry.EXIT_REFUSED, done.stdout
+    assert "не защищён от записи" in done.stderr
+    assert "bootstrap" in done.stderr and "IMPORTED-CLI" not in done.stdout
+
+
+@pytest.mark.parametrize("spoil", [*TRUST_SPOILS, "foreign-owner", "fifo"])
+def test_admin_tree_problems(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spoil: str
+) -> None:
+    lay = world(tmp_path)
+    paths = entry.EntryPaths(str(lay.root))
+    assert entry.admin_tree_problems(paths, ID) == []  # positive control
+    target = lay.admin_dir(ID) / "df" / "state.py"
+    if spoil == "foreign-owner":
+        real = entry.owner_uid
+        foreign = os.lstat(target).st_ino
+
+        def owner(st: os.stat_result) -> int:
+            return os.geteuid() + 1 if st.st_ino == foreign else real(st)
+
+        monkeypatch.setattr(entry, "owner_uid", owner)
+    elif spoil == "fifo":
+        os.mkfifo(lay.admin_dir(ID) / "df" / "pipe")
+    else:
+        _spoil(lay, spoil)
+    problems = entry.admin_tree_problems(paths, ID)
+    assert problems, spoil
+
+
+def test_entry_import_failure_is_refusal(tmp_path: Path) -> None:
+    """M-2 (reviewer probe P5): code matching its digest that fails to import
+    exits 2 with the bootstrap hint, not 1 with a traceback."""
+    lay = world(tmp_path)
+    (lay.admin_dir(ID) / "df" / "cli.py").write_text("def (:\n")
+    write_registry(lay, [record(ID, admin.admin_digest(lay, ID))])
+    done = run_entry(lay, "doctor")
+    assert done.returncode == entry.EXIT_REFUSED
+    assert "административный код повреждён" in done.stderr
+    assert "SyntaxError" in done.stderr and "Traceback" not in done.stderr
+
+
+def test_reader_digest_failure_during_change_says_changing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rec: Recorder
+) -> None:
+    """n-2: an activation between the snapshot and the digest is «состояние
+    меняется», not «повреждён»; with the generation unchanged it stays «повреждён»."""
+    lay = world(tmp_path)
+
+    def racing(_root: Path) -> str:
+        _bump(lay)
+        raise entry.TreeError("vanished")
+
+    monkeypatch.setattr(entry, "tree_digest", racing)
+    err = _stderr_of(lambda: run_in(lay, "doctor"))
+    assert "состояние меняется" in err
+
+    def broken(_root: Path) -> str:
+        raise entry.TreeError("vanished")
+
+    monkeypatch.setattr(entry, "tree_digest", broken)
+    err = _stderr_of(lambda: run_in(lay, "doctor"))
+    assert "повреждён" in err
+    assert rec.calls == []
+
+
+def _stderr_of(call: Callable[[], int]) -> str:
+    import contextlib
+    import io
+
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        assert call() == entry.EXIT_REFUSED
+    return buf.getvalue()
