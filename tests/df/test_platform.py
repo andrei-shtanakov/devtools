@@ -21,6 +21,12 @@ from df import fsutil
 from df import platform as plat
 from df.config import Account, ConfigError, dump_accounts, load_accounts
 from df.digest import TreeError
+from df.install_table import (
+    CLEANUP_OUTCOME,
+    CLEANUP_TREE_CASES,
+    cleanup_tree_variant,
+    leaf_variants,
+)
 from df.journal import StepFailed
 from df.paths import Layout
 from df.platform import (
@@ -1281,40 +1287,10 @@ def test_parse_getent_unparsable_is_refusal(output: bytes) -> None:
 
 # --- cleanup_tree ------------------------------------------------------------
 
-CleanupCase = tuple[str, str, str, str]  # (obj, cleaner, rmdir, label)
-CLEANUP_OUTCOME = {
-    "tree": "removed",
-    "link": "removed",
-    "absent": "removed",
-    "quarantine": "quarantined",
-    "failed": "failed",
-}
-EXPECTED_EVENTS: Mapping[str, list[str]] = {
-    "absent": [],
-    "link": ["unlink", "sync_dir(parent)"],
-    "tree": ["run_as(df-build)+", "unlink", "sync_dir(parent)"],
-    "quarantine": [
-        "run_as(df-build)+",
-        "renamed",
-        "sync_dir(quarantine)",
-        "sync_dir(parent)",
-    ],
-    "failed": ["run_as(df-build)+"],
-}
-CLEANUP_CASES: list[tuple[CleanupCase, str]] = [
-    (("absent", "-", "-", "id"), "absent"),
-    (("absent", "-", "-", "none"), "absent"),
-    (("link", "-", "-", "id"), "link"),
-    (("file", "-", "-", "none"), "link"),
-    (("dir", "ok", "ok", "id"), "tree"),
-    (("dir", "ok", "ok", "none"), "tree"),
-    (("dir", "code-1", "-", "id"), "quarantine"),
-    (("dir", "timeout", "-", "id"), "quarantine"),
-    (("dir", "ok", "enotempty", "id"), "quarantine"),
-    (("dir", "code-1", "-", "none"), "failed"),
-    (("dir", "timeout", "-", "none"), "failed"),
-    (("dir", "ok", "enotempty", "none"), "failed"),
-]
+#: Task 5 vocabulary of the fake environment: obj absent | link | file | dir;
+#: cleaner ok | code-1 | timeout | "-"; rmdir ok | enotempty | "-".
+_CLEANER_WORD = {"ok": "ok", "exit": "code-1", "timeout": "timeout", None: "-"}
+_RMDIR_WORD = {"ok": "ok", "ENOTEMPTY": "enotempty", None: "-"}
 
 
 def _real_run(argv: Sequence[str]) -> RunResult:
@@ -1322,11 +1298,23 @@ def _real_run(argv: Sequence[str]) -> RunResult:
     return RunResult(done.returncode, done.stdout, done.stderr, True)
 
 
-def run_cleanup_tree_case(
-    monkeypatch: pytest.MonkeyPatch, layout: Layout, case: CleanupCase
+def _cleanup_layout(tmp_path: Path) -> Layout:
+    root = Path(os.path.realpath(tmp_path)) / "cleanup-root"
+    lay = Layout(root)
+    lay.staging.mkdir(parents=True)
+    lay.quarantine.mkdir(parents=True)
+    return lay
+
+
+def _run_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    layout: Layout,
+    obj: str,
+    cleaner: str,
+    rmdir: str,
+    label: str | None,
 ) -> tuple[list[str], str, Path]:
     """Real `cleanup_tree`; only `run_as` and the fsutil observer replaced."""
-    obj, cleaner, rmdir, label = case
     parent = layout.staging
     tree = parent / "t"
     if obj == "link":
@@ -1367,10 +1355,48 @@ def run_cleanup_tree_case(
     monkeypatch.setattr(plat, "run_as", run_as)
     monkeypatch.setattr(fsutil, "sync_dir", sync)
     monkeypatch.setattr(fsutil, "fault_point", fault)
-    outcome = plat.cleanup_tree(
-        layout, parent, "t", quarantine_label=None if label == "none" else "rel1"
-    )
+    outcome = plat.cleanup_tree(layout, parent, "t", quarantine_label=label)
     return _collapse(events), outcome, tree
+
+
+def run_cleanup_tree_case(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    case: tuple[str, str | None, str | None, bool],
+) -> tuple[list[str], str]:
+    """Run one selection case (obj, cleaner, rmdir, label) of the table vocabulary.
+
+    Prepares the case in a fresh layout under `tmp_path`, runs the real
+    `cleanup_tree` (`_run_cleanup`), checks what the events cannot show (the name
+    stays on `failed`; the quarantine entry; a link's target untouched) and unlocks
+    the tree before returning the collapsed events and the outcome.
+    """
+    obj, cleaner, rmdir, label = case
+    layout = _cleanup_layout(tmp_path)
+    try:
+        events, outcome, tree = _run_cleanup(
+            monkeypatch,
+            layout,
+            obj,
+            _CLEANER_WORD[cleaner],
+            _RMDIR_WORD[rmdir],
+            "rel1" if label else None,
+        )
+        quarantined = os.listdir(layout.quarantine)
+        if outcome == "failed":
+            assert os.path.lexists(tree)
+            assert quarantined == []
+        elif outcome == "quarantined":
+            assert not os.path.lexists(tree)
+            assert quarantined == ["rel1.1"]
+        else:
+            assert not os.path.lexists(tree)
+            assert quarantined == []
+        if obj == "link":
+            assert (layout.root / "target").is_dir()
+    finally:
+        _unlock(layout.root)
+    return events, outcome
 
 
 def _collapse(events: list[str]) -> list[str]:
@@ -1382,29 +1408,36 @@ def _collapse(events: list[str]) -> list[str]:
     return out
 
 
-def _check_variant(events: list[str], outcome: str, variant: str) -> None:
-    assert events == EXPECTED_EVENTS[variant]
-    assert outcome == CLEANUP_OUTCOME[variant]
+@pytest.mark.parametrize("case", [inputs for inputs, _ in CLEANUP_TREE_CASES])
+def test_cleanup_tree_variant_events(monkeypatch, tmp_path, case):
+    expected_variant = cleanup_tree_variant(*case)
+    events, outcome = run_cleanup_tree_case(monkeypatch, tmp_path, case)
+    assert events == list(leaf_variants("cleanup_tree")[expected_variant])
+    assert outcome == CLEANUP_OUTCOME[expected_variant]
+    # S1-R11-N1, S1-R12-N1, S1-R13-N1, S1-R14-N2: case = (obj, cleaner, rmdir, label) —
+    # входы выбора; ожидание вычисляется из данных в самом тесте (строки выше);
+    # подготовка строит их (obj: нет имени / ссылка или файл / каталог; cleaner: подменённый
+    # run_as возвращает 0, код 1 или срок, причём первая команда действительно меняет режим
+    # корня; rmdir: ENOTEMPTY — после трёх успешных команд в дереве появляется файл; label:
+    # quarantine_label=id или None). run_cleanup_tree_case — фикстура: настоящий
+    # cleanup_tree, подменены только run_as и fsutil-наблюдатель; CLEANUP_OUTCOME =
+    # {"tree": "removed", "link": "removed", "absent": "removed", "quarantine":
+    # "quarantined", "failed": "failed"}. События — порядок, кратность, цели
+    # (sync_dir(quarantine) — по fd карантина, sync_dir(parent) — по pfd); при failed имя
+    # в parent на месте, root-событий нет, изменённый режим допустим. Двойники — провал:
+    # link без sync_dir(parent); quarantine без sync_dir(quarantine); quarantine с parent
+    # раньше quarantine; sync_dir(parent) до rename (S1-R12-N2); ENOTEMPTY после успешного
+    # очистителя как tree (S1-R13-N1)
 
 
-@pytest.mark.parametrize("case,variant", CLEANUP_CASES)
-def test_cleanup_tree_variant_events(
-    monkeypatch: pytest.MonkeyPatch, layout: Layout, case: CleanupCase, variant: str
+@pytest.mark.parametrize("label", ["rel1", None])
+def test_cleanup_tree_file_in_place_of_tree_is_link_variant(
+    monkeypatch: pytest.MonkeyPatch, layout: Layout, label: str | None
 ) -> None:
-    try:
-        events, outcome, tree = run_cleanup_tree_case(monkeypatch, layout, case)
-        _check_variant(events, outcome, variant)
-        if variant == "failed":
-            assert os.path.lexists(tree)
-        if variant == "quarantine":
-            assert not os.path.lexists(tree)
-            assert os.listdir(layout.quarantine) == ["rel1.1"]
-        if variant in ("tree", "link", "absent"):
-            assert not os.path.lexists(tree)
-        if case[0] == "link":
-            assert (layout.root / "target").is_dir()
-    finally:
-        _unlock(layout.root)
+    events, outcome, tree = _run_cleanup(monkeypatch, layout, "file", "-", "-", label)
+    assert events == list(leaf_variants("cleanup_tree")["link"])
+    assert outcome == "removed"
+    assert not os.path.lexists(tree)
 
 
 @pytest.mark.parametrize(
@@ -1441,9 +1474,7 @@ def test_cleanup_tree_variant_events(
     ],
 )
 def test_cleanup_tree_variant_twins_rejected(variant: str, twin: list[str]) -> None:
-    outcome = "removed" if "unlink" in twin else CLEANUP_OUTCOME[variant]
-    with pytest.raises(AssertionError):
-        _check_variant(twin, outcome, variant)
+    assert twin != list(leaf_variants("cleanup_tree")[variant])
 
 
 _AUDIT: dict[str, Any] = {"on": False, "seen": []}
