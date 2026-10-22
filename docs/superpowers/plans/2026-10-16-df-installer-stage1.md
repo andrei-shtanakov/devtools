@@ -3596,12 +3596,12 @@ def test_admin_python_on_real_host(root_world): ...
     намеренно не попадают. Тело issue называет решение, а не вопрос. Эталон
     `devtools.governance-conductor` в `test_lockset.py` остаётся: он проверяет обход lock, не
     профиль;
-  - известный блокер живой установки `core` (R40/F17): `disp --help` (disputatio fc402fe)
-    падает `ModuleNotFoundError: anyio` — `disputatio/cli.py` импортирует `anyio`, который
-    объявлен только в `[dependency-groups]`, а сборка идёт с `--no-default-groups`; проверка
-    переноса (з) законно отказывает. Исправление — у владельца:
-    https://github.com/andrei-shtanakov/disputatio/issues/159; до него живая установка
-    `core` не пройдёт.
+  - бывший блокер живой установки `core` (R40/F17): `disp --help` (disputatio fc402fe)
+    падал `ModuleNotFoundError: anyio` (`anyio` был только в `[dependency-groups]`, сборка
+    идёт с `--no-default-groups`). Исправлено disputatio#160 (master 920b63f: `anyio` в
+    зависимостях `[project]`; disputatio#159 закрыт; контроллер проверил на 920b63f
+    `uv sync --locked --no-editable --no-default-groups` и `disp --help` → код 0). Пин
+    disputatio в профиле `core` — 920b63f или позже.
 
   В `TODO.md` — пункт `@id:df-installer-stage1-live`: «живая установка профиля `core` на
   macOS arm64 и Ubuntu x86_64; проверка совместимости пинов и lock-файлов (`uv sync
