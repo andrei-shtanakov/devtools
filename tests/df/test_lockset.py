@@ -325,6 +325,36 @@ REFUSALS: dict[str, bytes] = {
             'x = [{ name = "a", marker = "platform_release == \'1\'" }]',
         ),
     ),
+    "unreached-ambiguous": lock(
+        ROOT_OK,
+        pkg("a"),
+        pkg("z", body='dependencies = [{ name = "b" }]'),
+        pkg("b"),
+        pkg("b", source='source = { registry = "https://x.org/s" }'),
+    ),
+    "unreached-missing-target": lock(
+        ROOT_OK, pkg("a"), pkg("z", body='dependencies = [{ name = "nowhere" }]')
+    ),
+    "unreached-missing-extra": lock(
+        root(
+            'dependencies = [{ name = "a" }]\n'
+            "[package.optional-dependencies]\n"
+            'dev = [{ name = "a", extra = ["absent"] }]'
+        ),
+        pkg("a"),
+    ),
+    "unknown-package-key": lock(ROOT_OK, pkg("a", body='flavour = "x"')),
+    "version-bool": lock(ROOT_OK, pkg("a"), header="version = true\nrevision = 3\n"),
+    "revision-float": lock(ROOT_OK, pkg("a"), header="version = 1\nrevision = 3.0\n"),
+    "name-twice-in-result": lock(
+        root(
+            'dependencies = [{ name = "a", version = "1.0" }, '
+            '{ name = "a", version = "2.0" }]'
+        ),
+        pkg("a", "1.0"),
+        pkg("a", "2.0"),
+    ),
+    "deep-nesting": HEADER.encode() + b"x = " + b"[" * 100000 + b"]" * 100000,
     "not-toml": b"version = 1\nrevision = \n",
     "not-utf8": HEADER.encode() + b"\n# \xff\n",
 }
@@ -352,6 +382,14 @@ REASONS: dict[str, str] = {
     "unreached-bad-marker": "os_name < 'x'",
     "unreached-bad-source": "z.whl",
     "unreached-bad-optional": "platform_release",
+    "unreached-ambiguous": "кандидатов 2",
+    "unreached-missing-target": "кандидатов 0",
+    "unreached-missing-extra": "нет extra 'absent'",
+    "unknown-package-key": "ключи пакета ['flavour']",
+    "version-bool": "version True",
+    "revision-float": "revision 3.0",
+    "name-twice-in-result": "одно имя в составе дважды: ['a']",
+    "deep-nesting": "вложенность",
     "not-toml": "TOML",
     "not-utf8": "utf-8",
 }
@@ -599,6 +637,12 @@ def test_unreadable_input_is_a_problem(
 ) -> None:
     problems = uv_config_problems(pyproject_bytes, None, lock_bytes)
     assert len(problems) == 1 and problems[0].startswith(file)
+
+
+def test_deep_nesting_is_a_problem_not_an_exception() -> None:
+    deep = b"x = " + b"[" * 100000 + b"]" * 100000
+    problems = uv_config_problems(deep, None, deep)
+    assert [p.split(":")[0] for p in problems] == ["pyproject.toml", "uv.lock"]
 
 
 def test_devtools_own_pyproject_and_lock_pass() -> None:

@@ -103,6 +103,24 @@ does not depend on the interpreter (`requires-python = ">=3.12"`).
   - `uv lock --check`, with or without `UV_NO_CONFIG=1` → rc 1, "The lockfile at `uv.lock`
     needs to be updated, but `--check` was provided." (a real stale reason).
 
+## Root path spelling (probe 22.10)
+
+The contract of `expected_distributions(root_dir=…)` (the exact `--project` path, compared
+as spelled, never resolved) rests on this uv fact. uv 0.11.23 on macOS, current user,
+scratch `UV_CACHE_DIR`, `UV_NO_CONFIG=1`, `UV_LINK_MODE=copy`: a tiny editable-root project
+(`uv_build` backend) installed with `uv sync --locked --no-editable --project <P>`; the
+root's `direct_url.json` `url`:
+
+| `--project` spelling | `direct_url.json` `url` |
+|---|---|
+| `…/link/proj`, where `link` is a symlink to `real` | `file:///private/tmp/…/link/proj` (link kept) |
+| `/tmp/…/real/proj` (`/tmp` is a symlink to `/private/tmp`) | `file:///tmp/…/real/proj` (not resolved) |
+| `…/real/proj/` (trailing slash) | `…/real/proj` (slash folded) |
+| `…/real/../real/proj` | `…/real/proj` (`..` folded) |
+
+uv normalises the path only lexically and never resolves links. A uv bump re-runs this
+probe together with the `[tool.uv]` allowlist (`UV_PROJECT_KEYS_0_11_23`).
+
 ## Not shipped
 
 The capture script (scratch only) is not part of `df/` or `tests/` and nothing here refers to it.

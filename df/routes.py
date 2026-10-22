@@ -440,10 +440,12 @@ def route_action(
 
 @dataclass
 class RouteContext:
-    """Values a leaf hands to a later step of its route (F7); taken once.
+    """Values a leaf hands to a later step of its route (F7).
 
-    `installed` is every repo's installed list as `distribution_problems`
-    accepted it, for `release.json` `distributions_declared` (Task 9).
+    `uv_version` and `copied_digest` are taken once (`_take`). `installed` is
+    not taken: it is every repo's installed list as `distribution_problems`
+    accepted it, read by the caller after the route (Task 9,
+    `release.json` `distributions_declared`); it is never reset here.
     """
 
     uv_version: str | None = None

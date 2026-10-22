@@ -1241,10 +1241,14 @@ source = { registry = "https://pypi.org/simple" }
 
 
 def _dist_calls(
-    fl: FakeLayout, repos: tuple[str, ...], refs: dict[str, Path], ctx: RouteContext
+    fl: FakeLayout,
+    repos: tuple[str, ...],
+    refs: dict[str, Path],
+    ctx: RouteContext,
+    groups: tuple[str, ...] = (),
 ) -> dict[str, routes.Call]:
     pins = tuple(
-        RepoPin(r, f"https://example.invalid/{r}", "0" * 40, ()) for r in repos
+        RepoPin(r, f"https://example.invalid/{r}", "0" * 40, groups) for r in repos
     )
     profile = Profile("p", PY, pins)
     plan = BuildPlan(
@@ -1311,6 +1315,42 @@ def test_distribution_problems_root_is_the_builds_project_path(
         json.dumps({"url": f"file://{project}", "dir_info": {}})
     )
     calls["distribution_problems"]("releases/<id>")
+
+
+def test_distribution_problems_leaf_passes_groups_env_and_root_as_spelled(
+    fl: FakeLayout, tmp_path: Path
+) -> None:
+    """M2: the pin's groups, the install platform's markers and the root at
+    the unresolved build path (`build_home/tmp` is a link here) all reach
+    `expected_distributions`."""
+    here = "darwin" if plat.detect_platform() == "macos-arm64" else "linux"
+    other = "linux" if here == "darwin" else "darwin"
+    lock = (
+        b'version = 1\nrevision = 3\n\n[[package]]\nname = "app"\n'
+        b'version = "0.1.0"\nsource = { editable = "." }\n'
+        b"dependencies = ["
+        + f'{{ name = "mine", marker = "sys_platform == \'{here}\'" }}, '
+        f'{{ name = "theirs", marker = "sys_platform == \'{other}\'" }}'.encode()
+        + b']\n[package.dev-dependencies]\ng = [{ name = "grp" }]\n'
+        + b"".join(
+            f'\n[[package]]\nname = "{n}"\nversion = "1.0"\n'
+            f'source = {{ registry = "https://pypi.org/simple" }}\n'.encode()
+            for n in ("mine", "theirs", "grp")
+        )
+    )
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (fl.layout.build_home / "tmp").symlink_to(elsewhere)
+    ref = _repo(fl, "r1", lock, [("mine", "1.0"), ("grp", "1.0"), ("app", "0.1.0")])
+    project = build_mod.build_src_dir(fl.layout, ID, "r1")
+    site = fl.layout.release_dir(ID) / "venv" / "r1" / "lib" / "python3.13"
+    (site / "site-packages" / "app-0.1.0.dist-info" / "direct_url.json").write_text(
+        json.dumps({"url": f"file://{project}", "dir_info": {}})
+    )
+    ctx = RouteContext()
+    calls = _dist_calls(fl, ("r1",), {"r1": ref}, ctx, groups=("g",))
+    calls["distribution_problems"]("releases/<id>")
+    assert sorted(d.name for d in ctx.installed["r1"]) == ["app", "grp", "mine"]
 
 
 def test_distribution_problems_leaf_lists_every_repo(fl: FakeLayout) -> None:

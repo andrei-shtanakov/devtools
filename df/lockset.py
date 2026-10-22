@@ -69,6 +69,21 @@ DECLARED_LIMIT = (
 )
 
 _DEP_KEYS = frozenset({"name", "version", "source", "marker", "extra"})
+#: `[[package]]` keys of a revision-3 lock; another key is a refusal.
+_PACKAGE_KEYS = frozenset(
+    {
+        "name",
+        "version",
+        "source",
+        "dependencies",
+        "optional-dependencies",
+        "dev-dependencies",
+        "sdist",
+        "wheels",
+        "metadata",
+        "resolution-markers",
+    }
+)
 _ROOT_SOURCES = frozenset({("virtual", "."), ("editable", "."), ("directory", ".")})
 
 
@@ -93,7 +108,9 @@ def expected_distributions(
     The lock must be `version = 1`, `revision = 3`, with no key outside
     `LOCK_TOP_KEYS`/`LOCK_MANIFEST_KEYS`. Every dependency record and every
     package source of the whole lock is checked first, reached or not, so a
-    refusal does not depend on the platform. Then a breadth-first walk:
+    refusal does not depend on the platform: package keys (`_PACKAGE_KEYS`),
+    record keys, markers, sources, each record's single target and the
+    extras it asks for. Then a breadth-first walk:
 
     - from the root's dependencies and its `dev-dependencies[g]` for each
       `g` in `groups` (a missing group is a refusal); root extras are not
@@ -106,7 +123,8 @@ def expected_distributions(
       (before projection); zero or several candidates are a refusal.
 
     The virtual root is not in the result; an `editable`/`directory` root is,
-    as the build copy `root_dir` (`--no-editable`). Anything else is
+    as the build copy `root_dir` (`--no-editable`). One name reached twice
+    (uv installs one distribution per name) and anything else is
     `UnsupportedLock`.
 
     `root_dir` must be the exact `--project` path of the build
@@ -121,8 +139,9 @@ def expected_distributions(
     _check_header(data)
     packages = _packages(data)
     root = _root(packages)
-    _check_all(packages, root, env, root_dir)
-    return _Walk(packages, root, env, root_dir).run(groups)
+    by_name = _index(packages)
+    _check_all(packages, by_name, root, env, root_dir)
+    return _Walk(packages, by_name, root, env, root_dir).run(groups)
 
 
 def distribution_problems(
@@ -235,8 +254,11 @@ def _tool_uv_problems(pyproject: bytes) -> list[str]:
 
 
 def _toml(data: bytes) -> dict[str, Any]:
-    """Parse UTF-8 TOML; a decode or syntax error is a `ValueError`."""
-    return tomllib.loads(data.decode("utf-8"))
+    """Parse UTF-8 TOML; a decode, syntax or nesting error is a `ValueError`."""
+    try:
+        return tomllib.loads(data.decode("utf-8"))
+    except RecursionError as exc:
+        raise ValueError("слишком глубокая вложенность") from exc
 
 
 def _declared(source: SourceId) -> SourceId:
@@ -299,6 +321,9 @@ def _packages(data: Mapping[str, Any]) -> list[_Package]:
     for table in raw:
         if not isinstance(table, dict):
             raise _refuse("[[package]] не таблица")
+        unknown = sorted(set(table) - _PACKAGE_KEYS)
+        if unknown:
+            raise _refuse(f"{table.get('name')!r}: ключи пакета {unknown}")
         name, version, source = (table.get(k) for k in ("name", "version", "source"))
         if not isinstance(name, str) or not isinstance(source, dict):
             raise _refuse(f"пакет без name/source: {name!r}")
@@ -355,9 +380,17 @@ def _check_entry(entry: object, where: str, env: Mapping[str, str]) -> None:
 
 
 def _check_all(
-    packages: list[_Package], root: int, env: Mapping[str, str], root_dir: Path
+    packages: list[_Package],
+    by_name: Mapping[str, list[int]],
+    root: int,
+    env: Mapping[str, str],
+    root_dir: Path,
 ) -> None:
-    """F5: every record and every source of the lock, reached or not."""
+    """F5: every record and every source of the lock, reached or not.
+
+    Each record must resolve to one target by the walk's own rule
+    (`_select`), and each extra it asks for must exist there.
+    """
     for i, package in enumerate(packages):
         if i != root:
             source_from_lock(package.source, root_dir=root_dir)
@@ -366,6 +399,33 @@ def _check_all(
                 raise _refuse(f"{package.name}: {label} не список")
             for entry in entries:
                 _check_entry(entry, f"{package.name} {label}", env)
+                target = packages[_select(packages, by_name, entry)]
+                optional = target.table.get("optional-dependencies", {})
+                for extra in entry.get("extra", []):
+                    if extra not in optional:
+                        raise _refuse(f"{target.name}: нет extra {extra!r}")
+
+
+def _index(packages: list[_Package]) -> dict[str, list[int]]:
+    by_name: dict[str, list[int]] = {}
+    for i, package in enumerate(packages):
+        by_name.setdefault(package.name, []).append(i)
+    return by_name
+
+
+def _select(
+    packages: list[_Package], by_name: Mapping[str, list[int]], entry: Mapping[str, Any]
+) -> int:
+    """N2: by name, then the record's raw `version`/`source`, if given."""
+    found = [
+        i
+        for i in by_name.get(normalize_name(entry["name"]), [])
+        if entry.get("version", packages[i].version) == packages[i].version
+        and entry.get("source", packages[i].source) == packages[i].source
+    ]
+    if len(found) != 1:
+        raise _refuse(f"запись {dict(entry)!r}: кандидатов {len(found)}")
+    return found[0]
 
 
 class _Walk:
@@ -374,19 +434,13 @@ class _Walk:
     def __init__(
         self,
         packages: list[_Package],
+        by_name: Mapping[str, list[int]],
         root: int,
         env: Mapping[str, str],
         root_dir: Path,
     ) -> None:
-        self.packages, self.root, self.env, self.root_dir = (
-            packages,
-            root,
-            env,
-            root_dir,
-        )
-        self.by_name: dict[str, list[int]] = {}
-        for i, package in enumerate(packages):
-            self.by_name.setdefault(package.name, []).append(i)
+        self.packages, self.by_name, self.root = packages, by_name, root
+        self.env, self.root_dir = env, root_dir
 
     def run(self, groups: tuple[str, ...]) -> frozenset[ExpectedDist]:
         root = self.packages[self.root]
@@ -404,20 +458,22 @@ class _Walk:
                 continue
             visited.add(node)
             queue.extend(self._targets(self._entries(*node)))
-        return frozenset(
+        dists = [
             self._dist(i)
             for i, extra in visited
             if extra is None and not (i == self.root and "virtual" in root.source)
-        )
+        ]
+        twice = sorted(n for n, c in Counter(d.name for d in dists).items() if c > 1)
+        if twice:
+            raise _refuse(f"одно имя в составе дважды: {twice}")
+        return frozenset(dists)
 
     def _entries(self, index: int, extra: str | None) -> list[Any]:
-        package = self.packages[index]
+        """Records of a node; `_check_all` proved every asked extra exists."""
+        table = self.packages[index].table
         if extra is None:
-            return list(package.table.get("dependencies", []))
-        optional = package.table.get("optional-dependencies", {})
-        if extra not in optional:
-            raise _refuse(f"{package.name}: нет extra {extra!r}")
-        return list(optional[extra])
+            return list(table.get("dependencies", []))
+        return list(table["optional-dependencies"][extra])
 
     def _targets(self, entries: list[Any]) -> list[tuple[int, str | None]]:
         nodes: list[tuple[int, str | None]] = []
@@ -425,23 +481,10 @@ class _Walk:
             marker = entry.get("marker")
             if marker is not None and not evaluate(marker, self.env):
                 continue
-            target = self._select(entry)
+            target = _select(self.packages, self.by_name, entry)
             nodes.append((target, None))
             nodes += [(target, e) for e in entry.get("extra", [])]
         return nodes
-
-    def _select(self, entry: Mapping[str, Any]) -> int:
-        """N2: by name, then the record's raw `version`/`source`, if given."""
-        found = [
-            i
-            for i in self.by_name.get(normalize_name(entry["name"]), [])
-            if entry.get("version", self.packages[i].version)
-            == self.packages[i].version
-            and entry.get("source", self.packages[i].source) == self.packages[i].source
-        ]
-        if len(found) != 1:
-            raise _refuse(f"запись {dict(entry)!r}: кандидатов {len(found)}")
-        return found[0]
 
     def _dist(self, index: int) -> ExpectedDist:
         package = self.packages[index]

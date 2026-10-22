@@ -68,7 +68,12 @@ def evaluate(marker: str, env: Mapping[str, str]) -> bool:
     Python variables compare as zero-padded integer tuples with all six
     operators; other variables support `==`/`!=` only.
     """
-    return _Parser(marker).parse().value(env)
+    try:
+        return _Parser(marker).parse().value(env)
+    except RecursionError as exc:
+        raise UnsupportedLock(
+            f"неподдерживаемый маркер {marker!r}: слишком глубокая вложенность"
+        ) from exc
 
 
 @dataclass(frozen=True)

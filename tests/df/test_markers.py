@@ -109,3 +109,9 @@ def test_unsupported_marker(marker: str) -> None:
     with pytest.raises(UnsupportedLock) as exc:
         evaluate(marker, MACOS_312)
     assert repr(marker) in str(exc.value)
+
+
+def test_deep_marker_nesting_is_refused() -> None:
+    marker = "(" * 5000 + "sys_platform == 'darwin'" + ")" * 5000
+    with pytest.raises(UnsupportedLock, match="вложенность"):
+        evaluate(marker, MACOS_312)
