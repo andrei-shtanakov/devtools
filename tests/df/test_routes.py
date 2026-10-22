@@ -1,7 +1,8 @@
 """Tests for the route interpreter, guards and call table (Task 7, part D1).
 
 Every route runs through the real `run_route` and real guards over a
-`fake_layout`. Every call Task 7 owns (`acceptance_calls`) is real (7-D2);
+`fake_layout`. Every call Tasks 7, 7a and 8 own (`acceptance_calls`) is real
+(7-D2);
 only the leaves of later tasks (`LATER_LEAVES`) are stand-ins generated from
 `leaf_variants` (F3): each performs exactly its protocol's steps through the
 patched lower operations (`fault_point`, `sync_dir`, `sync_tree`, `run_as`,
@@ -36,6 +37,7 @@ from df import build as build_mod
 from df import install_table as table
 from df import platform as plat
 from df.accept import AcceptMark, Facts, load_mark
+from df.boundary import TransferResult
 from df.build import BuildPlan
 from df.config import (
     Account,
@@ -1383,6 +1385,124 @@ def test_distribution_problems_leaf_lists_every_repo(fl: FakeLayout) -> None:
     assert "r3: нет доверенного чекаута" in detail
     assert ctx.installed == {}
     assert _journal(fl) == []
+
+
+# ---------- static_problems and transfer_check (Task 8) ----------
+
+PYPROJECT = '[project]\nname = "r1"\n[project.scripts]\ntool = "r1:main"\n'
+
+
+def _ref(fl: FakeLayout, repo: str, text: str) -> Path:
+    ref = fl.layout.verify_dir / repo
+    ref.mkdir()
+    (ref / "pyproject.toml").write_text(text + "[build-system]\nrequires = []\n")
+    return ref
+
+
+@pytest.mark.parametrize("leaf", ["static_problems", "transfer_check"])
+def test_boundary_leaves_pass_the_trusted_inventory(
+    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout, leaf: str
+) -> None:
+    """Each leaf reads `[project.scripts]` of the trusted checkout and hands
+    the copy, the platform / `df-build` and that inventory to its check."""
+    seen: list[tuple[object, ...]] = []
+
+    def fake_static(tree: Path, platform: str, expected: object) -> list[str]:
+        seen.append((tree, platform, expected))
+        return []
+
+    def fake_transfer(tree: Path, layout: Layout, **kw: object) -> TransferResult:
+        seen.append((tree, layout, kw))
+        return TransferResult([], {"r1": "3.13.1 (main)"})
+
+    monkeypatch.setattr(routes, "static_problems", fake_static)
+    monkeypatch.setattr(routes, "transfer_check", fake_transfer)
+    ctx = RouteContext()
+    refs = {"r1": _ref(fl, "r1", PYPROJECT)}
+    _dist_calls(fl, ("r1",), refs, ctx)[leaf]("releases/<id>")
+    tree, expected = fl.layout.release_dir(ID), {"r1": frozenset({"tool"})}
+    if leaf == "static_problems":
+        assert seen == [(tree, plat.detect_platform(), expected)]
+        assert ctx.python_declared == {}
+    else:
+        kw = {"user": plat.BUILD_USER, "expected": expected}
+        assert seen == [(tree, fl.layout, kw)]
+        assert ctx.python_declared == {"r1": "3.13.1 (main)"}
+
+
+@pytest.mark.parametrize("leaf", ["static_problems", "transfer_check"])
+def test_boundary_leaves_list_every_problem(
+    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout, leaf: str
+) -> None:
+    """A missing or unreadable inventory and the check's own problems go into
+    one `StepFailed("verify")`; nothing reaches the context."""
+    monkeypatch.setattr(routes, "static_problems", lambda *a: ["venv/r1: плохо"])
+    monkeypatch.setattr(
+        routes, "transfer_check", lambda *a, **k: TransferResult(["запуск: плохо"], {})
+    )
+    ctx = RouteContext()
+    refs = {"r1": _ref(fl, "r1", PYPROJECT), "r2": _ref(fl, "r2", "[project\n")}
+    calls = _dist_calls(fl, ("r1", "r2", "r3"), refs, ctx)
+    with pytest.raises(StepFailed) as exc:
+        calls[leaf]("releases/<id>")
+    assert exc.value.step == "verify"
+    assert "r2: инвентарь entrypoints" in exc.value.detail
+    assert "r3: нет доверенного чекаута" in exc.value.detail
+    if leaf == "static_problems":
+        assert "venv/r1: плохо" in exc.value.detail
+    ctx_refs = {"r1": refs["r1"]}
+    with pytest.raises(StepFailed) as exc:
+        _dist_calls(fl, ("r1",), ctx_refs, ctx)[leaf]("releases/<id>")
+    assert ("venv/r1: плохо" if leaf == "static_problems" else "запуск: плохо") in (
+        exc.value.detail
+    )
+    assert ctx.python_declared == {}
+
+
+def _transfer_runs(fl: FakeLayout) -> list[tuple[str, ...]]:
+    """Commands run as `df-build` inside the `transfer_check` call."""
+    runs: list[tuple[str, ...]] = []
+    inside = False
+    for event in fl.events:
+        if event[0] == "call":
+            inside = event[1] == "transfer_check"
+        elif inside and event[0] == "run_as":
+            runs.append(event[2])  # type: ignore[arg-type]
+    return runs
+
+
+def _transfer_honest(fl: FakeLayout, monkeypatch: pytest.MonkeyPatch) -> bool:
+    """The verify route matches the table and `transfer_check` ran exactly
+    the leftover `find` as `df-build` (the profile has no repos), so it
+    removed nothing. `run_as(df-build)+` alone cannot tell a hidden removal
+    as `df-build` from the find: the argv of each run is compared too."""
+    state = DEFAULT | BASES["verify"][0]
+    if not case_matches(fl, monkeypatch, "verify", state):
+        return False
+    home = str(fl.layout.build_home)
+    find = ("/usr/bin/find", home, "-mindepth", "1", "-maxdepth", "1")
+    find += ("(", "-name", "tmp", "-o", "-name", "cache", ")", "-print")
+    return _transfer_runs(fl) == [find]
+
+
+def test_transfer_check_in_route_only_finds(
+    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout
+) -> None:
+    assert _transfer_honest(fl, monkeypatch)
+
+
+def test_twin_transfer_check_with_hidden_build_home_cleanup(
+    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout
+) -> None:
+    """R33.F3 twin: the real check preceded by a hidden `cleanup_build_home`."""
+    real = routes.transfer_check
+
+    def hidden(release_dir: Path, layout: Layout, **kw: Any) -> TransferResult:
+        plat.cleanup_build_home(layout, "tmp")
+        return real(release_dir, layout, **kw)
+
+    monkeypatch.setattr(routes, "transfer_check", hidden)
+    assert not _transfer_honest(fl, monkeypatch)
 
 
 # ---------- the mark wrapper ----------

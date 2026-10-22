@@ -838,7 +838,7 @@ root, и сборщик пишет только в свой каталог. Ид
 | `verify_sources` | check | ничего не меняет: ни одного изменения файлов, ни одного запуска от `df-build` |
 | `distribution_problems` | check | ничего не меняет: ни одного изменения файлов, ни одного запуска от `df-build` |
 | `static_problems` | check | ничего не меняет: ни одного изменения файлов, ни одного запуска от `df-build` |
-| `transfer_check` | builder | создаёт `build_home/tmp`, `build_home/cache`; требует, чтобы их не было |
+| `transfer_check` | builder | запуски от `df-build` с `HOME = build_home`; требует отсутствия `build_home/tmp` и `build_home/cache`; ничего не удаляет |
 | `tree_digest` | check | ничего не меняет: ни одного изменения файлов, ни одного запуска от `df-build` |
 <!-- install-routes:end -->
 

@@ -15,6 +15,7 @@ from df.digest import (
     check_links,
     check_name,
     check_names,
+    resolve_in_tree,
     resolve_link_in_tree,
     tree_digest,
 )
@@ -361,3 +362,70 @@ def test_link_resolution_wraps_only_tree_changes(
     with pytest.raises(raised) as exc:
         resolve_link_in_tree(tree, LR, PurePosixPath("link"))
     assert (type(exc.value) is TreeError) == (raised is TreeError)
+
+
+# ---------- resolve_in_tree (Task 8, F3) ----------
+
+
+def _alias_tree(tmp_path: Path) -> Path:
+    """uv's layout: a minor-version alias to the key dir, absolute in-tree."""
+    tree = _link_tree(tmp_path, {})
+    key = tree / "python" / "cpython-3.12.13-x"
+    (key / "bin").mkdir(parents=True)
+    (key / "bin" / "python3.12").write_bytes(b"")
+    os.symlink(f"{LR}/python/cpython-3.12.13-x", tree / "python" / "cpython-3.12-x")
+    return tree
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        f"{LR}/python/cpython-3.12-x/bin/python3.12",
+        "python/cpython-3.12-x/bin/python3.12",
+        PurePosixPath("python/cpython-3.12-x/bin/../bin/./python3.12"),
+        f"{LR}/a/b/../../python/cpython-3.12.13-x/bin/python3.12",
+    ],
+)
+def test_resolve_in_tree_resolves_every_component(
+    tmp_path: Path, path: str | PurePosixPath
+) -> None:
+    tree = _alias_tree(tmp_path)
+    got = resolve_in_tree(tree, LR, path)
+    assert got == PurePosixPath("python/cpython-3.12.13-x/bin/python3.12")
+
+
+def test_resolve_in_tree_root_and_dirs(tmp_path: Path) -> None:
+    tree = _alias_tree(tmp_path)
+    assert resolve_in_tree(tree, LR, str(LR)) == PurePosixPath(".")
+    got = resolve_in_tree(tree, LR, f"{LR}/python/cpython-3.12-x/bin")
+    assert got == PurePosixPath("python/cpython-3.12.13-x/bin")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/etc/passwd",
+        f"{LR}x/a",
+        f"{LR}/..",
+        "../x",
+        "a/b/file/x",  # a file in the middle
+        "a/missing",  # dangling
+        "a/out/x",  # a link escaping the tree on the way
+    ],
+)
+def test_resolve_in_tree_refusals(tmp_path: Path, path: str) -> None:
+    tree = _link_tree(tmp_path, {"a/out": "/etc"})
+    with pytest.raises(TreeError):
+        resolve_in_tree(tree, LR, path)
+
+
+def test_resolve_in_tree_cycle_refused(tmp_path: Path) -> None:
+    tree = _link_tree(tmp_path, {"c1": "c2", "c2": "c1"})
+    with pytest.raises(TreeError, match="hops"):
+        resolve_in_tree(tree, LR, "c1/x")
+
+
+def test_resolve_in_tree_refuses_noncanonical_root(tmp_path: Path) -> None:
+    tree = _link_tree(tmp_path, {})
+    with pytest.raises(TreeError):
+        resolve_in_tree(tree, "/opt//df", "a")

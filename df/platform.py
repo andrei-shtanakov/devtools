@@ -145,7 +145,7 @@ _DS_STANDARD = "dsAttrTypeStandard:"
 _DS_NATIVE = "dsAttrTypeNative:"
 _GETENT_NOT_FOUND = 2
 #: Every Mach-O magic: thin 32/64-bit and fat/fat64, in both byte orders.
-_MACHO_MAGIC = frozenset(
+MACHO_MAGIC = frozenset(
     {
         b"\xfe\xed\xfa\xce",  # MH_MAGIC
         b"\xce\xfa\xed\xfe",  # MH_CIGAM
@@ -157,7 +157,7 @@ _MACHO_MAGIC = frozenset(
         b"\xbf\xba\xfe\xca",  # FAT_CIGAM_64
     }
 )
-_ELF_MAGIC = b"\x7fELF"
+ELF_MAGIC = b"\x7fELF"
 _INSTALL_HINT = (
     "поддерживаемый способ — системный CLI или "
     "`sudo install -o root -m 0755 <src> /usr/local/libexec/darkfactory/bin/{name}`"
@@ -1449,7 +1449,7 @@ def linked_libraries(path: Path) -> LibDeps | None:
     it. Not a binary -> `None`; any failure -> `StepFailed("cli")`.
     """
     magic = _read_regular(path, 4)
-    if magic in _MACHO_MAGIC:
+    if magic in MACHO_MAGIC:
         otool = _otool_path()
         loads = parse_otool_loads(_tool_output([otool, "-l", str(path)]))
         own = set(loads.get("LC_ID_DYLIB", ()))
@@ -1461,7 +1461,7 @@ def linked_libraries(path: Path) -> LibDeps | None:
             dylinker[0] if dylinker else None,
             loads.get("LC_DYLD_ENVIRONMENT", ()),
         )
-    if magic == _ELF_MAGIC:
+    if magic == ELF_MAGIC:
         _require_trusted_tool(_READELF)
         dynamic = parse_readelf(_tool_output([_READELF, "-d", str(path)]))
         interp = parse_readelf_interp(_tool_output([_READELF, "-l", str(path)]))
@@ -1770,11 +1770,11 @@ def _binary_problems(
     problems = [
         f"{target}: LC_DYLD_ENVIRONMENT {e} запрещён" for e in deps.dyld_environment
     ]
-    if deps.loader is not None and not _is_system(Path(deps.loader), platform):
+    if deps.loader is not None and not is_system_path(Path(deps.loader), platform):
         problems.append(f"{target}: загрузчик {deps.loader} вне системных каталогов")
     problems += [f"{target}: путь поиска {r!r} запрещён" for r in deps.rpaths]
     for dep in deps.needed:
-        problems += _dependency_problems(target, dep, platform)
+        problems += dependency_problems(target, dep, platform)
     if platform != "macos-arm64" or XCSELECT_LIB not in deps.needed:
         return problems
     if in_shim:
@@ -1782,13 +1782,16 @@ def _binary_problems(
     return problems + _shim_problems(invoked, target, platform, depth)
 
 
-def _dependency_problems(target: Path, dep: str, platform: PlatformName) -> list[str]:
+def dependency_problems(target: Path, dep: str, platform: PlatformName) -> list[str]:
+    """Problems of one dependency of `target` outside any search path: a
+    system library by absolute path (macOS: on disk or in dyld's shared
+    cache), or an ELF soname in `LOADER_DIRS`; search tokens are refused."""
     if dep.startswith("@") or "$" in dep:
         return [f"{target}: зависимость {dep}: пути поиска не поддерживаются"]
     if platform == "macos-arm64" and "/" not in dep:
         return [f"{target}: зависимость {dep}: относительное имя, ищется от cwd"]
     if "/" in dep:
-        if not dep.startswith("/") or not _is_system(Path(dep), platform):
+        if not dep.startswith("/") or not is_system_path(Path(dep), platform):
             return [f"{target}: зависимость {dep} вне системных каталогов"]
         if platform == "macos-arm64" and not _exists(Path(dep)):
             return _shared_cache_problems(target, dep)
@@ -1844,7 +1847,7 @@ def _shim_problems(
     return [f"{target}: xcode-select → {p}" for p in nested]
 
 
-def _is_system(path: Path, platform: PlatformName) -> bool:
+def is_system_path(path: Path, platform: PlatformName) -> bool:
     """Under a system directory; a path with `..` never is (links make `..`
     physical, so only the trusted-path walk may resolve it)."""
     if ".." in path.parts:
