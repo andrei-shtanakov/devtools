@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -182,8 +183,11 @@ def test_visible_unsynced_then_retry_then_os_crash(
     assert w.retry() == 0
     w.m.os_crash()
     assert committed_problems(w, target, w.cfg()) == []
-    order = [p for p in w.m.points if p.op == "unlinked" and p.path == w.lay.pending]
-    assert order, "pending.toml removed by the retry"
+    points = w.m.points
+    gone = [p.index for p in points if p.op == "unlinked" and p.path == w.lay.pending]
+    command = (w.lay.bin_dir / "darkfactory", w.lay.local_bin / "darkfactory")
+    last_command = max(p.index for p in points if p.path in command)
+    assert gone and gone[-1] > last_command, "pending.toml goes after the command"
 
 
 # ---------- rollback over a visible, not durable fact (S1-R6-N1) ----------
@@ -205,6 +209,7 @@ def test_rollback_with_unsynced_fact_then_os_crash(
     if window == "releases.toml":
         w.m.trap(fault("renamed", w.lay.etc / "releases.toml"))
         w.killed(lambda: w.bootstrap(w.init_argv()))
+        assert not w.m.is_durable(w.lay.etc / "releases.toml"), "window open"
     else:
         w.kill_at("verify")
         w.killed(lambda: w.bootstrap(w.init_argv()))
@@ -312,18 +317,26 @@ def root_never_inside(w: World, home: Path) -> list[str]:
     seen: list[str] = []
     inside = str(home) + "/"
 
+    def from_df() -> bool:
+        """Any `df` frame on the stack (calls via pathlib, shutil, os.walk)."""
+        frame = sys._getframe(2)  # noqa: SLF001
+        while frame is not None:
+            if str(frame.f_globals.get("__name__")).startswith("df."):
+                return True
+            frame = frame.f_back
+        return False
+
     def watch(name: str) -> None:
         real = getattr(os, name)
 
         def call(path: object, *a: object, **kw: object) -> object:
-            module = str(__import__("sys")._getframe(1).f_globals.get("__name__"))
             dir_fd = kw.get("dir_fd")
             full = str(path)
             if isinstance(dir_fd, int):
                 from tests.df.crash_model import fd_path
 
                 full = f"{fd_path(dir_fd)}/{path}"
-            if module.startswith("df.") and full.startswith(inside):
+            if full.startswith(inside) and from_df():
                 seen.append(f"{name} {full}")
             return real(path, *a, **kw)
 

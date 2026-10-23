@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from df import accept, admin, cli, fsutil, install, journal, state
+from df import accept, admin, cli, fsutil, install, journal, launcher_entry, state
 from df import build as build_mod
 from df import platform as plat
 from df.config import (
@@ -153,11 +153,27 @@ class World:
         assert self.model is not None, "fake_world only"
         return self.model
 
+    def entry(self, argv: list[str]) -> int:
+        """The shipped entry's writer half (`df/launcher_entry.py`, stdlib):
+        `acquire` (root, its own lock opening, its own os.fsync settle),
+        `take_snapshot`, `typed_read`, then `main(mode="writer")` -- what
+        `darkfactory install` runs, minus the import of the admin code."""
+        paths = launcher_entry.EntryPaths(str(self.lay.root))
+        self.mp.setattr(launcher_entry, "ROOT_UID", os.geteuid())
+        self.mp.setattr(launcher_entry, "owner_uid", self.fl.owner_of)
+        fd = launcher_entry.acquire(paths)
+        try:
+            snap = launcher_entry.take_snapshot(paths, "writer")
+            read = launcher_entry.typed_read(state, snap)
+            return cli.main(argv, mode="writer", read=read, lock_fd=fd, layout=self.lay)
+        finally:
+            os.close(fd)
+
     def retry(self, argv: list[str] | None = None) -> int:
-        """A retry by the real path (`install` by default): the entry's writer
-        half while `current` exists (the entry refuses without it), else
-        bootstrap -- lock, `settle_on_acquire`, `main`, `recover_pending`."""
-        run = self.writer if os.path.lexists(self.lay.current) else self.bootstrap
+        """A retry by the real path (`install` by default): the shipped
+        entry while `current` exists (it refuses without it), else bootstrap
+        -- lock, settle, `main`, `recover_pending`, `drive`."""
+        run = self.entry if os.path.lexists(self.lay.current) else self.bootstrap
         return run(["install"] if argv is None else argv)
 
     def killed(self, run: Callable[[], object]) -> None:

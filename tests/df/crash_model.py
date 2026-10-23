@@ -44,7 +44,12 @@ rules (spec 2026-10-13-df-installer-design.md §3.3 «Синхронизация
 Limits: L1 above; L2 every object must be readable and searchable by its
 owner (the fake runs as one user) -- otherwise `ModelError`, never a guess;
 L3 a symbolic link, fifo or socket is not synced on its own (a link is a
-value of its directory, anything else is `ModelError`).
+value of its directory, anything else is `ModelError`); L4 an OS crash
+loses *all* unsynced effects at once -- a real journaling filesystem may
+also persist a part of them (a periodic commit: a half-done `rmtree` back
+as a partial tree). Only the two extremes are modeled: a process crash
+keeps everything, an OS crash nothing unsynced; a prefix is not tested
+(the evidence's level «не испытано»).
 
 Identity: every observed object gets a model id, and the model keeps a
 descriptor open on it (a pin), so an inode number is never reused while
@@ -58,6 +63,7 @@ from a state (R49): the files, the durable records, the boot.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import os
 import stat
@@ -78,6 +84,8 @@ _SYMLINK, _CHMOD, _FCHMOD, _LINK = os.symlink, os.chmod, os.fchmod, os.link
 _FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _ANY_FLAGS = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC
+#: `open` errors that mean "no object to record" (a link, or nothing there).
+_NO_OBJECT = frozenset({errno.ELOOP, errno.ENOENT, errno.ENOTDIR})
 _IS_DARWIN = sys.platform == "darwin"
 _F_FULLFSYNC = getattr(fcntl, "F_FULLFSYNC", 51)
 _F_GETPATH = getattr(fcntl, "F_GETPATH", 50)
@@ -277,7 +285,10 @@ class CrashModel:
         )
 
     def restore(self, state: State) -> None:
-        """Back to `state`: files, durable records, boot, point count."""
+        """Back to `state`: files, durable records, boot, point count.
+
+        Traps and dropped syncs are not part of a state: they stay as armed
+        (a branch keeps its twin's drops; `disarm` clears them)."""
         self._materialize(state.current)
         self.durable = dict(state.durable)
         self.born = dict(state.born)
@@ -351,6 +362,9 @@ class CrashModel:
         return fault_point
 
     def _sync_file(self, fd: int) -> None:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            # the real sync_file of a directory may fail on macOS: never a guess
+            raise ModelError(f"sync_file of a non-file: {fd_path(fd)}")
         if self._point("sync", "sync_file", fd_path(fd)):
             self._record(fd)
 
@@ -434,7 +448,9 @@ class CrashModel:
             try:
                 dir_fd = kwargs.get("dir_fd")
                 fd = _OPEN(path, flags, dir_fd=dir_fd)  # type: ignore[arg-type]
-            except OSError:
+            except OSError as exc:
+                if exc.errno not in _NO_OBJECT:
+                    raise ModelError(f"L2: {path}: {exc}") from exc
                 fd = None  # a link itself, or nothing: no object to record
             if fd is not None:
                 try:

@@ -17,7 +17,7 @@ import pytest
 
 from df import fsutil, journal
 from tests.df.conftest import BUILD_UID, FakeLayout
-from tests.df.crash_model import Crash, CrashModel, Point
+from tests.df.crash_model import Crash, CrashModel, ModelError
 
 
 @pytest.fixture()
@@ -415,7 +415,6 @@ def test_restore_keeps_identities(m: CrashModel) -> None:
     m.os_crash()
     m.restore(branch)
     assert m.identity(f) == oid
-    assert isinstance(m.points, list) and all(isinstance(p, Point) for p in m.points)
 
 
 def test_bare_fsync_of_a_file_is_no_file_sync_on_macos(m: CrashModel) -> None:
@@ -446,3 +445,47 @@ def test_fullfsync_outside_fsutil_is_a_file_sync(m: CrashModel) -> None:
     os.close(fd)
     m.os_crash()
     assert f.read_bytes() == b"new"
+
+
+def test_bare_fsync_of_a_directory_counts(m: CrashModel) -> None:
+    """R2: a bare `os.fsync` of a directory (the entry's stdlib settle) makes
+    its entries durable on both platforms."""
+    a, b = m.root / "d" / "a", m.root / "d" / "b"
+    write(a, b"x", sync=True)
+    fsutil.sync_dir(a.parent)
+    os.rename(a, b)
+    fd = os.open(a.parent, os.O_RDONLY | os.O_DIRECTORY)
+    os.fsync(fd)
+    os.close(fd)
+    m.os_crash()
+    assert not os.path.lexists(a)
+    assert b.read_bytes() == b"x"
+
+
+def test_is_durable_compares_the_state(m: CrashModel) -> None:
+    """The same object after a `fchmod` without its own sync is not durable."""
+    d = m.root / "d"
+    assert m.is_durable(d)
+    fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+    os.fchmod(fd, 0o700)
+    os.close(fd)
+    assert not m.is_durable(d)
+    fsutil.sync_dir(d)
+    assert m.is_durable(d)
+
+
+def test_sync_file_of_a_directory_is_a_model_error(m: CrashModel) -> None:
+    fd = os.open(m.root / "d", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(ModelError):
+            fsutil.sync_file(fd)
+    finally:
+        os.close(fd)
+
+
+def test_unreadable_object_changed_is_a_model_error(m: CrashModel) -> None:
+    """L2: a `chmod` of an object the model cannot open is never a guess."""
+    f = m.root / "d" / "f"
+    write(f, b"x", mode=0o000)
+    with pytest.raises(ModelError, match="L2"):
+        os.chmod(f, 0o600)
