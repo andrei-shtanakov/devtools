@@ -527,7 +527,7 @@ def _trusted_ready(layout: Layout, cfg: InstallConfig, platform: PlatformName) -
             missing = True
         elif stat.S_ISDIR(st.st_mode):
             have = stat.S_IMODE(st.st_mode)
-            if _narrower_own(st, mode):
+            if _repairable_own(st, mode):
                 missing = True
             elif path in exact and have != mode:
                 problems.append(f"{path}: права {have:04o}, нужны {mode:04o}")
@@ -536,11 +536,10 @@ def _trusted_ready(layout: Layout, cfg: InstallConfig, platform: PlatformName) -
     return not missing
 
 
-def _narrower_own(st: os.stat_result, mode: int) -> bool:
-    """Root's directory whose mode is a strict subset of `mode`'s bits."""
-    have = stat.S_IMODE(st.st_mode)
+def _repairable_own(st: os.stat_result, mode: int) -> bool:
+    """Root's directory `fsutil.make_dir` sets to `mode` (`repairable`)."""
     owned = fsutil.owner_uid(st) == plat.ROOT_UID
-    return owned and have != mode and not have & ~mode
+    return owned and fsutil.repairable(st, mode)
 
 
 def _settle_prep_dirs(layout: Layout) -> None:

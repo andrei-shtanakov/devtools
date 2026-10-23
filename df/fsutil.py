@@ -144,12 +144,16 @@ def _discard(tmp: Path) -> None:
 def exact_mode() -> Iterator[None]:
     """`umask 0` around one creation: the object is born with exactly the
     requested mode, so its name is never visible at a narrower one. The
-    umask is process-wide; `df` is single-threaded."""
-    old = os.umask(0)
+    umask is process-wide: no other thread of `df` creates objects (the
+    only one, `SpawnedProducer`'s stderr drain, reads and closes its own
+    descriptor)."""
+    old: int | None = None
     try:
+        old = os.umask(0)
         yield
     finally:
-        os.umask(old)
+        if old is not None:
+            os.umask(old)
 
 
 def make_dir(
@@ -162,9 +166,13 @@ def make_dir(
     another mode, and the mode (the directory's own metadata) and the name
     (the parent's entry) are durable on return (spec 3.3).
 
+    A created directory whose mode is not `mode` after all (Linux: born
+    `S_ISGID` in a setgid parent) gets `fchmod(mode)` ->
+    `fault_point("chmod")` before its own sync.
+
     Present -- settle what is seen (spec 3.3, r6): a directory of the
-    current user whose mode is narrower than `mode` (a subset of its bits)
-    gets `fchmod(mode)` -> `fault_point("chmod")` (only with `repair`; a
+    current user whose mode is `repairable` (narrower, or with an inherited
+    `S_ISGID`) gets `fchmod(mode)` -> `fault_point("chmod")` (only with `repair`; a
     system directory above `df`'s own is never changed); a wider mode or
     another owner is never touched -- the caller refuses it. Then a
     directory is synced itself, and the parent always. Returns whether it
@@ -178,6 +186,9 @@ def make_dir(
     fault_point("created", path)
     fd = os.open(name, _DIR_NOFOLLOW, dir_fd=parent_fd)
     try:
+        if stat.S_IMODE(os.fstat(fd).st_mode) != mode:  # Linux: inherited S_ISGID
+            os.fchmod(fd, mode)
+            fault_point("chmod", path)
         sync_dir(fd)
     finally:
         os.close(fd)
@@ -192,15 +203,21 @@ def _settle_found(
     if stat.S_ISDIR(st.st_mode):
         fd = os.open(name, _DIR_NOFOLLOW, dir_fd=parent_fd)
         try:
-            have = stat.S_IMODE(st.st_mode)
-            narrower = have != mode and not have & ~mode
-            if repair and narrower and owner_uid(st) == os.geteuid():
+            if repair and repairable(st, mode) and owner_uid(st) == os.geteuid():
                 os.fchmod(fd, mode)
                 fault_point("chmod", path)
             sync_dir(fd)
         finally:
             os.close(fd)
     sync_dir(parent_fd)
+
+
+def repairable(st: os.stat_result, mode: int) -> bool:
+    """A mode `make_dir` may set to `mode`: not equal, and its bits a subset
+    of `mode`'s plus `S_ISGID` (Linux inherits it from a setgid parent).
+    Only narrowing: no write for group or others is ever added."""
+    have = stat.S_IMODE(st.st_mode)
+    return have != mode and not have & ~(mode | stat.S_ISGID)
 
 
 def create_file(path: Path, flags: int, mode: int, *, dir_fd: int | None = None) -> int:

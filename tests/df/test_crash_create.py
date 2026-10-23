@@ -38,10 +38,15 @@ def final_modes(w: World) -> dict[Path, int]:
     return out
 
 
-def nonfinal(w: World, *, all_present: bool = False) -> list[str]:
-    """Visible names at a mode other than their final one (or missing)."""
+def nonfinal(
+    w: World, *, all_present: bool = False, theirs: tuple[Path, ...] = ()
+) -> list[str]:
+    """Visible names at a mode other than their final one (or missing);
+    `theirs` -- pre-existing directories `df` must leave as they are."""
     out: list[str] = []
     for path, mode in final_modes(w).items():
+        if path in theirs:
+            continue
         try:
             have = stat.S_IMODE(os.lstat(path).st_mode)
         except FileNotFoundError:
@@ -307,7 +312,8 @@ def test_setgid_parents_never_leave_a_setgid_dir(fake_world: World, crash: str) 
     narrowing) -- never a permanent «права 2711, нужны 0711»."""
     w = fake_world
     w.m.linux_setgid = True
-    for top in (w.lay.root / "opt", w.lay.var.parent):
+    theirs = (w.lay.root / "opt", w.lay.var.parent)
+    for top in theirs:
         top.mkdir(parents=True)
         os.chmod(top, 0o2755)
     w.m.baseline()
@@ -329,8 +335,9 @@ def test_setgid_parents_never_leave_a_setgid_dir(fake_world: World, crash: str) 
                 w.m.os_crash()
         w.kill_at("build-dir")
         w.killed(lambda: w.bootstrap(w.init_argv()))  # reached drive
-        assert nonfinal(w, all_present=True) == [], n
+        assert nonfinal(w, all_present=True, theirs=theirs) == [], n
         w.m.os_crash()
-        assert nonfinal(w, all_present=True) == [], n
+        assert nonfinal(w, all_present=True, theirs=theirs) == [], n
+        assert all(os.stat(p).st_mode & 0o7777 == 0o2755 for p in theirs), n
         runs += 1
     assert runs == (len(mkdirs) if crash != "none" else 1)

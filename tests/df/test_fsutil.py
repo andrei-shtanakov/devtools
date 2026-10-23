@@ -290,6 +290,8 @@ def test_make_dir_mode_and_name_are_durable(
         ("wider", 0o755, 0o700, 0o755),  # never narrowed: the caller refuses
         ("foreign", 0o700, 0o711, 0o700),  # another owner: never touched
         ("no-repair", 0o700, 0o755, 0o700),  # a system directory
+        ("setgid-own", 0o2711, 0o711, 0o711),  # Linux-inherited S_ISGID cleared
+        ("setgid-wider", 0o2755, 0o711, 0o2755),  # S_ISGID and wider: untouched
     ],
 )
 def test_make_dir_settles_a_found_name(
@@ -352,6 +354,7 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
     ("fsutil", "_write_tmp", "os.fchmod", 1): PRIMITIVE + ": temp file, sync_file",
     ("fsutil", "_discard", "os.unlink", 1): PRIMITIVE + ": its own temp file",
     ("fsutil", "make_dir", "os.mkdir", 1): PRIMITIVE,
+    ("fsutil", "make_dir", "os.fchmod", 1): PRIMITIVE + ": inherited S_ISGID",
     ("fsutil", "_settle_found", "os.fchmod", 1): PRIMITIVE + ": then own sync",
     ("fsutil", "create_file", "os.open", 1): PRIMITIVE,
     ("fsutil", "remove_durably", "os.unlink", 1): PRIMITIVE,
