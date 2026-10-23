@@ -181,6 +181,7 @@ def test_visible_unsynced_then_retry_then_os_crash(
 
     w.m.restore(branch)
     assert w.retry() == 0
+    assert committed_problems(w, target, w.cfg()) == []  # nothing unsynced
     w.m.os_crash()
     assert committed_problems(w, target, w.cfg()) == []
     points = w.m.points
@@ -679,6 +680,7 @@ def test_process_crash_after_current_rename_then_os_crash(fake_world: World) -> 
     assert current_id(w) == UPGRADE
     assert "opt/df/current" in w.m.unsynced()
     assert w.retry() == 0
+    assert committed_problems(w, UPGRADE, w.cfg()) == []  # nothing unsynced
     w.m.os_crash()
     assert committed_problems(w, UPGRADE, w.cfg()) == []
 
