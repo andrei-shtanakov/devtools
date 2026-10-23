@@ -492,7 +492,10 @@ REQUIRES: Mapping[str, str] = {
     "`unlink`; иначе очиститель",
     "cleanup_build_home": "очиститель запущен и уложился в срок; ошибка доступа — "
     "отказ, не отсутствие",
-    "install_admin_python": "`.staging` нет; `uv` сверяет загрузку (§3.9)",
+    "install_admin_python": "`.staging` и `cpython-…` нет; Python ≥ 3.12; "
+    "`admin-home` — каталог root `0700`; версия `uv` подтверждена (сверка загрузки "
+    "и перенос, §3.9); дерево `cpython-…` — root, без записи группы и всех, ссылки "
+    "относительные и внутри",
     "remove_empty_dir": "объект есть, пуст, владелец root",
     "remove_durably": "файл есть",
     "accept_copy": "`staging/<id>/tree` не порван (`built` после смены boot — "

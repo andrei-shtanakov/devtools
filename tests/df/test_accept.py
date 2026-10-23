@@ -715,12 +715,19 @@ def test_remove_own_tree_refuses_builder_tree_under_fake(fl: FakeLayout) -> None
 
 
 def test_every_owner_decision_reads_the_seam() -> None:
-    """Class guard: no df module reads `st_uid` but `fsutil.owner_uid`."""
+    """Class guard: no df module reads `st_uid` but `fsutil.owner_uid`.
+
+    The one exception is the stdlib-only entry (Task 8a), which cannot import
+    `fsutil`: it reads `st_uid` once, in its own seam `owner_uid`.
+    """
     df_dir = Path(__file__).resolve().parents[2] / "df"
     readers = sorted(
         p.name for p in df_dir.glob("*.py") if "st_uid" in p.read_text(encoding="utf-8")
     )
-    assert readers == ["fsutil.py"]
+    assert readers == ["fsutil.py", "launcher_entry.py"]
+    entry_text = (df_dir / "launcher_entry.py").read_text(encoding="utf-8")
+    assert entry_text.count("st_uid") == 1
+    assert "    return st.st_uid\n" in entry_text
 
 
 @pytest.mark.parametrize("how", ["rmdir", "unlink"])

@@ -3,7 +3,7 @@
 `drive` runs with the real `read_facts`, the real `route_action`/`run_route`
 and the real calls of Task 7 (`acceptance_calls`); the leaves of later tasks
 (`LATER_LEAVES`) are the table-generated stand-ins of the routes test, and
-`admin_ready` (Task 8a) is a stand-in with its signature (F5). Everything
+`admin_ready` is Task 8a's real predicate. Everything
 runs in `fake_layout` as the current user: no root, no network. A scenario
 stops where a later task's action begins (`Halt`), or where the state it
 pins is reached. Crashes are raised at the fault points of fsutil.
@@ -18,14 +18,13 @@ from pathlib import Path
 
 import pytest
 
-from df import accept, fsutil
+from df import accept, admin, fsutil
 from df import install_table as table
 from df import platform as plat
 from df.accept import AcceptMark, Facts, classify, load_mark, read_facts
 from df.config import ReleaseEntry, ReleasesConfig, config_digest, dump_releases
-from df.digest import release_digest, tree_digest
+from df.digest import release_digest
 from df.journal import StepFailed, read_journal
-from df.paths import Layout
 from df.routes import route_action, run_route
 from tests.df.conftest import BUILD_UID, FakeLayout
 from tests.df.test_routes import (
@@ -64,29 +63,16 @@ def fl(monkeypatch: pytest.MonkeyPatch, fake_layout: FakeLayout) -> FakeLayout:
     layout = setup_layout(monkeypatch, fake_layout)
     write_accounts(layout)
     layout.layout.pending.write_text("raw\n")
-    monkeypatch.setattr(plat, "trusted_path_problems", lambda _p: ["untrusted"])
+    lay = layout.layout
+    monkeypatch.setattr(
+        plat,
+        "trusted_path_problems",
+        lambda p: ["untrusted"] if p == lay.local_bin else [],
+    )
     return layout
 
 
 # ---------- the world of a scenario ----------
-
-
-def admin_ready(
-    layout: Layout,
-    release_id: str,
-    *,
-    expected_admin_digest: str,
-    expected_python: str,
-) -> bool:
-    """Stand-in of Task 8a's predicate: the admin code has the digest and the
-    admin Python of exactly that version is installed."""
-    admin = layout.admin_dir(release_id)
-    python = layout.admin_python / f"cpython-{expected_python}-test-triple"
-    return (
-        accept.is_real_dir(admin)
-        and tree_digest(admin, exclude=frozenset()) == expected_admin_digest
-        and accept.is_real_dir(python)
-    )
 
 
 def facts(fl: FakeLayout) -> Facts:
@@ -96,7 +82,7 @@ def facts(fl: FakeLayout) -> Facts:
         install_digest=DIGEST,
         build_uid=BUILD_UID,
         launcher_ready=lambda: False,
-        admin_ready=admin_ready,
+        admin_ready=admin.admin_ready,
     )
 
 

@@ -383,23 +383,25 @@ def test_generation_end_on_even_is_programming_error(tmp_path: Path) -> None:
         generation_end(lay)
 
 
-@pytest.mark.parametrize(
-    "content",
-    [
-        b"",
-        b"\n",
-        b"01\n",
-        b"-1\n",
-        b"+1\n",
-        b"1\n\n",
-        b" 1\n",
-        b"1 \n",
-        b"x\n",
-        b"\xd9\xa1\n",
-        b"1" * 100,
-        b"00",
-    ],
+#: Generation file contents (shared with the entry's copy, Task 8a carry FM5).
+GENERATION_MALFORMED = (
+    b"",
+    b"\n",
+    b"01\n",
+    b"-1\n",
+    b"+1\n",
+    b"1\n\n",
+    b" 1\n",
+    b"1 \n",
+    b"x\n",
+    b"\xd9\xa1\n",
+    b"1" * 100,
+    b"00",
 )
+GENERATION_CANONICAL = (b"0", b"0\n", b"12", b"12\n")
+
+
+@pytest.mark.parametrize("content", GENERATION_MALFORMED)
 def test_generation_malformed_rejected(tmp_path: Path, content: bytes) -> None:
     lay = _layout(tmp_path)
     lay.install_dir.mkdir(parents=True)
@@ -409,7 +411,7 @@ def test_generation_malformed_rejected(tmp_path: Path, content: bytes) -> None:
     assert info.value.step == "snapshot"
 
 
-@pytest.mark.parametrize("content", [b"0", b"0\n", b"12", b"12\n"])
+@pytest.mark.parametrize("content", GENERATION_CANONICAL)
 def test_generation_canonical_accepted(tmp_path: Path, content: bytes) -> None:
     lay = _layout(tmp_path)
     lay.install_dir.mkdir(parents=True)
