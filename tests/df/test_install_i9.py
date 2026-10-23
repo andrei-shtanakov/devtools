@@ -24,8 +24,8 @@ import pytest
 
 from df import accept, fsutil, install, journal, launcher_entry, release
 from df import platform as plat
-from df.config import ReleasesConfig, dump_releases, load_releases
-from df.journal import read_journal
+from df.config import ReleasesConfig, dump_install, dump_releases, load_releases
+from df.journal import StepFailed, read_journal
 from df.paths import Layout
 from tests.df.conftest import FakeLayout
 from tests.df.install_world import (
@@ -377,7 +377,90 @@ def test_i9_backstop_damage_during_resume(
     err = capsys.readouterr().err
     assert err.startswith("darkfactory: damaged: ")
     assert f"(run_id {run_id(w)}) уже переключила на него current" in err
+    assert "(остановлено: launcher: active → damaged)" in err  # nit 3
     assert_no_bad_advice(err)
+
+
+def test_i9_backstop_before_activate_names_g2(
+    w: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """G4, the other branch: the run's release damaged right after
+    `register`, before `activate` -- `current` is not it, so G2's text
+    (`current = нет`, no `unlink`)."""
+    damage_after(w, "register", lambda: FIRST)
+    assert w.bootstrap(w.init_argv()) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("darkfactory: damaged: ")
+    assert f"релиз {FIRST} незавершённой установки (run_id {run_id(w)})" in err
+    assert "current = нет — прежний" in err and boot("init") in err
+    assert "уже переключила" not in err and unlink_step(w.lay) not in err
+    assert "(остановлено: " in err
+    assert_no_bad_advice(err)
+
+
+def fail_after(world: World, action: str, *, unreadable: bool = False) -> None:
+    """The next run's `action` runs, then fails with `StepFailed(action,
+    "x")`; with `unreadable`, it also damages the release and every later
+    read of the facts fails."""
+    real_actions, real_read = install.install_actions, install.read_for
+    failed = [False]
+
+    def actions(run: install.InstallRun) -> dict[str, Callable[..., None]]:
+        out = dict(real_actions(run))
+        inner = out[action]
+
+        def act(facts: object) -> None:
+            inner(facts)
+            if unreadable:
+                damage(world, run.release_id)
+            failed[0] = True
+            raise StepFailed(action, "x")
+
+        out[action] = act
+        return out
+
+    def read_for(run: install.InstallRun) -> Callable[[], object]:
+        read = real_read(run)
+
+        def facts() -> object:
+            if failed[0]:
+                raise StepFailed("facts", "не читается")
+            return read()
+
+        return facts if unreadable else read
+
+    world.mp.setattr(install, "install_actions", actions)
+    world.mp.setattr(install, "read_for", read_for)
+
+
+@pytest.mark.parametrize("unreadable", [False, True])
+def test_i9_backstop_keeps_other_failures(
+    w: World, capsys: pytest.CaptureFixture[str], unreadable: bool
+) -> None:
+    """I-1, the negative twin of G4's widening: an action fails on an intact
+    release (or the facts cannot be read after it) -- the refusal is that
+    step's own, never the damaged advice to delete `pending.toml`."""
+    rid = switched(w, "first-A2")
+    fail_after(w, "launcher", unreadable=unreadable)
+    assert w.writer(["install"]) == 2
+    err = capsys.readouterr().err
+    assert err == "darkfactory: launcher: x\n", err
+    assert os.path.lexists(w.lay.pending) and current_id(w) == rid
+
+
+def test_i9_bare_deletion_first_install_other_config_refused(
+    w: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """m-1, the prefix half of «согласован»: a first install's
+    `pending.toml` deleted and `install.toml` written by hand for another
+    sha -- registered, but not agreeing: G1(b)."""
+    rid = switched(w, "first-A2")
+    damage(w, rid)
+    w.lay.pending.unlink()
+    (w.lay.etc / "install.toml").write_text(dump_install(w.cfg(OTHER_SHA)))
+    err = refused(w, capsys, w.bootstrap, ["install"])
+    assert "а install.toml не согласован с ним" in err
+    assert unlink_step(w.lay) in err and boot("install") in err
 
 
 # ---------- 5.2 the procedure ----------
