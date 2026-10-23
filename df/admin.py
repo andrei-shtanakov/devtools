@@ -19,7 +19,6 @@ import os
 import re
 import shlex
 import stat
-import uuid
 from pathlib import Path, PurePosixPath
 
 from df import accept, acl, fsutil
@@ -44,6 +43,8 @@ ADMIN_UMASK = 0o022
 VERSION_TIMEOUT = 60.0
 #: Bytes of uv's stderr a refusal quotes.
 STDERR_REPORT_BYTES = 4096
+#: The one temporary name of `link_command` in `local_bin` (C13).
+LINK_TMP = ".darkfactory.tmp"
 
 _STEP = "admin"
 _LAUNCHER_STEP = "launcher"
@@ -501,17 +502,20 @@ def link_command(layout: Layout) -> None:
     """Protocol `link_command`: `/usr/local/bin/darkfactory` -> the command.
 
     A temporary link, `rename` over the name, `fault_point("renamed")`,
-    `sync_dir(local_bin)`. No branching: whether to link is the route's
+    `sync_dir(local_bin)`. The temporary name is one fixed name,
+    `LINK_TMP`: a leftover of a killed run is unlinked first, never
+    accumulated (C13; the writer lock makes the name exclusive). No branching: whether to link is the route's
     guard (`local_bin=trusted`). The name is the command's own; nothing
     named `df` is ever created. Effects: `renamed` -> `sync_dir(local_bin)`.
     """
     name = layout.launcher.name
-    tmp = f".{name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    tmp = LINK_TMP
     try:
         fd = os.open(layout.local_bin, _DIR_FLAGS)
     except OSError as exc:
         raise StepFailed(_LAUNCHER_STEP, f"{layout.local_bin}: {exc}") from exc
     try:
+        _unlink_absent_ok(tmp, fd)
         os.symlink(str(layout.launcher), tmp, dir_fd=fd)
         try:
             os.rename(tmp, name, src_dir_fd=fd, dst_dir_fd=fd)
@@ -524,6 +528,13 @@ def link_command(layout: Layout) -> None:
         raise StepFailed(_LAUNCHER_STEP, f"{layout.local_bin / name}: {exc}") from exc
     finally:
         os.close(fd)
+
+
+def _unlink_absent_ok(name: str, dir_fd: int) -> None:
+    try:
+        os.unlink(name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        pass
 
 
 def _unlink_quietly(name: str, dir_fd: int) -> None:

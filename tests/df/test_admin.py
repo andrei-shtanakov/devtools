@@ -893,6 +893,18 @@ def test_link_command_events_and_replace(fl: FakeLayout) -> None:
     assert sorted(os.listdir(lay.local_bin)) == ["darkfactory"]
 
 
+def test_link_command_reuses_one_temporary_name(fl: FakeLayout) -> None:
+    """C13 (as `activate`'s m4): one fixed temporary name; a leftover from a
+    killed run is replaced, not accumulated."""
+    lay = fl.layout
+    leftover = lay.local_bin / admin.LINK_TMP
+    leftover.symlink_to("/stale")
+    admin.link_command(lay)
+    admin.link_command(lay)
+    assert sorted(os.listdir(lay.local_bin)) == ["darkfactory"]
+    assert os.readlink(lay.local_bin / "darkfactory") == str(lay.launcher)
+
+
 def test_link_command_over_a_directory_refused(fl: FakeLayout) -> None:
     lay = fl.layout
     (lay.local_bin / "darkfactory").mkdir()
