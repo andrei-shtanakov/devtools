@@ -20,9 +20,11 @@ inputs, hostile ones included (`tests/df/test_launcher_entry.py`):
 - the hardened reader of `df.config` (bytes, not decoded) and the strict rules
   of `df.config.parse_releases`.
 
-`entry_text(layout)` is this module's own text with its `_ROOT` line set to
-the layout root; the installer writes it to `bin/darkfactory-entry.py` and
-`df.admin.launcher_ready` compares it byte for byte.
+`entry_text(layout, source)` is the text of an entry module — the activated
+release's own `admin/<id>/df/launcher_entry.py` (M-1), by default this file —
+with its `_ROOT` line set to the layout root; the installer writes it to
+`bin/darkfactory-entry.py` and `df.admin.launcher_ready` compares it byte for
+byte with the same source.
 """
 
 from __future__ import annotations
@@ -48,6 +50,8 @@ if TYPE_CHECKING:
 #: The layout root of the installed entry; `entry_text` substitutes this line.
 _ROOT = "/"
 _ROOT_LINE = '_ROOT = "/"\n'
+#: Bytes an entry source may have (`entry_text`).
+_ENTRY_MAX_BYTES = 1 << 20
 
 #: Parts of `df.state.RawSnapshot` (Task 9) the entry reads before `df` loads.
 RAW_FIELDS = (
@@ -77,18 +81,45 @@ _UNTRUSTED = "административный код не защищён от �
 _NO_INSTALL_DIR = "каталога установки нет: восстановление через bootstrap"
 
 
-def entry_text(layout: Layout) -> str:
-    """The text of `bin/darkfactory-entry.py` for `layout` (F14).
+def entry_text(layout: Layout, source: Path | None = None) -> str:
+    """The text of `bin/darkfactory-entry.py` for `layout` (F14, M-1).
 
-    This module's own source with its single `_ROOT` line set to the layout
-    root; not exactly one such line is an `AssertionError`.
+    `source` is the entry module of a release's admin code
+    (`admin/<id>/df/launcher_entry.py`); `None` is this module's own file.
+    The source is opened without following a link and must be a regular
+    UTF-8 file of at most `_ENTRY_MAX_BYTES`, with exactly one `_ROOT` line,
+    which is set to the layout root. The line is a frozen cross-version
+    contract (M13): release N's code renders release N+1's entry. Otherwise
+    `Refused("launcher")`; an `OSError` opening or reading it propagates.
     """
-    lines = pathlib.Path(__file__).read_text(encoding="utf-8").splitlines(True)
+    path = pathlib.Path(__file__) if source is None else source
+    try:
+        lines = _read_entry_source(path).decode("utf-8").splitlines(True)
+    except UnicodeDecodeError as exc:
+        raise Refused("launcher", f"{path}: не UTF-8: {exc}") from exc
     found = [i for i, line in enumerate(lines) if line == _ROOT_LINE]
     if len(found) != 1:
-        raise AssertionError(f"entry text: {len(found)} lines {_ROOT_LINE!r}")
+        raise Refused("launcher", f"{path}: {len(found)} строк {_ROOT_LINE!r}")
     lines[found[0]] = f"_ROOT = {str(layout.root)!r}\n"
     return "".join(lines)
+
+
+def _read_entry_source(path: Path) -> bytes:
+    """A regular file (no link followed, never blocking), size-limited."""
+    fd = os.open(path, _READ_OPTIONAL_FLAGS)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise Refused("launcher", f"{path}: не обычный файл")
+        data = b""
+        while len(data) <= _ENTRY_MAX_BYTES and (
+            chunk := os.read(fd, _ENTRY_MAX_BYTES + 1 - len(data))
+        ):
+            data += chunk
+    finally:
+        os.close(fd)
+    if len(data) > _ENTRY_MAX_BYTES:
+        raise Refused("launcher", f"{path}: больше {_ENTRY_MAX_BYTES} байт")
+    return data
 
 
 class Refused(Exception):

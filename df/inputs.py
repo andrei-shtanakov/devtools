@@ -105,7 +105,7 @@ def verify_sources(
                 _VERIFY_STEP,
                 f"{pin.name}: исходники релиза {have}, в чекауте {want}",
             )
-        locks[pin.name] = _lock_digest(ref / "uv.lock", pin.name)
+        locks[pin.name] = lock_digest(ref / "uv.lock", pin.name)
     return locks
 
 
@@ -223,7 +223,12 @@ def _unpack(archive: Path, dest: Path) -> None:
         raise TreeError(f"архив чекаута отказан: {exc}") from exc
 
 
-def _lock_digest(lock: Path, repo: str) -> str:
+def lock_digest(lock: Path, repo: str) -> str:
+    """`sha256:<hex>` of a trusted checkout's `uv.lock` (`release.json`
+    `lock_sha256`, M12): the value `verify_sources` returns for `repo`.
+
+    An unreadable lock is `StepFailed("verify-sources")` naming the repo.
+    """
     try:
         data = lock.read_bytes()
     except OSError as exc:

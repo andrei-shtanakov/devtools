@@ -328,6 +328,56 @@ def test_entry_text_is_the_module_with_root(tmp_path: Path) -> None:
     assert text != source
 
 
+def test_entry_text_from_a_source(tmp_path: Path) -> None:
+    """M-1: the text comes from the named source (a release's admin code)."""
+    lay = _layout(tmp_path)
+    source = tmp_path / "launcher_entry.py"
+    source.write_text('x = 1\n_ROOT = "/"\ny = 2\n')
+    assert entry.entry_text(lay, source) == f"x = 1\n_ROOT = {str(lay.root)!r}\ny = 2\n"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"x = 1\n",  # no _ROOT line
+        b'_ROOT = "/"\n_ROOT = "/"\n',  # two
+        b'_ROOT = "/"\n\xff\n',  # not UTF-8
+        b'_ROOT = "/"\n' + b"#" * (1 << 20),  # over the size limit
+    ],
+    ids=["none", "two", "not-utf8", "too-big"],
+)
+def test_entry_text_refuses_a_bad_source(tmp_path: Path, body: bytes) -> None:
+    """M13: not exactly one `_ROOT` line (the frozen cross-version contract) —
+    `Refused("launcher")`, never an `AssertionError`."""
+    lay = _layout(tmp_path)
+    source = tmp_path / "launcher_entry.py"
+    source.write_bytes(body)
+    with pytest.raises(entry.Refused) as exc:
+        entry.entry_text(lay, source)
+    assert exc.value.step == "launcher"
+
+
+@pytest.mark.parametrize("kind", ["link", "dir", "fifo"])
+def test_entry_text_source_is_a_regular_file(tmp_path: Path, kind: str) -> None:
+    """The source is opened without following a link and must be regular."""
+    lay = _layout(tmp_path)
+    real = tmp_path / "real.py"
+    real.write_text('_ROOT = "/"\n')
+    source = tmp_path / "launcher_entry.py"
+    if kind == "link":
+        source.symlink_to(real)
+    elif kind == "dir":
+        source.mkdir()
+    else:
+        os.mkfifo(source)
+    with pytest.raises((entry.Refused, OSError)) as exc:
+        entry.entry_text(lay, source)
+    if isinstance(exc.value, OSError):
+        assert exc.value.errno in (errno.ELOOP, errno.EMLINK)
+    else:
+        assert exc.value.step == "launcher"
+
+
 def test_entry_paths_match_layout(tmp_path: Path) -> None:
     lay = _layout(tmp_path)
     paths = entry.EntryPaths(str(lay.root))

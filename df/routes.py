@@ -13,8 +13,9 @@ through one exact-match table, `TARGETS`; a protocol call whose target names a
 wrapper (`WRAPS`) goes to that wrapper.
 
 `acceptance_calls` builds the implementations Tasks 7, 7a, 8 and 8a own
-(protocol leaves live in `df.leaves` and `df.admin`); the other leaves
-(`LATER_LEAVES`) come from their owner task and Task 9 merges them.
+(protocol leaves live in `df.leaves` and `df.admin`); `df.install` adds the
+release's own (`activate`, `write_release_json`, `register`, `write_atomic`,
+Task 9). `LATER_LEAVES` is empty.
 """
 
 from __future__ import annotations
@@ -153,15 +154,11 @@ TARGETS: Mapping[str, Target] = {
     "pending.toml": Target(_fixed(lambda lay: lay.install_dir, "pending.toml")),
 }
 
-#: Route leaves (and wrappers) implemented by later tasks, with the owner task.
-#: `write_atomic` itself is called only for targets without a wrapper: the
-#: launcher files (texts of Task 8a, `df.admin`) and `install.toml` (Task 9).
-LATER_LEAVES: Mapping[str, str] = {
-    "activate": "9",
-    "write_release_json": "9",
-    "register": "9",
-    "write_atomic": "9",
-}
+#: Route leaves (and wrappers) implemented by later tasks, with the owner task:
+#: none since Task 9 (`df.install.install_calls` adds `activate`,
+#: `write_release_json`, `register` and `write_atomic`). A later stage that
+#: adds a leaf names its owner here until it lands.
+LATER_LEAVES: Mapping[str, str] = {}
 
 
 def is_nested(call: str) -> bool:
@@ -240,8 +237,9 @@ def route_guard(
     `accept/`); the object itself is never opened. `not reg` reads the registry
     through the hardened reader; `local_bin=trusted` is
     `trusted_path_problems(layout.local_bin)` empty. `py=absent` needs the
-    admin Python key (F6); `r=root`/`r=builder` need `build_uid`: the root of
-    `releases/<id>` owned by neither root nor `df-build` is `StepFailed`. A
+    admin Python key (F6); `r=root`/`r=builder` read `build_uid` (`None`: no
+    `df-build` record): the root of `releases/<id>` owned by neither root
+    nor `df-build` is `StepFailed`. A
     parent that is not a root-owned directory, or any error but absence, is
     `StepFailed`; an absent parent means an absent name.
     """
@@ -294,9 +292,9 @@ def _root_kind(layout: Layout, release_id: str, build_uid: int | None) -> str:
     """`releases/<id>`: "root" or "builder" directory by owner, else "none".
 
     Another owner is outside the table: `StepFailed` naming it (F20).
+    `build_uid=None` (no `df-build` record, I5): no `df-build` process ran,
+    so any owner but root is outside the table too.
     """
-    if build_uid is None:
-        raise AssertionError("build_uid is required for the r guards")
     path = layout.release_dir(release_id)
     st = _lstat_in(layout.releases, path.name)
     if st is None or not stat.S_ISDIR(st.st_mode):
@@ -304,11 +302,10 @@ def _root_kind(layout: Layout, release_id: str, build_uid: int | None) -> str:
     owner = fsutil.owner_uid(st)
     if owner == accept.ROOT_UID:
         return "root"
-    if owner == build_uid:
+    if build_uid is not None and owner == build_uid:
         return "builder"
-    raise StepFailed(
-        _GUARD_STEP, f"{path}: владелец uid {owner} — ни root, ни df-build"
-    )
+    who = "df-build" if build_uid is not None else "записи df-build нет"
+    raise StepFailed(_GUARD_STEP, f"{path}: владелец uid {owner} — ни root, ни {who}")
 
 
 Guard = Callable[[Layout, str, str | None, int | None], bool]
@@ -362,9 +359,10 @@ GUARDS: Mapping[str, Guard] = {
 
 
 def _refuse_registered(layout: Layout, release_id: str) -> None:
-    """F13: what is registered is never removed."""
+    """F13: what is registered is never removed (`StepFailed("registered")`,
+    one name whichever route asks — Task 7 final M5)."""
     if accept.registry_entry(layout, release_id) is not None:
-        raise StepFailed("cleanup", f"{release_id} в releases.toml: не удаляется")
+        raise StepFailed("registered", f"{release_id} в releases.toml: не удаляется")
 
 
 #: Checks a route makes before its first step (F13).
@@ -440,16 +438,16 @@ class RouteContext:
 
     `uv_version` and `copied_digest` are taken once (`_take`). `installed` is
     not taken: it is every repo's installed list as `distribution_problems`
-    accepted it, read by the caller after the route (Task 9,
-    `release.json` `distributions_declared`); it is never reset here.
-    `python_declared` likewise: each repo's `sys.version` as `transfer_check`
-    accepted it (Task 9, `release.json` `python_declared`).
+    accepted it (a test reads it; `release.json` re-reads the environments
+    on `register`, I4b); it is never reset here. `python_declared` is each
+    repo's `sys.version` as `transfer_check` accepted it (`None`: no check
+    in this process); the `verified` mark keeps it (I4a).
     """
 
     uv_version: str | None = None
     copied_digest: str | None = None
     installed: dict[str, list[InstalledDist]] = field(default_factory=dict)
-    python_declared: dict[str, str] = field(default_factory=dict)
+    python_declared: dict[str, str] | None = None
 
 
 def acceptance_calls(
@@ -469,8 +467,8 @@ def acceptance_calls(
 ) -> dict[str, Call]:
     """Implementations of the route calls Tasks 7, 7a, 8 and 8a own (leaves, WRAPS).
 
-    Keys and `LATER_LEAVES` together are exactly `route_leaves()` and `WRAPS`;
-    Task 9 merges the later ones. The calls share one `RouteContext`: the
+    With the four of `df.install.install_calls` (Task 9) the keys are exactly
+    `route_leaves()` and `WRAPS`. The calls share one `RouteContext`: the
     build's uv version and the copy's digest reach the next mark.
     `python_key` is the caller's admin Python key — the same value it passes
     to `run_route`/`route_action` for the guards (one source, M5); it must be
@@ -523,7 +521,6 @@ class _Leaves:
             "reap_user_processes": self.reap,
             "seal": lambda _t: seal(lay, rid),
             "accept_copy": self.accept_copy,
-            "remove_own_tree": self.remove_own_tree,
             "check_links": self.check_links,
             "verify_chmod": lambda _t: verify_chmod(lay, rid),
             "verify_sources": self.verify_sources,
@@ -532,13 +529,10 @@ class _Leaves:
             "transfer_check": self.transfer_check,
             "cleanup_build_home": self.cleanup_build_home,
             "tree_digest": self.tree_digest,
-            "cleanup_tree": self.cleanup_tree,
-            "remove_empty_dir": self.remove_empty_dir,
-            "remove_durably": self.remove_durably,
-            "drop_mark": lambda _t: accept.drop_mark(lay, rid),
             "install_admin_python": self.install_admin_python,
             "install_admin": self.install_admin,
             "link_command": lambda _t: admin.link_command(lay),
+            **removal_calls(lay, rid, self.python_key),
         }
 
     @property
@@ -569,8 +563,10 @@ class _Leaves:
 
         `built` takes this boot's id and the build's uv version; every later
         stage carries both from the recorded mark (never `boot_id()`), `copied`
-        takes the copy's digest, `admin` the admin code's digest and the run's
-        Python; `max(стадия, verified)` rewrites a higher mark unchanged.
+        takes the copy's digest, `verified` the interpreter answers of this
+        route's `transfer_check` (I4a), `admin` the admin code's digest and the
+        run's Python and carries the answers; `max(стадия, verified)` rewrites
+        a higher mark unchanged.
         Effects: `write_atomic()`.
         """
         spec = TARGETS[target]
@@ -604,7 +600,20 @@ class _Leaves:
             self._admin_digest() if admin else None,
             self.profile.python if admin else None,
             old.uv_version_declared,
+            self._declared(stage, old),
         )
+
+    def _declared(self, stage: Stage, old: AcceptMark) -> str | None:
+        """`python_declared` of the next mark: this route's answers for
+        `verified`, the recorded ones for `admin`, none before (I4a)."""
+        if stage == "admin":
+            return old.python_declared
+        if stage != "verified":
+            return None
+        declared = self.ctx.python_declared
+        if declared is None:
+            raise StepFailed("mark", "нет значения python_declared от transfer_check")
+        return accept.dump_declared(declared)
 
     def _admin_digest(self) -> str:
         return admin.admin_digest(self.layout, self.release_id)
@@ -637,12 +646,6 @@ class _Leaves:
                 detail=f"процессы {target} остались: {left}",
             )
 
-    def remove_own_tree(self, target: str) -> None:
-        """Protocol `remove_own_tree`; never on a registered release (F13)."""
-        if target in ("releases/<id>", "admin/<id>"):
-            _refuse_registered(self.layout, self.release_id)
-        receive.remove_own_tree(*self.path(target))
-
     def check_links(self, target: str) -> None:
         """Check leaf: every link of the copy stays inside the release."""
         tree = Path(*self.path(target))
@@ -653,8 +656,9 @@ class _Leaves:
     def verify_sources(self, target: str) -> None:
         """Check leaf: sources equal the trusted checkout.
 
-        The lock digests it returns are not kept: `release.json` (Task 10)
-        calls `verify_sources` itself for `lock_sha256`.
+        The lock digests it returns are not kept: `release.json` takes
+        `lock_sha256` from the same trusted checkout (`inputs.lock_digest`,
+        the value `verify_sources` returns) on `register` (M12).
         """
         tree = Path(*self.path(target))
         verify_sources(tree, self.profile, self.refs)
@@ -761,23 +765,45 @@ class _Leaves:
         if want is None or have != want:
             raise StepFailed("verify", f"{tree}: digest {have}, отметка {want}")
 
-    def cleanup_tree(self, target: str) -> None:
+
+def removal_calls(
+    layout: Layout, release_id: str, python_key: str | None = None
+) -> dict[str, Call]:
+    """The removing calls of the routes: `remove_own_tree`, `cleanup_tree`,
+    `remove_empty_dir`, `remove_durably` and the wrapper `drop_mark`.
+
+    Exactly the calls of the route `rollback` (I5): no profile, no network,
+    no account is needed. `acceptance_calls` uses the same ones.
+    """
+
+    def path(target: str) -> tuple[Path, str]:
+        return where(layout, release_id, target, python_key)
+
+    def remove_own_tree(target: str) -> None:
+        """Protocol `remove_own_tree`; never on a registered release (F13)."""
+        if target in ("releases/<id>", "admin/<id>"):
+            _refuse_registered(layout, release_id)
+        receive.remove_own_tree(*path(target))
+
+    def cleanup_tree(target: str) -> None:
         """Protocol `cleanup_tree` with `quarantine_label=<id>`."""
-        parent, name = self.path(target)
-        outcome = plat.cleanup_tree(
-            self.layout, parent, name, quarantine_label=self.release_id
-        )
+        parent, name = path(target)
+        outcome = plat.cleanup_tree(layout, parent, name, quarantine_label=release_id)
         if outcome == "failed":
             raise StepFailed("cleanup", f"{parent / name}: очистка не удалась")
 
-    def remove_empty_dir(self, target: str) -> None:
-        """Protocol `remove_empty_dir`."""
-        receive.remove_empty_dir(*self.path(target))
-
-    def remove_durably(self, target: str) -> None:
+    def remove_durably(target: str) -> None:
         """Protocol `remove_durably` (targets without a wrapper)."""
-        parent, name = self.path(target)
+        parent, name = path(target)
         fsutil.remove_durably(parent / name)
+
+    return {
+        "remove_own_tree": remove_own_tree,
+        "cleanup_tree": cleanup_tree,
+        "remove_empty_dir": lambda t: receive.remove_empty_dir(*path(t)),
+        "remove_durably": remove_durably,
+        "drop_mark": lambda _t: accept.drop_mark(layout, release_id),
+    }
 
 
 def _take(ctx: RouteContext, name: str) -> str:

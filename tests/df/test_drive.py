@@ -318,3 +318,53 @@ def test_max_iter_zero_still_classifies(fl: FakeLayout) -> None:
         run(fl, world, max_iter=0)
     assert exc.value.step == "drive"
     assert world.reads == 1 and world.called == []
+
+
+@pytest.mark.parametrize(
+    "error,step",
+    [(StepFailed("facts", "не каталог"), "facts"), (OSError("io"), "facts")],
+)
+def test_post_check_read_failure_journaled_as_facts(
+    fl: FakeLayout, error: Exception, step: str
+) -> None:
+    """Task 7 final M4: the read of the post check fails as the head's read
+    does — journaled `facts`, not under the row's action."""
+    world = World("launched")
+    real_read = world.read
+
+    def read() -> Facts:
+        if world.called:
+            raise error
+        return real_read()
+
+    world.read = read  # type: ignore[method-assign]
+    with pytest.raises(type(error)):
+        run(fl, world)
+    assert events(fl) == [
+        ("commit-config", "start", "launched"),
+        (step, "failed", f"{type(error).__name__}: {error}"),
+    ]
+
+
+def test_registered_refusal_journaled_by_its_name(fl: FakeLayout) -> None:
+    """Task 7 final M5: the F13 refusal (`StepFailed("registered")`) keeps
+    its own name in the journal whichever route raised it; any other action
+    failure is journaled under the row's action."""
+    world = World("partial-copy")
+
+    def refuse(_f: Facts) -> None:
+        raise StepFailed("registered", "rel1 в releases.toml: не удаляется")
+
+    with pytest.raises(StepFailed) as exc:
+        run(fl, world, actions={**world.actions(), "copy-partial": refuse})
+    assert exc.value.step == "registered"
+    assert events(fl)[-1][:2] == ("registered", "failed")
+    world = World("partial-copy")
+
+    def other(_f: Facts) -> None:
+        raise StepFailed("copy", "tar")
+
+    fl.layout.journal.unlink()
+    with pytest.raises(StepFailed):
+        run(fl, world, actions={**world.actions(), "copy-partial": other})
+    assert events(fl)[-1][:2] == ("copy-partial", "failed")

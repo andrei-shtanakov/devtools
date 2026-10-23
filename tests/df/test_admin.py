@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from df import acl, admin, fsutil
+from df import acl, admin, fsutil, launcher_entry
 from df import build as build_mod
 from df import install_table as table
 from df import platform as plat
@@ -37,7 +37,7 @@ from df.platform import RunResult
 from df.receive import CopyLimits
 from df.routes import acceptance_calls, run_route
 from tests.df.conftest import BUILD_UID, FakeLayout
-from tests.df.test_routes import (
+from tests.df.route_world import (
     BASES,
     BOOT,
     DEFAULT,
@@ -461,7 +461,7 @@ def test_admin_code_comes_from_reference_not_release(fl: FakeLayout) -> None:
     (evil / "cli.py").write_text("raise SystemExit('swapped')\n")
     make_calls(fl)["install_admin"](ADMIN)
     code = lay.admin_dir(ID) / "df"
-    assert sorted(os.listdir(code)) == ["__init__.py"]
+    assert sorted(os.listdir(code)) == ["__init__.py", "launcher_entry.py"]
     ref = lay.verify_dir / "devtools" / "df"
     assert tree_digest(code, exclude=frozenset()) == tree_digest(
         ref, exclude=frozenset()
@@ -765,7 +765,7 @@ def test_admin_code_refuses_bytecode_and_install_skips_it(fl: FakeLayout) -> Non
     install_python(fl)
     admin.install_admin(lay, ID, devtools_ref=ref)
     pkg = lay.admin_dir(ID) / "df"
-    assert sorted(p.name for p in pkg.iterdir()) == ["__init__.py"]
+    assert sorted(p.name for p in pkg.iterdir()) == ["__init__.py", "launcher_entry.py"]
     assert admin.admin_code_problems(lay, ID) == []
     (pkg / "__pycache__").mkdir()
     assert admin.admin_code_problems(lay, ID)
@@ -795,11 +795,24 @@ def test_admin_ready_io_error_is_step_failed(
 # ---------- the command ----------
 
 
+def entry_source(fl: FakeLayout, text: str | None = None) -> Path:
+    """The release's own entry module `admin/<id>/df/launcher_entry.py`
+    (default: a copy of the dev module)."""
+    source = fl.layout.admin_dir(ID) / "df" / "launcher_entry.py"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    if text is None:
+        text = Path(launcher_entry.__file__).read_text(encoding="utf-8")
+    source.write_text(text)
+    return source
+
+
 def write_command(fl: FakeLayout, target: str) -> None:
     """Task 9's `write_atomic` of the launcher files (the generated texts)."""
     lay = fl.layout
     if target == "bin/darkfactory-entry.py":
-        fsutil.write_atomic(lay.entry, entry_text(lay), 0o644)
+        if not admin.entry_source(lay, ID).exists():
+            entry_source(fl)
+        fsutil.write_atomic(lay.entry, admin.release_entry_text(lay, ID), 0o644)
     elif target == "bin/darkfactory":
         fsutil.write_atomic(lay.launcher, admin.launcher_text(lay, PY, PLATFORM), 0o755)
     else:
@@ -854,7 +867,7 @@ def test_usr_local_link_only_when_trusted(
     assert os.path.lexists(link_path) is trusted
     if trusted:
         assert os.readlink(link_path) == str(lay.launcher)
-    assert admin.launcher_ready(lay, python=PY)
+    assert admin.launcher_ready(lay, ID, python=PY)
 
 
 def test_launcher_never_named_df(
@@ -918,7 +931,7 @@ def test_launcher_ready(
     if spoil == "no-entry":
         lay.entry.unlink()
     elif spoil == "entry-text":
-        fsutil.write_atomic(lay.entry, entry_text(lay) + "#\n", 0o644)
+        fsutil.write_atomic(lay.entry, admin.release_entry_text(lay, ID) + "#\n", 0o644)
     elif spoil == "entry-mode":
         lay.entry.chmod(0o664)
     elif spoil == "command-text":
@@ -939,7 +952,7 @@ def test_launcher_ready(
     elif spoil == "link-file":
         link.unlink()
         link.write_text("x\n")
-    assert admin.launcher_ready(lay, python=PY) is (spoil == "none")
+    assert admin.launcher_ready(lay, ID, python=PY) is (spoil == "none")
 
 
 @pytest.mark.parametrize("which", ["entry", "launcher"])
@@ -951,12 +964,12 @@ def test_launcher_ready_requires_trusted_paths(
     write_command(fl, "bin/darkfactory-entry.py")
     write_command(fl, "bin/darkfactory")
     admin.link_command(lay)
-    assert admin.launcher_ready(lay, python=PY)  # positive control
+    assert admin.launcher_ready(lay, ID, python=PY)  # positive control
     bad = getattr(lay, which)
     monkeypatch.setattr(
         plat, "trusted_path_problems", lambda p: ["acl"] if p == bad else []
     )
-    assert not admin.launcher_ready(lay, python=PY)
+    assert not admin.launcher_ready(lay, ID, python=PY)
 
 
 def test_launcher_ready_ignores_link_when_untrusted(
@@ -968,14 +981,70 @@ def test_launcher_ready_ignores_link_when_untrusted(
     monkeypatch.setattr(
         plat, "trusted_path_problems", lambda p: ["x"] if p == lay.local_bin else []
     )
-    assert admin.launcher_ready(lay, python=PY)
+    assert admin.launcher_ready(lay, ID, python=PY)
 
 
 def test_launcher_ready_other_python_false(fl: FakeLayout) -> None:
     write_command(fl, "bin/darkfactory-entry.py")
     write_command(fl, "bin/darkfactory")
     admin.link_command(fl.layout)
-    assert not admin.launcher_ready(fl.layout, python="3.13.2")
+    assert not admin.launcher_ready(fl.layout, ID, python="3.13.2")
+
+
+def test_launcher_ready_compares_with_the_release_source(fl: FakeLayout) -> None:
+    """M-1: the entry is the activated release's own module, not the running
+    `df` — an entry from another source is not `L`; the same is."""
+    lay = fl.layout
+    write_command(fl, "bin/darkfactory-entry.py")
+    write_command(fl, "bin/darkfactory")
+    admin.link_command(lay)
+    assert admin.launcher_ready(lay, ID, python=PY)
+    entry_source(fl, 'release = "N+1"\n_ROOT = "/"\n')
+    assert not admin.launcher_ready(lay, ID, python=PY)
+    want = f'release = "N+1"\n_ROOT = {str(lay.root)!r}\n'
+    assert admin.release_entry_text(lay, ID) == want
+    write_command(fl, "bin/darkfactory-entry.py")
+    assert lay.entry.read_text() == want
+    assert admin.launcher_ready(lay, ID, python=PY)
+
+
+@pytest.mark.parametrize("bad", ["absent", "no-root-line", "link"])
+def test_bad_entry_source_is_not_ready_and_refuses_launcher(
+    fl: FakeLayout, bad: str
+) -> None:
+    """M13: a source without exactly one `_ROOT` line (or none, or a link) —
+    `L` false (no exception) and the launcher's text `StepFailed("launcher")`."""
+    lay = fl.layout
+    write_command(fl, "bin/darkfactory-entry.py")
+    write_command(fl, "bin/darkfactory")
+    source = lay.admin_dir(ID) / "df" / "launcher_entry.py"
+    if bad == "absent":
+        source.unlink()
+    elif bad == "no-root-line":
+        source.write_text("x = 1\n")
+    else:
+        real = source.with_name("real.py")
+        source.rename(real)
+        source.symlink_to(real.name)
+    assert not admin.launcher_ready(lay, ID, python=PY)
+    with pytest.raises(StepFailed) as exc:
+        admin.release_entry_text(lay, ID)
+    assert exc.value.step == "launcher"
+
+
+def test_launcher_ready_source_io_error_is_step_failed(
+    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout
+) -> None:
+    write_command(fl, "bin/darkfactory-entry.py")
+    write_command(fl, "bin/darkfactory")
+
+    def broken(_layout: object, _source: object = None) -> str:
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr(admin, "entry_text", broken)
+    with pytest.raises(StepFailed) as exc:
+        admin.launcher_ready(fl.layout, ID, python=PY)
+    assert exc.value.step == "facts"
 
 
 # ---------- Step 1: premises of the pinned uv ----------

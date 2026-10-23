@@ -12,6 +12,7 @@ its emptiness is decided by `df-build` itself (`builder_tree_nonempty`).
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import stat
@@ -65,7 +66,11 @@ class AcceptMark:
     from `copied` on, `admin_digest` and `admin_python` (exact `X.Y.Z`)
     together by `admin`. `built_boot_id` and `uv_version_declared` (the uv
     version `run_build` declared, R29) are written by `built` and carried
-    unchanged by every later stage.
+    unchanged by every later stage. `python_declared` (R40/F7) is each
+    repo's `sys.version` as `transfer_check` accepted it, canonical JSON
+    `{repo: version}` (`dump_declared`): written by `verified`, carried
+    unchanged by `admin` — a later process registers without re-running
+    `verify`, and root cannot ask the release's interpreter again (§3.9).
     """
 
     install_digest: str
@@ -75,6 +80,7 @@ class AcceptMark:
     admin_digest: str | None
     admin_python: str | None
     uv_version_declared: str
+    python_declared: str | None = None
 
     def __post_init__(self) -> None:
         _need(bool(_HEX64.fullmatch(self.install_digest)), "install_digest")
@@ -92,6 +98,38 @@ class AcceptMark:
             else bool(python and PY_VERSION.fullmatch(python))
         )
         _need(ok, "admin_python")
+        verified = self.stage in ("verified", "admin")
+        _need(_declared_ok(self.python_declared, verified), "python_declared")
+
+
+def dump_declared(declared: Mapping[str, str]) -> str:
+    """`python_declared` as the mark keeps it: canonical JSON, sorted keys."""
+    return json.dumps(dict(declared), sort_keys=True, separators=(",", ":"))
+
+
+def parse_declared(text: str) -> dict[str, str]:
+    """`python_declared` of a mark back to `{repo: version}`; a value that is
+    not exactly `dump_declared` of such a mapping is a `ConfigError`."""
+    try:
+        data = json.loads(text)
+    except (ValueError, RecursionError) as exc:
+        raise ConfigError(f"accept mark: python_declared: {exc}") from exc
+    ok = isinstance(data, dict) and all(
+        isinstance(k, str) and isinstance(v, str) for k, v in data.items()
+    )
+    if not ok or dump_declared(data) != text:
+        raise ConfigError("accept mark: python_declared: not canonical")
+    return data
+
+
+def _declared_ok(value: str | None, required: bool) -> bool:
+    if not required or value is None:
+        return not required and value is None
+    try:
+        parse_declared(value)
+    except ConfigError:
+        return False
+    return True
 
 
 def _need(ok: bool, key: str) -> None:
@@ -169,6 +207,8 @@ def write_mark(layout: Layout, release_id: str, mark: AcceptMark) -> None:
         for key in ("built_boot_id", "uv_version_declared"):
             if getattr(mark, key) != getattr(old, key):
                 raise StepFailed("mark", f"{key} отметки не меняется")
+        if old.python_declared not in (None, mark.python_declared):
+            raise StepFailed("mark", "python_declared отметки не меняется")
     fsutil.write_atomic(layout.mark_file(release_id), dump_mark(mark), MARK_MODE)
 
 
@@ -293,15 +333,10 @@ def read_facts(
     mark = load_mark(layout, release_id, install_digest=install_digest)
     r = root_state(layout, release_id, build_uid=build_uid)
     tree = layout.release_dir(release_id)
-    intact = entry is not None and (
-        r == "root-755"
-        and _digest_equals(tree, entry.digest)
-        and admin_ready(
-            layout,
-            release_id,
-            expected_admin_digest=entry.admin_digest,
-            expected_python=entry.admin_python,
-        )
+    intact = (
+        entry is not None
+        and r == "root-755"
+        and _entry_matches(layout, release_id, entry, admin_ready)
     )
     full = (
         mark is not None
@@ -331,6 +366,48 @@ def read_facts(
         A=a,
         S=os.path.lexists(layout.staging_tree(release_id)),
         mark=mark,
+    )
+
+
+def entry_intact(
+    layout: Layout, release_id: str, entry: ReleaseEntry, *, admin_ready: AdminReady
+) -> bool:
+    """Fact `intact` of a registry entry on its own (Task 9: `command_ready`,
+    `activate`): `releases/<id>` is root's directory `0755` by `lstat`, its
+    digest equals the entry's and `admin_ready` holds for the entry's admin
+    digest and Python — the same predicate `read_facts` evaluates.
+    """
+    return _root_755(layout, release_id) and _entry_matches(
+        layout, release_id, entry, admin_ready
+    )
+
+
+def _root_755(layout: Layout, release_id: str) -> bool:
+    path = layout.release_dir(release_id)
+    try:
+        st = os.stat(path, follow_symlinks=False)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError as exc:
+        raise StepFailed("facts", f"{path}: {exc}") from exc
+    return (
+        stat.S_ISDIR(st.st_mode)
+        and fsutil.owner_uid(st) == ROOT_UID
+        and stat.S_IMODE(st.st_mode) == 0o755
+    )
+
+
+def _entry_matches(
+    layout: Layout, release_id: str, entry: ReleaseEntry, admin_ready: AdminReady
+) -> bool:
+    """The tree's digest and the admin environment match the entry."""
+    return _digest_equals(layout.release_dir(release_id), entry.digest) and (
+        admin_ready(
+            layout,
+            release_id,
+            expected_admin_digest=entry.admin_digest,
+            expected_python=entry.admin_python,
+        )
     )
 
 
@@ -515,8 +592,11 @@ def drive(
 
     Each iteration: `settle` -> `read` -> `classify`; `committed` returns,
     `damaged` stops; otherwise the row's action runs, then `settle`, and the
-    new phase must be one of the row's `post`. At most `max_iter` actions run
-    (`max_iter < 0` is a `ValueError`), then a final classification. Failures are journaled
+    new phase must be one of the row's `post`. A failure of the action is
+    journaled under the row's action (`NAMED_REFUSALS` under their own
+    name), of the post check's settle or read as at the head (`facts`). At
+    most `max_iter` actions run (`max_iter < 0` is a `ValueError`), then a
+    final classification. Failures are journaled
     (`failed`) and re-raised; directory syncs that lacked F_FULLFSYNC are
     journaled as `sync-note` for the evidence (decision (a)).
     """
@@ -593,13 +673,29 @@ def _step(
     log(row.action, "start", row.phase)
     try:
         actions[row.action](facts)
+    except Exception as exc:  # noqa: BLE001 - journaled, then re-raised
+        _fail(log, exc, _action_step(exc, row.action))
+    try:
         settle(layout, release_id)
         after = classify(read())
-        if after not in row.post:
-            raise StepFailed(row.action, f"{row.phase} → {after}")
     except Exception as exc:  # noqa: BLE001 - journaled, then re-raised
-        _fail(log, exc, row.action)
+        _fail(log, exc, "" if isinstance(exc, StepFailed) else "facts")
+    if after not in row.post:
+        _fail(log, StepFailed(row.action, f"{row.phase} → {after}"))
     log(row.action, "done", f"{row.phase} → {after}")
+
+
+#: Refusals journaled by their own step whichever action raised them: the
+#: F13 refusal of a registered release (Task 7 final M5).
+NAMED_REFUSALS = frozenset({"registered"})
+
+
+def _action_step(exc: Exception, action: str) -> str:
+    """The journal step of an action's failure: the row's action, except a
+    `NAMED_REFUSALS` refusal, which keeps its own name."""
+    if isinstance(exc, StepFailed) and exc.step in NAMED_REFUSALS:
+        return exc.step
+    return action
 
 
 def _fail(log: Callable[..., None], exc: Exception, step: str = "") -> NoReturn:

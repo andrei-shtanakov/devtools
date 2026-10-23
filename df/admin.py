@@ -27,7 +27,7 @@ from df import build as build_mod
 from df import platform as plat
 from df.digest import TreeError, check_links, open_regular, tree_digest
 from df.journal import StepFailed
-from df.launcher_entry import entry_text
+from df.launcher_entry import Refused, entry_text
 from df.lockset import UV_PINNED_VERSION
 from df.paths import Layout
 from df.platform import PlatformName
@@ -533,19 +533,47 @@ def _unlink_quietly(name: str, dir_fd: int) -> None:
         pass
 
 
-def launcher_ready(layout: Layout, *, python: str) -> bool:
-    """Fact `L`: the command files are what this admin code generates (F2).
+def entry_source(layout: Layout, release_id: str) -> Path:
+    """The entry module of a release's admin code (M-1): the one source."""
+    return layout.admin_dir(release_id) / "df" / "launcher_entry.py"
+
+
+def release_entry_text(layout: Layout, release_id: str) -> str:
+    """`entry_text` from `release_id`'s own admin code (M-1, M13).
+
+    The text of `bin/darkfactory-entry.py` the route `launcher` writes; a
+    source that is absent, a link, not regular, too big or without exactly
+    one `_ROOT` line is `StepFailed("launcher")`.
+    """
+    source = entry_source(layout, release_id)
+    try:
+        return entry_text(layout, source)
+    except Refused as exc:
+        raise StepFailed(_LAUNCHER_STEP, exc.detail) from exc
+    except OSError as exc:
+        raise StepFailed(_LAUNCHER_STEP, f"{source}: {exc}") from exc
+
+
+def launcher_ready(layout: Layout, release_id: str, *, python: str) -> bool:
+    """Fact `L`: the command files are what `release_id`'s admin code
+    generates (F2, M-1).
 
     The entry and the command are root's regular files, `0644` and `0755`,
-    with exactly `entry_text` and `launcher_text` for `python`, and both pass
-    `trusted_path_problems` (chain, ACL — spec 3.10, M-3); when
-    `/usr/local/bin` is trusted (`accept.local_bin_trusted`), its
-    `darkfactory` is a link whose text is the command's path. Absent or
-    different is false; any other `OSError` is `StepFailed("facts")`.
+    with exactly the entry text of `release_id`'s own source
+    (`entry_source`, the one the route `launcher` writes) and
+    `launcher_text` for `python`, and both pass `trusted_path_problems`
+    (chain, ACL — spec 3.10, M-3); when `/usr/local/bin` is trusted
+    (`accept.local_bin_trusted`), its `darkfactory` is a link whose text is
+    the command's path. Absent or different — a source that cannot render
+    an entry included — is false; any other `OSError` is
+    `StepFailed("facts")`.
     """
+    entry = _source_entry_text(layout, release_id)
+    if entry is None:
+        return False
     platform = plat.detect_platform()
     files = (
-        (layout.entry, entry_text(layout), 0o644),
+        (layout.entry, entry, 0o644),
         (layout.launcher, launcher_text(layout, python, platform), 0o755),
     )
     if not all(_file_is(path, text, mode) for path, text, mode in files):
@@ -555,6 +583,21 @@ def launcher_ready(layout: Layout, *, python: str) -> bool:
     if not accept.local_bin_trusted(layout):
         return True
     return _link_is(layout.local_bin / layout.launcher.name, str(layout.launcher))
+
+
+def _source_entry_text(layout: Layout, release_id: str) -> str | None:
+    """The entry text of the release's source; `None` if it renders none."""
+    source = entry_source(layout, release_id)
+    try:
+        return entry_text(layout, source)
+    except Refused:
+        return None
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return None
+        raise StepFailed(_FACTS_STEP, f"{source}: {exc}") from exc
 
 
 def _file_is(path: Path, text: str, mode: int) -> bool:
