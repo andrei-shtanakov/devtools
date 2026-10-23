@@ -555,8 +555,8 @@ class _FsSites(ast.NodeVisitor):
     `args[1]` for `<module>.open`, `args[0]` for a value's `.open`); any
     `shutil`/`tempfile` import or use; a `ctypes` loader (`CDLL`, ...);
     `from os|shutil|tempfile|ctypes import`; `getattr`/`vars` on those
-    modules and their `__dict__`; a call of a name imported from them. Aliases by `import os as x` and by
-    assignment `x = os` are tracked. Process starts are `processes`.
+    modules and their `__dict__`; a call of a name imported from them.
+    Aliases by `import os as x` and by assignment `x = os` are tracked. Process starts are `processes`.
 
     Flags resolve through: literal `os.O_*` and `|`/conditional
     expressions; a name bound exactly once -- in its function (a local
