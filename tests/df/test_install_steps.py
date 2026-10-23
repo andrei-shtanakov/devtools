@@ -448,7 +448,9 @@ def test_third_current_is_refused(w: World, capsys: pytest.CaptureFixture[str]) 
     )
     before = files(w)
     assert w.writer(["install"]) == 2
-    assert "pending: current = " + first in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "pending: current = " + first in err
+    assert pend.release_id in err and "elsewhere-1" in err and "doctor" not in err
     assert files(w) == before
     assert leftovers(w, pend.release_id) != []
 
@@ -456,15 +458,22 @@ def test_third_current_is_refused(w: World, capsys: pytest.CaptureFixture[str]) 
 def test_damaged_under_resume_is_refused_with_a_way_out(
     w: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """R47 (I9, option (a)): the activated pending release changed on disk —
-    `damaged` under resume is exit 2 naming the id, the state, the manual
-    way out and `doctor`; nothing is removed."""
+    """R51/R52 (I9, option (a), G1): the activated pending release changed on
+    disk — `damaged` under resume is exit 2 naming the id, the state and
+    the manual way out (a first install before `commit-config`: `unlink`),
+    never `doctor`; nothing is removed."""
     interrupt(w, w.bootstrap, w.init_argv(), "launcher")
     (w.lay.release_dir(FIRST) / "injected").write_text("x\n")
     assert w.writer(["install"]) == 2
     err = capsys.readouterr().err
-    for text in (FIRST, "damaged", str(w.lay.pending), "darkfactory doctor"):
+    for text in (
+        f"damaged: релиз {FIRST}: повреждён",
+        "уже переключила на него current",
+        f"удалите {w.lay.pending}",
+        f"unlink {w.lay.current}",
+    ):
         assert text in err
+    assert "doctor" not in err
     assert os.path.lexists(w.lay.pending)
     assert os.path.isdir(w.lay.release_dir(FIRST))
 
@@ -1077,15 +1086,19 @@ def test_commands_run_as_df_build_only_after_step2(w: World) -> None:
     assert names.index("run_as") > last_check
 
 
-def test_damaged_first_install_names_only_the_pending_file(
+def test_damaged_first_install_names_pending_then_current(
     w: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """nit: without `previous_current` the way out is the pending file alone."""
+    """Without `previous_current` the way out deletes `pending.toml` first,
+    then unlinks `current` (never the other way: M10); no «return
+    current»."""
     interrupt(w, w.bootstrap, w.init_argv(), "launcher")
     (w.lay.release_dir(FIRST) / "injected").write_text("x\n")
     assert w.writer(["install"]) == 2
     err = capsys.readouterr().err
-    assert "прежний релиз" not in err and str(w.lay.pending) in err
+    assert "прежний релиз" not in err and "верните" not in err
+    pending_at = err.index(f"удалите {w.lay.pending}")
+    assert pending_at < err.index(f"unlink {w.lay.current}")
 
 
 #: I-2: every way the parsed command and `mode_of(argv)` could disagree.
