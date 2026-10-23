@@ -127,14 +127,18 @@ def test_lock_and_step2_every_crash_position(fake_world: World, crash: str) -> N
     assert points >= 40 and calls >= 20, (points, calls)
 
 
-@pytest.mark.parametrize("which", ["var/lib", "opt"])
+@pytest.mark.parametrize("which", ["var/lib", "opt", "opt-ancestor"])
 def test_found_directory_is_settled_before_use(fake_world: World, which: str) -> None:
     """Review I2 (S1-R7 form): a crash leaves a created directory whose name
     is not durable; the retry finds it and must settle it before writing
     beneath it. An install interrupted before `verify`, then an OS crash:
     no tree without `pending.toml`."""
     w = fake_world
-    target = w.lay.var.parent if which == "var/lib" else w.lay.opt
+    target = {
+        "var/lib": w.lay.var.parent,
+        "opt": w.lay.opt,
+        "opt-ancestor": w.lay.root / "opt",  # step 2's missing ancestor
+    }[which]
     w.m.trap(lambda p: p.kind == "sync" and p.path == target)
     w.killed(lambda: w.bootstrap(w.init_argv()))
     w.kill_at("verify")
@@ -241,3 +245,54 @@ def test_points_of_the_positions_are_df_points(fake_world: World) -> None:
 
 def _under(path: Path, top: Path) -> bool:
     return path == top or top in path.parents
+
+
+@pytest.mark.parametrize(
+    "name,mode,outcome",
+    [
+        ("staging", 0o700, "widened"),  # exact-mode directory, narrower
+        ("releases", 0o700, "widened"),  # a 0755 directory, narrower
+        ("staging", 0o755, "refused"),  # wider: never narrowed
+    ],
+)
+def test_step2_widens_roots_narrower_dirs_only(
+    fake_world: World, name: str, mode: int, outcome: str
+) -> None:
+    """A root directory narrower than its mode (an older version, an
+    external chmod) is widened by step 2 instead of refused forever; a wider
+    one stays a refusal (trust is never loosened)."""
+    w = fake_world
+    with journal.writer_lock(w.lay):
+        install._make_prep_dirs(w.lay)  # noqa: SLF001 - all there: check decides
+    path = getattr(w.lay, name)
+    os.chmod(path, mode)
+    w.m.baseline()
+    code = w.bootstrap(w.init_argv())
+    want = dict(install.prep_dirs(w.lay))[path]
+    if outcome == "widened":
+        assert code == 0
+        assert stat.S_IMODE(os.stat(path).st_mode) == want
+        w.m.os_crash()
+        assert stat.S_IMODE(os.stat(path).st_mode) == want
+    else:
+        assert code == 2
+        assert stat.S_IMODE(os.stat(path).st_mode) == mode
+
+
+def test_pending_written_then_entry_retry_then_os_crash(fake_world: World) -> None:
+    """An upgrade dies right after `pending.toml`'s rename (the generation
+    already odd); the retry goes through the shipped entry, whose own
+    settle makes the name durable before anything is built under it; an OS
+    crash in the middle of the retry leaves no tree without it."""
+    from tests.df.install_world import installed  # noqa: PLC0415
+
+    w = fake_world
+    installed(w)
+    w.m.trap(lambda p: p.kind == "fault" and p.path == w.lay.pending)
+    w.killed(lambda: w.entry(["install"]))
+    assert not w.m.is_durable(w.lay.pending), "the window is open"
+    w.kill_at("verify")
+    w.killed(w.retry)
+    w.m.os_crash()
+    assert at_rest_problems(w) == []
+    assert os.path.lexists(w.lay.pending)
