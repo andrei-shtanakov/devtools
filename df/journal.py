@@ -311,6 +311,12 @@ def generation_end(layout: Layout) -> None:
     _write_generation(layout, n + 1)
 
 
+def read_generation(layout: Layout) -> int:
+    """The generation counter: absent -> 0; a malformed one is
+    `StepFailed("snapshot")` (bootstrap's snapshot, Task 9)."""
+    return _read_generation(layout)
+
+
 def _write_generation(layout: Layout, n: int) -> None:
     write_atomic(layout.generation, f"{n}\n", mode=0o644)
 

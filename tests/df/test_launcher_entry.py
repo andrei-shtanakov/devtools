@@ -6,7 +6,9 @@ Two kinds of runs:
   is tested only this way, with `ROOT_UID` patched to the current uid;
 - as a subprocess, the generated entry text run by a real interpreter with
   `-I -B -S` against a temporary administrative dir holding stub `df/cli.py`
-  and `df/state.py` (F4: `df.state` and `df.cli` are Task 9's).
+  and `df/state.py` (a subprocess cannot import the whole dev `df` from a
+  stub admin dir); the stub's `RawSnapshot` is checked against the real
+  `df.state` (Task 9), which the in-process runs use.
 
 Every stdlib copy in the entry is run against its `df` original on the same
 inputs, hostile ones included.
@@ -15,6 +17,7 @@ inputs, hostile ones included.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import errno
 import fcntl
 import json
@@ -23,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import types
+import typing
 import unicodedata
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -33,6 +37,7 @@ import pytest
 
 from df import accept, admin, bootstrap, journal
 from df import launcher_entry as entry
+from df import state as df_state
 from df.config import (
     ConfigError,
     ReleaseEntry,
@@ -57,15 +62,6 @@ from tests.df.test_journal import GENERATION_CANONICAL, GENERATION_MALFORMED
 ID = "abc123def456-macos-arm64-1"
 OTHER = "abc123def456-macos-arm64-2"
 REPO = Path(__file__).resolve().parents[2]
-#: `df.state.RawSnapshot` fields as Task 9 defines them (task-9 brief).
-TASK9_RAW_FIELDS = (
-    "generation",
-    "current_id",
-    "releases_text",
-    "install_text",
-    "models_text",
-    "pending_present",
-)
 INSTALL_TEXT = b'schema = "df/install/v1"\n# install\n'
 MODELS_TEXT = b'schema = "df/models/v1"\n'
 
@@ -78,7 +74,7 @@ from dataclasses import dataclass
 class RawSnapshot:
     generation: int
     current_id: str | None
-    releases_text: bytes
+    releases_text: bytes | None
     install_text: bytes | None
     models_text: bytes | None
     pending_present: bool
@@ -251,8 +247,10 @@ def main_call(done: subprocess.CompletedProcess[str]) -> dict[str, Any]:
 
 # --- in-process recorder ----------------------------------------------------
 
-STATE = types.ModuleType("stub_state")
-exec(compile(STUB_STATE, "stub_state", "exec", dont_inherit=True), STATE.__dict__)
+STUB = types.ModuleType("stub_state")
+exec(compile(STUB_STATE, "stub_state", "exec", dont_inherit=True), STUB.__dict__)
+#: The in-process runs hand `main` the real `df.state` (Task 9).
+STATE = df_state
 
 
 @dataclass
@@ -397,10 +395,13 @@ def test_entry_paths_match_layout(tmp_path: Path) -> None:
 
 
 def test_entry_raw_fields_match_df_state() -> None:
-    """F4: against the stub `RawSnapshot` and Task 9's field list; the check
-    against the real `df.state` is Task 9's."""
-    stub = tuple(f.name for f in STATE.RawSnapshot.__dataclass_fields__.values())
-    assert entry.RAW_FIELDS == stub == TASK9_RAW_FIELDS
+    """F4: `RAW_FIELDS` are the fields of the real `df.state.RawSnapshot`,
+    and the subprocess stub mirrors it field for field, types included."""
+    real = typing.get_type_hints(df_state.RawSnapshot)
+    stub = typing.get_type_hints(STUB.RawSnapshot)
+    names = tuple(f.name for f in dataclasses.fields(df_state.RawSnapshot))
+    assert entry.RAW_FIELDS == names == tuple(real)
+    assert stub == real
 
 
 @pytest.mark.parametrize(
