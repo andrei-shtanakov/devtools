@@ -84,6 +84,8 @@ def read_raw(layout: Layout) -> RawSnapshot:
             releases_text=_read_bytes(layout.etc / "releases.toml"),
             install_text=_read_bytes(layout.etc / "install.toml"),
             models_text=_read_bytes(layout.etc / "models.toml"),
+            # `lexists` is False on EACCES too; still fail-closed: the
+            # writer's `read_pending` then raises, or disagrees (`_writer`)
             pending_present=os.path.lexists(layout.pending),
         )
     except ConfigError as exc:

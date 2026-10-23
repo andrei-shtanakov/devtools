@@ -516,23 +516,42 @@ def _trusted_ready(layout: Layout, cfg: InstallConfig, platform: PlatformName) -
     missing = False
     exact = {getattr(layout, name) for name in EXACT_MODES}
     for path, mode in prep_dirs(layout):
+        problems += policy_problems(path)
         st = _lstat(path)
         if st is None:
             missing = True
-            problems += plat.trusted_path_problems(_existing_ancestor(path))
-        elif not stat.S_ISDIR(st.st_mode):
-            problems.append(f"{path}: не каталог")
-        else:
-            problems += plat.trusted_path_problems(path)
+        elif stat.S_ISDIR(st.st_mode) and path in exact:
             have = stat.S_IMODE(st.st_mode)
-            if path in exact and have != mode:
+            if have != mode:
                 problems.append(f"{path}: права {have:04o}, нужны {mode:04o}")
     if problems:
         raise StepFailed(_TRUST_STEP, "; ".join(dict.fromkeys(problems)))
     return not missing
 
 
+def policy_problems(path: Path) -> list[str]:
+    """The trusted-path policy of a directory root acts under (I-1, I-3).
+
+    Absent: the policy of its nearest existing ancestor — never skipped, so
+    only root could create anything between that ancestor and `path`. A
+    non-directory (a link included, by `lstat`): a problem. Otherwise
+    `trusted_path_problems(path)`. One helper for step 2 and the rollback.
+    """
+    st = _lstat(path)
+    if st is None:
+        return plat.trusted_path_problems(_existing_ancestor(path))
+    if not stat.S_ISDIR(st.st_mode):
+        return [f"{path}: не каталог"]
+    return plat.trusted_path_problems(path)
+
+
 def _make_prep_dirs(layout: Layout) -> None:
+    """Step 2's `do()`: only after `_trusted_ready` passed for the same
+    layout (m4). `_make_dir` opens each parent following links (macOS `/etc`
+    is one); that is safe only because the check proved every component
+    down to the nearest existing ancestor root's and unwritable by others,
+    and `fchmod` acts only on the directory this call created and opened
+    `O_NOFOLLOW`."""
     for path, mode in prep_dirs(layout):
         for ancestor in _missing_ancestors(layout, path):
             _make_dir(ancestor, 0o755)
@@ -748,19 +767,17 @@ def recover_pending(
 def rollback(layout: Layout, pending: Pending) -> None:
     """The route `rollback` of `pending`'s release, then `generation_end`.
 
-    Security order (I7): `trusted_path_problems` of `/opt/df`, `releases`,
-    `staging` and `admin` (absent ones skipped) must be empty before any
-    removal, else `StepFailed("trusted-paths")`. The calls are
-    `rollback_calls` (no profile, network or account; the cleaner gated on
+    Security order (I7): `policy_problems` of `/opt/df`, `releases`,
+    `staging` and `admin` (an absent one judged by its nearest existing
+    ancestor, I-1) must be empty before any removal, else
+    `StepFailed("trusted-paths")`. The calls are `rollback_calls` (no
+    profile, network or account; the cleaner gated on
     `verify_build_user`); `build_uid` is the `df-build` record's in any
     state, or `None` (I5). A `TreeError` or `OSError` of a call becomes
     `StepFailed("rollback", <route>[<step>] …)` (M7).
     """
     problems = [
-        p
-        for name in ROLLBACK_PARENTS
-        if _lstat(path := getattr(layout, name)) is not None
-        for p in plat.trusted_path_problems(path)
+        p for name in ROLLBACK_PARENTS for p in policy_problems(getattr(layout, name))
     ]
     if problems:
         raise StepFailed(_TRUST_STEP, "; ".join(dict.fromkeys(problems)))
@@ -915,13 +932,16 @@ def _prepare(layout: Layout, pend: Pending, fail_after: str | None) -> InstallRu
 
 
 def _damaged(layout: Layout, pend: Pending) -> str:
-    previous = pend.previous_current or "нет"
+    back = (
+        ""
+        if pend.previous_current is None
+        else f"верните current на прежний релиз ({pend.previous_current}) или "
+    )
     return (
         f"релиз {pend.release_id}: состояние damaged (повреждён) при "
         f"возобновлении, current = {pend.release_id}; автоматического выхода в "
-        f"v1 нет — восстановление вручную: верните current на прежний релиз "
-        f"({previous}) или удалите {layout.pending} после разбора, затем "
-        "darkfactory doctor"
+        f"v1 нет — восстановление вручную: {back}удалите {layout.pending} после "
+        "разбора, затем darkfactory doctor"
     )
 
 

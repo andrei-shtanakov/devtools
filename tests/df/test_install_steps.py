@@ -12,9 +12,11 @@ the fake uv are real. No OS-crash model here (9-C).
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import dataclasses
 import os
+import shutil
 import traceback
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -467,22 +469,34 @@ def test_parser_error_never_exits() -> None:
 
 
 @pytest.mark.parametrize(
-    "cli_args",
-    [["git=/usr/bin/git", "git=/bin/git"], ["git"], ["=x"], ["uv=relative"]],
+    "cli_args,why",
+    [
+        (["git=/usr/bin/git", "git=/bin/git"], "нужно NAME=PATH, каждое имя один раз"),
+        (["git"], "нужно NAME=PATH"),
+        (["=x"], "нужно NAME=PATH"),
+        (["git=/g", "tar=/t", "uv=relative"], "uv: approved_cli path must be absolute"),
+        (["git=/g"], "approved_cli: missing required: tar, uv"),
+    ],
 )
-def test_init_cli_pairs_refused(w: World, cli_args: list[str]) -> None:
+def test_init_cli_pairs_refused(
+    w: World, capsys: pytest.CaptureFixture[str], cli_args: list[str], why: str
+) -> None:
+    """A bad `--cli` is refused, naming why, before the lock creates anything."""
     argv = [*w.init_argv()[:7], "--cli", *cli_args]
     assert w.bootstrap(argv) == 2
+    assert why in capsys.readouterr().err
+    assert not os.path.lexists(w.lay.var)
 
 
 def test_exit_codes(w: World, capsys: pytest.CaptureFixture[str]) -> None:
     """M7: `NeedsHuman` is 3 with the instruction; a program error is 1 with
-    its traceback; a bare `TreeError`/`OSError` is a named exit 2."""
+    its traceback; a bare `TreeError`/`OSError` is exit 2 named by its type
+    (m3: it has no step of its own)."""
     cases: list[tuple[BaseException, int, str]] = [
         (NeedsHuman("создайте аккаунт"), 3, "создайте аккаунт"),
         (AssertionError("bug"), 1, "Traceback"),
-        (TreeError("tree"), 2, "darkfactory: tree"),
-        (OSError(5, "io"), 2, "darkfactory: [Errno 5] io"),
+        (TreeError("tree"), 2, "darkfactory: TreeError: tree"),
+        (OSError(5, "io"), 2, "darkfactory: OSError: [Errno 5] io"),
     ]
     for exc, code, text in cases:
 
@@ -711,16 +725,15 @@ def record(world: World, module: object, name: str) -> None:
 
 def test_trust_order_before_any_execution(w: World) -> None:
     """I6 (spy): manifest -> approved CLI and paths (step 2) -> account
-    (step 3) -> trusted checkouts -> uv settings -> quarantine -> `drive`;
-    no process runs before step 2 succeeds."""
+    (step 3) -> trusted checkouts -> uv settings -> quarantine -> `drive`.
+    That no process runs before step 2 is the positive control
+    `test_commands_run_as_df_build_only_after_step2` (m6)."""
     real_checkouts(
         w, ["devtools"], lambda _r: {"pyproject.toml": PYPROJECT, "uv.lock": LOCK}
     )
     record(w, build_mod, "verify_build_user")
     record(w, lockset, "uv_config_problems")
     record(w, plat, "retry_quarantine")
-    record(w, plat, "run_as")
-    record(w, plat, "run_command")
 
     def drive(*_a: object, **_k: object) -> None:
         w.calls.append(("drive",))
@@ -741,11 +754,6 @@ def test_trust_order_before_any_execution(w: World) -> None:
     assert list(dict.fromkeys(n for n in names if n in order)) == order
     last_check = max(i for i, n in enumerate(names) if n == "approved_cli_problems")
     assert last_check < names.index("fetch_reference")
-    first_exec = min(
-        (i for i, n in enumerate(names) if n in ("run_as", "run_command")),
-        default=len(names),
-    )
-    assert first_exec > names.index("approved_cli_problems")
 
 
 @pytest.mark.parametrize("bad", ["cli", "opt", "staging-mode"])
@@ -823,8 +831,8 @@ def test_uv_config_refused_before_build_lists_all_repos(
     w.mp.setattr(accept, "drive", lambda *a, **k: drives.append(a))
     assert w.bootstrap(w.init_argv()) == 2
     err = capsys.readouterr().err
-    assert "build: r1: [tool.uv] exclude-newer" in err or "r1:" in err
-    assert "exclude-newer" in err and "r2: uv.toml" in err
+    assert "build: r1: pyproject.toml [tool.uv] exclude-newer" in err, err
+    assert "r2: uv.toml: настройки uv в репо не поддерживаются" in err
     assert drives == []
     assert not [e for e in w.fl.events if e[0] == "run_as"]
 
@@ -998,7 +1006,8 @@ def test_rollback_to_other_admin_python_rewrites_launcher(
 #: Functions allowed to open or readlink a snapshot part from inside `main`
 #: (I2): the automaton's facts and settles, the route guards and the F13
 #: entry check, the release's own registry and link writers, the next id,
-#: the command's registered Python, and the writer's one `read_pending`.
+#: the command's registered Python, the writer's one `read_pending`, and the
+#: writer's own atomic writes and removals of those parts.
 #: Bootstrap reads its snapshot itself (`read_raw`, after `settle_on_acquire`).
 REREAD_ALLOWED = frozenset(
     {
@@ -1012,6 +1021,9 @@ REREAD_ALLOWED = frozenset(
         ("release", "next_release_id"),
         ("install", "_registered_python"),
         ("install", "read_pending"),
+        # writes of the writer's own parts (they stat their target), not reads
+        ("fsutil", "write_atomic"),
+        ("fsutil", "remove_durably"),
     }
 )
 BOOTSTRAP_READ = ("state", "read_raw")
@@ -1023,8 +1035,9 @@ class Reads:
 
     watched: frozenset[Path]
     hits: list[tuple[Path, list[tuple[str, str]]]] = field(default_factory=list)
+    opens: list[list[tuple[str, str]]] = field(default_factory=list)
 
-    def see(self, path: object, dir_fd: object) -> None:
+    def see(self, path: object, dir_fd: object, op: str = "stat") -> None:
         if dir_fd is not None or not isinstance(path, (str, os.PathLike)):
             return
         target = Path(os.fspath(path))
@@ -1036,6 +1049,8 @@ class Reads:
             if f"{os.sep}df{os.sep}" in f.filename and "tests" not in f.filename
         ]
         self.hits.append((target, frames))
+        if op == "open":
+            self.opens.append(frames)
 
 
 @contextlib.contextmanager
@@ -1053,11 +1068,23 @@ def watching(world: World) -> Iterator[Reads]:
         )
     )
     real_open, real_readlink = os.open, os.readlink
+    real_stat, real_lstat = os.stat, os.lstat
+
+    def stat_(
+        path: object, *, dir_fd: object = None, follow_symlinks: bool = True
+    ) -> object:
+        reads.see(path, dir_fd)
+        stat_of: Callable[..., object] = real_stat
+        return stat_of(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    def lstat(path: object, *, dir_fd: object = None) -> object:
+        reads.see(path, dir_fd)
+        return real_lstat(path, dir_fd=dir_fd)  # type: ignore[arg-type]
 
     def open_(
         path: object, flags: int, mode: int = 0o777, *, dir_fd: object = None
     ) -> int:
-        reads.see(path, dir_fd)
+        reads.see(path, dir_fd, "open")
         return real_open(path, flags, mode, dir_fd=dir_fd)  # type: ignore[arg-type]
 
     def readlink(path: object, *, dir_fd: object = None) -> object:
@@ -1067,6 +1094,8 @@ def watching(world: World) -> Iterator[Reads]:
     with pytest.MonkeyPatch.context() as m:
         m.setattr(os, "open", open_)
         m.setattr(os, "readlink", readlink)
+        m.setattr(os, "stat", stat_)
+        m.setattr(os, "lstat", lstat)
         yield reads
 
 
@@ -1074,14 +1103,14 @@ def assert_no_reread(reads: Reads, *, bootstrap: bool) -> None:
     allowed = REREAD_ALLOWED | ({BOOTSTRAP_READ} if bootstrap else set())
     for path, frames in reads.hits:
         assert allowed & set(frames), (path, frames)
-    pendings = [f for _p, f in reads.hits if ("install", "read_pending") in f]
+    pendings = [f for f in reads.opens if ("install", "read_pending") in f]
     assert len(pendings) == 1
 
 
 @pytest.mark.parametrize("run", ["bootstrap-init", "writer-upgrade", "writer-resume"])
 def test_main_rereads_nothing(w: World, run: str) -> None:
     """I2: inside `main`, a snapshot part (`install.toml`, `releases.toml`,
-    `models.toml`, `pending.toml`, `current`) is opened or read as a link
+    `models.toml`, `pending.toml`, `current`) is opened, stat'ed or read as a link
     only by the automaton reading its own changes under the lock (the
     whitelist), and `pending.toml` by `read_pending` exactly once; a reader
     reads none."""
@@ -1144,3 +1173,185 @@ def test_bootstrap_rejects_other_subcommands(
     assert w.bootstrap(argv) == 2
     assert "только init или install" in capsys.readouterr().err
     assert not os.path.lexists(w.lay.var)
+
+
+# ---------- fix round 1 ----------
+
+
+def test_rollback_judges_an_absent_parent_by_its_ancestor(
+    w: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """I-1 (negative twin of I7): `/opt/df` absent under an untrusted `<root>/opt`
+    — the rollback refuses `trusted-paths` naming `<root>/opt` before any
+    removal: no `rollback start`, `pending.toml` kept."""
+    lay = w.lay
+    lay.install_dir.mkdir(parents=True)
+    lay.pending.write_text(dump_pending(install.new_pending(w.cfg(), FIRST, None)))
+    journal.generation_begin(lay)
+    lay.opt.parent.mkdir()
+    w.untrusted.add(lay.opt.parent)
+    removed: list[object] = []
+    w.mp.setattr(receive, "remove_own_tree", lambda *a: removed.append(a))
+    assert w.bootstrap(w.init_argv(OTHER_SHA)) == 2
+    assert f"trusted-paths: {lay.opt.parent}: untrusted" in capsys.readouterr().err
+    rows = read_journal(lay.journal)
+    assert not [r for r in rows if r["step"] == "rollback"]
+    assert removed == [] and pending_of(w).release_id == FIRST
+
+
+@pytest.mark.parametrize("side", ["opt", "etc"])
+def test_step2_judges_an_absent_dir_by_its_ancestor(
+    w: World, capsys: pytest.CaptureFixture[str], side: str
+) -> None:
+    """I-3: a fresh host with `<root>/opt` (or `<root>/etc`) untrusted and
+    `/opt/df` (`/etc/df`) absent stops at `trusted-paths` naming it; nothing
+    is created under it and no command runs."""
+    real_checkouts(
+        w, ["devtools"], lambda _r: {"pyproject.toml": PYPROJECT, "uv.lock": LOCK}
+    )
+    record(w, plat, "run_as")
+    record(w, plat, "run_command")
+    ancestor = w.lay.root / side
+    ancestor.mkdir()
+    w.untrusted.add(ancestor)
+    assert w.bootstrap(w.init_argv()) == 2
+    assert f"trusted-paths: {ancestor}: untrusted" in capsys.readouterr().err
+    assert os.listdir(ancestor) == []
+    assert [
+        c for c in w.calls if c[0] in ("fetch_reference", "run_as", "run_command")
+    ] == []
+
+
+def test_step2_refuses_a_linked_dir(
+    w: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """m1: an existing step-2 path that is a link (to a trusted root
+    directory of the right mode) is refused «не каталог»."""
+    install._make_prep_dirs(w.lay)  # noqa: SLF001
+    elsewhere = w.lay.root / "elsewhere"
+    elsewhere.mkdir(mode=0o711)
+    elsewhere.chmod(0o711)
+    shutil.rmtree(w.lay.staging)
+    os.symlink(elsewhere, w.lay.staging)
+    assert w.bootstrap(w.init_argv()) == 2
+    assert f"trusted-paths: {w.lay.staging}: не каталог" in capsys.readouterr().err
+
+
+def test_bootstrap_proceeds_over_a_revoked_release(w: World) -> None:
+    """m2 (M16 conjunct `allowed`): the active entry revoked, files intact —
+    bootstrap `install` is not refused and installs a new id."""
+    first = installed(w)
+    path = w.lay.etc / "releases.toml"
+    path.write_text(
+        path.read_text().replace(
+            'status = "allowed"', 'status = "revoked"\nreason = "x"'
+        )
+    )
+    assert w.bootstrap(["install"]) == 0
+    assert os.readlink(w.lay.current) != f"releases/{first}"
+
+
+def test_commands_run_as_df_build_only_after_step2(w: World) -> None:
+    """m6, positive control of I6: a real install runs processes (`run_as`),
+    and the first one comes after the last approved-CLI check."""
+    record(w, plat, "run_as")
+    assert w.bootstrap(w.init_argv()) == 0
+    names = [c[0] for c in w.calls]
+    assert "run_as" in names
+    last_check = max(i for i, n in enumerate(names) if n == "approved_cli_problems")
+    assert names.index("run_as") > last_check
+
+
+def test_damaged_first_install_names_only_the_pending_file(
+    w: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """nit: without `previous_current` the way out is the pending file alone."""
+    interrupt(w, w.bootstrap, w.init_argv(), "launcher")
+    (w.lay.release_dir(FIRST) / "injected").write_text("x\n")
+    assert w.writer(["install"]) == 2
+    err = capsys.readouterr().err
+    assert "прежний релиз" not in err and str(w.lay.pending) in err
+
+
+#: I-2: every way the parsed command and `mode_of(argv)` could disagree.
+ARGV_FORMS = {
+    "dashdash-before-init": [
+        "--",
+        *"init --manifest-repo r --manifest-sha s --profile p --cli git=/g".split(),
+    ],
+    "dashdash-before-install": ["--", "install"],
+    "dashdash-after-install": ["install", "--"],
+    "dashdash-before-models": ["--", "models", "set", "x"],
+    "dashdash-inside-models": ["models", "--", "set", "x"],
+    "option-before": ["--json", "install"],
+    "abbreviated-option": (
+        "init --manifest-r r --manifest-sha s --profile p --cli git=/g".split()
+    ),
+    "prefix-subcommand": ["inst"],
+    "repeated": ["install", "install"],
+    "empty": [],
+    "models-set": ["models", "set", "x"],
+}
+
+
+@pytest.mark.parametrize("mode", ["reader", "writer", "bootstrap"])
+@pytest.mark.parametrize("form", sorted(ARGV_FORMS))
+def test_argv_forms_never_split_mode_and_dispatch(
+    w: World, capsys: pytest.CaptureFixture[str], mode: str, form: str
+) -> None:
+    """I-2: each form in each mode is exit 2 before the euid check and any
+    dispatch — except `models set`, which is a legitimate writer subcommand
+    (reader: refused as a writer; writer: its Task 10 stub; bootstrap:
+    refused as not init/install). Not root: a form that slipped past the
+    mode check would be refused for root instead, so the message tells."""
+    w.mp.setattr(cli, "ROOT_UID", os.geteuid() + 1)
+    argv = ARGV_FORMS[form]
+    raw = state.RawSnapshot(0, None, None, None, None, False)
+    read = None if mode == "bootstrap" else Stable(raw, 0)
+    runs: list[object] = []
+    w.mp.setattr(install, "run_install", lambda *a, **kw: runs.append(a))
+    code = cli.main(
+        argv,
+        mode=mode,  # type: ignore[arg-type]
+        read=read,
+        lock_fd=None if mode != "writer" else 99,
+        layout=w.lay,
+    )
+    err = capsys.readouterr().err
+    assert code == 2, err
+    assert "Traceback" not in err
+    # only the legitimate writer form in writer mode reaches the euid check
+    legit = (form, mode) == ("models-set", "writer")
+    assert ("требует root" in err) == legit
+    if "--" in argv and form != "dashdash-after-install":
+        # the second layer: `--` itself never reaches a dispatch (Task 10's
+        # `models` would otherwise get `rest = ["--", "set", …]`)
+        assert "форма команды" in err, err
+    assert runs == [] and not os.path.lexists(w.lay.var)
+
+
+def test_later_never_indexes_an_unknown_command() -> None:
+    with pytest.raises(cli.Refusal):
+        cli._later("install")  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    "argv,command,rest",
+    [
+        (["x", "install"], "install", None),
+        (["install"], "models", ["list"]),
+        (["models", "set"], "models", ["list"]),
+        (["models", "list"], "init", None),
+    ],
+)
+def test_check_mode_refuses_any_disagreement(
+    argv: list[str], command: str, rest: list[str] | None
+) -> None:
+    """I-2, the recompute alone (no `--`): the parsed command's mode differs
+    from `mode_of(argv)` — refused in every mode, whatever argparse made."""
+    ns = argparse.Namespace(command=command)
+    if rest is not None:
+        ns.rest = rest
+    for mode in ("reader", "writer", "bootstrap"):
+        with pytest.raises(cli.UsageError, match="форма команды"):
+            cli._check_mode(argv, mode, ns)  # type: ignore[arg-type]  # noqa: SLF001

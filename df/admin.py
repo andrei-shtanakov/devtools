@@ -506,7 +506,8 @@ def link_command(layout: Layout) -> None:
     `LINK_TMP`: a leftover of a killed run is unlinked first, never
     accumulated (C13; the writer lock makes the name exclusive). No
     branching: whether to link is the route's guard (`local_bin=trusted`).
-    The name is the command's own; nothing named `df` is ever created. Effects: `renamed` -> `sync_dir(local_bin)`.
+    The name is the command's own; nothing named `df` is ever created.
+    Effects: `renamed` -> `sync_dir(local_bin)`.
     """
     name = layout.launcher.name
     tmp = LINK_TMP

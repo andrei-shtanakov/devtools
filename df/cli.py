@@ -92,8 +92,11 @@ def main(
     except (Refusal, UsageError) as exc:
         _say(str(exc))
         return EXIT_REFUSED
-    except _REFUSALS as exc:
+    except StepFailed as exc:
         _say(str(exc))
+        return EXIT_REFUSED
+    except _REFUSALS as exc:
+        _say(f"{type(exc).__name__}: {exc}")  # no step of its own (m3)
         return EXIT_REFUSED
     except Exception:  # noqa: BLE001 - a program error: traceback, exit 1
         traceback.print_exc()
@@ -109,9 +112,11 @@ def _main(
 ) -> int:
     _check_call(mode, read, lock_fd)
     args = _parse(argv)
-    _check_mode(argv, mode, args.command)
+    _check_mode(argv, mode, args)
     if launcher_entry.mode_of(argv) == "writer" and os.geteuid() != ROOT_UID:
         raise Refusal("команда-писатель требует root: запустите через sudo")
+    # `init`'s configuration is checked before the lock creates anything (m5)
+    args.config = _init_config(args) if args.command == "init" else None
     if mode == "bootstrap":
         with journal.writer_lock(lay):
             accept.settle_on_acquire(lay)
@@ -137,9 +142,28 @@ def _check_call(mode: Mode, read: ReadResult | None, lock_fd: int | None) -> Non
         )
 
 
-def _check_mode(argv: list[str], mode: Mode, command: str) -> None:
-    """The subcommand's mode is the entry's (`mode_of`, (c))."""
+def parsed_mode(args: argparse.Namespace) -> str:
+    """The mode the parsed command needs: `writer` for `init`, `install` and
+    `models set` (`WRITER_COMMANDS`), else `reader`."""
+    words = (args.command, *getattr(args, "rest", ())[:1])
+    writer = any(words[: len(cmd)] == cmd for cmd in launcher_entry.WRITER_COMMANDS)
+    return "writer" if writer else "reader"
+
+
+def _check_mode(argv: list[str], mode: Mode, args: argparse.Namespace) -> None:
+    """The subcommand's mode is the entry's (`mode_of`, (c)).
+
+    I-2: the mode is decided on the raw argv (`mode_of`, as the entry does)
+    but the dispatch is argparse's; any disagreement between the two, and
+    any `--`, is refused before the euid check and any dispatch.
+    """
+    command = args.command
     wanted = launcher_entry.mode_of(argv)
+    if "--" in argv or parsed_mode(args) != wanted:
+        raise UsageError(
+            f"{' '.join(argv)!r}: форма команды не поддерживается "
+            "(подкоманда — первым словом, без --)"
+        )
     if mode == "reader" and wanted == "writer":
         raise Refusal(
             f"{command}: команда-писатель запущена без блокировки (режим reader)"
@@ -151,18 +175,24 @@ def _check_mode(argv: list[str], mode: Mode, command: str) -> None:
 
 
 def _parse(argv: list[str]) -> argparse.Namespace:
-    parser = _Parser(prog="darkfactory", exit_on_error=False, add_help=False)
+    parser = _Parser(
+        prog="darkfactory", exit_on_error=False, add_help=False, allow_abbrev=False
+    )
     sub = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
-    init = sub.add_parser("init", exit_on_error=False, add_help=False)
+    init = sub.add_parser(
+        "init", exit_on_error=False, add_help=False, allow_abbrev=False
+    )
     init.add_argument("--manifest-repo", required=True)
     init.add_argument("--manifest-sha", required=True)
     init.add_argument("--profile", required=True)
     init.add_argument(
         "--cli", action="append", nargs="+", required=True, metavar="NAME=PATH"
     )
-    sub.add_parser("install", exit_on_error=False, add_help=False)
+    sub.add_parser("install", exit_on_error=False, add_help=False, allow_abbrev=False)
     for name in LATER:
-        later = sub.add_parser(name, exit_on_error=False, add_help=False)
+        later = sub.add_parser(
+            name, exit_on_error=False, add_help=False, allow_abbrev=False
+        )
         later.add_argument("rest", nargs=argparse.REMAINDER)
     try:
         return parser.parse_args(argv)
@@ -183,7 +213,10 @@ def _reader(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
 
 
 def _later(command: str) -> int:
-    raise Refusal(f"{command}: ещё не реализовано ({LATER[command]})")
+    task = LATER.get(command)
+    if task is None:
+        raise Refusal(f"{command}: нет такой подкоманды здесь")
+    raise Refusal(f"{command}: ещё не реализовано ({task})")
 
 
 # ---------- writer ----------
@@ -219,7 +252,7 @@ def _requested(
     if args.command == "init":
         if snap.install is not None:
             raise Refusal("установка уже есть: darkfactory install")
-        return _init_config(args)
+        return args.config
     if pending is not None:
         return parse_install(pending.install_text)
     if snap.install is None:
