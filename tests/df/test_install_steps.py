@@ -39,11 +39,8 @@ from df import (
 from df import build as build_mod
 from df import platform as plat
 from df.config import (
-    Account,
-    InstallConfig,
     Pending,
     config_digest,
-    dump_accounts,
     dump_install,
     dump_pending,
     load_releases,
@@ -51,126 +48,25 @@ from df.config import (
 from df.digest import TreeError
 from df.journal import NeedsHuman, Stable, StepFailed, Transitional, read_journal
 from df.manifest import Profile, RepoPin
-from df.paths import Layout
 from tests.df.conftest import BUILD_UID, FakeLayout
+from tests.df.install_world import (
+    CLEAN_PASS,
+    FIRST,
+    OTHER_SHA,
+    PLATFORM,
+    SECOND,
+    SHA,
+    World,
+    files,
+    installed,
+    interrupt,
+    make_world,
+    write_ready_account,
+)
 from tests.df.route_world import (
     BOOT,
-    FAKE_UV,
     PY,
-    devtools_ref,
-    fake_uv,
 )
-
-SHA = "0" * 40
-OTHER_SHA = "1" * 40
-PLATFORM = plat.detect_platform()
-FIRST = f"{SHA[:12]}-{PLATFORM}-1"
-SECOND = f"{OTHER_SHA[:12]}-{PLATFORM}-1"
-PROFILE = Profile("p", PY, ())
-CLEAN_PASS = [
-    "build-dir",
-    "build",
-    "seal",
-    "copy",
-    "verify",
-    "admin",
-    "register",
-    "activate",
-    "launcher",
-    "commit-config",
-]
-
-
-@dataclass
-class World:
-    """A fresh host: nothing of `df` but the build account's home."""
-
-    fl: FakeLayout
-    mp: pytest.MonkeyPatch
-    calls: list[tuple[object, ...]] = field(default_factory=list)
-    untrusted: set[Path] = field(default_factory=set)
-
-    @property
-    def lay(self) -> Layout:
-        return self.fl.layout
-
-    def cfg(self, sha: str = SHA) -> InstallConfig:
-        return InstallConfig(
-            manifest_repo="owner/manifest",
-            manifest_sha=sha,
-            profile="p",
-            approved_cli={
-                "git": Path("/usr/bin/git"),
-                "uv": fake_uv(self.fl),
-                "tar": Path("/usr/bin/tar"),
-            },
-        )
-
-    def init_argv(self, sha: str = SHA) -> list[str]:
-        cli_args = [f"{k}={v}" for k, v in sorted(self.cfg(sha).approved_cli.items())]
-        return [
-            "init",
-            "--manifest-repo",
-            "owner/manifest",
-            "--manifest-sha",
-            sha,
-            "--profile",
-            "p",
-            "--cli",
-            *cli_args,
-        ]
-
-    def bootstrap(self, argv: list[str]) -> int:
-        return cli.main(
-            argv, mode="bootstrap", read=None, lock_fd=None, layout=self.lay
-        )
-
-    def writer(self, argv: list[str]) -> int:
-        """The entry's writer half: lock, settle, one read, `main(writer)`."""
-        with journal.writer_lock(self.lay) as fd:
-            accept.settle_on_acquire(self.lay)
-            raw = state.read_raw(self.lay)
-            return cli.main(
-                argv,
-                mode="writer",
-                read=Stable(raw, raw.generation),
-                lock_fd=fd,
-                layout=self.lay,
-            )
-
-    def reader(self, argv: list[str], read: state.ReadResult) -> int:
-        return cli.main(argv, mode="reader", read=read, lock_fd=None, layout=self.lay)
-
-    def done(self, run_id: str | None = None) -> list[str]:
-        rows = read_journal(self.lay.journal)
-        return [
-            str(r["step"])
-            for r in rows
-            if r["event"] == "done"
-            and (run_id is None or r["run_id"] == run_id)
-            and str(r["step"]) in CLEAN_PASS
-        ]
-
-    def crash_at(self, action: str) -> None:
-        """The next run's `action` raises before it runs (a killed process)."""
-        real = install.install_actions
-
-        def actions(run: install.InstallRun) -> dict[str, Callable[..., None]]:
-            out = dict(real(run))
-
-            def crash(_facts: object) -> None:
-                raise KeyboardInterrupt(f"crash before {action}")
-
-            out[action] = crash
-            return out
-
-        self.mp.setattr(install, "install_actions", actions)
-
-    def no_crash(self) -> None:
-        self.mp.setattr(install, "install_actions", REAL_ACTIONS)
-
-
-REAL_ACTIONS = install.install_actions
 
 
 @pytest.fixture(autouse=True)
@@ -181,88 +77,7 @@ def _boot(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture()
 def w(monkeypatch: pytest.MonkeyPatch, fake_layout: FakeLayout) -> World:
     """See `World`; the stand-ins are recorded in `calls`."""
-    world = World(fake_layout, monkeypatch)
-    lay = fake_layout.layout
-    lay.build_home.mkdir(parents=True)
-    lay.local_bin.mkdir(parents=True)
-    uv = fake_uv(fake_layout)
-    uv.write_text(FAKE_UV)
-    uv.chmod(0o755)
-    monkeypatch.setattr(cli, "ROOT_UID", os.geteuid())
-    monkeypatch.setattr(admin, "UV_ADMIN_CONFIRMED", frozenset({"0.9.2"}))
-
-    def approved(cli_map: object, platform: object) -> list[str]:
-        world.calls.append(("approved_cli_problems",))
-        return []
-
-    def trusted(path: Path) -> list[str]:
-        return [f"{path}: untrusted"] if path in world.untrusted else []
-
-    def fetch_manifest(repo: str, sha: str) -> bytes:
-        world.calls.append(("fetch_manifest", repo, sha))
-        return b"manifest"
-
-    def parse_profile(_data: bytes, _profile: str) -> Profile:
-        return PROFILE
-
-    def references(layout: object, profile: Profile, *, git: Path) -> dict[str, Path]:
-        world.calls.append(("fetch_references", git))
-        return {"devtools": devtools_ref(fake_layout)}
-
-    def create(layout: object) -> Account:
-        world.calls.append(("create_build_user",))
-        return write_ready_account(world)
-
-    def verify(layout: object) -> list[str]:
-        return [] if os.path.lexists(lay.accounts) else ["нет записи df-build"]
-
-    monkeypatch.setattr(plat, "approved_cli_problems", approved)
-    monkeypatch.setattr(plat, "trusted_path_problems", trusted)
-    monkeypatch.setattr(install.manifest_mod, "fetch_manifest", fetch_manifest)
-    monkeypatch.setattr(install.manifest_mod, "parse_profile", parse_profile)
-    monkeypatch.setattr(install, "fetch_references", references)
-    monkeypatch.setattr(plat, "create_build_user", create)
-    monkeypatch.setattr(build_mod, "verify_build_user", verify)
-    monkeypatch.setattr(build_mod, "whoami_as", lambda _u: (BUILD_UID, BUILD_UID))
-    return world
-
-
-def write_ready_account(world: World) -> Account:
-    account = Account(plat.BUILD_USER, BUILD_UID, BUILD_UID, "ready", "2026-10-23")
-    world.lay.accounts.write_text(dump_accounts({plat.BUILD_USER: account}))
-    return account
-
-
-def files(world: World) -> dict[str, bytes | str]:
-    """Every file and link under `/etc/df` and `/var/lib/df` (bytes, target)."""
-    out: dict[str, bytes | str] = {}
-    for top in (world.lay.etc, world.lay.var):
-        for dirpath, dirnames, filenames in os.walk(top):
-            for name in [*dirnames, *filenames]:
-                path = Path(dirpath) / name
-                key = str(path.relative_to(world.lay.root))
-                if path.is_symlink():
-                    out[key] = os.readlink(path)
-                elif path.is_file():
-                    out[key] = path.read_bytes()
-    return out
-
-
-def installed(world: World, sha: str = SHA) -> str:
-    """A committed first install through bootstrap; returns its id."""
-    assert world.bootstrap(world.init_argv(sha)) == 0
-    return os.readlink(world.lay.current).removeprefix("releases/")
-
-
-def interrupt(
-    world: World, run: Callable[[list[str]], int], argv: list[str], action: str
-) -> None:
-    """`run(argv)` killed just before `action`; later runs do not crash."""
-    world.crash_at(action)
-    with pytest.raises(KeyboardInterrupt):
-        run(argv)
-    world.no_crash()
-    assert os.path.lexists(world.lay.pending)
+    return make_world(fake_layout, monkeypatch)
 
 
 # ---------- the clean pass ----------
