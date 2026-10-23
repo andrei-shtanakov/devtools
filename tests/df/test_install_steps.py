@@ -459,6 +459,13 @@ def test_usage_errors_are_exit_2(w: World, argv: list[str]) -> None:
     assert not os.path.lexists(w.lay.var)
 
 
+def test_parser_error_never_exits() -> None:
+    """N1 on Python 3.12, where `exit_on_error=False` still routes required
+    and unrecognized arguments to `error()`: it raises, never `sys.exit`."""
+    with pytest.raises(cli.UsageError, match="boom"):
+        cli._Parser(prog="x").error("boom")  # noqa: SLF001
+
+
 @pytest.mark.parametrize(
     "cli_args",
     [["git=/usr/bin/git", "git=/bin/git"], ["git"], ["=x"], ["uv=relative"]],

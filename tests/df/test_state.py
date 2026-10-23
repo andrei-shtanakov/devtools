@@ -72,7 +72,7 @@ def test_read_raw_of_an_empty_layout(lay: Layout) -> None:
     assert state.read_raw(lay) == state.RawSnapshot(0, None, None, None, None, False)
 
 
-@pytest.mark.parametrize("bad", ["absolute", "foreign", "bad-id", "dir"])
+@pytest.mark.parametrize("bad", ["absolute", "foreign", "bare", "bad-id", "dir"])
 def test_read_raw_refuses_a_bad_current(lay: Layout, bad: str) -> None:
     if bad == "dir":
         lay.current.mkdir()
@@ -80,6 +80,7 @@ def test_read_raw_refuses_a_bad_current(lay: Layout, bad: str) -> None:
         target = {
             "absolute": str(lay.releases / ID),
             "foreign": "elsewhere/x",
+            "bare": ID,
             "bad-id": "releases/../x",
         }[bad]
         os.symlink(target, lay.current)
