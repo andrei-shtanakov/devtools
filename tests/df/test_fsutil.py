@@ -341,13 +341,15 @@ def test_create_file_is_durable_in_final_form(crash_model: CrashModel) -> None:
         fsutil.create_file(path, os.O_WRONLY, 0o600)
 
 
-#: Every call site in `df/` that creates an object, changes its metadata,
-#: renames or removes it (the class of the 9-C findings: an object not
-#: durable in its final form, or a found one used unsettled), keyed by
-#: (module, function, operation, ordinal), with the reason its result is
-#: durable in final form. A new site fails `test_every_fs_mutation_is_
-#: accounted_for` until it goes through an `fsutil` primitive or names its
-#: protocol here.
+#: Every finding of the fail-closed scan of `df/` (`_FsSites`: anything that
+#: may create an object, change its metadata, rename or remove it, unless it
+#: is literally a read) -- the class of the 9-C findings: an object not
+#: durable in its final form, or a found one used unsettled -- keyed by
+#: (module, function, operation, ordinal), with the reason it is safe. A new
+#: finding fails `test_every_fs_mutation_is_accounted_for` until it goes
+#: through an `fsutil` primitive or names its protocol here. Limit: objects
+#: created by processes `df` starts are outside the scan
+#: (`SUBPROCESS_CREATORS`).
 PRIMITIVE = "an fsutil primitive (durable in final form on return)"
 FS_SITES: dict[tuple[str, str, str, int], str] = {
     ("fsutil", "write_atomic", "os.rename", 1): PRIMITIVE,
@@ -358,6 +360,25 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
     ("fsutil", "_settle_found", "os.fchmod", 1): PRIMITIVE + ": then own sync",
     ("fsutil", "create_file", "os.open", 1): PRIMITIVE,
     ("fsutil", "remove_durably", "os.unlink", 1): PRIMITIVE,
+    ("fsutil", "_write_tmp", "os.open", 1): (
+        PRIMITIVE + ": write_atomic's O_EXCL temp, fchmod, sync_file, rename"
+    ),
+    ("fsutil", "_settle_found_file", "os.open", 1): "local read-only flags",
+    ("fsutil", "_sync_regular", "os.open", 1): "local read-only flags",
+    ("config", "_read_optional", "os.open", 1): "local read-only flags",
+    ("journal", "_open_or_make_dir", "os.open", 1): (
+        "the chain's directory flags (after fsutil.make_dir)"
+    ),
+    ("launcher_entry", "_descend", "os.open", 1): "the chain's directory flags",
+    ("journal", "_open_regular", "os.open", 1): (
+        "no O_CREAT: the lock (never written), the journal (append, then "
+        "sync_file) or a read"
+    ),
+    ("launcher_entry", "_open_regular", "os.open", 1): (
+        "no O_CREAT: the lock (never written) or a read"
+    ),
+    ("inputs", "", "import shutil", 1): "root's checkout: scratch",
+    ("receive", "", "import shutil", 1): "protocol remove_own_tree: rmtree",
     ("launcher_entry", "_create_private", "os.open", 1): (
         "stdlib copy of create_file: born 0600 (umask 0), file and dir synced"
     ),
@@ -422,31 +443,54 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
     ("release", "_unlink_quietly", "os.unlink", 1): "activate's own temp",
 }
 
-_OS_OPS = frozenset(
+#: Attribute calls that create, change the metadata of, rename or remove an
+#: object, whatever the object (`os.<x>`, a `Path`, a `TarFile`).
+_MUTATORS = frozenset(
     {
         "mkdir", "makedirs", "chmod", "fchmod", "lchmod", "chown", "fchown",
         "lchown", "rename", "replace", "symlink", "link", "unlink", "remove",
-        "rmdir", "open",
+        "rmdir", "removedirs", "mkfifo", "mknod", "truncate", "ftruncate",
+        "utime", "chflags", "lchflags", "write_text", "write_bytes", "touch",
+        "symlink_to", "hardlink_to", "extractall", "extract",
     }
 )  # fmt: skip
-_PATH_OPS = frozenset(
-    {
-        "mkdir", "write_text", "write_bytes", "touch", "symlink_to", "rename",
-        "replace", "unlink", "rmdir", "chmod", "extractall", "hardlink_to",
-    }
-)  # fmt: skip
+#: `os.open` flags that only read or open a directory.
+_READ_FLAGS = frozenset(
+    {"O_RDONLY", "O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC", "O_NONBLOCK", "O_NOCTTY"}
+)
+#: Modules whose every use is a finding (they create or remove files).
+_FS_MODULES = frozenset({"os", "shutil", "tempfile"})
+
+#: Processes `df` starts that create objects -- outside the AST scan, so
+#: listed here with why their result is safe (the guard's limit).
+SUBPROCESS_CREATORS = {
+    "uv python install (admin)": "protocol install_admin_python: sync_tree, rename",
+    "uv sync / git / tar (build, as df-build)": "builder tree: copied, digested",
+    "git / tar (root's checkout)": "scratch under verify/, fetched every run",
+    "cleaner find/chmod/rm (as df-build)": "protocol cleanup_tree: root syncs",
+    "useradd / dscl (account)": "OS records, judged by verify_build_user",
+}
 
 
 class _FsSites(ast.NodeVisitor):
-    """Every mutating call: `os.*`, `os.open` with `O_CREAT`, `shutil.*`,
-    the `pathlib`/`tarfile` mutators, and `open(..., "w"/"x"/"a"/"+")`."""
+    """Fail-closed scan of one module: every use that may create, change
+    metadata, rename or remove -- unless it is a literal read. Findings:
+    `<os>.<mutator>` and `.<mutator>` attribute calls; every `os.open` whose
+    flags are not literally read/directory ones (module constants of only
+    such flags included); `open`/`.open` with a mode that is not a literal
+    read mode; any `shutil`/`tempfile` use; `from os|shutil|tempfile import`;
+    `getattr` on those modules; a call of a name imported from them.
+    `import os as x` aliases are tracked. Subprocesses are outside the scan
+    (`SUBPROCESS_CREATORS`)."""
 
     def __init__(self, module: str, tree: ast.Module) -> None:
         self.module = module
-        self.creating = {
+        self.aliases: dict[str, str] = {}  # local name -> fs module
+        self.imported: set[str] = set()  # names from `from os import ...`
+        self.read_consts = {
             t.id
             for n in tree.body
-            if isinstance(n, ast.Assign) and "O_CREAT" in ast.unparse(n.value)
+            if isinstance(n, ast.Assign) and self._literal_read(n.value, set())
             for t in n.targets
             if isinstance(t, ast.Name)
         }
@@ -454,73 +498,147 @@ class _FsSites(ast.NodeVisitor):
         self.found: list[tuple[str, str, str, int]] = []
         self._ordinal: dict[tuple[str, str, str], int] = {}
 
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
-        self.stack.append(node.name)
-        self.generic_visit(node)
-        self.stack.pop()
+    def _literal_read(self, expr: ast.expr, consts: set[str]) -> bool:
+        if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.BitOr):
+            return self._literal_read(expr.left, consts) and self._literal_read(
+                expr.right, consts
+            )
+        if isinstance(expr, ast.Attribute) and isinstance(expr.value, ast.Name):
+            return expr.attr in _READ_FLAGS
+        return isinstance(expr, ast.Name) and expr.id in consts
 
     def _add(self, op: str) -> None:
         key = (self.module, self.stack[-1] if self.stack else "", op)
         self._ordinal[key] = self._ordinal.get(key, 0) + 1
         self.found.append((*key, self._ordinal[key]))
 
-    def _creates(self, flags: list[ast.expr]) -> bool:
-        names = {n.id for f in flags for n in ast.walk(f) if isinstance(n, ast.Name)}
-        text = " ".join(ast.unparse(f) for f in flags)
-        return "O_CREAT" in text or bool(names & self.creating)
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+        self.stack.append(node.name)
+        self.generic_visit(node)
+        self.stack.pop()
+
+    def visit_Import(self, node: ast.Import) -> None:  # noqa: N802
+        for a in node.names:
+            if a.name in _FS_MODULES:
+                self.aliases[a.asname or a.name] = a.name
+                if a.name != "os":
+                    self._add(f"import {a.name}")
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802
+        if node.module in _FS_MODULES:
+            for a in node.names:
+                self.imported.add(a.asname or a.name)
+                self._add(f"from {node.module} import {a.name}")
 
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
         f = node.func
         if isinstance(f, ast.Attribute):
-            base = ast.unparse(f.value)
-            if base == "os" and f.attr in _OS_OPS:
-                if f.attr != "open" or self._creates(node.args[1:2]):
-                    self._add(f"os.{f.attr}")
-            elif base == "shutil":
-                self._add(f"shutil.{f.attr}")
-            elif f.attr in _PATH_OPS:
-                self._add(f".{f.attr}")
-        elif isinstance(f, ast.Name) and f.id == "open":
-            mode = node.args[1] if len(node.args) > 1 else None
-            mode = mode or next(
-                (k.value for k in node.keywords if k.arg == "mode"), None
-            )
-            if mode is not None and any(c in ast.unparse(mode) for c in "wxa+"):
-                self._add("open")
+            self._attribute_call(f, node)
+        elif isinstance(f, ast.Name):
+            self._name_call(f, node)
         self.generic_visit(node)
+
+    def _attribute_call(self, f: ast.Attribute, node: ast.Call) -> None:
+        base = f.value.id if isinstance(f.value, ast.Name) else None
+        module = self.aliases.get(base or "")
+        if module in ("shutil", "tempfile"):
+            self._add(f"{module}.{f.attr}")
+        elif module == "os" and f.attr == "open":
+            flags = node.args[1] if len(node.args) > 1 else _kw(node, "flags")
+            if flags is None or not self._literal_read(flags, self.read_consts):
+                self._add("os.open")
+        elif f.attr in _MUTATORS:
+            self._add(f"{module}.{f.attr}" if module else f".{f.attr}")
+        elif f.attr == "open" and module is None:
+            mode = node.args[0] if node.args else _kw(node, "mode")
+            if base == "tarfile":
+                mode = node.args[1] if len(node.args) > 1 else _kw(node, "mode")
+            if not _read_mode(mode):
+                self._add(".open")
+
+    def _name_call(self, f: ast.Name, node: ast.Call) -> None:
+        if f.id in self.imported:
+            self._add(f"imported {f.id}")
+        elif f.id == "getattr" and node.args:
+            target = node.args[0]
+            if isinstance(target, ast.Name) and target.id in self.aliases:
+                self._add(f"getattr({self.aliases[target.id]})")
+        elif f.id == "open":
+            mode = node.args[1] if len(node.args) > 1 else _kw(node, "mode")
+            if not _read_mode(mode):
+                self._add("open")
+
+
+def _kw(node: ast.Call, name: str) -> ast.expr | None:
+    return next((k.value for k in node.keywords if k.arg == name), None)
+
+
+def _read_mode(mode: ast.expr | None) -> bool:
+    """No mode, or a literal read mode (`"r"`, `"rb"`, `"r:*"`, ...)."""
+    if mode is None:
+        return True
+    if not (isinstance(mode, ast.Constant) and isinstance(mode.value, str)):
+        return False
+    return mode.value.startswith("r") and "+" not in mode.value
+
+
+def _scan(path: Path) -> list[tuple[str, str, str, int]]:
+    tree = ast.parse(path.read_text())
+    visitor = _FsSites(path.stem, tree)
+    visitor.visit(tree)
+    return visitor.found
 
 
 def test_every_fs_mutation_is_accounted_for() -> None:
     found: list[tuple[str, str, str, int]] = []
     for path in sorted(Path(fsutil.__file__).parent.glob("*.py")):
-        tree = ast.parse(path.read_text())
-        visitor = _FsSites(path.stem, tree)
-        visitor.visit(tree)
-        found += visitor.found
+        found += _scan(path)
     assert sorted(found) == sorted(FS_SITES)
 
 
-def test_the_guard_sees_every_form() -> None:
-    """The scanner itself (a twin): each form it must catch is caught."""
-    src = """
-import os, shutil
-from pathlib import Path
-FLAGS = os.O_WRONLY | os.O_CREAT
-def f(p: Path) -> None:
-    os.mkdir("a"); os.chmod("a", 0o700); os.open("a", FLAGS)
-    os.open("b", os.O_RDONLY | os.O_CREAT, 0o600); os.open("c", os.O_RDONLY)
-    shutil.copy("a", "b"); p.write_text("x"); p.touch(); open("x", "w")
-    open("y"); os.replace("a", "b"); p.chmod(0o700)
-"""
-    visitor = _FsSites("m", ast.parse(src))
-    visitor.visit(ast.parse(src))
-    ops = sorted(op for _m, _f, op, _n in visitor.found)
-    assert ops == sorted(
-        [
-            "os.mkdir", "os.chmod", "os.open", "os.open", "shutil.copy",
-            ".write_text", ".touch", "open", "os.replace", ".chmod",
-        ]
-    )  # fmt: skip
+#: Each blind form of the first guard, planted: the scan must flag each.
+PLANTED = {
+    "local O_CREAT flags": "def f():\n    fl = os.O_WRONLY | os.O_CREAT\n    os.open('a', fl)\n",
+    "unknown flags variable": "def f(fl):\n    os.open('a', fl)\n",
+    "Path.open write": "def f(p):\n    p.open('w')\n",
+    "Path.open variable mode": "def f(p, m):\n    p.open(m)\n",
+    "builtin open append": "def f():\n    open('x', 'a')\n",
+    "from os import": "from os import mkdir\ndef f():\n    mkdir('a')\n",
+    "from os import, passed on": "from os import chmod as c\nHOOK = c\n",
+    "import alias": "import os as o\ndef f():\n    o.chmod('a', 0)\n",
+    "shutil alias": "import shutil as sh\ndef f():\n    sh.move('a', 'b')\n",
+    "tempfile": "import tempfile\ndef f():\n    tempfile.mkdtemp()\n",
+    "getattr os": "def f():\n    getattr(os, 'fchmod')(3, 0)\n",
+    "mkfifo": "def f():\n    os.mkfifo('a')\n",
+    "mknod": "def f():\n    os.mknod('a')\n",
+    "truncate": "def f():\n    os.truncate('a', 0)\n",
+    "utime": "def f():\n    os.utime('a')\n",
+    "chflags": "def f():\n    os.chflags('a', 0)\n",
+    "touch": "def f(p):\n    p.touch()\n",
+    "tar extract": "def f(t):\n    t.extract('m')\n",
+    "tarfile write": "def f():\n    tarfile.open('x', 'w')\n",
+}
+
+
+@pytest.mark.parametrize("form", sorted(PLANTED))
+def test_the_guard_flags_a_planted_form(tmp_path: Path, form: str) -> None:
+    """A negative twin per form: a planted instance is a finding."""
+    planted = tmp_path / "planted.py"
+    planted.write_text("import os\nimport tarfile\n" + PLANTED[form])
+    assert _scan(planted), form
+
+
+def test_the_guard_passes_literal_reads(tmp_path: Path) -> None:
+    """...and only those: literal read flags and modes are not findings."""
+    planted = tmp_path / "reads.py"
+    planted.write_text(
+        "import os\nimport tarfile\nFLAGS = os.O_RDONLY | os.O_NOFOLLOW\n"
+        "def f(p):\n    os.open('a', FLAGS)\n    os.open('b', os.O_RDONLY)\n"
+        "    open('c')\n    open('d', 'rb')\n    p.open()\n"
+        "    tarfile.open('e', 'r:*')\n"
+        "import os as o\ndef g():\n    o.open('f', o.O_RDONLY)\n"
+    )
+    assert _scan(planted) == []
 
 
 def _primitive_runs(
