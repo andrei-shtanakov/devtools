@@ -472,9 +472,13 @@ def install_steps(layout: Layout, cfg: InstallConfig, prepared: Prepared) -> lis
        `StepFailed("manifest", <problems>)` from the check itself.
     2. `trusted-paths`: the approved CLI first, then every directory of
        `prep_dirs`, settled first; any problem is `StepFailed("trusted-paths",
-       <paths and reasons>)`. `do()` creates missing ones and widens root's
-       narrower ones to their mode, durably (`fsutil.make_dir`); another
-       owner, group/other write or a wider exact mode stays a refusal.
+       <paths and reasons>)`. `do()` creates missing ones and sets every
+       `repairable` one of root's -- in **every** prep directory, exact or
+       not: narrower than its mode, or with an inherited `S_ISGID` -- to its
+       mode, durably (`fsutil.make_dir`); an operator's narrower mode on a
+       non-exact directory (e.g. `/opt/df` `0750`) is therefore widened to
+       `0755`. Another owner, group/other write or a wider exact mode stays
+       a refusal; nothing gains write for group or others.
     3. `build-user`: `verify_build_user` empty, and only then `whoami_as`
        equals the record (no process of `df-build` before readiness);
        `do()` is `create_build_user`.
@@ -513,9 +517,9 @@ def _profile(cfg: InstallConfig) -> Profile:
 
 def _trusted_ready(layout: Layout, cfg: InstallConfig, platform: PlatformName) -> bool:
     """Step 2's check. What it sees is settled first (spec 3.3 r6). Every
-    problem refuses; absence -- or a root directory narrower than its mode,
-    which `do()` widens to it (never a wider one, never another owner's) --
-    asks for `do()`."""
+    problem refuses; absence -- or a root directory whose mode `do()` may
+    set (`fsutil.repairable`: narrower, or an inherited `S_ISGID`; never a
+    wider one, never another owner's) -- asks for `do()`."""
     problems = list(plat.approved_cli_problems(cfg.approved_cli, platform))
     _settle_prep_dirs(layout)
     missing = False
@@ -583,10 +587,11 @@ def _make_prep_dirs(layout: Layout) -> None:
     """Step 2's `do()`: only after `_trusted_ready` passed for the same
     layout (m4). `_make_dir` opens each parent following links (macOS `/etc`
     is one); that is safe only because the check proved every component
-    down to the nearest existing ancestor root's and unwritable by others,
-    and `fchmod` acts only on the directory this call created and opened
-    `O_NOFOLLOW`. A root directory narrower than its mode is widened to it
-    (`fsutil.make_dir`)."""
+    down to the nearest existing ancestor root's and unwritable by others.
+    `fchmod` acts on a directory `fsutil.make_dir` opened `O_NOFOLLOW`: one
+    it created (an inherited `S_ISGID` cleared), or a found one of root
+    whose mode is `repairable` -- in every prep directory, not only the
+    exact ones; it only narrows group/other write, never adds it."""
     for path, mode in prep_dirs(layout):
         for ancestor in _missing_ancestors(layout, path):
             _make_dir(ancestor, 0o755)
@@ -604,7 +609,7 @@ def _missing_ancestors(layout: Layout, path: Path) -> list[Path]:
 
 def _make_dir(path: Path, mode: int) -> None:
     """`path` durable at exactly `mode` (`fsutil.make_dir`): created, or
-    found, settled and -- if root's and narrower -- widened to it."""
+    found, settled and -- if root's and `repairable` -- set to it."""
     try:
         parent = os.open(path.parent, _DIR_OPEN)
     except OSError as exc:

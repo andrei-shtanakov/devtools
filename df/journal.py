@@ -123,14 +123,15 @@ def _open_install_dir(layout: Layout) -> int:
     fd = _step_open(path, lambda: os.open(path, _DIR_FOLLOW_FLAGS))
     for i, name in enumerate(parts):
         path = path / name
-        flags = _DIR_FLAGS if i >= first_nofollow else _DIR_FOLLOW_FLAGS
-        fd = _descend(fd, path, flags)
+        own = i >= first_nofollow  # df's own: `var` itself and below
+        flags = _DIR_FLAGS if own else _DIR_FOLLOW_FLAGS
+        fd = _descend(fd, path, flags, own=own)
     return fd
 
 
-def _descend(parent_fd: int, path: Path, flags: int) -> int:
-    """Open child `path.name` of `parent_fd`; always closes the parent."""
-    own = flags == _DIR_FLAGS  # df's own directories, below `var`'s parent
+def _descend(parent_fd: int, path: Path, flags: int, *, own: bool) -> int:
+    """Open child `path.name` of `parent_fd`; always closes the parent.
+    `own` (by position: `var` and below) -- only those may be repaired."""
     try:
         return _step_open(
             path, lambda: _open_or_make_dir(parent_fd, path, flags, own=own)

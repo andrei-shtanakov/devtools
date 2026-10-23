@@ -6,6 +6,7 @@ import json
 import os
 import select
 import signal
+import stat
 import subprocess
 import sys
 import textwrap
@@ -717,3 +718,26 @@ def test_read_journal_non_utf8_named(tmp_path: Path) -> None:
     journal.write_bytes(b"\xff\xfe\n")
     with pytest.raises(ValueError, match="line 1"):
         read_journal(journal)
+
+
+def test_writer_lock_repairs_only_dfs_own_components(tmp_path: Path) -> None:
+    """m-D: by position in the path, `var` (`/var/lib/df`) and `install` are
+    df's own and a narrower mode of theirs is repaired to `0755`; the system
+    components above them (`/var`, `/var/lib`) are settled, never changed."""
+    lay = _layout(tmp_path)
+    root = lay.root
+    for rel in ("var", "var/lib", "var/lib/df", "var/lib/df/install"):
+        (root / rel).mkdir(mode=0o700)
+        os.chmod(root / rel, 0o700)
+    with writer_lock(lay):
+        pass
+    modes = {
+        rel: stat.S_IMODE(os.stat(root / rel).st_mode)
+        for rel in ("var", "var/lib", "var/lib/df", "var/lib/df/install")
+    }
+    assert modes == {
+        "var": 0o700,
+        "var/lib": 0o700,
+        "var/lib/df": 0o755,
+        "var/lib/df/install": 0o755,
+    }

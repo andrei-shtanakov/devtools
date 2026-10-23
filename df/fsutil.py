@@ -249,6 +249,10 @@ def create_file(path: Path, flags: int, mode: int, *, dir_fd: int | None = None)
 def _settle_found_file(
     target: Path | str, dir_fd: int | None, parent: int | Path
 ) -> None:
+    """Settle a file another creator won the `O_EXCL` race for. Its own sync
+    is redundant for today's callers -- the journal's append ends in
+    `sync_file`, the lock has no content and was born `0600` -- and is kept
+    so the primitive does not depend on what its caller does next."""
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
     try:
         fd = os.open(target, flags, dir_fd=dir_fd)

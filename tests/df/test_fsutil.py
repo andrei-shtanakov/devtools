@@ -628,3 +628,32 @@ def test_create_file_twins_every_position(
             assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
 
     assert _primitive_runs(crash_model, monkeypatch, run, check) >= 6
+
+
+def test_create_file_race_settles_the_winners_file(
+    crash_model: CrashModel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m-C, the O_EXCL race forced: between `_open_private`'s absence check
+    and `create_file`, another writer creates the journal and writes a line
+    without its syncs yet (it dies there). The loser finds the name, settles
+    the file and its directory, then opens and appends: after an OS crash
+    the winner's line is there as well as its own."""
+    from df import journal
+
+    path = crash_model.root / "journal.jsonl"
+    real_absent = journal._is_absent  # noqa: SLF001
+
+    def absent_then_raced(p: Path, dir_fd: int | None) -> bool:
+        answer = real_absent(p, dir_fd)
+        if answer:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            os.write(fd, b'{"winner": true}\n')
+            os.close(fd)
+        return answer
+
+    monkeypatch.setattr(journal, "_is_absent", absent_then_raced)
+    journal.journal_event(path, run_id="r", step="s", event="loser")
+    assert crash_model.unsynced() == []
+    crash_model.os_crash()
+    lines = path.read_text().splitlines()
+    assert lines[0] == '{"winner": true}' and '"loser"' in lines[1]
