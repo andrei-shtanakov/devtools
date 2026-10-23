@@ -442,7 +442,6 @@ _PREP_DIR_MODES: tuple[tuple[str, int], ...] = (
 #: Parents of what a rollback removes (I7): trusted before any removal.
 ROLLBACK_PARENTS = ("opt", "releases", "staging", "admin")
 _DIR_OPEN = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
-_DIR_NOFOLLOW = _DIR_OPEN | os.O_NOFOLLOW
 _DATA_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 _TRUST_STEP = "trusted-paths"
 _PENDING_STEP = "pending"
@@ -568,22 +567,14 @@ def _missing_ancestors(layout: Layout, path: Path) -> list[Path]:
 
 
 def _make_dir(path: Path, mode: int) -> None:
-    """Create `path` (if absent) with exactly `mode`; sync its parent."""
+    """Create `path` (if absent) with exactly `mode`, durably: the mode and
+    the name (`fsutil.make_dir`). An existing one: the check judges it."""
     try:
         parent = os.open(path.parent, _DIR_OPEN)
     except OSError as exc:
         raise StepFailed(_TRUST_STEP, f"{path.parent}: {exc}") from exc
     try:
-        try:
-            os.mkdir(path.name, 0o700, dir_fd=parent)
-        except FileExistsError:
-            return  # the check judges what is there
-        fd = os.open(path.name, _DIR_NOFOLLOW, dir_fd=parent)
-        try:
-            os.fchmod(fd, mode)
-        finally:
-            os.close(fd)
-        fsutil.sync_dir(parent)
+        fsutil.make_dir(parent, path.name, mode)
     except OSError as exc:
         raise StepFailed(_TRUST_STEP, f"{path}: {exc}") from exc
     finally:

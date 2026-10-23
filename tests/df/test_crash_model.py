@@ -307,9 +307,8 @@ def test_link_replaced_by_rename_needs_the_parent_sync(m: CrashModel) -> None:
 
 
 def test_journal_sync_names_are_the_models(m: CrashModel) -> None:
-    """`df.journal` bound `sync_file`/`sync_dir` at import: replaced too."""
+    """`df.journal` bound `sync_file` at import: replaced too."""
     assert journal.sync_file == m._sync_file  # noqa: SLF001
-    assert journal.sync_dir == m._sync_dir  # noqa: SLF001
     log = m.root / "d" / "journal"
     journal.journal_event(log, run_id="r", step="s", event="start")
     fsutil.sync_dir(log.parent)

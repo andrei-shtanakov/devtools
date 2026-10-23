@@ -185,8 +185,12 @@ class CrashModel:
         mp.setattr(fsutil, "sync_file", self._sync_file)
         mp.setattr(fsutil, "sync_dir", self._sync_dir)
         mp.setattr(fsutil, "sync_tree", self._sync_tree)
-        mp.setattr(journal, "sync_file", self._sync_file)
-        mp.setattr(journal, "sync_dir", self._sync_dir)
+        for name, hook in (
+            ("sync_file", self._sync_file),
+            ("sync_dir", self._sync_dir),
+        ):
+            if hasattr(journal, name):  # names `df.journal` bound at import
+                mp.setattr(journal, name, hook)
         mp.setattr(fsutil, "fault_point", self._wrap_fault(fsutil.fault_point))
         mp.setattr(fsutil, "boot_id", self.boot_id)
         mp.setattr(os, "fsync", self._fsync)

@@ -285,17 +285,31 @@ def test_writer_lock_refuses_foreign_dir_owner(
 def test_writer_lock_syncs_created_dirs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import df.journal as journal_mod
+    """Each created directory: its own sync (the mode), then its parent's
+    (the name) -- `fsutil.make_dir`; an existing chain syncs nothing."""
+    from df import fsutil
+    from tests.df.crash_model import fd_path
 
     lay = _layout(tmp_path)
-    calls: list[int] = []
-    real = journal_mod.sync_dir
-    monkeypatch.setattr(
-        journal_mod, "sync_dir", lambda fd: (calls.append(fd), real(fd))[1]
-    )
+    calls: list[Path] = []
+    real = fsutil.sync_dir
+
+    def spy(fd: int | Path) -> fsutil.SyncNote:
+        calls.append(fd_path(fd) if isinstance(fd, int) else fd)
+        return real(fd)
+
+    monkeypatch.setattr(fsutil, "sync_dir", spy)
     with writer_lock(lay):
         pass
-    assert len(calls) == 4  # var, lib, df, install
+    root = Path(os.path.realpath(lay.root))
+    chain = [
+        root / "var",
+        root / "var/lib",
+        root / "var/lib/df",
+        root / "var/lib/df/install",
+    ]
+    expected = [p for d in chain for p in (d, d.parent)]
+    assert [Path(os.path.realpath(p)) for p in calls] == expected
     calls.clear()
     with writer_lock(lay):
         pass

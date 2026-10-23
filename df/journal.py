@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from df import fsutil
-from df.fsutil import sync_dir, sync_file, write_atomic
+from df.fsutil import make_dir, sync_file, write_atomic
 from df.paths import Layout
 
 _NB = os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -159,29 +159,14 @@ def _require_trusted_dir(fd: int, path: Path) -> None:
 
 
 def _open_or_make_dir(parent_fd: int, name: str, flags: int) -> int:
+    """Open `name`, creating it `0755` durably first if absent
+    (`fsutil.make_dir`); a concurrent creator winning the race is fine."""
     try:
         return os.open(name, flags, dir_fd=parent_fd)
     except FileNotFoundError:
         pass
-    created = _mkdir_tolerant(parent_fd, name)
-    fd = os.open(name, flags, dir_fd=parent_fd)
-    if created:
-        try:
-            os.fchmod(fd, 0o755)
-            sync_dir(parent_fd)
-        except BaseException:
-            os.close(fd)
-            raise
-    return fd
-
-
-def _mkdir_tolerant(parent_fd: int, name: str) -> bool:
-    """Create `name`; a concurrent creator winning the race is fine."""
-    try:
-        os.mkdir(name, 0o755, dir_fd=parent_fd)
-    except FileExistsError:
-        return False
-    return True
+    make_dir(parent_fd, name, 0o755)
+    return os.open(name, flags, dir_fd=parent_fd)
 
 
 def _why(exc: OSError) -> str:

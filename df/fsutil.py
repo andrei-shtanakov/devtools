@@ -137,6 +137,31 @@ def _discard(tmp: Path) -> None:
         pass
 
 
+def make_dir(parent_fd: int, name: str, mode: int) -> bool:
+    """Create directory `name` in `parent_fd` with exactly `mode`, durably.
+
+    `mkdir 0700` -> open (`O_DIRECTORY|O_NOFOLLOW`) -> `fchmod(mode)` ->
+    `sync_dir(fd)` -> `sync_dir(parent_fd)`. The mode is the directory's own
+    metadata: only a sync of the directory makes it durable; the parent's
+    sync makes the name durable (spec 3.3, protocol `verify_chmod`). An
+    existing name is left untouched: `False`, nothing synced -- the caller
+    judges what is there.
+    """
+    try:
+        os.mkdir(name, 0o700, dir_fd=parent_fd)
+    except FileExistsError:
+        return False
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open(name, flags, dir_fd=parent_fd)
+    try:
+        os.fchmod(fd, mode)
+        sync_dir(fd)
+    finally:
+        os.close(fd)
+    sync_dir(parent_fd)
+    return True
+
+
 def remove_durably(path: Path) -> None:
     """Unlink `path`, then fault_point("unlinked"), then sync its parent."""
     os.unlink(path)
