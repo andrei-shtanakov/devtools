@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -416,3 +417,17 @@ def test_restore_keeps_identities(m: CrashModel) -> None:
     m.restore(branch)
     assert m.identity(f) == oid
     assert isinstance(m.points, list) and all(isinstance(p, Point) for p in m.points)
+
+
+def test_bare_fsync_of_a_file_is_no_file_sync_on_macos(m: CrashModel) -> None:
+    """R1: on macOS only F_FULLFSYNC (`sync_file`) makes a file durable; a
+    bare `os.fsync` from outside `fsutil` does on Linux only."""
+    f = m.root / "d" / "f"
+    write(f, b"old", sync=True)
+    fsutil.sync_dir(f.parent)
+    fd = os.open(f, os.O_WRONLY | os.O_TRUNC)
+    os.write(fd, b"new")
+    os.fsync(fd)
+    os.close(fd)
+    m.os_crash()
+    assert f.read_bytes() == (b"old" if sys.platform == "darwin" else b"new")

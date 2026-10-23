@@ -711,6 +711,26 @@ def test_home_found_by_retry_is_settled_before_ready(
     assert os.path.isdir(lay.build_home) is settle
 
 
+def test_created_home_is_durable_before_ready(fake_world: World) -> None:
+    """The home `create_build_user` makes is durable when it returns
+    (`sync_dir` of its parent after `rename_noreplace`): an OS crash right
+    after `ready` keeps it, with no retry to settle it."""
+    from tests.df.test_platform import _world  # noqa: PLC0415
+
+    w = fake_world
+    lay = w.lay
+    w.mp.setattr(plat, "create_build_user", REAL_CREATE)
+    _world(w.mp)
+    os.rmdir(lay.build_home)
+    w.m.baseline()
+    with journal.writer_lock(lay):
+        accept.settle_on_acquire(lay)
+        plat.create_build_user(lay)
+    w.m.os_crash()
+    assert REAL_LOAD(lay.accounts)[plat.BUILD_USER].state == "ready"
+    assert os.path.isdir(lay.build_home)
+
+
 REAL_CREATE = plat.create_build_user
 REAL_LOAD = __import__("df.config").config.load_accounts
 
