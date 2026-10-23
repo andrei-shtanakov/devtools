@@ -25,6 +25,7 @@ from df.config import (
     ReleaseEntry,
     dump_accounts,
     dump_install,
+    load_accounts,
     load_pending,
     load_releases,
 )
@@ -333,7 +334,11 @@ def at_rest_problems(world: World) -> list[str]:
 
     - no tree, container, admin code or mark of an id that is neither
       registered nor `pending.toml`'s (an orphan nothing will clean);
-    - `current` names a registered, intact release;
+    - `current` names a registered, intact release, and its install's state
+      under `/var/lib/df` is there: a `ready` `df-build` record, the journal,
+      its mark;
+    - once an install began (`pending.toml` or `install.toml`), the
+      generation file exists -- a missing one is a problem, never 0;
     - without `pending.toml`: `install.toml` exists iff `current` does, and
       then the command of `current` is ready.
     """
@@ -346,14 +351,12 @@ def at_rest_problems(world: World) -> list[str]:
         if rid not in known:
             problems.append(f"orphan {rid}: {', '.join(where)}")
     cur = current_id(world)
+    has_install = os.path.lexists(lay.etc / "install.toml")
+    if (pending is not None or has_install) and not os.path.lexists(lay.generation):
+        problems.append("generation file missing")
     if cur is not None:
-        entry = reg.get(cur)
-        if entry is None:
-            problems.append(f"current {cur}: not registered")
-        elif not accept.entry_intact(lay, cur, entry, admin_ready=admin.admin_ready):
-            problems.append(f"current {cur}: not intact")
+        problems += _active_state_problems(world, cur, reg)
     if pending is None:
-        has_install = os.path.lexists(lay.etc / "install.toml")
         if has_install != (cur is not None):
             problems.append(f"install.toml {has_install}, current {cur}")
         if cur is not None and not install.command_ready(lay, cur):
@@ -361,8 +364,42 @@ def at_rest_problems(world: World) -> list[str]:
     return problems
 
 
+def _active_state_problems(
+    world: World, cur: str, reg: dict[str, ReleaseEntry]
+) -> list[str]:
+    lay = world.lay
+    problems: list[str] = []
+    entry = reg.get(cur)
+    if entry is None:
+        problems.append(f"current {cur}: not registered")
+    elif not accept.entry_intact(lay, cur, entry, admin_ready=admin.admin_ready):
+        problems.append(f"current {cur}: not intact")
+    accounts = load_accounts(lay.accounts) if os.path.lexists(lay.accounts) else {}
+    account = accounts.get(plat.BUILD_USER)
+    if account is None or account.state != "ready":
+        problems.append("accounts.toml: no ready df-build record")
+    if not os.path.lexists(lay.journal):
+        problems.append("journal missing")
+    if not os.path.lexists(lay.mark_file(cur)):
+        problems.append(f"mark of {cur} missing")
+    return problems
+
+
+def unsynced_besides_checkout(world: World) -> list[str]:
+    """`unsynced()` without the two scratch trees nothing syncs by design:
+    root's checkout (fetched again on every run) and what is inside the
+    build home (`cleanup_build_home`: «nothing is synced», spec 3.3)."""
+    lay = world.lay
+    scratch = tuple(
+        str(p.relative_to(lay.root)) + "/" for p in (lay.verify_dir, lay.build_home)
+    )
+    return [p for p in world.m.unsynced() if not p.startswith(scratch)]
+
+
 def committed_problems(world: World, release_id: str, cfg: InstallConfig) -> list[str]:
-    """`at_rest_problems` plus: committed on `release_id` with `cfg`."""
+    """`at_rest_problems` plus: committed on `release_id` with `cfg`, the
+    generation file present and even, and -- the universal invariant of a
+    successful run -- nothing the model holds unsynced (`fake_world`)."""
     lay = world.lay
     problems = at_rest_problems(world)
     if os.path.lexists(lay.pending):
@@ -374,6 +411,10 @@ def committed_problems(world: World, release_id: str, cfg: InstallConfig) -> lis
         cfg
     ):
         problems.append("install.toml is not the installed configuration")
-    if journal.read_generation(lay) % 2:
+    if not os.path.lexists(lay.generation):
+        problems.append("generation file missing")
+    elif journal.read_generation(lay) % 2:
         problems.append("generation odd")
+    if world.model is not None:
+        problems += [f"unsynced {p}" for p in unsynced_besides_checkout(world)]
     return problems

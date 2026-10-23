@@ -430,3 +430,19 @@ def test_bare_fsync_of_a_file_is_no_file_sync_on_macos(m: CrashModel) -> None:
     os.close(fd)
     m.os_crash()
     assert f.read_bytes() == (b"old" if sys.platform == "darwin" else b"new")
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="F_FULLFSYNC is macOS")
+def test_fullfsync_outside_fsutil_is_a_file_sync(m: CrashModel) -> None:
+    """The entry's stdlib copy syncs a file with `F_FULLFSYNC` on macOS."""
+    import fcntl
+
+    f = m.root / "d" / "f"
+    write(f, b"old", sync=True)
+    fsutil.sync_dir(f.parent)
+    fd = os.open(f, os.O_WRONLY | os.O_TRUNC)
+    os.write(fd, b"new")
+    fcntl.fcntl(fd, getattr(fcntl, "F_FULLFSYNC", 51))
+    os.close(fd)
+    m.os_crash()
+    assert f.read_bytes() == b"new"

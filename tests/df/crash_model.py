@@ -9,7 +9,8 @@ rules (spec 2026-10-13-df-installer-design.md §3.3 «Синхронизация
 
 - R1 A sync of a regular file (`sync_file`) makes durable its content, mode
   and owner -- never its name. On macOS a bare `os.fsync` of a file is not
-  one (§3.3: «Файл -- F_FULLFSYNC на macOS»).
+  one (§3.3: «Файл -- F_FULLFSYNC на macOS»); `fcntl(F_FULLFSYNC)` outside
+  `fsutil` (the entry's stdlib copy) is.
 - R2 A sync of a directory (`sync_dir`, its own fsync) makes durable its
   entries -- names to objects, a symbolic link by its target -- and its own
   mode and owner, never a child's content or metadata. So a `rename`,
@@ -78,6 +79,9 @@ _FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _ANY_FLAGS = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC
 _IS_DARWIN = sys.platform == "darwin"
+_F_FULLFSYNC = getattr(fcntl, "F_FULLFSYNC", 51)
+_F_GETPATH = getattr(fcntl, "F_GETPATH", 50)
+_FCNTL = fcntl.fcntl
 
 Kind = Literal["dir", "file"]
 Key = tuple[int, int]
@@ -154,7 +158,7 @@ class State:
 def fd_path(fd: int) -> Path:
     """The path of an open descriptor (macOS `F_GETPATH`, Linux `/proc`)."""
     if _IS_DARWIN:
-        raw = fcntl.fcntl(fd, getattr(fcntl, "F_GETPATH", 50), b"\0" * 1024)
+        raw = _FCNTL(fd, _F_GETPATH, b"\0" * 1024)
         return Path(raw.rstrip(b"\0").decode())
     return Path(os.readlink(f"/proc/self/fd/{fd}"))
 
@@ -194,6 +198,7 @@ class CrashModel:
         mp.setattr(fsutil, "fault_point", self._wrap_fault(fsutil.fault_point))
         mp.setattr(fsutil, "boot_id", self.boot_id)
         mp.setattr(os, "fsync", self._fsync)
+        mp.setattr(fcntl, "fcntl", self._fcntl(fcntl.fcntl))
         mp.setattr(os, "mkdir", self._creating_mkdir(os.mkdir))
         mp.setattr(os, "open", self._creating_open(os.open))
         for name in ("chmod", "chown"):
@@ -386,6 +391,19 @@ class CrashModel:
         is_dir = stat.S_ISDIR(os.fstat(fd).st_mode)
         if self._point("sync", "fsync", fd_path(fd)) and (is_dir or not _IS_DARWIN):
             self._record(fd)
+
+    def _fcntl(self, inner: Callable[..., object]) -> Callable[..., object]:
+        """`F_FULLFSYNC` outside `fsutil` (the entry's copy): a file or a
+        directory sync (R1/R2); every other command passes through."""
+
+        def call(fd: int, cmd: int, *args: object) -> object:
+            if not _IS_DARWIN or cmd != _F_FULLFSYNC:
+                return inner(fd, cmd, *args)
+            if self._point("sync", "fullfsync", fd_path(fd)):
+                self._record(fd)
+            return 0
+
+        return call
 
     def _creating_mkdir(self, inner: Callable[..., None]) -> Callable[..., None]:
         def mkdir(

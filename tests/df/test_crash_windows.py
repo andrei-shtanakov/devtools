@@ -44,6 +44,7 @@ from tests.df.install_world import (
     current_id,
     installed,
     leftover_ids,
+    unsynced_besides_checkout,
 )
 from tests.df.route_world import KEY
 
@@ -56,12 +57,6 @@ def fault(op: str, path: Path) -> Callable[[Point], bool]:
 
 def any_sync(p: Point) -> bool:
     return p.kind == "sync"
-
-
-def unsynced_besides_checkout(w: World) -> list[str]:
-    """`unsynced()` without root's checkout (re-fetched on every run)."""
-    verify = str(w.lay.verify_dir.relative_to(w.lay.root))
-    return [p for p in w.m.unsynced() if not p.startswith(verify + "/")]
 
 
 def complete(w: World, release_id: str, sha: str = SHA) -> None:
