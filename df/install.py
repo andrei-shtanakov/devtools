@@ -1,4 +1,6 @@
-"""The install transaction (spec 3.3, Task 9), part 1: the real route calls.
+"""The install transaction (spec 3.3, Task 9).
+
+Part 1 (9-A): the real route calls.
 
 `InstallRun` carries everything one install run's routes need (I1): it is
 built after the preparation steps, the trusted checkouts and the account.
@@ -8,26 +10,49 @@ own: `activate`, `write_release_json`, `register`, `write_atomic`);
 `read_for` reads the facts with the real admin predicates (`admin_ready`,
 `command_ready`). `rollback_calls` is the route `rollback` without a profile,
 a network or an account (I5).
+
+Part 2 (9-B): the preparation steps 1-3 (`install_steps`), the trusted
+checkouts and the uv settings, the writer's `pending.toml` (`read_pending`,
+`new_pending`), the recovery of an interrupted install (`recover_pending`,
+`rollback`) and the whole run under the writer lock (`run_install`), in the
+fixed security order of I6, I7 and M4.
 """
 
 from __future__ import annotations
 
+import os
+import stat
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
-from df import accept, admin, fsutil, release
+from df import accept, admin, fsutil, inputs, journal, lockset, release
 from df import build as build_mod
 from df import install_table as table
+from df import manifest as manifest_mod
 from df import platform as plat
 from df.accept import Facts
 from df.build import BuildPlan
-from df.config import InstallConfig, Pending, config_digest, dump_install
+from df.config import (
+    Account,
+    ConfigError,
+    InstallConfig,
+    Pending,
+    ReleaseEntry,
+    config_digest,
+    dump_install,
+    dump_pending,
+    load_accounts,
+    load_pending,
+    parse_install,
+)
 from df.digest import TreeError, release_digest
 from df.inputs import InstalledDist, installed_distributions, lock_digest
-from df.journal import StepFailed
-from df.manifest import Profile, RepoPin
+from df.journal import Step, StepFailed, run_steps
+from df.manifest import ManifestError, Profile, RepoPin
 from df.paths import Layout
 from df.platform import PlatformName
 from df.receive import CopyLimits
@@ -36,10 +61,14 @@ from df.routes import (
     Call,
     RouteContext,
     acceptance_calls,
+    implementation,
+    is_nested,
     removal_calls,
     route_action,
+    run_route,
     where,
 )
+from df.state import Snapshot
 
 #: Modes of the files `write_atomic` writes without a wrapper (M13): the
 #: entry is read, the command executed, `install.toml` read by everyone.
@@ -207,7 +236,16 @@ def command_ready(layout: Layout, release_id: str) -> bool:
     route `launcher` writes. The entry's status is not read: like `intact`,
     `L` is a fact of the files; revocation is the table's (n4).
     """
-    entry = accept.registry_entry(layout, release_id)
+    return command_ready_of(
+        layout, release_id, accept.registry_entry(layout, release_id)
+    )
+
+
+def command_ready_of(
+    layout: Layout, release_id: str, entry: ReleaseEntry | None
+) -> bool:
+    """`command_ready` for a given registry entry: a snapshot's value, so
+    bootstrap's healthy-command check (M16) re-reads no registry (I2)."""
     if entry is None or not accept.entry_intact(
         layout, release_id, entry, admin_ready=admin.admin_ready
     ):
@@ -379,3 +417,523 @@ def _distributions(run: InstallRun, tree: Path) -> dict[str, tuple[InstalledDist
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+# ---------- part 2: preparation, recovery and the run (9-B) ----------
+
+#: Mode of `pending.toml`: it holds the text of `install.toml` (`0644`).
+PENDING_MODE = 0o644
+#: Directories whose mode step 2 requires exactly (M3): `staging` lists no
+#: id to `df-build`, the marks and the evidence are root's alone.
+EXACT_MODES = ("staging", "quarantine", "marks_dir", "verify_dir")
+_PREP_DIR_MODES: tuple[tuple[str, int], ...] = (
+    ("opt", 0o755),
+    ("releases", 0o755),
+    ("staging", 0o711),
+    ("quarantine", 0o711),
+    ("admin", 0o755),
+    ("admin_python", 0o755),
+    ("bin_dir", 0o755),
+    ("etc", 0o755),
+    ("var", 0o755),
+    ("marks_dir", 0o700),
+    ("verify_dir", 0o700),
+)
+#: Parents of what a rollback removes (I7): trusted before any removal.
+ROLLBACK_PARENTS = ("opt", "releases", "staging", "admin")
+_DIR_OPEN = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+_DIR_NOFOLLOW = _DIR_OPEN | os.O_NOFOLLOW
+_DATA_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+_TRUST_STEP = "trusted-paths"
+_PENDING_STEP = "pending"
+_ROLLBACK_STEP = "rollback"
+
+Decision = Literal["none", "resume", "rollback"]
+
+
+def prep_dirs(layout: Layout) -> tuple[tuple[Path, int], ...]:
+    """The directories step 2 creates and requires, in creation order, with
+    their modes (M3); `install_dir` is `writer_lock`'s."""
+    return tuple((getattr(layout, name), mode) for name, mode in _PREP_DIR_MODES)
+
+
+@dataclass
+class Prepared:
+    """What the preparation steps found: step 1 puts the profile here (I1)."""
+
+    profile: Profile | None = None
+
+
+def install_steps(layout: Layout, cfg: InstallConfig, prepared: Prepared) -> list[Step]:
+    """The preparation steps 1-3 for `run_steps` (spec 3.3; I1, I6, M3, M4).
+
+    1. `manifest`: the check fetches the manifest (HTTPS read only) and
+       parses the profile into `prepared`; a refusal is
+       `StepFailed("manifest", <problems>)` from the check itself.
+    2. `trusted-paths`: the approved CLI first, then every directory of
+       `prep_dirs`; any problem is `StepFailed("trusted-paths", <paths and
+       reasons>)` — `do()` never repairs an existing directory, it only
+       creates missing ones (`fchmod` to the exact mode, the parent synced).
+    3. `build-user`: `verify_build_user` empty, and only then `whoami_as`
+       equals the record (no process of `df-build` before readiness);
+       `do()` is `create_build_user`.
+    """
+    platform = plat.detect_platform()
+
+    def manifest_ready() -> bool:
+        prepared.profile = _profile(cfg)
+        return True
+
+    return [
+        Step("manifest", manifest_ready, lambda: None),
+        Step(
+            _TRUST_STEP,
+            lambda: _trusted_ready(layout, cfg, platform),
+            lambda: _make_prep_dirs(layout),
+        ),
+        Step(
+            "build-user",
+            lambda: _build_user_ready(layout),
+            lambda: _create_build_user(layout),
+        ),
+    ]
+
+
+def _profile(cfg: InstallConfig) -> Profile:
+    where_ = f"{cfg.manifest_repo}@{cfg.manifest_sha}"
+    try:
+        data = manifest_mod.fetch_manifest(cfg.manifest_repo, cfg.manifest_sha)
+        return manifest_mod.parse_profile(data, cfg.profile)
+    except ManifestError as exc:
+        raise StepFailed("manifest", f"{where_}: {'; '.join(exc.problems)}") from exc
+    except OSError as exc:
+        raise StepFailed("manifest", f"{where_}: {exc}") from exc
+
+
+def _trusted_ready(layout: Layout, cfg: InstallConfig, platform: PlatformName) -> bool:
+    """Step 2's check: every problem refuses; only absence asks for `do()`."""
+    problems = list(plat.approved_cli_problems(cfg.approved_cli, platform))
+    missing = False
+    exact = {getattr(layout, name) for name in EXACT_MODES}
+    for path, mode in prep_dirs(layout):
+        st = _lstat(path)
+        if st is None:
+            missing = True
+            problems += plat.trusted_path_problems(_existing_ancestor(path))
+        elif not stat.S_ISDIR(st.st_mode):
+            problems.append(f"{path}: не каталог")
+        else:
+            problems += plat.trusted_path_problems(path)
+            have = stat.S_IMODE(st.st_mode)
+            if path in exact and have != mode:
+                problems.append(f"{path}: права {have:04o}, нужны {mode:04o}")
+    if problems:
+        raise StepFailed(_TRUST_STEP, "; ".join(dict.fromkeys(problems)))
+    return not missing
+
+
+def _make_prep_dirs(layout: Layout) -> None:
+    for path, mode in prep_dirs(layout):
+        for ancestor in _missing_ancestors(layout, path):
+            _make_dir(ancestor, 0o755)
+        _make_dir(path, mode)
+
+
+def _missing_ancestors(layout: Layout, path: Path) -> list[Path]:
+    out: list[Path] = []
+    parent = path.parent
+    while parent != layout.root and _lstat(parent) is None:
+        out.insert(0, parent)
+        parent = parent.parent
+    return out
+
+
+def _make_dir(path: Path, mode: int) -> None:
+    """Create `path` (if absent) with exactly `mode`; sync its parent."""
+    try:
+        parent = os.open(path.parent, _DIR_OPEN)
+    except OSError as exc:
+        raise StepFailed(_TRUST_STEP, f"{path.parent}: {exc}") from exc
+    try:
+        try:
+            os.mkdir(path.name, 0o700, dir_fd=parent)
+        except FileExistsError:
+            return  # the check judges what is there
+        fd = os.open(path.name, _DIR_NOFOLLOW, dir_fd=parent)
+        try:
+            os.fchmod(fd, mode)
+        finally:
+            os.close(fd)
+        fsutil.sync_dir(parent)
+    except OSError as exc:
+        raise StepFailed(_TRUST_STEP, f"{path}: {exc}") from exc
+    finally:
+        os.close(parent)
+
+
+def _existing_ancestor(path: Path) -> Path:
+    parent = path.parent
+    while _lstat(parent) is None and parent != parent.parent:
+        parent = parent.parent
+    return parent
+
+
+def _lstat(path: Path) -> os.stat_result | None:
+    try:
+        return os.stat(path, follow_symlinks=False)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+
+
+def _build_user_ready(layout: Layout) -> bool:
+    """M4: `whoami_as` only after `verify_build_user` is empty."""
+    if build_mod.verify_build_user(layout):
+        return False
+    account = build_account(layout)
+    if account is None:
+        return False
+    return build_mod.whoami_as(plat.BUILD_USER) == (account.uid, account.gid)
+
+
+def _create_build_user(layout: Layout) -> None:
+    plat.create_build_user(layout)
+
+
+def build_account(layout: Layout) -> Account | None:
+    """The `df-build` record of `accounts.toml` in any state, else `None`
+    (I5); an unreadable `accounts.toml` is `StepFailed("build-user")`."""
+    try:
+        return load_accounts(layout.accounts).get(plat.BUILD_USER)
+    except ConfigError as exc:
+        raise StepFailed("build-user", str(exc)) from exc
+
+
+# ---------- the trusted checkouts ----------
+
+
+def fetch_references(layout: Layout, profile: Profile, *, git: Path) -> dict[str, Path]:
+    """Root's trusted checkout of every repo of the profile (Task 7,
+    R33.F34): `verify/<repo>` by `inputs.fetch_reference` with the approved
+    `git` — after step 2 only (I6)."""
+    return {
+        pin.name: inputs.fetch_reference(
+            pin, layout.verify_dir / pin.name, git=git, layout=layout
+        )
+        for pin in profile.repos
+    }
+
+
+def uv_config_refusal(profile: Profile, refs: Mapping[str, Path]) -> None:
+    """uv settings `UV_NO_CONFIG=1` would drop (spec 3.2, M5): the problems
+    of **all** repos, each line `<repo>: …`, as one `StepFailed("build")`;
+    the checkout's files are read as data, an unreadable one is a problem."""
+    problems: list[str] = []
+    for pin in profile.repos:
+        ref = refs[pin.name]
+        try:
+            pyproject = _checkout_file(ref / "pyproject.toml", required=True)
+            uv_toml = _checkout_file(ref / "uv.toml", required=False)
+            lock = _checkout_file(ref / "uv.lock", required=True)
+        except OSError as exc:
+            problems.append(f"{pin.name}: {exc}")
+            continue
+        assert pyproject is not None and lock is not None
+        problems += [
+            f"{pin.name}: {p}"
+            for p in lockset.uv_config_problems(pyproject, uv_toml, lock)
+        ]
+    if problems:
+        raise StepFailed("build", "; ".join(problems))
+
+
+def _checkout_file(path: Path, *, required: bool) -> bytes | None:
+    """A regular file of a checkout, as data (no link followed)."""
+    try:
+        fd = os.open(path, _DATA_FLAGS)
+    except FileNotFoundError:
+        if required:
+            raise OSError(f"{path.name}: нет файла") from None
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"{path.name}: не обычный файл")
+        with os.fdopen(fd, "rb", closefd=False) as fh:
+            return fh.read()
+    finally:
+        os.close(fd)
+
+
+# ---------- pending.toml ----------
+
+
+def new_pending(cfg: InstallConfig, release_id: str, previous: str | None) -> Pending:
+    """A fresh `pending.toml` for `release_id` (M8): `install_text` is `cfg`
+    rendered and `install_digest` its one digest."""
+    return Pending(
+        run_id=uuid.uuid4().hex,
+        release_id=release_id,
+        install_text=dump_install(cfg),
+        install_digest=config_digest(cfg),
+        previous_current=previous,
+    )
+
+
+def read_pending(layout: Layout) -> Pending | None:
+    """The writer's own `pending.toml`, read once under its lock (I2).
+
+    Absent -> `None`. Invalid, an invalid id, or a text/digest pair that is
+    not one configuration rendered (M8) -> `StepFailed("pending")`.
+    """
+    try:
+        pending = load_pending(layout.pending)
+        if pending is None:
+            return None
+        layout.release_dir(pending.release_id)
+        cfg = parse_install(pending.install_text)
+    except ConfigError as exc:
+        raise StepFailed(_PENDING_STEP, f"{layout.pending}: {exc}") from exc
+    if (
+        config_digest(cfg) != pending.install_digest
+        or dump_install(cfg) != pending.install_text
+    ):
+        raise StepFailed(
+            _PENDING_STEP, f"{layout.pending}: install_text и install_digest разошлись"
+        )
+    return pending
+
+
+def recover_pending(
+    layout: Layout, snap: Snapshot, requested: InstallConfig, pending: Pending | None
+) -> Decision:
+    """§3.3 «Незавершённая установка», first thing under the writer lock.
+
+    `snap` was read after `settle_on_acquire`; `pending` is `read_pending`'s.
+    - no `pending.toml` -> `none`;
+    - `current` is the pending id -> `resume`, whatever was requested (a
+      differing request is journaled as `warn`, I8);
+    - `current` is `previous_current` and the request is the pending
+      configuration -> `resume`;
+    - `current` is `previous_current`, another configuration -> the route
+      `rollback` runs here, then `generation_end`, and only then `rollback`
+      is returned (M11);
+    - any other `current` -> `StepFailed("pending")`: a human decides (M10).
+    """
+    if pending is None:
+        return "none"
+    current = snap.release_id
+    same = config_digest(requested) == pending.install_digest
+    if current == pending.release_id:
+        if not same:
+            _journal(
+                layout,
+                pending.run_id,
+                "pending",
+                "warn",
+                f"{pending.release_id} уже активен: запрошенная конфигурация "
+                "не применяется, установка продолжается",
+            )
+        return "resume"
+    if current != pending.previous_current:
+        raise StepFailed(
+            _PENDING_STEP,
+            f"current = {current}: ни {pending.release_id}, ни прежний "
+            f"{pending.previous_current} — решает человек (darkfactory doctor)",
+        )
+    if same:
+        return "resume"
+    rollback(layout, pending)
+    return "rollback"
+
+
+def rollback(layout: Layout, pending: Pending) -> None:
+    """The route `rollback` of `pending`'s release, then `generation_end`.
+
+    Security order (I7): `trusted_path_problems` of `/opt/df`, `releases`,
+    `staging` and `admin` (absent ones skipped) must be empty before any
+    removal, else `StepFailed("trusted-paths")`. The calls are
+    `rollback_calls` (no profile, network or account; the cleaner gated on
+    `verify_build_user`); `build_uid` is the `df-build` record's in any
+    state, or `None` (I5). A `TreeError` or `OSError` of a call becomes
+    `StepFailed("rollback", <route>[<step>] …)` (M7).
+    """
+    problems = [
+        p
+        for name in ROLLBACK_PARENTS
+        if _lstat(path := getattr(layout, name)) is not None
+        for p in plat.trusted_path_problems(path)
+    ]
+    if problems:
+        raise StepFailed(_TRUST_STEP, "; ".join(dict.fromkeys(problems)))
+    rid, run_id = pending.release_id, pending.run_id
+    account = build_account(layout)
+    calls = rollback_calls(layout, rid, layout.journal, run_id)
+    journal.generation_begin(layout)
+    _journal(layout, run_id, _ROLLBACK_STEP, "start", rid)
+    try:
+        run_route(
+            layout,
+            rid,
+            _ROLLBACK_STEP,
+            calls=_named_calls(calls, layout, rid),
+            python_key=None,
+            build_uid=None if account is None else account.uid,
+        )
+    except Exception as exc:  # noqa: BLE001 - journaled, then re-raised
+        _journal_failure(layout, run_id, exc)
+        raise
+    _journal(layout, run_id, _ROLLBACK_STEP, "done", rid)
+    journal.generation_end(layout)
+
+
+def _named_calls(
+    calls: Mapping[str, Call], layout: Layout, release_id: str
+) -> dict[str, Call]:
+    """Each call names its route step on a bare `TreeError`/`OSError` (M7)."""
+    steps = _route_steps(_ROLLBACK_STEP)
+
+    def named(key: str, call: Call) -> Call:
+        def run(target: str) -> None:
+            try:
+                call(target)
+            except (TreeError, OSError) as exc:
+                step = steps.get((key, target), "?")
+                parent, name = where(layout, release_id, target)
+                raise StepFailed(
+                    _ROLLBACK_STEP, f"{step} {key} {parent / name}: {exc}"
+                ) from exc
+
+        return run
+
+    return {key: named(key, call) for key, call in calls.items()}
+
+
+def _route_steps(name: str) -> dict[tuple[str, str], str]:
+    """`(call key, target) -> "<route>[<index>]"` over a route and its
+    nested routes (every key/target pair of `rollback` is unique)."""
+    out: dict[tuple[str, str], str] = {}
+    for i, (_guard, call, target) in enumerate(table.ROUTES[name]):
+        if is_nested(call):
+            out |= _route_steps(call)
+        else:
+            out[(implementation(call, target), target)] = f"{name}[{i}]"
+    return out
+
+
+# ---------- the run ----------
+
+
+def run_install(
+    layout: Layout,
+    requested: InstallConfig,
+    snap: Snapshot,
+    pending: Pending | None,
+    *,
+    fail_after: str | None = None,
+) -> str:
+    """One install under the writer lock (spec 3.3); returns the release id.
+
+    The order is fixed (I6, M5, M6): `recover_pending`; `generation_begin`;
+    a new `pending.toml` unless resuming; steps 1-3 (`run_steps`; the
+    manifest, the approved CLI and paths, the account); the trusted
+    checkouts; `uv_config_refusal`; `retry_quarantine` (a leftover is a
+    `warn`); `drive`; `generation_end`. No `git`/`uv`/`tar` runs before
+    step 2 succeeds. A resumed release that is `damaged` (current = its id)
+    is refused naming the id, the state, the manual way out and `doctor`
+    (R47, option (a); v1 limit).
+    """
+    decision = recover_pending(layout, snap, requested, pending)
+    journal.generation_begin(layout)
+    if decision == "resume":
+        assert pending is not None
+        pend = pending
+    else:
+        platform = plat.detect_platform()
+        rid = release.next_release_id(layout, requested.manifest_sha, platform)
+        pend = new_pending(requested, rid, snap.release_id)
+        fsutil.write_atomic(layout.pending, dump_pending(pend), PENDING_MODE)
+    run = _prepare(layout, pend, fail_after)
+    try:
+        accept.drive(
+            layout,
+            run.release_id,
+            actions=install_actions(run),
+            read=read_for(run),
+            journal=run.journal,
+            run_id=run.run_id,
+        )
+    except StepFailed as exc:
+        if exc.step == "damaged" and snap.release_id == pend.release_id:
+            raise StepFailed("damaged", _damaged(layout, pend)) from exc
+        raise
+    journal.generation_end(layout)
+    return pend.release_id
+
+
+def _prepare(layout: Layout, pend: Pending, fail_after: str | None) -> InstallRun:
+    """Steps 1-3, the checkouts, the uv settings and the quarantine: the run."""
+    cfg = parse_install(pend.install_text)
+    prepared = Prepared()
+    run_steps(
+        install_steps(layout, cfg, prepared),
+        layout.journal,
+        run_id=pend.run_id,
+        fail_after=fail_after,
+    )
+    profile = prepared.profile
+    account = build_account(layout)
+    if profile is None or account is None:
+        raise AssertionError("steps 1 and 3 hold the profile and the account")
+    refs = fetch_references(layout, profile, git=cfg.approved_cli["git"])
+    uv_config_refusal(profile, refs)
+    left = plat.retry_quarantine(layout)
+    if left:
+        _journal(layout, pend.run_id, "quarantine", "warn", ", ".join(left))
+    platform = plat.detect_platform()
+    rid = pend.release_id
+    plan = BuildPlan(
+        rid,
+        layout.release_dir(rid),
+        profile,
+        cfg.approved_cli["uv"],
+        cfg.approved_cli["git"],
+        cfg.approved_cli["tar"],
+    )
+    return InstallRun(
+        layout=layout,
+        cfg=cfg,
+        pending=pend,
+        profile=profile,
+        platform=platform,
+        plan=plan,
+        limits=CopyLimits(),
+        refs=refs,
+        journal=layout.journal,
+        run_id=pend.run_id,
+        python_key=build_mod.python_key(profile.python, platform),
+        build_uid=account.uid,
+    )
+
+
+def _damaged(layout: Layout, pend: Pending) -> str:
+    previous = pend.previous_current or "нет"
+    return (
+        f"релиз {pend.release_id}: состояние damaged (повреждён) при "
+        f"возобновлении, current = {pend.release_id}; автоматического выхода в "
+        f"v1 нет — восстановление вручную: верните current на прежний релиз "
+        f"({previous}) или удалите {layout.pending} после разбора, затем "
+        "darkfactory doctor"
+    )
+
+
+def _journal(layout: Layout, run_id: str, step: str, event: str, detail: str) -> None:
+    journal.journal_event(
+        layout.journal, run_id=run_id, step=step, event=event, detail=detail
+    )
+
+
+def _journal_failure(layout: Layout, run_id: str, exc: Exception) -> None:
+    step = exc.step if isinstance(exc, StepFailed) else _ROLLBACK_STEP
+    try:
+        _journal(layout, run_id, step, "failed", f"{type(exc).__name__}: {exc}")
+    except Exception as log_exc:  # noqa: BLE001 - the original failure wins
+        exc.add_note(f"журнал: не записано failed: {log_exc}")

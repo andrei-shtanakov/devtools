@@ -504,9 +504,9 @@ def link_command(layout: Layout) -> None:
     A temporary link, `rename` over the name, `fault_point("renamed")`,
     `sync_dir(local_bin)`. The temporary name is one fixed name,
     `LINK_TMP`: a leftover of a killed run is unlinked first, never
-    accumulated (C13; the writer lock makes the name exclusive). No branching: whether to link is the route's
-    guard (`local_bin=trusted`). The name is the command's own; nothing
-    named `df` is ever created. Effects: `renamed` -> `sync_dir(local_bin)`.
+    accumulated (C13; the writer lock makes the name exclusive). No
+    branching: whether to link is the route's guard (`local_bin=trusted`).
+    The name is the command's own; nothing named `df` is ever created. Effects: `renamed` -> `sync_dir(local_bin)`.
     """
     name = layout.launcher.name
     tmp = LINK_TMP
