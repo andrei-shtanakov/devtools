@@ -402,14 +402,28 @@ def _active_state_problems(
 
 
 def unsynced_besides_checkout(world: World) -> list[str]:
-    """`unsynced()` without the two scratch trees nothing syncs by design:
-    root's checkout (fetched again on every run) and what is inside the
-    build home (`cleanup_build_home`: «nothing is synced», spec 3.3)."""
+    """`unsynced()` without what nothing syncs by design: root's checkout
+    (fetched again on every run), what is inside the build home
+    (`cleanup_build_home`: «nothing is synced», spec 3.3) and a quarantined
+    tree but for its name (df-build's tree, never a fact source: its
+    content and its root's own mode and owner are df-build's -- root never
+    syncs them; the name in the quarantine `cleanup_tree` syncs is checked)."""
     lay = world.lay
     scratch = tuple(
         str(p.relative_to(lay.root)) + "/" for p in (lay.verify_dir, lay.build_home)
     )
-    return [p for p in world.m.unsynced() if not p.startswith(scratch)]
+    quarantine = str(lay.quarantine.relative_to(lay.root)) + "/"
+    named = world.m.durable_names(lay.quarantine)
+
+    def quarantined(p: str) -> bool:
+        rest = p.removeprefix(quarantine)
+        return p.startswith(quarantine) and ("/" in rest or rest in named)
+
+    return [
+        p
+        for p in world.m.unsynced()
+        if not p.startswith(scratch) and not quarantined(p)
+    ]
 
 
 def committed_problems(world: World, release_id: str, cfg: InstallConfig) -> list[str]:

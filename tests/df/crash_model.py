@@ -244,6 +244,11 @@ class CrashModel:
         """The first later point matching `pred` becomes a process crash."""
         self._traps.append(pred)
 
+    def untrap(self, pred: Callable[[Point], bool]) -> None:
+        """Forget one trap (a watcher that never fires), keeping the others."""
+        if pred in self._traps:
+            self._traps.remove(pred)
+
     def drop_syncs(self, pred: Callable[[Point], bool]) -> None:
         """Twins: a sync point matching `pred` takes no effect (still counted)."""
         self._drops.append(pred)
@@ -329,6 +334,22 @@ class CrashModel:
         then = _flatten(image, self.root_id)
         rel = str(path.relative_to(self.root))
         return now.get(rel) == then.get(rel)
+
+    def durable_names(self, path: Path) -> frozenset[str]:
+        """The names an OS crash now would leave in the directory `path`
+        (empty if the directory itself would not be there)."""
+        image = self._durable_image()
+        entry: Entry = self.root_id
+        for name in path.relative_to(self.root).parts:
+            if isinstance(entry, Link) or image[entry].kind != "dir":
+                return frozenset()
+            found = image[entry].entries().get(name)
+            if found is None:
+                return frozenset()
+            entry = found
+        if isinstance(entry, Link) or image[entry].kind != "dir":
+            return frozenset()
+        return frozenset(image[entry].entries())
 
     def identity(self, path: Path) -> int:
         """The model id of the object at `path` (its origin after R5)."""

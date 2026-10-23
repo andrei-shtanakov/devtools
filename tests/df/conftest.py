@@ -97,6 +97,11 @@ class FakeLayout:
 @pytest.fixture()
 def fake_layout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeLayout:
     """See the module docstring."""
+    return make_fake_layout(monkeypatch, tmp_path)
+
+
+def make_fake_layout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeLayout:
+    """`fake_layout` under `tmp_path` with `monkeypatch` (any scope's)."""
     root = Path(os.path.realpath(tmp_path)) / "root"
     root.mkdir()
     fake = FakeLayout(Layout(root), BUILD_UID)
@@ -263,13 +268,19 @@ def fake_world(
     monkeypatch: pytest.MonkeyPatch, fake_layout: FakeLayout
 ) -> Iterator[World]:
     """The install world with the OS-crash model (`World.model`)."""
+    world = make_fake_world(fake_layout, monkeypatch)
+    try:
+        yield world
+    finally:
+        world.m.close()
+
+
+def make_fake_world(fake_layout: FakeLayout, monkeypatch: pytest.MonkeyPatch) -> World:
+    """`fake_world` over `fake_layout` with `monkeypatch` (any scope's)."""
     from tests.df.install_world import make_world  # it imports this module
 
     world = make_world(fake_layout, monkeypatch)
     model = CrashModel(fake_layout.layout.root, fake_layout)
     model.install(monkeypatch)
     world.model = model
-    try:
-        yield world
-    finally:
-        model.close()
+    return world
