@@ -202,10 +202,10 @@ def command_ready(layout: Layout, release_id: str) -> bool:
     """`L` of `release_id` (I3): the command is what its own admin code makes.
 
     No registry entry, or one not `intact` — false, and nothing of the
-    release's admin tree is read. The entry's status is not read: like
-    `intact`, `L` is a fact of the files; revocation is the table's (n4). Otherwise `admin.launcher_ready` for the
+    release's admin tree is read. Otherwise `admin.launcher_ready` for the
     entry's admin Python: the same Python and the same entry source the
-    route `launcher` writes.
+    route `launcher` writes. The entry's status is not read: like `intact`,
+    `L` is a fact of the files; revocation is the table's (n4).
     """
     entry = accept.registry_entry(layout, release_id)
     if entry is None or not accept.entry_intact(
@@ -223,7 +223,9 @@ def rollback_calls(
     a profile or a network. No account is needed unless a builder tree is
     there: `cleanup_tree` runs the cleaner as `df-build`, so it first
     requires `verify_build_user` empty (security order: no `run_as` before
-    it), else `StepFailed("rollback")` before any change (I-1). `journal`
+    it), else `StepFailed("rollback")` before the cleaner runs (I-1); route
+    steps before it (e.g. a root-owned `releases/<id>`) may already be
+    removed, which a retry repeats idempotently. `journal`
     and `run_id` name the run that rolls back (the step naming of its
     failures is the caller's).
     """
