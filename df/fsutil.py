@@ -169,8 +169,11 @@ def make_dir(
 
     Absent: `mkdir(mode)` under `exact_mode` -> `fault_point("created")` ->
     `sync_dir(itself)` -> `sync_dir(parent)`: the name never exists at
-    another mode, and the mode (the directory's own metadata) and the name
-    (the parent's entry) are durable on return (spec 3.3).
+    another mode -- except a Linux `S_ISGID` inherited from the parent, for
+    the moment until the `fchmod` below (a crash there leaves a name the
+    next run's `repairable` heals) -- and the mode (the directory's own
+    metadata) and the name (the parent's entry) are durable on return
+    (spec 3.3).
 
     A created directory whose mode is not `mode` after all (Linux: born
     `S_ISGID` in a setgid parent) gets `fchmod(mode)` ->
@@ -229,7 +232,10 @@ def _settle_found(
 def repairable(st: os.stat_result, mode: int) -> bool:
     """A mode `make_dir` may set to `mode`: not equal, and its bits a subset
     of `mode`'s plus `S_ISGID` (Linux inherits it from a setgid parent).
-    Only narrowing: no write for group or others is ever added."""
+    Narrowing (clearing `S_ISGID`), or reaching the target from a narrower
+    mode (adding read/execute bits of `mode`); never adds group/other write,
+    and a mode with `S_ISUID`, `S_ISVTX` or a bit outside `mode` is not
+    repairable."""
     have = stat.S_IMODE(st.st_mode)
     return have != mode and not have & ~(mode | stat.S_ISGID)
 
