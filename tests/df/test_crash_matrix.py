@@ -369,8 +369,12 @@ def test_crash_matrix_absent_ok_twins(
     fake_world: World, prim: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`prim` refuses an absent object: for `cleanup_build_home` the refused
-    retry of `verify` (the r9 form); `cleanup_tree` passes (every call is
-    guarded), as in r18-local-check/twins.py."""
+    `verify` (the r9 form); `cleanup_tree` passes (every call is guarded),
+    as in r18-local-check/twins.py. In this world the profile has no repos,
+    so `build_home/cache` never exists and the first `verify` already meets
+    "absent" -- the same refusal the r9 retry (after the cleanup removed
+    what it found) gives; that retry form itself is 9-C's
+    `test_verify_retry_after_build_home_cleanup` (M-4)."""
     check_twin(matrix(fake_world), monkeypatch, ("absent", prim))
 
 

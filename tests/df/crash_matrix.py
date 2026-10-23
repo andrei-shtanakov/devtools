@@ -446,7 +446,8 @@ class Matrix:
             m.untrap(at_k)
         self.runs += 1
         if not died:
-            return [f"unreachable: the pass ended before point {s.k}"]
+            where = s.k if s.anchor is None else f"{s.sync_rel} after {s.anchor}"
+            return [f"unreachable: the pass ended before point {where}"]
         branch = Branch(m.points[-1], m.snapshot(), frozenset(self.moved))
         if s.kind == "deep":
             found = self.deep(branch, sha=s.sha, only=s.j)
