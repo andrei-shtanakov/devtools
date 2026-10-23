@@ -171,32 +171,34 @@ PATHS = [
 ]
 
 
-@pytest.mark.parametrize("path", PATHS)
 @pytest.mark.parametrize("state", STATES)
 def test_i9_switched_damaged_refused(
-    w: World, capsys: pytest.CaptureFixture[str], state: str, path: str
+    w: World, capsys: pytest.CaptureFixture[str], state: str
 ) -> None:
     """G1(a): A2/A4/A5 x D-tree, every writer path refuses before any change;
     `unlink` is named exactly for a first install before `commit-config`,
-    `init` exactly when there is no `install.toml`."""
+    `init` exactly when there is no `install.toml`. The state is built once
+    and every path runs on it in turn: `refused` proves each changed
+    nothing, so each path starts from the same state (m-4)."""
     rid = switched(w, state)
     damage(w, rid)
-    run = w.writer if path.startswith("writer") else w.bootstrap
-    argv = {
-        "writer-install": ["install"],
-        "bootstrap-install": ["install"],
-        "bootstrap-init": w.init_argv(),
-        "bootstrap-init-other": w.init_argv(OTHER_SHA),
-    }[path]
-    err = refused(w, capsys, run, argv)
     lay = w.lay
-    assert f"релиз {rid}: повреждён" in err
-    assert f"(run_id {run_id(w)}) уже переключила на него current" in err
-    assert f"2) удалите {lay.pending}" in err
     first_unlinked = state in ("first-A2", "first-A4")
-    assert (unlink_step(lay) in err) is first_unlinked
-    assert (boot("init") in err) is first_unlinked
-    assert (boot("install") in err) is not first_unlinked
+    for path in PATHS:
+        run = w.writer if path.startswith("writer") else w.bootstrap
+        argv = {
+            "writer-install": ["install"],
+            "bootstrap-install": ["install"],
+            "bootstrap-init": w.init_argv(),
+            "bootstrap-init-other": w.init_argv(OTHER_SHA),
+        }[path]
+        err = refused(w, capsys, run, argv)
+        assert f"релиз {rid}: повреждён" in err, path
+        assert f"(run_id {run_id(w)}) уже переключила на него current" in err, path
+        assert f"2) удалите {lay.pending}" in err, path
+        assert (unlink_step(lay) in err) is first_unlinked, path
+        assert (boot("init") in err) is first_unlinked, path
+        assert (boot("install") in err) is not first_unlinked, path
 
 
 def test_i9_switched_damaged_admin_entry_then_bootstrap(

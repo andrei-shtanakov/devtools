@@ -365,11 +365,13 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
         PRIMITIVE + ": write_atomic's O_EXCL temp, fchmod, sync_file, rename"
     ),
     ("journal", "_open_regular", "os.open no-create", 1): (
-        "every caller's flags resolve without O_CREAT/O_TRUNC: the lock "
+        "the callers in its own module pass flags without O_CREAT/O_TRUNC "
+        "(a call from another module is not seen): the lock "
         "(never written), the journal (append, then sync_file) or a read"
     ),
     ("launcher_entry", "_open_regular", "os.open no-create", 1): (
-        "every caller's flags resolve without O_CREAT/O_TRUNC: the lock "
+        "the callers in its own module pass flags without O_CREAT/O_TRUNC "
+        "(a call from another module is not seen): the lock "
         "(never written) or a read"
     ),
     ("inputs", "", "import shutil", 1): "root's checkout: scratch",
@@ -552,22 +554,27 @@ class _FsSites(ast.NodeVisitor):
     `open`/`.open` with a mode that is not a literal read (the mode is
     `args[1]` for `<module>.open`, `args[0]` for a value's `.open`); any
     `shutil`/`tempfile` import or use; a `ctypes` loader (`CDLL`, ...);
-    `from os|shutil|tempfile|ctypes import`; `getattr`/`vars` on those modules and their `__dict__`;
-    a call of a name imported from them. Aliases by `import os as x` and by
+    `from os|shutil|tempfile|ctypes import`; `getattr`/`vars` on those
+    modules and their `__dict__`; a call of a name imported from them. Aliases by `import os as x` and by
     assignment `x = os` are tracked. Process starts are `processes`.
 
     Flags resolve through: literal `os.O_*` and `|`/conditional
     expressions; a name bound exactly once -- in its function (a local
     shadows the module), else at module level; a parameter -- through every
-    call of its function in the module, if the function is never used
-    otherwise. Anything else does not resolve and is a finding.
+    call of its function in the same module, if the function is never used
+    there otherwise. Calls from other modules (`journal._open_regular(...)`
+    in `cli`, `from df.journal import _open_regular`) are not seen: such a
+    parameter is judged by its own module's callers only. Anything else
+    does not resolve and is a finding.
 
     Not seen (the guard's limit): code outside `df/*.py` (the stdlib, the C
-    functions a `ctypes` loader reaches -- the loader is a finding), other file classes' constructors
-    (`io.FileIO`, `zipfile.ZipFile`, `sqlite3.connect`, ...), dynamic code
-    (`eval`, `exec`, `importlib`, a non-literal `getattr` on any other
-    object), a mutator reached through an object of another module (its own
-    module is scanned), and what started processes do (`SUBPROCESS_CREATORS`).
+    functions a `ctypes` loader reaches -- the loader is a finding), other
+    file classes' constructors (`io.FileIO`, `zipfile.ZipFile`,
+    `sqlite3.connect`, ...), dynamic code (`eval`, `exec`, `importlib`, a
+    non-literal `getattr` on any other object), a mutator reached through
+    an object of another module (its own module is scanned), a resolved
+    parameter's callers in other modules, and what started processes do
+    (`SUBPROCESS_CREATORS`).
     """
 
     def __init__(self, module: str, tree: ast.Module) -> None:
@@ -641,7 +648,8 @@ class _FsSites(ast.NodeVisitor):
         return self._flags(owner.values[expr.id], owner, seen)
 
     def _param_flags(self, owner: _Scope, name: str, seen: set[object]) -> Flags | None:
-        """A parameter: the union over every call of its function here."""
+        """A parameter: the union over every call of its function in this
+        module (callers in other modules are not seen)."""
         calls = self.calls.get(owner.name, [])
         if not owner.name or not calls or self.loads.get(owner.name, 0) != len(calls):
             return None  # a lambda, never called here, or used as a value

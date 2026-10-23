@@ -954,8 +954,8 @@ def recover_pending(
 
 def _refuse_damaged_pending(layout: Layout, snap: Snapshot, pending: Pending) -> None:
     """G2: the pending release registered and not `intact` while `current`
-    is the previous one -- refused here, before `generation_begin`, the
-    steps and the network (not at `drive`'s first read). The registry is
+    is the previous one -- refused here, before steps 1-3 and the network
+    (not at `drive`'s first read). The registry is
     read as `drive` reads it: a fact of the automaton under the lock."""
     rid = pending.release_id
     entry = accept.registry_entry(layout, rid)
@@ -1062,7 +1062,8 @@ def run_install(
     step 2 succeeds. A `damaged` stop -- `drive`'s own, or an action whose
     post check found the release damaged -- is refused with the I9 text of
     what `current` is now (G4: read here, it may be this run's own
-    activation): the release itself -> G1(a)'s, else G2's (R51, v1 limit).
+    activation): the release itself -> G1(a)'s, else G2's (R51, v1 limit),
+    with the step it stopped on appended.
     """
     decision = recover_pending(layout, snap, requested, pending)
     journal.generation_begin(layout)
@@ -1087,7 +1088,7 @@ def run_install(
     except StepFailed as exc:
         if exc.step == _DAMAGED_STEP or _now_damaged(run):
             text = damaged_refusal(layout, _backstop(layout, snap, pend))
-            raise StepFailed(_DAMAGED_STEP, text) from exc
+            raise StepFailed(_DAMAGED_STEP, f"{text} (остановлено: {exc})") from exc
         raise
     journal.generation_end(layout)
     return pend.release_id
