@@ -49,6 +49,12 @@ _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 # ---------- the id ----------
 
 
+def id_prefix(manifest_sha: str, platform: PlatformName) -> str:
+    """`<sha12>-<platform>-`: every id of one configuration starts with it
+    (spec 3.5)."""
+    return f"{manifest_sha[:12]}-{platform}-"
+
+
 def next_release_id(layout: Layout, manifest_sha: str, platform: PlatformName) -> str:
     """The smallest `<sha12>-<platform>-<n>`, `n >= 1`, used nowhere (M1).
 
@@ -57,7 +63,7 @@ def next_release_id(layout: Layout, manifest_sha: str, platform: PlatformName) -
     equal to the id or `<id>.<k>`. `-1` is not used by `-10`. A registry or
     a directory that cannot be read is `StepFailed("release-id")`.
     """
-    prefix = f"{manifest_sha[:12]}-{platform}-"
+    prefix = id_prefix(manifest_sha, platform)
     exact = _registered_ids(layout) | {
         name
         for parent in (layout.releases, layout.staging, layout.admin)

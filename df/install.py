@@ -753,6 +753,160 @@ def read_pending(layout: Layout) -> Pending | None:
     return pending
 
 
+# ---------- I9: a damaged release under an unfinished install ----------
+
+#: How bootstrap is started (`df/bootstrap.py`); the refusals name it.
+BOOTSTRAP = "sudo <python ≥ 3.12> -I -B -S <чекаут devtools>/df/bootstrap.py"
+_DAMAGED_STEP = "damaged"
+_V1_LIMIT = "до ручного восстановления согласованного состояния (ограничение v1)"
+_KEEP = (
+    "current не переключайте, поколение не правьте, releases/, admin/ и "
+    "releases.toml не трогайте"
+)
+_PREVIOUS_CONFIG = " (конфигурация прежней попытки — install_text в копии pending.toml)"
+
+DamageKind = Literal["switched", "unclosed", "pending"]
+
+
+@dataclass(frozen=True)
+class Damage:
+    """The facts an I9 refusal names (R51-R53, task-9-i9-design.md §4.1).
+
+    `kind`: `switched` -- `pending.toml` and `current` on its damaged
+    release (G1(a)); `unclosed` -- no `pending.toml`, `current` damaged and
+    not agreeing (G1(b)); `pending` -- the pending release registered and
+    damaged, `current` the previous one (G2). `run_id` is `pending.toml`'s
+    (none for `unclosed`), `current` the id `current` names. `install`:
+    `install.toml` exists; `agrees`: it agrees with `release_id` -- the
+    release is registered and its id starts with `id_prefix` of
+    `install.toml`'s `manifest_sha` (§2.1).
+    """
+
+    kind: DamageKind
+    release_id: str
+    run_id: str | None
+    current: str | None
+    registered: bool
+    install: bool
+    agrees: bool
+
+
+def unfinished_damage(
+    layout: Layout, snap: Snapshot, pending: Pending | None
+) -> str | None:
+    """G1: the refusal of a writer outside the consistent state, else `None`.
+
+    Consistent (§2.1): no `pending.toml`, and `current` absent, intact, or a
+    registered release `install.toml` agrees with. Refused: (a)
+    `pending.toml` names `current` and that release is damaged (owner
+    23.10: the unfinished install already switched `current`); (b) no
+    `pending.toml`, `current` damaged and not agreeing. Values of the
+    snapshot plus `entry_intact` (the tree and `admin/`), computed only
+    when (a) or (b) is possible. Runs before anything of a writer changes
+    (`cli._writer`), so a refused run changes nothing.
+    """
+    cur = snap.release_id
+    if cur is None or (pending is not None and pending.release_id != cur):
+        return None
+    found = damage_of(
+        "unclosed" if pending is None else "switched",
+        cur,
+        None if pending is None else pending.run_id,
+        cur,
+        snap.entry,
+        snap.install,
+    )
+    if pending is None and found.agrees:
+        return None
+    entry = snap.entry
+    if entry is not None and accept.entry_intact(
+        layout, cur, entry, admin_ready=admin.admin_ready
+    ):
+        return None
+    return damaged_refusal(layout, found)
+
+
+def damage_of(
+    kind: DamageKind,
+    release_id: str,
+    run_id: str | None,
+    current: str | None,
+    entry: ReleaseEntry | None,
+    cfg: InstallConfig | None,
+) -> Damage:
+    """The `Damage` of `release_id` from its registry entry and `install.toml`."""
+    agrees = (
+        entry is not None
+        and cfg is not None
+        and release_id.startswith(
+            release.id_prefix(cfg.manifest_sha, plat.detect_platform())
+        )
+    )
+    return Damage(
+        kind, release_id, run_id, current, entry is not None, cfg is not None, agrees
+    )
+
+
+def damaged_refusal(layout: Layout, damage: Damage) -> str:
+    """The text of an I9 refusal (one source for G1, G2 and G4).
+
+    It names the release, the state and only the remaining manual steps:
+    copies first, then `pending.toml`, then -- only when the state after it
+    would still not be consistent -- the link `current`, then the command.
+    Never `doctor` (refused in this state), never «return `current`», the
+    generation only as a prohibition.
+    """
+    pending, journal_, current = layout.pending, layout.journal, layout.current
+    outside = f"вне {layout.opt}, {layout.etc} и {layout.var}"
+    rid, run_id = damage.release_id, damage.run_id
+    then = f"затем {_next_command(damage)}. {_KEEP}"
+    if damage.kind == "unclosed":
+        return (
+            f"релиз {rid}: повреждён (§3.8), current указывает на него, а "
+            f"{_disagreement(damage)}: незавершённая установка закрыта вручную "
+            f"не полностью; новая установка запрещена {_V1_LIMIT}. Под root: "
+            f"1) сохраните копию {journal_} {outside}; 2) удалите ссылку: "
+            f"unlink {current}; {then}"
+        )
+    steps = (
+        f"Под root: 1) сохраните копии {pending} и {journal_} {outside}; "
+        f"2) удалите {pending}; "
+    )
+    if damage.kind == "pending":
+        return (
+            f"релиз {rid} незавершённой установки (run_id {run_id}) повреждён "
+            f"(§3.8), current = {damage.current or 'нет'} — прежний; продолжить "
+            f"установку нельзя (ограничение v1). {steps}{then}"
+        )
+    unlink = "" if damage.agrees else f"3) удалите ссылку: unlink {current}; "
+    return (
+        f"релиз {rid}: повреждён (§3.8), а незавершённая установка (run_id "
+        f"{run_id}) уже переключила на него current; автоматическое продолжение "
+        f"и новая установка запрещены {_V1_LIMIT}. {steps}{unlink}{then}"
+    )
+
+
+def _disagreement(damage: Damage) -> str:
+    if not damage.registered:
+        return "релиза нет в releases.toml"
+    if not damage.install:
+        return "install.toml нет"
+    return "install.toml не согласован с ним"
+
+
+def _next_command(damage: Damage) -> str:
+    """`init` without `install.toml` (the previous attempt's configuration is
+    in the saved `pending.toml`); `darkfactory install` while `current` stays
+    on the previous release (bootstrap refuses a healthy command, M16);
+    else bootstrap `install`."""
+    if not damage.install:
+        hint = "" if damage.run_id is None else _PREVIOUS_CONFIG
+        return f"{BOOTSTRAP} init …{hint}"
+    if damage.kind == "pending" and damage.current is not None:
+        return f"darkfactory install (если команда отказывает — {BOOTSTRAP} install)"
+    return f"{BOOTSTRAP} install"
+
+
 def recover_pending(
     layout: Layout, snap: Snapshot, requested: InstallConfig, pending: Pending | None
 ) -> Decision:
@@ -763,7 +917,8 @@ def recover_pending(
     - `current` is the pending id -> `resume`, whatever was requested (a
       differing request is journaled as `warn`, I8);
     - `current` is `previous_current` and the request is the pending
-      configuration -> `resume`;
+      configuration -> `resume`, unless the pending release is registered
+      and damaged: then `StepFailed("damaged")` before any change (G2, I9);
     - `current` is `previous_current`, another configuration -> the route
       `rollback` runs here, then `generation_end`, and only then `rollback`
       is returned (M11);
@@ -788,12 +943,30 @@ def recover_pending(
         raise StepFailed(
             _PENDING_STEP,
             f"current = {current}: ни {pending.release_id}, ни прежний "
-            f"{pending.previous_current} — решает человек (darkfactory doctor)",
+            f"{pending.previous_current} — решает человек",
         )
     if same:
+        _refuse_damaged_pending(layout, snap, pending)
         return "resume"
     rollback(layout, pending)
     return "rollback"
+
+
+def _refuse_damaged_pending(layout: Layout, snap: Snapshot, pending: Pending) -> None:
+    """G2: the pending release registered and not `intact` while `current`
+    is the previous one -- refused here, before `generation_begin`, the
+    steps and the network (not at `drive`'s first read). The registry is
+    read as `drive` reads it: a fact of the automaton under the lock."""
+    rid = pending.release_id
+    entry = accept.registry_entry(layout, rid)
+    if entry is None or accept.entry_intact(
+        layout, rid, entry, admin_ready=admin.admin_ready
+    ):
+        return
+    found = damage_of(
+        "pending", rid, pending.run_id, snap.release_id, entry, snap.install
+    )
+    raise StepFailed(_DAMAGED_STEP, damaged_refusal(layout, found))
 
 
 def rollback(layout: Layout, pending: Pending) -> None:
@@ -886,9 +1059,10 @@ def run_install(
     manifest, the approved CLI and paths, the account); the trusted
     checkouts; `uv_config_refusal`; `retry_quarantine` (a leftover is a
     `warn`); `drive`; `generation_end`. No `git`/`uv`/`tar` runs before
-    step 2 succeeds. A resumed release that is `damaged` (current = its id)
-    is refused naming the id, the state, the manual way out and `doctor`
-    (R47, option (a); v1 limit).
+    step 2 succeeds. A `damaged` stop -- `drive`'s own, or an action whose
+    post check found the release damaged -- is refused with the I9 text of
+    what `current` is now (G4: read here, it may be this run's own
+    activation): the release itself -> G1(a)'s, else G2's (R51, v1 limit).
     """
     decision = recover_pending(layout, snap, requested, pending)
     journal.generation_begin(layout)
@@ -911,8 +1085,9 @@ def run_install(
             run_id=run.run_id,
         )
     except StepFailed as exc:
-        if exc.step == "damaged" and snap.release_id == pend.release_id:
-            raise StepFailed("damaged", _damaged(layout, pend)) from exc
+        if exc.step == _DAMAGED_STEP or _now_damaged(run):
+            text = damaged_refusal(layout, _backstop(layout, snap, pend))
+            raise StepFailed(_DAMAGED_STEP, text) from exc
         raise
     journal.generation_end(layout)
     return pend.release_id
@@ -963,18 +1138,24 @@ def _prepare(layout: Layout, pend: Pending, fail_after: str | None) -> InstallRu
     )
 
 
-def _damaged(layout: Layout, pend: Pending) -> str:
-    back = (
-        ""
-        if pend.previous_current is None
-        else f"верните current на прежний релиз ({pend.previous_current}) или "
-    )
-    return (
-        f"релиз {pend.release_id}: состояние damaged (повреждён) при "
-        f"возобновлении, current = {pend.release_id}; автоматического выхода в "
-        f"v1 нет — восстановление вручную: {back}удалите {layout.pending} после "
-        "разбора, затем darkfactory doctor"
-    )
+def _now_damaged(run: InstallRun) -> bool:
+    """Whether the run's release classifies `damaged` now: an action's post
+    check stops as the action, not as `damaged` (`accept.drive`). A read
+    that fails leaves the original refusal."""
+    try:
+        return accept.classify(read_for(run)()) == "damaged"
+    except (StepFailed, TreeError, OSError):
+        return False
+
+
+def _backstop(layout: Layout, snap: Snapshot, pend: Pending) -> Damage:
+    """G4: `current` and the registry read now -- the writer's own changes,
+    not the snapshot's values."""
+    rid = pend.release_id
+    entry = accept.registry_entry(layout, rid)
+    if accept.current_is(layout, rid):
+        return damage_of("switched", rid, pend.run_id, rid, entry, snap.install)
+    return damage_of("pending", rid, pend.run_id, snap.release_id, entry, snap.install)
 
 
 def _journal(layout: Layout, run_id: str, step: str, event: str, detail: str) -> None:

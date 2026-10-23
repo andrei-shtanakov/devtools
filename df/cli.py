@@ -229,6 +229,10 @@ def _writer(
     pending = install.read_pending(lay)
     if (pending is not None) != snap.pending_present:
         raise StepFailed("snapshot", "pending.toml не совпадает со снимком")
+    # G1 (I9) before anything else of a writer: a refused run changes nothing
+    refusal = install.unfinished_damage(lay, snap, pending)
+    if refusal is not None:
+        raise StepFailed("damaged", refusal)
     if snap.pending_present and args.command not in PENDING_ALLOWED:
         raise Refusal(_FINISH)
     if args.command not in ("init", "install"):
@@ -282,7 +286,10 @@ def _healthy(lay: Layout, snap: Snapshot) -> bool:
 
 def _close_odd_generation(lay: Layout, snap: Snapshot) -> None:
     """M9: an odd generation without `pending.toml` (a crash between removing
-    it and `generation_end`) protects nothing — made even, with a `warn`."""
+    it and `generation_end`) protects nothing — made even, with a `warn`
+    naming `current`. G3 (I9): called only after G1 passed, i.e. only in
+    the consistent state, so it never erases the evidence of an install
+    closed by hand halfway."""
     if snap.generation % 2 == 0 or snap.pending_present:
         return
     journal.generation_end(lay)
@@ -291,7 +298,10 @@ def _close_odd_generation(lay: Layout, snap: Snapshot) -> None:
         run_id="generation",
         step="generation",
         event="warn",
-        detail=f"нечётное поколение {snap.generation} без pending.toml: закрыто",
+        detail=(
+            f"нечётное поколение {snap.generation} без pending.toml: закрыто, "
+            f"current = {snap.release_id or 'нет'}"
+        ),
     )
 
 

@@ -845,6 +845,10 @@ REREAD_ALLOWED = frozenset(
         ("release", "next_release_id"),
         ("install", "_registered_python"),
         ("install", "read_pending"),
+        # I9: G2 reads the pending release's registry entry as `drive` would;
+        # G4 reads `current` and the registry after the run's own changes
+        ("install", "_refuse_damaged_pending"),
+        ("install", "_backstop"),
         # writes of the writer's own parts (they stat their target), not reads
         ("fsutil", "write_atomic"),
         ("fsutil", "remove_durably"),

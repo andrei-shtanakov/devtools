@@ -366,7 +366,7 @@ def read_facts(
     return Facts(
         P=os.path.lexists(layout.pending),
         reg=entry is not None,
-        cur=_current_is(layout, release_id),
+        cur=current_is(layout, release_id),
         L=intact and launcher_ready(),
         intact=intact,
         m=mark.stage if mark is not None else "none",
@@ -456,8 +456,9 @@ def is_real_dir(path: Path) -> bool:
     return stat.S_ISDIR(st.st_mode)
 
 
-def _current_is(layout: Layout, release_id: str) -> bool:
-    """`current` is the relative link `releases/<id>` (protocol `activate`)."""
+def current_is(layout: Layout, release_id: str) -> bool:
+    """`current` is the relative link `releases/<id>` (protocol `activate`):
+    a fact of the automaton, read under the writer lock."""
     try:
         target = os.readlink(layout.current)
     except FileNotFoundError:
