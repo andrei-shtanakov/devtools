@@ -30,13 +30,16 @@ from df import (
     receive,
     routes,
 )
+from df import build as build_mod
 from df import platform as plat
 from df.journal import StepFailed, read_journal
 from df.platform import RunResult
+from tests.df.conftest import BUILD_UID
 from tests.df.crash_model import Point
 from tests.df.install_world import (
     FIRST,
     OTHER_SHA,
+    PLATFORM,
     SECOND,
     SHA,
     World,
@@ -800,3 +803,53 @@ def test_lock_dirs_keep_their_modes_across_os_crash(
     w.m.os_crash()
     for path in (w.lay.var, w.lay.install_dir):
         assert os.stat(path).st_mode & 0o7777 == 0o755, path
+
+
+@pytest.mark.parametrize("crash", ["process", "os"])
+def test_account_created_through_main(fake_world: World, crash: str) -> None:
+    """9-C Minor 8 (the D4 carry): the real `create_build_user` and
+    `verify_build_user` through `main` -- bootstrap `init`, step 3's `do()`
+    after the lock and `settle_on_acquire`. Killed right after the home's
+    `rename_noreplace` (then, for `os`, an OS crash): the retry through
+    `main` settles what it finds and commits; an OS crash after the commit
+    keeps the home and the `ready` record."""
+    from tests.df.test_platform import _world  # noqa: PLC0415
+
+    w = fake_world
+    lay = w.lay
+    outer = plat.run_command  # fake_layout's: ps/pkill stand-ins, else real
+    accounts = _world(w.mp, PLATFORM)
+    # the record's uid is the build uid fake_layout gives df-build's trees
+    w.mp.setattr(plat, "ID_RANGE", {PLATFORM: range(BUILD_UID, BUILD_UID + 1)})
+    fake_os = plat.run_command
+
+    def run_command(argv: list[str], **kw: object) -> RunResult:
+        """Account commands go to the fake OS records, the rest as before."""
+        if argv[0].startswith(("/usr/bin/dscl", "/usr/sbin/", "/usr/bin/sudo")):
+            return fake_os(argv, **kw)
+        if argv[0] in ("/usr/bin/getent", "/usr/bin/dseditgroup"):
+            return fake_os(argv, **kw)
+        return outer(argv, **kw)  # type: ignore[arg-type]
+
+    w.mp.setattr(plat, "run_command", run_command)
+    w.mp.setattr(plat, "create_build_user", REAL_CREATE)
+    w.mp.setattr(build_mod, "verify_build_user", plat.verify_build_user)
+
+    def whoami(_user: str) -> tuple[int, int]:
+        account = REAL_LOAD(lay.accounts)[plat.BUILD_USER]
+        return account.uid, account.gid
+
+    w.mp.setattr(build_mod, "whoami_as", whoami)
+    os.rmdir(lay.build_home)
+    w.m.baseline()
+    w.m.trap(fault("renamed", lay.build_home))
+    w.killed(lambda: w.bootstrap(w.init_argv()))
+    assert REAL_LOAD(lay.accounts)[plat.BUILD_USER].state == "creating"
+    if crash == "os":
+        w.m.os_crash()
+    assert w.retry(w.init_argv()) == 0
+    assert accounts.commands, "the account was made through the fake OS"
+    assert committed_problems(w, FIRST, w.cfg()) == []
+    w.m.os_crash()
+    assert committed_problems(w, FIRST, w.cfg()) == []
+    assert os.path.isdir(lay.build_home)
