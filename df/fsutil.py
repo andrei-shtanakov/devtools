@@ -157,7 +157,13 @@ def exact_mode() -> Iterator[None]:
 
 
 def make_dir(
-    parent_fd: int, name: str, mode: int, *, path: Path, repair: bool = True
+    parent_fd: int,
+    name: str,
+    mode: int,
+    *,
+    path: Path,
+    repair: bool = True,
+    settle: bool = True,
 ) -> bool:
     """Make directory `name` in `parent_fd` durable in its final form.
 
@@ -172,16 +178,20 @@ def make_dir(
 
     Present -- settle what is seen (spec 3.3, r6): a directory of the
     current user whose mode is `repairable` (narrower, or with an inherited
-    `S_ISGID`) gets `fchmod(mode)` -> `fault_point("chmod")` (only with `repair`; a
-    system directory above `df`'s own is never changed); a wider mode or
-    another owner is never touched -- the caller refuses it. Then a
-    directory is synced itself, and the parent always. Returns whether it
-    was created (`path` names it for the fault points)."""
+    `S_ISGID`) gets `fchmod(mode)` -> `fault_point("chmod")` (only with
+    `repair`; a system directory above `df`'s own is never changed); a
+    wider mode or another owner is never touched -- the caller refuses it.
+    Then a directory is synced itself, and the parent always.
+
+    `settle=False` skips both syncs: the caller syncs the directory and the
+    parent itself before relying on either (the lock chain syncs each of
+    its directories once, after its child exists). Returns whether it was
+    created (`path` names it for the fault points)."""
     try:
         with exact_mode():
             os.mkdir(name, mode, dir_fd=parent_fd)
     except FileExistsError:
-        _settle_found(parent_fd, name, mode, path=path, repair=repair)
+        _settle_found(parent_fd, name, mode, path=path, repair=repair, settle=settle)
         return False
     fault_point("created", path)
     fd = os.open(name, _DIR_NOFOLLOW, dir_fd=parent_fd)
@@ -189,15 +199,17 @@ def make_dir(
         if stat.S_IMODE(os.fstat(fd).st_mode) != mode:  # Linux: inherited S_ISGID
             os.fchmod(fd, mode)
             fault_point("chmod", path)
-        sync_dir(fd)
+        if settle:
+            sync_dir(fd)
     finally:
         os.close(fd)
-    sync_dir(parent_fd)
+    if settle:
+        sync_dir(parent_fd)
     return True
 
 
 def _settle_found(
-    parent_fd: int, name: str, mode: int, *, path: Path, repair: bool
+    parent_fd: int, name: str, mode: int, *, path: Path, repair: bool, settle: bool
 ) -> None:
     st = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     if stat.S_ISDIR(st.st_mode):
@@ -206,10 +218,12 @@ def _settle_found(
             if repair and repairable(st, mode) and owner_uid(st) == os.geteuid():
                 os.fchmod(fd, mode)
                 fault_point("chmod", path)
-            sync_dir(fd)
+            if settle:
+                sync_dir(fd)
         finally:
             os.close(fd)
-    sync_dir(parent_fd)
+    if settle:
+        sync_dir(parent_fd)
 
 
 def repairable(st: os.stat_result, mode: int) -> bool:

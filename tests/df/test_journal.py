@@ -286,10 +286,11 @@ def test_writer_lock_refuses_foreign_dir_owner(
 def test_writer_lock_syncs_created_dirs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Each directory of the chain, created or found: its own sync (the
-    mode), then its parent's (the name) -- `fsutil.make_dir`; a created lock
-    then syncs `install/` too (`fsutil.create_file`). A found chain is
-    settled again on every acquisition (spec 3.3 r6)."""
+    """Every directory of the chain, root included, created or found, is
+    synced exactly once per acquisition, after its child exists (its mode
+    and the child's name), `install/` last; a created lock then syncs
+    `install/` again (`fsutil.create_file`). A found chain is settled again
+    on every acquisition (spec 3.3 r6)."""
     from df import fsutil
     from tests.df.crash_model import fd_path
 
@@ -309,7 +310,7 @@ def test_writer_lock_syncs_created_dirs(
         root / "var/lib/df",
         root / "var/lib/df/install",
     ]
-    settled = [p for d in chain for p in (d, d.parent)]
+    settled = [root, *chain]  # each once, after its child exists
     with writer_lock(lay):
         pass
     assert [Path(os.path.realpath(p)) for p in calls] == [*settled, chain[-1]]

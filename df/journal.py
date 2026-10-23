@@ -116,6 +116,10 @@ def _open_install_dir(layout: Layout) -> int:
 
     Components above `layout.var` follow system links (macOS /var);
     `df` and `install` are no-follow. Every directory must be trusted.
+    Settled once each (spec 3.3 r6): every directory of the chain, root
+    included, is synced exactly once, after its child entry exists -- its
+    mode and the child's name -- and `install_dir` last, all before the
+    lock is taken.
     """
     parts = layout.install_dir.relative_to(layout.root).parts
     first_nofollow = len(layout.var.relative_to(layout.root).parts) - 1
@@ -126,16 +130,28 @@ def _open_install_dir(layout: Layout) -> int:
         own = i >= first_nofollow  # df's own: `var` itself and below
         flags = _DIR_FLAGS if own else _DIR_FOLLOW_FLAGS
         fd = _descend(fd, path, flags, own=own)
+    try:
+        fsutil.sync_dir(fd)
+    except OSError as exc:
+        os.close(fd)
+        raise StepFailed("lock", f"{path}: {_why(exc)}") from exc
     return fd
 
 
 def _descend(parent_fd: int, path: Path, flags: int, *, own: bool) -> int:
-    """Open child `path.name` of `parent_fd`; always closes the parent.
-    `own` (by position: `var` and below) -- only those may be repaired."""
+    """Open child `path.name` of `parent_fd`, then sync the parent (its
+    mode, the child's name); always closes the parent. `own` (by position:
+    `var` and below) -- only those may be repaired."""
     try:
-        return _step_open(
+        fd = _step_open(
             path, lambda: _open_or_make_dir(parent_fd, path, flags, own=own)
         )
+        try:
+            fsutil.sync_dir(parent_fd)
+        except OSError as exc:
+            os.close(fd)
+            raise StepFailed("lock", f"{path.parent}: {_why(exc)}") from exc
+        return fd
     finally:
         os.close(parent_fd)
 
@@ -163,10 +179,10 @@ def _require_trusted_dir(fd: int, path: Path) -> None:
 
 
 def _open_or_make_dir(parent_fd: int, path: Path, flags: int, *, own: bool) -> int:
-    """Make `path` durable in its final form (`fsutil.make_dir`: created
-    `0755`, or found and settled; only `df`'s own are repaired), then open
-    it; a concurrent creator winning the race is fine."""
-    make_dir(parent_fd, path.name, 0o755, path=path, repair=own)
+    """Make `path` its final form (`fsutil.make_dir`: created `0755`, or
+    found; only `df`'s own are repaired), then open it; the walk syncs (one
+    sync per directory); a concurrent creator winning the race is fine."""
+    make_dir(parent_fd, path.name, 0o755, path=path, repair=own, settle=False)
     return os.open(path.name, flags, dir_fd=parent_fd)
 
 
