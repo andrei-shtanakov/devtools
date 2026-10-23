@@ -296,3 +296,41 @@ def test_pending_written_then_entry_retry_then_os_crash(fake_world: World) -> No
     w.m.os_crash()
     assert at_rest_problems(w) == []
     assert os.path.lexists(w.lay.pending)
+
+
+@pytest.mark.parametrize("crash", ["none", "process", "os"])
+def test_setgid_parents_never_leave_a_setgid_dir(fake_world: World, crash: str) -> None:
+    """Review I5 (Linux, emulated by the model's R9): `/opt` and `/var/lib`
+    are `2755`, so every directory made in them is born `S_ISGID`. `make_dir`
+    must bring each to its exact mode before its own sync; a crash right
+    after any `mkdir` leaves a name the retry repairs (clearing `S_ISGID` is
+    narrowing) -- never a permanent «права 2711, нужны 0711»."""
+    w = fake_world
+    w.m.linux_setgid = True
+    for top in (w.lay.root / "opt", w.lay.var.parent):
+        top.mkdir(parents=True)
+        os.chmod(top, 0o2755)
+    w.m.baseline()
+    trap = SyscallTrap(w)
+    start = w.m.snapshot()
+    w.kill_at("build-dir")
+    w.killed(lambda: w.bootstrap(w.init_argv()))
+    mkdirs = [i for i, s in enumerate(trap.seen, 1) if s.startswith("mkdir")]
+    assert len(mkdirs) >= 12, trap.seen
+    runs = 0
+    for n in mkdirs if crash != "none" else [0]:
+        w.m.restore(start)
+        w.m.disarm()
+        if n:
+            trap.arm(n)
+            w.killed(lambda: w.bootstrap(w.init_argv()))
+            trap.target = None
+            if crash == "os":
+                w.m.os_crash()
+        w.kill_at("build-dir")
+        w.killed(lambda: w.bootstrap(w.init_argv()))  # reached drive
+        assert nonfinal(w, all_present=True) == [], n
+        w.m.os_crash()
+        assert nonfinal(w, all_present=True) == [], n
+        runs += 1
+    assert runs == (len(mkdirs) if crash != "none" else 1)

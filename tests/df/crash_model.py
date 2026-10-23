@@ -40,6 +40,9 @@ rules (spec 2026-10-13-df-installer-design.md §3.3 «Синхронизация
   dying code's exception handlers did afterwards (a killed process runs
   none), and any point reached after the crash raises `Crash` again.
 - R8 Only the world root is modeled (the fake uv outside it survives).
+- R9 (opt-in, `linux_setgid`): a directory created in an `S_ISGID` parent
+  is born `S_ISGID`, as Linux `inode_init_owner` does; on macOS (BSD) it is
+  not, so the knob emulates the other supported platform.
 
 Limits: L1 above; L2 every object must be readable and searchable by its
 owner (the fake runs as one user) -- otherwise `ModelError`, never a guess;
@@ -189,6 +192,8 @@ class CrashModel:
     _traps: list[Callable[[Point], bool]] = field(default_factory=list)
     _drops: list[Callable[[Point], bool]] = field(default_factory=list)
     _dead: State | None = None
+    #: R9: emulate Linux setgid inheritance of created directories (opt-in).
+    linux_setgid: bool = False
 
     # ---- installation -------------------------------------------------------
 
@@ -425,9 +430,19 @@ class CrashModel:
         ) -> None:
             inner(path, mode, dir_fd=dir_fd)
             with _opened(path, _DIR_FLAGS, dir_fd) as fd:
+                if self.linux_setgid:
+                    self._inherit_setgid(fd)
                 self._note_birth(fd)
 
         return mkdir
+
+    def _inherit_setgid(self, fd: int) -> None:
+        """R9 (opt-in): Linux `inode_init_owner` -- a directory created in a
+        `S_ISGID` parent is born `S_ISGID` too (macOS does not inherit)."""
+        parent = os.stat(fd_path(fd).parent)
+        if parent.st_mode & stat.S_ISGID:
+            mode = stat.S_IMODE(os.fstat(fd).st_mode)
+            _FCHMOD(fd, mode | stat.S_ISGID)
 
     def _creating_open(self, inner: Callable[..., int]) -> Callable[..., int]:
         def open_(
