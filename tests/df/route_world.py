@@ -298,11 +298,33 @@ def expected_events(
     return out
 
 
+def without_journal_creation(events: list[Event]) -> list[Event]:
+    """Events without the audit journal's creation (`fsutil.create_file`:
+    `created` journal, `sync_dir` its directory): journal I/O happens at the
+    first event of a run, wherever that falls; it is no route's effect."""
+    out: list[Event] = []
+    skip_parent: object = None
+    for raw in events:
+        path = raw[1] if len(raw) > 1 else None
+        if raw[0] == "created" and isinstance(path, Path) and path.name == JOURNAL:
+            skip_parent = path.parent
+            continue
+        if skip_parent is not None and raw == ("sync_dir", skip_parent):
+            skip_parent = None
+            continue
+        out.append(raw)
+    return out
+
+
+JOURNAL = "journal.jsonl"
+
+
 def normalize(events: list[Event]) -> list[Event]:
-    """Recorded events as compared: ownership changes dropped (their fault
+    """Recorded events as compared: the journal's creation dropped
+    (`without_journal_creation`), ownership changes dropped (their fault
     point is the event), consecutive runs as `df-build` collapsed."""
     out: list[Event] = []
-    for raw in events:
+    for raw in without_journal_creation(events):
         if raw[0] in ("fchown", "chown") and len(raw) == 3:
             continue
         e = ("run_as+", raw[1]) if raw[0] == "run_as" else raw

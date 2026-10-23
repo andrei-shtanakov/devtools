@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from df import fsutil
-from df.fsutil import make_dir, sync_file, write_atomic
+from df.fsutil import create_file, make_dir, sync_file, write_atomic
 from df.paths import Layout
 
 _NB = os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -130,8 +130,11 @@ def _open_install_dir(layout: Layout) -> int:
 
 def _descend(parent_fd: int, path: Path, flags: int) -> int:
     """Open child `path.name` of `parent_fd`; always closes the parent."""
+    own = flags == _DIR_FLAGS  # df's own directories, below `var`'s parent
     try:
-        return _step_open(path, lambda: _open_or_make_dir(parent_fd, path.name, flags))
+        return _step_open(
+            path, lambda: _open_or_make_dir(parent_fd, path, flags, own=own)
+        )
     finally:
         os.close(parent_fd)
 
@@ -158,15 +161,12 @@ def _require_trusted_dir(fd: int, path: Path) -> None:
         raise StepFailed("lock", f"{path}: не доверенный каталог (права)")
 
 
-def _open_or_make_dir(parent_fd: int, name: str, flags: int) -> int:
-    """Open `name`, creating it `0755` durably first if absent
-    (`fsutil.make_dir`); a concurrent creator winning the race is fine."""
-    try:
-        return os.open(name, flags, dir_fd=parent_fd)
-    except FileNotFoundError:
-        pass
-    make_dir(parent_fd, name, 0o755)
-    return os.open(name, flags, dir_fd=parent_fd)
+def _open_or_make_dir(parent_fd: int, path: Path, flags: int, *, own: bool) -> int:
+    """Make `path` durable in its final form (`fsutil.make_dir`: created
+    `0755`, or found and settled; only `df`'s own are repaired), then open
+    it; a concurrent creator winning the race is fine."""
+    make_dir(parent_fd, path.name, 0o755, path=path, repair=own)
+    return os.open(path.name, flags, dir_fd=parent_fd)
 
 
 def _why(exc: OSError) -> str:
@@ -232,7 +232,8 @@ def _open_lock_file(dir_fd: int, path: Path) -> int:
 
 def _open_private(dir_fd: int | None, path: Path, flags: int, step: str) -> int:
     """Open a writer-side file (lock, journal): existing must be exactly 0600;
-    a missing one is created exclusively and forced to 0600 despite umask."""
+    a missing one is created exclusively at 0600 whatever the umask, durably
+    (`fsutil.create_file`)."""
     try:
         return _open_regular(dir_fd, path, flags, step, writer=True, exact_mode=0o600)
     except StepFailed:
@@ -253,19 +254,12 @@ def _is_absent(path: Path, dir_fd: int | None) -> bool:
 
 
 def _create_private(dir_fd: int | None, path: Path, flags: int, step: str) -> int:
-    target = path.name if dir_fd is not None else path
     try:
-        fd = os.open(target, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dir_fd)
+        return create_file(path, flags, 0o600, dir_fd=dir_fd)
     except FileExistsError:
         return _open_regular(dir_fd, path, flags, step, writer=True, exact_mode=0o600)
     except OSError as exc:
         raise StepFailed(step, f"{path}: {_why(exc)}") from exc
-    try:
-        os.fchmod(fd, 0o600)
-    except BaseException:
-        os.close(fd)
-        raise
-    return fd
 
 
 def _flock_or_refuse(fd: int, path: Path) -> None:

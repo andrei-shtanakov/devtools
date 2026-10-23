@@ -285,8 +285,10 @@ def test_writer_lock_refuses_foreign_dir_owner(
 def test_writer_lock_syncs_created_dirs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Each created directory: its own sync (the mode), then its parent's
-    (the name) -- `fsutil.make_dir`; an existing chain syncs nothing."""
+    """Each directory of the chain, created or found: its own sync (the
+    mode), then its parent's (the name) -- `fsutil.make_dir`; a created lock
+    then syncs `install/` too (`fsutil.create_file`). A found chain is
+    settled again on every acquisition (spec 3.3 r6)."""
     from df import fsutil
     from tests.df.crash_model import fd_path
 
@@ -299,8 +301,6 @@ def test_writer_lock_syncs_created_dirs(
         return real(fd)
 
     monkeypatch.setattr(fsutil, "sync_dir", spy)
-    with writer_lock(lay):
-        pass
     root = Path(os.path.realpath(lay.root))
     chain = [
         root / "var",
@@ -308,12 +308,14 @@ def test_writer_lock_syncs_created_dirs(
         root / "var/lib/df",
         root / "var/lib/df/install",
     ]
-    expected = [p for d in chain for p in (d, d.parent)]
-    assert [Path(os.path.realpath(p)) for p in calls] == expected
+    settled = [p for d in chain for p in (d, d.parent)]
+    with writer_lock(lay):
+        pass
+    assert [Path(os.path.realpath(p)) for p in calls] == [*settled, chain[-1]]
     calls.clear()
     with writer_lock(lay):
         pass
-    assert calls == []
+    assert [Path(os.path.realpath(p)) for p in calls] == settled
 
 
 def test_journal_hard_link_refused(tmp_path: Path) -> None:

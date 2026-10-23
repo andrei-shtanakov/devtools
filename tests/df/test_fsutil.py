@@ -7,6 +7,7 @@ import errno
 import os
 import stat
 import subprocess
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,8 @@ from df.fsutil import (
     sync_tree,
     write_atomic,
 )
+from tests.df.conftest import FakeLayout
+from tests.df.crash_model import CrashModel
 
 
 def test_write_atomic_syncs_file_then_dir(monkeypatch, tmp_path: Path) -> None:
@@ -251,24 +254,26 @@ def test_sync_tree_does_not_hang_on_fifo(tmp_path: Path) -> None:
 
 
 @pytest.fixture()
-def crash_model(fake_layout, monkeypatch):  # noqa: ANN001, ANN201
-    from tests.df.crash_model import CrashModel
-
+def crash_model(
+    fake_layout: FakeLayout, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[CrashModel]:
     model = CrashModel(fake_layout.layout.root, fake_layout)
     model.install(monkeypatch)
     yield model
     model.close()
 
 
-@pytest.mark.parametrize("umask", [0o022, 0o077])
-def test_make_dir_mode_and_name_are_durable(crash_model, umask: int) -> None:  # noqa: ANN001
-    """The mode is the directory's own metadata (its own sync), the name the
-    parent's: an OS crash right after `make_dir` keeps both."""
+@pytest.mark.parametrize("umask", [0o022, 0o077, 0o277])
+def test_make_dir_mode_and_name_are_durable(
+    crash_model: CrashModel, umask: int
+) -> None:
+    """Born at exactly `mode` whatever the umask, and durable on return: an
+    OS crash right after `make_dir` keeps the name and the mode."""
     root = crash_model.root
     fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
     old = os.umask(umask)
     try:
-        assert fsutil.make_dir(fd, "d", 0o711) is True
+        assert fsutil.make_dir(fd, "d", 0o711, path=root / "d") is True
     finally:
         os.umask(old)
         os.close(fd)
@@ -277,60 +282,346 @@ def test_make_dir_mode_and_name_are_durable(crash_model, umask: int) -> None:  #
     assert stat.S_IMODE(os.stat(root / "d").st_mode) == 0o711
 
 
-def test_make_dir_leaves_an_existing_name(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
-    (tmp_path / "d").mkdir(mode=0o700)
-    synced: list[object] = []
-    monkeypatch.setattr(fsutil, "sync_dir", synced.append)
-    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+@pytest.mark.parametrize(
+    "case,have,want,after",
+    [
+        ("narrower-own", 0o700, 0o711, 0o711),  # widened to the mode
+        ("equal", 0o711, 0o711, 0o711),
+        ("wider", 0o755, 0o700, 0o755),  # never narrowed: the caller refuses
+        ("foreign", 0o700, 0o711, 0o700),  # another owner: never touched
+        ("no-repair", 0o700, 0o755, 0o700),  # a system directory
+    ],
+)
+def test_make_dir_settles_a_found_name(
+    crash_model: CrashModel,
+    fake_layout: FakeLayout,
+    case: str,
+    have: int,
+    want: int,
+    after: int,
+) -> None:
+    """Settle what is seen (spec 3.3 r6): a found directory is synced itself
+    and in its parent before `make_dir` returns; only the current user's
+    narrower mode is widened, durably."""
+    from tests.df.conftest import BUILD_UID
+
+    root = crash_model.root
+    d = root / "d"
+    os.mkdir(d, have)
+    os.chmod(d, have)
+    if case == "foreign":
+        fake_layout.set_owner(d, BUILD_UID)
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        assert fsutil.make_dir(fd, "d", 0o755) is False
+        created = fsutil.make_dir(fd, "d", want, path=d, repair=case != "no-repair")
     finally:
         os.close(fd)
-    assert stat.S_IMODE(os.stat(tmp_path / "d").st_mode) == 0o700
-    assert synced == []
+    assert created is False
+    assert crash_model.unsynced() == []
+    crash_model.os_crash()
+    assert stat.S_IMODE(os.stat(d).st_mode) == after
 
 
-#: Every directory-creating call site of `df/` and why its result is durable
-#: (the class of the 9-C finding: a mode set after `mkdir` and only the
-#: parent synced). A new site fails this test until it is accounted for --
-#: by using `fsutil.make_dir`, or by naming its own protocol here.
-MKDIR_SITES = {
-    ("fsutil", "make_dir"): "the primitive: own sync, then the parent's",
-    ("leaves", "prepare_dir"): "protocol prepare_dir: fsync(fd) after fchown",
-    ("leaves", "seal"): "protocol seal: sync_dir(staging/<id>) itself",
-    ("receive", "_receive"): "protocol accept_copy: sync_tree with the root",
-    ("receive", "_create"): "protocol accept_copy: sync_tree",
-    ("admin", "_make_dir"): "protocol install_admin: sync_tree(admin/<id>)",
-    ("admin", "_ensure_admin_home"): "scratch, mode = creation mode, no fact",
-    ("platform", "_make_home"): "sync_dir(tmp_fd) after fchown/fchmod",
-    ("inputs", "fetch_reference"): "root's checkout, fetched again every run",
+def test_create_file_is_durable_in_final_form(crash_model: CrashModel) -> None:
+    """Born at exactly `mode` whatever the umask; file and name durable on
+    return; an existing name is `FileExistsError`."""
+    path = crash_model.root / "f"
+    old = os.umask(0o277)
+    try:
+        fd = fsutil.create_file(path, os.O_WRONLY, 0o600)
+    finally:
+        os.umask(old)
+    os.close(fd)
+    assert crash_model.unsynced() == []
+    crash_model.os_crash()
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+    with pytest.raises(FileExistsError):
+        fsutil.create_file(path, os.O_WRONLY, 0o600)
+
+
+#: Every call site in `df/` that creates an object, changes its metadata,
+#: renames or removes it (the class of the 9-C findings: an object not
+#: durable in its final form, or a found one used unsettled), keyed by
+#: (module, function, operation, ordinal), with the reason its result is
+#: durable in final form. A new site fails `test_every_fs_mutation_is_
+#: accounted_for` until it goes through an `fsutil` primitive or names its
+#: protocol here.
+PRIMITIVE = "an fsutil primitive (durable in final form on return)"
+FS_SITES: dict[tuple[str, str, str, int], str] = {
+    ("fsutil", "write_atomic", "os.rename", 1): PRIMITIVE,
+    ("fsutil", "_write_tmp", "os.fchmod", 1): PRIMITIVE + ": temp file, sync_file",
+    ("fsutil", "_discard", "os.unlink", 1): PRIMITIVE + ": its own temp file",
+    ("fsutil", "make_dir", "os.mkdir", 1): PRIMITIVE,
+    ("fsutil", "_settle_found", "os.fchmod", 1): PRIMITIVE + ": then own sync",
+    ("fsutil", "create_file", "os.open", 1): PRIMITIVE,
+    ("fsutil", "remove_durably", "os.unlink", 1): PRIMITIVE,
+    ("launcher_entry", "_create_private", "os.open", 1): (
+        "stdlib copy of create_file: born 0600 (umask 0), file and dir synced"
+    ),
+    ("admin", "install_admin_python", "os.rename", 1): (
+        "protocol install_admin_python: sync_tree before, sync_dir after"
+    ),
+    ("admin", "_make_dir", "os.mkdir", 1): "protocol install_admin: sync_tree",
+    ("admin", "_make_dir", "os.fchmod", 1): "protocol install_admin: sync_tree",
+    ("admin", "_copy_file", "os.open", 1): "protocol install_admin: sync_tree",
+    ("admin", "_copy_file", "os.fchmod", 1): "protocol install_admin: sync_tree",
+    ("admin", "link_command", "os.symlink", 1): "protocol link_command: temp",
+    ("admin", "link_command", "os.rename", 1): (
+        "protocol link_command: sync_dir(local_bin)"
+    ),
+    ("admin", "_unlink_absent_ok", "os.unlink", 1): "link_command's own temp",
+    ("admin", "_unlink_quietly", "os.unlink", 1): "link_command's own temp",
+    ("inputs", "fetch_reference", ".mkdir", 1): "root's checkout: scratch, refetched",
+    ("inputs", "fetch_reference", ".mkdir", 2): "root's checkout: scratch, refetched",
+    ("inputs", "_remove", "shutil.rmtree", 1): "root's checkout: scratch",
+    ("inputs", "_remove", ".unlink", 1): "root's checkout: scratch",
+    ("inputs", "_unpack", ".extractall", 1): "root's checkout: scratch",
+    ("leaves", "prepare_dir", "os.mkdir", 1): (
+        "protocol prepare_dir: a crash before fchown is row unknown (cleanup)"
+    ),
+    ("leaves", "prepare_dir", "os.fchmod", 1): "protocol prepare_dir: fsync(fd)",
+    ("leaves", "prepare_dir", "os.fchown", 1): "protocol prepare_dir: fsync(fd)",
+    ("leaves", "verify_chmod", "os.fchmod", 1): (
+        "protocol verify_chmod: sync_dir(itself)"
+    ),
+    ("leaves", "seal", "os.mkdir", 1): "protocol seal: sync_dir(staging/<id>)",
+    ("leaves", "seal", "os.fchmod", 1): "protocol seal: sync_dir(staging/<id>)",
+    ("leaves", "seal", "os.rename", 1): "protocol seal: both parents synced",
+    ("platform", "_make_home", "os.mkdir", 1): "reserved name; own sync, rename",
+    ("platform", "_make_home", "os.fchown", 1): "reserved name; own sync, rename",
+    ("platform", "_make_home", "os.fchmod", 1): "reserved name; own sync, rename",
+    ("platform", "_remove_reserved", "os.rmdir", 1): (
+        "idempotent: a retry removes it again before _make_home syncs the parent"
+    ),
+    ("platform", "_cleanup_at", "os.unlink", 1): "protocol cleanup_tree: link",
+    ("platform", "_rmdir_empty", "os.rmdir", 1): "protocol cleanup_tree: tree",
+    ("platform", "_quarantine", "os.rename", 1): (
+        "protocol cleanup_tree: quarantine, then parent synced"
+    ),
+    ("receive", "_receive", "os.mkdir", 1): "protocol accept_copy: sync_tree",
+    ("receive", "_receive", "os.fchmod", 1): "protocol accept_copy: sync_tree",
+    ("receive", "_create", "os.mkdir", 1): "protocol accept_copy: sync_tree",
+    ("receive", "_symlink", "os.symlink", 1): "protocol accept_copy: sync_tree",
+    ("receive", "_regular", "os.open", 1): "protocol accept_copy: sync_tree",
+    ("receive", "_regular", "os.fchmod", 1): "protocol accept_copy: sync_tree",
+    ("receive", "_hardlink", "os.open", 1): "protocol accept_copy: sync_tree",
+    ("receive", "_hardlink", "os.fchmod", 1): "protocol accept_copy: sync_tree",
+    ("receive", "open_dirs", "os.fchmod", 1): "protocol accept_copy: sync_tree",
+    ("receive", "_rmtree_at", "shutil.rmtree", 1): (
+        "protocol remove_own_tree: sync_dir(parent)"
+    ),
+    ("receive", "_rmdir_at", "os.rmdir", 1): (
+        "protocol remove_empty_dir: sync_dir(parent)"
+    ),
+    ("release", "_switch_current", "os.symlink", 1): "protocol activate: temp",
+    ("release", "_switch_current", "os.rename", 1): "protocol activate: sync_dir",
+    ("release", "_unlink_absent_ok", "os.unlink", 1): "activate's own temp",
+    ("release", "_unlink_quietly", "os.unlink", 1): "activate's own temp",
 }
 
+_OS_OPS = frozenset(
+    {
+        "mkdir", "makedirs", "chmod", "fchmod", "lchmod", "chown", "fchown",
+        "lchown", "rename", "replace", "symlink", "link", "unlink", "remove",
+        "rmdir", "open",
+    }
+)  # fmt: skip
+_PATH_OPS = frozenset(
+    {
+        "mkdir", "write_text", "write_bytes", "touch", "symlink_to", "rename",
+        "replace", "unlink", "rmdir", "chmod", "extractall", "hardlink_to",
+    }
+)  # fmt: skip
 
-class _MkdirSites(ast.NodeVisitor):
-    """(module, innermost function) of every `*.mkdir`/`*.makedirs` call."""
 
-    def __init__(self, module: str) -> None:
+class _FsSites(ast.NodeVisitor):
+    """Every mutating call: `os.*`, `os.open` with `O_CREAT`, `shutil.*`,
+    the `pathlib`/`tarfile` mutators, and `open(..., "w"/"x"/"a"/"+")`."""
+
+    def __init__(self, module: str, tree: ast.Module) -> None:
         self.module = module
+        self.creating = {
+            t.id
+            for n in tree.body
+            if isinstance(n, ast.Assign) and "O_CREAT" in ast.unparse(n.value)
+            for t in n.targets
+            if isinstance(t, ast.Name)
+        }
         self.stack: list[str] = []
-        self.found: set[tuple[str, str]] = set()
+        self.found: list[tuple[str, str, str, int]] = []
+        self._ordinal: dict[tuple[str, str, str], int] = {}
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
         self.stack.append(node.name)
         self.generic_visit(node)
         self.stack.pop()
 
+    def _add(self, op: str) -> None:
+        key = (self.module, self.stack[-1] if self.stack else "", op)
+        self._ordinal[key] = self._ordinal.get(key, 0) + 1
+        self.found.append((*key, self._ordinal[key]))
+
+    def _creates(self, flags: list[ast.expr]) -> bool:
+        names = {n.id for f in flags for n in ast.walk(f) if isinstance(n, ast.Name)}
+        text = " ".join(ast.unparse(f) for f in flags)
+        return "O_CREAT" in text or bool(names & self.creating)
+
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
         f = node.func
-        if isinstance(f, ast.Attribute) and f.attr in ("mkdir", "makedirs"):
-            self.found.add((self.module, self.stack[-1] if self.stack else ""))
+        if isinstance(f, ast.Attribute):
+            base = ast.unparse(f.value)
+            if base == "os" and f.attr in _OS_OPS:
+                if f.attr != "open" or self._creates(node.args[1:2]):
+                    self._add(f"os.{f.attr}")
+            elif base == "shutil":
+                self._add(f"shutil.{f.attr}")
+            elif f.attr in _PATH_OPS:
+                self._add(f".{f.attr}")
+        elif isinstance(f, ast.Name) and f.id == "open":
+            mode = node.args[1] if len(node.args) > 1 else None
+            mode = mode or next(
+                (k.value for k in node.keywords if k.arg == "mode"), None
+            )
+            if mode is not None and any(c in ast.unparse(mode) for c in "wxa+"):
+                self._add("open")
         self.generic_visit(node)
 
 
-def test_every_mkdir_site_is_accounted_for() -> None:
-    found: set[tuple[str, str]] = set()
+def test_every_fs_mutation_is_accounted_for() -> None:
+    found: list[tuple[str, str, str, int]] = []
     for path in sorted(Path(fsutil.__file__).parent.glob("*.py")):
-        visitor = _MkdirSites(path.stem)
-        visitor.visit(ast.parse(path.read_text()))
-        found |= visitor.found
-    assert found == set(MKDIR_SITES)
+        tree = ast.parse(path.read_text())
+        visitor = _FsSites(path.stem, tree)
+        visitor.visit(tree)
+        found += visitor.found
+    assert sorted(found) == sorted(FS_SITES)
+
+
+def test_the_guard_sees_every_form() -> None:
+    """The scanner itself (a twin): each form it must catch is caught."""
+    src = """
+import os, shutil
+from pathlib import Path
+FLAGS = os.O_WRONLY | os.O_CREAT
+def f(p: Path) -> None:
+    os.mkdir("a"); os.chmod("a", 0o700); os.open("a", FLAGS)
+    os.open("b", os.O_RDONLY | os.O_CREAT, 0o600); os.open("c", os.O_RDONLY)
+    shutil.copy("a", "b"); p.write_text("x"); p.touch(); open("x", "w")
+    open("y"); os.replace("a", "b"); p.chmod(0o700)
+"""
+    visitor = _FsSites("m", ast.parse(src))
+    visitor.visit(ast.parse(src))
+    ops = sorted(op for _m, _f, op, _n in visitor.found)
+    assert ops == sorted(
+        [
+            "os.mkdir", "os.chmod", "os.open", "os.open", "shutil.copy",
+            ".write_text", ".touch", "open", "os.replace", ".chmod",
+        ]
+    )  # fmt: skip
+
+
+def _primitive_runs(
+    model: CrashModel,
+    monkeypatch: pytest.MonkeyPatch,
+    run: Callable[[], None],
+    check: Callable[..., None],
+) -> int:
+    """Crash a primitive at each position -- after each of its syscalls and
+    at each model point -- by a process and by an OS crash; then no visible
+    name is at a non-final mode, and a rerun leaves it final and durable.
+    Returns the number of runs (asserted by the callers, R49)."""
+    import sys
+
+    from tests.df.crash_model import Crash
+
+    count = [0]
+    target: list[int | None] = [None]
+
+    def wrap(name: str) -> Callable[..., object]:
+        real = getattr(os, name)
+
+        def call(*a: object, **kw: object) -> object:
+            out = real(*a, **kw)
+            caller = str(sys._getframe(1).f_globals.get("__name__"))  # noqa: SLF001
+            if caller == "df.fsutil":
+                count[0] += 1
+                if count[0] == target[0]:
+                    target[0] = None
+                    model.kill_now(f"after {name}")
+            return out
+
+        return call
+
+    for name in ("mkdir", "open", "fchmod", "close"):
+        monkeypatch.setattr(os, name, wrap(name))
+    start = model.snapshot()
+    first = len(model.points)
+    run()
+    points, calls = len(model.points) - first, count[0]
+    runs = 0
+    for crash in ("process", "os"):
+        for kind, k in [("point", i) for i in range(points)] + [
+            ("syscall", n) for n in range(1, calls + 1)
+        ]:
+            model.restore(start)
+            model.disarm()
+            count[0] = 0
+            if kind == "point":
+                model.trap(lambda p, i=first + k: p.index == i)
+            else:
+                target[0] = k
+            with pytest.raises(Crash):
+                run()
+            model.reap()
+            if crash == "os":
+                model.os_crash()
+            check(final=False)
+            run()
+            check(final=True)
+            assert model.unsynced() == [], (crash, kind, k)
+            runs += 1
+    return runs
+
+
+def test_make_dir_twins_every_position(
+    crash_model: CrashModel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = crash_model.root
+    d = root / "d"
+
+    def run() -> None:
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        old = os.umask(0o277)
+        try:
+            fsutil.make_dir(fd, "d", 0o711, path=d)
+        finally:
+            os.umask(old)
+            os.close(fd)
+
+    def check(*, final: bool) -> None:
+        if os.path.lexists(d) or final:
+            assert stat.S_IMODE(os.stat(d).st_mode) == 0o711
+
+    assert _primitive_runs(crash_model, monkeypatch, run, check) >= 8
+
+
+def test_create_file_twins_every_position(
+    crash_model: CrashModel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = crash_model.root / "f"
+
+    def run() -> None:
+        old = os.umask(0o277)
+        try:
+            fd = fsutil.create_file(path, os.O_WRONLY, 0o600)
+        except FileExistsError:
+            return  # the caller opens and judges an existing one
+        finally:
+            os.umask(old)
+        os.close(fd)
+
+    def check(*, final: bool) -> None:
+        if os.path.lexists(path) or final:
+            assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+    assert _primitive_runs(crash_model, monkeypatch, run, check) >= 6

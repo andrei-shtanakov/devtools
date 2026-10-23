@@ -165,23 +165,21 @@ def _ensure_admin_home(layout: Layout) -> None:
     """`admin-home`: root's directory, mode exactly `0700` (F6).
 
     uv creates its lock files `0666` whatever the umask, so nobody but root
-    may reach them. Scratch, not a fact: no sync.
+    may reach them. Scratch, not a fact. Step 2 makes it (and settles it on
+    every run); absent here, it is made the same way (`fsutil.make_dir`:
+    born `0700`, durable), so no crash leaves a mode the check refuses.
     """
     home = layout.admin_home
-    created = True
+    parent = os.open(home.parent, _DIR_FLAGS)
     try:
-        os.mkdir(home, 0o700)
-    except FileExistsError:
-        created = False
-    fd = os.open(home, _DIR_FLAGS)
-    try:
-        if created:
-            os.fchmod(fd, 0o700)
-        st = os.fstat(fd)
+        if not os.path.lexists(home):  # step 2 makes it; settled there too
+            fsutil.make_dir(parent, home.name, 0o700, path=home)
+        st = os.stat(home.name, dir_fd=parent, follow_symlinks=False)
     finally:
-        os.close(fd)
+        os.close(parent)
     owner = fsutil.owner_uid(st)
-    if owner != plat.ROOT_UID or stat.S_IMODE(st.st_mode) != 0o700:
+    is_dir = stat.S_ISDIR(st.st_mode)
+    if not is_dir or owner != plat.ROOT_UID or stat.S_IMODE(st.st_mode) != 0o700:
         mode = oct(stat.S_IMODE(st.st_mode))
         raise StepFailed(_STEP, f"{home}: владелец uid {owner}, режим {mode}")
 

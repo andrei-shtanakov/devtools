@@ -72,6 +72,7 @@ class FakeLayout:
             lay.build_home,
         ):
             path.mkdir(parents=True, exist_ok=True)
+        lay.admin_home.mkdir(mode=0o700, exist_ok=True)  # as step 2 leaves it
 
     def set_owner(self, path: Path, uid: int) -> None:
         """Give `path` a virtual owner (as a recorded `chown` would)."""

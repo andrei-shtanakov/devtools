@@ -5,6 +5,7 @@ Every synchronisation error is raised: a failed sync is a refusal.
 
 from __future__ import annotations
 
+import contextlib
 import enum
 import errno
 import fcntl
@@ -13,6 +14,7 @@ import stat
 import subprocess
 import sys
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Literal
 
@@ -22,6 +24,7 @@ _UNSUPPORTED = {errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}
 _SYSCTL = "/usr/sbin/sysctl"
 _SAFE_ENV = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
 _BOOT_ID_LINUX = Path("/proc/sys/kernel/random/boot_id")
+_DIR_NOFOLLOW = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 # Devices (`st_dev`) where a directory refused F_FULLFSYNC in this process. Every
 # caller of `sync_dir` drops its `SyncNote`; the note is collected here instead and
 # the acceptance driver journals it for the evidence (decision (a), 2026-10-21).
@@ -137,29 +140,110 @@ def _discard(tmp: Path) -> None:
         pass
 
 
-def make_dir(parent_fd: int, name: str, mode: int) -> bool:
-    """Create directory `name` in `parent_fd` with exactly `mode`, durably.
+@contextlib.contextmanager
+def exact_mode() -> Iterator[None]:
+    """`umask 0` around one creation: the object is born with exactly the
+    requested mode, so its name is never visible at a narrower one. The
+    umask is process-wide; `df` is single-threaded."""
+    old = os.umask(0)
+    try:
+        yield
+    finally:
+        os.umask(old)
 
-    `mkdir 0700` -> open (`O_DIRECTORY|O_NOFOLLOW`) -> `fchmod(mode)` ->
-    `sync_dir(fd)` -> `sync_dir(parent_fd)`. The mode is the directory's own
-    metadata: only a sync of the directory makes it durable; the parent's
-    sync makes the name durable (spec 3.3, protocol `verify_chmod`). An
-    existing name is left untouched: `False`, nothing synced -- the caller
-    judges what is there.
-    """
+
+def make_dir(
+    parent_fd: int, name: str, mode: int, *, path: Path, repair: bool = True
+) -> bool:
+    """Make directory `name` in `parent_fd` durable in its final form.
+
+    Absent: `mkdir(mode)` under `exact_mode` -> `fault_point("created")` ->
+    `sync_dir(itself)` -> `sync_dir(parent)`: the name never exists at
+    another mode, and the mode (the directory's own metadata) and the name
+    (the parent's entry) are durable on return (spec 3.3).
+
+    Present -- settle what is seen (spec 3.3, r6): a directory of the
+    current user whose mode is narrower than `mode` (a subset of its bits)
+    gets `fchmod(mode)` -> `fault_point("chmod")` (only with `repair`; a
+    system directory above `df`'s own is never changed); a wider mode or
+    another owner is never touched -- the caller refuses it. Then a
+    directory is synced itself, and the parent always. Returns whether it
+    was created (`path` names it for the fault points)."""
     try:
-        os.mkdir(name, 0o700, dir_fd=parent_fd)
+        with exact_mode():
+            os.mkdir(name, mode, dir_fd=parent_fd)
     except FileExistsError:
+        _settle_found(parent_fd, name, mode, path=path, repair=repair)
         return False
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-    fd = os.open(name, flags, dir_fd=parent_fd)
+    fault_point("created", path)
+    fd = os.open(name, _DIR_NOFOLLOW, dir_fd=parent_fd)
     try:
-        os.fchmod(fd, mode)
         sync_dir(fd)
     finally:
         os.close(fd)
     sync_dir(parent_fd)
     return True
+
+
+def _settle_found(
+    parent_fd: int, name: str, mode: int, *, path: Path, repair: bool
+) -> None:
+    st = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if stat.S_ISDIR(st.st_mode):
+        fd = os.open(name, _DIR_NOFOLLOW, dir_fd=parent_fd)
+        try:
+            have = stat.S_IMODE(st.st_mode)
+            narrower = have != mode and not have & ~mode
+            if repair and narrower and owner_uid(st) == os.geteuid():
+                os.fchmod(fd, mode)
+                fault_point("chmod", path)
+            sync_dir(fd)
+        finally:
+            os.close(fd)
+    sync_dir(parent_fd)
+
+
+def create_file(path: Path, flags: int, mode: int, *, dir_fd: int | None = None) -> int:
+    """Create `path` exclusively, durable in its final form; return the fd.
+
+    `open(O_CREAT|O_EXCL, mode)` under `exact_mode` (born with exactly
+    `mode`) -> `fault_point("created")` -> `sync_file` -> `sync_dir(parent)`.
+    A found name is settled first -- a regular file synced itself, the
+    parent always (spec 3.3 r6) -- then `FileExistsError` propagates: the
+    caller opens and judges what is there."""
+    target = path.name if dir_fd is not None else path
+    parent: int | Path = dir_fd if dir_fd is not None else path.parent
+    try:
+        with exact_mode():
+            fd = os.open(target, flags | os.O_CREAT | os.O_EXCL, mode, dir_fd=dir_fd)
+    except FileExistsError:
+        _settle_found_file(target, dir_fd, parent)
+        raise
+    try:
+        fault_point("created", path)
+        sync_file(fd)
+        sync_dir(parent)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _settle_found_file(
+    target: Path | str, dir_fd: int | None, parent: int | Path
+) -> None:
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    try:
+        fd = os.open(target, flags, dir_fd=dir_fd)
+    except OSError:
+        fd = None  # a link or no longer there: only the name is settled
+    if fd is not None:
+        try:
+            if stat.S_ISREG(os.fstat(fd).st_mode):
+                sync_file(fd)
+        finally:
+            os.close(fd)
+    sync_dir(parent)
 
 
 def remove_durably(path: Path) -> None:

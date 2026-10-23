@@ -35,6 +35,7 @@ from tests.df.route_world import (
     PY,
     StandIns,
     setup_layout,
+    without_journal_creation,
     write_accounts,
 )
 
@@ -280,7 +281,8 @@ def test_action_refuses_outside_its_phase(fl: FakeLayout) -> None:
         ("cleanup", "failed", "StepFailed: seal: не в своей фазе"),
     ]
     # Only the reads of the facts and the settles ran: no call, no change.
-    assert {e[0] for e in fl.events} <= {"sync_dir", "run_as"}
+    events = without_journal_creation(fl.events)
+    assert {e[0] for e in events} <= {"sync_dir", "run_as"}
     assert {e[2][0] for e in fl.events if e[0] == "run_as"} == {"/usr/bin/find"}
     assert not os.path.lexists(lay.staging_dir(ID))
     assert (tree / "half-built").exists()

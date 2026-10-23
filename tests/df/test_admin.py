@@ -178,6 +178,7 @@ def test_install_admin_python_events_exact(fl: FakeLayout) -> None:
 def test_admin_home_created_root_0700(fl: FakeLayout) -> None:
     home = fl.layout.admin_home
     assert home == fl.layout.install_dir / "admin-home"
+    os.rmdir(home)  # absent: `install_admin_python` creates it (F6)
     install_python(fl)
     assert mode(home) == 0o700
 
@@ -189,6 +190,7 @@ def test_admin_home_refused_unless_root_0700(
     """F6: an existing `admin-home` must be root's real directory `0700`."""
     runs = uv_runs(monkeypatch)
     home = fl.layout.admin_home
+    home.rmdir()
     if bad == "link":
         other = fl.layout.root.parent / "elsewhere"
         other.mkdir(mode=0o700)

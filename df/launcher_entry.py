@@ -806,18 +806,37 @@ def _is_absent(path: Path, dir_fd: int) -> bool:
 
 
 def _create_private(dir_fd: int, path: Path, flags: int, step: str) -> int:
+    """`df.fsutil.create_file`: born `0600` whatever the umask, the file and
+    then its directory synced before use."""
+    old = os.umask(0)
     try:
         fd = os.open(path.name, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dir_fd)
     except FileExistsError:
         return _open_regular(dir_fd, path, flags, step, writer=True, exact_mode=0o600)
     except OSError as exc:
         raise Refused(step, f"{path}: {_why(exc)}") from exc
+    finally:
+        os.umask(old)
     try:
-        os.fchmod(fd, 0o600)
+        _sync_file(fd)
+        os.fsync(dir_fd)
+        if sys.platform == "darwin":
+            _full_fsync(dir_fd)
+    except OSError as exc:
+        os.close(fd)
+        raise Refused(step, f"{path}: {_why(exc)}") from exc
     except BaseException:
         os.close(fd)
         raise
     return fd
+
+
+def _sync_file(fd: int) -> None:
+    """`df.fsutil.sync_file`: F_FULLFSYNC on macOS (an error refuses)."""
+    if sys.platform == "darwin":
+        fcntl.fcntl(fd, _F_FULLFSYNC)
+        return
+    os.fsync(fd)
 
 
 def _flock_or_refuse(fd: int, path: Path) -> None:

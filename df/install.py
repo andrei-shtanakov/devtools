@@ -425,7 +425,7 @@ def _utc_now() -> datetime:
 PENDING_MODE = 0o644
 #: Directories whose mode step 2 requires exactly (M3): `staging` lists no
 #: id to `df-build`, the marks and the evidence are root's alone.
-EXACT_MODES = ("staging", "quarantine", "marks_dir", "verify_dir")
+EXACT_MODES = ("staging", "quarantine", "marks_dir", "verify_dir", "admin_home")
 _PREP_DIR_MODES: tuple[tuple[str, int], ...] = (
     ("opt", 0o755),
     ("releases", 0o755),
@@ -438,6 +438,7 @@ _PREP_DIR_MODES: tuple[tuple[str, int], ...] = (
     ("var", 0o755),
     ("marks_dir", 0o700),
     ("verify_dir", 0o700),
+    ("admin_home", 0o700),
 )
 #: Parents of what a rollback removes (I7): trusted before any removal.
 ROLLBACK_PARENTS = ("opt", "releases", "staging", "admin")
@@ -470,9 +471,10 @@ def install_steps(layout: Layout, cfg: InstallConfig, prepared: Prepared) -> lis
        parses the profile into `prepared`; a refusal is
        `StepFailed("manifest", <problems>)` from the check itself.
     2. `trusted-paths`: the approved CLI first, then every directory of
-       `prep_dirs`; any problem is `StepFailed("trusted-paths", <paths and
-       reasons>)` — `do()` never repairs an existing directory, it only
-       creates missing ones (`fchmod` to the exact mode, the parent synced).
+       `prep_dirs`, settled first; any problem is `StepFailed("trusted-paths",
+       <paths and reasons>)`. `do()` creates missing ones and widens root's
+       narrower ones to their mode, durably (`fsutil.make_dir`); another
+       owner, group/other write or a wider exact mode stays a refusal.
     3. `build-user`: `verify_build_user` empty, and only then `whoami_as`
        equals the record (no process of `df-build` before readiness);
        `do()` is `create_build_user`.
@@ -510,8 +512,12 @@ def _profile(cfg: InstallConfig) -> Profile:
 
 
 def _trusted_ready(layout: Layout, cfg: InstallConfig, platform: PlatformName) -> bool:
-    """Step 2's check: every problem refuses; only absence asks for `do()`."""
+    """Step 2's check. What it sees is settled first (spec 3.3 r6). Every
+    problem refuses; absence -- or a root directory narrower than its mode,
+    which `do()` widens to it (never a wider one, never another owner's) --
+    asks for `do()`."""
     problems = list(plat.approved_cli_problems(cfg.approved_cli, platform))
+    _settle_prep_dirs(layout)
     missing = False
     exact = {getattr(layout, name) for name in EXACT_MODES}
     for path, mode in prep_dirs(layout):
@@ -519,13 +525,43 @@ def _trusted_ready(layout: Layout, cfg: InstallConfig, platform: PlatformName) -
         st = _lstat(path)
         if st is None:
             missing = True
-        elif stat.S_ISDIR(st.st_mode) and path in exact:
+        elif stat.S_ISDIR(st.st_mode):
             have = stat.S_IMODE(st.st_mode)
-            if have != mode:
+            if _narrower_own(st, mode):
+                missing = True
+            elif path in exact and have != mode:
                 problems.append(f"{path}: права {have:04o}, нужны {mode:04o}")
     if problems:
         raise StepFailed(_TRUST_STEP, "; ".join(dict.fromkeys(problems)))
     return not missing
+
+
+def _narrower_own(st: os.stat_result, mode: int) -> bool:
+    """Root's directory whose mode is a strict subset of `mode`'s bits."""
+    have = stat.S_IMODE(st.st_mode)
+    owned = fsutil.owner_uid(st) == plat.ROOT_UID
+    return owned and have != mode and not have & ~mode
+
+
+def _settle_prep_dirs(layout: Layout) -> None:
+    """Sync every existing directory of `prep_dirs` and its ancestors, and
+    the parent of each (links followed: macOS `/etc`), so no name a retry
+    found is used unsettled."""
+    seen: list[Path] = []
+    for path, _mode in prep_dirs(layout):
+        node = path
+        while node != layout.root and layout.root in node.parents:
+            st = _lstat(node)
+            if st is not None and stat.S_ISDIR(st.st_mode):
+                for target in (node, node.parent):
+                    if target not in seen:
+                        seen.append(target)
+            node = node.parent
+    for target in sorted(seen, key=lambda p: len(p.parts)):
+        try:
+            fsutil.sync_dir(target)
+        except OSError as exc:
+            raise StepFailed(_TRUST_STEP, f"{target}: {exc}") from exc
 
 
 def policy_problems(path: Path) -> list[str]:
@@ -550,7 +586,8 @@ def _make_prep_dirs(layout: Layout) -> None:
     is one); that is safe only because the check proved every component
     down to the nearest existing ancestor root's and unwritable by others,
     and `fchmod` acts only on the directory this call created and opened
-    `O_NOFOLLOW`."""
+    `O_NOFOLLOW`. A root directory narrower than its mode is widened to it
+    (`fsutil.make_dir`)."""
     for path, mode in prep_dirs(layout):
         for ancestor in _missing_ancestors(layout, path):
             _make_dir(ancestor, 0o755)
@@ -567,14 +604,14 @@ def _missing_ancestors(layout: Layout, path: Path) -> list[Path]:
 
 
 def _make_dir(path: Path, mode: int) -> None:
-    """Create `path` (if absent) with exactly `mode`, durably: the mode and
-    the name (`fsutil.make_dir`). An existing one: the check judges it."""
+    """`path` durable at exactly `mode` (`fsutil.make_dir`): created, or
+    found, settled and -- if root's and narrower -- widened to it."""
     try:
         parent = os.open(path.parent, _DIR_OPEN)
     except OSError as exc:
         raise StepFailed(_TRUST_STEP, f"{path.parent}: {exc}") from exc
     try:
-        fsutil.make_dir(parent, path.name, mode)
+        fsutil.make_dir(parent, path.name, mode, path=path)
     except OSError as exc:
         raise StepFailed(_TRUST_STEP, f"{path}: {exc}") from exc
     finally:

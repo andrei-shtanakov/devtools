@@ -284,6 +284,7 @@ def test_settle_failure_at_iteration_head_journaled(
     def sync_dir(path: object) -> None:
         raise OSError("sync")
 
+    fl.layout.journal.touch(mode=0o600)  # its creation syncs (create_file)
     monkeypatch.setattr(fsutil, "sync_dir", sync_dir)
     with pytest.raises(OSError, match="sync"):
         run(fl, World("committed"))

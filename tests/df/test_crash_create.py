@@ -69,7 +69,8 @@ class SyscallTrap:
         def call(*a: object, **kw: object) -> object:
             out = real(*a, **kw)
             module = str(sys._getframe(1).f_globals.get("__name__"))  # noqa: SLF001
-            creating = name != "open" or bool(int(a[1]) & os.O_CREAT)  # type: ignore[call-overload]
+            flags = a[1] if name == "open" else os.O_CREAT
+            creating = bool(int(flags) & os.O_CREAT)  # type: ignore[call-overload]
             if module.startswith("df.") and creating:
                 self.count += 1
                 self.seen.append(f"{name} {module}")
@@ -123,7 +124,7 @@ def test_lock_and_step2_every_crash_position(fake_world: World, crash: str) -> N
         assert os.path.lexists(w.lay.pending), where
         runs += 1
     assert runs == len(positions)
-    assert points >= 40 and calls >= 40, (points, calls)
+    assert points >= 40 and calls >= 20, (points, calls)
 
 
 @pytest.mark.parametrize("which", ["var/lib", "opt"])
