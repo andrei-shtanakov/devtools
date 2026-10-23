@@ -738,3 +738,55 @@ REAL_LOAD = __import__("df.config").config.load_accounts
 def test_fsutil_is_the_models(fake_world: World) -> None:
     """The fixture's model owns the sync seams and the boot id."""
     assert fsutil.boot_id() == fake_world.m.boot_id()
+
+
+# ---------- created directories keep their modes (finding of 9-C) ----------
+
+
+def test_prep_dirs_keep_their_modes_across_os_crash(fake_world: World) -> None:
+    """Step 2 creates its directories with exact modes (`fchmod` after
+    `mkdir 0700`, M3). The mode is the directory's own metadata: durable by
+    a sync of the directory, not of its parent (model R2; spec: protocol
+    `verify_chmod`). An OS crash right after step 2 must not leave
+    `staging`/`.quarantine` at `0700` -- the retry's step 2 would refuse
+    them forever («права 0700, нужны 0711») -- nor `/opt`, `/var/lib/df` at
+    `0700`, closing the command to every non-root user."""
+    w = fake_world
+    real = install._make_prep_dirs  # noqa: SLF001
+    made = {str(p.relative_to(w.lay.root)) for p, _ in install.prep_dirs(w.lay)}
+    unsynced: list[str] = []
+
+    def prep(layout: object) -> None:
+        real(layout)  # type: ignore[arg-type]
+        w.mp.setattr(install, "_make_prep_dirs", real)
+        unsynced.extend(p for p in w.m.unsynced() if p in made | {"opt"})
+        w.m.kill_now("after step 2")
+
+    w.mp.setattr(install, "_make_prep_dirs", prep)
+    w.killed(lambda: w.bootstrap(w.init_argv()))
+    assert unsynced == []
+    w.m.os_crash()
+    for path, mode in install.prep_dirs(w.lay):
+        assert os.stat(path).st_mode & 0o7777 == mode, path
+    assert w.bootstrap(w.init_argv()) == 0
+    assert committed_problems(w, FIRST, w.cfg()) == []
+
+
+@pytest.mark.parametrize("umask", [0o022, 0o077])
+def test_lock_dirs_keep_their_modes_across_os_crash(
+    fake_world: World, umask: int
+) -> None:
+    """`writer_lock` creates `/var/lib/df` and `install/` (`0755`, R18) with
+    `fchmod` after `mkdir`: under a root umask `077` the mode is set by the
+    `fchmod` alone and must be durable before the lock is used."""
+    w = fake_world
+    old = os.umask(umask)
+    try:
+        with journal.writer_lock(w.lay):
+            dirs = {"var", "var/lib", "var/lib/df", "var/lib/df/install"}
+            assert [p for p in w.m.unsynced() if p in dirs] == []
+    finally:
+        os.umask(old)
+    w.m.os_crash()
+    for path in (w.lay.var, w.lay.install_dir):
+        assert os.stat(path).st_mode & 0o7777 == 0o755, path
