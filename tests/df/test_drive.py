@@ -322,7 +322,11 @@ def test_max_iter_zero_still_classifies(fl: FakeLayout) -> None:
 
 @pytest.mark.parametrize(
     "error,step",
-    [(StepFailed("facts", "не каталог"), "facts"), (OSError("io"), "facts")],
+    [
+        (StepFailed("facts", "не каталог"), "facts"),
+        (StepFailed("settle", "sync"), "settle"),
+        (OSError("io"), "facts"),
+    ],
 )
 def test_post_check_read_failure_journaled_as_facts(
     fl: FakeLayout, error: Exception, step: str

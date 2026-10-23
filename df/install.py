@@ -20,6 +20,7 @@ from pathlib import Path
 from df import accept, admin, fsutil, release
 from df import build as build_mod
 from df import install_table as table
+from df import platform as plat
 from df.accept import Facts
 from df.build import BuildPlan
 from df.config import InstallConfig, Pending, config_digest, dump_install
@@ -31,7 +32,14 @@ from df.paths import Layout
 from df.platform import PlatformName
 from df.receive import CopyLimits
 from df.release import ReleaseRecord, RepoRecord
-from df.routes import Call, RouteContext, acceptance_calls, removal_calls, route_action
+from df.routes import (
+    Call,
+    RouteContext,
+    acceptance_calls,
+    removal_calls,
+    route_action,
+    where,
+)
 
 #: Modes of the files `write_atomic` writes without a wrapper (M13): the
 #: entry is read, the command executed, `install.toml` read by everyone.
@@ -81,6 +89,8 @@ class InstallRun:
             self.layout.release_dir(rid),
         ):
             raise AssertionError(f"plan of another release: {self.plan.release_id}")
+        if self.platform != plat.detect_platform():
+            raise AssertionError(f"platform {self.platform} is not the host's (m2)")
         if self.python_key != build_mod.python_key(self.profile.python, self.platform):
             raise AssertionError(f"python_key {self.python_key!r} != the profile's")
 
@@ -192,7 +202,8 @@ def command_ready(layout: Layout, release_id: str) -> bool:
     """`L` of `release_id` (I3): the command is what its own admin code makes.
 
     No registry entry, or one not `intact` — false, and nothing of the
-    release's admin tree is read. Otherwise `admin.launcher_ready` for the
+    release's admin tree is read. The entry's status is not read: like
+    `intact`, `L` is a fact of the files; revocation is the table's (n4). Otherwise `admin.launcher_ready` for the
     entry's admin Python: the same Python and the same entry source the
     route `launcher` writes.
     """
@@ -209,11 +220,29 @@ def rollback_calls(
 ) -> dict[str, Call]:
     """The calls of the route `rollback`, exactly (I5): the removing calls of
     `acceptance_calls`, the same functions (`routes.removal_calls`), without
-    a profile, a network or an account. `journal` and `run_id` name the run
-    that rolls back (the step naming of its failures is the caller's).
+    a profile or a network. No account is needed unless a builder tree is
+    there: `cleanup_tree` runs the cleaner as `df-build`, so it first
+    requires `verify_build_user` empty (security order: no `run_as` before
+    it), else `StepFailed("rollback")` before any change (I-1). `journal`
+    and `run_id` name the run that rolls back (the step naming of its
+    failures is the caller's).
     """
     del journal, run_id  # the caller journals (M7)
-    return removal_calls(layout, release_id)
+    calls = removal_calls(layout, release_id)
+    cleanup = calls["cleanup_tree"]
+
+    def cleanup_tree(target: str) -> None:
+        problems = build_mod.verify_build_user(layout)
+        if problems:
+            parent, name = where(layout, release_id, target)
+            raise StepFailed(
+                "rollback",
+                f"{parent / name}: учётка df-build не готова — очистка дерева "
+                f"сборщика невозможна: {'; '.join(problems)}",
+            )
+        cleanup(target)
+
+    return calls | {"cleanup_tree": cleanup_tree}
 
 
 # ---------- the release's own calls ----------
@@ -269,7 +298,11 @@ class _ReleaseCalls:
 
 
 def _registered_python(layout: Layout, release_id: str) -> str:
-    """The admin Python of the registry entry: the command names it (I3)."""
+    """The admin Python of the registry entry: the command names it (I3).
+
+    The status is not read here: the rows that run `launcher` already hold
+    `reg ∧ intact`, and revocation is the table's, as for `intact` (n4).
+    """
     entry = accept.registry_entry(layout, release_id)
     if entry is None:
         raise StepFailed(_LAUNCHER_STEP, f"{release_id}: нет в releases.toml")
@@ -325,7 +358,10 @@ def _repo_record(run: InstallRun, pin: RepoPin) -> RepoRecord:
     ref = run.refs.get(pin.name)
     if ref is None:
         raise StepFailed(_REGISTER_STEP, f"{pin.name}: нет доверенного чекаута")
-    lock = lock_digest(ref / "uv.lock", pin.name)
+    try:
+        lock = lock_digest(ref / "uv.lock", pin.name)
+    except StepFailed as exc:
+        raise StepFailed(_REGISTER_STEP, exc.detail) from exc
     return RepoRecord(pin.name, pin.url, pin.sha, lock, pin.groups)
 
 

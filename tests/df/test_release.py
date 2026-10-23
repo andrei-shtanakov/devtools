@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from df import accept, admin, fsutil, install, release
+from df import accept, admin, fsutil, install, release, routes
 from df import install_table as table
 from df import platform as plat
 from df.accept import Facts, classify
@@ -791,3 +791,167 @@ def test_upgrade_keeps_shared_admin_python(fl: FakeLayout) -> None:
     entries = {e.id: e for e in load_releases(lay.etc / "releases.toml").releases}
     assert set(entries) == {ID, ID2}
     assert entries[ID2].admin_python == entries[ID].admin_python == PY
+
+
+# ---------- fix round 1 ----------
+
+
+def _builder_staging(fl: FakeLayout) -> Path:
+    """A rollback that needs the cleaner: `staging/<id>/tree` of `df-build`."""
+    lay = fl.layout
+    lay.staging_dir(ID).mkdir(mode=0o711)
+    tree = fl.builder_dir(lay.staging_tree(ID))
+    (tree / "f").write_text("x\n")
+    return tree
+
+
+@pytest.mark.parametrize("account", ["no-accounts", "not-ready"])
+def test_rollback_never_runs_as_build_user_before_it_is_ready(
+    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout, account: str
+) -> None:
+    """I-1 (security order): `rollback_calls` reaches no `run_as(df-build)`
+    while `verify_build_user` has problems — `StepFailed("rollback")` before
+    anything changes; no `accounts.toml` included."""
+    lay = fl.layout
+    tree = _builder_staging(fl)
+    if account == "no-accounts":
+        lay.accounts.unlink()
+        monkeypatch.setattr(
+            install.build_mod, "verify_build_user", plat.verify_build_user
+        )
+    else:
+        monkeypatch.setattr(
+            install.build_mod, "verify_build_user", lambda _l: ["state = creating"]
+        )
+    runs: list[object] = []
+    monkeypatch.setattr(plat, "run_as", lambda *a, **kw: runs.append(a))
+    calls = rollback_calls(lay, ID, lay.journal, "run-1")
+    fl.clear()
+    with pytest.raises(StepFailed) as exc:
+        run_route(lay, ID, "rollback", calls=calls, build_uid=None)
+    assert exc.value.step == "rollback"
+    assert runs == [] and fl.events == []
+    assert tree.is_dir() and lay.pending.exists()
+
+
+def test_rollback_runs_the_cleaner_when_the_account_is_ready(fl: FakeLayout) -> None:
+    """The positive twin of I-1: a ready account — the cleaner runs as
+    `df-build` and the builder tree is removed."""
+    lay = fl.layout
+    _builder_staging(fl)
+    calls = rollback_calls(lay, ID, lay.journal, "run-1")
+    fl.clear()
+    run_route(lay, ID, "rollback", calls=calls, build_uid=BUILD_UID)
+    assert any(e[0] == "run_as" for e in fl.events)
+    assert not os.path.lexists(lay.staging_tree(ID))
+    assert not os.path.lexists(lay.pending)
+
+
+def test_python_declared_survives_a_new_process_after_verified(
+    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout
+) -> None:
+    """m1, R40/F7: run A stops after `verified`; run B, a new process with a
+    fresh context that never runs `transfer_check`, carries A's answers
+    through `admin` into `release.json`."""
+    answers = {"devtools": "3.13.1 (main, A)"}
+    real = routes.transfer_check
+
+    def transfer(*a: object, **kw: object) -> object:
+        result = real(*a, **kw)
+        return dataclasses.replace(result, python_declared=answers)
+
+    with monkeypatch.context() as m:
+        m.setattr(routes, "transfer_check", transfer)
+        with pytest.raises(StepFailed, match="нет продвижения"):
+            accept.drive(
+                fl.layout,
+                ID,
+                actions=install_actions(install_run(fl)),
+                read=read_for(install_run(fl)),
+                journal=fl.layout.journal,
+                run_id="run-a",
+                max_iter=5,
+            )
+    mark = accept.load_mark(fl.layout, ID, install_digest=config_digest(INSTALL))
+    assert mark is not None and mark.stage == "verified"
+
+    def no_transfer(*_a: object, **_kw: object) -> object:
+        raise AssertionError("run B re-ran transfer_check")
+
+    monkeypatch.setattr(routes, "transfer_check", no_transfer)
+    run_b = install_run(fl)
+    assert run_b.ctx.python_declared is None
+    drive_run(run_b)
+    data = json.loads((fl.layout.release_dir(ID) / "release.json").read_text())
+    assert data["python_declared"] == answers
+
+
+def test_install_run_platform_is_the_hosts(fl: FakeLayout) -> None:
+    """m2: the command text and `L` name one platform."""
+    other = "linux-x86_64" if PLATFORM == "macos-arm64" else "macos-arm64"
+    with pytest.raises(AssertionError, match="platform"):
+        dataclasses.replace(install_run(fl), platform=other)
+
+
+def test_read_facts_asks_l_only_when_intact(fl: FakeLayout) -> None:
+    """m3: `L` is read only with `intact` (the table uses it only there)."""
+    asked: list[bool] = []
+    f = accept.read_facts(
+        fl.layout,
+        ID,
+        install_digest=config_digest(INSTALL),
+        build_uid=BUILD_UID,
+        launcher_ready=lambda: asked.append(True) or True,
+        admin_ready=admin.admin_ready,
+    )
+    assert (f.intact, f.L, asked) == (False, False, [])
+    release_world(fl)
+    f = accept.read_facts(
+        fl.layout,
+        ID,
+        install_digest=config_digest(INSTALL),
+        build_uid=BUILD_UID,
+        launcher_ready=lambda: asked.append(True) or True,
+        admin_ready=admin.admin_ready,
+    )
+    assert (f.intact, f.L, asked) == (True, True, [True])
+
+
+def test_activate_reuses_one_temporary_name(fl: FakeLayout) -> None:
+    """m4: a temporary link left by a kill is replaced, not accumulated."""
+    lay = fl.layout
+    release_world(fl)
+    (lay.opt / ".current.tmp").symlink_to("releases/stale")
+    names = set(os.listdir(lay.opt)) - {".current.tmp"} | {"current"}
+    release.activate(lay, ID)
+    assert os.readlink(lay.current) == f"releases/{ID}"
+    assert set(os.listdir(lay.opt)) == names
+
+
+def test_register_wrappers_name_their_step(
+    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout
+) -> None:
+    """m5: an I/O error of either wrapper, and an unreadable trusted lock,
+    are `StepFailed("register")`."""
+    tree = fl.layout.release_dir(ID)
+    tree.mkdir()
+    (tree / "release.json").mkdir()
+    with pytest.raises(StepFailed) as exc:
+        release.write_release_json(tree, record())
+
+    assert exc.value.step == "register"
+
+    def broken(*_a: object, **_kw: object) -> None:
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr(fsutil, "write_atomic", broken)
+    with pytest.raises(StepFailed) as exc:
+        release.register(fl.layout, record())
+    assert exc.value.step == "register"
+    monkeypatch.undo()
+    refs, _ctx = _accepted_copy(fl)
+    (refs["r1"] / "uv.lock").unlink()
+    calls = install_calls(install_run(fl, profile=PROFILE_R1, refs=refs))
+    with pytest.raises(StepFailed) as exc:
+        calls["write_release_json"]("releases/<id>/release.json")
+    assert exc.value.step == "register" and "uv.lock" in exc.value.detail

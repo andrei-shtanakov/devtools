@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import os
-import uuid
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -38,6 +37,8 @@ RELEASE_JSON = "release.json"
 RECORD_MODE = 0o644
 #: `release.json` says of a registry source what it does not prove (spec 3.5).
 INDEX_NOT_DECLARED = "not declared"
+#: The temporary name of `activate`'s link in `/opt/df` (m4).
+CURRENT_TMP = ".current.tmp"
 
 _ID_STEP = "release-id"
 _REGISTER_STEP = "register"
@@ -184,19 +185,20 @@ def write_release_json(release_dir: Path, rec: ReleaseRecord) -> None:
     """Wrapper of `write_atomic`: `release_dir/release.json`, `0644`.
 
     `release_dir` must be the real directory of `rec.id`; a `release.json`
-    the builder left there is replaced (N3). Effects: `write_atomic()`.
+    the builder left there is replaced (N3). An `OSError` writing it is
+    `StepFailed("register")` (m5). Effects: `write_atomic()`.
     """
     if release_dir.name != rec.id or not accept.is_real_dir(release_dir):
         raise StepFailed(_REGISTER_STEP, f"{release_dir}: не каталог релиза {rec.id}")
-    fsutil.write_atomic(release_dir / RELEASE_JSON, release_json(rec), RECORD_MODE)
+    _write(release_dir / RELEASE_JSON, release_json(rec))
 
 
 def register(layout: Layout, rec: ReleaseRecord) -> None:
     """Wrapper of `write_atomic`: `releases.toml` plus `rec.entry()`, `0644`.
 
     The registry is read by the hardened reader; a broken one, or one that
-    already names `rec.id` (any status), is `StepFailed("register")`.
-    Effects: `write_atomic()`.
+    already names `rec.id` (any status), or an `OSError` writing it, is
+    `StepFailed("register")`. Effects: `write_atomic()`.
     """
     path = layout.etc / "releases.toml"
     try:
@@ -206,8 +208,15 @@ def register(layout: Layout, rec: ReleaseRecord) -> None:
         raise StepFailed(_REGISTER_STEP, str(exc)) from exc
     if any(e.id == rec.id for e in entries):
         raise StepFailed(_REGISTER_STEP, f"{rec.id} уже в releases.toml")
-    text = dump_releases(ReleasesConfig((*entries, rec.entry())))
-    fsutil.write_atomic(path, text, RECORD_MODE)
+    _write(path, dump_releases(ReleasesConfig((*entries, rec.entry()))))
+
+
+def _write(path: Path, text: str) -> None:
+    """`write_atomic` of a record (`0644`); an `OSError` names the step."""
+    try:
+        fsutil.write_atomic(path, text, RECORD_MODE)
+    except OSError as exc:
+        raise StepFailed(_REGISTER_STEP, f"{path}: {exc}") from exc
 
 
 # ---------- activation ----------
@@ -220,7 +229,9 @@ def activate(layout: Layout, release_id: str) -> None:
     registry entry of `release_id` (read by `accept.registry_entry`) is
     `allowed` and `intact` (`accept.entry_intact`: the tree root's `0755`
     with the entry's digest, `admin_ready` with the entry's admin digest
-    and Python). A temporary relative link `releases/<id>` in `/opt/df`,
+    and Python). A temporary relative link `releases/<id>` in `/opt/df`
+    under the one name `.current.tmp` (a leftover of a kill or an OS crash
+    is unlinked first; the writer lock makes the name exclusive, m4),
     `rename` over `current`, `fault_point("renamed")`, `sync_dir(/opt/df)`.
     Effects: `renamed` -> `sync_dir(opt_df)`.
     """
@@ -238,12 +249,13 @@ def activate(layout: Layout, release_id: str) -> None:
 
 def _switch_current(layout: Layout, target: str) -> None:
     name = layout.current.name
-    tmp = f".{name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    tmp = CURRENT_TMP
     try:
         fd = os.open(layout.opt, _DIR_FLAGS)
     except OSError as exc:
         raise StepFailed(_ACTIVATE_STEP, f"{layout.opt}: {exc}") from exc
     try:
+        _unlink_absent_ok(tmp, fd)
         os.symlink(target, tmp, dir_fd=fd)
         try:
             os.rename(tmp, name, src_dir_fd=fd, dst_dir_fd=fd)
@@ -256,6 +268,13 @@ def _switch_current(layout: Layout, target: str) -> None:
         raise StepFailed(_ACTIVATE_STEP, f"{layout.current}: {exc}") from exc
     finally:
         os.close(fd)
+
+
+def _unlink_absent_ok(name: str, dir_fd: int) -> None:
+    try:
+        os.unlink(name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        pass
 
 
 def _unlink_quietly(name: str, dir_fd: int) -> None:

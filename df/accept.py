@@ -71,6 +71,13 @@ class AcceptMark:
     `{repo: version}` (`dump_declared`): written by `verified`, carried
     unchanged by `admin` — a later process registers without re-running
     `verify`, and root cannot ask the release's interpreter again (§3.9).
+
+    The schema stays `df/accept/v1` (Task 9, n2): marks are run-local state
+    of one install, never shared across versions, and the strict parser
+    makes the change fail closed both ways — older code reads the new key as
+    unknown (mark invalid), this code reads an older `verified`/`admin` mark
+    without the key as invalid; an invalid mark is absent, and the release
+    is rebuilt.
     """
 
     install_digest: str
@@ -327,7 +334,9 @@ def read_facts(
 
     Admin readiness takes its expected digest and Python from one source:
     the mark for `A` (before registration), the registry entry for `intact`
-    (after it); neither the profile nor the manifest is read.
+    (after it); neither the profile nor the manifest is read. `L` is asked
+    only when `intact` holds (the table reads it only with `reg ∧ intact`,
+    m3); otherwise it is false.
     """
     entry = registry_entry(layout, release_id)
     mark = load_mark(layout, release_id, install_digest=install_digest)
@@ -358,7 +367,7 @@ def read_facts(
         P=os.path.lexists(layout.pending),
         reg=entry is not None,
         cur=_current_is(layout, release_id),
-        L=launcher_ready(),
+        L=intact and launcher_ready(),
         intact=intact,
         m=mark.stage if mark is not None else "none",
         r=r,
