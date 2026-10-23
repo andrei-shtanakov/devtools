@@ -19,13 +19,18 @@ there and `admin-python/.staging` is not, no `staging/<id>` of a registered
 release, and no tree lost from its parent and the quarantine at once --
 by the tree's identity (S1-R13-N2), not by a field. A `damaged` release
 under `pending.toml` must end in the I9 refusal (G1-G4 are on the path);
-the matrix classifies such a point as `i9`, never as a pass.
+the matrix classifies such a point as `i9`, never as a pass -- and an
+`i9` point fails the matrix on purpose: a crash must never damage a release.
 
 Each protocol call of a route is watched (`_RouteSpy`): its variant and
 parent are recorded (every variant but `NOT_MODELED` must be executed), and
 in a strict run it must return with its change durable. The cleaner's
-outcome is the environment's (S1-R12-N1): a run that reached the cleaner is
-repeated with the cleaner failing, so `cleanup_tree` goes `quarantine`.
+outcome is the environment's (S1-R12-N1): a retry whose cleaner ran on a
+`releases/` tree is repeated with the cleaner failing, so `cleanup_tree`
+goes `quarantine` (`branch_cleaners="releases"`, CI). The verify's cleaner on
+`staging/<id>/tree` runs in every pass; its quarantine outcome is the
+quarantine passes', so in CI it is not branched per retry; `"all"` branches
+every retry whose cleaner ran (slow, 9-D2 M-2).
 
 R49 budget (task-9-rulings.md):
 - depth 1: every point x {process, OS} x both starts (first install,
@@ -106,6 +111,8 @@ PROTOCOL_FRAMES: Mapping[tuple[str, str], str] = {
 }
 #: The settles (RC-C1/RC-C2): what each syncs is a twin's to drop, together.
 _CLEANUP_FRAME = frozenset({("df.platform", "_cleanup_at")})
+#: `drive`'s own settle (before every classification and after every action).
+DRIVE_SETTLE_FRAMES = frozenset({("df.accept", "settle")})
 #: `settle_on_acquire`: the entry's stdlib copy and `df.accept`'s (bootstrap).
 ACQUIRE_FRAMES = frozenset(
     {("df.accept", "settle_on_acquire"), ("df.launcher_entry", "settle_on_acquire")}
@@ -146,6 +153,11 @@ class Schedule:
     #: the kind of point `k` counts: `fault`, or `sync` (a trapped sync
     #: crashes before it takes effect; then `kind` is `os`)
     at: str = "fault"
+    #: `at="sync"` by name (M-6): the first sync of `sync_rel` after the
+    #: `anchor` fault point (op, root-relative path, occurrence); `<id>` in a
+    #: path is the start's release id. Then `k` is not used.
+    anchor: tuple[str, str, int] | None = None
+    sync_rel: str | None = None
 
 
 @dataclass(frozen=True)
@@ -183,6 +195,8 @@ class Matrix:
     quarantine: bool = False
     #: parents (`SYNC_PARENTS` names) of the trees the cleaner ran on
     cleaned: set[str] = field(default_factory=set)
+    #: which retries are repeated with the cleaner failing: "releases" | "all"
+    branch_cleaners: str = "releases"
     #: (start, protocol, variant, parent) whose return was checked durable
     checked: set[tuple[object, ...]] = field(default_factory=set)
     settled: bool = False
@@ -409,13 +423,19 @@ class Matrix:
         its crash point): the problems, or `["unreachable: …"]`."""
         m = self.w.m
         self.quarantine = s.quarantine
-        if s.k is None:
+        if s.k is None and s.anchor is None:
             return self.run_pass(s.start)[1]
         m.restore(self.origin(s.start))
         self.start, self.moved = s.start, set()
         seen = [0]
+        rel = self._rel_of(s.start)
 
         def at_k(p: Point) -> bool:
+            if s.anchor is not None:  # by name: the anchor, then the sync
+                op, path, n = s.anchor
+                if p.kind == "fault" and (p.op, rel(p.path)) == (op, path):
+                    seen[0] += 1
+                return seen[0] >= n and p.kind == "sync" and rel(p.path) == s.sync_rel
             seen[0] += p.kind == s.at
             return p.kind == s.at and seen[0] == s.k + 1
 
@@ -433,6 +453,11 @@ class Matrix:
         else:
             found = self.crash(branch, s.kind, s.sha)
         return ["unreachable: another configuration"] if found is None else found
+
+    def _rel_of(self, start: str) -> Callable[[Path], str]:
+        """Root-relative path text with the start's release id as `<id>`."""
+        root, rid = self.w.lay.root, TARGETS[start]
+        return lambda p: str(p.relative_to(root)).replace(rid, "<id>")
 
     def dies(self, run: Callable[[], int]) -> bool:
         """`run()`, killed at an armed trap (then reaped); whether it died."""
@@ -472,11 +497,17 @@ class Matrix:
         assert state is not None, "base() first"
         return state
 
+    def undrop(self) -> None:
+        """Forget every dropped sync and trap, keeping the watcher."""
+        self.w.m.disarm()
+        self.w.m.trap(self._watch)
+
     def reset(self) -> None:
         """A test's own counters and twin switches; the base stays."""
         self.w.m.disarm()
         self.w.m.trap(self._watch)
         self.strict, self.quarantine = True, False
+        self.branch_cleaners = "releases"
         self.runs = 0
         self.i9, self.problems, self.moved = [], [], set()
         self.variants, self.parents, self.sync_cases = set(), set(), set()
@@ -579,7 +610,8 @@ class Matrix:
         before = self.w.m.snapshot()
         expected = self.expected(sha)
         found = self.finish(sha, expected)
-        if found or self.quarantine or "releases" not in self.cleaned:
+        branch = self.cleaned if self.branch_cleaners == "all" else {"releases"}
+        if found or self.quarantine or not self.cleaned & branch:
             return found
         self.w.m.restore(before)
         self.quarantine = True

@@ -11,6 +11,11 @@ which stops at the first -- or, where the model of `r18-local-check` says
 the rule is not needed (the literals below, M20: copied, never imported),
 must pass the R49 scope from the first call of the changed primitive or
 guard on (`sweep`). Every test asserts its number of runs.
+
+`slow` tests are deselected by default (`pyproject.toml` addopts): run them
+with `-m slow` -- a slow test named by node id alone is deselected (exit 5).
+A pinned schedule that answers `unreachable` means the pass changed shape
+(re-pin it), not a durability defect.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ from df.paths import Layout
 from tests.df.conftest import make_fake_layout, make_fake_world
 from tests.df.crash_matrix import (
     ACQUIRE_FRAMES,
+    DRIVE_SETTLE_FRAMES,
     PHASES,
     SETTLE_FRAMES,
     SHA,
@@ -63,14 +69,37 @@ def matrix(w: World) -> Matrix:
     """The module's engine, its base passes taken once, counters reset."""
     mx = _MATRICES.get(id(w))
     if mx is None:
-        mx = _MATRICES[id(w)] = Matrix(w)
-        mx.base()
+        mx = Matrix(w)
+        mx.base()  # cached only when complete (a failed base is not reused)
+        _MATRICES[id(w)] = mx
     mx.reset()
     return mx
 
 
 #: Fault points of a clean pass per start, pinned (R49: no silent truncation).
 POINTS = {"first-install": 49, "upgrade": 26}
+FI, UP = "first-install", "upgrade"
+OTHER = OTHER_SHA
+
+
+def at(start: str, k: int | None, kind: str = "process", **kw: object) -> Schedule:
+    return Schedule(start, k, kind, **kw)  # type: ignore[arg-type]
+
+
+#: Sync schedules by name (M-6): the first sync of the quarantine (the post
+#: action settle's first) after the mark's `verified` / `admin` write.
+MARK = "var/lib/df/install/accept/<id>.toml"
+MARK_VERIFIED = ("renamed", MARK, 3)
+MARK_ADMIN = ("renamed", MARK, 4)
+QUARANTINE = "opt/df/staging/.quarantine"
+
+
+def rollback_deep(k: int, j: int, *, quarantine: bool = False) -> Schedule:
+    """Killed at `k`, a retry with the other configuration (rollback), an OS
+    crash at its fault point `j`."""
+    return Schedule(FI, k, "deep", OTHER, j, quarantine)
+
+
 #: Runs of `test_crash_matrix`: per start, every point x `CRASHES`; the first
 #: install's other configuration where `current` is absent after the crash;
 #: the quarantine passes' points x 2; the retries repeated with the cleaner
@@ -102,6 +131,9 @@ def test_crash_matrix(fake_world: World) -> None:
         mx.start = start
         p = mx.passes[start]
         assert len(p.branches) == POINTS[start], [b.point for b in p.branches]
+        chunks = [(a, b) for s_, a, b in FULL_CHUNKS if s_ == start]
+        covered = [i for a, b in chunks for i in range(a, b)]
+        assert covered == list(range(POINTS[start])), "FULL_CHUNKS (M-5)"
         found += mx.sweep(p.branches)
     quarantined = 0
     mx.quarantine = True
@@ -143,9 +175,11 @@ ACQUIRE_FORMS = ["no-op", "without-id-paths"]
 #: Twins the model expects a counterexample of, but whose search on the real
 #: code -- every fault and sync point, depth 2 with both configurations --
 #: finds none (9-D2 findings, R55: argued, not deleted):
-#: - settle without release_root: its only fact is the root's mode, and every
-#:   row with a root not at 0755 is `copied`, whose `verify` sets it again
-#:   (the mutant with `verify_chmod`'s own sync dropped too finds none);
+#: - settle without release_root: its only fact is the root's mode. Three
+#:   syncs make it durable: the settle, `verify_chmod`'s own and `register`'s
+#:   `write_atomic(releases/<id>/release.json)` (its parent sync is the
+#:   root's); only all three dropped give a counterexample
+#:   (`test_crash_matrix_release_root_masking`);
 #: - settle without admin: `install_admin`'s and `remove_own_tree`'s own
 #:   syncs cover `admin/`; dropped together with `install_admin`'s sync it is
 #:   a counterexample at once (`test_crash_matrix_settle_admin_masking`);
@@ -191,6 +225,20 @@ def apply_twin(
             )
         )
         return lambda p: match(p.path) or match(p.path.parent)
+    if family == "drive-settle":  # `drive`'s settle frame only (RC-C2)
+        mx.w.m.drop_syncs(
+            lambda p: p.kind == "sync" and innermost(DRIVE_SETTLE_FRAMES) is not None
+        )
+        return lambda p: True
+    if family == "release-json":  # register's release.json: its parent sync
+        mx.w.m.drop_syncs(
+            lambda p: (
+                p.kind == "sync"
+                and p.path.parent == lay.releases
+                and sync_case(mx, p) == ("write_atomic", None, 1)
+            )
+        )
+        return lambda p: True
     if family == "acquire":
 
         def id_path(p: Path) -> bool:
@@ -365,19 +413,85 @@ def test_crash_matrix_acquire_twin_id_paths(
 def test_crash_matrix_settle_admin_masking(
     fake_world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The REDUNDANT settle of admin/ is masked by `install_admin`'s own
-    `sync_dir(admin)` (and that sync, a passing protocol twin, by the
-    settle): without both, a counterexample; with both, none."""
+    """The REDUNDANT settle of admin/ and `install_admin`'s own
+    `sync_dir(admin)` (a passing protocol twin) mask each other: with the
+    sync dropped alone none, with both dropped a counterexample."""
     mx = matrix(fake_world)
+    masking(
+        mx,
+        monkeypatch,
+        at(FI, 13),
+        [("settle", "admin")],
+        [("protocol", ("install_admin", None, 3))],
+    )
+    assert mx.runs == ADMIN_MASKING_RUNS
+
+
+def masking(
+    mx: Matrix,
+    mp: pytest.MonkeyPatch,
+    schedule: Schedule,
+    covers: list[Twin],
+    covered: list[Twin],
+) -> list[str]:
+    """`covers` mask `covered`: none with all in place, none with only
+    `covered` dropped, a counterexample with both dropped."""
     mx.strict = False
-    schedule = at(FI, 13)
-    assert mx.pinned(schedule) == []
-    apply_twin(mx, monkeypatch, ("settle", "admin"))
-    apply_twin(mx, monkeypatch, ("protocol", ("install_admin", None, 3)))
+    assert mx.pinned(schedule) == [], "all in place"
+    with pytest.MonkeyPatch.context() as only:
+        for twin in covered:
+            apply_twin(mx, only, twin)
+        assert mx.pinned(schedule) == [], f"{covered} dropped, {covers} in place"
+        mx.undrop()  # the drops of `covered` go with the context
+    for twin in covers + covered:
+        apply_twin(mx, mp, twin)
     found = mx.pinned(schedule)
-    print(f"\nadmin masking: {mx.runs} runs, {found[:1]}")
+    print(f"\n{covers} + {covered}: {mx.runs} runs, {found[:1]}")
     assert found and not found[0].startswith("unreachable"), found
-    assert mx.runs == 4
+    return found
+
+
+DRIVE_SETTLE_PAIRS = {
+    "activate": (("protocol", ("activate", None, 1)), at(FI, 42, "os")),
+    "install_admin/3": (("protocol", ("install_admin", None, 3)), at(FI, 37)),
+    "link_command": (("protocol", ("link_command", None, 1)), at(FI, 45, "os")),
+    "accept_copy/4": (("protocol", ("accept_copy", None, 4)), at(FI, 27)),
+}
+#: Runs of each masking test: three halves of 2 runs each.
+DRIVE_SETTLE_RUNS = dict.fromkeys(DRIVE_SETTLE_PAIRS, 6)
+ADMIN_MASKING_RUNS = 6
+
+
+@pytest.mark.parametrize("pair", sorted(DRIVE_SETTLE_PAIRS))
+def test_crash_matrix_drive_settle_masking(
+    fake_world: World, pair: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RC-C2: `drive`'s own settle is masked alone (by `settle_on_acquire`)
+    and witnessed paired: it covers the C2 sync `pair` -- with only that sync
+    dropped no counterexample, with `drive`'s settle dropped too one. A
+    no-op `drive` settle turns the middle half red."""
+    mx = matrix(fake_world)
+    twin, schedule = DRIVE_SETTLE_PAIRS[pair]
+    masking(mx, monkeypatch, schedule, [("drive-settle", None)], [twin])
+    assert mx.runs == DRIVE_SETTLE_RUNS[pair]
+
+
+def test_crash_matrix_release_root_masking(
+    fake_world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M-1: the REDUNDANT settle of release_root is backed by
+    `verify_chmod`'s own sync and by register's release.json parent sync:
+    with those two dropped no counterexample, with the settle dropped too
+    one."""
+    mx = matrix(fake_world)
+    masking(
+        mx,
+        monkeypatch,
+        RELEASE_ROOT_SCHEDULE,
+        [("settle", "release_root")],
+        [("protocol", ("verify_chmod", None, 1)), ("release-json", None)],
+    )
+    assert mx.runs == RELEASE_ROOT_RUNS
 
 
 COUNTEREXAMPLE_TWINS: list[Twin] = [
@@ -432,20 +546,6 @@ def test_crash_matrix_redundant_twins(
 
 #: Pinned first-counterexample schedules (R55), found by the hunts: `k` is
 #: the pass's fault point (`at="sync"`: its sync point), `None` the pass.
-FI, UP = "first-install", "upgrade"
-OTHER = OTHER_SHA
-
-
-def at(start: str, k: int | None, kind: str = "process", **kw: object) -> Schedule:
-    return Schedule(start, k, kind, **kw)  # type: ignore[arg-type]
-
-
-def rollback_deep(k: int, j: int, *, quarantine: bool = False) -> Schedule:
-    """Killed at `k`, a retry with the other configuration (rollback), an OS
-    crash at its fault point `j`."""
-    return Schedule(FI, k, "deep", OTHER, j, quarantine)
-
-
 PINNED: dict[Twin, Schedule] = {
     ("settle", "etc_df"): at(FI, 41, "deep", j=1),
     ("settle", "opt_df"): at(FI, 42),
@@ -469,7 +569,7 @@ PINNED: dict[Twin, Schedule] = {
     ("protocol", ("remove_own_tree", None, 1, "releases")): rollback_deep(22, 2),
     ("protocol", ("remove_own_tree", None, 1, "admin")): rollback_deep(37, 4),
     ("protocol", ("remove_own_tree", None, 1, "admin_python")): at(
-        FI, 238, "os", at="sync"
+        FI, None, "os", at="sync", anchor=MARK_ADMIN, sync_rel=QUARANTINE
     ),
     ("protocol", ("cleanup_tree", "tree", 2, "releases")): rollback_deep(23, 2),
     ("protocol", ("cleanup_tree", "quarantine", 2, "releases")): rollback_deep(
@@ -484,13 +584,16 @@ PINNED: dict[Twin, Schedule] = {
     ("protocol", ("accept_copy", None, 3)): at(FI, 27),
     ("protocol", ("install_admin", None, 2)): at(FI, 37),
     ("protocol", ("remove_empty_dir", None, 1, "staging")): at(
-        FI, 205, "os", at="sync"
+        FI, None, "os", at="sync", anchor=MARK_VERIFIED, sync_rel=QUARANTINE
     ),
     ("protocol", ("install_admin_python", None, 1)): at(FI, 34),
     ("absent", "cleanup_build_home"): at(FI, None),
 }
 #: Runs of each pinned twin: both halves (each half = the pass up to `k`
 #: plus the crash's retries; `deep`: plus its recorded retry).
+#: Process crash at the first point, the retry, the OS crash after its commit.
+RELEASE_ROOT_SCHEDULE = at(FI, 0)
+RELEASE_ROOT_RUNS = 6
 REDUNDANT_RUNS: dict[tuple[Twin, str], int] = {
     (("settle", "release_root"), "sync"): 740,
     (("settle", "release_root"), "deep"): 1706,
@@ -597,7 +700,7 @@ HUNT_RUNS: dict[Twin, int] = {
 
 
 #: The full enumeration in chunks of the passes' fault points (< 600 s each).
-FULL_CHUNKS = [(FI, 0, 17), (FI, 17, 34), (FI, 34, 49), (UP, 0, 26)]
+FULL_CHUNKS = [(FI, 0, 17), (FI, 17, 34), (FI, 34, POINTS[FI]), (UP, 0, POINTS[UP])]
 FULL_RUNS: dict[tuple[str, int, int], int] = {
     ("first-install", 0, 17): 699,
     ("first-install", 17, 34): 416,
@@ -643,3 +746,44 @@ def test_crash_matrix_sync_points(fake_world: World, start: str) -> None:
     print(f"\nsync points {start}: {mx.runs} runs")
     assert found == [], "\n".join(found[:20])
     assert mx.runs == SYNC_RUNS[start]
+
+
+QUARANTINE_BRANCH_RUNS = {FI: 685, UP: 203}
+ALL_CLEANERS_RUNS = {FI: 413, UP: 114}
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("start", STARTS)
+def test_crash_matrix_quarantine_branches(fake_world: World, start: str) -> None:
+    """M-3: the quarantine passes' points from the first move into the
+    quarantine on, with what CI gives only the plain passes: R49, the other
+    configuration (first install), depth 2 with both configurations."""
+    mx = matrix(fake_world)
+    mx.quarantine = True
+    mx.start = start
+    found: list[str] = []
+    for branch in mx.quarantined(start):
+        found += mx.crash(branch, "r49") or []
+        if start == FI:
+            for kind in ("process", "os"):
+                found += mx.crash(branch, kind, OTHER) or []
+        found += mx.deep(branch, stop=False)
+        found += mx.deep(branch, sha=OTHER, stop=False)
+    print(f"\nquarantine branches {start}: {mx.runs} runs")
+    assert found == [], "\n".join(found[:20])
+    assert mx.runs == QUARANTINE_BRANCH_RUNS[start]
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("start", STARTS)
+def test_crash_matrix_all_cleaners(fake_world: World, start: str) -> None:
+    """M-2: depth 1 and R49 with every retry whose cleaner ran repeated with
+    the cleaner failing (CI repeats only those that cleaned a releases/
+    tree; the staging one's quarantine is the quarantine passes')."""
+    mx = matrix(fake_world)
+    mx.branch_cleaners = "all"
+    mx.start = start
+    found = mx.sweep(mx.passes[start].branches)
+    print(f"\nall cleaners {start}: {mx.runs} runs")
+    assert found == [], "\n".join(found[:20])
+    assert mx.runs == ALL_CLEANERS_RUNS[start]
