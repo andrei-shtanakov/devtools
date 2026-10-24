@@ -211,7 +211,10 @@ ACTIONS: tuple[str, ...] = tuple(
 def read_for(run: InstallRun) -> Callable[[], Facts]:
     """The facts of the run's release for `drive` (R33.F5): `read_facts`
     under the run's install digest, with `admin.admin_ready` and `L` =
-    `command_ready` of the release."""
+    `admin.launcher_ready` for the entry's admin Python. `read_facts` asks
+    `L` only when `intact` holds, so `L` does not re-derive it (PR #628:
+    no third tree digest or admin walk per read); `command_ready` stays the
+    standalone `L` for callers without `intact`."""
     layout, rid = run.layout, run.release_id
 
     def read() -> Facts:
@@ -220,11 +223,19 @@ def read_for(run: InstallRun) -> Callable[[], Facts]:
             rid,
             install_digest=run.install_digest,
             build_uid=run.build_uid,
-            launcher_ready=lambda: command_ready(layout, rid),
+            launcher_ready=lambda: _launcher_of(layout, rid),
             admin_ready=admin.admin_ready,
         )
 
     return read
+
+
+def _launcher_of(layout: Layout, release_id: str) -> bool:
+    """`L` given `intact`: the command is what the entry's admin code makes."""
+    entry = accept.registry_entry(layout, release_id)
+    return entry is not None and admin.launcher_ready(
+        layout, release_id, python=entry.admin_python
+    )
 
 
 def command_ready(layout: Layout, release_id: str) -> bool:

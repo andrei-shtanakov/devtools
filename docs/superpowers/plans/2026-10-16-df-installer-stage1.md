@@ -2814,8 +2814,10 @@ I10, M1–M14, M16–M20, N1–N4 приняты как обязательные
     Имена действий и функций сверяет тест: ключи `install_actions` = множество `Row.action`
     без `""` и `"stop"` (`ACTIONS`). Чтение автомата — `read_for(run) -> Callable[[],
     Facts]`: `read_facts` с `df.admin.admin_ready` (Task 8a) и `L`, привязку сверяет тест
-    (R33.F5, I3): `launcher_ready=lambda: command_ready(layout, id)`, а `L` спрашивается
-    только при `intact` (m3). `command_ready(layout, release_id) -> bool` (=
+    (R33.F5, I3): `L` спрашивается только при `intact` (m3), поэтому `read_for` не
+    выводит `intact` заново — `launcher_ready` = `admin.launcher_ready(layout, id,
+    python=<запись>.admin_python)` по записи реестра (ревью PR #628: без третьего дайджеста
+    дерева и обхода admin-Python на каждое чтение). `command_ready(layout, release_id) -> bool` (=
     `command_ready_of(layout, id, registry_entry(...))`): нет записи реестра или не
     `intact` (`accept.entry_intact`) → `False`, иначе `admin.launcher_ready(layout, id,
     python=<запись>.admin_python)` — до регистрации ничего не читается из непроверенного

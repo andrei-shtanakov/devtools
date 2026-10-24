@@ -16,6 +16,7 @@ import json
 import os
 import shutil
 import textwrap
+import types
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
@@ -533,6 +534,33 @@ def test_clean_pass_routes_match_table_with_real_calls(fl: FakeLayout) -> None:
         assert got == expected, name
 
 
+def test_committed_read_digests_the_tree_once_per_fact(fl: FakeLayout) -> None:
+    """PR #628 review: `L` does not re-derive `intact`. A committed read
+    digests the release tree twice (`intact`, `full`) and asks `admin_ready`
+    twice (`intact`, `A`), not a third time through `command_ready`."""
+    run = install_run(fl)
+    drive_run(run)
+    trees: list[str] = []
+    admins: list[str] = []
+    real_digest, real_admin = accept.release_digest, admin.admin_ready
+
+    def digest_spy(path: Path) -> str:
+        trees.append(str(path))
+        return real_digest(path)
+
+    def admin_spy(*a: object, **kw: object) -> bool:
+        admins.append("A")
+        return real_admin(*a, **kw)  # type: ignore[arg-type]
+
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(accept, "release_digest", digest_spy)
+        m.setattr(admin, "admin_ready", admin_spy)
+        facts = read_for(run)()
+    assert classify(facts) == "committed" and facts.L
+    assert trees == [str(fl.layout.release_dir(ID))] * 2
+    assert len(admins) == 2
+
+
 def test_install_digest_is_one_value(fl: FakeLayout) -> None:
     """Task 7 final M1, M8: the digest `read_for` reads the marks under is
     `config_digest(cfg)`, the one `acceptance_calls` writes them under, and
@@ -575,7 +603,8 @@ def test_read_facts_binds_admin_predicates(
     monkeypatch: pytest.MonkeyPatch, fl: FakeLayout
 ) -> None:
     """R33.F5, I3: `read_for` reads the facts with `df.admin.admin_ready` and
-    `L` = `command_ready(layout, id)` of the run's release and `build_uid`."""
+    the run's release and `build_uid`; `L` = `admin.launcher_ready` for the
+    registry entry's admin Python (asked only under `intact`, PR #628)."""
     run = install_run(fl)
     got: dict[str, object] = {}
 
@@ -592,13 +621,21 @@ def test_read_facts_binds_admin_predicates(
         ID,
         BUILD_UID,
     )
-    asked: list[tuple[object, str]] = []
-    monkeypatch.setattr(
-        install, "command_ready", lambda lay, rid: asked.append((lay, rid)) or True
-    )
     launcher = got["launcher_ready"]
-    assert callable(launcher) and launcher() is True
-    assert asked == [(fl.layout, ID)]
+    assert callable(launcher) and launcher() is False  # no registry entry
+    asked: list[tuple[object, str, object]] = []
+    monkeypatch.setattr(
+        accept,
+        "registry_entry",
+        lambda lay, rid: types.SimpleNamespace(admin_python="py-key"),
+    )
+    monkeypatch.setattr(
+        admin,
+        "launcher_ready",
+        lambda lay, rid, *, python: asked.append((lay, rid, python)) or True,
+    )
+    assert launcher() is True
+    assert asked == [(fl.layout, ID, "py-key")]
 
 
 def test_command_ready_reads_nothing_before_registration(
