@@ -53,11 +53,18 @@ COMMON = "общий"
 _SCHEMA = KNOWN_SCHEMAS["models.toml"]
 _PRODUCT_ID = re.compile(r"[1-9][0-9]*", re.ASCII)
 _CHOICE_KEYS = frozenset({"harness", "model", "effort", "params"})
+_WORD = "must be a non-empty string of printable non-whitespace characters"
 
 
 @dataclass(frozen=True)
 class ModelChoice:
-    """One role's harness, model, effort and significant parameters."""
+    """One role's harness, model, effort and significant parameters.
+
+    Immutable: `params` is kept as a read-only copy, and the instance hashes
+    by its sorted items. Model, effort and parameter keys and values are
+    printable without whitespace (`_WORD`), so a row of `models list` stays
+    one row.
+    """
 
     harness: str
     model: str
@@ -66,17 +73,23 @@ class ModelChoice:
 
     def __post_init__(self) -> None:
         _need(self.harness in HARNESSES, "harness", f"unknown {self.harness!r}")
-        _need(_text(self.model), "model", "must be a non-empty string")
+        _need(_word(self.model), "model", _WORD)
         if self.effort is not None:
-            _need(_text(self.effort), "effort", "must be a non-empty string")
+            _need(_word(self.effort), "effort", _WORD)
         supported = SUPPORTED_PARAMS[self.harness]
         for key, value in self.params.items():
+            _need(_word(key), f"params.{key!r}", _WORD)
+            _need(_word(value), f"params.{key}", _WORD)
             _need(
                 key in supported,
                 f"params.{key}",
                 f"the {self.harness} adapter cannot pass it",
             )
-            _need(isinstance(value, str), f"params.{key}", "must be a string")
+        object.__setattr__(self, "params", MappingProxyType(dict(self.params)))
+
+    def __hash__(self) -> int:
+        params = tuple(sorted(self.params.items()))
+        return hash((self.harness, self.model, self.effort, params))
 
 
 @dataclass(frozen=True)
@@ -233,8 +246,13 @@ def _only(
         raise ConfigError(f"{where}: unknown key {key!r}")
 
 
-def _text(value: object) -> bool:
-    return isinstance(value, str) and bool(value)
+def _word(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and value.isprintable()
+        and bool(value)
+        and not any(ch.isspace() for ch in value)
+    )
 
 
 def _need(ok: bool, key: str, what: str) -> None:

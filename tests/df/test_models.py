@@ -5,9 +5,12 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import select
+import signal
 import sys
 import time
-from collections.abc import Iterator
+import traceback
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -206,12 +209,63 @@ def test_config_hash_is_canonical() -> None:
     assert config_hash(a) != config_hash(ModelChoice("codex", "m", "high", {}))
 
 
-def test_env_does_not_override(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_model_choice_is_immutable_and_hashable() -> None:
+    """m5: `params` is a read-only copy; equal choices hash equally."""
+    source = {}
+    choice = ModelChoice("claude", "m", None, source)
+    source["k"] = "v"
+    assert dict(choice.params) == {}
+    with pytest.raises(TypeError):
+        choice.params["k"] = "v"  # type: ignore[index]
+    assert hash(choice) == hash(ModelChoice("claude", "m", None, {}))
+    assert {choice, ModelChoice("claude", "m", None, {})} == {choice}
+
+
+@pytest.mark.parametrize(
+    "model,effort",
+    [("a b", None), ("a\nb", None), ("a\tb", None), ("m", "lo w"), ("m", "\x1b")],
+)
+def test_model_and_effort_are_single_words(
+    w: World, capsys: pytest.CaptureFixture[str], model: str, effort: str | None
+) -> None:
+    """m6: a model or effort with whitespace or a control character would
+    break the rows of `models list`: refused in the value, the parser and
+    `models set`."""
+    with pytest.raises(ConfigError, match="printable"):
+        ModelChoice("claude", model, effort, {})
+    line = f"effort = {json.dumps(effort)}\n" if effort is not None else ""
+    text = SCHEMA + (
+        f'[roles.author]\nharness = "claude"\nmodel = {json.dumps(model)}\n{line}'
+    )
+    with pytest.raises(ConfigError, match="printable"):
+        parse_models(text)
+    extra = [] if effort is None else ["--effort", effort]
+    argv = ["models", "set", "author", "--harness", "claude", "--model", model]
+    assert w.writer([*argv, *extra]) == 2
+    assert "printable" in capsys.readouterr().err
+    assert not models_path(w).exists()
+
+
+@pytest.mark.parametrize("params", [{"a b": "v"}, {"k": "a b"}, {"k": ""}])
+def test_param_keys_and_values_are_single_words(params: dict[str, str]) -> None:
+    with pytest.raises(ConfigError, match="printable"):
+        ModelChoice("codex", "m", None, params)
+
+
+def test_env_does_not_override(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_layout: FakeLayout,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Neither `resolve` nor `models list` takes the model from the env."""
     monkeypatch.setenv("DF_MODEL_AUTHOR", "x")
     monkeypatch.setenv("ANTHROPIC_MODEL", "y")
     assert resolve(parse_models(P.read_text()), "author", None)[0].model == (
         "claude-opus-5-5"
     )
+    data = list_json(fake_layout.layout, capsys, P.read_bytes())
+    assert data[1]["role"] == "author"
+    assert data[1]["model"] == "claude-opus-5-5"
 
 
 # ---------- models set ----------
@@ -272,9 +326,12 @@ def test_set_refuses_bad_values(
 
 
 def test_set_refuses_unknown_role(w: World, capsys: pytest.CaptureFixture[str]) -> None:
-    assert w.writer(["models", "set", "nobody", "--harness", "claude", "--model", "m"])
+    gen = journal.read_generation(w.lay)
+    argv = ["models", "set", "nobody", "--harness", "claude", "--model", "m"]
+    assert w.writer(argv) == 2
     assert "nobody" in capsys.readouterr().err
     assert not models_path(w).exists()
+    assert journal.read_generation(w.lay) == gen
 
 
 def test_set_keeps_an_invalid_file(
@@ -314,52 +371,102 @@ def test_set_closes_an_odd_generation(w: World) -> None:
 
 
 def test_concurrent_sets_of_two_roles_both_persist(w: World) -> None:
-    """R61: two processes; A holds the lock while B loses it (exit 2 /
-    `StepFailed("lock")`) and retries; both roles persist."""
+    """R61: two processes; A holds the lock while B loses it (the real
+    LOCK_NB loser, `StepFailed("lock")`) and retries; both roles persist.
+    Every child ends in `os._exit`, and on any failure the parent kills and
+    reaps them, so neither a hang nor a second pytest session is possible."""
     path = models_path(w)
     in_a_read, in_a_write = os.pipe()
     go_read, go_write = os.pipe()
     lost = w.lay.root / "lost"
+    children: list[int] = []
+    parent_fds = {in_a_read, in_a_write, go_read, go_write}
 
-    def run(argv: list[str], hold: bool) -> None:
-        if hold:
-            real = fsutil.write_atomic
+    def close(fd: int) -> None:
+        os.close(fd)
+        parent_fds.discard(fd)
 
-            def slow(target: Path, text: str, mode: int = 0o644) -> None:
-                os.write(in_a_write, b"in")
-                os.read(go_read, 2)  # parent: B has lost once
-                real(target, text, mode)
+    def set_holding(argv: list[str]) -> int:
+        os.close(in_a_read)
+        os.close(go_write)
+        real = fsutil.write_atomic
 
-            fsutil.write_atomic = slow  # the child's own copy of the module
-        for _ in range(500):
+        def slow(target: Path, text: str, mode: int = 0o644) -> None:
+            os.write(in_a_write, b"in")
+            os.read(go_read, 2)  # the parent: B has lost once (or EOF)
+            real(target, text, mode)
+
+        fsutil.write_atomic = slow  # the child's own copy of the module
+        return w.writer(argv)
+
+    def set_retrying(argv: list[str]) -> int:
+        for fd in sorted(parent_fds):  # the ends the parent still has
+            os.close(fd)
+        deadline = time.monotonic() + CHILD_SECONDS
+        while time.monotonic() < deadline:
             try:
-                os._exit(w.writer(argv))
+                return w.writer(argv)
             except StepFailed as exc:
                 if exc.step != "lock":
-                    os._exit(9)
+                    return 9
                 lost.touch()
                 time.sleep(0.01)
-        os._exit(8)
+        return 8
 
-    a = os.fork()
-    if a == 0:
-        run(SET_AUTHOR, hold=True)
-    assert os.read(in_a_read, 2) == b"in"
-    b = os.fork()
-    if b == 0:
-        run(SET_JUDGE, hold=False)
-    for _ in range(1000):
-        if lost.exists():
-            break
-        time.sleep(0.01)
-    assert lost.exists(), "B never contended for the lock"
-    os.write(go_write, b"go")
-    assert os.waitpid(a, 0)[1] == 0
-    assert os.waitpid(b, 0)[1] == 0
-    for fd in (in_a_read, in_a_write, go_read, go_write):
-        os.close(fd)
+    try:
+        children.append(fork_child(lambda: set_holding(SET_AUTHOR)))
+        close(in_a_write)
+        close(go_read)
+        ready, _, _ = select.select([in_a_read], [], [], CHILD_SECONDS)
+        assert ready and os.read(in_a_read, 2) == b"in", "A never took the lock"
+        children.append(fork_child(lambda: set_retrying(SET_JUDGE)))
+        deadline = time.monotonic() + CHILD_SECONDS
+        while not lost.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert lost.exists(), "B never contended for the lock"
+        os.write(go_write, b"go")
+        assert [reap(pid) for pid in children] == [0, 0]
+        children.clear()
+    finally:
+        for pid in children:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(pid, 0)
+        for fd in sorted(parent_fds):  # EOF for a child still reading
+            close(fd)
     assert set(load_models(path).default) == {"author", "judge"}
     assert journal.read_generation(w.lay) % 2 == 0
+
+
+#: The bound of every wait of the concurrency test, in seconds.
+CHILD_SECONDS = 60
+
+
+def fork_child(body: Callable[[], int]) -> int:
+    """Fork; the child runs `body` and always leaves by `os._exit` (its
+    code, or 70 after printing an unexpected exception)."""
+    pid = os.fork()
+    if pid:
+        return pid
+    code = 70
+    try:
+        code = body()
+    except BaseException:  # noqa: BLE001 - the child reports, never returns
+        traceback.print_exc()
+    finally:
+        os._exit(code)
+
+
+def reap(pid: int) -> int:
+    """The child's exit code, waiting at most `CHILD_SECONDS`."""
+    deadline = time.monotonic() + CHILD_SECONDS
+    while time.monotonic() < deadline:
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done:
+            return os.waitstatus_to_exitcode(status)
+        time.sleep(0.01)
+    raise AssertionError(f"child {pid} did not finish")
 
 
 def test_set_requires_root(w: World, capsys: pytest.CaptureFixture[str]) -> None:
