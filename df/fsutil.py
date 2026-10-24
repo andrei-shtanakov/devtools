@@ -10,6 +10,7 @@ import enum
 import errno
 import fcntl
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -25,6 +26,8 @@ _SYSCTL = "/usr/sbin/sysctl"
 _SAFE_ENV = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
 _BOOT_ID_LINUX = Path("/proc/sys/kernel/random/boot_id")
 _DIR_NOFOLLOW = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+#: The temp name of `write_atomic`: `.<name>.<pid>.<uuid4 hex>.tmp`.
+WRITE_TEMP = re.compile(r"\.(?P<name>.+)\.[0-9]+\.[0-9a-f]{32}\.tmp", re.ASCII)
 # Devices (`st_dev`) where a directory refused F_FULLFSYNC in this process. Every
 # caller of `sync_dir` drops its `SyncNote`; the note is collected here instead and
 # the acceptance driver journals it for the evidence (decision (a), 2026-10-21).
@@ -100,8 +103,11 @@ def write_atomic(path: Path, text: str, mode: int = 0o644) -> None:
     """Atomically replace `path` with `text`, durably.
 
     Temp file in the same directory (O_EXCL) -> sync_file -> rename ->
-    fault_point("renamed") -> sync_dir(parent).
+    fault_point("renamed") -> sync_dir(parent). A crash before the rename
+    leaves the temp (`WRITE_TEMP`); `doctor` reports one in `/etc/df`.
     """
+    # TODO: writers should sweep leftover `WRITE_TEMP` files of their own
+    # targets under the writer lock; until then removal is manual (doctor).
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     _write_tmp(tmp, text, mode)
     try:

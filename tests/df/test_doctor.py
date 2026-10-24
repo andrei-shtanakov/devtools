@@ -21,8 +21,21 @@ from pathlib import Path
 import pytest
 
 import df
-from df import acl, admin, cli, digest, doctor, fsutil, journal, probe, state
+from df import (
+    acl,
+    admin,
+    boundary,
+    cli,
+    digest,
+    doctor,
+    fsutil,
+    journal,
+    launcher_entry,
+    probe,
+    state,
+)
 from df import build as build_mod
+from df.config import ConfigError
 from df.doctor import (
     Check,
     doctor_main,
@@ -39,6 +52,7 @@ from tests.df.install_world import (
     OTHER_SHA,
     World,
     installed,
+    interrupt,
     make_world,
 )
 from tests.df.route_world import BOOT
@@ -720,19 +734,46 @@ def test_doctor_exit_codes(
     assert first.startswith("уровень 1: не достигнут — release.digest: нарушено")
 
 
-def test_doctor_allowed_with_pending(fake_installed: World) -> None:
-    assert "doctor" in cli.PENDING_ALLOWED
-    assert not hasattr(cli, "LATER")
+def test_doctor_allowed_with_pending(
+    fake_installed: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M1/M7: an interrupted install leaves `pending.toml` at an even
+    generation; the entry's reader read (`take_snapshot`, `typed_read`) is
+    then `Transitional` (launcher_entry.py, `take_snapshot`), so `doctor`
+    runs and shows the transitional state — a Stable read with `pending.toml`
+    cannot reach it."""
+    w = fake_installed
+    interrupt(w, w.writer, ["install"], "activate")
+    assert journal.read_generation(w.lay) % 2 == 1
+    journal.generation_end(w.lay)  # even: only `pending.toml` marks it
+    assert os.path.lexists(w.lay.pending)
+    paths = launcher_entry.EntryPaths(str(w.lay.root))
+    read = launcher_entry.typed_read(
+        state, launcher_entry.take_snapshot(paths, "reader")
+    )
+    assert isinstance(read, Transitional) and read.generation % 2 == 0
+    capsys.readouterr()
+    assert run_doctor(w, ["--json"], read) == 2
+    assert json.loads(capsys.readouterr().out) == {
+        "level1": "not reached",
+        "state": "transitional",
+        "generation": read.generation,
+    }
 
 
 # ---------- the public entry ----------
 
 
-def test_doctor_transitional_via_public_entry(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "generation,pending", [(5, False), (2, True)], ids=["odd", "even-pending"]
+)
+def test_doctor_transitional_via_public_entry(
+    tmp_path: Path, generation: int, pending: bool
+) -> None:
     """F4 (Task 8a): the real `darkfactory-entry.py` (`-I -B -S`) at an odd
-    generation runs the real `df` as admin code: exit 2 (level 1 not
-    reached) and the transitional JSON."""
-    lay = world(tmp_path, generation=b"5\n")
+    generation, or an even one with `pending.toml` (M1), runs the real `df`
+    as admin code: exit 2 (level 1 not reached) and the transitional JSON."""
+    lay = world(tmp_path, generation=f"{generation}\n".encode(), pending=pending)
     package = lay.admin_dir(ID) / "df"
     shutil.rmtree(package)
     shutil.copytree(
@@ -744,7 +785,7 @@ def test_doctor_transitional_via_public_entry(tmp_path: Path) -> None:
     assert json.loads(done.stdout) == {
         "level1": "not reached",
         "state": "transitional",
-        "generation": 5,
+        "generation": generation,
     }
 
 
@@ -754,3 +795,134 @@ def test_journal_untouched_by_doctor(fake_installed: World) -> None:
     assert run_doctor(fake_installed, []) == 0
     assert fake_installed.lay.journal.read_bytes() == before
     assert journal.read_generation(fake_installed.lay) == gen
+
+
+# ---------- fix round 1 ----------
+
+
+def test_leftover_write_temp_named(
+    fake_installed: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M2: the temp a crash leaves before `write_atomic`'s rename is named
+    with what to do; it still blocks (it may hold a partial configuration)."""
+    names: list[str] = []
+
+    def crash(tmp: Path, _text: str, _mode: int) -> None:
+        names.append(tmp.name)
+        tmp.write_text("partial")
+        raise KeyboardInterrupt("crash before rename")
+
+    etc = fake_installed.lay.etc
+    with monkeypatch.context() as m:
+        m.setattr(fsutil, "_write_tmp", crash)
+        with pytest.raises(KeyboardInterrupt):
+            fsutil.write_atomic(etc / "install.toml", "x")
+    assert fsutil.WRITE_TEMP.fullmatch(names[0])
+    checks = level1_checks(snap(fake_installed), fake_installed.lay, euid=os.geteuid())
+    c = by_id(checks)["etc.schemas"]
+    assert c.status == "нарушено"
+    assert c.reason == (
+        f"осталась временная запись после сбоя: {names[0]}; удалите вручную (sudo rm)"
+    )
+    assert not level1_reached(checks)
+    (etc / ".other.toml.1.tmp").write_text("")
+    reason = checks_of(fake_installed)["etc.schemas"].reason
+    assert "неизвестные файлы /etc/df: .other.toml.1.tmp" in reason
+
+
+def with_src(w: World, src: list[str], listed: list[str]) -> state.Snapshot:
+    """The release with `src/<r>` for `src` and `release.json` naming
+    `listed`; the digest, `release.json` and the entry agree again."""
+    rel = release(w)
+    for repo in src:
+        (rel / "src" / repo).mkdir(parents=True)
+        (rel / "src" / repo / "pyproject.toml").write_text('[project]\nname = "x"\n')
+    new = digest.release_digest(rel)
+    path = rel / "release.json"
+    data = json.loads(path.read_text())
+    data["digest"] = new
+    data["repos"] = [{"name": r} for r in listed]
+    path.write_text(json.dumps(data))
+    s = snap(w)
+    assert s.entry is not None
+    return dataclasses.replace(s, entry=dataclasses.replace(s.entry, digest=new))
+
+
+@pytest.fixture()
+def static_calls(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    calls: list[object] = []
+
+    def static(_tree: Path, _platform: str, expected: object) -> list[str]:
+        calls.append(expected)
+        return []
+
+    monkeypatch.setattr(boundary, "static_problems", static)
+    return calls
+
+
+def test_boundary_repos_from_src(
+    fake_installed: World, static_calls: list[object]
+) -> None:
+    s = with_src(fake_installed, ["devtools"], ["devtools"])
+    c = by_id(level1_checks(s, fake_installed.lay, euid=os.geteuid()))
+    assert c["release.digest"].status == "ok"
+    assert c["release.boundary"].status == "ok"
+    assert static_calls == [{"devtools": frozenset()}]
+
+
+@pytest.mark.parametrize(
+    "src,listed",
+    [(["devtools"], []), (["devtools", "extra"], ["devtools"])],
+    ids=["dropped-from-release-json", "extra-dir-in-src"],
+)
+def test_boundary_src_disagrees_with_release_json(
+    fake_installed: World,
+    static_calls: list[object],
+    src: list[str],
+    listed: list[str],
+) -> None:
+    """M5: `release.json` is outside the digest; the repos come from `src/`."""
+    s = with_src(fake_installed, src, listed)
+    c = by_id(level1_checks(s, fake_installed.lay, euid=os.geteuid()))
+    assert c["release.digest"].status == "ok"
+    assert (c["release.boundary"].status, c["release.boundary"].reason) == (
+        "нарушено",
+        "состав src/ не совпадает с release.json",
+    )
+    assert static_calls == []
+
+
+def test_config_error_of_one_check_is_its_verdict(
+    fake_installed: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M6: a `ConfigError`/`ValueError` of one helper is that check's
+    «нарушено»; the rest of the report goes on."""
+
+    def bad(*_a: object) -> Path:
+        raise ConfigError("invalid python")
+
+    monkeypatch.setattr(admin, "admin_python_path", bad)
+    checks = level1_checks(snap(fake_installed), fake_installed.lay, euid=os.geteuid())
+    c = by_id(checks)
+    assert c["trusted.paths"].status == "нарушено"
+    assert "invalid python" in c["trusted.paths"].reason
+    assert [x.id for x in checks] == LEVEL1_IDS
+    assert c["cli.approved"].status == "ok"
+    monkeypatch.setattr(
+        build_mod,
+        "verify_build_user",
+        lambda _l: (_ for _ in ()).throw(ValueError("v")),
+    )
+    assert checks_of(fake_installed)["build.user"].status == "нарушено"
+
+
+def test_program_error_propagates(
+    fake_installed: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def bug(*_a: object) -> list[str]:
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(build_mod, "verify_build_user", bug)
+    with pytest.raises(RuntimeError):
+        level1_checks(snap(fake_installed), fake_installed.lay, euid=os.geteuid())
+    assert run_doctor(fake_installed, []) == cli.EXIT_BUG

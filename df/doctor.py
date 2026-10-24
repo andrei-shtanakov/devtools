@@ -206,6 +206,8 @@ def _run(check_id: str, check: Callable[[_Context], str], ctx: _Context) -> Chec
     except (OSError, StepFailed) as exc:
         status = UNAVAILABLE
         reason = str(exc) if ctx.root else NEED_SUDO
+    except (ConfigError, TreeError, ValueError) as exc:  # this check only (M6)
+        status, reason = BROKEN, f"{type(exc).__name__}: {exc}"
     return Check(check_id, status, reason, _now())
 
 
@@ -215,6 +217,9 @@ def _need_root(ctx: _Context) -> None:
 
 
 def _pending(ctx: _Context) -> str:
+    """Defence in depth: the entry hands a reader `Transitional` whenever
+    `pending.toml` exists (`launcher_entry.take_snapshot`), so through the
+    command this shows as `install.transitional`."""
     if ctx.snap.pending_present:
         raise _Outcome(BROKEN, _PENDING)
     return ""
@@ -229,12 +234,26 @@ def _schemas(ctx: _Context) -> str:
             models.parse_models(ctx.snap.models_text)
         except ConfigError as exc:
             raise _Outcome(BROKEN, f"models.toml: {exc}") from exc
-    unknown = sorted(
-        n for n in _etc_names(ctx.layout) if n not in _STAGE1_FILES | STAGE_OF.keys()
-    )
-    if unknown:
-        raise _Outcome(BROKEN, f"неизвестные файлы /etc/df: {', '.join(unknown)}")
+    known = _STAGE1_FILES | STAGE_OF.keys()
+    unknown = sorted(n for n in _etc_names(ctx.layout) if n not in known)
+    temps = [n for n in unknown if _write_temp_of(n) in known]
+    others = [n for n in unknown if n not in temps]
+    reasons = [
+        f"осталась временная запись после сбоя: {n}; удалите вручную (sudo rm)"
+        for n in temps
+    ]
+    if others:
+        reasons.append(f"неизвестные файлы /etc/df: {', '.join(others)}")
+    if reasons:
+        raise _Outcome(BROKEN, "; ".join(reasons))
     return ""
+
+
+def _write_temp_of(name: str) -> str | None:
+    """The target of a leftover `write_atomic` temp (a crash before its
+    rename; still blocking: it may hold a partial configuration)."""
+    found = fsutil.WRITE_TEMP.fullmatch(name)
+    return None if found is None else found["name"]
 
 
 def _etc_names(layout: Layout) -> list[str]:
@@ -359,10 +378,12 @@ def _boundary_of(digest_check: Check) -> Callable[[_Context], str]:
             raise _Outcome(NOT_CHECKED, f"release.digest: {digest_check.status}")
         _need_root(ctx)  # `static_problems` turns a refused read into a line
         tree = ctx.release_dir()
+        repos = _src_repos(tree)
+        if repos != sorted(_repos(ctx.release_record())):
+            raise _Outcome(BROKEN, "состав src/ не совпадает с release.json")
         try:
             expected = {
-                r: boundary.expected_entrypoints(tree / "src" / r)
-                for r in _repos(ctx.release_record())
+                r: boundary.expected_entrypoints(tree / "src" / r) for r in repos
             }
         except (TreeError, ValueError) as exc:
             raise _Outcome(BROKEN, str(exc)) from exc
@@ -372,6 +393,15 @@ def _boundary_of(digest_check: Check) -> Callable[[_Context], str]:
         return ""
 
     return check
+
+
+def _src_repos(tree: Path) -> list[str]:
+    """The repos of the release by its `src/` listing: covered by the digest,
+    unlike `release.json` (M5)."""
+    try:
+        return sorted(os.listdir(tree / "src"))
+    except FileNotFoundError:
+        return []
 
 
 def _repos(record: dict[str, object]) -> list[str]:
