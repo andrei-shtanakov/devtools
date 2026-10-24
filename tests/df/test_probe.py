@@ -12,6 +12,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -1281,16 +1282,45 @@ def test_acl_probe_error_unreadable(
     assert obs == UNREADABLE_OBS
 
 
-@pytest.mark.parametrize("which", ["file", "dir"])
-def test_owner_mode_bits_required(tmp_path: Path, which: str) -> None:
-    """N2: a file without u+r, a directory without u+x: unreadable."""
+class _ModeView:
+    """An `os.stat_result` whose `st_mode` is replaced, the rest real."""
+
+    def __init__(self, real: os.stat_result, mode: int) -> None:
+        self._real, self.st_mode = real, mode
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._real, name)
+
+
+@pytest.mark.parametrize(
+    "which, change",
+    [
+        ("file", lambda m: m & ~stat.S_IRUSR),
+        ("dir", lambda m: m & ~stat.S_IXUSR),
+        ("file", lambda m: (m & ~stat.S_IFMT(m)) | stat.S_IFIFO),
+    ],
+    ids=["file-no-u+r", "dir-no-u+x", "file-not-regular"],
+)
+def test_owner_mode_bits_required(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    which: str,
+    change: Callable[[int], int],
+) -> None:
+    """N2: a file without u+r, a directory without u+x, a leaf that is not
+    a regular file: unreadable. Root would open each of them, so the mode is
+    changed only in what `fstat` reports for the target inode — a normal
+    user's open would otherwise fail first and hide the check."""
     cred = make_cred(tmp_path)
-    path, mode = (cred, 0o200) if which == "file" else (cred.parent, 0o600)
-    path.chmod(mode)
-    try:
-        obs = probe.observe_auth(make_profile(), tmp_path, role_uid=UID)
-    finally:
-        path.chmod(0o700)
+    target = os.stat(cred if which == "file" else cred.parent).st_ino
+    real = os.fstat
+
+    def fake(fd: int) -> object:
+        st = real(fd)
+        return _ModeView(st, change(st.st_mode)) if st.st_ino == target else st
+
+    monkeypatch.setattr(probe.os, "fstat", fake)
+    obs = probe.observe_auth(make_profile(), tmp_path, role_uid=UID)
     assert obs == UNREADABLE_OBS
 
 

@@ -89,6 +89,7 @@ _U = "user:11111111-2222-3333-4444-555555555555:someone:501"
         ),
         ("!#acl 1\n", True),
         (f"!#acl 1\n{_G}:deny:delete\n{_G}:allow:read\n", False),
+        (f"!#acl 1\n{_G}:allow:delete\n", False),
         (f"!#acl 1\n{_U}:deny:read\n", False),
         (f"!#acl 1\n{_G}:deny:delete,read\n", False),
         (f"!#acl 1\n{_G}:deny:delete,search\n", False),

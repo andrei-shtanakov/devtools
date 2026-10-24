@@ -502,7 +502,8 @@ def observe_auth(
     read; `no_file` when none exists. `unreadable` when one exists but is
     not provably the role's own: root's reach is not the role's, so `home`,
     every directory below it and the file are checked on the opened fd —
-    owned by `role_uid`, no ACL, directories searchable and the file
+    owned by `role_uid`, an ACL only if it denies nothing but deleting
+    (macOS), directories searchable and the file
     readable by its owner, the file regular with one link; a link at any
     component is never followed. Nothing of such a file is recorded. An
     unpinned readable file never gives `tracked`.

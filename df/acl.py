@@ -88,12 +88,7 @@ def _entry_denies_delete(line: str) -> bool:
         return False
     kind, *flags = parts[1].split(",")
     perms = set(parts[2].split(","))
-    return (
-        kind == "deny"
-        and set(flags) <= _PROPAGATION_FLAGS
-        and bool(perms)
-        and perms <= _DELETE_ONLY
-    )
+    return kind == "deny" and set(flags) <= _PROPAGATION_FLAGS and perms <= _DELETE_ONLY
 
 
 def _has_linux_acl(names: list[str]) -> bool:
