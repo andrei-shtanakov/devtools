@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from df import cli, models, probe, state
+from df import cli, fsutil, models, probe, state
 from df import platform as plat
 from df.config import ConfigError, InstallConfig, dump_install
 from df.journal import Stable, Transitional
@@ -40,6 +40,7 @@ CHOICE = ModelChoice("claude", "claude-opus-5-5", "high", {})
 CODEX = ModelChoice("codex", "gpt-5.5", None, {})
 PLATFORM = plat.detect_platform()
 CRED = ".claude/.credentials.json"
+UID = os.getuid()
 
 
 def fixture(name: str) -> bytes:
@@ -126,7 +127,9 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     exe.chmod(0o755)
     monkeypatch.setattr(plat, "ROOT_UID", os.getuid())
     monkeypatch.setattr(
-        probe, "_getpwnam", lambda name: SimpleNamespace(pw_dir=str(home))
+        probe,
+        "_getpwnam",
+        lambda name: SimpleNamespace(pw_dir=str(home), pw_uid=os.getuid()),
     )
     tools = {n: Path("/usr/bin/true") for n in ("git", "uv", "tar")}
     install = InstallConfig(
@@ -541,24 +544,24 @@ def test_backend_unknown_ignores_readable_file(tmp_path: Path) -> None:
     cred = tmp_path / CRED
     cred.parent.mkdir()
     cred.write_text("token")
-    obs = probe.observe_auth(make_profile(auth_files=None), tmp_path)
+    obs = probe.observe_auth(make_profile(auth_files=None), tmp_path, role_uid=UID)
     assert obs == AuthObservation("unavailable", "backend_unknown", ())
 
 
 def test_auth_observation_states(tmp_path: Path) -> None:
     prof = make_profile()
-    assert probe.observe_auth(prof, tmp_path) == AuthObservation(
+    assert probe.observe_auth(prof, tmp_path, role_uid=UID) == AuthObservation(
         "unavailable", "no_file", ()
     )
     cred = tmp_path / CRED
     cred.parent.mkdir()
     cred.write_text("token")
-    obs = probe.observe_auth(prof, tmp_path)
+    obs = probe.observe_auth(prof, tmp_path, role_uid=UID)
     assert obs.tracking == "tracked" and obs.reason is None
     assert [f["sha256"] for f in obs.files] == [hashlib.sha256(b"token").hexdigest()]
     assert obs.files[0]["mtime_ns"] == os.stat(cred).st_mtime_ns
     cred.chmod(0)
-    assert probe.observe_auth(prof, tmp_path) == AuthObservation(
+    assert probe.observe_auth(prof, tmp_path, role_uid=UID) == AuthObservation(
         "unavailable", "unreadable", ()
     )
 
@@ -570,7 +573,7 @@ def test_auth_link_is_unreadable(tmp_path: Path) -> None:
     cred = tmp_path / CRED
     cred.parent.mkdir()
     cred.symlink_to(secret)
-    obs = probe.observe_auth(make_profile(), tmp_path)
+    obs = probe.observe_auth(make_profile(), tmp_path, role_uid=UID)
     assert obs.reason == "unreadable"
 
 
@@ -578,7 +581,7 @@ def test_auth_observation_has_no_content(world: World) -> None:
     cred = world.home / CRED
     cred.parent.mkdir()
     cred.write_text("SECRET-TOKEN-123")
-    obs = probe.observe_auth(make_profile(), world.home)
+    obs = probe.observe_auth(make_profile(), world.home, role_uid=UID)
     assert "SECRET-TOKEN-123" not in json.dumps(dataclasses.asdict(obs))
     world.run(Spy(ok_result()))
     text = (world.lay.probes_dir / "author.json").read_text()
@@ -882,12 +885,12 @@ def test_auth_intermediate_link_is_unreadable(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
     (home / ".claude").symlink_to(other)
-    obs = probe.observe_auth(make_profile(), home)
+    obs = probe.observe_auth(make_profile(), home, role_uid=UID)
     assert obs == AuthObservation("unavailable", "unreadable", ())
 
 
 def test_auth_relative_path_must_stay_in_home(tmp_path: Path) -> None:
-    obs = probe.observe_auth(make_profile(auth_files=("../x",)), tmp_path)
+    obs = probe.observe_auth(make_profile(auth_files=("../x",)), tmp_path, role_uid=UID)
     assert obs.reason == "unreadable"
 
 
@@ -898,7 +901,7 @@ def test_backend_unknown_reads_nothing(
         raise AssertionError("opened")
 
     monkeypatch.setattr(os, "open", boom)
-    obs = probe.observe_auth(make_profile(auth_files=None), tmp_path)
+    obs = probe.observe_auth(make_profile(auth_files=None), tmp_path, role_uid=UID)
     assert obs.reason == "backend_unknown"
 
 
@@ -1011,3 +1014,107 @@ def test_root_models_list_hashes_each_binary_once(
     out = capsys.readouterr()
     assert code == 0, out.err
     assert seen == [world.exe]
+
+
+# ---------- fix round 2: the role's ownership, not root's reach ----------
+
+UNREADABLE_OBS = AuthObservation("unavailable", "unreadable", ())
+
+
+def fake_owners(mp: pytest.MonkeyPatch, owners: Mapping[Path, int]) -> None:
+    """Give objects (by inode) a virtual owner seen through `owner_uid`."""
+    keys = {(os.lstat(p).st_dev, os.lstat(p).st_ino): uid for p, uid in owners.items()}
+    real = fsutil.owner_uid
+    mp.setattr(
+        fsutil, "owner_uid", lambda st: keys.get((st.st_dev, st.st_ino), real(st))
+    )
+
+
+def make_cred(home: Path, text: str = "token") -> Path:
+    cred = home / CRED
+    cred.parent.mkdir(parents=True, exist_ok=True)
+    cred.write_text(text)
+    cred.chmod(0o600)
+    return cred
+
+
+def test_auth_all_role_owned_is_tracked(tmp_path: Path) -> None:
+    make_cred(tmp_path)
+    obs = probe.observe_auth(make_profile(), tmp_path, role_uid=UID)
+    assert obs.tracking == "tracked"
+
+
+def test_auth_root_can_read_role_cannot(tmp_path: Path) -> None:
+    """Everything is readable by the reader, but none of it is the role's."""
+    make_cred(tmp_path)
+    obs = probe.observe_auth(make_profile(), tmp_path, role_uid=UID + 1)
+    assert obs == UNREADABLE_OBS
+
+
+def test_auth_foreign_owned_file_records_nothing(world: World) -> None:
+    cred = make_cred(world.home, "FOREIGN-TOKEN")
+    fake_owners(world.mp, {cred: UID + 1})
+    obs = probe.observe_auth(make_profile(), world.home, role_uid=UID)
+    assert obs == UNREADABLE_OBS
+    rec = world.run(Spy(ok_result()))
+    assert isinstance(rec, ProbeRecord)
+    assert rec.auth_tracking == "unavailable: unreadable" and rec.auth_files == ()
+    text = (world.lay.probes_dir / "author.json").read_text()
+    assert hashlib.sha256(b"FOREIGN-TOKEN").hexdigest() not in text
+    assert str(os.stat(cred).st_mtime_ns) not in text
+
+
+@pytest.mark.parametrize("which", ["home", "intermediate"])
+def test_auth_foreign_owned_directory_unreadable(tmp_path: Path, which: str) -> None:
+    cred = make_cred(tmp_path)
+    directory = tmp_path if which == "home" else cred.parent
+    mp = pytest.MonkeyPatch()
+    try:
+        fake_owners(mp, {directory: UID + 1})
+        obs = probe.observe_auth(make_profile(), tmp_path, role_uid=UID)
+    finally:
+        mp.undo()
+    assert obs == UNREADABLE_OBS
+
+
+def test_auth_hard_link_unreadable(tmp_path: Path) -> None:
+    """A hard link (`st_nlink == 2`) may be a foreign file: never counted."""
+    cred = make_cred(tmp_path)
+    os.link(cred, tmp_path / "elsewhere")
+    obs = probe.observe_auth(make_profile(), tmp_path, role_uid=UID)
+    assert obs == UNREADABLE_OBS
+
+
+@pytest.mark.parametrize("replacement", ["role-owned", "foreign"])
+def test_auth_directory_swapped_mid_walk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replacement: str
+) -> None:
+    """Between opening the home and `.claude`, `.claude` is replaced by
+    another real directory with another credential file: its fingerprint
+    appears only if the replacement passes every ownership check."""
+    home = tmp_path / "home"
+    make_cred(home, "original")
+    evil = tmp_path / "evil"
+    make_cred(evil, "EVIL-TOKEN")
+    swapped = evil / ".claude"
+    if replacement == "foreign":
+        fake_owners(monkeypatch, {swapped: UID + 1})
+    real = probe._open_below
+    done: list[bool] = []
+
+    def racing(name: str, dir_fd: int, *, directory: bool) -> int:
+        if name == ".claude" and not done:
+            done.append(True)
+            os.rename(home / ".claude", tmp_path / "old")
+            os.rename(swapped, home / ".claude")
+        return real(name, dir_fd, directory=directory)
+
+    monkeypatch.setattr(probe, "_open_below", racing)
+    obs = probe.observe_auth(make_profile(), home, role_uid=UID)
+    assert done
+    evil_sha = hashlib.sha256(b"EVIL-TOKEN").hexdigest()
+    shas = [f["sha256"] for f in obs.files]
+    if replacement == "foreign":
+        assert obs == UNREADABLE_OBS and evil_sha not in shas
+    else:
+        assert obs.tracking == "tracked" and shas == [evil_sha]

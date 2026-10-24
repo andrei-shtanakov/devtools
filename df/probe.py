@@ -29,7 +29,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Literal
 
-from df import fsutil
+from df import acl, fsutil
 from df import platform as plat
 from df.config import ConfigError, InstallConfig
 from df.models import ROLE_CONTEXT, ROLES, ModelChoice, ModelsConfig, config_hash
@@ -491,12 +491,18 @@ class AuthObservation:
     files: tuple[dict[str, object], ...]
 
 
-def observe_auth(profile: HarnessProfile, home: Path) -> AuthObservation:
+def observe_auth(
+    profile: HarnessProfile, home: Path, *, role_uid: int
+) -> AuthObservation:
     """Fingerprint the auth files the profile pins, under `home`.
 
     `backend_unknown` reads nothing; `tracked` when at least one file was
-    read; `unreadable` when one exists but cannot be read (a link is not
-    followed at any component below `home`); `no_file` when none exists. An
+    read; `no_file` when none exists. `unreadable` when one exists but is
+    not provably the role's own: root's reach is not the role's, so `home`,
+    every directory below it and the file are checked on the opened fd —
+    owned by `role_uid`, no ACL, directories searchable and the file
+    readable by its owner, the file regular with one link; a link at any
+    component is never followed. Nothing of such a file is recorded. An
     unpinned readable file never gives `tracked`.
     """
     if profile.auth_files is None:
@@ -506,7 +512,7 @@ def observe_auth(profile: HarnessProfile, home: Path) -> AuthObservation:
     for rel in profile.auth_files:
         path = home / rel
         try:
-            mtime_ns, sha = _hash_under(home, rel)
+            mtime_ns, sha = _hash_under(home, rel, role_uid)
         except FileNotFoundError:
             continue
         except (OSError, ValueError):
@@ -533,9 +539,10 @@ def _hash_path(path: Path) -> tuple[int, str]:
         os.close(fd)
 
 
-def _hash_under(home: Path, rel: str) -> tuple[int, str]:
+def _hash_under(home: Path, rel: str, role_uid: int) -> tuple[int, str]:
     """`(mtime_ns, sha256)` of `home/rel`, opened component by component with
-    `O_NOFOLLOW`: a link anywhere below `home` is an `OSError` (unreadable),
+    `O_NOFOLLOW`, each opened fd checked by `_role_owns` before the next
+    step: a link or a component that is not the role's own raises (unreadable),
     never another file's fingerprint. A missing component is
     `FileNotFoundError`."""
     parts = Path(rel).parts
@@ -543,17 +550,55 @@ def _hash_under(home: Path, rel: str) -> tuple[int, str]:
         raise ValueError(f"{rel}: путь не внутри домашнего каталога")
     fd = os.open(home, _DIR_FLAGS)
     try:
+        _role_owns(fd, home, role_uid, directory=True)
+        here = home
         for part in parts[:-1]:
-            child = os.open(part, _DIR_FLAGS | os.O_NOFOLLOW, dir_fd=fd)
+            here = here / part
+            child = _open_below(part, fd, directory=True)
             os.close(fd)
             fd = child
-        leaf = os.open(parts[-1], _PEEK_FLAGS | os.O_NOFOLLOW, dir_fd=fd)
+            _role_owns(fd, here, role_uid, directory=True)
+        leaf = _open_below(parts[-1], fd, directory=False)
     finally:
         os.close(fd)
     try:
+        _role_owns(leaf, home / rel, role_uid, directory=False)
         return _hash_fd(leaf, home / rel)
     finally:
         os.close(leaf)
+
+
+def _open_below(name: str, dir_fd: int, *, directory: bool) -> int:
+    """Open one component of the auth walk, never following a link (the
+    tests' seam to model a race between two steps)."""
+    if directory:
+        return os.open(name, _DIR_FLAGS | os.O_NOFOLLOW, dir_fd=dir_fd)
+    return os.open(name, _PEEK_FLAGS | os.O_NOFOLLOW, dir_fd=dir_fd)
+
+
+def _role_owns(fd: int, path: Path, role_uid: int, *, directory: bool) -> None:
+    """The object open as `fd` is the role's own: owner `role_uid`, no ACL
+    (an undeterminable ACL fails closed), a directory its owner can search or
+    a regular one-link file its owner can read. Else `ValueError`."""
+    st = os.fstat(fd)
+    if fsutil.owner_uid(st) != role_uid:
+        raise ValueError(f"{path}: владелец uid {fsutil.owner_uid(st)}, не роль")
+    if directory:
+        ok = stat.S_ISDIR(st.st_mode) and bool(st.st_mode & stat.S_IXUSR)
+    else:
+        ok = (
+            stat.S_ISREG(st.st_mode)
+            and bool(st.st_mode & stat.S_IRUSR)
+            and st.st_nlink == 1
+        )
+    if not ok:
+        raise ValueError(f"{path}: не доступен роли как её собственный")
+    try:
+        has_acl = acl.acl_present_fd(fd)
+    except OSError as exc:
+        raise ValueError(f"{path}: ACL не определён ({_os_text(exc)})") from exc
+    if has_acl:
+        raise ValueError(f"{path}: есть ACL")
 
 
 def _hash_fd(fd: int, path: Path) -> tuple[int, str]:
@@ -720,9 +765,10 @@ def run_probe(
     """
     user = ROLE_CONTEXT[role]
     try:
-        home = Path(_getpwnam(user).pw_dir)
+        entry = _getpwnam(user)
     except KeyError:
         return f"{NOT_CHECKED}: роль {user} не создана (этап 2)"
+    home, role_uid = Path(entry.pw_dir), entry.pw_uid
     try:
         choice, _ = resolve_choice(cfg, role, product)
     except ConfigError:
@@ -755,7 +801,7 @@ def run_probe(
         sha=admitted.executable_sha256,
         managed_digest=managed_digest,
         result=result,
-        auth=observe_auth(profile, home),
+        auth=observe_auth(profile, home, role_uid=role_uid),
     )
     fsutil.write_atomic(record_path(layout, role, product), rec.to_json(), 0o644)
     return rec
@@ -913,11 +959,12 @@ def current_status(
         return probe_status(rec, choice, **_UNOBSERVED), rec
     user = ROLE_CONTEXT[role]
     try:
-        home = Path(_getpwnam(user).pw_dir)
+        entry = _getpwnam(user)
     except KeyError:
         return ProbeStatus(
             f"{NOT_CHECKED}: роль {user} не создана (этап 2)", False
         ), rec
+    home, role_uid = Path(entry.pw_dir), entry.pw_uid
     path = None if install is None else install.approved_cli.get(choice.harness)
     found = UNSUPPORTED if path is None else _target_cached(path, targets)
     sha = None if isinstance(found, str) else found[1]
@@ -935,7 +982,7 @@ def current_status(
         rec,
         choice,
         harness_version=profile.version,
-        auth=observe_auth(profile, home),
+        auth=observe_auth(profile, home, role_uid=role_uid),
         executable_sha256=sha,
         managed_digest=managed_context(profile)[0],
     ), rec
