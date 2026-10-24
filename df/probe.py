@@ -22,6 +22,7 @@ import json
 import os
 import pwd
 import stat
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from datetime import UTC, datetime
@@ -54,6 +55,7 @@ UNSUPPORTED = "не поддерживается"
 NOT_CHECKED = "не проверено"
 
 _READ_LIMIT = 1 << 20
+_IS_DARWIN = sys.platform == "darwin"
 _REASON_LIMIT = 300
 _PEEK_FLAGS = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
@@ -550,7 +552,10 @@ def _hash_under(home: Path, rel: str, role_uid: int) -> tuple[int, str]:
         raise ValueError(f"{rel}: путь не внутри домашнего каталога")
     # `home` itself is not followed either: a home that is a link is not
     # provably the role's own place (its target may be another role's)
-    fd = os.open(home, _DIR_FLAGS | os.O_NOFOLLOW)
+    try:
+        fd = os.open(home, _DIR_FLAGS | os.O_NOFOLLOW)
+    except FileNotFoundError as exc:  # a role without its home proves nothing
+        raise ValueError(f"{home}: нет домашнего каталога") from exc
     try:
         _role_owns(fd, home, role_uid, directory=True)
         here = home
@@ -579,9 +584,10 @@ def _open_below(name: str, dir_fd: int, *, directory: bool) -> int:
 
 
 def _role_owns(fd: int, path: Path, role_uid: int, *, directory: bool) -> None:
-    """The object open as `fd` is the role's own: owner `role_uid`, no ACL
-    (an undeterminable ACL fails closed), a directory its owner can search or
-    a regular one-link file its owner can read. Else `ValueError`."""
+    """The object open as `fd` is the role's own: owner `role_uid`, an ACL
+    that cannot reduce the owner's read or search (`_acl_harmless`), a
+    directory its owner can search or a regular one-link file its owner can
+    read. Else `ValueError`."""
     st = os.fstat(fd)
     if fsutil.owner_uid(st) != role_uid:
         raise ValueError(f"{path}: владелец uid {fsutil.owner_uid(st)}, не роль")
@@ -599,8 +605,19 @@ def _role_owns(fd: int, path: Path, role_uid: int, *, directory: bool) -> None:
         has_acl = acl.acl_present_fd(fd)
     except OSError as exc:
         raise ValueError(f"{path}: ACL не определён ({_os_text(exc)})") from exc
-    if has_acl:
-        raise ValueError(f"{path}: есть ACL")
+    if has_acl and not _acl_harmless(fd):
+        raise ValueError(f"{path}: ACL может ограничить чтение ролью")
+
+
+def _acl_harmless(fd: int) -> bool:
+    """An ACL is tolerated only on macOS and only if every entry denies
+    nothing but deleting (every real home carries `group:everyone deny
+    delete`); an ACL text that cannot be read or parsed, and any POSIX ACL
+    on Linux (v1 limit), are not."""
+    if not _IS_DARWIN:
+        return False
+    text = acl.acl_text_fd(fd)
+    return text is not None and acl.acl_only_denies_delete(text)
 
 
 def _hash_fd(fd: int, path: Path) -> tuple[int, str]:

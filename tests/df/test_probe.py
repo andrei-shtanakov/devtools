@@ -7,11 +7,14 @@ Mach-O file under `tmp_path`, and the runner is a spy.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import json
 import os
-from collections.abc import Callable, Mapping, Sequence
+import subprocess
+import sys
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1187,3 +1190,110 @@ def test_auth_walk_closes_every_fd(
     for _ in range(3):
         probe.observe_auth(make_profile(), home, role_uid=UID)
     assert _open_fds() == before
+
+
+# ---------- fix round 3: only delete-deny ACLs are tolerated ----------
+
+darwin_only = pytest.mark.skipif(sys.platform != "darwin", reason="macOS ACLs")
+
+
+@contextlib.contextmanager
+def acl_on(*items: tuple[Path, str]) -> Iterator[None]:
+    """Real ACL entries (`chmod +a`), removed again on exit."""
+    try:
+        for path, entry in items:
+            subprocess.run(["/bin/chmod", "+a", entry, str(path)], check=True)
+        yield
+    finally:
+        for path, _ in items:
+            subprocess.run(["/bin/chmod", "-N", str(path)], check=False)
+
+
+def _where(home: Path, which: str) -> Path:
+    return {"home": home, "dir": home / ".claude", "file": home / CRED}[which]
+
+
+@darwin_only
+@pytest.mark.parametrize("which", ["home", "dir", "file"])
+def test_acl_deny_delete_tolerated(tmp_path: Path, which: str) -> None:
+    """Every real macOS home carries `group:everyone deny delete`."""
+    make_cred(tmp_path)
+    with acl_on((_where(tmp_path, which), "group:everyone deny delete")):
+        obs = probe.observe_auth(make_profile(), tmp_path, role_uid=UID)
+    assert obs.tracking == "tracked"
+
+
+@darwin_only
+@pytest.mark.parametrize(
+    "entries",
+    [
+        ("everyone allow read",),
+        (f"user:{os.environ.get('USER') or 'root'} deny read",),
+        ("group:everyone deny delete", "group:everyone deny read"),
+        ("group:everyone deny delete,write",),
+    ],
+    ids=["allow-read", "user-deny-read", "deny-delete+deny-read", "deny-write"],
+)
+@pytest.mark.parametrize("which", ["home", "dir", "file"])
+def test_acl_reducing_entries_unreadable(
+    tmp_path: Path, which: str, entries: tuple[str, ...]
+) -> None:
+    make_cred(tmp_path)
+    path = _where(tmp_path, which)
+    with acl_on(*((path, e) for e in entries)):
+        obs = probe.observe_auth(make_profile(), tmp_path, role_uid=UID)
+    assert obs == UNREADABLE_OBS
+
+
+@darwin_only
+def test_acl_text_failure_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_cred(tmp_path)
+    monkeypatch.setattr(probe.acl, "acl_text_fd", lambda fd: None)
+    with acl_on((tmp_path / CRED, "group:everyone deny delete")):
+        obs = probe.observe_auth(make_profile(), tmp_path, role_uid=UID)
+    assert obs == UNREADABLE_OBS
+
+
+def test_any_acl_off_macos_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Linux (v1 limit): any POSIX ACL is unreadable, never parsed."""
+    make_cred(tmp_path)
+    monkeypatch.setattr(probe, "_IS_DARWIN", False)
+    monkeypatch.setattr(probe.acl, "acl_present_fd", lambda fd: True)
+    monkeypatch.setattr(probe.acl, "acl_text_fd", lambda fd: "!#acl 1\n")
+    obs = probe.observe_auth(make_profile(), tmp_path, role_uid=UID)
+    assert obs == UNREADABLE_OBS
+
+
+def test_acl_probe_error_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_cred(tmp_path)
+
+    def broken(fd: int) -> bool:
+        raise OSError(5, "EIO")
+
+    monkeypatch.setattr(probe.acl, "acl_present_fd", broken)
+    obs = probe.observe_auth(make_profile(), tmp_path, role_uid=UID)
+    assert obs == UNREADABLE_OBS
+
+
+@pytest.mark.parametrize("which", ["file", "dir"])
+def test_owner_mode_bits_required(tmp_path: Path, which: str) -> None:
+    """N2: a file without u+r, a directory without u+x: unreadable."""
+    cred = make_cred(tmp_path)
+    path, mode = (cred, 0o200) if which == "file" else (cred.parent, 0o600)
+    path.chmod(mode)
+    try:
+        obs = probe.observe_auth(make_profile(), tmp_path, role_uid=UID)
+    finally:
+        path.chmod(0o700)
+    assert obs == UNREADABLE_OBS
+
+
+def test_missing_home_unreadable(tmp_path: Path) -> None:
+    obs = probe.observe_auth(make_profile(), tmp_path / "absent", role_uid=UID)
+    assert obs == UNREADABLE_OBS
