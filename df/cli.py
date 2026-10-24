@@ -43,7 +43,10 @@ PENDING_ALLOWED = frozenset({"init", "install", "doctor"})
 #: Subcommands that land in later tasks: refused at dispatch (M19).
 LATER = {"doctor": "Task 12"}
 
-_TRANSITIONAL = "идёт или прервана административная операция: darkfactory install"
+_TRANSITIONAL = (
+    "идёт или прервана административная операция: дождитесь её конца; "
+    "прерванную повторите от root (darkfactory install или darkfactory models set)"
+)
 _FINISH = "есть незавершённая установка: завершите darkfactory install"
 _NO_PRODUCT = "продукт не зарегистрирован (этап 3)"
 _NO_REGISTRY = "реестр продуктов не поддерживается до этапа 3"
@@ -259,9 +262,10 @@ def _reader(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
 def _models_list(args: argparse.Namespace, snap: Snapshot) -> int:
     """Every role in `ROLES` order from the snapshot's text (I2); a role
     without a choice is shown unset (R58). `--product` is refused until the
-    registry lands (stage 3): a reader reads nothing to tell why (R57)."""
+    registry lands (stage 3): a reader reads no registry, so it does not claim
+    the product is unregistered (R57)."""
     if args.product is not None:
-        raise Refusal(_NO_PRODUCT)
+        raise Refusal(_NO_REGISTRY)
     text = snap.models_text
     cfg = models.EMPTY if text is None else models.parse_models(text)
     rows = [_list_row(cfg, role) for role in models.ROLES]
@@ -362,7 +366,14 @@ def _models_set(args: argparse.Namespace, lay: Layout, snap: Snapshot) -> int:
     cfg = models.with_choice(current, args.role, choice)
     _close_odd_generation(lay, snap)
     journal.generation_begin(lay)
-    fsutil.write_atomic(lay.etc / "models.toml", models.dump_models(cfg))
+    try:
+        fsutil.write_atomic(lay.etc / "models.toml", models.dump_models(cfg))
+    except OSError:
+        # unlike install, no `pending.toml` marks this bracket: a refused
+        # write leaves the old or the new file whole, so it closes here (a
+        # crash does not get here; the next writer closes it, M9)
+        journal.generation_end(lay)
+        raise
     journal.generation_end(lay)
     effort = "" if choice.effort is None else f" ({choice.effort})"
     print(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import select
@@ -370,6 +371,24 @@ def test_set_closes_an_odd_generation(w: World) -> None:
     assert any(r["step"] == "generation" and r["event"] == "warn" for r in rows)
 
 
+def test_set_refused_write_closes_its_generation(
+    w: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A refused write (ENOSPC) leaves no `pending.toml` behind to mark the
+    bracket, so `models set` closes its own generation: readers do not see
+    an interrupted operation that is not there (PR #629 review)."""
+    gen = journal.read_generation(w.lay)
+
+    def refuse(path: Path, text: str, mode: int = 0o644) -> None:
+        raise OSError(errno.ENOSPC, "no space", str(path))
+
+    w.mp.setattr(fsutil, "write_atomic", refuse)
+    assert w.writer(SET_AUTHOR) == 2
+    assert "no space" in capsys.readouterr().err
+    assert journal.read_generation(w.lay) == gen + 2
+    assert not models_path(w).exists()
+
+
 def test_concurrent_sets_of_two_roles_both_persist(w: World) -> None:
     """R61: two processes; A holds the lock while B loses it (the real
     LOCK_NB loser, `StepFailed("lock")`) and retries; both roles persist.
@@ -579,8 +598,8 @@ def test_list_refuses_invalid_models_toml(
 def test_list_product_refused_in_stage1(
     fake_layout: FakeLayout, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """R57: the reader refuses `--product` with the absent-registry text,
-    reading nothing."""
+    """R57: the reader refuses `--product` reading nothing, so it does not
+    claim the product is unregistered (PR #629 review)."""
     code = cli.main(
         ["models", "list", "--product", "42"],
         mode="reader",
@@ -589,7 +608,9 @@ def test_list_product_refused_in_stage1(
         layout=fake_layout.layout,
     )
     assert code == 2
-    assert "продукт не зарегистрирован (этап 3)" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "реестр продуктов не поддерживается до этапа 3" in err
+    assert "не зарегистрирован" not in err
 
 
 def test_list_uses_snapshot_text_only(
