@@ -119,6 +119,14 @@ def release(w: World) -> Path:
     return w.lay.release_dir(rid)
 
 
+def tamper_admin(w: World) -> None:
+    """Append to the first regular file of the active release's admin code."""
+    s = snap(w)
+    assert s.release_id is not None
+    files = sorted(p for p in w.lay.admin_dir(s.release_id).rglob("*") if p.is_file())
+    files[0].write_bytes(files[0].read_bytes() + b"\n# changed\n")
+
+
 def run_doctor(w: World, argv: list[str], read: state.ReadResult | None = None) -> int:
     if read is None:
         raw = state.read_raw(w.lay)
@@ -356,10 +364,7 @@ def test_empty_quarantine_no_warning(fake_installed: World) -> None:
 
 
 def test_admin_tamper_breaks_level1(fake_installed: World) -> None:
-    s = snap(fake_installed)
-    assert s.release_id is not None
-    code = fake_installed.lay.admin_dir(s.release_id) / "df" / "cli.py"
-    code.write_text(code.read_text() + "\n# changed\n")
+    tamper_admin(fake_installed)
     checks = level1_checks(snap(fake_installed), fake_installed.lay, euid=os.geteuid())
     c = by_id(checks)
     assert c["release.admin"].status == "нарушено"
@@ -653,10 +658,7 @@ def test_json_lists_all_problems(
     w = fake_installed
     rel = release(w)
     (rel / "python" / ".lock").write_text("changed")
-    s = snap(w)
-    assert s.release_id is not None
-    code = w.lay.admin_dir(s.release_id) / "df" / "cli.py"
-    code.write_text(code.read_text() + "\n# changed\n")
+    tamper_admin(w)
     (w.lay.etc / "extra.toml").write_text("")
     assert run_doctor(w, ["--json"]) == 2
     report = json.loads(capsys.readouterr().out)

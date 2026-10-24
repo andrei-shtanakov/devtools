@@ -3688,11 +3688,13 @@ Linux-профили и живая приёмка проб от ролей — T
   - `Check(id: str, status: Literal["ok", "нарушено", "не проверено", "данные недоступны"],
     reason: str, time: str)`.
   - `doctor_main(read: ReadResult, layout: Layout, *, euid: int, as_json: bool) -> int` —
-    `Transitional(g)` → «уровень 1: не достигнут — install.transitional: идёт или прервана
-    административная операция: darkfactory install», в JSON `{"level1": "not reached",
+    `Transitional(g)` → «уровень 1: не достигнут — install.transitional: <текст
+    `cli._TRANSITIONAL`>» (R69: текст Task 10 — «идёт или прервана административная
+    операция: дождитесь её конца; прерванную повторите от root (darkfactory install или
+    darkfactory models set)»), в JSON `{"level1": "not reached",
     "state": "transitional", "generation": g}`; части снимка не используются. `Stable` →
     `parse_snapshot(..., mode="reader")` → `level1_checks`. Код выхода — тот же, что у
-    недостигнутого уровня 1.
+    недостигнутого уровня 1 (R68: 0 — достигнут, 2 — не достигнут, 1 — ошибка программы).
   - `level1_checks(snap: Snapshot, layout: Layout, *, euid: int) -> list[Check]` — §3.8,
     **только факты**, журнал не читается; конфигурация и реестр — только из `snap`. Набор id:
     - `install.pending` — `pending.toml` нет; есть → `нарушено: переходное состояние,
