@@ -369,13 +369,13 @@ def test_exclusion_type_has_no_free_text() -> None:
 
 def test_single_launch_without_version_call(world: World) -> None:
     admitted: list[tuple[object, object]] = []
-    real = probe.admit
+    real = probe.admission
 
     def spy_admit(*args: object, **kw: object) -> object:
         admitted.append((kw["argv"], kw["env"]))
         return real(*args, **kw)  # type: ignore[arg-type]
 
-    world.mp.setattr(probe, "admit", spy_admit)
+    world.mp.setattr(probe, "admission", spy_admit)
     spy = Spy(ok_result())
     rec = world.run(spy)
     assert isinstance(rec, ProbeRecord)
@@ -564,7 +564,7 @@ def test_auth_observation_states(tmp_path: Path) -> None:
 
 
 def test_auth_link_is_unreadable(tmp_path: Path) -> None:
-    """A link in the role's home is never followed by root."""
+    """A link at the leaf of the pinned path is never followed by root."""
     secret = tmp_path / "secret"
     secret.write_text("root only")
     cred = tmp_path / CRED
@@ -867,3 +867,147 @@ def test_models_list_status_as_root(
     cred.write_text("other token")
     rows = {r["role"]: r for r in models_list(world, capsys)}
     assert rows["author"]["status"] == "устарела: auth"
+
+
+# ---------- fix round 1 ----------
+
+
+def test_auth_intermediate_link_is_unreadable(tmp_path: Path) -> None:
+    """I1: a link at an intermediate directory below the home (e.g. to
+    another role's `.claude`) is never followed: `unreadable`, never that
+    file's fingerprint."""
+    other = tmp_path / "other-role" / ".claude"
+    other.mkdir(parents=True)
+    (other / ".credentials.json").write_text("other role's token")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".claude").symlink_to(other)
+    obs = probe.observe_auth(make_profile(), home)
+    assert obs == AuthObservation("unavailable", "unreadable", ())
+
+
+def test_auth_relative_path_must_stay_in_home(tmp_path: Path) -> None:
+    obs = probe.observe_auth(make_profile(auth_files=("../x",)), tmp_path)
+    assert obs.reason == "unreadable"
+
+
+def test_backend_unknown_reads_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(*args: object, **kw: object) -> int:
+        raise AssertionError("opened")
+
+    monkeypatch.setattr(os, "open", boom)
+    obs = probe.observe_auth(make_profile(auth_files=None), tmp_path)
+    assert obs.reason == "backend_unknown"
+
+
+def test_elf_executable_accepted(world: World) -> None:
+    elf = plat.ELF_MAGIC + bytes(range(60))
+    world.exe.write_bytes(elf)
+    world.sha = hashlib.sha256(elf).hexdigest()
+    world.register(make_profile())
+    argv = probe.claude_argv(world.exe, CHOICE)
+    got = probe.admit("claude", world.exe, PLATFORM, argv=argv, env={})
+    assert got == make_profile()
+
+
+def test_record_sha_is_the_admitted_one(world: World) -> None:
+    """M3: the record's `executable_sha256` is the SHA admission hashed."""
+    real = probe.admission
+
+    def other_sha(*args: object, **kw: object) -> object:
+        got = real(*args, **kw)  # type: ignore[arg-type]
+        assert isinstance(got, probe.Admission)
+        return probe.Admission(got.profile, "f" * 64)
+
+    world.mp.setattr(probe, "admission", other_sha)
+    rec = world.run(Spy(ok_result()))
+    assert isinstance(rec, ProbeRecord) and rec.executable_sha256 == "f" * 64
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"auth_files": [{"path": 1, "mtime_ns": 1, "sha256": "a"}]},
+        {"auth_files": [{"path": "p", "mtime_ns": True, "sha256": "a"}]},
+        {"auth_files": [{"path": "p", "mtime_ns": 1, "sha256": "a", "x": 1}]},
+        {"params": {"k": 1}},
+    ],
+)
+def test_record_entries_type_checked(world: World, patch: dict[str, object]) -> None:
+    """M7: malformed entries are `ConfigError`; `read_record` then reads the
+    record as absent («не проверено», never current)."""
+    data = json.loads(record().to_json())
+    text = json.dumps({**data, **patch})
+    with pytest.raises(ConfigError):
+        ProbeRecord.from_json(text)
+    (world.lay.probes_dir / "author.json").write_text(text)
+    assert probe.read_record(world.lay, "author", None) is None
+
+
+def test_doctor_non_root_checked_before_transitional(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world.mp.setattr(cli, "ROOT_UID", os.geteuid() + 1)
+    assert doctor(world, ["--probe-models"], Transitional(3)) == 2
+    err = capsys.readouterr().err
+    assert "нужен sudo" in err and "административная операция" not in err
+
+
+TWO_CLAUDE = (
+    'schema = "df/models/v1"\n'
+    '[roles.author]\nharness = "claude"\nmodel = "claude-opus-5-5"\n'
+    '[roles.reviewer]\nharness = "claude"\nmodel = "claude-opus-5-5"\n'
+)
+
+
+def test_doctor_role_exception_reported_and_loop_continues(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M4: one role's runner exception is reported for it, the rest are
+    probed, and the exit code is 2."""
+    calls: list[str] = []
+
+    def runner(user: str, argv: Sequence[str], **kw: object) -> RunResult:
+        calls.append(user)
+        if len(calls) == 1:
+            raise OSError("boom")
+        return ok_result()
+
+    world.mp.setattr(cli, "ROOT_UID", os.geteuid())
+    world.mp.setattr(probe, "run_as", runner)
+    snap = Stable(raw_with(world.install, TWO_CLAUDE), 0)
+    assert doctor(world, ["--probe-models"], snap) == 2
+    out = capsys.readouterr().out
+    assert "author: ошибка пробы: OSError: boom" in out
+    assert "reviewer: confirmed" in out
+    assert calls == ["df-exec", "df-review"]
+
+
+def test_root_models_list_hashes_each_binary_once(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M5: two roles on one harness binary: one `executable_target`."""
+    world.mp.setattr(cli, "ROOT_UID", os.geteuid())
+    world.cfg = models.parse_models(TWO_CLAUDE)
+    for role in ("author", "reviewer"):
+        assert isinstance(world.run(Spy(ok_result()), role), ProbeRecord)
+    seen: list[Path] = []
+    real = probe.executable_target
+
+    def counting(path: Path) -> tuple[Path, str] | str:
+        seen.append(path)
+        return real(path)
+
+    world.mp.setattr(probe, "executable_target", counting)
+    code = cli.main(
+        ["models", "list", "--json"],
+        mode="reader",
+        read=Stable(raw_with(world.install, TWO_CLAUDE), 0),
+        lock_fd=None,
+        layout=world.lay,
+    )
+    out = capsys.readouterr()
+    assert code == 0, out.err
+    assert seen == [world.exe]

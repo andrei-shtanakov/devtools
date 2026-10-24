@@ -286,18 +286,24 @@ def _probe_models(args: argparse.Namespace, lay: Layout, read: ReadResult) -> in
         raise Refusal(_NO_INSTALL)
     cfg = _models_of(snap)
     probe.prepare_dirs(lay)
+    failed = False
     for role in models.ROLES:
         try:
             models.resolve(cfg, role, None)
         except ConfigError:
             print(f"{role}: модель не задана")
             continue
-        # the runner is looked up now, not bound at import (the tests' seam)
-        result = probe.run_probe(
-            role, None, cfg, snap.install, lay, runner=probe.run_as
-        )
+        try:
+            # the runner is looked up now, not bound at import (the tests' seam)
+            result = probe.run_probe(
+                role, None, cfg, snap.install, lay, runner=probe.run_as
+            )
+        except Exception as exc:  # noqa: BLE001 - this role only; the rest go on
+            failed = True
+            print(f"{role}: ошибка пробы: {type(exc).__name__}: {exc}")
+            continue
         print(f"{role}: {_probe_line(result)}")
-    return EXIT_OK
+    return EXIT_REFUSED if failed else EXIT_OK
 
 
 def _probe_line(result: probe.ProbeRecord | str) -> str:
@@ -325,7 +331,8 @@ def _models_list(args: argparse.Namespace, lay: Layout, snap: Snapshot) -> int:
         raise Refusal(_NO_REGISTRY)
     cfg = _models_of(snap)
     root = os.geteuid() == ROOT_UID
-    rows = [_list_row(cfg, role, lay, snap, root) for role in models.ROLES]
+    targets: dict[Path, tuple[Path, str] | str] = {}
+    rows = [_list_row(cfg, role, lay, snap, root, targets) for role in models.ROLES]
     if args.json:
         print(json.dumps(rows, sort_keys=True, ensure_ascii=False, indent=2))
         return EXIT_OK
@@ -337,7 +344,12 @@ def _models_list(args: argparse.Namespace, lay: Layout, snap: Snapshot) -> int:
 
 
 def _list_row(
-    cfg: models.ModelsConfig, role: str, lay: Layout, snap: Snapshot, root: bool
+    cfg: models.ModelsConfig,
+    role: str,
+    lay: Layout,
+    snap: Snapshot,
+    root: bool,
+    targets: dict[Path, tuple[Path, str] | str],
 ) -> dict[str, object]:
     """One role's row; the probe status from its record in `probes_dir`
     (R65: a non-root reader cannot observe the auth, so a record shows
@@ -357,7 +369,9 @@ def _list_row(
         choice, source = models.resolve(cfg, role, None)
     except ConfigError:
         return unset
-    status, rec = probe.current_status(lay, role, choice, snap.install, root=root)
+    status, rec = probe.current_status(
+        lay, role, choice, snap.install, root=root, targets=targets
+    )
     return {
         **unset,
         "harness": choice.harness,

@@ -223,6 +223,14 @@ def _contains(argv: Sequence[str], run: Sequence[str]) -> bool:
 # ---------- admission (nothing is executed) ----------
 
 
+@dataclass(frozen=True)
+class Admission:
+    """A passed admission: the profile and the SHA-256 that was hashed."""
+
+    profile: HarnessProfile
+    executable_sha256: str
+
+
 def admit(
     harness: str,
     path: Path,
@@ -233,17 +241,33 @@ def admit(
 ) -> HarnessProfile | str:
     """Admission before any launch (spec 3.6); a string is the refusal.
 
-    `argv` and `env` are exactly the ones the probe will run with: argv[0]
-    must be the final target of `path`, and every exclusion is checked on
-    them. Nothing is executed here.
+    `path` must already be the approved CLI of `harness` (spec 3.10,
+    `InstallConfig.approved_cli`): that approval is the caller's
+    precondition, not checked here. `argv` and `env` are exactly the ones
+    the probe will run with: argv[0] must be the final target of `path`, and
+    every exclusion is checked on them. Nothing is executed here.
     """
+    found = admission(harness, path, platform, argv=argv, env=env)
+    return found if isinstance(found, str) else found.profile
+
+
+def admission(
+    harness: str,
+    path: Path,
+    platform: PlatformName,
+    *,
+    argv: Sequence[str],
+    env: Mapping[str, str],
+) -> Admission | str:
+    """`admit`, also naming the SHA-256 it hashed (the record's
+    `executable_sha256` is the admitted file's)."""
     found = executable_target(path)
     if isinstance(found, str):
         return found
     target, sha = found
-    profile = HARNESS_PROFILES.get((harness, platform, sha))
-    if profile is None:
-        return f"{UNSUPPORTED}: неизвестный исполняемый файл {sha}"
+    profile = profile_for(harness, platform, sha)
+    if isinstance(profile, str):
+        return profile
     if not profile.isolation_verified:
         return f"{UNSUPPORTED}: изоляция не подтверждена"
     if not argv or argv[0] != str(target):
@@ -255,6 +279,14 @@ def admit(
             problems.append(f"{src.kind} {src.locator}: исключение не в этом вызове")
     if problems:
         return f"{UNSUPPORTED}: " + "; ".join(problems)
+    return Admission(profile, sha)
+
+
+def profile_for(harness: str, platform: PlatformName, sha: str) -> HarnessProfile | str:
+    """The profile pinned to `(harness, platform, sha)`, else the refusal."""
+    profile = HARNESS_PROFILES.get((harness, platform, sha))
+    if profile is None:
+        return f"{UNSUPPORTED}: неизвестный исполняемый файл {sha}"
     return profile
 
 
@@ -307,7 +339,7 @@ def managed_context(profile: HarnessProfile) -> tuple[str | None, list[str]]:
                 problems.append(f"{name}: не наблюдаем и не исключён вызовом")
             continue
         try:
-            found = _hash_file(Path(src.locator), follow=True)
+            found = _hash_path(Path(src.locator))
         except FileNotFoundError:
             seen.append([src.kind, src.locator, "absent"])
             continue
@@ -464,8 +496,8 @@ def observe_auth(profile: HarnessProfile, home: Path) -> AuthObservation:
 
     `backend_unknown` reads nothing; `tracked` when at least one file was
     read; `unreadable` when one exists but cannot be read (a link is not
-    followed); `no_file` when none exists. An unpinned readable file never
-    gives `tracked`.
+    followed at any component below `home`); `no_file` when none exists. An
+    unpinned readable file never gives `tracked`.
     """
     if profile.auth_files is None:
         return AuthObservation("unavailable", "backend_unknown", ())
@@ -474,7 +506,7 @@ def observe_auth(profile: HarnessProfile, home: Path) -> AuthObservation:
     for rel in profile.auth_files:
         path = home / rel
         try:
-            mtime_ns, sha = _hash_file(path, follow=False)
+            mtime_ns, sha = _hash_under(home, rel)
         except FileNotFoundError:
             continue
         except (OSError, ValueError):
@@ -491,22 +523,50 @@ def tracking_text(obs: AuthObservation) -> str:
     return "tracked" if obs.tracking == "tracked" else f"unavailable: {obs.reason}"
 
 
-def _hash_file(path: Path, *, follow: bool) -> tuple[int, str]:
-    """`(mtime_ns, sha256)` of a regular file up to `_READ_LIMIT` bytes."""
-    flags = _PEEK_FLAGS if follow else _PEEK_FLAGS | os.O_NOFOLLOW
-    fd = os.open(path, flags)
+def _hash_path(path: Path) -> tuple[int, str]:
+    """`(mtime_ns, sha256)` of a managed file (links followed: its place is
+    the administrator's)."""
+    fd = os.open(path, _PEEK_FLAGS)
     try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            raise ValueError(f"{path}: не обычный файл")
-        if st.st_size > _READ_LIMIT:
-            raise ValueError(f"{path}: слишком большой")
-        digest = hashlib.sha256()
-        while chunk := os.read(fd, 1 << 16):
-            digest.update(chunk)
-        return st.st_mtime_ns, digest.hexdigest()
+        return _hash_fd(fd, path)
     finally:
         os.close(fd)
+
+
+def _hash_under(home: Path, rel: str) -> tuple[int, str]:
+    """`(mtime_ns, sha256)` of `home/rel`, opened component by component with
+    `O_NOFOLLOW`: a link anywhere below `home` is an `OSError` (unreadable),
+    never another file's fingerprint. A missing component is
+    `FileNotFoundError`."""
+    parts = Path(rel).parts
+    if not parts or Path(rel).is_absolute() or ".." in parts:
+        raise ValueError(f"{rel}: путь не внутри домашнего каталога")
+    fd = os.open(home, _DIR_FLAGS)
+    try:
+        for part in parts[:-1]:
+            child = os.open(part, _DIR_FLAGS | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        leaf = os.open(parts[-1], _PEEK_FLAGS | os.O_NOFOLLOW, dir_fd=fd)
+    finally:
+        os.close(fd)
+    try:
+        return _hash_fd(leaf, home / rel)
+    finally:
+        os.close(leaf)
+
+
+def _hash_fd(fd: int, path: Path) -> tuple[int, str]:
+    """`(mtime_ns, sha256)` of an open regular file up to `_READ_LIMIT`."""
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        raise ValueError(f"{path}: не обычный файл")
+    if st.st_size > _READ_LIMIT:
+        raise ValueError(f"{path}: слишком большой")
+    digest = hashlib.sha256()
+    while chunk := os.read(fd, 1 << 16):
+        digest.update(chunk)
+    return st.st_mtime_ns, digest.hexdigest()
 
 
 def _os_text(exc: BaseException) -> str:
@@ -567,8 +627,10 @@ class ProbeRecord:
         if data["outcome"] not in ("confirmed", "not_confirmed"):
             raise ConfigError(f"{SCHEMA}: outcome: {data['outcome']!r}")
         files = data["auth_files"]
-        if not all(isinstance(f, dict) for f in files):
-            raise ConfigError(f"{SCHEMA}: auth_files: неверный тип")
+        if not all(_auth_file_ok(f) for f in files):
+            raise ConfigError(f"{SCHEMA}: auth_files: неверная запись")
+        if not all(_word_pair(k, v) for k, v in data["params"].items()):
+            raise ConfigError(f"{SCHEMA}: params: неверный тип")
         values = {f: data[f] for f in _FIELDS}
         values["auth_files"] = tuple(files)
         return cls(**values)
@@ -587,6 +649,23 @@ _FIELD_TYPES: Mapping[str, tuple[type, ...]] = MappingProxyType(
         "auth_files": (list,),
     }
 )
+
+
+def _auth_file_ok(entry: object) -> bool:
+    """`{path: str, mtime_ns: int, sha256: str}` and nothing else."""
+    if not isinstance(entry, dict) or set(entry) != {"path", "mtime_ns", "sha256"}:
+        return False
+    mtime = entry["mtime_ns"]
+    return (
+        isinstance(entry["path"], str)
+        and isinstance(entry["sha256"], str)
+        and isinstance(mtime, int)
+        and not isinstance(mtime, bool)
+    )
+
+
+def _word_pair(key: object, value: object) -> bool:
+    return isinstance(key, str) and isinstance(value, str)
 
 
 def record_path(layout: Layout, role: str, product: int | None) -> Path:
@@ -657,10 +736,11 @@ def run_probe(
     formed = _form(choice, path, home)
     if isinstance(formed, str):
         return formed
-    argv, env, sha = formed
-    profile = admit(choice.harness, path, detect_platform(), argv=argv, env=env)
-    if isinstance(profile, str):
-        return profile
+    argv, env = formed
+    admitted = admission(choice.harness, path, detect_platform(), argv=argv, env=env)
+    if isinstance(admitted, str):
+        return admitted
+    profile = admitted.profile
     managed_digest, problems = managed_context(profile)
     if managed_digest is None:  # changed since admission: still before launch
         return f"{UNSUPPORTED}: " + "; ".join(problems)
@@ -672,7 +752,7 @@ def run_probe(
         product,
         choice,
         profile,
-        sha=sha,
+        sha=admitted.executable_sha256,
         managed_digest=managed_digest,
         result=result,
         auth=observe_auth(profile, home),
@@ -683,16 +763,17 @@ def run_probe(
 
 def _form(
     choice: ModelChoice, path: Path, home: Path
-) -> tuple[list[str], dict[str, str], str] | str:
-    """The argv, env and executable SHA of the probe, from the profile pinned
-    to that SHA (data only: admission comes after)."""
+) -> tuple[list[str], dict[str, str]] | str:
+    """The argv and env of the probe, from the profile pinned to the SHA of
+    the executable (data only: admission, which hashes again and names the
+    SHA recorded, comes after)."""
     found = executable_target(path)
     if isinstance(found, str):
         return found
     target, sha = found
-    profile = HARNESS_PROFILES.get((choice.harness, detect_platform(), sha))
-    if profile is None:
-        return f"{UNSUPPORTED}: неизвестный исполняемый файл {sha}"
+    profile = profile_for(choice.harness, detect_platform(), sha)
+    if isinstance(profile, str):
+        return profile
     try:
         params = param_argv(choice)
         argv = profile.argv(target, choice)
@@ -705,7 +786,7 @@ def _form(
         "PATH": f"{target.parent}:/usr/bin:/bin",
         "LANG": "C.UTF-8",
     }
-    return argv, env, sha
+    return argv, env
 
 
 def _record(
@@ -817,12 +898,15 @@ def current_status(
     install: InstallConfig | None,
     *,
     root: bool,
+    targets: dict[Path, tuple[Path, str] | str] | None = None,
 ) -> tuple[ProbeStatus, ProbeRecord | None]:
     """The status of `role`'s last record against the facts observable now.
 
     A non-root reader cannot observe the role's auth: with a record, rule 2
     («нужен sudo»). Root observes the executable, its profile, the managed
-    context and the auth files; nothing is executed.
+    context and the auth files; nothing is executed. `targets` caches
+    `executable_target` per approved path across the roles of one command
+    (each binary is hashed once).
     """
     rec = read_record(layout, role, None)
     if rec is None or not root:
@@ -835,10 +919,10 @@ def current_status(
             f"{NOT_CHECKED}: роль {user} не создана (этап 2)", False
         ), rec
     path = None if install is None else install.approved_cli.get(choice.harness)
-    found = UNSUPPORTED if path is None else executable_target(path)
+    found = UNSUPPORTED if path is None else _target_cached(path, targets)
     sha = None if isinstance(found, str) else found[1]
-    profile = HARNESS_PROFILES.get((choice.harness, detect_platform(), sha or ""))
-    if profile is None:  # the version is unknown: stale, not «нужен sudo»
+    profile = profile_for(choice.harness, detect_platform(), sha or "")
+    if isinstance(profile, str):  # the version is unknown: stale, not «нужен sudo»
         return probe_status(
             rec,
             choice,
@@ -855,6 +939,16 @@ def current_status(
         executable_sha256=sha,
         managed_digest=managed_context(profile)[0],
     ), rec
+
+
+def _target_cached(
+    path: Path, cache: dict[Path, tuple[Path, str] | str] | None
+) -> tuple[Path, str] | str:
+    if cache is None:
+        return executable_target(path)
+    if path not in cache:
+        cache[path] = executable_target(path)
+    return cache[path]
 
 
 _UNOBSERVED: Mapping[str, None] = MappingProxyType(
