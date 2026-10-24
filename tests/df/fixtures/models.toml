@@ -1,0 +1,15 @@
+schema = "df/models/v1"
+
+[roles.author]
+harness = "claude"
+model = "claude-opus-5-5"
+effort = "high"
+
+[roles.reviewer]
+harness = "codex"
+model = "gpt-5.4"
+
+[products."42".roles.reviewer]
+harness = "claude"
+model = "claude-sonnet-5-5"
+effort = "medium"

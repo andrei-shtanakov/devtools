@@ -4,7 +4,8 @@ The entry (`df/launcher_entry.py`, Task 8a) or bootstrap (`df/bootstrap.py`)
 calls `main(argv, mode=, read=, lock_fd=)`. A writer works from the snapshot
 the entry read under the lock it holds; bootstrap takes the lock, settles
 and reads the snapshot itself. Subcommands: `init` and `install` (Task 9);
-`doctor` (Task 12) and `models` (Task 10) are refused here until they land.
+`models list|set` (Task 10); `doctor` (Task 12) is refused here until it
+lands.
 
 Exit codes (M7): 0 success; 2 a refusal or a configuration error, with the
 step named; 3 `NeedsHuman` (the instruction on stderr); 1 a program error
@@ -14,6 +15,7 @@ with its traceback.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import traceback
@@ -21,7 +23,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import NoReturn
 
-from df import accept, install, journal, launcher_entry, state
+from df import accept, fsutil, install, journal, launcher_entry, models, state
 from df.config import ConfigError, InstallConfig, Pending, parse_install
 from df.digest import TreeError
 from df.journal import NeedsHuman, Stable, StepFailed, Transitional
@@ -39,10 +41,19 @@ ROOT_UID = 0
 #: Subcommands allowed while `pending.toml` exists (spec 3.3).
 PENDING_ALLOWED = frozenset({"init", "install", "doctor"})
 #: Subcommands that land in later tasks: refused at dispatch (M19).
-LATER = {"doctor": "Task 12", "models": "Task 10"}
+LATER = {"doctor": "Task 12"}
 
-_TRANSITIONAL = "идёт или прервана административная операция: darkfactory install"
+_TRANSITIONAL = (
+    "идёт или прервана административная операция: дождитесь её конца; "
+    "прерванную повторите от root (darkfactory install или darkfactory models set)"
+)
 _FINISH = "есть незавершённая установка: завершите darkfactory install"
+_NO_PRODUCT = "продукт не зарегистрирован (этап 3)"
+_NO_REGISTRY = "реестр продуктов не поддерживается до этапа 3"
+#: The probe column until Task 11 fills it.
+_NOT_PROBED = "не проверено"
+_UNSET = "—"
+_LIST_COLUMNS = ("роль", "harness", "model", "effort", "источник", "проверка")
 _REFUSALS = (
     StepFailed,
     TreeError,
@@ -111,6 +122,8 @@ def _main(
     lay: Layout,
 ) -> int:
     _check_call(mode, read, lock_fd)
+    if "--" in argv:  # before argparse, which would read past it (I-2)
+        raise _form_error(argv)
     args = _parse(argv)
     _check_mode(argv, mode, args)
     if launcher_entry.mode_of(argv) == "writer" and os.geteuid() != ROOT_UID:
@@ -145,7 +158,8 @@ def _check_call(mode: Mode, read: ReadResult | None, lock_fd: int | None) -> Non
 def parsed_mode(args: argparse.Namespace) -> str:
     """The mode the parsed command needs: `writer` for `init`, `install` and
     `models set` (`WRITER_COMMANDS`), else `reader`."""
-    words = (args.command, *getattr(args, "rest", ())[:1])
+    sub = getattr(args, "models_command", None)
+    words = (args.command,) if sub is None else (args.command, sub)
     writer = any(words[: len(cmd)] == cmd for cmd in launcher_entry.WRITER_COMMANDS)
     return "writer" if writer else "reader"
 
@@ -160,10 +174,7 @@ def _check_mode(argv: list[str], mode: Mode, args: argparse.Namespace) -> None:
     command = args.command
     wanted = launcher_entry.mode_of(argv)
     if "--" in argv or parsed_mode(args) != wanted:
-        raise UsageError(
-            f"{' '.join(argv)!r}: форма команды не поддерживается "
-            "(подкоманда — первым словом, без --)"
-        )
+        raise _form_error(argv)
     if mode == "reader" and wanted == "writer":
         raise Refusal(
             f"{command}: команда-писатель запущена без блокировки (режим reader)"
@@ -172,6 +183,13 @@ def _check_mode(argv: list[str], mode: Mode, args: argparse.Namespace) -> None:
         raise UsageError(f"ошибка программы: {command} в режиме writer")
     if mode == "bootstrap" and command not in ("init", "install"):
         raise Refusal("bootstrap принимает только init или install")
+
+
+def _form_error(argv: list[str]) -> UsageError:
+    return UsageError(
+        f"{' '.join(argv)!r}: форма команды не поддерживается "
+        "(подкоманда — первым словом, без --)"
+    )
 
 
 def _parse(argv: list[str]) -> argparse.Namespace:
@@ -189,6 +207,7 @@ def _parse(argv: list[str]) -> argparse.Namespace:
         "--cli", action="append", nargs="+", required=True, metavar="NAME=PATH"
     )
     sub.add_parser("install", exit_on_error=False, add_help=False, allow_abbrev=False)
+    _add_models(sub)
     for name in LATER:
         later = sub.add_parser(
             name, exit_on_error=False, add_help=False, allow_abbrev=False
@@ -200,6 +219,32 @@ def _parse(argv: list[str]) -> argparse.Namespace:
         raise UsageError(str(exc)) from exc
 
 
+def _add_models(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
+    """`models set <role> --harness H --model M [--effort E] [--param k=v]...
+    [--product ID]` and `models list [--product ID] [--json]`."""
+    opts = {"exit_on_error": False, "add_help": False, "allow_abbrev": False}
+    group = sub.add_parser("models", **opts)
+    words = group.add_subparsers(
+        dest="models_command", required=True, parser_class=_Parser
+    )
+    put = words.add_parser("set", **opts)
+    put.add_argument("role")
+    put.add_argument("--harness", required=True)
+    put.add_argument("--model", required=True)
+    put.add_argument("--effort")
+    put.add_argument("--param", action="append", default=[], metavar="K=V")
+    put.add_argument("--product", type=_repository_id)
+    show = words.add_parser("list", **opts)
+    show.add_argument("--product", type=_repository_id)
+    show.add_argument("--json", action="store_true")
+
+
+def _repository_id(text: str) -> int:
+    if not text.isascii() or not text.isdigit() or text.startswith("0"):
+        raise ValueError(text)
+    return int(text)
+
+
 # ---------- reader ----------
 
 
@@ -208,8 +253,60 @@ def _reader(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
         if args.command == "doctor":
             return _later(args.command)
         raise Refusal(_TRANSITIONAL)
-    state.parse_snapshot(read.value, lay, mode="reader")
+    snap = state.parse_snapshot(read.value, lay, mode="reader")
+    if args.command == "models":
+        return _models_list(args, snap)
     return _later(args.command)
+
+
+def _models_list(args: argparse.Namespace, snap: Snapshot) -> int:
+    """Every role in `ROLES` order from the snapshot's text (I2); a role
+    without a choice is shown unset (R58). `--product` is refused until the
+    registry lands (stage 3): a reader reads no registry, so it does not claim
+    the product is unregistered (R57)."""
+    if args.product is not None:
+        raise Refusal(_NO_REGISTRY)
+    text = snap.models_text
+    cfg = models.EMPTY if text is None else models.parse_models(text)
+    rows = [_list_row(cfg, role) for role in models.ROLES]
+    if args.json:
+        print(json.dumps(rows, sort_keys=True, ensure_ascii=False, indent=2))
+        return EXIT_OK
+    table = [_LIST_COLUMNS, *(_list_cells(row) for row in rows)]
+    widths = [max(len(line[i]) for line in table) for i in range(len(_LIST_COLUMNS))]
+    for line in table:
+        print("  ".join(c.ljust(n) for c, n in zip(line, widths, strict=True)).rstrip())
+    return EXIT_OK
+
+
+def _list_row(cfg: models.ModelsConfig, role: str) -> dict[str, object]:
+    unset: dict[str, object] = {
+        "role": role,
+        "harness": None,
+        "model": None,
+        "effort": None,
+        "params": None,
+        "source": None,
+        "probe": _NOT_PROBED,
+    }
+    try:
+        choice, source = models.resolve(cfg, role, None)
+    except ConfigError:
+        return unset
+    return {
+        **unset,
+        "harness": choice.harness,
+        "model": choice.model,
+        "effort": choice.effort,
+        "params": dict(choice.params),
+        "source": source,
+    }
+
+
+def _list_cells(row: dict[str, object]) -> tuple[str, ...]:
+    source = "не задано" if row["source"] is None else str(row["source"])
+    values = (row["role"], row["harness"], row["model"], row["effort"])
+    return (*(_UNSET if v is None else str(v) for v in values), source, _NOT_PROBED)
 
 
 def _later(command: str) -> int:
@@ -235,6 +332,8 @@ def _writer(
         raise StepFailed("damaged", refusal)
     if snap.pending_present and args.command not in PENDING_ALLOWED:
         raise Refusal(_FINISH)
+    if args.command == "models":
+        return _models_set(args, lay, snap)
     if args.command not in ("init", "install"):
         return _later(args.command)
     requested = _requested(args, snap, pending)
@@ -246,6 +345,52 @@ def _writer(
     release_id = install.run_install(lay, requested, snap, pending)
     print(f"darkfactory: установлен релиз {release_id}; команда: {_command(lay)}")
     return EXIT_OK
+
+
+def _models_set(args: argparse.Namespace, lay: Layout, snap: Snapshot) -> int:
+    """Replace one role's common choice in `models.toml` (spec 3.6).
+
+    The current text is the snapshot's, read under the lock this writer
+    holds (R56); everything is checked before the generation opens, so a
+    refusal changes nothing. One `write_atomic` between `generation_begin`
+    and `generation_end`; the other entries stay as they were.
+    """
+    if args.product is not None:
+        registry = os.path.lexists(lay.etc / "products.toml")
+        raise Refusal(_NO_REGISTRY if registry else _NO_PRODUCT)
+    choice = models.ModelChoice(
+        args.harness, args.model, args.effort, _params(args.param)
+    )
+    text = snap.models_text
+    current = models.EMPTY if text is None else models.parse_models(text)
+    cfg = models.with_choice(current, args.role, choice)
+    _close_odd_generation(lay, snap)
+    journal.generation_begin(lay)
+    try:
+        fsutil.write_atomic(lay.etc / "models.toml", models.dump_models(cfg))
+    except OSError:
+        # unlike install, no `pending.toml` marks this bracket: a refused
+        # write leaves the old or the new file whole, so it closes here (a
+        # crash does not get here; the next writer closes it, M9)
+        journal.generation_end(lay)
+        raise
+    journal.generation_end(lay)
+    effort = "" if choice.effort is None else f" ({choice.effort})"
+    print(
+        f"darkfactory: {args.role}: {choice.harness} {choice.model}{effort}, "
+        f"источник {models.COMMON}"
+    )
+    return EXIT_OK
+
+
+def _params(items: list[str]) -> dict[str, str]:
+    params: dict[str, str] = {}
+    for item in items:
+        key, sep, value = item.partition("=")
+        if not sep or not key or key in params:
+            raise UsageError(f"--param {item!r}: нужно K=V, каждый ключ один раз")
+        params[key] = value
+    return params
 
 
 def _requested(

@@ -52,6 +52,7 @@ from tests.df.conftest import BUILD_UID, FakeLayout
 from tests.df.install_world import (
     CLEAN_PASS,
     FIRST,
+    MODELS_SET,
     OTHER_SHA,
     PLATFORM,
     SECOND,
@@ -189,14 +190,15 @@ def test_commands_refuse_while_pending(
 ) -> None:
     """M19: the common filter refuses a writer subcommand other than
     `init`/`install` while `pending.toml` exists — before dispatch (`models
-    set` is Task 10's); without `pending.toml` the same call reaches the
-    dispatch stub instead."""
+    set`); without `pending.toml` the same call reaches the dispatch and
+    succeeds instead."""
     installed(w)
-    assert w.writer(["models", "set", "x"]) == 2
-    assert "ещё не реализовано (Task 10)" in capsys.readouterr().err
+    assert w.writer(MODELS_SET) == 0
     interrupt(w, w.writer, ["install"], "build")
-    assert w.writer(["models", "set", "x"]) == 2
+    before = files(w)
+    assert w.writer(MODELS_SET) == 2
     assert "завершите darkfactory install" in capsys.readouterr().err
+    assert files(w) == before
 
 
 def test_reader_mode_refuses_writer_subcommand(
@@ -208,7 +210,7 @@ def test_reader_mode_refuses_writer_subcommand(
     raw = state.read_raw(w.lay)
     runs: list[object] = []
     w.mp.setattr(install, "run_install", lambda *a, **kw: runs.append(a))
-    for argv in (["install"], w.init_argv(), ["models", "set", "x"]):
+    for argv in (["install"], w.init_argv(), MODELS_SET):
         assert w.reader(argv, Stable(raw, raw.generation)) == 2
         assert "без блокировки" in capsys.readouterr().err
     assert runs == []
@@ -217,7 +219,7 @@ def test_reader_mode_refuses_writer_subcommand(
 def test_reader_transitional(w: World, capsys: pytest.CaptureFixture[str]) -> None:
     """A reader in a transitional state: `doctor` reaches its (Task 12) stub,
     the rest refuse naming the interrupted operation."""
-    assert w.reader(["models"], Transitional(3)) == 2
+    assert w.reader(["models", "list"], Transitional(3)) == 2
     assert "идёт или прервана административная операция" in capsys.readouterr().err
     assert w.reader(["doctor"], Transitional(3)) == 2
     assert "Task 12" in capsys.readouterr().err
@@ -966,7 +968,7 @@ def test_main_rereads_nothing(w: World, run: str) -> None:
     assert_no_reread(reads, bootstrap=False)
     raw = state.read_raw(w.lay)
     with watching(w) as reads:
-        assert w.reader(["models", "list"], Stable(raw, raw.generation)) == 2
+        assert w.reader(["models", "list"], Stable(raw, raw.generation)) == 0
     assert reads.hits == []
 
 
@@ -992,7 +994,7 @@ def test_pending_must_match_the_snapshot(
     assert files(w) == before
 
 
-@pytest.mark.parametrize("argv", [["doctor"], ["models", "set", "x"], ["models"]])
+@pytest.mark.parametrize("argv", [["doctor"], MODELS_SET, ["models", "list"]])
 def test_bootstrap_rejects_other_subcommands(
     w: World, capsys: pytest.CaptureFixture[str], argv: list[str]
 ) -> None:
@@ -1122,7 +1124,7 @@ ARGV_FORMS = {
     "prefix-subcommand": ["inst"],
     "repeated": ["install", "install"],
     "empty": [],
-    "models-set": ["models", "set", "x"],
+    "models-set": MODELS_SET,
 }
 
 
@@ -1133,7 +1135,7 @@ def test_argv_forms_never_split_mode_and_dispatch(
 ) -> None:
     """I-2: each form in each mode is exit 2 before the euid check and any
     dispatch — except `models set`, which is a legitimate writer subcommand
-    (reader: refused as a writer; writer: its Task 10 stub; bootstrap:
+    (reader: refused as a writer; writer: refused for root; bootstrap:
     refused as not init/install). Not root: a form that slipped past the
     mode check would be refused for root instead, so the message tells."""
     w.mp.setattr(cli, "ROOT_UID", os.geteuid() + 1)
@@ -1156,8 +1158,8 @@ def test_argv_forms_never_split_mode_and_dispatch(
     legit = (form, mode) == ("models-set", "writer")
     assert ("требует root" in err) == legit
     if "--" in argv and form != "dashdash-after-install":
-        # the second layer: `--` itself never reaches a dispatch (Task 10's
-        # `models` would otherwise get `rest = ["--", "set", …]`)
+        # the second layer: `--` itself never reaches argparse or a dispatch
+        # (argparse would read `models -- set …` as `models set …`)
         assert "форма команды" in err, err
     assert runs == [] and not os.path.lexists(w.lay.var)
 
@@ -1168,22 +1170,23 @@ def test_later_never_indexes_an_unknown_command() -> None:
 
 
 @pytest.mark.parametrize(
-    "argv,command,rest",
+    "argv,command,models_command",
     [
         (["x", "install"], "install", None),
-        (["install"], "models", ["list"]),
-        (["models", "set"], "models", ["list"]),
+        (["install"], "models", "list"),
+        (["models", "set"], "models", "list"),
         (["models", "list"], "init", None),
+        (["models", "list"], "models", "set"),
     ],
 )
 def test_check_mode_refuses_any_disagreement(
-    argv: list[str], command: str, rest: list[str] | None
+    argv: list[str], command: str, models_command: str | None
 ) -> None:
     """I-2, the recompute alone (no `--`): the parsed command's mode differs
     from `mode_of(argv)` — refused in every mode, whatever argparse made."""
     ns = argparse.Namespace(command=command)
-    if rest is not None:
-        ns.rest = rest
+    if models_command is not None:
+        ns.models_command = models_command
     for mode in ("reader", "writer", "bootstrap"):
         with pytest.raises(cli.UsageError, match="форма команды"):
             cli._check_mode(argv, mode, ns)  # type: ignore[arg-type]  # noqa: SLF001

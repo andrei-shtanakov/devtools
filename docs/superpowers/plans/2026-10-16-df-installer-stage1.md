@@ -2927,7 +2927,7 @@ I10, M1–M14, M16–M20, N1–N4 приняты как обязательные
       (M14); конфигурация `init` (`--cli NAME=PATH`, каждое имя один раз) проверяется
       там же, до блокировки;
     - `reader` с `Transitional`: `doctor` — переходная диагностика (Task 12), остальные — код
-      2, «идёт или прервана административная операция: darkfactory install»;
+      2, «идёт или прервана административная операция: дождитесь её конца; прерванную повторите от root (darkfactory install или darkfactory models set)»;
     - `bootstrap` — только из `df/bootstrap.py`, `read is None`: `main` сама берёт
       `writer_lock`, выполняет `settle_on_acquire` и читает `read_raw`. Отсутствие блокировки
       режим не определяет. Python ≥ 3.12, флаги `-I -B -S` и подкоманды `init`/`install`
