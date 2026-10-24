@@ -4,8 +4,8 @@ The entry (`df/launcher_entry.py`, Task 8a) or bootstrap (`df/bootstrap.py`)
 calls `main(argv, mode=, read=, lock_fd=)`. A writer works from the snapshot
 the entry read under the lock it holds; bootstrap takes the lock, settles
 and reads the snapshot itself. Subcommands: `init` and `install` (Task 9);
-`models list|set` (Task 10); `doctor` (Task 12) is refused here until it
-lands.
+`models list|set` (Task 10); `doctor --probe-models` (Task 11); plain
+`doctor` (Task 12) is refused here until it lands.
 
 Exit codes (M7): 0 success; 2 a refusal or a configuration error, with the
 step named; 3 `NeedsHuman` (the instruction on stderr); 1 a program error
@@ -23,7 +23,16 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import NoReturn
 
-from df import accept, fsutil, install, journal, launcher_entry, models, state
+from df import (
+    accept,
+    fsutil,
+    install,
+    journal,
+    launcher_entry,
+    models,
+    probe,
+    state,
+)
 from df.config import ConfigError, InstallConfig, Pending, parse_install
 from df.digest import TreeError
 from df.journal import NeedsHuman, Stable, StepFailed, Transitional
@@ -50,8 +59,7 @@ _TRANSITIONAL = (
 _FINISH = "есть незавершённая установка: завершите darkfactory install"
 _NO_PRODUCT = "продукт не зарегистрирован (этап 3)"
 _NO_REGISTRY = "реестр продуктов не поддерживается до этапа 3"
-#: The probe column until Task 11 fills it.
-_NOT_PROBED = "не проверено"
+_NO_INSTALL = "нет /etc/df/install.toml: начните с bootstrap init"
 _UNSET = "—"
 _LIST_COLUMNS = ("роль", "harness", "model", "effort", "источник", "проверка")
 _REFUSALS = (
@@ -208,11 +216,11 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     )
     sub.add_parser("install", exit_on_error=False, add_help=False, allow_abbrev=False)
     _add_models(sub)
-    for name in LATER:
-        later = sub.add_parser(
-            name, exit_on_error=False, add_help=False, allow_abbrev=False
-        )
-        later.add_argument("rest", nargs=argparse.REMAINDER)
+    doctor = sub.add_parser(
+        "doctor", exit_on_error=False, add_help=False, allow_abbrev=False
+    )
+    doctor.add_argument("--probe-models", action="store_true")
+    doctor.add_argument("--product", type=_repository_id)
     try:
         return parser.parse_args(argv)
     except argparse.ArgumentError as exc:
@@ -249,26 +257,75 @@ def _repository_id(text: str) -> int:
 
 
 def _reader(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
+    if args.command == "doctor" and args.probe_models:
+        return _probe_models(args, lay, read)
     if isinstance(read, Transitional):
         if args.command == "doctor":
             return _later(args.command)
         raise Refusal(_TRANSITIONAL)
     snap = state.parse_snapshot(read.value, lay, mode="reader")
     if args.command == "models":
-        return _models_list(args, snap)
+        return _models_list(args, lay, snap)
     return _later(args.command)
 
 
-def _models_list(args: argparse.Namespace, snap: Snapshot) -> int:
+def _probe_models(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
+    """`doctor --probe-models` (spec 3.6, R63): root only; the models text and
+    the install configuration are the snapshot's (I2). Each role with a
+    choice is probed once; records go to `probes_dir` (not install state, so
+    no generation bracket). `--product` is refused until the registry lands
+    (R64)."""
+    if os.geteuid() != ROOT_UID:
+        raise Refusal("doctor --probe-models: нужен sudo")
+    if isinstance(read, Transitional):
+        raise Refusal(_TRANSITIONAL)
+    if args.product is not None:
+        raise Refusal(_NO_REGISTRY)
+    snap = state.parse_snapshot(read.value, lay, mode="reader")
+    if snap.install is None:
+        raise Refusal(_NO_INSTALL)
+    cfg = _models_of(snap)
+    probe.prepare_dirs(lay)
+    for role in models.ROLES:
+        try:
+            models.resolve(cfg, role, None)
+        except ConfigError:
+            print(f"{role}: модель не задана")
+            continue
+        # the runner is looked up now, not bound at import (the tests' seam)
+        result = probe.run_probe(
+            role, None, cfg, snap.install, lay, runner=probe.run_as
+        )
+        print(f"{role}: {_probe_line(result)}")
+    return EXIT_OK
+
+
+def _probe_line(result: probe.ProbeRecord | str) -> str:
+    if isinstance(result, str):
+        return result
+    reason = "" if result.reason is None else f" ({result.reason})"
+    model = result.actual_model or "не сообщена"
+    return (
+        f"{result.outcome}{reason}; фактическая модель {model}; "
+        f"auth_tracking {result.auth_tracking}"
+    )
+
+
+def _models_of(snap: Snapshot) -> models.ModelsConfig:
+    text = snap.models_text
+    return models.EMPTY if text is None else models.parse_models(text)
+
+
+def _models_list(args: argparse.Namespace, lay: Layout, snap: Snapshot) -> int:
     """Every role in `ROLES` order from the snapshot's text (I2); a role
     without a choice is shown unset (R58). `--product` is refused until the
     registry lands (stage 3): a reader reads no registry, so it does not claim
     the product is unregistered (R57)."""
     if args.product is not None:
         raise Refusal(_NO_REGISTRY)
-    text = snap.models_text
-    cfg = models.EMPTY if text is None else models.parse_models(text)
-    rows = [_list_row(cfg, role) for role in models.ROLES]
+    cfg = _models_of(snap)
+    root = os.geteuid() == ROOT_UID
+    rows = [_list_row(cfg, role, lay, snap, root) for role in models.ROLES]
     if args.json:
         print(json.dumps(rows, sort_keys=True, ensure_ascii=False, indent=2))
         return EXIT_OK
@@ -279,7 +336,12 @@ def _models_list(args: argparse.Namespace, snap: Snapshot) -> int:
     return EXIT_OK
 
 
-def _list_row(cfg: models.ModelsConfig, role: str) -> dict[str, object]:
+def _list_row(
+    cfg: models.ModelsConfig, role: str, lay: Layout, snap: Snapshot, root: bool
+) -> dict[str, object]:
+    """One role's row; the probe status from its record in `probes_dir`
+    (R65: a non-root reader cannot observe the auth, so a record shows
+    «данные недоступны: нужен sudo»)."""
     unset: dict[str, object] = {
         "role": role,
         "harness": None,
@@ -287,12 +349,15 @@ def _list_row(cfg: models.ModelsConfig, role: str) -> dict[str, object]:
         "effort": None,
         "params": None,
         "source": None,
-        "probe": _NOT_PROBED,
+        "status": probe.NOT_CHECKED,
+        "current": False,
+        "auth_tracking": None,
     }
     try:
         choice, source = models.resolve(cfg, role, None)
     except ConfigError:
         return unset
+    status, rec = probe.current_status(lay, role, choice, snap.install, root=root)
     return {
         **unset,
         "harness": choice.harness,
@@ -300,13 +365,17 @@ def _list_row(cfg: models.ModelsConfig, role: str) -> dict[str, object]:
         "effort": choice.effort,
         "params": dict(choice.params),
         "source": source,
+        "status": status.text,
+        "current": status.current,
+        "auth_tracking": None if rec is None else rec.auth_tracking,
     }
 
 
 def _list_cells(row: dict[str, object]) -> tuple[str, ...]:
     source = "не задано" if row["source"] is None else str(row["source"])
     values = (row["role"], row["harness"], row["model"], row["effort"])
-    return (*(_UNSET if v is None else str(v) for v in values), source, _NOT_PROBED)
+    cells = (_UNSET if v is None else str(v) for v in values)
+    return (*cells, source, str(row["status"]))
 
 
 def _later(command: str) -> int:
@@ -405,7 +474,7 @@ def _requested(
     if pending is not None:
         return parse_install(pending.install_text)
     if snap.install is None:
-        raise Refusal("нет /etc/df/install.toml: начните с bootstrap init")
+        raise Refusal(_NO_INSTALL)
     return snap.install
 
 

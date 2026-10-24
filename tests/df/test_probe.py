@@ -814,7 +814,7 @@ def test_plain_doctor_is_still_the_stub(
 ) -> None:
     assert doctor(world, []) == 2
     assert "Task 12" in capsys.readouterr().err
-    assert doctor(world, ["--json"]) == 2
+    assert doctor(world, [], Transitional(3)) == 2
     assert "Task 12" in capsys.readouterr().err
 
 
