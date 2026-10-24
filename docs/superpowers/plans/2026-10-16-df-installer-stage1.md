@@ -2738,7 +2738,9 @@ I10, M1–M14, M16–M20, N1–N4 приняты как обязательные
       <вызов> <путь>: …")` по `(route, index)` из `ROUTES` (M7); отказ журналируется
       `failed`. Откат не требует сети, профиля и учётки; очиститель `cleanup_tree` от
       `df-build` — только при пустом `verify_build_user`, иначе `StepFailed("rollback")` до
-      любого эффекта (9-A I-1);
+      запуска очистителя (9-A I-1); шаги маршрута до него (шаг 0 `cleanup` —
+      `remove_own_tree` корня root `releases/<id>`) могли уже выполниться, повтор
+      идемпотентно повторяет их (docstring `rollback_calls`);
     - иной `current` → `StepFailed("pending", "current = …: ни <id>, ни прежний <id> —
       решает человек")` (M10; без ссылки на `doctor`).
   - `install_steps(layout: Layout, cfg: InstallConfig, prepared: Prepared) -> list[Step]` —
@@ -2748,14 +2750,14 @@ I10, M1–M14, M16–M20, N1–N4 приняты как обязательные
     | # | Шаг | `check()` | `do()` |
     |---|---|---|---|
     | 1 | `manifest` | `fetch_manifest` (только HTTPS-чтение) и `parse_profile` в `prepared`; `ManifestError`/`OSError` — `StepFailed("manifest", <проблемы>)` из самого `check()` | — |
-    | 2 | `trusted-paths` | сначала `approved_cli_problems`; затем закрепление найденных каталогов набора и их предков (`_settle_prep_dirs`); для каждого каталога `prep_dirs` — `policy_problems` (отсутствующий — по ближайшему существующему предку), не каталог — проблема, точный режим у `EXACT_MODES`; любая проблема — `StepFailed("trusted-paths", <пути и причины>)`; ложь — только отсутствие или исправимый свой каталог | создать недостающие (`fsutil.make_dir`, рождён в итоговом режиме, закреплён сам и в родителе; недостающие предки — `0755`) и расширить свой каталог root с режимом уже нужного или с унаследованным `S_ISGID` (`fsutil.repairable`) — для **любого** каталога набора; чужой владелец, запись группы и всех, режим шире у точного — отказ; запись группы и всех не добавляется никогда |
+    | 2 | `trusted-paths` | сначала `approved_cli_problems`; затем закрепление найденных каталогов набора и их предков (`_settle_prep_dirs`); для каждого каталога `prep_dirs` — `policy_problems` (отсутствующий — по ближайшему существующему предку), не каталог — проблема, точный режим у `EXACT_MODES`; любая проблема — `StepFailed("trusted-paths", <пути и причины>)`; ложь — только отсутствие или исправимый свой каталог | создать недостающие (`fsutil.make_dir`, рождён в итоговом режиме, закреплён сам и в родителе; недостающие предки — `0755`) и расширить свой каталог root с режимом уже нужного или с унаследованным `S_ISGID` (`fsutil.repairable`) — для **любого** каталога набора; чужой владелец, запись группы и всех, ACL, расхождение режима у точного — отказ; режим шире без записи группы и всех у неточного не исправляется и не отказывает; запись группы и всех не добавляется никогда |
     | 3 | `build-user` | `verify_build_user` пуст и только затем `whoami_as` = записи (M4: ни одного `run_as` при `creating`) | `create_build_user` |
 
     Набор шага 2 и режимы (`prep_dirs`, порядок создания; M3, 9-C): `opt`, `releases` —
     `0755`; `staging`, `quarantine` — `0711`; `admin`, `admin_python`, `bin_dir`, `etc`,
     `var` — `0755`; `marks_dir`, `verify_dir`, `admin_home` — `0700` (примитивы Task 7 их не
-    создают, R33.F31; `admin_home` — каталог шага 2 с 9-C, `install_admin_python` только
-    проверяет его). `EXACT_MODES = (staging, quarantine, marks_dir, verify_dir,
+    создают, R33.F31; `admin_home` — каталог шага 2 с 9-C, `install_admin_python` проверяет
+    его и создаёт через `fsutil.make_dir` (`0700`), если его нет). `EXACT_MODES = (staging, quarantine, marks_dir, verify_dir,
     admin_home)`. `install_dir` создаёт `writer_lock`. Решение M3 «`do()` не исправляет
     существующее» сужено (9-C RC-C5): не исправляет **чужой или более широкий**; созданное
     закрепляется синхронизацией самого каталога и родителя (не только родителя).
@@ -2955,8 +2957,9 @@ I10, M1–M14, M16–M20, N1–N4 приняты как обязательные
 
     Коды выхода (M7): 0 — успех; 2 — `Refusal`, `UsageError`, `StepFailed`, `TreeError`,
     `ConfigError`, `ManifestError`, `UnsupportedLock`, `OSError`: `darkfactory: <шаг>:
-    <подробность>` для `StepFailed`, `darkfactory: <Тип>: <сообщение>` для остальных (9-B
-    m3); 3 — `NeedsHuman` (инструкция в stderr); 1 — иное, с трассировкой (ошибка
+    <подробность>` для `StepFailed`; `darkfactory: <сообщение>` для `Refusal` и
+    `UsageError`; `darkfactory: <Тип>: <сообщение>` для `TreeError`, `ConfigError`,
+    `ManifestError`, `UnsupportedLock`, `OSError` (9-B m3); 3 — `NeedsHuman` (инструкция в stderr); 1 — иное, с трассировкой (ошибка
     программы, в том числе `AssertionError`).
 
 - [ ] **Step 1: Failing tests**
@@ -3949,7 +3952,8 @@ def test_account_created_through_main_linux(root_world, crash): ...
 def test_linux_loader_residuals(root_world): ...
     # из Task 5 (R26, решение владельца 22.10): Linux-гарантия approved_cli_problems не
     # подтверждена до этого прогона — замерить остатки модели загрузчика: подкаталоги
-    # glibc-hwcaps/tls системных каталогов и ld.so.cache (/etc/ld.so.conf с include);
+    # glibc-hwcaps/tls системных каталогов и записи ld.so.cache вне ld.so.conf (сам
+    # ld.so.conf с include код уже обходит);
     # утверждённый CLI на Ubuntu не тянет библиотеку мимо SYSTEM_LIB_DIRS; расхождение —
     # находка, не правка теста
 ```
@@ -4079,7 +4083,9 @@ def test_linux_loader_residuals(root_world): ...
   - дальше: `sudo darkfactory doctor`, `sudo darkfactory models set …`;
   - ограничения v1 из Task 9 (спека §3.8, §3.3): отказ `damaged` под незавершённой
     установкой и ручное восстановление (шаги из текста отказа; `current` вручную не
-    возвращать); root-владелец в карантине и его ручное снятие;
+    возвращать); снятие блокировки переустановки удалением `pending.toml` (R53, §3.8:
+    не подтверждает завершённость прежней установки) и второе ручное снятие (§3.8);
+    root-владелец в карантине и его ручное снятие;
   - почему не `df`: имя занято стандартной командой;
   - утверждённые CLI: только пути root (§3.10), способ подготовки `uv`;
   - приёмка — CI `df-stage1`; живая установка ждёт манифест.
