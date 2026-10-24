@@ -1,0 +1,12 @@
+{"type":"thread.started","thread_id":"01a16e61-8c4b-78e2-b205-b73a8fd6367b"}
+{"type":"turn.started"}
+{"type":"error","message":"Reconnecting... 2/5 (stream disconnected before completion: Connection refused (os error 61))"}
+{"type":"error","message":"Reconnecting... 3/5 (stream disconnected before completion: Connection refused (os error 61))"}
+{"type":"error","message":"Reconnecting... 4/5 (stream disconnected before completion: Connection refused (os error 61))"}
+{"type":"error","message":"Reconnecting... 5/5 (stream disconnected before completion: Connection refused (os error 61))"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Falling back from WebSockets to HTTPS transport. stream disconnected before completion: Connection refused (os error 61)"}}
+{"type":"error","message":"Reconnecting... waiting for network (Connection failed: error sending request)"}
+{"type":"error","message":"Reconnecting... waiting for network (Connection failed: error sending request)"}
+{"type":"error","message":"Reconnecting... waiting for network (Connection failed: error sending request)"}
+{"type":"error","message":"Reconnecting... waiting for network (Connection failed: error sending request)"}
+{"type":"error","message":"Reconnecting... waiting for network (Connection failed: error sending request)"}

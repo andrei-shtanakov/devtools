@@ -3456,9 +3456,12 @@ def test_set_requires_root(monkeypatch): ...
 - Create: `df/probe.py`
 - Modify: `df/models.py` (состояние проверки в `list`)
 - Test: `tests/df/test_probe.py`, `tests/df/test_probe_isolation.py` (маркер `harness`),
-  `tests/df/fixtures/probe/{claude-ok.json,claude-error.json,codex-ok.jsonl,
-  codex-neterr.jsonl}`, `tests/df/fixtures/probe/sentinel/` (hooks, MCP, конфиги)
-- Create (по факту Step 3): `docs/evidence/2026-10-XX-df-probe-isolation.md`
+  `tests/df/fixtures/probe/{claude-ok.json,claude-error.json,claude-http500.json,
+  codex-ok.jsonl,codex-neterr.jsonl,codex-http500.jsonl}` (настоящие выводы),
+  `tests/df/harness_world.py` (sentinel-деревья hooks, MCP, конфигов строятся во время
+  теста: в них абсолютные tmp-пути, поэтому статического `fixtures/probe/sentinel/` нет),
+  `tests/df/harness_stub.py` (локальная заглушка провайдера)
+- Create (по факту Step 3): `docs/evidence/2026-10-24-df-probe-isolation.md`
 
 **Interfaces:**
 - Consumes: `ModelChoice`, `ROLE_CONTEXT`, `config_hash`, `resolve` (Task 10); `run_as`
@@ -3651,6 +3654,11 @@ def test_auth_observation_has_no_content(tmp_path): ...
   `isolation_verified=True` ставится отдельным коммитом **только** для прошедших версий, со
   ссылкой на evidence. Не прошла — остаётся `False`, и пробы этой версии «не поддерживаются».
 - [ ] **Step 4: Commit** `feat(df): explicit model probes with verified harness isolation`
+
+**Итог Task 11 (решение владельца 24.10, дословно):** «Task 11 принимается как реализация механизма допуска, выполнения и учёта проб. Claude 2.1.309 и Codex 0.163.0 остаются неподдерживаемыми; харнессы не запускаются. Живая приёмка модельных ролей не пройдена. Изменение гарантии для серверной политики рассматривается отдельно, для каждого харнесса». Профили claude 2.1.309 и codex
+0.163.0 (macOS arm64) закреплены с `isolation_verified=False`; флип не делался. Тесты на
+настоящих харнессах — маркер `harness`, только по запросу (`pytest -m harness`). Переносы:
+Linux-профили и живая приёмка проб от ролей — Task 13 и этап 2; README — ограничение (Task 14).
 
 ### Task 12: `darkfactory doctor` — уровень 1
 

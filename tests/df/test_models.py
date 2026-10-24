@@ -559,7 +559,9 @@ def test_list_columns_text_and_json(
         "effort": "high",
         "params": {},
         "source": "общий",
-        "probe": "не проверено",
+        "status": "не проверено",
+        "current": False,
+        "auth_tracking": None,
     }
     assert data[-1] == {
         "role": "judge",
@@ -568,7 +570,9 @@ def test_list_columns_text_and_json(
         "effort": None,
         "params": None,
         "source": None,
-        "probe": "не проверено",
+        "status": "не проверено",
+        "current": False,
+        "auth_tracking": None,
     }
 
 
