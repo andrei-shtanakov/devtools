@@ -2596,11 +2596,43 @@ def test_bootstrap_under_system_python_says_what_is_needed(tmp_path): ...
 
 ### Task 9: Транзакция установки, регистрация, активация, команды `init` / `install`
 
+Как построено (24.10): предполётная проверка `task-9-preflight.md`, строки Ruling I1–I8,
+I10, M1–M14, M16–M20, N1–N4 приняты как обязательные (R46; где Ruling меняет текст брифа —
+действует Ruling). Исполнено четырьмя частями: 9-A (релиз и настоящие вызовы маршрутов),
+9-B (снимок, CLI, восстановление), 9-C (модель сбоя ОС, `fake_world`, именованные окна;
+найден и исправлен дефект долговечности режима созданных каталогов — механизм
+`fsutil.make_dir`/`create_file`/`exact_mode`, спека §3.3 «Создаваемые объекты»), 9-D1 (I9 —
+решение владельца 23.10, R51–R53: охранники G1–G4 и исправленная инструкция, спека §3.8
+«Повреждение под незавершённой установкой»), 9-D2 (матрица сбоев и семейства двойников,
+бюджет R49 → R55), 9-D3 (этот текст). Вариант (б) I9 (возврат `current` на прежний релиз)
+не реализован. Замеры — macOS arm64; Linux-ветки (наследование `S_ISGID`, учётка через
+`main`, матрица на настоящей ФС Linux) — Task 13.
+
 **Files:**
 - Create: `df/release.py`, `df/state.py`, `df/cli.py`, `df/install.py`
-- Test: `tests/df/test_release.py`, `tests/df/test_state.py`, `tests/df/test_install_steps.py`
-- Modify: `tests/df/conftest.py` (создан в Task 7 с `fake_layout`; добавить `fake_world`,
-  R33.F19)
+- Modify: `df/accept.py` (`AcceptMark.python_declared`, `entry_intact`, публичная
+  `current_is`, журнал M4/M5 `drive`), `df/routes.py` (`LATER_LEAVES = {}`,
+  `removal_calls`, `_root_kind(build_uid=None)`, `RouteContext.python_declared`),
+  `df/admin.py` (`entry_source`, `release_entry_text`, `launcher_ready(…, python)`,
+  `LINK_TMP`), `df/launcher_entry.py` (`entry_text(layout, source=None)`, файл блокировки
+  входа — в итоговом режиме), `df/inputs.py` (публичная `lock_digest`), `df/journal.py`
+  (публичная `read_generation`; цепочка блокировки через `fsutil.make_dir`, файлы — через
+  `create_file`), `df/fsutil.py` (`exact_mode`, `make_dir`, `create_file`, `repairable`),
+  `df/bootstrap.py` (снят `# type: ignore`), `pyproject.toml` (маркер `slow`, `addopts =
+  "-m 'not slow'"`)
+- Test (new): `tests/df/test_release.py`, `tests/df/test_state.py`,
+  `tests/df/test_install_steps.py`, `tests/df/test_install_i9.py`,
+  `tests/df/test_crash_model.py`, `tests/df/test_crash_windows.py`,
+  `tests/df/test_crash_create.py`, `tests/df/test_crash_matrix.py`; помощники
+  `tests/df/route_world.py` (из `test_routes.py`, 7-final M3), `tests/df/install_world.py`
+  (`World` и заглушки установки), `tests/df/crash_model.py` (модель сбоя ОС),
+  `tests/df/crash_matrix.py` (движок матрицы)
+- Modify (tests): `tests/df/conftest.py` (`fake_world`, `make_fake_layout`,
+  `make_fake_world`; `umask 022` autouse, M18), `tests/df/test_routes.py`,
+  `tests/df/test_leaves.py`, `tests/df/test_scenarios.py`, `tests/df/test_admin.py`,
+  `tests/df/test_accept.py`, `tests/df/test_drive.py`, `tests/df/test_launcher_entry.py`
+  (настоящий `df.state`), `tests/df/test_journal.py`, `tests/df/test_fsutil.py` (страж
+  «каждое изменение ФС и каждый запуск процесса в `df/` учтены»)
 
 **Interfaces:**
 - Consumes: всё из Tasks 1–8; `install_admin_python`, `install_admin`, `admin_ready`,
@@ -2612,8 +2644,11 @@ def test_bootstrap_under_system_python_says_what_is_needed(tmp_path): ...
 - Produces:
   - `next_release_id(layout: Layout, manifest_sha: str, platform: PlatformName) -> str` —
     наименьший `n ≥ 1`, для которого `<sha12>-<platform>-<n>` нет ни в `releases.toml`
-    (любой статус), ни среди каталогов `releases/`, `staging/`, `staging/.quarantine/`
-    (по префиксу), `admin/`, ни среди отметок `accept/`.
+    (любой статус), ни среди каталогов `releases/`, `staging/`, `admin/` (точное имя), ни
+    в `staging/.quarantine/` (имя равно id или начинается с `<id>.`), ни среди отметок
+    `accept/<id>.toml` (M1: иначе id 1 занят при наличии id 10). Префикс —
+    `id_prefix(manifest_sha, platform) = f"{manifest_sha[:12]}-{platform}-"` (тот же
+    префикс сверяет «согласован» I9).
   - `ReleaseRecord` (поля `release.json`, §3.5):
     - `schema = "df/release/v1"`, `id`, `digest`, `admin_digest`, `admin_python` (оба — из
       отметки `admin`, rev 8 r11);
@@ -2623,18 +2658,21 @@ def test_bootstrap_under_system_python_says_what_is_needed(tmp_path): ...
       шагом `build`, R29, R33.F11). `python_declared` — `ctx.python_declared`
       (`RouteContext`, Task 8): `sys.version` каждого окружения, принятый листом
       `transfer_check`;
-    - **решить в предполётной проверке Task 9** (R40/F7): `ctx.python_declared` и
-      `ctx.installed` живут только в процессе. Сбой после отметки `verified` → новый
-      процесс не повторяет `verify` → контекст пуст, и `register` не может записать
-      `release.json` (fail-closed, но установка застревает). Рекомендация: нести
-      `python_declared` в отметке начиная с `verified`, как `uv_version_declared`, а
-      `installed_distributions` перечитывать на `register` (только данные, над копией root,
-      закреплённой `tree_digest`). Гарантий не меняет: оба значения заявленные;
+    - решено (I4, R40/F7): `ctx.python_declared` и `ctx.installed` живут только в
+      процессе, а после отметки `verified` новый процесс `verify` не повторяет. Поэтому
+      `AcceptMark.python_declared: str | None` — канонический JSON `{repo: version}`
+      (`dump_declared`/`parse_declared`), обязателен с `verified`, у `admin` переносится
+      без изменений (`write_mark` сверяет перенос, как `uv_version_declared`); без ответов
+      `transfer_check` в этом процессе отметка `verified` — `StepFailed("mark")`. Отметка
+      без поля для `verified`/`admin` невалидна, то есть считается отсутствующей, и релиз
+      пересобирается (fail-closed). Гарантий не меняет: значения заявленные;
     - `distributions_declared: {repo: [{name, version, source}]}`. `source` — поля
-      `SourceId`; для registry `index: "not declared"`. Берётся из `ctx.installed`
-      (`RouteContext`, Task 7a) — того `ctx`, который `install_calls` передал
-      `acceptance_calls(..., ctx=ctx)`: списки, принятые листом `distribution_problems`.
-      Своего чтения окружения `write_release_json` не делает.
+      `SourceId`; для registry `index: "not declared"`. Читается заново на `register`
+      (`release_record(run)`): `installed_distributions(releases/<id>/venv/<repo>)` после
+      проверки, что `release_digest` копии равен `mark.tree_digest`, — те же списки, что
+      принял лист `distribution_problems`, и после повтора новым процессом. Читает
+      вызывающий, не `write_release_json`. `lock_sha256` — `inputs.lock_digest` по
+      доверенному чекауту (M12).
 
   - `write_release_json(release_dir: Path, rec: ReleaseRecord) -> None` — обёртка
     протокола `write_atomic` (`WRAPS`), `0644`. Эффекты: `write_atomic()`.
@@ -2643,52 +2681,108 @@ def test_bootstrap_under_system_python_says_what_is_needed(tmp_path): ...
   - `activate(layout: Layout, release_id: str) -> None`. Предусловие: запись `allowed`,
     `tree_digest` = записи, `admin_ready(layout, id, expected_admin_digest=<запись>.admin_digest,
     expected_python=<запись>.admin_python)`
-    истинен (запись прочитана `read_facts` под блокировкой). Протокол `activate`: ссылка
-    `current` — временная относительная `releases/<id>`, `rename` поверх `current`,
+    истинен — `accept.entry_intact` с `admin.admin_ready`; запись читает сам `activate`
+    через `registry_entry` под блокировкой (N4). Протокол `activate`: ссылка
+    `current` — временная относительная `releases/<id>` под одним именем `CURRENT_TMP =
+    ".current.tmp"` (остаток удаляется первым; каталог открыт `O_NOFOLLOW`), `rename`
+    поверх `current`,
     `fault_point("renamed")`, `sync_dir(opt)`. Эффекты: `renamed` → `sync_dir(opt_df)`.
-  - В `state.py`: `RawSnapshot(generation: int, current_id: str | None, releases_text: bytes,
-    install_text: bytes | None, models_text: bytes | None, pending_present: bool)` (поля =
-    `RAW_FIELDS`, Task 8a); `Stable`, `Transitional` — реэкспорт из Task 4;
-    `ReadResult = Stable[RawSnapshot] | Transitional`; `read_raw(layout) -> RawSnapshot` —
-    одно чтение всех частей; `Mode = Literal["writer", "reader", "bootstrap"]`;
-    `Snapshot(release_id: str | None, entry: ReleaseEntry | None, install: InstallConfig |
-    None, models_text: str | None, pending: Pending | None, generation: int)`;
-    `parse_snapshot(raw: RawSnapshot, layout: Layout, *, mode: Mode) -> Snapshot` —
-    `pending` разбирается только в режимах `writer`/`bootstrap`. Команды работают только со
-    снимком; ни одна функция после `main` не читает `current`, `install.toml`, `models.toml`,
-    `releases.toml` или `pending.toml` сама. Автомат писателя читает **факты** (`read_facts`,
-    Task 7) после каждого действия — это чтение собственных изменений под блокировкой, а не
-    перечитывание снимка (§3.3).
-  - `recover_pending(layout: Layout, snap: Snapshot, requested: InstallConfig) ->
-    Literal["none", "resume", "rollback"]` — §3.3 «Незавершённая установка», под
-    `writer_lock` первым делом. `snap` прочитан **после** `settle_on_acquire` (вход или
-    bootstrap), поэтому `reg`, `current` и дерево, на которых основано решение, уже
-    закреплены (rev 8 r6); своего закрепления функция не делает. Новый `pending.toml` пишется после `generation_begin`;
-    `generation_end` — после удаления `pending.toml` (успех или откат):
+  - В `state.py`: `RawSnapshot(generation: int, current_id: str | None, releases_text: bytes
+    | None, install_text: bytes | None, models_text: bytes | None, pending_present: bool)`
+    (поля = `RAW_FIELDS`, Task 8a; реестра нет при первой установке bootstrap, M2);
+    `Stable`, `Transitional` — реэкспорт из Task 4; `ReadResult = Stable[RawSnapshot] |
+    Transitional`; `read_raw(layout) -> RawSnapshot` — одно чтение всех частей
+    (поколение — публичная `journal.read_generation`; `current` — один `readlink`, цель —
+    относительная `releases/<id>` с допустимым id; файлы — через `config.read_optional`,
+    не-UTF-8 — отказ; любая ошибка — `StepFailed("snapshot")`); `Mode = Literal["writer",
+    "reader", "bootstrap"]`; `Snapshot(release_id: str | None, entry: ReleaseEntry | None,
+    install: InstallConfig | None, models_text: str | None, pending_present: bool,
+    generation: int)` — **без** поля `pending` (I2); `parse_snapshot(raw: RawSnapshot,
+    layout: Layout, *, mode: Mode) -> Snapshot` — снимок `reader` с `pending_present`
+    отвергается. Текст `pending.toml` писатель читает сам ровно один раз сразу после снимка:
+    `install.read_pending(layout) -> Pending | None` (I2, M8: `load_pending`, допустимый
+    id, `parse_install(install_text)`, чей digest и заново отрисованный текст обязаны
+    совпасть с файлом, иначе `StepFailed("pending")`); расхождение с `pending_present` —
+    `StepFailed("snapshot")`. Команды работают только со снимком; части снимка после `main`
+    читают только чтения автомата под блокировкой и собственные записи писателя — перечень
+    (белый список `test_main_rereads_nothing`, R46 I2 и его расширения D5 9-B и 9-D1):
+    `accept.read_facts`, `accept.settle`, `accept.settle_on_acquire`, `routes.route_guard`,
+    `routes._refuse_registered` (F13), `release.register`, `release.activate`,
+    `release.next_release_id`, `install._registered_python`, `install.read_pending`
+    (ровно один раз), `install._refuse_damaged_pending` (G2), `install._backstop` (G4), а
+    `fsutil.write_atomic` и `remove_durably` — как записи (они проверяют свою цель);
+    bootstrap добавляет `state.read_raw`. Читатель не читает ни одной части (§3.3).
+  - `recover_pending(layout: Layout, snap: Snapshot, requested: InstallConfig, pending:
+    Pending | None) -> Literal["none", "resume", "rollback"]` — §3.3 «Незавершённая
+    установка», под `writer_lock` первым делом; `pending` — результат `read_pending` (I2).
+    `snap` прочитан **после** `settle_on_acquire` (вход или bootstrap), поэтому `reg`,
+    `current` и дерево, на которых основано решение, уже закреплены (rev 8 r6); своего
+    закрепления функция не делает. Новый `pending.toml` (`PENDING_MODE = 0o644`) пишется
+    после `generation_begin`; `generation_end` — тот, кто удалил `pending.toml` (`run_install`
+    после `drive` или ветка отката, M6):
     - `pending` нет → `none`;
-    - `current` = `pending.release_id` → `resume` с тем же id, независимо от `requested`;
+    - `current` = `pending.release_id` → `resume` с тем же id, независимо от `requested`
+      (иная конфигурация — `warn` в журнале, I8);
     - `current` = `previous_current` и `config_digest(requested) == install_digest` →
-      `resume`;
-    - иначе → `rollback` — маршрут `rollback` через `run_route` (Task 7): маршрут `cleanup`
-      для незарегистрированного id,
-      `remove_durably(pending)`.
-  - `install_steps(layout: Layout, cfg: InstallConfig, pending: Pending) -> list[Step]` —
-    только подготовительные шаги 1–3 для `run_steps`; их `check()` — собственные факты:
+      `resume`; если релиз `pending.toml` зарегистрирован и не `intact` —
+      `StepFailed("damaged", <текст G2>)` здесь же, до шагов 1–3 и сети (G2, I9);
+    - `current` = `previous_current`, другая конфигурация → `rollback(layout, pending)`
+      выполняется здесь, затем `generation_end`, и только потом возвращается `"rollback"`
+      (M11). Порядок `rollback` (I7, I5): `policy_problems` для `opt`, `releases`,
+      `staging`, `admin` (`ROLLBACK_PARENTS`; отсутствующий — по ближайшему существующему
+      предку) пусты, иначе `StepFailed("trusted-paths")` до любого удаления;
+      `build_account` (запись `df-build` в любом состоянии или `None`); `rollback_calls`;
+      `generation_begin`; журнал `rollback start`; маршрут `rollback` через `run_route`
+      (Task 7) с `python_key=None` и `build_uid` записи; журнал `done`; `generation_end`.
+      Каждый вызов обёрнут: `TreeError`/`OSError` → `StepFailed("rollback", "<маршрут>[<i>]
+      <вызов> <путь>: …")` по `(route, index)` из `ROUTES` (M7); отказ журналируется
+      `failed`. Откат не требует сети, профиля и учётки; очиститель `cleanup_tree` от
+      `df-build` — только при пустом `verify_build_user`, иначе `StepFailed("rollback")` до
+      любого эффекта (9-A I-1);
+    - иной `current` → `StepFailed("pending", "current = …: ни <id>, ни прежний <id> —
+      решает человек")` (M10; без ссылки на `doctor`).
+  - `install_steps(layout: Layout, cfg: InstallConfig, prepared: Prepared) -> list[Step]` —
+    только подготовительные шаги 1–3 для `run_steps`; `Prepared(profile: Profile | None)`
+    несёт профиль из шага 1 (I1); их `check()` — собственные факты:
 
     | # | Шаг | `check()` | `do()` |
     |---|---|---|---|
-    | 1 | `manifest` | профиль разобран | — (чистая проверка; отказ — `StepFailed`) |
-    | 2 | `trusted-paths` | `approved_cli_problems` и `trusted_path_problems` для `/opt/df`, `/etc/df`, `/var/lib/df` пусты | создать недостающие каталоги root `0755` (`staging` и `.quarantine` — `0711`; `install/accept` и `var/verify` — `0700`: примитивы Task 7 их не создают, R33.F31) |
-    | 3 | `build-user` | `verify_build_user` пуст и `whoami_as` = записи | `create_build_user` |
+    | 1 | `manifest` | `fetch_manifest` (только HTTPS-чтение) и `parse_profile` в `prepared`; `ManifestError`/`OSError` — `StepFailed("manifest", <проблемы>)` из самого `check()` | — |
+    | 2 | `trusted-paths` | сначала `approved_cli_problems`; затем закрепление найденных каталогов набора и их предков (`_settle_prep_dirs`); для каждого каталога `prep_dirs` — `policy_problems` (отсутствующий — по ближайшему существующему предку), не каталог — проблема, точный режим у `EXACT_MODES`; любая проблема — `StepFailed("trusted-paths", <пути и причины>)`; ложь — только отсутствие или исправимый свой каталог | создать недостающие (`fsutil.make_dir`, рождён в итоговом режиме, закреплён сам и в родителе; недостающие предки — `0755`) и расширить свой каталог root с режимом уже нужного или с унаследованным `S_ISGID` (`fsutil.repairable`) — для **любого** каталога набора; чужой владелец, запись группы и всех, режим шире у точного — отказ; запись группы и всех не добавляется никогда |
+    | 3 | `build-user` | `verify_build_user` пуст и только затем `whoami_as` = записи (M4: ни одного `run_as` при `creating`) | `create_build_user` |
 
-    Затем `retry_quarantine` (Task 5; остаток — предупреждение в журнале) и **`drive`**
-    (Task 7) с таблицей действий строк §3.3 — `install_actions(layout, cfg, pending) ->
-    Mapping[str, Callable[[Facts], None]]`. Каждое значение — `route_action(layout, id,
-    <Row.action>, calls=install_calls(layout, cfg, pending), python_key=<ключ Python
-    профиля>, build_uid=<uid df-build из accounts.toml>)` (Task 7, R33.F14: проверка своей
-    фазы, затем `run_route`; rev 8 r8); `install_calls` = `acceptance_calls(...)` (Task 7,
-    тот же `python_key`, свой `ctx: RouteContext`) и листья `LATER_LEAVES` (9; листья 7a,
-    8 и 8a уже в `acceptance_calls`), R33.F7 — реализации
+    Набор шага 2 и режимы (`prep_dirs`, порядок создания; M3, 9-C): `opt`, `releases` —
+    `0755`; `staging`, `quarantine` — `0711`; `admin`, `admin_python`, `bin_dir`, `etc`,
+    `var` — `0755`; `marks_dir`, `verify_dir`, `admin_home` — `0700` (примитивы Task 7 их не
+    создают, R33.F31; `admin_home` — каталог шага 2 с 9-C, `install_admin_python` только
+    проверяет его). `EXACT_MODES = (staging, quarantine, marks_dir, verify_dir,
+    admin_home)`. `install_dir` создаёт `writer_lock`. Решение M3 «`do()` не исправляет
+    существующее» сужено (9-C RC-C5): не исправляет **чужой или более широкий**; созданное
+    закрепляется синхронизацией самого каталога и родителя (не только родителя).
+
+    Затем (порядок I6, проверяет тест-шпион): `fetch_references` (`inputs.fetch_reference`
+    для каждого репо в `verify/<repo>`), `uv_config_refusal`, `retry_quarantine` (Task 5;
+    остаток — `warn` в журнале), сборка `InstallRun` и **`drive`** (Task 7). Ни одного
+    запуска `git`/`uv`/`tar` до успешного шага 2.
+
+    `InstallRun` (I1) — один неизменяемый носитель: `layout`, `cfg` (из
+    `pending.install_text`), `pending`, `profile`, `platform` (= `detect_platform()`),
+    `plan: BuildPlan`, `limits`, `refs`, `journal`, `run_id` (= `pending.run_id`: возобновлённая
+    установка журналирует под исходным `run_id`), `python_key` (= `build.python_key` профиля),
+    `build_uid` (запись `df-build`), `ctx: RouteContext`; `release_id` = `pending.release_id`,
+    `install_digest` = `config_digest(cfg)`. Конструктор отвергает `config_digest(cfg) !=
+    pending.install_digest` и `dump_install(cfg) != pending.install_text`
+    (`StepFailed("pending")`). Собирается после шагов 1–3, чекаутов и `build_uid`.
+
+    Таблица действий строк §3.3 — `install_actions(run: InstallRun) -> Mapping[str,
+    Callable[[Facts], None]]`. Каждое значение — `route_action(layout, id,
+    <Row.action>, calls=install_calls(run), python_key=run.python_key,
+    build_uid=run.build_uid)` (Task 7, R33.F14: проверка своей
+    фазы, затем `run_route`; rev 8 r8); `install_calls(run) -> dict[str, Call]` =
+    `acceptance_calls(...)` (Task 7, тот же `python_key`, свой `ctx: RouteContext`) и
+    вызовы релиза (`write_release_json`, `register`, `activate`, `write_atomic` входа,
+    команды и `install.toml`); `LATER_LEAVES = {}` (листья 7a, 8 и 8a уже в
+    `acceptance_calls`), R33.F7 — реализации
     вызовов маршрутов:
 
     <!-- install-route-calls:begin -->
@@ -2716,14 +2810,27 @@ def test_bootstrap_under_system_python_says_what_is_needed(tmp_path): ...
     Сверяют `r18-local-check/check_plan.py` и тест `test_action_table_is_route_unfolding`.
 
     Имена действий и функций сверяет тест: ключи `install_actions` = множество `Row.action`
-    без `""` и `"stop"`. Чтение автомата — `read_facts` с `launcher_ready` и
-    `df.admin.admin_ready` (Task 8a), привязку сверяет тест (R33.F5):
-    `launcher_ready=lambda: launcher_ready(layout, python=<admin_python отметки или
-    записи>)` — та же версия, что `expected_python` у `admin_ready`; маршрут `launcher`
-    пишет `entry_text(layout)` и `launcher_text(layout, <та же версия>, platform)`.
-    Текст входа порождается из `admin_dir(id)/df/launcher_entry.py` активируемого id, и
-    `launcher_ready` сравнивает с тем же источником (ревью Task 8a, M-1: сейчас — из
-    исполняемого `df`, в спеке §3.9 записано как известное поведение).
+    без `""` и `"stop"` (`ACTIONS`). Чтение автомата — `read_for(run) -> Callable[[],
+    Facts]`: `read_facts` с `df.admin.admin_ready` (Task 8a) и `L`, привязку сверяет тест
+    (R33.F5, I3): `launcher_ready=lambda: command_ready(layout, id)`, а `L` спрашивается
+    только при `intact` (m3). `command_ready(layout, release_id) -> bool` (=
+    `command_ready_of(layout, id, registry_entry(...))`): нет записи реестра или не
+    `intact` (`accept.entry_intact`) → `False`, иначе `admin.launcher_ready(layout, id,
+    python=<запись>.admin_python)` — до регистрации ничего не читается из непроверенного
+    `admin/<id>`. Той же функцией bootstrap проверяет исправную команду (по записи снимка,
+    без чтения реестра), а маршрут `launcher` пишет `release_entry_text(layout, id)` (`0644`)
+    и `launcher_text(layout, <Python записи реестра>, platform)` (`0755`); нет записи —
+    `StepFailed("launcher")`. Текст входа порождается из `admin.entry_source(layout, id)` =
+    `admin_dir(id)/df/launcher_entry.py` активируемого id (`entry_text(layout, source)`:
+    `O_NOFOLLOW|O_NONBLOCK`, только обычный файл, ≤ 1 МиБ, UTF-8, ровно одна строка
+    `_ROOT` — иначе `Refused("launcher")`, у `release_entry_text` — `StepFailed("launcher")`;
+    строка `_ROOT = "/"` — замороженный межверсионный договор, M13), и `launcher_ready`
+    сравнивает с тем же источником (ревью Task 8a, M-1 — исправлено, спека §3.9).
+    `commit-config` пишет `pending.install_text` в `/etc/df/install.toml` (`0644`), затем
+    `remove_durably(pending.toml)`. Если файлы команды прежнего релиза побайтно равны новым
+    (тот же источник входа и тот же Python), `L` истинен уже после `activate`, и автомат
+    идёт `registered → launched`, пропуская `launcher` (9-A C3; в v1 так всегда при
+    переустановке — та же конфигурация).
     Команда называет Python одного релиза, поэтому откат или возобновление к релизу с
     другим `admin_python` оставляют `L` ложным для этого id: маршрут отката/возобновления
     обязан дойти до `launcher` для активного id, когда `L` ложен (F16; вход
@@ -2749,37 +2856,108 @@ def test_bootstrap_under_system_python_says_what_is_needed(tmp_path): ...
     Затем `tree_digest` обязан совпасть с `mark.tree_digest`, и пишется отметка
     `max(mark.stage, "verified")`: при `admin` — с прежними `admin_digest` и
     `admin_python` (отметка не понижается, §3.3). Любая проблема — `StepFailed` со списком.
-  - `main(argv: Sequence[str], *, mode: Mode, read: ReadResult | None, lock_fd: int | None)
-    -> int` в `cli.py`:
+  - `run_install(layout, requested: InstallConfig, snap: Snapshot, pending: Pending |
+    None, *, fail_after: str | None = None) -> str` — одна установка под блокировкой,
+    возвращает id. Порядок фиксирован (I6, M5, M6): `recover_pending`; `generation_begin`
+    (на нечётном поколении — без записи); кроме `resume` — `next_release_id`, затем
+    `new_pending(requested, id, snap.release_id)` (свежий `run_id`, `install_text =
+    dump_install(cfg)`, `install_digest = config_digest(cfg)`) пишется атомарно; шаги 1–3
+    (`run_steps`, `fail_after` — шов тестов); чекауты; `uv_config_refusal`;
+    `retry_quarantine`; `InstallRun`; `drive`; `generation_end`. **G4** (I9, 9-D1): отказ
+    `drive` шагом `damaged` **или** любой отказ действия, после которого релиз прогона
+    классифицируется `damaged` (`_now_damaged`: проверка после действия останавливает
+    прогон именем действия, не `damaged`; ошибка чтения фактов оставляет исходный отказ),
+    становится `StepFailed("damaged", <текст> + " (остановлено: <шаг>: <подробность>)")`;
+    `current` и запись реестра читаются заново как собственные изменения писателя
+    (`accept.current_is(layout, id)`, публичная): `current` на релизе прогона — текст G1(a),
+    иначе — текст G2.
+  - I9 (решение владельца 23.10, R51–R53; дизайн `task-9-i9-design.md`), всё в
+    `df/install.py`:
+    - «согласованное состояние» — нет `pending.toml`, и `current` отсутствует, `intact`
+      или зарегистрирован и начинается с `release.id_prefix(install.manifest_sha,
+      platform)` (спека §3.8);
+    - **G1** `unfinished_damage(layout, snap, pending) -> str | None` — в `cli._writer`
+      сразу после сверки `read_pending` со снимком, до фильтра `pending`, `_later`,
+      `_requested`, отказа исправной команды, M9 и `run_install`, то есть и до `models
+      set`: (a) `pending.toml` есть, `current` = его id, релиз не `intact` (A1–A5 дизайна);
+      (b) `pending.toml` нет, `current` не `intact` и не согласован (H1 первой установки,
+      ручная правка `install.toml`, `cur` без `reg`). `pending.toml` есть, а `current` не
+      его id — G1 молчит (обычный путь §3.8: повтор при повреждённом прежнем). Значения
+      снимка плюс `accept.entry_intact` (дерево и `admin/`), вычисляется только когда (a)
+      или (b) возможны; отказ ничего не меняет и не журналируется;
+    - **G2** — в `recover_pending`, ветка «прежний `current`, та же конфигурация» (выше);
+    - **G3** — только порядок: M9 (`_close_odd_generation`) вызывается после G1, значит
+      поколение закрывается только в согласованном состоянии; `detail` его `warn` кончается
+      `current = <id|нет>`;
+    - **G4** — в `run_install` (выше);
+    - `Damage(kind: Literal["switched", "unclosed", "pending"], release_id, run_id,
+      current, registered, install, agrees)`, `damage_of(...)` и
+      `damaged_refusal(layout, damage) -> str` — один источник текста для G1(a)
+      (`switched`), G1(b) (`unclosed`) и G2 (`pending`); точные тексты закреплены тестом
+      `test_damaged_refusal_text`. Текст называет id, состояние и только оставшиеся шаги:
+      копии (`pending.toml`, если есть, и журнал) вне `/opt/df`, `/etc/df`, `/var/lib/df`;
+      удалить `pending.toml`; `unlink current` — только когда после удаления состояние не
+      станет согласованным (G1(a) не `agrees`; G1(b) всегда); затем команда:
+      `BOOTSTRAP init …` без `install.toml` (с подсказкой «конфигурация прежней попытки —
+      install_text в копии pending.toml», если `pending.toml` был), `darkfactory install
+      (если команда отказывает — BOOTSTRAP install)` для G2 при `current` на прежнем
+      (bootstrap отказывает при исправной команде, M16), иначе `BOOTSTRAP install`; затем
+      «current не переключайте, поколение не правьте, releases/, admin/ и releases.toml не
+      трогайте». `BOOTSTRAP = "sudo <python ≥ 3.12> -I -B -S <чекаут
+      devtools>/df/bootstrap.py"`. Ни один текст не советует `doctor` (в этом состоянии
+      недоступен), возврат `current` или правку поколения. Отказ M10 тоже без `doctor`.
+  - `main(argv: Sequence[str], *, mode: Mode, read: ReadResult | None, lock_fd: int | None,
+    layout: Layout | None = None) -> int` в `cli.py` (`layout` — шов тестов; вход и
+    bootstrap его не передают):
     - `mode`, `read`, `lock_fd` передаёт вход команды (Task 8a). `writer` требует `lock_fd` и
-      `Stable`, `reader` — `lock_fd is None`; иное — ошибка программы, код 2;
+      `Stable`, `reader` — `lock_fd is None`, `bootstrap` — ни того, ни другого; иное —
+      ошибка программы, код 2;
+    - разбор (`_Parser`: `exit_on_error=False`, `error()` бросает, N1; `allow_abbrev=False`
+      у каждого парсера). Режим, выведенный из разобранных аргументов (`parsed_mode`:
+      `writer` для `WRITER_COMMANDS` по `(command, rest[0])`), обязан совпасть с
+      `launcher_entry.mode_of(argv)`, а `--` где-либо в `argv` — отказ (9-B I-2;
+      `UsageError`, код 2) — до проверки `euid` и любой диспетчеризации. Подкоманда-писатель
+      в режиме `reader` — код 2 (вход не взял блокировку); bootstrap принимает только
+      `init`/`install`;
+    - `euid == 0` (шов `cli.ROOT_UID`) для каждой подкоманды-писателя — до `writer_lock`
+      (M14); конфигурация `init` (`--cli NAME=PATH`, каждое имя один раз) проверяется
+      там же, до блокировки;
     - `reader` с `Transitional`: `doctor` — переходная диагностика (Task 12), остальные — код
       2, «идёт или прервана административная операция: darkfactory install»;
     - `bootstrap` — только из `df/bootstrap.py`, `read is None`: `main` сама берёт
       `writer_lock`, выполняет `settle_on_acquire` и читает `read_raw`. Отсутствие блокировки
-      режим не определяет. После снимка: активный `current`, его запись `allowed`, `intact`
-      и `L` истинны — код 2, «используйте `darkfactory`» (Task 8a F10; флага
-      `--recover` нет). Python ≥ 3.12, флаги `-I -B -S` и подкоманды `init`/`install`
+      режим не определяет. Python ≥ 3.12, флаги `-I -B -S` и подкоманды `init`/`install`
       проверяет сам `bootstrap.py`;
-    - подкоманду `main` определяет так же, как вход (`launcher_entry.mode_of`,
-      `WRITER_COMMANDS`): подкоманда-писатель в режиме `reader` — код 2 (вход не взял
-      блокировку).
+    - путь писателя (`_writer`): `parse_snapshot`; `read_pending` ровно один раз и сверка с
+      `pending_present`; **G1**; пока есть `pending.toml` — только `init`/`install`/`doctor`
+      (`PENDING_ALLOWED`, M19), иначе «есть незавершённая установка: завершите darkfactory
+      install»; `models`/`doctor` — `_later` («ещё не реализовано (Task 10/12)», неизвестное
+      имя — отказ, а не `KeyError`); `_requested`; в bootstrap — отказ исправной команды
+      (M16: нет `pending.toml`, есть `current`, запись `allowed`, `command_ready_of` по
+      записи снимка — код 2, «команда исправна (релиз <id>): используйте darkfactory»; Task
+      8a F10, флага `--recover` нет); M9 — нечётное поколение без `pending.toml` закрывается
+      `generation_end` с `warn` (`run_id="generation"`); `run_install`; печать «установлен
+      релиз <id>; команда: <путь>» — ссылка `/usr/local/bin`, только если она указывает на
+      нашу команду, иначе полный `/opt/df/bin/darkfactory`.
 
     Подкоманды:
     - `init --manifest-repo R --manifest-sha S --profile P --cli NAME=PATH...` — требует
-      `euid == 0`; при существующем `install.toml` — код 2, «установка уже есть: `darkfactory
-      install`». Порядок: снимок от входа (или `settle_on_acquire` и `read_raw` в
+      `euid == 0`; при существующем `install.toml` — код 2, «установка уже есть: darkfactory
+      install». Порядок: снимок от входа (или `settle_on_acquire` и `read_raw` в
       bootstrap), `recover_pending`,
       новый `Pending` (если нужно),
       шаги;
-    - `install` — то же с конфигурацией из `install.toml` (или из `pending.toml`, если он
-      есть);
+    - `install` — то же с конфигурацией из `pending.toml`, если он есть, иначе из
+      `install.toml`; ни того, ни другого — «нет /etc/df/install.toml: начните с bootstrap
+      init»;
     - `doctor` (Task 12);
     - `models` (Task 10).
 
-    Пока есть `pending.toml`, всё, кроме `install`/`init`/`doctor`, отказывает с кодом 2 и
-    текстом «завершите `darkfactory install`». Коды выхода: 0 — успех; 2 — отказ или
-    конфигурация; 3 — `NeedsHuman` (инструкция в stderr).
+    Коды выхода (M7): 0 — успех; 2 — `Refusal`, `UsageError`, `StepFailed`, `TreeError`,
+    `ConfigError`, `ManifestError`, `UnsupportedLock`, `OSError`: `darkfactory: <шаг>:
+    <подробность>` для `StepFailed`, `darkfactory: <Тип>: <сообщение>` для остальных (9-B
+    m3); 3 — `NeedsHuman` (инструкция в stderr); 1 — иное, с трассировкой (ошибка
+    программы, в том числе `AssertionError`).
 
 - [ ] **Step 1: Failing tests**
 
@@ -2804,22 +2982,47 @@ def test_crash_matrix(fake_world): ...
     # fake_world проходит и tree, и quarantine; исполнены все варианты, кроме NOT_MODELED
     # (иначе провал); каждый примитив возвращается со своим изменением закреплённым; дерево
     # не теряется из родителя и карантина одновременно — по идентичности дерева, а не по
-    # полю (S1-R13-N2: второе дерево по тому же пути не скрывает потерю первого)
+    # полю (S1-R13-N2: второе дерево по тому же пути не скрывает потерю первого).
+    # Как построено (9-D2, R49 → R55): движок tests/df/crash_matrix.py (Matrix). Точка
+    # сбоя — каждый fault_point и каждая синхронизация настоящего прохода (F5); POINTS
+    # fault_point чистого прохода закреплены: первая установка 49, обновление 26
+    # (обновление — с изменённым кодом входа, чтобы launcher исполнялся). Каждая точка —
+    # снимок State, ветви идут со снимка, префикс не повторяется. CI (386 прогонов,
+    # MATRIX_RUNS): глубина 1 — каждый fault_point × {сбой процесса, сбой ОС} × оба
+    # начала; глубина 2 — «сбой процесса, затем сбой ОС на первой синхронизации после
+    # settle_on_acquire повтора» (F3); другая конфигурация — только где current после
+    # сбоя нет (I8); проходы с неудачным очистителем (исход quarantine) × 2. Ожидаемый id
+    # повтора назван явно (9-C C7: id прогона; после commit — следующий; SECOND — для
+    # другой конфигурации). Точка, где под pending повреждён релиз, — провал (i9 == []).
+    # Исполнены все моделируемые варианты, все родители SYNC_PARENTS и все случаи
+    # sync_twin_cases(). Глубина 1 во всех точках синхронизации, полный перебор
+    # (FULL_CHUNKS покрывают ровно range(POINTS[start])) — только slow; глубина 2 в
+    # точках синхронизации повтора не перебирается нигде
 @pytest.mark.parametrize("dropped", ["etc_df", "opt_df", "releases", "release_root",
                                      "staging", "admin", "opt_bin", "local_bin"])
 def test_crash_matrix_settle_twins(fake_world, dropped): ...
     # settle без каталога dropped → test_crash_matrix находит контрпример (отсутствие —
     # провал теста); install и accept не обязательны для безопасности (§3.3 «Локальная
-    # проверка»), но входят в settle
+    # проверка»), но входят в settle. Как построено (R55): каждый двойник, ждущий
+    # контрпример, в CI — закреплённое расписание в обе стороны (правило на месте —
+    # контрпримера нет; снято — есть), PINNED_RUNS. REDUNDANT на настоящем коде (находка
+    # 9-D2, правило остаётся): release_root (единственный факт — режим корня; маскируют
+    # verify_chmod и родительская синхронизация release.json при register —
+    # test_crash_matrix_release_root_masking) и admin (маскируют собственные синхронизации
+    # install_admin и remove_own_tree — test_crash_matrix_settle_admin_masking); их
+    # перебор — slow, test_crash_matrix_redundant_twins
 @pytest.mark.parametrize("start", ["first-install", "upgrade"])
 @pytest.mark.parametrize("window", ["releases.toml", "bin/darkfactory", "usr-local-link"])
 def test_visible_unsynced_then_retry_then_os_crash(fake_world, start, window): ...
     # S1-R5-N1: сбой процесса после rename, до sync_dir родителя; повтор; сбой ОС до
     # следующего закрепления → current → зарегистрированный intact-релиз, команда есть,
     # pending.toml удалён только после неё
-@pytest.mark.parametrize("mode", ["writer-entry", "bootstrap"])
+@pytest.mark.parametrize("mode", ["writer", "bootstrap"])
 @pytest.mark.parametrize("window", ["releases.toml", "tree-removal"])
 def test_rollback_with_unsynced_fact_then_os_crash(fake_world, mode, window): ...
+    # I8: writer — main(mode="writer") напрямую, изолированная проверка recover_pending
+    # (через вход другая конфигурация при pending недостижима: init отказывает при
+    # install.toml, install берёт конфигурацию из pending.toml).
     # S1-R6-N1, настоящий путь вход/bootstrap → main → recover_pending (не drive):
     # releases.toml — сбой процесса после rename, до sync /etc/df; tree-removal — после
     # удаления дерева, до sync releases/. Повтор с другой конфигурацией → откат → сбой ОС →
@@ -2831,6 +3034,7 @@ def test_rollback_durable_before_pending_removed(fake_world, trees): ...
     # сбой ОС сразу после удаления pending.toml, до следующего drive → ни одного
     # root-дерева id без pending.toml. Двойники: протокол remove_own_tree без sync_dir
     # родителя (releases/, затем admin/) → контрпример обязан быть
+    # (test_rollback_durable_twin_without_parent_sync[releases|admin])
 @pytest.mark.parametrize("case", ["after-tmp", "after-cache", "both-absent", "root-0700"])
 def test_verify_retry_after_build_home_cleanup(fake_world, case): ...
     # S1-R9-N1, настоящий путь drive → verify → cleanup_build_home → transfer_check:
@@ -2851,7 +3055,10 @@ def test_upgrade_keeps_shared_admin_python(fake_world): ...
 def test_crash_matrix_absent_ok_twins(fake_world, prim): ...
     # prim отвергает отсутствующий объект → для cleanup_build_home test_crash_matrix даёт
     # отказ повтора verify (форма r9); для cleanup_tree — проходит (все вызовы под
-    # условиями), как в r18-local-check/twins.py; иное — провал
+    # условиями), как в r18-local-check/twins.py; иное — провал. Как построено (R55):
+    # cleanup_build_home — закреплённое расписание в CI в обе стороны; проходящий
+    # cleanup_tree — slow. Форма повтора r9 в мире без репо совпадает с первым verify
+    # (build_home/cache нет), её саму держит test_verify_retry_after_build_home_cleanup
 def test_verify_retry_after_staging_removed(fake_world): ...
     # S1-R8-N1: verify удалил staging/<id>, chmod 0755 выполнен, процесс упал до отметки;
     # повтор настоящим путём вход/bootstrap → copied → verify: шаги cleanup_staging
@@ -2863,29 +3070,47 @@ def test_rollback_with_staging_container_then_os_crash(fake_world): ...
                                   for i, (g, *_) in enumerate(s) if g])
 def test_crash_matrix_route_guard_twins(fake_world, step): ...
     # условие шага step считается истинным → test_crash_matrix даёт отказ примитива на
-    # отсутствующем объекте; исключения — ровно GUARD_NOT_NEEDED из
+    # отсутствующем объекте; исключения модели — ровно GUARD_NOT_NEEDED из
     # r18-local-check/twins.py (S1-R10-N3): ("cleanup", 1) — после шага r=root объекта
     # нет, cleanup_tree отсутствующего — "removed"; ("launcher", 2) — в матрице
     # /usr/local/bin доверен, принудительная истина ничего не меняет; ложную ветку
-    # проверяет test_usr_local_link_only_when_trusted (Task 8a)
+    # проверяет test_usr_local_link_only_when_trusted (Task 8a). На настоящем коде
+    # (9-D2 F1, R55) литерал теста — только второй: cleanup_tree отката сначала требует
+    # готовую учётку df-build и для отсутствующего дерева, поэтому первое условие нужно и
+    # его двойник ждёт контрпример. CI — 11 закреплённых расписаний в обе стороны
 @pytest.mark.parametrize("case", sync_twin_cases())
 def test_crash_matrix_protocol_twins(fake_world, case): ...
     # case = (протокол, вариант, шаг[, родитель]) — общий источник с twins.py (S1-R13-N3);
     # sync-шаг подменён пустым (у протокола из SYNC_PARENTS — только при вызове с этим
     # родителем) → test_crash_matrix даёт контрпример ровно при case ∈ SYNC_NEEDED; иначе
     # проходит (покрывает settle после действия); например, ("cleanup_tree", "tree", 2,
-    # "releases") — контрпример, ("cleanup_tree", "tree", 2, "staging") — нет
+    # "releases") — контрпример, ("cleanup_tree", "tree", 2, "staging") — нет.
+    # Как построено (R55): ждущие контрпример — 12 закреплённых расписаний в CI в обе
+    # стороны; два из них ловятся только сбоем ОС в точке синхронизации (F5) —
+    # remove_own_tree родителя admin_python и remove_empty_dir staging; их расписания
+    # закреплены по имени (Schedule.anchor: первая синхронизация staging/.quarantine после
+    # 3-й или 4-й записи accept/<id>.toml), ответ unreachable означает «перезакрепить», а
+    # не дефект. Проходящие (покрыты settle после действия, 9-C C2) — slow
 def test_crash_matrix_acquire_twin(fake_world): ...
     # settle_on_acquire подменён пустым → test_crash_matrix находит контрпример (отсутствие
-    # — провал теста); модель — twins.py «no settle_on_acquire»
+    # — провал теста); модель — twins.py «no settle_on_acquire». Как построено: форма
+    # no-op — закреплённое расписание в CI в обе стороны (то же, что у settle releases);
+    # форма без id-зависимых каталогов pending.toml (9-C C1) — REDUNDANT на настоящем коде:
+    # до drive их читают только условия маршрута отката, а примитив каждого шага закрепляет
+    # свой итог до удаления pending.toml (test_crash_matrix_acquire_twin_id_paths, slow)
 @pytest.mark.parametrize("point", ["member", "mid-copy"])
 def test_crash_inside_copy_then_rerun(fake_world, point): ...
 @pytest.mark.parametrize("after", ["activate", "launcher", "commit-config:install.toml"])
 def test_crash_after_activation_completes_same_id(fake_world, after): ...
     # повтор: тот же id, команда установлена, install.toml = pending, pending удалён последним
-def test_os_crash_model_keeps_only_synced_effects(fake_world): ...
+@pytest.mark.parametrize("mark", ["verified", "admin"])
+@pytest.mark.parametrize("crash", ["process", "os"])
+def test_os_crash_model_keeps_only_synced_effects(fake_world, mark, crash): ...
     # подмена fsutil: эффекты без sync откатываются → повтор не пропускает transfer-check и admin
-def test_crash_after_activate_before_journal_done(fake_world): ...   # doctor: уровень 1 по фактам
+@pytest.mark.parametrize("action", ["activate", "commit-config"])
+def test_crash_after_activate_before_journal_done(fake_world, action): ...
+    # M19: в Task 9 — по фактам (committed, без записи done в журнале); половина
+    # «doctor: уровень 1 по фактам» — Task 12 (test_level1_ignores_journal)
 def test_resume_with_other_config_rolls_back(fake_world): ...
     # прерывание после build; повтор init с другим manifest_sha → дерево очищено, новый id
 def test_registered_unactivated_survives_rollback(fake_world): ...
@@ -2909,9 +3134,10 @@ def test_routes_match_table_with_real_calls(fake_world, name): ...
 def test_uv_config_refused_before_build_lists_all_repos(fake_world): ...
     # Task 7a/§3.2: два репо — [tool.uv] exclude-newer у одного, uv.toml у другого →
     # StepFailed("build") с обоими файлами и ключами; ни одного запуска run_as(df-build)
-def test_release_json_distributions_from_route_context(fake_world): ...
-    # distributions_declared == ctx.installed листа distribution_problems; registry —
-    # index: "not declared"
+def test_release_json_distributions_from_the_accepted_tree(fake_world): ...
+    # I4 (переименован): distributions_declared == спискам, которые distribution_problems
+    # принял на том же дереве, прочитанным в свежем контексте прогона; registry —
+    # index: "not declared"; lock_sha256 — из доверенного чекаута (M12)
     # R33.F3: test_routes_match_table Task 7 со всеми настоящими calls (install_calls),
     # без заглушек LATER_LEAVES; тот же python_key, что у install_actions
 def test_read_facts_binds_admin_predicates(fake_world): ...
@@ -2935,18 +3161,23 @@ def test_init_refuses_existing_install(fake_world): ...
 @pytest.mark.parametrize("config", ["same", "other"])
 def test_init_with_pending_first_install(fake_world, entry, config): ...
     # S1-R7-N3: первая установка прервана до commit-config (install.toml нет, pending.toml
-    # есть): init с той же конфигурацией продолжает тот же id; с другой — откат и новый id
+    # есть): init с той же конфигурацией продолжает тот же id; с другой — откат и новый id.
+    # I8: entry=bootstrap — так; entry=darkfactory (прервано после activate) — same и other
+    # продолжают тот же id, запрошенная конфигурация не применяется, warn в журнале
 def test_init_with_pending_and_install_toml_refused(fake_world): ...
     # pending.toml и install.toml есть → init код 2, «установка уже есть: darkfactory install»;
     # файлы побайтово прежние
 def test_commands_refuse_while_pending(fake_world): ...     # models set → код 2
+    # M19: общим фильтром до диспетчеризации; models — заглушка до Task 10
 def test_init_requires_root(monkeypatch): ...               # euid≠0 → код 2, «нужен sudo»
 # перенесены из Task 8a (F4, F10, F16)
 def test_entry_raw_fields_match_df_state(): ...
     # launcher_entry.RAW_FIELDS == поля настоящего df.state.RawSnapshot
-def test_main_rereads_nothing(fake_world): ...
-    # снимок от входа; audit hook: в main нет open install.toml/releases.toml/models.toml/
-    # pending.toml и readlink current
+@pytest.mark.parametrize("run", ["bootstrap-init", "writer-upgrade", "writer-resume"])
+def test_main_rereads_nothing(fake_world, run): ...
+    # снимок от входа; шпион os.open/os.readlink/os.stat/os.lstat: части снимка в main
+    # читаются только из белого списка I2 (Interfaces, state.py), pending.toml —
+    # read_pending ровно один раз; читатель — ни одной
 def test_install_committed_without_local_link(fake_world, capsys): ...
     # local_bin=trusted ложно → link_command не вызван, L истинен без ссылки, установка
     # доходит до committed и печатает полный путь /opt/df/bin/darkfactory
@@ -2960,6 +3191,139 @@ def test_rollback_to_other_admin_python_rewrites_launcher(fake_world): ...
 def test_entry_text_from_activated_admin_code(fake_world): ...
     # ревью Task 8a, M-1: вход пишется из admin/<id>/df/launcher_entry.py активируемого id;
     # launcher_ready сравнивает с ним же — bootstrap-чекаут и код прежнего релиза не источник
+
+# Как построено — добавлено частями 9-A…9-D2 (сверх списка выше)
+# test_release.py (9-A): next_id_names_are_exact (M1), next_id_broken_registry_refused,
+# activate_crash_after_rename_leaves_only_current, activate_reuses_one_temporary_name,
+# release_json_schema_fields_and_mode, release_json_replaces_the_builders_file (N3),
+# release_json_needs_the_release_dir, release_json_refused_unless_the_copy_is_the_marks,
+# register_appends_an_allowed_entry, register_refuses, register_wrappers_name_their_step,
+# rollback_calls_are_the_route_unfolding,
+# rollback_without_build_uid_refuses_a_foreign_tree (I5),
+# rollback_never_runs_as_build_user_before_it_is_ready и его положительный двойник
+# rollback_runs_the_cleaner_when_the_account_is_ready (9-A I-1),
+# clean_pass_routes_match_table_with_real_calls (D3: вместе с test_routes_match_table
+# Task 7 на всех настоящих вызовах), command_ready_reads_nothing_before_registration,
+# command_ready_uses_the_entry_python, read_facts_asks_l_only_when_intact (m3),
+# launcher_without_registry_entry_refused, install_run_guards_its_invariants,
+# install_run_platform_is_the_hosts, python_declared_survives_a_new_process_after_verified
+# (I4). Рядом: test_admin.py (launcher_ready против источника релиза, плохой источник),
+# test_launcher_entry.py (entry_text из источника), test_accept.py (python_declared
+# отметки, entry_intact), test_drive.py (M4/M5 журнала).
+# test_state.py (9-B): части снимка, плохой current, ссылка вместо части, снимок
+# читателя с pending — отказ.
+def test_trust_order_before_any_execution(fake_world): ...
+    # I6, тест-шпион: шаг 1 → шаг 2 → шаг 3 → fetch_reference → uv_config_refusal →
+    # retry_quarantine → drive; ни одного git/uv/tar до успешного шага 2; положительный
+    # контроль — test_commands_run_as_df_build_only_after_step2
+def test_rollback_needs_trusted_parents(fake_world): ...
+    # I7: недоверенный /opt → StepFailed("trusted-paths") до любого удаления
+def test_rollback_judges_an_absent_parent_by_its_ancestor(fake_world): ...
+    # 9-B I-1: /opt/df нет, /opt недоверен → отказ, pending.toml цел, строки rollback нет
+@pytest.mark.parametrize("side", ["opt", "etc"])
+def test_step2_judges_an_absent_dir_by_its_ancestor(fake_world, side): ...
+def test_step2_refuses_a_linked_dir(fake_world): ...                # «не каталог»
+def test_build_user_step_runs_nothing_as_df_build_before_ready(fake_world): ...   # M4
+def test_odd_generation_without_pending_is_closed(fake_world): ...  # M9
+def test_third_current_is_refused(fake_world): ...                  # M10, без doctor
+def test_pending_text_and_digest_are_one_value(fake_world): ...     # M8
+def test_pending_must_match_the_snapshot(fake_world): ...           # I2
+def test_argv_forms_never_split_mode_and_dispatch(fake_world): ...
+    # 9-B I-2: 11 форм × 3 режима — `--` до и после подкоманды, опция до подкоманды,
+    # сокращение, префикс подкоманды, повтор, пустой argv, models set: код 2 без
+    # трассировки, run_install не вызван, var не создан
+def test_check_mode_refuses_any_disagreement(): ...
+def test_exit_codes(fake_world): ...           # M7; «<Тип>: сообщение» для отказа без шага
+def test_bootstrap_proceeds_over_a_revoked_release(fake_world): ...
+def test_damaged_first_install_names_pending_then_current(fake_world): ...
+    # переименован (I9 §5.6): «удалите pending» раньше «unlink current»
+# test_crash_model.py (9-C): правила R1–R9 модели сбоя ОС и её пределы L1–L4.
+# test_crash_windows.py (9-C), сверх списка выше:
+# rollback_durable_twin_without_parent_sync, created_home_is_durable_before_ready,
+# fsutil_is_the_models, prep_dirs_keep_their_modes_across_os_crash,
+# lock_dirs_keep_their_modes_across_os_crash,
+# account_created_through_main[process|os] (9-C Minor 8: настоящие create_build_user и
+# verify_build_user через main; только путь платформы хоста — Linux в Task 13).
+# test_crash_create.py (9-C, класс «созданное — в итоговом виде»):
+@pytest.mark.parametrize("crash", ["process", "os"])
+def test_lock_and_step2_every_crash_position(fake_world, crash): ...
+    # каждая позиция фазы блокировки и шага 2 (106 точек модели, 27 вызовов df, число
+    # закреплено): нет видимого имени с неитоговым режимом; повтор доходит до drive; после
+    # ещё одного сбоя ОС каталоги, блокировка и pending.toml — в итоговых режимах
+@pytest.mark.parametrize("crash", ["none", "process", "os"])
+def test_setgid_parents_never_leave_a_setgid_dir(fake_world, crash): ...
+    # R9 модели (Linux, наследование S_ISGID): /opt и /var/lib — 2755; повтор доходит до
+    # drive, каталоги точно в своих режимах, каталоги оператора не тронуты
+def test_step2_widens_roots_narrower_dirs_only(fake_world): ...
+def test_pending_written_then_entry_retry_then_os_crash(fake_world): ...
+# test_fsutil.py (9-C, 9-D1): двойники make_dir/create_file в каждой позиции;
+# test_every_fs_mutation_is_accounted_for — каждое изменение ФС в df/*.py (флаги os.open
+# по содержимому) учтено в FS_SITES с причиной; test_every_process_start_is_named —
+# каждый запуск процесса учтён в SUBPROCESS_CREATORS (предел стража: что делают сами
+# процессы, код вне df/*.py и вызовы из другого модуля он не видит — docstring).
+# test_install_i9.py (9-D1; дизайн task-9-i9-design.md §5; каждый отказ: код 2,
+# «darkfactory: damaged:», id релиза, без doctor; файлы /etc/df, /var/lib/df и current
+# до и после равны; нет fetch_references, run_as и шагов 1–3):
+@pytest.mark.parametrize("state", ["first-A2", "first-A4", "first-A5", "reinstall-A4",
+                                   "reinstall-A5"])
+def test_i9_switched_damaged_refused(fake_world, state): ...
+    # G1(a) на четырёх путях одного состояния: writer install, bootstrap install, bootstrap
+    # init той же и другой конфигурацией; unlink — ровно у первой установки до A5
+def test_i9_switched_damaged_admin_entry_then_bootstrap(fake_world): ...
+@pytest.mark.parametrize("pending", [True, False])
+def test_i9_switched_unregistered(fake_world, pending): ...
+def test_i9_bare_pending_deletion_first_install_refused(fake_world): ...
+    # G1(b); поколение осталось нечётным, строки generation warn нет (G3)
+def test_i9_bare_deletion_and_even_generation_first_install_refused(fake_world): ...
+def test_i9_bare_deletion_first_install_other_config_refused(fake_world): ...
+    # ручная правка install.toml на другой sha — «не согласован с ним», unlink
+def test_i9_switch_back_only_refused_early(fake_world): ...   # G2 до шагов и сети
+def test_i9_registered_damaged_before_activate_refused_early(fake_world): ...
+def test_i9_models_set_refused_first(fake_world): ...   # G1 раньше фильтра pending и _later
+def test_i9_backstop_uses_fresh_current(fake_world): ...
+def test_i9_backstop_damage_during_resume(fake_world): ...
+    # «(остановлено: launcher: active → damaged)»
+def test_i9_backstop_before_activate_names_g2(fake_world): ...
+@pytest.mark.parametrize("unreadable", [False, True])
+def test_i9_backstop_keeps_other_failures(fake_world, unreadable): ...
+    # G4 не шире нужного: отказ действия над целым релизом остаётся своим
+def test_i9_procedure_reinstall(fake_world): ...
+@pytest.mark.parametrize("state", ["first-A2", "first-A5"])
+def test_i9_procedure_first_install(fake_world, state): ...
+def test_i9_procedure_after_switch_back(fake_world): ...
+def test_i9_procedure_reentrant(fake_world): ...
+def test_i9_procedure_step_undone_by_os_crash(fake_world): ...
+@pytest.mark.parametrize("kind", ["tree", "admin"])
+def test_i9_normal_path_damaged_after_commit(fake_world, kind): ...
+def test_i9_normal_path_retry_between_generation_and_pending(fake_world): ...
+def test_i9_normal_path_retry_before_activate(fake_world): ...
+def test_i9_committed_odd_generation_damaged(fake_world): ...
+def test_i9_bare_deletion_reinstall_proceeds(fake_world): ...
+    # R53: код 0, новый id <sha12>-<plat>-3 ≠ R; activate и drive — только с новым id;
+    # запись R в реестре не изменилась (зарегистрирован, неактивен)
+def test_i9_resume_intact_unaffected(fake_world): ...
+def test_i9_rollback_other_config_unaffected(fake_world): ...
+def test_damaged_refusal_text(): ...            # точные тексты G1(a)/G1(b)/G2, 9 случаев
+def test_damaged_refusal_never_advises_doctor(): ...
+# test_crash_matrix.py (9-D2), сверх шести тестов выше (CI, кроме помеченных slow):
+def test_crash_matrix_settle_admin_masking(fake_world): ...
+@pytest.mark.parametrize("pair", ["activate", "install_admin/3", "link_command",
+                                  "accept_copy/4"])
+def test_crash_matrix_drive_settle_masking(fake_world, pair): ...
+    # settle итерации drive: всё на месте — нет; снята только синхронизация пары — нет
+    # (её покрывает settle drive); сняты обе — контрпример. verify_chmod/1 и
+    # install_admin_python/3 он не покрывает (их маскируют register и
+    # install_admin_python/1)
+def test_crash_matrix_release_root_masking(fake_world): ...
+    # verify_chmod/1 и release.json сняты — нет; ещё и settle release_root — контрпример
+def test_crash_matrix_acquire_twin_id_paths(fake_world): ...          # slow, REDUNDANT
+def test_crash_matrix_twin_hunts(fake_world, twin): ...               # slow
+def test_crash_matrix_redundant_twins(fake_world, twin, phase): ...   # slow
+def test_crash_matrix_full(fake_world, chunk): ...                    # slow, 1 704 прогона
+def test_crash_matrix_sync_points(fake_world, start): ...             # slow, F5
+def test_crash_matrix_quarantine_branches(fake_world, start): ...     # slow
+def test_crash_matrix_all_cleaners(fake_world, start): ...            # slow
+    # CI ветвит повтор с неудачным очистителем только для releases; slow — все
 ```
 
 `fake_world` — фикстура `tests/df/conftest.py`. Подменяет только нижние операции (rev 8,
@@ -2973,8 +3337,34 @@ r10, S1-R10-N1): механизм запуска `run_as`/`spawn_as` (как `fa
 — обёртка над `fsutil`: она помнит несинхронизированные изменения и откатывает их при
 «сбое».
 
+Как построено (9-C, 9-D2): `fake_world` = `make_fake_world(make_fake_layout(…))` —
+`World` (`tests/df/install_world.py`: заглушки установки, `writer` — половина писателя
+входа, `entry` — настоящий путь входа `launcher_entry.acquire → take_snapshot → main`,
+`bootstrap`, `crash_at`, `kill_at`, `killed`, `retry`; функции `interrupt`,
+`committed_problems` — успешный прогон закреплён целиком, ничего незакреплённого, —
+`at_rest_problems`) плюс `CrashModel` (`tests/df/crash_model.py`). Правила модели (её docstring; спека §3.3
+«Синхронизация»): R1 синхронизация файла закрепляет содержимое, режим и владельца, не имя
+(голый `fsync` файла на macOS не считается); R2 синхронизация каталога — его записи и его
+режим/владелец, не потомков (`chmod`/`chown` закрепляет только синхронизация самого
+объекта); R3 `sync_tree`; R4 сбой ОС оставляет закреплённое, закреплённое имя без
+синхронизации объекта возвращается «как родилось»; R5 имя, закреплённое в двух каталогах,
+возвращается в обоих; R6 сбой ОС — новая загрузка (`boot_id`); R7 сбой процесса оставляет
+файлы как есть и отменяет то, что сделали обработчики умирающего кода; R8 моделируется
+только корень мира; R9 (по выбору) Linux-наследование `S_ISGID`. Пределы L1–L4 названы
+там же. Повтор после сбоя идёт входом, когда `current` есть. API для матрицы: `points`,
+`trap`/`untrap`, `drop_syncs`, `snapshot`/`restore`, `os_crash`, `unsynced`,
+`is_durable`, `identity`, `durable_names`. В `test_crash_matrix.py` мир — на модуль (базовые проходы общие, каждый
+тест сбрасывает счётчики `Matrix.reset`). Медленные тесты (`@pytest.mark.slow`) по
+умолчанию не выбираются (`addopts = "-m 'not slow'"` в `pyproject.toml`); прогон —
+`uv run --frozen pytest -q -m slow tests/df` (около 90 минут, кусками ≤ 590 с); медленный
+тест, названный только node id без `-m slow`, отбирается (код 5). Каждый тест печатает и
+утверждает своё число прогонов (литерал). Литералы модели `r18-local-check`
+(`GUARD_NOT_NEEDED`, `ABSENT_NOT_NEEDED`) скопированы с указанием происхождения и не
+импортируются (M20).
+
 - [ ] **Step 2–4:** FAIL → implement → PASS
 - [ ] **Step 5: Commit** `feat(df): install transaction, registration, activation, init/install`
+  (как построено: коммиты частей 9-A…9-D3, один PR на всю Task 9, R48).
 
 ### Task 10: Модели — `models.toml`, `darkfactory models list|set`
 
@@ -2987,6 +3377,15 @@ r10, S1-R10-N1): механизм запуска `run_as`/`spawn_as` (как `fa
 - Consumes: `writer_lock`, `generation_begin`, `generation_end` (Task 4); `Snapshot`
   (Task 9) — `models list` берёт `models.toml` из переданного снимка и файл сам не читает;
   `write_atomic` (Task 1).
+- Из Task 9 (решено, 9-B I-2, 9-D1): `models set` достигается только через разобранный
+  режим — `cli.parsed_mode` обязан совпасть с `launcher_entry.mode_of(argv)`, `--` в
+  `argv` уже отвергнут, поэтому `rest` подкоманды `models` никогда не начинается с `--`.
+  Диспетчеризация заменяет заглушку `cli._later("models")` (`LATER["models"]`), но идёт
+  **после** охранника I9 G1 (`install.unfinished_damage` в `cli._writer`) и фильтра
+  `pending.toml` (`PENDING_ALLOWED`): `models set` при повреждённом релизе под
+  незавершённой установкой отказывает `damaged`, при `pending.toml` — «завершите
+  darkfactory install» (тесты `test_i9_models_set_refused_first`,
+  `test_commands_refuse_while_pending` остаются зелёными с настоящей подкомандой).
 - Produces:
   - `ROLES: tuple[str, ...] = ("interview", "author", "reviewer", "executor-review",
     "edge-check", "judge")`.
@@ -3260,6 +3659,18 @@ def test_auth_observation_has_no_content(tmp_path): ...
   `KNOWN_SCHEMAS`, `STAGE_OF` (Task 1); `tree_digest` (Task 3); `trusted_path_problems`, `approved_cli_problems`,
   `verify_build_user` (Task 5); `static_problems`, `expected_entrypoints` (Task 8);
   `admin_ready` (Task 8a); `parse_models`, `probe_status` (Tasks 10–11).
+- Из Task 9 (решено, R52, 9-C):
+  - `doctor` заменяет заглушку `cli._later("doctor")`; в режиме читателя с
+    `Transitional` и при `pending.toml` он показывает переходное состояние.
+  - При повреждённом **административном** коде или `current` без записи реестра вход
+    отказывает до импорта кода, поэтому `doctor` там недоступен (спека §3.8 «Повреждение
+    под незавершённой установкой»). Отказы I9 и M10 на `doctor` не ссылаются и ссылаться
+    не будут: Task 12 не меняет их тексты (`test_damaged_refusal_never_advises_doctor`).
+    При повреждённом дереве релиза (`admin/<id>` цел) `doctor` запускается и обязан
+    сообщить `release.digest: нарушено`, а при открытой транзакции — переходное
+    состояние, не уровень 1.
+  - Половина «`doctor`: уровень 1 по фактам» теста Task 9
+    `test_crash_after_activate_before_journal_done` — здесь (`test_level1_ignores_journal`).
 - Produces:
   - `Check(id: str, status: Literal["ok", "нарушено", "не проверено", "данные недоступны"],
     reason: str, time: str)`.
@@ -3524,6 +3935,23 @@ def test_admin_python_on_real_host(root_world): ...
     # rename sys.prefix == admin_python/<ключ>, ни одна ссылка не указывает в .staging;
     # испорченная загрузка через локальное зеркало отвергнута. Linux до этого прогона не
     # замерялся — расхождение с правилами F1/F7/F8 — находка, не правка теста
+def test_step2_and_lock_under_setgid_parents_real_linux(root_world): ...
+    # из Task 9 (9-C I5, RC2-C1): Ubuntu, настоящая ФС — /opt и /var/lib с 2755; bootstrap
+    # init доходит до committed; каталоги шага 2 и цепочки блокировки — точно в своих
+    # режимах (без S_ISGID), каталоги оператора не тронуты. В Task 9 проверено только
+    # эмуляцией (R9 модели); расхождение — находка
+@pytest.mark.parametrize("crash", ["process", "os"])
+def test_account_created_through_main_linux(root_world, crash): ...
+    # из Task 9 (9-C Minor 8, 9-D1 concern 5): настоящие create_build_user/useradd и
+    # verify_build_user через bootstrap init (main) на Ubuntu; прерывание после rename
+    # домашнего каталога, повтор через main — committed; в Task 9 исполнен только путь
+    # платформы хоста (macOS)
+def test_linux_loader_residuals(root_world): ...
+    # из Task 5 (R26, решение владельца 22.10): Linux-гарантия approved_cli_problems не
+    # подтверждена до этого прогона — замерить остатки модели загрузчика: подкаталоги
+    # glibc-hwcaps/tls системных каталогов и ld.so.cache (/etc/ld.so.conf с include);
+    # утверждённый CLI на Ubuntu не тянет библиотеку мимо SYSTEM_LIB_DIRS; расхождение —
+    # находка, не правка теста
 ```
 
 - [ ] **Step 2: Где идёт root-прогон.** Только в одноразовых выделенных окружениях macOS
@@ -3573,6 +4001,13 @@ def test_admin_python_on_real_host(root_world): ...
     `lib64 -> lib`, путь дескриптора через `/proc/self/fd` в `fake_layout`, отказ GNU tar
     ненулевым кодом в тесте отказа tar Task 7) исполняет уже CI PR (`tests/df` на ubuntu);
     обычный прогон Task 13 повторяет их на обеих ячейках матрицы.
+  - Матрица сбоев Task 9 на **настоящей ФС Linux** (из Task 9, 9-D2 M-6): обычный
+    прогон ячейки ubuntu исполняет `test_crash_matrix` и закреплённые двойники
+    (`tests/df/test_crash_matrix.py`) — числа прогонов закреплены литералами, а
+    расписания синхронизаций — по имени (`Schedule.anchor`); ответ `unreachable` на Linux
+    — перезакрепить, не дефект. Медленный набор (`uv run --frozen pytest -q -m slow
+    tests/df`, около 90 минут) в CI не входит; был ли он прогнан на Linux — строка
+    evidence.
 - [ ] **Step 4: Run** — push ветки; обе ячейки матрицы зелёные. Ссылку на прогон записать в
   evidence. Evidence разделяет:
   - «фикстурная приёмка механизма: pass (macOS arm64, Ubuntu x86_64)»;
@@ -3642,6 +4077,9 @@ def test_admin_python_on_real_host(root_world): ...
     macOS вместо `/usr/bin/python3` — любой Python ≥ 3.12 по выбору человека. Root исполняет
     код из чекаута человека — доверие к этому чекауту на совести человека;
   - дальше: `sudo darkfactory doctor`, `sudo darkfactory models set …`;
+  - ограничения v1 из Task 9 (спека §3.8, §3.3): отказ `damaged` под незавершённой
+    установкой и ручное восстановление (шаги из текста отказа; `current` вручную не
+    возвращать); root-владелец в карантине и его ручное снятие;
   - почему не `df`: имя занято стандартной командой;
   - утверждённые CLI: только пути root (§3.10), способ подготовки `uv`;
   - приёмка — CI `df-stage1`; живая установка ждёт манифест.
