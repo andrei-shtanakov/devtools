@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from df import acl, admin, boundary, digest, fsutil, models, probe, state
+from df import acl, admin, boundary, digest, fsutil, journal, models, probe, state
 from df import build as build_mod
 from df import platform as plat
 from df.config import KNOWN_SCHEMAS, STAGE_OF, ConfigError
@@ -50,6 +50,7 @@ SAME_MODELS = "предупреждение: модели автора и рев
 _REACHED = "уровень 1: достигнут"
 _NOT_REACHED = "уровень 1: не достигнут"
 _PENDING = "переходное состояние, завершите darkfactory install"
+_LIVE_WRITE = "идёт административная запись, повторите doctor"
 _NO_ENTRY = "нет записи реестра"
 _NO_INSTALL = "нет install.toml"
 #: `release.json` is root's record, a few KiB; more is not a record.
@@ -62,12 +63,16 @@ _SHOWN_PROBLEMS = 5
 
 @dataclass(frozen=True)
 class Check:
-    """One fact of level 1: its id, status, reason and when it was read."""
+    """One fact of level 1: its id, status, reason and when it was read.
+
+    `reason` is the human summary (at most `_SHOWN_PROBLEMS` problems);
+    `problems` is every problem the check found (the JSON carries all)."""
 
     id: str
     status: Status
     reason: str
     time: str
+    problems: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -82,10 +87,18 @@ class RoleProbe:
 class _Outcome(Exception):
     """A check's non-`ok` verdict, raised from inside a helper."""
 
-    def __init__(self, status: Status, reason: str) -> None:
+    def __init__(
+        self, status: Status, reason: str, problems: Sequence[str] = ()
+    ) -> None:
         super().__init__(reason)
         self.status = status
         self.reason = reason
+        self.problems = tuple(problems)
+
+
+def _broken(problems: Sequence[str]) -> _Outcome:
+    """«нарушено» with the summary as reason and every problem kept."""
+    return _Outcome(BROKEN, _summary(problems), problems)
 
 
 @dataclass
@@ -199,16 +212,17 @@ def _later_stage(check: Check) -> bool:
 def _run(check_id: str, check: Callable[[_Context], str], ctx: _Context) -> Check:
     """`check(ctx)` -> `ok`; its `_Outcome` is the verdict; a read error is
     «данные недоступны» (without root: «нужен sudo»)."""
+    problems: tuple[str, ...] = ()
     try:
         reason, status = check(ctx), OK
     except _Outcome as exc:
-        status, reason = exc.status, exc.reason
+        status, reason, problems = exc.status, exc.reason, exc.problems
     except (OSError, StepFailed) as exc:
         status = UNAVAILABLE
         reason = str(exc) if ctx.root else NEED_SUDO
     except (ConfigError, TreeError, ValueError) as exc:  # this check only (M6)
         status, reason = BROKEN, f"{type(exc).__name__}: {exc}"
-    return Check(check_id, status, reason, _now())
+    return Check(check_id, status, reason, _now(), problems)
 
 
 def _need_root(ctx: _Context) -> None:
@@ -228,7 +242,9 @@ def _pending(ctx: _Context) -> str:
 def _schemas(ctx: _Context) -> str:
     """The snapshot's texts parse (`install.toml` and the registry entry were
     parsed with the snapshot); every other name of `/etc/df` is judged by the
-    listing alone, never opened."""
+    listing alone, never opened. A `write_atomic` temp of a known target is a
+    live write while a writer's generation bracket is open (the counter moved
+    or is odd since the snapshot), else a leftover of a crash."""
     if ctx.snap.models_text is not None:
         try:
             models.parse_models(ctx.snap.models_text)
@@ -238,15 +254,26 @@ def _schemas(ctx: _Context) -> str:
     unknown = sorted(n for n in _etc_names(ctx.layout) if n not in known)
     temps = [n for n in unknown if _write_temp_of(n) in known]
     others = [n for n in unknown if n not in temps]
-    reasons = [
+    if temps and _writing(ctx):
+        raise _Outcome(UNAVAILABLE, _LIVE_WRITE, temps)
+    problems = [
         f"осталась временная запись после сбоя: {n}; удалите вручную (sudo rm)"
         for n in temps
     ]
+    problems += [f"неизвестный файл /etc/df: {n}" for n in others]
+    if not problems:
+        return ""
+    reasons = problems[: len(temps)]
     if others:
-        reasons.append(f"неизвестные файлы /etc/df: {', '.join(others)}")
-    if reasons:
-        raise _Outcome(BROKEN, "; ".join(reasons))
-    return ""
+        reasons.append(f"неизвестные файлы /etc/df: {_summary(others)}")
+    raise _Outcome(BROKEN, "; ".join(reasons), problems)
+
+
+def _writing(ctx: _Context) -> bool:
+    """A writer's bracket is open: the generation counter (not a snapshot
+    part) is odd or differs from the snapshot's."""
+    now = journal.read_generation(ctx.layout)
+    return now != ctx.snap.generation or now % 2 == 1
 
 
 def _write_temp_of(name: str) -> str | None:
@@ -342,7 +369,7 @@ def _perms(ctx: _Context) -> str:
         for name in sorted([*dirs, *files]):
             problems += _object_problems(Path(dirpath) / name)
     if problems:
-        raise _Outcome(BROKEN, _summary(problems))
+        raise _broken(problems)
     return ""
 
 
@@ -389,7 +416,7 @@ def _boundary_of(digest_check: Check) -> Callable[[_Context], str]:
             raise _Outcome(BROKEN, str(exc)) from exc
         problems = boundary.static_problems(tree, plat.detect_platform(), expected)
         if problems:
-            raise _Outcome(BROKEN, _summary(problems))
+            raise _broken(problems)
         return ""
 
     return check
@@ -427,7 +454,7 @@ def _trusted(ctx: _Context) -> str:
         paths.insert(3, python)
     problems = [p for path in paths for p in plat.trusted_path_problems(path)]
     if problems:
-        raise _Outcome(BROKEN, _summary(problems))
+        raise _broken(problems)
     if entry is None:
         raise _Outcome(NOT_CHECKED, f"{_NO_ENTRY}: административный Python")
     return ""
@@ -439,7 +466,7 @@ def _approved(ctx: _Context) -> str:
         raise _Outcome(BROKEN, _NO_INSTALL)
     problems = plat.approved_cli_problems(install.approved_cli, plat.detect_platform())
     if problems:
-        raise _Outcome(BROKEN, _summary(problems))
+        raise _broken(problems)
     return ""
 
 
@@ -447,7 +474,7 @@ def _build_user(ctx: _Context) -> str:
     _need_root(ctx)  # `verify_build_user` turns a refused read into a problem
     problems = build_mod.verify_build_user(ctx.layout)
     if problems:
-        raise _Outcome(BROKEN, _summary(problems))
+        raise _broken(problems)
     return ""
 
 

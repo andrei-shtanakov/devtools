@@ -35,6 +35,7 @@ from df import (
     state,
 )
 from df import build as build_mod
+from df import platform as plat
 from df.config import ConfigError
 from df.doctor import (
     Check,
@@ -685,7 +686,8 @@ def test_json_lists_all_problems(
         "release.admin": "нарушено",
         "release.boundary": "не проверено",
     }
-    assert all(set(c) == {"id", "status", "reason", "time"} for c in report["checks"])
+    keys = {"id", "status", "reason", "time", "problems"}
+    assert all(set(c) == keys for c in report["checks"])
     assert [m["role"] for m in report["models"]] == list(ROLES)
 
 
@@ -695,7 +697,15 @@ def test_render_json_shape() -> None:
     data = json.loads(render_json(checks, []))
     assert data == {
         "level1": "reached",
-        "checks": [{"id": "install.pending", "status": "ok", "reason": "", "time": t}],
+        "checks": [
+            {
+                "id": "install.pending",
+                "status": "ok",
+                "reason": "",
+                "time": t,
+                "problems": [],
+            }
+        ],
         "warnings": [],
         "models": [],
     }
@@ -926,3 +936,69 @@ def test_program_error_propagates(
     with pytest.raises(RuntimeError):
         level1_checks(snap(fake_installed), fake_installed.lay, euid=os.geteuid())
     assert run_doctor(fake_installed, []) == cli.EXIT_BUG
+
+
+# ---------- PR #631 review ----------
+
+
+@pytest.mark.parametrize("bump", [1, 2], ids=["odd-bracket-open", "moved-even"])
+def test_live_write_temp_is_not_a_leftover(fake_installed: World, bump: int) -> None:
+    """A concurrent writer between the snapshot and the check: its temp in
+    `/etc/df` and the generation counter moved (odd while its bracket is
+    open, or already closed at another even value) -> «данные недоступны»,
+    never the advice to remove it."""
+    w = fake_installed
+    s = snap(w)
+    temp = f".models.toml.{os.getpid()}.{'a' * 32}.tmp"
+    (w.lay.etc / temp).write_text("partial")
+    w.lay.generation.write_text(f"{s.generation + bump}\n")
+    checks = level1_checks(s, w.lay, euid=os.geteuid())
+    c = by_id(checks)["etc.schemas"]
+    assert (c.status, c.reason) == (
+        "данные недоступны",
+        "идёт административная запись, повторите doctor",
+    )
+    assert "удалите" not in render_brief(checks)
+    assert not level1_reached(checks)
+    w.lay.generation.write_text(f"{s.generation}\n")  # control: a leftover
+    c = checks_of(w)["etc.schemas"]
+    assert c.status == "нарушено" and "удалите вручную" in c.reason
+
+
+def test_generation_read_is_not_a_snapshot_reread(fake_installed: World) -> None:
+    """The counter is read only to tell a live write; the snapshot parts are
+    still never reopened (I2)."""
+    w = fake_installed
+    s = snap(w)
+    (w.lay.etc / f".install.toml.1.{'b' * 32}.tmp").write_text("")
+    with watching(w) as reads:
+        level1_checks(s, w.lay, euid=os.geteuid())
+    assert reads.hits == []
+
+
+def test_json_carries_every_problem(
+    fake_installed: World,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`reason` keeps 5 problems and «и ещё N»; `--json` carries all."""
+    many = [f"git: problem {i}" for i in range(12)]
+    monkeypatch.setattr(plat, "approved_cli_problems", lambda _c, _p: many)
+    assert run_doctor(fake_installed, ["--json"]) == 2
+    report = json.loads(capsys.readouterr().out)
+    check = next(c for c in report["checks"] if c["id"] == "cli.approved")
+    assert check["problems"] == many
+    assert check["reason"] == "; ".join(many[:5]) + "; и ещё 7"
+    assert run_doctor(fake_installed, []) == 2
+    out = capsys.readouterr().out
+    assert f"  cli.approved: нарушено: {'; '.join(many[:5])}; и ещё 7" in out
+    assert "problem 5" not in out
+
+
+def test_unknown_etc_names_all_in_problems(fake_installed: World) -> None:
+    names = [f"extra{i:02}.toml" for i in range(7)]
+    for name in names:
+        (fake_installed.lay.etc / name).write_text("")
+    c = checks_of(fake_installed)["etc.schemas"]
+    assert c.problems == tuple(f"неизвестный файл /etc/df: {n}" for n in names)
+    assert c.reason.endswith("и ещё 2")
