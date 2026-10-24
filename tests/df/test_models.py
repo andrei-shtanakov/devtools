@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -26,6 +27,7 @@ from df.models import (
     parse_models,
     resolve,
 )
+from df.paths import Layout
 from tests.df.conftest import FakeLayout
 from tests.df.install_world import World, installed, make_world
 
@@ -46,8 +48,9 @@ def _audit(event: str, args: tuple[object, ...]) -> None:
 sys.addaudithook(_audit)
 
 
-@pytest.fixture()
-def _audit_opens() -> Iterator[list[str]]:
+@contextlib.contextmanager
+def audit_opens() -> Iterator[list[str]]:
+    """The paths opened (audit event `open`) inside the block."""
     opens: list[str] = []
     _OPENS.append(opens)
     try:
@@ -72,13 +75,16 @@ def reader_raw(models_text: bytes | None) -> Stable[state.RawSnapshot]:
     return Stable(raw, 0)
 
 
-def list_json(lay: object, capsys: pytest.CaptureFixture[str], text: bytes | None):
+def list_json(
+    lay: Layout, capsys: pytest.CaptureFixture[str], text: bytes | None
+) -> list[dict[str, object]]:
+    """`models list --json` over a reader snapshot whose models text is `text`."""
     code = cli.main(
         ["models", "list", "--json"],
         mode="reader",
         read=reader_raw(text),
         lock_fd=None,
-        layout=lay,  # type: ignore[arg-type]
+        layout=lay,
     )
     out = capsys.readouterr()
     assert code == 0, out.err
@@ -482,7 +488,6 @@ def test_list_product_refused_in_stage1(
 def test_list_uses_snapshot_text_only(
     fake_layout: FakeLayout,
     capsys: pytest.CaptureFixture[str],
-    _audit_opens: list[str],
 ) -> None:
     """I2: `models list` gets snapshot A; `models.toml` is then replaced by
     B; no open of `models.toml`; the output is A's."""
@@ -491,6 +496,10 @@ def test_list_uses_snapshot_text_only(
     path = lay.etc / "models.toml"
     a = P.read_bytes()
     path.write_text(SCHEMA + '[roles.author]\nharness = "codex"\nmodel = "B"\n')
-    data = list_json(lay, capsys, a)
+    with audit_opens() as opens:
+        data = list_json(lay, capsys, a)
     assert data[1]["model"] == "claude-opus-5-5"
-    assert [p for p in _audit_opens if p.endswith("models.toml")] == []
+    assert [p for p in opens if p.endswith("models.toml")] == []
+    with audit_opens() as seen:  # the hook sees such an open (control)
+        load_models(path)
+    assert str(path) in seen

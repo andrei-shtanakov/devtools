@@ -668,8 +668,10 @@ def test_reader_interleaved_with_install_commit(fake_world: World) -> None:
     assert before["current_id"] == FIRST and after["current_id"] == UPGRADE
     assert snap.stable and snap.parts == after
     read = launcher_entry.typed_read(__import__("df.state").state, snap)
-    code = cli.main(["models"], mode="reader", read=read, lock_fd=None, layout=w.lay)
-    assert code == 2  # parsed, then the Task 10 stub
+    code = cli.main(
+        ["models", "list"], mode="reader", read=read, lock_fd=None, layout=w.lay
+    )
+    assert code == 0  # parsed and listed from the snapshot
 
 
 def test_process_crash_after_current_rename_then_os_crash(fake_world: World) -> None:

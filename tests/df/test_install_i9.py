@@ -30,6 +30,7 @@ from df.paths import Layout
 from tests.df.conftest import FakeLayout
 from tests.df.install_world import (
     FIRST,
+    MODELS_SET,
     OTHER_SHA,
     PLATFORM,
     SECOND,
@@ -326,10 +327,10 @@ def test_i9_registered_damaged_before_activate_refused_early(
 def test_i9_models_set_refused_first(
     w: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """G1 comes before the pending filter (`_FINISH`) and the dispatch stub."""
+    """G1 comes before the pending filter (`_FINISH`) and the dispatch."""
     rid = switched(w, "first-A2")
     damage(w, rid)
-    err = refused(w, capsys, w.writer, ["models", "set", "x"])
+    err = refused(w, capsys, w.writer, MODELS_SET)
     assert "уже переключила на него current" in err
     assert "завершите" not in err and "Task 10" not in err
 

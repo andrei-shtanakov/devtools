@@ -42,6 +42,8 @@ PLATFORM = plat.detect_platform()
 FIRST = f"{SHA[:12]}-{PLATFORM}-1"
 SECOND = f"{OTHER_SHA[:12]}-{PLATFORM}-1"
 PROFILE = Profile("p", PY, ())
+#: A complete `models set` (Task 10): passes the parser, reaches the dispatch.
+MODELS_SET = ["models", "set", "author", "--harness", "claude", "--model", "m"]
 CLEAN_PASS = [
     "build-dir",
     "build",
