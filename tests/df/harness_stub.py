@@ -273,7 +273,7 @@ def is_secret_header(name: str) -> bool:
 def _is_credential(name: str) -> bool:
     """A secret header that can carry a credential: the WebSocket handshake
     nonce (`Sec-WebSocket-Key`) is random per connection, not a credential."""
-    return is_secret_header(name) and not name.lower().startswith("sec-websocket-")
+    return is_secret_header(name) and name.lower() != "sec-websocket-key"
 
 
 def _credentials(headers: list[tuple[str, str]]) -> tuple[bool, bool]:

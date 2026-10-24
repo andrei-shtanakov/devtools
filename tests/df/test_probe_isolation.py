@@ -185,6 +185,8 @@ def test_stub_judges_secret_headers_by_name() -> None:
     assert _credentials([("Cookie", "session=1")]) == (False, True)
     assert _credentials([("Authorization", f"Bearer {FAKE_KEY}")]) == (True, False)
     assert _credentials([("Sec-WebSocket-Key", "dGhlIG5vbmNl")]) == (False, False)
+    # only the exact handshake nonce is exempt, never a look-alike
+    assert _credentials([("Sec-WebSocket-Auth-Token", "t")]) == (False, True)
 
 
 # ---------- claude 2.1.309 ----------
