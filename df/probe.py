@@ -548,7 +548,9 @@ def _hash_under(home: Path, rel: str, role_uid: int) -> tuple[int, str]:
     parts = Path(rel).parts
     if not parts or Path(rel).is_absolute() or ".." in parts:
         raise ValueError(f"{rel}: путь не внутри домашнего каталога")
-    fd = os.open(home, _DIR_FLAGS)
+    # `home` itself is not followed either: a home that is a link is not
+    # provably the role's own place (its target may be another role's)
+    fd = os.open(home, _DIR_FLAGS | os.O_NOFOLLOW)
     try:
         _role_owns(fd, home, role_uid, directory=True)
         here = home
@@ -782,10 +784,12 @@ def run_probe(
     formed = _form(choice, path, home)
     if isinstance(formed, str):
         return formed
-    argv, env = formed
+    argv, env, formed_sha = formed
     admitted = admission(choice.harness, path, detect_platform(), argv=argv, env=env)
     if isinstance(admitted, str):
         return admitted
+    if admitted.executable_sha256 != formed_sha:  # argv came from another file
+        return f"{UNSUPPORTED}: исполняемый файл изменился во время допуска"
     profile = admitted.profile
     managed_digest, problems = managed_context(profile)
     if managed_digest is None:  # changed since admission: still before launch
@@ -809,10 +813,10 @@ def run_probe(
 
 def _form(
     choice: ModelChoice, path: Path, home: Path
-) -> tuple[list[str], dict[str, str]] | str:
-    """The argv and env of the probe, from the profile pinned to the SHA of
-    the executable (data only: admission, which hashes again and names the
-    SHA recorded, comes after)."""
+) -> tuple[list[str], dict[str, str], str] | str:
+    """The argv, env and executable SHA of the probe, from the profile
+    pinned to that SHA (data only: admission, which hashes again and must
+    name the same SHA, comes after)."""
     found = executable_target(path)
     if isinstance(found, str):
         return found
@@ -832,7 +836,7 @@ def _form(
         "PATH": f"{target.parent}:/usr/bin:/bin",
         "LANG": "C.UTF-8",
     }
-    return argv, env
+    return argv, env, sha
 
 
 def _record(

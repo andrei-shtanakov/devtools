@@ -916,17 +916,21 @@ def test_elf_executable_accepted(world: World) -> None:
 
 
 def test_record_sha_is_the_admitted_one(world: World) -> None:
-    """M3: the record's `executable_sha256` is the SHA admission hashed."""
+    """M3: the record's `executable_sha256` is the SHA admission hashed (a
+    different one from forming argv is refused: the addendum's test)."""
     real = probe.admission
+    seen: list[str] = []
 
-    def other_sha(*args: object, **kw: object) -> object:
+    def spy(*args: object, **kw: object) -> object:
         got = real(*args, **kw)  # type: ignore[arg-type]
         assert isinstance(got, probe.Admission)
-        return probe.Admission(got.profile, "f" * 64)
+        seen.append(got.executable_sha256)
+        return got
 
-    world.mp.setattr(probe, "admission", other_sha)
+    world.mp.setattr(probe, "admission", spy)
     rec = world.run(Spy(ok_result()))
-    assert isinstance(rec, ProbeRecord) and rec.executable_sha256 == "f" * 64
+    assert isinstance(rec, ProbeRecord) and rec.executable_sha256 == seen[0]
+    assert seen == [world.sha]
 
 
 @pytest.mark.parametrize(
@@ -1118,3 +1122,68 @@ def test_auth_directory_swapped_mid_walk(
         assert obs == UNREADABLE_OBS and evil_sha not in shas
     else:
         assert obs.tracking == "tracked" and shas == [evil_sha]
+
+
+# ---------- fix round 2 addendum ----------
+
+
+def test_binary_swapped_between_form_and_admission(world: World) -> None:
+    """The SHA argv was formed for must be the one admission hashed; both
+    are known (same profile), still refused before launch."""
+    real = probe.executable_target
+    shas = iter(["1" * 64, "2" * 64])
+
+    def two_hashes(path: Path) -> tuple[Path, str] | str:
+        found = real(path)
+        assert not isinstance(found, str)
+        return found[0], next(shas)
+
+    prof = make_profile()
+    world.mp.setattr(
+        probe,
+        "HARNESS_PROFILES",
+        {("claude", PLATFORM, "1" * 64): prof, ("claude", PLATFORM, "2" * 64): prof},
+    )
+    world.mp.setattr(probe, "executable_target", two_hashes)
+    spy = Spy(ok_result())
+    result = world.run(spy)
+    assert result == "не поддерживается: исполняемый файл изменился во время допуска"
+    assert spy.calls == []
+
+
+def test_home_link_is_unreadable(tmp_path: Path) -> None:
+    real_home = tmp_path / "real"
+    make_cred(real_home)
+    (tmp_path / "home").symlink_to(real_home)
+    obs = probe.observe_auth(make_profile(), tmp_path / "home", role_uid=UID)
+    assert obs == UNREADABLE_OBS
+
+
+def _open_fds() -> int:
+    return len(os.listdir("/dev/fd"))
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["tracked", "missing", "leaf-link", "dir-link", "foreign-file", "foreign-dir"],
+)
+def test_auth_walk_closes_every_fd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    if case != "missing":
+        cred = make_cred(home if case != "dir-link" else tmp_path / "other")
+    if case == "leaf-link":
+        cred.rename(home / "real")
+        (home / CRED).symlink_to(home / "real")
+    elif case == "dir-link":
+        (home / ".claude").symlink_to(cred.parent)
+    elif case == "foreign-file":
+        fake_owners(monkeypatch, {cred: UID + 1})
+    elif case == "foreign-dir":
+        fake_owners(monkeypatch, {cred.parent: UID + 1})
+    before = _open_fds()
+    for _ in range(3):
+        probe.observe_auth(make_profile(), home, role_uid=UID)
+    assert _open_fds() == before
