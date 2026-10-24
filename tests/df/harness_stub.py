@@ -5,8 +5,9 @@ just enough for one turn of a real harness. It records, per request, only
 what the tests assert: the method, the path, the `model` field of a JSON
 body, the number of tools offered, the reasoning/effort fields, which of
 the test's marker strings the body contained, and two booleans about
-credentials — whether the fake key was presented, and whether any OTHER
-credential was. Header values and bodies
+credentials — whether the fake key was presented in a secret header, and
+whether any OTHER value was. A secret header is any whose name contains
+key, token, auth, cookie or secret (`is_secret_header`). Header values and bodies
 are never stored, logged or printed: a real credential that leaked into a
 request must not leak further into a test log.
 """
@@ -23,7 +24,8 @@ from typing import Literal
 
 #: The only key the harnesses are ever given in these tests.
 FAKE_KEY = "sk-df-isolation-test-0000000000000000"
-_CRED_HEADERS = ("x-api-key", "authorization")
+#: A header whose name contains one of these (any case) is a secret.
+_SECRET_PARTS = ("key", "token", "auth", "cookie", "secret")
 #: Reply text of a successful turn.
 REPLY = "OK"
 
@@ -76,7 +78,7 @@ class Stub:
 @contextmanager
 def running_stub() -> Iterator[Stub]:
     """Start the stub on 127.0.0.1 (ephemeral port); stop it on exit."""
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    server = _QuietServer(("127.0.0.1", 0), _Handler)
     stub = Stub(server)
     server.stub = stub  # type: ignore[attr-defined]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -87,6 +89,11 @@ def running_stub() -> Iterator[Stub]:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+class _QuietServer(ThreadingHTTPServer):
+    def handle_error(self, request: object, client_address: object) -> None:
+        """Clients (codex probing WebSocket) reset connections; print nothing."""
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -257,12 +264,24 @@ def _json_object(body: bytes) -> dict[str, object]:
     return data if isinstance(data, dict) else {}
 
 
+def is_secret_header(name: str) -> bool:
+    """A header the stub never stores or prints (only compares)."""
+    low = name.lower()
+    return any(part in low for part in _SECRET_PARTS)
+
+
+def _is_credential(name: str) -> bool:
+    """A secret header that can carry a credential: the WebSocket handshake
+    nonce (`Sec-WebSocket-Key`) is random per connection, not a credential."""
+    return is_secret_header(name) and not name.lower().startswith("sec-websocket-")
+
+
 def _credentials(headers: list[tuple[str, str]]) -> tuple[bool, bool]:
     """`(fake key presented, another credential presented)` — values are
     compared here and dropped; nothing of them leaves this function."""
     fake = other = False
     for name, value in headers:
-        if name.lower() not in _CRED_HEADERS:
+        if not _is_credential(name):
             continue
         token = value.removeprefix("Bearer ").strip()
         if token == FAKE_KEY:

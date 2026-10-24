@@ -223,8 +223,8 @@ def _unexcluded(kind: Literal["mdm", "server"], locator: str) -> ManagedSource:
 
 _CLAUDE_ROOT = "/Library/Application Support/ClaudeCode"
 _CLAUDE_PLIST = "com.anthropic.claudecode.plist"
-#: claude 2.1.309 on macOS: the closed list of managed sources, from the
-#: binary's own code and its debug log (evidence 2026-10-24). MDM is read
+#: claude 2.1.309 on macOS: the managed sources, closed as far as found in
+#: the binary's strings and its debug log (evidence 2026-10-24). MDM is read
 #: as plist files with `plutil` (device level and per user — the role's).
 CLAUDE_MANAGED_MACOS: tuple[ManagedSource, ...] = (
     _absent_or_refused("file", f"{_CLAUDE_ROOT}/managed-settings.json"),
@@ -239,6 +239,9 @@ CLAUDE_MANAGED_MACOS: tuple[ManagedSource, ...] = (
     ),
     _unexcluded("server", "api.anthropic.com/api/claude_code/settings"),
     _unexcluded("server", "api.anthropic.com/api/claude_code/policy_limits"),
+    # The server payload's on-disk cache in the role's config dir: a vehicle
+    # of the same server delivery, seeded from disk at start.
+    _unexcluded("server", "<role home>/.claude/remote-settings.json"),
 )
 #: codex 0.163.0 on macOS (evidence 2026-10-24). MDM goes through
 #: CFPreferences (domain `com.openai.codex`, keys `config_toml_base64`,

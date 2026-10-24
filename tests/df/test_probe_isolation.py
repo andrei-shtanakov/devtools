@@ -24,6 +24,7 @@ import base64
 import dataclasses
 import json
 import os
+import subprocess
 import sys
 import time
 from collections.abc import Iterator
@@ -138,6 +139,54 @@ def test_neutral_probe_cwd_has_no_problems(
     assert probe.probe_cwd_problems(lay) == []
 
 
+def test_sandbox_denies_owner_credential_places(tmp_path: Path) -> None:
+    # The profile itself: every existing denied place of the owner is
+    # unreadable in the sandbox (listing only; output dropped), and the
+    # login keychain cannot be queried.
+    if not hw.SANDBOX_EXEC.exists():
+        pytest.skip("no /usr/bin/sandbox-exec")
+    profile = tmp_path / "p.sb"
+    profile.write_text(hw.sandbox_profile())
+
+    def sandboxed(*argv: str) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            [str(hw.SANDBOX_EXEC), "-f", str(profile), *argv],
+            env={"PATH": "/usr/bin:/bin"},
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+    places = [hw.OWNER_HOME / d for d in hw.DENIED_DIRS] + [
+        hw.OWNER_HOME / f for f in hw.DENIED_FILES
+    ]
+    present = [p for p in places if p.exists()]
+    assert present  # at least the keychains directory
+    for place in present:
+        if place.is_file():
+            got = sandboxed("/usr/bin/head", "-c", "1", str(place))
+        else:
+            got = sandboxed("/bin/ls", "-1", str(place))
+        assert got.returncode != 0, place
+        assert b"Operation not permitted" in got.stderr, place
+    login = hw.OWNER_HOME / "Library/Keychains/login.keychain-db"
+    if login.exists():
+        got = sandboxed("/usr/bin/security", "show-keychain-info", str(login))
+        assert got.returncode != 0
+
+
+def test_stub_judges_secret_headers_by_name() -> None:
+    from tests.df.harness_stub import _credentials, is_secret_header
+
+    for name in ("x-api-key", "Authorization", "Cookie", "X-Auth-Token", "Secret"):
+        assert is_secret_header(name)
+    assert not is_secret_header("Content-Type")
+    assert _credentials([("Cookie", "session=1")]) == (False, True)
+    assert _credentials([("Authorization", f"Bearer {FAKE_KEY}")]) == (True, False)
+    assert _credentials([("Sec-WebSocket-Key", "dGhlIG5vbmNl")]) == (False, False)
+
+
 # ---------- claude 2.1.309 ----------
 
 
@@ -185,6 +234,42 @@ def test_claude_setting_sources_is_load_bearing(
     assert req.markers == frozenset(hw.MARKS)
 
 
+def test_claude_mcp_sentinels_are_live_without_isolation(
+    claude_bin: Path, stub: Stub, tree: hw.Tree
+) -> None:
+    # Twin for MCP: without `--setting-sources ""` AND the strict empty MCP
+    # config, the user (~/.claude.json) and project (.mcp.json) MCP servers
+    # start; with either flag present they do not (pinned run, previous twin).
+    hw.plant_claude(tree, stub.url)
+    argv, env = formed(CLAUDE_CHOICE, claude_bin, tree.home)
+    i = argv.index("--setting-sources")
+    argv = argv[:i] + argv[i + 2 :]
+    j = argv.index("--strict-mcp-config")
+    assert argv[j : j + 3] == [
+        "--strict-mcp-config",
+        "--mcp-config",
+        '{"mcpServers":{}}',
+    ]
+    ran = hw.run_harness(argv[:j] + argv[j + 3 :], _claude_env(env, stub), tree)
+    _settle()
+    assert ran.returncode == 0
+    assert {"user-mcp", "project-mcp"} <= set(tree.fired())
+
+
+def test_claude_reports_a_rewritten_model(
+    claude_bin: Path, stub: Stub, tree: hw.Tree
+) -> None:
+    # claude rewrites some model IDs; the request and `modelUsage` carry the
+    # model actually sent, which is what the record's `actual_model` keeps.
+    choice = dataclasses.replace(CLAUDE_CHOICE, model="claude-opus-4-1")
+    argv, env = formed(choice, claude_bin, tree.home)
+    ran = hw.run_harness(argv, _claude_env(env, stub), tree)
+    [req] = stub.requests()
+    assert req.model == "claude-opus-5-5"
+    parsed = probe.parse_output("claude", ran.stdout)
+    assert parsed == probe.ProbeParse(True, "claude-opus-5-5", None)
+
+
 def test_claude_prompt_after_empty_tools_needs_separator(
     claude_bin: Path, stub: Stub, tree: hw.Tree
 ) -> None:
@@ -198,14 +283,18 @@ def test_claude_prompt_after_empty_tools_needs_separator(
     assert b"Input must be provided" in ran.stderr
 
 
-@pytest.fixture()
-def claude_debug_log(claude_bin: Path, stub: Stub, tree: hw.Tree) -> str:
+@pytest.fixture(params=[(), ("--bare",)], ids=["pinned", "pinned+bare"])
+def claude_debug_log(
+    request: pytest.FixtureRequest, claude_bin: Path, stub: Stub, tree: hw.Tree
+) -> str:
     """One pinned run as with a first-party base URL (the production
     situation), its debug log as the evidence of what was read and what
-    was eligible. Test-only: `--debug-file` and the first-party override."""
+    was eligible. Test-only: `--debug-file` and the first-party override.
+    Also run with `--bare` (documented to skip background prefetches): the
+    most obvious candidate Exclusion."""
     argv, env = formed(CLAUDE_CHOICE, claude_bin, tree.home)
     log = tree.root / "debug.log"
-    argv = argv[:-2] + ["--debug-file", str(log)] + argv[-2:]
+    argv = [argv[0], *request.param, *argv[1:-2], "--debug-file", str(log), *argv[-2:]]
     env = {**_claude_env(env, stub), "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL": "1"}
     ran = hw.run_harness(argv, env, tree)
     assert ran.returncode == 0, ran.stderr[-500:]
@@ -214,8 +303,8 @@ def claude_debug_log(claude_bin: Path, stub: Stub, tree: hw.Tree) -> str:
 
 
 def test_claude_server_managed_settings_are_not_excluded(claude_debug_log: str) -> None:
-    # Under API-key auth the pinned invocation leaves remote managed
-    # settings eligible (and policy limits are fetched): no Exclusion.
+    # Under API-key auth the pinned invocation (with or without `--bare`)
+    # leaves remote managed settings eligible and fetches policy limits.
     assert "remote managed settings eligible" in claude_debug_log
     assert "Policy limits: fetch failed" in claude_debug_log
 
@@ -239,6 +328,7 @@ def test_claude_managed_sources_are_read(
         b"com.anthropic.claudecode",
         b"/api/claude_code/settings",
         b"/api/claude_code/policy_limits",
+        b"remote-settings.json",
     ):
         assert name in code, name
 
@@ -290,6 +380,39 @@ def test_codex_user_instructions_and_tools_reach_the_request(
     assert req.tools > 0
 
 
+#: Features whose tools could be switched off by `--disable` (0.163.0).
+TOOL_FEATURES = (
+    "hooks shell_tool unified_exec view_image multi_agent apps plugins "
+    "sleep_tool image_generation browser_use computer_use in_app_browser "
+    "tool_suggest skill_search goals remote_plugin standalone_web_search "
+    "memories code_mode_host"
+).split()
+
+
+def test_codex_tools_remain_with_features_disabled(
+    codex_bin: Path, stub: Stub, tree: hw.Tree
+) -> None:
+    _auth_file(tree, {"OPENAI_API_KEY": FAKE_KEY})
+    argv, env = formed(CODEX_CHOICE, codex_bin, tree.home)
+    off = [x for f in TOOL_FEATURES for x in ("--disable", f)]
+    extra = [*off, "-c", 'web_search="disabled"']
+    hw.run_harness(_codex_argv([*argv[:-1], *extra, argv[-1]], stub), env, tree)
+    [req] = stub.requests()
+    assert req.tools > 0
+
+
+def test_codex_forced_api_login_logs_a_chatgpt_role_out(
+    codex_bin: Path, stub: Stub, tree: hw.Tree
+) -> None:
+    # The rejected Exclusion candidate: it would log the role out.
+    _fake_chatgpt_auth(tree)
+    argv, env = formed(CODEX_CHOICE, codex_bin, tree.home)
+    forced = ["-c", 'forced_login_method="api"']
+    ran = hw.run_harness(_codex_argv([*argv[:-1], *forced, argv[-1]], stub), env, tree)
+    assert ran.returncode != 0 and stub.requests() == []
+    assert b"Logging out" in ran.stderr
+
+
 def test_codex_ignore_user_config_is_load_bearing(
     codex_bin: Path, stub: Stub, tree: hw.Tree
 ) -> None:
@@ -300,7 +423,9 @@ def test_codex_ignore_user_config_is_load_bearing(
     ran = hw.run_harness(_codex_argv(argv, stub), env, tree)
     _settle()
     assert ran.returncode == 0
-    assert {"user-mcp", "user-notify"} <= set(tree.fired())
+    # user MCP and notify, and the project layer the user config trusts
+    # (its MCP server) — so the project scenario of the pinned run is live.
+    assert {"user-mcp", "user-notify", "project-mcp"} <= set(tree.fired())
     [req] = stub.requests()
     assert req.path == "/user-provider/v1/responses"
 

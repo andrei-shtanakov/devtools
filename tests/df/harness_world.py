@@ -4,13 +4,15 @@ run of a real harness.
 
 Safety (R67): a harness runs only as the current user, under
 `/usr/bin/sandbox-exec` with a profile that denies network except
-localhost, the keychain services and reads of the owner's harness homes;
+localhost, the keychain services and reads of the owner's credential
+places (harness homes, gh/review/ai-prosto configs, ~/.ssh, keychains);
 with an explicit minimal environment (nothing inherited), HOME in a fresh
 temporary directory and a fake key; requests go to the localhost stub.
 """
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
@@ -19,14 +21,27 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-#: Binaries of Step 3 (R66): (path, SHA-256, version).
+#: The owner's real home (not $HOME): the sandbox denies reads below it.
+OWNER_HOME = Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
+def _bin(env_name: str, default: Path) -> Path:
+    """A binary's path: `env_name` overrides the default install location."""
+    return Path(os.environ.get(env_name) or default)
+
+
+#: Binaries of Step 3 (R66): (path, SHA-256, version). The path can be
+#: overridden by `DF_TEST_CLAUDE_BIN` / `DF_TEST_CODEX_BIN`; the SHA cannot.
 CLAUDE = (
-    Path("/Users/Andrei_Shtanakov/.local/share/claude/versions/2.1.309"),
+    _bin(
+        "DF_TEST_CLAUDE_BIN",
+        OWNER_HOME / ".local/share/claude/versions/2.1.309",
+    ),
     "5eadc0009cdcdbc0d06e58110d7b2baf88ced6088b1c33a60a21217fe410619c",
     "2.1.309",
 )
 CODEX = (
-    Path("/opt/homebrew/Caskroom/codex/0.163.0/bin/codex"),
+    _bin("DF_TEST_CODEX_BIN", Path("/opt/homebrew/Caskroom/codex/0.163.0/bin/codex")),
     "8813367285524ac798dd96d1b071aea30d58708c7226fd236cd275cf1cfdee31",
     "0.163.0",
 )
@@ -41,22 +56,44 @@ MARK_PROJECT = "DFMARK-PROJECT-91c2"
 MARKS = (MARK_USER, MARK_PROJECT)
 #: A model no pinned invocation asks for: seeing it means config won.
 SENTINEL_MODEL = "df-sentinel-model"
+#: The owner's credential places a harness run must not read (R67).
+DENIED_DIRS = (
+    ".claude",
+    ".codex",
+    ".config/gh",
+    ".config/review",
+    ".config/ai-prosto",
+    ".ssh",
+    "Library/Keychains",
+)
+DENIED_FILES = (".claude.json",)
 
 
 def pinned(binary: tuple[Path, str, str]) -> Path | None:
-    """The binary's path when it is present with the pinned SHA-256."""
+    """The binary's final target when it is present with the pinned SHA-256
+    (hashed once per path per session)."""
     path, sha, _ = binary
+    target = Path(os.path.realpath(path))
+    return target if _sha256(str(target)) == sha else None
+
+
+@functools.cache
+def _sha256(path: str) -> str | None:
+    digest = hashlib.sha256()
     try:
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        with open(path, "rb") as fh:
+            while chunk := fh.read(1 << 20):
+                digest.update(chunk)
     except OSError:
         return None
-    return path if digest == sha else None
+    return digest.hexdigest()
 
 
 def sandbox_profile() -> str:
     """Deny network except localhost, the keychain services and reads of
-    the owner's harness homes (their credentials must stay unreachable)."""
-    owner = pwd.getpwuid(os.getuid()).pw_dir
+    the owner's credential places (`DENIED_DIRS`, `DENIED_FILES`)."""
+    dirs = "".join(f'\n  (subpath "{OWNER_HOME / d}")' for d in DENIED_DIRS)
+    files = "".join(f'\n  (literal "{OWNER_HOME / f}")' for f in DENIED_FILES)
     return f"""(version 1)
 (allow default)
 (deny network-outbound)
@@ -67,11 +104,7 @@ def sandbox_profile() -> str:
   (global-name "com.apple.securityd")
   (global-name "com.apple.security.agent")
   (global-name "com.apple.secd"))
-(deny file-read*
-  (subpath "{owner}/.claude")
-  (literal "{owner}/.claude.json")
-  (subpath "{owner}/.codex")
-  (subpath "{owner}/Library/Keychains"))
+(deny file-read*{dirs}{files})
 """
 
 
@@ -190,7 +223,7 @@ base_url = "{base_url}/{scope}-provider/v1"
 requires_openai_auth = true
 wire_api = "responses"
 
-[mcp_servers.sentinel]
+[mcp_servers.sentinel-{scope}]
 command = "/bin/sh"
 args = ["-c", "{_touch(tree, f"{scope}-mcp")}; sleep 3"]
 
@@ -223,16 +256,33 @@ def _codex_hooks(tree: Tree, scope: str) -> str:
 
 def plant_codex(tree: Tree, base_url: str) -> None:
     """User and project codex config: model, effort, provider, MCP server,
-    notify, hooks (toml and json) and AGENTS.md markers."""
+    notify, hooks (toml and json) and AGENTS.md markers. The project is a
+    real git repository that the user config trusts, so the project layer
+    is live whenever the user config is read."""
     codex_home = tree.home / ".codex"
-    _write(codex_home / "config.toml", _codex_config(tree, "user", base_url))
+    trust = "".join(
+        f'\n[projects."{p}"]\ntrust_level = "trusted"\n'
+        for p in (tree.project, tree.cwd)
+    )
+    _write(codex_home / "config.toml", _codex_config(tree, "user", base_url) + trust)
     _write(codex_home / "hooks.json", _codex_hooks(tree, "user"))
     _write(codex_home / "AGENTS.md", f"{MARK_USER}\n")
     proj = tree.project
     _write(proj / ".codex" / "config.toml", _codex_config(tree, "project", base_url))
     _write(proj / ".codex" / "hooks.json", _codex_hooks(tree, "project"))
     _write(proj / "AGENTS.md", f"{MARK_PROJECT}\n")
-    (proj / ".git").mkdir()
+    _git_init(proj, tree.root)
+
+
+def _git_init(path: Path, home: Path) -> None:
+    """A real repository (codex finds the project root and its layer only
+    through one), created without the owner's git configuration."""
+    subprocess.run(
+        ["/usr/bin/git", "init", "-q", str(path)],
+        env={"HOME": str(home), "PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1"},
+        check=True,
+        capture_output=True,
+    )
 
 
 @dataclass(frozen=True)

@@ -1,8 +1,9 @@
 """Task 11-A: model probes (spec 3.6) — admission, parsing, records, status.
 
-No real harness runs here: every profile is built by the test (the table
-`HARNESS_PROFILES` is empty until Step 3 / 11-B), the executable is a fake
-Mach-O file under `tmp_path`, and the runner is a spy.
+No real harness runs here: every profile a probe launches with is built by
+the test (the real `HARNESS_PROFILES` entries of 11-B are unverified and are
+only checked to refuse), the executable is a fake Mach-O file under
+`tmp_path`, and the runner is a spy. Real binaries: `test_probe_isolation`.
 """
 
 from __future__ import annotations

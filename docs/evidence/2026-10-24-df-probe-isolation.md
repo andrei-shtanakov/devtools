@@ -5,6 +5,13 @@ Task 11, Step 3 (11-B) плана этапа 1 df-installer; спека
 «Допуск». Тесты — `tests/df/test_probe_isolation.py` (маркер `harness`), заглушка —
 `tests/df/harness_stub.py`, мир сценариев — `tests/df/harness_world.py`.
 
+**Как запустить.** Тесты opt-in: `uv run pytest tests/df/test_probe_isolation.py -m harness`
+(по умолчанию `addopts` исключает `slow` и `harness`). Пути к бинарям переопределяются
+`DF_TEST_CLAUDE_BIN` / `DF_TEST_CODEX_BIN`; SHA-256 — нет: при другом хеше или без
+бинаря, без `sandbox-exec` или не на macOS тесты пропускаются. Хеш каждого бинаря
+считается один раз за сессию. Метка **(разведка)** ниже — наблюдение ручного прогона без
+теста; всё остальное закреплено тестом.
+
 **Итог: ни одна версия не прошла. Обе записи `HARNESS_PROFILES` закреплены с
 `isolation_verified=False`; пробы обеих версий — «не поддерживается: изоляция не
 подтверждена».** Общая причина — серверная доставка managed-настроек, для которой нет
@@ -25,11 +32,14 @@ Task 11, Step 3 (11-B) плана этапа 1 df-installer; спека
 - Только текущий пользователь, без sudo и `run_as`.
 - Каждый запуск — под `/usr/bin/sandbox-exec` с профилем: исходящая сеть только на
   `localhost`, запрещены mach-сервисы связки ключей (`com.apple.SecurityServer`,
-  `com.apple.securityd`, `com.apple.security.agent`, `com.apple.secd`) и чтение
-  `~/.claude`, `~/.claude.json`, `~/.codex`, `~/Library/Keychains` владельца. Оба харнесса
-  под ним работают. Проверено, что профиль режет внешнюю сеть: codex с закреплённым argv
+  `com.apple.securityd`, `com.apple.security.agent`, `com.apple.secd`) и чтение мест
+  учётных данных владельца: `~/.claude`, `~/.claude.json`, `~/.codex`, `~/.config/gh`,
+  `~/.config/review`, `~/.config/ai-prosto`, `~/.ssh`, `~/Library/Keychains`. Что запрет
+  действует, показывает `test_sandbox_denies_owner_credential_places`: в песочнице каждое
+  существующее из этих мест не читается («Operation not permitted»), а `security
+  show-keychain-info` для login-keychain завершается ошибкой. Оба харнесса под профилем работают. Проверено, что профиль режет внешнюю сеть: codex с закреплённым argv
   сам пытался открыть `wss://api.openai.com/v1/responses` и получил `Operation not
-  permitted` — так и выяснилось, что `OPENAI_BASE_URL` им не читается.
+  permitted` — так и выяснилось, что `OPENAI_BASE_URL` им не читается (разведка).
 - Окружение задаётся целиком (ничего не наследуется): то, что строит `probe._form`
   (`HOME` — свежий временный каталог, `PATH` — каталог цели + `/usr/bin:/bin`,
   `LANG=C.UTF-8`), плюс только тестовые добавки: claude — `ANTHROPIC_API_KEY=<фейковый
@@ -41,7 +51,10 @@ Task 11, Step 3 (11-B) плана этапа 1 df-installer; спека
 - Заглушка (`127.0.0.1`, эфемерный порт) записывает только метод, путь, поле `model`,
   число инструментов, поле effort/reasoning, какие из тестовых маркеров встретились в теле,
   и два булевых признака: предъявлен ли фейковый ключ и предъявлены ли **иные**
-  учётные данные. Значения заголовков и тела не хранятся и не печатаются. Ни в одном
+  учётные данные. Секретным считается любой заголовок, имя которого содержит `key`,
+  `token`, `auth`, `cookie` или `secret` (без учёта регистра); учётными данными из них не
+  считается только одноразовый `Sec-WebSocket-Key` рукопожатия. Значения заголовков и тела
+  не хранятся и не печатаются (и ошибки обработчика заглушка не печатает). Ни в одном
   закреплённом запуске иных учётных данных не было (`leaked() == False`).
 - Платных вызовов нет: все запросы — к заглушке; внешняя сеть закрыта профилем.
 
@@ -58,7 +71,7 @@ claude 2.1.309 (`probe.claude_argv`):
 Отличие от кандидата плана: `--` перед промптом. `--tools <tools...>` вариадический:
 без `--` пустой список инструментов проглатывает промпт («Input must be provided either
 through stdin or as a prompt argument»), тест
-`test_claude_prompt_after_empty_tools_needs_separator`. `--tools=` тоже работает, но `--`
+`test_claude_prompt_after_empty_tools_needs_separator`. `--tools=` тоже работает (разведка), но `--`
 закрывает и будущие вариадические флаги. `--setting-sources ""` принимается и отключает
 user, project и local настройки (см. сценарии).
 
@@ -75,8 +88,9 @@ codex 0.163.0 (`probe.codex_argv`):
 
 ## Сценарии и результаты
 
-Посеяно в `HOME` роли и в родителе `cwd` (`project/`, cwd = `project/sub/cwd`, в
-`project/` есть `.git`): sentinel-hooks, MCP-серверы, конфиг с иной моделью
+Посеяно в `HOME` роли и в родителе `cwd` (`project/`, cwd = `project/sub/cwd`; для
+claude в `project/` — каталог `.git`, для codex — настоящий репозиторий `git init`,
+которому user-конфиг доверяет, `trust_level = "trusted"`): sentinel-hooks, MCP-серверы, конфиг с иной моделью
 (`df-sentinel-model`), effort и провайдером/`env`-переадресацией base URL на путь
 `/<scope>-settings-env`, `apiKeyHelper`, memory/инструкции с маркерами. Срабатывание —
 появление файла в каталоге sentinels; попадание инструкций — маркер в теле запроса.
@@ -87,21 +101,22 @@ codex 0.163.0 (`probe.codex_argv`):
 |---|---|---|
 | закреплённый argv, всё посеяно (user `~/.claude/settings.json` с hooks/model/effortLevel/env/apiKeyHelper, `~/.claude/CLAUDE.md`, user skill и agent, `~/.claude.json` с MCP; project `.claude/settings.json`, `settings.local.json`, `CLAUDE.md`, `.mcp.json`) | sentinels: нет; один запрос `POST /v1/messages`, `model = claude-opus-5-5` (из ModelChoice), `output_config.effort = high`, инструментов 0, маркеров 0, фейковый ключ, иных данных нет; `parse_output` → ok, `actual_model = claude-opus-5-5` | `test_claude_pinned_invocation_is_isolated` |
 | двойник без `--setting-sources ""` | срабатывают user и local hooks (SessionStart, UserPromptSubmit, Stop, SessionEnd), `apiKeyHelper`, запрос уходит по `env`-переадресации (`/local-settings-env/v1/messages`), оба маркера в теле — sentinels живые, флаг несущий | `test_claude_setting_sources_is_load_bearing` |
-| контроль без всех флагов изоляции (разведка) | дополнительно: модель из настроек (`df-sentinel-model`), effort `low`, 12 инструментов, user и project MCP стартуют | — (журнал разведки) |
+| двойник без `--setting-sources ""` и без `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` | стартуют user MCP (`~/.claude.json`) и project MCP (`.mcp.json`) — MCP-sentinels живые. С любым из двух флагов MCP не стартует (закреплённый запуск и предыдущий двойник) | `test_claude_mcp_sentinels_are_live_without_isolation` |
+| контроль без всех флагов изоляции (разведка) | дополнительно: модель из настроек (`df-sentinel-model`), effort `low`, 12 инструментов | — |
 | проектный конфиг в родителе cwd | не влияет (входит в первый сценарий); `probe_cwd_problems` для нейтрального `probe_cwd` пуст | первый сценарий; `test_neutral_probe_cwd_has_no_problems` |
 | `--tools ""` без `--` | промпт проглочен, запуск не состоялся | `test_claude_prompt_after_empty_tools_needs_separator` |
 
-Наблюдение: claude переписывает некоторые model ID (запрошенный `claude-opus-4-1` ушёл как
-`claude-opus-5-5`); `modelUsage` ответа называет фактически отправленный — `actual_model`
-записи это и фиксирует.
+claude переписывает некоторые model ID: запрошенный `claude-opus-4-1` уходит как
+`claude-opus-5-5`, и `modelUsage` ответа называет фактически отправленный — `actual_model`
+записи это и фиксирует (`test_claude_reports_a_rewritten_model`).
 
 ### codex 0.163.0
 
 | сценарий | результат | тест |
 |---|---|---|
 | закреплённый argv, посеяно (user `~/.codex/config.toml` с model/effort/provider/MCP/notify/`[hooks]`, `~/.codex/hooks.json`, `~/.codex/AGENTS.md`; project `.codex/config.toml`, `.codex/hooks.json`, `AGENTS.md`); ключ — в `~/.codex/auth.json` | sentinels: нет (hooks toml/json, MCP, notify); один `POST /v1/responses`, `model = gpt-5.5`, `reasoning.effort = high`, проектный маркер не дошёл, фейковый ключ из файла; `parse_output` → ok | `test_codex_pinned_invocation` |
-| **провал:** user-инструкции и инструменты | маркер `~/.codex/AGENTS.md` роли **доходит до запроса** (флага, отключающего глобальные инструкции `CODEX_HOME`, в 0.163.0 нет; `--ignore-user-config` касается только `config.toml`); модели предлагаются встроенные инструменты (10; с `--disable` двадцати фич и `-c web_search="disabled"` — всё ещё 2) | `test_codex_user_instructions_and_tools_reach_the_request` |
-| двойник без `--ignore-user-config` | стартуют user MCP и notify, запрос уходит к провайдеру из user-конфига (`/user-provider/v1/responses`) — sentinels живые, флаг несущий | `test_codex_ignore_user_config_is_load_bearing` |
+| **провал:** user-инструкции и инструменты | маркер `~/.codex/AGENTS.md` роли **доходит до запроса** (флага, отключающего глобальные инструкции `CODEX_HOME`, в 0.163.0 нет; `--ignore-user-config` касается только `config.toml`); модели предлагаются встроенные инструменты (10; с `--disable` девятнадцати фич и `-c web_search="disabled"` — всё ещё есть, 2 в разведке) | `test_codex_user_instructions_and_tools_reach_the_request`, `test_codex_tools_remain_with_features_disabled` |
+| двойник без `--ignore-user-config` | стартуют user MCP и notify, **и project MCP** из `project/.codex/config.toml` (проектный слой живой: репозиторий настоящий, доверие задано в user-конфиге); запрос уходит к провайдеру из user-конфига (`/user-provider/v1/responses`) — sentinels живые, флаг несущий. В закреплённом запуске проектный слой не загружается: доверие проекту задаётся только в игнорируемом user-конфиге | `test_codex_ignore_user_config_is_load_bearing` |
 | user hooks (разведка) | без `--ignore-user-config` и с `--dangerously-bypass-hook-trust` `hooks.json` и `[hooks]` из `CODEX_HOME` срабатывают; без `--ignore-user-config`, но без обхода доверия — не срабатывают (недоверенные hooks не исполняются), а user MCP и notify стартуют | — |
 | `-c mcp_servers={}` (разведка) | **не** убирает MCP-серверы user-конфига (пустая таблица сливается, а не заменяет); user MCP отключает именно `--ignore-user-config`. Флаг оставлен в argv как безвредный, несущим он не является | — |
 | подмена `auth.json` | `observe_auth` до/после запуска — `tracked`, файл запуском не изменён; после подмены содержимого отпечаток (sha256) другой | `test_codex_auth_file_is_the_fingerprinted_source` |
@@ -113,6 +128,12 @@ codex 0.163.0 (`probe.codex_argv`):
 поведенчески не доказано** — доказано, что файл является источником, а связка ключей
 этому запуску недоступна. Прогон без запрета связки ключей не делался намеренно: он мог
 бы прочитать настоящие учётные данные владельца (R67).
+
+`CODEX_HOME`, указывающий на каталог, принадлежащий пробе, обошёл бы `AGENTS.md` роли —
+но вместе с ним и её `auth.json` (по `--help`: «auth still uses `CODEX_HOME`»), то есть
+проба перестала бы проверять авторизацию роли. Как `Exclusion` в v1 не годится; этап 2
+может вернуться к этому (например, отдельный `CODEX_HOME` с копией только `auth.json`) —
+не проверялось.
 
 ### События codex (M1 из 11-A)
 
@@ -135,7 +156,11 @@ codex 0.163.0 (`probe.codex_argv`):
 терминального или два терминальных — «не разобран» (тесты
 `test_parse_codex_*` в `tests/df/test_probe.py`).
 
-## Managed-источники: замкнутый список и способ
+## Managed-источники: список и способ
+
+Список замкнут **настолько, насколько найдено в строках бинаря и debug-журнале этой
+версии** — а не абсолютно: недокументированный путь, не встретившийся в строках, им не
+покрыт.
 
 Создавать файлы в `/Library` и `/etc` нельзя (без root), поэтому наблюдаемость
 установлена по коду бинаря (строки и встроенный JS/Rust-код), по debug-журналу claude и по
@@ -154,6 +179,7 @@ codex 0.163.0 (`probe.codex_argv`):
 | mdm | `/Library/Managed Preferences/df-exec/com.anthropic.claudecode.plist`, `…/df-review/…` | да | код: путь `/Library/Managed Preferences/${os.userInfo().username}/…` — имя эффективного пользователя, то есть роли |
 | server | `api.anthropic.com/api/claude_code/settings` | нет | код: `${BASE_API_URL}/api/claude_code/settings`; поведение: см. ниже |
 | server | `api.anthropic.com/api/claude_code/policy_limits` | нет | debug-журнал: «Policy limits: fetch failed (network) from api.anthropic.com» с повторами |
+| server | `<role home>/.claude/remote-settings.json` (дисковый кэш серверных настроек) | нет | код: `lVt="remote-settings.json"`, путь `Ll(Le(), lVt)` — каталог конфигурации claude роли; кэш засевается с диска при старте (`seedFromDisk`). Носитель той же серверной доставки, поэтому вид `server` без исключения |
 
 Каталоги (`managed-settings.d`, `.claude`) записаны источниками вида `file`: отсутствие
 допускается, присутствие — отказ («не обычный файл»), пока профиль не научится их
@@ -170,7 +196,9 @@ codex 0.163.0 (`probe.codex_argv`):
 «remote managed settings eligible» и попытки забрать policy limits. Кандидаты на
 `Exclusion` отвергнуты: смена провайдера или base URL меняет сам проверяемый вызов; подмена
 `CLAUDE_CODE_ENTRYPOINT` — выдача себя за другой продукт ради обхода политики организации,
-а не исключение источника; `--bare` в списке условий не участвует. Значит, `excluded_by =
+а не исключение источника; `--bare` (по справке пропускает «background prefetches»)
+не помогает: тот же тест с `--bare` (параметр `pinned+bare`) даёт «remote managed settings
+eligible», попытку забрать серверные настройки и policy limits. Значит, `excluded_by =
 None`, и профиль не допускается даже при `isolation_verified=True`
 (`test_verified_flag_alone_would_not_admit`).
 
@@ -191,7 +219,7 @@ None`, и профиль не допускается даже при `isolation_
 работать («Failed to load cloud config bundle (workspace-managed policies)»). Кандидат
 `-c forced_login_method="api"` отвергнут: на ChatGPT-авторизации codex отвечает «API key
 login is required, but ChatGPT is currently being used. Logging out.» — проба
-разлогинила бы роль. Под API-ключом (разведка, `chatgpt_base_url` тоже на заглушку)
+разлогинила бы роль (`test_codex_forced_api_login_logs_a_chatgpt_role_out`). Под API-ключом (разведка, `chatgpt_base_url` тоже на заглушку)
 запроса к bundle не было — только `GET /backend-api/plugins/featured`; но это условие на
 способ авторизации, которое `Exclusion` выразить не может.
 
@@ -208,7 +236,8 @@ login is required, but ChatGPT is currently being used. Logging out.» — пр�
 
 - Наблюдаемость managed-файлов установлена по коду и debug-журналу, не созданием файлов в
   `/Library`/`/etc`: эффект присутствующего файла на запуск не проверен (недоступно без
-  root). Список замкнут по коду этой версии; новая версия — новый SHA и новая проверка.
+  root). Список замкнут настолько, насколько найдено в строках и debug-журнале этой версии;
+  новая версия — новый SHA и новая проверка.
 - Сценарии запускались от текущего пользователя, не от ролей `df-exec`/`df-review` (их нет до
   этапа 2) и не через `run_as`. Per-user MDM-путь claude берёт имя эффективного пользователя —
   у пробы это роль; здесь это проверено только по коду.
