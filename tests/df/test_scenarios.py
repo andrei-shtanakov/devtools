@@ -1,12 +1,12 @@
 """Acceptance scenarios through `drive` (Task 7, part E).
 
 `drive` runs with the real `read_facts`, the real `route_action`/`run_route`
-and the real calls of Task 7 (`acceptance_calls`); the leaves of later tasks
-(`LATER_LEAVES`) are the table-generated stand-ins of the routes test, and
-`admin_ready` is Task 8a's real predicate. Everything
-runs in `fake_layout` as the current user: no root, no network. A scenario
-stops where a later task's action begins (`Halt`), or where the state it
-pins is reached. Crashes are raised at the fault points of fsutil.
+and every real call (`df.install.install_calls`, Task 9), and `admin_ready`
+is Task 8a's real predicate. Everything runs in `fake_layout` as the
+current user: no root, no network. A scenario stops where the state it pins
+is reached, by default before `register` (`Halt`; the passes through
+registration are `tests/df/test_release.py`). Crashes are raised at the
+fault points of fsutil.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from df.digest import release_digest
 from df.journal import StepFailed, read_journal
 from df.routes import route_action, run_route
 from tests.df.conftest import BUILD_UID, FakeLayout
-from tests.df.test_routes import (
+from tests.df.route_world import (
     BOOT,
     ID,
     INSTALL,
@@ -35,18 +35,19 @@ from tests.df.test_routes import (
     PY,
     StandIns,
     setup_layout,
+    without_journal_creation,
     write_accounts,
 )
 
 DIGEST = config_digest(INSTALL)
 #: Every action of the table (`unknown` included: its action is `cleanup`).
 ACTIONS = sorted({r.action for r in (*table.ROWS, table.UNKNOWN_ROW)} - {"", "stop"})
-#: The chain of a fresh release up to the first action of Task 9.
+#: The chain of a fresh release up to `register` (the default halt).
 CHAIN = ["none", "prepared", "built", "sealed", "copied", "verified", "admin-ready"]
 
 
 class Halt(Exception):
-    """A scenario stops before the action of a later task."""
+    """A scenario stops before a chosen action."""
 
 
 class Crash(Exception):
@@ -280,7 +281,8 @@ def test_action_refuses_outside_its_phase(fl: FakeLayout) -> None:
         ("cleanup", "failed", "StepFailed: seal: не в своей фазе"),
     ]
     # Only the reads of the facts and the settles ran: no call, no change.
-    assert {e[0] for e in fl.events} <= {"sync_dir", "run_as"}
+    events = without_journal_creation(fl.events)
+    assert {e[0] for e in events} <= {"sync_dir", "run_as"}
     assert {e[2][0] for e in fl.events if e[0] == "run_as"} == {"/usr/bin/find"}
     assert not os.path.lexists(lay.staging_dir(ID))
     assert (tree / "half-built").exists()
@@ -378,7 +380,7 @@ def test_registered_release_never_removed(fl: FakeLayout) -> None:
             python_key=KEY,
             build_uid=BUILD_UID,
         )
-    assert exc.value.step == "cleanup"
+    assert exc.value.step == "registered"
     assert [e for e in fl.events if e[0] == "call"] == []
     (lay.release_dir(ID) / "tampered").write_text("x\n")
     assert classify(facts(fl)) == "damaged"

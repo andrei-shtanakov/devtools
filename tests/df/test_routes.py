@@ -1,17 +1,14 @@
 """Tests for the route interpreter, guards and call table (Task 7, part D1).
 
 Every route runs through the real `run_route` and real guards over a
-`fake_layout`. Every call Tasks 7, 7a, 8 and 8a own (`acceptance_calls`) is
-real (7-D2);
-only the leaves of later tasks (`LATER_LEAVES`) are stand-ins generated from
-`leaf_variants` (F3): each performs exactly its protocol's steps through the
-patched lower operations (`fault_point`, `sync_dir`, `sync_tree`, `run_as`,
-`reap_user_processes`) and changes only the objects its change steps name.
-`run_build` is real with F30's fakes: `verify_build_user`/`whoami_as`
-replaced and a local `uv` script as the plan's uv (no network); the same
-script installs a stand-in admin Python and the trusted `devtools` checkout
-is a local `df/`. Task 9 reruns
-the table with all-real calls.
+`fake_layout`, and every call is real: `df.install.install_calls` (Task 9,
+R33.F3) — `acceptance_calls` of Tasks 7, 7a, 8 and 8a and the release's own
+calls; `LATER_LEAVES` is empty. The table-generated stand-ins of
+`leaf_variants` (F3) remain only for twins. `run_build` is real with F30's
+fakes: `verify_build_user`/`whoami_as` replaced and a local `uv` script as
+the plan's uv (no network); the same script installs a stand-in admin
+Python and the trusted `devtools` checkout is a local `df/`. The world and
+the model live in `tests/df/route_world.py` (7-final M3).
 
 The expected sequence of a route is computed from the data alone: the
 unfolding of `ROUTES` (`unfold_route`), each step kept when its guards hold in
@@ -23,18 +20,15 @@ multiplicity and objects.
 from __future__ import annotations
 
 import dataclasses
-import itertools
 import json
 import os
-import re
-import shutil
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from df import accept, admin, fsutil, routes
+from df import accept, fsutil, routes
 from df import build as build_mod
 from df import install_table as table
 from df import platform as plat
@@ -42,13 +36,7 @@ from df.accept import AcceptMark, Facts, load_mark
 from df.boundary import TransferResult
 from df.build import BuildPlan
 from df.config import (
-    Account,
-    InstallConfig,
-    ReleaseEntry,
-    ReleasesConfig,
     config_digest,
-    dump_accounts,
-    dump_releases,
 )
 from df.digest import TreeError, tree_digest
 from df.journal import StepFailed, read_journal
@@ -68,515 +56,38 @@ from df.routes import (
     run_route,
 )
 from tests.df.conftest import BUILD_UID, FakeLayout
-
-ID = "rel1"
-PY = "3.13.1"
-SHORT = ".".join(PY.split(".")[:2])
-KEY = build_mod.python_key(PY, plat.detect_platform())
-BOOT = "boot-1"
-UV = "uv 0.9.2"
-Event = tuple[object, ...]
-StrPath = str | os.PathLike[str]
-State = dict[str, object]
-
-# ---------- the facet model of guard state ----------
-
-#: Facets of the prepared state and their values; guards read them.
-FACETS: Mapping[str, tuple[object, ...]] = {
-    "r": ("absent", "root", "builder"),
-    "S": ("none", "container", "tree"),
-    "admin": (False, True),
-    "m": (False, True),
-    "reg": (False, True),
-    "py": (False, True),
-    "pystaging": (False, True),
-    "local_bin": (False, True),
-}
-FACET_OF_GUARD: Mapping[str, str] = {
-    "r=root": "r",
-    "r=builder": "r",
-    "S=tree": "S",
-    "S=container": "S",
-    "admin=present": "admin",
-    "m=present": "m",
-    "not reg": "reg",
-    "py=absent": "py",
-    "py-staging=present": "pystaging",
-    "local_bin=trusted": "local_bin",
-}
-GUARD_MODEL: Mapping[str, Callable[[State], bool]] = {
-    "r=root": lambda s: s["r"] == "root",
-    "r=builder": lambda s: s["r"] == "builder",
-    "S=tree": lambda s: s["S"] == "tree",
-    "S=container": lambda s: s["S"] == "container",
-    "admin=present": lambda s: bool(s["admin"]),
-    "m=present": lambda s: bool(s["m"]),
-    "not reg": lambda s: not s["reg"],
-    "py=absent": lambda s: not s["py"],
-    "py-staging=present": lambda s: bool(s["pystaging"]),
-    "local_bin=trusted": lambda s: bool(s["local_bin"]),
-}
-#: What a leaf on a target changes in the facets (no entry: nothing).
-EFFECTS: Mapping[tuple[str, str], State] = {
-    ("prepare_dir", "releases/<id>"): {"r": "builder"},
-    ("seal", "releases/<id>"): {"r": "absent", "S": "tree"},
-    ("accept_copy", "releases/<id>"): {"r": "root"},
-    ("remove_own_tree", "releases/<id>"): {"r": "absent"},
-    ("cleanup_tree", "releases/<id>"): {"r": "absent"},
-    ("cleanup_tree", "staging/<id>/tree"): {"S": "container"},
-    ("remove_empty_dir", "staging/<id>"): {"S": "none"},
-    ("remove_own_tree", "admin/<id>"): {"admin": False},
-    ("install_admin", "admin/<id>"): {"admin": True},
-    ("drop_mark", "accept/<id>.toml"): {"m": False},
-    ("remove_own_tree", "admin-python/.staging"): {"pystaging": False},
-    ("install_admin_python", "admin-python/cpython-…"): {
-        "py": True,
-        "pystaging": True,
-    },
-}
-#: The prepared state each route starts from (its row's objects), before the
-#: facets of its guards; a list gives one case per base. `stage`: the valid
-#: mark the row holds (the real `write_mark` and `tree_digest` read it).
-BASES: Mapping[str, tuple[State, ...]] = {
-    "build": ({"r": "builder"},),
-    "seal": ({"r": "builder"}, {"r": "builder", "S": "container"}),
-    "copy": ({"S": "tree", "m": True, "stage": "built"},),
-    "copy-partial": ({"r": "root", "S": "tree", "m": True, "stage": "built"},),
-    "verify": ({"r": "root", "m": True, "stage": "copied"},),
-    "admin": ({"r": "root", "m": True, "stage": "verified"},),
-    "register": ({"r": "root"},),
-    "commit-config": ({"pending": True},),
-    "rollback": ({"pending": True},),
-}
-DEFAULT: State = {k: v[0] for k, v in FACETS.items()} | {
-    "pending": False,
-    "stage": None,
-}
-
-
-def route_guards(name: str) -> list[str]:
-    """Facets read by the guards of a route, in first-use order."""
-    out: list[str] = []
-    for guards, _call, _target in table.unfold_route(name):
-        for g in guards:
-            if FACET_OF_GUARD[g] not in out:
-                out.append(FACET_OF_GUARD[g])
-    return out
-
-
-def route_states(name: str) -> list[State]:
-    """Every base of the route × every combination of its guards' facets."""
-    facets = route_guards(name)
-    out: list[State] = []
-    for base in BASES.get(name, ({},)):
-        for values in itertools.product(*(FACETS[f] for f in facets)):
-            out.append(DEFAULT | base | dict(zip(facets, values, strict=True)))
-    return out
-
-
-def state_id(state: State) -> str:
-    return ",".join(f"{k}={v}" for k, v in state.items() if DEFAULT.get(k) != v)
-
-
-CASES = [
-    pytest.param(name, state, id=f"{name}[{state_id(state)}]")
-    for name in table.ROUTES
-    for state in route_states(name)
-]
-
-
-# ---------- objects of protocol steps ----------
-
-#: Fault kinds of fsutil for the protocols' change words.
-FAULT_KIND = {"rename": "renamed", "unlink": "unlinked"}
-
-
-#: Every target text of `ROUTES` -> its object, written from the spec
-#: independently of `routes.TARGETS` (I2); `None`: no object.
-OBJECTS: Mapping[str, Callable[[Layout], Path] | None] = {
-    "releases/<id>": lambda L: L.root / "opt/df/releases" / ID,
-    "от `df-build`": None,
-    "df-build": None,
-    "accept/<id>.toml: built": lambda L: (
-        L.root / f"var/lib/df/install/accept/{ID}.toml"
-    ),
-    "accept/<id>.toml: copied": lambda L: (
-        L.root / f"var/lib/df/install/accept/{ID}.toml"
-    ),
-    "accept/<id>.toml: max(стадия, verified)": lambda L: (
-        L.root / f"var/lib/df/install/accept/{ID}.toml"
-    ),
-    "accept/<id>.toml: admin": lambda L: (
-        L.root / f"var/lib/df/install/accept/{ID}.toml"
-    ),
-    "accept/<id>.toml": lambda L: L.root / f"var/lib/df/install/accept/{ID}.toml",
-    "releases/<id> = отметке": lambda L: L.root / "opt/df/releases" / ID,
-    "build_home/tmp": lambda L: L.build_home / "tmp",
-    "build_home/cache": lambda L: L.build_home / "cache",
-    "admin-python/.staging": lambda L: L.root / "opt/df/admin-python/.staging",
-    "admin-python/cpython-…": lambda L: L.root / "opt/df/admin-python" / KEY,
-    "admin/<id>": lambda L: L.root / "opt/df/admin" / ID,
-    "staging/<id>/tree": lambda L: L.root / "opt/df/staging" / ID / "tree",
-    "staging/<id>": lambda L: L.root / "opt/df/staging" / ID,
-    "releases/<id>/release.json": lambda L: (
-        L.root / "opt/df/releases" / ID / "release.json"
-    ),
-    "/etc/df/releases.toml": lambda L: L.root / "etc/df/releases.toml",
-    "/etc/df/install.toml": lambda L: L.root / "etc/df/install.toml",
-    "/opt/df/current": lambda L: L.root / "opt/df/current",
-    "bin/darkfactory-entry.py": lambda L: L.root / "opt/df/bin/darkfactory-entry.py",
-    "bin/darkfactory": lambda L: L.root / "opt/df/bin/darkfactory",
-    "/usr/local/bin/darkfactory": lambda L: L.root / "usr/local/bin/darkfactory",
-    "pending.toml": lambda L: L.root / "var/lib/df/install/pending.toml",
-}
-
-
-def obj(lay: Layout, target: str) -> Path:
-    """The object of a target from the independent table `OBJECTS`."""
-    get = OBJECTS[target]
-    assert get is not None, target
-    return get(lay)
-
-
-def change_path(
-    lay: Layout, proto: str, variant: str | None, i: int, target: str
-) -> Path:
-    """The object a change step names: the target's, except where the
-    protocol's text names another (seal's container and tree, the
-    quarantine entry, the admin Python's staging)."""
-    special: Mapping[tuple[str, str | None, int], Callable[[], Path]] = {
-        ("seal", "new", 0): lambda: lay.staging_dir(ID),
-        ("seal", "new", 1): lambda: lay.staging_tree(ID),
-        ("seal", "reuse", 0): lambda: lay.staging_tree(ID),
-        ("cleanup_tree", "quarantine", 1): lambda: lay.quarantine / f"{ID}.1",
-        ("install_admin_python", None, 0): lambda: lay.admin_python / ".staging",
-    }
-    get = special.get((proto, variant, i))
-    return get() if get is not None else obj(lay, target)
-
-
-def dir_paths(lay: Layout, arg: str, target: str) -> list[Path]:
-    """Directories a `sync_dir(<arg>)` step syncs (`staging`: both)."""
-    if arg == "parent":
-        return [obj(lay, target).parent]
-    named: Mapping[str, list[Path]] = {
-        "release_root": [lay.release_dir(ID)],
-        "releases": [lay.releases],
-        "staging": [lay.staging, lay.staging_dir(ID)],
-        "quarantine": [lay.quarantine],
-        "admin": [lay.admin],
-        "admin_python": [lay.admin_python],
-        "opt_df": [lay.opt],
-        "local_bin": [lay.local_bin],
-    }
-    return named[arg]
-
-
-def tree_path(lay: Layout, arg: str, target: str) -> Path:
-    if arg == "py":
-        return lay.admin_python / ".staging" / KEY
-    return obj(lay, target)
-
-
-def parse(token: str) -> tuple[str, str]:
-    """A token of `leaf_variants` as (op, arg)."""
-    if token == "run_as(df-build)+":
-        return "builder", "df-build"
-    m = re.fullmatch(r"(sync_dir|sync_tree|process)\((.+)\)", token)
-    return (m.group(1), m.group(2)) if m else ("change", token)
-
-
-def expected_events(
-    lay: Layout, leaf: str, variant: str | None, target: str
-) -> list[Event]:
-    """The concrete events of one leaf call in `variant`."""
-    proto = table.WRAPS.get(leaf, leaf)
-    out: list[Event] = []
-    for i, token in enumerate(table.leaf_variants(leaf)[variant]):
-        op, arg = parse(token)
-        if op == "change":
-            out.append(
-                (FAULT_KIND.get(arg, arg), change_path(lay, proto, variant, i, target))
-            )
-        elif op == "sync_dir":
-            out += [("sync_dir", p) for p in dir_paths(lay, arg, target)]
-        elif op == "sync_tree":
-            out.append(("sync_tree", tree_path(lay, arg, target)))
-        elif op == "process":
-            out.append(("process", "df-build"))
-        else:
-            out.append(("run_as+", "df-build"))
-    return out
-
-
-def normalize(events: list[Event]) -> list[Event]:
-    """Recorded events as compared: ownership changes dropped (their fault
-    point is the event), consecutive runs as `df-build` collapsed."""
-    out: list[Event] = []
-    for raw in events:
-        if raw[0] in ("fchown", "chown") and len(raw) == 3:
-            continue
-        e = ("run_as+", raw[1]) if raw[0] == "run_as" else raw
-        if e[0] == "run_as+" and out and out[-1] == e:
-            continue
-        out.append(e)
-    return out
-
-
-# ---------- stand-ins ----------
-
-
-class StandIns:
-    """Table-generated stand-ins of route calls over one fake layout (F3)."""
-
-    def __init__(self, fl: FakeLayout) -> None:
-        self.fl = fl
-        self.lay = fl.layout
-
-    def stand_in(
-        self,
-        name: str,
-        variant: str | None = None,
-        *,
-        target: str | None = None,
-        extra: tuple[str, ...] = (),
-    ) -> routes.Call:
-        """A call that emits exactly `leaf_variants(name)[variant]` (chosen by
-        the state when `None`). `target` and `extra` make twins only: the
-        object resolved from another target, extra steps appended."""
-
-        def call(step_target: str) -> None:
-            t = target or step_target
-            v = variant if variant is not None else self.variant(name, t)
-            tokens = (*table.leaf_variants(name)[v], *extra)
-            proto = table.WRAPS.get(name, name)
-            for i, token in enumerate(tokens):
-                self.step(proto, v, i, token, t)
-
-        return call
-
-    def calls(self, **override: routes.Call) -> dict[str, routes.Call]:
-        """Every leaf and wrapper, each call marked in events: the real call
-        of `acceptance_calls`, a stand-in for a later leaf, or `override`."""
-        names = [*table.route_leaves(), *table.WRAPS]
-        real = make_calls(self.fl)
-        made = {n: override.get(n) or real.get(n) or self.stand_in(n) for n in names}
-        return {n: self.marked(n, f) for n, f in made.items()}
-
-    def marked(self, name: str, f: routes.Call) -> routes.Call:
-        def call(target: str) -> None:
-            self.fl.events.append(("call", name, target))
-            f(target)
-
-        return call
-
-    def variant(self, name: str, target: str) -> str | None:
-        """The variant the state selects (protocols with variants only)."""
-        variants = list(table.leaf_variants(name))
-        if variants == [None]:
-            return None
-        if name == "seal":
-            return "reuse" if os.path.lexists(self.lay.staging_dir(ID)) else "new"
-        path = obj(self.lay, target)
-        if name == "cleanup_build_home":
-            return "tree" if os.path.lexists(path) else "absent"
-        if not os.path.lexists(path):
-            return "absent"
-        return "tree" if accept.is_real_dir(path) else "link"
-
-    def step(self, proto: str, variant: str | None, i: int, token: str, t: str) -> None:
-        op, arg = parse(token)
-        lay = self.lay
-        if op == "change":
-            path = change_path(lay, proto, variant, i, t)
-            self.change(proto, arg, path, t)
-            fsutil.fault_point(FAULT_KIND.get(arg, arg), path)  # type: ignore[arg-type]
-        elif op == "sync_dir":
-            for p in dir_paths(lay, arg, t):
-                fsutil.sync_dir(p)
-        elif op == "sync_tree":
-            fsutil.sync_tree(tree_path(lay, arg, t))
-        elif op == "process":
-            plat.reap_user_processes(plat.BUILD_USER)
-        else:
-            plat.run_as(
-                plat.BUILD_USER,
-                ["/usr/bin/true"],
-                env={"PATH": "/usr/bin:/bin", "LANG": "C"},
-                cwd=lay.build_home,
-                network=False,
-                timeout=10.0,
-            )
-
-    def change(self, proto: str, kind: str, path: Path, t: str) -> None:
-        """The declared change, on its object only; an absent object fails."""
-        lay = self.lay
-        if kind == "created":
-            path.mkdir(mode=0o711 if proto == "seal" else 0o700, exist_ok=True)
-            if proto == "install_admin_python":
-                (path / KEY).mkdir(exist_ok=True)
-        elif kind == "unlink":
-            if accept.is_real_dir(path):
-                shutil.rmtree(path)
-            else:
-                os.unlink(path)
-        elif kind == "chown":
-            fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            try:
-                os.fchown(fd, self.fl.build_uid, -1)
-            finally:
-                os.close(fd)
-        elif kind == "chmod":
-            os.chmod(path, 0o755)
-        elif proto == "seal":
-            os.rename(lay.release_dir(ID), path)
-        elif proto == "cleanup_tree":
-            os.rename(obj(lay, t), path)
-        elif proto == "install_admin_python":
-            os.rename(lay.admin_python / ".staging" / KEY, path)
-        elif proto in ("activate", "link_command"):
-            tmp = path.with_name(f".{path.name}.tmp")
-            os.symlink(f"releases/{ID}", tmp)
-            os.replace(tmp, path)
-        else:  # write_atomic
-            path.write_text("stand-in\n")
-
-
-# ---------- preparing and running ----------
-
-
-def reset(fl: FakeLayout) -> None:
-    """An empty layout again (between the cases of one test)."""
-    shutil.rmtree(fl.layout.root)
-    fl.layout.root.mkdir()
-    fl.events.clear()
-    fl.owners.clear()
-
-
-def prepare(fl: FakeLayout, monkeypatch: pytest.MonkeyPatch, state: State) -> None:
-    """Objects of the state; the trusted-path policy of `local_bin` faked."""
-    lay = fl.layout
-    fl.make_dirs()
-    write_accounts(fl)
-    if state["r"] == "root":
-        (lay.release_dir(ID) / "src").mkdir(parents=True)
-    elif state["r"] == "builder":
-        fl.builder_dir(lay.release_dir(ID))
-    if state["S"] != "none":
-        lay.staging_dir(ID).mkdir(mode=0o711)
-    if state["S"] == "tree":
-        fl.builder_dir(lay.staging_tree(ID))
-    if state["admin"]:
-        (lay.admin_dir(ID) / "df").mkdir(parents=True)
-    if state["m"]:
-        write_state_mark(fl, state["stage"])
-    if state["reg"]:
-        register(fl)
-    if state["py"]:
-        (lay.admin_python / KEY).mkdir()
-    if state["pystaging"]:
-        (lay.admin_python / ".staging").mkdir()
-    if state["pending"]:
-        lay.pending.write_text("raw\n")
-    trusted = bool(state["local_bin"])
-    monkeypatch.setattr(
-        plat,
-        "trusted_path_problems",
-        lambda p: ["untrusted"] if p == lay.local_bin and not trusted else [],
-    )
-
-
-def write_state_mark(fl: FakeLayout, stage: object) -> None:
-    """The row's valid mark (`stage`), else a raw mark file (F32: `m=present`
-    is the file's existence)."""
-    lay = fl.layout
-    if stage is None:
-        lay.mark_file(ID).write_text("raw\n")
-        return
-    copied = stage != "built"
-    digest = routes.release_digest(lay.release_dir(ID)) if copied else None
-    mark = AcceptMark(
-        config_digest(INSTALL),
-        stage,
-        BOOT,
-        digest,
-        None,
-        None,
-        UV,  # type: ignore[arg-type]
-    )
-    accept.write_mark(lay, ID, mark)
-
-
-def write_accounts(fl: FakeLayout) -> None:
-    """A ready `df-build` record with the fake uid (prepare_dir reads it)."""
-    account = Account(plat.BUILD_USER, BUILD_UID, BUILD_UID, "ready", "2026-10-22")
-    fl.layout.accounts.write_text(dump_accounts({plat.BUILD_USER: account}))
-
-
-def register(fl: FakeLayout) -> None:
-    entry = ReleaseEntry(
-        ID, "sha256:" + "1" * 64, "sha256:" + "2" * 64, PY, "allowed", None
-    )
-    (fl.layout.etc / "releases.toml").write_text(
-        dump_releases(ReleasesConfig((entry,)))
-    )
-
-
-def model_variant(leaf: str, state: State) -> str | None:
-    """The variant the model expects; prepared trees are directories."""
-    if list(table.leaf_variants(leaf)) == [None]:
-        return None
-    if leaf == "seal":
-        return "reuse" if state["S"] == "container" else "new"
-    return {"cleanup_tree": "tree", "cleanup_build_home": "absent"}[leaf]
-
-
-def expected_route(lay: Layout, name: str, state: State) -> tuple[list[Event], State]:
-    """Events of the route from the data, and the final facets."""
-    s = dict(state)
-    out: list[Event] = []
-    for guards, call, target in table.unfold_route(name):
-        if not all(GUARD_MODEL[g](s) for g in guards):
-            continue
-        leaf = implementation(call, target)
-        out.append(("call", leaf, target))
-        out += expected_events(lay, leaf, model_variant(leaf, s), target)
-        s.update(EFFECTS.get((leaf, target), {}))
-        if leaf == "write_mark":
-            s["m"] = True
-    return out, s
-
-
-def run_case(
-    fl: FakeLayout,
-    monkeypatch: pytest.MonkeyPatch,
-    name: str,
-    state: State,
-    **override: routes.Call,
-) -> tuple[list[Event], list[Event], State]:
-    """Prepare, compute the expectation from the data, run the real route."""
-    prepare(fl, monkeypatch, state)
-    expected, final = expected_route(fl.layout, name, state)
-    fl.clear()
-    calls = StandIns(fl).calls(**override)
-    run_route(fl.layout, ID, name, calls=calls, python_key=KEY, build_uid=BUILD_UID)
-    return normalize(fl.events), expected, final
-
-
-def case_matches(
-    fl: FakeLayout,
-    monkeypatch: pytest.MonkeyPatch,
-    name: str,
-    state: State,
-    **override: routes.Call,
-) -> bool:
-    """One case of a twin: False on a mismatch or a refusal."""
-    reset(fl)
-    try:
-        got, expected, _final = run_case(fl, monkeypatch, name, state, **override)
-    except (OSError, StepFailed, TreeError, AssertionError):
-        return False
-    return got == expected
+from tests.df.route_world import (
+    BASES,
+    BOOT,
+    CASES,
+    DECLARED,
+    DEFAULT,
+    GUARD_MODEL,
+    ID,
+    INSTALL,
+    KEY,
+    LOCK_A,
+    OBJECTS,
+    PY,
+    UV,
+    StandIns,
+    State,
+    StrPath,
+    case_matches,
+    expected_route,
+    fake_uv,
+    install_run,
+    make_calls,
+    normalize,
+    obj,
+    prepare,
+    register,
+    repo_ref,
+    reset,
+    route_states,
+    run_case,
+    setup_layout,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -589,47 +100,6 @@ def fl(monkeypatch: pytest.MonkeyPatch, fake_layout: FakeLayout) -> FakeLayout:
     return setup_layout(monkeypatch, fake_layout)
 
 
-def setup_layout(
-    monkeypatch: pytest.MonkeyPatch, fake_layout: FakeLayout
-) -> FakeLayout:
-    """The layout's directories; F30's fakes and the local uv of the plan."""
-    fake_layout.make_dirs()
-    uv = fake_uv(fake_layout)
-    uv.write_text(FAKE_UV)
-    uv.chmod(0o755)
-    monkeypatch.setattr(admin, "UV_ADMIN_CONFIRMED", frozenset({UV.split()[1]}))
-    monkeypatch.setattr(build_mod, "verify_build_user", lambda _layout: [])
-    monkeypatch.setattr(build_mod, "whoami_as", lambda _user: (BUILD_UID, BUILD_UID))
-    return fake_layout
-
-
-#: The plan's uv: `--version` prints `UV`; `python install --no-bin <key>`
-#: puts a stand-in interpreter `<key>/bin/python<X.Y>` and a service file
-#: into `$UV_PYTHON_INSTALL_DIR` (as uv leaves `.lock` there); else nothing.
-FAKE_UV = f"""#!/bin/sh
-[ "$1" = --version ] && echo '{UV}' && exit 0
-if [ "$1 $2 $3" = "python install --no-bin" ]; then
-  mkdir -p "$UV_PYTHON_INSTALL_DIR/$4/bin" || exit 1
-  printf '#!/bin/sh\\n' > "$UV_PYTHON_INSTALL_DIR/$4/bin/python{SHORT}"
-  : > "$UV_PYTHON_INSTALL_DIR/.lock"
-fi
-exit 0
-"""
-
-
-def fake_uv(fl: FakeLayout) -> Path:
-    """The plan's uv: a local script (`FAKE_UV`), outside root."""
-    return fl.layout.root.parent / "uv"
-
-
-def devtools_ref(fl: FakeLayout) -> Path:
-    """Root's trusted `devtools` checkout: a small `df/` under `verify`."""
-    ref = fl.layout.verify_dir / "devtools"
-    (ref / "df").mkdir(parents=True, exist_ok=True)
-    (ref / "df" / "__init__.py").write_text('"""admin code"""\n')
-    return ref
-
-
 # ---------- routes match the table ----------
 
 
@@ -639,7 +109,7 @@ def test_routes_match_table(
 ) -> None:
     got, expected, final = run_case(fl, monkeypatch, name, state)
     assert got == expected
-    # The stand-ins changed what the guards read exactly as the model says.
+    # The calls changed what the guards read exactly as the model says.
     for guard in {g for gs, _c, _t in table.unfold_route(name) for g in gs}:
         value = route_guard(fl.layout, ID, guard, python_key=KEY, build_uid=BUILD_UID)
         assert value == GUARD_MODEL[guard](final), guard
@@ -1003,7 +473,7 @@ def test_cleanup_refuses_registered_before_any_step(
         run_route(
             fl.layout, ID, "cleanup", calls=StandIns(fl).calls(), build_uid=BUILD_UID
         )
-    assert exc.value.step == "cleanup"
+    assert exc.value.step == "registered"
     assert fl.events == []
     assert fl.layout.release_dir(ID).is_dir() and fl.layout.admin_dir(ID).is_dir()
 
@@ -1161,51 +631,32 @@ def test_check_targets_twins(monkeypatch: pytest.MonkeyPatch, mutate: str) -> No
 
 # ---------- acceptance_calls ----------
 
-INSTALL = InstallConfig(
-    manifest_repo="https://example.invalid/m",
-    manifest_sha="0" * 40,
-    profile="p",
-    approved_cli={
-        "git": Path("/usr/bin/git"),
-        "uv": Path("/usr/bin/uv"),
-        "tar": Path("/usr/bin/tar"),
-    },
-)
-PROFILE = Profile("p", PY, ())
+#: The calls `df.install` adds to `acceptance_calls` (Task 9).
+RELEASE_CALLS = {"activate", "write_release_json", "register", "write_atomic"}
 
 
-def make_calls(fl: FakeLayout) -> dict[str, routes.Call]:
-    lay = fl.layout
-    plan = BuildPlan(
-        ID,
-        lay.release_dir(ID),
-        PROFILE,
-        fake_uv(fl),
-        Path("/usr/bin/git"),
-        Path("/usr/bin/tar"),
+def test_install_calls_cover_the_table(fl: FakeLayout) -> None:
+    """§5, R33.F3: `install_calls` are exactly the leaves of every route and
+    the wrappers; `acceptance_calls` is all of them but the release's own;
+    no leaf is left to a later task (M18)."""
+    every = set(table.route_leaves()) | set(table.WRAPS)
+    assert set(make_calls(fl)) == every
+    run = install_run(fl)
+    accepted = acceptance_calls(
+        run.layout,
+        run.release_id,
+        install=run.cfg,
+        profile=run.profile,
+        platform=run.platform,
+        plan=run.plan,
+        limits=run.limits,
+        refs=run.refs,
+        journal=run.journal,
+        run_id=run.run_id,
+        python_key=run.python_key,
     )
-    return acceptance_calls(
-        lay,
-        ID,
-        install=INSTALL,
-        profile=PROFILE,
-        platform=plat.detect_platform(),
-        plan=plan,
-        limits=CopyLimits(),
-        refs={"devtools": devtools_ref(fl)},
-        journal=lay.journal,
-        run_id="run-1",
-        python_key=KEY,
-    )
-
-
-def test_acceptance_calls_and_later_leaves_cover_the_table(fl: FakeLayout) -> None:
-    """§5: Task 7's calls and the later tasks' leaves are exactly the leaves
-    of every route and the wrappers, without overlap."""
-    keys = set(make_calls(fl))
-    assert keys.isdisjoint(LATER_LEAVES)
-    assert keys | set(LATER_LEAVES) == set(table.route_leaves()) | set(table.WRAPS)
-    assert set(LATER_LEAVES.values()) <= {"7a", "8", "8a", "9"}
+    assert set(accepted) == every - RELEASE_CALLS
+    assert LATER_LEAVES == {}
 
 
 @pytest.mark.parametrize("target", ["releases/<id>", "admin/<id>"])
@@ -1216,7 +667,7 @@ def test_remove_own_tree_never_removes_registered(fl: FakeLayout, target: str) -
     register(fl)
     with pytest.raises(StepFailed) as exc:
         make_calls(fl)["remove_own_tree"](target)
-    assert exc.value.step == "cleanup"
+    assert exc.value.step == "registered"
     assert path.is_dir()
     assert fl.events == []
 
@@ -1254,21 +705,6 @@ def test_reap_runs_the_real_reap(fl: FakeLayout) -> None:
 
 # ---------- distribution_problems ----------
 
-LOCK_A = b"""version = 1
-revision = 3
-
-[[package]]
-name = "app"
-version = "0.1.0"
-source = { virtual = "." }
-dependencies = [{ name = "a" }]
-
-[[package]]
-name = "a"
-version = "1.0"
-source = { registry = "https://pypi.org/simple" }
-"""
-
 
 def _dist_calls(
     fl: FakeLayout,
@@ -1300,23 +736,8 @@ def _dist_calls(
     )
 
 
-def _repo(fl: FakeLayout, repo: str, lock: bytes, dists: list[tuple[str, str]]) -> Path:
-    """A trusted checkout with `lock` and a venv of registry `dists`."""
-    ref = fl.layout.verify_dir / repo
-    ref.mkdir()
-    (ref / "uv.lock").write_bytes(lock)
-    site = fl.layout.release_dir(ID) / "venv" / repo / "lib" / "python3.13"
-    site = site / "site-packages"
-    site.mkdir(parents=True)
-    for name, version in dists:
-        info = site / f"{name}-{version}.dist-info"
-        info.mkdir()
-        (info / "METADATA").write_text(f"Name: {name}\nVersion: {version}\n")
-    return ref
-
-
 def test_distribution_problems_leaf_accepts_and_keeps_installed(fl: FakeLayout) -> None:
-    ref = _repo(fl, "r1", LOCK_A, [("a", "1.0")])
+    ref = repo_ref(fl, "r1", LOCK_A, [("a", "1.0")])
     ctx = RouteContext()
     _dist_calls(fl, ("r1",), {"r1": ref}, ctx)["distribution_problems"]("releases/<id>")
     assert [(d.name, d.version) for d in ctx.installed["r1"]] == [("a", "1.0")]
@@ -1329,7 +750,7 @@ def test_distribution_problems_root_is_the_builds_project_path(
     """The root is expected at exactly the `--project` path the build passes
     to `uv sync` (uv records it as given, not resolved)."""
     lock = LOCK_A.replace(b'{ virtual = "." }', b'{ editable = "." }')
-    ref = _repo(fl, "r1", lock, [("a", "1.0"), ("app", "0.1.0")])
+    ref = repo_ref(fl, "r1", lock, [("a", "1.0"), ("app", "0.1.0")])
     calls = _dist_calls(fl, ("r1",), {"r1": ref}, RouteContext())
     profile = Profile(
         "p", PY, (RepoPin("r1", "https://example.invalid/r1", "0" * 40, ()),)
@@ -1371,7 +792,7 @@ def test_distribution_problems_leaf_passes_groups_env_and_root_as_spelled(
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     (fl.layout.build_home / "tmp").symlink_to(elsewhere)
-    ref = _repo(fl, "r1", lock, [("mine", "1.0"), ("grp", "1.0"), ("app", "0.1.0")])
+    ref = repo_ref(fl, "r1", lock, [("mine", "1.0"), ("grp", "1.0"), ("app", "0.1.0")])
     project = build_mod.build_src_dir(fl.layout, ID, "r1")
     site = fl.layout.release_dir(ID) / "venv" / "r1" / "lib" / "python3.13"
     (site / "site-packages" / "app-0.1.0.dist-info" / "direct_url.json").write_text(
@@ -1387,7 +808,7 @@ def test_distribution_problems_root_dir_contract_is_listed(
     monkeypatch: pytest.MonkeyPatch, fl: FakeLayout
 ) -> None:
     """A broken `root_dir` contract is a listed problem, not a bare error."""
-    ref = _repo(fl, "r1", LOCK_A, [("a", "1.0")])
+    ref = repo_ref(fl, "r1", LOCK_A, [("a", "1.0")])
     monkeypatch.setattr(
         build_mod, "build_src_dir", lambda _lay, _id, repo: Path("relative") / repo
     )
@@ -1399,8 +820,8 @@ def test_distribution_problems_root_dir_contract_is_listed(
 
 def test_distribution_problems_leaf_lists_every_repo(fl: FakeLayout) -> None:
     """Problems of all repos in one failure, with the named limit."""
-    r1 = _repo(fl, "r1", LOCK_A, [("a", "1.0"), ("b", "2.0")])
-    r2 = _repo(fl, "r2", b"version = 1\nrevision = 4\n", [])
+    r1 = repo_ref(fl, "r1", LOCK_A, [("a", "1.0"), ("b", "2.0")])
+    r2 = repo_ref(fl, "r2", b"version = 1\nrevision = 4\n", [])
     ctx = RouteContext()
     calls = _dist_calls(fl, ("r1", "r2", "r3"), {"r1": r1, "r2": r2}, ctx)
     with pytest.raises(StepFailed) as exc:
@@ -1451,7 +872,7 @@ def test_boundary_leaves_pass_the_trusted_inventory(
     tree, expected = fl.layout.release_dir(ID), {"r1": frozenset({"tool"})}
     if leaf == "static_problems":
         assert seen == [(tree, plat.detect_platform(), expected)]
-        assert ctx.python_declared == {}
+        assert ctx.python_declared is None
     else:
         kw = {"user": plat.BUILD_USER, "expected": expected}
         assert seen == [(tree, fl.layout, kw)]
@@ -1484,7 +905,7 @@ def test_boundary_leaves_list_every_problem(
     assert ("venv/r1: плохо" if leaf == "static_problems" else "запуск: плохо") in (
         exc.value.detail
     )
-    assert ctx.python_declared == {}
+    assert ctx.python_declared is None
 
 
 def _transfer_runs(fl: FakeLayout) -> list[tuple[str, ...]]:
@@ -1551,6 +972,7 @@ def _write(fl: FakeLayout, stage: str, **kw: object) -> AcceptMark:
         "admin_digest": "sha256:" + "2" * 64 if admin else None,
         "admin_python": PY if admin else None,
         "uv_version_declared": "uv 0.1.0",
+        "python_declared": DECLARED if stage in ("verified", "admin") else None,
     }
     values.update(kw)
     mark = AcceptMark(**values)  # type: ignore[arg-type]
@@ -1623,8 +1045,21 @@ def test_verify_mark_carries_from_the_record_not_boot_id(
 ) -> None:
     old = _write(fl, "copied")
     monkeypatch.setattr(fsutil, "boot_id", _no_boot_id)
-    make_calls(fl)["write_mark"]("accept/<id>.toml: max(стадия, verified)")
-    assert _mark(fl) == dataclasses.replace(old, stage="verified")
+    ctx = RouteContext(python_declared={"r1": "3.13.1 (main)"})
+    make_calls(fl, ctx)["write_mark"]("accept/<id>.toml: max(стадия, verified)")
+    assert _mark(fl) == dataclasses.replace(
+        old, stage="verified", python_declared='{"r1":"3.13.1 (main)"}'
+    )
+
+
+def test_verify_mark_needs_the_transfer_check_answers(fl: FakeLayout) -> None:
+    """I4a: no `transfer_check` in this process — no `verified` mark."""
+    _write(fl, "copied")
+    with pytest.raises(StepFailed, match="python_declared") as exc:
+        make_calls(fl)["write_mark"]("accept/<id>.toml: max(стадия, verified)")
+    assert exc.value.step == "mark"
+    mark = _mark(fl)
+    assert mark is not None and mark.stage == "copied"
 
 
 def test_verify_mark_keeps_a_higher_admin_mark(
@@ -1758,12 +1193,22 @@ def test_r_guard_foreign_owner_stops(
         assert exc.value.step == "route"
 
 
-def test_r_guard_needs_build_uid(
-    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout
+@pytest.mark.parametrize("r", ["absent", "root", "builder"])
+def test_r_guards_without_build_uid(
+    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout, r: str
 ) -> None:
-    prepare(fl, monkeypatch, DEFAULT | {"r": "root"})
-    with pytest.raises(AssertionError, match="build_uid"):
-        route_guard(fl.layout, ID, "r=root")
+    """I5: no `df-build` record (`build_uid=None`, a rollback before step 3):
+    a root tree is root's; any other owner is `StepFailed("route")` — no
+    `df-build` process ran, so no builder tree can be there."""
+    prepare(fl, monkeypatch, DEFAULT | {"r": r})
+    if r == "builder":
+        for guard in ("r=root", "r=builder"):
+            with pytest.raises(StepFailed, match=str(BUILD_UID)) as exc:
+                route_guard(fl.layout, ID, guard)
+            assert exc.value.step == "route"
+        return
+    assert route_guard(fl.layout, ID, "r=root") is (r == "root")
+    assert route_guard(fl.layout, ID, "r=builder") is False
 
 
 def test_rollback_forced_into_cleanup_refuses_registered(
@@ -1782,7 +1227,7 @@ def test_rollback_forced_into_cleanup_refuses_registered(
         run_route(
             fl.layout, ID, "rollback", calls=StandIns(fl).calls(), build_uid=BUILD_UID
         )
-    assert exc.value.step == "cleanup"
+    assert exc.value.step == "registered"
     assert fl.events == []
     assert fl.layout.release_dir(ID).is_dir() and fl.layout.pending.exists()
 

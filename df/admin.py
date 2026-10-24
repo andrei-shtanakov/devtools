@@ -19,7 +19,6 @@ import os
 import re
 import shlex
 import stat
-import uuid
 from pathlib import Path, PurePosixPath
 
 from df import accept, acl, fsutil
@@ -27,7 +26,7 @@ from df import build as build_mod
 from df import platform as plat
 from df.digest import TreeError, check_links, open_regular, tree_digest
 from df.journal import StepFailed
-from df.launcher_entry import entry_text
+from df.launcher_entry import Refused, entry_text
 from df.lockset import UV_PINNED_VERSION
 from df.paths import Layout
 from df.platform import PlatformName
@@ -44,6 +43,8 @@ ADMIN_UMASK = 0o022
 VERSION_TIMEOUT = 60.0
 #: Bytes of uv's stderr a refusal quotes.
 STDERR_REPORT_BYTES = 4096
+#: The one temporary name of `link_command` in `local_bin` (C13).
+LINK_TMP = ".darkfactory.tmp"
 
 _STEP = "admin"
 _LAUNCHER_STEP = "launcher"
@@ -164,23 +165,21 @@ def _ensure_admin_home(layout: Layout) -> None:
     """`admin-home`: root's directory, mode exactly `0700` (F6).
 
     uv creates its lock files `0666` whatever the umask, so nobody but root
-    may reach them. Scratch, not a fact: no sync.
+    may reach them. Scratch, not a fact. Step 2 makes it (and settles it on
+    every run); absent here, it is made the same way (`fsutil.make_dir`:
+    born `0700`, durable), so no crash leaves a mode the check refuses.
     """
     home = layout.admin_home
-    created = True
+    parent = os.open(home.parent, _DIR_FLAGS)
     try:
-        os.mkdir(home, 0o700)
-    except FileExistsError:
-        created = False
-    fd = os.open(home, _DIR_FLAGS)
-    try:
-        if created:
-            os.fchmod(fd, 0o700)
-        st = os.fstat(fd)
+        if not os.path.lexists(home):  # step 2 makes it; settled there too
+            fsutil.make_dir(parent, home.name, 0o700, path=home)
+        st = os.stat(home.name, dir_fd=parent, follow_symlinks=False)
     finally:
-        os.close(fd)
+        os.close(parent)
     owner = fsutil.owner_uid(st)
-    if owner != plat.ROOT_UID or stat.S_IMODE(st.st_mode) != 0o700:
+    is_dir = stat.S_ISDIR(st.st_mode)
+    if not is_dir or owner != plat.ROOT_UID or stat.S_IMODE(st.st_mode) != 0o700:
         mode = oct(stat.S_IMODE(st.st_mode))
         raise StepFailed(_STEP, f"{home}: владелец uid {owner}, режим {mode}")
 
@@ -501,17 +500,21 @@ def link_command(layout: Layout) -> None:
     """Protocol `link_command`: `/usr/local/bin/darkfactory` -> the command.
 
     A temporary link, `rename` over the name, `fault_point("renamed")`,
-    `sync_dir(local_bin)`. No branching: whether to link is the route's
-    guard (`local_bin=trusted`). The name is the command's own; nothing
-    named `df` is ever created. Effects: `renamed` -> `sync_dir(local_bin)`.
+    `sync_dir(local_bin)`. The temporary name is one fixed name,
+    `LINK_TMP`: a leftover of a killed run is unlinked first, never
+    accumulated (C13; the writer lock makes the name exclusive). No
+    branching: whether to link is the route's guard (`local_bin=trusted`).
+    The name is the command's own; nothing named `df` is ever created.
+    Effects: `renamed` -> `sync_dir(local_bin)`.
     """
     name = layout.launcher.name
-    tmp = f".{name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    tmp = LINK_TMP
     try:
         fd = os.open(layout.local_bin, _DIR_FLAGS)
     except OSError as exc:
         raise StepFailed(_LAUNCHER_STEP, f"{layout.local_bin}: {exc}") from exc
     try:
+        _unlink_absent_ok(tmp, fd)
         os.symlink(str(layout.launcher), tmp, dir_fd=fd)
         try:
             os.rename(tmp, name, src_dir_fd=fd, dst_dir_fd=fd)
@@ -526,6 +529,13 @@ def link_command(layout: Layout) -> None:
         os.close(fd)
 
 
+def _unlink_absent_ok(name: str, dir_fd: int) -> None:
+    try:
+        os.unlink(name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        pass
+
+
 def _unlink_quietly(name: str, dir_fd: int) -> None:
     try:
         os.unlink(name, dir_fd=dir_fd)
@@ -533,19 +543,47 @@ def _unlink_quietly(name: str, dir_fd: int) -> None:
         pass
 
 
-def launcher_ready(layout: Layout, *, python: str) -> bool:
-    """Fact `L`: the command files are what this admin code generates (F2).
+def entry_source(layout: Layout, release_id: str) -> Path:
+    """The entry module of a release's admin code (M-1): the one source."""
+    return layout.admin_dir(release_id) / "df" / "launcher_entry.py"
+
+
+def release_entry_text(layout: Layout, release_id: str) -> str:
+    """`entry_text` from `release_id`'s own admin code (M-1, M13).
+
+    The text of `bin/darkfactory-entry.py` the route `launcher` writes; a
+    source that is absent, a link, not regular, too big or without exactly
+    one `_ROOT` line is `StepFailed("launcher")`.
+    """
+    source = entry_source(layout, release_id)
+    try:
+        return entry_text(layout, source)
+    except Refused as exc:
+        raise StepFailed(_LAUNCHER_STEP, exc.detail) from exc
+    except OSError as exc:
+        raise StepFailed(_LAUNCHER_STEP, f"{source}: {exc}") from exc
+
+
+def launcher_ready(layout: Layout, release_id: str, *, python: str) -> bool:
+    """Fact `L`: the command files are what `release_id`'s admin code
+    generates (F2, M-1).
 
     The entry and the command are root's regular files, `0644` and `0755`,
-    with exactly `entry_text` and `launcher_text` for `python`, and both pass
-    `trusted_path_problems` (chain, ACL — spec 3.10, M-3); when
-    `/usr/local/bin` is trusted (`accept.local_bin_trusted`), its
-    `darkfactory` is a link whose text is the command's path. Absent or
-    different is false; any other `OSError` is `StepFailed("facts")`.
+    with exactly the entry text of `release_id`'s own source
+    (`entry_source`, the one the route `launcher` writes) and
+    `launcher_text` for `python`, and both pass `trusted_path_problems`
+    (chain, ACL — spec 3.10, M-3); when `/usr/local/bin` is trusted
+    (`accept.local_bin_trusted`), its `darkfactory` is a link whose text is
+    the command's path. Absent or different — a source that cannot render
+    an entry included — is false; any other `OSError` is
+    `StepFailed("facts")`.
     """
+    entry = _source_entry_text(layout, release_id)
+    if entry is None:
+        return False
     platform = plat.detect_platform()
     files = (
-        (layout.entry, entry_text(layout), 0o644),
+        (layout.entry, entry, 0o644),
         (layout.launcher, launcher_text(layout, python, platform), 0o755),
     )
     if not all(_file_is(path, text, mode) for path, text, mode in files):
@@ -555,6 +593,21 @@ def launcher_ready(layout: Layout, *, python: str) -> bool:
     if not accept.local_bin_trusted(layout):
         return True
     return _link_is(layout.local_bin / layout.launcher.name, str(layout.launcher))
+
+
+def _source_entry_text(layout: Layout, release_id: str) -> str | None:
+    """The entry text of the release's source; `None` if it renders none."""
+    source = entry_source(layout, release_id)
+    try:
+        return entry_text(layout, source)
+    except Refused:
+        return None
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return None
+        raise StepFailed(_FACTS_STEP, f"{source}: {exc}") from exc
 
 
 def _file_is(path: Path, text: str, mode: int) -> bool:

@@ -58,6 +58,10 @@ selfcheck = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+# `slow`: full enumerations outside CI (df crash matrix, Task 9 R49); run
+# them with `pytest -m slow` (the last `-m` wins over this default).
+addopts = "-m 'not slow'"
+markers = ["slow: full enumeration outside CI (run with -m slow)"]
 
 [tool.ruff]
 # Вендоренные фикстуры criteria-closure/v1: байты — это кейсы (синтаксическая

@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import errno
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,8 @@ BOOT = "boot-1"
 UV = "0.9.2"
 PY = "3.13.1"
 OLD_PY = "3.12.7"
+#: `python_declared` of a verified mark: canonical JSON `{repo: sys.version}`.
+DECLARED = '{"r1":"3.13.1 (main)"}'
 
 
 @pytest.fixture(autouse=True)
@@ -72,6 +75,7 @@ def mark(stage: str, **kw: object) -> AcceptMark:
         "admin_digest": "sha256:" + "2" * 64 if admin else None,
         "admin_python": PY if admin else None,
         "uv_version_declared": UV,
+        "python_declared": DECLARED if stage in ("verified", "admin") else None,
     }
     values.update(kw)
     return AcceptMark(**values)  # type: ignore[arg-type]
@@ -208,6 +212,56 @@ def test_mark_carried_fields_unchanged(fl: FakeLayout, key: str) -> None:
         write_mark(fl.layout, ID, mark("copied", **{key: "other"}))
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        "",
+        "{}x",
+        "[]",
+        '{"r1": "3.13.1 (main)"}',  # not canonical (spacing)
+        '{"r2":"a","r1":"b"}',  # not canonical (key order)
+        '{"r1":1}',
+        "[" * 100000,
+    ],
+)
+@pytest.mark.parametrize("stage", ["verified", "admin"])
+def test_mark_python_declared_required_and_canonical(
+    stage: str, value: str | None
+) -> None:
+    """R40/F7 (I4a): `verified` and `admin` carry the interpreter answers as
+    canonical JSON `{repo: version}`; anything else is refused."""
+    with pytest.raises(ConfigError):
+        mark(stage, python_declared=value)
+
+
+@pytest.mark.parametrize("stage", ["built", "copied"])
+def test_mark_python_declared_absent_before_verified(stage: str) -> None:
+    with pytest.raises(ConfigError):
+        mark(stage, python_declared=DECLARED)
+
+
+def test_python_declared_dump_is_canonical() -> None:
+    assert accept.dump_declared({"r2": "b", "r1": "a"}) == '{"r1":"a","r2":"b"}'
+    assert accept.dump_declared({}) == "{}"
+    assert accept.parse_declared('{"r1":"a"}') == {"r1": "a"}
+
+
+def test_mark_python_declared_carried(fl: FakeLayout) -> None:
+    """I4a: written with `verified`, carried unchanged by `admin` (checked
+    like `built_boot_id`); an `at_least` rewrite keeps a higher mark."""
+    write_mark(fl.layout, ID, mark("copied"))
+    write_mark(fl.layout, ID, mark("verified"))
+    other = '{"r1":"3.13.2"}'
+    for stage in ("verified", "admin"):
+        with pytest.raises(StepFailed, match="python_declared") as exc:
+            write_mark(fl.layout, ID, mark(stage, python_declared=other))
+        assert exc.value.step == "mark"
+    write_mark(fl.layout, ID, mark("admin"))
+    loaded = load_mark(fl.layout, ID, install_digest=INSTALL)
+    assert loaded is not None and loaded.python_declared == DECLARED
+
+
 def test_mark_of_other_config_ignored(fl: FakeLayout) -> None:
     write_mark(fl.layout, ID, mark("admin", install_digest=OTHER_INSTALL))
     assert load_mark(fl.layout, ID, install_digest=INSTALL) is None
@@ -299,6 +353,38 @@ def test_registered_unhealthy_is_damaged(fl: FakeLayout) -> None:
     f = facts(fl, launcher_ready=lambda: True)
     assert not f.intact
     assert classify(f) == "damaged"
+
+
+@pytest.mark.parametrize(
+    "spoil", ["none", "mode", "tree", "admin", "builder", "absent", "link"]
+)
+def test_entry_intact_is_the_fact_intact(fl: FakeLayout, spoil: str) -> None:
+    """`entry_intact` (Task 9) gives exactly `read_facts`'s `intact` for the
+    entry, without `build_uid` or the other facts."""
+    pending(fl)
+    lay = fl.layout
+    digest = root_tree(fl)
+    admin_digest = admin_tree(fl)
+    register(fl, digest, admin_digest)
+    tree = lay.release_dir(ID)
+    if spoil == "mode":
+        tree.chmod(0o700)
+    elif spoil == "tree":
+        (tree / "src" / "app.py").write_text("tampered\n")
+    elif spoil == "admin":
+        (lay.admin_python / PY / "POLICY-FAIL").write_text("")
+    elif spoil == "builder":
+        fl.set_owner(tree, fl.build_uid)
+    elif spoil in ("absent", "link"):
+        shutil.rmtree(tree)
+        if spoil == "link":
+            tree.symlink_to(lay.admin_dir(ID))
+    entry = accept.registry_entry(lay, ID)
+    assert entry is not None
+    got = accept.entry_intact(lay, ID, entry, admin_ready=admin_ready_model)
+    assert got is (spoil == "none")
+    if spoil not in ("builder", "link"):
+        assert facts(fl).intact is got
 
 
 def test_registry_entry_is_authoritative_over_mark(fl: FakeLayout) -> None:
@@ -687,7 +773,8 @@ def test_acquire_paths_cover_settle_paths(fl: FakeLayout) -> None:
 
 
 def test_mark_dataclass_field_order() -> None:
-    """The brief's positional fields, then the uv version (F11)."""
+    """The brief's positional fields, then the uv version (F11), then the
+    interpreter answers (Task 9, I4a)."""
     assert [f.name for f in dataclasses.fields(AcceptMark)] == [
         "install_digest",
         "stage",
@@ -696,6 +783,7 @@ def test_mark_dataclass_field_order() -> None:
         "admin_digest",
         "admin_python",
         "uv_version_declared",
+        "python_declared",
     ]
 
 

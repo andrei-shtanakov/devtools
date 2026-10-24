@@ -18,7 +18,7 @@ from unittest import mock
 
 import pytest
 
-from df import admin, fsutil, leaves, receive, routes
+from df import admin, fsutil, leaves, receive, release, routes
 from df import install_table as table
 from df import platform as plat
 from df.accept import Facts, classify, load_mark, read_facts
@@ -27,7 +27,7 @@ from df.digest import tree_digest
 from df.journal import StepFailed
 from df.receive import CopyLimits
 from tests.df.conftest import BUILD_UID, FakeLayout, fd_path
-from tests.df.test_routes import (
+from tests.df.route_world import (
     BOOT,
     ID,
     INSTALL,
@@ -39,6 +39,7 @@ from tests.df.test_routes import (
     make_calls,
     normalize,
     obj,
+    release_world,
     setup_layout,
     write_accounts,
     write_state_mark,
@@ -684,6 +685,17 @@ def _run_install_admin_python(
     return "admin-python/cpython-…"
 
 
+def _run_activate(
+    fl: FakeLayout, monkeypatch: pytest.MonkeyPatch, _v: str | None
+) -> str:
+    """The real `activate` (Task 9) over a registered intact release."""
+    monkeypatch.setattr(plat, "trusted_path_problems", lambda _p: [])
+    release_world(fl)
+    fl.clear()
+    release.activate(fl.layout, ID)
+    return "/opt/df/current"
+
+
 #: name -> run of the real primitive in a variant; returns the target text.
 PRIMITIVES: Mapping[
     str, Callable[[FakeLayout, pytest.MonkeyPatch, str | None], str]
@@ -729,13 +741,15 @@ PRIMITIVES: Mapping[
     "link_command": _simple(
         _nothing, lambda fl: admin.link_command(fl.layout), "/usr/local/bin/darkfactory"
     ),
+    "activate": _run_activate,
 }
 
 
 def test_primitives_cover_protocols() -> None:
-    """Every protocol has a real primitive here or a later owner task."""
-    assert set(PRIMITIVES) <= set(table.PROTOCOLS)
-    assert set(table.PROTOCOLS) - set(PRIMITIVES) <= set(routes.LATER_LEAVES)
+    """Every protocol has its real primitive here: no later owner task is
+    left (Task 9, M18)."""
+    assert set(PRIMITIVES) == set(table.PROTOCOLS)
+    assert routes.LATER_LEAVES == {}
 
 
 @pytest.mark.parametrize(
@@ -751,8 +765,5 @@ def test_primitive_protocols_match_table(
     """S1-R7-N1, S1-R11-N4: the real primitive in `variant` (the preparation
     gives the outcome); its events == leaf_variants(name)[variant] — order,
     multiplicity and objects; event kinds are those of OPS."""
-    run = PRIMITIVES.get(name)
-    if run is None:
-        pytest.skip(f"real primitive of Task {routes.LATER_LEAVES[name]}")
-    target = run(fl, monkeypatch, variant)
+    target = PRIMITIVES[name](fl, monkeypatch, variant)
     assert normalize(fl.events) == expected_events(fl.layout, name, variant, target)

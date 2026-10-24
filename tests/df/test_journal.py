@@ -6,6 +6,7 @@ import json
 import os
 import select
 import signal
+import stat
 import subprocess
 import sys
 import textwrap
@@ -285,21 +286,38 @@ def test_writer_lock_refuses_foreign_dir_owner(
 def test_writer_lock_syncs_created_dirs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import df.journal as journal_mod
+    """Every directory of the chain, root included, created or found, is
+    synced exactly once per acquisition, after its child exists (its mode
+    and the child's name), `install/` last; a created lock then syncs
+    `install/` again (`fsutil.create_file`). A found chain is settled again
+    on every acquisition (spec 3.3 r6)."""
+    from df import fsutil
+    from tests.df.crash_model import fd_path
 
     lay = _layout(tmp_path)
-    calls: list[int] = []
-    real = journal_mod.sync_dir
-    monkeypatch.setattr(
-        journal_mod, "sync_dir", lambda fd: (calls.append(fd), real(fd))[1]
-    )
+    calls: list[Path] = []
+    real = fsutil.sync_dir
+
+    def spy(fd: int | Path) -> fsutil.SyncNote:
+        calls.append(fd_path(fd) if isinstance(fd, int) else fd)
+        return real(fd)
+
+    monkeypatch.setattr(fsutil, "sync_dir", spy)
+    root = Path(os.path.realpath(lay.root))
+    chain = [
+        root / "var",
+        root / "var/lib",
+        root / "var/lib/df",
+        root / "var/lib/df/install",
+    ]
+    settled = [root, *chain]  # each once, after its child exists
     with writer_lock(lay):
         pass
-    assert len(calls) == 4  # var, lib, df, install
+    assert [Path(os.path.realpath(p)) for p in calls] == [*settled, chain[-1]]
     calls.clear()
     with writer_lock(lay):
         pass
-    assert calls == []
+    assert [Path(os.path.realpath(p)) for p in calls] == settled
 
 
 def test_journal_hard_link_refused(tmp_path: Path) -> None:
@@ -701,3 +719,26 @@ def test_read_journal_non_utf8_named(tmp_path: Path) -> None:
     journal.write_bytes(b"\xff\xfe\n")
     with pytest.raises(ValueError, match="line 1"):
         read_journal(journal)
+
+
+def test_writer_lock_repairs_only_dfs_own_components(tmp_path: Path) -> None:
+    """m-D: by position in the path, `var` (`/var/lib/df`) and `install` are
+    df's own and a narrower mode of theirs is repaired to `0755`; the system
+    components above them (`/var`, `/var/lib`) are settled, never changed."""
+    lay = _layout(tmp_path)
+    root = lay.root
+    for rel in ("var", "var/lib", "var/lib/df", "var/lib/df/install"):
+        (root / rel).mkdir(mode=0o700)
+        os.chmod(root / rel, 0o700)
+    with writer_lock(lay):
+        pass
+    modes = {
+        rel: stat.S_IMODE(os.stat(root / rel).st_mode)
+        for rel in ("var", "var/lib", "var/lib/df", "var/lib/df/install")
+    }
+    assert modes == {
+        "var": 0o700,
+        "var/lib": 0o700,
+        "var/lib/df": 0o755,
+        "var/lib/df/install": 0o755,
+    }

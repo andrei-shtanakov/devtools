@@ -48,7 +48,7 @@ def main(argv: list[str]) -> int:
         sys.stderr.write("darkfactory bootstrap: " + problem + "\n")
         return EXIT_REFUSED
     sys.path.insert(0, checkout_root(__file__))
-    from df.cli import main as cli_main  # type: ignore[import-not-found]
+    from df.cli import main as cli_main
 
     return cli_main(argv, mode="bootstrap", read=None, lock_fd=None)
 

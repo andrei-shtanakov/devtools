@@ -13,17 +13,22 @@ mechanism (`role_argv`) becomes a plain `env -i` exec as the current user;
 `pkill`/`ps` in `reap_user_processes` are recorded as one `process(df-build)`.
 Events of fsutil (`fault_point`, `sync_dir`, `sync_tree`) and every `run_as`
 are recorded in order; `sync_tree` is one event and syncs nothing (F16).
+
+`fake_world` (Task 9-C) is the install world of `tests/df/install_world.py`
+over `fake_layout` with the OS-crash model of `tests/df/crash_model.py`
+installed on top: the model replaces the sync seams (so `sync_tree` syncs
+again, in the model) and keeps only synced effects across `os_crash()`.
+Every test runs under `umask 022` (autouse; carried from Task 7).
 """
 
 from __future__ import annotations
 
-import fcntl
 import os
 import pwd
-import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -31,18 +36,14 @@ from df import accept, fsutil, journal, receive
 from df import platform as plat
 from df.paths import Layout
 from df.platform import RunResult
+from tests.df.crash_model import CrashModel, fd_path
+
+if TYPE_CHECKING:
+    from tests.df.install_world import World
 
 #: The fake uid of `df-build`: never the current user (F1).
 BUILD_UID = os.getuid() + 100000
 Event = tuple[object, ...]
-
-
-def fd_path(fd: int) -> Path:
-    """The path of an open descriptor (macOS `F_GETPATH`, Linux `/proc`)."""
-    if sys.platform == "darwin":
-        raw = fcntl.fcntl(fd, getattr(fcntl, "F_GETPATH", 50), b"\0" * 1024)
-        return Path(raw.rstrip(b"\0").decode())
-    return Path(os.readlink(f"/proc/self/fd/{fd}"))
 
 
 @dataclass
@@ -71,6 +72,7 @@ class FakeLayout:
             lay.build_home,
         ):
             path.mkdir(parents=True, exist_ok=True)
+        lay.admin_home.mkdir(mode=0o700, exist_ok=True)  # as step 2 leaves it
 
     def set_owner(self, path: Path, uid: int) -> None:
         """Give `path` a virtual owner (as a recorded `chown` would)."""
@@ -95,6 +97,11 @@ class FakeLayout:
 @pytest.fixture()
 def fake_layout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeLayout:
     """See the module docstring."""
+    return make_fake_layout(monkeypatch, tmp_path)
+
+
+def make_fake_layout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeLayout:
+    """`fake_layout` under `tmp_path` with `monkeypatch` (any scope's)."""
     root = Path(os.path.realpath(tmp_path)) / "root"
     root.mkdir()
     fake = FakeLayout(Layout(root), BUILD_UID)
@@ -244,3 +251,36 @@ def _patch_launch(monkeypatch: pytest.MonkeyPatch, fake: FakeLayout) -> None:
     monkeypatch.setattr(plat, "run_as", run_as)
     monkeypatch.setattr(plat.pwd, "getpwnam", getpwnam)
     monkeypatch.setattr(plat, "run_command", run_command)
+
+
+@pytest.fixture(autouse=True)
+def _umask_022() -> Iterator[None]:
+    """Every df test runs under `umask 022` (carry of Task 7, M18)."""
+    old = os.umask(0o022)
+    try:
+        yield
+    finally:
+        os.umask(old)
+
+
+@pytest.fixture()
+def fake_world(
+    monkeypatch: pytest.MonkeyPatch, fake_layout: FakeLayout
+) -> Iterator[World]:
+    """The install world with the OS-crash model (`World.model`)."""
+    world = make_fake_world(fake_layout, monkeypatch)
+    try:
+        yield world
+    finally:
+        world.m.close()
+
+
+def make_fake_world(fake_layout: FakeLayout, monkeypatch: pytest.MonkeyPatch) -> World:
+    """`fake_world` over `fake_layout` with `monkeypatch` (any scope's)."""
+    from tests.df.install_world import make_world  # it imports this module
+
+    world = make_world(fake_layout, monkeypatch)
+    model = CrashModel(fake_layout.layout.root, fake_layout)
+    model.install(monkeypatch)
+    world.model = model
+    return world

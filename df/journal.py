@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from df import fsutil
-from df.fsutil import sync_dir, sync_file, write_atomic
+from df.fsutil import create_file, make_dir, sync_file, write_atomic
 from df.paths import Layout
 
 _NB = os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -116,6 +116,10 @@ def _open_install_dir(layout: Layout) -> int:
 
     Components above `layout.var` follow system links (macOS /var);
     `df` and `install` are no-follow. Every directory must be trusted.
+    Settled once each (spec 3.3 r6): every directory of the chain, root
+    included, is synced exactly once, after its child entry exists -- its
+    mode and the child's name -- and `install_dir` last, all before the
+    lock is taken.
     """
     parts = layout.install_dir.relative_to(layout.root).parts
     first_nofollow = len(layout.var.relative_to(layout.root).parts) - 1
@@ -123,15 +127,31 @@ def _open_install_dir(layout: Layout) -> int:
     fd = _step_open(path, lambda: os.open(path, _DIR_FOLLOW_FLAGS))
     for i, name in enumerate(parts):
         path = path / name
-        flags = _DIR_FLAGS if i >= first_nofollow else _DIR_FOLLOW_FLAGS
-        fd = _descend(fd, path, flags)
+        own = i >= first_nofollow  # df's own: `var` itself and below
+        flags = _DIR_FLAGS if own else _DIR_FOLLOW_FLAGS
+        fd = _descend(fd, path, flags, own=own)
+    try:
+        fsutil.sync_dir(fd)
+    except OSError as exc:
+        os.close(fd)
+        raise StepFailed("lock", f"{path}: {_why(exc)}") from exc
     return fd
 
 
-def _descend(parent_fd: int, path: Path, flags: int) -> int:
-    """Open child `path.name` of `parent_fd`; always closes the parent."""
+def _descend(parent_fd: int, path: Path, flags: int, *, own: bool) -> int:
+    """Open child `path.name` of `parent_fd`, then sync the parent (its
+    mode, the child's name); always closes the parent. `own` (by position:
+    `var` and below) -- only those may be repaired."""
     try:
-        return _step_open(path, lambda: _open_or_make_dir(parent_fd, path.name, flags))
+        fd = _step_open(
+            path, lambda: _open_or_make_dir(parent_fd, path, flags, own=own)
+        )
+        try:
+            fsutil.sync_dir(parent_fd)
+        except OSError as exc:
+            os.close(fd)
+            raise StepFailed("lock", f"{path.parent}: {_why(exc)}") from exc
+        return fd
     finally:
         os.close(parent_fd)
 
@@ -158,30 +178,12 @@ def _require_trusted_dir(fd: int, path: Path) -> None:
         raise StepFailed("lock", f"{path}: не доверенный каталог (права)")
 
 
-def _open_or_make_dir(parent_fd: int, name: str, flags: int) -> int:
-    try:
-        return os.open(name, flags, dir_fd=parent_fd)
-    except FileNotFoundError:
-        pass
-    created = _mkdir_tolerant(parent_fd, name)
-    fd = os.open(name, flags, dir_fd=parent_fd)
-    if created:
-        try:
-            os.fchmod(fd, 0o755)
-            sync_dir(parent_fd)
-        except BaseException:
-            os.close(fd)
-            raise
-    return fd
-
-
-def _mkdir_tolerant(parent_fd: int, name: str) -> bool:
-    """Create `name`; a concurrent creator winning the race is fine."""
-    try:
-        os.mkdir(name, 0o755, dir_fd=parent_fd)
-    except FileExistsError:
-        return False
-    return True
+def _open_or_make_dir(parent_fd: int, path: Path, flags: int, *, own: bool) -> int:
+    """Make `path` its final form (`fsutil.make_dir`: created `0755`, or
+    found; only `df`'s own are repaired), then open it; the walk syncs (one
+    sync per directory); a concurrent creator winning the race is fine."""
+    make_dir(parent_fd, path.name, 0o755, path=path, repair=own, settle=False)
+    return os.open(path.name, flags, dir_fd=parent_fd)
 
 
 def _why(exc: OSError) -> str:
@@ -247,7 +249,8 @@ def _open_lock_file(dir_fd: int, path: Path) -> int:
 
 def _open_private(dir_fd: int | None, path: Path, flags: int, step: str) -> int:
     """Open a writer-side file (lock, journal): existing must be exactly 0600;
-    a missing one is created exclusively and forced to 0600 despite umask."""
+    a missing one is created exclusively at 0600 whatever the umask, durably
+    (`fsutil.create_file`)."""
     try:
         return _open_regular(dir_fd, path, flags, step, writer=True, exact_mode=0o600)
     except StepFailed:
@@ -268,19 +271,12 @@ def _is_absent(path: Path, dir_fd: int | None) -> bool:
 
 
 def _create_private(dir_fd: int | None, path: Path, flags: int, step: str) -> int:
-    target = path.name if dir_fd is not None else path
     try:
-        fd = os.open(target, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dir_fd)
+        return create_file(path, flags, 0o600, dir_fd=dir_fd)
     except FileExistsError:
         return _open_regular(dir_fd, path, flags, step, writer=True, exact_mode=0o600)
     except OSError as exc:
         raise StepFailed(step, f"{path}: {_why(exc)}") from exc
-    try:
-        os.fchmod(fd, 0o600)
-    except BaseException:
-        os.close(fd)
-        raise
-    return fd
 
 
 def _flock_or_refuse(fd: int, path: Path) -> None:
@@ -309,6 +305,12 @@ def generation_end(layout: Layout) -> None:
     if n % 2 == 0:
         raise RuntimeError(f"generation_end on even generation {n}")
     _write_generation(layout, n + 1)
+
+
+def read_generation(layout: Layout) -> int:
+    """The generation counter: absent -> 0; a malformed one is
+    `StepFailed("snapshot")` (bootstrap's snapshot, Task 9)."""
+    return _read_generation(layout)
 
 
 def _write_generation(layout: Layout, n: int) -> None:
