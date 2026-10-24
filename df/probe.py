@@ -10,9 +10,10 @@ once, with the argv and environment that passed admission; there is no
 separate `--version` call (rev 8, r4). The adapter parses the provider's
 answer itself; the role's output is never taken as «checked».
 
-`HARNESS_PROFILES` is empty until the isolation of a harness version is
-verified on its binary (Task 11, Step 3): until then every probe is «не
-поддерживается».
+`HARNESS_PROFILES` pins the binaries checked on real harnesses (Task 11,
+Step 3, evidence `docs/evidence/2026-10-24-df-probe-isolation.md`); a
+profile whose isolation is not verified refuses every probe («не
+поддерживается»).
 """
 
 from __future__ import annotations
@@ -42,8 +43,8 @@ ADAPTER_VERSION = "2"
 PROBE_PROMPT = "Reply with the single word OK."
 PROBE_TIMEOUT = 120
 SCHEMA = "df/probe/v1"
-#: The value of claude's `--setting-sources` that disables user and project
-#: settings; fixed by the isolation check on the binary (Step 3, 11-B).
+#: The value of claude's `--setting-sources` that disables user, project and
+#: local settings (sentinels did not fire with it on 2.1.309, did without).
 CLAUDE_SETTING_SOURCES = ""
 #: Harness project files that must not be in the probe cwd or its parents.
 PROJECT_FILES = (".claude", "CLAUDE.md", "AGENTS.md", ".codex", ".git")
@@ -97,7 +98,7 @@ def param_argv(choice: ModelChoice) -> list[str]:
 
 
 def claude_argv(harness: Path, choice: ModelChoice) -> list[str]:
-    """The candidate probe argv of claude (pinned per version in Step 3)."""
+    """The probe argv of claude, verified on 2.1.309 (evidence 2026-10-24)."""
     effort = ["--effort", choice.effort] if choice.effort else []
     return [
         str(harness),
@@ -117,12 +118,16 @@ def claude_argv(harness: Path, choice: ModelChoice) -> list[str]:
         "",
         *effort,
         *param_argv(choice),
+        # `--tools <tools...>` is variadic: without `--` an empty tool list
+        # swallows the prompt (claude 2.1.309, evidence 2026-10-24).
+        "--",
         PROBE_PROMPT,
     ]
 
 
 def codex_argv(harness: Path, choice: ModelChoice) -> list[str]:
-    """The candidate probe argv of codex: the auth store is pinned to `file`."""
+    """The probe argv of codex, run on 0.163.0 (evidence 2026-10-24): the
+    auth store is pinned to `file`; project instruction files are off."""
     effort = (
         ["-c", f'model_reasoning_effort="{choice.effort}"'] if choice.effort else []
     )
@@ -135,6 +140,8 @@ def codex_argv(harness: Path, choice: ModelChoice) -> list[str]:
         'cli_auth_credentials_store="file"',
         "-c",
         "mcp_servers={}",
+        "-c",
+        "project_doc_max_bytes=0",
         "-m",
         choice.model,
         "--json",
@@ -201,10 +208,80 @@ class HarnessProfile:
     isolation_verified: bool
 
 
-#: Profiles keyed by `(harness, platform, SHA-256 of the executable)`; filled
-#: by Step 3 (11-B) only for verified versions.
+def _absent_or_refused(kind: Literal["file", "mdm"], locator: str) -> ManagedSource:
+    """An observable source with no approved content: absent is admitted,
+    anything present (a directory included: it is not a regular file) is a
+    refusal until its digest is approved in the profile."""
+    return ManagedSource(kind, locator, True, frozenset(), None)
+
+
+def _unexcluded(kind: Literal["mdm", "server"], locator: str) -> ManagedSource:
+    """An unobservable source for which Step 3 found no `Exclusion` that
+    holds under every auth method: admission always refuses it."""
+    return ManagedSource(kind, locator, False, frozenset(), None)
+
+
+_CLAUDE_ROOT = "/Library/Application Support/ClaudeCode"
+_CLAUDE_PLIST = "com.anthropic.claudecode.plist"
+#: claude 2.1.309 on macOS: the closed list of managed sources, from the
+#: binary's own code and its debug log (evidence 2026-10-24). MDM is read
+#: as plist files with `plutil` (device level and per user — the role's).
+CLAUDE_MANAGED_MACOS: tuple[ManagedSource, ...] = (
+    _absent_or_refused("file", f"{_CLAUDE_ROOT}/managed-settings.json"),
+    _absent_or_refused("file", f"{_CLAUDE_ROOT}/managed-settings.d"),
+    _absent_or_refused("file", f"{_CLAUDE_ROOT}/managed-mcp.json"),
+    _absent_or_refused("file", f"{_CLAUDE_ROOT}/CLAUDE.md"),
+    _absent_or_refused("file", f"{_CLAUDE_ROOT}/.claude"),
+    _absent_or_refused("mdm", f"/Library/Managed Preferences/{_CLAUDE_PLIST}"),
+    *(
+        _absent_or_refused("mdm", f"/Library/Managed Preferences/{u}/{_CLAUDE_PLIST}")
+        for u in sorted(set(ROLE_CONTEXT.values()))
+    ),
+    _unexcluded("server", "api.anthropic.com/api/claude_code/settings"),
+    _unexcluded("server", "api.anthropic.com/api/claude_code/policy_limits"),
+)
+#: codex 0.163.0 on macOS (evidence 2026-10-24). MDM goes through
+#: CFPreferences (domain `com.openai.codex`, keys `config_toml_base64`,
+#: `requirements_toml_base64`): cfprefsd, not one file, so not observable.
+CODEX_MANAGED_MACOS: tuple[ManagedSource, ...] = (
+    _absent_or_refused("file", "/etc/codex/config.toml"),
+    _absent_or_refused("file", "/etc/codex/requirements.toml"),
+    _absent_or_refused("file", "/etc/codex/managed_config.toml"),
+    _unexcluded("mdm", "cfprefs:com.openai.codex"),
+    _unexcluded("server", "chatgpt.com/backend-api/wham/config/bundle"),
+)
+
+#: Profiles keyed by `(harness, platform, SHA-256 of the executable)`. Only
+#: the macOS arm64 binaries of R66 are pinned here; Linux SHAs come with the
+#: native acceptance (Task 13). `isolation_verified` is set only for a
+#: version that passed every check of Step 3 (evidence 2026-10-24).
 HARNESS_PROFILES: Mapping[tuple[str, PlatformName, str], HarnessProfile] = (
-    MappingProxyType({})
+    MappingProxyType(
+        {
+            (
+                "claude",
+                "macos-arm64",
+                "5eadc0009cdcdbc0d06e58110d7b2baf88ced6088b1c33a60a21217fe410619c",
+            ): HarnessProfile(
+                version="2.1.309",
+                argv=claude_argv,
+                auth_files=None,  # the macOS keychain: backend_unknown
+                managed=CLAUDE_MANAGED_MACOS,
+                isolation_verified=False,
+            ),
+            (
+                "codex",
+                "macos-arm64",
+                "8813367285524ac798dd96d1b071aea30d58708c7226fd236cd275cf1cfdee31",
+            ): HarnessProfile(
+                version="0.163.0",
+                argv=codex_argv,
+                auth_files=(".codex/auth.json",),
+                managed=CODEX_MANAGED_MACOS,
+                isolation_verified=False,
+            ),
+        }
+    )
 )
 
 
@@ -446,6 +523,13 @@ def _parse_claude(text: str) -> ProbeParse:
 
 
 def _parse_codex(text: str) -> ProbeParse:
+    """codex 0.163.0 `exec --json` (sequences pinned in the fixtures from
+    the real binary, evidence 2026-10-24): a turn ends with exactly one
+    `turn.completed` or `turn.failed`, and that event is the last one. A
+    completed turn may follow top-level `error` events — the harness's
+    «Reconnecting… n/5» retry notices — so `error` alone decides nothing;
+    a failed turn names its error. No terminal event (e.g. the harness
+    retrying an unreachable network until the timeout) is not success."""
     events: list[dict[str, object]] = []
     for line in text.splitlines():
         if not line.strip():
@@ -457,12 +541,19 @@ def _parse_codex(text: str) -> ProbeParse:
         if not isinstance(event, dict) or not isinstance(event.get("type"), str):
             return _UNPARSED
         events.append(event)
-    for event in events:
-        if event["type"] in ("error", "turn.failed"):
-            return ProbeParse(False, None, _clip(_codex_error(event)))
-    if any(event["type"] == "turn.completed" for event in events):
-        return ProbeParse(True, None, None)
-    return _UNPARSED
+    ends = [e for e in events if e["type"] in ("turn.completed", "turn.failed")]
+    if not ends:
+        errors = [e for e in events if e["type"] == "error"]
+        return (
+            ProbeParse(False, None, _clip(_codex_error(errors[-1])))
+            if errors
+            else _UNPARSED
+        )
+    if len(ends) != 1 or ends[0] is not events[-1]:
+        return _UNPARSED
+    if ends[0]["type"] == "turn.failed":
+        return ProbeParse(False, None, _clip(_codex_error(ends[0])))
+    return ProbeParse(True, None, None)
 
 
 def _codex_error(event: Mapping[str, object]) -> object:

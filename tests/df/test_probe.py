@@ -45,6 +45,8 @@ CODEX = ModelChoice("codex", "gpt-5.5", None, {})
 PLATFORM = plat.detect_platform()
 CRED = ".claude/.credentials.json"
 UID = os.getuid()
+#: The module's real profile table, before any test patches it.
+REAL_PROFILES = dict(probe.HARNESS_PROFILES)
 
 
 def fixture(name: str) -> bytes:
@@ -170,8 +172,10 @@ def test_argv_claude_and_codex_exact() -> None:
         "",
         "--effort",
         "high",
+        "--",
         PROBE_PROMPT,
     ]
+    assert probe.CLAUDE_SETTING_SOURCES == ""
     plain = dataclasses.replace(CHOICE, effort=None)
     assert "--effort" not in probe.claude_argv(h, plain)
     c = Path("/opt/h/codex")
@@ -184,6 +188,8 @@ def test_argv_claude_and_codex_exact() -> None:
         'cli_auth_credentials_store="file"',
         "-c",
         "mcp_servers={}",
+        "-c",
+        "project_doc_max_bytes=0",
         "-m",
         "gpt-5.5",
         "--json",
@@ -203,8 +209,66 @@ def test_argv_claude_and_codex_exact() -> None:
     assert PROBE_PROMPT == "Reply with the single word OK."
 
 
-def test_profiles_table_is_empty_until_step3() -> None:
-    assert dict(probe.HARNESS_PROFILES) == {}
+def test_profiles_pin_the_step3_binaries_unverified() -> None:
+    # 11-B: the two macOS binaries of R66, both with isolation NOT verified
+    # (server-delivered managed settings have no Exclusion; evidence
+    # docs/evidence/2026-10-24-df-probe-isolation.md).
+    table = REAL_PROFILES
+    claude = table[
+        (
+            "claude",
+            "macos-arm64",
+            "5eadc0009cdcdbc0d06e58110d7b2baf88ced6088b1c33a60a21217fe410619c",
+        )
+    ]
+    codex = table[
+        (
+            "codex",
+            "macos-arm64",
+            "8813367285524ac798dd96d1b071aea30d58708c7226fd236cd275cf1cfdee31",
+        )
+    ]
+    assert len(table) == 2
+    assert (claude.version, claude.argv, claude.auth_files) == (
+        "2.1.309",
+        probe.claude_argv,
+        None,
+    )
+    assert (codex.version, codex.argv, codex.auth_files) == (
+        "0.163.0",
+        probe.codex_argv,
+        (".codex/auth.json",),
+    )
+    assert not claude.isolation_verified
+    assert not codex.isolation_verified
+    for prof in (claude, codex):
+        servers = [m for m in prof.managed if m.kind == "server"]
+        assert servers and all(m.excluded_by is None for m in servers)
+        assert all(m.observable for m in prof.managed if m.kind == "file")
+        assert all(not m.allowed_digests for m in prof.managed)
+    plists = {m.locator for m in claude.managed if m.kind == "mdm"}
+    assert plists == {
+        "/Library/Managed Preferences/com.anthropic.claudecode.plist",
+        "/Library/Managed Preferences/df-exec/com.anthropic.claudecode.plist",
+        "/Library/Managed Preferences/df-review/com.anthropic.claudecode.plist",
+    }
+
+
+def test_pinned_profiles_refuse_before_launch(world: World) -> None:
+    # Each real (unverified) profile, put under the fake binary's SHA: the
+    # probe is «не поддерживается» and the runner is never called.
+    for key, prof in REAL_PROFILES.items():
+        world.register(prof, key[0])
+        world.cfg = ModelsConfig(
+            {"author": dataclasses.replace(CHOICE, harness=key[0])}, {}
+        )
+        world.install = dataclasses.replace(
+            world.install,
+            approved_cli={**world.install.approved_cli, key[0]: world.exe},
+        )
+        spy = Spy(ok_result())
+        assert world.run(spy) == "не поддерживается: изоляция не подтверждена"
+        assert spy.calls == []
 
 
 def test_param_flags_match_supported_params() -> None:
@@ -510,14 +574,44 @@ def test_parse_claude_reports_actual_model() -> None:
     got = probe.parse_output("claude", json.dumps(two).encode())
     assert got.ok and got.actual_model is None
     bad = probe.parse_output("claude", fixture("claude-error.json"))
-    assert not bad.ok and bad.error is not None and "Connection error" in bad.error
+    assert not bad.ok and bad.error is not None and "ECONNREFUSED" in bad.error
+    http = probe.parse_output("claude", fixture("claude-http500.json"))
+    assert not http.ok and http.error is not None and "500" in http.error
 
 
 def test_parse_codex_model_not_reported() -> None:
     got = probe.parse_output("codex", fixture("codex-ok.jsonl"))
     assert got == probe.ProbeParse(True, None, None)
     bad = probe.parse_output("codex", fixture("codex-neterr.jsonl"))
-    assert not bad.ok and bad.error is not None and "stream disconnected" in bad.error
+    assert not bad.ok and bad.error is not None and "waiting for network" in bad.error
+
+
+# Real codex 0.163.0 sequences (fixtures captured from the binary, 11-B):
+# a completed turn may follow top-level `error` retry notices; a failed turn
+# ends with `turn.failed`; an unreachable network never ends the turn.
+def test_parse_codex_success_after_retry_notices() -> None:
+    lines = fixture("codex-ok.jsonl").decode().splitlines()
+    types = [json.loads(line)["type"] for line in lines]
+    assert "error" in types and types[-1] == "turn.completed"
+    assert probe.parse_output("codex", fixture("codex-ok.jsonl")).ok
+
+
+def test_parse_codex_failed_turn() -> None:
+    got = probe.parse_output("codex", fixture("codex-http500.jsonl"))
+    assert not got.ok and got.error is not None and "high demand" in got.error
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        b'{"type":"turn.completed"}\n{"type":"error","message":"late"}\n',
+        b'{"type":"turn.completed"}\n{"type":"turn.completed"}\n',
+        b'{"type":"turn.failed","error":{"message":"x"}}\n{"type":"turn.completed"}\n',
+    ],
+)
+def test_parse_codex_terminal_event_must_be_single_and_last(tail: bytes) -> None:
+    got = probe.parse_output("codex", b'{"type":"turn.started"}\n' + tail)
+    assert not got.ok
 
 
 @pytest.mark.parametrize(
