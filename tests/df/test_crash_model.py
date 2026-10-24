@@ -494,11 +494,13 @@ def test_unreadable_object_changed_is_a_model_error(m: CrashModel) -> None:
 @pytest.mark.parametrize("knob", [False, True])
 def test_linux_setgid_inheritance_is_opt_in(m: CrashModel, knob: bool) -> None:
     """R9: with `linux_setgid` a directory made in a setgid parent is born
-    setgid (Linux), durably with its name; without it, as on macOS, not."""
+    setgid (Linux), durably with its name; without it, as on macOS, not --
+    unless the host kernel is Linux, which inherits the bit itself (first
+    native evidence: PR #628 CI on ubuntu)."""
     m.linux_setgid = knob
     os.chmod(m.root / "d", 0o2755)
     os.mkdir(m.root / "d" / "x", 0o711)
     fsutil.sync_dir(m.root / "d")
     m.os_crash()
     have = os.stat(m.root / "d" / "x").st_mode & 0o7777
-    assert have == (0o2711 if knob else 0o711)
+    assert have == (0o2711 if knob or sys.platform == "linux" else 0o711)
