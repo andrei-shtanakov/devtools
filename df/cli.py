@@ -274,7 +274,10 @@ def _probe_models(args: argparse.Namespace, lay: Layout, read: ReadResult) -> in
     the install configuration are the snapshot's (I2). Each role with a
     choice is probed once; records go to `probes_dir` (not install state, so
     no generation bracket). `--product` is refused until the registry lands
-    (R64)."""
+    (R64). Each role's outcome is printed; the exit code is 0 only when at
+    least one probe ran and no role ended in an exception — a run where
+    every role was refused («не проверено» / «не поддерживается») probed
+    nothing and is a refusal, 2 (M7; PR #630 review)."""
     if os.geteuid() != ROOT_UID:
         raise Refusal("doctor --probe-models: нужен sudo")
     if isinstance(read, Transitional):
@@ -286,7 +289,7 @@ def _probe_models(args: argparse.Namespace, lay: Layout, read: ReadResult) -> in
         raise Refusal(_NO_INSTALL)
     cfg = _models_of(snap)
     probe.prepare_dirs(lay)
-    failed = False
+    failed = probed = False
     for role in models.ROLES:
         try:
             models.resolve(cfg, role, None)
@@ -302,8 +305,9 @@ def _probe_models(args: argparse.Namespace, lay: Layout, read: ReadResult) -> in
             failed = True
             print(f"{role}: ошибка пробы: {type(exc).__name__}: {exc}")
             continue
+        probed = probed or isinstance(result, probe.ProbeRecord)
         print(f"{role}: {_probe_line(result)}")
-    return EXIT_REFUSED if failed else EXIT_OK
+    return EXIT_OK if probed and not failed else EXIT_REFUSED
 
 
 def _probe_line(result: probe.ProbeRecord | str) -> str:

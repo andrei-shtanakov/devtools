@@ -3456,9 +3456,12 @@ def test_set_requires_root(monkeypatch): ...
 - Create: `df/probe.py`
 - Modify: `df/models.py` (состояние проверки в `list`)
 - Test: `tests/df/test_probe.py`, `tests/df/test_probe_isolation.py` (маркер `harness`),
-  `tests/df/fixtures/probe/{claude-ok.json,claude-error.json,codex-ok.jsonl,
-  codex-neterr.jsonl}`, `tests/df/fixtures/probe/sentinel/` (hooks, MCP, конфиги)
-- Create (по факту Step 3): `docs/evidence/2026-10-XX-df-probe-isolation.md`
+  `tests/df/fixtures/probe/{claude-ok.json,claude-error.json,claude-http500.json,
+  codex-ok.jsonl,codex-neterr.jsonl,codex-http500.jsonl}` (настоящие выводы),
+  `tests/df/harness_world.py` (sentinel-деревья hooks, MCP, конфигов строятся во время
+  теста: в них абсолютные tmp-пути, поэтому статического `fixtures/probe/sentinel/` нет),
+  `tests/df/harness_stub.py` (локальная заглушка провайдера)
+- Create (по факту Step 3): `docs/evidence/2026-10-24-df-probe-isolation.md`
 
 **Interfaces:**
 - Consumes: `ModelChoice`, `ROLE_CONTEXT`, `config_hash`, `resolve` (Task 10); `run_as`

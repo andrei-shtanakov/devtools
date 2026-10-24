@@ -860,7 +860,8 @@ def test_doctor_probe_models_stage1(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Stage 1: no role users, so every chosen role is «не проверено»; the
-    runner is never reached and no record is written."""
+    runner is never reached and no record is written. Nothing was probed,
+    so the command is a refusal: exit 2 (M7)."""
 
     def missing(name: str) -> object:
         raise KeyError(name)
@@ -868,7 +869,7 @@ def test_doctor_probe_models_stage1(
     world.mp.setattr(cli, "ROOT_UID", os.geteuid())
     world.mp.setattr(probe, "_getpwnam", missing)
     world.mp.setattr(probe, "run_as", Spy(ok_result()))
-    assert doctor(world, ["--probe-models"]) == 0
+    assert doctor(world, ["--probe-models"]) == 2
     out = capsys.readouterr().out
     assert "author: не проверено: роль df-exec не создана (этап 2)" in out
     assert "judge: не проверено: роль df-review не создана (этап 2)" in out
