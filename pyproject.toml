@@ -61,7 +61,13 @@ pythonpath = ["."]
 # `slow`: full enumerations outside CI (df crash matrix, Task 9 R49); run
 # them with `pytest -m slow` (the last `-m` wins over this default).
 addopts = "-m 'not slow'"
-markers = ["slow: full enumeration outside CI (run with -m slow)"]
+# `harness`: real harness binaries under sandbox-exec (df probe isolation,
+# Task 11-B); each test skips unless the binary with its pinned SHA-256 is
+# present, so CI without harnesses stays green.
+markers = [
+    "slow: full enumeration outside CI (run with -m slow)",
+    "harness: runs a pinned real harness binary (skips when absent)",
+]
 
 [tool.ruff]
 # Вендоренные фикстуры criteria-closure/v1: байты — это кейсы (синтаксическая
