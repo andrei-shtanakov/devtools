@@ -1,0 +1,1 @@
+{"type":"result","subtype":"success","is_error":true,"duration_ms":310,"num_turns":1,"result":"API Error: Connection error.","session_id":"6f1c0e1e-0000-4000-8000-000000000003","total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0},"modelUsage":{},"permission_denials":[]}
