@@ -27,9 +27,9 @@ concurrency:
 env:
   # Iteration selector (pre-flight section 6): probes | root-only | full.
   # The final commit of Task 13 must say `full` (the reviewer checks).
-  DF_STAGE1_SCOPE: root-only
+  DF_STAGE1_SCOPE: full
   # Optional `-k` expression of the root run while iterating; empty = all.
-  DF_STAGE1_K: "partial_account or conflicting_record or foreign_home or preexisting_build_user or untrusted_cli or account_created_through_main or setgid or loader_residuals or sudo_rules_real or posix_acl or home_acl_facts"
+  DF_STAGE1_K: ""
   # R78: a skip for a missing or unpinned uv fails the run.
   DF_REQUIRE_PINNED_UV: "1"
 
