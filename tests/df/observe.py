@@ -7,24 +7,35 @@ Spec 3.8 «Наблюдение» (rev 8 r5), pre-flight rulings R92-R94:
         obs.watch(new_source)   # a source that appeared mid-run (R93)
     obs.status                  # "observed" | "unobserved"
     obs.violations              # root's opens/listings/execs under a source
+    obs.limits                  # what this platform's observer cannot see
 
 - macOS: `eslogger open readdir exec --format json` (Endpoint Security),
   started detached (its parent's events are muted, CI run 40189716039); a
   violation is an event whose own path (open file, listed directory, exec
-  target) is under a source and whose `audit_token.euid` is 0.
+  target) is under a source and whose `audit_token.euid` is 0. A gap in
+  `global_seq_num` (ES dropped messages) makes the run "unobserved".
 - Linux: one `auditctl` rule per source, `-a always,exit -F arch=b64 -S
   open,openat,openat2,getdents64,execve -F dir=<source> -F euid=0 -k <key>`,
   removed in `finally`; every event of a source's key is a violation (the
   rule already says "root, under the source"). `ausearch -k <key> --format
-  raw` after the context. Step 0 measured: `getdents64` on a held directory
-  descriptor matches no `dir=` rule (`LINUX_GAPS`).
+  raw` after the context. Growth of `lost` in `auditctl -s` (the kernel
+  dropped records) makes the run "unobserved".
+- Sources (`observe_root_access`, `watch`) must be canonical (their own
+  realpath: ES reports resolved paths) and sit in a directory of root that
+  group and others cannot write, so `df-build` cannot rename a source away;
+  13-D watches the root-pinned directory, not a builder-renamable leaf.
+  Otherwise `ValueError`.
 - Positive control (R92): `control` is a directory with a file `f`; the
   observer's own process opens `control/f` as root on entry and again on exit
-  and waits until the OS reports each open. Unseen -> "unobserved". Exactly
-  these opens (this pid, under `control`) are dropped from `violations`.
-  The exit marker also proves every earlier event was delivered.
-- A missing tool, a refused start or an unseen control is "unobserved" with
-  a `reason`, never an error: the test turns it into `pytest.xfail`.
+  and waits until the OS reports each open (this pid; macOS: not earlier than
+  the wait). Unseen -> "unobserved". Exactly these opens are dropped from
+  `violations`. The exit marker proves delivery up to it.
+- A missing tool, a refused start, an unseen control, dropped events or a
+  failed search are "unobserved" with a `reason`, never an error: the test
+  turns it into `pytest.xfail`.
+- `LIMITS` names, per platform, the forms this observer does not report
+  (the form table of the Task 13-B report); twins in `test_platform_root.py`
+  hold each entry.
 
 Digests of a source are taken outside the context (R94): inside it, root's
 reads of a source are exactly what this observer reports.
@@ -36,11 +47,12 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -55,20 +67,74 @@ from tests.df.ci_step0 import (
     _LineReader,
     _start_detached,
     _stop_detached,
-    wait_for_control,
 )
 
 Status = Literal["observed", "unobserved"]
-#: What the Linux rules cannot see (Step 0, CI run 40189716039): evidence.
-LINUX_GAPS = ("getdents64 по удерживаемому дескриптору не наблюдается (Linux)",)
+#: Owner a source's parent must have (tests substitute their own uid).
+ROOT_UID = 0
 #: The file of the control directory the observer opens (R92).
 CONTROL_FILE = "f"
 #: Seconds to wait for the OS to report a control open.
 CONTROL_TIMEOUT = 30.0
 SYSCALLS = "open,openat,openat2,getdents64,execve"
+
+_COMMON_LIMITS: Mapping[str, str] = {
+    "before-watch": "доступы до входа в наблюдение и до watch() не наблюдаются",
+    "moved-out": (
+        "объект, перенесённый df-build из источника в ненаблюдаемый каталог, "
+        "дальше не прослеживается"
+    ),
+    "hardlink-out": (
+        "open через жёсткую ссылку вне источников на файл источника "
+        "не гарантированно сообщается"
+    ),
+    "held-fd-read": (
+        "read/mmap через дескриптор, открытый до наблюдения, — не событие"
+    ),
+    "symlink-out": (
+        "open через ссылку источника на объект вне источников сообщается "
+        "путём цели — не нарушение"
+    ),
+}
+#: What each platform's observer does not report (form table, Task 13-B).
+LIMITS: Mapping[str, Mapping[str, str]] = {
+    "darwin": {
+        **_COMMON_LIMITS,
+        "other-ops": (
+            "наблюдаются только open, readdir, exec (stat/rename/unlink — нет)"
+        ),
+        "path-truncated": (
+            "событие с усечённым путём (path_truncated) не сопоставляется"
+        ),
+    },
+    "linux": {
+        **_COMMON_LIMITS,
+        "other-ops": (
+            "наблюдаются только open, openat, openat2, getdents64, execve "
+            "(stat/rename/unlink — нет)"
+        ),
+        "held-fd-getdents": (
+            "getdents64 по удерживаемому дескриптору не наблюдается (Step 0)"
+        ),
+        "b32-io-uring": (
+            "32-битные вызовы (arch=b32) и open через io_uring не наблюдаются"
+        ),
+    },
+}
 _AUDIT_RECORD = re.compile(r"type=(\w+) msg=audit\([\d.]+:(\d+)\): (.*)")
 _AUDIT_FIELD = re.compile(r"\b(\w+)=(\"[^\"]*\"|\S+)")
 _HEX = re.compile(r"(?:[0-9A-F]{2})+")
+_SEQ = re.compile(r'"global_seq_num"\s*:\s*(\d+)')
+_LOST = re.compile(r"^lost (\d+)$", re.MULTILINE)
+_NO_WRITE_OTHERS = stat.S_IWGRP | stat.S_IWOTH
+#: Time of an event that has none readable: before every cutoff is wrong
+#: (it would hide the event), so it counts under every watch (M1).
+UNKNOWN_TIME = -1
+
+
+def limits_here() -> Mapping[str, str]:
+    """The limits of this platform's observer."""
+    return LIMITS["darwin" if sys.platform == "darwin" else "linux"]
 
 
 @dataclass(frozen=True)
@@ -90,17 +156,53 @@ class Observation:
     violations: list[Access] = field(default_factory=list)
     reason: str = ""
     control_events: int = 0
+    limits: dict[str, str] = field(default_factory=lambda: dict(limits_here()))
     _watch: Callable[[Path], None] = field(default=lambda _p: None, repr=False)
 
     def watch(self, path: Path) -> None:
-        """Observe `path` (an existing directory) from now on (R93)."""
+        """Observe `path` from now on (R93); refused like a source."""
+        _require_source(path)
         self._watch(path)
+
+
+@dataclass(frozen=True)
+class Finish:
+    """A backend's result: accesses, control opens and a failure reason."""
+
+    violations: list[Access]
+    controls: int
+    failure: str | None
 
 
 class _Backend(Protocol):
     def start(self, sources: Sequence[Path]) -> str | None: ...
     def watch(self, path: Path) -> None: ...
-    def finish(self) -> tuple[list[Access], int, str | None]: ...
+    def finish(self) -> Finish: ...
+
+
+def source_problem(path: Path) -> str | None:
+    """Why `path` cannot be observed (I2, I3); `None` when it can."""
+    if os.path.realpath(path) != str(path):
+        return f"источник не канонический: {path} (realpath {os.path.realpath(path)})"
+    try:
+        st = os.lstat(path)
+        parent = os.lstat(path.parent)
+    except OSError as exc:
+        return f"источник недоступен: {exc}"
+    if not stat.S_ISDIR(st.st_mode):
+        return f"источник не каталог: {path}"
+    if parent.st_uid != ROOT_UID or parent.st_mode & _NO_WRITE_OTHERS:
+        return (
+            f"родитель источника {path.parent} не закреплён root "
+            f"(uid {parent.st_uid}, права {stat.S_IMODE(parent.st_mode):04o})"
+        )
+    return None
+
+
+def _require_source(path: Path) -> None:
+    problem = source_problem(path)
+    if problem is not None:
+        raise ValueError(problem)
 
 
 @contextmanager
@@ -117,8 +219,7 @@ def observe_root_access(
     raw stream); `record`, if given, receives the observation as JSON.
     """
     for path in (*sources, control):
-        if not path.is_dir():
-            raise ValueError(f"источник наблюдения не каталог: {path}")
+        _require_source(path)
     backend = _backend(control, workdir)
     obs = Observation()
     if backend is None:
@@ -136,11 +237,11 @@ def observe_root_access(
     try:
         yield obs
     finally:
-        accesses, controls, failure = backend.finish()
-        obs.control_events = controls
-        obs.violations = accesses
-        obs.status = "observed" if failure is None else "unobserved"
-        obs.reason = failure or ""
+        done = backend.finish()
+        obs.control_events = done.controls
+        obs.violations = done.violations
+        obs.status = "observed" if done.failure is None else "unobserved"
+        obs.reason = done.failure or ""
         _record(obs, record)
 
 
@@ -162,7 +263,7 @@ def _record(obs: Observation, record: Path | None) -> None:
         "reason": obs.reason,
         "control_events": obs.control_events,
         "violations": [asdict(a) for a in obs.violations],
-        "gaps": list(LINUX_GAPS) if sys.platform != "darwin" else [],
+        "limits": obs.limits,
     }
     record.parent.mkdir(parents=True, exist_ok=True)
     record.write_text(json.dumps(data, indent=2, ensure_ascii=False))
@@ -171,6 +272,10 @@ def _record(obs: Observation, record: Path | None) -> None:
 def touch_control(control: Path) -> None:
     """The control access: this (root) process opens `control/f`."""
     os.close(os.open(control / CONTROL_FILE, os.O_RDONLY))
+
+
+def _under(path: str, prefix: str) -> bool:
+    return path == prefix or path.startswith(prefix.rstrip("/") + "/")
 
 
 # ---------- macOS: eslogger ----------
@@ -193,7 +298,12 @@ class _Eslogger:
             self.pid = _start_detached(argv, self.raw, self.err)
         except (OSError, subprocess.SubprocessError) as exc:
             return f"eslogger не стартовал: {exc}"
-        if not self._marker():
+        try:
+            seen = self._marker()
+        except BaseException:
+            _stop_detached(self.pid)
+            raise
+        if not seen:
             _stop_detached(self.pid)
             unseen = f"eslogger: контроль не увиден за {CONTROL_TIMEOUT} с"
             return unseen + self._stderr()
@@ -201,12 +311,16 @@ class _Eslogger:
         return None
 
     def _marker(self) -> bool:
-        ways = {"control": (lambda: touch_control(self.control), _own_exe())}
-        seen = wait_for_control(
-            self.reader.new_lines, ways, self.control, timeout=CONTROL_TIMEOUT
-        )
-        seconds = seen["seconds"]
-        return isinstance(seconds, dict) and seconds["control"] is not None
+        """Touch the control until this pid's open, not earlier than now, is
+        in the stream (M3)."""
+        since = time.time_ns()
+        deadline = time.monotonic() + CONTROL_TIMEOUT
+        while time.monotonic() < deadline:
+            touch_control(self.control)
+            time.sleep(0.5)
+            if marker_seen(self.reader.new_lines(), self.control, os.getpid(), since):
+                return True
+        return False
 
     def _stderr(self) -> str:
         try:
@@ -218,56 +332,98 @@ class _Eslogger:
     def watch(self, path: Path) -> None:
         self.watches.append((str(path), time.time_ns()))
 
-    def finish(self) -> tuple[list[Access], int, str | None]:
-        ended = self._marker()
-        _stop_detached(self.pid)
+    def finish(self) -> Finish:
+        try:
+            ended = self._marker()
+        finally:
+            _stop_detached(self.pid)
         with self.raw.open("rb") as stream:
             lines = (b.decode("utf-8", "replace") for b in stream)
-            accesses = eslogger_accesses(lines, [*self.watches, (str(self.control), 0)])
-        controls = [a for a in accesses if _is_control(a, self.control)]
-        violations = [a for a in accesses if not _is_control(a, self.control)]
-        failure = None if ended else "eslogger: конец наблюдения не подтверждён"
-        return violations, len(controls), failure
-
-
-def _own_exe() -> str:
-    return os.path.realpath(sys.executable)
+            scan = eslogger_scan(lines, [*self.watches, (str(self.control), 0)])
+        controls = [a for a in scan.accesses if _is_control(a, self.control)]
+        violations = [a for a in scan.accesses if not _is_control(a, self.control)]
+        failure = None
+        if scan.missing:
+            failure = f"eslogger: пропущено событий {scan.missing} (global_seq_num)"
+        elif not ended:
+            failure = "eslogger: конец наблюдения не подтверждён"
+        return Finish(violations, len(controls), failure)
 
 
 def _is_control(access: Access, control: Path) -> bool:
     return access.pid == os.getpid() and _under(access.path, str(control))
 
 
-def _under(path: str, prefix: str) -> bool:
-    return path == prefix or path.startswith(prefix.rstrip("/") + "/")
+def marker_seen(lines: Iterable[str], control: Path, pid: int, since: int) -> bool:
+    """A root open of `control` by `pid` at or after `since` (ns) (M3); an
+    event without a readable time is not a marker."""
+    needle = str(control).replace("/", "\\/")
+    for line in lines:
+        if needle not in line and str(control) not in line:
+            continue
+        event = _json(line)
+        access = _es_access(event)
+        if access is None or access.euid != 0 or access.pid != pid:
+            continue
+        when = _es_time(event.get("time") if isinstance(event, dict) else None)
+        if _under(access.path, str(control)) and when >= since:
+            return True
+    return False
 
 
-def eslogger_accesses(
-    lines: Iterator[str] | Sequence[str], watches: Sequence[tuple[str, int]]
-) -> list[Access]:
-    """Root's accesses in eslogger JSON lines under any watched prefix.
+@dataclass(frozen=True)
+class EsScan:
+    """Root's accesses under the watches, and how many messages ES dropped."""
 
-    `watches` are `(prefix, since_ns)`: an event counts for a prefix only if
-    its `time` is not earlier (R93). The event's own path is the open file,
-    the listed directory or the exec target; exec arguments and the
-    working directory are not accesses.
+    accesses: list[Access]
+    missing: int
+
+
+def eslogger_scan(lines: Iterable[str], watches: Sequence[tuple[str, int]]) -> EsScan:
+    """One pass over eslogger JSON lines (module doc).
+
+    `watches` are `(prefix, since_ns)`: an event counts for a prefix if its
+    `time` is not earlier, or is unreadable (M1). The event's own path is the
+    open file, the listed directory or the exec target; exec arguments and
+    the working directory are not accesses. `missing` counts the numbers
+    absent from `global_seq_num` between its smallest and largest value (I1).
     """
     needles = [n for p, _ in watches for n in (p, p.replace("/", "\\/"))]
     found: list[Access] = []
+    seqs: set[int] = set()
     for line in lines:
+        seq = _SEQ.search(line)
+        if seq is not None:
+            seqs.add(int(seq.group(1)))
         if not any(n in line for n in needles):
             continue
-        try:
-            event = json.loads(line)
-        except ValueError:
-            continue
+        event = _json(line)
         access = _es_access(event)
         if access is None or access.euid != 0:
             continue
-        when = _es_time(event.get("time"))
-        if any(_under(access.path, p) and when >= since for p, since in watches):
+        when = _es_time(event.get("time") if isinstance(event, dict) else None)
+        if any(_counts(access.path, when, p, since) for p, since in watches):
             found.append(access)
-    return found
+    missing = max(seqs) - min(seqs) + 1 - len(seqs) if seqs else 0
+    return EsScan(found, missing)
+
+
+def eslogger_accesses(
+    lines: Iterable[str], watches: Sequence[tuple[str, int]]
+) -> list[Access]:
+    """The accesses of `eslogger_scan`."""
+    return eslogger_scan(lines, watches).accesses
+
+
+def _counts(path: str, when: int, prefix: str, since: int) -> bool:
+    return _under(path, prefix) and (when == UNKNOWN_TIME or when >= since)
+
+
+def _json(line: str) -> object:
+    try:
+        return json.loads(line)
+    except ValueError:
+        return None
 
 
 def _es_access(event: object) -> Access | None:
@@ -292,7 +448,7 @@ def _es_access(event: object) -> Access | None:
                     euid=int(token.get("euid", -1)),
                     op=op,
                     path=path,
-                    exe=str(exe),
+                    exe=exe if isinstance(exe, str) else "",
                 )
     return None
 
@@ -308,15 +464,18 @@ def _dig(value: object, keys: Sequence[str]) -> object:
 
 
 def _es_time(value: object) -> int:
-    """`2026-10-25T11:38:51.018729555Z` -> ns since the epoch (0 if unknown)."""
+    """`2026-10-25T11:38:51.018729555Z` -> ns since the epoch;
+    `UNKNOWN_TIME` when absent or unreadable."""
     if not isinstance(value, str) or not value.endswith("Z"):
-        return 0
+        return UNKNOWN_TIME
     whole, _, frac = value[:-1].partition(".")
     try:
         base = datetime.strptime(whole, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=UTC)
     except ValueError:
-        return 0
-    digits = (frac + "000000000")[:9] if frac.isdigit() else "0"
+        return UNKNOWN_TIME
+    if frac and not frac.isdigit():
+        return UNKNOWN_TIME
+    digits = (frac + "000000000")[:9]
     return int(base.timestamp()) * 1_000_000_000 + int(digits)
 
 
@@ -335,6 +494,7 @@ class _Audit:
         self.keys: list[str] = []
         self.control_key = f"df-r5-{self.token}-c"
         self.failure: str | None = None
+        self.lost: int | None = None
 
     def _rule(self, path: Path, key: str) -> list[str]:
         return [
@@ -359,8 +519,14 @@ class _Audit:
         self.rules.append(rule)
         return None
 
+    def _lost(self) -> int | None:
+        return audit_lost(_run([self.auditctl, "-s"]).stdout)
+
     def start(self, sources: Sequence[Path]) -> str | None:
-        failure = self._add(self.control, self.control_key)
+        self.lost = self._lost()
+        failure = None if self.lost is not None else "auditctl -s: нет счётчика lost"
+        if failure is None:
+            failure = self._add(self.control, self.control_key)
         for i, path in enumerate(sources):
             if failure is None:
                 self.keys.append(f"df-r5-{self.token}-{i}")
@@ -380,7 +546,8 @@ class _Audit:
 
     def _controls(self) -> list[Access]:
         own = os.getpid()
-        return [a for a in self._search(self.control_key) if a.pid == own]
+        found, _failure = self._search(self.control_key)
+        return [a for a in found if a.pid == own]
 
     def _marker(self, before: int) -> bool:
         deadline = time.monotonic() + CONTROL_TIMEOUT
@@ -391,23 +558,39 @@ class _Audit:
                 return True
         return False
 
-    def _search(self, key: str) -> list[Access]:
+    def _search(self, key: str) -> tuple[list[Access], str | None]:
         done = _run([self.ausearch, "-k", key, "--format", "raw"])
-        return audit_accesses(done.stdout, key)
+        failure = ausearch_failure(done.returncode, done.stderr)
+        return audit_accesses(done.stdout, key), failure
 
-    def finish(self) -> tuple[list[Access], int, str | None]:
+    def finish(self) -> Finish:
         try:
-            before = len(self._controls())
-            ended = self._marker(before)
-            violations = [a for k in self.keys for a in self._search(k)]
-            controls = self._controls()
-            others = [a for a in self._search(self.control_key) if a not in controls]
+            ended = self._marker(len(self._controls()))
+            found = [self._found(key) for key in self.keys]
+            in_control = self._found(self.control_key)
+            lost = self._lost()
         finally:
             self._remove()
-        failure = self.failure
-        if failure is None and not ended:
-            failure = "auditd: конец наблюдения не подтверждён"
-        return violations + others, len(controls), failure
+        own = os.getpid()
+        controls = [a for a in in_control if a.pid == own]
+        violations = [a for group in found for a in group]
+        violations += [a for a in in_control if a.pid != own]
+        return Finish(violations, len(controls), self._verdict(lost, ended))
+
+    def _found(self, key: str) -> list[Access]:
+        found, failure = self._search(key)
+        if failure is not None and self.failure is None:
+            self.failure = failure
+        return found
+
+    def _verdict(self, lost: int | None, ended: bool) -> str | None:
+        if self.failure is not None:
+            return self.failure
+        if lost is None or self.lost is None:
+            return "auditctl -s: нет счётчика lost"
+        if lost > self.lost:
+            return f"auditd: потеряно записей {lost - self.lost} (lost)"
+        return None if ended else "auditd: конец наблюдения не подтверждён"
 
     def _remove(self) -> None:
         for rule in self.rules:
@@ -419,6 +602,19 @@ def _run(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(argv), capture_output=True, text=True, timeout=60, check=False
     )
+
+
+def audit_lost(status: str) -> int | None:
+    """The `lost` counter of `auditctl -s` output; `None` if absent."""
+    match = _LOST.search(status)
+    return int(match.group(1)) if match else None
+
+
+def ausearch_failure(returncode: int, stderr: str) -> str | None:
+    """`None` for a search that worked (rc 0, or rc 1 with `<no matches>`)."""
+    if returncode == 0 or (returncode == 1 and "<no matches>" in stderr):
+        return None
+    return f"ausearch: код {returncode}: {stderr.strip()[:300]}"
 
 
 def audit_accesses(raw: str, key: str) -> list[Access]:

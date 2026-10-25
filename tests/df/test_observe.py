@@ -8,6 +8,7 @@ Recorded samples are Step 0's (CI run 40189716039): eslogger JSON lines
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -92,8 +93,10 @@ def test_eslogger_watch_counts_from_its_time() -> None:
 def test_es_time() -> None:
     assert observe._es_time("1970-01-01T00:00:01.5Z") == 1_500_000_000
     assert observe._es_time("1970-01-01T00:00:02Z") == 2_000_000_000
-    assert observe._es_time(None) == 0
-    assert observe._es_time("garbage") == 0
+    assert observe._es_time(None) == observe.UNKNOWN_TIME
+    assert observe._es_time("garbage") == observe.UNKNOWN_TIME
+    assert observe._es_time("2026-10-25T11:38:51+00:00") == observe.UNKNOWN_TIME
+    assert observe._es_time("2026-10-25T11:38:51.x5Z") == observe.UNKNOWN_TIME
 
 
 def test_recorded_ausearch_twins() -> None:
@@ -141,30 +144,152 @@ def test_audit_str() -> None:
     assert observe._audit_str("2F78") == "/x"
 
 
-def test_missing_observer_is_unobserved(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """No eslogger/auditctl: `unobserved` with a reason, never an error."""
-    monkeypatch.setattr(observe, "_backend", lambda control, workdir: None)
-    src, ctl = tmp_path / "src", tmp_path / "ctl"
-    src.mkdir()
-    ctl.mkdir()
-    record = tmp_path / "rec" / "obs.json"
-    with observe.observe_root_access(
-        [src], control=ctl, workdir=tmp_path, record=record
-    ) as obs:
-        obs.watch(src)
-    assert obs.status == "unobserved"
-    assert "нет наблюдателя" in obs.reason
-    assert json.loads(record.read_text())["status"] == "unobserved"
+@pytest.fixture()
+def canon(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A canonical tmp dir whose children pass the source rule as this user."""
+    monkeypatch.setattr(observe, "ROOT_UID", os.getuid())
+    top = Path(os.path.realpath(tmp_path))
+    for name in ("src", "ctl"):
+        (top / name).mkdir()
+    return top
 
 
-def test_source_must_exist(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="не каталог"):
+@pytest.mark.parametrize("time_value", [None, "garbage", "2026-10-25T11:38:51+00:00"])
+def test_eslogger_unreadable_time_counts(time_value: str | None) -> None:
+    """M1 (F8): an event whose time cannot be read counts under a mid-run
+    watch instead of being dropped."""
+    event = json.loads(_es_line("open", "/r/rel/f").replace("\\/", "/"))
+    event["time"] = time_value
+    line = json.dumps(event)
+    found = observe.eslogger_accesses([line], [("/r/rel", 10**30)])
+    assert [a.path for a in found] == ["/r/rel/f"]
+
+
+def _with_seq(line: str, seq: int) -> str:
+    event = json.loads(line)
+    event["global_seq_num"] = seq
+    return json.dumps(event)
+
+
+def test_eslogger_seq_gap_is_unobserved() -> None:
+    """I1 (F1): a gap in `global_seq_num` anywhere is counted, matched or not."""
+    other = _es_line("open", "/elsewhere")
+    hit = _es_line("open", "/r/src/f")
+    whole = [_with_seq(other, 0), _with_seq(hit, 1), _with_seq(other, 2)]
+    assert observe.eslogger_scan(whole, [("/r/src", 0)]).missing == 0
+    gapped = [_with_seq(other, 0), _with_seq(other, 3), _with_seq(hit, 4)]
+    scan = observe.eslogger_scan(gapped, [("/r/src", 0)])
+    assert scan.missing == 2
+    assert len(scan.accesses) == 1
+
+
+def test_marker_requires_pid_and_time() -> None:
+    """M3 (F13): the end marker is this pid's open, not earlier than the wait."""
+    ctl = Path("/r/ctl")
+    t = "2026-10-25T11:38:51.500000000Z"
+    since = observe._es_time(t)
+    line = _es_line("open", "/r/ctl/f", pid=42, time=t)
+    assert observe.marker_seen([line], ctl, 42, since)
+    assert not observe.marker_seen([line], ctl, 43, since)
+    assert not observe.marker_seen([line], ctl, 42, since + 1)
+    nonroot = _es_line("open", "/r/ctl/f", pid=42, euid=501, time=t)
+    assert not observe.marker_seen([nonroot], ctl, 42, since)
+    untimed = json.loads(line)
+    untimed["time"] = None
+    assert not observe.marker_seen([json.dumps(untimed)], ctl, 42, 0)
+
+
+def test_audit_lost_parsed() -> None:
+    status = "enabled 1\nfailure 1\npid 712\nrate_limit 0\nbacklog_limit 8192\nlost 7\n"
+    assert observe.audit_lost(status) == 7
+    assert observe.audit_lost("enabled 1\n") is None
+
+
+def test_audit_lost_growth_is_unobserved(tmp_path: Path) -> None:
+    """I1 (F1): records lost between start and finish -> `unobserved`."""
+    backend = observe._Audit(tmp_path, "auditctl", "ausearch")
+    backend.lost = 3
+    assert backend._verdict(3, True) is None
+    assert "потеряно записей 2" in str(backend._verdict(5, True))
+    assert "lost" in str(backend._verdict(None, True))
+    assert "конец" in str(backend._verdict(3, False))
+
+
+@pytest.mark.parametrize(
+    ("rc", "stderr", "ok"),
+    [(0, "", True), (1, "<no matches>\n", True), (1, "", False), (10, "x", False)],
+)
+def test_ausearch_failure_is_unobserved(rc: int, stderr: str, ok: bool) -> None:
+    """M2 (F14): a failed search is a failure, not "no events"."""
+    assert (observe.ausearch_failure(rc, stderr) is None) is ok
+
+
+def test_non_canonical_source_refused(canon: Path) -> None:
+    """I2 (F2): a source through an alias would never match ES paths."""
+    alias = canon / "alias"
+    alias.symlink_to(canon / "src")
+    with pytest.raises(ValueError, match="не канонический"):
         with observe.observe_root_access(
-            [tmp_path / "absent"], control=tmp_path, workdir=tmp_path
+            [alias / "."], control=canon / "ctl", workdir=canon
         ):
             pass
+    assert "не канонический" in str(observe.source_problem(alias))
+
+
+def test_source_with_builder_writable_parent_refused(canon: Path) -> None:
+    """I3 (F3): a source whose parent df-build could write could be renamed
+    away; the parent must be root's (here: this user's) and not group/other
+    writable."""
+    assert observe.source_problem(canon / "src") is None
+    os.chmod(canon, 0o777)
+    try:
+        assert "не закреплён" in str(observe.source_problem(canon / "src"))
+    finally:
+        os.chmod(canon, 0o700)
+
+
+def test_source_parent_of_another_owner_refused(tmp_path: Path) -> None:
+    """With the production owner (root), a user's tmp parent is refused."""
+    src = Path(os.path.realpath(tmp_path)) / "src"
+    src.mkdir()
+    assert "не закреплён" in str(observe.source_problem(src))
+
+
+def test_source_must_be_a_directory(canon: Path) -> None:
+    (canon / "file").write_text("x")
+    assert "не каталог" in str(observe.source_problem(canon / "file"))
+    assert "недоступен" in str(observe.source_problem(canon / "absent"))
+
+
+def test_missing_observer_is_unobserved(
+    monkeypatch: pytest.MonkeyPatch, canon: Path
+) -> None:
+    """No eslogger/auditctl: `unobserved` with a reason and the limits."""
+    monkeypatch.setattr(observe, "_backend", lambda control, workdir: None)
+    record = canon / "rec" / "obs.json"
+    with observe.observe_root_access(
+        [canon / "src"], control=canon / "ctl", workdir=canon, record=record
+    ) as obs:
+        obs.watch(canon / "src")
+    assert obs.status == "unobserved"
+    assert "нет наблюдателя" in obs.reason
+    data = json.loads(record.read_text())
+    assert data["status"] == "unobserved"
+    assert data["limits"] == dict(observe.limits_here())
+    assert "before-watch" in data["limits"]
+
+
+def test_watch_non_canonical_refused(
+    monkeypatch: pytest.MonkeyPatch, canon: Path
+) -> None:
+    monkeypatch.setattr(observe, "_backend", lambda control, workdir: None)
+    alias = canon / "alias"
+    alias.symlink_to(canon / "src")
+    with observe.observe_root_access(
+        [canon / "src"], control=canon / "ctl", workdir=canon
+    ) as obs:
+        with pytest.raises(ValueError, match="не канонический"):
+            obs.watch(alias)
 
 
 class _FakeBackend:
@@ -179,9 +304,9 @@ class _FakeBackend:
     def watch(self, path: Path) -> None:
         self.watched.append(path)
 
-    def finish(self) -> tuple[list[Access], int, str | None]:
+    def finish(self) -> observe.Finish:
         hit = [Access(1, 0, "open", "/s/f", "/bin/cat")]
-        return hit, 2, None if self.ended else "конец не подтверждён"
+        return observe.Finish(hit, 2, None if self.ended else "конец не подтверждён")
 
 
 @pytest.mark.parametrize(
@@ -190,7 +315,7 @@ class _FakeBackend:
 )
 def test_status_follows_both_control_markers(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    canon: Path,
     start: str | None,
     ended: bool,
     status: str,
@@ -198,10 +323,10 @@ def test_status_follows_both_control_markers(
     backend = _FakeBackend(start, ended)
     monkeypatch.setattr(observe, "_backend", lambda control, workdir: backend)
     with observe.observe_root_access(
-        [tmp_path], control=tmp_path, workdir=tmp_path
+        [canon / "src"], control=canon / "ctl", workdir=canon
     ) as obs:
-        obs.watch(tmp_path)
+        obs.watch(canon / "src")
     assert obs.status == status
     if start is None:
-        assert backend.watched == [tmp_path]
+        assert backend.watched == [canon / "src"]
         assert obs.violations and obs.control_events == 2
