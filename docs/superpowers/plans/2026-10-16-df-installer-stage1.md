@@ -4042,7 +4042,20 @@ def test_linux_loader_residuals(root_world): ...
   - остаточный риск (§3.2, R33.F28): процессы `df-build`, пережившие сбой установщика во
     время `run_build`, могут писать в будущий `releases/<id>`;
   - «изоляция харнессов: <версии> verified / not verified» (Task 11 Step 3);
-  - «`core` live: blocked / not run (ждёт `df-manifest-profiles`)».
+  - «`core` live: blocked / not run (ждёт `df-manifest-profiles`)»;
+  - «Python релиза без Tcl/Tk (решение владельца 25.10, спека §3.4): список
+    `TCLTK_REMOVED_<версия Python>` удалён сборкой до `seal`; `import tkinter` не работает»
+    по ячейке.
+
+  **Python без Tcl/Tk (13-B2, решение владельца 25.10).** На Linux правило нативных файлов
+  отказало Tcl/Tk python-build-standalone (путь поиска `/tools/deps/lib`). `run_build` после
+  `uv python install` и до `uv sync` удаляет от `df-build` измеренный список
+  `TCLTK_REMOVED_3_12_13` (`rm -r` без `-f`: отсутствующая запись — дрейф и отказ шага
+  `strip-tcltk`); Python профиля без списка — отказ до первой команды. Правило (в) не
+  меняется. Тесты: точность списка и единый состав на обеих ОС, порядок и пользователь шага,
+  отказ при дрейфе (`test_build.py`); замер обоих ключей `uv` (`network`); root-тест
+  `test_installed_python_has_no_tk_but_core_works` (нет `tkinter`/`turtle`, работают `ssl`,
+  `sqlite3`, `ctypes`, `venv`, `dfprobe --help`); чистая установка на обеих ячейках.
 
   Этап 1 по §10 при этом **не закрыт**.
 - [ ] **Step 5: Commit** `test(df): stage-1 acceptance on macOS arm64 and Ubuntu`
@@ -4084,7 +4097,8 @@ def test_linux_loader_residuals(root_world): ...
   с `@trigger` на смену закреплённой версии `uv`: перепроверить замером
   `UV_PROJECT_KEYS_<версия>` (дополнение A1/A2 предполётной проверки Task 7a) и таблицу
   записи пути корня в `tests/df/fixtures/locks/SOURCES.md`, переименовать константу под
-  новую версию, перезахватить эталоны.
+  новую версию, перезахватить эталоны; при смене `uv` или Python профиля — заново измерить
+  `TCLTK_REMOVED_<версия Python>` (спека §3.4) на обоих ключах.
 - [ ] **Step 2: Документация** — строка `df/` в таблице CLAUDE.md и раздел README:
   - что делает этап 1;
   - первая установка: `sudo /usr/bin/python3 -I -B -S <чекаут devtools>/df/bootstrap.py init
@@ -4098,6 +4112,8 @@ def test_linux_loader_residuals(root_world): ...
     возвращать); снятие блокировки переустановки удалением `pending.toml` (R53, §3.8:
     не подтверждает завершённость прежней установки) и второе ручное снятие (§3.8);
     root-владелец в карантине и его ручное снятие;
+  - Python релиза без Tcl/Tk (решение владельца 25.10, спека §3.4): `tkinter`, `turtle`,
+    `idlelib` недоступны инструментам релиза;
   - почему не `df`: имя занято стандартной командой;
   - утверждённые CLI: только пути root (§3.10), способ подготовки `uv`;
   - приёмка — CI `df-stage1`; живая установка ждёт манифест.
