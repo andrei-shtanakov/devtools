@@ -226,13 +226,33 @@ def _retry(world: RootWorld) -> int:
     return world.bootstrap(world.init_argv())
 
 
+@pytest.fixture()
+def notes(request: pytest.FixtureRequest) -> Iterator[dict[str, object]]:
+    """Facts of one test, kept as CI evidence (`install/<test>.json`)
+    whatever its outcome (junit xunit2 drops `record_property`)."""
+    facts: dict[str, object] = {}
+    yield facts
+    text = json.dumps(facts, indent=2, ensure_ascii=False, sort_keys=True)
+    write_evidence(stage1_out(), f"install/{_label(request)}.json", text + "\n")
+
+
 def _doctor_reached(world: RootWorld) -> dict[str, Any]:
-    """The installed command's `doctor --json` (a real root process):
-    level 1 reached, exit 0."""
+    """Level 1 in process, then by the installed command's `doctor --json`
+    (a real process of root): reached, exit 0."""
+    checks = _level1(world)
+    assert doctor.level1_reached(checks), [c for c in checks if c.status != "ok"]
     done = world.command(["doctor", "--json"])
-    assert done.returncode == doctor.EXIT_REACHED, (done.stdout, done.stderr)
-    report = json.loads(done.stdout)
-    assert report["level1"] == "reached", report
+    try:
+        report = json.loads(done.stdout)
+    except ValueError:
+        pytest.fail(f"doctor: код {done.returncode}, не JSON: {done.stderr[-2000:]}")
+    other = [c for c in report["checks"] if c["status"] != doctor.OK]
+    reached = report["level1"] == "reached"
+    assert done.returncode == doctor.EXIT_REACHED and reached, (
+        done.returncode,
+        other,
+        done.stderr[-2000:],
+    )
     return report
 
 
@@ -413,7 +433,7 @@ def test_rerun_after_interrupt(
     root_world: RootWorld,
     action: str,
     request: pytest.FixtureRequest,
-    record_property: Callable[[str, object], None],
+    notes: dict[str, object],
 ) -> None:
     """Spec 3.8: `init` killed inside each action (at its first fault
     point), then the retry completes the install with the same id: nothing
@@ -428,14 +448,14 @@ def test_rerun_after_interrupt(
         with pytest.raises(Killed):
             world.bootstrap(world.init_argv())
     assert len(hits) == 1, f"{action}: внутри действия нет точки сбоя"
-    record_property("killed_at", f"{hits[0][0]} {hits[0][1]}")
+    notes["killed_at"] = f"{hits[0][0]} {hits[0][1]}"
     rid = _pending_id(lay)
     rows = read_journal(lay.journal)
     mine = [r["event"] for r in rows if r["step"] == action]
     assert mine == ["start"], mine
     since = len(rows)
     code, observer = _observed_retry(world, _label(request), lambda: _retry(world))
-    record_property("observations", len(observer.seen))
+    notes["observations"] = [o.phase for o in observer.seen]
     assert code == cli.EXIT_OK
     assert_committed(lay, since=since)
     assert current_id(lay) == rid
@@ -443,8 +463,8 @@ def test_rerun_after_interrupt(
     retried = _done_steps(read_journal(lay.journal)[since:])
     if action == "copy":
         assert {"copy", "copy-partial"} & set(retried), retried
-    _doctor_reached(world)
     observer.require_clean()
+    _doctor_reached(world)
 
 
 # ---------- crash after activation ----------
@@ -474,7 +494,7 @@ def _kill_after(mp: pytest.MonkeyPatch, action: str) -> None:
 
 @pytest.mark.parametrize("after", ["activate", "launcher"])
 def test_crash_after_activation_real_fs(
-    root_world: RootWorld, after: str, record_property: Callable[[str, object], None]
+    root_world: RootWorld, after: str, notes: dict[str, object]
 ) -> None:
     """Spec 3.8: a crash between `current`'s switch and `launcher` or
     `commit-config` -> the retry (bootstrap `init` without the command, the
@@ -495,7 +515,7 @@ def test_crash_after_activation_real_fs(
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(fsutil, "fault_point", lambda k, p: points.append((k, p)))
         assert _retry(world) == cli.EXIT_OK
-    record_property("retry", "darkfactory install" if after == "launcher" else "init")
+    notes["retry"] = "darkfactory install" if after == "launcher" else "init"
     assert current_id(lay) == rid
     assert_committed(lay, since=since)
     assert install.command_ready(lay, rid)
@@ -582,7 +602,7 @@ LINK_TARGETS: Mapping[str, tuple[tuple[str, str], ...]] = {
 
 @pytest.mark.parametrize("target", list(LINK_TARGETS))
 def test_dangerous_link_in_artifact_refused(
-    root_world: RootWorld, target: str, record_property: Callable[[str, object], None]
+    root_world: RootWorld, target: str, notes: dict[str, object]
 ) -> None:
     """Spec 3.8: a link of the artifact leaving the release — an absolute
     target outside, `..` beyond the root, the release's own prefix followed
@@ -600,7 +620,7 @@ def test_dangerous_link_in_artifact_refused(
             infra(f"ссылка от {plat.BUILD_USER} не создана: {done}")
 
     failed = _refused(root_world, plant)
-    record_property("refusal", f"{failed['step']}: {failed['detail']}"[-2000:])
+    notes["refusal"] = f"{failed['step']}: {failed['detail']}"[-2000:]
     assert failed["step"] == "verify", failed
     assert f"venv/{PIN_NAME}/{DANGER}" in str(failed["detail"]), failed
 
@@ -619,7 +639,7 @@ ENTRYPOINT_CHANGES: Mapping[str, str] = {
 
 @pytest.mark.parametrize("case", list(ENTRYPOINT_CHANGES))
 def test_missing_entrypoint_and_broken_help_refused(
-    root_world: RootWorld, case: str, record_property: Callable[[str, object], None]
+    root_world: RootWorld, case: str, notes: dict[str, object]
 ) -> None:
     """Spec 3.8: the expected entrypoint `dfprobe` absent (rule (д)), or a
     script with its direct `shebang` whose `--help` fails (rule (з)) ->
@@ -633,7 +653,7 @@ def test_missing_entrypoint_and_broken_help_refused(
             infra(f"entrypoint от {plat.BUILD_USER} не изменён: {done}")
 
     failed = _refused(root_world, change)
-    record_property("refusal", f"{failed['step']}: {failed['detail']}"[-2000:])
+    notes["refusal"] = f"{failed['step']}: {failed['detail']}"[-2000:]
     assert failed["step"] == "verify", failed
     assert "dfprobe" in str(failed["detail"]), failed
 
@@ -693,9 +713,7 @@ def test_runs_after_build_dir_and_cache_removed(
 
 
 def test_boundary_on_real_release(
-    installed_world: InstalledWorld,
-    installed_controls: Controls,
-    record_property: Callable[[str, object], None],
+    installed_world: InstalledWorld, installed_controls: Controls
 ) -> None:
     """R40/F9, R82: the real `static_problems` and `transfer_check` (as
     `df-build`) pass on the release `build.py` made; the §3.4 facts this
@@ -714,7 +732,6 @@ def test_boundary_on_real_release(
     facts = BoundaryFacts(installed_world).collect()
     text = json.dumps(facts, indent=2, ensure_ascii=False, sort_keys=True)
     write_evidence(stage1_out(), f"boundary/{PLATFORM}.json", text + "\n")
-    record_property("boundary_facts", text[-4000:])
     escapes = [c for c in facts["origin_via_link"] if c["escapes"]]
     assert escapes == [], f"находка (правило (в), $ORIGIN через ссылку): {escapes}"
 
@@ -795,9 +812,7 @@ def _mirror(body: bytes) -> Iterator[tuple[str, list[str]]]:
         server.server_close()
 
 
-def test_admin_python_on_real_host(
-    installed_world: InstalledWorld, record_property: Callable[[str, object], None]
-) -> None:
+def test_admin_python_on_real_host(installed_world: InstalledWorld) -> None:
     """Task 8a F1/F7/F8, R82: the install's real `install_admin_python` (as
     root) left exactly the key `build.python_key` (on Linux: the build uv
     chose matches the key), its whole tree passes the check, fact `A` holds
@@ -848,7 +863,6 @@ def test_admin_python_on_real_host(
     }
     text = json.dumps(facts, indent=2, ensure_ascii=False, sort_keys=True)
     write_evidence(stage1_out(), f"admin-python/{PLATFORM}.json", text + "\n")
-    record_property("admin_python_facts", text)
 
 
 def _links_into(top: Path, forbidden: Path) -> list[str]:
