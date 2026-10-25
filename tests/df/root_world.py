@@ -17,6 +17,9 @@ Runs only as root in the disposable CI runners (the root gate of
 - `df-build` (R90): absent when a world starts (a leftover fails the test
   as infrastructure); the teardown kills its processes, deletes the user and
   the group, removes `<R>` and asserts the records are gone.
+- `installed_world` (R90, 13-E): one committed install of a fresh world,
+  with `<R>/usr/local/bin` root `0755` so `launcher` links the command
+  there, shared read-only by the tests of one module (`install_once`).
 - Positive controls (`check_controls`, spec 3.8): `whoami_as` equals the
   `accounts.toml` record, `df-build` writes in its home, and the control
   address (an HTTP server on the runner's external interface) answers
@@ -43,7 +46,7 @@ from pathlib import Path
 
 import pytest
 
-from df import cli, install, journal, lockset
+from df import cli, install, journal, launcher_entry, lockset, state
 from df import platform as plat
 from df.build import GIT_ISOLATION
 from df.config import Account, InstallConfig, load_accounts
@@ -282,6 +285,34 @@ class RootWorld:
             argv, mode="bootstrap", read=None, lock_fd=None, layout=self.layout
         )
 
+    def entry(self, argv: list[str]) -> int:
+        """`darkfactory <argv>` as the shipped entry's writer half runs it, in
+        process: `acquire` (root, the lock, its own settle), `take_snapshot`,
+        `typed_read`, then `main(mode="writer")` -- minus the import of the
+        admin code (the pin is substituted in this process only)."""
+        paths = launcher_entry.EntryPaths(str(self.layout.root))
+        fd = launcher_entry.acquire(paths)
+        try:
+            snap = launcher_entry.take_snapshot(paths, "writer")
+            read = launcher_entry.typed_read(state, snap)
+            return cli.main(
+                argv, mode="writer", read=read, lock_fd=fd, layout=self.layout
+            )
+        finally:
+            os.close(fd)
+
+    def command(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
+        """The installed `<R>/opt/df/bin/darkfactory <argv>`, a real process
+        of root (reader commands only: a writer would fetch the manifest)."""
+        return subprocess.run(
+            [str(self.layout.launcher), *argv],
+            env=dict(ROLE_ENV),
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+
     def prepare_build_user(self) -> Account:
         """Steps 1-3 of the install under the writer lock: the prep
         directories and a real `df-build` made by `create_build_user`."""
@@ -323,6 +354,55 @@ class RootWorld:
         path = self.top / f"observe-{self.layout.root.name}"
         path.mkdir(mode=0o700, exist_ok=True)
         return path
+
+
+@dataclass(frozen=True)
+class InstalledWorld:
+    """`installed_world` (R90): a world after one committed install."""
+
+    world: RootWorld
+    release_id: str
+
+    @property
+    def layout(self) -> Layout:
+        return self.world.layout
+
+    @property
+    def release(self) -> Path:
+        return self.layout.release_dir(self.release_id)
+
+
+def install_once(world: RootWorld) -> InstalledWorld:
+    """`<R>/usr/local/bin` root `0755` (trusted, so `launcher` links the
+    command there), then `bootstrap init`; a refusal fails the module."""
+    local_bin = world.layout.local_bin
+    for path in (local_bin.parent.parent, local_bin.parent, local_bin):
+        os.mkdir(path, 0o755)
+        os.chmod(path, 0o755)
+    code = world.bootstrap(world.init_argv())
+    if code != cli.EXIT_OK:
+        pytest.fail(f"установка installed_world: код {code}")
+    assert_committed(world.layout)
+    rid = current_id(world.layout)
+    assert rid is not None
+    return InstalledWorld(world, rid)
+
+
+def current_id(layout: Layout) -> str | None:
+    """The id `current` names, or `None`."""
+    if not os.path.lexists(layout.current):
+        return None
+    return os.readlink(layout.current).removeprefix("releases/")
+
+
+def write_evidence(out: Path | None, relative: str, text: str) -> None:
+    """Keep a measured fact under the CI evidence directory `out` (none
+    locally)."""
+    if out is None:
+        return
+    path = out / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
 
 
 def build_account(layout: Layout) -> Account:

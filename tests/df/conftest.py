@@ -45,7 +45,7 @@ from tests.df.crash_model import CrashModel, fd_path
 
 if TYPE_CHECKING:
     from tests.df.install_world import World
-    from tests.df.root_world import Controls, FixtureRepo, RootWorld
+    from tests.df.root_world import Controls, FixtureRepo, InstalledWorld, RootWorld
 
 #: The fake uid of `df-build`: never the current user (F1).
 BUILD_UID = os.getuid() + 100000
@@ -409,3 +409,38 @@ def controls(root_world: RootWorld) -> Controls:
 
     root_world.prepare_build_user()
     return check_controls(root_world)
+
+
+@pytest.fixture(scope="module")
+def installed_world(
+    acceptance_top: Path,
+    fixture_repo: FixtureRepo,
+    control_url: str,
+    request: pytest.FixtureRequest,
+) -> Iterator[InstalledWorld]:
+    """R90: one committed install (`install_once`) shared by the read-only
+    tests of a module; they must come after its `root_world` tests (a live
+    `df-build` fails a fresh world as infrastructure). Torn down like
+    `root_world` at the end of the module."""
+    from df import install
+    from tests.df.root_world import install_once, make_world, teardown_world
+
+    world = make_world(acceptance_top, fixture_repo, control_url)
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(install, "_profile", lambda _cfg: world.profile())
+            installed = install_once(world)
+        yield installed
+    finally:
+        out = stage1_out()
+        name = re.sub(r"[^A-Za-z0-9_.-]", "_", request.module.__name__)
+        keep = None if out is None else out / "journals" / f"{name}-installed.jsonl"
+        teardown_world(world, keep)
+
+
+@pytest.fixture()
+def installed_controls(installed_world: InstalledWorld) -> Controls:
+    """The positive `controls` over the installed world's `df-build`."""
+    from tests.df.root_world import check_controls
+
+    return check_controls(installed_world.world)
