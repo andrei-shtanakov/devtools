@@ -2741,6 +2741,11 @@ def test_o3_real_make_is_named_as_wrapper() -> None:
     make = Path("/Library/Developer/CommandLineTools/usr/bin/make")
     if not make.exists() or not Path("/usr/bin/make").exists():
         pytest.skip("needs the Command Line Tools")
+    # R97: on some hosts CLT make is itself an xcode-select shim (make ->
+    # gnumake); on the CI runner it is a real binary, which df accepts.
+    deps = plat.linked_libraries(make)
+    if deps is None or plat.XCSELECT_LIB not in deps.needed:
+        pytest.skip("CLT make is not a shim on this host")
     problems = plat.approved_cli_problems(
         {"make": Path("/usr/bin/make")}, "macos-arm64"
     )

@@ -337,12 +337,24 @@ def approved_cli_facts(
     if platform == "macos-arm64":
         facts["xcrun_find_git"] = cmd(["/usr/bin/xcrun", "--find", "git"])
         facts["xcode_select"] = cmd(["/usr/bin/xcode-select", "-p"])
+        facts["make"] = _make_facts()
         # R96: the workflow's selection step leaves the "before" value here.
         before = out_dir / XCODE_SELECT_RECORD
         facts["xcode_select_before"] = (
             before.read_text() if before.exists() else "не записано"
         )
     return facts
+
+
+def _make_facts() -> Facts:
+    """R97: where `make` resolves and whether it is itself an xcselect shim."""
+    found = cmd(["/usr/bin/xcrun", "--find", "make"])
+    path = _stdout(found).strip()
+    deps = plat.linked_libraries(Path(path)) if path else None
+    return {
+        "xcrun_find": found,
+        "links_xcselect": None if deps is None else plat.XCSELECT_LIB in deps.needed,
+    }
 
 
 def id_facts(platform: plat.PlatformName) -> Facts:
@@ -534,85 +546,187 @@ def eslogger_facts(scratch: Path, out: Path) -> Facts:
 
 
 def _eslogger_run(scratch: Path, out: Path) -> Facts:
+    """Run eslogger detached and touch a control dir three ways (round 3).
+
+    eslogger is started through an intermediate Python that exits, so its
+    parent is launchd and not this Python (in case eslogger mutes its own process tree). The ways:
+    `python` (this process reads/lists), `cat` (a child `/bin/cat`), `ls` (a
+    child `/bin/ls`); each is attributed by the event's executable path.
+    """
     control = scratch / "es-control"
     control.mkdir()
     (control / "f").write_text("step0\n")
     raw, err = scratch / "es-raw.jsonl", scratch / "es-err.txt"
+    pid = _start_detached(
+        [str(ESLOGGER), *ESLOGGER_EVENTS, "--format", "json"], raw, err
+    )
+    facts: Facts = {
+        "pid": pid,
+        "ppid": _stdout(cmd(["/bin/ps", "-o", "ppid=", "-p", str(pid)])).strip(),
+    }
+    reader = _LineReader(raw)
+    ways: dict[str, Way] = {
+        "python": (_python_touch(control), os.path.realpath(sys.executable)),
+        "cat": (_child_touch(["/bin/cat", str(control / "f")]), "/bin/cat"),
+        "ls": (_child_touch(["/bin/ls", str(control)]), "/bin/ls"),
+    }
+    try:
+        facts |= wait_for_control(reader.new_lines, ways, control)
+    finally:
+        facts["stop"] = _stop_detached(pid)
+    lines = raw.read_bytes().decode("utf-8", "replace").splitlines()
+    (out / "eslogger-sample.jsonl").write_text("\n".join(lines[:20]))
+    seen = eslogger_control(lines, control, near=str(scratch.parent))
+    seconds = facts.get("seconds")
+    seen_ways = (
+        sorted(w for w, s in seconds.items() if s is not None)
+        if isinstance(seconds, dict)
+        else []
+    )
+    return {
+        **facts,
+        "stderr": _text(err.read_bytes()),
+        **seen,
+        "seen_ways": seen_ways,
+        "permitted": bool(seen_ways),
+    }
 
+
+Way = tuple[Callable[[], None], str]
+
+
+def _python_touch(control: Path) -> Callable[[], None]:
     def touch() -> None:
         (control / "f").read_text()
         os.listdir(control)
 
-    def read_lines() -> list[str]:
-        return raw.read_bytes().decode("utf-8", "replace").splitlines()
+    return touch
 
-    with raw.open("wb") as stdout, err.open("wb") as stderr:
-        proc = subprocess.Popen(
-            [str(ESLOGGER), *ESLOGGER_EVENTS, "--format", "json"],
-            stdin=subprocess.DEVNULL,
-            stdout=stdout,
-            stderr=stderr,
-        )
-        ready = wait_for_control(read_lines, touch, control)
-        exited_early = proc.poll() is not None
-        if not exited_early:
-            proc.send_signal(signal.SIGINT)
+
+def _child_touch(argv: Sequence[str]) -> Callable[[], None]:
+    def touch() -> None:
+        subprocess.run(list(argv), capture_output=True, timeout=10, check=False)
+
+    return touch
+
+
+#: An intermediate Python starts the command in its own session and exits,
+#: so launchd adopts it. Not `sh -c '… &'`: a non-interactive shell starts
+#: background jobs with SIGINT ignored, and eslogger stops on SIGINT.
+_DETACH = (
+    "import os, subprocess, sys\n"
+    "out = open(os.environ['DF_OUT'], 'wb')\n"
+    "err = open(os.environ['DF_ERR'], 'wb')\n"
+    "proc = subprocess.Popen(sys.argv[1:], stdin=subprocess.DEVNULL,"
+    " stdout=out, stderr=err, start_new_session=True)\n"
+    "print(proc.pid)\n"
+)
+
+
+def _start_detached(argv: Sequence[str], raw: Path, err: Path) -> int:
+    """Start `argv` with launchd as its parent; its pid."""
+    env = {**os.environ, "DF_OUT": str(raw), "DF_ERR": str(err)}
+    done = subprocess.run(
+        [sys.executable, "-c", _DETACH, *argv],
+        capture_output=True,
+        env=env,
+        timeout=10,
+        check=True,
+    )
+    return int(done.stdout.decode().strip())
+
+
+def _stop_detached(pid: int) -> str:
+    """SIGINT, up to 10 s to exit, then SIGKILL; what happened."""
+    try:
+        os.kill(pid, signal.SIGINT)
+    except ProcessLookupError:
+        return "exited before SIGINT"
+    for _ in range(100):
+        time.sleep(0.1)
         try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-    lines = read_lines()
-    (out / "eslogger-sample.jsonl").write_text("\n".join(lines[:20]))
-    seen = eslogger_control(lines, control)
-    return {
-        "exited_before_signal": exited_early,
-        "rc": proc.returncode,
-        "stderr": _text(err.read_bytes()),
-        "seconds_to_first_control": ready,
-        **seen,
-        "permitted": seen["control_seen"],
-    }
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return "exited on SIGINT"
+    os.kill(pid, signal.SIGKILL)
+    return "killed"
+
+
+class _LineReader:
+    """Complete lines appended to a file since the last call."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.offset = 0
+        self.rest = b""
+
+    def new_lines(self) -> list[str]:
+        try:
+            with self.path.open("rb") as stream:
+                stream.seek(self.offset)
+                data = stream.read()
+        except FileNotFoundError:
+            return []
+        self.offset += len(data)
+        *complete, self.rest = (self.rest + data).split(b"\n")
+        return [line.decode("utf-8", "replace") for line in complete]
 
 
 def wait_for_control(
-    read_lines: Callable[[], Sequence[str]],
-    touch: Callable[[], None],
+    new_lines: Callable[[], Sequence[str]],
+    ways: Mapping[str, Way],
     control: Path,
     *,
     timeout: float = 30.0,
     interval: float = 0.5,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
-) -> float | None:
+) -> Facts:
     """Readiness of an eslogger subscription (reused by 13-B's observer).
 
-    ES events flow only once the client is subscribed, which is not when the
-    process starts. Touch `control` every `interval` until a decoded event
-    on it by euid 0 appears; return the seconds that took, `None` after
-    `timeout`.
+    ES events flow only once the client is subscribed, not when it starts.
+    Every `interval`, each way not yet seen touches `control`; a way is seen
+    when a decoded event names `control` (or a path below it), comes from
+    euid 0 and from that way's executable. Stops when all are seen or after
+    `timeout`. `new_lines` returns the lines written since its last call.
+    Returns the seconds per way (`None`: never seen) and the cumulative
+    event count at every poll (events stream before SIGINT, or not).
     """
     start = clock()
+    seen: dict[str, float | None] = dict.fromkeys(ways)
+    counts: list[tuple[float, int]] = []
+    total = 0
     while True:
-        touch()
+        for name, (touch, _exe) in ways.items():
+            if seen[name] is None:
+                touch()
         sleep(interval)
-        if any(_is_control(d, control) for d in _decoded(read_lines())):
-            return round(clock() - start, 2)
-        if clock() - start >= timeout:
-            return None
+        elapsed = round(clock() - start, 2)
+        lines = list(new_lines())
+        total += len(lines)
+        counts.append((elapsed, total))
+        decoded = _decoded([line for line in lines if control.name in line])
+        for name, (_touch, exe) in ways.items():
+            if seen[name] is None and any(
+                _is_control(d, control, exe) for d in decoded
+            ):
+                seen[name] = elapsed
+        if all(v is not None for v in seen.values()) or elapsed >= timeout:
+            return {"seconds": seen, "lines_during_wait": counts}
 
 
-def eslogger_control(lines: Sequence[str], control: Path) -> Facts:
+def eslogger_control(lines: Sequence[str], control: Path, *, near: str) -> Facts:
     """Decoded eslogger events on `control` by euid 0 (its JSON escapes `/`).
 
-    `control_seen` means the control access was observed. The sample is the
-    first matching event; without one: the event kinds seen and the ten most
-    frequent paths, to tell "nothing delivered" from "control not matched".
+    `control_seen` means a control access was observed. The sample is the
+    first matching event; without one: the event kinds, the ten most
+    frequent paths and the first three events on a path under `near`.
     """
     events = matches = 0
     first: object = None
     kinds: Counter[str] = Counter()
     paths: Counter[str] = Counter()
+    near_events: list[Facts] = []
     for decoded in _decoded(lines):
         events += 1
         if _is_control(decoded, control):
@@ -623,10 +737,17 @@ def eslogger_control(lines: Sequence[str], control: Path) -> Facts:
         event = decoded.get("event")
         if isinstance(event, dict):
             kinds.update(str(k) for k in event)
-        paths.update(s for s in _strings(event) if s.startswith("/"))
+        found = [s for s in _strings(event) if s.startswith("/")]
+        paths.update(found)
+        if len(near_events) < 3 and any(s.startswith(near) for s in found):
+            near_events.append(_event_sample(decoded))
     sample: object = first
     if first is None:
-        sample = {"event_kinds": sorted(kinds), "top_paths": paths.most_common(10)}
+        sample = {
+            "event_kinds": sorted(kinds),
+            "top_paths": paths.most_common(10),
+            "near_events": near_events,
+        }
     return {
         "events": events,
         "control_events": matches,
@@ -647,15 +768,19 @@ def _decoded(lines: Sequence[str]) -> list[dict[str, object]]:
     return found
 
 
-def _is_control(decoded: dict[str, object], control: Path) -> bool:
-    """An event naming `control` (or a path below it) by a euid-0 process."""
+def _is_control(
+    decoded: dict[str, object], control: Path, executable: str | None = None
+) -> bool:
+    """An event naming `control` (or below it) by euid 0 [and `executable`]."""
     prefix = str(control)
     names = _strings(decoded.get("event"))
     if not any(s == prefix or s.startswith(prefix + "/") for s in names):
         return False
-    process = decoded.get("process")
-    token = process.get("audit_token") if isinstance(process, dict) else None
-    return isinstance(token, dict) and token.get("euid") == 0
+    sample = _event_sample(decoded)
+    token = sample["process_audit_token"]
+    if not (isinstance(token, dict) and token.get("euid") == 0):
+        return False
+    return executable is None or sample["process_executable"] == executable
 
 
 def _strings(value: object) -> list[str]:
