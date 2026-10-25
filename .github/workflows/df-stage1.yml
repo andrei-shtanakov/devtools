@@ -27,7 +27,7 @@ concurrency:
 env:
   # Iteration selector (pre-flight section 6): probes | root-only | full.
   # The final commit of Task 13 must say `full` (the reviewer checks).
-  DF_STAGE1_SCOPE: full
+  DF_STAGE1_SCOPE: root-only
   # Optional `-k` expression of the root run while iterating; empty = all.
   DF_STAGE1_K: ""
   # R78: a skip for a missing or unpinned uv fails the run.
@@ -47,6 +47,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
     steps:
+      # Pre-flight section 6: the final commit is `full` with no -k; a full
+      # run that selects a subset of the root tests is refused, not green.
+      - name: scope guard
+        run: |
+          if [ "$DF_STAGE1_SCOPE" = full ] && [ -n "$DF_STAGE1_K" ]; then
+            echo "::error title=scope guard::DF_STAGE1_K must be empty in full scope"
+            exit 1
+          fi
       - name: arch check
         env:
           EXPECTED_ARCH: ${{ matrix.arch }}
@@ -170,8 +178,9 @@ jobs:
       # UV_CACHE_DIR, `--no-sync`, no pytest cache, no bytecode; last step.
       # The canary test_root_gate_open is always selected (also with
       # DF_STAGE1_K), and the runner checks the junit afterwards (I1): the
-      # step fails unless the canary passed and nothing was skipped by the
-      # root gate, so a gate that never opened cannot leave the cell green.
+      # step fails unless the canary passed, nothing was skipped by the root
+      # gate and every collected root test is in the junit, so neither a
+      # gate that never opened nor a narrowed selection leaves it green.
       # Runs after a red ordinary step too (the cell stays red).
       - name: tests/df root run
         if: ${{ !cancelled() && env.DF_STAGE1_SCOPE != 'probes' }}
@@ -194,17 +203,22 @@ jobs:
           if [ -n "$DF_STAGE1_K" ]; then
             select=(-k "($DF_STAGE1_K) or test_root_gate_open")
           fi
+          as_root=(sudo -n env "PATH=$PATH" "HOME=$RUNNER_TEMP/root-home"
+            "UV_CACHE_DIR=$RUNNER_TEMP/uv-root" DF_ROOT_ACCEPTANCE=1
+            "DF_STAGE1_OUT=$RUNNER_TEMP/df-stage1"
+            DF_REQUIRE_PINNED_UV=1 PYTHONDONTWRITEBYTECODE=1
+            uv run --frozen --no-sync pytest -p no:cacheprovider -m root)
+          # Collected in the same environment and selection: the guard below
+          # fails if any of them is missing from the junit (13-B review).
+          collected="$RUNNER_TEMP/df-stage1/root-collected.txt"
+          "${as_root[@]}" --collect-only -q "${select[@]}" tests/df > "$collected"
           set +e
-          sudo -n env "PATH=$PATH" "HOME=$RUNNER_TEMP/root-home" \
-            "UV_CACHE_DIR=$RUNNER_TEMP/uv-root" DF_ROOT_ACCEPTANCE=1 \
-            "DF_STAGE1_OUT=$RUNNER_TEMP/df-stage1" \
-            DF_REQUIRE_PINNED_UV=1 PYTHONDONTWRITEBYTECODE=1 \
-            uv run --frozen --no-sync pytest -q -rs -p no:cacheprovider -m root \
-            "${select[@]}" --junitxml "$RUNNER_TEMP/df-stage1/junit-root.xml" tests/df
+          "${as_root[@]}" -q -rs "${select[@]}" \
+            --junitxml "$RUNNER_TEMP/df-stage1/junit-root.xml" tests/df
           rc=$?
           set -e
           PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m tests.df.ci_junit \
-            "$RUNNER_TEMP/df-stage1/junit-root.xml"
+            "$RUNNER_TEMP/df-stage1/junit-root.xml" --expect "$collected"
           exit "$rc"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
