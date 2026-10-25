@@ -222,3 +222,24 @@ def test_closed_gate_run_fails_the_junit_guard(tmp_path: Path) -> None:
     assert done.returncode == 0, done.stdout + done.stderr
     assert ci_junit.main([str(junit)]) == 1
     assert ci_junit.main([str(tmp_path / "absent.xml")]) == 1
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="проверка по сбору — не от root")
+def test_collected_but_not_run_fails_the_guard(tmp_path: Path) -> None:
+    """13-B review (canary bug): a `-k` that runs the canary alone leaves
+    collected root tests out of the junit; `--expect` names them."""
+    target = "tests/df/test_platform_root.py"
+    collected = tmp_path / "collected.txt"
+    listing = _pytest("--collect-only", "-q", "-m", "root", target)
+    assert listing.returncode == 0, listing.stdout + listing.stderr
+    collected.write_text(listing.stdout)
+    assert len(ci_junit.collected_ids(listing.stdout)) > 1
+    full, canary = tmp_path / "full.xml", tmp_path / "canary.xml"
+    _pytest("-q", "-m", "root", target, f"--junitxml={full}")
+    _pytest(
+        "-q", "-m", "root", "-k", "test_root_gate_open", target, f"--junitxml={canary}"
+    )
+    assert ci_junit.missing_problems(collected.read_text(), full.read_text()) == []
+    missing = ci_junit.missing_problems(collected.read_text(), canary.read_text())
+    assert missing and all("собран, но не выполнен" in m for m in missing)
+    assert ci_junit.missing_problems("no tests ran\n", full.read_text()) != []
