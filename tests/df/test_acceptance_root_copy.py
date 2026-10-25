@@ -467,7 +467,11 @@ ONE_SHOT: Mapping[str, str] = {
 #: Continuous writers: started before the copy, print first, heartbeat.
 WRITERS: Mapping[str, str] = {
     "saved-fd-writer": (
-        "exec 3>> {r}/pad-grow; echo go; while :; do"
+        # Builtins only until the gate: no child process lives through the
+        # observed `seal` (the observer's surviving-process check, CI run
+        # 40217302730).
+        "exec 3>> {r}/pad-grow; echo go; while [ ! -e {gate} ]; do :; done;"
+        " while :; do"
         " /usr/bin/head -c 65536 /dev/zero >&3; printf . >> {beat};"
         " /bin/sleep 0.01; done"
     ),
@@ -514,6 +518,7 @@ def test_live_writer_during_copy(
         "secret": _q(secret.path),
         "secret_dir": _q(secret.path.parent),
         "beat": _q(beat),
+        "gate": _q(lay.build_home / "gate"),
     }
     writer: plat.SpawnedProducer | None = None
     acts: list[plat.RunResult] = []
@@ -530,6 +535,7 @@ def test_live_writer_during_copy(
         if race == "saved-fd-writer":  # the descriptor is taken before `seal`
             writer = cw.spawn_build(WRITERS[race].format(**fill))
         cw.seal_observed()
+        cw.as_build(f": > {fill['gate']}")
         if race in WRITERS and writer is None:
             writer = cw.spawn_build(WRITERS[race].format(**fill))
         digest, refusal = cw.copy_observed("copy", hook)
