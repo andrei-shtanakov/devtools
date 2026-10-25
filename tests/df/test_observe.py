@@ -222,9 +222,10 @@ def test_recorded_ausearch_twins() -> None:
 def test_recorded_ausearch_identities() -> None:
     """R98: PATH `dev=08:01 inode=…` give the identity `lstat` gives."""
     raw = (FIXTURES / "ausearch-step0.txt").read_text()
-    events = observe.audit_events_ids(raw, STEP0_KEY)
-    relative = next(ids for a, _n, ids in events if a.path == "f")
-    assert relative == {(os.makedev(8, 1) & 0xFFFFFFFF, 9184318)}
+    events = observe.audit_events(raw, STEP0_KEY)
+    relative = next(e for e in events if e.access.path == "f")
+    assert relative.idents == {(os.makedev(8, 1) & 0xFFFFFFFF, 9184318)}
+    assert relative.serial == 149
 
 
 def test_ausearch_other_key_and_rule_change_ignored() -> None:
@@ -244,9 +245,9 @@ def test_ausearch_create_names_parent_and_file() -> None:
         'type=PATH msg=audit(1.0:9): item=1 name="/r/ctl/marker-1" inode=8 '
         "dev=08:01 nametype=CREATE\n"
     )
-    [(access, names)] = observe.audit_events(raw, "k")
-    assert access.path == "/r/ctl/marker-1"
-    assert names == {"/r/ctl/", "/r/ctl/marker-1"}
+    [event] = observe.audit_events(raw, "k")
+    assert event.access.path == "/r/ctl/marker-1"
+    assert event.names == {"/r/ctl/", "/r/ctl/marker-1"}
 
 
 def test_ausearch_hex_encoded_name() -> None:
@@ -540,3 +541,24 @@ def test_marker_file_is_unique_and_opened(canon: Path) -> None:
     second = observe.make_marker(canon / "ctl")
     assert first != second and first.parent == second.parent == canon / "ctl"
     assert first.is_file()
+
+
+def _scope_event(serial: int, ident: Ident) -> observe.AuditEvent:
+    access = Access(1, 0, "openat", "x", "/bin/x")
+    return observe.AuditEvent(access, frozenset({"x"}), frozenset({ident}), serial)
+
+
+def test_audit_identity_counts_after_its_watch_marker(tmp_path: Path) -> None:
+    """R93 on Linux: root's own creation of a watched directory (before the
+    watch marker, in kernel order) is not a violation; later access is."""
+    entry = Watch(tmp_path, (0, 0), frozenset(), 0)
+    backend = observe._Audit(entry, "auditctl", "ausearch", tmp_path)
+    backend.idents = {(1, 1): None, (1, 2): "/c/marker-w"}
+    serials = {"/c/marker-w": 50}
+    assert backend._counts(_scope_event(10, (1, 1)), serials)
+    assert not backend._counts(_scope_event(49, (1, 2)), serials)
+    assert backend._counts(_scope_event(51, (1, 2)), serials)
+    assert not backend._counts(_scope_event(60, (9, 9)), serials)
+    assert backend.failure is None
+    assert backend._counts(_scope_event(1, (1, 2)), {})
+    assert "метка watch" in str(backend.failure)

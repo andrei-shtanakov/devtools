@@ -702,7 +702,8 @@ class _Audit:
         self.token = uuid.uuid4().hex[:8]
         self.rules: list[list[str]] = []
         self.keys: list[str] = []
-        self.idents: set[Ident] = set()
+        #: identity -> the marker after which it counts (`None`: from entry)
+        self.idents: dict[Ident, str | None] = {}
         self.control_key = f"df-r5-{self.token}-c"
         self.scope_key = f"df-r5-{self.token}-s"
         self.failure: str | None = None
@@ -745,18 +746,26 @@ class _Audit:
             failure = self._add(self.scope, self.scope_key)
         for entry in watches:
             if failure is None:
-                failure = self._watch(entry)
+                failure = self._watch(entry, None)
         if failure is None and not self._marker():
             failure = f"auditd: метка не увидена за {CONTROL_TIMEOUT} с"
         return failure
 
-    def _watch(self, entry: Watch) -> str | None:
+    def _watch(self, entry: Watch, marker: str | None) -> str | None:
         self.keys.append(f"df-r5-{self.token}-{len(self.keys)}")
-        self.idents |= entry.idents
+        for found in entry.idents:
+            self.idents.setdefault(found, marker)
         return self._add(entry.path, self.keys[-1])
 
     def watch(self, entry: Watch) -> None:
-        failure = self._watch(entry)
+        """A mid-run source: its rule, then a marker; scope events of its
+        identity count only after that marker (kernel serial order)."""
+        key = f"df-r5-{self.token}-{len(self.keys)}"
+        self.keys.append(key)
+        failure = self._add(entry.path, key)
+        marker = str(make_marker(self.control.path))
+        for found in entry.idents:
+            self.idents.setdefault(found, marker)
         if failure is not None and self.failure is None:
             self.failure = failure
 
@@ -768,56 +777,52 @@ class _Audit:
         while time.monotonic() < deadline:
             made.add(str(make_marker(self.control.path)))
             time.sleep(0.5)
-            found, failure = self._search(self.control_key)
-            if failure is not None:
-                self.failure = self.failure or failure
+            found = self._found(self.control_key)
+            if self.failure is not None:
                 return False
-            if any(a.pid == own and names & made for a, names in found):
+            if any(e.access.pid == own and e.names & made for e in found):
                 return True
         return False
 
-    def _search(self, key: str) -> tuple[list[tuple[Access, set[str]]], str | None]:
+    def _found(self, key: str) -> list[AuditEvent]:
         done = _run([self.ausearch, "-k", key, "--format", "raw"])
         failure = ausearch_failure(done.returncode, done.stderr)
-        return audit_events(done.stdout, key), failure
+        if failure is not None and self.failure is None:
+            self.failure = failure
+        return audit_events(done.stdout, key)
 
     def finish(self) -> Finish:
         try:
             ended = self._marker()
-            found = [a for k in self.keys for a, _n in self._found(k)]
-            scoped = (
-                [
-                    a
-                    for a, _n, ids in self._found_ids(self.scope_key)
-                    if ids & self.idents
-                ]
-                if self.scope is not None
-                else []
-            )
-            in_control = [a for a, _n in self._found(self.control_key)]
+            found = [e.access for k in self.keys for e in self._found(k)]
+            in_control = self._found(self.control_key)
+            scoped = self._found(self.scope_key) if self.scope is not None else []
             lost = self._lost()
         finally:
             self._remove()
         own = os.getpid()
-        controls = [a for a in in_control if a.pid == own]
-        violations = _unique(
-            [*found, *scoped, *(a for a in in_control if a.pid != own)]
-        )
+        serials = {n: e.serial for e in in_control for n in e.names}
+        controls = [e.access for e in in_control if e.access.pid == own]
+        others = [e.access for e in in_control if e.access.pid != own]
+        by_ident = [e.access for e in scoped if self._counts(e, serials)]
+        violations = _unique([*found, *by_ident, *others])
         stats = {"lost_start": self.lost, "lost_end": lost}
         return Finish(violations, len(controls), self._verdict(lost, ended), stats)
 
-    def _found(self, key: str) -> list[tuple[Access, set[str]]]:
-        found, failure = self._search(key)
-        if failure is not None and self.failure is None:
-            self.failure = failure
-        return found
-
-    def _found_ids(self, key: str) -> list[tuple[Access, set[str], set[Ident]]]:
-        done = _run([self.ausearch, "-k", key, "--format", "raw"])
-        failure = ausearch_failure(done.returncode, done.stderr)
-        if failure is not None and self.failure is None:
-            self.failure = failure
-        return audit_events_ids(done.stdout, key)
+    def _counts(self, event: AuditEvent, serials: Mapping[str, int]) -> bool:
+        """A scope event of a source identity, after that identity's marker."""
+        for found in event.idents & self.idents.keys():
+            marker = self.idents[found]
+            if marker is None:
+                return True
+            if marker not in serials:
+                self.failure = (
+                    self.failure or f"auditd: метка watch не найдена {marker}"
+                )
+                return True
+            if event.serial > serials[marker]:
+                return True
+        return False
 
     def _verdict(self, lost: int | None, ended: bool) -> str | None:
         if self.failure is not None:
@@ -866,17 +871,23 @@ def ausearch_failure(returncode: int, stderr: str) -> str | None:
     return f"ausearch: код {returncode}: {stderr.strip()[:300]}"
 
 
+@dataclass(frozen=True)
+class AuditEvent:
+    """One audited syscall: the access, every PATH name and identity, and
+    its serial (kernel order)."""
+
+    access: Access
+    names: frozenset[str]
+    idents: frozenset[Ident]
+    serial: int
+
+
 def audit_accesses(raw: str, key: str) -> list[Access]:
     """The accesses of `audit_events`."""
-    return [a for a, _n in audit_events(raw, key)]
+    return [e.access for e in audit_events(raw, key)]
 
 
-def audit_events(raw: str, key: str) -> list[tuple[Access, set[str]]]:
-    """`(access, every PATH name)` of the events whose SYSCALL carries `key`."""
-    return [(a, n) for a, n, _i in audit_events_ids(raw, key)]
-
-
-def audit_events_ids(raw: str, key: str) -> list[tuple[Access, set[str], set[Ident]]]:
+def audit_events(raw: str, key: str) -> list[AuditEvent]:
     """Events of `ausearch --format raw` whose SYSCALL record carries `key`:
     the access (path: the first non-PARENT name, as the kernel recorded it,
     relative for `openat(dirfd, name)`), every PATH name and every PATH
@@ -895,8 +906,8 @@ def audit_events_ids(raw: str, key: str) -> list[tuple[Access, set[str], set[Ide
             paths = event["paths"]
             assert isinstance(paths, list)
             paths.append(fields)
-    found: list[tuple[Access, set[str], set[Ident]]] = []
-    for event in events.values():
+    found: list[AuditEvent] = []
+    for serial, event in events.items():
         call = event.get("syscall")
         paths = event["paths"]
         assert isinstance(paths, list)
@@ -912,7 +923,8 @@ def audit_events_ids(raw: str, key: str) -> list[tuple[Access, set[str], set[Ide
             path=(own or names or [""])[0],
             exe=_audit_str(str(call.get("exe", ""))),
         )
-        found.append((access, set(names), {i for p in paths if (i := _path_ident(p))}))
+        idents = frozenset(i for p in paths if (i := _path_ident(p)) is not None)
+        found.append(AuditEvent(access, frozenset(names), idents, int(serial)))
     return found
 
 
