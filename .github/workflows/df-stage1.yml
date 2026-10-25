@@ -187,15 +187,20 @@ jobs:
             exit 1
           fi
           sudo -n install -d -m 0700 "$RUNNER_TEMP/root-home"
-          select=test_root_gate_open
-          if [ -n "$DF_STAGE1_K" ]; then select="($DF_STAGE1_K) or $select"; fi
+          # No -k in full scope: every root test (the canary included) runs;
+          # an iteration's -k keeps the canary (CI run 40192503738 ran the
+          # canary alone with an empty DF_STAGE1_K).
+          select=()
+          if [ -n "$DF_STAGE1_K" ]; then
+            select=(-k "($DF_STAGE1_K) or test_root_gate_open")
+          fi
           set +e
           sudo -n env "PATH=$PATH" "HOME=$RUNNER_TEMP/root-home" \
             "UV_CACHE_DIR=$RUNNER_TEMP/uv-root" DF_ROOT_ACCEPTANCE=1 \
             "DF_STAGE1_OUT=$RUNNER_TEMP/df-stage1" \
             DF_REQUIRE_PINNED_UV=1 PYTHONDONTWRITEBYTECODE=1 \
             uv run --frozen --no-sync pytest -q -rs -p no:cacheprovider -m root \
-            -k "$select" --junitxml "$RUNNER_TEMP/df-stage1/junit-root.xml" tests/df
+            "${select[@]}" --junitxml "$RUNNER_TEMP/df-stage1/junit-root.xml" tests/df
           rc=$?
           set -e
           PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m tests.df.ci_junit \
