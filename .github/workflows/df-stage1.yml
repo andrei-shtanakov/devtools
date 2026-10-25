@@ -177,9 +177,14 @@ jobs:
         if: ${{ !cancelled() && env.DF_STAGE1_SCOPE != 'probes' }}
         run: |
           # The cell is already red if uv sync did not run: no second error.
-          if [ ! -x .venv/bin/pytest ]; then
-            echo "::notice title=root run::skipped: no .venv/bin/pytest (uv sync did not run)"
+          # A venv without pytest is a broken sync, never a green skip (m1).
+          if [ ! -x .venv/bin/python ]; then
+            echo "::notice title=root run::skipped: no .venv (uv sync did not run)"
             exit 0
+          fi
+          if [ ! -x .venv/bin/pytest ]; then
+            echo "::error title=root run::.venv exists but .venv/bin/pytest does not"
+            exit 1
           fi
           sudo -n install -d -m 0700 "$RUNNER_TEMP/root-home"
           select=test_root_gate_open

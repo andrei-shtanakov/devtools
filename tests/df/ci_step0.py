@@ -549,7 +549,8 @@ def _eslogger_run(scratch: Path, out: Path) -> Facts:
     """Run eslogger detached and touch a control dir three ways (round 3).
 
     eslogger is started through an intermediate Python that exits, so its
-    parent is launchd and not this Python (in case eslogger mutes its own process tree). The ways:
+    parent is launchd and not this Python (in case eslogger mutes its own
+    process tree). The ways:
     `python` (this process reads/lists), `cat` (a child `/bin/cat`), `ls` (a
     child `/bin/ls`); each is attributed by the event's executable path.
     """
@@ -636,20 +637,35 @@ def _start_detached(argv: Sequence[str], raw: Path, err: Path) -> int:
     return int(done.stdout.decode().strip())
 
 
-def _stop_detached(pid: int) -> str:
-    """SIGINT, up to 10 s to exit, then SIGKILL; what happened."""
+def _stop_detached(pid: int, *, grace: float = 10.0) -> str:
+    """SIGINT, up to `grace` s to exit, then SIGKILL; what happened.
+
+    "killed" only once the process is gone after SIGKILL; a process still
+    there 5 s after it is "kill failed" (the caller records, never hangs).
+    """
     try:
         os.kill(pid, signal.SIGINT)
     except ProcessLookupError:
         return "exited before SIGINT"
-    for _ in range(100):
+    if _gone_within(pid, grace):
+        return "exited on SIGINT"
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return "exited on SIGINT"
+    return "killed" if _gone_within(pid, 5.0) else "kill failed"
+
+
+def _gone_within(pid: int, seconds: float) -> bool:
+    """Whether `pid` (not our child: launchd/init reaps it) exits in time."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
         time.sleep(0.1)
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
-            return "exited on SIGINT"
-    os.kill(pid, signal.SIGKILL)
-    return "killed"
+            return True
+    return False
 
 
 class _LineReader:

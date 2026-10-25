@@ -6,6 +6,10 @@ Only the pure parts and the refusals run here: the probes themselves call
 
 from __future__ import annotations
 
+import os
+import signal
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -254,3 +258,60 @@ def test_r96_main(
         "::error title=select CommandLineTools (R96)::git: bad"
         in capsys.readouterr().out
     ) is bool(problems)
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _wait_for(path: Path, seconds: float = 10.0) -> None:
+    deadline = time.monotonic() + seconds
+    while not path.exists():
+        assert time.monotonic() < deadline, f"{path} did not appear"
+        time.sleep(0.05)
+
+
+def test_detached_command_stops_on_sigint(tmp_path: Path) -> None:
+    """m2: the command is not our child, and SIGINT stops it (no orphan)."""
+    pid = ci_step0._start_detached(
+        ["/bin/sleep", "60"], tmp_path / "out", tmp_path / "err"
+    )
+    try:
+        with pytest.raises(ChildProcessError):
+            os.waitpid(pid, os.WNOHANG)  # not our child: detached
+        assert ci_step0._stop_detached(pid) == "exited on SIGINT"
+    finally:
+        if _alive(pid):
+            os.kill(pid, signal.SIGKILL)
+    assert not _alive(pid)
+
+
+def test_detached_command_ignoring_sigint_is_killed(tmp_path: Path) -> None:
+    """m2: a command ignoring SIGINT is killed, and its exit is confirmed."""
+    ready = tmp_path / "ready"
+    code = (
+        "import signal, sys, time; signal.signal(signal.SIGINT, signal.SIG_IGN); "
+        "open(sys.argv[1], 'w').close(); time.sleep(60)"
+    )
+    pid = ci_step0._start_detached(
+        [sys.executable, "-c", code, str(ready)], tmp_path / "out", tmp_path / "err"
+    )
+    try:
+        _wait_for(ready)  # SIGINT before the handler would simply stop it
+        assert ci_step0._stop_detached(pid, grace=0.5) == "killed"
+    finally:
+        if _alive(pid):
+            os.kill(pid, signal.SIGKILL)
+    assert not _alive(pid)
+
+
+def test_stop_of_a_gone_process(tmp_path: Path) -> None:
+    pid = ci_step0._start_detached(["/usr/bin/true"], tmp_path / "o", tmp_path / "e")
+    deadline = time.monotonic() + 10
+    while _alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert ci_step0._stop_detached(pid) == "exited before SIGINT"
