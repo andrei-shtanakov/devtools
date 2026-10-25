@@ -17,6 +17,7 @@ import sys
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -70,22 +71,70 @@ def test_mechanism_binaries_present() -> None:
 
 # ---------- 13-B: the positive controls and the observer ----------
 
+#: Which control each broken `run_as` defeats (M5): removing any one check
+#: of `check_controls` makes one of these pass silently.
+BROKEN_CONTROLS = (
+    "always-1",
+    "whoami-fails",
+    "whoami-mismatch",
+    "write-fails",
+    "network-code",
+    "network-not-launched",
+)
 
+
+@pytest.mark.parametrize("broken", BROKEN_CONTROLS)
 def test_broken_run_as_fails_suite(
-    root_world: RootWorld, monkeypatch: pytest.MonkeyPatch
+    root_world: RootWorld, monkeypatch: pytest.MonkeyPatch, broken: str
 ) -> None:
-    """A `run_as` that always returns 1 fails the controls as infrastructure,
-    never as a PASS of a negative test (spec 3.8)."""
+    """A broken `run_as` fails the controls as infrastructure, never as a
+    PASS of a negative test (spec 3.8); each control is exercised."""
     root_world.prepare_build_user()
-    broken = plat.RunResult(1, b"", b"", True)
-    monkeypatch.setattr(plat, "run_as", lambda *_a, **_k: broken)
+    real = plat.run_as
+
+    def fake(user: str, argv: list[str], **kw: Any) -> plat.RunResult:
+        tool = argv[0]
+        if broken == "always-1":
+            return plat.RunResult(1, b"", b"", True)
+        if tool == "/usr/bin/id" and broken == "whoami-fails":
+            return plat.RunResult(1, b"", b"", True)
+        if tool == "/usr/bin/id" and broken == "whoami-mismatch":
+            return plat.RunResult(0, b"123456\n", b"", True)
+        if tool == "/usr/bin/touch" and broken == "write-fails":
+            real(user, argv, **kw)  # the file is there: only the code tells
+            return plat.RunResult(1, b"", b"", True)
+        if tool == "/usr/bin/curl" and broken == "network-code":
+            return plat.RunResult(0, b"000", b"", True)
+        if tool == "/usr/bin/curl" and broken == "network-not-launched":
+            return plat.RunResult(0, b"200", b"", False)
+        return real(user, argv, **kw)
+
+    monkeypatch.setattr(plat, "run_as", fake)
     with pytest.raises(pytest.fail.Exception, match=INFRA):
         check_controls(root_world)
 
 
-@pytest.mark.parametrize(
-    "twin", ["root-child-cat", "root-ctypes-open", "prepare-dir-reopen"]
+#: Twins of the observer (S1-R5-N4, S1-R8-N2 and the form table of the 13-B
+#: report): each holds one row on both OSes.
+TWINS = (
+    "root-child-cat",
+    "root-ctypes-open",
+    "prepare-dir-reopen",
+    "rename-refused",
+    "symlink-out",
+    "hardlink-out",
+    "held-fd-readdir",
+    "held-fd-read",
 )
+#: Twin -> the limit key that says it is not reported (`observe.LIMITS`).
+TWIN_LIMIT = {
+    "symlink-out": "symlink-out",
+    "held-fd-readdir": "held-fd-getdents",
+    "held-fd-read": "held-fd-read",
+}
+
+
+@pytest.mark.parametrize("twin", TWINS)
 def test_root_access_observer_twins(
     root_world: RootWorld, controls: Controls, twin: str
 ) -> None:
@@ -93,19 +142,117 @@ def test_root_access_observer_twins(
     process opening it through libc (both missed by Python's audit hook) are
     violations on both platforms. S1-R8-N2: the real `prepare_dir`, observed
     from its `fchown` on, has none; one reopening `releases/<id>` by path
-    after it has one."""
+    after it has one. The form-table twins: a source cannot be renamed away
+    by `df-build`; a followed link out, a held descriptor listed or read are
+    reported exactly when the platform states no limit for them; a hardlink
+    out is recorded."""
     if twin == "prepare-dir-reopen":
         _prepare_dir_twin(root_world)
         return
-    src = _builder_tree(root_world)
-    target = src / "f"
-    with _observing(root_world, [src], twin) as obs:
-        if twin == "root-child-cat":
-            subprocess.run(["/bin/cat", str(target)], capture_output=True, check=True)
-        else:
-            _ctypes_open(target)
+    src = root_world.builder_dir(
+        root_world.layout.root / "twins" / "src", "echo sentinel > f"
+    )
+    TWIN_RUNS[twin](root_world, src)
+
+
+def _twin_cat(world: RootWorld, src: Path) -> None:
+    with _observing(world, [src], "root-child-cat") as obs:
+        subprocess.run(["/bin/cat", str(src / "f")], capture_output=True, check=True)
     _require_observed(obs)
-    assert [a for a in obs.violations if a.path == str(target)], obs.violations
+    assert [a for a in obs.violations if a.path == str(src / "f")], obs.violations
+
+
+def _twin_ctypes(world: RootWorld, src: Path) -> None:
+    with _observing(world, [src], "root-ctypes-open") as obs:
+        _ctypes_open(src / "f")
+    _require_observed(obs)
+    assert [a for a in obs.violations if a.path == str(src / "f")], obs.violations
+
+
+def _twin_rename(world: RootWorld, src: Path) -> None:
+    """F3: the parent is root's, so `df-build` cannot move the source."""
+    with _observing(world, [src], "rename-refused") as obs:
+        moved = plat.run_as(
+            plat.BUILD_USER,
+            ["/bin/mv", str(src), f"{src}-moved"],
+            env=ROLE_ENV,
+            cwd=Path("/"),
+            network=False,
+            timeout=30,
+        )
+    _require_observed(obs)
+    assert moved.launched and moved.returncode != 0, moved
+    assert src.is_dir() and not Path(f"{src}-moved").exists()
+    assert obs.violations == []
+
+
+def _twin_symlink(world: RootWorld, src: Path) -> None:
+    """F5: root follows `src/link` to a file outside every source."""
+    outside = world.layout.root / "twins" / "outside"
+    outside.mkdir(mode=0o755)
+    (outside / "f").write_text("outside\n")
+    _as_builder(["/bin/ln", "-s", str(outside / "f"), str(src / "link")])
+    with _observing(world, [src], "symlink-out") as obs:
+        os.close(os.open(src / "link", os.O_RDONLY))
+    _expect_per_limits(obs, "symlink-out")
+
+
+def _twin_hardlink(world: RootWorld, src: Path) -> None:
+    """F6: root opens a df-build hardlink (in its home) to `src/f`; the
+    outcome is recorded (the JSON), the guarantee is a stated limit."""
+    link = world.layout.build_home / "hardlink"
+    _as_builder(["/bin/ln", str(src / "f"), str(link)])
+    with _observing(world, [src], "hardlink-out") as obs:
+        os.close(os.open(link, os.O_RDONLY))
+    _require_observed(obs)
+    assert "hardlink-out" in obs.limits
+
+
+def _twin_held_readdir(world: RootWorld, src: Path) -> None:
+    """F9: a directory descriptor opened before the observation is listed."""
+    fd = os.open(src, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with _observing(world, [src], "held-fd-readdir") as obs:
+            os.listdir(fd)
+    finally:
+        os.close(fd)
+    _expect_per_limits(obs, "held-fd-readdir")
+
+
+def _twin_held_read(world: RootWorld, src: Path) -> None:
+    """F10: a file descriptor opened before the observation is read."""
+    fd = os.open(src / "f", os.O_RDONLY)
+    try:
+        with _observing(world, [src], "held-fd-read") as obs:
+            assert os.read(fd, 64) == b"sentinel\n"
+    finally:
+        os.close(fd)
+    _expect_per_limits(obs, "held-fd-read")
+
+
+TWIN_RUNS: dict[str, Callable[[RootWorld, Path], None]] = {
+    "root-child-cat": _twin_cat,
+    "root-ctypes-open": _twin_ctypes,
+    "rename-refused": _twin_rename,
+    "symlink-out": _twin_symlink,
+    "hardlink-out": _twin_hardlink,
+    "held-fd-readdir": _twin_held_readdir,
+    "held-fd-read": _twin_held_read,
+}
+
+
+def _expect_per_limits(obs: Observation, twin: str) -> None:
+    """The twin's access is reported iff no stated limit covers it here."""
+    _require_observed(obs)
+    limited = TWIN_LIMIT[twin] in obs.limits
+    assert bool(obs.violations) is not limited, (twin, obs.violations, obs.limits)
+
+
+def _as_builder(argv: list[str]) -> None:
+    result = plat.run_as(
+        plat.BUILD_USER, argv, env=ROLE_ENV, cwd=Path("/"), network=False, timeout=30
+    )
+    assert result.launched and result.returncode == 0, result
 
 
 def _prepare_dir_twin(world: RootWorld) -> None:
@@ -149,21 +296,6 @@ def _observing(
 def _require_observed(obs: Observation) -> None:
     if obs.status == "unobserved":
         pytest.xfail(f"{UNOBSERVED}: {obs.reason}")
-
-
-def _builder_tree(world: RootWorld) -> Path:
-    """`build_home/twin-src/f`, made by `df-build` (the source)."""
-    home = world.layout.build_home
-    result = plat.run_as(
-        plat.BUILD_USER,
-        ["/bin/sh", "-c", "mkdir twin-src && echo sentinel > twin-src/f"],
-        env=ROLE_ENV,
-        cwd=home,
-        network=False,
-        timeout=30,
-    )
-    assert result.launched and result.returncode == 0, result
-    return home / "twin-src"
 
 
 def _ctypes_open(path: Path) -> None:

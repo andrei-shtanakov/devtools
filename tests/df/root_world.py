@@ -67,6 +67,10 @@ INFRA = "инфраструктура"
 ROLE_ENV: Mapping[str, str] = {"PATH": "/usr/bin:/bin", "LANG": "C"}
 _SYSTEM_ENV = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C"}
 _worlds = itertools.count(1)
+#: Never part of the pin: bytecode, caches and editor leftovers (M7).
+FIXTURE_IGNORE = shutil.ignore_patterns(
+    "__pycache__", "*.pyc", ".*.swp", "*~", ".DS_Store", ".pytest_cache", ".venv"
+)
 
 
 def infra(message: str) -> None:
@@ -137,9 +141,8 @@ def _git_env(home: Path) -> dict[str, str]:
 def build_fixture_repo(top: Path) -> tuple[Path, str]:
     """`<top>/fixture.git` (bare, root's) of the fixture project + `df/`."""
     src = top / "fixture-src"
-    shutil.copytree(FIXTURE_PROJECT, src)
-    ignore = shutil.ignore_patterns("__pycache__", "*.pyc")
-    shutil.copytree(REPO_ROOT / "df", src / "df", ignore=ignore)
+    shutil.copytree(FIXTURE_PROJECT, src, ignore=FIXTURE_IGNORE)
+    shutil.copytree(REPO_ROOT / "df", src / "df", ignore=FIXTURE_IGNORE)
     env = _git_env(top / "git-home")
     git = str(SYSTEM_GIT)
     run([git, "init", "-q", "--template=", str(src)], env=env)
@@ -290,22 +293,29 @@ class RootWorld:
 
     def control_dir(self) -> Path:
         """R92: `<R>/observe-control`, `df-build`'s, with the file `f` it wrote."""
-        account = build_account(self.layout)
         path = self.layout.root / "observe-control"
         if path.is_dir():
             return path
+        return self.builder_dir(path, "echo control > f")
+
+    def builder_dir(self, path: Path, script: str) -> Path:
+        """`path` (its parent root's, not writable by others: an observable
+        source, I3) made by root, handed to `df-build`, filled by `script`
+        run as `df-build` inside it."""
+        account = build_account(self.layout)
+        os.makedirs(path.parent, mode=0o755, exist_ok=True)
         os.mkdir(path, 0o755)
         os.chown(path, account.uid, account.gid)
         result = plat.run_as(
             plat.BUILD_USER,
-            ["/bin/sh", "-c", "echo control > f"],
+            ["/bin/sh", "-c", script],
             env=ROLE_ENV,
             cwd=path,
             network=False,
             timeout=30,
         )
         if not result.launched or result.returncode != 0:
-            infra(f"контрольный каталог: {result}")
+            infra(f"{path} от {plat.BUILD_USER}: {result}")
         return path
 
     def workdir(self) -> Path:
@@ -506,7 +516,9 @@ def _control_write(layout: Layout, account: Account) -> None:
         raise
     if owner != account.uid:
         infra(f"{probe}: владелец {owner}, нужен {account.uid}")
-    _as_build(["/bin/rm", "-f", str(probe)], home, network=False)
+    removed = _as_build(["/bin/rm", "-f", str(probe)], home, network=False)
+    if not removed.launched or removed.returncode != 0:
+        infra(f"{probe}: не удалён от {plat.BUILD_USER}: {removed}")
 
 
 def _control_network(url: str) -> None:

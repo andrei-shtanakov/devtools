@@ -18,6 +18,10 @@ pytestmark = pytest.mark.root
 
 #: Steps 1-3 of a fresh install, as `run_steps` journals them.
 PREP_STEPS = [("manifest", "skip"), ("trusted-paths", "done"), ("build-user", "done")]
+#: The only other journal step of a clean run: `drive`'s `sync-note`.
+OTHER_STEPS = ("drive",)
+#: Events of an action besides start/done in a clean run (Task 7a).
+NOTES = {("verify", "distributions-note"), ("drive", "sync-note")}
 
 
 def _level1(world: RootWorld) -> list[doctor.Check]:
@@ -35,15 +39,23 @@ def test_clean_install_reaches_level1(root_world: RootWorld) -> None:
 
 def test_clean_pass_walks_automaton_in_order(root_world: RootWorld) -> None:
     """One clean install: steps 1-3, then each action of the table once, in
-    order, each `start` followed by its `done`; nothing failed."""
+    order, each `start` followed by its `done`; no other step (no recovery
+    action such as `copy-partial`), nothing failed, and the last action
+    ends in `committed`."""
     assert root_world.bootstrap(root_world.init_argv()) == 0
     rows = read_journal(root_world.layout.journal)
     assert [r for r in rows if r["event"] == "failed"] == []
+    allowed = {*dict(PREP_STEPS), *CLEAN_PASS, *OTHER_STEPS}
+    assert {str(r["step"]) for r in rows} <= allowed, rows
     prep = [(r["step"], r["event"]) for r in rows if r["step"] in dict(PREP_STEPS)]
     assert [p for p in prep if p[1] in ("skip", "done")] == PREP_STEPS
+    events = {(str(r["step"]), str(r["event"])) for r in rows}
+    extra = {e for e in events if e[0] not in dict(PREP_STEPS)}
+    assert extra - NOTES <= {(a, e) for a in CLEAN_PASS for e in ("start", "done")}
     walk = [
-        (r["step"], r["event"])
-        for r in rows
-        if r["step"] in CLEAN_PASS and r["event"] in ("start", "done")
+        r for r in rows if r["step"] in CLEAN_PASS and r["event"] in ("start", "done")
     ]
-    assert walk == [(a, e) for a in CLEAN_PASS for e in ("start", "done")]
+    assert [(r["step"], r["event"]) for r in walk] == [
+        (a, e) for a in CLEAN_PASS for e in ("start", "done")
+    ]
+    assert str(walk[-1]["detail"]).endswith("→ committed"), walk[-1]
