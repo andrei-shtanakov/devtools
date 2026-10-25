@@ -11,15 +11,15 @@ in CI df-stage1.
 
 The OS observer (`tests/df/observe.py`) watches every phase whose source
 stays in place: the build (`releases/<id>`, watched from `prepare_dir`'s
-`fchown`, with the classification), the copy (`staging/<id>/tree`) and the
-cleanup (the root parent that holds the tree: `staging/<id>`, `releases/`,
-the quarantine, or `df-build`'s home). `seal` is not inside one: it moves
-the source, which the observer refuses at exit, and its own operations on
-the tree (`fstatat`, `renameat`) are outside the observed set anyway. A
-cleanup's parent is root's own directory, opened by the protocol as the held
-parent (`OWN_OPS`); every other access of root to a source is a violation.
-An `unobserved` run fails the test (13-D brief), it is never a pass. Digests
-of a source are taken before its observation (R94).
+`fchown`, with the classification) and the copy (`staging/<id>/tree`). A
+cleanup removes its source, which the observer refuses at exit, so it watches
+the directory that holds the tree (`staging/<id>`, `releases/`, the
+quarantine, or `df-build`'s home); an access to that holder itself is not
+one to the source (`require_clean`), every access under it is. `seal` is not
+inside an observation: it moves the source, and its own operations on the
+tree (`fstatat`, `renameat`) are outside the observed set anyway. An
+`unobserved` run fails the test (13-D brief), it is never a pass. Digests of
+a source are taken before its observation (R94).
 """
 
 from __future__ import annotations
@@ -89,14 +89,21 @@ NAMES_TREE = (
     f" && mkdir -p {DEEP} && printf deep > {DEEP}/f"
     " && ln d/f hard && ln -s d/f sym"
 )
-#: 16 MiB of padding: the copy is mid-stream when a race acts on the tree.
-PAD = (
-    "mkdir -p pad && i=0; while [ $i -lt 16 ]; do"
-    " /usr/bin/head -c 1048576 /dev/urandom > pad/p$i; i=$((i+1)); done"
-)
+#: Race targets: `s0`..`s15`, each a 1 MiB file, a file, a link and a
+#: directory. Whatever order tar walks them in, at the receiver's first
+#: member it is at most a pipe buffer ahead, so at most one or two of them
+#: are archived before a race changes all sixteen (CI run 40214182146: one
+#: target was always passed already on macOS).
+SPREAD = 16
+#: `body` for each `i` of the spread; prints `ok` per target it changed.
+EACH = f"i=0; while [ $i -lt {SPREAD} ]; do {{body}} && echo ok; i=$((i+1)); done"
 LIVE_TREE = (
     "mkdir -p d/sub grow && printf 'hello\\n' > d/f && ln -s d/f link"
-    " && : > pad-grow && " + PAD
+    " && : > pad-grow && "
+    + EACH.format(
+        body="mkdir -p s$i/sub && /usr/bin/head -c 1048576 /dev/urandom > s$i/pad"
+        " && printf 'hello\\n' > s$i/f && ln -s f s$i/link"
+    )
 )
 #: A non-empty tree whose root and nested directories end `000`.
 ZERO_TREE = (
@@ -269,20 +276,20 @@ def _watch_at_chown(obs: Observation) -> Callable[[str, Path], None]:
 
 
 def require_clean(
-    obs: Observation, *, own: Mapping[Path, frozenset[str]] | None = None
+    obs: Observation, *, holder: Mapping[Path, frozenset[str]] | None = None
 ) -> None:
-    """`observed`, and no access of root to a source except `own`'s: the
-    root parent a protocol holds, with the ops it performs on it."""
+    """`observed`, and no access of root to a source.
+
+    `holder`: a directory watched in place of a source the phase removes or
+    moves (the observer refuses a source gone at exit). Spec §3.8: the
+    source is the tree, not the directory holding it, so an access to the
+    holder itself with one of its listed ops is not a violation (the
+    protocol's held parent; on macOS `sudo` of `run_as` also opens its cwd,
+    `build_home`); every access under the holder is."""
     if obs.status != "observed":
         pytest.fail(f"наблюдатель: unobserved — {obs.reason}")
-    allowed = dict(own or {})
-    for parent in allowed:
-        assert os.lstat(parent).st_uid == 0, parent  # root's own, not df-build's
-    bad = [
-        a
-        for a in obs.violations
-        if not (a.path in {str(p) for p in allowed} and a.op in allowed[Path(a.path)])
-    ]
+    allowed = {str(path): ops for path, ops in (holder or {}).items()}
+    bad = [a for a in obs.violations if a.op not in allowed.get(a.path, ())]
     assert bad == [], bad
 
 
@@ -423,12 +430,17 @@ def test_real_tar_from_build_user_accepted(cw: CopyWorld) -> None:
 
 # ---------- live writer during the copy ----------
 
-#: One-shot races: `df-build` changes the sealed tree at the first member.
+#: One-shot races: `df-build` changes every target `s<i>` of the sealed tree
+#: at the first member (the `{t}` fields are filled per test).
 ONE_SHOT: Mapping[str, str] = {
-    "dir-to-link": "rm -rf {t}/d && ln -s {secret_dir} {t}/d",
-    "link-retarget": "rm -f {t}/link && ln -s {secret} {t}/link",
-    "file-to-fifo": "rm -f {t}/d/f && mkfifo {t}/d/f",
-    "hardlink-root-only-file": "ln {secret} {t}/d/hard",
+    "dir-to-link": EACH.format(
+        body="rm -rf {t}/s$i/sub && ln -s {secret_dir} {t}/s$i/sub"
+    ),
+    "link-retarget": EACH.format(
+        body="rm -f {t}/s$i/link && ln -s {secret} {t}/s$i/link"
+    ),
+    "file-to-fifo": EACH.format(body="rm -f {t}/s$i/f && mkfifo {t}/s$i/f"),
+    "hardlink-root-only-file": EACH.format(body="ln {secret} {t}/s$i/hard"),
 }
 #: Continuous writers: started before the copy, print first, heartbeat.
 WRITERS: Mapping[str, str] = {
@@ -447,6 +459,13 @@ WRITERS: Mapping[str, str] = {
     ),
 }
 RACES = [*ONE_SHOT, *WRITERS]
+#: The cleanup's writer: shell builtins only (no fork per file), in the tree
+#: root, which `find -mindepth 1 -delete` never removes (CI run 40214182146:
+#: a throttled writer in `grow/` lost its directory and the tree was gone).
+FLOOD = (
+    "cd {t} && echo go; i=0; while :; do : > f$i; i=$((i+1));"
+    " [ $((i % 100)) -eq 0 ] && printf . >> {beat}; done"
+)
 
 
 @pytest.mark.parametrize("race", RACES)
@@ -492,15 +511,20 @@ def test_live_writer_during_copy(
         if writer is not None:
             writer.end()
     assert hook.fired, "гонка не состоялась: ни одного члена потока"
+    record_property("outcome", "accepted" if refusal is None else str(refusal))
     for done in acts:
-        record_property("race_act", f"rc={done.returncode} {done.stderr[-300:]!r}")
-        assert done.launched, done
+        changed = done.stdout.split().count(b"ok")
+        record_property("race_changed", f"{changed}/{SPREAD} {done.stderr[-300:]!r}")
+        assert done.launched and done.returncode == 0, done
         if race == "hardlink-root-only-file" and LINUX:
             # protected_hardlinks: a link to root's 0600 file is refused.
-            assert done.returncode != 0, done
+            assert changed == 0, done
         else:
-            assert done.returncode == 0, done
-    record_property("outcome", "accepted" if refusal is None else str(refusal))
+            assert changed == SPREAD, done
+        if race == "hardlink-root-only-file" and changed:
+            # Spec 3.3: tar as df-build cannot read a root-only file through
+            # a hard link, and the stream breaks off with an error.
+            assert refusal is not None, "поток с root-only файлом принят"
     release = lay.release_dir(RID)
     assert_no_builder_processes(cw.uid)
     if refusal is None:
@@ -514,7 +538,7 @@ def test_live_writer_during_copy(
     box = lay.staging_dir(RID)
     with cw.observing([box], "cleanup") as obs:
         outcome = plat.cleanup_tree(lay, box, "tree", quarantine_label=RID)
-    require_clean(obs, own={box: OPEN_OPS})
+    require_clean(obs, holder={box: OPEN_OPS})
     assert outcome == "removed"
     assert not os.path.lexists(lay.staging_tree(RID))
 
@@ -560,7 +584,7 @@ def test_cleanup_of_000_tree(cw: CopyWorld) -> None:
     cw.built(ZERO_TREE)
     with cw.observing([lay.releases], "releases") as obs:
         outcome = plat.cleanup_tree(lay, lay.releases, RID, quarantine_label=RID)
-    require_clean(obs, own={lay.releases: OPEN_OPS})
+    require_clean(obs, holder={lay.releases: OPEN_OPS})
     assert outcome == "removed"
     assert not os.path.lexists(lay.release_dir(RID))
 
@@ -568,14 +592,14 @@ def test_cleanup_of_000_tree(cw: CopyWorld) -> None:
     os.rename(lay.release_dir("q-1"), lay.quarantine / "q-1.1")  # setup only
     with cw.observing([lay.quarantine], "quarantine") as obs:
         left = plat.retry_quarantine(lay)
-    require_clean(obs, own={lay.quarantine: LIST_OPS})
+    require_clean(obs, holder={lay.quarantine: LIST_OPS})
     assert left == []
     assert os.listdir(lay.quarantine) == []
 
     cw.as_build(f"mkdir {_q(lay.build_home / 't000')} && cd t000 && {ZERO_TREE}")
     with cw.observing([lay.build_home], "build-home") as obs:
         removed = plat.cleanup_build_home(lay, "t000")
-    require_clean(obs)
+    require_clean(obs, holder={lay.build_home: OPEN_OPS})
     assert removed == "removed"
     assert not os.path.lexists(lay.build_home / "t000")
 
@@ -589,7 +613,7 @@ def quarantined_growing_tree(cw: CopyWorld) -> tuple[str, float]:
     lay = cw.layout
     beat = lay.build_home / "beat-cleanup"
     tree = cw.sealed(LIVE_TREE)
-    writer = cw.spawn_build(WRITERS["growing-tree"].format(t=_q(tree), beat=_q(beat)))
+    writer = cw.spawn_build(FLOOD.format(t=_q(tree), beat=_q(beat)))
     try:
         wait_beat(beat)
         box = lay.staging_dir(RID)
@@ -601,7 +625,7 @@ def quarantined_growing_tree(cw: CopyWorld) -> tuple[str, float]:
             elapsed = time.monotonic() - start
     finally:
         writer.end()
-    require_clean(obs, own={box: OPEN_OPS})
+    require_clean(obs, holder={box: OPEN_OPS})
     return outcome, elapsed
 
 
@@ -747,10 +771,11 @@ def _refused_then_resumed(cw: CopyWorld, script: str, reason: str) -> None:
     assert_root_700(lay.release_dir(rid))
     assert_no_builder_processes(cw.uid)
     assert_lock_free(lay)
+    since = len(rows)
     assert cw.bootstrap_init() == cli.EXIT_OK
-    rows = read_journal(lay.journal)
+    rows = read_journal(lay.journal)[since:]
     assert ("copy-partial", "done") in {(r["step"], r["event"]) for r in rows}
-    assert_committed(lay)
+    assert_committed(lay, since=since)
 
 
 def test_forked_producer_reaped_via_spawn_as(cw: CopyWorld) -> None:

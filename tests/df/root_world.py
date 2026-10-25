@@ -473,11 +473,12 @@ def _uid_of(name: str) -> int | None:
         return None
 
 
-def assert_committed(layout: Layout) -> None:
-    """No `pending.toml`, no failed step in the journal, and the last `done`
-    of the run ended in `committed`."""
+def assert_committed(layout: Layout, *, since: int = 0) -> None:
+    """No `pending.toml`, no failed step in the journal from row `since` on
+    (a run after a deliberately refused one), and the last `done` of the run
+    ended in `committed`."""
     assert not os.path.lexists(layout.pending)
-    rows = journal.read_journal(layout.journal)
+    rows = journal.read_journal(layout.journal)[since:]
     assert [r for r in rows if r["event"] == "failed"] == []
     done = [r for r in rows if r["event"] == "done"]
     assert done and str(done[-1]["detail"]).endswith("→ committed"), done[-1:]
