@@ -113,10 +113,100 @@ def test_eslogger_control_decodes_escaped_paths() -> None:
     assert sample["process_executable"] == "/usr/bin/python3"
 
 
-def test_eslogger_control_absent_lists_first_paths() -> None:
+def test_eslogger_control_absent_lists_kinds_and_paths() -> None:
     sibling = ES_OTHER.replace("\\/usr\\/lib\\/dyld", "\\/private\\/var\\/tmp-df\\/x")
     seen = ci_step0.eslogger_control([ES_OTHER, sibling], CONTROL)
     assert seen["control_seen"] is False
     assert seen["sample"] == {
-        "first_event_paths": [["/usr/lib/dyld"], ["/private/var/tmp-df/x"]]
+        "event_kinds": ["open"],
+        "top_paths": [("/usr/lib/dyld", 1), ("/private/var/tmp-df/x", 1)],
     }
+
+
+def _es(path: str, euid: int = 0) -> str:
+    """One eslogger `open` line as eslogger writes it (`/` escaped)."""
+    escaped = path.replace("/", "\\/")
+    return (
+        f'{{"event_type":10,"process":{{"audit_token":{{"euid":{euid}}}}},'
+        f'"event":{{"open":{{"file":{{"path":"{escaped}"}}}}}}}}'
+    )
+
+
+def test_wait_for_control_until_first_root_event() -> None:
+    """Readiness: control touched every interval; events before the
+    subscription is live (and a non-root control open) do not count."""
+    now = [0.0]
+    lines: list[str] = []
+    touches: list[float] = []
+    feed = {
+        1.0: _es("/usr/bin"),
+        1.5: _es(f"{CONTROL}/f", euid=501),
+        2.0: _es(f"{CONTROL}/f"),
+    }
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+        if now[0] in feed:
+            lines.append(feed[now[0]])
+
+    took = ci_step0.wait_for_control(
+        lambda: lines,
+        lambda: touches.append(now[0]),
+        CONTROL,
+        clock=lambda: now[0],
+        sleep=sleep,
+    )
+    assert took == 2.0
+    assert touches == [0.0, 0.5, 1.0, 1.5]
+
+
+def test_wait_for_control_times_out() -> None:
+    now = [0.0]
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    took = ci_step0.wait_for_control(
+        lambda: [_es("/usr/bin")],
+        lambda: None,
+        CONTROL,
+        timeout=3.0,
+        clock=lambda: now[0],
+        sleep=sleep,
+    )
+    assert took is None
+    assert now[0] == 3.0
+
+
+def test_eslogger_control_needs_euid_0_and_reports_kinds() -> None:
+    seen = ci_step0.eslogger_control(
+        [_es(f"{CONTROL}/f", euid=501), _es("/usr/bin"), _es("/usr/bin")], CONTROL
+    )
+    assert seen["control_seen"] is False
+    assert seen["sample"] == {
+        "event_kinds": ["open"],
+        "top_paths": [("/usr/bin", 2), (f"{CONTROL}/f", 1)],
+    }
+
+
+@pytest.mark.parametrize(("problems", "rc"), [([], 0), (["git: bad"], 1)])
+def test_r96_main(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    problems: list[str],
+    rc: int,
+) -> None:
+    seen: list[object] = []
+
+    def fake(cli: object, platform: object) -> list[str]:
+        seen.append(cli)
+        return problems
+
+    monkeypatch.setattr(ci_step0.plat, "approved_cli_problems", fake)
+    monkeypatch.setattr(ci_step0.plat, "detect_platform", lambda: "macos-arm64")
+    assert ci_step0.r96_main() == rc
+    assert seen == [ci_step0.R96_TOOLS]
+    assert (
+        "::error title=select CommandLineTools (R96)::git: bad"
+        in capsys.readouterr().out
+    ) is bool(problems)

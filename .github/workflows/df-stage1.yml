@@ -61,7 +61,8 @@ jobs:
       # R96: /usr/bin/git, otool and make are xcrun shims; on the image they
       # resolve into /Applications/Xcode_*.app (uid 501, /Applications
       # group-writable), which df correctly refuses (CI run 1). Configure the
-      # runner as a supported host: select the root-owned Command Line Tools.
+      # runner as a supported host: select the Command Line Tools here; the
+      # trust verdict is df's own policy, after `uv sync` (next R96 step).
       - name: select CommandLineTools (R96)
         if: runner.os == 'macOS'
         run: |
@@ -69,30 +70,22 @@ jobs:
           mkdir -p "$RUNNER_TEMP/df-stage1/step0"
           record="$RUNNER_TEMP/df-stage1/step0/xcode-select.txt"
           echo "before: $(xcode-select -p)" > "$record"
-          trusted() {  # every component from / root-owned, no group/other write
-            p=""
-            for part in $(echo "${1#/}" | tr '/' ' '); do
-              p="$p/$part"
-              test ! -L "$p" || { echo "$p: link"; return 1; }
-              read -r uid mode <<< "$(stat -f '%u %Lp' "$p")"
-              test "$uid" = 0 || { echo "$p: owner $uid"; return 1; }
-              test $(( 8#$mode & 8#022 )) = 0 || { echo "$p: mode $mode"; return 1; }
-            done
-          }
           fail() { echo "::error title=select CommandLineTools (R96)::$1"; exit 1; }
           test -d "$clt" || fail "$clt absent"
-          trusted "$clt/usr/bin/git" || fail "$clt/usr/bin/git not trusted"
           sudo -n xcode-select -s "$clt" || fail "xcode-select -s failed"
           test "$(xcode-select -p)" = "$clt" || fail "selection did not stick"
-          for tool in git otool make; do
-            found=$(xcrun --find "$tool") || fail "xcrun --find $tool failed"
-            case "$found" in "$clt"/*) ;; *) fail "$tool -> $found" ;; esac
-            trusted "$found" || fail "$found not trusted"
-          done
           echo "after: $(xcode-select -p)" >> "$record"
           cat "$record"
       - run: uv python install 3.12
       - run: uv sync --frozen
+      # R96 verdict: approved_cli_problems for git/tar/chmod (df runs otool
+      # through the same shim) as the runner; any problem fails by name.
+      - name: verify CommandLineTools with df policy (R96)
+        if: runner.os == 'macOS'
+        run: >
+          PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -I -c "import sys;
+          sys.path.append('.'); from tests.df.ci_step0 import r96_main;
+          sys.exit(r96_main())"
 
       # ---- Step 0: facts of this runner (tests/df/ci_step0.py) -------------
       # A crash of the probe script is a bug to read in the log, not a reason
@@ -100,9 +93,13 @@ jobs:
       - name: step 0 facts (runner user)
         if: ${{ !cancelled() }}
         continue-on-error: true
-        run: >
-          uv run --frozen --no-sync python -m tests.df.ci_step0 runner
-          --out "$RUNNER_TEMP/df-stage1/step0"
+        run: |
+          if [ ! -x .venv/bin/python ]; then
+            echo "::notice title=step 0::skipped: no .venv (uv sync did not run)"
+            exit 0
+          fi
+          .venv/bin/python -m tests.df.ci_step0 runner \
+            --out "$RUNNER_TEMP/df-stage1/step0"
       - name: step 0 install auditd (absence is a fact)
         if: ${{ !cancelled() && runner.os == 'Linux' }}
         continue-on-error: true
@@ -112,12 +109,16 @@ jobs:
       - name: step 0 facts (root)
         if: ${{ !cancelled() }}
         continue-on-error: true
-        run: >
-          sudo -n install -d -m 0700 "$RUNNER_TEMP/root-home" &&
-          sudo -n env "PATH=$PATH" "HOME=$RUNNER_TEMP/root-home"
-          PYTHONDONTWRITEBYTECODE=1 DF_ROOT_ACCEPTANCE=1
-          .venv/bin/python -m tests.df.ci_step0 root
-          --out "$RUNNER_TEMP/df-stage1/step0" --uv "$(command -v uv)"
+        run: |
+          if [ ! -x .venv/bin/python ]; then
+            echo "::notice title=step 0::skipped: no .venv (uv sync did not run)"
+            exit 0
+          fi
+          sudo -n install -d -m 0700 "$RUNNER_TEMP/root-home"
+          sudo -n env "PATH=$PATH" "HOME=$RUNNER_TEMP/root-home" \
+            PYTHONDONTWRITEBYTECODE=1 DF_ROOT_ACCEPTANCE=1 \
+            .venv/bin/python -m tests.df.ci_step0 root \
+            --out "$RUNNER_TEMP/df-stage1/step0" --uv "$(command -v uv)"
 
       # ---- mechanism probes: the run_as/spawn_as path, failing by name -----
       - name: "mechanism: unshare --net + setpriv to nobody"
@@ -175,6 +176,11 @@ jobs:
       - name: tests/df root run
         if: ${{ !cancelled() && env.DF_STAGE1_SCOPE != 'probes' }}
         run: |
+          # The cell is already red if uv sync did not run: no second error.
+          if [ ! -x .venv/bin/pytest ]; then
+            echo "::notice title=root run::skipped: no .venv/bin/pytest (uv sync did not run)"
+            exit 0
+          fi
           sudo -n install -d -m 0700 "$RUNNER_TEMP/root-home"
           select=test_root_gate_open
           if [ -n "$DF_STAGE1_K" ]; then select="($DF_STAGE1_K) or $select"; fi

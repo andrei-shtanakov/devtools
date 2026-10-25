@@ -32,6 +32,7 @@ import socket
 import subprocess
 import sys
 import time
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
@@ -99,6 +100,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     print(f"ci_step0: {args.part}: {len(facts)} facts -> {path}")
     return 0
+
+
+#: R96: system CLIs the macOS real-host tests use (git is an xcrun shim;
+#: df's own analysis runs otool through the shim too), judged by df's policy
+#: after the CommandLineTools selection. `make` is left out: df refuses it by
+#: design (a nested shim, test_o3_real_make_is_named_as_wrapper).
+R96_TOOLS: Mapping[str, Path] = {
+    "git": SYSTEM_GIT,
+    "tar": SYSTEM_TAR,
+    "chmod": Path("/bin/chmod"),
+}
+
+
+def r96_main() -> int:
+    """R96 verdict for the workflow: 1 (named errors) unless df trusts them."""
+    problems = plat.approved_cli_problems(R96_TOOLS, plat.detect_platform())
+    for problem in problems:
+        print(f"::error title=select CommandLineTools (R96)::{problem}")
+    print(f"R96: approved_cli_problems({sorted(R96_TOOLS)}): {len(problems)}")
+    return 1 if problems else 0
 
 
 def refusal_reason(part: str, euid: int, env: Mapping[str, str]) -> str | None:
@@ -517,6 +538,14 @@ def _eslogger_run(scratch: Path, out: Path) -> Facts:
     control.mkdir()
     (control / "f").write_text("step0\n")
     raw, err = scratch / "es-raw.jsonl", scratch / "es-err.txt"
+
+    def touch() -> None:
+        (control / "f").read_text()
+        os.listdir(control)
+
+    def read_lines() -> list[str]:
+        return raw.read_bytes().decode("utf-8", "replace").splitlines()
+
     with raw.open("wb") as stdout, err.open("wb") as stderr:
         proc = subprocess.Popen(
             [str(ESLOGGER), *ESLOGGER_EVENTS, "--format", "json"],
@@ -524,12 +553,7 @@ def _eslogger_run(scratch: Path, out: Path) -> Facts:
             stdout=stdout,
             stderr=stderr,
         )
-        time.sleep(3.0)
-        for _ in range(3):
-            (control / "f").read_text()
-            os.listdir(control)
-            time.sleep(0.2)
-        time.sleep(2.0)
+        ready = wait_for_control(read_lines, touch, control)
         exited_early = proc.poll() is not None
         if not exited_early:
             proc.send_signal(signal.SIGINT)
@@ -538,49 +562,100 @@ def _eslogger_run(scratch: Path, out: Path) -> Facts:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
-    lines = raw.read_bytes().decode("utf-8", "replace").splitlines()
-    seen = eslogger_control(lines, control)
+    lines = read_lines()
     (out / "eslogger-sample.jsonl").write_text("\n".join(lines[:20]))
+    seen = eslogger_control(lines, control)
     return {
         "exited_before_signal": exited_early,
         "rc": proc.returncode,
         "stderr": _text(err.read_bytes()),
+        "seconds_to_first_control": ready,
         **seen,
         "permitted": seen["control_seen"],
     }
 
 
-def eslogger_control(lines: Sequence[str], control: Path) -> Facts:
-    """Decoded eslogger events touching `control` (its JSON escapes `/`).
+def wait_for_control(
+    read_lines: Callable[[], Sequence[str]],
+    touch: Callable[[], None],
+    control: Path,
+    *,
+    timeout: float = 30.0,
+    interval: float = 0.5,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> float | None:
+    """Readiness of an eslogger subscription (reused by 13-B's observer).
 
-    `control_seen` means the control access was observed; the sample is the
-    first matching event, else the paths of the first three events.
+    ES events flow only once the client is subscribed, which is not when the
+    process starts. Touch `control` every `interval` until a decoded event
+    on it by euid 0 appears; return the seconds that took, `None` after
+    `timeout`.
     """
-    prefix = str(control)
+    start = clock()
+    while True:
+        touch()
+        sleep(interval)
+        if any(_is_control(d, control) for d in _decoded(read_lines())):
+            return round(clock() - start, 2)
+        if clock() - start >= timeout:
+            return None
+
+
+def eslogger_control(lines: Sequence[str], control: Path) -> Facts:
+    """Decoded eslogger events on `control` by euid 0 (its JSON escapes `/`).
+
+    `control_seen` means the control access was observed. The sample is the
+    first matching event; without one: the event kinds seen and the ten most
+    frequent paths, to tell "nothing delivered" from "control not matched".
+    """
     events = matches = 0
     first: object = None
-    paths: list[list[str]] = []
+    kinds: Counter[str] = Counter()
+    paths: Counter[str] = Counter()
+    for decoded in _decoded(lines):
+        events += 1
+        if _is_control(decoded, control):
+            matches += 1
+            if first is None:
+                first = _event_sample(decoded)
+            continue
+        event = decoded.get("event")
+        if isinstance(event, dict):
+            kinds.update(str(k) for k in event)
+        paths.update(s for s in _strings(event) if s.startswith("/"))
+    sample: object = first
+    if first is None:
+        sample = {"event_kinds": sorted(kinds), "top_paths": paths.most_common(10)}
+    return {
+        "events": events,
+        "control_events": matches,
+        "control_seen": matches > 0,
+        "sample": sample,
+    }
+
+
+def _decoded(lines: Sequence[str]) -> list[dict[str, object]]:
+    found: list[dict[str, object]] = []
     for line in lines:
         try:
             decoded = json.loads(line)
         except ValueError:
             continue
-        if not isinstance(decoded, dict):
-            continue
-        events += 1
-        found = _strings(decoded.get("event"))
-        if any(s == prefix or s.startswith(prefix + "/") for s in found):
-            matches += 1
-            if first is None:
-                first = _event_sample(decoded)
-        elif len(paths) < 3:
-            paths.append([s for s in found if s.startswith("/")])
-    return {
-        "events": events,
-        "control_events": matches,
-        "control_seen": matches > 0,
-        "sample": first if first is not None else {"first_event_paths": paths},
-    }
+        if isinstance(decoded, dict):
+            found.append(decoded)
+    return found
+
+
+def _is_control(decoded: dict[str, object], control: Path) -> bool:
+    """An event naming `control` (or a path below it) by a euid-0 process."""
+    prefix = str(control)
+    names = _strings(decoded.get("event"))
+    if not any(s == prefix or s.startswith(prefix + "/") for s in names):
+        return False
+    process = decoded.get("process")
+    token = process.get("audit_token") if isinstance(process, dict) else None
+    return isinstance(token, dict) and token.get("euid") == 0
 
 
 def _strings(value: object) -> list[str]:
