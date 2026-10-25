@@ -21,10 +21,20 @@ every classification read of the retry that starts with a builder tree on
 disk — `releases/<id>` of `df-build` (via its holder `releases/`),
 `staging/<id>` (via `staging/`), the build scratch in `df-build`'s home —
 runs inside `observe_root_access`, and `build-dir` from the `fchown` on
-(R93). Root's own ops on a holder are allowed (`require_clean`), every
-access under it is a violation; an `unobserved` observation fails the test.
-`settle`, the preparation steps and `retry_quarantine` outside `drive` are
-not observed (they touch no builder tree: 13-D observed the leaves).
+(R93). Root's own ops on a holder are allowed (`RouteObserver.require_clean`),
+every access under it is a violation; an `unobserved` observation fails the
+test. Without `scope` (Linux): root's copy and digest of a whole release
+under a scope rule overran the audit log (`ausearch` lost the markers, CI
+run 40223595064) and a deleted tree's inode, reused by root's next file,
+matched by identity; so on Linux only accesses under the watched holders
+count (the observer's limit `identity-scope`). `settle`, the preparation
+steps and `retry_quarantine` outside `drive` are not observed (they touch
+no builder tree: 13-D observed the leaves).
+
+The installed command runs as a real process (`RootWorld.command`): its
+entry reads `<R>` (its `_ROOT`) and admits the admin code, but `df.cli`
+then uses `default_layout()` — `/` — so its level-1 checks read the host;
+level 1 of `<R>` is the in-process `doctor.level1_checks` (`_level1`).
 """
 
 from __future__ import annotations
@@ -236,23 +246,28 @@ def notes(request: pytest.FixtureRequest) -> Iterator[dict[str, object]]:
     write_evidence(stage1_out(), f"install/{_label(request)}.json", text + "\n")
 
 
-def _doctor_reached(world: RootWorld) -> dict[str, Any]:
-    """Level 1 in process, then by the installed command's `doctor --json`
-    (a real process of root): reached, exit 0."""
+def _doctor_reached(world: RootWorld) -> None:
+    """Level 1 of `<R>` (in process), and the installed command's `doctor
+    --json` runs: its entry admits the admin code, `df.cli` reports, and
+    the snapshot it was handed (from `<R>`) has no `pending.toml`."""
     checks = _level1(world)
     assert doctor.level1_reached(checks), [c for c in checks if c.status != "ok"]
+    report = _command_report(world)
+    pending = [c for c in report["checks"] if c["id"] == "install.pending"]
+    assert [c["status"] for c in pending] == [doctor.OK], pending
+
+
+def _command_report(world: RootWorld) -> dict[str, Any]:
+    """`darkfactory doctor --json` of the installed command: a report
+    (exit 0 or 2, the module doc says why not 0), nothing on stderr."""
     done = world.command(["doctor", "--json"])
-    try:
-        report = json.loads(done.stdout)
-    except ValueError:
-        pytest.fail(f"doctor: код {done.returncode}, не JSON: {done.stderr[-2000:]}")
-    other = [c for c in report["checks"] if c["status"] != doctor.OK]
-    reached = report["level1"] == "reached"
-    assert done.returncode == doctor.EXIT_REACHED and reached, (
+    codes = (doctor.EXIT_REACHED, doctor.EXIT_NOT_REACHED)
+    assert done.returncode in codes and done.stderr == "", (
         done.returncode,
-        other,
         done.stderr[-2000:],
     )
+    report = json.loads(done.stdout)
+    assert {"level1", "checks", "models"} <= set(report), report
     return report
 
 
@@ -273,11 +288,14 @@ def _only_release(layout: Layout, rid: str) -> None:
 
 @dataclass
 class Observed:
-    """One observation of the retry and the holders allowed in it."""
+    """One observation of the retry and root's allowed ops on its holders:
+    by path, and (Linux, `openat` by a held descriptor) by the relative
+    name the kernel recorded."""
 
     phase: str
     obs: Observation
     holder: dict[Path, frozenset[str]]
+    relative: dict[str, frozenset[str]]
 
 
 @dataclass
@@ -318,7 +336,7 @@ class RouteObserver:
         return observed
 
     def _call(self, phase: str, rid: str, fn: Callable[[], Any]) -> Any:
-        sources, holder = self.sources(rid)
+        sources, holder, relative = self.sources(rid)
         if not sources and phase != "build-dir":
             return fn()
         tag = f"{self.label}-{len(self.seen):02d}-{phase}"
@@ -328,7 +346,7 @@ class RouteObserver:
             sources,
             control=self.world.control_dir(),
             workdir=self.world.workdir(),
-            scope=self.world.layout.root,
+            scope=None,  # route volume: see the module doc
             record=record,
         ) as obs:
             try:
@@ -338,30 +356,40 @@ class RouteObserver:
                     mp.setattr(fsutil, "fault_point", _watch_at_chown(obs))
                     return fn()
             finally:
-                self.seen.append(Observed(tag, obs, holder))
+                self.seen.append(Observed(tag, obs, holder, relative))
 
-    def sources(self, rid: str) -> tuple[list[Path], dict[Path, frozenset[str]]]:
-        """The builder trees on disk now, each through its holder."""
+    def sources(
+        self, rid: str
+    ) -> tuple[list[Path], dict[Path, frozenset[str]], dict[str, frozenset[str]]]:
+        """The builder trees on disk now, each through its holder: root's
+        directories `releases/`, `staging/`, `staging/<id>` and the
+        quarantine (opened or listed: none is under a source, spec 3.8),
+        `df-build`'s home (opened: `sudo`'s cwd on macOS, 13-D)."""
         lay = self.world.layout
         sources: list[Path] = []
         holder: dict[Path, frozenset[str]] = {}
+        relative: dict[str, frozenset[str]] = {}
         try:
             st = os.lstat(lay.release_dir(rid))
         except FileNotFoundError:
             st = None
-        if st is not None and st.st_uid == self.uid:
+        builder_release = st is not None and st.st_uid == self.uid
+        if builder_release:
             sources.append(lay.releases)
-            holder[lay.releases] = OPEN_OPS
+            holder[lay.releases] = LIST_OPS
         box = lay.staging_dir(rid)
-        quarantined = os.path.isdir(lay.quarantine) and bool(os.listdir(lay.quarantine))
-        if os.path.lexists(box) or quarantined:
+        quarantine = lay.quarantine
+        quarantined = os.path.isdir(quarantine) and bool(os.listdir(quarantine))
+        if os.path.lexists(lay.staging_tree(rid)) or quarantined:
             sources.append(lay.staging)
-            holder |= {lay.staging: OPEN_OPS, box: OPEN_OPS, lay.quarantine: LIST_OPS}
+            holder |= {lay.staging: LIST_OPS, box: LIST_OPS, quarantine: LIST_OPS}
+            if not builder_release:  # then `<id>` under `staging/` is the box
+                relative[rid] = LIST_OPS
         home = lay.build_home
         if any(os.path.lexists(home / name) for name in ("tmp", "cache")):
             sources.append(home)
             holder[home] = OPEN_OPS
-        return sources, holder
+        return sources, holder, relative
 
     def require_clean(self) -> None:
         """Every observation `observed`, no access but a holder's own op."""
@@ -370,6 +398,7 @@ class RouteObserver:
             if obs.status != "observed":
                 pytest.fail(f"наблюдатель: unobserved ({item.phase}) — {obs.reason}")
             allowed = {str(path): ops for path, ops in item.holder.items()}
+            allowed |= item.relative
             bad = [a for a in obs.violations if a.op not in allowed.get(a.path, ())]
             assert bad == [], (item.phase, bad)
 
@@ -532,8 +561,9 @@ def test_crash_after_activation_real_fs(
 
 def test_tamper_after_install_doctor_broken(root_world: RootWorld) -> None:
     """Spec 3.8: a file of the installed release changed afterwards ->
-    the installed command's `doctor` reports `release.digest` «нарушено»
-    (the release is damaged) and level 1 not reached (exit 2)."""
+    `doctor` (its level 1 of `<R>`, in process: module doc) reports
+    `release.digest` «нарушено» (the release is damaged), level 1 not
+    reached."""
     world = root_world
     assert world.bootstrap(world.init_argv()) == cli.EXIT_OK
     lay = world.layout
@@ -544,13 +574,10 @@ def test_tamper_after_install_doctor_broken(root_world: RootWorld) -> None:
     target = lay.release_dir(rid) / site / "dfprobe.py"
     with open(target, "a", encoding="utf-8") as handle:
         handle.write("# tampered\n")
-    done = world.command(["doctor", "--json"])
-    assert done.returncode == doctor.EXIT_NOT_REACHED, (done.stdout, done.stderr)
-    report = json.loads(done.stdout)
-    assert report["level1"] == "not reached"
-    checks = {c["id"]: c for c in report["checks"]}
-    assert checks["release.digest"]["status"] == doctor.BROKEN, checks
-    assert doctor.DAMAGED in checks["release.digest"]["reason"]
+    checks = {c.id: c for c in _level1(world)}
+    assert not doctor.level1_reached(list(checks.values()))
+    assert checks["release.digest"].status == doctor.BROKEN, checks
+    assert doctor.DAMAGED in checks["release.digest"].reason
 
 
 # ---------- refused artifacts (df-build changes its tree after the build) ----------
@@ -686,8 +713,13 @@ def test_internal_absolute_links_survive_rename_and_copy(
         assert text.startswith(prefix), (rel, text)
         assert os.path.realpath(release / rel).startswith(prefix), rel
     assert check_links(release, str(release)) == []
-    done = _role_run([str(release / env.bin / "python"), "-I", "-c", "print(1)"])
-    assert (done.returncode, done.stdout) == (0, "1\n"), done.stderr
+    # as df-build: root's `-I` run would write bytecode into the release
+    # (`-I` ignores PYTHONDONTWRITEBYTECODE; CI run 40223595064)
+    python = release / env.bin / "python"
+    done = _as_build(
+        f"{_q(python)} -I -c 'print(1)'", installed_world.layout.build_home
+    )
+    assert (done.returncode, done.stdout) == (0, b"1\n"), done
 
 
 def test_runs_after_build_dir_and_cache_removed(
@@ -740,8 +772,9 @@ def test_darkfactory_command_works_and_is_immutable(
     installed_world: InstalledWorld,
 ) -> None:
     """Spec 3.9: the installed `darkfactory doctor` and `models list` (real
-    processes of root) work; two runs of each change neither the release,
-    the admin code, the admin Python nor the command files."""
+    processes of root) work — the entry admits the admin code, `df.cli`
+    answers; two runs of each change neither the release, the admin code,
+    the admin Python nor the command files; level 1 of `<R>` holds."""
     world, lay = installed_world.world, installed_world.layout
     before = _digests(installed_world)
     for _ in range(2):
@@ -1038,11 +1071,12 @@ def test_entrypoint_has_no_network(
 
 #: A wheel with one console script, for uv's shebang form by path length.
 WHEEL_NAME = "thr-0.0.0-py3-none-any.whl"
-#: The longest venv interpreter path probed for the trampoline switch (macOS
-#: `PATH_MAX` is 1024).
-THRESHOLD_MAX = 1000
-#: A wheel with a bundled native library (manylinux `.libs`, macOS none).
-NATIVE_WHEEL = "cffi==1.17.1"
+#: The longest venv interpreter path probed for the trampoline switch: the
+#: venv's own files stay under macOS `PATH_MAX` (1024; CI run 40222369099).
+THRESHOLD_MAX = 900
+#: A wheel with bundled native libraries (manylinux `pillow.libs`, macOS
+#: `PIL/.dylibs`); cffi 1.17.1 bundles none (CI run 40223595064).
+NATIVE_WHEEL = "pillow==11.0.0"
 
 
 @dataclass
@@ -1131,7 +1165,7 @@ class BoundaryFacts:
                 p
                 for p in found.values()
                 if p is not None
-                and not p.startswith(prefix)
+                and not p.startswith((prefix, "system:"))
                 and not plat.is_system_path(Path(p), PLATFORM)
             ]
             out.append(
@@ -1306,11 +1340,17 @@ def _resolve(
     origin: Path,
 ) -> dict[str, str | None]:
     """Where each need is found through `rpaths` with the file's directory
-    token set to `origin` (absolute needs: themselves), else `None`."""
+    token set to `origin`, else `None`; an absolute need is itself, or
+    `system:` when only the macOS dyld cache holds it."""
     found: dict[str, str | None] = {}
     for name in needed:
         if name.startswith("/"):
-            found[name] = name if os.path.exists(name) else None
+            if os.path.exists(name):
+                found[name] = name
+            elif plat.is_system_path(Path(name), PLATFORM):
+                found[name] = f"system:{name}"
+            else:
+                found[name] = None
             continue
         leaf = name.removeprefix("@rpath/")
         found[name] = None
@@ -1322,6 +1362,11 @@ def _resolve(
             if os.path.exists(candidate):
                 found[name] = candidate
                 break
+        if found[name] is None:
+            for base in plat.LOADER_DIRS[PLATFORM]:
+                if os.path.exists(os.path.join(base, leaf)):
+                    found[name] = f"system:{os.path.join(base, leaf)}"
+                    break
     return found
 
 
