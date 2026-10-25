@@ -172,6 +172,19 @@ def tcltk_strip_argv(plan: BuildPlan, platform: PlatformName) -> list[str]:
     return [_RM, "-r", "--", *(str(base / rel) for rel in removed)]
 
 
+def unmeasured_python(python: str) -> str | None:
+    """Why a profile Python cannot be built (no measured `TCLTK_REMOVED`
+    list, spec 3.4), with the remedy; `None` when it has one."""
+    if python in TCLTK_REMOVED:
+        return None
+    measured = ", ".join(sorted(TCLTK_REMOVED))
+    return (
+        f"Python {python}: список удаляемых компонентов Tcl/Tk не измерен "
+        f"(измерен для {measured}); укажите в профиле одну из этих версий "
+        "или измерьте список для этой версии заново (спека §3.4)"
+    )
+
+
 def build_commands(plan: BuildPlan, layout: Layout) -> list[tuple[str, list[str]]]:
     """`(label, argv)` in execution order.
 
@@ -224,12 +237,9 @@ def _check_plan(plan: BuildPlan, layout: Layout) -> None:
             f"release_dir {plan.release_dir}, для {plan.release_id} "
             f"ожидается {expected}",
         )
-    if plan.profile.python not in TCLTK_REMOVED:
-        raise StepFailed(
-            "build",
-            f"Python {plan.profile.python}: список удаляемых компонентов Tcl/Tk "
-            f"не измерен (есть для {', '.join(sorted(TCLTK_REMOVED))})",
-        )
+    refusal = unmeasured_python(plan.profile.python)
+    if refusal is not None:
+        raise StepFailed("build", refusal)
 
 
 def _steps(plan: BuildPlan, layout: Layout) -> Iterator[Step]:
@@ -291,6 +301,13 @@ def _check_user(layout: Layout) -> None:
         )
 
 
+#: Remedy appended to a failed `strip-tcltk` (spec 3.4: list drift).
+STRIP_DRIFT_HINT = (
+    "дрейф списка Tcl/Tk: установленный Python не совпадает с измеренным "
+    "TCLTK_REMOVED; перемерить перечень (спека §3.4)"
+)
+
+
 def _check_result(label: str, result: RunResult) -> None:
     if result.launched and not (
         result.timed_out or result.stdout_truncated or result.returncode != 0
@@ -305,7 +322,10 @@ def _check_result(label: str, result: RunResult) -> None:
     else:
         state = f"код {result.returncode}"
     tail = result.stderr[-STDERR_REPORT_BYTES:].decode("utf-8", "replace").strip()
-    raise StepFailed(label, f"{state}: {tail}" if tail else state)
+    detail = f"{state}: {tail}" if tail else state
+    if label == "strip-tcltk":
+        detail = f"{detail}; {STRIP_DRIFT_HINT}"
+    raise StepFailed(label, detail)
 
 
 def _check_head(label: str, plan: BuildPlan, result: RunResult) -> None:

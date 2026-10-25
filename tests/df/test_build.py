@@ -455,6 +455,8 @@ def test_strip_failure_stops_the_build_before_sync(
     with pytest.raises(StepFailed) as err:
         run_build(plan, layout, runner=stub)
     assert err.value.step == "strip-tcltk" and "tk9.0" in err.value.detail
+    assert err.value.detail.endswith(build.STRIP_DRIFT_HINT)
+    assert "перемерить перечень" in build.STRIP_DRIFT_HINT
     assert stub.label_of(stub.calls[-1]["argv"]) == "strip-tcltk"
 
 
@@ -467,6 +469,7 @@ def test_unmeasured_python_refused_before_any_command(
         run_build(bad, layout, runner=stub)
     assert err.value.step == "build"
     assert "3.12.12" in err.value.detail and "Tcl/Tk" in err.value.detail
+    assert "укажите в профиле" in err.value.detail and "3.12.13" in err.value.detail
     assert stub.calls == []
     with pytest.raises(StepFailed):
         build_commands(bad, layout)
@@ -484,7 +487,7 @@ def test_strip_argv_removes_exactly_the_list(
 ) -> None:
     """The real `rm` removes every listed entry and nothing else."""
     argv = tcltk_strip_argv(plan, name)
-    base = Path(argv[3]).parents[1]
+    base = plan.release_dir / "python" / python_key("3.12.13", name)
     _stand_in_tree(base, TCLTK_REMOVED_3_12_13[name])
     done = subprocess.run(argv, capture_output=True, check=False)
     assert done.returncode == 0, done.stderr
@@ -495,7 +498,7 @@ def test_strip_argv_removes_exactly_the_list(
 def test_strip_argv_refuses_list_drift(plan: BuildPlan) -> None:
     """A listed entry missing (list drift) fails the real `rm`, by name."""
     argv = tcltk_strip_argv(plan, "linux-x86_64")
-    base = Path(argv[3]).parents[1]
+    base = plan.release_dir / "python" / python_key("3.12.13", "linux-x86_64")
     _stand_in_tree(base, [e for e in TCLTK_LINUX if e != "lib/tk9.0"])
     done = subprocess.run(argv, capture_output=True, check=False)
     assert done.returncode != 0
@@ -508,8 +511,9 @@ def test_tcltk_list_matches_the_pinned_python(
     tmp_path: Path, name: PlatformName
 ) -> None:
     """Re-measure (uv installs either key on any host): every listed entry
-    exists, and no other Tcl/Tk entry sits where the list was measured. On
-    the host platform the stripped tree passes rule (в) unchanged."""
+    exists, and no other Tcl/Tk-named entry is anywhere in the tree (whole
+    walk). On the host platform the stripped tree passes rule (в)
+    unchanged."""
     uv = pinned_uv()
     key = python_key("3.12.13", name)
     release = tmp_path / "rel"
@@ -525,14 +529,7 @@ def test_tcltk_list_matches_the_pinned_python(
     base = release / "python" / key
     listed = TCLTK_REMOVED_3_12_13[name]
     assert [rel for rel in listed if not os.path.lexists(base / rel)] == []
-    words = ("tcl", "tk", "thread3", "idle", "turtle")
-    found = {
-        f"{top}/{entry.name}"
-        for top in ("bin", "lib", "lib/python3.12", "lib/python3.12/lib-dynload")
-        for entry in os.scandir(base / top)
-        if any(w in entry.name.lower() for w in words)
-    }
-    assert found == set(listed)
+    assert _tcltk_named(base) == set(listed)
     if name != detect_platform():
         return
     check = _NativeCheck(release, name, PurePosixPath(f"python/{key}/bin"))
@@ -544,6 +541,33 @@ def test_tcltk_list_matches_the_pinned_python(
     strip = tcltk_strip_argv(_plan_at(release), name)
     subprocess.run(strip, capture_output=True, check=True)
     assert check.problems() == []
+
+
+#: Name fragments of the measurement (test only; df removes a literal list).
+TCLTK_WORDS = ("tcl", "tk", "thread3", "idle", "turtle")
+#: Tcl/Tk-named, but not Tcl/Tk: a terminal type of ncurses' terminfo.
+TCLTK_NOT = frozenset({"share/terminfo/t/tkterm"})
+
+
+def _tcltk_named(base: Path) -> set[str]:
+    """Every Tcl/Tk-named entry of the whole tree, not descending into one
+    (its contents go with it), minus `TCLTK_NOT`."""
+    found: set[str] = set()
+    for dirpath, dirs, files in os.walk(base):
+        top = Path(dirpath).relative_to(base)
+        for name in (*dirs, *files):
+            if any(w in name.lower() for w in TCLTK_WORDS):
+                found.add(str(top / name))
+        dirs[:] = [d for d in dirs if str(top / d) not in found]
+    return found - TCLTK_NOT
+
+
+def test_tcltk_named_walks_the_whole_tree(tmp_path: Path) -> None:
+    """The measurement sees a Tcl/Tk name at any depth, once per subtree."""
+    for rel in ("include/tcl.h", "lib/tk9.0/x.tcl", "share/terminfo/t/tkterm", "a/b"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("x")
+    assert _tcltk_named(tmp_path) == {"include/tcl.h", "lib/tk9.0"}
 
 
 def _plan_at(release_dir: Path) -> BuildPlan:
