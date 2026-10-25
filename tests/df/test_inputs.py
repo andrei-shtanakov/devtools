@@ -13,7 +13,7 @@ import pytest
 
 from df import inputs
 from df.build import BuildPlan, build_env
-from df.digest import TreeError
+from df.digest import TreeError, tree_digest
 from df.inputs import (
     fetch_reference,
     installed_distributions,
@@ -73,6 +73,33 @@ def test_reference_fetch_unpacks_pinned_commit(tmp_path: Path, layout: Layout) -
     assert got == dest
     assert sorted(p.name for p in dest.iterdir()) == ["a.txt", "ok", "uv.lock"]
     assert [p.name for p in layout.verify_dir.iterdir()] == ["core"]
+
+
+#: R79 (carry C8): a public commit of this repo on GitHub (master, PR #631)
+#: and the digest of its checkout, nothing excluded (measured 25.10).
+GITHUB_PIN = RepoPin(
+    "devtools",
+    "https://github.com/andrei-shtanakov/devtools",
+    "d2f569eb668b1ba2e04a6b84e8d1cfd17dc93e81",
+    (),
+)
+GITHUB_DIGEST = (
+    "sha256:710edc68ad138c176c3571311bbfa78ac6ff35deaf3bbd4748d36b93548bafa9"
+)
+
+
+@pytest.mark.network
+def test_fetch_reference_sha_from_github(layout: Layout) -> None:
+    """R79: the build's `--depth=1 <sha>` fetch from GitHub, with the system
+    git (`/usr/bin/git`, the approved one) and the production environment
+    of `fetch_reference`: `FETCH_HEAD` is the sha (else a refusal) and the
+    unpacked checkout is exactly that commit's tree."""
+    dest = layout.verify_dir / "devtools"
+    got = fetch_reference(GITHUB_PIN, dest, git=Path("/usr/bin/git"), layout=layout)
+    assert got == dest
+    assert (dest / "df" / "inputs.py").is_file()
+    assert tree_digest(dest, exclude=frozenset()) == GITHUB_DIGEST
+    assert [p.name for p in layout.verify_dir.iterdir()] == ["devtools"]
 
 
 def test_reference_fetch_checks_head_and_uses_data_filter(

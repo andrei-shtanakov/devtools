@@ -69,7 +69,7 @@ from df.boundary import (
     static_problems,
     transfer_check,
 )
-from df.digest import check_links, release_digest, tree_digest
+from df.digest import check_links, tree_digest
 from df.journal import StepFailed, read_journal
 from df.paths import Layout
 from tests.df.conftest import stage1_out
@@ -154,37 +154,47 @@ def test_clean_pass_walks_automaton_in_order(root_world: RootWorld) -> None:
     assert str(walk[-1]["detail"]).endswith("→ committed"), walk[-1]
 
 
-def _role_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
-    env = {**ROLE_ENV, "PYTHONDONTWRITEBYTECODE": "1"}
-    return subprocess.run(
-        argv, env=env, capture_output=True, text=True, check=False, timeout=120
+def _role_run(world: RootWorld, argv: list[str]) -> tuple[int, str, str]:
+    """`argv` as `df-build` from its home without network (spec 3.4: release
+    code never runs as root; root's `-I` run would also write bytecode into
+    the release): (code, stdout, stderr)."""
+    home = world.layout.build_home
+    result = plat.run_as(
+        plat.BUILD_USER, argv, env=ROLE_ENV, cwd=home, network=False, timeout=120
     )
+    if not result.launched:
+        infra(f"{plat.BUILD_USER} не запущен: {argv}: {result}")
+    out, err = (b.decode("utf-8", "replace") for b in (result.stdout, result.stderr))
+    return result.returncode, out, err
 
 
 def test_installed_python_has_no_tk_but_core_works(root_world: RootWorld) -> None:
     """The installed release's Python cannot import Tcl/Tk modules; `ssl`,
     `sqlite3`, `ctypes`, `venv` (a real environment is created and runs) and
-    the pin's entrypoint still work."""
-    assert root_world.bootstrap(root_world.init_argv()) == 0
-    lay = root_world.layout
+    the pin's entrypoint still work — all run as `df-build`."""
+    world = root_world
+    assert world.bootstrap(world.init_argv()) == 0
+    lay = world.layout
     snap = state.parse_snapshot(state.read_raw(lay), lay, mode="reader")
     assert snap.release_id is not None
     bin_dir = lay.release_dir(snap.release_id) / "venv" / PIN_NAME / "bin"
     python = str(bin_dir / "python")
     for module in NO_TK:
-        done = _role_run([python, "-I", "-c", f"import {module}"])
-        assert done.returncode != 0, module
-        assert "ModuleNotFoundError" in done.stderr, (module, done.stderr)
-    core = _role_run([python, "-I", "-c", CORE])
-    assert core.returncode == 0, core.stderr
-    env_dir = root_world.top / "core-venv"
-    made = _role_run([python, "-I", "-m", "venv", "--without-pip", str(env_dir)])
-    assert made.returncode == 0, made.stderr
-    used = _role_run([str(env_dir / "bin" / "python"), "-I", "-c", "import ssl"])
-    assert used.returncode == 0, used.stderr
-    probe = _role_run([str(bin_dir / "dfprobe"), "--help"])
-    assert probe.returncode == 0, probe.stderr
-    assert probe.stdout.startswith("usage: dfprobe"), probe.stdout
+        code, _, err = _role_run(world, [python, "-I", "-c", f"import {module}"])
+        assert code != 0, module
+        assert "ModuleNotFoundError" in err, (module, err)
+    code, _, err = _role_run(world, [python, "-I", "-c", CORE])
+    assert code == 0, err
+    env_dir = lay.build_home / "core-venv"
+    venv_argv = [python, "-I", "-m", "venv", "--without-pip", str(env_dir)]
+    code, _, err = _role_run(world, venv_argv)
+    assert code == 0, err
+    used = [str(env_dir / "bin" / "python"), "-I", "-c", "import ssl"]
+    code, _, err = _role_run(world, used)
+    assert code == 0, err
+    code, out, err = _role_run(world, [str(bin_dir / "dfprobe"), "--help"])
+    assert code == 0, err
+    assert out.startswith("usage: dfprobe"), out
 
 
 # ---------- shared helpers of the install group ----------
@@ -238,20 +248,46 @@ def _retry(world: RootWorld) -> int:
 @pytest.fixture()
 def notes(request: pytest.FixtureRequest) -> Iterator[dict[str, object]]:
     """Facts of one test, kept as CI evidence (`install/<test>.json`)
-    whatever its outcome (junit xunit2 drops `record_property`)."""
+    whatever its outcome, one file per test beside junit-root.xml."""
     facts: dict[str, object] = {}
     yield facts
     text = json.dumps(facts, indent=2, ensure_ascii=False, sort_keys=True)
     write_evidence(stage1_out(), f"install/{_label(request)}.json", text + "\n")
 
 
+#: Checks of the installed command's `doctor` that are not ok only because
+#: its `df.cli` reads `/` (module doc): the release, the account and the
+#: trusted paths of a host without df. A check outside it fails the test.
+SEAM_CHECKS = frozenset(
+    {
+        "etc.schemas",
+        "release.active",
+        "release.digest",
+        "release.admin",
+        "release.inputs",
+        "release.perms",
+        "release.boundary",
+        "trusted.paths",
+        "build.user",
+    }
+)
+
+
 def _doctor_reached(world: RootWorld) -> None:
     """Level 1 of `<R>` (in process), and the installed command's `doctor
-    --json` runs: its entry admits the admin code, `df.cli` reports, and
-    the snapshot it was handed (from `<R>`) has no `pending.toml`."""
+    --json` (a real process of root): its entry admits the admin code, and
+    `df.cli` answers exactly as the doctor over the snapshot of `<R>` and
+    the layout `/` (the seam), whose blocking checks are `SEAM_CHECKS`."""
     checks = _level1(world)
     assert doctor.level1_reached(checks), [c for c in checks if c.status != "ok"]
     report = _command_report(world)
+    lay = Layout(Path("/"))
+    snap = state.parse_snapshot(state.read_raw(world.layout), lay, mode="reader")
+    model = doctor.level1_checks(snap, lay, euid=0)
+    got = [(c["id"], c["status"], c["reason"]) for c in report["checks"]]
+    assert got == [(c.id, c.status, c.reason) for c in model]
+    blocking = {c.id for c in model if doctor._blocks(c)}  # noqa: SLF001
+    assert blocking <= SEAM_CHECKS, blocking - SEAM_CHECKS
     pending = [c for c in report["checks"] if c["id"] == "install.pending"]
     assert [c["status"] for c in pending] == [doctor.OK], pending
 
@@ -292,6 +328,7 @@ class Observed:
     name the kernel recorded."""
 
     phase: str
+    name: str
     obs: Observation
     holder: dict[Path, frozenset[str]]
     relative: dict[str, frozenset[str]]
@@ -355,7 +392,7 @@ class RouteObserver:
                     mp.setattr(fsutil, "fault_point", _watch_at_chown(obs))
                     return fn()
             finally:
-                self.seen.append(Observed(tag, obs, holder, relative))
+                self.seen.append(Observed(tag, phase, obs, holder, relative))
 
     def sources(
         self, rid: str
@@ -456,6 +493,19 @@ def _interrupt_inside(mp: pytest.MonkeyPatch, action: str) -> list[tuple[str, st
     return hits
 
 
+#: The retry's phases that meet a builder tree, per interrupted action
+#: (measured on both cells, CI runs 40225037367/40225737217): each is
+#: observed; one fewer or more means a tree was missed or invented.
+_TAIL = ("read", "read", "copy", "read", "read", "verify")
+OBSERVED_PHASES: Mapping[str, tuple[str, ...]] = {
+    "build-dir": ("build-dir", "read", "read", "build", "read", "read", "seal", *_TAIL),
+    "build": ("read", "seal", *_TAIL),
+    "seal": ("read", "seal", *_TAIL),
+    "copy": ("read", "copy-partial", "read", "read", "verify"),
+    "verify": ("read", "verify"),
+}
+
+
 @pytest.mark.parametrize("action", CLEAN_PASS)
 def test_rerun_after_interrupt(
     root_world: RootWorld,
@@ -468,7 +518,8 @@ def test_rerun_after_interrupt(
     failed, nothing of another id or builder leftover, a partial copy not
     accepted (the retry copies again), a registered release kept, level 1
     by the installed command's own `doctor`. The retry's phases over a
-    builder tree are observed with no root access to it."""
+    builder tree are observed (exactly `OBSERVED_PHASES`) with no root
+    access to it."""
     world = root_world
     lay = world.layout
     with pytest.MonkeyPatch.context() as mp:
@@ -489,8 +540,10 @@ def test_rerun_after_interrupt(
     assert current_id(lay) == rid
     _only_release(lay, rid)
     retried = _done_steps(read_journal(lay.journal)[since:])
-    if action == "copy":
-        assert {"copy", "copy-partial"} & set(retried), retried
+    if action == "copy":  # the partial copy is removed and copied again
+        assert "copy-partial" in retried and "copy" not in retried, retried
+    phases = tuple(o.name for o in observer.seen)
+    assert phases == OBSERVED_PHASES.get(action, ()), phases
     observer.require_clean()
     _doctor_reached(world)
 
@@ -743,6 +796,7 @@ def test_runs_after_build_dir_and_cache_removed(
     assert called.stdout.startswith(b"dfprobe: python " + PYTHON.encode()), called
 
 
+@pytest.mark.network  # the wheel sample comes from PyPI (R77)
 def test_boundary_on_real_release(
     installed_world: InstalledWorld, installed_controls: Controls
 ) -> None:
@@ -772,8 +826,11 @@ def test_darkfactory_command_works_and_is_immutable(
 ) -> None:
     """Spec 3.9: the installed `darkfactory doctor` and `models list` (real
     processes of root) work — the entry admits the admin code, `df.cli`
-    answers; two runs of each change neither the release, the admin code,
-    the admin Python nor the command files; level 1 of `<R>` holds."""
+    answers (the doctor's report pinned by `_doctor_reached`); two runs of
+    each change neither the admin code, the admin Python nor the command
+    files, which the process runs. Level 1 and the release's immutability
+    under a real `doctor` are not shown here: its `df.cli` reads `/`, not
+    `<R>` (module doc); level 1 of `<R>` is checked in process."""
     world, lay = installed_world.world, installed_world.layout
     before = _digests(installed_world)
     for _ in range(2):
@@ -788,7 +845,6 @@ def test_darkfactory_command_works_and_is_immutable(
 def _digests(installed: InstalledWorld) -> dict[str, str]:
     lay = installed.layout
     return {
-        "release": release_digest(installed.release),
         "admin": admin.admin_digest(lay, installed.release_id),
         "admin-python": tree_digest(lay.admin_python, exclude=frozenset()),
         "bin": tree_digest(lay.bin_dir, exclude=frozenset()),
@@ -856,7 +912,7 @@ def test_admin_python_on_real_host(installed_world: InstalledWorld) -> None:
     key = build_mod.python_key(PYTHON, PLATFORM)
     final = lay.admin_python / key
     names = sorted(os.listdir(lay.admin_python))
-    assert key in names and ".staging" not in names, names
+    assert names == [key], names
     assert admin.admin_tree_problems(final, final) == []
     assert admin.admin_python_problems(lay, PYTHON, PLATFORM) == []
     entry = accept.registry_entry(lay, rid)
@@ -1104,7 +1160,7 @@ class BoundaryFacts:
                 "sys_path": _measure(lambda: self._sys_path(env)),
                 "libpython_pth": _measure(lambda: self._pth(env, scratch)),
                 "trampoline": _measure(lambda: self._trampoline(env, scratch)),
-                "native_wheel": _measure(lambda: self._native_wheel(env, scratch)),
+                "native_wheel": self._native_wheel(env, scratch),
             }
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
@@ -1278,8 +1334,8 @@ class BoundaryFacts:
             f" --python {_q(venv)}/bin/python {_q(NATIVE_WHEEL)}"
         )
         done = _as_build(script, work, network=True, timeout=300)
-        if done.returncode != 0:
-            return {"error": done.stderr[-500:].decode("utf-8", "replace")}
+        if done.returncode != 0:  # a network error fails, never a measurement
+            pytest.fail(f"{NATIVE_WHEEL}: {done.stderr[-1000:]!r}")
         site = venv / "lib" / f"python3.{env.minor}" / "site-packages"
         natives: dict[str, Any] = {}
         for path in _native_files(site):
