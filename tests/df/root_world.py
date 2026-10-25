@@ -4,7 +4,8 @@ Runs only as root in the disposable CI runners (the root gate of
 `tests/df/conftest.py` skips every test using it elsewhere).
 
 - Layout (R83): `<base>/df-acc-<pid>/r<n>`, every level root `0755`, `<base>`
-  = `/private/var/tmp-df` (macOS) or `/var/tmp-df` (Linux).
+  = `/private/var/tmp-df` (macOS) or `/var/tmp-df` (Linux); `<R>/Users`
+  (macOS) or `<R>/home` (Linux) exists root `0755`, as on a host.
 - Approved CLI (R88): `/usr/bin/git`, `/usr/bin/tar` and `<R>/cli/uv`, a
   root `0755` copy of the pinned uv on `PATH`.
 - Profile pin (R91): `install._profile` returns a profile of one repo named
@@ -327,6 +328,9 @@ def make_world(top: Path, repo: FixtureRepo, control_url: str) -> RootWorld:
     os.mkdir(root, 0o755)
     os.chmod(root, 0o755)
     layout = Layout(Path(os.path.realpath(root)))
+    # The host's /Users (macOS) or /home (Linux): root 0755, as on a host.
+    os.mkdir(layout.build_home.parent, 0o755)
+    os.chmod(layout.build_home.parent, 0o755)
     return RootWorld(layout, repo, _uv_copy(layout), top, control_url)
 
 
