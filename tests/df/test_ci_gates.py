@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.df import ci_junit
 from tests.df import conftest as df_conftest
 
 REPO = Path(__file__).resolve().parents[2]
@@ -118,12 +119,15 @@ def test_pinned_uv_skip_fails_session_only_when_required(
     assert session.exitstatus == want
 
 
-def _pytest(*args: str) -> subprocess.CompletedProcess[str]:
+def _pytest(
+    *args: str, extra: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     env = {
         k: v
         for k, v in os.environ.items()
         if k not in {"DF_ROOT_ACCEPTANCE", "PYTEST_ADDOPTS"}
     }
+    env.update(extra or {})
     return subprocess.run(
         [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", *args],
         cwd=REPO,
@@ -157,3 +161,64 @@ def test_root_tests_skip_cleanly_as_non_root() -> None:
     assert " passed" not in out
     assert "skipped" in out
     assert "DF_ROOT_ACCEPTANCE" in out
+
+
+@pytest.mark.parametrize(("required", "rc"), [("1", 1), ("0", 0)])
+def test_pinned_uv_gate_wiring(tmp_path: Path, required: str, rc: int) -> None:
+    """R78 end to end: without uv on PATH the pinned-uv test skips, and the
+    session fails only under `DF_REQUIRE_PINNED_UV=1`."""
+    empty = tmp_path / "bin"
+    empty.mkdir()
+    done = _pytest(
+        "-q",
+        "-k",
+        "corrupt_download",
+        "tests/df/test_admin.py",
+        extra={"PATH": f"{empty}:/bin", "DF_REQUIRE_PINNED_UV": required},
+    )
+    out = done.stdout + done.stderr
+    assert done.returncode == rc, out
+    assert "1 skipped" in out
+    assert ("закреплённого uv нет" in out) is (rc == 1)
+
+
+def _case(name: str, child: str = "") -> str:
+    return f'<testcase classname="t" name="{name}">{child}</testcase>'
+
+
+GATE_SKIP = '<skipped type="pytest.skip" message="root-приёмка: нужны euid 0"/>'
+
+
+@pytest.mark.parametrize(
+    ("cases", "ok"),
+    [
+        ([_case("test_root_gate_open"), _case("test_x")], True),
+        (
+            [
+                _case("test_root_gate_open"),
+                _case("test_obs", '<skipped type="pytest.xfail" message="x"/>'),
+            ],
+            True,
+        ),
+        ([_case("test_x")], False),
+        ([_case("test_root_gate_open", GATE_SKIP)], False),
+        ([_case("test_root_gate_open", '<failure message="x"/>')], False),
+        ([_case("test_root_gate_open"), _case("test_x", GATE_SKIP)], False),
+    ],
+)
+def test_root_run_problems(cases: list[str], ok: bool) -> None:
+    xml = f'<testsuites><testsuite name="pytest">{"".join(cases)}</testsuite></testsuites>'
+    assert (ci_junit.root_run_problems(xml) == []) is ok
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="проверка закрытого шлюза — не от root")
+def test_closed_gate_run_fails_the_junit_guard(tmp_path: Path) -> None:
+    """I1 mutant: the root run with the gate closed is green for pytest, red
+    for the guard the workflow runs after it."""
+    junit = tmp_path / "junit-root.xml"
+    done = _pytest(
+        "-q", "-m", "root", "tests/df/test_platform_root.py", f"--junitxml={junit}"
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert ci_junit.main([str(junit)]) == 1
+    assert ci_junit.main([str(tmp_path / "absent.xml")]) == 1

@@ -54,6 +54,8 @@ SYSTEM_TAR = Path("/usr/bin/tar")
 OTHER_USER = "nobody"
 ESLOGGER = Path("/usr/bin/eslogger")
 ESLOGGER_EVENTS = ("open", "readdir", "exec")
+#: Written by the workflow's R96 step: `xcode-select -p` before/after it.
+XCODE_SELECT_RECORD = "xcode-select.txt"
 SBIN_PATH = "/usr/sbin:/sbin:/usr/bin:/bin"
 #: x86_64 numbers of the syscalls the observer rule lists (spec 3.8 r5).
 X86_64_SYSCALLS: Mapping[int, str] = {
@@ -239,7 +241,7 @@ def _scratch_probes(
 ) -> dict[str, Probe]:
     probes: dict[str, Probe] = {
         "base": lambda: base_facts(base, created),
-        "approved_cli": lambda: approved_cli_facts(platform, scratch, uv),
+        "approved_cli": lambda: approved_cli_facts(platform, scratch, uv, out),
         "git_file": lambda: git_file_facts(platform, scratch),
     }
     if platform == "macos-arm64":
@@ -292,7 +294,7 @@ def _path_facts(path: Path) -> Facts:
 
 
 def approved_cli_facts(
-    platform: plat.PlatformName, scratch: Path, uv: Path | None
+    platform: plat.PlatformName, scratch: Path, uv: Path | None, out_dir: Path
 ) -> Facts:
     """R88: `approved_cli_problems` as root for git, tar and a root uv copy."""
     tools = {"git": SYSTEM_GIT, "tar": SYSTEM_TAR}
@@ -314,6 +316,11 @@ def approved_cli_facts(
     if platform == "macos-arm64":
         facts["xcrun_find_git"] = cmd(["/usr/bin/xcrun", "--find", "git"])
         facts["xcode_select"] = cmd(["/usr/bin/xcode-select", "-p"])
+        # R96: the workflow's selection step leaves the "before" value here.
+        before = out_dir / XCODE_SELECT_RECORD
+        facts["xcode_select_before"] = (
+            before.read_text() if before.exists() else "не записано"
+        )
     return facts
 
 
@@ -408,7 +415,10 @@ def git_file_facts(platform: plat.PlatformName, scratch: Path) -> Facts:
     for owner in ("root", "other"):
         bare = work / f"bare-{owner}.git"
         facts[f"clone-{owner}"] = cmd(
-            [git, "clone", "-q", "--bare", src, bare], env=env
+            # --no-local: own object files, so the chown below re-owns only
+            # this clone (hardlinks would re-own src and bare-root too).
+            [git, "clone", "-q", "--no-local", "--bare", src, bare],
+            env=env,
         )
         if owner == "other":
             _chown_tree(bare, other.pw_uid, other.pw_gid)
@@ -529,15 +539,74 @@ def _eslogger_run(scratch: Path, out: Path) -> Facts:
             proc.kill()
             proc.wait()
     lines = raw.read_bytes().decode("utf-8", "replace").splitlines()
-    hits = [line for line in lines if str(control) in line]
-    (out / "eslogger-sample.jsonl").write_text("\n".join([*lines[:20], *hits[:20]]))
+    seen = eslogger_control(lines, control)
+    (out / "eslogger-sample.jsonl").write_text("\n".join(lines[:20]))
     return {
         "exited_before_signal": exited_early,
         "rc": proc.returncode,
         "stderr": _text(err.read_bytes()),
-        "events": len(lines),
-        "control_events": len(hits),
-        "permitted": bool(hits),
+        **seen,
+        "permitted": seen["control_seen"],
+    }
+
+
+def eslogger_control(lines: Sequence[str], control: Path) -> Facts:
+    """Decoded eslogger events touching `control` (its JSON escapes `/`).
+
+    `control_seen` means the control access was observed; the sample is the
+    first matching event, else the paths of the first three events.
+    """
+    prefix = str(control)
+    events = matches = 0
+    first: object = None
+    paths: list[list[str]] = []
+    for line in lines:
+        try:
+            decoded = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(decoded, dict):
+            continue
+        events += 1
+        found = _strings(decoded.get("event"))
+        if any(s == prefix or s.startswith(prefix + "/") for s in found):
+            matches += 1
+            if first is None:
+                first = _event_sample(decoded)
+        elif len(paths) < 3:
+            paths.append([s for s in found if s.startswith("/")])
+    return {
+        "events": events,
+        "control_events": matches,
+        "control_seen": matches > 0,
+        "sample": first if first is not None else {"first_event_paths": paths},
+    }
+
+
+def _strings(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in _strings(v)]
+    if isinstance(value, list):
+        return [s for v in value for s in _strings(v)]
+    return []
+
+
+def _event_sample(decoded: dict[str, object]) -> Facts:
+    process = decoded.get("process")
+    token: object = None
+    exe: object = None
+    if isinstance(process, dict):
+        token = process.get("audit_token")
+        executable = process.get("executable")
+        if isinstance(executable, dict):
+            exe = executable.get("path")
+    return {
+        "event_type": decoded.get("event_type"),
+        "event": decoded.get("event"),
+        "process_audit_token": token,
+        "process_executable": exe,
     }
 
 
