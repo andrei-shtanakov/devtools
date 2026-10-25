@@ -273,11 +273,12 @@ SEAM_CHECKS = frozenset(
 )
 
 
-def _doctor_reached(world: RootWorld) -> None:
+def _doctor_reached(world: RootWorld) -> list[str]:
     """Level 1 of `<R>` (in process), and the installed command's `doctor
     --json` (a real process of root): its entry admits the admin code, and
     `df.cli` answers exactly as the doctor over the snapshot of `<R>` and
-    the layout `/` (the seam), whose blocking checks are `SEAM_CHECKS`."""
+    the layout `/` (the seam), whose blocking checks are `SEAM_CHECKS`.
+    Returns the real report's non-ok checks as `id: status` (M-a)."""
     checks = _level1(world)
     assert doctor.level1_reached(checks), [c for c in checks if c.status != "ok"]
     report = _command_report(world)
@@ -290,6 +291,11 @@ def _doctor_reached(world: RootWorld) -> None:
     assert blocking <= SEAM_CHECKS, blocking - SEAM_CHECKS
     pending = [c for c in report["checks"] if c["id"] == "install.pending"]
     assert [c["status"] for c in pending] == [doctor.OK], pending
+    return [
+        f"{c['id']}: {c['status']}"
+        for c in report["checks"]
+        if c["status"] != doctor.OK
+    ]
 
 
 def _command_report(world: RootWorld) -> dict[str, Any]:
@@ -822,7 +828,7 @@ def test_boundary_on_real_release(
 
 
 def test_darkfactory_command_works_and_is_immutable(
-    installed_world: InstalledWorld,
+    installed_world: InstalledWorld, notes: dict[str, object]
 ) -> None:
     """Spec 3.9: the installed `darkfactory doctor` and `models list` (real
     processes of root) work — the entry admits the admin code, `df.cli`
@@ -830,11 +836,14 @@ def test_darkfactory_command_works_and_is_immutable(
     each change neither the admin code, the admin Python nor the command
     files, which the process runs. Level 1 and the release's immutability
     under a real `doctor` are not shown here: its `df.cli` reads `/`, not
-    `<R>` (module doc); level 1 of `<R>` is checked in process."""
+    `<R>` (module doc); level 1 of `<R>` is checked in process. The real
+    report's non-ok checks of each run are kept in `notes` (M-a)."""
     world, lay = installed_world.world, installed_world.layout
     before = _digests(installed_world)
+    not_ok: list[list[str]] = []
+    notes["doctor_not_ok"] = not_ok
     for _ in range(2):
-        _doctor_reached(world)
+        not_ok.append(_doctor_reached(world))
         listed = world.command(["models", "list"])
         assert listed.returncode == cli.EXIT_OK, (listed.stdout, listed.stderr)
         assert listed.stdout.startswith("роль"), listed.stdout
