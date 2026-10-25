@@ -58,7 +58,9 @@ macOS — 6 тестов только для Linux (`test_account_created_throug
 для macOS (`test_home_acl_facts_macos`). Сверка `tests/df/ci_junit.py` после прогона:
 канарейка `test_root_gate_open` прошла, собранные root-тесты (`root-collected.txt`: macOS
 119, Ubuntu 112) все есть в `junit-root.xml`. Пропуски обычного прогона —
-root-тесты (гейт закрыт без root) и платформенные; пропуска «uv не закреплён» нет
+root-тесты (гейт закрыт без root), платформенные и по условию хоста (macOS: ФС без учёта
+регистра, `make` CLT не шим — R97; Ubuntu: системный `python3` ≥ 3.12, ФС различает регистр
+и нормализацию); пропуска «uv не закреплён» нет
 (`DF_REQUIRE_PINNED_UV=1`).
 
 **Строки Step 4 плана по ячейке.**
@@ -105,14 +107,16 @@ root-тесты (гейт закрыт без root) и платформенны�
 | повтор `init` после прерывания на каждом шаге и внутри каждой фазы приёма; частичное дерево не принимается | `test_rerun_after_interrupt[build-dir, build, seal, copy, verify, admin, register, activate, launcher, commit-config]`, `test_crash_inside_accept_real_fs[member, mid-copy]`; шаги подготовки — `test_install_steps::test_interrupt_prep_step_then_rerun_completes`; журнал не принимает частичное — `test_scenarios::test_partial_tree_not_accepted_by_journal` | root; эмуляция; юнит |
 | обычный проход проходит автомат по порядку | `test_clean_pass_walks_automaton_in_order` | root |
 | сбой между `current` и `launcher`/`commit-config` → тот же id, команда есть | `test_crash_after_activation_real_fs[activate, launcher]`; `test_crash_windows::test_crash_after_activation_completes_same_id` | root; эмуляция |
-| повреждённый релиз под незавершённой установкой → отказ до изменений, ручное восстановление | `test_install_i9::test_i9_switched_damaged_refused`, `test_i9_registered_damaged_before_activate_refused_early` и соседние; `test_install_steps::test_damaged_first_install_names_pending_then_current`, `test_damaged_under_resume_is_refused_with_a_way_out` | эмуляция (root-теста нет) |
+| повреждённый релиз под незавершённой установкой → отказ до изменений, ручное восстановление | `test_install_i9::test_i9_switched_damaged_refused`, `test_i9_registered_damaged_before_activate_refused_early`; ручное восстановление —
+`test_install_i9::test_i9_procedure_{reinstall, first_install, after_switch_back, reentrant,
+step_undone_by_os_crash}`; `test_install_steps::test_damaged_first_install_names_pending_then_current`, `test_damaged_under_resume_is_refused_with_a_way_out` | эмуляция (root-теста нет) |
 | сбой между созданием учётки и `ready`, между временным домашним каталогом и `chown`, после записи пользователя и каждой команды атрибута → повтор до `ready`, UID/GID ожидаемые | `test_partial_account_creation_resumed[intent, attr:1…attr:9 (macOS: 9 команд dscl) / attr:1…attr:2 (Linux: groupadd, useradd), home-mkdir, home-chown, home-rename]` | root |
 | чужой каталог на домашнем пути, чужая запись, запись с конфликтующим атрибутом не присваиваются | `test_foreign_home_dir_not_adopted`, `test_conflicting_record_not_adopted[record-before-intent, user-before-intent, partial-with-conflicting-gid]` | root |
-| прерывание после `rename` домашнего каталога, повтор до `ready`, затем сбой ОС → каталог на месте (спека l.1754–1755) | Ubuntu: `test_account_created_through_main_linux[process, os]` — настоящий процесс через `main`; половина `os` — `sync`, `drop_caches=3`, новый `boot_id` **без потери питания**; потеря несинхронизированного — `test_crash_windows::test_account_created_through_main[os]`, `test_created_home_is_durable_before_ready` | root (только процесс и перезагрузка кешей); **сбой ОС — только эмуляция** |
+| прерывание после `rename` домашнего каталога, повтор до `ready`, затем сбой ОС → каталог на месте (спека l.1757–1758) | Ubuntu: `test_account_created_through_main_linux[process, os]` — настоящий процесс через `main`; половина `os` — `sync`, `drop_caches=3`, новый `boot_id` **без потери питания**; потеря несинхронизированного — `test_crash_windows::test_account_created_through_main[os]`, `test_created_home_is_durable_before_ready` | root (только процесс и перезагрузка кешей); **сбой ОС — только эмуляция** |
 | обычный путь `нет → creating → ready` без подмены проверок | каждая чистая установка (`create_build_user`, `verify_build_user` настоящие) | root |
 | сбой процесса после `rename` `releases.toml` / последнего файла команды, повтор, сбой ОС; откат через `main → recover_pending` | `test_crash_windows::test_visible_unsynced_then_retry_then_os_crash`, `test_rollback_with_unsynced_fact_then_os_crash`, `test_rollback_durable_before_pending_removed`; `test_crash_matrix::test_crash_matrix` с двойниками | эмуляция |
 | сбой процесса между `rename current` и синхронизацией `/opt/df`, затем сбой ОС | `test_crash_windows::test_process_crash_after_current_rename_then_os_crash` | эмуляция |
-| читатель и переход установки, чередуемые управляемо | `test_crash_windows::test_reader_interleaved_with_install_commit` | эмуляция |
+| читатель и переход установки, чередуемые управляемо | `test_crash_windows::test_reader_interleaved_with_install_commit`; читатель без root не открывает блокировку — `test_journal::test_reader_never_opens_lock` | эмуляция; юнит |
 | сбой после активации до записи журнала → уровень 1 по фактам; поддельная запись журнала уровня не даёт | `test_crash_windows::test_crash_after_activate_before_journal_done`; `test_doctor::test_level1_ignores_journal` | эмуляция; юнит |
 | два одновременных `init`; два одновременных `models set` | `test_install_steps::test_init_lock_loser_changes_nothing`; `test_models::test_concurrent_sets_of_two_roles_both_persist` | юнит |
 | — | отключение питания (§3.3) | **не испытано** |
@@ -240,10 +244,16 @@ Ubuntu `hardlink-root-only-file`: ни одна из 16 жёстких ссыл�
   источник наблюдатель держать не может, поэтому очистка, `seal` и повтор маршрута
   наблюдаются через каталог-держатель (`staging/<id>`, `releases/`, `.quarantine`,
   `build_home`). Исключение — только доступ, путь которого **ровно** путь держателя, и только
-  названная операция: `open`/`openat` держателя (закреплённый родитель §3.3 п. 2, `seal`),
+  названная операция (и одна относительная форма, ниже): `open`/`openat` держателя (закреплённый родитель §3.3 п. 2, `seal`),
   перечисление `.quarantine` повтором карантина (§3.3 п. 4); на маршруте держатели root
   (`releases/`, `staging/`, `staging/<id>`, карантин) допускают `open` и перечисление,
-  `build_home` — только `open`. Любой доступ под держателем — нарушение. Непустые
+  `build_home` — только `open`. Маршрут допускает ещё и голое относительное имя `<id>` — ящик `staging/<id>`, когда
+  `releases/<id>` не источник (`test_acceptance_root_install.py`, `RouteObserver`): `openat`
+  по дескриптору держателя `staging/`, для которого `auditd` пишет в PATH только имя (на macOS
+  `eslogger` даёт полный путь); в этом прогоне таких записей 4, все на
+  Ubuntu, путь `c684cfda9cfd-linux-x86_64-1`, в наблюдениях `verify` после прерывания
+  `build-dir`, `build`, `copy`, `seal` (`observe/test_rerun_after_interrupt_*-verify.json`).
+  Любой иной доступ под держателем — нарушение. Непустые
   `violations` в `observe/*.json` (например, 45 файлов на macOS и 36 на Ubuntu
   вне двойников) — только такие доступы к самим держателям; тесты проверяют это отбором.
 - **macOS: `sudo` открывает `build_home` с `euid = 0`.** `sudo` запуска от роли
@@ -282,7 +292,7 @@ Ubuntu `hardlink-root-only-file`: ни одна из 16 жёстких ссыл�
   `approved_cli_problems`: `/usr/bin/git` ведёт туда через `xcrun`. Runner настроен на Command
   Line Tools (`step0/xcode-select.txt`: `before: /Applications/Xcode_16.4.app/Contents/Developer`, `after: /Library/Developer/CommandLineTools`), вердикт CLT — `[]` (`step0/root.json`).
 - **13-C.**
-  - сбой ОС после `rename` домашнего каталога (l.1754–1755) испытан только эмуляцией;
+  - сбой ОС после `rename` домашнего каталога (l.1757–1758) испытан только эмуляцией;
     root-половина `os` — процесс, `sync`, сброс кешей и новый `boot_id`, без потери питания;
   - остатки загрузчика (R75) измерены `LD_DEBUG=libs` только на старте `--version`:
     библиотеки, которые CLI подгружает позже (например, `git-remote-https` — libcurl/TLS), не
@@ -320,15 +330,17 @@ Ubuntu `hardlink-root-only-file`: ни одна из 16 жёстких ссыл�
     перестановка чтений классификации в `install.py` уронит тест;
   - Linux §3.4 (`boundary/linux-x86_64.json`): интерпретатор PBS с libpython не связан
     (`libpython_linked: false`; NEEDED — системные `libpthread`, `libdl`, `libutil`,
-    `librt`, `libm`, `libc`; RUNPATH `$ORIGIN/../lib`), `lib/libpython3.12.so.1.0._pth` при
-    старте не читается; порог `uv`: путь `bin/python` до 124 байт — прямой `#!`, от
+    `librt`, `libm`, `libc`; RUNPATH `$ORIGIN/../lib`); читается ли `lib/libpython3.12.so.1.0._pth`, не проверялось —
+    проба выходит сразу, раз интерпретатор с libpython не связан (вывод, не замер); порог `uv`: путь `bin/python` до 124 байт — прямой `#!`, от
     125 — sh-трамплин, на обеих ОС одинаково — это константа `uv`, не предел ядра;
     `$ORIGIN` через ссылки `venv/devtools/bin/python*` остаётся внутри (все зависимости —
     системные sonames, выходов нет); `sys.path` запусков `-I` и `-P` совпадают на каждой ОС;
     состав `python/`, `python/<ключ>`, `python/<ключ>/bin` и тексты ссылок — как
-    закреплено, `python/<ключ>/lib/lib` нет; на macOS — то же, `@executable_path/../lib`.
+    закреплено, `python/<ключ>/lib/lib` нет; на macOS — то же (интерпретатор с `@executable_path/../lib`),
+    кроме `$ORIGIN` через ссылку: `origin_via_link` на macOS пуст — проба ищет только
+    `$ORIGIN`/`@loader_path`, через ссылки там ничего не измерено.
 - **Время.** Root-прогон: 13:01 (шаг 20:52:48–21:05:49; junit 779 с) (macOS), 11:10 (шаг 20:51:19–21:02:29; junit 668 с) (Ubuntu), предел job — 180 мин.
-  Чистая установка от `manifest` до `committed` (`journals/test_clean_install_reaches_level1.jsonl`):
+  Чистая установка от `manifest` до `commit-config done` (переход в `committed`) (`journals/test_clean_install_reaches_level1.jsonl`):
   8,3 с (macOS), 14,0 с (Ubuntu), 10 итераций `drive` (по одному действию от
   `build-dir` до `commit-config`). Время `full`/`intact` digest журнал отдельно не пишет;
   промежуток между `done` одного действия и `start` следующего (классификация с digest
@@ -385,3 +397,12 @@ Ubuntu `hardlink-root-only-file`: ни одна из 16 жёстких ссыл�
 6. **Ограничение Xcode (R96):** Mac с активным `Xcode.app` в `/Applications` получает отказ;
    строка ограничения в README (Task 14) или, если владелец хочет такие хосты, изменение
    политики доверия для `/Applications`.
+7. **Правки подписанной спеки B rev 8 в этой ветке (e80295f)** — ни одна не меняет проверку:
+   §3.4 — заметка о замере (интерпретатор PBS 3.12.13 на Linux с libpython не связан, запрет
+   имени `lib` остаётся) и порог трамплина назван порогом `uv` (124/125 байт), а не пределом
+   ядра; §3.8 «Наблюдение» — сопоставление по идентичности и написанию на диске (R93/R98),
+   «карантин» = дерево в `.quarantine/<id>.<n>`, `build_home` — родитель источника, правило
+   «рабочий каталог запуска от роли — не дерево сборщика» и абзац «Наблюдатель не полон»
+   (R101). **Последний сужает то, что доказывает наблюдение:** гарантия «root не открывает
+   источник» верна в пределах `Observation.limits` (раздел 3), а не безусловно — по условию
+   владельца 25.10 («I1–I3 закрыты или гарантия ограничена»).

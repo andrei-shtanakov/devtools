@@ -13,6 +13,11 @@ https://github.com/andrei-shtanakov/devtools/actions/runs/40228831245** (head
   rules (Step 0, `step0/sudo-l/runner.out`); the parser is called with the
   name `runner`.
 
+The texts are byte-identical (after the same host-name edit) to the
+captures of CI run
+https://github.com/andrei-shtanakov/devtools/actions/runs/40232411657 (head
+c57d613), the run the stage-1 evidence cites.
+
 The only edit is the host name: the runner's name is replaced by `mac-mini`
 / `ubuntu-ci`. stderr was empty in all three, so `<case>.out` is stdout.
 
