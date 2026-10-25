@@ -384,6 +384,12 @@ def teardown_world(world: RootWorld, keep: Path | None) -> None:
     if keep is not None and journal_file.exists():
         keep.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(journal_file, keep)
+    if _uid_of(plat.BUILD_USER) == 0:
+        # `pkill -u df-build` would kill every root process (this run too):
+        # a UID-0 df-build left by a test is removed unreaped and fails it.
+        remove_build_user(force=True)
+        shutil.rmtree(world.layout.root, ignore_errors=True)
+        infra(f"{plat.BUILD_USER} с UID 0 остался после теста")
     plat.reap_user_processes(plat.BUILD_USER)
     remove_build_user()
     shutil.rmtree(world.layout.root, ignore_errors=True)
@@ -394,8 +400,9 @@ def teardown_world(world: RootWorld, keep: Path | None) -> None:
         infra(f"{plat.BUILD_USER} не удалён: {leftover}")
 
 
-def remove_build_user() -> None:
-    """Delete the user and the group (absent ones are fine)."""
+def remove_build_user(*, force: bool = False) -> None:
+    """Delete the user and the group (absent ones are fine); `force` is
+    `userdel -f` (Linux), which a UID-0 user needs: root runs processes."""
     name = plat.BUILD_USER
     if plat.detect_platform() == "macos-arm64":
         argvs = [
@@ -404,7 +411,8 @@ def remove_build_user() -> None:
             ["/usr/bin/dscacheutil", "-flushcache"],
         ]
     else:
-        argvs = [["/usr/sbin/userdel", name], ["/usr/sbin/groupdel", name]]
+        userdel = ["/usr/sbin/userdel", *(["-f"] if force else []), name]
+        argvs = [userdel, ["/usr/sbin/groupdel", name]]
     for argv in argvs:
         subprocess.run(
             argv, capture_output=True, env=_SYSTEM_ENV, timeout=60, check=False
@@ -456,6 +464,23 @@ def _lookup_facts(name: str) -> dict[str, str]:
         done = subprocess.run(argv, capture_output=True, text=True, check=False)
         facts[label] = f"rc={done.returncode} {done.stdout.strip()[:200]}"
     return facts
+
+
+def _uid_of(name: str) -> int | None:
+    try:
+        return pwd.getpwnam(name).pw_uid
+    except KeyError:
+        return None
+
+
+def assert_committed(layout: Layout) -> None:
+    """No `pending.toml`, no failed step in the journal, and the last `done`
+    of the run ended in `committed`."""
+    assert not os.path.lexists(layout.pending)
+    rows = journal.read_journal(layout.journal)
+    assert [r for r in rows if r["event"] == "failed"] == []
+    done = [r for r in rows if r["event"] == "done"]
+    assert done and str(done[-1]["detail"]).endswith("→ committed"), done[-1:]
 
 
 def _known(name: str) -> bool:

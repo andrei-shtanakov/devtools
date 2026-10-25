@@ -16,7 +16,6 @@ import grp
 import os
 import pwd
 import stat
-import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator, Sequence
@@ -32,7 +31,14 @@ from df import platform as plat
 from df.config import Account, dump_accounts, load_accounts
 from df.journal import StepFailed, read_journal, run_steps
 from df.paths import Layout
-from tests.df.root_world import RootWorld, _flush_ds_cache, infra, remove_build_user
+from tests.df.root_world import (
+    RootWorld,
+    _flush_ds_cache,
+    assert_committed,
+    infra,
+    remove_build_user,
+    run,
+)
 
 pytestmark = pytest.mark.root
 
@@ -45,10 +51,8 @@ ATTR_STOPS = [f"attr:{i}" for i in range(1, len(OPS) + 1)]
 #: fault-point kind of `_make_home` per home stop.
 HOME_STOPS = {"home-mkdir": "created", "home-chown": "chown", "home-rename": "renamed"}
 STOPS = ["intent", *ATTR_STOPS, *HOME_STOPS]
-_SYSTEM_ENV = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"}
 _DSEDITGROUP = "/usr/sbin/dseditgroup"
 _USERMOD = "/usr/sbin/usermod"
-_USERDEL = "/usr/sbin/userdel"
 #: The administrative group a decoy joins (`plat.ADMIN_GROUPS`).
 ADMIN_GROUP = "admin" if MACOS else "sudo"
 
@@ -210,21 +214,30 @@ def _assert_home_at_stop(account: Account, layout: Layout, stop: str) -> None:
 # ---------- foreign records and homes ----------
 
 
+#: `_write_intent`'s refusal of records it did not make (spec 3.2: «отказ с
+#: инструкцией (удалить или переименовать)»).
+FOREIGN = (
+    f"пользователь {NAME} существует, но создан не darkfactory: "
+    "удалите или переименуйте"
+)
+#: The attribute of the group's GID in `_refuse_conflict`'s text.
+GID_ATTR = "PrimaryGroupID" if MACOS else "gid"
+
+
 @pytest.mark.parametrize(
-    "case", ["record-before-intent", "partial-with-conflicting-gid"]
+    "case",
+    ["record-before-intent", "user-before-intent", "partial-with-conflicting-gid"],
 )
 def test_conflicting_record_not_adopted(
     root_world: RootWorld, monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
-    """A foreign group `df-build` before the intent, or one with another
-    GID under our intent: `StepFailed`, the record untouched, no record
-    command run."""
+    """A foreign group `df-build`, or a foreign user record alone, before
+    the intent; or a group with another GID under our intent: `StepFailed`
+    with its exact text, the records untouched, no record command run."""
     lay = root_world.layout
     spy = _spy(monkeypatch)
-    if case == "record-before-intent":
-        gid = _free_ids(1)[0]
-        needle = "создан не darkfactory"
-    else:
+    uid, gid = _free_ids(2)
+    if case == "partial-with-conflicting-gid":
         with monkeypatch.context() as mp:
             _arm_intent(mp, lay)
             with pytest.raises(Killed):
@@ -232,20 +245,25 @@ def test_conflicting_record_not_adopted(
         intent = _account(lay)
         assert intent is not None
         gid = next(i for i in _free_ids(2) if i != intent.gid)
-        needle = "PrimaryGroupID" if MACOS else "gid"
-    _make_group(gid)
-    before = plat.read_record("group", NAME)
-    assert before is not None
-    with pytest.raises(StepFailed, match=needle):
+        text = f"group {NAME}: {GID_ATTR} = {gid}, в намерении {intent.gid}"
+    else:
+        text = FOREIGN
+    if case == "user-before-intent":
+        _make_lone_user(uid)
+    else:
+        _make_group(gid)
+    records = _records()
+    assert records["user" if case == "user-before-intent" else "group"] is not None
+    with pytest.raises(StepFailed) as raised:
         root_world.prepare_build_user()
-    assert plat.read_record("group", NAME) == before
-    assert plat.read_record("user", NAME) is None
+    assert raised.value.detail == text
+    assert _records() == records
     assert spy.commands == []
     account = _account(lay)
-    if case == "record-before-intent":
-        assert account is None
-    else:
+    if case == "partial-with-conflicting-gid":
         assert account is not None and account.state == "creating"
+    else:
+        assert account is None
 
 
 def test_foreign_home_dir_not_adopted(
@@ -290,42 +308,53 @@ def test_preexisting_build_user_refused_before_build(
     root_world: RootWorld, monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
     """A decoy `df-build` made by the test (UID 0, in an administrative
-    group, a home of root, or without a record in `accounts.toml`):
-    `bootstrap init` refuses at `build-user`; no process runs as a role,
-    nothing is staged, the decoy's records are untouched."""
-    _guard_reap(monkeypatch)
+    group, a home of root, or without a record in `accounts.toml` -- and
+    then without a home, so only the record can refuse it): `bootstrap
+    init` refuses at `build-user`; no process runs as a role, none is reaped
+    (`pkill -u` of a UID-0 decoy would kill every root process: recorded,
+    never run), nothing is staged, the decoy's records are untouched."""
     lay = root_world.layout
     with _decoy(root_world, case):
         records = _records()
         launches = _launches(monkeypatch)
-        rc = root_world.bootstrap(root_world.init_argv())
+        with monkeypatch.context() as mp:
+            reaps = _record_reaps(mp)
+            rc = root_world.bootstrap(root_world.init_argv())
         assert rc == cli.EXIT_REFUSED
         failed = [r for r in read_journal(lay.journal) if r["event"] == "failed"]
         assert [r["step"] for r in failed] == ["build-user"], failed
+        if case == "not-in-accounts":
+            assert failed[0]["detail"] == f"StepFailed: build-user: {FOREIGN}"
         problems = plat.verify_build_user(lay)
         assert any(DECOYS[case] in p for p in problems), problems
         assert launches == []
+        assert reaps == []
         assert _records() == records
         assert sorted(os.listdir(lay.releases)) == []
         assert sorted(os.listdir(lay.staging)) == [lay.quarantine.name]
+    if case == "admin-group":
+        assert NAME not in _admin_members()
 
 
-def _guard_reap(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`pkill -u df-build` of a UID-0 decoy would kill every root process
-    (this test run included): refused while the decoy exists, and by the
-    world's teardown too (the patch outlives it)."""
-    real = plat.reap_user_processes
+def _record_reaps(mp: pytest.MonkeyPatch) -> list[str]:
+    """`reap_user_processes` calls, recorded and never run."""
+    calls: list[str] = []
 
     def reap(name: str, **kw: Any) -> list[int]:
-        try:
-            uid = pwd.getpwnam(name).pw_uid
-        except KeyError:
-            uid = None
-        if uid == 0:
-            return []
-        return real(name, **kw)
+        calls.append(name)
+        return []
 
-    monkeypatch.setattr(plat, "reap_user_processes", reap)
+    mp.setattr(plat, "reap_user_processes", reap)
+    return calls
+
+
+def _admin_members() -> list[str]:
+    """Members of `ADMIN_GROUP` as the OS records them (not a libc cache)."""
+    if MACOS:
+        path = f"/Groups/{ADMIN_GROUP}"
+        out = run([plat._DSCL, ".", "-read", path, "GroupMembership"])
+        return out.split()[1:]
+    return run([plat._GETENT, "group", ADMIN_GROUP]).strip().split(":")[3].split(",")
 
 
 @contextmanager
@@ -349,8 +378,9 @@ def _make_decoy(world: RootWorld, case: str) -> None:
     _make_group(gid)
     _make_user(uid, gid, lay.build_home, non_unique=uid == 0)
     owner = 0 if case == "foreign-home" else uid
-    os.mkdir(lay.build_home, 0o700)
-    os.chown(lay.build_home, owner, gid)
+    if case != "not-in-accounts":
+        os.mkdir(lay.build_home, 0o700)
+        os.chown(lay.build_home, owner, gid)
     if case == "admin-group":
         _join_admin()
     if case != "not-in-accounts":
@@ -368,9 +398,10 @@ def _prep_dirs(world: RootWorld) -> None:
 
 def _remove_decoy(case: str) -> None:
     if case == "admin-group" and MACOS:
-        _sh([_DSEDITGROUP, "-o", "edit", "-d", NAME, "-t", "user", ADMIN_GROUP])
-    if case == "uid0" and not MACOS:
-        _sh([_USERDEL, "-f", NAME])  # plain userdel refuses: root runs processes
+        run([_DSEDITGROUP, "-o", "edit", "-d", NAME, "-t", "user", ADMIN_GROUP])
+    if case == "uid0":
+        remove_build_user(force=True)  # plain userdel refuses: root runs processes
+        return
     remove_build_user()
 
 
@@ -379,14 +410,6 @@ def _records() -> dict[str, dict[str, str] | None]:
 
 
 # ---------- OS records made by the test ----------
-
-
-def _sh(argv: list[str]) -> None:
-    done = subprocess.run(
-        argv, capture_output=True, text=True, env=_SYSTEM_ENV, timeout=60, check=False
-    )
-    if done.returncode != 0:
-        infra(f"{' '.join(argv)}: код {done.returncode}: {done.stderr.strip()}")
 
 
 def _free_ids(n: int) -> list[int]:
@@ -400,20 +423,20 @@ def _free_ids(n: int) -> list[int]:
 
 def _make_group(gid: int) -> None:
     if MACOS:
-        _sh([plat._DSCL, ".", "-create", f"/Groups/{NAME}"])
-        _sh([plat._DSCL, ".", "-create", f"/Groups/{NAME}", "PrimaryGroupID", str(gid)])
+        run([plat._DSCL, ".", "-create", f"/Groups/{NAME}"])
+        run([plat._DSCL, ".", "-create", f"/Groups/{NAME}", "PrimaryGroupID", str(gid)])
         return
-    _sh([plat._GROUPADD, "--gid", str(gid), NAME])
+    run([plat._GROUPADD, "--gid", str(gid), NAME])
 
 
 def _make_user(uid: int, gid: int, home: Path, *, non_unique: bool) -> None:
     if not MACOS:
         argv = [plat._USERADD, "--uid", str(uid), *(["-o"] if non_unique else [])]
         argv += ["--gid", NAME, "--home-dir", str(home), "--no-create-home"]
-        _sh([*argv, "--shell", "/usr/sbin/nologin", NAME])
+        run([*argv, "--shell", "/usr/sbin/nologin", NAME])
         return
     path = f"/Users/{NAME}"
-    _sh([plat._DSCL, ".", "-create", path])
+    run([plat._DSCL, ".", "-create", path])
     attrs = {
         "UniqueID": str(uid),
         "PrimaryGroupID": str(gid),
@@ -422,14 +445,26 @@ def _make_user(uid: int, gid: int, home: Path, *, non_unique: bool) -> None:
         "Password": "*",
     }
     for attr, value in attrs.items():
-        _sh([plat._DSCL, ".", "-create", path, attr, value])
+        run([plat._DSCL, ".", "-create", path, attr, value])
+
+
+def _make_lone_user(uid: int) -> None:
+    """A user record `df-build` without a group of its name."""
+    if MACOS:
+        path = f"/Users/{NAME}"
+        run([plat._DSCL, ".", "-create", path])
+        run([plat._DSCL, ".", "-create", path, "UniqueID", str(uid)])
+        run([plat._DSCL, ".", "-create", path, "PrimaryGroupID", "-2"])
+        return
+    argv = [plat._USERADD, "--uid", str(uid), "--no-user-group", "--gid", "nogroup"]
+    run([*argv, "--no-create-home", "--shell", "/usr/sbin/nologin", NAME])
 
 
 def _join_admin() -> None:
     if MACOS:
-        _sh([_DSEDITGROUP, "-o", "edit", "-a", NAME, "-t", "user", ADMIN_GROUP])
+        run([_DSEDITGROUP, "-o", "edit", "-a", NAME, "-t", "user", ADMIN_GROUP])
     else:
-        _sh([_USERMOD, "-aG", ADMIN_GROUP, NAME])
+        run([_USERMOD, "-aG", ADMIN_GROUP, NAME])
 
 
 def _wait_visible(uid: int, *, admin: bool) -> None:
@@ -488,7 +523,7 @@ def test_account_created_through_main_linux(
     assert account is not None and account.state == "ready"
     assert (account.uid, account.gid) == (first.uid, first.gid)
     assert plat.verify_build_user(lay) == []
-    _assert_committed(lay)
+    assert_committed(lay)
     home = os.lstat(lay.build_home)
     assert (home.st_uid, stat.S_IMODE(home.st_mode)) == (first.uid, 0o700)
 
@@ -499,16 +534,3 @@ def _reboot_without_power_loss(monkeypatch: pytest.MonkeyPatch) -> None:
     Path("/proc/sys/vm/drop_caches").write_text("3\n")
     rebooted = f"{fsutil.boot_id()}-rebooted"
     monkeypatch.setattr(fsutil, "boot_id", lambda: rebooted)
-
-
-def _assert_committed(layout: Layout) -> None:
-    """No `pending.toml`, and the last action of the run ended in `committed`."""
-    assert not os.path.lexists(layout.pending)
-    rows = read_journal(layout.journal)
-    ends = [
-        r
-        for r in rows
-        if r["event"] == "done" and str(r["detail"]).endswith("→ committed")
-    ]
-    assert ends, rows[-5:]
-    assert not [r for r in rows[rows.index(ends[-1]) :] if r["event"] == "failed"]

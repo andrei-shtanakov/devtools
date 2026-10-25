@@ -40,6 +40,7 @@ from tests.df.root_world import (
     ROLE_ENV,
     Controls,
     RootWorld,
+    assert_committed,
     check_controls,
     infra,
     run,
@@ -408,7 +409,8 @@ def test_untrusted_cli_refused_before_exec(
     """An approved `uv` in a directory of `df-build`, behind a link of
     `df-build`, or in a directory whose ACL lets `df-build` write: `bootstrap
     init` refuses at `trusted-paths` and the program never runs (it would
-    leave a marker). Twin: the same script in a root directory passes."""
+    leave a marker). Twin: the same script in a root directory passes the
+    policy, and run, it leaves the marker."""
     lay = root_world.layout
     marks = root_world.top / f"marks-{lay.root.name}"
     marks.mkdir()
@@ -417,6 +419,9 @@ def test_untrusted_cli_refused_before_exec(
     script = f'#!/bin/sh\n/usr/bin/touch {marker}\nexec {root_world.uv} "$@"\n'
     trusted = _cli_dir(lay.root / "cli-ok", script)
     assert plat.approved_cli_problems({"uv": trusted}, PLATFORM) == []
+    ran = subprocess.run([str(trusted), "--version"], capture_output=True, check=False)
+    assert ran.returncode == 0 and marker.exists(), ran  # the marker works
+    marker.unlink()
     uv, culprit = _plant_cli(root_world, controls.account.uid, case, script)
     problems = plat.approved_cli_problems({"uv": uv}, PLATFORM)
     want = f"{culprit}: {UNTRUSTED_CLI[case]}"
@@ -505,7 +510,7 @@ def test_step2_and_lock_under_setgid_parents_real_linux(root_world: RootWorld) -
     probe_dir.rmdir()
     assert born_setgid, "ядро не наследует S_ISGID: тест ничего не проверяет"
     assert root_world.bootstrap(root_world.init_argv()) == cli.EXIT_OK
-    _assert_committed(root_world)
+    assert_committed(root_world.layout)
     final = dict(install.prep_dirs(lay))
     final |= {lay.root / "etc": 0o755, lay.install_dir: 0o755, lay.lock: 0o600}
     wrong = {
@@ -518,15 +523,6 @@ def test_step2_and_lock_under_setgid_parents_real_linux(root_world: RootWorld) -
     assert stat.S_IMODE(os.stat(var).st_mode) == 0o755
 
 
-def _assert_committed(world: RootWorld) -> None:
-    lay = world.layout
-    assert not os.path.lexists(lay.pending)
-    rows = read_journal(lay.journal)
-    assert [r for r in rows if r["event"] == "failed"] == []
-    done = [r for r in rows if r["event"] == "done"]
-    assert str(done[-1]["detail"]).endswith("→ committed"), done[-1:]
-
-
 _LD_INIT = re.compile(r"^\s*\d+:\s+calling init: (\S+)$", re.MULTILINE)
 _LDCONFIG_ENTRY = re.compile(r"=> (/\S+)$", re.MULTILINE)
 #: Loader subdirectories outside the model of `approved_cli_problems` (R26).
@@ -537,7 +533,8 @@ _LOADER_SUBDIRS = ("glibc-hwcaps", "tls", "x86_64", "haswell")
 def test_linux_loader_residuals(root_world: RootWorld, controls: Controls) -> None:
     """R75 (R26, owner decision 22.10): each approved CLI run as `df-build`
     under `LD_DEBUG=libs` loads only objects whose real path is under
-    `SYSTEM_LIB_DIRS`; the glibc-hwcaps/tls subdirectories that exist and
+    `SYSTEM_LIB_DIRS`, and `calling init` covers its whole DT_NEEDED
+    closure (else the instrument failed, not the CLI); the glibc-hwcaps/tls subdirectories that exist and
     the `ld.so.cache` entries outside `ld.so.conf` are recorded (evidence).
     A library outside is a finding to the owner, not a test edit."""
     lay = root_world.layout
@@ -557,9 +554,10 @@ def test_linux_loader_residuals(root_world: RootWorld, controls: Controls) -> No
         assert result.launched and result.returncode == 0, (name, result)
         text = "".join(p.read_text() for p in sorted(out_dir.glob(f"{name}.*")))
         loaded[name] = sorted(set(_LD_INIT.findall(text)))
-        deps = plat.linked_libraries(Path(os.path.realpath(path)))
-        if deps is not None and deps.needed and not loaded[name]:
-            infra(f"{name}: LD_DEBUG ничего не записал ({deps.needed})")
+        needed = _needed_closure(Path(os.path.realpath(path)))
+        missing = needed - {Path(p).name for p in loaded[name]}
+        if missing:  # fail-closed instrument (13-C review M3)
+            infra(f"{name}: LD_DEBUG не показал {sorted(missing)}: {loaded[name]}")
     outside = {
         name: [p for p in paths if not _system_object(p)]
         for name, paths in loaded.items()
@@ -572,6 +570,29 @@ def test_linux_loader_residuals(root_world: RootWorld, controls: Controls) -> No
     }
     _evidence("loader/linux-residuals.json", json.dumps(facts, indent=2) + "\n")
     assert all(not paths for paths in outside.values()), outside
+
+
+def _needed_closure(binary: Path) -> set[str]:
+    """Sonames of the DT_NEEDED closure of `binary` (and its loader), found
+    in `LOADER_DIRS` as `dependency_problems` finds them."""
+    seen: set[str] = set()
+    pending = [binary]
+    while pending:
+        deps = plat.linked_libraries(pending.pop())
+        if deps is None:
+            continue
+        names = list(deps.needed)
+        if deps.loader is not None:
+            names.append(Path(deps.loader).name)
+        for soname in names:
+            if soname in seen:
+                continue
+            seen.add(soname)
+            for base in plat.LOADER_DIRS[PLATFORM]:
+                if (Path(base) / soname).exists():
+                    pending.append(Path(os.path.realpath(Path(base) / soname)))
+                    break
+    return seen
 
 
 def _system_object(path: str) -> bool:
