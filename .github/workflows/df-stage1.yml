@@ -4,7 +4,8 @@
 # have passwordless sudo; the root run never happens on a workstation.
 # Order of a cell: arch check (fails) -> Step 0 facts (recorded, never fail
 # the job) -> mechanism probes (fail, named by the step) -> ordinary tests/df
-# -> root run (last step, R76). Actions pinned by full commit SHA, as ci.yml.
+# -> root run (R76) -> scope guard (last: only `full` with no -k is green).
+# Actions pinned by full commit SHA, as ci.yml.
 # No workflow_dispatch: the file runs from the PR before it is on master.
 name: df-stage1
 
@@ -26,7 +27,9 @@ concurrency:
 
 env:
   # Iteration selector (pre-flight section 6): probes | root-only | full.
-  # The final commit of Task 13 must say `full` (the reviewer checks).
+  # Only `full` with an empty DF_STAGE1_K can be green: the scope guard (last
+  # step) fails every other setting, so an iteration commit runs its narrowed
+  # steps and its cell is red by design (PR #632 review).
   DF_STAGE1_SCOPE: full
   # Optional `-k` expression of the root run while iterating; empty = all.
   DF_STAGE1_K: ""
@@ -47,14 +50,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
     steps:
-      # Pre-flight section 6: the final commit is `full` with no -k; a full
-      # run that selects a subset of the root tests is refused, not green.
-      - name: scope guard
-        run: |
-          if [ "$DF_STAGE1_SCOPE" = full ] && [ -n "$DF_STAGE1_K" ]; then
-            echo "::error title=scope guard::DF_STAGE1_K must be empty in full scope"
-            exit 1
-          fi
       - name: arch check
         env:
           EXPECTED_ARCH: ${{ matrix.arch }}
@@ -232,3 +227,18 @@ jobs:
       - name: return RUNNER_TEMP to the runner
         if: always()
         run: sudo -n chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP"
+      # Pre-flight section 6: only `full` with no -k is green. A narrowed scope
+      # (probes, root-only: whole test steps skipped, and a skipped step is not
+      # red) or a run selecting a subset of the root tests is refused here.
+      # Last, so an iteration still runs its narrowed steps first.
+      - name: scope guard
+        if: always()
+        run: |
+          if [ "$DF_STAGE1_SCOPE" != full ]; then
+            echo "::error title=scope guard::DF_STAGE1_SCOPE is '$DF_STAGE1_SCOPE'; only full can be green"
+            exit 1
+          fi
+          if [ -n "$DF_STAGE1_K" ]; then
+            echo "::error title=scope guard::DF_STAGE1_K must be empty in full scope"
+            exit 1
+          fi

@@ -2738,19 +2738,23 @@ def test_s7_shim_link_with_other_name_refused(
 
 
 @MACOS_ONLY
-def test_o3_real_make_is_named_as_wrapper() -> None:
+def test_o3_real_make_verdict_follows_clt() -> None:
+    """R97: on some hosts CLT make is itself an xcode-select shim (make ->
+    gnumake), and df refuses `/usr/bin/make` as a nested wrapper; where it is
+    a real binary (the CI runner), df accepts it. Either way the real host's
+    verdict is asserted, never skipped (PR #632 review)."""
     make = Path("/Library/Developer/CommandLineTools/usr/bin/make")
     if not make.exists() or not Path("/usr/bin/make").exists():
         pytest.skip("needs the Command Line Tools")
-    # R97: on some hosts CLT make is itself an xcode-select shim (make ->
-    # gnumake); on the CI runner it is a real binary, which df accepts.
     deps = plat.linked_libraries(make)
-    if deps is None or plat.XCSELECT_LIB not in deps.needed:
-        pytest.skip("CLT make is not a shim on this host")
+    assert deps is not None, make
     problems = plat.approved_cli_problems(
         {"make": Path("/usr/bin/make")}, "macos-arm64"
     )
-    assert any("обёртка xcode-select" in p for p in problems), problems
+    if plat.XCSELECT_LIB in deps.needed:
+        assert any("обёртка xcode-select" in p for p in problems), problems
+    else:
+        assert problems == [], problems
 
 
 def test_drain_thread_owns_its_descriptor(monkeypatch: pytest.MonkeyPatch) -> None:

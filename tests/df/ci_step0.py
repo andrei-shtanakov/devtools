@@ -104,8 +104,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 #: R96: system CLIs the macOS real-host tests use (git is an xcrun shim;
 #: df's own analysis runs otool through the shim too), judged by df's policy
-#: after the CommandLineTools selection. `make` is left out: df refuses it by
-#: design (a nested shim, test_o3_real_make_is_named_as_wrapper).
+#: after the CommandLineTools selection. `make` is left out: its verdict
+#: depends on the host's CLT (refused where CLT make is itself an xcselect
+#: shim, accepted where it is a real binary, as on the runner); the ordinary
+#: run asserts it either way (test_o3_real_make_verdict_follows_clt).
 R96_TOOLS: Mapping[str, Path] = {
     "git": SYSTEM_GIT,
     "tar": SYSTEM_TAR,
