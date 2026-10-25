@@ -60,13 +60,19 @@ testpaths = ["tests"]
 pythonpath = ["."]
 # `slow`: full enumerations outside CI (df crash matrix, Task 9 R49); run
 # them with `pytest -m slow` (the last `-m` wins over this default).
-addopts = "-m 'not slow and not harness'"
+addopts = "-m 'not slow and not harness and not network'"
 # `harness`: real harness binaries under sandbox-exec (df probe isolation,
 # Task 11-B); opt-in with `pytest -m harness`, and each test skips unless
 # the binary with its pinned SHA-256 is present.
+# `root`: df stage-1 acceptance as root (Task 13); skipped unless euid 0 and
+# DF_ROOT_ACCEPTANCE=1 (tests/df/conftest.py); CI df-stage1 runs `-m root`.
+# `network`: real downloads from the internet; df-stage1 runs them, local and
+# ci.yml runs do not.
 markers = [
     "slow: full enumeration outside CI (run with -m slow)",
     "harness: runs a pinned real harness binary (skips when absent)",
+    "root: runs as root in a disposable CI runner (skips otherwise)",
+    "network: needs the internet (deselected by default)",
 ]
 
 [tool.ruff]

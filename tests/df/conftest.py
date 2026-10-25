@@ -19,12 +19,17 @@ over `fake_layout` with the OS-crash model of `tests/df/crash_model.py`
 installed on top: the model replaces the sync seams (so `sync_tree` syncs
 again, in the model) and keeps only synced effects across `os_crash()`.
 Every test runs under `umask 022` (autouse; carried from Task 7).
+
+Two run gates (Task 13, R77/R78): a `root` test is skipped unless euid 0 and
+`DF_ROOT_ACCEPTANCE=1`; with `DF_REQUIRE_PINNED_UV=1` a pinned-uv skip fails
+the session (CI df-stage1 sets it).
 """
 
 from __future__ import annotations
 
 import os
 import pwd
+import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,6 +49,51 @@ if TYPE_CHECKING:
 #: The fake uid of `df-build`: never the current user (F1).
 BUILD_UID = os.getuid() + 100000
 Event = tuple[object, ...]
+
+#: Root gate (Task 13, R77): a `root` test runs only as euid 0 and only when
+#: the acceptance run asks for it with `DF_ROOT_ACCEPTANCE=1`.
+ROOT_ACCEPTANCE_ENV = "DF_ROOT_ACCEPTANCE"
+#: R78: df-stage1 sets it, so a pinned-uv test can never vanish as a skip.
+PINNED_UV_ENV = "DF_REQUIRE_PINNED_UV"
+_PINNED_UV_SKIP = re.compile(r"uv не найден|не закреплённая")
+_skipped_for_uv: list[str] = []
+
+
+def root_gate_reason(euid: int, env: Mapping[str, str]) -> str | None:
+    """Why a `root` test is skipped here; `None` when the gate is open."""
+    if euid == 0 and env.get(ROOT_ACCEPTANCE_ENV) == "1":
+        return None
+    return f"root-приёмка: нужны euid 0 и {ROOT_ACCEPTANCE_ENV}=1 (CI df-stage1)"
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """Skip every `root` test unless the root gate is open."""
+    reason = root_gate_reason(os.geteuid(), os.environ)
+    if reason is None:
+        return
+    for item in items:
+        if item.get_closest_marker("root") is not None:
+            item.add_marker(pytest.mark.skip(reason=reason))
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    """Note a pinned-uv skip when `DF_REQUIRE_PINNED_UV=1` (R78)."""
+    if os.environ.get(PINNED_UV_ENV) != "1" or not report.skipped:
+        return
+    longrepr = report.longrepr
+    reason = longrepr[2] if isinstance(longrepr, tuple) else str(longrepr)
+    if _PINNED_UV_SKIP.search(reason):
+        _skipped_for_uv.append(report.nodeid)
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Fail the session that skipped a pinned-uv test under R78."""
+    if _skipped_for_uv:
+        names = ", ".join(_skipped_for_uv)
+        print(f"\n{PINNED_UV_ENV}=1, но закреплённого uv нет: {names}")
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 @dataclass

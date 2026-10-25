@@ -23,6 +23,10 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          # UV_PINNED_VERSION (df/lockset.py, Task 8a): иначе тесты админ-Python
+          # (хэш загрузки) пропускаются; df-stage1.yml закрепляет так же.
+          version: "0.11.23"
       - run: uv python install 3.12
       # Без группы governance: модули обязаны импортироваться без steward
       # (ленивые импорты) — этот прогон и есть проверка контракта (ревью #499).

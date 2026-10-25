@@ -1,0 +1,160 @@
+# df installer, stage-1 acceptance (Task 13 of
+# docs/superpowers/plans/2026-10-16-df-installer-stage1.md, pre-flight rulings
+# R73-R95). Root commands exist only here: hosted runners are disposable and
+# have passwordless sudo; the root run never happens on a workstation.
+# Order of a cell: arch check (fails) -> Step 0 facts (recorded, never fail
+# the job) -> mechanism probes (fail, named by the step) -> ordinary tests/df
+# -> root run (last step, R76). Actions pinned by full commit SHA, as ci.yml.
+# No workflow_dispatch: the file runs from the PR before it is on master.
+name: df-stage1
+
+on:
+  pull_request:
+    paths:
+      - "df/**"
+      - "tests/df/**"
+      - ".github/workflows/df-stage1.yml"
+      - "pyproject.toml"
+      - "uv.lock"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: df-stage1-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Iteration selector (pre-flight section 6): probes | root-only | full.
+  # The final commit of Task 13 must say `full` (the reviewer checks).
+  DF_STAGE1_SCOPE: full
+  # Optional `-k` expression of the root run while iterating; empty = all.
+  DF_STAGE1_K: ""
+  # R78: a skip for a missing or unpinned uv fails the run.
+  DF_REQUIRE_PINNED_UV: "1"
+
+jobs:
+  stage1:
+    name: stage1 (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            arch: arm64
+          - os: ubuntu-24.04
+            arch: x86_64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    steps:
+      - name: arch check
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: test "$(uname -m)" = "$EXPECTED_ARCH"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          # UV_PINNED_VERSION (df/lockset.py); else the admin-Python tests skip.
+          version: "0.11.23"
+      - run: uv python install 3.12
+      - run: uv sync --frozen
+
+      # ---- Step 0: facts of this runner (tests/df/ci_step0.py) -------------
+      # A crash of the probe script is a bug to read in the log, not a reason
+      # to lose the rest of the cell.
+      - name: step 0 facts (runner user)
+        continue-on-error: true
+        run: >
+          uv run --frozen --no-sync python -m tests.df.ci_step0 runner
+          --out "$RUNNER_TEMP/df-stage1/step0"
+      - name: step 0 install auditd (absence is a fact)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: |
+          sudo -n apt-get update -qq
+          sudo -n apt-get install -y -qq --no-install-recommends auditd
+      - name: step 0 facts (root)
+        continue-on-error: true
+        run: >
+          sudo -n env "PATH=$PATH" "HOME=$RUNNER_TEMP/root-home"
+          PYTHONDONTWRITEBYTECODE=1 DF_ROOT_ACCEPTANCE=1
+          .venv/bin/python -m tests.df.ci_step0 root
+          --out "$RUNNER_TEMP/df-stage1/step0" --uv "$(command -v uv)"
+
+      # ---- mechanism probes: the run_as/spawn_as path, failing by name -----
+      - name: "mechanism: unshare --net + setpriv to nobody"
+        if: runner.os == 'Linux'
+        run: |
+          want=$(id -u nobody)
+          got=$(sudo -n /usr/bin/unshare --net -- /usr/bin/setpriv \
+            --reuid=nobody --regid=nogroup --init-groups -- /usr/bin/id -u)
+          test "$got" = "$want" || {
+            echo "::error title=mechanism unshare/setpriv::uid '$got', want $want"
+            exit 1
+          }
+      - name: "mechanism: unshare --net as root"
+        if: runner.os == 'Linux'
+        run: sudo -n /usr/bin/unshare --net -- /usr/bin/true
+      - name: "mechanism: readelf -d /bin/sh"
+        if: runner.os == 'Linux'
+        run: /usr/bin/readelf -d /bin/sh
+      - name: "mechanism: GNU tar"
+        if: runner.os == 'Linux'
+        run: |
+          /usr/bin/tar --version | tee "$RUNNER_TEMP/tar-version.txt"
+          grep -q '(GNU tar)' "$RUNNER_TEMP/tar-version.txt" || {
+            echo "::error title=mechanism GNU tar::/usr/bin/tar is not GNU tar"
+            exit 1
+          }
+      - name: "mechanism: sudo -u nobody sandbox-exec"
+        if: runner.os == 'macOS'
+        run: |
+          want=$(id -u nobody)
+          got=$(sudo -n -u nobody /usr/bin/sandbox-exec \
+            -p '(version 1)(allow default)(deny network*)' /usr/bin/id -u)
+          test "$got" = "$want" || {
+            echo "::error title=mechanism sudo/sandbox-exec::uid '$got', want $want"
+            exit 1
+          }
+      - name: "mechanism: otool -L /bin/sh"
+        if: runner.os == 'macOS'
+        run: /usr/bin/otool -L /bin/sh
+
+      # ---- tests ------------------------------------------------------------
+      # R77: the `network` marker is included here (both cells), not locally.
+      - name: tests/df (ordinary)
+        if: env.DF_STAGE1_SCOPE == 'full'
+        run: >
+          uv run --frozen pytest -q -m 'not slow and not harness'
+          --junitxml "$RUNNER_TEMP/df-stage1/junit-ordinary.xml" tests/df
+      # R76: root never rewrites the runner's .venv or uv cache: own HOME and
+      # UV_CACHE_DIR, `--no-sync`, no pytest cache, no bytecode; last step.
+      # Exit 5 (no test selected) is accepted with a warning while the root
+      # tests grow (13-A ships two); any other non-zero code fails the cell.
+      - name: tests/df root run
+        if: env.DF_STAGE1_SCOPE != 'probes'
+        run: |
+          sudo -n install -d -m 0700 "$RUNNER_TEMP/root-home"
+          set +e
+          sudo -n env "PATH=$PATH" "HOME=$RUNNER_TEMP/root-home" \
+            "UV_CACHE_DIR=$RUNNER_TEMP/uv-root" DF_ROOT_ACCEPTANCE=1 \
+            DF_REQUIRE_PINNED_UV=1 PYTHONDONTWRITEBYTECODE=1 \
+            uv run --frozen --no-sync pytest -q -rs -p no:cacheprovider -m root \
+            ${DF_STAGE1_K:+-k "$DF_STAGE1_K"} \
+            --junitxml "$RUNNER_TEMP/df-stage1/junit-root.xml" tests/df
+          rc=$?
+          set -e
+          if [ "$rc" -eq 5 ]; then
+            echo "::warning title=root run::no root test selected (pytest exit 5)"
+            exit 0
+          fi
+          exit "$rc"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: df-stage1-${{ matrix.os }}
+          path: ${{ runner.temp }}/df-stage1
+          if-no-files-found: warn
