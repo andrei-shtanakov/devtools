@@ -81,7 +81,8 @@ def _role_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
 
 def test_installed_python_has_no_tk_but_core_works(root_world: RootWorld) -> None:
     """The installed release's Python cannot import Tcl/Tk modules; `ssl`,
-    `sqlite3`, `ctypes`, `venv` and the pin's entrypoint still work."""
+    `sqlite3`, `ctypes`, `venv` (a real environment is created and runs) and
+    the pin's entrypoint still work."""
     assert root_world.bootstrap(root_world.init_argv()) == 0
     lay = root_world.layout
     snap = state.parse_snapshot(state.read_raw(lay), lay, mode="reader")
@@ -94,6 +95,11 @@ def test_installed_python_has_no_tk_but_core_works(root_world: RootWorld) -> Non
         assert "ModuleNotFoundError" in done.stderr, (module, done.stderr)
     core = _role_run([python, "-I", "-c", CORE])
     assert core.returncode == 0, core.stderr
+    env_dir = root_world.top / "core-venv"
+    made = _role_run([python, "-I", "-m", "venv", "--without-pip", str(env_dir)])
+    assert made.returncode == 0, made.stderr
+    used = _role_run([str(env_dir / "bin" / "python"), "-I", "-c", "import ssl"])
+    assert used.returncode == 0, used.stderr
     probe = _role_run([str(bin_dir / "dfprobe"), "--help"])
     assert probe.returncode == 0, probe.stderr
     assert probe.stdout.startswith("usage: dfprobe"), probe.stdout
