@@ -7,9 +7,9 @@ account}.py`; мир — `tests/df/root_world.py`; наблюдатель — `t
 `.github/workflows/df-stage1.yml`.
 
 **Источник.** Всё ниже взято только из артефактов одного прогона — последнего полного
-прогона ветки ([40232411657](https://github.com/andrei-shtanakov/devtools/actions/runs/40232411657),
-голова `c57d613` — последний коммит, меняющий код и тесты; коммит этого документа кода не
-меняет и df-stage1 не запускает). Прежние зелёные прогоны доказательством не считаются (решение
+прогона ветки ([40238123506](https://github.com/andrei-shtanakov/devtools/actions/runs/40238123506),
+голова `2d2b8c4` — последний коммит, меняющий код, тесты и workflow; коммит этого документа
+кода не меняет). Прежние зелёные прогоны доказательством не считаются (решение
 владельца 25.10). Факт, которого нет в артефактах, помечен **(не из артефактов)** с
 источником. Root-команды исполнялись только в одноразовых runner-ах GitHub, ни разу на
 машине человека.
@@ -30,10 +30,10 @@ account}.py`; мир — `tests/df/root_world.py`; наблюдатель — `t
 
 | | |
 |---|---|
-| прогон | [40232411657](https://github.com/andrei-shtanakov/devtools/actions/runs/40232411657) |
-| голова | `c57d6133a9efc7b5d58dad6f2319d619fd22db36` (ветка `feat/df-stage1-task13`, PR #632, событие `pull_request`) |
-| workflow | `df-stage1`, `DF_STAGE1_SCOPE: full`, `DF_STAGE1_K: ""` (полный охват, без `-k`) |
-| дата | 2026-10-25, 20:47–21:06 UTC (26.10 по Тбилиси) |
+| прогон | [40238123506](https://github.com/andrei-shtanakov/devtools/actions/runs/40238123506) |
+| голова | `2d2b8c40d95f5566ed4fa4078bca31cdaea278df` (ветка `feat/df-stage1-task13`, PR #632, событие `pull_request`) |
+| workflow | `df-stage1`, `DF_STAGE1_SCOPE: full`, `DF_STAGE1_K: ""` (полный охват, без `-k`); последний шаг `scope guard` — success (иной охват или непустой `-k` — красный) |
+| дата | 2026-10-25, 22:00–22:21 UTC (26.10 по Тбилиси) |
 
 | | macOS | Ubuntu |
 |---|---|---|
@@ -47,9 +47,9 @@ account}.py`; мир — `tests/df/root_world.py`; наблюдатель — `t
 | утверждённый `git` | `/usr/bin/git` (2.39.5 (Apple Git-154); Command Line Tools, R96) | `/usr/bin/git` (2.55.0) |
 | `uv` в мире | root-копия `<R>/cli/uv` (R88) | то же |
 | наблюдатель | `eslogger` (Endpoint Security), запуск отсоединённый | `auditd` (поставлен шагом Step 0) |
-| обычный прогон `tests/df` (`-m 'not slow and not harness'`, с `network`) | 2851: 2730 passed, 121 skipped, 0 failed | 2844: 2704 passed, 140 skipped, 0 failed |
+| обычный прогон `tests/df` (`-m 'not slow and not harness'`, с `network`) | 2851: 2731 passed, 120 skipped, 0 failed | 2844: 2704 passed, 140 skipped, 0 failed |
 | root-прогон (`-m root`) | 119: 113 passed, 6 skipped, 0 failed | 112: 111 passed, 1 skipped, 0 failed |
-| длительность root-прогона | 13:01 (шаг 20:52:48–21:05:49; junit 779 с) | 11:10 (шаг 20:51:19–21:02:29; junit 668 с) |
+| длительность root-прогона | 15:17 (шаг 22:05:56–22:21:13; junit 915 с) | 11:15 (шаг 22:03:28–22:14:43; junit 674 с) |
 
 Пропуски root-прогона — только платформенные `skipif`, ни одного пропуска root-гейтом:
 macOS — 6 тестов только для Linux (`test_account_created_through_main_linux` ×2,
@@ -59,7 +59,7 @@ macOS — 6 тестов только для Linux (`test_account_created_throug
 канарейка `test_root_gate_open` прошла, собранные root-тесты (`root-collected.txt`: macOS
 119, Ubuntu 112) все есть в `junit-root.xml`. Пропуски обычного прогона —
 root-тесты (гейт закрыт без root), платформенные и по условию хоста (macOS: ФС без учёта
-регистра, `make` CLT не шим — R97; Ubuntu: системный `python3` ≥ 3.12, ФС различает регистр
+регистра; Ubuntu: системный `python3` ≥ 3.12, ФС различает регистр
 и нормализацию); пропуска «uv не закреплён» нет
 (`DF_REQUIRE_PINNED_UV=1`).
 
@@ -179,7 +179,7 @@ Ubuntu `hardlink-root-only-file`: ни одна из 16 жёстких ссыл�
 зависит от того, успел ли писатель до чтения файла: исход одного случая может меняться от
 прогона к прогону, тест принимает оба.
 
-`test_build_user_after_seal_cannot_touch_destination`: ни одна попытка `df-build` создать или дописать файл в `releases/<id>` после `seal` не открыла его (свойство `tries`: macOS `{'EACCES': 20, 'ENOENT': 48, 'OPENED': 0, 'other': 0}`, Ubuntu `{'EACCES': 28, 'ENOENT': 80, 'OPENED': 0, 'other': 0}`); итог принят в обеих ячейках.
+`test_build_user_after_seal_cannot_touch_destination`: ни одна попытка `df-build` создать или дописать файл в `releases/<id>` после `seal` не открыла его (свойство `tries`: macOS `{'EACCES': 18, 'ENOENT': 38, 'OPENED': 0, 'other': 0}`, Ubuntu `{'EACCES': 28, 'ENOENT': 82, 'OPENED': 0, 'other': 0}`); итог принят в обеих ячейках.
 
 ## 3. Наблюдатель
 
@@ -290,7 +290,10 @@ Ubuntu `hardlink-root-only-file`: ни одна из 16 жёстких ссыл�
 - **Xcode (R96).** Mac, у которого активный каталог разработчика — `Xcode.app` в
   `/Applications` (на образе — uid 501, `/Applications` с записью группы), получает отказ
   `approved_cli_problems`: `/usr/bin/git` ведёт туда через `xcrun`. Runner настроен на Command
-  Line Tools (`step0/xcode-select.txt`: `before: /Applications/Xcode_16.4.app/Contents/Developer`, `after: /Library/Developer/CommandLineTools`), вердикт CLT — `[]` (`step0/root.json`).
+  Line Tools (`step0/xcode-select.txt`: `before: /Applications/Xcode_16.4.app/Contents/Developer`, `after: /Library/Developer/CommandLineTools`), вердикт CLT — `[]` (`step0/root.json`). `make` CLT на runner-е — настоящий бинарь (не шим
+  xcode-select), и `/usr/bin/make` принят: `test_o3_real_make_verdict_follows_clt` (обычный
+  прогон macOS, pass) утверждает вердикт хоста в обе стороны — отказ «обёртка xcode-select»,
+  где CLT `make` связан с libxcselect, и `[]`, где нет.
 - **13-C.**
   - сбой ОС после `rename` домашнего каталога (l.1757–1758) испытан только эмуляцией;
     root-половина `os` — процесс, `sync`, сброс кешей и новый `boot_id`, без потери питания;
@@ -308,7 +311,7 @@ Ubuntu `hardlink-root-only-file`: ни одна из 16 жёстких ссыл�
     `.quarantine` (его перечисляет §3.3 п. 4); спека уточнена;
   - Ubuntu `hardlink-root-only-file` — 0/16 ссылок (`protected_hardlinks`), «tar обрывается»
     измерено только на macOS;
-  - срок очистки растущего дерева: вариант `writer` — 1.91 с (macOS), 0.77 с (Ubuntu); вариант `deadline` (20 000 каталогов `000`, бюджет 5 с) — 5.08 с и 5.03 с, то есть отказ по сроку с убийством и сбором процессов очистителя; отказ замолчавшего и разветвлённого производителя — за 45.17/45.40 с (macOS) и 45.05/45.11 с (Ubuntu) при сроке 45 с; GNU-выравнивание при трубе 4096 байт (Ubuntu) — поток 16941056 байт принят за 5.17 с.
+  - срок очистки растущего дерева: вариант `writer` — 1.96 с (macOS), 0.76 с (Ubuntu); вариант `deadline` (20 000 каталогов `000`, бюджет 5 с) — 5.13 с и 5.03 с, то есть отказ по сроку с убийством и сбором процессов очистителя; отказ замолчавшего и разветвлённого производителя — за 45.16/47.29 с (macOS) и 45.07/45.10 с (Ubuntu) при сроке 45 с (допуск — срок плюс сбор производителя); GNU-выравнивание при трубе 4096 байт (Ubuntu) — поток 16941056 байт принят за 5.20 с.
 - **13-E.**
   - прерывание «внутри `build`» — отметка после настоящей сборки: окно, в котором `df-build`
     ещё пишет `releases/<id>` (повтор как `b-partial`, остаточный риск R33.F28), root-тестом
@@ -339,12 +342,12 @@ Ubuntu `hardlink-root-only-file`: ни одна из 16 жёстких ссыл�
     закреплено, `python/<ключ>/lib/lib` нет; на macOS — то же (интерпретатор с `@executable_path/../lib`),
     кроме `$ORIGIN` через ссылку: `origin_via_link` на macOS пуст — проба ищет только
     `$ORIGIN`/`@loader_path`, через ссылки там ничего не измерено.
-- **Время.** Root-прогон: 13:01 (шаг 20:52:48–21:05:49; junit 779 с) (macOS), 11:10 (шаг 20:51:19–21:02:29; junit 668 с) (Ubuntu), предел job — 180 мин.
+- **Время.** Root-прогон: 15:17 (шаг 22:05:56–22:21:13; junit 915 с) (macOS), 11:15 (шаг 22:03:28–22:14:43; junit 674 с) (Ubuntu), предел job — 180 мин.
   Чистая установка от `manifest` до `commit-config done` (переход в `committed`) (`journals/test_clean_install_reaches_level1.jsonl`):
-  8,3 с (macOS), 14,0 с (Ubuntu), 10 итераций `drive` (по одному действию от
+  13,5 с (macOS), 14,2 с (Ubuntu), 10 итераций `drive` (по одному действию от
   `build-dir` до `commit-config`). Время `full`/`intact` digest журнал отдельно не пишет;
   промежуток между `done` одного действия и `start` следующего (классификация с digest
-  дерева) — не больше 0,26 с (macOS) и 0,70 с (Ubuntu), наибольший — после
+  дерева) — не больше 0,47 с (macOS) и 0,70 с (Ubuntu), наибольший — после
   `register`/`activate`/`launcher`, когда классификация читает принятый релиз целиком.
 
 ## 5. Отказ tar от root (R81)
