@@ -27,9 +27,9 @@ concurrency:
 env:
   # Iteration selector (pre-flight section 6): probes | root-only | full.
   # The final commit of Task 13 must say `full` (the reviewer checks).
-  DF_STAGE1_SCOPE: root-only
+  DF_STAGE1_SCOPE: full
   # Optional `-k` expression of the root run while iterating; empty = all.
-  DF_STAGE1_K: "test_acceptance_root_install"
+  DF_STAGE1_K: ""
   # R78: a skip for a missing or unpinned uv fails the run.
   DF_REQUIRE_PINNED_UV: "1"
 
