@@ -26,9 +26,11 @@ Runs only as root in the disposable CI runners (the root gate of
 
 from __future__ import annotations
 
+import grp
 import http.server
 import itertools
 import os
+import pwd
 import shutil
 import socket
 import subprocess
@@ -290,6 +292,8 @@ class RootWorld:
         """R92: `<R>/observe-control`, `df-build`'s, with the file `f` it wrote."""
         account = build_account(self.layout)
         path = self.layout.root / "observe-control"
+        if path.is_dir():
+            return path
         os.mkdir(path, 0o755)
         os.chown(path, account.uid, account.gid)
         result = plat.run_as(
@@ -395,6 +399,37 @@ def remove_build_user() -> None:
         subprocess.run(
             argv, capture_output=True, env=_SYSTEM_ENV, timeout=60, check=False
         )
+    _wait_forgotten(name)
+
+
+def _wait_forgotten(name: str) -> None:
+    """Until the libc lookups forget `name` (the macOS directory cache kept a
+    deleted user's home for the next world, CI run 40191801437)."""
+    deadline = time.monotonic() + 30
+    while _known(name):
+        if time.monotonic() > deadline:
+            infra(f"{name}: удалённая учётка всё ещё видна через pwd/grp")
+        if plat.detect_platform() == "macos-arm64":
+            subprocess.run(
+                ["/usr/bin/dscacheutil", "-flushcache"],
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
+        time.sleep(0.5)
+
+
+def _known(name: str) -> bool:
+    try:
+        pwd.getpwnam(name)
+        return True
+    except KeyError:
+        pass
+    try:
+        grp.getgrnam(name)
+        return True
+    except KeyError:
+        return False
 
 
 # ---------- the positive controls ----------
