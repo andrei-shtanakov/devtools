@@ -59,7 +59,7 @@ from typing import Any
 
 import pytest
 
-from df import accept, admin, cli, doctor, fsutil, install, state
+from df import accept, admin, boundary, cli, doctor, fsutil, install, state
 from df import build as build_mod
 from df import platform as plat
 from df.boundary import (
@@ -92,7 +92,6 @@ from tests.df.root_world import (
 pytestmark = pytest.mark.root
 
 PLATFORM = plat.detect_platform()
-LINUX = PLATFORM == "linux-x86_64"
 #: Steps 1-3 of a fresh install, as `run_steps` journals them.
 PREP_STEPS = [("manifest", "skip"), ("trusted-paths", "done"), ("build-user", "done")]
 #: The only other journal step of a clean run: `drive`'s `sync-note`.
@@ -1263,10 +1262,12 @@ class BoundaryFacts:
         return "trampoline" if head == "#!/bin/sh" else f"иное: {head[:80]}"
 
     def _native_wheel(self, env: Any, scratch: Path) -> dict[str, Any]:
-        """A wheel with a bundled native library installed (network, as
+        """A wheel with bundled native libraries installed (network, as
         `df-build`) into a venv of the release's Python: each native file's
-        search paths and where its needs resolve (core is not buildable in
-        stage 1: R85, df-manifest-profiles)."""
+        search paths, where its needs resolve, and what rule (в) itself
+        (`boundary._NativeCheck` over `site-packages`) says of them — core
+        is not buildable in stage 1 (R85, df-manifest-profiles), so this is
+        the sample of a manylinux/delocate wheel."""
         work = _builder_dir(scratch / "wheel")
         venv = work / "venv"
         uv = self.installed.world.uv
@@ -1287,7 +1288,9 @@ class BoundaryFacts:
                 tuple(deps["needed"]), tuple(deps["rpaths"]), path.parent
             )
             natives[str(path.relative_to(site))] = deps
-        return {"wheel": NATIVE_WHEEL, "natives": natives}
+        check = boundary._NativeCheck(site, PLATFORM, None)  # noqa: SLF001
+        rule_v = _measure(check.problems)
+        return {"wheel": NATIVE_WHEEL, "natives": natives, "rule_v_problems": rule_v}
 
 
 def _measure(fn: Callable[[], Any]) -> Any:
@@ -1351,6 +1354,10 @@ def _resolve(
                 found[name] = f"system:{name}"
             else:
                 found[name] = None
+            continue
+        if name.startswith("@loader_path/"):
+            candidate = os.path.normpath(origin / name.removeprefix("@loader_path/"))
+            found[name] = candidate if os.path.exists(candidate) else None
             continue
         leaf = name.removeprefix("@rpath/")
         found[name] = None
