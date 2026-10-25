@@ -47,7 +47,8 @@ from df.routes import RouteContext, implementation, run_route
 from tests.df.conftest import BUILD_UID, FakeLayout
 
 ID = "rel1"
-PY = "3.13.1"
+#: The one Python with a measured Tcl/Tk removal list (`build_mod.TCLTK_REMOVED`).
+PY = "3.12.13"
 SHORT = ".".join(PY.split(".")[:2])
 KEY = build_mod.python_key(PY, plat.detect_platform())
 BOOT = "boot-1"
@@ -608,14 +609,25 @@ def setup_layout(
     return fake_layout
 
 
+#: Stand-ins (empty files) for the measured Tcl/Tk entries of this host.
+_TCLTK = " ".join(build_mod.TCLTK_REMOVED[PY][plat.detect_platform()])
+
 #: The plan's uv: `--version` prints `UV`; `python install --no-bin <key>`
 #: puts a stand-in interpreter `<key>/bin/python<X.Y>` and a service file
-#: into `$UV_PYTHON_INSTALL_DIR` (as uv leaves `.lock` there); else nothing.
+#: into `$UV_PYTHON_INSTALL_DIR` (as uv leaves `.lock` there); a release's
+#: `.../python` also gets stand-ins for the measured Tcl/Tk entries (the
+#: build removes them; the admin Python keeps its tree); else nothing.
 FAKE_UV = f"""#!/bin/sh
 [ "$1" = --version ] && echo '{UV}' && exit 0
 if [ "$1 $2 $3" = "python install --no-bin" ]; then
   mkdir -p "$UV_PYTHON_INSTALL_DIR/$4/bin" || exit 1
   printf '#!/bin/sh\\n' > "$UV_PYTHON_INSTALL_DIR/$4/bin/python{SHORT}"
+  case "$UV_PYTHON_INSTALL_DIR" in */python)
+    for rel in {_TCLTK}; do
+      mkdir -p "$(dirname "$UV_PYTHON_INSTALL_DIR/$4/$rel")" || exit 1
+      : > "$UV_PYTHON_INSTALL_DIR/$4/$rel" || exit 1
+    done;;
+  esac
   : > "$UV_PYTHON_INSTALL_DIR/.lock"
 fi
 exit 0
@@ -747,7 +759,7 @@ def repo_ref(
     ref = fl.layout.verify_dir / repo
     ref.mkdir()
     (ref / "uv.lock").write_bytes(lock)
-    site = fl.layout.release_dir(ID) / "venv" / repo / "lib" / "python3.13"
+    site = fl.layout.release_dir(ID) / "venv" / repo / "lib" / f"python{SHORT}"
     site = site / "site-packages"
     site.mkdir(parents=True)
     for name, version in dists:
