@@ -912,13 +912,18 @@ def test_doctor_probe_models_transitional_and_product(
     assert "реестр продуктов не поддерживается до этапа 3" in capsys.readouterr().err
 
 
-def test_plain_doctor_is_still_the_stub(
+def test_plain_doctor_reports_level1(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """Plain `doctor` is Task 12's level 1, no longer a stub; here nothing
+    is installed, so the level is not reached."""
     assert doctor(world, []) == 2
-    assert "Task 12" in capsys.readouterr().err
+    out = capsys.readouterr()
+    assert out.out.startswith("уровень 1: не достигнут — ")
+    assert "Task 12" not in out.err
     assert doctor(world, [], Transitional(3)) == 2
-    assert "Task 12" in capsys.readouterr().err
+    out = capsys.readouterr()
+    assert out.out.startswith("уровень 1: не достигнут — install.transitional: ")
 
 
 def models_list(world: World, capsys: pytest.CaptureFixture[str]) -> list[dict]:

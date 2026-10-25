@@ -217,12 +217,13 @@ def test_reader_mode_refuses_writer_subcommand(
 
 
 def test_reader_transitional(w: World, capsys: pytest.CaptureFixture[str]) -> None:
-    """A reader in a transitional state: `doctor` reaches its (Task 12) stub,
-    the rest refuse naming the interrupted operation."""
+    """A reader in a transitional state: `doctor` shows it (Task 12), the
+    rest refuse naming the interrupted operation."""
     assert w.reader(["models", "list"], Transitional(3)) == 2
     assert "идёт или прервана административная операция" in capsys.readouterr().err
     assert w.reader(["doctor"], Transitional(3)) == 2
-    assert "Task 12" in capsys.readouterr().err
+    out = capsys.readouterr().out
+    assert out.startswith("уровень 1: не достигнут — install.transitional: ")
 
 
 @pytest.mark.parametrize(
@@ -1162,11 +1163,6 @@ def test_argv_forms_never_split_mode_and_dispatch(
         # (argparse would read `models -- set …` as `models set …`)
         assert "форма команды" in err, err
     assert runs == [] and not os.path.lexists(w.lay.var)
-
-
-def test_later_never_indexes_an_unknown_command() -> None:
-    with pytest.raises(cli.Refusal):
-        cli._later("install")  # noqa: SLF001
 
 
 @pytest.mark.parametrize(

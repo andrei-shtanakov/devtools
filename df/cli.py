@@ -4,12 +4,12 @@ The entry (`df/launcher_entry.py`, Task 8a) or bootstrap (`df/bootstrap.py`)
 calls `main(argv, mode=, read=, lock_fd=)`. A writer works from the snapshot
 the entry read under the lock it holds; bootstrap takes the lock, settles
 and reads the snapshot itself. Subcommands: `init` and `install` (Task 9);
-`models list|set` (Task 10); `doctor --probe-models` (Task 11); plain
-`doctor` (Task 12) is refused here until it lands.
+`models list|set` (Task 10); `doctor --probe-models` (Task 11); `doctor
+[--json]` (Task 12, `df.doctor`).
 
 Exit codes (M7): 0 success; 2 a refusal or a configuration error, with the
 step named; 3 `NeedsHuman` (the instruction on stderr); 1 a program error
-with its traceback.
+with its traceback. `doctor`: 0 level 1 reached, 2 not reached (R68).
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from typing import NoReturn
 
 from df import (
     accept,
+    doctor,
     fsutil,
     install,
     journal,
@@ -49,13 +50,8 @@ EXIT_HUMAN = 3
 ROOT_UID = 0
 #: Subcommands allowed while `pending.toml` exists (spec 3.3).
 PENDING_ALLOWED = frozenset({"init", "install", "doctor"})
-#: Subcommands that land in later tasks: refused at dispatch (M19).
-LATER = {"doctor": "Task 12"}
 
-_TRANSITIONAL = (
-    "идёт или прервана административная операция: дождитесь её конца; "
-    "прерванную повторите от root (darkfactory install или darkfactory models set)"
-)
+_TRANSITIONAL = doctor.TRANSITIONAL
 _FINISH = "есть незавершённая установка: завершите darkfactory install"
 _NO_PRODUCT = "продукт не зарегистрирован (этап 3)"
 _NO_REGISTRY = "реестр продуктов не поддерживается до этапа 3"
@@ -221,6 +217,7 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     )
     doctor.add_argument("--probe-models", action="store_true")
     doctor.add_argument("--product", type=_repository_id)
+    doctor.add_argument("--json", action="store_true")
     try:
         return parser.parse_args(argv)
     except argparse.ArgumentError as exc:
@@ -257,16 +254,26 @@ def _repository_id(text: str) -> int:
 
 
 def _reader(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
-    if args.command == "doctor" and args.probe_models:
-        return _probe_models(args, lay, read)
+    if args.command == "doctor":
+        return _doctor(args, lay, read)
     if isinstance(read, Transitional):
-        if args.command == "doctor":
-            return _later(args.command)
         raise Refusal(_TRANSITIONAL)
     snap = state.parse_snapshot(read.value, lay, mode="reader")
-    if args.command == "models":
-        return _models_list(args, lay, snap)
-    return _later(args.command)
+    return _models_list(args, lay, snap)
+
+
+def _doctor(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
+    """`doctor [--json]` (Task 12) or `doctor --probe-models` (Task 11).
+
+    `--probe-models` with `--json` is a usage error in v1; plain `doctor
+    --product` is refused before any read (R57/R64, R70)."""
+    if args.probe_models:
+        if args.json:
+            raise UsageError("doctor --probe-models: --json не поддерживается")
+        return _probe_models(args, lay, read)
+    if args.product is not None:
+        raise Refusal(_NO_REGISTRY)
+    return doctor.doctor_main(read, lay, euid=os.geteuid(), as_json=args.json)
 
 
 def _probe_models(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
@@ -396,13 +403,6 @@ def _list_cells(row: dict[str, object]) -> tuple[str, ...]:
     return (*cells, source, str(row["status"]))
 
 
-def _later(command: str) -> int:
-    task = LATER.get(command)
-    if task is None:
-        raise Refusal(f"{command}: нет такой подкоманды здесь")
-    raise Refusal(f"{command}: ещё не реализовано ({task})")
-
-
 # ---------- writer ----------
 
 
@@ -421,8 +421,6 @@ def _writer(
         raise Refusal(_FINISH)
     if args.command == "models":
         return _models_set(args, lay, snap)
-    if args.command not in ("init", "install"):
-        return _later(args.command)
     requested = _requested(args, snap, pending)
     if mode == "bootstrap" and _healthy(lay, snap):
         raise Refusal(
