@@ -285,13 +285,53 @@ def test_audit_lost_parsed() -> None:
     assert observe.audit_lost("enabled 1\n") is None
 
 
-def test_never_rules() -> None:
-    """N5b: a host `never` rule masks events of the first match."""
-    listing = (
-        "-a never,exit -F arch=b64 -S openat -F exe=/bin/cat\n-a always,exit -k x\n"
-    )
-    assert observe.never_rules(listing) == [listing.splitlines()[0]]
-    assert observe.never_rules("No rules\n") == []
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "-a never,exit -F arch=b64 -S openat -F exe=/bin/cat",
+        "-a exit,never -F arch=b64 -S openat -F exe=/bin/cat",
+        "-a always,exclude -F msgtype=SYSCALL -F exe=/usr/bin/uv",
+        "-a exclude,always -F msgtype=PATH",
+        "-a never,exclude -F msgtype=CWD",
+    ],
+)
+def test_suppressing_rules_refused(rule: str) -> None:
+    """N5b, A3: a host `never` rule or `exclude`-list rule masks events."""
+    listing = f"{rule}\n-a always,exit -F arch=b64 -S openat -k x\n"
+    assert observe.suppressing_rules(listing) == [rule]
+
+
+@pytest.mark.parametrize(
+    "listing",
+    [
+        "No rules\n",
+        "-a always,exit -F arch=b64 -S openat -F dir=/var/tmp-df -k never\n",
+        "-a always,exit -F arch=b64 -S execve -F exe=/usr/bin/exclude -k y\n",
+        "-w /etc/passwd -p wa -k identity\n",
+    ],
+)
+def test_ordinary_rules_not_refused(listing: str) -> None:
+    """A3 twin: an `always,exit` rule (even keyed `never`) is not refused."""
+    assert observe.suppressing_rules(listing) == []
+
+
+def test_audit_start_refuses_an_exclude_rule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A3: the refusal reaches the verdict before any rule is added."""
+    exclude = "-a always,exclude -F msgtype=SYSCALL -F exe=/usr/bin/uv"
+    calls: list[list[str]] = []
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, f"{exclude}\n", "")
+
+    monkeypatch.setattr(observe, "_run", run)
+    entry = Watch(tmp_path, (0, 0), frozenset(), 0)
+    backend = observe._Audit(entry, "auditctl", "ausearch", None)
+    failure = backend.start([])
+    assert failure is not None and "exclude" in failure and exclude in failure
+    assert calls == [["auditctl", "-l"]]
 
 
 def test_audit_lost_growth_is_unobserved(tmp_path: Path) -> None:
@@ -508,6 +548,66 @@ def test_child_alive_after_observation_is_unobserved(
     finally:
         child.kill()
         child.wait()
+
+
+@pytest.mark.parametrize(
+    ("argv", "why"),
+    [
+        (["/bin/sh", "-c", "exit 3"], "ps: код 3"),
+        (["/nonexistent/ps"], "ps не выполнен"),
+        (["/bin/echo", "not a process table"], "не прочитано"),
+        (["/bin/sh", "-c", "echo 1 0 Ss"], "нет строки pid"),
+    ],
+)
+def test_failing_ps_is_unobserved(
+    fake: list[_FakeBackend],
+    canon: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+    why: str,
+) -> None:
+    """A5: a `ps` that fails, cannot run or prints no tree with this pid is
+    a reason, never a silent pass of the surviving-child check."""
+    fake.append(_FakeBackend(None, True))
+    monkeypatch.setattr(observe, "PS_ARGV", argv)
+    with observe.observe_root_access(
+        [canon / "src"], control=canon / "ctl", workdir=canon
+    ) as obs:
+        pass
+    assert obs.status == "unobserved"
+    assert why in obs.reason
+
+
+def test_working_ps_without_child_stays_observed(
+    fake: list[_FakeBackend], canon: Path
+) -> None:
+    """A5 twin: the real `ps` and no root child left -> `observed`."""
+    fake.append(_FakeBackend(None, True))
+    assert isinstance(observe.descendants(os.getpid()), set)
+    with observe.observe_root_access(
+        [canon / "src"], control=canon / "ctl", workdir=canon
+    ) as obs:
+        subprocess.run(["/bin/sh", "-c", "exit 0"], check=True)
+    assert obs.status == "observed", obs.reason
+
+
+def test_process_tree() -> None:
+    """Zombies left out, blank lines skipped, a malformed line -> `None`."""
+    listing = "  10 1 Ss\n\n  11 10 Z\n  12 10 R+\n"
+    assert observe.process_tree(listing) == {1: [10], 10: [12]}
+    assert observe.process_tree("10 1\n") is None
+    assert observe.process_tree("x 1 S\n") is None
+
+
+def test_limits_state_r101_forms() -> None:
+    """R101: A2/A4 on both platforms, A1 on Linux (text names the form)."""
+    for platform in ("darwin", "linux"):
+        limits = observe.LIMITS[platform]
+        assert "до вызова watch()" in limits["created-moved-out"]
+        assert "отменённое" in limits["entry-exit-only"]
+        assert "setsid" in limits["detached-process"]
+    assert "/var/tmp" in observe.LIMITS["linux"]["identity-scope"]
+    assert "identity-scope" not in observe.LIMITS["darwin"]
 
 
 def test_missing_observer_is_unobserved(

@@ -14,7 +14,9 @@ Matching (R98) is by identity and by path:
   by `lstat` before the observation starts, plus the watched directory itself
   at `watch()` (only `lstat` inside the context: listing it would be a root
   access). An event whose own object has one of these identities is a
-  violation wherever its path is (a hardlink, a moved object);
+  violation wherever the OS reports it (macOS: anywhere; Linux: only under
+  a watched directory, limit `identity-scope`); objects that were not
+  enumerated are matched by path only (limit `created-moved-out`);
 - path: the event path under a source's on-disk spelling (every component
   of a source must appear byte-exact in its parent's listing: case and
   Unicode-normalisation aliases are refused).
@@ -23,7 +25,14 @@ Sources must also keep a trusted ancestor chain (`plat.trusted_path_problems`
 of the parent: root's, no group/other write, no ACL), so `df-build` cannot
 rename a source or an ancestor away; the chain, the canonical spelling and
 the source's identity are checked at entry (refusal: `ValueError`) and again
-at exit (a change: "unobserved").
+at exit (a change: "unobserved"; one undone in between is not seen, limit
+`entry-exit-only`).
+
+The guarantee: "observed" with no violations means no root (euid 0) open,
+listing or exec of a source object, identified as above, from entry (or
+`watch()`) to the end marker, with no dropped events; the observer sees
+root's accesses to objects under the watched directories (on macOS also to
+entry identities elsewhere), and only those, except the forms in `LIMITS`.
 
 - macOS: `eslogger open readdir exec --format json` (Endpoint Security),
   started detached (its parent's events are muted, CI run 40189716039). The
@@ -35,15 +44,18 @@ at exit (a change: "unobserved").
   outside the sources), `-a always,exit -F arch=b64 -S <SYSCALLS> -F
   dir=<dir> -F euid=0 -k <key>`, removed in `finally`. Every event of a
   source's key is a violation; an event of the scope key is one when one of
-  its PATH records has a source identity. A `never` rule on the host, or
-  growth of `lost` in `auditctl -s`, makes the run "unobserved".
+  its PATH records has a source identity; an object outside every watched
+  directory produces no record. A `never` or `exclude` rule on the host,
+  or growth of `lost` in `auditctl -s`, makes the run "unobserved".
 - Markers (R92, R98): the observer's own process creates a uniquely named
   file in `control` on entry and as the very last act on exit, and waits
   until the OS reports that exact path from this pid. The exit marker
   proves delivery of everything before it. Control events of this pid are
   dropped from `violations`.
 - A root process this one started during the observation and still alive
-  at its end makes the run "unobserved" (it could read a source unseen).
+  at its end makes the run "unobserved" (it could read a source unseen), and
+  so does a `ps` that fails at either end; a process that detached from
+  this one's tree is not seen (limit `detached-process`).
 - Missing tools, a refused start, an unseen marker, dropped events, a
   failed search: "unobserved" with a `reason`, never an error; the test
   turns it into `pytest.xfail`.
@@ -102,15 +114,31 @@ X86_64_SYSCALLS: Mapping[int, str] = {
     437: "openat2",
 }
 SYSCALLS = ",".join(sorted(X86_64_SYSCALLS.values()))
+#: The process listing of the surviving-child check (tests substitute it).
+PS_ARGV: Sequence[str] = ("/bin/ps", "-A", "-o", "pid=,ppid=,stat=")
 #: The trusted-path policy of an ancestor chain (tests substitute it).
 trusted_problems: Callable[[Path], list[str]] = plat.trusted_path_problems
 
 _COMMON_LIMITS: Mapping[str, str] = {
     "before-watch": "доступы до входа в наблюдение и до watch() не наблюдаются",
     "created-moved-out": (
-        "объект, созданный в источнике после входа (или после watch) и "
-        "перенесённый df-build в каталог вне источников, дальше не "
-        "прослеживается (объекты, бывшие при входе, сопоставляются по inode)"
+        "по идентичности (inode) сопоставляются только объекты источников, "
+        "перечисленные при входе, и сам каталог, добавленный через watch(); "
+        "остальные — созданные в источнике после входа или после watch(), а "
+        "также бывшие в каталоге watch() ещё до вызова watch() — "
+        "сопоставляются только по пути: перенесённые df-build в каталог вне "
+        "источников, они дальше не прослеживаются"
+    ),
+    "entry-exit-only": (
+        "цепочка родителей, написание и идентичность источника проверяются "
+        "на входе и на выходе; изменение, отменённое между двумя проверками, "
+        "не видно"
+    ),
+    "detached-process": (
+        "проверка переживших процессов идёт по дереву потомков этого "
+        "процесса; процесс, отсоединившийся от него (двойной fork/setsid с "
+        "переходом к init/launchd), и его доступы после конечной метки не "
+        "видны"
     ),
     "held-fd-read": "read/mmap через дескриптор, открытый до наблюдения, — не событие",
     "symlink-out": (
@@ -133,6 +161,14 @@ LIMITS: Mapping[str, Mapping[str, str]] = {
     },
     "linux": {
         **_COMMON_LIMITS,
+        "identity-scope": (
+            "правила audit следят только за наблюдаемыми каталогами "
+            "(источники, control, scope): видны доступы root к объектам под "
+            "ними, и только к ним; объект источника, который df-build связал "
+            "жёсткой ссылкой или перенёс за их пределы (например, в /var/tmp), "
+            "root читает там незамеченным; без scope сопоставления по "
+            "идентичности нет"
+        ),
         "other-ops": (
             f"наблюдаются только {SYSCALLS}; stat/rename/unlink, sendfile/"
             "copy_file_range по чужому дескриптору — нет"
@@ -382,19 +418,20 @@ def make_marker(control: Path) -> Path:
     return path
 
 
-def descendants(pid: int) -> set[int]:
-    """Live descendants of `pid` (from `ps`; the `ps` itself excluded)."""
-    done = subprocess.run(
-        ["/bin/ps", "-A", "-o", "pid=,ppid=,stat="],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    children: dict[int, list[int]] = {}
-    for line in done.stdout.splitlines():
-        fields = line.split()
-        if len(fields) == 3 and not fields[2].startswith("Z"):
-            children.setdefault(int(fields[1]), []).append(int(fields[0]))
+def descendants(pid: int) -> set[int] | str:
+    """Live descendants of `pid` (from `ps`; the `ps` itself excluded), or
+    why `ps` gave no process tree (A5: a failed check is never a pass)."""
+    try:
+        done = subprocess.run(
+            list(PS_ARGV), capture_output=True, text=True, timeout=60, check=False
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"ps не выполнен: {exc}"
+    if done.returncode != 0:
+        return f"ps: код {done.returncode}: {done.stderr.strip()[:300]}"
+    children = process_tree(done.stdout)
+    if children is None or not any(pid in kids for kids in children.values()):
+        return f"ps: дерево процессов не прочитано (нет строки pid {pid})"
     found: set[int] = set()
     todo = [pid]
     while todo:
@@ -405,9 +442,30 @@ def descendants(pid: int) -> set[int]:
     return found
 
 
-def _survivors(before: set[int]) -> str | None:
-    """N5a: a process this one started in the observation and still alive."""
-    left = {p for p in descendants(os.getpid()) - before if _alive(p)}
+def process_tree(listing: str) -> dict[int, list[int]] | None:
+    """`ps -o pid=,ppid=,stat=` -> live children by parent pid (zombies
+    left out); `None` when a line is not `pid ppid stat`."""
+    children: dict[int, list[int]] = {}
+    for line in listing.splitlines():
+        fields = line.split()
+        if not fields:
+            continue
+        if len(fields) != 3 or not (fields[0].isdigit() and fields[1].isdigit()):
+            return None
+        if not fields[2].startswith("Z"):
+            children.setdefault(int(fields[1]), []).append(int(fields[0]))
+    return children
+
+
+def _survivors(before: set[int] | str) -> str | None:
+    """N5a: a process this one started in the observation and still alive;
+    a `ps` that failed at either end is the reason (A5)."""
+    if isinstance(before, str):
+        return before
+    after = descendants(os.getpid())
+    if isinstance(after, str):
+        return after
+    left = {p for p in after - before if _alive(p)}
     if left:
         return f"процессы, запущенные в наблюдении, живы после него: {sorted(left)}"
     return None
@@ -735,9 +793,9 @@ class _Audit:
         return failure
 
     def _start(self, watches: Sequence[Watch]) -> str | None:
-        never = never_rules(_run([self.auditctl, "-l"]).stdout)
-        if never:
-            return f"auditctl: правила never на хосте: {never}"
+        suppressing = suppressing_rules(_run([self.auditctl, "-l"]).stdout)
+        if suppressing:
+            return f"auditctl: правила never/exclude на хосте: {suppressing}"
         self.lost = self._lost()
         if self.lost is None:
             return "auditctl -s: нет счётчика lost"
@@ -849,12 +907,17 @@ def _run(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
-def never_rules(listing: str) -> list[str]:
-    """Rules of `auditctl -l` that suppress events (`never`), N5b."""
+#: Rule actions/lists of `auditctl -l` that drop events (N5b, A3).
+SUPPRESSING = frozenset({"never", "exclude"})
+
+
+def suppressing_rules(listing: str) -> list[str]:
+    """Rules of `auditctl -l` that suppress events: a `never` action or the
+    `exclude` list, in either order (`-a never,exit`, `-a always,exclude`)."""
     return [
         line
         for line in listing.splitlines()
-        if "never" in ",".join(line.split()[:2]).split(",")
+        if SUPPRESSING & set(",".join(line.split()[:2]).split(","))
     ]
 
 
