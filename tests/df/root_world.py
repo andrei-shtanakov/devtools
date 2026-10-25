@@ -402,21 +402,50 @@ def remove_build_user() -> None:
     _wait_forgotten(name)
 
 
+#: libinfo's in-process cache listens to these (macOS); `dscacheutil
+#: -flushcache` alone left a deleted user visible (CI run 40191989552).
+_DS_INVALIDATE = (
+    "com.apple.system.DirectoryService.InvalidateCache",
+    "com.apple.system.DirectoryService.InvalidateCache.user",
+    "com.apple.system.DirectoryService.InvalidateCache.group",
+)
+
+
 def _wait_forgotten(name: str) -> None:
     """Until the libc lookups forget `name` (the macOS directory cache kept a
     deleted user's home for the next world, CI run 40191801437)."""
     deadline = time.monotonic() + 30
     while _known(name):
         if time.monotonic() > deadline:
-            infra(f"{name}: удалённая учётка всё ещё видна через pwd/grp")
+            infra(f"{name}: удалённая учётка всё ещё видна: {_lookup_facts(name)}")
         if plat.detect_platform() == "macos-arm64":
-            subprocess.run(
-                ["/usr/bin/dscacheutil", "-flushcache"],
-                capture_output=True,
-                timeout=60,
-                check=False,
-            )
+            _flush_ds_cache()
         time.sleep(0.5)
+
+
+def _flush_ds_cache() -> None:
+    argvs = [["/usr/bin/dscacheutil", "-flushcache"]]
+    argvs += [["/usr/bin/notifyutil", "-p", key] for key in _DS_INVALIDATE]
+    for argv in argvs:
+        subprocess.run(argv, capture_output=True, timeout=60, check=False)
+
+
+def _lookup_facts(name: str) -> dict[str, str]:
+    """Who still sees `name`: this process, a new process, dscl, the cache."""
+    facts: dict[str, str] = {}
+    try:
+        facts["pwd (в процессе)"] = repr(pwd.getpwnam(name))
+    except KeyError:
+        facts["pwd (в процессе)"] = "нет"
+    probes = {
+        "id (новый процесс)": ["/usr/bin/id", name],
+        "dscl -read": ["/usr/bin/dscl", ".", "-read", f"/Users/{name}", "UniqueID"],
+        "dscacheutil -q": ["/usr/bin/dscacheutil", "-q", "user", "-a", "name", name],
+    }
+    for label, argv in probes.items():
+        done = subprocess.run(argv, capture_output=True, text=True, check=False)
+        facts[label] = f"rc={done.returncode} {done.stdout.strip()[:200]}"
+    return facts
 
 
 def _known(name: str) -> bool:
