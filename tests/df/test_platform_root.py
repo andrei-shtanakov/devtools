@@ -78,6 +78,7 @@ BROKEN_CONTROLS = (
     "whoami-fails",
     "whoami-mismatch",
     "write-fails",
+    "write-as-root",
     "network-code",
     "network-not-launched",
 )
@@ -103,6 +104,9 @@ def test_broken_run_as_fails_suite(
         if tool == "/usr/bin/touch" and broken == "write-fails":
             real(user, argv, **kw)  # the file is there: only the code tells
             return plat.RunResult(1, b"", b"", True)
+        if tool == "/usr/bin/touch" and broken == "write-as-root":
+            subprocess.run(argv, check=True)  # root's file: only the owner tells
+            return plat.RunResult(0, b"", b"", True)
         if tool == "/usr/bin/curl" and broken == "network-code":
             return plat.RunResult(0, b"000", b"", True)
         if tool == "/usr/bin/curl" and broken == "network-not-launched":
@@ -125,13 +129,23 @@ TWINS = (
     "hardlink-out",
     "held-fd-readdir",
     "held-fd-read",
+    "moved-out",
+    "exec-source",
 )
-#: Twin -> the limit key that says it is not reported (`observe.LIMITS`).
+#: Twin -> the limit key that would say it is not reported
+#: (`observe.LIMITS`); a key no platform states means "always reported".
 TWIN_LIMIT = {
     "symlink-out": "symlink-out",
+    "hardlink-out": "hardlink-out",
     "held-fd-readdir": "held-fd-getdents",
     "held-fd-read": "held-fd-read",
+    "moved-out": "moved-out",
+    "exec-source": "exec-source",
 }
+#: The source every form twin uses: a file, and a script root may execute.
+TWIN_SOURCE = (
+    "echo sentinel > f && printf '#!/bin/sh\\nexit 0\\n' > tool && chmod 755 tool"
+)
 
 
 @pytest.mark.parametrize("twin", TWINS)
@@ -145,13 +159,12 @@ def test_root_access_observer_twins(
     after it has one. The form-table twins: a source cannot be renamed away
     by `df-build`; a followed link out, a held descriptor listed or read are
     reported exactly when the platform states no limit for them; a hardlink
-    out is recorded."""
+    out, a moved object and an executed source script are reported (R98:
+    by identity)."""
     if twin == "prepare-dir-reopen":
         _prepare_dir_twin(root_world)
         return
-    src = root_world.builder_dir(
-        root_world.layout.root / "twins" / "src", "echo sentinel > f"
-    )
+    src = root_world.builder_dir(root_world.layout.root / "twins" / "src", TWIN_SOURCE)
     TWIN_RUNS[twin](root_world, src)
 
 
@@ -198,14 +211,31 @@ def _twin_symlink(world: RootWorld, src: Path) -> None:
 
 
 def _twin_hardlink(world: RootWorld, src: Path) -> None:
-    """F6: root opens a df-build hardlink (in its home) to `src/f`; the
-    outcome is recorded (the JSON), the guarantee is a stated limit."""
+    """F6: root opens a df-build hardlink (in its home) to `src/f`: the same
+    object, reported by identity (R98)."""
     link = world.layout.build_home / "hardlink"
     _as_builder(["/bin/ln", str(src / "f"), str(link)])
     with _observing(world, [src], "hardlink-out") as obs:
         os.close(os.open(link, os.O_RDONLY))
-    _require_observed(obs)
-    assert "hardlink-out" in obs.limits
+    _expect_per_limits(obs, "hardlink-out")
+
+
+def _twin_moved(world: RootWorld, src: Path) -> None:
+    """F4: df-build moves `src/f` (present at entry) out of the source during
+    the observation; root opens it at its new place."""
+    moved = world.layout.build_home / "moved"
+    with _observing(world, [src], "moved-out") as obs:
+        _as_builder(["/bin/mv", str(src / "f"), str(moved)])
+        os.close(os.open(moved, os.O_RDONLY))
+    _expect_per_limits(obs, "moved-out")
+
+
+def _twin_exec(world: RootWorld, src: Path) -> None:
+    """N6: root executes a df-build script of the source."""
+    with _observing(world, [src], "exec-source") as obs:
+        subprocess.run([str(src / "tool")], capture_output=True, check=True)
+    _expect_per_limits(obs, "exec-source")
+    assert [a for a in obs.violations if a.path == str(src / "tool")], obs.violations
 
 
 def _twin_held_readdir(world: RootWorld, src: Path) -> None:
@@ -238,6 +268,8 @@ TWIN_RUNS: dict[str, Callable[[RootWorld, Path], None]] = {
     "hardlink-out": _twin_hardlink,
     "held-fd-readdir": _twin_held_readdir,
     "held-fd-read": _twin_held_read,
+    "moved-out": _twin_moved,
+    "exec-source": _twin_exec,
 }
 
 
@@ -289,7 +321,11 @@ def _observing(
     out = stage1_out()
     record = None if out is None else out / "observe" / f"{label}.json"
     return observe_root_access(
-        sources, control=world.control_dir(), workdir=world.workdir(), record=record
+        sources,
+        control=world.control_dir(),
+        workdir=world.workdir(),
+        scope=world.layout.root,
+        record=record,
     )
 
 

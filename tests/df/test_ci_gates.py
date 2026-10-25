@@ -243,3 +243,12 @@ def test_collected_but_not_run_fails_the_guard(tmp_path: Path) -> None:
     missing = ci_junit.missing_problems(collected.read_text(), canary.read_text())
     assert missing and all("собран, но не выполнен" in m for m in missing)
     assert ci_junit.missing_problems("no tests ran\n", full.read_text()) != []
+
+
+def test_junit_ids_of_a_test_in_a_class() -> None:
+    xml = (
+        '<testsuites><testsuite><testcase classname="tests.df.test_x.TestK" '
+        'name="test_y[p]"/></testsuite></testsuites>'
+    )
+    collected = "tests/df/test_x.py::TestK::test_y[p]\n"
+    assert ci_junit.missing_problems(collected, xml) == []

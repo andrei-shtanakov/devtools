@@ -78,13 +78,17 @@ def collected_ids(text: str) -> list[str]:
 
 
 def junit_ids(junit_xml: str) -> set[str]:
-    """`<path>::<name>` of every testcase (module-level tests: the classname
-    is the dotted path of the file)."""
+    """Every node id a testcase may stand for: its dotted classname split
+    into a file path and the classes inside it (`a.b.C` -> `a/b.py::C::n`
+    and `a/b/C.py::n`)."""
     root = ET.fromstring(junit_xml)
     found: set[str] = set()
     for case in root.iter("testcase"):
-        module = (case.get("classname") or "").replace(".", "/")
-        found.add(f"{module}.py::{case.get('name')}")
+        parts = (case.get("classname") or "").split(".")
+        name = str(case.get("name"))
+        for k in range(1, len(parts) + 1):
+            module = "/".join(parts[:k])
+            found.add("::".join([f"{module}.py", *parts[k:], name]))
     return found
 
 
