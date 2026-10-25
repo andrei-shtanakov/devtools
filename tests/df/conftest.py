@@ -45,6 +45,7 @@ from tests.df.crash_model import CrashModel, fd_path
 
 if TYPE_CHECKING:
     from tests.df.install_world import World
+    from tests.df.root_world import Controls, FixtureRepo, RootWorld
 
 #: The fake uid of `df-build`: never the current user (F1).
 BUILD_UID = os.getuid() + 100000
@@ -334,3 +335,77 @@ def make_fake_world(fake_layout: FakeLayout, monkeypatch: pytest.MonkeyPatch) ->
     model.install(monkeypatch)
     world.model = model
     return world
+
+
+# ---------- the root world (Task 13-B; only root tests reach these) ----------
+
+#: Where CI collects evidence (`$RUNNER_TEMP/df-stage1`); unset locally.
+STAGE1_OUT_ENV = "DF_STAGE1_OUT"
+
+
+def stage1_out() -> Path | None:
+    """The evidence directory of the CI run, if any."""
+    value = os.environ.get(STAGE1_OUT_ENV)
+    return Path(value) if value else None
+
+
+@pytest.fixture(scope="session")
+def acceptance_top() -> Iterator[Path]:
+    """`<base>/df-acc-<pid>` (R83), removed at the end of the session."""
+    from tests.df.root_world import acceptance_dir
+
+    with acceptance_dir() as top:
+        yield top
+
+
+@pytest.fixture(scope="session")
+def fixture_repo(acceptance_top: Path) -> Iterator[FixtureRepo]:
+    """The bare fixture repo and the URL the build fetches it from (R91)."""
+    from tests.df.root_world import FixtureRepo, build_fixture_repo, serve_repo
+
+    bare, sha = build_fixture_repo(acceptance_top)
+    with serve_repo(acceptance_top, bare) as url:
+        yield FixtureRepo(url, sha)
+
+
+@pytest.fixture(scope="session")
+def control_url() -> Iterator[str]:
+    """The control address on the runner's external interface (spec 3.8)."""
+    from tests.df.root_world import control_server
+
+    with control_server() as url:
+        yield url
+
+
+@pytest.fixture()
+def root_world(
+    acceptance_top: Path,
+    fixture_repo: FixtureRepo,
+    control_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> Iterator[RootWorld]:
+    """A fresh root world (R90): `<R>`, the root uv copy, the profile pin
+    through `install._profile` (R91); `df-build` removed afterwards."""
+    from df import install
+    from tests.df.root_world import make_world, teardown_world
+
+    world = make_world(acceptance_top, fixture_repo, control_url)
+    monkeypatch.setattr(install, "_profile", lambda _cfg: world.profile())
+    yield world
+    out = stage1_out()
+    keep = None
+    if out is not None:
+        name = re.sub(r"[^A-Za-z0-9_.-]", "_", request.node.name)
+        keep = out / "journals" / f"{name}.jsonl"
+    teardown_world(world, keep)
+
+
+@pytest.fixture()
+def controls(root_world: RootWorld) -> Controls:
+    """Spec 3.8 positive controls over a real `df-build` (before any
+    negative test); a failure fails the test as infrastructure."""
+    from tests.df.root_world import check_controls
+
+    root_world.prepare_build_user()
+    return check_controls(root_world)
