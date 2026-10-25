@@ -501,18 +501,19 @@ def _fixture(name: str) -> tuple[int, bytes]:
     return code, (base / f"{name}.out").read_bytes()
 
 
+# `linux-some` is the CI runner's own capture (user `runner`), R74.
 @pytest.mark.parametrize(
-    "fixture,expected",
+    "fixture,user,expected",
     [
-        ("macos-none", "none"),
-        ("linux-none", "none"),
-        ("linux-some", "some"),
-        ("garbage", "unknown"),
-        ("exit-1", "unknown"),
+        ("macos-none", "df-build", "none"),
+        ("linux-none", "df-build", "none"),
+        ("linux-some", "runner", "some"),
+        ("garbage", "df-build", "unknown"),
+        ("exit-1", "df-build", "unknown"),
     ],
 )
 def test_sudo_rules_parsing(
-    monkeypatch: pytest.MonkeyPatch, fixture: str, expected: str
+    monkeypatch: pytest.MonkeyPatch, fixture: str, user: str, expected: str
 ) -> None:
     code, out = _fixture(fixture)
     seen: list[list[str]] = []
@@ -522,8 +523,8 @@ def test_sudo_rules_parsing(
         return ok(out, code)
 
     monkeypatch.setattr(plat, "run_command", run)
-    assert plat.sudo_rules("df-build") == expected
-    assert seen == [["/usr/bin/sudo", "-n", "-l", "-U", "df-build"]]
+    assert plat.sudo_rules(user) == expected
+    assert seen == [["/usr/bin/sudo", "-n", "-l", "-U", user]]
 
 
 def test_sudo_rules_other_name_or_launch_failure_is_unknown(

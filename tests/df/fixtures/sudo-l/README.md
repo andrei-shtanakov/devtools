@@ -1,16 +1,25 @@
 # `sudo -n -l -U <name>` outputs
 
-**Synthesized, not captured.** Capturing a real output needs root (`sudo -l -U`
-for another user is root-only), and Task 5 runs no root commands. The texts
-follow sudo's documented messages:
+**`macos-none`, `linux-none`, `linux-some`: captured in CI run
+https://github.com/andrei-shtanakov/devtools/actions/runs/40228831245** (head
+8eca26a, workflow `df-stage1`, Task 13 R74), as root with `LC_ALL=C`:
 
-- `*-none` — `User <name> is not allowed to run sudo on <host>.` (same wording
-  on macOS and Linux sudo);
-- `linux-some` — `Matching Defaults entries ...` followed by
-  `User <name> may run the following commands on <host>:` and a rule line;
+- `macos-none` — macos-15 (sudo 1.9.13p2), `sudo -n -l -U df-build` after
+  `create_build_user` (`test_sudo_rules_real`, artifact
+  `sudo-l/macos-arm64-none.txt`);
+- `linux-none` — ubuntu-24.04 (sudo 1.9.15p5), the same command
+  (`sudo-l/linux-x86_64-none.txt`);
+- `linux-some` — ubuntu-24.04, `sudo -n -l -U runner`, the runner's own
+  rules (Step 0, `step0/sudo-l/runner.out`); the parser is called with the
+  name `runner`.
+
+The only edit is the host name: the runner's name is replaced by `mac-mini`
+/ `ubuntu-ci`. stderr was empty in all three, so `<case>.out` is stdout.
+
+Synthesized, not captured (no real case exists to capture):
+
 - `garbage` — exit 0 without either phrase;
 - `exit-1` — sudo's own failure (`a password is required`, exit 1).
 
 Each case is two files: `<case>.out` (combined output) and `<case>.rc` (exit
-code). Real capture on both OSes is Task 13 CI (root marker); replace these
-files with the captured ones there.
+code).
