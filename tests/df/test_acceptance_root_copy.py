@@ -9,17 +9,16 @@ silent producer and the quarantine left for the next install go through
 writer lock after it exits, the next run's `copy-partial` route). Runs only
 in CI df-stage1.
 
-The OS observer (`tests/df/observe.py`) watches every phase whose source
-stays in place: the build (`releases/<id>`, watched from `prepare_dir`'s
-`fchown`, with the classification) and the copy (`staging/<id>/tree`). A
-cleanup removes its source, which the observer refuses at exit, so it watches
-the directory that holds the tree (`staging/<id>`, `releases/`, the
-quarantine, or `df-build`'s home); an access to that holder itself is not
-one to the source (`require_clean`), every access under it is. `seal` is not
-inside an observation: it moves the source, and its own operations on the
-tree (`fstatat`, `renameat`) are outside the observed set anyway. An
-`unobserved` run fails the test (13-D brief), it is never a pass. Digests of
-a source are taken before its observation (R94).
+The OS observer (`tests/df/observe.py`) watches every phase: the build
+(`releases/<id>`, watched from `prepare_dir`'s `fchown`, with the
+classification), `seal`, the copy (`staging/<id>/tree`) and the cleanups.
+`seal` and a cleanup move or remove their source, which the observer refuses
+at exit, so they watch the directory that holds the tree (`releases/`,
+`staging/<id>`, the quarantine, or `df-build`'s home); an access to that
+holder itself is not one to the source (`require_clean`), every access under
+it is, and a moved tree stays matched by identity. An `unobserved` run fails
+the test (13-D brief), it is never a pass. Digests of a source are taken
+before its observation (R94).
 """
 
 from __future__ import annotations
@@ -29,11 +28,13 @@ import functools
 import os
 import re
 import stat
+import subprocess
 import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -70,6 +71,8 @@ LIMITS = CopyLimits(
 )
 #: The deadline of a copy in the forked/silent producer runs (seconds).
 DEADLINE = 45.0
+#: `CopyLimits.reap_seconds`: the producer's end after the deadline.
+REAP = CopyLimits().reap_seconds
 #: The cleanup budget of the growing tree (R89) and its ε.
 BUDGET = 5.0
 EPSILON = 15.0
@@ -124,7 +127,8 @@ F_SETPIPE_SZ = 1031
 
 
 class Killed(BaseException):
-    """A process kill at a chosen point (never caught by df)."""
+    """The crash model: an exception at a chosen point that no handler of df
+    catches; `finally` blocks still run, unlike a real process death."""
 
 
 # ---------- the copy world ----------
@@ -183,9 +187,9 @@ class CopyWorld:
             network=False,
         )
 
-    def built(self, script: str, rid: str = RID) -> Path:
+    def built(self, script: str, rid: str = RID, *, r: str = "b-full") -> Path:
         """`releases/<rid>` made by `prepare_dir`, filled by `df-build`
-        and classified, under observation from the `fchown` on (R93)."""
+        and classified (`r`), under observation from the `fchown` on (R93)."""
         lay = self.layout
         tree = lay.release_dir(rid)
         with self.observing([], f"build-{rid}") as obs:
@@ -202,14 +206,23 @@ class CopyWorld:
                 admin_ready=_never_admin,
             )
         require_clean(obs)
-        assert facts.r == "b-full", facts
+        assert facts.r == r, facts
         return tree
 
-    def sealed(self, script: str, rid: str = RID) -> Path:
+    def seal_observed(self, rid: str = RID) -> Path:
+        """`seal` observed through its holder `releases/` (M1): the tree moves
+        out, its objects stay matched by identity (macOS everywhere, Linux
+        under the scope); `seal` opens `releases/` itself, nothing under it."""
+        lay = self.layout
+        with self.observing([lay.releases], f"seal-{rid}") as obs:
+            seal(lay, rid)
+        require_clean(obs, holder={lay.releases: OPEN_OPS})
+        return lay.staging_tree(rid)
+
+    def sealed(self, script: str, rid: str = RID, *, r: str = "b-full") -> Path:
         """`built`, then `seal`: the tree at `staging/<rid>/tree`."""
-        self.built(script, rid)
-        seal(self.layout, rid)
-        return self.layout.staging_tree(rid)
+        self.built(script, rid, r=r)
+        return self.seal_observed(rid)
 
     def copy(
         self,
@@ -409,17 +422,26 @@ class OnceHook:
 # ---------- real tar ----------
 
 
-def test_real_tar_from_build_user_accepted(cw: CopyWorld) -> None:
-    """tar of `df-build` through `spawn_as` into `receive_tree`: the root
-    record, long and non-ASCII names, a hard and a symbolic link; the
+@pytest.mark.parametrize("tree_kind", ["empty", "full"])
+def test_real_tar_from_build_user_accepted(cw: CopyWorld, tree_kind: str) -> None:
+    """tar of `df-build` through `spawn_as` into `receive_tree`, for an empty
+    tree (classified `b-empty`, only the root record) and a full one (the
+    root record, long and non-ASCII names, a hard and a symbolic link); the
     copy's digest equals the source's (taken before the observation, R94)."""
-    tree = cw.sealed(NAMES_TREE)
+    if tree_kind == "empty":
+        tree = cw.sealed(":", r="b-empty")
+    else:
+        tree = cw.sealed(NAMES_TREE)
     expected = release_digest(tree)
     digest, refusal = cw.copy_observed("copy")
     assert refusal is None, refusal
     release = cw.layout.release_dir(RID)
     assert digest == expected == release_digest(release)
     assert_root_700(release)
+    if tree_kind == "empty":
+        assert os.listdir(release) == []
+        assert_no_builder_processes(cw.uid)
+        return
     assert os.readlink(release / "sym") == "d/f"
     assert (release / "hard").read_bytes() == b"hello\n"
     assert os.lstat(release / "hard").st_ino != os.lstat(release / "d/f").st_ino
@@ -462,6 +484,10 @@ RACES = [*ONE_SHOT, *WRITERS]
 #: The cleanup's writer: shell builtins only (no fork per file), in the tree
 #: root, which `find -mindepth 1 -delete` never removes (CI run 40214182146:
 #: a throttled writer in `grow/` lost its directory and the tree was gone).
+#: Directories of mode `000` the cleaner's `find … -exec chmod` visits one
+#: process each: more than the budget on both runners.
+SLOW_DIRS = 20_000
+SLOW_TREE = f"/usr/bin/seq -f 'z%g' 1 {SLOW_DIRS} | /usr/bin/xargs /bin/mkdir -m 000"
 FLOOD = (
     "cd {t} && echo go; i=0; while :; do : > f$i; i=$((i+1));"
     " [ $((i % 100)) -eq 0 ] && printf . >> {beat}; done"
@@ -490,12 +516,6 @@ def test_live_writer_during_copy(
         "beat": _q(beat),
     }
     writer: plat.SpawnedProducer | None = None
-    cw.built(LIVE_TREE)
-    if race == "saved-fd-writer":  # the descriptor is taken before `seal`
-        writer = cw.spawn_build(WRITERS[race].format(**fill))
-    seal(lay, RID)
-    if race in WRITERS and writer is None:
-        writer = cw.spawn_build(WRITERS[race].format(**fill))
     acts: list[plat.RunResult] = []
 
     def act() -> None:
@@ -505,7 +525,13 @@ def test_live_writer_during_copy(
         acts.append(cw.as_build(ONE_SHOT[race].format(**fill), check=False))
 
     hook = OnceHook("member", act)
+    cw.built(LIVE_TREE)
     try:
+        if race == "saved-fd-writer":  # the descriptor is taken before `seal`
+            writer = cw.spawn_build(WRITERS[race].format(**fill))
+        cw.seal_observed()
+        if race in WRITERS and writer is None:
+            writer = cw.spawn_build(WRITERS[race].format(**fill))
         digest, refusal = cw.copy_observed("copy", hook)
     finally:
         if writer is not None:
@@ -525,6 +551,12 @@ def test_live_writer_during_copy(
             # Spec 3.3: tar as df-build cannot read a root-only file through
             # a hard link, and the stream breaks off with an error.
             assert refusal is not None, "поток с root-only файлом принят"
+        if refusal is None and changed:
+            # I1: an accepted copy must show the race landed somewhere,
+            # else the race tested nothing (CI run 40214182146).
+            landed = landed_targets(race, lay.release_dir(RID), secret)
+            record_property("race_landed", f"{landed}/{SPREAD}")
+            assert landed >= 1, "гонка не попала в копию"
     release = lay.release_dir(RID)
     assert_no_builder_processes(cw.uid)
     if refusal is None:
@@ -541,6 +573,25 @@ def test_live_writer_during_copy(
     require_clean(obs, holder={box: OPEN_OPS})
     assert outcome == "removed"
     assert not os.path.lexists(lay.staging_tree(RID))
+
+
+def landed_targets(race: str, release: Path, secret: Sentinel) -> int:
+    """Targets `s<i>` whose received copy shows the state after the act."""
+    landed = 0
+    for i in range(SPREAD):
+        target = release / f"s{i}"
+        if race == "dir-to-link":
+            sub = target / "sub"
+            hit = sub.is_symlink() and os.readlink(sub) == str(secret.path.parent)
+        elif race == "link-retarget":
+            link = target / "link"
+            hit = link.is_symlink() and os.readlink(link) == str(secret.path)
+        elif race == "file-to-fifo":
+            hit = not os.path.lexists(target / "f")  # a fifo is never received
+        else:
+            hit = os.path.lexists(target / "hard")
+        landed += hit
+    return landed
 
 
 # ---------- tar failure ----------
@@ -607,38 +658,58 @@ def test_cleanup_of_000_tree(cw: CopyWorld) -> None:
 # ---------- growing tree and quarantine ----------
 
 
-def quarantined_growing_tree(cw: CopyWorld) -> tuple[str, float]:
-    """A sealed tree a `df-build` writer keeps filling, cleaned with
-    `budget=BUDGET` under observation: (outcome, seconds)."""
+def quarantined_growing_tree(
+    cw: CopyWorld, trigger: str = "writer"
+) -> tuple[str, float]:
+    """A sealed tree cleaned with `budget=BUDGET` under observation of its
+    holders `staging/<id>` and `.quarantine` (M6: the moved tree stays under
+    one): (outcome, seconds). `writer`: a `df-build` writer keeps filling it
+    while the cleaner runs; `deadline`: the tree holds `SLOW_DIRS`
+    directories of mode `000`, so the cleaner's per-directory `chmod` pass
+    cannot finish within the budget and is killed at the deadline (I2)."""
     lay = cw.layout
     beat = lay.build_home / "beat-cleanup"
     tree = cw.sealed(LIVE_TREE)
-    writer = cw.spawn_build(FLOOD.format(t=_q(tree), beat=_q(beat)))
+    writer = None
+    if trigger == "writer":
+        writer = cw.spawn_build(FLOOD.format(t=_q(tree), beat=_q(beat)))
+    else:
+        cw.as_build(f"cd {_q(tree)} && {SLOW_TREE}")
+    box = lay.staging_dir(RID)
     try:
-        wait_beat(beat)
-        box = lay.staging_dir(RID)
-        with cw.observing([box], "cleanup") as obs:
+        if writer is not None:
+            wait_beat(beat)
+        with cw.observing([box, lay.quarantine], "cleanup") as obs:
             start = time.monotonic()
             outcome = plat.cleanup_tree(
                 lay, box, "tree", quarantine_label=RID, budget=BUDGET
             )
             elapsed = time.monotonic() - start
+            if writer is None:  # the cleaner killed at the deadline, reaped
+                assert_no_builder_processes(cw.uid)
     finally:
-        writer.end()
-    require_clean(obs, holder={box: OPEN_OPS})
+        if writer is not None:
+            writer.end()
+    require_clean(obs, holder={box: OPEN_OPS, lay.quarantine: OPEN_OPS})
     return outcome, elapsed
 
 
+@pytest.mark.parametrize("trigger", ["writer", "deadline"])
 def test_cleanup_of_growing_tree_quarantined_within_budget(
-    cw: CopyWorld, record_property: Callable[[str, object], None]
+    cw: CopyWorld, trigger: str, record_property: Callable[[str, object], None]
 ) -> None:
-    """A `df-build` writer creates files while the cleaner deletes: within
-    budget+ε the rest is in the quarantine and the install goes on (the leaf
-    returns `quarantined`, no refusal); the writer is ended afterwards."""
-    outcome, elapsed = quarantined_growing_tree(cw)
+    """The cleaner cannot empty the tree: a `df-build` writer creates files
+    while it deletes (`writer`: the cleaner ends, the tree is not empty), or
+    the cleaner is still running at the budget (`deadline`: killed then,
+    elapsed at least the budget). Within budget+ε the rest is in the
+    quarantine and the install goes on (`quarantined`, no refusal); no
+    `df-build` process is left."""
+    outcome, elapsed = quarantined_growing_tree(cw, trigger)
     record_property("cleanup_seconds", f"{elapsed:.2f}")
     assert outcome == "quarantined"
     assert elapsed <= BUDGET + EPSILON, elapsed
+    if trigger == "deadline":
+        assert elapsed >= BUDGET, elapsed
     lay = cw.layout
     assert not os.path.lexists(lay.staging_tree(RID))
     assert os.path.lexists(lay.quarantine / f"{RID}.1")
@@ -674,13 +745,14 @@ def test_build_user_after_seal_cannot_touch_destination(
     release = lay.release_dir(RID)
     log = lay.build_home / "after-seal.log"
     beat = lay.build_home / "beat-after-seal"
+    # One log line per try: OPENED, or the shell's error text (M4).
     script = (
-        f"echo go; while :; do cat {_q(tree)}/d/f > /dev/null;"
+        'attempt() { if r=$( ( : >> "$1" ) 2>&1 ); then echo OPENED;'
+        " else printf 'denied %s' \"$r\" | tr '\\n' ' '; echo; fi"
+        f" >> {_q(log)}; }};"
+        f" echo go; while :; do cat {_q(tree)}/d/f > /dev/null;"
         f" printf x >> {_q(tree)}/pad-grow;"
-        f" if ( : > {_q(release)}/probe ) 2>/dev/null; then echo OPENED >> {_q(log)};"
-        f" else echo denied >> {_q(log)}; fi;"
-        f" if ( : >> {_q(release)}/d/f ) 2>/dev/null; then echo OPENED >> {_q(log)};"
-        f" else echo denied >> {_q(log)}; fi;"
+        f" attempt {_q(release)}/probe; attempt {_q(release)}/d/f;"
         f" printf . >> {_q(beat)}; /bin/sleep 0.01; done"
     )
     writer = cw.spawn_build(script)
@@ -690,8 +762,13 @@ def test_build_user_after_seal_cannot_touch_destination(
     finally:
         writer.end()
     record_property("outcome", "accepted" if refusal is None else str(refusal))
-    tries = log.read_text().split()
-    assert tries and set(tries) == {"denied"}, tries[:10]
+    kinds = [_try_kind(line) for line in log.read_text().splitlines()]
+    counts = {k: kinds.count(k) for k in ("EACCES", "ENOENT", "OPENED", "other")}
+    record_property("tries", str(counts))
+    assert counts["OPENED"] == 0 and counts["other"] == 0, log.read_text()[:2000]
+    # Tries while the copy holds `releases/<id>` (root `0700`) are EACCES;
+    # ENOENT only before `receive_tree` creates it.
+    assert counts["EACCES"] >= 1, counts
     if refusal is None:
         assert digest == release_digest(release)
     assert not os.path.lexists(release / "probe")
@@ -699,14 +776,29 @@ def test_build_user_after_seal_cannot_touch_destination(
     assert_destination_closed(cw)
 
 
+def _try_kind(line: str) -> str:
+    if line == "OPENED":
+        return "OPENED"
+    if line.startswith("denied ") and "Permission denied" in line:
+        return "EACCES"
+    # bash: "No such file or directory"; dash: "Directory nonexistent".
+    missing = ("No such file or directory", "Directory nonexistent")
+    if line.startswith("denied ") and any(m in line for m in missing):
+        return "ENOENT"
+    return "other"
+
+
 # ---------- crash inside accept ----------
 
 
 @pytest.mark.parametrize("point", ["member", "mid-copy"])
 def test_crash_inside_accept_real_fs(cw: CopyWorld, point: str) -> None:
-    """A kill inside `accept_copy` at `point`: the partial copy is root
-    `0700`, no `df-build` process is left; the route `copy-partial`'s leaves
-    (`remove_own_tree`, `accept_copy`) give the source's digest."""
+    """A crash inside `accept_copy` at `point`, by the crash model (M3): an
+    in-process `BaseException` from `_hook`, so `receive_tree`'s `finally`
+    still ends the producer (a real process death would not run it); the
+    filesystem state is real. The partial copy is root `0700`, no `df-build`
+    process is left; the route `copy-partial`'s leaves (`remove_own_tree`,
+    `accept_copy`) give the source's digest."""
     tree = cw.sealed(LIVE_TREE)
     expected = release_digest(tree)
 
@@ -751,14 +843,56 @@ def _release_ids(layout: Layout) -> list[str]:
     return sorted(os.listdir(layout.releases))
 
 
-def _refused_then_resumed(cw: CopyWorld, script: str, reason: str) -> None:
+def builder_groups(uid: int) -> list[tuple[int, int]]:
+    """`(pid, pgid)` of the live processes of `uid` (`ps`)."""
+    done = subprocess.run(
+        ["/bin/ps", "-A", "-o", "pid=,uid=,pgid=,stat="],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    found: list[tuple[int, int]] = []
+    for line in done.stdout.splitlines():
+        pid, owner, pgid, state = line.split()[:4]
+        if int(owner) == uid and not state.startswith("Z"):
+            found.append((int(pid), int(pgid)))
+    return found
+
+
+def _watch_end(mp: pytest.MonkeyPatch, uid: int, seen: list[dict[str, object]]) -> None:
+    """Before `SpawnedProducer.end` kills the group: which `df-build`
+    processes are outside the producer's group (M5: a session escape)."""
+    real_end = plat.SpawnedProducer.end
+
+    def end(self: plat.SpawnedProducer) -> None:
+        group = self._proc.pid  # noqa: SLF001 - its own session's group
+        procs = builder_groups(uid)
+        seen.append({"group": group, "outside": [p for p, g in procs if g != group]})
+        real_end(self)
+
+    mp.setattr(plat.SpawnedProducer, "end", end)
+
+
+def _seconds(row: Mapping[str, object]) -> float:
+    return datetime.fromisoformat(str(row["ts"])).timestamp()
+
+
+def _refused_then_resumed(
+    cw: CopyWorld,
+    script: str,
+    reason: str,
+    record_property: Callable[[str, object], None],
+) -> list[dict[str, object]]:
     """`init` with the producer substituted is refused at `copy` for
-    `reason`; the partial copy is root `0700`, no `df-build` process, the
-    writer lock free; `init` again resumes through `copy-partial` and
-    commits."""
+    `reason` within the deadline (+ reap + ε, M5); the partial copy is root
+    `0700`, no `df-build` process, the writer lock free; `init` again
+    resumes through `copy-partial` and commits. Returns what `end` saw."""
     lay = cw.layout
+    seen: list[dict[str, object]] = []
     with pytest.MonkeyPatch.context() as mp:
         _substitute_producer(mp, script)
+        _watch_end(mp, cw.uid, seen)
         mp.setattr(
             install, "CopyLimits", functools.partial(CopyLimits, max_seconds=DEADLINE)
         )
@@ -767,6 +901,11 @@ def _refused_then_resumed(cw: CopyWorld, script: str, reason: str) -> None:
     failed = [r for r in rows if r["event"] == "failed"]
     assert failed and failed[-1]["step"] == "copy", failed[-1:]
     assert reason in str(failed[-1]["detail"]), failed[-1]
+    started = [r for r in rows if (r["step"], r["event"]) == ("copy", "start")]
+    took = _seconds(failed[-1]) - _seconds(started[-1])
+    record_property("copy_seconds", f"{took:.2f}")
+    record_property("before_end", str(seen))
+    assert DEADLINE <= took <= DEADLINE + REAP + EPSILON, took
     (rid,) = _release_ids(lay)
     assert_root_700(lay.release_dir(rid))
     assert_no_builder_processes(cw.uid)
@@ -776,24 +915,30 @@ def _refused_then_resumed(cw: CopyWorld, script: str, reason: str) -> None:
     rows = read_journal(lay.journal)[since:]
     assert ("copy-partial", "done") in {(r["step"], r["event"]) for r in rows}
     assert_committed(lay, since=since)
+    return seen
 
 
-def test_forked_producer_reaped_via_spawn_as(cw: CopyWorld) -> None:
+def test_forked_producer_reaped_via_spawn_as(
+    cw: CopyWorld, record_property: Callable[[str, object], None]
+) -> None:
     """S1-R4-N3, S1-R10-N3: the approved tar under a wrapper that starts the
     producer in its own session and exits without waiting; the stream never
     ends, so `receive_tree` refuses at its deadline, and afterwards no
     process of `df-build` is left (the session escaped the group kill, not
     the reap by user), the partial copy is root `0700`, the lock free; the
     next install removes it through `copy-partial`."""
-    _refused_then_resumed(cw, FORKED, "deadline")
+    seen = _refused_then_resumed(cw, FORKED, "deadline", record_property)
+    assert len(seen) == 1 and seen[0]["outside"], seen  # escaped the group
 
 
-def test_silent_producer_released(cw: CopyWorld) -> None:
+def test_silent_producer_released(
+    cw: CopyWorld, record_property: Callable[[str, object], None]
+) -> None:
     """The producer writes 1 KiB of the stream and sleeps: refused within
     the deadline, the `df-build` process killed, the partial copy root
     `0700` until the next run, the writer lock free after the command;
     the retry with the real tar removes it (`copy-partial`) and commits."""
-    _refused_then_resumed(cw, SILENT, "deadline")
+    _refused_then_resumed(cw, SILENT, "deadline", record_property)
 
 
 # ---------- GNU padding ----------
