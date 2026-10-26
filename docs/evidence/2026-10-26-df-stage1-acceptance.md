@@ -575,10 +575,11 @@ disputatio.cli:main`; steward `007d0049` — `gate-check`, `steward`, `steward-c
 
 ### 9.1. Раскладка `/`: команда README как процесс
 
-Прогон [40322926536](https://github.com/andrei-shtanakov/devtools/actions/runs/40322926536)
-(PR #635, голова `3854073`), обе ячейки success; в нём же повторены и зелёные форма в процессе
-(`init` 61,3 с macOS, 50,7 с Ubuntu; doctor 11/11 `ok`; smoke как выше) и инвентаризация
-(вердикты таблицы выше без изменений). Факты — `live/<платформа>-production.json`,
+Прогон [40326008224](https://github.com/andrei-shtanakov/devtools/actions/runs/40326008224)
+(PR #635, голова `38fe574`, рецепт Python с `--no-bin`), обе ячейки success; в нём же
+повторены и зелёные форма в процессе (`init` 54,3 с macOS, 48,7 с Ubuntu; doctor 11/11 `ok`;
+smoke как выше) и инвентаризация (вердикты таблицы выше без изменений). Предыдущий зелёный
+прогон той же формы без `--no-bin` — 40322926536 (голова `3854073`), те же результаты. Факты — `live/<платформа>-production.json`,
 `live/<платформа>-production-doctor.json`, `…-doctor-after-smoke.json`, `live/opt-host.txt`.
 
 Две формы живой установки, честно:
@@ -604,13 +605,13 @@ disputatio.cli:main`; steward `007d0049` — `gate-check`, `steward`, `steward-c
 | каталог разработчика | `/Library/Developer/CommandLineTools` | — |
 | uv: архив, sha256 (= README и опубликованная) | `uv-aarch64-apple-darwin.tar.gz`, `71ef9de8…`, `shasum -c` OK | `uv-x86_64-unknown-linux-gnu.tar.gz`, `e12c4cda…`, `sha256sum -c` OK |
 | копия uv | `/usr/local/libexec/darkfactory/bin/uv`, uid 0, `0755`, путь доверенный, `uv 0.11.23` | то же |
-| Python bootstrap | `sudo …/uv python install 3.12.13 --install-dir /usr/local/libexec/darkfactory-bootstrap/python` → `…/cpython-3.12.13-macos-aarch64-none/bin/python3.12` (3.12.13), путь доверенный | `/usr/bin/python3` → `python3.12` (3.12.3), путь доверенный |
+| Python bootstrap | `sudo …/uv python install 3.12.13 --no-bin --install-dir /usr/local/libexec/darkfactory-bootstrap/python` → `…/cpython-3.12.13-macos-aarch64-none/bin/python3.12` (3.12.13), путь доверенный | `/usr/bin/python3` → `python3.12` (3.12.3), путь доверенный |
 | `sudo <python> -I -B -S <чекаут>/df/bootstrap.py init …` (argv README, заполнены 3 места) | код 0: «установлен релиз 080f15e6b8fa-macos-arm64-1; команда: /opt/df/bin/darkfactory» | код 0: «… 080f15e6b8fa-linux-x86_64-1; команда: /opt/df/bin/darkfactory» |
 | `release.json` | манифест `080f15e…`, `core`, SHA членов = пины | то же |
 | `sudo /opt/df/bin/darkfactory doctor --json` | код 0, stderr пуст, `level1: reached`, 11/11 `ok` | то же |
 | smoke `--help` от пользователя runner-а (uid 501 / 1001, не root), рабочий каталог вне релиза | 8/8 код 0 | 8/8 код 0 |
 | doctor после smoke | 11/11 `ok` | 11/11 `ok` |
-| время шага | 76 с | 64 с |
+| время шага | 68 с | 62 с |
 
 Smoke по членам — тот же набор, что в таблице выше: devtools и discovery-toolkit — «нет
 консольных команд — smoke не применим»; discovery `discovery`; disputatio `disp`; spec-runner
@@ -619,12 +620,13 @@ Smoke по членам — тот же набор, что в таблице в�
 
 Наблюдения:
 
-- Ссылки `/usr/local/bin/darkfactory` нет на обеих ячейках: `/usr/local/bin` на runner-ах не
-  проходит политику доверенных путей, установщик напечатал полный путь, и doctor вызывался
-  как `sudo /opt/df/bin/darkfactory` — как README и описывает.
 - `sudo uv python install` на macOS: `sudo` сохраняет `HOME` пользователя
-  (`/Users/runner`), и uv пытается положить ссылку `python3.12` в его `~/.local/bin`. Здесь
-  попытка не удалась («Executable already exists … not managed by uv», ссылка от раннего
-  шага workflow), интерпретатор поставлен. На хосте без такой ссылки root, вероятно, создал
-  бы её (и каталог) в доме человека — не измерено; кандидат на `--no-bin` в рецепте README
-  (решение владельца).
+  (`/Users/runner`). Без `--no-bin` (прогон 40322926536) uv пытался положить ссылку
+  `python3.12` в его `~/.local/bin` (не удалось: там уже была ссылка раннего шага workflow).
+  С `--no-bin` (решение 26.10; флаг есть в `uv python install --help` у 0.11.23) попытки
+  нет — предупреждения нет, `~/.local/bin` (листинг от root) содержит только ссылку
+  runner-а от раннего шага, владелец `runner`.
+- Форма со ссылкой `/usr/local/bin/darkfactory` **не исполнена**: на обоих runner-ах
+  `/usr/local/bin` не проходит политику доверенных путей (macOS — владелец uid 501), ссылки
+  нет, установщик напечатал полный путь, и команда вызывалась как
+  `sudo /opt/df/bin/darkfactory` — как README и описывает.
