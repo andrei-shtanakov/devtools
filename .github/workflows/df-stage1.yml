@@ -226,6 +226,10 @@ jobs:
       - name: configure /opt as a supported host (owner 26.10)
         if: ${{ !cancelled() && env.DF_STAGE1_SCOPE == 'full' }}
         run: |
+          if [ ! -x .venv/bin/python ]; then
+            echo "::notice title=configure /opt::skipped: no .venv (uv sync did not run)"
+            exit 0
+          fi
           # live/ may be root's (the root run's evidence): back to the runner.
           sudo -n chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/df-stage1"
           mkdir -p "$RUNNER_TEMP/df-stage1/live"
