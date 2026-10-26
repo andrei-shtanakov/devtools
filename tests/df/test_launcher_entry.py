@@ -1315,7 +1315,9 @@ def test_entry_hands_its_root_layout_to_main(tmp_path: Path, rec: Recorder) -> N
 
 
 def test_entry_one_root_through_real_main(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """D2: through the real `df.cli.main`, a reader and a writer of a non-"/"
     root work on that root's layout; `default_layout()` is never reached."""
@@ -1351,8 +1353,10 @@ def test_entry_one_root_through_real_main(
     lay = world(tmp_path)
     code = run_in(lay, "doctor", "--json")
     assert code in (cli.EXIT_OK, cli.EXIT_REFUSED), code
+    assert "ошибка программы" not in capsys.readouterr().err  # not the D2 guard
     setter = ["models", "set", "author", "--harness", "claude", "--model", "m"]
     assert run_in(lay, *setter) == cli.EXIT_OK
+    assert "ошибка программы" not in capsys.readouterr().err
     assert seen == [("reader", lay), ("writer", lay)]
 
 

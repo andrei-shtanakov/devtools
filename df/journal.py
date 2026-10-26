@@ -60,7 +60,9 @@ class _Interrupted(Exception):
 class Step:
     """`check()` means "the fact is already achieved"; the optional `why()`
     names what keeps it from being achieved (the refusal's reasons when the
-    postcondition fails after `do()`)."""
+    postcondition fails after `do()`). `why()` is a fresh probe, not the
+    failed check's facts: a state changed in between may name other reasons
+    or none (then the bare refusal text)."""
 
     name: str
     check: Callable[[], bool]

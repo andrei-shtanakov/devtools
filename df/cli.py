@@ -1,8 +1,9 @@
 """The administrative command `darkfactory` (spec 3.3, 3.9): `main`.
 
 The entry (`df/launcher_entry.py`, Task 8a) or bootstrap (`df/bootstrap.py`)
-calls `main(argv, mode=, read=, lock_fd=)`; the entry also hands over the
-layout of its own root (`layout=`, D2), bootstrap none. A writer works from
+calls `main(argv, mode=, read=, lock_fd=)`; the entry must also hand over
+the layout of its own root (`layout=`, D2), bootstrap may omit it (then
+`default_layout()`). A writer works from
 the snapshot the entry read under the lock it holds; bootstrap takes the
 lock, settles and reads the snapshot itself. Subcommands: `init` and
 `install` (Task 9); `models list|set` (Task 10); `doctor --probe-models`
@@ -151,7 +152,8 @@ def _main(
 def _check_call(
     mode: Mode, read: ReadResult | None, lock_fd: int | None, layout: Layout | None
 ) -> None:
-    """The entry's call carries its layout, bootstrap's may not (D2)."""
+    """The entry's call must carry its layout; bootstrap's may omit it (then
+    `default_layout()`, D2)."""
     ok = {
         "writer": lock_fd is not None and isinstance(read, Stable),
         "reader": lock_fd is None and isinstance(read, (Stable, Transitional)),
