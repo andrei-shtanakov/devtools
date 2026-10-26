@@ -59,7 +59,7 @@ from typing import Any
 
 import pytest
 
-from df import accept, admin, boundary, cli, doctor, fsutil, install, state
+from df import accept, admin, boundary, cli, doctor, fsutil, install, lockset, state
 from df import build as build_mod
 from df import platform as plat
 from df.boundary import (
@@ -70,15 +70,21 @@ from df.boundary import (
     transfer_check,
 )
 from df.digest import check_links, tree_digest
+from df.inputs import installed_distributions
 from df.journal import StepFailed, read_journal
+from df.markers import marker_env
 from df.paths import Layout
+from df.sources import UnsupportedLock
 from tests.df.conftest import stage1_out
+from tests.df.dist_records import by_distribution, record_owners
 from tests.df.install_world import CLEAN_PASS
 from tests.df.observe import Observation, observe_root_access
 from tests.df.root_world import (
     PIN_NAME,
     PYTHON,
     ROLE_ENV,
+    SYSTEM_GIT,
+    SYSTEM_TAR,
     Controls,
     InstalledWorld,
     RootWorld,
@@ -1124,6 +1130,28 @@ THRESHOLD_MAX = 900
 #: A wheel with bundled native libraries (manylinux `pillow.libs`, macOS
 #: `PIL/.dylibs`); cffi 1.17.1 bundles none (CI run 40223595064).
 NATIVE_WHEEL = "pillow==11.0.0"
+#: Inputs of the 26.10 inventory of profile `core` (owner decision D1,
+#: Task 14-B): each member's master of 26.10 and its groups (spec 3.1, plan
+#: Task 1: only `devtools` has one); no manifest pins them yet.
+CORE_PINS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("devtools", "d2f569eb668b1ba2e04a6b84e8d1cfd17dc93e81", ("governance",)),
+    ("discovery", "3ebed2d90580510be14c6d9d64d19ca8f8dca56d", ()),
+    ("discovery-toolkit", "e5faa6776bbec08b5e6c05517a8d69ee10772185", ()),
+    ("disputatio", "920b63f489ddd6af150a3396b847ae5bba65b22e", ()),
+    ("steward", "007d00490599fa79484df648451988bf8939f25f", ()),
+    ("spec-runner", "d586fbb683158922bfd20091b6d4ed58f4583bfa", ()),
+)
+CORE_URL = "https://github.com/andrei-shtanakov/{}"
+#: uv/git stderr of a network failure: the inventory fails, never records it.
+NETWORK_MARKERS = (
+    "error sending request",
+    "dns error",
+    "Could not resolve host",
+    "Failed to connect",
+    "operation timed out",
+    "Connection reset",
+)
+STDERR_TAIL = 2000
 
 
 @dataclass
@@ -1153,6 +1181,7 @@ class BoundaryFacts:
                 "libpython_pth": _measure(lambda: self._pth(env, scratch)),
                 "trampoline": _measure(lambda: self._trampoline(env, scratch)),
                 "native_wheel": self._native_wheel(env, scratch),
+                "core_inventory": self._core_inventory(env, scratch),
             }
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
@@ -1339,6 +1368,151 @@ class BoundaryFacts:
         check = boundary._NativeCheck(site, PLATFORM, None)  # noqa: SLF001
         rule_v = _measure(check.problems)
         return {"wheel": NATIVE_WHEEL, "natives": natives, "rule_v_problems": rule_v}
+
+    def _core_inventory(self, env: Any, scratch: Path) -> dict[str, Any]:
+        """Rule (в) over the exact locked artifacts of profile `core` (owner
+        decision D1): each member fetched by SHA as `build.py` does, df's own
+        lock verdicts on its bytes, the installer's `uv sync` form into a
+        venv of the release's Python (network, as `df-build`), then
+        `boundary._NativeCheck` over `site-packages` grouped by distribution.
+        Data only: a sync failure is a fact, a network error fails."""
+        cache = _builder_dir(scratch / "core-cache")
+        members = {
+            name: self._core_member(env, scratch, cache, name, sha, groups)
+            for name, sha, groups in CORE_PINS
+        }
+        return {
+            "inputs": "master of each member, 26.10 (no manifest yet)",
+            "python": PYTHON,
+            "members": members,
+        }
+
+    def _core_member(
+        self,
+        env: Any,
+        scratch: Path,
+        cache: Path,
+        name: str,
+        sha: str,
+        groups: tuple[str, ...],
+    ) -> dict[str, Any]:
+        work = _builder_dir(scratch / f"core-{name}")
+        src = _fetch_by_sha(work, cache, name, sha)
+        lock, want = _lock_verdicts(src, groups)
+        out: dict[str, Any] = {"sha": sha, "groups": list(groups), "lock": lock}
+        venv = work / "venv"
+        sync = [str(self.installed.world.uv), "sync", "--locked", "--no-editable"]
+        sync += ["--no-default-groups", *(a for g in groups for a in ("--group", g))]
+        sync += ["--project", str(src), "--python", str(self.release / env.interpreter)]
+        role = _core_env(work, cache) | {"UV_PROJECT_ENVIRONMENT": str(venv)}
+        done = _core_run(sync, work, role, timeout=900)
+        out["sync"] = {"argv": sync[1:], "code": done.returncode}
+        if done.returncode != 0:
+            tail = done.stderr[-STDERR_TAIL:].decode("utf-8", "replace")
+            if any(m in tail for m in NETWORK_MARKERS):
+                pytest.fail(f"{name}: сеть при uv sync: {tail!r}")
+            out["sync"]["stderr_tail"] = tail
+            return out
+        if want is not None:
+            out["distribution_problems"] = _measure(
+                lambda: lockset.distribution_problems(
+                    installed_distributions(venv), want
+                )
+            )
+        site = venv / "lib" / f"python3.{env.minor}" / "site-packages"
+        out["rule_v"] = _measure(lambda: _rule_v_by_dist(site))
+        return out
+
+
+def _fetch_by_sha(work: Path, cache: Path, name: str, sha: str) -> Path:
+    """`build.py`'s route for one member: init, shallow fetch of `sha` from
+    the public URL, `rev-parse FETCH_HEAD` == `sha`, archive, extract into
+    `<work>/src` (as `df-build`, network). A failure is infrastructure."""
+    git, repo, src = str(SYSTEM_GIT), str(work / "repo"), work / "src"
+    archive = str(work / "src.tar")
+    role = _core_env(work, cache)
+    steps = [
+        ("init", [git, "init", "-q", repo]),
+        ("fetch", build_mod.git_fetch_argv(git, repo, CORE_URL.format(name), sha)),
+        ("rev-parse", build_mod.git_rev_parse_argv(git, repo)),
+        ("archive", build_mod.git_archive_argv(git, repo, archive, sha)),
+        ("mkdir", ["/bin/mkdir", "-p", str(src)]),
+        ("extract", [str(SYSTEM_TAR), "-xf", archive, "-C", str(src)]),
+    ]
+    for label, argv in steps:
+        done = _core_run(argv, work, role, timeout=600)
+        if done.returncode != 0:
+            pytest.fail(f"{name}: {label}: {done.stderr[-STDERR_TAIL:]!r}")
+        head = done.stdout.decode("utf-8", "replace").strip()
+        if label == "rev-parse" and head != sha:
+            pytest.fail(f"{name}: FETCH_HEAD {head!r}, пин {sha!r}")
+    return src
+
+
+def _lock_verdicts(
+    src: Path, groups: tuple[str, ...]
+) -> tuple[dict[str, Any], frozenset[lockset.ExpectedDist] | None]:
+    """df's pre-build verdicts on a member's bytes: `uv_config_problems`
+    (with `lock_layout_problems`) and the walk of `expected_distributions`
+    for this platform and the release's Python (its set, or `None`)."""
+    uv_toml = src / "uv.toml"
+    lock = (src / "uv.lock").read_bytes()
+    problems = lockset.uv_config_problems(
+        (src / "pyproject.toml").read_bytes(),
+        uv_toml.read_bytes() if uv_toml.exists() else None,
+        lock,
+    )
+    try:
+        want = lockset.expected_distributions(
+            lock, groups=groups, env=marker_env(PLATFORM, PYTHON), root_dir=src
+        )
+    except (UnsupportedLock, ValueError) as exc:
+        return {"uv_config_problems": problems, "walk": f"отказ: {exc}"}, None
+    return {"uv_config_problems": problems, "walk": len(want)}, want
+
+
+def _rule_v_by_dist(site: Path) -> dict[str, Any]:
+    """Rule (в) over `site`, per native file its needs and where they
+    resolve, grouped by the distribution whose `RECORD` lists the file."""
+    natives: dict[str, Any] = {}
+    for path in _native_files(site):
+        deps = _deps(path)
+        deps["resolved"] = _resolve(
+            tuple(deps.get("needed", ())), tuple(deps.get("rpaths", ())), path.parent
+        )
+        natives[str(path.relative_to(site))] = deps
+    problems = boundary._NativeCheck(site, PLATFORM, None).problems()  # noqa: SLF001
+    grouped = by_distribution(natives, problems, record_owners(site))
+    for item in grouped.values():
+        item["files"] = {rel: natives[rel] for rel in item["natives"]}
+    return {"count": len(problems), "by_distribution": grouped}
+
+
+def _core_env(work: Path, cache: Path) -> dict[str, str]:
+    """The inventory's role environment: `build_env`'s uv and git settings
+    with the scratch as home; nothing is inherited."""
+    return {
+        "HOME": str(work),
+        "PATH": "/usr/bin:/bin",
+        "LANG": "C.UTF-8",
+        "UV_CACHE_DIR": str(cache),
+        "UV_LINK_MODE": "copy",
+        "UV_NO_CONFIG": "1",
+        "UV_PYTHON_DOWNLOADS": "never",
+        "XDG_CONFIG_HOME": str(work / "config"),
+        **build_mod.GIT_ISOLATION,
+    }
+
+
+def _core_run(
+    argv: list[str], cwd: Path, env: Mapping[str, str], *, timeout: float
+) -> plat.RunResult:
+    result = plat.run_as(
+        plat.BUILD_USER, argv, env=env, cwd=cwd, network=True, timeout=timeout
+    )
+    if not result.launched:
+        infra(f"{plat.BUILD_USER} не запущен: {argv[:3]}: {result}")
+    return result
 
 
 def _measure(fn: Callable[[], Any]) -> Any:
