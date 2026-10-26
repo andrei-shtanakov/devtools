@@ -76,7 +76,12 @@ from df.markers import marker_env
 from df.paths import Layout
 from df.sources import UnsupportedLock
 from tests.df.conftest import stage1_out
-from tests.df.dist_records import by_distribution, record_owners
+from tests.df.dist_records import (
+    by_distribution,
+    dist_wheels,
+    record_owners,
+    vacuity_problems,
+)
 from tests.df.install_world import CLEAN_PASS
 from tests.df.observe import Observation, observe_root_access
 from tests.df.root_world import (
@@ -812,6 +817,7 @@ def test_boundary_on_real_release(
     write_evidence(stage1_out(), f"boundary/{PLATFORM}.json", text + "\n")
     escapes = [c for c in facts["origin_via_link"] if c["escapes"]]
     assert escapes == [], f"находка (правило (в), $ORIGIN через ссылку): {escapes}"
+    assert vacuity_problems(facts["core_inventory"]["members"]) == []
 
 
 def test_darkfactory_command_works_and_is_immutable(
@@ -1397,15 +1403,17 @@ class BoundaryFacts:
         groups: tuple[str, ...],
     ) -> dict[str, Any]:
         work = _builder_dir(scratch / f"core-{name}")
-        src = _fetch_by_sha(work, cache, name, sha)
+        role = _core_env(work, cache, self.installed.world.uv)
+        src = _fetch_by_sha(work, role, name, sha)
         lock, want = _lock_verdicts(src, groups)
         out: dict[str, Any] = {"sha": sha, "groups": list(groups), "lock": lock}
         venv = work / "venv"
         sync = [str(self.installed.world.uv), "sync", "--locked", "--no-editable"]
         sync += ["--no-default-groups", *(a for g in groups for a in ("--group", g))]
         sync += ["--project", str(src), "--python", str(self.release / env.interpreter)]
-        role = _core_env(work, cache) | {"UV_PROJECT_ENVIRONMENT": str(venv)}
-        done = _core_run(sync, work, role, timeout=900)
+        done = _core_run(
+            sync, work, role | {"UV_PROJECT_ENVIRONMENT": str(venv)}, timeout=900
+        )
         out["sync"] = {"argv": sync[1:], "code": done.returncode}
         if done.returncode != 0:
             tail = done.stderr[-STDERR_TAIL:].decode("utf-8", "replace")
@@ -1420,17 +1428,18 @@ class BoundaryFacts:
                 )
             )
         site = venv / "lib" / f"python3.{env.minor}" / "site-packages"
+        out["site_exists"] = site.is_dir()
+        out["native_count"] = sum(1 for _ in _native_files(site))
         out["rule_v"] = _measure(lambda: _rule_v_by_dist(site))
         return out
 
 
-def _fetch_by_sha(work: Path, cache: Path, name: str, sha: str) -> Path:
+def _fetch_by_sha(work: Path, role: Mapping[str, str], name: str, sha: str) -> Path:
     """`build.py`'s route for one member: init, shallow fetch of `sha` from
     the public URL, `rev-parse FETCH_HEAD` == `sha`, archive, extract into
     `<work>/src` (as `df-build`, network). A failure is infrastructure."""
     git, repo, src = str(SYSTEM_GIT), str(work / "repo"), work / "src"
     archive = str(work / "src.tar")
-    role = _core_env(work, cache)
     steps = [
         ("init", [git, "init", "-q", repo]),
         ("fetch", build_mod.git_fetch_argv(git, repo, CORE_URL.format(name), sha)),
@@ -1483,17 +1492,21 @@ def _rule_v_by_dist(site: Path) -> dict[str, Any]:
         natives[str(path.relative_to(site))] = deps
     problems = boundary._NativeCheck(site, PLATFORM, None).problems()  # noqa: SLF001
     grouped = by_distribution(natives, problems, record_owners(site))
-    for item in grouped.values():
+    wheels = dist_wheels(site)
+    for dist, item in grouped.items():
         item["files"] = {rel: natives[rel] for rel in item["natives"]}
+        item["wheel"] = wheels.get(dist)
     return {"count": len(problems), "by_distribution": grouped}
 
 
-def _core_env(work: Path, cache: Path) -> dict[str, str]:
-    """The inventory's role environment: `build_env`'s uv and git settings
-    with the scratch as home; nothing is inherited."""
+def _core_env(work: Path, cache: Path, uv: Path) -> dict[str, str]:
+    """The inventory's role environment: `build_env`'s `PATH` (the git, tar
+    and uv directories, then the system ones), uv and git settings, with
+    the scratch as home; nothing is inherited."""
+    tools = (str(p.parent) for p in (SYSTEM_GIT, SYSTEM_TAR, uv))
     return {
         "HOME": str(work),
-        "PATH": "/usr/bin:/bin",
+        "PATH": ":".join(dict.fromkeys([*tools, "/usr/bin", "/bin"])),
         "LANG": "C.UTF-8",
         "UV_CACHE_DIR": str(cache),
         "UV_LINK_MODE": "copy",

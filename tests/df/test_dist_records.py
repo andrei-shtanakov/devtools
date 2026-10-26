@@ -9,8 +9,10 @@ from tests.df.dist_records import (
     NO_FILE,
     NO_RECORD,
     by_distribution,
+    dist_wheels,
     reason_class,
     record_owners,
+    vacuity_problems,
 )
 
 
@@ -78,3 +80,49 @@ def test_reason_class_masks_tokens() -> None:
     assert reason_class("@rpath/libz.1.dylib: нет в @loader_path/../lib") == (
         "*: нет в *"
     )
+
+
+def test_dist_wheels_records_version_and_tags(tmp_path: Path) -> None:
+    _dist(tmp_path, "rpds_py-0.27.1", [])
+    wheel = "Wheel-Version: 1.0\nGenerator: maturin\nTag: cp312-cp312-{}\n"
+    (tmp_path / "rpds_py-0.27.1.dist-info" / "WHEEL").write_text(
+        wheel.format("manylinux_2_17_x86_64")
+        + "Tag: cp312-cp312-manylinux2014_x86_64\n"
+    )
+    _dist(tmp_path, "nowheel-1.0", [])
+    assert dist_wheels(tmp_path) == {
+        "rpds_py": {
+            "version": "0.27.1",
+            "tags": [
+                "cp312-cp312-manylinux_2_17_x86_64",
+                "cp312-cp312-manylinux2014_x86_64",
+            ],
+        },
+        "nowheel": {"version": "1.0", "tags": []},
+    }
+
+
+def _member(code: int, site: bool = True, natives: int = 0) -> dict[str, object]:
+    return {"sync": {"code": code}, "site_exists": site, "native_count": natives}
+
+
+def test_vacuity_passes_a_measured_inventory() -> None:
+    members = {"a": _member(0, natives=0), "b": _member(0, natives=2)}
+    assert vacuity_problems(members) == []
+
+
+def test_vacuity_fails_a_missing_site_after_sync() -> None:
+    members = {"a": _member(0, site=False), "b": _member(0, natives=1)}
+    assert vacuity_problems(members) == ["a: site-packages нет после успешного uv sync"]
+
+
+def test_vacuity_fails_zero_natives_when_every_member_synced() -> None:
+    members = {"a": _member(0), "b": _member(0)}
+    assert vacuity_problems(members) == [
+        "инвентаризация core: ни одного нативного файла"
+    ]
+
+
+def test_vacuity_zero_natives_with_a_failed_sync_is_a_fact() -> None:
+    members = {"a": _member(0), "b": {"sync": {"code": 1}}}
+    assert vacuity_problems(members) == []

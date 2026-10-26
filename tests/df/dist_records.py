@@ -5,7 +5,8 @@ The owner of a file is the `*.dist-info` whose `RECORD` lists it; a file no
 `RECORD` lists is `NO_RECORD`. A problem line of `boundary._NativeCheck` is
 `<rel>: <reason>`; its file is the longest native path it starts with, and
 its reason class is the reason with the variable parts (the dependency, the
-search path, the file paths) replaced by `*`.
+search path, the file paths) replaced by `*`. `vacuity_problems` is the one
+verdict here: an inventory that measured nothing is not «0 problems».
 """
 
 from __future__ import annotations
@@ -44,6 +45,36 @@ def record_owners(site: Path) -> dict[str, str]:
                 if row and row[0]:
                     owners[str(PurePosixPath(_normal(row[0])))] = dist
     return owners
+
+
+def dist_wheels(site: Path) -> dict[str, dict[str, Any]]:
+    """Each distribution under `site`: its version (from the `dist-info`
+    name) and the `Tag` lines of its `WHEEL` (empty when there is none)."""
+    out: dict[str, dict[str, Any]] = {}
+    for info in sorted(site.glob("*.dist-info")):
+        dist, _, version = info.name.removesuffix(".dist-info").rpartition("-")
+        wheel = info / "WHEEL"
+        lines = (
+            wheel.read_text(encoding="utf-8").splitlines() if wheel.is_file() else []
+        )
+        tags = [x.removeprefix("Tag:").strip() for x in lines if x.startswith("Tag:")]
+        out[dist] = {"version": version, "tags": tags}
+    return out
+
+
+def vacuity_problems(members: Mapping[str, Mapping[str, Any]]) -> list[str]:
+    """Why an inventory measured nothing: a member synced without a
+    `site-packages`, or no native file at all once every member synced."""
+    synced = {n: m for n, m in members.items() if m["sync"]["code"] == 0}
+    problems = [
+        f"{n}: site-packages нет после успешного uv sync"
+        for n, m in synced.items()
+        if not m["site_exists"]
+    ]
+    if synced and len(synced) == len(members):
+        if sum(m["native_count"] for m in synced.values()) == 0:
+            problems.append("инвентаризация core: ни одного нативного файла")
+    return problems
 
 
 def by_distribution(
