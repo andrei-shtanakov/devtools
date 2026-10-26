@@ -19,12 +19,17 @@ over `fake_layout` with the OS-crash model of `tests/df/crash_model.py`
 installed on top: the model replaces the sync seams (so `sync_tree` syncs
 again, in the model) and keeps only synced effects across `os_crash()`.
 Every test runs under `umask 022` (autouse; carried from Task 7).
+
+Two run gates (Task 13, R77/R78): a `root` test is skipped unless euid 0 and
+`DF_ROOT_ACCEPTANCE=1`; with `DF_REQUIRE_PINNED_UV=1` a pinned-uv skip fails
+the session (CI df-stage1 sets it).
 """
 
 from __future__ import annotations
 
 import os
 import pwd
+import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,10 +45,56 @@ from tests.df.crash_model import CrashModel, fd_path
 
 if TYPE_CHECKING:
     from tests.df.install_world import World
+    from tests.df.root_world import Controls, FixtureRepo, InstalledWorld, RootWorld
 
 #: The fake uid of `df-build`: never the current user (F1).
 BUILD_UID = os.getuid() + 100000
 Event = tuple[object, ...]
+
+#: Root gate (Task 13, R77): a `root` test runs only as euid 0 and only when
+#: the acceptance run asks for it with `DF_ROOT_ACCEPTANCE=1`.
+ROOT_ACCEPTANCE_ENV = "DF_ROOT_ACCEPTANCE"
+#: R78: df-stage1 sets it, so a pinned-uv test can never vanish as a skip.
+PINNED_UV_ENV = "DF_REQUIRE_PINNED_UV"
+_PINNED_UV_SKIP = re.compile(r"uv не найден|не закреплённая")
+_skipped_for_uv: list[str] = []
+
+
+def root_gate_reason(euid: int, env: Mapping[str, str]) -> str | None:
+    """Why a `root` test is skipped here; `None` when the gate is open."""
+    if euid == 0 and env.get(ROOT_ACCEPTANCE_ENV) == "1":
+        return None
+    return f"root-приёмка: нужны euid 0 и {ROOT_ACCEPTANCE_ENV}=1 (CI df-stage1)"
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """Skip every `root` test unless the root gate is open."""
+    reason = root_gate_reason(os.geteuid(), os.environ)
+    if reason is None:
+        return
+    for item in items:
+        if item.get_closest_marker("root") is not None:
+            item.add_marker(pytest.mark.skip(reason=reason))
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    """Note a pinned-uv skip when `DF_REQUIRE_PINNED_UV=1` (R78)."""
+    if os.environ.get(PINNED_UV_ENV) != "1" or not report.skipped:
+        return
+    longrepr = report.longrepr
+    reason = longrepr[2] if isinstance(longrepr, tuple) else str(longrepr)
+    if _PINNED_UV_SKIP.search(reason):
+        _skipped_for_uv.append(report.nodeid)
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Fail the session that skipped a pinned-uv test under R78."""
+    if _skipped_for_uv:
+        names = ", ".join(_skipped_for_uv)
+        print(f"\n{PINNED_UV_ENV}=1, но закреплённого uv нет: {names}")
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 @dataclass
@@ -284,3 +335,112 @@ def make_fake_world(fake_layout: FakeLayout, monkeypatch: pytest.MonkeyPatch) ->
     model.install(monkeypatch)
     world.model = model
     return world
+
+
+# ---------- the root world (Task 13-B; only root tests reach these) ----------
+
+#: Where CI collects evidence (`$RUNNER_TEMP/df-stage1`); unset locally.
+STAGE1_OUT_ENV = "DF_STAGE1_OUT"
+
+
+def stage1_out() -> Path | None:
+    """The evidence directory of the CI run, if any."""
+    value = os.environ.get(STAGE1_OUT_ENV)
+    return Path(value) if value else None
+
+
+@pytest.fixture(scope="session")
+def acceptance_top() -> Iterator[Path]:
+    """`<base>/df-acc-<pid>` (R83), removed at the end of the session."""
+    from tests.df.root_world import acceptance_dir
+
+    with acceptance_dir() as top:
+        yield top
+
+
+@pytest.fixture(scope="session")
+def fixture_repo(acceptance_top: Path) -> Iterator[FixtureRepo]:
+    """The bare fixture repo and the URL the build fetches it from (R91)."""
+    from tests.df.root_world import FixtureRepo, build_fixture_repo, serve_repo
+
+    bare, sha = build_fixture_repo(acceptance_top)
+    with serve_repo(acceptance_top, bare) as url:
+        yield FixtureRepo(url, sha)
+
+
+@pytest.fixture(scope="session")
+def control_url() -> Iterator[str]:
+    """The control address on the runner's external interface (spec 3.8)."""
+    from tests.df.root_world import control_server
+
+    with control_server() as url:
+        yield url
+
+
+@pytest.fixture()
+def root_world(
+    acceptance_top: Path,
+    fixture_repo: FixtureRepo,
+    control_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> Iterator[RootWorld]:
+    """A fresh root world (R90): `<R>`, the root uv copy, the profile pin
+    through `install._profile` (R91); `df-build` removed afterwards."""
+    from df import install
+    from tests.df.root_world import make_world, teardown_world
+
+    world = make_world(acceptance_top, fixture_repo, control_url)
+    monkeypatch.setattr(install, "_profile", lambda _cfg: world.profile())
+    yield world
+    out = stage1_out()
+    keep = None
+    if out is not None:
+        name = re.sub(r"[^A-Za-z0-9_.-]", "_", request.node.name)
+        keep = out / "journals" / f"{name}.jsonl"
+    teardown_world(world, keep)
+
+
+@pytest.fixture()
+def controls(root_world: RootWorld) -> Controls:
+    """Spec 3.8 positive controls over a real `df-build` (before any
+    negative test); a failure fails the test as infrastructure."""
+    from tests.df.root_world import check_controls
+
+    root_world.prepare_build_user()
+    return check_controls(root_world)
+
+
+@pytest.fixture(scope="module")
+def installed_world(
+    acceptance_top: Path,
+    fixture_repo: FixtureRepo,
+    control_url: str,
+    request: pytest.FixtureRequest,
+) -> Iterator[InstalledWorld]:
+    """R90: one committed install (`install_once`) shared by the read-only
+    tests of a module; they must come after its `root_world` tests (a live
+    `df-build` fails a fresh world as infrastructure). Torn down like
+    `root_world` at the end of the module."""
+    from df import install
+    from tests.df.root_world import install_once, make_world, teardown_world
+
+    world = make_world(acceptance_top, fixture_repo, control_url)
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(install, "_profile", lambda _cfg: world.profile())
+            installed = install_once(world)
+        yield installed
+    finally:
+        out = stage1_out()
+        name = re.sub(r"[^A-Za-z0-9_.-]", "_", request.module.__name__)
+        keep = None if out is None else out / "journals" / f"{name}-installed.jsonl"
+        teardown_world(world, keep)
+
+
+@pytest.fixture()
+def installed_controls(installed_world: InstalledWorld) -> Controls:
+    """The positive `controls` over the installed world's `df-build`."""
+    from tests.df.root_world import check_controls
+
+    return check_controls(installed_world.world)

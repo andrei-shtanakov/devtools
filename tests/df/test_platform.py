@@ -501,18 +501,19 @@ def _fixture(name: str) -> tuple[int, bytes]:
     return code, (base / f"{name}.out").read_bytes()
 
 
+# `linux-some` is the CI runner's own capture (user `runner`), R74.
 @pytest.mark.parametrize(
-    "fixture,expected",
+    "fixture,user,expected",
     [
-        ("macos-none", "none"),
-        ("linux-none", "none"),
-        ("linux-some", "some"),
-        ("garbage", "unknown"),
-        ("exit-1", "unknown"),
+        ("macos-none", "df-build", "none"),
+        ("linux-none", "df-build", "none"),
+        ("linux-some", "runner", "some"),
+        ("garbage", "df-build", "unknown"),
+        ("exit-1", "df-build", "unknown"),
     ],
 )
 def test_sudo_rules_parsing(
-    monkeypatch: pytest.MonkeyPatch, fixture: str, expected: str
+    monkeypatch: pytest.MonkeyPatch, fixture: str, user: str, expected: str
 ) -> None:
     code, out = _fixture(fixture)
     seen: list[list[str]] = []
@@ -522,8 +523,8 @@ def test_sudo_rules_parsing(
         return ok(out, code)
 
     monkeypatch.setattr(plat, "run_command", run)
-    assert plat.sudo_rules("df-build") == expected
-    assert seen == [["/usr/bin/sudo", "-n", "-l", "-U", "df-build"]]
+    assert plat.sudo_rules(user) == expected
+    assert seen == [["/usr/bin/sudo", "-n", "-l", "-U", user]]
 
 
 def test_sudo_rules_other_name_or_launch_failure_is_unknown(
@@ -2737,14 +2738,23 @@ def test_s7_shim_link_with_other_name_refused(
 
 
 @MACOS_ONLY
-def test_o3_real_make_is_named_as_wrapper() -> None:
+def test_o3_real_make_verdict_follows_clt() -> None:
+    """R97: on some hosts CLT make is itself an xcode-select shim (make ->
+    gnumake), and df refuses `/usr/bin/make` as a nested wrapper; where it is
+    a real binary (the CI runner), df accepts it. Either way the real host's
+    verdict is asserted, never skipped (PR #632 review)."""
     make = Path("/Library/Developer/CommandLineTools/usr/bin/make")
     if not make.exists() or not Path("/usr/bin/make").exists():
         pytest.skip("needs the Command Line Tools")
+    deps = plat.linked_libraries(make)
+    assert deps is not None, make
     problems = plat.approved_cli_problems(
         {"make": Path("/usr/bin/make")}, "macos-arm64"
     )
-    assert any("обёртка xcode-select" in p for p in problems), problems
+    if plat.XCSELECT_LIB in deps.needed:
+        assert any("обёртка xcode-select" in p for p in problems), problems
+    else:
+        assert problems == [], problems
 
 
 def test_drain_thread_owns_its_descriptor(monkeypatch: pytest.MonkeyPatch) -> None:

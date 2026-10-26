@@ -619,6 +619,26 @@ def test_step2_refusal_stops_before_any_execution(
         assert os.stat(w.lay.staging).st_mode & 0o777 == 0o755
 
 
+def test_unmeasured_python_refused_at_manifest_before_any_host_change(
+    w: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """13-B2 M1: a profile Python without a measured Tcl/Tk list is refused
+    by step `manifest` with the remedy; step 2 never runs, nothing is
+    created, no process runs."""
+    profile = Profile("p", "3.12.12", (pin("devtools"),))
+    w.mp.setattr(install.manifest_mod, "parse_profile", lambda _d, _p: profile)
+    record(w, plat, "approved_cli_problems")
+    record(w, plat, "run_as")
+    record(w, plat, "run_command")
+    assert w.bootstrap(w.init_argv()) == 2
+    err = capsys.readouterr().err
+    assert "manifest" in err and "Python 3.12.12" in err
+    assert "укажите в профиле" in err and "§3.4" in err
+    names = {c[0] for c in w.calls}
+    assert names.isdisjoint({"approved_cli_problems", "run_as", "run_command"})
+    assert not os.path.lexists(w.lay.opt) and not os.path.lexists(w.lay.staging)
+
+
 def test_build_user_step_runs_nothing_as_df_build_before_ready(w: World) -> None:
     """M4 (spy): while `verify_build_user` has problems, `whoami_as` (a
     process of `df-build`) is never called; the step refuses after

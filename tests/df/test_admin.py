@@ -3,9 +3,9 @@
 Everything runs in `fake_layout` as the current user (root faked): the admin
 Python comes from the fixture uv of the routes test (`FAKE_UV`) or a variant
 of it; only the Step 1 premise tests run the real pinned uv — the hash test
-against a local mirror (no external network), the relocation test opt-in
-(`DF_NETWORK_TESTS=1`, a real download; Task 13 turns it into its `network`
-marker).
+against a local mirror (no external network), the relocation test under the
+`network` marker (a real download; deselected by default, run by CI
+df-stage1 on both platforms).
 """
 
 from __future__ import annotations
@@ -1139,10 +1139,7 @@ def test_uv_refuses_corrupt_download(tmp_path: Path) -> None:
     assert not (tmp_path / ".staging" / key).exists()
 
 
-@pytest.mark.skipif(
-    os.environ.get("DF_NETWORK_TESTS") != "1",
-    reason="сеть: DF_NETWORK_TESTS=1 (маркер network — Task 13)",
-)
+@pytest.mark.network
 def test_admin_python_relocation_precondition(
     monkeypatch: pytest.MonkeyPatch, fake_layout: FakeLayout
 ) -> None:

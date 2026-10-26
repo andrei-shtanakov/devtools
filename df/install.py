@@ -479,8 +479,9 @@ def install_steps(layout: Layout, cfg: InstallConfig, prepared: Prepared) -> lis
     """The preparation steps 1-3 for `run_steps` (spec 3.3; I1, I6, M3, M4).
 
     1. `manifest`: the check fetches the manifest (HTTPS read only) and
-       parses the profile into `prepared`; a refusal is
-       `StepFailed("manifest", <problems>)` from the check itself.
+       parses the profile into `prepared`; a refusal -- also a profile Python
+       without a measured Tcl/Tk list (`build.unmeasured_python`), before any
+       host change -- is `StepFailed("manifest", <problems>)` from the check.
     2. `trusted-paths`: the approved CLI first, then every directory of
        `prep_dirs`, settled first; any problem is `StepFailed("trusted-paths",
        <paths and reasons>)`. `do()` creates missing ones and sets every
@@ -519,11 +520,15 @@ def _profile(cfg: InstallConfig) -> Profile:
     where_ = f"{cfg.manifest_repo}@{cfg.manifest_sha}"
     try:
         data = manifest_mod.fetch_manifest(cfg.manifest_repo, cfg.manifest_sha)
-        return manifest_mod.parse_profile(data, cfg.profile)
+        profile = manifest_mod.parse_profile(data, cfg.profile)
     except ManifestError as exc:
         raise StepFailed("manifest", f"{where_}: {'; '.join(exc.problems)}") from exc
     except OSError as exc:
         raise StepFailed("manifest", f"{where_}: {exc}") from exc
+    refusal = build_mod.unmeasured_python(profile.python)
+    if refusal is not None:
+        raise StepFailed("manifest", f"{where_}: {refusal}")
+    return profile
 
 
 def _trusted_ready(layout: Layout, cfg: InstallConfig, platform: PlatformName) -> bool:

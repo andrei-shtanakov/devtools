@@ -32,6 +32,43 @@ PYTHON_TRIPLES: Mapping[PlatformName, str] = {
     "macos-arm64": "macos-aarch64-none",
     "linux-x86_64": "linux-x86_64-gnu",
 }
+#: Tcl/Tk parts shared by both platforms, under `python/<key>/`.
+_TCLTK_SHARED_3_12_13 = (
+    "bin/idle3",
+    "bin/idle3.12",
+    "lib/itcl4.3.5",
+    "lib/tcl9",
+    "lib/tcl9.0",
+    "lib/thread3.0.4",
+    "lib/tk9.0",
+    "lib/python3.12/idlelib",
+    "lib/python3.12/tkinter",
+    "lib/python3.12/turtle.py",
+    "lib/python3.12/turtledemo",
+)
+#: Tcl/Tk removed from the release's managed Python before seal (owner
+#: decision 25.10, spec 3.4): the same components on both platforms, paths
+#: under `python/<key>/`. Measured 25.10 on uv 0.11.23's cpython-3.12.13
+#: (python-build-standalone 20260610) for both keys. A listed entry missing at
+#: build time is list drift: `rm` without `-f` fails and the build stops.
+TCLTK_REMOVED_3_12_13: Mapping[PlatformName, tuple[str, ...]] = {
+    "macos-arm64": (
+        *_TCLTK_SHARED_3_12_13,
+        "lib/libtcl9.0.dylib",
+        "lib/libtcl9tk9.0.dylib",
+        "lib/python3.12/lib-dynload/_tkinter.cpython-312-darwin.so",
+    ),
+    "linux-x86_64": (
+        *_TCLTK_SHARED_3_12_13,
+        "lib/libtcl9.0.so",
+        "lib/libtcl9tk9.0.so",
+        "lib/python3.12/lib-dynload/_tkinter.cpython-312-x86_64-linux-gnu.so",
+    ),
+}
+#: Measured removal lists by profile Python; any other Python is refused.
+TCLTK_REMOVED: Mapping[str, Mapping[PlatformName, tuple[str, ...]]] = {
+    "3.12.13": TCLTK_REMOVED_3_12_13,
+}
 _RM = "/bin/rm"
 _MKDIR = "/bin/mkdir"
 _SYSTEM_PATH = ("/usr/bin", "/bin")
@@ -125,6 +162,29 @@ def python_path(plan: BuildPlan) -> Path:
     return plan.release_dir / "python" / key / "bin" / f"python{short}"
 
 
+def tcltk_strip_argv(plan: BuildPlan, platform: PlatformName) -> list[str]:
+    """`rm -r` of exactly the measured Tcl/Tk entries of the managed Python.
+
+    No `-f`: a missing entry fails the command (list drift stops the build).
+    """
+    base = plan.release_dir / "python" / python_key(plan.profile.python, platform)
+    removed = TCLTK_REMOVED[plan.profile.python][platform]
+    return [_RM, "-r", "--", *(str(base / rel) for rel in removed)]
+
+
+def unmeasured_python(python: str) -> str | None:
+    """Why a profile Python cannot be built (no measured `TCLTK_REMOVED`
+    list, spec 3.4), with the remedy; `None` when it has one."""
+    if python in TCLTK_REMOVED:
+        return None
+    measured = ", ".join(sorted(TCLTK_REMOVED))
+    return (
+        f"Python {python}: список удаляемых компонентов Tcl/Tk не измерен "
+        f"(измерен для {measured}); укажите в профиле одну из этих версий "
+        "или измерьте список для этой версии заново (спека §3.4)"
+    )
+
+
 def build_commands(plan: BuildPlan, layout: Layout) -> list[tuple[str, list[str]]]:
     """`(label, argv)` in execution order.
 
@@ -139,6 +199,7 @@ def run_build(plan: BuildPlan, layout: Layout, *, runner: Runner = run_as) -> st
 
     Precondition: `verify_build_user` is empty and `whoami_as` matches the
     accounts record, otherwise `StepFailed("build", ...)` before any command.
+    The managed Python loses `TCLTK_REMOVED` before any sync (spec 3.4).
     Returns the declared uv version (stripped `uv --version` stdout). Effects:
     `run_as(df-build)+` (`releases/<id>`, `build_home/tmp`, `build_home/cache`).
     """
@@ -164,7 +225,8 @@ def run_build(plan: BuildPlan, layout: Layout, *, runner: Runner = run_as) -> st
 
 
 def _check_plan(plan: BuildPlan, layout: Layout) -> None:
-    """The release id is valid and `release_dir` is its registered path."""
+    """The release id is valid, `release_dir` is its registered path and the
+    profile's Python has a measured Tcl/Tk removal list."""
     try:
         expected = layout.release_dir(plan.release_id)
     except ConfigError as exc:
@@ -175,6 +237,9 @@ def _check_plan(plan: BuildPlan, layout: Layout) -> None:
             f"release_dir {plan.release_dir}, для {plan.release_id} "
             f"ожидается {expected}",
         )
+    refusal = unmeasured_python(plan.profile.python)
+    if refusal is not None:
+        raise StepFailed("build", refusal)
 
 
 def _steps(plan: BuildPlan, layout: Layout) -> Iterator[Step]:
@@ -204,8 +269,10 @@ def _steps(plan: BuildPlan, layout: Layout) -> Iterator[Step]:
         yield f"extract:{r.name}", [tar, "-xf", archive, "-C", final], {}
         build = str(build_src_dir(layout, plan.release_id, r.name))
         yield f"extract-build:{r.name}", [tar, "-xf", archive, "-C", build], {}
-    key = python_key(plan.profile.python, detect_platform())
+    platform = detect_platform()
+    key = python_key(plan.profile.python, platform)
     yield "python", [uv, "python", "install", "--no-bin", key], {}
+    yield "strip-tcltk", tcltk_strip_argv(plan, platform), {}
     interpreter = str(python_path(plan))
     for r in repos:
         venv = {"UV_PROJECT_ENVIRONMENT": str(plan.release_dir / "venv" / r.name)}
@@ -234,6 +301,13 @@ def _check_user(layout: Layout) -> None:
         )
 
 
+#: Remedy appended to a failed `strip-tcltk` (spec 3.4: list drift).
+STRIP_DRIFT_HINT = (
+    "дрейф списка Tcl/Tk: установленный Python не совпадает с измеренным "
+    "TCLTK_REMOVED; перемерить перечень (спека §3.4)"
+)
+
+
 def _check_result(label: str, result: RunResult) -> None:
     if result.launched and not (
         result.timed_out or result.stdout_truncated or result.returncode != 0
@@ -248,7 +322,10 @@ def _check_result(label: str, result: RunResult) -> None:
     else:
         state = f"код {result.returncode}"
     tail = result.stderr[-STDERR_REPORT_BYTES:].decode("utf-8", "replace").strip()
-    raise StepFailed(label, f"{state}: {tail}" if tail else state)
+    detail = f"{state}: {tail}" if tail else state
+    if label == "strip-tcltk":
+        detail = f"{detail}; {STRIP_DRIFT_HINT}"
+    raise StepFailed(label, detail)
 
 
 def _check_head(label: str, plan: BuildPlan, result: RunResult) -> None:

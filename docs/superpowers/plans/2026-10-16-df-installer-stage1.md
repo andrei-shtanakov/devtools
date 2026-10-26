@@ -3776,11 +3776,21 @@ def test_doctor_transitional_via_public_entry(tmp_path): ...
 
 **Files:**
 - Create: `tests/df/observe.py` (наблюдатель root-доступов уровня ОС, §3.8 rev 8 r5),
-  `tests/df/test_acceptance_root.py`, `tests/df/fixtures/proj/` (минимальный
+  `tests/df/root_world.py` (корневой мир: раскладка, утверждённый CLI, пин, `df-build`;
+  R83/R88/R90/R91), root-тесты в четырёх файлах вместо одного `test_acceptance_root.py`
+  (R73): `tests/df/test_platform_root.py` (примитивы платформы: `sudo -l`, учётка, ACL,
+  загрузчик, недоверенный CLI, setgid) и `tests/df/test_acceptance_root_{install,copy,
+  account}.py` (строки §3.8 по группам), `tests/df/ci_step0.py` (факты Step 0 runner-а),
+  `tests/df/ci_junit.py` (сверка junit root-прогона), `tests/df/fixtures/proj/` (минимальный
   uv-проект: `[project.scripts] dfprobe = "dfprobe:main"`, одна зависимость с маркером
   платформы, build-backend `hatchling`, `uv.lock`), `.github/workflows/df-stage1.yml`
-- Modify: `tests/conftest.py` (маркеры `root`, `harness`, `network`)
-- Create: `docs/evidence/2026-10-XX-df-stage1-acceptance.md` (по факту прогона)
+- Modify: `pyproject.toml` (маркеры `root` и `network` рядом с `slow` и `harness`;
+  `addopts` исключает и `network`; R77), `tests/df/conftest.py` (root-гейт
+  `pytest_collection_modifyitems`, фикстуры `root_world`/`controls`, `DF_REQUIRE_PINNED_UV`;
+  R77/R78), `.github/workflows/ci.yml` (`uv` 0.11.23), `tests/df/test_admin.py`
+  (`DF_NETWORK_TESTS` → маркер `network`), `tests/df/fixtures/sudo-l/*` (тексты, снятые в CI;
+  R74)
+- Create: `docs/evidence/2026-10-26-df-stage1-acceptance.md` (по факту прогона)
 
 **Interfaces:**
 - Consumes: `install_steps`, `run_steps`, `drive`, `install_actions`, `level1_checks`,
@@ -3790,11 +3800,16 @@ def test_doctor_transitional_via_public_entry(tmp_path): ...
   (Task 7a).
 
 Root-тесты (`@pytest.mark.root`) пропускаются, если не выполнены `os.geteuid() == 0` и
-`DF_ROOT_ACCEPTANCE == "1"`. Раскладка — `Layout(<канонический tmp>)`, родители проходят
-политику §3.10 (tmp-корень создаётся root `0755`). Пин профиля указывает на локальный
-bare-репо с фикстурным проектом (`file://`) и подставляется в обход `parse_profile` —
-правило «только github.com» проверено в Task 2. Пользователь `df-build` — настоящий,
-созданный `create_build_user`.
+`DF_ROOT_ACCEPTANCE == "1"`. Раскладка — `Layout(<R>)`, `<R>` = `<base>/df-acc-<pid>/r<n>`,
+каждый уровень root `0755`, `<base>` = `/private/var/tmp-df` (macOS) или `/var/tmp-df`
+(Linux); родители проходят политику §3.10 (R83). Каждый путь хоста в тестах ниже
+(`/opt/df/...`, `/usr/local/bin/df`, `/opt` и `/var/lib` с `2755`) — путь под `<R>`;
+системные каталоги runner-а тесты не меняют (R84). Пин профиля указывает на локальный
+bare-репо root с фикстурным проектом и подставляется в обход `parse_profile` подменой
+`install._profile` (R91): `file://` на Linux, `git daemon` на `127.0.0.1` (`git://`) на
+macOS, где git отказывает `file://` чужого владельца — правило «только github.com» проверено
+в Task 2, выборка sha с GitHub — тестом `network` `test_fetch_reference_sha_from_github`
+(R79). Пользователь `df-build` — настоящий, созданный `create_build_user`.
 
 **Положительные контроли — общий фикстур `controls`** (§3.8). До любого отрицательного
 теста:
@@ -3806,29 +3821,55 @@ bare-репо с фикстурным проектом (`file://`) и подст
 Провал контроля — `pytest.fail("инфраструктура: …")`, не skip и не PASS. Каждый
 отрицательный тест дополнительно требует `RunResult.launched`.
 
-**Наблюдатель root-доступов** (`tests/df/observe.py`, §3.8 «Наблюдение», rev 8 r5):
-- `observe_root_access(sources: Sequence[Path]) -> ContextManager[Observation]`;
-  `Observation.status: Literal["observed", "unobserved"]`, `violations: list[Access]`,
-  `Access(pid: int, euid: int, op: str, path: str, exe: str)`;
-- Linux — `auditctl` с ключом прогона: `-a always,exit -F arch=b64 -S
-  open,openat,openat2,getdents64,execve -F dir=<источник> -F euid=0 -k df-r5-<run>`;
-  события — `ausearch -k … --format raw` после выхода из контекста; правила снимаются в
-  `finally`;
-- macOS — `eslogger open readdir exec --format json` (Endpoint Security) на время
-  контекста; нарушение — путь под источником и `audit_token.euid == 0`;
-- нет `auditctl`/`eslogger`, нет прав (TCC Full Disk Access для `eslogger`) или
-  наблюдатель не увидел ни одного события положительного контроля (`open` файла источника
-  от root внутри контекста перед тестом) → `status="unobserved"`;
+**Наблюдатель root-доступов** (`tests/df/observe.py`, §3.8 «Наблюдение», rev 8 r5;
+R92/R93/R98/R101):
+- `observe_root_access(sources: Sequence[Path], *, control: Path, workdir: Path, scope:
+  Path | None = None, record: Path | None = None) -> ContextManager[Observation]`;
+  `Observation.status: Literal["observed", "unobserved"]`, `reason`, `violations:
+  list[Access]`, `limits` (формы, которых наблюдатель этой ОС не видит),
+  `Observation.watch(path)` — источник, появившийся по ходу прогона (`releases/<id>` на
+  `fchown`, дерево в карантине; R93); `Access(pid: int, euid: int, op: str, path: str, exe:
+  str)`;
+- сопоставление (R98): по идентичности `(st_dev, st_ino)` объектов источника, перечисленных
+  `lstat` до входа и при `watch()`, и по пути в написании на диске (алиасы регистра и
+  нормализации Unicode — отказ); цепочка родителей каждого источника проходит
+  `trusted_path_problems`, она, написание и идентичность проверяются на входе и на выходе
+  (изменение — `unobserved`);
+- Linux — `auditctl` с ключом прогона: `-a always,exit -F arch=b64 -S <SYSCALLS> -F
+  dir=<каталог> -F euid=0 -k <ключ>` на каждый источник, каталог `control` и (необязательно)
+  `scope`; `SYSCALLS` — `creat, execve, execveat, getdents, getdents64, open,
+  open_by_handle_at, openat, openat2`; правило `never`/`exclude` на хосте или рост `lost` —
+  `unobserved`; события — `ausearch -k … --format raw` после выхода из контекста; правила
+  снимаются в `finally`;
+- macOS — `eslogger open readdir exec --format json` (Endpoint Security), запущенный
+  отсоединённо (события своего родителя он приглушает); нарушение — объект под источником или
+  с его идентичностью и `audit_token.euid == 0`; разрыв `global_seq_num` — `unobserved`;
+- положительный контроль (R92) — уникальная метка, которую сам наблюдатель создаёт в
+  отдельном каталоге `control` (не в дереве сборщика) на входе и последним действием на
+  выходе; нет `auditctl`/`eslogger`, нет прав (TCC Full Disk Access для `eslogger`), метка не
+  увидена, события потеряны, сбой `ps` или живой root-потомок на выходе →
+  `status="unobserved"`;
 - разрешённые операции над закреплённым родителем (`fstatat`, `renameat`, `unlinkat` по
-  имени дерева) этими событиями не являются.
+  имени дерева) этими событиями не являются; удалённый источник наблюдается через родителя
+  с исключением только его точного пути и названных операций (13-D);
+- каждая форма, которую наблюдатель не видит, названа в `Observation.limits` и переносится
+  в evidence (R101); новой формы ревью не ищет.
 
 Step 0 фиксирует имена событий `eslogger --list-events` и поддержку `-F dir` для перечня
-системных вызовов на версиях ОС CI. Тест с `status="unobserved"` — `pytest.xfail(
-"наблюдатель недоступен: гарантия §3.3 не подтверждена")`, а evidence пишет «не
+системных вызовов на версиях ОС CI. Двойник наблюдателя с `status="unobserved"` —
+`pytest.xfail("наблюдатель недоступен: гарантия §3.3 не подтверждена")`; тест приёма,
+очистки или маршрута с `status="unobserved"` — `pytest.fail`; evidence пишет «не
 подтверждено» для этой гарантии; это не PASS. Аудит-хук Python остаётся дополнительным
 локальным контролем (Task 5).
 
 - [ ] **Step 1: Тесты по §3.8, по одному на строку**
+
+Раскладка по файлам (R73): учётка, учётка-приманка и Linux-путь через `main` —
+`test_acceptance_root_account.py`; копия, приём, очистка и карантин на уровне листьев (R89) —
+`test_acceptance_root_copy.py`; чистая установка, маршрут, релиз и команда —
+`test_acceptance_root_install.py`; канарейка гейта, двойники наблюдателя, сломанный
+`run_as`, `sudo -l`, недоверенный CLI, setgid, ACL и остатки загрузчика —
+`test_platform_root.py`.
 
 ```python
 def test_clean_install_reaches_level1(root_world): ...
@@ -3972,16 +4013,21 @@ def test_linux_loader_residuals(root_world): ...
 
 - [ ] **Step 2: Где идёт root-прогон.** Только в одноразовых выделенных окружениях macOS
   arm64 и Ubuntu x86_64, предпочтительно CI (Step 3); на рабочей машине человека — нет.
-  Команда прогона:
-  `sudo env "PATH=$PATH" DF_ROOT_ACCEPTANCE=1 uv run --frozen pytest -q -m root tests/df`.
+  Команда прогона (R76: root не переписывает `.venv` и кеш `uv` runner-а; последний шаг
+  ячейки): `sudo env "PATH=$PATH" HOME=<свой каталог root> UV_CACHE_DIR=<свой кеш>
+  DF_ROOT_ACCEPTANCE=1 DF_REQUIRE_PINNED_UV=1 PYTHONDONTWRITEBYTECODE=1 uv run --frozen
+  --no-sync pytest -p no:cacheprovider -q -m root tests/df`; после него
+  `tests/df/ci_junit.py` сверяет junit: канарейка `test_root_gate_open` прошла, root-гейт
+  ничего не пропустил, каждый собранный root-тест есть в junit.
   Два исхода не смешиваются:
   - **положительные контроли** (`controls`, выше) идут до любого отрицательного теста; их
     провал — `pytest.fail("инфраструктура: …")`, прогон провален целиком, гарантии не
     выводятся;
   - **наблюдатель ОС недоступен** (`Observation.status == "unobserved"`: нет
-    `auditctl`/`eslogger` или прав) — прогон не провален, но гарантия «root не обращается к
-    объектам источника» в evidence — «не подтверждено»; для неё нужна отдельная одноразовая
-    тестовая машина, PASS остальных тестов её не заменяет.
+    `auditctl`/`eslogger` или прав, потеря событий, невидимая метка): двойник наблюдателя —
+    `xfail`, тест приёма, очистки или маршрута — `pytest.fail` (прогон провален); гарантия
+    «root не обращается к объектам источника» в evidence — «не подтверждено»; для неё нужна
+    отдельная одноразовая тестовая машина, PASS остальных тестов её не заменяет.
 - [ ] **Step 3: Workflow `df-stage1.yml`.** Матрица `macos-15` (arm64; `macos-14` снимается
   GitHub 2 ноября 2026) и `ubuntu-24.04` (x86_64). Первый шаг каждой ячейки — явная
   проверка архитектуры: `test "$(uname -m)" = arm64` / `test "$(uname -m)" = x86_64`;
@@ -3989,14 +4035,19 @@ def test_linux_loader_residuals(root_world): ...
   - Действия запинены теми же SHA, что в `ci.yml`; `permissions: contents: read`;
     `persist-credentials: false`.
   - Шаги: `uv python install 3.12` → `uv sync --frozen` → обычный
-    `uv run --frozen pytest -q tests/df` → root-прогон из Step 2 (контроли — внутри него,
-    до отрицательных тестов).
+    `uv run --frozen pytest -q -m 'not slow and not harness' tests/df` (с `network`) →
+    root-прогон из Step 2 (контроли — внутри него, до отрицательных тестов).
+  - macOS (R96): до тестов root выбирает Command Line Tools (`xcode-select -s
+    /Library/Developer/CommandLineTools`), вердикт — `approved_cli_problems` самого df;
+    `/usr/bin/git` образа иначе ведёт в `/Applications/Xcode_*.app` (uid 501, группа с
+    записью), и df ему справедливо отказывает.
   - `uv` закреплён на `UV_PINNED_VERSION` (0.11.23) и здесь, и в `ci.yml` (Task 8a): иначе
     `test_uv_refuses_corrupt_download` в CI пропускается, а `install_admin_python`
-    отказывает по `UV_ADMIN_CONFIRMED`. Маркер `network` регистрируется в
-    `tests/conftest.py`; opt-in `DF_NETWORK_TESTS` теста
-    `test_admin_python_relocation_precondition` (Task 8a, F9) заменяется этим маркером, и
-    тест идёт в обеих ячейках матрицы.
+    отказывает по `UV_ADMIN_CONFIRMED`; `DF_REQUIRE_PINNED_UV=1` превращает такой пропуск в
+    провал (R78). Маркеры `root` и `network` регистрируются в `pyproject.toml` (R77),
+    `addopts` исключает `network` из локальных прогонов и `ci.yml`; opt-in `DF_NETWORK_TESTS`
+    теста `test_admin_python_relocation_precondition` (Task 8a, F9) заменяется маркером
+    `network`, и тест идёт в обеих ячейках матрицы.
   - До прогона — **проба механизмов** тем же путём, что `run_as`/`spawn_as` (под `sudo`
     runner-а, без пароля). Неуспех — провал workflow с именем механизма, не skip:
     - **ubuntu-24.04**:
@@ -4042,7 +4093,21 @@ def test_linux_loader_residuals(root_world): ...
   - остаточный риск (§3.2, R33.F28): процессы `df-build`, пережившие сбой установщика во
     время `run_build`, могут писать в будущий `releases/<id>`;
   - «изоляция харнессов: <версии> verified / not verified» (Task 11 Step 3);
-  - «`core` live: blocked / not run (ждёт `df-manifest-profiles`)».
+  - «`core` live: blocked / not run (ждёт `df-manifest-profiles`)»;
+  - «Python релиза без Tcl/Tk (решение владельца 25.10, спека §3.4): список
+    `TCLTK_REMOVED_<версия Python>` удалён сборкой до `seal`; `import tkinter` не работает»
+    по ячейке.
+
+  **Python без Tcl/Tk (13-B2, решение владельца 25.10).** На Linux правило нативных файлов
+  отказало Tcl/Tk python-build-standalone (путь поиска `/tools/deps/lib`). `run_build` после
+  `uv python install` и до `uv sync` удаляет от `df-build` измеренный список
+  `TCLTK_REMOVED_3_12_13` (`rm -r` без `-f`: отсутствующая запись — дрейф и отказ шага
+  `strip-tcltk` с подсказкой «перемерить перечень»); Python профиля без списка — отказ шага
+  `manifest` до изменений хоста (и повторно в `run_build` до первой команды). Правило (в) не
+  меняется. Тесты: точность списка и единый состав на обеих ОС, порядок и пользователь шага,
+  отказ при дрейфе (`test_build.py`); замер обоих ключей `uv` (`network`); root-тест
+  `test_installed_python_has_no_tk_but_core_works` (нет `tkinter`/`turtle`, работают `ssl`,
+  `sqlite3`, `ctypes`, `venv`, `dfprobe --help`); чистая установка на обеих ячейках.
 
   Этап 1 по §10 при этом **не закрыт**.
 - [ ] **Step 5: Commit** `test(df): stage-1 acceptance on macOS arm64 and Ubuntu`
@@ -4062,6 +4127,9 @@ def test_linux_loader_residuals(root_world): ...
   - lock-файлы членов в пределах поддерживаемых конструкций §3.5 (иначе установка откажет
     «неподдерживаемый lock»), а `[tool.uv]` членов — в пределах `UV_PROJECT_KEYS_0_11_23`,
     без `uv.toml` (§3.2; иначе отказ до сборки);
+  - `python` профиля — `3.12.13`: единственная версия с измеренным списком удаляемых
+    компонентов Tcl/Tk `TCLTK_REMOVED` (§3.4, решение владельца 25.10); иная версия — отказ
+    шага `manifest` до любого изменения хоста, пока список для неё не измерен;
   - **решение владельца 22.10** (R37 закрыт, R40/F20): группы `core` для `devtools` —
     только `governance`. `conductor` (группа службы в `default-groups`
     `devtools/pyproject.toml`) — отдельный профиль позже, не в v1; сборка идёт с
@@ -4084,7 +4152,8 @@ def test_linux_loader_residuals(root_world): ...
   с `@trigger` на смену закреплённой версии `uv`: перепроверить замером
   `UV_PROJECT_KEYS_<версия>` (дополнение A1/A2 предполётной проверки Task 7a) и таблицу
   записи пути корня в `tests/df/fixtures/locks/SOURCES.md`, переименовать константу под
-  новую версию, перезахватить эталоны.
+  новую версию, перезахватить эталоны; при смене `uv` или Python профиля — заново измерить
+  `TCLTK_REMOVED_<версия Python>` (спека §3.4) на обоих ключах.
 - [ ] **Step 2: Документация** — строка `df/` в таблице CLAUDE.md и раздел README:
   - что делает этап 1;
   - первая установка: `sudo /usr/bin/python3 -I -B -S <чекаут devtools>/df/bootstrap.py init
@@ -4098,6 +4167,8 @@ def test_linux_loader_residuals(root_world): ...
     возвращать); снятие блокировки переустановки удалением `pending.toml` (R53, §3.8:
     не подтверждает завершённость прежней установки) и второе ручное снятие (§3.8);
     root-владелец в карантине и его ручное снятие;
+  - Python релиза без Tcl/Tk (решение владельца 25.10, спека §3.4): `tkinter`, `turtle`,
+    `idlelib` недоступны инструментам релиза;
   - почему не `df`: имя занято стандартной командой;
   - утверждённые CLI: только пути root (§3.10), способ подготовки `uv`;
   - приёмка — CI `df-stage1`; живая установка ждёт манифест.

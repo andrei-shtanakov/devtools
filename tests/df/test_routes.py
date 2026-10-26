@@ -69,6 +69,7 @@ from tests.df.route_world import (
     LOCK_A,
     OBJECTS,
     PY,
+    SHORT,
     UV,
     StandIns,
     State,
@@ -760,7 +761,7 @@ def test_distribution_problems_root_is_the_builds_project_path(
     )
     argv = dict(build_mod.build_commands(plan, fl.layout))["sync:r1"]
     project = argv[argv.index("--project") + 1]
-    site = fl.layout.release_dir(ID) / "venv" / "r1" / "lib" / "python3.13"
+    site = fl.layout.release_dir(ID) / "venv" / "r1" / "lib" / f"python{SHORT}"
     info = site / "site-packages" / "app-0.1.0.dist-info"
     (info / "direct_url.json").write_text(
         json.dumps({"url": f"file://{project}", "dir_info": {}})
@@ -794,7 +795,7 @@ def test_distribution_problems_leaf_passes_groups_env_and_root_as_spelled(
     (fl.layout.build_home / "tmp").symlink_to(elsewhere)
     ref = repo_ref(fl, "r1", lock, [("mine", "1.0"), ("grp", "1.0"), ("app", "0.1.0")])
     project = build_mod.build_src_dir(fl.layout, ID, "r1")
-    site = fl.layout.release_dir(ID) / "venv" / "r1" / "lib" / "python3.13"
+    site = fl.layout.release_dir(ID) / "venv" / "r1" / "lib" / f"python{SHORT}"
     (site / "site-packages" / "app-0.1.0.dist-info" / "direct_url.json").write_text(
         json.dumps({"url": f"file://{project}", "dir_info": {}})
     )

@@ -1,17 +1,22 @@
-"""Unit tests of df.build (stub runner; no root, no network)."""
+"""Unit tests of df.build (stub runner; no root). Only the `network` test
+installs the pinned Pythons (df-stage1 runs it)."""
 
 from __future__ import annotations
 
 import os
+import subprocess
 from collections.abc import Sequence
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import pytest
 
 from df import build
+from df.boundary import _NativeCheck
 from df.build import (
+    TCLTK_REMOVED,
+    TCLTK_REMOVED_3_12_13,
     BuildPlan,
     build_commands,
     build_env,
@@ -20,13 +25,42 @@ from df.build import (
     python_key,
     python_path,
     run_build,
+    tcltk_strip_argv,
 )
 from df.config import Account, dump_accounts
 from df.journal import StepFailed
 from df.manifest import Profile, RepoPin
 from df.paths import Layout
-from df.platform import BUILD_USER, PlatformName, RunResult
+from df.platform import BUILD_USER, PlatformName, RunResult, detect_platform
+from tests.df.test_admin import pinned_uv
 
+#: Owner decision 25.10, measured 25.10 (uv 0.11.23, cpython-3.12.13): the
+#: same components on both platforms; only the native file names differ.
+TCLTK_SHARED = (
+    "bin/idle3",
+    "bin/idle3.12",
+    "lib/itcl4.3.5",
+    "lib/tcl9",
+    "lib/tcl9.0",
+    "lib/thread3.0.4",
+    "lib/tk9.0",
+    "lib/python3.12/idlelib",
+    "lib/python3.12/tkinter",
+    "lib/python3.12/turtle.py",
+    "lib/python3.12/turtledemo",
+)
+TCLTK_LINUX = (
+    *TCLTK_SHARED,
+    "lib/libtcl9.0.so",
+    "lib/libtcl9tk9.0.so",
+    "lib/python3.12/lib-dynload/_tkinter.cpython-312-x86_64-linux-gnu.so",
+)
+TCLTK_MACOS = (
+    *TCLTK_SHARED,
+    "lib/libtcl9.0.dylib",
+    "lib/libtcl9tk9.0.dylib",
+    "lib/python3.12/lib-dynload/_tkinter.cpython-312-darwin.so",
+)
 SHA_A = "a" * 40
 SHA_B = "b" * 40
 UID = 401
@@ -45,7 +79,7 @@ def layout(tmp_path: Path) -> Layout:
 def plan(layout: Layout) -> BuildPlan:
     profile = Profile(
         "core",
-        "3.12.7",
+        "3.12.13",
         (
             RepoPin("devtools", "https://x/devtools.git", SHA_A, ("governance",)),
             RepoPin("steward", "https://x/steward.git", SHA_B, ()),
@@ -107,7 +141,8 @@ def make_stub(
 def test_commands_exact_order_and_flags(plan: BuildPlan, layout: Layout) -> None:
     work = layout.build_home / "tmp" / "rel1"
     rel = plan.release_dir
-    py = rel / "python" / "cpython-3.12.7-linux-x86_64-gnu" / "bin" / "python3.12"
+    key = rel / "python" / "cpython-3.12.13-linux-x86_64-gnu"
+    py = key / "bin" / "python3.12"
     git, tar, uv = "/usr/bin/git", "/usr/bin/tar", "/opt/tools/uv"
 
     def repo_steps(name: str, url: str, sha: str) -> list[tuple[str, list[str]]]:
@@ -159,8 +194,9 @@ def test_commands_exact_order_and_flags(plan: BuildPlan, layout: Layout) -> None
         *repo_steps("steward", "https://x/steward.git", SHA_B),
         (
             "python",
-            [uv, "python", "install", "--no-bin", "cpython-3.12.7-linux-x86_64-gnu"],
+            [uv, "python", "install", "--no-bin", "cpython-3.12.13-linux-x86_64-gnu"],
         ),
+        ("strip-tcltk", ["/bin/rm", "-r", "--", *(f"{key}/{p}" for p in TCLTK_LINUX)]),
         sync("devtools", ["governance"]),
         sync("steward", []),
         ("uv-version", [uv, "--version"]),
@@ -183,11 +219,11 @@ def test_python_path_per_platform(
 ) -> None:
     base = plan.release_dir / "python"
     assert python_path(plan) == (
-        base / "cpython-3.12.7-linux-x86_64-gnu/bin/python3.12"
+        base / "cpython-3.12.13-linux-x86_64-gnu/bin/python3.12"
     )
     monkeypatch.setattr(build, "detect_platform", lambda: "macos-arm64")
     assert python_path(plan) == (
-        base / "cpython-3.12.7-macos-aarch64-none/bin/python3.12"
+        base / "cpython-3.12.13-macos-aarch64-none/bin/python3.12"
     )
 
 
@@ -333,7 +369,7 @@ def test_python_install_argv_matches_python_path(
     monkeypatch.setattr(build, "detect_platform", lambda: name)
     install = dict(build_commands(plan, layout))
     key = install["python"][-1]
-    assert key == python_key("3.12.7", name)
+    assert key == python_key("3.12.13", name)
     assert python_path(plan).parent.parent.name == key
 
 
@@ -354,3 +390,186 @@ def test_work_and_src_dir_helpers(plan: BuildPlan, layout: Layout) -> None:
     work = build_work_dir(layout, "rel1")
     assert work == layout.build_home / "tmp" / "rel1"
     assert build_src_dir(layout, "rel1", "steward") == work / "src" / "steward"
+
+
+# ---------- Tcl/Tk removal (owner decision 25.10, spec 3.4) ----------
+
+
+def test_tcltk_list_is_the_measured_one() -> None:
+    """The constant is exactly the measured list, per platform and in order;
+    only 3.12.13 is measured."""
+    assert TCLTK_REMOVED == {"3.12.13": TCLTK_REMOVED_3_12_13}
+    assert TCLTK_REMOVED_3_12_13 == {
+        "linux-x86_64": TCLTK_LINUX,
+        "macos-arm64": TCLTK_MACOS,
+    }
+
+
+def test_tcltk_list_names_the_same_components_on_both_platforms() -> None:
+    """No blanket pattern: every entry is a literal path; the platforms differ
+    only by the native suffix (`.so`/`.dylib`, the `_tkinter` ABI tag)."""
+
+    def component(rel: str) -> str:
+        for suffix in (".cpython-312-x86_64-linux-gnu.so", ".cpython-312-darwin.so"):
+            rel = rel.removesuffix(suffix)
+        return rel.removesuffix(".so").removesuffix(".dylib")
+
+    lists = TCLTK_REMOVED_3_12_13.values()
+    assert len({frozenset(map(component, entries)) for entries in lists}) == 1
+    for entries in lists:
+        assert len(set(entries)) == len(entries)
+        assert not any(c in rel for rel in entries for c in "*?[]")
+
+
+def test_strip_runs_as_build_user_after_python_before_any_sync(
+    plan: BuildPlan, layout: Layout
+) -> None:
+    """Removal is the build's own step: `df-build`, after the Python install,
+    before every `uv sync` (so before `seal`, which follows `run_build`)."""
+    stub = make_stub(plan, layout)
+    run_build(plan, layout, runner=stub)
+    labels = [stub.label_of(c["argv"]) for c in stub.calls]
+    at = labels.index("strip-tcltk")
+    assert labels[at - 1] == "python"
+    assert all(not label.startswith("sync:") for label in labels[:at])
+    assert stub.calls[at]["user"] == BUILD_USER
+
+
+@pytest.mark.parametrize("name", ["macos-arm64", "linux-x86_64"])
+def test_strip_argv_is_rm_without_force_of_the_listed_paths(
+    plan: BuildPlan, name: PlatformName
+) -> None:
+    key = plan.release_dir / "python" / python_key("3.12.13", name)
+    argv = tcltk_strip_argv(plan, name)
+    assert argv[:3] == ["/bin/rm", "-r", "--"]
+    assert argv[3:] == [str(key / rel) for rel in TCLTK_REMOVED_3_12_13[name]]
+
+
+def test_strip_failure_stops_the_build_before_sync(
+    plan: BuildPlan, layout: Layout
+) -> None:
+    gone = b"rm: /x/lib/tk9.0: No such file or directory"
+    stub = make_stub(
+        plan, layout, {"strip-tcltk": RunResult(1, b"", gone, launched=True)}
+    )
+    with pytest.raises(StepFailed) as err:
+        run_build(plan, layout, runner=stub)
+    assert err.value.step == "strip-tcltk" and "tk9.0" in err.value.detail
+    assert err.value.detail.endswith(build.STRIP_DRIFT_HINT)
+    assert "перемерить перечень" in build.STRIP_DRIFT_HINT
+    assert stub.label_of(stub.calls[-1]["argv"]) == "strip-tcltk"
+
+
+def test_unmeasured_python_refused_before_any_command(
+    plan: BuildPlan, layout: Layout
+) -> None:
+    bad = replace(plan, profile=replace(plan.profile, python="3.12.12"))
+    stub = make_stub(plan, layout)
+    with pytest.raises(StepFailed) as err:
+        run_build(bad, layout, runner=stub)
+    assert err.value.step == "build"
+    assert "3.12.12" in err.value.detail and "Tcl/Tk" in err.value.detail
+    assert "укажите в профиле" in err.value.detail and "3.12.13" in err.value.detail
+    assert stub.calls == []
+    with pytest.raises(StepFailed):
+        build_commands(bad, layout)
+
+
+def _stand_in_tree(base: Path, entries: Sequence[str]) -> None:
+    for rel in (*entries, "lib/libpython3.12.so", "share/terminfo/t/tkterm"):
+        (base / rel).parent.mkdir(parents=True, exist_ok=True)
+        (base / rel).write_text("x")
+
+
+@pytest.mark.parametrize("name", ["macos-arm64", "linux-x86_64"])
+def test_strip_argv_removes_exactly_the_list(
+    plan: BuildPlan, name: PlatformName
+) -> None:
+    """The real `rm` removes every listed entry and nothing else."""
+    argv = tcltk_strip_argv(plan, name)
+    base = plan.release_dir / "python" / python_key("3.12.13", name)
+    _stand_in_tree(base, TCLTK_REMOVED_3_12_13[name])
+    done = subprocess.run(argv, capture_output=True, check=False)
+    assert done.returncode == 0, done.stderr
+    left = sorted(str(p.relative_to(base)) for p in base.rglob("*") if p.is_file())
+    assert left == ["lib/libpython3.12.so", "share/terminfo/t/tkterm"]
+
+
+def test_strip_argv_refuses_list_drift(plan: BuildPlan) -> None:
+    """A listed entry missing (list drift) fails the real `rm`, by name."""
+    argv = tcltk_strip_argv(plan, "linux-x86_64")
+    base = plan.release_dir / "python" / python_key("3.12.13", "linux-x86_64")
+    _stand_in_tree(base, [e for e in TCLTK_LINUX if e != "lib/tk9.0"])
+    done = subprocess.run(argv, capture_output=True, check=False)
+    assert done.returncode != 0
+    assert b"tk9.0" in done.stderr
+
+
+@pytest.mark.network
+@pytest.mark.parametrize("name", ["macos-arm64", "linux-x86_64"])
+def test_tcltk_list_matches_the_pinned_python(
+    tmp_path: Path, name: PlatformName
+) -> None:
+    """Re-measure (uv installs either key on any host): every listed entry
+    exists, and no other Tcl/Tk-named entry is anywhere in the tree (whole
+    walk). On the host platform the stripped tree passes rule (в)
+    unchanged."""
+    uv = pinned_uv()
+    key = python_key("3.12.13", name)
+    release = tmp_path / "rel"
+    env = {
+        "HOME": str(tmp_path / "home"),
+        "PATH": "/usr/bin:/bin",
+        "UV_CACHE_DIR": str(tmp_path / "cache"),
+        "UV_NO_CONFIG": "1",
+        "UV_PYTHON_INSTALL_DIR": str(release / "python"),
+    }
+    argv = [str(uv), "python", "install", "--no-bin", key]
+    subprocess.run(argv, env=env, capture_output=True, check=True, timeout=600)
+    base = release / "python" / key
+    listed = TCLTK_REMOVED_3_12_13[name]
+    assert [rel for rel in listed if not os.path.lexists(base / rel)] == []
+    assert _tcltk_named(base) == set(listed)
+    if name != detect_platform():
+        return
+    check = _NativeCheck(release, name, PurePosixPath(f"python/{key}/bin"))
+    before = check.problems()
+    prefixes = tuple(f"python/{key}/{rel}" for rel in listed)
+    assert all(line.startswith(prefixes) for line in before), before
+    if name == "linux-x86_64":
+        assert before, "rule (в) must see the PBS Tcl/Tk rpath (13-B finding)"
+    strip = tcltk_strip_argv(_plan_at(release), name)
+    subprocess.run(strip, capture_output=True, check=True)
+    assert check.problems() == []
+
+
+#: Name fragments of the measurement (test only; df removes a literal list).
+TCLTK_WORDS = ("tcl", "tk", "thread3", "idle", "turtle")
+#: Tcl/Tk-named, but not Tcl/Tk: a terminal type of ncurses' terminfo.
+TCLTK_NOT = frozenset({"share/terminfo/t/tkterm"})
+
+
+def _tcltk_named(base: Path) -> set[str]:
+    """Every Tcl/Tk-named entry of the whole tree, not descending into one
+    (its contents go with it), minus `TCLTK_NOT`."""
+    found: set[str] = set()
+    for dirpath, dirs, files in os.walk(base):
+        top = Path(dirpath).relative_to(base)
+        for name in (*dirs, *files):
+            if any(w in name.lower() for w in TCLTK_WORDS):
+                found.add(str(top / name))
+        dirs[:] = [d for d in dirs if str(top / d) not in found]
+    return found - TCLTK_NOT
+
+
+def test_tcltk_named_walks_the_whole_tree(tmp_path: Path) -> None:
+    """The measurement sees a Tcl/Tk name at any depth, once per subtree."""
+    for rel in ("include/tcl.h", "lib/tk9.0/x.tcl", "share/terminfo/t/tkterm", "a/b"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("x")
+    assert _tcltk_named(tmp_path) == {"include/tcl.h", "lib/tk9.0"}
+
+
+def _plan_at(release_dir: Path) -> BuildPlan:
+    profile = Profile("core", "3.12.13", ())
+    return BuildPlan("rel1", release_dir, profile, Path("/"), Path("/"), Path("/"))
