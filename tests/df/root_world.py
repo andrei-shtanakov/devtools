@@ -51,7 +51,13 @@ from df import platform as plat
 from df.build import GIT_ISOLATION
 from df.config import Account, InstallConfig, load_accounts
 from df.journal import StepFailed, run_steps
-from df.manifest import Profile, RepoPin
+from df.manifest import (
+    ManifestError,
+    Profile,
+    RepoPin,
+    fetch_manifest,
+    parse_profile,
+)
 from df.paths import Layout
 from tests.df.ci_step0 import BASES, make_base
 
@@ -65,6 +71,14 @@ PROFILE_NAME = "p"
 #: The pin's name: `install_admin` copies `<checkout of devtools>/df`.
 PIN_NAME = "devtools"
 MANIFEST_REPO = "fixture/manifest"
+#: The umbrella manifest that pins profile `core` (ai-orchestrators-workspace#52,
+#: merge commit on `main`): the one source of the `core` inventory and of the
+#: live install.
+CORE_MANIFEST = (
+    "andrei-shtanakov/ai-orchestrators-workspace",
+    "080f15e6b8fa3497a369f959e5466c1391bf2700",
+)
+CORE_PROFILE = "core"
 FIXED_DATE = "2026-10-01T00:00:00+00:00"
 INFRA = "инфраструктура"
 ROLE_ENV: Mapping[str, str] = {"PATH": "/usr/bin:/bin", "LANG": "C"}
@@ -372,20 +386,35 @@ class InstalledWorld:
         return self.layout.release_dir(self.release_id)
 
 
-def install_once(world: RootWorld) -> InstalledWorld:
+def install_once(world: RootWorld, argv: list[str] | None = None) -> InstalledWorld:
     """`<R>/usr/local/bin` root `0755` (trusted, so `launcher` links the
-    command there), then `bootstrap init`; a refusal fails the module."""
+    command there), then `bootstrap init` (`argv`, else the fixture pin's);
+    a refusal fails the module."""
     local_bin = world.layout.local_bin
     for path in (local_bin.parent.parent, local_bin.parent, local_bin):
         os.mkdir(path, 0o755)
         os.chmod(path, 0o755)
-    code = world.bootstrap(world.init_argv())
+    code = world.bootstrap(world.init_argv() if argv is None else argv)
     if code != cli.EXIT_OK:
         pytest.fail(f"установка installed_world: код {code}")
     assert_committed(world.layout)
     rid = current_id(world.layout)
     assert rid is not None
     return InstalledWorld(world, rid)
+
+
+def core_profile() -> Profile:
+    """Profile `core` of `CORE_MANIFEST`, fetched and resolved by df's own
+    `fetch_manifest` and `parse_profile` (network). A network error or a
+    refusal fails the test: an inventory is never recorded without inputs."""
+    repo, sha = CORE_MANIFEST
+    try:
+        profile = parse_profile(fetch_manifest(repo, sha), CORE_PROFILE)
+    except (ManifestError, OSError) as exc:
+        pytest.fail(f"манифест {repo}@{sha}: {type(exc).__name__}: {exc}")
+    if profile.python != PYTHON or not profile.repos:
+        pytest.fail(f"манифест {repo}@{sha}: {profile}, нужен Python {PYTHON}")
+    return profile
 
 
 def current_id(layout: Layout) -> str | None:
