@@ -539,12 +539,22 @@ job — 180 мин. Факты ниже — из артефактов прого
 
 | член | точки входа | macOS arm64 | Ubuntu x86_64 |
 |---|---|---|---|
-| devtools | — (не пакет) | — | — |
+| devtools | нет (`[project.scripts]` нет, `tool.uv.package = false`) | нет консольных команд — smoke не применим | нет консольных команд — smoke не применим |
 | discovery | `discovery` | 0 | 0 |
-| discovery-toolkit | — (не пакет) | — | — |
+| discovery-toolkit | нет (`[project.scripts]` нет, `tool.uv.package = false`) | нет консольных команд — smoke не применим | нет консольных команд — smoke не применим |
 | disputatio | `disp` | 0 | 0 |
 | spec-runner | `spec-runner`, `spec-runner-init`, `spec-task` | 0, 0, 0 | 0, 0, 0 |
 | steward | `gate-check`, `review-eval`, `steward`, `steward-compile` | 0, 0, 0, 0 | 0, 0, 0, 0 |
+
+Объявленные точки входа сверены с `pyproject.toml` каждого члена на его пине (`[project.scripts]`,
+`gui-scripts` нет ни у кого, `dynamic` нет): devtools `335188f6` и discovery-toolkit
+`e5faa677` — секции нет, `tool.uv.package = false`, `[build-system]` нет; discovery
+`3ebed2d9` — `discovery = discovery.cli:main`; disputatio `920b63f4` — `disp =
+disputatio.cli:main`; steward `007d0049` — `gate-check`, `steward`, `steward-compile`,
+`review-eval` (`steward.*.cli:app`); spec-runner `c71decf7` — `spec-runner`, `spec-task`,
+`spec-runner-init`. Набор smoke совпал с объявленным у всех шести членов на обеих ОС: пустая
+запись в `live/<платформа>.json` (`"smoke": {"devtools": {}, "discovery-toolkit": {}}`) значит
+«нечего запускать», а не «прошло».
 
 **Инвентаризация `core` на пинах манифеста** (`boundary/<платформа>.json`, `core_inventory`,
 `inputs` = «pins of profile core, manifest …@080f15e…»; метод — как в разделе 8).
