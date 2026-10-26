@@ -15,7 +15,7 @@ What README «Установка DarkFactory: этап 1» says, as processes:
    `.sha256` (and the README's value), its version, then `sudo install` to
    `UV_DIR` root `0755`; the bootstrap Python (Ubuntu `/usr/bin/python3`;
    macOS the README recipe, owner decision 26.10: `sudo <uv> python install
-   PYTHON --install-dir BOOTSTRAP_PYTHON_DIR`), which must pass
+   PYTHON --no-bin --install-dir BOOTSTRAP_PYTHON_DIR`), which must pass
    `trusted_path_problems` (a problem is a finding). The `/opt` chain is the
    workflow's host-configuration step, before this script.
 3. The README first-install command verbatim (`documented_command`, the
@@ -187,10 +187,11 @@ def bootstrap_python(platform: plat.PlatformName, work: Path, facts: dict) -> st
 
 
 def _install_python(work: Path, facts: dict) -> str:
-    """`sudo <uv> python install PYTHON --install-dir BOOTSTRAP_PYTHON_DIR`;
-    the one `cpython-PYTHON-*/bin/python3.12` it made. Where the uv run left
-    its executables links is recorded (`~/.local/bin` of the `sudo` HOME)."""
-    argv = ["sudo", str(UV_DIR / "uv"), "python", "install", PYTHON]
+    """`sudo <uv> python install PYTHON --no-bin --install-dir
+    BOOTSTRAP_PYTHON_DIR`; the one `cpython-PYTHON-*/bin/python3.12` it made.
+    `~/.local/bin` of the `sudo` HOME is recorded: `--no-bin` keeps root out
+    of the human's home."""
+    argv = ["sudo", str(UV_DIR / "uv"), "python", "install", PYTHON, "--no-bin"]
     argv += ["--install-dir", str(BOOTSTRAP_PYTHON_DIR)]
     done = _run(argv, timeout=900, cwd=work)
     facts["python_install"] = done

@@ -50,6 +50,7 @@ def test_bootstrap_python_recipe_is_the_readme_one() -> None:
     text = README.read_text(encoding="utf-8").replace("\\\n    ", "")
     recipe = (
         f"sudo {live_install.UV_DIR}/uv python install {live_install.PYTHON}"
+        " --no-bin"
         f" --install-dir {live_install.BOOTSTRAP_PYTHON_DIR}"
     )
     assert recipe in " ".join(text.split())

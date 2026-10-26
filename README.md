@@ -339,9 +339,12 @@ remediation-issue у уже помеченного родителя). Повто
    root утверждённым uv из п. 3 в каталог root вне дерева релиза:
 
    ```sh
-   sudo /usr/local/libexec/darkfactory/bin/uv python install 3.12.13 \
+   sudo /usr/local/libexec/darkfactory/bin/uv python install 3.12.13 --no-bin \
      --install-dir /usr/local/libexec/darkfactory-bootstrap/python
    ```
+
+   `--no-bin` обязателен: `sudo` на macOS сохраняет `HOME` человека, и без флага root
+   положил бы ссылку `python3.12` в его `~/.local/bin`.
 
    интерпретатор для bootstrap —
    `/usr/local/libexec/darkfactory-bootstrap/python/cpython-3.12.13-macos-aarch64-none/bin/python3.12`.
