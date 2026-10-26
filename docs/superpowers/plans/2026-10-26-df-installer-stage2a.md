@@ -557,11 +557,19 @@ run` в sudoers нет: его вызывает `df-run-start` после сбр
 - `launch.role_env(layout, role) -> dict[str, str]` — `HOME` = `role_home(role)`,
   `PATH` = `"/usr/bin:/bin"`, `LANG` = `"C.UTF-8"`, `TZ` = `"UTC"`;
 - `launch.role_cwd(layout, role) -> Path` — `role_home(role)/"work"`;
+- **Снимок несёт весь реестр** (r4 N1): `df/state.py` — поле `Snapshot.releases:
+  ReleasesConfig | None` (разобранный `RawSnapshot.releases_text`, тот же текст, из
+  которого уже берётся `entry`); `parse_snapshot` его сохраняет; договор входа
+  `launcher_entry → cli.main` не меняется. Тест `test_service_commands_reread_nothing`
+  (механизм `test_main_rereads_nothing` этапа 1 для `launch exec`, `publisher serve`,
+  `run start|resume`): после получения снимка чтение `releases.toml`, `install.toml`,
+  `current` запрещено; `current = B`, прогон на `allowed` A → A; A отозван в снимке →
+  отказ; правка файлов после снимка не смешивает записи;
 - `launch.release_for(layout, op, snap, stdin) -> tuple[str, Path, str | None]` — для
   `check`, `check-github` — `snap.release_id` (один снимок входа), `run_id = None`; для
   `run` и `review` — `run_id` из stdin (≤ 256 байт, `[A-Za-z0-9._-]+`) → запись
   `/var/lib/df/runs/<run_id>.json` (root, без ссылок) → её `release_id`; запись релиза в
-  `releases.toml` `allowed` и digest совпадает, иначе отказ с причиной
+  `snap.releases` `allowed` и digest совпадает, иначе отказ с причиной
   (`release_revoked`, `release_unknown`) (r1 N5);
 - `launch.exec_main(argv, *, layout, snap) -> int` — `argv = [role, op]`, порядок:
   1. `os.closerange(3, …)` — до чтения stdin и любых файлов;
@@ -718,9 +726,10 @@ run` в sudoers нет: его вызывает `df-run-start` после сбр
   десятичное число (`0|[1-9][0-9]*`); `op ∈ ADMIN_OPERATIONS` ⇔ `SUDO_UID == 0`; иначе
   `SUDO_UID` из таблицы и `op` ∈ его операций; иначе `Refused` (причины:
   `not_publisher_uid`, `sender_unknown`, `operation_not_allowed`);
-- `main.check_run(layout, run_id) -> RunRecord` — запись есть, релиз записи `allowed`
-  в `releases.toml` (отозванный → `refused: release_revoked: <причина>`), `root_id` записи
-  сверяется операциями периметра (Task 11);
+- `main.check_run(layout, snap: Snapshot, run_id) -> RunRecord` — запись есть, релиз
+  записи `allowed` в **реестре снимка** `snap.releases` (отозванный → `refused:
+  release_revoked: <причина>`), digest совпадает; `releases.toml` повторно не читается
+  (r4 N1); `root_id` записи сверяется операциями периметра (Task 11);
 - `store.reserve(layout, sender_uid, op, req) -> Reservation` — §5.6 дословно: глобальная
   `flock` на `publisher/ids.lock` → временный файл `ids/.<request_id>.<pid>.tmp` с
   `{sender, operation, digest}` → `fsync` → `os.link` в `ids/<request_id>` (`EEXIST` →
@@ -804,7 +813,10 @@ repository_ids, permissions}], problems}` — `SelfCheckResult.to_json()`; ре�
   `repositories` равна `total_count` последней страницы. Ошибка любой страницы,
   превышение предела, неожиданная форма — `GitHubUnavailable`, не частичный список
   (r2 N9);
-- `SelfCheckResult(installations: tuple[Installation, ...], problems: tuple[str, ...])`,
+- `SelfCheckResult(installations: tuple[Installation, ...], problems: tuple[str, ...],
+  perimeter: PerimeterStats | None)`, `PerimeterStats(events: int, db_bytes: int,
+  free_bytes: int)` (r4 N5: эксплуатационные пределы §6.1 — читает издатель, единственный,
+  кто открывает базу; `None` с причиной, если база недоступна),
   `Installation(id: int, account: str, repository_ids: tuple[int, ...],
   permissions: Mapping[str, str])`; `to_json()`/`from_json()` — сериализация для ответа
   `self-check` и разбор в `doctor` (r3 N5);
@@ -955,9 +967,14 @@ product_unknown`); перед каждой операцией — `self_check` (
        инвариантами, `admission` в ней ставится `restored_pending` — всё до барьера;
     2. `flock(LOCK_EX)` с ожиданием ≤ 30 с (иначе отказ «база занята», ничего не
        меняется) — после него ни одного открытого соединения издателя нет;
-    3. если у прежней базы есть горячий журнал `events.sqlite-journal`, прежняя база
-       открывается и закрывается под тем же `LOCK_EX`, чтобы SQLite откатил журнал;
-       затем журнала быть не должно (иначе отказ);
+    3. если у прежней базы есть горячий журнал `events.sqlite-journal`, под тем же
+       `LOCK_EX` прежняя база открывается с прагмами `open_db` и выполняется **чтение**
+       (`BEGIN; SELECT count(*) FROM sqlite_master; COMMIT`) — SQLite откатывает горячий
+       журнал при начале транзакции чтения (r4 N2); соединение закрывается; журнала
+       быть не должно. Ошибка чтения (повреждённая пара база/журнал) — отказ с
+       инструкцией: `darkfactory perimeter restore … --set-aside-old` переносит
+       **оба** файла вместе в `perimeter/set-aside/<UTC-время>/` и только затем ставит
+       новую базу; удалять один журнал нельзя никогда;
     4. `rename` временного файла на `events.sqlite`, `fsync` каталога, снятие
        `LOCK_EX`; сбой до шага 4 оставляет прежнюю базу, после — новую с
        `restored_pending`;
@@ -1019,7 +1036,10 @@ product_unknown`); перед каждой операцией — `self_check` (
   восстановленную базу с `restored_pending`); `test_restore_timeout_changes_nothing`;
   `test_restore_crash_points` (сбой на каждом шаге 1–4 → прежняя база либо новая с
   `restored_pending`, никогда `clear` без допуска; подтверждённые транзакции прежней базы
-  на месте, если остался прежний файл); `test_restore_with_hot_journal`; клиентский номер
+  на месте, если остался прежний файл); `test_restore_with_hot_journal` (настоящий горячий журнал: отдельный процесс-писатель
+  SQLite завершается `os._exit` внутри транзакции записи; восстановление откатывает его,
+  подтверждённые ранее события на месте); `test_restore_corrupt_pair_refused` (испорченный
+  журнал → отказ, оба файла не тронуты; с `--set-aside-old` — перенесены вместе); клиентский номер
   эпохи — поля нет в схеме; 10 000 событий — `perimeter_status` укладывается в
   `2.0` с на раннере (замер пишется в вывод теста); `test_pragmas_effective`
   (на macOS `fullfsync == 1`); `test_no_binding_refuses`; `test_client_new_request_id_after_stale`;
@@ -1078,6 +1098,16 @@ product_unknown`); перед каждой операцией — `self_check` (
 - Modify: `df/doctor.py`, `df/cli.py`
 - Test: `tests/df/test_doctor.py` (дополнить)
 
+Эксплуатационная сводка журнала периметра (r4 N5, §6.1) — отдельная строка `doctor`
+(не уровень 2), из `self-check.perimeter`: число событий, размер базы, свободное место;
+`events ≥ 9000` — предупреждение «журнал периметра приближается к пределу 10 000»;
+`> 10 000` — «нарушено» (операции периметра отвечают `unavailable`); свободное место
+`< 64 МиБ` — предупреждение; `perimeter = None` — «данные недоступны: <причина>».
+Тест: норма, 9000, 10 001, мало места, недоступно; Task 11 — ошибка записи при нехватке
+места (`SQLITE_FULL`) даёт `refused: storage_full`, не `done`, подтверждённые события
+на месте (`test_disk_full_refuses`, файловая система ограниченного размера: `tmpfs`
+`size=` на Linux, образ `hdiutil` на macOS — в root-ячейках).
+
 Проверки уровня 2 (каждая — `Check` со статусами §8), порядок:
 1. `roles.users` — `verify_service_user` для трёх ролей;
 2. `roles.sudoers` — `validate` установленного файла + `policy_problems` для пяти имён
@@ -1125,7 +1155,8 @@ product_unknown`); перед каждой операцией — `self_check` (
   матрица), `tests/df/conftest.py` (маркер `stage2a`)
 
 Мир: `installed_world` этапа 1 → `darkfactory roles setup --operator runner` →
-фикстурный `products.toml` (продукт `repository_id = 1`, App 1) → фикстурный ключ App
+фикстурный `products.toml` (продукт `repository_id = 1`, App 1; фикстурный репо релиза
+содержит `FIXTURE_FROM_CHECKOUT`, Task 15) → фикстурный ключ App
 (тестовый PEM) → **локальный поддельный GitHub** (`tests/df/fake_github.py`: HTTP на
 `127.0.0.1`, проверяет подпись JWT тестовым публичным ключом, отдаёт установки,
 репозитории, токены, PR, ревью по сценарию теста) и `api_base` в `publisher.toml`
@@ -1136,8 +1167,13 @@ evidence, r1 N11) → для отзыва — фикстурная правка 
 наблюдателя — `pytest.fail("инфраструктура: …")`, не PASS и не skip.
 
 Каждая строка — тест с **названным механизмом отказа** и парным положительным контролем
-(r1 N12). Код sudo-отказа — 1 и строка «is not allowed» / «not allowed to execute»
-(обе ОС); код отказа издателя — 2 и `outcome = refused` с причиной.
+(r1 N12). Отказы классифицируются по механизму (r4 N4), при `LC_ALL=C`, по снимкам
+диагностик обеих ОС в `tests/df/fixtures/sudo-diag/`: «команда не разрешена»
+(код 1, `is not allowed to execute` / `not allowed to run`), «сохранение окружения
+запрещено» (код 1, `not allowed to preserve the environment`), «нужен пароль» —
+**не** засчитывается как запрет, а валит тест как неверную настройку; отказ издателя —
+код 2 и `outcome = refused` с причиной. При отказе sudo проверяется, что издатель не
+запускался: в `publisher/journal.jsonl` нет новой строки.
 
 | Попытка | Механизм отказа | Положительный контроль |
 |---|---|---|
@@ -1153,6 +1189,7 @@ evidence, r1 N11) → для отзыва — фикстурная правка 
 | `run start` при отозванном `current` | `df-run-start` (код 2, причина) | при `allowed`: запись есть, затем отказ `df-launch run` «доступ к моделям не подтверждён» |
 | повтор `perimeter-status` | — : каждый раз заново `unavailable/no_binding` (журнал — две строки) | — |
 | тот же `request_id` с другим содержимым | издатель (`request_id_reused`) | первый запрос — ответ |
+| предел одной UID (B §5.8): процесс `df-exec` прогона на отозванном релизе ссылается на `run_id` другого, `allowed` прогона | — (не отказ, а предел): издатель отвечает так же, как на запрос этого `allowed` прогона, — собственные проверки операции, ничего сверх них; штатный `df-launch run` прогона на отозванном релизе — отказ `release_revoked` | evidence фиксирует строку как предел гарантии, не как защиту |
 | I/O-журнал sudo (r2 N2), четыре конфигурации во втором файле `sudoers.d` на время теста: (а) глобальный `log_output`; (б) `Defaults!<df-publish> log_output, iolog_dir=<другой>`; (в) `log_servers=127.0.0.1:30344`; (г) только `log_input` | (а), (г): `evidence.response_nonce` ответа `perimeter-status` от `df-exec` не найден в потоках `stdout`, `stderr`, `ttyout` ни одной сессии под `iolog_dir` (файлы сессии разбираются по типу потока; сжатые gzip — распаковываются; нераспознанный файл — провал «инфраструктура»), `io_log_problems` пуст; (б), (в): `io_log_problems` — «нарушено» | (а): маркер `check_report.nonce`, напечатанный `df-launch … check`, **найден** в `stdout` его сессии; (г): `request_id` запроса **найден** в потоке `stdin` сессии `df-publish` — журнал stdin работает, stdout — нет |
 
 Переносы этапа 1:
@@ -1188,13 +1225,18 @@ evidence, r1 N11) → для отзыва — фикстурная правка 
 Workflow: `on: workflow_dispatch` (только), `environment: df-stage2-live`, матрица
 macos-15 / ubuntu-24.04, `if: github.ref == 'refs/heads/master'`. Шаги: подготовка хоста
 → установка **проверяемой реализации** (r2 N7): фикстурный профиль `root_world` из одного
-члена `devtools` — bare-репо, собранное из чекаута workflow на коммите `github.sha`
+члена `devtools` — bare-репо, собранное из чекаута workflow на коммите `github.sha`;
+в фикстурный коммит кроме `df/` копируется `contracts/approval-branches/v1/patterns.env`
+(r4 N3: его читает маршрутизация `merge`; `build_fixture_repo` дополняется списком
+`FIXTURE_FROM_CHECKOUT = ("df", "contracts/approval-branches/v1/patterns.env")`, тот же
+список в Task 14), а проверка происхождения ниже сверяет blob-ы **всех** путей этого
+списка
 (тот же механизм, что `installed_world` этапа 1, но в раскладке `/`); до любых операций
 с секретами сверка происхождения (r3 N2) — две идентичности, не приравниваемые друг к
 другу: `source_sha = github.sha` (чекаут workflow) и `fixture_sha` (коммит фикстурного
 репо, который ставит установка). Проверки: (1) `git -C <fixture> ls-tree -r
-<fixture_sha> -- df/` и `git -C <checkout> ls-tree -r <source_sha> -- df/` дают
-одинаковые пары «путь, blob»; (2) `release.json` называет член `devtools` с
+<fixture_sha> -- <пути FIXTURE_FROM_CHECKOUT>` и то же для `<checkout>` на `<source_sha>`
+дают одинаковые пары «путь, blob»; отсутствующий путь — провал; (2) `release.json` называет член `devtools` с
 `sha = fixture_sha`; (3) `admin_digest` записи `releases.toml` равен
 `admin.expected_admin_digest(<checkout>/df)` — новая функция `df/admin.py`: копирует
 `df/` во временный `<tmp>/df` теми же правилами, что `install_admin`, и считает
