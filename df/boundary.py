@@ -806,7 +806,9 @@ def _link_problem(release_dir: Path, env: EnvPaths, name: str) -> list[str]:
 
 def script_heads(release_dir: Path, repo: str) -> tuple[bytes, bytes]:
     """The two exact heads uv writes for a script of `venv/<repo>` (F1):
-    a direct `#!` and, above the kernel's shebang limit, the sh trampoline.
+    a direct `#!` and, past uv's trampoline threshold (a uv constant, not a
+    kernel limit: a `bin/python` path up to 124 bytes is direct, from 125 a
+    trampoline), the sh trampoline.
     Both name the environment's own `bin/python`."""
     python = os.fsencode(release_dir / "venv" / repo / "bin" / "python")
     direct = b"#!" + python + b"\n"
