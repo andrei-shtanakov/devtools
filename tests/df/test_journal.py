@@ -95,6 +95,42 @@ def test_postcheck_false_fails(tmp_path: Path) -> None:
     assert "done" not in [e for _, e in _events(tmp_path / "j")]
 
 
+def test_postcheck_false_names_the_reason(tmp_path: Path) -> None:
+    """D3: a step's `why()` supplies the refusal's reasons; the type, the
+    step name and the journal events stay those of a bare failure."""
+    journal = tmp_path / "j"
+    seen: list[str] = []
+
+    def why() -> list[str]:
+        seen.append("why")
+        return ["uid 0", "чужой дом"]
+
+    step = Step("a", lambda: False, lambda: None, why)
+    with pytest.raises(StepFailed) as info:
+        run_steps([step], journal, run_id="r")
+    assert info.value.step == "a"
+    assert info.value.detail == "постусловие не выполнено: uid 0; чужой дом"
+    assert seen == ["why"]  # asked only once the postcondition failed
+    bare = tmp_path / "bare"
+    with pytest.raises(StepFailed) as plain:
+        run_steps([Step("a", lambda: False, lambda: None)], bare, run_id="r")
+    assert plain.value.detail == "постусловие не выполнено"
+    assert _events(journal) == _events(bare)
+
+
+def test_postcheck_why_not_asked_when_ready(tmp_path: Path) -> None:
+    """`why()` is the failure path only: a skip or a done never calls it."""
+    box = Box("a")
+
+    def why() -> list[str]:
+        raise AssertionError("why() called")
+
+    steps = [Step("a", lambda: "a" in box.facts, lambda: None, why)]
+    steps.append(Step("b", lambda: "b" in box.facts, lambda: box.facts.add("b"), why))
+    run_steps(steps, tmp_path / "j", run_id="r")
+    assert _events(tmp_path / "j") == [("a", "skip"), ("b", "start"), ("b", "done")]
+
+
 def test_needs_human_stops_without_done(tmp_path: Path) -> None:
     journal = tmp_path / "j.jsonl"
 

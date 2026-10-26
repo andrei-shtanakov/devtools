@@ -683,11 +683,44 @@ def test_build_user_step_runs_nothing_as_df_build_before_ready(w: World) -> None
     with pytest.raises(StepFailed) as exc:
         journal.run_steps([step], lay.journal, run_id="r")
     assert exc.value.step == "build-user"
+    assert exc.value.detail == "постусловие не выполнено: state = creating"
     assert asked == [] and ("create",) in w.calls
     write_ready_account(w)
     w.mp.setattr(build_mod, "verify_build_user", lambda _l: [])
     journal.run_steps([step], lay.journal, run_id="r")
     assert asked == [plat.BUILD_USER]
+
+
+def test_build_user_refusal_names_the_reason(
+    w: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D3: a decoy `df-build` with a `ready` record — the install's refusal
+    carries the problems `verify_build_user` knows (as `doctor` names
+    them), not only «постусловие не выполнено»."""
+    problems = ["uid 0: не учётка сборщика", "дом /var/root: не build_home"]
+    w.mp.setattr(build_mod, "verify_build_user", lambda _l: problems)
+    w.mp.setattr(plat, "create_build_user", lambda _l: None)
+    assert w.bootstrap(w.init_argv()) == cli.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert "build-user: постусловие не выполнено: " + "; ".join(problems) in err
+    rows = [r for r in read_journal(w.lay.journal) if r["step"] == "build-user"]
+    assert [r["event"] for r in rows] == ["start", "failed"], rows
+
+
+def test_build_user_refusal_names_whoami_mismatch(w: World) -> None:
+    """D3, the other half of readiness: `verify_build_user` clean, but
+    `whoami_as` disagrees with the record — the refusal says so."""
+    lay = w.lay
+    lay.install_dir.mkdir(parents=True)
+    write_ready_account(w)
+    w.mp.setattr(build_mod, "verify_build_user", lambda _l: [])
+    w.mp.setattr(build_mod, "whoami_as", lambda _u: (0, 0))
+    w.mp.setattr(plat, "create_build_user", lambda _l: None)
+    step = install.install_steps(lay, w.cfg(), install.Prepared())[2]
+    with pytest.raises(StepFailed) as exc:
+        journal.run_steps([step], lay.journal, run_id="r")
+    want = f"whoami {plat.BUILD_USER}: (0, 0), в записи ({BUILD_UID}, {BUILD_UID})"
+    assert exc.value.detail == f"постусловие не выполнено: {want}"
 
 
 def test_uv_config_refused_before_build_lists_all_repos(

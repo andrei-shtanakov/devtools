@@ -58,11 +58,14 @@ class _Interrupted(Exception):
 
 @dataclass(frozen=True)
 class Step:
-    """`check()` means "the fact is already achieved"."""
+    """`check()` means "the fact is already achieved"; the optional `why()`
+    names what keeps it from being achieved (the refusal's reasons when the
+    postcondition fails after `do()`)."""
 
     name: str
     check: Callable[[], bool]
     do: Callable[[], None]
+    why: Callable[[], Sequence[str]] | None = None
 
 
 @dataclass(frozen=True)
@@ -474,5 +477,9 @@ def _execute(step: Step, log: Callable[..., None], fail_after: str | None) -> No
     if fail_after == step.name:
         raise _Interrupted(step.name)
     if not step.check():
-        raise StepFailed(step.name, "постусловие не выполнено")
+        reasons = list(step.why()) if step.why is not None else []
+        detail = "постусловие не выполнено"
+        if reasons:
+            detail = f"{detail}: {'; '.join(reasons)}"
+        raise StepFailed(step.name, detail)
     log("done")
