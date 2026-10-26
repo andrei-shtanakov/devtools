@@ -326,12 +326,38 @@ remediation-issue у уже помеченного родителя). Повто
 
 ### Подготовка
 
-1. Python ≥ 3.12 для bootstrap: на Ubuntu 24.04 — системный `/usr/bin/python3`; на macOS
-   системный `/usr/bin/python3` — 3.9, нужен другой по выбору человека.
+1. Цепочки путей к `/opt/df`, `/etc/df` и `/usr/local/libexec/darkfactory` (каждый каталог
+   от `/`, в том числе `/opt`, `/etc`, `/usr/local/libexec`): владелец root, без записи для
+   группы и всех, без ACL. Иначе `darkfactory` отказывает и называет путь. На штатном образе
+   GitHub Ubuntu 24.04 `/opt` открыт на запись группе и всем и несёт ACL — CI `df-stage1`
+   перед установкой выполняет `sudo chmod go-w /opt` и `sudo setfacl -b /opt`.
 2. `git`: на Ubuntu — `sudo apt-get install git` (в минимальном образе `/usr/bin/git` нет);
    на macOS — Command Line Tools, выбранные root (ниже, «macOS: каталог разработчика»).
 3. `uv` 0.11.23 — копия в каталог root (ниже, «Утверждённые CLI»).
-4. Чекаут этого репо и полный SHA коммита манифеста зонтика.
+4. Python ≥ 3.12 для bootstrap. На Ubuntu 24.04 — системный `/usr/bin/python3` (3.12). На
+   macOS системный `/usr/bin/python3` — 3.9; поддерживаемый вариант — Python, поставленный
+   root утверждённым uv из п. 3 в каталог root вне дерева релиза:
+
+   ```sh
+   cd / && sudo -H /usr/local/libexec/darkfactory/bin/uv --no-config python install 3.12.13 \
+     --no-bin --install-dir /usr/local/libexec/darkfactory-bootstrap/python
+   ```
+
+   Интерпретатор для bootstrap:
+   `/usr/local/libexec/darkfactory-bootstrap/python/cpython-3.12.13-macos-aarch64-none/bin/python3.12`.
+
+   `sudo` на macOS сохраняет `HOME` человека, а root-овский uv читал бы его настройки. Каждая
+   часть рецепта закрывает своё (тот же класс, что `UV_NO_CONFIG` установщика, решение
+   владельца 22.10):
+   - `--no-config` — не читаются ни пользовательская конфигурация человека
+     (`~/.config/uv/uv.toml`), ни конфигурация проекта (`uv.toml`, `[tool.uv]` в
+     `pyproject.toml`) в каталогах над текущим; любая из них могла бы подменить источник
+     загрузки Python (`python-install-mirror`, `python-downloads-json-url`), и root поставил
+     бы чужой интерпретатор;
+   - `cd /` — текущий каталог вне любого проекта;
+   - `sudo -H` — `HOME` root-а: в кеше человека (`~/.cache/uv`) не появляются файлы root;
+   - `--no-bin` — uv не кладёт ссылку `python3.12` в `~/.local/bin`.
+5. Чекаут этого репо и полный SHA коммита манифеста зонтика.
 
 ### Первая установка
 
@@ -345,7 +371,7 @@ sudo <python-3.12+> -I -B -S <чекаут-devtools>/df/bootstrap.py init \
   --cli uv=/usr/local/libexec/darkfactory/bin/uv
 ```
 
-- `<python-3.12+>` — интерпретатор из п. 1 подготовки (на Ubuntu 24.04 — `/usr/bin/python3`);
+- `<python-3.12+>` — интерпретатор из п. 4 подготовки (на Ubuntu 24.04 — `/usr/bin/python3`);
   `<sha-манифеста>` — полный SHA коммита манифеста зонтика, 40 **строчных** hex (заглавные —
   отказ манифеста); `<чекаут-devtools>` — чекаут этого репо.
 - Root исполняет код из чекаута человека: доверие к этому чекауту и к интерпретатору — на
@@ -354,8 +380,9 @@ sudo <python-3.12+> -I -B -S <чекаут-devtools>/df/bootstrap.py init \
 - Флаги `-I -B -S` обязательны, без них bootstrap отказывает; Python < 3.12 — тоже отказ.
 - Python профиля — только `3.12.13`: для иной версии нет измеренного списка удаляемых
   компонентов Tcl/Tk, и шаг `manifest` отказывает до любого изменения хоста.
-- Живая установка профиля `core` ждёт секцию профилей в манифесте зонтика
-  (`df-manifest-profiles`; пункт `df-installer-stage1-live` в `TODO.md`).
+- Профиль `core` описан в манифесте зонтика (`[df.profiles.core]`, коммит
+  `080f15e6b8fa3497a369f959e5466c1391bf2700`); его живая установка этой командой — в CI
+  `df-stage1` (раздел «Приёмка»).
 
 Дальше — команда (ссылка `/usr/local/bin/darkfactory`, если `/usr/local/bin` проходит
 политику доверенных путей; иначе установщик печатает полный путь `/opt/df/bin/darkfactory`):
@@ -468,5 +495,9 @@ Tools. Возврат — `sudo xcode-select -s <путь к Xcode>/Contents/Dev
 
 CI `df-stage1` (`.github/workflows/df-stage1.yml`): macOS arm64 и Ubuntu x86_64, root-тесты
 только в одноразовых runner-ах GitHub. Evidence —
-`docs/evidence/2026-10-26-df-stage1-acceptance.md`. Живая установка `core` ждёт манифест
-(`df-manifest-profiles`).
+`docs/evidence/2026-10-26-df-stage1-acceptance.md`. Живая установка профиля `core` по
+манифесту зонтика (`080f15e`) — в двух формах: в root-мире тестов (`<R>`, в процессе,
+`tests/df/test_acceptance_root_live.py`) и в раскладке `/` командой выше как процесс
+(`tests/df/live_install.py`: подготовка по разделу «Подготовка», `sudo darkfactory doctor
+--json` — уровень 1, `--help` каждой точки входа от непривилегированного пользователя);
+результаты — evidence §9.

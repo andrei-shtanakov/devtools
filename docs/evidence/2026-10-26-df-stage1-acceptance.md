@@ -498,3 +498,147 @@ Ubuntu `hardlink-root-only-file`: ни одна из 16 жёстких ссыл�
   **Контроль:** в том же прогоне образец `pillow` (`native_wheel`) по-прежнему даёт проблемы
   правила (в) — macOS 1, Linux 10, — то есть проверка над venv жива, и ноль у `core` —
   замер, а не слепое пятно метода.
+
+## 9. Живая установка `core`
+
+Прогон [40312801764](https://github.com/andrei-shtanakov/devtools/actions/runs/40312801764)
+(PR #635, голова `1b34478`), обе ячейки success. Root-прогон: 16:28 (macOS, шаг
+11:15:07–11:31:35, junit 986 с), 12:09 (Ubuntu, шаг 11:11:03–11:23:12, junit 728 с); предел
+job — 180 мин. Факты ниже — из артефактов прогона (`live/<платформа>.json`,
+`live/<платформа>-doctor.json`, `journals/live-core.jsonl`, `boundary/<платформа>.json`).
+
+**Входы.** Манифест зонтика `andrei-shtanakov/ai-orchestrators-workspace@080f15e6b8fa3497a369f959e5466c1391bf2700`
+(ai-orchestrators-workspace#52), профиль `core`, Python `3.12.13`. Одна константа
+`CORE_MANIFEST` (`tests/df/root_world.py`); профиль разрешает `core_profile()` собственными
+`df.manifest.fetch_manifest` и `parse_profile` — рукописного `CORE_PINS` больше нет; сбой сети
+или отказ манифеста — падение теста, а не пустой замер.
+
+**Установка** (`tests/df/test_acceptance_root_live.py::test_live_core_install`). Root-мир
+`<R>` (свежий `df-build`, копия закреплённого uv по утверждённому пути, `/usr/bin/git`,
+`/usr/bin/tar`), но **без подмены профиля**: шаг `manifest` читает настоящий манифест, сборка
+выбирает члены с GitHub по их пинам. argv — команда README «Первая установка»
+(`documented_argv` из `tests/df/test_cli.py`), заменены только SHA манифеста и путь uv (копия
+мира); исполнена так, как её исполняет bootstrap, в процессе над раскладкой `<R>` (R87).
+Почему `<R>`, а не `/`: `bootstrap.py` не принимает корень и строит `Layout("/")` сам, а
+настоящий процесс в раскладке `/` потребовал бы обойти мир (своя учётка, свой разбор
+остатков, общий с остальными root-тестами `df-build`); мир `<R>` уже прошёл приёмку
+§3.8 и отличается от `/` только корнем (D2: один корень на процесс). Настоящий процесс — у
+команды: `doctor --json` — это установленный `<R>/opt/df/bin/darkfactory`. Раскладку `/`
+командой README как процессом исполняет отдельный шаг CI — см. §9.1.
+
+| | macOS arm64 | Ubuntu x86_64 |
+|---|---|---|
+| `init`, код / время | 0 / 71,8 с | 0 / 47,6 с |
+| релиз | `080f15e6b8fa-macos-arm64-1` | `080f15e6b8fa-linux-x86_64-1` |
+| журнал | 26 строк, `manifest skip` → … → `commit-config done`, `failed` нет | то же |
+| `release.json`: манифест, профиль, SHA членов | `080f15e…`, `core`, = пины манифеста | то же |
+| `darkfactory doctor --json` | код 0, stderr пуст, `level1: reached` | то же |
+| проверки уровня 1 | 11 из 11 `ok` (`install.pending`, `etc.schemas`, `release.active`, `release.digest`, `release.admin`, `release.inputs`, `release.perms`, `release.boundary`, `trusted.paths`, `cli.approved`, `build.user`) | то же |
+
+**Smoke точек входа** — `<релиз>/venv/<член>/bin/<точка> --help` от `df-build` из его дома без
+сети (Python релиза от root не запускался); набор точек — `expected_entrypoints` члена.
+
+| член | точки входа | macOS arm64 | Ubuntu x86_64 |
+|---|---|---|---|
+| devtools | нет (`[project.scripts]` нет, `tool.uv.package = false`) | нет консольных команд — smoke не применим | нет консольных команд — smoke не применим |
+| discovery | `discovery` | 0 | 0 |
+| discovery-toolkit | нет (`[project.scripts]` нет, `tool.uv.package = false`) | нет консольных команд — smoke не применим | нет консольных команд — smoke не применим |
+| disputatio | `disp` | 0 | 0 |
+| spec-runner | `spec-runner`, `spec-runner-init`, `spec-task` | 0, 0, 0 | 0, 0, 0 |
+| steward | `gate-check`, `review-eval`, `steward`, `steward-compile` | 0, 0, 0, 0 | 0, 0, 0, 0 |
+
+Объявленные точки входа сверены с `pyproject.toml` каждого члена на его пине (`[project.scripts]`,
+`gui-scripts` нет ни у кого, `dynamic` нет): devtools `335188f6` и discovery-toolkit
+`e5faa677` — секции нет, `tool.uv.package = false`, `[build-system]` нет; discovery
+`3ebed2d9` — `discovery = discovery.cli:main`; disputatio `920b63f4` — `disp =
+disputatio.cli:main`; steward `007d0049` — `gate-check`, `steward`, `steward-compile`,
+`review-eval` (`steward.*.cli:app`); spec-runner `c71decf7` — `spec-runner`, `spec-task`,
+`spec-runner-init`. Набор smoke совпал с объявленным у всех шести членов на обеих ОС: пустая
+запись в `live/<платформа>.json` (`"smoke": {"devtools": {}, "discovery-toolkit": {}}`) значит
+«нечего запускать», а не «прошло».
+
+**Инвентаризация `core` на пинах манифеста** (`boundary/<платформа>.json`, `core_inventory`,
+`inputs` = «pins of profile core, manifest …@080f15e…»; метод — как в разделе 8).
+
+| член | SHA | группы | lock | ожид. распр. | macOS arm64: sync / (в) / нативных | Ubuntu x86_64: sync / (в) / нативных | нативные распределения |
+|---|---|---|---|---|---|---|---|
+| devtools | `335188f6` | `governance` | без проблем | 20 | ok / 0 / 2 | ok / 0 / 2 | pyyaml, rpds_py |
+| discovery | `3ebed2d9` | — | без проблем | 2 | ok / 0 / 1 | ok / 0 / 1 | pyyaml |
+| discovery-toolkit | `e5faa677` | — | без проблем | 1 | ok / 0 / 1 | ok / 0 / 1 | pyyaml |
+| disputatio | `920b63f4` | — | без проблем | 11 | ok / 0 / 2 | ok / 0 / 2 | pydantic_core, pyyaml |
+| steward | `007d0049` | — | без проблем | 15 | ok / 0 / 2 | ok / 0 / 2 | pyyaml, rpds_py |
+| spec-runner | `c71decf7` (v5.0.0) | — | без проблем | 41 | ok / 0 / 5 | ok / 0 / 5 | cffi, cryptography, pydantic_core, pyyaml, rpds_py |
+
+`site_exists` — истина у всех 6 на обеих ОС, `distribution_problems` пусты, нативных файлов 13
+на ячейку. Против раздела 8 сменились пины devtools (`d2f569eb` → `335188f6`) и spec-runner
+(`d586fbb6` → `c71decf7`); вердикты те же. Контроль метода в том же прогоне: образец `pillow`
+даёт проблемы правила (в) — macOS 1, Linux 10.
+
+### 9.1. Раскладка `/`: команда README как процесс
+
+Прогон [40330172102](https://github.com/andrei-shtanakov/devtools/actions/runs/40330172102)
+(PR #635, голова `7b1ca8f`, рецепт Python `cd / && sudo -H … uv --no-config python install
+3.12.13 --no-bin …`), обе ячейки success; в нём же повторены и зелёные форма в процессе
+(`init` 59,9 с macOS, 47,5 с Ubuntu; doctor 11/11 `ok`; smoke как выше) и инвентаризация
+(вердикты таблицы выше без изменений). Прежние зелёные прогоны той же формы — 40326008224
+(голова `38fe574`, рецепт с `--no-bin`, без `-H`/`--no-config`) и 40322926536 (голова
+`3854073`, без `--no-bin`), те же результаты установки. Факты — `live/<платформа>-production.json`,
+`live/<платформа>-production-journal.jsonl` (журнал установки в `/`, копия `sudo -n cat`),
+`live/<платформа>-production-doctor.json`, `…-doctor-after-smoke.json`, `live/opt-host.txt`.
+
+Две формы живой установки, честно:
+
+- **в процессе над `<R>`** (выше) — сильнее проверяет мир: свежий `df-build` на тест,
+  наблюдаемые инварианты root-мира, разборка с проверкой; но `bootstrap.py` как процесс и
+  раскладку `/` не исполняет;
+- **процесс в `/`** (`tests/df/live_install.py`, шаг `live install of core (production
+  layout)`) — ровно то, что делает человек по README, на одноразовом runner-е; после него
+  `df-build` и `/opt/df` остаются (удаления на этапе 1 нет), поэтому шаг идёт **после**
+  root-прогона, а остатки до него — находка скрипта. Остатков не было на обеих ячейках
+  (`leftovers` пуст): после разборки root-прогона нет ни `/opt/df`, `/etc/df`,
+  `/var/lib/df`, `/usr/local/libexec/darkfactory`, `/usr/local/libexec/darkfactory-bootstrap`,
+  ссылки команды и дома `df-build`, ни записей пользователя и группы `df-build` — проверено
+  только это.
+
+Порядок шагов ячейки: root-прогон → `configure /opt as a supported host (owner 26.10)` →
+`live install of core (production layout)` → scope guard. Шаг `/opt` — адаптация хоста, не
+изменение df (решение владельца 26.10, после прогона 40316417187, где `init` в `/` на Ubuntu
+отказал `trusted-paths: /opt: запись для группы или всех; /opt: есть ACL`).
+
+| | macOS arm64 | Ubuntu x86_64 |
+|---|---|---|
+| остатки до установки | нет | нет |
+| `/opt` до → после | `drwxr-xr-x root wheel`, ACL нет → без изменений (шаг ничего не меняет на macOS) | `drwxrwxrwx+ root root`, ACL `default:user:runner:rwx` и др. → `drwxr-xr-x`, ACL нет (`chmod go-w`, `setfacl -b`) |
+| каталог разработчика | `/Library/Developer/CommandLineTools` | — |
+| uv: архив, sha256 (= README и опубликованная) | `uv-aarch64-apple-darwin.tar.gz`, `71ef9de8…`, `shasum -c` OK | `uv-x86_64-unknown-linux-gnu.tar.gz`, `e12c4cda…`, `sha256sum -c` OK |
+| копия uv | `/usr/local/libexec/darkfactory/bin/uv`, uid 0, `0755`, путь доверенный, `uv 0.11.23` | то же |
+| Python bootstrap | из `/`: `sudo -H /usr/local/libexec/darkfactory/bin/uv --no-config python install 3.12.13 --no-bin --install-dir /usr/local/libexec/darkfactory-bootstrap/python` → `…/cpython-3.12.13-macos-aarch64-none/bin/python3.12` (3.12.13), путь доверенный; записей root в `~/.config/uv`, `~/.cache/uv`, `~/.local/bin`, `~/.local/share/uv` пользователя runner-а нет | `/usr/bin/python3` → `python3.12` (3.12.3), путь доверенный |
+| `sudo <python> -I -B -S <чекаут>/df/bootstrap.py init …` (argv README, заполнены 3 места) | код 0: «установлен релиз 080f15e6b8fa-macos-arm64-1; команда: /opt/df/bin/darkfactory» | код 0: «… 080f15e6b8fa-linux-x86_64-1; команда: /opt/df/bin/darkfactory» |
+| журнал установки (`/var/lib/df/install`) | 26 строк, `manifest skip` → … → `commit-config done` («launched → committed»), `failed` нет | то же |
+| `release.json` | манифест `080f15e…`, `core`, SHA членов = пины | то же |
+| `sudo /opt/df/bin/darkfactory doctor --json` | код 0, stderr пуст, `level1: reached`, 11/11 `ok` | то же |
+| smoke `--help` от пользователя runner-а (uid 501 / 1001, не root), рабочий каталог вне релиза | 8/8 код 0 | 8/8 код 0 |
+| doctor после smoke | 11/11 `ok` | 11/11 `ok` |
+| `/usr/local`, `/usr/local/bin` (`local_bin`) | `0755` uid 0; `0775` uid 501 — проблемы: «владелец uid 501, не root», «запись для группы или всех» | `0755` uid 0; `0777` uid 0 — проблема: «запись для группы или всех» |
+| время шага | 79 с | 60 с |
+
+Smoke по членам — тот же набор, что в таблице выше: devtools и discovery-toolkit — «нет
+консольных команд — smoke не применим»; discovery `discovery`; disputatio `disp`; spec-runner
+`spec-runner`, `spec-runner-init`, `spec-task`; steward `gate-check`, `review-eval`,
+`steward`, `steward-compile` — все код 0 на обеих ОС.
+
+Наблюдения:
+
+- `sudo uv python install` на macOS: `sudo` сохраняет `HOME` пользователя
+  (`/Users/runner`). Без `--no-bin` (прогон 40322926536) uv пытался положить ссылку
+  `python3.12` в его `~/.local/bin` (не удалось: там уже была ссылка раннего шага workflow).
+  Рецепт теперь закрывает и остальное (решения 26.10; оба флага приняты uv 0.11.23):
+  `--no-config` — ни пользовательская конфигурация человека, ни конфигурация проекта над
+  текущим каталогом (`cd /`) не читаются; `sudo -H` — кеш и прочие каталоги `HOME` root-а.
+  Скрипт проверяет итог: в uv-каталогах пользователя runner-а нет ни одной записи с
+  владельцем root (`root_in_user_dirs` пуст); предупреждения uv нет. Чтение подложенной
+  конфигурации не испытывалось (её на runner-е нет) — это гарантия флага, а не замер.
+- Форма со ссылкой `/usr/local/bin/darkfactory` **не исполнена**: на обоих runner-ах
+  `/usr/local/bin` не проходит политику доверенных путей (строка `local_bin` таблицы), ссылки
+  нет, установщик напечатал полный путь, и команда вызывалась как
+  `sudo /opt/df/bin/darkfactory` — как README и описывает.

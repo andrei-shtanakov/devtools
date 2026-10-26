@@ -72,6 +72,7 @@ from df.boundary import (
 from df.digest import check_links, tree_digest
 from df.inputs import installed_distributions
 from df.journal import StepFailed, read_journal
+from df.manifest import RepoPin
 from df.markers import marker_env
 from df.paths import Layout
 from df.sources import UnsupportedLock
@@ -85,6 +86,7 @@ from tests.df.dist_records import (
 from tests.df.install_world import CLEAN_PASS
 from tests.df.observe import Observation, observe_root_access
 from tests.df.root_world import (
+    CORE_MANIFEST,
     PIN_NAME,
     PYTHON,
     ROLE_ENV,
@@ -95,6 +97,7 @@ from tests.df.root_world import (
     RootWorld,
     assert_committed,
     build_account,
+    core_profile,
     current_id,
     infra,
     write_evidence,
@@ -1136,18 +1139,6 @@ THRESHOLD_MAX = 900
 #: A wheel with bundled native libraries (manylinux `pillow.libs`, macOS
 #: `PIL/.dylibs`); cffi 1.17.1 bundles none (CI run 40223595064).
 NATIVE_WHEEL = "pillow==11.0.0"
-#: Inputs of the 26.10 inventory of profile `core` (owner decision D1,
-#: Task 14-B): each member's master of 26.10 and its groups (spec 3.1, plan
-#: Task 1: only `devtools` has one); no manifest pins them yet.
-CORE_PINS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    ("devtools", "d2f569eb668b1ba2e04a6b84e8d1cfd17dc93e81", ("governance",)),
-    ("discovery", "3ebed2d90580510be14c6d9d64d19ca8f8dca56d", ()),
-    ("discovery-toolkit", "e5faa6776bbec08b5e6c05517a8d69ee10772185", ()),
-    ("disputatio", "920b63f489ddd6af150a3396b847ae5bba65b22e", ()),
-    ("steward", "007d00490599fa79484df648451988bf8939f25f", ()),
-    ("spec-runner", "d586fbb683158922bfd20091b6d4ed58f4583bfa", ()),
-)
-CORE_URL = "https://github.com/andrei-shtanakov/{}"
 #: uv/git stderr of a network failure: the inventory fails, never records it.
 NETWORK_MARKERS = (
     "error sending request",
@@ -1377,34 +1368,32 @@ class BoundaryFacts:
 
     def _core_inventory(self, env: Any, scratch: Path) -> dict[str, Any]:
         """Rule (в) over the exact locked artifacts of profile `core` (owner
-        decision D1): each member fetched by SHA as `build.py` does, df's own
+        decision D1) at the pins of `CORE_MANIFEST` (`core_profile`: df's own
+        fetch and parser): each member fetched by SHA as `build.py` does, df's own
         lock verdicts on its bytes, the installer's `uv sync` form into a
         venv of the release's Python (network, as `df-build`), then
         `boundary._NativeCheck` over `site-packages` grouped by distribution.
         Data only: a sync failure is a fact, a network error fails."""
+        profile = core_profile()
         cache = _builder_dir(scratch / "core-cache")
         members = {
-            name: self._core_member(env, scratch, cache, name, sha, groups)
-            for name, sha, groups in CORE_PINS
+            pin.name: self._core_member(env, scratch, cache, pin)
+            for pin in profile.repos
         }
+        repo, sha = CORE_MANIFEST
         return {
-            "inputs": "master of each member, 26.10 (no manifest yet)",
-            "python": PYTHON,
+            "inputs": f"pins of profile core, manifest {repo}@{sha}",
+            "python": profile.python,
             "members": members,
         }
 
     def _core_member(
-        self,
-        env: Any,
-        scratch: Path,
-        cache: Path,
-        name: str,
-        sha: str,
-        groups: tuple[str, ...],
+        self, env: Any, scratch: Path, cache: Path, pin: RepoPin
     ) -> dict[str, Any]:
+        name, sha, groups = pin.name, pin.sha, pin.groups
         work = _builder_dir(scratch / f"core-{name}")
         role = _core_env(work, cache, self.installed.world.uv)
-        src = _fetch_by_sha(work, role, name, sha)
+        src = _fetch_by_sha(work, role, pin)
         lock, want = _lock_verdicts(name, src, groups)
         out: dict[str, Any] = {"sha": sha, "groups": list(groups), "lock": lock}
         if "unreadable" in lock:
@@ -1440,15 +1429,17 @@ class BoundaryFacts:
         return out
 
 
-def _fetch_by_sha(work: Path, role: Mapping[str, str], name: str, sha: str) -> Path:
-    """`build.py`'s route for one member: init, shallow fetch of `sha` from
-    the public URL, `rev-parse FETCH_HEAD` == `sha`, archive, extract into
-    `<work>/src` (as `df-build`, network). A failure is infrastructure."""
+def _fetch_by_sha(work: Path, role: Mapping[str, str], pin: RepoPin) -> Path:
+    """`build.py`'s route for one member: init, shallow fetch of the pin's
+    `sha` from its manifest URL, `rev-parse FETCH_HEAD` == `sha`, archive,
+    extract into `<work>/src` (as `df-build`, network). A failure is
+    infrastructure."""
+    name, sha = pin.name, pin.sha
     git, repo, src = str(SYSTEM_GIT), str(work / "repo"), work / "src"
     archive = str(work / "src.tar")
     steps = [
         ("init", [git, "init", "-q", repo]),
-        ("fetch", build_mod.git_fetch_argv(git, repo, CORE_URL.format(name), sha)),
+        ("fetch", build_mod.git_fetch_argv(git, repo, pin.url, sha)),
         ("rev-parse", build_mod.git_rev_parse_argv(git, repo)),
         ("archive", build_mod.git_archive_argv(git, repo, archive, sha)),
         ("mkdir", ["/bin/mkdir", "-p", str(src)]),

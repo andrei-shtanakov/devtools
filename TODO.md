@@ -2915,18 +2915,28 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 > мержем.
 
 - [ ] Установщик df (команда darkfactory), этап 1 (конфигурация, установка, модели): план `docs/superpowers/plans/2026-10-16-df-installer-stage1.md` @owner:github:andrei-shtanakov @id:df-installer-stage1 @epic:eco.dark-factory
-- [ ] Живая установка профиля `core` на macOS arm64 и Ubuntu x86_64: проверка совместимости пинов и lock-файлов (`uv sync --locked` каждого члена на его SHA), до установки — повтор инвентаризации нативных артефактов `core` правилом (в) (`CORE_PINS`, Task 14-B) на пинах манифеста; закрывает приёмку этапа 1 по §10 @owner:github:andrei-shtanakov @id:df-installer-stage1-live @epic:eco.dark-factory @blocked_by:todo://ai-orchestrators-workspace/df-manifest-profiles
-      Бывший блокер `disp --help` (`anyio`) решён disputatio#160 (920b63f; disputatio#159
-      закрыт): пин disputatio в `core` — 920b63f или позже. Инвентаризация 26.10 (прогон
-      40277653777) сделана на master членов, не на пинах манифеста: 0 проблем правила (в) у
-      всех 6 членов на обеих ОС; правило (в) не меняется (решение владельца 26.10), поэтому
-      `CORE_PINS` переставить на пины манифеста и прогнать `df-stage1` заново. Вердикт —
-      `core_inventory` в `boundary/<platform>.json`; зелёный прогон необходим, но не
-      достаточен.
+- [ ] Живая установка профиля `core` на macOS arm64 и Ubuntu x86_64 по манифесту зонтика (`080f15e`, ai-orchestrators-workspace#52) в CI `df-stage1`, в двух формах — в раскладке `/` командой README как процессом и в root-мире `<R>` в процессе; в обеих `doctor --json` — уровень 1, все проверки `ok`, `--help` каждой объявленной точки входа не от root; до неё — повтор инвентаризации нативных артефактов `core` правилом (в) на пинах манифеста; закрывает приёмку этапа 1 по §10 @owner:github:andrei-shtanakov @id:df-installer-stage1-live @epic:eco.dark-factory
+      Манифест доставлен: ai-orchestrators-workspace#52 влит (`080f15e`), #51 закрыт,
+      impresario — отдельно (ai-orchestrators-workspace#53). Инвентаризация больше не держит
+      рукописных пинов: `core_profile()` (`tests/df/root_world.py`) читает профиль из
+      `CORE_MANIFEST` собственными `fetch_manifest`/`parse_profile`; сбой сети — падение
+      теста, не пустой замер; вердикт — `core_inventory` в `boundary/<platform>.json`.
+      Форма `/` (обязательная, решение 26.10) — `tests/df/live_install.py` после root-прогона
+      и шага хоста `/opt` (`chmod go-w`, `setfacl -b`, только Linux): подготовка по README
+      (uv 0.11.23 по опубликованной sha256; на macOS Python bootstrap рецептом README
+      `sudo -H … uv --no-config python install 3.12.13 --no-bin`), `sudo …/bootstrap.py init`,
+      `sudo darkfactory doctor --json`, smoke от пользователя runner-а; evidence
+      `live/<платформа>-production*.json`, `…-production-journal.jsonl`, `live/opt-host.txt`.
+      Форма `<R>` — `tests/df/test_acceptance_root_live.py`, smoke от `df-build`; evidence
+      `live/<платформа>.json`, `…-doctor.json`, `journals/live-core.jsonl`. Зелёный прогон
+      необходим, но не достаточен — пункт закрывает контроллер по evidence (§9, §9.1
+      `docs/evidence/2026-10-26-df-stage1-acceptance.md`).
 - [ ] Смена закреплённого `uv`, Python профиля или пина члена `core`: перемерить то, что закреплено за прежним значением @owner:github:andrei-shtanakov @id:df-installer-pin-drift @epic:eco.dark-factory @trigger:"смена UV_PINNED_VERSION, Python профиля или пина члена core в манифесте"
       `uv`: замер `UV_PROJECT_KEYS_<версия>` (дополнение A1/A2 предполётной проверки Task 7a)
       и таблица записи пути корня в `tests/df/fixtures/locks/SOURCES.md`, переименовать
       константу под новую версию, перезахватить эталоны. `uv` или Python профиля — заново
       измерить `TCLTK_REMOVED_<версия Python>` (спека §3.4) на обоих ключах. Пин члена
-      `core` — повтор инвентаризации нативных артефактов (`CORE_PINS`, Task 14-B) до
-      установки: решение о правиле (в) принято только для замеренных входов.
+      `core` — новый коммит манифеста: поднять `CORE_MANIFEST` в `tests/df/root_world.py`
+      (`core_profile()` сам разрешит новые пины) и прогнать `df-stage1` — инвентаризация
+      нативных артефактов (Task 14-B) и живая установка до установки на хосты: решение о
+      правиле (в) принято только для замеренных входов.
