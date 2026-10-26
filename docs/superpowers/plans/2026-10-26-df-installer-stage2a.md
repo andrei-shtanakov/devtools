@@ -6,7 +6,8 @@
 
 **Goal:** `sudo darkfactory roles setup` создаёт роли ОС `df-exec`, `df-review`,
 `df-publisher`, файл `/etc/sudoers.d/df` и неизменяемые обёртки `/opt/df/libexec/`.
-Человек регистрирует прогон через `sudo /opt/df/bin/df-run-start`, агенты обращаются к
+Человек регистрирует прогон командой `darkfactory run start` (она вызывает
+`sudo /opt/df/bin/df-run-start` из `/`, решение 12), агенты обращаются к
 издателю `df-publish` только через `sudo` по точным командам. Издатель исполняет пять
 операций протокола §5. Мерж в 2a доходит до маршрутизации вида и отказывает
 `precheck_unavailable`: живой мерж — этап 2b, после части B. Приёмка — таблица §4.5 без
@@ -597,7 +598,8 @@ run` в sudoers нет: его вызывает `df-run-start` после сбр
   (`managed_context`), отпечаток авторизации роли; затем `probe_status` последней записи
   против этих фактов и против пина (`config_hash`, версия харнесса, model ID). В v1 —
   всегда «не поддерживается: изоляция не подтверждена»;
-- `launch_release.check_report() -> dict[str, object]` — `uid`, `euid`, `gid`,
+- `launch_release.check_report() -> dict[str, object]` — `nonce` (128 случайных бит),
+  `uid`, `euid`, `gid`,
   `groups`, `env` (имена), `cwd`, `fds` (открытые дескрипторы > 2), `denied` (результат
   попыток открыть фиксированный список чужих путей: `errno` по каждому).
 
@@ -704,7 +706,9 @@ run` в sudoers нет: его вызывает `df-run-start` после сбр
 - `Outcome = Literal["done", "refused", "unknown", "stale_snapshot"]` (решение 14);
   `Response(schema="df/publisher-response/v1", outcome, reason: str | None,
   result: Mapping[str, object], evidence: Mapping[str, object])`; вывод — одна строка
-  JSON; `result` у `perimeter-status` — `{state: blocked|clear|unavailable, reason,
+  JSON; `evidence.response_nonce` — 128 случайных бит, порождается издателем на каждый
+  ответ и есть **только** в stdout (не в запросе, не в журнале издателя) — маркер
+  поведенческой проверки I/O-журнала sudo (r3 N3); `result` у `perimeter-status` — `{state: blocked|clear|unavailable, reason,
   snapshot_sha, last_epoch}`; `parse_response(bytes) -> Response` — для клиентов
   (round-trip-тест всех исходов и состояний);
 - `main.ADMIN_OPERATIONS = frozenset({"self-check"})` — отправитель root (`SUDO_UID == 0`),
@@ -760,7 +764,7 @@ run` в sudoers нет: его вызывает `df-run-start` после сбр
 Операция `self-check` (решение 6): запрос `{schema, request_id}`; **без** `run_id` —
 порядок для неё: отправитель → разбор → резервирование → операция (`check_run` не
 вызывается, r2 N3); ответ `done` с `result = {installations: [{id, account,
-repository_ids, permissions}], problems}` из `github.self_check`; результат не
+repository_ids, permissions}], problems}` — `SelfCheckResult.to_json()`; результат не
 воспроизводится при повторе. Для модельных операций неизвестный `run_id` —
 `refused: run_unknown`; этим пользуется `doctor` (проверка «издатель отвечает» без
 зарегистрированных прогонов).
@@ -800,9 +804,14 @@ repository_ids, permissions}], problems}` из `github.self_check`; резуль
   `repositories` равна `total_count` последней страницы. Ошибка любой страницы,
   превышение предела, неожиданная форма — `GitHubUnavailable`, не частичный список
   (r2 N9);
-- `self_check(products, app_id, key, *, openssl, transport) -> list[str]` — репо каждой
-  установки App ⊆ `repository_id` продуктов с этим `app_id`; иначе проблема
-  `app_installation_outside_products: <id>` (решение 10);
+- `SelfCheckResult(installations: tuple[Installation, ...], problems: tuple[str, ...])`,
+  `Installation(id: int, account: str, repository_ids: tuple[int, ...],
+  permissions: Mapping[str, str])`; `to_json()`/`from_json()` — сериализация для ответа
+  `self-check` и разбор в `doctor` (r3 N5);
+- `self_check(products, app_id, key, *, openssl, transport) -> SelfCheckResult` — все
+  установки App с их репозиториями и правами; проблема
+  `app_installation_outside_products: <id>`, если репо установки не ⊆ `repository_id`
+  продуктов с этим `app_id` (решение 10);
 - `call(method, path, token, body=None, *, transport) -> tuple[int, object]` — ответы 5xx
   и сетевые ошибки → `GitHubUnavailable`; 4xx → `GitHubRefused(status, message)`.
 
@@ -812,7 +821,10 @@ repository_ids, permissions}], problems}` из `github.self_check`; резуль
   (`HTTPS_PROXY` в окружении не используется); `test_self_check_outside_products`;
   `test_5xx_is_unavailable`; `test_pagination_all_pages` и
   `test_pagination_error_is_unavailable` (вторая страница 502 → не успех);
-  `test_total_count_mismatch` (только `installation_repos`); `test_installations_is_array`
+  `test_total_count_mismatch` (только `installation_repos`);
+  `test_self_check_result_roundtrip` (цепочка `self_check` → `Response` → `parse_response`
+  → `SelfCheckResult.from_json` → проверка `github.app` Task 13: успех, нет установки
+  продукта, недостаточные права — без заранее написанного JSON); `test_installations_is_array`
   (объект вместо массива → `GitHubUnavailable`); `test_token_expiry_bounds`; `test_run_with_input_signs`
   (изменение одного байта нагрузки ломает `openssl dgst -verify`).
 - [ ] **Step 2–4.** **Step 5: Commit** `feat(df): GitHub App client for the publisher`
@@ -933,9 +945,22 @@ product_unknown`); перед каждой операцией — `self_check` (
     базы, ни отметки; пишет схему, `admission = ready`, затем отметку;
   - `open_db` **никогда не создаёт**: нет базы при отметке → `unavailable: lost`
     (обращение к человеку); нет ни того ни другого → `unavailable: not_initialized`;
-  - `darkfactory perimeter restore --from PATH | --empty` (root, писатель; копия
-    проверяется `integrity_check` и инвариантами до установки) ставит базу на место с
-    `admission = restored_pending`;
+  - **барьер базы** (r3 N1): файл `perimeter/db.lock` (`df-publisher`, `0600`); каждый
+    процесс издателя берёт `flock(LOCK_SH)` **до** `sqlite3.connect` и держит до
+    закрытия соединения; `create_db` и восстановление — `LOCK_EX`;
+  - `darkfactory perimeter restore --from PATH | --empty` (root, писатель) исполняет
+    восстановление **от `df-publisher`** (`run_as`, данные копии — через stdin
+    `run_with_input`, каталог `0700` роли) по протоколу:
+    1. копия пишется во временный файл каталога и проверяется `integrity_check` и
+       инвариантами, `admission` в ней ставится `restored_pending` — всё до барьера;
+    2. `flock(LOCK_EX)` с ожиданием ≤ 30 с (иначе отказ «база занята», ничего не
+       меняется) — после него ни одного открытого соединения издателя нет;
+    3. если у прежней базы есть горячий журнал `events.sqlite-journal`, прежняя база
+       открывается и закрывается под тем же `LOCK_EX`, чтобы SQLite откатил журнал;
+       затем журнала быть не должно (иначе отказ);
+    4. `rename` временного файла на `events.sqlite`, `fsync` каталога, снятие
+       `LOCK_EX`; сбой до шага 4 оставляет прежнюю базу, после — новую с
+       `restored_pending`;
   - `restored_pending` при открытии: источник эпох доступен → в одной транзакции
     консервативное `registered(E)` для **каждого** корня из множества «корни строк
     `events` ∪ корень текущей привязки» (источник `db_restore`) и `admission = ready`;
@@ -988,7 +1013,13 @@ product_unknown`); перед каждой операцией — `self_check` (
   устаревшая копия без последнего события → `restored_pending` → при доступных эпохах
   консервативное событие на каждый корень → `blocked` до следующей эпохи);
   `test_restore_interrupted` (сбой между вставками → после повторного открытия либо всё,
-  либо ничего — одна транзакция); `test_restore_pending_without_epochs_unavailable`; клиентский номер
+  либо ничего — одна транзакция); `test_restore_pending_without_epochs_unavailable`;
+  `test_restore_waits_for_open_connection` (процесс A открыл базу и стоит на барьере;
+  `restore` ждёт; A закрывается; `restore` завершается; новый процесс B видит только
+  восстановленную базу с `restored_pending`); `test_restore_timeout_changes_nothing`;
+  `test_restore_crash_points` (сбой на каждом шаге 1–4 → прежняя база либо новая с
+  `restored_pending`, никогда `clear` без допуска; подтверждённые транзакции прежней базы
+  на месте, если остался прежний файл); `test_restore_with_hot_journal`; клиентский номер
   эпохи — поля нет в схеме; 10 000 событий — `perimeter_status` укладывается в
   `2.0` с на раннере (замер пишется в вывод теста); `test_pragmas_effective`
   (на macOS `fullfsync == 1`); `test_no_binding_refuses`; `test_client_new_request_id_after_stale`;
@@ -1122,7 +1153,7 @@ evidence, r1 N11) → для отзыва — фикстурная правка 
 | `run start` при отозванном `current` | `df-run-start` (код 2, причина) | при `allowed`: запись есть, затем отказ `df-launch run` «доступ к моделям не подтверждён» |
 | повтор `perimeter-status` | — : каждый раз заново `unavailable/no_binding` (журнал — две строки) | — |
 | тот же `request_id` с другим содержимым | издатель (`request_id_reused`) | первый запрос — ответ |
-| I/O-журнал sudo (r2 N2), четыре конфигурации во втором файле `sudoers.d` на время теста: (а) глобальный `log_output`; (б) `Defaults!<df-publish> log_output, iolog_dir=<другой>`; (в) `log_servers=127.0.0.1:30344`; (г) только `log_input` | (а), (г): уникальный маркер stdout ответа `perimeter-status` от `df-exec` (поле `evidence.request_id`) не найден ни в одном файле под `iolog_dir` любого вида, `io_log_problems` пуст; (б), (в): `io_log_problems` — «нарушено» | в (а) маркер stdout `df-launch … check` в журнале **найден** |
+| I/O-журнал sudo (r2 N2), четыре конфигурации во втором файле `sudoers.d` на время теста: (а) глобальный `log_output`; (б) `Defaults!<df-publish> log_output, iolog_dir=<другой>`; (в) `log_servers=127.0.0.1:30344`; (г) только `log_input` | (а), (г): `evidence.response_nonce` ответа `perimeter-status` от `df-exec` не найден в потоках `stdout`, `stderr`, `ttyout` ни одной сессии под `iolog_dir` (файлы сессии разбираются по типу потока; сжатые gzip — распаковываются; нераспознанный файл — провал «инфраструктура»), `io_log_problems` пуст; (б), (в): `io_log_problems` — «нарушено» | (а): маркер `check_report.nonce`, напечатанный `df-launch … check`, **найден** в `stdout` его сессии; (г): `request_id` запроса **найден** в потоке `stdin` сессии `df-publish` — журнал stdin работает, stdout — нет |
 
 Переносы этапа 1:
 - `test_run_start_no_release_code_before_drop` — sentinel-интерпретатор релиза
@@ -1159,9 +1190,18 @@ macos-15 / ubuntu-24.04, `if: github.ref == 'refs/heads/master'`. Шаги: по
 → установка **проверяемой реализации** (r2 N7): фикстурный профиль `root_world` из одного
 члена `devtools` — bare-репо, собранное из чекаута workflow на коммите `github.sha`
 (тот же механизм, что `installed_world` этапа 1, но в раскладке `/`); до любых операций
-с секретами сверка: `admin_digest` установленного релиза равен `tree_digest` каталога
-`df/` чекаута, а `release.json` называет `github.sha`; расхождение — провал
-«инфраструктура»; обе идентичности — в evidence. Манифест зонтика здесь не
+с секретами сверка происхождения (r3 N2) — две идентичности, не приравниваемые друг к
+другу: `source_sha = github.sha` (чекаут workflow) и `fixture_sha` (коммит фикстурного
+репо, который ставит установка). Проверки: (1) `git -C <fixture> ls-tree -r
+<fixture_sha> -- df/` и `git -C <checkout> ls-tree -r <source_sha> -- df/` дают
+одинаковые пары «путь, blob»; (2) `release.json` называет член `devtools` с
+`sha = fixture_sha`; (3) `admin_digest` записи `releases.toml` равен
+`admin.expected_admin_digest(<checkout>/df)` — новая функция `df/admin.py`: копирует
+`df/` во временный `<tmp>/df` теми же правилами, что `install_admin`, и считает
+`tree_digest(<tmp>)` — та же область хеширования, что у `admin_digest`. Расхождение —
+провал «инфраструктура»; обе идентичности и digest — в evidence; тест
+`test_live_provenance`: изменённый файл `df/`, другой `source_sha`, подменённый
+`fixture_sha` → провал до чтения секретов. Манифест зонтика здесь не
 используется: его пин devtools старше 2a → `roles setup` → `products.toml` стенда из
 переменных → `setup-agent app-key`/`machine-token` из секретов (файлы во `RUNNER_TEMP`,
 `0600`, удаляются шагом `always()`) → фикстурная запись прогона (как Task 14, отмечена в
@@ -1177,14 +1217,17 @@ evidence: штатный `run start` в v1 останавливается на �
 3. **сверка после потерянного ответа**: root удаляет `results/<key>.json` (имитация сбоя
    после действия, до записи результата), повтор → `done` с тем же `review_id`, второго
    `POST` нет;
-4. **смена head** (r2 N8, B §4.5): (а) запрос с прежним `head_sha` после пуша →
-   `refused: pr_state`; (б) окно между чтением издателя и публикацией: издатель опирается
-   на свойство GitHub «ревью с `commit_id = X` привязано к X» — его стенд проверяет
-   напрямую: после пуша нового коммита тест публикует `COMMENT`-ревью полным токеном
-   установки с `commit_id` = прежний SHA; GitHub сохраняет `commit_id` прежним, а
-   список ревью нового head его не содержит. Порядок операций внутри издателя в этом окне
-   (чтение → публикация без повторного чтения, `commit_id` из запроса) — unit-тест Task 9
-   с барьером транспорта `test_publish_review_head_moves_between_get_and_post`;
+4. **смена head** (r2 N8, r3 N4, B §4.5): (а) запрос с прежним `head_sha` после пуша →
+   `refused: pr_state`; (б) **окно между чтением и публикацией — через настоящий
+   издатель**: на время этой строки `api_base` стенда — локальный прокси
+   `tests/df/gate_proxy.py` на `127.0.0.1` (тот же root-ключ `publisher.toml`, что в
+   Task 14; в evidence — «нештатный API, прокси к api.github.com»), который передаёт
+   запросы на `https://api.github.com` без изменений и **задерживает** первый
+   `POST …/pulls/{n}/reviews` до сигнала теста. Порядок: `df-review` → `publish-review`
+   (настоящий sudo) → издатель делает `GET` PR (head = X) → прокси держит `POST` → тест
+   пушит коммит Y от machine user → прокси пропускает `POST` → ответ издателя `done`,
+   ревью `commit_id = X`; проверка по `commit_id` (не по общему списку ревью PR): ревью
+   с `commit_id = Y` от бота App нет. Затем `api_base` возвращается к штатному;
 5. `df-review` → `read-token` → `git --config-env=http.extraHeader=DF_READ_AUTH clone`
    приватного стенда проходит. Тем же токеном: `git push` новой ветки, `POST …/reviews`
    (`COMMENT`), `PATCH …/pulls/{n}` (заголовок), `PUT …/pulls/{n}/merge` — отказ GitHub
