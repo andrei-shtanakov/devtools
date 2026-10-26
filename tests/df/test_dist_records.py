@@ -149,6 +149,20 @@ def test_vacuity_fails_rule_v_error_of_a_synced_member() -> None:
     assert vacuity_problems(members) == ["a: правило (в) не исполнено: OSError: boom"]
 
 
-def test_vacuity_zero_natives_with_a_failed_sync_is_a_fact() -> None:
-    members = {"a": _member(0), "b": {"sync": {"code": 1}}}
+def test_vacuity_fails_zero_natives_among_synced_despite_a_failed_sync() -> None:
+    """PR #633 review: a failed sync no longer turns the zero-natives check
+    off — five members fail, one pure-Python member syncs: nothing measured."""
+    members: dict[str, dict[str, object]] = {
+        f"f{i}": {"sync": {"code": 1}} for i in range(5)
+    }
+    members["pure"] = _member(0, natives=0)
+    assert vacuity_problems(members) == [
+        "инвентаризация core: ни одного нативного файла"
+    ]
+
+
+def test_vacuity_failed_sync_with_measured_natives_is_a_fact() -> None:
+    """A failed sync stays a recorded fact when the synced members did
+    measure native files."""
+    members = {"a": _member(0, natives=1), "b": {"sync": {"code": 1}}}
     assert vacuity_problems(members) == []

@@ -1405,8 +1405,14 @@ class BoundaryFacts:
         work = _builder_dir(scratch / f"core-{name}")
         role = _core_env(work, cache, self.installed.world.uv)
         src = _fetch_by_sha(work, role, name, sha)
-        lock, want = _lock_verdicts(src, groups)
+        lock, want = _lock_verdicts(name, src, groups)
         out: dict[str, Any] = {"sha": sha, "groups": list(groups), "lock": lock}
+        if "unreadable" in lock:
+            out["sync"] = {
+                "code": None,
+                "skipped": f"не запускался: {lock['unreadable']}",
+            }
+            return out
         venv = work / "venv"
         sync = [str(self.installed.world.uv), "sync", "--locked", "--no-editable"]
         sync += ["--no-default-groups", *(a for g in groups for a in ("--group", g))]
@@ -1458,19 +1464,34 @@ def _fetch_by_sha(work: Path, role: Mapping[str, str], name: str, sha: str) -> P
     return src
 
 
+def test_lock_verdicts_missing_lock_is_a_problem(tmp_path: Path) -> None:
+    """PR #633 review: a member without `uv.lock` is a recorded problem
+    `<repo>: <error>` with `unreadable` set (its sync is skipped), not an
+    exception that loses the evidence."""
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\n')
+    lock, want = _lock_verdicts("m", tmp_path, ())
+    assert want is None
+    assert lock["unreadable"] == lock["uv_config_problems"][0]
+    assert lock["unreadable"].startswith("m: ") and "uv.lock" in lock["unreadable"]
+
+
 def _lock_verdicts(
-    src: Path, groups: tuple[str, ...]
+    name: str, src: Path, groups: tuple[str, ...]
 ) -> tuple[dict[str, Any], frozenset[lockset.ExpectedDist] | None]:
     """df's pre-build verdicts on a member's bytes: `uv_config_problems`
     (with `lock_layout_problems`) and the walk of `expected_distributions`
-    for this platform and the release's Python (its set, or `None`)."""
+    for this platform and the release's Python (its set, or `None`). A
+    missing or unreadable file is a problem `<repo>: <error>`, as in
+    `install.uv_config_refusal`, and the key `unreadable` (no sync)."""
     uv_toml = src / "uv.toml"
-    lock = (src / "uv.lock").read_bytes()
-    problems = lockset.uv_config_problems(
-        (src / "pyproject.toml").read_bytes(),
-        uv_toml.read_bytes() if uv_toml.exists() else None,
-        lock,
-    )
+    try:
+        lock = (src / "uv.lock").read_bytes()
+        pyproject = (src / "pyproject.toml").read_bytes()
+        uv_config = uv_toml.read_bytes() if uv_toml.exists() else None
+    except OSError as exc:
+        problem = f"{name}: {exc}"
+        return {"uv_config_problems": [problem], "unreadable": problem}, None
+    problems = lockset.uv_config_problems(pyproject, uv_config, lock)
     try:
         want = lockset.expected_distributions(
             lock, groups=groups, env=marker_env(PLATFORM, PYTHON), root_dir=src

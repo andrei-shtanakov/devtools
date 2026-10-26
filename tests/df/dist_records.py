@@ -65,7 +65,7 @@ def dist_wheels(site: Path) -> dict[str, dict[str, Any]]:
 def vacuity_problems(members: Mapping[str, Mapping[str, Any]]) -> list[str]:
     """Why an inventory measured nothing: no member synced, a member synced
     without a `site-packages` or with rule (в) failing to run, or no native
-    file at all once every member synced."""
+    file at all among the synced members (whether or not the others synced)."""
     synced = {n: m for n, m in members.items() if m["sync"]["code"] == 0}
     if members and not synced:
         return ["инвентаризация core: ни один член не синхронизирован"]
@@ -79,9 +79,8 @@ def vacuity_problems(members: Mapping[str, Mapping[str, Any]]) -> list[str]:
         for n, m in synced.items()
         if "error" in m.get("rule_v", {})
     ]
-    if synced and len(synced) == len(members):
-        if sum(m["native_count"] for m in synced.values()) == 0:
-            problems.append("инвентаризация core: ни одного нативного файла")
+    if synced and sum(m["native_count"] for m in synced.values()) == 0:
+        problems.append("инвентаризация core: ни одного нативного файла")
     return problems
 
 
