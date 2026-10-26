@@ -576,11 +576,14 @@ disputatio.cli:main`; steward `007d0049` — `gate-check`, `steward`, `steward-c
 
 ### 9.1. Раскладка `/`: команда README как процесс
 
-Прогон [40326008224](https://github.com/andrei-shtanakov/devtools/actions/runs/40326008224)
-(PR #635, голова `38fe574`, рецепт Python с `--no-bin`), обе ячейки success; в нём же
-повторены и зелёные форма в процессе (`init` 54,3 с macOS, 48,7 с Ubuntu; doctor 11/11 `ok`;
-smoke как выше) и инвентаризация (вердикты таблицы выше без изменений). Предыдущий зелёный
-прогон той же формы без `--no-bin` — 40322926536 (голова `3854073`), те же результаты. Факты — `live/<платформа>-production.json`,
+Прогон [40330172102](https://github.com/andrei-shtanakov/devtools/actions/runs/40330172102)
+(PR #635, голова `7b1ca8f`, рецепт Python `cd / && sudo -H … uv --no-config python install
+3.12.13 --no-bin …`), обе ячейки success; в нём же повторены и зелёные форма в процессе
+(`init` 59,9 с macOS, 47,5 с Ubuntu; doctor 11/11 `ok`; smoke как выше) и инвентаризация
+(вердикты таблицы выше без изменений). Прежние зелёные прогоны той же формы — 40326008224
+(голова `38fe574`, рецепт с `--no-bin`, без `-H`/`--no-config`) и 40322926536 (голова
+`3854073`, без `--no-bin`), те же результаты установки. Факты — `live/<платформа>-production.json`,
+`live/<платформа>-production-journal.jsonl` (журнал установки в `/`, копия `sudo -n cat`),
 `live/<платформа>-production-doctor.json`, `…-doctor-after-smoke.json`, `live/opt-host.txt`.
 
 Две формы живой установки, честно:
@@ -609,13 +612,15 @@ smoke как выше) и инвентаризация (вердикты таб�
 | каталог разработчика | `/Library/Developer/CommandLineTools` | — |
 | uv: архив, sha256 (= README и опубликованная) | `uv-aarch64-apple-darwin.tar.gz`, `71ef9de8…`, `shasum -c` OK | `uv-x86_64-unknown-linux-gnu.tar.gz`, `e12c4cda…`, `sha256sum -c` OK |
 | копия uv | `/usr/local/libexec/darkfactory/bin/uv`, uid 0, `0755`, путь доверенный, `uv 0.11.23` | то же |
-| Python bootstrap | `sudo …/uv python install 3.12.13 --no-bin --install-dir /usr/local/libexec/darkfactory-bootstrap/python` → `…/cpython-3.12.13-macos-aarch64-none/bin/python3.12` (3.12.13), путь доверенный | `/usr/bin/python3` → `python3.12` (3.12.3), путь доверенный |
+| Python bootstrap | из `/`: `sudo -H /usr/local/libexec/darkfactory/bin/uv --no-config python install 3.12.13 --no-bin --install-dir /usr/local/libexec/darkfactory-bootstrap/python` → `…/cpython-3.12.13-macos-aarch64-none/bin/python3.12` (3.12.13), путь доверенный; записей root в `~/.config/uv`, `~/.cache/uv`, `~/.local/bin`, `~/.local/share/uv` пользователя runner-а нет | `/usr/bin/python3` → `python3.12` (3.12.3), путь доверенный |
 | `sudo <python> -I -B -S <чекаут>/df/bootstrap.py init …` (argv README, заполнены 3 места) | код 0: «установлен релиз 080f15e6b8fa-macos-arm64-1; команда: /opt/df/bin/darkfactory» | код 0: «… 080f15e6b8fa-linux-x86_64-1; команда: /opt/df/bin/darkfactory» |
+| журнал установки (`/var/lib/df/install`) | 26 строк, `manifest skip` → … → `commit-config done` («launched → committed»), `failed` нет | то же |
 | `release.json` | манифест `080f15e…`, `core`, SHA членов = пины | то же |
 | `sudo /opt/df/bin/darkfactory doctor --json` | код 0, stderr пуст, `level1: reached`, 11/11 `ok` | то же |
 | smoke `--help` от пользователя runner-а (uid 501 / 1001, не root), рабочий каталог вне релиза | 8/8 код 0 | 8/8 код 0 |
 | doctor после smoke | 11/11 `ok` | 11/11 `ok` |
-| время шага | 68 с | 62 с |
+| `/usr/local`, `/usr/local/bin` (`local_bin`) | `0755` uid 0; `0775` uid 501 — проблемы: «владелец uid 501, не root», «запись для группы или всех» | `0755` uid 0; `0777` uid 0 — проблема: «запись для группы или всех» |
+| время шага | 79 с | 60 с |
 
 Smoke по членам — тот же набор, что в таблице выше: devtools и discovery-toolkit — «нет
 консольных команд — smoke не применим»; discovery `discovery`; disputatio `disp`; spec-runner
@@ -627,10 +632,13 @@ Smoke по членам — тот же набор, что в таблице в�
 - `sudo uv python install` на macOS: `sudo` сохраняет `HOME` пользователя
   (`/Users/runner`). Без `--no-bin` (прогон 40322926536) uv пытался положить ссылку
   `python3.12` в его `~/.local/bin` (не удалось: там уже была ссылка раннего шага workflow).
-  С `--no-bin` (решение 26.10; флаг есть в `uv python install --help` у 0.11.23) попытки
-  нет — предупреждения нет, `~/.local/bin` (листинг от root) содержит только ссылку
-  runner-а от раннего шага, владелец `runner`.
+  Рецепт теперь закрывает и остальное (решения 26.10; оба флага приняты uv 0.11.23):
+  `--no-config` — ни пользовательская конфигурация человека, ни конфигурация проекта над
+  текущим каталогом (`cd /`) не читаются; `sudo -H` — кеш и прочие каталоги `HOME` root-а.
+  Скрипт проверяет итог: в uv-каталогах пользователя runner-а нет ни одной записи с
+  владельцем root (`root_in_user_dirs` пуст); предупреждения uv нет. Чтение подложенной
+  конфигурации не испытывалось (её на runner-е нет) — это гарантия флага, а не замер.
 - Форма со ссылкой `/usr/local/bin/darkfactory` **не исполнена**: на обоих runner-ах
-  `/usr/local/bin` не проходит политику доверенных путей (macOS — владелец uid 501), ссылки
+  `/usr/local/bin` не проходит политику доверенных путей (строка `local_bin` таблицы), ссылки
   нет, установщик напечатал полный путь, и команда вызывалась как
   `sudo /opt/df/bin/darkfactory` — как README и описывает.
