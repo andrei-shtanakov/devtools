@@ -498,3 +498,67 @@ Ubuntu `hardlink-root-only-file`: ни одна из 16 жёстких ссыл�
   **Контроль:** в том же прогоне образец `pillow` (`native_wheel`) по-прежнему даёт проблемы
   правила (в) — macOS 1, Linux 10, — то есть проверка над venv жива, и ноль у `core` —
   замер, а не слепое пятно метода.
+
+## 9. Живая установка `core`
+
+Прогон [40312801764](https://github.com/andrei-shtanakov/devtools/actions/runs/40312801764)
+(PR #635, голова `1b34478`), обе ячейки success. Root-прогон: 16:28 (macOS, шаг
+11:15:07–11:31:35, junit 986 с), 12:09 (Ubuntu, шаг 11:11:03–11:23:12, junit 728 с); предел
+job — 180 мин. Факты ниже — из артефактов прогона (`live/<платформа>.json`,
+`live/<платформа>-doctor.json`, `journals/live-core.jsonl`, `boundary/<платформа>.json`).
+
+**Входы.** Манифест зонтика `andrei-shtanakov/ai-orchestrators-workspace@080f15e6b8fa3497a369f959e5466c1391bf2700`
+(ai-orchestrators-workspace#52), профиль `core`, Python `3.12.13`. Одна константа
+`CORE_MANIFEST` (`tests/df/root_world.py`); профиль разрешает `core_profile()` собственными
+`df.manifest.fetch_manifest` и `parse_profile` — рукописного `CORE_PINS` больше нет; сбой сети
+или отказ манифеста — падение теста, а не пустой замер.
+
+**Установка** (`tests/df/test_acceptance_root_live.py::test_live_core_install`). Root-мир
+`<R>` (свежий `df-build`, копия закреплённого uv по утверждённому пути, `/usr/bin/git`,
+`/usr/bin/tar`), но **без подмены профиля**: шаг `manifest` читает настоящий манифест, сборка
+выбирает члены с GitHub по их пинам. argv — команда README «Первая установка»
+(`documented_argv` из `tests/df/test_cli.py`), заменены только SHA манифеста и путь uv (копия
+мира); исполнена так, как её исполняет bootstrap, в процессе над раскладкой `<R>` (R87).
+Почему `<R>`, а не `/`: `bootstrap.py` не принимает корень и строит `Layout("/")` сам, а
+настоящий процесс в раскладке `/` потребовал бы обойти мир (своя учётка, свой разбор
+остатков, общий с остальными root-тестами `df-build`); мир `<R>` уже прошёл приёмку
+§3.8 и отличается от `/` только корнем (D2: один корень на процесс). Настоящий процесс — у
+команды: `doctor --json` — это установленный `<R>/opt/df/bin/darkfactory`.
+
+| | macOS arm64 | Ubuntu x86_64 |
+|---|---|---|
+| `init`, код / время | 0 / 71,8 с | 0 / 47,6 с |
+| релиз | `080f15e6b8fa-macos-arm64-1` | `080f15e6b8fa-linux-x86_64-1` |
+| журнал | 26 строк, `manifest skip` → … → `commit-config done`, `failed` нет | то же |
+| `release.json`: манифест, профиль, SHA членов | `080f15e…`, `core`, = пины манифеста | то же |
+| `darkfactory doctor --json` | код 0, stderr пуст, `level1: reached` | то же |
+| проверки уровня 1 | 11 из 11 `ok` (`install.pending`, `etc.schemas`, `release.active`, `release.digest`, `release.admin`, `release.inputs`, `release.perms`, `release.boundary`, `trusted.paths`, `cli.approved`, `build.user`) | то же |
+
+**Smoke точек входа** — `<релиз>/venv/<член>/bin/<точка> --help` от `df-build` из его дома без
+сети (Python релиза от root не запускался); набор точек — `expected_entrypoints` члена.
+
+| член | точки входа | macOS arm64 | Ubuntu x86_64 |
+|---|---|---|---|
+| devtools | — (не пакет) | — | — |
+| discovery | `discovery` | 0 | 0 |
+| discovery-toolkit | — (не пакет) | — | — |
+| disputatio | `disp` | 0 | 0 |
+| spec-runner | `spec-runner`, `spec-runner-init`, `spec-task` | 0, 0, 0 | 0, 0, 0 |
+| steward | `gate-check`, `review-eval`, `steward`, `steward-compile` | 0, 0, 0, 0 | 0, 0, 0, 0 |
+
+**Инвентаризация `core` на пинах манифеста** (`boundary/<платформа>.json`, `core_inventory`,
+`inputs` = «pins of profile core, manifest …@080f15e…»; метод — как в разделе 8).
+
+| член | SHA | группы | lock | ожид. распр. | macOS arm64: sync / (в) / нативных | Ubuntu x86_64: sync / (в) / нативных | нативные распределения |
+|---|---|---|---|---|---|---|---|
+| devtools | `335188f6` | `governance` | без проблем | 20 | ok / 0 / 2 | ok / 0 / 2 | pyyaml, rpds_py |
+| discovery | `3ebed2d9` | — | без проблем | 2 | ok / 0 / 1 | ok / 0 / 1 | pyyaml |
+| discovery-toolkit | `e5faa677` | — | без проблем | 1 | ok / 0 / 1 | ok / 0 / 1 | pyyaml |
+| disputatio | `920b63f4` | — | без проблем | 11 | ok / 0 / 2 | ok / 0 / 2 | pydantic_core, pyyaml |
+| steward | `007d0049` | — | без проблем | 15 | ok / 0 / 2 | ok / 0 / 2 | pyyaml, rpds_py |
+| spec-runner | `c71decf7` (v5.0.0) | — | без проблем | 41 | ok / 0 / 5 | ok / 0 / 5 | cffi, cryptography, pydantic_core, pyyaml, rpds_py |
+
+`site_exists` — истина у всех 6 на обеих ОС, `distribution_problems` пусты, нативных файлов 13
+на ячейку. Против раздела 8 сменились пины devtools (`d2f569eb` → `335188f6`) и spec-runner
+(`d586fbb6` → `c71decf7`); вердикты те же. Контроль метода в том же прогоне: образец `pillow`
+даёт проблемы правила (в) — macOS 1, Linux 10.
