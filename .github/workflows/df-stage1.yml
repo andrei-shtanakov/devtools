@@ -217,6 +217,28 @@ jobs:
             "$RUNNER_TEMP/df-stage1/junit-root.xml" --expect "$collected"
           exit "$rc"
 
+      # Host adaptation, not a df change (owner decision 26.10): the hosted
+      # Ubuntu image ships `/opt` group/other-writable with an ACL, which df
+      # refuses by spec 3.10 (run 40316417187: `trusted-paths: /opt`). Make
+      # the runner a supported host as README «Подготовка» requires, like the
+      # R96 CLT selection; on macOS only the facts are logged (nothing is
+      # changed unless a run shows df refuses `/opt` there).
+      - name: configure /opt as a supported host (owner 26.10)
+        if: ${{ !cancelled() && env.DF_STAGE1_SCOPE == 'full' }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/df-stage1/live"
+          record="$RUNNER_TEMP/df-stage1/live/opt-host.txt"
+          facts() {
+            ls -ld /opt
+            if [ "$RUNNER_OS" = Linux ]; then getfacl -p /opt; else ls -led /opt; fi
+          }
+          { echo "before:"; facts; } > "$record" 2>&1
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo -n chmod go-w /opt
+            sudo -n setfacl -b /opt
+          fi
+          { echo "after:"; facts; } >> "$record" 2>&1
+          cat "$record"
       # Live install of profile `core` in the production layout `/`, as
       # README «Установка DarkFactory: этап 1» says, every step a process
       # (tests/df/live_install.py, as the runner user; root only through

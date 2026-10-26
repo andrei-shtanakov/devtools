@@ -43,3 +43,13 @@ def test_main_refuses_outside_ci(
     monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
     assert live_install.main(["--out", str(tmp_path), "--work", str(tmp_path)]) == 2
     assert list(tmp_path.iterdir()) == []
+
+
+def test_bootstrap_python_recipe_is_the_readme_one() -> None:
+    """The macOS recipe the script runs is the one README «Подготовка» gives."""
+    text = README.read_text(encoding="utf-8").replace("\\\n    ", "")
+    recipe = (
+        f"sudo {live_install.UV_DIR}/uv python install {live_install.PYTHON}"
+        f" --install-dir {live_install.BOOTSTRAP_PYTHON_DIR}"
+    )
+    assert recipe in " ".join(text.split())

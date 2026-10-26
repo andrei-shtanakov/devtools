@@ -11,10 +11,13 @@ What README «Установка DarkFactory: этап 1» says, as processes:
 1. No state of an earlier install (`df-build`, `/opt/df`, `/etc/df`,
    `/var/lib/df`, the uv directory, the command link); any is a finding.
 2. «Подготовка»: on macOS the Command Line Tools selected (the workflow's R96
-   step); the bootstrap Python (Ubuntu `/usr/bin/python3`, macOS the first
-   trusted Python >= 3.12 of `MACOS_PYTHONS`); the uv 0.11.23 release asset
-   checked against its published `.sha256` (and the README's value), its
-   version, then `sudo install` to `UV_DIR` root `0755`.
+   step); the uv 0.11.23 release asset checked against its published
+   `.sha256` (and the README's value), its version, then `sudo install` to
+   `UV_DIR` root `0755`; the bootstrap Python (Ubuntu `/usr/bin/python3`;
+   macOS the README recipe, owner decision 26.10: `sudo <uv> python install
+   PYTHON --install-dir BOOTSTRAP_PYTHON_DIR`), which must pass
+   `trusted_path_problems` (a problem is a finding). The `/opt` chain is the
+   workflow's host-configuration step, before this script.
 3. The README first-install command verbatim (`documented_command`, the
    placeholders filled), a process of root through `sudo`.
 4. `sudo darkfactory doctor --json`: level 1 reached, every check `ok`.
@@ -44,7 +47,7 @@ from df.lockset import UV_PINNED_VERSION
 from df.manifest import fetch_manifest, parse_profile
 from df.paths import Layout
 from df.release import RELEASE_JSON
-from tests.df.root_world import CORE_MANIFEST, CORE_PROFILE
+from tests.df.root_world import CORE_MANIFEST, CORE_PROFILE, PYTHON
 from tests.df.test_cli import PYTHON_PLACEHOLDER, SHA_PLACEHOLDER, documented_command
 
 #: README «Утверждённые CLI»: the approved copy of uv.
@@ -68,17 +71,9 @@ SHA_CHECK: Mapping[str, list[str]] = {
 }
 CLT = "/Library/Developer/CommandLineTools"
 LINUX_PYTHON = "/usr/bin/python3"
-#: macOS bootstrap Python candidates, first trusted one >= 3.12 wins.
-MACOS_PYTHONS = (
-    "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3",
-    "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3",
-    "/usr/local/bin/python3.13",
-    "/usr/local/bin/python3.12",
-    "/usr/local/bin/python3",
-    "/opt/homebrew/bin/python3.13",
-    "/opt/homebrew/bin/python3.12",
-    "/opt/homebrew/bin/python3",
-)
+#: README «Подготовка» (owner decision 26.10): the macOS bootstrap Python,
+#: installed by root with the approved uv, outside the df release tree.
+BOOTSTRAP_PYTHON_DIR = Path("/usr/local/libexec/darkfactory-bootstrap/python")
 CHECKOUT_PLACEHOLDER = "<чекаут-devtools>"
 USER_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C"}
 TAIL = 4000
@@ -129,9 +124,9 @@ def run(platform: plat.PlatformName, work: Path, live: Path, facts: dict) -> Non
         facts["xcode_select"] = selected
         if selected != CLT:
             raise Failure(f"xcode-select -p {selected!r}, нужен {CLT}")
-    python = bootstrap_python(platform, facts)
     work.mkdir(parents=True, exist_ok=True)
     facts["uv"] = prepare_uv(platform, work)
+    python = bootstrap_python(platform, work, facts)
     argv = install_argv(python)
     facts["init"] = _run(argv, timeout=3600)
     if facts["init"]["code"] != 0:
@@ -156,6 +151,7 @@ def leftovers(layout: Layout) -> dict[str, str]:
             layout.etc,
             layout.var,
             UV_DIR.parent.parent,
+            BOOTSTRAP_PYTHON_DIR.parent,
             layout.local_bin / "darkfactory",
             layout.build_home,
         )
@@ -168,24 +164,53 @@ def leftovers(layout: Layout) -> dict[str, str]:
     return found
 
 
-def bootstrap_python(platform: plat.PlatformName, facts: dict) -> str:
-    """README «Подготовка» 1: the interpreter, trusted and >= 3.12."""
-    candidates = [LINUX_PYTHON] if platform == "linux-x86_64" else list(MACOS_PYTHONS)
-    seen: dict[str, Any] = {}
-    chosen = None
-    for path in candidates:
-        if not os.path.exists(path):
-            continue
-        real = os.path.realpath(path)
-        version = _out([path, "-I", "-c", "import sys; print(*sys.version_info[:3])"])
-        problems = plat.trusted_path_problems(Path(path))
-        seen[path] = {"real": real, "version": version.split(), "problems": problems}
-        if chosen is None and not problems and _at_least_312(version):
-            chosen = path
-    facts["python"] = {"chosen": chosen, "candidates": seen}
-    if chosen is None:
-        raise Failure(f"нет доверенного Python >= 3.12: {seen}")
-    return chosen
+def bootstrap_python(platform: plat.PlatformName, work: Path, facts: dict) -> str:
+    """README «Подготовка» 1: Ubuntu's `/usr/bin/python3`; macOS the root
+    install by the approved uv. Either must be trusted and >= 3.12."""
+    if platform == "linux-x86_64":
+        python = LINUX_PYTHON
+    else:
+        python = _install_python(work, facts)
+    version = _out([python, "-I", "-c", "import sys; print(*sys.version_info[:3])"])
+    problems = plat.trusted_path_problems(Path(python))
+    facts["python"] = {
+        "path": python,
+        "real": os.path.realpath(python),
+        "version": version.split(),
+        "problems": problems,
+    }
+    if problems:
+        raise Failure(f"находка: Python bootstrap не доверенный: {facts['python']}")
+    if not _at_least_312(version):
+        raise Failure(f"Python bootstrap {version!r}: нужен >= 3.12")
+    return python
+
+
+def _install_python(work: Path, facts: dict) -> str:
+    """`sudo <uv> python install PYTHON --install-dir BOOTSTRAP_PYTHON_DIR`;
+    the one `cpython-PYTHON-*/bin/python3.12` it made. Where the uv run left
+    its executables links is recorded (`~/.local/bin` of the `sudo` HOME)."""
+    argv = ["sudo", str(UV_DIR / "uv"), "python", "install", PYTHON]
+    argv += ["--install-dir", str(BOOTSTRAP_PYTHON_DIR)]
+    done = _run(argv, timeout=900, cwd=work)
+    facts["python_install"] = done
+    if done["code"] != 0:
+        raise Failure(f"uv python install: {done}")
+    found = sorted(BOOTSTRAP_PYTHON_DIR.glob(f"cpython-{PYTHON}-*/bin/python3.12"))
+    facts["python_install"]["found"] = [str(p) for p in found]
+    facts["python_install"]["links"] = _links_left()
+    if len(found) != 1:
+        raise Failure(f"uv python install: интерпретатор не один: {found}")
+    return str(found[0])
+
+
+def _links_left() -> dict[str, Any]:
+    """The `sudo` HOME and its `~/.local/bin` listing (as root): where
+    `uv python install` puts its executable links, if anywhere."""
+    home = _run(["sudo", "/usr/bin/printenv", "HOME"], timeout=60)
+    path = f"{str(home['stdout_tail']).strip()}/.local/bin"
+    listing = _run(["sudo", "/bin/ls", "-la", path], timeout=60)
+    return {"sudo_home": home["stdout_tail"].strip(), "bin": listing}
 
 
 def _at_least_312(version: str) -> bool:

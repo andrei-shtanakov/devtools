@@ -326,12 +326,26 @@ remediation-issue у уже помеченного родителя). Повто
 
 ### Подготовка
 
-1. Python ≥ 3.12 для bootstrap: на Ubuntu 24.04 — системный `/usr/bin/python3`; на macOS
-   системный `/usr/bin/python3` — 3.9, нужен другой по выбору человека.
+1. Цепочки путей к `/opt/df`, `/etc/df` и `/usr/local/libexec/darkfactory` (каждый каталог
+   от `/`, в том числе `/opt`, `/etc`, `/usr/local/libexec`): владелец root, без записи для
+   группы и всех, без ACL. Иначе `darkfactory` отказывает и называет путь. На штатном образе
+   GitHub Ubuntu 24.04 `/opt` открыт на запись группе и всем и несёт ACL — CI `df-stage1`
+   перед установкой выполняет `sudo chmod go-w /opt` и `sudo setfacl -b /opt`.
 2. `git`: на Ubuntu — `sudo apt-get install git` (в минимальном образе `/usr/bin/git` нет);
    на macOS — Command Line Tools, выбранные root (ниже, «macOS: каталог разработчика»).
 3. `uv` 0.11.23 — копия в каталог root (ниже, «Утверждённые CLI»).
-4. Чекаут этого репо и полный SHA коммита манифеста зонтика.
+4. Python ≥ 3.12 для bootstrap. На Ubuntu 24.04 — системный `/usr/bin/python3` (3.12). На
+   macOS системный `/usr/bin/python3` — 3.9; поддерживаемый вариант — Python, поставленный
+   root утверждённым uv из п. 3 в каталог root вне дерева релиза:
+
+   ```sh
+   sudo /usr/local/libexec/darkfactory/bin/uv python install 3.12.13 \
+     --install-dir /usr/local/libexec/darkfactory-bootstrap/python
+   ```
+
+   интерпретатор для bootstrap —
+   `/usr/local/libexec/darkfactory-bootstrap/python/cpython-3.12.13-macos-aarch64-none/bin/python3.12`.
+5. Чекаут этого репо и полный SHA коммита манифеста зонтика.
 
 ### Первая установка
 
@@ -345,7 +359,7 @@ sudo <python-3.12+> -I -B -S <чекаут-devtools>/df/bootstrap.py init \
   --cli uv=/usr/local/libexec/darkfactory/bin/uv
 ```
 
-- `<python-3.12+>` — интерпретатор из п. 1 подготовки (на Ubuntu 24.04 — `/usr/bin/python3`);
+- `<python-3.12+>` — интерпретатор из п. 4 подготовки (на Ubuntu 24.04 — `/usr/bin/python3`);
   `<sha-манифеста>` — полный SHA коммита манифеста зонтика, 40 **строчных** hex (заглавные —
   отказ манифеста); `<чекаут-devtools>` — чекаут этого репо.
 - Root исполняет код из чекаута человека: доверие к этому чекауту и к интерпретатору — на
