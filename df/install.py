@@ -512,6 +512,7 @@ def install_steps(layout: Layout, cfg: InstallConfig, prepared: Prepared) -> lis
             "build-user",
             lambda: _build_user_ready(layout),
             lambda: _create_build_user(layout),
+            lambda: _build_user_problems(layout),
         ),
     ]
 
@@ -653,13 +654,25 @@ def _lstat(path: Path) -> os.stat_result | None:
 
 
 def _build_user_ready(layout: Layout) -> bool:
-    """M4: `whoami_as` only after `verify_build_user` is empty."""
-    if build_mod.verify_build_user(layout):
-        return False
+    """`df-build` is ready: no `_build_user_problems`."""
+    return not _build_user_problems(layout)
+
+
+def _build_user_problems(layout: Layout) -> list[str]:
+    """Why `df-build` is not ready (the refusal names it, D3): the problems
+    of `verify_build_user`, and only when there are none (M4) `whoami_as`
+    against the record."""
+    problems = build_mod.verify_build_user(layout)
+    if problems:
+        return problems
     account = build_account(layout)
     if account is None:
-        return False
-    return build_mod.whoami_as(plat.BUILD_USER) == (account.uid, account.gid)
+        return [f"нет записи {plat.BUILD_USER} в accounts.toml"]
+    got = build_mod.whoami_as(plat.BUILD_USER)
+    want = (account.uid, account.gid)
+    if got != want:
+        return [f"whoami {plat.BUILD_USER}: {got}, в записи {want}"]
+    return []
 
 
 def _create_build_user(layout: Layout) -> None:

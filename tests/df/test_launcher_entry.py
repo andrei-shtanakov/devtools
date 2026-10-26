@@ -106,11 +106,12 @@ def _plain(value):
     return value.decode() if isinstance(value, bytes) else value
 
 
-def main(argv, *, mode, read, lock_fd):
+def main(argv, *, mode, read, lock_fd, layout):
     out = {
         "argv": list(argv),
         "mode": mode,
         "lock_fd": lock_fd,
+        "layout": [type(layout).__module__, str(layout.root)],
         "kind": type(read).__name__,
         "generation": read.generation,
         "path0": sys.path[0],
@@ -122,6 +123,16 @@ def main(argv, *, mode, read, lock_fd):
         out["raw"] = {k: _plain(v) for k, v in raw.items()}
     print("MAIN " + json.dumps(out))
     return 7
+'''
+
+STUB_PATHS = '''\
+"""Stub of df.paths: the entry builds the layout of its root from it (D2)."""
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class Layout:
+    root: object
 '''
 
 
@@ -142,6 +153,7 @@ def write_admin(lay: Layout, release_id: str) -> str:
     (pkg / "__init__.py").write_text("")
     (pkg / "state.py").write_text(STUB_STATE)
     (pkg / "cli.py").write_text(STUB_CLI)
+    (pkg / "paths.py").write_text(STUB_PATHS)
     return admin.admin_digest(lay, release_id)
 
 
@@ -261,17 +273,29 @@ class Recorder:
     before: Callable[[], None] | None = None
     admin_dirs: list[Path] = field(default_factory=list)
 
-    def import_df(self, admin_dir: Path) -> tuple[Any, Callable[..., int]]:
+    def import_df(self, admin_dir: Path) -> tuple[Any, Callable[..., int], Any]:
         self.admin_dirs.append(admin_dir)
         if self.before is not None:
             self.before()
-        return STATE, self.main
+        return STATE, self.main, Layout
 
     def main(
-        self, argv: list[str], *, mode: str, read: Any, lock_fd: int | None
+        self,
+        argv: list[str],
+        *,
+        mode: str,
+        read: Any,
+        lock_fd: int | None,
+        layout: Layout,
     ) -> int:
         self.calls.append(
-            {"argv": argv, "mode": mode, "read": read, "lock_fd": lock_fd}
+            {
+                "argv": argv,
+                "mode": mode,
+                "read": read,
+                "lock_fd": lock_fd,
+                "layout": layout,
+            }
         )
         return 7
 
@@ -1283,6 +1307,67 @@ def test_entry_refuses_bad_snapshot_parts(
     assert rec.calls == []
 
 
+def test_entry_hands_its_root_layout_to_main(tmp_path: Path, rec: Recorder) -> None:
+    """D2: `main` gets the admin code's `Layout` of the entry's own root."""
+    lay = world(tmp_path)
+    assert run_in(lay, "doctor") == 7
+    assert rec.calls[-1]["layout"] == lay
+
+
+def test_entry_one_root_through_real_main(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D2: through the real `df.cli.main`, a reader and a writer of a non-"/"
+    root work on that root's layout; `default_layout()` is never reached."""
+    from df import cli
+
+    def no_default() -> Layout:
+        raise AssertionError("default_layout() reached under the entry")
+
+    seen: list[tuple[str, Layout]] = []
+    real_reader = cli._reader  # noqa: SLF001
+
+    def reader(args: Any, layout: Layout, read: Any) -> int:
+        seen.append(("reader", layout))
+        return real_reader(args, layout, read)
+
+    def writer(args: Any, layout: Layout, raw: Any, mode: str) -> int:
+        seen.append(("writer", layout))
+        return 0
+
+    monkeypatch.setattr(cli, "default_layout", no_default)
+    monkeypatch.setattr(cli, "_reader", reader)
+    monkeypatch.setattr(cli, "_writer", writer)
+    monkeypatch.setattr(cli, "ROOT_UID", os.geteuid())
+
+    def main(argv: list[str], **kw: Any) -> int:
+        try:
+            return cli.main(argv, **kw)
+        finally:  # the process would exit here, releasing the writer lock
+            if kw["lock_fd"] is not None:
+                os.close(kw["lock_fd"])
+
+    monkeypatch.setattr(entry, "_import_df", lambda _d: (STATE, main, Layout))
+    lay = world(tmp_path)
+    code = run_in(lay, "doctor", "--json")
+    assert code in (cli.EXIT_OK, cli.EXIT_REFUSED), code
+    assert "ошибка программы" not in capsys.readouterr().err  # not the D2 guard
+    setter = ["models", "set", "author", "--harness", "claude", "--model", "m"]
+    assert run_in(lay, *setter) == cli.EXIT_OK
+    assert "ошибка программы" not in capsys.readouterr().err
+    assert seen == [("reader", lay), ("writer", lay)]
+
+
+@pytest.mark.parametrize("root", ["relative/root", "/a/../b"])
+def test_entry_layout_refuses_a_root_the_admin_code_refuses(root: str) -> None:
+    """The admin code's `Layout` refuses a non-canonical root: the entry
+    turns that into its own refusal, never a traceback."""
+    with pytest.raises(entry.Refused, match="не принят"):
+        entry._entry_layout(Layout, root)  # noqa: SLF001
+
+
 def test_import_guard_refuses_preloaded_df(tmp_path: Path) -> None:
     """In this process `df` is loaded: the real `_import_df` refuses."""
     with pytest.raises(entry.Refused, match="загружен до проверки"):
@@ -1305,6 +1390,7 @@ def test_entry_subprocess_reader(tmp_path: Path) -> None:
     assert call["raw"]["current_id"] == ID
     assert call["raw"]["install_text"] == INSTALL_TEXT.decode()
     assert call["argv"] == ["doctor", "--json"]
+    assert call["layout"] == ["df.paths", str(lay.root)]  # D2: the entry's root
 
 
 def test_entry_reader_transitional_reaches_main(tmp_path: Path) -> None:

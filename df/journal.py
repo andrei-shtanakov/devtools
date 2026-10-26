@@ -58,11 +58,17 @@ class _Interrupted(Exception):
 
 @dataclass(frozen=True)
 class Step:
-    """`check()` means "the fact is already achieved"."""
+    """`check()` means "the fact is already achieved"; the optional `why()`
+    names what keeps it from being achieved (the refusal's reasons when the
+    postcondition fails after `do()`). `why()` is a fresh probe, not the
+    failed check's facts: a state changed in between may name other reasons
+    or none (then the bare refusal text); a `why()` that raises gives the
+    bare text too, never a program error."""
 
     name: str
     check: Callable[[], bool]
     do: Callable[[], None]
+    why: Callable[[], Sequence[str]] | None = None
 
 
 @dataclass(frozen=True)
@@ -474,5 +480,19 @@ def _execute(step: Step, log: Callable[..., None], fail_after: str | None) -> No
     if fail_after == step.name:
         raise _Interrupted(step.name)
     if not step.check():
-        raise StepFailed(step.name, "постусловие не выполнено")
+        reasons = _reasons(step)
+        detail = "постусловие не выполнено"
+        if reasons:
+            detail = f"{detail}: {'; '.join(reasons)}"
+        raise StepFailed(step.name, detail)
     log("done")
+
+
+def _reasons(step: Step) -> list[str]:
+    """`step.why()`, or none when it is absent or its probe fails."""
+    if step.why is None:
+        return []
+    try:
+        return list(step.why())
+    except Exception:  # noqa: BLE001 - a diagnostic never replaces the refusal
+        return []

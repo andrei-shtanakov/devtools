@@ -534,15 +534,17 @@ def test_linux_loader_residuals(root_world: RootWorld, controls: Controls) -> No
     """R75 (R26, owner decision 22.10): each approved CLI run as `df-build`
     under `LD_DEBUG=libs` loads only objects whose real path is under
     `SYSTEM_LIB_DIRS`, and `calling init` covers its whole DT_NEEDED
-    closure (else the instrument failed, not the CLI); the glibc-hwcaps/tls subdirectories that exist and
-    the `ld.so.cache` entries outside `ld.so.conf` are recorded (evidence).
+    closure (else the instrument failed, not the CLI); the glibc-hwcaps/tls
+    subdirectories that exist and the `ld.so.cache` entries outside
+    `ld.so.conf` are recorded (evidence).
     A library outside is a finding to the owner, not a test edit."""
     lay = root_world.layout
     out_dir = lay.build_home / "ld-debug"
     _as_builder(["/bin/mkdir", str(out_dir)])
     loaded: dict[str, list[str]] = {}
     for name, path in sorted(root_world.cfg().approved_cli.items()):
-        env = {**ROLE_ENV, "LD_DEBUG": "libs", "LD_DEBUG_OUTPUT": str(out_dir / name)}
+        output = str(out_dir / name)
+        env = {**ROLE_ENV, "LD_DEBUG": "libs", "LD_DEBUG_OUTPUT": output}
         result = plat.run_as(
             plat.BUILD_USER,
             [str(path), "--version"],

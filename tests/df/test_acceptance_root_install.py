@@ -32,9 +32,9 @@ steps and `retry_quarantine` outside `drive` are not observed (they touch
 no builder tree: 13-D observed the leaves).
 
 The installed command runs as a real process (`RootWorld.command`): its
-entry reads `<R>` (its `_ROOT`) and admits the admin code, but `df.cli`
-then uses `default_layout()` — `/` — so its level-1 checks read the host;
-level 1 of `<R>` is the in-process `doctor.level1_checks` (`_level1`).
+entry reads `<R>` (its `_ROOT`), admits the admin code and hands `df.cli` the
+layout of that same root (D2: one root per process), so its `doctor` answers
+exactly as the in-process `doctor.level1_checks` of `<R>` (`_level1`).
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ from typing import Any
 
 import pytest
 
-from df import accept, admin, boundary, cli, doctor, fsutil, install, state
+from df import accept, admin, boundary, cli, doctor, fsutil, install, lockset, state
 from df import build as build_mod
 from df import platform as plat
 from df.boundary import (
@@ -70,15 +70,26 @@ from df.boundary import (
     transfer_check,
 )
 from df.digest import check_links, tree_digest
+from df.inputs import installed_distributions
 from df.journal import StepFailed, read_journal
+from df.markers import marker_env
 from df.paths import Layout
+from df.sources import UnsupportedLock
 from tests.df.conftest import stage1_out
+from tests.df.dist_records import (
+    by_distribution,
+    dist_wheels,
+    record_owners,
+    vacuity_problems,
+)
 from tests.df.install_world import CLEAN_PASS
 from tests.df.observe import Observation, observe_root_access
 from tests.df.root_world import (
     PIN_NAME,
     PYTHON,
     ROLE_ENV,
+    SYSTEM_GIT,
+    SYSTEM_TAR,
     Controls,
     InstalledWorld,
     RootWorld,
@@ -255,40 +266,18 @@ def notes(request: pytest.FixtureRequest) -> Iterator[dict[str, object]]:
     write_evidence(stage1_out(), f"install/{_label(request)}.json", text + "\n")
 
 
-#: Checks of the installed command's `doctor` that are not ok only because
-#: its `df.cli` reads `/` (module doc): the release, the account and the
-#: trusted paths of a host without df. A check outside it fails the test.
-SEAM_CHECKS = frozenset(
-    {
-        "etc.schemas",
-        "release.active",
-        "release.digest",
-        "release.admin",
-        "release.inputs",
-        "release.perms",
-        "release.boundary",
-        "trusted.paths",
-        "build.user",
-    }
-)
-
-
 def _doctor_reached(world: RootWorld) -> list[str]:
     """Level 1 of `<R>` (in process), and the installed command's `doctor
     --json` (a real process of root): its entry admits the admin code, and
-    `df.cli` answers exactly as the doctor over the snapshot of `<R>` and
-    the layout `/` (the seam), whose blocking checks are `SEAM_CHECKS`.
-    Returns the real report's non-ok checks as `id: status` (M-a)."""
+    `df.cli` answers exactly as the doctor over the snapshot and the layout
+    of `<R>` (D2), level 1 reached. Returns the real report's non-ok checks
+    as `id: status` (M-a)."""
     checks = _level1(world)
     assert doctor.level1_reached(checks), [c for c in checks if c.status != "ok"]
-    report = _command_report(world)
-    lay = Layout(Path("/"))
-    snap = state.parse_snapshot(state.read_raw(world.layout), lay, mode="reader")
-    model = doctor.level1_checks(snap, lay, euid=0)
+    report = _command_report(world, doctor.EXIT_REACHED)
     got = [(c["id"], c["status"], c["reason"]) for c in report["checks"]]
-    assert got == [(c.id, c.status, c.reason) for c in model]
-    blocking = {c.id for c in model if doctor._blocks(c)}  # noqa: SLF001
-    assert blocking <= SEAM_CHECKS, blocking - SEAM_CHECKS
+    assert got == [(c.id, c.status, c.reason) for c in checks]
+    assert report["level1"] == "reached", report
     pending = [c for c in report["checks"] if c["id"] == "install.pending"]
     assert [c["status"] for c in pending] == [doctor.OK], pending
     return [
@@ -298,12 +287,11 @@ def _doctor_reached(world: RootWorld) -> list[str]:
     ]
 
 
-def _command_report(world: RootWorld) -> dict[str, Any]:
-    """`darkfactory doctor --json` of the installed command: a report
-    (exit 0 or 2, the module doc says why not 0), nothing on stderr."""
+def _command_report(world: RootWorld, code: int) -> dict[str, Any]:
+    """`darkfactory doctor --json` of the installed command: a report with
+    exit `code` (level 1 reached or not), nothing on stderr."""
     done = world.command(["doctor", "--json"])
-    codes = (doctor.EXIT_REACHED, doctor.EXIT_NOT_REACHED)
-    assert done.returncode in codes and done.stderr == "", (
+    assert done.returncode == code and done.stderr == "", (
         done.returncode,
         done.stderr[-2000:],
     )
@@ -619,9 +607,9 @@ def test_crash_after_activation_real_fs(
 
 def test_tamper_after_install_doctor_broken(root_world: RootWorld) -> None:
     """Spec 3.8: a file of the installed release changed afterwards ->
-    `doctor` (its level 1 of `<R>`, in process: module doc) reports
-    `release.digest` «нарушено» (the release is damaged), level 1 not
-    reached."""
+    `doctor` (level 1 of `<R>` in process, and the installed command's own
+    report, D2) reports `release.digest` «нарушено» (the release is
+    damaged), level 1 not reached."""
     world = root_world
     assert world.bootstrap(world.init_argv()) == cli.EXIT_OK
     lay = world.layout
@@ -636,6 +624,10 @@ def test_tamper_after_install_doctor_broken(root_world: RootWorld) -> None:
     assert not doctor.level1_reached(list(checks.values()))
     assert checks["release.digest"].status == doctor.BROKEN, checks
     assert doctor.DAMAGED in checks["release.digest"].reason
+    report = _command_report(world, doctor.EXIT_NOT_REACHED)
+    got = [(c["id"], c["status"], c["reason"]) for c in report["checks"]]
+    assert got == [(c.id, c.status, c.reason) for c in checks.values()]
+    assert report["level1"] == "not reached", report
 
 
 # ---------- refused artifacts (df-build changes its tree after the build) ----------
@@ -825,6 +817,7 @@ def test_boundary_on_real_release(
     write_evidence(stage1_out(), f"boundary/{PLATFORM}.json", text + "\n")
     escapes = [c for c in facts["origin_via_link"] if c["escapes"]]
     assert escapes == [], f"находка (правило (в), $ORIGIN через ссылку): {escapes}"
+    assert vacuity_problems(facts["core_inventory"]["members"]) == []
 
 
 def test_darkfactory_command_works_and_is_immutable(
@@ -833,11 +826,10 @@ def test_darkfactory_command_works_and_is_immutable(
     """Spec 3.9: the installed `darkfactory doctor` and `models list` (real
     processes of root) work — the entry admits the admin code, `df.cli`
     answers (the doctor's report pinned by `_doctor_reached`); two runs of
-    each change neither the admin code, the admin Python nor the command
-    files, which the process runs. Level 1 and the release's immutability
-    under a real `doctor` are not shown here: its `df.cli` reads `/`, not
-    `<R>` (module doc); level 1 of `<R>` is checked in process. The real
-    report's non-ok checks of each run are kept in `notes` (M-a)."""
+    each change neither the admin code, the admin Python, the command files,
+    which the process runs, nor the release, which its `doctor` reads (D2:
+    the real report is level 1 of `<R>`, reached). The real report's non-ok
+    checks of each run are kept in `notes` (M-a)."""
     world, lay = installed_world.world, installed_world.layout
     before = _digests(installed_world)
     not_ok: list[list[str]] = []
@@ -857,6 +849,9 @@ def _digests(installed: InstalledWorld) -> dict[str, str]:
         "admin": admin.admin_digest(lay, installed.release_id),
         "admin-python": tree_digest(lay.admin_python, exclude=frozenset()),
         "bin": tree_digest(lay.bin_dir, exclude=frozenset()),
+        "release": tree_digest(
+            lay.release_dir(installed.release_id), exclude=frozenset()
+        ),
     }
 
 
@@ -1141,6 +1136,28 @@ THRESHOLD_MAX = 900
 #: A wheel with bundled native libraries (manylinux `pillow.libs`, macOS
 #: `PIL/.dylibs`); cffi 1.17.1 bundles none (CI run 40223595064).
 NATIVE_WHEEL = "pillow==11.0.0"
+#: Inputs of the 26.10 inventory of profile `core` (owner decision D1,
+#: Task 14-B): each member's master of 26.10 and its groups (spec 3.1, plan
+#: Task 1: only `devtools` has one); no manifest pins them yet.
+CORE_PINS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("devtools", "d2f569eb668b1ba2e04a6b84e8d1cfd17dc93e81", ("governance",)),
+    ("discovery", "3ebed2d90580510be14c6d9d64d19ca8f8dca56d", ()),
+    ("discovery-toolkit", "e5faa6776bbec08b5e6c05517a8d69ee10772185", ()),
+    ("disputatio", "920b63f489ddd6af150a3396b847ae5bba65b22e", ()),
+    ("steward", "007d00490599fa79484df648451988bf8939f25f", ()),
+    ("spec-runner", "d586fbb683158922bfd20091b6d4ed58f4583bfa", ()),
+)
+CORE_URL = "https://github.com/andrei-shtanakov/{}"
+#: uv/git stderr of a network failure: the inventory fails, never records it.
+NETWORK_MARKERS = (
+    "error sending request",
+    "dns error",
+    "Could not resolve host",
+    "Failed to connect",
+    "operation timed out",
+    "Connection reset",
+)
+STDERR_TAIL = 2000
 
 
 @dataclass
@@ -1170,6 +1187,7 @@ class BoundaryFacts:
                 "libpython_pth": _measure(lambda: self._pth(env, scratch)),
                 "trampoline": _measure(lambda: self._trampoline(env, scratch)),
                 "native_wheel": self._native_wheel(env, scratch),
+                "core_inventory": self._core_inventory(env, scratch),
             }
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
@@ -1356,6 +1374,179 @@ class BoundaryFacts:
         check = boundary._NativeCheck(site, PLATFORM, None)  # noqa: SLF001
         rule_v = _measure(check.problems)
         return {"wheel": NATIVE_WHEEL, "natives": natives, "rule_v_problems": rule_v}
+
+    def _core_inventory(self, env: Any, scratch: Path) -> dict[str, Any]:
+        """Rule (в) over the exact locked artifacts of profile `core` (owner
+        decision D1): each member fetched by SHA as `build.py` does, df's own
+        lock verdicts on its bytes, the installer's `uv sync` form into a
+        venv of the release's Python (network, as `df-build`), then
+        `boundary._NativeCheck` over `site-packages` grouped by distribution.
+        Data only: a sync failure is a fact, a network error fails."""
+        cache = _builder_dir(scratch / "core-cache")
+        members = {
+            name: self._core_member(env, scratch, cache, name, sha, groups)
+            for name, sha, groups in CORE_PINS
+        }
+        return {
+            "inputs": "master of each member, 26.10 (no manifest yet)",
+            "python": PYTHON,
+            "members": members,
+        }
+
+    def _core_member(
+        self,
+        env: Any,
+        scratch: Path,
+        cache: Path,
+        name: str,
+        sha: str,
+        groups: tuple[str, ...],
+    ) -> dict[str, Any]:
+        work = _builder_dir(scratch / f"core-{name}")
+        role = _core_env(work, cache, self.installed.world.uv)
+        src = _fetch_by_sha(work, role, name, sha)
+        lock, want = _lock_verdicts(name, src, groups)
+        out: dict[str, Any] = {"sha": sha, "groups": list(groups), "lock": lock}
+        if "unreadable" in lock:
+            out["sync"] = {
+                "code": None,
+                "skipped": f"не запускался: {lock['unreadable']}",
+            }
+            return out
+        venv = work / "venv"
+        sync = [str(self.installed.world.uv), "sync", "--locked", "--no-editable"]
+        sync += ["--no-default-groups", *(a for g in groups for a in ("--group", g))]
+        sync += ["--project", str(src), "--python", str(self.release / env.interpreter)]
+        done = _core_run(
+            sync, work, role | {"UV_PROJECT_ENVIRONMENT": str(venv)}, timeout=900
+        )
+        out["sync"] = {"argv": sync[1:], "code": done.returncode}
+        if done.returncode != 0:
+            tail = done.stderr[-STDERR_TAIL:].decode("utf-8", "replace")
+            if any(m in tail for m in NETWORK_MARKERS):
+                pytest.fail(f"{name}: сеть при uv sync: {tail!r}")
+            out["sync"]["stderr_tail"] = tail
+            return out
+        if want is not None:
+            out["distribution_problems"] = _measure(
+                lambda: lockset.distribution_problems(
+                    installed_distributions(venv), want
+                )
+            )
+        site = venv / "lib" / f"python3.{env.minor}" / "site-packages"
+        out["site_exists"] = site.is_dir()
+        out["native_count"] = sum(1 for _ in _native_files(site))
+        out["rule_v"] = _measure(lambda: _rule_v_by_dist(site))
+        return out
+
+
+def _fetch_by_sha(work: Path, role: Mapping[str, str], name: str, sha: str) -> Path:
+    """`build.py`'s route for one member: init, shallow fetch of `sha` from
+    the public URL, `rev-parse FETCH_HEAD` == `sha`, archive, extract into
+    `<work>/src` (as `df-build`, network). A failure is infrastructure."""
+    git, repo, src = str(SYSTEM_GIT), str(work / "repo"), work / "src"
+    archive = str(work / "src.tar")
+    steps = [
+        ("init", [git, "init", "-q", repo]),
+        ("fetch", build_mod.git_fetch_argv(git, repo, CORE_URL.format(name), sha)),
+        ("rev-parse", build_mod.git_rev_parse_argv(git, repo)),
+        ("archive", build_mod.git_archive_argv(git, repo, archive, sha)),
+        ("mkdir", ["/bin/mkdir", "-p", str(src)]),
+        ("extract", [str(SYSTEM_TAR), "-xf", archive, "-C", str(src)]),
+    ]
+    for label, argv in steps:
+        done = _core_run(argv, work, role, timeout=600)
+        if done.returncode != 0:
+            pytest.fail(f"{name}: {label}: {done.stderr[-STDERR_TAIL:]!r}")
+        head = done.stdout.decode("utf-8", "replace").strip()
+        if label == "rev-parse" and head != sha:
+            pytest.fail(f"{name}: FETCH_HEAD {head!r}, пин {sha!r}")
+    return src
+
+
+def test_lock_verdicts_missing_lock_is_a_problem(tmp_path: Path) -> None:
+    """PR #633 review: a member without `uv.lock` is a recorded problem
+    `<repo>: <error>` with `unreadable` set (its sync is skipped), not an
+    exception that loses the evidence."""
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\n')
+    lock, want = _lock_verdicts("m", tmp_path, ())
+    assert want is None
+    assert lock["unreadable"] == lock["uv_config_problems"][0]
+    assert lock["unreadable"].startswith("m: ") and "uv.lock" in lock["unreadable"]
+
+
+def _lock_verdicts(
+    name: str, src: Path, groups: tuple[str, ...]
+) -> tuple[dict[str, Any], frozenset[lockset.ExpectedDist] | None]:
+    """df's pre-build verdicts on a member's bytes: `uv_config_problems`
+    (with `lock_layout_problems`) and the walk of `expected_distributions`
+    for this platform and the release's Python (its set, or `None`). A
+    missing or unreadable file is a problem `<repo>: <error>`, as in
+    `install.uv_config_refusal`, and the key `unreadable` (no sync)."""
+    uv_toml = src / "uv.toml"
+    try:
+        lock = (src / "uv.lock").read_bytes()
+        pyproject = (src / "pyproject.toml").read_bytes()
+        uv_config = uv_toml.read_bytes() if uv_toml.exists() else None
+    except OSError as exc:
+        problem = f"{name}: {exc}"
+        return {"uv_config_problems": [problem], "unreadable": problem}, None
+    problems = lockset.uv_config_problems(pyproject, uv_config, lock)
+    try:
+        want = lockset.expected_distributions(
+            lock, groups=groups, env=marker_env(PLATFORM, PYTHON), root_dir=src
+        )
+    except (UnsupportedLock, ValueError) as exc:
+        return {"uv_config_problems": problems, "walk": f"отказ: {exc}"}, None
+    return {"uv_config_problems": problems, "walk": len(want)}, want
+
+
+def _rule_v_by_dist(site: Path) -> dict[str, Any]:
+    """Rule (в) over `site`, per native file its needs and where they
+    resolve, grouped by the distribution whose `RECORD` lists the file."""
+    natives: dict[str, Any] = {}
+    for path in _native_files(site):
+        deps = _deps(path)
+        deps["resolved"] = _resolve(
+            tuple(deps.get("needed", ())), tuple(deps.get("rpaths", ())), path.parent
+        )
+        natives[str(path.relative_to(site))] = deps
+    problems = boundary._NativeCheck(site, PLATFORM, None).problems()  # noqa: SLF001
+    grouped = by_distribution(natives, problems, record_owners(site))
+    wheels = dist_wheels(site)
+    for dist, item in grouped.items():
+        item["files"] = {rel: natives[rel] for rel in item["natives"]}
+        item["wheel"] = wheels.get(dist)
+    return {"count": len(problems), "by_distribution": grouped}
+
+
+def _core_env(work: Path, cache: Path, uv: Path) -> dict[str, str]:
+    """The inventory's role environment: `build_env`'s `PATH` (the git, tar
+    and uv directories, then the system ones), uv and git settings, with
+    the scratch as home; nothing is inherited."""
+    tools = (str(p.parent) for p in (SYSTEM_GIT, SYSTEM_TAR, uv))
+    return {
+        "HOME": str(work),
+        "PATH": ":".join(dict.fromkeys([*tools, "/usr/bin", "/bin"])),
+        "LANG": "C.UTF-8",
+        "UV_CACHE_DIR": str(cache),
+        "UV_LINK_MODE": "copy",
+        "UV_NO_CONFIG": "1",
+        "UV_PYTHON_DOWNLOADS": "never",
+        "XDG_CONFIG_HOME": str(work / "config"),
+        **build_mod.GIT_ISOLATION,
+    }
+
+
+def _core_run(
+    argv: list[str], cwd: Path, env: Mapping[str, str], *, timeout: float
+) -> plat.RunResult:
+    result = plat.run_as(
+        plat.BUILD_USER, argv, env=env, cwd=cwd, network=True, timeout=timeout
+    )
+    if not result.launched:
+        infra(f"{plat.BUILD_USER} не запущен: {argv[:3]}: {result}")
+    return result
 
 
 def _measure(fn: Callable[[], Any]) -> Any:

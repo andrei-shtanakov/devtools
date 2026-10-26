@@ -305,28 +305,39 @@ DECOYS = {
 
 @pytest.mark.parametrize("case", list(DECOYS))
 def test_preexisting_build_user_refused_before_build(
-    root_world: RootWorld, monkeypatch: pytest.MonkeyPatch, case: str
+    root_world: RootWorld,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    case: str,
 ) -> None:
     """A decoy `df-build` made by the test (UID 0, in an administrative
     group, a home of root, or without a record in `accounts.toml` -- and
     then without a home, so only the record can refuse it): `bootstrap
     init` refuses at `build-user`; no process runs as a role, none is reaped
     (`pkill -u` of a UID-0 decoy would kill every root process: recorded,
-    never run), nothing is staged, the decoy's records are untouched."""
+    never run), nothing is staged, the decoy's records are untouched. With
+    a `ready` record the refusal names what `verify_build_user` finds, in
+    the install's output and its `failed` row (D3)."""
     lay = root_world.layout
     with _decoy(root_world, case):
         records = _records()
         launches = _launches(monkeypatch)
+        capsys.readouterr()
         with monkeypatch.context() as mp:
             reaps = _record_reaps(mp)
             rc = root_world.bootstrap(root_world.init_argv())
         assert rc == cli.EXIT_REFUSED
+        err = capsys.readouterr().err
         failed = [r for r in read_journal(lay.journal) if r["event"] == "failed"]
         assert [r["step"] for r in failed] == ["build-user"], failed
-        if case == "not-in-accounts":
-            assert failed[0]["detail"] == f"StepFailed: build-user: {FOREIGN}"
         problems = plat.verify_build_user(lay)
         assert any(DECOYS[case] in p for p in problems), problems
+        if case == "not-in-accounts":
+            assert failed[0]["detail"] == f"StepFailed: build-user: {FOREIGN}"
+        else:
+            refusal = "build-user: постусловие не выполнено: " + "; ".join(problems)
+            assert failed[0]["detail"] == f"StepFailed: {refusal}", failed
+            assert f"darkfactory: {refusal}" in err, err
         assert launches == []
         assert reaps == []
         assert _records() == records
