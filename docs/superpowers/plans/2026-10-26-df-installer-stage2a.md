@@ -74,6 +74,11 @@
    `/var/lib/df/{runs,publisher,perimeter}`. Обёртки не зависят от релиза (разрешают
    `current` при каждом вызове), поэтому маршрут активации их не трогает; `roles setup`
    повторяем и сверяет написанное с ожидаемым текстом. Автомат установки этапа 1 не меняется.
+   Оговорка (r2): текст обёрток содержит путь административного Python релиза `current`.
+   `darkfactory install` при смене этого пути печатает «обёртки ролей устарели:
+   выполните darkfactory roles setup» (код 0 — установка прошла), а `doctor`
+   (`roles.libexec`) показывает «нарушено» до повторного `roles setup`; тест
+   `test_install_new_admin_python_marks_wrappers_stale`.
 5. **`products.toml` в 2a не пишется командой.** Регистрация продукта — `setup-repo`
    (этап 3, §6.4 п. 1). Приёмка 2a пишет `products.toml` фикстурой от root; издатель и
    `doctor --product` его читают. Без `products.toml` издатель отказывает
@@ -136,10 +141,11 @@
 14. **Схема ответа издателя** (r1 N15, правка спеки rev 9 §5.5): `outcome ∈ {done, refused,
     unknown, stale_snapshot}`; `perimeter-status` с исходом `done` несёт
     `state ∈ {blocked, clear, unavailable}` и `reason` (у `unavailable`: `no_binding`,
-    `busy`, `integrity`, `epochs_unavailable`). `unavailable` — состояние периметра, а не
+    `busy`, `integrity`, `epochs_unavailable`, `lost`, `not_initialized`,
+    `restore_pending`; поля снимка — `null`). `unavailable` — состояние периметра, а не
     исход операции.
-15. **Потеря питания SQLite — вне v1, как у установки** (r1 N16, **на подпись
-    владельца**: меняет требование спеки §6.1 «Платформенные предпосылки»). Приёмка 2a
+15. **Потеря питания SQLite — вне v1, как у установки** (r1 N16; **решение владельца
+    26.10**; меняет требование спеки §6.1 «Платформенные предпосылки»). Приёмка 2a
     проверяет эффективные прагмы и восстановление после падения процесса; сохранность
     подтверждённого `COMMIT` при потере питания утверждается только по документации SQLite
     для выбранных прагм и не испытывается. Спека rev 9 вносит это в §0 «Что спека не
@@ -305,7 +311,13 @@ def test_ensure_roles_distinct_ids(fake_os):
 
 **Interfaces:**
 - Produces:
-  - `PublisherConfig(senders: Mapping[int, frozenset[str]])` — UID → операции;
+  - `PublisherConfig(senders: Mapping[int, frozenset[str]], api_base: str)` — UID →
+    операции; `api_base` — по умолчанию `"https://api.github.com"`; иное значение
+    допустимо только вида `http://127.0.0.1:<порт>` (r2 N6: межпроцессный транспорт
+    offline-приёмки), файл root `0644` — модельные роли его не меняют; каждый ответ
+    издателя несёт `evidence.api_base`, а `doctor` при нештатном значении даёт
+    `github.app` и `github.machine_user` «нарушено: нештатный API» — уровень 2 с ним
+    недостижим;
     `parse_publisher(text) -> PublisherConfig`, `dump_publisher(cfg) -> str`;
     `expected_publisher(accounts: Mapping[str, Account]) -> PublisherConfig` —
     `df-exec`: `{"merge", "record-violation", "perimeter-status"}`;
@@ -401,11 +413,16 @@ def test_run_record_rejects_unknown_field():
     `df-exec`, `df-review` — множество (RunAs, теги, команда с аргументами) **равно**
     сгенерированному для этой роли; оператор — сгенерированные правила оператора
     **входят** в его множество, остальное не проверяется;
-  - `io_log_problems() -> list[str]` — `!log_output` для `df-publish` подтверждается не
-    текстом `sudo -l`, а поведением (r1): `doctor` и приёмка сверяют, что после вызова
-    `perimeter-status` в каталоге I/O-журнала sudo (`iolog_dir` из `sudo -V` от root)
-    не появилось сессии этой команды; при включённом глобально `log_output` парный
-    контроль — сессия для `df-launch … check` появляется.
+  - `io_log_problems(layout) -> list[str]` — **поддерживаемый контракт I/O-журнала**
+    (r2 N2): выходные потоки команды `df-publish` не журналируются. Проверка по
+    эффективным `Defaults`, которые `sudo -l -U <роль>` печатает для `df-exec` и
+    `df-review` (разделы «Matching Defaults entries» и «Runas and Command-specific
+    defaults»): для команды `df-publish` последним значением каждого из `log_output`,
+    `log_stdout`, `log_stderr`, `log_ttyout` должно быть «выключено»; любое упоминание
+    `log_servers`, а также `log_output`-семейства с неопределимой областью действия или
+    нераспознанной строкой — «нарушено: конфигурация I/O-журнала не проверяема»
+    (не успех). `log_input`/`log_stdin`/`log_ttyin` не мешают (stdin издателя — запрос,
+    секретов в нём нет). Поведенческая проверка — в приёмке (Task 14), не в `doctor`.
 
 Текст (имена путей — от `layout`; `<op>` — оператор, имя пользователя ОС человека):
 
@@ -474,6 +491,7 @@ run` в sudoers нет: его вызывает `df-run-start` после сбр
   - `roles_setup.run(layout: Layout, *, operator: str, snap: Snapshot) -> None` — шаги
     под блокировкой писателя через `journal.run_steps`: `roles` (`ensure_roles`) →
     `dirs` → `publisher-config` (`expected_publisher` → `/etc/df/publisher.toml`) →
+    `perimeter-init` (`create_db` от `df-publisher` через `run_as`, Task 11) →
     `libexec` → `sudoers` (`render`, `install`) → `verify` (`wrapper_problems`,
     `policy_problems` для пяти имён).
 
@@ -538,28 +556,47 @@ run` в sudoers нет: его вызывает `df-run-start` после сбр
 - `launch.role_env(layout, role) -> dict[str, str]` — `HOME` = `role_home(role)`,
   `PATH` = `"/usr/bin:/bin"`, `LANG` = `"C.UTF-8"`, `TZ` = `"UTC"`;
 - `launch.role_cwd(layout, role) -> Path` — `role_home(role)/"work"`;
-- `launch.release_for(layout, op, snap, stdin) -> tuple[str, Path]` — для `check`,
-  `check-github`, `review` — `snap.release_id` (один снимок входа); для `run` — `run_id`
-  из stdin (≤ 256 байт) → запись `/var/lib/df/runs/<run_id>.json` (root, без ссылок) →
-  её `release_id`; запись релиза в `releases.toml` `allowed` и digest совпадает, иначе
-  отказ с причиной (`release_revoked`, `release_unknown`) (r1 N5);
+- `launch.release_for(layout, op, snap, stdin) -> tuple[str, Path, str | None]` — для
+  `check`, `check-github` — `snap.release_id` (один снимок входа), `run_id = None`; для
+  `run` и `review` — `run_id` из stdin (≤ 256 байт, `[A-Za-z0-9._-]+`) → запись
+  `/var/lib/df/runs/<run_id>.json` (root, без ссылок) → её `release_id`; запись релиза в
+  `releases.toml` `allowed` и digest совпадает, иначе отказ с причиной
+  (`release_revoked`, `release_unknown`) (r1 N5);
 - `launch.exec_main(argv, *, layout, snap) -> int` — `argv = [role, op]`, порядок:
   1. `os.closerange(3, …)` — до чтения stdin и любых файлов;
   2. фактический UID/EUID/GID == записи роли в `accounts.toml`, иначе отказ 2;
   3. `os.chdir(role_cwd)`; окружение — `role_env` (`os.environ` очищается);
   4. `release_for`;
   5. `os.execve(<release>/venv/devtools/bin/python, [python, "-I", "-B",
-     <release>/src/devtools/df/launch_release.py, role, op, release_id], role_env)` —
-     пути релиза этапа 1 (`venv/<repo>`, `src/<repo>`, r1 N3);
+     <release>/src/devtools/df/launch_release.py, role, op, release_id, run_id or "-"],
+     role_env)` — пути релиза этапа 1 (`venv/<repo>`, `src/<repo>`, r1 N3); `run_id`
+     доходит до кода релиза (r2 N1). Под `-I` каталог скрипта не в `sys.path`:
+     `launch_release.py` сам добавляет `<release>/src/devtools` (вычисленный из
+     `__file__`) первой строкой;
 - `launch.human_main(argv) -> int` — `darkfactory launch <role> <op>` (решение 12):
   `chdir("/")`, `closerange(3, …)`, затем `os.execv("/usr/bin/sudo", ["sudo", "-n",
   "-u", role, "<libexec>/df-launch", role, op])`;
-- `launch_release.main(argv) -> int` — `argv = [role, op, release_id]`; `release_id`
-  сверяется с каталогом файла (`Path(__file__).parents[3].name`), иначе отказ;
-  операции 2a: `check` → JSON `check_report()`; `check-github` (только `df-exec`) →
-  `GET /user` токеном `~/.config/df/github-token` (заголовок, не argv), печатает
-  логин; `run` → проверка актуальности проб модельных ролей от роли (Task 6) → отказ
-  «конвейер — этап 3»; `review` → отказ «конвейер — этап 3»;
+- `launch_release.main(argv) -> int` — `argv = [role, op, release_id, run_id | "-"]`;
+  `release_id` сверяется с каталогом файла (`Path(__file__).parents[3].name`), иначе
+  отказ; операции 2a:
+  - `check` → JSON `check_report()`;
+  - `check-github` (только `df-exec`) → JSON `{login, products: {repository_id:
+    {full_name, permissions}}}`: `GET /user` и `GET /repos/{full_name}` для каждого
+    продукта `products.toml` (читается от роли; `/etc/df` — `0644`) с `machine_user`
+    этой установки; токен — заголовком из `~/.config/df/github-token` (r2 N3);
+  - `run` (`df-exec`) → `RunRecord` и события `runs/<run_id>.events.jsonl` (действующий
+    пин — исходный плюс принятые `model_change`, не текущий `models.toml`) →
+    `probe.pin_ready(layout, role, pin)` для модельных ролей **своего** контекста
+    (`interview`, `author`) → отказ «конвейер — этап 3»;
+  - `review` (`df-review`, через `df-review-run` со stdin `run_id`) → то же для ролей
+    контекста `df-review` (`reviewer`, `executor-review`, `edge-check`, `judge`) → отказ
+    «конвейер — этап 3». Свежесть фактов каждой роли проверяется от её UID (r2 N1);
+- `probe.pin_ready(layout, role, pin: ModelPin) -> ProbeStatus` (новое в `df/probe.py`) —
+  **допуск без запуска харнесса**: `executable_target` → SHA-256 → профиль адаптера
+  (неизвестный или «изоляция не подтверждена» → «не поддерживается»), managed-контекст
+  (`managed_context`), отпечаток авторизации роли; затем `probe_status` последней записи
+  против этих фактов и против пина (`config_hash`, версия харнесса, model ID). В v1 —
+  всегда «не поддерживается: изоляция не подтверждена»;
 - `launch_release.check_report() -> dict[str, object]` — `uid`, `euid`, `gid`,
   `groups`, `env` (имена), `cwd`, `fds` (открытые дескрипторы > 2), `denied` (результат
   попыток открыть фиксированный список чужих путей: `errno` по каждому).
@@ -572,7 +609,13 @@ run` в sudoers нет: его вызывает `df-run-start` после сбр
   `test_release_for_run_revoked` (запись A отозвана, `current` = B allowed → отказ);
   `test_execve_paths_match_stage1_layout` (пути от `build.py`: `venv/devtools`,
   `src/devtools`); `test_human_main_chdir_before_sudo`; `test_check_github_only_df_exec`;
-  `test_launch_release_refuses_foreign_release_id`.
+  `test_launch_release_refuses_foreign_release_id`; `test_run_uses_record_pins_not_current_config`
+  (после регистрации `models.toml` изменён — проверяется пин записи);
+  `test_run_two_records_same_release_distinct` (две записи одного релиза с разными пинами —
+  проверяется пин своей записи); `test_run_resume_accepted_change_applies`;
+  `test_review_checks_only_df_review_roles` (устаревшая авторизация только у
+  `reviewer` → отказ `review`, `run` её не видит); `test_pin_ready_unsupported_harness`
+  (харнесс без подтверждённой изоляции → «не поддерживается», харнесс не исполняется).
 - [ ] **Step 2–4.** **Step 5: Commit** `feat(df): df-launch (admin pre-exec) and release role ops`
 
 ---
@@ -685,8 +728,10 @@ run` в sudoers нет: его вызывает `df-run-start` после сбр
   принадлежать только процессу, который уже не держит её, то есть погибшему;
 - `store.intent(res, payload) -> None` / `store.result(res, response) -> None` — файлы
   `intents/<key>.json`, `results/<key>.json`, запись `write_atomic` с `fsync` каталога;
-  повтор с готовым `result` → прежний ответ (кроме `perimeter-status` и `read-token`);
-  с `intent` без `result` → ветка сверки операции;
+  повтор с готовым `result` → прежний ответ (кроме `perimeter-status`, `read-token`,
+  `self-check`); с `intent` без `result` → ветка сверки операции. **`result` пишется
+  только для окончательных исходов** (`done`, `refused`); `unknown` не сохраняется, и
+  повтор снова идёт в сверку — внешнее действие не повторяется никогда (r2 N4);
 - журнал `publisher/journal.jsonl` — одна строка на запрос: время, отправитель, операция,
   `request_id`, `run_id`, digest, исход; секреты не пишутся никогда (поля ответа
   `read-token` заменяются `"token": "<redacted>"`).
@@ -712,9 +757,13 @@ run` в sudoers нет: его вызывает `df-run-start` после сбр
   `test_response_roundtrip`;
   `test_repeat_returns_previous_result`; `test_perimeter_status_and_read_token_not_replayed`;
   `test_extra_argv_refused_before_stdin`; `test_journal_has_no_token`.
-Операция `self-check` (решение 6): запрос `{schema, request_id}`; ответ `done` с
-`result.problems` из `github.self_check`; резервирование и журнал как у остальных; результат
-не воспроизводится при повторе (вычисляется заново).
+Операция `self-check` (решение 6): запрос `{schema, request_id}`; **без** `run_id` —
+порядок для неё: отправитель → разбор → резервирование → операция (`check_run` не
+вызывается, r2 N3); ответ `done` с `result = {installations: [{id, account,
+repository_ids, permissions}], problems}` из `github.self_check`; результат не
+воспроизводится при повторе. Для модельных операций неизвестный `run_id` —
+`refused: run_unknown`; этим пользуется `doctor` (проверка «издатель отвечает» без
+зарегистрированных прогонов).
 
 - [ ] **Step 2–4.** **Step 5: Commit** `feat(df): publisher request frame, sender, id reservation`
 
@@ -744,11 +793,13 @@ run` в sudoers нет: его вызывает `df-run-start` после сбр
   вернувшиеся равны запрошенным, иначе `GitHubRefused("token_scope_mismatch")`;
   `expires_at` разобран (RFC 3339) и лежит в `(now, now + 3600]`, иначе
   `token_expiry_invalid`;
-- `installations(jwt, transport) -> list[Installation]` и
-  `installation_repos(token, transport) -> list[int]` — **все страницы** (`per_page=100`,
-  ссылка `Link: rel="next"`, предел 50 страниц); ошибка любой страницы или превышение
-  предела — `GitHubUnavailable`, не частичный список; поле `total_count` сверяется с
-  числом полученных записей;
+- `installations(jwt, transport) -> list[Installation]` — `GET /app/installations`:
+  ответ — **массив**; все страницы по `Link: rel="next"` (`per_page=100`, предел 50);
+  `installation_repos(token, transport) -> list[int]` — `GET /installation/repositories`:
+  ответ — **объект** `{total_count, repositories}`; все страницы; сумма длин
+  `repositories` равна `total_count` последней страницы. Ошибка любой страницы,
+  превышение предела, неожиданная форма — `GitHubUnavailable`, не частичный список
+  (r2 N9);
 - `self_check(products, app_id, key, *, openssl, transport) -> list[str]` — репо каждой
   установки App ⊆ `repository_id` продуктов с этим `app_id`; иначе проблема
   `app_installation_outside_products: <id>` (решение 10);
@@ -761,7 +812,8 @@ run` в sudoers нет: его вызывает `df-run-start` после сбр
   (`HTTPS_PROXY` в окружении не используется); `test_self_check_outside_products`;
   `test_5xx_is_unavailable`; `test_pagination_all_pages` и
   `test_pagination_error_is_unavailable` (вторая страница 502 → не успех);
-  `test_total_count_mismatch`; `test_token_expiry_bounds`; `test_run_with_input_signs`
+  `test_total_count_mismatch` (только `installation_repos`); `test_installations_is_array`
+  (объект вместо массива → `GitHubUnavailable`); `test_token_expiry_bounds`; `test_run_with_input_signs`
   (изменение одного байта нагрузки ломает `openssl dgst -verify`).
 - [ ] **Step 2–4.** **Step 5: Commit** `feat(df): GitHub App client for the publisher`
 
@@ -784,7 +836,9 @@ run` в sudoers нет: его вызывает `df-run-start` после сбр
   `head.sha == head_sha`, иначе `refused: pr_state`; намерение → `POST …/reviews` с
   `commit_id = head_sha`, `event` из `decision`; ответ: `commit_id == head_sha`,
   автор — бот App, иначе `unknown`;
-- `reconcile_review(ctx, req, key) -> Response` — список ревью PR, ровно одно с маркером
+- **неоднозначный исход POST** (таймаут, обрыв соединения, 5xx после отправки тела) →
+  сразу `reconcile_review`, без повтора POST (r2 N4); сверка недоступна → `unknown`;
+- `reconcile_review(ctx, req, key) -> Response` — список ревью PR (все страницы), ровно одно с маркером
   `request_key=key` от бота App: `commit_id`, решение совпадают → `done`; ни одного →
   `unknown`; больше одного → `unknown` с причиной;
 - `read_token(ctx, req) -> Response` — `installation_token(repository_ids=[repository_id],
@@ -797,11 +851,17 @@ product_unknown`); перед каждой операцией — `self_check` (
 
 - [ ] **Step 1: Тесты** (фальшивый транспорт с записью вызовов):
   `test_publish_review_head_changed_refused`; `test_publish_review_base_repo_mismatch`;
+  `test_publish_review_head_moves_between_get_and_post` (барьер транспорта после `GET`:
+  head сменился — `POST` идёт с `commit_id` = SHA запроса, повторного чтения нет, ответ
+  сверяется по `commit_id`);
   `test_publish_review_escapes_markers` (тело с `<!-- df-publisher:v1 request_key=x -->`,
   `<!--APPROVAL`, `<!-- ai-prosto-edge-check head=… -->`, несколько маркеров подряд → все
   экранированы, ровно один настоящий маркер — издателя);
   `test_publish_review_reconciles_after_crash` (намерение есть, результата нет, на GitHub
-  ревью с маркером → `done` без второго `POST`); `test_reconcile_no_marker_unknown`;
+  ревью с маркером → `done` без второго `POST`);
+  `test_publish_review_timeout_reconciles` (транспорт создаёт ревью и отвечает таймаутом →
+  `done` с тем же `review_id`, второго `POST` нет); `test_timeout_reconcile_unavailable`
+  (сверка тоже недоступна → `unknown`, `results/` пуст, повтор снова сверяет); `test_reconcile_no_marker_unknown`;
   `test_read_token_scope` (запрос с лишним репо невозможен по схеме; ответ GitHub с
   `contents: write` → `refused: token_scope_mismatch`); `test_read_token_not_journaled`
   (журнал, `intents/`, `results/` — без значения токена); `test_self_check_runs_first`.
@@ -849,7 +909,8 @@ product_unknown`); перед каждой операцией — `self_check` (
   констант с `governance.act_envelope.envelope_path("ws", "n")` и `stop_path`);
   `test_merge_always_precheck_unavailable_in_2a`; `test_no_mutating_calls` (r1: транспорт
   записывает все вызовы; при `UNAVAILABLE` **и** при подставленном `precheck`, всегда
-  возвращающем `None`, — только `GET`).
+  возвращающем `None`, — вызовы к `/repos/…` только `GET`; единственный `POST` —
+  выпуск токена установки `/app/installations/{id}/access_tokens`).
 - [ ] **Step 2–4.** **Step 5: Commit** `feat(df): merge kind routing (stage 2a, no merge)`
 
 ---
@@ -858,11 +919,27 @@ product_unknown`); перед каждой операцией — `self_check` (
 
 **Files:**
 - Create: `df/publisher/perimeter.py`, `df/perimeter_client.py`
+- Modify: `df/cli.py` (`perimeter restore`, писатель), `df/roles_setup.py`
+  (`perimeter-init`)
 - Test: `tests/df/test_perimeter.py`, `tests/df/test_perimeter_client.py`
 
 **Interfaces:**
 - `DB = layout.perimeter_dir / "events.sqlite"`; `MAX_EVENTS = 10_000`;
   `BUSY_TIMEOUT_MS = 5000`;
+- **Жизненный цикл базы** (r2 N5): таблица `meta(key, value)` с `admission ∈ {ready,
+  restored_pending}`; `/var/lib/df/perimeter/created` — отметка первичного создания
+  (`df-publisher`, `0600`):
+  - `create_db(layout)` — только шаг `roles setup` `perimeter-init`, только если нет ни
+    базы, ни отметки; пишет схему, `admission = ready`, затем отметку;
+  - `open_db` **никогда не создаёт**: нет базы при отметке → `unavailable: lost`
+    (обращение к человеку); нет ни того ни другого → `unavailable: not_initialized`;
+  - `darkfactory perimeter restore --from PATH | --empty` (root, писатель; копия
+    проверяется `integrity_check` и инвариантами до установки) ставит базу на место с
+    `admission = restored_pending`;
+  - `restored_pending` при открытии: источник эпох доступен → в одной транзакции
+    консервативное `registered(E)` для **каждого** корня из множества «корни строк
+    `events` ∪ корень текущей привязки» (источник `db_restore`) и `admission = ready`;
+    недоступен (в 2a — всегда) → `unavailable: restore_pending`;
 - `open_db(layout) -> sqlite3.Connection` — `journal_mode=DELETE`,
   `synchronous=EXTRA`, `fullfsync=ON` и `checkpoint_fullfsync=ON` на macOS,
   `busy_timeout`; эффективные значения читаются `PRAGMA` обратно и сверяются (иначе
@@ -892,9 +969,11 @@ product_unknown`); перед каждой операцией — `self_check` (
   `perimeter-status` через `sudo -n -u df-publisher <libexec>/df-publish
   perimeter-status` (stdin); `stale_snapshot` → `trust = reload()` и **новый**
   `request_id` с новым `expected_snapshot_sha`; сбой вызова (не ответ) — повтор того же
-  запроса с **тем же** `request_id` (minor r7 №2); ответ `done`: `snapshot_sha` и
-  `last_epoch` равны `trust`, иначе `PerimeterState("unavailable", "snapshot_mismatch")`;
-  исчерпание попыток — `unavailable`.
+  запроса с **тем же** `request_id` (minor r7 №2); ответ `done` со `state =
+  unavailable` → `PerimeterState("unavailable", <reason ответа>)` (поля снимка в таком
+  ответе — `null`, r2 N10); со `state ∈ {blocked, clear}` — `snapshot_sha` и
+  `last_epoch` обязаны равняться `trust`, иначе `PerimeterState("unavailable",
+  "snapshot_mismatch")`; исчерпание попыток — `unavailable`.
 
 - [ ] **Step 1: Тесты** — сценарии §6.1 «Тесты», возможные на поддельном
   `EpochSource`: обнаружение → эпохи недоступны → `pending` → эпохи доступны →
@@ -904,11 +983,18 @@ product_unknown`); перед каждой операцией — `self_check` (
   конкурентных `perimeter-status` с `pending` (один переход); аварийное завершение
   писателя (`os._exit` внутри транзакции) → следующее открытие → подтверждённое событие на
   месте; испорченный индекс (`writable_schema`) / дубль `UNIQUE` / неизвестное состояние
-  → `unavailable`; восстановление из копии → консервативное событие; клиентский номер
+  → `unavailable`; `test_open_never_creates` (нет базы + отметка → `lost`; нет обоих →
+  `not_initialized`; файл не появляется); `test_restore_stale_copy_blocks` (исправная
+  устаревшая копия без последнего события → `restored_pending` → при доступных эпохах
+  консервативное событие на каждый корень → `blocked` до следующей эпохи);
+  `test_restore_interrupted` (сбой между вставками → после повторного открытия либо всё,
+  либо ничего — одна транзакция); `test_restore_pending_without_epochs_unavailable`; клиентский номер
   эпохи — поля нет в схеме; 10 000 событий — `perimeter_status` укладывается в
   `2.0` с на раннере (замер пишется в вывод теста); `test_pragmas_effective`
   (на macOS `fullfsync == 1`); `test_no_binding_refuses`; `test_client_new_request_id_after_stale`;
-  `test_client_same_request_id_on_retry`; `test_client_snapshot_mismatch_unavailable`.
+  `test_client_same_request_id_on_retry`; `test_client_snapshot_mismatch_unavailable`
+  (у `clear`); `test_client_keeps_unavailable_reason` (`no_binding`, `busy`, `integrity`,
+  `lost`, `not_initialized`, `restore_pending` с `null`-снимком — причина сохраняется).
 - [ ] **Step 2–4.** **Step 5: Commit** `feat(df): perimeter event store and status ops`
 
 ---
@@ -972,25 +1058,27 @@ product_unknown`); перед каждой операцией — `self_check` (
    по каждому пути списка роли (у `df-exec`: `secrets/`, `~df-review`, `~<оператор>/.config/gh`;
    у `df-review`: `secrets/`, токен machine user); для `df-publisher` — `self-check`
    отвечает и `secrets/app-<app_id>.pem` есть (через ответ, не чтением root);
-5. `publisher.answers` — `perimeter-status` от обеих модельных ролей через настоящий
-   `sudo`: корректный `df/publisher-response/v1`; в 2a — `state = unavailable`,
-   `reason = no_binding`;
+5. `publisher.answers` — `perimeter-status` с `run_id = "doctor-probe"` от обеих
+   модельных ролей через настоящий `sudo`: корректный `df/publisher-response/v1` с
+   `refused: run_unknown` (r2 N3: «отвечает» не требует прогона);
 6. `publisher.foreign` — `df-review` → `df-publish merge` отвергнут sudo;
 7. `product.registered` — `P` есть в `products.toml`;
-8. `github.machine_user` (r1 N10) — `df-launch df-exec check-github`: логин равен
-   `machine_user` продукта; `GET /repos/{full_name}` этим токеном: `permissions` по
-   профилю (`write` — `push = true`, `admin = false`; `fork` — `push = false`); 401 —
+8. `github.machine_user` (r1 N10) — ответ `df-launch df-exec check-github` (Task 5):
+   `login` равен `machine_user` продукта; `products[P].permissions` по профилю
+   (`write` — `push = true`, `admin = false`; `fork` — `push = false`); 401 —
    «нарушено: токен отозван»; сеть/5xx — «данные недоступны»;
-9. `github.app` — `self-check` без проблем; установка `installation_id` продукта
-   существует, содержит `repository_id`, права установки ⊇ `contents: write`,
-   `pull_requests: write`; источники доверия — «не проверено (этап 3)», уровень 2 этим
-   не блокируется;
+9. `github.app` — ответ `self-check` (Task 7): `problems` пуст; в `installations` есть
+   `installation_id` продукта, его `repository_ids` содержат `P`, `permissions` ⊇
+   `contents: write`, `pull_requests: write`; источники доверия — «не проверено
+   (этап 3)», уровень 2 этим не блокируется;
 10. `models.access` — модельные роли `P`: актуальная проба (§3.6), проверяемая от роли;
     в v1 — «не подтверждён» (решение 9).
 Уровень 2 достигнут ⇔ уровень 1 и проверки 1–10 `ok` (9 — с оговоркой этапа 3).
 
-- [ ] **Step 1: Тесты** — каждая проверка с подменёнными фактами: ok / нарушено / данные
-  недоступны / нужен sudo; неверный логин machine user, недостаточные права, App без
+- [ ] **Step 1: Тесты** — каждая проверка с подменёнными **ответами операций** (JSON
+  `check-github`, `self-check`, `perimeter-status`, разобранные теми же парсерами, что
+  в проде): ok / нарушено / данные недоступны / нужен sudo; свежая установка без
+  прогонов — `publisher.answers` ok; PAT профиля `fork` у продукта `write`; неверный логин machine user, недостаточные права, App без
   продукта в установке, отозванный токен, недоступный GitHub — не `ok`; полный зелёный
   набор с фикстурной пробой — уровень 2 достигнут (положительный контроль механизма);
   `doctor` без `--product` уровень 2 не считает.
@@ -1007,7 +1095,11 @@ product_unknown`); перед каждой операцией — `self_check` (
 
 Мир: `installed_world` этапа 1 → `darkfactory roles setup --operator runner` →
 фикстурный `products.toml` (продукт `repository_id = 1`, App 1) → фикстурный ключ App
-(тестовый PEM) → фикстурная запись прогона в `runs/` (root, помечена `"fixture": true` в
+(тестовый PEM) → **локальный поддельный GitHub** (`tests/df/fake_github.py`: HTTP на
+`127.0.0.1`, проверяет подпись JWT тестовым публичным ключом, отдаёт установки,
+репозитории, токены, PR, ревью по сценарию теста) и `api_base` в `publisher.toml`
+(r2 N6; отмечается в evidence; `check-github` роли ходит туда же — `launch_release`
+берёт `api_base` из того же файла) → фикстурная запись прогона в `runs/` (root, помечена `"fixture": true` в
 evidence, r1 N11) → для отзыва — фикстурная правка `releases.toml`. Teardown удаляет
 роли, `/etc/sudoers.d/df`, `<R>`, проверяет, что записей нет. Сбой мира, запуска или
 наблюдателя — `pytest.fail("инфраструктура: …")`, не PASS и не skip.
@@ -1025,12 +1117,12 @@ evidence, r1 N11) → для отзыва — фикстурная правка 
 | те же операции **мимо sudoers**: `df-publish` от `df-publisher` через `run_as` с `SUDO_UID` = UID чужой роли | издатель (`operation_not_allowed`) | с `SUDO_UID` своей роли — ответ |
 | `sudo -E` / `--preserve-env` / лишний аргумент после операции | sudo | без них — ответ |
 | `SUDO_UID=0 sudo -u df-publisher … perimeter-status` от `df-exec` | — (не отказ): ответ, evidence — отправитель `df-exec` | — |
-| `df-exec` → `self-check` (через sudo) | sudo | root → `self-check`: ответ |
+| `df-exec` → `self-check` (через sudo) | sudo | root → `self-check` через настоящую цепочку и поддельный GitHub: `done`, `problems` пуст; сценарий «лишняя установка» — `problems` не пуст |
 | `run_id` прогона на отозванном релизе | издатель (`release_revoked`) и `df-launch run` (`release_revoked`) | `run_id` на `allowed`: ответ |
 | `run start` при отозванном `current` | `df-run-start` (код 2, причина) | при `allowed`: запись есть, затем отказ `df-launch run` «доступ к моделям не подтверждён» |
 | повтор `perimeter-status` | — : каждый раз заново `unavailable/no_binding` (журнал — две строки) | — |
 | тот же `request_id` с другим содержимым | издатель (`request_id_reused`) | первый запрос — ответ |
-| `!log_output` для `df-publish` | sudo I/O-журнал включается на время теста (`Defaults log_output` во втором файле `sudoers.d`); сессии `df-publish` нет | сессия `df-launch … check` есть |
+| I/O-журнал sudo (r2 N2), четыре конфигурации во втором файле `sudoers.d` на время теста: (а) глобальный `log_output`; (б) `Defaults!<df-publish> log_output, iolog_dir=<другой>`; (в) `log_servers=127.0.0.1:30344`; (г) только `log_input` | (а), (г): уникальный маркер stdout ответа `perimeter-status` от `df-exec` (поле `evidence.request_id`) не найден ни в одном файле под `iolog_dir` любого вида, `io_log_problems` пуст; (б), (в): `io_log_problems` — «нарушено» | в (а) маркер stdout `df-launch … check` в журнале **найден** |
 
 Переносы этапа 1:
 - `test_run_start_no_release_code_before_drop` — sentinel-интерпретатор релиза
@@ -1064,7 +1156,13 @@ evidence, r1 N11) → для отзыва — фикстурная правка 
 
 Workflow: `on: workflow_dispatch` (только), `environment: df-stage2-live`, матрица
 macos-15 / ubuntu-24.04, `if: github.ref == 'refs/heads/master'`. Шаги: подготовка хоста
-и установка этапа 1 (как `live_install.py`) → `roles setup` → `products.toml` стенда из
+→ установка **проверяемой реализации** (r2 N7): фикстурный профиль `root_world` из одного
+члена `devtools` — bare-репо, собранное из чекаута workflow на коммите `github.sha`
+(тот же механизм, что `installed_world` этапа 1, но в раскладке `/`); до любых операций
+с секретами сверка: `admin_digest` установленного релиза равен `tree_digest` каталога
+`df/` чекаута, а `release.json` называет `github.sha`; расхождение — провал
+«инфраструктура»; обе идентичности — в evidence. Манифест зонтика здесь не
+используется: его пин devtools старше 2a → `roles setup` → `products.toml` стенда из
 переменных → `setup-agent app-key`/`machine-token` из секретов (файлы во `RUNNER_TEMP`,
 `0600`, удаляются шагом `always()`) → фикстурная запись прогона (как Task 14, отмечена в
 evidence: штатный `run start` в v1 останавливается на пробах) → `live_stand.py`. Перед
@@ -1079,14 +1177,23 @@ evidence: штатный `run start` в v1 останавливается на �
 3. **сверка после потерянного ответа**: root удаляет `results/<key>.json` (имитация сбоя
    после действия, до записи результата), повтор → `done` с тем же `review_id`, второго
    `POST` нет;
-4. **смена head**: machine user пушит второй коммит после чтения `head_sha`; запрос с
-   прежним `head_sha` → `refused: pr_state`; ревью, опубликованное до пуша, привязано к
-   прежнему SHA (`commit_id`);
+4. **смена head** (r2 N8, B §4.5): (а) запрос с прежним `head_sha` после пуша →
+   `refused: pr_state`; (б) окно между чтением издателя и публикацией: издатель опирается
+   на свойство GitHub «ревью с `commit_id = X` привязано к X» — его стенд проверяет
+   напрямую: после пуша нового коммита тест публикует `COMMENT`-ревью полным токеном
+   установки с `commit_id` = прежний SHA; GitHub сохраняет `commit_id` прежним, а
+   список ревью нового head его не содержит. Порядок операций внутри издателя в этом окне
+   (чтение → публикация без повторного чтения, `commit_id` из запроса) — unit-тест Task 9
+   с барьером транспорта `test_publish_review_head_moves_between_get_and_post`;
 5. `df-review` → `read-token` → `git --config-env=http.extraHeader=DF_READ_AUTH clone`
    приватного стенда проходит. Тем же токеном: `git push` новой ветки, `POST …/reviews`
-   (`COMMENT`), `PATCH …/pulls/{n}` (заголовок) — отказ GitHub (403/404). Контроль
-   выполнимости тех же трёх запросов: `push` и `PATCH` — токеном machine user, `POST
-   …/reviews` — через `publish-review`; все проходят;
+   (`COMMENT`), `PATCH …/pulls/{n}` (заголовок), `PUT …/pulls/{n}/merge` — отказ GitHub
+   **по правам**: `403` с сообщением «Resource not accessible by integration» (r2 N8).
+   Контроль выполнимости: `push` и `PATCH` — токеном machine user (проходят); `POST
+   …/reviews` — через `publish-review` (проходит); `PUT …/merge` — полным токеном
+   установки App на тот же PR возвращает **не** 403, а отказ состояния (`405`, PR не
+   одобрен по ruleset) — то есть у полномочия есть право, и 403 `read-token` — именно
+   нехватка прав, а не состояние PR;
 6. во время чтения `ps -axww -o args` (снимок каждые 100 мс) не содержит токена; журнал
    издателя, `/var/lib/df/publisher/**`, каталог I/O-журнала sudo и `.git/config` клона —
    без токена;
@@ -1115,6 +1222,6 @@ Evidence: id прогонов, `review_id`, ответы издателя (бе�
   (B §5.8): в 2a `check_run` сверяет корень только у операций периметра; запись
   продукта командой (`setup-repo`).
 - Таблица конвейеров `df-launch run` и `df-review-run` с реальным ревью — этап 3/4.
-- Испытание потерей питания для SQLite — вне v1 (решение 15, на подпись владельца).
+- Испытание потерей питания для SQLite — вне v1 (решение 15, владелец 26.10).
 - `releases.toml` `revoked` пишет `darkfactory update` (этап 4); в 2a отзыв в приёмке
   делает фикстура.
