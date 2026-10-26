@@ -339,15 +339,24 @@ remediation-issue у уже помеченного родителя). Повто
    root утверждённым uv из п. 3 в каталог root вне дерева релиза:
 
    ```sh
-   sudo /usr/local/libexec/darkfactory/bin/uv python install 3.12.13 --no-bin \
-     --install-dir /usr/local/libexec/darkfactory-bootstrap/python
+   cd / && sudo -H /usr/local/libexec/darkfactory/bin/uv --no-config python install 3.12.13 \
+     --no-bin --install-dir /usr/local/libexec/darkfactory-bootstrap/python
    ```
 
-   `--no-bin` обязателен: `sudo` на macOS сохраняет `HOME` человека, и без флага root
-   положил бы ссылку `python3.12` в его `~/.local/bin`.
-
-   интерпретатор для bootstrap —
+   Интерпретатор для bootstrap:
    `/usr/local/libexec/darkfactory-bootstrap/python/cpython-3.12.13-macos-aarch64-none/bin/python3.12`.
+
+   `sudo` на macOS сохраняет `HOME` человека, а root-овский uv читал бы его настройки. Каждая
+   часть рецепта закрывает своё (тот же класс, что `UV_NO_CONFIG` установщика, решение
+   владельца 22.10):
+   - `--no-config` — не читаются ни пользовательская конфигурация человека
+     (`~/.config/uv/uv.toml`), ни конфигурация проекта (`uv.toml`, `[tool.uv]` в
+     `pyproject.toml`) в каталогах над текущим; любая из них могла бы подменить источник
+     загрузки Python (`python-install-mirror`, `python-downloads-json-url`), и root поставил
+     бы чужой интерпретатор;
+   - `cd /` — текущий каталог вне любого проекта;
+   - `sudo -H` — `HOME` root-а: в кеше человека (`~/.cache/uv`) не появляются файлы root;
+   - `--no-bin` — uv не кладёт ссылку `python3.12` в `~/.local/bin`.
 5. Чекаут этого репо и полный SHA коммита манифеста зонтика.
 
 ### Первая установка

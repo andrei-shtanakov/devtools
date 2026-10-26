@@ -2915,16 +2915,22 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 > мержем.
 
 - [ ] Установщик df (команда darkfactory), этап 1 (конфигурация, установка, модели): план `docs/superpowers/plans/2026-10-16-df-installer-stage1.md` @owner:github:andrei-shtanakov @id:df-installer-stage1 @epic:eco.dark-factory
-- [ ] Живая установка профиля `core` на macOS arm64 и Ubuntu x86_64 по манифесту зонтика (`080f15e`, ai-orchestrators-workspace#52): `bootstrap init` командой README в root-мире CI `df-stage1`, `darkfactory doctor --json` — уровень 1, все проверки `ok`, `--help` каждой точки входа каждого члена от `df-build`; до неё — повтор инвентаризации нативных артефактов `core` правилом (в) на пинах манифеста; закрывает приёмку этапа 1 по §10 @owner:github:andrei-shtanakov @id:df-installer-stage1-live @epic:eco.dark-factory
+- [ ] Живая установка профиля `core` на macOS arm64 и Ubuntu x86_64 по манифесту зонтика (`080f15e`, ai-orchestrators-workspace#52) в CI `df-stage1`, в двух формах — в раскладке `/` командой README как процессом и в root-мире `<R>` в процессе; в обеих `doctor --json` — уровень 1, все проверки `ok`, `--help` каждой объявленной точки входа не от root; до неё — повтор инвентаризации нативных артефактов `core` правилом (в) на пинах манифеста; закрывает приёмку этапа 1 по §10 @owner:github:andrei-shtanakov @id:df-installer-stage1-live @epic:eco.dark-factory
       Манифест доставлен: ai-orchestrators-workspace#52 влит (`080f15e`), #51 закрыт,
       impresario — отдельно (ai-orchestrators-workspace#53). Инвентаризация больше не держит
       рукописных пинов: `core_profile()` (`tests/df/root_world.py`) читает профиль из
       `CORE_MANIFEST` собственными `fetch_manifest`/`parse_profile`; сбой сети — падение
-      теста, не пустой замер. Живая установка — `tests/df/test_acceptance_root_live.py`
-      (evidence `live/<платформа>.json`, `live/<платформа>-doctor.json`,
-      `journals/live-core.jsonl`). Вердикт инвентаризации — `core_inventory` в
-      `boundary/<platform>.json`; зелёный прогон необходим, но не достаточен — пункт
-      закрывает контроллер по evidence (§9 `docs/evidence/2026-10-26-df-stage1-acceptance.md`).
+      теста, не пустой замер; вердикт — `core_inventory` в `boundary/<platform>.json`.
+      Форма `/` (обязательная, решение 26.10) — `tests/df/live_install.py` после root-прогона
+      и шага хоста `/opt` (`chmod go-w`, `setfacl -b`, только Linux): подготовка по README
+      (uv 0.11.23 по опубликованной sha256; на macOS Python bootstrap рецептом README
+      `sudo -H … uv --no-config python install 3.12.13 --no-bin`), `sudo …/bootstrap.py init`,
+      `sudo darkfactory doctor --json`, smoke от пользователя runner-а; evidence
+      `live/<платформа>-production*.json`, `…-production-journal.jsonl`, `live/opt-host.txt`.
+      Форма `<R>` — `tests/df/test_acceptance_root_live.py`, smoke от `df-build`; evidence
+      `live/<платформа>.json`, `…-doctor.json`, `journals/live-core.jsonl`. Зелёный прогон
+      необходим, но не достаточен — пункт закрывает контроллер по evidence (§9, §9.1
+      `docs/evidence/2026-10-26-df-stage1-acceptance.md`).
 - [ ] Смена закреплённого `uv`, Python профиля или пина члена `core`: перемерить то, что закреплено за прежним значением @owner:github:andrei-shtanakov @id:df-installer-pin-drift @epic:eco.dark-factory @trigger:"смена UV_PINNED_VERSION, Python профиля или пина члена core в манифесте"
       `uv`: замер `UV_PROJECT_KEYS_<версия>` (дополнение A1/A2 предполётной проверки Task 7a)
       и таблица записи пути корня в `tests/df/fixtures/locks/SOURCES.md`, переименовать

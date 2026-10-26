@@ -9,17 +9,20 @@ for good, stage 1 has no uninstall):
 What README «Установка DarkFactory: этап 1» says, as processes:
 
 1. No state of an earlier install (`df-build`, `/opt/df`, `/etc/df`,
-   `/var/lib/df`, the uv directory, the command link); any is a finding.
+   `/var/lib/df`, `/usr/local/libexec/darkfactory`, the bootstrap Python
+   directory, the command link); any is a finding.
 2. «Подготовка»: on macOS the Command Line Tools selected (the workflow's R96
    step); the uv 0.11.23 release asset checked against its published
    `.sha256` (and the README's value), its version, then `sudo install` to
    `UV_DIR` root `0755`; the bootstrap Python (Ubuntu `/usr/bin/python3`;
-   macOS the README recipe, owner decision 26.10: `sudo <uv> python install
-   PYTHON --no-bin --install-dir BOOTSTRAP_PYTHON_DIR`), which must pass
-   `trusted_path_problems` (a problem is a finding). The `/opt` chain is the
-   workflow's host-configuration step, before this script.
+   macOS the README recipe `PYTHON_RECIPE`, owner decision 26.10), which
+   must pass `trusted_path_problems` (a problem is a finding); root-owned
+   entries the recipe left in this user's uv directories are a finding. The
+   `/opt` chain is the workflow's host-configuration step, before this
+   script.
 3. The README first-install command verbatim (`documented_command`, the
-   placeholders filled), a process of root through `sudo`.
+   placeholders filled), a process of root through `sudo`; the install
+   journal is copied out whatever its result.
 4. `sudo darkfactory doctor --json`: level 1 reached, every check `ok`.
 5. Every declared console entrypoint of every member `--help` as this
    (unprivileged) user, exit 0; then `doctor` again, every check `ok`.
@@ -74,6 +77,23 @@ LINUX_PYTHON = "/usr/bin/python3"
 #: README «Подготовка» (owner decision 26.10): the macOS bootstrap Python,
 #: installed by root with the approved uv, outside the df release tree.
 BOOTSTRAP_PYTHON_DIR = Path("/usr/local/libexec/darkfactory-bootstrap/python")
+#: README recipe, run from `/`: `sudo -H` (root's HOME: no root-owned files in
+#: the human's cache), `--no-config` (neither the human's user config nor a
+#: project config above the cwd), `--no-bin` (no link in a `bin` of a HOME).
+PYTHON_RECIPE = (
+    "sudo",
+    "-H",
+    "/usr/local/libexec/darkfactory/bin/uv",
+    "--no-config",
+    "python",
+    "install",
+    PYTHON,
+    "--no-bin",
+    "--install-dir",
+    str(BOOTSTRAP_PYTHON_DIR),
+)
+#: This user's uv directories root must not have written into (recipe).
+USER_UV_DIRS = (".config/uv", ".cache/uv", ".local/bin", ".local/share/uv")
 CHECKOUT_PLACEHOLDER = "<чекаут-devtools>"
 USER_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C"}
 TAIL = 4000
@@ -127,8 +147,12 @@ def run(platform: plat.PlatformName, work: Path, live: Path, facts: dict) -> Non
     work.mkdir(parents=True, exist_ok=True)
     facts["uv"] = prepare_uv(platform, work)
     python = bootstrap_python(platform, work, facts)
+    facts["local_bin"] = local_bin_facts(layout)
     argv = install_argv(python)
     facts["init"] = _run(argv, timeout=3600)
+    facts["journal"] = copy_journal(
+        layout, live / f"{platform}-production-journal.jsonl"
+    )
     if facts["init"]["code"] != 0:
         raise Failure(f"init: код {facts['init']['code']}")
     doctor_argv = command_argv(layout, ["doctor", "--json"])
@@ -150,7 +174,7 @@ def leftovers(layout: Layout) -> dict[str, str]:
             layout.opt,
             layout.etc,
             layout.var,
-            UV_DIR.parent.parent,
+            UV_DIR.parent,
             BOOTSTRAP_PYTHON_DIR.parent,
             layout.local_bin / "darkfactory",
             layout.build_home,
@@ -187,31 +211,63 @@ def bootstrap_python(platform: plat.PlatformName, work: Path, facts: dict) -> st
 
 
 def _install_python(work: Path, facts: dict) -> str:
-    """`sudo <uv> python install PYTHON --no-bin --install-dir
-    BOOTSTRAP_PYTHON_DIR`; the one `cpython-PYTHON-*/bin/python3.12` it made.
-    `~/.local/bin` of the `sudo` HOME is recorded: `--no-bin` keeps root out
-    of the human's home."""
-    argv = ["sudo", str(UV_DIR / "uv"), "python", "install", PYTHON, "--no-bin"]
-    argv += ["--install-dir", str(BOOTSTRAP_PYTHON_DIR)]
-    done = _run(argv, timeout=900, cwd=work)
+    """`PYTHON_RECIPE` from `/`; the one `cpython-PYTHON-*/bin/python3.12` it
+    made. Root-owned entries in this user's uv directories are a finding."""
+    done = _run(list(PYTHON_RECIPE), timeout=900, cwd=Path("/"))
     facts["python_install"] = done
     if done["code"] != 0:
         raise Failure(f"uv python install: {done}")
     found = sorted(BOOTSTRAP_PYTHON_DIR.glob(f"cpython-{PYTHON}-*/bin/python3.12"))
-    facts["python_install"]["found"] = [str(p) for p in found]
-    facts["python_install"]["links"] = _links_left()
+    done["found"] = [str(p) for p in found]
+    done["root_in_user_dirs"] = root_owned_in_user_dirs()
+    if done["root_in_user_dirs"]:
+        raise Failure(f"находка: root писал в дом: {done['root_in_user_dirs']}")
     if len(found) != 1:
         raise Failure(f"uv python install: интерпретатор не один: {found}")
     return str(found[0])
 
 
-def _links_left() -> dict[str, Any]:
-    """The `sudo` HOME and its `~/.local/bin` listing (as root): where
-    `uv python install` puts its executable links, if anywhere."""
-    home = _run(["sudo", "/usr/bin/printenv", "HOME"], timeout=60)
-    path = f"{str(home['stdout_tail']).strip()}/.local/bin"
-    listing = _run(["sudo", "/bin/ls", "-la", path], timeout=60)
-    return {"sudo_home": home["stdout_tail"].strip(), "bin": listing}
+def root_owned_in_user_dirs() -> list[str]:
+    """Entries owned by uid 0 under `USER_UV_DIRS` of this user's HOME."""
+    home = Path(os.environ["HOME"])
+    found = []
+    for rel in USER_UV_DIRS:
+        top = home / rel
+        if not os.path.lexists(top):
+            continue
+        for path in [top, *top.rglob("*")]:
+            if os.lstat(path).st_uid == 0:
+                found.append(str(path))
+    return found
+
+
+def local_bin_facts(layout: Layout) -> dict[str, Any]:
+    """`/usr/local` and `/usr/local/bin` as found: owner, mode, problems (why
+    the command link is or is not made)."""
+    out: dict[str, Any] = {}
+    for path in (layout.local_bin.parent, layout.local_bin):
+        st = os.lstat(path)
+        out[str(path)] = {"uid": st.st_uid, "mode": oct(st.st_mode & 0o7777)}
+    out["problems"] = plat.trusted_path_problems(layout.local_bin)
+    return out
+
+
+def copy_journal(layout: Layout, dest: Path) -> dict[str, Any]:
+    """The install journal (root's) copied to `dest` through `sudo -n cat`."""
+    done = subprocess.run(
+        ["sudo", "-n", "/bin/cat", str(layout.journal)],
+        capture_output=True,
+        stdin=subprocess.DEVNULL,
+        timeout=60,
+        check=False,
+    )
+    dest.write_bytes(done.stdout)
+    rows = [json.loads(line) for line in done.stdout.splitlines() if line.strip()]
+    return {
+        "code": done.returncode,
+        "rows": len(rows),
+        "failed": [r for r in rows if r.get("event") == "failed"],
+    }
 
 
 def _at_least_312(version: str) -> bool:
@@ -281,7 +337,12 @@ def command_argv(layout: Layout, argv: list[str]) -> list[str]:
 def doctor(argv: list[str], raw: Path) -> dict[str, Any]:
     """`doctor --json`: exit 0, empty stderr, level 1, every check `ok`."""
     done = subprocess.run(
-        argv, capture_output=True, text=True, timeout=600, check=False
+        argv,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=600,
+        check=False,
     )
     raw.write_text(done.stdout)
     facts: dict[str, Any] = {
