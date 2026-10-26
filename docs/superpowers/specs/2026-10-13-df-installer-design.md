@@ -321,6 +321,13 @@ depends_on: devtools/docs/superpowers/specs/2026-10-12-approval-act-review-desig
 > `trust.toml` — `unavailable: no_binding` (§6.1). Стенд живых строк 2a — приватный репо
 > владельца, App спайка, PAT machine user на стенд, секреты в environment с одобрением
 > владельца (план, «Решения» п. 2).
+>
+> **rev 9, круги stage2a-r1…r5** (локальный цикл Codex 26.10; r1 — 12 major, r2 — 8, r3 — 4,
+> r4 — 3, r5 — converged, 1 minor исправлен без повтора). В спеку из кругов: схема ответа
+> издателя `df/publisher-response/v1` и `unavailable` как состояние периметра (§5.5);
+> подготовка до кода релиза и человеческие входы `darkfactory launch|run` (§4.2, §5.8);
+> `SUDO_UID` в таблице §4.5; потеря питания SQLite вне v1 — **решение владельца 26.10**
+> (§0, §6.1). Остальное — в плане этапа 2a.
 
 ## 0. Суть
 
