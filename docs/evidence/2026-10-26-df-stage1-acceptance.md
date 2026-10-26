@@ -572,3 +572,59 @@ disputatio.cli:main`; steward `007d0049` — `gate-check`, `steward`, `steward-c
 на ячейку. Против раздела 8 сменились пины devtools (`d2f569eb` → `335188f6`) и spec-runner
 (`d586fbb6` → `c71decf7`); вердикты те же. Контроль метода в том же прогоне: образец `pillow`
 даёт проблемы правила (в) — macOS 1, Linux 10.
+
+### 9.1. Раскладка `/`: команда README как процесс
+
+Прогон [40322926536](https://github.com/andrei-shtanakov/devtools/actions/runs/40322926536)
+(PR #635, голова `3854073`), обе ячейки success; в нём же повторены и зелёные форма в процессе
+(`init` 61,3 с macOS, 50,7 с Ubuntu; doctor 11/11 `ok`; smoke как выше) и инвентаризация
+(вердикты таблицы выше без изменений). Факты — `live/<платформа>-production.json`,
+`live/<платформа>-production-doctor.json`, `…-doctor-after-smoke.json`, `live/opt-host.txt`.
+
+Две формы живой установки, честно:
+
+- **в процессе над `<R>`** (выше) — сильнее проверяет мир: свежий `df-build` на тест,
+  наблюдаемые инварианты root-мира, разборка с проверкой; но `bootstrap.py` как процесс и
+  раскладку `/` не исполняет;
+- **процесс в `/`** (`tests/df/live_install.py`, шаг `live install of core (production
+  layout)`) — ровно то, что делает человек по README, на одноразовом runner-е; после него
+  `df-build` и `/opt/df` остаются (удаления на этапе 1 нет), поэтому шаг идёт **после**
+  root-прогона, а остатки до него — находка скрипта. Остатков не было на обеих ячейках
+  (`leftovers` пуст): разборка root-прогона ничего не оставляет.
+
+Порядок шагов ячейки: root-прогон → `configure /opt as a supported host (owner 26.10)` →
+`live install of core (production layout)` → scope guard. Шаг `/opt` — адаптация хоста, не
+изменение df (решение владельца 26.10, после прогона 40316417187, где `init` в `/` на Ubuntu
+отказал `trusted-paths: /opt: запись для группы или всех; /opt: есть ACL`).
+
+| | macOS arm64 | Ubuntu x86_64 |
+|---|---|---|
+| остатки до установки | нет | нет |
+| `/opt` до → после | `drwxr-xr-x root wheel`, ACL нет → без изменений (шаг ничего не меняет на macOS) | `drwxrwxrwx+ root root`, ACL `default:user:runner:rwx` и др. → `drwxr-xr-x`, ACL нет (`chmod go-w`, `setfacl -b`) |
+| каталог разработчика | `/Library/Developer/CommandLineTools` | — |
+| uv: архив, sha256 (= README и опубликованная) | `uv-aarch64-apple-darwin.tar.gz`, `71ef9de8…`, `shasum -c` OK | `uv-x86_64-unknown-linux-gnu.tar.gz`, `e12c4cda…`, `sha256sum -c` OK |
+| копия uv | `/usr/local/libexec/darkfactory/bin/uv`, uid 0, `0755`, путь доверенный, `uv 0.11.23` | то же |
+| Python bootstrap | `sudo …/uv python install 3.12.13 --install-dir /usr/local/libexec/darkfactory-bootstrap/python` → `…/cpython-3.12.13-macos-aarch64-none/bin/python3.12` (3.12.13), путь доверенный | `/usr/bin/python3` → `python3.12` (3.12.3), путь доверенный |
+| `sudo <python> -I -B -S <чекаут>/df/bootstrap.py init …` (argv README, заполнены 3 места) | код 0: «установлен релиз 080f15e6b8fa-macos-arm64-1; команда: /opt/df/bin/darkfactory» | код 0: «… 080f15e6b8fa-linux-x86_64-1; команда: /opt/df/bin/darkfactory» |
+| `release.json` | манифест `080f15e…`, `core`, SHA членов = пины | то же |
+| `sudo /opt/df/bin/darkfactory doctor --json` | код 0, stderr пуст, `level1: reached`, 11/11 `ok` | то же |
+| smoke `--help` от пользователя runner-а (uid 501 / 1001, не root), рабочий каталог вне релиза | 8/8 код 0 | 8/8 код 0 |
+| doctor после smoke | 11/11 `ok` | 11/11 `ok` |
+| время шага | 76 с | 64 с |
+
+Smoke по членам — тот же набор, что в таблице выше: devtools и discovery-toolkit — «нет
+консольных команд — smoke не применим»; discovery `discovery`; disputatio `disp`; spec-runner
+`spec-runner`, `spec-runner-init`, `spec-task`; steward `gate-check`, `review-eval`,
+`steward`, `steward-compile` — все код 0 на обеих ОС.
+
+Наблюдения:
+
+- Ссылки `/usr/local/bin/darkfactory` нет на обеих ячейках: `/usr/local/bin` на runner-ах не
+  проходит политику доверенных путей, установщик напечатал полный путь, и doctor вызывался
+  как `sudo /opt/df/bin/darkfactory` — как README и описывает.
+- `sudo uv python install` на macOS: `sudo` сохраняет `HOME` пользователя
+  (`/Users/runner`), и uv пытается положить ссылку `python3.12` в его `~/.local/bin`. Здесь
+  попытка не удалась («Executable already exists … not managed by uv», ссылка от раннего
+  шага workflow), интерпретатор поставлен. На хосте без такой ссылки root, вероятно, создал
+  бы её (и каталог) в доме человека — не измерено; кандидат на `--no-bin` в рецепте README
+  (решение владельца).
