@@ -4,7 +4,9 @@
 is the first code of the administrative command: it decides the mode, takes
 the writer lock (writer) and settles, reads the full snapshot, finds the
 active release's administrative code, checks its digest, and only then
-imports `df` from that code and calls `df.cli.main`.
+imports `df` from that code and calls `df.cli.main` with that code's `Layout`
+of the entry's `_ROOT` -- the one root of the process: the command resolves
+no other (D2).
 
 Until that import nothing but stdlib may run, so the parts of `df` the entry
 needs are copied here. A test runs each copy and its original on the same
@@ -221,13 +223,15 @@ def run(argv: list[str], root: str = _ROOT, executable: str | None = None) -> in
         snap = take_snapshot(paths, mode)
         _require_trusted_interpreter(paths, executable)
         admin_dir = located_admin_dir(paths, snap, mode)
-        state, main = _import_df(admin_dir)
+        state, main, layout_type = _import_df(admin_dir)
+        layout = _entry_layout(layout_type, root)
     except (Refused, OSError) as exc:
         if lock_fd is not None:
             os.close(lock_fd)
         print(f"darkfactory: {exc}", file=sys.stderr)
         return EXIT_REFUSED
-    return main(argv, mode=mode, read=typed_read(state, snap), lock_fd=lock_fd)
+    read = typed_read(state, snap)
+    return main(argv, mode=mode, read=read, lock_fd=lock_fd, layout=layout)
 
 
 def acquire(paths: EntryPaths) -> int:
@@ -446,19 +450,30 @@ def _trust_problems(path: Path, st: os.stat_result) -> list[str]:
     return problems
 
 
-def _import_df(admin_dir: Path) -> tuple[Any, Callable[..., int]]:
-    """Import `df.state` and `df.cli` from the checked `admin_dir` only."""
+def _import_df(admin_dir: Path) -> tuple[Any, Callable[..., int], Any]:
+    """Import `df.state`, `df.cli` and `df.paths` from the checked `admin_dir`
+    only; returns the state module, `df.cli.main` and `df.paths.Layout`."""
     if any(name == "df" or name.startswith("df.") for name in sys.modules):
         raise Refused("entry", "пакет df загружен до проверки административного кода")
     sys.path.insert(0, str(admin_dir))
     try:
         state = importlib.import_module("df.state")
         cli = importlib.import_module("df.cli")
+        paths = importlib.import_module("df.paths")
     except (Exception, SystemExit) as exc:  # noqa: BLE001 - broken code (M-2, n-7)
         raise Refused("entry", f"{_NO_CODE} ({exc!r})") from exc
     if Path(str(cli.__file__)).parent != admin_dir / "df":
         raise Refused("entry", f"df.cli не из {admin_dir}")
-    return state, cli.main
+    return state, cli.main, paths.Layout
+
+
+def _entry_layout(layout_type: Any, root: str) -> Any:
+    """The admin code's `Layout` of the entry's own root: the one root of the
+    process (D2) -- `df.cli.main` gets it and never resolves another."""
+    try:
+        return layout_type(Path(root))
+    except Exception as exc:  # noqa: BLE001 - the admin code's own refusal
+        raise Refused("entry", f"корень {root!r} не принят ({exc})") from exc
 
 
 def typed_read(state: Any, snap: Snap) -> Any:

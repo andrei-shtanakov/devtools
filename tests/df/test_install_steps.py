@@ -48,6 +48,7 @@ from df.config import (
 from df.digest import TreeError
 from df.journal import NeedsHuman, Stable, StepFailed, Transitional, read_journal
 from df.manifest import Profile, RepoPin
+from df.paths import Layout
 from tests.df.conftest import BUILD_UID, FakeLayout
 from tests.df.install_world import (
     CLEAN_PASS,
@@ -259,6 +260,33 @@ def test_main_refuses_a_wrong_call(
     assert code == 2
     assert "ошибка программы" in capsys.readouterr().err
     assert not os.path.lexists(w.lay.var)
+
+
+@pytest.mark.parametrize(
+    "mode,read,lock_fd",
+    [("writer", "stable", 5), ("reader", "stable", None), ("reader", "t", None)],
+)
+def test_main_refuses_entry_mode_without_layout(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mode: str,
+    read: object,
+    lock_fd: int | None,
+) -> None:
+    """D2: an entry mode always carries the entry's layout; `main` never
+    falls back to `default_layout()` there (only bootstrap does)."""
+
+    def no_default() -> Layout:
+        raise AssertionError("default_layout() reached")
+
+    monkeypatch.setattr(cli, "default_layout", no_default)
+    if read == "stable":
+        read = Stable(state.RawSnapshot(0, None, None, None, None, False), 0)
+    else:
+        read = Transitional(1)
+    code = cli.main(["doctor"], mode=mode, read=read, lock_fd=lock_fd)  # type: ignore[arg-type]
+    assert code == 2
+    assert "ошибка программы" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(

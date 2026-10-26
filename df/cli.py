@@ -1,11 +1,12 @@
 """The administrative command `darkfactory` (spec 3.3, 3.9): `main`.
 
 The entry (`df/launcher_entry.py`, Task 8a) or bootstrap (`df/bootstrap.py`)
-calls `main(argv, mode=, read=, lock_fd=)`. A writer works from the snapshot
-the entry read under the lock it holds; bootstrap takes the lock, settles
-and reads the snapshot itself. Subcommands: `init` and `install` (Task 9);
-`models list|set` (Task 10); `doctor --probe-models` (Task 11); `doctor
-[--json]` (Task 12, `df.doctor`).
+calls `main(argv, mode=, read=, lock_fd=)`; the entry also hands over the
+layout of its own root (`layout=`, D2), bootstrap none. A writer works from
+the snapshot the entry read under the lock it holds; bootstrap takes the
+lock, settles and reads the snapshot itself. Subcommands: `init` and
+`install` (Task 9); `models list|set` (Task 10); `doctor --probe-models`
+(Task 11); `doctor [--json]` (Task 12, `df.doctor`).
 
 Exit codes (M7): 0 success; 2 a refusal or a configuration error, with the
 step named; 3 `NeedsHuman` (the instruction on stderr); 1 a program error
@@ -96,11 +97,11 @@ def main(
     `mode`, `read` and `lock_fd` come from the entry (writer: a lock fd and
     `Stable`; reader: no lock) or from bootstrap (`read` and `lock_fd` are
     `None`); any other combination is a program error, exit 2. `layout` is
-    the test seam; production is `default_layout()`.
+    the entry's layout of its own root (D2: one root per process); only
+    bootstrap, which has no entry, resolves `default_layout()`.
     """
-    lay = layout if layout is not None else default_layout()
     try:
-        return _main(list(argv), mode, read, lock_fd, lay)
+        return _main(list(argv), mode, read, lock_fd, layout)
     except NeedsHuman as exc:
         _say(exc.instruction)
         return EXIT_HUMAN
@@ -123,9 +124,10 @@ def _main(
     mode: Mode,
     read: ReadResult | None,
     lock_fd: int | None,
-    lay: Layout,
+    layout: Layout | None,
 ) -> int:
-    _check_call(mode, read, lock_fd)
+    _check_call(mode, read, lock_fd, layout)
+    lay = default_layout() if layout is None else layout
     if "--" in argv:  # before argparse, which would read past it (I-2)
         raise _form_error(argv)
     args = _parse(argv)
@@ -146,16 +148,19 @@ def _main(
     return _reader(args, lay, read)
 
 
-def _check_call(mode: Mode, read: ReadResult | None, lock_fd: int | None) -> None:
+def _check_call(
+    mode: Mode, read: ReadResult | None, lock_fd: int | None, layout: Layout | None
+) -> None:
+    """The entry's call carries its layout, bootstrap's may not (D2)."""
     ok = {
         "writer": lock_fd is not None and isinstance(read, Stable),
         "reader": lock_fd is None and isinstance(read, (Stable, Transitional)),
         "bootstrap": lock_fd is None and read is None,
     }.get(mode, False)
-    if not ok:
+    if not ok or (mode != "bootstrap" and layout is None):
         raise UsageError(
             f"ошибка программы: режим {mode!r} с read={type(read).__name__}, "
-            f"lock_fd={lock_fd!r}"
+            f"lock_fd={lock_fd!r}, layout={layout!r}"
         )
 
 
