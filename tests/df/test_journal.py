@@ -118,6 +118,24 @@ def test_postcheck_false_names_the_reason(tmp_path: Path) -> None:
     assert _events(journal) == _events(bare)
 
 
+def test_postcheck_why_failing_keeps_the_bare_refusal(tmp_path: Path) -> None:
+    """A `why()` probe that raises (final review 14, n5) leaves the named
+    refusal: the bare text, the same type, step and events."""
+    journal = tmp_path / "j"
+
+    def why() -> list[str]:
+        raise OSError(5, "whoami")
+
+    with pytest.raises(StepFailed) as info:
+        run_steps([Step("a", lambda: False, lambda: None, why)], journal, run_id="r")
+    assert info.value.step == "a"
+    assert info.value.detail == "постусловие не выполнено"
+    bare = tmp_path / "bare"
+    with pytest.raises(StepFailed):
+        run_steps([Step("a", lambda: False, lambda: None)], bare, run_id="r")
+    assert _events(journal) == _events(bare)
+
+
 def test_postcheck_why_not_asked_when_ready(tmp_path: Path) -> None:
     """`why()` is the failure path only: a skip or a done never calls it."""
     box = Box("a")

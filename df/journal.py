@@ -62,7 +62,8 @@ class Step:
     names what keeps it from being achieved (the refusal's reasons when the
     postcondition fails after `do()`). `why()` is a fresh probe, not the
     failed check's facts: a state changed in between may name other reasons
-    or none (then the bare refusal text)."""
+    or none (then the bare refusal text); a `why()` that raises gives the
+    bare text too, never a program error."""
 
     name: str
     check: Callable[[], bool]
@@ -479,9 +480,19 @@ def _execute(step: Step, log: Callable[..., None], fail_after: str | None) -> No
     if fail_after == step.name:
         raise _Interrupted(step.name)
     if not step.check():
-        reasons = list(step.why()) if step.why is not None else []
+        reasons = _reasons(step)
         detail = "постусловие не выполнено"
         if reasons:
             detail = f"{detail}: {'; '.join(reasons)}"
         raise StepFailed(step.name, detail)
     log("done")
+
+
+def _reasons(step: Step) -> list[str]:
+    """`step.why()`, or none when it is absent or its probe fails."""
+    if step.why is None:
+        return []
+    try:
+        return list(step.why())
+    except Exception:  # noqa: BLE001 - a diagnostic never replaces the refusal
+        return []

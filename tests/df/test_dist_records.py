@@ -102,8 +102,16 @@ def test_dist_wheels_records_version_and_tags(tmp_path: Path) -> None:
     }
 
 
-def _member(code: int, site: bool = True, natives: int = 0) -> dict[str, object]:
-    return {"sync": {"code": code}, "site_exists": site, "native_count": natives}
+def _member(
+    code: int, site: bool = True, natives: int = 0, rule_v: object = None
+) -> dict[str, object]:
+    measured = {"count": 0, "by_distribution": {}} if rule_v is None else rule_v
+    return {
+        "sync": {"code": code},
+        "site_exists": site,
+        "native_count": natives,
+        "rule_v": measured,
+    }
 
 
 def test_vacuity_passes_a_measured_inventory() -> None:
@@ -121,6 +129,24 @@ def test_vacuity_fails_zero_natives_when_every_member_synced() -> None:
     assert vacuity_problems(members) == [
         "инвентаризация core: ни одного нативного файла"
     ]
+
+
+def test_vacuity_fails_when_no_member_synced() -> None:
+    """Final review 14, m1: every sync failed (not a network failure) — rule
+    (в) ran nowhere, which is not «0 problems»."""
+    members = {"a": {"sync": {"code": 1}}, "b": {"sync": {"code": 2}}}
+    assert vacuity_problems(members) == [
+        "инвентаризация core: ни один член не синхронизирован"
+    ]
+
+
+def test_vacuity_fails_rule_v_error_of_a_synced_member() -> None:
+    """Final review 14, m1: natives were counted but rule (в) raised."""
+    members = {
+        "a": _member(0, natives=2, rule_v={"error": "OSError: boom"}),
+        "b": _member(0, natives=1),
+    }
+    assert vacuity_problems(members) == ["a: правило (в) не исполнено: OSError: boom"]
 
 
 def test_vacuity_zero_natives_with_a_failed_sync_is_a_fact() -> None:

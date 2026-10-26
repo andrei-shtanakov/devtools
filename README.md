@@ -321,10 +321,22 @@ remediation-issue у уже помеченного родителя). Повто
 моделей ролей (`models`). Рабочих ролей (`df-exec`, `df-review`, `df-publisher`), sudoers и
 запуска агентов здесь нет — это этап 2.
 
+Измерено (CI `df-stage1`) на macOS 15 arm64 и Ubuntu 24.04 x86_64; иные хосты, в том числе
+другие выпуски Linux, не измерялись.
+
+### Подготовка
+
+1. Python ≥ 3.12 для bootstrap: на Ubuntu 24.04 — системный `/usr/bin/python3`; на macOS
+   системный `/usr/bin/python3` — 3.9, нужен другой по выбору человека.
+2. `git`: на Ubuntu — `sudo apt-get install git` (в минимальном образе `/usr/bin/git` нет);
+   на macOS — Command Line Tools, выбранные root (ниже, «macOS: каталог разработчика»).
+3. `uv` 0.11.23 — копия в каталог root (ниже, «Утверждённые CLI»).
+4. Чекаут этого репо и полный SHA коммита манифеста зонтика.
+
 ### Первая установка
 
 ```sh
-sudo /usr/bin/python3 -I -B -S <чекаут-devtools>/df/bootstrap.py init \
+sudo <python-3.12+> -I -B -S <чекаут-devtools>/df/bootstrap.py init \
   --manifest-repo andrei-shtanakov/ai-orchestrators-workspace \
   --manifest-sha <sha-манифеста> \
   --profile core \
@@ -333,13 +345,13 @@ sudo /usr/bin/python3 -I -B -S <чекаут-devtools>/df/bootstrap.py init \
   --cli uv=/usr/local/libexec/darkfactory/bin/uv
 ```
 
-- `<sha-манифеста>` — полный SHA (40 hex) коммита манифеста зонтика; `<чекаут-devtools>` —
-  чекаут этого репо.
+- `<python-3.12+>` — интерпретатор из п. 1 подготовки (на Ubuntu 24.04 — `/usr/bin/python3`);
+  `<sha-манифеста>` — полный SHA коммита манифеста зонтика, 40 **строчных** hex (заглавные —
+  отказ манифеста); `<чекаут-devtools>` — чекаут этого репо.
 - Root исполняет код из чекаута человека: доверие к этому чекауту и к интерпретатору — на
   совести человека (он и так держит `sudo`). Bootstrap находит корень чекаута по пути
   самого файла, а не по `cwd` или `PATH`.
-- На macOS `/usr/bin/python3` — 3.9; вместо него — любой Python ≥ 3.12 по выбору человека.
-  Флаги `-I -B -S` обязательны, без них bootstrap отказывает.
+- Флаги `-I -B -S` обязательны, без них bootstrap отказывает; Python < 3.12 — тоже отказ.
 - Python профиля — только `3.12.13`: для иной версии нет измеренного списка удаляемых
   компонентов Tcl/Tk, и шаг `manifest` отказывает до любого изменения хоста.
 - Живая установка профиля `core` ждёт секцию профилей в манифесте зонтика
@@ -366,11 +378,20 @@ root, без записи для группы и всех, без ACL; нати�
 проходит, и `darkfactory` не меняет владельцев чужих каталогов. Поддерживаются:
 
 - системные `/usr/bin/git` и `/usr/bin/tar` (на обеих ОС);
-- `uv` — копия бинарника `uv` 0.11.23 (закреплённая версия; иная — отказ) в каталог root:
+- `uv` — копия бинарника `uv` 0.11.23 (закреплённая версия; иная — отказ) в каталог root.
+  Homebrew, `pipx` и скрипт установки без версии ставят последнюю версию — брать архив
+  официального релиза [0.11.23](https://github.com/astral-sh/uv/releases/tag/0.11.23):
+  `uv-aarch64-apple-darwin.tar.gz` (macOS arm64) или `uv-x86_64-unknown-linux-gnu.tar.gz`
+  (Linux x86_64). Сверить с опубликованной рядом контрольной суммой (`<архив>.sha256`; на
+  26.10 — macOS `71ef9de85db820749b3b12b7585624ee279e9c5afcbc6f8236bc3d628c4305b0`, Linux
+  `e12c4cda2fe8c305510a78380a88f2c32a27e90cdcd123cefd2873388f0ebb5f`), затем версию:
 
   ```sh
+  shasum -a 256 -c uv-<цель>.tar.gz.sha256     # Linux: sha256sum -c …
+  tar -xzf uv-<цель>.tar.gz
+  ./uv-<цель>/uv --version                       # uv 0.11.23
   sudo install -d -o root -m 0755 /usr/local/libexec/darkfactory/bin
-  sudo install -o root -m 0755 <путь-к-uv-0.11.23> /usr/local/libexec/darkfactory/bin/uv
+  sudo install -o root -m 0755 ./uv-<цель>/uv /usr/local/libexec/darkfactory/bin/uv
   ```
 
 Пути закрепляются в `/etc/df/install.toml`.
@@ -430,6 +451,10 @@ Tools. Возврат — `sudo xcode-select -s <путь к Xcode>/Contents/Dev
   и без шаблонов.
 - **Python релиза без Tcl/Tk** (решение владельца 25.10, спека §3.4): `tkinter`, `turtle`,
   `idlelib` инструментам релиза недоступны.
+- **Загрузчик Linux (R26, принято владельцем 22.10 как ограничение v1):** модель доверия к
+  нативным зависимостям утверждённых CLI не охватывает подкаталоги `glibc-hwcaps`/`tls` и
+  записи `ld.so.cache` вне `ld.so.conf`. Linux: измерено на Ubuntu 24.04 (штатный образ, там
+  их нет); хост с пакетами hwcaps или своим кешем загрузчика — вне измеренного.
 - На пути к `/opt/df` не должно быть символических ссылок (хост с `/opt` — ссылкой не
   поддерживается, §3.10).
 

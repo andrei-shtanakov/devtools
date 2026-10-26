@@ -22,6 +22,8 @@ SECTION = "## Установка DarkFactory: этап 1"
 #: The one placeholder of the documented argv: the human's manifest commit.
 SHA_PLACEHOLDER = "<sha-манифеста>"
 SHA = "0" * 40
+#: The interpreter of the documented command: the human's Python >= 3.12.
+PYTHON_PLACEHOLDER = "<python-3.12+>"
 
 
 def documented_command() -> list[str]:
@@ -45,7 +47,7 @@ def documented_argv() -> list[str]:
 def test_documented_bootstrap_argv_parses() -> None:
     """The documented command is `sudo <python> -I -B -S …/df/bootstrap.py init`
     and its argv builds the `InstallConfig` of profile `core`, nothing run."""
-    assert documented_command()[:5] == ["sudo", "/usr/bin/python3", "-I", "-B", "-S"]
+    assert documented_command()[:5] == ["sudo", PYTHON_PLACEHOLDER, "-I", "-B", "-S"]
     argv = documented_argv()
     assert launcher_entry.mode_of(argv) == "writer"
     args = cli._parse(argv)  # noqa: SLF001 - the `init` parser itself

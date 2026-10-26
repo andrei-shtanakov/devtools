@@ -2913,7 +2913,10 @@ I10, M1–M14, M16–M20, N1–N4 приняты как обязательные
   - `main(argv: Sequence[str], *, mode: Mode, read: ReadResult | None, lock_fd: int | None,
     layout: Layout | None = None) -> int` в `cli.py` (`layout` — раскладка корня входа:
     с Task 14, D2, вход передаёт её, и `writer`/`reader` без неё — ошибка программы, код 2;
-    bootstrap её не передаёт — тогда `default_layout()`; тесты передают свою):
+    bootstrap её не передаёт — тогда `default_layout()`; тесты передают свою). Набор
+    ключевых аргументов вызова из входа и `df.paths.Layout(Path(<корень>))`, которым вход
+    строит раскладку из административного кода, — замороженный межверсионный договор, как
+    строка `_ROOT` (M13; спека §3.9):
     - `mode`, `read`, `lock_fd` передаёт вход команды (Task 8a). `writer` требует `lock_fd` и
       `Stable`, `reader` — `lock_fd is None`, `bootstrap` — ни того, ни другого; иное —
       ошибка программы, код 2;
