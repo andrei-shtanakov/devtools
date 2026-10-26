@@ -354,8 +354,9 @@ sudo <python-3.12+> -I -B -S <чекаут-devtools>/df/bootstrap.py init \
 - Флаги `-I -B -S` обязательны, без них bootstrap отказывает; Python < 3.12 — тоже отказ.
 - Python профиля — только `3.12.13`: для иной версии нет измеренного списка удаляемых
   компонентов Tcl/Tk, и шаг `manifest` отказывает до любого изменения хоста.
-- Живая установка профиля `core` ждёт секцию профилей в манифесте зонтика
-  (`df-manifest-profiles`; пункт `df-installer-stage1-live` в `TODO.md`).
+- Профиль `core` описан в манифесте зонтика (`[df.profiles.core]`, коммит
+  `080f15e6b8fa3497a369f959e5466c1391bf2700`); его живая установка этой командой — в CI
+  `df-stage1` (раздел «Приёмка»).
 
 Дальше — команда (ссылка `/usr/local/bin/darkfactory`, если `/usr/local/bin` проходит
 политику доверенных путей; иначе установщик печатает полный путь `/opt/df/bin/darkfactory`):
@@ -468,5 +469,9 @@ Tools. Возврат — `sudo xcode-select -s <путь к Xcode>/Contents/Dev
 
 CI `df-stage1` (`.github/workflows/df-stage1.yml`): macOS arm64 и Ubuntu x86_64, root-тесты
 только в одноразовых runner-ах GitHub. Evidence —
-`docs/evidence/2026-10-26-df-stage1-acceptance.md`. Живая установка `core` ждёт манифест
-(`df-manifest-profiles`).
+`docs/evidence/2026-10-26-df-stage1-acceptance.md`. Живая установка профиля `core` по
+манифесту зонтика (`080f15e`) — в двух формах: в root-мире тестов (`<R>`, в процессе,
+`tests/df/test_acceptance_root_live.py`) и в раскладке `/` командой выше как процесс
+(`tests/df/live_install.py`: подготовка по разделу «Подготовка», `sudo darkfactory doctor
+--json` — уровень 1, `--help` каждой точки входа от непривилегированного пользователя);
+результаты — evidence §9.

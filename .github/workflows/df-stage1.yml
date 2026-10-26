@@ -4,7 +4,8 @@
 # have passwordless sudo; the root run never happens on a workstation.
 # Order of a cell: arch check (fails) -> Step 0 facts (recorded, never fail
 # the job) -> mechanism probes (fail, named by the step) -> ordinary tests/df
-# -> root run (R76) -> scope guard (last: only `full` with no -k is green).
+# -> root run (R76) -> live install of core in `/` -> scope guard (last:
+# only `full` with no -k is green).
 # Actions pinned by full commit SHA, as ci.yml.
 # No workflow_dispatch: the file runs from the PR before it is on master.
 name: df-stage1
@@ -216,6 +217,24 @@ jobs:
             "$RUNNER_TEMP/df-stage1/junit-root.xml" --expect "$collected"
           exit "$rc"
 
+      # Live install of profile `core` in the production layout `/`, as
+      # README «Установка DarkFactory: этап 1» says, every step a process
+      # (tests/df/live_install.py, as the runner user; root only through
+      # `sudo`). After the root run: its worlds need `df-build` absent, and
+      # this install leaves `df-build` and `/opt/df` for good (stage 1 has no
+      # uninstall); state the root run left is a finding of the script.
+      # Runs after a red root run too (the cell stays red).
+      - name: live install of core (production layout)
+        if: ${{ !cancelled() && env.DF_STAGE1_SCOPE == 'full' }}
+        run: |
+          if [ ! -x .venv/bin/python ]; then
+            echo "::notice title=live install::skipped: no .venv (uv sync did not run)"
+            exit 0
+          fi
+          # live/ may be root's (the root run's evidence): back to the runner.
+          sudo -n chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/df-stage1"
+          PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m tests.df.live_install \
+            --out "$RUNNER_TEMP/df-stage1" --work "$RUNNER_TEMP/df-live"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
