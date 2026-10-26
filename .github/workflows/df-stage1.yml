@@ -226,6 +226,8 @@ jobs:
       - name: configure /opt as a supported host (owner 26.10)
         if: ${{ !cancelled() && env.DF_STAGE1_SCOPE == 'full' }}
         run: |
+          # live/ may be root's (the root run's evidence): back to the runner.
+          sudo -n chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/df-stage1"
           mkdir -p "$RUNNER_TEMP/df-stage1/live"
           record="$RUNNER_TEMP/df-stage1/live/opt-host.txt"
           facts() {
