@@ -374,6 +374,9 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
         "(a call from another module is not seen): the lock "
         "(never written) or a read"
     ),
+    ("launch_release", "urllib_transport", ".open", 1): (
+        "an HTTP GET through an opener (`urllib`): reads the network, writes no file"
+    ),
     ("inputs", "", "import shutil", 1): "root's checkout: scratch",
     ("receive", "", "import shutil", 1): "protocol remove_own_tree: rmtree",
     ("acl", "_libsystem", "ctypes.CDLL", 1): "ACL reads only: acl_get_*_np, acl_free",
@@ -518,6 +521,13 @@ SUBPROCESS_CREATORS = {
         "creates nothing: its stdout is the stream accept_copy receives"
     ),
     "sysctl (boot id)": "creates nothing: a read",
+    "execve of the release's interpreter (df-launch, as the role)": (
+        "replaces the process; the release's code runs as the role, whose "
+        "writes are bounded by the OS, not by this module"
+    ),
+    "execv of sudo (the human's launch)": (
+        "replaces the process; sudo runs the root-owned df-launch wrapper"
+    ),
 }
 #: Every site that starts a process (`os.system`/`posix_spawn*`/`spawn*`/
 #: `exec*`/`popen`/`fork`, `subprocess.*`), keyed like `FS_SITES`, with the
@@ -537,6 +547,10 @@ PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
     ("platform", "spawn_as", "subprocess.Popen", 1): (
         "tar -cf - (copy producer, as df-build)",
     ),
+    ("launch", "exec_main", "os.execve", 1): (
+        "execve of the release's interpreter (df-launch, as the role)",
+    ),
+    ("launch", "human_main", "os.execv", 1): ("execv of sudo (the human's launch)",),
 }
 
 Site = tuple[str, str, str, int]

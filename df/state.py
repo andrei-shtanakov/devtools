@@ -19,6 +19,7 @@ from df.config import (
     ConfigError,
     InstallConfig,
     ReleaseEntry,
+    ReleasesConfig,
     parse_install,
     parse_releases,
     read_optional,
@@ -62,8 +63,9 @@ ReadResult = Stable[RawSnapshot] | Transitional
 
 @dataclass(frozen=True)
 class Snapshot:
-    """The parsed snapshot: the active release, its registry entry, the
-    configuration, the models text and whether `pending.toml` was seen."""
+    """The parsed snapshot: the active release, its registry entry, the whole
+    registry (`releases`, from the same text), the configuration, the models
+    text and whether `pending.toml` was seen."""
 
     release_id: str | None
     entry: ReleaseEntry | None
@@ -71,6 +73,7 @@ class Snapshot:
     models_text: str | None
     pending_present: bool
     generation: int
+    releases: ReleasesConfig | None = None
 
 
 def read_raw(layout: Layout) -> RawSnapshot:
@@ -104,24 +107,31 @@ def parse_snapshot(raw: RawSnapshot, layout: Layout, *, mode: Mode) -> Snapshot:
         release_id = raw.current_id
         if release_id is not None:
             layout.release_dir(release_id)  # a valid id, else ConfigError
+        releases = _releases_of(raw.releases_text)
         return Snapshot(
             release_id=release_id,
-            entry=_entry_of(raw.releases_text, release_id),
+            entry=_entry_of(releases, release_id),
             install=_install_of(raw.install_text),
             models_text=_decode(raw.models_text, "models.toml"),
             pending_present=raw.pending_present,
             generation=raw.generation,
+            releases=releases,
         )
     except ConfigError as exc:
         raise StepFailed(_STEP, str(exc)) from exc
 
 
-def _entry_of(text: bytes | None, release_id: str | None) -> ReleaseEntry | None:
+def _releases_of(text: bytes | None) -> ReleasesConfig | None:
     decoded = _decode(text, "releases.toml")
-    if decoded is None or release_id is None:
+    return None if decoded is None else parse_releases(decoded)
+
+
+def _entry_of(
+    releases: ReleasesConfig | None, release_id: str | None
+) -> ReleaseEntry | None:
+    if releases is None or release_id is None:
         return None
-    entries = parse_releases(decoded).releases
-    return next((e for e in entries if e.id == release_id), None)
+    return next((e for e in releases.releases if e.id == release_id), None)
 
 
 def _install_of(text: bytes | None) -> InstallConfig | None:
