@@ -632,11 +632,11 @@ def _cli_set(args: argparse.Namespace, lay: Layout, snap: Snapshot) -> int:
     problems = plat.approved_cli_problems({CLI_SETTABLE: path}, plat.detect_platform())
     if problems:
         raise Refusal("; ".join(problems))
+    _close_odd_generation(lay, snap)  # before the no-op too (PR #643)
     if cfg.approved_cli.get(CLI_SETTABLE) == path:
         print(f"darkfactory: {CLI_SETTABLE} уже {path}: install.toml не изменён")
         return EXIT_OK
     new = replace(cfg, approved_cli={**cfg.approved_cli, CLI_SETTABLE: path})
-    _close_odd_generation(lay, snap)
     journal.generation_begin(lay)
     try:
         fsutil.write_atomic(
@@ -697,23 +697,12 @@ def _healthy(lay: Layout, snap: Snapshot) -> bool:
 
 
 def _close_odd_generation(lay: Layout, snap: Snapshot) -> None:
-    """M9: an odd generation without `pending.toml` (a crash between removing
-    it and `generation_end`) protects nothing — made even, with a `warn`
-    naming `current`. G3 (I9): called only after G1 passed, i.e. only in
-    the consistent state, so it never erases the evidence of an install
-    closed by hand halfway."""
-    if snap.generation % 2 == 0 or snap.pending_present:
-        return
-    journal.generation_end(lay)
-    journal.journal_event(
-        lay.journal,
-        run_id="generation",
-        step="generation",
-        event="warn",
-        detail=(
-            f"нечётное поколение {snap.generation} без pending.toml: закрыто, "
-            f"current = {snap.release_id or 'нет'}"
-        ),
+    """`journal.close_odd_generation` with the snapshot's values (M9)."""
+    journal.close_odd_generation(
+        lay,
+        generation=snap.generation,
+        pending_present=snap.pending_present,
+        current=snap.release_id,
     )
 
 

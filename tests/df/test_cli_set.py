@@ -240,6 +240,34 @@ def test_closes_an_odd_generation_first(w: World) -> None:
     assert any(r["step"] == "generation" and r["event"] == "warn" for r in rows)
 
 
+def reader_read(w: World) -> object:
+    """What a reader of the shipped entry gets now: `Stable` or
+    `Transitional` (an odd generation)."""
+    w.mp.setattr(launcher_entry, "ROOT_UID", os.geteuid())
+    w.mp.setattr(launcher_entry, "owner_uid", w.fl.owner_of)
+    paths = launcher_entry.EntryPaths(str(w.lay.root))
+    return launcher_entry.typed_read(
+        state, launcher_entry.take_snapshot(paths, "reader")
+    )
+
+
+def test_same_value_closes_a_stale_odd_generation(w: World) -> None:
+    """PR #643: a writer killed inside its bracket left the generation odd
+    (readers `Transitional`); repeating `cli set` with the same path -- the
+    advertised recovery -- closes it (M9, a `warn`) though it writes nothing."""
+    assert w.writer(SET) == 0
+    before = install_toml(w).read_bytes()
+    journal.generation_begin(w.lay)
+    gen = journal.read_generation(w.lay)
+    assert isinstance(reader_read(w), state.Transitional)
+    assert w.writer(SET) == 0
+    assert journal.read_generation(w.lay) == gen + 1
+    assert install_toml(w).read_bytes() == before
+    assert isinstance(reader_read(w), Stable)
+    rows = journal.read_journal(w.lay.journal)
+    assert any(r["step"] == "generation" and r["event"] == "warn" for r in rows)
+
+
 def test_write_is_durable(fake_world: World) -> None:
     """Under the OS-crash model nothing of the write is left unsynced."""
     installed(fake_world)

@@ -53,7 +53,8 @@ EXIT_REACHED = 0
 EXIT_NOT_REACHED = 2
 TRANSITIONAL = (
     "идёт или прервана административная операция: дождитесь её конца; "
-    "прерванную повторите от root (darkfactory install или darkfactory models set)"
+    "прерванную повторите от root любой командой-писателем (darkfactory "
+    "install, models set, cli set или roles setup)"
 )
 NEED_SUDO = "нужен sudo"
 DAMAGED = "релиз повреждён"

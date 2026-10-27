@@ -78,6 +78,13 @@ def run(layout: Layout, *, operator: str, snap: Snapshot) -> None:
     Everything that can be refused is refused before the first step. The
     caller holds the writer lock."""
     check_preconditions(layout, operator, snap)
+    # a re-run may change nothing: a stale odd generation is closed anyway
+    journal.close_odd_generation(
+        layout,
+        generation=snap.generation,
+        pending_present=snap.pending_present,
+        current=snap.release_id,
+    )
     python = libexec.admin_python_of(layout, snap)
     run_steps(
         _steps(layout, operator, python),
