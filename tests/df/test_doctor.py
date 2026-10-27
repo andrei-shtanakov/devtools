@@ -623,6 +623,25 @@ def test_broken_publisher_does_not_hide_other_problems(
     assert "publisher.toml" in reason and "extra.toml" in reason
 
 
+def test_publisher_changed_after_snapshot_is_transient(
+    fake_installed: World,
+) -> None:
+    """A writer replaced `publisher.toml` after the snapshot (counter moved):
+    no «нарушено» verdict on the half-seen file, «данные недоступны»."""
+    w = fake_installed
+    s = snap(w)
+    (w.lay.etc / "publisher.toml").write_text("garbage = [")
+    w.lay.generation.write_text(f"{s.generation + 2}\n")
+    c = by_id(level1_checks(s, w.lay, euid=os.geteuid()))["etc.schemas"]
+    assert (c.status, c.reason) == (
+        "данные недоступны",
+        "идёт административная запись, повторите doctor",
+    )
+    w.lay.generation.write_text(f"{s.generation}\n")  # control: settled
+    c = by_id(level1_checks(s, w.lay, euid=os.geteuid()))["etc.schemas"]
+    assert c.status == "нарушено" and "publisher.toml" in c.reason
+
+
 def test_unknown_etc_file_broken(fake_installed: World) -> None:
     (fake_installed.lay.etc / "extra.toml").write_text("x = 1\n")
     checks = level1_checks(snap(fake_installed), fake_installed.lay, euid=os.geteuid())

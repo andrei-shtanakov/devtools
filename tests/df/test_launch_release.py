@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import http.client
 import io
 import json
 import os
@@ -443,3 +444,27 @@ def test_bootstrap_imports_df_from_the_release_tree(tmp_path: Path) -> None:
     )  # fmt: skip
     assert run.returncode == 0, run.stderr
     assert json.loads(run.stdout)["cwd"] == "/"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        http.client.IncompleteRead(b"x"),
+        http.client.BadStatusLine("x"),
+        http.client.LineTooLong("header line"),
+    ],
+)
+def test_check_github_http_exception_is_exit_2(
+    w: World, capsys: pytest.CaptureFixture[str], error: Exception
+) -> None:
+    """Exit 1 means only «mismatch»: a broken HTTP exchange is a refusal."""
+    put_products(w, "bot")
+    put_token(w)
+
+    def broken(url: str, headers) -> tuple[int, bytes]:  # noqa: ANN001
+        raise error
+
+    w.transport = broken  # type: ignore[attr-defined]
+    assert w.run("df-exec", "check-github") == 2
+    err = capsys.readouterr().err
+    assert w.out == "" and "Traceback" not in err and "данные недоступны" in err

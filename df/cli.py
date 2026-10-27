@@ -303,6 +303,9 @@ def _check_launch(args: argparse.Namespace) -> None:
         raise UsageError(f"launch: неизвестная роль {args.role!r}")
     if args.operation not in launch.ROLE_OPS[args.role]:
         raise UsageError(f"launch: {args.role}: неверная операция {args.operation!r}")
+    reason = None if args.exec_form else launch.human_refusal(args.role, args.operation)
+    if reason is not None:
+        raise UsageError(f"launch: {reason}")
 
 
 def _check_run(args: argparse.Namespace) -> None:
