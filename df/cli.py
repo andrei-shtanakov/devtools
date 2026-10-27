@@ -28,17 +28,20 @@ from typing import NoReturn
 
 from df import (
     accept,
+    admin,
     doctor,
     fsutil,
     install,
     journal,
     launcher_entry,
+    libexec,
     models,
     probe,
     roles,
     roles_setup,
     state,
 )
+from df import platform as plat
 from df.config import ConfigError, InstallConfig, Pending, parse_install
 from df.digest import TreeError
 from df.journal import NeedsHuman, Stable, StepFailed, Transitional
@@ -62,6 +65,7 @@ _FINISH = "есть незавершённая установка: заверш�
 _NO_PRODUCT = "продукт не зарегистрирован (этап 3)"
 _NO_REGISTRY = "реестр продуктов не поддерживается до этапа 3"
 _NO_INSTALL = "нет /etc/df/install.toml: начните с bootstrap init"
+_STALE_WRAPPERS = "обёртки ролей устарели: выполните darkfactory roles setup"
 _NOT_YET = "не реализовано на этом шаге"
 _NO_OPERATOR = "roles setup: укажите --operator (SUDO_USER не задан)"
 _UNSET = "—"
@@ -499,13 +503,15 @@ def _writer(
     _close_odd_generation(lay, snap)
     release_id = install.run_install(lay, requested, snap, pending)
     print(f"darkfactory: установлен релиз {release_id}; команда: {_command(lay)}")
+    _warn_stale_wrappers(lay, release_id)
     return EXIT_OK
 
 
 def _roles_setup(args: argparse.Namespace, lay: Layout, snap: Snapshot) -> int:
     """`roles setup`: the operator is `--operator`, else `SUDO_USER`. The
-    steps work under the lock this writer holds; no generation bracket,
-    because none of the snapshot's parts changes."""
+    steps work under the lock this writer holds. Only the write of
+    `publisher.toml` under `/etc/df` takes a generation bracket (inside
+    `roles_setup`); the snapshot's own parts never change."""
     operator = _operator_of(args)
     roles_setup.run(lay, operator=operator, snap=snap)
     print(f"darkfactory: роли и обёртки настроены; оператор {operator}")
@@ -519,6 +525,20 @@ def _operator_of(args: argparse.Namespace) -> str:
     if not operator:
         raise Refusal(_NO_OPERATOR)
     return operator
+
+
+def _warn_stale_wrappers(lay: Layout, release_id: str) -> None:
+    """Plan decision 4 (r2): wrappers written for another admin Python are
+    stale; say so (the install itself succeeded, exit 0). Silent on a host
+    that never ran `roles setup`."""
+    if not libexec.wrappers_present(lay):  # nothing to read on a stage-1 host
+        return
+    entry = accept.registry_entry(lay, release_id)
+    if entry is None:
+        return
+    python = admin.admin_python_path(lay, entry.admin_python, plat.detect_platform())
+    if libexec.wrappers_stale(lay, python):
+        _say(_STALE_WRAPPERS)
 
 
 def _models_set(args: argparse.Namespace, lay: Layout, snap: Snapshot) -> int:

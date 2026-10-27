@@ -363,3 +363,40 @@ def test_operator_account_must_exist(
         setup.run()
     assert info.value.step == "operator"
     assert setup.calls.ensure == 0 and not setup.lay.journal.exists()
+
+
+# --- PR #641: the /etc/df write is bracketed ----------------------------------
+
+
+def test_publisher_write_is_inside_a_generation_bracket(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = fsutil.write_atomic
+    seen: list[int] = []
+
+    def write_atomic(path: Path, text: str, mode: int = 0o644) -> None:
+        if path.name == "publisher.toml":
+            seen.append(journal.read_generation(setup.lay))
+        real(path, text, mode)
+
+    monkeypatch.setattr(fsutil, "write_atomic", write_atomic)
+    before = journal.read_generation(setup.lay)
+    setup.run()
+    assert seen == [before + 1]
+    assert journal.read_generation(setup.lay) == before + 2
+
+
+def test_refused_publisher_write_closes_the_bracket(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = fsutil.write_atomic
+
+    def write_atomic(path: Path, text: str, mode: int = 0o644) -> None:
+        if path.name == "publisher.toml":
+            raise OSError("disk full")
+        real(path, text, mode)
+
+    monkeypatch.setattr(fsutil, "write_atomic", write_atomic)
+    with pytest.raises(StepFailed, match="disk full"):
+        setup.run()
+    assert journal.read_generation(setup.lay) % 2 == 0
