@@ -27,6 +27,8 @@ import fcntl
 import os
 import re
 import secrets
+import stat
+import time
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -58,6 +60,15 @@ NO_PROBE = "не проверено"
 NO_ACTUAL = "не сообщён"
 RESUME_HINT = "повторите с --accept-model-change --from-step N"
 _STEP = "run"
+LOCK_DIR = ".locks"
+LOCK_DIR_MODE = 0o700
+LOCK_MODE = 0o600
+#: How long a resume waits for another resume of the same run, and how often
+#: it tries.
+LOCK_WAIT = 30.0
+LOCK_POLL = 0.1
+_LOCK_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+_UID = re.compile(r"[0-9]{1,10}", re.ASCII)
 _NUMBER = re.compile(r"[1-9][0-9]{0,8}", re.ASCII)
 _WRITE_FLAGS = os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC
 _APPEND_FLAGS = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -191,9 +202,9 @@ def _start(layout: Layout, snap: Snapshot, req: Request) -> str:
 def _resume(layout: Layout, snap: Snapshot, req: Request) -> str:
     assert req.run_id is not None
     rec = launch.release_of_record(layout, snap, req.run_id)
-    # Two resumes of one run take turns: the second reads the events after
+    # Two resumes of one run take turns (a root-only lock, never the record): the second reads the events after
     # the first one's append, so no event has a stale `before`.
-    with _locked(layout.runs_dir / f"{rec.run_id}.json"):
+    with _locked(layout, rec.run_id):
         events = launch.read_root_file(_events_path(layout, rec.run_id), optional=True)
         in_force = effective_pins(rec, _lines(events))
         fresh = pins_from_data(layout, rec.product, _models_of(snap))
@@ -205,15 +216,69 @@ def _resume(layout: Layout, snap: Snapshot, req: Request) -> str:
 
 
 @contextmanager
-def _locked(path: Path) -> Iterator[None]:
-    """An exclusive `flock` on the run record (root's, so only root can hold
-    it), held for the block."""
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+def _locked(layout: Layout, run_id: str) -> Iterator[None]:
+    """An exclusive `flock` on the run's own lock file, held for the block.
+
+    The file lives in `runs/.locks/` (root, `0700`), so no role can open it
+    and hold it: the record itself is readable by every role and is never
+    locked. Waits at most `LOCK_WAIT` seconds, then refuses."""
+    fd = _open_lock(layout, run_id)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        _acquire(fd)
         yield
     finally:
         os.close(fd)
+
+
+def _open_lock(layout: Layout, run_id: str) -> int:
+    directory = layout.runs_dir / LOCK_DIR
+    parent = os.open(layout.runs_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        fsutil.make_dir(parent, LOCK_DIR, LOCK_DIR_MODE, path=directory)
+    finally:
+        os.close(parent)
+    _require_private(directory, LOCK_DIR_MODE, directory=True)
+    path = directory / f"{run_id}.lock"
+    try:
+        fd = fsutil.create_file(path, _LOCK_FLAGS, LOCK_MODE)
+    except FileExistsError:
+        fd = os.open(path, _LOCK_FLAGS | os.O_NONBLOCK)
+    try:
+        _require_private(path, LOCK_MODE, directory=False, st=os.fstat(fd))
+    except StepFailed:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _require_private(
+    path: Path, mode: int, *, directory: bool, st: os.stat_result | None = None
+) -> None:
+    """Root's, exactly `mode`, no links: else the lock cannot be trusted."""
+    st = os.lstat(path) if st is None else st
+    kind = stat.S_ISDIR if directory else stat.S_ISREG
+    if not kind(st.st_mode):
+        raise StepFailed(_STEP, f"{path}: не то, что ожидалось")
+    if fsutil.owner_uid(st) != plat.ROOT_UID:
+        raise StepFailed(_STEP, f"{path}: владелец не root")
+    if stat.S_IMODE(st.st_mode) != mode:
+        raise StepFailed(
+            _STEP, f"{path}: права {stat.S_IMODE(st.st_mode):04o}, нужны {mode:04o}"
+        )
+    if not directory and st.st_nlink != 1:
+        raise StepFailed(_STEP, f"{path}: жёстких ссылок {st.st_nlink}, нужна одна")
+
+
+def _acquire(fd: int) -> None:
+    deadline = time.monotonic() + LOCK_WAIT
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise StepFailed(_STEP, "прогон занят другим resume") from None
+            time.sleep(LOCK_POLL)
 
 
 _PIN_FIELDS = (
@@ -249,7 +314,7 @@ def _models_of(snap: Snapshot) -> ModelsConfig:
 def _started_by() -> int:
     """The human behind `sudo`; root itself when there is none."""
     value = os.environ.get("SUDO_UID", "")
-    ok = value.isascii() and value.isdigit() and int(value) < 1 << 32
+    ok = _UID.fullmatch(value) is not None and int(value) < 1 << 32
     return int(value) if ok else 0
 
 

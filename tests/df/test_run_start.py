@@ -900,6 +900,8 @@ def test_started_by_is_the_sudo_uid(
         ("abc", 0),
         ("-1", 0),
         ("99999999999", 0),
+        ("9" * 5000, 0),
+        ("٣", 0),
     ):
         ev.reset()
         for path in records(world):
@@ -1002,7 +1004,7 @@ def test_concurrent_resumes_take_turns(
 
     monkeypatch.setattr(fcntl, "flock", first_finishes_while_we_wait)
     assert resume(world, changed, *flags) == 1
-    assert calls[0] == fcntl.LOCK_EX
+    assert calls[0] & fcntl.LOCK_EX
     lines = events_of(world)
     assert len(lines) == 1
     rec = parse_run((world.layout.runs_dir / "run-1.json").read_text())
@@ -1032,3 +1034,107 @@ def test_a_probe_appearing_after_start_is_a_pin_change(
     with pytest.raises(StepFailed) as err:
         resume(world, snap_of(world))
     assert "author: harness_version не проверено → 9.9.9" in str(err.value)
+
+
+# --- the resume lock is root's alone ----------------------------------------------------
+
+
+def test_a_role_holding_the_record_does_not_block_resume(
+    world: FakeLayout, ev: Ev
+) -> None:
+    import fcntl
+
+    put_run_with_pins(world)
+    fd = os.open(world.layout.runs_dir / "run-1.json", os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH)  # what a role can do to the record
+        assert resume(world, snap_of(world)) == 1
+    finally:
+        os.close(fd)
+    lock = world.layout.runs_dir / ".locks" / "run-1.lock"
+    assert lock.stat().st_mode & 0o777 == 0o600
+    assert (world.layout.runs_dir / ".locks").stat().st_mode & 0o777 == 0o700
+
+
+def test_contention_past_the_bound_refuses(
+    world: FakeLayout, ev: Ev, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import fcntl
+
+    put_run_with_pins(world)
+    resume(world, snap_of(world))  # creates the lock file
+    ev.reset()
+    other = os.open(world.layout.runs_dir / ".locks" / "run-1.lock", os.O_RDONLY)
+    fcntl.flock(other, fcntl.LOCK_EX)  # another resume holds it
+    monkeypatch.setattr(run_start, "LOCK_WAIT", 0.2)
+    monkeypatch.setattr(run_start, "LOCK_POLL", 0.01)
+    try:
+        with pytest.raises(StepFailed, match="прогон занят другим resume"):
+            resume(world, snap_of(world))
+    finally:
+        os.close(other)
+    assert ev.log == []
+    ev.reset()
+    assert resume(world, snap_of(world)) == 1  # released: it goes through
+
+
+@pytest.mark.parametrize("mode", [0o755, 0o770, 0o777])
+def test_a_lock_directory_with_wrong_mode_refuses(
+    world: FakeLayout, ev: Ev, mode: int
+) -> None:
+    put_run_with_pins(world)
+    directory = world.layout.runs_dir / ".locks"
+    directory.mkdir()
+    directory.chmod(mode)
+    with pytest.raises(StepFailed, match="права"):
+        resume(world, snap_of(world))
+    assert ev.log == []
+
+
+def test_a_lock_directory_of_another_owner_refuses(
+    world: FakeLayout, ev: Ev, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from df import fsutil
+
+    put_run_with_pins(world)
+    directory = world.layout.runs_dir / ".locks"
+    directory.mkdir(mode=0o700)
+    real = fsutil.owner_uid
+    monkeypatch.setattr(
+        fsutil,
+        "owner_uid",
+        lambda st: 4711 if st.st_ino == directory.stat().st_ino else real(st),
+    )
+    with pytest.raises(StepFailed, match="владелец"):
+        resume(world, snap_of(world))
+    assert ev.log == []
+
+
+def test_a_lock_directory_that_is_a_link_refuses(world: FakeLayout, ev: Ev) -> None:
+    put_run_with_pins(world)
+    elsewhere = world.layout.root / "elsewhere"
+    elsewhere.mkdir(mode=0o700)
+    (world.layout.runs_dir / ".locks").symlink_to(elsewhere)
+    with pytest.raises((StepFailed, OSError)):
+        resume(world, snap_of(world))
+    assert list(elsewhere.iterdir()) == [] and ev.log == []
+
+
+@pytest.mark.parametrize("how", ["mode", "link", "hardlink"])
+def test_a_bad_lock_file_refuses(world: FakeLayout, ev: Ev, how: str) -> None:
+    put_run_with_pins(world)
+    directory = world.layout.runs_dir / ".locks"
+    directory.mkdir(mode=0o700)
+    lock = directory / "run-1.lock"
+    if how == "mode":
+        lock.write_text("")
+        lock.chmod(0o644)
+    elif how == "hardlink":
+        lock.write_text("")
+        lock.chmod(0o600)
+        os.link(lock, directory / "twin")
+    else:
+        lock.symlink_to(world.layout.root / "elsewhere")
+    with pytest.raises((StepFailed, OSError)):
+        resume(world, snap_of(world))
+    assert ev.log == []
