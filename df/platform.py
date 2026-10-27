@@ -798,8 +798,9 @@ def parse_dscl(output: bytes, step: str) -> dict[str, str]:
     Standard attributes are taken; a native one only when the intent lists
     it (macOS keeps some, like `IsHidden`, as `dsAttrTypeNative:`). Both forms
     of one name with different values are refused (`step` names the failure).
-    Every value is an array of strings; several values join with `", "` (and so never equal a single
-    intended value). Other native attributes are ignored.
+    Every value is an array of strings; several values join with `", "` (and
+    so never equal a single intended value). Other native attributes are
+    ignored.
     """
     try:
         data = plistlib.loads(output, fmt=plistlib.FMT_XML)
