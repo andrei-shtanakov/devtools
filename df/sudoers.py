@@ -33,8 +33,9 @@ TAGS = frozenset({"NOPASSWD", "NOSETENV"})
 #: Output streams of `df-publish` that sudo's I/O log must not record (4.4).
 LOG_KEYS = ("log_output", "log_stdout", "log_stderr", "log_ttyout")
 UNVERIFIABLE = "нарушено: конфигурация I/O-журнала не проверяема"
-#: v1 supports classic sudo 1.9 only (owner, 27.10): sudo-rs (the default of
-#: Ubuntu 25.10+) rejects `log_output` and is refused with this instruction.
+#: v1 supports classic sudo 1.9 only (owner, 27.10): sudo-rs (measured on the
+#: Ubuntu 26.04 CI runner) rejects `log_output` and is refused with this
+#: instruction.
 SUDO_FIX = (
     "v1 требует классический sudo 1.9 (sudo.ws); переключите альтернативу sudo "
     "на sudo.ws (Ubuntu: `sudo update-alternatives --config sudo`)"
