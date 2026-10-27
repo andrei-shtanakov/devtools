@@ -10,7 +10,8 @@ this order, each settled by its own check so that a repeat changes nothing:
 3. `publisher-config`: `/etc/df/publisher.toml` from the accounts;
 4. `libexec`: the wrappers, for the admin Python of `current`;
 5. `sudoers`: `/etc/sudoers.d/df`;
-6. `verify`: wrappers and the effective sudo policy of five names.
+6. `verify`: wrappers and the effective sudo policy of five names (always run,
+   once; a failure names the retry).
 
 TODO(Task 11): `perimeter-init` (the perimeter database, created as
 `df-publisher`) goes between `publisher-config` and `libexec`; `dirs` already
@@ -20,6 +21,7 @@ makes its directory.
 from __future__ import annotations
 
 import os
+import pwd
 import stat
 import uuid
 from dataclasses import dataclass
@@ -40,6 +42,7 @@ _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 #: Directory states `do()` settles: absent, a mode `make_dir` repairs, ours but
 #: still root's (a crash between `mkdir` and `fchown`).
 _NEEDS_DO = frozenset({"absent", "repair", "unowned"})
+_RETRY = "; исправьте и повторите darkfactory roles setup"
 _NO_OPENSSL = (
     "openssl: нет в install.toml (approved_cli.openssl): добавьте путь, "
     "например openssl = /usr/bin/openssl"
@@ -89,6 +92,10 @@ def check_preconditions(layout: Layout, operator: str, snap: Snapshot) -> None:
         sudoers.render(layout, operator)
     except ValueError as exc:
         raise StepFailed("operator", str(exc)) from exc
+    try:
+        pwd.getpwnam(operator)
+    except KeyError as exc:
+        raise StepFailed("operator", f"нет учётной записи {operator!r}") from exc
     install = snap.install
     if install is None:
         raise StepFailed(
@@ -115,8 +122,14 @@ def _steps(layout: Layout, operator: str, python: Path) -> list[Step]:
             sudoers.SUDOERS_FILE, sudoers_text(), SUDOERS_MODE
         )
 
-    def verify_problems() -> list[str]:
-        return _verify_problems(layout, operator, python)
+    verified: list[bool] = []
+
+    def verify() -> None:
+        """One probe per run; a pure check would be run three times."""
+        problems = _verify_problems(layout, operator, python)
+        if problems:
+            raise StepFailed("verify", "; ".join(problems) + _RETRY)
+        verified.append(True)
 
     return [
         Step(
@@ -144,12 +157,7 @@ def _steps(layout: Layout, operator: str, python: Path) -> list[Step]:
             lambda: sudoers.install(sudoers_text()),
             sudoers_problems,
         ),
-        Step(
-            "verify",
-            lambda: not verify_problems(),
-            lambda: None,
-            verify_problems,
-        ),
+        Step("verify", lambda: bool(verified), verify),
     ]
 
 
@@ -210,9 +218,16 @@ def _dir_state(spec: DirSpec, accounts: dict[str, Account]) -> str:
     want = plat.ROOT_UID if spec.owner is None else _account(accounts, spec.owner).uid
     owner = fsutil.owner_uid(st)
     if have != spec.mode:
-        if owner == plat.ROOT_UID and fsutil.repairable(st, spec.mode):
+        if (
+            owner == plat.ROOT_UID
+            and fsutil.repairable(st, spec.mode)
+            and (spec.owner is None or not os.listdir(spec.path))
+        ):
             return "repair"  # a crash left an inherited S_ISGID
-        return f"{spec.path}: права {have:04o}, нужны {spec.mode:04o}"
+        return (
+            f"{spec.path}: права {have:04o}, нужны {spec.mode:04o}; "
+            f"исправьте (chmod {spec.mode:04o} {spec.path}) или удалите каталог"
+        )
     if owner == want:
         return "ok"
     if owner == plat.ROOT_UID and not os.listdir(spec.path):

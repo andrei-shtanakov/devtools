@@ -70,6 +70,9 @@ _STAGE1_FILES = frozenset(n for n in KNOWN_SCHEMAS if n not in STAGE_OF)
 _NO_WRITE_OTHERS = stat.S_IWGRP | stat.S_IWOTH
 _SPECIAL_BITS = stat.S_ISUID | stat.S_ISGID
 _SHOWN_PROBLEMS = 5
+#: Directories of `/etc/df` that are not files of a schema (stage 2a): judged
+#: by `lstat` alone -- a real directory -- and never opened.
+_ETC_DIRS = frozenset({"secrets"})
 
 
 @dataclass(frozen=True)
@@ -265,7 +268,11 @@ def _schemas(ctx: _Context) -> str:
             raise _Outcome(BROKEN, f"models.toml: {exc}") from exc
     broken_publisher = _publisher_problem(ctx.layout)
     known = _STAGE1_FILES | STAGE_OF.keys()
-    unknown = sorted(n for n in _etc_names(ctx.layout) if n not in known)
+    unknown = sorted(
+        n
+        for n in _etc_names(ctx.layout)
+        if n not in known and not _is_etc_dir(ctx.layout, n)
+    )
     temps = [n for n in unknown if _write_temp_of(n) in known]
     others = [n for n in unknown if n not in temps]
     if temps and _writing(ctx):
@@ -311,6 +318,16 @@ def _write_temp_of(name: str) -> str | None:
     rename; still blocking: it may hold a partial configuration)."""
     found = fsutil.WRITE_TEMP.fullmatch(name)
     return None if found is None else found["name"]
+
+
+def _is_etc_dir(layout: Layout, name: str) -> bool:
+    """A name of `_ETC_DIRS` that is a real directory (not a link, not a file)."""
+    if name not in _ETC_DIRS:
+        return False
+    try:
+        return stat.S_ISDIR(os.lstat(layout.etc / name).st_mode)
+    except OSError:
+        return False
 
 
 def _etc_names(layout: Layout) -> list[str]:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import pwd
 import stat
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -108,6 +109,14 @@ def setup(
     monkeypatch.setattr(plat, "verify_service_user", verify)
     monkeypatch.setattr(plat, "approved_cli_problems", lambda _cli, _plat: [])
     monkeypatch.setattr(plat, "trusted_path_problems", lambda _path: [])
+    real_getpwnam = pwd.getpwnam
+
+    def getpwnam(name: str):  # noqa: ANN202
+        return real_getpwnam(
+            pwd.getpwuid(os.getuid()).pw_name if name == OPERATOR else name
+        )
+
+    monkeypatch.setattr(pwd, "getpwnam", getpwnam)
     monkeypatch.setattr(sudoers, "SUDOERS_FILE", sudoers_file)
     monkeypatch.setattr(sudoers, "install", install)
     monkeypatch.setattr(sudoers, "policy_problems", policy)
@@ -120,7 +129,7 @@ def test_steps_order_without_perimeter_init(setup: Setup) -> None:
     seen = list(dict.fromkeys(step for step, _event in setup.steps()))
     assert seen == ["roles", "dirs", "publisher-config", "libexec", "sudoers", "verify"]
     assert tuple(seen) == roles_setup.STEP_NAMES
-    assert ("verify", "skip") in setup.steps()  # a pure check: nothing to do
+    assert ("verify", "done") in setup.steps()
     assert ("sudoers", "done") in setup.steps()
 
 
@@ -176,7 +185,10 @@ def test_idempotent(setup: Setup) -> None:
     assert setup.calls.ensure == 1
     assert len(setup.calls.installed) == 1
     new = setup.steps()[before:]
-    assert new == [(name, "skip") for name in roles_setup.STEP_NAMES]
+    # verify has nothing to settle but always probes, once
+    want = [(name, "skip") for name in roles_setup.STEP_NAMES[:-1]]
+    assert new == [*want, ("verify", "start"), ("verify", "done")]
+    assert len(setup.calls.policy) == 10
     assert not [e for e in setup.fake.events if e[0] in ("created", "chmod")]
 
 
@@ -200,6 +212,8 @@ def test_verify_failure_is_a_refusal_naming_the_problem(setup: Setup) -> None:
     with pytest.raises(StepFailed, match="лишнее правило") as info:
         setup.run()
     assert info.value.step == "verify"
+    assert str(info.value).endswith("исправьте и повторите darkfactory roles setup")
+    assert len(setup.calls.policy) == 5  # one probe, not three
 
 
 def test_stale_wrapper_is_rewritten(setup: Setup) -> None:
@@ -251,3 +265,101 @@ def test_roles_are_created_only_through_ensure_roles(setup: Setup) -> None:
     created one after another under the lock, only via `ensure_roles`."""
     setup.run()
     assert setup.calls.ensure == 1
+
+
+# --- fail-closed and crash-recovery branches of `dirs` (review I2) -------------
+
+
+def refused_dirs(setup: Setup) -> str:
+    with pytest.raises(StepFailed) as info:
+        setup.run()
+    assert info.value.step == "dirs"
+    return str(info.value)
+
+
+def test_wrong_mode_dir_refused_with_the_way_out(setup: Setup) -> None:
+    setup.lay.publisher_dir.mkdir(mode=0o755)
+    os.chmod(setup.lay.publisher_dir, 0o755)
+    text = refused_dirs(setup)
+    assert "0755" in text and "нужны 0700" in text
+    assert f"chmod 0700 {setup.lay.publisher_dir}" in text
+    assert not [e for e in setup.fake.events if e[0] == "fchown"]
+
+
+def test_foreign_owner_dir_refused(setup: Setup) -> None:
+    setup.lay.secrets_dir.mkdir(mode=0o700)
+    setup.fake.set_owner(setup.lay.secrets_dir, 4242)
+    assert "владелец uid 4242" in refused_dirs(setup)
+
+
+@pytest.mark.parametrize("kind", ["file", "symlink"])
+def test_non_directory_refused(setup: Setup, kind: str) -> None:
+    path = setup.lay.runs_dir
+    if kind == "file":
+        path.write_text("x")
+    else:
+        path.symlink_to(setup.lay.var)
+    assert "не каталог" in refused_dirs(setup)
+
+
+def test_crash_between_mkdir_and_fchown_is_finished(setup: Setup) -> None:
+    work = setup.lay.role_home("df-exec") / "work"
+    work.mkdir(mode=0o700)  # born, not yet handed over
+    setup.run()
+    assert fsutil.owner_uid(os.lstat(work)) == ROLE_UID["df-exec"]
+
+
+def test_non_empty_unowned_role_dir_refused(setup: Setup) -> None:
+    work = setup.lay.role_home("df-exec") / "work"
+    work.mkdir(mode=0o700)
+    (work / "stray").write_text("x")
+    assert "владелец" in refused_dirs(setup)
+    assert fsutil.owner_uid(os.lstat(work)) == os.getuid()
+
+
+def test_inherited_setgid_is_repaired(setup: Setup) -> None:
+    setup.lay.libexec.mkdir(mode=0o755)
+    os.chmod(setup.lay.libexec, 0o2755)
+    setup.run()
+    assert stat.S_IMODE(os.lstat(setup.lay.libexec).st_mode) == 0o755
+
+
+def test_role_dir_repair_needs_it_empty(setup: Setup) -> None:
+    """m3: a root-owned narrower role dir with content is not handed over."""
+    pub = setup.lay.publisher_dir
+    pub.mkdir(mode=0o700)
+    (pub / "root-file").write_text("x")
+    os.chmod(pub, 0o500)
+    assert "права 0500" in refused_dirs(setup)
+    assert fsutil.owner_uid(os.lstat(pub)) == os.getuid()
+
+
+def test_role_dir_repair_when_empty(setup: Setup) -> None:
+    pub = setup.lay.publisher_dir
+    pub.mkdir(mode=0o700)
+    os.chmod(pub, 0o500)
+    setup.run()
+    st = os.lstat(pub)
+    assert stat.S_IMODE(st.st_mode) == 0o700
+    assert fsutil.owner_uid(st) == ROLE_UID["df-publisher"]
+
+
+def test_sudoers_file_with_wrong_mode_is_reinstalled(setup: Setup) -> None:
+    setup.run()
+    os.chmod(setup.sudoers_file, 0o640)
+    setup.run()
+    assert len(setup.calls.installed) == 2
+    assert stat.S_IMODE(os.lstat(setup.sudoers_file).st_mode) == 0o440
+
+
+def test_operator_account_must_exist(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def missing(name: str):  # noqa: ANN202
+        raise KeyError(name)
+
+    monkeypatch.setattr(pwd, "getpwnam", missing)
+    with pytest.raises(StepFailed, match="нет учётной записи") as info:
+        setup.run()
+    assert info.value.step == "operator"
+    assert setup.calls.ensure == 0 and not setup.lay.journal.exists()

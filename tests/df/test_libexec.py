@@ -126,3 +126,13 @@ def test_install_wrappers_replaces_a_stale_one(fake: FakeLayout) -> None:
     libexec.install_wrappers(lay, OTHER_PYTHON)
     assert libexec.wrapper_problems(lay, OTHER_PYTHON) == []
     assert libexec.wrapper_problems(lay, PYTHON) != []
+
+
+def test_wrapper_paths_agree_with_layout(fake: FakeLayout) -> None:
+    lay = fake.layout
+    assert lay.opt / "bin/df-run-start" == lay.run_start
+    assert lay.opt / "libexec" == lay.libexec
+    for name in libexec.WRAPPERS:
+        assert libexec.wrapper_path(lay, name) == lay.opt / name
+    with pytest.raises(ValueError):
+        libexec.wrapper_path(lay, "libexec/df-other")

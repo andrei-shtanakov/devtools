@@ -513,7 +513,9 @@ def _roles_setup(args: argparse.Namespace, lay: Layout, snap: Snapshot) -> int:
 
 
 def _operator_of(args: argparse.Namespace) -> str:
-    operator = args.operator or os.environ.get("SUDO_USER")
+    if args.operator is not None:  # an explicit "" is refused later, not replaced
+        return args.operator
+    operator = os.environ.get("SUDO_USER")
     if not operator:
         raise Refusal(_NO_OPERATOR)
     return operator

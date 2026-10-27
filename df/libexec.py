@@ -43,6 +43,15 @@ _FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 _STEP = "libexec"
 
 
+def wrapper_path(layout: Layout, name: str) -> Path:
+    """Where wrapper `name` lives: through `Layout`, the one source of paths."""
+    if name == "bin/df-run-start":
+        return layout.run_start
+    if name in WRAPPERS:
+        return layout.libexec / name.removeprefix("libexec/")
+    raise ValueError(f"not a wrapper: {name!r}")
+
+
 def wrapper_text(layout: Layout, name: str, admin_python: Path) -> str:
     """The exact text of wrapper `name` (an entry of `WRAPPERS`)."""
     subcommand = _SUBCOMMANDS.get(name)
@@ -64,10 +73,11 @@ def install_wrappers(layout: Layout, admin_python: Path) -> None:
     """Write every wrapper atomically, root-owned `0755`."""
     for name in WRAPPERS:
         text = wrapper_text(layout, name, admin_python)
+        path = wrapper_path(layout, name)
         try:
-            fsutil.write_atomic(layout.opt / name, text, WRAPPER_MODE)
+            fsutil.write_atomic(path, text, WRAPPER_MODE)
         except OSError as exc:
-            raise StepFailed(_STEP, f"{layout.opt / name}: {exc}") from exc
+            raise StepFailed(_STEP, f"{path}: {exc}") from exc
 
 
 def wrapper_problems(layout: Layout, admin_python: Path) -> list[str]:
@@ -75,7 +85,7 @@ def wrapper_problems(layout: Layout, admin_python: Path) -> list[str]:
     path that passes the trusted-path policy; empty means all hold."""
     problems: list[str] = []
     for name in WRAPPERS:
-        path = layout.opt / name
+        path = wrapper_path(layout, name)
         text = wrapper_text(layout, name, admin_python)
         found = root_file_problems(path, text, WRAPPER_MODE)
         problems += found

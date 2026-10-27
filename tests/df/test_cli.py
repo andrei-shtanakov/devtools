@@ -104,7 +104,7 @@ def test_cli_roles_setup_is_writer() -> None:
     assert launcher_entry.mode_of(["roles"]) == "reader"
 
 
-def test_cli_roles_setup_without_root_refused_before_the_lock(
+def test_cli_roles_setup_without_root_refused_by_main(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -221,3 +221,25 @@ def test_roles_setup_operator_defaults_to_sudo_user(
     monkeypatch.setenv("SUDO_USER", "")
     with pytest.raises(cli.Refusal, match="укажите --operator"):
         cli._operator_of(cli._parse(["roles", "setup"]))  # noqa: SLF001
+
+
+def test_empty_operator_is_not_replaced_by_sudo_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUDO_USER", "carol")
+    args = cli._parse(["roles", "setup", "--operator", ""])  # noqa: SLF001
+    assert cli._operator_of(args) == ""  # noqa: SLF001
+
+
+def test_entry_refuses_roles_setup_before_any_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The guarantee `main` cannot give: the entry refuses a non-root writer
+    before it opens or creates the lock chain."""
+    monkeypatch.setattr(launcher_entry, "ROOT_UID", os.geteuid() + 1)
+    code = launcher_entry.run(["roles", "setup", "--operator", "a"], root=str(tmp_path))
+    assert code == 2
+    assert "требует root" in capsys.readouterr().err
+    assert list(tmp_path.iterdir()) == []

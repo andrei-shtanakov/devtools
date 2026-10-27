@@ -419,9 +419,6 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
     ("platform", "_make_home", "os.mkdir", 1): "reserved name; own sync, rename",
     ("platform", "_make_home", "os.fchown", 1): "reserved name; own sync, rename",
     ("platform", "_make_home", "os.fchmod", 1): "reserved name; own sync, rename",
-    ("roles_setup", "_hand_over", "os.fchown", 1): (
-        "an empty root-born 0700 dir handed to its role: own sync, then the parent's"
-    ),
     ("platform", "_remove_reserved", "os.rmdir", 1): (
         "idempotent: a retry removes it again before _make_home syncs the parent"
     ),
@@ -449,6 +446,9 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
     ("release", "_switch_current", "os.rename", 1): "protocol activate: sync_dir",
     ("release", "_unlink_absent_ok", "os.unlink", 1): "activate's own temp",
     ("release", "_unlink_quietly", "os.unlink", 1): "activate's own temp",
+    ("roles_setup", "_hand_over", "os.fchown", 1): (
+        "an empty root-born 0700 dir handed to its role: own sync, then the parent's"
+    ),
     ("sudoers", "_place", "os.rename", 1): (
         "protocol install: temp born 0440 by create_file, sync_file, visudo, "
         "rename, sync_dir(parent)"
