@@ -119,6 +119,8 @@ def _visudo(
     seen: list[tuple[list[str], str, int]] = []
 
     def run(argv: Sequence[str], **_kw: object) -> RunResult:
+        if list(argv) == ["/usr/bin/sudo", "--version"]:
+            return ok(CLASSIC)
         path = Path(argv[-1])
         mode = stat.S_IMODE(path.stat().st_mode)
         seen.append((list(argv), path.read_text(), mode))
@@ -150,9 +152,72 @@ def test_validate_not_launched(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.skipif(not VISUDO_USABLE, reason="нет /usr/sbin/visudo")
 def test_validate_real_visudo() -> None:
+    """Classic sudo: the real visudo accepts the text and rejects a broken one.
+    sudo-rs (Ubuntu 26.04 and later; its visudo rejects `log_output`): v1
+    refuses it, so the refusal is what this host must show."""
+    if sudoers.sudo_flavor() == "sudo-rs":
+        [problem] = sudoers.flavor_problems()
+        assert "sudo-rs" in problem and "sudo.ws" in problem
+        return
     assert sudoers.validate(sudoers.render(ROOT, OP)) == []
     broken = sudoers.render(ROOT, OP).replace("ALL=(df-exec)", "ALL=(df-exec")
     assert sudoers.validate(broken) != []
+
+
+# --- sudo flavor -------------------------------------------------------------
+
+CLASSIC = b"Sudo version 1.9.15p5\nSudoers policy plugin version 1.9.15p5\n"
+
+
+def _version(monkeypatch: pytest.MonkeyPatch, result: RunResult) -> list[list[str]]:
+    seen: list[list[str]] = []
+
+    def run(argv: Sequence[str], **_kw: object) -> RunResult:
+        seen.append(list(argv))
+        return result
+
+    monkeypatch.setattr(plat, "run_command", run)
+    return seen
+
+
+@pytest.mark.parametrize(
+    "result,flavor",
+    [
+        (ok(CLASSIC), "classic"),
+        (ok(b"Sudo version 1.9.13p2\n"), "classic"),
+        (ok(b"sudo-rs 0.2.8\n"), "sudo-rs"),
+        (ok(b"Sudo version 1.8.31\n"), "unknown"),
+        (ok(b"garbage\n"), "unknown"),
+        (ok(b""), "unknown"),
+        (ok(b"\xff\xfe\n"), "unknown"),
+        (RunResult(1, CLASSIC, b"", launched=True), "unknown"),
+        (RunResult(127, b"", b"", launched=False), "unknown"),
+    ],
+)
+def test_sudo_flavor(
+    monkeypatch: pytest.MonkeyPatch, result: RunResult, flavor: str
+) -> None:
+    seen = _version(monkeypatch, result)
+    assert sudoers.sudo_flavor() == flavor
+    assert seen == [["/usr/bin/sudo", "--version"]]
+
+
+def test_flavor_problems_classic_is_clean(monkeypatch: pytest.MonkeyPatch) -> None:
+    _version(monkeypatch, ok(CLASSIC))
+    assert sudoers.flavor_problems() == []
+
+
+@pytest.mark.parametrize(
+    "out,flavor", [(b"sudo-rs 0.2.8\n", "sudo-rs"), (b"x", "unknown")]
+)
+def test_flavor_problems_name_the_fix(
+    monkeypatch: pytest.MonkeyPatch, out: bytes, flavor: str
+) -> None:
+    _version(monkeypatch, ok(out))
+    [problem] = sudoers.flavor_problems()
+    assert flavor in problem
+    assert "sudo 1.9 (sudo.ws)" in problem
+    assert "update-alternatives --config sudo" in problem
 
 
 # --- install -----------------------------------------------------------------
@@ -181,6 +246,19 @@ def test_install_validates_temp_then_renames(
     st = target.stat()
     assert stat.S_IMODE(st.st_mode) == 0o440 and st.st_uid == os.getuid()
     assert sorted(p.name for p in target.parent.iterdir()) == ["df"]
+
+
+@pytest.mark.parametrize("out", [b"sudo-rs 0.2.8\n", b"garbage\n"])
+def test_install_refuses_other_sudo_before_any_write(
+    target: Path, monkeypatch: pytest.MonkeyPatch, out: bytes
+) -> None:
+    seen = _version(monkeypatch, ok(out))
+    with pytest.raises(StepFailed) as info:
+        sudoers.install("rules\n")
+    assert info.value.step == "sudoers"
+    assert "sudo.ws" in info.value.detail
+    assert seen == [["/usr/bin/sudo", "--version"]]  # no visudo
+    assert list(target.parent.iterdir()) == []
 
 
 def test_install_problems_never_rename(

@@ -367,6 +367,8 @@ depends_on: devtools/docs/superpowers/specs/2026-10-12-approval-act-review-desig
   (требование, доказывается приёмкой, не предполагается). Проверка App — JWT/installation, не
   `gh api user`. `setup-repo plan → apply` человеком. Модели фиксируются на старте прогона;
   смена при `resume` — событие. Приёмка: CI против живой; без credentials — `not_verified`.
+  **27.10 (владелец):** v1 требует классический sudo 1.9 (sudo.ws); sudo-rs (Ubuntu 25.10+)
+  отклоняется с инструкцией переключить альтернативу sudo на sudo.ws.
 - **Spike 12.10** (`df-roles-probe`): approve App засчитывается ruleset-ом, App мержит,
   `merged_by` Bot → `classify_actor = agent`; отказ на человеческом пути — CODEOWNERS по путям +
   `require_code_owner_review`; токен установки App живёт час.

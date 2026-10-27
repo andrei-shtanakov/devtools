@@ -323,6 +323,9 @@ remediation-issue у уже помеченного родителя). Повто
 
 Измерено (CI `df-stage1`) на macOS 15 arm64 и Ubuntu 24.04 x86_64; иные хосты, в том числе
 другие выпуски Linux, не измерялись.
+Этап 2 требует классический sudo 1.9 (sudo.ws): sudo-rs (по умолчанию в Ubuntu 25.10+)
+отклоняется с инструкцией переключить альтернативу sudo на sudo.ws
+(`sudo update-alternatives --config sudo`); измерено на Ubuntu 24.04.
 
 ### Подготовка
 
