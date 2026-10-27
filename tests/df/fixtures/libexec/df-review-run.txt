@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /opt/df/admin-python/cpython-3.12.13-linux-x86_64-gnu/bin/python3.12 -I -B -S /opt/df/bin/darkfactory-entry.py launch exec df-review review "$@"

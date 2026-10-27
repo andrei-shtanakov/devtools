@@ -32,6 +32,7 @@ from df import (
     journal,
     launcher_entry,
     probe,
+    roles_setup,
     state,
 )
 from df import build as build_mod
@@ -1041,3 +1042,66 @@ def test_unknown_etc_names_all_in_problems(fake_installed: World) -> None:
     c = checks_of(fake_installed)["etc.schemas"]
     assert c.problems == tuple(f"неизвестный файл /etc/df: {n}" for n in names)
     assert c.reason.endswith("и ещё 2")
+
+
+def test_secrets_dir_is_not_an_unknown_etc_file(fake_installed: World) -> None:
+    secrets = fake_installed.lay.etc / "secrets"
+    secrets.mkdir(mode=0o700)
+    (secrets / "token").write_text("never opened")
+    os.chmod(secrets, 0o000)  # opening it would fail: it is only lstat-ed
+    try:
+        checks = level1_checks(
+            snap(fake_installed), fake_installed.lay, euid=os.geteuid()
+        )
+    finally:
+        os.chmod(secrets, 0o700)
+    assert by_id(checks)["etc.schemas"].status == "ok"
+
+
+@pytest.mark.parametrize("kind", ["file", "symlink"])
+def test_non_directory_secrets_is_still_flagged(
+    fake_installed: World, kind: str
+) -> None:
+    path = fake_installed.lay.etc / "secrets"
+    if kind == "file":
+        path.write_text("x")
+    else:
+        path.symlink_to(fake_installed.lay.var)
+    c = by_id(
+        level1_checks(snap(fake_installed), fake_installed.lay, euid=os.geteuid())
+    )
+    assert c["etc.schemas"].status == "нарушено"
+    assert "secrets" in c["etc.schemas"].reason
+
+
+def test_publisher_write_is_a_live_write_for_doctor(
+    fake_installed: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #641: `roles setup` writes `publisher.toml` inside a generation
+    bracket, so a doctor that sees the temp of `write_atomic` at that moment
+    says «идёт запись», not «осталась после сбоя»."""
+    from df import fsutil
+    from df.stage2_config import PublisherConfig, dump_publisher
+
+    w = fake_installed
+    s = snap(w)
+    monkeypatch.setattr(
+        roles_setup, "_publisher_text", lambda _l: dump_publisher(PublisherConfig({}))
+    )
+    real = fsutil.write_atomic
+    seen: list[tuple[str, str]] = []
+
+    def write_atomic(path: Path, text: str, mode: int = 0o644) -> None:
+        temp = path.with_name(f".{path.name}.{os.getpid()}.{'b' * 32}.tmp")
+        temp.write_text("partial")
+        c = by_id(level1_checks(s, w.lay, euid=os.geteuid()))["etc.schemas"]
+        seen.append((c.status, c.reason))
+        temp.unlink()
+        real(path, text, mode)
+
+    monkeypatch.setattr(fsutil, "write_atomic", write_atomic)
+    roles_setup._write_publisher(w.lay)  # noqa: SLF001
+    assert seen == [
+        ("данные недоступны", "идёт административная запись, повторите doctor")
+    ]
+    assert w.lay.generation.read_text() == f"{s.generation + 2}\n"
