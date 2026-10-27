@@ -381,7 +381,7 @@ def _run(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
     if os.geteuid() != ROOT_UID:
         return run_start.human_main(args.words, layout=lay)
     if isinstance(read, Transitional):
-        raise Refusal(_TRANSITIONAL)
+        raise Refusal(doctor.transitional_text(read.generation))
     snap = state.parse_snapshot(read.value, lay, mode="reader")
     return run_start.main(args.words, layout=lay, snap=snap)
 
