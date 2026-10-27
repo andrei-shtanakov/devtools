@@ -65,7 +65,13 @@ RAW_FIELDS = (
     "pending_present",
 )
 #: Subcommands run as writers (spec 3.3): root only, exclusive lock.
-WRITER_COMMANDS = (("init",), ("install",), ("models", "set"))
+WRITER_COMMANDS = (
+    ("init",),
+    ("install",),
+    ("models", "set"),
+    ("roles", "setup"),
+    ("setup-agent",),
+)
 #: Owner of root's objects; tests substitute their own uid.
 ROOT_UID = 0
 EXIT_REFUSED = 2

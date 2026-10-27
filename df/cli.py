@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import traceback
 from collections.abc import Sequence
@@ -34,6 +35,8 @@ from df import (
     launcher_entry,
     models,
     probe,
+    roles,
+    roles_setup,
     state,
 )
 from df.config import ConfigError, InstallConfig, Pending, parse_install
@@ -42,6 +45,7 @@ from df.journal import NeedsHuman, Stable, StepFailed, Transitional
 from df.manifest import ManifestError
 from df.paths import Layout, default_layout
 from df.sources import UnsupportedLock
+from df.stage2_config import OPERATIONS
 from df.state import Mode, ReadResult, Snapshot
 
 EXIT_OK = 0
@@ -58,7 +62,14 @@ _FINISH = "есть незавершённая установка: заверш�
 _NO_PRODUCT = "продукт не зарегистрирован (этап 3)"
 _NO_REGISTRY = "реестр продуктов не поддерживается до этапа 3"
 _NO_INSTALL = "нет /etc/df/install.toml: начните с bootstrap init"
+_NOT_YET = "не реализовано на этом шаге"
+_NO_OPERATOR = "roles setup: укажите --operator (SUDO_USER не задан)"
 _UNSET = "—"
+#: Subcommands of the roles' side (Tasks 5-7); readers, refused until then.
+SERVICE_COMMANDS = frozenset({"launch", "publisher", "run"})
+#: What `publisher serve` takes: the five operations and the self-check.
+PUBLISHER_ARGS = (*OPERATIONS, "self-check")
+_LAUNCH_OP = re.compile(r"[a-z][a-z0-9-]*", re.ASCII)
 _LIST_COLUMNS = ("роль", "harness", "model", "effort", "источник", "проверка")
 _REFUSALS = (
     StepFailed,
@@ -167,9 +178,9 @@ def _check_call(
 
 
 def parsed_mode(args: argparse.Namespace) -> str:
-    """The mode the parsed command needs: `writer` for `init`, `install` and
-    `models set` (`WRITER_COMMANDS`), else `reader`."""
-    sub = getattr(args, "models_command", None)
+    """The mode the parsed command needs: `writer` for `init`, `install`,
+    `models set` and `roles setup` (`WRITER_COMMANDS`), else `reader`."""
+    sub = getattr(args, "models_command", None) or getattr(args, "roles_command", None)
     words = (args.command,) if sub is None else (args.command, sub)
     writer = any(words[: len(cmd)] == cmd for cmd in launcher_entry.WRITER_COMMANDS)
     return "writer" if writer else "reader"
@@ -219,6 +230,7 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     )
     sub.add_parser("install", exit_on_error=False, add_help=False, allow_abbrev=False)
     _add_models(sub)
+    _add_service(sub)
     doctor = sub.add_parser(
         "doctor", exit_on_error=False, add_help=False, allow_abbrev=False
     )
@@ -226,9 +238,12 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     doctor.add_argument("--product", type=_repository_id)
     doctor.add_argument("--json", action="store_true")
     try:
-        return parser.parse_args(argv)
+        args = parser.parse_args(argv)
     except argparse.ArgumentError as exc:
         raise UsageError(str(exc)) from exc
+    if args.command == "launch":
+        _check_launch(args)
+    return args
 
 
 def _add_models(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
@@ -251,6 +266,42 @@ def _add_models(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
     show.add_argument("--json", action="store_true")
 
 
+def _add_service(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
+    """`roles setup [--operator NAME]` (writer); `launch [exec] <role> <op>`,
+    `publisher serve <op>` and `run start|resume` (readers; the wrappers of
+    `df.libexec` call them, one exact shape each)."""
+    opts = {"exit_on_error": False, "add_help": False, "allow_abbrev": False}
+    group = sub.add_parser("roles", **opts)
+    words = group.add_subparsers(
+        dest="roles_command", required=True, parser_class=_Parser
+    )
+    words.add_parser("setup", **opts).add_argument("--operator")
+    publisher = sub.add_parser("publisher", **opts)
+    words = publisher.add_subparsers(
+        dest="publisher_command", required=True, parser_class=_Parser
+    )
+    words.add_parser("serve", **opts).add_argument("operation", choices=PUBLISHER_ARGS)
+    run = sub.add_parser("run", **opts)
+    words = run.add_subparsers(dest="run_command", required=True, parser_class=_Parser)
+    for name in ("start", "resume"):
+        words.add_parser(name, **opts)
+    sub.add_parser("launch", **opts).add_argument("words", nargs="+")
+
+
+def _check_launch(args: argparse.Namespace) -> None:
+    """`launch exec <role> <op>` or `launch <role> <op>`: exactly that."""
+    words: list[str] = args.words
+    args.exec_form = words[0] == "exec"
+    rest = words[1:] if args.exec_form else words
+    if len(rest) != 2:
+        raise UsageError(f"launch: нужно [exec] <роль> <операция>, получено {words}")
+    args.role, args.operation = rest
+    if args.role not in roles.MODEL_ROLE_USERS:
+        raise UsageError(f"launch: неизвестная роль {args.role!r}")
+    if not _LAUNCH_OP.fullmatch(args.operation):
+        raise UsageError(f"launch: неверная операция {args.operation!r}")
+
+
 def _repository_id(text: str) -> int:
     if not text.isascii() or not text.isdigit() or text.startswith("0"):
         raise ValueError(text)
@@ -261,12 +312,22 @@ def _repository_id(text: str) -> int:
 
 
 def _reader(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
+    if args.command in SERVICE_COMMANDS:
+        raise Refusal(f"{_service_name(args)}: {_NOT_YET}")  # Tasks 5-7
     if args.command == "doctor":
         return _doctor(args, lay, read)
     if isinstance(read, Transitional):
         raise Refusal(_TRANSITIONAL)
     snap = state.parse_snapshot(read.value, lay, mode="reader")
     return _models_list(args, lay, snap)
+
+
+def _service_name(args: argparse.Namespace) -> str:
+    if args.command == "launch":
+        return "launch exec" if args.exec_form else "launch"
+    if args.command == "publisher":
+        return "publisher serve"
+    return f"run {args.run_command}"
 
 
 def _doctor(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
@@ -428,6 +489,8 @@ def _writer(
         raise Refusal(_FINISH)
     if args.command == "models":
         return _models_set(args, lay, snap)
+    if args.command == "roles":
+        return _roles_setup(args, lay, snap)
     requested = _requested(args, snap, pending)
     if mode == "bootstrap" and _healthy(lay, snap):
         raise Refusal(
@@ -437,6 +500,23 @@ def _writer(
     release_id = install.run_install(lay, requested, snap, pending)
     print(f"darkfactory: установлен релиз {release_id}; команда: {_command(lay)}")
     return EXIT_OK
+
+
+def _roles_setup(args: argparse.Namespace, lay: Layout, snap: Snapshot) -> int:
+    """`roles setup`: the operator is `--operator`, else `SUDO_USER`. The
+    steps work under the lock this writer holds; no generation bracket,
+    because none of the snapshot's parts changes."""
+    operator = _operator_of(args)
+    roles_setup.run(lay, operator=operator, snap=snap)
+    print(f"darkfactory: роли и обёртки настроены; оператор {operator}")
+    return EXIT_OK
+
+
+def _operator_of(args: argparse.Namespace) -> str:
+    operator = args.operator or os.environ.get("SUDO_USER")
+    if not operator:
+        raise Refusal(_NO_OPERATOR)
+    return operator
 
 
 def _models_set(args: argparse.Namespace, lay: Layout, snap: Snapshot) -> int:

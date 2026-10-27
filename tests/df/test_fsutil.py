@@ -419,6 +419,9 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
     ("platform", "_make_home", "os.mkdir", 1): "reserved name; own sync, rename",
     ("platform", "_make_home", "os.fchown", 1): "reserved name; own sync, rename",
     ("platform", "_make_home", "os.fchmod", 1): "reserved name; own sync, rename",
+    ("roles_setup", "_hand_over", "os.fchown", 1): (
+        "an empty root-born 0700 dir handed to its role: own sync, then the parent's"
+    ),
     ("platform", "_remove_reserved", "os.rmdir", 1): (
         "idempotent: a retry removes it again before _make_home syncs the parent"
     ),

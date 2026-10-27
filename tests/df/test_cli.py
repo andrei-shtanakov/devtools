@@ -13,8 +13,9 @@ from pathlib import Path
 
 import pytest
 
-from df import cli, launcher_entry
+from df import cli, launcher_entry, state
 from df.config import REQUIRED_CLI, ConfigError, InstallConfig
+from df.journal import Stable
 from df.paths import Layout
 
 README = Path(__file__).resolve().parents[2] / "README.md"
@@ -81,3 +82,142 @@ def test_documented_bootstrap_without_tar_refused_before_any_change(
     assert code == cli.EXIT_REFUSED
     assert "ConfigError: approved_cli: missing required: tar" in capsys.readouterr().err
     assert list(tmp_path.iterdir()) == []
+
+
+# --- Task 4: roles setup and the service subcommands ------------------------
+
+SERVICE = [
+    ["launch", "exec", "df-exec", "check"],
+    ["launch", "df-review", "check"],
+    ["publisher", "serve", "merge"],
+    ["publisher", "serve", "self-check"],
+    ["run", "start"],
+    ["run", "resume"],
+]
+RAW = state.RawSnapshot(0, None, None, None, None, False)
+
+
+def test_cli_roles_setup_is_writer() -> None:
+    assert launcher_entry.mode_of(["roles", "setup"]) == "writer"
+    assert launcher_entry.mode_of(["roles", "setup", "--operator", "a"]) == "writer"
+    assert launcher_entry.mode_of(["setup-agent"]) == "writer"
+    assert launcher_entry.mode_of(["roles"]) == "reader"
+
+
+def test_cli_roles_setup_without_root_refused_before_the_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli, "ROOT_UID", os.geteuid() + 1)
+    lay = Layout(Path(os.path.realpath(tmp_path)))
+    code = cli.main(
+        ["roles", "setup", "--operator", "a"],
+        mode="writer",
+        read=Stable(RAW, 0),
+        lock_fd=99,
+        layout=lay,
+    )
+    assert code == 2
+    assert "требует root" in capsys.readouterr().err
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("argv", SERVICE)
+def test_cli_service_commands_are_readers(argv: list[str]) -> None:
+    assert launcher_entry.mode_of(argv) == "reader"
+    assert cli.parsed_mode(cli._parse(argv)) == "reader"  # noqa: SLF001
+
+
+@pytest.mark.parametrize("argv", SERVICE)
+def test_service_commands_are_not_implemented_yet(
+    argv: list[str], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    lay = Layout(Path(os.path.realpath(tmp_path)))
+    code = cli.main(argv, mode="reader", read=Stable(RAW, 0), lock_fd=None, layout=lay)
+    assert code == 2
+    assert "не реализовано на этом шаге" in capsys.readouterr().err
+
+
+BAD_SERVICE = [
+    ["publisher", "serve"],
+    ["publisher", "serve", "merge", "extra"],
+    ["publisher", "serve", "bogus"],
+    ["publisher"],
+    ["run"],
+    ["run", "start", "extra"],
+    ["run", "stop"],
+    ["launch"],
+    ["launch", "exec", "df-exec"],
+    ["launch", "exec", "df-exec", "check", "extra"],
+    ["launch", "df-exec"],
+    ["launch", "df-exec", "check", "extra"],
+    ["launch", "exec", "df-publisher", "check"],
+    ["launch", "exec", "root", "check"],
+    ["launch", "exec", "df-exec", "Check;rm"],
+    ["roles"],
+    ["roles", "setup", "extra"],
+]
+
+
+@pytest.mark.parametrize("argv", BAD_SERVICE)
+def test_wrong_argument_shape_is_a_usage_error(argv: list[str]) -> None:
+    with pytest.raises(cli.UsageError):
+        cli._parse(argv)  # noqa: SLF001
+
+
+def test_publisher_serve_extra_arg_refused_before_stdin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class NoStdin:
+        def read(self, *_a: object) -> str:
+            raise AssertionError("stdin was read")
+
+        readline = read
+        buffer = None
+
+    monkeypatch.setattr("sys.stdin", NoStdin())
+    lay = Layout(Path(os.path.realpath(tmp_path)))
+    code = cli.main(
+        ["publisher", "serve", "merge", "extra"],
+        mode="reader",
+        read=Stable(RAW, 0),
+        lock_fd=None,
+        layout=lay,
+    )
+    assert code == 2
+    assert "extra" in capsys.readouterr().err
+
+
+def test_roles_setup_needs_an_operator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli, "ROOT_UID", os.geteuid())
+    monkeypatch.delenv("SUDO_USER", raising=False)
+    lay = Layout(Path(os.path.realpath(tmp_path)))
+    code = cli.main(
+        ["roles", "setup"],
+        mode="writer",
+        read=Stable(RAW, 0),
+        lock_fd=99,
+        layout=lay,
+    )
+    assert code == 2
+    assert "укажите --operator" in capsys.readouterr().err
+
+
+def test_roles_setup_operator_defaults_to_sudo_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUDO_USER", "carol")
+    args = cli._parse(["roles", "setup"])  # noqa: SLF001
+    assert cli._operator_of(args) == "carol"  # noqa: SLF001
+    args = cli._parse(["roles", "setup", "--operator", "dave"])  # noqa: SLF001
+    assert cli._operator_of(args) == "dave"  # noqa: SLF001
+    monkeypatch.setenv("SUDO_USER", "")
+    with pytest.raises(cli.Refusal, match="укажите --operator"):
+        cli._operator_of(cli._parse(["roles", "setup"]))  # noqa: SLF001

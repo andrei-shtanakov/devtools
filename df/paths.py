@@ -97,9 +97,39 @@ class Layout:
         return self.bin_dir / "darkfactory-entry.py"
 
     @property
+    def libexec(self) -> Path:
+        """`/opt/df/libexec`: wrappers that `sudo` and roles run (stage 2a)."""
+        return self.opt / "libexec"
+
+    @property
+    def run_start(self) -> Path:
+        """Root's wrapper of `run start` / `run resume`."""
+        return self.bin_dir / "df-run-start"
+
+    @property
     def local_bin(self) -> Path:
         """`/usr/local/bin`: the public command's link, if one is created."""
         return self.root / "usr" / "local" / "bin"
+
+    @property
+    def runs_dir(self) -> Path:
+        """`/var/lib/df/runs`: run records (root writes)."""
+        return self.var / "runs"
+
+    @property
+    def publisher_dir(self) -> Path:
+        """`/var/lib/df/publisher`: the publisher's state (`df-publisher`)."""
+        return self.var / "publisher"
+
+    @property
+    def perimeter_dir(self) -> Path:
+        """`/var/lib/df/perimeter`: the perimeter database (`df-publisher`)."""
+        return self.var / "perimeter"
+
+    @property
+    def secrets_dir(self) -> Path:
+        """`/etc/df/secrets`: tokens (`df-publisher`)."""
+        return self.etc / "secrets"
 
     @property
     def journal(self) -> Path:
