@@ -360,9 +360,9 @@ def test_closerange_bound_is_the_hard_limit(
     monkeypatch.setattr(
         resource, "getrlimit", lambda _r: (1024, resource.RLIM_INFINITY)
     )
-    assert launch._fd_limit() == launch._FD_CAP  # noqa: SLF001
+    assert launch.fd_limit() == launch._FD_CAP  # noqa: SLF001
     monkeypatch.setattr(resource, "getrlimit", lambda _r: (1024, 1 << 20))
-    assert launch._fd_limit() == 1 << 20  # noqa: SLF001
+    assert launch.fd_limit() == 1 << 20  # noqa: SLF001
 
 
 def test_untrusted_ancestors_refuse_the_record(
@@ -429,7 +429,9 @@ FORBIDDEN = ("releases.toml", "install.toml", "models.toml", "current")
 class Spy:
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.hits: list[str] = []
-        # Tasks 6 and 7: add `publisher serve` and `run start|resume` here
+        # Task 7: add `publisher serve` here. `run start|resume` (Task 6) has
+        # the same spy over the same names in test_run_start.py:
+        # test_start_and_resume_reread_nothing (it needs the privileged fakes)
         for name in ("open", "readlink", "stat", "lstat", "listdir", "scandir"):
             real = getattr(os, name)
             monkeypatch.setattr(os, name, self._wrap(real))

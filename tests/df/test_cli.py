@@ -91,8 +91,9 @@ SERVICE = [
     ["launch", "df-review", "check"],
     ["publisher", "serve", "merge"],
     ["publisher", "serve", "self-check"],
-    ["run", "start"],
-    ["run", "resume"],
+    ["run", "start", "--product", "7"],
+    ["run", "resume", "run-1"],
+    ["run", "resume", "run-1", "--accept-model-change", "--from-step", "2"],
 ]
 RAW = state.RawSnapshot(0, None, None, None, None, False)
 
@@ -129,7 +130,7 @@ def test_cli_service_commands_are_readers(argv: list[str]) -> None:
     assert cli.parsed_mode(cli._parse(argv)) == "reader"  # noqa: SLF001
 
 
-@pytest.mark.parametrize("argv", [a for a in SERVICE if a[0] != "launch"])
+@pytest.mark.parametrize("argv", [a for a in SERVICE if a[0] == "publisher"])
 def test_service_commands_are_not_implemented_yet(
     argv: list[str], tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -145,6 +146,7 @@ BAD_SERVICE = [
     ["publisher", "serve", "bogus"],
     ["publisher"],
     ["run"],
+    ["run", "start"],
     ["run", "start", "extra"],
     ["run", "stop"],
     ["launch"],
