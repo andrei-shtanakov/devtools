@@ -11,6 +11,7 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Literal
@@ -26,6 +27,7 @@ from df.config import (
     _parse_toml,
     read_optional,
 )
+from df.roles import ROLE_USERS
 from df.toml_emit import dumps
 
 OPERATIONS: tuple[str, ...] = (
@@ -51,6 +53,7 @@ _PUBLISHER = KNOWN_SCHEMAS["publisher.toml"]
 _PRODUCTS = KNOWN_SCHEMAS["products.toml"]
 _TRUST = KNOWN_SCHEMAS["trust.toml"]
 _RUN = STATE_SCHEMAS["runs/<id>.json"]
+_DIGEST = re.compile(r"sha256:[0-9a-f]{64}", re.ASCII)
 
 
 def _is_int(value: object) -> bool:
@@ -107,15 +110,21 @@ def _check_api_base(value: object) -> None:
 
 
 def expected_publisher(accounts: Mapping[str, Account]) -> PublisherConfig:
-    """The table of spec 5.2 for the model roles present in `accounts`.
+    """The table of spec 5.2 for the model roles.
 
-    The publisher itself is never a sender.
+    Refuses (`ConfigError`) unless every role of `ROLE_USERS` is present and
+    `ready` and the three UIDs are distinct: a shared UID would silently
+    merge two roles' rights, and the publisher is never a sender.
     """
-    senders = {
-        accounts[name].uid: ops
-        for name, ops in _ROLE_OPERATIONS.items()
-        if name in accounts
-    }
+    for name in ROLE_USERS:
+        _need(name in accounts, name, "role account is missing")
+        _need(accounts[name].state == "ready", name, "role account is not ready")
+    by_uid: dict[int, str] = {}
+    for name in ROLE_USERS:
+        uid = accounts[name].uid
+        _need(uid not in by_uid, name, f"uid {uid} is shared with {by_uid.get(uid)}")
+        by_uid[uid] = name
+    senders = {accounts[name].uid: ops for name, ops in _ROLE_OPERATIONS.items()}
     return PublisherConfig(senders, DEFAULT_API_BASE)
 
 
@@ -135,7 +144,7 @@ def parse_publisher(text: str) -> PublisherConfig:
 
 
 def _parse_sender(row: dict[str, object]) -> tuple[int, frozenset[str]]:
-    _check_keys(row, {"uid", "operations"}, set(), "sender")
+    _check_keys(row, {"uid", "operations"}, set(), "sender", allow_schema=False)
     uid, ops = row["uid"], row["operations"]
     _need(_is_int(uid), "uid", "must be an integer")
     _need(
@@ -218,7 +227,7 @@ def parse_products(text: str) -> dict[int, Product]:
 
 
 def _parse_product(row: dict[str, object]) -> Product:
-    _check_keys(row, _PRODUCT_KEYS, set(), "product")
+    _check_keys(row, _PRODUCT_KEYS, set(), "product", allow_schema=False)
     return Product(
         row["repository_id"],  # type: ignore[arg-type]
         row["full_name"],  # type: ignore[arg-type]
@@ -373,9 +382,16 @@ class RunRecord:
     started_by_uid: int
 
     def __post_init__(self) -> None:
-        for key in ("run_id", "release_id", "release_digest", "admin_digest"):
+        for key in ("run_id", "release_id"):
             _nonempty(getattr(self, key), key)
-        _nonempty(self.started_at, "started_at")
+        for key in ("release_digest", "admin_digest"):
+            value = getattr(self, key)
+            ok = isinstance(value, str) and bool(_DIGEST.fullmatch(value))
+            _need(ok, key, "must be sha256:<64 lowercase hex>")
+        _check_timestamp(self.started_at)
+        for role, pin in self.models.items():
+            _need(bool(role) and isinstance(role, str), "models", "bad role name")
+            _need(isinstance(pin, ModelPin), f"models.{role}", "must be a ModelPin")
         _need(_is_int(self.product) and self.product > 0, "product", "must be positive")
         _need(
             _is_int(self.started_by_uid) and self.started_by_uid >= 0,
@@ -386,6 +402,17 @@ class RunRecord:
         object.__setattr__(self, "models", MappingProxyType(dict(self.models)))
 
 
+def _check_timestamp(value: object) -> None:
+    """An ISO 8601 instant with an offset, like the journal's `ts`."""
+    _nonempty(value, "started_at")
+    assert isinstance(value, str)
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ConfigError(f"started_at: not an ISO 8601 time: {exc}") from exc
+    _need(moment.tzinfo is not None, "started_at", "must carry a UTC offset")
+
+
 def _check_root_id(root_id: object) -> None:
     if root_id is None:
         return
@@ -393,10 +420,13 @@ def _check_root_id(root_id: object) -> None:
         isinstance(root_id, tuple)
         and len(root_id) == 3
         and isinstance(root_id[0], str)
+        and bool(root_id[0])
         and _is_int(root_id[1])
+        and root_id[1] > 0
         and isinstance(root_id[2], str)
+        and bool(root_id[2])
     )
-    _need(ok, "root_id", "must be null or [host, repository id, branch]")
+    _need(ok, "root_id", "must be null or [host, repository id > 0, branch]")
 
 
 def dump_run(rec: RunRecord) -> str:
@@ -427,7 +457,9 @@ def _pin_data(pin: ModelPin) -> dict[str, object]:
 def parse_run(text: str) -> RunRecord:
     """Strictly parse a run record; any deviation is a `ConfigError`."""
     try:
-        data = json.loads(text, parse_constant=_no_constant)
+        data = json.loads(
+            text, parse_constant=_no_constant, object_pairs_hook=_no_duplicates
+        )
     except (ValueError, RecursionError) as exc:
         raise ConfigError(f"schema {_RUN}: invalid JSON: {exc}") from exc
     _need(isinstance(data, dict), "run", "must be a JSON object")
@@ -448,6 +480,15 @@ def parse_run(text: str) -> RunRecord:
     )
 
 
+def _no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate key {key!r}")
+        result[key] = value
+    return result
+
+
 def _no_constant(name: str) -> object:
     raise ValueError(f"constant {name} is not allowed")
 
@@ -463,7 +504,9 @@ def _parse_root_id(value: object) -> tuple[str, int, str] | None:
 def _parse_pin(value: object) -> ModelPin:
     _need(isinstance(value, dict), "models", "each pin must be an object")
     assert isinstance(value, dict)
-    _check_keys(value, {*_PIN_STR, "effort", "params"}, set(), "model pin")
+    _check_keys(
+        value, {*_PIN_STR, "effort", "params"}, set(), "model pin", allow_schema=False
+    )
     params = value["params"]
     _need(isinstance(params, dict), "params", "must be an object")
     return ModelPin(

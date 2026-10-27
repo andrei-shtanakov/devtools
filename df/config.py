@@ -72,9 +72,14 @@ def _parse_toml(text: str, schema: str) -> dict[str, object]:
 
 
 def _check_keys(
-    data: Mapping[str, object], required: set[str], optional: set[str], where: str
+    data: Mapping[str, object],
+    required: set[str],
+    optional: set[str],
+    where: str,
+    allow_schema: bool = True,
 ) -> None:
-    for key in sorted(set(data) - required - optional - {"schema"}):
+    exempt = {"schema"} if allow_schema else set()
+    for key in sorted(set(data) - required - optional - exempt):
         raise ConfigError(f"{where}: unknown key {key!r}")
     for key in sorted(required - set(data)):
         raise ConfigError(f"{where}: missing key {key!r}")

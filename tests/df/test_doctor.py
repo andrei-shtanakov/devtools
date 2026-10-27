@@ -610,6 +610,18 @@ def test_publisher_toml_is_parsed(fake_installed: World) -> None:
     assert "publisher.toml" in bad["etc.schemas"].reason
 
 
+def test_broken_publisher_does_not_hide_other_problems(
+    fake_installed: World,
+) -> None:
+    lay = fake_installed.lay
+    (lay.etc / "publisher.toml").write_text("garbage = [")
+    (lay.etc / "extra.toml").write_text("x = 1\n")
+    c = by_id(level1_checks(snap(fake_installed), lay, euid=os.geteuid()))
+    reason = c["etc.schemas"].reason
+    assert c["etc.schemas"].status == "нарушено"
+    assert "publisher.toml" in reason and "extra.toml" in reason
+
+
 def test_unknown_etc_file_broken(fake_installed: World) -> None:
     (fake_installed.lay.etc / "extra.toml").write_text("x = 1\n")
     checks = level1_checks(snap(fake_installed), fake_installed.lay, euid=os.geteuid())

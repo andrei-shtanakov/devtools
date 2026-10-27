@@ -62,7 +62,7 @@ def pin() -> ModelPin:
 
 def record() -> RunRecord:
     return RunRecord(
-        "r1", "rel1", "d" * 64, "a" * 64, 7, {"author": pin()},
+        "r1", "rel1", "sha256:" + "d" * 64, "sha256:" + "a" * 64, 7, {"author": pin()},
         ("github.com", 5, "main"), "2026-10-27T00:00:00+00:00", 501,
     )  # fmt: skip
 
@@ -78,6 +78,41 @@ def test_publisher_expected_table() -> None:
     }
     assert 603 not in cfg.senders
     assert cfg.api_base == "https://api.github.com"
+
+
+def with_account(**changes: Account | None) -> dict[str, Account]:
+    accs = accounts()
+    for name, acc in changes.items():
+        key = name.replace("_", "-")
+        if acc is None:
+            del accs[key]
+        else:
+            accs[key] = acc
+    return accs
+
+
+def test_expected_publisher_missing_role_refused() -> None:
+    for role in ("df_exec", "df_review", "df_publisher"):
+        with pytest.raises(ConfigError, match=role.replace("_", "-")):
+            expected_publisher(with_account(**{role: None}))
+
+
+def test_expected_publisher_not_ready_refused() -> None:
+    creating = Account("df-review", 602, 602, "creating", "t")
+    with pytest.raises(ConfigError, match="df-review.*not ready"):
+        expected_publisher(with_account(df_review=creating))
+
+
+def test_expected_publisher_shared_uid_refused() -> None:
+    shared = Account("df-review", 601, 601, "ready", "t")
+    with pytest.raises(ConfigError, match="601"):
+        expected_publisher(with_account(df_review=shared))
+
+
+def test_expected_publisher_publisher_uid_equals_sender_refused() -> None:
+    clash = Account("df-publisher", 602, 602, "ready", "t")
+    with pytest.raises(ConfigError, match="602"):
+        expected_publisher(with_account(df_publisher=clash))
 
 
 def test_publisher_roundtrip_and_unknown_key() -> None:
@@ -120,6 +155,21 @@ def test_publisher_all_operations_known() -> None:
 def test_publisher_bad_sender_refused(rows: str) -> None:
     with pytest.raises(ConfigError):
         parse_publisher(PUB + rows)
+
+
+def test_nested_rows_reject_schema_key() -> None:
+    with pytest.raises(ConfigError, match="schema"):
+        parse_publisher(
+            PUB + '[[sender]]\nuid = 1\noperations = ["merge"]\nschema = "x"\n'
+        )
+    with pytest.raises(ConfigError, match="schema"):
+        parse_products(
+            'schema = "df/products/v1"\n' + ROW.format(rid=1) + 'schema = "x"\n'
+        )
+    data = json.loads(dump_run(record()))
+    data["models"]["author"]["schema"] = "x"
+    with pytest.raises(ConfigError, match="schema"):
+        parse_run(json.dumps(data))
 
 
 def test_publisher_wrong_schema() -> None:
@@ -257,6 +307,19 @@ def test_run_schema_registered() -> None:
     assert STATE_SCHEMAS["runs/<id>.json"] == "df/run/v1"
 
 
+def test_run_record_duplicate_keys_refused() -> None:
+    text = dump_run(record()).replace('{"admin', '{"run_id":"r0","admin', 1)
+    assert text.count('"run_id"') == 2
+    with pytest.raises(ConfigError, match="duplicate"):
+        parse_run(text)
+
+
+def test_run_record_direct_construction_checked() -> None:
+    good = record()
+    with pytest.raises(ConfigError):
+        RunRecord(**{**good.__dict__, "models": {"author": "x"}})  # type: ignore[arg-type]
+
+
 def test_run_record_rejects_unknown_field() -> None:
     with pytest.raises(ConfigError):
         parse_run(json.dumps({**json.loads(dump_run(record())), "x": 1}))
@@ -278,6 +341,16 @@ def test_run_record_rejects_unknown_pin_field() -> None:
         lambda d: d.update(started_by_uid=True),
         lambda d: d.update(root_id=["h", 1]),
         lambda d: d.update(root_id=["h", "1", "b"]),
+        lambda d: d.update(root_id=["", 1, "b"]),
+        lambda d: d.update(root_id=["h", 0, "b"]),
+        lambda d: d.update(root_id=["h", 1, ""]),
+        lambda d: d.update(release_digest="x"),
+        lambda d: d.update(admin_digest="d" * 64),
+        lambda d: d.update(started_at="yesterday"),
+        lambda d: d.update(started_at="2026-10-27T00:00:00"),
+        lambda d: d["models"]["author"].update(model=1),
+        lambda d: d["models"]["author"].update(effort=1),
+        lambda d: d["models"].update({"": d["models"]["author"]}),
         lambda d: d["models"]["author"].update(params=[]),
     ],
 )

@@ -252,8 +252,10 @@ def _pending(ctx: _Context) -> str:
 
 def _schemas(ctx: _Context) -> str:
     """The snapshot's texts parse (`install.toml` and the registry entry were
-    parsed with the snapshot); every other name of `/etc/df` is judged by the
-    listing alone, never opened. A `write_atomic` temp of a known target is a
+    parsed with the snapshot); `publisher.toml` is opened and parsed here, read
+    after the snapshot (writers rename atomically, so it may only be newer);
+    every other name of `/etc/df` is judged by the listing alone, never
+    opened. A `write_atomic` temp of a known target is a
     live write while a writer's generation bracket is open (the counter moved
     or is odd since the snapshot), else a leftover of a crash."""
     if ctx.snap.models_text is not None:
@@ -261,7 +263,7 @@ def _schemas(ctx: _Context) -> str:
             models.parse_models(ctx.snap.models_text)
         except ConfigError as exc:
             raise _Outcome(BROKEN, f"models.toml: {exc}") from exc
-    _check_publisher(ctx.layout)
+    broken_publisher = _publisher_problem(ctx.layout)
     known = _STAGE1_FILES | STAGE_OF.keys()
     unknown = sorted(n for n in _etc_names(ctx.layout) if n not in known)
     temps = [n for n in unknown if _write_temp_of(n) in known]
@@ -273,23 +275,28 @@ def _schemas(ctx: _Context) -> str:
         for n in temps
     ]
     problems += [f"неизвестный файл /etc/df: {n}" for n in others]
+    reasons = problems[: len(temps)]
+    if broken_publisher:
+        problems.append(broken_publisher)
+        reasons.append(broken_publisher)
     if not problems:
         return ""
-    reasons = problems[: len(temps)]
     if others:
         reasons.append(f"неизвестные файлы /etc/df: {_summary(others)}")
     raise _Outcome(BROKEN, "; ".join(reasons), problems)
 
 
-def _check_publisher(layout: Layout) -> None:
-    """`publisher.toml` (stage 2a) parses when present; it is the one /etc/df
-    file outside the snapshot that `etc.schemas` opens."""
+def _publisher_problem(layout: Layout) -> str:
+    """The reason `publisher.toml` (stage 2a) does not parse; empty if it does
+    or is absent. Returned, not raised, so the other problems of the check
+    are reported with it."""
     try:
         text = read_optional(layout.etc / "publisher.toml")
         if text is not None:
             stage2_config.parse_publisher(text)
     except ConfigError as exc:
-        raise _Outcome(BROKEN, f"publisher.toml: {exc}") from exc
+        return f"publisher.toml: {exc}"
+    return ""
 
 
 def _writing(ctx: _Context) -> bool:
