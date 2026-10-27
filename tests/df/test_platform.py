@@ -40,19 +40,17 @@ from df.platform import (
     RunResult,
 )
 from df.receive import CopyLimits, receive_tree
+from tests.df.account_world import (
+    Interrupted,
+    World,
+    account_world,
+    ok,
+)
 from tests.df.producers import TAR, LocalProducer
 
 FIXTURES = Path(__file__).parent / "fixtures"
 MACOS_ONLY = pytest.mark.skipif(sys.platform != "darwin", reason="macOS only")
 PLATFORMS: list[PlatformName] = ["macos-arm64", "linux-x86_64"]
-
-
-class Interrupted(Exception):
-    """Simulated process death inside `create_build_user`."""
-
-
-def ok(stdout: bytes = b"", code: int = 0) -> RunResult:
-    return RunResult(code, stdout, b"", launched=True)
 
 
 @pytest.fixture()
@@ -574,170 +572,10 @@ def test_linked_libraries_real_macho() -> None:
     assert "/usr/lib/libSystem.B.dylib" in deps.needed
 
 
-# --- fake world of system accounts -------------------------------------------
-
-
-POLICY_BLOB = plistlib.dumps({"creationTime": 1.0}).decode()
-#: Attributes macOS stores as native (`dscl -plist . -read /Users/_sentinel`).
-NATIVE_ATTRS = frozenset({"IsHidden"})
-
-
-def _ds_prefix(attr: str) -> str:
-    return "dsAttrTypeNative:" if attr in NATIVE_ATTRS else "dsAttrTypeStandard:"
-
-
-@dataclass
-class World:
-    """System accounts as seen through `run_command` and pwd/grp."""
-
-    platform: PlatformName
-    users: dict[str, dict[str, str]] = field(default_factory=dict)
-    groups: dict[str, dict[str, str]] = field(default_factory=dict)
-    others: list[SimpleNamespace] = field(default_factory=list)
-    other_groups: list[SimpleNamespace] = field(default_factory=list)
-    commands: list[list[str]] = field(default_factory=list)
-    sudo: tuple[int, bytes] = (0, b"User df-build is not allowed to run sudo on h.\n")
-    extra_groups: tuple[int, ...] = ()
-    stop_after_command: int | None = None
-
-    # -- commands --------------------------------------------------------------
-    def run(self, argv: Sequence[str], **_kw: object) -> RunResult:
-        argv = list(argv)
-        if argv[0] == "/usr/bin/sudo":
-            return ok(self.sudo[1], self.sudo[0])
-        if argv[:4] == ["/usr/bin/dscl", "-plist", ".", "-read"]:
-            return self._dscl_read(argv[4])
-        if argv[0] == "/usr/bin/getent":
-            return self._getent(argv[1], argv[2])
-        self.commands.append(argv)
-        self._apply(argv)
-        if self.stop_after_command == len(self.commands):
-            raise Interrupted(f"after {argv}")
-        return ok()
-
-    def _table(self, path: str) -> dict[str, dict[str, str]]:
-        return self.groups if path.startswith("/Groups/") else self.users
-
-    def _dscl_read(self, path: str) -> RunResult:
-        record = self._table(path).get(path.rsplit("/", 1)[1])
-        if record is None:
-            return RunResult(56, b"", b"DS Error: -14136 (eDSRecordNotFound)", True)
-        data = {f"{_ds_prefix(k)}{k}": [v] for k, v in record.items()}
-        data["dsAttrTypeNative:accountPolicyData"] = [POLICY_BLOB]
-        return ok(plistlib.dumps(data))
-
-    def _getent(self, db: str, name: str) -> RunResult:
-        table = self.groups if db == "group" else self.users
-        record = table.get(name)
-        if record is None:
-            return ok(code=2)
-        if db == "group":
-            return ok(f"{name}:x:{record['gid']}:\n".encode())
-        r = record
-        line = f"{name}:x:{r['uid']}:{r['gid']}::{r['home']}:{r['shell']}\n"
-        return ok(line.encode())
-
-    def _apply(self, argv: list[str]) -> None:
-        if argv[0] == "/usr/bin/dscl":
-            path = argv[3]
-            record = self._table(path).setdefault(path.rsplit("/", 1)[1], {})
-            name = path.rsplit("/", 1)[1]
-            record.setdefault("RecordName", name)
-            if len(argv) == 6:
-                record[argv[4]] = argv[5]
-            return
-        if argv[0] == "/usr/sbin/groupadd":
-            self.groups[argv[-1]] = {"gid": argv[3]}
-            return
-        opts = {a: argv[i + 1] for i, a in enumerate(argv[:-1]) if a.startswith("--")}
-        gid = self.groups[opts["--gid"]]["gid"]
-        self.users[argv[-1]] = {
-            "uid": opts["--uid"],
-            "gid": gid,
-            "home": opts["--home-dir"],
-            "shell": "/usr/sbin/nologin",
-        }
-
-    # -- pwd / grp -------------------------------------------------------------
-    def _user_entry(self, name: str) -> SimpleNamespace | None:
-        r = self.users.get(name)
-        if r is None:
-            return None
-        if self.platform == "macos-arm64":
-            if "UniqueID" not in r:
-                return None
-            return SimpleNamespace(
-                pw_name=name,
-                pw_uid=int(r["UniqueID"]),
-                pw_gid=int(r.get("PrimaryGroupID", "-1")),
-                pw_dir=r.get("NFSHomeDirectory", "/var/empty"),
-                pw_shell=r.get("UserShell", "/bin/sh"),
-            )
-        return SimpleNamespace(
-            pw_name=name,
-            pw_uid=int(r["uid"]),
-            pw_gid=int(r["gid"]),
-            pw_dir=r["home"],
-            pw_shell=r["shell"],
-        )
-
-    def _group_entries(self) -> list[SimpleNamespace]:
-        key = "PrimaryGroupID" if self.platform == "macos-arm64" else "gid"
-        own = [
-            SimpleNamespace(gr_name=n, gr_gid=int(r[key]))
-            for n, r in self.groups.items()
-            if key in r
-        ]
-        return own + self.other_groups
-
-    def getpwall(self) -> list[SimpleNamespace]:
-        own = [e for n in self.users if (e := self._user_entry(n)) is not None]
-        return own + self.others
-
-    def getpwnam(self, name: str) -> SimpleNamespace:
-        for entry in self.getpwall():
-            if entry.pw_name == name:
-                return entry
-        raise KeyError(name)
-
-    def getgrgid(self, gid: int) -> SimpleNamespace:
-        for entry in self._group_entries():
-            if entry.gr_gid == gid:
-                return entry
-        raise KeyError(gid)
-
-    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(plat, "detect_platform", lambda: self.platform)
-        monkeypatch.setattr(plat, "run_command", self.run)
-        monkeypatch.setattr(
-            plat,
-            "pwd",
-            SimpleNamespace(getpwnam=self.getpwnam, getpwall=self.getpwall),
-        )
-        monkeypatch.setattr(
-            plat,
-            "grp",
-            SimpleNamespace(getgrgid=self.getgrgid, getgrall=self._group_entries),
-        )
-        monkeypatch.setattr(
-            plat, "_getgrouplist", lambda _n, gid: [gid, *self.extra_groups]
-        )
-
-
 @pytest.fixture()
 def no_chown(monkeypatch: pytest.MonkeyPatch) -> None:
     """Non-root tests: the home keeps the current user, who is the account."""
     monkeypatch.setattr(os, "fchown", lambda _fd, _u, _g: None)
-
-
-def _world(
-    monkeypatch: pytest.MonkeyPatch, platform: PlatformName = "macos-arm64"
-) -> World:
-    world = World(platform)
-    world.install(monkeypatch)
-    me = os.getuid()
-    monkeypatch.setattr(plat, "ID_RANGE", {platform: range(me, me + 1)})
-    return world
 
 
 def _account(layout: Layout) -> Account | None:
@@ -754,7 +592,7 @@ def _write_account(layout: Layout, account: Account) -> None:
 def _ready_world(
     monkeypatch: pytest.MonkeyPatch, layout: Layout, no_chown: None
 ) -> tuple[World, Account]:
-    world = _world(monkeypatch)
+    world = account_world(monkeypatch)
     account = plat.create_build_user(layout)
     assert account.state == "ready"
     return world, account
@@ -830,6 +668,49 @@ def test_account_problems_ignores_state(
     assert plat.verify_build_user(layout) == ["state = creating"]
 
 
+def test_account_problems_ignores_sudo(
+    monkeypatch: pytest.MonkeyPatch, layout: Layout, no_chown: None
+) -> None:
+    world, account = _ready_world(monkeypatch, layout, no_chown)
+    world.sudo = _fixture("linux-some")
+    assert plat.account_problems(account) == []
+
+
+def test_verify_build_user_still_refuses_rules(
+    monkeypatch: pytest.MonkeyPatch, layout: Layout, no_chown: None
+) -> None:
+    world, _ = _ready_world(monkeypatch, layout, no_chown)
+    world.sudo = _fixture("linux-some")
+    problems = plat.verify_build_user(layout)
+    assert any("sudo -l -U df-build" in p for p in problems), problems
+
+
+@pytest.mark.parametrize("case", ["no-record", "record-without-os-user"])
+def test_verify_build_user_absent_does_not_ask_sudo(
+    monkeypatch: pytest.MonkeyPatch, layout: Layout, case: str
+) -> None:
+    account_world(monkeypatch)
+    calls: list[str] = []
+    monkeypatch.setattr(plat, "sudo_rules", lambda n: calls.append(n) or "unknown")
+    if case == "record-without-os-user":
+        _write_account(layout, Account("df-build", 7, 7, "creating", "t"))
+    problems = plat.verify_build_user(layout)
+    assert problems and not any("sudo" in p for p in problems), problems
+    assert calls == []
+
+
+def test_create_build_user_refuses_sudo_rules_before_ready(
+    monkeypatch: pytest.MonkeyPatch, layout: Layout, no_chown: None
+) -> None:
+    world = account_world(monkeypatch)
+    world.sudo = _fixture("linux-some")
+    with pytest.raises(StepFailed, match="sudo -l -U df-build") as info:
+        plat.create_build_user(layout)
+    assert info.value.step == "build-user"
+    account = _account(layout)
+    assert account is not None and account.state == "creating"
+
+
 @pytest.mark.parametrize("platform", PLATFORMS)
 def test_create_absent_to_ready_without_stubbing_checks(
     monkeypatch: pytest.MonkeyPatch,
@@ -837,7 +718,7 @@ def test_create_absent_to_ready_without_stubbing_checks(
     no_chown: None,
     platform: PlatformName,
 ) -> None:
-    world = _world(monkeypatch, platform)
+    world = account_world(monkeypatch, platform)
     written: list[str] = []
     real_write = fsutil.write_atomic
 
@@ -863,7 +744,7 @@ def test_create_absent_to_ready_without_stubbing_checks(
 def test_create_refuses_preexisting_foreign_user(
     monkeypatch: pytest.MonkeyPatch, layout: Layout
 ) -> None:
-    world = _world(monkeypatch)
+    world = account_world(monkeypatch)
     world.users["df-build"] = {"RecordName": "df-build", "UniqueID": "77"}
     with pytest.raises(StepFailed, match="создан не darkfactory"):
         plat.create_build_user(layout)
@@ -927,7 +808,7 @@ def test_create_resumes_own_partial_creation(
             lay = Layout(root)
             lay.install_dir.mkdir(parents=True)
             lay.build_home.parent.mkdir(parents=True)
-            world = _world(mp, platform)
+            world = account_world(mp, platform)
             if stop.startswith("attr:"):
                 world.stop_after_command = int(stop.split(":")[1])
             with mp.context() as armed:
@@ -966,7 +847,7 @@ def test_create_resumes_own_partial_creation(
 def test_create_never_adopts_foreign_home(
     monkeypatch: pytest.MonkeyPatch, layout: Layout, no_chown: None, where: str
 ) -> None:
-    world = _world(monkeypatch)
+    world = account_world(monkeypatch)
     home = layout.build_home
     reserved = home.parent / HOME_TMP_NAME
     me = os.getuid()
@@ -1015,7 +896,7 @@ def test_create_never_adopts_foreign_home(
 def test_reserved_name_of_root_is_recreated(
     monkeypatch: pytest.MonkeyPatch, layout: Layout, no_chown: None
 ) -> None:
-    _world(monkeypatch)
+    account_world(monkeypatch)
     me = os.getuid()
     _write_account(layout, Account("df-build", me, me, "creating", "t"))
     (layout.build_home.parent / HOME_TMP_NAME).mkdir()
@@ -1056,7 +937,7 @@ def test_rename_noreplace_missing_call_refuses(
 def test_create_refuses_mismatch_with_intent(
     monkeypatch: pytest.MonkeyPatch, layout: Layout, no_chown: None
 ) -> None:
-    world = _world(monkeypatch)
+    world = account_world(monkeypatch)
     me = os.getuid()
     _write_account(layout, Account("df-build", me, me, "creating", "t"))
     world.groups["df-build"] = {"RecordName": "df-build", "PrimaryGroupID": str(me)}
@@ -1083,7 +964,7 @@ def test_create_never_adopts_conflicting_record(
     case: str,
     needle: str,
 ) -> None:
-    world = _world(monkeypatch, platform)
+    world = account_world(monkeypatch, platform)
     me = os.getuid()
     mac = platform == "macos-arm64"
     if case != "record-before-intent":
@@ -1119,7 +1000,7 @@ def test_created_home_is_settled_after_rename_retry_does_no_sync(
 ) -> None:
     """R21: created home -> `sync_dir(parent)` after the rename; a home found by
     a retry is accepted without a sync of its own before `ready`."""
-    _world(monkeypatch)
+    account_world(monkeypatch)
     events: list[str] = []
     parent_ino = os.stat(layout.build_home.parent).st_ino
     real_sync = fsutil.sync_dir
@@ -1154,7 +1035,7 @@ def test_created_home_is_settled_after_rename_retry_does_no_sync(
     other.install_dir.mkdir(parents=True)
     other.build_home.parent.mkdir(parents=True)
     parent_ino = os.stat(other.build_home.parent).st_ino
-    _world(monkeypatch)
+    account_world(monkeypatch)
     plat.create_build_user(other)
     i = events.index("renamed")
     assert events[i + 1] == "sync(parent)"
@@ -1235,10 +1116,12 @@ def test_read_record_error_is_not_absence(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_parse_dscl_captured_records() -> None:
     base = FIXTURES / "dscl"
-    group = plat.parse_dscl((base / "group-staff.plist").read_bytes())
+    group = plat.parse_dscl((base / "group-staff.plist").read_bytes(), "build-user")
     assert group["RecordName"] == "staff, BUILTIN\\Users"
     assert group["PrimaryGroupID"] == "20"
-    user = plat.parse_dscl((base / "user-human-df-build.plist").read_bytes())
+    user = plat.parse_dscl(
+        (base / "user-human-df-build.plist").read_bytes(), "build-user"
+    )
     assert user["UniqueID"] == "503" and user["UserShell"] == "/bin/zsh"
     assert not any(k.startswith("dsAttrType") for k in user)  # native keys ignored
 
@@ -1256,13 +1139,13 @@ def test_parse_dscl_captured_records() -> None:
 )
 def test_parse_dscl_unparsable_is_refusal(output: bytes) -> None:
     with pytest.raises(StepFailed, match="неразборн"):
-        plat.parse_dscl(output)
+        plat.parse_dscl(output, "build-user")
 
 
 def test_human_df_build_refused_with_instruction(
     monkeypatch: pytest.MonkeyPatch, layout: Layout
 ) -> None:
-    world = _world(monkeypatch)
+    world = account_world(monkeypatch)
     human = (FIXTURES / "dscl" / "user-human-df-build.plist").read_bytes()
     real_run = world.run
 
@@ -2136,10 +2019,13 @@ def test_parse_dscl_native_intended_attribute() -> None:
         "dsAttrTypeNative:accountPolicyData": ["<plist/>"],
         "dsAttrTypeStandard:UniqueID": ["401"],
     }
-    assert plat.parse_dscl(plistlib.dumps(data)) == {"IsHidden": "1", "UniqueID": "401"}
+    assert plat.parse_dscl(plistlib.dumps(data), "build-user") == {
+        "IsHidden": "1",
+        "UniqueID": "401",
+    }
     data["dsAttrTypeStandard:IsHidden"] = ["0"]
     with pytest.raises(StepFailed, match="два разных значения IsHidden"):
-        plat.parse_dscl(plistlib.dumps(data))
+        plat.parse_dscl(plistlib.dumps(data), "build-user")
 
 
 # --- R26: approved CLI policy without a loader model (fix round 3) -------------------
