@@ -168,6 +168,13 @@ def test_wrong_argument_shape_is_a_usage_error(argv: list[str]) -> None:
         cli._parse(argv)  # noqa: SLF001
 
 
+def test_run_usage_error_names_the_step_once() -> None:
+    with pytest.raises(cli.UsageError) as caught:
+        cli._parse(["run", "start"])  # noqa: SLF001
+    assert str(caught.value).startswith("run: start: ")
+    assert "run: run:" not in str(caught.value)
+
+
 def test_publisher_serve_extra_arg_refused_before_stdin(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

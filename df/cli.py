@@ -314,7 +314,7 @@ def _check_run(args: argparse.Namespace) -> None:
     try:
         run_start.parse(args.words)
     except StepFailed as exc:
-        raise UsageError(f"run: {exc}") from exc
+        raise UsageError(f"run: {exc.detail}") from exc
 
 
 # ---------- reader ----------
