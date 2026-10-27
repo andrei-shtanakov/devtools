@@ -295,6 +295,40 @@ def test_trusted_path_asks_the_policy(w: World) -> None:
     assert seen == [{"openssl": OPENSSL}]
 
 
+def test_same_value_no_longer_trusted_is_refused(
+    w: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The policy runs before the no-op: a path approved earlier that stopped
+    passing §3.10 is refused with the reason, not reported unchanged."""
+    assert w.writer(SET) == 0
+    capsys.readouterr()
+    record_policy(w, {"openssl": ["владелец не root"]})
+    before = files(w)
+    assert w.writer(SET) == 2
+    err = capsys.readouterr().err
+    assert "openssl: владелец не root" in err
+    assert "не изменён" not in err
+    assert files(w) == before
+
+
+def test_damaged_current_refused_before_any_change(
+    w: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """G1 (I9, spec 3.8): `current` damaged and `install.toml` not agreeing
+    with it -- `cli set` is refused at `damaged` before its first change."""
+    rid = current_id(w)
+    assert rid is not None
+    other = replace(load_install(install_toml(w)), manifest_sha="1" * 40)
+    install_toml(w).write_text(dump_install(other))
+    (w.lay.release_dir(rid) / "extra-file").write_text("x")
+    before = files(w)
+    capsys.readouterr()
+    assert w.writer(SET) == 2
+    assert capsys.readouterr().err.startswith("darkfactory: damaged: ")
+    assert files(w) == before
+    assert "openssl" not in load_install(install_toml(w)).approved_cli
+
+
 def test_pending_install_refused(w: World, capsys: pytest.CaptureFixture[str]) -> None:
     """An unfinished install is not touched: refused like `models set`."""
     interrupt(w, w.writer, ["install"], "build")
