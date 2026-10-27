@@ -685,6 +685,20 @@ def test_verify_build_user_still_refuses_rules(
     assert any("sudo -l -U df-build" in p for p in problems), problems
 
 
+@pytest.mark.parametrize("case", ["no-record", "record-without-os-user"])
+def test_verify_build_user_absent_does_not_ask_sudo(
+    monkeypatch: pytest.MonkeyPatch, layout: Layout, case: str
+) -> None:
+    account_world(monkeypatch)
+    calls: list[str] = []
+    monkeypatch.setattr(plat, "sudo_rules", lambda n: calls.append(n) or "unknown")
+    if case == "record-without-os-user":
+        _write_account(layout, Account("df-build", 7, 7, "creating", "t"))
+    problems = plat.verify_build_user(layout)
+    assert problems and not any("sudo" in p for p in problems), problems
+    assert calls == []
+
+
 def test_create_build_user_refuses_sudo_rules_before_ready(
     monkeypatch: pytest.MonkeyPatch, layout: Layout, no_chown: None
 ) -> None:

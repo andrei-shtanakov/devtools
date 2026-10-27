@@ -963,8 +963,16 @@ def _require_service_name(name: str) -> None:
 
 
 def verify_build_user(layout: Layout) -> list[str]:
-    """Readiness of `df-build`: `verify_service_user` and its sudo policy."""
-    return verify_service_user(layout, BUILD_USER) + _sudo_policy_problems(BUILD_USER)
+    """Readiness of `df-build`: `verify_service_user` and its sudo policy.
+
+    An absent OS user is reported by identity only; `sudo` is not asked.
+    """
+    problems = verify_service_user(layout, BUILD_USER)
+    try:
+        pwd.getpwnam(BUILD_USER)
+    except KeyError:
+        return problems  # absent: nothing to ask `sudo -l` about
+    return problems + _sudo_policy_problems(BUILD_USER)
 
 
 def verify_service_user(layout: Layout, name: str) -> list[str]:
