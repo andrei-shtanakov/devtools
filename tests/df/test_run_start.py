@@ -1110,12 +1110,43 @@ def test_a_lock_directory_of_another_owner_refuses(
     assert ev.log == []
 
 
+def test_the_wait_is_bounded_by_the_clock(
+    world: FakeLayout, ev: Ev, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lock is always taken: the resume sleeps `LOCK_WAIT` seconds of a
+    fake clock in `LOCK_POLL` steps, no more than one step over, then refuses."""
+    import fcntl
+    from types import SimpleNamespace
+
+    put_run_with_pins(world)
+    clock = [1000.0]
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock[0] += seconds
+        assert len(sleeps) < 10_000, "the wait has no bound"
+
+    def busy(fd: int, how: int) -> None:
+        raise BlockingIOError(11, "busy")
+
+    monkeypatch.setattr(
+        run_start, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=sleep)
+    )
+    monkeypatch.setattr(fcntl, "flock", busy)
+    with pytest.raises(StepFailed, match="прогон занят другим resume"):
+        resume(world, snap_of(world))
+    assert sum(sleeps) >= run_start.LOCK_WAIT
+    assert len(sleeps) <= run_start.LOCK_WAIT / run_start.LOCK_POLL + 2
+    assert ev.log == []
+
+
 def test_a_lock_directory_that_is_a_link_refuses(world: FakeLayout, ev: Ev) -> None:
     put_run_with_pins(world)
     elsewhere = world.layout.root / "elsewhere"
     elsewhere.mkdir(mode=0o700)
     (world.layout.runs_dir / ".locks").symlink_to(elsewhere)
-    with pytest.raises((StepFailed, OSError)):
+    with pytest.raises(StepFailed):
         resume(world, snap_of(world))
     assert list(elsewhere.iterdir()) == [] and ev.log == []
 
@@ -1135,6 +1166,6 @@ def test_a_bad_lock_file_refuses(world: FakeLayout, ev: Ev, how: str) -> None:
         os.link(lock, directory / "twin")
     else:
         lock.symlink_to(world.layout.root / "elsewhere")
-    with pytest.raises((StepFailed, OSError)):
+    with pytest.raises(StepFailed):
         resume(world, snap_of(world))
     assert ev.log == []

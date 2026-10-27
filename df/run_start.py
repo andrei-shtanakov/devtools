@@ -202,8 +202,9 @@ def _start(layout: Layout, snap: Snapshot, req: Request) -> str:
 def _resume(layout: Layout, snap: Snapshot, req: Request) -> str:
     assert req.run_id is not None
     rec = launch.release_of_record(layout, snap, req.run_id)
-    # Two resumes of one run take turns (a root-only lock, never the record): the second reads the events after
-    # the first one's append, so no event has a stale `before`.
+    # Two resumes of one run take turns (a root-only lock, never the record):
+    # the second reads the events after the first one's append, so no event
+    # has a stale `before`.
     with _locked(layout, rec.run_id):
         events = launch.read_root_file(_events_path(layout, rec.run_id), optional=True)
         in_force = effective_pins(rec, _lines(events))
@@ -232,13 +233,20 @@ def _locked(layout: Layout, run_id: str) -> Iterator[None]:
 
 def _open_lock(layout: Layout, run_id: str) -> int:
     directory = layout.runs_dir / LOCK_DIR
+    path = directory / f"{run_id}.lock"
+    try:
+        return _open_private_lock(layout, directory, path)
+    except OSError as exc:  # a link (ELOOP), a vanished name, no permission
+        raise StepFailed(_STEP, f"{exc.filename or directory}: {exc.strerror}") from exc
+
+
+def _open_private_lock(layout: Layout, directory: Path, path: Path) -> int:
     parent = os.open(layout.runs_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
         fsutil.make_dir(parent, LOCK_DIR, LOCK_DIR_MODE, path=directory)
     finally:
         os.close(parent)
     _require_private(directory, LOCK_DIR_MODE, directory=True)
-    path = directory / f"{run_id}.lock"
     try:
         fd = fsutil.create_file(path, _LOCK_FLAGS, LOCK_MODE)
     except FileExistsError:
