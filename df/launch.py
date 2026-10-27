@@ -83,7 +83,7 @@ def exec_main(argv: Sequence[str], *, layout: Layout, snap: Snapshot) -> int:
 
     Returns only if `execve` does not replace the process (a test's fake).
     """
-    os.closerange(3, _fd_limit())
+    os.closerange(3, fd_limit())
     role, op = _role_and_op(argv)
     _check_identity(layout, role)
     os.chdir(role_cwd(layout, role))
@@ -121,7 +121,7 @@ def human_main(argv: Sequence[str], *, layout: Layout | None = None) -> int:
         raise StepFailed(_STEP, reason)
     lay = default_layout() if layout is None else layout
     os.chdir("/")
-    os.closerange(3, _fd_limit())
+    os.closerange(3, fd_limit())
     wrapper = str(lay.libexec / "df-launch")
     os.execv(SUDO, ["sudo", "-n", "-u", role, wrapper, role, op])
     return 1
@@ -141,21 +141,29 @@ def release_for(
     if op in CURRENT_OPS:
         if snap.release_id is None:
             raise StepFailed(_STEP, "нет активного релиза: release_unknown")
-        _allowed_entry(snap, snap.release_id)
+        allowed_entry(snap, snap.release_id)
         return snap.release_id, layout.release_dir(snap.release_id), None
     if op not in RECORD_OPS:
         raise StepFailed(_STEP, f"неизвестная операция {op!r}")
     run_id = _read_run_id(stdin)
+    rec = release_of_record(layout, snap, run_id)
+    return rec.release_id, layout.release_dir(rec.release_id), run_id
+
+
+def release_of_record(layout: Layout, snap: Snapshot, run_id: str) -> RunRecord:
+    """The run record `run_id` whose release is `allowed` in the snapshot's
+    registry with the record's digest; `current` is never consulted."""
     rec = read_record(layout, run_id)
-    entry = _allowed_entry(snap, rec.release_id)
+    entry = allowed_entry(snap, rec.release_id)
     if entry.digest != rec.release_digest:
         raise StepFailed(
             _STEP, f"release_digest_mismatch: запись {run_id} и реестр расходятся"
         )
-    return rec.release_id, layout.release_dir(rec.release_id), run_id
+    return rec
 
 
-def _allowed_entry(snap: Snapshot, release_id: str) -> ReleaseEntry:
+def allowed_entry(snap: Snapshot, release_id: str) -> ReleaseEntry:
+    """The registry entry of `release_id` if it is `allowed`; else `StepFailed`."""
     registry = () if snap.releases is None else snap.releases.releases
     entry = next((e for e in registry if e.id == release_id), None)
     if entry is None:
@@ -194,7 +202,7 @@ def _check_identity(layout: Layout, role: str) -> None:
         )
 
 
-def _fd_limit() -> int:
+def fd_limit() -> int:
     """Above every descriptor this process can have open."""
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     return max(_FD_CAP, soft) if hard == resource.RLIM_INFINITY else hard
@@ -246,7 +254,7 @@ def read_root_file(path: Path, *, optional: bool = False) -> str | None:
         raise StepFailed(_STEP, f"{path}: {exc.strerror or exc}") from exc
     try:
         st = os.fstat(fd)
-        bad = _record_problem(path, st)
+        bad = record_problem(path, st)
         if bad:
             raise StepFailed(_STEP, bad)
         data = os.read(fd, MAX_RECORD + 1)
@@ -265,7 +273,7 @@ def read_root_file(path: Path, *, optional: bool = False) -> str | None:
         raise StepFailed(_STEP, f"{path}: не UTF-8: {exc}") from exc
 
 
-def _record_problem(path: Path, st: os.stat_result) -> str | None:
+def record_problem(path: Path, st: os.stat_result) -> str | None:
     if not stat.S_ISREG(st.st_mode):
         return f"{path}: не обычный файл"
     if fsutil.owner_uid(st) != plat.ROOT_UID:

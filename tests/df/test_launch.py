@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import builtins
-import io
 import os
 from pathlib import Path
 
@@ -15,6 +13,7 @@ from df.journal import Stable, StepFailed, Transitional
 from df.state import Snapshot
 from tests.df.conftest import FakeLayout
 from tests.df.launch_world import (
+    Spy,
     entry,
     fake_os,
     put_accounts,
@@ -360,9 +359,9 @@ def test_closerange_bound_is_the_hard_limit(
     monkeypatch.setattr(
         resource, "getrlimit", lambda _r: (1024, resource.RLIM_INFINITY)
     )
-    assert launch._fd_limit() == launch._FD_CAP  # noqa: SLF001
+    assert launch.fd_limit() == launch._FD_CAP  # noqa: SLF001
     monkeypatch.setattr(resource, "getrlimit", lambda _r: (1024, 1 << 20))
-    assert launch._fd_limit() == 1 << 20  # noqa: SLF001
+    assert launch.fd_limit() == 1 << 20  # noqa: SLF001
 
 
 def test_untrusted_ancestors_refuse_the_record(
@@ -422,27 +421,6 @@ def test_cli_launch_op_must_fit_the_role() -> None:
 
 
 # --- the snapshot is the only source ------------------------------------------
-
-FORBIDDEN = ("releases.toml", "install.toml", "models.toml", "current")
-
-
-class Spy:
-    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self.hits: list[str] = []
-        # Tasks 6 and 7: add `publisher serve` and `run start|resume` here
-        for name in ("open", "readlink", "stat", "lstat", "listdir", "scandir"):
-            real = getattr(os, name)
-            monkeypatch.setattr(os, name, self._wrap(real))
-        for owner in (builtins, io):
-            monkeypatch.setattr(owner, "open", self._wrap(owner.open))
-
-    def _wrap(self, real):  # noqa: ANN001, ANN202
-        def seen(path, *a, **kw):  # noqa: ANN001, ANN002, ANN003, ANN202
-            if isinstance(path, (str, os.PathLike)) and Path(path).name in FORBIDDEN:
-                self.hits.append(str(path))
-            return real(path, *a, **kw)
-
-        return seen
 
 
 def test_spy_sees_builtin_open(
