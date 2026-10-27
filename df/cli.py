@@ -365,7 +365,7 @@ def _launch(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
     if not args.exec_form:
         return launch.human_main(words, layout=lay)
     if isinstance(read, Transitional):
-        raise Refusal(_TRANSITIONAL)
+        raise Refusal(doctor.transitional_text(read.generation))
     snap = state.parse_snapshot(read.value, lay, mode="reader")
     return launch.exec_main(words, layout=lay, snap=snap)
 
