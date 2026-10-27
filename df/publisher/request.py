@@ -67,6 +67,12 @@ class Refused(Exception):
         self.verified_not_done = verified_not_done
 
 
+class InFlight(Exception):
+    """A publisher lock was not obtained in time: the same request (its id is
+    in the key) is being served. The answer is `unknown: in_flight`, never
+    `refused` (R24): the client reconciles instead of taking a new id."""
+
+
 class BadResponse(ValueError):
     """A response line that is not `df/publisher-response/v1`."""
 

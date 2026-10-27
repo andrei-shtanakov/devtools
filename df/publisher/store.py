@@ -26,7 +26,13 @@ from types import TracebackType
 from df import fsutil
 from df.paths import Layout
 from df.publisher import request
-from df.publisher.request import FINAL_OUTCOMES, Refused, Request, Response
+from df.publisher.request import (
+    FINAL_OUTCOMES,
+    InFlight,
+    Refused,
+    Request,
+    Response,
+)
 
 IDS_LOCK = "ids.lock"
 JOURNAL = "journal.jsonl"
@@ -41,7 +47,7 @@ _CANONICAL = re.compile(r"0|[1-9][0-9]{0,18}", re.ASCII)
 _MAX_RECORD = 4096
 #: Intents and results carry a request's content (a review body): one cap.
 MAX_STATE = 1 << 20
-#: How long a lock may be waited for before `refused: busy` (no intent yet).
+#: How long a lock may be waited for before `unknown: in_flight` (R24).
 LOCK_WAIT = 30.0
 _LOCK_POLL = 0.02
 _READ = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
@@ -153,7 +159,7 @@ def _regular(fd: int, path: Path) -> os.stat_result:
 
 def _lock_file(path: Path) -> int:
     """Create (born `0600`, durable) or open `path` and take an exclusive
-    `flock`, waiting at most `LOCK_WAIT` seconds (`Refused("busy")`); the
+    `flock`, waiting at most `LOCK_WAIT` seconds (`InFlight`); the
     descriptor is returned."""
     flags = os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC
     try:
@@ -177,7 +183,7 @@ def _flock(fd: int) -> None:
             return
         except BlockingIOError:
             if time.monotonic() >= deadline:
-                raise Refused("busy") from None
+                raise InFlight("lock") from None
             time.sleep(_LOCK_POLL)
 
 
@@ -283,10 +289,21 @@ def _write_state(path: Path, text: str) -> None:
 
 def has_state(layout: Layout, key: str) -> bool:
     """An intent or a result of the idempotency key exists (`lstat` only; a
-    link or a damaged file counts): an external action may have been done."""
+    link or a damaged file counts). Fails closed: anything but "absent" (an
+    unreadable directory, say) is `True`."""
     base = layout.publisher_dir
     paths = (base / "intents" / f"{key}.json", base / "results" / f"{key}.json")
-    return any(os.path.lexists(p) for p in paths)
+    return any(_present(p) for p in paths)
+
+
+def _present(path: Path) -> bool:
+    try:
+        os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return True
+    return True
 
 
 def replay(res: Reservation) -> Response | None:

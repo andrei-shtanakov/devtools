@@ -15,7 +15,7 @@ import pytest
 from df import fsutil
 from df.paths import Layout
 from df.publisher import request, store
-from df.publisher.request import Refused, Response
+from df.publisher.request import InFlight, Refused, Response
 from tests.df.publisher_world import RID, SHA_B, make_req, tmp_layout
 
 SENDER = 601
@@ -405,14 +405,13 @@ def test_key_lock_blocks_an_identical_reserve_until_closed(lay: Layout) -> None:
     assert seen["entered"] >= seen["closed"]
 
 
-def test_busy_lock_is_refused_after_the_wait(
+def test_busy_lock_is_in_flight_after_the_wait(
     lay: Layout, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(store, "LOCK_WAIT", 0.2)
     with store.reserve(lay, SENDER, "merge", make_req()):
-        with pytest.raises(Refused) as info:
+        with pytest.raises(InFlight):
             store.reserve(lay, SENDER, "merge", make_req())
-    assert info.value.reason == "busy"
 
 
 def test_intent_larger_than_a_record_roundtrips(lay: Layout) -> None:
@@ -484,8 +483,28 @@ def test_lock_wait_is_bounded_on_a_fake_clock(
     clock = Clock()
     with store.reserve(lay, SENDER, "merge", make_req()):
         monkeypatch.setattr(store, "time", clock)
-        with pytest.raises(Refused) as info:
+        with pytest.raises(InFlight):
             store.reserve(lay, SENDER, "merge", make_req())
-    assert info.value.reason == "busy"
     assert clock.slept >= store.LOCK_WAIT
     assert clock.calls <= 2 * store.LOCK_WAIT / store._LOCK_POLL + 10  # noqa: SLF001
+
+
+def test_has_state_sees_a_result_alone_and_a_dangling_link(lay: Layout) -> None:
+    with store.reserve(lay, SENDER, "merge", make_req()) as res:
+        assert not store.has_state(lay, res.key)
+        store.result(res, Response("done"))
+        assert store.has_state(lay, res.key)  # a result, no intent
+        res.result_path.unlink()
+        res.intent_path.symlink_to(lay.publisher_dir / "nowhere")
+        assert store.has_state(lay, res.key)  # lexists would say so, too
+
+
+def test_has_state_fails_closed(lay: Layout) -> None:
+    with store.reserve(lay, SENDER, "merge", make_req()) as res:
+        store.intent(res, {"a": 1})
+        intents = lay.publisher_dir / "intents"
+        intents.chmod(0)
+        try:
+            assert store.has_state(lay, res.key)
+        finally:
+            intents.chmod(0o700)

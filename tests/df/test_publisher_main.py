@@ -946,10 +946,10 @@ def test_busy_after_an_intent_is_unknown(
 
     with store.reserve(world.lay, EXEC, "merge", make_req()):  # a live holder
         code, resp = world.run("merge", capsys=capsys)
-    assert (code, resp.outcome, resp.reason) == (3, "unknown", "state_exists: busy")
+    assert (code, resp.outcome, resp.reason) == (3, "unknown", "in_flight")
 
 
-def test_busy_without_state_is_refused(
+def test_busy_without_state_is_unknown_in_flight(
     world: World,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -959,7 +959,7 @@ def test_busy_without_state_is_refused(
     monkeypatch.setattr(store, "LOCK_WAIT", 0.2)
     with store.reserve(world.lay, EXEC, "merge", make_req()):
         code, resp = world.run("merge", capsys=capsys)
-    assert (code, resp.outcome, resp.reason) == (2, "refused", "busy")
+    assert (code, resp.outcome, resp.reason) == (3, "unknown", "in_flight")
 
 
 def test_revoked_release_after_an_intent_is_unknown(
@@ -1016,3 +1016,35 @@ def test_returned_refusal_after_intent_is_unknown(
     _, resp = world.run("merge", capsys=capsys)
     assert (resp.outcome, resp.reason) == ("unknown", "state_exists: pr_closed")
     assert world.files("results") == []
+
+
+def test_holder_without_an_intent_yet_gives_in_flight(
+    world: World,
+    table: dict[str, list[Context]],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P4: the holder has not written its intent when the twin times out."""
+    from tests.df.publisher_world import make_req
+
+    calls = install(table, "merge", acting)
+    monkeypatch.setattr(store, "LOCK_WAIT", 0.2)
+    with store.reserve(world.lay, EXEC, "merge", make_req()) as held:
+        code, resp = world.run("merge", capsys=capsys)
+        assert not held.intent_path.exists()
+    assert (code, resp.outcome, resp.reason) == (3, "unknown", "in_flight")
+    assert calls == []
+
+
+def test_unreadable_intents_directory_keeps_a_refusal_unknown(
+    world: World, table: dict[str, list[Context]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    crash_once(table, world, capsys)
+    intents = world.lay.publisher_dir / "intents"
+    intents.chmod(0)
+    try:
+        revoked = snapshot("rel-a", entry("rel-a", "revoked"))
+        _, resp = world.run("merge", snap=revoked, capsys=capsys)
+    finally:
+        intents.chmod(0o700)
+    assert resp.outcome == "unknown"

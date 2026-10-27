@@ -745,9 +745,12 @@ run` в sudoers нет: его вызывает `df-run-start` после сбр
   `self-check`); с `intent` без `result` → ветка сверки операции. **`result` пишется
   только для окончательных исходов** (`done`, `refused`); `unknown` не сохраняется, и
   повтор снова идёт в сверку — внешнее действие не повторяется никогда (r2 N4).
-  Правило хранения (Task 7, M5): result хранится для `done` и для `refused` после intent;
-  `refused` без intent пересчитывается; обработчик обязан записать intent до внешнего
-  действия; любое исключение при существующем intent/result — `unknown`, не `refused`;
+  Правило хранения (R23, см. Task 8): result хранится для `done` и для проверенного
+  отказа (`Refused(verified_not_done=True)`, в т.ч. до intent); обработчик обязан записать
+  intent до внешнего действия. Проверенным считается только **поднятый**
+  `Refused(verified_not_done=True)`; возвращённый `Response("refused")` — никогда.
+  Обработчики не вызывают `store.result` напрямую. Таймаут любой блокировки издателя
+  (ключа или `ids.lock`) — `unknown: in_flight` (R24), не `refused`;
 - журнал `publisher/journal.jsonl` — одна строка на запрос: время, отправитель, операция,
   `request_id`, `run_id`, digest, исход; секреты не пишутся никогда (поля ответа
   `read-token` заменяются `"token": "<redacted>"`).
@@ -947,6 +950,8 @@ product_unknown`); перед каждой операцией — `self_check` (
 ---
 
 ### Task 11: Журнал периметра SQLite, `record-violation`, `perimeter-status`, клиент
+
+> Клиент: отсутствующая или не разбираемая строка ответа, а также ненулевой код выхода без JSON — это `unknown`.
 
 **Files:**
 - Create: `df/publisher/perimeter.py`, `df/perimeter_client.py`

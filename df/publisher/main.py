@@ -25,7 +25,7 @@ from df.config import ConfigError, load_accounts, read_optional
 from df.journal import StepFailed
 from df.paths import Layout
 from df.publisher import request, store
-from df.publisher.request import Refused, Request, Response
+from df.publisher.request import InFlight, Refused, Request, Response
 from df.stage2_config import PublisherConfig, RunRecord, parse_publisher
 from df.state import Snapshot
 
@@ -162,7 +162,9 @@ def main(
         resp = _handle(layout, snapshot, who, op, stdin_fd, seen)
     except Refused as exc:
         resp = Response("refused", exc.reason)
-    except Exception as exc:  # noqa: BLE001 - nothing was done outside yet
+    except InFlight:
+        resp = Response("unknown", "in_flight")
+    except Exception as exc:  # noqa: BLE001 - R23 judges it by what is on disk
         print(f"publisher: {type(exc).__name__}: {exc}", file=sys.stderr)
         resp = Response("refused", "internal_error")
     resp = _never_refuse_with_state(layout, seen, resp)
