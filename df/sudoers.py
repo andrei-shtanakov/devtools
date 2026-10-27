@@ -3,9 +3,10 @@
 `render` writes the exact text; `install` puts it in place atomically after
 `visudo -c`. `policy_problems` and `io_log_problems` read the effective
 policy back from `sudo -n -l -U <name>` (decision 13): the parser accepts only
-the sections it knows, and joins lines sudo wraps on a narrow terminal (rules
-continue with deeper indentation, Defaults bindings with a line that does not
-start a new `Defaults`).
+the sections it knows. The listing is read from a pipe, which sudo never
+wraps; joining wrapped lines (rules continue with deeper indentation, Defaults
+bindings with a line that does not start a new `Defaults`) is a tolerance
+only.
 """
 
 from __future__ import annotations
@@ -42,7 +43,9 @@ _ALIAS = re.compile(r"[A-Z][A-Z0-9_]*")
 _SAFE_PATH = re.compile(r"/[A-Za-z0-9/._-]*")
 _PLAIN_USER = re.compile(r"[a-z_][a-z0-9_.-]*")
 _TAG = re.compile(r"([A-Z_]+): |([A-Z_]+=\S+) ")
-_BINDING = re.compile(r"Defaults([!>])(\S+(?:, \S+)*) (\S.*)")
+_BINDING = re.compile(r"Defaults([!>])(\S.*)")
+#: One Defaults entry: `[!]name[{+,-}=value]`, a value quoted or one word.
+_ENTRY = re.compile(r'!?[a-z_]+(?:[+-]?=(?:"[^"]*"|[^\s",]*))?')
 _RULE_START = re.compile(r" {4}\(")
 _CONTINUATION = ", \\\n    "
 
@@ -64,11 +67,19 @@ class Grant:
 
 @dataclass(frozen=True)
 class Listing:
-    """`sudo -l -U <name>` in parts; `bound` holds one binding per entry."""
+    """`sudo -l -U <name>` in parts; `bound` holds one binding per entry.
+
+    sudo prints a RunAs change inside one privilege as a new line that shows
+    only the tags that changed, so a line cannot tell a new privilege (no
+    tag inherited) from the same one (tags inherited). `grants` reads every
+    line as a new privilege, `carried` reads all lines as one; a tag that
+    may apply is in either.
+    """
 
     defaults: tuple[str, ...]
     bound: tuple[str, ...]
     grants: frozenset[Grant]
+    carried: frozenset[Grant]
 
 
 class ListingError(Exception):
@@ -175,9 +186,9 @@ def install(text: str) -> None:
     tmp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
     try:
         _place(tmp, target, text)
+        fsutil.sync_dir(target.parent)
     except OSError as exc:
         raise StepFailed(STEP, f"{target}: {exc}") from exc
-    fsutil.sync_dir(target.parent)
 
 
 def _place(tmp: Path, target: Path, text: str) -> None:
@@ -297,7 +308,8 @@ def parse_listing(name: str, text: str) -> Listing:
     return Listing(
         defaults=tuple(_split_list(defaults)),
         bound=tuple(bound),
-        grants=frozenset(g for rule in rules for g in _grants(rule)),
+        grants=frozenset(_grants(rules, carry=False)),
+        carried=frozenset(_grants(rules, carry=True)),
     )
 
 
@@ -366,10 +378,19 @@ def _split_list(text: str) -> list[str]:
     return [item.strip() for item in items if item.strip()]
 
 
-def _grants(rule: str) -> Iterator[Grant]:
-    """The commands of one listed rule; RunAs and tags carry along the line."""
-    runas: str | None = None
+def _grants(rules: list[str], *, carry: bool) -> Iterator[Grant]:
+    """The listed commands; RunAs and tags carry along a line, and with
+    `carry` from one line to the next too (see `Listing`)."""
     tags: dict[str, str] = {}
+    for rule in rules:
+        if not carry:
+            tags = {}
+        yield from _line_grants(rule, tags)
+
+
+def _line_grants(rule: str, tags: dict[str, str]) -> Iterator[Grant]:
+    """The commands of one listed line; updates `tags` as they change."""
+    runas: str | None = None
     for listed in _split_list(rule):
         item = listed
         if item.startswith("("):
@@ -411,9 +432,8 @@ def _io_logged(listing: Listing, publish: str) -> list[str]:
             if setting is not None:
                 values[setting[0]] = setting[1]
     found = [f"{key} включён" for key in LOG_KEYS if values[key]]
-    if any(
-        _runs(g.command, publish) and "LOG_OUTPUT" in g.tags for g in listing.grants
-    ):
+    grants = listing.grants | listing.carried
+    if any(_runs(g.command, publish) and "LOG_OUTPUT" in g.tags for g in grants):
         found.append("правило с тегом LOG_OUTPUT")
     return found
 
@@ -431,20 +451,43 @@ def _matching_values(entries: tuple[str, ...]) -> dict[str, bool]:
 
 
 def _bound_entries(binding: str, publish: str) -> list[str]:
-    """The entries of a RunAs/command binding that applies to `publish`."""
+    """The entries of a RunAs/command binding that applies to `publish`.
+
+    A binding that mentions a log key must parse in full before its scope is
+    judged: members without arguments, then entries of the Defaults grammar.
+    sudo prints a `Cmnd_Alias` expanded, arguments included, so a member with
+    arguments (`/x arg, /y log_output`) cannot be told from entries and is
+    not verifiable.
+    """
     if not _mentions(binding):
         return []
     if "log_servers" in binding:  # any mention, whatever the scope
         raise ListingError(f"log_servers: {binding!r}")
     match = _BINDING.fullmatch(binding)
-    if match is None:
+    parts = _binding_parts(match.group(2)) if match else None
+    if match is None or parts is None:
         raise ListingError(f"нераспознанная привязка: {binding!r}")
-    kind, members, entries = match.groups()
-    decide = _cmnd_member if kind == "!" else _runas_member
-    verdicts = [decide(member, publish) for member in members.split(", ")]
+    members, entries = parts
+    for entry in entries:
+        _log_setting(entry)
+    decide = _cmnd_member if match.group(1) == "!" else _runas_member
+    verdicts = [decide(member, publish) for member in members]
     if None in verdicts:
         raise ListingError(f"область не определима: {binding!r}")
-    return _split_list(entries) if any(verdicts) else []
+    return entries if any(verdicts) else []
+
+
+def _binding_parts(rest: str) -> tuple[list[str], list[str]] | None:
+    """(members, entries) of `M1, ..., Mk E1, ..., En`; `None` otherwise."""
+    items = _split_list(rest)
+    spaced = next((i for i, item in enumerate(items) if " " in item), None)
+    if spaced is None:
+        return None
+    last, first = items[spaced].split(" ", 1)
+    entries = [first, *items[spaced + 1 :]]
+    if not all(_ENTRY.fullmatch(entry) for entry in entries):
+        return None
+    return [*items[:spaced], last], entries
 
 
 def _cmnd_member(member: str, publish: str) -> bool | None:

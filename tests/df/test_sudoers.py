@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from df import fsutil, roles, sudoers
 from df import platform as plat
-from df import roles, sudoers
 from df.journal import StepFailed
 from df.paths import Layout
 from df.platform import RunResult
@@ -195,6 +195,22 @@ def test_install_problems_never_rename(
     assert renames == []
     assert target.read_text() == "old\n"
     assert sorted(p.name for p in target.parent.iterdir()) == ["df"]
+
+
+def test_install_sync_error_is_step_failure(
+    target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review M2: an `OSError` after the rename is the step's failure too."""
+    _visudo(monkeypatch, ok(b"parsed OK\n"))
+
+    def sync_dir(_path: object) -> None:
+        if target.exists():  # only the sync after the rename fails
+            raise OSError(5, "EIO")
+
+    monkeypatch.setattr(fsutil, "sync_dir", sync_dir)
+    with pytest.raises(StepFailed) as info:
+        sudoers.install("rules\n")
+    assert info.value.step == "sudoers"
 
 
 def test_install_os_error_is_step_failure(
@@ -440,6 +456,10 @@ def _binding(extra: str) -> tuple[str, str]:
         _binding("    Defaults!/usr/bin/other log_output"),
         _binding("    Defaults>root log_stdout"),
         _binding("    Defaults>df-publisher log_output"),  # runas before cmnd
+        _binding("    Defaults!/usr/bin/a, /usr/bin/b log_output"),
+        _binding(
+            f"    Defaults!/usr/bin/a, {LIBEXEC}/df-publish log_stdout, !log_stdout"
+        ),
         _binding("    Defaults!/opt/df/libexec/df-publish env_reset"),
     ],
 )
@@ -456,6 +476,10 @@ def test_io_log_off(monkeypatch: pytest.MonkeyPatch, edit: tuple[str, str]) -> N
         (_binding("    Defaults!ALL log_output"), "log_output"),
         (_binding("    Defaults!/opt/df/libexec/df-publish log_output"), "log_output"),
         (_binding("    Defaults>df-publisher log_stdout"), "log_stdout"),
+        (
+            _binding(f"    Defaults!/usr/bin/a, {LIBEXEC}/df-publish log_stdout"),
+            "log_stdout",
+        ),
         ((BINDING, ""), None),  # no `!log_output`: default off
     ],
 )
@@ -470,6 +494,24 @@ def test_io_log_on(
         f"sudo -l -U {name}: {LIBEXEC}/df-publish: {key} включён"
         for name in ("df-exec", "df-review")
     ]
+
+
+#: review M1: a RunAs change inside one privilege starts a line that does not
+#: reprint the tags it inherits.
+INHERITED = "    (df-review) PASSWD: SETENV: LOG_OUTPUT: /bin/true\n"
+
+
+def test_io_log_tag_inherited_across_lines(monkeypatch: pytest.MonkeyPatch) -> None:
+    edit = ("    (df-publisher) NOPASSWD:", INHERITED + "    (df-publisher) NOPASSWD:")
+    assert _io(monkeypatch, edit) == [
+        f"sudo -l -U {name}: {LIBEXEC}/df-publish: правило с тегом LOG_OUTPUT"
+        for name in ("df-exec", "df-review")
+    ]
+
+
+def test_io_log_tag_reset_by_explicit_nolog(monkeypatch: pytest.MonkeyPatch) -> None:
+    new = INHERITED + "    (df-publisher) NOLOG_OUTPUT: NOPASSWD:"
+    assert _io(monkeypatch, ("    (df-publisher) NOPASSWD:", new)) == []
 
 
 def test_io_log_tag_on_publish_rule(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -496,6 +538,14 @@ def test_io_log_tag_on_publish_rule(monkeypatch: pytest.MonkeyPatch) -> None:
         _binding("    Defaults@ubuntu-ci log_output"),
         _binding("    Defaults:df-exec log_output"),
         _binding("    Defaults!/usr/bin/other log_servers=h"),
+        # review I1: a member with arguments (an expanded Cmnd_Alias) cannot be
+        # told from entries; the rest of the binding is never dropped
+        _binding(f"    Defaults!/usr/bin/foo bar, {LIBEXEC}/df-publish log_output"),
+        _binding(f'    Defaults!/usr/bin/foo "", {LIBEXEC}/df-publish log_output'),
+        _binding(f"    Defaults!{LIBEXEC}/df-publish merge, /usr/bin/x log_output"),
+        _binding("    Defaults!/usr/bin/foo bar, /usr/bin/baz log_output"),
+        _binding(f"    Defaults!{LIBEXEC}/df-publish merge !log_output"),
+        _binding("    Defaults!/usr/bin/other log_output=1"),  # before scope
         ("Matching Defaults", "Unknown Defaults"),
     ],
 )
