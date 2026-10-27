@@ -20,7 +20,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
 import traceback
 from collections.abc import Sequence
@@ -35,6 +34,7 @@ from df import (
     fsutil,
     install,
     journal,
+    launch,
     launcher_entry,
     libexec,
     models,
@@ -79,10 +79,9 @@ _NO_OPERATOR = "roles setup: укажите --operator (SUDO_USER не зада�
 CLI_SETTABLE = "openssl"
 _UNSET = "—"
 #: Subcommands of the roles' side (Tasks 5-7); readers, refused until then.
-SERVICE_COMMANDS = frozenset({"launch", "publisher", "run"})
+SERVICE_COMMANDS = frozenset({"publisher", "run"})
 #: What `publisher serve` takes: the five operations and the self-check.
 PUBLISHER_ARGS = (*OPERATIONS, "self-check")
-_LAUNCH_OP = re.compile(r"[a-z][a-z0-9-]*", re.ASCII)
 _LIST_COLUMNS = ("роль", "harness", "model", "effort", "источник", "проверка")
 _REFUSALS = (
     StepFailed,
@@ -330,8 +329,11 @@ def _check_launch(args: argparse.Namespace) -> None:
     args.role, args.operation = rest
     if args.role not in roles.MODEL_ROLE_USERS:
         raise UsageError(f"launch: неизвестная роль {args.role!r}")
-    if not _LAUNCH_OP.fullmatch(args.operation):
-        raise UsageError(f"launch: неверная операция {args.operation!r}")
+    if args.operation not in launch.ROLE_OPS[args.role]:
+        raise UsageError(f"launch: {args.role}: неверная операция {args.operation!r}")
+    reason = None if args.exec_form else launch.human_refusal(args.role, args.operation)
+    if reason is not None:
+        raise UsageError(f"launch: {reason}")
 
 
 def _repository_id(text: str) -> int:
@@ -344,8 +346,10 @@ def _repository_id(text: str) -> int:
 
 
 def _reader(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
+    if args.command == "launch":
+        return _launch(args, lay, read)
     if args.command in SERVICE_COMMANDS:
-        raise Refusal(f"{_service_name(args)}: {_NOT_YET}")  # Tasks 5-7
+        raise Refusal(f"{_service_name(args)}: {_NOT_YET}")  # Tasks 6-7
     if args.command == "doctor":
         return _doctor(args, lay, read)
     if isinstance(read, Transitional):
@@ -354,9 +358,19 @@ def _reader(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
     return _models_list(args, lay, snap)
 
 
+def _launch(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
+    """`launch exec <role> <op>` from the one snapshot; `launch <role> <op>`
+    (the human's entry) needs none."""
+    words = [args.role, args.operation]
+    if not args.exec_form:
+        return launch.human_main(words, layout=lay)
+    if isinstance(read, Transitional):
+        raise Refusal(_TRANSITIONAL)
+    snap = state.parse_snapshot(read.value, lay, mode="reader")
+    return launch.exec_main(words, layout=lay, snap=snap)
+
+
 def _service_name(args: argparse.Namespace) -> str:
-    if args.command == "launch":
-        return "launch exec" if args.exec_form else "launch"
     if args.command == "publisher":
         return "publisher serve"
     return f"run {args.run_command}"

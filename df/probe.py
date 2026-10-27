@@ -38,6 +38,7 @@ from df.models import ROLE_CONTEXT, ROLES, ModelChoice, ModelsConfig, config_has
 from df.models import resolve as resolve_choice
 from df.paths import Layout
 from df.platform import PlatformName, RunResult, detect_platform, run_as
+from df.stage2_config import ModelPin
 
 ADAPTER_VERSION = "2"
 PROBE_PROMPT = "Reply with the single word OK."
@@ -1102,6 +1103,19 @@ def current_status(
         executable_sha256=sha,
         managed_digest=managed_context(profile)[0],
     ), rec
+
+
+def pin_ready(layout: Layout, role: str, pin: ModelPin) -> ProbeStatus:
+    """Admission of a run's pin for `role`, without running a harness.
+
+    Decision 9: no launcher isolation is confirmed in v1, so every pin is
+    «не поддерживается: изоляция не подтверждена». The full admission
+    (`executable_target`, the profile, `managed_context`, the role's auth
+    fingerprint, then `probe_status` of the last record against those facts
+    and the pin) arrives with the first profile whose isolation is verified;
+    until then nothing is read, hashed or executed.
+    """
+    return ProbeStatus(f"{UNSUPPORTED}: изоляция не подтверждена", False)
 
 
 def _target_cached(

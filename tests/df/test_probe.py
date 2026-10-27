@@ -1428,3 +1428,35 @@ def test_owner_mode_bits_required(
 def test_missing_home_unreadable(tmp_path: Path) -> None:
     obs = probe.observe_auth(make_profile(), tmp_path / "absent", role_uid=UID)
     assert obs == UNREADABLE_OBS
+
+
+def test_pin_ready_unsupported_harness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Decision 9: every pin is «не поддерживается: изоляция не подтверждена»
+    and no harness is executed (an executable planted at the approved path
+    leaves no mark, and no process creator is called)."""
+    from df.stage2_config import ModelPin
+
+    mark = tmp_path / "executed"
+    harness = tmp_path / "claude"
+    harness.write_text(f"#!/bin/sh\ntouch {mark}\n")
+    harness.chmod(0o755)
+    lay = Layout(Path(os.path.realpath(tmp_path)) / "root")
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise AssertionError("a process was started")
+
+    for owner, names in (
+        (subprocess, ("run", "Popen", "call", "check_output")),
+        (os, ("execv", "execve", "system", "posix_spawn", "fork")),
+    ):
+        for name in names:
+            monkeypatch.setattr(owner, name, boom)
+    pin = ModelPin("claude", "1.0", "m", "m", None, {}, "h" * 8)
+    for role in ("interview", "author", "reviewer"):
+        status = probe.pin_ready(lay, role, pin)
+        assert status == probe.ProbeStatus(
+            "не поддерживается: изоляция не подтверждена", False
+        )
+    assert not mark.exists()

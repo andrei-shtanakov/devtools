@@ -108,7 +108,21 @@ def test_parse_snapshot_values(lay: Layout) -> None:
         models_text='schema = "df/models/v1"\n',
         pending_present=False,
         generation=4,
+        releases=ReleasesConfig((ENTRY,)),
     )
+
+
+def test_parse_snapshot_carries_the_whole_registry(lay: Layout) -> None:
+    """Task 5: `launch exec` picks a release by a run record, not by
+    `current`: the snapshot holds every entry, from the text of `entry`."""
+    other = dataclasses.replace(ENTRY, id="rel2", status="revoked", reason="bad")
+    text = dump_releases(ReleasesConfig((ENTRY, other))).encode()
+    raw = state.RawSnapshot(2, ID, text, None, None, False)
+    snap = state.parse_snapshot(raw, lay, mode="writer")
+    assert snap.releases == ReleasesConfig((ENTRY, other))
+    assert snap.entry == ENTRY
+    empty = state.RawSnapshot(2, None, None, None, None, False)
+    assert state.parse_snapshot(empty, lay, mode="bootstrap").releases is None
 
 
 def test_parse_snapshot_current_without_entry(lay: Layout) -> None:

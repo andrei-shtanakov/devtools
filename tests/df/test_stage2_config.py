@@ -10,17 +10,21 @@ import pytest
 from df.config import STATE_SCHEMAS, Account, ConfigError
 from df.stage2_config import (
     OPERATIONS,
+    ModelChange,
     ModelPin,
     Product,
     PublisherConfig,
     RunRecord,
     TrustBinding,
+    dump_model_change,
     dump_products,
     dump_publisher,
     dump_run,
+    effective_pins,
     expected_publisher,
     load_products,
     load_trust,
+    parse_model_change,
     parse_products,
     parse_publisher,
     parse_run,
@@ -350,6 +354,8 @@ def test_run_record_rejects_unknown_pin_field() -> None:
         lambda d: d.update(started_at="2026-10-27T00:00:00"),
         lambda d: d["models"]["author"].update(model=1),
         lambda d: d["models"]["author"].update(effort=1),
+        lambda d: d["models"]["author"].update(effort=""),
+        lambda d: d["models"]["author"].update(effort="a b"),
         lambda d: d["models"].update({"": d["models"]["author"]}),
         lambda d: d["models"]["author"].update(params=[]),
     ],
@@ -371,3 +377,101 @@ def test_publisher_config_is_immutable() -> None:
     cfg = PublisherConfig({601: frozenset({"merge"})}, "https://api.github.com")
     with pytest.raises(TypeError):
         cfg.senders[1] = frozenset()  # type: ignore[index]
+
+
+# --- model-change events (Task 5, R12) ----------------------------------------
+
+
+def other(model: str) -> ModelPin:
+    return ModelPin("claude", "1.0", model, model, "high", {}, "h" * 8)
+
+
+def event(before: ModelPin, after: ModelPin, role: str = "author") -> ModelChange:
+    return ModelChange("r1", role, before, after, 2)
+
+
+def test_model_change_roundtrip_and_canonical_form() -> None:
+    ev = event(pin(), other("m2"))
+    line = dump_model_change(ev)
+    assert parse_model_change(line) == ev
+    assert line == json.dumps(json.loads(line), sort_keys=True, separators=(",", ":"))
+    assert json.loads(line)["event"] == "model_change"
+    assert (
+        json.loads(line)["before"] == json.loads(dump_run(record()))["models"]["author"]
+    )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda d: d.pop("from_step"),
+        lambda d: d.update(extra=1),
+        lambda d: d.update(event="other"),
+        lambda d: d.update(from_step=-1),
+        lambda d: d.update(from_step=True),
+        lambda d: d.update(from_step="1"),
+        lambda d: d.update(role=""),
+        lambda d: d["after"].update(extra="x"),
+        lambda d: d.update(before="x"),
+    ],
+)
+def test_model_change_refuses_deviations(mutate) -> None:  # noqa: ANN001
+    data = json.loads(dump_model_change(event(pin(), other("m2"))))
+    mutate(data)
+    with pytest.raises(ConfigError):
+        parse_model_change(json.dumps(data))
+
+
+@pytest.mark.parametrize("line", ["", "x", "[]", "NaN", '{"a":1,"a":2}'])
+def test_model_change_refuses_bad_json(line: str) -> None:
+    with pytest.raises(ConfigError):
+        parse_model_change(line)
+
+
+def test_model_change_duplicate_keys_refused() -> None:
+    line = dump_model_change(event(pin(), other("m2")))
+    doubled = line[:-1] + ',"role":"author"}'
+    with pytest.raises(ConfigError, match="duplicate"):
+        parse_model_change(doubled)
+
+
+def test_effective_pins_apply_in_file_order() -> None:
+    rec = record()
+    lines = [
+        dump_model_change(event(pin(), other("m2"))),
+        dump_model_change(event(other("m2"), other("m3"))),
+    ]
+    assert effective_pins(rec, lines)["author"] == other("m3")
+    assert effective_pins(rec, []) == dict(rec.models)
+    assert effective_pins(rec, lines[:1])["author"] == other("m2")
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        ["not json"],
+        [""],
+        ["{}"],
+    ],
+)
+def test_effective_pins_malformed_line_refuses(lines: list[str]) -> None:
+    good = dump_model_change(event(pin(), other("m2")))
+    with pytest.raises(ConfigError):
+        effective_pins(record(), [good, *lines])
+    with pytest.raises(ConfigError):
+        effective_pins(record(), [*lines, good])
+
+
+def test_effective_pins_refuses_a_broken_chain() -> None:
+    swapped = [
+        dump_model_change(event(pin(), other("m2"))),
+        dump_model_change(event(pin(), other("m3"))),  # before is no longer in force
+    ]
+    with pytest.raises(ConfigError, match="before"):
+        effective_pins(record(), swapped)
+    foreign = dump_model_change(ModelChange("r2", "author", pin(), other("m"), 0))
+    with pytest.raises(ConfigError, match="another run"):
+        effective_pins(record(), [foreign])
+    unknown = dump_model_change(event(pin(), other("m"), role="judge"))
+    with pytest.raises(ConfigError, match="judge"):
+        effective_pins(record(), [unknown])
