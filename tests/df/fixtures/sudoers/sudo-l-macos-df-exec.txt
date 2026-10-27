@@ -1,9 +1,9 @@
 Matching Defaults entries for df-exec on mac-mini:
-    env_reset, env_keep+=BLOCKSIZE, env_keep+="COLORFGBG COLORTERM", env_keep+=__CF_USER_TEXT_ENCODING, env_keep+="CHARSET LANG LANGUAGE LC_ALL LC_COLLATE LC_CTYPE", env_keep+="LC_MESSAGES LC_MONETARY LC_NUMERIC LC_TIME", env_keep+="LINES COLUMNS", env_keep+=LSCOLORS, env_keep+=SSH_AUTH_SOCK, env_keep+=TZ, env_keep+="DISPLAY XAUTHORIZATION XAUTHORITY", env_keep+="EDITOR VISUAL", env_keep+="HOME MAIL", lecture_file=/etc/sudo_lecture, env_reset, !setenv
+    env_reset, env_keep+=BLOCKSIZE, env_keep+="COLORFGBG COLORTERM", env_keep+=__CF_USER_TEXT_ENCODING, env_keep+="CHARSET LANG LANGUAGE LC_ALL LC_COLLATE LC_CTYPE", env_keep+="LC_MESSAGES LC_MONETARY LC_NUMERIC LC_TIME", env_keep+="LINES COLUMNS", env_keep+=LSCOLORS, env_keep+=SSH_AUTH_SOCK, env_keep+=TZ, env_keep+="DISPLAY XAUTHORIZATION XAUTHORITY", env_keep+="EDITOR VISUAL", env_keep+="HOME MAIL", lecture_file=/etc/sudo_lecture, !log_allowed, env_reset, !setenv
 
 Runas and Command-specific defaults for df-exec:
     Defaults!/opt/df/libexec/df-publish !log_output
 
 User df-exec may run the following commands on mac-mini:
-    (df-review) NOPASSWD: NOSETENV: /opt/df/libexec/df-review-run ""
-    (df-publisher) NOPASSWD: NOSETENV: /opt/df/libexec/df-publish merge, /opt/df/libexec/df-publish record-violation, /opt/df/libexec/df-publish perimeter-status
+    (df-review) NOSETENV: NOPASSWD: /opt/df/libexec/df-review-run ""
+    (df-publisher) NOSETENV: NOPASSWD: /opt/df/libexec/df-publish merge, /opt/df/libexec/df-publish record-violation, /opt/df/libexec/df-publish perimeter-status

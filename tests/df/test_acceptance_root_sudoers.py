@@ -3,7 +3,7 @@
 R7: the parser of `df.sudoers` is proven on the real `sudo -n -l -U <name>`
 of the three roles and the runner's own account, after the real `visudo`
 and `install`. The captures are kept as evidence under
-`$DF_STAGE1_OUT/sudoers/` and replace the provisional fixtures of
+`$DF_STAGE1_OUT/sudoers/`; their `.fixture.txt` forms are the fixtures of
 `tests/df/fixtures/sudoers/` (README there). R9: the test refuses a host
 that already has the file or a role, never creates `df-build`, and removes
 the file and the roles in `finally`. Runs only in CI df-stage1.

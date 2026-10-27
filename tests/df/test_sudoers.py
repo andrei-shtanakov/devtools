@@ -1,7 +1,7 @@
 """`/etc/sudoers.d/df` of the stage-2 roles (stage 2a, Task 3).
 
-The `sudo -n -l -U` texts of `fixtures/sudoers/` are provisional until the CI
-capture of `test_acceptance_root_sudoers.py` replaces them (README there).
+The `sudo -n -l -U` texts of `fixtures/sudoers/` are the CI capture of
+`test_acceptance_root_sudoers.py` (provenance in the README there).
 """
 
 from __future__ import annotations
@@ -27,6 +27,8 @@ OSES = ["linux", "macos"]
 OP = "runner"
 ROOT = Layout(Path("/"))
 LIBEXEC = "/opt/df/libexec"
+#: The generated tags as sudo prints them (CI capture: its own order).
+PRINTED = "NOSETENV: NOPASSWD:"
 VISUDO_USABLE = os.access(sudoers.VISUDO, os.X_OK)
 
 
@@ -251,7 +253,7 @@ def _edited(monkeypatch: pytest.MonkeyPatch, name: str, old: str, new: str) -> N
     "old,new,named",
     [
         # an extra tag: SETENV instead of NOSETENV
-        ("NOPASSWD: NOSETENV: /opt", "NOPASSWD: SETENV: /opt", "SETENV"),
+        (f"{PRINTED} /opt", "SETENV: NOPASSWD: /opt", "SETENV"),
         # an extra command
         ("perimeter-status", "perimeter-status, /opt/df/libexec/df-publish x", "x"),
         # a wider RunAs
@@ -271,7 +273,7 @@ def test_policy_role_differs(
 
 
 def test_policy_role_missing_rule(monkeypatch: pytest.MonkeyPatch) -> None:
-    line = '    (df-review) NOPASSWD: NOSETENV: /opt/df/libexec/df-review-run ""\n'
+    line = f'    (df-review) {PRINTED} /opt/df/libexec/df-review-run ""\n'
     _edited(monkeypatch, "df-exec", line, "")
     assert _problems("df-exec") == [
         (
@@ -285,8 +287,8 @@ def test_policy_tags_carry_within_a_line(monkeypatch: pytest.MonkeyPatch) -> Non
     """sudo prints RunAs and tags only when they change along a line."""
     text = _fixture("sudo-l-linux-df-exec.txt")
     first, second = (
-        '    (df-review) NOPASSWD: NOSETENV: /opt/df/libexec/df-review-run ""\n',
-        "    (df-publisher) NOPASSWD: NOSETENV: ",
+        f'    (df-review) {PRINTED} /opt/df/libexec/df-review-run ""\n',
+        f"    (df-publisher) {PRINTED} ",
     )
     merged = text.replace(first + second, first.rstrip("\n") + ", (df-publisher) ")
     assert merged != text
@@ -298,7 +300,7 @@ def test_policy_tags_reset_on_a_new_line(monkeypatch: pytest.MonkeyPatch) -> Non
     _edited(
         monkeypatch,
         "df-exec",
-        "    (df-publisher) NOPASSWD: NOSETENV: ",
+        f"    (df-publisher) {PRINTED} ",
         "    (df-publisher) ",
     )
     problems = _problems("df-exec")
@@ -306,10 +308,7 @@ def test_policy_tags_reset_on_a_new_line(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_policy_operator_without_launch_rule(monkeypatch: pytest.MonkeyPatch) -> None:
-    line = (
-        "    (df-review) NOPASSWD: NOSETENV: "
-        "/opt/df/libexec/df-launch df-review check\n"
-    )
+    line = f"    (df-review) {PRINTED} /opt/df/libexec/df-launch df-review check\n"
     _edited(monkeypatch, OP, line, "")
     assert _problems(OP) == [
         (
@@ -502,7 +501,8 @@ INHERITED = "    (df-review) PASSWD: SETENV: LOG_OUTPUT: /bin/true\n"
 
 
 def test_io_log_tag_inherited_across_lines(monkeypatch: pytest.MonkeyPatch) -> None:
-    edit = ("    (df-publisher) NOPASSWD:", INHERITED + "    (df-publisher) NOPASSWD:")
+    head = f"    (df-publisher) {PRINTED}"
+    edit = (head, INHERITED + head)
     assert _io(monkeypatch, edit) == [
         f"sudo -l -U {name}: {LIBEXEC}/df-publish: правило с тегом LOG_OUTPUT"
         for name in ("df-exec", "df-review")
@@ -510,12 +510,13 @@ def test_io_log_tag_inherited_across_lines(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_io_log_tag_reset_by_explicit_nolog(monkeypatch: pytest.MonkeyPatch) -> None:
-    new = INHERITED + "    (df-publisher) NOLOG_OUTPUT: NOPASSWD:"
-    assert _io(monkeypatch, ("    (df-publisher) NOPASSWD:", new)) == []
+    head = f"    (df-publisher) {PRINTED}"
+    new = INHERITED + f"    (df-publisher) NOLOG_OUTPUT: {PRINTED}"
+    assert _io(monkeypatch, (head, new)) == []
 
 
 def test_io_log_tag_on_publish_rule(monkeypatch: pytest.MonkeyPatch) -> None:
-    edit = ("(df-publisher) NOPASSWD:", "(df-publisher) LOG_OUTPUT: NOPASSWD:")
+    edit = (f"(df-publisher) {PRINTED}", f"(df-publisher) LOG_OUTPUT: {PRINTED}")
     assert _io(monkeypatch, edit) == [
         f"sudo -l -U {name}: {LIBEXEC}/df-publish: правило с тегом LOG_OUTPUT"
         for name in ("df-exec", "df-review")

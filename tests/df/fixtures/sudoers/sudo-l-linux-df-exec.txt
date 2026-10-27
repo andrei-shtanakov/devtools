@@ -5,5 +5,5 @@ Runas and Command-specific defaults for df-exec:
     Defaults!/opt/df/libexec/df-publish !log_output
 
 User df-exec may run the following commands on ubuntu-ci:
-    (df-review) NOPASSWD: NOSETENV: /opt/df/libexec/df-review-run ""
-    (df-publisher) NOPASSWD: NOSETENV: /opt/df/libexec/df-publish merge, /opt/df/libexec/df-publish record-violation, /opt/df/libexec/df-publish perimeter-status
+    (df-review) NOSETENV: NOPASSWD: /opt/df/libexec/df-review-run ""
+    (df-publisher) NOSETENV: NOPASSWD: /opt/df/libexec/df-publish merge, /opt/df/libexec/df-publish record-violation, /opt/df/libexec/df-publish perimeter-status
