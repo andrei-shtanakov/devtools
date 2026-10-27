@@ -31,6 +31,7 @@ from tests.df.conftest import FakeLayout
 from tests.df.launch_world import (
     ADMIN,
     DIGEST,
+    Spy,
     entry,
     put_accounts,
     put_record,
@@ -179,6 +180,9 @@ def execve_of(ev: Ev) -> tuple[str, list[str], dict[str, str]]:
         ["resume", "run-1", "--accept-model-change", "--from-step", "01"],
         ["resume", "run-1", "--accept-model-change", "--from-step", "٣"],
         ["resume", "run-1", "--accept-model-change", "--from-step"],
+        ["resume", "run-1", "--from-step", "--accept-model-change", "2"],
+        ["resume", "run-1", "--accept-model-change", "2", "--from-step"],
+        ["resume", "run-1", "2", "--from-step", "--accept-model-change"],
         ["resume", "run-1", "--accept-model-change", "--accept-model-change"],
         ["resume", "run-1", "--from-step", "1", "--from-step", "2"],
         ["resume"],
@@ -202,12 +206,18 @@ def test_parse_refuses_bad_shapes(argv: list[str]) -> None:
 
 def test_parse_accepts_the_forms() -> None:
     assert run_start.parse(["start", "--product", "7"]).product == 7
+    big = run_start.parse(["start", "--product", "1012345678"])
+    assert big.product == 1012345678  # real GitHub ids have ten digits
     plain = run_start.parse(["resume", "run-1"])
     assert (plain.run_id, plain.accept, plain.from_step) == ("run-1", False, None)
     both = run_start.parse(
         ["resume", "run-1", "--from-step", "3", "--accept-model-change"]
     )
     assert (both.accept, both.from_step) == (True, 3)
+    first = run_start.parse(
+        ["resume", "r", "--accept-model-change", "--from-step", "4"]
+    )
+    assert (first.accept, first.from_step) == (True, 4)
 
 
 def test_option_alone_exits_before_anything_is_read(
@@ -452,6 +462,7 @@ def test_no_role_home_or_product_file_read_before_the_drop(
     hits: list[tuple[str, bool]] = []
     forbidden = (str(world.layout.role_home("df-exec")), "/x/checkout")
     forbidden += (str(world.layout.role_home("df-review")),)
+    forbidden += (str(world.layout.role_home("df-publisher")),)
 
     def wrap(real):  # noqa: ANN001, ANN202
         def seen(path, *a, **kw):  # noqa: ANN001, ANN002, ANN003, ANN202
@@ -658,7 +669,9 @@ def test_resume_model_change_needs_flag_and_step(world: FakeLayout, ev: Ev) -> N
     assert ev.names().index("setuid") < ev.names().index("execve")
 
 
-def test_events_are_written_before_the_drop(world: FakeLayout, ev: Ev) -> None:
+def test_events_are_written_before_the_drop(
+    world: FakeLayout, ev: Ev, monkeypatch: pytest.MonkeyPatch
+) -> None:
     put_run_with_pins(world)
     seen: list[bool] = []
     real = run_start.drop_privileges
@@ -667,17 +680,14 @@ def test_events_are_written_before_the_drop(world: FakeLayout, ev: Ev) -> None:
         seen.append(bool(events_of(world)))
         real(account)
 
-    run_start.drop_privileges = spy  # type: ignore[assignment]
-    try:
-        resume(
-            world,
-            snap_of(world, "rel-a", A, author=OTHER),
-            "--accept-model-change",
-            "--from-step",
-            "1",
-        )
-    finally:
-        run_start.drop_privileges = real
+    monkeypatch.setattr(run_start, "drop_privileges", spy)
+    resume(
+        world,
+        snap_of(world, "rel-a", A, author=OTHER),
+        "--accept-model-change",
+        "--from-step",
+        "1",
+    )
     assert seen == [True]
 
 
@@ -766,31 +776,17 @@ def test_start_and_resume_reread_nothing(
     put_registry(world, entry("rel-a", "revoked"), B)
     (world.layout.etc / "install.toml").write_text("garbage")
     (world.layout.etc / "models.toml").write_text("garbage")
-    hits: list[str] = []
-    names = ("releases.toml", "install.toml", "models.toml", "current")
-
-    def wrap(real):  # noqa: ANN001, ANN202
-        def seen(path, *a, **kw):  # noqa: ANN001, ANN002, ANN003, ANN202
-            if isinstance(path, (str, os.PathLike)) and Path(path).name in names:
-                hits.append(str(path))
-            return real(path, *a, **kw)
-
-        return seen
-
-    for name in ("open", "readlink", "stat", "lstat", "listdir", "scandir"):
-        monkeypatch.setattr(os, name, wrap(getattr(os, name)))
-    for owner in (builtins, io):
-        monkeypatch.setattr(owner, "open", wrap(owner.open))
+    spy = Spy(monkeypatch)
     resume(world, snap_of(world, "rel-b", A, B))
     ev.reset()
     start_snap = snap_of(world, "rel-b", B)
     start(world, start_snap)
-    assert hits == []
+    assert spy.hits == []
     ev.reset()
     revoked = snap_of(world, "rel-b", entry("rel-a", "revoked"), B)
     with pytest.raises(StepFailed, match="release_revoked"):
         resume(world, revoked)
-    assert hits == []
+    assert spy.hits == []
 
 
 # --- the human form --------------------------------------------------------------------
@@ -873,3 +869,166 @@ def test_cli_transitional_state_is_refused_for_root(
         mode="reader", read=Transitional(1), lock_fd=None, layout=world.layout,
     )  # fmt: skip
     assert code == 2 and ev.log == [] and records(world) == []
+
+
+# --- fix round 1 -----------------------------------------------------------------------
+
+
+def test_start_with_a_ten_digit_product(world: FakeLayout, ev: Ev) -> None:
+    big = 1012345678
+    (world.layout.etc / "products.toml").write_text(
+        dump_products({big: Product(big, "o/r", "write", 1, 2, "u", "/x/checkout")})
+    )
+    run_start.main(
+        ["start", "--product", str(big)], layout=world.layout, snap=snap_of(world)
+    )
+    assert parse_run(records(world)[0].read_text()).product == big
+
+
+def test_cli_accepts_a_ten_digit_product() -> None:
+    args = cli._parse(["run", "start", "--product", "1012345678"])  # noqa: SLF001
+    assert args.words == ["start", "--product", "1012345678"]
+    assert cli._parse(["doctor", "--product", "1012345678"]).product == 1012345678  # noqa: SLF001
+
+
+def test_started_by_is_the_sudo_uid(
+    world: FakeLayout, ev: Ev, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for value, want in (
+        ("501", 501),
+        ("", 0),
+        ("abc", 0),
+        ("-1", 0),
+        ("99999999999", 0),
+    ):
+        ev.reset()
+        for path in records(world):
+            path.unlink()
+        monkeypatch.setenv("SUDO_UID", value)
+        start(world, snap_of(world))
+        assert parse_run(records(world)[0].read_text()).started_by_uid == want, value
+    ev.reset()
+    for path in records(world):
+        path.unlink()
+    monkeypatch.delenv("SUDO_UID")
+    start(world, snap_of(world))
+    assert parse_run(records(world)[0].read_text()).started_by_uid == 0
+
+
+def test_an_empty_harness_version_in_a_probe_does_not_abort_start(
+    world: FakeLayout, ev: Ev
+) -> None:
+    world.layout.probes_dir.mkdir(parents=True)
+    odd = _probe_record(
+        "author", models.config_hash(CHOICE), harness_version="", actual_model=""
+    )
+    (world.layout.probes_dir / "author.json").write_text(odd.to_json())
+    start(world, snap_of(world))
+    pin = parse_run(records(world)[0].read_text()).models["author"]
+    assert (pin.harness_version, pin.actual_model) == ("не проверено", "не сообщён")
+
+
+def test_a_record_missing_a_role_is_a_clean_refusal(world: FakeLayout, ev: Ev) -> None:
+    rec = record("run-1", "rel-a")
+    few = {r: _pin_of(CHOICE) for r in models.ROLES if r != "judge"}
+    put_record(world, _with_models(rec, few))
+    with pytest.raises(StepFailed, match="нет пина роли judge"):
+        resume(world, snap_of(world))
+    assert ev.log == []
+
+
+def test_cli_missing_role_exits_2_without_a_traceback(
+    world: FakeLayout,
+    ev: Ev,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr("df.cli.ROOT_UID", os.getuid())
+    few = {r: _pin_of(CHOICE) for r in models.ROLES if r != "judge"}
+    put_record(world, _with_models(record("run-1", "rel-a"), few))
+    code = cli.main(
+        ["run", "resume", "run-1"],
+        mode="reader", read=Stable(raw_of(world), 1), lock_fd=None, layout=world.layout,
+    )  # fmt: skip
+    err = capsys.readouterr().err
+    assert code == 2 and "judge" in err and "Traceback" not in err
+
+
+def test_the_existing_events_file_is_judged_again_at_append(
+    world: FakeLayout, ev: Ev, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    put_run_with_pins(world)
+    path = world.layout.runs_dir / "run-1.events.jsonl"
+    path.write_text("")
+    path.chmod(0o666)  # appears between the read and the append
+    real = launch.read_root_file
+
+    def unseen(file: Path, **kw: bool) -> str | None:
+        return None if file.name.endswith(".events.jsonl") else real(file, **kw)
+
+    monkeypatch.setattr(launch, "read_root_file", unseen)
+    with pytest.raises(StepFailed, match="запись для группы или всех"):
+        resume(
+            world,
+            snap_of(world, "rel-a", A, author=OTHER),
+            "--accept-model-change",
+            "--from-step",
+            "2",
+        )
+    assert path.read_text() == "" and ev.of("execve") == []
+
+
+def test_concurrent_resumes_take_turns(
+    world: FakeLayout, ev: Ev, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second resume gets the lock only after the first appended: it
+    reads that event, finds nothing new and writes none (no stale `before`)."""
+    import fcntl
+
+    put_run_with_pins(world)
+    changed = snap_of(world, "rel-a", A, author=OTHER)
+    flags = ("--accept-model-change", "--from-step", "2")
+    real = fcntl.flock
+    calls: list[int] = []
+
+    def first_finishes_while_we_wait(fd: int, how: int) -> None:
+        calls.append(how)
+        if len(calls) == 1:
+            monkeypatch.setattr(fcntl, "flock", lambda *a: None)
+            resume(world, changed, *flags)  # the other process, to its end
+            ev.reset()
+            monkeypatch.setattr(fcntl, "flock", first_finishes_while_we_wait)
+        real(fd, how)
+
+    monkeypatch.setattr(fcntl, "flock", first_finishes_while_we_wait)
+    assert resume(world, changed, *flags) == 1
+    assert calls[0] == fcntl.LOCK_EX
+    lines = events_of(world)
+    assert len(lines) == 1
+    rec = parse_run((world.layout.runs_dir / "run-1.json").read_text())
+    assert effective_pins(rec, lines)["author"].model == "sonnet"
+
+
+def test_a_pin_change_names_the_role_field_and_values(
+    world: FakeLayout, ev: Ev
+) -> None:
+    put_run_with_pins(world)
+    with pytest.raises(StepFailed) as err:
+        resume(world, snap_of(world, "rel-a", A, author=OTHER))
+    text = str(err.value)
+    assert "пин изменился: author: model opus → sonnet" in text
+    assert "effort high → None" in text
+    assert text.endswith(RESUME_HINT)
+    assert "модель изменилась" not in text
+
+
+def test_a_probe_appearing_after_start_is_a_pin_change(
+    world: FakeLayout, ev: Ev
+) -> None:
+    put_run_with_pins(world)
+    world.layout.probes_dir.mkdir(parents=True)
+    probed = _probe_record("author", models.config_hash(CHOICE))
+    (world.layout.probes_dir / "author.json").write_text(probed.to_json())
+    with pytest.raises(StepFailed) as err:
+        resume(world, snap_of(world))
+    assert "author: harness_version не проверено → 9.9.9" in str(err.value)

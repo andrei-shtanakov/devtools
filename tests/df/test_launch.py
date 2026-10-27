@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import builtins
-import io
 import os
 from pathlib import Path
 
@@ -15,6 +13,7 @@ from df.journal import Stable, StepFailed, Transitional
 from df.state import Snapshot
 from tests.df.conftest import FakeLayout
 from tests.df.launch_world import (
+    Spy,
     entry,
     fake_os,
     put_accounts,
@@ -422,29 +421,6 @@ def test_cli_launch_op_must_fit_the_role() -> None:
 
 
 # --- the snapshot is the only source ------------------------------------------
-
-FORBIDDEN = ("releases.toml", "install.toml", "models.toml", "current")
-
-
-class Spy:
-    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self.hits: list[str] = []
-        # Task 7: add `publisher serve` here. `run start|resume` (Task 6) has
-        # the same spy over the same names in test_run_start.py:
-        # test_start_and_resume_reread_nothing (it needs the privileged fakes)
-        for name in ("open", "readlink", "stat", "lstat", "listdir", "scandir"):
-            real = getattr(os, name)
-            monkeypatch.setattr(os, name, self._wrap(real))
-        for owner in (builtins, io):
-            monkeypatch.setattr(owner, "open", self._wrap(owner.open))
-
-    def _wrap(self, real):  # noqa: ANN001, ANN202
-        def seen(path, *a, **kw):  # noqa: ANN001, ANN002, ANN003, ANN202
-            if isinstance(path, (str, os.PathLike)) and Path(path).name in FORBIDDEN:
-                self.hits.append(str(path))
-            return real(path, *a, **kw)
-
-        return seen
 
 
 def test_spy_sees_builtin_open(

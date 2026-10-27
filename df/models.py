@@ -165,6 +165,14 @@ def resolve(
     raise ConfigError(f"{role}: модель не задана")
 
 
+def repository_id(text: str) -> int:
+    """A GitHub repository id as typed: ASCII digits, no leading zero, any
+    length; anything else is a `ValueError` (the one rule of `--product`)."""
+    if not text.isascii() or not text.isdigit() or text.startswith("0"):
+        raise ValueError(text)
+    return int(text)
+
+
 def config_hash(choice: ModelChoice) -> str:
     """SHA-256 of the choice's canonical JSON (sorted keys)."""
     canonical = json.dumps(

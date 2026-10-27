@@ -23,10 +23,12 @@ read or run before the drop. `current` is read once, in the snapshot.
 
 from __future__ import annotations
 
+import fcntl
 import os
 import re
 import secrets
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -87,9 +89,12 @@ def parse(argv: Sequence[str]) -> Request:
 
 
 def _parse_start(rest: list[str]) -> Request:
-    if len(rest) != 2 or rest[0] != "--product" or not _NUMBER.fullmatch(rest[1]):
-        raise StepFailed(_STEP, "start: нужно --product <repository_id>")
-    return Request("start", product=int(rest[1]))
+    try:
+        if len(rest) != 2 or rest[0] != "--product":
+            raise ValueError(rest)
+        return Request("start", product=models.repository_id(rest[1]))
+    except ValueError:
+        raise StepFailed(_STEP, "start: нужно --product <repository_id>") from None
 
 
 def _parse_resume(rest: list[str]) -> Request:
@@ -98,12 +103,24 @@ def _parse_resume(rest: list[str]) -> Request:
         raise StepFailed(_STEP, "resume: нужен RUN_ID ([A-Za-z0-9._-]+)")
     if not options:
         return Request("resume", run_id=run_id)
-    if len(options) != 3 or options.count("--accept-model-change") != 1:
-        raise StepFailed(_STEP, f"resume: {_BOTH}")
-    rest_two = [w for w in options if w != "--accept-model-change"]
-    if rest_two[0] != "--from-step" or not _NUMBER.fullmatch(rest_two[1]):
+    step = _step_of(options)
+    if step is None:
         raise StepFailed(_STEP, f"resume: {_BOTH}; N — целое больше нуля")
-    return Request("resume", run_id=run_id, accept=True, from_step=int(rest_two[1]))
+    return Request("resume", run_id=run_id, accept=True, from_step=step)
+
+
+def _step_of(options: list[str]) -> int | None:
+    """N of `--accept-model-change --from-step N` or `--from-step N
+    --accept-model-change`; any other shape is `None`."""
+    flag = "--accept-model-change"
+    if options[:1] == [flag] and options[1:2] == ["--from-step"]:
+        number = options[2:]
+    elif options[:1] == ["--from-step"] and options[2:] == [flag]:
+        number = options[1:2]
+    else:
+        return None
+    ok = len(number) == 1 and _NUMBER.fullmatch(number[0])
+    return int(number[0]) if ok else None
 
 
 _BOTH = "--accept-model-change и --from-step N задаются только вместе"
@@ -174,15 +191,52 @@ def _start(layout: Layout, snap: Snapshot, req: Request) -> str:
 def _resume(layout: Layout, snap: Snapshot, req: Request) -> str:
     assert req.run_id is not None
     rec = launch.release_of_record(layout, snap, req.run_id)
-    events = launch.read_root_file(_events_path(layout, rec.run_id), optional=True)
-    in_force = effective_pins(rec, _lines(events))
-    fresh = pins_from_data(layout, rec.product, _models_of(snap))
-    changes = model_changes(rec.run_id, in_force, fresh, req.from_step or 0)
-    if changes and not req.accept:
-        roles = ", ".join(c.role for c in changes)
-        raise StepFailed(_STEP, f"модель изменилась: {roles}; {RESUME_HINT}")
-    append_events(layout, rec.run_id, changes)
+    # Two resumes of one run take turns: the second reads the events after
+    # the first one's append, so no event has a stale `before`.
+    with _locked(layout.runs_dir / f"{rec.run_id}.json"):
+        events = launch.read_root_file(_events_path(layout, rec.run_id), optional=True)
+        in_force = effective_pins(rec, _lines(events))
+        fresh = pins_from_data(layout, rec.product, _models_of(snap))
+        changes = model_changes(rec.run_id, in_force, fresh, req.from_step or 0)
+        if changes and not req.accept:
+            raise StepFailed(_STEP, f"{_describe(changes)}; {RESUME_HINT}")
+        append_events(layout, rec.run_id, changes)
     return rec.run_id
+
+
+@contextmanager
+def _locked(path: Path) -> Iterator[None]:
+    """An exclusive `flock` on the run record (root's, so only root can hold
+    it), held for the block."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+_PIN_FIELDS = (
+    "harness",
+    "harness_version",
+    "model",
+    "actual_model",
+    "effort",
+    "params",
+)
+
+
+def _describe(changes: Sequence[ModelChange]) -> str:
+    """`пин изменился: <role>: <field> <before> → <after>` per changed role."""
+    return "; ".join(
+        f"пин изменился: {c.role}: {_diff(c.before, c.after)}" for c in changes
+    )
+
+
+def _diff(before: ModelPin, after: ModelPin) -> str:
+    fields = [f for f in _PIN_FIELDS if getattr(before, f) != getattr(after, f)]
+    fields = fields or ["config_hash"]
+    return ", ".join(f"{f} {getattr(before, f)} → {getattr(after, f)}" for f in fields)
 
 
 def _models_of(snap: Snapshot) -> ModelsConfig:
@@ -195,7 +249,8 @@ def _models_of(snap: Snapshot) -> ModelsConfig:
 def _started_by() -> int:
     """The human behind `sudo`; root itself when there is none."""
     value = os.environ.get("SUDO_UID", "")
-    return int(value) if _NUMBER.fullmatch(value) else 0
+    ok = value.isascii() and value.isdigit() and int(value) < 1 << 32
+    return int(value) if ok else 0
 
 
 def _lines(text: str | None) -> list[str]:
@@ -242,9 +297,9 @@ def _last_probe(
 def _pin(choice: ModelChoice, found: probe.ProbeRecord | None) -> ModelPin:
     return ModelPin(
         choice.harness,
-        NO_PROBE if found is None else found.harness_version,
+        found.harness_version if found and found.harness_version else NO_PROBE,
         choice.model,
-        NO_ACTUAL if found is None or not found.actual_model else found.actual_model,
+        found.actual_model if found and found.actual_model else NO_ACTUAL,
         choice.effort,
         dict(choice.params),
         models.config_hash(choice),
@@ -259,6 +314,9 @@ def model_changes(
 ) -> list[ModelChange]:
     """One `model_change` per role whose pin in force differs from the fresh
     one, in `models.ROLES` order; `step` is the first step on the new pin."""
+    missing = [role for role in models.ROLES if role not in in_force]
+    if missing:
+        raise StepFailed(_STEP, f"запись {run_id}: нет пина роли {missing[0]}")
     return [
         ModelChange(run_id, role, in_force[role], fresh[role], step)
         for role in models.ROLES

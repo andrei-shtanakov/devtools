@@ -239,7 +239,7 @@ def _parse(argv: list[str]) -> argparse.Namespace:
         "doctor", exit_on_error=False, add_help=False, allow_abbrev=False
     )
     doctor.add_argument("--probe-models", action="store_true")
-    doctor.add_argument("--product", type=_repository_id)
+    doctor.add_argument("--product", type=models.repository_id)
     doctor.add_argument("--json", action="store_true")
     try:
         args = parser.parse_args(argv)
@@ -266,9 +266,9 @@ def _add_models(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
     put.add_argument("--model", required=True)
     put.add_argument("--effort")
     put.add_argument("--param", action="append", default=[], metavar="K=V")
-    put.add_argument("--product", type=_repository_id)
+    put.add_argument("--product", type=models.repository_id)
     show = words.add_parser("list", **opts)
-    show.add_argument("--product", type=_repository_id)
+    show.add_argument("--product", type=models.repository_id)
     show.add_argument("--json", action="store_true")
 
 
@@ -312,12 +312,6 @@ def _check_run(args: argparse.Namespace) -> None:
         run_start.parse(args.words)
     except StepFailed as exc:
         raise UsageError(f"run: {exc}") from exc
-
-
-def _repository_id(text: str) -> int:
-    if not text.isascii() or not text.isdigit() or text.startswith("0"):
-        raise ValueError(text)
-    return int(text)
 
 
 # ---------- reader ----------
