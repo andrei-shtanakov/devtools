@@ -21,10 +21,21 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from df import acl, admin, boundary, digest, fsutil, journal, models, probe, state
+from df import (
+    acl,
+    admin,
+    boundary,
+    digest,
+    fsutil,
+    journal,
+    models,
+    probe,
+    stage2_config,
+    state,
+)
 from df import build as build_mod
 from df import platform as plat
-from df.config import KNOWN_SCHEMAS, STAGE_OF, ConfigError
+from df.config import KNOWN_SCHEMAS, STAGE_OF, ConfigError, read_optional
 from df.digest import TreeError
 from df.journal import StepFailed, Transitional
 from df.paths import Layout
@@ -250,6 +261,7 @@ def _schemas(ctx: _Context) -> str:
             models.parse_models(ctx.snap.models_text)
         except ConfigError as exc:
             raise _Outcome(BROKEN, f"models.toml: {exc}") from exc
+    _check_publisher(ctx.layout)
     known = _STAGE1_FILES | STAGE_OF.keys()
     unknown = sorted(n for n in _etc_names(ctx.layout) if n not in known)
     temps = [n for n in unknown if _write_temp_of(n) in known]
@@ -267,6 +279,17 @@ def _schemas(ctx: _Context) -> str:
     if others:
         reasons.append(f"неизвестные файлы /etc/df: {_summary(others)}")
     raise _Outcome(BROKEN, "; ".join(reasons), problems)
+
+
+def _check_publisher(layout: Layout) -> None:
+    """`publisher.toml` (stage 2a) parses when present; it is the one /etc/df
+    file outside the snapshot that `etc.schemas` opens."""
+    try:
+        text = read_optional(layout.etc / "publisher.toml")
+        if text is not None:
+            stage2_config.parse_publisher(text)
+    except ConfigError as exc:
+        raise _Outcome(BROKEN, f"publisher.toml: {exc}") from exc
 
 
 def _writing(ctx: _Context) -> bool:

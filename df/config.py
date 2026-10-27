@@ -34,12 +34,12 @@ KNOWN_SCHEMAS: Mapping[str, str] = {
 STAGE_OF: Mapping[str, int] = {
     "trust.toml": 3,
     "products.toml": 3,
-    "publisher.toml": 2,
 }
 STATE_SCHEMAS: Mapping[str, str] = {
     "pending.toml": "df/pending/v1",
     "accounts.toml": "df/accounts/v1",
     "accept/<id>.toml": "df/accept/v1",
+    "runs/<id>.json": "df/run/v1",
 }
 REQUIRED_CLI = frozenset({"git", "uv", "tar"})
 

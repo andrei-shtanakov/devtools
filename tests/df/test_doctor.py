@@ -583,7 +583,6 @@ def test_later_stage_files_not_checked(fake_installed: World) -> None:
     """Files of stages > 1 are named by the listing, never opened."""
     etc = fake_installed.lay.etc
     (etc / "trust.toml").write_text("garbage = [")
-    (etc / "publisher.toml").write_text("garbage = [")
     s = snap(fake_installed)
     with audit_opens() as opens:
         checks = level1_checks(s, fake_installed.lay, euid=os.geteuid())
@@ -592,14 +591,23 @@ def test_later_stage_files_not_checked(fake_installed: World) -> None:
         "не проверено",
         "этап 3",
     )
-    assert (c["etc.publisher.toml"].status, c["etc.publisher.toml"].reason) == (
-        "не проверено",
-        "этап 2",
-    )
+    assert "etc.publisher.toml" not in c
     assert c["etc.schemas"].status == "ok"
     assert level1_reached(checks)
     assert render_brief(checks) == "уровень 1: достигнут"
-    assert not {str(etc / "trust.toml"), str(etc / "publisher.toml")} & set(opens)
+    assert str(etc / "trust.toml") not in set(opens)
+
+
+def test_publisher_toml_is_parsed(fake_installed: World) -> None:
+    lay = fake_installed.lay
+    pub = lay.etc / "publisher.toml"
+    pub.write_text('schema = "df/publisher/v1"\n')
+    ok = by_id(level1_checks(snap(fake_installed), lay, euid=os.geteuid()))
+    assert ok["etc.schemas"].status == "ok"
+    pub.write_text("garbage = [")
+    bad = by_id(level1_checks(snap(fake_installed), lay, euid=os.geteuid()))
+    assert bad["etc.schemas"].status == "нарушено"
+    assert "publisher.toml" in bad["etc.schemas"].reason
 
 
 def test_unknown_etc_file_broken(fake_installed: World) -> None:
