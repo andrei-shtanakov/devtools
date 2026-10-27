@@ -350,6 +350,8 @@ def test_run_record_rejects_unknown_pin_field() -> None:
         lambda d: d.update(started_at="2026-10-27T00:00:00"),
         lambda d: d["models"]["author"].update(model=1),
         lambda d: d["models"]["author"].update(effort=1),
+        lambda d: d["models"]["author"].update(effort=""),
+        lambda d: d["models"]["author"].update(effort="a b"),
         lambda d: d["models"].update({"": d["models"]["author"]}),
         lambda d: d["models"]["author"].update(params=[]),
     ],

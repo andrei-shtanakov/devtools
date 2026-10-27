@@ -3,7 +3,10 @@
 Every check reads the one `Snapshot` the entry handed the command (reader
 mode, no lock): the configuration, the registry entry and the models text
 come from it, never from `/etc/df` again, and `current` is not read as a
-link. The journal takes no part. The models section (probe status per role,
+link. The one exception is `publisher.toml` (stage 2a), which `etc.schemas`
+opens live, after the snapshot: it is not part of the snapshot (the entry's
+reader read is stage 1's), so a verdict on it is withheld while a writer is
+active (`_writing`, like the temp files). The journal takes no part. The models section (probe status per role,
 spec 3.6) is shown apart: probes are level 2 and never change level 1.
 
 Exit codes (R68): 0 — level 1 reached; 2 — not reached (a transitional
@@ -264,6 +267,8 @@ def _schemas(ctx: _Context) -> str:
         except ConfigError as exc:
             raise _Outcome(BROKEN, f"models.toml: {exc}") from exc
     broken_publisher = _publisher_problem(ctx.layout)
+    if broken_publisher and _writing(ctx):
+        raise _Outcome(UNAVAILABLE, _LIVE_WRITE, [broken_publisher])
     known = _STAGE1_FILES | STAGE_OF.keys()
     unknown = sorted(n for n in _etc_names(ctx.layout) if n not in known)
     temps = [n for n in unknown if _write_temp_of(n) in known]

@@ -27,6 +27,7 @@ from df.config import (
     _parse_toml,
     read_optional,
 )
+from df.models import _WORD, _word
 from df.roles import ROLE_USERS
 from df.toml_emit import dumps
 
@@ -347,11 +348,8 @@ class ModelPin:
     def __post_init__(self) -> None:
         for key in _PIN_STR:
             _nonempty(getattr(self, key), key)
-        _need(
-            self.effort is None or isinstance(self.effort, str),
-            "effort",
-            "must be a string or null",
-        )
+        if self.effort is not None:
+            _need(_word(self.effort), "effort", _WORD)
         _need(
             all(
                 isinstance(k, str) and isinstance(v, str)
