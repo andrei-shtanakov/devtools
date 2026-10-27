@@ -51,11 +51,27 @@ UNAVAILABLE: Status = "данные недоступны"
 ROOT_UID = 0
 EXIT_REACHED = 0
 EXIT_NOT_REACHED = 2
+#: Odd generation: a bracket is open -- a running or killed writer, with or
+#: without `pending.toml` (the reader cannot tell which).
 TRANSITIONAL = (
     "идёт или прервана административная операция: дождитесь её конца; "
-    "прерванную повторите от root любой командой-писателем (darkfactory "
-    "install, models set, cli set или roles setup)"
+    "если установка не завершена — darkfactory install, иначе повторите от "
+    "root прерванную команду-писатель (darkfactory install, models set или "
+    "cli set)"
 )
+#: Even generation and `Transitional`: the reader saw `pending.toml` (the
+#: entry's stable read), where every other writer is refused (`_FINISH`).
+TRANSITIONAL_PENDING = (
+    "установка не завершена: завершите её от root darkfactory install"
+)
+
+
+def transitional_text(generation: int) -> str:
+    """What recovers a `Transitional(generation)` read: an even generation
+    is an unfinished install only; an odd one may be either case."""
+    return TRANSITIONAL if generation % 2 else TRANSITIONAL_PENDING
+
+
 NEED_SUDO = "нужен sudo"
 DAMAGED = "релиз повреждён"
 SAME_MODELS = "предупреждение: модели автора и ревьюера совпадают"
@@ -169,7 +185,8 @@ def _transitional(generation: int, as_json: bool) -> int:
         data = {"level1": "not reached", "state": "transitional"}
         print(json.dumps({**data, "generation": generation}, ensure_ascii=False))
     else:
-        print(f"{_NOT_REACHED} — install.transitional: {TRANSITIONAL}")
+        text = transitional_text(generation)
+        print(f"{_NOT_REACHED} — install.transitional: {text}")
     return EXIT_NOT_REACHED
 
 

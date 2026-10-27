@@ -61,6 +61,7 @@ from tests.df.route_world import BOOT
 from tests.df.test_install_steps import watching
 from tests.df.test_launcher_entry import ID, record, run_entry, world, write_registry
 
+SET_OPENSSL = ["cli", "set", "openssl", "/usr/bin/openssl"]
 LEVEL1_IDS = [
     "install.pending",
     "etc.schemas",
@@ -240,8 +241,94 @@ def test_doctor_transitional(
     assert reads.hits == []
     assert doctor_main(Transitional(7), fake_installed.lay, euid=0, as_json=False) == 2
     assert capsys.readouterr().out == (
-        f"уровень 1: не достигнут — install.transitional: {cli._TRANSITIONAL}\n"  # noqa: SLF001
+        f"уровень 1: не достигнут — install.transitional: {doctor.TRANSITIONAL}\n"
     )
+
+
+def test_transitional_text_names_what_recovers() -> None:
+    """#643 recheck: an even `Transitional` is `pending.toml` (only `install`
+    recovers; the other writers are refused there); an odd one may be
+    either, so it names both ways. `roles setup` is not offered: without
+    `openssl` it refuses before it can close the generation."""
+    assert doctor.transitional_text(8) == doctor.TRANSITIONAL_PENDING
+    assert doctor.transitional_text(7) == doctor.TRANSITIONAL
+    pending = doctor.TRANSITIONAL_PENDING
+    assert "darkfactory install" in pending
+    for writer in ("models set", "cli set", "roles setup"):
+        assert writer not in pending
+    odd = doctor.TRANSITIONAL
+    assert "если установка не завершена — darkfactory install" in odd
+    assert "models set" in odd and "cli set" in odd
+    assert "roles setup" not in odd
+
+
+def entry_reader(w: World) -> state.ReadResult:
+    """The shipped entry's reader read of the world as it is now."""
+    w.mp.setattr(launcher_entry, "ROOT_UID", os.geteuid())
+    w.mp.setattr(launcher_entry, "owner_uid", w.fl.owner_of)
+    paths = launcher_entry.EntryPaths(str(w.lay.root))
+    return launcher_entry.typed_read(
+        state, launcher_entry.take_snapshot(paths, "reader")
+    )
+
+
+def test_doctor_interrupted_install(
+    fake_installed: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An install killed inside its bracket: the entry's reader gets an odd
+    `Transitional` (it cannot see `pending.toml` then), so doctor gives the
+    conditional text whose first way is `darkfactory install`; the other
+    writers are refused (`_FINISH`) and `install` recovers."""
+    w = fake_installed
+    interrupt(w, w.writer, ["install"], "build")
+    read = entry_reader(w)
+    assert isinstance(read, Transitional) and read.generation % 2 == 1
+    capsys.readouterr()
+    assert run_doctor(w, [], read) == 2
+    assert capsys.readouterr().out == (
+        f"уровень 1: не достигнут — install.transitional: {doctor.TRANSITIONAL}\n"
+    )
+    assert w.writer(SET_OPENSSL) == 2
+    assert "завершите darkfactory install" in capsys.readouterr().err
+    assert w.writer(["install"]) == 0
+    assert isinstance(entry_reader(w), Stable)
+
+
+def test_doctor_pending_seen_names_install_only(
+    fake_installed: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`pending.toml` under an even generation: the entry's stable read saw
+    it and hands an even `Transitional`; doctor names `install` only."""
+    w = fake_installed
+    interrupt(w, w.writer, ["install"], "build")
+    journal.generation_end(w.lay)
+    read = entry_reader(w)
+    assert isinstance(read, Transitional) and read.generation % 2 == 0
+    capsys.readouterr()
+    assert run_doctor(w, [], read) == 2
+    assert capsys.readouterr().out == (
+        "уровень 1: не достигнут — install.transitional: "
+        f"{doctor.TRANSITIONAL_PENDING}\n"
+    )
+
+
+def test_doctor_odd_generation_names_both_ways(
+    fake_installed: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A writer killed inside its bracket (no `pending.toml`): an odd
+    `Transitional`; doctor gives the conditional text, and repeating a
+    named writer (`cli set`) recovers."""
+    w = fake_installed
+    journal.generation_begin(w.lay)
+    read = entry_reader(w)
+    assert isinstance(read, Transitional) and read.generation % 2 == 1
+    capsys.readouterr()
+    assert run_doctor(w, [], read) == 2
+    assert capsys.readouterr().out == (
+        f"уровень 1: не достигнут — install.transitional: {doctor.TRANSITIONAL}\n"
+    )
+    assert w.writer(SET_OPENSSL) == 0
+    assert isinstance(entry_reader(w), Stable)
 
 
 def test_doctor_transitional_through_main(

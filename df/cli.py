@@ -68,7 +68,6 @@ ROOT_UID = 0
 #: Subcommands allowed while `pending.toml` exists (spec 3.3).
 PENDING_ALLOWED = frozenset({"init", "install", "doctor"})
 
-_TRANSITIONAL = doctor.TRANSITIONAL
 _FINISH = "есть незавершённая установка: завершите darkfactory install"
 _NO_PRODUCT = "продукт не зарегистрирован (этап 3)"
 _NO_REGISTRY = "реестр продуктов не поддерживается до этапа 3"
@@ -350,7 +349,7 @@ def _reader(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
     if args.command == "doctor":
         return _doctor(args, lay, read)
     if isinstance(read, Transitional):
-        raise Refusal(_TRANSITIONAL)
+        raise Refusal(doctor.transitional_text(read.generation))
     snap = state.parse_snapshot(read.value, lay, mode="reader")
     return _models_list(args, lay, snap)
 
@@ -389,7 +388,7 @@ def _probe_models(args: argparse.Namespace, lay: Layout, read: ReadResult) -> in
     if os.geteuid() != ROOT_UID:
         raise Refusal("doctor --probe-models: нужен sudo")
     if isinstance(read, Transitional):
-        raise Refusal(_TRANSITIONAL)
+        raise Refusal(doctor.transitional_text(read.generation))
     if args.product is not None:
         raise Refusal(_NO_REGISTRY)
     snap = state.parse_snapshot(read.value, lay, mode="reader")
