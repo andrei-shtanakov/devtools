@@ -830,6 +830,23 @@ def test_account_problems_ignores_state(
     assert plat.verify_build_user(layout) == ["state = creating"]
 
 
+def test_account_problems_ignores_sudo(
+    monkeypatch: pytest.MonkeyPatch, layout: Layout, no_chown: None
+) -> None:
+    world, account = _ready_world(monkeypatch, layout, no_chown)
+    world.sudo = _fixture("linux-some")
+    assert plat.account_problems(account) == []
+
+
+def test_verify_build_user_still_refuses_rules(
+    monkeypatch: pytest.MonkeyPatch, layout: Layout, no_chown: None
+) -> None:
+    world, _ = _ready_world(monkeypatch, layout, no_chown)
+    world.sudo = _fixture("linux-some")
+    problems = plat.verify_build_user(layout)
+    assert any("sudo -l -U df-build" in p for p in problems), problems
+
+
 @pytest.mark.parametrize("platform", PLATFORMS)
 def test_create_absent_to_ready_without_stubbing_checks(
     monkeypatch: pytest.MonkeyPatch,

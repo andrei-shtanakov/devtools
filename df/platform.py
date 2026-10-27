@@ -48,6 +48,7 @@ CleanupOutcome = Literal["removed", "quarantined", "failed"]
 #: Owner of every trusted object; tests substitute it.
 ROOT_UID = 0
 BUILD_USER = "df-build"
+BUILD_STEP = "build-user"
 HOME_TMP_NAME = ".df-build-home.creating"
 ADMIN_GROUPS = frozenset({"root", "wheel", "admin", "sudo", "adm"})
 NOLOGIN_SHELLS = frozenset({"/usr/bin/false", "/usr/sbin/nologin", "/sbin/nologin"})
@@ -713,7 +714,7 @@ ACCOUNT_ATTRS: Mapping[PlatformName, tuple[AttrOp, ...]] = {
         AttrOp("user", "UserShell", lambda _a, _l: "/usr/bin/false"),
         AttrOp("user", "IsHidden", lambda _a, _l: "1"),
         AttrOp("user", "PrimaryGroupID", lambda a, _l: str(a.gid)),
-        AttrOp("user", "NFSHomeDirectory", lambda _a, lay: str(lay.build_home)),
+        AttrOp("user", "NFSHomeDirectory", lambda a, lay: str(lay.role_home(a.name))),
         AttrOp("user", "UniqueID", lambda a, _l: str(a.uid)),
     ),
     "linux-x86_64": (
@@ -722,7 +723,10 @@ ACCOUNT_ATTRS: Mapping[PlatformName, tuple[AttrOp, ...]] = {
             "user",
             "line",
             lambda a, lay: _fields(
-                uid=a.uid, gid=a.gid, home=lay.build_home, shell="/usr/sbin/nologin"
+                uid=a.uid,
+                gid=a.gid,
+                home=lay.role_home(a.name),
+                shell="/usr/sbin/nologin",
             ),
         ),
     ),
@@ -748,7 +752,7 @@ def attr_argv(
         "--gid",
         account.name,
         "--home-dir",
-        str(layout.build_home),
+        str(layout.role_home(account.name)),
         "--no-create-home",
         "--shell",
         "/usr/sbin/nologin",
@@ -773,27 +777,27 @@ def _read_dscl(kind: RecordKind, name: str) -> dict[str, str] | None:
     path = f"/{'Groups' if kind == 'group' else 'Users'}/{name}"
     result = run_command([_DSCL, "-plist", ".", "-read", path])
     if result.launched and result.returncode == 0:
-        return parse_dscl(result.stdout)
+        return parse_dscl(result.stdout, _step(name))
     if result.launched and _DSCL_NOT_FOUND in result.stdout + result.stderr:
         return None
-    raise StepFailed("build-user", f"чтение записи {kind} {name}: {_brief(result)}")
+    raise StepFailed(_step(name), f"чтение записи {kind} {name}: {_brief(result)}")
 
 
-def parse_dscl(output: bytes) -> dict[str, str]:
+def parse_dscl(output: bytes, step: str = BUILD_STEP) -> dict[str, str]:
     """Attributes of a `dscl -plist -read` record, without the type prefix.
 
     Standard attributes are taken; a native one only when the intent lists
     it (macOS keeps some, like `IsHidden`, as `dsAttrTypeNative:`). Both forms
-    of one name with different values are refused. Every value is an array
+    of one name with different values are refused (`step` names the failure). Every value is an array
     of strings; several values join with `", "` (and so never equal a single
     intended value). Other native attributes are ignored.
     """
     try:
         data = plistlib.loads(output, fmt=plistlib.FMT_XML)
     except (plistlib.InvalidFileException, ValueError, ExpatError) as exc:
-        raise StepFailed("build-user", f"неразборный вывод dscl: {exc}") from exc
+        raise StepFailed(step, f"неразборный вывод dscl: {exc}") from exc
     if not isinstance(data, dict):
-        raise StepFailed("build-user", "неразборный вывод dscl: не словарь")
+        raise StepFailed(step, "неразборный вывод dscl: не словарь")
     intended = {op.attr for op in ACCOUNT_ATTRS["macos-arm64"]}
     record: dict[str, str] = {}
     for key, values in data.items():
@@ -801,12 +805,10 @@ def parse_dscl(output: bytes) -> dict[str, str]:
         if name is None:
             continue
         if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
-            raise StepFailed(
-                "build-user", f"неразборное значение dscl {key}: {values!r}"
-            )
+            raise StepFailed(step, f"неразборное значение dscl {key}: {values!r}")
         value = ", ".join(values)
         if record.setdefault(name, value) != value:
-            raise StepFailed("build-user", f"dscl: два разных значения {name}")
+            raise StepFailed(step, f"dscl: два разных значения {name}")
     return record
 
 
@@ -825,7 +827,7 @@ def _read_getent(kind: RecordKind, name: str) -> dict[str, str] | None:
     if result.launched and result.returncode == _GETENT_NOT_FOUND:
         return None
     if not result.launched or result.returncode != 0:
-        raise StepFailed("build-user", f"чтение записи {kind} {name}: {_brief(result)}")
+        raise StepFailed(_step(name), f"чтение записи {kind} {name}: {_brief(result)}")
     return parse_getent(kind, name, result.stdout)
 
 
@@ -839,7 +841,7 @@ def parse_getent(kind: RecordKind, name: str, output: bytes) -> dict[str, str]:
     want = 4 if kind == "group" else 7
     ids = parts[2:3] if kind == "group" else parts[2:4]
     if len(parts) != want or parts[0] != name or not all(map(_is_number, ids)):
-        raise StepFailed("build-user", f"неразборный вывод getent: {output!r}")
+        raise StepFailed(_step(name), f"неразборный вывод getent: {output!r}")
     if kind == "group":
         return {"gid": parts[2]}
     return {"uid": parts[2], "gid": parts[3], "home": parts[5], "shell": parts[6]}
@@ -857,9 +859,15 @@ def _op_fields(
 # --- account identity ---------------------------------------------------------
 
 
+def _step(name: str) -> str:
+    """The journal step of a failure about the account `name`."""
+    return BUILD_STEP if name == BUILD_USER else f"user:{name}"
+
+
 def account_problems(account: Account, home: Path | None = None) -> list[str]:
     """Facts of the OS against the record, regardless of `state` (spec 3.2).
 
+    Identity, groups, shell and home only; sudo rules are the caller's policy.
     With `home`, the record's home directory must also be that path.
     """
     try:
@@ -872,11 +880,7 @@ def account_problems(account: Account, home: Path | None = None) -> list[str]:
         problems.append(f"оболочка {entry.pw_shell} разрешает вход")
     if home is not None and Path(entry.pw_dir) != home:
         problems.append(f"домашний каталог {entry.pw_dir}, в намерении {home}")
-    problems += _home_problems(account, Path(entry.pw_dir))
-    rules = sudo_rules(account.name)
-    if rules != "none":
-        problems.append(f"sudo -l -U {account.name}: {rules}")
-    return problems
+    return problems + _home_problems(account, Path(entry.pw_dir))
 
 
 def _uid_problems(account: Account, entry: pwd.struct_passwd) -> list[str]:
@@ -933,19 +937,33 @@ def _home_problems(account: Account, home: Path) -> list[str]:
 
 
 def verify_build_user(layout: Layout) -> list[str]:
-    """Readiness: record present, `state = "ready"`, no `account_problems`."""
+    """Readiness of `df-build`: `verify_service_user` and no sudo rules."""
+    problems = verify_service_user(layout, BUILD_USER)
+    rules = sudo_rules(BUILD_USER)
+    if rules != "none":
+        problems.append(f"sudo -l -U {BUILD_USER}: {rules}")
+    return problems
+
+
+def verify_service_user(layout: Layout, name: str) -> list[str]:
+    """Record present, `state = "ready"`, no `account_problems` for `name`."""
     try:
-        account = load_accounts(layout.accounts).get(BUILD_USER)
+        account = load_accounts(layout.accounts).get(name)
     except ConfigError as exc:
         return [f"accounts.toml: {exc}"]
     if account is None:
-        return [f"нет записи {BUILD_USER} в accounts.toml"]
+        return [f"нет записи {name} в accounts.toml"]
     problems = [] if account.state == "ready" else [f"state = {account.state}"]
-    return problems + account_problems(account, layout.build_home)
+    return problems + account_problems(account, layout.role_home(name))
 
 
 def create_build_user(layout: Layout) -> Account:
-    """Create `df-build` by intent (spec 3.3 "Создание учётки"); resumable.
+    """Create `df-build` by intent (spec 3.3 "Создание учётки")."""
+    return create_service_user(layout, BUILD_USER)
+
+
+def create_service_user(layout: Layout, name: str) -> Account:
+    """Create the service account `name` by intent; resumable.
 
     The intent (`state = "creating"`) is written before the first OS
     command; a retry completes only our own partial records. The accepted
@@ -955,46 +973,42 @@ def create_build_user(layout: Layout) -> Account:
     platform = detect_platform()
     try:
         accounts = load_accounts(layout.accounts)
-        account = accounts.get(BUILD_USER)
+        account = accounts.get(name)
         if account is None:
-            account = _write_intent(platform, layout, accounts)
+            account = _write_intent(platform, layout, accounts, name)
         if account.state == "ready":
             return account
         _complete(platform, layout, account)
-        problems = account_problems(account, layout.build_home)
+        problems = account_problems(account, layout.role_home(name))
         if problems:
-            raise StepFailed("build-user", "; ".join(problems))
+            raise StepFailed(_step(name), "; ".join(problems))
         ready = replace(account, state="ready")
-        fsutil.write_atomic(
-            layout.accounts, dump_accounts({**accounts, BUILD_USER: ready})
-        )
+        fsutil.write_atomic(layout.accounts, dump_accounts({**accounts, name: ready}))
         return ready
     except (OSError, ConfigError) as exc:
-        raise StepFailed("build-user", str(exc)) from exc
+        raise StepFailed(_step(name), str(exc)) from exc
 
 
 def _write_intent(
-    platform: PlatformName, layout: Layout, accounts: Mapping[str, Account]
+    platform: PlatformName, layout: Layout, accounts: Mapping[str, Account], name: str
 ) -> Account:
-    records = (read_record("user", BUILD_USER), read_record("group", BUILD_USER))
+    records = (read_record("user", name), read_record("group", name))
     if any(record is not None for record in records):
         raise StepFailed(
-            "build-user",
-            f"пользователь {BUILD_USER} существует, но создан не darkfactory: "
+            _step(name),
+            f"пользователь {name} существует, но создан не darkfactory: "
             "удалите или переименуйте",
         )
-    home = layout.build_home
+    home = layout.role_home(name)
     for path in (home, home.parent / HOME_TMP_NAME):
         if _exists(path):
             raise StepFailed(
-                "build-user", f"каталог {path} существует, создан не darkfactory"
+                _step(name), f"каталог {path} существует, создан не darkfactory"
             )
-    uid = _free_id(platform)
+    uid = _free_id(platform, name)
     created = datetime.now(UTC).isoformat(timespec="seconds")
-    account = Account(BUILD_USER, uid, uid, "creating", created)
-    fsutil.write_atomic(
-        layout.accounts, dump_accounts({**accounts, BUILD_USER: account})
-    )
+    account = Account(name, uid, uid, "creating", created)
+    fsutil.write_atomic(layout.accounts, dump_accounts({**accounts, name: account}))
     return account
 
 
@@ -1010,13 +1024,13 @@ def _exists(path: Path) -> bool:
     return True
 
 
-def _free_id(platform: PlatformName) -> int:
+def _free_id(platform: PlatformName, name: str) -> int:
     """The lowest id of the range free both as a UID and as a GID."""
     used = {p.pw_uid for p in pwd.getpwall()} | {g.gr_gid for g in grp.getgrall()}
     for n in ID_RANGE[platform]:
         if n not in used:
             return n
-    raise StepFailed("build-user", f"нет свободного UID/GID в {ID_RANGE[platform]}")
+    raise StepFailed(_step(name), f"нет свободного UID/GID в {ID_RANGE[platform]}")
 
 
 def _complete(platform: PlatformName, layout: Layout, account: Account) -> None:
@@ -1032,7 +1046,7 @@ def _complete(platform: PlatformName, layout: Layout, account: Account) -> None:
         fields = _op_fields(platform, op, account, layout)
         if record is not None and fields.keys() <= record.keys():
             continue
-        _run_checked(attr_argv(platform, op, account, layout))
+        _run_checked(attr_argv(platform, op, account, layout), _step(account.name))
     if home_absent:
         _make_home(layout, account)
 
@@ -1050,7 +1064,7 @@ def _refuse_conflict(
         have = record.get(attr)
         if have is not None and have != want:
             raise StepFailed(
-                "build-user",
+                _step(account.name),
                 f"{op.kind} {account.name}: {attr} = {have}, в намерении {want}",
             )
 
@@ -1063,19 +1077,20 @@ def _refuse_shared_ids(account: Account) -> None:
         if others:
             value = account.uid if kind == "uid" else account.gid
             raise StepFailed(
-                "build-user", f"{kind} {value} занят именем {', '.join(others)}"
+                _step(account.name),
+                f"{kind} {value} занят именем {', '.join(others)}",
             )
 
 
-def _run_checked(argv: list[str]) -> None:
+def _run_checked(argv: list[str], step: str) -> None:
     result = run_command(argv)
     if not result.launched or result.returncode != 0:
-        raise StepFailed("build-user", f"{' '.join(argv)}: {_brief(result)}")
+        raise StepFailed(step, f"{' '.join(argv)}: {_brief(result)}")
 
 
 def _home_absent(layout: Layout, account: Account) -> bool:
     """Whether the home must be created; a foreign home or reserved name refuses."""
-    home = layout.build_home
+    home = layout.role_home(account.name)
     try:
         st = os.lstat(home)
     except FileNotFoundError:
@@ -1087,7 +1102,7 @@ def _home_absent(layout: Layout, account: Account) -> bool:
         or stat.S_IMODE(st.st_mode) != 0o700
     ):
         raise StepFailed(
-            "build-user", f"каталог {home} существует, создан не darkfactory"
+            _step(account.name), f"каталог {home} существует, создан не darkfactory"
         )
     return False
 
@@ -1111,16 +1126,17 @@ def _clear_reserved(parent: Path, account: Account) -> None:
             account.uid,
         ):
             raise StepFailed(
-                "build-user", f"каталог {path} существует, создан не darkfactory"
+                _step(account.name),
+                f"каталог {path} существует, создан не darkfactory",
             )
-        _remove_reserved(parent_fd, path)
+        _remove_reserved(parent_fd, path, _step(account.name))
     finally:
         os.close(parent_fd)
 
 
 def _make_home(layout: Layout, account: Account) -> None:
     """Whole home under the reserved name, then rename without replacement."""
-    home = layout.build_home
+    home = layout.role_home(account.name)
     parent_fd = os.open(home.parent, _DIR_FLAGS)
     try:
         os.mkdir(HOME_TMP_NAME, 0o700, dir_fd=parent_fd)
@@ -1140,14 +1156,14 @@ def _make_home(layout: Layout, account: Account) -> None:
         os.close(parent_fd)
 
 
-def _remove_reserved(parent_fd: int, path: Path) -> None:
+def _remove_reserved(parent_fd: int, path: Path, step: str) -> None:
     """Remove our empty reserved directory; non-empty refuses."""
     try:
         os.rmdir(HOME_TMP_NAME, dir_fd=parent_fd)
     except OSError as exc:
         if exc.errno in (errno.ENOTEMPTY, errno.EEXIST):
             raise StepFailed(
-                "build-user", f"каталог {path} существует, создан не darkfactory"
+                step, f"каталог {path} существует, создан не darkfactory"
             ) from exc
         raise
     fsutil.fault_point("unlinked", path)

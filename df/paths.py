@@ -159,8 +159,12 @@ class Layout:
     @property
     def build_home(self) -> Path:
         """Home of the `df-build` account."""
+        return self.role_home("df-build")
+
+    def role_home(self, name: str) -> Path:
+        """Home of the service account `name`."""
         base = "Users" if sys.platform == "darwin" else "home"
-        return self.root / base / "df-build"
+        return self.root / base / name
 
     def release_dir(self, release_id: str) -> Path:
         """Registered release tree."""
