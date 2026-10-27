@@ -701,12 +701,12 @@ def test_home_found_by_retry_is_settled_before_ready(
     crash -> a retry (lock, `settle_on_acquire`, the real
     `create_build_user`) -> `ready` -> an OS crash: the home is there. The
     twin without `settle_on_acquire` loses it while the record says ready."""
-    from tests.df.test_platform import _world  # noqa: PLC0415
+    from tests.df.account_world import account_world  # noqa: PLC0415
 
     w = fake_world
     lay = w.lay
     w.mp.setattr(plat, "create_build_user", REAL_CREATE)
-    _world(w.mp)
+    account_world(w.mp)
     os.rmdir(lay.build_home)
     w.m.baseline()
 
@@ -730,12 +730,12 @@ def test_created_home_is_durable_before_ready(fake_world: World) -> None:
     """The home `create_build_user` makes is durable when it returns
     (`sync_dir` of its parent after `rename_noreplace`): an OS crash right
     after `ready` keeps it, with no retry to settle it."""
-    from tests.df.test_platform import _world  # noqa: PLC0415
+    from tests.df.account_world import account_world  # noqa: PLC0415
 
     w = fake_world
     lay = w.lay
     w.mp.setattr(plat, "create_build_user", REAL_CREATE)
-    _world(w.mp)
+    account_world(w.mp)
     os.rmdir(lay.build_home)
     w.m.baseline()
     with journal.writer_lock(lay):
@@ -815,12 +815,12 @@ def test_account_created_through_main(fake_world: World, crash: str) -> None:
     `rename_noreplace` (then, for `os`, an OS crash): the retry through
     `main` settles what it finds and commits; an OS crash after the commit
     keeps the home and the `ready` record."""
-    from tests.df.test_platform import _world  # noqa: PLC0415
+    from tests.df.account_world import account_world  # noqa: PLC0415
 
     w = fake_world
     lay = w.lay
     outer = plat.run_command  # fake_layout's: ps/pkill stand-ins, else real
-    accounts = _world(w.mp, PLATFORM)
+    accounts = account_world(w.mp, PLATFORM)
     # the record's uid is the build uid fake_layout gives df-build's trees
     w.mp.setattr(plat, "ID_RANGE", {PLATFORM: range(BUILD_UID, BUILD_UID + 1)})
     fake_os = plat.run_command

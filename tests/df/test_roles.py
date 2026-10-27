@@ -10,10 +10,10 @@ import pytest
 
 from df import fsutil, models, roles
 from df import platform as plat
-from df.config import Account, dump_accounts, load_accounts
+from df.config import Account, ConfigError, dump_accounts, load_accounts
 from df.journal import StepFailed
 from df.paths import Layout
-from tests.df.test_platform import World, _world
+from tests.df.account_world import World, account_world
 
 FIRST_ID = os.getuid()
 
@@ -30,7 +30,7 @@ def layout(tmp_path: Path) -> Layout:
 @pytest.fixture()
 def role_world(monkeypatch: pytest.MonkeyPatch) -> World:
     """Fake OS with ids for three roles; homes are owned by their account."""
-    world = _world(monkeypatch)
+    world = account_world(monkeypatch)
     monkeypatch.setattr(
         plat, "ID_RANGE", {"macos-arm64": range(FIRST_ID, FIRST_ID + 3)}
     )
@@ -96,7 +96,7 @@ def test_read_record_failure_names_the_role_step(
 
 def test_parsers_take_the_step_from_the_caller() -> None:
     with pytest.raises(StepFailed) as info:
-        plat.parse_dscl(b"", step="user:df-exec")
+        plat.parse_dscl(b"", "user:df-exec")
     assert info.value.step == "user:df-exec"
     with pytest.raises(StepFailed) as info:
         plat.parse_getent("user", "df-exec", b"")
@@ -141,6 +141,60 @@ def test_ensure_roles_resumes_creating(layout: Layout, role_world: World) -> Non
 def test_ensure_roles_does_not_check_sudo(layout: Layout, role_world: World) -> None:
     role_world.sudo = (1, b"sudo: a password is required\n")
     assert {a.state for a in roles.ensure_roles(layout).values()} == {"ready"}
+
+
+def test_service_names_are_the_roles_and_builder() -> None:
+    assert plat.SERVICE_USERS == {*roles.ROLE_USERS, "df-build"}
+
+
+@pytest.mark.parametrize("name", ["root", "df-other", ""])
+def test_service_user_refuses_foreign_name(layout: Layout, name: str) -> None:
+    with pytest.raises(ValueError):
+        plat.create_service_user(layout, name)
+    with pytest.raises(ValueError):
+        plat.verify_service_user(layout, name)
+
+
+@pytest.mark.parametrize("name", ["", "a/b", ".hidden", "../x"])
+def test_role_home_rejects_bad_names(tmp_path: Path, name: str) -> None:
+    with pytest.raises(ConfigError):
+        Layout(Path(os.path.realpath(tmp_path))).role_home(name)
+
+
+def test_other_accounts_reserved_home_is_not_foreign(
+    layout: Layout, role_world: World
+) -> None:
+    (layout.build_home.parent / plat.home_tmp_name("df-review")).mkdir()
+    assert plat.create_service_user(layout, "df-exec").state == "ready"
+
+
+def test_own_reserved_home_is_removed_on_resume(
+    layout: Layout, role_world: World
+) -> None:
+    (layout.build_home.parent / plat.home_tmp_name("df-exec")).mkdir()
+    creating = Account("df-exec", FIRST_ID, FIRST_ID, "creating", "t")
+    layout.accounts.write_text(dump_accounts({"df-exec": creating}))
+    assert plat.create_service_user(layout, "df-exec").state == "ready"
+
+
+@pytest.mark.parametrize("partial", ["group-only", "user-without-home"])
+def test_resume_from_partial_record(
+    layout: Layout, role_world: World, partial: str
+) -> None:
+    uid = FIRST_ID + 1
+    creating = Account("df-review", uid, uid, "creating", "t")
+    layout.accounts.write_text(dump_accounts({"df-review": creating}))
+    group = {"RecordName": "df-review", "PrimaryGroupID": str(uid)}
+    role_world.groups["df-review"] = group
+    if partial == "user-without-home":
+        role_world.users["df-review"] = {
+            "RecordName": "df-review",
+            "UniqueID": str(uid),
+        }
+    account = plat.create_service_user(layout, "df-review")
+    assert (account.state, account.uid, account.gid) == ("ready", uid, uid)
+    assert layout.role_home("df-review").is_dir()
+    assert plat.verify_service_user(layout, "df-review") == []
 
 
 def test_verify_service_user_reports_missing_record(layout: Layout) -> None:

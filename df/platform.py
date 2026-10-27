@@ -49,7 +49,16 @@ CleanupOutcome = Literal["removed", "quarantined", "failed"]
 ROOT_UID = 0
 BUILD_USER = "df-build"
 BUILD_STEP = "build-user"
-HOME_TMP_NAME = ".df-build-home.creating"
+#: The accounts `create_service_user` may create (`roles.ROLE_USERS` + builder).
+SERVICE_USERS = frozenset({BUILD_USER, "df-exec", "df-review", "df-publisher"})
+
+
+def home_tmp_name(name: str) -> str:
+    """The reserved name of the home of `name` while it is being created."""
+    return f".{name}-home.creating"
+
+
+HOME_TMP_NAME = home_tmp_name("df-build")
 ADMIN_GROUPS = frozenset({"root", "wheel", "admin", "sudo", "adm"})
 NOLOGIN_SHELLS = frozenset({"/usr/bin/false", "/usr/sbin/nologin", "/sbin/nologin"})
 NO_NETWORK_PROFILE = "(version 1)(allow default)(deny network*)"
@@ -783,13 +792,13 @@ def _read_dscl(kind: RecordKind, name: str) -> dict[str, str] | None:
     raise StepFailed(_step(name), f"чтение записи {kind} {name}: {_brief(result)}")
 
 
-def parse_dscl(output: bytes, step: str = BUILD_STEP) -> dict[str, str]:
+def parse_dscl(output: bytes, step: str) -> dict[str, str]:
     """Attributes of a `dscl -plist -read` record, without the type prefix.
 
     Standard attributes are taken; a native one only when the intent lists
     it (macOS keeps some, like `IsHidden`, as `dsAttrTypeNative:`). Both forms
-    of one name with different values are refused (`step` names the failure). Every value is an array
-    of strings; several values join with `", "` (and so never equal a single
+    of one name with different values are refused (`step` names the failure).
+    Every value is an array of strings; several values join with `", "` (and so never equal a single
     intended value). Other native attributes are ignored.
     """
     try:
@@ -936,17 +945,30 @@ def _home_problems(account: Account, home: Path) -> list[str]:
     return problems
 
 
+def _sudo_policy_problems(name: str) -> list[str]:
+    """Sudo policy of the account `name`: `df-build` has no rules at all.
+
+    TODO: roles get `sudoers.policy_problems` here (Task 3); none until then.
+    """
+    if name != BUILD_USER:
+        return []
+    rules = sudo_rules(name)
+    return [] if rules == "none" else [f"sudo -l -U {name}: {rules}"]
+
+
+def _require_service_name(name: str) -> None:
+    if name not in SERVICE_USERS:
+        raise ValueError(f"not a service account name: {name!r}")
+
+
 def verify_build_user(layout: Layout) -> list[str]:
-    """Readiness of `df-build`: `verify_service_user` and no sudo rules."""
-    problems = verify_service_user(layout, BUILD_USER)
-    rules = sudo_rules(BUILD_USER)
-    if rules != "none":
-        problems.append(f"sudo -l -U {BUILD_USER}: {rules}")
-    return problems
+    """Readiness of `df-build`: `verify_service_user` and its sudo policy."""
+    return verify_service_user(layout, BUILD_USER) + _sudo_policy_problems(BUILD_USER)
 
 
 def verify_service_user(layout: Layout, name: str) -> list[str]:
     """Record present, `state = "ready"`, no `account_problems` for `name`."""
+    _require_service_name(name)
     try:
         account = load_accounts(layout.accounts).get(name)
     except ConfigError as exc:
@@ -970,6 +992,7 @@ def create_service_user(layout: Layout, name: str) -> Account:
     home is settled before `ready`: a created one by `sync_dir(parent)` after
     `rename_noreplace`, one found by a retry by `settle_on_acquire` (Task 7).
     """
+    _require_service_name(name)
     platform = detect_platform()
     try:
         accounts = load_accounts(layout.accounts)
@@ -980,6 +1003,7 @@ def create_service_user(layout: Layout, name: str) -> Account:
             return account
         _complete(platform, layout, account)
         problems = account_problems(account, layout.role_home(name))
+        problems += _sudo_policy_problems(name)
         if problems:
             raise StepFailed(_step(name), "; ".join(problems))
         ready = replace(account, state="ready")
@@ -1000,7 +1024,7 @@ def _write_intent(
             "удалите или переименуйте",
         )
     home = layout.role_home(name)
-    for path in (home, home.parent / HOME_TMP_NAME):
+    for path in (home, home.parent / home_tmp_name(name)):
         if _exists(path):
             raise StepFailed(
                 _step(name), f"каталог {path} существует, создан не darkfactory"
@@ -1114,11 +1138,12 @@ def _clear_reserved(parent: Path, account: Account) -> None:
     did not exist when the intent was written and only root writes `parent`.
     Anything else, or a non-empty one, refuses; root never lists inside it.
     """
-    path = parent / HOME_TMP_NAME
+    tmp = home_tmp_name(account.name)
+    path = parent / tmp
     parent_fd = os.open(parent, _DIR_FLAGS)
     try:
         try:
-            st = os.stat(HOME_TMP_NAME, dir_fd=parent_fd, follow_symlinks=False)
+            st = os.stat(tmp, dir_fd=parent_fd, follow_symlinks=False)
         except FileNotFoundError:
             return
         if not stat.S_ISDIR(st.st_mode) or fsutil.owner_uid(st) not in (
@@ -1137,19 +1162,20 @@ def _clear_reserved(parent: Path, account: Account) -> None:
 def _make_home(layout: Layout, account: Account) -> None:
     """Whole home under the reserved name, then rename without replacement."""
     home = layout.role_home(account.name)
+    tmp = home_tmp_name(account.name)
     parent_fd = os.open(home.parent, _DIR_FLAGS)
     try:
-        os.mkdir(HOME_TMP_NAME, 0o700, dir_fd=parent_fd)
-        fsutil.fault_point("created", home.parent / HOME_TMP_NAME)
-        tmp_fd = os.open(HOME_TMP_NAME, _DIR_FLAGS, dir_fd=parent_fd)
+        os.mkdir(tmp, 0o700, dir_fd=parent_fd)
+        fsutil.fault_point("created", home.parent / tmp)
+        tmp_fd = os.open(tmp, _DIR_FLAGS, dir_fd=parent_fd)
         try:
             os.fchown(tmp_fd, account.uid, account.gid)
-            fsutil.fault_point("chown", home.parent / HOME_TMP_NAME)
+            fsutil.fault_point("chown", home.parent / tmp)
             os.fchmod(tmp_fd, 0o700)
             fsutil.sync_dir(tmp_fd)
         finally:
             os.close(tmp_fd)
-        rename_noreplace(parent_fd, HOME_TMP_NAME, home.name)
+        rename_noreplace(parent_fd, tmp, home.name)
         fsutil.fault_point("renamed", home)
         fsutil.sync_dir(parent_fd)
     finally:
@@ -1159,7 +1185,7 @@ def _make_home(layout: Layout, account: Account) -> None:
 def _remove_reserved(parent_fd: int, path: Path, step: str) -> None:
     """Remove our empty reserved directory; non-empty refuses."""
     try:
-        os.rmdir(HOME_TMP_NAME, dir_fd=parent_fd)
+        os.rmdir(path.name, dir_fd=parent_fd)
     except OSError as exc:
         if exc.errno in (errno.ENOTEMPTY, errno.EEXIST):
             raise StepFailed(

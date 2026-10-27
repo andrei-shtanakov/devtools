@@ -163,6 +163,8 @@ class Layout:
 
     def role_home(self, name: str) -> Path:
         """Home of the service account `name`."""
+        if not name or "/" in name or name.startswith("."):
+            raise ConfigError(f"invalid account name: {name!r}")
         base = "Users" if sys.platform == "darwin" else "home"
         return self.root / base / name
 
