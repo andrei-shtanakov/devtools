@@ -504,3 +504,20 @@ CI `df-stage1` (`.github/workflows/df-stage1.yml`): macOS arm64 и Ubuntu x86_64
 (`tests/df/live_install.py`: подготовка по разделу «Подготовка», `sudo darkfactory doctor
 --json` — уровень 1, `--help` каждой точки входа от непривилегированного пользователя);
 результаты — evidence §9.
+
+## Установка DarkFactory: этап 2
+
+Роли и обёртки (`df-exec`, `df-review`, `df-publisher`, `/opt/df/libexec`, sudoers) ставит
+`darkfactory roles setup` поверх исправной установки этапа 1. Ему нужен утверждённый
+`openssl` (подпись JWT издателем, спека §3.7): на установке этапа 1 его нет, и `roles setup`
+отказывает до любого изменения. Сначала задать путь, затем настроить роли:
+
+```sh
+sudo darkfactory cli set openssl /usr/bin/openssl
+sudo darkfactory roles setup
+```
+
+Путь должен пройти политику утверждённых CLI (спека §3.10, как `git` и `tar` выше) на этом
+хосте: проверка делается при `cli set`, в `doctor` и при каждой установке; не прошёл — отказ
+с причиной, `install.toml` не меняется. `cli set` задаёт только `openssl`; повтор с тем же
+путём ничего не пишет. Оператор `roles setup` — `SUDO_USER`, иначе `--operator <имя>`.

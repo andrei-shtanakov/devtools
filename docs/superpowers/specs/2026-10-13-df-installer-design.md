@@ -1669,7 +1669,7 @@ codex 0.163.0 user-инструкции роли (`~/.codex/AGENTS.md`) дохо
 
 | Файл | Ключевые поля |
 |---|---|
-| `install.toml` | `manifest_repo`, `manifest_sha`, `profile`, утверждённые системные CLI: обязательны `git`, `uv`, `tar` (rev 8, r5), без любого — отказ разбора до установки; необязательный `openssl` — обязателен для `roles setup` (подпись JWT издателем, rev 9) |
+| `install.toml` | `manifest_repo`, `manifest_sha`, `profile`, утверждённые системные CLI: обязательны `git`, `uv`, `tar` (rev 8, r5), без любого — отказ разбора до установки; необязательный `openssl` — обязателен для `roles setup` (подпись JWT издателем, rev 9); на существующей установке ключ `openssl` задаёт `darkfactory cli set openssl PATH` (владелец 27.10) |
 | `trust.toml` | привязка корня доверия (спека A rev 16 §6.1 п. 1): `host`, `df_trust_repository_id`, `df_trust_full_name` (информационно), `df_trust_branch`; `approval_policy_repository_id`; транспорт — только `public` (v1) |
 | `releases.toml` | разрешённые и отозванные релизы (id, digest, digest административного кода `admin_digest` и точная версия административного Python `admin_python` §3.9, причина отзыва) — источник для издателя и запускателя (§5.8) |
 | `products.toml` | на продукт: `repository_id`, `full_name`, профиль защиты (`fork` / `write`), `product_app_id`, `product_installation_id`, machine user, путь чекаута у `df-exec` |
