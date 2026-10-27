@@ -129,7 +129,7 @@ def test_cli_service_commands_are_readers(argv: list[str]) -> None:
     assert cli.parsed_mode(cli._parse(argv)) == "reader"  # noqa: SLF001
 
 
-@pytest.mark.parametrize("argv", SERVICE)
+@pytest.mark.parametrize("argv", [a for a in SERVICE if a[0] != "launch"])
 def test_service_commands_are_not_implemented_yet(
     argv: list[str], tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

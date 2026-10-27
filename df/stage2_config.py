@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -510,3 +510,85 @@ def _parse_pin(value: object) -> ModelPin:
     return ModelPin(
         **{k: value[k] for k in _PIN_STR}, effort=value["effort"], params=params
     )
+
+
+# --- model-change events ----------------------------------------------------
+
+_CHANGE_KEYS = {"event", "run_id", "role", "before", "after", "from_step"}
+_CHANGE_EVENT = "model_change"
+
+
+@dataclass(frozen=True)
+class ModelChange:
+    """One accepted change of a role's pin in `runs/<run_id>.events.jsonl`.
+
+    `before` and `after` are pins in the canonical form of the run record;
+    `from_step` is the first step (a non-negative index) that runs on `after`.
+    """
+
+    run_id: str
+    role: str
+    before: ModelPin
+    after: ModelPin
+    from_step: int
+
+    def __post_init__(self) -> None:
+        _nonempty(self.run_id, "run_id")
+        _nonempty(self.role, "role")
+        for key in ("before", "after"):
+            _need(isinstance(getattr(self, key), ModelPin), key, "must be a ModelPin")
+        ok = _is_int(self.from_step) and self.from_step >= 0
+        _need(ok, "from_step", "must be a non-negative integer")
+
+
+def dump_model_change(ev: ModelChange) -> str:
+    """Render one event line as canonical JSON (sorted keys, no spaces)."""
+    data: dict[str, object] = {
+        "event": _CHANGE_EVENT,
+        "run_id": ev.run_id,
+        "role": ev.role,
+        "before": _pin_data(ev.before),
+        "after": _pin_data(ev.after),
+        "from_step": ev.from_step,
+    }
+    return json.dumps(data, sort_keys=True, separators=(",", ":"))
+
+
+def parse_model_change(line: str) -> ModelChange:
+    """Strictly parse one event line; any deviation is a `ConfigError`."""
+    try:
+        data = json.loads(
+            line, parse_constant=_no_constant, object_pairs_hook=_no_duplicates
+        )
+    except (ValueError, RecursionError) as exc:
+        raise ConfigError(f"model_change: invalid JSON: {exc}") from exc
+    _need(isinstance(data, dict), "model_change", "must be a JSON object")
+    _check_keys(data, _CHANGE_KEYS, set(), "model_change", allow_schema=False)
+    _need(data["event"] == _CHANGE_EVENT, "event", f"expected {_CHANGE_EVENT!r}")
+    return ModelChange(
+        run_id=data["run_id"],
+        role=data["role"],
+        before=_parse_pin(data["before"]),
+        after=_parse_pin(data["after"]),
+        from_step=data["from_step"],
+    )
+
+
+def effective_pins(rec: RunRecord, events: Iterable[str]) -> dict[str, ModelPin]:
+    """The pins in force: the record's, then each event line in file order.
+
+    Fail closed: a malformed line, another run's event, an unknown role or a
+    `before` that is not the pin in force is a `ConfigError`, never skipped.
+    """
+    pins = dict(rec.models)
+    for line in events:
+        ev = parse_model_change(line)
+        _need(ev.run_id == rec.run_id, "model_change", "event of another run")
+        _need(ev.role in pins, "model_change", f"no pin for role {ev.role!r}")
+        _need(
+            pins[ev.role] == ev.before,
+            "model_change",
+            f"before is not the pin in force for {ev.role!r}",
+        )
+        pins[ev.role] = ev.after
+    return pins
