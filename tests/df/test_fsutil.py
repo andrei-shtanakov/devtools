@@ -374,12 +374,12 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
         "(a call from another module is not seen): the lock "
         "(never written) or a read"
     ),
-    ("store", "_bind", "os.link", 1): (
+    ("publisher.store", "_bind", "os.link", 1): (
         "protocol reserve (spec 5.6): the temp is write_atomic's (durable), link "
         "to ids/<id> (EEXIST judged), then sync_dir(ids); a crash before the "
         "link leaves a temp the next reserve sweeps under the global lock"
     ),
-    ("store", "journal", "os.open no-create", 1): (
+    ("publisher.store", "journal", "os.open no-create", 1): (
         "the journal exists (create_file's FileExistsError): O_APPEND, one "
         "write of a whole line, then sync_file"
     ),
@@ -926,9 +926,18 @@ def _read_mode(mode: ast.expr | None) -> bool:
     return mode.value.startswith("r") and "+" not in mode.value
 
 
+def _module_name(path: Path) -> str:
+    """Dotted name under `df/` (`publisher.store`): `__init__` stems and
+    same-named modules of subpackages never merge."""
+    root = Path(fsutil.__file__).parent
+    if root not in path.parents:  # a planted file of the guard's own tests
+        return path.stem
+    return ".".join(path.relative_to(root).with_suffix("").parts)
+
+
 def _visitor(path: Path) -> _FsSites:
     tree = ast.parse(path.read_text())
-    visitor = _FsSites(path.stem, tree)
+    visitor = _FsSites(_module_name(path), tree)
     visitor.visit(tree)
     return visitor
 

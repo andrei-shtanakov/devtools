@@ -135,6 +135,7 @@ def main(
     layout: Layout,
     snapshot: Snapshot,
     uid: int | None = None,
+    gid: int | None = None,
     env: Mapping[str, str] | None = None,
     stdin_fd: int = 0,
 ) -> int:
@@ -152,8 +153,9 @@ def main(
         return _REFUSED_EXIT
     op = argv[0]
     try:
-        who = _authenticate(layout, op, uid, env)
+        who = _authenticate(layout, op, uid, gid, env)
     except Refused as exc:
+        _journal_sender_refusal(layout, op, env, exc.reason)
         return _answer(Response("refused", exc.reason, evidence={"operation": op}))
     seen = _Seen()
     try:
@@ -175,8 +177,30 @@ class _Seen:
     digest: str | None = None
 
 
+#: Refusals of a sender the process could identify as called by `sudo`; others
+#: (not the publisher, broken configuration) leave no file behind.
+_JOURNALLED_SENDER = ("sender_unknown", "operation_not_allowed")
+
+
+def _journal_sender_refusal(
+    layout: Layout, op: str, env: Mapping[str, str] | None, reason: str
+) -> None:
+    if reason not in _JOURNALLED_SENDER:
+        return
+    environ = os.environ if env is None else env
+    line = store.refusal_line(op, environ.get("SUDO_UID"), reason)
+    try:
+        store.journal(layout, line)
+    except OSError as exc:
+        print(f"publisher: journal not written: {exc}", file=sys.stderr)
+
+
 def _authenticate(
-    layout: Layout, op: str, uid: int | None, env: Mapping[str, str] | None
+    layout: Layout,
+    op: str,
+    uid: int | None,
+    gid: int | None,
+    env: Mapping[str, str] | None,
 ) -> int:
     try:
         text = read_optional(layout.etc / "publisher.toml")
@@ -187,7 +211,16 @@ def _authenticate(
         raise Refused("publisher_config_invalid") from exc
     if account is None or account.state != "ready":
         raise Refused("not_publisher_uid")
+    if not _own_gid_is(account.gid, gid):
+        raise Refused("not_publisher_uid")
     return sender(cfg, op, publisher_uid=account.uid, uid=_own_uid(uid), env=env)
+
+
+def _own_gid_is(want: int, gid: int | None) -> bool:
+    """Real and effective GID are the account's (as `launch._check_identity`)."""
+    if gid is not None:
+        return gid == want
+    return os.getgid() == os.getegid() == want
 
 
 def _own_uid(uid: int | None) -> int:
@@ -212,7 +245,13 @@ def _handle(
     seen.request, seen.digest = req, request.digest(req)
     record = None if op in ADMIN_OPERATIONS else check_run(layout, snapshot, req.run_id)
     with store.reserve(layout, who, op, req) as res:
-        return _under_key(layout, snapshot, who, op, req, record, res)
+        try:
+            return _under_key(layout, snapshot, who, op, req, record, res)
+        except Exception as exc:  # noqa: BLE001 - judged by what is on disk
+            if not store.has_state(res):
+                raise
+            print(f"publisher: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return Response("unknown", "state_unreadable")
 
 
 def _under_key(
@@ -254,7 +293,7 @@ def _keep(res: store.Reservation, resp: Response) -> Response:
     done, so the answer is `unknown` (a repeat reconciles from the intent)."""
     try:
         store.result(res, resp)
-    except OSError as exc:
+    except Exception as exc:  # noqa: BLE001 - the action may be done
         print(f"publisher: result not saved: {exc}", file=sys.stderr)
         return Response("unknown", "result_not_saved", evidence=resp.evidence)
     return resp

@@ -701,7 +701,7 @@ run` в sudoers нет: его вызывает `df-run-start` после сбр
 **Interfaces:**
 - `request.MAX_BYTES = 65536`, `request.READ_TIMEOUT = 5.0`;
 - `request.parse(op: str, raw: bytes) -> Request` — схема `df/publisher-request/v1`; общие
-  поля PR-операций: `schema`, `request_id` (`[A-Za-z0-9._-]{8,128}`), `run_id`,
+  поля PR-операций: `schema`, `request_id` (`[A-Za-z0-9][A-Za-z0-9._-]{7,127}`; ведущая точка столкнулась бы с уборкой `ids/.*.tmp`), `run_id`,
   `repository_id`, `pr`, `head_sha` (40 hex); `publish-review`: + `decision`
   (`approve | request_changes | comment`), `body` (≤ 60000 символов); `merge`: ничего
   сверх общих; `read-token`: `request_id`, `run_id`, `repository_id`;
@@ -744,7 +744,10 @@ run` в sudoers нет: его вызывает `df-run-start` после сбр
   повтор с готовым `result` → прежний ответ (кроме `perimeter-status`, `read-token`,
   `self-check`); с `intent` без `result` → ветка сверки операции. **`result` пишется
   только для окончательных исходов** (`done`, `refused`); `unknown` не сохраняется, и
-  повтор снова идёт в сверку — внешнее действие не повторяется никогда (r2 N4);
+  повтор снова идёт в сверку — внешнее действие не повторяется никогда (r2 N4).
+  Правило хранения (Task 7, M5): result хранится для `done` и для `refused` после intent;
+  `refused` без intent пересчитывается; обработчик обязан записать intent до внешнего
+  действия; любое исключение при существующем intent/result — `unknown`, не `refused`;
 - журнал `publisher/journal.jsonl` — одна строка на запрос: время, отправитель, операция,
   `request_id`, `run_id`, digest, исход; секреты не пишутся никогда (поля ответа
   `read-token` заменяются `"token": "<redacted>"`).
@@ -783,6 +786,8 @@ repository_ids, permissions}], problems}` — `SelfCheckResult.to_json()`; ре�
 ---
 
 ### Task 8: Клиент GitHub App
+
+> Контракт обработчиков Tasks 8–11: `ctx.record_intent(...)` строго до внешнего действия, и тест обработчика проверяет, что intent существует к моменту внешнего вызова.
 
 **Files:**
 - Create: `df/publisher/github.py`

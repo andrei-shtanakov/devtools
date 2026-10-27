@@ -712,3 +712,203 @@ def test_cli_publisher_serve_without_accounts_is_a_refusal(
     )
     assert code == 2
     assert request.parse_response(capsys.readouterr().out).outcome == "refused"
+
+
+# --- fix round 1 ----------------------------------------------------------------
+
+
+def crash_after_intent(payload: dict[str, object]):  # noqa: ANN201
+    def dies(ctx: Context) -> Response:
+        ctx.record_intent(payload)
+        raise RuntimeError("boom")
+
+    return dies
+
+
+def test_large_intent_then_crash_then_repeat_reaches_reconciliation(
+    world: World, table: dict[str, list[Context]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    payload = {"body": "é" * 50000}  # well over 4 KiB once escaped
+    install(table, "merge", crash_after_intent(payload))
+    assert world.run("merge", capsys=capsys)[1].outcome == "unknown"
+    seen: list[object] = []
+
+    def reconciles(ctx: Context) -> Response:
+        seen.append(ctx.intent)
+        return Response("done")
+
+    install(table, "merge", reconciles)
+    code, resp = world.run("merge", capsys=capsys)
+    assert (code, resp.outcome) == (0, "done")
+    assert seen == [payload]
+
+
+def _intent_file(world: World) -> Path:
+    (path,) = (world.lay.publisher_dir / "intents").iterdir()
+    return path
+
+
+@pytest.mark.parametrize("damage", ["garbage", "not-an-intent", "hardlink"])
+def test_damaged_intent_is_unknown_not_refused(
+    damage: str,
+    world: World,
+    table: dict[str, list[Context]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls = install(table, "merge", crash_after_intent({"step": 1}))
+    world.run("merge", capsys=capsys)
+    path = _intent_file(world)
+    if damage == "garbage":
+        path.write_text("{")
+    elif damage == "not-an-intent":
+        path.write_text("[]")
+    else:
+        os.link(path, world.lay.root / "other-name")
+    code, resp = world.run("merge", capsys=capsys)
+    assert (code, resp.outcome, resp.reason) == (3, "unknown", "state_unreadable")
+    assert len(calls) == 1  # the handler never ran again
+
+
+def test_damaged_result_is_unknown_not_refused(
+    world: World, table: dict[str, list[Context]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls = install(table, "merge", acting)
+    world.run("merge", capsys=capsys)
+    (path,) = (world.lay.publisher_dir / "results").iterdir()
+    path.write_text("{}")
+    code, resp = world.run("merge", capsys=capsys)
+    assert (code, resp.outcome, resp.reason) == (3, "unknown", "state_unreadable")
+    assert len(calls) == 1
+
+
+def test_result_that_cannot_be_serialised_after_intent_is_unknown(
+    world: World, table: dict[str, list[Context]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    def odd(ctx: Context) -> Response:
+        ctx.record_intent({"step": 1})
+        return Response("done", None, {"x": object()})
+
+    install(table, "merge", odd)
+    code, resp = world.run("merge", capsys=capsys)
+    assert (code, resp.outcome, resp.reason) == (3, "unknown", "result_not_saved")
+    assert world.files("results") == []
+
+
+def test_sender_refusals_are_journalled_without_the_raw_string(
+    world: World, no_stdin: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cases = [("777", "777"), (" 601", "<noncanonical>"), ("6\nx", "<noncanonical>")]
+    for sudo, _ in cases:
+        pmain.main(
+            ["merge"],
+            layout=world.lay,
+            snapshot=world.snap,
+            uid=world.me,
+            env={"SUDO_UID": sudo},
+        )
+    pmain.main(
+        ["publish-review"],
+        layout=world.lay,
+        snapshot=world.snap,
+        uid=world.me,
+        env={"SUDO_UID": str(EXEC)},
+    )
+    pmain.main(["merge"], layout=world.lay, snapshot=world.snap, uid=world.me, env={})
+    lines = world.journal()
+    assert [(x["sudo_uid"], x["reason"]) for x in lines] == [
+        ("777", "sender_unknown"),
+        ("<noncanonical>", "sender_unknown"),
+        ("<noncanonical>", "sender_unknown"),
+        ("601", "operation_not_allowed"),
+        (None, "sender_unknown"),
+    ]
+    assert all(x["sender"] is None and x["request_id"] is None for x in lines)
+    assert all(x["outcome"] == "refused" for x in lines)
+    assert "6\\nx" not in (world.lay.publisher_dir / "journal.jsonl").read_text()
+    assert world.files("ids") == []
+
+
+def test_not_publisher_and_broken_config_are_not_journalled(
+    world: World, no_stdin: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env = {"SUDO_UID": str(EXEC)}
+    pmain.main(
+        ["merge"], layout=world.lay, snapshot=world.snap, uid=world.me + 1, env=env
+    )
+    (world.lay.etc / "publisher.toml").write_text("garbage = ")
+    pmain.main(["merge"], layout=world.lay, snapshot=world.snap, uid=world.me, env=env)
+    assert not (world.lay.publisher_dir / "journal.jsonl").exists()
+    out = capsys.readouterr().out.splitlines()
+    assert [json.loads(x)["reason"] for x in out] == [
+        "not_publisher_uid",
+        "publisher_config_invalid",
+    ]
+
+
+def test_gid_must_be_the_publishers(
+    world: World, no_stdin: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env = {"SUDO_UID": str(EXEC)}
+    code = pmain.main(
+        ["merge"],
+        layout=world.lay,
+        snapshot=world.snap,
+        uid=world.me,
+        gid=os.getgid() + 1,
+        env=env,
+    )
+    assert code == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == "not_publisher_uid"
+
+
+def test_key_lock_is_held_for_the_whole_handler(
+    world: World, table: dict[str, list[Context]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two identical requests at once: one handler call, the second answer is
+    the first's result, replayed."""
+    import multiprocessing as mp
+    import time
+
+    ctx = mp.get_context("fork")
+    barrier, answers, count = ctx.Barrier(2, timeout=10), ctx.Queue(), ctx.Value("i", 0)
+
+    def slow(c: Context) -> Response:
+        c.record_intent({"step": 1})
+        with count.get_lock():
+            count.value += 1
+        time.sleep(1.0)
+        return Response("done", None, {"n": 1})
+
+    install(table, "merge", slow)
+    monkeypatch.setattr(
+        pmain,
+        "_answer",
+        lambda resp: answers.put((resp.outcome, resp.evidence.get("replayed"))) or 0,
+    )
+    stdin = world.lay.root / "stdin"
+    stdin.write_bytes(raw_of("merge"))
+
+    def child() -> None:
+        fd = os.open(stdin, os.O_RDONLY)
+        barrier.wait()
+        pmain.main(
+            ["merge"],
+            layout=world.lay,
+            snapshot=world.snap,
+            uid=world.me,
+            env={"SUDO_UID": str(EXEC)},
+            stdin_fd=fd,
+        )
+
+    procs = [ctx.Process(target=child) for _ in range(2)]
+    for proc in procs:
+        proc.start()
+    for proc in procs:
+        proc.join(30)
+    stuck = [p for p in procs if p.is_alive()]
+    for proc in stuck:
+        proc.terminate()
+    assert not stuck
+    got = sorted(str(answers.get(timeout=5)) for _ in range(2))
+    assert count.value == 1
+    assert got == ["('done', None)", "('done', True)"]

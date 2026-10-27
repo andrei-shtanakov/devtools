@@ -14,7 +14,9 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import stat
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -35,7 +37,13 @@ NOT_REPLAYED = frozenset({"perimeter-status", "read-token", request.SELF_CHECK})
 #: Response keys whose value is never written to the journal.
 SECRET_KEYS = frozenset({"token"})
 REDACTED = "<redacted>"
+_CANONICAL = re.compile(r"0|[1-9][0-9]{0,18}", re.ASCII)
 _MAX_RECORD = 4096
+#: Intents and results carry a request's content (a review body): one cap.
+MAX_STATE = 1 << 20
+#: How long a lock may be waited for before `refused: busy` (no intent yet).
+LOCK_WAIT = 30.0
+_LOCK_POLL = 0.02
 _READ = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 _DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
@@ -115,28 +123,62 @@ def _ensure_dirs(base: Path) -> None:
     parent = os.open(base, _DIR)
     try:
         for name in SUBDIRS:
-            if not (base / name).is_dir():
-                fsutil.make_dir(parent, name, 0o700, path=base / name)
+            _subdir(parent, name, base / name)
     finally:
         os.close(parent)
 
 
+def _subdir(parent: int, name: str, path: Path) -> None:
+    """`name` is a real directory of ours, `0700` (made durably if absent)."""
+    try:
+        fd = os.open(name, _DIR, dir_fd=parent)
+    except FileNotFoundError:
+        fsutil.make_dir(parent, name, 0o700, path=path)
+        fd = os.open(name, _DIR, dir_fd=parent)
+    try:
+        st = os.fstat(fd)
+    finally:
+        os.close(fd)
+    if stat.S_IMODE(st.st_mode) != 0o700 or fsutil.owner_uid(st) != os.geteuid():
+        raise OSError(f"{path}: not a 0700 directory of this user")
+
+
+def _regular(fd: int, path: Path) -> os.stat_result:
+    """`fd` is a regular file with one link (nothing planted next to it)."""
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        raise OSError(f"{path}: not a regular file with one link")
+    return st
+
+
 def _lock_file(path: Path) -> int:
     """Create (born `0600`, durable) or open `path` and take an exclusive
-    blocking `flock`; the descriptor is returned."""
+    `flock`, waiting at most `LOCK_WAIT` seconds (`Refused("busy")`); the
+    descriptor is returned."""
     flags = os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC
     try:
         fd = fsutil.create_file(path, flags, 0o600)
     except FileExistsError:
         fd = os.open(path, _READ)
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError(f"{path}: not a regular file")
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        _regular(fd, path)
+        _flock(fd)
     except BaseException:
         os.close(fd)
         raise
     return fd
+
+
+def _flock(fd: int) -> None:
+    deadline = time.monotonic() + LOCK_WAIT
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise Refused("busy") from None
+            time.sleep(_LOCK_POLL)
 
 
 def _unlock(fd: int) -> None:
@@ -186,15 +228,14 @@ def _same_binding(final: Path, binding: Mapping[str, object]) -> None:
         raise Refused("request_id_reused")
 
 
-def _read(path: Path) -> bytes:
+def _read(path: Path, limit: int = _MAX_RECORD) -> bytes:
     fd = os.open(path, _READ)
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError(f"{path}: not a regular file")
-        data = os.read(fd, _MAX_RECORD + 1)
+        _regular(fd, path)
+        data = os.read(fd, limit + 1)
     finally:
         os.close(fd)
-    if len(data) > _MAX_RECORD:
+    if len(data) > limit:
         raise OSError(f"{path}: too long")
     return data
 
@@ -205,13 +246,13 @@ def _read(path: Path) -> bytes:
 def intent(res: Reservation, payload: Mapping[str, object]) -> None:
     """Record, durably, what is about to be done outside (before doing it)."""
     record = {"request_id": res.request_id, "payload": dict(payload)}
-    fsutil.write_atomic(res.intent_path, json.dumps(record, sort_keys=True), 0o600)
+    _write_state(res.intent_path, json.dumps(record, sort_keys=True))
 
 
 def read_intent(res: Reservation) -> Mapping[str, object] | None:
     """The payload of an earlier attempt's intent, if there is one."""
     try:
-        record = json.loads(_read(res.intent_path))
+        record = json.loads(_read(res.intent_path, MAX_STATE))
     except FileNotFoundError:
         return None
     except (OSError, ValueError) as exc:
@@ -230,8 +271,20 @@ def result(res: Reservation, response: Response) -> bool:
     (r2 N4). Returns whether it was kept."""
     if response.outcome not in FINAL_OUTCOMES:
         return False
-    fsutil.write_atomic(res.result_path, request.dump_response(response), 0o600)
+    _write_state(res.result_path, request.dump_response(response))
     return True
+
+
+def _write_state(path: Path, text: str) -> None:
+    if len(text) > MAX_STATE:  # the JSON is ASCII: characters are bytes
+        raise ValueError(f"{path.name}: more than {MAX_STATE} bytes")
+    fsutil.write_atomic(path, text, 0o600)
+
+
+def has_state(res: Reservation) -> bool:
+    """An intent or a result of this request exists (a link or a damaged
+    file counts): an external action may have been done."""
+    return any(os.path.lexists(p) for p in (res.intent_path, res.result_path))
 
 
 def replay(res: Reservation) -> Response | None:
@@ -240,21 +293,10 @@ def replay(res: Reservation) -> Response | None:
     if res.operation in NOT_REPLAYED:
         return None
     try:
-        raw = _read_result(res.result_path)
+        raw = _read(res.result_path, MAX_STATE)
     except FileNotFoundError:
         return None
     return request.parse_response(raw)
-
-
-def _read_result(path: Path) -> bytes:
-    fd = os.open(path, _READ)
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError(f"{path}: not a regular file")
-        with os.fdopen(fd, "rb", closefd=False) as fh:
-            return fh.read(request.MAX_BYTES * 2)
-    finally:
-        os.close(fd)
 
 
 # --- journal ------------------------------------------------------------------
@@ -294,17 +336,39 @@ def journal_line(
     return json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
 
 
+def refusal_line(op: str, sudo_uid: str | None, reason: str) -> str:
+    """The journal line of a refused sender: no sender, the raw `SUDO_UID` only
+    if canonical (else a mask: never an arbitrary string), nothing of a
+    request."""
+    shown = None if sudo_uid is None else sudo_uid
+    if shown is not None and not _CANONICAL.fullmatch(shown):
+        shown = "<noncanonical>"
+    record = {
+        "ts": datetime.now(UTC).isoformat(),
+        "sender": None,
+        "sudo_uid": shown,
+        "operation": op,
+        "request_id": None,
+        "run_id": None,
+        "digest": None,
+        "outcome": "refused",
+        "reason": reason,
+        "result": {},
+    }
+    return json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+
+
 def journal(layout: Layout, line: str) -> None:
     """Append `line` to `journal.jsonl` (born `0600`) and sync it."""
     path = layout.publisher_dir / JOURNAL
-    flags = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC
+    flags = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
     try:
         fd = fsutil.create_file(path, flags, 0o600)
     except FileExistsError:
         fd = os.open(path, flags)
     try:
-        data = line.encode("utf-8")
-        view = memoryview(data)
+        _regular(fd, path)
+        view = memoryview(line.encode("utf-8"))
         while view:
             view = view[os.write(fd, view) :]
         fsutil.sync_file(fd)

@@ -107,7 +107,7 @@ def test_reserve_leaves_no_temporary_file(lay: Layout) -> None:
 
 def test_reserve_order(lay: Layout, monkeypatch: pytest.MonkeyPatch) -> None:
     ids = lay.publisher_dir / "ids"
-    ids.mkdir()
+    ids.mkdir(mode=0o700)
     (ids / ".old.123.tmp").write_text("dead process")
     log: list[str] = []
     real_lock, real_unlock = store._lock_file, store._unlock  # noqa: SLF001
@@ -380,3 +380,85 @@ def test_journal_appends_lines_privately(lay: Layout) -> None:
     path = lay.publisher_dir / "journal.jsonl"
     assert path.read_text() == "one\ntwo\n"
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+# --- fix round 1 ----------------------------------------------------------------
+
+
+def test_key_lock_blocks_an_identical_reserve_until_closed(lay: Layout) -> None:
+    ctx = _ctx()
+    holding, times = ctx.Event(), ctx.Queue()
+
+    def holder() -> None:
+        with store.reserve(lay, SENDER, "merge", make_req()):
+            holding.set()
+            time.sleep(0.8)
+            times.put(("closed", time.monotonic()))
+
+    def waiter() -> None:
+        assert holding.wait(10)
+        with store.reserve(lay, SENDER, "merge", make_req()):
+            times.put(("entered", time.monotonic()))
+
+    run_children([holder, waiter])
+    seen = dict(times.get(timeout=5) for _ in range(2))
+    assert seen["entered"] >= seen["closed"]
+
+
+def test_busy_lock_is_refused_after_the_wait(
+    lay: Layout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(store, "LOCK_WAIT", 0.2)
+    with store.reserve(lay, SENDER, "merge", make_req()):
+        with pytest.raises(Refused) as info:
+            store.reserve(lay, SENDER, "merge", make_req())
+    assert info.value.reason == "busy"
+
+
+def test_intent_larger_than_a_record_roundtrips(lay: Layout) -> None:
+    with store.reserve(lay, SENDER, "merge", make_req()) as res:
+        store.intent(res, {"body": "x" * 100000})
+        assert store.read_intent(res) == {"body": "x" * 100000}
+        assert store.has_state(res)
+
+
+def test_hard_linked_state_file_is_refused(lay: Layout) -> None:
+    with store.reserve(lay, SENDER, "merge", make_req()) as res:
+        store.intent(res, {"a": 1})
+        os.link(res.intent_path, lay.publisher_dir / "elsewhere")
+        with pytest.raises(OSError, match="one link"):
+            store.read_intent(res)
+
+
+def test_hard_linked_lock_file_is_refused(lay: Layout) -> None:
+    store.reserve(lay, SENDER, "merge", make_req()).close()
+    os.link(lay.publisher_dir / "ids.lock", lay.publisher_dir / "elsewhere")
+    with pytest.raises(OSError, match="one link"):
+        store.reserve(lay, SENDER, "merge", make_req())
+
+
+@pytest.mark.parametrize("damage", ["wide", "symlink"])
+def test_subdirectory_must_be_ours_and_0700(lay: Layout, damage: str) -> None:
+    store.reserve(lay, SENDER, "merge", make_req()).close()
+    keys = lay.publisher_dir / "keys"
+    if damage == "wide":
+        keys.chmod(0o755)
+    else:
+        moved = lay.publisher_dir / "keys-real"
+        keys.rename(moved)
+        keys.symlink_to(moved)
+    with pytest.raises(OSError):
+        store.reserve(lay, SENDER, "merge", make_req())
+
+
+def test_journal_refuses_a_fifo(lay: Layout) -> None:
+    os.mkfifo(lay.publisher_dir / "journal.jsonl")
+    with pytest.raises(OSError):
+        store.journal(lay, "x\n")
+
+
+def test_refusal_line_masks_a_noncanonical_uid() -> None:
+    line = store.refusal_line("merge", "6\nx", "sender_unknown")
+    assert json.loads(line)["sudo_uid"] == "<noncanonical>"
+    assert json.loads(store.refusal_line("merge", "601", "x"))["sudo_uid"] == "601"
+    assert json.loads(store.refusal_line("merge", None, "x"))["sudo_uid"] is None
