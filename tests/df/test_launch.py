@@ -289,7 +289,7 @@ def test_human_main_chdir_before_sudo(
     world: FakeLayout, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ev = fake_os(monkeypatch)
-    launch.human_main(["df-review", "review"], layout=world.layout)
+    launch.human_main(["df-review", "check"], layout=world.layout)
     assert ev.log == [
         ("chdir", Path("/")),
         ("closerange", 3, ev.log[1][2]),
@@ -298,7 +298,7 @@ def test_human_main_chdir_before_sudo(
             "/usr/bin/sudo",
             [
                 "sudo", "-n", "-u", "df-review",
-                str(world.layout.libexec / "df-launch"), "df-review", "review",
+                str(world.layout.libexec / "df-launch"), "df-review", "check",
             ],
         ),
     ]  # fmt: skip
@@ -418,7 +418,7 @@ def test_cli_launch_op_must_fit_the_role() -> None:
     ):
         with pytest.raises(cli.UsageError):
             cli._parse(argv)  # noqa: SLF001
-    assert cli._parse(["launch", "df-review", "review"]).operation == "review"  # noqa: SLF001
+    assert cli._parse(["launch", "df-review", "check"]).operation == "check"  # noqa: SLF001
 
 
 # --- the snapshot is the only source ------------------------------------------
@@ -524,3 +524,48 @@ def test_cli_launch_human_form(
     reader(["launch", "df-exec", "check"], world, Transitional(1))
     assert ev.names() == ["chdir", "closerange", "execv"]
     assert launcher_entry.mode_of(["launch", "df-exec", "check"]) == "reader"
+
+
+@pytest.mark.parametrize(
+    ("argv", "way_in"),
+    [
+        (["df-exec", "run"], "darkfactory run start|resume"),
+        (["df-review", "review"], "df-review-run"),
+    ],
+)
+def test_human_entry_refuses_run_and_review(
+    world: FakeLayout,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    argv: list[str],
+    way_in: str,
+) -> None:
+    ev = fake_os(monkeypatch)
+    with pytest.raises(StepFailed, match="darkfactory run start"):
+        launch.human_main(argv, layout=world.layout)
+    assert ev.log == []
+    # `launch exec` still takes them (the wrappers call it after the drop)
+    code = cli.main(
+        ["launch", *argv],
+        mode="reader",
+        read=Stable(raw_of(world, "rel-a"), 1),
+        lock_fd=None,
+        layout=world.layout,
+    )
+    assert code == 2 and way_in in capsys.readouterr().err
+    assert ev.log == []
+    assert cli._parse(["launch", "exec", *argv]).operation == argv[1]  # noqa: SLF001
+
+
+def test_human_ops_are_the_operator_rules_of_sudoers(world: FakeLayout) -> None:
+    from df import sudoers
+
+    grants = sudoers.expected_grants(world.layout, "alice")["alice"]
+    found: dict[str, set[str]] = {}
+    for grant in grants:
+        command, role, op = grant.command.rsplit(" ", 2)
+        assert command == str(world.layout.libexec / "df-launch")
+        assert grant.runas == role
+        found.setdefault(role, set()).add(op)
+    assert found == {r: set(ops) for r, ops in launch.HUMAN_OPS.items()}
+    assert all(ops <= launch.ROLE_OPS[r] for r, ops in launch.HUMAN_OPS.items())

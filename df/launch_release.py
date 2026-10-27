@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import errno  # noqa: E402
+import http.client  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
@@ -253,8 +254,8 @@ def _get(
 ) -> dict[str, object]:
     try:
         status, body = transport(url, headers)
-    except OSError as exc:
-        raise Refused(f"GET {url}: {exc}") from exc
+    except (OSError, http.client.HTTPException) as exc:
+        raise Refused(f"GET {url}: данные недоступны: {exc!r}") from exc
     if status != 200:
         raise Refused(f"GET {url}: HTTP {status}")
     try:

@@ -47,6 +47,12 @@ ROLE_OPS: Mapping[str, frozenset[str]] = MappingProxyType(
         "df-review": frozenset({"check", "review"}),
     }
 )
+#: What the human's `darkfactory launch` may ask for: exactly the operator
+#: rules of `sudoers.render`. `run` goes through `df-run-start` and `review`
+#: through `df-review-run`, never through the operator's `df-launch` rule.
+HUMAN_OPS: Mapping[str, frozenset[str]] = MappingProxyType(
+    {"df-exec": frozenset({"check", "check-github"}), "df-review": frozenset({"check"})}
+)
 MAX_RUN_ID = 256
 MAX_RECORD = 1 << 20
 RUN_ID = re.compile(r"[A-Za-z0-9._-]+", re.ASCII)
@@ -92,12 +98,27 @@ def exec_main(argv: Sequence[str], *, layout: Layout, snap: Snapshot) -> int:
     return 1
 
 
+def human_refusal(role: str, op: str) -> str | None:
+    """Why `darkfactory launch <role> <op>` is refused (`None`: it is not)."""
+    if op in HUMAN_OPS.get(role, ()):
+        return None
+    if op in ROLE_OPS.get(role, ()):
+        return (
+            f"{role} {op}: для человека это не вход; прогон начинает "
+            "`darkfactory run start|resume` (df-run-start), ревью — df-review-run"
+        )
+    return f"{role}: операция {op!r} не допускается"
+
+
 def human_main(argv: Sequence[str], *, layout: Layout | None = None) -> int:
     """`darkfactory launch <role> <op>`: `chdir("/")`, close descriptors,
     `execv` of `sudo -n -u <role> <libexec>/df-launch <role> <op>` (decision
     12). `sudo` opens the caller's directory as root first, hence the order.
     """
     role, op = _role_and_op(argv)
+    reason = human_refusal(role, op)
+    if reason is not None:
+        raise StepFailed(_STEP, reason)
     lay = default_layout() if layout is None else layout
     os.chdir("/")
     os.closerange(3, _fd_limit())
