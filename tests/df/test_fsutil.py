@@ -446,6 +446,19 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
     ("release", "_switch_current", "os.rename", 1): "protocol activate: sync_dir",
     ("release", "_unlink_absent_ok", "os.unlink", 1): "activate's own temp",
     ("release", "_unlink_quietly", "os.unlink", 1): "activate's own temp",
+    ("sudoers", "_place", "os.rename", 1): (
+        "protocol install: temp born 0440 by create_file, sync_file, visudo, "
+        "rename, sync_dir(parent)"
+    ),
+    ("sudoers", "_discard", "os.unlink", 1): (
+        "install's own temp: a dotted name sudo's includedir never reads"
+    ),
+    ("sudoers", "", "import tempfile", 1): "validate's scratch for visudo",
+    ("sudoers", "validate", "tempfile.mkstemp", 1): (
+        "validate's scratch for visudo, removed"
+    ),
+    ("sudoers", "validate", "open", 1): "validate's scratch for visudo",
+    ("sudoers", "validate", "os.unlink", 1): "validate's scratch for visudo",
 }
 
 #: Attribute calls that create, change the metadata of, rename or remove an
