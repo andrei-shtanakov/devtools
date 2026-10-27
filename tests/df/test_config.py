@@ -260,11 +260,12 @@ def test_known_schemas() -> None:
         "publisher.toml": "df/publisher/v1",
         "models.toml": "df/models/v1",
     }
-    assert STAGE_OF == {"trust.toml": 3, "products.toml": 3, "publisher.toml": 2}
+    assert STAGE_OF == {"trust.toml": 3, "products.toml": 3}
     assert STATE_SCHEMAS == {
         "pending.toml": "df/pending/v1",
         "accounts.toml": "df/accounts/v1",
         "accept/<id>.toml": "df/accept/v1",
+        "runs/<id>.json": "df/run/v1",
     }
 
 

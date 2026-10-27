@@ -583,7 +583,6 @@ def test_later_stage_files_not_checked(fake_installed: World) -> None:
     """Files of stages > 1 are named by the listing, never opened."""
     etc = fake_installed.lay.etc
     (etc / "trust.toml").write_text("garbage = [")
-    (etc / "publisher.toml").write_text("garbage = [")
     s = snap(fake_installed)
     with audit_opens() as opens:
         checks = level1_checks(s, fake_installed.lay, euid=os.geteuid())
@@ -592,14 +591,54 @@ def test_later_stage_files_not_checked(fake_installed: World) -> None:
         "не проверено",
         "этап 3",
     )
-    assert (c["etc.publisher.toml"].status, c["etc.publisher.toml"].reason) == (
-        "не проверено",
-        "этап 2",
-    )
+    assert "etc.publisher.toml" not in c
     assert c["etc.schemas"].status == "ok"
     assert level1_reached(checks)
     assert render_brief(checks) == "уровень 1: достигнут"
-    assert not {str(etc / "trust.toml"), str(etc / "publisher.toml")} & set(opens)
+    assert str(etc / "trust.toml") not in set(opens)
+
+
+def test_publisher_toml_is_parsed(fake_installed: World) -> None:
+    lay = fake_installed.lay
+    pub = lay.etc / "publisher.toml"
+    pub.write_text('schema = "df/publisher/v1"\n')
+    ok = by_id(level1_checks(snap(fake_installed), lay, euid=os.geteuid()))
+    assert ok["etc.schemas"].status == "ok"
+    pub.write_text("garbage = [")
+    bad = by_id(level1_checks(snap(fake_installed), lay, euid=os.geteuid()))
+    assert bad["etc.schemas"].status == "нарушено"
+    assert "publisher.toml" in bad["etc.schemas"].reason
+
+
+def test_broken_publisher_does_not_hide_other_problems(
+    fake_installed: World,
+) -> None:
+    lay = fake_installed.lay
+    (lay.etc / "publisher.toml").write_text("garbage = [")
+    (lay.etc / "extra.toml").write_text("x = 1\n")
+    c = by_id(level1_checks(snap(fake_installed), lay, euid=os.geteuid()))
+    reason = c["etc.schemas"].reason
+    assert c["etc.schemas"].status == "нарушено"
+    assert "publisher.toml" in reason and "extra.toml" in reason
+
+
+def test_publisher_changed_after_snapshot_is_transient(
+    fake_installed: World,
+) -> None:
+    """A writer replaced `publisher.toml` after the snapshot (counter moved):
+    no «нарушено» verdict on the half-seen file, «данные недоступны»."""
+    w = fake_installed
+    s = snap(w)
+    (w.lay.etc / "publisher.toml").write_text("garbage = [")
+    w.lay.generation.write_text(f"{s.generation + 2}\n")
+    c = by_id(level1_checks(s, w.lay, euid=os.geteuid()))["etc.schemas"]
+    assert (c.status, c.reason) == (
+        "данные недоступны",
+        "идёт административная запись, повторите doctor",
+    )
+    w.lay.generation.write_text(f"{s.generation}\n")  # control: settled
+    c = by_id(level1_checks(s, w.lay, euid=os.geteuid()))["etc.schemas"]
+    assert c.status == "нарушено" and "publisher.toml" in c.reason
 
 
 def test_unknown_etc_file_broken(fake_installed: World) -> None:

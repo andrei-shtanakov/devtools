@@ -34,12 +34,12 @@ KNOWN_SCHEMAS: Mapping[str, str] = {
 STAGE_OF: Mapping[str, int] = {
     "trust.toml": 3,
     "products.toml": 3,
-    "publisher.toml": 2,
 }
 STATE_SCHEMAS: Mapping[str, str] = {
     "pending.toml": "df/pending/v1",
     "accounts.toml": "df/accounts/v1",
     "accept/<id>.toml": "df/accept/v1",
+    "runs/<id>.json": "df/run/v1",
 }
 REQUIRED_CLI = frozenset({"git", "uv", "tar"})
 
@@ -72,9 +72,14 @@ def _parse_toml(text: str, schema: str) -> dict[str, object]:
 
 
 def _check_keys(
-    data: Mapping[str, object], required: set[str], optional: set[str], where: str
+    data: Mapping[str, object],
+    required: set[str],
+    optional: set[str],
+    where: str,
+    allow_schema: bool = True,
 ) -> None:
-    for key in sorted(set(data) - required - optional - {"schema"}):
+    exempt = {"schema"} if allow_schema else set()
+    for key in sorted(set(data) - required - optional - exempt):
         raise ConfigError(f"{where}: unknown key {key!r}")
     for key in sorted(required - set(data)):
         raise ConfigError(f"{where}: missing key {key!r}")

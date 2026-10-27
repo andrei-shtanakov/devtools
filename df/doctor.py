@@ -3,7 +3,10 @@
 Every check reads the one `Snapshot` the entry handed the command (reader
 mode, no lock): the configuration, the registry entry and the models text
 come from it, never from `/etc/df` again, and `current` is not read as a
-link. The journal takes no part. The models section (probe status per role,
+link. The one exception is `publisher.toml` (stage 2a), which `etc.schemas`
+opens live, after the snapshot: it is not part of the snapshot (the entry's
+reader read is stage 1's), so a verdict on it is withheld while a writer is
+active (`_writing`, like the temp files). The journal takes no part. The models section (probe status per role,
 spec 3.6) is shown apart: probes are level 2 and never change level 1.
 
 Exit codes (R68): 0 — level 1 reached; 2 — not reached (a transitional
@@ -21,10 +24,21 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from df import acl, admin, boundary, digest, fsutil, journal, models, probe, state
+from df import (
+    acl,
+    admin,
+    boundary,
+    digest,
+    fsutil,
+    journal,
+    models,
+    probe,
+    stage2_config,
+    state,
+)
 from df import build as build_mod
 from df import platform as plat
-from df.config import KNOWN_SCHEMAS, STAGE_OF, ConfigError
+from df.config import KNOWN_SCHEMAS, STAGE_OF, ConfigError, read_optional
 from df.digest import TreeError
 from df.journal import StepFailed, Transitional
 from df.paths import Layout
@@ -241,8 +255,10 @@ def _pending(ctx: _Context) -> str:
 
 def _schemas(ctx: _Context) -> str:
     """The snapshot's texts parse (`install.toml` and the registry entry were
-    parsed with the snapshot); every other name of `/etc/df` is judged by the
-    listing alone, never opened. A `write_atomic` temp of a known target is a
+    parsed with the snapshot); `publisher.toml` is opened and parsed here, read
+    after the snapshot (writers rename atomically, so it may only be newer);
+    every other name of `/etc/df` is judged by the listing alone, never
+    opened. A `write_atomic` temp of a known target is a
     live write while a writer's generation bracket is open (the counter moved
     or is odd since the snapshot), else a leftover of a crash."""
     if ctx.snap.models_text is not None:
@@ -250,6 +266,9 @@ def _schemas(ctx: _Context) -> str:
             models.parse_models(ctx.snap.models_text)
         except ConfigError as exc:
             raise _Outcome(BROKEN, f"models.toml: {exc}") from exc
+    broken_publisher = _publisher_problem(ctx.layout)
+    if broken_publisher and _writing(ctx):
+        raise _Outcome(UNAVAILABLE, _LIVE_WRITE, [broken_publisher])
     known = _STAGE1_FILES | STAGE_OF.keys()
     unknown = sorted(n for n in _etc_names(ctx.layout) if n not in known)
     temps = [n for n in unknown if _write_temp_of(n) in known]
@@ -261,12 +280,28 @@ def _schemas(ctx: _Context) -> str:
         for n in temps
     ]
     problems += [f"неизвестный файл /etc/df: {n}" for n in others]
+    reasons = problems[: len(temps)]
+    if broken_publisher:
+        problems.append(broken_publisher)
+        reasons.append(broken_publisher)
     if not problems:
         return ""
-    reasons = problems[: len(temps)]
     if others:
         reasons.append(f"неизвестные файлы /etc/df: {_summary(others)}")
     raise _Outcome(BROKEN, "; ".join(reasons), problems)
+
+
+def _publisher_problem(layout: Layout) -> str:
+    """The reason `publisher.toml` (stage 2a) does not parse; empty if it does
+    or is absent. Returned, not raised, so the other problems of the check
+    are reported with it."""
+    try:
+        text = read_optional(layout.etc / "publisher.toml")
+        if text is not None:
+            stage2_config.parse_publisher(text)
+    except ConfigError as exc:
+        return f"publisher.toml: {exc}"
+    return ""
 
 
 def _writing(ctx: _Context) -> bool:
