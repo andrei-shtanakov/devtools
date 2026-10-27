@@ -175,8 +175,8 @@ def _check_identity(layout: Layout, role: str) -> None:
 
 def _fd_limit() -> int:
     """Above every descriptor this process can have open."""
-    hard = resource.getrlimit(resource.RLIMIT_NOFILE)[1]
-    return _FD_CAP if hard == resource.RLIM_INFINITY else min(hard, _FD_CAP)
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    return max(_FD_CAP, soft) if hard == resource.RLIM_INFINITY else hard
 
 
 def _stdin(size: int) -> bytes:
@@ -218,7 +218,7 @@ def read_root_file(path: Path, *, optional: bool = False) -> str | None:
     try:
         fd = os.open(path, _RECORD_FLAGS)
     except FileNotFoundError as exc:
-        if optional and not os.path.islink(path):
+        if optional:
             return None
         raise StepFailed(_STEP, f"{path}: {exc.strerror or exc}") from exc
     except OSError as exc:
@@ -251,4 +251,6 @@ def _record_problem(path: Path, st: os.stat_result) -> str | None:
         return f"{path}: владелец uid {fsutil.owner_uid(st)}, не root"
     if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         return f"{path}: запись для группы или всех"
+    if st.st_nlink != 1:
+        return f"{path}: жёстких ссылок {st.st_nlink}, нужна одна"
     return None

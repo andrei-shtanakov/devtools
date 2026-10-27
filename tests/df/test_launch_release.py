@@ -218,7 +218,9 @@ def test_check_github_uses_api_base_of_publisher_toml(w: World) -> None:
     assert w.transport.calls[0][0] == "http://127.0.0.1:8123/user"  # type: ignore[attr-defined]
 
 
-@pytest.mark.parametrize("why", ["missing", "mode", "empty", "spaces", "link", "dir"])
+@pytest.mark.parametrize(
+    "why", ["missing", "mode", "empty", "spaces", "link", "dir", "owner"]
+)
 def test_check_github_bad_token_makes_no_request(
     w: World, capsys: pytest.CaptureFixture[str], why: str
 ) -> None:
@@ -235,6 +237,8 @@ def test_check_github_bad_token_makes_no_request(
         link.symlink_to(real)
         real.unlink()
         real.symlink_to(link)
+    elif why == "owner":
+        w.fake.set_owner(put_token(w), os.getuid() + 5)
     elif why == "dir":
         w.home.joinpath(*launch_release.TOKEN_PATH).mkdir(parents=True)
     transport = Transport()
@@ -378,3 +382,64 @@ def test_review_checks_only_df_review_roles(
 
 def test_main_run_op_table_matches_launch() -> None:
     assert launch.ROLE_OPS["df-review"] == {"check", "review"}
+
+
+def test_run_dangling_events_link_is_not_absence(w: World) -> None:
+    put_record(w.fake, record("run-1", REL))
+    (w.lay.runs_dir / "run-1.events.jsonl").symlink_to(w.lay.root / "nowhere")
+    assert w.run("df-exec", "run", "run-1") == 2
+    assert w.seen == []
+
+
+def test_run_events_on_an_untrusted_path_refuse(
+    w: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    put_record(w.fake, record("run-1", REL))
+    put_events(w, change(pin(), pin("x")))
+    monkeypatch.setattr(
+        launch.plat, "trusted_path_problems", lambda p: [f"{p}: untrusted"]
+    )
+    assert w.run("df-exec", "run", "run-1") == 2
+    assert w.seen == []
+
+
+def test_run_hard_linked_events_refuse(w: World) -> None:
+    put_record(w.fake, record("run-1", REL))
+    put_events(w, change(pin(), pin("x")))
+    os.link(w.lay.runs_dir / "run-1.events.jsonl", w.lay.runs_dir / "twin")
+    assert w.run("df-exec", "run", "run-1") == 2
+    assert w.seen == []
+
+
+def test_bootstrap_imports_df_from_the_release_tree(tmp_path: Path) -> None:
+    """I1: `python -I -B <rel>/src/devtools/df/launch_release.py` has only the
+    bootstrap line to find `df`; run it for real in a fixture release."""
+    import shutil
+    import subprocess
+    import sys
+
+    repo = Path(launch.__file__).parents[1]
+    tree = tmp_path / "rel-a" / "src" / "devtools"
+    shutil.copytree(
+        repo / "df", tree / "df", ignore=shutil.ignore_patterns("__pycache__")
+    )
+    script = tree / "df" / "launch_release.py"
+    env = {"PATH": "/usr/bin:/bin"}
+    probe = (
+        "import runpy, sys\n"
+        "runpy.run_path(sys.argv[1], run_name='bootstrap')\n"
+        "import df\n"
+        "print(df.__file__)\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", probe, str(script)],
+        cwd="/", env=env, capture_output=True, text=True, check=False,
+    )  # fmt: skip
+    assert out.returncode == 0, out.stderr
+    assert Path(out.stdout.strip()).is_relative_to(tree)
+    run = subprocess.run(
+        [sys.executable, "-I", "-B", str(script), "df-exec", "check", "rel-a", "-"],
+        cwd="/", env=env, capture_output=True, text=True, check=False,
+    )  # fmt: skip
+    assert run.returncode == 0, run.stderr
+    assert json.loads(run.stdout)["cwd"] == "/"

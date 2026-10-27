@@ -19,7 +19,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
 import traceback
 from collections.abc import Sequence
@@ -70,7 +69,6 @@ _UNSET = "—"
 SERVICE_COMMANDS = frozenset({"publisher", "run"})
 #: What `publisher serve` takes: the five operations and the self-check.
 PUBLISHER_ARGS = (*OPERATIONS, "self-check")
-_LAUNCH_OP = re.compile(r"[a-z][a-z0-9-]*", re.ASCII)
 _LIST_COLUMNS = ("роль", "harness", "model", "effort", "источник", "проверка")
 _REFUSALS = (
     StepFailed,
@@ -299,8 +297,8 @@ def _check_launch(args: argparse.Namespace) -> None:
     args.role, args.operation = rest
     if args.role not in roles.MODEL_ROLE_USERS:
         raise UsageError(f"launch: неизвестная роль {args.role!r}")
-    if not _LAUNCH_OP.fullmatch(args.operation):
-        raise UsageError(f"launch: неверная операция {args.operation!r}")
+    if args.operation not in launch.ROLE_OPS[args.role]:
+        raise UsageError(f"launch: {args.role}: неверная операция {args.operation!r}")
 
 
 def _repository_id(text: str) -> int:

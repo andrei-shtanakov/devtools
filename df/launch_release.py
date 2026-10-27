@@ -181,7 +181,8 @@ def _foreign_paths(layout: Layout) -> list[Path]:
         layout.secrets_dir,
         layout.publisher_dir,
         layout.perimeter_dir,
-        layout.install_dir,
+        layout.marks_dir,
+        layout.verify_dir,
         layout.admin_home,
         *others,
     ]

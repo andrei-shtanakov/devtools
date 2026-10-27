@@ -60,6 +60,7 @@ def snapshot(current: str | None, *entries: ReleaseEntry) -> Snapshot:
 @dataclass
 class Events:
     log: list[tuple[object, ...]] = field(default_factory=list)
+    environ_at_stdin: dict[str, str] | None = None
 
     def names(self) -> list[object]:
         return [e[0] for e in self.log]
@@ -72,6 +73,7 @@ def fake_os(monkeypatch: pytest.MonkeyPatch, stdin: bytes = b"") -> Events:
 
     def reading(size: int) -> bytes:
         ev.log.append(("stdin", size))
+        ev.environ_at_stdin = dict(os.environ)
         return chunks.pop(0)[:size] if chunks else b""
 
     def once(name: str, real):  # noqa: ANN001, ANN202
@@ -85,7 +87,7 @@ def fake_os(monkeypatch: pytest.MonkeyPatch, stdin: bytes = b"") -> Events:
     for name in ("getuid", "geteuid", "getgid", "getegid"):
         once(name, getattr(os, name))
     monkeypatch.setattr(
-        os, "closerange", lambda lo, hi: ev.log.append(("closerange", lo))
+        os, "closerange", lambda lo, hi: ev.log.append(("closerange", lo, hi))
     )
     monkeypatch.setattr(os, "chdir", lambda p: ev.log.append(("chdir", Path(p))))
     monkeypatch.setattr(

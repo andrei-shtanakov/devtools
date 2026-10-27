@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import builtins
+import io
 import os
 from pathlib import Path
 
@@ -85,7 +87,9 @@ def test_exec_main_order(world: FakeLayout, monkeypatch: pytest.MonkeyPatch) -> 
     assert names.index("identity") < names.index("chdir")
     assert names.index("chdir") < names.index("stdin") < names.index("execve")
     assert names[-1] == "execve"
-    assert ev.log[0] == ("closerange", 3)
+    assert ev.log[0][:2] == ("closerange", 3)
+    # the scrub is done before stdin and the release choice (m2)
+    assert ev.environ_at_stdin == launch.role_env(world.layout, "df-exec")
     assert ("chdir", launch.role_cwd(world.layout, "df-exec")) in ev.log
 
 
@@ -211,6 +215,9 @@ def test_record_must_be_roots_plain_file(world: FakeLayout) -> None:
     path = put_record(world, record("run-2", "rel-a"), mode=0o664)
     with pytest.raises(StepFailed, match="запись для группы"):
         launch.release_for(world.layout, "run", snap, stdin_of(b"run-2"))
+    path = put_record(world, record("run-4", "rel-a"), mode=0o646)
+    with pytest.raises(StepFailed, match="запись для группы"):
+        launch.release_for(world.layout, "run", snap, stdin_of(b"run-4"))
     path = world.layout.runs_dir / "run-3.json"
     path.symlink_to(world.layout.runs_dir / "run-1.json")
     with pytest.raises(StepFailed):
@@ -285,7 +292,7 @@ def test_human_main_chdir_before_sudo(
     launch.human_main(["df-review", "review"], layout=world.layout)
     assert ev.log == [
         ("chdir", Path("/")),
-        ("closerange", 3),
+        ("closerange", 3, ev.log[1][2]),
         (
             "execv",
             "/usr/bin/sudo",
@@ -336,6 +343,84 @@ def test_check_github_only_df_exec(
         )
 
 
+def test_closerange_bound_is_the_hard_limit(
+    world: FakeLayout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import resource
+
+    ev = fake_os(monkeypatch)
+    launch.exec_main(
+        ["df-exec", "check"], layout=world.layout, snap=snapshot("rel-a", A)
+    )
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    hi = ev.log[0][2]
+    assert hi >= soft
+    if hard != resource.RLIM_INFINITY:
+        assert hi == hard
+    monkeypatch.setattr(
+        resource, "getrlimit", lambda _r: (1024, resource.RLIM_INFINITY)
+    )
+    assert launch._fd_limit() == launch._FD_CAP  # noqa: SLF001
+    monkeypatch.setattr(resource, "getrlimit", lambda _r: (1024, 1 << 20))
+    assert launch._fd_limit() == 1 << 20  # noqa: SLF001
+
+
+def test_untrusted_ancestors_refuse_the_record(
+    world: FakeLayout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    put_record(world, record("run-1", "rel-a"))
+    monkeypatch.setattr(
+        launch.plat, "trusted_path_problems", lambda p: [f"{p}: group-writable"]
+    )
+    with pytest.raises(StepFailed, match="group-writable"):
+        launch.release_for(
+            world.layout, "run", snapshot("rel-a", A), stdin_of(b"run-1")
+        )
+
+
+def test_hard_linked_record_is_refused(world: FakeLayout) -> None:
+    path = put_record(world, record("run-1", "rel-a"))
+    os.link(path, world.layout.runs_dir / "twin.json")
+    with pytest.raises(StepFailed, match="жёстких ссылок"):
+        launch.release_for(
+            world.layout, "run", snapshot("rel-a", A), stdin_of(b"run-1")
+        )
+
+
+def test_roles_can_read_what_launch_exec_reads(world: FakeLayout) -> None:
+    """`launch exec` runs as the role and reads `accounts.toml` under
+    `var/lib/df/install`: the stage-1 writer lock keeps that directory and
+    its ancestors 0755 and the accounts file is written 0644 (roles READ it)."""
+    import inspect
+    import stat
+
+    from df import fsutil, journal
+    from df import platform as plat
+
+    with journal.writer_lock(world.layout):
+        for d in (world.layout.var, world.layout.install_dir):
+            assert stat.S_IMODE(d.stat().st_mode) == 0o755, d
+    default = inspect.signature(fsutil.write_atomic).parameters["mode"].default
+    assert default == 0o644
+    writes = [
+        ln
+        for ln in inspect.getsource(plat).splitlines()
+        if "write_atomic(layout.accounts" in ln
+    ]
+    assert writes and not any("mode" in ln for ln in writes)
+
+
+def test_cli_launch_op_must_fit_the_role() -> None:
+    for argv in (
+        ["launch", "df-exec", "review"],
+        ["launch", "exec", "df-review", "run"],
+        ["launch", "df-exec", "frobnicate"],
+    ):
+        with pytest.raises(cli.UsageError):
+            cli._parse(argv)  # noqa: SLF001
+    assert cli._parse(["launch", "df-review", "review"]).operation == "review"  # noqa: SLF001
+
+
 # --- the snapshot is the only source ------------------------------------------
 
 FORBIDDEN = ("releases.toml", "install.toml", "models.toml", "current")
@@ -344,9 +429,12 @@ FORBIDDEN = ("releases.toml", "install.toml", "models.toml", "current")
 class Spy:
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.hits: list[str] = []
+        # Tasks 6 and 7: add `publisher serve` and `run start|resume` here
         for name in ("open", "readlink", "stat", "lstat", "listdir", "scandir"):
             real = getattr(os, name)
             monkeypatch.setattr(os, name, self._wrap(real))
+        for owner in (builtins, io):
+            monkeypatch.setattr(owner, "open", self._wrap(owner.open))
 
     def _wrap(self, real):  # noqa: ANN001, ANN202
         def seen(path, *a, **kw):  # noqa: ANN001, ANN002, ANN003, ANN202
@@ -355,6 +443,17 @@ class Spy:
             return real(path, *a, **kw)
 
         return seen
+
+
+def test_spy_sees_builtin_open(
+    world: FakeLayout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spy = Spy(monkeypatch)
+    world.layout.etc.mkdir(parents=True, exist_ok=True)
+    (world.layout.etc / "models.toml").write_text("x")
+    (world.layout.etc / "models.toml").read_text()
+    open(world.layout.etc / "install.toml", "a").close()
+    assert len(spy.hits) >= 2
 
 
 def test_service_commands_reread_nothing(
