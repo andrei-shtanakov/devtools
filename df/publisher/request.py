@@ -55,11 +55,16 @@ FINAL_OUTCOMES = frozenset({"done", "refused"})
 
 
 class Refused(Exception):
-    """The request is refused with a reason (`refused: <reason>`)."""
+    """The request is refused with a reason (`refused: <reason>`).
 
-    def __init__(self, reason: str) -> None:
+    `verified_not_done` is for a handler that, after its reconciliation,
+    proved the external action did not happen: only then may a request that
+    has an intent be answered `refused` (R23)."""
+
+    def __init__(self, reason: str, *, verified_not_done: bool = False) -> None:
         super().__init__(reason)
         self.reason = reason
+        self.verified_not_done = verified_not_done
 
 
 class BadResponse(ValueError):

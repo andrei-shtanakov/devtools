@@ -281,10 +281,12 @@ def _write_state(path: Path, text: str) -> None:
     fsutil.write_atomic(path, text, 0o600)
 
 
-def has_state(res: Reservation) -> bool:
-    """An intent or a result of this request exists (a link or a damaged
-    file counts): an external action may have been done."""
-    return any(os.path.lexists(p) for p in (res.intent_path, res.result_path))
+def has_state(layout: Layout, key: str) -> bool:
+    """An intent or a result of the idempotency key exists (`lstat` only; a
+    link or a damaged file counts): an external action may have been done."""
+    base = layout.publisher_dir
+    paths = (base / "intents" / f"{key}.json", base / "results" / f"{key}.json")
+    return any(os.path.lexists(p) for p in paths)
 
 
 def replay(res: Reservation) -> Response | None:

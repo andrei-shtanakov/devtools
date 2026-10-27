@@ -165,6 +165,7 @@ def main(
     except Exception as exc:  # noqa: BLE001 - nothing was done outside yet
         print(f"publisher: {type(exc).__name__}: {exc}", file=sys.stderr)
         resp = Response("refused", "internal_error")
+    resp = _never_refuse_with_state(layout, seen, resp)
     resp = _decorate(resp, who, op, seen.request, snapshot)
     _journal(layout, who, op, seen, resp)
     return _answer(resp)
@@ -175,6 +176,9 @@ class _Seen:
 
     request: Request | None = None
     digest: str | None = None
+    key: str | None = None
+    #: A handler proved the action was not done (or a kept result is replayed).
+    verified: bool = False
 
 
 #: Refusals of a sender the process could identify as called by `sudo`; others
@@ -230,6 +234,18 @@ def _own_uid(uid: int | None) -> int:
     return os.getuid() if os.getuid() == os.geteuid() else -1
 
 
+def _never_refuse_with_state(layout: Layout, seen: _Seen, resp: Response) -> Response:
+    """R23, the one place: a request with an intent or a result on disk is
+    never answered `refused` (the action may have been done, and a client takes
+    `refused` as "not done") unless a handler verified that it was not."""
+    if resp.outcome != "refused" or seen.verified or seen.key is None:
+        return resp
+    if not store.has_state(layout, seen.key):
+        return resp
+    reason = f"state_exists: {resp.reason}"
+    return Response("unknown", reason, resp.result, resp.evidence)
+
+
 def _handle(
     layout: Layout,
     snapshot: Snapshot,
@@ -243,15 +259,10 @@ def _handle(
     )
     req = request.parse(op, raw)
     seen.request, seen.digest = req, request.digest(req)
+    seen.key = store.idempotency_key(who, op, seen.digest)
     record = None if op in ADMIN_OPERATIONS else check_run(layout, snapshot, req.run_id)
     with store.reserve(layout, who, op, req) as res:
-        try:
-            return _under_key(layout, snapshot, who, op, req, record, res)
-        except Exception as exc:  # noqa: BLE001 - judged by what is on disk
-            if not store.has_state(res):
-                raise
-            print(f"publisher: {type(exc).__name__}: {exc}", file=sys.stderr)
-            return Response("unknown", "state_unreadable")
+        return _under_key(layout, snapshot, who, op, req, record, res, seen)
 
 
 def _under_key(
@@ -262,30 +273,31 @@ def _under_key(
     req: Request,
     record: RunRecord | None,
     res: store.Reservation,
+    seen: _Seen,
 ) -> Response:
     kept = store.replay(res)
     if kept is not None:
+        seen.verified = True  # a kept result was final when it was kept
         evidence = {**kept.evidence, "replayed": True}
         return Response(kept.outcome, kept.reason, kept.result, evidence)
     replayed = op not in store.NOT_REPLAYED
     earlier = store.read_intent(res) if replayed else None
     ctx = Context(layout, snapshot, who, req, record, res, earlier, earlier is not None)
-    resp = _run_handler(ctx, op)
+    resp = _run_handler(ctx, op, seen)
     resp = _decorate(resp, who, op, req, snapshot)
-    if not replayed or not (resp.outcome == "done" or ctx.intent_written):
-        return resp
-    return _keep(res, resp)
+    final = resp.outcome == "done" or (resp.outcome == "refused" and seen.verified)
+    return _keep(res, resp) if replayed and final else resp
 
 
-def _run_handler(ctx: Context, op: str) -> Response:
+def _run_handler(ctx: Context, op: str, seen: _Seen) -> Response:
     try:
         return OPERATION_TABLE[op](ctx)
     except Refused as exc:
+        seen.verified = exc.verified_not_done
         return Response("refused", exc.reason)
-    except Exception as exc:  # noqa: BLE001 - judged by whether an intent exists
+    except Exception as exc:  # noqa: BLE001 - R23 judges it by what is on disk
         print(f"publisher: {type(exc).__name__}: {exc}", file=sys.stderr)
-        outcome = "unknown" if ctx.intent_written else "refused"
-        return Response(outcome, "internal_error")
+        return Response("refused", "internal_error")
 
 
 def _keep(res: store.Reservation, resp: Response) -> Response:

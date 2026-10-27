@@ -419,7 +419,7 @@ def test_intent_larger_than_a_record_roundtrips(lay: Layout) -> None:
     with store.reserve(lay, SENDER, "merge", make_req()) as res:
         store.intent(res, {"body": "x" * 100000})
         assert store.read_intent(res) == {"body": "x" * 100000}
-        assert store.has_state(res)
+        assert store.has_state(lay, res.key)
 
 
 def test_hard_linked_state_file_is_refused(lay: Layout) -> None:
@@ -462,3 +462,30 @@ def test_refusal_line_masks_a_noncanonical_uid() -> None:
     assert json.loads(line)["sudo_uid"] == "<noncanonical>"
     assert json.loads(store.refusal_line("merge", "601", "x"))["sudo_uid"] == "601"
     assert json.loads(store.refusal_line("merge", None, "x"))["sudo_uid"] is None
+
+
+def test_lock_wait_is_bounded_on_a_fake_clock(
+    lay: Layout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Clock:
+        now = 0.0
+        slept = 0.0
+        calls = 0
+
+        def monotonic(self) -> float:
+            return self.now
+
+        def sleep(self, seconds: float) -> None:
+            self.calls += 1
+            assert self.calls < 20000, "the wait has no bound"
+            self.now += seconds
+            self.slept += seconds
+
+    clock = Clock()
+    with store.reserve(lay, SENDER, "merge", make_req()):
+        monkeypatch.setattr(store, "time", clock)
+        with pytest.raises(Refused) as info:
+            store.reserve(lay, SENDER, "merge", make_req())
+    assert info.value.reason == "busy"
+    assert clock.slept >= store.LOCK_WAIT
+    assert clock.calls <= 2 * store.LOCK_WAIT / store._LOCK_POLL + 10  # noqa: SLF001

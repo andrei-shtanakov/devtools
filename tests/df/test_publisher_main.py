@@ -310,17 +310,17 @@ def test_intent_then_result_then_replay(
     assert all("response_nonce" not in p.read_text() for p in stored)
 
 
-def test_refused_after_intent_is_kept(
+def test_refused_after_intent_is_kept_only_if_verified(
     world: World, table: dict[str, list[Context]], capsys: pytest.CaptureFixture[str]
 ) -> None:
     def refuses(ctx: Context) -> Response:
         ctx.record_intent({"step": "act"})
-        return Response("refused", "github said no")
+        raise Refused("github said no", verified_not_done=True)
 
     calls = install(table, "merge", refuses)
     world.run("merge", capsys=capsys)
     code, again = world.run("merge", capsys=capsys)
-    assert (code, again.reason) == (2, "github said no")
+    assert (code, again.outcome, again.reason) == (2, "refused", "github said no")
     assert len(calls) == 1
 
 
@@ -343,7 +343,11 @@ def test_unexpected_exception_after_intent_is_unknown_and_not_saved(
 
     install(table, "merge", dies)
     code, resp = world.run("merge", capsys=capsys)
-    assert (code, resp.outcome, resp.reason) == (3, "unknown", "internal_error")
+    assert (code, resp.outcome, resp.reason) == (
+        3,
+        "unknown",
+        "state_exists: internal_error",
+    )
     assert world.files("results") == []
     assert len(world.files("intents")) == 1
     # the repeat goes to the reconciliation: the handler sees the earlier intent
@@ -765,7 +769,11 @@ def test_damaged_intent_is_unknown_not_refused(
     else:
         os.link(path, world.lay.root / "other-name")
     code, resp = world.run("merge", capsys=capsys)
-    assert (code, resp.outcome, resp.reason) == (3, "unknown", "state_unreadable")
+    assert (code, resp.outcome, resp.reason) == (
+        3,
+        "unknown",
+        "state_exists: internal_error",
+    )
     assert len(calls) == 1  # the handler never ran again
 
 
@@ -777,7 +785,11 @@ def test_damaged_result_is_unknown_not_refused(
     (path,) = (world.lay.publisher_dir / "results").iterdir()
     path.write_text("{}")
     code, resp = world.run("merge", capsys=capsys)
-    assert (code, resp.outcome, resp.reason) == (3, "unknown", "state_unreadable")
+    assert (code, resp.outcome, resp.reason) == (
+        3,
+        "unknown",
+        "state_exists: internal_error",
+    )
     assert len(calls) == 1
 
 
@@ -912,3 +924,95 @@ def test_key_lock_is_held_for_the_whole_handler(
     got = sorted(str(answers.get(timeout=5)) for _ in range(2))
     assert count.value == 1
     assert got == ["('done', None)", "('done', True)"]
+
+
+# --- fix round 2: R23, never `refused` with state -------------------------------
+
+
+def crash_once(table: dict[str, list[Context]], world: World, capsys) -> None:  # noqa: ANN001
+    install(table, "merge", crash_after_intent({"step": 1}))
+    assert world.run("merge", capsys=capsys)[1].outcome == "unknown"
+
+
+def test_busy_after_an_intent_is_unknown(
+    world: World,
+    table: dict[str, list[Context]],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    crash_once(table, world, capsys)
+    monkeypatch.setattr(store, "LOCK_WAIT", 0.2)
+    from tests.df.publisher_world import make_req
+
+    with store.reserve(world.lay, EXEC, "merge", make_req()):  # a live holder
+        code, resp = world.run("merge", capsys=capsys)
+    assert (code, resp.outcome, resp.reason) == (3, "unknown", "state_exists: busy")
+
+
+def test_busy_without_state_is_refused(
+    world: World,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.df.publisher_world import make_req
+
+    monkeypatch.setattr(store, "LOCK_WAIT", 0.2)
+    with store.reserve(world.lay, EXEC, "merge", make_req()):
+        code, resp = world.run("merge", capsys=capsys)
+    assert (code, resp.outcome, resp.reason) == (2, "refused", "busy")
+
+
+def test_revoked_release_after_an_intent_is_unknown(
+    world: World, table: dict[str, list[Context]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    crash_once(table, world, capsys)
+    revoked = snapshot("rel-a", entry("rel-a", "revoked"))
+    code, resp = world.run("merge", snap=revoked, capsys=capsys)
+    assert code == 3
+    assert resp.outcome == "unknown"
+    assert (resp.reason or "").startswith("state_exists: release_revoked")
+
+
+def test_unknown_run_after_an_intent_is_unknown(
+    world: World, table: dict[str, list[Context]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    crash_once(table, world, capsys)
+    (world.lay.runs_dir / "run-1.json").unlink()
+    _, resp = world.run("merge", capsys=capsys)
+    assert (resp.outcome, resp.reason) == ("unknown", "state_exists: run_unknown")
+
+
+def test_handler_refusal_after_intent_needs_the_flag(
+    world: World, table: dict[str, list[Context]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    flag = {"verified": True}
+
+    def refuses(ctx: Context) -> Response:
+        ctx.record_intent({"step": 1})
+        raise Refused("pr_closed", verified_not_done=flag["verified"])
+
+    install(table, "merge", refuses)
+    code, resp = world.run("merge", capsys=capsys)
+    assert (code, resp.outcome, resp.reason) == (2, "refused", "pr_closed")
+    flag["verified"] = False
+    code, resp = world.run(
+        "merge", raw_of("merge", request_id="req-00000077"), capsys=capsys
+    )
+    assert (code, resp.outcome, resp.reason) == (
+        3,
+        "unknown",
+        "state_exists: pr_closed",
+    )
+
+
+def test_returned_refusal_after_intent_is_unknown(
+    world: World, table: dict[str, list[Context]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    def refuses(ctx: Context) -> Response:
+        ctx.record_intent({"step": 1})
+        return Response("refused", "pr_closed")
+
+    install(table, "merge", refuses)
+    _, resp = world.run("merge", capsys=capsys)
+    assert (resp.outcome, resp.reason) == ("unknown", "state_exists: pr_closed")
+    assert world.files("results") == []
