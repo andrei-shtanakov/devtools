@@ -2931,6 +2931,12 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       `live/<платформа>.json`, `…-doctor.json`, `journals/live-core.jsonl`. Зелёный прогон
       необходим, но не достаточен — пункт закрывает контроллер по evidence (§9, §9.1
       `docs/evidence/2026-10-26-df-stage1-acceptance.md`).
+- [ ] Этап 2a спеки B — роли и изоляция: `roles setup`, sudoers, `df-launch`, `df-run-start`, `df-publisher` без исполнения мержа, журнал периметра без привязки; приёмка §4.5 без трёх строк мержа (root CI + живой стенд) @owner:github:andrei-shtanakov @id:df-installer-stage2a @epic:eco.dark-factory
+      План — `docs/superpowers/plans/2026-10-26-df-installer-stage2a.md` (15 задач),
+      спека B rev 9; решения владельца 26.10: разделение 2a/2b, стенд, потеря питания SQLite
+      вне v1. Живая приёмка (Task 15) требует шагов человека H1–H4 (стенд
+      `df-roles-probe-private`, ключ App, PAT `ai-prosto`, environment `df-stage2-live`).
+- [ ] Этап 2b спеки B — мерж издателя: `act_premerge` как предпроверка `merge`, поверхность candidate D16 и полный состав PR, вид stop, три строки мержа §4.5 живьём @owner:github:andrei-shtanakov @id:df-installer-stage2b @epic:eco.dark-factory @blocked_by:todo://devtools/approval-act-node @blocked_by:todo://devtools/df-installer-stage2a
 - [ ] Смена закреплённого `uv`, Python профиля или пина члена `core`: перемерить то, что закреплено за прежним значением @owner:github:andrei-shtanakov @id:df-installer-pin-drift @epic:eco.dark-factory @trigger:"смена UV_PINNED_VERSION, Python профиля или пина члена core в манифесте"
       `uv`: замер `UV_PROJECT_KEYS_<версия>` (дополнение A1/A2 предполётной проверки Task 7a)
       и таблица записи пути корня в `tests/df/fixtures/locks/SOURCES.md`, переименовать
