@@ -27,7 +27,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from df import fsutil, libexec, roles, sudoers
+from df import fsutil, journal, libexec, roles, sudoers
 from df import platform as plat
 from df.config import Account, ConfigError, load_accounts
 from df.journal import Step, StepFailed, run_steps
@@ -291,11 +291,18 @@ def _publisher_problems(layout: Layout) -> list[str]:
 
 
 def _write_publisher(layout: Layout) -> None:
+    """The only write under `/etc/df`: inside a generation bracket, so that a
+    doctor that sees the temp of `write_atomic` says «идёт запись», not
+    «осталась после сбоя». A crash leaves the bracket odd; the next writer
+    (`generation_begin` keeps an odd value) closes it."""
     path = layout.etc / "publisher.toml"
+    journal.generation_begin(layout)
     try:
         fsutil.write_atomic(path, _publisher_text(layout), PUBLISHER_MODE)
     except OSError as exc:
+        journal.generation_end(layout)  # a refused write leaves the old file whole
         raise StepFailed("publisher-config", f"{path}: {exc}") from exc
+    journal.generation_end(layout)
 
 
 # --- verify --------------------------------------------------------------------

@@ -929,6 +929,9 @@ REREAD_ALLOWED = frozenset(
         ("release", "next_release_id"),
         ("install", "_registered_python"),
         ("install", "read_pending"),
+        # PR #641: after the run, the registry it just wrote names the admin
+        # Python the role wrappers are compared with (only if they exist)
+        ("cli", "_warn_stale_wrappers"),
         # I9: G2 reads the pending release's registry entry as `drive` would;
         # G4 reads `current` and the registry after the run's own changes
         ("install", "_refuse_damaged_pending"),

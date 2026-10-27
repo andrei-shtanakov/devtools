@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from df import accept, fsutil, install, journal, launcher_entry, release
+from df import accept, admin, fsutil, install, journal, launcher_entry, libexec, release
 from df import platform as plat
 from df.config import ReleasesConfig, dump_install, dump_releases, load_releases
 from df.journal import StepFailed, read_journal
@@ -796,3 +796,42 @@ def test_damaged_refusal_never_advises_doctor() -> None:
                 )
             )
             assert_no_bad_advice(text)
+
+
+# ---------- PR #641: stale role wrappers after an install ----------
+
+STALE = "обёртки ролей устарели: выполните darkfactory roles setup"
+
+
+def release_python(world: World) -> Path:
+    entry = accept.registry_entry(world.lay, FIRST)
+    assert entry is not None
+    return admin.admin_python_path(
+        world.lay, entry.admin_python, plat.detect_platform()
+    )
+
+
+def test_install_new_admin_python_marks_wrappers_stale(
+    w: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Wrappers written for another admin Python: the reinstall says so on
+    stderr and still exits 0 (plan decision 4, r2)."""
+    installed(w)
+    w.lay.libexec.mkdir()
+    libexec.install_wrappers(w.lay, Path("/opt/df/admin-python/old/bin/python3.11"))
+    capsys.readouterr()
+    assert w.writer(["install"]) == 0
+    assert STALE in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("state", ["no-wrappers", "current-wrappers"])
+def test_install_leaves_wrappers_silent(
+    w: World, capsys: pytest.CaptureFixture[str], state: str
+) -> None:
+    installed(w)
+    if state == "current-wrappers":
+        w.lay.libexec.mkdir()
+        libexec.install_wrappers(w.lay, release_python(w))
+    capsys.readouterr()
+    assert w.writer(["install"]) == 0
+    assert STALE not in capsys.readouterr().err

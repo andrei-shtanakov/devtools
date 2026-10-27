@@ -5,8 +5,10 @@ administrative Python of the `current` record runs the stage-1 entry
 (`bin/darkfactory-entry.py`, its contract unchanged) with a fixed subcommand
 and the wrapper's own arguments. `sudo` and the roles run the wrappers, never
 the Python itself, so the path of the interpreter is written here and nowhere
-else. A new release with another admin Python makes them stale;
-`wrapper_problems` shows it and `darkfactory roles setup` rewrites them.
+else. A new release with another admin Python makes them stale:
+`wrappers_stale` is what `darkfactory install` uses to say so (exit code 0),
+`wrapper_problems` shows it in full (doctor's `roles.libexec`, Task 13) and
+`darkfactory roles setup` rewrites them.
 """
 
 from __future__ import annotations
@@ -41,6 +43,7 @@ _SUBCOMMANDS = {
 }
 _FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 _STEP = "libexec"
+TEXT_MISMATCH = "текст не совпадает с ожидаемым"
 
 
 def wrapper_path(layout: Layout, name: str) -> Path:
@@ -94,6 +97,26 @@ def wrapper_problems(layout: Layout, admin_python: Path) -> list[str]:
     return problems
 
 
+def wrappers_present(layout: Layout) -> bool:
+    """Some wrapper path exists: `roles setup` has run on this host."""
+    return any(os.path.lexists(wrapper_path(layout, n)) for n in WRAPPERS)
+
+
+def wrappers_stale(layout: Layout, admin_python: Path) -> bool:
+    """Some wrapper exists and holds another text: written for another admin
+    Python (or by another version). Absent wrappers are not stale -- a
+    stage-1-only host has none."""
+    return any(
+        any(TEXT_MISMATCH in p for p in _text_problems(layout, name, admin_python))
+        for name in WRAPPERS
+    )
+
+
+def _text_problems(layout: Layout, name: str, admin_python: Path) -> list[str]:
+    text = wrapper_text(layout, name, admin_python)
+    return root_file_problems(wrapper_path(layout, name), text, WRAPPER_MODE)
+
+
 def root_file_problems(path: Path, text: str, mode: int) -> list[str]:
     """`path` must be a regular file of root, exactly `mode`, holding `text`.
 
@@ -118,7 +141,7 @@ def root_file_problems(path: Path, text: str, mode: int) -> list[str]:
             )
         want = text.encode("utf-8")
         if os.read(fd, len(want) + 1) != want:
-            problems.append(f"{path}: текст не совпадает с ожидаемым")
+            problems.append(f"{path}: {TEXT_MISMATCH}")
         return problems
     except OSError as exc:
         return [f"{path}: {exc.strerror or exc}"]

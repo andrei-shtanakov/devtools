@@ -32,6 +32,7 @@ from df import (
     journal,
     launcher_entry,
     probe,
+    roles_setup,
     state,
 )
 from df import build as build_mod
@@ -1052,3 +1053,36 @@ def test_non_directory_secrets_is_still_flagged(
     )
     assert c["etc.schemas"].status == "нарушено"
     assert "secrets" in c["etc.schemas"].reason
+
+
+def test_publisher_write_is_a_live_write_for_doctor(
+    fake_installed: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #641: `roles setup` writes `publisher.toml` inside a generation
+    bracket, so a doctor that sees the temp of `write_atomic` at that moment
+    says «идёт запись», not «осталась после сбоя»."""
+    from df import fsutil
+    from df.stage2_config import PublisherConfig, dump_publisher
+
+    w = fake_installed
+    s = snap(w)
+    monkeypatch.setattr(
+        roles_setup, "_publisher_text", lambda _l: dump_publisher(PublisherConfig({}))
+    )
+    real = fsutil.write_atomic
+    seen: list[tuple[str, str]] = []
+
+    def write_atomic(path: Path, text: str, mode: int = 0o644) -> None:
+        temp = path.with_name(f".{path.name}.{os.getpid()}.{'b' * 32}.tmp")
+        temp.write_text("partial")
+        c = by_id(level1_checks(s, w.lay, euid=os.geteuid()))["etc.schemas"]
+        seen.append((c.status, c.reason))
+        temp.unlink()
+        real(path, text, mode)
+
+    monkeypatch.setattr(fsutil, "write_atomic", write_atomic)
+    roles_setup._write_publisher(w.lay)  # noqa: SLF001
+    assert seen == [
+        ("данные недоступны", "идёт административная запись, повторите doctor")
+    ]
+    assert w.lay.generation.read_text() == f"{s.generation + 2}\n"
