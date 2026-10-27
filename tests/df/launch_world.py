@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import builtins
+import io
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -146,3 +148,28 @@ def stdin_of(data: bytes):  # noqa: ANN201
         return head
 
     return read
+
+
+#: What no command may read again after the snapshot.
+FORBIDDEN = ("releases.toml", "install.toml", "models.toml", "current")
+
+
+class Spy:
+    """Records every open/stat/listing of a `FORBIDDEN` name (`os.*`, the
+    builtin `open` and `io.open`). `publisher serve` joins in Task 7."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.hits: list[str] = []
+        for name in ("open", "readlink", "stat", "lstat", "listdir", "scandir"):
+            real = getattr(os, name)
+            monkeypatch.setattr(os, name, self._wrap(real))
+        for owner in (builtins, io):
+            monkeypatch.setattr(owner, "open", self._wrap(owner.open))
+
+    def _wrap(self, real):  # noqa: ANN001, ANN202
+        def seen(path, *a, **kw):  # noqa: ANN001, ANN002, ANN003, ANN202
+            if isinstance(path, (str, os.PathLike)) and Path(path).name in FORBIDDEN:
+                self.hits.append(str(path))
+            return real(path, *a, **kw)
+
+        return seen

@@ -374,6 +374,10 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
         "(a call from another module is not seen): the lock "
         "(never written) or a read"
     ),
+    ("run_start", "_append_open", "os.open no-create", 1): (
+        "an existing events file: flags carry no O_CREAT (the creating call is "
+        "fsutil.create_file's), then fstat judges it and the caller syncs it"
+    ),
     ("launch_release", "urllib_transport", ".open", 1): (
         "an HTTP GET through an opener (`urllib`): reads the network, writes no file"
     ),
@@ -528,6 +532,13 @@ SUBPROCESS_CREATORS = {
     "execv of sudo (the human's launch)": (
         "replaces the process; sudo runs the root-owned df-launch wrapper"
     ),
+    "execve of df-launch (df-run-start, as df-exec)": (
+        "replaces the process after setgroups/setgid/setuid to df-exec; the "
+        "root-owned wrapper runs, no release code before the drop"
+    ),
+    "execv of sudo (the human's run start)": (
+        "replaces the process; sudo runs the root-owned df-run-start wrapper"
+    ),
 }
 #: Every site that starts a process (`os.system`/`posix_spawn*`/`spawn*`/
 #: `exec*`/`popen`/`fork`, `subprocess.*`), keyed like `FS_SITES`, with the
@@ -551,6 +562,12 @@ PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
         "execve of the release's interpreter (df-launch, as the role)",
     ),
     ("launch", "human_main", "os.execv", 1): ("execv of sudo (the human's launch)",),
+    ("run_start", "hand_over", "os.execve", 1): (
+        "execve of df-launch (df-run-start, as df-exec)",
+    ),
+    ("run_start", "human_main", "os.execv", 1): (
+        "execv of sudo (the human's run start)",
+    ),
 }
 
 Site = tuple[str, str, str, int]

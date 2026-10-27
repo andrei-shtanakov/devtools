@@ -39,6 +39,7 @@ from df import (
     probe,
     roles,
     roles_setup,
+    run_start,
     state,
 )
 from df import platform as plat
@@ -70,7 +71,7 @@ _NOT_YET = "не реализовано на этом шаге"
 _NO_OPERATOR = "roles setup: укажите --operator (SUDO_USER не задан)"
 _UNSET = "—"
 #: Subcommands of the roles' side (Tasks 5-7); readers, refused until then.
-SERVICE_COMMANDS = frozenset({"publisher", "run"})
+SERVICE_COMMANDS = frozenset({"publisher"})
 #: What `publisher serve` takes: the five operations and the self-check.
 PUBLISHER_ARGS = (*OPERATIONS, "self-check")
 _LIST_COLUMNS = ("роль", "harness", "model", "effort", "источник", "проверка")
@@ -238,7 +239,7 @@ def _parse(argv: list[str]) -> argparse.Namespace:
         "doctor", exit_on_error=False, add_help=False, allow_abbrev=False
     )
     doctor.add_argument("--probe-models", action="store_true")
-    doctor.add_argument("--product", type=_repository_id)
+    doctor.add_argument("--product", type=models.repository_id)
     doctor.add_argument("--json", action="store_true")
     try:
         args = parser.parse_args(argv)
@@ -246,6 +247,8 @@ def _parse(argv: list[str]) -> argparse.Namespace:
         raise UsageError(str(exc)) from exc
     if args.command == "launch":
         _check_launch(args)
+    if args.command == "run":
+        _check_run(args)
     return args
 
 
@@ -263,9 +266,9 @@ def _add_models(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
     put.add_argument("--model", required=True)
     put.add_argument("--effort")
     put.add_argument("--param", action="append", default=[], metavar="K=V")
-    put.add_argument("--product", type=_repository_id)
+    put.add_argument("--product", type=models.repository_id)
     show = words.add_parser("list", **opts)
-    show.add_argument("--product", type=_repository_id)
+    show.add_argument("--product", type=models.repository_id)
     show.add_argument("--json", action="store_true")
 
 
@@ -284,10 +287,7 @@ def _add_service(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
         dest="publisher_command", required=True, parser_class=_Parser
     )
     words.add_parser("serve", **opts).add_argument("operation", choices=PUBLISHER_ARGS)
-    run = sub.add_parser("run", **opts)
-    words = run.add_subparsers(dest="run_command", required=True, parser_class=_Parser)
-    for name in ("start", "resume"):
-        words.add_parser(name, **opts)
+    sub.add_parser("run", **opts).add_argument("words", nargs=argparse.REMAINDER)
     sub.add_parser("launch", **opts).add_argument("words", nargs="+")
 
 
@@ -308,10 +308,13 @@ def _check_launch(args: argparse.Namespace) -> None:
         raise UsageError(f"launch: {reason}")
 
 
-def _repository_id(text: str) -> int:
-    if not text.isascii() or not text.isdigit() or text.startswith("0"):
-        raise ValueError(text)
-    return int(text)
+def _check_run(args: argparse.Namespace) -> None:
+    """`run start --product ID` or `run resume RUN_ID [--accept-model-change
+    --from-step N]`: exactly that, judged by `run_start.parse`."""
+    try:
+        run_start.parse(args.words)
+    except StepFailed as exc:
+        raise UsageError(f"run: {exc.detail}") from exc
 
 
 # ---------- reader ----------
@@ -320,8 +323,10 @@ def _repository_id(text: str) -> int:
 def _reader(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
     if args.command == "launch":
         return _launch(args, lay, read)
+    if args.command == "run":
+        return _run(args, lay, read)
     if args.command in SERVICE_COMMANDS:
-        raise Refusal(f"{_service_name(args)}: {_NOT_YET}")  # Tasks 6-7
+        raise Refusal(f"{_service_name(args)}: {_NOT_YET}")  # Task 7
     if args.command == "doctor":
         return _doctor(args, lay, read)
     if isinstance(read, Transitional):
@@ -342,10 +347,19 @@ def _launch(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
     return launch.exec_main(words, layout=lay, snap=snap)
 
 
+def _run(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
+    """`run start|resume`: root registers and hands over; anyone else is the
+    human, whose `sudo` runs the same wrapper as root."""
+    if os.geteuid() != ROOT_UID:
+        return run_start.human_main(args.words, layout=lay)
+    if isinstance(read, Transitional):
+        raise Refusal(_TRANSITIONAL)
+    snap = state.parse_snapshot(read.value, lay, mode="reader")
+    return run_start.main(args.words, layout=lay, snap=snap)
+
+
 def _service_name(args: argparse.Namespace) -> str:
-    if args.command == "publisher":
-        return "publisher serve"
-    return f"run {args.run_command}"
+    return "publisher serve"
 
 
 def _doctor(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
