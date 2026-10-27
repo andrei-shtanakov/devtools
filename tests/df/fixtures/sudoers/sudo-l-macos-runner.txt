@@ -1,0 +1,11 @@
+Matching Defaults entries for runner on mac-mini:
+    env_reset, env_keep+=BLOCKSIZE, env_keep+="COLORFGBG COLORTERM", env_keep+=__CF_USER_TEXT_ENCODING, env_keep+="CHARSET LANG LANGUAGE LC_ALL LC_COLLATE LC_CTYPE", env_keep+="LC_MESSAGES LC_MONETARY LC_NUMERIC LC_TIME", env_keep+="LINES COLUMNS", env_keep+=LSCOLORS, env_keep+=SSH_AUTH_SOCK, env_keep+=TZ, env_keep+="DISPLAY XAUTHORIZATION XAUTHORITY", env_keep+="EDITOR VISUAL", env_keep+="HOME MAIL", lecture_file=/etc/sudo_lecture
+
+Runas and Command-specific defaults for runner:
+    Defaults!/opt/df/libexec/df-publish !log_output
+
+User runner may run the following commands on mac-mini:
+    (ALL) ALL
+    (ALL) NOPASSWD: ALL
+    (df-exec) NOPASSWD: NOSETENV: /opt/df/libexec/df-launch df-exec check, /opt/df/libexec/df-launch df-exec check-github
+    (df-review) NOPASSWD: NOSETENV: /opt/df/libexec/df-launch df-review check

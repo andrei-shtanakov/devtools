@@ -512,7 +512,11 @@ def teardown_world(world: RootWorld, keep: Path | None) -> None:
 def remove_build_user(*, force: bool = False) -> None:
     """Delete the user and the group (absent ones are fine); `force` is
     `userdel -f` (Linux), which a UID-0 user needs: root runs processes."""
-    name = plat.BUILD_USER
+    remove_service_user(plat.BUILD_USER, force=force)
+
+
+def remove_service_user(name: str, *, force: bool = False) -> None:
+    """`remove_build_user` for any service account `name` (stage-2 roles)."""
     if plat.detect_platform() == "macos-arm64":
         argvs = [
             ["/usr/bin/dscl", ".", "-delete", f"/Users/{name}"],
