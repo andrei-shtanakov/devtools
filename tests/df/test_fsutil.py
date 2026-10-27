@@ -374,6 +374,15 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
         "(a call from another module is not seen): the lock "
         "(never written) or a read"
     ),
+    ("store", "_bind", "os.link", 1): (
+        "protocol reserve (spec 5.6): the temp is write_atomic's (durable), link "
+        "to ids/<id> (EEXIST judged), then sync_dir(ids); a crash before the "
+        "link leaves a temp the next reserve sweeps under the global lock"
+    ),
+    ("store", "journal", "os.open no-create", 1): (
+        "the journal exists (create_file's FileExistsError): O_APPEND, one "
+        "write of a whole line, then sync_file"
+    ),
     ("run_start", "_append_open", "os.open no-create", 1): (
         "an existing events file: flags carry no O_CREAT (the creating call is "
         "fsutil.create_file's), then fstat judges it and the caller syncs it"
@@ -929,7 +938,7 @@ def _scan(path: Path) -> list[Site]:
 
 
 def _df_modules() -> list[Path]:
-    return sorted(Path(fsutil.__file__).parent.glob("*.py"))
+    return sorted(Path(fsutil.__file__).parent.rglob("*.py"))
 
 
 def test_every_fs_mutation_is_accounted_for() -> None:
