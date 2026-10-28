@@ -197,9 +197,30 @@ def test_token_scope_mismatch() -> None:
         _mint(_token_reply([9], PERMS), perms=PERMS)
 
 
+def test_token_metadata_read_is_tolerated() -> None:
+    plus = {**PERMS, "metadata": "read"}
+    assert _mint(_token_reply([7], plus), perms=PERMS).permissions == plus
+
+
+@pytest.mark.parametrize(
+    "extra", [{"metadata": "write"}, {"issues": "read"}, {"metadata": "admin"}]
+)
+def test_token_extra_permission_is_mismatch(extra: Mapping[str, str]) -> None:
+    with pytest.raises(GitHubRefused, match="token_scope_mismatch"):
+        _mint(_token_reply([7], {**PERMS, **extra}), perms=PERMS)
+
+
+def test_token_requested_metadata_must_match_exactly() -> None:
+    asked = {**PERMS, "metadata": "read"}
+    _mint(_token_reply([7], asked), perms=asked)
+    with pytest.raises(GitHubRefused, match="token_scope_mismatch"):
+        _mint(_token_reply([7], PERMS), perms=asked)
+
+
 def test_token_expiry_bounds() -> None:
     _mint(_token_reply([7], PERMS, secs=3600), perms=PERMS)
-    for secs in (0, -5, 3601):
+    _mint(_token_reply([7], PERMS, secs=3600 + github.CLOCK_SLACK), perms=PERMS)
+    for secs in (0, -5, 3600 + github.CLOCK_SLACK + 1):
         with pytest.raises(GitHubRefused, match="token_expiry_invalid"):
             _mint(_token_reply([7], PERMS, secs=secs), perms=PERMS)
     junk = _json_reply(

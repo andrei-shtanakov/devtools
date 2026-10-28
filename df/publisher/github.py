@@ -31,6 +31,8 @@ JWT_BACKDATE = 60
 JWT_LIFETIME = 540
 #: Longest life of an installation token.
 TOKEN_LIFETIME = 3600
+#: Seconds of clock difference tolerated on the token expiry.
+CLOCK_SLACK = 300
 PER_PAGE = 100
 MAX_PAGES = 50
 _MESSAGE_LIMIT = 200
@@ -321,7 +323,7 @@ def _expires_at(value: object, now: float) -> datetime:
     if parsed.tzinfo is None:
         raise GitHubRefused("token_expiry_invalid")
     at = parsed.astimezone(UTC).timestamp()
-    if not now < at <= now + TOKEN_LIFETIME:
+    if not now < at <= now + TOKEN_LIFETIME + CLOCK_SLACK:
         raise GitHubRefused("token_expiry_invalid")
     return parsed.astimezone(UTC)
 
@@ -343,6 +345,13 @@ def _levels(value: object) -> dict[str, str]:
     if not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
         raise GitHubUnavailable("permissions: unexpected item")
     return dict(value)
+
+
+def _scope_ok(granted: Mapping[str, str], asked: Mapping[str, str]) -> bool:
+    """Equal to what was asked, or plus exactly `metadata: read` (GitHub adds it)."""
+    if "metadata" in asked:
+        return dict(granted) == dict(asked)
+    return dict(granted) in (dict(asked), {**asked, "metadata": "read"})
 
 
 def installation_token(
@@ -373,7 +382,7 @@ def installation_token(
     granted = _levels(data.get("permissions", {}))
     if repository_ids is not None and set(granted_repos) != set(repository_ids):
         raise GitHubRefused("token_scope_mismatch")
-    if permissions is not None and granted != dict(permissions):
+    if permissions is not None and not _scope_ok(granted, permissions):
         raise GitHubRefused("token_scope_mismatch")
     expires = _expires_at(data.get("expires_at"), now)
     return Token(data["token"], expires, granted, granted_repos)
