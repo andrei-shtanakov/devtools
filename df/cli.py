@@ -389,7 +389,7 @@ def _run(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
 def _publisher(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
     """`publisher serve <op>` as `df-publisher`, from the one snapshot."""
     if isinstance(read, Transitional):
-        raise Refusal(_TRANSITIONAL)
+        raise Refusal(doctor.transitional_text(read.generation))
     snap = state.parse_snapshot(read.value, lay, mode="reader")
     return publisher_main.main([args.operation], layout=lay, snapshot=snap)
 
