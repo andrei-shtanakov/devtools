@@ -17,10 +17,11 @@ from collections.abc import Mapping, Sequence
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NoReturn, Protocol
+from urllib.parse import quote
 
 from df.config import ConfigError, read_optional
 from df.publisher import github, ops
-from df.publisher.github import GitHubRefused, GitHubUnavailable, TooManyItems
+from df.publisher.github import GitHubRefused, GitHubUnavailable
 from df.publisher.ops import OpContext
 from df.publisher.request import Refused, Response
 
@@ -34,11 +35,13 @@ Kind = Literal["candidate", "brief", "finalize", "stop"]
 ENVELOPE_PATH = ("workstreams", "*", "approvals", "*.yaml")
 STOP_PATH = ("workstreams", "*", "approvals", "stops", "*-g*.yaml")
 BRIEF_GLOB = "brief/*"
-#: GitHub lists at most 3000 files of a PR; more is refused, not truncated.
-MAX_FILES = 3000
+#: `compare` lists at most 300 files and does not say when it cut the list:
+#: that many or more is refused (the rule of `merge-pr.sh`).
+COMPARE_FILE_CAP = 300
 _CANDIDATE_KEY = "APPROVAL_CANDIDATE_TEMPLATE"
 _FINALIZE_KEY = "APPROVAL_FINALIZE_SUFFIX"
-_LINE = re.compile(r"([A-Z][A-Z0-9_]*)=(.+)", re.ASCII)
+_LINE = re.compile(r"([A-Z][A-Z0-9_]*)=(.*)", re.ASCII)
+_SHA = re.compile(r"[0-9a-f]{40}", re.ASCII)
 _PLACEHOLDER = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
 _ADJACENT_STARS = re.compile(r"\*[-._]\*")
 
@@ -88,10 +91,11 @@ def _parse_patterns(text: str) -> dict[str, str]:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        match = _LINE.fullmatch(line)
-        if match is None or match[1] in found:
+        match = _LINE.fullmatch(stripped)
+        value = "" if match is None else match[2].strip()
+        if match is None or match[1] in found or not value:
             raise Refused("patterns_unavailable")
-        found[match[1]] = match[2]
+        found[match[1]] = value
     if not {_CANDIDATE_KEY, _FINALIZE_KEY} <= found.keys():
         raise Refused("patterns_unavailable")
     return found
@@ -129,6 +133,8 @@ def branch_kinds(head_ref: str, patterns: Mapping[str, str]) -> set[Kind]:
 
 def _matches(path: str, template: Sequence[str]) -> bool:
     parts = path.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        return False
     return len(parts) == len(template) and all(
         fnmatchcase(part, pattern)
         for part, pattern in zip(parts, template, strict=True)
@@ -147,6 +153,8 @@ def route(
     if len(kinds) != 1:
         return Refused("ambiguous_kind")
     (kind,) = kinds
+    if kind == "brief" and any(_matches(p, ENVELOPE_PATH) for p in paths):
+        return Refused("ambiguous_kind")
     if kind == "finalize" and not (
         paths and all(_matches(p, ENVELOPE_PATH) for p in paths)
     ):
@@ -165,23 +173,13 @@ def _head_ref(pr: Mapping[str, object]) -> str:
     return ref
 
 
-def _changed_files(pr: Mapping[str, object]) -> int:
-    """The PR's own count of files; the listing stops silently at 3000."""
-    count = pr.get("changed_files")
-    if not github._is_int(count) or not isinstance(count, int) or count < 0:
-        raise GitHubUnavailable("pr: no changed_files")
-    if count >= MAX_FILES:
-        raise Refused("too_many_files")
-    return count
-
-
 def _check_head_repo(oc: OpContext, pr: Mapping[str, object]) -> None:
     """A fork picks its own branch names: only the product's own branches
     are routed by name (`head_repo_foreign`)."""
     head = pr.get("head")
     repo = head.get("repo") if isinstance(head, dict) else None
     ident = repo.get("id") if isinstance(repo, dict) else None
-    if ident != oc.product.repository_id or not github._is_int(ident):
+    if isinstance(ident, bool) or ident != oc.product.repository_id:
         raise Refused("head_repo_foreign")
 
 
@@ -198,34 +196,63 @@ def _paths_of(item: object) -> list[str]:
     return [item["filename"], previous]
 
 
-def pr_paths(oc: OpContext, token: str, pr: int, expected: int) -> list[str]:
-    """Every path of the PR's files: `expected` files (the PR's own count),
-    else `files_listing_incomplete`; at most `MAX_FILES` files."""
-    path = f"/repos/{oc.product.full_name}/pulls/{pr}/files"
-    try:
-        items = github.paged_array(
-            path, token, oc.transport, api_base=oc.api_base, max_items=MAX_FILES
-        )
-    except TooManyItems:
-        raise Refused("too_many_files") from None
-    if len(items) != expected:
-        raise Refused("files_listing_incomplete")
-    return [p for item in items for p in _paths_of(item)]
+def _get(oc: OpContext, token: str, path: str) -> object:
+    _, data = github.call(
+        "GET", path, token, transport=oc.transport, api_base=oc.api_base
+    )
+    return data
+
+
+def _base_ref(pr: Mapping[str, object]) -> str:
+    base = pr.get("base")
+    ref = base.get("ref") if isinstance(base, dict) else None
+    if not isinstance(ref, str) or not ref:
+        raise GitHubUnavailable("pr: no base ref")
+    return ref
+
+
+def base_tip(oc: OpContext, token: str, ref: str) -> str:
+    """The live tip of the PR's base branch (the commit the compare starts
+    at, as in `merge-pr.sh`)."""
+    name = quote(ref, safe="")
+    data = _get(oc, token, f"/repos/{oc.product.full_name}/branches/{name}")
+    commit = data.get("commit") if isinstance(data, dict) else None
+    sha = commit.get("sha") if isinstance(commit, dict) else None
+    if not isinstance(sha, str) or _SHA.fullmatch(sha) is None:
+        raise GitHubUnavailable("branch: no commit sha")
+    return sha
+
+
+def pr_paths(oc: OpContext, token: str, tip: str, head_sha: str) -> list[str]:
+    """Every path of the diff `tip...head_sha`: two fixed commits, so the list
+    cannot change under us (the PR's own files listing follows the live head).
+    `COMPARE_FILE_CAP` files or more is `too_many_files`."""
+    path = f"/repos/{oc.product.full_name}/compare/{tip}...{head_sha}"
+    data = _get(oc, token, path)
+    files = data.get("files") if isinstance(data, dict) else None
+    if not isinstance(files, list):
+        raise GitHubUnavailable("compare: no files")
+    if len(files) >= COMPARE_FILE_CAP:
+        raise Refused("too_many_files")
+    return [p for item in files for p in _paths_of(item)]
 
 
 def _decide(ctx: Context, precheck: Precheck) -> NoReturn:
     oc = ops.build_context(ctx)
-    ops._self_check_first(oc)
-    token = ops._authorize(oc, {"pull_requests": "read"})
+    patterns = read_patterns()
+    ops.self_check_first(oc)
+    token = ops.authorize(oc, {"pull_requests": "read"}).value
     pr_number = int(str(ctx.request.fields["pr"]))
     head_sha = str(ctx.request.fields["head_sha"])
-    pr = ops.read_pr(oc, token.value, pr_number, head_sha)
-    head_ref = _head_ref(pr)
-    _check_head_repo(oc, pr)
-    expected = _changed_files(pr)
-    paths = pr_paths(oc, token.value, pr_number, expected)
-    ops.read_pr(oc, token.value, pr_number, head_sha)  # the head did not move
-    kind = route(head_ref, paths, read_patterns())
+    first = ops.read_pr(oc, token, pr_number, head_sha)
+    head_ref = _head_ref(first)
+    _check_head_repo(oc, first)
+    tip = base_tip(oc, token, _base_ref(first))
+    paths = pr_paths(oc, token, tip, head_sha)
+    pr = ops.read_pr(oc, token, pr_number, head_sha)  # head and base did not move
+    if _base_ref(pr) != _base_ref(first):
+        raise Refused("pr_state")
+    kind = route(head_ref, paths, patterns)
     if isinstance(kind, Refused):
         raise kind
     refused = precheck(kind, oc, pr)
@@ -240,12 +267,12 @@ def merge(ctx: Context, precheck: Precheck = UNAVAILABLE) -> Response:
     written and every refusal is truthful."""
     try:
         return _decide(ctx, precheck)
-    except ops._Answer as answer:
+    except ops.Answer as answer:
         return answer.response
     except GitHubUnavailable:
         return Response("unknown", "github_unavailable")
     except GitHubRefused as exc:
-        return Response("refused", ops._reason(exc))
+        return Response("refused", ops.refusal_reason(exc))
     except Refused as exc:
         return Response("refused", exc.reason)
 

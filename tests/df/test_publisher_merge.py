@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from pathlib import Path
-from urllib.parse import parse_qs
 
 import pytest
 
@@ -17,6 +16,7 @@ from governance import act_envelope, approval_branches
 from tests.df.publisher_world import SHA, World, raw_of
 from tests.df.test_publisher_ops import (
     PR_URL,
+    REPO,
     FakeGitHub,
     Reply,
     _reply,
@@ -32,16 +32,19 @@ FINAL = "spec/ws-approve-1-2-3-final"
 CAND = "spec/ws-approve-1-2-3"
 
 
+TIP = "c" * 40
+COMPARE = f"/repos/{REPO}/compare/{TIP}...{SHA}"
+
+
 class MergeGitHub(FakeGitHub):
-    """The fake GitHub with a head ref and a files listing."""
+    """The fake GitHub with a head ref, a base branch and a compare."""
 
     def __init__(self, world: World) -> None:
         super().__init__(world)
         self.head_ref = CAND
+        self.base_ref = "master"
         self.files: list[object] = [{"filename": "README.md"}]
-        self.endless = False
-        self.file_gets = 0
-        self.changed: int | None = None  # None: len(files)
+        self.file_gets = 0  # compare requests
         self.head_repo: object = 7
 
     def pr(self) -> Reply:
@@ -51,9 +54,7 @@ class MergeGitHub(FakeGitHub):
         data["head"]["repo"] = (
             None if self.head_repo is None else {"id": self.head_repo}
         )
-        data["changed_files"] = (
-            len(self.files) if self.changed is None else self.changed
-        )
+        data["base"]["ref"] = self.base_ref
         return _reply(data)
 
     def route(
@@ -64,24 +65,14 @@ class MergeGitHub(FakeGitHub):
         headers: Mapping[str, str],
         data: dict[str, object] | None,
     ) -> Reply:
-        if (method, path) == ("GET", f"{PR_URL}/files"):
-            return self.listing_files(query)
+        if method == "GET" and path.startswith(f"/repos/{REPO}/branches/"):
+            return _reply({"commit": {"sha": TIP}})
+        if method == "GET" and path.startswith(f"/repos/{REPO}/compare/"):
+            self.file_gets += 1
+            if path != COMPARE:  # any other pair of commits shows other files
+                return _reply({"files": [{"filename": STOP}]})
+            return _reply({"files": self.files})
         return super().route(method, path, query, headers, data)
-
-    def listing_files(self, query: str) -> Reply:
-        self.file_gets += 1
-        page = int(parse_qs(query).get("page", ["1"])[0])
-        if self.endless:
-            rows: list[object] = [{"filename": f"f{page}-{i}"} for i in range(100)]
-            last = False
-        else:
-            rows = self.files[(page - 1) * 100 : page * 100]
-            last = page * 100 >= len(self.files)
-        link = {}
-        if not last:
-            nxt = f"{github.API}{PR_URL}/files?per_page=100&page={page + 1}"
-            link = {"Link": f'<{nxt}>; rel="next"'}
-        return _reply(rows, **link)
 
 
 @pytest.fixture()
@@ -415,100 +406,166 @@ def test_rename_out_of_stops_does_not_escape(
     )
 
 
-def test_merge_paged_files_all_seen(
+def test_compare_is_pinned_and_pulls_files_is_never_called(
     world: World, mgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    mgh.files = [{"filename": f"f{i}"} for i in range(250)] + [{"filename": STOP}]
-    assert reason(run(world, capsys)) == ("refused", "ambiguous_kind")
-    assert mgh.file_gets == 3
+    """The listing of the PR follows its live head (ABA); the compare of two
+    fixed commits does not. Here `pulls/files` would show a stop file."""
+    resp = run(world, capsys)
+    assert reason(resp) == ("refused", "precheck_unavailable")
+    gets = mgh.paths("GET")
+    assert COMPARE in gets and mgh.file_gets == 1
+    assert not any(p.endswith("/files") for p in gets)
+    assert f"/repos/{REPO}/branches/master" in gets
 
 
-def test_exactly_3000_files_is_too_many(
+def test_base_branch_name_is_url_encoded(
     world: World, mgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """GitHub stops listing at 3000: a PR of 3000 files may have more."""
-    mgh.files = [{"filename": f"f{i}"} for i in range(3000)]
-    assert reason(run(world, capsys)) == ("refused", "too_many_files")
-    assert mgh.file_gets == 0
+    mgh.base_ref = "rel/1.0 x"
+    run(world, capsys)
+    assert f"/repos/{REPO}/branches/rel%2F1.0%20x" in mgh.paths("GET")
 
 
-def test_2999_files_are_listed(
+def test_299_files_are_fine_300_are_too_many(
     world: World, mgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    mgh.files = [{"filename": f"f{i}"} for i in range(2999)]
+    mgh.files = [{"filename": f"f{i}"} for i in range(299)]
     assert reason(run(world, capsys)) == ("refused", "precheck_unavailable")
+    mgh.files = [{"filename": f"f{i}"} for i in range(300)]
+    resp = run(world, capsys, request_id="req-00000002")
+    assert reason(resp) == ("refused", "too_many_files")
 
 
-def test_listing_longer_than_limit_stops_paging(
-    world: World, mgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
-) -> None:
-    mgh.endless = True
-    mgh.changed = 2999
-    assert reason(run(world, capsys)) == ("refused", "too_many_files")
-    assert mgh.file_gets == 31  # the page that passes 3000 is the last fetched
-
-
-@pytest.mark.parametrize("changed", [5, 0])
-def test_listing_shorter_or_longer_than_changed_files(
+@pytest.mark.parametrize("bad", [None, [], "x", {"files": "x"}, {"nofiles": 1}])
+def test_compare_without_files_is_unavailable(
     world: World,
     mgh: MergeGitHub,
     capsys: pytest.CaptureFixture[str],
-    changed: int,
+    monkeypatch: pytest.MonkeyPatch,
+    bad: object,
 ) -> None:
-    mgh.files = [{"filename": "a"}, {"filename": "b"}]
-    mgh.changed = changed
-    assert reason(run(world, capsys)) == ("refused", "files_listing_incomplete")
+    real = mgh.route
 
+    def route(method: str, path: str, *rest: object) -> Reply:
+        if path == COMPARE:
+            return _reply(bad)
+        return real(method, path, *rest)  # type: ignore[arg-type]
 
-@pytest.mark.parametrize("changed", ["3", None, True, -1])
-def test_bad_changed_files_is_unavailable(
-    world: World,
-    mgh: MergeGitHub,
-    capsys: pytest.CaptureFixture[str],
-    changed: object,
-) -> None:
-    mgh.changed = changed  # type: ignore[assignment]
-    if changed is None:
-        mgh.changed = None
-        mgh.pr = lambda: _reply(  # type: ignore[method-assign]
-            {
-                "state": "open",
-                "base": {"repo": {"id": 7}},
-                "head": {"sha": SHA, "ref": CAND, "repo": {"id": 7}},
-            }
-        )
+    monkeypatch.setattr(mgh, "route", route)
     assert reason(run(world, capsys)) == ("unknown", "github_unavailable")
 
 
-def test_head_moves_during_the_listing(
+@pytest.mark.parametrize("tip", [None, "short", 5, "G" * 40])
+def test_bad_base_tip_is_unavailable(
+    world: World,
+    mgh: MergeGitHub,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tip: object,
+) -> None:
+    real = mgh.route
+
+    def route(method: str, path: str, *rest: object) -> Reply:
+        if "/branches/" in path:
+            return _reply({"commit": {"sha": tip}})
+        return real(method, path, *rest)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(mgh, "route", route)
+    assert reason(run(world, capsys)) == ("unknown", "github_unavailable")
+    assert mgh.file_gets == 0
+
+
+def test_base_ref_changes_between_the_reads(
     world: World, mgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
 ) -> None:
     reads: list[int] = []
 
     def barrier() -> None:
         reads.append(1)
-        if len(reads) == 1:  # between the first read and the second
-            mgh.pr_head = "b" * 40
+        if len(reads) == 1:
+            mgh.base_ref = "other"
 
     mgh.after_pr_get = barrier
     assert reason(run(world, capsys)) == ("refused", "pr_state")
-    assert mgh.file_gets >= 1 and len(reads) == 2
+    assert len(reads) == 2
 
 
-@pytest.mark.parametrize("head_repo", [8, None, "7"])
-@pytest.mark.parametrize("ref", [CAND, FINAL])
-def test_fork_pr_is_foreign(
+def test_precheck_gets_the_second_read(
+    world: World, mgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
+    reads: list[int] = []
+
+    def barrier() -> None:
+        reads.append(1)
+        if len(reads) == 1:
+            mgh.head_ref = "brief/moved"  # not the routed ref, but visible
+
+    mgh.after_pr_get = barrier
+    got: list[Mapping[str, object]] = []
+
+    def spy(kind: Kind, oc: object, pr: Mapping[str, object]) -> Refused:
+        got.append(pr)
+        return Refused("stop")
+
+    merge.merge(_frame_ctx(world, capsys), spy)  # type: ignore[arg-type]
+    head = got[0]["head"]
+    assert isinstance(head, dict) and head["ref"] == "brief/moved"
+
+
+def test_patterns_are_read_before_any_call(
     world: World,
     mgh: MergeGitHub,
     capsys: pytest.CaptureFixture[str],
-    ref: str,
-    head_repo: object,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    mgh.head_ref = ref
-    mgh.files = [{"filename": ENVELOPE}]
-    mgh.head_repo = head_repo
-    assert reason(run(world, capsys)) == ("refused", "head_repo_foreign")
-    assert mgh.file_gets == 0
+    monkeypatch.setattr(merge, "patterns_path", lambda: tmp_path / "none.env")
+    assert reason(run(world, capsys)) == ("refused", "patterns_unavailable")
+    assert mgh.calls == []
+
+
+def test_brief_branch_with_an_envelope_is_ambiguous() -> None:
+    assert amb(merge.route("brief/x", [ENVELOPE], REAL))
+    assert amb(merge.route("brief/x", ["docs/a.md", ENVELOPE], REAL))
+    assert merge.route("brief/x", ["workstreams/ws/notes.md"], REAL) == "brief"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        GOOD,
+        GOOD.replace("-final", "-final  "),
+        GOOD.replace("APPROVAL_FINALIZE", "  APPROVAL_FINALIZE"),
+        GOOD.replace("-final\n", "-final\r\n"),
+        GOOD.replace("=-final", "=  -final"),
+        "\t" + GOOD,
+    ],
+)
+def test_patterns_parse_like_the_contract(text: str) -> None:
+    from governance import ssot_env
+
+    parsed = merge._parse_patterns(text)
+    for key, value in parsed.items():
+        assert [value] == ssot_env.definition_lines(text, key)
+
+
+def test_patterns_parse_like_the_contract_on_the_real_file() -> None:
+    from governance import ssot_env
+
+    text = approval_branches.PATTERNS_PATH.read_text(encoding="utf-8")
+    for key, value in merge._parse_patterns(text).items():
+        assert [value] == ssot_env.definition_lines(text, key)
+
+
+@pytest.mark.parametrize("path", ["", ".", "..", "workstreams//approvals/n.yaml"])
+def test_bad_segments_never_match(path: str) -> None:
+    assert not merge._matches(path, merge.ENVELOPE_PATH)
+    assert not merge._matches("workstreams/ws/approvals/../x.yaml", merge.ENVELOPE_PATH)
+    assert not merge._matches("workstreams/./approvals/n.yaml", merge.ENVELOPE_PATH)
+    assert not merge._matches(
+        "workstreams/ws/approvals/stops/../n-g1.yaml", merge.STOP_PATH
+    )
 
 
 @pytest.mark.parametrize(

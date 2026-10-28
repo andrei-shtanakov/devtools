@@ -732,16 +732,3 @@ def test_paged_array_follows_links_and_rejects_objects() -> None:
     bad = FakeTransport({("GET", f"{url}?per_page=100"): _json_reply({"a": 1})})
     with pytest.raises(GitHubUnavailable):
         github.paged_array("/x", "t", bad)
-
-
-def test_paged_array_max_items_stops_before_the_next_page() -> None:
-    url = f"{github.API}/x"
-    nxt = f"{url}?per_page=100&page=2"
-    fake = FakeTransport(
-        {
-            ("GET", f"{url}?per_page=100"): [_json_reply([1, 2], **_link(nxt))],
-            # a second page is not served: fetching it would fail the test
-        }
-    )
-    with pytest.raises(github.TooManyItems):
-        github.paged_array("/x", "t", fake, max_items=1)
