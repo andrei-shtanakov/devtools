@@ -931,6 +931,31 @@ def frame_status(
     return world.run("perimeter-status", raw, capsys=capsys)
 
 
+def test_disk_full_refuses(
+    world: World, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`SQLITE_FULL` while writing is `refused: storage_full`, not `done` and
+    not `unknown`: the rolled-back transaction proves the event is absent;
+    committed events stay. (The size-bounded file system variant is Task 14's
+    root cells.)"""
+    frame_record(world, capsys)
+    opened = perimeter.open_db
+
+    def full(lay: Layout) -> perimeter.Db:
+        db = opened(lay)
+        pages = db.conn.execute("PRAGMA page_count").fetchone()[0]
+        db.conn.execute(f"PRAGMA max_page_count = {pages}")
+        return db
+
+    monkeypatch.setattr(perimeter, "open_db", full)
+    code, resp = frame_record(
+        world, capsys, request_id="req-viol-0002", detail="x" * 4000
+    )
+    assert (code, resp.outcome, resp.reason) == (2, "refused", "storage_full")
+    assert rows(world.lay) == [("pending", None)]
+    assert world.files("intents") and len(world.files("results")) == 2
+
+
 def test_frame_record_kept_and_replayed(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -513,6 +513,8 @@ def _unavailable_of(exc: sqlite3.Error) -> Unavailable:
         return Unavailable("busy")
     if primary in _BROKEN_CODES:
         return Unavailable("integrity")
+    if primary == sqlite3.SQLITE_FULL:
+        return Unavailable("storage_full")
     name = getattr(exc, "sqlite_errorname", None) or type(exc).__name__
     return Unavailable(f"sqlite: {name}")
 
@@ -815,7 +817,18 @@ def record_violation_op(ctx: Context) -> Response:
                 db.conn, ctx.sender, ctx.request, key, EPOCHS, binding
             )
         except Unavailable as exc:
+            if exc.reason == "storage_full" and _not_committed(db.conn, key):
+                # the transaction rolled back and the key has no row: not done
+                raise Refused("storage_full", verified_not_done=True) from None
             raise Refused(f"perimeter_unavailable: {exc.reason}") from None
+
+
+def _not_committed(conn: sqlite3.Connection, key: str) -> bool:
+    """The event of `key` is provably absent (a fresh read finds no row)."""
+    try:
+        return _by_key(conn, key) is None
+    except sqlite3.Error:
+        return False
 
 
 def perimeter_status_op(ctx: Context) -> Response:
