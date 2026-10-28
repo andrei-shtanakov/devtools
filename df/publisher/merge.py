@@ -3,10 +3,12 @@
 `PUT .../merge` in 2a, so an accepted precheck ends in
 `refused: merge_not_in_stage_2a`.
 
-The branch patterns are the release's own copy of
-`contracts/approval-branches/v1/patterns.env` (parsed as `KEY=VALUE`, never
-executed); `df` does not import `governance`, so the glob rule of the
-contract header is repeated here and a test holds it equal to
+The branch patterns are the active release's own copy of
+`contracts/approval-branches/v1/patterns.env` (read from the release tree,
+not from the admin tree the publisher's code is imported from; parsed as
+`KEY=VALUE` by the rules of `governance/ssot_env`, never executed). `df`
+does not import `governance`, so the glob rule
+of the contract header is repeated here and a test holds it equal to
 `governance.approval_branches`.
 """
 
@@ -19,11 +21,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NoReturn, Protocol
 from urllib.parse import quote
 
+from df import launch
 from df.config import ConfigError, read_optional
+from df.paths import Layout
 from df.publisher import github, ops
 from df.publisher.github import GitHubRefused, GitHubUnavailable
 from df.publisher.ops import OpContext
 from df.publisher.request import Refused, Response
+from df.state import Snapshot
 
 if TYPE_CHECKING:
     from df.publisher.main import Context
@@ -40,7 +45,6 @@ BRIEF_GLOB = "brief/*"
 COMPARE_FILE_CAP = 300
 _CANDIDATE_KEY = "APPROVAL_CANDIDATE_TEMPLATE"
 _FINALIZE_KEY = "APPROVAL_FINALIZE_SUFFIX"
-_LINE = re.compile(r"([A-Z][A-Z0-9_]*)=(.*)", re.ASCII)
 _SHA = re.compile(r"[0-9a-f]{40}", re.ASCII)
 _PLACEHOLDER = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
 _ADJACENT_STARS = re.compile(r"\*[-._]\*")
@@ -66,38 +70,57 @@ UNAVAILABLE: Precheck = _unavailable
 # --- patterns -----------------------------------------------------------------
 
 
-def patterns_path() -> Path:
-    """`patterns.env` of the release the publisher runs from: the parent of
-    the directory that holds the `df` package."""
-    root = Path(__file__).resolve().parent.parent.parent
-    return root / "contracts" / "approval-branches" / "v1" / "patterns.env"
+PATTERNS_RELATIVE = ("contracts", "approval-branches", "v1", "patterns.env")
 
 
-def read_patterns() -> dict[str, str]:
+def patterns_path(layout: Layout, snapshot: Snapshot) -> Path:
+    """`patterns.env` in the active release's source tree (`patterns_unavailable`
+    if no release is active). Never relative to this module: the publisher
+    runs from the admin tree, which holds `df/` only."""
+    if snapshot.release_id is None:
+        raise Refused("patterns_unavailable")
+    try:
+        release = layout.release_dir(snapshot.release_id)
+    except ConfigError:
+        raise Refused("patterns_unavailable") from None
+    return release / "src" / launch.RELEASE_REPO / Path(*PATTERNS_RELATIVE)
+
+
+def read_patterns(layout: Layout, snapshot: Snapshot) -> dict[str, str]:
     """The two keys of `patterns.env`; anything else than a whole file with
     both keys is `patterns_unavailable`."""
     try:
-        text = read_optional(patterns_path())
+        text = read_optional(patterns_path(layout, snapshot))
     except ConfigError:
         raise Refused("patterns_unavailable") from None
     if text is None:
         raise Refused("patterns_unavailable")
-    return _parse_patterns(text)
+    return parse_patterns(text)
 
 
-def _parse_patterns(text: str) -> dict[str, str]:
-    found: dict[str, str] = {}
+def _definitions(text: str, key: str) -> list[str]:
+    """The values of the lines that define `key`: the rules of
+    `governance.ssot_env.definition_lines` (strip the line, skip blanks and
+    comments, a definition starts with exactly `KEY=`, strip the value)."""
+    prefix = f"{key}="
+    found = []
     for line in text.splitlines():
         stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        match = _LINE.fullmatch(stripped)
-        value = "" if match is None else match[2].strip()
-        if match is None or match[1] in found or not value:
+        if stripped and not stripped.startswith("#") and stripped.startswith(prefix):
+            found.append(stripped[len(prefix) :].strip())
+    return found
+
+
+def parse_patterns(text: str) -> dict[str, str]:
+    """Both keys; any other line is ignored, as in the contract's other two
+    halves. A missing key, a duplicate definition or an empty value is
+    `patterns_unavailable`."""
+    found: dict[str, str] = {}
+    for key in (_CANDIDATE_KEY, _FINALIZE_KEY):
+        values = _definitions(text, key)
+        if len(values) != 1 or not values[0]:
             raise Refused("patterns_unavailable")
-        found[match[1]] = value
-    if not {_CANDIDATE_KEY, _FINALIZE_KEY} <= found.keys():
-        raise Refused("patterns_unavailable")
+        found[key] = values[0]
     return found
 
 
@@ -212,14 +235,14 @@ def _base_ref(pr: Mapping[str, object]) -> str:
 
 
 def base_tip(oc: OpContext, token: str, ref: str) -> str:
-    """The live tip of the PR's base branch (the commit the compare starts
-    at, as in `merge-pr.sh`)."""
-    name = quote(ref, safe="")
-    data = _get(oc, token, f"/repos/{oc.product.full_name}/branches/{name}")
-    commit = data.get("commit") if isinstance(data, dict) else None
-    sha = commit.get("sha") if isinstance(commit, dict) else None
+    """The live tip of the PR's base branch (`git/ref/heads/<ref>`, as in
+    `merge-pr.sh`: the commit the compare starts at)."""
+    name = quote(ref, safe="/")
+    data = _get(oc, token, f"/repos/{oc.product.full_name}/git/ref/heads/{name}")
+    obj = data.get("object") if isinstance(data, dict) else None
+    sha = obj.get("sha") if isinstance(obj, dict) else None
     if not isinstance(sha, str) or _SHA.fullmatch(sha) is None:
-        raise GitHubUnavailable("branch: no commit sha")
+        raise GitHubUnavailable("ref: no object sha")
     return sha
 
 
@@ -239,7 +262,7 @@ def pr_paths(oc: OpContext, token: str, tip: str, head_sha: str) -> list[str]:
 
 def _decide(ctx: Context, precheck: Precheck) -> NoReturn:
     oc = ops.build_context(ctx)
-    patterns = read_patterns()
+    patterns = read_patterns(ctx.layout, ctx.snapshot)
     ops.self_check_first(oc)
     # compare and branches need Contents read; pull_requests read alone is a 403
     token = ops.authorize(oc, ops.READ_PERMISSIONS).value

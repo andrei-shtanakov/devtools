@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -25,7 +26,7 @@ from tests.df.test_publisher_ops import (
     pytestmark,  # noqa: F401  (skip without openssl)
 )
 
-REAL = merge.read_patterns()
+REAL = merge.parse_patterns(approval_branches.PATTERNS_PATH.read_text())
 ENVELOPE = "workstreams/ws/approvals/n1.yaml"
 STOP = "workstreams/ws/approvals/stops/n1-g2.yaml"
 FINAL = "spec/ws-approve-1-2-3-final"
@@ -67,8 +68,8 @@ class MergeGitHub(FakeGitHub):
         headers: Mapping[str, str],
         data: dict[str, object] | None,
     ) -> Reply:
-        if method == "GET" and path.startswith(f"/repos/{REPO}/branches/"):
-            return _reply({"commit": {"sha": TIP}})
+        if method == "GET" and path.startswith(f"/repos/{REPO}/git/ref/heads/"):
+            return _reply({"object": {"sha": TIP}})
         if method == "GET" and path.startswith(f"/repos/{REPO}/compare/"):
             self.file_gets += 1
             if path != COMPARE:  # any other pair of commits shows other files
@@ -85,7 +86,18 @@ def mgh(
 ) -> MergeGitHub:
     fake = MergeGitHub(world)
     monkeypatch.setattr(github, "default_transport", fake)
+    put_patterns(world, approval_branches.PATTERNS_PATH.read_text())
     return fake
+
+
+def put_patterns(world: World, text: str | None) -> Path:
+    """`patterns.env` in the world's active release tree (`None`: absent)."""
+    path = merge.patterns_path(world.lay, world.snap)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.unlink(missing_ok=True)
+    if text is not None:
+        path.write_text(text)
+    return path
 
 
 def run(world: World, capsys: pytest.CaptureFixture[str], **over: object) -> Response:
@@ -111,8 +123,36 @@ def test_glob_equals_the_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     assert merge._template_glob(older) == approval_branches.candidate_glob()
 
 
-def test_real_patterns_file_is_the_contracts() -> None:
-    assert merge.patterns_path() == approval_branches.PATTERNS_PATH
+def test_patterns_path_is_in_the_release_tree(world: World) -> None:
+    path = merge.patterns_path(world.lay, world.snap)
+    release = world.lay.release_dir("rel-a")
+    assert path.relative_to(release / "src" / "devtools") == (
+        approval_branches.PATTERNS_PATH.relative_to(
+            Path(approval_branches.__file__).resolve().parent.parent
+        )
+    )
+    assert not path.is_relative_to(Path(merge.__file__).resolve().parent.parent)
+
+
+def test_patterns_no_release_is_unavailable(world: World) -> None:
+    snap = replace(world.snap, release_id=None)
+    with pytest.raises(Refused) as info:
+        merge.read_patterns(world.lay, snap)
+    assert info.value.reason == "patterns_unavailable"
+
+
+def test_patterns_next_to_the_package_are_not_read(
+    world: World,
+    mgh: MergeGitHub,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Regression: the publisher runs from the admin tree, which holds `df/`
+    only; the file beside the package (the repo's own) must not be used."""
+    beside = Path(merge.__file__).resolve().parent.parent.parent
+    assert (beside / "contracts/approval-branches/v1/patterns.env").is_file()
+    put_patterns(world, None)
+    assert reason(run(world, capsys)) == ("refused", "patterns_unavailable")
+    assert mgh.calls == []
 
 
 @pytest.mark.parametrize(
@@ -223,44 +263,44 @@ GOOD = (
         None,
         "",
         "APPROVAL_CANDIDATE_TEMPLATE=spec/{a}-approve-{b}\n",
-        GOOD + "garbage line\n",
         GOOD + "APPROVAL_FINALIZE_SUFFIX=-x\n",
-        GOOD + "export OTHER=1\n",
+        GOOD + "  APPROVAL_CANDIDATE_TEMPLATE=spec/x-approve-1\n",
         GOOD.replace("-final", ""),
+        GOOD.replace("-final", "  "),
+        GOOD.replace("APPROVAL_FINALIZE_SUFFIX", "approval_finalize_suffix"),
+        GOOD.replace("APPROVAL_FINALIZE_SUFFIX", "export APPROVAL_FINALIZE_SUFFIX"),
     ],
 )
-def test_patterns_unavailable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: str | None
-) -> None:
-    path = tmp_path / "patterns.env"
-    if text is not None:
-        path.write_text(text)
-    monkeypatch.setattr(merge, "patterns_path", lambda: path)
+def test_patterns_unavailable(world: World, text: str | None) -> None:
+    put_patterns(world, text)
     with pytest.raises(Refused) as info:
-        merge.read_patterns()
+        merge.read_patterns(world.lay, world.snap)
     assert info.value.reason == "patterns_unavailable"
 
 
-def test_patterns_parsed_not_executed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    path = tmp_path / "patterns.env"
-    path.write_text(GOOD)
-    monkeypatch.setattr(merge, "patterns_path", lambda: path)
-    assert merge.read_patterns() == {
+def test_patterns_parsed_not_executed(world: World) -> None:
+    put_patterns(world, GOOD)
+    assert merge.read_patterns(world.lay, world.snap) == {
         "APPROVAL_CANDIDATE_TEMPLATE": "spec/{ws_id}-approve-{wave}",
         "APPROVAL_FINALIZE_SUFFIX": "-final",
     }
 
 
-def test_merge_patterns_unavailable_is_refused(
-    world: World,
-    mgh: MergeGitHub,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_merge_routes_through_the_release_tree(
+    world: World, mgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(merge, "patterns_path", lambda: tmp_path / "none.env")
+    put_patterns(world, GOOD.replace("approve", "okay"))
+    mgh.head_ref = "spec/ws-okay-1"
+    assert reason(run(world, capsys)) == ("refused", "precheck_unavailable")
+    mgh.head_ref = CAND  # a name of the real contract's form, not this tree's
+    resp = run(world, capsys, request_id="req-00000002")
+    assert reason(resp) == ("refused", "ambiguous_kind")
+
+
+def test_merge_patterns_unavailable_is_refused(
+    world: World, mgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
+    put_patterns(world, None)
     assert reason(run(world, capsys)) == ("refused", "patterns_unavailable")
 
 
@@ -419,7 +459,7 @@ def test_compare_is_pinned_and_pulls_files_is_never_called(
     gets = mgh.paths("GET")
     assert COMPARE in gets and mgh.file_gets == 1
     assert not any(p.endswith("/files") for p in gets)
-    assert f"/repos/{REPO}/branches/master" in gets
+    assert f"/repos/{REPO}/git/ref/heads/master" in gets
 
 
 def test_base_branch_name_is_url_encoded(
@@ -427,7 +467,15 @@ def test_base_branch_name_is_url_encoded(
 ) -> None:
     mgh.base_ref = "rel/1.0 x"
     run(world, capsys)
-    assert f"/repos/{REPO}/branches/rel%2F1.0%20x" in mgh.paths("GET")
+    assert f"/repos/{REPO}/git/ref/heads/rel/1.0%20x" in mgh.paths("GET")
+
+
+def test_base_branch_with_a_slash_keeps_it(
+    world: World, mgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
+    mgh.base_ref = "release/1.0"
+    run(world, capsys)
+    assert f"/repos/{REPO}/git/ref/heads/release/1.0" in mgh.paths("GET")
 
 
 def test_299_files_are_fine_300_are_too_many(
@@ -470,8 +518,8 @@ def test_bad_base_tip_is_unavailable(
     real = mgh.route
 
     def route(method: str, path: str, *rest: object) -> Reply:
-        if "/branches/" in path:
-            return _reply({"commit": {"sha": tip}})
+        if "/git/ref/heads/" in path:
+            return _reply({"object": {"sha": tip}})
         return real(method, path, *rest)  # type: ignore[arg-type]
 
     monkeypatch.setattr(mgh, "route", route)
@@ -531,49 +579,47 @@ def test_precheck_gets_the_second_read(
     assert got[0]["title"] == "edited"
 
 
-def test_patterns_are_read_before_any_call(
-    world: World,
-    mgh: MergeGitHub,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(merge, "patterns_path", lambda: tmp_path / "none.env")
-    assert reason(run(world, capsys)) == ("refused", "patterns_unavailable")
-    assert mgh.calls == []
-
-
 def test_brief_branch_with_an_envelope_is_ambiguous() -> None:
     assert amb(merge.route("brief/x", [ENVELOPE], REAL))
     assert amb(merge.route("brief/x", ["docs/a.md", ENVELOPE], REAL))
     assert merge.route("brief/x", ["workstreams/ws/notes.md"], REAL) == "brief"
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        GOOD,
-        GOOD.replace("-final", "-final  "),
-        GOOD.replace("APPROVAL_FINALIZE", "  APPROVAL_FINALIZE"),
-        GOOD.replace("-final\n", "-final\r\n"),
-        GOOD.replace("=-final", "=  -final"),
-        "\t" + GOOD,
-    ],
-)
+PARITY = [
+    GOOD,
+    GOOD.replace("-final", "-final  "),
+    GOOD.replace("APPROVAL_FINALIZE", "  APPROVAL_FINALIZE"),
+    GOOD.replace("-final\n", "-final\r\n"),
+    GOOD.replace("=-final", "=  -final"),
+    "\t" + GOOD,
+    GOOD + "export OTHER=1\n",
+    GOOD + "Stop_Template=x\n",
+    GOOD + "a bare line of prose\n",
+    GOOD + "garbage line\n",
+    GOOD + "APPROVAL_FINALIZE_SUFFIX=-x\n",
+    GOOD.replace("-final", ""),
+    GOOD.replace("APPROVAL_FINALIZE_SUFFIX", "export APPROVAL_FINALIZE_SUFFIX"),
+    "",
+    approval_branches.PATTERNS_PATH.read_text(encoding="utf-8"),
+]
+
+
+@pytest.mark.parametrize("text", PARITY)
 def test_patterns_parse_like_the_contract(text: str) -> None:
+    """The publisher and `governance.ssot_env` agree: same values, or both
+    refuse (a missing key, a duplicate, an empty value)."""
     from governance import ssot_env
 
-    parsed = merge._parse_patterns(text)
-    for key, value in parsed.items():
-        assert [value] == ssot_env.definition_lines(text, key)
-
-
-def test_patterns_parse_like_the_contract_on_the_real_file() -> None:
-    from governance import ssot_env
-
-    text = approval_branches.PATTERNS_PATH.read_text(encoding="utf-8")
-    for key, value in merge._parse_patterns(text).items():
-        assert [value] == ssot_env.definition_lines(text, key)
+    keys = ("APPROVAL_CANDIDATE_TEMPLATE", "APPROVAL_FINALIZE_SUFFIX")
+    found = [ssot_env.definition_lines(text, k) for k in keys]
+    good = all(len(v) == 1 and v[0] for v in found)
+    if not good:
+        with pytest.raises(Refused):
+            merge.parse_patterns(text)
+        return
+    assert merge.parse_patterns(text) == {
+        k: v[0] for k, v in zip(keys, found, strict=True)
+    }
 
 
 @pytest.mark.parametrize("path", ["", ".", "..", "workstreams//approvals/n.yaml"])
