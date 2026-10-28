@@ -971,9 +971,15 @@ product_unknown`); перед каждой операцией — `self_check` (
   restored_pending}`; `/var/lib/df/perimeter/created` — отметка первичного создания
   (`df-publisher`, `0600`):
   - `create_db(layout)` — только шаг `roles setup` `perimeter-init`, только если нет ни
-    базы, ни отметки; пишет схему, `admission = ready`, затем отметку;
+    базы, ни отметки; пишет схему, `admission = ready`, затем отметку; после успеха
+    `roles setup` пишет **вторую** отметку вне `perimeter/` — `/var/lib/df/perimeter.created`
+    (root, `0644`): потеря всего каталога `perimeter/` тогда даёт `lost`, а не молча
+    новую базу `ready` (ревью Task 11); база не строится рядом с оставшимся
+    `events.sqlite-journal` (`integrity`, нужен человек); событие сверх `MAX_EVENTS`
+    записывается (потеря нарушения хуже), после чего каждое открытие — `too_many_events`;
   - `open_db` **никогда не создаёт**: нет базы при отметке → `unavailable: lost`
-    (обращение к человеку); нет ни того ни другого → `unavailable: not_initialized`;
+    (обращение к человеку), так же при корневой отметке `perimeter.created` без базы и
+    без отметки; нет ни того ни другого → `unavailable: not_initialized`;
   - **барьер базы** (r3 N1): файл `perimeter/db.lock` (`df-publisher`, `0600`); каждый
     процесс издателя берёт `flock(LOCK_SH)` **до** `sqlite3.connect` и держит до
     закрытия соединения; `create_db` и восстановление — `LOCK_EX`;
