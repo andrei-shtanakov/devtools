@@ -74,7 +74,7 @@ class _Auth:
     token: str = field(repr=False)
 
 
-class _Answer(Exception):
+class Answer(Exception):
     """An answer decided by a helper; the handler returns it."""
 
     def __init__(self, response: Response) -> None:
@@ -92,7 +92,7 @@ def _answers(fn: Callable[[Context], Response]) -> Callable[[Context], Response]
     def run(ctx: Context) -> Response:
         try:
             return fn(ctx)
-        except _Answer as answer:
+        except Answer as answer:
             return answer.response
 
     run.__name__ = fn.__name__
@@ -146,8 +146,8 @@ def build_context(ctx: Context) -> OpContext:
     )
 
 
-def _unavailable() -> _Answer:
-    return _Answer(Response("unknown", "github_unavailable"))
+def _unavailable() -> Answer:
+    return Answer(Response("unknown", "github_unavailable"))
 
 
 def _check_app(
@@ -171,7 +171,7 @@ def _check_app(
     )
 
 
-def _self_check_first(oc: OpContext) -> None:
+def self_check_first(oc: OpContext) -> None:
     """Decision 10: the App is checked before every operation."""
     try:
         result = _check_app(
@@ -186,18 +186,18 @@ def _self_check_first(oc: OpContext) -> None:
     except GitHubUnavailable:
         raise _unavailable() from None
     except GitHubRefused as exc:
-        raise Refused(_reason(exc)) from None
+        raise Refused(refusal_reason(exc)) from None
     except SigningFailed:
         raise Refused("app_key_unusable") from None
     if result.problems:
         raise Refused(result.problems[0])
 
 
-def _reason(exc: GitHubRefused) -> str:
+def refusal_reason(exc: GitHubRefused) -> str:
     return exc.reason if exc.status is None else f"github_{exc.status}: {exc.reason}"
 
 
-def _authorize(oc: OpContext, permissions: Mapping[str, str]) -> github.Token:
+def authorize(oc: OpContext, permissions: Mapping[str, str]) -> github.Token:
     """An installation token for the product's repository."""
     jwt = _jwt(oc)
     try:
@@ -213,7 +213,7 @@ def _authorize(oc: OpContext, permissions: Mapping[str, str]) -> github.Token:
     except GitHubUnavailable:
         raise _unavailable() from None
     except GitHubRefused as exc:
-        raise Refused(_reason(exc)) from None
+        raise Refused(refusal_reason(exc)) from None
 
 
 def _jwt(oc: OpContext) -> str:
@@ -233,8 +233,8 @@ def _auth(oc: OpContext) -> _Auth:
     except GitHubUnavailable:
         raise _unavailable() from None
     except GitHubRefused as exc:
-        raise Refused(_reason(exc)) from None
-    token = _authorize(oc, REVIEW_PERMISSIONS)
+        raise Refused(refusal_reason(exc)) from None
+    token = authorize(oc, REVIEW_PERMISSIONS)
     return _Auth(f"{slug}[bot]", token.value)
 
 
@@ -250,17 +250,25 @@ def _is_bot(review: Mapping[str, object], bot: str) -> bool:
 
 def _check_pr(oc: OpContext, auth: _Auth, pr: int, head_sha: str) -> None:
     """The PR is open, of this product, at `head_sha` (`pr_state`)."""
+    read_pr(oc, auth.token, pr, head_sha)
+
+
+def read_pr(oc: OpContext, token: str, pr: int, head_sha: str) -> dict[str, object]:
+    """The PR as GitHub says it, once it is checked to be open, of this
+    product and at `head_sha` (`pr_state` otherwise)."""
     path = f"/repos/{oc.product.full_name}/pulls/{pr}"
     try:
         _, data = github.call(
-            "GET", path, auth.token, transport=oc.transport, api_base=oc.api_base
+            "GET", path, token, transport=oc.transport, api_base=oc.api_base
         )
     except GitHubUnavailable:
         raise _unavailable() from None
     except GitHubRefused as exc:
-        raise Refused(_reason(exc)) from None
+        raise Refused(refusal_reason(exc)) from None
     if not _pr_matches(data, oc.product.repository_id, head_sha):
         raise Refused("pr_state")
+    assert isinstance(data, dict)
+    return data
 
 
 def _pr_matches(data: object, repository_id: int, head_sha: str) -> bool:
@@ -307,9 +315,9 @@ def _post_review(
     except GitHubUnavailable:
         return None
     except GitHubRefused as exc:
-        raise _Answer(Response("refused", _reason(exc))) from None
+        raise Answer(Response("refused", refusal_reason(exc))) from None
     if not isinstance(data, dict):
-        raise _Answer(Response("unknown", "review_response_unexpected"))
+        raise Answer(Response("unknown", "review_response_unexpected"))
     return data
 
 
@@ -359,7 +367,7 @@ def reconcile_review(oc: OpContext, auth: _Auth, req: Request, key: str) -> Resp
     except GitHubUnavailable:
         return Response("unknown", "reconcile_unavailable")
     except GitHubRefused as exc:
-        return Response("unknown", f"reconcile_refused: {_reason(exc)}")
+        return Response("unknown", f"reconcile_refused: {refusal_reason(exc)}")
     mine = [
         r
         for r in reviews
@@ -391,7 +399,7 @@ def publish_review(ctx: Context) -> Response:
     req, key = ctx.request, ctx.reservation.key
     if len(_review_text(req, key)) > MAX_REVIEW_BODY:
         raise Refused("body_too_long")
-    _self_check_first(oc)
+    self_check_first(oc)
     auth = _auth(oc)
     if ctx.intent is not None:
         return reconcile_review(oc, auth, req, key)
@@ -415,8 +423,8 @@ def read_token(ctx: Context) -> Response:
     repository. Nothing external changes, so no intent is written, and the
     token is in the answer only (the frame never stores or journals it)."""
     oc = build_context(ctx)
-    _self_check_first(oc)
-    token = _authorize(oc, READ_PERMISSIONS)
+    self_check_first(oc)
+    token = authorize(oc, READ_PERMISSIONS)
     result = {
         "token": token.value,
         "expires_at": token.expires_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -447,7 +455,7 @@ def _check_one(
     except SigningFailed:
         return SelfCheckResult((), (f"app_key_unusable: {app_id}",), None)
     except GitHubRefused as exc:
-        problem = f"app_unreadable: {app_id}: {_reason(exc)}"
+        problem = f"app_unreadable: {app_id}: {refusal_reason(exc)}"
         return SelfCheckResult((), (problem,), None)
     except GitHubUnavailable:
         raise _unavailable() from None
@@ -471,11 +479,16 @@ def self_check_op(ctx: Context) -> Response:
 
 __all__ = [
     "MARKER",
+    "Answer",
     "OpContext",
+    "authorize",
     "build_context",
     "escape_body",
     "publish_review",
+    "read_pr",
     "read_token",
     "reconcile_review",
+    "refusal_reason",
+    "self_check_first",
     "self_check_op",
 ]
