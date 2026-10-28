@@ -88,7 +88,8 @@ DB_RESTORE = "db_restore"
 LOST_TEXT = (
     "база периметра потеряна: есть отметка perimeter/created, нет "
     "perimeter/events.sqlite; заново она не создаётся — нужен человек: "
-    "sudo darkfactory perimeter restore --from <копия> (или --empty)"
+    "sudo darkfactory perimeter restore --from <копия> (или --empty); если "
+    "нет самого каталога perimeter/ — сначала sudo darkfactory roles setup"
 )
 INTEGRITY_TEXT = (
     "база периметра не прошла проверку целостности, или рядом с отсутствующей "
@@ -105,8 +106,17 @@ MAX_COPY = 256 << 20
 RESTORE_WAIT = 30.0
 RESTORE_TEXTS = {
     "busy": (
-        "база периметра занята: издатель держит её открытой дольше 30 с; "
-        "ничего не изменено, повторите позже"
+        "база периметра занята: издатель держит её открытой дольше "
+        f"{RESTORE_WAIT:g} с; ничего не изменено, повторите позже"
+    ),
+    "perimeter_dir": (
+        "каталога perimeter/ нет или он не 0700 учётки df-publisher: сначала "
+        "sudo darkfactory roles setup (создаёт каталог), затем sudo darkfactory "
+        "perimeter restore --from <копия> (или --empty)"
+    ),
+    "set_aside": (
+        "perimeter/set-aside есть, но это не каталог 0700 учётки df-publisher; "
+        "ничего не изменено, нужен человек"
     ),
     "journal": (
         "у прежней базы журнал perimeter/events.sqlite-journal, который не "
@@ -384,14 +394,18 @@ def _lock_for_create(base: Path) -> int:
 
 
 def _own_dir(base: Path) -> None:
-    st = os.lstat(base)
-    ok = (
+    if not _is_own_dir(base):
+        raise OSError(f"{base}: not a 0700 directory of this user")
+
+
+def _is_own_dir(path: Path) -> bool:
+    """A `0700` directory (not a link) of this user; `lstat` errors raise."""
+    st = os.lstat(path)
+    return (
         stat.S_ISDIR(st.st_mode)
         and stat.S_IMODE(st.st_mode) == 0o700
         and fsutil.owner_uid(st) == os.geteuid()
     )
-    if not ok:
-        raise OSError(f"{base}: not a 0700 directory of this user")
 
 
 def _flock(fd: int, op: int, wait: float | None = None) -> None:
@@ -620,7 +634,10 @@ def restore(layout: Layout, copy: bytes | None, *, set_aside_old: bool = False) 
     is `Unavailable` (`RESTORE_TEXTS`, `copy: <reason>`)."""
     _require_sqlite()
     base = layout.perimeter_dir
-    _own_dir(base)
+    try:
+        _own_dir(base)
+    except OSError:
+        raise Unavailable("perimeter_dir") from None
     if _lexists(base / RESTORE_INTENT):
         with _exclusive(base):
             _set_aside(base, _read_intent(base))
@@ -631,6 +648,9 @@ def restore(layout: Layout, copy: bytes | None, *, set_aside_old: bool = False) 
         RESTORE_STEP("staged")
         with _exclusive(base):
             if set_aside_old:
+                aside = base / SET_ASIDE
+                if _lexists(aside) and not _is_own_dir(aside):
+                    raise Unavailable("set_aside")  # before the intent: no change
                 _set_aside(base, _write_intent(base))
             else:
                 _roll_back(base)
@@ -778,12 +798,20 @@ def _set_aside(base: Path, intent: dict[str, str]) -> None:
 
 
 def _make_dir(path: Path) -> None:
-    """A `0700` directory of this user, durable (present: settled)."""
-    fd = os.open(path.parent, _DIR_FLAGS)
+    """A `0700` directory of this user, durable (present: settled). Anything
+    else found there (a file, a link, another mode or owner) is
+    `restore_incomplete`: nothing is moved through it."""
     try:
-        fsutil.make_dir(fd, path.name, 0o700, path=path)
-    finally:
-        os.close(fd)
+        fd = os.open(path.parent, _DIR_FLAGS)
+        try:
+            fsutil.make_dir(fd, path.name, 0o700, path=path)
+        finally:
+            os.close(fd)
+        ok = _is_own_dir(path)
+    except OSError:
+        ok = False
+    if not ok:
+        raise Unavailable("restore_incomplete")
 
 
 def _move_aside(src: Path, dst: Path) -> None:

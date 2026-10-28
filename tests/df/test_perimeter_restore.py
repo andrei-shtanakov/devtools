@@ -13,6 +13,7 @@ import contextlib
 import fcntl
 import io
 import os
+import shutil
 import sqlite3
 import sys
 import threading
@@ -120,15 +121,15 @@ def stat_mode(path: Path) -> int:
     return os.lstat(path).st_mode & 0o777
 
 
-@pytest.mark.parametrize("before", ["lost", "present", "whole-dir-lost"])
+@pytest.mark.parametrize("before", ["lost", "present", "dir-emptied"])
 def test_restore_empty_is_pending(ready: Layout, before: str) -> None:
     """`--empty`: a fresh schema with `restored_pending`, never `ready`, over
-    a lost database, a present one, or a lost directory content."""
+    a lost database, a present one, or an emptied directory."""
     base = ready.perimeter_dir
     if before == "lost":
         db_file(ready).unlink()
         assert unavailable(ready) == "lost"
-    if before == "whole-dir-lost":
+    if before == "dir-emptied":
         for name in os.listdir(base):
             (base / name).unlink()
     assert perimeter.restore(ready, None) == "restored"
@@ -370,15 +371,35 @@ def test_restore_with_hot_journal(
     assert rows(ready) == PENDING
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root opens a 0000 journal")
-def test_restore_corrupt_pair_refused(ready: Layout, copy: bytes) -> None:
-    """A pair SQLite cannot roll back (here: a journal it cannot open; a
-    malformed journal SQLite itself resolves) is refused with the
-    `--set-aside-old` instruction; both files are untouched."""
+@pytest.mark.parametrize(
+    "spoil",
+    [
+        "zeroed-header",
+        pytest.param(
+            "unopenable",
+            marks=pytest.mark.skipif(
+                os.geteuid() == 0, reason="root opens a 0000 journal"
+            ),
+        ),
+    ],
+)
+def test_restore_corrupt_pair_refused(ready: Layout, copy: bytes, spoil: str) -> None:
+    """A pair the read does not resolve is refused with the `--set-aside-old`
+    instruction; both files are untouched.
+
+    `zeroed-header`: a real hot journal with its header zeroed -- SQLite
+    takes it for not hot and neither rolls it back nor deletes it, while the
+    database keeps the torn pages; only the check "no journal after the
+    read" refuses it. `unopenable` (the I/O form): a journal SQLite cannot
+    open, `SQLITE_CANTOPEN` at the read."""
     hot_journal(ready)
     journal_path = ready.perimeter_dir / JOURNAL
+    if spoil == "zeroed-header":
+        with journal_path.open("r+b") as fh:
+            fh.write(bytes(28))
     before = listing(ready)
-    journal_path.chmod(0)
+    if spoil == "unopenable":
+        journal_path.chmod(0)
     try:
         with pytest.raises(Unavailable) as info:
             perimeter.restore(ready, copy)
@@ -474,6 +495,108 @@ def test_set_aside_failure_midway_keeps_its_stage(
     monkeypatch.setattr(perimeter, "RESTORE_STEP", perimeter._no_step)  # noqa: SLF001
     assert perimeter.restore(ready, None) == "resumed"
     assert rows(ready) == PENDING
+
+
+def test_resume_waits_for_the_barrier(
+    ready: Layout, copy: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(б)-(д) of a resume run under `LOCK_EX`: a publisher holding the
+    barrier makes the resume `busy`, nothing moved."""
+    hot_journal(ready)
+    crash_at(ready, "journal-moved", copy, set_aside=True)
+    monkeypatch.setattr(perimeter, "RESTORE_WAIT", 0.2)
+    before = listing(ready)
+    with holding(ready, fcntl.LOCK_SH):
+        with pytest.raises(Unavailable, match="busy"):
+            perimeter.restore(ready, None)
+    assert listing(ready) == before
+
+
+def test_resume_never_overwrites_the_set_aside_copy(ready: Layout, copy: bytes) -> None:
+    """Intent, stage and `events.sqlite` in place, but `set-aside/<UTC>/`
+    already holds an `events.sqlite`: never two of one name."""
+    crash_at(ready, "journal-moved", copy, set_aside=True)
+    (aside_dir(ready) / perimeter.DB_NAME).write_bytes(b"the only old copy")
+    before = listing(ready)
+    with pytest.raises(Unavailable, match="restore_incomplete"):
+        perimeter.restore(ready, None)
+    assert listing(ready) == before
+
+
+def test_resume_never_admits_a_journal_next_to_the_new_base(
+    ready: Layout, copy: bytes
+) -> None:
+    """Intent, no stage, `events.sqlite` and a journal in place: refused."""
+    crash_at(ready, "installed", copy, set_aside=True)
+    (ready.perimeter_dir / JOURNAL).write_bytes(b"a journal from elsewhere")
+    before = listing(ready)
+    with pytest.raises(Unavailable, match="restore_incomplete"):
+        perimeter.restore(ready, None)
+    assert listing(ready) == before
+
+
+@pytest.mark.parametrize("form", ["file", "link"])
+def test_set_aside_must_be_our_directory(
+    ready: Layout, copy: bytes, form: str, tmp_path: Path
+) -> None:
+    """A `set-aside` that is not a 0700 directory of the role is refused
+    before the intent: the old pair is not moved."""
+    hot_journal(ready)
+    aside = ready.perimeter_dir / perimeter.SET_ASIDE
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    if form == "file":
+        aside.write_bytes(b"leftover")
+    else:
+        aside.symlink_to(outside)
+    before = listing(ready)
+    with pytest.raises(Unavailable, match="set_aside"):
+        perimeter.restore(ready, copy, set_aside_old=True)
+    assert listing(ready) == before
+    assert list(outside.iterdir()) == []
+    assert "нужен человек" in perimeter.restore_text("set_aside")
+
+
+def test_resume_refuses_a_link_as_set_aside_dir(
+    ready: Layout, copy: bytes, tmp_path: Path
+) -> None:
+    """The intent's `set-aside/<UTC>` is a link: nothing is moved through it."""
+    crash_at(ready, "intent", copy, set_aside=True)
+    intent = perimeter._read_intent(ready.perimeter_dir)  # noqa: SLF001
+    aside = ready.perimeter_dir / intent["set_aside_dir"]
+    aside.parent.mkdir(mode=0o700)
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    aside.symlink_to(outside)
+    before = listing(ready)
+    with pytest.raises(Unavailable, match="restore_incomplete"):
+        perimeter.restore(ready, None)
+    assert listing(ready) == before
+    assert list(outside.iterdir()) == []
+
+
+def test_restore_dir_removed_names_roles_setup(ready: Layout) -> None:
+    """The whole `perimeter/` is gone (root's `perimeter.created` says it
+    existed): `lost`, and restore refuses naming `roles setup` first -- in
+    the role half a refusal, not a traceback."""
+    ready.perimeter_created.parent.mkdir(parents=True, exist_ok=True)
+    ready.perimeter_created.write_text("t\n")
+    shutil.rmtree(ready.perimeter_dir)
+    assert unavailable(ready) == "lost"
+    assert "sudo darkfactory roles setup" in perimeter.LOST_TEXT
+    with pytest.raises(Unavailable) as info:
+        perimeter.restore(ready, None)
+    assert info.value.reason == "perimeter_dir"
+    text = perimeter.restore_text("perimeter_dir")
+    assert text.index("roles setup") < text.index("perimeter restore")
+    ready.install_dir.mkdir(parents=True, exist_ok=True)
+    row = Account("df-publisher", os.geteuid(), os.getgid(), "ready", "t")
+    ready.accounts.write_text(dump_accounts({"df-publisher": row}))
+    result = role_half(ready, ["perimeter-restore", "--empty"], None)
+    assert result.returncode == 2
+    assert text.encode() in result.stderr
+    assert b"Traceback" not in result.stderr
+    assert not ready.perimeter_dir.exists()
 
 
 @pytest.mark.parametrize(
@@ -739,3 +862,8 @@ def test_cli_restore_launch_failure_is_refused(
 def test_lost_text_names_the_command() -> None:
     assert "sudo darkfactory perimeter restore --from <копия>" in perimeter.LOST_TEXT
     assert "--set-aside-old" in perimeter.RESTORE_TEXTS["journal"]
+    assert f"{perimeter.RESTORE_WAIT:g} с" in perimeter.RESTORE_TEXTS["busy"]
+
+
+def test_resumed_text_names_either_source() -> None:
+    assert "копия или --empty" in cli._RESTORE_DONE["resumed"]  # noqa: SLF001
