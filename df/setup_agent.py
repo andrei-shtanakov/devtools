@@ -26,7 +26,7 @@ import os
 import re
 import stat
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -54,6 +54,10 @@ TOKEN_DIR_MODE = 0o700
 SECRETS_MODE = 0o700
 #: Seconds root waits for `check-github` (a GET per product, 20 s each).
 CHECK_TIMEOUT = 120.0
+#: Seconds root waits for the publisher's `self-check`: a JWT, the App's
+#: installations, then a token and a repository listing per installation, each
+#: request up to 20 s (`perimeter-status`'s 60 s is too short for that).
+SELF_CHECK_TIMEOUT = 300.0
 _PEM = re.compile(
     rb"-----BEGIN (RSA |)PRIVATE KEY-----\r?\n"
     rb"(?:[A-Za-z0-9+/=]{1,76}\r?\n){1,400}"
@@ -108,9 +112,18 @@ def install_app_key(layout: Layout, app_id: int, source: Path) -> None:
         os.close(fd)
 
 
-def setup_app_key(layout: Layout, app_id: int, source: Path) -> Check:
-    """`install_app_key`, then `check_app_key`."""
+def setup_app_key(
+    layout: Layout,
+    app_id: int,
+    source: Path,
+    *,
+    before_check: Callable[[], None] = lambda: None,
+) -> Check:
+    """`install_app_key`, then `before_check` (the writer closes an odd
+    generation there: its refusals are behind it, and the check's readers
+    need a stable snapshot), then `check_app_key`."""
     install_app_key(layout, app_id, source)
+    before_check()
     return check_app_key(layout, app_id)
 
 
@@ -156,11 +169,18 @@ def install_machine_token(layout: Layout, source: Path) -> None:
     _install_token(layout, _read_token(source))
 
 
-def setup_machine_token(layout: Layout, source: Path) -> Check:
-    """`install_machine_token`, then `check_machine_token` (the token known
-    to the check only to mask it)."""
+def setup_machine_token(
+    layout: Layout,
+    source: Path,
+    *,
+    before_check: Callable[[], None] = lambda: None,
+) -> Check:
+    """`install_machine_token`, then `before_check` (as `setup_app_key`),
+    then `check_machine_token` (the token known to the check only to mask
+    it)."""
     token = _read_token(source)
     warnings = _install_token(layout, token)
+    before_check()
     check = check_machine_token(layout, token)
     return replace(check, warnings=warnings + check.warnings)
 
@@ -394,7 +414,9 @@ def publisher_self_check(layout: Layout) -> bytes:
         "request_id": f"setup-agent-{uuid.uuid4().hex}",
     }
     data = json.dumps(payload, sort_keys=True).encode("utf-8")
-    return perimeter_client.sudo_call(data, layout, operation=request.SELF_CHECK)
+    return perimeter_client.sudo_call(
+        data, layout, operation=request.SELF_CHECK, timeout=SELF_CHECK_TIMEOUT
+    )
 
 
 def exec_check_github(layout: Layout) -> plat.RunResult:

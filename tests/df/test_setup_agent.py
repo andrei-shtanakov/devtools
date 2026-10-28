@@ -18,7 +18,15 @@ from pathlib import Path
 
 import pytest
 
-from df import cli, fsutil, journal, launch_release, launcher_entry, setup_agent
+from df import (
+    cli,
+    fsutil,
+    journal,
+    launch_release,
+    launcher_entry,
+    perimeter_client,
+    setup_agent,
+)
 from df import paths as df_paths
 from df import platform as plat
 from df.config import Account, dump_accounts
@@ -84,6 +92,13 @@ class W:
     def rows(self) -> list[tuple[str, str]]:
         rows = journal.read_journal(self.lay.journal)
         return [(str(r["step"]), str(r["event"])) for r in rows]
+
+
+def odd_main(w: W, argv: list[str]) -> int:
+    """`main` on a snapshot whose generation is odd (a crashed bracket)."""
+    journal.generation_begin(w.lay)
+    raw = RawSnapshot(journal.read_generation(w.lay), None, None, None, None, False)
+    return cli.main(argv, mode="writer", read=Stable(raw, 0), lock_fd=99, layout=w.lay)
 
 
 def response(problems: list[str] | None = None, outcome: str = "done") -> bytes:
@@ -1050,6 +1065,64 @@ def test_only_this_apps_problems_fail(
         assert w.rows() == [("setup-agent", "done")]
     else:
         assert f"проверка не прошла: self-check: {problem}" in err
+
+
+@pytest.mark.parametrize("kind", ["key", "token"])
+def test_odd_generation_closed_before_the_check(w: W, kind: str) -> None:
+    """A writer closes an odd generation once its refusals are behind it
+    (PR #643): the check's readers would otherwise see `Transitional`."""
+    seen: list[int] = []
+    real_check, real_github = setup_agent.publisher_self_check, w.github
+
+    def check(lay: Layout) -> bytes:
+        seen.append(journal.read_generation(lay))
+        return real_check(lay)
+
+    w.mp.setattr(setup_agent, "publisher_self_check", check)
+    w.mp.setattr(
+        setup_agent,
+        "exec_check_github",
+        lambda lay: (seen.append(journal.read_generation(lay)), real_github.pop(0))[1],
+    )
+    argv = key_argv(w.source(KEY)) if kind == "key" else token_argv(w.source(TOKEN))
+    assert odd_main(w, argv) == 0
+    assert seen and all(g % 2 == 0 for g in seen)
+    rows = journal.read_journal(w.lay.journal)
+    assert any(r["step"] == "generation" and r["event"] == "warn" for r in rows)
+
+
+def test_refused_setup_leaves_an_odd_generation(w: W) -> None:
+    """A refusal before the write changes nothing, the generation included."""
+    argv = key_argv(w.source(b"not a key"))
+    assert odd_main(w, argv) == 2
+    assert journal.read_generation(w.lay) % 2 == 1
+    assert not w.lay.app_key(APP_ID).exists()
+
+
+def test_journal_names_an_unchecked_key(
+    w: W, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A key no product uses is not "проверка пройдена" in the journal."""
+    w.self_check = [response([])]
+    assert w.main(key_argv(w.source(KEY))) == 0
+    text = w.journal_text()
+    assert "не проверено" in text and "проверка пройдена" not in text
+
+
+def test_self_check_gets_its_own_timeout(
+    fake_layout: FakeLayout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`self-check` makes many 20 s requests: not `perimeter-status`'s 60 s."""
+    got: list[float] = []
+
+    def run(argv: list[str], data: bytes, *, timeout: float) -> plat.RunResult:
+        got.append(timeout)
+        return plat.RunResult(0, response([]), b"", True)
+
+    monkeypatch.setattr(plat, "run_with_input", run)
+    setup_agent.publisher_self_check(fake_layout.layout)
+    assert got == [setup_agent.SELF_CHECK_TIMEOUT]
+    assert setup_agent.SELF_CHECK_TIMEOUT > perimeter_client.CALL_TIMEOUT
 
 
 def test_installation_claimed_by_two_apps_is_this_apps(

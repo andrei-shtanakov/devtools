@@ -61,7 +61,11 @@ class _NoAnswer(Exception):
 
 
 def sudo_call(
-    data: bytes, layout: Layout | None = None, *, operation: str = OPERATION
+    data: bytes,
+    layout: Layout | None = None,
+    *,
+    operation: str = OPERATION,
+    timeout: float = CALL_TIMEOUT,
 ) -> bytes:
     """`df-publish <operation>` through `sudo`; its stdout.
 
@@ -72,7 +76,7 @@ def sudo_call(
     lay = default_layout() if layout is None else layout
     wrapper = lay.libexec / "df-publish"
     argv = [SUDO, "-n", "-u", PUBLISHER, str(wrapper), operation]
-    result = plat.run_with_input(argv, data, timeout=CALL_TIMEOUT)
+    result = plat.run_with_input(argv, data, timeout=timeout)
     if not result.launched or result.timed_out or result.stdout_truncated:
         raise OSError(f"{operation}: the call failed (code {result.returncode})")
     return result.stdout

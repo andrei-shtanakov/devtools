@@ -678,7 +678,7 @@ def _writer(
     if args.command == "perimeter":
         return _perimeter_restore(args, lay, snap)
     if args.command == "setup-agent":
-        return _setup_agent(args, lay)
+        return _setup_agent(args, lay, snap)
     requested = _requested(args, snap, pending)
     if mode == "bootstrap" and _healthy(lay, snap):
         raise Refusal(
@@ -863,7 +863,7 @@ def _restore_copy(source: str) -> bytes:
         raise Refusal(f"perimeter restore --from: {exc}") from exc
 
 
-def _setup_agent(args: argparse.Namespace, lay: Layout) -> int:
+def _setup_agent(args: argparse.Namespace, lay: Layout, snap: Snapshot) -> int:
     """`setup-agent app-key | machine-token` (Task 12): root writes the
     secret (`df.setup_agent`), then checks it -- `app-key` by the publisher's
     `self-check`, `machine-token` by `df-exec`'s `check-github`. A refusal
@@ -871,7 +871,9 @@ def _setup_agent(args: argparse.Namespace, lay: Layout) -> int:
     is journalled `failed`, a failed check `needs-human` (exit 3), else
     `done`; a secret renamed into place but not made durable is
     `needs-human` too. No `/etc/df` file of the snapshot changes: no generation
-    bracket. Neither the journal nor any output carries the secret."""
+    bracket; an odd generation is closed after the write, before the checks
+    (their readers need a stable snapshot). Neither the journal nor any
+    output carries the secret."""
     source = Path(args.file)
     key = args.setup_command == "app-key"
     if key:
@@ -879,11 +881,17 @@ def _setup_agent(args: argparse.Namespace, lay: Layout) -> int:
     else:
         target = lay.role_home(setup_agent.EXEC).joinpath(*MACHINE_TOKEN)
         what = f"machine-token {target}"
+
+    def close() -> None:
+        _close_odd_generation(lay, snap)
+
     try:
         if key:
-            check = setup_agent.setup_app_key(lay, args.app_id, source)
+            check = setup_agent.setup_app_key(
+                lay, args.app_id, source, before_check=close
+            )
         else:
-            check = setup_agent.setup_machine_token(lay, source)
+            check = setup_agent.setup_machine_token(lay, source, before_check=close)
     except fsutil.NotDurable as exc:  # the old secret is already replaced
         _journal_setup(lay, "needs-human", f"{what}: {_NOT_DURABLE}: {exc}")
         raise NeedsHuman(f"{what}: {_NOT_DURABLE} ({exc})") from exc
@@ -891,7 +899,8 @@ def _setup_agent(args: argparse.Namespace, lay: Layout) -> int:
         _journal_setup(lay, "failed", f"{what}: {type(exc).__name__}: {exc}")
         raise
     event = "done" if check.failure is None else "needs-human"
-    _journal_setup(lay, event, f"{what}: {check.failure or 'проверка пройдена'}")
+    outcome = check.failure or "; ".join(check.warnings) or "проверка пройдена"
+    _journal_setup(lay, event, f"{what}: {outcome}")
     print(f"darkfactory: записан {what}")
     for line in check.lines:
         print(f"darkfactory: {line}")
