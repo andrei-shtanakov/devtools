@@ -26,7 +26,7 @@ import os
 import re
 import stat
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -430,7 +430,7 @@ def check_app_key(layout: Layout, app_id: int) -> Check:
     if not isinstance(problems, list):
         return Check((), warnings, "self-check: в ответе нет problems")
     texts = [str(p) for p in problems]
-    installs = {p.installation_id: p.app_id for p in products.values()}
+    installs = _installation_apps(products.values())
     app = [p for p in texts if _problem_app(p, installs) in (app_id, None)]
     other = tuple(f"self-check: {p}" for p in texts if p not in app)
     if app:
@@ -439,7 +439,17 @@ def check_app_key(layout: Layout, app_id: int) -> Check:
     return Check((f"self-check издателя: {line}",), warnings + other)
 
 
-def _problem_app(problem: str, installs: Mapping[int, int]) -> int | None:
+def _installation_apps(products: Iterable[Product]) -> dict[int, int | None]:
+    """Installation id -> its App; an id two Apps claim maps to `None`
+    (ambiguous: judged as this App's, conservative)."""
+    apps: dict[int, int | None] = {}
+    for p in products:
+        known = apps.get(p.installation_id, p.app_id)
+        apps[p.installation_id] = p.app_id if known == p.app_id else None
+    return apps
+
+
+def _problem_app(problem: str, installs: Mapping[int, int | None]) -> int | None:
     """The App a problem of `APP_PROBLEMS` concerns: `app_key_unusable: <id>`
     and `app_unreadable: <id>: ...` name it; `app_installation_*: <id>`
     names an installation, mapped through `products.toml`. `None`: not

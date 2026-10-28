@@ -1052,6 +1052,18 @@ def test_only_this_apps_problems_fail(
         assert f"проверка не прошла: self-check: {problem}" in err
 
 
+def test_installation_claimed_by_two_apps_is_this_apps(
+    w: W, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An installation id two Apps claim is ambiguous: judged as this App's
+    (conservative), whatever the file order."""
+    two_apps(w, Product(300, "o/c", "fork", 2, 11, "df-bot", "/c"))
+    w.self_check = [response(["app_installation_unreadable: 11"])]
+    argv = ["setup-agent", "app-key", "--app-id", "1", "--file", str(w.source(KEY))]
+    assert w.main(argv) == 3
+    assert "проверка не прошла" in capsys.readouterr().err
+
+
 def test_unused_app_with_another_apps_problem(
     w: W, capsys: pytest.CaptureFixture[str]
 ) -> None:
