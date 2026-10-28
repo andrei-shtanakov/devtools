@@ -127,6 +127,12 @@ class Layout:
         return self.var / "perimeter"
 
     @property
+    def perimeter_created(self) -> Path:
+        """`/var/lib/df/perimeter.created`: root's record that `perimeter-init`
+        once created the database (outside `perimeter/`, `0644`)."""
+        return self.var / "perimeter.created"
+
+    @property
     def secrets_dir(self) -> Path:
         """`/etc/df/secrets`: tokens (`df-publisher`)."""
         return self.etc / "secrets"

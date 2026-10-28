@@ -141,6 +141,70 @@ def test_publisher_serve_reaches_the_frame(
     assert '"outcome":"refused"' in capsys.readouterr().out
 
 
+def _perimeter_layout(tmp_path: Path, uid: int) -> Layout:
+    from df.config import Account, dump_accounts
+
+    lay = Layout(Path(os.path.realpath(tmp_path)))
+    lay.install_dir.mkdir(parents=True)
+    lay.perimeter_dir.mkdir(parents=True, mode=0o700)
+    row = Account("df-publisher", uid, os.getgid(), "ready", "t")
+    lay.accounts.write_text(dump_accounts({"df-publisher": row}))
+    return lay
+
+
+def _perimeter_init(lay: Layout) -> int:
+    return cli.main(
+        ["publisher", "perimeter-init"],
+        mode="reader",
+        read=Stable(RAW, 0),
+        lock_fd=None,
+        layout=lay,
+    )
+
+
+def test_cli_perimeter_init_is_a_reader() -> None:
+    argv = ["publisher", "perimeter-init"]
+    assert launcher_entry.mode_of(argv) == "reader"
+    assert cli.parsed_mode(cli._parse(argv)) == "reader"  # noqa: SLF001
+
+
+def test_cli_perimeter_init_creates_once(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from df.publisher import perimeter
+
+    lay = _perimeter_layout(tmp_path, os.geteuid())
+    assert _perimeter_init(lay) == 0
+    assert "perimeter-init: created" in capsys.readouterr().out
+    assert _perimeter_init(lay) == 0
+    assert "perimeter-init: present" in capsys.readouterr().out
+    (lay.perimeter_dir / perimeter.DB_NAME).unlink()
+    assert _perimeter_init(lay) == 2
+    assert perimeter.LOST_TEXT in capsys.readouterr().err
+    assert not (lay.perimeter_dir / perimeter.DB_NAME).exists()
+
+
+def test_cli_perimeter_init_orphan_journal_is_for_a_human(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from df.publisher import perimeter
+
+    lay = _perimeter_layout(tmp_path, os.geteuid())
+    (lay.perimeter_dir / perimeter.JOURNAL).write_bytes(b"old pages")
+    assert _perimeter_init(lay) == 2
+    assert perimeter.INTEGRITY_TEXT in capsys.readouterr().err
+    assert not (lay.perimeter_dir / perimeter.DB_NAME).exists()
+
+
+def test_cli_perimeter_init_only_as_the_publisher(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    lay = _perimeter_layout(tmp_path, os.geteuid() + 1)
+    assert _perimeter_init(lay) == 2
+    assert "только от учётки df-publisher" in capsys.readouterr().err
+    assert os.listdir(lay.perimeter_dir) == []
+
+
 BAD_SERVICE = [
     ["publisher", "serve"],
     ["publisher", "serve", "merge", "extra"],

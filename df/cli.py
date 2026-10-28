@@ -50,6 +50,7 @@ from df.config import (
     InstallConfig,
     Pending,
     dump_install,
+    load_accounts,
     parse_install,
 )
 from df.digest import TreeError
@@ -57,6 +58,7 @@ from df.journal import NeedsHuman, Stable, StepFailed, Transitional
 from df.manifest import ManifestError
 from df.paths import Layout, default_layout
 from df.publisher import main as publisher_main
+from df.publisher import perimeter
 from df.sources import UnsupportedLock
 from df.stage2_config import OPERATIONS
 from df.state import Mode, ReadResult, Snapshot
@@ -303,7 +305,8 @@ def _add_cli(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
 def _add_service(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
     """`roles setup [--operator NAME]` (writer); `launch [exec] <role> <op>`,
     `publisher serve <op>` and `run start|resume` (readers; the wrappers of
-    `df.libexec` call them, one exact shape each)."""
+    `df.libexec` call them, one exact shape each); `publisher perimeter-init`
+    (a reader as `df-publisher`, which `roles setup` runs)."""
     opts = {"exit_on_error": False, "add_help": False, "allow_abbrev": False}
     group = sub.add_parser("roles", **opts)
     words = group.add_subparsers(
@@ -315,6 +318,7 @@ def _add_service(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
         dest="publisher_command", required=True, parser_class=_Parser
     )
     words.add_parser("serve", **opts).add_argument("operation", choices=PUBLISHER_ARGS)
+    words.add_parser("perimeter-init", **opts)
     sub.add_parser("run", **opts).add_argument("words", nargs=argparse.REMAINDER)
     sub.add_parser("launch", **opts).add_argument("words", nargs="+")
 
@@ -388,10 +392,33 @@ def _run(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
 
 def _publisher(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
     """`publisher serve <op>` as `df-publisher`, from the one snapshot."""
+    if args.publisher_command == "perimeter-init":
+        return _perimeter_init(lay)
     if isinstance(read, Transitional):
         raise Refusal(doctor.transitional_text(read.generation))
     snap = state.parse_snapshot(read.value, lay, mode="reader")
     return publisher_main.main([args.operation], layout=lay, snapshot=snap)
+
+
+_PERIMETER_TEXTS = {
+    "lost": perimeter.LOST_TEXT,
+    "integrity": perimeter.INTEGRITY_TEXT,
+}
+
+
+def _perimeter_init(lay: Layout) -> int:
+    """`publisher perimeter-init`: the perimeter database, only as the
+    `df-publisher` of `accounts.toml` (its files are born the role's)."""
+    account = load_accounts(lay.accounts).get(publisher_main.PUBLISHER_USER)
+    if account is None or account.state != "ready" or os.geteuid() != account.uid:
+        raise Refusal("publisher perimeter-init: только от учётки df-publisher")
+    try:
+        outcome = perimeter.create_db(lay)
+    except perimeter.Unavailable as exc:
+        text = _PERIMETER_TEXTS.get(exc.reason, f"perimeter-init: {exc.reason}")
+        raise Refusal(text) from exc
+    print(f"perimeter-init: {outcome}")
+    return EXIT_OK
 
 
 def _doctor(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:

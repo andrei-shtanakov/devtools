@@ -379,6 +379,12 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
         "to ids/<id> (EEXIST judged), then sync_dir(ids); a crash before the "
         "link leaves a temp the next reserve sweeps under the global lock"
     ),
+    ("publisher.perimeter", "_build", "os.rename", 1): (
+        "protocol create_db (under db.lock LOCK_EX): NEW_DB born 0600 by "
+        "create_file, the schema committed by SQLite (synchronous=EXTRA), "
+        "sync_file, rename, sync_dir(perimeter); a leftover temp is swept by "
+        "the next create_db; the files SQLite itself makes are not seen"
+    ),
     ("publisher.store", "journal", "os.open no-create", 1): (
         "the journal exists (create_file's FileExistsError): O_APPEND, one "
         "write of a whole line, then sync_file"
@@ -554,6 +560,15 @@ SUBPROCESS_CREATORS = {
     "execv of sudo (the human's run start)": (
         "replaces the process; sudo runs the root-owned df-run-start wrapper"
     ),
+    "darkfactory publisher perimeter-init (roles setup, as df-publisher)": (
+        "protocol create_db of the role: its own files under perimeter/, "
+        "judged by roles setup's check (database, marker); root then writes "
+        "perimeter.created by write_atomic"
+    ),
+    "sudo df-publish perimeter-status (perimeter client)": (
+        "the publisher's own protocol (its state and the perimeter database); "
+        "the client keeps only stdout"
+    ),
 }
 #: Every site that starts a process (`os.system`/`posix_spawn*`/`spawn*`/
 #: `exec*`/`popen`/`fork`, `subprocess.*`), keyed like `FS_SITES`, with the
@@ -561,7 +576,8 @@ SUBPROCESS_CREATORS = {
 #: `test_every_process_start_is_named` until it is named there.
 PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
     ("fsutil", "_sysctl_boot_id", "subprocess.run", 1): ("sysctl (boot id)",),
-    # run_command (root), run_as (df-build), run_with_input (df-publisher)
+    # run_command (root), run_as (df-build, df-publisher), run_with_input
+    # (df-publisher; the roles, perimeter client)
     ("platform", "_execute", "subprocess.Popen", 1): (
         "openssl dgst -sign (publisher App JWT)",
         "uv python install (admin)",
@@ -570,6 +586,8 @@ PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
         "cleaner find/chmod/rm (as df-build)",
         "useradd / dscl (account)",
         "probes: ps / pkill / sudo -l / getent / dscl -read / xcrun",
+        "darkfactory publisher perimeter-init (roles setup, as df-publisher)",
+        "sudo df-publish perimeter-status (perimeter client)",
     ),
     ("platform", "spawn_as", "subprocess.Popen", 1): (
         "tar -cf - (copy producer, as df-build)",

@@ -958,9 +958,17 @@ product_unknown`); перед каждой операцией — `self_check` (
 
 > Клиент: отсутствующая или не разбираемая строка ответа, а также ненулевой код выхода без JSON — это `unknown`.
 
+> **Разделение (исполнение 28.10):** восстановление базы — команда `darkfactory perimeter
+> restore` (`--from`/`--empty`/`--set-aside-old`), шаги протокола 1–4 и (а)–(д) ниже и
+> шесть его тестов — вынесено в **Task 11r** (отдельный PR сразу следом). Task 11 даёт
+> хранилище, операции, `perimeter-init`, клиента и семантику `restored_pending` /
+> `restore.intent`, которые читает `open_db`. Task 11r обязана влиться **до Task 14**:
+> раньше живой установки нет, поэтому состояние `lost` без выхода не возникает ни на
+> одном хосте.
+
 **Files:**
 - Create: `df/publisher/perimeter.py`, `df/perimeter_client.py`
-- Modify: `df/cli.py` (`perimeter restore`, писатель), `df/roles_setup.py`
+- Modify: `df/cli.py` (служебная `publisher perimeter-init`), `df/roles_setup.py`
   (`perimeter-init`)
 - Test: `tests/df/test_perimeter.py`, `tests/df/test_perimeter_client.py`
 
@@ -971,9 +979,15 @@ product_unknown`); перед каждой операцией — `self_check` (
   restored_pending}`; `/var/lib/df/perimeter/created` — отметка первичного создания
   (`df-publisher`, `0600`):
   - `create_db(layout)` — только шаг `roles setup` `perimeter-init`, только если нет ни
-    базы, ни отметки; пишет схему, `admission = ready`, затем отметку;
+    базы, ни отметки; пишет схему, `admission = ready`, затем отметку; после успеха
+    `roles setup` пишет **вторую** отметку вне `perimeter/` — `/var/lib/df/perimeter.created`
+    (root, `0644`): потеря всего каталога `perimeter/` тогда даёт `lost`, а не молча
+    новую базу `ready` (ревью Task 11); база не строится рядом с оставшимся
+    `events.sqlite-journal` (`integrity`, нужен человек); событие сверх `MAX_EVENTS`
+    записывается (потеря нарушения хуже), после чего каждое открытие — `too_many_events`;
   - `open_db` **никогда не создаёт**: нет базы при отметке → `unavailable: lost`
-    (обращение к человеку); нет ни того ни другого → `unavailable: not_initialized`;
+    (обращение к человеку), так же при корневой отметке `perimeter.created` без базы и
+    без отметки; нет ни того ни другого → `unavailable: not_initialized`;
   - **барьер базы** (r3 N1): файл `perimeter/db.lock` (`df-publisher`, `0600`); каждый
     процесс издателя берёт `flock(LOCK_SH)` **до** `sqlite3.connect` и держит до
     закрытия соединения; `create_db` и восстановление — `LOCK_EX`;
@@ -1079,6 +1093,34 @@ product_unknown`); перед каждой операцией — `self_check` (
   `lost`, `not_initialized`, `restore_pending` с `null`-снимком — причина сохраняется).
 - [ ] **Step 2–4.** **Step 5: Commit** `feat(df): perimeter event store and status ops`
 
+Тесты протокола восстановления из списка выше (`test_restore_waits_for_open_connection`,
+`test_restore_timeout_changes_nothing`, `test_restore_crash_points`,
+`test_restore_with_hot_journal`, `test_restore_corrupt_pair_refused`,
+`test_set_aside_crash_points`) — в Task 11r. `test_disk_full_refuses` (Task 13, сводка) —
+здесь в форме `PRAGMA max_page_count` (без root); вариант на файловой системе
+ограниченного размера — в root-ячейках Task 14.
+
+---
+
+### Task 11r: `darkfactory perimeter restore`
+
+**Files:**
+- Modify: `df/cli.py` (`perimeter restore`, писатель; `WRITER_COMMANDS`),
+  `df/publisher/perimeter.py` (протокол восстановления), `df/launcher_entry.py`
+- Test: `tests/df/test_perimeter_restore.py`
+
+**Interfaces:** `darkfactory perimeter restore --from PATH | --empty` и аварийная ветка
+`--set-aside-old` — ровно как в Task 11 «Жизненный цикл базы»: исполнение от
+`df-publisher` (`run_as`, данные копии через stdin `run_with_input`), шаги 1–4
+(временный файл с `integrity_check` и `admission = restored_pending` до барьера →
+`LOCK_EX` ≤ 30 с → откат горячего журнала чтением → `rename` + `fsync`) и (а)–(д)
+(`restore.intent`, `set-aside/<UTC>/`, журнал переносится первым). `--empty` создаёт пустую
+базу с `restored_pending` (не `ready`). Текст `LOST_TEXT` называет команду.
+
+- [ ] **Step 1: Тесты** — шесть тестов протокола из Task 11 Step 1 (см. выше) +
+  `test_restore_empty_is_pending`, `test_restore_is_root_writer_only`.
+- [ ] **Step 2–4.** **Step 5: Commit** `feat(df): perimeter restore`
+
 ---
 
 ### Task 12: `darkfactory setup-agent`
@@ -1137,7 +1179,9 @@ product_unknown`); перед каждой операцией — `self_check` (
 Тест: норма, 9000, 10 001, мало места, недоступно; Task 11 — ошибка записи при нехватке
 места (`SQLITE_FULL`) даёт `refused: storage_full`, не `done`, подтверждённые события
 на месте (`test_disk_full_refuses`, файловая система ограниченного размера: `tmpfs`
-`size=` на Linux, образ `hdiutil` на macOS — в root-ячейках).
+`size=` на Linux, образ `hdiutil` на macOS — в root-ячейках Task 14; в Task 11 — форма
+`PRAGMA max_page_count`, ответ `refused: storage_full` с `verified_not_done`: откат
+транзакции и отсутствие строки по ключу доказывают, что событие не записано).
 
 Проверки уровня 2 (каждая — `Check` со статусами §8), порядок:
 1. `roles.users` — `verify_service_user` для трёх ролей;
@@ -1238,6 +1282,9 @@ evidence, r1 N11) → для отзыва — фикстурная правка 
   дескрипторов > 2 нет, вызов был с открытым fd 9 у вызывающего.
 
 - [ ] **Step 1–3:** мир, тесты, job workflow.
+  В root-ячейках также `test_disk_full_refuses` на файловой системе ограниченного размера
+  (`tmpfs size=` на Linux, образ `hdiutil` на macOS): `record-violation` при нехватке места
+  — `refused: storage_full`, подтверждённые события на месте (перенесено из Task 11).
 - [ ] **Step 4:** прогон CI на PR — обе ячейки зелёные; расхождение со спекой —
   находка и стоп (не подгонять `df` и тесты).
 - [ ] **Step 5: Commit** `test(df): stage-2a root acceptance (§4.5 without merge)`
