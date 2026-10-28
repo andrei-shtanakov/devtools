@@ -437,6 +437,10 @@ def test_set_aside_crash_points(ready: Layout, copy: bytes, point: str) -> None:
     base = ready.perimeter_dir
     old = {n: digest(base / n) for n in (perimeter.DB_NAME, JOURNAL)}
     crash_at(ready, point, copy, set_aside=True)
+    # the journal leaves first; the database is absent only between the
+    # database's move and the new one's rename
+    assert (base / JOURNAL).exists() == (point in ("intent", "set-aside-dir"))
+    assert db_file(ready).exists() == (point != "db-moved")
     db_was = db_file(ready).exists()
     assert unavailable(ready) == "restore_incomplete"
     assert db_file(ready).exists() == db_was  # nothing created
@@ -450,6 +454,26 @@ def test_set_aside_crash_points(ready: Layout, copy: bytes, point: str) -> None:
     assert admission_of(ready) == "restored_pending"
     assert rows(ready) == PENDING  # the intent's stage, not an empty base
     never_clear(ready)
+
+
+def test_set_aside_failure_midway_keeps_its_stage(
+    ready: Layout, copy: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An error (not a crash) after the intent leaves the intent's stage in
+    place: the repeat still finishes, from the stage of the first call."""
+    hot_journal(ready)
+
+    def step(name: str) -> None:
+        if name == "db-moved":
+            raise OSError("disk went away")
+
+    monkeypatch.setattr(perimeter, "RESTORE_STEP", step)
+    with pytest.raises(OSError, match="disk went away"):
+        perimeter.restore(ready, copy, set_aside_old=True)
+    assert (ready.perimeter_dir / perimeter.RESTORE_DB).exists()
+    monkeypatch.setattr(perimeter, "RESTORE_STEP", perimeter._no_step)  # noqa: SLF001
+    assert perimeter.restore(ready, None) == "resumed"
+    assert rows(ready) == PENDING
 
 
 @pytest.mark.parametrize(
