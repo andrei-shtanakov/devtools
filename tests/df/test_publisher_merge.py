@@ -182,6 +182,8 @@ def test_path_templates_per_segment() -> None:
     assert not m("workstreams/a/b/approvals/n.yaml", merge.ENVELOPE_PATH)
     assert not m("workstreams/approvals/n.yaml", merge.ENVELOPE_PATH)
     assert not m(STOP, merge.ENVELOPE_PATH)  # '*' never crosses '/'
+    assert not m(ENVELOPE + "/extra", merge.ENVELOPE_PATH)  # longer
+    assert not m("workstreams/ws/approvals", merge.ENVELOPE_PATH)  # shorter
     assert m(STOP, merge.STOP_PATH)
     assert not m("workstreams/ws/approvals/stops/x/n-g1.yaml", merge.STOP_PATH)
     assert not m("workstreams/ws/approvals/stops/n.yaml", merge.STOP_PATH)
