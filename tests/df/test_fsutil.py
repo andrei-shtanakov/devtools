@@ -390,6 +390,9 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
     ("launch_release", "urllib_transport", ".open", 1): (
         "an HTTP GET through an opener (`urllib`): reads the network, writes no file"
     ),
+    ("publisher.github", "default_transport", ".open", 1): (
+        "an HTTP request through an opener (`urllib`): the network, no file"
+    ),
     ("inputs", "", "import shutil", 1): "root's checkout: scratch",
     ("receive", "", "import shutil", 1): "protocol remove_own_tree: rmtree",
     ("acl", "_libsystem", "ctypes.CDLL", 1): "ACL reads only: acl_get_*_np, acl_free",
