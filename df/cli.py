@@ -9,7 +9,8 @@ lock, settles and reads the snapshot itself. Subcommands: `init` and
 `install` (Task 9); `models list|set` (Task 10); `doctor --probe-models`
 (Task 11); `doctor [--json]` (Task 12, `df.doctor`); `cli set openssl PATH`
 (stage 2a, Task 4a); `perimeter restore --from PATH | --empty
-[--set-aside-old]` (stage 2a, Task 11r).
+[--set-aside-old]` (stage 2a, Task 11r); `setup-agent app-key --app-id N
+--file PATH | machine-token --file PATH` (stage 2a, Task 12).
 
 Exit codes (M7): 0 success; 2 a refusal or a configuration error, with the
 step named; 3 `NeedsHuman` (the instruction on stderr); 1 a program error
@@ -45,6 +46,7 @@ from df import (
     roles,
     roles_setup,
     run_start,
+    setup_agent,
     state,
 )
 from df import platform as plat
@@ -59,7 +61,7 @@ from df.config import (
 from df.digest import TreeError
 from df.journal import NeedsHuman, Stable, StepFailed, Transitional
 from df.manifest import ManifestError
-from df.paths import Layout, default_layout
+from df.paths import MACHINE_TOKEN, Layout, default_layout
 from df.publisher import main as publisher_main
 from df.publisher import perimeter
 from df.sources import UnsupportedLock
@@ -104,6 +106,7 @@ _RESTORE_DONE = {
         "же источником, повторять не нужно; иначе повторите команду со своим"
     ),
 }
+_SETUP_FAILED = "секрет записан, проверка не прошла: "
 _LIST_COLUMNS = ("роль", "harness", "model", "effort", "источник", "проверка")
 _REFUSALS = (
     StepFailed,
@@ -213,13 +216,14 @@ def _check_call(
 
 def parsed_mode(args: argparse.Namespace) -> str:
     """The mode the parsed command needs: `writer` for `init`, `install`,
-    `models set`, `cli set`, `roles setup` and `perimeter restore`
-    (`WRITER_COMMANDS`), else `reader`."""
+    `models set`, `cli set`, `roles setup`, `setup-agent` and `perimeter
+    restore` (`WRITER_COMMANDS`), else `reader`."""
     sub = (
         getattr(args, "models_command", None)
         or getattr(args, "roles_command", None)
         or getattr(args, "cli_command", None)
         or getattr(args, "perimeter_command", None)
+        or getattr(args, "setup_command", None)
     )
     words = (args.command,) if sub is None else (args.command, sub)
     writer = any(words[: len(cmd)] == cmd for cmd in launcher_entry.WRITER_COMMANDS)
@@ -272,6 +276,7 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     _add_models(sub)
     _add_cli(sub)
     _add_perimeter(sub)
+    _add_setup_agent(sub)
     _add_service(sub)
     doctor = sub.add_parser(
         "doctor", exit_on_error=False, add_help=False, allow_abbrev=False
@@ -335,6 +340,27 @@ def _add_perimeter(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
     source.add_argument("--from", dest="source", metavar="PATH")
     source.add_argument("--empty", action="store_true")
     put.add_argument("--set-aside-old", action="store_true")
+
+
+def _add_setup_agent(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
+    """`setup-agent app-key --app-id N --file PATH` and `setup-agent
+    machine-token --file PATH` (writers)."""
+    opts = {"exit_on_error": False, "add_help": False, "allow_abbrev": False}
+    group = sub.add_parser("setup-agent", **opts)
+    words = group.add_subparsers(
+        dest="setup_command", required=True, parser_class=_Parser
+    )
+    key = words.add_parser("app-key", **opts)
+    key.add_argument("--app-id", required=True, type=_app_id)
+    key.add_argument("--file", required=True)
+    words.add_parser("machine-token", **opts).add_argument("--file", required=True)
+
+
+def _app_id(text: str) -> int:
+    """A canonical positive decimal."""
+    if not text.isascii() or not text.isdigit() or text.startswith("0"):
+        raise argparse.ArgumentTypeError(f"--app-id {text!r}: нужно целое > 0")
+    return int(text)
 
 
 def _add_service(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
@@ -650,6 +676,8 @@ def _writer(
         return _cli_set(args, lay, snap)
     if args.command == "perimeter":
         return _perimeter_restore(args, lay, snap)
+    if args.command == "setup-agent":
+        return _setup_agent(args, lay)
     requested = _requested(args, snap, pending)
     if mode == "bootstrap" and _healthy(lay, snap):
         raise Refusal(
@@ -832,6 +860,51 @@ def _restore_copy(source: str) -> bytes:
         return inputs.read_capped(path, perimeter.MAX_COPY)
     except TreeError as exc:
         raise Refusal(f"perimeter restore --from: {exc}") from exc
+
+
+def _setup_agent(args: argparse.Namespace, lay: Layout) -> int:
+    """`setup-agent app-key | machine-token` (Task 12): root writes the
+    secret (`df.setup_agent`), then checks it -- `app-key` by the publisher's
+    `self-check`, `machine-token` by `df-exec`'s `check-github`. A refusal
+    before the write changes nothing and is not journalled; a failed write
+    is journalled `failed`, a failed check `needs-human` (exit 3), else
+    `done`. No `/etc/df` file of the snapshot changes: no generation
+    bracket. Neither the journal nor any output carries the secret."""
+    source = Path(args.file)
+    key = args.setup_command == "app-key"
+    if key:
+        what = f"app-key {lay.app_key(args.app_id)}"
+    else:
+        target = lay.role_home(setup_agent.EXEC).joinpath(*MACHINE_TOKEN)
+        what = f"machine-token {target}"
+    try:
+        if key:
+            check = setup_agent.setup_app_key(lay, args.app_id, source)
+        else:
+            check = setup_agent.setup_machine_token(lay, source)
+    except OSError as exc:
+        _journal_setup(lay, "failed", f"{what}: {type(exc).__name__}: {exc}")
+        raise
+    event = "done" if check.failure is None else "needs-human"
+    _journal_setup(lay, event, f"{what}: {check.failure or 'проверка пройдена'}")
+    print(f"darkfactory: записан {what}")
+    for line in check.lines:
+        print(f"darkfactory: {line}")
+    for warning in check.warnings:
+        _say(f"предупреждение: {warning}")
+    if check.failure is not None:
+        raise NeedsHuman(_SETUP_FAILED + check.failure)
+    return EXIT_OK
+
+
+def _journal_setup(lay: Layout, event: str, detail: str) -> None:
+    journal.journal_event(
+        lay.journal,
+        run_id=uuid.uuid4().hex,
+        step=setup_agent.STEP,
+        event=event,
+        detail=detail,
+    )
 
 
 def _params(items: list[str]) -> dict[str, str]:

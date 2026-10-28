@@ -60,18 +60,21 @@ class _NoAnswer(Exception):
     """The call gave no response (repeated with the same request id)."""
 
 
-def sudo_call(data: bytes, layout: Layout | None = None) -> bytes:
-    """`df-publish perimeter-status` through `sudo`; its stdout.
+def sudo_call(
+    data: bytes, layout: Layout | None = None, *, operation: str = OPERATION
+) -> bytes:
+    """`df-publish <operation>` through `sudo`; its stdout.
 
-    `layout` is the caller's (the entry's root, D2); `None` is the default
-    layout. A response comes with any exit code (`refused` is 2); a call that
-    did not start, timed out or overflowed is `OSError`."""
+    `operation` is `perimeter-status` (the consumers) or `self-check` (root's
+    `setup-agent`). `layout` is the caller's (the entry's root, D2); `None` is
+    the default layout. A response comes with any exit code (`refused` is 2);
+    a call that did not start, timed out or overflowed is `OSError`."""
     lay = default_layout() if layout is None else layout
     wrapper = lay.libexec / "df-publish"
-    argv = [SUDO, "-n", "-u", PUBLISHER, str(wrapper), OPERATION]
+    argv = [SUDO, "-n", "-u", PUBLISHER, str(wrapper), operation]
     result = plat.run_with_input(argv, data, timeout=CALL_TIMEOUT)
     if not result.launched or result.timed_out or result.stdout_truncated:
-        raise OSError(f"{OPERATION}: the call failed (code {result.returncode})")
+        raise OSError(f"{operation}: the call failed (code {result.returncode})")
     return result.stdout
 
 

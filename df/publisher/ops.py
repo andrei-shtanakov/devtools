@@ -120,7 +120,7 @@ def _openssl(ctx: Context) -> Path:
 
 
 def _key_of(layout: Layout, app_id: int) -> Path:
-    return layout.secrets_dir / f"app-{app_id}.pem"
+    return layout.app_key(app_id)
 
 
 def build_context(ctx: Context) -> OpContext:

@@ -11,6 +11,9 @@ from pathlib import Path
 from df.config import ConfigError
 
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+#: The machine user's token under the home of `df-exec` (spec 4.3): the one
+#: spelling `setup-agent machine-token` writes and `check-github` reads.
+MACHINE_TOKEN: tuple[str, ...] = (".config", "df", "github-token")
 
 
 def _check_id(release_id: str) -> str:
@@ -136,6 +139,11 @@ class Layout:
     def secrets_dir(self) -> Path:
         """`/etc/df/secrets`: tokens (`df-publisher`)."""
         return self.etc / "secrets"
+
+    def app_key(self, app_id: int) -> Path:
+        """`/etc/df/secrets/app-<app_id>.pem`: the private key of a GitHub App
+        (`setup-agent app-key` writes it, the publisher reads it)."""
+        return self.secrets_dir / f"app-{app_id}.pem"
 
     @property
     def journal(self) -> Path:

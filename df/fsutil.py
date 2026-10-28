@@ -133,6 +133,53 @@ def _write_tmp(tmp: Path, text: str, mode: int) -> None:
     os.close(fd)
 
 
+def write_under(
+    dir_fd: int,
+    name: str,
+    data: bytes,
+    *,
+    mode: int,
+    uid: int,
+    gid: int,
+    path: Path,
+) -> None:
+    """Atomically replace `name` in the open directory `dir_fd` with `data`,
+    owned `uid:gid` at `mode`, durably; every step through the descriptor.
+
+    `openat(temp, O_CREAT|O_EXCL|O_NOFOLLOW)` born at `mode` (`exact_mode`)
+    -> `fchown` -> `fchmod` -> write -> `sync_file` -> `renameat(dir_fd,
+    temp, dir_fd, name)` -> `fault_point("renamed", path)` ->
+    `sync_dir(dir_fd)`. A swap of the directory's path after it was opened
+    does not redirect the write. The temp (`WRITE_TEMP`) is removed on a
+    failure before the rename. `path` names the target for the fault point
+    only; it is never opened."""
+    tmp = f".{name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    with exact_mode():
+        fd = os.open(tmp, flags, mode, dir_fd=dir_fd)
+    try:
+        try:
+            os.fchown(fd, uid, gid)
+            os.fchmod(fd, mode)
+            _write_all(fd, data)
+            sync_file(fd)
+        finally:
+            os.close(fd)
+        os.rename(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except BaseException:
+        _discard_at(dir_fd, tmp)
+        raise
+    fault_point("renamed", path)
+    sync_dir(dir_fd)
+
+
+def _discard_at(dir_fd: int, tmp: str) -> None:
+    try:
+        os.unlink(tmp, dir_fd=dir_fd)
+    except OSError:
+        pass
+
+
 def _write_all(fd: int, data: bytes) -> None:
     view = memoryview(data)
     while view:
