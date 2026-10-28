@@ -357,27 +357,49 @@ def _perimeter_problems(layout: Layout) -> list[str]:
 
 
 def _perimeter_init(layout: Layout, python: Path) -> None:
-    """`create_db` as `df-publisher`: the admin Python runs the entry with
-    `publisher perimeter-init` (the entry reads no data relative to the
-    code: the admin tree holds `df/` only)."""
-    argv = [str(python), "-I", "-B", "-S", str(layout.entry)]
-    result = plat.run_as(
+    """`create_db` as `df-publisher` (`publisher perimeter-init`)."""
+    result = run_as_publisher(layout, python, ["perimeter-init"], timeout=_INIT_TIMEOUT)
+    if publisher_succeeded(result):
+        _record_created(layout)
+        return
+    raise StepFailed("perimeter-init", publisher_failure(result) + _RETRY)
+
+
+def run_as_publisher(
+    layout: Layout,
+    python: Path,
+    words: list[str],
+    *,
+    timeout: float,
+    stdin: bytes | None = None,
+) -> plat.RunResult:
+    """The entry's `publisher <words>` as `df-publisher`, run by the admin
+    Python `python` without network, `env -i`, cwd `/` (the entry reads no
+    data relative to the code: the admin tree holds `df/` only)."""
+    argv = [str(python), "-I", "-B", "-S", str(layout.entry), "publisher", *words]
+    return plat.run_as(
         PUBLISHER_USER,
-        [*argv, "publisher", "perimeter-init"],
+        argv,
         env=_ROLE_ENV,
         cwd=Path("/"),
         network=False,
-        timeout=_INIT_TIMEOUT,
+        timeout=timeout,
+        stdin=stdin,
     )
-    if result.launched and not result.timed_out and result.returncode == 0:
-        _record_created(layout)
-        return
+
+
+def publisher_succeeded(result: plat.RunResult) -> bool:
+    """Launched, in time, exit 0."""
+    return result.launched and not result.timed_out and result.returncode == 0
+
+
+def publisher_failure(result: plat.RunResult) -> str:
+    """Why a run of `run_as_publisher` failed: its state and stderr."""
     err = result.stderr.decode("utf-8", "replace").strip()
     state = "не стартовал" if not result.launched else f"код {result.returncode}"
     if result.timed_out:
         state = "срок истёк"
-    detail = f"от {PUBLISHER_USER}: {state}" + (f": {err}" if err else "")
-    raise StepFailed("perimeter-init", detail + _RETRY)
+    return f"от {PUBLISHER_USER}: {state}" + (f": {err}" if err else "")
 
 
 def _record_created(layout: Layout) -> None:

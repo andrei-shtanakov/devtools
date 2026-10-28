@@ -8,7 +8,8 @@ the snapshot the entry read under the lock it holds; bootstrap takes the
 lock, settles and reads the snapshot itself. Subcommands: `init` and
 `install` (Task 9); `models list|set` (Task 10); `doctor --probe-models`
 (Task 11); `doctor [--json]` (Task 12, `df.doctor`); `cli set openssl PATH`
-(stage 2a, Task 4a).
+(stage 2a, Task 4a); `perimeter restore --from PATH | --empty
+[--set-aside-old]` (stage 2a, Task 11r).
 
 Exit codes (M7): 0 success; 2 a refusal or a configuration error, with the
 step named; 3 `NeedsHuman` (the instruction on stderr); 1 a program error
@@ -22,6 +23,7 @@ import json
 import os
 import sys
 import traceback
+import uuid
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -32,6 +34,7 @@ from df import (
     admin,
     doctor,
     fsutil,
+    inputs,
     install,
     journal,
     launch,
@@ -85,6 +88,20 @@ _UNSET = "—"
 SERVICE_COMMANDS = frozenset({"publisher"})
 #: What `publisher serve` takes: the five operations and the self-check.
 PUBLISHER_ARGS = (*OPERATIONS, "self-check")
+#: Seconds root waits for `publisher perimeter-restore` (the barrier wait,
+#: a copy of up to `perimeter.MAX_COPY` and its integrity check).
+RESTORE_TIMEOUT = 600.0
+_RESTORE_DONE = {
+    "restored": (
+        "база периметра восстановлена: admission = restored_pending; в работу "
+        "она входит после консервативного события на каждый корень, когда "
+        "эпохи доступны (до того — unavailable: restore_pending)"
+    ),
+    "resumed": (
+        "завершено прерванное восстановление --set-aside-old (его копия); "
+        "копия этого вызова не применена — повторите команду, чтобы применить её"
+    ),
+}
 _LIST_COLUMNS = ("роль", "harness", "model", "effort", "источник", "проверка")
 _REFUSALS = (
     StepFailed,
@@ -194,12 +211,13 @@ def _check_call(
 
 def parsed_mode(args: argparse.Namespace) -> str:
     """The mode the parsed command needs: `writer` for `init`, `install`,
-    `models set`, `cli set` and `roles setup` (`WRITER_COMMANDS`), else
-    `reader`."""
+    `models set`, `cli set`, `roles setup` and `perimeter restore`
+    (`WRITER_COMMANDS`), else `reader`."""
     sub = (
         getattr(args, "models_command", None)
         or getattr(args, "roles_command", None)
         or getattr(args, "cli_command", None)
+        or getattr(args, "perimeter_command", None)
     )
     words = (args.command,) if sub is None else (args.command, sub)
     writer = any(words[: len(cmd)] == cmd for cmd in launcher_entry.WRITER_COMMANDS)
@@ -251,6 +269,7 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     sub.add_parser("install", exit_on_error=False, add_help=False, allow_abbrev=False)
     _add_models(sub)
     _add_cli(sub)
+    _add_perimeter(sub)
     _add_service(sub)
     doctor = sub.add_parser(
         "doctor", exit_on_error=False, add_help=False, allow_abbrev=False
@@ -302,11 +321,27 @@ def _add_cli(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
     put.add_argument("path")
 
 
+def _add_perimeter(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
+    """`perimeter restore --from PATH | --empty [--set-aside-old]` (writer)."""
+    opts = {"exit_on_error": False, "add_help": False, "allow_abbrev": False}
+    group = sub.add_parser("perimeter", **opts)
+    words = group.add_subparsers(
+        dest="perimeter_command", required=True, parser_class=_Parser
+    )
+    put = words.add_parser("restore", **opts)
+    source = put.add_mutually_exclusive_group(required=True)
+    source.add_argument("--from", dest="source", metavar="PATH")
+    source.add_argument("--empty", action="store_true")
+    put.add_argument("--set-aside-old", action="store_true")
+
+
 def _add_service(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
     """`roles setup [--operator NAME]` (writer); `launch [exec] <role> <op>`,
     `publisher serve <op>` and `run start|resume` (readers; the wrappers of
     `df.libexec` call them, one exact shape each); `publisher perimeter-init`
-    (a reader as `df-publisher`, which `roles setup` runs)."""
+    and `publisher perimeter-restore (--stdin | --empty) [--set-aside-old]`
+    (readers as `df-publisher`, which `roles setup` and `perimeter restore`
+    run; no wrapper or sudoers rule reaches them)."""
     opts = {"exit_on_error": False, "add_help": False, "allow_abbrev": False}
     group = sub.add_parser("roles", **opts)
     words = group.add_subparsers(
@@ -319,6 +354,11 @@ def _add_service(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
     )
     words.add_parser("serve", **opts).add_argument("operation", choices=PUBLISHER_ARGS)
     words.add_parser("perimeter-init", **opts)
+    put = words.add_parser("perimeter-restore", **opts)
+    source = put.add_mutually_exclusive_group(required=True)
+    source.add_argument("--stdin", action="store_true")
+    source.add_argument("--empty", action="store_true")
+    put.add_argument("--set-aside-old", action="store_true")
     sub.add_parser("run", **opts).add_argument("words", nargs=argparse.REMAINDER)
     sub.add_parser("launch", **opts).add_argument("words", nargs="+")
 
@@ -394,6 +434,8 @@ def _publisher(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
     """`publisher serve <op>` as `df-publisher`, from the one snapshot."""
     if args.publisher_command == "perimeter-init":
         return _perimeter_init(lay)
+    if args.publisher_command == "perimeter-restore":
+        return _perimeter_restore_role(args, lay)
     if isinstance(read, Transitional):
         raise Refusal(doctor.transitional_text(read.generation))
     snap = state.parse_snapshot(read.value, lay, mode="reader")
@@ -406,18 +448,38 @@ _PERIMETER_TEXTS = {
 }
 
 
-def _perimeter_init(lay: Layout) -> int:
-    """`publisher perimeter-init`: the perimeter database, only as the
-    `df-publisher` of `accounts.toml` (its files are born the role's)."""
+def _require_publisher(lay: Layout, command: str) -> None:
+    """Only the `df-publisher` of `accounts.toml` (its files are born the
+    role's)."""
     account = load_accounts(lay.accounts).get(publisher_main.PUBLISHER_USER)
     if account is None or account.state != "ready" or os.geteuid() != account.uid:
-        raise Refusal("publisher perimeter-init: только от учётки df-publisher")
+        raise Refusal(f"publisher {command}: только от учётки df-publisher")
+
+
+def _perimeter_init(lay: Layout) -> int:
+    """`publisher perimeter-init`: the perimeter database, as `df-publisher`."""
+    _require_publisher(lay, "perimeter-init")
     try:
         outcome = perimeter.create_db(lay)
     except perimeter.Unavailable as exc:
         text = _PERIMETER_TEXTS.get(exc.reason, f"perimeter-init: {exc.reason}")
         raise Refusal(text) from exc
     print(f"perimeter-init: {outcome}")
+    return EXIT_OK
+
+
+def _perimeter_restore_role(args: argparse.Namespace, lay: Layout) -> int:
+    """`publisher perimeter-restore`: `perimeter.restore` as `df-publisher`;
+    the copy comes on stdin (`--stdin`), at most `MAX_COPY` bytes are read
+    (one more is a refusal of `restore`). Only root runs it (`perimeter
+    restore`, through `run_as`)."""
+    _require_publisher(lay, "perimeter-restore")
+    copy = sys.stdin.buffer.read(perimeter.MAX_COPY + 1) if args.stdin else None
+    try:
+        outcome = perimeter.restore(lay, copy, set_aside_old=args.set_aside_old)
+    except perimeter.Unavailable as exc:
+        raise Refusal(perimeter.restore_text(exc.reason)) from exc
+    print(f"perimeter-restore: {outcome}")
     return EXIT_OK
 
 
@@ -584,6 +646,8 @@ def _writer(
         return _roles_setup(args, lay, snap)
     if args.command == "cli":
         return _cli_set(args, lay, snap)
+    if args.command == "perimeter":
+        return _perimeter_restore(args, lay, snap)
     requested = _requested(args, snap, pending)
     if mode == "bootstrap" and _healthy(lay, snap):
         raise Refusal(
@@ -706,6 +770,55 @@ def _cli_set(args: argparse.Namespace, lay: Layout, snap: Snapshot) -> int:
     journal.generation_end(lay)
     print(f"darkfactory: {CLI_SETTABLE} = {path} записан в /etc/df/install.toml")
     return EXIT_OK
+
+
+def _perimeter_restore(args: argparse.Namespace, lay: Layout, snap: Snapshot) -> int:
+    """`perimeter restore` (Task 11r): root reads the copy (`--from`, on a
+    trusted path, at most `perimeter.MAX_COPY` bytes) and runs `publisher
+    perimeter-restore` as `df-publisher` with it on stdin; the protocol is
+    `perimeter.restore`. No `/etc/df` file changes, so no generation
+    bracket; one journal line records the outcome."""
+    copy = None if args.empty else _restore_copy(args.source)
+    python = libexec.admin_python_of(lay, snap)
+    _close_odd_generation(lay, snap)
+    words = ["perimeter-restore", "--empty" if copy is None else "--stdin"]
+    if args.set_aside_old:
+        words.append("--set-aside-old")
+    result = roles_setup.run_as_publisher(
+        lay, python, words, timeout=RESTORE_TIMEOUT, stdin=copy
+    )
+    lines = result.stdout.decode("utf-8", "replace").splitlines()
+    outcome = lines[-1].removeprefix("perimeter-restore: ") if lines else ""
+    ok = roles_setup.publisher_succeeded(result) and outcome in _RESTORE_DONE
+    detail = outcome if ok else roles_setup.publisher_failure(result)
+    source = "--empty" if copy is None else f"--from {args.source}"
+    journal.journal_event(
+        lay.journal,
+        run_id=uuid.uuid4().hex,
+        step="perimeter-restore",
+        event="done" if ok else "failed",
+        detail=f"{source}: {detail}",
+    )
+    if not ok:
+        raise Refusal(f"perimeter restore: {detail}")
+    print(f"darkfactory: {_RESTORE_DONE[outcome]}")
+    return EXIT_OK
+
+
+def _restore_copy(source: str) -> bytes:
+    """The copy `--from` names: an absolute path that passes the trusted-path
+    policy of root's reads of operator-given files (spec 3.10, as `cli set`),
+    a regular file read without following a link, at most `MAX_COPY`."""
+    path = Path(source)
+    if not source or not path.is_absolute():
+        raise Refusal(f"perimeter restore --from: путь {source!r} не абсолютный")
+    problems = plat.trusted_path_problems(path)
+    if problems:
+        raise Refusal("perimeter restore --from: " + "; ".join(problems))
+    try:
+        return inputs.read_capped(path, perimeter.MAX_COPY)
+    except TreeError as exc:
+        raise Refusal(f"perimeter restore --from: {exc}") from exc
 
 
 def _params(items: list[str]) -> dict[str, str]:
