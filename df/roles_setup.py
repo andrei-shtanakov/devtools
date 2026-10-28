@@ -360,7 +360,10 @@ def _perimeter_init(layout: Layout, python: Path) -> None:
     """`create_db` as `df-publisher` (`publisher perimeter-init`)."""
     result = run_as_publisher(layout, python, ["perimeter-init"], timeout=_INIT_TIMEOUT)
     if publisher_succeeded(result):
-        _record_created(layout)
+        try:
+            record_created(layout)
+        except OSError as exc:
+            raise StepFailed("perimeter-init", f"{exc}{_RETRY}") from exc
         return
     raise StepFailed("perimeter-init", publisher_failure(result) + _RETRY)
 
@@ -402,9 +405,10 @@ def publisher_failure(result: plat.RunResult) -> str:
     return f"от {PUBLISHER_USER}: {state}" + (f": {err}" if err else "")
 
 
-def _record_created(layout: Layout) -> None:
+def record_created(layout: Layout) -> None:
     """Root's `perimeter.created` (`0644`, so that `df-publisher` reads it),
-    in `/var/lib/df`, which must be root's and writable by root alone."""
+    if absent, in `/var/lib/df`, which must be root's and writable by root
+    alone (else `OSError`). After `perimeter-init` and `perimeter restore`."""
     st = os.lstat(layout.var)
     mode = stat.S_IMODE(st.st_mode)
     ok = (
@@ -413,7 +417,7 @@ def _record_created(layout: Layout) -> None:
         and not mode & (stat.S_IWGRP | stat.S_IWOTH)
     )
     if not ok:
-        raise StepFailed("perimeter-init", f"{layout.var}: не каталог root" + _RETRY)
+        raise OSError(f"{layout.var}: не каталог root")
     if not os.path.lexists(layout.perimeter_created):
         text = f"{perimeter.now()}\n"
         fsutil.write_atomic(layout.perimeter_created, text, CREATED_MODE)

@@ -98,9 +98,9 @@ _RESTORE_DONE = {
         "эпохи доступны (до того — unavailable: restore_pending)"
     ),
     "resumed": (
-        "завершено прерванное восстановление --set-aside-old (его копия); "
-        "источник этого вызова (копия или --empty) не применён — повторите "
-        "команду, чтобы применить его"
+        "завершено прерванное ранее восстановление --set-aside-old: на месте "
+        "его копия (admission = restored_pending); источник этого вызова "
+        "(копия или --empty) не применён — повторите команду со своим источником"
     ),
 }
 _LIST_COLUMNS = ("роль", "harness", "model", "effort", "источник", "проверка")
@@ -777,8 +777,11 @@ def _perimeter_restore(args: argparse.Namespace, lay: Layout, snap: Snapshot) ->
     """`perimeter restore` (Task 11r): root reads the copy (`--from`, on a
     trusted path, at most `perimeter.MAX_COPY` bytes) and runs `publisher
     perimeter-restore` as `df-publisher` with it on stdin; the protocol is
-    `perimeter.restore`. No `/etc/df` file changes, so no generation
-    bracket; one journal line records the outcome."""
+    `perimeter.restore`. A database put in place is recorded in root's
+    `perimeter.created` (as `perimeter-init`); `resumed` (an earlier restore
+    finished, this source not applied) is `NeedsHuman`, exit 3. No `/etc/df`
+    file changes, so no generation bracket; one journal line records the
+    outcome."""
     copy = None if args.empty else _restore_copy(args.source)
     python = libexec.admin_python_of(lay, snap)
     _close_odd_generation(lay, snap)
@@ -792,16 +795,24 @@ def _perimeter_restore(args: argparse.Namespace, lay: Layout, snap: Snapshot) ->
     outcome = lines[-1].removeprefix("perimeter-restore: ") if lines else ""
     ok = roles_setup.publisher_succeeded(result) and outcome in _RESTORE_DONE
     detail = outcome if ok else roles_setup.publisher_failure(result)
+    if ok:
+        try:  # a database is in place: "created once", as perimeter-init says
+            roles_setup.record_created(lay)
+        except OSError as exc:
+            ok, detail = False, f"{outcome}; {lay.perimeter_created} не записан: {exc}"
     source = "--empty" if copy is None else f"--from {args.source}"
+    event = "failed" if not ok else "needs-human" if outcome == "resumed" else "done"
     journal.journal_event(
         lay.journal,
         run_id=uuid.uuid4().hex,
         step="perimeter-restore",
-        event="done" if ok else "failed",
+        event=event,
         detail=f"{source}: {detail}",
     )
     if not ok:
         raise Refusal(f"perimeter restore: {detail}")
+    if outcome == "resumed":  # not the source asked for: never exit 0
+        raise NeedsHuman(_RESTORE_DONE[outcome])
     print(f"darkfactory: {_RESTORE_DONE[outcome]}")
     return EXIT_OK
 

@@ -115,8 +115,9 @@ RESTORE_TEXTS = {
         "perimeter restore --from <копия> (или --empty)"
     ),
     "set_aside": (
-        "perimeter/set-aside есть, но это не каталог 0700 учётки df-publisher; "
-        "ничего не изменено, нужен человек"
+        "perimeter/set-aside/ не создаётся или это не каталог 0700 учётки "
+        "df-publisher; ничего не изменено, база доступна: устраните причину "
+        "(или уберите чужой объект — нужен человек) и повторите команду"
     ),
     "journal": (
         "у прежней базы журнал perimeter/events.sqlite-journal, который не "
@@ -335,10 +336,16 @@ def create_db(layout: Layout) -> str:
         if not db:
             _build(base)
         _open_verified(layout).close()
-        fsutil.write_atomic(base / MARKER, now() + "\n", 0o600)
+        _mark_created(base)
         return "created"
     finally:
         os.close(fd)
+
+
+def _mark_created(base: Path) -> None:
+    """`created`, the marker of the first creation, written if absent."""
+    if not _lexists(base / MARKER):
+        fsutil.write_atomic(base / MARKER, now() + "\n", 0o600)
 
 
 def _require_sqlite() -> None:
@@ -406,14 +413,6 @@ def _is_own_dir(path: Path) -> bool:
         and stat.S_IMODE(st.st_mode) == 0o700
         and fsutil.owner_uid(st) == os.geteuid()
     )
-
-
-def _own_dir_or_false(path: Path) -> bool:
-    """`_is_own_dir`, an `lstat` error (a racing change) counting as not ours."""
-    try:
-        return _is_own_dir(path)
-    except OSError:
-        return False
 
 
 def _flock(fd: int, op: int, wait: float | None = None) -> None:
@@ -638,8 +637,10 @@ def restore(layout: Layout, copy: bytes | None, *, set_aside_old: bool = False) 
        (the stage is removed);
     3. a hot journal of the old database is rolled back (`_roll_back`);
     4. `rename` onto `events.sqlite`, `fsync` of the directory.
-    With `set_aside_old`, steps 3-4 are (а)-(д) of `_set_aside`. A refusal
-    is `Unavailable` (`RESTORE_TEXTS`, `copy: <reason>`)."""
+    With `set_aside_old`, steps 3-4 are (а)-(д) of `_set_aside`, its
+    directories made before the intent. A database put in place gets the
+    `created` marker if absent (root then writes `perimeter.created`). A
+    refusal is `Unavailable` (`RESTORE_TEXTS`, `copy: <reason>`)."""
     _require_sqlite()
     base = layout.perimeter_dir
     try:
@@ -649,6 +650,7 @@ def restore(layout: Layout, copy: bytes | None, *, set_aside_old: bool = False) 
     if _lexists(base / RESTORE_INTENT):
         with _exclusive(base):
             _set_aside(base, _read_intent(base))
+            _mark_created(base)
         return "resumed"
     tmp = base / RESTORE_DB
     try:
@@ -656,15 +658,16 @@ def restore(layout: Layout, copy: bytes | None, *, set_aside_old: bool = False) 
         RESTORE_STEP("staged")
         with _exclusive(base):
             if set_aside_old:
-                aside = base / SET_ASIDE
-                if _lexists(aside) and not _own_dir_or_false(aside):
-                    raise Unavailable("set_aside")  # before the intent: no change
-                _set_aside(base, _write_intent(base))
+                intent = _new_intent()
+                # (б) before the intent: a failure here changes nothing
+                _make_aside_dirs(base, intent, "set_aside")
+                _set_aside(base, _write_intent(base, intent))
             else:
                 _roll_back(base)
                 RESTORE_STEP("rolled-back")
                 _move(tmp, base / DB_NAME)
                 RESTORE_STEP("installed")
+            _mark_created(base)
     except BaseException:
         if not _lexists(base / RESTORE_INTENT):  # the intent keeps its stage
             with contextlib.suppress(OSError):
@@ -747,11 +750,15 @@ def _move(src: Path, dst: Path) -> None:
         fsutil.sync_dir(src.parent)
 
 
-def _write_intent(base: Path) -> dict[str, str]:
+def _new_intent() -> dict[str, str]:
+    """The set-aside directory (`set-aside/<UTC>`) and the stage of a run."""
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
+    return {"set_aside_dir": f"{SET_ASIDE}/{stamp}", "new_tmp": RESTORE_DB}
+
+
+def _write_intent(base: Path, intent: dict[str, str]) -> dict[str, str]:
     """(а): `restore.intent` names the set-aside directory and the stage;
     `write_atomic` syncs the file and the directory."""
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
-    intent = {"set_aside_dir": f"{SET_ASIDE}/{stamp}", "new_tmp": RESTORE_DB}
     text = json.dumps(intent, sort_keys=True) + "\n"
     fsutil.write_atomic(base / RESTORE_INTENT, text, 0o600)
     RESTORE_STEP("intent")
@@ -790,8 +797,7 @@ def _set_aside(base: Path, intent: dict[str, str]) -> None:
     in place (if any) is the old one; the journal goes first, so the new
     database never meets the old journal."""
     aside, new = base / intent["set_aside_dir"], base / intent["new_tmp"]
-    for path in (aside.parent, aside):
-        _make_dir(path)
+    _make_aside_dirs(base, intent, "restore_incomplete")  # idempotent
     RESTORE_STEP("set-aside-dir")
     if _lexists(new):
         _move_aside(base / JOURNAL, aside / JOURNAL)
@@ -805,10 +811,19 @@ def _set_aside(base: Path, intent: dict[str, str]) -> None:
     fsutil.remove_durably(base / RESTORE_INTENT)
 
 
-def _make_dir(path: Path) -> None:
+def _make_aside_dirs(base: Path, intent: dict[str, str], reason: str) -> None:
+    """(б): `set-aside/` and `set-aside/<UTC>/`, each `_make_dir`; made
+    before the intent (failure: `reason` = `set_aside`, nothing changed) and
+    again, idempotently, by `_set_aside` (`restore_incomplete`)."""
+    aside = base / intent["set_aside_dir"]
+    for path in (aside.parent, aside):
+        _make_dir(path, reason)
+
+
+def _make_dir(path: Path, reason: str) -> None:
     """A `0700` directory of this user, durable (present: settled). Anything
-    else found there (a file, a link, another mode or owner) is
-    `restore_incomplete`: nothing is moved through it."""
+    else found there (a file, a link, another mode or owner) or an `OSError`
+    is `Unavailable(reason)`: nothing is moved through it."""
     try:
         fd = os.open(path.parent, _DIR_FLAGS)
         try:
@@ -819,7 +834,7 @@ def _make_dir(path: Path) -> None:
     except OSError:
         ok = False
     if not ok:
-        raise Unavailable("restore_incomplete")
+        raise Unavailable(reason)
 
 
 def _move_aside(src: Path, dst: Path) -> None:
