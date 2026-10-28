@@ -600,18 +600,23 @@ def test_cli_app_key_done(w: W, capsys: pytest.CaptureFixture[str]) -> None:
 
 def test_cli_app_key_unused_app_warns(w: W, capsys: pytest.CaptureFixture[str]) -> None:
     assert w.main(key_argv(w.source(KEY))) == 0
-    assert f"App {APP_ID} нет ни у одного продукта" in capsys.readouterr().err
+    want = f"предупреждение: не проверено: нет продукта с App {APP_ID}"
+    assert want in capsys.readouterr().err
     product = Product(100, "o/p", "fork", APP_ID, 2, "df-bot", "/c")
     (w.lay.etc / "products.toml").write_text(dump_products({100: product}))
     w.self_check = [response([])]
     assert w.main(key_argv(w.source(KEY))) == 0
-    assert "нет ни у одного продукта" not in capsys.readouterr().err
+    assert "не проверено" not in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
     "answer",
     [
         response(["app_key_unusable: 4242"]),
+        response(["app_unreadable: 4242: github_404: Not Found"]),
+        response(["app_installation_outside_products: 9"]),
+        response(["app_installation_unreadable: 9"]),
+        response(["perimeter_unavailable: lost", "app_key_unusable: 4242"]),
         response(None, outcome="refused"),
         response(None),  # no `problems`
         OSError("self-check: the call failed (code 1)"),
@@ -629,6 +634,23 @@ def test_cli_app_key_failed_check_needs_human(
     assert "секрет записан, проверка не прошла: self-check" in err
     assert w.rows() == [("setup-agent", "needs-human")]
     assert w.lay.app_key(APP_ID).read_bytes() == KEY  # the secret stays
+
+
+@pytest.mark.parametrize(
+    "problems", [["perimeter_unavailable: lost"], ["other_subsystem: x", "y"]]
+)
+def test_cli_app_key_non_app_problem_is_a_warning(
+    w: W, capsys: pytest.CaptureFixture[str], problems: list[str]
+) -> None:
+    """Not the key's fault: printed as a warning, exit 0, journal `done`."""
+    w.self_check = [response(problems)]
+    assert w.main(key_argv(w.source(KEY))) == 0
+    out = capsys.readouterr()
+    for problem in problems:
+        assert f"предупреждение: self-check: {problem}" in out.err
+    assert "self-check издателя: проблем App нет" in out.out
+    assert "проверка не прошла" not in out.err
+    assert w.rows() == [("setup-agent", "done")]
 
 
 def test_cli_token_done_prints_login(w: W, capsys: pytest.CaptureFixture[str]) -> None:

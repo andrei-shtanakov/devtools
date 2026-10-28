@@ -60,6 +60,9 @@ _PEM = re.compile(
 )
 _TOKEN = re.compile(rb"github_pat_[A-Za-z0-9_]{1,244}|ghp_[A-Za-z0-9]{1,251}")
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+#: Self-check problems that concern an App (its key, its installations); any
+#: other (`perimeter_unavailable`, ...) is not the key's fault: a warning.
+APP_PROBLEMS = ("app_installation_", "app_key_unusable", "app_unreadable")
 _ROLES_SETUP = "выполните sudo darkfactory roles setup"
 _NOT_DIR = (errno.ELOOP, errno.ENOTDIR, errno.EMLINK)
 
@@ -337,9 +340,10 @@ def exec_check_github(layout: Layout) -> plat.RunResult:
 
 
 def check_app_key(layout: Layout, app_id: int) -> Check:
-    """The publisher's `self-check`: `done` without `problems` passes. An App
-    no product of `products.toml` uses is not signed with by the check: a
-    warning says the key itself was not exercised."""
+    """The publisher's `self-check`: `done` without App problems
+    (`APP_PROBLEMS`) passes; another problem is a warning. No answer or
+    another outcome fails. An App no product of `products.toml` uses is not
+    signed with by the check: a warning says the key was not checked."""
     warnings = _unused_app(layout, app_id)
     try:
         raw = publisher_self_check(layout)
@@ -357,9 +361,13 @@ def check_app_key(layout: Layout, app_id: int) -> Check:
     problems = resp.result.get("problems")
     if not isinstance(problems, list):
         return Check((), warnings, "self-check: в ответе нет problems")
-    if problems:
-        return Check((), warnings, "self-check: " + "; ".join(map(str, problems)))
-    return Check(("self-check издателя: проблем нет",), warnings)
+    texts = [str(p) for p in problems]
+    app = [p for p in texts if p.startswith(APP_PROBLEMS)]
+    other = tuple(f"self-check: {p}" for p in texts if p not in app)
+    if app:
+        return Check((), warnings + other, "self-check: " + "; ".join(app))
+    line = "проблем App нет" if other else "проблем нет"
+    return Check((f"self-check издателя: {line}",), warnings + other)
 
 
 def _unused_app(layout: Layout, app_id: int) -> tuple[str, ...]:
@@ -370,8 +378,8 @@ def _unused_app(layout: Layout, app_id: int) -> tuple[str, ...]:
     if any(p.app_id == app_id for p in products.values()):
         return ()
     unused = (
-        f"App {app_id} нет ни у одного продукта products.toml: self-check "
-        "этот ключ не использовал (регистрация продукта — этап 3)"
+        f"не проверено: нет продукта с App {app_id} в products.toml (self-check "
+        "этот ключ не использовал; регистрация продукта — этап 3)"
     )
     return (unused,)
 
