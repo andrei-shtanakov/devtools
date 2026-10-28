@@ -1119,3 +1119,49 @@ def test_found_root_empty_dir_names_rmdir(w: W) -> None:
     config.mkdir(mode=0o700)
     with pytest.raises(StepFailed, match=f"sudo rmdir {config}"):
         setup_agent.install_machine_token(w.lay, w.source(TOKEN))
+
+
+# ---------- the home's system parents ----------
+
+
+def link_home_parent(w: W) -> Path:
+    """`<root>/Users` (or `home`) becomes a link to `var/home`, as a Linux
+    `/home -> var/home`; returns the real parent."""
+    parent = w.home.parent
+    real = w.lay.root / "var" / "home"
+    os.rename(parent, real)
+    parent.symlink_to("var/home")
+    return real
+
+
+def test_token_through_a_system_home_link(w: W) -> None:
+    """The home's parent is a system link: followed (vetted by the
+    trusted-path policy); the token is written in the real home."""
+    real = link_home_parent(w)
+    setup_agent.install_machine_token(w.lay, w.source(TOKEN))
+    token = real / "df-exec" / Path(*MACHINE_TOKEN)
+    assert token.read_bytes() == TOKEN + b"\n"
+    assert owner(w, token) == EXEC_UID and mode(token) == 0o600
+
+
+@pytest.mark.parametrize("where", ["home", ".config", ".config/df"])
+def test_own_components_never_follow_under_a_home_link(w: W, where: str) -> None:
+    """Below the followed system parent, the home, `.config` and `df` are
+    still no-follow."""
+    real = link_home_parent(w) / "df-exec"
+    if where == "home":
+        os.rename(real, w.outside / "home")
+        real.symlink_to(w.outside / "home")
+    else:
+        if where == ".config/df":
+            (real / ".config").mkdir(mode=0o700)
+            w.fake.set_owner(real / ".config", EXEC_UID)
+        (real / where).symlink_to(w.lay.root)
+    with pytest.raises(StepFailed, match="ссылка или не каталог"):
+        setup_agent.install_machine_token(w.lay, w.source(TOKEN))
+    assert not [e for e in w.fake.events if e[0] == "fchown"]
+
+
+def test_open_own_never_follows_the_path_itself(w: W) -> None:
+    with pytest.raises(ValueError, match="not a parent"):
+        setup_agent.open_own(w.lay, w.home, EXEC_UID, system=w.home)

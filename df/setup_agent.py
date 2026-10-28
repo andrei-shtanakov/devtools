@@ -128,13 +128,10 @@ def _read_key(source: Path) -> bytes:
 def _open_secrets(layout: Layout, owner: Account) -> int:
     """`secrets/` opened from `/`: its parents on a trusted path, itself
     `df-publisher`'s and exactly `0700`. The system components up to `etc`
-    follow links (macOS `/etc -> private/etc`, vetted by the trusted-path
-    policy); the installer's own, `df` and `secrets`, never do."""
+    follow links (macOS `/etc -> private/etc`); the installer's own, `df`
+    and `secrets`, never do (`open_own`)."""
     path = layout.secrets_dir
-    problems = plat.trusted_path_problems(path.parent)
-    if problems:
-        raise StepFailed(STEP, "; ".join(problems) + f"; {_ROLES_SETUP}")
-    fd = open_chain(layout, path, owner.uid, follow_to=layout.etc.parent)
+    fd = open_own(layout, path, owner.uid, system=layout.etc.parent)
     mode = stat.S_IMODE(os.fstat(fd).st_mode)
     if mode != SECRETS_MODE:
         os.close(fd)
@@ -171,10 +168,8 @@ def setup_machine_token(layout: Layout, source: Path) -> Check:
 def _install_token(layout: Layout, token: bytes) -> tuple[str, ...]:
     owner = _account(layout, EXEC)
     home = layout.role_home(EXEC)
-    problems = plat.trusted_path_problems(home.parent)
-    if problems:
-        raise StepFailed(STEP, "; ".join(problems) + f"; {_ROLES_SETUP}")
-    fd = open_chain(layout, home, owner.uid)
+    # the home's parents are the system's (a Linux `/home -> var/home`)
+    fd = open_own(layout, home, owner.uid, system=home.parent)
     warnings: list[str] = []
     try:
         here = home
@@ -276,6 +271,20 @@ def _found_dir(
 
 
 # --- shared ----------------------------------------------------------------
+
+
+def open_own(layout: Layout, path: Path, owner: int, *, system: Path) -> int:
+    """Directory `path` of the installer (or of a role) as a descriptor: the
+    whole way to it passes the trusted-path policy first; `system` and its
+    parents are then opened following links (vetted by that policy), every
+    component below `system` -- `path` itself included -- never; `path` is
+    `owner`'s (`open_chain`)."""
+    if system not in path.parents:  # `path` itself is never followed
+        raise ValueError(f"{system} is not a parent of {path}")
+    problems = plat.trusted_path_problems(path.parent)
+    if problems:
+        raise StepFailed(STEP, "; ".join(problems) + f"; {_ROLES_SETUP}")
+    return open_chain(layout, path, owner, follow_to=system)
 
 
 def open_chain(
