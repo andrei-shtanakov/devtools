@@ -19,12 +19,17 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
+from typing import IO
 
 from df import platform
 from df.stage2_config import Product
 
 API = "https://api.github.com"
+#: Seconds per socket operation (connect, each read), not for a whole answer.
 TIMEOUT = 20.0
+#: Largest answer body read; more is `GitHubUnavailable`.
+MAX_ANSWER = 8 << 20
 USER_AGENT = "darkfactory-publisher"
 #: Seconds the JWT is backdated (clock drift) and lives.
 JWT_BACKDATE = 60
@@ -37,7 +42,9 @@ PER_PAGE = 100
 MAX_PAGES = 50
 _MESSAGE_LIMIT = 200
 _UTC_SUFFIX = {True: "+00:00", False: ""}
-_NEXT_LINK = re.compile(r'<([^>]*)>\s*;\s*rel="next"')
+_LINK_VALUE = re.compile(r"<([^>]*)>([^<]*)")
+_BARE_URL = re.compile(r"<[^>]*>")
+_NEXT_WORD = re.compile(r"\bnext\b", re.IGNORECASE)
 
 Transport = Callable[
     [str, str, Mapping[str, str], bytes | None],
@@ -48,6 +55,10 @@ Clock = Callable[[], float]
 
 class GitHubUnavailable(Exception):
     """GitHub did not answer usefully (5xx, network, wrong shape): retry later."""
+
+
+class SigningFailed(Exception):
+    """The App JWT could not be signed: a local fault (key, openssl), not GitHub's."""
 
 
 class GitHubRefused(Exception):
@@ -68,6 +79,11 @@ class Token:
     permissions: Mapping[str, str]
     repository_ids: tuple[int, ...]
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "permissions", MappingProxyType(dict(self.permissions))
+        )
+
 
 @dataclass(frozen=True)
 class Installation:
@@ -77,6 +93,11 @@ class Installation:
     account: str
     repository_ids: tuple[int, ...]
     permissions: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "permissions", MappingProxyType(dict(self.permissions))
+        )
 
 
 @dataclass(frozen=True)
@@ -203,6 +224,13 @@ def build_opener() -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
 
 
+def _read_limited(stream: IO[bytes]) -> bytes:
+    data = stream.read(MAX_ANSWER + 1)
+    if len(data) > MAX_ANSWER:
+        raise GitHubUnavailable("answer too large")
+    return data
+
+
 def default_transport(
     method: str, url: str, headers: Mapping[str, str], body: bytes | None
 ) -> tuple[int, Mapping[str, str], bytes]:
@@ -210,10 +238,10 @@ def default_transport(
     req = urllib.request.Request(url, data=body, headers=dict(headers), method=method)
     try:
         with build_opener().open(req, timeout=TIMEOUT) as resp:
-            return resp.status, dict(resp.headers), resp.read()
+            return resp.status, dict(resp.headers), _read_limited(resp)
     except urllib.error.HTTPError as exc:
         with exc:
-            return exc.code, dict(exc.headers), exc.read()
+            return exc.code, dict(exc.headers), _read_limited(exc)
     except (urllib.error.URLError, OSError) as exc:
         raise GitHubUnavailable(f"network: {type(exc).__name__}") from exc
 
@@ -249,14 +277,14 @@ def _send(
         headers["Content-Type"] = "application/json"
     try:
         status, resp_headers, raw = transport(method, url, headers, payload)
-    except GitHubUnavailable:
+    except (GitHubUnavailable, GitHubRefused):
         raise
-    except OSError as exc:
-        raise GitHubUnavailable(f"network: {type(exc).__name__}") from exc
-    if status >= 500:
-        raise GitHubUnavailable(f"http {status}")
-    if status >= 400:
+    except Exception as exc:  # noqa: BLE001 - only the type name is kept
+        raise GitHubUnavailable(f"network: {type(exc).__name__}") from None
+    if 400 <= status < 500:
         raise GitHubRefused(_message(raw), status)
+    if not 200 <= status < 300:
+        raise GitHubUnavailable(f"http {status}")
     return status, resp_headers, raw
 
 
@@ -276,8 +304,8 @@ def call(
     transport: Transport = default_transport,
     api_base: str = API,
 ) -> tuple[int, object]:
-    """One API call; 5xx and network errors are `GitHubUnavailable`, 4xx
-    `GitHubRefused(message, status)`. An empty answer body is `None`."""
+    """One API call; only 2xx succeeds. 4xx is `GitHubRefused(message, status)`;
+    5xx, redirects, other statuses and any transport error are `GitHubUnavailable`. An empty answer body is `None`."""
     if not path.startswith("/"):
         raise ValueError("path must start with /")
     url = f"{api_base.rstrip('/')}{path}"
@@ -303,8 +331,9 @@ def app_jwt(app_id: int, key: Path, *, openssl: Path, now: int) -> str:
     signing_input = f"{head}.{_b64(_compact(claims))}"
     argv = [str(openssl), "dgst", "-sha256", "-sign", str(key)]
     result = platform.run_with_input(argv, signing_input.encode(), timeout=TIMEOUT)
-    if not result.launched or result.returncode != 0 or not result.stdout:
-        raise GitHubUnavailable("jwt signing failed")
+    failed = result.timed_out or result.stdout_truncated or not result.launched
+    if failed or result.returncode != 0 or not result.stdout:
+        raise SigningFailed("jwt signing failed")
     return f"{signing_input}.{_b64(result.stdout)}"
 
 
@@ -366,6 +395,8 @@ def installation_token(
 ) -> Token:
     """Mint an installation token; what GitHub granted must equal what was
     asked (`token_scope_mismatch`) and expire within the hour."""
+    if repository_ids is not None and not repository_ids:
+        raise ValueError("repository_ids must not be empty")
     request: dict[str, object] = {}
     if repository_ids is not None:
         request["repository_ids"] = list(repository_ids)
@@ -378,6 +409,8 @@ def installation_token(
     )
     if not isinstance(data, dict) or not isinstance(data.get("token"), str):
         raise GitHubUnavailable("access_tokens: unexpected answer")
+    if repository_ids is not None and "repositories" not in data:
+        raise GitHubRefused("token_scope_mismatch")
     granted_repos = _id_list(data.get("repositories", []), "repositories")
     granted = _levels(data.get("permissions", {}))
     if repository_ids is not None and set(granted_repos) != set(repository_ids):
@@ -388,15 +421,30 @@ def installation_token(
     return Token(data["token"], expires, granted, granted_repos)
 
 
+def _is_next(params: str) -> bool:
+    for param in params.split(";"):
+        key, _, value = param.partition("=")
+        if key.strip().lower() == "rel":
+            return "next" in value.strip().strip('"').lower().split()
+    return False
+
+
 def _next_url(headers: Mapping[str, str], api_base: str) -> str | None:
     link = next((v for k, v in headers.items() if k.lower() == "link"), None)
-    match = _NEXT_LINK.search(link) if link else None
-    if match is None:
+    if not link:
         return None
-    url = match.group(1)
-    if not url.startswith(f"{api_base.rstrip('/')}/"):
+    urls = [
+        u
+        for u, params in _LINK_VALUE.findall(link)
+        if _is_next(params.partition(",")[0])
+    ]
+    if not urls:
+        if _NEXT_WORD.search(_BARE_URL.sub("", link)):
+            raise GitHubUnavailable("unreadable Link header")
+        return None
+    if not urls[0].startswith(f"{api_base.rstrip('/')}/"):
         raise GitHubUnavailable("next page is off the API host")
-    return url
+    return urls[0]
 
 
 def _pages(path: str, token: str, transport: Transport, api_base: str) -> list[object]:
@@ -475,6 +523,22 @@ def _problems(
     )
 
 
+def _repos_of(
+    jwt: str, ident: int, transport: Transport, api_base: str, clock: Clock
+) -> list[int]:
+    """Repositories of one installation, read with a metadata-only token."""
+    token = installation_token(
+        jwt,
+        ident,
+        repository_ids=None,
+        permissions={"metadata": "read"},
+        transport=transport,
+        api_base=api_base,
+        clock=clock,
+    )
+    return installation_repos(token.value, transport, api_base=api_base)
+
+
 def self_check(
     products: Mapping[int, Product],
     app_id: int,
@@ -490,18 +554,15 @@ def self_check(
     problem. `perimeter` is the publisher's to fill (`None` here)."""
     jwt = app_jwt(app_id, key, openssl=openssl, now=int(clock()))
     found: list[Installation] = []
+    unreadable: list[str] = []
     for inst in installations(jwt, transport, api_base=api_base):
-        token = installation_token(
-            jwt,
-            inst.id,
-            repository_ids=None,
-            permissions=None,
-            transport=transport,
-            api_base=api_base,
-            clock=clock,
-        )
-        repos = installation_repos(token.value, transport, api_base=api_base)
+        try:
+            repos = _repos_of(jwt, inst.id, transport, api_base, clock)
+        except GitHubRefused:
+            unreadable.append(f"app_installation_unreadable: {inst.id}")
+            repos = []
         found.append(
             Installation(inst.id, inst.account, tuple(repos), inst.permissions)
         )
-    return SelfCheckResult(tuple(found), _problems(found, products, app_id), None)
+    problems = (*unreadable, *_problems(found, products, app_id))
+    return SelfCheckResult(tuple(found), problems, None)

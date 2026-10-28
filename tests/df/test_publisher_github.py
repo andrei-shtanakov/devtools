@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import base64
+import email.message
+import http.client
+import io
 import json
 import shutil
 import subprocess
 import urllib.request
+import urllib.response
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,6 +24,7 @@ from df.publisher.github import (
     Installation,
     PerimeterStats,
     SelfCheckResult,
+    SigningFailed,
 )
 from df.stage2_config import Product
 
@@ -140,10 +145,10 @@ def test_run_with_input_signs(app_key: Path, tmp_path: Path) -> None:
 
 
 @needs_openssl
-def test_jwt_signing_failure_is_unavailable(tmp_path: Path) -> None:
+def test_jwt_signing_failure_is_signing_failed(tmp_path: Path) -> None:
     assert OPENSSL is not None
     bad = tmp_path / "missing.pem"
-    with pytest.raises(GitHubUnavailable):
+    with pytest.raises(SigningFailed):
         github.app_jwt(1, bad, openssl=Path(OPENSSL), now=NOW)
 
 
@@ -396,7 +401,7 @@ def _world(repos: list[int], perms: Mapping[str, str] = PERMS) -> FakeTransport:
     return FakeTransport(
         {
             ("GET", INSTS): _json_reply(listing),
-            ("POST", TOKEN_URL): _token_reply([], {}),
+            ("POST", TOKEN_URL): _token_reply([], {"metadata": "read"}),
             ("GET", REPOS): _json_reply(_repos(repos, len(repos))),
         }
     )
@@ -500,3 +505,183 @@ def test_self_check_result_roundtrip(
     again = SelfCheckResult.from_json(response.result)
     assert again == result
     assert _app_problems(again, product) == expected
+
+
+# --- review round 1 -----------------------------------------------------------
+
+
+def test_incomplete_read_is_unavailable() -> None:
+    def boom(*_args: object) -> Reply:
+        raise http.client.IncompleteRead(b"")
+
+    with pytest.raises(GitHubUnavailable, match="network: IncompleteRead"):
+        github.call("GET", "/x", "tok", transport=boom)
+
+
+def test_any_transport_exception_is_unavailable_without_its_text() -> None:
+    def boom(*_args: object) -> Reply:
+        raise ValueError("secret-token-text")
+
+    with pytest.raises(GitHubUnavailable) as err:
+        github.call("GET", "/x", "tok", transport=boom)
+    assert str(err.value) == "network: ValueError"
+
+
+@pytest.mark.parametrize("status", [100, 301, 307, 399])
+def test_non_2xx_answers_are_not_success(status: int) -> None:
+    fake = FakeTransport({("PUT", f"{github.API}/x"): (status, {}, b"")})
+    with pytest.raises(GitHubUnavailable, match=f"http {status}"):
+        github.call("PUT", "/x", "t", {"k": 1}, transport=fake)
+
+
+def test_answer_size_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Big:
+        def read(self, n: int) -> bytes:
+            return b"x" * n
+
+    with pytest.raises(GitHubUnavailable, match="answer too large"):
+        github._read_limited(Big())  # type: ignore[arg-type]
+    assert github._read_limited(io.BytesIO(b"ok")) == b"ok"
+    monkeypatch.setattr(github, "MAX_ANSWER", 4)
+    assert github._read_limited(io.BytesIO(b"1234")) == b"1234"
+    with pytest.raises(GitHubUnavailable, match="answer too large"):
+        github._read_limited(io.BytesIO(b"12345"))
+
+
+def test_empty_repository_ids_is_rejected_before_any_call() -> None:
+    fake = FakeTransport({})
+    with pytest.raises(ValueError):
+        github.installation_token(
+            "j", 9, repository_ids=[], permissions=None, transport=fake
+        )
+    assert fake.calls == []
+
+
+def test_answer_without_repositories_key_is_mismatch() -> None:
+    reply = _json_reply(
+        {"token": "t", "expires_at": _expiry(3000), "permissions": PERMS}, 201
+    )
+    with pytest.raises(GitHubRefused, match="token_scope_mismatch"):
+        _mint(reply, repos=[7], perms=PERMS)
+
+
+@needs_openssl
+def test_self_check_asks_for_metadata_only(app_key: Path) -> None:
+    fake = _world([7])
+    _check(fake, {7: _product(7)}, app_key)
+    bodies = [b for m, u, _, b in fake.calls if m == "POST"]
+    assert [json.loads(b or b"") for b in bodies] == [
+        {"permissions": {"metadata": "read"}}
+    ]
+
+
+@needs_openssl
+def test_self_check_refused_installation_is_a_problem(app_key: Path) -> None:
+    fake = _world([7])
+    fake.routes[("POST", TOKEN_URL)] = _json_reply({"message": "suspended"}, 403)
+    result = _check(fake, {7: _product(7)}, app_key)
+    assert result.problems == ("app_installation_unreadable: 9",)
+    assert result.installations[0].repository_ids == ()
+    fake.routes[("POST", TOKEN_URL)] = (502, {}, b"")
+    with pytest.raises(GitHubUnavailable):
+        _check(fake, {7: _product(7)}, app_key)
+
+
+NEXT = f"{github.API}/next"
+
+
+@pytest.mark.parametrize(
+    "link",
+    [
+        f'<{NEXT}>; foo=bar; rel="next"',
+        f"<{NEXT}>; rel=next",
+        f'<{NEXT}>; rel="next last"',
+        f'<{NEXT}>; REL="Next"',
+        f'<{github.API}/last>; rel="last", <{NEXT}>; rel="next"',
+    ],
+)
+def test_link_header_forms(link: str) -> None:
+    assert github._next_url({"link": link}, github.API) == NEXT
+
+
+def test_link_header_without_next() -> None:
+    assert github._next_url({}, github.API) is None
+    last = f'<{github.API}/next?x=1>; rel="last"'
+    assert github._next_url({"Link": last}, github.API) is None
+
+
+@pytest.mark.parametrize("link", ['rel="next"', "<broken; rel=next", 'x; rel="next"'])
+def test_garbled_link_header_is_unavailable(link: str) -> None:
+    with pytest.raises(GitHubUnavailable):
+        github._next_url({"Link": link}, github.API)
+
+
+def test_signing_failure_has_its_own_type(tmp_path: Path) -> None:
+    assert OPENSSL is not None
+    with pytest.raises(SigningFailed):
+        github.app_jwt(1, tmp_path / "none.pem", openssl=Path(OPENSSL), now=NOW)
+    with pytest.raises(SigningFailed):
+        github.app_jwt(1, tmp_path, openssl=Path("/nonexistent/openssl"), now=NOW)
+
+
+class _FakeOpener:
+    def __init__(self) -> None:
+        self.timeouts: list[float] = []
+
+    def open(self, req: object, timeout: float) -> object:
+        self.timeouts.append(timeout)
+        return urllib.response.addinfourl(io.BytesIO(b"{}"), {}, "u", 200)
+
+
+def test_default_transport_uses_the_proxy_free_opener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeOpener()
+    monkeypatch.setattr(github, "build_opener", lambda: fake)
+    status, _, body = github.default_transport("GET", "http://h/x", {}, None)
+    assert (status, body) == (200, b"{}")
+    assert fake.timeouts == [github.TIMEOUT]
+
+
+class _Redirecting(urllib.request.BaseHandler):
+    handler_order = 100
+
+    def __init__(self) -> None:
+        self.seen: list[str] = []
+
+    def http_open(self, req: urllib.request.Request) -> object:
+        self.seen.append(req.full_url)
+        headers = email.message.Message()
+        headers["Location"] = "http://elsewhere.invalid/x"
+        resp = urllib.response.addinfourl(io.BytesIO(b""), headers, req.full_url, 307)
+        resp.msg = "Temporary Redirect"  # type: ignore[attr-defined]
+        return resp
+
+
+def test_redirect_is_not_followed(monkeypatch: pytest.MonkeyPatch) -> None:
+    opener = github.build_opener()
+    handler = _Redirecting()
+    opener.add_handler(handler)
+    monkeypatch.setattr(github, "build_opener", lambda: opener)
+    status, headers, _ = github.default_transport("PUT", "http://h/x", {}, b"{}")
+    assert status == 307 and headers["Location"].startswith("http://elsewhere")
+    assert handler.seen == ["http://h/x"]
+    with pytest.raises(GitHubUnavailable, match="http 307"):
+        github.call(
+            "PUT",
+            "/x",
+            "t",
+            {},
+            transport=github.default_transport,
+            api_base="http://h",
+        )
+
+
+def test_permissions_are_read_only() -> None:
+    inst = Installation(9, "acme", (7,), {"contents": "write"})
+    with pytest.raises(TypeError):
+        inst.permissions["contents"] = "read"  # type: ignore[index]
+    token = _mint(_token_reply([7], PERMS), perms=PERMS)
+    with pytest.raises(TypeError):
+        token.permissions["x"] = "y"  # type: ignore[index]
+    assert inst == Installation(9, "acme", (7,), {"contents": "write"})
