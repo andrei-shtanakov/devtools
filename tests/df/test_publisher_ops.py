@@ -156,6 +156,8 @@ class FakeGitHub:
             answer = {"state": "PENDING"}
         if self.post_mode == "no_marker":
             answer = {"body": "text only"}
+        if self.post_mode == "marker_not_last":
+            answer = {"body": f"{data['body']}\n\nmore"}
         review = {
             "id": 100 + len(self.reviews),
             "user": {"login": BOT, "type": "Bot"},
@@ -747,6 +749,18 @@ def test_reconcile_ignores_what_is_not_ours(
     assert review(world, capsys).reason == "review_not_found"
 
 
+@pytest.mark.parametrize("ident", [True, "900", None])
+def test_reconcile_review_id_must_be_an_int(
+    ident: object,
+    world: World,
+    gh: FakeGitHub,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    key = lost_with(world, gh, capsys)
+    gh.reviews.append(bot_review(key, id=ident))
+    assert review(world, capsys).reason == "review_mismatch"
+
+
 def test_reconcile_commit_mismatch(
     world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -755,7 +769,9 @@ def test_reconcile_commit_mismatch(
     assert review(world, capsys).reason == "review_mismatch"
 
 
-@pytest.mark.parametrize("mode", ["rewrite_commit", "pending", "no_marker", "other"])
+@pytest.mark.parametrize(
+    "mode", ["rewrite_commit", "pending", "no_marker", "marker_not_last", "other"]
+)
 def test_post_answer_is_checked(
     mode: str,
     world: World,
