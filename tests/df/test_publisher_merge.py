@@ -14,7 +14,7 @@ from df.publisher import github, merge
 from df.publisher.merge import UNAVAILABLE, Kind
 from df.publisher.request import Refused, Response
 from governance import act_envelope, approval_branches
-from tests.df.publisher_world import World, raw_of
+from tests.df.publisher_world import SHA, World, raw_of
 from tests.df.test_publisher_ops import (
     PR_URL,
     FakeGitHub,
@@ -41,11 +41,19 @@ class MergeGitHub(FakeGitHub):
         self.files: list[object] = [{"filename": "README.md"}]
         self.endless = False
         self.file_gets = 0
+        self.changed: int | None = None  # None: len(files)
+        self.head_repo: object = 7
 
     def pr(self) -> Reply:
         _, _, raw = super().pr()
         data = json.loads(raw)
         data["head"]["ref"] = self.head_ref
+        data["head"]["repo"] = (
+            None if self.head_repo is None else {"id": self.head_repo}
+        )
+        data["changed_files"] = (
+            len(self.files) if self.changed is None else self.changed
+        )
         return _reply(data)
 
     def route(
@@ -415,19 +423,92 @@ def test_merge_paged_files_all_seen(
     assert mgh.file_gets == 3
 
 
-def test_exactly_3000_files_is_not_too_many(
+def test_exactly_3000_files_is_too_many(
     world: World, mgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """GitHub stops listing at 3000: a PR of 3000 files may have more."""
     mgh.files = [{"filename": f"f{i}"} for i in range(3000)]
+    assert reason(run(world, capsys)) == ("refused", "too_many_files")
+    assert mgh.file_gets == 0
+
+
+def test_2999_files_are_listed(
+    world: World, mgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
+    mgh.files = [{"filename": f"f{i}"} for i in range(2999)]
     assert reason(run(world, capsys)) == ("refused", "precheck_unavailable")
 
 
-def test_too_many_files_stops_paging(
+def test_listing_longer_than_limit_stops_paging(
     world: World, mgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
 ) -> None:
     mgh.endless = True
+    mgh.changed = 2999
     assert reason(run(world, capsys)) == ("refused", "too_many_files")
     assert mgh.file_gets == 31  # the page that passes 3000 is the last fetched
+
+
+@pytest.mark.parametrize("changed", [5, 0])
+def test_listing_shorter_or_longer_than_changed_files(
+    world: World,
+    mgh: MergeGitHub,
+    capsys: pytest.CaptureFixture[str],
+    changed: int,
+) -> None:
+    mgh.files = [{"filename": "a"}, {"filename": "b"}]
+    mgh.changed = changed
+    assert reason(run(world, capsys)) == ("refused", "files_listing_incomplete")
+
+
+@pytest.mark.parametrize("changed", ["3", None, True, -1])
+def test_bad_changed_files_is_unavailable(
+    world: World,
+    mgh: MergeGitHub,
+    capsys: pytest.CaptureFixture[str],
+    changed: object,
+) -> None:
+    mgh.changed = changed  # type: ignore[assignment]
+    if changed is None:
+        mgh.changed = None
+        mgh.pr = lambda: _reply(  # type: ignore[method-assign]
+            {
+                "state": "open",
+                "base": {"repo": {"id": 7}},
+                "head": {"sha": SHA, "ref": CAND, "repo": {"id": 7}},
+            }
+        )
+    assert reason(run(world, capsys)) == ("unknown", "github_unavailable")
+
+
+def test_head_moves_during_the_listing(
+    world: World, mgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
+    reads: list[int] = []
+
+    def barrier() -> None:
+        reads.append(1)
+        if len(reads) == 1:  # between the first read and the second
+            mgh.pr_head = "b" * 40
+
+    mgh.after_pr_get = barrier
+    assert reason(run(world, capsys)) == ("refused", "pr_state")
+    assert mgh.file_gets >= 1 and len(reads) == 2
+
+
+@pytest.mark.parametrize("head_repo", [8, None, "7"])
+@pytest.mark.parametrize("ref", [CAND, FINAL])
+def test_fork_pr_is_foreign(
+    world: World,
+    mgh: MergeGitHub,
+    capsys: pytest.CaptureFixture[str],
+    ref: str,
+    head_repo: object,
+) -> None:
+    mgh.head_ref = ref
+    mgh.files = [{"filename": ENVELOPE}]
+    mgh.head_repo = head_repo
+    assert reason(run(world, capsys)) == ("refused", "head_repo_foreign")
+    assert mgh.file_gets == 0
 
 
 @pytest.mark.parametrize(

@@ -165,6 +165,26 @@ def _head_ref(pr: Mapping[str, object]) -> str:
     return ref
 
 
+def _changed_files(pr: Mapping[str, object]) -> int:
+    """The PR's own count of files; the listing stops silently at 3000."""
+    count = pr.get("changed_files")
+    if not github._is_int(count) or not isinstance(count, int) or count < 0:
+        raise GitHubUnavailable("pr: no changed_files")
+    if count >= MAX_FILES:
+        raise Refused("too_many_files")
+    return count
+
+
+def _check_head_repo(oc: OpContext, pr: Mapping[str, object]) -> None:
+    """A fork picks its own branch names: only the product's own branches
+    are routed by name (`head_repo_foreign`)."""
+    head = pr.get("head")
+    repo = head.get("repo") if isinstance(head, dict) else None
+    ident = repo.get("id") if isinstance(repo, dict) else None
+    if ident != oc.product.repository_id or not github._is_int(ident):
+        raise Refused("head_repo_foreign")
+
+
 def _paths_of(item: object) -> list[str]:
     """The paths a file entry puts in play: the old path of a rename counts
     too, or a rename out of `approvals/stops/` would escape the stop check."""
@@ -178,8 +198,9 @@ def _paths_of(item: object) -> list[str]:
     return [item["filename"], previous]
 
 
-def pr_paths(oc: OpContext, token: str, pr: int) -> list[str]:
-    """Every path of the PR's files (all pages, at most `MAX_FILES` files)."""
+def pr_paths(oc: OpContext, token: str, pr: int, expected: int) -> list[str]:
+    """Every path of the PR's files: `expected` files (the PR's own count),
+    else `files_listing_incomplete`; at most `MAX_FILES` files."""
     path = f"/repos/{oc.product.full_name}/pulls/{pr}/files"
     try:
         items = github.paged_array(
@@ -187,6 +208,8 @@ def pr_paths(oc: OpContext, token: str, pr: int) -> list[str]:
         )
     except TooManyItems:
         raise Refused("too_many_files") from None
+    if len(items) != expected:
+        raise Refused("files_listing_incomplete")
     return [p for item in items for p in _paths_of(item)]
 
 
@@ -195,9 +218,13 @@ def _decide(ctx: Context, precheck: Precheck) -> NoReturn:
     ops._self_check_first(oc)
     token = ops._authorize(oc, {"pull_requests": "read"})
     pr_number = int(str(ctx.request.fields["pr"]))
-    pr = ops.read_pr(oc, token.value, pr_number, str(ctx.request.fields["head_sha"]))
+    head_sha = str(ctx.request.fields["head_sha"])
+    pr = ops.read_pr(oc, token.value, pr_number, head_sha)
     head_ref = _head_ref(pr)
-    paths = pr_paths(oc, token.value, pr_number)
+    _check_head_repo(oc, pr)
+    expected = _changed_files(pr)
+    paths = pr_paths(oc, token.value, pr_number, expected)
+    ops.read_pr(oc, token.value, pr_number, head_sha)  # the head did not move
     kind = route(head_ref, paths, read_patterns())
     if isinstance(kind, Refused):
         raise kind
