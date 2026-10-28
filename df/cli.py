@@ -107,6 +107,7 @@ _RESTORE_DONE = {
     ),
 }
 _SETUP_FAILED = "секрет записан, проверка не прошла: "
+_NOT_DURABLE = "записан, но не закреплён: повторите команду"
 _LIST_COLUMNS = ("роль", "harness", "model", "effort", "источник", "проверка")
 _REFUSALS = (
     StepFailed,
@@ -868,7 +869,8 @@ def _setup_agent(args: argparse.Namespace, lay: Layout) -> int:
     `self-check`, `machine-token` by `df-exec`'s `check-github`. A refusal
     before the write changes nothing and is not journalled; a failed write
     is journalled `failed`, a failed check `needs-human` (exit 3), else
-    `done`. No `/etc/df` file of the snapshot changes: no generation
+    `done`; a secret renamed into place but not made durable is
+    `needs-human` too. No `/etc/df` file of the snapshot changes: no generation
     bracket. Neither the journal nor any output carries the secret."""
     source = Path(args.file)
     key = args.setup_command == "app-key"
@@ -882,6 +884,9 @@ def _setup_agent(args: argparse.Namespace, lay: Layout) -> int:
             check = setup_agent.setup_app_key(lay, args.app_id, source)
         else:
             check = setup_agent.setup_machine_token(lay, source)
+    except fsutil.NotDurable as exc:  # the old secret is already replaced
+        _journal_setup(lay, "needs-human", f"{what}: {_NOT_DURABLE}: {exc}")
+        raise NeedsHuman(f"{what}: {_NOT_DURABLE} ({exc})") from exc
     except OSError as exc:
         _journal_setup(lay, "failed", f"{what}: {type(exc).__name__}: {exc}")
         raise

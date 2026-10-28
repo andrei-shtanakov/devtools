@@ -500,9 +500,10 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
         "an empty root-born 0700 dir handed to its role: own sync, then the parent's"
     ),
     ("setup_agent", "_token_dir", "os.fchown", 1): (
-        "a directory make_dir just created (root's, 0700, empty), handed to "
-        "df-exec through its descriptor; a found one is never changed; then "
-        "sync_dir of itself and the parent"
+        "a directory make_dir just created, handed to df-exec through its "
+        "descriptor only if fstat shows it root's, 0700 and empty (_fresh); "
+        "a found or swapped one is never changed; then sync_dir of itself "
+        "and the parent"
     ),
     ("setup_agent", "_token_dir", "os.fchmod", 1): (
         "the same just-created directory, by descriptor (a Linux inherited "

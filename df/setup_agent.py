@@ -26,7 +26,8 @@ import os
 import re
 import stat
 import uuid
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from df import fsutil, inputs, perimeter_client
@@ -38,7 +39,7 @@ from df.launch import SUDO
 from df.paths import MACHINE_TOKEN, Layout
 from df.publisher import request
 from df.publisher.request import BadResponse
-from df.stage2_config import load_products
+from df.stage2_config import Product, load_products
 
 STEP = "setup-agent"
 PUBLISHER = "df-publisher"
@@ -60,6 +61,8 @@ _PEM = re.compile(
 )
 _TOKEN = re.compile(rb"github_pat_[A-Za-z0-9_]{1,244}|ghp_[A-Za-z0-9]{1,251}")
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_DIR_FOLLOW_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+_WRITABLE = stat.S_IWGRP | stat.S_IWOTH
 #: Self-check problems that concern an App (its key, its installations); any
 #: other (`perimeter_unavailable`, ...) is not the key's fault: a warning.
 APP_PROBLEMS = ("app_installation_", "app_key_unusable", "app_unreadable")
@@ -124,12 +127,14 @@ def _read_key(source: Path) -> bytes:
 
 def _open_secrets(layout: Layout, owner: Account) -> int:
     """`secrets/` opened from `/`: its parents on a trusted path, itself
-    `df-publisher`'s and exactly `0700`."""
+    `df-publisher`'s and exactly `0700`. The system components up to `etc`
+    follow links (macOS `/etc -> private/etc`, vetted by the trusted-path
+    policy); the installer's own, `df` and `secrets`, never do."""
     path = layout.secrets_dir
     problems = plat.trusted_path_problems(path.parent)
     if problems:
         raise StepFailed(STEP, "; ".join(problems) + f"; {_ROLES_SETUP}")
-    fd = open_chain(layout, path, owner.uid)
+    fd = open_chain(layout, path, owner.uid, follow_to=layout.etc.parent)
     mode = stat.S_IMODE(os.fstat(fd).st_mode)
     if mode != SECRETS_MODE:
         os.close(fd)
@@ -148,7 +153,9 @@ def install_machine_token(layout: Layout, source: Path) -> None:
     The home is opened from `/` one component at a time; `.config` and `df`
     are opened under it without following a link, and created (`df-exec`,
     `0700`, through their descriptors) only when absent; one that is found
-    must be `df-exec`'s directory, else a refusal with nothing changed."""
+    must be `df-exec`'s directory, else a refusal with nothing changed.
+    Its warnings (a found directory writable by others) are returned by
+    `setup_machine_token` only."""
     _install_token(layout, _read_token(source))
 
 
@@ -156,19 +163,24 @@ def setup_machine_token(layout: Layout, source: Path) -> Check:
     """`install_machine_token`, then `check_machine_token` (the token known
     to the check only to mask it)."""
     token = _read_token(source)
-    _install_token(layout, token)
-    return check_machine_token(layout, token)
+    warnings = _install_token(layout, token)
+    check = check_machine_token(layout, token)
+    return replace(check, warnings=warnings + check.warnings)
 
 
-def _install_token(layout: Layout, token: bytes) -> None:
+def _install_token(layout: Layout, token: bytes) -> tuple[str, ...]:
     owner = _account(layout, EXEC)
     home = layout.role_home(EXEC)
+    problems = plat.trusted_path_problems(home.parent)
+    if problems:
+        raise StepFailed(STEP, "; ".join(problems) + f"; {_ROLES_SETUP}")
     fd = open_chain(layout, home, owner.uid)
+    warnings: list[str] = []
     try:
         here = home
         for name in MACHINE_TOKEN[:-1]:
             here = here / name
-            child = _token_dir(fd, name, here, owner)
+            child = _token_dir(fd, name, here, owner, warnings)
             os.close(fd)
             fd = child
         target = home.joinpath(*MACHINE_TOKEN)
@@ -183,6 +195,7 @@ def _install_token(layout: Layout, token: bytes) -> None:
         )
     finally:
         os.close(fd)
+    return tuple(warnings)
 
 
 def _read_token(source: Path) -> bytes:
@@ -197,18 +210,24 @@ def _read_token(source: Path) -> bytes:
     return token
 
 
-def _token_dir(parent: int, name: str, path: Path, owner: Account) -> int:
+def _token_dir(
+    parent: int, name: str, path: Path, owner: Account, warnings: list[str]
+) -> int:
     """`name` under `parent` as a descriptor. A found one is judged and kept
     as it is; an absent one is made, then handed over through its own
-    descriptor."""
+    descriptor -- only if what is opened is still root's, `0700` and empty
+    (else it was swapped: a found object)."""
     try:
-        return _found_dir(parent, name, path, owner)
+        return _found_dir(parent, name, path, owner, warnings)
     except FileNotFoundError:
         pass
     created = fsutil.make_dir(parent, name, TOKEN_DIR_MODE, path=path, repair=False)
     if not created:  # someone else made it meanwhile: a found object
-        return _found_dir(parent, name, path, owner)
+        return _found_dir(parent, name, path, owner, warnings)
     fd = _open_dir(parent, name, path)
+    if not _fresh(fd):
+        os.close(fd)
+        return _found_dir(parent, name, path, owner, warnings)
     try:
         os.fchown(fd, owner.uid, owner.gid)
         os.fchmod(fd, TOKEN_DIR_MODE)
@@ -220,15 +239,38 @@ def _token_dir(parent: int, name: str, path: Path, owner: Account) -> int:
     return fd
 
 
-def _found_dir(parent: int, name: str, path: Path, owner: Account) -> int:
+def _fresh(fd: int) -> bool:
+    """The directory `make_dir` just created: root's, `0700`, empty."""
+    st = os.fstat(fd)
+    if fsutil.owner_uid(st) != plat.ROOT_UID:
+        return False
+    return stat.S_IMODE(st.st_mode) == TOKEN_DIR_MODE and not os.listdir(fd)
+
+
+def _found_dir(
+    parent: int, name: str, path: Path, owner: Account, warnings: list[str]
+) -> int:
     fd = _open_dir(parent, name, path)
-    have = fsutil.owner_uid(os.fstat(fd))
+    st = os.fstat(fd)
+    have = fsutil.owner_uid(st)
     if have != owner.uid:
+        hint = (
+            f"; если это пустой каталог root, оставшийся после сбоя, удалите его "
+            f"(sudo rmdir {path}) и повторите"
+            if have == plat.ROOT_UID and not os.listdir(fd)
+            else ""
+        )
         os.close(fd)
         raise StepFailed(
             STEP,
             f"{path}: владелец uid {have}, нужен {owner.name} ({owner.uid}); "
-            "исправьте вручную, root не меняет владельца найденного",
+            f"исправьте вручную, root не меняет владельца найденного{hint}",
+        )
+    if st.st_mode & _WRITABLE:
+        mode = stat.S_IMODE(st.st_mode)
+        warnings.append(
+            f"{path}: права {mode:04o}, запись для группы или всех "
+            "(root не меняет найденное; советуем chmod 0700)"
         )
     return fd
 
@@ -236,12 +278,17 @@ def _found_dir(parent: int, name: str, path: Path, owner: Account) -> int:
 # --- shared ----------------------------------------------------------------
 
 
-def open_chain(layout: Layout, path: Path, owner: int) -> int:
+def open_chain(
+    layout: Layout, path: Path, owner: int, *, follow_to: Path | None = None
+) -> int:
     """Directory `path` as a descriptor, opened from `/` one component at a
     time (`O_DIRECTORY|O_NOFOLLOW`): every component from the layout root
     down is root's and not writable by group or others, the last is
     `owner`'s. The components above the layout root (only a test's root has
-    any) are judged by the trusted-path policy instead."""
+    any) are judged by the trusted-path policy instead. `follow_to` and its
+    parents are system components that may be links: they are opened
+    following them (the caller has vetted them by the trusted-path policy)
+    and judged by what they lead to."""
     problems = plat.trusted_path_problems(layout.root)
     if problems:
         raise StepFailed(STEP, "; ".join(problems))
@@ -252,8 +299,11 @@ def open_chain(layout: Layout, path: Path, owner: int) -> int:
         _judge(fd, here, layout, None if parts else owner)
         for i, part in enumerate(parts):
             here = here / part
+            system = follow_to is not None and (
+                here == follow_to or here in follow_to.parents
+            )
             try:
-                nxt = _open_dir(fd, part, here)
+                nxt = _open_dir(fd, part, here, follow=system)
             except FileNotFoundError as exc:
                 raise StepFailed(STEP, f"{here}: нет каталога; {_ROLES_SETUP}") from exc
             os.close(fd)
@@ -265,9 +315,10 @@ def open_chain(layout: Layout, path: Path, owner: int) -> int:
     return fd
 
 
-def _open_dir(parent: int, name: str, path: Path) -> int:
+def _open_dir(parent: int, name: str, path: Path, *, follow: bool = False) -> int:
+    flags = _DIR_FOLLOW_FLAGS if follow else _DIR_FLAGS
     try:
-        return os.open(name, _DIR_FLAGS, dir_fd=parent)
+        return os.open(name, flags, dir_fd=parent)
     except FileNotFoundError:
         raise
     except OSError as exc:
@@ -289,7 +340,7 @@ def _judge(fd: int, path: Path, layout: Layout, owner: int | None) -> None:
                 STEP, f"{path}: владелец uid {have}, нужен {owner}; {_ROLES_SETUP}"
             )
         return
-    if have != plat.ROOT_UID or st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+    if have != plat.ROOT_UID or st.st_mode & _WRITABLE:
         raise StepFailed(
             STEP,
             f"{path}: не каталог root без записи для группы и всех; {_ROLES_SETUP}",
@@ -301,6 +352,12 @@ def _read_source(source: Path, cap: int) -> bytes:
     final link, at most `cap` bytes. Never deleted."""
     if not source.is_absolute():
         raise StepFailed(STEP, f"--file {str(source)!r}: путь не абсолютный")
+    try:  # never open a device or a FIFO: refused before the open
+        st = os.lstat(source)
+    except OSError as exc:
+        raise StepFailed(STEP, f"--file {source}: {exc.strerror or exc}") from exc
+    if not stat.S_ISREG(st.st_mode):
+        raise StepFailed(STEP, f"--file {source}: не обычный файл")
     try:
         return inputs.read_capped(source, cap)
     except TreeError as exc:
@@ -344,7 +401,9 @@ def check_app_key(layout: Layout, app_id: int) -> Check:
     (`APP_PROBLEMS`) passes; another problem is a warning. No answer or
     another outcome fails. An App no product of `products.toml` uses is not
     signed with by the check: a warning says the key was not checked."""
-    warnings = _unused_app(layout, app_id)
+    products, warnings = _products(layout)
+    if not any(p.app_id == app_id for p in products.values()):
+        warnings += (_unused(app_id),)
     try:
         raw = publisher_self_check(layout)
     except OSError as exc:
@@ -362,7 +421,8 @@ def check_app_key(layout: Layout, app_id: int) -> Check:
     if not isinstance(problems, list):
         return Check((), warnings, "self-check: в ответе нет problems")
     texts = [str(p) for p in problems]
-    app = [p for p in texts if p.startswith(APP_PROBLEMS)]
+    installs = {p.installation_id: p.app_id for p in products.values()}
+    app = [p for p in texts if _problem_app(p, installs) in (app_id, None)]
     other = tuple(f"self-check: {p}" for p in texts if p not in app)
     if app:
         return Check((), warnings + other, "self-check: " + "; ".join(app))
@@ -370,18 +430,34 @@ def check_app_key(layout: Layout, app_id: int) -> Check:
     return Check((f"self-check издателя: {line}",), warnings + other)
 
 
-def _unused_app(layout: Layout, app_id: int) -> tuple[str, ...]:
+def _problem_app(problem: str, installs: Mapping[int, int]) -> int | None:
+    """The App a problem of `APP_PROBLEMS` concerns: `app_key_unusable: <id>`
+    and `app_unreadable: <id>: ...` name it; `app_installation_*: <id>`
+    names an installation, mapped through `products.toml`. `None`: not
+    attributable (judged as this App's: conservative). `-1`: not an App
+    problem."""
+    if not problem.startswith(APP_PROBLEMS):
+        return -1
+    ident = problem.partition(": ")[2].split(":", 1)[0].strip()
+    if not ident.isascii() or not ident.isdigit():
+        return None
+    if problem.startswith("app_installation_"):
+        return installs.get(int(ident))
+    return int(ident)
+
+
+def _products(layout: Layout) -> tuple[dict[int, Product], tuple[str, ...]]:
     try:
-        products = load_products(layout.etc / "products.toml")
+        return load_products(layout.etc / "products.toml"), ()
     except ConfigError as exc:
-        return (f"products.toml не читается: {exc}",)
-    if any(p.app_id == app_id for p in products.values()):
-        return ()
-    unused = (
+        return {}, (f"products.toml не читается: {exc}",)
+
+
+def _unused(app_id: int) -> str:
+    return (
         f"не проверено: нет продукта с App {app_id} в products.toml (self-check "
         "этот ключ не использовал; регистрация продукта — этап 3)"
     )
-    return (unused,)
 
 
 def check_machine_token(layout: Layout, token: bytes = b"") -> Check:

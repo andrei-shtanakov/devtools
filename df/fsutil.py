@@ -36,6 +36,13 @@ _SYNC_NOTES: set[int] = set()
 FaultKind = Literal["renamed", "unlinked", "created", "chown", "chmod"]
 
 
+class NotDurable(Exception):
+    """`write_under` renamed the new file into place but could not make it
+    durable: the old content is gone, the new one may not survive a crash.
+    Deliberately not an `OSError`: a caller must not report it as a write
+    that changed nothing."""
+
+
 class SyncNote(enum.Enum):
     """Evidence note returned by `sync_dir`."""
 
@@ -151,7 +158,8 @@ def write_under(
     temp, dir_fd, name)` -> `fault_point("renamed", path)` ->
     `sync_dir(dir_fd)`. A swap of the directory's path after it was opened
     does not redirect the write. The temp (`WRITE_TEMP`) is removed on a
-    failure before the rename. `path` names the target for the fault point
+    failure before the rename; a failure after it is `NotDurable` (its
+    cause the `OSError`). `path` names the target for the fault point
     only; it is never opened."""
     tmp = f".{name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -169,8 +177,11 @@ def write_under(
     except BaseException:
         _discard_at(dir_fd, tmp)
         raise
-    fault_point("renamed", path)
-    sync_dir(dir_fd)
+    try:
+        fault_point("renamed", path)
+        sync_dir(dir_fd)
+    except OSError as exc:
+        raise NotDurable(f"{path}: {exc}") from exc
 
 
 def _discard_at(dir_fd: int, tmp: str) -> None:

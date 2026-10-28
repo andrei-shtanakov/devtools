@@ -788,3 +788,334 @@ def test_fd_path_names_the_temp(w: W) -> None:
     setup_agent.install_machine_token(w.lay, w.source(TOKEN))
     temp = [e[1] for e in w.fake.events if e[0] == "fchown"][-1]
     assert fsutil.WRITE_TEMP.fullmatch(temp.name)
+
+
+# ---------- review round 1 ----------
+
+
+def test_app_key_through_a_system_etc_link(w: W) -> None:
+    """B1: macOS `/etc -> private/etc`. The system parents follow links
+    (vetted by the trusted-path policy); `app-key` succeeds."""
+    root = w.lay.root
+    (root / "private").mkdir(mode=0o755)
+    os.rename(root / "etc", root / "private" / "etc")
+    (root / "etc").symlink_to("private/etc")
+    setup_agent.install_app_key(w.lay, APP_ID, w.source(KEY))
+    target = root / "private" / "etc" / "df" / "secrets" / f"app-{APP_ID}.pem"
+    assert target.read_bytes() == KEY and owner(w, target) == PUB_UID
+
+
+@pytest.mark.parametrize("where", ["df", "secrets"])
+def test_installer_components_never_follow(w: W, where: str) -> None:
+    """B1: below the system `etc`, `df` and `secrets` are still no-follow,
+    also when `etc` itself is a link."""
+    root = w.lay.root
+    (root / "private").mkdir(mode=0o755)
+    os.rename(root / "etc", root / "private" / "etc")
+    (root / "etc").symlink_to("private/etc")
+    real = root / "private" / "etc" / "df"
+    moved = real if where == "secrets" else root / "df-real"
+    if where == "df":
+        os.rename(real, moved)
+        real.symlink_to(moved)
+    else:
+        os.rename(moved / "secrets", root / "secrets-real")
+        (moved / "secrets").symlink_to(root / "secrets-real")
+    with pytest.raises(StepFailed, match="ссылка или не каталог"):
+        setup_agent.install_app_key(w.lay, APP_ID, w.source(KEY))
+    assert not [e for e in w.fake.events if e[0] == "fchown"]
+
+
+@pytest.mark.parametrize(
+    "swap",
+    ["df-exec", "df-exec-empty", "other", "other-empty", "root-full", "root-mode"],
+)
+def test_created_dir_swapped_before_open(w: W, swap: str) -> None:
+    """M1: `.config` is made, then swapped before root opens it: root hands
+    over only its own fresh directory; a swapped one is a found object."""
+    real_make_dir = fsutil.make_dir
+    config = w.home / ".config"
+
+    def make_dir(parent: int, name: str, mode_: int, **kw: object) -> bool:
+        created = real_make_dir(parent, name, mode_, **kw)  # type: ignore[arg-type]
+        if name == ".config":
+            os.rename(config, w.home / ".config-root")
+            config.mkdir(mode=0o755 if swap == "root-mode" else 0o700)
+            if swap in ("df-exec", "other", "root-full"):
+                (config / "kept").write_text("x")
+            uid = {"df-exec": EXEC_UID, "other": ME + 5}.get(
+                swap.removesuffix("-empty"), ME
+            )
+            w.fake.set_owner(config, uid)
+        return created
+
+    w.mp.setattr(fsutil, "make_dir", make_dir)
+    if swap.startswith("df-exec"):
+        setup_agent.install_machine_token(w.lay, w.source(TOKEN))
+        assert w.token_file.read_bytes() == TOKEN + b"\n"
+        assert mode(config) == 0o700
+    else:
+        with pytest.raises(StepFailed, match="root не меняет"):
+            setup_agent.install_machine_token(w.lay, w.source(TOKEN))
+        assert owner(w, config) == (ME + 5 if swap.startswith("other") else ME)
+    assert config not in [e[1] for e in w.fake.events if e[0] == "fchown"]
+
+
+@pytest.mark.parametrize("planted", ["file", "hardlink"])
+def test_planted_temp_name_refused(
+    w: W, capsys: pytest.CaptureFixture[str], planted: str
+) -> None:
+    """M2: `O_EXCL` on the temp: a planted name (a hard link to another
+    file too) is never opened, chowned or written."""
+    hexed = "0" * 32
+    w.mp.setattr(fsutil.uuid, "uuid4", lambda: type("U", (), {"hex": hexed})())
+    temp = w.lay.secrets_dir / f".app-{APP_ID}.pem.{os.getpid()}.{hexed}.tmp"
+    victim = w.outside / "victim"
+    victim.write_text("victim")
+    if planted == "file":
+        temp.write_text("planted")
+    else:
+        os.link(victim, temp)
+    before = os.lstat(victim)
+    assert w.main(key_argv(w.source(KEY))) == 2
+    assert w.rows() == [("setup-agent", "failed")]
+    assert not [e for e in w.fake.events if e[0] == "fchown"]
+    assert victim.read_text() == "victim"
+    assert w.fake.owner_of(os.lstat(victim)) == w.fake.owner_of(before)
+    assert temp.exists() and not w.lay.app_key(APP_ID).exists()
+    assert "FileExistsError" in capsys.readouterr().err
+
+
+def _record_io(w: W) -> None:
+    """`fchmod`, the data write and `sync_file` join the fake's events."""
+    from tests.df.crash_model import fd_path
+
+    real_fchmod, real_write = os.fchmod, fsutil._write_all  # noqa: SLF001
+    real_sync_file = fsutil.sync_file
+
+    def fchmod(fd: int, mode_: int) -> None:
+        w.fake.events.append(("fchmod", fd_path(fd)))
+        real_fchmod(fd, mode_)
+
+    def write_all(fd: int, data: bytes) -> None:
+        w.fake.events.append(("write", fd_path(fd)))
+        real_write(fd, data)
+
+    def sync_file(fd: int) -> None:
+        w.fake.events.append(("sync_file", fd_path(fd)))
+        real_sync_file(fd)
+
+    w.mp.setattr(os, "fchmod", fchmod)
+    w.mp.setattr(fsutil, "_write_all", write_all)
+    w.mp.setattr(fsutil, "sync_file", sync_file)
+
+
+def _in_order(events: list[tuple[object, ...]], want: list[tuple[object, ...]]) -> bool:
+    it = iter(events)
+    return all(any(e[:2] == x for e in it) for x in want)
+
+
+def test_token_events_in_order(w: W) -> None:
+    """M2/N4: each directory is handed over and synced (itself, then its
+    parent) before the next; the temp is owned and moded before its first
+    byte, synced before the rename; the directory synced last."""
+    _record_io(w)
+    setup_agent.install_machine_token(w.lay, w.source(TOKEN))
+    config, df_dir = w.home / ".config", w.home / ".config" / "df"
+    events = w.fake.events
+    temp = next(e[1] for e in events if e[0] == "write")
+    assert isinstance(temp, Path) and temp.parent == df_dir
+    assert _in_order(
+        events,
+        [
+            ("fchown", config),
+            ("fchmod", config),
+            ("sync_dir", config),
+            ("sync_dir", w.home),
+            ("fchown", df_dir),
+            ("fchmod", df_dir),
+            ("sync_dir", df_dir),
+            ("sync_dir", config),
+            ("fchown", temp),
+            ("fchmod", temp),
+            ("write", temp),
+            ("sync_file", temp),
+            ("renamed", w.token_file),
+            ("sync_dir", df_dir),
+        ],
+    )
+    assert events[-1] == ("sync_dir", df_dir)
+
+
+def test_key_events_in_order(w: W) -> None:
+    _record_io(w)
+    setup_agent.install_app_key(w.lay, APP_ID, w.source(KEY))
+    secrets = w.lay.secrets_dir
+    temp = next(e[1] for e in w.fake.events if e[0] == "write")
+    assert _in_order(
+        w.fake.events,
+        [
+            ("fchown", temp),
+            ("fchmod", temp),
+            ("write", temp),
+            ("sync_file", temp),
+            ("renamed", w.lay.app_key(APP_ID)),
+            ("sync_dir", secrets),
+        ],
+    )
+
+
+def test_token_target_planted_as_dir(w: W, capsys: pytest.CaptureFixture[str]) -> None:
+    """M2: `github-token` is a directory: the rename fails, the directory and
+    its content are untouched, no temp is left; journalled `failed`."""
+    df_dir = w.token_file.parent
+    df_dir.mkdir(parents=True, mode=0o700)
+    for path in (df_dir.parent, df_dir):
+        w.fake.set_owner(path, EXEC_UID)
+    w.token_file.mkdir()
+    (w.token_file / "inside").write_text("x")
+    before = tree(df_dir)
+    assert w.main(token_argv(w.source(TOKEN))) == 2
+    assert tree(df_dir) == before
+    assert w.rows() == [("setup-agent", "failed")]
+    assert_no_secret(w, capsys)
+
+
+@pytest.mark.parametrize("kind", ["key", "token"])
+def test_not_durable_after_rename_needs_human(
+    w: W, capsys: pytest.CaptureFixture[str], kind: str
+) -> None:
+    """M4: the directory's sync fails after the rename: the secret is
+    already replaced, so NeedsHuman (exit 3), never `failed`."""
+    from tests.df.crash_model import fd_path
+
+    target = w.lay.app_key(APP_ID) if kind == "key" else w.token_file
+    real_sync_dir = fsutil.sync_dir
+
+    def sync_dir(fd_or_path: int | Path) -> fsutil.SyncNote:
+        path = fd_path(fd_or_path) if isinstance(fd_or_path, int) else fd_or_path
+        if path == target.parent and target.exists():
+            raise OSError(5, "Input/output error")
+        return real_sync_dir(fd_or_path)
+
+    w.mp.setattr(fsutil, "sync_dir", sync_dir)
+    argv = key_argv(w.source(KEY)) if kind == "key" else token_argv(w.source(TOKEN))
+    assert w.main(argv) == 3
+    err = capsys.readouterr().err
+    assert "записан, но не закреплён: повторите команду" in err
+    assert w.rows() == [("setup-agent", "needs-human")]
+    assert target.exists()
+    assert w.self_check and w.github  # no check after an unsettled write
+    text = err + w.journal_text()
+    assert TOKEN.decode() not in text and KEY_MARK.decode() not in text
+
+
+def two_apps(w: W, *extra: Product) -> None:
+    rows = [
+        Product(100, "o/a", "fork", 1, 11, "df-bot", "/c"),
+        Product(200, "o/b", "fork", 2, 21, "df-bot", "/c"),
+        *extra,
+    ]
+    (w.lay.etc / "products.toml").write_text(
+        dump_products({p.repository_id: p for p in rows})
+    )
+
+
+@pytest.mark.parametrize(
+    ("problem", "code"),
+    [
+        ("app_key_unusable: 2", 0),
+        ("app_unreadable: 2: github_404: Not Found", 0),
+        ("app_installation_unreadable: 21", 0),
+        ("app_installation_outside_products: 21", 0),
+        ("app_key_unusable: 1", 3),
+        ("app_unreadable: 1: github_401: Bad credentials", 3),
+        ("app_installation_unreadable: 11", 3),
+        ("app_installation_outside_products: 99", 3),  # not mapped
+        ("app_unreadable: x", 3),  # not attributable
+    ],
+)
+def test_only_this_apps_problems_fail(
+    w: W, capsys: pytest.CaptureFixture[str], problem: str, code: int
+) -> None:
+    """M3: two Apps, the key of App 1 installed; another App's problem is a
+    warning."""
+    two_apps(w)
+    w.self_check = [response([problem])]
+    argv = ["setup-agent", "app-key", "--app-id", "1", "--file", str(w.source(KEY))]
+    assert w.main(argv) == code
+    err = capsys.readouterr().err
+    if code == 0:
+        assert f"предупреждение: self-check: {problem}" in err
+        assert w.rows() == [("setup-agent", "done")]
+    else:
+        assert f"проверка не прошла: self-check: {problem}" in err
+
+
+def test_unused_app_with_another_apps_problem(
+    w: W, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M3 with c1: App N unused, another App broken: both warnings, exit 0."""
+    two_apps(w)
+    w.self_check = [response(["app_key_unusable: 2"])]
+    assert w.main(key_argv(w.source(KEY))) == 0
+    err = capsys.readouterr().err
+    assert f"не проверено: нет продукта с App {APP_ID}" in err
+    assert "предупреждение: self-check: app_key_unusable: 2" in err
+
+
+def test_home_parent_judged_by_trusted_path(w: W) -> None:
+    """M5: the home's parent goes through the trusted-path policy (ACLs)."""
+    seen: list[Path] = []
+
+    def policy(path: Path) -> list[str]:
+        seen.append(path)
+        return [f"{path}: ACL"] if path == w.home.parent else []
+
+    w.mp.setattr(plat, "trusted_path_problems", policy)
+    with pytest.raises(StepFailed, match="ACL.*roles setup"):
+        setup_agent.install_machine_token(w.lay, w.source(TOKEN))
+    assert w.home.parent in seen and os.listdir(w.home) == []
+
+
+@pytest.mark.parametrize("kind", ["fifo", "dir", "link"])
+def test_source_not_opened_unless_regular(w: W, kind: str) -> None:
+    """N1: `lstat` first: a FIFO, a directory or a link is never opened."""
+    path = w.src / "k.pem"
+    if kind == "fifo":
+        os.mkfifo(path)
+    elif kind == "dir":
+        path.mkdir()
+    else:
+        path.symlink_to(w.source(KEY, "real.pem"))
+    opened: list[Path] = []
+    w.mp.setattr(setup_agent.inputs, "read_capped", lambda p, _c: opened.append(p))
+    with pytest.raises(StepFailed, match="не обычный файл"):
+        setup_agent.install_app_key(w.lay, APP_ID, path)
+    assert opened == []
+
+
+@pytest.mark.parametrize("which", [".config", ".config/df"])
+def test_found_writable_dir_warns(
+    w: W, capsys: pytest.CaptureFixture[str], which: str
+) -> None:
+    """N2: a found `df-exec` directory writable by others is kept, with a
+    warning."""
+    df_dir = w.home / ".config" / "df"
+    df_dir.mkdir(parents=True, mode=0o700)
+    for path in (df_dir.parent, df_dir):
+        w.fake.set_owner(path, EXEC_UID)
+    (w.home / which).chmod(0o777)
+    assert w.main(token_argv(w.source(TOKEN))) == 0
+    err = capsys.readouterr().err
+    assert f"предупреждение: {w.home / which}: права 0777" in err
+    assert mode(w.home / which) == 0o777
+
+
+def test_found_root_empty_dir_names_rmdir(w: W) -> None:
+    """N3: a crash's leftover (root's empty `.config`) is named with how to
+    remove it."""
+    config = w.home / ".config"
+    config.mkdir(mode=0o700)
+    with pytest.raises(StepFailed, match=f"sudo rmdir {config}"):
+        setup_agent.install_machine_token(w.lay, w.source(TOKEN))
