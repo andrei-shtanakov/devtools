@@ -258,7 +258,7 @@ def _headers(auth: str) -> dict[str, str]:
 def _message(body: bytes) -> str:
     try:
         data = json.loads(body)
-    except ValueError:
+    except (ValueError, RecursionError):
         return "no message"
     text = data.get("message") if isinstance(data, dict) else None
     return text[:_MESSAGE_LIMIT] if isinstance(text, str) else "no message"
@@ -291,7 +291,7 @@ def _send(
 def _json(raw: bytes) -> object:
     try:
         return json.loads(raw)
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         raise GitHubUnavailable("answer is not JSON") from exc
 
 
@@ -351,10 +351,13 @@ def _expires_at(value: object, now: float) -> datetime:
         raise GitHubRefused("token_expiry_invalid") from exc
     if parsed.tzinfo is None:
         raise GitHubRefused("token_expiry_invalid")
-    at = parsed.astimezone(UTC).timestamp()
-    if not now < at <= now + TOKEN_LIFETIME + CLOCK_SLACK:
+    try:
+        at = parsed.astimezone(UTC)
+    except OverflowError as exc:
+        raise GitHubRefused("token_expiry_invalid") from exc
+    if not now < at.timestamp() <= now + TOKEN_LIFETIME + CLOCK_SLACK:
         raise GitHubRefused("token_expiry_invalid")
-    return parsed.astimezone(UTC)
+    return at
 
 
 def _id_list(items: object, what: str) -> tuple[int, ...]:

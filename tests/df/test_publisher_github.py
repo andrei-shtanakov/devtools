@@ -238,6 +238,12 @@ def test_token_expiry_bounds() -> None:
     )
     with pytest.raises(GitHubRefused, match="token_expiry_invalid"):
         _mint(naive, repos=None, perms=PERMS)
+    far = _json_reply(
+        {"token": "t", "expires_at": "9999-12-31T23:59:59-23:59", "permissions": PERMS},
+        201,
+    )
+    with pytest.raises(GitHubRefused, match="token_expiry_invalid"):
+        _mint(far, repos=None, perms=PERMS)
 
 
 def test_token_without_requested_scope_is_not_compared() -> None:
@@ -266,6 +272,16 @@ def _proxy_of(handler: object) -> object:
 def test_5xx_is_unavailable() -> None:
     fake = FakeTransport({("GET", f"{github.API}/x"): (503, {}, b"{}")})
     with pytest.raises(GitHubUnavailable):
+        github.call("GET", "/x", "tok", transport=fake)
+
+
+def test_deeply_nested_answer_is_unavailable() -> None:
+    deep = b"[" * 200_000 + b"]" * 200_000
+    fake = FakeTransport({("GET", f"{github.API}/x"): (200, {}, deep)})
+    with pytest.raises(GitHubUnavailable, match="not JSON"):
+        github.call("GET", "/x", "tok", transport=fake)
+    fake = FakeTransport({("GET", f"{github.API}/x"): (404, {}, deep)})
+    with pytest.raises(GitHubRefused, match="no message"):
         github.call("GET", "/x", "tok", transport=fake)
 
 
