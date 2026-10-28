@@ -11,13 +11,13 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from df.config import ConfigError, read_optional
 from df.paths import Layout
-from df.publisher import github, store
+from df.publisher import github
 from df.publisher.github import (
     GitHubRefused,
     GitHubUnavailable,
@@ -48,6 +48,8 @@ REVIEW_PERMISSIONS = {"pull_requests": "write"}
 #: What `read-token` hands the reviewer (spec 4.4).
 READ_PERMISSIONS = {"contents": "read", "pull_requests": "read"}
 _ESCAPED = "&lt;!--"
+#: GitHub's limit of a review body, in characters.
+MAX_REVIEW_BODY = 65536
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,7 @@ class OpContext:
     transport: Transport
     now: float
     api_base: str
+    products: Mapping[int, Product]
 
 
 @dataclass(frozen=True)
@@ -68,7 +71,7 @@ class _Auth:
     """The App's bot login and an installation token for one repository."""
 
     bot: str
-    token: str
+    token: str = field(repr=False)
 
 
 class _Answer(Exception):
@@ -121,9 +124,14 @@ def _key_of(layout: Layout, app_id: int) -> Path:
 
 
 def build_context(ctx: Context) -> OpContext:
-    """The `OpContext` of the product the request names (`product_unknown`,
-    `products_config_invalid`, `openssl_not_configured` otherwise)."""
-    product = _products(ctx.layout).get(int(str(ctx.request.fields["repository_id"])))
+    """The `OpContext` of the product the request names. The run must belong
+    to that product (`run_product_mismatch`); `product_unknown`,
+    `products_config_invalid`, `openssl_not_configured` otherwise."""
+    repository_id = int(str(ctx.request.fields["repository_id"]))
+    if ctx.record is None or ctx.record.product != repository_id:
+        raise Refused("run_product_mismatch")
+    products = _products(ctx.layout)
+    product = products.get(repository_id)
     if product is None:
         raise Refused("product_unknown")
     return OpContext(
@@ -134,6 +142,7 @@ def build_context(ctx: Context) -> OpContext:
         github.default_transport,
         time.time(),
         ctx.api_base,
+        products,
     )
 
 
@@ -150,16 +159,29 @@ def _check_app(
     now: float,
     api_base: str,
 ) -> SelfCheckResult:
-    """`github.self_check` with its failures as answers."""
+    """`github.self_check` with the clock fixed at `now`."""
+    return github.self_check(
+        products,
+        app_id,
+        key,
+        openssl=openssl,
+        transport=transport,
+        api_base=api_base,
+        clock=lambda: now,
+    )
+
+
+def _self_check_first(oc: OpContext) -> None:
+    """Decision 10: the App is checked before every operation."""
     try:
-        return github.self_check(
-            products,
-            app_id,
-            key,
-            openssl=openssl,
-            transport=transport,
-            api_base=api_base,
-            clock=lambda: now,
+        result = _check_app(
+            oc.products,
+            oc.product.app_id,
+            oc.app_key,
+            oc.openssl,
+            oc.transport,
+            oc.now,
+            oc.api_base,
         )
     except GitHubUnavailable:
         raise _unavailable() from None
@@ -167,19 +189,6 @@ def _check_app(
         raise Refused(_reason(exc)) from None
     except SigningFailed:
         raise Refused("app_key_unusable") from None
-
-
-def _self_check_first(ctx: Context, oc: OpContext) -> None:
-    """Decision 10: the App is checked before every operation."""
-    result = _check_app(
-        _products(ctx.layout),
-        oc.product.app_id,
-        oc.app_key,
-        oc.openssl,
-        oc.transport,
-        oc.now,
-        oc.api_base,
-    )
     if result.problems:
         raise Refused(result.problems[0])
 
@@ -266,17 +275,24 @@ def _pr_matches(data: object, repository_id: int, head_sha: str) -> bool:
     return head.get("sha") == head_sha
 
 
+def _marker(req: Request, key: str) -> str:
+    return MARKER.format(key=key, sha=req.fields["head_sha"])
+
+
+def _review_text(req: Request, key: str) -> str:
+    """The body as published: escaped model text, then the one real marker."""
+    return f"{escape_body(str(req.fields['body']))}\n\n{_marker(req, key)}"
+
+
 def _post_review(
     oc: OpContext, auth: _Auth, req: Request, key: str
 ) -> Mapping[str, object] | None:
     """POST the review; `None` if the outcome is ambiguous (reconcile)."""
     fields = req.fields
-    head_sha = str(fields["head_sha"])
-    marker = MARKER.format(key=key, sha=head_sha)
     body = {
-        "commit_id": head_sha,
+        "commit_id": str(fields["head_sha"]),
         "event": EVENTS[str(fields["decision"])],
-        "body": f"{escape_body(str(fields['body']))}\n\n{marker}",
+        "body": _review_text(req, key),
     }
     path = f"/repos/{oc.product.full_name}/pulls/{fields['pr']}/reviews"
     try:
@@ -297,17 +313,31 @@ def _post_review(
     return data
 
 
-def _posted(data: Mapping[str, object], auth: _Auth, head_sha: str) -> Response:
+def _done(ident: int, head_sha: str) -> Response:
+    ids = {"review_id": ident, "commit_id": head_sha}
+    return Response("done", None, ids, dict(ids))
+
+
+def _posted(
+    data: Mapping[str, object], auth: _Auth, req: Request, key: str
+) -> Response:
+    """The POST's answer is the review we asked for: same commit, decision's
+    state, our marker last, authored by the bot."""
     ident = data.get("id")
+    head_sha = str(req.fields["head_sha"])
+    body = data.get("body")
     ok = (
-        isinstance(ident, int)
-        and not isinstance(ident, bool)
+        github._is_int(ident)
         and data.get("commit_id") == head_sha
+        and data.get("state") == STATES[str(req.fields["decision"])]
+        and isinstance(body, str)
+        and body.endswith("\n\n" + _marker(req, key))
         and _is_bot(data, auth.bot)
     )
     if not ok:
         return Response("unknown", "review_response_unexpected")
-    return Response("done", None, {"review_id": ident, "commit_id": head_sha})
+    assert isinstance(ident, int)
+    return _done(ident, head_sha)
 
 
 def _list_reviews(oc: OpContext, auth: _Auth, pr: object) -> list[dict[str, object]]:
@@ -323,7 +353,7 @@ def reconcile_review(oc: OpContext, auth: _Auth, req: Request, key: str) -> Resp
     (every page): exactly one from the bot matching the decision is `done`;
     none or several is `unknown`."""
     head_sha = str(req.fields["head_sha"])
-    marker = MARKER.format(key=key, sha=head_sha)
+    suffix = "\n\n" + _marker(req, key)
     try:
         reviews = _list_reviews(oc, auth, req.fields["pr"])
     except GitHubUnavailable:
@@ -333,7 +363,7 @@ def reconcile_review(oc: OpContext, auth: _Auth, req: Request, key: str) -> Resp
     mine = [
         r
         for r in reviews
-        if _is_bot(r, auth.bot) and marker in str(r.get("body") or "")
+        if _is_bot(r, auth.bot) and str(r.get("body") or "").endswith(suffix)
     ]
     if not mine:
         return Response("unknown", "review_not_found")
@@ -345,10 +375,11 @@ def reconcile_review(oc: OpContext, auth: _Auth, req: Request, key: str) -> Resp
     if (
         found.get("commit_id") != head_sha
         or found.get("state") != state
-        or not isinstance(ident, int)
+        or not github._is_int(ident)
     ):
         return Response("unknown", "review_mismatch")
-    return Response("done", None, {"review_id": ident, "commit_id": head_sha})
+    assert isinstance(ident, int)
+    return _done(ident, head_sha)
 
 
 @_answers
@@ -357,9 +388,11 @@ def publish_review(ctx: Context) -> Response:
     publish the review at `head_sha`; an ambiguous POST or a repeated request
     is reconciled, never posted again."""
     oc = build_context(ctx)
-    _self_check_first(ctx, oc)
-    auth = _auth(oc)
     req, key = ctx.request, ctx.reservation.key
+    if len(_review_text(req, key)) > MAX_REVIEW_BODY:
+        raise Refused("body_too_long")
+    _self_check_first(oc)
+    auth = _auth(oc)
     if ctx.intent is not None:
         return reconcile_review(oc, auth, req, key)
     head_sha = str(req.fields["head_sha"])
@@ -370,7 +403,7 @@ def publish_review(ctx: Context) -> Response:
     data = _post_review(oc, auth, req, key)
     if data is None:
         return reconcile_review(oc, auth, req, key)
-    return _posted(data, auth, head_sha)
+    return _posted(data, auth, req, key)
 
 
 # --- read-token ---------------------------------------------------------------
@@ -382,7 +415,7 @@ def read_token(ctx: Context) -> Response:
     repository. Nothing external changes, so no intent is written, and the
     token is in the answer only (the frame never stores or journals it)."""
     oc = build_context(ctx)
-    _self_check_first(ctx, oc)
+    _self_check_first(oc)
     token = _authorize(oc, READ_PERMISSIONS)
     result = {
         "token": token.value,
@@ -396,6 +429,30 @@ def read_token(ctx: Context) -> Response:
 # --- self-check ---------------------------------------------------------------
 
 
+def _check_one(
+    ctx: Context, products: Mapping[int, Product], app_id: int, openssl: Path
+) -> SelfCheckResult:
+    """One App's check; a broken key or an unreadable App is a problem of
+    that App, not the end of the report."""
+    try:
+        return _check_app(
+            products,
+            app_id,
+            _key_of(ctx.layout, app_id),
+            openssl,
+            github.default_transport,
+            time.time(),
+            ctx.api_base,
+        )
+    except SigningFailed:
+        return SelfCheckResult((), (f"app_key_unusable: {app_id}",), None)
+    except GitHubRefused as exc:
+        problem = f"app_unreadable: {app_id}: {_reason(exc)}"
+        return SelfCheckResult((), (problem,), None)
+    except GitHubUnavailable:
+        raise _unavailable() from None
+
+
 @_answers
 def self_check_op(ctx: Context) -> Response:
     """`self-check` (root): every App of `products.toml` is checked; the
@@ -405,15 +462,7 @@ def self_check_op(ctx: Context) -> Response:
     installations: list[github.Installation] = []
     problems: list[str] = []
     for app_id in sorted({p.app_id for p in products.values()}):
-        result = _check_app(
-            products,
-            app_id,
-            _key_of(ctx.layout, app_id),
-            openssl,
-            github.default_transport,
-            time.time(),
-            ctx.api_base,
-        )
+        result = _check_one(ctx, products, app_id, openssl)
         installations.extend(result.installations)
         problems.extend(result.problems)
     whole = SelfCheckResult(tuple(installations), tuple(problems), None)
@@ -429,5 +478,4 @@ __all__ = [
     "read_token",
     "reconcile_review",
     "self_check_op",
-    "store",
 ]

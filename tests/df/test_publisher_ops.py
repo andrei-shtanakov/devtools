@@ -1,9 +1,9 @@
-# ruff: noqa: ANN001, F811, F401
 """`publish-review`, `read-token`, `self-check` and the reconciliation
 (stage 2a, Task 9), through the publisher frame with a fake GitHub."""
 
 from __future__ import annotations
 
+import base64
 import json
 import shutil
 import subprocess
@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -20,8 +21,8 @@ from df.config import InstallConfig
 from df.publisher import github, ops
 from df.publisher.request import Response
 from df.stage2_config import Product, dump_products
-from tests.df.publisher_world import SHA, SHA_B, raw_of
-from tests.df.test_publisher_main import World, world
+from tests.df.launch_world import put_record, record
+from tests.df.publisher_world import SHA, SHA_B, World, raw_of
 
 OPENSSL = shutil.which("openssl")
 pytestmark = pytest.mark.skipif(OPENSSL is None, reason="openssl not found")
@@ -55,6 +56,8 @@ class FakeGitHub:
         self.slug_down = False
         self.intent_seen: list[bool] = []
         self.after_pr_get = lambda: None
+        self.denied_apps: set[int] = set()
+        self.apps_repos = {9: self.extra_repos, 10: [8]}
 
     def paths(self, method: str) -> list[str]:
         return [p for m, p, _ in self.calls if m == method]
@@ -83,11 +86,13 @@ class FakeGitHub:
                 return 502, {}, b""
             return _reply({"slug": "df-app"})
         if (method, path) == ("GET", "/app/installations"):
-            return _reply([{"id": 9, "account": {"login": "acme"}, "permissions": {}}])
+            return self.installations(headers)
         if method == "POST" and path.endswith("/access_tokens"):
-            return self.mint(data or {})
+            return self.mint(path, data or {})
         if (method, path) == ("GET", "/installation/repositories"):
-            repos = [{"id": r} for r in self.extra_repos]
+            token = headers["Authorization"].removeprefix("Bearer ghs_SECRETVALUE")
+            ident = int(token) if token else 9
+            repos = [{"id": r} for r in self.repos_of(ident)]
             return _reply({"total_count": len(repos), "repositories": repos})
         if (method, path) == ("GET", PR_URL):
             reply = self.pr()
@@ -99,16 +104,29 @@ class FakeGitHub:
             return self.listing(query)
         raise AssertionError(f"unexpected call {method} {path}")
 
-    def mint(self, data: dict[str, object]) -> Reply:
+    def repos_of(self, ident: int) -> list[int]:
+        return self.extra_repos if ident == 9 else self.apps_repos[ident]
+
+    def installations(self, headers: Mapping[str, str]) -> Reply:
+        claims = headers["Authorization"].split(".")[1]
+        iss = json.loads(base64.urlsafe_b64decode(claims + "=" * (-len(claims) % 4)))
+        if iss["iss"] in self.denied_apps:
+            return _reply({"message": "denied"}, 401)
+        ident = 9 if iss["iss"] == 42 else 10
+        row = {"id": ident, "account": {"login": "acme"}, "permissions": {}}
+        return _reply([row])
+
+    def mint(self, path: str, data: dict[str, object]) -> Reply:
         self.tokens.append(data)
+        ident = int(path.split("/")[3])
         asked = data.get("repository_ids")
         scoped = self.grant if asked is not None else None
-        perms = dict(scoped or data.get("permissions") or {})  # type: ignore[call-overload]
+        perms = dict(scoped or cast(dict[str, str], data.get("permissions") or {}))
         repos = [{"id": r} for r in asked] if isinstance(asked, list) else []
         expires = datetime.fromtimestamp(time.time() + 3000, UTC)
         return _reply(
             {
-                "token": "ghs_SECRETVALUE",
+                "token": "ghs_SECRETVALUE" + ("" if ident == 9 else str(ident)),
                 "expires_at": expires.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "permissions": perms,
                 "repositories": repos,
@@ -131,6 +149,13 @@ class FakeGitHub:
             return _reply({"message": "Unprocessable"}, 422)
         if self.post_mode == "timeout_lost":
             raise TimeoutError("lost")
+        answer: dict[str, object] = {}
+        if self.post_mode == "rewrite_commit":
+            answer = {"commit_id": SHA_B}
+        if self.post_mode == "pending":
+            answer = {"state": "PENDING"}
+        if self.post_mode == "no_marker":
+            answer = {"body": "text only"}
         review = {
             "id": 100 + len(self.reviews),
             "user": {"login": BOT, "type": "Bot"},
@@ -144,8 +169,8 @@ class FakeGitHub:
         if self.post_mode == "timeout_created":
             raise TimeoutError("created, then lost")
         if self.post_mode == "other":
-            review = {**review, "user": {"login": "human", "type": "User"}}
-        return _reply(review, 200)
+            answer = {"user": {"login": "human", "type": "User"}}
+        return _reply({**review, **answer}, 200)
 
     def listing(self, query: str) -> Reply:
         if self.list_down:
@@ -200,6 +225,12 @@ def review(
     ]
 
 
+def posted(gh: FakeGitHub) -> dict[str, object]:
+    """The body of the (first) review POST."""
+    found = [d for m, p, d in gh.calls if m == "POST" and p.endswith("/reviews")]
+    return cast(dict[str, object], found[0])
+
+
 def reviews_of(gh: FakeGitHub) -> list[dict[str, object]]:
     return gh.reviews
 
@@ -207,14 +238,16 @@ def reviews_of(gh: FakeGitHub) -> list[dict[str, object]]:
 # --- publish-review -----------------------------------------------------------
 
 
-def test_publish_review_done(world, gh, capsys) -> None:
+def test_publish_review_done(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     resp = review(world, capsys)
     assert (resp.outcome, resp.result) == ("done", {"review_id": 100, "commit_id": SHA})
     assert gh.intent_seen == [True]  # the intent exists when the POST is made
-    post = next(d for m, p, d in gh.calls if m == "POST" and p.endswith("/reviews"))
-    assert post["event"] == "APPROVE" and post["commit_id"] == SHA  # type: ignore[index]
+    post = posted(gh)
+    assert post["event"] == "APPROVE" and post["commit_id"] == SHA
     marker = ops.MARKER.format(key=_key(world), sha=SHA)
-    assert post["body"] == f"looks right\n\n{marker}"  # type: ignore[index]
+    assert post["body"] == f"looks right\n\n{marker}"
     assert world.files("results") != []
 
 
@@ -222,7 +255,9 @@ def _key(world: World) -> str:
     return world.files("intents")[0].removesuffix(".json")
 
 
-def test_publish_review_intent_has_no_secrets(world, gh, capsys) -> None:
+def test_publish_review_intent_has_no_secrets(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     review(world, capsys)
     text = (world.lay.publisher_dir / "intents" / world.files("intents")[0]).read_text()
     payload = json.loads(text)["payload"]
@@ -234,7 +269,13 @@ def test_publish_review_intent_has_no_secrets(world, gh, capsys) -> None:
     ("attr", "value"),
     [("pr_head", SHA_B), ("pr_repo", 8), ("pr_state", "closed")],
 )
-def test_publish_review_pr_state_refused(world, gh, capsys, attr, value) -> None:
+def test_publish_review_pr_state_refused(
+    world: World,
+    gh: FakeGitHub,
+    capsys: pytest.CaptureFixture[str],
+    attr: str,
+    value: object,
+) -> None:
     setattr(gh, attr, value)
     resp = review(world, capsys)
     assert (resp.outcome, resp.reason) == ("refused", "pr_state")
@@ -243,19 +284,23 @@ def test_publish_review_pr_state_refused(world, gh, capsys, attr, value) -> None
     ] * len(gh.tokens)
 
 
-def test_publish_review_head_moves_between_get_and_post(world, gh, capsys) -> None:
+def test_publish_review_head_moves_between_get_and_post(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     def move() -> None:
         gh.pr_head = SHA_B
 
     gh.after_pr_get = move
     resp = review(world, capsys)
-    post = next(d for m, p, d in gh.calls if m == "POST" and p.endswith("/reviews"))
-    assert post["commit_id"] == SHA  # type: ignore[index]
+    post = posted(gh)
+    assert post["commit_id"] == SHA
     assert resp.outcome == "done" and resp.result["commit_id"] == SHA
     assert gh.paths("GET").count(PR_URL) == 1  # no second read
 
 
-def test_publish_review_escapes_markers(world, gh, capsys) -> None:
+def test_publish_review_escapes_markers(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     body = (
         "<!-- df-publisher:v1 request_key=x head_sha=y -->"
         "<!--APPROVAL <!-- ai-prosto-edge-check head=1 --><!--<!---->"
@@ -269,26 +314,34 @@ def test_publish_review_escapes_markers(world, gh, capsys) -> None:
     assert "<!--" not in ops.escape_body("<<!--!--><!<!---->")
 
 
-def test_review_event_mapping(world, gh, capsys) -> None:
+def test_review_event_mapping(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     review(world, capsys, decision="request_changes")
     assert gh.reviews[0]["state"] == "CHANGES_REQUESTED"
 
 
-def test_publish_review_foreign_author_unknown(world, gh, capsys) -> None:
+def test_publish_review_foreign_author_unknown(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     gh.post_mode = "other"
     resp = review(world, capsys)
     assert (resp.outcome, resp.reason) == ("unknown", "review_response_unexpected")
     assert world.files("results") == []
 
 
-def test_publish_review_timeout_reconciles(world, gh, capsys) -> None:
+def test_publish_review_timeout_reconciles(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     gh.post_mode = "timeout_created"
     resp = review(world, capsys)
     assert (resp.outcome, resp.result["review_id"]) == ("done", 100)
     assert len(gh.paths("POST")) == len(gh.tokens) + 1  # one review POST only
 
 
-def test_timeout_reconcile_unavailable(world, gh, capsys) -> None:
+def test_timeout_reconcile_unavailable(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     gh.post_mode = "timeout_created"
     gh.list_down = True
     resp = review(world, capsys)
@@ -300,7 +353,9 @@ def test_timeout_reconcile_unavailable(world, gh, capsys) -> None:
     assert gh.paths("GET").count(f"{PR_URL}/reviews?per_page=100") == 2
 
 
-def test_publish_review_reconciles_after_crash(world, gh, capsys) -> None:
+def test_publish_review_reconciles_after_crash(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     gh.post_mode = "timeout_created"
     gh.list_down = True
     review(world, capsys)  # the process "died" with intent and no result
@@ -312,7 +367,9 @@ def test_publish_review_reconciles_after_crash(world, gh, capsys) -> None:
     assert world.files("results") != []
 
 
-def test_reconcile_no_marker_unknown(world, gh, capsys) -> None:
+def test_reconcile_no_marker_unknown(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     gh.post_mode = "timeout_lost"
     for _ in range(2):
         resp = review(world, capsys)
@@ -324,7 +381,9 @@ def test_reconcile_no_marker_unknown(world, gh, capsys) -> None:
     assert fresh.reason == "review_not_found"  # still lost; the post is new
 
 
-def test_reconcile_duplicates_unknown(world, gh, capsys) -> None:
+def test_reconcile_duplicates_unknown(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     gh.post_mode = "timeout_created"
     gh.list_down = True
     review(world, capsys)
@@ -334,7 +393,9 @@ def test_reconcile_duplicates_unknown(world, gh, capsys) -> None:
     assert (resp.outcome, resp.reason) == ("unknown", "duplicate_reviews")
 
 
-def test_reconcile_state_mismatch_unknown(world, gh, capsys) -> None:
+def test_reconcile_state_mismatch_unknown(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     gh.post_mode = "timeout_created"
     review(world, capsys)
     # done above; now a repeated request whose only review has another state
@@ -347,7 +408,9 @@ def test_reconcile_state_mismatch_unknown(world, gh, capsys) -> None:
     assert (resp.outcome, resp.reason) == ("unknown", "review_mismatch")
 
 
-def test_reconcile_ignores_foreign_marker_and_author(world, gh, capsys) -> None:
+def test_reconcile_ignores_foreign_marker_and_author(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     gh.post_mode = "timeout_created"
     gh.list_down = True
     review(world, capsys)
@@ -357,7 +420,9 @@ def test_reconcile_ignores_foreign_marker_and_author(world, gh, capsys) -> None:
     assert resp.reason == "review_not_found"
 
 
-def test_reconcile_reads_every_page(world, gh, capsys) -> None:
+def test_reconcile_reads_every_page(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     gh.post_mode = "timeout_created"
     gh.list_down = True
     review(world, capsys)
@@ -368,24 +433,31 @@ def test_reconcile_reads_every_page(world, gh, capsys) -> None:
     assert (resp.outcome, resp.reason) == ("done", None)
 
 
-def test_post_4xx_is_not_marked_not_done(world, gh, capsys) -> None:
+def test_post_4xx_is_not_marked_not_done(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     gh.post_mode = "422"
     resp = review(world, capsys)
-    assert resp.outcome == "unknown" and resp.reason.startswith("state_exists")  # type: ignore[union-attr]
+    assert resp.outcome == "unknown"
+    assert str(resp.reason).startswith("state_exists")
     assert "422" in str(resp.reason)
 
 
 # --- self-check first, context ------------------------------------------------
 
 
-def test_self_check_runs_first(world, gh, capsys) -> None:
+def test_self_check_runs_first(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     review(world, capsys)
     paths = [p for _, p, _ in gh.calls]
     assert paths[0] == "/app/installations?per_page=100"
     assert paths.index(PR_URL) > paths.index("/installation/repositories?per_page=100")
 
 
-def test_self_check_problem_refuses_before_intent(world, gh, capsys) -> None:
+def test_self_check_problem_refuses_before_intent(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     gh.extra_repos = [7, 8]
     resp = review(world, capsys)
     assert (resp.outcome, resp.reason) == (
@@ -395,7 +467,12 @@ def test_self_check_problem_refuses_before_intent(world, gh, capsys) -> None:
     assert world.files("intents") == [] and PR_URL not in gh.paths("GET")
 
 
-def test_self_check_github_down_is_unknown(world, gh, capsys, monkeypatch) -> None:
+def test_self_check_github_down_is_unknown(
+    world: World,
+    gh: FakeGitHub,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def down(*_a: object) -> Reply:
         raise OSError("down")
 
@@ -405,21 +482,27 @@ def test_self_check_github_down_is_unknown(world, gh, capsys, monkeypatch) -> No
     assert world.files("intents") == []
 
 
-def test_bad_key_refused(world, gh, capsys) -> None:
+def test_bad_key_refused(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     (world.lay.secrets_dir / "app-42.pem").write_text("not a key")
     resp = review(world, capsys)
     assert (resp.outcome, resp.reason) == ("refused", "app_key_unusable")
     assert gh.calls == []
 
 
-def test_product_unknown(world, gh, capsys) -> None:
-    resp = world.run(
-        "read-token", raw_of("read-token", repository_id=99), capsys=capsys
-    )[1]
+def test_product_unknown(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
+    put_record(world.fake, replace(record("run-3", "rel-a"), product=99))
+    raw = raw_of("read-token", repository_id=99, run_id="run-3")
+    resp = world.run("read-token", raw, capsys=capsys)[1]
     assert (resp.outcome, resp.reason) == ("refused", "product_unknown")
 
 
-def test_products_missing_or_invalid(world, gh, capsys) -> None:
+def test_products_missing_or_invalid(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     path = world.lay.etc / "products.toml"
     path.write_text("not = [toml")
     assert review(world, capsys).reason == "products_config_invalid"
@@ -427,7 +510,9 @@ def test_products_missing_or_invalid(world, gh, capsys) -> None:
     assert review(world, capsys).reason == "product_unknown"
 
 
-def test_openssl_not_configured(world, gh, capsys) -> None:
+def test_openssl_not_configured(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     world.snap = replace(world.snap, install=None)
     assert review(world, capsys).reason == "openssl_not_configured"
     cfg = InstallConfig(
@@ -437,7 +522,9 @@ def test_openssl_not_configured(world, gh, capsys) -> None:
     assert review(world, capsys).reason == "openssl_not_configured"
 
 
-def test_review_token_asks_pull_requests_write_only(world, gh, capsys) -> None:
+def test_review_token_asks_pull_requests_write_only(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     review(world, capsys)
     scoped = [t for t in gh.tokens if "repository_ids" in t]
     assert scoped == [
@@ -445,7 +532,9 @@ def test_review_token_asks_pull_requests_write_only(world, gh, capsys) -> None:
     ]
 
 
-def test_app_slug_is_fetched_with_jwt(world, gh, capsys) -> None:
+def test_app_slug_is_fetched_with_jwt(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     gh.slug_down = True
     resp = review(world, capsys)
     assert (resp.outcome, resp.reason) == ("unknown", "github_unavailable")
@@ -455,7 +544,9 @@ def test_app_slug_is_fetched_with_jwt(world, gh, capsys) -> None:
 # --- read-token ---------------------------------------------------------------
 
 
-def test_read_token_result(world, gh, capsys) -> None:
+def test_read_token_result(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     resp = world.run("read-token", raw_of("read-token"), capsys=capsys)[1]
     assert resp.outcome == "done"
     assert resp.result["token"] == "ghs_SECRETVALUE"
@@ -470,13 +561,17 @@ def test_read_token_result(world, gh, capsys) -> None:
     ]
 
 
-def test_read_token_scope(world, gh, capsys) -> None:
+def test_read_token_scope(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     gh.grant = {"contents": "write", "pull_requests": "read"}
     resp = world.run("read-token", raw_of("read-token"), capsys=capsys)[1]
     assert (resp.outcome, resp.reason) == ("refused", "token_scope_mismatch")
 
 
-def test_read_token_not_journaled(world, gh, capsys) -> None:
+def test_read_token_not_journaled(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     world.run("read-token", raw_of("read-token"), capsys=capsys)
     world.run("read-token", raw_of("read-token"), capsys=capsys)  # new issue
     assert world.files("intents") == [] and world.files("results") == []
@@ -484,31 +579,39 @@ def test_read_token_not_journaled(world, gh, capsys) -> None:
     for path in (p for p in base.rglob("*") if p.is_file()):
         assert "ghs_SECRETVALUE" not in path.read_text(), path
     last = world.journal()[-1]
-    assert last["result"]["token"] == "<redacted>"  # type: ignore[index]
+    assert last["result"]["token"] == "<redacted>"
     assert last["outcome"] == "done"
 
 
 # --- self-check operation -----------------------------------------------------
 
 
-def test_self_check_operation(world, gh, capsys) -> None:
+def test_self_check_operation(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     resp = world.run("self-check", raw_of("self-check"), capsys=capsys)[1]
     assert resp.outcome == "done"
     assert resp.result["problems"] == []
-    assert resp.result["installations"][0]["repository_ids"] == [7]  # type: ignore[index]
+    found = cast(list[dict[str, object]], resp.result["installations"])
+    assert found[0]["repository_ids"] == [7]
 
 
-def test_self_check_operation_problems_and_failures(world, gh, capsys) -> None:
+def test_self_check_operation_problems_and_failures(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     gh.extra_repos = [7, 8]
     resp = world.run("self-check", raw_of("self-check"), capsys=capsys)[1]
     assert resp.outcome == "done"
     assert resp.result["problems"] == ["app_installation_outside_products: 9"]
     (world.lay.secrets_dir / "app-42.pem").write_text("junk")
     resp = world.run("self-check", raw_of("self-check"), capsys=capsys)[1]
-    assert (resp.outcome, resp.reason) == ("refused", "app_key_unusable")
+    assert resp.outcome == "done"
+    assert resp.result["problems"] == ["app_key_unusable: 42"]
 
 
-def test_self_check_operation_without_products(world, gh, capsys) -> None:
+def test_self_check_operation_without_products(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
     (world.lay.etc / "products.toml").unlink()
     resp = world.run("self-check", raw_of("self-check"), capsys=capsys)[1]
     assert resp.outcome == "done"
@@ -516,10 +619,215 @@ def test_self_check_operation_without_products(world, gh, capsys) -> None:
     assert gh.calls == []
 
 
-def test_self_check_operation_github_down(world, gh, capsys, monkeypatch) -> None:
+def test_self_check_operation_github_down(
+    world: World,
+    gh: FakeGitHub,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def down(*_a: object) -> Reply:
         raise OSError("down")
 
     monkeypatch.setattr(github, "default_transport", down)
     resp = world.run("self-check", raw_of("self-check"), capsys=capsys)[1]
     assert (resp.outcome, resp.reason) == ("unknown", "github_unavailable")
+
+
+# --- round 1: run binding, body size ------------------------------------------
+
+
+def other_run(world: World) -> None:
+    """Register `run-2` of product 8 (the requests below name product 7)."""
+    rec = replace(record("run-2", "rel-a"), product=8)
+    put_record(world.fake, rec)
+
+
+@pytest.mark.parametrize("op", ["publish-review", "read-token"])
+def test_run_of_another_product_is_refused(
+    op: str, world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
+    other_run(world)
+    resp = world.run(op, raw_of(op, run_id="run-2"), capsys=capsys)[1]
+    assert (resp.outcome, resp.reason) == ("refused", "run_product_mismatch")
+    assert gh.calls == [] and world.files("intents") == []
+
+
+def body_for(total: int) -> str:
+    """A body (at most 60000 characters) whose published text is `total`
+    characters long: only `<!--` grows (by 3) when escaped."""
+    fixed = len(ops.MARKER.format(key="0" * 64, sha=SHA)) + 2
+    rest = total - fixed
+    raw = 59998 if (rest - 59998) % 3 == 0 else 59999
+    k = (rest - raw) // 3
+    assert 0 <= raw <= 60000 and 4 * k <= raw
+    return "<!--" * k + "a" * (raw - 4 * k)
+
+
+def test_body_limit_boundary(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exact = review(world, capsys, body=body_for(65536))
+    assert exact.outcome == "done"
+    assert len(str(gh.reviews[0]["body"])) == 65536
+    over = review(world, capsys, request_id="req-00000002", body=body_for(65537))
+    assert (over.outcome, over.reason) == ("refused", "body_too_long")
+    assert len(gh.reviews) == 1 and len(world.files("intents")) == 1
+
+
+def test_body_too_long_comes_before_everything(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
+    resp = review(world, capsys, body=body_for(65537))
+    assert resp.reason == "body_too_long"
+    assert gh.calls == [] and world.files("intents") == []
+
+
+# --- round 1: safety predicates -----------------------------------------------
+
+
+def lost_with(world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]) -> str:
+    """The POST was lost for good; the request has an intent. Returns its key."""
+    gh.post_mode = "timeout_lost"
+    assert review(world, capsys).reason == "review_not_found"
+    return _key(world)
+
+
+def bot_review(key: str, sha: str = SHA, **over: object) -> dict[str, object]:
+    return {
+        "id": 900,
+        "user": {"login": BOT, "type": "Bot"},
+        "body": "x\n\n" + ops.MARKER.format(key=key, sha=sha),
+        "commit_id": sha,
+        "state": "APPROVED",
+        **over,
+    }
+
+
+def test_reconcile_accepts_the_exact_review(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
+    key = lost_with(world, gh, capsys)
+    gh.reviews.append(bot_review(key))
+    resp = review(world, capsys)
+    assert (resp.outcome, resp.result) == ("done", {"review_id": 900, "commit_id": SHA})
+    assert resp.evidence["review_id"] == 900  # also in the evidence
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda k: bot_review("f" * 64),
+        lambda k: bot_review(k[:-1]),
+        lambda k: bot_review(k + "0"),
+        lambda k: bot_review(k, user={"login": BOT, "type": "User"}),
+        lambda k: bot_review(k, user={"login": "github-actions[bot]", "type": "Bot"}),
+        lambda k: bot_review(k, user=None),
+        lambda k: bot_review(
+            k, body="x\n\n" + ops.MARKER.format(key=k, sha=SHA) + "\n\nmore"
+        ),
+    ],
+    ids=[
+        "other-key",
+        "key-prefix",
+        "key-extension",
+        "user-type",
+        "other-bot",
+        "no-user",
+        "marker-not-last",
+    ],
+)
+def test_reconcile_ignores_what_is_not_ours(
+    mutate: object,
+    world: World,
+    gh: FakeGitHub,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    key = lost_with(world, gh, capsys)
+    gh.reviews.append(mutate(key))  # type: ignore[operator]
+    assert review(world, capsys).reason == "review_not_found"
+
+
+def test_reconcile_commit_mismatch(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
+    key = lost_with(world, gh, capsys)
+    gh.reviews.append(bot_review(key, commit_id=SHA_B))
+    assert review(world, capsys).reason == "review_mismatch"
+
+
+@pytest.mark.parametrize("mode", ["rewrite_commit", "pending", "no_marker", "other"])
+def test_post_answer_is_checked(
+    mode: str,
+    world: World,
+    gh: FakeGitHub,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    gh.post_mode = mode
+    resp = review(world, capsys)
+    assert (resp.outcome, resp.reason) == ("unknown", "review_response_unexpected")
+    assert world.files("results") == []
+
+
+def test_done_evidence_has_the_review(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
+    resp = review(world, capsys)
+    assert resp.evidence["review_id"] == 100 and resp.evidence["commit_id"] == SHA
+
+
+def test_auth_repr_hides_the_token() -> None:
+    assert "ghs_" not in repr(ops._Auth(BOT, "ghs_SECRET"))
+
+
+# --- round 1: read-token self-check, two Apps ---------------------------------
+
+
+def test_read_token_self_check_first(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gh.extra_repos = [7, 8]
+    resp = world.run("read-token", raw_of("read-token"), capsys=capsys)[1]
+    assert (resp.outcome, resp.reason) == (
+        "refused",
+        "app_installation_outside_products: 9",
+    )
+    assert [t for t in gh.tokens if "repository_ids" in t] == []
+
+
+def two_apps(world: World, key_text: str) -> None:
+    second = Product(8, "acme/p8", "write", 43, 10, "bot", "/srv/8")
+    path = world.lay.etc / "products.toml"
+    path.write_text(dump_products({7: PRODUCT, 8: second}))
+    (world.lay.secrets_dir / "app-43.pem").write_text(key_text)
+
+
+def test_self_check_two_apps(
+    world: World,
+    gh: FakeGitHub,
+    key_text: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    two_apps(world, key_text)
+    resp = world.run("self-check", raw_of("self-check"), capsys=capsys)[1]
+    assert resp.outcome == "done" and resp.result["problems"] == []
+    found = resp.result["installations"]
+    assert [i["id"] for i in found] == [9, 10]
+
+
+def test_self_check_one_app_broken(
+    world: World,
+    gh: FakeGitHub,
+    key_text: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    two_apps(world, key_text)
+    (world.lay.secrets_dir / "app-43.pem").write_text("junk")
+    resp = world.run("self-check", raw_of("self-check"), capsys=capsys)[1]
+    assert resp.outcome == "done"
+    assert resp.result["problems"] == ["app_key_unusable: 43"]
+    assert [i["id"] for i in resp.result["installations"]] == [9]
+    gh.denied_apps = {43}
+    (world.lay.secrets_dir / "app-43.pem").write_text(key_text)
+    resp = world.run("self-check", raw_of("self-check"), capsys=capsys)[1]
+    assert resp.outcome == "done"
+    assert resp.result["problems"] == ["app_unreadable: 43: github_401: denied"]

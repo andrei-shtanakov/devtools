@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
+import pytest
+
+from df.config import Account, dump_accounts
 from df.paths import Layout
+from df.publisher import main as pmain
 from df.publisher import request
-from df.publisher.request import Request
+from df.publisher.request import Request, Response
+from df.stage2_config import dump_publisher, expected_publisher
+from df.state import Snapshot
+from tests.df.conftest import FakeLayout
+from tests.df.launch_world import entry, put_record, record, snapshot, trust_paths
 
 SHA = "a" * 40
 SHA_B = "b" * 40
@@ -66,3 +75,78 @@ def tmp_layout(tmp_path: Path) -> Layout:
     lay = Layout(Path(os.path.realpath(tmp_path)))
     lay.publisher_dir.mkdir(parents=True, mode=0o700)
     return lay
+
+
+EXEC, REVIEW = 601, 602
+A = entry("rel-a")
+
+
+class World:
+    """A fake layout with the three role accounts and a registered run."""
+
+    def __init__(self, fake: FakeLayout) -> None:
+        self.fake = fake
+        self.lay = fake.layout
+        self.me = os.getuid()  # the publisher is this process in the tests
+        self.snap = snapshot("rel-a", A)
+        self.out: list[Response] = []
+
+    def run(
+        self,
+        op: str,
+        raw: bytes | None = None,
+        *,
+        sudo: str | None = None,
+        snap: Snapshot | None = None,
+        capsys: pytest.CaptureFixture[str],
+    ) -> tuple[int, Response]:
+        if op in pmain.ADMIN_OPERATIONS:
+            who = "0"
+        else:
+            who = str(REVIEW if op in ("publish-review", "read-token") else EXEC)
+        env = {} if sudo == "" else {"SUDO_UID": sudo or who}
+        stdin = self.lay.root / "stdin"
+        stdin.write_bytes(raw if raw is not None else raw_of(op))
+        rfd = os.open(stdin, os.O_RDONLY)
+        try:
+            code = pmain.main(
+                [op],
+                layout=self.lay,
+                snapshot=snap or self.snap,
+                uid=self.me,
+                env=env,
+                stdin_fd=rfd,
+            )
+        finally:
+            os.close(rfd)
+        line = capsys.readouterr().out
+        assert line.count("\n") == 1
+        return code, request.parse_response(line)
+
+    def files(self, name: str) -> list[str]:
+        path = self.lay.publisher_dir / name
+        return sorted(p.name for p in path.iterdir()) if path.is_dir() else []
+
+    def journal(self) -> list[dict[str, object]]:
+        text = (self.lay.publisher_dir / "journal.jsonl").read_text()
+        return [json.loads(line) for line in text.splitlines()]
+
+
+def build_world(fake_layout: FakeLayout, monkeypatch: pytest.MonkeyPatch) -> World:
+    """A fake layout with the role accounts, a registered run and trust paths."""
+    fake_layout.make_dirs()
+    lay = fake_layout.layout
+    lay.runs_dir.mkdir(parents=True)
+    lay.publisher_dir.mkdir(parents=True, mode=0o700)
+    me = os.getuid()
+    rows = {
+        "df-exec": Account("df-exec", EXEC, 1, "ready", "t"),
+        "df-review": Account("df-review", REVIEW, 1, "ready", "t"),
+        "df-publisher": Account("df-publisher", me, os.getgid(), "ready", "t"),
+    }
+    lay.accounts.write_text(dump_accounts(rows))  # type: ignore[arg-type]
+    text = dump_publisher(expected_publisher(rows))  # type: ignore[arg-type]
+    (lay.etc / "publisher.toml").write_text(text)
+    put_record(fake_layout, record("run-1", "rel-a"))
+    trust_paths(monkeypatch)
+    return World(fake_layout)

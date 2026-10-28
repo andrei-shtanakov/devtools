@@ -7,9 +7,9 @@ reservation of `request_id` (`store.reserve`), the operation. The answer is
 one JSON line on stdout; the exit code is 0 for `done`, 3 for `unknown` and 2
 for every other outcome.
 
-An operation is an entry of `OPERATION_TABLE`. Until Tasks 8-11 replace them,
-the real ones refuse with `not_implemented` before any intent is written, so
-no operation can leave an intent or an `unknown` state yet.
+An operation is an entry of `OPERATION_TABLE`. `publish-review`, `read-token`
+and `self-check` are implemented in `df.publisher.ops`; the others still refuse
+with `not_implemented` before any intent is written.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from df import launch
 from df.config import ConfigError, load_accounts, read_optional
 from df.journal import StepFailed
 from df.paths import Layout
-from df.publisher import github, ops, request, store
+from df.publisher import ops, request, store
 from df.publisher.request import InFlight, Refused, Request, Response
 from df.stage2_config import PublisherConfig, RunRecord, parse_publisher
 from df.state import Snapshot
@@ -306,9 +306,18 @@ def _under_key(
         return Response(kept.outcome, kept.reason, kept.result, evidence)
     replayed = op not in store.NOT_REPLAYED
     earlier = store.read_intent(res) if replayed else None
-    base = seen.api_base if seen.api_base is not None else github.API
+    if seen.api_base is None:
+        raise Refused("publisher_config_invalid")
     ctx = Context(
-        layout, snapshot, who, req, record, res, earlier, base, earlier is not None
+        layout,
+        snapshot,
+        who,
+        req,
+        record,
+        res,
+        earlier,
+        seen.api_base,
+        earlier is not None,
     )
     resp = _run_handler(ctx, op, seen)
     resp = _decorate(resp, who, op, seen, snapshot)
