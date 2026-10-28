@@ -408,6 +408,14 @@ def _is_own_dir(path: Path) -> bool:
     )
 
 
+def _own_dir_or_false(path: Path) -> bool:
+    """`_is_own_dir`, an `lstat` error (a racing change) counting as not ours."""
+    try:
+        return _is_own_dir(path)
+    except OSError:
+        return False
+
+
 def _flock(fd: int, op: int, wait: float | None = None) -> None:
     """`op` on the barrier, waited for at most `wait` (`BARRIER_WAIT`)."""
     deadline = time.monotonic() + (BARRIER_WAIT if wait is None else wait)
@@ -649,7 +657,7 @@ def restore(layout: Layout, copy: bytes | None, *, set_aside_old: bool = False) 
         with _exclusive(base):
             if set_aside_old:
                 aside = base / SET_ASIDE
-                if _lexists(aside) and not _is_own_dir(aside):
+                if _lexists(aside) and not _own_dir_or_false(aside):
                     raise Unavailable("set_aside")  # before the intent: no change
                 _set_aside(base, _write_intent(base))
             else:

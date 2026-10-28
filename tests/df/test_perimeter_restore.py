@@ -557,6 +557,27 @@ def test_set_aside_must_be_our_directory(
     assert "нужен человек" in perimeter.restore_text("set_aside")
 
 
+def test_set_aside_lstat_race_is_refused(
+    ready: Layout, copy: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`set-aside` vanishing between the existence test and `lstat` is a
+    refusal before the intent, not a traceback."""
+    aside = ready.perimeter_dir / perimeter.SET_ASIDE
+    aside.mkdir(mode=0o700)
+    real = perimeter._is_own_dir
+
+    def racing(path: Path) -> bool:
+        if path == aside:
+            raise FileNotFoundError("gone")
+        return real(path)
+
+    monkeypatch.setattr(perimeter, "_is_own_dir", racing)
+    before = listing(ready)
+    with pytest.raises(Unavailable, match="set_aside"):
+        perimeter.restore(ready, copy, set_aside_old=True)
+    assert listing(ready) == before
+
+
 def test_resume_refuses_a_link_as_set_aside_dir(
     ready: Layout, copy: bytes, tmp_path: Path
 ) -> None:
