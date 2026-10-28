@@ -56,6 +56,7 @@ from df.digest import TreeError
 from df.journal import NeedsHuman, Stable, StepFailed, Transitional
 from df.manifest import ManifestError
 from df.paths import Layout, default_layout
+from df.publisher import main as publisher_main
 from df.sources import UnsupportedLock
 from df.stage2_config import OPERATIONS
 from df.state import Mode, ReadResult, Snapshot
@@ -74,12 +75,11 @@ _NO_PRODUCT = "продукт не зарегистрирован (этап 3)"
 _NO_REGISTRY = "реестр продуктов не поддерживается до этапа 3"
 _NO_INSTALL = "нет /etc/df/install.toml: начните с bootstrap init"
 _STALE_WRAPPERS = "обёртки ролей устарели: выполните darkfactory roles setup"
-_NOT_YET = "не реализовано на этом шаге"
 _NO_OPERATOR = "roles setup: укажите --operator (SUDO_USER не задан)"
 #: The one approved CLI `cli set` may add to an existing install (owner 27.10).
 CLI_SETTABLE = "openssl"
 _UNSET = "—"
-#: Subcommands of the roles' side (Tasks 5-7); readers, refused until then.
+#: Subcommands of the roles' side (Tasks 5-7); readers.
 SERVICE_COMMANDS = frozenset({"publisher"})
 #: What `publisher serve` takes: the five operations and the self-check.
 PUBLISHER_ARGS = (*OPERATIONS, "self-check")
@@ -354,7 +354,7 @@ def _reader(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
     if args.command == "run":
         return _run(args, lay, read)
     if args.command in SERVICE_COMMANDS:
-        raise Refusal(f"{_service_name(args)}: {_NOT_YET}")  # Task 7
+        return _publisher(args, lay, read)
     if args.command == "doctor":
         return _doctor(args, lay, read)
     if isinstance(read, Transitional):
@@ -386,8 +386,12 @@ def _run(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
     return run_start.main(args.words, layout=lay, snap=snap)
 
 
-def _service_name(args: argparse.Namespace) -> str:
-    return "publisher serve"
+def _publisher(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
+    """`publisher serve <op>` as `df-publisher`, from the one snapshot."""
+    if isinstance(read, Transitional):
+        raise Refusal(doctor.transitional_text(read.generation))
+    snap = state.parse_snapshot(read.value, lay, mode="reader")
+    return publisher_main.main([args.operation], layout=lay, snapshot=snap)
 
 
 def _doctor(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:

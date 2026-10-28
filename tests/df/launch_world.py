@@ -156,7 +156,7 @@ FORBIDDEN = ("releases.toml", "install.toml", "models.toml", "current")
 
 class Spy:
     """Records every open/stat/listing of a `FORBIDDEN` name (`os.*`, the
-    builtin `open` and `io.open`). `publisher serve` joins in Task 7."""
+    builtin `open` and `io.open`). `launch exec` and `publisher serve` use it."""
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.hits: list[str] = []

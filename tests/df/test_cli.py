@@ -131,13 +131,14 @@ def test_cli_service_commands_are_readers(argv: list[str]) -> None:
 
 
 @pytest.mark.parametrize("argv", [a for a in SERVICE if a[0] == "publisher"])
-def test_service_commands_are_not_implemented_yet(
+def test_publisher_serve_reaches_the_frame(
     argv: list[str], tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """No `df-publisher` account here: the frame refuses, as a response."""
     lay = Layout(Path(os.path.realpath(tmp_path)))
     code = cli.main(argv, mode="reader", read=Stable(RAW, 0), lock_fd=None, layout=lay)
     assert code == 2
-    assert "не реализовано на этом шаге" in capsys.readouterr().err
+    assert '"outcome":"refused"' in capsys.readouterr().out
 
 
 BAD_SERVICE = [

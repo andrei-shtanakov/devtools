@@ -810,7 +810,9 @@ def test_every_owner_decision_reads_the_seam() -> None:
     """
     df_dir = Path(__file__).resolve().parents[2] / "df"
     readers = sorted(
-        p.name for p in df_dir.glob("*.py") if "st_uid" in p.read_text(encoding="utf-8")
+        str(p.relative_to(df_dir))
+        for p in df_dir.rglob("*.py")
+        if "st_uid" in p.read_text(encoding="utf-8")
     )
     assert readers == ["fsutil.py", "launcher_entry.py"]
     entry_text = (df_dir / "launcher_entry.py").read_text(encoding="utf-8")
