@@ -1091,6 +1091,25 @@ def test_odd_generation_closed_before_the_check(w: W, kind: str) -> None:
     assert any(r["step"] == "generation" and r["event"] == "warn" for r in rows)
 
 
+@pytest.mark.parametrize(
+    "error", [OSError(28, "no space"), StepFailed("snapshot", "x")]
+)
+def test_generation_close_failure_is_needs_human(
+    w: W, capsys: pytest.CaptureFixture[str], error: Exception
+) -> None:
+    """The secret is written before the generation is closed: a failure there
+    is `needs-human` (exit 3), never `failed`."""
+
+    def broken(*_a: object, **_kw: object) -> None:
+        raise error
+
+    w.mp.setattr(journal, "generation_end", broken)
+    assert odd_main(w, token_argv(w.source(TOKEN))) == 3
+    assert "секрет записан; нечётное поколение не закрыто" in capsys.readouterr().err
+    assert w.rows()[-1] == ("setup-agent", "needs-human")
+    assert w.token_file.read_bytes() == TOKEN + b"\n"
+
+
 def test_refused_setup_leaves_an_odd_generation(w: W) -> None:
     """A refusal before the write changes nothing, the generation included."""
     argv = key_argv(w.source(b"not a key"))

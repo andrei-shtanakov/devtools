@@ -108,6 +108,13 @@ _RESTORE_DONE = {
 }
 _SETUP_FAILED = "секрет записан, проверка не прошла: "
 _NOT_DURABLE = "записан, но не закреплён: повторите команду"
+_GEN_OPEN = "секрет записан; нечётное поколение не закрыто"
+
+
+class _GenerationNotClosed(Exception):
+    """`setup-agent`: the secret is written, closing the generation failed."""
+
+
 _LIST_COLUMNS = ("роль", "harness", "model", "effort", "источник", "проверка")
 _REFUSALS = (
     StepFailed,
@@ -883,7 +890,10 @@ def _setup_agent(args: argparse.Namespace, lay: Layout, snap: Snapshot) -> int:
         what = f"machine-token {target}"
 
     def close() -> None:
-        _close_odd_generation(lay, snap)
+        try:
+            _close_odd_generation(lay, snap)
+        except (OSError, StepFailed) as exc:  # after the write: not `failed`
+            raise _GenerationNotClosed(f"{type(exc).__name__}: {exc}") from exc
 
     try:
         if key:
@@ -895,6 +905,9 @@ def _setup_agent(args: argparse.Namespace, lay: Layout, snap: Snapshot) -> int:
     except fsutil.NotDurable as exc:  # the old secret is already replaced
         _journal_setup(lay, "needs-human", f"{what}: {_NOT_DURABLE}: {exc}")
         raise NeedsHuman(f"{what}: {_NOT_DURABLE} ({exc})") from exc
+    except _GenerationNotClosed as exc:
+        _journal_setup(lay, "needs-human", f"{what}: {_GEN_OPEN}: {exc}")
+        raise NeedsHuman(f"{what}: {_GEN_OPEN} ({exc})") from exc
     except OSError as exc:
         _journal_setup(lay, "failed", f"{what}: {type(exc).__name__}: {exc}")
         raise
