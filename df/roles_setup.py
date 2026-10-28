@@ -44,8 +44,8 @@ _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _NEEDS_DO = frozenset({"absent", "repair", "unowned"})
 _RETRY = "; исправьте и повторите darkfactory roles setup"
 _NO_OPENSSL = (
-    "openssl: нет в install.toml (approved_cli.openssl): добавьте путь, "
-    "например openssl = /usr/bin/openssl"
+    "openssl: нет в install.toml (approved_cli.openssl): задайте путь "
+    "командой sudo darkfactory cli set openssl /usr/bin/openssl"
 )
 
 
@@ -78,6 +78,13 @@ def run(layout: Layout, *, operator: str, snap: Snapshot) -> None:
     Everything that can be refused is refused before the first step. The
     caller holds the writer lock."""
     check_preconditions(layout, operator, snap)
+    # a re-run may change nothing: a stale odd generation is closed anyway
+    journal.close_odd_generation(
+        layout,
+        generation=snap.generation,
+        pending_present=snap.pending_present,
+        current=snap.release_id,
+    )
     python = libexec.admin_python_of(layout, snap)
     run_steps(
         _steps(layout, operator, python),

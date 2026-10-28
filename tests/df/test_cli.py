@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from df import cli, launcher_entry, state
+from df import cli, launcher_entry, roles_setup, state
 from df.config import REQUIRED_CLI, ConfigError, InstallConfig
 from df.journal import Stable
 from df.paths import Layout
@@ -252,3 +252,29 @@ def test_entry_refuses_roles_setup_before_any_lock(
     assert code == 2
     assert "требует root" in capsys.readouterr().err
     assert list(tmp_path.iterdir()) == []
+
+
+# --- Task 4a: the stage-2 sequence of the README -----------------------------
+
+SECTION_2 = "## Установка DarkFactory: этап 2"
+
+
+def documented_stage2() -> list[list[str]]:
+    """The commands of the README's stage-2 `sh` block, one argv each."""
+    text = README.read_text(encoding="utf-8")
+    section = text.split(SECTION_2, 1)[1].split("\n## ", 1)[0]
+    block = re.findall(r"```sh\n(.*?)```", section, re.DOTALL)[0]
+    return [shlex.split(line) for line in block.splitlines() if line.strip()]
+
+
+def test_documented_stage2_sequence_parses() -> None:
+    """`cli set openssl` first, then `roles setup`; both writers under sudo,
+    and the path is the one `roles setup`'s refusal names."""
+    commands = documented_stage2()
+    assert [c[:2] for c in commands] == [["sudo", "darkfactory"]] * 2
+    argvs = [c[2:] for c in commands]
+    assert argvs == [["cli", "set", "openssl", "/usr/bin/openssl"], ["roles", "setup"]]
+    for argv in argvs:
+        assert launcher_entry.mode_of(argv) == "writer"
+        assert cli.parsed_mode(cli._parse(argv)) == "writer"  # noqa: SLF001
+    assert " ".join(commands[0]) in roles_setup._NO_OPENSSL  # noqa: SLF001
