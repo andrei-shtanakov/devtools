@@ -465,6 +465,37 @@ def _pages(path: str, token: str, transport: Transport, api_base: str) -> list[o
     return pages
 
 
+def paged_array(
+    path: str,
+    token: str,
+    transport: Transport = default_transport,
+    *,
+    api_base: str = API,
+) -> list[object]:
+    """Every item of a listing whose pages are arrays, in order; a page that
+    is not an array is `GitHubUnavailable`."""
+    items: list[object] = []
+    for page in _pages(path, token, transport, api_base):
+        if not isinstance(page, list):
+            raise GitHubUnavailable(f"{path}: not an array")
+        items.extend(page)
+    return items
+
+
+def app_slug(
+    jwt: str,
+    *,
+    transport: Transport = default_transport,
+    api_base: str = API,
+) -> str:
+    """The App's slug (`GET /app`); its bot is `<slug>[bot]`."""
+    _, data = call("GET", "/app", jwt, transport=transport, api_base=api_base)
+    slug = data.get("slug") if isinstance(data, dict) else None
+    if not isinstance(slug, str) or not slug:
+        raise GitHubUnavailable("app: unexpected answer")
+    return slug
+
+
 def _installation_row(item: object) -> tuple[int, str, dict[str, str]]:
     if not isinstance(item, dict) or not _is_int(item.get("id")):
         raise GitHubUnavailable("installations: unexpected item")

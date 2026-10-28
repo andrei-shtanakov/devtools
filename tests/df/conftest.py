@@ -45,6 +45,7 @@ from tests.df.crash_model import CrashModel, fd_path
 
 if TYPE_CHECKING:
     from tests.df.install_world import World
+    from tests.df.publisher_world import World as PublisherWorld
     from tests.df.root_world import Controls, FixtureRepo, InstalledWorld, RootWorld
 
 #: The fake uid of `df-build`: never the current user (F1).
@@ -444,3 +445,11 @@ def installed_controls(installed_world: InstalledWorld) -> Controls:
     from tests.df.root_world import check_controls
 
     return check_controls(installed_world.world)
+
+
+@pytest.fixture()
+def world(fake_layout: FakeLayout, monkeypatch: pytest.MonkeyPatch) -> PublisherWorld:
+    """The publisher's world (`tests/df/publisher_world.py`)."""
+    from tests.df.publisher_world import build_world
+
+    return build_world(fake_layout, monkeypatch)

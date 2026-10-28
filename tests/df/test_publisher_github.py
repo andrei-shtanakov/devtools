@@ -701,3 +701,34 @@ def test_permissions_are_read_only() -> None:
     with pytest.raises(TypeError):
         token.permissions["x"] = "y"  # type: ignore[index]
     assert inst == Installation(9, "acme", (7,), {"contents": "write"})
+
+
+# --- app slug and paged arrays ------------------------------------------------
+
+
+def test_app_slug() -> None:
+    fake = FakeTransport({("GET", f"{github.API}/app"): _json_reply({"slug": "df"})})
+    assert github.app_slug("jwt", transport=fake) == "df"
+    assert fake.calls[0][2]["Authorization"] == "Bearer jwt"
+
+
+@pytest.mark.parametrize("answer", [{}, {"slug": 3}, {"slug": ""}, [1]])
+def test_app_slug_wrong_shape(answer: object) -> None:
+    fake = FakeTransport({("GET", f"{github.API}/app"): _json_reply(answer)})
+    with pytest.raises(GitHubUnavailable):
+        github.app_slug("jwt", transport=fake)
+
+
+def test_paged_array_follows_links_and_rejects_objects() -> None:
+    url = f"{github.API}/x"
+    nxt = f"{url}?per_page=100&page=2"
+    fake = FakeTransport(
+        {
+            ("GET", f"{url}?per_page=100"): [_json_reply([1], **_link(nxt))],
+            ("GET", nxt): [_json_reply([2, 3])],
+        }
+    )
+    assert github.paged_array("/x", "t", fake) == [1, 2, 3]
+    bad = FakeTransport({("GET", f"{url}?per_page=100"): _json_reply({"a": 1})})
+    with pytest.raises(GitHubUnavailable):
+        github.paged_array("/x", "t", bad)
