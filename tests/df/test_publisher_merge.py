@@ -46,6 +46,7 @@ class MergeGitHub(FakeGitHub):
         self.files: list[object] = [{"filename": "README.md"}]
         self.file_gets = 0  # compare requests
         self.head_repo: object = 7
+        self.title = "t"
 
     def pr(self) -> Reply:
         _, _, raw = super().pr()
@@ -55,6 +56,7 @@ class MergeGitHub(FakeGitHub):
             None if self.head_repo is None else {"id": self.head_repo}
         )
         data["base"]["ref"] = self.base_ref
+        data["title"] = self.title
         return _reply(data)
 
     def route(
@@ -286,7 +288,8 @@ def _no_mutation(mgh: MergeGitHub) -> None:
     assert posts and all(p == "/app/installations/9/access_tokens" for p in posts)
     assert len(mgh.tokens) == len(posts)
     scoped = [t for t in mgh.tokens if "repository_ids" in t]
-    assert scoped and all(t["permissions"] == {"pull_requests": "read"} for t in scoped)
+    read = {"contents": "read", "pull_requests": "read"}
+    assert scoped and all(t["permissions"] == read for t in scoped)
     for method, path, _ in mgh.calls:
         if method == "POST":
             continue
@@ -491,6 +494,22 @@ def test_base_ref_changes_between_the_reads(
     assert len(reads) == 2
 
 
+def test_head_ref_changes_between_the_reads(
+    world: World, mgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A branch rename keeps the sha; the routed kind must match read 2."""
+    reads: list[int] = []
+
+    def barrier() -> None:
+        reads.append(1)
+        if len(reads) == 1:
+            mgh.head_ref = "brief/renamed"
+
+    mgh.after_pr_get = barrier
+    assert reason(run(world, capsys)) == ("refused", "pr_state")
+    assert len(reads) == 2
+
+
 def test_precheck_gets_the_second_read(
     world: World, mgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -499,7 +518,7 @@ def test_precheck_gets_the_second_read(
     def barrier() -> None:
         reads.append(1)
         if len(reads) == 1:
-            mgh.head_ref = "brief/moved"  # not the routed ref, but visible
+            mgh.title = "edited"  # visible only in the second read
 
     mgh.after_pr_get = barrier
     got: list[Mapping[str, object]] = []
@@ -509,8 +528,7 @@ def test_precheck_gets_the_second_read(
         return Refused("stop")
 
     merge.merge(_frame_ctx(world, capsys), spy)  # type: ignore[arg-type]
-    head = got[0]["head"]
-    assert isinstance(head, dict) and head["ref"] == "brief/moved"
+    assert got[0]["title"] == "edited"
 
 
 def test_patterns_are_read_before_any_call(

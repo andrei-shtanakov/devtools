@@ -241,7 +241,8 @@ def _decide(ctx: Context, precheck: Precheck) -> NoReturn:
     oc = ops.build_context(ctx)
     patterns = read_patterns()
     ops.self_check_first(oc)
-    token = ops.authorize(oc, {"pull_requests": "read"}).value
+    # compare and branches need Contents read; pull_requests read alone is a 403
+    token = ops.authorize(oc, ops.READ_PERMISSIONS).value
     pr_number = int(str(ctx.request.fields["pr"]))
     head_sha = str(ctx.request.fields["head_sha"])
     first = ops.read_pr(oc, token, pr_number, head_sha)
@@ -250,7 +251,7 @@ def _decide(ctx: Context, precheck: Precheck) -> NoReturn:
     tip = base_tip(oc, token, _base_ref(first))
     paths = pr_paths(oc, token, tip, head_sha)
     pr = ops.read_pr(oc, token, pr_number, head_sha)  # head and base did not move
-    if _base_ref(pr) != _base_ref(first):
+    if _base_ref(pr) != _base_ref(first) or _head_ref(pr) != head_ref:
         raise Refused("pr_state")
     kind = route(head_ref, paths, patterns)
     if isinstance(kind, Refused):
