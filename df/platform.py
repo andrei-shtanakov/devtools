@@ -31,7 +31,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import IO, Literal
 from xml.parsers.expat import ExpatError
 
 from df import fsutil
@@ -253,6 +253,24 @@ def run_command(
     return _execute(argv, env=env, cwd=Path("/"), timeout=timeout, limit=1 << 20)
 
 
+def run_with_input(
+    argv: Sequence[str],
+    data: bytes,
+    *,
+    timeout: float = 60.0,
+    env: Mapping[str, str] = _SYSTEM_ENV,
+) -> RunResult:
+    """Like `run_command`, but `data` is fed to the command on a stdin pipe."""
+    return _execute(
+        argv,
+        env=env,
+        cwd=Path("/"),
+        timeout=timeout,
+        limit=1 << 20,
+        stdin_data=data,
+    )
+
+
 def run_as(
     user: str,
     argv: Sequence[str],
@@ -329,11 +347,12 @@ def _execute(
     cwd: Path,
     timeout: float,
     limit: int,
+    stdin_data: bytes | None = None,
 ) -> RunResult:
     try:
         proc = subprocess.Popen(
             list(argv),
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL if stdin_data is None else subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=dict(env),
@@ -342,6 +361,11 @@ def _execute(
         )
     except OSError as exc:
         return RunResult(LAUNCH_FAILED, b"", str(exc).encode(), launched=False)
+    if stdin_data is not None and proc.stdin is not None:
+        # A thread: a command that does not read must not block the deadline.
+        threading.Thread(
+            target=_feed, args=(proc.stdin, stdin_data), daemon=True
+        ).start()
     try:
         return _collect(proc, time.monotonic() + timeout, limit)
     finally:
@@ -350,6 +374,19 @@ def _execute(
         for pipe in (proc.stdout, proc.stderr):
             if pipe is not None:
                 pipe.close()
+
+
+def _feed(pipe: IO[bytes], data: bytes) -> None:
+    """Write `data` to a child's stdin and close it; a dead child is fine."""
+    try:
+        pipe.write(data)
+    except OSError:
+        pass
+    finally:
+        try:
+            pipe.close()
+        except OSError:
+            pass
 
 
 def _collect(proc: subprocess.Popen[bytes], deadline: float, limit: int) -> RunResult:

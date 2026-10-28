@@ -390,6 +390,9 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
     ("launch_release", "urllib_transport", ".open", 1): (
         "an HTTP GET through an opener (`urllib`): reads the network, writes no file"
     ),
+    ("publisher.github", "default_transport", ".open", 1): (
+        "an HTTP request through an opener (`urllib`): the network, no file"
+    ),
     ("inputs", "", "import shutil", 1): "root's checkout: scratch",
     ("receive", "", "import shutil", 1): "protocol remove_own_tree: rmtree",
     ("acl", "_libsystem", "ctypes.CDLL", 1): "ACL reads only: acl_get_*_np, acl_free",
@@ -534,6 +537,9 @@ SUBPROCESS_CREATORS = {
         "creates nothing: its stdout is the stream accept_copy receives"
     ),
     "sysctl (boot id)": "creates nothing: a read",
+    "openssl dgst -sign (publisher App JWT)": (
+        "creates nothing: its stdout is the signature; the key path is in argv"
+    ),
     "execve of the release's interpreter (df-launch, as the role)": (
         "replaces the process; the release's code runs as the role, whose "
         "writes are bounded by the OS, not by this module"
@@ -555,8 +561,9 @@ SUBPROCESS_CREATORS = {
 #: `test_every_process_start_is_named` until it is named there.
 PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
     ("fsutil", "_sysctl_boot_id", "subprocess.run", 1): ("sysctl (boot id)",),
-    # run_command (root) and run_as (df-build)
+    # run_command (root), run_as (df-build), run_with_input (df-publisher)
     ("platform", "_execute", "subprocess.Popen", 1): (
+        "openssl dgst -sign (publisher App JWT)",
         "uv python install (admin)",
         "uv sync / git / tar (build, as df-build)",
         "git / tar (root's checkout)",

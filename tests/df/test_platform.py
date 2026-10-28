@@ -2742,3 +2742,32 @@ def test_unknown_executable_format_is_a_problem(
     assert (expected in problems) is unknown, problems
     if not unknown:
         assert problems == []
+
+
+def test_run_with_input_feeds_stdin() -> None:
+    done = plat.run_with_input(["/bin/cat"], b"abc\x00def", timeout=10.0)
+    assert done.launched and done.returncode == 0
+    assert done.stdout == b"abc\x00def"
+
+
+def test_run_with_input_large_data_does_not_block() -> None:
+    data = b"x" * (1 << 18)
+    done = plat.run_with_input(["/bin/cat"], data, timeout=20.0)
+    assert done.stdout == data
+
+
+def test_run_with_input_command_that_ignores_stdin_times_out() -> None:
+    started = time.monotonic()
+    done = plat.run_with_input(["/bin/sleep", "30"], b"x" * (1 << 20), timeout=0.5)
+    assert done.timed_out
+    assert time.monotonic() - started < 15
+
+
+def test_run_with_input_uses_system_env_and_root_cwd() -> None:
+    done = plat.run_with_input(["/bin/sh", "-c", "pwd; echo $LANG"], b"")
+    assert done.stdout.split() == [b"/", b"C"]
+
+
+def test_run_with_input_missing_executable_is_not_launched() -> None:
+    done = plat.run_with_input(["/nonexistent/prog"], b"x")
+    assert not done.launched
