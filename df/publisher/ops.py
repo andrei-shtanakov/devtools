@@ -250,10 +250,16 @@ def _is_bot(review: Mapping[str, object], bot: str) -> bool:
 
 def _check_pr(oc: OpContext, auth: _Auth, pr: int, head_sha: str) -> None:
     """The PR is open, of this product, at `head_sha` (`pr_state`)."""
+    read_pr(oc, auth.token, pr, head_sha)
+
+
+def read_pr(oc: OpContext, token: str, pr: int, head_sha: str) -> dict[str, object]:
+    """The PR as GitHub says it, once it is checked to be open, of this
+    product and at `head_sha` (`pr_state` otherwise)."""
     path = f"/repos/{oc.product.full_name}/pulls/{pr}"
     try:
         _, data = github.call(
-            "GET", path, auth.token, transport=oc.transport, api_base=oc.api_base
+            "GET", path, token, transport=oc.transport, api_base=oc.api_base
         )
     except GitHubUnavailable:
         raise _unavailable() from None
@@ -261,6 +267,8 @@ def _check_pr(oc: OpContext, auth: _Auth, pr: int, head_sha: str) -> None:
         raise Refused(_reason(exc)) from None
     if not _pr_matches(data, oc.product.repository_id, head_sha):
         raise Refused("pr_state")
+    assert isinstance(data, dict)
+    return data
 
 
 def _pr_matches(data: object, repository_id: int, head_sha: str) -> bool:
@@ -475,6 +483,7 @@ __all__ = [
     "build_context",
     "escape_body",
     "publish_review",
+    "read_pr",
     "read_token",
     "reconcile_review",
     "self_check_op",

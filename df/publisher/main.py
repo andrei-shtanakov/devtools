@@ -8,7 +8,8 @@ one JSON line on stdout; the exit code is 0 for `done`, 3 for `unknown` and 2
 for every other outcome.
 
 An operation is an entry of `OPERATION_TABLE`. `publish-review`, `read-token`
-and `self-check` are implemented in `df.publisher.ops`; the others still refuse
+and `self-check` are implemented in `df.publisher.ops`, `merge` (routing only,
+never a merge) in `df.publisher.merge`; the others still refuse
 with `not_implemented` before any intent is written.
 """
 
@@ -24,7 +25,7 @@ from df import launch
 from df.config import ConfigError, load_accounts, read_optional
 from df.journal import StepFailed
 from df.paths import Layout
-from df.publisher import ops, request, store
+from df.publisher import merge, ops, request, store
 from df.publisher.request import InFlight, Refused, Request, Response
 from df.stage2_config import PublisherConfig, RunRecord, parse_publisher
 from df.state import Snapshot
@@ -71,11 +72,12 @@ def _not_implemented(_ctx: Context) -> Response:
     return Response("refused", "not_implemented")
 
 
-#: Tasks 10-11 replace their own entries; tests inject handlers here.
+#: Task 11 replaces its own entries; tests inject handlers here.
 OPERATION_TABLE: dict[str, Handler] = {
     **{op: _not_implemented for op in request.ALL_OPERATIONS},
     "publish-review": ops.publish_review,
     "read-token": ops.read_token,
+    "merge": merge.merge_op,
     request.SELF_CHECK: ops.self_check_op,
 }
 

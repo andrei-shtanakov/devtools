@@ -61,6 +61,10 @@ class SigningFailed(Exception):
     """The App JWT could not be signed: a local fault (key, openssl), not GitHub's."""
 
 
+class TooManyItems(Exception):
+    """A listing is longer than the caller allows."""
+
+
 class GitHubRefused(Exception):
     """GitHub, or the client checking its answer, said no."""
 
@@ -451,16 +455,28 @@ def _next_url(headers: Mapping[str, str], api_base: str) -> str | None:
     return urls[0]
 
 
-def _pages(path: str, token: str, transport: Transport, api_base: str) -> list[object]:
-    """Every page of a listing, in order; any failure is not a partial list."""
+def _pages(
+    path: str,
+    token: str,
+    transport: Transport,
+    api_base: str,
+    max_items: int | None = None,
+) -> list[object]:
+    """Every page of a listing, in order; any failure is not a partial list.
+    Past `max_items` array items it stops at once with `TooManyItems`."""
     base = api_base.rstrip("/")
     url: str | None = f"{base}{path}?per_page={PER_PAGE}"
     pages: list[object] = []
+    seen = 0
     while url is not None:
         if len(pages) >= MAX_PAGES:
             raise GitHubUnavailable("too many pages")
         _, headers, raw = _send(transport, "GET", url, token)
-        pages.append(_json(raw))
+        page = _json(raw)
+        pages.append(page)
+        seen += len(page) if isinstance(page, list) else 0
+        if max_items is not None and seen > max_items:
+            raise TooManyItems(path)
         url = _next_url(headers, base)
     return pages
 
@@ -471,11 +487,13 @@ def paged_array(
     transport: Transport = default_transport,
     *,
     api_base: str = API,
+    max_items: int | None = None,
 ) -> list[object]:
     """Every item of a listing whose pages are arrays, in order; a page that
-    is not an array is `GitHubUnavailable`."""
+    is not an array is `GitHubUnavailable`; more than `max_items` items is
+    `TooManyItems`, raised before the next page is fetched."""
     items: list[object] = []
-    for page in _pages(path, token, transport, api_base):
+    for page in _pages(path, token, transport, api_base, max_items):
         if not isinstance(page, list):
             raise GitHubUnavailable(f"{path}: not an array")
         items.extend(page)

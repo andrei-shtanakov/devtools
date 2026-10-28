@@ -208,7 +208,8 @@ def test_check_run_record_unreadable(world: World) -> None:
 def test_stubs_refuse_before_any_intent(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    stubs = sorted(set(VALID) - {"publish-review", "read-token", "self-check"})
+    implemented = {"publish-review", "read-token", "self-check", "merge"}
+    stubs = sorted(set(VALID) - implemented)
     for op in stubs:
         raw = raw_of(op, request_id=f"req-{op}-0001")
         code, resp = world.run(op, raw, capsys=capsys)
@@ -611,11 +612,11 @@ def test_cli_publisher_serve_runs_the_frame(
     monkeypatch.setattr(os, "environ", {"SUDO_UID": str(EXEC)})
     monkeypatch.setattr(pmain, "_own_uid", lambda _u: world.me)
     stdin = world.lay.root / "stdin"
-    stdin.write_bytes(raw_of("merge"))
+    stdin.write_bytes(raw_of("record-violation"))
     rfd = os.open(stdin, os.O_RDONLY)
     monkeypatch.setattr(request, "read_frame", _frame_of(rfd))
     code = cli.main(
-        ["publisher", "serve", "merge"],
+        ["publisher", "serve", "record-violation"],
         mode="reader",
         read=Stable(raw, 0),
         lock_fd=None,
