@@ -385,6 +385,13 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
         "sync_file, rename, sync_dir(perimeter); a leftover temp is swept by "
         "the next create_db; the files SQLite itself makes are not seen"
     ),
+    ("publisher.perimeter", "_move", "os.rename", 1): (
+        "protocol restore (Task 11r, under db.lock LOCK_EX): the stage (born "
+        "0600 by create_file, synced) onto events.sqlite after the hot journal "
+        "is rolled back, or --set-aside-old's moves after restore.intent "
+        "(write_atomic), journal first; then sync_dir of both directories; a "
+        "repeat continues by the files on disk"
+    ),
     ("publisher.store", "journal", "os.open no-create", 1): (
         "the journal exists (create_file's FileExistsError): O_APPEND, one "
         "write of a whole line, then sync_file"
@@ -569,6 +576,11 @@ SUBPROCESS_CREATORS = {
         "the publisher's own protocol (its state and the perimeter database); "
         "the client keeps only stdout"
     ),
+    "darkfactory publisher perimeter-restore (restore, as df-publisher)": (
+        "protocol restore of the role (Task 11r): its own files under "
+        "perimeter/ (stage, set-aside/, restore.intent, events.sqlite); the "
+        "copy comes on stdin; root keeps the outcome line and journals it"
+    ),
 }
 #: Every site that starts a process (`os.system`/`posix_spawn*`/`spawn*`/
 #: `exec*`/`popen`/`fork`, `subprocess.*`), keyed like `FS_SITES`, with the
@@ -576,8 +588,9 @@ SUBPROCESS_CREATORS = {
 #: `test_every_process_start_is_named` until it is named there.
 PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
     ("fsutil", "_sysctl_boot_id", "subprocess.run", 1): ("sysctl (boot id)",),
-    # run_command (root), run_as (df-build, df-publisher), run_with_input
-    # (df-publisher; the roles, perimeter client)
+    # run_command (root), run_as (df-build, df-publisher; with stdin for
+    # perimeter restore), run_with_input (df-publisher; the roles, perimeter
+    # client)
     ("platform", "_execute", "subprocess.Popen", 1): (
         "openssl dgst -sign (publisher App JWT)",
         "uv python install (admin)",
@@ -588,6 +601,7 @@ PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
         "probes: ps / pkill / sudo -l / getent / dscl -read / xcrun",
         "darkfactory publisher perimeter-init (roles setup, as df-publisher)",
         "sudo df-publish perimeter-status (perimeter client)",
+        "darkfactory publisher perimeter-restore (restore, as df-publisher)",
     ),
     ("platform", "spawn_as", "subprocess.Popen", 1): (
         "tar -cf - (copy producer, as df-build)",

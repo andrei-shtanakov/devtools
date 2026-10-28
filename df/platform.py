@@ -280,6 +280,7 @@ def run_as(
     network: bool,
     timeout: float,
     stdout_limit: int = 1 << 20,
+    stdin: bytes | None = None,
 ) -> RunResult:
     """Run `argv` as `user`, environment built only from `env` (`env -i`).
 
@@ -287,10 +288,17 @@ def run_as(
     Linux `unshare --net -- setpriv --reuid=<user> ...`. On timeout or a
     stdout overflow the session group and every process of `user` are
     killed; stderr never stops the command (only its tail is kept).
+    `stdin`, if given, is fed on a pipe (as `run_with_input`); else
+    `/dev/null`.
     """
     full = role_argv(detect_platform(), user, argv, env=env, network=network)
     result = _execute(
-        full, env=_SYSTEM_ENV, cwd=cwd, timeout=timeout, limit=stdout_limit
+        full,
+        env=_SYSTEM_ENV,
+        cwd=cwd,
+        timeout=timeout,
+        limit=stdout_limit,
+        stdin_data=stdin,
     )
     if result.timed_out or result.stdout_truncated:
         reap_user_processes(user)

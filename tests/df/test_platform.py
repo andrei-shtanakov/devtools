@@ -263,6 +263,43 @@ def test_run_as_with_network_has_no_sandbox(
     assert "/usr/bin/unshare" not in seen[0]
 
 
+@pytest.mark.parametrize("stdin", [None, b"", b"copy bytes"])
+def test_run_as_feeds_stdin_and_keeps_the_kill(
+    monkeypatch: pytest.MonkeyPatch, stdin: bytes | None
+) -> None:
+    """`stdin` reaches `_execute` as is (`None`: `/dev/null`); a timed-out
+    run is still reaped (Task 11r)."""
+    seen: list[object] = []
+    reaped: list[str] = []
+
+    def fake(argv: Sequence[str], **kw: object) -> RunResult:
+        seen.append(kw["stdin_data"])
+        return RunResult(-9, b"", b"", True, timed_out=True)
+
+    monkeypatch.setattr(plat, "detect_platform", lambda: "macos-arm64")
+    monkeypatch.setattr(plat, "_execute", fake)
+    monkeypatch.setattr(plat, "reap_user_processes", lambda u: reaped.append(u))
+    kw = {} if stdin is None else {"stdin": stdin}
+    result = plat.run_as(
+        "df-publisher",
+        ["/usr/bin/true"],
+        env={},
+        cwd=Path("/"),
+        network=False,
+        timeout=5,
+        **kw,  # type: ignore[arg-type]
+    )
+    assert seen == [stdin]
+    assert result.timed_out and reaped == ["df-publisher"]
+
+
+def test_execute_feeds_stdin(tmp_path: Path) -> None:
+    result = plat._execute(
+        ["/bin/cat"], env={}, cwd=tmp_path, timeout=10, limit=1024, stdin_data=b"x\n"
+    )
+    assert result.stdout == b"x\n"
+
+
 def test_run_as_env_is_exactly_given() -> None:
     inner = plat._env_argv(["/usr/bin/env"], {"A": "1", "B": "two words"})
     assert inner[:2] == ["/usr/bin/env", "-i"]

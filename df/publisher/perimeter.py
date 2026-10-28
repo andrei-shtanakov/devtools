@@ -23,7 +23,9 @@ A restored copy (`admission = restored_pending`) is not complete: once the
 epoch source answers for every known root, one transaction records a
 conservative `registered(E)` per root (source `db_restore`) and admits the
 copy; until then it is `unavailable: restore_pending`. In 2a the only epoch
-source in the code is `NO_BINDING`.
+source in the code is `NO_BINDING`. `restore` (root's `darkfactory perimeter
+restore`, run as `df-publisher`; Task 11r) puts a copy, or an empty database,
+in place: always `restored_pending`, never `ready`.
 
 The epoch of a registration is read inside the write transaction, with the
 write lock held. A remote read cannot be made atomic with the `COMMIT`: an
@@ -41,12 +43,13 @@ import fcntl
 import functools
 import json
 import os
+import re
 import sqlite3
 import stat
 import sys
 import time
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -84,15 +87,53 @@ ADMISSIONS = ("ready", "restored_pending")
 DB_RESTORE = "db_restore"
 LOST_TEXT = (
     "база периметра потеряна: есть отметка perimeter/created, нет "
-    "perimeter/events.sqlite; заново она не создаётся — нужен человек "
-    "(восстановление из копии)"
+    "perimeter/events.sqlite; заново она не создаётся — нужен человек: "
+    "sudo darkfactory perimeter restore --from <копия> (или --empty); если "
+    "нет самого каталога perimeter/ — сначала sudo darkfactory roles setup"
 )
 INTEGRITY_TEXT = (
     "база периметра не прошла проверку целостности, или рядом с отсутствующей "
     "базой остался журнал perimeter/events.sqlite-journal; нужен человек "
     "(журнал не удалять)"
 )
+#: Where `restore` stages the copy (or the empty database) before the barrier.
+RESTORE_DB = "events.sqlite.restore"
+#: Where `--set-aside-old` moves the old pair: `set-aside/<UTC>/`.
+SET_ASIDE = "set-aside"
+#: The largest copy `restore` accepts (bytes).
+MAX_COPY = 256 << 20
+#: Seconds `restore` waits for `LOCK_EX` before `busy`.
+RESTORE_WAIT = 30.0
+RESTORE_TEXTS = {
+    "busy": (
+        "база периметра занята: издатель держит её открытой дольше "
+        f"{RESTORE_WAIT:g} с; ничего не изменено, повторите позже"
+    ),
+    "perimeter_dir": (
+        "каталога perimeter/ нет или он не 0700 учётки df-publisher: сначала "
+        "sudo darkfactory roles setup (создаёт каталог), затем sudo darkfactory "
+        "perimeter restore --from <копия> (или --empty)"
+    ),
+    "set_aside": (
+        "perimeter/set-aside есть, но это не каталог 0700 учётки df-publisher; "
+        "ничего не изменено, нужен человек"
+    ),
+    "journal": (
+        "у прежней базы журнал perimeter/events.sqlite-journal, который не "
+        "откатывается (или журнал без базы); ничего не изменено. Аварийная "
+        "ветка: sudo darkfactory perimeter restore --from <копия> "
+        "--set-aside-old (прежняя пара уходит в perimeter/set-aside/); журнал "
+        "не удалять"
+    ),
+    "restore_incomplete": (
+        "прерванное восстановление (perimeter/restore.intent) не продолжается "
+        "по фактам на диске; нужен человек"
+    ),
+}
 _POLL = 0.02
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+_INTENT_DIR = re.compile(rf"{SET_ASIDE}/[0-9]{{8}}T[0-9]{{6}}\.[0-9]{{6}}Z", re.ASCII)
 _LOCK_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 
 #: A root of trust: host, `df-trust` repository id, branch (spec 6.1).
@@ -353,18 +394,31 @@ def _lock_for_create(base: Path) -> int:
 
 
 def _own_dir(base: Path) -> None:
-    st = os.lstat(base)
-    ok = (
+    if not _is_own_dir(base):
+        raise OSError(f"{base}: not a 0700 directory of this user")
+
+
+def _is_own_dir(path: Path) -> bool:
+    """A `0700` directory (not a link) of this user; `lstat` errors raise."""
+    st = os.lstat(path)
+    return (
         stat.S_ISDIR(st.st_mode)
         and stat.S_IMODE(st.st_mode) == 0o700
         and fsutil.owner_uid(st) == os.geteuid()
     )
-    if not ok:
-        raise OSError(f"{base}: not a 0700 directory of this user")
 
 
-def _flock(fd: int, op: int) -> None:
-    deadline = time.monotonic() + BARRIER_WAIT
+def _own_dir_or_false(path: Path) -> bool:
+    """`_is_own_dir`, an `lstat` error (a racing change) counting as not ours."""
+    try:
+        return _is_own_dir(path)
+    except OSError:
+        return False
+
+
+def _flock(fd: int, op: int, wait: float | None = None) -> None:
+    """`op` on the barrier, waited for at most `wait` (`BARRIER_WAIT`)."""
+    deadline = time.monotonic() + (BARRIER_WAIT if wait is None else wait)
     while True:
         try:
             fcntl.flock(fd, op | fcntl.LOCK_NB)
@@ -389,15 +443,30 @@ def _open_verified(layout: Layout) -> sqlite3.Connection:
         raise _io(exc) from None
     if not stat.S_ISREG(st.st_mode):
         raise Unavailable("integrity")
+    return _connect_verified(path)
+
+
+def _connect_verified(path: Path) -> sqlite3.Connection:
+    """`_connect`, then `_verify`; SQLite's errors are `Unavailable`."""
     with _mapped():
-        uri = f"{path.as_uri()}?mode=rw&nofollow=1"
-        conn = sqlite3.connect(uri, uri=True, isolation_level=None)
+        conn = _connect(path)
         try:
-            _apply_pragmas(conn)
             _verify(conn)
         except BaseException:
             conn.close()
             raise
+    return conn
+
+
+def _connect(path: Path) -> sqlite3.Connection:
+    """An existing file (never a link), with every pragma set and read back."""
+    uri = f"{path.as_uri()}?mode=rw&nofollow=1"
+    conn = sqlite3.connect(uri, uri=True, isolation_level=None)
+    try:
+        _apply_pragmas(conn)
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
@@ -450,12 +519,18 @@ def _count(conn: sqlite3.Connection) -> int:
 
 
 def _build(base: Path) -> None:
-    """The schema in a fresh `NEW_DB` (born `0600`), synced, renamed into
-    place, the directory synced. A leftover of a crash is swept first."""
+    """A fresh `ready` database in `NEW_DB`, renamed into place, the
+    directory synced."""
     tmp = base / NEW_DB
-    for leftover in (tmp, base / f"{NEW_DB}-journal"):
-        with contextlib.suppress(FileNotFoundError):
-            fsutil.remove_durably(leftover)
+    _new_db(tmp, "ready")
+    os.rename(tmp, base / DB_NAME)
+    fsutil.sync_dir(base)
+
+
+def _new_db(tmp: Path, admission: str) -> None:
+    """The schema and `meta` in a fresh `tmp` (born `0600`), synced. A
+    leftover of a crash is swept first."""
+    _sweep(tmp)
     os.close(fsutil.create_file(tmp, os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600))
     with _mapped():
         conn = sqlite3.connect(tmp, isolation_level=None)
@@ -466,17 +541,26 @@ def _build(base: Path) -> None:
                     conn.execute(sql)
                 conn.executemany(
                     "INSERT INTO meta (key, value) VALUES (?, ?)",
-                    [("schema", SCHEMA_VERSION), ("admission", "ready")],
+                    [("schema", SCHEMA_VERSION), ("admission", admission)],
                 )
         finally:
             conn.close()
-    fd = os.open(tmp, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    _sync_file(tmp)
+
+
+def _sweep(tmp: Path) -> None:
+    """A temporary database and its journal, removed durably if present."""
+    for leftover in (tmp, tmp.with_name(f"{tmp.name}-journal")):
+        with contextlib.suppress(FileNotFoundError):
+            fsutil.remove_durably(leftover)
+
+
+def _sync_file(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
         fsutil.sync_file(fd)
     finally:
         os.close(fd)
-    os.rename(tmp, base / DB_NAME)
-    fsutil.sync_dir(base)
 
 
 def _write(conn: sqlite3.Connection) -> contextlib.AbstractContextManager[None]:
@@ -528,6 +612,229 @@ def admission(conn: sqlite3.Connection) -> str:
     """`ready` or `restored_pending`."""
     row = conn.execute("SELECT value FROM meta WHERE key = 'admission'").fetchone()
     return str(row[0])
+
+
+# --- restore (Task 11r) ----------------------------------------------------------
+
+
+def _no_step(_name: str) -> None:
+    """The default `RESTORE_STEP`: nothing."""
+
+
+#: Called with the name of each step of `restore` once it is done; tests
+#: crash there (`os._exit`).
+RESTORE_STEP: Callable[[str], None] = _no_step
+
+
+def restore(layout: Layout, copy: bytes | None, *, set_aside_old: bool = False) -> str:
+    """`perimeter restore` as `df-publisher`: `restored`, or `resumed` when an
+    interrupted `--set-aside-old` (`restore.intent`) was finished instead --
+    the copy of this call is then not used.
+
+    1. the copy (`None`: an empty database) is staged in `RESTORE_DB`,
+       verified as `open_db` verifies and marked `restored_pending` -- all
+       before the barrier;
+    2. `LOCK_EX`, waited for at most `RESTORE_WAIT`: `busy`, nothing changed
+       (the stage is removed);
+    3. a hot journal of the old database is rolled back (`_roll_back`);
+    4. `rename` onto `events.sqlite`, `fsync` of the directory.
+    With `set_aside_old`, steps 3-4 are (а)-(д) of `_set_aside`. A refusal
+    is `Unavailable` (`RESTORE_TEXTS`, `copy: <reason>`)."""
+    _require_sqlite()
+    base = layout.perimeter_dir
+    try:
+        _own_dir(base)
+    except OSError:
+        raise Unavailable("perimeter_dir") from None
+    if _lexists(base / RESTORE_INTENT):
+        with _exclusive(base):
+            _set_aside(base, _read_intent(base))
+        return "resumed"
+    tmp = base / RESTORE_DB
+    try:
+        _stage(tmp, copy)
+        RESTORE_STEP("staged")
+        with _exclusive(base):
+            if set_aside_old:
+                aside = base / SET_ASIDE
+                if _lexists(aside) and not _own_dir_or_false(aside):
+                    raise Unavailable("set_aside")  # before the intent: no change
+                _set_aside(base, _write_intent(base))
+            else:
+                _roll_back(base)
+                RESTORE_STEP("rolled-back")
+                _move(tmp, base / DB_NAME)
+                RESTORE_STEP("installed")
+    except BaseException:
+        if not _lexists(base / RESTORE_INTENT):  # the intent keeps its stage
+            with contextlib.suppress(OSError):
+                _sweep(tmp)
+        raise
+    return "restored"
+
+
+def _stage(tmp: Path, copy: bytes | None) -> None:
+    """Step 1: the database to put in place, verified, `restored_pending`."""
+    if copy is None:
+        _new_db(tmp, "restored_pending")
+        return
+    if len(copy) > MAX_COPY:
+        raise Unavailable("copy: too_large")
+    _sweep(tmp)
+    fd = fsutil.create_file(tmp, os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        view = memoryview(copy)
+        while view:
+            view = view[os.write(fd, view) :]
+        fsutil.sync_file(fd)
+    finally:
+        os.close(fd)
+    try:
+        conn = _connect_verified(tmp)
+    except Unavailable as exc:
+        raise Unavailable(f"copy: {exc.reason}") from None
+    try:
+        with _mapped(), _write(conn):
+            conn.execute(
+                "UPDATE meta SET value = 'restored_pending' WHERE key = 'admission'"
+            )
+    finally:
+        conn.close()
+    _sync_file(tmp)
+
+
+@contextlib.contextmanager
+def _exclusive(base: Path) -> Iterator[None]:
+    """Step 2: the barrier `LOCK_EX` (the lock file made if lost), waited for
+    at most `RESTORE_WAIT`; then no publisher has the database open."""
+    fd = _lock_for_create(base)
+    try:
+        _flock(fd, fcntl.LOCK_EX, RESTORE_WAIT)
+        RESTORE_STEP("barrier")
+        yield
+    finally:
+        os.close(fd)
+
+
+def _roll_back(base: Path) -> None:
+    """Step 3: SQLite rolls a hot journal back at the start of a read
+    transaction of the old database, opened with `open_db`'s pragmas; the
+    journal is gone after it. A journal without a database, a failed read or
+    a journal still there is `Unavailable("journal")`; nothing is removed."""
+    if not _lexists(base / JOURNAL):
+        return
+    if not _lexists(base / DB_NAME):
+        raise Unavailable("journal")
+    try:
+        with _mapped():
+            conn = _connect(base / DB_NAME)
+            try:
+                with _transaction(conn, "BEGIN"):
+                    conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+            finally:
+                conn.close()
+    except Unavailable:
+        raise Unavailable("journal") from None
+    if _lexists(base / JOURNAL):
+        raise Unavailable("journal")
+
+
+def _move(src: Path, dst: Path) -> None:
+    """`rename`, then `fsync` of both directories (once when they are one)."""
+    os.rename(src, dst)
+    fsutil.sync_dir(dst.parent)
+    if src.parent != dst.parent:
+        fsutil.sync_dir(src.parent)
+
+
+def _write_intent(base: Path) -> dict[str, str]:
+    """(а): `restore.intent` names the set-aside directory and the stage;
+    `write_atomic` syncs the file and the directory."""
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
+    intent = {"set_aside_dir": f"{SET_ASIDE}/{stamp}", "new_tmp": RESTORE_DB}
+    text = json.dumps(intent, sort_keys=True) + "\n"
+    fsutil.write_atomic(base / RESTORE_INTENT, text, 0o600)
+    RESTORE_STEP("intent")
+    return intent
+
+
+def _read_intent(base: Path) -> dict[str, str]:
+    """The intent of an interrupted `--set-aside-old`; anything but the
+    shape `_write_intent` writes is `restore_incomplete`."""
+    try:
+        fd = os.open(base / RESTORE_INTENT, _READ_FLAGS)
+        try:
+            raw = os.read(fd, 4096)
+        finally:
+            os.close(fd)
+        intent = json.loads(raw.decode("utf-8"))
+    except (OSError, ValueError):
+        raise Unavailable("restore_incomplete") from None
+    ok = (
+        isinstance(intent, dict)
+        and intent.keys() == {"set_aside_dir", "new_tmp"}
+        and intent["new_tmp"] == RESTORE_DB
+        and isinstance(intent["set_aside_dir"], str)
+        and _INTENT_DIR.fullmatch(intent["set_aside_dir"]) is not None
+    )
+    if not ok:
+        raise Unavailable("restore_incomplete")
+    return intent
+
+
+def _set_aside(base: Path, intent: dict[str, str]) -> None:
+    """(б)-(д) under `LOCK_EX`, each judged by the files on disk, so that a
+    repeat continues from the first step not done: (б) `set-aside/<UTC>/`;
+    (в) the journal, then the database moved there; (г) the stage renamed
+    into place; (д) the intent removed. While the stage exists the database
+    in place (if any) is the old one; the journal goes first, so the new
+    database never meets the old journal."""
+    aside, new = base / intent["set_aside_dir"], base / intent["new_tmp"]
+    for path in (aside.parent, aside):
+        _make_dir(path)
+    RESTORE_STEP("set-aside-dir")
+    if _lexists(new):
+        _move_aside(base / JOURNAL, aside / JOURNAL)
+        RESTORE_STEP("journal-moved")
+        _move_aside(base / DB_NAME, aside / DB_NAME)
+        RESTORE_STEP("db-moved")
+        _move(new, base / DB_NAME)
+        RESTORE_STEP("installed")
+    elif not _lexists(base / DB_NAME) or _lexists(base / JOURNAL):
+        raise Unavailable("restore_incomplete")
+    fsutil.remove_durably(base / RESTORE_INTENT)
+
+
+def _make_dir(path: Path) -> None:
+    """A `0700` directory of this user, durable (present: settled). Anything
+    else found there (a file, a link, another mode or owner) is
+    `restore_incomplete`: nothing is moved through it."""
+    try:
+        fd = os.open(path.parent, _DIR_FLAGS)
+        try:
+            fsutil.make_dir(fd, path.name, 0o700, path=path)
+        finally:
+            os.close(fd)
+        ok = _is_own_dir(path)
+    except OSError:
+        ok = False
+    if not ok:
+        raise Unavailable("restore_incomplete")
+
+
+def _move_aside(src: Path, dst: Path) -> None:
+    if not _lexists(src):
+        return
+    if _lexists(dst):
+        raise Unavailable("restore_incomplete")  # never two of one name
+    _move(src, dst)
+
+
+def restore_text(reason: str) -> str:
+    """The human's text of a refused `restore`."""
+    if reason.startswith("copy: "):
+        return f"копия не принята ({reason.removeprefix('copy: ')}): ничего не изменено"
+    return RESTORE_TEXTS.get(reason, f"perimeter restore: {reason}")
 
 
 # --- admission of a restored copy ------------------------------------------------
@@ -859,9 +1166,15 @@ __all__ = [
     "LOCK",
     "LOST_TEXT",
     "MARKER",
+    "MAX_COPY",
     "MAX_EVENTS",
     "NO_BINDING",
+    "RESTORE_DB",
     "RESTORE_INTENT",
+    "RESTORE_STEP",
+    "RESTORE_TEXTS",
+    "RESTORE_WAIT",
+    "SET_ASIDE",
     "Db",
     "EpochSource",
     "Root",
@@ -876,7 +1189,9 @@ __all__ = [
     "pragmas",
     "record_violation",
     "record_violation_op",
+    "restore",
     "restore_conservative",
+    "restore_text",
     "root_of",
     "stats",
     "status_unavailable",
