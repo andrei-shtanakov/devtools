@@ -8,14 +8,13 @@ this order, each settled by its own check so that a repeat changes nothing:
    intents, so two parallel creations could take the same id);
 2. `dirs`: the stage-2 directories, born in their final owner and mode;
 3. `publisher-config`: `/etc/df/publisher.toml` from the accounts;
-4. `libexec`: the wrappers, for the admin Python of `current`;
-5. `sudoers`: `/etc/sudoers.d/df`;
-6. `verify`: wrappers and the effective sudo policy of five names (always run,
+4. `perimeter-init`: the perimeter database, created as `df-publisher` by the
+   admin Python of `current` running the entry (`publisher perimeter-init`);
+   a marker without the database is lost and refused, never recreated;
+5. `libexec`: the wrappers, for the admin Python of `current`;
+6. `sudoers`: `/etc/sudoers.d/df`;
+7. `verify`: wrappers and the effective sudo policy of five names (always run,
    once; a failure names the retry).
-
-TODO(Task 11): `perimeter-init` (the perimeter database, created as
-`df-publisher`) goes between `publisher-config` and `libexec`; `dirs` already
-makes its directory.
 """
 
 from __future__ import annotations
@@ -32,10 +31,19 @@ from df import platform as plat
 from df.config import Account, ConfigError, load_accounts
 from df.journal import Step, StepFailed, run_steps
 from df.paths import Layout
+from df.publisher import perimeter
 from df.stage2_config import dump_publisher, expected_publisher
 from df.state import Snapshot
 
-STEP_NAMES = ("roles", "dirs", "publisher-config", "libexec", "sudoers", "verify")
+STEP_NAMES = (
+    "roles",
+    "dirs",
+    "publisher-config",
+    "perimeter-init",
+    "libexec",
+    "sudoers",
+    "verify",
+)
 PUBLISHER_MODE = 0o644
 SUDOERS_MODE = 0o440
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -43,6 +51,10 @@ _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 #: still root's (a crash between `mkdir` and `fchown`).
 _NEEDS_DO = frozenset({"absent", "repair", "unowned"})
 _RETRY = "; исправьте и повторите darkfactory roles setup"
+PUBLISHER_USER = "df-publisher"
+#: The environment of `perimeter-init` as the role (`env -i`).
+_ROLE_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C"}
+_INIT_TIMEOUT = 60.0
 _NO_OPENSSL = (
     "openssl: нет в install.toml (approved_cli.openssl): задайте путь "
     "командой sudo darkfactory cli set openssl /usr/bin/openssl"
@@ -151,6 +163,12 @@ def _steps(layout: Layout, operator: str, python: Path) -> list[Step]:
             lambda: not _publisher_problems(layout),
             lambda: _write_publisher(layout),
             lambda: _publisher_problems(layout),
+        ),
+        Step(
+            "perimeter-init",
+            lambda: _perimeter_ready(layout),
+            lambda: _perimeter_init(layout, python),
+            lambda: _perimeter_problems(layout),
         ),
         Step(
             "libexec",
@@ -310,6 +328,49 @@ def _write_publisher(layout: Layout) -> None:
         journal.generation_end(layout)  # a refused write leaves the old file whole
         raise StepFailed("publisher-config", f"{path}: {exc}") from exc
     journal.generation_end(layout)
+
+
+# --- perimeter-init ------------------------------------------------------------
+
+
+def _perimeter_ready(layout: Layout) -> bool:
+    """Database and marker: done; neither (or a database without the marker,
+    a crash of the creation): `do()`; the marker alone: lost, a refusal."""
+    base = layout.perimeter_dir
+    db = os.path.lexists(base / perimeter.DB_NAME)
+    marker = os.path.lexists(base / perimeter.MARKER)
+    if marker and not db:
+        raise StepFailed("perimeter-init", perimeter.LOST_TEXT)
+    return db and marker
+
+
+def _perimeter_problems(layout: Layout) -> list[str]:
+    base = layout.perimeter_dir
+    names = (perimeter.DB_NAME, perimeter.MARKER)
+    return [f"{base / n}: нет файла" for n in names if not os.path.lexists(base / n)]
+
+
+def _perimeter_init(layout: Layout, python: Path) -> None:
+    """`create_db` as `df-publisher`: the admin Python runs the entry with
+    `publisher perimeter-init` (the entry reads no data relative to the
+    code: the admin tree holds `df/` only)."""
+    argv = [str(python), "-I", "-B", "-S", str(layout.entry)]
+    result = plat.run_as(
+        PUBLISHER_USER,
+        [*argv, "publisher", "perimeter-init"],
+        env=_ROLE_ENV,
+        cwd=Path("/"),
+        network=False,
+        timeout=_INIT_TIMEOUT,
+    )
+    if result.launched and not result.timed_out and result.returncode == 0:
+        return
+    err = result.stderr.decode("utf-8", "replace").strip()
+    state = "не стартовал" if not result.launched else f"код {result.returncode}"
+    if result.timed_out:
+        state = "срок истёк"
+    detail = f"от {PUBLISHER_USER}: {state}" + (f": {err}" if err else "")
+    raise StepFailed("perimeter-init", detail + _RETRY)
 
 
 # --- verify --------------------------------------------------------------------

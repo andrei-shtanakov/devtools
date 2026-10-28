@@ -21,6 +21,7 @@ from df.config import (
     load_accounts,
 )
 from df.journal import StepFailed
+from df.publisher import perimeter
 from df.roles import ROLE_USERS
 from df.stage2_config import dump_publisher, expected_publisher
 from df.state import Snapshot
@@ -38,6 +39,7 @@ class Calls:
     policy: list[str] = field(default_factory=list)
     io_log: int = 0
     policy_result: dict[str, list[str]] = field(default_factory=dict)
+    run_as: list[tuple[str, list[str]]] = field(default_factory=list)
 
 
 @dataclass
@@ -122,13 +124,38 @@ def setup(
     monkeypatch.setattr(sudoers, "install", install)
     monkeypatch.setattr(sudoers, "policy_problems", policy)
     monkeypatch.setattr(sudoers, "io_log_problems", io_log)
+
+    def run_as(user: str, argv: list[str], **kw: object) -> plat.RunResult:
+        """`perimeter-init` as the role: `create_db` in this process with the
+        role's euid (the directory's virtual owner)."""
+        calls.run_as.append((user, list(argv)))
+        assert kw["network"] is False and kw["cwd"] == Path("/")
+        real = os.geteuid
+        os.geteuid = lambda: ROLE_UID[user]  # type: ignore[assignment]
+        try:
+            outcome = perimeter.create_db(fake.layout)
+        except perimeter.Unavailable as exc:
+            return plat.RunResult(2, b"", exc.reason.encode(), True)
+        finally:
+            os.geteuid = real  # type: ignore[assignment]
+        return plat.RunResult(0, outcome.encode(), b"", True)
+
+    monkeypatch.setattr(plat, "run_as", run_as)
     return Setup(fake, calls, sudoers_file, snapshot())
 
 
-def test_steps_order_without_perimeter_init(setup: Setup) -> None:
+def test_steps_order(setup: Setup) -> None:
     setup.run()
     seen = list(dict.fromkeys(step for step, _event in setup.steps()))
-    assert seen == ["roles", "dirs", "publisher-config", "libexec", "sudoers", "verify"]
+    assert seen == [
+        "roles",
+        "dirs",
+        "publisher-config",
+        "perimeter-init",
+        "libexec",
+        "sudoers",
+        "verify",
+    ]
     assert tuple(seen) == roles_setup.STEP_NAMES
     assert ("verify", "done") in setup.steps()
     assert ("sudoers", "done") in setup.steps()
@@ -191,6 +218,62 @@ def test_idempotent(setup: Setup) -> None:
     assert new == [*want, ("verify", "start"), ("verify", "done")]
     assert len(setup.calls.policy) == 10
     assert not [e for e in setup.fake.events if e[0] in ("created", "chmod")]
+    assert len(setup.calls.run_as) == 1
+
+
+# --- perimeter-init ----------------------------------------------------------
+
+
+def test_perimeter_init_runs_create_db_as_the_publisher(setup: Setup) -> None:
+    setup.run()
+    python = libexec.admin_python_of(setup.lay, setup.snap)
+    assert setup.calls.run_as == [
+        (
+            "df-publisher",
+            [str(python), "-I", "-B", "-S", str(setup.lay.entry), "publisher",
+             "perimeter-init"],
+        )
+    ]  # fmt: skip
+    base = setup.lay.perimeter_dir
+    assert sorted(os.listdir(base)) == sorted(
+        [perimeter.DB_NAME, perimeter.LOCK, perimeter.MARKER]
+    )
+    perimeter.open_db(setup.lay).close()
+
+
+def test_perimeter_init_never_recreates_a_lost_database(setup: Setup) -> None:
+    setup.run()
+    (setup.lay.perimeter_dir / perimeter.DB_NAME).unlink()
+    setup.calls.run_as.clear()
+    with pytest.raises(StepFailed, match="потеряна") as info:
+        setup.run()
+    assert info.value.step == "perimeter-init"
+    assert "нужен человек" in str(info.value)
+    assert setup.calls.run_as == []
+    assert not (setup.lay.perimeter_dir / perimeter.DB_NAME).exists()
+    assert ("libexec", "start") not in setup.steps()[-3:]
+
+
+def test_perimeter_init_finishes_a_missing_marker(setup: Setup) -> None:
+    setup.run()
+    (setup.lay.perimeter_dir / perimeter.MARKER).unlink()
+    setup.calls.run_as.clear()
+    setup.run()
+    assert len(setup.calls.run_as) == 1
+    assert (setup.lay.perimeter_dir / perimeter.MARKER).exists()
+
+
+def test_perimeter_init_failure_names_the_retry(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(_user: str, _argv: list[str], **_kw: object) -> plat.RunResult:
+        return plat.RunResult(2, b"", b"darkfactory: denied", True)
+
+    monkeypatch.setattr(plat, "run_as", broken)
+    with pytest.raises(StepFailed, match="darkfactory: denied") as info:
+        setup.run()
+    assert info.value.step == "perimeter-init"
+    assert str(info.value).endswith("исправьте и повторите darkfactory roles setup")
 
 
 def test_sudoers_failure_leaves_no_file_and_skips_verify(

@@ -205,18 +205,25 @@ def test_check_run_record_unreadable(world: World) -> None:
 # --- the frame ------------------------------------------------------------------
 
 
-def test_stubs_refuse_before_any_intent(
+def test_every_operation_has_a_handler() -> None:
+    assert set(pmain.OPERATION_TABLE) == set(request.ALL_OPERATIONS)
+
+
+def test_perimeter_without_binding_writes_no_intent(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    implemented = {"publish-review", "read-token", "self-check", "merge"}
-    stubs = sorted(set(VALID) - implemented)
-    for op in stubs:
-        raw = raw_of(op, request_id=f"req-{op}-0001")
-        code, resp = world.run(op, raw, capsys=capsys)
-        assert (code, resp.outcome, resp.reason) == (2, "refused", "not_implemented")
+    raw = raw_of("record-violation", request_id="req-viol-0001")
+    code, resp = world.run("record-violation", raw, capsys=capsys)
+    assert (code, resp.outcome, resp.reason) == (2, "refused", "no_binding")
+    raw = raw_of("perimeter-status", request_id="req-stat-0001")
+    code, resp = world.run("perimeter-status", raw, capsys=capsys)
+    assert (code, resp.outcome) == (0, "done")
+    assert resp.result == request.perimeter_result(
+        "unavailable", "no_binding", None, None
+    )
     assert world.files("intents") == []
     assert world.files("results") == []
-    assert len(world.journal()) == len(stubs)
+    assert len(world.journal()) == 2
 
 
 def test_intent_then_result_then_replay(
@@ -624,7 +631,7 @@ def test_cli_publisher_serve_runs_the_frame(
     )
     os.close(rfd)
     assert code == 2
-    assert request.parse_response(capsys.readouterr().out).reason == "not_implemented"
+    assert request.parse_response(capsys.readouterr().out).reason == "no_binding"
 
 
 def _frame_of(fd: int):  # noqa: ANN202

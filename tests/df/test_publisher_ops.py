@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from df.config import InstallConfig
-from df.publisher import github, ops
+from df.publisher import github, ops, perimeter
 from df.publisher.request import Response
 from df.stage2_config import Product, dump_products
 from tests.df.launch_world import put_record, record
@@ -212,6 +212,8 @@ def gh(
     cli["openssl"] = Path(OPENSSL)
     install = InstallConfig("o/m", "a" * 40, "core", cli)
     world.snap = replace(world.snap, install=install)
+    lay.perimeter_dir.mkdir(mode=0o700)
+    perimeter.create_db(lay)  # what roles setup's perimeter-init leaves
     fake = FakeGitHub(world)
     monkeypatch.setattr(github, "default_transport", fake)
     return fake
@@ -617,8 +619,20 @@ def test_self_check_operation_without_products(
     (world.lay.etc / "products.toml").unlink()
     resp = world.run("self-check", raw_of("self-check"), capsys=capsys)[1]
     assert resp.outcome == "done"
-    assert resp.result == {"installations": [], "problems": [], "perimeter": None}
+    assert resp.result["installations"] == [] and resp.result["problems"] == []
+    stats = cast(dict[str, int], resp.result["perimeter"])
+    assert stats["events"] == 0 and stats["db_bytes"] > 0 and stats["free_bytes"] > 0
     assert gh.calls == []
+
+
+def test_self_check_perimeter_unavailable(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (world.lay.perimeter_dir / perimeter.DB_NAME).unlink()
+    resp = world.run("self-check", raw_of("self-check"), capsys=capsys)[1]
+    assert resp.outcome == "done"
+    assert resp.result["perimeter"] is None
+    assert resp.result["problems"] == ["perimeter_unavailable: lost"]
 
 
 def test_self_check_operation_github_down(

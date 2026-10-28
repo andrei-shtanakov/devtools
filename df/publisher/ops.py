@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 
 from df.config import ConfigError, read_optional
 from df.paths import Layout
-from df.publisher import github
+from df.publisher import github, perimeter
 from df.publisher.github import (
     GitHubRefused,
     GitHubUnavailable,
@@ -464,7 +464,8 @@ def _check_one(
 @_answers
 def self_check_op(ctx: Context) -> Response:
     """`self-check` (root): every App of `products.toml` is checked; the
-    installations and problems are put together."""
+    installations and problems are put together with the perimeter's limits
+    (`None` and a problem if the database cannot be opened)."""
     products = _products(ctx.layout)
     openssl = _openssl(ctx) if products else Path()
     installations: list[github.Installation] = []
@@ -473,7 +474,11 @@ def self_check_op(ctx: Context) -> Response:
         result = _check_one(ctx, products, app_id, openssl)
         installations.extend(result.installations)
         problems.extend(result.problems)
-    whole = SelfCheckResult(tuple(installations), tuple(problems), None)
+    stats = perimeter.stats(ctx.layout)
+    if isinstance(stats, perimeter.Unavailable):
+        problems.append(f"perimeter_unavailable: {stats.reason}")
+        stats = None
+    whole = SelfCheckResult(tuple(installations), tuple(problems), stats)
     return Response("done", None, whole.to_json())
 
 
