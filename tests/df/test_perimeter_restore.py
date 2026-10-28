@@ -920,7 +920,7 @@ def test_cli_restore_resumed_needs_a_human(
     capsys.readouterr()
     assert rw.w.writer(["perimeter", "restore", "--empty"]) == cli.EXIT_HUMAN
     err = capsys.readouterr().err
-    assert "повторите команду со своим источником" in err
+    assert "повторять не нужно" in err and "повторите команду со своим" in err
     assert rw.journal_rows() == [("needs-human", "--empty: resumed")]
     assert rows(rw.lay) == PENDING  # the earlier call's copy, not --empty
     assert rw.lay.perimeter_created.exists()
@@ -948,11 +948,36 @@ def test_set_aside_dir_failure_before_the_intent_changes_nothing(
     assert "повторите команду" in perimeter.restore_text("set_aside")
 
 
+def test_partial_set_aside_dirs_are_dropped_before_the_intent(
+    ready: Layout, copy: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`set-aside/` made, `set-aside/<UTC>/` fails: the refusal leaves no new
+    directory behind (its text says nothing changed)."""
+    real = fsutil.make_dir
+    calls: list[object] = []
+
+    def second_fails(*a: object, **kw: object) -> bool:
+        calls.append(a)
+        if len(calls) == 2:
+            raise OSError(errno.ENOSPC, "no space")
+        return real(*a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(fsutil, "make_dir", second_fails)
+    before = listing(ready)
+    with pytest.raises(Unavailable, match="set_aside"):
+        perimeter.restore(ready, copy, set_aside_old=True)
+    assert len(calls) == 2
+    assert listing(ready) == before
+    assert not (ready.perimeter_dir / perimeter.SET_ASIDE).exists()
+
+
 def test_lost_text_names_the_command() -> None:
     assert "sudo darkfactory perimeter restore --from <копия>" in perimeter.LOST_TEXT
     assert "--set-aside-old" in perimeter.RESTORE_TEXTS["journal"]
     assert f"{perimeter.RESTORE_WAIT:g} с" in perimeter.RESTORE_TEXTS["busy"]
 
 
-def test_resumed_text_names_either_source() -> None:
-    assert "копия или --empty" in cli._RESTORE_DONE["resumed"]  # noqa: SLF001
+def test_resumed_text_does_not_demand_a_repeat() -> None:
+    """The finished copy may be the very one asked for: no blind repeat."""
+    text = cli._RESTORE_DONE["resumed"]  # noqa: SLF001
+    assert "не применялся" in text and "повторять не нужно" in text

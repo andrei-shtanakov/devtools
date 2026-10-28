@@ -3,14 +3,15 @@
 
 `/var/lib/df/perimeter/events.sqlite` is opened by the publisher only
 (`df-publisher`, directory `0700`); consumers ask `perimeter-status`. Next to
-it: `created`, the marker of the first creation (`roles setup`'s
-`perimeter-init`, the one place that creates), and `db.lock`, the barrier:
+it: `created`, the marker of the first creation (written by `roles setup`'s
+`perimeter-init`, the one place that creates, and by `perimeter restore` for
+the database it puts in place), and `db.lock`, the barrier:
 every publisher process holds `flock(LOCK_SH)` on it from before
 `sqlite3.connect` until the connection is closed; creation (and restore,
 Task 11r) hold `LOCK_EX`. While `restore.intent` exists the database is not
 opened at all (`restore_incomplete`). Outside the directory, root's
-`/var/lib/df/perimeter.created` (`0644`, written by `roles setup` after a
-successful `perimeter-init`) keeps the "created once" fact when the whole
+`/var/lib/df/perimeter.created` (`0644`, written by root after a successful
+`perimeter-init` or `perimeter restore`) keeps the "created once" fact when the whole
 `perimeter/` is lost: then the answer is `lost`, never a new database.
 
 Every open checks the effective pragmas, `PRAGMA integrity_check`, the schema
@@ -653,13 +654,16 @@ def restore(layout: Layout, copy: bytes | None, *, set_aside_old: bool = False) 
             _mark_created(base)
         return "resumed"
     tmp = base / RESTORE_DB
+    made: list[Path] = []  # directories this call created before the intent
     try:
         _stage(tmp, copy)
         RESTORE_STEP("staged")
         with _exclusive(base):
             if set_aside_old:
                 intent = _new_intent()
-                # (б) before the intent: a failure here changes nothing
+                aside = base / intent["set_aside_dir"]
+                made = [p for p in (aside, aside.parent) if not _lexists(p)]
+                # (б) before the intent: a failure here leaves nothing behind
                 _make_aside_dirs(base, intent, "set_aside")
                 _set_aside(base, _write_intent(base, intent))
             else:
@@ -672,6 +676,7 @@ def restore(layout: Layout, copy: bytes | None, *, set_aside_old: bool = False) 
         if not _lexists(base / RESTORE_INTENT):  # the intent keeps its stage
             with contextlib.suppress(OSError):
                 _sweep(tmp)
+            _drop_empty(*made)
         raise
     return "restored"
 
@@ -809,6 +814,14 @@ def _set_aside(base: Path, intent: dict[str, str]) -> None:
     elif not _lexists(base / DB_NAME) or _lexists(base / JOURNAL):
         raise Unavailable("restore_incomplete")
     fsutil.remove_durably(base / RESTORE_INTENT)
+
+
+def _drop_empty(*paths: Path) -> None:
+    """Remove the directories this call made, if still empty (a refusal
+    before the intent leaves nothing new behind); deepest first."""
+    for path in paths:
+        with contextlib.suppress(OSError):
+            os.rmdir(path)
 
 
 def _make_aside_dirs(base: Path, intent: dict[str, str], reason: str) -> None:
