@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import pwd
 import stat
@@ -400,3 +401,31 @@ def test_refused_publisher_write_closes_the_bracket(
     with pytest.raises(StepFailed, match="disk full"):
         setup.run()
     assert journal.read_generation(setup.lay) % 2 == 0
+
+
+# --- PR #643: a stale odd generation is closed even with nothing to change ----
+
+
+def test_rerun_with_nothing_to_change_closes_a_stale_odd_generation(
+    setup: Setup,
+) -> None:
+    """A writer killed inside its bracket left the generation odd; a re-run
+    of `roles setup` that changes nothing still closes it (M9, a `warn`)."""
+    setup.run()
+    journal.generation_begin(setup.lay)
+    gen = journal.read_generation(setup.lay)
+    setup.snap = dataclasses.replace(setup.snap, generation=gen)
+    setup.run()
+    assert journal.read_generation(setup.lay) == gen + 1
+    assert len(setup.calls.installed) == 1  # nothing else was written
+    assert ("generation", "warn") in setup.steps()
+
+
+def test_odd_generation_close_waits_for_the_preconditions(setup: Setup) -> None:
+    """A refused `roles setup` changes nothing, the odd generation included."""
+    journal.generation_begin(setup.lay)
+    gen = journal.read_generation(setup.lay)
+    setup.snap = dataclasses.replace(snapshot(openssl=False), generation=gen)
+    with pytest.raises(StepFailed):
+        setup.run()
+    assert journal.read_generation(setup.lay) == gen

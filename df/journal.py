@@ -313,6 +313,31 @@ def generation_end(layout: Layout) -> None:
     _write_generation(layout, n + 1)
 
 
+def close_odd_generation(
+    layout: Layout, *, generation: int, pending_present: bool, current: str | None
+) -> None:
+    """M9: an odd generation without `pending.toml` (a crash between removing
+    it, or between any writer's `generation_begin` and `generation_end`)
+    protects nothing -- made even, with a `warn` naming `current`. Every
+    writer calls it once its own refusals are behind it, before any early
+    success (PR #643), with the values of its snapshot read under the lock.
+    G3 (I9): only after G1 passed, i.e. only in the consistent state, so it
+    never erases the evidence of an install closed by hand halfway."""
+    if generation % 2 == 0 or pending_present:
+        return
+    generation_end(layout)
+    journal_event(
+        layout.journal,
+        run_id="generation",
+        step="generation",
+        event="warn",
+        detail=(
+            f"нечётное поколение {generation} без pending.toml: закрыто, "
+            f"current = {current or 'нет'}"
+        ),
+    )
+
+
 def read_generation(layout: Layout) -> int:
     """The generation counter: absent -> 0; a malformed one is
     `StepFailed("snapshot")` (bootstrap's snapshot, Task 9)."""

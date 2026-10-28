@@ -1274,7 +1274,7 @@ digest итога и digest административного кода. Отм�
   отказ называет оба id.
 
 **Согласованное чтение** (rev 8, r3).
-- **Писатели** (`init`, `install`, `models set`) берут `flock` на `/var/lib/df/install/lock`
+- **Писатели** (`init`, `install`, `models set`, `cli set`, `roles setup`) берут `flock` на `/var/lib/df/install/lock`
   (root, `0600`) исключительно на всё время команды. Занято — отказ «идёт другая
   административная операция», без ожидания.
 - **Счётчик поколений** `/var/lib/df/install/generation` (root, `0644`, целое число). Писатель
@@ -1669,7 +1669,7 @@ codex 0.163.0 user-инструкции роли (`~/.codex/AGENTS.md`) дохо
 
 | Файл | Ключевые поля |
 |---|---|
-| `install.toml` | `manifest_repo`, `manifest_sha`, `profile`, утверждённые системные CLI: обязательны `git`, `uv`, `tar` (rev 8, r5), без любого — отказ разбора до установки; необязательный `openssl` — обязателен для `roles setup` (подпись JWT издателем, rev 9) |
+| `install.toml` | `manifest_repo`, `manifest_sha`, `profile`, утверждённые системные CLI: обязательны `git`, `uv`, `tar` (rev 8, r5), без любого — отказ разбора до установки; необязательный `openssl` — обязателен для `roles setup` (подпись JWT издателем, rev 9); на существующей установке ключ `openssl` задаёт `darkfactory cli set openssl PATH` (владелец 27.10) |
 | `trust.toml` | привязка корня доверия (спека A rev 16 §6.1 п. 1): `host`, `df_trust_repository_id`, `df_trust_full_name` (информационно), `df_trust_branch`; `approval_policy_repository_id`; транспорт — только `public` (v1) |
 | `releases.toml` | разрешённые и отозванные релизы (id, digest, digest административного кода `admin_digest` и точная версия административного Python `admin_python` §3.9, причина отзыва) — источник для издателя и запускателя (§5.8) |
 | `products.toml` | на продукт: `repository_id`, `full_name`, профиль защиты (`fork` / `write`), `product_app_id`, `product_installation_id`, machine user, путь чекаута у `df-exec` |
@@ -1704,7 +1704,7 @@ codex 0.163.0 user-инструкции роли (`~/.codex/AGENTS.md`) дохо
 него не входит: нечётное поколение без `pending.toml` команда закрывает сама, но только в
 согласованном состоянии (предупреждение в журнале называет `current`).
 
-Писатели (`init`, `install`, `models set`) и bootstrap проверяют это до первого изменения и
+Писатели (`init`, `install`, `models set`, `cli set`, `roles setup`) и bootstrap проверяют это до первого изменения и
 отказывают с шагом `damaged`:
 - `pending.toml` есть, `current` = его id, релиз повреждён;
 - `pending.toml` нет, `current` повреждён и не согласован с `install.toml` (`install.toml`
@@ -1932,7 +1932,7 @@ root-процесс, переживший наблюдение, — «не на�
 - **команда** — `/opt/df/bin/darkfactory`. Это фиксированный скрипт root, `0755`, который
   запускает `<административный Python> -I -B -S /opt/df/bin/darkfactory-entry.py`. Входной
   файл — фиксированный текст stdlib, его пишет установщик. Он делает:
-  1. определяет режим: **писатель** (`init`, `install`, `models set`; только root — берёт
+  1. определяет режим: **писатель** (`init`, `install`, `models set`, `cli set`, `roles setup`; только root — берёт
      исключительную блокировку на всё время команды и сразу закрепляет, §3.3) или
      **читатель** (остальные, с root и без; блокировку не открывает) (§3.3). Каталогов
      вход не создаёт: их нет — отказ с указанием на bootstrap;

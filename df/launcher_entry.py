@@ -69,6 +69,7 @@ WRITER_COMMANDS = (
     ("init",),
     ("install",),
     ("models", "set"),
+    ("cli", "set"),
     ("roles", "setup"),
     ("setup-agent",),
 )

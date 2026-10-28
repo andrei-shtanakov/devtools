@@ -7,7 +7,8 @@ the layout of its own root (`layout=`, D2), bootstrap may omit it (then
 the snapshot the entry read under the lock it holds; bootstrap takes the
 lock, settles and reads the snapshot itself. Subcommands: `init` and
 `install` (Task 9); `models list|set` (Task 10); `doctor --probe-models`
-(Task 11); `doctor [--json]` (Task 12, `df.doctor`).
+(Task 11); `doctor [--json]` (Task 12, `df.doctor`); `cli set openssl PATH`
+(stage 2a, Task 4a).
 
 Exit codes (M7): 0 success; 2 a refusal or a configuration error, with the
 step named; 3 `NeedsHuman` (the instruction on stderr); 1 a program error
@@ -22,6 +23,7 @@ import os
 import sys
 import traceback
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import NoReturn
 
@@ -43,7 +45,13 @@ from df import (
     state,
 )
 from df import platform as plat
-from df.config import ConfigError, InstallConfig, Pending, parse_install
+from df.config import (
+    ConfigError,
+    InstallConfig,
+    Pending,
+    dump_install,
+    parse_install,
+)
 from df.digest import TreeError
 from df.journal import NeedsHuman, Stable, StepFailed, Transitional
 from df.manifest import ManifestError
@@ -62,13 +70,14 @@ ROOT_UID = 0
 #: Subcommands allowed while `pending.toml` exists (spec 3.3).
 PENDING_ALLOWED = frozenset({"init", "install", "doctor"})
 
-_TRANSITIONAL = doctor.TRANSITIONAL
 _FINISH = "есть незавершённая установка: завершите darkfactory install"
 _NO_PRODUCT = "продукт не зарегистрирован (этап 3)"
 _NO_REGISTRY = "реестр продуктов не поддерживается до этапа 3"
 _NO_INSTALL = "нет /etc/df/install.toml: начните с bootstrap init"
 _STALE_WRAPPERS = "обёртки ролей устарели: выполните darkfactory roles setup"
 _NO_OPERATOR = "roles setup: укажите --operator (SUDO_USER не задан)"
+#: The one approved CLI `cli set` may add to an existing install (owner 27.10).
+CLI_SETTABLE = "openssl"
 _UNSET = "—"
 #: Subcommands of the roles' side (Tasks 5-7); readers.
 SERVICE_COMMANDS = frozenset({"publisher"})
@@ -183,8 +192,13 @@ def _check_call(
 
 def parsed_mode(args: argparse.Namespace) -> str:
     """The mode the parsed command needs: `writer` for `init`, `install`,
-    `models set` and `roles setup` (`WRITER_COMMANDS`), else `reader`."""
-    sub = getattr(args, "models_command", None) or getattr(args, "roles_command", None)
+    `models set`, `cli set` and `roles setup` (`WRITER_COMMANDS`), else
+    `reader`."""
+    sub = (
+        getattr(args, "models_command", None)
+        or getattr(args, "roles_command", None)
+        or getattr(args, "cli_command", None)
+    )
     words = (args.command,) if sub is None else (args.command, sub)
     writer = any(words[: len(cmd)] == cmd for cmd in launcher_entry.WRITER_COMMANDS)
     return "writer" if writer else "reader"
@@ -234,6 +248,7 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     )
     sub.add_parser("install", exit_on_error=False, add_help=False, allow_abbrev=False)
     _add_models(sub)
+    _add_cli(sub)
     _add_service(sub)
     doctor = sub.add_parser(
         "doctor", exit_on_error=False, add_help=False, allow_abbrev=False
@@ -270,6 +285,19 @@ def _add_models(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
     show = words.add_parser("list", **opts)
     show.add_argument("--product", type=models.repository_id)
     show.add_argument("--json", action="store_true")
+
+
+def _add_cli(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
+    """`cli set NAME PATH`; the name is checked by `_cli_set`, not here, so
+    that another name gets its own message."""
+    opts = {"exit_on_error": False, "add_help": False, "allow_abbrev": False}
+    group = sub.add_parser("cli", **opts)
+    words = group.add_subparsers(
+        dest="cli_command", required=True, parser_class=_Parser
+    )
+    put = words.add_parser("set", **opts)
+    put.add_argument("name")
+    put.add_argument("path")
 
 
 def _add_service(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
@@ -314,7 +342,7 @@ def _check_run(args: argparse.Namespace) -> None:
     try:
         run_start.parse(args.words)
     except StepFailed as exc:
-        raise UsageError(f"run: {exc}") from exc
+        raise UsageError(f"run: {exc.detail}") from exc
 
 
 # ---------- reader ----------
@@ -330,7 +358,7 @@ def _reader(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
     if args.command == "doctor":
         return _doctor(args, lay, read)
     if isinstance(read, Transitional):
-        raise Refusal(_TRANSITIONAL)
+        raise Refusal(doctor.transitional_text(read.generation))
     snap = state.parse_snapshot(read.value, lay, mode="reader")
     return _models_list(args, lay, snap)
 
@@ -342,7 +370,7 @@ def _launch(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
     if not args.exec_form:
         return launch.human_main(words, layout=lay)
     if isinstance(read, Transitional):
-        raise Refusal(_TRANSITIONAL)
+        raise Refusal(doctor.transitional_text(read.generation))
     snap = state.parse_snapshot(read.value, lay, mode="reader")
     return launch.exec_main(words, layout=lay, snap=snap)
 
@@ -353,7 +381,7 @@ def _run(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
     if os.geteuid() != ROOT_UID:
         return run_start.human_main(args.words, layout=lay)
     if isinstance(read, Transitional):
-        raise Refusal(_TRANSITIONAL)
+        raise Refusal(doctor.transitional_text(read.generation))
     snap = state.parse_snapshot(read.value, lay, mode="reader")
     return run_start.main(args.words, layout=lay, snap=snap)
 
@@ -392,7 +420,7 @@ def _probe_models(args: argparse.Namespace, lay: Layout, read: ReadResult) -> in
     if os.geteuid() != ROOT_UID:
         raise Refusal("doctor --probe-models: нужен sudo")
     if isinstance(read, Transitional):
-        raise Refusal(_TRANSITIONAL)
+        raise Refusal(doctor.transitional_text(read.generation))
     if args.product is not None:
         raise Refusal(_NO_REGISTRY)
     snap = state.parse_snapshot(read.value, lay, mode="reader")
@@ -527,6 +555,8 @@ def _writer(
         return _models_set(args, lay, snap)
     if args.command == "roles":
         return _roles_setup(args, lay, snap)
+    if args.command == "cli":
+        return _cli_set(args, lay, snap)
     requested = _requested(args, snap, pending)
     if mode == "bootstrap" and _healthy(lay, snap):
         raise Refusal(
@@ -609,6 +639,48 @@ def _models_set(args: argparse.Namespace, lay: Layout, snap: Snapshot) -> int:
     return EXIT_OK
 
 
+def _cli_set(args: argparse.Namespace, lay: Layout, snap: Snapshot) -> int:
+    """Set the optional approved `openssl` in `install.toml` (spec 3.7).
+
+    Only `openssl`, an absolute path that passes the approved-CLI policy
+    (spec 3.10); every other field stays. The same value again writes
+    nothing and opens no generation. Otherwise one `write_atomic` between
+    `generation_begin` and `generation_end`, as `models set`. The config
+    digest changes with it; it is compared only within one install run
+    (`pending.toml` and that run's marks), never against a finished one.
+    """
+    if args.name != CLI_SETTABLE:
+        raise Refusal(
+            f"cli set: {args.name!r} не задаётся этой командой: "
+            f"в v1 только {CLI_SETTABLE}"
+        )
+    path = Path(args.path)
+    if not args.path or not path.is_absolute():
+        raise Refusal(f"cli set {CLI_SETTABLE}: путь {args.path!r} не абсолютный")
+    cfg = snap.install
+    if cfg is None:
+        raise Refusal(_NO_INSTALL)
+    problems = plat.approved_cli_problems({CLI_SETTABLE: path}, plat.detect_platform())
+    if problems:
+        raise Refusal("; ".join(problems))
+    _close_odd_generation(lay, snap)  # before the no-op too (PR #643)
+    if cfg.approved_cli.get(CLI_SETTABLE) == path:
+        print(f"darkfactory: {CLI_SETTABLE} уже {path}: install.toml не изменён")
+        return EXIT_OK
+    new = replace(cfg, approved_cli={**cfg.approved_cli, CLI_SETTABLE: path})
+    journal.generation_begin(lay)
+    try:
+        fsutil.write_atomic(
+            lay.etc / "install.toml", dump_install(new), install.INSTALL_MODE
+        )
+    except OSError:
+        journal.generation_end(lay)  # as `models set`: the old file is whole
+        raise
+    journal.generation_end(lay)
+    print(f"darkfactory: {CLI_SETTABLE} = {path} записан в /etc/df/install.toml")
+    return EXIT_OK
+
+
 def _params(items: list[str]) -> dict[str, str]:
     params: dict[str, str] = {}
     for item in items:
@@ -656,23 +728,12 @@ def _healthy(lay: Layout, snap: Snapshot) -> bool:
 
 
 def _close_odd_generation(lay: Layout, snap: Snapshot) -> None:
-    """M9: an odd generation without `pending.toml` (a crash between removing
-    it and `generation_end`) protects nothing — made even, with a `warn`
-    naming `current`. G3 (I9): called only after G1 passed, i.e. only in
-    the consistent state, so it never erases the evidence of an install
-    closed by hand halfway."""
-    if snap.generation % 2 == 0 or snap.pending_present:
-        return
-    journal.generation_end(lay)
-    journal.journal_event(
-        lay.journal,
-        run_id="generation",
-        step="generation",
-        event="warn",
-        detail=(
-            f"нечётное поколение {snap.generation} без pending.toml: закрыто, "
-            f"current = {snap.release_id or 'нет'}"
-        ),
+    """`journal.close_odd_generation` with the snapshot's values (M9)."""
+    journal.close_odd_generation(
+        lay,
+        generation=snap.generation,
+        pending_present=snap.pending_present,
+        current=snap.release_id,
     )
 
 
