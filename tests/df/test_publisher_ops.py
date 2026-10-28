@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -633,6 +634,19 @@ def test_self_check_perimeter_unavailable(
     assert resp.outcome == "done"
     assert resp.result["perimeter"] is None
     assert resp.result["problems"] == ["perimeter_unavailable: lost"]
+
+
+def test_self_check_perimeter_io_error(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
+    os.chmod(world.lay.perimeter_dir, 0)
+    try:
+        resp = world.run("self-check", raw_of("self-check"), capsys=capsys)[1]
+    finally:
+        os.chmod(world.lay.perimeter_dir, 0o700)
+    assert resp.outcome == "done"
+    assert resp.result["perimeter"] is None
+    assert resp.result["problems"] == ["perimeter_unavailable: io: Permission denied"]
 
 
 def test_self_check_operation_github_down(

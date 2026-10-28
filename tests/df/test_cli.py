@@ -184,6 +184,18 @@ def test_cli_perimeter_init_creates_once(
     assert not (lay.perimeter_dir / perimeter.DB_NAME).exists()
 
 
+def test_cli_perimeter_init_orphan_journal_is_for_a_human(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from df.publisher import perimeter
+
+    lay = _perimeter_layout(tmp_path, os.geteuid())
+    (lay.perimeter_dir / perimeter.JOURNAL).write_bytes(b"old pages")
+    assert _perimeter_init(lay) == 2
+    assert perimeter.INTEGRITY_TEXT in capsys.readouterr().err
+    assert not (lay.perimeter_dir / perimeter.DB_NAME).exists()
+
+
 def test_cli_perimeter_init_only_as_the_publisher(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

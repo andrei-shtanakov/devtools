@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from pathlib import Path
 
@@ -164,11 +165,11 @@ def test_client_bad_result_is_a_failed_call() -> None:
 
 
 def test_client_attempts_exhausted() -> None:
-    pub = Publisher(*(OSError("x") for _ in range(3)))
-    assert run(pub) == PerimeterState("unavailable", "attempts_exhausted")
+    pub = Publisher(OSError("x"), OSError("y"), b"")
+    assert run(pub) == PerimeterState("unavailable", "attempts_exhausted: 0 lines")
     stale = Publisher(*(answer("stale_snapshot", "snapshot_moved") for _ in range(3)))
     got = run(stale, reload=lambda: T2)
-    assert got == PerimeterState("unavailable", "attempts_exhausted")
+    assert got == PerimeterState("unavailable", "attempts_exhausted: stale_snapshot")
     assert len(set(stale.ids())) == 3
 
 
@@ -202,3 +203,30 @@ def test_sudo_call(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(plat, "run_with_input", fake(broken))
         with pytest.raises(OSError):
             perimeter_client.sudo_call(b"{}")
+
+
+def test_client_reload_failure_is_unavailable() -> None:
+    def reload() -> TrustView:
+        raise ValueError("df-trust unreadable")
+
+    pub = Publisher(answer("stale_snapshot", "snapshot_moved"))
+    got = run(pub, reload=reload)
+    assert got == PerimeterState("unavailable", "reload_failed")
+
+
+def test_client_default_call_uses_the_given_layout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from df.paths import Layout
+
+    lay = Layout(Path(os.path.realpath(tmp_path)))
+    seen: list[list[str]] = []
+
+    def run_with_input(argv: list[str], _data: bytes, **_kw: object) -> plat.RunResult:
+        seen.append(argv)
+        return plat.RunResult(0, done("clear", None, S1, 1), b"", True)
+
+    monkeypatch.setattr(plat, "run_with_input", run_with_input)
+    got = perimeter_client.status("run-1", ROOT, T1, reload=no_reload, layout=lay)
+    assert got == PerimeterState("clear", None)
+    assert seen[0][4] == str(lay.libexec / "df-publish")

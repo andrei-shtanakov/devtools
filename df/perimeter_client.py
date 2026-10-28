@@ -12,6 +12,7 @@ snapshot is `unavailable`.
 
 from __future__ import annotations
 
+import functools
 import json
 import uuid
 from collections.abc import Callable
@@ -20,7 +21,7 @@ from typing import Literal, NamedTuple
 
 from df import platform as plat
 from df.launch import SUDO
-from df.paths import default_layout
+from df.paths import Layout, default_layout
 from df.publisher import request
 from df.publisher.request import BadResponse, Response
 
@@ -59,12 +60,14 @@ class _NoAnswer(Exception):
     """The call gave no response (repeated with the same request id)."""
 
 
-def sudo_call(data: bytes) -> bytes:
+def sudo_call(data: bytes, layout: Layout | None = None) -> bytes:
     """`df-publish perimeter-status` through `sudo`; its stdout.
 
-    A response comes with any exit code (`refused` is 2); a call that did not
-    start, timed out or overflowed is `OSError`."""
-    wrapper = default_layout().libexec / "df-publish"
+    `layout` is the caller's (the entry's root, D2); `None` is the default
+    layout. A response comes with any exit code (`refused` is 2); a call that
+    did not start, timed out or overflowed is `OSError`."""
+    lay = default_layout() if layout is None else layout
+    wrapper = lay.libexec / "df-publish"
     argv = [SUDO, "-n", "-u", PUBLISHER, str(wrapper), OPERATION]
     result = plat.run_with_input(argv, data, timeout=CALL_TIMEOUT)
     if not result.launched or result.timed_out or result.stdout_truncated:
@@ -78,26 +81,36 @@ def status(
     trust: TrustView,
     *,
     reload: Callable[[], TrustView],
-    call: Callable[[bytes], bytes] = sudo_call,
+    call: Callable[[bytes], bytes] | None = None,
     attempts: int = 3,
+    layout: Layout | None = None,
 ) -> PerimeterState:
     """The perimeter state of `root_id` for the run, at most `attempts`
-    calls; exhausted is `unavailable: attempts_exhausted`."""
+    calls (`call` defaults to `sudo_call` under `layout`); exhausted is
+    `unavailable: attempts_exhausted: <the last failure>`, a failing
+    `reload` is `unavailable: reload_failed`."""
+    ask = call if call is not None else functools.partial(sudo_call, layout=layout)
     request_id = _new_id()
+    last = "no attempt"
     for _ in range(attempts):
         try:
-            resp = _ask(call, _payload(run_id, root_id, trust, request_id))
-        except _NoAnswer:
+            resp = _ask(ask, _payload(run_id, root_id, trust, request_id))
+        except _NoAnswer as exc:
+            last = str(exc)
             continue  # the same request again
         if resp.outcome == "stale_snapshot":
-            trust = reload()
+            last = "stale_snapshot"
+            try:
+                trust = reload()
+            except Exception:  # noqa: BLE001 - any failure is fail-closed
+                return PerimeterState("unavailable", "reload_failed")
             request_id = _new_id()
             continue
         try:
             return _state_of(resp, trust)
-        except _NoAnswer:
-            continue
-    return PerimeterState("unavailable", "attempts_exhausted")
+        except _NoAnswer as exc:
+            last = str(exc)
+    return PerimeterState("unavailable", f"attempts_exhausted: {last}")
 
 
 def _new_id() -> str:

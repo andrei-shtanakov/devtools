@@ -562,7 +562,8 @@ SUBPROCESS_CREATORS = {
     ),
     "darkfactory publisher perimeter-init (roles setup, as df-publisher)": (
         "protocol create_db of the role: its own files under perimeter/, "
-        "judged by roles setup's check (database and marker)"
+        "judged by roles setup's check (database, marker); root then writes "
+        "perimeter.created by write_atomic"
     ),
     "sudo df-publish perimeter-status (perimeter client)": (
         "the publisher's own protocol (its state and the perimeter database); "

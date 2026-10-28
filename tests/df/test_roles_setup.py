@@ -239,6 +239,39 @@ def test_perimeter_init_runs_create_db_as_the_publisher(setup: Setup) -> None:
         [perimeter.DB_NAME, perimeter.LOCK, perimeter.MARKER]
     )
     perimeter.open_db(setup.lay).close()
+    st = os.lstat(setup.lay.perimeter_created)
+    assert stat.S_IMODE(st.st_mode) == roles_setup.CREATED_MODE == 0o644
+    assert fsutil.owner_uid(st) == plat.ROOT_UID
+
+
+def test_perimeter_lost_as_a_whole_directory_is_lost(setup: Setup) -> None:
+    """`perimeter/` removed as a whole: `dirs` makes it again, but root's
+    `perimeter.created` makes `perimeter-init` refuse; no database."""
+    setup.run()
+    base = setup.lay.perimeter_dir
+    for name in os.listdir(base):
+        (base / name).unlink()
+    base.rmdir()
+    setup.calls.run_as.clear()
+    with pytest.raises(StepFailed, match="потеряна") as info:
+        setup.run()
+    assert info.value.step == "perimeter-init"
+    assert setup.calls.run_as == []
+    assert os.listdir(base) == []
+    with pytest.raises(perimeter.Unavailable, match="lost"):
+        perimeter.open_db(setup.lay)
+
+
+def test_perimeter_created_needs_root_var(setup: Setup) -> None:
+    setup.run()
+    setup.lay.perimeter_created.unlink()
+    os.chmod(setup.lay.var, 0o775)
+    try:
+        with pytest.raises(StepFailed, match="не каталог root"):
+            setup.run()
+    finally:
+        os.chmod(setup.lay.var, 0o755)
+    assert not setup.lay.perimeter_created.exists()
 
 
 def test_perimeter_init_never_recreates_a_lost_database(setup: Setup) -> None:

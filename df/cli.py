@@ -400,6 +400,12 @@ def _publisher(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
     return publisher_main.main([args.operation], layout=lay, snapshot=snap)
 
 
+_PERIMETER_TEXTS = {
+    "lost": perimeter.LOST_TEXT,
+    "integrity": perimeter.INTEGRITY_TEXT,
+}
+
+
 def _perimeter_init(lay: Layout) -> int:
     """`publisher perimeter-init`: the perimeter database, only as the
     `df-publisher` of `accounts.toml` (its files are born the role's)."""
@@ -409,9 +415,8 @@ def _perimeter_init(lay: Layout) -> int:
     try:
         outcome = perimeter.create_db(lay)
     except perimeter.Unavailable as exc:
-        if exc.reason == "lost":
-            raise Refusal(perimeter.LOST_TEXT) from exc
-        raise Refusal(f"publisher perimeter-init: {exc.reason}") from exc
+        text = _PERIMETER_TEXTS.get(exc.reason, f"perimeter-init: {exc.reason}")
+        raise Refusal(text) from exc
     print(f"perimeter-init: {outcome}")
     return EXIT_OK
 

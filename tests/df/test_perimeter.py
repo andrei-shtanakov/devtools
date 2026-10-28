@@ -13,13 +13,14 @@ import time
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from df.paths import Layout
 from df.publisher import perimeter, store
 from df.publisher.perimeter import Root, Snapshot, Unavailable
-from df.publisher.request import Refused, Request, Response, perimeter_result
+from df.publisher.request import Request, Response, perimeter_result
 from df.stage2_config import TrustBinding
 from tests.df.conftest import FakeLayout
 from tests.df.launch_world import put_record, record
@@ -206,7 +207,10 @@ def test_open_never_creates(lay: Layout) -> None:
     (base / perimeter.LOCK).unlink()
     assert unavailable(lay) == "lost"
     assert sorted(os.listdir(base)) == [perimeter.MARKER]
+    lay.perimeter_created.write_text("t\n")  # root's record outside perimeter/
     (base / perimeter.MARKER).unlink()
+    assert unavailable(lay) == "lost"
+    lay.perimeter_created.unlink()
     assert unavailable(lay) == "not_initialized"
     assert os.listdir(base) == []
 
@@ -230,6 +234,58 @@ def test_open_never_creates_in_a_race(
     monkeypatch.undo()
     assert reason.startswith("sqlite: ")
     assert not target.exists()
+
+
+def test_whole_directory_lost_is_lost(ready: Layout) -> None:
+    """`perimeter/` gone as a whole: root's `perimeter.created` says it was
+    created; neither open nor create makes a new database."""
+    ready.perimeter_created.write_text("t\n")
+    for name in os.listdir(ready.perimeter_dir):
+        (ready.perimeter_dir / name).unlink()
+    assert unavailable(ready) == "lost"
+    with pytest.raises(Unavailable, match="lost"):
+        perimeter.create_db(ready)
+    assert os.listdir(ready.perimeter_dir) == [perimeter.LOCK]  # the lock only
+
+
+def test_lock_missing_next_to_the_database(ready: Layout) -> None:
+    (ready.perimeter_dir / perimeter.LOCK).unlink()
+    assert unavailable(ready) == "lock_missing"
+    assert perimeter.create_db(ready) == "present"  # recreates the lock
+    assert unavailable_or_none(ready) is None
+
+
+def test_create_db_never_builds_next_to_an_orphan_journal(lay: Layout) -> None:
+    journal = lay.perimeter_dir / perimeter.JOURNAL
+    journal.write_bytes(b"pages of an old database")
+    with pytest.raises(Unavailable, match="integrity"):
+        perimeter.create_db(lay)
+    assert not db_file(lay).exists()
+    assert journal.read_bytes() == b"pages of an old database"
+
+
+def test_io_errors_are_unavailable(
+    ready: Layout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = os.lstat
+
+    def lstat(path: object, *a: object, **kw: object) -> os.stat_result:
+        if Path(str(path)) == db_file(ready):
+            raise PermissionError(13, "Permission denied")
+        return real(path, *a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "lstat", lstat)
+    assert unavailable(ready) == "io: Permission denied"
+    got = perimeter.stats(ready)
+    assert isinstance(got, Unavailable) and got.reason == "io: Permission denied"
+    monkeypatch.undo()
+
+    def statvfs(_path: object) -> os.statvfs_result:
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(os, "statvfs", statvfs)
+    got = perimeter.stats(ready)
+    assert isinstance(got, Unavailable) and got.reason == "io: Input/output error"
 
 
 def test_open_without_marker_is_not_lost(ready: Layout) -> None:
@@ -282,7 +338,7 @@ def test_pragma_not_taking_effect_is_unavailable(
 
 
 def test_old_sqlite_is_refused(ready: Layout, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(perimeter, "SQLITE_VERSION", (3, 23, 1))
+    monkeypatch.setattr(perimeter, "SQLITE_VERSION", (3, 30, 1))  # no nofollow
     assert unavailable(ready) == "sqlite_too_old"
     with pytest.raises(Unavailable, match="sqlite_too_old"):
         perimeter.create_db(ready)
@@ -360,7 +416,8 @@ def test_dropped_unique_index_is_integrity(ready: Layout) -> None:
         "UPDATE events SET epoch = 3",  # pending with an epoch
         (
             "INSERT INTO transitions (event_id, transition, at, epoch, provenance,"
-            " actor, evidence) VALUES (99, 'registered', 't', 1, 'p', 'publisher', '{}')"
+            " actor, evidence)"
+            " VALUES (99, 'registered', 't', 1, 'p', 'publisher', '{}')"
         ),
         "UPDATE meta SET value = 'maybe' WHERE key = 'admission'",
         "DELETE FROM meta WHERE key = 'schema'",
@@ -379,16 +436,29 @@ def test_invariant_violation_is_integrity(ready: Layout, sql: str) -> None:
 def test_more_than_max_events_is_unavailable(
     ready: Layout, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The event past the limit is kept (never dropped): from then on the
+    store is `unavailable: too_many_events` until a human decides."""
     monkeypatch.setattr(perimeter, "MAX_EVENTS", 2)
     for n in (1, 2):
-        record_in(ready, n)
-    with pytest.raises(Refused) as info:
-        record_in(ready, 3)
-    assert info.value.reason == "perimeter_unavailable: too_many_events"
-    assert info.value.verified_not_done  # the lookup found nothing
-    assert len(rows(ready)) == 2
-    _copy_row(ready, request_key="key-x")
+        record_in(ready, n, epochs=at(S1, 1))
+    third = record_in(ready, 3, epochs=at(S1, 1))
+    assert (third.outcome, third.result["state"]) == ("done", "registered")
+    assert len(rows(ready)) == 3
     assert unavailable(ready) == "too_many_events"
+
+
+def test_more_than_max_events_status_through_the_op(
+    world: World, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(perimeter, "MAX_EVENTS", 1)
+    perimeter.EPOCHS.at(S1, 1)  # type: ignore[attr-defined]
+    frame_record(world, capsys)
+    _, resp = frame_record(world, capsys, request_id="req-viol-0002")
+    assert (resp.outcome, resp.result["state"]) == ("done", "registered")
+    assert len(rows(world.lay)) == 2
+    perimeter.EPOCHS.at(S2, 2)  # type: ignore[attr-defined]
+    _, resp = frame_status(world, capsys, expected_snapshot_sha=S2)
+    assert resp.result == perimeter_result("unavailable", "too_many_events", None, None)
 
 
 # --- record-violation and perimeter-status ---------------------------------------
@@ -478,6 +548,40 @@ def test_violated_repository_is_the_bindings(ready: Layout) -> None:
         )
     got = rows(ready, "SELECT violated_role, violated_repository_id FROM events")
     assert got == [("approval-policy", 6)]
+
+
+class LockProbe:
+    """An epoch source that records whether the database's write lock was
+    held when the head was read (another connection cannot take it)."""
+
+    def __init__(self, lay: Layout) -> None:
+        self.lay = lay
+        self.held: list[bool] = []
+
+    def head(self, _root: Root) -> Snapshot | Unavailable:
+        conn = sqlite3.connect(db_file(self.lay), isolation_level=None, timeout=0)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("ROLLBACK")
+            self.held.append(False)
+        except sqlite3.OperationalError:
+            self.held.append(True)
+        finally:
+            conn.close()
+        return Snapshot(S1, 1)
+
+
+def test_head_is_read_with_the_write_lock_held(ready: Layout) -> None:
+    probe = LockProbe(ready)
+    with perimeter.open_db(ready) as db:
+        perimeter.record_violation(db.conn, EXEC, violation(1), "k1", probe, BINDING)
+        perimeter.perimeter_status(db.conn, status_req(S1), probe)
+    assert probe.held == [True, True]
+    record_in(ready, 2)  # pending
+    with perimeter.open_db(ready) as db:
+        perimeter.perimeter_status(db.conn, status_req(S1), probe)
+    assert probe.held == [True, True, True]
+    assert rows(ready) == [("registered", 1), ("registered", 1)]
 
 
 def test_busy_is_unavailable(ready: Layout, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -729,8 +833,11 @@ def test_restore_interrupted(ready: Layout) -> None:
 # --- volume ----------------------------------------------------------------------
 
 
-def test_ten_thousand_events_within_budget(ready: Layout) -> None:
-    record_in(ready, epochs=at(S1, 1))
+@pytest.mark.parametrize("pending", [False, True])
+def test_ten_thousand_events_within_budget(ready: Layout, pending: bool) -> None:
+    """Registered rows (a read), or pending rows all registered in the one
+    transaction of the status."""
+    record_in(ready, epochs=DOWN if pending else at(S1, 1))
     conn = raw(ready)
     cur = conn.execute("SELECT * FROM events WHERE event_id = 1")
     names = [d[0] for d in cur.description][1:]
@@ -750,8 +857,11 @@ def test_ten_thousand_events_within_budget(ready: Layout) -> None:
     start = time.monotonic()
     resp = status(ready, at(S2, 2))
     took = time.monotonic() - start
-    print(f"perimeter_status over {perimeter.MAX_EVENTS} events: {took:.3f} s")
-    assert state_of(resp) == "clear"
+    kind = "pending" if pending else "registered"
+    print(f"perimeter_status over {perimeter.MAX_EVENTS} {kind}: {took:.3f} s")
+    assert state_of(resp) == ("blocked" if pending else "clear")
+    if pending:
+        assert len(cast(list[int], resp.result["events"])) == perimeter.MAX_EVENTS
     assert took < 2.0
 
 
@@ -825,7 +935,8 @@ def test_frame_record_kept_and_replayed(
     code, first = frame_record(world, capsys)
     assert (code, first.outcome, first.result["state"]) == (0, "done", "pending")
     assert first.evidence["event_id"] == first.result["event_id"]
-    assert first.evidence["trust_root"]["unavailable"] == "epochs_unavailable"  # type: ignore[index]
+    trust = cast(dict[str, object], first.evidence["trust_root"])
+    assert trust["unavailable"] == "epochs_unavailable"
     assert len(world.files("intents")) == 1 and len(world.files("results")) == 1
     code, again = frame_record(world, capsys)
     assert (code, again.result, again.evidence["replayed"]) == (0, first.result, True)

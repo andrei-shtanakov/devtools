@@ -8,7 +8,10 @@ it: `created`, the marker of the first creation (`roles setup`'s
 every publisher process holds `flock(LOCK_SH)` on it from before
 `sqlite3.connect` until the connection is closed; creation (and restore,
 Task 11r) hold `LOCK_EX`. While `restore.intent` exists the database is not
-opened at all (`restore_incomplete`).
+opened at all (`restore_incomplete`). Outside the directory, root's
+`/var/lib/df/perimeter.created` (`0644`, written by `roles setup` after a
+successful `perimeter-init`) keeps the "created once" fact when the whole
+`perimeter/` is lost: then the answer is `lost`, never a new database.
 
 Every open checks the effective pragmas, `PRAGMA integrity_check`, the schema
 and the application invariants; any failure is `Unavailable` and the file is
@@ -21,6 +24,14 @@ epoch source answers for every known root, one transaction records a
 conservative `registered(E)` per root (source `db_restore`) and admits the
 copy; until then it is `unavailable: restore_pending`. In 2a the only epoch
 source in the code is `NO_BINDING`.
+
+The epoch of a registration is read inside the write transaction, with the
+write lock held. A remote read cannot be made atomic with the `COMMIT`: an
+epoch opened between the read and the `COMMIT` is not seen, so the event is
+registered one epoch too low.
+TODO: when a real `EpochSource` arrives, re-read the head after `COMMIT` and,
+if the epoch moved, raise the event's epoch in a second transaction
+(conservative).
 """
 
 from __future__ import annotations
@@ -53,6 +64,7 @@ if TYPE_CHECKING:
     from df.publisher.main import Context
 
 DB_NAME = "events.sqlite"
+JOURNAL = "events.sqlite-journal"
 #: Where `create_db` builds the database before renaming it into place.
 NEW_DB = "events.sqlite.new"
 MARKER = "created"
@@ -62,8 +74,9 @@ MAX_EVENTS = 10_000
 BUSY_TIMEOUT_MS = 5000
 #: Seconds the barrier is waited for before `busy`.
 BARRIER_WAIT = 5.0
-#: `synchronous = EXTRA` exists since SQLite 3.24.
-MIN_SQLITE = (3, 24, 0)
+#: `synchronous = EXTRA` needs SQLite 3.24, the `nofollow` URI parameter 3.31
+#: (below it is silently ignored): the larger of the two.
+MIN_SQLITE = (3, 31, 0)
 SQLITE_VERSION: tuple[int, int, int] = sqlite3.sqlite_version_info
 SCHEMA_VERSION = "1"
 STATES = ("pending", "registered")
@@ -73,6 +86,15 @@ LOST_TEXT = (
     "база периметра потеряна: есть отметка perimeter/created, нет "
     "perimeter/events.sqlite; заново она не создаётся — нужен человек "
     "(восстановление из копии)"
+)
+INTEGRITY_TEXT = (
+    "база периметра не прошла проверку целостности, или рядом с отсутствующей "
+    "базой остался журнал perimeter/events.sqlite-journal; нужен человек "
+    "(журнал не удалять)"
+)
+LOCK_MISSING_TEXT = (
+    "нет perimeter/db.lock рядом с базой периметра: выполните "
+    "darkfactory roles setup (perimeter-init создаст его заново)"
 )
 _POLL = 0.02
 _LOCK_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
@@ -238,10 +260,10 @@ def open_db(layout: Layout) -> Db:
     base = layout.perimeter_dir
     if _lexists(base / RESTORE_INTENT):
         raise Unavailable("restore_incomplete")  # without waiting for restore
-    fd = _open_lock(base)
+    fd = _open_lock(layout)
     try:
         _flock(fd, fcntl.LOCK_SH)
-        conn = _open_verified(base)
+        conn = _open_verified(layout)
     except BaseException:
         os.close(fd)
         raise
@@ -253,8 +275,10 @@ def create_db(layout: Layout) -> str:
 
     Under `LOCK_EX`: only when neither the database nor the marker exists is
     the database built (a temporary file, renamed into place) and then the
-    marker written; the marker without the database is `Unavailable("lost")`
-    and nothing is created; a database without the marker (a crash before
+    marker written. No database while the marker or root's
+    `perimeter.created` exists is `Unavailable("lost")`; no database next to
+    an `events.sqlite-journal` is `Unavailable("integrity")`: nothing is
+    created in either case. A database without the marker (a crash before
     the marker) is verified and marked."""
     _require_sqlite()
     base = layout.perimeter_dir
@@ -265,14 +289,16 @@ def create_db(layout: Layout) -> str:
         if _lexists(base / RESTORE_INTENT):
             raise Unavailable("restore_incomplete")
         db, marker = _lexists(base / DB_NAME), _lexists(base / MARKER)
-        if marker and not db:
+        if not db and (marker or _lexists(layout.perimeter_created)):
             raise Unavailable("lost")
         if db and marker:
             return "present"
+        if not db and _lexists(base / JOURNAL):
+            raise Unavailable("integrity")  # never build next to a foreign journal
         if not db:
             _build(base)
-        _open_verified(base).close()
-        fsutil.write_atomic(base / MARKER, _now() + "\n", 0o600)
+        _open_verified(layout).close()
+        fsutil.write_atomic(base / MARKER, now() + "\n", 0o600)
         return "created"
     finally:
         os.close(fd)
@@ -283,22 +309,35 @@ def _require_sqlite() -> None:
         raise Unavailable("sqlite_too_old")
 
 
+def _io(exc: OSError) -> Unavailable:
+    return Unavailable(f"io: {exc.strerror or exc}")
+
+
 def _lexists(path: Path) -> bool:
     return os.path.lexists(path)
 
 
-def _missing(base: Path) -> Unavailable:
-    return Unavailable("lost" if _lexists(base / MARKER) else "not_initialized")
+def _missing(layout: Layout) -> Unavailable:
+    """No database: `lost` if it was ever created (the marker in the
+    directory or root's record outside it), else `not_initialized`."""
+    created = _lexists(layout.perimeter_dir / MARKER) or _lexists(
+        layout.perimeter_created
+    )
+    return Unavailable("lost" if created else "not_initialized")
 
 
-def _open_lock(base: Path) -> int:
-    """The barrier file, opened for reading: never created here."""
+def _open_lock(layout: Layout) -> int:
+    """The barrier file, opened for reading: never created here. Missing
+    next to an existing database: `lock_missing`."""
+    base = layout.perimeter_dir
     try:
         fd = os.open(base / LOCK, _LOCK_FLAGS)
     except FileNotFoundError:
-        raise _missing(base) from None
+        if _lexists(base / DB_NAME):
+            raise Unavailable("lock_missing") from None
+        raise _missing(layout) from None
     except OSError as exc:
-        raise Unavailable(f"io: {exc.strerror or exc}") from None
+        raise _io(exc) from None
     if not stat.S_ISREG(os.fstat(fd).st_mode):
         os.close(fd)
         raise Unavailable("integrity")
@@ -340,15 +379,18 @@ def _flock(fd: int, op: int) -> None:
             time.sleep(_POLL)
 
 
-def _open_verified(base: Path) -> sqlite3.Connection:
+def _open_verified(layout: Layout) -> sqlite3.Connection:
     """Connect to the existing database (the caller holds the barrier)."""
+    base = layout.perimeter_dir
     if _lexists(base / RESTORE_INTENT):
         raise Unavailable("restore_incomplete")
     path = base / DB_NAME
     try:
         st = os.lstat(path)
     except FileNotFoundError:
-        raise _missing(base) from None
+        raise _missing(layout) from None
+    except OSError as exc:
+        raise _io(exc) from None
     if not stat.S_ISREG(st.st_mode):
         raise Unavailable("integrity")
     with _mapped():
@@ -479,7 +521,8 @@ def _unavailable_of(exc: sqlite3.Error) -> Unavailable:
     return Unavailable(f"sqlite: {name}")
 
 
-def _now() -> str:
+def now() -> str:
+    """The current UTC instant, as the store writes it."""
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
@@ -559,7 +602,7 @@ def _insert(
     violated: tuple[str, int] | None = None,
 ) -> int:
     pending = isinstance(head, Unavailable)
-    now = _now()
+    stamp = now()
     fields = {} if req is None else req.fields
     cur = conn.execute(
         "INSERT INTO events (root_host, root_repository_id, root_branch, "
@@ -576,8 +619,8 @@ def _insert(
             None if violated is None else violated[0],
             None if violated is None else violated[1],
             detected_by,
-            str(fields.get("observed_at", now)),
-            now,
+            str(fields.get("observed_at", stamp)),
+            stamp,
             "pending" if pending else "registered",
             None if isinstance(head, Unavailable) else head.last_epoch,
             json.dumps(_provenance(head), sort_keys=True),
@@ -607,18 +650,15 @@ def record_violation(
 
     The same `key` again finds its row and answers it (no new epoch);
     otherwise `pending` if the epochs are unavailable, else `registered(E)`
-    with the root's last epoch now. A full store refuses, verified: the
-    lookup in the same transaction found nothing. SQLite's failures are
-    `Unavailable`."""
+    with the root's last epoch, read with the write lock held. The event is
+    always inserted: one past `MAX_EVENTS` is kept, and from then on every
+    open is `too_many_events` (fail-closed, a human decides). SQLite's
+    failures are `Unavailable`."""
     root = root_of(req)
-    head = epochs.head(root)
     with _mapped(), _write(conn):
         row = _by_key(conn, key)
         if row is None:
-            if _count(conn) >= MAX_EVENTS:
-                raise Refused(
-                    "perimeter_unavailable: too_many_events", verified_not_done=True
-                )
+            head = epochs.head(root)
             _insert(
                 conn,
                 root,
@@ -671,17 +711,19 @@ def perimeter_status(
 ) -> Response:
     """The root's state against the current head (spec 6.1).
 
-    A head other than `expected_snapshot_sha` is `stale_snapshot` with the
-    head's SHA. Otherwise one transaction registers every `pending` event of
-    the root at the head's last epoch and computes `blocked`/`clear`."""
+    One write transaction; the head is read with its lock held. A head other
+    than `expected_snapshot_sha` is `stale_snapshot` with the head's SHA.
+    Otherwise every `pending` event of the root is registered at the head's
+    last epoch and `blocked`/`clear` computed."""
     root = root_of(req)
-    head = epochs.head(root)
-    if isinstance(head, Unavailable):
-        return status_unavailable(head.reason)
-    if head.sha != req.fields["expected_snapshot_sha"]:
-        return Response("stale_snapshot", "snapshot_moved", {"snapshot_sha": head.sha})
     try:
         with _mapped(), _write(conn):
+            head = epochs.head(root)
+            if isinstance(head, Unavailable):
+                return status_unavailable(head.reason)
+            if head.sha != req.fields["expected_snapshot_sha"]:
+                moved = {"snapshot_sha": head.sha}
+                return Response("stale_snapshot", "snapshot_moved", moved)
             _register_pending(conn, root, head)
             found = conn.execute(_BLOCKING, (*root, head.last_epoch)).fetchall()
     except Unavailable as exc:
@@ -697,7 +739,7 @@ def _register_pending(conn: sqlite3.Connection, root: Root, head: Snapshot) -> N
         f"SELECT event_id FROM events WHERE {_ROOT_WHERE} AND state = 'pending'",
         root,
     ).fetchall()
-    now = _now()
+    stamp = now()
     provenance = json.dumps({"snapshot_sha": head.sha}, sort_keys=True)
     for (event_id,) in pending:
         conn.execute(
@@ -709,7 +751,7 @@ def _register_pending(conn: sqlite3.Connection, root: Root, head: Snapshot) -> N
             "INSERT INTO transitions (event_id, transition, at, epoch, "
             "provenance, actor, evidence) VALUES (?, 'registered', ?, ?, ?, "
             "'publisher', '{}')",
-            (event_id, now, head.last_epoch, provenance),
+            (event_id, stamp, head.last_epoch, provenance),
         )
 
 
@@ -723,9 +765,11 @@ def stats(layout: Layout) -> PerimeterStats | Unavailable:
         with open_db(layout) as db, _mapped():
             events = _count(db.conn)
             size = os.lstat(base / DB_NAME).st_size
+        vfs = os.statvfs(base)
     except Unavailable as exc:
         return exc
-    vfs = os.statvfs(base)
+    except OSError as exc:
+        return _io(exc)
     return PerimeterStats(events, size, vfs.f_bavail * vfs.f_frsize)
 
 
@@ -801,7 +845,10 @@ __all__ = [
     "BUSY_TIMEOUT_MS",
     "DB_NAME",
     "EPOCHS",
+    "INTEGRITY_TEXT",
+    "JOURNAL",
     "LOCK",
+    "LOCK_MISSING_TEXT",
     "LOST_TEXT",
     "MARKER",
     "MAX_EVENTS",
