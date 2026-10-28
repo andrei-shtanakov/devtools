@@ -152,12 +152,15 @@ def main(
         )
         return _REFUSED_EXIT
     op = argv[0]
+    seen = _Seen()
     try:
-        who = _authenticate(layout, op, uid, gid, env)
+        cfg = _load_config(layout)
+        seen.api_base = cfg.api_base
+        who = _authenticate(layout, cfg, op, uid, gid, env)
     except Refused as exc:
         _journal_sender_refusal(layout, op, env, exc.reason)
-        return _answer(Response("refused", exc.reason, evidence={"operation": op}))
-    seen = _Seen()
+        evidence = {"operation": op, **_api_evidence(seen)}
+        return _answer(Response("refused", exc.reason, evidence=evidence))
     try:
         resp = _handle(layout, snapshot, who, op, stdin_fd, seen)
     except Refused as exc:
@@ -168,7 +171,7 @@ def main(
         print(f"publisher: {type(exc).__name__}: {exc}", file=sys.stderr)
         resp = Response("refused", "internal_error")
     resp = _never_refuse_with_state(layout, seen, resp)
-    resp = _decorate(resp, who, op, seen.request, snapshot)
+    resp = _decorate(resp, who, op, seen, snapshot)
     _journal(layout, who, op, seen, resp)
     return _answer(resp)
 
@@ -179,6 +182,8 @@ class _Seen:
     request: Request | None = None
     digest: str | None = None
     key: str | None = None
+    #: `publisher.toml`'s `api_base`, once the file was read.
+    api_base: str | None = None
     #: A handler proved the action was not done (or a kept result is replayed).
     verified: bool = False
 
@@ -201,16 +206,28 @@ def _journal_sender_refusal(
         print(f"publisher: journal not written: {exc}", file=sys.stderr)
 
 
+def _load_config(layout: Layout) -> PublisherConfig:
+    """`publisher.toml`: absent is `publisher_config_missing` (roles setup has
+    not run), unreadable or malformed `publisher_config_invalid`."""
+    try:
+        text = read_optional(layout.etc / "publisher.toml")
+        if text is None:
+            raise Refused("publisher_config_missing")
+        return parse_publisher(text)
+    except ConfigError as exc:
+        print(f"publisher: {exc}", file=sys.stderr)
+        raise Refused("publisher_config_invalid") from exc
+
+
 def _authenticate(
     layout: Layout,
+    cfg: PublisherConfig,
     op: str,
     uid: int | None,
     gid: int | None,
     env: Mapping[str, str] | None,
 ) -> int:
     try:
-        text = read_optional(layout.etc / "publisher.toml")
-        cfg = parse_publisher("" if text is None else text)
         account = load_accounts(layout.accounts).get(PUBLISHER_USER)
     except ConfigError as exc:
         print(f"publisher: {exc}", file=sys.stderr)
@@ -286,7 +303,7 @@ def _under_key(
     earlier = store.read_intent(res) if replayed else None
     ctx = Context(layout, snapshot, who, req, record, res, earlier, earlier is not None)
     resp = _run_handler(ctx, op, seen)
-    resp = _decorate(resp, who, op, req, snapshot)
+    resp = _decorate(resp, who, op, seen, snapshot)
     final = resp.outcome == "done" or (resp.outcome == "refused" and seen.verified)
     return _keep(res, resp) if replayed and final else resp
 
@@ -313,12 +330,17 @@ def _keep(res: store.Reservation, resp: Response) -> Response:
     return resp
 
 
+def _api_evidence(seen: _Seen) -> dict[str, object]:
+    return {} if seen.api_base is None else {"api_base": seen.api_base}
+
+
 def _decorate(
-    resp: Response, who: int, op: str, req: Request | None, snap: Snapshot
+    resp: Response, who: int, op: str, seen: _Seen, snap: Snapshot
 ) -> Response:
-    """Add the evidence every answer carries (spec 5.5); the handler's own
-    keys win."""
-    base: dict[str, object] = {"sender": who, "operation": op}
+    """Add the evidence every answer carries (spec 5.5, plan: `api_base`);
+    the handler's own keys win."""
+    req = seen.request
+    base: dict[str, object] = {"sender": who, "operation": op, **_api_evidence(seen)}
     if req is not None:
         base["request_id"] = req.request_id
         base["run_id"] = req.run_id

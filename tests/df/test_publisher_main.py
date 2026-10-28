@@ -296,6 +296,7 @@ def test_intent_then_result_then_replay(
     assert first.evidence["sender"] == EXEC
     assert first.evidence["request_id"] == RID
     assert first.evidence["operation"] == "merge"
+    assert first.evidence["api_base"] == "https://api.github.com"
     assert first.evidence["publisher_release"] == {
         "id": "rel-a",
         "digest": A.digest,
@@ -855,6 +856,31 @@ def test_not_publisher_and_broken_config_are_not_journalled(
         "not_publisher_uid",
         "publisher_config_invalid",
     ]
+
+
+def test_missing_config_has_its_own_reason(
+    world: World, no_stdin: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No `publisher.toml` (roles setup has not run) is not a broken one."""
+    (world.lay.etc / "publisher.toml").unlink()
+    env = {"SUDO_UID": str(EXEC)}
+    code = pmain.main(
+        ["merge"], layout=world.lay, snapshot=world.snap, uid=world.me, env=env
+    )
+    resp = json.loads(capsys.readouterr().out)
+    assert (code, resp["reason"]) == (2, "publisher_config_missing")
+    assert "api_base" not in resp["evidence"]
+    assert not (world.lay.publisher_dir / "journal.jsonl").exists()
+
+
+def test_sender_refusal_carries_api_base(
+    world: World, no_stdin: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env = {"SUDO_UID": "4242"}
+    pmain.main(["merge"], layout=world.lay, snapshot=world.snap, uid=world.me, env=env)
+    resp = json.loads(capsys.readouterr().out)
+    assert resp["reason"] == "sender_unknown"
+    assert resp["evidence"]["api_base"] == "https://api.github.com"
 
 
 def test_gid_must_be_the_publishers(
