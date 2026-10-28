@@ -568,6 +568,37 @@ def test_bad_segments_never_match(path: str) -> None:
     )
 
 
+def test_head_moves_during_the_listing(
+    world: World, mgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
+    reads: list[int] = []
+
+    def barrier() -> None:
+        reads.append(1)
+        if len(reads) == 1:  # between the first read and the second
+            mgh.pr_head = "b" * 40
+
+    mgh.after_pr_get = barrier
+    assert reason(run(world, capsys)) == ("refused", "pr_state")
+    assert mgh.file_gets == 1 and len(reads) == 2
+
+
+@pytest.mark.parametrize("head_repo", [8, None, "7", True])
+@pytest.mark.parametrize("ref", [CAND, FINAL])
+def test_fork_pr_is_foreign(
+    world: World,
+    mgh: MergeGitHub,
+    capsys: pytest.CaptureFixture[str],
+    ref: str,
+    head_repo: object,
+) -> None:
+    mgh.head_ref = ref
+    mgh.files = [{"filename": ENVELOPE}]
+    mgh.head_repo = head_repo
+    assert reason(run(world, capsys)) == ("refused", "head_repo_foreign")
+    assert mgh.file_gets == 0
+
+
 @pytest.mark.parametrize(
     "files",
     [
