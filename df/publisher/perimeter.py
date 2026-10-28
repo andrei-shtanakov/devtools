@@ -92,10 +92,6 @@ INTEGRITY_TEXT = (
     "базой остался журнал perimeter/events.sqlite-journal; нужен человек "
     "(журнал не удалять)"
 )
-LOCK_MISSING_TEXT = (
-    "нет perimeter/db.lock рядом с базой периметра: выполните "
-    "darkfactory roles setup (perimeter-init создаст его заново)"
-)
 _POLL = 0.02
 _LOCK_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 
@@ -848,7 +844,6 @@ __all__ = [
     "INTEGRITY_TEXT",
     "JOURNAL",
     "LOCK",
-    "LOCK_MISSING_TEXT",
     "LOST_TEXT",
     "MARKER",
     "MAX_EVENTS",

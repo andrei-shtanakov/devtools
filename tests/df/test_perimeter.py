@@ -536,9 +536,11 @@ def test_client_epoch_has_no_field() -> None:
 
 def test_repeat_after_commit_returns_the_same_event(ready: Layout) -> None:
     first = record_in(ready, epochs=at(S1, 1))
-    again = record_in(ready, epochs=at(S2, 2))  # the answer was lost; epoch moved
+    moved = at(S2, 2)
+    again = record_in(ready, epochs=moved)  # the answer was lost; epoch moved
     assert again.result == first.result
     assert rows(ready) == [("registered", 1)]
+    assert moved.calls == 0  # a replay never reads a new epoch
 
 
 def test_violated_repository_is_the_bindings(ready: Layout) -> None:
