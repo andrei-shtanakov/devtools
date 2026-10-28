@@ -537,6 +537,9 @@ SUBPROCESS_CREATORS = {
         "creates nothing: its stdout is the stream accept_copy receives"
     ),
     "sysctl (boot id)": "creates nothing: a read",
+    "openssl dgst -sign (publisher App JWT)": (
+        "creates nothing: its stdout is the signature; the key path is in argv"
+    ),
     "execve of the release's interpreter (df-launch, as the role)": (
         "replaces the process; the release's code runs as the role, whose "
         "writes are bounded by the OS, not by this module"
@@ -558,8 +561,9 @@ SUBPROCESS_CREATORS = {
 #: `test_every_process_start_is_named` until it is named there.
 PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
     ("fsutil", "_sysctl_boot_id", "subprocess.run", 1): ("sysctl (boot id)",),
-    # run_command (root) and run_as (df-build)
+    # run_command (root), run_as (df-build), run_with_input (df-publisher)
     ("platform", "_execute", "subprocess.Popen", 1): (
+        "openssl dgst -sign (publisher App JWT)",
         "uv python install (admin)",
         "uv sync / git / tar (build, as df-build)",
         "git / tar (root's checkout)",

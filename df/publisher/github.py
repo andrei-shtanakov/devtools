@@ -305,7 +305,8 @@ def call(
     api_base: str = API,
 ) -> tuple[int, object]:
     """One API call; only 2xx succeeds. 4xx is `GitHubRefused(message, status)`;
-    5xx, redirects, other statuses and any transport error are `GitHubUnavailable`. An empty answer body is `None`."""
+    5xx, redirects, other statuses and any transport error are
+    `GitHubUnavailable`. An empty answer body is `None`."""
     if not path.startswith("/"):
         raise ValueError("path must start with /")
     url = f"{api_base.rstrip('/')}{path}"

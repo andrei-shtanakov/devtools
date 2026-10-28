@@ -813,9 +813,14 @@ repository_ids, permissions}], problems}` — `SelfCheckResult.to_json()`; ре�
   permissions: Mapping[str, str] | None, transport) -> Token` — `POST
   /app/installations/{id}/access_tokens`; `Token(value, expires_at, permissions,
   repository_ids)`; ответ сверяется: при заданных `repository_ids`/`permissions`
-  вернувшиеся равны запрошенным, иначе `GitHubRefused("token_scope_mismatch")`;
-  `expires_at` разобран (RFC 3339) и лежит в `(now, now + 3600]`, иначе
-  `token_expiry_invalid`;
+  вернувшиеся равны запрошенным (права — равны запрошенным либо запрошенным плюс ровно
+  `metadata: read`, который GitHub выдаёт неявно; если `metadata` запрошен — строгое
+  равенство), иначе `GitHubRefused("token_scope_mismatch")`; `repository_ids = []` —
+  отказ до вызова; `expires_at` разобран (RFC 3339) и лежит в
+  `(now, now + 3600 + CLOCK_SLACK]`, `CLOCK_SLACK = 300` (часы хоста могут отставать от
+  GitHub), иначе `token_expiry_invalid`; все сетевые функции принимают `api_base`
+  (по умолчанию `API`, значение из `publisher.toml`); подключение `self-check` к
+  `OPERATION_TABLE` — Task 9;
 - `installations(jwt, transport) -> list[Installation]` — `GET /app/installations`:
   ответ — **массив**; все страницы по `Link: rel="next"` (`per_page=100`, предел 50);
   `installation_repos(token, transport) -> list[int]` — `GET /installation/repositories`:
