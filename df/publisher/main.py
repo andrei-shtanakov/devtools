@@ -24,7 +24,7 @@ from df import launch
 from df.config import ConfigError, load_accounts, read_optional
 from df.journal import StepFailed
 from df.paths import Layout
-from df.publisher import request, store
+from df.publisher import github, ops, request, store
 from df.publisher.request import InFlight, Refused, Request, Response
 from df.stage2_config import PublisherConfig, RunRecord, parse_publisher
 from df.state import Snapshot
@@ -54,6 +54,8 @@ class Context:
     record: RunRecord | None
     reservation: store.Reservation
     intent: Mapping[str, object] | None
+    #: `publisher.toml`'s `api_base`: every GitHub call goes there.
+    api_base: str
     intent_written: bool = False
 
     def record_intent(self, payload: Mapping[str, object]) -> None:
@@ -69,9 +71,12 @@ def _not_implemented(_ctx: Context) -> Response:
     return Response("refused", "not_implemented")
 
 
-#: Tasks 8-11 replace their own entries; tests inject handlers here.
+#: Tasks 10-11 replace their own entries; tests inject handlers here.
 OPERATION_TABLE: dict[str, Handler] = {
-    op: _not_implemented for op in request.ALL_OPERATIONS
+    **{op: _not_implemented for op in request.ALL_OPERATIONS},
+    "publish-review": ops.publish_review,
+    "read-token": ops.read_token,
+    request.SELF_CHECK: ops.self_check_op,
 }
 
 
@@ -301,7 +306,10 @@ def _under_key(
         return Response(kept.outcome, kept.reason, kept.result, evidence)
     replayed = op not in store.NOT_REPLAYED
     earlier = store.read_intent(res) if replayed else None
-    ctx = Context(layout, snapshot, who, req, record, res, earlier, earlier is not None)
+    base = seen.api_base if seen.api_base is not None else github.API
+    ctx = Context(
+        layout, snapshot, who, req, record, res, earlier, base, earlier is not None
+    )
     resp = _run_handler(ctx, op, seen)
     resp = _decorate(resp, who, op, seen, snapshot)
     final = resp.outcome == "done" or (resp.outcome == "refused" and seen.verified)

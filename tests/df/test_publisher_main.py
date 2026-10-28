@@ -277,13 +277,14 @@ def test_check_run_record_unreadable(world: World) -> None:
 def test_stubs_refuse_before_any_intent(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    for op in sorted(VALID):
+    stubs = sorted(set(VALID) - {"publish-review", "read-token", "self-check"})
+    for op in stubs:
         raw = raw_of(op, request_id=f"req-{op}-0001")
         code, resp = world.run(op, raw, capsys=capsys)
         assert (code, resp.outcome, resp.reason) == (2, "refused", "not_implemented")
     assert world.files("intents") == []
     assert world.files("results") == []
-    assert len(world.journal()) == len(VALID)
+    assert len(world.journal()) == len(stubs)
 
 
 def test_intent_then_result_then_replay(
