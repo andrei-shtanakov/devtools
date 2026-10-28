@@ -10,6 +10,7 @@ this process (as `roles setup`'s `perimeter-init` is tested).
 from __future__ import annotations
 
 import contextlib
+import errno
 import fcntl
 import io
 import os
@@ -26,7 +27,7 @@ import pytest
 from df import cli, fsutil, journal, launcher_entry, libexec, roles_setup, sudoers
 from df import platform as plat
 from df.config import Account, dump_accounts, load_accounts
-from df.journal import Stable
+from df.journal import Stable, StepFailed
 from df.paths import Layout
 from df.publisher import perimeter
 from df.publisher.perimeter import Unavailable
@@ -585,7 +586,7 @@ def test_resume_refuses_a_link_as_set_aside_dir(
     crash_at(ready, "intent", copy, set_aside=True)
     intent = perimeter._read_intent(ready.perimeter_dir)  # noqa: SLF001
     aside = ready.perimeter_dir / intent["set_aside_dir"]
-    aside.parent.mkdir(mode=0o700)
+    aside.rmdir()  # made before the intent; replaced by a link
     outside = tmp_path / "outside"
     outside.mkdir(mode=0o700)
     aside.symlink_to(outside)
@@ -880,11 +881,103 @@ def test_cli_restore_launch_failure_is_refused(
     assert admission_of(rw.lay) == "ready"
 
 
+@pytest.mark.parametrize("source", ["--from", "--empty"])
+def test_cli_restore_records_creation(rw: Restore, source: str) -> None:
+    """A restore onto a perimeter without either marker records the "created
+    once" fact (`perimeter/created` by the role, root's `perimeter.created`):
+    a later loss is `lost`, and `roles setup`'s perimeter-init refuses
+    instead of building a `ready` database."""
+    lay = rw.lay
+    marker = lay.perimeter_dir / perimeter.MARKER
+    marker.unlink()
+    db_file(lay).unlink()
+    assert not lay.perimeter_created.exists()
+    assert unavailable(lay) == "not_initialized"
+    argv = ["perimeter", "restore", "--empty"]
+    if source == "--from":
+        argv = ["perimeter", "restore", "--from", str(rw.copy_path)]
+    assert rw.w.writer(argv) == 0
+    assert marker.exists() and lay.perimeter_created.exists()
+    assert stat_mode(marker) == 0o600 and stat_mode(lay.perimeter_created) == 0o644
+    db_file(lay).unlink()
+    assert unavailable(lay) == "lost"
+    with pytest.raises(StepFailed) as info:
+        roles_setup._perimeter_ready(lay)  # noqa: SLF001
+    assert perimeter.LOST_TEXT in str(info.value)
+    with pytest.raises(Unavailable, match="lost"):
+        perimeter.create_db(lay)
+    assert not db_file(lay).exists()
+
+
+def test_cli_restore_resumed_needs_a_human(
+    rw: Restore, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An interrupted `--set-aside-old` is finished instead of this call's
+    source: exit 3 (`NeedsHuman`), the journal event not `done`."""
+    hot_journal(rw.lay)
+    earlier = rw.copy_path.read_bytes()
+    crash_at(rw.lay, "journal-moved", earlier, set_aside=True)
+    capsys.readouterr()
+    assert rw.w.writer(["perimeter", "restore", "--empty"]) == cli.EXIT_HUMAN
+    err = capsys.readouterr().err
+    assert "повторять не нужно" in err and "повторите команду со своим" in err
+    assert rw.journal_rows() == [("needs-human", "--empty: resumed")]
+    assert rows(rw.lay) == PENDING  # the earlier call's copy, not --empty
+    assert rw.lay.perimeter_created.exists()
+
+
+def test_set_aside_dir_failure_before_the_intent_changes_nothing(
+    ready: Layout, copy: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`set-aside/` is made before the intent: a transient failure there is a
+    refusal with no intent, and the old database stays available."""
+    old = rows(ready)
+
+    def full(*_a: object, **_kw: object) -> bool:
+        raise OSError(errno.ENOSPC, "no space")
+
+    monkeypatch.setattr(fsutil, "make_dir", full)
+    before = listing(ready)
+    with pytest.raises(Unavailable, match="set_aside"):
+        perimeter.restore(ready, copy, set_aside_old=True)
+    assert listing(ready) == before
+    assert not (ready.perimeter_dir / perimeter.RESTORE_INTENT).exists()
+    with perimeter.open_db(ready):
+        pass
+    assert rows(ready) == old
+    assert "повторите команду" in perimeter.restore_text("set_aside")
+
+
+def test_partial_set_aside_dirs_are_dropped_before_the_intent(
+    ready: Layout, copy: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`set-aside/` made, `set-aside/<UTC>/` fails: the refusal leaves no new
+    directory behind (its text says nothing changed)."""
+    real = fsutil.make_dir
+    calls: list[object] = []
+
+    def second_fails(*a: object, **kw: object) -> bool:
+        calls.append(a)
+        if len(calls) == 2:
+            raise OSError(errno.ENOSPC, "no space")
+        return real(*a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(fsutil, "make_dir", second_fails)
+    before = listing(ready)
+    with pytest.raises(Unavailable, match="set_aside"):
+        perimeter.restore(ready, copy, set_aside_old=True)
+    assert len(calls) == 2
+    assert listing(ready) == before
+    assert not (ready.perimeter_dir / perimeter.SET_ASIDE).exists()
+
+
 def test_lost_text_names_the_command() -> None:
     assert "sudo darkfactory perimeter restore --from <копия>" in perimeter.LOST_TEXT
     assert "--set-aside-old" in perimeter.RESTORE_TEXTS["journal"]
     assert f"{perimeter.RESTORE_WAIT:g} с" in perimeter.RESTORE_TEXTS["busy"]
 
 
-def test_resumed_text_names_either_source() -> None:
-    assert "копия или --empty" in cli._RESTORE_DONE["resumed"]  # noqa: SLF001
+def test_resumed_text_does_not_demand_a_repeat() -> None:
+    """The finished copy may be the very one asked for: no blind repeat."""
+    text = cli._RESTORE_DONE["resumed"]  # noqa: SLF001
+    assert "не применялся" in text and "повторять не нужно" in text

@@ -385,6 +385,11 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
         "sync_file, rename, sync_dir(perimeter); a leftover temp is swept by "
         "the next create_db; the files SQLite itself makes are not seen"
     ),
+    ("publisher.perimeter", "_drop_empty", "os.rmdir", 1): (
+        "restore refused before restore.intent: rmdir of only the set-aside "
+        "directories this call made, under db.lock LOCK_EX; rmdir removes an "
+        "empty directory only, so an earlier pair is never touched"
+    ),
     ("publisher.perimeter", "_move", "os.rename", 1): (
         "protocol restore (Task 11r, under db.lock LOCK_EX): the stage (born "
         "0600 by create_file, synced) onto events.sqlite after the hot journal "
