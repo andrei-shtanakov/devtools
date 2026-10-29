@@ -616,19 +616,19 @@ SUBPROCESS_CREATORS = {
         "launch exec of the role: check_report only opens and stats (fds, "
         "the foreign paths), creates nothing; root keeps stdout"
     ),
-    "sudo -u df-exec test -r (doctor roles.isolation, root)": (
+    "sudo -u df-exec test -r / -x (doctor roles.isolation, root)": (
         "creates nothing: access(2) of one path as the role; root keeps the "
         "exit code and the stderr tail"
     ),
     "sudo -u <role> sudo df-publish perimeter-status (doctor, root)": (
         "the publisher's own protocol through the role's own sudo rule; the "
-        "probe run is unknown, so it refuses before the idempotency store; "
-        "root keeps only stdout"
+        "probe run is unknown, so it refuses before the idempotency store "
+        "and writes only its journal line; root keeps only stdout"
     ),
     "sudo -u df-review sudo df-publish merge (doctor publisher.foreign)": (
         "expected to be refused by sudo before df-publish runs (no rule); if "
-        "sudo let it through, df-publish refuses the empty request; root "
-        "keeps the exit code and stdout length"
+        "sudo let it through, df-publish refuses the empty request and "
+        "writes its journal line; root keeps the exit code and stdout length"
     ),
     "darkfactory publisher perimeter-restore (restore, as df-publisher)": (
         "protocol restore of the role (Task 11r): its own files under "
@@ -660,7 +660,7 @@ PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
         "sudo df-publish self-check (setup-agent app-key, doctor; root)",
         "sudo df-launch df-exec check-github (setup-agent machine-token, doctor)",
         "sudo df-launch <role> check (doctor roles.isolation, root)",
-        "sudo -u df-exec test -r (doctor roles.isolation, root)",
+        "sudo -u df-exec test -r / -x (doctor roles.isolation, root)",
         "sudo -u <role> sudo df-publish perimeter-status (doctor, root)",
         "sudo -u df-review sudo df-publish merge (doctor publisher.foreign)",
     ),

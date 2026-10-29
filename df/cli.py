@@ -7,8 +7,8 @@ the layout of its own root (`layout=`, D2), bootstrap may omit it (then
 the snapshot the entry read under the lock it holds; bootstrap takes the
 lock, settles and reads the snapshot itself. Subcommands: `init` and
 `install` (Task 9); `models list|set` (Task 10); `doctor --probe-models`
-(Task 11); `doctor [--product P] [--json]` (Tasks 12, 13, `df.doctor`); `cli
-set openssl PATH`
+(Task 11); `doctor [--product P] [--json]` (Tasks 12, 13, `df.doctor`);
+`cli set openssl PATH`
 (stage 2a, Task 4a); `perimeter restore --from PATH | --empty
 [--set-aside-old]` (stage 2a, Task 11r); `setup-agent app-key --app-id N
 --file PATH | machine-token --file PATH` (stage 2a, Task 12).

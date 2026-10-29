@@ -216,7 +216,7 @@ def doctor_main(
     it (R13-5).
     """
     if isinstance(read, Transitional):
-        return _transitional(read.generation, as_json)
+        return _transitional(read.generation, as_json, product)
     snap = state.parse_snapshot(read.value, layout, mode="reader")
     checks = level1_checks(snap, layout, euid=euid)
     notes = warnings(snap, layout, euid=euid)
@@ -232,13 +232,18 @@ def doctor_main(
     return EXIT_REACHED if reached else EXIT_NOT_REACHED
 
 
-def _transitional(generation: int, as_json: bool) -> int:
+def _transitional(generation: int, as_json: bool, product: int | None) -> int:
+    """The transitional state; with `product`, level 2 is not reached too."""
     if as_json:
-        data = {"level1": "not reached", "state": "transitional"}
+        data: dict[str, object] = {"level1": "not reached", "state": "transitional"}
+        if product is not None:
+            data |= {"product": product, "level2": "not reached"}
         print(json.dumps({**data, "generation": generation}, ensure_ascii=False))
     else:
         text = transitional_text(generation)
         print(f"{_NOT_REACHED} — install.transitional: {text}")
+        if product is not None:
+            print(f"{_NOT_REACHED2} — уровень 1 не достигнут")
     return EXIT_NOT_REACHED
 
 
@@ -652,6 +657,8 @@ PROBE_RUN_ID = "doctor-probe"
 #: Seconds root waits for a role's `check`, `test -r` or a nested call.
 ROLE_TIMEOUT = 60.0
 TEST = "/bin/test"
+#: `test` flags the operator's `gh` directory must fail for `df-exec`.
+GH_PROBES = ("-r", "-x")
 MODEL_ROLES = ("df-exec", "df-review")
 #: `events` from which the perimeter line warns (spec 6.1, r4 N5).
 PERIMETER_WARN = 9_000
@@ -663,6 +670,7 @@ NO_MODEL_ACCESS = "доступ к моделям не подтверждён"
 TRUST_STAGE3 = "источники доверия: не проверено (этап 3)"
 _APP_RIGHTS = ("contents", "pull_requests")
 _WRITE_LEVELS = frozenset({"write", "admin"})
+_PERIMETER_PROBLEM = "perimeter_"
 _RANK = {BROKEN: 3, UNAVAILABLE: 2, NOT_CHECKED: 1}
 _HTTP = re.compile(r": HTTP (\d{3})$")
 _MIB = 1024 * 1024
@@ -766,6 +774,10 @@ def _operator(ctx: _Level2) -> str:
     """R13-2: the operator is `SUDO_USER`, as `roles setup` takes it."""
     if not ctx.operator:
         raise _Outcome(UNAVAILABLE, NO_OPERATOR)
+    try:
+        sudoers.render(ctx.layout, ctx.operator)
+    except ValueError as exc:
+        raise _Outcome(UNAVAILABLE, f"оператор недопустим: {exc}") from exc
     return ctx.operator
 
 
@@ -799,8 +811,8 @@ def _isolation(ctx: _Level2) -> str:
 
 def _denied_paths(layout: Layout, role: str) -> tuple[Path, ...]:
     """What `role` must be refused (`EACCES`) in its own report (R13-1):
-    `secrets/` and the other model role's home (`df-review`'s holds the
-    machine user's token under `df-exec`'s home)."""
+    `secrets/` and the other model role's home (`df-review`'s list holds
+    `df-exec`'s home, where the machine user's token lives)."""
     other = "df-review" if role == "df-exec" else "df-exec"
     return (layout.secrets_dir, layout.role_home(other))
 
@@ -856,7 +868,7 @@ def _report(
     except ValueError:
         report = None
     if not isinstance(report, dict):
-        return (BROKEN, f"{what}: ответ не объект JSON")
+        return (BROKEN, f"{what}: ответ не объект JSON; {_tail(result)}")
     return report
 
 
@@ -867,9 +879,9 @@ def _tail(result: plat.RunResult) -> str:
 
 
 def _gh_denied(ctx: _Level2) -> list[_Part]:
-    """R13-1: `df-exec` cannot read `~<operator>/.config/gh` (kernel access
-    as the role: `test -r` exit 1 with nothing on stderr -- sudo's own
-    refusal is also exit 1, but it speaks)."""
+    """R13-1: `df-exec` can neither read nor search `~<operator>/.config/gh`
+    (kernel access as the role, `test -r` and `test -x`: a `0711` directory
+    still lets a file inside be opened by name)."""
     if not ctx.operator:
         return [(UNAVAILABLE, f"df-exec: ~/.config/gh: {NO_OPERATOR}")]
     try:
@@ -878,31 +890,48 @@ def _gh_denied(ctx: _Level2) -> list[_Part]:
         return [(BROKEN, f"нет учётной записи оператора {ctx.operator!r}")]
     if not os.path.lexists(path):
         return [(OK, f"нет {path}")]
-    result = role_reads("df-exec", path)
+    return [p for flag in GH_PROBES for p in _gh_probe(path, flag)]
+
+
+def _gh_probe(path: Path, flag: str) -> list[_Part]:
+    """One `test <flag>` as `df-exec`: denied is exit 1 with nothing on
+    stderr -- sudo's own refusal is also exit 1, but it speaks."""
+    result = role_access("df-exec", flag, path)
     if not result.launched or result.timed_out:
-        return [(UNAVAILABLE, f"df-exec: test -r {path}: не выполнен")]
+        return [(UNAVAILABLE, f"df-exec: test {flag} {path}: не выполнен")]
     if result.returncode == 1 and not result.stderr.strip():
         return []
     if result.returncode == 0:
-        return [(BROKEN, f"df-exec читает {path}")]
-    return [(UNAVAILABLE, f"df-exec: test -r {path}: {_tail(result)}")]
+        return [(BROKEN, f"df-exec: test {flag} {path} проходит")]
+    return [(UNAVAILABLE, f"df-exec: test {flag} {path}: {_tail(result)}")]
 
 
 def _publisher_key(ctx: _Level2) -> list[_Part]:
-    """`df-publisher` answers `self-check` and found the key of P's App: no
-    `app_key_unusable: <app_id>` (the key file is the publisher's to read)."""
+    """`df-publisher` answers `self-check` and signed with the key of P's App
+    (the key file is the publisher's to read): positive evidence only -- an
+    installation of that App, or a problem of it past the signing."""
     try:
         answer = _self_check(ctx)
-    except _Outcome as exc:
-        return [(exc.status, f"df-publisher: {exc.reason}")]
-    try:
         product = _registered(ctx)
     except _Outcome as exc:
         return [(exc.status, f"df-publisher: ключ App: {exc.reason}")]
-    if f"app_key_unusable: {product.app_id}" in answer.problems:
-        key = ctx.layout.app_key(product.app_id)
-        return [(BROKEN, f"df-publisher: ключ App {product.app_id} не годен: {key}")]
+    app = product.app_id
+    if f"app_key_unusable: {app}" in answer.problems:
+        key = ctx.layout.app_key(app)
+        return [(BROKEN, f"df-publisher: ключ App {app} не годен: {key}")]
+    installs = _installation_apps(ctx)
+    signed = any(installs.get(i.id) == app for i in answer.installations) or any(
+        setup_agent.problem_app(p, installs) == app for p in answer.problems
+    )
+    if not signed:
+        return [(NOT_CHECKED, f"df-publisher: self-check не проверял App {app}")]
     return []
+
+
+def _installation_apps(ctx: _Level2) -> dict[int, int | None]:
+    """Installation id -> its App by `products.toml` (`_lookup` read it)."""
+    products = ctx.products if isinstance(ctx.products, dict) else {}
+    return setup_agent.installation_apps(products.values())
 
 
 # --- 5-6: the publisher answers its senders and refuses a foreign one ---
@@ -971,6 +1000,9 @@ def _product_check(ctx: _Level2) -> str:
 
 
 def _lookup(ctx: _Level2) -> stage2_config.Product:
+    # TODO: (stage 3, R13-9) `products.toml` is read live, outside the
+    # snapshot; once `setup-repo` writes it, withhold a verdict during a live
+    # write (`_writing`), as `etc.schemas` does for `publisher.toml`.
     if ctx.products is None:
         try:
             ctx.products = stage2_config.load_products(ctx.layout.etc / "products.toml")
@@ -986,17 +1018,26 @@ def _lookup(ctx: _Level2) -> stage2_config.Product:
 
 
 def _registered(ctx: _Level2) -> stage2_config.Product:
-    """R13-4: the checks that need P are «не проверено» without it."""
+    """R13-4: the checks that need P are «не проверено» without it; an
+    unreadable `products.toml` says so (unavailable), never «не
+    зарегистрирован»."""
     try:
         return _lookup(ctx)
     except _Outcome as exc:
-        raise _Outcome(NOT_CHECKED, UNREGISTERED) from exc
+        if exc.reason.startswith(UNREGISTERED):
+            raise _Outcome(NOT_CHECKED, UNREGISTERED) from exc
+        status = UNAVAILABLE if exc.status == UNAVAILABLE else NOT_CHECKED
+        raise _Outcome(status, f"product.registered: {exc.reason}") from exc
 
 
 def _machine_user(ctx: _Level2) -> str:
     """`check-github` as `df-exec`: the login is P's `machine_user`, and its
     rights on P are those of P's profile."""
     product = _registered(ctx)
+    # TODO: (stage 3, R13-9) `check-github` reports every product and any
+    # refused GET aborts the whole report, so another product's repository
+    # (404/403, network) fails P too; needs `check-github --product P` or
+    # per-row errors in `launch_release.check_github`.
     result = setup_agent.exec_check_github(ctx.layout)
     if result.launched and not result.timed_out and result.returncode not in (0, 1):
         raise _github_refusal(result)
@@ -1021,13 +1062,14 @@ def _machine_user(ctx: _Level2) -> str:
 
 
 def _github_refusal(result: plat.RunResult) -> _Outcome:
-    """`check-github` refused (exit 2): 401 is a revoked token; the network
-    or a 5xx is unavailable data; anything else is broken."""
+    """`check-github` refused (exit 2): 401 is a revoked token; the network,
+    429 or a 5xx is unavailable data; anything else is broken."""
     tail = _tail(result)
     code = _HTTP.search(tail)
     if code is not None and code[1] == "401":
         return _Outcome(BROKEN, f"токен отозван: {tail}")
-    if UNAVAILABLE in tail or (code is not None and code[1].startswith("5")):
+    transient = code is not None and (code[1] == "429" or code[1].startswith("5"))
+    if UNAVAILABLE in tail or transient:
         return _Outcome(UNAVAILABLE, f"GitHub: {tail}")
     return _Outcome(BROKEN, f"check-github: {tail}")
 
@@ -1045,11 +1087,13 @@ def _right_problems(profile: str, permissions: object) -> list[str]:
 
 
 def _app(ctx: _Level2) -> str:
-    """`self-check`: no problems; P's installation is there with P and the
-    write rights of `_APP_RIGHTS`. Trust sources are stage 3's."""
+    """`self-check`: no problem of P's App (R13-8); P's installation is there
+    with P and the write rights of `_APP_RIGHTS`. Trust sources are stage
+    3's; other Apps' problems are a note."""
     product = _registered(ctx)
     answer = _self_check(ctx)
-    problems = [f"self-check: {p}" for p in answer.problems]
+    mine, others = _app_problems(ctx, answer.problems, product.app_id)
+    problems = [f"self-check: {p}" for p in mine]
     found = [i for i in answer.installations if i.id == product.installation_id]
     if not found:
         problems.append(
@@ -1068,7 +1112,25 @@ def _app(ctx: _Level2) -> str:
         ]
     if problems:
         raise _broken(problems)
-    return TRUST_STAGE3
+    note = f"; другие App: {_summary(others)}" if others else ""
+    return TRUST_STAGE3 + note
+
+
+def _app_problems(
+    ctx: _Level2, problems: Sequence[str], app_id: int
+) -> tuple[list[str], list[str]]:
+    """R13-8, by Task 12's attribution (`problem_app`): `(P's, other Apps')`.
+    A problem of no attributable App counts as P's; `perimeter_*` belong to
+    the perimeter line only."""
+    installs = _installation_apps(ctx)
+    mine: list[str] = []
+    others: list[str] = []
+    for problem in problems:
+        if problem.startswith(_PERIMETER_PROBLEM):
+            continue
+        owner = setup_agent.problem_app(problem, installs)
+        (mine if owner in (app_id, None, -1) else others).append(problem)
+    return mine, others
 
 
 def _models_access(ctx: _Level2) -> str:
@@ -1162,7 +1224,7 @@ def _perimeter(ctx: _Level2) -> str:
         raise _Outcome(UNAVAILABLE, exc.reason) from exc
     if stats is None:
         why = next(
-            (p for p in _self_check(ctx).problems if p.startswith("perimeter_")),
+            (p for p in _self_check(ctx).problems if p.startswith(_PERIMETER_PROBLEM)),
             "в ответе self-check нет perimeter",
         )
         raise _Outcome(UNAVAILABLE, why)
@@ -1196,10 +1258,10 @@ def role_check(layout: Layout, role: str) -> plat.RunResult:
     return plat.run_command(argv, timeout=ROLE_TIMEOUT)
 
 
-def role_reads(role: str, path: Path) -> plat.RunResult:
-    """`test -r <path>` as `role` from root: the kernel's answer for the
+def role_access(role: str, flag: str, path: Path) -> plat.RunResult:
+    """`test <flag> <path>` as `role` from root: the kernel's answer for the
     role's uid and groups. The tests' seam."""
-    argv = [SUDO, "-n", "-u", role, TEST, "-r", str(path)]
+    argv = [SUDO, "-n", "-u", role, TEST, flag, str(path)]
     return plat.run_command(argv, timeout=ROLE_TIMEOUT)
 
 

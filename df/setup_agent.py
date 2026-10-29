@@ -453,8 +453,8 @@ def check_app_key(layout: Layout, app_id: int) -> Check:
     if not isinstance(problems, list):
         return Check((), warnings, "self-check: в ответе нет problems")
     texts = [str(p) for p in problems]
-    installs = _installation_apps(products.values())
-    app = [p for p in texts if _problem_app(p, installs) in (app_id, None)]
+    installs = installation_apps(products.values())
+    app = [p for p in texts if problem_app(p, installs) in (app_id, None)]
     other = tuple(f"self-check: {p}" for p in texts if p not in app)
     if app:
         return Check((), warnings + other, "self-check: " + "; ".join(app))
@@ -462,7 +462,7 @@ def check_app_key(layout: Layout, app_id: int) -> Check:
     return Check((f"self-check издателя: {line}",), warnings + other)
 
 
-def _installation_apps(products: Iterable[Product]) -> dict[int, int | None]:
+def installation_apps(products: Iterable[Product]) -> dict[int, int | None]:
     """Installation id -> its App; an id two Apps claim maps to `None`
     (ambiguous: judged as this App's, conservative)."""
     apps: dict[int, int | None] = {}
@@ -472,7 +472,7 @@ def _installation_apps(products: Iterable[Product]) -> dict[int, int | None]:
     return apps
 
 
-def _problem_app(problem: str, installs: Mapping[int, int | None]) -> int | None:
+def problem_app(problem: str, installs: Mapping[int, int | None]) -> int | None:
     """The App a problem of `APP_PROBLEMS` concerns: `app_key_unusable: <id>`
     and `app_unreadable: <id>: ...` name it; `app_installation_*: <id>`
     names an installation, mapped through `products.toml`. `None`: not
