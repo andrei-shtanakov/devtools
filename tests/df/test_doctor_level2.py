@@ -540,7 +540,7 @@ CF_ENV = ["HOME", "LANG", "PATH", "TZ", "__CF_USER_TEXT_ENCODING"]
 def test_runtime_env_on_macos_only(
     monkeypatch: pytest.MonkeyPatch, platform: str, ok: bool
 ) -> None:
-    """F3 (R14-11): `__CF_USER_TEXT_ENCODING`, which the macOS runtime sets
+    """F3 (plan Task 14a): `__CF_USER_TEXT_ENCODING`, which the macOS runtime sets
     in the release process itself, is accepted on macOS only; any other
     extra name still breaks isolation there."""
     monkeypatch.setattr(plat, "detect_platform", lambda: platform)

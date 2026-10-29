@@ -111,7 +111,7 @@ def test_launch_release_refuses_bad_arguments(w: World, argv: list[str]) -> None
 
 
 def test_inherited_fds_seen_before_any_import(tmp_path: Path) -> None:
-    """F3 (R14-11): a descriptor the caller left open is reported; the
+    """F3 (plan Task 14a): a descriptor the caller left open is reported; the
     measurement is taken in a fresh interpreter at the module's first
     statements."""
     fd = os.open(tmp_path, os.O_RDONLY)
@@ -534,7 +534,7 @@ def test_check_github_http_exception_is_exit_2(
 def test_stale_pins_one_prefix_roles_joined(
     w: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """F1 (R14-9): «доступ к моделям не подтверждён: <роль>: <причина>»,
+    """F1 (plan Task 14a): «доступ к моделям не подтверждён: <роль>: <причина>»,
     the prefix once and every stale role after it, in `ROLES` order; the
     same words as doctor's `models.access`."""
     put_record(w.fake, record("run-1", REL))
