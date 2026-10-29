@@ -198,6 +198,24 @@ def no_rule(rw: RolesWorld, role: str, words: list[str]) -> bool:
 
     control = listed(["perimeter-status"])
     verdict = listed(words)
+    publish = rw.wrapper("df-publish")
+    variants = {
+        "U-u-before-l": [SUDO, "-n", "-U", role, "-u", PUBLISHER, "-l", publish]
+        + ["perimeter-status"],
+        "no-u": [SUDO, "-n", "-l", "-U", role, publish, "perimeter-status"],
+        "ll": [SUDO, "-n", "-ll", "-U", role],
+    }
+    for name, argv in variants.items():
+        result = plat.run_command(argv, env=BASE_ENV)
+        seen[f"diag {name}"] = [
+            result.returncode,
+            result.stdout.decode("utf-8", "replace"),
+            result.stderr.decode("utf-8", "replace"),
+        ]
+    own = as_user(
+        role, [SUDO, "-n", "-l", "-u", PUBLISHER, publish, "perimeter-status"]
+    )
+    seen["diag as-role"] = [own.returncode, own.stdout.decode(), own.stderr.decode()]
     evidence(f"no-rule-{role}-{'-'.join(words)}.json", seen)
     if control != 0:
         infra(f"sudo -l -U {role} perimeter-status: код {control}, ждали 0: {seen}")
