@@ -809,16 +809,18 @@ def small_fs(rw: RolesWorld, mountpoint: Path, uid: int, gid: int) -> Iterator[N
 
 
 def fill(directory: Path) -> int:
-    """Write a filler file under `directory` until `ENOSPC`; its size."""
+    """Write a filler file under `directory` until not one more byte fits
+    (`ENOSPC` at every chunk size down to 1); its size."""
     fd = os.open(directory / "df-acc-filler", os.O_WRONLY | os.O_CREAT, 0o600)
-    total = 0
-    chunk = b"\0" * 65536
+    total, size = 0, 1 << 16
     try:
-        while True:
-            total += os.write(fd, chunk)
-    except OSError as exc:
-        if exc.errno != errno.ENOSPC:
-            raise
+        while size:
+            try:
+                total += os.write(fd, b"\0" * size)
+            except OSError as exc:
+                if exc.errno != errno.ENOSPC:
+                    raise
+                size //= 2
     finally:
         os.close(fd)
     return total

@@ -354,20 +354,22 @@ jobs:
           sudo -n apt-get update -qq
           sudo -n apt-get install -y -qq --no-install-recommends auditd
       # The stage-2a world is the production layout `/` (R14-8): the same
-      # host adaptation as stage1's live install (owner decision 26.10).
-      - name: configure /opt as a supported host (owner 26.10)
+      # host adaptation as stage1's live install (owner decision 26.10), and
+      # for `/home` too, where the roles' homes are (the image's `/home`
+      # carries an ACL, which df refuses by spec 3.10: CI run 40852118817).
+      - name: configure /opt and /home as a supported host (owner 26.10)
         if: ${{ env.DF_STAGE2A_SCOPE == 'full' }}
         run: |
           mkdir -p "$RUNNER_TEMP/df-stage2a"
           record="$RUNNER_TEMP/df-stage2a/opt-host.txt"
           facts() {
-            ls -ld /opt
-            if [ "$RUNNER_OS" = Linux ]; then getfacl -p /opt; else ls -led /opt; fi
+            ls -ld /opt /home
+            if [ "$RUNNER_OS" = Linux ]; then getfacl -p /opt /home; else ls -led /opt; fi
           }
           { echo "before:"; facts; } > "$record" 2>&1
           if [ "$RUNNER_OS" = Linux ]; then
-            sudo -n chmod go-w /opt
-            sudo -n setfacl -b /opt
+            sudo -n chmod go-w /opt /home
+            sudo -n setfacl -b /opt /home
           fi
           { echo "after:"; facts; } >> "$record" 2>&1
           cat "$record"
