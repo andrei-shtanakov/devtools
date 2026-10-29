@@ -21,10 +21,10 @@ byte for byte from the artifacts.
 
 | case | command, as the role | class (`classify_sudo`) |
 |---|---|---|
-| `df-review-merge` | `sudo -n -u df-publisher …/df-publish merge` as `df-review` | `password` |
-| `df-exec-publish-review` | `… df-publish publish-review` as `df-exec` | `password` |
-| `df-exec-extra-argument` | `… df-publish perimeter-status extra` as `df-exec` | `password` |
-| `df-exec-self-check` | `… df-publish self-check` as `df-exec` | `password` |
+| `df-review-merge` | `sudo -n -u df-publisher …/df-publish merge` as `df-review` | `password-required` |
+| `df-exec-publish-review` | `… df-publish publish-review` as `df-exec` | `password-required` |
+| `df-exec-extra-argument` | `… df-publish perimeter-status extra` as `df-exec` | `password-required` |
+| `df-exec-self-check` | `… df-publish self-check` as `df-exec` | `password-required` |
 | `df-exec-sudo-E` | `sudo -E -n -u df-publisher … perimeter-status` as `df-exec` | `preserve-env` |
 | `df-exec-preserve-env` | `sudo --preserve-env -n -u df-publisher …` as `df-exec` | `preserve-env` |
 
@@ -32,7 +32,11 @@ What the capture settled (finding F2 of the Task 14 report): on both
 platforms sudo answers a command the role has no rule for with «a password
 is required» (exit 1) — it asks for authentication before it judges the
 command, and `-n` turns that into the refusal — never «is not allowed to
-execute». The brief counts that class as a wrong setup, not as a denial.
+execute». Ruling R14-10: that class counts as the refusal «sudo: нет правила
+(запрос пароля под -n)» only with exit 1, empty stdout, no new line in the
+publisher's journal and root's `sudo -n -l -U <role> -u df-publisher <the
+same command>` exiting 1; otherwise it is a wrong setup
+(`sudo_refused` of `tests/df/test_acceptance_root_roles.py`).
 
 Synthesized, not captured (no real case exists to capture): the
 `not-allowed` texts of `test_classify_sudo` in `tests/df/test_roles_world.py`.

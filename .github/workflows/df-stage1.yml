@@ -38,7 +38,7 @@ env:
   # with an empty DF_STAGE2A_K can be green (its own scope guard).
   DF_STAGE2A_SCOPE: full
   # Optional `-k` expression narrowing the stage-2a root run; empty = all.
-  DF_STAGE2A_K: "launch_release_sees_clean_start"
+  DF_STAGE2A_K: ""
   # R78: a skip for a missing or unpinned uv fails the run.
   DF_REQUIRE_PINNED_UV: "1"
 

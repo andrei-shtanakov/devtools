@@ -124,23 +124,73 @@ def keep_publisher_journal(rw: RolesWorld) -> None:
 # ---------- shared checks ----------
 
 
+#: R14-10: the mechanism of «a password is required» that counts as a
+#: refusal (every condition of `sudo_refused` holds).
+NO_RULE = "sudo: нет правила (запрос пароля под -n)"
+
+
 def sudo_refused(
-    rw: RolesWorld, case: str, done: subprocess.CompletedProcess[bytes], want: SudoDiag
-) -> None:
-    """The refusal of `done` is sudo's own, of mechanism `want` (R14-2): the
-    capture goes to `sudo-diag/<os>/<case>.txt` (and `.rc`)."""
+    rw: RolesWorld,
+    case: str,
+    role: str,
+    op: str,
+    data: bytes,
+    want: SudoDiag,
+    *,
+    flags: tuple[str, ...] = (),
+    extra: tuple[str, ...] = (),
+) -> str:
+    """`role` runs `sudo [flags] -n -u df-publisher df-publish <op> [extra]`
+    and sudo itself refuses it, by mechanism `want`; the publisher never
+    runs (its journal has no new line). The capture goes to
+    `sudo-diag/<os>/<case>.{txt,rc}` (R14-2). For `not-allowed`, R14-10:
+    «a password is required» (`password-required`) counts as the refusal
+    `NO_RULE` only with exit 1, empty stdout and root's `sudo -n -l -U
+    <role> -u df-publisher <the same command>` exiting 1 (sudo's own policy:
+    no rule), its control (the role's permitted `perimeter-status`) exiting
+    0; any other «password required» is a wrong setup. The mechanism found
+    is returned and kept in `sudo-diag/<os>/<case>.mechanism`."""
+    before = len(rw.journal_lines())
+    done = rw.publish(role, op, data, flags=flags, extra=extra)
     text = done.stderr.decode("utf-8", "replace")
-    form = fixture_form(text, rw.layout.root, host_names())
     out = stage1_out()
+    form = fixture_form(text, rw.layout.root, host_names())
     write_evidence(out, f"sudo-diag/{OS_DIR}/{case}.txt", form)
     write_evidence(out, f"sudo-diag/{OS_DIR}/{case}.rc", f"{done.returncode}\n")
     kind = classify_sudo(done.returncode, text)
     if kind is None:
         infra(f"нераспознанная диагностика sudo ({case}): {shown(done)}")
-    if kind == "password":
-        pytest.fail(f"неверная настройка: sudo требует пароль ({case}): {shown(done)}")
-    assert kind == want, shown(done)
     assert done.stdout == b"", shown(done)
+    assert len(rw.journal_lines()) == before, "издатель запускался"
+    mechanism = str(kind)
+    if kind == "password-required":
+        if want != "not-allowed" or not no_rule(rw, role, [op, *extra]):
+            pytest.fail(
+                f"неверная настройка: sudo требует пароль ({case}): {shown(done)}"
+            )
+        mechanism = NO_RULE
+    else:
+        assert kind == want, shown(done)
+    write_evidence(out, f"sudo-diag/{OS_DIR}/{case}.mechanism", mechanism + "\n")
+    return mechanism
+
+
+def no_rule(rw: RolesWorld, role: str, words: list[str]) -> bool:
+    """Root's `sudo -n -l -U <role> -u df-publisher df-publish <words>` says
+    the command is not allowed (exit 1), while the same listing of the
+    role's permitted `perimeter-status` says it is (exit 0)."""
+
+    def listed(args: list[str]) -> int:
+        argv = [SUDO, "-n", "-l", "-U", role, "-u", PUBLISHER]
+        result = plat.run_command([*argv, rw.wrapper("df-publish"), *args])
+        if not result.launched:
+            infra(f"sudo -l -U {role}: не запустился")
+        return result.returncode
+
+    control = listed(["perimeter-status"])
+    if control != 0:
+        infra(f"sudo -l -U {role} perimeter-status: код {control}, ждали 0")
+    return listed(words) == 1
 
 
 def answered(done: subprocess.CompletedProcess[bytes], sender: int) -> Response:
@@ -287,10 +337,9 @@ def test_role_cannot_change_installed_objects(rw: RolesWorld, role: str) -> None
 def test_foreign_operation_refused_by_sudo(rw: RolesWorld, role: str, op: str) -> None:
     """Row 4: sudo refuses a role the other role's operation; the
     publisher never runs. Control: `df-exec` → `perimeter-status` answers."""
-    before = len(rw.journal_lines())
     data = pr_request(op, rw.allowed_run, new_request_id("foreign"))
-    sudo_refused(rw, f"{role}-{op}", rw.publish(role, op, data), "not-allowed")
-    assert len(rw.journal_lines()) == before
+    sudo_refused(rw, f"{role}-{op}", role, op, data, "not-allowed")
+    before = len(rw.journal_lines())
     no_binding(status_of(rw, "df-exec", rw.allowed_run, new_request_id("row4")))
     assert len(rw.journal_lines()) == before + 1
 
@@ -349,11 +398,10 @@ def test_sudo_forms_refused(
 ) -> None:
     """Row 6: `sudo -E`, `--preserve-env`, an argument after the operation:
     sudo refuses, the publisher never runs. Control: the plain form."""
-    before = len(rw.journal_lines())
     data = status_request(rw.allowed_run, new_request_id("row6"))
-    done = rw.publish("df-exec", "perimeter-status", data, flags=flags, extra=extra)
-    sudo_refused(rw, f"df-exec-{case}", done, want)
-    assert len(rw.journal_lines()) == before
+    op = "perimeter-status"
+    case = f"df-exec-{case}"
+    sudo_refused(rw, case, "df-exec", op, data, want, flags=flags, extra=extra)
     no_binding(status_of(rw, "df-exec", rw.allowed_run, new_request_id("row6c")))
 
 
@@ -383,11 +431,9 @@ def test_self_check_only_root(rw: RolesWorld) -> None:
     """Row 8: `df-exec` → `self-check` is refused by sudo. Control: root's
     `self-check` against the fake is `done` with no problem; with an extra
     installation of the App, `problems` names it."""
-    before = len(rw.journal_lines())
     data = json.dumps({"schema": "df/publisher-request/v1", "request_id": "acc-sc-1"})
-    done = rw.publish("df-exec", "self-check", data.encode())
-    sudo_refused(rw, "df-exec-self-check", done, "not-allowed")
-    assert len(rw.journal_lines()) == before
+    op = "self-check"
+    sudo_refused(rw, "df-exec-self-check", "df-exec", op, data.encode(), "not-allowed")
     clean = self_check(rw)
     extra = Installation(12, "df-other", (99,), {"contents": "write"})
     rw.fake.scenario.installations.append(extra)

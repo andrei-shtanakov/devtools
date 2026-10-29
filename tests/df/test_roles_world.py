@@ -68,8 +68,8 @@ needs_openssl = pytest.mark.skipif(OPENSSL is None, reason="нет openssl")
             "sudo: sorry, you are not allowed to preserve the environment\n",
             "preserve-env",
         ),
-        (1, "sudo: a password is required\n", "password"),
-        (1, "sudo: a terminal is required to read the password\n", "password"),
+        (1, "sudo: a password is required\n", "password-required"),
+        (1, "sudo: a terminal is required to read the password\n", "password-required"),
         (1, "sudo: something else\n", None),
         (2, "Sorry, user x is not allowed to execute 'y' as z on h.\n", None),
     ],
@@ -80,10 +80,10 @@ def test_classify_sudo(rc: int, stderr: str, kind: str | None) -> None:
 
 #: The class of each committed capture (`fixtures/sudo-diag/README.md`).
 CAPTURED = {
-    "df-review-merge": "password",
-    "df-exec-publish-review": "password",
-    "df-exec-extra-argument": "password",
-    "df-exec-self-check": "password",
+    "df-review-merge": "password-required",
+    "df-exec-publish-review": "password-required",
+    "df-exec-extra-argument": "password-required",
+    "df-exec-self-check": "password-required",
     "df-exec-sudo-E": "preserve-env",
     "df-exec-preserve-env": "preserve-env",
 }
@@ -104,7 +104,7 @@ def test_classify_sudo_on_captures(os_dir: str) -> None:
 def test_password_wins_over_a_denial() -> None:
     """A diagnostic that asks for a password is never read as a denial."""
     text = "sudo: a password is required\nSorry, user x is not allowed to run y\n"
-    assert classify_sudo(1, text) == "password"
+    assert classify_sudo(1, text) == "password-required"
 
 
 def test_fixture_form() -> None:

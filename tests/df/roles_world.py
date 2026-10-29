@@ -137,11 +137,14 @@ ACCOUNTS = (plat.BUILD_USER, *roles.ROLE_USERS)
 IOLOG_FILE = sudoers.SUDOERS_FILE.with_name("zz-df-acc-iolog")
 TIMEOUT = 300
 
-SudoDiag = Literal["not-allowed", "preserve-env", "password"]
+SudoDiag = Literal["not-allowed", "preserve-env", "password-required"]
 #: sudo's refusals by mechanism, at `LC_ALL=C` (r4 N4). Password first: a
 #: refusal that asks for a password is a wrong setup, never a denial.
 _DIAG: tuple[tuple[SudoDiag, re.Pattern[str]], ...] = (
-    ("password", re.compile(r"a password is required|a terminal is required")),
+    (
+        "password-required",
+        re.compile(r"a password is required|a terminal is required"),
+    ),
     ("preserve-env", re.compile(r"not allowed to preserve the environment")),
     ("not-allowed", re.compile(r"is not allowed to execute|not allowed to run")),
 )
