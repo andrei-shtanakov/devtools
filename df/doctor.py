@@ -920,7 +920,7 @@ def _role_report(layout: Layout, role: str, account: Account | None) -> list[_Pa
 #: Names the OS runtime puts into a process's environment itself, at
 #: interpreter start: macOS's CoreFoundation sets `__CF_USER_TEXT_ENCODING`
 #: (the release's first statement sees it after an `execve` with exactly
-#: `launch.ENV_ALLOW`, Task 14 F3, R14-11). Not inherited, so not a leak of
+#: `launch.ENV_ALLOW`, plan Task 14a F3). Not inherited, so not a leak of
 #: the caller; accepted on that platform only.
 RUNTIME_ENV: dict[plat.PlatformName, frozenset[str]] = {
     "macos-arm64": frozenset({"__CF_USER_TEXT_ENCODING"}),

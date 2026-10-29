@@ -612,10 +612,11 @@ _CANTOPEN = "sqlite: SQLITE_CANTOPEN"
 def full_or(exc: Unavailable, base: Path) -> Unavailable:
     """`storage_full` for a `SQLITE_CANTOPEN` caused by a full file system:
     on macOS (APFS, HFS+) SQLite cannot even create its rollback journal
-    there, and says CANTOPEN, not FULL (Task 14 F4, R14-12). The database
+    there, and says CANTOPEN, not FULL (plan Task 14a F4). The database
     directory `base` is probed by creating, filling with one byte and
     removing a temporary file; `ENOSPC`/`EDQUOT` is `storage_full`, anything
-    else keeps `exc`."""
+    else keeps `exc`. Applied where an event is written (`record-violation`),
+    not when the database is opened or admitted."""
     if exc.reason != _CANTOPEN:
         return exc
     return Unavailable("storage_full") if _no_space(base) else exc
@@ -634,7 +635,8 @@ def _no_space(base: Path) -> bool:
     except OSError as err:
         return err.errno in _NO_SPACE
     finally:
-        os.close(fd)
+        with contextlib.suppress(OSError):
+            os.close(fd)
         with contextlib.suppress(OSError):
             os.unlink(probe)
     return False

@@ -31,7 +31,7 @@ def _open_fds() -> list[int]:
 #: The descriptors above 2 at this file's first statements, before any other
 #: import: what the caller left open (spec 4.5, clean start). The imports
 #: below may open their own -- on Linux the interpreter's OpenSSL keeps
-#: `/dev/urandom` (Task 14 F3, R14-11) -- and those are not the caller's.
+#: `/dev/urandom` (plan Task 14a F3) -- and those are not the caller's.
 INHERITED_FDS: tuple[int, ...] = tuple(_open_fds())
 
 from pathlib import Path  # noqa: E402

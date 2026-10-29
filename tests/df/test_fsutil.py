@@ -399,7 +399,7 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
         "the next create_db; the files SQLite itself makes are not seen"
     ),
     ("publisher.perimeter", "_no_space", "os.open", 1): (
-        "space probe of F4 (R14-12): a uniquely named temp in perimeter/, "
+        "space probe of F4 (plan Task 14a): a uniquely named temp in perimeter/, "
         "O_EXCL|O_NOFOLLOW, one byte, removed at once; its durability is "
         "irrelevant (only the errno of open/write is read), a leftover after "
         "a crash is a stray temp no reader opens"

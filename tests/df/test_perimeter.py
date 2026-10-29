@@ -998,7 +998,7 @@ def test_cantopen_on_a_full_directory_is_storage_full(
     at: str,
     want: str,
 ) -> None:
-    """F4 (R14-12): SQLite says CANTOPEN when a full file system cannot even
+    """F4 (plan Task 14a): SQLite says CANTOPEN when a full file system cannot even
     take its journal (macOS); a probe of the directory tells `storage_full`
     from any other CANTOPEN, and leaves nothing behind."""
     base = world.lay.perimeter_dir
