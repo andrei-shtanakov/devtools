@@ -11,7 +11,7 @@ active (`_writing`, like the temp files). The journal takes no part. The models 
 spec 3.6) is shown apart: probes are level 2 and never change level 1.
 
 Level 2 is root's only (R13-3): it asks the roles and the publisher through
-the real `sudo` (the seams `role_check`, `role_reads`,
+the real `sudo` (the seams `role_check`, `role_access`,
 `role_perimeter_status`, `review_merge`, and `setup_agent`'s
 `publisher_self_check` and `exec_check_github`) and judges their answers with
 the production parsers; `products.toml` is read live, like `publisher.toml`.
