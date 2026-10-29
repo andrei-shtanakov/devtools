@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import ast
 import errno
 import http.client
 import io
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from df import launch, launch_release, probe
+from df import doctor, launch, launch_release, probe
 from df.paths import MACHINE_TOKEN
 from df.probe import ProbeStatus
 from df.stage2_config import (
@@ -24,6 +27,8 @@ from df.stage2_config import (
 )
 from tests.df.conftest import FakeLayout
 from tests.df.launch_world import pin, put_record, record, trust_paths
+
+REPO = Path(__file__).resolve().parents[2]
 
 REL = "rel-a"
 OK = ProbeStatus("годен", True)
@@ -105,6 +110,56 @@ def test_launch_release_refuses_bad_arguments(w: World, argv: list[str]) -> None
 # --- check ------------------------------------------------------------------
 
 
+def test_inherited_fds_seen_before_any_import(tmp_path: Path) -> None:
+    """F3 (R14-11): a descriptor the caller left open is reported; the
+    measurement is taken in a fresh interpreter at the module's first
+    statements."""
+    fd = os.open(tmp_path, os.O_RDONLY)
+    try:
+        code = "import df.launch_release as m; print(list(m.INHERITED_FDS))"
+        done = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-B",
+                "-c",
+                f"import sys; sys.path.insert(0, {str(REPO)!r}); {code}",
+            ],
+            pass_fds=(fd,),
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=60,
+        )
+    finally:
+        os.close(fd)
+    assert fd in json.loads(done.stdout)
+
+
+def test_inherited_fds_measured_before_other_imports() -> None:
+    """The measurement precedes every import of the module but the three it
+    needs (`os`, `resource`, `sys`): what those later imports open (Linux:
+    OpenSSL's `/dev/urandom`) is the release's own, not the caller's."""
+    tree = ast.parse(Path(launch_release.__file__).read_text())
+    seen: list[str] = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "INHERITED_FDS" for t in node.targets
+        ):
+            break
+        if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", "") == (
+            "INHERITED_FDS"
+        ):
+            break
+        if isinstance(node, ast.Import):
+            seen += [a.name for a in node.names]
+        if isinstance(node, ast.ImportFrom):
+            seen.append(str(node.module))
+    else:
+        pytest.fail("INHERITED_FDS не присваивается на верхнем уровне")
+    assert sorted(seen) == ["__future__", "os", "resource", "sys"]
+
+
 def test_check_report(w: World, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(os, "environ", {"HOME": "/h", "TZ": "UTC"})
     r, wfd = os.pipe()
@@ -121,7 +176,9 @@ def test_check_report(w: World, monkeypatch: pytest.MonkeyPatch) -> None:
     assert first["euid"] == os.geteuid()
     assert first["env"] == ["HOME", "TZ"]
     assert first["cwd"] == os.getcwd()
-    assert r in first["fds"] and wfd in first["fds"]
+    # opened after the module's first statement: not inherited (F3)
+    assert first["fds"] == list(launch_release.INHERITED_FDS)
+    assert r not in first["fds"] and wfd not in first["fds"]
     assert set(first["denied"]) >= {
         str(w.lay.secrets_dir),
         str(w.lay.publisher_dir),
@@ -374,6 +431,9 @@ def test_review_checks_only_df_review_roles(
     assert w.run("df-review", "review", "run-1") == 2
     err = capsys.readouterr().err
     assert "reviewer: не поддерживается" in err and "этап 3" not in err
+    assert (
+        f"Refused: {launch_release.NO_MODEL_ACCESS}: reviewer: не поддерживается" in err
+    )
     assert {r for r, _p in w.seen} == {
         "reviewer",
         "executor-review",
@@ -469,3 +529,20 @@ def test_check_github_http_exception_is_exit_2(
     assert w.run("df-exec", "check-github") == 2
     err = capsys.readouterr().err
     assert w.out == "" and "Traceback" not in err and "данные недоступны" in err
+
+
+def test_stale_pins_one_prefix_roles_joined(
+    w: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F1 (R14-9): «доступ к моделям не подтверждён: <роль>: <причина>»,
+    the prefix once and every stale role after it, in `ROLES` order; the
+    same words as doctor's `models.access`."""
+    put_record(w.fake, record("run-1", REL))
+    w.stale = {"interview": STALE, "author": STALE}  # type: ignore[attr-defined]
+    assert w.run("df-exec", "run", "run-1") == 2
+    err = capsys.readouterr().err.strip().splitlines()[-1]
+    assert err == (
+        f"Refused: {launch_release.NO_MODEL_ACCESS}: interview: не поддерживается: x; "
+        "author: не поддерживается: x"
+    )
+    assert launch_release.NO_MODEL_ACCESS == doctor.NO_MODEL_ACCESS

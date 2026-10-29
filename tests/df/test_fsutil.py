@@ -398,6 +398,15 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
         "sync_file, rename, sync_dir(perimeter); a leftover temp is swept by "
         "the next create_db; the files SQLite itself makes are not seen"
     ),
+    ("publisher.perimeter", "_no_space", "os.open", 1): (
+        "space probe of F4 (R14-12): a uniquely named temp in perimeter/, "
+        "O_EXCL|O_NOFOLLOW, one byte, removed at once; its durability is "
+        "irrelevant (only the errno of open/write is read), a leftover after "
+        "a crash is a stray temp no reader opens"
+    ),
+    ("publisher.perimeter", "_no_space", "os.unlink", 1): (
+        "space probe of F4: removes only the temp _no_space itself created"
+    ),
     ("publisher.perimeter", "_drop_empty", "os.rmdir", 1): (
         "restore refused before restore.intent: rmdir of only the set-aside "
         "directories this call made, under db.lock LOCK_EX; rmdir removes an "

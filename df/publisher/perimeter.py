@@ -40,6 +40,7 @@ if the epoch moved, raise the event's epoch in a second transaction
 from __future__ import annotations
 
 import contextlib
+import errno
 import fcntl
 import functools
 import json
@@ -603,6 +604,42 @@ def _unavailable_of(exc: sqlite3.Error) -> Unavailable:
     return Unavailable(f"sqlite: {name}")
 
 
+#: `errno` of a directory that has no room for one more byte.
+_NO_SPACE = frozenset({errno.ENOSPC, errno.EDQUOT})
+_CANTOPEN = "sqlite: SQLITE_CANTOPEN"
+
+
+def full_or(exc: Unavailable, base: Path) -> Unavailable:
+    """`storage_full` for a `SQLITE_CANTOPEN` caused by a full file system:
+    on macOS (APFS, HFS+) SQLite cannot even create its rollback journal
+    there, and says CANTOPEN, not FULL (Task 14 F4, R14-12). The database
+    directory `base` is probed by creating, filling with one byte and
+    removing a temporary file; `ENOSPC`/`EDQUOT` is `storage_full`, anything
+    else keeps `exc`."""
+    if exc.reason != _CANTOPEN:
+        return exc
+    return Unavailable("storage_full") if _no_space(base) else exc
+
+
+def _no_space(base: Path) -> bool:
+    probe = base / f".space-probe.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        fd = os.open(probe, flags, 0o600)
+    except OSError as err:
+        return err.errno in _NO_SPACE
+    try:
+        os.write(fd, b"\0")
+        os.fsync(fd)
+    except OSError as err:
+        return err.errno in _NO_SPACE
+    finally:
+        os.close(fd)
+        with contextlib.suppress(OSError):
+            os.unlink(probe)
+    return False
+
+
 def now() -> str:
     """The current UTC instant, as the store writes it."""
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
@@ -1151,7 +1188,8 @@ def record_violation_op(ctx: Context) -> Response:
             return record_violation(
                 db.conn, ctx.sender, ctx.request, key, EPOCHS, binding
             )
-        except Unavailable as exc:
+        except Unavailable as raised:
+            exc = full_or(raised, ctx.layout.perimeter_dir)
             if exc.reason == "storage_full" and _not_committed(db.conn, key):
                 # the transaction rolled back and the key has no row: not done
                 raise Refused("storage_full", verified_not_done=True) from None

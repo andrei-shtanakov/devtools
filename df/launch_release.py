@@ -8,17 +8,40 @@ release's `src/devtools` is added first, from this file's own place.
 
 from __future__ import annotations
 
+import os
+import resource
 import sys
-from pathlib import Path
+
+_FD_SCAN_CAP = 4096
+
+
+def _open_fds() -> list[int]:
+    soft = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+    limit = _FD_SCAN_CAP if soft == resource.RLIM_INFINITY else min(soft, _FD_SCAN_CAP)
+    found = []
+    for fd in range(3, limit):
+        try:
+            os.fstat(fd)
+        except OSError:
+            continue
+        found.append(fd)
+    return found
+
+
+#: The descriptors above 2 at this file's first statements, before any other
+#: import: what the caller left open (spec 4.5, clean start). The imports
+#: below may open their own -- on Linux the interpreter's OpenSSL keeps
+#: `/dev/urandom` (Task 14 F3, R14-11) -- and those are not the caller's.
+INHERITED_FDS: tuple[int, ...] = tuple(_open_fds())
+
+from pathlib import Path  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import errno  # noqa: E402
 import http.client  # noqa: E402
 import json  # noqa: E402
-import os  # noqa: E402
 import re  # noqa: E402
-import resource  # noqa: E402
 import secrets  # noqa: E402
 import stat  # noqa: E402
 import urllib.error  # noqa: E402
@@ -48,9 +71,12 @@ EXIT_MISMATCH = 1
 EXIT_REFUSED = 2
 _FULL_NAME = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", re.ASCII)
 _TOKEN = re.compile(r"[\x21-\x7e]+", re.ASCII)
-_FD_SCAN_CAP = 4096
 _OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 _STAGE3 = "конвейер — этап 3"
+#: The refusal of a pin that is not ready (plan, stage 2a, line 668), once,
+#: followed by `<роль>: <причина>` of every such role (as doctor's
+#: `models.access`).
+NO_MODEL_ACCESS = "доступ к моделям не подтверждён"
 
 
 class Refused(Exception):
@@ -82,8 +108,9 @@ def main(
 
 def check_report(layout: Layout | None = None) -> dict[str, object]:
     """What the role's process looks like from inside: a fresh nonce,
-    identity, environment names, `cwd`, open descriptors above 2 and the
-    `errno` of opening each of a fixed list of foreign paths (0: opened)."""
+    identity, environment names, `cwd`, the descriptors above 2 it inherited
+    (`INHERITED_FDS`) and the `errno` of opening each of a fixed list of
+    foreign paths (0: opened)."""
     lay = default_layout() if layout is None else layout
     return {
         "nonce": secrets.token_hex(16),
@@ -93,7 +120,7 @@ def check_report(layout: Layout | None = None) -> dict[str, object]:
         "groups": sorted(os.getgroups()),
         "env": sorted(os.environ),
         "cwd": os.getcwd(),
-        "fds": _open_fds(),
+        "fds": list(INHERITED_FDS),
         "denied": {str(p): _open_errno(p) for p in _foreign_paths(lay)},
     }
 
@@ -160,19 +187,6 @@ def _emit(out: IO[str], report: Mapping[str, object], code: int) -> int:
 
 
 # --- check ------------------------------------------------------------------
-
-
-def _open_fds() -> list[int]:
-    soft = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
-    limit = _FD_SCAN_CAP if soft == resource.RLIM_INFINITY else min(soft, _FD_SCAN_CAP)
-    found = []
-    for fd in range(3, limit):
-        try:
-            os.fstat(fd)
-        except OSError:
-            continue
-        found.append(fd)
-    return found
 
 
 def _foreign_paths(layout: Layout) -> list[Path]:
@@ -312,7 +326,7 @@ def _pipeline(role: str, run_id: str, release_id: str, layout: Layout) -> int:
         if not status.current:
             stale.append(f"{name}: {status.text}")
     if stale:
-        raise Refused("; ".join(stale))
+        raise Refused(f"{NO_MODEL_ACCESS}: {'; '.join(stale)}")
     raise Refused(_STAGE3)
 
 
