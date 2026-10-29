@@ -371,6 +371,7 @@ def test_sudo_uid_spoof_ignored(rw: RolesWorld) -> None:
 
 def self_check(rw: RolesWorld) -> SelfCheckResult:
     """Root's `self-check` through the real chain (`sudo -u df-publisher`)."""
+    rw.require_fake_api()
     raw = setup_agent.publisher_self_check(rw.layout, purpose="acceptance")
     done = subprocess.CompletedProcess([], 0, raw, b"")
     resp = response_of(done)

@@ -59,7 +59,13 @@ import pytest
 
 from df import cli, fsutil, journal, models, perimeter_client, roles, run_start, sudoers
 from df import platform as plat
-from df.config import ReleaseEntry, dump_releases, load_accounts, parse_releases
+from df.config import (
+    ConfigError,
+    ReleaseEntry,
+    dump_releases,
+    load_accounts,
+    parse_releases,
+)
 from df.lockset import UV_PINNED_VERSION
 from df.paths import Layout
 from df.publisher import request
@@ -433,8 +439,24 @@ class RolesWorld:
         return str(self.layout.libexec / name)
 
     def darkfactory(self, argv: Sequence[str]) -> subprocess.CompletedProcess[bytes]:
-        """`sudo darkfactory <argv>` as the operator."""
+        """`sudo darkfactory <argv>` as the operator; a command that reaches
+        GitHub (`setup-agent`, `doctor`) only behind `require_fake_api`."""
+        if argv[:1] in (["setup-agent"], ["doctor"]):
+            self.require_fake_api()
         return as_operator([SUDO, "-n", str(self.layout.launcher), *argv])
+
+    def require_fake_api(self) -> None:
+        """No fixture credential ever goes to the real GitHub: before any
+        call that reaches it, `publisher.toml`'s `api_base` (what the
+        publisher and `check-github` read) must be the fake's loopback URL."""
+        try:
+            text = (self.layout.etc / "publisher.toml").read_text()
+            base = parse_publisher(text).api_base
+        except (OSError, ConfigError) as exc:
+            infra(f"publisher.toml не читается до обращения к GitHub: {exc}")
+            raise
+        if base != self.fake.url or not base.startswith("http://127.0.0.1:"):
+            infra(f"api_base {base!r}, а не поддельный GitHub {self.fake.url!r}")
 
     def human(
         self, argv: Sequence[str], *, cwd: Path = Path("/")
@@ -691,6 +713,13 @@ def set_up(rw: RolesWorld, key: Path) -> None:
     cfg = parse_publisher((lay.etc / "publisher.toml").read_text())
     write_etc(lay, "publisher.toml", dump_publisher(replace(cfg, api_base=rw.fake.url)))
     write_etc(lay, "products.toml", products_text())
+    rw.notes["world_layout"] = {
+        "root": "/",
+        "why": (
+            "R14-8: код релиза (launch_release) по построению берёт раскладку /; "
+            "мир в <R> не может исполнить операции ролей"
+        ),
+    }
     rw.notes["api_base"] = {
         "value": rw.fake.url,
         "note": "нештатный API: локальный поддельный GitHub (root-ключ publisher.toml)",
