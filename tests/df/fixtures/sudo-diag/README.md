@@ -32,11 +32,17 @@ What the capture settled (finding F2 of the Task 14 report): on both
 platforms sudo answers a command the role has no rule for with «a password
 is required» (exit 1) — it asks for authentication before it judges the
 command, and `-n` turns that into the refusal — never «is not allowed to
-execute». Ruling R14-10: that class counts as the refusal «sudo: нет правила
+execute». Ruling R14-10a: that class counts as the refusal «sudo: нет правила
 (запрос пароля под -n)» only with exit 1, empty stdout, no new line in the
-publisher's journal and root's `sudo -n -l -U <role> -u df-publisher <the
-same command>` exiting 1; otherwise it is a wrong setup
-(`sudo_refused` of `tests/df/test_acceptance_root_roles.py`).
+publisher's journal, and sudo's own policy for the role -- its full listing
+`sudo -n -l -U <role>` parsed by `sudoers.read_listing` -- granting no rule
+for the same command while granting the control `df-publish
+perimeter-status` (a grant of a form not judged exactly fails closed,
+R14-14 M1); on every OS but macOS root's `sudo -n -l -U <role> -u
+df-publisher <the same command>` must also exit 1 (its control 0), on macOS
+it is evidence only (sudo 1.9.13 exits 1 even for a permitted command, CI
+run 40876804216). Otherwise it is a wrong setup (`sudo_refused` and
+`no_rule` of `tests/df/test_acceptance_root_roles.py`).
 
 Synthesized, not captured (no real case exists to capture): the
 `not-allowed` texts of `test_classify_sudo` in `tests/df/test_roles_world.py`.

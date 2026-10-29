@@ -346,10 +346,10 @@ jobs:
           sys.path.append('.'); from tests.df.ci_step0 import r96_main;
           sys.exit(r96_main())"
       # The stage-1 observer of the carried test_launch_cwd_outside_builder_tree
-      # needs auditd on Linux; its absence makes that test an xfail, a fact.
+      # needs auditd on Linux; an observer that sees nothing is an
+      # infrastructure failure (R14-14 I1), so a failed install is red here.
       - name: install auditd (observer)
         if: ${{ runner.os == 'Linux' && env.DF_STAGE2A_SCOPE == 'full' }}
-        continue-on-error: true
         run: |
           sudo -n apt-get update -qq
           sudo -n apt-get install -y -qq --no-install-recommends auditd
@@ -379,6 +379,8 @@ jobs:
           out="$RUNNER_TEMP/df-stage2a"
           mkdir -p "$out"
           sudo -n install -d -m 0700 "$RUNNER_TEMP/root-home"
+          # -m root -k: the stage2a-marked tests plus the root canary
+          # test_root_gate_open, which the junit guard requires (R14-6, M5).
           select=(-k "stage2a or test_root_gate_open")
           if [ -n "$DF_STAGE2A_K" ]; then
             select=(-k "(stage2a and ($DF_STAGE2A_K)) or test_root_gate_open")

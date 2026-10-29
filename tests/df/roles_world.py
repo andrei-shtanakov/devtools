@@ -39,6 +39,7 @@ state: the caller's working directory and descriptors (direct drop too).
 
 from __future__ import annotations
 
+import grp
 import gzip
 import json
 import os
@@ -48,7 +49,7 @@ import shutil
 import socket
 import subprocess
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -139,7 +140,9 @@ TIMEOUT = 300
 
 SudoDiag = Literal["not-allowed", "preserve-env", "password-required"]
 #: sudo's refusals by mechanism, at `LC_ALL=C` (r4 N4). Password first: a
-#: refusal that asks for a password is a wrong setup, never a denial.
+#: refusal that asks for a password is never read as a denial by itself; it
+#: counts as «нет правила» only under R14-10a's conditions (`sudo_refused` of
+#: the acceptance), else it is a wrong setup.
 _DIAG: tuple[tuple[SudoDiag, re.Pattern[str]], ...] = (
     (
         "password-required",
@@ -156,6 +159,37 @@ def classify_sudo(returncode: int, stderr: str) -> SudoDiag | None:
     if returncode != 1:
         return None
     return next((kind for kind, rx in _DIAG if rx.search(stderr)), None)
+
+
+class UnjudgedGrant(Exception):
+    """A grant of a form `grants_cover` does not judge exactly."""
+
+
+#: A RunAs `grants_cover` understands: one plain user name, or `ALL`.
+_RUNAS = re.compile(r"ALL|[a-z_][a-z0-9_.-]*", re.ASCII)
+#: Command forms it does not judge: wildcards, a directory, a digest, `!`.
+_UNJUDGED_COMMAND = re.compile(r"[*?\[\]]|/$|^sha\d+:|^!", re.ASCII)
+
+
+def grants_cover(
+    grants: Iterable[sudoers.Grant], runas: str, wrapper: str, command: str
+) -> bool:
+    """Whether a grant lets the role run `command` as `runas`: RunAs `runas`
+    or `ALL`, command `ALL`, the bare `wrapper` (any arguments) or exactly
+    `command`. Fail closed (R14-14 M1): any grant of a form not judged
+    exactly here -- a RunAs list, `%group`, `#uid`, a wildcard, a directory,
+    a digest prefix, a negation -- is `UnjudgedGrant`, never «no rule»."""
+    found = False
+    for grant in grants:
+        if not _RUNAS.fullmatch(grant.runas) or _UNJUDGED_COMMAND.search(grant.command):
+            raise UnjudgedGrant(str(grant))
+        if grant.runas in (runas, "ALL") and grant.command in (
+            "ALL",
+            wrapper,
+            command,
+        ):
+            found = True
+    return found
 
 
 def fixture_form(text: str, root: Path, hostnames: Sequence[str]) -> str:
@@ -611,14 +645,25 @@ def evidence(name: str, data: object) -> None:
 def require_clean_host() -> None:
     """A leftover of an install, a role or a sudoers file is someone else's:
     refuse, touch nothing."""
-    for path in (sudoers.SUDOERS_FILE, IOLOG_FILE, *owned_paths(PRODUCTION)):
+    link = command_link(PRODUCTION)
+    for path in (sudoers.SUDOERS_FILE, IOLOG_FILE, link, *owned_paths(PRODUCTION)):
         if os.path.lexists(path):
             infra(f"{path} уже есть")
     leftover = [name for name in ACCOUNTS if _known(name)]
-    if leftover:
-        infra(f"учётки остались от прошлого прогона: {leftover}")
+    if leftover or df_groups():
+        infra(f"учётки или группы df-* от прошлого прогона: {leftover} {df_groups()}")
     if not _known(OPERATOR):
         infra(f"нет учётки оператора {OPERATOR}")
+
+
+def command_link(layout: Layout) -> Path:
+    """`/usr/local/bin/darkfactory`, the command's link the install makes."""
+    return layout.local_bin / layout.launcher.name
+
+
+def df_groups() -> list[str]:
+    """Groups named `df-*` (a role's or `df-build`'s group, user or not)."""
+    return sorted(g.gr_name for g in grp.getgrall() if g.gr_name.startswith("df-"))
 
 
 def _known(name: str) -> bool:
@@ -814,14 +859,14 @@ def teardown_install(layout: Layout, keep: Path | None) -> None:
     if _known(plat.BUILD_USER):
         plat.reap_user_processes(plat.BUILD_USER)
     remove_service_user(plat.BUILD_USER)
-    link = layout.local_bin / layout.launcher.name
+    link = command_link(layout)
     if os.path.islink(link) and os.readlink(link) == str(layout.launcher):
         os.unlink(link)
     for path in owned_paths(layout):
         shutil.rmtree(path, ignore_errors=True)
-    left = [str(p) for p in owned_paths(layout) if os.path.lexists(p)]
-    if left or _known(plat.BUILD_USER):
-        infra(f"после теста остались {left} или {plat.BUILD_USER}")
+    left = [str(p) for p in (link, *owned_paths(layout)) if os.path.lexists(p)]
+    if left or _known(plat.BUILD_USER) or df_groups():
+        infra(f"после теста остались {left}, {plat.BUILD_USER} или {df_groups()}")
 
 
 def install_sudoers_file(path: Path, text: str) -> None:

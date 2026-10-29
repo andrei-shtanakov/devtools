@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from df import launch_release
+from df import launch_release, sudoers
 from df.paths import MACHINE_TOKEN, Layout
 from df.publisher import github
 from df.stage2_config import (
@@ -38,9 +38,12 @@ from tests.df.roles_world import (
     MACHINE_TOKEN_TEXT,
     MACHINE_USER,
     PRODUCT_ID,
+    PUBLISHER,
+    UnjudgedGrant,
     classify_sudo,
     fixture_form,
     found_in,
+    grants_cover,
     io_sessions,
     products_text,
     scenario,
@@ -112,6 +115,81 @@ def test_fixture_form() -> None:
     text = f"Sorry, ... '{root}/opt/df/libexec/df-publish merge' on runner-7.x.\n"
     form = fixture_form(text, root, ["runner-7.x", "runner-7"])
     assert form == f"Sorry, ... '/opt/df/libexec/df-publish merge' on {HOST}.\n"
+
+
+# ---------- `no_rule`'s judge of sudo's listing (R14-10a, R14-14 M1) ----------
+
+SUDOERS_FIXTURES = Path(__file__).parent / "fixtures" / "sudoers"
+PUBLISH = "/opt/df/libexec/df-publish"
+
+
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize(
+    ("role", "words", "covered"),
+    [
+        ("df-exec", "perimeter-status", True),
+        ("df-exec", "merge", True),
+        ("df-exec", "publish-review", False),
+        ("df-exec", "self-check", False),
+        ("df-exec", "perimeter-status extra", False),
+        ("df-review", "merge", False),
+        ("df-review", "read-token", True),
+    ],
+)
+def test_grants_cover_on_captured_listings(
+    os_dir: str, role: str, words: str, covered: bool
+) -> None:
+    """The real listings of the roles (`fixtures/sudoers/`, Task 3): exact
+    grants only, judged without a refusal."""
+    text = (SUDOERS_FIXTURES / f"sudo-l-{os_dir}-{role}.txt").read_text()
+    listing = sudoers.parse_listing(role, text)
+    grants = listing.grants | listing.carried
+    asked = f"{PUBLISH} {words}"
+    assert grants_cover(grants, PUBLISHER, PUBLISH, asked) is covered
+
+
+def _grant(runas: str, command: str) -> sudoers.Grant:
+    return sudoers.Grant(runas, frozenset({"NOPASSWD"}), command)
+
+
+@pytest.mark.parametrize(
+    ("runas", "command"),
+    [
+        ("root, df-publisher", f"{PUBLISH} merge"),
+        ("%admin", f"{PUBLISH} merge"),
+        ("#0", f"{PUBLISH} merge"),
+        ("df-publisher : wheel", f"{PUBLISH} merge"),
+        ("df-publisher", f"{PUBLISH} *"),
+        ("df-publisher", f"{PUBLISH} merge?"),
+        ("df-publisher", f"{PUBLISH} [mp]erge"),
+        ("df-publisher", "/opt/df/libexec/"),
+        ("df-publisher", f"sha256:abcd {PUBLISH}"),
+        ("df-publisher", f"!{PUBLISH} merge"),
+    ],
+)
+def test_grants_cover_fails_closed(runas: str, command: str) -> None:
+    """A grant of any form not judged exactly is `UnjudgedGrant`, never
+    «no rule» -- even when the asked command is something else."""
+    exact = _grant(PUBLISHER, f"{PUBLISH} perimeter-status")
+    with pytest.raises(UnjudgedGrant):
+        grants_cover([exact, _grant(runas, command)], PUBLISHER, PUBLISH, "x")
+
+
+@pytest.mark.parametrize(
+    ("grant", "covered"),
+    [
+        (("ALL", f"{PUBLISH} merge"), True),
+        (("df-publisher", "ALL"), True),
+        (("df-publisher", PUBLISH), True),
+        (("root", f"{PUBLISH} merge"), False),
+        (("df-publisher", f"{PUBLISH} merge extra"), False),
+    ],
+)
+def test_grants_cover_exact_forms(grant: tuple[str, str], covered: bool) -> None:
+    """`ALL` RunAs or command, and the bare wrapper (any arguments), cover;
+    another RunAs or other arguments do not."""
+    found = grants_cover([_grant(*grant)], PUBLISHER, PUBLISH, f"{PUBLISH} merge")
+    assert found is covered
 
 
 # ---------- the I/O log reader ----------

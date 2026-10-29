@@ -9,7 +9,11 @@ with its named mechanism of refusal and a paired positive control (r1 N12):
 - sudo: exit 1 with a diagnostic classified at `LC_ALL=C` (`classify_sudo`,
   captured to `sudo-diag/` and committed as `tests/df/fixtures/sudo-diag/`,
   R14-2), and no new line in `publisher/journal.jsonl` (the publisher did not
-  run); «a password is required» fails the test as a wrong setup;
+  run); «a password is required» counts as the refusal «sudo: нет правила
+  (запрос пароля под -n)» only under R14-10a (`sudo_refused`, `no_rule`:
+  sudo's parsed listing grants no rule for the command and does grant the
+  control, the command form also exits 1 on every OS but macOS), else it
+  fails the test as a wrong setup;
 - the publisher: exit 2 and `outcome = refused` with the reason.
 
 The rows run in file order on one world: the registry edits that revoke
@@ -55,12 +59,14 @@ from tests.df.roles_world import (
     TRUST_TEXT,
     RolesWorld,
     SudoDiag,
+    UnjudgedGrant,
     as_operator,
     as_user,
     classify_sudo,
     evidence,
     fixture_form,
     found_in,
+    grants_cover,
     host_names,
     install_sudoers_file,
     io_sessions,
@@ -198,11 +204,11 @@ def no_rule(rw: RolesWorld, role: str, words: list[str]) -> bool:
     grants = listing.grants | listing.carried
 
     def covered(command: str) -> bool:
-        return any(
-            g.runas.split(":")[0].strip() in (PUBLISHER, "ALL")
-            and g.command in ("ALL", publish, command)
-            for g in grants
-        )
+        try:
+            return grants_cover(grants, PUBLISHER, publish, command)
+        except UnjudgedGrant as exc:
+            infra(f"не судится: sudo -l -U {role}: {exc}")
+            raise
 
     control, asked = f"{publish} perimeter-status", " ".join([publish, *words])
     seen: dict[str, object] = {
@@ -216,7 +222,7 @@ def no_rule(rw: RolesWorld, role: str, words: list[str]) -> bool:
         result = plat.run_command(argv, env=BASE_ENV)
         codes[name] = result.returncode
         seen[f"command form {name}"] = [" ".join(argv), result.returncode]
-    judged = plat.detect_platform() == "linux-x86_64"
+    judged = plat.detect_platform() != "macos-arm64"
     seen["command form judged"] = judged or MACOS_COMMAND_FORM
     evidence(f"no-rule-{role}-{'-'.join(words)}.json", seen)
     if not covered(control):
@@ -873,7 +879,7 @@ def test_launch_cwd_outside_builder_tree(rw: RolesWorld) -> None:
     )
     for obs, done in seen.values():
         if obs.status != "observed":
-            pytest.xfail(f"наблюдатель: {obs.reason}")
+            infra(f"наблюдатель: {obs.reason}")
         assert done.returncode == 0, shown(done)
     assert seen["human"][0].violations == []
     if plat.detect_platform() == "macos-arm64":
