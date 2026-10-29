@@ -30,7 +30,7 @@ from df import fsutil, launch, probe  # noqa: E402
 from df.config import ConfigError, read_optional  # noqa: E402
 from df.journal import StepFailed  # noqa: E402
 from df.models import ROLE_CONTEXT, ROLES  # noqa: E402
-from df.paths import Layout, default_layout  # noqa: E402
+from df.paths import MACHINE_TOKEN, Layout, default_layout  # noqa: E402
 from df.stage2_config import (  # noqa: E402
     DEFAULT_API_BASE,
     Product,
@@ -41,7 +41,6 @@ from df.stage2_config import (  # noqa: E402
 
 Transport = Callable[[str, Mapping[str, str]], tuple[int, bytes]]
 
-TOKEN_PATH = (".config", "df", "github-token")
 MAX_BODY = 1 << 20
 MAX_TOKEN = 4096
 TIMEOUT = 20
@@ -208,7 +207,7 @@ def check_github(
     from `GET /user` and `GET /repos/<full_name>` of every product, and 1 if
     any product's `machine_user` is not the token's login. A missing or
     unreadable token refuses before any request."""
-    token = _read_token(home.joinpath(*TOKEN_PATH))
+    token = _read_token(home.joinpath(*MACHINE_TOKEN))
     api = _api_base(layout)
     headers = {
         "Authorization": f"Bearer {token}",

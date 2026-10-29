@@ -364,6 +364,19 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
     ("fsutil", "_write_tmp", "os.open", 1): (
         PRIMITIVE + ": write_atomic's O_EXCL temp, fchmod, sync_file, rename"
     ),
+    ("fsutil", "write_under", "os.open", 1): (
+        PRIMITIVE + ": O_EXCL|O_NOFOLLOW temp under dir_fd, born at mode"
+    ),
+    ("fsutil", "write_under", "os.fchown", 1): (
+        PRIMITIVE + ": its own new temp, before any byte is written"
+    ),
+    ("fsutil", "write_under", "os.fchmod", 1): PRIMITIVE + ": its own new temp",
+    ("fsutil", "write_under", "os.rename", 1): (
+        PRIMITIVE + ": renameat within dir_fd after sync_file, then sync_dir"
+    ),
+    ("fsutil", "_discard_at", "os.unlink", 1): (
+        PRIMITIVE + ": write_under's own temp, by dir_fd"
+    ),
     ("journal", "_open_regular", "os.open no-create", 1): (
         "the callers in its own module pass flags without O_CREAT/O_TRUNC "
         "(a call from another module is not seen): the lock "
@@ -486,6 +499,16 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
     ("roles_setup", "_hand_over", "os.fchown", 1): (
         "an empty root-born 0700 dir handed to its role: own sync, then the parent's"
     ),
+    ("setup_agent", "_token_dir", "os.fchown", 1): (
+        "a directory make_dir just created, handed to df-exec through its "
+        "descriptor only if fstat shows it root's, 0700 and empty (_fresh); "
+        "a found or swapped one is never changed; then sync_dir of itself "
+        "and the parent"
+    ),
+    ("setup_agent", "_token_dir", "os.fchmod", 1): (
+        "the same just-created directory, by descriptor (a Linux inherited "
+        "S_ISGID); then sync_dir of itself and the parent"
+    ),
     ("sudoers", "_place", "os.rename", 1): (
         "protocol install: temp born 0440 by create_file, sync_file, visudo, "
         "rename, sync_dir(parent)"
@@ -581,6 +604,14 @@ SUBPROCESS_CREATORS = {
         "the publisher's own protocol (its state and the perimeter database); "
         "the client keeps only stdout"
     ),
+    "sudo df-publish self-check (setup-agent app-key, root)": (
+        "the publisher's own protocol (self-check reads the keys and the "
+        "perimeter database, writes its journal); root keeps only stdout"
+    ),
+    "sudo df-launch df-exec check-github (setup-agent machine-token)": (
+        "launch exec of the role: GETs to GitHub with the token, creates "
+        "nothing; root keeps stdout and the stderr tail"
+    ),
     "darkfactory publisher perimeter-restore (restore, as df-publisher)": (
         "protocol restore of the role (Task 11r): its own files under "
         "perimeter/ (stage, set-aside/, restore.intent, events.sqlite); the "
@@ -593,9 +624,9 @@ SUBPROCESS_CREATORS = {
 #: `test_every_process_start_is_named` until it is named there.
 PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
     ("fsutil", "_sysctl_boot_id", "subprocess.run", 1): ("sysctl (boot id)",),
-    # run_command (root), run_as (df-build, df-publisher; with stdin for
-    # perimeter restore), run_with_input (df-publisher; the roles, perimeter
-    # client)
+    # run_command (root; setup-agent's check-github), run_as (df-build,
+    # df-publisher; with stdin for perimeter restore), run_with_input
+    # (df-publisher; the roles, perimeter client, setup-agent's self-check)
     ("platform", "_execute", "subprocess.Popen", 1): (
         "openssl dgst -sign (publisher App JWT)",
         "uv python install (admin)",
@@ -607,6 +638,8 @@ PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
         "darkfactory publisher perimeter-init (roles setup, as df-publisher)",
         "sudo df-publish perimeter-status (perimeter client)",
         "darkfactory publisher perimeter-restore (restore, as df-publisher)",
+        "sudo df-publish self-check (setup-agent app-key, root)",
+        "sudo df-launch df-exec check-github (setup-agent machine-token)",
     ),
     ("platform", "spawn_as", "subprocess.Popen", 1): (
         "tar -cf - (copy producer, as df-build)",

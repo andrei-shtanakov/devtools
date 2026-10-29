@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from df import launch, launch_release, probe
+from df.paths import MACHINE_TOKEN
 from df.probe import ProbeStatus
 from df.stage2_config import (
     ModelChange,
@@ -150,7 +151,7 @@ def put_products(w: World, *users: str) -> None:
 
 
 def put_token(w: World, text: str = "ghp_secret\n", mode: int = 0o600) -> Path:
-    path = w.home.joinpath(*launch_release.TOKEN_PATH)
+    path = w.home.joinpath(*MACHINE_TOKEN)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
     path.chmod(mode)
@@ -241,7 +242,7 @@ def test_check_github_bad_token_makes_no_request(
     elif why == "owner":
         w.fake.set_owner(put_token(w), os.getuid() + 5)
     elif why == "dir":
-        w.home.joinpath(*launch_release.TOKEN_PATH).mkdir(parents=True)
+        w.home.joinpath(*MACHINE_TOKEN).mkdir(parents=True)
     transport = Transport()
     w.transport = transport  # type: ignore[attr-defined]
     assert w.run("df-exec", "check-github") == 2
