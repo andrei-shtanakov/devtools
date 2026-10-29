@@ -39,7 +39,7 @@ import socket
 import subprocess
 import threading
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -155,18 +155,27 @@ def _git_env(home: Path) -> dict[str, str]:
     }
 
 
-def build_fixture_repo(top: Path) -> tuple[Path, str]:
-    """`<top>/fixture.git` (bare, root's) of the fixture project + `df/`."""
-    src = top / "fixture-src"
+def build_fixture_repo(
+    top: Path, paths: Sequence[str] = ("df",), name: str = "fixture"
+) -> tuple[Path, str]:
+    """`<top>/<name>.git` (bare, root's) of the fixture project plus `paths`
+    of this checkout (directories or files, relative to its root)."""
+    src = top / f"{name}-src"
     shutil.copytree(FIXTURE_PROJECT, src, ignore=FIXTURE_IGNORE)
-    shutil.copytree(REPO_ROOT / "df", src / "df", ignore=FIXTURE_IGNORE)
+    for relative in paths:
+        origin, target = REPO_ROOT / relative, src / relative
+        if origin.is_dir():
+            shutil.copytree(origin, target, ignore=FIXTURE_IGNORE)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(origin, target)
     env = _git_env(top / "git-home")
     git = str(SYSTEM_GIT)
     run([git, "init", "-q", "--template=", str(src)], env=env)
     run([git, "-C", str(src), "add", "-A"], env=env)
     run([git, "-C", str(src), "commit", "-q", "-m", "fixture"], env=env)
     sha = run([git, "-C", str(src), "rev-parse", "HEAD"], env=env).strip()
-    bare = top / "fixture.git"
+    bare = top / f"{name}.git"
     run([git, "clone", "-q", "--bare", "--no-local", str(src), str(bare)], env=env)
     return bare, sha
 
