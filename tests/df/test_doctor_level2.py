@@ -1010,7 +1010,19 @@ def _directory(path: Path) -> None:
     path.mkdir()
 
 
-@pytest.mark.parametrize("spoil", [_chmod_000, _fifo, _directory])
+@pytest.mark.parametrize(
+    "spoil",
+    [
+        pytest.param(
+            _chmod_000,
+            marks=pytest.mark.skipif(
+                os.geteuid() == 0, reason="root reads a 0o000 file: not unreadable"
+            ),
+        ),
+        _fifo,
+        _directory,
+    ],
+)
 def test_unreadable_products_is_unavailable(l2: L2, spoil: object) -> None:
     """R13-12, with real objects: a `products.toml` that cannot be read is
     «данные недоступны» for 7 and 8-10, never «не зарегистрирован»."""
@@ -1137,3 +1149,120 @@ def test_corrupt_file_of_the_same_operator_is_broken(l2: L2) -> None:
     path.chmod(0o440)
     status, reason = status_of(l2, "roles.sudoers")
     assert status == "нарушено" and "текст не совпадает" in reason
+
+
+# --- fix round 3: recheck minors ---
+
+
+def _planted(lay: Layout, caller: str) -> str:
+    launch_cmd = lay.libexec / "df-launch"
+    return f"{caller} ALL=(df-exec) NOPASSWD: NOSETENV: {launch_cmd} df-exec check\n"
+
+
+def _rewrite_sudoers(text: str) -> None:
+    path = sudoers.SUDOERS_FILE
+    path.chmod(0o640)
+    path.write_text(text)
+    path.chmod(0o440)
+
+
+def test_installed_operator_needs_exactly_one_rule(l2: L2) -> None:
+    """A planted second `df-exec check` rule makes the name ambiguous."""
+    text = sudoers.render(l2.lay, OPERATOR)
+    head, sep, rest = text.partition(f"{OPERATOR} ALL=(df-exec)")
+    planted = head + _planted(l2.lay, "mallory") + sep + rest
+    assert sudoers.installed_operator(planted, l2.lay) is None
+    assert sudoers.installed_operator(text + _planted(l2.lay, OPERATOR), l2.lay) is None
+
+
+@pytest.mark.parametrize("caller", [OPERATOR, "bob"])
+def test_planted_rule_is_broken_not_another_operator(
+    l2: L2, monkeypatch: pytest.MonkeyPatch, caller: str
+) -> None:
+    """mallory's rule before alice's: «нарушено», never «укажите --operator
+    mallory», whoever runs doctor."""
+    text = sudoers.render(l2.lay, OPERATOR)
+    head, sep, rest = text.partition(f"{OPERATOR} ALL=(df-exec)")
+    _rewrite_sudoers(head + _planted(l2.lay, "mallory") + sep + rest)
+    status, reason = status_of(l2, "roles.sudoers", operator=caller)
+    assert status == "нарушено"
+    assert "mallory" not in reason and "текст не совпадает" in reason
+
+
+def test_other_operator_keeps_operator_free_problems(
+    l2: L2, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """alice's file checked by bob, with the publisher's output in sudo's I/O
+    log: «нарушено» with that problem and the operator note."""
+    io = "sudo -l -U df-exec: /opt/df/libexec/df-publish: log_output"
+    monkeypatch.setattr(sudoers, "io_log_problems", lambda _l: [io])
+    asked: list[tuple[str, str]] = []
+
+    def policy(name: str, *, layout: Layout, operator: str) -> list[str]:
+        asked.append((name, operator))
+        return []
+
+    monkeypatch.setattr(sudoers, "policy_problems", policy)
+    c = l2.level2(operator="bob")["roles.sudoers"]
+    assert c.status == "нарушено"
+    note = (
+        f"файл установлен для оператора {OPERATOR}, проверка для bob — "
+        f"укажите --operator {OPERATOR}"
+    )
+    assert c.problems == (io, note)
+    names = ["df-exec", "df-review", "df-publisher", "df-build"]
+    assert asked == [(n, OPERATOR) for n in names]
+
+
+def test_other_operator_keeps_policy_and_visudo_problems(
+    l2: L2, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sudoers, "validate", lambda _t: ["syntax error"])
+    monkeypatch.setattr(
+        sudoers,
+        "policy_problems",
+        lambda n, **_k: ["лишнее правило"] if n == "df-review" else [],
+    )
+    c = l2.level2(operator="bob")["roles.sudoers"]
+    assert c.status == "нарушено"
+    assert any("syntax error" in p for p in c.problems)
+    assert "лишнее правило" in c.problems
+    assert "укажите --operator" in c.problems[-1]
+
+
+def test_other_operator_read_is_bounded(
+    l2: L2, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file beyond the expected text plus the margin is not read: the
+    name is unknown (`None`), so the check stays «нарушено»."""
+    path = sudoers.SUDOERS_FILE
+    text = sudoers.render(l2.lay, OPERATOR)
+    other = doctor._other_operator  # noqa: SLF001
+    assert other(l2.lay, path, "bob") == OPERATOR
+    big = text + "#" * (doctor.SUDOERS_MARGIN + 4096) + "\n"
+    _rewrite_sudoers(big)
+    read: list[int] = []
+    real = os.read
+
+    def counting(fd: int, n: int) -> bytes:
+        read.append(n)
+        return real(fd, n)
+
+    monkeypatch.setattr(os, "read", counting)
+    assert other(l2.lay, path, "bob") is None
+    monkeypatch.setattr(os, "read", real)
+    limit = len(sudoers.render(l2.lay, "bob").encode()) + doctor.SUDOERS_MARGIN + 1
+    assert sum(read) <= limit
+    status, reason = status_of(l2, "roles.sudoers", operator="bob")
+    assert status == "нарушено" and "укажите" not in reason
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["--operator", OPERATOR], ["--probe-models", "--operator", OPERATOR]],
+)
+def test_operator_without_product_is_a_usage_error(
+    fake_installed: World, capsys: pytest.CaptureFixture[str], argv: list[str]
+) -> None:
+    assert run_doctor(fake_installed, argv) == 2
+    assert "doctor: --operator только с --product" in capsys.readouterr().err

@@ -113,13 +113,17 @@ def render(layout: Layout, operator: str) -> str:
 
 def installed_operator(text: str, layout: Layout) -> str | None:
     """The operator a `render` text was made for: the caller of its
-    `df-launch df-exec check` rule; `None` when no line has that form."""
+    `df-launch df-exec check` rule, only when exactly one line has that form
+    (a second one, even planted, makes the name ambiguous: `None`)."""
     check = f"{_command(layout, 'df-launch')} df-exec check"
+    callers = []
     for line in text.splitlines():
         caller, sep, rest = line.partition(" ALL=(df-exec) NOPASSWD: NOSETENV: ")
-        if sep and rest.split(",")[0] == check and _USER_NAME.fullmatch(caller):
-            return caller
-    return None
+        if sep and rest.split(",")[0] == check:
+            callers.append(caller)
+    if len(callers) != 1 or not _USER_NAME.fullmatch(callers[0]):
+        return None
+    return callers[0]
 
 
 def expected_grants(layout: Layout, operator: str) -> dict[str, frozenset[Grant]]:

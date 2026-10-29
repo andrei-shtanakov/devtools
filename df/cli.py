@@ -527,8 +527,10 @@ def _doctor(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
 
     `--probe-models` with `--json` is a usage error in v1. `--product P` adds
     level 2 of P; the operator is `--operator`, else `SUDO_USER`, as for
-    `roles setup` (`_given_operator`, R13-10); without `--product` it is not
-    used."""
+    `roles setup` (`_given_operator`, R13-10); `--operator` without
+    `--product` is a usage error."""
+    if args.operator is not None and args.product is None:
+        raise UsageError("doctor: --operator только с --product")
     if args.probe_models:
         if args.json:
             raise UsageError("doctor --probe-models: --json не поддерживается")

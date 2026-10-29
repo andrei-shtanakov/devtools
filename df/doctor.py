@@ -666,6 +666,8 @@ PERIMETER_WARN = 9_000
 MIN_FREE = 64 * 1024 * 1024
 NO_OPERATOR = "оператор неизвестен (нет --operator, SUDO_USER не задан)"
 _LEVEL1_FIRST = "уровень 1 не достигнут"
+#: What `_other_operator` reads beyond the expected sudoers text.
+SUDOERS_MARGIN = 64 * 1024
 UNREGISTERED = "продукт не зарегистрирован"
 NO_MODEL_ACCESS = "доступ к моделям не подтверждён"
 TRUST_STAGE3 = "источники доверия: не проверено (этап 3)"
@@ -772,36 +774,70 @@ def _sudoers(ctx: _Level2) -> str:
     accepts that text (the same bytes); the effective policy of five names
     (decision 13: the roles, `df-build`, the operator); the I/O log."""
     operator = _operator(ctx)
-    text = sudoers.render(ctx.layout, operator)
+    path = sudoers.SUDOERS_FILE
+    problems = _sudoers_text_problems(ctx.layout, operator)
+    other = None
+    if any(libexec.TEXT_MISMATCH in p for p in problems):
+        other = _other_operator(ctx.layout, path, operator)
+    if other is not None:  # judge the file as `other`'s, without the operator
+        problems = _sudoers_text_problems(ctx.layout, other)
+    names = (*roles.ROLE_USERS, plat.BUILD_USER)
+    for name in names if other is not None else (*names, operator):
+        problems += sudoers.policy_problems(
+            name, layout=ctx.layout, operator=other or operator
+        )
+    problems += sudoers.io_log_problems(ctx.layout)
+    if other is None and not problems:
+        return ""
+    note = (
+        f"файл установлен для оператора {other}, проверка для {operator} — "
+        f"укажите --operator {other}"
+    )
+    if not problems:
+        raise _Outcome(UNAVAILABLE, note)
+    raise _broken([*problems, note] if other is not None else problems)
+
+
+def _sudoers_text_problems(layout: Layout, operator: str) -> list[str]:
+    """The installed file is root's `0440` text of `render(operator)`, and
+    `visudo` accepts that text (the same bytes)."""
+    text = sudoers.render(layout, operator)
     path = sudoers.SUDOERS_FILE
     problems = libexec.root_file_problems(path, text, roles_setup.SUDOERS_MODE)
-    if any(libexec.TEXT_MISMATCH in p for p in problems):
-        _other_operator(ctx.layout, path, operator)
-    if not problems:
-        problems = [f"{path}: {p}" for p in sudoers.validate(text)]
-    for name in (*roles.ROLE_USERS, plat.BUILD_USER, operator):
-        problems += sudoers.policy_problems(name, layout=ctx.layout, operator=operator)
-    problems += sudoers.io_log_problems(ctx.layout)
-    if problems:
-        raise _broken(problems)
-    return ""
+    return problems or [f"{path}: {p}" for p in sudoers.validate(text)]
 
 
-def _other_operator(layout: Layout, path: Path, operator: str) -> None:
-    """R13-10: a file installed for another operator is not a broken one:
-    the check cannot judge it for `operator` (data unavailable, with the
-    name to pass). A file that names no operator, or this one, is broken."""
-    try:
-        text = read_optional(path)
-    except ConfigError:
-        return
+def _other_operator(layout: Layout, path: Path, operator: str) -> str | None:
+    """R13-10: the operator another than `operator` the installed file was
+    rendered for, named unambiguously (`installed_operator`); `None` when the
+    file names none, this one, or cannot be read within its bound."""
+    cap = len(sudoers.render(layout, operator).encode("utf-8")) + SUDOERS_MARGIN
+    text = _bounded_text(path, cap)
     installed = None if text is None else sudoers.installed_operator(text, layout)
-    if installed is not None and installed != operator:
-        raise _Outcome(
-            UNAVAILABLE,
-            f"файл установлен для оператора {installed}, проверка для "
-            f"{operator} — укажите --operator {installed}",
-        )
+    return installed if installed != operator else None
+
+
+def _bounded_text(path: Path, cap: int) -> str | None:
+    """At most `cap` bytes of a regular file opened without following a
+    link (`digest.open_regular`); larger, unreadable or not UTF-8 is `None`."""
+    try:
+        fd = digest.open_regular(path)
+    except (OSError, TreeError):
+        return None
+    try:
+        data = b""
+        while len(data) <= cap and (chunk := os.read(fd, cap + 1 - len(data))):
+            data += chunk
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    if len(data) > cap:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
 def _operator(ctx: _Level2) -> str:
