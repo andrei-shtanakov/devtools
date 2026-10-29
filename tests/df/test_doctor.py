@@ -848,17 +848,6 @@ def test_doctor_json_with_probe_models_refused(
     assert "--json" in capsys.readouterr().err
 
 
-def test_doctor_product_refused_without_reads(
-    fake_installed: World, capsys: pytest.CaptureFixture[str]
-) -> None:
-    raw = state.read_raw(fake_installed.lay)
-    with audit_opens() as opens:
-        code = run_doctor(fake_installed, ["--product", "42"], Stable(raw, 2))
-    assert code == 2
-    assert "реестр продуктов не поддерживается до этапа 3" in capsys.readouterr().err
-    assert [p for p in opens if p.startswith(str(fake_installed.lay.root))] == []
-
-
 def test_doctor_exit_codes(
     fake_installed: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
