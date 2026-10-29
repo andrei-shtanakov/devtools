@@ -41,6 +41,7 @@ from tests.df.conftest import stage1_out
 from tests.df.fake_github import Installation
 from tests.df.observe import observe_root_access
 from tests.df.roles_world import (
+    BASE_ENV,
     FIXTURE_FROM_CHECKOUT,
     INSTALLATION_ID,
     IOLOG_FILE,
@@ -180,17 +181,27 @@ def no_rule(rw: RolesWorld, role: str, words: list[str]) -> bool:
     the command is not allowed (exit 1), while the same listing of the
     role's permitted `perimeter-status` says it is (exit 0)."""
 
+    seen: dict[str, object] = {}
+
     def listed(args: list[str]) -> int:
         argv = [SUDO, "-n", "-l", "-U", role, "-u", PUBLISHER]
-        result = plat.run_command([*argv, rw.wrapper("df-publish"), *args])
+        argv += [rw.wrapper("df-publish"), *args]
+        result = plat.run_command(argv, env=BASE_ENV)
         if not result.launched:
             infra(f"sudo -l -U {role}: не запустился")
+        seen[" ".join(argv)] = [
+            result.returncode,
+            result.stdout.decode("utf-8", "replace"),
+            result.stderr.decode("utf-8", "replace"),
+        ]
         return result.returncode
 
     control = listed(["perimeter-status"])
+    verdict = listed(words)
+    evidence(f"no-rule-{role}-{'-'.join(words)}.json", seen)
     if control != 0:
-        infra(f"sudo -l -U {role} perimeter-status: код {control}, ждали 0")
-    return listed(words) == 1
+        infra(f"sudo -l -U {role} perimeter-status: код {control}, ждали 0: {seen}")
+    return verdict == 1
 
 
 def answered(done: subprocess.CompletedProcess[bytes], sender: int) -> Response:
