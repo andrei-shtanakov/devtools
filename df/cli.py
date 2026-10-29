@@ -7,10 +7,9 @@ the layout of its own root (`layout=`, D2), bootstrap may omit it (then
 the snapshot the entry read under the lock it holds; bootstrap takes the
 lock, settles and reads the snapshot itself. Subcommands: `init` and
 `install` (Task 9); `models list|set` (Task 10); `doctor --probe-models`
-(Task 11); `doctor [--product P] [--json]` (Tasks 12, 13, `df.doctor`);
-`cli set openssl PATH`
-(stage 2a, Task 4a); `perimeter restore --from PATH | --empty
-[--set-aside-old]` (stage 2a, Task 11r); `setup-agent app-key --app-id N
+(Task 11); `doctor [--product P [--operator NAME]] [--json]` (Tasks 12, 13,
+`df.doctor`); `cli set openssl PATH` (stage 2a, Task 4a); `perimeter
+restore --from PATH | --empty [--set-aside-old]` (stage 2a, Task 11r); `setup-agent app-key --app-id N
 --file PATH | machine-token --file PATH` (stage 2a, Task 12).
 
 Exit codes (M7): 0 success; 2 a refusal or a configuration error, with the
@@ -294,6 +293,7 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     doctor.add_argument("--probe-models", action="store_true")
     doctor.add_argument("--product", type=models.repository_id)
     doctor.add_argument("--json", action="store_true")
+    doctor.add_argument("--operator")
     try:
         args = parser.parse_args(argv)
     except argparse.ArgumentError as exc:
@@ -522,12 +522,13 @@ def _perimeter_restore_role(args: argparse.Namespace, lay: Layout) -> int:
 
 
 def _doctor(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
-    """`doctor [--product P] [--json]` (Tasks 12, 13) or `doctor
-    --probe-models` (Task 11).
+    """`doctor [--product P [--operator NAME]] [--json]` (Tasks 12, 13) or
+    `doctor --probe-models` (Task 11).
 
     `--probe-models` with `--json` is a usage error in v1. `--product P` adds
-    level 2 of P; the operator is `SUDO_USER`, as `roles setup` takes it
-    (R13-2)."""
+    level 2 of P; the operator is `--operator`, else `SUDO_USER`, as for
+    `roles setup` (`_given_operator`, R13-10); without `--product` it is not
+    used."""
     if args.probe_models:
         if args.json:
             raise UsageError("doctor --probe-models: --json не поддерживается")
@@ -538,7 +539,7 @@ def _doctor(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
         euid=os.geteuid(),
         as_json=args.json,
         product=args.product,
-        operator=os.environ.get("SUDO_USER") or None,
+        operator=_given_operator(args),
     )
 
 
@@ -719,12 +720,17 @@ def _roles_setup(args: argparse.Namespace, lay: Layout, snap: Snapshot) -> int:
 
 
 def _operator_of(args: argparse.Namespace) -> str:
-    if args.operator is not None:  # an explicit "" is refused later, not replaced
-        return args.operator
-    operator = os.environ.get("SUDO_USER")
-    if not operator:
+    operator = _given_operator(args)
+    if operator is None:
         raise Refusal(_NO_OPERATOR)
     return operator
+
+
+def _given_operator(args: argparse.Namespace) -> str | None:
+    """`--operator`, else `SUDO_USER`; `None` without either."""
+    if args.operator is not None:  # an explicit "" is refused later, not replaced
+        return args.operator
+    return os.environ.get("SUDO_USER") or None
 
 
 def _warn_stale_wrappers(lay: Layout, release_id: str) -> None:

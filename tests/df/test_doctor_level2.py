@@ -30,7 +30,6 @@ from df import (
     models,
     probe,
     setup_agent,
-    stage2_config,
     state,
     sudoers,
 )
@@ -149,10 +148,7 @@ class L2:
         return self.w.lay
 
     def level2(self, operator: str | None = OPERATOR) -> dict[str, Check]:
-        second = doctor.level2(
-            snap(self.w), self.lay, PRODUCT, euid=os.geteuid(), operator=operator
-        )
-        return by_id(second.checks)
+        return by_id(level2_of(self, operator=operator).checks)
 
     def doctor(self, argv: list[str]) -> int:
         return run_doctor(self.w, ["--product", str(PRODUCT), *argv])
@@ -167,6 +163,18 @@ class L2:
             for rid, (prof, app, inst) in rows.items()
         }
         fsutil.write_atomic(self.lay.etc / "products.toml", dump_products(products))
+
+
+def level2_of(
+    world: L2, *, euid: int | None = None, operator: str | None = OPERATOR
+) -> doctor.Level2:
+    """`doctor.level2` over this world's level 1, as `doctor_main` runs it."""
+    s = snap(world.w)
+    uid = os.geteuid() if euid is None else euid
+    level1 = level1_checks(s, world.lay, euid=uid)
+    return doctor.level2(
+        s, world.lay, PRODUCT, euid=uid, operator=operator, level1=level1
+    )
 
 
 def green_report(lay: Layout, role: str) -> dict[str, object]:
@@ -407,11 +415,29 @@ def test_level1_not_reached_blocks_level2(
     assert out[1] == "уровень 2: не достигнут — уровень 1 не достигнут"
 
 
+def test_level1_not_reached_asks_nothing(
+    l2: L2, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R13-11 (as R72): over a broken level 1 -- here a tampered release, whose
+    code `df-launch` would run as the roles -- level 2 calls no role and no
+    publisher: every check and the line are «не проверено»."""
+    rid = os.readlink(l2.lay.current).removeprefix("releases/")
+    target = l2.lay.release_dir(rid) / "python" / ".lock"
+    target.write_text("changed")
+    second = level2_of(l2)
+    assert [(c.id, c.status, c.reason) for c in second.checks] == [
+        (i, "не проверено", "уровень 1 не достигнут") for i in LEVEL2_IDS
+    ]
+    assert (second.perimeter.status, second.perimeter.reason) == (
+        "не проверено",
+        "уровень 1 не достигнут",
+    )
+    assert l2.calls == []
+
+
 def test_non_root_level2_needs_sudo_and_asks_nothing(l2: L2) -> None:
     """R13-3: without root every level-2 check is «нужен sudo»."""
-    second = doctor.level2(
-        snap(l2.w), l2.lay, PRODUCT, euid=os.geteuid() + 1, operator=OPERATOR
-    )
+    second = level2_of(l2, euid=os.geteuid() + 1)
     assert [(c.status, c.reason) for c in second.checks] == [
         ("данные недоступны", SUDO)
     ] * len(LEVEL2_IDS)
@@ -440,7 +466,7 @@ def test_sudoers_without_operator_unavailable(l2: L2) -> None:
     checks = l2.level2(operator=None)
     assert (checks["roles.sudoers"].status, checks["roles.sudoers"].reason) == (
         "данные недоступны",
-        "оператор неизвестен (SUDO_USER не задан)",
+        "оператор неизвестен (нет --operator, SUDO_USER не задан)",
     )
     assert checks["roles.isolation"].status == "данные недоступны"
     assert "SUDO_USER" in checks["roles.isolation"].reason
@@ -759,9 +785,7 @@ def test_app_self_check_failures(l2: L2, out: bytes | Exception, status: str) ->
 
 
 def test_self_check_asked_once_per_run(l2: L2) -> None:
-    second = doctor.level2(
-        snap(l2.w), l2.lay, PRODUCT, euid=os.geteuid(), operator=OPERATOR
-    )
+    second = level2_of(l2)
     assert second.perimeter.status == "ok"
     assert [c for c in l2.calls if c[0] == "self-check"] == [("self-check", "doctor")]
 
@@ -810,26 +834,20 @@ def test_perimeter_line(
 ) -> None:
     problems = ("perimeter_unavailable: lost",) if stats is None else ()
     l2.self_check = self_check_answer(stats=stats, problems=problems)
-    second = doctor.level2(
-        snap(l2.w), l2.lay, PRODUCT, euid=os.geteuid(), operator=OPERATOR
-    )
+    second = level2_of(l2)
     line = second.perimeter
     assert line.status == status and needle in line.reason, line
 
 
 def test_perimeter_line_normal_has_no_warning(l2: L2) -> None:
-    second = doctor.level2(
-        snap(l2.w), l2.lay, PRODUCT, euid=os.geteuid(), operator=OPERATOR
-    )
+    second = level2_of(l2)
     assert "предупреждение" not in second.perimeter.reason
 
 
 def test_perimeter_line_does_not_block_level2(l2: L2) -> None:
     """The line is operational, not a level-2 check (r4 N5)."""
     l2.self_check = self_check_answer(stats=PerimeterStats(10_001, 1, 1 << 30))
-    second = doctor.level2(
-        snap(l2.w), l2.lay, PRODUCT, euid=os.geteuid(), operator=OPERATOR
-    )
+    second = level2_of(l2)
     assert second.perimeter.status == "нарушено"
     level1 = level1_checks(snap(l2.w), l2.lay, euid=os.geteuid())
     assert doctor.level2_reached(level1, second.checks)
@@ -837,9 +855,7 @@ def test_perimeter_line_does_not_block_level2(l2: L2) -> None:
 
 def test_perimeter_line_self_check_silent(l2: L2) -> None:
     l2.self_check = OSError("the call failed")
-    second = doctor.level2(
-        snap(l2.w), l2.lay, PRODUCT, euid=os.geteuid(), operator=OPERATOR
-    )
+    second = level2_of(l2)
     assert second.perimeter.status == "данные недоступны"
     assert "нет ответа" in second.perimeter.reason
 
@@ -945,9 +961,7 @@ def test_perimeter_problem_only_on_the_perimeter_line(l2: L2) -> None:
     """R13-8: `perimeter_unavailable` is the line's, not `github.app`'s."""
     problem = "perimeter_unavailable: lost"
     l2.self_check = self_check_answer(problems=(problem,), stats=None)
-    second = doctor.level2(
-        snap(l2.w), l2.lay, PRODUCT, euid=os.geteuid(), operator=OPERATOR
-    )
+    second = level2_of(l2)
     checks = by_id(second.checks)
     assert (checks["github.app"].status, checks["github.app"].reason) == (
         "ok",
@@ -982,27 +996,53 @@ def test_isolation_sibling_installation_is_no_evidence(l2: L2) -> None:
     assert status_of(l2, "roles.isolation")[0] == "не проверено"
 
 
-@pytest.mark.parametrize(
-    "error,status",
-    [
-        (PermissionError(errno.EACCES, "Permission denied"), "данные недоступны"),
-        (ConfigError("bad schema"), "не проверено"),
-    ],
-)
-def test_unreadable_products_is_not_unregistered(
-    l2: L2, monkeypatch: pytest.MonkeyPatch, error: Exception, status: str
-) -> None:
-    """m3: 8-10 name check 7's reason, never «продукт не зарегистрирован»."""
+def _chmod_000(path: Path) -> None:
+    path.chmod(0o000)
 
-    def load(_path: Path) -> dict[int, Product]:
-        raise error
 
-    monkeypatch.setattr(stage2_config, "load_products", load)
-    checks = l2.level2()
+def _fifo(path: Path) -> None:
+    path.unlink()
+    os.mkfifo(path)
+
+
+def _directory(path: Path) -> None:
+    path.unlink()
+    path.mkdir()
+
+
+@pytest.mark.parametrize("spoil", [_chmod_000, _fifo, _directory])
+def test_unreadable_products_is_unavailable(l2: L2, spoil: object) -> None:
+    """R13-12, with real objects: a `products.toml` that cannot be read is
+    «данные недоступны» for 7 and 8-10, never «не зарегистрирован»."""
+    path = l2.lay.etc / "products.toml"
+    spoil(path)  # type: ignore[operator]
+    try:
+        checks = l2.level2()
+    finally:
+        if path.is_file():
+            path.chmod(0o644)
+    registered = checks["product.registered"]
+    assert registered.status == "данные недоступны"
+    assert registered.reason.startswith("products.toml:")
     for name in ("github.machine_user", "github.app", "models.access"):
-        assert checks[name].status == status
+        assert checks[name].status == "данные недоступны"
         assert checks[name].reason.startswith("product.registered: products.toml:")
-    assert checks["product.registered"].status != "ok"
+
+
+@pytest.mark.parametrize("text", ["schema = 1\n", b"\xff\xfe"])
+def test_malformed_products_is_broken(l2: L2, text: str | bytes) -> None:
+    """R13-12: text that does not parse (or decode) is «нарушено»; 8-10 are
+    «не проверено» with 7's reason."""
+    path = l2.lay.etc / "products.toml"
+    if isinstance(text, bytes):
+        path.write_bytes(text)
+    else:
+        path.write_text(text)
+    checks = l2.level2()
+    assert checks["product.registered"].status == "нарушено"
+    for name in ("github.machine_user", "github.app", "models.access"):
+        assert checks[name].status == "не проверено"
+        assert checks[name].reason.startswith("product.registered: products.toml:")
 
 
 def test_machine_user_rate_limited_unavailable(l2: L2) -> None:
@@ -1040,3 +1080,60 @@ def test_transitional_with_product(
     else:
         assert out.splitlines()[1] == "уровень 2: не достигнут — уровень 1 не достигнут"
     assert l2.calls == []
+
+
+# --- fix round 2: the operator of the installed sudoers file (R13-10) ---
+
+
+def test_installed_operator_named_by_its_check_rule(l2: L2) -> None:
+    assert sudoers.installed_operator(sudoers.render(l2.lay, "alice"), l2.lay) == (
+        "alice"
+    )
+    assert sudoers.installed_operator("alice ALL=(ALL) ALL\n", l2.lay) is None
+
+
+def test_file_of_another_operator_is_unavailable_with_the_hint(
+    l2: L2, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`roles setup --operator alice`, then `sudo doctor` by bob: the file is
+    not broken, the check cannot judge it for bob."""
+    monkeypatch.setenv("SUDO_USER", "bob")
+    capsys.readouterr()
+    assert l2.doctor(["--json"]) == 2
+    data = json.loads(capsys.readouterr().out)
+    sudo = next(c for c in data["level2_checks"] if c["id"] == "roles.sudoers")
+    hint = (
+        f"файл установлен для оператора {OPERATOR}, проверка для bob — "
+        f"укажите --operator {OPERATOR}"
+    )
+    assert (sudo["status"], sudo["reason"]) == ("данные недоступны", hint)
+
+
+def test_operator_flag_wins_over_sudo_user(
+    l2: L2, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R13-10: `--operator alice` > `SUDO_USER=bob`; the gh probe is alice's."""
+    monkeypatch.setenv("SUDO_USER", "bob")
+    asked: list[str] = []
+
+    def operator_gh(operator: str) -> Path:
+        asked.append(operator)
+        return l2.gh_dir
+
+    monkeypatch.setattr(doctor, "operator_gh", operator_gh)
+    capsys.readouterr()
+    assert l2.doctor(["--operator", OPERATOR]) == 0
+    assert capsys.readouterr().out.splitlines()[1] == "уровень 2: достигнут"
+    assert asked == [OPERATOR]
+
+
+def test_corrupt_file_of_the_same_operator_is_broken(l2: L2) -> None:
+    """The negative twin: the file names this operator but differs."""
+    path = sudoers.SUDOERS_FILE
+    path.chmod(0o640)
+    text = path.read_text()
+    assert " merge," in text
+    path.write_text(text.replace(" merge,", " merge-any,", 1))
+    path.chmod(0o440)
+    status, reason = status_of(l2, "roles.sudoers")
+    assert status == "нарушено" and "текст не совпадает" in reason

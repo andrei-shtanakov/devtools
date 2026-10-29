@@ -208,7 +208,7 @@ def doctor_main(
 ) -> int:
     """`darkfactory doctor [--product P] [--json]`: level 1, warnings, the
     models section; with `product` also level 2 of P and the perimeter line
-    (`operator`: `SUDO_USER`, R13-2).
+    (`operator`: `--operator`, else `SUDO_USER`, R13-10).
 
     `Transitional(g)`: only the transitional state, nothing of a snapshot is
     used. `Stable`: the snapshot as a reader parses it (`parse_snapshot`).
@@ -225,7 +225,7 @@ def doctor_main(
         render = render_json if as_json else render_text
         print(render(checks, probes, notes))
         return EXIT_REACHED if level1_reached(checks) else EXIT_NOT_REACHED
-    second = level2(snap, layout, product, euid=euid, operator=operator)
+    second = level2(snap, layout, product, euid=euid, operator=operator, level1=checks)
     render2 = render_json_product if as_json else render_text_product
     print(render2(checks, second, probes, notes))
     reached = level2_reached(checks, second.checks)
@@ -664,7 +664,8 @@ MODEL_ROLES = ("df-exec", "df-review")
 PERIMETER_WARN = 9_000
 #: Free space under which the perimeter line warns.
 MIN_FREE = 64 * 1024 * 1024
-NO_OPERATOR = "оператор неизвестен (SUDO_USER не задан)"
+NO_OPERATOR = "оператор неизвестен (нет --operator, SUDO_USER не задан)"
+_LEVEL1_FIRST = "уровень 1 не достигнут"
 UNREGISTERED = "продукт не зарегистрирован"
 NO_MODEL_ACCESS = "доступ к моделям не подтверждён"
 TRUST_STAGE3 = "источники доверия: не проверено (этап 3)"
@@ -703,21 +704,35 @@ class _Level2(_Context):
 
 
 def level2(
-    snap: Snapshot, layout: Layout, product: int, *, euid: int, operator: str | None
+    snap: Snapshot,
+    layout: Layout,
+    product: int,
+    *,
+    euid: int,
+    operator: str | None,
+    level1: Sequence[Check],
 ) -> Level2:
     """The checks of level 2 for `product` (spec 2.4), in report order, and
     the perimeter line. Root only (R13-3): otherwise every check is
-    «данные недоступны: нужен sudo» and nothing is asked."""
+    «данные недоступны: нужен sudo». Only over a reached `level1` (R13-11,
+    as R72): otherwise every check is «не проверено: уровень 1 не
+    достигнут». In both cases nothing is asked -- no role runs release code
+    a broken level 1 may have changed."""
     if euid != ROOT_UID:
-        checks = [Check(i, UNAVAILABLE, NEED_SUDO, _now()) for i in LEVEL2_IDS]
-        line = Check(PERIMETER_ID, UNAVAILABLE, NEED_SUDO, _now())
-        return Level2(product, checks, line, None)
+        return _unasked(product, UNAVAILABLE, NEED_SUDO)
+    if not level1_reached(level1):
+        return _unasked(product, NOT_CHECKED, _LEVEL1_FIRST)
     ctx = _Level2(snap, layout, True, product=product, operator=operator)
     checks = [_run(i, check, ctx) for i, check in _LEVEL2]
     line = _run(PERIMETER_ID, _perimeter, ctx)
     products = ctx.products
     entry = products.get(product) if isinstance(products, dict) else None
     return Level2(product, checks, line, None if entry is None else entry.profile)
+
+
+def _unasked(product: int, status: Status, reason: str) -> Level2:
+    checks = [Check(i, status, reason, _now()) for i in LEVEL2_IDS]
+    return Level2(product, checks, Check(PERIMETER_ID, status, reason, _now()), None)
 
 
 def level2_reached(level1: Sequence[Check], checks: Sequence[Check]) -> bool:
@@ -760,6 +775,8 @@ def _sudoers(ctx: _Level2) -> str:
     text = sudoers.render(ctx.layout, operator)
     path = sudoers.SUDOERS_FILE
     problems = libexec.root_file_problems(path, text, roles_setup.SUDOERS_MODE)
+    if any(libexec.TEXT_MISMATCH in p for p in problems):
+        _other_operator(ctx.layout, path, operator)
     if not problems:
         problems = [f"{path}: {p}" for p in sudoers.validate(text)]
     for name in (*roles.ROLE_USERS, plat.BUILD_USER, operator):
@@ -770,8 +787,26 @@ def _sudoers(ctx: _Level2) -> str:
     return ""
 
 
+def _other_operator(layout: Layout, path: Path, operator: str) -> None:
+    """R13-10: a file installed for another operator is not a broken one:
+    the check cannot judge it for `operator` (data unavailable, with the
+    name to pass). A file that names no operator, or this one, is broken."""
+    try:
+        text = read_optional(path)
+    except ConfigError:
+        return
+    installed = None if text is None else sudoers.installed_operator(text, layout)
+    if installed is not None and installed != operator:
+        raise _Outcome(
+            UNAVAILABLE,
+            f"файл установлен для оператора {installed}, проверка для "
+            f"{operator} — укажите --operator {installed}",
+        )
+
+
 def _operator(ctx: _Level2) -> str:
-    """R13-2: the operator is `SUDO_USER`, as `roles setup` takes it."""
+    """R13-10: the operator is `doctor --operator`, else `SUDO_USER` (the
+    precedence of `roles setup`)."""
     if not ctx.operator:
         raise _Outcome(UNAVAILABLE, NO_OPERATOR)
     try:
@@ -1004,17 +1039,29 @@ def _lookup(ctx: _Level2) -> stage2_config.Product:
     # snapshot; once `setup-repo` writes it, withhold a verdict during a live
     # write (`_writing`), as `etc.schemas` does for `publisher.toml`.
     if ctx.products is None:
-        try:
-            ctx.products = stage2_config.load_products(ctx.layout.etc / "products.toml")
-        except (ConfigError, OSError) as exc:
-            status = BROKEN if isinstance(exc, ConfigError) else UNAVAILABLE
-            ctx.products = _Outcome(status, f"products.toml: {exc}")
+        ctx.products = _read_products(ctx.layout.etc / "products.toml")
     if isinstance(ctx.products, _Outcome):
         raise ctx.products
     product = ctx.products.get(ctx.product)
     if product is None:
         raise _Outcome(BROKEN, f"{UNREGISTERED}: {ctx.product} нет в products.toml")
     return product
+
+
+def _read_products(path: Path) -> dict[int, stage2_config.Product] | _Outcome:
+    """R13-12: a file that cannot be read (open, not a regular file, read)
+    is «данные недоступны»; text that does not parse or decode is
+    «нарушено». Absent is no products."""
+    try:
+        text = read_optional(path)
+    except ConfigError as exc:
+        if not isinstance(exc.__cause__, UnicodeDecodeError):
+            return _Outcome(UNAVAILABLE, f"products.toml: {exc}")
+        return _Outcome(BROKEN, f"products.toml: {exc}")
+    try:
+        return {} if text is None else stage2_config.parse_products(text)
+    except ConfigError as exc:
+        return _Outcome(BROKEN, f"products.toml: {exc}")
 
 
 def _registered(ctx: _Level2) -> stage2_config.Product:
