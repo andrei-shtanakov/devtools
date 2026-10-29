@@ -666,7 +666,10 @@ def test_run_start_no_release_code_before_drop(rw: RolesWorld) -> None:
 
 
 #: Inserted after `from __future__ import annotations` of the release's
-#: `launch_release.py`: what the process is at its first statement.
+#: `launch_release.py` (`phase` "start": what the process is at its first
+#: statement) and before its first class (`phase` "imports", evidence only:
+#: the descriptors its imports opened, with their targets where `/proc`
+#: names them — finding F3).
 START_SENTINEL = """
 import json as _df_acc_json
 import os as _df_acc_os
@@ -678,10 +681,18 @@ for _df_acc_fd in range(3, 1024):
     except OSError:
         continue
     _df_acc_fds.append(_df_acc_fd)
+_df_acc_targets = {{}}
+for _df_acc_fd in _df_acc_fds:
+    try:
+        _df_acc_targets[_df_acc_fd] = _df_acc_os.readlink(f"/proc/self/fd/{{_df_acc_fd}}")
+    except OSError:
+        _df_acc_targets[_df_acc_fd] = None
 with open({log!r}, "a") as _df_acc_out:
     _df_acc_out.write(
         _df_acc_json.dumps(
             {{
+                "phase": {phase!r},
+                "targets": _df_acc_targets,
                 "uid": _df_acc_os.getuid(),
                 "euid": _df_acc_os.geteuid(),
                 "cwd": _df_acc_os.getcwd(),
@@ -693,6 +704,7 @@ with open({log!r}, "a") as _df_acc_out:
     )
 """
 _FUTURE = "from __future__ import annotations\n"
+_FIRST_CLASS = "\nclass Refused(Exception):"
 
 
 def test_launch_release_sees_clean_start(rw: RolesWorld) -> None:
@@ -706,7 +718,12 @@ def test_launch_release_sees_clean_start(rw: RolesWorld) -> None:
     text = original.decode("utf-8")
     if _FUTURE not in text:
         infra(f"{script}: нет {_FUTURE.strip()!r}")
-    patched = text.replace(_FUTURE, _FUTURE + START_SENTINEL.format(log=str(log)), 1)
+    if _FIRST_CLASS not in text:
+        infra(f"{script}: нет {_FIRST_CLASS.strip()!r}")
+    start = START_SENTINEL.format(log=str(log), phase="start")
+    after = START_SENTINEL.format(log=str(log), phase="imports")
+    patched = text.replace(_FUTURE, _FUTURE + start, 1)
+    patched = patched.replace(_FIRST_CLASS, after + _FIRST_CLASS, 1)
     # the caller (the operator's shell) opens fd 9 itself and keeps it
     # across its `exec` of the command
     shell = "exec 9</dev/null; [ -e /dev/fd/9 ] && echo fd9-open >&2; "
@@ -725,7 +742,9 @@ def test_launch_release_sees_clean_start(rw: RolesWorld) -> None:
     work = str(launch.role_cwd(rw.layout, "df-exec"))
     # `env` at the first statement is evidence only (doctor's isolation
     # check judges the report's, finding F3)
-    seen = [{k: v for k, v in start.items() if k != "env"} for start in starts]
+    first = [s for s in starts if s.get("phase") == "start"]
+    keep = ("uid", "euid", "cwd", "fds")
+    seen = [{k: s[k] for k in keep} for s in first]
     assert seen == [{"uid": uid, "euid": uid, "cwd": work, "fds": []}]
 
 
