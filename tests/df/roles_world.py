@@ -1,11 +1,14 @@
 """The world of the stage-2a root acceptance (Task 14; spec 4.5 without merge).
 
 Runs only as root in the disposable CI runners (the root gate of
-`tests/df/conftest.py` skips it elsewhere). One world per module:
+`tests/df/conftest.py` skips it elsewhere). One world per module, in the
+production layout `/` (R14-8: the release's own code, `launch_release`, has
+no other root, so a `<R>` world cannot run a role's operation):
 
-1. stage 1's root world (`root_world.make_world`) and one committed install
-   (`install_once`) of the fixture repo, which holds `FIXTURE_FROM_CHECKOUT`
-   of this checkout (R14-3: defined here once, Task 15 imports it);
+1. the approved uv copied to the README's `UV_DIR`, then one committed
+   `bootstrap init` (in process, as stage 1's `installed_world`) of the
+   fixture repo, which holds `FIXTURE_FROM_CHECKOUT` of this checkout
+   (R14-3: defined here once, Task 15 imports it);
 2. as the operator `runner` through its own `sudo`: `darkfactory cli set
    openssl`, `darkfactory roles setup --operator runner`;
 3. root writes the fixture `products.toml` (product 1, App 1) and points
@@ -18,11 +21,12 @@ Runs only as root in the disposable CI runners (the root gate of
    release and fixture run records in `runs/` (r1 N11: marked
    `"fixture": true` in the evidence).
 
-The teardown deletes the roles, `/etc/sudoers.d/df` (and the I/O-log file
-of the tests), the operator's `gh` fixture if this world made it, and `<R>`
-with `df-build` (`root_world.teardown_world`), then checks that no record of
-a role is left. A failure of the world, of a launch or of an observer is
-`pytest.fail("инфраструктура: …")`, never a PASS or a skip.
+Nothing of it may exist before (`require_clean_host`). The teardown deletes
+the roles, `/etc/sudoers.d/df` (and the I/O-log file of the tests), the
+operator's `gh` fixture if this world made it, `df-build`, `/opt/df`,
+`/etc/df`, `/var/lib/df`, `UV_DIR`, the homes and the command's link, then
+checks that nothing is left. A failure of the world, of a launch or of an
+observer is `pytest.fail("инфраструктура: …")`, never a PASS or a skip.
 
 Processes "of a role" are started by direct drop (`as_user`: `setgid`,
 `setgroups`, `setuid` in the child, no `sudo` around them), so the `sudo`
@@ -52,9 +56,10 @@ from typing import Literal
 
 import pytest
 
-from df import fsutil, journal, models, perimeter_client, roles, run_start, sudoers
+from df import cli, fsutil, journal, models, perimeter_client, roles, run_start, sudoers
 from df import platform as plat
 from df.config import ReleaseEntry, dump_releases, load_accounts, parse_releases
+from df.lockset import UV_PINNED_VERSION
 from df.paths import Layout
 from df.publisher import request
 from df.publisher.request import BadResponse, Response
@@ -76,12 +81,12 @@ from tests.df.fake_github import (
 from tests.df.root_world import (
     FixtureRepo,
     InstalledWorld,
+    RootWorld,
+    assert_committed,
     current_id,
     infra,
-    install_once,
-    make_world,
     remove_service_user,
-    teardown_world,
+    run,
     write_evidence,
 )
 
@@ -114,6 +119,13 @@ BASE_ENV: Mapping[str, str] = {
 #: Host labels of the committed diagnostics (as `fixtures/sudo-l/`).
 HOST = "mac-mini" if plat.detect_platform() == "macos-arm64" else "ubuntu-ci"
 OS_DIR = "macos" if plat.detect_platform() == "macos-arm64" else "linux"
+#: The world is the production layout (R14-8): the release's own code
+#: (`launch_release`) knows no other root.
+PRODUCTION = Layout(Path("/"))
+#: README «Утверждённые CLI»: where the approved uv lives.
+UV_DIR = Path("/usr/local/libexec/darkfactory/bin")
+#: Accounts the world creates (absent before it, removed after it).
+ACCOUNTS = (plat.BUILD_USER, *roles.ROLE_USERS)
 #: The second `sudoers.d` file of the I/O-log rows; sorts after `df`.
 IOLOG_FILE = sudoers.SUDOERS_FILE.with_name("zz-df-acc-iolog")
 TIMEOUT = 300
@@ -575,13 +587,14 @@ def evidence(name: str, data: object) -> None:
 
 
 def require_clean_host() -> None:
-    """A leftover file or role is someone else's: refuse, touch nothing."""
-    for path in (sudoers.SUDOERS_FILE, IOLOG_FILE):
+    """A leftover of an install, a role or a sudoers file is someone else's:
+    refuse, touch nothing."""
+    for path in (sudoers.SUDOERS_FILE, IOLOG_FILE, *owned_paths(PRODUCTION)):
         if os.path.lexists(path):
             infra(f"{path} уже есть")
-    leftover = [name for name in roles.ROLE_USERS if _known(name)]
+    leftover = [name for name in ACCOUNTS if _known(name)]
     if leftover:
-        infra(f"роли остались от прошлого прогона: {leftover}")
+        infra(f"учётки остались от прошлого прогона: {leftover}")
     if not _known(OPERATOR):
         infra(f"нет учётки оператора {OPERATOR}")
 
@@ -606,16 +619,13 @@ def roles_world(
 ) -> Iterator[RolesWorld]:
     """The module's world (module doc); torn down whatever happens."""
     require_clean_host()
-    world = make_world(top, repo, control_url)
+    layout = PRODUCTION
     with ExitStack() as stack:
-        stack.callback(teardown_world, world, keep)
-        stack.callback(teardown_roles, world.layout)
-        from df import install  # the pin is substituted for this install only
-
-        with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(install, "_profile", lambda _cfg: world.profile())
-            installed = install_once(world)
-        work = top / f"roles-{world.layout.root.name}"
+        stack.callback(teardown_install, layout, keep)
+        stack.callback(teardown_roles, layout)
+        world = RootWorld(layout, repo, approved_uv(), top, control_url)
+        installed = install_production(world)
+        work = top / "roles"
         work.mkdir(mode=0o755)
         os.chmod(work, 0o755)
         key, public = make_app_key(work)
@@ -626,6 +636,40 @@ def roles_world(
         stack.callback(remove_created, rw)
         set_up(rw, key)
         yield rw
+
+
+def approved_uv() -> Path:
+    """The pinned uv (the runner's) copied root `0755` to `UV_DIR`, the
+    README's place of the approved uv (R88's copy, in `/`)."""
+    found = shutil.which("uv")
+    if found is None:
+        infra("uv не найден на PATH")
+    assert found is not None
+    copy = UV_DIR / "uv"
+    run(["/usr/bin/install", "-d", "-o", "root", "-m", "0755", str(UV_DIR)])
+    run(["/usr/bin/install", "-o", "root", "-m", "0755", found, str(copy)])
+    version = run([str(copy), "--version"]).split()
+    if version[1:2] != [UV_PINNED_VERSION]:
+        infra(f"uv {version}: нужен {UV_PINNED_VERSION}")
+    return copy
+
+
+def install_production(world: RootWorld) -> InstalledWorld:
+    """`bootstrap init` of the fixture pin (R91's substitution of the
+    profile, for this install only) into `/`; a refusal fails the module."""
+    from df import install
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(install, "_profile", lambda _cfg: world.profile())
+        code = world.bootstrap(world.init_argv())
+    if code != cli.EXIT_OK:
+        infra(f"установка в /: код {code}")
+    assert_committed(world.layout)
+    rid = current_id(world.layout)
+    if rid is None:
+        infra("установка в /: нет current")
+    assert rid is not None
+    return InstalledWorld(world, rid)
 
 
 def make_app_key(work: Path) -> tuple[Path, Path]:
@@ -723,6 +767,32 @@ def teardown_roles(layout: Layout) -> None:
     left = [name for name in roles.ROLE_USERS if _known(name)]
     if left or any(os.path.lexists(p) for p in (IOLOG_FILE, sudoers.SUDOERS_FILE)):
         infra(f"после теста остались роли {left} или файлы sudoers ({layout.root})")
+
+
+def owned_paths(layout: Layout) -> list[Path]:
+    """What the world makes in `/` (absent before it, removed after it)."""
+    homes = [layout.role_home(name) for name in ACCOUNTS]
+    return [layout.opt, layout.etc, layout.var, UV_DIR.parent, *homes]
+
+
+def teardown_install(layout: Layout, keep: Path | None) -> None:
+    """The install in `/`: the journal kept as evidence, `df-build`'s
+    processes and records, the trees of `owned_paths`, the command's link;
+    anything left is an infrastructure failure."""
+    if keep is not None and layout.journal.exists():
+        keep.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(layout.journal, keep)
+    if _known(plat.BUILD_USER):
+        plat.reap_user_processes(plat.BUILD_USER)
+    remove_service_user(plat.BUILD_USER)
+    link = layout.local_bin / layout.launcher.name
+    if os.path.islink(link) and os.readlink(link) == str(layout.launcher):
+        os.unlink(link)
+    for path in owned_paths(layout):
+        shutil.rmtree(path, ignore_errors=True)
+    left = [str(p) for p in owned_paths(layout) if os.path.lexists(p)]
+    if left or _known(plat.BUILD_USER):
+        infra(f"после теста остались {left} или {plat.BUILD_USER}")
 
 
 def install_sudoers_file(path: Path, text: str) -> None:

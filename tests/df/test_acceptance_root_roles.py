@@ -732,8 +732,8 @@ def test_launch_cwd_outside_builder_tree(rw: RolesWorld) -> None:
     control (macOS): a direct `sudo …/df-launch` from the same directory —
     the unsupported form — is seen opening it."""
     world = rw.installed.world
-    builder = world.builder_dir(rw.layout.root / "builder-cwd", "true")
-    control = world.control_dir()
+    builder = world.builder_dir(world.top / "builder-cwd", "true")
+    control = world.builder_dir(world.top / "observe-control", "echo c > f")
     out = stage1_out()
     launcher = str(rw.layout.launcher)
     calls = {
@@ -748,7 +748,7 @@ def test_launch_cwd_outside_builder_tree(rw: RolesWorld) -> None:
             [builder],
             control=control,
             workdir=world.workdir(),
-            scope=rw.layout.root,
+            scope=world.top,
             record=record,
         ) as obs:
             # the operator enters the directory itself: no root `chdir`
