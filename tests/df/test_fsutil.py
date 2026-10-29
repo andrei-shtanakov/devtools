@@ -604,13 +604,31 @@ SUBPROCESS_CREATORS = {
         "the publisher's own protocol (its state and the perimeter database); "
         "the client keeps only stdout"
     ),
-    "sudo df-publish self-check (setup-agent app-key, root)": (
+    "sudo df-publish self-check (setup-agent app-key, doctor; root)": (
         "the publisher's own protocol (self-check reads the keys and the "
         "perimeter database, writes its journal); root keeps only stdout"
     ),
-    "sudo df-launch df-exec check-github (setup-agent machine-token)": (
+    "sudo df-launch df-exec check-github (setup-agent machine-token, doctor)": (
         "launch exec of the role: GETs to GitHub with the token, creates "
         "nothing; root keeps stdout and the stderr tail"
+    ),
+    "sudo df-launch <role> check (doctor roles.isolation, root)": (
+        "launch exec of the role: check_report only opens and stats (fds, "
+        "the foreign paths), creates nothing; root keeps stdout"
+    ),
+    "sudo -u df-exec test -r (doctor roles.isolation, root)": (
+        "creates nothing: access(2) of one path as the role; root keeps the "
+        "exit code and the stderr tail"
+    ),
+    "sudo -u <role> sudo df-publish perimeter-status (doctor, root)": (
+        "the publisher's own protocol through the role's own sudo rule; the "
+        "probe run is unknown, so it refuses before the idempotency store; "
+        "root keeps only stdout"
+    ),
+    "sudo -u df-review sudo df-publish merge (doctor publisher.foreign)": (
+        "expected to be refused by sudo before df-publish runs (no rule); if "
+        "sudo let it through, df-publish refuses the empty request; root "
+        "keeps the exit code and stdout length"
     ),
     "darkfactory publisher perimeter-restore (restore, as df-publisher)": (
         "protocol restore of the role (Task 11r): its own files under "
@@ -624,9 +642,10 @@ SUBPROCESS_CREATORS = {
 #: `test_every_process_start_is_named` until it is named there.
 PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
     ("fsutil", "_sysctl_boot_id", "subprocess.run", 1): ("sysctl (boot id)",),
-    # run_command (root; setup-agent's check-github), run_as (df-build,
-    # df-publisher; with stdin for perimeter restore), run_with_input
-    # (df-publisher; the roles, perimeter client, setup-agent's self-check)
+    # run_command (root; setup-agent's and doctor's check-github, doctor's
+    # role check and test -r), run_as (df-build, df-publisher; with stdin for
+    # perimeter restore), run_with_input (df-publisher; the roles, perimeter
+    # client, setup-agent's and doctor's self-check, doctor's nested calls)
     ("platform", "_execute", "subprocess.Popen", 1): (
         "openssl dgst -sign (publisher App JWT)",
         "uv python install (admin)",
@@ -638,8 +657,12 @@ PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
         "darkfactory publisher perimeter-init (roles setup, as df-publisher)",
         "sudo df-publish perimeter-status (perimeter client)",
         "darkfactory publisher perimeter-restore (restore, as df-publisher)",
-        "sudo df-publish self-check (setup-agent app-key, root)",
-        "sudo df-launch df-exec check-github (setup-agent machine-token)",
+        "sudo df-publish self-check (setup-agent app-key, doctor; root)",
+        "sudo df-launch df-exec check-github (setup-agent machine-token, doctor)",
+        "sudo df-launch <role> check (doctor roles.isolation, root)",
+        "sudo -u df-exec test -r (doctor roles.isolation, root)",
+        "sudo -u <role> sudo df-publish perimeter-status (doctor, root)",
+        "sudo -u df-review sudo df-publish merge (doctor publisher.foreign)",
     ),
     ("platform", "spawn_as", "subprocess.Popen", 1): (
         "tar -cf - (copy producer, as df-build)",

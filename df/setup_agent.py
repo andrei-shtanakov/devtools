@@ -406,12 +406,13 @@ def _account(layout: Layout, name: str) -> Account:
 # --- post-write checks ------------------------------------------------------
 
 
-def publisher_self_check(layout: Layout) -> bytes:
+def publisher_self_check(layout: Layout, *, purpose: str = STEP) -> bytes:
     """`df-publish self-check` from root (`sudo -n -u df-publisher`); its
-    stdout. No answer is `OSError`. The tests' seam."""
+    stdout. No answer is `OSError`. `purpose` prefixes the request id
+    (`setup-agent`, `doctor`). The tests' seam."""
     payload = {
         "schema": request.REQUEST_SCHEMA,
-        "request_id": f"setup-agent-{uuid.uuid4().hex}",
+        "request_id": f"{purpose}-{uuid.uuid4().hex}",
     }
     data = json.dumps(payload, sort_keys=True).encode("utf-8")
     return perimeter_client.sudo_call(

@@ -101,7 +101,7 @@ def status(
     last = "no attempt"
     for _ in range(attempts):
         try:
-            resp = _ask(ask, _payload(run_id, root_id, trust, request_id))
+            resp = _ask(ask, payload(run_id, root_id, trust, request_id))
         except _NoAnswer as exc:
             last = str(exc)
             continue  # the same request again
@@ -124,7 +124,9 @@ def _new_id() -> str:
     return f"perimeter-{uuid.uuid4().hex}"
 
 
-def _payload(run_id: str, root_id: RootId, trust: TrustView, request_id: str) -> bytes:
+def payload(run_id: str, root_id: RootId, trust: TrustView, request_id: str) -> bytes:
+    """The `perimeter-status` request (`df/publisher-request/v1`) as bytes;
+    `doctor`'s probe (Task 13) builds its request here too."""
     data = {
         "schema": request.REQUEST_SCHEMA,
         "request_id": request_id,
@@ -175,6 +177,7 @@ __all__ = [
     "PerimeterState",
     "RootId",
     "TrustView",
+    "payload",
     "status",
     "sudo_call",
 ]
