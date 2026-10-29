@@ -217,11 +217,14 @@ def as_user(
     stdin: bytes = b"",
     env: Mapping[str, str] | None = None,
     cwd: Path = Path("/"),
+    exact_env: bool = False,
 ) -> subprocess.CompletedProcess[bytes]:
     """`argv` as `name` by direct drop (its own group only): the process is
-    the account, and no `sudo` session wraps it."""
+    the account, and no `sudo` session wraps it. `env` is added to
+    `BASE_ENV` and the account's `HOME`, or with `exact_env` is the whole
+    environment."""
     pw = pwd.getpwnam(name)
-    base = {**BASE_ENV, "HOME": pw.pw_dir}
+    base = {} if exact_env else {**BASE_ENV, "HOME": pw.pw_dir}
     return _run(
         argv,
         stdin=stdin,
@@ -834,13 +837,30 @@ def teardown_roles(layout: Layout) -> None:
             os.unlink(path)
         except FileNotFoundError:
             pass
-    for name in roles.ROLE_USERS:
-        if _known(name):
-            plat.reap_user_processes(name)
-        remove_service_user(name)
+    root_owned = [name for name in roles.ROLE_USERS if not reap_safely(name)]
     left = [name for name in roles.ROLE_USERS if _known(name)]
+    if root_owned:
+        infra(f"учётки с UID 0 после теста (удалены без reap): {root_owned}")
     if left or any(os.path.lexists(p) for p in (IOLOG_FILE, sudoers.SUDOERS_FILE)):
         infra(f"после теста остались роли {left} или файлы sudoers ({layout.root})")
+
+
+def reap_safely(name: str) -> bool:
+    """Reap `name`'s processes, then remove its records; `False` when it
+    has UID 0: `pkill -u` would then kill every root process (this run too),
+    so it is removed unreaped (`userdel -f`) and the caller fails (the guard
+    of `root_world.teardown_world`)."""
+    try:
+        uid = pwd.getpwnam(name).pw_uid
+    except KeyError:
+        uid = None
+    if uid == 0:
+        remove_service_user(name, force=True)
+        return False
+    if uid is not None:
+        plat.reap_user_processes(name)
+    remove_service_user(name)
+    return True
 
 
 def owned_paths(layout: Layout) -> list[Path]:
@@ -856,15 +876,15 @@ def teardown_install(layout: Layout, keep: Path | None) -> None:
     if keep is not None and layout.journal.exists():
         keep.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(layout.journal, keep)
-    if _known(plat.BUILD_USER):
-        plat.reap_user_processes(plat.BUILD_USER)
-    remove_service_user(plat.BUILD_USER)
+    build_ok = reap_safely(plat.BUILD_USER)
     link = command_link(layout)
     if os.path.islink(link) and os.readlink(link) == str(layout.launcher):
         os.unlink(link)
     for path in owned_paths(layout):
         shutil.rmtree(path, ignore_errors=True)
     left = [str(p) for p in (link, *owned_paths(layout)) if os.path.lexists(p)]
+    if not build_ok:
+        infra(f"{plat.BUILD_USER} с UID 0 после теста (удалён без reap)")
     if left or _known(plat.BUILD_USER) or df_groups():
         infra(f"после теста остались {left}, {plat.BUILD_USER} или {df_groups()}")
 

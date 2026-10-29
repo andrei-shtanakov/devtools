@@ -627,29 +627,130 @@ def test_request_id_reused_refused(rw: RolesWorld) -> None:
     ), shown(done)
 
 
-def test_one_uid_limit(rw: RolesWorld) -> None:
-    """Row 13 (a limit, not a protection, spec 5.8): a `df-exec` process of
-    the revoked run naming the `allowed` run's `run_id` gets what that run
-    gets — the publisher's own checks, nothing more; the normal `df-launch
-    run` of the revoked run is refused."""
-    as_allowed = status_of(rw, "df-exec", rw.allowed_run, new_request_id("row13a"))
-    as_revoked = status_of(rw, "df-exec", rw.allowed_run, new_request_id("row13b"))
-    assert (as_allowed.outcome, dict(as_allowed.result)) == (
-        as_revoked.outcome,
-        dict(as_revoked.result),
+#: A `df-exec` process of a run (row 13): it takes its `run_id` on stdin, as
+#: `df-run-start` hands it to `df-launch run`, then asks `perimeter-status`
+#: through its own `sudo` for each `(named run, request)` of argv[1]; prints
+#: what it was and what it got.
+RUN_CONTEXT = """
+import json, os, subprocess, sys
+own = sys.stdin.readline().strip()
+answers = []
+for named, data in json.loads(sys.argv[1]):
+    argv = ["/usr/bin/sudo", "-n", "-u", "df-publisher", sys.argv[2], "perimeter-status"]
+    done = subprocess.run(argv, input=data.encode(), capture_output=True)
+    answers.append({"named": named, "rc": done.returncode,
+                    "stdout": done.stdout.decode(), "stderr": done.stderr.decode()})
+print(json.dumps({"run_id": own, "uid": os.getuid(), "cwd": os.getcwd(),
+                  "env": sorted(os.environ), "answers": answers}))
+"""
+
+
+def run_context(rw: RolesWorld, own: str, named: list[str]) -> dict[str, object]:
+    """A `df-exec` process in the context of run `own`: the role's UID, the
+    environment and working directory `launch.role_env` / `launch.role_cwd`
+    give its pipeline, `own` on stdin; the release interpreter of `current`
+    runs it (a revoked fixture release has no tree). The real `sudo` →
+    `df-publish` path for each request naming a run of `named`."""
+    python = rw.installed.release / "venv" / "devtools" / "bin" / "python"
+    asks = [[n, status_request(n, new_request_id("row13")).decode()] for n in named]
+    done = as_user(
+        "df-exec",
+        [
+            str(python),
+            "-I",
+            "-c",
+            RUN_CONTEXT,
+            json.dumps(asks),
+            rw.wrapper("df-publish"),
+        ],
+        stdin=f"{own}\n".encode(),
+        env=launch.role_env(rw.layout, "df-exec"),
+        cwd=launch.role_cwd(rw.layout, "df-exec"),
+        exact_env=True,
     )
+    if done.returncode != 0:
+        infra(f"процесс прогона {own}: {shown(done)}")
+    found = json.loads(done.stdout)
+    assert found["run_id"] == own and found["uid"] == rw.uid("df-exec"), found
+    assert found["cwd"] == str(launch.role_cwd(rw.layout, "df-exec")), found
+    return found
+
+
+def answer_of(found: dict[str, object], i: int) -> Response:
+    """The `i`-th answer of a run context, parsed as the clients do."""
+    answers = found["answers"]
+    assert isinstance(answers, list)
+    item = answers[i]
+    out = subprocess.CompletedProcess(
+        [], item["rc"], item["stdout"].encode(), item["stderr"].encode()
+    )
+    return response_of(out)
+
+
+def test_one_uid_limit(rw: RolesWorld) -> None:
+    """Row 13 (a limit, not a protection, spec 5.8): a `df-exec` process in
+    the context of the run on the revoked release (its run id on stdin, the
+    pipeline's env and cwd; built by the test, since `df-launch run` refuses
+    that run) naming the `allowed` run's `run_id` gets exactly what a
+    process of the allowed run gets — the publisher's own checks, nothing
+    more (1). Control: the same revoked-run process naming its own run is
+    refused `release_revoked` (2) — the publisher judges by the `run_id` of
+    the request, not by the caller. The normal `df-launch run` of the
+    revoked run is refused `release_revoked` (3)."""
+    allowed_ctx = run_context(rw, rw.allowed_run, [rw.allowed_run])
+    revoked_ctx = run_context(rw, rw.revoked_run, [rw.allowed_run, rw.revoked_run])
+    from_allowed = answer_of(allowed_ctx, 0)
+    from_revoked = answer_of(revoked_ctx, 0)
+    control = answer_of(revoked_ctx, 1)
     launched = launch_run(rw, rw.revoked_run)
-    assert launched.returncode == REFUSED and b"release_revoked" in launched.stderr
     evidence(
         "row13-one-uid-limit.json",
         {
             "kind": "предел гарантии (одна UID), не защита",
-            "allowed_run": rw.allowed_run,
-            "revoked_run": rw.revoked_run,
-            "answer": dict(as_revoked.result),
+            "contexts": {"allowed": allowed_ctx, "revoked": revoked_ctx},
+            "requests": [
+                {
+                    "sender_context": "allowed",
+                    "context_run": rw.allowed_run,
+                    "named_run": rw.allowed_run,
+                    "answer": [
+                        from_allowed.outcome,
+                        from_allowed.reason,
+                        dict(from_allowed.result),
+                    ],
+                },
+                {
+                    "sender_context": "revoked",
+                    "context_run": rw.revoked_run,
+                    "named_run": rw.allowed_run,
+                    "answer": [
+                        from_revoked.outcome,
+                        from_revoked.reason,
+                        dict(from_revoked.result),
+                    ],
+                },
+                {
+                    "sender_context": "revoked",
+                    "context_run": rw.revoked_run,
+                    "named_run": rw.revoked_run,
+                    "answer": [control.outcome, control.reason],
+                },
+            ],
             "df-launch run (revoked)": shown(launched),
         },
     )
+    sender = rw.uid("df-exec")
+    for resp in (from_allowed, from_revoked, control):
+        assert resp.evidence.get("sender") == sender, resp.evidence
+    no_binding(from_allowed)
+    assert (from_revoked.outcome, dict(from_revoked.result)) == (
+        from_allowed.outcome,
+        dict(from_allowed.result),
+    )
+    assert control.outcome == "refused", control
+    assert str(control.reason).startswith("release_revoked"), control
+    assert launched.returncode == REFUSED, shown(launched)
+    assert b"release_revoked" in launched.stderr, shown(launched)
 
 
 # ---------- row 14: sudo's I/O log ----------
