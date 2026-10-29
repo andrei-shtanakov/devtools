@@ -629,7 +629,8 @@ def test_request_id_reused_refused(rw: RolesWorld) -> None:
 
 #: A `df-exec` process of a run (row 13): it takes its `run_id` on stdin, as
 #: `df-run-start` hands it to `df-launch run`, then asks `perimeter-status`
-#: through its own `sudo` for each `(named run, request)` of argv[1]; prints
+#: through its own `sudo` for each `(named run, request)` of argv[1], called
+#: as `perimeter_client.sudo_call` calls it (`cwd` `/`, a timeout); prints
 #: what it was and what it got.
 RUN_CONTEXT = """
 import json, os, subprocess, sys
@@ -637,7 +638,8 @@ own = sys.stdin.readline().strip()
 answers = []
 for named, data in json.loads(sys.argv[1]):
     argv = ["/usr/bin/sudo", "-n", "-u", "df-publisher", sys.argv[2], "perimeter-status"]
-    done = subprocess.run(argv, input=data.encode(), capture_output=True)
+    done = subprocess.run(argv, input=data.encode(), capture_output=True,
+                          cwd="/", timeout=60)
     answers.append({"named": named, "rc": done.returncode,
                     "stdout": done.stdout.decode(), "stderr": done.stderr.decode()})
 print(json.dumps({"run_id": own, "uid": os.getuid(), "cwd": os.getcwd(),
