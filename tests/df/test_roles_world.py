@@ -78,6 +78,29 @@ def test_classify_sudo(rc: int, stderr: str, kind: str | None) -> None:
     assert classify_sudo(rc, stderr) == kind
 
 
+#: The class of each committed capture (`fixtures/sudo-diag/README.md`).
+CAPTURED = {
+    "df-review-merge": "password",
+    "df-exec-publish-review": "password",
+    "df-exec-extra-argument": "password",
+    "df-exec-self-check": "password",
+    "df-exec-sudo-E": "preserve-env",
+    "df-exec-preserve-env": "preserve-env",
+}
+CAPTURES = Path(__file__).parent / "fixtures" / "sudo-diag"
+
+
+@pytest.mark.parametrize("os_dir", ["macos", "linux"])
+def test_classify_sudo_on_captures(os_dir: str) -> None:
+    """R14-2: the classifier on the real diagnostics of both platforms;
+    every committed capture is listed."""
+    here = CAPTURES / os_dir
+    assert sorted(p.stem for p in here.glob("*.txt")) == sorted(CAPTURED)
+    for case, kind in CAPTURED.items():
+        rc = int((here / f"{case}.rc").read_text())
+        assert classify_sudo(rc, (here / f"{case}.txt").read_text()) == kind, case
+
+
 def test_password_wins_over_a_denial() -> None:
     """A diagnostic that asks for a password is never read as a denial."""
     text = "sudo: a password is required\nSorry, user x is not allowed to run y\n"

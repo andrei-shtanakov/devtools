@@ -128,12 +128,12 @@ def sudo_refused(
     rw: RolesWorld, case: str, done: subprocess.CompletedProcess[bytes], want: SudoDiag
 ) -> None:
     """The refusal of `done` is sudo's own, of mechanism `want` (R14-2): the
-    capture goes to `sudo-diag/<os>/<want>--<case>.txt`."""
+    capture goes to `sudo-diag/<os>/<case>.txt` (and `.rc`)."""
     text = done.stderr.decode("utf-8", "replace")
     form = fixture_form(text, rw.layout.root, host_names())
     out = stage1_out()
-    write_evidence(out, f"sudo-diag/{OS_DIR}/{want}--{case}.txt", form)
-    write_evidence(out, f"sudo-diag/{OS_DIR}/{want}--{case}.rc", f"{done.returncode}\n")
+    write_evidence(out, f"sudo-diag/{OS_DIR}/{case}.txt", form)
+    write_evidence(out, f"sudo-diag/{OS_DIR}/{case}.rc", f"{done.returncode}\n")
     kind = classify_sudo(done.returncode, text)
     if kind is None:
         infra(f"нераспознанная диагностика sudo ({case}): {shown(done)}")
@@ -685,6 +685,7 @@ with open({log!r}, "a") as _df_acc_out:
                 "euid": _df_acc_os.geteuid(),
                 "cwd": _df_acc_os.getcwd(),
                 "fds": _df_acc_fds,
+                "env": sorted(_df_acc_os.environ),
             }}
         )
         + "\\n"
@@ -721,7 +722,10 @@ def test_launch_release_sees_clean_start(rw: RolesWorld) -> None:
     assert done.returncode == 0, shown(done)
     uid = rw.uid("df-exec")
     work = str(launch.role_cwd(rw.layout, "df-exec"))
-    assert starts == [{"uid": uid, "euid": uid, "cwd": work, "fds": []}]
+    # `env` at the first statement is evidence only (doctor's isolation
+    # check judges the report's, finding F3)
+    seen = [{k: v for k, v in start.items() if k != "env"} for start in starts]
+    assert seen == [{"uid": uid, "euid": uid, "cwd": work, "fds": []}]
 
 
 def test_launch_cwd_outside_builder_tree(rw: RolesWorld) -> None:
