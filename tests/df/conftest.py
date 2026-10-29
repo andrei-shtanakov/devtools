@@ -68,6 +68,14 @@ def root_gate_reason(euid: int, env: Mapping[str, str]) -> str | None:
     return f"root-приёмка: нужны euid 0 и {ROOT_ACCEPTANCE_ENV}=1 (CI df-stage1)"
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """The `stage2a` marker (Task 14, R14-6): the stage-2a root acceptance,
+    run by its own CI job; the stage-1 root run deselects it."""
+    config.addinivalue_line(
+        "markers", "stage2a: stage-2a root acceptance (CI job stage2a, with root)"
+    )
+
+
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:

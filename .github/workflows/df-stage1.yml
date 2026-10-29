@@ -31,9 +31,14 @@ env:
   # Only `full` with an empty DF_STAGE1_K can be green: the scope guard (last
   # step) fails every other setting, so an iteration commit runs its narrowed
   # steps and its cell is red by design (PR #632 review).
-  DF_STAGE1_SCOPE: full
+  DF_STAGE1_SCOPE: probes
   # Optional `-k` expression of the root run while iterating; empty = all.
   DF_STAGE1_K: ""
+  # The job stage2a (<os>) (stage 2a Task 14, R14-6): full | off; only full
+  # with an empty DF_STAGE2A_K can be green (its own scope guard).
+  DF_STAGE2A_SCOPE: full
+  # Optional `-k` expression narrowing the stage-2a root run; empty = all.
+  DF_STAGE2A_K: ""
   # R78: a skip for a missing or unpinned uv fails the run.
   DF_REQUIRE_PINNED_UV: "1"
 
@@ -203,9 +208,11 @@ jobs:
             "UV_CACHE_DIR=$RUNNER_TEMP/uv-root" DF_ROOT_ACCEPTANCE=1
             "DF_STAGE1_OUT=$RUNNER_TEMP/df-stage1"
             DF_REQUIRE_PINNED_UV=1 PYTHONDONTWRITEBYTECODE=1
-            uv run --frozen --no-sync pytest -p no:cacheprovider -m root)
+            uv run --frozen --no-sync pytest -p no:cacheprovider
+            -m "root and not stage2a")
           # Collected in the same environment and selection: the guard below
-          # fails if any of them is missing from the junit (13-B review).
+          # fails if any of them is missing from the junit (13-B review). The
+          # stage-2a tests are the job stage2a's (R14-6).
           collected="$RUNNER_TEMP/df-stage1/root-collected.txt"
           "${as_root[@]}" --collect-only -q "${select[@]}" tests/df > "$collected"
           set +e
@@ -287,5 +294,108 @@ jobs:
           fi
           if [ -n "$DF_STAGE1_K" ]; then
             echo "::error title=scope guard::DF_STAGE1_K must be empty in full scope"
+            exit 1
+          fi
+
+  # Stage 2a, Task 14 (R14-6): root acceptance of spec 4.5 without merge, in
+  # a fresh runner of the same matrix, after stage1 (its result does not gate
+  # this job: an iteration narrows stage1 and stays red there). The tests
+  # carry the markers `root` and `stage2a`; the selection keeps the canary
+  # test_root_gate_open, and the junit guard checks collected vs run, as in
+  # stage1's root run. Evidence: artifact df-stage2a-<os>.
+  stage2a:
+    name: stage2a (${{ matrix.os }})
+    needs: stage1
+    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            arch: arm64
+          - os: ubuntu-24.04
+            arch: x86_64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    steps:
+      - name: arch check
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: test "$(uname -m)" = "$EXPECTED_ARCH"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.23"
+      # R96, as in stage1: the installed world builds with the CLT shims.
+      - name: select CommandLineTools (R96)
+        if: runner.os == 'macOS'
+        run: |
+          clt=/Library/Developer/CommandLineTools
+          fail() { echo "::error title=select CommandLineTools (R96)::$1"; exit 1; }
+          test -d "$clt" || fail "$clt absent"
+          sudo -n xcode-select -s "$clt" || fail "xcode-select -s failed"
+          test "$(xcode-select -p)" = "$clt" || fail "selection did not stick"
+      - run: uv python install 3.12
+      - run: uv sync --frozen
+      - name: verify CommandLineTools with df policy (R96)
+        if: runner.os == 'macOS'
+        run: >
+          PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -I -c "import sys;
+          sys.path.append('.'); from tests.df.ci_step0 import r96_main;
+          sys.exit(r96_main())"
+      # The stage-1 observer of the carried test_launch_cwd_outside_builder_tree
+      # needs auditd on Linux; its absence makes that test an xfail, a fact.
+      - name: install auditd (observer)
+        if: ${{ runner.os == 'Linux' && env.DF_STAGE2A_SCOPE == 'full' }}
+        continue-on-error: true
+        run: |
+          sudo -n apt-get update -qq
+          sudo -n apt-get install -y -qq --no-install-recommends auditd
+      - name: tests/df stage-2a root run
+        if: ${{ env.DF_STAGE2A_SCOPE == 'full' }}
+        run: |
+          out="$RUNNER_TEMP/df-stage2a"
+          mkdir -p "$out"
+          sudo -n install -d -m 0700 "$RUNNER_TEMP/root-home"
+          select=(-k "stage2a or test_root_gate_open")
+          if [ -n "$DF_STAGE2A_K" ]; then
+            select=(-k "(stage2a and ($DF_STAGE2A_K)) or test_root_gate_open")
+          fi
+          as_root=(sudo -n env "PATH=$PATH" "HOME=$RUNNER_TEMP/root-home"
+            "UV_CACHE_DIR=$RUNNER_TEMP/uv-root" DF_ROOT_ACCEPTANCE=1
+            "DF_STAGE1_OUT=$out"
+            DF_REQUIRE_PINNED_UV=1 PYTHONDONTWRITEBYTECODE=1
+            uv run --frozen --no-sync pytest -p no:cacheprovider -m root)
+          collected="$out/root-collected.txt"
+          "${as_root[@]}" --collect-only -q "${select[@]}" tests/df > "$collected"
+          set +e
+          "${as_root[@]}" -q -rs "${select[@]}" \
+            --junitxml "$out/junit-root.xml" tests/df
+          rc=$?
+          set -e
+          sudo -n chown -R "$(id -u):$(id -g)" "$out"
+          PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m tests.df.ci_junit \
+            "$out/junit-root.xml" --expect "$collected"
+          exit "$rc"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: df-stage2a-${{ matrix.os }}
+          path: ${{ runner.temp }}/df-stage2a
+          if-no-files-found: warn
+      - name: return RUNNER_TEMP to the runner
+        if: always()
+        run: sudo -n chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP"
+      - name: scope guard
+        if: always()
+        run: |
+          if [ "$DF_STAGE2A_SCOPE" != full ]; then
+            echo "::error title=scope guard::DF_STAGE2A_SCOPE is '$DF_STAGE2A_SCOPE'; only full can be green"
+            exit 1
+          fi
+          if [ -n "$DF_STAGE2A_K" ]; then
+            echo "::error title=scope guard::DF_STAGE2A_K must be empty in full scope"
             exit 1
           fi
