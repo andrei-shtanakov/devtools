@@ -38,7 +38,7 @@ env:
   # with an empty DF_STAGE2A_K can be green (its own scope guard).
   DF_STAGE2A_SCOPE: full
   # Optional `-k` expression narrowing the stage-2a root run; empty = all.
-  DF_STAGE2A_K: "foreign_operation_refused_by_sudo or self_check_only_root"
+  DF_STAGE2A_K: ""
   # R78: a skip for a missing or unpinned uv fails the run.
   DF_REQUIRE_PINNED_UV: "1"
 

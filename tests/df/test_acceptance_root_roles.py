@@ -146,10 +146,9 @@ def sudo_refused(
     runs (its journal has no new line). The capture goes to
     `sudo-diag/<os>/<case>.{txt,rc}` (R14-2). For `not-allowed`, R14-10:
     «a password is required» (`password-required`) counts as the refusal
-    `NO_RULE` only with exit 1, empty stdout and root's `sudo -n -l -U
-    <role> -u df-publisher <the same command>` exiting 1 (sudo's own policy:
-    no rule), its control (the role's permitted `perimeter-status`) exiting
-    0; any other «password required» is a wrong setup. The mechanism found
+    `NO_RULE` only with exit 1, empty stdout and sudo's own policy for the
+    role granting no rule for the same command while granting its control
+    (`no_rule`); any other «password required» is a wrong setup. The mechanism found
     is returned and kept in `sudo-diag/<os>/<case>.mechanism`."""
     before = len(rw.journal_lines())
     done = rw.publish(role, op, data, flags=flags, extra=extra)
@@ -177,49 +176,41 @@ def sudo_refused(
 
 
 def no_rule(rw: RolesWorld, role: str, words: list[str]) -> bool:
-    """Root's `sudo -n -l -U <role> -u df-publisher df-publish <words>` says
-    the command is not allowed (exit 1), while the same listing of the
-    role's permitted `perimeter-status` says it is (exit 0)."""
-
-    seen: dict[str, object] = {}
-
-    def listed(args: list[str]) -> int:
-        argv = [SUDO, "-n", "-l", "-U", role, "-u", PUBLISHER]
-        argv += [rw.wrapper("df-publish"), *args]
-        result = plat.run_command(argv, env=BASE_ENV)
-        if not result.launched:
-            infra(f"sudo -l -U {role}: не запустился")
-        seen[" ".join(argv)] = [
-            result.returncode,
-            result.stdout.decode("utf-8", "replace"),
-            result.stderr.decode("utf-8", "replace"),
-        ]
-        return result.returncode
-
-    control = listed(["perimeter-status"])
-    verdict = listed(words)
+    """sudo's own policy for `role` (`sudo -n -l -U <role>`, parsed by
+    `sudoers.read_listing`) grants no rule as `df-publisher` that covers
+    `df-publish <words>`, while it grants the role's `perimeter-status` (the
+    control). The command form `sudo -n -l -U <role> -u df-publisher <cmd>`
+    of R14-10 is recorded as evidence only: on macOS it exits 1 even for a
+    permitted command (CI run 40876804216, also as the role itself)."""
     publish = rw.wrapper("df-publish")
-    variants = {
-        "U-u-before-l": [SUDO, "-n", "-U", role, "-u", PUBLISHER, "-l", publish]
-        + ["perimeter-status"],
-        "no-u": [SUDO, "-n", "-l", "-U", role, publish, "perimeter-status"],
-        "ll": [SUDO, "-n", "-ll", "-U", role],
+    try:
+        listing = sudoers.read_listing(role)
+    except sudoers.ListingError as exc:
+        infra(f"sudo -l -U {role}: {exc}")
+        raise
+    grants = listing.grants | listing.carried
+
+    def covered(command: str) -> bool:
+        return any(
+            g.runas.split(":")[0].strip() in (PUBLISHER, "ALL")
+            and g.command in ("ALL", publish, command)
+            for g in grants
+        )
+
+    control, asked = f"{publish} perimeter-status", " ".join([publish, *words])
+    seen: dict[str, object] = {
+        "grants": sorted(str(g) for g in grants),
+        "control": [control, covered(control)],
+        "asked": [asked, covered(asked)],
     }
-    for name, argv in variants.items():
+    for name, args in (("control", ["perimeter-status"]), ("asked", words)):
+        argv = [SUDO, "-n", "-l", "-U", role, "-u", PUBLISHER, publish, *args]
         result = plat.run_command(argv, env=BASE_ENV)
-        seen[f"diag {name}"] = [
-            result.returncode,
-            result.stdout.decode("utf-8", "replace"),
-            result.stderr.decode("utf-8", "replace"),
-        ]
-    own = as_user(
-        role, [SUDO, "-n", "-l", "-u", PUBLISHER, publish, "perimeter-status"]
-    )
-    seen["diag as-role"] = [own.returncode, own.stdout.decode(), own.stderr.decode()]
+        seen[f"command form {name}"] = [" ".join(argv), result.returncode]
     evidence(f"no-rule-{role}-{'-'.join(words)}.json", seen)
-    if control != 0:
-        infra(f"sudo -l -U {role} perimeter-status: код {control}, ждали 0: {seen}")
-    return verdict == 1
+    if not covered(control):
+        infra(f"sudo -l -U {role}: нет правила {control}: {seen}")
+    return not covered(asked)
 
 
 def answered(done: subprocess.CompletedProcess[bytes], sender: int) -> Response:
