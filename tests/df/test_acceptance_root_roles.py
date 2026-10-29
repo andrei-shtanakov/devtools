@@ -175,6 +175,13 @@ def sudo_refused(
     return mechanism
 
 
+#: R14-10a: why the command form is evidence only on macOS.
+MACOS_COMMAND_FORM = (
+    "не судится: sudo 1.9.13 (macOS) отвечает кодом 1 и на разрешённую "
+    "команду (CI run 40876804216)"
+)
+
+
 def no_rule(rw: RolesWorld, role: str, words: list[str]) -> bool:
     """sudo's own policy for `role` (`sudo -n -l -U <role>`, parsed by
     `sudoers.read_listing`) grants no rule as `df-publisher` that covers
@@ -203,14 +210,21 @@ def no_rule(rw: RolesWorld, role: str, words: list[str]) -> bool:
         "control": [control, covered(control)],
         "asked": [asked, covered(asked)],
     }
+    codes: dict[str, int] = {}
     for name, args in (("control", ["perimeter-status"]), ("asked", words)):
         argv = [SUDO, "-n", "-l", "-U", role, "-u", PUBLISHER, publish, *args]
         result = plat.run_command(argv, env=BASE_ENV)
+        codes[name] = result.returncode
         seen[f"command form {name}"] = [" ".join(argv), result.returncode]
+    judged = plat.detect_platform() == "linux-x86_64"
+    seen["command form judged"] = judged or MACOS_COMMAND_FORM
     evidence(f"no-rule-{role}-{'-'.join(words)}.json", seen)
     if not covered(control):
         infra(f"sudo -l -U {role}: нет правила {control}: {seen}")
-    return not covered(asked)
+    if judged and codes["control"] != 0:
+        infra(f"sudo -l -U {role} … perimeter-status: код {codes['control']}")
+    form_ok = not judged or codes["asked"] == 1
+    return form_ok and not covered(asked)
 
 
 def answered(done: subprocess.CompletedProcess[bytes], sender: int) -> Response:
