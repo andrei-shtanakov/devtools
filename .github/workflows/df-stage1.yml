@@ -31,14 +31,14 @@ env:
   # Only `full` with an empty DF_STAGE1_K can be green: the scope guard (last
   # step) fails every other setting, so an iteration commit runs its narrowed
   # steps and its cell is red by design (PR #632 review).
-  DF_STAGE1_SCOPE: probes
+  DF_STAGE1_SCOPE: full
   # Optional `-k` expression of the root run while iterating; empty = all.
   DF_STAGE1_K: ""
   # The job stage2a (<os>) (stage 2a Task 14, R14-6): full | off; only full
   # with an empty DF_STAGE2A_K can be green (its own scope guard).
   DF_STAGE2A_SCOPE: full
   # Optional `-k` expression narrowing the stage-2a root run; empty = all.
-  DF_STAGE2A_K: "one_uid_limit"
+  DF_STAGE2A_K: ""
   # R78: a skip for a missing or unpinned uv fails the run.
   DF_REQUIRE_PINNED_UV: "1"
 
