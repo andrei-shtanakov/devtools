@@ -705,17 +705,16 @@ def test_launch_release_sees_clean_start(rw: RolesWorld) -> None:
     if _FUTURE not in text:
         infra(f"{script}: нет {_FUTURE.strip()!r}")
     patched = text.replace(_FUTURE, _FUTURE + START_SENTINEL.format(log=str(log)), 1)
-    held = os.open("/dev/null", os.O_RDONLY)
-    os.dup2(held, 9)
+    # the caller (the operator's shell) opens fd 9 itself and keeps it
+    # across its `exec` of the command
+    shell = "exec 9</dev/null; [ -e /dev/fd/9 ] && echo fd9-open >&2; "
+    shell += 'exec "$0" "$@"'
+    argv = ["/bin/sh", "-c", shell, str(rw.layout.launcher)]
     try:
         script.write_text(patched)
-        shell = 'if [ -e /dev/fd/9 ]; then echo fd9-open >&2; fi; exec "$0" "$@"'
-        argv = ["/bin/sh", "-c", shell, str(rw.layout.launcher)]
-        done = as_user(OPERATOR, [*argv, "launch", "df-exec", "check"], pass_fds=(9,))
+        done = as_user(OPERATOR, [*argv, "launch", "df-exec", "check"])
     finally:
         script.write_bytes(original)
-        os.close(9)
-        os.close(held)
     starts = [json.loads(line) for line in log.read_text().splitlines()]
     evidence("carry-launch-release-start.json", {"starts": starts, "run": shown(done)})
     assert b"fd9-open" in done.stderr, shown(done)
@@ -791,8 +790,9 @@ def small_fs(rw: RolesWorld, mountpoint: Path, uid: int, gid: int) -> Iterator[N
     else:
         image = rw.work / "perimeter.dmg"
         hdiutil = "/usr/bin/hdiutil"
+        # APFS: the file system `/var/lib/df` is on in a macOS install
         run(
-            [hdiutil, "create", "-size", "4m", "-fs", "HFS+", "-volname", "dfacc"]
+            [hdiutil, "create", "-size", "8m", "-fs", "APFS", "-volname", "dfacc"]
             + [str(image)]
         )
         run(

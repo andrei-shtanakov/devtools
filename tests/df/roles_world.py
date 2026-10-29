@@ -33,7 +33,8 @@ Processes "of a role" are started by direct drop (`as_user`: `setgid`,
 each of them runs is the role's own and nothing else's: an outer `sudo`
 session would hold a copy of the role's output in its I/O log. The
 operator's processes go through `sudo -n -u runner` (its groups as the
-host made them), except where a held descriptor must reach the call.
+host made them), except where root itself must not touch the caller's
+state: the caller's working directory and descriptors (direct drop too).
 """
 
 from __future__ import annotations
@@ -173,7 +174,6 @@ def as_user(
     stdin: bytes = b"",
     env: Mapping[str, str] | None = None,
     cwd: Path = Path("/"),
-    pass_fds: Sequence[int] = (),
 ) -> subprocess.CompletedProcess[bytes]:
     """`argv` as `name` by direct drop (its own group only): the process is
     the account, and no `sudo` session wraps it."""
@@ -184,7 +184,6 @@ def as_user(
         stdin=stdin,
         env={**base, **(env or {})},
         cwd=cwd,
-        pass_fds=pass_fds,
         user=pw.pw_uid,
         group=pw.pw_gid,
     )
@@ -207,7 +206,6 @@ def _run(
     stdin: bytes,
     env: Mapping[str, str],
     cwd: Path,
-    pass_fds: Sequence[int] = (),
     user: int | None = None,
     group: int | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
@@ -218,7 +216,6 @@ def _run(
             capture_output=True,
             env=dict(env),
             cwd=cwd,
-            pass_fds=tuple(pass_fds),
             user=user,
             group=group,
             extra_groups=None if group is None else [group],
