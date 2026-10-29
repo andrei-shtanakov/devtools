@@ -608,7 +608,8 @@ run` в sudoers нет: его вызывает `df-run-start` после сбр
   всегда «не поддерживается: изоляция не подтверждена»;
 - `launch_release.check_report() -> dict[str, object]` — `nonce` (128 случайных бит),
   `uid`, `euid`, `gid`,
-  `groups`, `env` (имена), `cwd`, `fds` (открытые дескрипторы > 2), `denied` (результат
+  `groups`, `env` (имена), `cwd`, `fds` (дескрипторы > 2, открытые на первых операторах модуля — унаследованные
+  от вызывающего, Task 14a F3), `denied` (результат
   попыток открыть фиксированный список чужих путей: `errno` по каждому).
 
 - [ ] **Step 1: Тесты** — `test_role_env_ignores_caller` (`SSH_AUTH_SOCK`, `GH_TOKEN`,
@@ -1190,7 +1191,8 @@ product_unknown`); перед каждой операцией — `self_check` (
 3. `roles.libexec` — `wrapper_problems` (включая путь административного Python текущего
    релиза);
 4. `roles.isolation` — для `df-exec` и `df-review` через `df-launch <role> check` (§8):
-   UID/GID равны `accounts.toml`, `fds` пуст, `env` ⊆ `ENV_ALLOW`, `denied` — `EACCES`
+   UID/GID равны `accounts.toml`, `fds` пуст, `env` ⊆ `ENV_ALLOW` ∪ имена, которые рантайм ОС ставит сам (Task 14a F3),
+   `denied` — `EACCES`
    по каждому пути списка роли (у `df-exec`: `secrets/`, `~df-review`, `~<оператор>/.config/gh`;
    у `df-review`: `secrets/`, токен machine user); для `df-publisher` — `self-check`
    отвечает и `secrets/app-<app_id>.pem` есть (через ответ, не чтением root);
@@ -1290,6 +1292,21 @@ evidence, r1 N11) → для отзыва — фикстурная правка 
 - [ ] **Step 5: Commit** `test(df): stage-2a root acceptance (§4.5 without merge)`
 
 ---
+
+### Task 14a: Находки root-приёмки F1/F3/F4 (правка `df`)
+
+Root-приёмка Task 14 на настоящих хостах CI нашла расхождения `df` с этим планом;
+исправлены отдельной задачей до слияния Task 14:
+- **F1:** отказ `df-launch run` — «доступ к моделям не подтверждён: <роль>: <причина>»
+  (Task 5, строка интерфейса `launch_release`); префикс один, роли через `; `.
+- **F3:** `roles.isolation` судит только унаследованное от вызывающего (спека §4.5,
+  чистый старт): `fds` — снимок на первых операторах `launch_release.py` до прочих
+  импортов (на Linux интерпретатор сам держит `/dev/urandom`); `env` допускает имена,
+  которые рантайм ОС ставит при старте интерпретатора — только `__CF_USER_TEXT_ENCODING`
+  и только на macOS.
+- **F4:** на заполненном томе macOS (APFS, HFS+) SQLite отвечает `SQLITE_CANTOPEN`
+  (журнал не создаётся); при записи `record-violation` каталог базы зондируется
+  временным файлом, `ENOSPC`/`EDQUOT` — `refused: storage_full`.
 
 ### Task 15: Живая приёмка на стенде, evidence, документация
 

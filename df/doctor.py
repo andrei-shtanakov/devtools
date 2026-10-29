@@ -917,10 +917,22 @@ def _role_report(layout: Layout, role: str, account: Account | None) -> list[_Pa
     return [(BROKEN, p) for p in problems]
 
 
+#: Names the OS runtime puts into a process's environment itself, at
+#: interpreter start: macOS's CoreFoundation sets `__CF_USER_TEXT_ENCODING`
+#: (the release's first statement sees it after an `execve` with exactly
+#: `launch.ENV_ALLOW`, plan Task 14a F3). Not inherited, so not a leak of
+#: the caller; accepted on that platform only.
+RUNTIME_ENV: dict[plat.PlatformName, frozenset[str]] = {
+    "macos-arm64": frozenset({"__CF_USER_TEXT_ENCODING"}),
+    "linux-x86_64": frozenset(),
+}
+
+
 def _env_problems(role: str, env: object) -> list[str]:
     if not isinstance(env, list):
         return [f"{role}: env не список"]
-    extra = sorted(str(n) for n in env if n not in launch.ENV_ALLOW)
+    allowed = {*launch.ENV_ALLOW, *RUNTIME_ENV[plat.detect_platform()]}
+    extra = sorted(str(n) for n in env if n not in allowed)
     return [f"{role}: лишние переменные окружения {extra}"] if extra else []
 
 

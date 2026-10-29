@@ -16,6 +16,7 @@ import errno
 import json
 import os
 from pathlib import Path
+from typing import get_args
 
 import pytest
 
@@ -528,6 +529,41 @@ def test_isolation_report_broken(
     l2.reports[role] = report
     status, reason = status_of(l2, "roles.isolation")
     assert status == "нарушено" and needle in reason
+
+
+CF_ENV = ["HOME", "LANG", "PATH", "TZ", "__CF_USER_TEXT_ENCODING"]
+
+
+@pytest.mark.parametrize(
+    ("platform", "ok"), [("macos-arm64", True), ("linux-x86_64", False)]
+)
+def test_runtime_env_on_macos_only(
+    monkeypatch: pytest.MonkeyPatch, platform: str, ok: bool
+) -> None:
+    """F3 (plan Task 14a): `__CF_USER_TEXT_ENCODING`, which the macOS runtime sets
+    in the release process itself, is accepted on macOS only; any other
+    extra name still breaks isolation there."""
+    monkeypatch.setattr(plat, "detect_platform", lambda: platform)
+    found = doctor._env_problems("df-exec", CF_ENV)  # noqa: SLF001
+    assert (found == []) is ok, found
+    other = doctor._env_problems("df-exec", [*CF_ENV, "DYLD_LIBRARY_PATH"])  # noqa: SLF001
+    assert len(other) == 1 and "DYLD_LIBRARY_PATH" in other[0]
+    assert ("__CF_USER_TEXT_ENCODING" in other[0]) is not ok
+
+
+def test_isolation_runtime_env_here(l2: L2) -> None:
+    """The same through `roles.isolation` on this host's platform."""
+    for role in ("df-exec", "df-review"):
+        report = green_report(l2.lay, role)
+        report["env"] = CF_ENV
+        l2.reports[role] = report
+    status, reason = status_of(l2, "roles.isolation")
+    on_macos = plat.detect_platform() == "macos-arm64"
+    assert (status == "ok") is on_macos, reason
+
+
+def test_runtime_env_covers_every_platform() -> None:
+    assert set(doctor.RUNTIME_ENV) == set(get_args(plat.PlatformName))
 
 
 @pytest.mark.parametrize(

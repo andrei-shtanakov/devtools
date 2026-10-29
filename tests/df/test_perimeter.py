@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import hashlib
 import multiprocessing as mp
@@ -954,6 +955,86 @@ def test_disk_full_refuses(
     assert (code, resp.outcome, resp.reason) == (2, "refused", "storage_full")
     assert rows(world.lay) == [("pending", None)]
     assert world.files("intents") and len(world.files("results")) == 2
+
+
+def _space(monkeypatch: pytest.MonkeyPatch, err: int | None, at: str) -> None:
+    """Inject `err` into the space probe's `open` or `write` (only the
+    probe's: other calls pass through)."""
+    real_open, real_write = os.open, os.write
+    probes: set[int] = set()
+
+    def open_(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        probe = ".space-probe." in str(path)
+        if probe and at == "open" and err is not None:
+            raise OSError(err, os.strerror(err))
+        fd = real_open(path, flags, *args, **kwargs)  # type: ignore[arg-type]
+        if probe:
+            probes.add(fd)
+        return fd
+
+    def write(fd: int, data: bytes) -> int:
+        if fd in probes and at == "write" and err is not None:
+            raise OSError(err, os.strerror(err))
+        return real_write(fd, data)
+
+    monkeypatch.setattr(os, "open", open_)
+    monkeypatch.setattr(os, "write", write)
+
+
+@pytest.mark.parametrize(
+    ("err", "at", "want"),
+    [
+        (errno.ENOSPC, "open", "storage_full"),
+        (errno.EDQUOT, "open", "storage_full"),
+        (errno.ENOSPC, "write", "storage_full"),
+        (errno.EACCES, "open", "sqlite: SQLITE_CANTOPEN"),
+        (None, "open", "sqlite: SQLITE_CANTOPEN"),
+    ],
+)
+def test_cantopen_on_a_full_directory_is_storage_full(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+    err: int | None,
+    at: str,
+    want: str,
+) -> None:
+    """F4 (plan Task 14a): SQLite says CANTOPEN when a full file system cannot even
+    take its journal (macOS); a probe of the directory tells `storage_full`
+    from any other CANTOPEN, and leaves nothing behind."""
+    base = world.lay.perimeter_dir
+    before = sorted(os.listdir(base))
+    _space(monkeypatch, err, at)
+    got = perimeter.full_or(Unavailable("sqlite: SQLITE_CANTOPEN"), base)
+    assert got.reason == want
+    assert sorted(os.listdir(base)) == before
+
+
+def test_full_or_probes_only_cantopen(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _space(monkeypatch, errno.ENOSPC, "open")
+    for reason in ("busy", "integrity", "sqlite: SQLITE_IOERR", "storage_full"):
+        assert (
+            perimeter.full_or(Unavailable(reason), world.lay.perimeter_dir).reason
+            == reason
+        )
+
+
+def test_disk_full_cantopen_refuses(
+    world: World, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The frame of F4: CANTOPEN while writing on a full directory is
+    `refused: storage_full` (as `SQLITE_FULL`), the committed event stays."""
+    frame_record(world, capsys)
+
+    def cantopen(*args: object, **kwargs: object) -> Response:
+        raise Unavailable("sqlite: SQLITE_CANTOPEN")
+
+    monkeypatch.setattr(perimeter, "record_violation", cantopen)
+    _space(monkeypatch, errno.ENOSPC, "open")
+    code, resp = frame_record(world, capsys, request_id="req-viol-0002")
+    assert (code, resp.outcome, resp.reason) == (2, "refused", "storage_full")
+    assert rows(world.lay) == [("pending", None)]
 
 
 def test_frame_record_kept_and_replayed(
