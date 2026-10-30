@@ -23,9 +23,10 @@ failure, step H2), a fixture run record (as Task 14: `run start` stops at
 the probes in v1), the rows, the cleanup (row 9), the revocation of the
 installation tokens it was given (`DELETE /installation/token`, best
 effort, logged) and the host teardown; the evidence is scanned for every
-in-process secret whatever happens. `wipe` (always) sweeps the stand of a
-run cut short before row 9 (`tag_branches`), scans the evidence for the
-file secrets, removes the installed copies and the secret files.
+in-process secret whatever happens. `wipe` (always) scans the evidence for
+the file secrets, sweeps the stand of a run cut short before row 9
+(`tag_branches`; a failure of it never skips the local removals), removes
+the installed copies and the secret files.
 
 Rows (each with its mechanism of refusal and a feasibility control, r1 N12):
 1 the machine user opens `brief/stand-<tag>` and `stand/<tag>`; 2
@@ -1422,7 +1423,9 @@ class Row:
 
 
 #: The rows and what each needs (R15 fix round 1, finding 3): a row whose
-#: prerequisite did not pass is skipped, never passed; the others run.
+#: prerequisite did not pass is skipped, never passed; the others run. A
+#: control held by another row is a prerequisite too (R1-1): 5б's review
+#: control is row 2, row 7's controls are rows 2 and 8 (so 8 runs first).
 ROWS: tuple[Row, ...] = (
     Row("1", "PR от machine user", row1_open_prs),
     Row("2", "publish-review и повтор", row2_review_once, ("1",)),
@@ -1430,10 +1433,10 @@ ROWS: tuple[Row, ...] = (
     Row("4а", "прежний head", row4a_old_head, ("1",)),
     Row("4б", "окно чтение→публикация", row4b_window, ("4а",)),
     Row("5а", "read-token и clone", row5a_read),
-    Row("5б", "отказы GitHub токену чтения", row5b_rights, ("1", "5а")),
+    Row("5б", "отказы GitHub токену чтения", row5b_rights, ("1", "2", "5а")),
     Row("6", "токен нигде", row6_no_token, ("5а",)),
-    Row("7", "отказ sudo", row7_sudo_refusals, ("1",)),
     Row("8", "маршрутизация merge", row8_merge_routes, ("1",)),
+    Row("7", "отказ sudo", row7_sudo_refusals, ("1", "2", "8")),
 )
 CLEANUP = Row("9", "уборка", row9_cleanup)
 SKIPPED = "не выполнялась"
@@ -1596,6 +1599,8 @@ def set_up(rw: RolesWorld, args: StandArgs, secrets: StandSecrets) -> Stand:
     if repo.get("private") is not True:
         infra(f"стенд {repo.get('full_name')} не приватный")
     gh.full_name = str(repo["full_name"])
+    # the header git carries the PAT in (row 5б's control push)
+    guard_token(secrets.machine_token, str(user["login"]))
     product = Product(
         args.repo_id,
         gh.full_name,
@@ -1714,11 +1719,15 @@ def wipe_phase(out: Path, secrets: Path, repo_id: int | None, tag: str | None) -
             needles += (
                 key_needles(text) if path.name == APP_KEY_FILE else [text.strip()]
             )
-    if token and repo_id is not None and tag:
-        print(f"уборка стенда: {sweep(MachineGitHub(token), repo_id, tag)}", flush=True)
     leaked = scan_tree(out, [n for n in needles if len(n) >= 16])
     for path in leaked:
         path.unlink()
+    if token and repo_id is not None and tag:
+        try:
+            swept = sweep(MachineGitHub(token), repo_id, tag)
+        except Exception as exc:  # noqa: BLE001 - the local removals still run
+            swept = {"стенд": f"уборка упала: {type(exc).__name__}"}
+        print(f"уборка стенда: {swept}", flush=True)
     shutil.rmtree(PRODUCTION.secrets_dir, ignore_errors=True)
     try:
         exec_home = PRODUCTION.role_home("df-exec")

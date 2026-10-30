@@ -395,6 +395,35 @@ def test_rows_skip_only_on_a_failed_prerequisite() -> None:
     assert live_stand.verdict(results, expected=6) == live_stand.EXIT_FAILED
 
 
+def test_failed_control_row_skips_its_dependents() -> None:
+    """R1-1: a row whose control is another row's result (5б and 7 need
+    row 2) is skipped when that row fails, never recorded as a pass."""
+    names = {r.id: r for r in live_stand.ROWS}
+    assert "2" in names["5б"].needs
+    assert {"2", "8"} <= set(names["7"].needs)
+
+    def fn(row_id: str) -> Callable[[object], dict[str, object]]:
+        def run(_st: object) -> dict[str, object]:
+            if row_id == "2":
+                raise RowFailed("control row fails")
+            return {}
+
+        return run
+
+    rows = tuple(
+        live_stand.Row(r.id, r.title, fn(r.id), r.needs)  # type: ignore[arg-type]
+        for r in live_stand.ROWS
+    )
+    cleanup = live_stand.Row("9", "z", fn("9"))  # type: ignore[arg-type]
+    results = live_stand.run_rows(object(), rows, cleanup)  # type: ignore[arg-type]
+    by_id = {name.split(" ", 1)[0]: v["status"] for name, v in results.items()}
+    assert by_id["2"] == "fail"
+    for dependent in ("3", "5б", "7"):
+        assert by_id[dependent] == live_stand.SKIPPED, dependent
+    assert by_id["8"] == "pass" and by_id["6"] == "pass"
+    assert live_stand.verdict(results) == live_stand.EXIT_FAILED
+
+
 def test_row_dependencies_name_existing_earlier_rows() -> None:
     seen: set[str] = set()
     for row in live_stand.ROWS:
