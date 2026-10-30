@@ -528,3 +528,66 @@ install` (остальные писатели при незавершённой 
 `sudo darkfactory install`, иначе повтор прерванной команды-писателя от root
 (`darkfactory install`, `models set` или `cli set`) закрывает её, даже если ей нечего менять.
 `roles setup` её тоже закрывает, но только пройдя свои условия (нужен `openssl`).
+
+### Подготовка (этап 2a)
+
+Домашние каталоги ролей — `/home/<роль>` (Linux) и `/Users/<роль>` (macOS); к цепочке их
+путей те же требования, что в п. 1 «Подготовки» этапа 1: владелец root, без записи для группы и
+всех, без ACL. На штатном образе GitHub Ubuntu 24.04 `/home` несёт ACL — CI (`df-stage1`, job
+`stage2a`, и `df-stage2-live`) перед установкой выполняет `sudo chmod go-w /opt /home` и
+`sudo setfacl -b /opt /home`. Поддерживается только классический `sudo` 1.9: с `sudo-rs`
+`roles setup` отказывает при установке sudoers и называет, как переключить альтернативу.
+
+### GitHub-учётки: `setup-agent`
+
+Machine user и App продукта создаёт человек (спека §4.3); продукт вносит в
+`/etc/df/products.toml` root вручную (команда записи продукта — этап 3). Затем root ставит
+credentials, которые сделал человек:
+
+```sh
+sudo darkfactory setup-agent app-key --app-id <N> --file <ключ App .pem>
+sudo darkfactory setup-agent machine-token --file <файл с токеном machine user>
+```
+
+Источник читается как данные (обычный файл, абсолютный путь, ожидаемая форма: PEM без
+шифрования; одна строка `github_pat_…` или `ghp_…`) и не удаляется. Ключ ложится в
+`/etc/df/secrets/app-<N>.pem` (`df-publisher`, `0400`), токен — в
+`~df-exec/.config/df/github-token` (`0600`). После записи — проверки: `self-check` издателя
+(App установлен только на репо продуктов) и `check-github` роли `df-exec` (`GET /user` даёт
+`machine_user` продукта); непрошедшая — код 3. Итог по продукту:
+`sudo darkfactory doctor --product <id> --json` (уровень 2).
+
+### Запуск ролей: `darkfactory launch`, `darkfactory run`
+
+- `darkfactory launch df-exec check|check-github`, `darkfactory launch df-review check` —
+  без `sudo`: команда сама делает `chdir("/")`, закрывает дескрипторы и исполняет
+  `sudo -n -u <роль> /opt/df/libexec/df-launch <роль> <операция>`.
+- `darkfactory run start --product <id>` и `darkfactory run resume <run_id>
+  [--accept-model-change --from-step N]` — тоже без `sudo` перед командой: она вызывает
+  `sudo /opt/df/bin/df-run-start …`, который записывает прогон (`/var/lib/df/runs/`) и
+  передаёт его `df-exec`. В v1 прогон после записи останавливается на пробах: «изоляция не
+  подтверждена», «доступ к моделям не подтверждён».
+- Прямой `sudo /opt/df/libexec/…` **не поддерживается**: на macOS `sudo` открывает рабочий
+  каталог вызывающего от root раньше любого кода `df` (спека §4.2).
+
+### Ограничения этапа 2a
+
+- `merge` издателя только маршрутизирует PR и ничего не мержит: `brief/…` →
+  `refused: precheck_unavailable`, вне форм — `refused: ambiguous_kind`; мерж — этап 2b.
+- Журнал периметра без привязки к корню доверия: `perimeter-status` отвечает
+  `unavailable: no_binding` (привязка `df-trust` — этап 3).
+- Одна UID на роль: процесс одного прогона может назвать `run_id` другого (предел гарантии,
+  спека §5.8, не защита).
+- Отзыв релиза в `releases.toml` пишет `darkfactory update` (этап 4); в 2a его делает только
+  фикстура приёмки.
+- Отключение питания для SQLite периметра не испытано (вне v1).
+
+### Приёмка этапа 2a
+
+Root-приёмка §4.5 без строк мержа — CI `df-stage1`, job `stage2a` (обе ОС). Строки GitHub —
+на живом стенде: `.github/workflows/df-stage2-live.yml`, только `workflow_dispatch` на
+`master` с одобрения владельца (environment `df-stage2-live`: секреты `DF_STAND_APP_KEY`,
+`DF_STAND_MACHINE_TOKEN`, переменные `DF_STAND_REPO_ID`, `DF_STAND_APP_ID`,
+`DF_STAND_INSTALLATION_ID`); сценарий — `tests/df/live_stand.py`. Стенд — личный приватный
+репо без ruleset (тариф Free): контроль «мерж полным токеном App — отказ состояния 405» даёт
+конфликтующий PR. Evidence — `docs/evidence/2026-10-30-df-stage2a-acceptance.md`.

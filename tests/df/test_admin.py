@@ -470,6 +470,24 @@ def test_admin_code_comes_from_reference_not_release(fl: FakeLayout) -> None:
     )
 
 
+def test_expected_admin_digest_is_install_admins(fl: FakeLayout) -> None:
+    """Task 15 (r3 N2): `expected_admin_digest` of a checkout's `df/` equals
+    the `admin_digest` its `install_admin` records -- bytecode skipped, an
+    executable file `0755` -- and a changed file changes it."""
+    lay = fl.layout
+    ref = devtools_ref(fl)
+    tool = ref / "df" / "tool.sh"
+    tool.write_text("#!/bin/sh\n")
+    tool.chmod(0o700)
+    (ref / "df" / "__pycache__").mkdir()
+    (ref / "df" / "__pycache__" / "x.cpython-312.pyc").write_bytes(b"\0")
+    admin.install_admin(lay, ID, devtools_ref=ref)
+    expected = admin.expected_admin_digest(ref / "df")
+    assert expected == admin.admin_digest(lay, ID)
+    (ref / "df" / "__init__.py").write_text('"""changed"""\n')
+    assert admin.expected_admin_digest(ref / "df") != expected
+
+
 def test_install_admin_without_devtools_ref(fl: FakeLayout) -> None:
     """F13 carry: a profile without `devtools` has no admin code."""
     lay = fl.layout

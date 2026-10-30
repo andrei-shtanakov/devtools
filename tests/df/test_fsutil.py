@@ -453,6 +453,10 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
     ("admin", "_make_dir", "os.fchmod", 1): "protocol install_admin: sync_tree",
     ("admin", "_copy_file", "os.open", 1): "protocol install_admin: sync_tree",
     ("admin", "_copy_file", "os.fchmod", 1): "protocol install_admin: sync_tree",
+    ("admin", "", "import tempfile", 1): "expected_admin_digest's scratch copy",
+    ("admin", "expected_admin_digest", "tempfile.TemporaryDirectory", 1): (
+        "expected_admin_digest's scratch copy (Task 15), never under the layout"
+    ),
     ("admin", "link_command", "os.symlink", 1): "protocol link_command: temp",
     ("admin", "link_command", "os.rename", 1): (
         "protocol link_command: sync_dir(local_bin)"

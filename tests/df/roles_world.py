@@ -292,6 +292,111 @@ def response_of(done: subprocess.CompletedProcess[bytes]) -> Response:
         raise
 
 
+# ---------- sudo refusals (Task 14 rows, Task 15 row 7) ----------
+
+
+#: R14-10: the mechanism of «a password is required» that counts as a
+#: refusal (every condition of `sudo_refused` holds).
+NO_RULE = "sudo: нет правила (запрос пароля под -n)"
+
+
+def sudo_refused(
+    rw: RolesWorld,
+    case: str,
+    role: str,
+    op: str,
+    data: bytes,
+    want: SudoDiag,
+    *,
+    flags: tuple[str, ...] = (),
+    extra: tuple[str, ...] = (),
+) -> str:
+    """`role` runs `sudo [flags] -n -u df-publisher df-publish <op> [extra]`
+    and sudo itself refuses it, by mechanism `want`; the publisher never
+    runs (its journal has no new line). The capture goes to
+    `sudo-diag/<os>/<case>.{txt,rc}` (R14-2). For `not-allowed`, R14-10:
+    «a password is required» (`password-required`) counts as the refusal
+    `NO_RULE` only with exit 1, empty stdout and sudo's own policy for the
+    role granting no rule for the same command while granting its control
+    (`no_rule`); any other «password required» is a wrong setup. The mechanism found
+    is returned and kept in `sudo-diag/<os>/<case>.mechanism`."""
+    before = len(rw.journal_lines())
+    done = rw.publish(role, op, data, flags=flags, extra=extra)
+    text = done.stderr.decode("utf-8", "replace")
+    out = stage1_out()
+    form = fixture_form(text, rw.layout.root, host_names())
+    write_evidence(out, f"sudo-diag/{OS_DIR}/{case}.txt", form)
+    write_evidence(out, f"sudo-diag/{OS_DIR}/{case}.rc", f"{done.returncode}\n")
+    kind = classify_sudo(done.returncode, text)
+    if kind is None:
+        infra(f"нераспознанная диагностика sudo ({case}): {shown(done)}")
+    assert done.stdout == b"", shown(done)
+    assert len(rw.journal_lines()) == before, "издатель запускался"
+    mechanism = str(kind)
+    if kind == "password-required":
+        if want != "not-allowed" or not no_rule(rw, role, [op, *extra]):
+            pytest.fail(
+                f"неверная настройка: sudo требует пароль ({case}): {shown(done)}"
+            )
+        mechanism = NO_RULE
+    else:
+        assert kind == want, shown(done)
+    write_evidence(out, f"sudo-diag/{OS_DIR}/{case}.mechanism", mechanism + "\n")
+    return mechanism
+
+
+#: R14-10a: why the command form is evidence only on macOS.
+MACOS_COMMAND_FORM = (
+    "не судится: sudo 1.9.13 (macOS) отвечает кодом 1 и на разрешённую "
+    "команду (CI run 40876804216)"
+)
+
+
+def no_rule(rw: RolesWorld, role: str, words: list[str]) -> bool:
+    """sudo's own policy for `role` (`sudo -n -l -U <role>`, parsed by
+    `sudoers.read_listing`) grants no rule as `df-publisher` that covers
+    `df-publish <words>`, while it grants the role's `perimeter-status` (the
+    control). The command form `sudo -n -l -U <role> -u df-publisher <cmd>`
+    of R14-10 is recorded as evidence only: on macOS it exits 1 even for a
+    permitted command (CI run 40876804216, also as the role itself)."""
+    publish = rw.wrapper("df-publish")
+    try:
+        listing = sudoers.read_listing(role)
+    except sudoers.ListingError as exc:
+        infra(f"sudo -l -U {role}: {exc}")
+        raise
+    grants = listing.grants | listing.carried
+
+    def covered(command: str) -> bool:
+        try:
+            return grants_cover(grants, PUBLISHER, publish, command)
+        except UnjudgedGrant as exc:
+            infra(f"не судится: sudo -l -U {role}: {exc}")
+            raise
+
+    control, asked = f"{publish} perimeter-status", " ".join([publish, *words])
+    seen: dict[str, object] = {
+        "grants": sorted(str(g) for g in grants),
+        "control": [control, covered(control)],
+        "asked": [asked, covered(asked)],
+    }
+    codes: dict[str, int] = {}
+    for name, args in (("control", ["perimeter-status"]), ("asked", words)):
+        argv = [SUDO, "-n", "-l", "-U", role, "-u", PUBLISHER, publish, *args]
+        result = plat.run_command(argv, env=BASE_ENV)
+        codes[name] = result.returncode
+        seen[f"command form {name}"] = [" ".join(argv), result.returncode]
+    judged = plat.detect_platform() != "macos-arm64"
+    seen["command form judged"] = judged or MACOS_COMMAND_FORM
+    evidence(f"no-rule-{role}-{'-'.join(words)}.json", seen)
+    if not covered(control):
+        infra(f"sudo -l -U {role}: нет правила {control}: {seen}")
+    if judged and codes["control"] != 0:
+        infra(f"sudo -l -U {role} … perimeter-status: код {codes['control']}")
+    form_ok = not judged or codes["asked"] == 1
+    return form_ok and not covered(asked)
+
+
 # ---------- requests ----------
 
 

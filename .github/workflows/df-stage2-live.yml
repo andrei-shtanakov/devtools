@@ -1,0 +1,164 @@
+# df installer, stage-2a live stand acceptance (Task 15 of
+# docs/superpowers/plans/2026-10-26-df-installer-stage2a.md, rulings
+# R15-1..R15-6): the GitHub rows of spec 4.5 on the private stand repo, the
+# rest of 4.5 being df-stage1's job stage2a (Task 14). Root exists only in
+# these disposable runners. The owner dispatches it on master; the
+# environment df-stage2-live asks for the owner's approval and admits master
+# only, so the file cannot run from a PR.
+# Order of a cell: host preparation as stage2a -> install of the checkout's
+# df in `/` and the provenance check (no secret exists yet) -> the secrets
+# written to RUNNER_TEMP (0600) -> the rows (tests/df/live_stand.py, which
+# checks provenance again before it reads a secret, closes its PRs and
+# deletes its branches) -> always: evidence scanned for the secrets, the
+# secrets and their installed copies removed, evidence uploaded.
+# Actions pinned by full commit SHA, as df-stage1.yml.
+name: df-stage2-live
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: df-stage2-live
+  cancel-in-progress: false
+
+jobs:
+  live:
+    name: live (${{ matrix.os }})
+    if: github.ref == 'refs/heads/master'
+    environment: df-stage2-live
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            arch: arm64
+            cell: macos
+          - os: ubuntu-24.04
+            arch: x86_64
+            cell: linux
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - name: arch check
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: test "$(uname -m)" = "$EXPECTED_ARCH"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.23"
+      # R96, as in df-stage1: the installed world builds with the CLT shims.
+      - name: select CommandLineTools (R96)
+        if: runner.os == 'macOS'
+        run: |
+          clt=/Library/Developer/CommandLineTools
+          fail() { echo "::error title=select CommandLineTools (R96)::$1"; exit 1; }
+          test -d "$clt" || fail "$clt absent"
+          sudo -n xcode-select -s "$clt" || fail "xcode-select -s failed"
+          test "$(xcode-select -p)" = "$clt" || fail "selection did not stick"
+      - run: uv python install 3.12
+      - run: uv sync --frozen
+      - name: verify CommandLineTools with df policy (R96)
+        if: runner.os == 'macOS'
+        run: >
+          PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -I -c "import sys;
+          sys.path.append('.'); from tests.df.ci_step0 import r96_main;
+          sys.exit(r96_main())"
+      # The same host adaptation as df-stage1's stage2a (owner decision
+      # 26.10, R14-13): /opt and /home without group/other write and ACL.
+      - name: configure /opt and /home as a supported host (owner 26.10)
+        run: |
+          mkdir -p "$RUNNER_TEMP/df-stage2-live"
+          record="$RUNNER_TEMP/df-stage2-live/opt-host.txt"
+          facts() {
+            ls -ld /opt /home
+            if [ "$RUNNER_OS" = Linux ]; then getfacl -p /opt /home; else ls -led /opt; fi
+          }
+          { echo "before:"; facts; } > "$record" 2>&1
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo -n chmod go-w /opt /home
+            sudo -n setfacl -b /opt /home
+          fi
+          { echo "after:"; facts; } >> "$record" 2>&1
+          cat "$record"
+      # No secret exists in this job yet: the provenance verdict comes first.
+      - name: install the checkout's df in / and check provenance
+        run: |
+          out="$RUNNER_TEMP/df-stage2-live"
+          sudo -n install -d -m 0700 "$RUNNER_TEMP/root-home"
+          sudo -n env "PATH=$PATH" "HOME=$RUNNER_TEMP/root-home" \
+            "UV_CACHE_DIR=$RUNNER_TEMP/uv-root" PYTHONDONTWRITEBYTECODE=1 \
+            "GITHUB_ACTIONS=$GITHUB_ACTIONS" "DF_STAGE1_OUT=$out" \
+            .venv/bin/python -m tests.df.live_stand install \
+            --source-sha "$GITHUB_SHA" --out "$out"
+      # R15-2: the machine token is betta-tester's classic PAT; the evidence
+      # names its type only. Values reach the files through shell builtins.
+      - name: write the stand's secrets (RUNNER_TEMP, 0600)
+        env:
+          DF_STAND_APP_KEY: ${{ secrets.DF_STAND_APP_KEY }}
+          DF_STAND_MACHINE_TOKEN: ${{ secrets.DF_STAND_MACHINE_TOKEN }}
+        run: |
+          dir="$RUNNER_TEMP/df-stand-secrets"
+          umask 077
+          mkdir -m 0700 "$dir"
+          key=$(printf '%s' "$DF_STAND_APP_KEY")
+          token=$(printf '%s' "$DF_STAND_MACHINE_TOKEN")
+          printf '%s\n' "$key" > "$dir/app-key.pem"
+          printf '%s\n' "$token" > "$dir/machine-token"
+      - name: live stand rows
+        env:
+          DF_STAND_REPO_ID: ${{ vars.DF_STAND_REPO_ID }}
+          DF_STAND_APP_ID: ${{ vars.DF_STAND_APP_ID }}
+          DF_STAND_INSTALLATION_ID: ${{ vars.DF_STAND_INSTALLATION_ID }}
+          CELL: ${{ matrix.cell }}
+        run: |
+          out="$RUNNER_TEMP/df-stage2-live"
+          sudo -n env "PATH=$PATH" "HOME=$RUNNER_TEMP/root-home" \
+            "UV_CACHE_DIR=$RUNNER_TEMP/uv-root" PYTHONDONTWRITEBYTECODE=1 \
+            "GITHUB_ACTIONS=$GITHUB_ACTIONS" "DF_STAGE1_OUT=$out" \
+            .venv/bin/python -m tests.df.live_stand stand \
+            --source-sha "$GITHUB_SHA" --out "$out" \
+            --secrets "$RUNNER_TEMP/df-stand-secrets" \
+            --repo-id "$DF_STAND_REPO_ID" --app-id "$DF_STAND_APP_ID" \
+            --installation-id "$DF_STAND_INSTALLATION_ID" \
+            --tag "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$CELL"
+      # Before the upload: what a run cut short left on the stand is swept
+      # (its PRs closed, its branches deleted, best effort), evidence holding
+      # a secret is deleted (the step is then red), the installed copies and
+      # the secret files removed -- the files also by the shell, whatever
+      # the script did.
+      - name: wipe the stand's secrets
+        if: always()
+        env:
+          DF_STAND_REPO_ID: ${{ vars.DF_STAND_REPO_ID }}
+          CELL: ${{ matrix.cell }}
+        run: |
+          dir="$RUNNER_TEMP/df-stand-secrets"
+          rc=0
+          if [ -x .venv/bin/python ]; then
+            set +e
+            sudo -n env "PATH=$PATH" "HOME=$RUNNER_TEMP/root-home" \
+              PYTHONDONTWRITEBYTECODE=1 "GITHUB_ACTIONS=$GITHUB_ACTIONS" \
+              .venv/bin/python -m tests.df.live_stand wipe \
+              --out "$RUNNER_TEMP/df-stage2-live" --secrets "$dir" \
+              --repo-id "$DF_STAND_REPO_ID" \
+              --tag "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$CELL"
+            rc=$?
+            set -e
+          fi
+          sudo -n rm -rf "$dir"
+          exit "$rc"
+      - name: return RUNNER_TEMP to the runner
+        if: always()
+        run: sudo -n chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: df-stage2-live-${{ matrix.os }}
+          path: ${{ runner.temp }}/df-stage2-live
+          if-no-files-found: warn

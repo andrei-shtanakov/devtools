@@ -2934,8 +2934,12 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 - [ ] Этап 2a спеки B — роли и изоляция: `roles setup`, sudoers, `df-launch`, `df-run-start`, `df-publisher` без исполнения мержа, журнал периметра без привязки; приёмка §4.5 без трёх строк мержа (root CI + живой стенд) @owner:github:andrei-shtanakov @id:df-installer-stage2a @epic:eco.dark-factory
       План — `docs/superpowers/plans/2026-10-26-df-installer-stage2a.md` (15 задач),
       спека B rev 9; решения владельца 26.10: разделение 2a/2b, стенд, потеря питания SQLite
-      вне v1. Живая приёмка (Task 15) требует шагов человека H1–H4 (стенд
-      `df-roles-probe-private`, ключ App, PAT `ai-prosto`, environment `df-stage2-live`).
+      вне v1. Живая приёмка (Task 15): стенд готов (H1–H4, 30.10; `df-roles-probe-private`
+      без ruleset — R15-1, PAT machine-учётки `betta-tester` — R15-2); workflow
+      `df-stage2-live.yml` и `tests/df/live_stand.py` — PR Task 15; **ждёт запуска
+      владельцем** (`workflow_dispatch` на `master` после мержа, одобрение environment
+      `df-stage2-live`); evidence `docs/evidence/2026-10-30-df-stage2a-acceptance.md`
+      заполняется по прогону отдельным PR (15e), он же закрывает пункт.
 - [ ] Этап 2b спеки B — мерж издателя: `act_premerge` как предпроверка `merge`, поверхность candidate D16 и полный состав PR, вид stop, три строки мержа §4.5 живьём @owner:github:andrei-shtanakov @id:df-installer-stage2b @epic:eco.dark-factory @blocked_by:todo://devtools/approval-act-node @blocked_by:todo://devtools/df-installer-stage2a
 - [ ] Смена закреплённого `uv`, Python профиля или пина члена `core`: перемерить то, что закреплено за прежним значением @owner:github:andrei-shtanakov @id:df-installer-pin-drift @epic:eco.dark-factory @trigger:"смена UV_PINNED_VERSION, Python профиля или пина члена core в манифесте"
       `uv`: замер `UV_PROJECT_KEYS_<версия>` (дополнение A1/A2 предполётной проверки Task 7a)
