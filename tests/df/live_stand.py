@@ -775,8 +775,9 @@ def row3_reconcile(st: Stand) -> dict[str, object]:
 
 def row4a_old_head(st: Stand) -> dict[str, object]:
     """Row 4(a): after a push by the machine user, a request with the old
-    `head_sha` is `refused: pr_state`. Control: row 4(b)'s request with the
-    new head is `done`."""
+    `head_sha` is `refused: pr_state`. Control: row 2 (a prerequisite) --
+    a `publish-review` with the PR's current head is `done`, so the refusal
+    is about the head, not every request."""
     pr, old = st.prs["brief"], st.heads["brief"]
     branch = tag_branches(st.args.tag)["brief"]
     new = st.put_file(branch, f"df-stand/{st.args.tag}/brief.md", "2\n")
@@ -976,6 +977,12 @@ def mask(text: str, needles: Sequence[str]) -> str:
     return text
 
 
+def role_lines(lines: Sequence[str]) -> list[str]:
+    """The lines of the roles' processes of the read: the publisher's
+    `df-publish` and the reviewer's `git … clone` (not any `git…` word)."""
+    return [line for line in lines if "df-publish" in line or " clone " in line]
+
+
 def seen_lines(texts: Sequence[str], needles: Sequence[str]) -> list[str]:
     """`git` and `df-publish` lines of the snapshots, the needles masked:
     what the evidence keeps of `ps` (never whole snapshots)."""
@@ -1075,11 +1082,18 @@ def row5a_read(st: Stand) -> dict[str, object]:
     clone = launch.role_cwd(st.layout, "df-review") / "df-live-clone"
     url = f"{GITHUB_WEB}/{st.full_name}.git"
     with PsSampler() as ps:
-        probe = subprocess.Popen(["/bin/sh", "-c", "sleep 3; exit 0", marker])
-        if not ps.saw(marker, 10.0):
-            probe.kill()
-            infra(f"контроль ps: маркер не виден ({ps.error})")
-        probe.wait(30)
+        # the control is a process of a role (df-review), not root's child:
+        # the sampler must see other users' argv, as row 6 judges them
+        probe = threading.Thread(
+            target=as_user,
+            args=("df-review", ["/bin/sh", "-c", "sleep 3; exit 0", marker]),
+            daemon=True,
+        )
+        probe.start()
+        seen = ps.saw(marker, 10.0)
+        probe.join(30)
+        if not seen:
+            infra(f"контроль ps: маркер процесса df-review не виден ({ps.error})")
         start = time.monotonic()
         rc, resp = st.ask("df-review", "read-token", data)
         token = str(resp.result.get("token") or "")
@@ -1276,6 +1290,7 @@ def row6_no_token(st: Stand) -> dict[str, object]:
     needles = [token, auth_header("x-access-token", token).split(" ", 2)[2]]
     texts = [text for _b, _e, text in snapshots]
     window = inside(snapshots, start, end)
+    lines = seen_lines(window, needles)
     in_ps = [i for i, s in enumerate(texts) if any(n in s for n in needles)]
     state_files = scan_tree(st.layout.publisher_dir, needles)
     journal = (st.layout.publisher_dir / store.JOURNAL).read_text()
@@ -1297,7 +1312,7 @@ def row6_no_token(st: Stand) -> dict[str, object]:
             "read_window_seconds": round(end - start, 3),
             "ps_sampler_problem": sampler,
             "ps_with_token": in_ps,
-            "ps_git_and_publish_lines_in_window": seen_lines(window, needles),
+            "ps_git_and_publish_lines_in_window": lines,
             "publisher_files_with_token": [str(p) for p in state_files],
             "iolog": iolog,
             "git_config_has_token": any(n in config for n in needles),
@@ -1307,6 +1322,8 @@ def row6_no_token(st: Stand) -> dict[str, object]:
             },
         },
     )
+    if sampler is None and not role_lines(lines):
+        sampler = "в окне чтения ни одной строки df-publish или git clone"
     if sampler is not None:
         infra(f"контроль строки 6: {sampler}")
     if str(carried["request_id"]) not in journal or st.full_name not in config:
@@ -1424,13 +1441,14 @@ class Row:
 
 #: The rows and what each needs (R15 fix round 1, finding 3): a row whose
 #: prerequisite did not pass is skipped, never passed; the others run. A
-#: control held by another row is a prerequisite too (R1-1): 5б's review
-#: control is row 2, row 7's controls are rows 2 and 8 (so 8 runs first).
+#: control held by another row is a prerequisite too (R1-1): 4а's and 5б's
+#: review control is row 2, row 7's controls are rows 2 and 8 (so 8 runs
+#: first).
 ROWS: tuple[Row, ...] = (
     Row("1", "PR от machine user", row1_open_prs),
     Row("2", "publish-review и повтор", row2_review_once, ("1",)),
     Row("3", "сверка после потерянного ответа", row3_reconcile, ("2",)),
-    Row("4а", "прежний head", row4a_old_head, ("1",)),
+    Row("4а", "прежний head", row4a_old_head, ("1", "2")),
     Row("4б", "окно чтение→публикация", row4b_window, ("4а",)),
     Row("5а", "read-token и clone", row5a_read),
     Row("5б", "отказы GitHub токену чтения", row5b_rights, ("1", "2", "5а")),

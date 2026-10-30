@@ -399,7 +399,7 @@ def test_failed_control_row_skips_its_dependents() -> None:
     """R1-1: a row whose control is another row's result (5б and 7 need
     row 2) is skipped when that row fails, never recorded as a pass."""
     names = {r.id: r for r in live_stand.ROWS}
-    assert "2" in names["5б"].needs
+    assert "2" in names["5б"].needs and "2" in names["4а"].needs
     assert {"2", "8"} <= set(names["7"].needs)
 
     def fn(row_id: str) -> Callable[[object], dict[str, object]]:
@@ -418,7 +418,7 @@ def test_failed_control_row_skips_its_dependents() -> None:
     results = live_stand.run_rows(object(), rows, cleanup)  # type: ignore[arg-type]
     by_id = {name.split(" ", 1)[0]: v["status"] for name, v in results.items()}
     assert by_id["2"] == "fail"
-    for dependent in ("3", "5б", "7"):
+    for dependent in ("3", "4а", "4б", "5б", "7"):
         assert by_id[dependent] == live_stand.SKIPPED, dependent
     assert by_id["8"] == "pass" and by_id["6"] == "pass"
     assert live_stand.verdict(results) == live_stand.EXIT_FAILED
@@ -478,6 +478,18 @@ def test_sampler_error_is_kept() -> None:
         assert ok.saw("mark", 5.0)
     began, ended, text = ok.snapshots[0]
     assert ok.error is None and began <= ended and "mark" in text
+
+
+def test_role_lines_need_the_roles_processes() -> None:
+    """Paid review minor 1: only `df-publish` or a `git … clone` line shows
+    the roles' processes were visible; a runner line with «github» is not."""
+    lines = [
+        "/home/runner/actions-runner/bin/Runner.Worker github",
+        "sudo -n -u df-publisher /opt/df/libexec/df-publish read-token",
+        "/usr/bin/git --config-env=http.extraHeader=DF_READ_AUTH clone --quiet u d",
+    ]
+    assert live_stand.role_lines(lines) == lines[1:]
+    assert live_stand.role_lines(lines[:1]) == []
 
 
 def test_seen_lines_mask_the_token() -> None:
