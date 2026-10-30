@@ -2931,15 +2931,19 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       `live/<платформа>.json`, `…-doctor.json`, `journals/live-core.jsonl`. Зелёный прогон
       необходим, но не достаточен — пункт закрывает контроллер по evidence (§9, §9.1
       `docs/evidence/2026-10-26-df-stage1-acceptance.md`).
-- [ ] Этап 2a спеки B — роли и изоляция: `roles setup`, sudoers, `df-launch`, `df-run-start`, `df-publisher` без исполнения мержа, журнал периметра без привязки; приёмка §4.5 без трёх строк мержа (root CI + живой стенд) @owner:github:andrei-shtanakov @id:df-installer-stage2a @epic:eco.dark-factory
+- [x] Этап 2a спеки B — роли и изоляция: `roles setup`, sudoers, `df-launch`, `df-run-start`, `df-publisher` без исполнения мержа, журнал периметра без привязки; приёмка §4.5 без трёх строк мержа (root CI + живой стенд) @owner:github:andrei-shtanakov @id:df-installer-stage2a @epic:eco.dark-factory
       План — `docs/superpowers/plans/2026-10-26-df-installer-stage2a.md` (15 задач),
       спека B rev 9; решения владельца 26.10: разделение 2a/2b, стенд, потеря питания SQLite
-      вне v1. Живая приёмка (Task 15): стенд готов (H1–H4, 30.10; `df-roles-probe-private`
-      без ruleset — R15-1, PAT machine-учётки `betta-tester` — R15-2); workflow
-      `df-stage2-live.yml` и `tests/df/live_stand.py` — PR Task 15; **ждёт запуска
-      владельцем** (`workflow_dispatch` на `master` после мержа, одобрение environment
-      `df-stage2-live`); evidence `docs/evidence/2026-10-30-df-stage2a-acceptance.md`
-      заполняется по прогону отдельным PR (15e), он же закрывает пункт.
+      вне v1. Root-приёмка §4.5 — job `stage2a` CI `df-stage1` (Task 14, #654). Живая
+      приёмка (Task 15, #656 `9da14cf`) пройдена 2026-10-30: прогон `df-stage2-live`
+      41044119428 на `master`, обе ячейки (macOS arm64, Ubuntu x86_64) зелёные, строки
+      стенда 1–9 `pass`; стенд `df-roles-probe-private` без ruleset (R15-1), PAT
+      `betta-tester` (R15-2); после прогона стенд чист (0 открытых PR, только `master`).
+      Evidence — `docs/evidence/2026-10-30-df-stage2a-acceptance.md`. Три строки мержа §4.5
+      — пункт 2b ниже.
+- [ ] Отозвать PAT machine-учётки `betta-tester` и удалить секреты environment `df-stage2-live` (`DF_STAND_APP_KEY`, `DF_STAND_MACHINE_TOKEN`) после закрытия этапа 2a — действие владельца; для живых строк 2b стенд заводится заново @owner:github:andrei-shtanakov @id:df-stage2a-stand-secrets-revoke @epic:eco.dark-factory
+      PAT classic, `repo`, срок 30 дней (R15-2); ключ App стенда — тоже секрет
+      environment. Прогон 41044119428 отозвал свои токены установки сам (`tokens_revoked`).
 - [ ] Этап 2b спеки B — мерж издателя: `act_premerge` как предпроверка `merge`, поверхность candidate D16 и полный состав PR, вид stop, три строки мержа §4.5 живьём @owner:github:andrei-shtanakov @id:df-installer-stage2b @epic:eco.dark-factory @blocked_by:todo://devtools/approval-act-node @blocked_by:todo://devtools/df-installer-stage2a
 - [ ] Смена закреплённого `uv`, Python профиля или пина члена `core`: перемерить то, что закреплено за прежним значением @owner:github:andrei-shtanakov @id:df-installer-pin-drift @epic:eco.dark-factory @trigger:"смена UV_PINNED_VERSION, Python профиля или пина члена core в манифесте"
       `uv`: замер `UV_PROJECT_KEYS_<версия>` (дополнение A1/A2 предполётной проверки Task 7a)
