@@ -19,6 +19,7 @@ import os
 import re
 import shlex
 import stat
+import tempfile
 from pathlib import Path, PurePosixPath
 
 from df import accept, acl, fsutil
@@ -276,6 +277,19 @@ def admin_digest(layout: Layout, release_id: str) -> str:
     The one definition for the mark `admin`, the registry and `admin_ready`.
     """
     return tree_digest(layout.admin_dir(release_id), exclude=frozenset())
+
+
+def expected_admin_digest(df_dir: Path) -> str:
+    """The `admin_digest` an install of a checkout whose `df/` is `df_dir`
+    records (Task 15, provenance r3 N2): `df_dir` copied by `install_admin`'s
+    rules (`_copy_dir`: no bytecode, no link, modes `0755`/`0644`) into a
+    temporary `<tmp>/admin/df`, then `tree_digest` of `<tmp>/admin` with
+    nothing excluded -- the scope of `admin_digest`. Needs no root."""
+    with tempfile.TemporaryDirectory(prefix="df-admin-digest-") as tmp:
+        dest = Path(tmp) / "admin"
+        _make_dir(dest)
+        _copy_dir(df_dir, dest / "df")
+        return tree_digest(dest, exclude=frozenset())
 
 
 def admin_python_problems(
