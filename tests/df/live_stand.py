@@ -7,7 +7,8 @@ disposable runners of the environment `df-stage2-live` (the owner's approval,
     python -m tests.df.live_stand install --source-sha SHA --out DIR
     python -m tests.df.live_stand stand --source-sha SHA --out DIR \\
         --secrets DIR --repo-id N --app-id N --installation-id N --tag TAG
-    python -m tests.df.live_stand wipe --out DIR --secrets DIR
+    python -m tests.df.live_stand wipe --out DIR --secrets DIR \\
+        [--repo-id N --tag TAG]
 
 `install` exists before any secret does (the workflow writes them in a later
 step): the implementation under test, installed as in Task 14 -- the fixture
@@ -19,22 +20,26 @@ before it reads a secret, then `roles setup`, the stand's `products.toml`
 from the variables (a fixture, noted), `setup-agent` from the secret files,
 the publisher's `self-check` (an extra App installation is an infrastructure
 failure, step H2), a fixture run record (as Task 14: `run start` stops at
-the probes in v1), the rows, the cleanup (row 9) and the host teardown.
-`wipe` (always) scans the evidence for the secrets, removes the installed
-copies and the secret files.
+the probes in v1), the rows, the cleanup (row 9), the revocation of the
+installation tokens it was given (`DELETE /installation/token`, best
+effort, logged) and the host teardown; the evidence is scanned for every
+in-process secret whatever happens. `wipe` (always) sweeps the stand of a
+run cut short before row 9 (`tag_branches`), scans the evidence for the
+file secrets, removes the installed copies and the secret files.
 
 Rows (each with its mechanism of refusal and a feasibility control, r1 N12):
 1 the machine user opens `brief/stand-<tag>` and `stand/<tag>`; 2
 `publish-review` and its identical repeat; 3 reconciliation after a lost
 result; 4 a moved head: (a) the old head is `pr_state`, (b) through
 `tests/df/gate_proxy.py` the review stays on the head read before the push;
-5 `read-token`: a private clone passes, a push, a review, a PATCH and a merge
-with it are refused by GitHub `403`, each with its control (R15-1: the merge
-control is a deliberately conflicting PR, `405` with the full installation
-token); 6 the token in no `ps` snapshot, publisher file, sudo I/O log or
-`.git/config`; 7 sudo refuses the other role's operation; 8 `merge` routes
+5 `read-token`: (a) a private clone passes; (b) a push, a review, a PATCH
+and a merge with it are refused by GitHub `403`, each with its control
+(R15-1: the merge control is a deliberately conflicting PR, `405` with the
+full installation token); 6 the token in no `ps` snapshot (at least one
+strictly inside the read), publisher file, sudo I/O log or `.git/config`; 7 sudo refuses the other role's operation; 8 `merge` routes
 `brief/…` to `precheck_unavailable` and `stand/…` to `ambiguous_kind`; 9
-every PR closed and branch deleted.
+every PR closed and branch deleted. A row runs unless a row it needs
+(`Row.needs`) did not pass; a skipped row is recorded and fails the run.
 
 Exit codes: 0 every row passed, 1 a row failed, 2 infrastructure. No pytest
 test runs a phase or reads `DF_STAND_*`; `tests/df/test_live_stand.py` tests
@@ -86,7 +91,6 @@ from tests.df.ci_step0 import BASES, make_base
 from tests.df.fake_github import FakeGitHub
 from tests.df.gate_proxy import serve_gate_proxy
 from tests.df.roles_world import (
-    BASE_ENV,
     FIXTURE_FROM_CHECKOUT,
     OPENSSL,
     OPERATOR,
@@ -102,6 +106,7 @@ from tests.df.roles_world import (
     new_request_id,
     require_clean_host,
     shown,
+    sudo_refused,
     teardown_install,
     teardown_roles,
     write_etc,
@@ -119,7 +124,6 @@ from tests.df.root_world import (
     infra,
     serve_repo,
 )
-from tests.df.test_acceptance_root_roles import sudo_refused
 
 EXIT_PASS = 0
 EXIT_FAILED = 1
@@ -139,6 +143,8 @@ PS_PERIOD = 0.1
 #: is held (below `gate_proxy.HOLD_LIMIT`), and for `mergeable`.
 HELD_WAIT = 180.0
 HEAD_WAIT = 10.0
+#: Row 4(b) polls the head this often while the POST is held.
+HEAD_POLL = 0.5
 MERGEABLE_WAIT = 120.0
 POLL = 2.0
 FORBIDDEN = "Resource not accessible by integration"
@@ -523,7 +529,8 @@ class Stand:
     prs: dict[str, int] = field(default_factory=dict)
     heads: dict[str, str] = field(default_factory=dict)
     branches: list[str] = field(default_factory=list)
-    carried: dict[str, object] = field(default_factory=dict)
+    carried: dict[str, object] = field(default_factory=dict, repr=False)
+    revocable: dict[str, str] = field(default_factory=dict, repr=False)
 
     @property
     def layout(self) -> Layout:
@@ -598,14 +605,17 @@ class Stand:
         self.prs[name] = number
         return number
 
-    def wait_head(self, number: int, sha: str, deadline: float) -> bool:
-        """Until the PR's head is `sha` or `deadline` (monotonic)."""
+    def wait_head(
+        self, number: int, sha: str, deadline: float, *, period: float = 1.0
+    ) -> bool:
+        """Until the PR's head is `sha` or `deadline` (monotonic), polled
+        every `period` seconds."""
         while True:
             if head_of(self.gh.pull(number)) == sha:
                 return True
             if time.monotonic() >= deadline:
                 return False
-            time.sleep(1.0)
+            time.sleep(period)
 
     def bot_reviews(self, number: int) -> list[dict[str, object]]:
         """The PR's reviews by the App's bot."""
@@ -665,7 +675,8 @@ def row1_open_prs(st: Stand) -> dict[str, object]:
     if tip is None:
         infra(f"нет ветки {st.default_branch}")
     assert tip is not None
-    branches = {"brief": f"brief/stand-{st.args.tag}", "stand": f"stand/{st.args.tag}"}
+    names = tag_branches(st.args.tag)
+    branches = {"brief": names["brief"], "stand": names["stand"]}
     for name, branch in branches.items():
         st.make_branch(branch, tip)
         st.heads[name] = st.put_file(branch, f"df-stand/{st.args.tag}/{name}.md", "1\n")
@@ -731,8 +742,8 @@ def row2_review_once(st: Stand) -> dict[str, object]:
 def row3_reconcile(st: Stand) -> dict[str, object]:
     """Row 3: root removes `results/<key>.json` (a crash after the action,
     before the result); the repeat reconciles with GitHub: `done` with the
-    same `review_id`, no second POST (one marked review). Control: the
-    intent and the result existed before."""
+    same `review_id`, no second POST (one marked review), and the result
+    stored again. Control: the intent and the result existed before."""
     data, key, review_id = cast(tuple[bytes, str, int], st.carried["row2"])
     pr, head = st.prs["brief"], st.heads["brief"]
     base = st.layout.publisher_dir
@@ -743,6 +754,7 @@ def row3_reconcile(st: Stand) -> dict[str, object]:
     os.unlink(result)
     rc, resp = st.ask("df-review", "publish-review", data)
     after = marked(st.bot_reviews(pr), key, head)
+    rewritten = result.is_file()
     st.record(
         "row3-reconcile.json",
         {
@@ -750,12 +762,13 @@ def row3_reconcile(st: Stand) -> dict[str, object]:
             "answer": [rc, resp.outcome, resp.reason, dict(resp.result)],
             "evidence": dict(resp.evidence),
             "marked": after,
-            "result_rewritten": result.is_file(),
+            "result_rewritten": rewritten,
         },
     )
     expect((rc, resp.outcome) == (0, "done"), f"сверка: {resp}")
     expect(resp.result.get("review_id") == review_id, f"сверка: {resp.result}")
     expect(after == [review_id], f"второй POST: {after}")
+    expect(rewritten, f"сверка не записала результат: {result}")
     return {"review_id": review_id}
 
 
@@ -764,9 +777,8 @@ def row4a_old_head(st: Stand) -> dict[str, object]:
     `head_sha` is `refused: pr_state`. Control: row 4(b)'s request with the
     new head is `done`."""
     pr, old = st.prs["brief"], st.heads["brief"]
-    new = st.put_file(
-        f"brief/stand-{st.args.tag}", f"df-stand/{st.args.tag}/brief.md", "2\n"
-    )
+    branch = tag_branches(st.args.tag)["brief"]
+    new = st.put_file(branch, f"df-stand/{st.args.tag}/brief.md", "2\n")
     if not st.wait_head(pr, new, time.monotonic() + 60):
         infra(f"голова PR {pr} не стала {new}")
     st.heads["brief"] = new
@@ -802,11 +814,11 @@ def row4b_window(st: Stand) -> dict[str, object]:
     through the real publisher and sudo: `api_base` is `gate_proxy` (a
     non-standard API, a proxy to api.github.com), which holds the review
     POST; the machine user pushes Y meanwhile; released, the publisher
-    answers `done` with `commit_id = X`, and the bot has no review with
-    `commit_id = Y`. Controls: the POST was held, and the PR's head was Y
-    before it was released."""
+    answers `done` with `commit_id = X`; on GitHub the bot's review of this
+    request (its marker) is at X, and the bot has no review at Y. Controls:
+    the POST was held, and the PR's head was Y before it was released."""
     pr, x = st.prs["brief"], st.heads["brief"]
-    branch = f"brief/stand-{st.args.tag}"
+    branch = tag_branches(st.args.tag)["brief"]
     data = review_payload(st, pr, x, "row4b")
     box: dict[str, subprocess.CompletedProcess[bytes]] = {}
 
@@ -816,12 +828,12 @@ def row4b_window(st: Stand) -> dict[str, object]:
     with serve_gate_proxy() as proxy, api_base(st, proxy.url):
         worker = threading.Thread(target=publish, daemon=True)
         worker.start()
-        held = proxy.held.wait(HELD_WAIT)
+        held = wait_held(proxy.held, worker.is_alive, HELD_WAIT)
         y, moved = "", False
         if held:
             deadline = time.monotonic() + HEAD_WAIT
             y = st.put_file(branch, f"df-stand/{st.args.tag}/brief.md", "3\n")
-            moved = st.wait_head(pr, y, deadline)
+            moved = st.wait_head(pr, y, deadline, period=HEAD_POLL)
         proxy.release()
         worker.join(600)
         seen = proxy.requests()
@@ -833,7 +845,11 @@ def row4b_window(st: Stand) -> dict[str, object]:
     st.heads["brief"] = y
     lines = done.stdout.decode("utf-8", "replace").splitlines()
     resp = request.parse_response(lines[0]) if len(lines) == 1 else None
-    at_y = [r.get("id") for r in st.bot_reviews(pr) if r.get("commit_id") == y]
+    reviews = st.bot_reviews(pr)
+    at_y = [r.get("id") for r in reviews if r.get("commit_id") == y]
+    at_x = marked(
+        [r for r in reviews if r.get("commit_id") == x], review_key(st, data), x
+    )
     st.record(
         "row4b-window.json",
         {
@@ -848,6 +864,7 @@ def row4b_window(st: Stand) -> dict[str, object]:
             "answer": None
             if resp is None
             else [done.returncode, resp.outcome, resp.reason, dict(resp.result)],
+            "bot_reviews_at_x_with_marker": at_x,
             "bot_reviews_at_y": at_y,
         },
     )
@@ -858,29 +875,55 @@ def row4b_window(st: Stand) -> dict[str, object]:
     assert resp is not None
     expect((done.returncode, resp.outcome) == (0, "done"), str(resp))
     expect(resp.result.get("commit_id") == x, f"commit_id {resp.result}")
+    expect(at_x == [resp.result.get("review_id")], f"ревью на X в GitHub: {at_x}")
     expect(at_y == [], f"ревью бота на новой голове: {at_y}")
     return {"review_id": resp.result.get("review_id"), "x": x, "y": y}
 
 
-class PsSampler:
-    """`ps` every `PS_PERIOD` seconds in a thread; snapshots kept in memory."""
+def wait_held(held: threading.Event, alive: Callable[[], bool], limit: float) -> bool:
+    """Whether `held` is set within `limit` seconds; gives up at once when
+    the publisher (`alive`) ended without its POST reaching the proxy."""
+    deadline = time.monotonic() + limit
+    while time.monotonic() < deadline:
+        if held.wait(1.0):
+            return True
+        if not alive():
+            return held.is_set()
+    return held.is_set()
 
-    def __init__(self) -> None:
-        self.snapshots: list[str] = []
+
+class PsSampler:
+    """`argv` (`ps`) every `period` seconds in a thread: each snapshot with
+    the monotonic times its run started and ended; `error` if a run failed
+    (the loop then stops)."""
+
+    def __init__(
+        self, argv: Sequence[str] = PS_ARGV, period: float = PS_PERIOD
+    ) -> None:
+        self.argv = list(argv)
+        self.period = period
+        self.snapshots: list[tuple[float, float, str]] = []
+        self.error: str | None = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True)
-        self.error: str | None = None
 
     def _loop(self) -> None:
         while not self._stop.is_set():
-            done = subprocess.run(
-                list(PS_ARGV), capture_output=True, timeout=30, check=False
-            )
-            if done.returncode != 0:
-                self.error = done.stderr.decode("utf-8", "replace")[:200]
+            began = time.monotonic()
+            try:
+                done = subprocess.run(
+                    self.argv, capture_output=True, timeout=30, check=False
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                self.error = f"{type(exc).__name__}: {exc}"[:200]
                 return
-            self.snapshots.append(done.stdout.decode("utf-8", "replace"))
-            self._stop.wait(PS_PERIOD)
+            if done.returncode != 0:
+                err = done.stderr.decode("utf-8", "replace")[:200]
+                self.error = f"код {done.returncode}: {err}"
+                return
+            text = done.stdout.decode("utf-8", "replace")
+            self.snapshots.append((began, time.monotonic(), text))
+            self._stop.wait(self.period)
 
     def __enter__(self) -> PsSampler:
         self._thread.start()
@@ -894,16 +937,62 @@ class PsSampler:
         """Whether a snapshot holds `marker` within `timeout` seconds."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if any(marker in s for s in list(self.snapshots)):
+            if any(marker in s for _b, _e, s in list(self.snapshots)):
                 return True
-            time.sleep(PS_PERIOD)
+            if self.error is not None:
+                return False
+            time.sleep(self.period)
         return False
 
 
-def review_git(st: Stand, argv: Sequence[str], token: str) -> tuple[int, str]:
-    """`git argv` as `df-review` in its work dir, the read token in the
-    environment only (`DF_READ_AUTH`, spec 4.4); exit code and stderr."""
-    env = {**GIT_ENV, "DF_READ_AUTH": auth_header("x-access-token", token)}
+def inside(
+    snapshots: Sequence[tuple[float, float, str]], start: float, end: float
+) -> list[str]:
+    """The snapshots taken strictly inside `(start, end)`."""
+    return [text for began, ended, text in snapshots if start < began and ended < end]
+
+
+def window_problem(
+    error: str | None,
+    snapshots: Sequence[tuple[float, float, str]],
+    start: float,
+    end: float,
+) -> str | None:
+    """Why the sampler does not cover the read window (row 6's control):
+    a failed `ps` run, or no snapshot strictly inside the window."""
+    if error is not None:
+        return f"ps не отработал: {error}"
+    if not inside(snapshots, start, end):
+        return "ни одного снимка ps внутри окна чтения"
+    return None
+
+
+def mask(text: str, needles: Sequence[str]) -> str:
+    """`text` with every non-empty needle replaced by `<token>`."""
+    for needle in needles:
+        if needle:
+            text = text.replace(needle, "<token>")
+    return text
+
+
+def seen_lines(texts: Sequence[str], needles: Sequence[str]) -> list[str]:
+    """`git` and `df-publish` lines of the snapshots, the needles masked:
+    what the evidence keeps of `ps` (never whole snapshots)."""
+    found: list[str] = []
+    for text in texts:
+        for line in text.splitlines():
+            if "git" not in line and "df-publish" not in line:
+                continue
+            masked = mask(line, needles)
+            if masked not in found:
+                found.append(masked)
+    return found[:50]
+
+
+def review_git(st: Stand, argv: Sequence[str], header: str) -> tuple[int, str]:
+    """`git argv` as `df-review` in its work dir, the authorization header in
+    the environment only (`DF_READ_AUTH`, spec 4.4); exit code and stderr."""
+    env = {**GIT_ENV, "DF_READ_AUTH": header}
     git = [str(SYSTEM_GIT), "--config-env=http.extraHeader=DF_READ_AUTH"]
     done = as_user(
         "df-review",
@@ -915,33 +1004,32 @@ def review_git(st: Stand, argv: Sequence[str], token: str) -> tuple[int, str]:
     return done.returncode, err
 
 
-def control_push(st: Stand, branch: str) -> tuple[int, str]:
-    """The control of the push: the same git push with the machine user's
-    token (root, its own clone)."""
-    work = st.rw.work / "control-clone"
-    home = st.rw.work / "git-home"
-    home.mkdir(mode=0o700, exist_ok=True)
-    env = {
-        **BASE_ENV,
-        **GIT_ENV,
-        "HOME": str(home),
-        "DF_PUSH_AUTH": auth_header(st.product.machine_user, st.secrets.machine_token),
+#: GitHub's own refusal of a push for rights, as git prints it (never a
+#: bare «denied»: a local `Permission denied` is not GitHub's answer).
+PUSH_REFUSED = (
+    "The requested URL returned error: 403",
+    "Write access to repository not granted",
+)
+_PERMISSION_TO = re.compile(r"remote: Permission to \S+ denied to ")
+
+
+def github_refused_push(stderr: str) -> bool:
+    """Whether git's `stderr` is GitHub's refusal of the push for rights."""
+    if any(text in stderr for text in PUSH_REFUSED):
+        return True
+    return _PERMISSION_TO.search(stderr) is not None
+
+
+def tag_branches(tag: str) -> dict[str, str]:
+    """Every branch a run with `tag` may create (rows and `wipe`'s sweep)."""
+    return {
+        "brief": f"brief/stand-{tag}",
+        "stand": f"stand/{tag}",
+        "conflict-base": f"df-stand-conflict/{tag}-base",
+        "conflict-head": f"df-stand-conflict/{tag}-head",
+        "readtoken": f"df-stand-readtoken/{tag}",
+        "control": f"df-stand-control/{tag}",
     }
-    git = [str(SYSTEM_GIT), "--config-env=http.extraHeader=DF_PUSH_AUTH"]
-    url = f"{GITHUB_WEB}/{st.full_name}.git"
-    steps = [
-        [*git, "clone", "--quiet", "--depth", "1", url, str(work)],
-        [*git, "-C", str(work), "commit", "--allow-empty", "-q", "-m", "control"],
-        [*git, "-C", str(work), "push", "-q", "origin", f"HEAD:refs/heads/{branch}"],
-    ]
-    st.branches.append(branch)
-    for argv in steps:
-        done = subprocess.run(
-            argv, capture_output=True, env=env, timeout=300, check=False
-        )
-        if done.returncode != 0:
-            return done.returncode, done.stderr.decode("utf-8", "replace")[-600:]
-    return 0, ""
 
 
 def conflicting_pr(st: Stand) -> tuple[int, object]:
@@ -951,8 +1039,8 @@ def conflicting_pr(st: Stand) -> tuple[int, object]:
     computed it (polled; `None` after `MERGEABLE_WAIT`)."""
     tip = st.gh.ref_sha(st.default_branch)
     assert tip is not None
-    base = f"df-stand-conflict/{st.args.tag}-base"
-    head = f"df-stand-conflict/{st.args.tag}-head"
+    names = tag_branches(st.args.tag)
+    base, head = names["conflict-base"], names["conflict-head"]
     path = f"df-stand/{st.args.tag}/conflict.md"
     for branch, text in ((base, "base\n"), (head, "head\n")):
         st.make_branch(branch, tip)
@@ -966,18 +1054,13 @@ def conflicting_pr(st: Stand) -> tuple[int, object]:
         time.sleep(POLL)
 
 
-def row5_read_token(st: Stand) -> dict[str, object]:
-    """Row 5: `df-review` → `read-token`; `git --config-env=http.extraHeader=
-    DF_READ_AUTH clone` of the private stand passes. With the same token a
-    git push of a new branch, `POST …/reviews`, `PATCH …/pulls/{n}` and
-    `PUT …/pulls/{n}/merge` are refused by GitHub for rights: `403`
-    «Resource not accessible by integration» (a push: git's `403`, the
-    branch absent). Controls: the push and the PATCH with the machine
-    user's token pass; `POST …/reviews` passes through `publish-review`
-    (row 2); `PUT …/merge` with the App's full installation token on the
-    same, deliberately conflicting PR is `405` (R15-1: `mergeable == false`
-    first, else infrastructure and no PUT). The `ps` snapshots of row 6 run
-    around the read."""
+def row5a_read(st: Stand) -> dict[str, object]:
+    """Row 5(a): `df-review` → `read-token` (the repository and the rights
+    the publisher asked for); `git --config-env=http.extraHeader=
+    DF_READ_AUTH clone` of the private stand as `df-review` passes. The `ps`
+    sampler of row 6 runs around it: its feasibility control (a marker
+    process seen) before the read, its window (start of the read, end of the
+    clone) recorded for row 6."""
     marker = f"df-live-ps-{uuid.uuid4().hex}"
     data = json.dumps(
         {
@@ -996,20 +1079,31 @@ def row5_read_token(st: Stand) -> dict[str, object]:
             probe.kill()
             infra(f"контроль ps: маркер не виден ({ps.error})")
         probe.wait(30)
+        start = time.monotonic()
         rc, resp = st.ask("df-review", "read-token", data)
         token = str(resp.result.get("token") or "")
         if token:
             guard_token(token, "x-access-token")
+            st.revocable["read-token"] = token
+        header = auth_header("x-access-token", token)
         clone_rc, clone_err = review_git(
-            st, ["clone", "--quiet", url, str(clone)], token
+            st, ["clone", "--quiet", url, str(clone)], header
         )
+        end = time.monotonic()
     st.carried["row6"] = {
         "token": token,
         "request_id": json.loads(data)["request_id"],
-        "snapshots": ps.snapshots,
+        "snapshots": list(ps.snapshots),
+        "sampler_error": ps.error,
+        "window": (start, end),
         "clone": clone,
     }
     granted = {k: v for k, v in resp.result.items() if k != "token"}
+    found: dict[str, object] = {
+        "read_token": granted,
+        "clone": {"rc": clone_rc, "stderr": clone_err},
+    }
+    st.record("row5a-read.json", found)
     expect((rc, resp.outcome) == (0, "done") and bool(token), f"read-token: {granted}")
     expect(granted.get("repository_ids") == [st.args.repo_id], f"репо {granted}")
     perms = granted.get("permissions")
@@ -1018,12 +1112,24 @@ def row5_read_token(st: Stand) -> dict[str, object]:
         and {k: v for k, v in perms.items() if k != "metadata"} == ops.READ_PERMISSIONS,
         f"права {perms}",
     )
-    found: dict[str, object] = {
-        "read_token": granted,
-        "clone": {"rc": clone_rc, "stderr": clone_err},
-    }
-    st.record("row5-read-token.json", found)
     expect(clone_rc == 0 and (clone / ".git").is_dir(), f"clone: {clone_err}")
+    st.carried["row5"] = (token, clone)
+    return {"repository_ids": granted.get("repository_ids")}
+
+
+def row5b_rights(st: Stand) -> dict[str, object]:
+    """Row 5(b): with the read token, a git push of a new branch, `POST
+    …/reviews`, `PATCH …/pulls/{n}` and `PUT …/pulls/{n}/merge` are refused
+    by GitHub for rights: `403` «Resource not accessible by integration»
+    (a push: GitHub's 403 as git prints it, `github_refused_push`, and the
+    branch absent). Controls: the same push from the same clone as
+    `df-review` with the machine user's header passes; the PATCH with the
+    machine user's token passes; `POST …/reviews` passes through
+    `publish-review` (row 2); `PUT …/merge` with the App's full
+    installation token on the same, deliberately conflicting PR is `405`
+    (R15-1: `mergeable == false` first, else infrastructure and no PUT)."""
+    token, clone = cast(tuple[str, Path], st.carried["row5"])
+    found: dict[str, object] = {}
     rights_refusals(st, token, clone, found)
     return {"refusals": sorted(k for k in found if k.startswith("refused"))}
 
@@ -1031,28 +1137,42 @@ def row5_read_token(st: Stand) -> dict[str, object]:
 def rights_refusals(
     st: Stand, token: str, clone: Path, found: dict[str, object]
 ) -> None:
-    """Row 5's refusals of the read token, each next to its control; `found`
-    (the row's evidence) is recorded before every verdict."""
+    """Row 5(b)'s refusals of the read token, each next to its control;
+    `found` (the row's evidence) is recorded before every verdict."""
     tag = st.args.tag
     brief = st.prs["brief"]
-    branch = f"df-stand-readtoken/{tag}"
-    st.branches.append(branch)
+    names = tag_branches(tag)
+    branch, ctl_branch = names["readtoken"], names["control"]
+    st.branches += [branch, ctl_branch]
+    read_header = auth_header("x-access-token", token)
+    machine_header = auth_header(st.product.machine_user, st.secrets.machine_token)
 
     def keep() -> None:
-        st.record("row5-read-token.json", found)
+        st.record("row5b-rights.json", found)
 
     commit = ["-C", str(clone), "commit", "--allow-empty", "-q", "-m", "read-token"]
-    rc, err = review_git(st, commit, token)
+    rc, err = review_git(st, commit, read_header)
     if rc != 0:
         infra(f"коммит в клоне: {err}")
     push = ["-C", str(clone), "push", "-q", "origin", f"HEAD:refs/heads/{branch}"]
-    rc, err = review_git(st, push, token)
+    rc, err = review_git(st, push, read_header)
     exists = st.gh.ref_sha(branch) is not None
     found["refused push"] = {"rc": rc, "stderr": err, "branch_exists": exists}
-    ctl_branch = f"df-stand-control/{tag}"
-    ctl_rc, ctl_err = control_push(st, ctl_branch)
+    control = [
+        "-C",
+        str(clone),
+        "push",
+        "-q",
+        "origin",
+        f"HEAD:refs/heads/{ctl_branch}",
+    ]
+    ctl_rc, ctl_err = review_git(st, control, machine_header)
     ctl_exists = st.gh.ref_sha(ctl_branch) is not None
-    found["control push (machine user)"] = {"rc": ctl_rc, "stderr": ctl_err}
+    found["control push (same clone, df-review, machine user's header)"] = {
+        "rc": ctl_rc,
+        "stderr": ctl_err,
+        "branch_exists": ctl_exists,
+    }
     keep()
     if ctl_rc != 0 or not ctl_exists:
         infra(f"контроль push токеном machine user: {ctl_rc} {ctl_err}")
@@ -1091,23 +1211,16 @@ def rights_refusals(
     exc = refusal(
         lambda: gh_full.call("PUT", gh_full.repo(f"/pulls/{number}/merge"), {})
     )
-    found["control PUT merge (full installation token)"] = (
-        None if exc is None else {"status": exc.status, "reason": exc.reason}
-    )
+    full_put = None if exc is None else {"status": exc.status, "reason": exc.reason}
+    found["control PUT merge (full installation token)"] = full_put
     found["control POST reviews"] = "row 2: publish-review done"
     keep()
     if not patched:
         infra("контроль PATCH токеном machine user не прошёл")
     if exc is None or exc.status != 405:
-        infra(
-            f"контроль PUT полным токеном: {found['control PUT merge (full installation token)']}"
-        )
-    push_err = str(err)
-    expect(rc != 0 and not exists, f"push токеном чтения: {rc} {push_err}")
-    expect(
-        "403" in push_err or "denied" in push_err or "not granted" in push_err,
-        f"push: не отказ по правам: {push_err}",
-    )
+        infra(f"контроль PUT полным токеном: {full_put}")
+    expect(rc != 0 and not exists, f"push токеном чтения: {rc} {err}")
+    expect(github_refused_push(err), f"push: не отказ GitHub по правам: {err}")
     for name in calls:
         item = found[name]
         expect(
@@ -1120,7 +1233,7 @@ def rights_refusals(
 
 def full_installation_token(st: Stand) -> str:
     """The App's installation token without a narrowed scope (row 5's
-    control only); its value joins `GUARD`."""
+    control only); its value joins `GUARD` and is revoked at the end."""
     jwt = github.app_jwt(
         st.args.app_id, st.secrets.app_key, openssl=OPENSSL, now=int(time.time())
     )
@@ -1129,23 +1242,40 @@ def full_installation_token(st: Stand) -> str:
         jwt, st.args.installation_id, repository_ids=None, permissions=None
     )
     guard_token(token.value, "x-access-token")
+    st.revocable["full installation token"] = token.value
     return token.value
+
+
+def revoke(token: str) -> str:
+    """`DELETE /installation/token` with `token` itself (best effort): the
+    outcome as a word, never the token."""
+    try:
+        github.call("DELETE", "/installation/token", token)
+    except GitHubRefused as exc:
+        return f"отказ {exc.status}: {exc.reason}"
+    except GitHubUnavailable as exc:
+        return f"недоступно: {exc}"
+    return "отозван"
 
 
 def row6_no_token(st: Stand) -> dict[str, object]:
     """Row 6: the read token is in no `ps` snapshot (every 100 ms around the
     read), no file of the publisher's state (its journal included), no
     session of sudo's I/O log, and not in the clone's `.git/config`.
-    Controls: a marker process was seen by the sampler (row 5); the
-    read-token's request id is in the journal; `.git/config` names the
-    stand's remote."""
+    Controls (infrastructure if not): a marker process was seen by the
+    sampler (row 5a); the sampler did not fail and took at least one
+    snapshot strictly inside the read window (from the start of
+    `read-token` to the end of the clone); the read-token's request id is
+    in the journal; `.git/config` names the stand's remote."""
     carried = cast(dict[str, object], st.carried["row6"])
     token = str(carried["token"])
-    snapshots = cast(list[str], carried["snapshots"])
+    snapshots = cast(list[tuple[float, float, str]], carried["snapshots"])
+    start, end = cast(tuple[float, float], carried["window"])
     clone = cast(Path, carried["clone"])
     needles = [token, auth_header("x-access-token", token).split(" ", 2)[2]]
-    in_ps = [i for i, s in enumerate(snapshots) if any(n in s for n in needles)]
-    clones_seen = sum(1 for s in snapshots if " clone " in s)
+    texts = [text for _b, _e, text in snapshots]
+    window = inside(snapshots, start, end)
+    in_ps = [i for i, s in enumerate(texts) if any(n in s for n in needles)]
     state_files = scan_tree(st.layout.publisher_dir, needles)
     journal = (st.layout.publisher_dir / store.JOURNAL).read_text()
     iolog = {
@@ -1155,12 +1285,18 @@ def row6_no_token(st: Stand) -> dict[str, object]:
         for d in IOLOG_DIRS
     }
     config = (clone / ".git" / "config").read_text()
+    sampler = window_problem(
+        cast(str | None, carried["sampler_error"]), snapshots, start, end
+    )
     st.record(
         "row6-no-token.json",
         {
             "ps_snapshots": len(snapshots),
+            "ps_snapshots_in_read_window": len(window),
+            "read_window_seconds": round(end - start, 3),
+            "ps_sampler_problem": sampler,
             "ps_with_token": in_ps,
-            "ps_snapshots_with_git_clone": clones_seen,
+            "ps_git_and_publish_lines_in_window": seen_lines(window, needles),
             "publisher_files_with_token": [str(p) for p in state_files],
             "iolog": iolog,
             "git_config_has_token": any(n in config for n in needles),
@@ -1170,6 +1306,8 @@ def row6_no_token(st: Stand) -> dict[str, object]:
             },
         },
     )
+    if sampler is not None:
+        infra(f"контроль строки 6: {sampler}")
     if str(carried["request_id"]) not in journal or st.full_name not in config:
         infra(
             "контроль строки 6: request_id нет в журнале или remote нет в .git/config"
@@ -1179,7 +1317,7 @@ def row6_no_token(st: Stand) -> dict[str, object]:
     leaked = [v for v in iolog.values() if isinstance(v, list) and v]
     expect(leaked == [], f"токен в I/O-журнале sudo: {leaked}")
     expect(not any(n in config for n in needles), "токен в .git/config")
-    return {"ps_snapshots": len(snapshots)}
+    return {"ps_snapshots": len(snapshots), "in_window": len(window)}
 
 
 def row7_sudo_refusals(st: Stand) -> dict[str, object]:
@@ -1269,23 +1407,39 @@ def row9_cleanup(st: Stand) -> dict[str, object]:
     return {"closed": len(states), "deleted": len(st.branches)}
 
 
-ROWS: tuple[tuple[str, Callable[[Stand], dict[str, object]]], ...] = (
-    ("1 PR от machine user", row1_open_prs),
-    ("2 publish-review и повтор", row2_review_once),
-    ("3 сверка после потерянного ответа", row3_reconcile),
-    ("4а прежний head", row4a_old_head),
-    ("4б окно чтение→публикация", row4b_window),
-    ("5 read-token", row5_read_token),
-    ("6 токен нигде", row6_no_token),
-    ("7 отказ sudo", row7_sudo_refusals),
-    ("8 маршрутизация merge", row8_merge_routes),
+@dataclass(frozen=True)
+class Row:
+    """A row: its id, title, function and the rows it needs to have passed."""
+
+    id: str
+    title: str
+    fn: Callable[[Stand], dict[str, object]]
+    needs: tuple[str, ...] = ()
+
+    @property
+    def name(self) -> str:
+        return f"{self.id} {self.title}"
+
+
+#: The rows and what each needs (R15 fix round 1, finding 3): a row whose
+#: prerequisite did not pass is skipped, never passed; the others run.
+ROWS: tuple[Row, ...] = (
+    Row("1", "PR от machine user", row1_open_prs),
+    Row("2", "publish-review и повтор", row2_review_once, ("1",)),
+    Row("3", "сверка после потерянного ответа", row3_reconcile, ("2",)),
+    Row("4а", "прежний head", row4a_old_head, ("1",)),
+    Row("4б", "окно чтение→публикация", row4b_window, ("4а",)),
+    Row("5а", "read-token и clone", row5a_read),
+    Row("5б", "отказы GitHub токену чтения", row5b_rights, ("1", "5а")),
+    Row("6", "токен нигде", row6_no_token, ("5а",)),
+    Row("7", "отказ sudo", row7_sudo_refusals, ("1",)),
+    Row("8", "маршрутизация merge", row8_merge_routes, ("1",)),
 )
-CLEANUP = ("9 уборка", row9_cleanup)
+CLEANUP = Row("9", "уборка", row9_cleanup)
+SKIPPED = "не выполнялась"
 
 
-def run_row(
-    st: Stand, name: str, fn: Callable[[Stand], dict[str, object]]
-) -> dict[str, object]:
+def run_row(st: Stand, fn: Callable[[Stand], dict[str, object]]) -> dict[str, object]:
     """One row's outcome: `pass`, `fail` (its mechanism) or `инфраструктура`."""
     try:
         return {"status": "pass", **fn(st)}
@@ -1299,24 +1453,35 @@ def run_row(
         return {"status": "инфраструктура", "reason": f"{type(exc).__name__}: {exc}"}
 
 
-def run_rows(st: Stand) -> dict[str, dict[str, object]]:
-    """The rows in order, stopping at the first that does not pass; the
-    cleanup always."""
+def run_rows(
+    st: Stand, rows: Sequence[Row] = ROWS, cleanup: Row = CLEANUP
+) -> dict[str, dict[str, object]]:
+    """Every row in order: one whose prerequisite did not pass is recorded
+    `не выполнялась (зависит от N)`, the others run; the cleanup always."""
     results: dict[str, dict[str, object]] = {}
-    for name, fn in ROWS:
-        results[name] = run_row(st, name, fn)
-        print(f"{name}: {results[name]['status']}", flush=True)
-        if results[name]["status"] != "pass":
-            break
-    results[CLEANUP[0]] = run_row(st, *CLEANUP)
-    print(f"{CLEANUP[0]}: {results[CLEANUP[0]]['status']}", flush=True)
+    passed: set[str] = set()
+    for row in rows:
+        missing = [n for n in row.needs if n not in passed]
+        if missing:
+            why = f"{SKIPPED} (зависит от {', '.join(missing)})"
+            results[row.name] = {"status": SKIPPED, "reason": why}
+        else:
+            results[row.name] = run_row(st, row.fn)
+            if results[row.name]["status"] == "pass":
+                passed.add(row.id)
+        print(f"{row.name}: {results[row.name]['status']}", flush=True)
+    results[cleanup.name] = run_row(st, cleanup.fn)
+    print(f"{cleanup.name}: {results[cleanup.name]['status']}", flush=True)
     return results
 
 
-def verdict(results: Mapping[str, Mapping[str, object]]) -> int:
-    """`EXIT_PASS` only when every row and the cleanup passed."""
+def verdict(
+    results: Mapping[str, Mapping[str, object]], expected: int = len(ROWS) + 1
+) -> int:
+    """`EXIT_PASS` only when every row and the cleanup passed; a skipped or
+    missing row is a failure, an infrastructure failure anywhere is 2."""
     statuses = [str(r["status"]) for r in results.values()]
-    if len(results) != len(ROWS) + 1:
+    if len(results) != expected:
         statuses.append("fail")
     if "инфраструктура" in statuses:
         return EXIT_INFRA
@@ -1366,7 +1531,8 @@ def install_phase(source_sha: str, out: Path) -> int:
 
 
 def stand_phase(args: StandArgs) -> int:
-    """`stand` (module doc)."""
+    """`stand` (module doc). The scan of the evidence for every in-process
+    secret runs whatever happens (an outer `finally`)."""
     require_ci_root()
     top = live_top()
     prov, secrets = gate(args.source_sha, args.secrets, top=top, layout=PRODUCTION)
@@ -1378,29 +1544,37 @@ def stand_phase(args: StandArgs) -> int:
     work = top / "stand"
     work.mkdir(mode=0o755)
     rw = RolesWorld(installed, cast(FakeGitHub, None), work)
+    code = EXIT_INFRA
     try:
-        st = set_up(rw, args, secrets)
-        results = run_rows(st)
-        summary = {
-            "tag": args.tag,
-            "provenance": prov.to_json(),
-            "token_type": secrets.token_type,
-            "run_record": {"run_id": st.run_id, "fixture": True},
-            "products_toml": "фикстура (переменные стенда)",
-            "rows": results,
-        }
-        record(args.out, "summary.json", summary)
-        code = verdict(results)
+        try:
+            st = set_up(rw, args, secrets)
+            results = run_rows(st)
+            revoked = {label: revoke(t) for label, t in st.revocable.items()}
+            print(f"отзыв токенов: {revoked}", flush=True)
+            summary = {
+                "tag": args.tag,
+                "provenance": prov.to_json(),
+                "token_type": secrets.token_type,
+                "run_record": {"run_id": st.run_id, "fixture": True},
+                "products_toml": "фикстура (переменные стенда)",
+                "rows": results,
+                "tokens_revoked": revoked,
+            }
+            record(args.out, "summary.json", summary)
+            code = verdict(results)
+        finally:
+            teardown_roles(PRODUCTION)
+            teardown_install(PRODUCTION, args.out / "journals" / "live-installed.jsonl")
+            shutil.rmtree(top, ignore_errors=True)
     finally:
-        teardown_roles(PRODUCTION)
-        teardown_install(PRODUCTION, args.out / "journals" / "live-installed.jsonl")
-        shutil.rmtree(top, ignore_errors=True)
-    leaked = scan_tree(args.out, GUARD.values())
-    if leaked:
+        leaked = scan_tree(args.out, GUARD.values())
         for path in leaked:
             path.unlink()
-        print(f"evidence с секретом удалено: {[str(p) for p in leaked]}", flush=True)
-        return EXIT_INFRA
+        if leaked:
+            print(
+                f"evidence с секретом удалено: {[str(p) for p in leaked]}", flush=True
+            )
+            code = EXIT_INFRA
     return code
 
 
@@ -1524,17 +1698,24 @@ def register_run(st: Stand) -> str:
     return rec.run_id
 
 
-def wipe_phase(out: Path, secrets: Path) -> int:
-    """`wipe` (always): evidence holding a secret is deleted (exit 2), the
-    installed copies and the secret files removed."""
+def wipe_phase(out: Path, secrets: Path, repo_id: int | None, tag: str | None) -> int:
+    """`wipe` (always): with `repo_id` and `tag`, the stand swept of what a
+    run cut short left (`sweep`, best effort, logged); evidence holding a
+    secret deleted (exit 2); the installed copies and the secret files
+    removed."""
     require_ci_root()
     needles: list[str] = []
+    token = ""
     if secrets.is_dir():
         for path in sorted(secrets.iterdir()):
             text = path.read_text(errors="replace")
+            if path.name == TOKEN_FILE:
+                token = text.strip()
             needles += (
                 key_needles(text) if path.name == APP_KEY_FILE else [text.strip()]
             )
+    if token and repo_id is not None and tag:
+        print(f"уборка стенда: {sweep(MachineGitHub(token), repo_id, tag)}", flush=True)
     leaked = scan_tree(out, [n for n in needles if len(n) >= 16])
     for path in leaked:
         path.unlink()
@@ -1549,6 +1730,50 @@ def wipe_phase(out: Path, secrets: Path) -> int:
         print(f"evidence с секретом удалено: {[str(p) for p in leaked]}", flush=True)
         return EXIT_INFRA
     return EXIT_PASS
+
+
+def sweep(gh: MachineGitHub, repo_id: int, tag: str) -> dict[str, str]:
+    """Close the open PRs from and delete the branches of `tag_branches(tag)`
+    (a run cancelled before row 9); every step best effort, its outcome a
+    word (nothing secret). A completed run leaves nothing to sweep."""
+    names = set(tag_branches(tag).values())
+    done: dict[str, str] = {}
+    try:
+        repo = gh.call("GET", f"/repositories/{repo_id}")
+        gh.full_name = str(repo["full_name"]) if isinstance(repo, dict) else ""
+        pulls = github.paged_array(gh.repo("/pulls"), gh.token)
+    except (GitHubRefused, GitHubUnavailable, KeyError) as exc:
+        return {"стенд": f"не прочитан: {type(exc).__name__}"}
+    for pr in pulls:
+        if not isinstance(pr, dict):
+            continue
+        head = pr.get("head")
+        ref = head.get("ref") if isinstance(head, dict) else None
+        if ref in names:
+            done[f"PR #{pr.get('number')}"] = _best_effort(
+                lambda n=pr.get("number"): gh.call(
+                    "PATCH", gh.repo(f"/pulls/{n}"), {"state": "closed"}
+                )
+            )
+    for branch in sorted(names):
+        try:
+            present = gh.ref_sha(branch) is not None
+        except (GitHubRefused, GitHubUnavailable) as exc:
+            done[branch] = f"не прочитана: {type(exc).__name__}"
+            continue
+        if present:
+            done[branch] = _best_effort(
+                lambda b=branch: gh.call("DELETE", gh.repo(f"/git/refs/heads/{b}"))
+            )
+    return done or {"стенд": "чисто"}
+
+
+def _best_effort(call: Callable[[], object]) -> str:
+    try:
+        call()
+    except (GitHubRefused, GitHubUnavailable) as exc:
+        return f"не удалось: {type(exc).__name__}"
+    return "сделано"
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -1567,6 +1792,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     wipe = sub.add_parser("wipe")
     wipe.add_argument("--out", type=Path, required=True)
     wipe.add_argument("--secrets", type=Path, required=True)
+    wipe.add_argument("--repo-id", type=int)
+    wipe.add_argument("--tag")
     return parser.parse_args(list(argv))
 
 
@@ -1577,7 +1804,7 @@ def main(argv: Sequence[str]) -> int:
         if ns.phase == "install":
             return install_phase(ns.source_sha, ns.out)
         if ns.phase == "wipe":
-            return wipe_phase(ns.out, ns.secrets)
+            return wipe_phase(ns.out, ns.secrets, ns.repo_id, ns.tag)
         if _TAG.fullmatch(ns.tag) is None:
             raise SystemExit(f"--tag {ns.tag!r}: нужен [A-Za-z0-9-]")
         args = StandArgs(

@@ -127,20 +127,32 @@ jobs:
             --repo-id "$DF_STAND_REPO_ID" --app-id "$DF_STAND_APP_ID" \
             --installation-id "$DF_STAND_INSTALLATION_ID" \
             --tag "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$CELL"
-      # Before the upload: evidence holding a secret is deleted (the step is
-      # then red), the installed copies and the secret files removed.
+      # Before the upload: what a run cut short left on the stand is swept
+      # (its PRs closed, its branches deleted, best effort), evidence holding
+      # a secret is deleted (the step is then red), the installed copies and
+      # the secret files removed -- the files also by the shell, whatever
+      # the script did.
       - name: wipe the stand's secrets
         if: always()
+        env:
+          DF_STAND_REPO_ID: ${{ vars.DF_STAND_REPO_ID }}
+          CELL: ${{ matrix.cell }}
         run: |
           dir="$RUNNER_TEMP/df-stand-secrets"
-          if [ ! -x .venv/bin/python ]; then
-            rm -rf "$dir"
-            exit 0
+          rc=0
+          if [ -x .venv/bin/python ]; then
+            set +e
+            sudo -n env "PATH=$PATH" "HOME=$RUNNER_TEMP/root-home" \
+              PYTHONDONTWRITEBYTECODE=1 "GITHUB_ACTIONS=$GITHUB_ACTIONS" \
+              .venv/bin/python -m tests.df.live_stand wipe \
+              --out "$RUNNER_TEMP/df-stage2-live" --secrets "$dir" \
+              --repo-id "$DF_STAND_REPO_ID" \
+              --tag "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$CELL"
+            rc=$?
+            set -e
           fi
-          sudo -n env "PATH=$PATH" "HOME=$RUNNER_TEMP/root-home" \
-            PYTHONDONTWRITEBYTECODE=1 "GITHUB_ACTIONS=$GITHUB_ACTIONS" \
-            .venv/bin/python -m tests.df.live_stand wipe \
-            --out "$RUNNER_TEMP/df-stage2-live" --secrets "$dir"
+          sudo -n rm -rf "$dir"
+          exit "$rc"
       - name: return RUNNER_TEMP to the runner
         if: always()
         run: sudo -n chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP"

@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 import urllib.request
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -327,7 +328,7 @@ def test_run_row_classifies() -> None:
         raise KeyError("bug")
 
     got = {
-        fn.__name__: live_stand.run_row(st, fn.__name__, fn)["status"]  # type: ignore[arg-type]
+        fn.__name__: live_stand.run_row(st, fn)["status"]  # type: ignore[arg-type]
         for fn in (passes, fails, asserts, control, crashes)
     }
     assert got == {
@@ -340,7 +341,7 @@ def test_run_row_classifies() -> None:
 
 
 def test_verdict_needs_every_row_and_the_cleanup() -> None:
-    names = [n for n, _fn in live_stand.ROWS] + [live_stand.CLEANUP[0]]
+    names = [r.name for r in live_stand.ROWS] + [live_stand.CLEANUP.name]
     ok = {n: {"status": "pass"} for n in names}
     assert live_stand.verdict(ok) == live_stand.EXIT_PASS
     assert live_stand.verdict(dict(list(ok.items())[:-1])) == live_stand.EXIT_FAILED
@@ -348,6 +349,124 @@ def test_verdict_needs_every_row_and_the_cleanup() -> None:
     assert live_stand.verdict(failed) == live_stand.EXIT_FAILED
     broken = {**failed, names[0]: {"status": "инфраструктура"}}
     assert live_stand.verdict(broken) == live_stand.EXIT_INFRA
+    skipped = {**ok, names[2]: {"status": live_stand.SKIPPED}}
+    assert live_stand.verdict(skipped) == live_stand.EXIT_FAILED
+
+
+def test_rows_skip_only_on_a_failed_prerequisite() -> None:
+    """Finding 3: a row runs unless a row it needs did not pass; a skipped
+    row is recorded, never a pass; independent rows still run; the cleanup
+    always runs and the overall verdict is a failure."""
+    calls: list[str] = []
+
+    def ok(name: str) -> Callable[[object], dict[str, object]]:
+        def fn(_st: object) -> dict[str, object]:
+            calls.append(name)
+            return {}
+
+        return fn
+
+    def bad(_st: object) -> dict[str, object]:
+        calls.append("b")
+        raise RowFailed("wording")
+
+    Row = live_stand.Row
+    rows = (
+        Row("a", "a", ok("a")),  # type: ignore[arg-type]
+        Row("b", "b", bad, ("a",)),  # type: ignore[arg-type]
+        Row("c", "c", ok("c"), ("b",)),  # type: ignore[arg-type]
+        Row("d", "d", ok("d"), ("c",)),  # type: ignore[arg-type]
+        Row("e", "e", ok("e"), ("a",)),  # type: ignore[arg-type]
+    )
+    cleanup = Row("z", "z", ok("z"))  # type: ignore[arg-type]
+    results = live_stand.run_rows(object(), rows, cleanup)  # type: ignore[arg-type]
+    assert calls == ["a", "b", "e", "z"]
+    statuses = {k: v["status"] for k, v in results.items()}
+    assert statuses == {
+        "a a": "pass",
+        "b b": "fail",
+        "c c": live_stand.SKIPPED,
+        "d d": live_stand.SKIPPED,
+        "e e": "pass",
+        "z z": "pass",
+    }
+    assert "зависит от b" in str(results["c c"]["reason"])
+    assert "зависит от c" in str(results["d d"]["reason"])
+    assert live_stand.verdict(results, expected=6) == live_stand.EXIT_FAILED
+
+
+def test_row_dependencies_name_existing_earlier_rows() -> None:
+    seen: set[str] = set()
+    for row in live_stand.ROWS:
+        assert set(row.needs) <= seen, row.name
+        seen.add(row.id)
+
+
+@pytest.mark.parametrize(
+    ("stderr", "refused"),
+    [
+        (
+            (
+                "remote: Write access to repository not granted.\n"
+                "fatal: unable to access 'https://github.com/o/r.git/': "
+                "The requested URL returned error: 403"
+            ),
+            True,
+        ),
+        ("remote: Permission to o/r.git denied to df-fixture-app[bot].", True),
+        ("error: cannot open .git/FETCH_HEAD: Permission denied", False),
+        ("fatal: could not read Username: terminal prompts disabled", False),
+        ("error: The requested URL returned error: 404", False),
+        ("", False),
+    ],
+)
+def test_push_refusal_is_githubs_only(stderr: str, refused: bool) -> None:
+    """Finding 2: only GitHub's own 403 counts, never a local «Permission
+    denied» (the negative twin) or another error."""
+    assert live_stand.github_refused_push(stderr) is refused
+
+
+def test_window_needs_a_snapshot_inside_the_read() -> None:
+    """Finding 1: the sampler covers the read only with a snapshot strictly
+    inside the window and no failed run."""
+    snaps = [(0.0, 0.1, "before"), (1.1, 1.2, "during"), (3.0, 3.1, "after")]
+    assert live_stand.window_problem(None, snaps, 1.0, 2.0) is None
+    assert live_stand.inside(snaps, 1.0, 2.0) == ["during"]
+    edge = [(0.9, 1.05, "straddles start"), (1.95, 2.1, "straddles end")]
+    assert live_stand.window_problem(None, edge, 1.0, 2.0) is not None
+    assert live_stand.window_problem(None, snaps[:1], 1.0, 2.0) is not None
+    assert live_stand.window_problem("код 1: x", snaps, 1.0, 2.0) is not None
+
+
+def test_sampler_error_is_kept() -> None:
+    """A failing `ps` run stops the sampler with its error (then row 6's
+    control is infrastructure); a working one records timed snapshots."""
+    with live_stand.PsSampler(["/bin/sh", "-c", "exit 3"], period=0.01) as ps:
+        assert not ps.saw("x", 2.0)
+    assert ps.error is not None and ps.error.startswith("код 3")
+    assert ps.snapshots == []
+    with live_stand.PsSampler(["/bin/echo", "mark"], period=0.01) as ok:
+        assert ok.saw("mark", 5.0)
+    began, ended, text = ok.snapshots[0]
+    assert ok.error is None and began <= ended and "mark" in text
+
+
+def test_seen_lines_mask_the_token() -> None:
+    text = "1 /usr/bin/git clone https://x\n2 sshd\n3 df-publish read-token SEKRET\n"
+    assert live_stand.seen_lines([text, text], ["SEKRET"]) == [
+        "1 /usr/bin/git clone https://x",
+        "3 df-publish read-token <token>",
+    ]
+
+
+def test_wait_held_gives_up_when_the_publisher_ends() -> None:
+    """Finding 9: no POST and the publisher gone: no 180 s wait."""
+    held = threading.Event()
+    began = time.monotonic()
+    assert live_stand.wait_held(held, lambda: False, 30.0) is False
+    assert time.monotonic() - began < 5.0
+    held.set()
+    assert live_stand.wait_held(held, lambda: True, 180.0) is True
 
 
 def test_phases_refuse_outside_ci_root(monkeypatch: pytest.MonkeyPatch) -> None:
