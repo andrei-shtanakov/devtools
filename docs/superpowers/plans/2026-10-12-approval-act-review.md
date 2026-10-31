@@ -2949,13 +2949,16 @@ steward#211). Этот коммит сверяет «Интерфейс M0» с 
    чтобы и 13, и 14 её потребляли.
 6. **Task 13** — вопрос владельца по п. 9 заметок части A (остановка не действующего поколения)
    записан с двумя вариантами; зависимые шаги помечены `[ждёт решения владельца]`.
-7. **Task 15** — `act_premerge` не опрашивает журнал периметра (иначе цепочка импортов обвязки мержа
-   включила бы `df/`, а это изменение процесса ревью `df/` — не решение плана); нарушение,
-   увиденное предпроверкой, — код 2 без мержа, регистрирует его путь решения (решение исполнителя
-   плана Р-7 ниже).
+7. **Task 15** — `act_premerge` опрашивает журнал периметра, как каждый потребитель (спека §6.3):
+   узкий клиент `act_journal_wire` (Task 12a, Step 5b) — тот же формат и правило блокировки без
+   импорта `df/`, поэтому цепочка обвязки мержа остаётся в `_HARNESS_PREFIXES` (Р-16). Нарушение,
+   найденное предпроверкой, регистрируется; блок другого потребителя останавливает мерж.
 8. **Live-проверки части B** — только после H1/H2: живой `approval-policy` сейчас один корневой
-   прямой коммит, активаций нет (ответ #211, п. 6). До H2 нет привязки — путь узла остаётся
-   прежним для заявок без маркера (Р-1).
+   прямой коммит, активаций нет (ответ #211, п. 6). **Привязка — предусловие развёртывания**
+   (ревизия b1, B1-5): режим продукта выводится из истории `ACT_MODE` по корню доверия; без файла
+   `/etc/df/trust.toml` режим «не установлен» (стоп шага, отказ создания заявки), а не legacy. До
+   слияния PR devtools #2 привязка ставится на каждой машине, где идут путь узла или раннер; в
+   тестах вне `act_*` режим подменяет `tests/conftest.py` (`mode_probe` → `PRE_MIGRATION`).
 
 Листинги части B проверены при ревизии: все полные модули разбираются `ast`, `ruff --select F`
 не находит неопределённых имён; длина строк приводится `ruff format` при реализации (после
@@ -2970,21 +2973,23 @@ steward#211). Этот коммит сверяет «Интерфейс M0» с 
 
 | # | Решение | Почему | Цена, если неверно |
 |---|---|---|---|
-| Р-1 | Нет файла привязки `/etc/df/trust.toml` → заявка без маркера идёт старым путём без чтений форджа, gate-check — `--act-mode legacy`; заявка с маркером — `Unavailable` | до H2 корня доверия нет, активация `ACT_MODE` невозможна, единственный допустимый исход admission — legacy; файл принадлежит root, агент его не удалит | удаление привязки root-ом молча вернёт продукт в legacy; лечится возвратом файла, исторические решения не меняются |
+| Р-1 | **снято ревизией b1** (B1-5): спека буквально — режим по истории `ACT_MODE` (§6.1, §10); нет привязки — режим не установлен (`Unavailable`), не legacy | — | — |
 | Р-2 | Читатель снимка `df-trust` — свой (REST анонимно: `repositories/{id}` → имя, голова закреплённой ветки, first-parent обход, версии `epochs.yaml` по `contents?ref=`); имя репо обязано совпасть с `df_trust_full_name` привязки | steward читает только `approval-policy` и требует default branch (О11), а спека §6.1 п. 1 запрещает следовать за default branch `df-trust` | переименование `df-trust` даёт `Unavailable` до правки привязки человеком (консервативно) |
 | Р-3 | Кэш анонимных ответов — только в памяти процесса и только для путей, неизменных по SHA (`commits/{sha}`, `git/trees/{sha}`, `git/blobs/{oid}`, `contents/…?ref={sha}`) | диск пишет агент того же пользователя: подменённый ответ коммита (родители) скрыл бы прямой push, а проверить содержимое коммита по SHA из REST нельзя | при пределе 60 анонимных запросов/ч несколько решений в час → `Unavailable: http`; см. вопрос к спеке С-1 |
-| Р-4 | `HistoryViolation` в диапазоне **открытой** эпохи — событие периметра + `Unavailable`; в диапазоне **закрытой** — значение диапазона `Unavailable` без события | закрытая эпоха — та, что человек уже закрыл из-за нарушения; событие с номером последней эпохи заблокировало бы корень до ещё одной эпохи без новой информации (e5: недоступный диапазон закрытой эпохи — ограничение, а не отказ) | если нарушение внутри подтверждённого человеком диапазона всё же значимо, мы не останавливаем корень, а лишь не принимаем акты этой эпохи |
-| Р-5 | Журнал периметра во флоте владельца — режим разработки: то же хранилище `df.publisher.perimeter` в `$XDG_STATE_HOME/darkfactory/perimeter/root/var/lib/df/perimeter/`; в установке `df` (есть `/opt/df/libexec/df-publish`) — клиент издателя (`df.perimeter_client`); без контекста прогона `df` — `Unavailable` | спека §6.3: «в режиме разработки … в том же формате»; формат — схема этапа 2a; путь `Layout` установщика не настраивается под произвольный каталог | в установке `df` до подключения источника эпох (этап 3 установщика, решение владельца 26.10) все решения — `Unavailable: no_binding`; часть B работает во флоте владельца |
+| Р-4 | **снято ревизией b1** (B1-4): `HistoryViolation` в диапазоне любой эпохи — событие периметра и отказ (§6.3); от возраста диапазона не зависит | — | — |
+| Р-5 | Журнал периметра во флоте владельца — режим разработки: то же хранилище `df.publisher.perimeter` в `$XDG_STATE_HOME/darkfactory/perimeter/root/var/lib/df/perimeter/`; в установке `df` (есть `/opt/df/libexec/df-publish`) — клиент издателя (`df.perimeter_client`); без контекста прогона `df` — `Unavailable`. В событии — настоящий `approval_policy_repository_id` привязки (B1-18) | спека §6.3: «в режиме разработки … в том же формате»; формат — схема этапа 2a; путь `Layout` установщика не настраивается под произвольный каталог | в установке `df` до подключения источника эпох (этап 3 установщика, решение владельца 26.10) все решения — `Unavailable: no_binding`; часть B работает во флоте владельца |
 | Р-6 | Свой строгий разбор `trust.toml` в `act_trust` (те же ключи, `O_NOFOLLOW`, владелец root, не пишется группой/всеми); тест сверяет исход с `df.stage2_config.parse_trust` на тех же фикстурах | `act_trust` входит в цепочку `act_premerge` (обвязка мержа), а `df.stage2_config` тянет полдюжины модулей `df/`, не входящих в `_HARNESS_PREFIXES` | два разборщика одного файла; расхождение ловит тест равенства, а не ревью |
-| Р-7 | `act_premerge` выполняет `load_trust` без журнала периметра; нарушение, найденное ею, — код 2 и текст «зарегистрирует `--approve-node`», регистрация — на пути решения (`act_node`, `act_status`), который повторяет те же самоотчёты | цепочка обвязки мержа не может включать `df/` без смены процесса ревью этих путей (решение владельца, не плана) | окно между отказом предпроверки и следующим `--approve-node`, когда другие потребители той же установки не заблокированы; мерж при этом не выполняется |
-| Р-8 | История узла читается по first-parent **локальной** базы: заявка — коммит, **добавивший** манифест; голова заявки — второй родитель merge-коммита; добавление манифеста не merge-коммитом, правка или удаление манифеста/остановки после доставки → история `Unavailable` | агентская доставка candidate идёт `merge-pr.sh --merge` (merge-коммит); без второго родителя голову одобренного коммита из git не установить | squash-мерж candidate человеком делает узел `unavailable` (не «одобрен» и не «отказ») до `--repropose` |
-| Р-9 | Узел без единого события `review/v1` в истории судится старым предикатом (`node_debt`, frontmatter) и под `ACT_MODE=review` | спека §9.1 п. 3: режим узла — по заявке действующего события; при D7 файлы узлов под CODEOWNERS-человеком, агентская правка frontmatter без человека в базу не попадёт | до включения D7 в продукте frontmatter legacy-узла остаётся тем, чем был сегодня |
-| Р-10 | `gate-check` S4/S8: `--act-mode review` + провайдер, если на текущей активации открытой эпохи `ACT_MODE[P] = review`; иначе `legacy`; недоступный корень доверия — стоп шага | О14 требует результат admission; «admission» для прогона целиком — режим продукта сейчас; смешанный DAG покрывает провайдер (legacy-узлы он судит старым предикатом) | продукт в `merge` с уже доставленной заявкой `review/v1` (невозможно по барьеру §10) упрётся в `GC-ACT-MODE-CONFLICT` — fail-closed |
-| Р-11 | Проверка конверта после мержа finalize (Task 13) — побайтовое равенство с `render_envelope(ожидаемый)` на merge-коммите finalize; полный статус узла — в гейте доставки (Task 14) | прежняя редакция ссылалась на Task 14 из Task 13; побайтовое равенство — та же сверка, что форма коммита конверта | нет |
+| Р-7 | **снято ревизией b1** (B1-4): журнал обязателен и в предпроверке — через `act_journal_wire` (Р-16) | — | — |
+| Р-8 | **сужено b1** (B1-9): история узла — по first-parent базы; заявка — коммит, добавивший манифест; голова заявки — `headRefOid` из фактов PR merge-коммита (`prs_containing_commit` + `pr_facts`), а не второй родитель — squash поддержан; объект головы догружается `refs/pull/N/head`. Правка или удаление манифеста/остановки после доставки → история `Unavailable` | спека требует манифест в одобренном head (§9.1 (а) п. 0) и запрещает переписывать доставленное; форма мержа контрактом не ограничена | правка доставленной заявки блокирует историю воркстрима до разбора человеком (fail-closed) |
+| Р-9 | **механизм b1** (B1-3): узел без события `review/v1` получает статус только через provenance старого одобрения — подпись frontmatter внесена finalize-PR старой заявки, её candidate смёржен той же учёткой в то же время, доставка candidate проходит admission (`Decider.legacy`); без доказанного candidate — `not_approved:legacy_provenance` | правило — спека §9.1 (а) п. 3 и :747, без отката на «нет события»; плану остаётся только механизм цепочки | цепочка опирается на SSOT формы веток; переименование формы без миграции даст `legacy_provenance` (fail-closed) |
+| Р-10 | **механизм b1** (B1-5): `gate-check` S4/S8 — `--act-mode` по `product_mode` (история режима): `review` → провайдер; `PRE_MIGRATION`/`merge` → `legacy`; удаление записи, откат `review → merge`, нет привязки, недочитанная история → стоп шага | О14 требует результат admission; спека §10 запрещает выводить режим из одного текущего значения | продукт в `merge` с уже доставленной заявкой `review/v1` (невозможно по барьеру §10) упрётся в `GC-ACT-MODE-CONFLICT` — fail-closed |
+| Р-11 | **дополнено b1** (B1-15): проверка конверта после мержа finalize — побайтовое равенство с `render_envelope(ожидаемый)` на merge-коммите finalize **и** достижимость этого коммита из базы (`is_ancestor`); `reopen` — наличие и идентичность `StopRecord` в stop-PR, достижимость его merge-коммита | прежняя редакция ссылалась на Task 14 из Task 13; доставка в нужную базу — часть утверждения «конверт в base» | нет |
 | Р-12 | Вендоренный `contracts/approval-facts/` — в authority-root и `_HARNESS_PREFIXES` | данные тестов ядра акта защищаются так же, как сами тесты `tests/test_act_*` (заметки части A, строка 10) | PR, правящий только векторы, мержит человек |
-| Р-13 | Канонический хеш DAG для узлов `review/v1`: в манифест хеша добавляются блобы конверта и записей остановки узла, а не «производный статус» | статус `review/v1` меняется только байтами `approvals/` (остановка, supersede, конверт) и upstream (уже в хеше); `_content_anchor` зовут четыре места без форджи; legacy-продукты хеш не меняют | если появится изменение допуска без байтов `approvals/`, no-op §I5 его не увидит до гейта; см. С-3 |
+| Р-13 | **переведено в вопрос владельцу В-1** (B1-6): канонический хеш DAG — отступление от буквы спеки; вариант по умолчанию закрывает дыру supersede (блобы всех `approvals/`) | — | — |
 | Р-14 | `--repropose` брифа переезжает из Task 13a в Task 17 | заявка брифа с пином активации (`v2`) появляется только с M2 discovery — переиздавать до неё нечего | до части C выход для брифа — новая заявка через `brief-propose` |
-| Р-15 | Барьер (Task 16) считает смёрженный legacy-candidate разобранным по подписи этого (или более позднего) акта в базе; пины узла не судит | §10 п. 2 спрашивает «доведена или инвалидирована», а не «узел без долга»; дрейф пинов после законного акта — долг узла | узел с долгом пинов пройдёт барьер и встанет на гейте доставки |
+| Р-15 | **усилено b1** (B1-13): барьер считает смёрженный legacy-candidate разобранным, только если каждый узел, отданный candidate на одобрение (`approval_pending` в его голове, состав — независимо от finalize), подписан этим или более поздним актом в базе; пустой состав — живой пункт; пины узла не судит | §10 п. 2 спрашивает «доведена или инвалидирована», а не «узел без долга»; дрейф пинов после законного акта — долг узла | узел с долгом пинов пройдёт барьер и встанет на гейте доставки |
+| Р-16 | Предпроверка мержа пишет журнал периметра узким клиентом `act_journal_wire`: в установке `df` — протокол издателя `df/publisher-request/v1` (`sudo -n -u df-publisher df-publish`), в режиме разработки — то же SQLite-хранилище (правило блокировки и вставка `pending` в `BEGIN IMMEDIATE`); совпадение форматов держит тест на одном файле базы | спека §6.3 требует журнал у каждого потребителя; цепочка обвязки мержа не может включать `df/` без смены процесса ревью этих путей (решение владельца, не плана) | второй писатель того же хранилища: расхождение схемы ловит тест равенства с `df.publisher.perimeter`, номер эпохи `pending` назначает полный журнал |
+| Р-17 | Идентичность судимого объекта — одна на объект: `RequestIdentity(product, ws_id, request_id)` + пути узлов DAG + байты манифеста в одобренном head; маркер миграции — `<!-- act-migrated: <product>/<ws_id>/<request_id> -->` | ревизия b1 нашла пять мест, сверявших часть компонентов (B1-1/2/13/14/15); спека формат маркера не задаёт | маркеры старой формы (`approve-W-K-A` без продукта и воркстрима) барьер не принимает — их ставят заново `--invalidate` |
 
 **Вопросы к спеке** (план не поглощает; список — в отчёте ревизии): С-1 — анонимный REST
 (спека §6.2, 60 запросов/ч на IP) против чтения истории обоих источников доверия перед **каждым**
@@ -2992,8 +2997,84 @@ steward#211). Этот коммит сверяет «Интерфейс M0» с 
 источника политики обязана быть default branch) — новое ограничение, которого нет в §6.1;
 поглощается как fail-closed предусловие H1/H2, но в спеку его стоит внести. С-3 — §9.1 (а) п. 4
 («производный статус из проверенного конверта» в каноническом хеше DAG) требует чтений форджи в
-`_content_anchor`, который сегодня их не делает; план берёт байты `approvals/` (Р-13).
+`_content_anchor`, который сегодня их не делает; решение — за владельцем (В-1 ниже).
 
+
+### Правки по ревью b1
+
+Ревью `plan-review-b1` (3 blocker, 12 major, 3 minor). Подписанная спека обязательна: план не
+решает отступлений. Р-1, Р-4, Р-7 сняты (спека буквально), Р-13 переведено в вопрос владельцу
+В-1, Р-8–Р-11 и Р-15 переписаны под спеку; новые Р-16, Р-17 — механизмы, а не отступления.
+
+- **B1-1, B1-2, B1-13, B1-14, B1-15 — один класс**: суждение сверяло часть идентичности объекта.
+  Введена одна идентичность на объект (`governance/act_identity.py`, Task 12a Step 5a; Р-17) и
+  таблица ниже; на каждый недостающий компонент — отрицательный двойник.
+- **B1-3**: legacy-узел — только provenance старого одобрения + admission (`LegacyProbe`, Task 14;
+  Р-9); отката на «нет события `review/v1`» нет.
+- **B1-4**: журнал обязателен всюду, включая предпроверку (`act_journal_wire`, Р-16);
+  `HistoryViolation` любой эпохи — событие периметра (Р-4 снято).
+- **B1-5**: режим продукта — `act_trust.product_mode` по истории `ACT_MODE`: `PRE_MIGRATION` (записи
+  не было никогда) отличён от удалённой записи, отката `review → merge` и потери привязки
+  (`Unavailable`); единая точка `act_status.mode_probe` для гейтов, DAG и создания заявки.
+- **B1-6**: С-3 — вопрос владельцу В-1; вариант по умолчанию хеширует все файлы `approvals/`
+  (дыры supersede нет), тест «те же байты узла, новое поколение — хеш другой, no-op не скрывает».
+- **B1-7, B1-8 — один класс**: смена поверхности `Ops` не доходила до всех мест вызова. Два
+  статических обхода: `test_every_gate_check_site_names_act_mode` (Task 11 — все вызовы,
+  переопределения и пересылки `gate_check_*`) и `test_new_ops_surface_reached_only_behind_mode_probe`
+  (Task 14 — новые методы `Ops` только из `act_*`, чтение истории вне `act_*` — только за
+  `mode_probe`).
+- **B1-9**: голова заявки — из фактов PR (squash поддержан), тест полного цикла «squash → чтение →
+  `--repropose`» (Task 13a).
+- **B1-10**: `load_anchor_times` читает все якоря, `load_ranges` — все эпохи с якорем ≤ t;
+  интеграционный тест загрузчика с admission перехода в эпоху 2 (Task 12a).
+- **B1-11**: производный токен App не самоотчитывается: предпроверка в App-режиме идёт с
+  `GH_TOKEN=""`, установки App проверяются у держателя ключа (`app_installations`), прочие
+  credentials — как обычно; сквозной тест App → `act_premerge` → `load_trust` (Task 15a).
+- **B1-12**: оба списка самоотчёта App — все страницы с проверкой полноты, иначе `Unavailable`;
+  HTTP без перенаправлений (`_NoRedirect`).
+- **B1-16**: тест JWT проверяет подпись без часов прогона, `iat`/`exp` — отдельно.
+- **B1-17**: состав коммита Task 13 перечислен для каждого варианта решения по п. 9 части A.
+- **B1-18**: в событии журнала — настоящий `approval_policy_repository_id`; тест полей события.
+
+**Идентичность судимого объекта: место суждения × компоненты** (✓ — сверяется; тест —
+отрицательный двойник на компонент, который раньше не сверялся):
+
+| Место суждения | product | ws_id | request_id | пути узлов DAG | манифест в одобренном head | merge-коммит в базе | Отрицательные двойники |
+|---|---|---|---|---|---|---|---|
+| `act_identity` (общая проверка) | ✓ | ✓ | ✓ | ✓ | ✓ | — | `test_act_identity.py::test_each_identity_component_is_checked`, `::test_manifest_only_in_delivery_or_changed`, `::test_marker_and_memo_carry_full_identity` |
+| путь узла, открытый/смёрженный candidate (`act_node._binding_refusal`) | ✓ | ✓ (путь манифеста) | ✓ | ✓ | ✓ (head PR) | — | `test_act_node.py::test_foreign_identity_binding_invalidates[product,ws_id,node_path]` |
+| исторический `Decider` (Task 14) | ✓ | ✓ (фильтр истории) | ✓ | ✓ | ✓ (`head_manifest_refusal`) | ✓ (first-parent) | `test_act_status.py::test_decider_refuses_unbound_manifest[absent_in_head,changed_in_head,foreign_path,foreign_product]` |
+| память вердиктов `Decider` | ✓ | ✓ | ✓ | — | — | ✓ | `test_act_status.py::test_decider_memo_is_per_request_not_per_commit` |
+| finalize в конверт (`_reconcile_finalize`) | ✓ | ✓ | ✓ | ✓ | — | ✓ (`is_ancestor`) | `test_act_node.py::test_finalize_merged_outside_base_invalidates` |
+| остановка / `reopen` | ✓ | ✓ | узел + поколение | ✓ | — | ✓ | `test_act_node.py::test_reopen_refuses_stop_pr_without_record` |
+| предпроверка мержа (`act_premerge`) | ✓ (`--repo`) | ✓ (ветка) | ✓ (ветка) | — | ✓ (`--head`) | — | `test_act_premerge.py::test_manifest_of_other_identity_refused[request_id,ws_id]` |
+| барьер: «помечен» (`_marked`) | ✓ | ✓ | ✓ | — | ✓ (строгий разбор) | — | `test_act_barrier.py::test_malformed_or_foreign_manifest_is_not_a_marker` |
+| барьер: маркер миграции (`_migrated`) | ✓ | ✓ | ✓ | — | — | — | `test_act_barrier.py::test_marker_must_be_human_unedited_and_this_request` |
+| барьер: инвалидация леджера (`invalidate`) | ✓ | ✓ | ✓ | — | — | — | `test_act_barrier.py::test_invalidate_touches_only_selected_workstream` |
+| барьер: legacy-candidate разобран | ✓ | ✓ | ✓ | ✓ (состав candidate) | — | ✓ (finalize MERGED) | `test_act_barrier.py::test_partial_finalize_leaves_candidate_live`, `::test_empty_finalize_does_not_resolve` |
+| provenance старого одобрения (`LegacyProbe`) | ✓ | ✓ | ✓ (ветки SSOT) | ✓ (файл узла) | — | ✓ (подпись — коммит finalize) | `test_act_legacy.py::test_candidate_delivered_after_activation_refused` и пять соседних |
+
+**Правило смены поверхности `Ops`** (B1-7/B1-8): каждая задача, меняющая сигнатуру или добавляющая
+метод `Ops`, несёт статический обход всех мест вызова, переопределения и пересылки по
+`governance/` и `tests/` — список мест сверяется с деревом при исполнении задачи, а не с
+памятью плана.
+
+**Вопрос владельцу В-1** (ревизия b1, B1-6; вопрос к спеке С-3) — канонический хеш DAG для узлов
+`review/v1`. Спека §9.1 (а) п. 4: «в каноническую проекцию входит производный статус из
+проверенного конверта».
+
+- **(а) Спека буквально** — `_content_anchor` получает проверенный статус `Statuses.of` и
+  подставляет его вместо `status` узла `review/v1`. Следствия: доверенный контекст и чтения форджи
+  во всех четырёх местах `_content_anchor` (сегодня без форджи), каждое no-op §I5 тратит
+  анонимную квоту (С-1); недоступность форджи — `Unavailable` вместо no-op.
+- **(б) Байты всех файлов `approvals/` воркстрима** (конверты, манифесты, остановки) в манифесте
+  хеша. Следствия: без форджи; любое новое поколение, остановка, supersede меняют хеш — no-op не
+  скроет изменение допуска; хеш меняется и от байтов, не влияющих на допуск (лишний перегон §I5,
+  не пропуск).
+- **Рекомендация: (б)** — та же гарантия «изменение допуска не скрыто», без чтений форджи в
+  `_content_anchor`; цена — лишние перегоны. Шаг `_canonical_dag_hash` Task 14 помечен
+  `[ждёт решения владельца В-1]`; листинг — вариант (б), тест
+  `test_canonical_hash_sees_new_generation_and_stops` проходит при обоих вариантах.
 ### Task 11: Пин steward v0.2.0, совместимость вызовов gate-check, gate-catalog v3
 
 **Files:**
@@ -3003,8 +3084,11 @@ steward#211). Этот коммит сверяет «Интерфейс M0» с 
   `Ops.gate_snapshot_digest`; `RealOps` — то же)
 - Modify: `governance/runner.py` (`_step_gate` ~3275, `_step_s8` ~4024 — явный `act_mode`)
 - Modify: `governance/bundle_state.py:70` (`collect_bundle(..., act_mode="legacy")`)
-- Modify (тесты-стабы): `tests/test_governance_runner.py:514,522,1692,2893`,
-  `tests/test_governance_sandbox_live.py:855`, `tests/test_governance_waves_e2e.py:206,209`,
+- Modify (тесты — вызовы, стабы и пересылки; полный список — статический обход ниже, ревизия
+  b1, B1-7): `tests/test_governance_ops.py:316,341` (прямые вызовы `gate_check_s8` + проверки
+  argv), `tests/test_governance_runner.py:514,522` (стабы), `:1692–1696,2893–2897` (пересылка в
+  `RealOps`), `tests/test_governance_sandbox_live.py:855–860` (пересылка),
+  `tests/test_governance_waves_e2e.py:206,209`,
   `tests/test_governance_bundle_state.py:375,387`, `tests/test_governance_stale_adapter.py:32,53,68`,
   `tests/test_governance_steward_surface.py` (все вызовы `collect_bundle`)
 - Test: `tests/test_governance_gate_act_mode.py` (новый)
@@ -3113,6 +3197,39 @@ def test_every_collect_bundle_call_names_act_mode() -> None:
     assert offenders == []
 
 
+GATE_METHODS = ("gate_check_s8", "gate_check_candidate")
+
+
+def _gate_offenders(root: Path) -> list[str]:
+    """Все места вызова и переопределения методов `Ops`, сменивших сигнатуру."""
+    offenders: list[str] = []
+    for path in [*root.glob("governance/**/*.py"), *root.glob("tests/**/*.py")]:
+        rel = path.relative_to(root)
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name in GATE_METHODS:
+                kwonly = {a.arg for a in node.args.kwonlyargs}
+                if not {"act_mode", "node_status"} <= kwonly or node.args.kwarg is not None:
+                    offenders.append(f"{rel}:{node.lineno} def {node.name}")
+                for inner in ast.walk(node):  # пересылка обязана нести оба аргумента
+                    if (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute)
+                            and inner.func.attr == node.name
+                            and not {"act_mode", "node_status"}
+                            <= {k.arg for k in inner.keywords}):
+                        offenders.append(f"{rel}:{inner.lineno} пересылка {node.name}")
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in GATE_METHODS
+                    and "act_mode" not in {k.arg for k in node.keywords}):
+                offenders.append(f"{rel}:{node.lineno} вызов {node.func.attr}")
+    return sorted(set(offenders))
+
+
+def test_every_gate_check_site_names_act_mode() -> None:
+    """B1-7: все места вызова, переопределения и пересылки `gate_check_*` —
+    статически, чтобы пропущенный стаб не всплыл `TypeError` в чужом тесте."""
+    assert _gate_offenders(ROOT) == []
+
+
 def test_gate_catalog_is_v3_with_act_gates() -> None:
     data = yaml.safe_load((ROOT / "profiles/gate-catalog.yaml").read_text("utf-8"))
     assert data["version"] == 3
@@ -3136,6 +3253,15 @@ def test_cli_refuses_without_act_mode(tmp_path: Path) -> None:
 
 `gates` в каталоге v3 — отображение `код → {obligation, status, title, stages}` (сверено по
 `steward@68f46a9:profiles/gate-catalog.yaml`).
+
+Статический обход `test_every_gate_check_site_names_act_mode` (ревизия b1, правило «класс, а не
+экземпляр»): на сегодняшнем дереве он перечисляет ровно эти места — `governance/ops.py:306,312`
+(`Ops`), `:2105,2154` (`RealOps`), `governance/runner.py:3275,4024`,
+`tests/test_governance_ops.py:316,341`, `tests/test_governance_runner.py:514,522,1692/1696,
+2893/2897`, `tests/test_governance_sandbox_live.py:855/859/860`,
+`tests/test_governance_waves_e2e.py:206,209` (сверено прогоном обхода по `devtools@HEAD` ветки
+плана). Каждое из них правится в этом же коммите; новый стаб или вызов без `act_mode` падает
+здесь, а не `TypeError` в чужом тесте.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -3299,7 +3425,8 @@ def _act_args(act_mode: str, node_status: str | None) -> list[str]:
     artifacts, findings = collect_bundle(graph, bundle_dir, act_mode="legacy")
 ```
 
-Стабы `Ops` в тестах принимают новый аргумент (тело не меняется), например
+Стабы `Ops` в тестах принимают новый аргумент (тело не меняется, кроме пересылающих в
+`RealOps` — они передают аргументы дальше, см. ниже), например
 `tests/test_governance_runner.py:514`:
 
 ```python
@@ -3324,9 +3451,27 @@ def _act_args(act_mode: str, node_status: str | None) -> list[str]:
 стаб падал, если вызывающий его не передал. Тесты, зовущие `collect_bundle` напрямую, получают
 `act_mode="legacy"`.
 
+Пересылающие стабы (`tests/test_governance_runner.py:1692,2893`,
+`tests/test_governance_sandbox_live.py:855`) передают оба аргумента дальше без изменений:
+
+```python
+        def gate_check_candidate(
+            self, target_dir, bundle_dir, profile, *, act_mode, node_status=None
+        ):
+            self.calls.append(("gate_check_candidate", bundle_dir))
+            return RealOps().gate_check_candidate(
+                target_dir, bundle_dir, profile, act_mode=act_mode, node_status=node_status
+            )
+```
+
+(в `test_governance_sandbox_live.py:859–860` так же — и ветка `RealOps()`, и `super()`).
+Прямые вызовы `tests/test_governance_ops.py:316,341` получают `act_mode="legacy"`, а их
+проверки argv — хвост `["--act-mode", "legacy"]` (характеризация реальной команды обновляется
+вместе с командой).
+
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `uv run --group governance pytest tests/test_governance_gate_act_mode.py tests/test_governance_runner.py tests/test_governance_bundle_state.py tests/test_governance_stale_adapter.py tests/test_governance_steward_surface.py tests/test_governance_waves_e2e.py -v`
+Run: `uv run --group governance pytest tests/test_governance_gate_act_mode.py tests/test_governance_ops.py tests/test_governance_runner.py tests/test_governance_sandbox_live.py tests/test_governance_bundle_state.py tests/test_governance_stale_adapter.py tests/test_governance_steward_surface.py tests/test_governance_waves_e2e.py -v`
 Expected: PASS. Затем полный набор в обоих режимах:
 `uv run pytest -q` и `GOVERNANCE_REQUIRED=1 uv run --group governance pytest -q` — PASS
 (никаких `SKIPPED (steward)` во втором). `uv run ruff check . && uv run ruff format --check . &&
@@ -3336,7 +3481,8 @@ uv run pyrefly check` — чисто.
 
 ```bash
 git add pyproject.toml uv.lock profiles/gate-catalog.yaml governance/ops.py governance/runner.py \
-  governance/bundle_state.py tests/test_governance_gate_act_mode.py tests/test_governance_runner.py \
+  governance/bundle_state.py tests/test_governance_gate_act_mode.py tests/test_governance_ops.py \
+  tests/test_governance_runner.py \
   tests/test_governance_sandbox_live.py tests/test_governance_waves_e2e.py \
   tests/test_governance_bundle_state.py tests/test_governance_stale_adapter.py \
   tests/test_governance_steward_surface.py
@@ -5231,12 +5377,16 @@ git commit -m "feat(act): полная проверка доставки на с
   цепочку `act_premerge` — импортирует `df/`)
 - Create: `governance/act_context.py` (решение по доставке поверх доверенного контекста — общее
   для Task 13 и Task 14)
+- Create: `governance/act_identity.py` (идентичность судимого объекта — ревизия b1)
+- Create: `governance/act_journal_wire.py` (узкий клиент журнала для `act_premerge`, без `df/` —
+  ревизия b1)
 - Modify: `governance/act_perimeter.py` — удаляются маркер-файлы части A (`marker_path`,
   `_marked_epoch`, `_write_marker`, `record_violation`, `blocked`, `PerimeterError`): механизм
   заменён журналом событий (спека A rev 16 §6.3); остаются `Violation`, `permissions_refusal`
 - Modify: `tests/test_act_perimeter.py` — удаляются тесты маркеров (строки `:26–112`, `:151–162`),
   тесты `permissions_refusal` остаются
-- Test: `tests/test_act_trust.py`, `tests/test_act_journal.py`, `tests/test_act_context.py`
+- Test: `tests/test_act_trust.py`, `tests/test_act_journal.py`, `tests/test_act_context.py`,
+  `tests/test_act_identity.py`, `tests/test_act_journal_wire.py`
 
 **Interfaces:**
 - Consumes: Tasks 1, 2, 4, 9 (`parse_source`, `parse_journal`, `check_transition`,
@@ -5249,7 +5399,8 @@ git commit -m "feat(act): полная проверка доставки на с
   `BINDING_PATH = Path("/etc/df/trust.toml")`; `Binding(host, df_trust_repository_id,
   df_trust_full_name, df_trust_branch, approval_policy_repository_id, transport)`;
   `parse_binding(text) -> Binding` (`TrustError`); `load_binding(path=None, *,
-  owner_uid=0) -> Binding | None | Unavailable` (`None` — файла нет, Р-1; `path=None` —
+  owner_uid=0) -> Binding | None | Unavailable` (`None` — файла нет; потребители режима
+  читают это как «режим не установлен», не legacy — ревизия b1, B1-5; `path=None` —
   `BINDING_PATH` на момент вызова);
   `TrustRoot(host, repository_id, branch, snapshot_sha)` с `.id_tuple`;
   `TrustSnapshot(root, full_name, source, epochs)`;
@@ -5259,18 +5410,22 @@ git commit -m "feat(act): полная проверка доставки на с
   `Readers(anon, as_credential)`, `default_readers()`;
   `Journal` (protocol: `status(snap) -> "clear" | "blocked" | STALE | Unavailable`,
   `record(snap, source, detail) -> Unavailable | None`); `STALE = "stale_snapshot"`;
-  `Trust(snapshot, unverified: tuple[str, ...], perimeter_checked: bool)` + свойства `source`,
-  `epochs`, `root`;
-  `load_trust(readers, binding, journal, *, creds) -> Trust | Unavailable`;
+  `Trust(snapshot, unverified: tuple[str, ...])` + свойства `source`, `epochs`, `root`;
+  `load_trust(readers, binding, journal, *, creds) -> Trust | Unavailable` (журнал обязателен —
+  ревизия b1);
   `load_anchor_times(anon, trust, t) -> dict[str, datetime | Unavailable]`;
   `load_ranges(anon, trust, anchor_at, t, journal) -> tuple[dict[int, Span | Unavailable],
   dict[str, PolicySet | Unavailable]] | Unavailable`;
   `policy_set(anon, source, activation: ActivationFact) -> PolicySet | Unavailable`;
-  `current_activation(trust, ranges) -> ActivationView | Unavailable`.
+  `current_activation(trust, ranges) -> ActivationView | Unavailable`;
+  `PRE_MIGRATION`; `product_mode(trust, ranges, sets, product, now) -> str | Unavailable`
+  (`PRE_MIGRATION` | `merge` | `review`; удаление записи, откат `review → merge`, недочитанная
+  нужная история — `Unavailable`).
 - Produces (`act_journal`): `ForgeEpochs(reread)` (реализация `df.publisher.perimeter.EpochSource`
   поверх `read_trust_snapshot` — её же подключает этап 3 установщика, handoff в отчёте);
-  `DevJournal(state_home, run_id, reread)`; `InstalledJournal(df_run_id)`;
-  `journal_for(*, state_home, run_id, reread, env) -> Journal | Unavailable` (Р-5).
+  `DevJournal(state_home, run_id, reread, policy_repository_id)`; `InstalledJournal(df_run_id)`;
+  `journal_for(*, state_home, run_id, reread, env, policy_repository_id) -> Journal | Unavailable`
+  (Р-5; id approval-policy — из привязки, B1-18).
 - Produces (`act_context`): `delivery_verdict(readers, trust, journal, *, product, pr, paths,
   request, request_act, head_sha, facts_transport, self_hashes, legacy) -> tuple[Outcome,
   DeliveryView | None]`.
@@ -5285,8 +5440,9 @@ git commit -m "feat(act): полная проверка доставки на с
    `contents?ref=<звено>`: первая — ровно одна открытая эпоха 1 с якорем `BOOTSTRAP_ACTIVATION`,
    каждая следующая — `check_transition`; удаление файла после появления — нарушение журнала.
    SHA снимка — в `TrustRoot`. `act_source.load_source()` не вызывается.
-2. Журнал событий периметра (если передан): `blocked` → `Unavailable`; `STALE` → перечитать снимок
-   и повторить (не более трёх снимков); `act_premerge` передаёт `None` (Р-7).
+2. Журнал событий периметра (обязателен у каждого потребителя, включая `act_premerge` — узкий
+   клиент `act_journal_wire`, ревизия b1): `blocked` → `Unavailable`; `STALE` → перечитать снимок и
+   повторить (не более трёх снимков).
 3. Самоотчёт **каждого** credential процесса (`credentials`: профиль агента, фактический профиль
    мержа, `GH_TOKEN`, `GITHUB_TOKEN`; совпадающие — один раз) на **обоих** репо доверия:
    `permissions_refusal` → `Violation` (у любого credential, перекрывает чужие `Unavailable`) →
@@ -5297,17 +5453,21 @@ git commit -m "feat(act): полная проверка доставки на с
 5. `allow_rebase_merge` у `approval-policy` (анонимно): четыре состояния (раздел «Решения
    владельца», п. 1); `None`/нет ключа → `Trust.unverified = ("allow_rebase_merge",)`.
 
-`load_anchor_times(t)`: от последней эпохи назад, время якоря — `merged_at` из `read_activation`
-(№19); как только якорь `< t` или время не установлено — обход прекращается (e7: объекты старых
-эпох не нужны). `load_ranges(t)`: история только эпох с якорем `≤ t`; `HistoryBreak` открытой
-эпохи — событие + `Unavailable`, закрытой — значение диапазона `Unavailable` (Р-4); наборы
+`load_anchor_times(t)`: время якоря **каждой** эпохи — `merged_at` из `read_activation` (№19);
+недоступное время — значение `Unavailable`, которое мешает лишь решению, зависящему от него (e7;
+ревизия b1, B1-10: admission при `merge`/без записи требует истории режима прежних эпох).
+`load_ranges(t)`: история всех эпох с якорем `≤ t`; `HistoryBreak` в диапазоне **любой** эпохи —
+событие периметра + `Unavailable` (§6.3; ревизия b1 сняла исключение закрытых эпох); наборы
 политик — **только** активаций с `merged_at ≤ t` (набор после T не читается: §6, §8.1 №5); байты
 набора — из того же `merge_commit` и сверяются с `files_sha256` steward (смешение → `Unavailable`,
 №32); отсутствующий в активации файл (О3) → `Unavailable`.
 
 Порядок вызовов: историческая доставка — `load_trust` → `load_anchor_times(merged_at)` →
 `load_ranges(merged_at)` (это делает `delivery_verdict`); открытый PR (`act_node`, `act_premerge`)
-— то же с `t = now`, текущая активация = `current_activation`.
+— то же с `t = now`, текущая активация = `current_activation`, режим продукта сейчас —
+`product_mode` (Task 14 `live_policy`): без привязки, при удалённой записи, откате или
+недочитанной истории — `Unavailable` и стоп, а не legacy (ревизия b1, B1-5; привязка — предусловие
+развёртывания части B).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -5436,10 +5596,10 @@ AGENT = act_trust.Credential("profile:agent", gh_config_dir=Path("/x/review"))
 
 def load(routes: dict, journal: Journal | None = None, creds=(AGENT,), answers=None):
     readers = act_trust.Readers(Anon(routes), as_credential(answers or {}))
-    return act_trust.load_trust(readers, binding(), journal, creds=creds)
+    return act_trust.load_trust(readers, binding(), journal or Journal(), creds=creds)
 
 
-# --- привязка (Р-1, Р-6) ----------------------------------------------------
+# --- привязка (Р-6; без Р-1 — ревизия b1) -----------------------------------
 
 
 def test_binding_parse_agrees_with_installer() -> None:
@@ -5540,7 +5700,7 @@ def test_load_source_not_called(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_clean_trust_carries_root_and_premise() -> None:
     trust = load(trust_routes(None, J1, rebase=None), Journal())
     assert isinstance(trust, act_trust.Trust)
-    assert trust.root.snapshot_sha == C1 and trust.perimeter_checked
+    assert trust.root.snapshot_sha == C1
     assert trust.unverified == ("allow_rebase_merge",)
 
 
@@ -5552,11 +5712,6 @@ def test_blocked_journal_blocks() -> None:
 def test_stale_snapshot_reloads() -> None:
     journal = Journal([act_trust.STALE, "clear"])
     assert isinstance(load(trust_routes(None, J1), journal), act_trust.Trust)
-
-
-def test_premerge_without_journal() -> None:
-    trust = load(trust_routes(None, J1), None)
-    assert isinstance(trust, act_trust.Trust) and not trust.perimeter_checked
 
 
 def test_token_with_push_records_and_blocks() -> None:
@@ -5651,7 +5806,7 @@ def test_credentials_deduplicate_and_list_what_process_holds(tmp_path: Path) -> 
     assert [c.label for c in got] == ["profile:agent", "env:GH_TOKEN"]
 
 
-# --- якоря и диапазоны (№19, №28, e7, §6, Р-4) ------------------------------
+# --- якоря и диапазоны (№19, №28, e7, §6; без Р-4 — ревизия b1) ------------
 
 
 def _trust(epochs: tuple[Epoch, ...], source_repo: str = AP, branch: str = "main",
@@ -5660,7 +5815,7 @@ def _trust(epochs: tuple[Epoch, ...], source_repo: str = AP, branch: str = "main
         act_trust.TrustRoot("github.com", 11, "main", C1), DT,
         act_source.SourceV2(source_repo, branch, anchor, frozenset({"owner"})), epochs,
     )
-    return act_trust.Trust(snap, (), True)
+    return act_trust.Trust(snap, ())
 
 
 def _activation(sha: str, at: str) -> act_facts.ActivationFact:
@@ -5677,17 +5832,19 @@ def test_anchor_time_from_activation_not_commit_date(monkeypatch) -> None:
     assert times == {BOOT: parse_ts("2026-10-12T08:00:00Z")}
 
 
-def test_old_anchor_not_read_when_newer_precedes_t(monkeypatch) -> None:
-    seen: list[str] = []
-
+def test_old_anchor_unavailable_is_kept_not_blocking(monkeypatch) -> None:
+    """e7 + B1-10: все якоря читаются; недоступный старый — значение, а не отказ."""
     def activation(t, s, sha):  # noqa: ANN001
-        seen.append(sha)
+        if sha == BOOT:
+            return Unavailable("object_missing")
         return _activation(sha, "2026-10-12T08:00:00Z")
 
     monkeypatch.setattr(act_facts, "activation", activation)
     epochs = (Epoch(1, BOOT, BOOT, "2026-10-11T00:00:00Z", "x"), Epoch(2, "c" * 40))
-    act_trust.load_anchor_times(Anon({}), _trust(epochs), parse_ts("2026-10-12T10:00:00Z"))
-    assert seen == ["c" * 40]
+    times = act_trust.load_anchor_times(Anon({}), _trust(epochs),
+                                        parse_ts("2026-10-12T10:00:00Z"))
+    assert isinstance(times[BOOT], Unavailable)
+    assert times["c" * 40] == parse_ts("2026-10-12T08:00:00Z")
 
 
 def _history_case(name: str) -> tuple[dict, act_trust.Trust]:
@@ -5731,8 +5888,9 @@ def test_single_commit_rebase_merge_not_detected(monkeypatch) -> None:
     assert isinstance(got[0][1], tuple)
 
 
-def test_closed_epoch_break_is_range_value_not_event(monkeypatch) -> None:
-    """Р-4: нарушение в закрытой эпохе — недоступный диапазон, события нет."""
+def test_closed_epoch_break_registers_event(monkeypatch) -> None:
+    """§6.3 (ревизия b1, B1-4): нарушение формы истории в диапазоне ЗАКРЫТОЙ
+    подтверждённой эпохи — тоже событие периметра и отказ."""
     monkeypatch.setattr(act_facts, "history",
                         lambda t, s, a, u: act_facts.HistoryBreak("commit_without_pr: x")
                         if u else (act_facts.ActivationFact(1, a, parse_ts("2026-10-12T08:00:00Z"), {}),))
@@ -5744,9 +5902,73 @@ def test_closed_epoch_break_is_range_value_not_event(monkeypatch) -> None:
         {BOOT: parse_ts("2026-10-01T00:00:00Z"), "c" * 40: parse_ts("2026-10-12T08:00:00Z")},
         parse_ts("2026-10-12T10:00:00Z"), journal,
     )
-    ranges, _sets = got
-    assert isinstance(ranges[1], Unavailable) and isinstance(ranges[2], tuple)
-    assert journal.records == []
+    assert isinstance(got, Unavailable)
+    assert journal.records == [("approval-policy", "commit_without_pr: x")]
+
+
+def test_unknown_anchor_time_makes_range_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(act_facts, "history", lambda t, s, a, u: pytest.fail("read"))
+    got = act_trust.load_ranges(Anon({}), _trust((Epoch(1, BOOT),)),
+                                {BOOT: Unavailable("object_missing")},
+                                parse_ts("2026-10-12T10:00:00Z"), Journal())
+    assert isinstance(got[0][1], Unavailable)
+
+
+# --- режим продукта сейчас (§10; ревизия b1, B1-5) ----------------------------------
+
+
+def _set(mode: str | None) -> object:
+    from governance.act_policy import parse_policy_set
+    from tests.act_cases import FILES
+
+    modes = f"  owner/p: {mode}\n" if mode else "  owner/other: merge\n"
+    return parse_policy_set(BOOT, {**FILES, "policy/modes.yaml":
+                                   ("schema: approval-policy-modes/v1\nmodes:\n" + modes).encode()})
+
+
+def _view(name: str, hms: str):
+    from governance.act_check import ActivationView
+
+    sha = f"{name:0<40}"
+    return ActivationView(("activation", sha), sha, parse_ts(f"2026-10-12T{hms}Z"))
+
+
+def _mode(modes: list[str | None], *, epochs=None, ranges=None):
+    views = [_view(f"p{i}", f"0{i}:00:00") for i in range(len(modes))]
+    sets = {v.merge_commit: _set(m) for v, m in zip(views, modes)}
+    trust = _trust(epochs or (Epoch(1, views[0].merge_commit),))
+    return act_trust.product_mode(trust, ranges or {1: tuple(views)}, sets, "owner/p",
+                                  parse_ts("2026-10-12T12:00:00Z"))
+
+
+def test_mode_never_entered_is_pre_migration() -> None:
+    assert _mode([None, None]) == act_trust.PRE_MIGRATION
+
+
+def test_mode_current_values() -> None:
+    assert _mode([None, "merge"]) == "merge"
+    assert _mode([None, "merge", "review"]) == "review"
+
+
+@pytest.mark.parametrize("modes", [["merge", None], ["review", None], ["merge", "review", "merge"]])
+def test_mode_removed_or_rolled_back_is_unavailable(modes: list) -> None:
+    assert isinstance(_mode(modes), Unavailable)
+
+
+def test_mode_needs_prior_epoch_unless_review() -> None:
+    v1, v2 = _view("p0", "01:00:00"), _view("p1", "02:00:00")
+    epochs = (Epoch(1, v1.merge_commit, v1.merge_commit, "2026-10-12T01:30:00Z", "x"),
+              Epoch(2, v2.merge_commit))
+    sets = {v1.merge_commit: _set("review"), v2.merge_commit: _set("merge")}
+    now = parse_ts("2026-10-12T12:00:00Z")
+    gone = {1: Unavailable("object_missing"), 2: (v2,)}
+    assert isinstance(act_trust.product_mode(_trust(epochs), gone, sets, "owner/p", now),
+                      Unavailable)
+    full = {1: (v1,), 2: (v2,)}
+    assert isinstance(act_trust.product_mode(_trust(epochs), full, sets, "owner/p", now),
+                      Unavailable)  # review в E1, merge в E2 — откат через границу эпох
+    sets[v2.merge_commit] = _set("review")
+    assert act_trust.product_mode(_trust(epochs), gone, sets, "owner/p", now) == "review"
 
 
 def test_history_read_failure_no_event(monkeypatch) -> None:
@@ -5850,8 +6072,25 @@ class Head:
         return self.current
 
 
+POLICY_ID = 22
+
+
 def journal(tmp_path: Path, head: Head) -> act_journal.DevJournal:
-    return act_journal.DevJournal(tmp_path.resolve(), "run-1", head)
+    return act_journal.DevJournal(tmp_path.resolve(), "run-1", head, POLICY_ID)
+
+
+def test_event_names_the_violated_repository(tmp_path: Path) -> None:
+    """B1-18: событие роли approval-policy несёт id approval-policy, не df-trust."""
+    import sqlite3
+
+    j = journal(tmp_path, Head(snap(1)))
+    j.record(snap(1), "approval-policy", "push у токена")
+    j.record(snap(1), "df-trust", "push у профиля мержа")
+    db = j.layout.perimeter_dir / "events.sqlite"
+    rows = sqlite3.connect(db).execute(
+        "SELECT violated_role, violated_repository_id FROM events ORDER BY event_id"
+    ).fetchall()
+    assert rows == [("approval-policy", POLICY_ID), ("df-trust", 11)]
 
 
 def test_clear_then_blocked_then_new_epoch(tmp_path: Path) -> None:
@@ -5904,17 +6143,17 @@ def test_deleted_store_with_marker_is_lost(tmp_path: Path) -> None:
 def test_installed_journal_requires_df_run(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(act_journal, "_publisher_present", lambda: True)
     got = act_journal.journal_for(state_home=tmp_path, run_id="r", reread=Head(snap()),
-                                  env={})
+                                  env={}, policy_repository_id=POLICY_ID)
     assert isinstance(got, Unavailable)
     dev = act_journal.journal_for(state_home=tmp_path, run_id="r", reread=Head(snap()),
-                                  env={"DF_RUN_ID": "run-7"})
+                                  env={"DF_RUN_ID": "run-7"}, policy_repository_id=POLICY_ID)
     assert isinstance(dev, act_journal.InstalledJournal)
 
 
 def test_dev_journal_without_publisher(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(act_journal, "_publisher_present", lambda: False)
     got = act_journal.journal_for(state_home=tmp_path, run_id="r", reread=Head(snap()),
-                                  env={"DF_RUN_ID": "ignored"})
+                                  env={"DF_RUN_ID": "ignored"}, policy_repository_id=POLICY_ID)
     assert isinstance(got, act_journal.DevJournal)
 
 
@@ -5949,8 +6188,18 @@ pytest.importorskip("steward")
 from governance import act_context, act_facts, act_trust  # noqa: E402
 from governance.act_check import LegacyAccepted  # noqa: E402
 from governance.act_decision import Accepted, DeliveryView, WaitingDelivery  # noqa: E402
-from governance.act_time import Unavailable  # noqa: E402
-from tests.act_cases_facts import HEAD, PATH, act, context, sha  # noqa: E402
+from governance.act_epochs import Epoch  # noqa: E402
+from governance.act_policy import parse_policy_set  # noqa: E402
+from governance.act_time import Unavailable, parse_ts  # noqa: E402
+from tests.act_cases_facts import (  # noqa: E402
+    HEAD,
+    PATH,
+    act,
+    context,
+    policy_files,
+    sha,
+    ts,
+)
 
 NOT_MERGED = DeliveryView(False, None, None, None, None, None, False, {})
 
@@ -5958,7 +6207,7 @@ NOT_MERGED = DeliveryView(False, None, None, None, None, None, False, {})
 def _trust(ctx) -> act_trust.Trust:
     snap = act_trust.TrustSnapshot(act_trust.TrustRoot("github.com", 11, "main", "1" * 40),
                                    "owner/df-trust", ctx.source, ctx.epochs)
-    return act_trust.Trust(snap, (), True)
+    return act_trust.Trust(snap, ())
 
 
 def _wire(monkeypatch, ctx, *, merged: bool = True) -> None:
@@ -6014,6 +6263,30 @@ def test_ranges_unavailable_is_unavailable(monkeypatch) -> None:
     _wire(monkeypatch, ctx)
     monkeypatch.setattr(act_trust, "load_ranges", lambda *a: Unavailable("history"))
     assert isinstance(_verdict(ctx)[0], Unavailable)
+
+
+def test_loader_supplies_prior_epochs_for_merge_admission(monkeypatch) -> None:
+    """B1-10: при `merge` на T admission требует историю эпохи 1 — настоящий
+    загрузчик (`load_anchor_times` + `load_ranges`) её даёт; раньше — Unavailable."""
+    p0, p1 = sha("p0"), sha("p1")
+    epochs = (Epoch(1, p0, p0, ts("07:00:00"), "разрыв"), Epoch(2, p1))
+    times = {p0: parse_ts(ts("06:00:00")), p1: parse_ts(ts("08:00:00"))}
+    monkeypatch.setattr(act_facts, "activation",
+                        lambda t, s, c: act_facts.ActivationFact(1, c, times[c], {}))
+    monkeypatch.setattr(act_facts, "history",
+                        lambda t, s, a, u: (act_facts.ActivationFact(1, a, times[a], {}),))
+    monkeypatch.setattr(act_trust, "policy_set", lambda anon, s, a: parse_policy_set(
+        a.merge_commit, policy_files("merge", ("alice",))))
+    ctx = context(request_act=None)
+    monkeypatch.setattr(act_facts, "read", lambda t, repo, pr, paths: (ctx.delivery, ctx.facts))
+    snap = act_trust.TrustSnapshot(act_trust.TrustRoot("github.com", 11, "main", "1" * 40),
+                                   "owner/df-trust", ctx.source, epochs)
+    outcome, _ = act_context.delivery_verdict(
+        act_trust.Readers(object(), lambda c, p: None), act_trust.Trust(snap, ()), None,
+        product=ctx.product, pr=7, paths=[], request=None, request_act=None, head_sha=HEAD,
+        facts_transport=object(), self_hashes=lambda: {}, legacy=lambda: LegacyAccepted("bob"),
+    )
+    assert outcome == LegacyAccepted("bob")
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -6059,7 +6332,13 @@ from governance.act_anon import AnonTransport, contents_bytes
 from governance.act_check import ActivationView
 from governance.act_epochs import Epoch, JournalError, check_transition, parse_journal
 from governance.act_perimeter import Violation, permissions_refusal
-from governance.act_policy import POLICY_FILES, PolicyError, PolicySet, parse_policy_set
+from governance.act_policy import (
+    POLICY_FILES,
+    PolicyError,
+    PolicySet,
+    mode_for,
+    parse_policy_set,
+)
 from governance.act_source import SourceError, SourceV2, parse_source
 from governance.act_time import Unavailable
 from governance.facts import Fact, Outcome, unavailable
@@ -6132,7 +6411,6 @@ class Trust:
 
     snapshot: TrustSnapshot
     unverified: tuple[str, ...]
-    perimeter_checked: bool
 
     @property
     def source(self) -> SourceV2:
@@ -6209,7 +6487,8 @@ def load_binding(
     path: Path | None = None, *, owner_uid: int = 0
 ) -> Binding | None | Unavailable:
     """Привязка: обычный файл, без ссылок, владелец `owner_uid`, не пишется
-    группой/всеми. Файла нет — `None` (Р-1); иное — `Unavailable`.
+    группой/всеми. Файла нет — `None` (режим продукта не установлен, не
+    legacy — ревизия b1); иное — `Unavailable`.
 
     `path=None` — `BINDING_PATH`, прочитанный в момент вызова (тесты подменяют
     атрибут модуля, чтобы машина разработчика с настоящей привязкой не
@@ -6459,21 +6738,21 @@ def _rebase(anon: Any, snap: TrustSnapshot) -> Found | str:
     return Unavailable(f"{snap.source.repo}: allow_rebase_merge = {value!r}")
 
 
-def _register(journal: Journal | None, snap: TrustSnapshot, found: tuple[str, str]) -> Unavailable:
+def _register(journal: Journal, snap: TrustSnapshot, found: tuple[str, str]) -> Unavailable:
+    """Обнаруженное нарушение — событие журнала периметра (§6.3), затем отказ."""
     role, detail = found
-    if journal is not None:
-        failed = journal.record(snap, role, detail)
-        if failed is not None:
-            return Unavailable(f"нарушение периметра ({detail}); регистрация: {failed.reason}")
+    failed = journal.record(snap, role, detail)
+    if failed is not None:
+        return Unavailable(f"нарушение периметра ({detail}); регистрация: {failed.reason}")
     return Unavailable(f"нарушение периметра: {detail}")
 
 
 def _snapshot_for_decision(
-    readers: Readers, binding: Binding, journal: Journal | None
+    readers: Readers, binding: Binding, journal: Journal
 ) -> TrustSnapshot | Unavailable:
     for _ in range(3):
         snap = read_trust_snapshot(readers.anon, binding)
-        if isinstance(snap, Unavailable) or journal is None:
+        if isinstance(snap, Unavailable):
             return snap
         state = journal.status(snap)
         if state == STALE:
@@ -6489,11 +6768,15 @@ def _snapshot_for_decision(
 def load_trust(
     readers: Readers,
     binding: Binding,
-    journal: Journal | None,
+    journal: Journal,
     *,
     creds: Sequence[Credential],
 ) -> Trust | Unavailable:
-    """Обязательные проверки перед решением (п. 1–5 Task 12a), с ранним выходом."""
+    """Обязательные проверки перед решением (п. 1–5 Task 12a), с ранним выходом.
+
+    Журнал периметра обязателен у КАЖДОГО потребителя, включая предпроверку
+    мержа (ревизия b1: `act_journal_wire`): блок, зарегистрированный другим
+    потребителем, учитывается, а обнаруженное здесь нарушение сохраняется."""
     snap = _snapshot_for_decision(readers, binding, journal)
     if isinstance(snap, Unavailable):
         return snap
@@ -6510,23 +6793,28 @@ def load_trust(
             return found
         elif isinstance(found, tuple):
             return _register(journal, snap, found)
-    return Trust(snap, unverified, journal is not None)
+    return Trust(snap, unverified)
 
 
 # --- якоря, диапазоны, наборы --------------------------------------------------------
 
 
 def load_anchor_times(anon: Any, trust: Trust, t: datetime) -> dict[str, datetime | Unavailable]:
-    """Время якорей от последней эпохи назад, лениво относительно `t` (e7)."""
+    """Время якоря КАЖДОЙ эпохи (`merged_at` активации, №19).
+
+    Не лениво (ревизия b1, B1-10): admission при `merge`/без записи на T
+    требует истории режима всех прежних эпох (`act_check._mode_history`), а её
+    диапазоны читаются от якорей. e7 сохраняется иначе: недоступное время
+    старого якоря записывается `Unavailable` и мешает лишь решению, которое от
+    него зависит (`_epoch_at` идёт от новой эпохи назад и до старого якоря не
+    доходит, если новый уже предшествует T). `t` — для симметрии с
+    `load_ranges` и будущего предела обхода; на чтение не влияет.
+    """
+    del t
     times: dict[str, datetime | Unavailable] = {}
     for epoch in reversed(trust.epochs):
         got = act_facts.activation(anon, trust.source, epoch.anchor)
-        if isinstance(got, Unavailable):
-            times[epoch.anchor] = got
-            break
-        times[epoch.anchor] = got.merged_at
-        if got.merged_at < t:
-            break
+        times[epoch.anchor] = got if isinstance(got, Unavailable) else got.merged_at
     return times
 
 
@@ -6554,22 +6842,27 @@ def load_ranges(
     trust: Trust,
     anchor_at: Mapping[str, datetime | Unavailable],
     t: datetime,
-    journal: Journal | None,
+    journal: Journal,
 ) -> tuple[dict[int, Span | Unavailable], dict[str, PolicySet | Unavailable]] | Unavailable:
-    """Диапазоны эпох с якорем ≤ t и наборы активаций ≤ t (§6.4, Р-4)."""
+    """Диапазоны эпох с якорем ≤ t и наборы активаций ≤ t (§6.4).
+
+    Нарушение формы истории в диапазоне ЛЮБОЙ эпохи — событие периметра и
+    отказ (§6.3; ревизия b1 сняла исключение для закрытых эпох). Недочитанный
+    диапазон — значение `Unavailable`: решение спросит его, только если оно от
+    него зависит (e5, e7). Эпоха с неизвестным временем якоря — `Unavailable`.
+    """
     ranges: dict[int, Span | Unavailable] = {}
     sets: dict[str, PolicySet | Unavailable] = {}
-    last = trust.epochs[-1].epoch
     for epoch in trust.epochs:
-        at = anchor_at.get(epoch.anchor)
-        if not isinstance(at, datetime) or at > t:
+        at = anchor_at.get(epoch.anchor, Unavailable("время якоря не загружено"))
+        if isinstance(at, Unavailable):
+            ranges[epoch.epoch] = Unavailable(f"якорь эпохи {epoch.epoch}: {at.reason}")
+            continue
+        if at > t:
             continue
         got = act_facts.history(anon, trust.source, epoch.anchor, epoch.last_confirmed)
         if isinstance(got, act_facts.HistoryBreak):
-            if epoch.epoch == last:
-                return _register(journal, trust.snapshot, ("approval-policy", got.reason))
-            ranges[epoch.epoch] = Unavailable(f"диапазон эпохи {epoch.epoch}: {got.reason}")
-            continue
+            return _register(journal, trust.snapshot, ("approval-policy", got.reason))
         if isinstance(got, Unavailable):
             ranges[epoch.epoch] = got
             continue
@@ -6581,6 +6874,68 @@ def load_ranges(
             if a.merged_at <= t and a.merge_commit not in sets:
                 sets[a.merge_commit] = policy_set(anon, trust.source, a)
     return ranges, sets
+
+
+PRE_MIGRATION = "pre_migration"
+"""Записи `ACT_MODE[P]` не было ни в одной активации — старый путь (§10, legacy-эпоха)."""
+
+
+def _modes(
+    span: Span, sets: Mapping[str, PolicySet | Unavailable], product: str, now: datetime
+) -> list[str] | Unavailable:
+    found: list[str] = []
+    for a in span:
+        if a.at > now:
+            continue
+        policy = sets.get(a.merge_commit, Unavailable("набор активации не загружен"))
+        if isinstance(policy, Unavailable):
+            return Unavailable(f"набор {a.merge_commit[:12]}: {policy.reason}")
+        found.append(mode_for(policy, product) or "")
+    return found
+
+
+def product_mode(
+    trust: Trust,
+    ranges: Mapping[int, Span | Unavailable],
+    sets: Mapping[str, PolicySet | Unavailable],
+    product: str,
+    now: datetime,
+) -> str | Unavailable:
+    """Режим продукта СЕЙЧАС по истории режима (§10): `PRE_MIGRATION` | `merge` | `review`.
+
+    Не «текущее значение»: удаление записи после первой (`""`), обратное
+    переключение `review → merge` и недочитанная нужная история — `Unavailable`,
+    а не legacy (ревизия b1, B1-5). Текущее `review` от прежних эпох не зависит
+    (e7); иначе нужна история всех эпох.
+    """
+    open_span = ranges.get(trust.epochs[-1].epoch, Unavailable("диапазон открытой эпохи нет"))
+    if isinstance(open_span, Unavailable):
+        return Unavailable(f"история режима: {open_span.reason}")
+    current = _modes(open_span, sets, product, now)
+    if isinstance(current, Unavailable):
+        return current
+    if current and current[-1] == "review":
+        return "review"
+    history: list[str] = []
+    for epoch in trust.epochs:
+        span = ranges.get(epoch.epoch)
+        if span is None:
+            continue  # якорь эпохи позже now — эпоха не наступила
+        if isinstance(span, Unavailable):
+            return Unavailable(f"история режима, эпоха {epoch.epoch}: {span.reason}")
+        got = _modes(span, sets, product, now)
+        if isinstance(got, Unavailable):
+            return got
+        history.extend(got)
+    entered = [i for i, m in enumerate(history) if m]
+    if not entered:
+        return PRE_MIGRATION
+    tail = history[entered[0]:]
+    if tail[-1] == "":
+        return Unavailable(f"ACT_MODE[{product}] удалён после первой записи (§10 п. 2)")
+    if "review" in tail:
+        return Unavailable(f"ACT_MODE[{product}]: обратное переключение review → merge")
+    return "merge"
 
 
 def current_activation(
@@ -6674,12 +7029,17 @@ def _status_of(resp: preq.Response, snap: TrustSnapshot) -> str | Unavailable:
 class DevJournal:
     """Режим разработки: хранилище этапа 2a в каталоге пользователя."""
 
-    def __init__(self, state_home: Path, run_id: str, reread: Reread) -> None:
+    def __init__(
+        self, state_home: Path, run_id: str, reread: Reread, policy_repository_id: int
+    ) -> None:
         base = (state_home / DEV_ROOT).resolve()
         base.mkdir(parents=True, exist_ok=True)
         self.layout = Layout(base)
         self.run_id = run_id
         self.epochs = ForgeEpochs(reread)
+        # настоящий id approval-policy из привязки: по нему издатель пишет
+        # `violated_repository_id` события роли approval-policy (B1-18)
+        self.policy_repository_id = policy_repository_id
 
     def _open(self) -> store.Db | Unavailable:
         try:
@@ -6721,8 +7081,8 @@ class DevJournal:
              "detail": detail[: preq.MAX_DETAIL]},
         )
         host, repository_id, branch = snap.root.id_tuple
-        binding = TrustBinding(host, repository_id, snap.full_name, branch, repository_id,
-                               "public")
+        binding = TrustBinding(host, repository_id, snap.full_name, branch,
+                               self.policy_repository_id, "public")
         db = self._open()
         if isinstance(db, Unavailable):
             return db
@@ -6789,7 +7149,8 @@ class InstalledJournal:
 
 
 def journal_for(
-    *, state_home: Path, run_id: str, reread: Reread, env: Mapping[str, str]
+    *, state_home: Path, run_id: str, reread: Reread, env: Mapping[str, str],
+    policy_repository_id: int,
 ) -> DevJournal | InstalledJournal | Unavailable:
     """Журнал этого процесса (Р-5): установка `df` — издатель; иначе dev."""
     if _publisher_present():
@@ -6797,7 +7158,7 @@ def journal_for(
         if not df_run:
             return Unavailable("периметр: установка df без контекста прогона (DF_RUN_ID)")
         return InstalledJournal(df_run)
-    return DevJournal(state_home, run_id, reread)
+    return DevJournal(state_home, run_id, reread, policy_repository_id)
 ```
 
 `preq.BadResponse` и `preq.MAX_DETAIL` — имена `df/publisher/request.py` (сверено: `MAX_DETAIL = 4000`,
@@ -6881,6 +7242,506 @@ def delivery_verdict(
 
 `act_check.Outcome` — алиас исхода из Task 12 (уже экспортируется модулем).
 
+- [ ] **Step 5a: Identity of judged objects** (ревизия b1, класс B1-1/B1-2/B1-13/B1-14/B1-15 —
+  таблица «место суждения × компоненты» в ревизии части B). `governance/act_identity.py`:
+
+```python
+"""Идентичность судимого объекта акта (ревизия b1): одна на объект, одна проверка.
+
+Каждое суждение о заявке, её доставке, маркере миграции сверяет ВСЕ
+компоненты идентичности объекта, а не те, что оказались под рукой: продукт,
+воркстрим, ключ заявки, пути узлов в DAG прогона и байты манифеста в
+одобренном head. Таблица «место суждения × компоненты» — ревизия части B;
+отрицательный двойник на каждый компонент — `tests/test_act_identity.py`.
+Модуль чистый и входит в цепочку `act_premerge`: только `act_request`.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+
+from governance.act_request import NodeRequest, manifest_path
+
+
+@dataclass(frozen=True)
+class RequestIdentity:
+    """Чья это заявка: продукт доставки, воркстрим прогона, ключ леджера."""
+
+    product: str
+    ws_id: str
+    request_id: str
+
+    @property
+    def manifest_path(self) -> str:
+        """Где манифест обязан лежать в одобренном коммите."""
+        return manifest_path(self.ws_id, self.request_id)
+
+    @property
+    def migration_marker(self) -> str:
+        """Маркер `act_migrated` этой и только этой заявки (§10 п. 2, B1-14)."""
+        return f"<!-- act-migrated: {self.product}/{self.ws_id}/{self.request_id} -->"
+
+    @property
+    def memo_key(self) -> tuple[str, str, str]:
+        """Ключ памяти вердиктов: заявка, а не коммит (B1-2)."""
+        return (self.product, self.ws_id, self.request_id)
+
+
+def manifest_refusal(req: NodeRequest, ident: RequestIdentity) -> str | None:
+    """Манифест называет именно эту заявку этого воркстрима этого продукта."""
+    for name, got, want in (
+        ("product", req.product, ident.product),
+        ("ws_id", req.ws_id, ident.ws_id),
+        ("request_id", req.request_id, ident.request_id),
+    ):
+        if got != want:
+            return f"манифест: {name} {got} ≠ {want}"
+    return None
+
+
+def paths_refusal(req: NodeRequest, expected: Mapping[str, str]) -> str | None:
+    """Узлы манифеста — узлы активного DAG, путь каждого — его путь в прогоне."""
+    for node, entry in sorted(req.nodes.items()):
+        want = expected.get(node)
+        if want is None:
+            return f"манифест: узел {node} не из активного DAG"
+        if entry.path != want:
+            return f"манифест: путь узла {node} {entry.path} ≠ {want}"
+    return None
+
+
+def head_manifest_refusal(text_at_head: str | None, text_delivered: str) -> str | None:
+    """Доставленный манифест лежит в одобренном head теми же байтами (§9.1 (а) п. 0)."""
+    if text_at_head is None:
+        return "манифест есть в доставке, но не в одобренном head"
+    if text_at_head != text_delivered:
+        return "манифест доставки ≠ манифесту одобренного head"
+    return None
+```
+
+`tests/test_act_identity.py`:
+
+```python
+"""Идентичность судимых объектов: отрицательные двойники по каждому компоненту (b1)."""
+
+from __future__ import annotations
+
+import pytest
+
+from governance.act_identity import (
+    RequestIdentity,
+    head_manifest_refusal,
+    manifest_refusal,
+    paths_refusal,
+)
+from governance.act_request import NodeEntry, NodeRequest, PolicyPin, render_manifest
+
+ID = RequestIdentity("owner/p", "ws-7", "approve-2-1-1")
+PIN = PolicyPin("owner/approval-policy", "main", "a" * 40, {})
+
+
+def req(**kw: object) -> NodeRequest:
+    base = dict(request_id="approve-2-1-1", ws_id="ws-7", product="owner/p",
+                nodes={"requirements": NodeEntry("spec/10-r.md", "h", 1)},
+                upstream_pins={"requirements": {}}, policy=PIN)
+    base.update(kw)
+    return NodeRequest(**base)  # type: ignore[arg-type]
+
+
+def test_matching_manifest_passes() -> None:
+    assert manifest_refusal(req(), ID) is None
+    assert paths_refusal(req(), {"requirements": "spec/10-r.md"}) is None
+
+
+@pytest.mark.parametrize("field", ["product", "ws_id", "request_id"])
+def test_each_identity_component_is_checked(field: str) -> None:
+    assert field in manifest_refusal(req(**{field: "other"}), ID)
+
+
+def test_node_outside_dag_and_wrong_path() -> None:
+    assert "не из активного DAG" in paths_refusal(req(), {})
+    assert "путь узла" in paths_refusal(req(), {"requirements": "spec/other.md"})
+
+
+def test_manifest_only_in_delivery_or_changed() -> None:
+    text = render_manifest(req())
+    assert head_manifest_refusal(text, text) is None
+    assert "не в одобренном head" in head_manifest_refusal(None, text)
+    assert "≠" in head_manifest_refusal(text + "# x\n", text)
+
+
+def test_marker_and_memo_carry_full_identity() -> None:
+    other_ws = RequestIdentity("owner/p", "ws-8", "approve-2-1-1")
+    assert ID.migration_marker != other_ws.migration_marker
+    assert ID.memo_key != other_ws.memo_key
+    assert ID.manifest_path == "workstreams/ws-7/approvals/requests/approve-2-1-1.yaml"
+```
+
+- [ ] **Step 5b: Narrow journal client for the merge harness** (ревизия b1, B1-4: спека §6.3
+  требует журнал у каждого потребителя; `act_journal` тянет `df/`, а цепочка `act_premerge` —
+  только `_HARNESS_PREFIXES`). `governance/act_journal_wire.py` — тот же журнал без импорта
+  `df/`: в установке — протокол издателя, в режиме разработки — то же хранилище SQLite (чтение
+  правила блокировки, вставка события `pending`; завершение `pending → registered(E)` делает
+  полный журнал на пути решения). Совпадение форматов держит тест с обоими клиентами на одном
+  файле базы (решение исполнителя плана Р-16).
+
+```python
+"""Узкий клиент журнала периметра для обвязки мержа (ревизия b1, спека §6.3).
+
+`act_premerge` исполняется `merge-pr.sh`, и его цепочка импортов — только
+защищённые `_HARNESS_PREFIXES`; полный журнал (`act_journal`) тянет `df/`.
+Этот модуль — тот же журнал без `df/`: в установке `df` — протокол издателя
+`df/publisher-request/v1` поверх `sudo -n -u df-publisher …/df-publish`; в
+режиме разработки — то же хранилище SQLite: правило блокировки (событие
+`pending` либо `registered(E)` с `E ≥` последней эпохи) и вставка события
+`pending` одной транзакцией. Номер эпохи `pending` назначает полный журнал
+на пути решения. Совпадение форматов держит `tests/test_act_journal_wire.py`.
+"""
+
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import sqlite3
+import stat
+import subprocess
+import sys
+import time
+import uuid
+from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from governance.act_time import Unavailable
+from governance.act_trust import STALE, TrustSnapshot
+
+REQUEST_SCHEMA = "df/publisher-request/v1"
+RESPONSE_SCHEMA = "df/publisher-response/v1"
+PUBLISHER = "df-publisher"
+SUDO = "/usr/bin/sudo"
+PUBLISH = Path("/opt/df/libexec/df-publish")
+#: Каталог хранилища режима разработки — тот же, что `act_journal.DevJournal`.
+DEV_BASE = Path("darkfactory/perimeter/root/var/lib/df/perimeter")
+DB_NAME, LOCK, MARKER, RESTORE_INTENT = "events.sqlite", "db.lock", "created", "restore.intent"
+BUSY_TIMEOUT_MS = 5000
+LOCK_WAIT = 5.0
+MAX_DETAIL = 4000
+_BLOCKING = (
+    "SELECT event_id FROM events WHERE root_host = ? AND root_repository_id = ? "
+    "AND root_branch = ? AND (state = 'pending' OR (state = 'registered' AND epoch >= ?))"
+)
+_LOCK_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+
+
+def _now() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _root_id(snap: TrustSnapshot) -> dict[str, object]:
+    host, repository_id, branch = snap.root.id_tuple
+    return {"host": host, "repository_id": repository_id, "branch": branch}
+
+
+class WireJournal:
+    """Установка `df`: операции издателя `perimeter-status` и `record-violation`."""
+
+    def __init__(self, df_run_id: str, *, run: Callable[..., Any] = subprocess.run) -> None:
+        self.run_id = df_run_id
+        self._run = run
+
+    def _call(self, op: str, fields: Mapping[str, object]) -> dict | Unavailable:
+        data = {
+            "schema": REQUEST_SCHEMA,
+            "request_id": f"perimeter-{uuid.uuid4().hex}",
+            "run_id": self.run_id,
+            **fields,
+        }
+        argv = [SUDO, "-n", "-u", PUBLISHER, str(PUBLISH), op]
+        try:
+            done = self._run(argv, input=json.dumps(data, sort_keys=True).encode("utf-8"),
+                             capture_output=True, timeout=60, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return Unavailable(f"{op}: вызов издателя не состоялся: {exc}")
+        lines = done.stdout.decode("utf-8", "replace").splitlines()
+        try:
+            resp = json.loads(lines[0]) if len(lines) == 1 else None
+        except ValueError:
+            resp = None
+        if not isinstance(resp, dict) or resp.get("schema") != RESPONSE_SCHEMA:
+            return Unavailable(f"{op}: ответ издателя не разобран (код {done.returncode})")
+        return resp
+
+    def status(self, snap: TrustSnapshot) -> str | Unavailable:
+        resp = self._call("perimeter-status", {
+            "root_id": _root_id(snap), "expected_snapshot_sha": snap.root.snapshot_sha})
+        if isinstance(resp, Unavailable):
+            return resp
+        if resp.get("outcome") == "stale_snapshot":
+            return STALE
+        result = resp.get("result") if resp.get("outcome") == "done" else None
+        state = result.get("state") if isinstance(result, dict) else None
+        if state not in ("blocked", "clear"):
+            reason = result.get("reason") if isinstance(result, dict) else resp.get("reason")
+            return Unavailable(f"периметр: {reason}")
+        if (result.get("snapshot_sha"), result.get("last_epoch")) != (
+            snap.root.snapshot_sha, snap.epochs[-1].epoch):
+            return Unavailable("периметр: ответ не о снимке решения")
+        return str(state)
+
+    def record(self, snap: TrustSnapshot, source: str, detail: str) -> Unavailable | None:
+        resp = self._call("record-violation", {
+            "root_id": _root_id(snap), "source": source, "observed_at": _now(),
+            "detail": detail[:MAX_DETAIL]})
+        if isinstance(resp, Unavailable):
+            return resp
+        if resp.get("outcome") != "done":
+            return Unavailable(f"record-violation: {resp.get('outcome')}: {resp.get('reason')}")
+        return None
+
+
+class DevStoreJournal:
+    """Режим разработки: то же хранилище, что `act_journal.DevJournal`, без `df/`."""
+
+    def __init__(self, state_home: Path, run_id: str, policy_repository_id: int) -> None:
+        self.base = state_home / DEV_BASE
+        self.run_id = run_id
+        self.policy_repository_id = policy_repository_id
+
+    def _open(self) -> tuple[int, sqlite3.Connection] | Unavailable:
+        if (self.base / RESTORE_INTENT).exists():
+            return Unavailable("журнал периметра (dev): restore_incomplete")
+        db = self.base / DB_NAME
+        try:
+            if not stat.S_ISREG(os.lstat(db).st_mode):
+                return Unavailable("журнал периметра (dev): integrity")
+            fd = os.open(self.base / LOCK, _LOCK_FLAGS)
+        except FileNotFoundError:
+            lost = (self.base / MARKER).exists()
+            return Unavailable(f"журнал периметра (dev): {'lost' if lost else 'не создан'}")
+        except OSError as exc:
+            return Unavailable(f"журнал периметра (dev): {exc}")
+        deadline = time.monotonic() + LOCK_WAIT
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    os.close(fd)
+                    return Unavailable("журнал периметра (dev): busy")
+                time.sleep(0.02)
+        try:
+            conn = sqlite3.connect(f"{db.as_uri()}?mode=rw&nofollow=1", uri=True,
+                                   isolation_level=None)
+            conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+            conn.execute("PRAGMA synchronous = EXTRA")
+            if sys.platform == "darwin":
+                conn.execute("PRAGMA fullfsync = ON")
+            if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise sqlite3.DatabaseError("integrity_check")
+            admission = conn.execute(
+                "SELECT value FROM meta WHERE key = 'admission'").fetchone()
+            if admission is None or admission[0] != "ready":
+                conn.close()
+                os.close(fd)
+                return Unavailable("журнал периметра (dev): restore_pending")
+        except sqlite3.Error as exc:
+            os.close(fd)
+            return Unavailable(f"журнал периметра (dev): {exc}")
+        return fd, conn
+
+    def status(self, snap: TrustSnapshot) -> str | Unavailable:
+        opened = self._open()
+        if isinstance(opened, Unavailable):
+            return opened
+        fd, conn = opened
+        try:
+            rows = conn.execute(_BLOCKING, (*snap.root.id_tuple, snap.epochs[-1].epoch)).fetchall()
+        except sqlite3.Error as exc:
+            return Unavailable(f"журнал периметра (dev): {exc}")
+        finally:
+            conn.close()
+            os.close(fd)
+        return "blocked" if rows else "clear"
+
+    def record(self, snap: TrustSnapshot, source: str, detail: str) -> Unavailable | None:
+        opened = self._open()
+        if isinstance(opened, Unavailable):
+            return opened
+        fd, conn = opened
+        key = f"perimeter-{uuid.uuid4().hex}"
+        violated = (self.policy_repository_id if source == "approval-policy"
+                    else snap.root.repository_id)
+        provenance = json.dumps({"snapshot_sha": snap.root.snapshot_sha,
+                                 "unavailable": "epoch_assigned_on_completion"},
+                                sort_keys=True)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "INSERT INTO events (root_host, root_repository_id, root_branch, "
+                "request_key, request_id, run_id, sender, violated_role, "
+                "violated_repository_id, detected_by, observed_at, registered_at, "
+                "state, epoch, provenance, detail) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, ?)",
+                (*snap.root.id_tuple, f"premerge:{key}", key, self.run_id, os.getuid(),
+                 source, violated, f"sender:{os.getuid()}", _now(), _now(), provenance,
+                 detail[:MAX_DETAIL]),
+            )
+            conn.execute("COMMIT")
+        except sqlite3.Error as exc:
+            return Unavailable(f"журнал периметра (dev): событие не записано: {exc}")
+        finally:
+            conn.close()
+            os.close(fd)
+        return None
+
+
+def journal_for_premerge(
+    *, env: Mapping[str, str], state_home: Path, run_id: str, policy_repository_id: int
+) -> WireJournal | DevStoreJournal | Unavailable:
+    """Тот же выбор, что `act_journal.journal_for` (Р-5): издатель есть — протокол."""
+    if PUBLISH.exists():
+        df_run = env.get("DF_RUN_ID")
+        if not df_run:
+            return Unavailable("периметр: установка df без контекста прогона (DF_RUN_ID)")
+        return WireJournal(df_run)
+    return DevStoreJournal(state_home, run_id, policy_repository_id)
+```
+
+`tests/test_act_journal_wire.py`:
+
+```python
+"""Узкий клиент журнала: совпадение формата с df/ на одном файле базы (b1, Р-16)."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from df.publisher import request as preq
+from governance import act_journal, act_journal_wire
+from governance.act_epochs import Epoch
+from governance.act_source import SourceV2
+from governance.act_time import Unavailable
+from governance.act_trust import STALE, TrustRoot, TrustSnapshot
+
+
+def snap(epoch: int = 1, sha: str = "1" * 40) -> TrustSnapshot:
+    return TrustSnapshot(TrustRoot("github.com", 11, "main", sha), "owner/df-trust",
+                         SourceV2("owner/ap", "main", "a" * 40, frozenset({"o"})),
+                         tuple(Epoch(i, "a" * 40) for i in range(1, epoch + 1)))
+
+
+class Head:
+    def __init__(self, current: object) -> None:
+        self.current = current
+
+    def __call__(self) -> object:
+        return self.current
+
+
+def pair(tmp_path: Path, head: Head):
+    full = act_journal.DevJournal(tmp_path.resolve(), "run-1", head, 22)
+    narrow = act_journal_wire.DevStoreJournal(tmp_path.resolve(), "run-1", 22)
+    return full, narrow
+
+
+def test_same_directory_as_full_journal(tmp_path: Path) -> None:
+    full, narrow = pair(tmp_path, Head(snap()))
+    assert narrow.base == full.layout.perimeter_dir
+
+
+def test_missing_store_is_unavailable(tmp_path: Path) -> None:
+    _, narrow = pair(tmp_path, Head(snap()))
+    assert isinstance(narrow.status(snap()), Unavailable)
+    assert isinstance(narrow.record(snap(), "df-trust", "x"), Unavailable)
+
+
+def test_narrow_pending_blocks_and_full_journal_completes_it(tmp_path: Path) -> None:
+    head = Head(snap(1))
+    full, narrow = pair(tmp_path, head)
+    assert full.status(snap(1)) == "clear"           # полный журнал создаёт базу
+    assert narrow.status(snap(1)) == "clear"
+    assert narrow.record(snap(1), "approval-policy", "push у профиля мержа") is None
+    assert narrow.status(snap(1)) == "blocked"       # pending блокирует
+    assert full.status(snap(1)) == "blocked"         # база цела, pending → registered(1)
+    head.current = snap(2, "2" * 40)
+    assert full.status(snap(2, "2" * 40)) == "clear"
+    assert narrow.status(snap(2, "2" * 40)) == "clear"
+
+
+def test_registered_by_full_journal_seen_by_narrow(tmp_path: Path) -> None:
+    head = Head(snap(1))
+    full, narrow = pair(tmp_path, head)
+    full.record(snap(1), "df-trust", "x")
+    assert narrow.status(snap(1)) == full.status(snap(1)) == "blocked"
+
+
+def test_restore_intent_and_corruption_unavailable(tmp_path: Path) -> None:
+    full, narrow = pair(tmp_path, Head(snap()))
+    full.status(snap())
+    (narrow.base / "restore.intent").write_text("x")
+    assert isinstance(narrow.status(snap()), Unavailable)
+    (narrow.base / "restore.intent").unlink()
+    (narrow.base / "events.sqlite").write_bytes(b"not a database")
+    assert isinstance(narrow.status(snap()), Unavailable)
+
+
+class Run:
+    def __init__(self, response: dict) -> None:
+        self.response, self.calls = response, []
+
+    def __call__(self, argv, *, input, capture_output, timeout, check):  # noqa: A002
+        self.calls.append((argv, input))
+
+        class Done:
+            returncode = 0
+            stdout = (json.dumps(self.response) + "\n").encode()
+
+        return Done()
+
+
+def _resp(outcome: str, result: dict) -> dict:
+    return {"schema": "df/publisher-response/v1", "outcome": outcome, "reason": None,
+            "result": result, "evidence": {}}
+
+
+def test_wire_requests_parse_as_publisher_requests() -> None:
+    run = Run(_resp("done", {"state": "clear", "reason": None, "snapshot_sha": "1" * 40,
+                             "last_epoch": 1, "events": []}))
+    wire = act_journal_wire.WireJournal("run-7", run=run)
+    assert wire.status(snap()) == "clear"
+    wire.record(snap(), "approval-policy", "x")
+    (argv1, data1), (argv2, data2) = run.calls
+    assert argv1[-1] == "perimeter-status" and argv2[-1] == "record-violation"
+    assert preq.parse("perimeter-status", data1).fields["expected_snapshot_sha"] == "1" * 40
+    assert preq.parse("record-violation", data2).fields["source"] == "approval-policy"
+
+
+def test_wire_stale_and_foreign_snapshot() -> None:
+    stale = act_journal_wire.WireJournal("r", run=Run(_resp("stale_snapshot", {})))
+    assert stale.status(snap()) == STALE
+    foreign = act_journal_wire.WireJournal("r", run=Run(_resp("done", {
+        "state": "clear", "reason": None, "snapshot_sha": "9" * 40, "last_epoch": 1})))
+    assert isinstance(foreign.status(snap()), Unavailable)
+
+
+def test_premerge_selection_follows_publisher_presence(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(act_journal_wire, "PUBLISH", tmp_path / "df-publish")
+    dev = act_journal_wire.journal_for_premerge(env={}, state_home=tmp_path, run_id="r",
+                                                policy_repository_id=22)
+    assert isinstance(dev, act_journal_wire.DevStoreJournal)
+    (tmp_path / "df-publish").write_text("")
+    assert isinstance(act_journal_wire.journal_for_premerge(
+        env={}, state_home=tmp_path, run_id="r", policy_repository_id=22), Unavailable)
+    assert isinstance(act_journal_wire.journal_for_premerge(
+        env={"DF_RUN_ID": "run-7"}, state_home=tmp_path, run_id="r",
+        policy_repository_id=22), act_journal_wire.WireJournal)
+```
+
 - [ ] **Step 6: Remove the marker files of Part A** — `governance/act_perimeter.py` после правки
 (целиком):
 
@@ -6923,7 +7784,7 @@ def permissions_refusal(
 
 - [ ] **Step 7: Run tests to verify they pass**
 
-Run: `uv run --group governance pytest tests/test_act_trust.py tests/test_act_journal.py tests/test_act_context.py tests/test_act_perimeter.py -v`
+Run: `uv run --group governance pytest tests/test_act_trust.py tests/test_act_journal.py tests/test_act_context.py tests/test_act_identity.py tests/test_act_journal_wire.py tests/test_act_perimeter.py -v`
 Expected: PASS. Затем `uv run pytest -q` (без группы: `test_act_trust`, `test_act_context` —
 `SKIPPED (steward)`; `test_act_journal` проходит — `df/` stdlib) и полный набор с группой. ruff,
 pyrefly — чисто.
@@ -6932,14 +7793,17 @@ pyrefly — чисто.
 
 ```bash
 git add governance/act_trust.py governance/act_journal.py governance/act_context.py \
-  governance/act_perimeter.py tests/test_act_trust.py tests/test_act_journal.py \
-  tests/test_act_context.py tests/test_act_perimeter.py
+  governance/act_identity.py governance/act_journal_wire.py governance/act_perimeter.py \
+  tests/test_act_trust.py tests/test_act_journal.py tests/test_act_context.py \
+  tests/test_act_identity.py tests/test_act_journal_wire.py tests/test_act_perimeter.py
 git commit -m "feat(act): доверенный контекст — снимок df-trust, журнал периметра, диапазоны эпох (спека A rev 16 §6)"
 ```
 
 ### Task 13: Путь узла — общий вход, создание заявки, леджер, finalize в конверт, остановка, аудит
 
-Исполняется после Task 14 (её `load_history`, `Statuses`, `Deps`, `live_policy`).
+Исполняется после Task 14 (её `load_history`, `Statuses`, `Deps`, `mode_probe`/`live_policy`).
+Ревизия b1: B1-5 (режим по истории, без Р-1), B1-1 (привязка через `act_identity`), B1-15
+(доставка конверта и остановки в базу), B1-17 (полный состав коммита).
 
 **Files:**
 - Create: `governance/act_node.py` (вся новая логика узла; `approve_node` только ветвится)
@@ -6955,7 +7819,6 @@ git commit -m "feat(act): доверенный контекст — снимок
 - Modify: `governance/ops.py` (`Ops.pr_body_fact` + `RealOps`)
 - Modify: `governance/runner.py` (`reopen` ~1172 — остановка до волны; `resume` ~899 — аудит;
   `_print_status` ~4093 — события аудита)
-- Modify: `tests/conftest.py` (autouse: `act_trust.BINDING_PATH` → несуществующий путь)
 - Test: `tests/test_act_node.py`; `tests/test_governance_approve_node.py`,
   `tests/test_governance_approval_ledger.py`, `tests/test_governance_runner.py` — без правок
   ожиданий (регрессия старого пути)
@@ -6974,7 +7837,8 @@ git commit -m "feat(act): доверенный контекст — снимок
   `act_node.label_for(op) -> str`;
   `act_node.route(state, ops, dag, op, key, step) -> ApprovalOutcome | None` — `None` значит «старый
   код продолжает» и возвращается только: нет candidate-PR; PR открыт/закрыт без манифеста;
-  смёржен без манифеста и без привязки (Р-1); `LegacyAccepted` после `resolve`;
+  смёржен без манифеста в продукте `PRE_MIGRATION` (режим по истории, B1-5); `LegacyAccepted`
+  после `resolve`;
   `act_node.envelope_commit_defect(state, ops, expected, head) -> str | None`;
   `act_node.reopen(state, ops, dag, node) -> str | None` (`None` — у узла нет действующего
   одобрения `review/v1`);
@@ -7028,13 +7892,16 @@ def _advance(state, ops, dag, op, key):
 `RequestError` → `invalidate_request`; `ABSENT` → без маркера; `UNAVAILABLE` → `_unresolved`);
 (3) зеркала: `op.get("act") == "review/v1"` ⇔ манифест есть, иначе `invalidated` (приёмка №13,
 P1-2); для `review/v1` — `mirror_mismatch(req, key, op, body)` (тело — `pr_body_fact`) и привязка к
-прогону: `product` = `state.repo_slug`, `ws_id` = `state.ws_id`, путь каждого узла =
-`_rel(state, _filename(dag, n))`, `upstream_pins[n]` = `bundle_inputs.direct_blobs(..., ref=head)`;
-расхождение → `invalidated`; (4) PR открыт без манифеста → `None`; открыт с манифестом → живое
+прогону — `act_identity` (`RequestIdentity(state.repo_slug, state.ws_id, key)`:
+`manifest_refusal`, `paths_refusal` по путям `_rel(state, _filename(dag, n))`) и
+`upstream_pins[n]` = `bundle_inputs.direct_blobs(..., ref=head)`; расхождение → `invalidated`; (4) PR открыт без манифеста → `None`; открыт с манифестом → живое
 правило (`live_policy_refusal` против `act_status.live_policy`), затем `open_review` + D1
 (`find_act`) на голове: нет акта → `WAITING_HUMAN_APPROVAL`; есть → `ops.merge` (обвязка,
 предпроверка Task 15) → `WAITING_DELIVERY`; (5) закрыт без мержа → `None`; (6) смёржен: без
-манифеста и без привязки → `None` (Р-1); иначе `delivery_verdict` (Task 12a) с `legacy` =
+манифеста — `mode_probe`: продукт до миграции (`PRE_MIGRATION`: записи `ACT_MODE[P]` не было
+никогда) → `None` — admission при пустой истории режима даёт тот же legacy-исход (§10);
+`Unavailable` (нет привязки, удалённая запись, откат) → `_unresolved`; иначе `delivery_verdict`
+(Task 12a) с `legacy` =
 `_legacy_outcome` (только для заявки без маркера) → `LegacyAccepted` → `None`; `Accepted` →
 `record_review_act` (идемпотентно) → finalize; `Rejected` → `invalidated: <code>: <detail>`;
 `Ambiguous` → `_unresolved` с выходом `--repropose`; `Unavailable` → `_unresolved` (для
@@ -7042,8 +7909,9 @@ P1-2); для `review/v1` — `mirror_mismatch(req, key, op, body)` (тело �
 мержа (`FINALIZE`, `AWAIT_FINALIZE_MERGE`) `route` выполняет те же п. 1–6 по голове смёрженного
 candidate при **каждом** входе — решение переустанавливается из фактов, а не берётся из `op`.
 
-**Создание заявки.** `act_node.creation` перед первой записью: нет привязки → без маркера (если
-не `draining`); привязка есть → `live_policy`: `ACT_MODE[P] = review` и `settings.review_v1` →
+**Создание заявки.** `act_node.creation(state, ops, deps, live)` перед первой записью, `live` —
+`mode_probe` (ревизия b1): `Unavailable` → отказ создания (`_unresolved`, не legacy);
+`PRE_MIGRATION`/`merge` → без маркера (если не `draining`); `review` и `settings.review_v1` →
 `review/v1` (поколение узла — `next_generation(history, node)`, пин — текущая активация и её
 `files_sha256`); `review` без `review_v1` → отказ создания с причиной; `merge`/нет записи при
 `draining` → отказ создания без маркера. Присоединение к живой заявке шага — только той же
@@ -7057,15 +7925,17 @@ frontmatter узлов не трогается. Мерж finalize-PR — пре�
 (`finalize_merge_policy`, scope-аттестация, `_try_agent_merge`), но проверка формы —
 `envelope_commit_defect`: коммит трогает ровно пути конвертов узлов заявки, содержимое каждого —
 ожидаемое. После мержа finalize — конверты читаются **на merge-коммите finalize** и сверяются
-побайтово (Р-11); иначе `invalidated`. Повтор после падения берёт записанный `finalize_head_sha`
+побайтово, а сам merge-коммит обязан быть достижим из базы (`is_ancestor`; B1-15) — иначе
+`invalidated`; неустановленная достижимость — `_unresolved` (Р-11). Повтор после падения берёт записанный `finalize_head_sha`
 (второго конверта нет, Review Focus 5).
 
 **Переоткрытие.** `runner.reopen` первым шагом (после локальных отказов и проверки грязного
 дерева, до правки `state`) зовёт `act_node.reopen`: у узла действующее событие — доставленная
 заявка `review/v1` → отдельный PR `stop/<ws-id>-<node>-g<gen>` с единственным файлом
 `stop_path(ws, node, gen)` (поколение — действующее), агентский мерж (`merge-pr.sh`; одобряющее
-ревью проверяется до вызова, как у finalize), проверенный `state=MERGED`; до доставки остановки
-`reopen` отказывает и узел остаётся одобренным. Повтор находит свой stop-PR по ветке.
+ревью проверяется до вызова, как у finalize), проверенный `state=MERGED`, merge-коммит stop-PR
+достижим из базы и несёт ровно ожидаемую запись `StopRecord(node, gen, …)` по `stop_path`
+(B1-15); до этого `reopen` отказывает и узел остаётся одобренным. Повтор находит свой stop-PR по ветке.
 
 **Аудит позднего отзыва (§8, приёмка №10).** `audit_late_dismissals` — на `resume` прогона и на
 вызове `--approve-node` для завершённых заявок `review/v1`: отзывы с `created_at > merged_at` →
@@ -7110,6 +7980,7 @@ from tests.test_governance_approve_node import (  # noqa: E402
     WS_ID,
     Ops,
     World,
+    _git,
     _make_world,
     _show,
     approve,
@@ -7126,7 +7997,7 @@ ROOT = act_trust.TrustRoot("github.com", 11, "main", "s" * 40)
 
 def trust(unverified: tuple[str, ...] = ()) -> act_trust.Trust:
     snap = act_trust.TrustSnapshot(ROOT, "owner/df-trust", SOURCE, (Epoch(1, ACT),))
-    return act_trust.Trust(snap, unverified, True)
+    return act_trust.Trust(snap, unverified)
 
 
 class BodyOps(Ops):
@@ -7147,6 +8018,11 @@ class BodyOps(Ops):
             return Fact(Outcome.ABSENT, None, "нет файла")
         return Fact(Outcome.FOUND, done.stdout, "ok")
 
+    def prs_containing_commit(self, repo_slug, sha):
+        return [{"number": n, "state": "MERGED", "mergeCommit": sha}
+                for n, rec in self.forge.prs.items()
+                if (rec.get("mergeCommit") or {}).get("oid") == sha]
+
 
 class Stand:
     """Подмены доверия и фактов ревью; `verdict` — исход доставки candidate."""
@@ -7156,12 +8032,13 @@ class Stand:
         self.settings = ActSettings(review_v1=True, draining=False)
         self.binding: object = object()
         self.mode = "review"
+        self.mode_unset: str | None = None  # причина Unavailable режима продукта
         self.unverified: tuple[str, ...] = ()
         self.effective: dict[str, ReviewView] = {}
         self.verdict: object = None
         self.dismissals: tuple[v3.Dismissal, ...] = ()
         monkeypatch.setattr(act_node, "DEPS_FACTORY", lambda state: self.deps())
-        monkeypatch.setattr(act_status, "live_policy", lambda state, deps: self.live())
+        monkeypatch.setattr(act_status, "mode_probe", lambda state, deps=None: self.probe())
         monkeypatch.setattr(act_facts, "open_review", lambda t, repo, pr: self.facts(pr))
         monkeypatch.setattr(act_facts, "effective", lambda facts, clock: dict(self.effective))
         monkeypatch.setattr(act_context, "delivery_verdict", self.deliver)
@@ -7171,6 +8048,9 @@ class Stand:
         return act_status.Deps(readers=None, binding=self.binding, journal=lambda r, b: None,
                                creds=(), gh=None, now=lambda: NOW, sleep=lambda s: None,
                                settings=self.settings)
+
+    def probe(self) -> act_status.LivePolicy | Unavailable:
+        return Unavailable(self.mode_unset) if self.mode_unset else self.live()
 
     def live(self) -> act_status.LivePolicy:
         policy = POLICY if self.mode == "review" else parse_policy_set(ACT, FILES)
@@ -7243,8 +8123,16 @@ def test_review_mode_without_review_v1_refuses(world: World, stand: Stand) -> No
         approve(world, "charter")
 
 
-def test_no_binding_keeps_legacy_creation(world: World, stand: Stand) -> None:
-    stand.binding = None
+def test_unset_mode_refuses_creation(world: World, stand: Stand) -> None:
+    """B1-5: нет привязки / удалённая запись / откат — не legacy, а отказ создания."""
+    stand.mode_unset = "нет привязки корня доверия"
+    with pytest.raises(RuntimeError, match="режим акта"):
+        approve(world, "charter")
+    assert al.requests(world.state) == []
+
+
+def test_pre_migration_keeps_legacy_creation(world: World, stand: Stand) -> None:
+    stand.mode = act_trust.PRE_MIGRATION
     key, op, pr = _candidate(world)
     assert op.get("act") is None
     assert world.forge.prs[pr]["label"] == an.HUMAN_MERGE_LABEL
@@ -7273,7 +8161,7 @@ def test_live_request_with_old_pin_invalidated(world: World, stand: Stand, monke
     """Приёмка №8, №9, №44: пин живой заявки ≠ текущей активации."""
     key, op, pr = _candidate(world)
     newer = ActivationView(("activation", "b" * 40), "b" * 40, NOW)
-    monkeypatch.setattr(act_status, "live_policy", lambda state, deps: replace(
+    monkeypatch.setattr(act_status, "mode_probe", lambda state, deps=None: replace(
         stand.live(), activation=newer))
     with pytest.raises(RuntimeError, match="policy_changed"):
         approve(world, "charter")
@@ -7336,14 +8224,26 @@ def test_legacy_candidate_merged_after_review_activation_refused(world: World,
                                                                  stand: Stand) -> None:
     """Приёмка №24: candidate без манифеста после активации review — admission, через
     настоящий диспетчер шага."""
-    stand.binding = None
+    stand.mode = act_trust.PRE_MIGRATION
     key, op, pr = _candidate(world)  # заявка без маркера
     merge_pr(world, pr)
-    stand.binding = object()
+    stand.mode = "review"
     stand.verdict = Rejected("admission", "ACT_MODE=review: заявка без маркера")
     with pytest.raises(RuntimeError, match="admission"):
         approve(world, "charter")
     assert world.state.ops[key]["status"] == al.STATUS_INVALIDATED
+
+
+def test_merged_unmarked_with_unset_mode_stays_alive(world: World, stand: Stand) -> None:
+    """B1-5: смёржен без маркера, режим продукта не установлен (откат review → merge) —
+    заявка жива, старый код не продолжает."""
+    stand.mode = act_trust.PRE_MIGRATION
+    key, op, pr = _candidate(world)
+    merge_pr(world, pr)
+    stand.mode_unset = "ACT_MODE: обратное переключение review → merge"
+    with pytest.raises(RuntimeError, match="режим акта"):
+        approve(world, "charter")
+    assert world.state.ops[key]["status"] == al.STATUS_STARTED
 
 
 def test_act_removed_from_ledger_with_manifest_in_head(world: World, stand: Stand) -> None:
@@ -7355,10 +8255,21 @@ def test_act_removed_from_ledger_with_manifest_in_head(world: World, stand: Stan
     assert world.state.ops[key]["status"] == al.STATUS_INVALIDATED
 
 
-def test_foreign_product_binding_invalidates(world: World, stand: Stand) -> None:
+@pytest.mark.parametrize("component,match", [
+    ("product", "product"), ("ws_id", "зеркало act"), ("node_path", "путь узла")])
+def test_foreign_identity_binding_invalidates(world: World, stand: Stand,
+                                              monkeypatch: pytest.MonkeyPatch,
+                                              component: str, match: str) -> None:
+    """B1-1/B1-14: отрицательный двойник на каждый компонент идентичности на пути узла
+    (ws_id другого прогона — манифест не по его пути, зеркало `act` расходится)."""
     key, pr = _deliver(world, stand)
-    world.state.repo_slug = "owner/other"
-    with pytest.raises(RuntimeError, match="product"):
+    if component == "product":
+        world.state.repo_slug = "owner/other"
+    elif component == "ws_id":
+        world.state.ws_id = "ws-other"
+    else:
+        monkeypatch.setattr(an, "_rel", lambda state, f: f"elsewhere/{f}")
+    with pytest.raises(RuntimeError, match=match):
         approve(world, "charter")
     assert world.state.ops[key]["status"] == al.STATUS_INVALIDATED
 
@@ -7392,6 +8303,15 @@ def test_crash_after_finalize_merge_before_complete(world: World, stand: Stand,
     approve(world, "charter")
     assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
     assert len([n for n, r in world.forge.prs.items() if r["branch"].endswith("-final")]) == 1
+
+
+def test_finalize_merged_outside_base_invalidates(world: World, stand: Stand) -> None:
+    """B1-15: конверт верен, но merge-коммит finalize недостижим из базы — не «в base»."""
+    key, pr = _deliver(world, stand)
+    world.ops.is_ancestor = lambda target, sha, ref: False  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="не в базу"):
+        approve(world, "charter")
+    assert world.state.ops[key]["status"] == al.STATUS_INVALIDATED
 
 
 def test_envelope_commit_defect_names_extra_path(world: World) -> None:
@@ -7429,6 +8349,23 @@ def test_reopen_writes_stop_of_current_generation(world: World, stand: Stand) ->
     assert len(stop_prs) == 1 and stop_prs[0]["state"] == "MERGED"
     again = act_node.reopen(world.state, world.ops, an.bundle_dag.dag_for(None), "charter")
     assert again is None  # действующее событие — уже остановка
+
+
+def test_reopen_refuses_stop_pr_without_record(world: World, stand: Stand) -> None:
+    """B1-15: stop-PR смёржен, но записи остановки этого узла/поколения в нём нет."""
+    key, pr = _deliver(world, stand)
+    approve(world, "charter")
+    branch = f"stop/{WS_ID}-charter-g1"
+    _git(world.human, "fetch", "-q", "origin")
+    _git(world.human, "switch", "-qc", branch, "origin/master")
+    (world.human / "unrelated.txt").write_text("x\n")
+    _git(world.human, "add", "unrelated.txt")
+    _git(world.human, "commit", "-qm", "not a stop")
+    _git(world.human, "push", "-q", "origin", branch)
+    stop_pr = world.ops.create_pr(str(world.target), SLUG, branch, "t", "b", "")
+    merge_pr(world, stop_pr)
+    with pytest.raises(RuntimeError, match="записи остановки"):
+        act_node.reopen(world.state, world.ops, an.bundle_dag.dag_for(None), "charter")
 
 
 def test_reopen_of_legacy_node_is_old_path(world: World, stand: Stand) -> None:
@@ -7573,17 +8510,7 @@ def expected_envelope(current: DeliveredRequest, node: str, review_id: str) -> E
         return Fact(Outcome.FOUND, done.stdout.rstrip("\n"), "ok")
 ```
 
-`tests/conftest.py` — autouse-фикстура (машина разработчика с настоящей привязкой не уводит
-тесты в сеть):
-
-```python
-@pytest.fixture(autouse=True)
-def _no_trust_binding(monkeypatch: pytest.MonkeyPatch, tmp_path_factory) -> None:
-    from governance import act_trust
-
-    monkeypatch.setattr(act_trust, "BINDING_PATH",
-                        tmp_path_factory.getbasetemp() / "no-trust.toml")
-```
+Изоляция тестов вне `act_*` (`tests/conftest.py`) — уже в Task 14 (ревизия b1, B1-8).
 
 - [ ] **Step 5: Write `act_node`**
 
@@ -7604,7 +8531,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
-from governance import act_context, act_facts, act_status, bundle_inputs
+from governance import act_context, act_facts, act_status, act_trust, bundle_dag, bundle_inputs
 from governance import approval_facts as af
 from governance import approval_ledger as al
 from governance import approve_node as an
@@ -7621,6 +8548,7 @@ from governance.act_envelope import (
     render_stop,
     stop_path,
 )
+from governance.act_identity import RequestIdentity, manifest_refusal, paths_refusal
 from governance.act_projection import ProjectionError, self_hash_v
 from governance.act_request import (
     ACT_REVIEW_V1,
@@ -7658,19 +8586,16 @@ class Creation:
 # --- создание ------------------------------------------------------------------------
 
 
-def creation(state: RunState, ops: Ops, deps: act_status.Deps) -> Creation:
-    """Режим создания по текущей активации и настройке установки (§10, Task 10)."""
+def creation(state: RunState, ops: Ops, deps: act_status.Deps,
+             live: act_status.LivePolicy | Unavailable) -> Creation:
+    """Режим создания по режиму продукта сейчас (`mode_probe`) и настройке (§10, Task 10).
+
+    Неустановленный режим (нет привязки, удалённая запись, откат) — отказ
+    создания, не заявка без маркера (ревизия b1, B1-5)."""
     settings = deps.settings
     assert settings is not None
-    if deps.binding is None:
-        if settings.draining:
-            raise RuntimeError(_DRAINING)
-        return Creation(None, None, ())
-    if isinstance(deps.binding, Unavailable):
-        raise an._unresolved(f"привязка корня доверия: {deps.binding.reason}")
-    live = act_status.live_policy(state, deps)
     if isinstance(live, Unavailable):
-        raise an._unresolved(f"текущая активация политики: {live.reason}")
+        raise an._unresolved(f"режим акта продукта: {live.reason}")
     if live.mode != "review":
         if settings.draining:
             raise RuntimeError(_DRAINING)
@@ -7680,7 +8605,7 @@ def creation(state: RunState, ops: Ops, deps: act_status.Deps) -> Creation:
             f"ACT_MODE[{state.repo_slug}] = review, а review_v1 в act.toml выключен — "
             "заявка не создаётся (§10): включите review_v1 либо дождитесь дефолта M4"
         )
-    history = act_status.load_history(ops, state.target_dir, an._base_ref(state), state.ws_id)
+    history = act_status.load_history(ops, state, an._base_ref(state))
     if isinstance(history, Unavailable):
         raise an._unresolved(f"история заявок узлов: {history.reason}")
     pin = PolicyPin(
@@ -7755,19 +8680,14 @@ def _invalidate(state: RunState, key: str, reason: str) -> NoReturn:
 
 
 def _binding_refusal(state: RunState, ops: Ops, dag: Dag, op: Mapping, req: NodeRequest,
-                     head: str) -> str | None:
-    if req.product != state.repo_slug:
-        return f"манифест: product {req.product} ≠ продукт прогона {state.repo_slug}"
-    if req.ws_id != state.ws_id:
-        return f"манифест: ws_id {req.ws_id} ≠ {state.ws_id}"
+                     head: str, key: str) -> str | None:
+    ident = RequestIdentity(state.repo_slug, state.ws_id, key)
+    expected = {bundle_dag.node_id(f): an._rel(state, f) for f, _ in dag}
+    refusal = manifest_refusal(req, ident) or paths_refusal(req, expected)
+    if refusal is not None:
+        return refusal
     ops.fetch_branch(state.target_dir, op["branch"])
-    for node, entry in req.nodes.items():
-        try:
-            expected = an._rel(state, an._filename(dag, node))
-        except KeyError:
-            return f"манифест: узел {node} не из активного DAG"
-        if entry.path != expected:
-            return f"манифест: путь узла {node} {entry.path} ≠ {expected}"
+    for node in req.nodes:
         fact = bundle_inputs.direct_blobs(state, ops, dag, node, head)
         if fact.outcome is not Outcome.FOUND or fact.value is None:
             if fact.outcome is Outcome.FORBIDDEN:
@@ -7789,7 +8709,7 @@ def _check_marked(state, ops, dag, op, key, pr: int, head: str) -> NodeRequest |
         raise an._unresolved(f"тело candidate-PR #{pr} — {body.detail}")
     for refusal in (
         mirror_mismatch(req, key, op, body.value),
-        _binding_refusal(state, ops, dag, op, req, head),
+        _binding_refusal(state, ops, dag, op, req, head, key),
     ):
         if refusal is not None:
             _invalidate(state, key, refusal)
@@ -7813,18 +8733,24 @@ def route(state: RunState, ops: Ops, dag: Dag, op: dict, key: str,
     if where is Disposition.CLOSED_UNMERGED:
         return None
     deps = DEPS_FACTORY(state)
-    if req is None and deps.binding is None:
-        return None  # Р-1: до корня доверия единственный исход admission — legacy
+    if req is None:
+        live = act_status.mode_probe(state, deps)
+        if isinstance(live, Unavailable):
+            raise an._unresolved(f"режим акта продукта: {live.reason}")
+        if live.mode == act_trust.PRE_MIGRATION:
+            # записи ACT_MODE[P] не было никогда: admission на T — legacy (§10),
+            # тот же исход, что дал бы полный перебор; старый код продолжает
+            return None
     return _merged(state, ops, dag, op, key, pr, head, req, facts, deps)
 
 
 def _open(state, ops, op, key, pr: int, head: str, req: NodeRequest) -> an.ApprovalOutcome:
     deps = DEPS_FACTORY(state)
-    if deps.binding is None or isinstance(deps.binding, Unavailable):
-        raise an._unresolved("заявка review/v1, а корень доверия не прочитан (Р-1)")
-    live = act_status.live_policy(state, deps)
+    live = act_status.mode_probe(state, deps)
     if isinstance(live, Unavailable):
-        raise an._unresolved(f"текущая активация политики: {live.reason}")
+        raise an._unresolved(f"режим акта продукта: {live.reason}")
+    if live.mode != "review":
+        raise an._unresolved(f"заявка review/v1, а режим продукта сейчас — {live.mode}")
     refusal = live_policy_refusal(req.policy, live.activation.merge_commit)
     if refusal is not None:
         _invalidate(state, key, refusal)
@@ -7880,9 +8806,7 @@ def _head_hashes(state: RunState, ops: Ops, req: NodeRequest, head: str):
 
 
 def _merged(state, ops, dag, op, key, pr, head, req, facts, deps) -> an.ApprovalOutcome | None:
-    if isinstance(deps.binding, Unavailable) or deps.binding is None:
-        raise an._unresolved(f"корень доверия: {getattr(deps.binding, 'reason', 'нет привязки')}")
-    decider = act_status.Decider(state, ops, deps)
+    decider = act_status.Decider(state, ops, deps, dag)
     trust = decider.trust()
     if isinstance(trust, Unavailable):
         raise an._unresolved(f"доверенный контекст: {trust.reason}")
@@ -8014,11 +8938,12 @@ def _reconcile_finalize(state, ops, dag, key, expected) -> an.ApprovalOutcome:
     event = af.merge_event(facts)
     if event.outcome is not Outcome.FOUND or event.value is None:
         raise an._unresolved(f"merge-коммит PR конверта #{pr} — {event.detail}")
-    ops.fetch_branch(state.target_dir, an._base_ref(state))
+    commit = event.value.commit
+    _require_in_base(state, ops, key, commit, f"PR конверта #{pr}")
     for node, text in expected.items():
-        got = ops.show_file(state.target_dir, event.value.commit, envelope_path(state.ws_id, node))
+        got = ops.show_file(state.target_dir, commit, envelope_path(state.ws_id, node))
         if got is None:
-            raise an._unresolved(f"конверт {node} на {event.value.commit[:12]} не читается")
+            raise an._unresolved(f"конверт {node} на {commit[:12]} не читается")
         if got != text:
             _invalidate(state, key, f"PR конверта #{pr} доставил не тот конверт узла {node}")
     an._ensure_finalize_identity(state, ops, key, op)
@@ -8030,14 +8955,30 @@ def _reconcile_finalize(state, ops, dag, key, expected) -> an.ApprovalOutcome:
     )
 
 
+def _in_base(state: RunState, ops: Ops, commit: str) -> bool | None:
+    """merge-коммит достижим из свежей базы (B1-15); `None` — не установлено."""
+    ops.checkout_and_pull(state.target_dir, an._base_ref(state))
+    return ops.is_ancestor(state.target_dir, commit, an._base_ref(state))
+
+
+def _require_in_base(state: RunState, ops: Ops, key: str, commit: str, what: str) -> None:
+    reached = _in_base(state, ops, commit)
+    if reached is None:
+        raise an._unresolved(f"{what}: достижимость {commit[:12]} из базы")
+    if not reached:
+        _invalidate(state, key, f"{what} смёржен не в базу {an._base_ref(state)}")
+
+
 # --- переоткрытие и аудит ------------------------------------------------------------
+
+STOP_REASON = "переоткрытие узла {node}"
 
 
 def reopen(state: RunState, ops: Ops, dag: Dag, node: str) -> str | None:
     """Остановка действующего одобрения `review/v1` до новой волны (§8, Q1)."""
     base = an._base_ref(state)
     ops.checkout_and_pull(state.target_dir, base)
-    history = act_status.load_history(ops, state.target_dir, base, state.ws_id)
+    history = act_status.load_history(ops, state, base)
     if isinstance(history, Unavailable):
         raise an._unresolved(f"история заявок узлов: {history.reason}")
     current = current_event(history, node)
@@ -8046,6 +8987,7 @@ def reopen(state: RunState, ops: Ops, dag: Dag, node: str) -> str | None:
     gen = current.request.nodes[node].generation
     branch = f"stop/{state.ws_id}-{node}-g{gen}"
     path = stop_path(state.ws_id, node, gen)
+    record = render_stop(StopRecord(node, gen, STOP_REASON.format(node=node)))
     found = af.search_pr(ops, state.repo_slug, branch, any_state=True)
     if found.outcome is Outcome.UNAVAILABLE:
         raise an._unresolved(f"поиск stop-PR на ветке {branch} — {found.detail}")
@@ -8053,8 +8995,7 @@ def reopen(state: RunState, ops: Ops, dag: Dag, node: str) -> str | None:
         ops.switch_to(state.target_dir, branch, base)
         file = Path(state.target_dir) / path
         file.parent.mkdir(parents=True, exist_ok=True)
-        file.write_text(render_stop(StopRecord(node, gen, f"переоткрытие узла {node}")),
-                        encoding="utf-8")
+        file.write_text(record, encoding="utf-8")
         ops.commit_paths(state.target_dir, [path], f"spec: {state.ws_id} — остановка {node} g{gen}")
         ops.push_branch(state.target_dir, branch)
         head = ops.rev_parse(state.target_dir, "HEAD") or ""
@@ -8078,7 +9019,20 @@ def reopen(state: RunState, ops: Ops, dag: Dag, node: str) -> str | None:
         facts = an._pr_facts(state, ops, pr)
     if an._disposition(facts, pr) is not Disposition.MERGED:
         raise RuntimeError(f"stop-PR #{pr} не смёржен — узел {node} остаётся одобренным")
-    ops.checkout_and_pull(state.target_dir, base)
+    event = af.merge_event(facts)
+    if event.outcome is not Outcome.FOUND or event.value is None:
+        raise an._unresolved(f"merge-коммит stop-PR #{pr} — {event.detail}")
+    # доставка остановки доказывается базой, а не состоянием PR (B1-15)
+    reached = _in_base(state, ops, event.value.commit)
+    if reached is None:
+        raise an._unresolved(f"stop-PR #{pr}: достижимость из базы")
+    if not reached:
+        raise RuntimeError(f"stop-PR #{pr} смёржен не в базу — узел {node} остаётся одобренным")
+    if ops.show_file(state.target_dir, event.value.commit, path) != record:
+        raise RuntimeError(
+            f"stop-PR #{pr} не несёт записи остановки {path} узла {node} поколения {gen} — "
+            "узел остаётся одобренным; разберите PR вручную"
+        )
     return f"остановка {path} (g{gen}) доставлена PR #{pr}"
 
 
@@ -8117,19 +9071,25 @@ def _try_agent_merge(state, ops, dag, op, nodes, pr, head, *,
     defect = form() if form is not None else _envelope_form_defect(state, ops, dag, op, nodes, head)
 ```
 
-`_propose` — после `_require_no_reopened_pr(...)`, до `self_hash` (статус узла `review/v1` —
-не frontmatter):
+`_propose` — сразу после `upstream_blobs = …` (`:375`), до блока долга (статус узла в продукте
+`review` — не frontmatter):
 
 ```python
     from governance import act_node, act_status
 
-    statuses = act_status.statuses_at_base(state, ops, dag)
-    if isinstance(statuses, Unavailable):
-        raise _unresolved(f"статус узла {node_id}: {statuses.reason}")
-    made = act_node.creation(state, ops, act_node.DEPS_FACTORY(state))
+    deps = act_node.DEPS_FACTORY(state)
+    live = act_status.mode_probe(state, deps)  # один раз: и статус, и режим создания
+    statuses = (act_status.statuses_at_base(state, ops, dag, live, deps)
+                if not isinstance(live, Unavailable) and live.mode == "review" else None)
 ```
 
-и замена блока `debt = na.node_debt(...)` / no-op / пины (`:375–386`):
+после `_require_no_reopened_pr(...)`, до `self_hash`:
+
+```python
+    made = act_node.creation(state, ops, deps, live)  # Unavailable — отказ до записи
+```
+
+и замена блока `debt = na.node_debt(...)` / no-op / пины (`:376–386`):
 
 ```python
     if statuses is not None and statuses.is_review(node_id):
@@ -8147,7 +9107,8 @@ def _try_agent_merge(state, ops, dag, op, nodes, pr, head, *,
             raise RuntimeError(debt.render())
 ```
 
-(Порядок «гварды до первой записи» сохраняется: `statuses_at_base` и `creation` только читают.)
+(Порядок «гварды до первой записи» сохраняется: `mode_probe`, `statuses_at_base` и `creation`
+только читают; неустановленный режим отказывает в `creation` до записи.)
 Присоединение и запись:
 
 ```python
@@ -8177,7 +9138,8 @@ def _try_agent_merge(state, ops, dag, op, nodes, pr, head, *,
         )
 ```
 
-`propose_from_source` — тот же приём: `made = act_node.creation(...)` до первой записи;
+`propose_from_source` — тот же приём: `live = act_status.mode_probe(state, deps)`,
+`made = act_node.creation(state, ops, deps, live)` до первой записи;
 `generations = {n: act_node.generation_of(made, n) for n in node_ids}` для `review/v1`;
 `start_request(..., act=made.act, generations={first: generations[first]})`,
 `extend_request(..., generation=generations[node])`.
@@ -8361,16 +9323,19 @@ _LEGACY_RAISE = {
 - [ ] **Step 9: Run tests to verify they pass**
 
 Run: `uv run --group governance pytest tests/test_act_node.py tests/test_governance_approve_node.py tests/test_governance_approval_ledger.py tests/test_governance_runner.py -v`
-Expected: PASS; существующие тесты старого пути — без правок ожиданий (`route` возвращает `None`
-без привязки, `_legacy_outcome` держит прежние тексты). Полный набор в обоих режимах, ruff,
-pyrefly.
+Expected: PASS; существующие тесты старого пути — без правок ожиданий (`tests/conftest.py`
+Task 14 даёт продукт до миграции: `route` для заявки без маркера возвращает `None`,
+`_legacy_outcome` держит прежние тексты). Полный набор в обоих режимах, ruff, pyrefly. Перед
+коммитом при варианте (Б) вопроса п. 9 — ещё `tests/test_act_envelope.py tests/test_act_status.py`.
 
 - [ ] **Step 10: Commit**
 
 ```bash
 git add governance/act_node.py governance/approve_node.py governance/approval_ledger.py \
   governance/act_decision.py governance/act_envelope.py governance/ops.py governance/runner.py \
-  tests/conftest.py tests/test_act_node.py tests/test_governance_runner.py
+  tests/test_act_node.py tests/test_governance_runner.py
+# Step 8, вариант (А): + governance/act_status.py
+# Step 8, вариант (Б): + tests/test_act_envelope.py tests/test_act_status.py (act_envelope.py уже в списке)
 git commit -m "feat(act): путь узла review/v1 — общий вход admission, заявка с манифестом, конверт, остановка, аудит"
 ```
 
@@ -8433,9 +9398,15 @@ from governance.act_envelope import (  # noqa: E402
     envelope_path,
     next_generation,
 )
-from governance.act_time import Ambiguous  # noqa: E402
+from governance.act_time import Ambiguous, Unavailable  # noqa: E402
 from tests.test_act_node import NOW, BodyOps, Stand  # noqa: E402
-from tests.test_governance_approve_node import World, _make_world, approve  # noqa: E402
+from tests.test_governance_approve_node import (  # noqa: E402
+    SLUG,
+    World,
+    _git,
+    _make_world,
+    approve,
+)
 
 
 @pytest.fixture()
@@ -8457,8 +9428,8 @@ def test_after_policy_changed_successor_carries_predecessor(world, stand, monkey
     first = approve(world, "charter")
     key = first.request
     newer = ActivationView(("activation", "b" * 40), "b" * 40, NOW)
-    monkeypatch.setattr(act_status, "live_policy",
-                        lambda s, d: replace(stand.live(), activation=newer))
+    monkeypatch.setattr(act_status, "mode_probe",
+                        lambda s, d=None: replace(stand.live(), activation=newer))
     with pytest.raises(RuntimeError, match="policy_changed"):
         approve(world, "charter")
     before = copy.deepcopy(world.state.ops[key])
@@ -8482,6 +9453,46 @@ def test_persistent_ambiguous_merged_candidate(world, stand):
     assert world.state.ops[key]["status"] == al.STATUS_INVALIDATED
     assert world.state.ops[key]["reason"].startswith("reproposed:")
     assert al.successor_of(world.state, key) is not None
+
+
+def _squash_pr(world: World, pr: int, *, login: str = "alice") -> str:
+    """Человек мержит candidate squash-ом: один родитель, голова PR — только в
+    `refs/pull/N/head` и фактах PR (B1-9)."""
+    rec, clone = world.forge.prs[pr], world.forge.merger
+    assert clone is not None
+    _git(clone, "fetch", "-q", "origin")
+    _git(clone, "switch", "-q", "master")
+    _git(clone, "reset", "-q", "--hard", "origin/master")
+    _git(clone, "merge", "-q", "--squash", f"origin/{rec['branch']}")
+    _git(clone, "commit", "-qm", f"PR #{pr} (squash)")
+    sha = _git(clone, "rev-parse", "HEAD")
+    _git(clone, "push", "-q", "origin", "master",
+         f"refs/remotes/origin/{rec['branch']}:refs/pull/{pr}/head")
+    rec.update(state="MERGED", mergedBy={"login": login}, mergedAt=NOW,
+               mergeCommit={"oid": sha})
+    return sha
+
+
+def test_squash_delivery_read_and_repropose_cycle(world, stand):
+    """B1-9: squash-доставка читается историей (голова из фактов PR, не из второго
+    родителя), постоянный Ambiguous уводит в --repropose, преемник создаётся."""
+    first = approve(world, "charter")
+    key = first.request
+    pr = world.state.ops[key]["candidate_pr"]
+    stand.approve_head(pr)
+    _squash_pr(world, pr)
+    history = act_status.load_history(world.ops, world.state, "master")
+    assert not isinstance(history, Unavailable)
+    delivered = [e for e in history if isinstance(e, DeliveredRequest)]
+    assert [e.request.request_id for e in delivered] == [key]
+    assert delivered[0].head_sha == world.ops.pr_facts(SLUG, pr)["headRefOid"]
+    stand.verdict = Ambiguous()
+    with pytest.raises(RuntimeError, match="--repropose"):
+        approve(world, "charter")
+    _repropose(world, key)
+    assert world.state.ops[key]["reason"].startswith("reproposed:")
+    succ = al.successor_of(world.state, key)
+    assert succ is not None and world.state.ops[succ]["predecessor"] == key
 
 
 def test_open_candidate_is_closed_before_successor(world, stand):
@@ -8653,10 +9664,11 @@ git add governance/act_node.py governance/approve_node.py governance/approval_le
 git commit -m "feat(act): --repropose — преемник заявки узла с сохранением доказательств предшественника"
 ```
 
-### Task 14: Статус узла — история, конверт, провайдер гейтов, хеш DAG
+### Task 14: Статус узла — история, конверт, provenance, провайдер гейтов, хеш DAG
 
 Исполняется **до** Task 13 (порядок ревизии 31.10): Task 13 опирается на `load_history`,
-`Statuses` и `Deps` этой задачи.
+`Statuses`, `Deps` и `live_policy`/`mode_probe` этой задачи. Ревизия b1: B1-1, B1-2, B1-3, B1-5,
+B1-6, B1-8, B1-9 — см. «Правки по ревью b1».
 
 **Files:**
 - Create: `governance/act_status.py`
@@ -8665,72 +9677,95 @@ git commit -m "feat(act): --repropose — преемник заявки узла
 - Modify: `governance/node_approval.py` (`DEBT_REVIEW_V1`)
 - Modify: `governance/approve_node.py` (`read_dag_state` ~480, `_require_upstream_ready` ~939)
 - Modify: `governance/runner.py` (`_step_gate` S4 ~3275, `_step_s8` ~4024 — режим и провайдер)
-- Modify: `governance/task_bridge.py` (`_canonical_dag_hash` ~1138 — Р-13)
-- Test: `tests/test_act_status.py`, `tests/test_act_gate.py`; дополнить
-  `tests/test_governance_runner.py` (стоп S4 на недоступном корне)
+- Modify: `governance/task_bridge.py` (`_canonical_dag_hash` ~1138 — **[ждёт решения владельца
+  В-1]**, вариант по умолчанию ниже)
+- Modify: `tests/conftest.py` — изоляция путей акта для тестов вне `act_*` (перенесено сюда из
+  Task 13: с этой задачи старые пути зовут `mode_probe`)
+- Test: `tests/test_act_status.py`, `tests/test_act_legacy.py`, `tests/test_act_gate.py`;
+  дополнить `tests/test_governance_runner.py` (стоп S4 при неустановленном режиме) и
+  `tests/test_governance_task_bridge.py` (хеш DAG)
 
 **Interfaces:**
 - Consumes: Tasks 5, 5a, 8 (`parse_manifest`, `manifest_path`, `self_hash_v`, `envelope_refusal`,
   `generation_refusal`, `current_event`, `parse_envelope`, `parse_stop`, `envelope_path`,
-  `stop_path`), 11, 11a, 12, 12a (`act_trust`, `act_context.delivery_verdict`, `act_journal`).
+  `stop_path`), 11, 11a, 12, 12a (`act_trust` с `product_mode`, `act_context.delivery_verdict`,
+  `act_journal`, `act_identity`).
 - Produces:
-  `Ops.first_parent_changes(target_dir, ref) -> list[tuple[str, tuple[str, ...], tuple[tuple[str, str], ...]]] | None`
-  — first-parent `ref`, старые первыми: `(commit, parents, ((status, path), …))`, дифф против
-  первого родителя, без детекции переименований;
+  `Ops.first_parent_changes(target_dir, ref) -> list[tuple[str, tuple[str, ...], tuple[tuple[str, str], ...]]] | None`;
   `act_settings.config_home(env) -> Path`;
-  `act_status.load_history(ops, target_dir, base_ref, ws_id) -> History | Unavailable` (Р-8);
+  `act_status.load_history(ops, state, base_ref) -> History | Unavailable` — заявка = коммит
+  first-parent, **добавивший** манифест; голова одобренного коммита — из фактов PR доставки
+  (`pr_for_merge` + `pr_facts.headRefOid`; merge и squash — B1-9); правка/удаление записи истории
+  после доставки → `Unavailable` (Р-8, сужено b1);
   `act_status.Deps(readers, binding, journal, creds, gh, now, sleep, settings)`,
   `act_status.real_deps(state, env=None) -> Deps`;
-  `act_status.Decider(state, ops, deps, *, trust=None, journal=None)` — вызов
-  `(DeliveredRequest) -> Outcome` с памятью по `merge_commit`;
-  `act_status.Statuses(*, dag, ws_id, history, node_path, text_of, blobs_of, decide)` —
-  `of(node) -> str` (`approved` | `not_approved:<reason>` | `unavailable:<reason>`, форма ответа
-  провайдера steward);
-  `act_status.statuses_at_base(state, ops, dag, deps=None) -> Statuses | None | Unavailable`
-  (`None` — в истории нет ни одного события `review/v1`: старый путь без изменений);
-  `act_status.LivePolicy(mode, trust, journal, activation, policy)`,
-  `act_status.live_policy(state, deps) -> LivePolicy | Unavailable` — живое правило: текущая
-  активация открытой эпохи и режим продукта (Task 13, 15 его же потребляют);
-  `Statuses.is_review(node) -> bool`;
-  `act_status.gate_run(state, ops, dag, *, candidate, out, deps=None) -> tuple[str, str | None] | Unavailable`
-  — режим `gate-check` (Р-10) и путь файла провайдера;
+  `act_status.Decider(state, ops, deps, dag, *, trust=None, journal=None)` — `(DeliveredRequest)
+  -> Outcome`; память — по полной идентичности заявки (B1-2); до вердикта steward — идентичность и
+  привязка (`act_identity`: продукт/воркстрим/ключ, пути узлов DAG, те же байты манифеста в
+  одобренном head, upstream-пины = прямым входам head; иначе `Rejected(REQUEST_BINDING)`, B1-1);
+  `Decider.legacy(pr, approved_by) -> Outcome` — admission старой доставки;
+  `act_status.LegacyProbe(state, ops, base_ref, decide_legacy)` — provenance старого одобрения
+  (B1-3);
+  `act_status.Statuses(*, dag, ws_id, history, node_path, text_of, blobs_of, decide, legacy)` —
+  `of(node) -> str`, `is_review(node) -> bool`;
+  `act_status.statuses_at_base(state, ops, dag, live, deps=None) -> Statuses`;
+  `act_status.LivePolicy(mode, trust, journal, activation, policy)` (`mode` —
+  `PRE_MIGRATION` | `merge` | `review`), `act_status.live_policy(state, deps) -> LivePolicy |
+  Unavailable`, `act_status.mode_probe(state, deps=None)` — единая точка «режим продукта сейчас»;
+  `act_status.gate_run(state, ops, dag, *, candidate, out, deps=None) -> tuple[str, str | None] | Unavailable`;
   `act_status.pr_for_merge(ops, slug, merge_commit) -> int | Unavailable`;
-  `node_approval.DEBT_REVIEW_V1 = "review_v1"`.
+  `act_status.REQUEST_BINDING`; `node_approval.DEBT_REVIEW_V1 = "review_v1"`.
 
-Правила статуса (§9.1 п. 0a–4; Р-9): событие узла — последнее по first-parent базы (доставленная
-заявка с манифестом, запись остановки; supersede — более поздняя заявка). Нет события `review/v1`
-— старый предикат (`node_debt`, frontmatter). Есть: `generation_refusal` → остановка → вердикт
-доставки этой заявки (`delivery_verdict`, свидетельство `review_id`) → `envelope_refusal` по
-байтам **снимка** (self-hash узла и прямые входы `bundle_inputs.direct_blobs`, включая source-входы
-discovery) → каждый прямой upstream по DAG `approved` (рекурсивно, память на вызов);
-остановленный upstream — `not_approved:upstream_stopped:<A>`. Провайдер отвечает за снимок,
-который читает steward (§12 п. 3): S4 — байты рабочего дерева волны, S8 и гейт доставки — база.
+**Режим продукта сейчас** (§6.1, §10; ревизия b1, B1-5): `live_policy` — привязка обязательна
+(нет — `Unavailable`), режим — `act_trust.product_mode` по **истории** режима: записи не было
+никогда → `PRE_MIGRATION` (legacy-эпоха, старый путь); `merge` → старый путь; `review` → путь
+`review/v1`; удаление записи после первой, откат `review → merge`, недочитанная нужная история →
+`Unavailable` — стоп с причиной, не legacy. Все пути вне `act_*` (гейты S4/S8, `read_dag_state`,
+`_require_upstream_ready`, создание заявки, общий вход Task 13) спрашивают `mode_probe`. Следствие
+спеки, а не решение плана: на каждой машине, где исполняется путь узла или раннер, нужна привязка
+`/etc/df/trust.toml` (H2 п. 4) — иначе все эти пути останавливаются; порядок «H1–H2 до части B»
+уже в таблице «Порядок и зависимости».
 
-Канонический хеш DAG (Р-13): для узла, у которого в базе есть конверт или записи остановки, в
-манифест хеша добавляются строки `<node> approvals <blob>` по каждому такому файлу; у узлов без них
-величина не меняется (legacy-продукты не получают новой эпохи канонизации). Изменение допуска
-`review/v1` возможно только через байты `approvals/` (остановка, supersede, конверт) или байты
-upstream (уже в хеше через пины); прочие факторы (периметр, эпохи) ретроактивно законный акт не
-отменяют (Q1). Литерал спеки — «производный статус из проверенного конверта» — требует чтений
-форджи в четырёх местах вызова `_content_anchor` (вопрос к спеке С-3 в отчёте).
+**Правила статуса** (§9.1 п. 0a–4) — только для продукта в `review`: событие узла — последнее по
+first-parent базы (доставленная заявка с манифестом, запись остановки; supersede — более поздняя
+заявка). Есть событие: `generation_refusal` → остановка → идентичность и привязка заявки +
+вердикт её доставки (`Decider`) → `envelope_refusal` по байтам **снимка** → каждый прямой upstream
+`approved` (рекурсивно); остановленный upstream — `not_approved:upstream_stopped:<A>`. **Нет
+события** (§9.1 (а) п. 3, B1-3): frontmatter без долга (`node_debt`) — лишь предпосылка; одобрение
+даёт только `LegacyProbe`: последняя правка файла узла в first-parent базы — запись его нынешней
+подписи; её PR — finalize старой заявки (форма ветки из SSOT); candidate той же заявки смёржен
+этой учёткой в это время; доставка candidate проходит admission (`Decider.legacy`; до активации
+`ACT_MODE[P]` — `OLD_READER`, после — `Rejected(admission)`). Механизм цепочки — решение
+исполнителя плана Р-9 (правило — спека). Провайдер отвечает за снимок, который читает steward
+(§12 п. 3): S4 — байты рабочего дерева волны, S8 и гейт доставки — база.
+
+**Канонический хеш DAG — [ждёт решения владельца В-1]** (вопрос к спеке С-3). Спека §9.1 (а)
+п. 4: «в каноническую проекцию входит производный статус из проверенного конверта». Вариант по
+умолчанию (листинг ниже): в манифест хеша входят блобы **всех** файлов `approvals/` воркстрима —
+конверты, манифесты заявок (`requests/`), записи остановки; новое действующее поколение (новый
+манифест) меняет хеш даже при прежних байтах узла и прежнем конверте (B1-6); у продукта без
+`approvals/` величина прежняя. Вариант спеки буквально — проверенный статус `Statuses.of` в
+проекции: требует доверенного контекста во всех четырёх местах `_content_anchor` (+ чтения
+форджи на каждый §I5). Шаг Step 5 (часть `task_bridge`) исполняется после ответа владельца.
 
 - [ ] **Step 1: Write the failing tests**
 
 `tests/test_act_status.py`:
 
 ```python
-"""Статус узла review/v1 (§9.1; приёмка №17, 23, 25, 31; каскад, supersede)."""
+"""Статус узла review/v1 (§9.1; приёмка №17, 23, 25, 31; каскад, supersede; b1)."""
 
 from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 pytest.importorskip("steward")
 
-from governance import act_status  # noqa: E402
+from governance import act_context, act_status, bundle_inputs  # noqa: E402
 from governance.act_decision import Accepted, Rejected  # noqa: E402
 from governance.act_envelope import (  # noqa: E402
     DeliveredRequest,
@@ -8751,10 +9786,13 @@ from governance.act_request import (  # noqa: E402
     render_manifest,
 )
 from governance.act_time import Ambiguous, Unavailable  # noqa: E402
+from governance.facts import Fact, Outcome  # noqa: E402
 from governance.ops import RealOps  # noqa: E402
 
 WS = "ws-7"
+SLUG = "owner/p"
 DAG = (("10-requirements.md", ()), ("15-behaviour-spec.md", ("requirements",)))
+FILES = {"requirements": "10-requirements.md", "behaviour-spec": "15-behaviour-spec.md"}
 PIN = PolicyPin("owner/approval-policy", "main", "p" * 40, {"policy/modes.yaml": "0" * 64})
 
 
@@ -8762,12 +9800,11 @@ def node_text(name: str, body: str = "тело", status: str = "approval_pending
     return f"---\nspec_stage: {name}\nstatus: {status}\nversion: 2\n---\n{body}\n"
 
 
-FILES = {"requirements": "10-requirements.md", "behaviour-spec": "15-behaviour-spec.md"}
-
-
-def request(rid: str, nodes: dict[str, tuple[str, int]], pins=None) -> NodeRequest:
-    entries = {n: NodeEntry(f"spec/{FILES[n]}", h, g) for n, (h, g) in nodes.items()}
-    return NodeRequest(rid, WS, "owner/p", entries, pins or {n: {} for n in nodes}, PIN)
+def request(rid: str, nodes: dict[str, tuple[str, int]], pins=None, *,
+            path_of=None, product: str = SLUG) -> NodeRequest:
+    path_of = path_of or (lambda n: f"spec/{FILES[n]}")
+    entries = {n: NodeEntry(path_of(n), h, g) for n, (h, g) in nodes.items()}
+    return NodeRequest(rid, WS, product, entries, pins or {n: {} for n in nodes}, PIN)
 
 
 def envelope(event: DeliveredRequest, node: str, review_id: str = "11") -> str:
@@ -8790,12 +9827,13 @@ class Snapshot:
         return self.files.get(path)
 
 
-def statuses(history, snap: Snapshot, decide=None) -> act_status.Statuses:
+def statuses(history, snap: Snapshot, decide=None, legacy=None) -> act_status.Statuses:
     return act_status.Statuses(
         dag=DAG, ws_id=WS, history=history,
         node_path=lambda n: f"spec/{FILES[n]}",
         text_of=snap.text, blobs_of=lambda n: snap.blobs.get(n, {}),
         decide=decide or (lambda event: Accepted("m" * 40, "df-reviewer", "11", "alice")),
+        legacy=legacy or (lambda path, text: "approved"),
     )
 
 
@@ -8845,8 +9883,7 @@ def test_previous_generation_envelope_with_same_bytes_refused() -> None:
     (r1, r2), snap = both_approved()
     r3 = delivered("approve-3-1-1", "c" * 40, {"behaviour-spec": (H_BEH, 2)},
                    {"behaviour-spec": {"requirements": "blob-req"}})
-    st = statuses((r1, r2, r3), snap)
-    assert st.of("behaviour-spec").startswith("not_approved:")
+    assert statuses((r1, r2, r3), snap).of("behaviour-spec").startswith("not_approved:")
     snap.files[envelope_path(WS, "behaviour-spec")] = envelope(r3, "behaviour-spec")
     assert statuses((r1, r2, r3), snap).of("behaviour-spec") == "approved"
 
@@ -8866,7 +9903,6 @@ def test_stopped_upstream_with_unchanged_bytes_blocks_downstream() -> None:
 
 
 def test_cascade_by_pins_without_a_history_record() -> None:
-    """Upstream переодобрен с новыми байтами — пины B расходятся с базой."""
     history, snap = both_approved()
     snap.blobs["behaviour-spec"] = {"requirements": "blob-req-v2"}
     assert statuses(history, snap).of("behaviour-spec").startswith("not_approved:")
@@ -8890,8 +9926,9 @@ def test_history_unavailable_is_unavailable() -> None:
     assert statuses(Unavailable("git"), snap).of("requirements").startswith("unavailable:")
 
 
-def test_legacy_node_judged_by_frontmatter() -> None:
-    """Р-9: смешанный DAG — узел без события review/v1 судится старым предикатом."""
+def test_legacy_node_needs_provenance_not_frontmatter() -> None:
+    """B1-3 (§9.1 (а) п. 3): узел без события review/v1 с честным frontmatter
+    одобрен ТОЛЬКО если provenance+admission старого акта установлены."""
     r2 = delivered("approve-2-1-1", "b" * 40, {"behaviour-spec": (H_BEH, 1)},
                    {"behaviour-spec": {"requirements": "blob-req"}})
     legacy = node_text("requirements", status="approved").replace(
@@ -8899,9 +9936,19 @@ def test_legacy_node_judged_by_frontmatter() -> None:
         f"approved_content_hash: {H_REQ}\n")
     files = {"spec/10-requirements.md": legacy, "spec/15-behaviour-spec.md": BEH_TEXT,
              envelope_path(WS, "behaviour-spec"): envelope(r2, "behaviour-spec")}
-    st = statuses((r2,), Snapshot(files, {"behaviour-spec": {"requirements": "blob-req"}}))
-    assert st.of("requirements") == "approved"
-    assert st.of("behaviour-spec") == "approved"
+    snap = Snapshot(files, {"behaviour-spec": {"requirements": "blob-req"}})
+    refused = statuses((r2,), snap, legacy=lambda path, text: "not_approved:legacy_admission:x")
+    assert refused.of("requirements") == "not_approved:legacy_admission:x"
+    assert refused.of("behaviour-spec") == "not_approved:upstream:requirements"
+    proven = statuses((r2,), snap, legacy=lambda path, text: "approved")
+    assert (proven.of("requirements"), proven.of("behaviour-spec")) == ("approved", "approved")
+
+
+def test_legacy_probe_not_called_for_debt_node() -> None:
+    _, snap = both_approved()
+    snap.files["spec/10-requirements.md"] = node_text("requirements", status="draft")
+    st = statuses((), snap, legacy=lambda path, text: pytest.fail("provenance"))
+    assert st.of("requirements").startswith("not_approved:")
 
 
 def test_provider_twin_changed_candidate_bytes_not_approved() -> None:
@@ -8911,12 +9958,101 @@ def test_provider_twin_changed_candidate_bytes_not_approved() -> None:
     assert statuses(history, snap).of("behaviour-spec").startswith("not_approved:")
 
 
-# --- история базы (Р-8) — настоящий git ---------------------------------------------
+# --- исторический Decider: идентичность и привязка (B1-1, B1-2) ---------------------
+
+
+class _DecideOps:
+    """Ops для Decider: манифест в merge-коммите и в head, PR коммита."""
+
+    def __init__(self, delivered: dict[str, str], head: dict[str, str | None]) -> None:
+        self.delivered, self.head = delivered, head
+
+    def show_file(self, target, ref, path):
+        return self.delivered.get(path) if ref == "m" * 40 else None
+
+    def repo_file_fact(self, slug, sha, path):
+        text = self.head.get(path)
+        return Fact(Outcome.FOUND, text, "ok") if text else Fact(Outcome.ABSENT, None, "нет")
+
+    def prs_containing_commit(self, slug, sha):
+        return [{"number": 7, "state": "MERGED", "mergeCommit": sha}]
+
+
+def _decider(monkeypatch, ops) -> act_status.Decider:
+    state = SimpleNamespace(repo_slug=SLUG, ws_id=WS, target_dir="/t", bundle_dir="spec",
+                            run_id="r", base_ref="master")
+    monkeypatch.setattr(bundle_inputs, "direct_blobs",
+                        lambda state, ops, dag, node, ref: Fact(Outcome.FOUND, {}, "ok"))
+    monkeypatch.setattr(act_context, "delivery_verdict", lambda *a, **k: (
+        Accepted("m" * 40, "df-reviewer", "11", "alice"), None))
+    deps = act_status.Deps(readers=None, binding=object(), journal=None, creds=(), gh=None,
+                           now=None, sleep=None, settings=None)
+    return act_status.Decider(state, ops, deps, DAG, trust=object(), journal=None)
+
+
+def _event(req: NodeRequest) -> DeliveredRequest:
+    return DeliveredRequest("m" * 40, "h" * 40, req)
+
+
+def test_decider_accepts_bound_manifest(monkeypatch) -> None:
+    req = request("approve-1-0-1", {"requirements": (H_REQ, 1)})
+    text = render_manifest(req)
+    path = manifest_path(WS, req.request_id)
+    got = _decider(monkeypatch, _DecideOps({path: text}, {path: text}))(_event(req))
+    assert isinstance(got, Accepted)
+
+
+@pytest.mark.parametrize("case", ["absent_in_head", "changed_in_head", "foreign_path",
+                                  "foreign_product"])
+def test_decider_refuses_unbound_manifest(monkeypatch, case: str) -> None:
+    """B1-1: манифест только в merge-коммите / иной в head / путь узла не из DAG /
+    чужой продукт — установленный отказ через исторический Decider."""
+    kw = {"foreign_path": {"path_of": lambda n: "elsewhere/x.md"},
+          "foreign_product": {"product": "owner/other"}}.get(case, {})
+    req = request("approve-1-0-1", {"requirements": (H_REQ, 1)}, **kw)
+    text = render_manifest(req)
+    path = manifest_path(WS, req.request_id)
+    head = {"absent_in_head": {path: None}, "changed_in_head": {path: text + "# x\n"}}.get(
+        case, {path: text})
+    got = _decider(monkeypatch, _DecideOps({path: text}, head))(_event(req))
+    assert isinstance(got, Rejected) and got.code == act_status.REQUEST_BINDING
+
+
+@pytest.mark.parametrize("order", [(0, 1), (1, 0)])
+def test_decider_memo_is_per_request_not_per_commit(monkeypatch, order) -> None:
+    """B1-2: два манифеста одного merge-коммита — вердикт каждого свой."""
+    good = request("approve-1-0-1", {"requirements": (H_REQ, 1)})
+    bad = request("approve-1-0-2", {"requirements": (H_REQ, 2)},
+                  path_of=lambda n: "elsewhere/x.md")
+    texts = {manifest_path(WS, r.request_id): render_manifest(r) for r in (good, bad)}
+    decider = _decider(monkeypatch, _DecideOps(texts, texts))
+    events = [_event(good), _event(bad)]
+    got = {events[i].request.request_id: decider(events[i]) for i in order}
+    assert isinstance(got["approve-1-0-1"], Accepted)
+    assert isinstance(got["approve-1-0-2"], Rejected)
+
+
+# --- история базы (merge и squash, B1-9) — настоящий git ----------------------------
 
 
 def _git(repo: Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(repo), *args], check=True,
                           capture_output=True, text=True).stdout.strip()
+
+
+class GitOps(RealOps):
+    """Настоящий git + форджа стенда: PR по merge-коммиту и его голова."""
+
+    def __init__(self, prs: dict[str, tuple[int, str]]) -> None:
+        self.prs = prs  # merge-коммит → (номер PR, голова)
+
+    def prs_containing_commit(self, slug, sha):
+        hit = self.prs.get(sha)
+        return [] if hit is None else [{"number": hit[0], "state": "MERGED", "mergeCommit": sha}]
+
+    def pr_facts(self, slug, pr):
+        head = next(h for n, h in self.prs.values() if n == pr)
+        return {"headRefOid": head}
 
 
 @pytest.fixture()
@@ -8931,46 +10067,72 @@ def repo(tmp_path: Path) -> Path:
     return r
 
 
-def _merge_branch(repo: Path, branch: str, files: dict[str, str]) -> str:
+def _state(repo: Path) -> SimpleNamespace:
+    return SimpleNamespace(repo_slug=SLUG, ws_id=WS, target_dir=str(repo))
+
+
+def _branch(repo: Path, branch: str, files: dict[str, str]) -> str:
     _git(repo, "switch", "-qc", branch)
     for path, text in files.items():
         (repo / path).parent.mkdir(parents=True, exist_ok=True)
         (repo / path).write_text(text)
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", branch)
+    head = _git(repo, "rev-parse", "HEAD")
     _git(repo, "switch", "-q", "master")
+    return head
+
+
+def _merge(repo: Path, branch: str) -> str:
     _git(repo, "merge", "-q", "--no-ff", branch, "-m", f"Merge {branch}")
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def _squash(repo: Path, branch: str) -> str:
+    _git(repo, "merge", "-q", "--squash", branch)
+    _git(repo, "commit", "-qm", f"{branch} (squash)")
     return _git(repo, "rev-parse", "HEAD")
 
 
 def test_history_from_first_parent(repo: Path) -> None:
     req = request("approve-1-0-1", {"requirements": (H_REQ, 1)})
-    m1 = _merge_branch(repo, "cand", {manifest_path(WS, req.request_id): render_manifest(req)})
-    head = _git(repo, "rev-parse", "cand")
-    _merge_branch(repo, "final", {envelope_path(WS, "requirements"): "ignored: true\n"})
+    head = _branch(repo, "cand", {manifest_path(WS, req.request_id): render_manifest(req)})
+    m1 = _merge(repo, "cand")
+    _branch(repo, "final", {envelope_path(WS, "requirements"): "ignored: true\n"})
+    _merge(repo, "final")
     stop = StopRecord("requirements", 1, "r")
-    m3 = _merge_branch(repo, "stop", {stop_path(WS, "requirements", 1): render_stop(stop)})
-    got = act_status.load_history(RealOps(), str(repo), "master", WS)
+    _branch(repo, "stop", {stop_path(WS, "requirements", 1): render_stop(stop)})
+    m3 = _merge(repo, "stop")
+    got = act_status.load_history(GitOps({m1: (7, head)}), _state(repo), "master")
     assert got == (DeliveredRequest(m1, head, req), DeliveredStop(m3, stop))
+
+
+def test_history_supports_squash_delivery(repo: Path) -> None:
+    """B1-9: голова одобренного коммита — из фактов PR, второй родитель не нужен."""
+    req = request("approve-1-0-1", {"requirements": (H_REQ, 1)})
+    head = _branch(repo, "cand", {manifest_path(WS, req.request_id): render_manifest(req)})
+    sq = _squash(repo, "cand")
+    got = act_status.load_history(GitOps({sq: (7, head)}), _state(repo), "master")
+    assert got == (DeliveredRequest(sq, head, req),)
+
+
+def test_history_manifest_commit_without_pr_unavailable(repo: Path) -> None:
+    req = request("approve-1-0-1", {"requirements": (H_REQ, 1)})
+    _branch(repo, "cand", {manifest_path(WS, req.request_id): render_manifest(req)})
+    _squash(repo, "cand")
+    assert isinstance(act_status.load_history(GitOps({}), _state(repo), "master"),
+                      Unavailable)
 
 
 def test_manifest_edited_after_delivery_unavailable(repo: Path) -> None:
     req = request("approve-1-0-1", {"requirements": (H_REQ, 1)})
     path = manifest_path(WS, req.request_id)
-    _merge_branch(repo, "cand", {path: render_manifest(req)})
+    head = _branch(repo, "cand", {path: render_manifest(req)})
+    m1 = _merge(repo, "cand")
     (repo / path).write_text(render_manifest(req) + "# x\n")
     _git(repo, "commit", "-qam", "edit")
-    assert isinstance(act_status.load_history(RealOps(), str(repo), "master", WS), Unavailable)
-
-
-def test_manifest_added_without_merge_commit_unavailable(repo: Path) -> None:
-    req = request("approve-1-0-1", {"requirements": (H_REQ, 1)})
-    path = repo / manifest_path(WS, req.request_id)
-    path.parent.mkdir(parents=True)
-    path.write_text(render_manifest(req))
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-qm", "squash")
-    assert isinstance(act_status.load_history(RealOps(), str(repo), "master", WS), Unavailable)
+    assert isinstance(act_status.load_history(GitOps({m1: (7, head)}), _state(repo), "master"),
+                      Unavailable)
 
 
 def test_pr_for_merge_needs_exactly_one() -> None:
@@ -8996,14 +10158,146 @@ def test_config_home_resolution() -> None:
     assert config_home({}) == Path.home() / ".config"
 ```
 
-`tests/test_act_gate.py` (режим гейтов и файл провайдера; сквозная проверка формы файла живым
-CLI steward):
+`tests/test_act_legacy.py`:
 
 ```python
-"""Режим gate-check S4/S8 и провайдер статуса узла (О4, О14, §12 п. 2–3; Р-10)."""
+"""Provenance старого одобрения: отрицательные двойники (§9.1 (а) п. 3; ревизия b1, B1-3)."""
 
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+pytest.importorskip("steward")
+
+from governance import act_status  # noqa: E402
+from governance import approval_branches as ab  # noqa: E402
+from governance.act_check import LegacyAccepted  # noqa: E402
+from governance.act_decision import Rejected  # noqa: E402
+from governance.brief_facts import BriefPrFacts  # noqa: E402
+from governance.facts import Fact, Outcome  # noqa: E402
+from governance.ops import RealOps  # noqa: E402
+
+NODE = "spec/10-requirements.md"
+CAND = ab.candidate_branch("ws-7", 1, 0, 1)
+FINAL = ab.finalize_branch("ws-7", 1, 0, 1)
+AT = "2026-09-10T08:00:00Z"
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def _text(status: str, by: str = "", at: str = "") -> str:
+    return (f"---\nspec_stage: requirements\nstatus: {status}\nversion: 2\n"
+            f"approved_by: '{by}'\napproved_at: '{at}'\n---\nтело\n")
+
+
+class Ops(RealOps):
+    """git настоящий; форджа — PR по merge-коммиту, ветка PR, candidate по ветке."""
+
+    def __init__(self, signed_by_pr: dict[str, int], branches: dict[int, str],
+                 candidate: dict | None) -> None:
+        self.signed_by_pr, self.branches, self.candidate = signed_by_pr, branches, candidate
+
+    def prs_containing_commit(self, slug, sha):
+        pr = self.signed_by_pr.get(sha)
+        return [] if pr is None else [{"number": pr, "state": "MERGED", "mergeCommit": sha}]
+
+    def brief_pr_fact(self, slug, pr):
+        return Fact(Outcome.FOUND, BriefPrFacts(pr, "MERGED", "master", self.branches[pr],
+                                                "h" * 40, (), None, None, None), "ok")
+
+    def find_pr(self, slug, branch, *, any_state=False):
+        return 5 if self.candidate is not None and branch == CAND else None
+
+    def pr_facts(self, slug, pr):
+        return dict(self.candidate or {})
+
+
+@pytest.fixture()
+def world(tmp_path: Path):
+    r = tmp_path / "p"
+    subprocess.run(["git", "init", "-q", "-b", "master", str(r)], check=True)
+    _git(r, "config", "user.email", "t@e.st")
+    _git(r, "config", "user.name", "t")
+    (r / "spec").mkdir()
+    (r / NODE).write_text(_text("draft"))
+    _git(r, "add", "-A")
+    _git(r, "commit", "-qm", "seed")
+    _git(r, "switch", "-qc", FINAL)
+    (r / NODE).write_text(_text("approved", "alice", AT))
+    _git(r, "commit", "-qam", "envelope")
+    _git(r, "switch", "-q", "master")
+    _git(r, "merge", "-q", "--no-ff", FINAL, "-m", "Merge finalize")
+    return r, _git(r, "rev-parse", "HEAD")
+
+
+def probe(repo: Path, ops: Ops, verdict) -> act_status.LegacyProbe:
+    state = SimpleNamespace(repo_slug="owner/p", ws_id="ws-7", target_dir=str(repo))
+    return act_status.LegacyProbe(state, ops, "master", lambda pr, by: verdict)
+
+
+CANDIDATE = {"state": "MERGED", "mergedBy": {"login": "alice"}, "mergedAt": AT}
+
+
+def test_proven_legacy_act_before_activation_is_approved(world) -> None:
+    repo, signed = world
+    ops = Ops({signed: 6}, {6: FINAL}, CANDIDATE)
+    assert probe(repo, ops, LegacyAccepted("alice"))(NODE, _text("approved", "alice", AT)) \
+        == "approved"
+
+
+def test_candidate_delivered_after_activation_refused(world) -> None:
+    """Заявка без манифеста, доставленная после ACT_MODE=review, — отказ admission."""
+    repo, signed = world
+    ops = Ops({signed: 6}, {6: FINAL}, CANDIDATE)
+    got = probe(repo, ops, Rejected("admission"))(NODE, _text("approved", "alice", AT))
+    assert got == "not_approved:legacy_admission:admission"
+
+
+def test_signature_without_finalize_pr_refused(world) -> None:
+    repo, signed = world
+    ops = Ops({signed: 6}, {6: "feat/forged"}, CANDIDATE)
+    got = probe(repo, ops, LegacyAccepted("alice"))(NODE, _text("approved", "alice", AT))
+    assert got.startswith("not_approved:legacy_provenance")
+
+
+def test_signature_not_through_pr_refused(world) -> None:
+    repo, _signed = world
+    ops = Ops({}, {}, CANDIDATE)
+    got = probe(repo, ops, LegacyAccepted("alice"))(NODE, _text("approved", "alice", AT))
+    assert got.startswith("not_approved:legacy_provenance")
+
+
+@pytest.mark.parametrize("candidate", [None, {**CANDIDATE, "mergedBy": {"login": "bob"}},
+                                       {**CANDIDATE, "state": "CLOSED"}])
+def test_candidate_absent_or_not_matching_signature(world, candidate) -> None:
+    repo, signed = world
+    ops = Ops({signed: 6}, {6: FINAL}, candidate)
+    got = probe(repo, ops, LegacyAccepted("alice"))(NODE, _text("approved", "alice", AT))
+    assert got.startswith("not_approved:legacy_provenance")
+
+
+def test_frontmatter_signature_differs_from_last_edit(world) -> None:
+    repo, signed = world
+    ops = Ops({signed: 6}, {6: FINAL}, CANDIDATE)
+    got = probe(repo, ops, LegacyAccepted("bob"))(NODE, _text("approved", "bob", AT))
+    assert got.startswith("not_approved:legacy_provenance")
+```
+
+`tests/test_act_gate.py`:
+
+```python
+"""Режим gate-check S4/S8 и провайдер статуса узла (О4, О14, §12 п. 2–3; Р-10; b1)."""
+
+from __future__ import annotations
+
+import ast
 import json
 import subprocess
 from pathlib import Path
@@ -9032,23 +10326,52 @@ def _deps(binding) -> act_status.Deps:
                            now=None, sleep=None, settings=None)
 
 
-def test_no_binding_is_legacy_without_reads(tmp_path: Path) -> None:
+def _live(mode: str) -> act_status.LivePolicy:
+    return act_status.LivePolicy(mode, "trust", "j", None, None)
+
+
+def _real_probe(monkeypatch) -> None:
+    """Снять подмену `tests/conftest.py`: проверяется настоящий `live_policy`."""
+    monkeypatch.setattr(act_status, "mode_probe",
+                        lambda state, deps=None: act_status.live_policy(state, deps))
+
+
+def test_no_binding_is_unavailable_not_legacy(tmp_path: Path, monkeypatch) -> None:
+    """B1-5: потеря привязки — не «до миграции»: стоп, файл провайдера не пишется."""
+    _real_probe(monkeypatch)
     got = act_status.gate_run(_State(), object(), (), candidate=True,
                               out=tmp_path / "ns.json", deps=_deps(None))
-    assert got == ("legacy", None) and not (tmp_path / "ns.json").exists()
+    assert isinstance(got, Unavailable) and not (tmp_path / "ns.json").exists()
 
 
-def test_unreadable_binding_stops(tmp_path: Path) -> None:
+def test_unreadable_binding_stops(tmp_path: Path, monkeypatch) -> None:
+    _real_probe(monkeypatch)
     got = act_status.gate_run(_State(), object(), (), candidate=True,
                               out=tmp_path / "ns.json", deps=_deps(Unavailable("perm")))
     assert isinstance(got, Unavailable)
 
 
+@pytest.mark.parametrize("mode", [act_trust.PRE_MIGRATION, "merge"])
+def test_pre_migration_and_merge_are_legacy(tmp_path: Path, monkeypatch, mode: str) -> None:
+    monkeypatch.setattr(act_status, "mode_probe", lambda state, deps=None: _live(mode))
+    got = act_status.gate_run(_State(), object(), (), candidate=False,
+                              out=tmp_path / "ns.json", deps=_deps(object()))
+    assert got == ("legacy", None)
+
+
+def test_mode_unavailable_stops(tmp_path: Path, monkeypatch) -> None:
+    """Удалённая запись / откат review → merge — стоп шага, не legacy (B1-5)."""
+    monkeypatch.setattr(act_status, "mode_probe",
+                        lambda state, deps=None: Unavailable("обратное переключение"))
+    got = act_status.gate_run(_State(), object(), (), candidate=True,
+                              out=tmp_path / "ns.json", deps=_deps(object()))
+    assert isinstance(got, Unavailable)
+
+
 def test_review_mode_writes_provider_bound_to_digest(tmp_path: Path, monkeypatch) -> None:
-    live = act_status.LivePolicy("review", "trust", "j", None, None)
-    monkeypatch.setattr(act_status, "live_policy", lambda state, deps: live)
+    monkeypatch.setattr(act_status, "mode_probe", lambda state, deps=None: _live("review"))
     monkeypatch.setattr(act_status, "_gate_statuses",
-                        lambda state, ops, dag, deps, trust, journal: {"requirements": "approved"})
+                        lambda state, ops, dag, deps, live: {"requirements": "approved"})
 
     class _Ops:
         def gate_snapshot_digest(self, target_dir, bundle_dir, *, candidate):
@@ -9056,23 +10379,11 @@ def test_review_mode_writes_provider_bound_to_digest(tmp_path: Path, monkeypatch
             return 0, "sha256:" + "a" * 64
 
     out = tmp_path / "ns.json"
-    binding = act_trust.parse_binding(
-        'schema = "df/trust/v1"\nhost = "github.com"\ndf_trust_repository_id = 1\n'
-        'df_trust_full_name = "o/t"\ndf_trust_branch = "main"\n'
-        'approval_policy_repository_id = 2\ntransport = "public"\n')
     got = act_status.gate_run(_State(), _Ops(), (), candidate=True, out=out,
-                              deps=_deps(binding))
+                              deps=_deps(object()))
     assert got == ("review", str(out))
     assert json.loads(out.read_text()) == {
         "snapshot_digest": "sha256:" + "a" * 64, "nodes": {"requirements": "approved"}}
-
-
-def test_merge_mode_product_is_legacy(tmp_path: Path, monkeypatch) -> None:
-    live = act_status.LivePolicy("merge", None, None, None, None)
-    monkeypatch.setattr(act_status, "live_policy", lambda state, deps: live)
-    got = act_status.gate_run(_State(), object(), (), candidate=False,
-                              out=tmp_path / "ns.json", deps=_deps(object()))
-    assert got == ("legacy", None)
 
 
 def test_cli_accepts_provider_file_and_reports_not_approved(tmp_path: Path) -> None:
@@ -9098,30 +10409,89 @@ def test_cli_accepts_provider_file_and_reports_not_approved(tmp_path: Path) -> N
     assert "GC-ACT-NOT-APPROVED" in with_provider.stdout + with_provider.stderr
     without = subprocess.run(run, capture_output=True, text=True, check=False)
     assert "GC-ACT-PROVIDER-MISSING" in without.stdout + without.stderr
+
+
+NEW_OPS = {"first_parent_changes", "pr_body_fact", "gate_snapshot_digest"}
+HISTORY = {"statuses_at_base", "load_history", "Decider"}
+
+
+def _surface_offenders(root: Path) -> list[str]:
+    """Новые методы `Ops` части B — только из `governance/act_*`; чтение истории вне
+    `act_*` — только в функции, сначала спросившей `mode_probe`."""
+    offenders: list[str] = []
+    for path in root.glob("governance/**/*.py"):
+        if path.name.startswith("act_"):
+            continue
+        rel = path.relative_to(root)
+        for fn in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(fn, ast.FunctionDef):
+                continue
+            called = {c.func.attr if isinstance(c.func, ast.Attribute) else
+                      getattr(c.func, "id", "") for c in ast.walk(fn) if isinstance(c, ast.Call)}
+            if called & NEW_OPS:
+                offenders.append(f"{rel}:{fn.lineno} {fn.name}: {sorted(called & NEW_OPS)}")
+            if called & HISTORY and "mode_probe" not in called:
+                offenders.append(f"{rel}:{fn.lineno} {fn.name}: история без mode_probe")
+    return offenders
+
+
+def test_new_ops_surface_reached_only_behind_mode_probe() -> None:
+    """B1-8 (класс B1-7): стабы `Ops` старых тестов не знают новых методов — значит,
+    их не должен звать ни один путь, который тесты вне `act_*` проходят с
+    `tests/conftest.py` (`mode_probe` → `PRE_MIGRATION`). Новый вызов вне `act_*`
+    или чтение истории в обход `mode_probe` падает здесь, а не `AttributeError` в
+    чужом тесте."""
+    assert _surface_offenders(ROOT) == []
 ```
 
-Дополнение `tests/test_governance_runner.py` (стенд раннера уже подменяет `Ops`):
+Дополнение `tests/test_governance_runner.py` (тот же стенд, что `test_gate_red_stops`):
 
 ```python
-def test_s4_stops_when_trust_root_unavailable(runner_world, monkeypatch) -> None:
+def test_s4_stops_when_act_mode_unset(tmp_path: Path, runs_root, monkeypatch) -> None:
+    """B1-5/B1-8: режим акта не установлен — стоп S4 с причиной, гейт steward не зовётся."""
     from governance import act_status
     from governance.act_time import Unavailable
 
     monkeypatch.setattr(act_status, "gate_run",
                         lambda *a, **k: Unavailable("df-trust: HTTP 403"))
-    state = runner_world.run_until("gate-candidate")
+    ops = FakeOps()
+    state = locked_runner.start(**_start_kwargs(tmp_path, "r-act-gate", ops))
     assert state.status == "stopped_gate"
-    findings = (runner_world.run_dir / "gate-findings.txt").read_text()
+    findings = (rs.run_dir("r-act-gate") / "gate-findings.txt").read_text(encoding="utf-8")
     assert "GC-ACT-UNAVAILABLE(devtools)" in findings and "HTTP 403" in findings
-    assert runner_world.ops.gate_modes == []  # гейт steward не вызывался
+    assert ops.gate_modes == []
 ```
 
-(`runner_world`, `run_until`, `run_dir` — имена стенда раннера; при расхождении исполнитель берёт
-фактические из `tests/test_governance_runner.py`, ожидания не меняются.)
+Дополнение `tests/test_governance_task_bridge.py` (вариант по умолчанию В-1):
+
+```python
+def test_canonical_hash_sees_new_generation_and_stops(tmp_path: Path) -> None:
+    """B1-6: новый манифест (поколение с теми же байтами узла и прежним конвертом) и
+    запись остановки меняют хеш; пустой/отсутствующий approvals/ — прежнее значение."""
+    dag = task_bridge._dag_for(None)
+    rel = "workstreams/ws-7/spec"
+    bundle = tmp_path / rel
+    bundle.mkdir(parents=True)
+    for fname, _ in dag:
+        (bundle / fname).write_text(f"---\nstatus: approved\n---\n{fname}\n")
+    before = task_bridge._canonical_dag_hash(str(tmp_path), rel, dag)
+    approvals = tmp_path / "workstreams/ws-7/approvals"
+    approvals.mkdir()
+    assert task_bridge._canonical_dag_hash(str(tmp_path), rel, dag) == before
+    (approvals / "requirements.yaml").write_text("envelope: r1\n")
+    with_envelope = task_bridge._canonical_dag_hash(str(tmp_path), rel, dag)
+    (approvals / "requests").mkdir()
+    (approvals / "requests" / "approve-3-1-1.yaml").write_text("act: review/v1\n")
+    with_new_generation = task_bridge._canonical_dag_hash(str(tmp_path), rel, dag)
+    assert len({before, with_envelope, with_new_generation}) == 3
+    (approvals / "stops").mkdir()
+    (approvals / "stops" / "requirements-g1.yaml").write_text("stop\n")
+    assert task_bridge._canonical_dag_hash(str(tmp_path), rel, dag) != with_new_generation
+```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `uv run --group governance pytest tests/test_act_status.py tests/test_act_gate.py -v`
+Run: `uv run --group governance pytest tests/test_act_status.py tests/test_act_legacy.py tests/test_act_gate.py -v`
 Expected: FAIL — `ImportError: cannot import name 'act_status' from 'governance'`.
 
 - [ ] **Step 3: Add the git primitive and `config_home`**
@@ -9142,7 +10512,7 @@ Expected: FAIL — `ImportError: cannot import name 'act_status' from 'governanc
         ПЕРВОГО родителя (`--diff-merges=first-parent`, без переименований).
 
         Без pathspec намеренно: упрощение истории по пути скрыло бы merge-коммит,
-        TREESAME второму родителю, — ровно доставку candidate (Р-8). `None` —
+        TREESAME второму родителю, — ровно доставку candidate. `None` —
         git не ответил (факт не установлен)."""
         done = subprocess.run(
             ["git", "-C", target_dir, "log", "--first-parent", "--reverse",
@@ -9179,6 +10549,21 @@ def config_home(env: Mapping[str, str]) -> Path:
 (`from collections.abc import Mapping` в импортах.) `node_approval.py` — после `DEBT_SELF_HASH`:
 `DEBT_REVIEW_V1 = "review_v1"`.
 
+`tests/conftest.py` — изоляция путей акта для тестов вне `act_*` (машина разработчика с
+настоящей привязкой не уводит их в сеть; продукт стенда — до миграции, §10 legacy-эпоха, тот же
+исход admission, что дал бы пустой журнал режима). Тесты `act_*` подменяют `mode_probe` сами:
+
+```python
+@pytest.fixture(autouse=True)
+def _act_isolation(monkeypatch: pytest.MonkeyPatch, tmp_path_factory) -> None:
+    from governance import act_status, act_trust
+
+    monkeypatch.setattr(act_trust, "BINDING_PATH",
+                        tmp_path_factory.getbasetemp() / "no-trust.toml")
+    pre = act_status.LivePolicy(act_trust.PRE_MIGRATION, None, None, None, None)
+    monkeypatch.setattr(act_status, "mode_probe", lambda state, deps=None: pre)
+```
+
 - [ ] **Step 4: Write `act_status`**
 
 ```python
@@ -9186,9 +10571,10 @@ def config_home(env: Mapping[str, str]) -> Path:
 
 Одобрение узла устанавливается историей first-parent базы (заявки и
 остановки), а не конвертом: конверт обязан совпасть с действующим событием.
-Узел без событий `review/v1` судится старым предикатом (Р-9). Ответ — в
-форме провайдера steward: `approved` | `not_approved:<reason>` |
-`unavailable:<reason>` (approval-facts v3 §7.2, О4).
+Узел без события `review/v1` в продукте под `ACT_MODE=review` судится старым
+предикатом ТОЛЬКО после установленного provenance старого акта и admission
+его доставки (§9.1 (а) п. 3; ревизия b1, B1-3). Ответ — в форме провайдера
+steward: `approved` | `not_approved:<reason>` | `unavailable:<reason>` (О4).
 """
 
 from __future__ import annotations
@@ -9202,9 +10588,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from governance import act_context, act_facts, act_trust, bundle_dag, bundle_inputs
+from governance import act_context, act_facts, act_trust, approval_branches, bundle_dag
+from governance import bundle_inputs
 from governance import node_approval as na
-from governance.act_decision import Accepted
+from governance.act_check import LegacyAccepted
+from governance.act_decision import Accepted, Rejected
 from governance.act_envelope import (
     DeliveredRequest,
     DeliveredStop,
@@ -9218,64 +10606,109 @@ from governance.act_envelope import (
     parse_stop,
     stop_path,
 )
-from governance.act_policy import mode_for
+from governance.act_identity import (
+    RequestIdentity,
+    head_manifest_refusal,
+    manifest_refusal,
+    paths_refusal,
+)
 from governance.act_projection import ProjectionError, self_hash_v
 from governance.act_request import ACT_REVIEW_V1, RequestError, manifest_path, parse_manifest
 from governance.act_settings import ActSettings, config_home, load_settings
 from governance.act_time import Ambiguous, Unavailable
 from governance.facts import Outcome as FactOutcome
+from governance.frontmatter import split_frontmatter
 from governance.ops import Ops
 from governance.run_state import RunState
 
 APPROVED = "approved"
+REQUEST_BINDING = "request_binding"
 Dag = tuple[tuple[str, tuple[str, ...]], ...]
+Rows = list[tuple[str, tuple[str, ...], tuple[tuple[str, str], ...]]]
+
+
+def _rel(state: RunState, fname: str) -> str:
+    return f"{state.bundle_dir}/{fname}"
+
+
+def _node_paths(state: RunState, dag: Dag) -> dict[str, str]:
+    return {bundle_dag.node_id(f): _rel(state, f) for f, _ in dag}
+
+
+def pr_for_merge(ops: Ops, slug: str, merge_commit: str) -> int | Unavailable:
+    """Единственный смёрженный PR, чей merge-коммит — `merge_commit` (merge и squash)."""
+    try:
+        prs = ops.prs_containing_commit(slug, merge_commit)
+    except RuntimeError as exc:
+        return Unavailable(f"PR merge-коммита {merge_commit[:12]}: {exc}")
+    found = [p["number"] for p in prs
+             if p.get("state") == "MERGED" and p.get("mergeCommit") == merge_commit]
+    if len(found) != 1:
+        return Unavailable(f"merge-коммит {merge_commit[:12]}: PR {found} (нужен ровно один)")
+    return int(found[0])
+
+
+def _pr_head(ops: Ops, state: RunState, pr: int) -> str | Unavailable:
+    try:
+        head = ops.pr_facts(state.repo_slug, pr).get("headRefOid")
+    except (RuntimeError, OSError, ValueError) as exc:
+        return Unavailable(f"голова PR #{pr}: {exc}")
+    if not isinstance(head, str) or len(head) != 40:
+        return Unavailable(f"голова PR #{pr} не названа")
+    if ops.rev_parse(state.target_dir, f"{head}^{{commit}}") is None:
+        ops.fetch_branch(state.target_dir, f"refs/pull/{pr}/head")  # squash: head вне базы
+    return head
 
 
 # --- история ------------------------------------------------------------------------
 
 
 def _event(
-    ops: Ops, target_dir: str, ws_id: str, commit: str, parents: tuple[str, ...],
-    status: str, path: str,
+    ops: Ops, state: RunState, commit: str, status: str, path: str
 ) -> DeliveredRequest | DeliveredStop | Unavailable | None:
-    requests_dir = f"workstreams/{ws_id}/approvals/requests/"
-    stops_dir = f"workstreams/{ws_id}/approvals/stops/"
+    requests_dir = f"workstreams/{state.ws_id}/approvals/requests/"
+    stops_dir = f"workstreams/{state.ws_id}/approvals/stops/"
     if not path.startswith((requests_dir, stops_dir)):
         return None  # конверты и прочее — не события истории
     where = f"{commit[:12]}:{path}"
     if status != "A":
         return Unavailable(f"{where}: запись истории изменена после доставки ({status})")
-    text = ops.show_file(target_dir, commit, path)
+    text = ops.show_file(state.target_dir, commit, path)
     if text is None:
         return Unavailable(f"{where}: не читается")
     if path.startswith(requests_dir):
-        if len(parents) != 2:
-            return Unavailable(f"{where}: заявка доставлена не merge-коммитом (Р-8)")
         try:
             req = parse_manifest(text)
         except RequestError as exc:
             return Unavailable(f"{where}: {exc}")
-        if req.ws_id != ws_id or manifest_path(req.ws_id, req.request_id) != path:
+        if req.ws_id != state.ws_id or manifest_path(req.ws_id, req.request_id) != path:
             return Unavailable(f"{where}: манифест лежит не по своему пути")
-        return DeliveredRequest(commit, parents[1], req)
+        # голова одобренного коммита — из фактов PR доставки (merge и squash, B1-9)
+        pr = pr_for_merge(ops, state.repo_slug, commit)
+        if isinstance(pr, Unavailable):
+            return pr
+        head = _pr_head(ops, state, pr)
+        if isinstance(head, Unavailable):
+            return head
+        return DeliveredRequest(commit, head, req)
     try:
         stop = parse_stop(text)
     except EnvelopeError as exc:
         return Unavailable(f"{where}: {exc}")
-    if stop_path(ws_id, stop.node, stop.generation) != path:
+    if stop_path(state.ws_id, stop.node, stop.generation) != path:
         return Unavailable(f"{where}: остановка лежит не по своему пути")
     return DeliveredStop(commit, stop)
 
 
-def load_history(ops: Ops, target_dir: str, base_ref: str, ws_id: str) -> History | Unavailable:
+def load_history(ops: Ops, state: RunState, base_ref: str) -> History | Unavailable:
     """Доставленные заявки и остановки по first-parent базы, старые первыми."""
-    rows = ops.first_parent_changes(target_dir, base_ref)
+    rows = ops.first_parent_changes(state.target_dir, base_ref)
     if rows is None:
         return Unavailable(f"история {base_ref}: first-parent не прочитан")
     events: list[DeliveredRequest | DeliveredStop] = []
-    for commit, parents, changes in rows:
+    for commit, _parents, changes in rows:
         for status, path in changes:
-            event = _event(ops, target_dir, ws_id, commit, parents, status, path)
+            event = _event(ops, state, commit, status, path)
             if isinstance(event, Unavailable):
                 return event
             if event is not None:
@@ -9315,6 +10748,7 @@ def real_deps(state: RunState, env: Mapping[str, str] | None = None) -> Deps:
             run_id=state.run_id,
             reread=lambda: act_trust.read_trust_snapshot(readers.anon, binding),
             env=env,
+            policy_repository_id=binding.approval_policy_repository_id,
         )
 
     binding = act_trust.load_binding()
@@ -9323,37 +10757,30 @@ def real_deps(state: RunState, env: Mapping[str, str] | None = None) -> Deps:
         binding=binding,
         journal=journal,
         creds=act_trust.credentials(env, agent_dir=agent, merge_dir=merge),
-        # без привязки путь акта не читает форджу (Р-1), и steward не нужен —
-        # прогон тестов без группы governance проходит старым путём
-        gh=act_facts.gh_transport(agent) if binding is not None else None,
+        gh=act_facts.gh_transport(agent) if isinstance(binding, act_trust.Binding) else None,
         now=lambda: datetime.now(UTC).replace(microsecond=0),
         sleep=time.sleep,
         settings=load_settings(config_home(env)),
     )
 
 
-def pr_for_merge(ops: Ops, slug: str, merge_commit: str) -> int | Unavailable:
-    """Единственный смёрженный PR, чей merge-коммит — `merge_commit`."""
-    try:
-        prs = ops.prs_containing_commit(slug, merge_commit)
-    except RuntimeError as exc:
-        return Unavailable(f"PR merge-коммита {merge_commit[:12]}: {exc}")
-    found = [p["number"] for p in prs
-             if p.get("state") == "MERGED" and p.get("mergeCommit") == merge_commit]
-    if len(found) != 1:
-        return Unavailable(f"merge-коммит {merge_commit[:12]}: PR {found} (нужен ровно один)")
-    return int(found[0])
-
-
 class Decider:
-    """Вердикт доставки заявки из истории; доверие грузится один раз."""
+    """Вердикт доставки заявки из истории; доверие грузится один раз.
 
-    def __init__(self, state: RunState, ops: Ops, deps: Deps, *,
+    Память — по полной идентичности заявки (`RequestIdentity` + merge-коммит),
+    не по коммиту: один коммит может доставить несколько манифестов (B1-2).
+    До вердикта steward — идентичность и привязка (B1-1): манифест называет эту
+    заявку этого воркстрима продукта прогона, его узлы и пути — из DAG прогона,
+    те же байты лежат в одобренном head, upstream-пины = прямым входам в head.
+    """
+
+    def __init__(self, state: RunState, ops: Ops, deps: Deps, dag: Dag, *,
                  trust: act_trust.Trust | None = None, journal: Any = None) -> None:
-        self.state, self.ops, self.deps = state, ops, deps
+        self.state, self.ops, self.deps, self.dag = state, ops, deps, dag
+        self.paths = _node_paths(state, dag)
         self._trust: act_trust.Trust | Unavailable | None = trust
         self._journal = journal
-        self._memo: dict[str, Any] = {}
+        self._memo: dict[tuple[str, ...], Any] = {}
 
     @property
     def journal(self) -> Any:
@@ -9365,7 +10792,7 @@ class Decider:
         if self._trust is None:
             binding = self.deps.binding
             if binding is None:
-                self._trust = Unavailable("в истории есть заявка review/v1, а привязки нет")
+                self._trust = Unavailable("нет привязки корня доверия (§6.1 п. 1)")
             elif isinstance(binding, Unavailable):
                 self._trust = binding
             else:
@@ -9391,9 +10818,45 @@ class Decider:
                 return Unavailable(str(exc))
         return hashes
 
+    def _binding(self, event: DeliveredRequest, ident: RequestIdentity) -> Any:
+        """`Rejected(REQUEST_BINDING)` — установленное несовпадение; `Unavailable`; `None`."""
+        req = event.request
+        refusal = manifest_refusal(req, ident) or paths_refusal(req, self.paths)
+        if refusal is not None:
+            return Rejected(REQUEST_BINDING, refusal)
+        delivered = self.ops.show_file(self.state.target_dir, event.merge_commit,
+                                       ident.manifest_path)
+        head = self.ops.repo_file_fact(self.state.repo_slug, event.head_sha,
+                                       ident.manifest_path)
+        if delivered is None or head.outcome is FactOutcome.UNAVAILABLE:
+            return Unavailable(f"манифест {req.request_id}: не прочитан ({head.detail})")
+        refusal = head_manifest_refusal(
+            head.value if head.outcome is FactOutcome.FOUND else None, delivered)
+        if refusal is not None:
+            return Rejected(REQUEST_BINDING, refusal)
+        for node in req.nodes:
+            fact = bundle_inputs.direct_blobs(self.state, self.ops, self.dag, node,
+                                              event.head_sha)
+            if fact.outcome is FactOutcome.FORBIDDEN:
+                return Rejected(REQUEST_BINDING, f"прямые входы {node}: {fact.detail}")
+            if fact.outcome is not FactOutcome.FOUND or fact.value is None:
+                return Unavailable(f"прямые входы {node} в {event.head_sha[:12]}: {fact.detail}")
+            if dict(req.upstream_pins[node]) != fact.value:
+                return Rejected(REQUEST_BINDING, f"upstream-пины {node} ≠ прямым входам head")
+        return None
+
     def __call__(self, event: DeliveredRequest) -> Any:
-        if event.merge_commit in self._memo:
-            return self._memo[event.merge_commit]
+        ident = RequestIdentity(self.state.repo_slug, self.state.ws_id,
+                                event.request.request_id)
+        key = (*ident.memo_key, event.merge_commit)
+        if key not in self._memo:
+            self._memo[key] = self._decide(event, ident)
+        return self._memo[key]
+
+    def _decide(self, event: DeliveredRequest, ident: RequestIdentity) -> Any:
+        refused = self._binding(event, ident)
+        if refused is not None:
+            return refused
         trust = self.trust()
         if isinstance(trust, Unavailable):
             return trust
@@ -9409,9 +10872,101 @@ class Decider:
             legacy=None,
         )
         if delivery is not None and delivery.merge_commit != event.merge_commit:
-            outcome = Unavailable(f"PR #{pr} доставил {delivery.merge_commit}, не {event.merge_commit}")
-        self._memo[event.merge_commit] = outcome
+            return Unavailable(f"PR #{pr} доставил {delivery.merge_commit}, не {event.merge_commit}")
         return outcome
+
+    def legacy(self, pr: int, approved_by: str) -> Any:
+        """Admission старой доставки (`request=None`): до активации — `LegacyAccepted`."""
+        trust = self.trust()
+        if isinstance(trust, Unavailable):
+            return trust
+        outcome, _ = act_context.delivery_verdict(
+            self.deps.readers, trust, self._journal, product=self.state.repo_slug, pr=pr,
+            paths=[], request=None, request_act=None, head_sha="",
+            facts_transport=self.deps.gh, self_hashes=lambda: {},
+            legacy=lambda: LegacyAccepted(approved_by),
+        )
+        return outcome
+
+
+# --- provenance старого одобрения (§9.1 (а) п. 3) -----------------------------------
+
+
+class LegacyProbe:
+    """Узел без события `review/v1` в продукте `review`: доказать старый акт.
+
+    Цепочка (решение исполнителя плана Р-9, механизм; правило — спека):
+    последняя правка файла узла в first-parent базы обязана быть записью ЕГО
+    нынешней подписи (`approved_by`/`approved_at`); её PR — finalize старой
+    заявки (форма ветки из SSOT); candidate той же заявки смёржен именно этой
+    учёткой в это время; доставка candidate проходит admission (до активации
+    `ACT_MODE[P]` — `OLD_READER`). Чего-либо нет — «не одобрен», а не fallback.
+    """
+
+    def __init__(self, state: RunState, ops: Ops, base_ref: str,
+                 decide_legacy: Callable[[int, str], Any]) -> None:
+        self.state, self.ops, self.base_ref = state, ops, base_ref
+        self.decide_legacy = decide_legacy
+        self._rows: Rows | None = None
+
+    def _changes(self) -> Rows | None:
+        if self._rows is None:
+            self._rows = self.ops.first_parent_changes(self.state.target_dir, self.base_ref)
+        return self._rows
+
+    def __call__(self, node_path: str, text: str) -> str:
+        meta = split_frontmatter(text)[0]
+        by, at = meta.get("approved_by"), meta.get("approved_at")
+        rows = self._changes()
+        if rows is None:
+            return "unavailable:история базы не прочитана"
+        commit = next((c for c, _p, ch in reversed(rows)
+                       if any(path == node_path for _s, path in ch)), None)
+        if commit is None:
+            return "not_approved:legacy_provenance:в истории базы нет правки узла"
+        signed = self.ops.show_file(self.state.target_dir, commit, node_path)
+        signed_meta = split_frontmatter(signed)[0] if signed is not None else {}
+        if (signed_meta.get("status"), signed_meta.get("approved_by"),
+                signed_meta.get("approved_at")) != (na.STATUS_APPROVED, by, at):
+            return "not_approved:legacy_provenance:последняя правка узла — не его подпись"
+        return self._candidate(commit, str(by), str(at))
+
+    def _candidate(self, commit: str, by: str, at: str) -> str:
+        slug = self.state.repo_slug
+        try:
+            prs = self.ops.prs_containing_commit(slug, commit)
+        except RuntimeError as exc:
+            return f"unavailable:PR коммита подписи {commit[:12]}: {exc}"
+        merged = [p["number"] for p in prs
+                  if p.get("state") == "MERGED" and p.get("mergeCommit") == commit]
+        if not merged:
+            return "not_approved:legacy_provenance:подпись внесена не смёрженным PR"
+        if len(merged) > 1:
+            return f"unavailable:коммит подписи — merge-коммит PR {merged}"
+        final = int(merged[0])
+        facts = self.ops.brief_pr_fact(slug, final)
+        if facts.outcome is not FactOutcome.FOUND or facts.value is None:
+            return f"unavailable:PR подписи #{final}: {facts.detail}"
+        branch = facts.value.head_ref
+        if not approval_branches.is_finalize(branch):
+            return f"not_approved:legacy_provenance:подпись внесена не finalize-PR (#{final})"
+        candidate_branch = branch.removesuffix(approval_branches.finalize_suffix())
+        try:
+            candidate = self.ops.find_pr(slug, candidate_branch, any_state=True)
+            facts_c = self.ops.pr_facts(slug, candidate) if candidate is not None else {}
+        except RuntimeError as exc:
+            return f"unavailable:candidate {candidate_branch}: {exc}"
+        if candidate is None:
+            return f"not_approved:legacy_provenance:нет candidate-PR {candidate_branch}"
+        if (facts_c.get("state"), (facts_c.get("mergedBy") or {}).get("login"),
+                facts_c.get("mergedAt")) != ("MERGED", by, at):
+            return "not_approved:legacy_provenance:подпись ≠ мержу candidate"
+        verdict = self.decide_legacy(candidate, by)
+        if isinstance(verdict, LegacyAccepted):
+            return APPROVED
+        if isinstance(verdict, Rejected):
+            return f"not_approved:legacy_admission:{verdict.code}"
+        return f"unavailable:{getattr(verdict, 'reason', type(verdict).__name__)}"
 
 
 # --- статус узла --------------------------------------------------------------------
@@ -9425,11 +10980,11 @@ class Statuses:
         node_path: Callable[[str], str], text_of: Callable[[str], str | None],
         blobs_of: Callable[[str], Mapping[str, str] | Unavailable],
         decide: Callable[[DeliveredRequest], Any],
+        legacy: Callable[[str, str], str],
     ) -> None:
         self.dag, self.ws_id, self.history = dag, ws_id, history
-        self.node_path, self.text_of, self.blobs_of, self.decide = (
-            node_path, text_of, blobs_of, decide
-        )
+        self.node_path, self.text_of, self.blobs_of = node_path, text_of, blobs_of
+        self.decide, self.legacy = decide, legacy
         self._memo: dict[str, str] = {}
 
     def of(self, node: str) -> str:
@@ -9438,17 +10993,17 @@ class Statuses:
             self._memo[node] = self._compute(node)
         return self._memo[node]
 
+    def is_review(self, node: str) -> bool:
+        """У узла есть событие `review/v1` в истории (неизвестно — тоже да)."""
+        if isinstance(self.history, Unavailable):
+            return True
+        return current_event(self.history, node) is not None
+
     def _upstreams(self, node: str) -> tuple[str, ...]:
         for fname, ups in self.dag:
             if bundle_dag.node_id(fname) == node:
                 return ups
         return ()
-
-    def is_review(self, node: str) -> bool:
-        """У узла есть событие `review/v1` в истории (иначе — старый предикат, Р-9)."""
-        if isinstance(self.history, Unavailable):
-            return True  # неизвестно — не судить старым предикатом
-        return current_event(self.history, node) is not None
 
     def _stopped(self, node: str) -> bool:
         if isinstance(self.history, Unavailable):
@@ -9463,7 +11018,9 @@ class Statuses:
         if isinstance(pins, Unavailable):
             return f"unavailable:{pins.reason}"
         debt = na.node_debt(node, text, dict(pins))
-        return APPROVED if debt is None else f"not_approved:{debt.kind}"
+        if debt is not None:
+            return f"not_approved:{debt.kind}"
+        return self.legacy(self.node_path(node), text)
 
     def _compute(self, node: str) -> str:
         if isinstance(self.history, Unavailable):
@@ -9511,14 +11068,6 @@ class Statuses:
         return None if refusal is None else f"not_approved:{refusal}"
 
 
-def _rel(state: RunState, fname: str) -> str:
-    return f"{state.bundle_dir}/{fname}"
-
-
-def _node_paths(state: RunState, dag: Dag) -> dict[str, str]:
-    return {bundle_dag.node_id(f): _rel(state, f) for f, _ in dag}
-
-
 def _blobs(state: RunState, ops: Ops, dag: Dag, ref: str | None):
     def read(node: str) -> Mapping[str, str] | Unavailable:
         fact = bundle_inputs.direct_blobs(state, ops, dag, node, ref)
@@ -9529,45 +11078,53 @@ def _blobs(state: RunState, ops: Ops, dag: Dag, ref: str | None):
     return read
 
 
-def statuses_at_base(
-    state: RunState, ops: Ops, dag: Dag, deps: Deps | None = None
-) -> Statuses | None | Unavailable:
-    """Статусы по базе для гейта доставки и предложений (`read_dag_state`).
-
-    `None` — событий `review/v1` в истории нет: старый путь без изменений."""
+def _statuses(state: RunState, ops: Ops, dag: Dag, live: LivePolicy, deps: Deps, *,
+              text_of: Callable[[str], str | None], ref: str | None) -> Statuses:
     base = state.base_ref or "master"
-    history = load_history(ops, state.target_dir, base, state.ws_id)
-    if isinstance(history, Unavailable):
-        return history
-    if not history:
-        return None
+    decider = Decider(state, ops, deps, dag, trust=live.trust, journal=live.journal)
     paths = _node_paths(state, dag)
     return Statuses(
-        dag=dag, ws_id=state.ws_id, history=history, node_path=paths.__getitem__,
-        text_of=lambda path: ops.show_file(state.target_dir, base, path),
-        blobs_of=_blobs(state, ops, dag, base),
-        decide=Decider(state, ops, deps or real_deps(state)),
+        dag=dag, ws_id=state.ws_id, history=load_history(ops, state, base),
+        node_path=paths.__getitem__, text_of=text_of, blobs_of=_blobs(state, ops, dag, ref),
+        decide=decider, legacy=LegacyProbe(state, ops, base, decider.legacy),
     )
 
 
-# --- гейты steward (Р-10) -----------------------------------------------------------
+def statuses_at_base(state: RunState, ops: Ops, dag: Dag, live: LivePolicy,
+                     deps: Deps | None = None) -> Statuses:
+    """Статусы по базе для гейта доставки и предложений (`read_dag_state`).
+
+    Только для продукта в `review` (`live.mode`); иначе путь старый (§10)."""
+    base = state.base_ref or "master"
+    return _statuses(state, ops, dag, live, deps or real_deps(state),
+                     text_of=lambda path: ops.show_file(state.target_dir, base, path),
+                     ref=base)
+
+
+# --- режим продукта сейчас (§10; ревизия b1, B1-5) ----------------------------------
 
 
 @dataclass(frozen=True)
 class LivePolicy:
     """Текущая активация открытой эпохи, её набор и режим продукта (живое правило §6)."""
 
-    mode: str
-    trust: act_trust.Trust
+    mode: str  # act_trust.PRE_MIGRATION | "merge" | "review"
+    trust: Any  # act_trust.Trust
     journal: Any
     activation: Any  # act_check.ActivationView
     policy: Any  # act_policy.PolicySet
 
 
 def live_policy(state: RunState, deps: Deps) -> LivePolicy | Unavailable:
-    """`ACT_MODE[P]` на текущей активации открытой эпохи + доверие, на котором он прочитан.
+    """Режим продукта сейчас по истории режима (`act_trust.product_mode`).
 
-    `deps.binding` — уже `Binding` (вызывающий разобрал `None`/`Unavailable`)."""
+    Нет привязки, удалённая запись, откат `review → merge`, недочитанная
+    нужная история — `Unavailable`, а не legacy (§6.1, §10; ревизия b1)."""
+    if deps.binding is None:
+        return Unavailable("нет привязки корня доверия /etc/df/trust.toml (§6.1 п. 1) — "
+                           "режим продукта не установлен")
+    if isinstance(deps.binding, Unavailable):
+        return deps.binding
     journal = deps.journal(deps.readers, deps.binding)
     if isinstance(journal, Unavailable):
         return journal
@@ -9580,30 +11137,38 @@ def live_policy(state: RunState, deps: Deps) -> LivePolicy | Unavailable:
     if isinstance(loaded, Unavailable):
         return loaded
     ranges, sets = loaded
+    mode = act_trust.product_mode(trust, ranges, sets, state.repo_slug, now)
+    if isinstance(mode, Unavailable):
+        return mode
     current = act_trust.current_activation(trust, ranges)
     if isinstance(current, Unavailable):
         return current
     policy = sets.get(current.merge_commit, Unavailable("набор текущей активации не прочитан"))
     if isinstance(policy, Unavailable):
         return policy
-    return LivePolicy(mode_for(policy, state.repo_slug) or "", trust, journal, current, policy)
+    return LivePolicy(mode, trust, journal, current, policy)
 
 
-def _gate_statuses(state, ops, dag, deps, trust, journal) -> dict[str, str]:
-    base = state.base_ref or "master"
-    paths = _node_paths(state, dag)
-    history = load_history(ops, state.target_dir, base, state.ws_id)
+def mode_probe(state: RunState, deps: Deps | None = None) -> LivePolicy | Unavailable:
+    """Единая точка «режим продукта сейчас» для путей вне `act_*` (гейты, DAG, создание).
+
+    Тесты вне `act_*` подменяют её на `PRE_MIGRATION` (`tests/conftest.py`)."""
+    return live_policy(state, deps or real_deps(state))
+
+
+# --- гейты steward (Р-10) -----------------------------------------------------------
+
+
+def _gate_statuses(state: RunState, ops: Ops, dag: Dag, deps: Deps,
+                   live: LivePolicy) -> dict[str, str]:
     worktree = Path(state.target_dir)
 
     def text_of(path: str) -> str | None:
         file = worktree / path
         return file.read_text(encoding="utf-8") if file.is_file() else None
 
-    st = Statuses(
-        dag=dag, ws_id=state.ws_id, history=history, node_path=paths.__getitem__,
-        text_of=text_of, blobs_of=_blobs(state, ops, dag, None),
-        decide=Decider(state, ops, deps, trust=trust, journal=journal),
-    )
+    st = _statuses(state, ops, dag, live, deps, text_of=text_of, ref=None)
+    paths = _node_paths(state, dag)
     return {node: st.of(node) for node, path in paths.items() if (worktree / path).is_file()}
 
 
@@ -9611,21 +11176,16 @@ def gate_run(
     state: RunState, ops: Ops, dag: Dag, *, candidate: bool, out: Path,
     deps: Deps | None = None,
 ) -> tuple[str, str | None] | Unavailable:
-    """Режим `gate-check` (Р-10) и файл провайдера, привязанный к снимку (§12 п. 3)."""
-    deps = deps or real_deps(state)
-    if deps.binding is None:
-        return "legacy", None
-    if isinstance(deps.binding, Unavailable):
-        return deps.binding
-    live = live_policy(state, deps)
+    """Режим `gate-check` по режиму продукта (Р-10) и файл провайдера (§12 п. 3)."""
+    live = mode_probe(state, deps)
     if isinstance(live, Unavailable):
         return live
     if live.mode != "review":
-        return "legacy", None
+        return "legacy", None  # PRE_MIGRATION или merge — старый читатель (§10)
     rc, digest = ops.gate_snapshot_digest(state.target_dir, state.bundle_dir, candidate=candidate)
     if rc != 0 or not digest.startswith("sha256:"):
         return Unavailable(f"gate-check --print-snapshot-digest: код {rc}: {digest}")
-    nodes = _gate_statuses(state, ops, dag, deps, live.trust, live.journal)
+    nodes = _gate_statuses(state, ops, dag, deps or real_deps(state), live)
     out.write_text(
         json.dumps({"snapshot_digest": digest, "nodes": nodes}, sort_keys=True),
         encoding="utf-8",
@@ -9640,9 +11200,11 @@ def gate_run(
 ```python
     from governance import act_status
 
-    statuses = act_status.statuses_at_base(state, ops, dag)
-    if isinstance(statuses, Unavailable):
-        return DagState(None, unresolved=statuses.reason)
+    live = act_status.mode_probe(state)
+    if isinstance(live, Unavailable):
+        return DagState(None, unresolved=f"режим акта продукта: {live.reason}")
+    statuses = (act_status.statuses_at_base(state, ops, dag, live)
+                if live.mode == "review" else None)
 ```
 
 и в цикле вместо безусловного `na.node_debt(...)`:
@@ -9659,7 +11221,7 @@ def gate_run(
 
 ```python
 def _review_debt(node: str, text: str, verdict: str) -> na.NodeDebt:
-    """Долг узла `review/v1`: причина — ответ статуса, процедура — новая заявка."""
+    """Долг узла в продукте `review`: причина — ответ статуса, процедура — новая заявка."""
     status = split_frontmatter(text)[0].get("status")
     return na.NodeDebt(
         node, status, na.DEBT_REVIEW_V1, verdict.removeprefix("not_approved:"),
@@ -9667,9 +11229,17 @@ def _review_debt(node: str, text: str, verdict: str) -> na.NodeDebt:
     )
 ```
 
-`_require_upstream_ready` — тот же приём (один `statuses_at_base` на вызов, ответ `approved` —
-готов; `unavailable:*` — `_unresolved`; иное — прежний `RuntimeError` с `_review_debt(...).reason`).
-`from governance.act_time import Unavailable` — в импорты модуля.
+`_require_upstream_ready` — тот же приём: один `mode_probe`; `Unavailable` — `_unresolved`;
+`review` — `statuses_at_base(...).of(up)`: `approved` — готов, `unavailable:*` — `_unresolved`,
+иное — прежний `RuntimeError` с `_review_debt(...).reason`; `PRE_MIGRATION`/`merge` — прежний
+`node_debt`. `from governance.act_time import Unavailable` — в импорты модуля. В продукте до
+миграции и в `merge` история не читается (`first_parent_changes` не зовётся) — стабы `Ops` старых
+тестов (`tests/test_governance_task_bridge.py:366` `_StubOps` и наследники) не меняются; это
+проверяет полный прогон Step 6, а класс целиком — статический обход
+`tests/test_act_gate.py::test_new_ops_surface_reached_only_behind_mode_probe` (ревизия b1,
+B1-8 как класс B1-7): новые методы `Ops` части B (`first_parent_changes`, `pr_body_fact`,
+`gate_snapshot_digest`) зовутся только из `governance/act_*`, а `statuses_at_base`/
+`load_history`/`Decider` вне `act_*` — только в функциях, спросивших `mode_probe`.
 
 `governance/runner.py`, `_step_gate` — вместо `act_mode="legacy"` из Task 11:
 
@@ -9699,39 +11269,37 @@ def _review_debt(node: str, text: str, verdict: str) -> na.NodeDebt:
 `_step_s8` — то же с `candidate=False`, файлом `node-status-s8.json`; недоступность — `print`
 причины и `return False` (шаг resumable, как прочие стопы S8).
 
-`governance/task_bridge.py`, `_canonical_dag_hash` — после цикла по узлам, до source-путей:
+`governance/task_bridge.py`, `_canonical_dag_hash` — **[ждёт решения владельца В-1]**, вариант по
+умолчанию — после цикла по узлам, до source-путей:
 
 ```python
     approvals = base.parent / "approvals"
-    for fname, _ in dag:
-        node_id = _node_id(fname)
-        files = [approvals / f"{node_id}.yaml", *sorted((approvals / "stops").glob(f"{node_id}-g*.yaml"))]
-        for path in files:
-            if path.is_file():
-                rel = path.relative_to(approvals).as_posix()
-                lines.append(f"{node_id} approvals {rel} {blob_sha1_bytes(path.read_bytes())}")
+    if approvals.is_dir():
+        for path in sorted(p for p in approvals.rglob("*") if p.is_file()):
+            rel = path.relative_to(approvals).as_posix()
+            lines.append(f"approvals {rel} {blob_sha1_bytes(path.read_bytes())}")
 ```
 
-(Р-13; докстринг `_canonical_dag_hash` дополняется абзацем «`review/v1`: байты конверта и записей
-остановки узла входят в хеш…»; тест — `test_canonical_hash_sees_stop_record`: та же база + файл
-`approvals/stops/<node>-g1.yaml` → другой хеш; база без `approvals/` → прежнее значение,
-сверенное с хешем до правки.)
+(докстринг `_canonical_dag_hash` дополняется абзацем «`review/v1`: байты всех файлов `approvals/`
+— конверты, манифесты, остановки — входят в хеш (В-1)…». При варианте спеки буквально —
+`_content_anchor` получает статусы `Statuses.of` и подставляет их вместо `status` узлов
+`review/v1`; тест тот же, ожидания те же.)
 
 - [ ] **Step 6: Run tests to verify they pass**
 
-Run: `uv run --group governance pytest tests/test_act_status.py tests/test_act_gate.py tests/test_governance_runner.py tests/test_governance_approve_node.py tests/test_governance_node_approval.py tests/test_governance_task_bridge.py -v`
-Expected: PASS (существующие тесты `approve_node`, раннера и моста — без правок: история без
-событий `review/v1` → `statuses_at_base` даёт `None`, путь прежний; в стенде раннера `gate_run`
-без привязки → `legacy`). Полный набор в обоих режимах, ruff, pyrefly.
+Run: `uv run --group governance pytest tests/test_act_status.py tests/test_act_legacy.py tests/test_act_gate.py tests/test_governance_runner.py tests/test_governance_approve_node.py tests/test_governance_node_approval.py tests/test_governance_task_bridge.py -v`
+Expected: PASS. Существующие тесты — без правок ожиданий: `tests/conftest.py` даёт продукт до
+миграции, старый путь не читает историю. Полный набор в обоих режимах (`uv run pytest -q`;
+`GOVERNANCE_REQUIRED=1 uv run --group governance pytest -q`), ruff, pyrefly.
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add governance/act_status.py governance/ops.py governance/act_settings.py \
   governance/node_approval.py governance/approve_node.py governance/runner.py \
-  governance/task_bridge.py tests/test_act_status.py tests/test_act_gate.py \
-  tests/test_governance_runner.py tests/test_governance_task_bridge.py
-git commit -m "feat(act): статус узла review/v1 из истории и конверта; провайдер gate-check, режим S4/S8, хеш DAG"
+  governance/task_bridge.py tests/conftest.py tests/test_act_status.py tests/test_act_legacy.py \
+  tests/test_act_gate.py tests/test_governance_runner.py tests/test_governance_task_bridge.py
+git commit -m "feat(act): статус узла review/v1 — история, provenance, провайдер gate-check, режим S4/S8, хеш DAG"
 ```
 
 ### Task 15: Агентская доставка candidate `review/v1` — предпроверка и граница секунды
@@ -9749,20 +11317,25 @@ git commit -m "feat(act): статус узла review/v1 из истории и
 
 **Interfaces:**
 - Consumes: Tasks 4, 5, 7 (`find_act`), 11a, 11b, 12 (`live_policy_refusal`), 12a (`load_binding`,
-  `load_trust` **без журнала**, `load_anchor_times`, `load_ranges`, `current_activation`).
+  `load_trust` **с журналом** — `act_journal_wire.journal_for_premerge`, `load_anchor_times`,
+  `load_ranges(..., journal)`, `product_mode`, `current_activation`, `act_identity`).
 - Produces: запуск **файлом** из `merge-pr.sh`:
   `uv run --frozen --exact --group governance --no-config --no-env-file python -I
   "$script_dir/governance/act_premerge.py" --repo <slug> --pr <n> --head <sha> --head-ref <ветка>
   --merge-profile <dir> --merger <login> --merger-type User|Bot` → `0` — мерж разрешён (граница
   выдержана), `3` — отказ, `2` — не установлено. `main(argv, deps=None) -> int`;
-  `PremergeDeps(readers, gh, binding, now, sleep, creds)`; `request_of_branch(head_ref) ->
+  `PremergeDeps(readers, gh, binding, journal, now, sleep, creds, installations=None)`
+  (`installations` — самоотчёт установок App у держателя ключа, его наполняет Task 15a);
+  `real_deps(args, env=None)`; `request_of_branch(head_ref) ->
   tuple[str, str] | None` (`(ws_id, request_key)` из формы `contracts/approval-branches/v1`);
   `act_decision.merger_allowed(policy, login, hint) -> bool`.
 
 Цепочка импортов `act_premerge` — `governance/__init__`, `governance/act_*` (кроме `act_journal`,
-`act_node`, `act_status`, `act_context`), `governance/facts`, `governance/ssot_env`, вендоренный
+`act_node`, `act_status`, `act_context`; **включая** `act_journal_wire` — узкий журнал периметра,
+ревизия b1, Р-16), `governance/facts`, `governance/ssot_env`, вендоренный
 `contracts/approval-branches/` (данные), сторонние `steward`, `yaml` по `uv.lock`. **Не входят:**
-`df/` (журнал периметра — Р-7), `governance/ops`, `approval_facts`, `approval_branches`,
+`df/` (журнал — через `act_journal_wire`, не через `df.perimeter_client`), `governance/ops`,
+`approval_facts`, `approval_branches`,
 `node_approval`, `stale_adapter` (предпроверка не считает self-hash: `act_projection` не
 импортируется). Отсюда п. 8 заметок части A выполняется так: `node_approval`/`stale_adapter` в
 цепочке обвязки нет — инвариант `tests/harness_trust.py` это проверяет, и если будущая правка их
@@ -9774,13 +11347,18 @@ git commit -m "feat(act): статус узла review/v1 из истории и
 `sha=<head>`; `3` → `die 3`; иное → `die 2`. Candidate **без** метки — `die 3`, как сейчас
 (legacy-акт — мерж человеком). Метка `human-merge-required` по-прежнему отказывает (гвард ниже).
 
-`act_premerge` по порядку: (1) ветка → `(ws_id, key)`, иначе 3; (2) привязка: нет → 3 (заявка
-`review/v1` без корня доверия), недоступна → 2; (3) `load_trust(..., journal=None)` (Р-7):
-`Unavailable` → 2 (нарушение периметра — с текстом «зарегистрирует `--approve-node`»), непустой
-`Trust.unverified` → строки `unverified premise: <имя>` в stderr, мерж не блокируют; (4) текущая
-активация открытой эпохи (`t = now`) и её набор; `ACT_MODE[P] ≠ review` → 3; (5) манифест в
-`--head` (GraphQL-профиль агента, `contents_bytes` через `GhTransport`): нет → 3, `request_id`/
-`ws_id`/`product` не те → 3; (6) `live_policy_refusal` → 3; (7) D3 заранее
+`act_premerge` по порядку: (1) ветка → `RequestIdentity(product, ws_id, request_id)`, иначе 3;
+(2) привязка: нет → 3 (заявка `review/v1` без корня доверия), недоступна → 2; журнал периметра
+недоступен → 2; (3) `load_trust(readers, binding, journal)` — журнал **обязателен** (спека §6.3;
+ревизия b1 сняла Р-7): блок, уже зарегистрированный другим потребителем, → 2; обнаруженное здесь
+нарушение регистрируется (`_register`) → 2; непустой `Trust.unverified` → строки
+`unverified premise: <имя>` в stderr, мерж не блокируют; (3a) App-режим (Task 15a): самоотчёт
+установок у держателя ключа — нарушение регистрируется в журнале → 2, неизвестно → 2; (4)
+`product_mode` по полной истории режима (B1-5): `review` → дальше, `PRE_MIGRATION`/`merge` → 3,
+`Unavailable` (удаление записи, откат `review → merge`, недочитанная история) → 2; текущая
+активация открытой эпохи и её набор; (5) манифест в `--head` (GraphQL-профиль агента,
+`contents_bytes` через `GhTransport`): нет → 3, `act_identity.manifest_refusal` (идентичность из
+ветки, не из манифеста) → 3; (6) `live_policy_refusal` → 3; (7) D3 заранее
 (`merger_allowed(policy, --merger, --merger-type)`) → иначе 3; (8) `open_review` + D1
 (`find_act`) на `--head`: голова фактов ≠ `--head` → 3, нет акта → 3; (9) **граница**: последнее
 событие, способное повлиять на решение, — максимум `submitted_at` ревью, `created_at` отзывов,
@@ -9814,6 +11392,7 @@ from governance.act_policy import parse_policy_set  # noqa: E402
 from governance.act_request import NodeEntry, NodeRequest, PolicyPin, render_manifest  # noqa: E402
 from governance.act_source import SourceV2  # noqa: E402
 from governance.act_time import Unavailable, parse_ts  # noqa: E402
+from governance.facts import Fact, Outcome  # noqa: E402
 from tests.act_cases import FILES  # noqa: E402
 
 SLUG = "owner/p"
@@ -9826,13 +11405,31 @@ POLICY = parse_policy_set(ACT, {**FILES, "policy/modes.yaml": MODES})
 SNAP = act_trust.TrustSnapshot(
     act_trust.TrustRoot("github.com", 11, "main", "s" * 40), "owner/df-trust",
     SourceV2("owner/approval-policy", "main", ACT, frozenset({"owner"})), (Epoch(1, ACT),))
+BINDING = act_trust.Binding("github.com", 11, "owner/df-trust", "main", 22, "public")
+REAL_LOAD_TRUST = act_trust.load_trust
+CLEAN = {"admin": False, "maintain": False, "push": False}
 
 
-def manifest(pin: str = ACT, request_id: str = "approve-2-1-1") -> str:
+def manifest(pin: str = ACT, request_id: str = "approve-2-1-1", ws_id: str = "ws-7") -> str:
     return render_manifest(NodeRequest(
-        request_id, "ws-7", SLUG, {"requirements": NodeEntry("spec/10-r.md", "h", 1)},
+        request_id, ws_id, SLUG, {"requirements": NodeEntry("spec/10-r.md", "h", 1)},
         {"requirements": {}},
         PolicyPin("owner/approval-policy", "main", pin, dict(POLICY.files_sha256))))
+
+
+class Journal:
+    """Журнал периметра: регистрация блокирует следующие решения (§6.3)."""
+
+    def __init__(self, state: str = "clear") -> None:
+        self.state, self.recorded = state, []
+
+    def status(self, snap):
+        return self.state
+
+    def record(self, snap, source, detail):
+        self.recorded.append((source, detail))
+        self.state = "blocked"
+        return None
 
 
 class World:
@@ -9845,8 +11442,13 @@ class World:
         self.reads: list[v3.ReviewFacts] = []
         self.slept: list[float] = []
         self.clock = [NOW]
+        self.journal: object = Journal()
+        self.installations = None
+        self.creds: tuple[act_trust.Credential, ...] = ()
+        self.perms: dict[str, dict] = {}
+        self.monkeypatch = monkeypatch
         monkeypatch.setattr(act_trust, "load_trust", lambda *a, **k: self.trust or
-                            act_trust.Trust(SNAP, self.unverified, False))
+                            act_trust.Trust(SNAP, self.unverified))
         monkeypatch.setattr(act_trust, "load_anchor_times", lambda *a: {ACT: parse_ts(
             self.activation_at)})
         monkeypatch.setattr(act_trust, "load_ranges", lambda *a: (
@@ -9857,6 +11459,17 @@ class World:
         monkeypatch.setattr(act_facts, "effective", lambda facts, clock: {
             r.login: ReviewView(r.review_id, r.login, r.type_hint, r.state, r.commit_id)
             for r in facts.reviews})
+
+    def real_perimeter(self) -> None:
+        """Настоящий `load_trust`: снимок подменён, журнал и самоотчёт — свои."""
+        self.monkeypatch.setattr(act_trust, "load_trust", REAL_LOAD_TRUST)
+        self.monkeypatch.setattr(act_trust, "read_trust_snapshot", lambda anon, b: SNAP)
+        self.monkeypatch.setattr(act_trust, "_rulesets", lambda anon, snap: None)
+        self.monkeypatch.setattr(act_trust, "_rebase", lambda anon, snap: None)
+
+    def as_credential(self, cred, path):
+        perms = self.perms.get(cred.label, CLEAN)
+        return Fact(Outcome.FOUND, {"permissions": perms}, "ok")
 
     def next_facts(self) -> v3.ReviewFacts:
         if self.reads:
@@ -9870,8 +11483,9 @@ class World:
 
     def run(self, *extra: str) -> int:
         deps = act_premerge.PremergeDeps(
-            readers=act_trust.Readers(object(), lambda c, p: None), gh=object(),
-            binding=object(), now=lambda: self.clock[0], sleep=self.sleep, creds=())
+            readers=act_trust.Readers(object(), self.as_credential), gh=object(),
+            binding=BINDING, journal=self.journal, now=lambda: self.clock[0],
+            sleep=self.sleep, creds=self.creds, installations=self.installations)
         argv = ["--repo", SLUG, "--pr", "7", "--head", HEAD, "--head-ref", BRANCH,
                 "--merge-profile", "/x/review", "--merger", "df-reviewer[bot]",
                 "--merger-type", "Bot", *extra]
@@ -9909,6 +11523,14 @@ def test_stale_pin_refused(world: World) -> None:
     assert world.run() == 3
 
 
+@pytest.mark.parametrize("field", ["request_id", "ws_id"])
+def test_manifest_of_other_identity_refused(world: World, field: str) -> None:
+    """Идентичность (product, ws_id, request_id) — по ветке, не по манифесту."""
+    world.manifest = manifest(**{field: {"request_id": "approve-2-1-2",
+                                         "ws_id": "ws-8"}[field]})
+    assert world.run() == 3
+
+
 def test_no_approve_refused(world: World) -> None:
     world.reads = [v3.ReviewFacts(SLUG, 7, HEAD, "master", "OPEN", (), ())]
     assert world.run() == 3
@@ -9933,10 +11555,61 @@ def test_no_manifest_refused(world: World) -> None:
     assert world.run() == 3
 
 
-def test_violation_found_is_unset_and_names_registration(world, capsys) -> None:
-    world.trust = Unavailable("нарушение периметра: env:GH_TOKEN на owner/approval-policy")
+@pytest.mark.parametrize("mode,code", [
+    (act_trust.PRE_MIGRATION, 3), ("merge", 3),
+    (Unavailable("ACT_MODE: обратное переключение review → merge"), 2),
+])
+def test_product_mode_gate(world: World, monkeypatch, mode, code: int) -> None:
+    """B1-5: режим — по истории; неустановленный (удаление, откат) — 2, не отказ-legacy."""
+    monkeypatch.setattr(act_trust, "product_mode", lambda *a: mode)
+    assert world.run() == code
+
+
+def test_existing_block_stops_premerge(world: World, capsys) -> None:
+    """B1-4: блок, зарегистрированный другим потребителем, останавливает мерж."""
+    world.real_perimeter()
+    world.journal = Journal("blocked")
     assert world.run() == 2
-    assert "--approve-node" in capsys.readouterr().err
+    assert "заблокирован" in capsys.readouterr().err
+
+
+def test_detected_violation_registered_and_blocks_restart(world: World, capsys) -> None:
+    """B1-4: нарушение, найденное предпроверкой, записано; повторный запуск видит блок."""
+    world.real_perimeter()
+    world.creds = (act_trust.Credential("env:GH_TOKEN", token="ghp_x"),)
+    world.perms = {"env:GH_TOKEN": {"admin": True, "maintain": True, "push": True}}
+    assert world.run() == 2
+    assert world.journal.recorded and world.journal.recorded[0][0] == "approval-policy"
+    capsys.readouterr()
+    world.perms = {}
+    assert world.run() == 2
+    assert "заблокирован" in capsys.readouterr().err
+
+
+def test_journal_unavailable_is_unset(world: World) -> None:
+    world.journal = Unavailable("журнал периметра (dev): integrity")
+    assert world.run() == 2
+
+
+def test_app_installation_violation_recorded(world: World) -> None:
+    """B1-11: установка App на репо доверия — у держателя ключа; событие журнала, 2."""
+    world.installations = lambda binding: ("df-trust", "установка App 9 видит df-trust (11)")
+    assert world.run() == 2
+    assert world.journal.recorded == [("df-trust", "установка App 9 видит df-trust (11)")]
+
+
+def test_app_installations_unknown_is_unset(world: World) -> None:
+    world.installations = lambda binding: Unavailable("GET /app/installations: HTTP 502")
+    assert world.run() == 2 and world.journal.recorded == []
+
+
+def test_no_binding_refused(world: World, monkeypatch) -> None:
+    deps = act_premerge.PremergeDeps(
+        readers=act_trust.Readers(object(), world.as_credential), gh=object(), binding=None,
+        journal=Unavailable("нет привязки"), now=lambda: NOW, sleep=world.sleep, creds=())
+    argv = ["--repo", SLUG, "--pr", "7", "--head", HEAD, "--head-ref", BRANCH,
+            "--merge-profile", "/x", "--merger", "m", "--merger-type", "Bot"]
+    assert act_premerge.main(argv, deps=deps) == 3
 
 
 def test_unverified_premise_printed_but_not_blocking(world, capsys) -> None:
@@ -9955,7 +11628,8 @@ def test_request_of_branch(branch: str, expected) -> None:
 
 
 def test_premerge_chain_has_no_df_and_no_projection() -> None:
-    """Р-7 и п. 8 заметок части A: цепочка обвязки — без df/ и без node_approval."""
+    """Р-16 и п. 8 заметок части A: цепочка обвязки — без df/ и без node_approval,
+    но с узким журналом периметра."""
     from pathlib import Path
 
     from tests.harness_trust import closure
@@ -9963,9 +11637,10 @@ def test_premerge_chain_has_no_df_and_no_projection() -> None:
     files, problems, _third = closure(Path(__file__).resolve().parent.parent,
                                       "governance/act_premerge.py")
     assert problems == []
+    assert "governance/act_journal_wire.py" in files
     assert not any(f.startswith("df/") for f in files)
     assert not {"governance/node_approval.py", "governance/stale_adapter.py",
-                "governance/ops.py"} & files
+                "governance/ops.py", "governance/act_journal.py"} & files
 ```
 
 Дополнение `tests/test_merge_pr.py` — стаб `uv` рядом со стабом `gh` (в фикстуре `fleet`
@@ -9973,7 +11648,7 @@ def test_premerge_chain_has_no_df_and_no_projection() -> None:
 
 ```python
 UV_STUB = """#!/usr/bin/env bash
-echo "uv $*" >> "$GH_STUB_LOG"
+echo "uv GH_TOKEN=[${GH_TOKEN-}] $*" >> "$GH_STUB_LOG"
 exit "${UV_STUB_RC:-0}"
 """
 ```
@@ -10064,9 +11739,10 @@ def merger_allowed(policy: PolicySet, login: str, hint: str | None) -> bool:
 Этот файл ИСПОЛНЯЕТ `merge-pr.sh` — файлом, в своём окружении:
 `uv run --frozen --exact --group governance --no-config --no-env-file python -I
 <этот файл> …` (форму распознаёт `tests/harness_trust.py`). Цепочка импортов —
-только защищённые `governance/act_*`, `facts`, `ssot_env`; журнал периметра
-не опрашивается (решение плана Р-7: его реализация тянет `df/`). Коды: 0 —
-мерж разрешён (граница секунды выдержана), 3 — отказ, 2 — не установлено.
+только защищённые `governance/act_*`, `facts`, `ssot_env`; журнал периметра —
+узкий клиент `act_journal_wire` (без `df/`, ревизия b1): уже зарегистрированный
+блок останавливает мерж, обнаруженное здесь нарушение регистрируется. Коды:
+0 — мерж разрешён (граница секунды выдержана), 3 — отказ, 2 — не установлено.
 Предпроверка не подпись: окончательно решает `check_delivery` (Task 13).
 """
 
@@ -10098,12 +11774,12 @@ from dataclasses import dataclass  # noqa: E402
 from datetime import UTC, datetime, timedelta  # noqa: E402
 from typing import Any  # noqa: E402
 
-from governance import act_facts, act_trust, ssot_env  # noqa: E402
+from governance import act_facts, act_journal_wire, act_trust, ssot_env  # noqa: E402
 from governance.act_anon import contents_bytes  # noqa: E402
 from governance.act_check import live_policy_refusal  # noqa: E402
 from governance.act_decision import find_act, merger_allowed  # noqa: E402
-from governance.act_policy import mode_for  # noqa: E402
-from governance.act_request import RequestError, manifest_path, parse_manifest  # noqa: E402
+from governance.act_identity import RequestIdentity, manifest_refusal  # noqa: E402
+from governance.act_request import RequestError, parse_manifest  # noqa: E402
 from governance.act_time import Clock, Unavailable, parse_ts  # noqa: E402
 
 EXIT_OK, EXIT_UNSET, EXIT_REFUSED = 0, 2, 3
@@ -10113,6 +11789,10 @@ PATTERNS = Path(__file__).resolve().parent.parent / "contracts/approval-branches
 AGENT_GH_CONFIG_DIR = Path(
     os.environ.get("REVIEW_GH_CONFIG_DIR") or Path.home() / ".config" / "review"
 )
+REGISTERED = " — событие записано в журнал периметра; мерж не выполнен"
+
+Installations = Callable[[act_trust.Binding], "act_trust.Found"]
+"""Самоотчёт установок App у держателя ключа (Task 15a); `None` — режим профиля."""
 
 
 class _Stop(Exception):
@@ -10128,9 +11808,11 @@ class PremergeDeps:
     readers: act_trust.Readers
     gh: Any
     binding: Any  # Binding | None | Unavailable
+    journal: Any  # act_trust.Journal | Unavailable — по привязке
     now: Callable[[], datetime]
     sleep: Callable[[float], None]
     creds: tuple[act_trust.Credential, ...]
+    installations: Installations | None = None
 
 
 def request_of_branch(head_ref: str) -> tuple[str, str] | None:
@@ -10155,13 +11837,19 @@ def _manifest_text(deps: PremergeDeps, repo: str, head: str, path: str) -> str |
     return raw.decode("utf-8") if isinstance(raw, bytes) else raw
 
 
-def _live(deps: PremergeDeps, trust: act_trust.Trust):
+def _live(deps: PremergeDeps, trust: act_trust.Trust, product: str):
+    """Текущая активация, её набор и режим продукта по ПОЛНОЙ истории (B1-5)."""
     now = deps.now()
     anchors = act_trust.load_anchor_times(deps.readers.anon, trust, now)
-    loaded = act_trust.load_ranges(deps.readers.anon, trust, anchors, now, None)
+    loaded = act_trust.load_ranges(deps.readers.anon, trust, anchors, now, deps.journal)
     if isinstance(loaded, Unavailable):
         raise _Stop(EXIT_UNSET, f"история источника политики: {loaded.reason}")
     ranges, sets = loaded
+    mode = act_trust.product_mode(trust, ranges, sets, product, now)
+    if isinstance(mode, Unavailable):
+        raise _Stop(EXIT_UNSET, f"режим продукта: {mode.reason}")
+    if mode != "review":
+        raise _Stop(EXIT_REFUSED, f"ACT_MODE[{product}] = {mode} — не review")
     current = act_trust.current_activation(trust, ranges)
     if isinstance(current, Unavailable):
         raise _Stop(EXIT_UNSET, f"текущая активация: {current.reason}")
@@ -10169,6 +11857,8 @@ def _live(deps: PremergeDeps, trust: act_trust.Trust):
     if isinstance(policy, Unavailable):
         raise _Stop(EXIT_UNSET, policy.reason)
     span = ranges[trust.epochs[-1].epoch]
+    if isinstance(span, Unavailable):
+        raise _Stop(EXIT_UNSET, f"диапазон открытой эпохи: {span.reason}")
     return current, policy, span
 
 
@@ -10179,37 +11869,47 @@ def _boundary(facts: Any, span: Sequence[Any]) -> datetime:
     return max(stamps)
 
 
-def _check(args: argparse.Namespace, deps: PremergeDeps) -> None:
-    branch = request_of_branch(args.head_ref)
-    if branch is None:
-        raise _Stop(EXIT_REFUSED, f"ветка {args.head_ref!r} — не форма candidate")
-    ws_id, key = branch
+def _trust(deps: PremergeDeps) -> act_trust.Trust:
+    """Привязка, журнал, проверки периметра; App — самоотчёт установок (B1-11)."""
     if deps.binding is None:
         raise _Stop(EXIT_REFUSED, "заявка review/v1 без корня доверия (нет /etc/df/trust.toml)")
     if isinstance(deps.binding, Unavailable):
         raise _Stop(EXIT_UNSET, deps.binding.reason)
-    trust = act_trust.load_trust(deps.readers, deps.binding, None, creds=deps.creds)
+    if isinstance(deps.journal, Unavailable):
+        raise _Stop(EXIT_UNSET, f"журнал периметра: {deps.journal.reason}")
+    trust = act_trust.load_trust(deps.readers, deps.binding, deps.journal, creds=deps.creds)
     if isinstance(trust, Unavailable):
-        tail = (" — событие зарегистрирует `--approve-node` (Р-7); мерж не выполнен"
-                if trust.reason.startswith("нарушение периметра") else "")
-        raise _Stop(EXIT_UNSET, f"{trust.reason}{tail}")
+        raise _Stop(EXIT_UNSET, trust.reason)
+    if deps.installations is not None:
+        found = deps.installations(deps.binding)
+        if isinstance(found, Unavailable):
+            raise _Stop(EXIT_UNSET, f"установки App: {found.reason}")
+        if found is not None:
+            failed = deps.journal.record(trust.snapshot, found[0], found[1])
+            tail = REGISTERED if failed is None else f"; регистрация: {failed.reason}"
+            raise _Stop(EXIT_UNSET, f"нарушение периметра: {found[1]}{tail}")
     for name in trust.unverified:
         print(f"unverified premise: {name}", file=sys.stderr)
-    current, policy, span = _live(deps, trust)
-    if mode_for(policy, args.repo) != "review":
-        raise _Stop(EXIT_REFUSED, f"ACT_MODE[{args.repo}] ≠ review на текущей активации")
-    text = _manifest_text(deps, args.repo, args.head, manifest_path(ws_id, key))
+    return trust
+
+
+def _check(args: argparse.Namespace, deps: PremergeDeps) -> None:
+    branch = request_of_branch(args.head_ref)
+    if branch is None:
+        raise _Stop(EXIT_REFUSED, f"ветка {args.head_ref!r} — не форма candidate")
+    ident = RequestIdentity(args.repo, *branch)
+    trust = _trust(deps)
+    current, policy, span = _live(deps, trust, args.repo)
+    text = _manifest_text(deps, args.repo, args.head, ident.manifest_path)
     if isinstance(text, Unavailable):
         raise _Stop(EXIT_UNSET, f"манифест: {text.reason}")
     if text is None:
-        raise _Stop(EXIT_REFUSED, f"в {args.head[:12]} нет манифеста {key}")
+        raise _Stop(EXIT_REFUSED, f"в {args.head[:12]} нет манифеста {ident.request_id}")
     try:
         req = parse_manifest(text)
     except RequestError as exc:
         raise _Stop(EXIT_REFUSED, f"манифест: {exc}") from exc
-    if (req.request_id, req.ws_id, req.product) != (key, ws_id, args.repo):
-        raise _Stop(EXIT_REFUSED, "манифест не этой заявки, воркстрима или продукта")
-    refusal = live_policy_refusal(req.policy, current.merge_commit)
+    refusal = manifest_refusal(req, ident) or live_policy_refusal(req.policy, current.merge_commit)
     if refusal is not None:
         raise _Stop(EXIT_REFUSED, refusal)
     if not merger_allowed(policy, args.merger, args.merger_type):
@@ -10221,7 +11921,7 @@ def _check(args: argparse.Namespace, deps: PremergeDeps) -> None:
     if wait > 0:
         deps.sleep(wait)
     again = act_facts.open_review(deps.gh, args.repo, args.pr)
-    current2, _policy2, _span2 = _live(deps, trust)
+    current2, _policy2, _span2 = _live(deps, trust, args.repo)
     if again != facts or current2 != current:
         raise _Stop(EXIT_UNSET, "ревью или текущая активация изменились за время ожидания")
 
@@ -10249,23 +11949,34 @@ def _parser() -> argparse.ArgumentParser:
     return p
 
 
-def real_deps(merge_profile: Path) -> PremergeDeps:
-    """Боевые чтения: анонимный REST, GraphQL под профилем агента, привязка."""
+def real_deps(args: argparse.Namespace, env: dict[str, str] | None = None) -> PremergeDeps:
+    """Боевые чтения: анонимный REST, GraphQL под профилем агента, привязка, журнал."""
+    env = dict(os.environ) if env is None else env
+    binding = act_trust.load_binding()
+    journal: Any = Unavailable("нет привязки")
+    if isinstance(binding, act_trust.Binding):
+        journal = act_journal_wire.journal_for_premerge(
+            env=env,
+            state_home=Path(env.get("XDG_STATE_HOME") or Path.home() / ".local" / "state"),
+            run_id=f"merge-pr:{args.repo}#{args.pr}",
+            policy_repository_id=binding.approval_policy_repository_id,
+        )
     return PremergeDeps(
         readers=act_trust.default_readers(),
         gh=act_facts.gh_transport(AGENT_GH_CONFIG_DIR),
-        binding=act_trust.load_binding(),
+        binding=binding,
+        journal=journal,
         now=lambda: datetime.now(UTC).replace(microsecond=0),
         sleep=time.sleep,
-        creds=act_trust.credentials(os.environ, agent_dir=AGENT_GH_CONFIG_DIR,
-                                    merge_dir=merge_profile),
+        creds=act_trust.credentials(env, agent_dir=AGENT_GH_CONFIG_DIR,
+                                    merge_dir=Path(args.merge_profile)),
     )
 
 
 def main(argv: Sequence[str] | None = None, deps: PremergeDeps | None = None) -> int:
     """CLI предпроверки; см. докстринг модуля."""
     args = _parser().parse_args(argv)
-    deps = deps or real_deps(Path(args.merge_profile))
+    deps = deps or real_deps(args)
     try:
         _check(args, deps)
     except _Stop as stop:
@@ -10374,9 +12085,11 @@ git commit -m "feat(merge-pr): доставка candidate review/v1 агенто
 - Produces: `python -I governance/act_app_token.py --app-id <id> --key <path> --repo <slug>` (та же
   форма запуска, что Task 15) → stdout две строки: `<slug>[bot]` и токен установки на целевой
   репо; коды 0 / 2; `app_identity(app_id, key, repo, *, http, now) -> tuple[str, str] |
-  Unavailable`; `installations_refusal(app_id, key, trust_repos, *, http, now) -> Violation |
-  Unavailable | None` (установка App на `approval-policy` или `df-trust` — нарушение; спека A
-  rev 16 §6.2).
+  Unavailable`; `installations_refusal(app_id, key, trust_repos, *, http, now) -> Found`
+  (`(роль, деталь)` | `Unavailable` | `None`; установка App на `approval-policy` или `df-trust` —
+  нарушение; спека A rev 16 §6.2; оба списка — все страницы, B1-12);
+  `act_premerge.app_installations(app_id, key, *, http=None) -> Installations`; `act_premerge`
+  принимает `--app-id <id> --app-key <path>` (оба или ни одного).
 
 Положительный сценарий №1 и M3 требуют, чтобы candidate доставлял App. Действующий preflight
 `merge-pr.sh:269` вызывает `gh api user`, а токен установки App получает на него 403 (spike;
@@ -10395,10 +12108,15 @@ App-режим обёртки только для candidate `review/v1` (бри�
   `GH_TOKEN=<installation token>` для всех последующих `gh` вызовов обёртки (`gh_a` выставляет
   `GH_TOKEN` вместо `GH_CONFIG_DIR`). Совпадение `<slug>[bot]` с `AUTHORIZED_MERGER_ACCOUNTS`
   текущей активации проверяет `act_premerge` (`merger_allowed`).
-- Самоотчёт App (Task 12a, спека §6.2): `act_premerge --app-id/--app-key` дополнительно читает
-  установки App (`GET /app/installations`, `GET /installation/repositories` с токеном метаданных) —
-  установка, видящая `approval-policy` или `df-trust` по `repository_id` привязки, — нарушение,
-  код 2 (регистрация — Р-7); неизвестные полномочия установки — 2.
+- Самоотчёт App (Task 12a, спека §6.2): производный токен установки **не** проходит
+  `_self_report` — спека освобождает его от самоотчёта; проверяется держатель ключа. Поэтому
+  `merge-pr.sh` запускает `act_premerge` с `GH_TOKEN=""` (токен установки процессу предпроверки не
+  передаётся, `credentials` его не видит), а `act_premerge --app-id/--app-key` читает установки App
+  (`GET /app/installations`, `GET /installation/repositories` с токеном метаданных, все страницы) —
+  установка, видящая `approval-policy` или `df-trust` по `repository_id` привязки, — нарушение:
+  событие журнала периметра (Task 15, `act_journal_wire`) и код 2; неполный список или неизвестные
+  полномочия установки — 2. Прочие credentials процесса (`GITHUB_TOKEN`, профили) самоотчитываются
+  как обычно (ревизия b1, B1-11).
 
 - [ ] **Step 1: Write the failing tests** — `tests/test_act_app_token.py` (HTTP подменён
   фабрикой ответов, JWT проверяется `jwt.decode` с публичным ключом тестовой пары):
@@ -10408,6 +12126,8 @@ App-режим обёртки только для candidate `review/v1` (бри�
 
 from __future__ import annotations
 
+import urllib.request
+
 import pytest
 
 jwt = pytest.importorskip("jwt")
@@ -10415,8 +12135,11 @@ from cryptography.hazmat.primitives import serialization  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
 
 from governance import act_app_token  # noqa: E402
-from governance.act_perimeter import Violation  # noqa: E402
 from governance.act_time import Unavailable  # noqa: E402
+
+TRUST = {"approval-policy": 22, "df-trust": 11}
+INST = "/app/installations?per_page=100&page={}"
+REPOS = "/installation/repositories?per_page=100&page={}"
 
 
 @pytest.fixture()
@@ -10430,12 +12153,35 @@ def key(tmp_path):
 
 
 class Http:
-    def __init__(self, routes: dict) -> None:
-        self.routes, self.seen = routes, []
+    """Ответы по `(метод, путь)`; репо установки — по её токену (`visible`)."""
+
+    def __init__(self, routes: dict, visible: dict[int, list[int]] | None = None) -> None:
+        self.routes, self.visible, self.seen = routes, visible or {}, []
 
     def __call__(self, method: str, path: str, auth: str, body: dict | None = None):
         self.seen.append((method, path, auth))
-        return self.routes[(method, path)]
+        if (method, path) in self.routes:
+            return self.routes[(method, path)]
+        if path == REPOS.format(1) and auth.startswith("token ghs_"):
+            ids = self.visible.get(int(auth.removeprefix("token ghs_")), [])
+            return 200, {"total_count": len(ids), "repositories": [{"id": i} for i in ids]}
+        return 502, None
+
+
+def _installs(*pages: list[dict]) -> dict:
+    """Маршруты списка установок по страницам и токены метаданных для каждой."""
+    routes: dict = {("GET", INST.format(n)): (200, page) for n, page in enumerate(pages, 1)}
+    for page in pages:
+        for item in page:
+            routes[("POST", f"/app/installations/{item['id']}/access_tokens")] = (
+                201, {"token": f"ghs_{item['id']}"})
+    return routes
+
+
+def _repos(ids: list[int], total: int | None = None) -> dict:
+    return {("GET", REPOS.format(1)): (200, {"total_count": len(ids) if total is None
+                                             else total,
+                                             "repositories": [{"id": i} for i in ids]})}
 
 
 def test_identity_uses_jwt_not_gh_user(key) -> None:
@@ -10447,8 +12193,11 @@ def test_identity_uses_jwt_not_gh_user(key) -> None:
     })
     got = act_app_token.app_identity(5285716, path, "o/p", http=http, now=1_700_000_000)
     assert got == ("df-probe-reviewer[bot]", "ghs_x")
-    claims = jwt.decode(http.seen[0][2].removeprefix("Bearer "), public, algorithms=["RS256"])
+    # Подпись проверяется; срок — отдельно от часов прогона (ревизия b1, B1-16).
+    claims = jwt.decode(http.seen[0][2].removeprefix("Bearer "), public, algorithms=["RS256"],
+                        options={"verify_exp": False, "verify_iat": False})
     assert claims["iss"] == "5285716"
+    assert (claims["iat"], claims["exp"]) == (1_700_000_000 - 60, 1_700_000_000 + 540)
     assert not any(p == "/user" for _, p, _ in http.seen)
 
 
@@ -10459,31 +12208,92 @@ def test_identity_unreadable_is_unavailable(key) -> None:
 
 
 def test_installation_on_trust_repo_is_violation(key) -> None:
-    http = Http({
-        ("GET", "/app/installations"): (200, [{"id": 9, "permissions": {"metadata": "read"}}]),
-        ("POST", "/app/installations/9/access_tokens"): (201, {"token": "ghs_m"}),
-        ("GET", "/installation/repositories"): (200, {"total_count": 2, "repositories": [
-            {"id": 7}, {"id": 22}]}),
-    })
-    got = act_app_token.installations_refusal(1, key[0], {"approval-policy": 22,
-                                                          "df-trust": 11}, http=http, now=0)
-    assert isinstance(got, Violation) and "approval-policy" in got.detail
+    http = Http({**_installs([{"id": 9}]), **_repos([7, 22])})
+    got = act_app_token.installations_refusal(1, key[0], TRUST, http=http, now=0)
+    assert got == ("approval-policy", "установка App 9 видит approval-policy (22)")
 
 
 def test_installations_clean(key) -> None:
-    http = Http({
-        ("GET", "/app/installations"): (200, [{"id": 9, "permissions": {"metadata": "read"}}]),
-        ("POST", "/app/installations/9/access_tokens"): (201, {"token": "ghs_m"}),
-        ("GET", "/installation/repositories"): (200, {"total_count": 1, "repositories": [
-            {"id": 7}]}),
-    })
-    assert act_app_token.installations_refusal(1, key[0], {"approval-policy": 22,
-                                                           "df-trust": 11},
-                                               http=http, now=0) is None
+    http = Http({**_installs([{"id": 9}]), **_repos([7])})
+    assert act_app_token.installations_refusal(1, key[0], TRUST, http=http, now=0) is None
+
+
+def test_violation_on_second_installations_page(key) -> None:
+    """B1-12: установка на репо доверия на второй странице не теряется."""
+    first = [{"id": 1000 + n} for n in range(100)]
+    http = Http(_installs(first, [{"id": 9}]), visible={9: [11]})
+    got = act_app_token.installations_refusal(1, key[0], TRUST, http=http, now=0)
+    assert got == ("df-trust", "установка App 9 видит df-trust (11)")
+
+
+def test_full_last_page_requires_empty_next(key) -> None:
+    """Ровно 100 установок: полнота — по пустой следующей странице, не по догадке."""
+    page = [{"id": n} for n in range(1, 101)]
+    http = Http(_installs(page))  # страница 2 не отвечает (502)
+    got = act_app_token.installations_refusal(1, key[0], TRUST, http=http, now=0)
+    assert isinstance(got, Unavailable) and "стр. 2" in got.reason
+    http = Http({**_installs(page), ("GET", INST.format(2)): (200, [])})
+    assert act_app_token.installations_refusal(1, key[0], TRUST, http=http, now=0) is None
+
+
+def test_repositories_total_mismatch_is_unavailable(key) -> None:
+    http = Http({**_installs([{"id": 9}]), **_repos([7], total=150)})
+    got = act_app_token.installations_refusal(1, key[0], TRUST, http=http, now=0)
+    assert isinstance(got, Unavailable) and "total_count" in got.reason
+
+
+def test_http_does_not_follow_redirects() -> None:
+    """B1-12: 3xx возвращается кодом — запрос с Authorization на новый адрес не идёт."""
+    handler = act_app_token._NoRedirect()
+    req = urllib.request.Request("https://api.github.com/app",
+                                 headers={"Authorization": "Bearer x"})
+    assert handler.redirect_request(req, None, 302, "Found", {},
+                                    "https://evil.example/app") is None
+    assert any(isinstance(h, act_app_token._NoRedirect)
+               for h in act_app_token._OPENER.handlers)
+
+
+# --- сквозной App → act_premerge → load_trust (ревизия b1, B1-11) -------------------
+
+def _app_world(monkeypatch, key, env: dict[str, str], visible: dict[int, list[int]]):
+    from pathlib import Path
+
+    from governance import act_premerge, act_trust
+    from tests.test_act_premerge import World
+
+    world = World(monkeypatch)
+    world.real_perimeter()
+    world.creds = act_trust.credentials(env, agent_dir=Path("/x/review"),
+                                        merge_dir=Path("/x/merge"))
+    world.perms = {"env:GH_TOKEN": {}}  # токен установки: `permissions` в ответе нет
+    world.installations = act_premerge.app_installations(
+        1, key[0], http=Http(_installs([{"id": 9}]), visible))
+    return world
+
+
+def test_app_mode_premerge_clean(monkeypatch, key) -> None:
+    """Запуск с `GH_TOKEN=""`: производный токен не держится и не самоотчитывается."""
+    world = _app_world(monkeypatch, key, {"GH_TOKEN": ""}, {9: [7]})
+    assert world.run() == 0 and world.journal.recorded == []
+
+
+def test_app_token_leaked_into_env_is_unset(monkeypatch, key, capsys) -> None:
+    """Двойник: токен установки в `GH_TOKEN` — самоотчёт невозможен (§6.2), 2."""
+    world = _app_world(monkeypatch, key, {"GH_TOKEN": "ghs_inst"}, {9: [7]})
+    assert world.run() == 2 and world.journal.recorded == []
+    assert "самоотчёт env:GH_TOKEN" in capsys.readouterr().err
+
+
+def test_app_installation_on_policy_repo_registered(monkeypatch, key) -> None:
+    world = _app_world(monkeypatch, key, {"GH_TOKEN": ""}, {9: [22]})
+    assert world.run() == 2
+    assert [r[0] for r in world.journal.recorded] == ["approval-policy"]
 ```
 
 `tests/test_merge_pr.py`: App-режим — `gh api user` не вызывается (лог стаба), `uv` зовётся с
-`act_app_token.py` и затем `act_premerge.py … --merger <slug>[bot] --merger-type Bot`; App-режим
+`act_app_token.py` и затем `act_premerge.py … --merger <slug>[bot] --merger-type Bot --app-id …
+--app-key …`, причём строка лога стаба для `act_premerge.py` несёт `GH_TOKEN=[]` (стаб `uv` Task 15
+пишет значение; B1-11), а последующий вызов мержа `gh` — `GH_TOKEN` установки; App-режим
 на PR без метки → 2; прежний режим (без `MERGE_APP_*`) не изменился (существующие тесты зелёные).
 Стаб `uv` в App-тестах печатает две строки (`UV_STUB_OUT`) на вызов `act_app_token.py`.
 
@@ -10522,11 +12332,24 @@ import urllib.error  # noqa: E402
 import urllib.request  # noqa: E402
 from collections.abc import Callable, Mapping  # noqa: E402
 
-from governance.act_perimeter import Violation  # noqa: E402
 from governance.act_time import Unavailable  # noqa: E402
 
 API = "https://api.github.com"
+PER_PAGE = 100
+MAX_PAGES = 50
 Http = Callable[..., tuple[int, object]]
+Found = tuple[str, str] | Unavailable | None
+"""Как `act_trust.Found`: нарушение `(роль репо, деталь)`, недоступность или чисто."""
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """3xx не исполняется: ответ возвращается кодом (Authorization не уезжает)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
 
 
 def _http(method: str, path: str, auth: str, body: dict | None = None) -> tuple[int, object]:
@@ -10535,12 +12358,34 @@ def _http(method: str, path: str, auth: str, body: dict | None = None) -> tuple[
         "Accept": "application/vnd.github+json", "Authorization": auth,
         "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "devtools-act-app"})
     try:
-        with urllib.request.urlopen(req, timeout=30) as answer:  # noqa: S310
+        with _OPENER.open(req, timeout=30) as answer:
             return answer.status, json.loads(answer.read() or b"null")
     except urllib.error.HTTPError as err:
         return err.code, None
     except (OSError, ValueError) as exc:
         return 0, str(exc)
+
+
+def _pages(http: Http, path: str, auth: str, field: str | None) -> list | Unavailable:
+    """Все страницы списка: до первой неполной страницы (полнота по построению).
+
+    `field` — ключ списка в объекте с `total_count` (тогда сумма сверяется с
+    ним); `None` — ответ сам список. Больше `MAX_PAGES` — `Unavailable`."""
+    items: list = []
+    total: object = None
+    for page in range(1, MAX_PAGES + 1):
+        status, data = http("GET", f"{path}?per_page={PER_PAGE}&page={page}", auth)
+        chunk = data.get(field) if field and isinstance(data, dict) else data
+        if status != 200 or not isinstance(chunk, list):
+            return Unavailable(f"GET {path} (стр. {page}): HTTP {status}")
+        if field:
+            total = data.get("total_count") if isinstance(data, dict) else None
+        items.extend(chunk)
+        if len(chunk) < PER_PAGE:
+            if field and total != len(items):
+                return Unavailable(f"GET {path}: {len(items)} из total_count={total!r}")
+            return items
+    return Unavailable(f"GET {path}: больше {MAX_PAGES} страниц")
 
 
 def _jwt(app_id: int, key: Path, now: int) -> str:
@@ -10577,28 +12422,28 @@ def app_identity(app_id: int, key: Path, repo: str, *, http: Http = _http,
 
 
 def installations_refusal(app_id: int, key: Path, trust_repos: Mapping[str, int], *,
-                          http: Http = _http, now: int | None = None
-                          ) -> Violation | Unavailable | None:
-    """Установка App, видящая репо доверия, — нарушение (§6.2: проверяется ключ)."""
+                          http: Http = _http, now: int | None = None) -> Found:
+    """Установка App, видящая репо доверия, — нарушение `(роль, деталь)` (§6.2:
+    проверяется держатель ключа, не производный токен). Оба списка — со всеми
+    страницами (ревизия b1, B1-12); неполный — `Unavailable`, не «чисто»."""
     bearer = "Bearer " + _jwt(app_id, key, int(time.time()) if now is None else now)
-    status, data = http("GET", "/app/installations", bearer)
-    if status != 200 or not isinstance(data, list):
-        return Unavailable(f"GET /app/installations: HTTP {status}")
-    for item in data:
+    installations = _pages(http, "/app/installations", bearer, None)
+    if isinstance(installations, Unavailable):
+        return installations
+    for item in installations:
         ident = item.get("id") if isinstance(item, dict) else None
         if type(ident) is not int:
             return Unavailable("установка без id")
         token = _token(http, bearer, ident, {"permissions": {"metadata": "read"}})
         if isinstance(token, Unavailable):
             return token
-        status, page = http("GET", "/installation/repositories", f"token {token}")
-        repos = page.get("repositories") if isinstance(page, dict) else None
-        if status != 200 or not isinstance(repos, list) or page.get("total_count") != len(repos):
-            return Unavailable(f"репо установки {ident}: неполный ответ")
+        repos = _pages(http, "/installation/repositories", f"token {token}", "repositories")
+        if isinstance(repos, Unavailable):
+            return Unavailable(f"репо установки {ident}: {repos.reason}")
         seen = {r.get("id") for r in repos if isinstance(r, dict)}
         for role, repo_id in trust_repos.items():
             if repo_id in seen:
-                return Violation(f"установка App {ident} видит {role} ({repo_id})")
+                return role, f"установка App {ident} видит {role} ({repo_id})"
     return None
 
 
@@ -10622,8 +12467,11 @@ if __name__ == "__main__":
     sys.exit(main())
 ```
 
-(Постраничность `/installation/repositories` — более 100 репо на установку у App продукта не
-бывает по построению спеки B; неполный ответ (`total_count ≠ len`) — `Unavailable`, а не «чисто».)
+(Постраничность — оба списка читаются до первой неполной страницы (`per_page=100`); у
+`/installation/repositories` сумма сверяется с `total_count`; больше `MAX_PAGES` страниц, ошибка
+любой страницы или расхождение — `Unavailable`, а не «чисто» (ревизия b1, B1-12). Перенаправления
+не исполняются: `_NoRedirect` возвращает 3xx кодом — заголовок `Authorization` не уходит на
+другой хост.)
 
 `merge-pr.sh` — профиль:
 
@@ -10658,10 +12506,58 @@ candidate review/v1 (метка $HUMAN_APPROVAL_LABEL)" ;;
 fi
 ```
 
-`gh_a()` в App-режиме не выставляет `GH_CONFIG_DIR` (токен — `GH_TOKEN`); `act_premerge`
-получает `--app-id "$MERGE_APP_ID" --app-key "$MERGE_APP_KEY"` и выполняет
-`installations_refusal` с `repository_id` обоих репо доверия из привязки (`Violation` → код 2 с
-текстом про регистрацию, Р-7). Проверка `${#GH_TOKEN} -gt 0` и формы `login` (`*[bot]`) — `die 2`.
+`gh_a()` в App-режиме не выставляет `GH_CONFIG_DIR` (токен — `GH_TOKEN`). Проверка
+`${#GH_TOKEN} -gt 0` и формы `login` (`*[bot]`) — `die 2`. Запуск предпроверки (блок Task 15) в
+App-режиме — отдельной строкой той же формы, с пустым `GH_TOKEN` и ключом App:
+
+```sh
+        if [ "$app_mode" -eq 1 ]; then
+            premerge_out=$(cd "$script_dir" && GH_TOKEN="" \
+                UV_PROJECT_ENVIRONMENT="$premerge_env" \
+                uv run --frozen --exact --group governance --no-config --no-env-file \
+                python -I "$script_dir/governance/act_premerge.py" \
+                --repo "$slug" --pr "$pr" --head "$head_oid" --head-ref "$head_ref" \
+                --merge-profile "$MERGE_GH_CONFIG_DIR" --merger "$login" \
+                --merger-type "$merger_type" \
+                --app-id "$MERGE_APP_ID" --app-key "$MERGE_APP_KEY") || premerge_rc=$?
+        else
+            premerge_out=$(…форма Task 15 без изменений…) || premerge_rc=$?
+        fi
+```
+
+(`tests/harness_trust.py` снимает ведущие присваивания окружения перед сверкой формы запуска так
+же, как для `UV_PROJECT_ENVIRONMENT`; если сегодняшний разбор знает только его — правило
+расширяется на `GH_TOKEN=""` с литерально пустым значением, иное значение — отказ разбора.)
+
+`governance/act_premerge.py` — App-режим (функция перед `_parser`; `_parser` и `real_deps`):
+
+```python
+def app_installations(app_id: int, key: Path, *, http: Any = None) -> Installations:
+    """Самоотчёт установок App у держателя ключа (§6.2; ревизия b1, B1-11).
+
+    Производный токен установки предпроверка не держит (`merge-pr.sh` запускает
+    её с `GH_TOKEN=""`), поэтому `_self_report` его не опрашивает; прочие
+    credentials процесса (`GITHUB_TOKEN`, профили) проверяются как обычно."""
+    from governance import act_app_token
+
+    def check(binding: act_trust.Binding) -> act_trust.Found:
+        repos = {"approval-policy": binding.approval_policy_repository_id,
+                 "df-trust": binding.df_trust_repository_id}
+        extra = {} if http is None else {"http": http}
+        return act_app_token.installations_refusal(app_id, key, repos, **extra)
+
+    return check
+```
+
+```python
+    p.add_argument("--app-id", type=int, default=None)
+    p.add_argument("--app-key", type=Path, default=None)
+```
+
+в `main` после разбора: `(args.app_id is None) != (args.app_key is None)` → `parser.error`
+(«App-режим: нужны оба --app-id и --app-key»); `real_deps` добавляет
+`installations=app_installations(args.app_id, args.app_key) if args.app_id is not None else
+None`.
 
 - [ ] **Step 4: Run** → PASS; `shellcheck merge-pr.sh`; полный набор.
 - [ ] **Step 5: Commit**
@@ -10679,7 +12575,7 @@ git commit -m "feat(merge-pr): App-режим — личность через JW
 - Test: `tests/test_act_barrier.py`
 
 **Interfaces:**
-- Consumes: Tasks 10 (`act_settings`), 12a, 13 (`manifest_path`, `approval_branches`), 14
+- Consumes: Tasks 10 (`act_settings`), 12a (`act_identity`), 13 (`approval_branches`), 14
   (`live_policy`); `Ops.prs_by_head_prefix` (вся история PR, GraphQL с пагинацией; сбой —
   `RuntimeError`), `Ops.pr_facts`, `Ops.repo_file_fact`, `Ops.brief_pr_fact` (файлы PR),
   `Ops.default_branch_fact`, `Ops.pr_comments_fact`, `Ops.comment`.
@@ -10697,19 +12593,27 @@ git commit -m "feat(merge-pr): App-режим — личность через JW
 видна):
 1. Все PR продукта (`prs_by_head_prefix(product, "")`; сбой — `gaps`) формы candidate, finalize
    (`approval_branches`) или `brief/*`.
-2. OPEN candidate/finalize без манифеста `review/v1` в голове, OPEN brief-PR (заявка v1; `v2` —
-   Task 17) → `items`. MERGED legacy-candidate **разобран**, только если смёржен его finalize и
-   каждый файл узла из диффа finalize в голове базы несёт `status: approved` с подписью этого
-   candidate (`approved_by = mergedBy`, `approved_at = mergedAt` — предикат
-   `_verify_nodes_in_base`) либо подпись более позднего акта (`approved_at > mergedAt` — узел
-   покрыт позже); иначе — `items` («merged-but-unrecorded / pending-finalize»). Пины узла
-   барьер не судит (решение исполнителя плана Р-15: дрейф пинов после законного старого акта —
-   долг узла, а не живая заявка; цена — узел с таким долгом пройдёт барьер и встанет на гейте
-   доставки). Имя ветки finalize разбором не считается.
+2. OPEN candidate/finalize без **действительного** манифеста `review/v1` этой заявки в голове
+   (строгий `parse_manifest` + `act_identity.manifest_refusal` по идентичности
+   `(product, ws_id, request_id)` из ветки; некорректный YAML, чужой воркстрим или ключ — не
+   маркер; ревизия b1, B1-13), OPEN brief-PR (заявка v1; `v2` — Task 17) → `items`. MERGED
+   legacy-candidate **разобран**, только если смёржен его finalize и **каждый узел, отданный
+   candidate на одобрение**, — файлы диффа candidate со `status: approval_pending` в его голове,
+   состав устанавливается независимо от finalize, — в голове базы несёт `status: approved` с
+   подписью этого candidate (`approved_by = mergedBy`, `approved_at = mergedAt`) либо подпись
+   более позднего акта (`approved_at > mergedAt` — узел покрыт позже); пустой состав —
+   `items` («разберите вручную»); иначе — `items` («merged-but-unrecorded / pending-finalize»);
+   неустановленный состав или голова — `gaps`. Пины узла барьер не судит (решение исполнителя
+   плана Р-15: дрейф пинов после законного старого акта — долг узла, а не живая заявка; цена —
+   узел с таким долгом пройдёт барьер и встанет на гейте доставки). Имя ветки finalize и его
+   состав разбором не считаются.
 3. Явная инвалидация (§10 п. 2, `act_migrated`): `--invalidate <pr>` (человеческий контекст)
-   пишет в PR комментарий `<!-- act-migrated: <request-key> -->`; барьер принимает маркер только
-   от логина из `human_approvers` **текущей активации** и без правок (`last_edited_at is None`);
-   локальный леджер той же заявки получает `invalidated: act_migrated`.
+   пишет в PR комментарий `RequestIdentity.migration_marker` —
+   `<!-- act-migrated: <product>/<ws_id>/<request-key> -->`; барьер принимает маркер только
+   дословно для идентичности этого PR, от логина из `human_approvers` **текущей активации** и
+   без правок (`last_edited_at is None`); локальный леджер получает `invalidated: act_migrated`
+   только в прогоне с тем же `(repo_slug, ws_id)` (B1-14: тот же ключ в другом воркстриме —
+   другая заявка).
 4. MERGED brief-PR с заявкой v1: штамп живёт только в `run_dir` установки; без локального
    доказательства (прогон с `interview.approval == {repo: product, pr}` и файлом
    `brief-approval/customer-brief.md`) — `items` с пометкой «требует подтверждения человека»,
@@ -10736,6 +12640,8 @@ import pytest
 from governance import act_barrier
 from governance import approval_branches as ab
 from governance import run_state as rs
+from governance.act_identity import RequestIdentity
+from governance.act_request import NodeEntry, NodeRequest, PolicyPin, render_manifest
 from governance.brief_facts import BriefPrFacts, DefaultBranch, PrComment
 from governance.facts import Fact, Outcome
 
@@ -10745,12 +12651,22 @@ TIP = "9" * 40
 CAND = ab.candidate_branch("ws-7", 2, 1, 1)
 FINAL = ab.finalize_branch("ws-7", 2, 1, 1)
 NODE = "workstreams/ws-7/spec/10-requirements.md"
+NODE2 = "workstreams/ws-7/spec/20-design.md"
+IDENT = RequestIdentity(P, "ws-7", "approve-2-1-1")
+MARK = IDENT.migration_marker
+PENDING = "---\nstatus: approval_pending\n---\nтело\n"
 
 
 @pytest.fixture(autouse=True)
 def _runs(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Локальные леджеры — только стенда, не настоящего out/governance-runs."""
     monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
+
+
+def manifest(ws_id: str = "ws-7", request_id: str = "approve-2-1-1") -> str:
+    return render_manifest(NodeRequest(
+        request_id, ws_id, P, {"requirements": NodeEntry(NODE, "h", 1)},
+        {"requirements": {}}, PolicyPin("owner/approval-policy", "main", "a" * 40, {})))
 
 
 def signed(by: str = "alice", at: str = "2026-10-01T10:00:00Z") -> str:
@@ -10760,9 +12676,10 @@ def signed(by: str = "alice", at: str = "2026-10-01T10:00:00Z") -> str:
 class Ops:
     def __init__(self, prs: list[dict], **kw: object) -> None:
         self.prs = prs
-        self.files: dict[tuple[str, str], str] = kw.get("files", {})  # (sha, path) -> text
-        self.manifests: set[str] = kw.get("manifests", set())  # head sha с манифестом
+        self.files: dict[tuple[str, str], str] = {(HEAD, NODE): PENDING, **kw.get("files", {})}
+        self.manifests: dict[str, str] = kw.get("manifests", {})  # head sha -> текст
         self.comments: dict[int, list[PrComment]] = kw.get("comments", {})
+        self.pr_files: dict[int, tuple] = kw.get("pr_files", {})
         self.fail_list = kw.get("fail_list", False)
         self.posted: list[tuple[int, str]] = []
 
@@ -10778,15 +12695,16 @@ class Ops:
 
     def repo_file_fact(self, slug: str, sha: str, path: str) -> Fact[str]:
         if "/approvals/requests/" in path:
-            return (Fact(Outcome.FOUND, "act: review/v1\n", "ok") if sha in self.manifests
-                    else Fact(Outcome.ABSENT, None, "нет"))
-        text = self.files.get((sha, path))
+            text = self.manifests.get(sha)
+        else:
+            text = self.files.get((sha, path))
         return Fact(Outcome.FOUND, text, "ok") if text else Fact(Outcome.ABSENT, None, "нет")
 
     def brief_pr_fact(self, slug: str, pr: int) -> Fact[BriefPrFacts]:
-        return Fact(Outcome.FOUND, BriefPrFacts(pr, "MERGED", "master", FINAL, HEAD,
-                                                ((NODE, "MODIFIED"),), "ai-prosto",
-                                                "2026-10-01T10:05:00Z", "f" * 40), "ok")
+        files = self.pr_files.get(pr, ((NODE, "MODIFIED"),))
+        return Fact(Outcome.FOUND, BriefPrFacts(pr, "MERGED", "master", CAND, HEAD, files,
+                                                "ai-prosto", "2026-10-01T10:05:00Z",
+                                                "f" * 40), "ok")
 
     def default_branch_fact(self, slug: str) -> Fact[DefaultBranch]:
         return Fact(Outcome.FOUND, DefaultBranch("master", TIP), "ok")
@@ -10831,8 +12749,20 @@ def test_open_unmarked_stage_is_live(branch: str) -> None:
 
 
 def test_open_review_candidate_is_not_a_barrier() -> None:
-    got = run(Ops([pr(5, CAND, "OPEN")], manifests={HEAD}))
+    got = run(Ops([pr(5, CAND, "OPEN")], manifests={HEAD: manifest()}))
     assert got.items == ()
+
+
+@pytest.mark.parametrize("text", [
+    "act: review/v1\n",  # не манифест: строгий разбор
+    "schema: [не yaml\n",
+    manifest(ws_id="ws-8"),  # манифест чужого воркстрима
+    manifest(request_id="approve-2-1-2"),  # манифест чужой заявки
+])
+def test_malformed_or_foreign_manifest_is_not_a_marker(text: str) -> None:
+    """B1-13/B1-14: найденный файл — ещё не манифест этой заявки."""
+    got = run(Ops([pr(5, CAND, "OPEN")], manifests={HEAD: text}))
+    assert len(got.items) == 1
 
 
 def test_merged_legacy_with_signed_node_is_resolved() -> None:
@@ -10853,22 +12783,52 @@ def test_node_covered_later_is_resolved() -> None:
     assert run(ops).items == ()
 
 
+def test_partial_finalize_leaves_candidate_live() -> None:
+    """B1-13: candidate отдал два узла; finalize подписал один — заявка не разобрана."""
+    ops = Ops([pr(5, CAND, "MERGED"), pr(6, FINAL, "MERGED")],
+              pr_files={5: ((NODE, "MODIFIED"), (NODE2, "MODIFIED")),
+                        6: ((NODE, "MODIFIED"),)},
+              files={(HEAD, NODE2): PENDING, (TIP, NODE): signed()})
+    got = run(ops)
+    assert len(got.items) == 1 and NODE2 in got.items[0]
+
+
+def test_empty_finalize_does_not_resolve() -> None:
+    """B1-13: состав берётся из candidate, а не из (пустого) finalize."""
+    ops = Ops([pr(5, CAND, "MERGED"), pr(6, FINAL, "MERGED")], pr_files={6: ()})
+    assert len(run(ops).items) == 1
+
+
+def test_candidate_without_pending_nodes_is_live() -> None:
+    ops = Ops([pr(5, CAND, "MERGED"), pr(6, FINAL, "MERGED")],
+              files={(HEAD, NODE): signed()})
+    got = run(ops)
+    assert "узлов на одобрении не найдено" in got.items[0]
+
+
 def test_merged_candidate_without_finalize_is_live() -> None:
     got = run(Ops([pr(5, CAND, "MERGED")]))
     assert "pending-finalize" in got.items[0]
 
 
 def test_human_migration_marker_resolves() -> None:
-    marker = PrComment("c1", "alice", "<!-- act-migrated: approve-2-1-1 -->",
-                       "2026-10-10T00:00:00Z", None)
+    marker = PrComment("c1", "alice", MARK, "2026-10-10T00:00:00Z", None)
     assert run(Ops([pr(5, CAND, "OPEN")], comments={5: [marker]})).items == ()
 
 
 @pytest.mark.parametrize("comment", [
-    PrComment("c1", "ai-prosto", "<!-- act-migrated: approve-2-1-1 -->", "t", None),
-    PrComment("c1", "alice", "<!-- act-migrated: approve-2-1-1 -->", "t", "2026-10-11"),
+    PrComment("c1", "ai-prosto", MARK, "t", None),
+    PrComment("c1", "alice", MARK, "t", "2026-10-11"),
+    PrComment("c1", "alice", "<!-- act-migrated: approve-2-1-1 -->", "t", None),
+    PrComment("c1", "alice", RequestIdentity(P, "ws-8", "approve-2-1-1").migration_marker,
+              "t", None),
+    PrComment("c1", "alice", RequestIdentity(P, "ws-7", "approve-9-9-9").migration_marker,
+              "t", None),
+    PrComment("c1", "alice", RequestIdentity("owner/q", "ws-7", "approve-2-1-1")
+              .migration_marker, "t", None),
 ])
-def test_agent_or_edited_marker_not_accepted(comment: PrComment) -> None:
+def test_marker_must_be_human_unedited_and_this_request(comment: PrComment) -> None:
+    """B1-14: маркер агента, правленый, старой формы или с чужой идентичностью — нет."""
     assert len(run(Ops([pr(5, CAND, "OPEN")], comments={5: [comment]})).items) == 1
 
 
@@ -10887,15 +12847,35 @@ def test_broken_pagination_incomplete() -> None:
 def test_invalidate_posts_marker_for_human_only() -> None:
     ops = Ops([pr(5, CAND, "OPEN")])
     act_barrier.invalidate(P, ops, 5, humans=frozenset({"alice"}), caller="alice")
-    assert ops.posted == [(5, "<!-- act-migrated: approve-2-1-1 -->")]
+    assert ops.posted == [(5, MARK)]
     with pytest.raises(RuntimeError, match="human_approvers"):
         act_barrier.invalidate(P, ops, 5, humans=frozenset({"alice"}), caller="ai-prosto")
 
 
+def test_invalidate_touches_only_selected_workstream(monkeypatch) -> None:
+    """B1-14: тот же ключ approve-2-1-1 в двух воркстримах — инвалидируется один."""
+    from types import SimpleNamespace
+
+    from governance import approval_ledger as al
+
+    states = {"r7": SimpleNamespace(repo_slug=P, ws_id="ws-7",
+                                    ops={"approve-2-1-1": {"status": al.STATUS_STARTED}}),
+              "r8": SimpleNamespace(repo_slug=P, ws_id="ws-8",
+                                    ops={"approve-2-1-1": {"status": al.STATUS_STARTED}})}
+    hit: list[str] = []
+    monkeypatch.setattr(rs, "all_run_ids", lambda: list(states))
+    monkeypatch.setattr(rs, "load", lambda run_id: states[run_id])
+    monkeypatch.setattr(al, "invalidate_request",
+                        lambda state, key, reason: hit.append(state.ws_id))
+    act_barrier.invalidate(P, Ops([pr(5, CAND, "OPEN")]), 5, humans=frozenset({"alice"}),
+                           caller="alice")
+    assert hit == ["ws-7"]
+
+
 def test_review_preview_unavailable_product_incomplete() -> None:
-    good = Ops([pr(5, CAND, "OPEN")], manifests={HEAD})
+    good = Ops([pr(5, CAND, "OPEN")], manifests={HEAD: manifest()})
     bad = Ops([], fail_list=True)
-    got = act_barrier.live_review_requests({"owner/a": good, "owner/b": bad})
+    got = act_barrier.live_review_requests({"owner/p": good, "owner/b": bad})
     assert len(got.items) == 1 and not got.complete
 ```
 
@@ -10927,13 +12907,13 @@ from types import SimpleNamespace
 from governance import approval_branches as ab
 from governance import approval_ledger as al
 from governance import run_state as rs
-from governance.act_request import manifest_path
+from governance.act_identity import RequestIdentity, manifest_refusal
+from governance.act_request import RequestError, parse_manifest
 from governance.facts import Outcome
 from governance.frontmatter import split_frontmatter
 
-MARKER = "<!-- act-migrated: {key} -->"
-_MARKER = re.compile(r"<!-- act-migrated: (approve-\d+-\d+-\d+) -->")
 _CANDIDATE = re.compile(r"(?P<ws>.+)-approve-(?P<w>\d+)-(?P<k>\d+)-(?P<a>\d+)$")
+PENDING = "approval_pending"
 
 
 @dataclass(frozen=True)
@@ -10953,32 +12933,50 @@ def _kind(branch: str) -> str | None:
     return "brief" if branch.startswith("brief/") else None
 
 
-def _request(branch: str) -> tuple[str, str] | None:
+def _identity(product: str, branch: str) -> RequestIdentity | None:
+    """Полная идентичность заявки ветки candidate/finalize (B1-14)."""
     stem = branch.removeprefix("spec/").removesuffix(ab.finalize_suffix())
     m = _CANDIDATE.match(stem)
-    return None if m is None else (m["ws"], f"approve-{m['w']}-{m['k']}-{m['a']}")
+    if m is None:
+        return None
+    return RequestIdentity(product, m["ws"], f"approve-{m['w']}-{m['k']}-{m['a']}")
+
+
+def _head(product: str, ops, number: int) -> str | None:
+    head = ops.pr_facts(product, number).get("headRefOid")
+    return head if isinstance(head, str) else None
 
 
 def _marked(product: str, ops, number: int, branch: str) -> bool | str:
-    """Манифест `review/v1` в голове PR; строка — факт не установлен."""
-    req = _request(branch)
-    if req is None:
+    """Действительный манифест `review/v1` ЭТОЙ заявки в голове PR (B1-13): разобран
+    строго и называет её идентичность; иначе не маркер. Строка — факт не установлен."""
+    ident = _identity(product, branch)
+    if ident is None:
         return False
-    head = ops.pr_facts(product, number).get("headRefOid")
-    if not isinstance(head, str):
+    head = _head(product, ops, number)
+    if head is None:
         return f"#{number}: голова не прочитана"
-    fact = ops.repo_file_fact(product, head, manifest_path(*req))
+    fact = ops.repo_file_fact(product, head, ident.manifest_path)
     if fact.outcome is Outcome.UNAVAILABLE:
         return f"#{number}: манифест не прочитан — {fact.detail}"
-    return fact.outcome is Outcome.FOUND
+    if fact.outcome is not Outcome.FOUND or fact.value is None:
+        return False
+    try:
+        req = parse_manifest(fact.value)
+    except RequestError:
+        return False
+    return manifest_refusal(req, ident) is None
 
 
-def _migrated(product: str, ops, number: int, humans: frozenset[str]) -> bool | str:
+def _migrated(product: str, ops, number: int, ident: RequestIdentity,
+              humans: frozenset[str]) -> bool | str:
+    """Маркер `act_migrated` именно этой заявки — дословно, от человека, без правок."""
     fact = ops.pr_comments_fact(product, number)
     if fact.outcome is not Outcome.FOUND or fact.value is None:
         return f"#{number}: комментарии не прочитаны — {fact.detail}"
     return any(
-        c.author in humans and c.last_edited_at is None and _MARKER.search(c.body)
+        c.author in humans and c.last_edited_at is None
+        and c.body.strip() == ident.migration_marker
         for c in fact.value
     )
 
@@ -10993,19 +12991,42 @@ def _signed(text: str, by: str, at: str) -> bool:
     return isinstance(later, str) and isinstance(at, str) and later > at
 
 
+def _candidate_nodes(product: str, ops, number: int) -> list[str] | str:
+    """Узлы, которые candidate отдал на одобрение: его файлы со `status:
+    approval_pending` в его голове — независимо от того, что выбрал finalize (B1-13)."""
+    files = ops.brief_pr_fact(product, number)
+    head = _head(product, ops, number)
+    if files.outcome is not Outcome.FOUND or files.value is None or head is None:
+        return f"#{number}: состав или голова candidate не прочитаны"
+    nodes: list[str] = []
+    for path, _change in files.value.files:
+        text = ops.repo_file_fact(product, head, path)
+        if text.outcome is Outcome.UNAVAILABLE:
+            return f"#{number}: {path} в голове candidate не прочитан"
+        if text.outcome is Outcome.FOUND and text.value and path.endswith(".md"):
+            meta, _ = split_frontmatter(text.value)
+            if meta.get("status") == PENDING:
+                nodes.append(path)
+    return nodes
+
+
 def _legacy_resolved(product: str, ops, number: int, branch: str,
-                     by_branch: Mapping[str, dict]) -> str | None:
+                     by_branch: Mapping[str, dict]) -> str | tuple[str] | None:
     final = by_branch.get(branch + ab.finalize_suffix())
     if final is None or final["state"] != "MERGED":
         return f"#{number} candidate MERGED без смёрженного finalize — pending-finalize"
+    nodes = _candidate_nodes(product, ops, number)
+    if isinstance(nodes, str):
+        return (nodes,)
+    if not nodes:
+        return f"#{number} candidate MERGED: узлов на одобрении не найдено — разберите вручную"
     facts = ops.pr_facts(product, number)
     by = (facts.get("mergedBy") or {}).get("login")
     at = facts.get("mergedAt")
-    files = ops.brief_pr_fact(product, final["number"])
     tip = ops.default_branch_fact(product)
-    if files.outcome is not Outcome.FOUND or tip.outcome is not Outcome.FOUND:
-        return f"#{number}: состав finalize или голова базы не прочитаны"
-    for path, _change in files.value.files:
+    if tip.outcome is not Outcome.FOUND or tip.value is None:
+        return (f"#{number}: голова базы не прочитана",)
+    for path in nodes:
         text = ops.repo_file_fact(product, tip.value.sha, path)
         if text.outcome is not Outcome.FOUND or not _signed(text.value, by, at):
             return (f"#{number} candidate MERGED: {path} в базе без подписи этого акта "
@@ -11019,11 +13040,13 @@ def _judge(product, ops, pr: dict, by_branch, humans, confirmed) -> str | None |
     kind = _kind(branch)
     if kind is None or state == "CLOSED":
         return None
-    migrated = _migrated(product, ops, number, humans)
-    if isinstance(migrated, str):
-        return (migrated,)
-    if migrated:
-        return None
+    ident = _identity(product, branch)
+    if ident is not None:
+        migrated = _migrated(product, ops, number, ident, humans)
+        if isinstance(migrated, str):
+            return (migrated,)
+        if migrated:
+            return None
     if kind == "brief":
         if state == "OPEN":
             return f"#{number} brief-PR OPEN — заявка v1 без маркера"
@@ -11125,16 +13148,18 @@ def invalidate(product: str, ops, pr: int, *, humans: frozenset[str], caller: st
         raise RuntimeError(f"{caller} не в human_approvers текущей активации — маркер не ставится")
     branch = next((p["headRefName"] for p in ops.prs_by_head_prefix(product, "")
                    if p["number"] == pr), None)
-    req = _request(branch or "")
-    if req is None:
+    ident = _identity(product, branch or "")
+    if ident is None:
         raise RuntimeError(f"PR #{pr} не candidate/finalize заявки узла")
-    ops.comment(product, pr, MARKER.format(key=req[1]))
+    ops.comment(product, pr, ident.migration_marker)
     for run_id in rs.all_run_ids():
         state = rs.load(run_id)
-        op = state.ops.get(req[1])
-        if state.repo_slug == product and op is not None and al.is_live(op):
-            al.invalidate_request(state, req[1], "act_migrated")
-    return req[1]
+        if (state.repo_slug, state.ws_id) != (ident.product, ident.ws_id):
+            continue  # тот же ключ в другом воркстриме — другая заявка (B1-14)
+        op = state.ops.get(ident.request_id)
+        if op is not None and al.is_live(op):
+            al.invalidate_request(state, ident.request_id, "act_migrated")
+    return ident.request_id
 ```
 
 ```python
