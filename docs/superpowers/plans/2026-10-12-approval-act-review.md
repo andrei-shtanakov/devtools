@@ -3409,6 +3409,24 @@ error=…)`, «отказ | None», `raise`), но полноту не дока�
 - **Мутации затронутых строк** (scratch, -B): 11 закрыто (9 условие → `False`, 2 `BYPASS`),
   `not_merged` — `ruled`; `act_node._manifest:parseable`, `_try_agent_merge#form` и строки
   раннера/`_propose` — на стенде `World` / с хуками части B, прогон — Step 4a.
+
+### Правка по ревью b7
+
+Ревью `plan-review-b7` (B6-1/2/4/5 закрыты, B6-3 частично; 1 major):
+
+- **B7-1**: `asserts_reason` отслеживает происхождение сторон. Сравнение засчитывается, только
+  если одна сторона укоренена (база цепочки `Name`/`Attribute`/`Subscript`/`Call`) в наблюдаемом
+  значении — локальном результате вычисления, фикстуре или сборщике (`seen = []`), — а другая
+  содержит литерал или связанное с ним имя. Стороны из одних ожиданий (литерал, имена,
+  связанные с ним без вычисления, константы модуля, локальные данные из литералов, `dict(…)`)
+  отвергаются. Конъюнкты — только через `and`; `or`, `not`, IfExp и прочие формы не
+  засчитываются (fail closed); `!=`/`not in`/`is not` — только когда литерал реестра
+  охватывает всё сравнение с оператором. Самопроверки: 20 (было 11) — добавлены оба
+  контрпримера Codex (`expected["reason"] == expected["reason"]`,
+  `assert True or got.reason == "ПРИЧИНА"`), `!=`, `not`, IfExp, `dict(…)`-ожидание,
+  константа против литерала; положительные — конъюнкт `and`, `startswith`. Переписан один
+  двойник: `test_read_dag_state_review_debt` (генератор в `any(...)` — неподдерживаемая форма →
+  явный отбор долгов и сравнение причины).
 ### Task 11: Пин steward v0.2.0, совместимость вызовов gate-check, gate-catalog v3
 
 **Files:**
@@ -8836,7 +8854,8 @@ def test_read_dag_state_review_debt(world: World, stand: Stand,
     """b5 (`approve_node.read_dag_state#review_debt`): не approved — долг review/v1."""
     monkeypatch.setattr(act_status.Statuses, "of", lambda self, node: "not_approved:act:d1_no_act")
     got = an.read_dag_state(world.state, world.ops, an.bundle_dag.dag_for(None))
-    assert any(d.kind == na.DEBT_REVIEW_V1 and d.reason == "act:d1_no_act" for d in got.debts)
+    debts = [d for d in got.debts if d.kind == na.DEBT_REVIEW_V1]
+    assert len(debts) == 1 and debts[0].reason == "act:d1_no_act"
 
 
 @pytest.mark.parametrize("verdict,match", [
@@ -15836,21 +15855,30 @@ def test_row_check_literal_belongs_to_one_check(site, component, check, lit, twi
 
 
 def asserts_reason(fn: ast.FunctionDef, module_src: str, tlit: str) -> bool:
-    """Причина участвует в проверяемом условии о результате (b5–b6, B3-10/B6-3): в
-    `Assert.test` (не в сообщении `msg`) есть сравнение/вхождение/`startswith`, одна
-    сторона которого — литерал или связанное с ним имя, а другая выведена из результата
-    (имя, атрибут, вызов, подписка, не связанные с литералом); либо литерал (имя) — в
-    `pytest.raises(..., match=…)`. Тавтология `assert "ЛИТЕРАЛ"` и утверждение только о
-    типе не засчитываются."""
+    """Причина участвует в проверяемом условии о результате (b5–b7, B3-10/B6-3/B7-1).
+
+    Разбирается только `Assert.test` (не сообщение `msg`), на конъюнкты `and`. Конъюнкт —
+    сравнение `==`/`in`/`is` (или `startswith`/`endswith`) с происхождением сторон:
+    наблюдаемая сторона укоренена (база цепочки атрибутов/подписок/вызовов) в локальном
+    значении или вызове, а не в ожиданиях; ожидания — литерал и имена, связанные с ним без
+    вычисления (присваивание, `parametrize`, константы модуля). Принимается: (а) наблюдаемая
+    сторона без литерала против стороны с литералом; (б) литерал называет наблюдаемое
+    выражение (`decider._memo`) против чистого ожидания; (в) литерал — всё сравнение
+    (`… is None`) с наблюдаемой и ожидаемой сторонами; либо литерал (имя) в
+    `pytest.raises(..., match=…)`. Fail closed: сравнение только ожиданий, `or`, `not`, IfExp,
+    `!=`/`not in`, тавтология, утверждение только о типе — не засчитываются."""
     def seg(node: ast.AST) -> str:
         return ast.get_source_segment(module_src, node) or ""
 
+    pure = {"str", "repr", "len", "list", "tuple", "set", "frozenset", "sorted", "dict",
+            "bool", "int"}
+
     def no_call(node: ast.AST) -> bool:
-        """Нет вычисления вне лямбд (таблица подмен с лямбдами — данные)."""
+        """Нет вычисления вне лямбд и конструкторов данных (`dict(…)` — данные)."""
         stack = [node]
         while stack:
             n = stack.pop()
-            if isinstance(n, ast.Call):
+            if isinstance(n, ast.Call) and not (isinstance(n.func, ast.Name) and n.func.id in pure):
                 return False
             stack.extend(c for c in ast.iter_child_nodes(n) if not isinstance(c, ast.Lambda))
         return True
@@ -15865,11 +15893,16 @@ def asserts_reason(fn: ast.FunctionDef, module_src: str, tlit: str) -> bool:
                 out |= names_of(list(t.elts))
         return out
 
-    bound: set[str] = set()
-    for node in [*ast.walk(fn), *ast.parse(module_src).body]:
-        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None \
-                and tlit in seg(node.value) and no_call(node.value):  # данные, не результат
-            bound |= names_of(node.targets if isinstance(node, ast.Assign) else [node.target])
+    def assigns(scope: list[ast.AST]) -> list[tuple[set[str], ast.AST]]:
+        return [(names_of(n.targets if isinstance(n, ast.Assign) else [n.target]), n.value)
+                for n in scope if isinstance(n, (ast.Assign, ast.AnnAssign)) and n.value is not None]
+
+    own, module = assigns(list(ast.walk(fn))), assigns(ast.parse(module_src).body)
+    constants = {n for names, _ in module for n in names}  # данные модуля — не наблюдение
+    bound: set[str] = set()  # ожидания: связанные с литералом данные (без вычисления)
+    for names, value in own + module:
+        if tlit in seg(value) and no_call(value):
+            bound |= names
     for dec in fn.decorator_list:
         if isinstance(dec, ast.Call) and "parametrize" in ast.unparse(dec.func) and tlit in seg(dec):
             first = dec.args[0]
@@ -15877,49 +15910,94 @@ def asserts_reason(fn: ast.FunctionDef, module_src: str, tlit: str) -> bool:
                      ",".join(e.value for e in getattr(first, "elts", []) if isinstance(e, ast.Constant)))
             bound |= {n.strip() for n in str(names).split(",")}
     changed = True
-    while changed:  # имена, выведенные из связанных без вычисления (`a, b = TABLE[c]`, `x = d[k]`)
+    while changed:  # имена, выведенные из ожиданий без вычисления (`a, b = TABLE[c]`)
         changed = False
-        for node in ast.walk(fn):
-            if isinstance(node, ast.Assign) and no_call(node.value) and {
-                    n.id for n in ast.walk(node.value) if isinstance(n, ast.Name)} & bound:
-                new = names_of(node.targets)
-                if not new <= bound:
-                    bound |= new
+        for names, value in own:
+            if no_call(value) and {n.id for n in ast.walk(value) if isinstance(n, ast.Name)} & bound:
+                if not names <= bound:
+                    bound |= names
                     changed = True
+
+    # локальные данные без вычисления (`commit = "…"`) — ожидание; пустой контейнер — сборщик,
+    # который наполняет проверяемый код (`seen = []`), — наблюдение
+    empty = (ast.List(elts=[]), ast.Dict(keys=[], values=[]))
+    data: set[str] = set()
+    changed = True
+    while changed:  # данные — из литералов и других данных, не из наблюдаемых имён
+        changed = False
+        for names, value in own:
+            local = {t.id for c in ast.walk(value) if isinstance(c, ast.comprehension)
+                     for t in ast.walk(c.target) if isinstance(t, ast.Name)}
+            refs = {r.id for r in ast.walk(value) if isinstance(r, ast.Name)} - local
+            if (no_call(value) and ast.dump(value) not in {ast.dump(e) for e in empty}
+                    and refs <= bound | constants | data | pure and not names <= data):
+                data |= names
+                changed = True
+
+    def rooted(node: ast.AST) -> bool:
+        """Наблюдаемое: корень цепочки — локальное значение/фикстура или вызов, не ожидание."""
+        if isinstance(node, ast.Name):
+            return node.id not in bound | constants | data
+        if isinstance(node, (ast.Tuple, ast.List)):
+            return bool(node.elts) and all(rooted(e) for e in node.elts)
+        if isinstance(node, (ast.Attribute, ast.Subscript)):
+            return rooted(node.value)
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in pure:
+                return any(rooted(a) for a in node.args)
+            return rooted(node.func)
+        return False
 
     def mentions(node: ast.AST) -> bool:
         return tlit in seg(node) or any(isinstance(n, ast.Name) and n.id in bound
                                         for n in ast.walk(node))
 
-    def derived(node: ast.AST) -> bool:
-        """Сторона, выведенная из результата: вычисление или имя, не связанное с литералом."""
-        return any((isinstance(n, ast.Name) and n.id not in bound)
-                   or isinstance(n, (ast.Attribute, ast.Call, ast.Subscript))
-                   for n in ast.walk(node))
+    def root(node: ast.AST) -> str | None:
+        while isinstance(node, (ast.Attribute, ast.Subscript, ast.Call)):
+            node = node.func if isinstance(node, ast.Call) else node.value
+        return node.id if isinstance(node, ast.Name) else None
 
-    def literal_side(node: ast.AST) -> bool:
-        """Сторона-ожидание: литерал или связанное имя, без вызова."""
-        return mentions(node) and no_call(node)
+    def inputs_only(node: ast.AST) -> bool:
+        """Ожидания в наблюдаемой стороне — только аргументы вызова (входы), не её корень."""
+        args = {id(n) for c in ast.walk(node) if isinstance(c, ast.Call)
+                for a in [*c.args, *(k.value for k in c.keywords)] for n in ast.walk(a)}
+        return all(id(n) in args for n in ast.walk(node)
+                   if isinstance(n, ast.Name) and n.id in bound)
+
+    def observed(node: ast.AST) -> bool:
+        return rooted(node) and tlit not in seg(node) and inputs_only(node)
+
+    def expectation(node: ast.AST) -> bool:
+        return no_call(node) and not any(isinstance(n, ast.Name) and rooted(n)
+                                         for n in ast.walk(node))
+
+    def conjuncts(e: ast.AST) -> list[ast.AST]:
+        if isinstance(e, ast.BoolOp) and isinstance(e.op, ast.And):
+            return [c for v in e.values for c in conjuncts(v)]
+        return [e]
+
+    def checks_reason(e: ast.AST) -> bool:
+        if isinstance(e, ast.Compare):
+            sides = [e.left, *e.comparators]
+            pairs = [(a, b) for a in sides for b in sides if a is not b]
+            if tlit in seg(e) and not any(tlit in seg(s) for s in sides):
+                # литерал — всё сравнение вместе с оператором (`… is not None`, `x is refused`):
+                # наблюдаемая сторона против ожидания или значения с другим корнем
+                return any(observed(a) and (expectation(b) or root(b) not in (None, root(a)))
+                           for a, b in pairs)
+            if not all(isinstance(op, (ast.Eq, ast.In, ast.Is)) for op in e.ops):
+                return False
+            return (any(observed(a) and mentions(b) and (no_call(b) or tlit in seg(b))
+                        for a, b in pairs)
+                    or any(rooted(a) and tlit in seg(a) and expectation(b) for a, b in pairs))
+        if (isinstance(e, ast.Call) and isinstance(e.func, ast.Attribute)
+                and e.func.attr in ("startswith", "endswith")):
+            return observed(e.func.value) and (tlit in seg(e) or any(mentions(a) for a in e.args))
+        return False
 
     for node in ast.walk(fn):
-        if isinstance(node, ast.Assert):
-            for n in ast.walk(node.test):  # только условие, без `msg`
-                if isinstance(n, ast.Compare):
-                    sides = [n.left, *n.comparators]
-                    # литерал (или связанное имя) — в этом сравнении, и хотя бы одна сторона
-                    # выведена из результата и сама литерала не содержит
-                    for lit in [s for s in sides if literal_side(s)]:
-                        if any(derived(s) for s in sides if s is not lit):
-                            return True
-                    # литерал — всё сравнение целиком (свойство: `f(x) is None`)
-                    if tlit in seg(n) and any(derived(s) and tlit not in seg(s) for s in sides) \
-                            and not all(literal_side(s) for s in sides):
-                        return True
-                if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                        and n.func.attr in ("startswith", "endswith")
-                        and (tlit in seg(n) or any(mentions(a) for a in n.args))
-                        and derived(n.func.value) and not mentions(n.func.value)):
-                    return True
+        if isinstance(node, ast.Assert) and any(checks_reason(c) for c in conjuncts(node.test)):
+            return True
         if isinstance(node, ast.Call) and "raises" in ast.unparse(node.func):
             if any(kw.arg == "match" and mentions(kw.value) for kw in node.keywords):
                 return True
@@ -15945,9 +16023,21 @@ def _assert_src(body: str, module: str = "") -> bool:
     ('got = f()\nassert isinstance(got, Unavailable), "ПРИЧИНА"', "", False),
     ('expected = "ПРИЧИНА"\ngot = f()\nassert isinstance(got, Unavailable), expected', "", False),
     ('assert "ПРИЧИНА"', "", False),
+    ('expected = {"reason": "ПРИЧИНА"}\ngot = f()\nassert isinstance(got, Unavailable)\n'
+     'assert expected["reason"] == expected["reason"]', "", False),
+    ('got = f()\nassert True or got.reason == "ПРИЧИНА"', "", False),
+    ('got = f()\nassert got.reason != "ПРИЧИНА"', "", False),
+    ('got = f()\nassert not got.reason == "ПРИЧИНА"', "", False),
+    ('got = f()\nassert got.reason == "ПРИЧИНА" if x else True', "", False),
+    ('got = f()\nassert isinstance(got, Unavailable) and got.reason == "ПРИЧИНА"', "", True),
+    ('got = f()\nassert got.reason.startswith("ПРИЧИНА")', "", True),
+    ('expected = dict(reason="ПРИЧИНА")\nassert expected["reason"] == "ПРИЧИНА"', "", False),
+    ('assert REASON == "ПРИЧИНА"', 'REASON = "ПРИЧИНА"', False),
 ], ids=["literal_in_assert", "bound_name", "raises_match", "assignment_only",
         "comment_only", "module_constant_unused", "module_constant_used", "exit_code_only",
-        "message_only", "bound_in_message", "tautology"])
+        "message_only", "bound_in_message", "tautology", "expected_vs_expected", "or_true_branch",
+        "not_equal", "negated", "ifexp", "and_conjunct", "startswith", "expected_dict_call",
+        "constant_vs_literal"])
 def test_reason_link_mechanism(body: str, module: str, expected: bool) -> None:
     """B3-10: самопроверка механизма (b) на отрицательных и положительных двойниках."""
     assert _assert_src(body, module) is expected
