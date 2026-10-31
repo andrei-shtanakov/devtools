@@ -3366,6 +3366,49 @@ error=…)`, «отказ | None», `raise`), но полноту не дока�
   обходом (144 условие → `False`, 57 `BYPASS`), 4 в `RULED` (хранилище журнала недоступно /
   утрачено, нет файла блокировки, PR не смёржен — продолжить без данных нечем); выживших и
   ошибок нет. 53 строки (`World`, раннер, проверки изменённых функций) — Step 4a.
+
+### Правки по ревью b6
+
+Ревью `plan-review-b6` (5 major, все в диффе b5). Только эти пять:
+
+- **B6-1**: фрагмент `_require_upstream_ready` передаёт локальный `text` функции
+  (`_review_debt(up, text, verdict)`), а не `texts[up]` из `read_dag_state`. Проверено
+  подстановкой фрагмента в настоящую функцию части A (scratch): режим не установлен, upstream
+  `unavailable:`, upstream не одобрен (причина долга `review_v1`) и `pre_migration` (прежнее
+  поведение части A) — 4 passed.
+- **B6-2**: двойники `act_incompatible` / `other_pin` строятся на двух узлах одного шага
+  (`design` и `acceptance` — оба ждут `behaviour-spec`): `_level_three` одобряет
+  charter → requirements → behaviour-spec на `pre_migration`, затем режим `review` и статусы
+  трёх узлов «одобрен»; живая заявка над `design` создаётся одним актом/активацией, `acceptance`
+  присоединяется другим — отказ guard'а, без пропуска. Двойник преемника вызывает одобрение
+  `acceptance` с `predecessor=…`, над которым живой заявки нет, — до `_advance` дело не доходит,
+  отказывает новый guard. Production-маршрутизация не менялась.
+- **B6-3**: `asserts_reason` анализирует только `Assert.test` (сообщение `Assert.msg`
+  исключено); `assert "ЛИТЕРАЛ"` отвергается; литерал должен сравниваться с выражением,
+  производным от результата (имя из вызова, атрибут/подписка/вызов над ним; `in`/`==`,
+  `startswith`/`endswith` над производным, `raises(match=)`). Самопроверки дополнены тремя
+  отрицательными: причина только в сообщении `assert`, причина через имя только в сообщении,
+  тавтология `assert "ПРИЧИНА"`. Двойники, державшиеся на сообщении или на литерале без
+  сравнения с результатом, переписаны (`memo_only_sha`, `memo_request`, `head_sha`,
+  `ssot_roundtrip`, `stale`, `violation_wins`, маркер барьера).
+- **B6-4**: `tests/act_mutation.py --check` — применимость операторов ко ВСЕМ строкам без
+  двойников; Step 4a начинается с неё. При ревизии **259/259**: 249 — по коду scratch (186
+  условие → `False`, 58 `BYPASS`, 5 `RULED`), 10 строк `<функция>#<проверка>` — по AST
+  фрагментов плана (в scratch хуков части B нет; 9 условие → `False`, 1 `BYPASS`). Поиск
+  функции проверки — по всем одноимённым определениям, а не по первому (протокол и
+  реализация с одним именем; в scratch это дало ложное `n/a` для `RealOps.pr_body_fact`). Найдено и исправлено: `act_node._manifest:
+  parseable` (`except RequestError`) — `BYPASS` «нечитаемый манифест = манифеста нет»
+  (`return None`): двойник ждёт `invalidated` с причиной «манифест … не читается»;
+  `_try_agent_merge#form` (IfExp `form() if form is not None`, литерал не в условии) — `BYPASS`
+  `defect = None` (дефекта формы нет → агентский мерж).
+- **B6-5**: строка `check_delivery × not_merged` возвращена (двойник
+  `test_not_merged_waits`: `check_delivery(context(merged=False)) == WaitingDelivery()`).
+  Отключение guard'а не доходит до `decide`: `parse_ts(None)` падает раньше — обход с
+  корректными данными подменил бы сам факт мержа, поэтому строка в `RULED` с этой причиной.
+  Прежнее объяснение b5 («недостижима, дублируется `decide`») было неверным.
+- **Мутации затронутых строк** (scratch, -B): 11 закрыто (9 условие → `False`, 2 `BYPASS`),
+  `not_merged` — `ruled`; `act_node._manifest:parseable`, `_try_agent_merge#form` и строки
+  раннера/`_propose` — на стенде `World` / с хуками части B, прогон — Step 4a.
 ### Task 11: Пин steward v0.2.0, совместимость вызовов gate-check, gate-catalog v3
 
 **Files:**
@@ -6089,7 +6132,9 @@ def test_blocked_journal_blocks() -> None:
 
 def test_stale_snapshot_reloads() -> None:
     journal = Journal([act_trust.STALE, "clear"])
-    assert isinstance(load(trust_routes(None, J1), journal), act_trust.Trust)
+    got = load(trust_routes(None, J1), journal)
+    assert isinstance(got, act_trust.Trust)
+    assert journal.states == ["clear"]  # STALE израсходован: снимок перечитан
 
 
 def test_token_with_push_records_and_blocks() -> None:
@@ -6121,7 +6166,7 @@ def test_violation_wins_over_other_unavailable() -> None:
         ("env:GH_TOKEN", f"repos/{DT}"): Fact(Outcome.FOUND, _perms(True), "ok"),
     }
     load(trust_routes(None, J1), journal, creds=(AGENT, tok), answers=answers)
-    assert journal.records
+    assert journal.records and journal.records[0][0] == "df-trust"
 
 
 def test_self_report_404_is_unavailable_without_record() -> None:
@@ -8511,6 +8556,7 @@ from tests.test_governance_approve_node import (  # noqa: E402
     Ops,
     World,
     _git,
+    drive_to_approved,
     _make_world,
     _show,
     approve,
@@ -8711,14 +8757,18 @@ def test_open_candidate_in_merge_mode_refused(world: World, stand: Stand) -> Non
     assert world.forge.prs[pr]["state"] == "OPEN"
 
 
-def _peer_of_charter() -> str:
-    """Другой узел того же шага, что charter (без upstream); нет такого — тест не применим."""
-    dag = an.bundle_dag.dag_for(None)
-    peers = [an.bundle_dag.node_id(f) for f, ups in dag if not ups
-             and an.bundle_dag.node_id(f) != "charter"]
-    if not peers:
-        pytest.skip("в DAG нет второго корневого узла — присоединение к шагу не моделируется")
-    return peers[0]
+def _level_three(world: World, stand: Stand, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Стенд до шага, где `design` и `acceptance` — два узла одного шага с общими
+    upstream (`requirements`, `behaviour-spec`): upstream проведены старым путём до
+    миграции; их статус в продукте review — «approved» (судят двойники `LegacyProbe`,
+    здесь — только проверки присоединения)."""
+    stand.mode = act_trust.PRE_MIGRATION
+    for node in ("charter", "requirements", "behaviour-spec"):
+        drive_to_approved(world, node)
+    real_of = act_status.Statuses.of
+    monkeypatch.setattr(act_status.Statuses, "of", lambda self, node: (
+        act_status.APPROVED if node in ("charter", "requirements", "behaviour-spec")
+        else real_of(self, node)))
 
 
 def _child_of_charter() -> str:
@@ -8726,27 +8776,33 @@ def _child_of_charter() -> str:
     return next(an.bundle_dag.node_id(f) for f, ups in dag if "charter" in ups)
 
 
-def test_join_live_legacy_request_refused(world: World, stand: Stand) -> None:
-    """b5 (`approve_node._propose#act_incompatible`): живая заявка шага без маркера и новая
-    `review/v1` в одну не соединяются."""
-    stand.mode = act_trust.PRE_MIGRATION
-    first = approve(world, "charter")
+def test_join_live_legacy_request_refused(world: World, stand: Stand,
+                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    """b5/b6 (`approve_node._propose#act_incompatible`): живая заявка шага без маркера
+    (`design`, до миграции) и новая `review/v1` (`acceptance`, тот же шаг) в одну не
+    соединяются."""
+    _level_three(world, stand, monkeypatch)
+    first = approve(world, "design")  # заявка без маркера над шагом
     stand.mode = "review"
     with pytest.raises(RuntimeError, match="в одну заявку они не соединяются"):
-        approve(world, _peer_of_charter())
+        approve(world, "acceptance")
     assert world.state.ops[first.request]["status"] == al.STATUS_STARTED
+    assert world.state.ops[first.request]["nodes"] == ["design"]
 
 
 def test_join_request_pinned_to_other_activation_refused(world: World, stand: Stand,
                                                          monkeypatch: pytest.MonkeyPatch) -> None:
-    """b5 (`approve_node._propose#other_pin`): живая заявка шага закрепила другую
-    активацию — узел к ней не дописывается."""
-    approve(world, "charter")
+    """b5/b6 (`approve_node._propose#other_pin`): живая заявка шага (`design`, review/v1)
+    закрепила другую активацию — `acceptance` того же шага к ней не дописывается."""
+    _level_three(world, stand, monkeypatch)
+    stand.mode = "review"
+    first = approve(world, "design")
     newer = ActivationView(("activation", "b" * 40), "b" * 40, NOW)
     monkeypatch.setattr(act_status, "mode_probe", lambda state, deps=None: replace(
         stand.live(), activation=newer))
     with pytest.raises(RuntimeError, match="закрепила другую активацию"):
-        approve(world, _peer_of_charter())
+        approve(world, "acceptance")
+    assert world.state.ops[first.request]["nodes"] == ["design"]
 
 
 def test_review_status_unavailable_blocks_proposal(world: World, stand: Stand,
@@ -10350,14 +10406,17 @@ def test_two_successors_refused(world, stand):
         al.successor_of(world.state, key)
 
 
-def test_successor_refused_when_step_has_live_request(world, stand):
-    """b5 (`approve_node._propose#successor_joins_live`): у шага уже есть живая заявка —
-    преемник не создаётся, живая не трогается."""
-    first = approve(world, "charter")
-    key = first.request
+def test_successor_refused_when_step_has_live_request(world, stand, monkeypatch):
+    """b5/b6 (`approve_node._propose#successor_joins_live`): над `acceptance` заявки нет, но
+    у её шага есть живая (`design`) — преемник не создаётся и к ней не присоединяется."""
+    from tests.test_act_node import _level_three
+
+    _level_three(world, stand, monkeypatch)
+    stand.mode = "review"
+    first = approve(world, "design")
     with pytest.raises(RuntimeError, match="уже есть — продвиньте её"):
-        an.approve_node(world.state, world.ops, "charter", predecessor="approve-9-9-9")
-    assert world.state.ops[key]["status"] == al.STATUS_STARTED
+        an.approve_node(world.state, world.ops, "acceptance", predecessor="approve-9-9-9")
+    assert world.state.ops[first.request]["nodes"] == ["design"]
 
 
 def test_completed_request_refused(world, stand):
@@ -10423,7 +10482,7 @@ predecessor: str | None = None)` передаёт `predecessor` в `_propose(...
 проверка части B; реестр — `approve_node._propose#successor_joins_live`):
 
 ```python
-    if predecessor is not None and joined is not None:
+    if predecessor is not None and joined is not None:  # первой из проверок присоединения
         raise RuntimeError(
             f"живая заявка шага {al.request_key(*joined[0])} уже есть — продвиньте её, "
             f"преемник {predecessor} не создаётся"
@@ -11025,6 +11084,7 @@ def test_decider_memo_is_per_request_not_per_commit(monkeypatch, order) -> None:
     got = {events[i].request.request_id: decider(events[i]) for i in order}
     assert isinstance(got["approve-1-0-1"], Accepted)
     assert isinstance(got["approve-1-0-2"], Rejected)
+    assert got["approve-1-0-2"].code == act_status.REQUEST_BINDING
 
 
 # --- история базы (merge и squash, B1-9) — настоящий git ----------------------------
@@ -12870,15 +12930,23 @@ def _review_debt(node: str, text: str, verdict: str) -> na.NodeDebt:
         raise _unresolved(f"режим акта продукта (upstream {node_id}): {live.reason}")
     statuses = (act_status.statuses_at_base(state, ops, dag, live)
                 if live.mode == "review" else None)
-    ...  # в цикле по прямым upstream `up`, до прежнего `node_debt`:
+    for up in _upstreams(dag, node_id):
+        text = _base_text(ops, state, _filename(dag, up))
         if statuses is not None:
             verdict = statuses.of(up)
             if verdict.startswith("unavailable:"):
                 raise _unresolved(f"upstream {up} узла {node_id}: {verdict}")
             if verdict != act_status.APPROVED:
                 raise RuntimeError(f"upstream {up} не одобрен (review/v1): "
-                                   f"{_review_debt(up, texts[up], verdict).reason}")
+                                   f"{_review_debt(up, text, verdict).reason}")
             continue
+        debt = na.node_debt(  # прежний код без изменений
+            up,
+            text,
+            _base_upstream_blobs(ops, state, dag, up),
+            awaiting_merge_pr=_pr_awaiting_merge(state, up),
+        )
+        ...  # прежние `continue` / `RuntimeError` без изменений
 ```
 
 Словами: один `mode_probe`; `Unavailable` — `_unresolved`;
@@ -14562,22 +14630,21 @@ def test_human_migration_marker_resolves() -> None:
     assert run(Ops([pr(5, CAND, "OPEN")], comments={5: [marker]})).items == ()
 
 
-@pytest.mark.parametrize("comment", [
-    PrComment("c1", "ai-prosto", MARK, "t", None),
-    PrComment("c1", "alice", MARK, "t", "2026-10-11"),
-    PrComment("c1", "alice", "<!-- act-migrated: approve-2-1-1 -->", "t", None),
-    PrComment("c1", "alice", RequestIdentity(P, "ws-8", "approve-2-1-1").migration_marker,
-              "t", None),
-    PrComment("c1", "alice", RequestIdentity(P, "ws-7", "approve-9-9-9").migration_marker,
-              "t", None),
-    PrComment("c1", "alice", RequestIdentity("owner/q", "ws-7", "approve-2-1-1")
-              .migration_marker, "t", None),
+@pytest.mark.parametrize("comment,reason", [
+    (PrComment("c1", "ai-prosto", MARK, "t", None), "маркер не от human_approvers"),
+    (PrComment("c1", "alice", MARK, "t", "2026-10-11"), "маркер правлен"),
+    (PrComment("c1", "alice", "<!-- act-migrated: approve-2-1-1 -->", "t", None),
+     "маркер не этой заявки"),
+    (PrComment("c1", "alice", RequestIdentity(P, "ws-8", "approve-2-1-1").migration_marker,
+               "t", None), "маркер не этой заявки"),
+    (PrComment("c1", "alice", RequestIdentity(P, "ws-7", "approve-9-9-9").migration_marker,
+               "t", None), "маркер не этой заявки"),
+    (PrComment("c1", "alice", RequestIdentity("owner/q", "ws-7", "approve-2-1-1")
+               .migration_marker, "t", None), "маркер не этой заявки"),
 ], ids=["author", "edited", "old_form", "ws_id", "request_id", "product"])
-def test_marker_must_be_human_unedited_and_this_request(request, comment: PrComment) -> None:
+def test_marker_must_be_human_unedited_and_this_request(comment: PrComment, reason: str) -> None:
     """B1-14/b4: маркер агента, правленый, старой формы или с чужой идентичностью —
     отвергнут с причиной своей проверки."""
-    reason = {"author": "маркер не от human_approvers",
-              "edited": "маркер правлен"}.get(request.node.callspec.id, "маркер не этой заявки")
     got = run(Ops([pr(5, CAND, "OPEN")], comments={5: [comment]}))
     assert len(got.items) == 1 and got.items[0].endswith(reason)
 
@@ -14802,7 +14869,7 @@ JUDGMENT = {
     # --- act_anon
     "act_anon.AnonTransport.send": (
         r("memo_only_sha", "act_anon.AnonTransport.send", "_IMMUTABLE.match(path)",
-          f"{A}::test_memo_only_for_sha_addressed_paths", "_IMMUTABLE"),
+          f"{A}::test_memo_only_for_sha_addressed_paths", "t.sent == [commit, pulls, pulls]"),
         r("relative_get", "act_anon.AnonTransport.send", "_UNSAFE_PATH.search(path)",
           f"{A}::test_only_relative_get", '"только GET относительного пути"'),
     ),
@@ -14821,6 +14888,8 @@ JUDGMENT = {
     ),
     # --- act_check / act_decision (Task 12)
     "act_check.check_delivery": (
+        r("not_merged", "act_check.check_delivery", "not ctx.delivery.merged",
+          f"{C}::test_not_merged_waits", "WaitingDelivery()"),
         r("product", "act_check._pinned_policy", "ctx.request.product != ctx.product",
           f"{C}::test_manifest_product_must_be_delivery_repo", "REQUEST_BINDING"),
         r("act_head", "act_decision.decide", "if act is None",
@@ -14934,10 +15003,10 @@ JUDGMENT = {
         r("blocked", "act_trust._snapshot_for_decision", 'state != "clear"',
           f"{T}::test_blocked_journal_blocks", '"периметр заблокирован"'),
         r("stale", "act_trust._snapshot_for_decision", "state == STALE",
-          f"{T}::test_stale_snapshot_reloads", "act_trust.Trust)"),
+          f"{T}::test_stale_snapshot_reloads", '["clear"]'),
     ),
     "act_trust.load_trust": (r("violation_wins", "act_trust.load_trust", "isinstance(found, tuple)",
-                               f"{T}::test_violation_wins_over_other_unavailable", "journal.records"),),
+                               f"{T}::test_violation_wins_over_other_unavailable", '"df-trust"'),),
     "act_trust.policy_set": (
         r("bytes_vs_activation", "act_trust.policy_set",
           "hashlib.sha256(raw).hexdigest() != digest",
@@ -15087,7 +15156,8 @@ JUDGMENT = {
         r("memo_key", "act_status.Decider.__call__", "key = (*ident.memo_key, event.merge_commit)",
           f"{S}::test_decider_memo_key_carries_full_identity", "decider._memo"),
         r("memo_request", "act_status.Decider.__call__", "key = (*ident.memo_key, event.merge_commit)",
-          f"{S}::test_decider_memo_is_per_request_not_per_commit[good_first]", '"approve-1-0-2"'),
+          f"{S}::test_decider_memo_is_per_request_not_per_commit[good_first]",
+          "act_status.REQUEST_BINDING"),
     ),
     "act_status.Decider.trust": (r("binding", "act_status.Decider.trust", "if binding is None",
                                    f"{S}::test_decider_without_binding_trust_unavailable",
@@ -15099,14 +15169,15 @@ JUDGMENT = {
         r("merge_commit", "act_status.Decider._decide", "delivery.merge_commit != event.merge_commit",
           f"{S}::test_decider_delivery_of_other_merge_commit_unavailable", "доставил"),
         r("head_sha", "act_status.Decider._decide", "head_sha=event.head_sha",
-          f"{S}::test_decider_judges_review_on_event_head", 'seen[0]["head_sha"]'),
+          f"{S}::test_decider_judges_review_on_event_head", '"h" * 40'),
     ),
     "act_status.Decider.legacy": (r("contract_result", "act_status.Decider.legacy", "legacy=contract",
                                     f"{L}::test_decider_legacy_returns_contract_result", "is refused"),),
     "act_status.candidate_identity": (
         r("ssot_roundtrip", "act_status.candidate_identity",
           "approval_branches.candidate_branch(m[\"ws\"], w, k, a) != branch",
-          f"{L}::test_candidate_identity_round_trips_ssot_form", '"spec/ws-7-approve-01-0-1"'),
+          f"{L}::test_candidate_identity_round_trips_ssot_form",
+          'act_status.candidate_identity("spec/ws-7-approve-01-0-1") is None'),
     ),
     "act_status.legacy_contract_refusal": (
         r("pending", "act_status.legacy_contract_refusal", "return NOT_PENDING",
@@ -15765,23 +15836,40 @@ def test_row_check_literal_belongs_to_one_check(site, component, check, lit, twi
 
 
 def asserts_reason(fn: ast.FunctionDef, module_src: str, tlit: str) -> bool:
-    """Причина участвует в утверждении о результате (b5, B3-10), а не просто встречается:
-    литерал — внутри `assert` либо в `pytest.raises(..., match=…)`; либо литерал связан с
-    именем (присваивание, параметр `parametrize`, словарь/константа модуля), и это имя —
-    внутри `assert`/`match=`. Утверждение только о типе литерала не содержит."""
+    """Причина участвует в проверяемом условии о результате (b5–b6, B3-10/B6-3): в
+    `Assert.test` (не в сообщении `msg`) есть сравнение/вхождение/`startswith`, одна
+    сторона которого — литерал или связанное с ним имя, а другая выведена из результата
+    (имя, атрибут, вызов, подписка, не связанные с литералом); либо литерал (имя) — в
+    `pytest.raises(..., match=…)`. Тавтология `assert "ЛИТЕРАЛ"` и утверждение только о
+    типе не засчитываются."""
     def seg(node: ast.AST) -> str:
         return ast.get_source_segment(module_src, node) or ""
 
-    checks = [seg(n) for n in ast.walk(fn) if isinstance(n, ast.Assert)]
-    checks += [seg(kw.value) for n in ast.walk(fn) if isinstance(n, ast.Call)
-               and "raises" in ast.unparse(n.func) for kw in n.keywords if kw.arg == "match"]
-    if any(tlit in c for c in checks):
+    def no_call(node: ast.AST) -> bool:
+        """Нет вычисления вне лямбд (таблица подмен с лямбдами — данные)."""
+        stack = [node]
+        while stack:
+            n = stack.pop()
+            if isinstance(n, ast.Call):
+                return False
+            stack.extend(c for c in ast.iter_child_nodes(n) if not isinstance(c, ast.Lambda))
         return True
+
+    def names_of(targets: list[ast.AST]) -> set[str]:
+        """Только имена (в т. ч. в распаковке), не базы атрибутов/подписок."""
+        out: set[str] = set()
+        for t in targets:
+            if isinstance(t, ast.Name):
+                out.add(t.id)
+            elif isinstance(t, (ast.Tuple, ast.List)):
+                out |= names_of(list(t.elts))
+        return out
+
     bound: set[str] = set()
     for node in [*ast.walk(fn), *ast.parse(module_src).body]:
-        if isinstance(node, (ast.Assign, ast.AnnAssign)) and tlit in seg(node.value):
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            bound |= {n.id for t in targets for n in ast.walk(t) if isinstance(n, ast.Name)}
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None \
+                and tlit in seg(node.value) and no_call(node.value):  # данные, не результат
+            bound |= names_of(node.targets if isinstance(node, ast.Assign) else [node.target])
     for dec in fn.decorator_list:
         if isinstance(dec, ast.Call) and "parametrize" in ast.unparse(dec.func) and tlit in seg(dec):
             first = dec.args[0]
@@ -15789,18 +15877,53 @@ def asserts_reason(fn: ast.FunctionDef, module_src: str, tlit: str) -> bool:
                      ",".join(e.value for e in getattr(first, "elts", []) if isinstance(e, ast.Constant)))
             bound |= {n.strip() for n in str(names).split(",")}
     changed = True
-    while changed:  # имена, выведенные из связанных (`change, reason = TABLE[c]`, `x = d[k]`)
+    while changed:  # имена, выведенные из связанных без вычисления (`a, b = TABLE[c]`, `x = d[k]`)
         changed = False
         for node in ast.walk(fn):
-            if isinstance(node, ast.Assign) and {n.id for n in ast.walk(node.value)
-                                                 if isinstance(n, ast.Name)} & bound:
-                new = {n.id for t in node.targets for n in ast.walk(t) if isinstance(n, ast.Name)}
+            if isinstance(node, ast.Assign) and no_call(node.value) and {
+                    n.id for n in ast.walk(node.value) if isinstance(n, ast.Name)} & bound:
+                new = names_of(node.targets)
                 if not new <= bound:
                     bound |= new
                     changed = True
-    used = {n.id for c in checks for n in ast.walk(ast.parse(c.strip() or "pass", mode="exec"))
-            if isinstance(n, ast.Name)}
-    return bool(bound & used)
+
+    def mentions(node: ast.AST) -> bool:
+        return tlit in seg(node) or any(isinstance(n, ast.Name) and n.id in bound
+                                        for n in ast.walk(node))
+
+    def derived(node: ast.AST) -> bool:
+        """Сторона, выведенная из результата: вычисление или имя, не связанное с литералом."""
+        return any((isinstance(n, ast.Name) and n.id not in bound)
+                   or isinstance(n, (ast.Attribute, ast.Call, ast.Subscript))
+                   for n in ast.walk(node))
+
+    def literal_side(node: ast.AST) -> bool:
+        """Сторона-ожидание: литерал или связанное имя, без вызова."""
+        return mentions(node) and no_call(node)
+
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Assert):
+            for n in ast.walk(node.test):  # только условие, без `msg`
+                if isinstance(n, ast.Compare):
+                    sides = [n.left, *n.comparators]
+                    # литерал (или связанное имя) — в этом сравнении, и хотя бы одна сторона
+                    # выведена из результата и сама литерала не содержит
+                    for lit in [s for s in sides if literal_side(s)]:
+                        if any(derived(s) for s in sides if s is not lit):
+                            return True
+                    # литерал — всё сравнение целиком (свойство: `f(x) is None`)
+                    if tlit in seg(n) and any(derived(s) and tlit not in seg(s) for s in sides) \
+                            and not all(literal_side(s) for s in sides):
+                        return True
+                if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                        and n.func.attr in ("startswith", "endswith")
+                        and (tlit in seg(n) or any(mentions(a) for a in n.args))
+                        and derived(n.func.value) and not mentions(n.func.value)):
+                    return True
+        if isinstance(node, ast.Call) and "raises" in ast.unparse(node.func):
+            if any(kw.arg == "match" and mentions(kw.value) for kw in node.keywords):
+                return True
+    return False
 
 
 def _assert_src(body: str, module: str = "") -> bool:
@@ -15819,8 +15942,12 @@ def _assert_src(body: str, module: str = "") -> bool:
     ('got = f()\nassert isinstance(got, Unavailable)', 'REASON = "ПРИЧИНА"', False),
     ('got = f()\nassert got.reason == REASON', 'REASON = "ПРИЧИНА"', True),
     ('unused = "ПРИЧИНА"\nassert f() == 3', "", False),
+    ('got = f()\nassert isinstance(got, Unavailable), "ПРИЧИНА"', "", False),
+    ('expected = "ПРИЧИНА"\ngot = f()\nassert isinstance(got, Unavailable), expected', "", False),
+    ('assert "ПРИЧИНА"', "", False),
 ], ids=["literal_in_assert", "bound_name", "raises_match", "assignment_only",
-        "comment_only", "module_constant_unused", "module_constant_used", "exit_code_only"])
+        "comment_only", "module_constant_unused", "module_constant_used", "exit_code_only",
+        "message_only", "bound_in_message", "tautology"])
 def test_reason_link_mechanism(body: str, module: str, expected: bool) -> None:
     """B3-10: самопроверка механизма (b) на отрицательных и положительных двойниках."""
     assert _assert_src(body, module) is expected
@@ -16247,9 +16374,12 @@ if __name__ == "__main__":
   `tests/test_act_repropose.py`), строки проверок внутри изменённых функций
   (`approve_node._propose#…`, `read_dag_state#…`, `_require_upstream_ready#…`,
   `_try_agent_merge#form`, `runner._step_gate#…`, `runner._step_s8#…`) и прогнанные при ревизии
-  плана (там: 201 закрыто обходом, 4 в `RULED`):
+  плана. Сначала — применимость операторов ко ВСЕМ строкам без запуска двойников (b6, B6-4;
+  ожидается `259/259`: при ревизии — 249 по коду scratch и 10 строк `<функция>#<проверка>` по
+  AST фрагментов плана; `n/a` чинится оператором `BYPASS` или записью `RULED`, не пропуском):
 
   ```bash
+  uv run --group governance python tests/act_mutation.py --check --out /tmp/act-mutation-check.json
   uv run --group governance python tests/act_mutation.py \
     --out docs/superpowers/plans/2026-10-12-approval-act-review.runs/act-mutation-$(git rev-parse --short HEAD).json
   ```
@@ -16283,7 +16413,9 @@ if __name__ == "__main__":
 (проверка «пропустила», дальше — штатный путь). Подмена причины («МУТАНТ», O3) —
 только проверка причины: инструмент её не применяет, обход ею НЕ закрывается.
 
-Запуск: `uv run --group governance python tests/act_mutation.py --out <файл.json>`;
+Сначала `--check` — только применимость операторов ко ВСЕМ строкам, без двойников
+(b6: должно быть N/N; `n/a` чинится оператором `BYPASS` или записью `RULED`). Затем
+запуск: `uv run --group governance python tests/act_mutation.py --out <файл.json>`;
 байткод не пишется и очищается перед каждым мутантом (иначе мутант той же длины в ту
 же секунду исполнит код предыдущего).
 """
@@ -16355,6 +16487,8 @@ BYPASS: dict[str, tuple[str, str]] = {
         '"clear"'),
     'act_journal_wire.WireJournal._call:garbled': ('return Unavailable(f"{op}: ответ издателя не разобран (код {done.returncode})")',
         'return {}'),
+    'act_node._manifest:parseable': ('_invalidate(state, key, f"манифест в одобренном коммите не читается: {exc}")',
+        'return None'),
     'act_premerge._check:manifest_present': ('raise _Stop(EXIT_REFUSED, f"в {args.head[:12]} нет манифеста {ident.request_id}")',
         'return'),
     'act_premerge._trust:app_unknown': ('raise _Stop(EXIT_UNSET, f"установки App: {found.reason}")',
@@ -16421,9 +16555,13 @@ BYPASS: dict[str, tuple[str, str]] = {
         'head = "0" * 40'),
     'approve_node._legacy_outcome:old_pin_missing': ('    if not pinned:\n',
         '    if not pinned:\n        pinned = {"sha": None, "fingerprint": None}\n    if False:\n'),
+    'approve_node._try_agent_merge#form:form': ('defect = form() if form is not None else _envelope_form_defect(state, ops, dag, op, nodes, head)',
+        'defect = None'),
 }
 #: Обход невозможен (без данных продолжить нечем) — решение ревьюера с причиной.
 RULED: dict[str, str] = {
+    'act_check.check_delivery:not_merged':
+        'PR не смёржен (или нет merged_at): нет T — перебор порядков на T невозможен, `parse_ts(None)`; обход с корректными данными подменил бы факт мержа, проверяемый этой же строкой; двойник утверждает `WaitingDelivery()`',
     'act_context.delivery_verdict:not_merged':
         'PR не смёржен: нет T и фактов доставки — продолжить без них нечем; обход с корректными данными невозможен, проверяется причина (O3) и отдельный двойник «ranges не читаются»',
     'act_journal.DevJournal._open:store':
@@ -16437,13 +16575,16 @@ RULED: dict[str, str] = {
 
 def _locate(path: Path, qualified: str) -> tuple[str, ast.AST | None]:
     src = path.read_text(encoding="utf-8")
-    node: ast.AST | None = ast.parse(src)
-    for name in qualified.split(".")[1:]:
-        node = next((c for c in ast.walk(node) if isinstance(
-            c, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and c.name == name), None)
-        if node is None:
-            break
-    return src, node
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+    def find(node: ast.AST, names: list[str]) -> ast.AST | None:
+        if not names:
+            return node
+        # все одноимённые определения, а не первое (протокол и реализация, `@overload`)
+        return next((got for c in ast.walk(node) if isinstance(c, defs) and c.name == names[0]
+                     for got in [find(c, names[1:])] if got is not None), None)
+
+    return src, find(ast.parse(src), qualified.split(".")[1:])
 
 
 def _offsets(src: str) -> list[int]:
@@ -16492,6 +16633,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="act_mutation")
     p.add_argument("--out", required=True, type=Path)
     p.add_argument("--only", action="append", default=[])
+    p.add_argument("--check", action="store_true", help="только применимость, без двойников")
     args = p.parse_args(argv)
     results = []
     for site, comp, check, lit, twin, _tlit in ROWS:
@@ -16515,6 +16657,9 @@ def main(argv: list[str] | None = None) -> int:
         if mutated is None:
             results.append({"row": key, "status": "n/a", "note": "оператор обхода не применим"})
             continue
+        if args.check:
+            results.append({"row": key, "status": "applicable"})
+            continue
         path.write_text(mutated, encoding="utf-8")
         try:
             status = _run(twin)
@@ -16523,7 +16668,7 @@ def main(argv: list[str] | None = None) -> int:
         results.append({"row": key, "status": status, "operator": "BYPASS" if key in BYPASS else "O1"})
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8")
-    blocking = [r for r in results if r["status"] not in ("closed", "ruled")]
+    blocking = [r for r in results if r["status"] not in ("closed", "ruled", "applicable")]
     for r in blocking:
         print(f"act_mutation: {r['status']}: {r['row']}", file=sys.stderr)
     print(f"act_mutation: {len(results) - len(blocking)}/{len(results)} закрыто или решено")
