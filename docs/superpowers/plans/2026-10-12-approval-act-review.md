@@ -2989,7 +2989,7 @@ steward#211). Этот коммит сверяет «Интерфейс M0» с 
 | Р-14 | `--repropose` брифа переезжает из Task 13a в Task 17 | заявка брифа с пином активации (`v2`) появляется только с M2 discovery — переиздавать до неё нечего | до части C выход для брифа — новая заявка через `brief-propose` |
 | Р-15 | **усилено b1** (B1-13): барьер считает смёрженный legacy-candidate разобранным, только если каждый узел, отданный candidate на одобрение (`approval_pending` в его голове, состав — независимо от finalize), подписан этим или более поздним актом в базе; пустой состав — живой пункт; пины узла не судит | §10 п. 2 спрашивает «доведена или инвалидирована», а не «узел без долга»; дрейф пинов после законного акта — долг узла | узел с долгом пинов пройдёт барьер и встанет на гейте доставки |
 | Р-16 | Предпроверка мержа пишет журнал периметра узким клиентом `act_journal_wire`: в установке `df` — протокол издателя `df/publisher-request/v1` (`sudo -n -u df-publisher df-publish`), в режиме разработки — то же SQLite-хранилище (правило блокировки и вставка `pending` в `BEGIN IMMEDIATE`); совпадение форматов держит тест на одном файле базы | спека §6.3 требует журнал у каждого потребителя; цепочка обвязки мержа не может включать `df/` без смены процесса ревью этих путей (решение владельца, не плана) | второй писатель того же хранилища: расхождение схемы ловит тест равенства с `df.publisher.perimeter`, номер эпохи `pending` назначает полный журнал |
-| Р-17 | Идентичность судимого объекта — одна на объект: `RequestIdentity(product, ws_id, request_id)` + пути узлов DAG + байты манифеста в одобренном head; для конверта — все поля `Envelope`; для старого акта — воркстрим, узел в candidate, байты, прежние пины; маркер миграции — `<!-- act-migrated: <product>/<ws_id>/<request_id> -->`. Полнота держится исчерпывающей классификацией всех определений части B по правилу «проверка-отказ — место суждения» и точной причиной каждой строки (мета-тест `tests/test_act_identity_table.py`, Task 16), а не галочками и не именами-маркерами | ревизии b1 и b2 нашли места, сверявшие часть компонентов (B1-1/2/13/14/15, B2-1/B2-3) — второй круг одного класса; спека формат маркера не задаёт | маркеры старой формы (`approve-W-K-A` без продукта и воркстрима) барьер не принимает — их ставят заново `--invalidate` |
+| Р-17 | Идентичность судимого объекта — одна на объект: `RequestIdentity(product, ws_id, request_id)` + пути узлов DAG + байты манифеста в одобренном head; для конверта — все поля `Envelope`; для старого акта — воркстрим, узел в candidate, байты, прежние пины; маркер миграции — `<!-- act-migrated: <product>/<ws_id>/<request_id> -->`. Реестр ведёт ревьюер задачи; мета-тест (`tests/test_act_identity_table.py`, Task 16) проверяет классификацию по правилу «проверка-отказ — место суждения» (детектор формы — перекрёстная проверка, полноту не доказывает), точную причину каждой строки по AST и новые проверки изменённых функций; обход каждой строки — обязательный мутационный проход Task 16 Step 4a | ревизии b1 и b2 нашли места, сверявшие часть компонентов (B1-1/2/13/14/15, B2-1/B2-3) — второй круг одного класса; спека формат маркера не задаёт | маркеры старой формы (`approve-W-K-A` без продукта и воркстрима) барьер не принимает — их ставят заново `--invalidate` |
 
 **Вопросы к спеке** (план не поглощает; список — в отчёте ревизии): С-1 — анонимный REST
 (спека §6.2, 60 запросов/ч на IP) против чтения истории обоих источников доверия перед **каждым**
@@ -3036,22 +3036,25 @@ steward#211). Этот коммит сверяет «Интерфейс M0» с 
 - **B1-17**: состав коммита Task 13 перечислен для каждого варианта решения по п. 9 части A.
 - **B1-18**: в событии журнала — настоящий `approval_policy_repository_id`; тест полей события.
 
-**Идентичность судимого объекта — исчерпывающая классификация по правилу** (ревизии b3–b4).
-Реестр — `tests/test_act_identity_table.py` (Task 16). Состав: рекурсивный обход AST (вложенные
-функции, `async def`, определения под `if`/`try`) 13 модулей части B и 18
-дополнений в существующие модули — 224 определений; `JUDGMENT` — 117 мест, 240 строк;
-`NOT_JUDGMENT` — 107 (каждое — без условного пути к отказу в собственном теле;
-`GUARD_EXEMPT` — 3 ложных срабатывания с причиной). Строка = компонент × функция проверки ×
-литерал проверки (в её исходнике ровно один раз) × двойник × литерал утверждения (двойник
-утверждает именно его). Ниже — места суждения и функции их проверок.
+**Идентичность судимого объекта — классификация по правилу, детектор — перекрёстная проверка**
+(ревизии b3–b5). Реестр — `tests/test_act_identity_table.py` (Task 16); его ведёт ревьюер задачи:
+детектор формы отказа ловит типовые формы (возврат/присваивание `Unavailable`/`Rejected`/…, `cls(...,
+error=…)`, «отказ | None», `raise`), но полноту не доказывает — отказ иной формы вносится руками.
+Состав: 224 определений (13 модулей части B и 18 дополнений в существующие
+модули) и 15 новых проверок внутри изменённых существующих функций (`MODIFIED_EXISTING`,
+ключ `<функция>#<проверка>`); `JUDGMENT` — 135 мест, 258 строк; `NOT_JUDGMENT` — 104.
+Строка = компонент × функция проверки × литерал проверки (ровно один в её исходнике) ×
+двойник × литерал утверждения (по AST входит в `assert` о результате или `pytest.raises(match=)`).
 
 | Место суждения | Компонент → функция проверки |
 |---|---|
 | `act_facts._call` | library_exception |
 | `act_facts._own` | steward_unavailable |
-| `act_anon.AnonTransport.send` | memo_only_sha |
+| `act_anon.AnonTransport.send` | memo_only_sha, relative_get |
+| `act_anon._response` | size_limit |
+| `act_anon.AnonTransport._fetch` | transport_failure |
 | `act_anon.contents_bytes` | blob_oid, absent, unreadable |
-| `act_check.check_delivery` | not_merged, product → `act_check._pinned_policy`, act_head → `act_decision.decide` |
+| `act_check.check_delivery` | product → `act_check._pinned_policy`, act_head → `act_decision.decide` |
 | `act_check.live_policy_refusal` | current_activation |
 | `act_check._admission` | mode_after_review, marker_before_bootstrap |
 | `act_check._epoch_at` | interepoch_gap |
@@ -3100,10 +3103,11 @@ steward#211). Этот коммит сверяет «Интерфейс M0» с 
 | `act_identity.head_manifest_refusal` | in_head, bytes |
 | `act_status.pr_for_merge` | exactly_one |
 | `act_status._pr_head` | head_fetched |
-| `act_status._event` | request:path, request:merge_commit → `act_status.pr_for_merge`, immutable, stop:ws_id, stop:path |
+| `act_status._event` | request:path, request:no_pr, immutable, stop:ws_id, stop:path |
 | `act_status.load_history` | base_unread |
 | `act_status.Decider._binding` | identity, head_manifest, upstream_pins |
 | `act_status.Decider.__call__` | memo_key, memo_request |
+| `act_status.Decider.trust` | binding |
 | `act_status.Decider._head_hashes` | head_bytes |
 | `act_status.Decider._decide` | merge_commit, head_sha |
 | `act_status.Decider.legacy` | contract_result |
@@ -3163,6 +3167,21 @@ steward#211). Этот коммит сверяет «Интерфейс M0» с 
 | `approval_ledger.successor_of` | single_successor |
 | `act_barrier._identity` | request_form |
 | `ops.RealOps.first_parent_changes` | git_failed |
+| `approve_node._propose#act_incompatible` | act |
+| `approve_node._propose#other_pin` | policy_pin |
+| `approve_node._propose#status_unavailable` | status |
+| `approve_node._propose#successor_joins_live` | successor |
+| `approve_node.read_dag_state#mode_unset` | mode |
+| `approve_node.read_dag_state#status_unavailable` | status |
+| `approve_node.read_dag_state#review_debt` | debt |
+| `approve_node._require_upstream_ready#mode_unset` | mode |
+| `approve_node._require_upstream_ready#upstream_unavailable` | status |
+| `approve_node._require_upstream_ready#upstream_not_approved` | debt |
+| `approve_node._try_agent_merge#form` | form |
+| `runner._step_gate#act_mode_unset` | mode |
+| `runner._step_s8#act_mode_unset` | mode |
+| `act_envelope.envelope_refusal#bytes` | bytes |
+| `act_envelope.envelope_refusal#pins` | pins |
 | `ops.RealOps.pr_body_fact` | gh_failed |
 
 **Правило смены поверхности `Ops`** (B1-7/B1-8): каждая задача, меняющая сигнатуру или добавляющая
@@ -3313,6 +3332,40 @@ steward#211). Этот коммит сверяет «Интерфейс M0» с 
   двойника во всех 36. Выживших 0, необработанных ошибок 0. Байткод между мутантами
   очищается (`-B`, `__pycache__`): в проходе b3 этого не было, его числа могли быть завышены.
 - Ссылка на Task 13 в пояснении Task 12 исправлена на Task 14 Step 3a.
+
+### Правки по ревью b5
+
+Ревью `plan-review-b5` (3 major, 1 minor; B2-3, B3-2, B3-3, B3-6, B3-8 — частично). Гарантии
+мета-теста приведены к тому, что он действительно проверяет:
+
+- **B3-9**: в `JUDGMENT` — `Decider.trust`, `act_anon._response` и `AnonTransport._fetch` (с
+  двойниками); новые проверки внутри изменённых существующих функций — `MODIFIED_EXISTING` с
+  ключами `<функция>#<проверка>`: `_propose` (несовместимый акт, другой пин, неустановленный
+  статус, преемник при живой заявке), `read_dag_state` (режим, статус, долг review/v1),
+  `_require_upstream_ready` (режим, upstream не установлен / не одобрен), `_try_agent_merge#form`,
+  `runner._step_gate`/`_step_s8` (режим не установлен), `envelope_refusal` (байты / пины); прочие
+  изменённые функции — с причиной «новой проверки нет». Фрагменты `_require_upstream_ready`,
+  `_step_s8` и проверки преемника записаны кодом (литералы закреплены). Детектор дополнен
+  присвоенными отказами и `cls(..., error=…)`; текст плана и докстринг реестра больше не
+  утверждают полноту — детектор перекрёстный, реестр ведёт ревьюер задачи.
+- **B3-10**: связь причины с утверждением — по AST: литерал или связанное с ним имя
+  (присваивание, параметр `parametrize`, константа модуля, производные имена) входит в `assert`
+  о результате либо в `pytest.raises(match=)`; самопроверка механизма — 8 двойников
+  (`test_reason_link_mechanism`: литерал только в присваивании, только в комментарии, константа
+  без использования, только код выхода — отказ; в `assert`, через имя, `match=` — принято).
+- **B3-11**: двойники проверяют тип результата до обращения к полям (`ForgeEpochs.head`,
+  `_rebase`, прямые двойники `_call`/`_own`); для несущих проверок — операторы обхода с
+  корректными данными (`BYPASS` в `tests/act_mutation.py`), O3 засчитывается только как проверка
+  причины и строку не закрывает; недостижимая проверка `check_delivery` «не смёржен» (её
+  дублирует `decide`) снята со строк; production-код ради мутаций не менялся.
+- **B3-12**: Task 16 Step 4a — обязательный проход `tests/act_mutation.py` по ВСЕМ строкам, включая
+  53 строки на стенде `World` и раннере; результат коммитится в рабочее пространство SDD
+  (`docs/superpowers/plans/2026-10-12-approval-act-review.runs/`); `survived`/`error`/`n/a`/непрогнанная
+  строка блокируют коммит, исключение — только запись `RULED` с причиной.
+- **Мутационный проход при ревизии** (scratch, -B): исполнимых строк 205 из 258 — 201 закрыто
+  обходом (144 условие → `False`, 57 `BYPASS`), 4 в `RULED` (хранилище журнала недоступно /
+  утрачено, нет файла блокировки, PR не смёржен — продолжить без данных нечем); выживших и
+  ошибок нет. 53 строки (`World`, раннер, проверки изменённых функций) — Step 4a.
 ### Task 11: Пин steward v0.2.0, совместимость вызовов gate-check, gate-catalog v3
 
 **Files:**
@@ -4049,6 +4102,23 @@ def test_effective_keys_by_review_login() -> None:
     assert eff["alice"].commit_id == HEAD
 
 
+def test_call_turns_exception_into_unavailable() -> None:
+    """b5/B3-11 (`_call`): исключение библиотеки — свой `Unavailable` с именем исключения."""
+    def boom():
+        raise OSError("socket")
+
+    got = act_facts._call("read_act_facts", boom)
+    assert isinstance(got, Unavailable)
+    assert got.reason == "steward read_act_facts: OSError: socket"
+
+
+def test_own_translates_steward_unavailable() -> None:
+    """b5/B3-11 (`_own`): `v3.Unavailable` переводится в свой тип с той же причиной."""
+    got = act_facts._own(v3.Unavailable("transport"))
+    assert isinstance(got, Unavailable) and got.reason == "transport"
+    assert act_facts._own("значение") == "значение"
+
+
 def test_steward_unavailable_reason_kept_verbatim() -> None:
     """Отзыв ревью, не находящегося в DISMISSED — `malformed` (О13), code сохраняется."""
     facts = _facts(
@@ -4419,6 +4489,14 @@ def test_redirect_is_not_followed() -> None:
     assert act_anon.AnonTransport(open_url=fake).send(_get("repos/o/r")).status == 301
 
 
+def test_oversized_response_refused(monkeypatch) -> None:
+    """b5 (`_response`): ответ больше предела — `Response(None, error=…)`, тело не читается."""
+    monkeypatch.setattr(act_anon, "MAX_BODY", 8)
+    fake = _Fake({act_anon.API + "repos/o/r": (200, {"x": "0123456789"}, None)})
+    resp = act_anon.AnonTransport(open_url=fake).send(_get("repos/o/r"))
+    assert resp.status is None and resp.error == "anon: ответ больше 8 байт"
+
+
 def test_transport_failure_is_status_none() -> None:
     def broken(req, timeout):  # noqa: ANN001
         raise TimeoutError("slow")
@@ -4438,7 +4516,7 @@ def test_transport_failure_is_status_none() -> None:
 )
 def test_only_relative_get(request_: v3.Request) -> None:
     resp = act_anon.AnonTransport(open_url=_Fake({})).send(request_)
-    assert resp.status is None
+    assert resp.status is None and "только GET относительного пути" in resp.error
 
 
 def test_link_and_query_passed_through() -> None:
@@ -6090,6 +6168,7 @@ def test_rebase_true_is_violation() -> None:
 @pytest.mark.parametrize("present", [True, False])
 def test_rebase_hidden_is_unverified_premise(present: bool) -> None:
     trust = load(trust_routes(None, J1, rebase=None, rebase_present=present), Journal())
+    assert isinstance(trust, act_trust.Trust)  # тип — до обращения к полям (B3-11)
     assert trust.unverified == ("allow_rebase_merge",)
 
 
@@ -6482,9 +6561,11 @@ def test_status_answer_about_other_snapshot_unavailable() -> None:
 def test_forge_epochs_refuse_other_root() -> None:
     """b4: источник эпох отвечает только о своём корне."""
     epochs = act_journal.ForgeEpochs(Head(snap(1)))
-    assert epochs.head(("github.com", 99, "main")).reason == "root_mismatch"
+    other = epochs.head(("github.com", 99, "main"))
+    assert isinstance(other, act_journal.store.Unavailable) and other.reason == "root_mismatch"
     gone = act_journal.ForgeEpochs(Head(Unavailable("403")))
-    assert gone.head(ROOT.id_tuple).reason == "df-trust: 403"
+    lost = gone.head(ROOT.id_tuple)
+    assert isinstance(lost, act_journal.store.Unavailable) and lost.reason == "df-trust: 403"
 
 
 def test_dev_record_refused_by_store_is_unavailable(tmp_path: Path, monkeypatch) -> None:
@@ -8396,6 +8477,7 @@ from steward.approvalfacts import v3  # noqa: E402
 from governance import act_context, act_facts, act_node, act_status, act_trust  # noqa: E402
 from governance import approval_ledger as al  # noqa: E402
 from governance import approve_node as an  # noqa: E402
+from governance import node_approval as na  # noqa: E402
 from governance.act_check import ActivationView  # noqa: E402
 from governance.act_decision import Accepted, DeliveryView, Rejected, ReviewView  # noqa: E402
 from governance.act_envelope import (  # noqa: E402
@@ -8629,6 +8711,108 @@ def test_open_candidate_in_merge_mode_refused(world: World, stand: Stand) -> Non
     assert world.forge.prs[pr]["state"] == "OPEN"
 
 
+def _peer_of_charter() -> str:
+    """Другой узел того же шага, что charter (без upstream); нет такого — тест не применим."""
+    dag = an.bundle_dag.dag_for(None)
+    peers = [an.bundle_dag.node_id(f) for f, ups in dag if not ups
+             and an.bundle_dag.node_id(f) != "charter"]
+    if not peers:
+        pytest.skip("в DAG нет второго корневого узла — присоединение к шагу не моделируется")
+    return peers[0]
+
+
+def _child_of_charter() -> str:
+    dag = an.bundle_dag.dag_for(None)
+    return next(an.bundle_dag.node_id(f) for f, ups in dag if "charter" in ups)
+
+
+def test_join_live_legacy_request_refused(world: World, stand: Stand) -> None:
+    """b5 (`approve_node._propose#act_incompatible`): живая заявка шага без маркера и новая
+    `review/v1` в одну не соединяются."""
+    stand.mode = act_trust.PRE_MIGRATION
+    first = approve(world, "charter")
+    stand.mode = "review"
+    with pytest.raises(RuntimeError, match="в одну заявку они не соединяются"):
+        approve(world, _peer_of_charter())
+    assert world.state.ops[first.request]["status"] == al.STATUS_STARTED
+
+
+def test_join_request_pinned_to_other_activation_refused(world: World, stand: Stand,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    """b5 (`approve_node._propose#other_pin`): живая заявка шага закрепила другую
+    активацию — узел к ней не дописывается."""
+    approve(world, "charter")
+    newer = ActivationView(("activation", "b" * 40), "b" * 40, NOW)
+    monkeypatch.setattr(act_status, "mode_probe", lambda state, deps=None: replace(
+        stand.live(), activation=newer))
+    with pytest.raises(RuntimeError, match="закрепила другую активацию"):
+        approve(world, _peer_of_charter())
+
+
+def test_review_status_unavailable_blocks_proposal(world: World, stand: Stand,
+                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    """b5 (`approve_node._propose#status_unavailable`): статус узла review/v1 не установлен —
+    заявка не создаётся, а не «долг по frontmatter»."""
+    monkeypatch.setattr(act_status.Statuses, "is_review", lambda self, node: True)
+    monkeypatch.setattr(act_status.Statuses, "of", lambda self, node: "unavailable:история")
+    with pytest.raises(RuntimeError, match="статус узла charter: unavailable:история"):
+        approve(world, "charter")
+    assert al.requests(world.state) == []
+
+
+def test_read_dag_state_mode_unset(world: World, stand: Stand) -> None:
+    """b5 (`approve_node.read_dag_state#mode_unset`)."""
+    stand.mode_unset = "нет привязки корня доверия"
+    got = an.read_dag_state(world.state, world.ops, an.bundle_dag.dag_for(None))
+    assert got.unresolved == "режим акта продукта: нет привязки корня доверия"
+
+
+def test_read_dag_state_status_unavailable(world: World, stand: Stand,
+                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    """b5 (`approve_node.read_dag_state#status_unavailable`)."""
+    monkeypatch.setattr(act_status.Statuses, "of", lambda self, node: "unavailable:история")
+    got = an.read_dag_state(world.state, world.ops, an.bundle_dag.dag_for(None))
+    assert got.unresolved == "unavailable:история"
+
+
+def test_read_dag_state_review_debt(world: World, stand: Stand,
+                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    """b5 (`approve_node.read_dag_state#review_debt`): не approved — долг review/v1."""
+    monkeypatch.setattr(act_status.Statuses, "of", lambda self, node: "not_approved:act:d1_no_act")
+    got = an.read_dag_state(world.state, world.ops, an.bundle_dag.dag_for(None))
+    assert any(d.kind == na.DEBT_REVIEW_V1 and d.reason == "act:d1_no_act" for d in got.debts)
+
+
+@pytest.mark.parametrize("verdict,match", [
+    (None, "режим акта продукта \\(upstream"),
+    ("unavailable:история", "upstream charter узла .*: unavailable:история"),
+    ("not_approved:act:d1_no_act", "upstream charter не одобрен \\(review/v1\\)"),
+], ids=["mode_unset", "upstream_unavailable", "upstream_not_approved"])
+def test_upstream_readiness_in_review(world: World, stand: Stand, monkeypatch: pytest.MonkeyPatch,
+                                      verdict, match: str) -> None:
+    """b5 (`approve_node._require_upstream_ready#…`): готовность upstream в продукте review —
+    по статусу review/v1, не по frontmatter."""
+    if verdict is None:
+        stand.mode_unset = "нет привязки"
+    else:
+        monkeypatch.setattr(act_status.Statuses, "of", lambda self, node: verdict)
+    with pytest.raises(RuntimeError, match=match):
+        approve(world, _child_of_charter())
+
+
+def test_finalize_form_defect_blocks_agent_merge(world: World, stand: Stand,
+                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    """b5 (`approve_node._try_agent_merge#form`): дефект формы коммита конверта — агентский
+    мерж finalize не выполняется, причина — дефект формы."""
+    key, pr = _deliver(world, stand)
+    monkeypatch.setattr(act_node, "envelope_commit_defect",
+                        lambda *a: "коммит конверта трогает лишний путь")
+    outcome = approve(world, "charter")
+    assert "коммит конверта трогает лишний путь" in outcome.message
+    final = world.state.ops[key]["finalize_pr"]
+    assert world.forge.prs[final]["state"] == "OPEN"
+
+
 def test_live_request_with_old_pin_invalidated(world: World, stand: Stand, monkeypatch) -> None:
     """Приёмка №8, №9, №44: пин живой заявки ≠ текущей активации."""
     key, op, pr = _candidate(world)
@@ -8722,7 +8906,7 @@ def test_act_removed_from_ledger_with_manifest_in_head(world: World, stand: Stan
     """Приёмка №13 / P1-2: зеркало `act` удалено, манифест в голове — отказ."""
     key, pr = _deliver(world, stand)
     world.state.ops[key].pop("act")
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="зеркало act в run.json расходится"):
         approve(world, "charter")
     assert world.state.ops[key]["status"] == al.STATUS_INVALIDATED
 
@@ -10013,6 +10197,7 @@ pytest.importorskip("steward")
 
 from governance import act_node, act_status  # noqa: E402
 from governance import approval_ledger as al  # noqa: E402
+from governance import approve_node as an  # noqa: E402
 from governance.act_check import ActivationView  # noqa: E402
 from governance.act_decision import Accepted, Rejected  # noqa: E402
 from governance.act_envelope import (  # noqa: E402
@@ -10165,6 +10350,16 @@ def test_two_successors_refused(world, stand):
         al.successor_of(world.state, key)
 
 
+def test_successor_refused_when_step_has_live_request(world, stand):
+    """b5 (`approve_node._propose#successor_joins_live`): у шага уже есть живая заявка —
+    преемник не создаётся, живая не трогается."""
+    first = approve(world, "charter")
+    key = first.request
+    with pytest.raises(RuntimeError, match="уже есть — продвиньте её"):
+        an.approve_node(world.state, world.ops, "charter", predecessor="approve-9-9-9")
+    assert world.state.ops[key]["status"] == al.STATUS_STARTED
+
+
 def test_completed_request_refused(world, stand):
     first = approve(world, "charter")
     key = first.request
@@ -10223,6 +10418,17 @@ predecessor: str | None = None)` передаёт `predecessor` в `_propose(...
 в `al.start_request(..., predecessor=predecessor)` (при присоединении к живой заявке шага
 преемник не создаётся: `predecessor` с `joined is not None` — `RuntimeError` «живая заявка шага
 уже есть — продвиньте её»); `propose_from_source(..., predecessor=None)` — так же.
+
+`governance/approve_node.py`, `_propose` — перед присоединением к живой заявке шага (новая
+проверка части B; реестр — `approve_node._propose#successor_joins_live`):
+
+```python
+    if predecessor is not None and joined is not None:
+        raise RuntimeError(
+            f"живая заявка шага {al.request_key(*joined[0])} уже есть — продвиньте её, "
+            f"преемник {predecessor} не создаётся"
+        )
+```
 
 `governance/act_node.py`:
 
@@ -10762,6 +10968,16 @@ def test_decider_delivery_of_other_merge_commit_unavailable(monkeypatch) -> None
     got = _decider(monkeypatch, _DecideOps({path: text}, {path: text}),
                    delivered_by="n" * 40)(_event(req))
     assert isinstance(got, Unavailable) and f"доставил {'n' * 40}" in got.reason
+
+
+def test_decider_without_binding_trust_unavailable() -> None:
+    """b5 (`Decider.trust`): нет привязки — доверие не грузится, `Unavailable` с причиной."""
+    state = SimpleNamespace(repo_slug=SLUG, ws_id=WS, target_dir="/t", bundle_dir="spec")
+    deps = act_status.Deps(readers=None, binding=None, journal=None, creds=(), gh=None,
+                           now=None, sleep=None, settings=None)
+    got = act_status.Decider(state, object(), deps, DAG).trust()
+    assert isinstance(got, Unavailable)
+    assert got.reason == "нет привязки корня доверия (§6.1 п. 1)"
 
 
 def test_decider_head_bytes_unreadable_unavailable(monkeypatch) -> None:
@@ -11576,6 +11792,22 @@ def test_new_ops_surface_reached_only_behind_mode_probe() -> None:
 Дополнение `tests/test_governance_runner.py` (тот же стенд, что `test_gate_red_stops`):
 
 ```python
+def test_s8_stops_when_act_mode_unset(tmp_path: Path, runs_root, monkeypatch, capsys) -> None:
+    """b5 (`runner._step_s8#act_mode_unset`): режим акта не установлен на S8 — шаг
+    останавливается (resumable), authoritative-гейт не зовётся."""
+    from governance import act_status, runner
+    from governance.act_time import Unavailable
+
+    ops = FakeOps()
+    state = locked_runner.start(**_start_kwargs(tmp_path, "r-act-s8", ops))
+    monkeypatch.setattr(act_status, "gate_run",
+                        lambda *a, **k: Unavailable("df-trust: HTTP 403"))
+    before = len(ops.calls)
+    assert runner._step_s8(state, ops) is False
+    assert "S8: режим акта не установлен — df-trust: HTTP 403" in capsys.readouterr().out
+    assert not any(c[0] == "gate_check_s8" for c in ops.calls[before:])
+
+
 def test_s4_stops_when_act_mode_unset(tmp_path: Path, runs_root, monkeypatch) -> None:
     """B1-5/B1-8: режим акта не установлен — стоп S4 с причиной, гейт steward не зовётся."""
     from governance import act_status
@@ -12627,7 +12859,29 @@ def _review_debt(node: str, text: str, verdict: str) -> na.NodeDebt:
     )
 ```
 
-`_require_upstream_ready` — тот же приём: один `mode_probe`; `Unavailable` — `_unresolved`;
+`_require_upstream_ready` — тот же приём (новые проверки части B; реестр —
+`approve_node._require_upstream_ready#mode_unset|upstream_unavailable|upstream_not_approved`):
+
+```python
+    from governance import act_status
+
+    live = act_status.mode_probe(state)
+    if isinstance(live, Unavailable):
+        raise _unresolved(f"режим акта продукта (upstream {node_id}): {live.reason}")
+    statuses = (act_status.statuses_at_base(state, ops, dag, live)
+                if live.mode == "review" else None)
+    ...  # в цикле по прямым upstream `up`, до прежнего `node_debt`:
+        if statuses is not None:
+            verdict = statuses.of(up)
+            if verdict.startswith("unavailable:"):
+                raise _unresolved(f"upstream {up} узла {node_id}: {verdict}")
+            if verdict != act_status.APPROVED:
+                raise RuntimeError(f"upstream {up} не одобрен (review/v1): "
+                                   f"{_review_debt(up, texts[up], verdict).reason}")
+            continue
+```
+
+Словами: один `mode_probe`; `Unavailable` — `_unresolved`;
 `review` — `statuses_at_base(...).of(up)`: `approved` — готов, `unavailable:*` — `_unresolved`,
 иное — прежний `RuntimeError` с `_review_debt(...).reason`; `PRE_MIGRATION`/`merge` — прежний
 `node_debt`. `from governance.act_time import Unavailable` — в импорты модуля. В продукте до
@@ -12670,7 +12924,13 @@ B1-8 как класс B1-7): новые методы `Ops` части B (`first
 ```
 
 `_step_s8` — то же с `candidate=False`, файлом `node-status-s8.json`; недоступность — `print`
-причины и `return False` (шаг resumable, как прочие стопы S8).
+причины и `return False` (шаг resumable, как прочие стопы S8):
+
+```python
+    if isinstance(gate, Unavailable):
+        print(f"S8: режим акта не установлен — {gate.reason}; шаг остановлен (resumable)")
+        return False
+```
 
 `governance/task_bridge.py`, `_canonical_dag_hash` — **[ждёт решения владельца В-1]**, вариант по
 умолчанию. Каталог `approvals/` — **из идентичности воркстрима**, путём производителя
@@ -14024,6 +14284,9 @@ git commit -m "feat(merge-pr): App-режим — личность через JW
 
 **Files:**
 - Create: `governance/act_barrier.py` (+ `make act-barrier` в `Makefile`)
+- Create: `tests/act_mutation.py` (обязательный мутационный проход по реестру, Step 4a); его
+  результат — `docs/superpowers/plans/2026-10-12-approval-act-review.runs/act-mutation-<sha>.json`
+  (рабочее пространство SDD ветки, коммитится вместе с задачей)
 - Test: `tests/test_act_barrier.py`; `tests/test_act_identity_table.py` (мета-тест таблицы
   идентичности всей части B, ревизия b2 — последняя задача части B, когда все места суждения уже
   в коде)
@@ -14440,18 +14703,25 @@ def test_review_preview_unavailable_product_incomplete() -> None:
    части B в существующие модули; каждое определение — ровно в одном реестре.
 2. Классификация по правилу, а не по имени. `NOT_JUDGMENT` допустим, только если в
    собственном теле функции нет условного пути к отказу (`raise`, `return
-   Unavailable/Rejected/Violation/_Stop/LegacyHalt`, `_unresolved`, `_invalidate`,
-   ответ `unavailable:`/`not_approved:`, условный `return False`); ложные
-   срабатывания — `GUARD_EXEMPT` с причиной.
+   Unavailable/Rejected/Violation/_Stop/LegacyHalt`, `cls(..., error=…)`,
+   `_unresolved`, `_invalidate`, ответ `unavailable:`/`not_approved:`, условный
+   `return False`, форма «отказ | None», отказ, присвоенный имени и возвращённый
+   позже); ложные срабатывания — `GUARD_EXEMPT` с причиной. Детектор — ПЕРЕКРЁСТНАЯ
+   проверка формы, а не доказательство полноты: отказ иной формы (доменный объект,
+   вызов помощника, вернувший отказ) он не видит. Реестр ведёт ревьюер задачи: каждое
+   новое определение части B и каждая новая проверка внутри изменённой существующей
+   функции (`MODIFIED_EXISTING`) вносятся руками при ревью, с двойником.
 3. Точная причина. Строка `JUDGMENT` = компонент × функция проверки × литерал
    проверки (встречается в её исходнике ровно один раз — то есть принадлежит одной
-   проверке) × двойник × литерал утверждения (двойник утверждает именно его, не
-   только код выхода или тип исключения).
+   проверке) × двойник × литерал утверждения: по AST литерал (или имя, связанное с
+   ним) входит в `assert` о результате либо в `pytest.raises(..., match=…)` —
+   утверждение только о типе или коде выхода не засчитывается; механизм проверяется
+   собственными отрицательными двойниками (`test_reason_link_mechanism`).
 4. Маркеры положительного суждения — перекрёстная проверка (`MARKERS`).
 
-Мутационная проверка строк (отключить проверку → двойник падает на утверждении,
-а не исключением) выполняется при ревизии плана и при реализации; результат —
-в отчёте ревизии.
+Мутационная проверка строк (обойти проверку → двойник падает на утверждении, а не
+исключением) обязательна перед коммитом Task 16 по ВСЕМ строкам, включая стенд
+`World` (`tests/act_mutation.py`, Task 16 Step 4a).
 """
 
 # ruff: noqa: E501 — таблица данных: строка = место × компонент × тест, перенос её не читается
@@ -14479,6 +14749,31 @@ EXISTING_ADDITIONS = {
     "act_settings": ("config_home",),
     "approve_node": ("_legacy_outcome", "_review_debt"),
 }
+#: Изменённые частью B СУЩЕСТВУЮЩИЕ функции (не дополнения): новая проверка — кортеж имён,
+#: каждое — ключ `JUDGMENT` `<функция>#<имя>`; новой проверки нет — причина строкой. Список
+#: ведёт ревьюер задачи (детектор формы его не доказывает); сверено с листингами Tasks 11–16.
+MODIFIED_EXISTING = {
+    "approve_node._propose": ("act_incompatible", "other_pin", "status_unavailable",
+                              "successor_joins_live"),
+    "approve_node.read_dag_state": ("mode_unset", "status_unavailable", "review_debt"),
+    "approve_node._require_upstream_ready": ("mode_unset", "upstream_unavailable",
+                                             "upstream_not_approved"),
+    "approve_node._try_agent_merge": ("form",),
+    "runner._step_gate": ("act_mode_unset",),
+    "runner._step_s8": ("act_mode_unset",),
+    "act_envelope.envelope_refusal": ("bytes", "pins"),
+    "approve_node._advance": "маршрутизация в `act_node.route` до выбора шага; своей проверки нет",
+    "approve_node._reconcile_candidate": "проверки вынесены в `_legacy_outcome` (Task 14 Step 3a), новых нет",
+    "approve_node.propose_from_source": "делегирует `act_node.creation` (место суждения); своей проверки нет",
+    "approve_node._sync_branch_to_snapshot": "пишет манифест из `act_node.manifest_file`; проверок нет",
+    "approve_node.approve_node": "пробрасывает `predecessor` в `_propose`; проверок нет",
+    "approval_ledger.start_request": "пишет поле `predecessor`; проверок нет",
+    "task_bridge._canonical_dag_hash": "хеш (В-1), не суждение",
+    "task_bridge._content_anchor": "пробрасывает `ws_id`; не суждение",
+    "ops.RealOps.gate_check_s8": "аргументы `--act-mode`/`--node-status`; не суждение",
+    "ops.RealOps.gate_check_candidate": "аргументы `--act-mode`/`--node-status`; не суждение",
+    "bundle_state.candidate_state": "`act_mode=\"legacy\"` в `collect_bundle`; не суждение",
+}
 
 S, N, L = "tests/test_act_status.py", "tests/test_act_node.py", "tests/test_act_legacy.py"
 P, B, C = "tests/test_act_premerge.py", "tests/test_act_barrier.py", "tests/test_act_check.py"
@@ -14500,14 +14795,22 @@ def r(component, check, lit, twin, tlit=None):
 JUDGMENT = {
     # --- act_facts: граница библиотеки steward
     "act_facts._call": (r("library_exception", "act_facts._call", "except Exception",
-                          f"{F}::test_library_exception_is_unavailable", '"OSError" in got.reason'),),
+                          f"{F}::test_call_turns_exception_into_unavailable",
+                          '"steward read_act_facts: OSError: socket"'),),
     "act_facts._own": (r("steward_unavailable", "act_facts._own", "isinstance(got, _v3().Unavailable)",
-                         f"{F}::test_steward_unavailable_reason_kept_verbatim",
-                         'got.reason.startswith("malformed")'),),
+                         f"{F}::test_own_translates_steward_unavailable", '"transport"'),),
     # --- act_anon
-    "act_anon.AnonTransport.send": (r("memo_only_sha", "act_anon.AnonTransport.send",
-                                      "_IMMUTABLE.match(path)",
-                                      f"{A}::test_memo_only_for_sha_addressed_paths", "_IMMUTABLE"),),
+    "act_anon.AnonTransport.send": (
+        r("memo_only_sha", "act_anon.AnonTransport.send", "_IMMUTABLE.match(path)",
+          f"{A}::test_memo_only_for_sha_addressed_paths", "_IMMUTABLE"),
+        r("relative_get", "act_anon.AnonTransport.send", "_UNSAFE_PATH.search(path)",
+          f"{A}::test_only_relative_get", '"только GET относительного пути"'),
+    ),
+    "act_anon._response": (r("size_limit", "act_anon._response", "len(raw) > MAX_BODY",
+                             f"{A}::test_oversized_response_refused", '"anon: ответ больше 8 байт"'),),
+    "act_anon.AnonTransport._fetch": (r("transport_failure", "act_anon.AnonTransport._fetch",
+                                        "except Exception as exc",
+                                        f"{A}::test_transport_failure_is_status_none", '"TimeoutError"'),),
     "act_anon.contents_bytes": (
         r("blob_oid", "act_anon.contents_bytes", "содержимое не равно blob",
           f"{A}::test_contents_bytes_checked_against_blob_oid"),
@@ -14518,8 +14821,6 @@ JUDGMENT = {
     ),
     # --- act_check / act_decision (Task 12)
     "act_check.check_delivery": (
-        r("not_merged", "act_check.check_delivery", "not ctx.delivery.merged",
-          f"{C}::test_not_merged_waits", "WaitingDelivery()"),
         r("product", "act_check._pinned_policy", "ctx.request.product != ctx.product",
           f"{C}::test_manifest_product_must_be_delivery_repo", "REQUEST_BINDING"),
         r("act_head", "act_decision.decide", "if act is None",
@@ -14762,7 +15063,7 @@ JUDGMENT = {
     "act_status._event": (
         r("request:path", "act_status._event", "манифест лежит не по своему пути",
           f"{S}::test_history_manifest_off_its_path_unavailable[ws_id]"),
-        r("request:merge_commit", "act_status.pr_for_merge", "len(found) != 1",
+        r("request:no_pr", "act_status._event", "if isinstance(pr, Unavailable)",
           f"{S}::test_history_manifest_commit_without_pr_unavailable", '"нужен ровно один"'),
         r("immutable", "act_status._event", 'if status != "A"',
           f"{S}::test_manifest_edited_after_delivery_unavailable", '"запись истории изменена после доставки"'),
@@ -14788,6 +15089,9 @@ JUDGMENT = {
         r("memo_request", "act_status.Decider.__call__", "key = (*ident.memo_key, event.merge_commit)",
           f"{S}::test_decider_memo_is_per_request_not_per_commit[good_first]", '"approve-1-0-2"'),
     ),
+    "act_status.Decider.trust": (r("binding", "act_status.Decider.trust", "if binding is None",
+                                   f"{S}::test_decider_without_binding_trust_unavailable",
+                                   '"нет привязки корня доверия (§6.1 п. 1)"'),),
     "act_status.Decider._head_hashes": (r("head_bytes", "act_status.Decider._head_hashes", "if text is None",
                                           f"{S}::test_decider_head_bytes_unreadable_unavailable",
                                           "не читается"),),
@@ -14925,7 +15229,7 @@ JUDGMENT = {
     "act_node._check_marked": (r("act_mirror", "act_node._check_marked",
                                  '(op.get("act") == ACT_REVIEW_V1) != (req is not None)',
                                  f"{N}::test_act_removed_from_ledger_with_manifest_in_head",
-                                 "pop(\"act\")"),),
+                                 '"зеркало act в run.json расходится"'),),
     "act_node.route": (r("merged_unmarked_mode", "act_node.route", "live.mode == act_trust.PRE_MIGRATION",
                          f"{N}::test_merged_unmarked_with_unset_mode_stays_alive", '"режим акта"'),),
     "act_node._open": (
@@ -15140,6 +15444,61 @@ JUDGMENT = {
                                            "if done.returncode != 0",
                                            f"{S}::test_first_parent_unreadable_is_none",
                                            '"master") is None'),),
+    # --- новые проверки части B внутри изменённых существующих функций (ключ `<функция>#<проверка>`)
+    "approve_node._propose#act_incompatible": (r("act", "approve_node._propose",
+                                                 'joined[1].get("act") != made.act',
+                                                 f"{N}::test_join_live_legacy_request_refused",
+                                                 '"в одну заявку они не соединяются"'),),
+    "approve_node._propose#other_pin": (r("policy_pin", "approve_node._propose",
+                                          'joined[1]["policy"] != policy_record',
+                                          f"{N}::test_join_request_pinned_to_other_activation_refused",
+                                          '"закрепила другую активацию"'),),
+    "approve_node._propose#status_unavailable": (r("status", "approve_node._propose",
+                                                   "статус узла {node_id}: {verdict}",
+                                                   f"{N}::test_review_status_unavailable_blocks_proposal",
+                                                   '"статус узла charter: unavailable:история"'),),
+    "approve_node._propose#successor_joins_live": (r("successor", "approve_node._propose",
+                                                     "predecessor is not None and joined is not None",
+                                                     f"{RP}::test_successor_refused_when_step_has_live_request",
+                                                     '"уже есть — продвиньте её"'),),
+    "approve_node.read_dag_state#mode_unset": (r("mode", "approve_node.read_dag_state",
+                                                 "unresolved=f\"режим акта продукта: {live.reason}\"",
+                                                 f"{N}::test_read_dag_state_mode_unset",
+                                                 '"режим акта продукта: нет привязки корня доверия"'),),
+    "approve_node.read_dag_state#status_unavailable": (r("status", "approve_node.read_dag_state",
+                                                         'if verdict.startswith("unavailable:")',
+                                                         f"{N}::test_read_dag_state_status_unavailable",
+                                                         '"unavailable:история"'),),
+    "approve_node.read_dag_state#review_debt": (r("debt", "approve_node.read_dag_state",
+                                                  "debts.append(_review_debt(node, texts[node], verdict))",
+                                                  f"{N}::test_read_dag_state_review_debt",
+                                                  '"act:d1_no_act"'),),
+    "approve_node._require_upstream_ready#mode_unset": (r("mode", "approve_node._require_upstream_ready",
+                                                          "режим акта продукта (upstream {node_id})",
+                                                          f"{N}::test_upstream_readiness_in_review[mode_unset]",
+                                                          "режим акта продукта"),),
+    "approve_node._require_upstream_ready#upstream_unavailable": (r("status", "approve_node._require_upstream_ready",
+                                                                    "upstream {up} узла {node_id}: {verdict}",
+                                                                    f"{N}::test_upstream_readiness_in_review[upstream_unavailable]",
+                                                                    "upstream charter узла"),),
+    "approve_node._require_upstream_ready#upstream_not_approved": (r("debt", "approve_node._require_upstream_ready",
+                                                                     "не одобрен (review/v1)",
+                                                                     f"{N}::test_upstream_readiness_in_review[upstream_not_approved]",
+                                                                     "не одобрен"),),
+    "approve_node._try_agent_merge#form": (r("form", "approve_node._try_agent_merge",
+                                             "form() if form is not None",
+                                             f"{N}::test_finalize_form_defect_blocks_agent_merge",
+                                             '"коммит конверта трогает лишний путь"'),),
+    "runner._step_gate#act_mode_unset": (r("mode", "runner._step_gate", "GC-ACT-UNAVAILABLE(devtools)",
+                                           "tests/test_governance_runner.py::test_s4_stops_when_act_mode_unset"),),
+    "runner._step_s8#act_mode_unset": (r("mode", "runner._step_s8", "S8: режим акта не установлен",
+                                         "tests/test_governance_runner.py::test_s8_stops_when_act_mode_unset"),),
+    "act_envelope.envelope_refusal#bytes": (r("bytes", "act_envelope.envelope_refusal",
+                                              "байты узла изменились после одобрения",
+                                              f"{S}::test_provider_twin_changed_candidate_bytes_not_approved"),),
+    "act_envelope.envelope_refusal#pins": (r("pins", "act_envelope.envelope_refusal",
+                                             "upstream-пины изменились после одобрения",
+                                             f"{S}::test_cascade_by_pins_without_a_history_record"),),
     "ops.RealOps.pr_body_fact": (r("gh_failed", "ops.RealOps.pr_body_fact", "done.returncode != 0",
                                    f"{OB}::test_pr_body_unreadable_is_unavailable", '"тело PR #7: no network"'),),
 }
@@ -15154,8 +15513,8 @@ NOT_JUDGMENT = {
         "_v3", "gh_transport", "_delivery", "read", "open_review", "effective", "event_stamps",
         "review_requires", "_activation", "history", "activation")},
     "act_anon._NoRedirect.redirect_request": "транспортная политика (3xx не исполняется); отказа об объекте нет",
-    "act_anon._default_open": _IO, "act_anon._response": _IO,
-    "act_anon.AnonTransport.__init__": _BUILD, "act_anon.AnonTransport._fetch": _IO,
+    "act_anon._default_open": _IO,
+    "act_anon.AnonTransport.__init__": _BUILD,
     **{f"act_check.{n}": _HELPER for n in (
         "_activations", "_stamps", "_requires", "_until_t", "_mode_events", "_earlier",
         "_mode_history")},
@@ -15182,7 +15541,6 @@ NOT_JUDGMENT = {
     "act_status._no": "форматирует ответ провайдера `not_approved:<код>:<деталь>`; проверок нет",
     "act_status.real_deps": _BUILD, "act_status.real_deps.journal": _BUILD,
     "act_status.Decider.__init__": _BUILD, "act_status.Decider.journal": _BUILD,
-    "act_status.Decider.trust": "делегирует `load_trust` (его двойники); собственных проверок-отказов нет",
     "act_status.LegacyProbe.__init__": _BUILD, "act_status.LegacyProbe._changes": _IO,
     "act_status.Statuses.__init__": _BUILD, "act_status.Statuses._upstreams": _BUILD,
     "act_status.Statuses._stopped": "выбирает текст причины для уже решённого отказа (`_compute`)",
@@ -15294,7 +15652,9 @@ def _refusal_paths(fn: ast.AST) -> list[int]:
     def refusing(value: ast.AST | None) -> bool:
         if isinstance(value, ast.Call):
             func = value.func
-            return (func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")) in REFUSE_CALLS
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            # доменный отказ вида `cls(None, error=…)` (ответ транспорта) — тоже отказ (b5)
+            return name in REFUSE_CALLS or any(kw.arg == "error" for kw in value.keywords)
         if isinstance(value, ast.Constant):
             return value.value is False or (isinstance(value.value, str)
                                             and value.value.startswith(("unavailable:", "not_approved:")))
@@ -15309,6 +15669,8 @@ def _refusal_paths(fn: ast.AST) -> list[int]:
             inside = conditional or isinstance(node, CONDITIONAL)
             if inside and (isinstance(child, ast.Raise)
                            or (isinstance(child, ast.Return) and refusing(child.value))
+                           # отказ, присвоенный имени/атрибуту и возвращённый позже (b5)
+                           or (isinstance(child, (ast.Assign, ast.AnnAssign)) and refusing(child.value))
                            or (isinstance(child, ast.Call) and refusing(child)
                                and isinstance(node, ast.Expr))):
                 found.append(child.lineno)
@@ -15362,10 +15724,22 @@ def test_every_definition_classified_exactly_once() -> None:
     defs = _definitions()
     missing = sorted(q for q, (node, _s) in defs.items() if node is None)
     assert missing == [], f"дополнения части B не найдены в коде: {missing}"
-    judged, plain = set(JUDGMENT), set(NOT_JUDGMENT)
+    judged = {k for k in JUDGMENT if "#" not in k}
+    plain = set(NOT_JUDGMENT)
     assert sorted(set(defs) - judged - plain) == [], "определения вне реестров"
     assert sorted(judged & plain) == [], "определения в обоих реестрах"
     assert sorted((judged | plain) - set(defs)) == [], "реестр называет исчезнувшие определения"
+
+
+def test_modified_functions_audited() -> None:
+    """b5 (B3-9): новые проверки внутри изменённых существующих функций — в `JUDGMENT`."""
+    guards = {k for k in JUDGMENT if "#" in k}
+    expected = {f"{func}#{g}" for func, entry in MODIFIED_EXISTING.items()
+                if isinstance(entry, tuple) for g in entry}
+    assert sorted(guards ^ expected) == [], "ключи `<функция>#<проверка>` ≠ MODIFIED_EXISTING"
+    missing = sorted(f for f in MODIFIED_EXISTING if _function(f)[0] is None)
+    assert missing == [], f"изменённые функции не найдены: {missing}"
+    assert [f for f, e in MODIFIED_EXISTING.items() if isinstance(e, str) and not e.strip()] == []
 
 
 def test_not_judgment_has_no_refusal_guard() -> None:
@@ -15390,19 +15764,76 @@ def test_row_check_literal_belongs_to_one_check(site, component, check, lit, twi
     assert src.count(lit) == 1, f"{check}: литерал {lit!r} встречается {src.count(lit)} раз"
 
 
+def asserts_reason(fn: ast.FunctionDef, module_src: str, tlit: str) -> bool:
+    """Причина участвует в утверждении о результате (b5, B3-10), а не просто встречается:
+    литерал — внутри `assert` либо в `pytest.raises(..., match=…)`; либо литерал связан с
+    именем (присваивание, параметр `parametrize`, словарь/константа модуля), и это имя —
+    внутри `assert`/`match=`. Утверждение только о типе литерала не содержит."""
+    def seg(node: ast.AST) -> str:
+        return ast.get_source_segment(module_src, node) or ""
+
+    checks = [seg(n) for n in ast.walk(fn) if isinstance(n, ast.Assert)]
+    checks += [seg(kw.value) for n in ast.walk(fn) if isinstance(n, ast.Call)
+               and "raises" in ast.unparse(n.func) for kw in n.keywords if kw.arg == "match"]
+    if any(tlit in c for c in checks):
+        return True
+    bound: set[str] = set()
+    for node in [*ast.walk(fn), *ast.parse(module_src).body]:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and tlit in seg(node.value):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            bound |= {n.id for t in targets for n in ast.walk(t) if isinstance(n, ast.Name)}
+    for dec in fn.decorator_list:
+        if isinstance(dec, ast.Call) and "parametrize" in ast.unparse(dec.func) and tlit in seg(dec):
+            first = dec.args[0]
+            names = (first.value if isinstance(first, ast.Constant) else
+                     ",".join(e.value for e in getattr(first, "elts", []) if isinstance(e, ast.Constant)))
+            bound |= {n.strip() for n in str(names).split(",")}
+    changed = True
+    while changed:  # имена, выведенные из связанных (`change, reason = TABLE[c]`, `x = d[k]`)
+        changed = False
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Assign) and {n.id for n in ast.walk(node.value)
+                                                 if isinstance(n, ast.Name)} & bound:
+                new = {n.id for t in node.targets for n in ast.walk(t) if isinstance(n, ast.Name)}
+                if not new <= bound:
+                    bound |= new
+                    changed = True
+    used = {n.id for c in checks for n in ast.walk(ast.parse(c.strip() or "pass", mode="exec"))
+            if isinstance(n, ast.Name)}
+    return bool(bound & used)
+
+
+def _assert_src(body: str, module: str = "") -> bool:
+    """Вспомогательное для самопроверки механизма: тело теста → asserts_reason."""
+    src = module + "\n\ndef test_twin(x):\n" + "\n".join("    " + ln for ln in body.splitlines())
+    fn = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef))
+    return asserts_reason(fn, src, "ПРИЧИНА")
+
+
+@pytest.mark.parametrize("body,module,expected", [
+    ('got = f()\nassert got.reason == "ПРИЧИНА"', "", True),
+    ('expected = "ПРИЧИНА"\ngot = f()\nassert got.reason == expected', "", True),
+    ('with pytest.raises(E, match="ПРИЧИНА"):\n    f()', "", True),
+    ('expected = "ПРИЧИНА"\ngot = f()\nassert isinstance(got, Unavailable)', "", False),
+    ('got = f()  # ПРИЧИНА\nassert isinstance(got, Unavailable)', "", False),
+    ('got = f()\nassert isinstance(got, Unavailable)', 'REASON = "ПРИЧИНА"', False),
+    ('got = f()\nassert got.reason == REASON', 'REASON = "ПРИЧИНА"', True),
+    ('unused = "ПРИЧИНА"\nassert f() == 3', "", False),
+], ids=["literal_in_assert", "bound_name", "raises_match", "assignment_only",
+        "comment_only", "module_constant_unused", "module_constant_used", "exit_code_only"])
+def test_reason_link_mechanism(body: str, module: str, expected: bool) -> None:
+    """B3-10: самопроверка механизма (b) на отрицательных и положительных двойниках."""
+    assert _assert_src(body, module) is expected
+
+
 @pytest.mark.parametrize("site,component,check,lit,twin,tlit", ROWS,
                          ids=[f"{r[0]}:{r[1]}" for r in ROWS])
 def test_row_twin_asserts_exact_reason(site, component, check, lit, twin, tlit) -> None:
-    """(b) двойник утверждает именно причину своей проверки."""
+    """(b) двойник утверждает именно причину своей проверки (связь — по AST)."""
     fn, text, module_src = _twin(twin)
     assert fn is not None, f"{site} × {component}: двойника {twin} нет"
     assert tlit.strip() not in GENERIC, f"{twin}: утверждение {tlit!r} не называет причину"
-    names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
-    constants = "\n".join(
-        ast.get_source_segment(module_src, n) or "" for n in ast.parse(module_src).body
-        if isinstance(n, ast.Assign) and any(getattr(t, "id", None) in names for t in n.targets))
-    assert tlit in text or tlit in constants, f"{twin}: нет утверждения {tlit!r}"
-    assert any(isinstance(n, ast.Assert) for n in ast.walk(fn)) or "raises(" in text
+    assert asserts_reason(fn, module_src, tlit), f"{twin}: {tlit!r} не входит в утверждение"
     if "[" in twin:
         param = twin.split("[", 1)[1].rstrip("]")
         marks = [d for d in fn.decorator_list if "parametrize" in ast.unparse(d)]
@@ -15810,11 +16241,304 @@ if __name__ == "__main__":
 отказывает на admission (Task 12) — второй рубеж, а не замена порядка.
 
 - [ ] **Step 4: Run** → PASS; полный набор; `uv run ruff check . && uv run pyrefly check`.
+
+- [ ] **Step 4a: Обязательный мутационный проход по ВСЕМ строкам реестра** (ревизия b5, B3-12) —
+  включая 40+ строк на настоящем стенде `World` (`tests/test_act_node.py`,
+  `tests/test_act_repropose.py`), строки проверок внутри изменённых функций
+  (`approve_node._propose#…`, `read_dag_state#…`, `_require_upstream_ready#…`,
+  `_try_agent_merge#form`, `runner._step_gate#…`, `runner._step_s8#…`) и прогнанные при ревизии
+  плана (там: 201 закрыто обходом, 4 в `RULED`):
+
+  ```bash
+  uv run --group governance python tests/act_mutation.py \
+    --out docs/superpowers/plans/2026-10-12-approval-act-review.runs/act-mutation-$(git rev-parse --short HEAD).json
+  ```
+
+  Правило приёмки: каждая строка — `closed` (двойник упал на утверждении при обойдённой
+  проверке) или `ruled` (запись в `RULED` с причиной, видна в диффе и принимается ревьюером
+  задачи). `survived`, `error`, `n/a` и непрогнанная строка **блокируют коммит**: чинится
+  двойник (тип результата — до обращения к полям; изоляция, при которой обход даёт другой
+  итог, а не исключение) или добавляется оператор `BYPASS` с корректными данными. Подмена
+  причины (O3) строку не закрывает. Файл результата коммитится.
+
+`tests/act_mutation.py`:
+
+```python
+"""Обязательный мутационный проход по строкам реестра идентичности (Task 16 Step 4a).
+
+Для КАЖДОЙ строки `tests/test_act_identity_table.py::ROWS`, включая двойники на стенде
+`World` (`tests/test_act_node.py`, `tests/test_act_repropose.py`) и проверки внутри
+изменённых существующих функций (`<функция>#<проверка>`): обойти проверку и запустить
+названный двойник отдельно. Итог строки:
+
+- `closed` — двойник упал на утверждении (`AssertionError`, `DID NOT RAISE`, regex
+  `match=`, `pytest.fail`);
+- `survived` — двойник прошёл; `error` — упал иным исключением; `n/a` — оператор не
+  применим. Любой из трёх БЛОКИРУЕТ коммит Task 16: двойник или оператор чинятся, либо
+  строка вносится в `RULED` с причиной (решение ревьюера задачи, видно в диффе).
+
+Операторы обхода: по умолчанию — условие самого внутреннего `if`/IfExp с литералом
+проверки → `False`; для проверок, без которых дальнейший код падает (несущие), для
+«принимающих» проверок, памяти и замыканий — `BYPASS`: замена, дающая корректные данные
+(проверка «пропустила», дальше — штатный путь). Подмена причины («МУТАНТ», O3) —
+только проверка причины: инструмент её не применяет, обход ею НЕ закрывается.
+
+Запуск: `uv run --group governance python tests/act_mutation.py --out <файл.json>`;
+байткод не пишется и очищается перед каждым мутантом (иначе мутант той же длины в ту
+же секунду исполнит код предыдущего).
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from tests.test_act_identity_table import ROWS  # noqa: E402
+
+#: Обход с корректными данными: `site:component` → (фрагмент в функции проверки, замена).
+BYPASS: dict[str, tuple[str, str]] = {
+    'act_anon.AnonTransport._fetch:transport_failure': ('return cls(None, error=f"anon: {type(exc).__name__}: {exc}")',
+        'return cls(200, body={}, link=None)'),
+    'act_app_token._pages:completeness': ('return Unavailable(f"GET {path} (стр. {page}): HTTP {status}")',
+        'return items'),
+    'act_barrier._candidate_nodes:pending': ('meta.get("status") == PENDING',
+        'True'),
+    'act_barrier._identity:request_form': ('    if m is None:\n        return None',
+        '    if m is None:\n        m = _CANDIDATE.match("ws-9-approve-9-9-9")'),
+    'act_barrier._legacy_resolved:node_in_base': ('NODE_MISSING if',
+        'None if'),
+    'act_barrier._local_brief_stamp:file': ('stamped.is_file()',
+        'True'),
+    'act_barrier._local_brief_stamp:run': ('approval.get("repo") == product and approval.get("pr") == number',
+        'True'),
+    'act_barrier._local_items:unreadable': ('gaps.append(f"леджер {run_id} не читается: {exc}")',
+        'pass'),
+    'act_barrier._marked:absent': ('return Unmarked(NO_MANIFEST_FILE)',
+        'return True'),
+    'act_barrier._marked:unparsed': ('return Unmarked(f"{MANIFEST_UNPARSED}: {exc}")',
+        'return True'),
+    'act_barrier._signed:signer': ('later > at',
+        'True'),
+    'act_barrier.live_review_requests:product_gaps': ('gaps.append(f"{product}: список PR неполон — {exc}")',
+        'pass'),
+    'act_barrier.live_unmarked:pagination': ('gaps.append(f"список PR {product} неполон: {exc}")',
+        'pass'),
+    'act_check._admission:marker_before_bootstrap': ('ctx.request_act is None',
+        'True'),
+    'act_check._admission:mode_after_review': ('return Rejected(ADMISSION, admission.reason)',
+        'return own'),
+    'act_check._decide:approver': ('        return Rejected(D1_NO_ACT, f"нет approve человека на {head_sha}")',
+        '        act = ReviewView("0", "nobody", "User", "APPROVED", head_sha)'),
+    'act_check._decide:dismissal': ('        return Rejected(D1_NO_ACT, f"нет approve человека на {head_sha}")',
+        '        act = ReviewView("0", "nobody", "User", "APPROVED", head_sha)'),
+    'act_check.check_delivery:act_head': ('        return Rejected(D1_NO_ACT, f"нет approve человека на {head_sha}")',
+        '        act = ReviewView("0", "nobody", "User", "APPROVED", head_sha)'),
+    'act_facts._call:library_exception': ('return Unavailable(f"steward {what}: {type(exc).__name__}: {exc}")',
+        'return None'),
+    'act_facts._own:steward_unavailable': ('return Unavailable(got.reason)',
+        'return got'),
+    'act_journal.DevJournal.record:store_refused': ('return Unavailable(f"журнал периметра (dev): {exc.reason}")',
+        'return None'),
+    'act_journal_wire.DevStoreJournal.record:insert_failed': ('return Unavailable(f"журнал периметра (dev): событие не записано: {exc}")',
+        'return None'),
+    'act_journal_wire.DevStoreJournal.status:blocking': ('"blocked" if rows else "clear"',
+        '"clear"'),
+    'act_journal_wire.WireJournal._call:garbled': ('return Unavailable(f"{op}: ответ издателя не разобран (код {done.returncode})")',
+        'return {}'),
+    'act_premerge._check:manifest_present': ('raise _Stop(EXIT_REFUSED, f"в {args.head[:12]} нет манифеста {ident.request_id}")',
+        'return'),
+    'act_premerge._trust:app_unknown': ('raise _Stop(EXIT_UNSET, f"установки App: {found.reason}")',
+        'found = None'),
+    'act_premerge.request_of_branch:form': ('    if match is None:\n        return None',
+        '    if match is None:\n        match = re.fullmatch(pattern, "spec/ws-9-approve-9-9-9")'),
+    'act_status.Decider.__call__:memo_key': ('key = (*ident.memo_key, event.merge_commit)',
+        'key = (event.merge_commit,)'),
+    'act_status.Decider.__call__:memo_request': ('key = (*ident.memo_key, event.merge_commit)',
+        'key = (event.merge_commit,)'),
+    'act_status.Decider._decide:head_sha': ('head_sha=event.head_sha',
+        'head_sha="0" * 40'),
+    'act_status.Decider._head_hashes:head_bytes': ('            if text is None:\n                return Unavailable(f"{entry.path} в {event.head_sha[:12]} не читается")',
+        '            if text is None:\n                text = "---\\nspec_stage: x\\nstatus: approval_pending\\nversion: 1\\n---\\nтело\\n"'),
+    'act_status.Decider.legacy:contract_result': ('legacy=contract',
+        'legacy=lambda: LegacyAccepted("alice")'),
+    'act_status.Decider.trust:binding': ('self._trust = Unavailable("нет привязки корня доверия (§6.1 п. 1)")',
+        'self._trust = act_trust.Trust(None, ())'),
+    'act_status.LegacyProbe._candidate:ledger_node': ('return _no(LEDGER_NODE, f"заявка {key} леджера не выносила узел {node}")',
+        'return APPROVED'),
+    'act_status.LegacyProbe._candidate:ledger_record': ('        if op is None:\n',
+        '        if op is None:\n            op = {}\n        if False:\n'),
+    'act_status.LegacyProbe._finalize_branch:via_pr': ('            return _no(NOT_VIA_PR, "подпись внесена не смёрженным PR")',
+        '            merged = [0]'),
+    'act_status.Statuses._compute:delivery_verdict': ('return f"not_approved:act:{getattr(verdict, \'code\', type(verdict).__name__)}"',
+        'verdict = Accepted(current.merge_commit, "x", "11", "alice")'),
+    'act_status.Statuses._envelope:ws_id': ('return f"узел {node}: нет конверта — не одобрен"',
+        'return None'),
+    'act_status.Statuses.is_review:no_event': ('current_event(self.history, node) is not None',
+        'True'),
+    'act_status.Statuses.of:memo_node': ('return self._memo[node]',
+        'return next(iter(self._memo.values()))'),
+    'act_status._event:request:no_pr': ('        if isinstance(pr, Unavailable):\n            return pr',
+        '        if isinstance(pr, Unavailable):\n            return None'),
+    'act_status.gate_run:snapshot_digest': ('return Unavailable(f"gate-check --print-snapshot-digest: код {rc}: {digest}")',
+        'return "review", str(out)'),
+    'act_status.load_history:base_unread': ('    if rows is None:\n        return Unavailable',
+        '    if rows is None:\n        rows = []\n    if False:\n        return Unavailable'),
+    'act_status.pr_for_merge:exactly_one': ('    if len(found) != 1:',
+        '    if not found:\n        found = [7]\n    if False:'),
+    'act_trust._checked_epochs:transition': ('return Unavailable(f"недопустимый переход журнала: {exc}")',
+        'pass'),
+    'act_trust._journal_versions:journal_deleted': ('if versions:',
+        'if False:'),
+    'act_trust._modes:unread_set': ('return Unavailable(f"набор {a.merge_commit[:12]}: {policy.reason}")',
+        'continue'),
+    'act_trust._register:violation_event': ('return Unavailable(f"нарушение периметра: {detail}")',
+        'return None'),
+    'act_trust.current_activation:open_epoch': ('    if not span:\n        return Unavailable("в открытой эпохе нет активаций")',
+        '    if not span:\n        span = next(s for s in ranges.values() if isinstance(s, tuple) and s)'),
+    'act_trust.gh_get:not_json': ('return unavailable(f"gh api {path} ({cred.label}): ответ не JSON")',
+        'return Fact(Outcome.FOUND, None, "ok")'),
+    'act_trust.load_binding:absent': ('    except FileNotFoundError:\n        return None\n',
+        '    except FileNotFoundError as exc:\n        return Unavailable(f"привязка {path}: {exc}")\n'),
+    'act_trust.load_ranges:history_violation': ('return _register(journal, trust.snapshot, ("approval-policy", got.reason))',
+        'got = ()'),
+    'act_trust.load_ranges:unknown_anchor': ('ranges[epoch.epoch] = Unavailable(f"якорь эпохи {epoch.epoch}: {at.reason}")\n            continue',
+        'at = t'),
+    'act_trust.product_mode:never_entered': ('if not entered:\n        return PRE_MIGRATION',
+        'if not entered:\n        return "merge"'),
+    'act_trust.product_mode:prior_epoch': ('return Unavailable(f"история режима, эпоха {epoch.epoch}: {span.reason}")',
+        'continue'),
+    'act_trust.read_trust_snapshot:head_named': ('return Unavailable(f"{repo}: голова {binding.df_trust_branch} не прочитана")',
+        'head = "0" * 40'),
+    'approve_node._legacy_outcome:old_pin_missing': ('    if not pinned:\n',
+        '    if not pinned:\n        pinned = {"sha": None, "fingerprint": None}\n    if False:\n'),
+}
+#: Обход невозможен (без данных продолжить нечем) — решение ревьюера с причиной.
+RULED: dict[str, str] = {
+    'act_context.delivery_verdict:not_merged':
+        'PR не смёржен: нет T и фактов доставки — продолжить без них нечем; обход с корректными данными невозможен, проверяется причина (O3) и отдельный двойник «ranges не читаются»',
+    'act_journal.DevJournal._open:store':
+        'хранилище журнала не открывается (битое/утраченное): продолжить без БД нечем; обход невозможен, проверяется причина (O3)',
+    'act_journal.DevJournal.status:lost':
+        'причина «lost» порождается хранилищем `df.publisher` (exc.reason), обработчик общий; обход невозможен (без БД нечем продолжить); двойник утверждает причину хранилища',
+    'act_journal_wire.DevStoreJournal._open:missing':
+        'нет файла блокировки — нет хранилища, продолжить без дескриптора нечем; обход невозможен, проверяется причина (O3)',
+}
+
+
+def _locate(path: Path, qualified: str) -> tuple[str, ast.AST | None]:
+    src = path.read_text(encoding="utf-8")
+    node: ast.AST | None = ast.parse(src)
+    for name in qualified.split(".")[1:]:
+        node = next((c for c in ast.walk(node) if isinstance(
+            c, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and c.name == name), None)
+        if node is None:
+            break
+    return src, node
+
+
+def _offsets(src: str) -> list[int]:
+    offs = [0]
+    for line in src.splitlines(keepends=True):
+        offs.append(offs[-1] + len(line))
+    return offs
+
+
+def _guard_off(src: str, fn: ast.AST, lit: str) -> str | None:
+    offs = _offsets(src)
+
+    def pos(n: ast.AST, end: bool = False) -> int:
+        return offs[(n.end_lineno if end else n.lineno) - 1] + (n.end_col_offset if end else n.col_offset)
+
+    best = None
+    for node in ast.walk(fn):
+        if isinstance(node, (ast.If, ast.IfExp)):
+            body = node.body if isinstance(node, ast.If) else [node.body]
+            test = src[pos(node.test):pos(node.test, True)]
+            text = test + "".join(src[pos(b):pos(b, True)] for b in body)
+            if lit in text or (lit.startswith("if ") and lit[3:] in test):
+                if best is None or pos(node) >= pos(best):
+                    best = node
+    if best is None:
+        return None
+    return src[:pos(best.test)] + "False" + src[pos(best.test, True):]
+
+
+def _run(twin: str) -> str:
+    for cache in ROOT.rglob("__pycache__"):
+        shutil.rmtree(cache, ignore_errors=True)
+    done = subprocess.run([sys.executable, "-B", "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider", twin],
+                          cwd=ROOT, capture_output=True, text=True, timeout=900,
+                          env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+    if done.returncode == 0:
+        return "survived"
+    tail = done.stdout[-4000:]
+    if re.search(r"^E\s+(AssertionError|assert )|DID NOT RAISE|Regex pattern did not match|^E\s+Failed:",
+                 tail, re.M):
+        return "closed"
+    return "error"
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="act_mutation")
+    p.add_argument("--out", required=True, type=Path)
+    p.add_argument("--only", action="append", default=[])
+    args = p.parse_args(argv)
+    results = []
+    for site, comp, check, lit, twin, _tlit in ROWS:
+        key = f"{site}:{comp}"
+        if args.only and key not in args.only:
+            continue
+        path = ROOT / "governance" / f"{check.split('.')[0]}.py"
+        src, fn = _locate(path, check)
+        if fn is None:
+            results.append({"row": key, "status": "n/a", "note": "функция проверки не найдена"})
+            continue
+        if key in RULED:
+            results.append({"row": key, "status": "ruled", "note": RULED[key]})
+            continue
+        if key in BYPASS:
+            old, new = BYPASS[key]
+            seg = ast.get_source_segment(src, fn) or ""
+            mutated = src.replace(seg, seg.replace(old, new), 1) if seg.count(old) == 1 else None
+        else:
+            mutated = _guard_off(src, fn, lit)
+        if mutated is None:
+            results.append({"row": key, "status": "n/a", "note": "оператор обхода не применим"})
+            continue
+        path.write_text(mutated, encoding="utf-8")
+        try:
+            status = _run(twin)
+        finally:
+            path.write_text(src, encoding="utf-8")
+        results.append({"row": key, "status": status, "operator": "BYPASS" if key in BYPASS else "O1"})
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8")
+    blocking = [r for r in results if r["status"] not in ("closed", "ruled")]
+    for r in blocking:
+        print(f"act_mutation: {r['status']}: {r['row']}", file=sys.stderr)
+    print(f"act_mutation: {len(results) - len(blocking)}/{len(results)} закрыто или решено")
+    return 1 if blocking else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
 - [ ] **Step 5: Commit**
 
 ```bash
 git add governance/act_barrier.py Makefile tests/test_act_barrier.py \
-  tests/test_act_identity_table.py
+  tests/test_act_identity_table.py tests/act_mutation.py \
+  docs/superpowers/plans/2026-10-12-approval-act-review.runs/
 git commit -m "feat(act): барьер миграции по форджу и предпросмотр затрагиваемых заявок (§10, Q9)"
 ```
 
