@@ -2981,7 +2981,7 @@ steward#211). Этот коммит сверяет «Интерфейс M0» с 
 | Р-6 | Свой строгий разбор `trust.toml` в `act_trust` (те же ключи, `O_NOFOLLOW`, владелец root, не пишется группой/всеми); тест сверяет исход с `df.stage2_config.parse_trust` на тех же фикстурах | `act_trust` входит в цепочку `act_premerge` (обвязка мержа), а `df.stage2_config` тянет полдюжины модулей `df/`, не входящих в `_HARNESS_PREFIXES` | два разборщика одного файла; расхождение ловит тест равенства, а не ревью |
 | Р-7 | **снято ревизией b1** (B1-4): журнал обязателен и в предпроверке — через `act_journal_wire` (Р-16) | — | — |
 | Р-8 | **сужено b1** (B1-9): история узла — по first-parent базы; заявка — коммит, добавивший манифест; голова заявки — `headRefOid` из фактов PR merge-коммита (`prs_containing_commit` + `pr_facts`), а не второй родитель — squash поддержан; объект головы догружается `refs/pull/N/head`. Правка или удаление манифеста/остановки после доставки → история `Unavailable` | спека требует манифест в одобренном head (§9.1 (а) п. 0) и запрещает переписывать доставленное; форма мержа контрактом не ограничена | правка доставленной заявки блокирует историю воркстрима до разбора человеком (fail-closed) |
-| Р-9 | **механизм b1, b2** (B1-3, B2-1): узел без события `review/v1` получает статус только через provenance старого одобрения — подпись frontmatter внесена finalize-PR старой заявки **этого воркстрима**, узел — среди файлов её candidate и в его голове `approval_pending`, candidate смёржен той же учёткой в то же время, а вердикт admission до активации — результат **старого контракта по прежним пинам** (`legacy_contract_refusal`: вынесенные байты = байтам базы, пины подписи = пинам выноса), не безусловный `LegacyAccepted`; без доказанного звена — `not_approved:legacy_provenance`/`legacy_contract` | правило — спека §9.1 (а) п. 3 и :747, без отката на «нет события»; плану остаётся только механизм цепочки | цепочка опирается на SSOT формы веток; переименование формы без миграции даст `legacy_provenance` (fail-closed) |
+| Р-9 | **механизм b1, b2** (B1-3, B2-1): узел без события `review/v1` получает статус только через provenance старого одобрения — подпись frontmatter внесена finalize-PR старой заявки **этого воркстрима**, узел — среди файлов её candidate и в его голове `approval_pending`, candidate смёржен той же учёткой в то же время, а вердикт admission до активации — результат **полного старого контракта**: байтовая часть (`legacy_contract_refusal`) и `approve_node._legacy_outcome` — опубликованный снимок, пин `approval-policy-source/v1` из записи заявки в леджере прогона, отпечаток, `authorized_signature` по прежнему allowlist (b3, B3-1); у каждого звена свой код отказа; без записи заявки или пина — отказ, политика недоступна — `unavailable`, никогда `approved` | правило — спека §9.1 (а) п. 3 и :747, без отката на «нет события»; плану остаётся только механизм цепочки | цепочка опирается на SSOT формы веток; переименование формы без миграции даст `legacy_provenance` (fail-closed) |
 | Р-10 | **механизм b1** (B1-5): `gate-check` S4/S8 — `--act-mode` по `product_mode` (история режима): `review` → провайдер; `PRE_MIGRATION`/`merge` → `legacy`; удаление записи, откат `review → merge`, нет привязки, недочитанная история → стоп шага | О14 требует результат admission; спека §10 запрещает выводить режим из одного текущего значения | продукт в `merge` с уже доставленной заявкой `review/v1` (невозможно по барьеру §10) упрётся в `GC-ACT-MODE-CONFLICT` — fail-closed |
 | Р-11 | **дополнено b1** (B1-15): проверка конверта после мержа finalize — побайтовое равенство с `render_envelope(ожидаемый)` на merge-коммите finalize **и** достижимость этого коммита из базы (`is_ancestor`); `reopen` — наличие и идентичность `StopRecord` в stop-PR, достижимость его merge-коммита | прежняя редакция ссылалась на Task 14 из Task 13; доставка в нужную базу — часть утверждения «конверт в base» | нет |
 | Р-12 | Вендоренный `contracts/approval-facts/` — в authority-root и `_HARNESS_PREFIXES` | данные тестов ядра акта защищаются так же, как сами тесты `tests/test_act_*` (заметки части A, строка 10) | PR, правящий только векторы, мержит человек |
@@ -2989,7 +2989,7 @@ steward#211). Этот коммит сверяет «Интерфейс M0» с 
 | Р-14 | `--repropose` брифа переезжает из Task 13a в Task 17 | заявка брифа с пином активации (`v2`) появляется только с M2 discovery — переиздавать до неё нечего | до части C выход для брифа — новая заявка через `brief-propose` |
 | Р-15 | **усилено b1** (B1-13): барьер считает смёрженный legacy-candidate разобранным, только если каждый узел, отданный candidate на одобрение (`approval_pending` в его голове, состав — независимо от finalize), подписан этим или более поздним актом в базе; пустой состав — живой пункт; пины узла не судит | §10 п. 2 спрашивает «доведена или инвалидирована», а не «узел без долга»; дрейф пинов после законного акта — долг узла | узел с долгом пинов пройдёт барьер и встанет на гейте доставки |
 | Р-16 | Предпроверка мержа пишет журнал периметра узким клиентом `act_journal_wire`: в установке `df` — протокол издателя `df/publisher-request/v1` (`sudo -n -u df-publisher df-publish`), в режиме разработки — то же SQLite-хранилище (правило блокировки и вставка `pending` в `BEGIN IMMEDIATE`); совпадение форматов держит тест на одном файле базы | спека §6.3 требует журнал у каждого потребителя; цепочка обвязки мержа не может включать `df/` без смены процесса ревью этих путей (решение владельца, не плана) | второй писатель того же хранилища: расхождение схемы ловит тест равенства с `df.publisher.perimeter`, номер эпохи `pending` назначает полный журнал |
-| Р-17 | Идентичность судимого объекта — одна на объект: `RequestIdentity(product, ws_id, request_id)` + пути узлов DAG + байты манифеста в одобренном head; для конверта — все поля `Envelope`; для старого акта — воркстрим, узел в candidate, байты, прежние пины; маркер миграции — `<!-- act-migrated: <product>/<ws_id>/<request_id> -->`. Полнота держится данными и мета-тестом (`tests/test_act_identity_table.py`, Task 16), а не галочками | ревизии b1 и b2 нашли места, сверявшие часть компонентов (B1-1/2/13/14/15, B2-1/B2-3) — второй круг одного класса; спека формат маркера не задаёт | маркеры старой формы (`approve-W-K-A` без продукта и воркстрима) барьер не принимает — их ставят заново `--invalidate` |
+| Р-17 | Идентичность судимого объекта — одна на объект: `RequestIdentity(product, ws_id, request_id)` + пути узлов DAG + байты манифеста в одобренном head; для конверта — все поля `Envelope`; для старого акта — воркстрим, узел в candidate, байты, прежние пины; маркер миграции — `<!-- act-migrated: <product>/<ws_id>/<request_id> -->`. Полнота держится исчерпывающей классификацией всех функций модулей части B (`JUDGMENT`/`NOT_JUDGMENT`) и мета-тестом (`tests/test_act_identity_table.py`, Task 16), а не галочками и не именами-маркерами | ревизии b1 и b2 нашли места, сверявшие часть компонентов (B1-1/2/13/14/15, B2-1/B2-3) — второй круг одного класса; спека формат маркера не задаёт | маркеры старой формы (`approve-W-K-A` без продукта и воркстрима) барьер не принимает — их ставят заново `--invalidate` |
 
 **Вопросы к спеке** (план не поглощает; список — в отчёте ревизии): С-1 — анонимный REST
 (спека §6.2, 60 запросов/ч на IP) против чтения истории обоих источников доверия перед **каждым**
@@ -3036,33 +3036,104 @@ steward#211). Этот коммит сверяет «Интерфейс M0» с 
 - **B1-17**: состав коммита Task 13 перечислен для каждого варианта решения по п. 9 части A.
 - **B1-18**: в событии журнала — настоящий `approval_policy_repository_id`; тест полей события.
 
-**Идентичность судимого объекта: место положительного суждения × компонент → отрицательный
-двойник через это место** (ревизия b2: перестроено механически по листингам; данные —
-`tests/test_act_identity_table.py::TABLE`, Task 16; мета-тест падает, если у строки нет теста, тест
-исчез или функция с признаком положительного суждения — `APPROVED`, `Accepted`, `LegacyAccepted`,
-`complete_request`, `EXIT_OK`, память `_memo` — не внесена в таблицу). 107 строк, 19 мест.
+**Идентичность судимого объекта — исчерпывающая классификация** (ревизия b3: третий круг
+класса, механизм, а не экземпляры). Реестр — `tests/test_act_identity_table.py` (Task 16):
+все 197 функций и методов верхнего уровня 13 модулей части B стоят
+ровно в одном из реестров — `JUDGMENT` (87 мест, 233 строк «компонент →
+двойник через этот вход») или `NOT_JUDGMENT` (110, у каждой — причина). Функция вне
+реестров, в обоих, исчезнувшая, строка без теста, неверный id параметра и функция с маркером
+положительного суждения (`APPROVED`, `Accepted`, `LegacyAccepted`, `complete_request`) вне
+`JUDGMENT` — падение мета-теста. Ниже — места суждения и их компоненты (тесты — в реестре).
 
-| Место | Компонент → тест |
+| Место суждения | Компоненты идентичности (двойник на каждый) |
 |---|---|
-| `act_status._event` | request:ws_id → `test_act_status.py::test_history_manifest_off_its_path_unavailable[ws_id]`; request:request_id → `test_act_status.py::test_history_manifest_off_its_path_unavailable[request_id]`; request:merge_commit → `test_act_status.py::test_history_manifest_commit_without_pr_unavailable`; request:head_sha → `test_act_status.py::test_history_fetches_squash_head_absent_locally[False]`; request:immutable → `test_act_status.py::test_manifest_edited_after_delivery_unavailable`; stop:ws_id → `test_act_status.py::test_history_stop_of_other_workstream_ignored`; stop:node → `test_act_status.py::test_history_stop_off_its_path_unavailable[node]`; stop:generation → `test_act_status.py::test_history_stop_off_its_path_unavailable[generation]`; stop:immutable → `test_act_status.py::test_history_stop_edited_after_delivery_unavailable` |
-| `act_status.Decider.__call__` | product+ws_id+merge_commit → `test_act_status.py::test_decider_memo_key_carries_full_identity`; request_id → `test_act_status.py::test_decider_memo_is_per_request_not_per_commit[good_first]` |
-| `act_status.Decider._decide` | product → `test_act_status.py::test_decider_refuses_unbound_manifest[foreign_product]`; ws_id → `test_act_status.py::test_decider_refuses_unbound_manifest[foreign_ws]`; request_id → `test_act_status.py::test_decider_refuses_unbound_manifest[head_other_request]`; node_paths → `test_act_status.py::test_decider_refuses_unbound_manifest[foreign_path]`; manifest_in_head → `test_act_status.py::test_decider_refuses_unbound_manifest[absent_in_head]`; manifest_bytes → `test_act_status.py::test_decider_refuses_unbound_manifest[changed_in_head]`; upstream_pins → `test_act_status.py::test_decider_refuses_unbound_manifest[pins_changed]`; head_sha → `test_act_status.py::test_decider_judges_review_on_event_head`; merge_commit → `test_act_status.py::test_decider_delivery_of_other_merge_commit_unavailable` |
-| `act_status.Decider.legacy` | old_contract_result → `test_act_legacy.py::test_decider_legacy_returns_contract_result` |
-| `act_status.LegacyProbe._candidate` | ws_id → `test_act_legacy.py::test_finalize_of_other_workstream_refused`; node_in_candidate → `test_act_legacy.py::test_node_not_in_candidate_refused`; node_pending_in_candidate → `test_act_legacy.py::test_node_not_pending_in_candidate_refused`; node_bytes → `test_act_legacy.py::test_node_bytes_changed_by_finalize_refused`; old_pins → `test_act_legacy.py::test_signature_under_changed_pins_refused`; signature_commit → `test_act_legacy.py::test_frontmatter_signature_differs_from_last_edit`; finalize_form → `test_act_legacy.py::test_signature_without_finalize_pr_refused`; signature_via_pr → `test_act_legacy.py::test_signature_not_through_pr_refused`; candidate_exists → `test_act_legacy.py::test_candidate_absent_or_not_matching_signature[absent]`; candidate_merger → `test_act_legacy.py::test_candidate_absent_or_not_matching_signature[other_merger]`; candidate_merged → `test_act_legacy.py::test_candidate_absent_or_not_matching_signature[not_merged]`; admission → `test_act_legacy.py::test_candidate_delivered_after_activation_refused` |
-| `act_status.Statuses._envelope` | envelope:node → `test_act_status.py::test_envelope_component_substituted_not_approved[node]`; envelope:request_id → `test_act_status.py::test_envelope_component_substituted_not_approved[request_id]`; envelope:generation → `test_act_status.py::test_envelope_component_substituted_not_approved[generation]`; envelope:manifest_path → `test_act_status.py::test_envelope_component_substituted_not_approved[manifest_path]`; envelope:head_sha → `test_act_status.py::test_envelope_component_substituted_not_approved[head_sha]`; envelope:self_hash → `test_act_status.py::test_envelope_component_substituted_not_approved[self_hash]`; envelope:upstream_pins → `test_act_status.py::test_envelope_component_substituted_not_approved[upstream_pins]`; envelope:merge_commit → `test_act_status.py::test_envelope_component_substituted_not_approved[merge_commit]`; envelope:review_id → `test_act_status.py::test_envelope_component_substituted_not_approved[review_id]`; envelope:policy → `test_act_status.py::test_envelope_component_substituted_not_approved[policy]`; ws_id → `test_act_status.py::test_envelope_of_other_workstream_not_used`; node_bytes → `test_act_status.py::test_provider_twin_changed_candidate_bytes_not_approved`; current_pins → `test_act_status.py::test_cascade_by_pins_without_a_history_record` |
-| `act_status.Statuses.of` | node → `test_act_status.py::test_statuses_memo_is_per_node[approved_first]` |
-| `act_status.Statuses._compute` | generation → `test_act_status.py::test_previous_generation_envelope_with_same_bytes_refused`; stop → `test_act_status.py::test_stop_makes_node_not_approved`; upstream → `test_act_status.py::test_stopped_upstream_with_unchanged_bytes_blocks_downstream`; delivery_verdict → `test_act_status.py::test_rejected_delivery_not_approved` |
-| `act_status.gate_run` | snapshot_digest → `test_act_gate.py::test_review_mode_writes_provider_bound_to_digest`; product_mode → `test_act_gate.py::test_mode_unavailable_stops` |
-| `act_node._binding_refusal` | product → `test_act_node.py::test_foreign_identity_binding_invalidates[product]`; ws_id → `test_act_node.py::test_foreign_identity_binding_invalidates[ws_id]`; node_path → `test_act_node.py::test_foreign_identity_binding_invalidates[node_path]`; upstream_pins → `test_act_node.py::test_foreign_identity_binding_invalidates[upstream_pins]` |
-| `act_node._merged` | act_mirror → `test_act_node.py::test_act_removed_from_ledger_with_manifest_in_head`; legacy_admission → `test_act_node.py::test_legacy_candidate_merged_after_review_activation_refused`; product_mode → `test_act_node.py::test_merged_unmarked_with_unset_mode_stays_alive` |
-| `act_node.envelope_commit_defect` | extra_path → `test_act_node.py::test_envelope_commit_defect_twins[extra_path]`; missing → `test_act_node.py::test_envelope_commit_defect_twins[missing]`; ws_id → `test_act_node.py::test_envelope_commit_defect_twins[ws_id]`; bytes → `test_act_node.py::test_envelope_commit_defect_twins[bytes]` |
-| `act_node._reconcile_finalize` | envelope:node → `test_act_node.py::test_finalize_delivered_envelope_component_substituted_invalidates[node]`; envelope:request_id → `test_act_node.py::test_finalize_delivered_envelope_component_substituted_invalidates[request_id]`; envelope:generation → `test_act_node.py::test_finalize_delivered_envelope_component_substituted_invalidates[generation]`; envelope:manifest_path → `test_act_node.py::test_finalize_delivered_envelope_component_substituted_invalidates[manifest_path]`; envelope:head_sha → `test_act_node.py::test_finalize_delivered_envelope_component_substituted_invalidates[head_sha]`; envelope:self_hash → `test_act_node.py::test_finalize_delivered_envelope_component_substituted_invalidates[self_hash]`; envelope:upstream_pins → `test_act_node.py::test_finalize_delivered_envelope_component_substituted_invalidates[upstream_pins]`; envelope:merge_commit → `test_act_node.py::test_finalize_delivered_envelope_component_substituted_invalidates[merge_commit]`; envelope:review_id → `test_act_node.py::test_finalize_delivered_envelope_component_substituted_invalidates[review_id]`; envelope:policy → `test_act_node.py::test_finalize_delivered_envelope_component_substituted_invalidates[policy]`; in_base → `test_act_node.py::test_finalize_merged_outside_base_invalidates` |
-| `act_node.reopen` | record → `test_act_node.py::test_reopen_refuses_stop_pr_without_record[none]`; node → `test_act_node.py::test_reopen_refuses_stop_pr_without_record[other_node]`; generation → `test_act_node.py::test_reopen_refuses_stop_pr_without_record[other_generation]`; record_bytes → `test_act_node.py::test_reopen_refuses_stop_pr_without_record[other_reason]`; in_base → `test_act_node.py::test_reopen_refuses_stop_pr_outside_base` |
-| `act_premerge.main` | product → `test_act_premerge.py::test_manifest_of_other_identity_refused[product]`; ws_id → `test_act_premerge.py::test_manifest_of_other_identity_refused[ws_id]`; request_id → `test_act_premerge.py::test_manifest_of_other_identity_refused[request_id]`; policy_pin → `test_act_premerge.py::test_stale_pin_refused`; head_sha → `test_act_premerge.py::test_review_facts_head_differs_refused`; act → `test_act_premerge.py::test_no_approve_refused`; merger → `test_act_premerge.py::test_merger_outside_allowlist_refused`; product_mode → `test_act_premerge.py::test_product_mode_gate[unset]`; perimeter → `test_act_premerge.py::test_existing_block_stops_premerge` |
-| `act_barrier._marked` | not_manifest → `test_act_barrier.py::test_malformed_or_foreign_manifest_is_not_a_marker[not_manifest]`; bad_yaml → `test_act_barrier.py::test_malformed_or_foreign_manifest_is_not_a_marker[bad_yaml]`; ws_id → `test_act_barrier.py::test_malformed_or_foreign_manifest_is_not_a_marker[ws_id]`; request_id → `test_act_barrier.py::test_malformed_or_foreign_manifest_is_not_a_marker[request_id]`; product → `test_act_barrier.py::test_malformed_or_foreign_manifest_is_not_a_marker[product]` |
-| `act_barrier._migrated` | author → `test_act_barrier.py::test_marker_must_be_human_unedited_and_this_request[author]`; edited → `test_act_barrier.py::test_marker_must_be_human_unedited_and_this_request[edited]`; old_form → `test_act_barrier.py::test_marker_must_be_human_unedited_and_this_request[old_form]`; ws_id → `test_act_barrier.py::test_marker_must_be_human_unedited_and_this_request[ws_id]`; request_id → `test_act_barrier.py::test_marker_must_be_human_unedited_and_this_request[request_id]`; product → `test_act_barrier.py::test_marker_must_be_human_unedited_and_this_request[product]` |
-| `act_barrier._legacy_resolved` | candidate_composition → `test_act_barrier.py::test_partial_finalize_leaves_candidate_live`; empty_finalize → `test_act_barrier.py::test_empty_finalize_does_not_resolve`; pending_nodes → `test_act_barrier.py::test_candidate_without_pending_nodes_is_live`; signature → `test_act_barrier.py::test_merged_legacy_without_signature_in_base_is_live`; finalize_merged → `test_act_barrier.py::test_merged_candidate_without_finalize_is_live` |
-| `act_barrier.invalidate` | ws_id → `test_act_barrier.py::test_invalidate_touches_only_selected_workstream`; human → `test_act_barrier.py::test_invalidate_posts_marker_for_human_only` |
+| `act_anon.AnonTransport.send` | memo_only_sha_addressed |
+| `act_anon.contents_bytes` | blob_oid, absent_vs_unreadable |
+| `act_check.check_delivery` | not_merged, product, head_sha |
+| `act_check.live_policy_refusal` | current_activation |
+| `act_check._admission` | mode_after_review, mode_removed_or_reverted, marker_before_bootstrap, interepoch_gap |
+| `act_check._pinned_policy` | product, activation_pin, mixed_set, unreadable_set |
+| `act_check._decide` | act_head, approver, merger, dismissal, bytes |
+| `act_check._legacy_verdict` | old_reader_result |
+| `act_trust.parse_binding` | keys |
+| `act_trust.load_binding` | owner_and_link, absent |
+| `act_trust._named` | repository_id |
+| `act_trust._chain` | first_parent |
+| `act_trust._journal_versions` | journal_deleted |
+| `act_trust._checked_epochs` | bootstrap_first |
+| `act_trust.read_trust_snapshot` | one_sha |
+| `act_trust._self_report` | push_on_policy, push_on_df_trust, unreadable |
+| `act_trust._rulesets` | pull_request_rule |
+| `act_trust._rebase` | rebase_true, rebase_hidden |
+| `act_trust._snapshot_for_decision` | blocked, stale |
+| `act_trust.load_trust` | violation_wins |
+| `act_trust.load_anchor_times` | activation_time |
+| `act_trust.policy_set` | one_commit, bytes_vs_activation, actors_file |
+| `act_trust.load_ranges` | history_violation, closed_epoch_violation, unknown_anchor |
+| `act_trust.product_mode` | never_entered, removed_or_rolled_back, prior_epoch |
+| `act_trust.current_activation` | open_epoch_last |
+| `act_journal.DevJournal.status` | blocked_and_epoch, pending, stale, corrupted, deleted |
+| `act_journal.InstalledJournal.status` | df_run |
+| `act_journal.journal_for` | selection |
+| `act_journal_wire.WireJournal.status` | stale_or_foreign |
+| `act_journal_wire.DevStoreJournal.status` | pending, registered, restore_or_corrupt, missing |
+| `act_journal_wire.journal_for_premerge` | selection |
+| `act_context.delivery_verdict` | not_merged, legacy_only_unmarked, self_hash, ranges |
+| `act_identity.manifest_refusal` | product, ws_id, request_id |
+| `act_identity.paths_refusal` | node_and_path |
+| `act_identity.head_manifest_refusal` | in_head_and_bytes |
+| `act_status.pr_for_merge` | exactly_one_pr |
+| `act_status._pr_head` | head_fetched |
+| `act_status._event` | request:ws_id, request:request_id, request:merge_commit, request:immutable, stop:ws_id, stop:node, stop:generation, stop:immutable |
+| `act_status.Decider._binding` | product, ws_id, request_id, node_paths, manifest_in_head, manifest_bytes, upstream_pins |
+| `act_status.Decider.__call__` | product+ws_id+merge_commit, request_id |
+| `act_status.Decider._decide` | head_sha, merge_commit |
+| `act_status.Decider.legacy` | old_contract_result, admission |
+| `act_status.candidate_identity` | ssot_form |
+| `act_status.legacy_contract_refusal` | pending, bytes, hash_field, pins |
+| `act_status.LegacyProbe.__call__` | edit_in_history, signature_commit |
+| `act_status.LegacyProbe._finalize_branch` | via_pr, finalize_form |
+| `act_status.LegacyProbe._candidate` | ws_id, absent, not_merged, other_merger, other_time, ledger:absent, ledger:other_candidate, ledger:node_absent |
+| `act_status.LegacyProbe._offered` | node_in_candidate |
+| `act_status.LegacyProbe._verdict` | old_allowlist, old_pin_missing, old_pin_substituted, old_pin_unavailable, old_pin_superseded, snapshot_published |
+| `act_status.Statuses.of` | node |
+| `act_status.Statuses.is_review` | no_event_is_legacy |
+| `act_status.Statuses._legacy` | debt_before_probe |
+| `act_status.Statuses._compute` | generation, stop, upstream, delivery_verdict |
+| `act_status.Statuses._envelope` | envelope:node, envelope:request_id, envelope:generation, envelope:manifest_path, envelope:head_sha, envelope:self_hash, envelope:upstream_pins, envelope:merge_commit, envelope:review_id, envelope:policy, ws_id, node_bytes, current_pins |
+| `act_status.live_policy` | binding, mode |
+| `act_status.gate_run` | snapshot_digest, product_mode |
+| `act_node.creation` | mode_unset, pre_migration |
+| `act_node._manifest` | parseable |
+| `act_node._binding_refusal` | node_path, product, upstream_pins, ws_id |
+| `act_node._check_marked` | act_mirror |
+| `act_node.route` | merged_unmarked_mode |
+| `act_node._merged` | legacy_admission |
+| `act_node.envelope_commit_defect` | extra_path, missing, ws_id, bytes |
+| `act_node._reconcile_finalize` | envelope:node, envelope:request_id, envelope:generation, envelope:manifest_path, envelope:head_sha, envelope:self_hash, envelope:upstream_pins, envelope:merge_commit, envelope:review_id, envelope:policy |
+| `act_node._in_base` | reachable |
+| `act_node._require_in_base` | finalize, stop |
+| `act_node.reopen` | none, other_node, other_generation, other_reason, current_event_after |
+| `act_premerge.request_of_branch` | candidate_form |
+| `act_premerge._trust` | binding, journal, perimeter_block, perimeter_violation, app_installations |
+| `act_premerge._live` | product_mode, not_review |
+| `act_premerge._boundary` | wait, skew |
+| `act_premerge._check` | product, ws_id, request_id, policy_pin, merger, manifest_present, reread |
+| `act_premerge._act` | head_sha, act |
+| `act_app_token._pages` | completeness |
+| `act_app_token.installations_refusal` | trust_repo, second_page, total_count |
+| `act_app_token.app_identity` | jwt_identity |
+| `act_barrier._marked` | not_manifest, bad_yaml, ws_id, request_id, product |
+| `act_barrier._migrated` | author, edited, old_form, ws_id, request_id, product |
+| `act_barrier._signed` | signer_and_time, status |
+| `act_barrier._candidate_nodes` | composition, pending |
+| `act_barrier._legacy_resolved` | finalize_absent, finalize_open, finalize_closed, not_from_finalize |
+| `act_barrier._judge` | open_candidate, open_finalize, open_brief, merged_brief |
+| `act_barrier._local_brief_stamp` | other_product, other_pr, no_stamp |
+| `act_barrier._local_items` | live_local, unreadable |
+| `act_barrier.live_unmarked` | draining, attestation, pagination, local_ledger |
+| `act_barrier.live_review_requests` | product_gaps |
+| `act_barrier.invalidate` | ws_id, human |
 
 **Правило смены поверхности `Ops`** (B1-7/B1-8): каждая задача, меняющая сигнатуру или добавляющая
 метод `Ops`, несёт статический обход всех мест вызова, переопределения и пересылки по
@@ -3119,6 +3190,43 @@ steward#211). Этот коммит сверяет «Интерфейс M0» с 
   почему этого достаточно — в Task 14.
 - `tests/harness_trust.py` уже снимает ведущие присваивания окружения — оговорка о правке
   защищённого файла в Task 15a снята.
+
+### Правки по ревью b3
+
+Ревью `plan-review-b3` (1 blocker, 3 major); B1-3, B2-1, B2-3 — частично. Третий круг одного
+класса — меняется механизм: реестр мест суждения стал исчерпывающим, двойники — точными.
+
+- **B3-1**: старый путь исполняет ПОЛНЫЙ старый контракт тем же кодом, что старый путь
+  (`approve_node._legacy_outcome` выделен в Task 14 Step 3a — раньше `LegacyProbe`, Task 13 его
+  потребляет): опубликованный снимок, пин `approval-policy-source/v1` из записи заявки в леджере
+  прогона (запись обязана называть этот candidate и этот узел), отпечаток, `authorized_signature`
+  мержера по прежнему allowlist. Сквозные двойники через `LegacyProbe → Decider.legacy →
+  delivery_verdict → check_delivery`: мержер вне прежнего allowlist, пин отсутствует / подменён /
+  недоступен / заменён новой версией, снимок не опубликован, записи заявки нет / про другой
+  candidate / без узла. Следствие (вопрос не плана, а миграции): узел, одобренный на другой
+  установке или чей леджер утрачен, в продукте `review` получает `not_approved:legacy_no_ledger_record`
+  и переодобряется заявкой `review/v1`.
+- **B3-2**: имя-маркеры заменены исчерпывающей классификацией: все функции и методы верхнего уровня
+  13 модулей части B — ровно в `JUDGMENT` (с компонентами и двойниками) или `NOT_JUDGMENT` (с
+  причиной); маркеры — лишь перекрёстная проверка. Добавлены места, названные ревью
+  (`Decider._binding`, `legacy_contract_refusal`, `_require_in_base`, `act_premerge._check`,
+  `act_barrier._signed`, `_judge`, `_local_brief_stamp`, `live_unmarked`) и все остальные места
+  суждения в `act_check`, `act_trust`, журналах, `act_context`, `act_identity`, `act_anon`,
+  `act_app_token`; новые двойники там, где их не было (`current_activation`,
+  `candidate_identity`, `_manifest`, `_local_items`, `_local_brief_stamp`, `_signed` по статусу).
+- **B3-3**: у каждой проверки старого акта — свой код (`act_status.NO_EDIT … PINS` и коды
+  `_legacy_outcome`), двойник проверяет ровно его, вход построен так, что все предыдущие проверки
+  проходят. `_binding_refusal`: компонент подменяется в самом манифесте головы при верных
+  зеркалах — отказ именно `_binding_refusal` с причиной компонента. Двойники конверта и барьера
+  проверяют точную причину. `reopen`: двойник «новое событие узла между первым чтением и проверкой
+  остановки».
+- **B3-4**: `reopen[other_reason]` и соседние подмены лежат в ОТКРЫТОМ stop-PR, который мержит сам
+  `reopen` после первого чтения истории; уже доставленная остановка — отдельный тест
+  идемпотентности.
+- **Мутационный проход** (scratch): legacy-путь — 24 мутации, барьер — 25; отключение каждой
+  проверки убивается хотя бы одним двойником (49/49). Выжившие в первом проходе закрыты:
+  `finalize` открыт/закрыт без мержа (новый двойник), `brief-PR OPEN` (точный текст пункта);
+  недостижимая проверка учётки старого кода снята (её гарантирует ранняя проверка мержера).
 ### Task 11: Пин steward v0.2.0, совместимость вызовов gate-check, gate-catalog v3
 
 **Files:**
@@ -5989,6 +6097,19 @@ def test_mode_never_entered_is_pre_migration() -> None:
     assert _mode([None, None]) == act_trust.PRE_MIGRATION
 
 
+def test_current_activation_is_last_of_open_epoch_or_unavailable() -> None:
+    """B3-2: «текущая активация» — последняя активация ОТКРЫТОЙ эпохи; пустая или
+    недочитанная открытая эпоха — `Unavailable`, не активация закрытой."""
+    v0, v1, v2 = _view("p0", "01:00:00"), _view("p1", "02:00:00"), _view("p2", "03:00:00")
+    epochs = (Epoch(1, v0.merge_commit, v0.merge_commit, "2026-10-12T02:30:00Z", "x"),
+              Epoch(2, v2.merge_commit))
+    trust = _trust(epochs)
+    assert act_trust.current_activation(trust, {1: (v0, v1), 2: (v2,)}) == v2
+    assert isinstance(act_trust.current_activation(trust, {1: (v0, v1), 2: ()}), Unavailable)
+    assert isinstance(act_trust.current_activation(
+        trust, {1: (v0, v1), 2: Unavailable("x")}), Unavailable)
+
+
 def test_mode_current_values() -> None:
     assert _mode([None, "merge"]) == "merge"
     assert _mode([None, "merge", "review"]) == "review"
@@ -7854,8 +7975,8 @@ git commit -m "feat(act): доверенный контекст — снимок
 - Modify: `governance/approve_node.py` — `_advance` ~1627 (общий вход), `_propose` ~366 и
   `propose_from_source` ~664 (режим создания), `_sync_branch_to_snapshot` ~1192 (манифест в
   коммите candidate), `_publish_candidate` ~1410 / `_candidate_body` ~1491 / `_policy_ref` ~866
-  (метка, тело, тексты), `_try_agent_merge` ~2451 (`form=`), `_reconcile_candidate` ~1787
-  (поверх нового `_legacy_outcome`)
+  (метка, тело, тексты), `_try_agent_merge` ~2451 (`form=`); `_legacy_outcome` — из Task 14
+  (Step 3a)
 - Modify: `governance/approval_ledger.py` (`start_request(..., act, generations)`,
   `extend_request(..., generation)`, `record_review_act`, `record_audit`, `audit_events`)
 - Modify: `governance/act_decision.py` (публичный `find_act`), `governance/act_envelope.py`
@@ -8008,12 +8129,12 @@ pytest.importorskip("steward")
 from steward.approvalfacts import v3  # noqa: E402
 
 from governance import act_context, act_facts, act_node, act_status, act_trust  # noqa: E402
-from governance import bundle_inputs  # noqa: E402
 from governance import approval_ledger as al  # noqa: E402
 from governance import approve_node as an  # noqa: E402
 from governance.act_check import ActivationView  # noqa: E402
 from governance.act_decision import Accepted, DeliveryView, Rejected, ReviewView  # noqa: E402
 from governance.act_envelope import (  # noqa: E402
+    DeliveredRequest,
     Envelope,
     StopRecord,
     envelope_path,
@@ -8024,7 +8145,12 @@ from governance.act_envelope import (  # noqa: E402
 )
 from governance.act_epochs import Epoch  # noqa: E402
 from governance.act_policy import parse_policy_set  # noqa: E402
-from governance.act_request import manifest_path, parse_manifest  # noqa: E402
+from governance.act_request import (  # noqa: E402
+    NodeEntry,
+    manifest_path,
+    parse_manifest,
+    render_manifest,
+)
 from governance.act_settings import ActSettings  # noqa: E402
 from governance.act_source import SourceV2  # noqa: E402
 from governance.act_time import Ambiguous, Unavailable, parse_ts  # noqa: E402
@@ -8310,25 +8436,58 @@ def test_act_removed_from_ledger_with_manifest_in_head(world: World, stand: Stan
     assert world.state.ops[key]["status"] == al.STATUS_INVALIDATED
 
 
-@pytest.mark.parametrize("component,match", [
-    ("product", "product"), ("ws_id", "зеркало act"), ("node_path", "путь узла"),
-    ("upstream_pins", "upstream-пины")], ids=["product", "ws_id", "node_path", "upstream_pins"])
+def _rewrite_manifest(world: World, op: dict, key: str, change) -> None:
+    """Подменить манифест в голове candidate (ветка на origin) — до approve и мержа."""
+    branch = op["branch"]
+    _git(world.human, "fetch", "-q", "origin")
+    _git(world.human, "switch", "-qC", branch, f"origin/{branch}")
+    path = world.human / manifest_path(WS_ID, key)
+    path.write_text(render_manifest(change(parse_manifest(path.read_text()))))
+    _git(world.human, "commit", "-qam", "tamper manifest")
+    _git(world.human, "push", "-q", "origin", branch)
+
+
+def test_unreadable_manifest_in_head_invalidates(world: World, stand: Stand) -> None:
+    """B3-2: файл манифеста в голове есть, но не разбирается — заявка invalidated
+    (`_manifest`), а не «без маркера»."""
+    key, op, pr = _candidate(world)
+    branch = op["branch"]
+    _git(world.human, "fetch", "-q", "origin")
+    _git(world.human, "switch", "-qC", branch, f"origin/{branch}")
+    (world.human / manifest_path(WS_ID, key)).write_text("schema: [битый\n")
+    _git(world.human, "commit", "-qam", "broken manifest")
+    _git(world.human, "push", "-q", "origin", branch)
+    stand.approve_head(pr)
+    with pytest.raises(RuntimeError, match="манифест в одобренном коммите не читается"):
+        approve(world, "charter")
+    assert world.state.ops[key]["status"] == al.STATUS_INVALIDATED
+
+
+BINDING_TWINS = {
+    # компонент → (подмена манифеста, точная причина `_binding_refusal`)
+    "product": (lambda r: replace(r, product="owner/other"), "манифест: product owner/other"),
+    "ws_id": (lambda r: replace(r, ws_id="ws-other"), "манифест: ws_id ws-other"),
+    "node_path": (lambda r: replace(r, nodes={n: NodeEntry("elsewhere/x.md", e.content_hash,
+                                                           e.generation)
+                                              for n, e in r.nodes.items()}),
+                  "манифест: путь узла"),
+    "upstream_pins": (lambda r: replace(r, upstream_pins={n: {"charter": "f" * 40}
+                                                          for n in r.upstream_pins}),
+                      "upstream-пины"),
+}
+
+
+@pytest.mark.parametrize("component", sorted(BINDING_TWINS))
 def test_foreign_identity_binding_invalidates(world: World, stand: Stand,
-                                              monkeypatch: pytest.MonkeyPatch,
-                                              component: str, match: str) -> None:
-    """B1-1/B1-14: отрицательный двойник на каждый компонент идентичности на пути узла
-    (ws_id другого прогона — манифест не по его пути, зеркало `act` расходится)."""
-    key, pr = _deliver(world, stand)
-    if component == "product":
-        world.state.repo_slug = "owner/other"
-    elif component == "ws_id":
-        world.state.ws_id = "ws-other"
-    elif component == "node_path":
-        monkeypatch.setattr(an, "_rel", lambda state, f: f"elsewhere/{f}")
-    else:
-        monkeypatch.setattr(bundle_inputs, "direct_blobs", lambda *a, **k: Fact(
-            Outcome.FOUND, {"charter": "f" * 40}, "ok"))
-    with pytest.raises(RuntimeError, match=match):
+                                              component: str) -> None:
+    """B1-1/B1-14/B3-3: компонент идентичности подменён в САМОМ манифесте головы при
+    прочих верных (ключ, зеркала `act`/политики, путь манифеста) — отказ именно
+    `_binding_refusal` с причиной этого компонента."""
+    change, reason = BINDING_TWINS[component]
+    key, op, pr = _candidate(world)
+    _rewrite_manifest(world, op, key, change)
+    stand.approve_head(pr)
+    with pytest.raises(RuntimeError, match=reason):
         approve(world, "charter")
     assert world.state.ops[key]["status"] == al.STATUS_INVALIDATED
 
@@ -8459,8 +8618,10 @@ def test_reopen_writes_stop_of_current_generation(world: World, stand: Stand) ->
 @pytest.mark.parametrize("record", ["none", "other_node", "other_generation", "other_reason"])
 def test_reopen_refuses_stop_pr_without_record(world: World, stand: Stand,
                                                record: str) -> None:
-    """B1-15/B2-3: stop-PR смёржен, но записи остановки ЭТОГО узла и поколения в нём
-    нет: файла нет / остановка другого узла / другого поколения / другие байты."""
+    """B1-15/B2-3/B3-4: на ветке stop-PR лежит ОТКРЫТЫЙ PR с подменой (файла нет /
+    остановка другого узла / другого поколения / другие байты). Первое чтение истории
+    видит действующую заявку; `reopen` находит этот PR, мержит его и только ПОСЛЕ
+    мержа сверяет запись — подмена ловится проверкой записи, а не ранним выходом."""
     key, pr = _deliver(world, stand)
     approve(world, "charter")
     branch = f"stop/{WS_ID}-charter-g1"
@@ -8481,8 +8642,46 @@ def test_reopen_refuses_stop_pr_without_record(world: World, stand: Stand,
     _git(world.human, "commit", "-qm", "not a stop")
     _git(world.human, "push", "-q", "origin", branch)
     stop_pr = world.ops.create_pr(str(world.target), SLUG, branch, "t", "b", "")
-    merge_pr(world, stop_pr)
+    assert world.forge.prs[stop_pr]["state"] == "OPEN"  # подмена — до мержа reopen-ом
     with pytest.raises(RuntimeError, match="записи остановки"):
+        act_node.reopen(world.state, world.ops, an.bundle_dag.dag_for(None), "charter")
+    assert world.forge.prs[stop_pr]["state"] == "MERGED"  # проверка — после мержа
+
+
+def test_reopen_already_delivered_stop_is_idempotent(world: World, stand: Stand) -> None:
+    """B3-4: остановка уже доставлена — повтор `--reopen` ничего не делает и нового
+    stop-PR не создаёт (ранний выход по действующему событию — штатный)."""
+    key, pr = _deliver(world, stand)
+    approve(world, "charter")
+    assert act_node.reopen(world.state, world.ops, an.bundle_dag.dag_for(None), "charter")
+    before = len(world.forge.prs)
+    assert act_node.reopen(world.state, world.ops, an.bundle_dag.dag_for(None),
+                           "charter") is None
+    assert len(world.forge.prs) == before
+
+
+def test_reopen_new_event_between_read_and_stop_check(world: World, stand: Stand,
+                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    """B3-3: между первым чтением истории и проверкой остановки в базу пришло новое
+    событие узла (заявка следующего поколения) — `reopen` не сообщает об остановке."""
+    key, pr = _deliver(world, stand)
+    approve(world, "charter")
+    real = act_status.load_history
+    calls: list[int] = []
+
+    def racing(ops, state, base):
+        history = real(ops, state, base)
+        calls.append(1)
+        if len(calls) < 2 or isinstance(history, Unavailable):
+            return history
+        current = next(e for e in reversed(history) if isinstance(e, DeliveredRequest))
+        entry = current.request.nodes["charter"]
+        newer = replace(current.request, request_id="approve-9-9-9",
+                        nodes={"charter": replace(entry, generation=entry.generation + 1)})
+        return (*history, DeliveredRequest("n" * 40, "h" * 40, newer))
+
+    monkeypatch.setattr(act_status, "load_history", racing)
+    with pytest.raises(RuntimeError, match="не эта остановка"):
         act_node.reopen(world.state, world.ops, an.bundle_dag.dag_for(None), "charter")
 
 
@@ -9323,103 +9522,9 @@ def _try_agent_merge(state, ops, dag, op, nodes, pr, head, *,
 
 `_policy_ref(op)` — для `review/v1`: `f"политики {op['policy']['repo']}@{op['policy']['activation_commit']} (review/v1)"`.
 
-`_reconcile_candidate` поверх `_legacy_outcome` — новая чистая функция и её тип остановки:
-
-```python
-@dataclass(frozen=True)
-class LegacyHalt:
-    """Старый путь не установил факт: `text` — прежнее сообщение; `wrap` — через
-    `_unresolved` (иначе прежний `RuntimeError` с тем же текстом)."""
-
-    text: str
-    wrap: bool = True
-
-
-_LEGACY_UNPUBLISHED = "legacy_unpublished"
-_LEGACY_UNPINNED = "legacy_unpinned"
-_LEGACY_SIGNATURE = "legacy_signature"
-
-
-def _legacy_outcome(state, ops, dag, op, key, facts) -> LegacyAccepted | Rejected | LegacyHalt:
-    """Вердикт старого кода по смёрженному candidate без побочных эффектов (Task 12)."""
-    pr = op["candidate_pr"]
-    published = _snapshot_is_published(state, ops, dag, op, facts.get("headRefOid"))
-    if published is None:
-        return LegacyHalt(f"состав предложения в голове PR #{pr} — объект недоступен "
-                          "либо голова не названа")
-    if not published:
-        return Rejected(_LEGACY_UNPUBLISHED,
-                        f"в голове PR #{pr} ({facts.get('headRefOid')}) лежат не все узлы "
-                        f"снимка заявки ({', '.join(op['nodes'])}), а PR уже закрыт либо "
-                        "вмержен: предъявлено человеку было не то, что заявка выносит")
-    event = af.merge_event(facts)
-    if event.outcome is not Outcome.FOUND or event.value is None:
-        return LegacyHalt(f"акт мержа candidate-PR #{pr} — {event.detail}")
-    pinned = op.get("policy")
-    if not pinned:
-        return Rejected(_LEGACY_UNPINNED,
-                        "заявка не закрепила версию политики (старый формат, §4.6)")
-    policy = af.policy_snapshot(ops, pinned_sha=pinned["sha"])
-    if policy.outcome is Outcome.UNAVAILABLE:
-        return LegacyHalt(f"политика подписи для мержа PR #{pr}: {policy.detail}")
-    if policy.outcome is Outcome.FORBIDDEN:
-        refusal = policy.value
-        assert isinstance(refusal, af.PolicyRefusal)
-        if refusal.kind == af.POLICY_REFUSAL_SUPERSEDED:
-            return Rejected(af.INVALIDATION_POLICY_CHANGED,
-                            f"{af.INVALIDATION_POLICY_CHANGED}: {refusal.detail}")
-        return LegacyHalt(f"{refusal.detail}. Заявка {key} жива, факт мержа не записан; "
-                          "исправьте источник/окружение и повторите", wrap=False)
-    snapshot = policy.value
-    assert isinstance(snapshot, af.PolicySnapshot)
-    if snapshot.fingerprint != pinned["fingerprint"]:
-        return LegacyHalt(
-            f"политика {snapshot.source}: прочитано не то, что закрепляла заявка {key} "
-            f"(отпечаток {snapshot.fingerprint} ≠ {pinned['fingerprint']}) — подмена или "
-            "сбой пути чтения; заявка жива, ничего не записано", wrap=False)
-    signature = af.authorized_signature(event.value, snapshot)
-    if signature.outcome is Outcome.FORBIDDEN:
-        return Rejected(_LEGACY_SIGNATURE, signature.detail)
-    return LegacyAccepted(event.value.login, evidence=(event.value, signature.value))
-
-
-#: Тексты отказа старого пути — те же, что писал `_reconcile_candidate` до выделения.
-_LEGACY_RAISE = {
-    _LEGACY_UNPUBLISHED: "PR #{pr} завершён не на предложении заявки {key} — часть её узлов "
-    "человеку не предъявлялась. Заявка invalidated; восстановление: новый candidate над "
-    "теми же узлами",
-    _LEGACY_UNPINNED: "заявка {key} не закрепила версию политики — invalidated; "
-    "восстановление: новый candidate над теми же узлами",
-    af.INVALIDATION_POLICY_CHANGED: "{detail}. Заявка {key} — invalidated; повторное "
-    "установление авторизации — новый candidate над теми же узлами",
-    _LEGACY_SIGNATURE: "{detail}. Заявка {key} — invalidated; восстановление: новый "
-    "candidate над теми же узлами, мерж учёткой из allowlist даст верную подпись",
-}
-```
-
-Хвост `_reconcile_candidate` после ветки `OPEN` (вместо `:1840–1928`):
-
-```python
-    event = af.merge_event(facts)
-    if published and event.outcome is Outcome.ABSENT:
-        al.abandon_request(state, key, f"candidate-PR #{pr} закрыт без мержа — не одобрено")
-        return ApprovalOutcome(...)  # прежний текст без изменений
-    verdict = _legacy_outcome(state, ops, dag, op, key, facts)
-    if isinstance(verdict, LegacyHalt):
-        raise _unresolved(verdict.text) if verdict.wrap else RuntimeError(verdict.text)
-    if isinstance(verdict, Rejected):
-        al.invalidate_request(state, key, verdict.detail)
-        detail = verdict.detail.removeprefix(f"{verdict.code}: ")
-        raise RuntimeError(_LEGACY_RAISE[verdict.code].format(pr=pr, key=key, detail=detail))
-    merged, authorization = verdict.evidence
-    al.record_merge(state, key, merged, authorization)
-    return _finalize(state, ops, dag, state.ops[key], key, facts)
-```
-
-(`published` по-прежнему считается до ветвления по состоянию; при `published is None` прежний код
-отказывал до ветки `OPEN` — этот порядок сохраняется: `_legacy_outcome` его повторяет только для
-смёрженного PR.) Импорты: `from governance.act_check import LegacyAccepted`,
-`from governance.act_decision import Rejected`.
+`_reconcile_candidate` уже стоит поверх `_legacy_outcome` — выделение перенесено в Task 14
+(Step 3a, ревизия b3: `LegacyProbe` обязан исполнять тот же полный старый контракт); здесь
+`_legacy_outcome` только потребляется (`act_node._legacy`).
 
 - [ ] **Step 7: Runner hooks**
 
@@ -9817,7 +9922,8 @@ B1-6, B1-8, B1-9 — см. «Правки по ревью b1».
 - Modify: `governance/ops.py` (`Ops.first_parent_changes` + `RealOps`)
 - Modify: `governance/act_settings.py` (`config_home(env)` — заметки части A, п. 11)
 - Modify: `governance/node_approval.py` (`DEBT_REVIEW_V1`)
-- Modify: `governance/approve_node.py` (`read_dag_state` ~480, `_require_upstream_ready` ~939)
+- Modify: `governance/approve_node.py` (`_legacy_outcome` + `LegacyHalt` выделены из
+  `_reconcile_candidate` ~1787 — Step 3a; `read_dag_state` ~480, `_require_upstream_ready` ~939)
 - Modify: `governance/runner.py` (`_step_gate` S4 ~3275, `_step_s8` ~4024 — режим и провайдер)
 - Modify: `governance/task_bridge.py` (`_canonical_dag_hash` ~1138 — **[ждёт решения владельца
   В-1]**, вариант по умолчанию ниже)
@@ -9847,8 +9953,9 @@ B1-6, B1-8, B1-9 — см. «Правки по ревью b1».
   одобренном head, upstream-пины = прямым входам head; иначе `Rejected(REQUEST_BINDING)`, B1-1);
   `Decider.legacy(pr, contract: Callable[[], Outcome]) -> Outcome` — admission старой доставки,
   до активации — результат `contract()` (B2-1);
-  `act_status.LegacyProbe(state, ops, base_ref, decide_legacy)` — provenance старого одобрения
-  (B1-3, B2-1); `act_status.legacy_contract_refusal(candidate_text, base_text) -> str | None`,
+  `act_status.LegacyProbe(state, ops, base_ref, decide_legacy, dag)` — provenance старого
+  одобрения и ПОЛНЫЙ старый контракт (B1-3, B2-1, B3-1); коды отказа — константы
+  `act_status.NO_EDIT … PINS` (по одному на проверку); `act_status.legacy_contract_refusal(candidate_text, base_text) -> str | None`,
   `act_status.candidate_identity(branch) -> tuple[str, str] | None`;
   `act_status.Statuses(*, dag, ws_id, history, node_path, text_of, blobs_of, decide, legacy)` —
   `of(node) -> str`, `is_review(node) -> bool`;
@@ -9880,9 +9987,14 @@ first-parent базы (доставленная заявка с манифест
 подписи; её PR — finalize старой заявки (форма ветки из SSOT) **воркстрима прогона**; узел —
 среди файлов candidate этой заявки и в его голове `approval_pending`; candidate смёржен этой
 учёткой в это время; доставка candidate проходит admission (`Decider.legacy`; до активации
-`ACT_MODE[P]` — `OLD_READER`, и тогда вердикт — **результат старого контракта по прежним пинам**
-`legacy_contract_refusal`: вынесенные байты = байтам базы, поле хеша им равно, пины подписи =
-пинам выноса; после активации — `Rejected(admission)`; ревизия b2, B2-1). Механизм цепочки — решение
+`ACT_MODE[P]` — `OLD_READER`, и тогда вердикт — **результат полного старого контракта**: байтовая
+часть `legacy_contract_refusal` (вынесенные байты = байтам базы, поле хеша им равно, пины подписи
+= пинам выноса) и `approve_node._legacy_outcome` — тот же код, что судит старый путь
+(опубликованный снимок, закреплённый пин `approval-policy-source/v1` из записи заявки в леджере
+прогона, его отпечаток, `authorized_signature` мержера по прежнему allowlist); записи заявки в
+леджере нет, она про другой candidate или не выносила узел — отказ (`legacy_no_ledger_record` и
+др.); пин или политика недоступны — `unavailable`; после активации — `Rejected(admission)`;
+ревизии b2, b3: B2-1, B3-1). Механизм цепочки — решение
 исполнителя плана Р-9 (правило — спека). Провайдер отвечает за снимок, который читает steward
 (§12 п. 3): S4 — байты рабочего дерева волны, S8 и гейт доставки — база.
 
@@ -10123,7 +10235,10 @@ def test_envelope_component_substituted_not_approved(field: str) -> None:
     value = (ENVELOPE_SUBSTITUTES[field] if field != "policy" else
              {k: ("z" * 40 if isinstance(v, str) else v) for k, v in env.policy.items()})
     snap.files[path] = render_envelope(replace(env, **{field: value}))
-    assert statuses(history, snap).of("requirements").startswith("not_approved:")
+    reason = ("подставлен" if field == "node" else "другого поколения"
+              if field in ("generation", "request_id") else "не совпадает с манифестом")
+    got = statuses(history, snap).of("requirements")
+    assert got.startswith("not_approved:") and reason in got  # причина ЭТОЙ проверки (b3)
 
 
 def test_envelope_of_other_workstream_not_used() -> None:
@@ -10131,7 +10246,7 @@ def test_envelope_of_other_workstream_not_used() -> None:
     history, snap = both_approved()
     snap.files[envelope_path("ws-8", "requirements")] = snap.files.pop(
         envelope_path(WS, "requirements"))
-    assert statuses(history, snap).of("requirements").startswith("not_approved:")
+    assert "нет конверта" in statuses(history, snap).of("requirements")
 
 
 @pytest.mark.parametrize("order", [("requirements", "behaviour-spec"),
@@ -10478,7 +10593,15 @@ def test_config_home_resolution() -> None:
 `tests/test_act_legacy.py`:
 
 ```python
-"""Provenance старого одобрения: отрицательные двойники (§9.1 (а) п. 3; b1 B1-3, b2 B2-1)."""
+"""Provenance старого одобрения: отрицательные двойники (§9.1 (а) п. 3; b1 B1-3, b2 B2-1,
+b3 B3-1/B3-3).
+
+Сквозной путь — настоящие `LegacyProbe → Decider.legacy → delivery_verdict →
+check_delivery → approve_node._legacy_outcome`; подменены только факты форджи,
+снимок старой политики и контекст доверия (до активации — `OLD_READER`). Каждый
+двойник ломает ровно один компонент при прочих верных и проверяет ТОЧНЫЙ код
+своей проверки.
+"""
 
 from __future__ import annotations
 
@@ -10490,20 +10613,24 @@ import pytest
 
 pytest.importorskip("steward")
 
-from governance import act_context, act_status  # noqa: E402
+from governance import act_status  # noqa: E402
 from governance import approval_branches as ab  # noqa: E402
+from governance import approval_facts as af  # noqa: E402
 from governance import node_approval as na  # noqa: E402
 from governance.act_check import LegacyAccepted  # noqa: E402
 from governance.act_decision import Rejected  # noqa: E402
 from governance.brief_facts import BriefPrFacts  # noqa: E402
 from governance.facts import Fact, Outcome  # noqa: E402
 from governance.ops import RealOps  # noqa: E402
+from tests.act_cases_facts import PRODUCT, context, sha  # noqa: E402
+from tests.test_act_context import _trust, _wire  # noqa: E402
 
 NODE = "spec/10-requirements.md"
+DAG = (("10-requirements.md", ()),)
 CAND = ab.candidate_branch("ws-7", 1, 0, 1)
 FINAL = ab.finalize_branch("ws-7", 1, 0, 1)
 AT = "2026-09-10T08:00:00Z"
-PINS = {"charter": "c" * 40}
+PSHA, FP = "e" * 40, "fp-1"
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -10513,17 +10640,26 @@ def _git(repo: Path, *args: str) -> str:
 
 def _text(status: str, by: str = "", at: str = "", body: str = "тело",
           pins: dict | None = None) -> str:
-    pins = PINS if pins is None else pins
-    pin_lines = "".join(f"  {k}: '{v}'\n" for k, v in pins.items())
+    pin_lines = "".join(f"  {k}: '{v}'\n" for k, v in (pins or {}).items())
+    pins_block = f"upstream_hashes:\n{pin_lines}" if pin_lines else "upstream_hashes: {}\n"
     text = (f"---\nspec_stage: requirements\nstatus: {status}\nversion: 2\n"
-            f"approved_by: '{by}'\napproved_at: '{at}'\nupstream_hashes:\n{pin_lines}"
+            f"approved_by: '{by}'\napproved_at: '{at}'\n{pins_block}"
             f"approved_content_hash: ''\n---\n{body}\n")
     return text.replace("approved_content_hash: ''",
                         f"approved_content_hash: '{na.self_hash(text)}'")
 
 
+def code(got: str) -> str:
+    """Код проверки из ответа провайдера `not_approved:<код>:<деталь>`."""
+    assert got.startswith("not_approved:"), got
+    rest = got.removeprefix("not_approved:")
+    return ":".join(rest.split(":")[:2]) if rest.startswith("legacy_admission:") \
+        else rest.split(":")[0]
+
+
 class World:
-    """Настоящий git: candidate (approval_pending) → finalize (подпись) → база."""
+    """Настоящий git: candidate (approval_pending) → finalize (подпись) → база;
+    леджер прогона с записью заявки и её пином старой политики."""
 
     def __init__(self, tmp: Path, *, final_body: str = "тело",
                  final_pins: dict | None = None) -> None:
@@ -10537,7 +10673,8 @@ class World:
         _git(r, "commit", "-qm", "seed")
         self.seed = _git(r, "rev-parse", "HEAD")
         _git(r, "switch", "-qc", CAND)
-        (r / NODE).write_text(_text(na.STATUS_APPROVAL_PENDING))
+        pending = _text(na.STATUS_APPROVAL_PENDING)
+        (r / NODE).write_text(pending)
         _git(r, "commit", "-qam", "candidate")
         self.cand_head = _git(r, "rev-parse", "HEAD")
         _git(r, "switch", "-qc", FINAL)
@@ -10545,6 +10682,7 @@ class World:
         _git(r, "commit", "-qam", "envelope")
         _git(r, "switch", "-q", "master")
         _git(r, "merge", "-q", "--no-ff", CAND, "-m", "Merge candidate")
+        self.cand_merge = _git(r, "rev-parse", "HEAD")
         _git(r, "merge", "-q", "--no-ff", FINAL, "-m", "Merge finalize")
         self.signed = _git(r, "rev-parse", "HEAD")
         self.base_text = (r / NODE).read_text()
@@ -10554,6 +10692,15 @@ class World:
         self.candidate: dict | None = {"state": "MERGED", "mergedBy": {"login": "alice"},
                                        "mergedAt": AT}
         self.signed_by_pr: dict[str, int] = {self.signed: 6}
+        self.ledger: dict = {"approve-1-0-1": {
+            "candidate_pr": 5, "nodes": ["requirements"], "branch": CAND,
+            "content_hashes": {"requirements": na.self_hash(pending)},
+            "upstream_pins": {"requirements": {}},
+            "policy": {"sha": PSHA, "fingerprint": FP},
+        }}
+        self.allowlist = frozenset({"alice"})
+        self.policy: object = None  # иначе — исход policy_snapshot
+        self.mode = "merge"  # режим продукта на T мержа candidate (merge — OLD_READER)
 
 
 class Ops(RealOps):
@@ -10562,9 +10709,9 @@ class Ops(RealOps):
     def __init__(self, w: World) -> None:
         self.w = w
 
-    def prs_containing_commit(self, slug, sha):
-        pr = self.w.signed_by_pr.get(sha)
-        return [] if pr is None else [{"number": pr, "state": "MERGED", "mergeCommit": sha}]
+    def prs_containing_commit(self, slug, sha_):
+        pr = self.w.signed_by_pr.get(sha_)
+        return [] if pr is None else [{"number": pr, "state": "MERGED", "mergeCommit": sha_}]
 
     def brief_pr_fact(self, slug, pr):
         branch, files = ((self.w.final_branch, ((NODE, "MODIFIED"),)) if pr == 6
@@ -10576,7 +10723,8 @@ class Ops(RealOps):
         return 5 if self.w.candidate is not None and branch == CAND else None
 
     def pr_facts(self, slug, pr):
-        return {**(self.w.candidate or {}), "headRefOid": self.w.cand_head_ref}
+        return {**(self.w.candidate or {}), "headRefOid": self.w.cand_head_ref,
+                "mergeCommit": {"oid": self.w.cand_merge}}
 
 
 @pytest.fixture()
@@ -10584,94 +10732,196 @@ def world(tmp_path: Path) -> World:
     return World(tmp_path)
 
 
-def old_reader(pr, contract):
-    """Admission до активации: вердикт — результат старой проверки (OLD_READER)."""
-    return contract()
+def judge(w: World, monkeypatch: pytest.MonkeyPatch, text: str | None = None) -> str:
+    """Сквозной вызов провайдера по узлу без события `review/v1`."""
+    snapshot = af.PolicySnapshot("owner/approval-policy", "main", "ALLOWLIST", PSHA,
+                                 w.allowlist, FP)
+    monkeypatch.setattr(af, "policy_snapshot", lambda ops, pinned_sha: w.policy or Fact(
+        Outcome.FOUND, snapshot, "ok"))
+    ctx = context(modes={sha("p1"): w.mode}, request_act=None)
+    _wire(monkeypatch, ctx)
+    state = SimpleNamespace(repo_slug=PRODUCT, ws_id="ws-7", target_dir=str(w.repo),
+                            bundle_dir="spec", brief=None, ops=w.ledger, run_id="r",
+                            base_ref="master")
+    deps = act_status.Deps(readers=SimpleNamespace(anon=object()), binding=object(),
+                           journal=None, creds=(), gh=object(), now=None, sleep=None,
+                           settings=None)
+    ops = Ops(w)
+    decider = act_status.Decider(state, ops, deps, DAG, trust=_trust(ctx), journal=None)
+    probe = act_status.LegacyProbe(state, ops, "master", decider.legacy, DAG)
+    return probe(NODE, w.base_text if text is None else text)
 
 
-def judge(w: World, decide=old_reader) -> str:
-    state = SimpleNamespace(repo_slug="owner/p", ws_id="ws-7", target_dir=str(w.repo))
-    return act_status.LegacyProbe(state, Ops(w), "master", decide)(NODE, w.base_text)
+def test_proven_legacy_act_before_activation_is_approved(world, monkeypatch) -> None:
+    assert judge(world, monkeypatch) == "approved"
 
 
-def test_proven_legacy_act_before_activation_is_approved(world) -> None:
-    assert judge(world) == "approved"
+# --- provenance (LegacyProbe.__call__ / _finalize_branch / _candidate) ---------------
 
 
-def test_candidate_delivered_after_activation_refused(world) -> None:
-    """Заявка без манифеста, доставленная после ACT_MODE=review, — отказ admission."""
-    got = judge(world, lambda pr, contract: Rejected("admission"))
-    assert got == "not_approved:legacy_admission:admission"
+def test_no_edit_of_node_in_history_refused(world, monkeypatch) -> None:
+    """B3-3: файла узла нет в истории базы (подпись не из базы) — `__call__`."""
+    state = SimpleNamespace(repo_slug=PRODUCT, ws_id="ws-7", target_dir=str(world.repo))
+    probe = act_status.LegacyProbe(state, Ops(world), "master", lambda pr, c: c(), DAG)
+    assert code(probe("spec/99-absent.md", world.base_text)) == act_status.NO_EDIT
 
 
-def test_signature_without_finalize_pr_refused(world) -> None:
-    world.final_branch = "feat/forged"
-    assert judge(world).startswith("not_approved:legacy_provenance")
+def test_candidate_identity_round_trips_ssot_form() -> None:
+    """B3-2: форма candidate — только круговая подстановка в SSOT-шаблон."""
+    assert act_status.candidate_identity(CAND) == ("ws-7", "approve-1-0-1")
+    assert act_status.candidate_identity(FINAL) is None
+    assert act_status.candidate_identity("spec/ws-7-approve-01-0-1") is None
+    assert act_status.candidate_identity("feat/ws-7-approve-1-0-1") is None
 
 
-def test_signature_not_through_pr_refused(world) -> None:
-    world.signed_by_pr = {}
-    assert judge(world).startswith("not_approved:legacy_provenance")
-
-
-@pytest.mark.parametrize("candidate", [None, {"state": "MERGED", "mergedBy": {"login": "bob"},
-                                              "mergedAt": AT},
-                                       {"state": "CLOSED", "mergedBy": {"login": "alice"},
-                                        "mergedAt": AT}],
-                         ids=["absent", "other_merger", "not_merged"])
-def test_candidate_absent_or_not_matching_signature(world, candidate) -> None:
-    world.candidate = candidate
-    assert judge(world).startswith("not_approved:legacy_provenance")
-
-
-def test_frontmatter_signature_differs_from_last_edit(world) -> None:
+def test_frontmatter_signature_differs_from_last_edit(world, monkeypatch) -> None:
+    """Подпись frontmatter ≠ записи последней правки — отказ `__call__`, не позже."""
     text = world.base_text.replace("approved_by: 'alice'", "approved_by: 'bob'")
-    state = SimpleNamespace(repo_slug="owner/p", ws_id="ws-7", target_dir=str(world.repo))
-    got = act_status.LegacyProbe(state, Ops(world), "master", old_reader)(NODE, text)
-    assert got.startswith("not_approved:legacy_provenance")
+    assert code(judge(world, monkeypatch, text)) == act_status.NOT_SIGNATURE
 
 
-def test_finalize_of_other_workstream_refused(world) -> None:
+def test_signature_not_through_pr_refused(world, monkeypatch) -> None:
+    world.signed_by_pr = {}
+    assert code(judge(world, monkeypatch)) == act_status.NOT_VIA_PR
+
+
+def test_signature_without_finalize_pr_refused(world, monkeypatch) -> None:
+    world.final_branch = "feat/forged"
+    assert code(judge(world, monkeypatch)) == act_status.NOT_FINALIZE
+
+
+def test_finalize_of_other_workstream_refused(world, monkeypatch) -> None:
     """B2-1: finalize/candidate чужого воркстрима — не акт этого узла."""
     world.final_branch = ab.finalize_branch("ws-8", 1, 0, 1)
-    got = judge(world)
-    assert got.startswith("not_approved:legacy_provenance") and "ws-7" in got
+    assert code(judge(world, monkeypatch)) == act_status.FOREIGN_WS
 
 
-def test_node_not_in_candidate_refused(world) -> None:
+@pytest.mark.parametrize("candidate,expected", [
+    (None, act_status.NO_CANDIDATE),
+    ({"state": "CLOSED", "mergedBy": {"login": "alice"}, "mergedAt": AT},
+     act_status.CANDIDATE_NOT_MERGED),
+    ({"state": "MERGED", "mergedBy": {"login": "bob"}, "mergedAt": AT},
+     act_status.CANDIDATE_MERGER),
+    ({"state": "MERGED", "mergedBy": {"login": "alice"}, "mergedAt": "2026-09-10T09:00:00Z"},
+     act_status.CANDIDATE_TIME),
+], ids=["absent", "not_merged", "other_merger", "other_time"])
+def test_candidate_absent_or_not_matching_signature(world, monkeypatch, candidate,
+                                                    expected) -> None:
+    world.candidate = candidate
+    assert code(judge(world, monkeypatch)) == expected
+
+
+def test_node_not_in_candidate_refused(world, monkeypatch) -> None:
     """B2-1: узел не среди файлов candidate — candidate его не выносил."""
     world.cand_files = (("spec/20-design.md", "MODIFIED"),)
-    assert "узел не из candidate" in judge(world)
+    assert code(judge(world, monkeypatch)) == act_status.NOT_IN_CANDIDATE
 
 
-def test_node_not_pending_in_candidate_refused(world) -> None:
+@pytest.mark.parametrize("case,expected", [
+    ("absent", act_status.NO_LEDGER),
+    ("other_candidate", act_status.LEDGER_CANDIDATE),
+    ("node_absent", act_status.LEDGER_NODE),
+], ids=["absent", "other_candidate", "node_absent"])
+def test_ledger_record_binds_candidate_and_node(world, monkeypatch, case, expected) -> None:
+    """B3-1: пин старой политики — только из записи ЭТОЙ заявки леджера прогона."""
+    op = world.ledger["approve-1-0-1"]
+    if case == "absent":
+        world.ledger.clear()
+    elif case == "other_candidate":
+        op["candidate_pr"] = 9
+    else:
+        op["nodes"] = ["design"]
+    assert code(judge(world, monkeypatch)) == expected
+
+
+# --- байтовая часть старого контракта (legacy_contract_refusal) ----------------------
+
+
+def test_node_not_pending_in_candidate_refused(world, monkeypatch) -> None:
     """B2-1: в голове candidate узел не `approval_pending` — не было заявки на него."""
     world.cand_head_ref = world.seed
-    assert judge(world).startswith("not_approved:legacy_contract:узел в candidate")
+    assert code(judge(world, monkeypatch)) == act_status.NOT_PENDING
 
 
-def test_node_bytes_changed_by_finalize_refused(tmp_path: Path) -> None:
+def test_node_bytes_changed_by_finalize_refused(tmp_path, monkeypatch) -> None:
     """B2-1: подписаны не те байты, что выносились (правка тела в finalize)."""
-    got = judge(World(tmp_path, final_body="другое тело"))
-    assert got.startswith("not_approved:legacy_contract:байты узла")
+    assert code(judge(World(tmp_path, final_body="другое тело"), monkeypatch)) == \
+        act_status.BYTES
 
 
-def test_signature_under_changed_pins_refused(tmp_path: Path) -> None:
-    """B2-1: старый контракт — по прежним пинам; подпись под другими пинами — отказ."""
-    got = judge(World(tmp_path, final_pins={"charter": "d" * 40}))
-    assert got.startswith("not_approved:legacy_contract:пины подписи")
+def test_hash_field_not_matching_base_bytes_refused(world, monkeypatch) -> None:
+    text = world.base_text.replace("approved_content_hash: '", "approved_content_hash: 'x")
+    w = world
+    (w.repo / NODE).write_text(text)
+    _git(w.repo, "commit", "-qam", "tamper hash field")  # правка = новая подпись?
+    w.signed_by_pr = {_git(w.repo, "rev-parse", "HEAD"): 6}
+    assert code(judge(w, monkeypatch, text)) == act_status.HASH_FIELD
+
+
+def test_signature_under_changed_pins_refused(tmp_path, monkeypatch) -> None:
+    """B2-1: подпись под другими пинами, чем выносились."""
+    w = World(tmp_path, final_pins={"charter": "d" * 40})
+    assert code(judge(w, monkeypatch)) == act_status.PINS
+
+
+# --- старый код авторизации (approve_node._legacy_outcome), B3-1 -------------------
+
+
+def test_merger_outside_old_allowlist_refused(world, monkeypatch) -> None:
+    """Подпись согласована, но мержер не в закреплённой версии allowlist — отказ."""
+    world.allowlist = frozenset({"bob"})
+    assert code(judge(world, monkeypatch)) == "legacy_signature"
+
+
+def test_old_pin_missing_refused(world, monkeypatch) -> None:
+    world.ledger["approve-1-0-1"].pop("policy")
+    assert code(judge(world, monkeypatch)) == "legacy_unpinned"
+
+
+def test_old_pin_substituted_is_unavailable(world, monkeypatch) -> None:
+    """Прочитан не тот снимок, что закрепляла заявка (отпечаток) — не установлено."""
+    world.ledger["approve-1-0-1"]["policy"]["fingerprint"] = "fp-other"
+    assert judge(world, monkeypatch).startswith("unavailable:политика")
+
+
+def test_old_pin_unavailable_is_unavailable(world, monkeypatch) -> None:
+    world.policy = Fact(Outcome.UNAVAILABLE, None, "approval-policy: 502")
+    assert judge(world, monkeypatch).startswith("unavailable:политика подписи")
+
+
+def test_old_pin_superseded_is_policy_changed(world, monkeypatch) -> None:
+    refusal = af.PolicyRefusal(af.POLICY_REFUSAL_SUPERSEDED, "версия сменилась")
+    world.policy = Fact(Outcome.FORBIDDEN, refusal, "superseded")
+    assert code(judge(world, monkeypatch)) == "policy_changed"
+
+
+def test_snapshot_not_published_in_candidate_refused(world, monkeypatch) -> None:
+    """Старый код: в голове candidate узел не в форме снимка заявки (хеш леджера)."""
+    world.ledger["approve-1-0-1"]["content_hashes"]["requirements"] = "sha:other"
+    assert code(judge(world, monkeypatch)) == "legacy_unpublished"
+
+
+# --- admission и сам Decider.legacy ---------------------------------------------------
+
+
+def test_candidate_delivered_after_activation_refused(world, monkeypatch) -> None:
+    """Заявка без манифеста, доставленная после ACT_MODE=review, — отказ admission."""
+    world.mode = "review"
+    assert code(judge(world, monkeypatch)).startswith("legacy_admission:")
 
 
 def test_decider_legacy_returns_contract_result(monkeypatch) -> None:
     """B2-1: `Decider.legacy` отдаёт результат старой проверки, не безусловный
-    `LegacyAccepted`."""
-    monkeypatch.setattr(act_context, "delivery_verdict",
-                        lambda *a, legacy, **k: (legacy(), None))
-    state = SimpleNamespace(repo_slug="owner/p", ws_id="ws-7", target_dir="/t",
+    `LegacyAccepted` (настоящий `delivery_verdict`, OLD_READER)."""
+    ctx = context(modes={sha("p1"): "merge"}, request_act=None)
+    _wire(monkeypatch, ctx)
+    state = SimpleNamespace(repo_slug=PRODUCT, ws_id="ws-7", target_dir="/t",
                             bundle_dir="spec")
-    decider = act_status.Decider(state, object(), SimpleNamespace(readers=None, gh=None),
-                                 (), trust=object(), journal=None)
-    refused = Rejected(act_status.LEGACY_CONTRACT, "пины")
+    deps = act_status.Deps(readers=SimpleNamespace(anon=object()), binding=object(),
+                           journal=None, creds=(), gh=object(), now=None, sleep=None,
+                           settings=None)
+    decider = act_status.Decider(state, object(), deps, (), trust=_trust(ctx), journal=None)
+    refused = Rejected(act_status.PINS, "пины")
     assert decider.legacy(5, lambda: refused) is refused
     assert decider.legacy(5, lambda: LegacyAccepted("alice")) == LegacyAccepted("alice")
 ```
@@ -11020,6 +11270,110 @@ def _act_isolation(monkeypatch: pytest.MonkeyPatch, tmp_path_factory) -> None:
     monkeypatch.setattr(act_status, "mode_probe", lambda state, deps=None: pre)
 ```
 
+- [ ] **Step 3a: Выделить `approve_node._legacy_outcome`** (перенесено из Task 13, ревизия b3,
+  B3-1: `LegacyProbe` исполняет ПОЛНЫЙ старый контракт через этот же код, а не параллельную
+  частичную проверку). Поведение старого пути не меняется: `_reconcile_candidate` строится поверх
+  чистой функции с прежними текстами; это держат существующие тесты
+  `tests/test_governance_approve_node.py` без правок.
+
+`_reconcile_candidate` поверх `_legacy_outcome` — новая чистая функция и её тип остановки:
+
+```python
+@dataclass(frozen=True)
+class LegacyHalt:
+    """Старый путь не установил факт: `text` — прежнее сообщение; `wrap` — через
+    `_unresolved` (иначе прежний `RuntimeError` с тем же текстом)."""
+
+    text: str
+    wrap: bool = True
+
+
+_LEGACY_UNPUBLISHED = "legacy_unpublished"
+_LEGACY_UNPINNED = "legacy_unpinned"
+_LEGACY_SIGNATURE = "legacy_signature"
+
+
+def _legacy_outcome(state, ops, dag, op, key, facts) -> LegacyAccepted | Rejected | LegacyHalt:
+    """Вердикт старого кода по смёрженному candidate без побочных эффектов (Task 12)."""
+    pr = op["candidate_pr"]
+    published = _snapshot_is_published(state, ops, dag, op, facts.get("headRefOid"))
+    if published is None:
+        return LegacyHalt(f"состав предложения в голове PR #{pr} — объект недоступен "
+                          "либо голова не названа")
+    if not published:
+        return Rejected(_LEGACY_UNPUBLISHED,
+                        f"в голове PR #{pr} ({facts.get('headRefOid')}) лежат не все узлы "
+                        f"снимка заявки ({', '.join(op['nodes'])}), а PR уже закрыт либо "
+                        "вмержен: предъявлено человеку было не то, что заявка выносит")
+    event = af.merge_event(facts)
+    if event.outcome is not Outcome.FOUND or event.value is None:
+        return LegacyHalt(f"акт мержа candidate-PR #{pr} — {event.detail}")
+    pinned = op.get("policy")
+    if not pinned:
+        return Rejected(_LEGACY_UNPINNED,
+                        "заявка не закрепила версию политики (старый формат, §4.6)")
+    policy = af.policy_snapshot(ops, pinned_sha=pinned["sha"])
+    if policy.outcome is Outcome.UNAVAILABLE:
+        return LegacyHalt(f"политика подписи для мержа PR #{pr}: {policy.detail}")
+    if policy.outcome is Outcome.FORBIDDEN:
+        refusal = policy.value
+        assert isinstance(refusal, af.PolicyRefusal)
+        if refusal.kind == af.POLICY_REFUSAL_SUPERSEDED:
+            return Rejected(af.INVALIDATION_POLICY_CHANGED,
+                            f"{af.INVALIDATION_POLICY_CHANGED}: {refusal.detail}")
+        return LegacyHalt(f"{refusal.detail}. Заявка {key} жива, факт мержа не записан; "
+                          "исправьте источник/окружение и повторите", wrap=False)
+    snapshot = policy.value
+    assert isinstance(snapshot, af.PolicySnapshot)
+    if snapshot.fingerprint != pinned["fingerprint"]:
+        return LegacyHalt(
+            f"политика {snapshot.source}: прочитано не то, что закрепляла заявка {key} "
+            f"(отпечаток {snapshot.fingerprint} ≠ {pinned['fingerprint']}) — подмена или "
+            "сбой пути чтения; заявка жива, ничего не записано", wrap=False)
+    signature = af.authorized_signature(event.value, snapshot)
+    if signature.outcome is Outcome.FORBIDDEN:
+        return Rejected(_LEGACY_SIGNATURE, signature.detail)
+    return LegacyAccepted(event.value.login, evidence=(event.value, signature.value))
+
+
+#: Тексты отказа старого пути — те же, что писал `_reconcile_candidate` до выделения.
+_LEGACY_RAISE = {
+    _LEGACY_UNPUBLISHED: "PR #{pr} завершён не на предложении заявки {key} — часть её узлов "
+    "человеку не предъявлялась. Заявка invalidated; восстановление: новый candidate над "
+    "теми же узлами",
+    _LEGACY_UNPINNED: "заявка {key} не закрепила версию политики — invalidated; "
+    "восстановление: новый candidate над теми же узлами",
+    af.INVALIDATION_POLICY_CHANGED: "{detail}. Заявка {key} — invalidated; повторное "
+    "установление авторизации — новый candidate над теми же узлами",
+    _LEGACY_SIGNATURE: "{detail}. Заявка {key} — invalidated; восстановление: новый "
+    "candidate над теми же узлами, мерж учёткой из allowlist даст верную подпись",
+}
+```
+
+Хвост `_reconcile_candidate` после ветки `OPEN` (вместо `:1840–1928`):
+
+```python
+    event = af.merge_event(facts)
+    if published and event.outcome is Outcome.ABSENT:
+        al.abandon_request(state, key, f"candidate-PR #{pr} закрыт без мержа — не одобрено")
+        return ApprovalOutcome(...)  # прежний текст без изменений
+    verdict = _legacy_outcome(state, ops, dag, op, key, facts)
+    if isinstance(verdict, LegacyHalt):
+        raise _unresolved(verdict.text) if verdict.wrap else RuntimeError(verdict.text)
+    if isinstance(verdict, Rejected):
+        al.invalidate_request(state, key, verdict.detail)
+        detail = verdict.detail.removeprefix(f"{verdict.code}: ")
+        raise RuntimeError(_LEGACY_RAISE[verdict.code].format(pr=pr, key=key, detail=detail))
+    merged, authorization = verdict.evidence
+    al.record_merge(state, key, merged, authorization)
+    return _finalize(state, ops, dag, state.ops[key], key, facts)
+```
+
+(`published` по-прежнему считается до ветвления по состоянию; при `published is None` прежний код
+отказывал до ветки `OPEN` — этот порядок сохраняется: `_legacy_outcome` его повторяет только для
+смёрженного PR.) Импорты: `from governance.act_check import LegacyAccepted`,
+`from governance.act_decision import Rejected`.
+
 - [ ] **Step 4: Write `act_status`**
 
 ```python
@@ -11352,6 +11706,21 @@ class Decider:
 # --- provenance старого одобрения (§9.1 (а) п. 3) -----------------------------------
 
 LEGACY_CONTRACT = "legacy_contract"
+#: Коды отказа старого акта — по одному на проверку (ревизия b3: двойник проверяет
+#: ровно свой код, вход построен так, что все предыдущие проверки проходят).
+NO_EDIT, NOT_SIGNATURE = "legacy_no_edit", "legacy_not_signature_commit"
+NOT_VIA_PR, NOT_FINALIZE = "legacy_signature_not_pr", "legacy_signature_not_finalize"
+FOREIGN_WS, NO_CANDIDATE = "legacy_foreign_workstream", "legacy_no_candidate"
+CANDIDATE_NOT_MERGED = "legacy_candidate_not_merged"
+CANDIDATE_MERGER, CANDIDATE_TIME = "legacy_candidate_merger", "legacy_candidate_time"
+NOT_IN_CANDIDATE = "legacy_node_not_in_candidate"
+NO_LEDGER, LEDGER_CANDIDATE = "legacy_no_ledger_record", "legacy_ledger_other_candidate"
+LEDGER_NODE = "legacy_ledger_node_absent"
+NOT_PENDING, BYTES = "legacy_not_pending", "legacy_bytes"
+HASH_FIELD, PINS = "legacy_hash_field", "legacy_pins"
+#: Коды старого кода (`approve_node._legacy_outcome`): опубликованность снимка,
+#: закреплённая политика, подпись по прежнему allowlist.
+OLD_CODES = ("legacy_unpublished", "legacy_unpinned", "policy_changed", "legacy_signature")
 _CANDIDATE = re.compile(r"spec/(?P<ws>.+)-approve-(?P<w>\d+)-(?P<k>\d+)-(?P<a>\d+)")
 
 
@@ -11367,42 +11736,46 @@ def candidate_identity(branch: str) -> tuple[str, str] | None:
     return m["ws"], f"approve-{w}-{k}-{a}"
 
 
-def legacy_contract_refusal(candidate_text: str, base_text: str) -> str | None:
-    """Старый контракт узла по ПРЕЖНИМ пинам (сверки 3–4 `_verify_nodes_in_base`
-    без леджера): в candidate узел был `approval_pending`; собственные байты в
-    базе — те, что выносились (`self_hash`), и поле хеша им равно; пины подписи —
-    пины, под которыми узел выносился. Текущие пины против upstream — `node_debt`."""
+def legacy_contract_refusal(candidate_text: str, base_text: str) -> tuple[str, str] | None:
+    """Байтовая часть старого контракта (сверки 3–4 `_verify_nodes_in_base`):
+    в candidate узел был `approval_pending`; собственные байты в базе — те, что
+    выносились, и поле хеша им равно; пины подписи — пины выноса. `(код, деталь)`."""
     cand, _ = split_frontmatter(candidate_text)
     base, _ = split_frontmatter(base_text)
     if cand.get("status") != na.STATUS_APPROVAL_PENDING:
-        return "узел в candidate не был на одобрении (approval_pending)"
+        return NOT_PENDING, "узел в candidate не был на одобрении (approval_pending)"
     recomputed = na.self_hash(base_text)
     if na.self_hash(candidate_text) != recomputed:
-        return "байты узла в базе ≠ вынесенным candidate"
+        return BYTES, "байты узла в базе ≠ вынесенным candidate"
     if base.get(na.SELF_HASH_KEY) != recomputed:
-        return f"{na.SELF_HASH_KEY} ≠ пересчёту байтов базы"
+        return HASH_FIELD, f"{na.SELF_HASH_KEY} ≠ пересчёту байтов базы"
     if dict(cand.get("upstream_hashes") or {}) != dict(base.get("upstream_hashes") or {}):
-        return "пины подписи ≠ пинам, под которыми узел выносился"
+        return PINS, "пины подписи ≠ пинам, под которыми узел выносился"
     return None
 
 
+def _no(code: str, detail: str) -> str:
+    return f"not_approved:{code}:{detail}"
+
+
 class LegacyProbe:
-    """Узел без события `review/v1` в продукте `review`: доказать старый акт.
+    """Узел без события `review/v1` в продукте `review`: доказать старый акт ЦЕЛИКОМ.
 
     Цепочка (решение исполнителя плана Р-9, механизм; правило — спека), каждое
-    звено — компонент идентичности старого акта (таблица Р-17, ревизия b2):
-    последняя правка файла узла в first-parent базы — запись ЕГО нынешней
-    подписи; её PR — finalize старой заявки; candidate этой заявки — того же
-    воркстрима, что прогон; узел — среди файлов candidate и в его голове
-    `approval_pending`; candidate смёржен именно этой учёткой в это время;
-    старый контракт по прежним пинам (`legacy_contract_refusal`) — это и есть
-    `legacy`-вердикт admission (`Decider.legacy`). Чего-либо нет — «не
-    одобрен», а не fallback.
+    звено — свой код: последняя правка файла узла в first-parent базы — запись
+    ЕГО нынешней подписи; её PR — finalize старой заявки воркстрима прогона;
+    candidate этой заявки смёржен этой учёткой в это время; узел — среди файлов
+    candidate; запись заявки в леджере прогона называет этот candidate и этот
+    узел. Вердикт `legacy` admission (`Decider.legacy`) — ПОЛНЫЙ старый контракт:
+    байтовая часть (`legacy_contract_refusal`) и `approve_node._legacy_outcome`
+    (опубликованный снимок, закреплённый пин `approval-policy-source/v1`, его
+    отпечаток, `authorized_signature` мержера по прежнему allowlist; ревизия b3,
+    B3-1). Нет пина или политики — отказ/`unavailable`, никогда `approved`.
     """
 
     def __init__(self, state: RunState, ops: Ops, base_ref: str,
-                 decide_legacy: Callable[[int, Callable[[], Any]], Any]) -> None:
-        self.state, self.ops, self.base_ref = state, ops, base_ref
+                 decide_legacy: Callable[[int, Callable[[], Any]], Any], dag: Dag) -> None:
+        self.state, self.ops, self.base_ref, self.dag = state, ops, base_ref, dag
         self.decide_legacy = decide_legacy
         self._rows: Rows | None = None
 
@@ -11420,12 +11793,12 @@ class LegacyProbe:
         commit = next((c for c, _p, ch in reversed(rows)
                        if any(path == node_path for _s, path in ch)), None)
         if commit is None:
-            return "not_approved:legacy_provenance:в истории базы нет правки узла"
+            return _no(NO_EDIT, "в истории базы нет правки узла")
         signed = self.ops.show_file(self.state.target_dir, commit, node_path)
         signed_meta = split_frontmatter(signed)[0] if signed is not None else {}
         if (signed_meta.get("status"), signed_meta.get("approved_by"),
                 signed_meta.get("approved_at")) != (na.STATUS_APPROVED, by, at):
-            return "not_approved:legacy_provenance:последняя правка узла — не его подпись"
+            return _no(NOT_SIGNATURE, "последняя правка узла — не его подпись")
         return self._candidate(node_path, text, commit, str(by), str(at))
 
     def _finalize_branch(self, commit: str) -> str:
@@ -11438,14 +11811,14 @@ class LegacyProbe:
         merged = [p["number"] for p in prs
                   if p.get("state") == "MERGED" and p.get("mergeCommit") == commit]
         if not merged:
-            return "not_approved:legacy_provenance:подпись внесена не смёрженным PR"
+            return _no(NOT_VIA_PR, "подпись внесена не смёрженным PR")
         if len(merged) > 1:
             return f"unavailable:коммит подписи — merge-коммит PR {merged}"
         facts = self.ops.brief_pr_fact(slug, int(merged[0]))
         if facts.outcome is not FactOutcome.FOUND or facts.value is None:
             return f"unavailable:PR подписи #{merged[0]}: {facts.detail}"
         if not approval_branches.is_finalize(facts.value.head_ref):
-            return f"not_approved:legacy_provenance:подпись внесена не finalize-PR (#{merged[0]})"
+            return _no(NOT_FINALIZE, f"подпись внесена не finalize-PR (#{merged[0]})")
         return facts.value.head_ref
 
     def _candidate(self, node_path: str, text: str, commit: str, by: str, at: str) -> str:
@@ -11456,33 +11829,56 @@ class LegacyProbe:
         candidate_branch = branch.removesuffix(approval_branches.finalize_suffix())
         ident = candidate_identity(candidate_branch)
         if ident is None or ident[0] != self.state.ws_id:
-            return ("not_approved:legacy_provenance:finalize не заявки воркстрима "
-                    f"{self.state.ws_id} ({candidate_branch})")
+            return _no(FOREIGN_WS, f"finalize не заявки воркстрима {self.state.ws_id} "
+                                   f"({candidate_branch})")
+        key = ident[1]
         try:
             candidate = self.ops.find_pr(slug, candidate_branch, any_state=True)
             facts_c = self.ops.pr_facts(slug, candidate) if candidate is not None else {}
         except RuntimeError as exc:
             return f"unavailable:candidate {candidate_branch}: {exc}"
         if candidate is None:
-            return f"not_approved:legacy_provenance:нет candidate-PR {candidate_branch}"
-        if (facts_c.get("state"), (facts_c.get("mergedBy") or {}).get("login"),
-                facts_c.get("mergedAt")) != ("MERGED", by, at):
-            return "not_approved:legacy_provenance:подпись ≠ мержу candidate"
+            return _no(NO_CANDIDATE, f"нет candidate-PR {candidate_branch}")
+        if facts_c.get("state") != "MERGED":
+            return _no(CANDIDATE_NOT_MERGED, f"candidate #{candidate} не смёржен")
+        if (facts_c.get("mergedBy") or {}).get("login") != by:
+            return _no(CANDIDATE_MERGER, f"candidate #{candidate} смёржил не {by}")
+        if facts_c.get("mergedAt") != at:
+            return _no(CANDIDATE_TIME, f"мерж candidate #{candidate} не в {at}")
         offered = self._offered(candidate, node_path)
         if offered.startswith(("unavailable:", "not_approved:")):
             return offered
-        refusal = legacy_contract_refusal(offered, text)
+        op = self.state.ops.get(key)
+        if op is None:
+            return _no(NO_LEDGER, f"в леджере прогона нет заявки {key} — пин старой "
+                                  "политики не установить")
+        if op.get("candidate_pr") != candidate:
+            return _no(LEDGER_CANDIDATE, f"заявка {key} леджера — candidate "
+                                         f"#{op.get('candidate_pr')}, не #{candidate}")
+        node = bundle_dag.node_id(node_path.rsplit("/", 1)[-1])
+        if node not in op.get("nodes", ()):
+            return _no(LEDGER_NODE, f"заявка {key} леджера не выносила узел {node}")
+        return self._verdict(candidate, by, offered, text, op, key, facts_c)
+
+    def _verdict(self, candidate: int, by: str, offered: str, text: str, op: Mapping,
+                 key: str, facts_c: Mapping) -> str:
+        from governance import approve_node as an  # ленивый: approve_node зовёт act_status
 
         def contract() -> Any:
-            return (LegacyAccepted(by) if refusal is None
-                    else Rejected(LEGACY_CONTRACT, refusal))
+            refusal = legacy_contract_refusal(offered, text)
+            if refusal is not None:
+                return Rejected(*refusal)
+            got = an._legacy_outcome(self.state, self.ops, self.dag, dict(op), key,
+                                     dict(facts_c))
+            return Unavailable(got.text) if isinstance(got, an.LegacyHalt) else got
 
         verdict = self.decide_legacy(candidate, contract)
         if isinstance(verdict, LegacyAccepted):
-            return APPROVED
+            return APPROVED  # учётка старого кода = `by`: `_legacy_outcome` берёт её из facts_c
         if isinstance(verdict, Rejected):
-            kind = LEGACY_CONTRACT if verdict.code == LEGACY_CONTRACT else "legacy_admission"
-            return f"not_approved:{kind}:{verdict.detail or verdict.code}"
+            own = verdict.code.startswith("legacy_") or verdict.code in OLD_CODES
+            return _no(verdict.code if own else f"legacy_admission:{verdict.code}",
+                       verdict.detail or verdict.code)
         return f"unavailable:{getattr(verdict, 'reason', type(verdict).__name__)}"
 
     def _offered(self, candidate: int, node_path: str) -> str:
@@ -11491,7 +11887,7 @@ class LegacyProbe:
         if files.outcome is not FactOutcome.FOUND or files.value is None:
             return f"unavailable:файлы candidate #{candidate}: {files.detail}"
         if node_path not in {path for path, _change in files.value.files}:
-            return f"not_approved:legacy_provenance:узел не из candidate #{candidate}"
+            return _no(NOT_IN_CANDIDATE, f"узел не из candidate #{candidate}")
         head = _pr_head(self.ops, self.state, candidate)
         if isinstance(head, Unavailable):
             return f"unavailable:{head.reason}"
@@ -11618,7 +12014,7 @@ def _statuses(state: RunState, ops: Ops, dag: Dag, live: LivePolicy, deps: Deps,
     return Statuses(
         dag=dag, ws_id=state.ws_id, history=load_history(ops, state, base),
         node_path=paths.__getitem__, text_of=text_of, blobs_of=_blobs(state, ops, dag, ref),
-        decide=decider, legacy=LegacyProbe(state, ops, base, decider.legacy),
+        decide=decider, legacy=LegacyProbe(state, ops, base, decider.legacy, dag),
     )
 
 
@@ -13305,10 +13701,13 @@ def test_draining_off_incomplete() -> None:
     assert not run(Ops([]), draining=False).complete
 
 
-@pytest.mark.parametrize("branch", [CAND, FINAL, "brief/ws-7"])
-def test_open_unmarked_stage_is_live(branch: str) -> None:
-    got = run(Ops([pr(5, branch, "OPEN")]))
-    assert len(got.items) == 1 and "#5" in got.items[0]
+@pytest.mark.parametrize("branch,item", [
+    (CAND, "#5 candidate OPEN без маркера"),
+    (FINAL, "#5 finalize OPEN без маркера"),
+    ("brief/ws-7", "#5 brief-PR OPEN — заявка v1 без маркера"),
+], ids=["candidate", "finalize", "brief"])
+def test_open_unmarked_stage_is_live(branch: str, item: str) -> None:
+    assert run(Ops([pr(5, branch, "OPEN")])).items == (item,)
 
 
 def test_open_review_candidate_is_not_a_barrier() -> None:
@@ -13326,7 +13725,7 @@ def test_open_review_candidate_is_not_a_barrier() -> None:
 def test_malformed_or_foreign_manifest_is_not_a_marker(text: str) -> None:
     """B1-13/B1-14: найденный файл — ещё не манифест этой заявки."""
     got = run(Ops([pr(5, CAND, "OPEN")], manifests={HEAD: text}))
-    assert len(got.items) == 1
+    assert got.items == ("#5 candidate OPEN без маркера",)
 
 
 def test_merged_legacy_with_signed_node_is_resolved() -> None:
@@ -13338,7 +13737,15 @@ def test_merged_legacy_with_signed_node_is_resolved() -> None:
 def test_merged_legacy_without_signature_in_base_is_live() -> None:
     ops = Ops([pr(5, CAND, "MERGED"), pr(6, FINAL, "MERGED")],
               files={(TIP, NODE): signed(by="bob", at="2026-09-01T00:00:00Z")})
-    assert len(run(ops).items) == 1
+    assert run(ops).items == (f"#5 candidate MERGED: {NODE} в базе без подписи этого акта "
+                              "— merged-but-unrecorded",)
+
+
+def test_unapproved_node_in_base_is_live() -> None:
+    """B3-3: подпись этого акта есть, но статус узла в базе — не `approved` (`_signed`)."""
+    text = signed().replace("status: approved", "status: approval_pending")
+    ops = Ops([pr(5, CAND, "MERGED"), pr(6, FINAL, "MERGED")], files={(TIP, NODE): text})
+    assert "merged-but-unrecorded" in run(ops).items[0]
 
 
 def test_node_covered_later_is_resolved() -> None:
@@ -13360,7 +13767,8 @@ def test_partial_finalize_leaves_candidate_live() -> None:
 def test_empty_finalize_does_not_resolve() -> None:
     """B1-13: состав берётся из candidate, а не из (пустого) finalize."""
     ops = Ops([pr(5, CAND, "MERGED"), pr(6, FINAL, "MERGED")], pr_files={6: ()})
-    assert len(run(ops).items) == 1
+    assert run(ops).items == (f"#5 candidate MERGED: {NODE} в базе без подписи этого акта "
+                              "— merged-but-unrecorded",)
 
 
 def test_candidate_without_pending_nodes_is_live() -> None:
@@ -13370,9 +13778,13 @@ def test_candidate_without_pending_nodes_is_live() -> None:
     assert "узлов на одобрении не найдено" in got.items[0]
 
 
-def test_merged_candidate_without_finalize_is_live() -> None:
-    got = run(Ops([pr(5, CAND, "MERGED")]))
-    assert "pending-finalize" in got.items[0]
+@pytest.mark.parametrize("finalize", [None, "OPEN", "CLOSED"], ids=["absent", "open", "closed"])
+def test_merged_candidate_without_finalize_is_live(finalize: str | None) -> None:
+    """B3-3: finalize нет / открыт / закрыт без мержа — заявка не разобрана."""
+    prs = [pr(5, CAND, "MERGED")] + ([pr(6, FINAL, finalize)] if finalize else [])
+    got = run(Ops(prs, files={(TIP, NODE): signed()}))
+    assert got.items[0] == ("#5 candidate MERGED без смёрженного finalize — "
+                            "pending-finalize")
 
 
 def test_human_migration_marker_resolves() -> None:
@@ -13393,7 +13805,8 @@ def test_human_migration_marker_resolves() -> None:
 ], ids=["author", "edited", "old_form", "ws_id", "request_id", "product"])
 def test_marker_must_be_human_unedited_and_this_request(comment: PrComment) -> None:
     """B1-14: маркер агента, правленый, старой формы или с чужой идентичностью — нет."""
-    assert len(run(Ops([pr(5, CAND, "OPEN")], comments={5: [comment]})).items) == 1
+    got = run(Ops([pr(5, CAND, "OPEN")], comments={5: [comment]}))
+    assert got.items == ("#5 candidate OPEN без маркера",)
 
 
 def test_merged_brief_needs_human_confirmation() -> None:
@@ -13401,6 +13814,60 @@ def test_merged_brief_needs_human_confirmation() -> None:
     got = run(ops)
     assert "--confirm-resolved 7" in got.items[0]
     assert run(ops, confirmed=frozenset({7})).items == ()
+
+
+def _brief_runs(monkeypatch, tmp_path, runs: dict[str, tuple[dict, bool]]) -> None:
+    """Локальные прогоны: `interview.approval` и наличие штампа брифа."""
+    from types import SimpleNamespace
+
+    states = {rid: SimpleNamespace(interview={"approval": approval}, repo_slug=P,
+                                   ws_id="ws-7", ops={}) for rid, (approval, _s) in runs.items()}
+    for rid, (_a, stamped) in runs.items():
+        if stamped:
+            (tmp_path / rid / "brief-approval").mkdir(parents=True)
+            (tmp_path / rid / "brief-approval" / "customer-brief.md").write_text("x")
+    monkeypatch.setattr(rs, "all_run_ids", lambda: list(states))
+    monkeypatch.setattr(rs, "load", lambda rid: states[rid])
+    monkeypatch.setattr(rs, "run_dir", lambda rid: tmp_path / rid)
+
+
+@pytest.mark.parametrize("approval,stamped,resolved", [
+    ({"repo": P, "pr": 7}, True, True),
+    ({"repo": "owner/q", "pr": 7}, True, False),
+    ({"repo": P, "pr": 8}, True, False),
+    ({"repo": P, "pr": 7}, False, False),
+], ids=["match", "other_product", "other_pr", "no_stamp"])
+def test_local_brief_stamp_binds_product_pr_and_file(monkeypatch, tmp_path, approval,
+                                                     stamped, resolved) -> None:
+    """B3-2/B3-3: штамп брифа доказывает разбор только своего продукта, своего PR и при
+    наличии файла штампа (`_local_brief_stamp`)."""
+    _brief_runs(monkeypatch, tmp_path, {"r1": (approval, stamped)})
+    got = run(Ops([pr(7, "brief/ws-7", "MERGED")]))
+    assert (got.items == ()) is resolved
+
+
+def test_local_live_request_without_pr_is_item(monkeypatch) -> None:
+    """B3-2: живая заявка локального леджера без маркера, не дошедшая до PR — пункт
+    (`_local_items`); заявка другого продукта — нет."""
+    from types import SimpleNamespace
+
+    from governance import approval_ledger as al
+
+    states = {"r1": SimpleNamespace(repo_slug=P), "r2": SimpleNamespace(repo_slug="owner/q")}
+    monkeypatch.setattr(rs, "load", lambda rid: states[rid])
+    monkeypatch.setattr(al, "live_requests", lambda state: [((2, 1, 1), {})])
+    got = run(Ops([]), runs=("r1", "r2"))
+    assert got.items == ("r1:approve-2-1-1 — заявка без маркера до PR",)
+
+
+def test_unreadable_local_ledger_incomplete(monkeypatch) -> None:
+    """B3-2: нечитаемый леджер прогона — пробел полноты, а не «пусто» (`live_unmarked`)."""
+    def broken(run_id):
+        raise ValueError("битый run.json")
+
+    monkeypatch.setattr(rs, "load", broken)
+    got = run(Ops([]), runs=("r1",))
+    assert not got.complete and "леджер r1 не читается" in got.gaps[0]
 
 
 def test_broken_pagination_incomplete() -> None:
@@ -13443,21 +13910,22 @@ def test_review_preview_unavailable_product_incomplete() -> None:
     assert len(got.items) == 1 and not got.complete
 ```
 
-Мета-тест таблицы идентичности (ревизия b2, Р-17; таблица в разделе ревизии — человекочитаемая
-копия этих данных) — `tests/test_act_identity_table.py`:
+Мета-тест таблицы идентичности (ревизии b2, b3, Р-17: исчерпывающая классификация функций части B;
+таблица в разделе ревизии — человекочитаемая копия) — `tests/test_act_identity_table.py`:
 
 ```python
-"""Таблица идентичности судимых объектов: место × компонент → отрицательный двойник
-(ревизия b2, Р-17; правило «класс, а не экземпляр»).
+"""Таблица идентичности судимых объектов: ИСЧЕРПЫВАЮЩАЯ классификация функций части B
+(ревизия b3, Р-17; правило «класс, а не экземпляр» — третий круг).
 
-Каждая функция части B, выносящая ПОЛОЖИТЕЛЬНОЕ суждение (`Accepted`,
-`LegacyAccepted`, `approved`, совпадение конверта или записи остановки,
-завершение finalize/reopen, попадание в память, «помечен»/«разобран» барьера,
-код 0 предпроверки), — строки таблицы по каждому компоненту идентичности
-судимого объекта; ячейка — тест, который подменяет ЭТОТ компонент и проходит
-через ЭТОТ вход (не общий модульный тест `RequestIdentity`). Мета-тесты
-падают, если у строки нет теста, тест исчез или новое место положительного
-суждения не внесено в таблицу.
+Каждая функция и метод верхнего уровня во ВСЕХ модулях части B стоит ровно в одном
+реестре: `JUDGMENT` — функция выносит суждение о судимом объекте (заявке, доставке,
+узле, конверте, остановке, маркере, старом акте, периметре, полноте барьера); у неё —
+строки «компонент идентичности → отрицательный двойник через ЭТОТ вход» (двойник
+ломает ровно этот компонент при прочих верных и проверяет точную причину своей
+проверки); `NOT_JUDGMENT` — однострочная причина, почему это не суждение. Функция вне
+реестров, функция в обоих, исчезнувшая функция, строка без теста и функция с маркером
+положительного суждения вне `JUDGMENT` — падение. Частные помощники судят через свой
+публичный вход: двойник идёт через вход, который их вызывает (в таблице — тот вход).
 """
 
 # ruff: noqa: E501 — таблица данных: строка = место × компонент × тест, перенос её не читается
@@ -13470,125 +13938,317 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
+MODULES = ("act_facts", "act_anon", "act_check", "act_trust", "act_journal", "act_context",
+           "act_identity", "act_journal_wire", "act_status", "act_node", "act_premerge",
+           "act_app_token", "act_barrier")
 S, N, L = "tests/test_act_status.py", "tests/test_act_node.py", "tests/test_act_legacy.py"
-P, B = "tests/test_act_premerge.py", "tests/test_act_barrier.py"
-ENV = "test_envelope_component_substituted_not_approved"
-FIN = "test_finalize_delivered_envelope_component_substituted_invalidates"
+P, B, C = "tests/test_act_premerge.py", "tests/test_act_barrier.py", "tests/test_act_check.py"
+T, J, W = "tests/test_act_trust.py", "tests/test_act_journal.py", "tests/test_act_journal_wire.py"
+I, A, G = "tests/test_act_identity.py", "tests/test_act_anon.py", "tests/test_act_gate.py"
+X, K = "tests/test_act_context.py", "tests/test_act_app_token.py"
 ENVELOPE_FIELDS = ("node", "request_id", "generation", "manifest_path", "head_sha",
                    "self_hash", "upstream_pins", "merge_commit", "review_id", "policy")
+ENV = f"{S}::test_envelope_component_substituted_not_approved"
+FIN = f"{N}::test_finalize_delivered_envelope_component_substituted_invalidates"
+BIND = f"{S}::test_decider_refuses_unbound_manifest"
 
-TABLE: tuple[tuple[str, str, str], ...] = (
-    # история базы: заявка
-    ("act_status._event", "request:ws_id", f"{S}::test_history_manifest_off_its_path_unavailable[ws_id]"),
-    ("act_status._event", "request:request_id", f"{S}::test_history_manifest_off_its_path_unavailable[request_id]"),
-    ("act_status._event", "request:merge_commit", f"{S}::test_history_manifest_commit_without_pr_unavailable"),
-    ("act_status._event", "request:head_sha", f"{S}::test_history_fetches_squash_head_absent_locally[False]"),
-    ("act_status._event", "request:immutable", f"{S}::test_manifest_edited_after_delivery_unavailable"),
-    # история базы: остановка
-    ("act_status._event", "stop:ws_id", f"{S}::test_history_stop_of_other_workstream_ignored"),
-    ("act_status._event", "stop:node", f"{S}::test_history_stop_off_its_path_unavailable[node]"),
-    ("act_status._event", "stop:generation", f"{S}::test_history_stop_off_its_path_unavailable[generation]"),
-    ("act_status._event", "stop:immutable", f"{S}::test_history_stop_edited_after_delivery_unavailable"),
-    # память Decider
-    ("act_status.Decider.__call__", "product+ws_id+merge_commit", f"{S}::test_decider_memo_key_carries_full_identity"),
-    ("act_status.Decider.__call__", "request_id", f"{S}::test_decider_memo_is_per_request_not_per_commit[good_first]"),
-    # вердикт доставки заявки
-    ("act_status.Decider._decide", "product", f"{S}::test_decider_refuses_unbound_manifest[foreign_product]"),
-    ("act_status.Decider._decide", "ws_id", f"{S}::test_decider_refuses_unbound_manifest[foreign_ws]"),
-    ("act_status.Decider._decide", "request_id", f"{S}::test_decider_refuses_unbound_manifest[head_other_request]"),
-    ("act_status.Decider._decide", "node_paths", f"{S}::test_decider_refuses_unbound_manifest[foreign_path]"),
-    ("act_status.Decider._decide", "manifest_in_head", f"{S}::test_decider_refuses_unbound_manifest[absent_in_head]"),
-    ("act_status.Decider._decide", "manifest_bytes", f"{S}::test_decider_refuses_unbound_manifest[changed_in_head]"),
-    ("act_status.Decider._decide", "upstream_pins", f"{S}::test_decider_refuses_unbound_manifest[pins_changed]"),
-    ("act_status.Decider._decide", "head_sha", f"{S}::test_decider_judges_review_on_event_head"),
-    ("act_status.Decider._decide", "merge_commit", f"{S}::test_decider_delivery_of_other_merge_commit_unavailable"),
-    # старый акт
-    ("act_status.Decider.legacy", "old_contract_result", f"{L}::test_decider_legacy_returns_contract_result"),
-    ("act_status.LegacyProbe._candidate", "ws_id", f"{L}::test_finalize_of_other_workstream_refused"),
-    ("act_status.LegacyProbe._candidate", "node_in_candidate", f"{L}::test_node_not_in_candidate_refused"),
-    ("act_status.LegacyProbe._candidate", "node_pending_in_candidate", f"{L}::test_node_not_pending_in_candidate_refused"),
-    ("act_status.LegacyProbe._candidate", "node_bytes", f"{L}::test_node_bytes_changed_by_finalize_refused"),
-    ("act_status.LegacyProbe._candidate", "old_pins", f"{L}::test_signature_under_changed_pins_refused"),
-    ("act_status.LegacyProbe._candidate", "signature_commit", f"{L}::test_frontmatter_signature_differs_from_last_edit"),
-    ("act_status.LegacyProbe._candidate", "finalize_form", f"{L}::test_signature_without_finalize_pr_refused"),
-    ("act_status.LegacyProbe._candidate", "signature_via_pr", f"{L}::test_signature_not_through_pr_refused"),
-    ("act_status.LegacyProbe._candidate", "candidate_exists", f"{L}::test_candidate_absent_or_not_matching_signature[absent]"),
-    ("act_status.LegacyProbe._candidate", "candidate_merger", f"{L}::test_candidate_absent_or_not_matching_signature[other_merger]"),
-    ("act_status.LegacyProbe._candidate", "candidate_merged", f"{L}::test_candidate_absent_or_not_matching_signature[not_merged]"),
-    ("act_status.LegacyProbe._candidate", "admission", f"{L}::test_candidate_delivered_after_activation_refused"),
-    # конверт и статус
-    *(("act_status.Statuses._envelope", f"envelope:{f}", f"{S}::{ENV}[{f}]")
-      for f in ENVELOPE_FIELDS),
-    ("act_status.Statuses._envelope", "ws_id", f"{S}::test_envelope_of_other_workstream_not_used"),
-    ("act_status.Statuses._envelope", "node_bytes", f"{S}::test_provider_twin_changed_candidate_bytes_not_approved"),
-    ("act_status.Statuses._envelope", "current_pins", f"{S}::test_cascade_by_pins_without_a_history_record"),
-    ("act_status.Statuses.of", "node", f"{S}::test_statuses_memo_is_per_node[approved_first]"),
-    ("act_status.Statuses._compute", "generation", f"{S}::test_previous_generation_envelope_with_same_bytes_refused"),
-    ("act_status.Statuses._compute", "stop", f"{S}::test_stop_makes_node_not_approved"),
-    ("act_status.Statuses._compute", "upstream", f"{S}::test_stopped_upstream_with_unchanged_bytes_blocks_downstream"),
-    ("act_status.Statuses._compute", "delivery_verdict", f"{S}::test_rejected_delivery_not_approved"),
-    ("act_status.gate_run", "snapshot_digest", "tests/test_act_gate.py::test_review_mode_writes_provider_bound_to_digest"),
-    ("act_status.gate_run", "product_mode", "tests/test_act_gate.py::test_mode_unavailable_stops"),
-    # путь узла
-    *(("act_node._binding_refusal", c, f"{N}::test_foreign_identity_binding_invalidates[{c}]")
-      for c in ("product", "ws_id", "node_path", "upstream_pins")),
-    ("act_node._merged", "act_mirror", f"{N}::test_act_removed_from_ledger_with_manifest_in_head"),
-    ("act_node._merged", "legacy_admission", f"{N}::test_legacy_candidate_merged_after_review_activation_refused"),
-    ("act_node._merged", "product_mode", f"{N}::test_merged_unmarked_with_unset_mode_stays_alive"),
-    *(("act_node.envelope_commit_defect", c, f"{N}::test_envelope_commit_defect_twins[{c}]")
-      for c in ("extra_path", "missing", "ws_id", "bytes")),
-    *(("act_node._reconcile_finalize", f"envelope:{f}", f"{N}::{FIN}[{f}]")
-      for f in ENVELOPE_FIELDS),
-    ("act_node._reconcile_finalize", "in_base", f"{N}::test_finalize_merged_outside_base_invalidates"),
-    ("act_node.reopen", "record", f"{N}::test_reopen_refuses_stop_pr_without_record[none]"),
-    ("act_node.reopen", "node", f"{N}::test_reopen_refuses_stop_pr_without_record[other_node]"),
-    ("act_node.reopen", "generation", f"{N}::test_reopen_refuses_stop_pr_without_record[other_generation]"),
-    ("act_node.reopen", "record_bytes", f"{N}::test_reopen_refuses_stop_pr_without_record[other_reason]"),
-    ("act_node.reopen", "in_base", f"{N}::test_reopen_refuses_stop_pr_outside_base"),
-    # предпроверка мержа
-    ("act_premerge.main", "product", f"{P}::test_manifest_of_other_identity_refused[product]"),
-    ("act_premerge.main", "ws_id", f"{P}::test_manifest_of_other_identity_refused[ws_id]"),
-    ("act_premerge.main", "request_id", f"{P}::test_manifest_of_other_identity_refused[request_id]"),
-    ("act_premerge.main", "policy_pin", f"{P}::test_stale_pin_refused"),
-    ("act_premerge.main", "head_sha", f"{P}::test_review_facts_head_differs_refused"),
-    ("act_premerge.main", "act", f"{P}::test_no_approve_refused"),
-    ("act_premerge.main", "merger", f"{P}::test_merger_outside_allowlist_refused"),
-    ("act_premerge.main", "product_mode", f"{P}::test_product_mode_gate[unset]"),
-    ("act_premerge.main", "perimeter", f"{P}::test_existing_block_stops_premerge"),
-    # барьер
-    *(("act_barrier._marked", c, f"{B}::test_malformed_or_foreign_manifest_is_not_a_marker[{c}]")
-      for c in ("not_manifest", "bad_yaml", "ws_id", "request_id", "product")),
-    *(("act_barrier._migrated", c,
-       f"{B}::test_marker_must_be_human_unedited_and_this_request[{c}]")
-      for c in ("author", "edited", "old_form", "ws_id", "request_id", "product")),
-    ("act_barrier._legacy_resolved", "candidate_composition", f"{B}::test_partial_finalize_leaves_candidate_live"),
-    ("act_barrier._legacy_resolved", "empty_finalize", f"{B}::test_empty_finalize_does_not_resolve"),
-    ("act_barrier._legacy_resolved", "pending_nodes", f"{B}::test_candidate_without_pending_nodes_is_live"),
-    ("act_barrier._legacy_resolved", "signature", f"{B}::test_merged_legacy_without_signature_in_base_is_live"),
-    ("act_barrier._legacy_resolved", "finalize_merged", f"{B}::test_merged_candidate_without_finalize_is_live"),
-    ("act_barrier.invalidate", "ws_id", f"{B}::test_invalidate_touches_only_selected_workstream"),
-    ("act_barrier.invalidate", "human", f"{B}::test_invalidate_posts_marker_for_human_only"),
-)
+JUDGMENT: dict[str, tuple[tuple[str, str], ...]] = {
+    # --- act_anon: байты по SHA и память ответов
+    "act_anon.AnonTransport.send": (("memo_only_sha_addressed", f"{A}::test_memo_only_for_sha_addressed_paths"),),
+    "act_anon.contents_bytes": (("blob_oid", f"{A}::test_contents_bytes_checked_against_blob_oid"),
+                                ("absent_vs_unreadable", f"{A}::test_contents_absent_vs_unreadable")),
+    # --- act_check: доставка на T (Task 12); помощники судят через check_delivery
+    "act_check.check_delivery": (("not_merged", f"{C}::test_not_merged_waits"),
+                                 ("product", f"{C}::test_manifest_product_must_be_delivery_repo"),
+                                 ("head_sha", f"{C}::test_new_head_after_approve_is_no_act")),
+    "act_check.live_policy_refusal": (("current_activation", f"{C}::test_live_pin_against_current_activation"),),
+    "act_check._admission": (("mode_after_review", f"{C}::test_unmarked_after_review_mode_refused"),
+                             ("mode_removed_or_reverted", f"{C}::test_mode_entry_removed_or_reverted"),
+                             ("marker_before_bootstrap", f"{C}::test_before_bootstrap_marked_rejected"),
+                             ("interepoch_gap", f"{C}::test_interepoch_gap_refused_for_review")),
+    "act_check._pinned_policy": (("product", f"{C}::test_manifest_product_must_be_delivery_repo"),
+                                 ("activation_pin", f"{C}::test_policy_changed_before_merge"),
+                                 ("mixed_set", f"{C}::test_mixed_policy_refused"),
+                                 ("unreadable_set", f"{C}::test_unreadable_policy_set_is_unavailable")),
+    "act_check._decide": (("act_head", f"{C}::test_new_head_after_approve_is_no_act"),
+                          ("approver", f"{C}::test_approver_outside_list_rejected"),
+                          ("merger", f"{C}::test_agent_outside_merger_list"),
+                          ("dismissal", f"{C}::test_dismissed_before_merge_rejected"),
+                          ("bytes", f"{C}::test_bytes_and_content_are_distinct_refusals")),
+    "act_check._legacy_verdict": (("old_reader_result", f"{C}::test_before_bootstrap_unmarked_goes_to_old_reader"),),
+    # --- act_trust: корень доверия и периметр (Task 12a)
+    "act_trust.parse_binding": (("keys", f"{T}::test_binding_rejects_bad_text"),),
+    "act_trust.load_binding": (("owner_and_link", f"{T}::test_binding_symlink_or_foreign_owner_refused"),
+                               ("absent", f"{T}::test_binding_absent_is_none")),
+    "act_trust._named": (("repository_id", f"{T}::test_root_substitution_refused"),),
+    "act_trust._chain": (("first_parent", f"{T}::test_rewritten_closed_epoch_in_history_unavailable"),),
+    "act_trust._journal_versions": (("journal_deleted", f"{T}::test_journal_deleted_after_appearing_unavailable"),),
+    "act_trust._checked_epochs": (("bootstrap_first", f"{T}::test_first_version_must_be_bootstrap"),),
+    "act_trust.read_trust_snapshot": (("one_sha", f"{T}::test_snapshot_reads_both_files_from_one_sha"),),
+    "act_trust._self_report": (("push_on_policy", f"{T}::test_token_with_push_records_and_blocks"),
+                               ("push_on_df_trust", f"{T}::test_merge_profile_with_push_on_df_trust"),
+                               ("unreadable", f"{T}::test_self_report_404_is_unavailable_without_record")),
+    "act_trust._rulesets": (("pull_request_rule", f"{T}::test_ruleset_without_pull_request_is_violation"),),
+    "act_trust._rebase": (("rebase_true", f"{T}::test_rebase_true_is_violation"),
+                          ("rebase_hidden", f"{T}::test_rebase_hidden_is_unverified_premise")),
+    "act_trust._snapshot_for_decision": (("blocked", f"{T}::test_blocked_journal_blocks"),
+                                         ("stale", f"{T}::test_stale_snapshot_reloads")),
+    "act_trust.load_trust": (("violation_wins", f"{T}::test_violation_wins_over_other_unavailable"),),
+    "act_trust.load_anchor_times": (("activation_time", f"{T}::test_anchor_time_from_activation_not_commit_date"),),
+    "act_trust.policy_set": (("one_commit", f"{T}::test_policy_set_from_one_commit"),
+                             ("bytes_vs_activation", f"{T}::test_policy_bytes_not_matching_activation_is_mixing"),
+                             ("actors_file", f"{T}::test_activation_without_actors_file_unavailable")),
+    "act_trust.load_ranges": (("history_violation", f"{T}::test_history_violation_records_event"),
+                              ("closed_epoch_violation", f"{T}::test_closed_epoch_break_registers_event"),
+                              ("unknown_anchor", f"{T}::test_unknown_anchor_time_makes_range_unavailable")),
+    "act_trust.product_mode": (("never_entered", f"{T}::test_mode_never_entered_is_pre_migration"),
+                               ("removed_or_rolled_back", f"{T}::test_mode_removed_or_rolled_back_is_unavailable"),
+                               ("prior_epoch", f"{T}::test_mode_needs_prior_epoch_unless_review")),
+    "act_trust.current_activation": (("open_epoch_last", f"{T}::test_current_activation_is_last_of_open_epoch_or_unavailable"),),
+    # --- журналы периметра
+    "act_journal.DevJournal.status": (("blocked_and_epoch", f"{J}::test_clear_then_blocked_then_new_epoch"),
+                                      ("pending", f"{J}::test_pending_blocks_until_epochs_known"),
+                                      ("stale", f"{J}::test_stale_snapshot_reported"),
+                                      ("corrupted", f"{J}::test_corrupted_store_blocks"),
+                                      ("deleted", f"{J}::test_deleted_store_with_marker_is_lost")),
+    "act_journal.InstalledJournal.status": (("df_run", f"{J}::test_installed_journal_requires_df_run"),),
+    "act_journal.journal_for": (("selection", f"{J}::test_dev_journal_without_publisher"),),
+    "act_journal_wire.WireJournal.status": (("stale_or_foreign", f"{W}::test_wire_stale_and_foreign_snapshot"),),
+    "act_journal_wire.DevStoreJournal.status": (("pending", f"{W}::test_narrow_pending_blocks_and_full_journal_completes_it"),
+                                                ("registered", f"{W}::test_registered_by_full_journal_seen_by_narrow"),
+                                                ("restore_or_corrupt", f"{W}::test_restore_intent_and_corruption_unavailable"),
+                                                ("missing", f"{W}::test_missing_store_is_unavailable")),
+    "act_journal_wire.journal_for_premerge": (("selection", f"{W}::test_premerge_selection_follows_publisher_presence"),),
+    # --- act_context
+    "act_context.delivery_verdict": (("not_merged", f"{X}::test_not_merged_waits_without_reading_ranges"),
+                                     ("legacy_only_unmarked", f"{X}::test_legacy_computed_only_for_unmarked"),
+                                     ("self_hash", f"{X}::test_unavailable_self_hash_is_unavailable"),
+                                     ("ranges", f"{X}::test_ranges_unavailable_is_unavailable")),
+    # --- act_identity
+    "act_identity.manifest_refusal": tuple((c, f"{I}::test_each_identity_component_is_checked[{c}]")
+                                           for c in ("product", "ws_id", "request_id")),
+    "act_identity.paths_refusal": (("node_and_path", f"{I}::test_node_outside_dag_and_wrong_path"),),
+    "act_identity.head_manifest_refusal": (("in_head_and_bytes", f"{I}::test_manifest_only_in_delivery_or_changed"),),
+    # --- act_status: история, вердикт, старый акт, статус (Task 14)
+    "act_status.pr_for_merge": (("exactly_one_pr", f"{S}::test_pr_for_merge_needs_exactly_one"),),
+    "act_status._pr_head": (("head_fetched", f"{S}::test_history_fetches_squash_head_absent_locally"),),
+    "act_status._event": (("request:ws_id", f"{S}::test_history_manifest_off_its_path_unavailable[ws_id]"),
+                          ("request:request_id", f"{S}::test_history_manifest_off_its_path_unavailable[request_id]"),
+                          ("request:merge_commit", f"{S}::test_history_manifest_commit_without_pr_unavailable"),
+                          ("request:immutable", f"{S}::test_manifest_edited_after_delivery_unavailable"),
+                          ("stop:ws_id", f"{S}::test_history_stop_of_other_workstream_ignored"),
+                          ("stop:node", f"{S}::test_history_stop_off_its_path_unavailable[node]"),
+                          ("stop:generation", f"{S}::test_history_stop_off_its_path_unavailable[generation]"),
+                          ("stop:immutable", f"{S}::test_history_stop_edited_after_delivery_unavailable")),
+    "act_status.Decider._binding": (("product", f"{BIND}[foreign_product]"), ("ws_id", f"{BIND}[foreign_ws]"),
+                                    ("request_id", f"{BIND}[head_other_request]"),
+                                    ("node_paths", f"{BIND}[foreign_path]"),
+                                    ("manifest_in_head", f"{BIND}[absent_in_head]"),
+                                    ("manifest_bytes", f"{BIND}[changed_in_head]"),
+                                    ("upstream_pins", f"{BIND}[pins_changed]")),
+    "act_status.Decider.__call__": (("product+ws_id+merge_commit", f"{S}::test_decider_memo_key_carries_full_identity"),
+                                    ("request_id", f"{S}::test_decider_memo_is_per_request_not_per_commit[good_first]")),
+    "act_status.Decider._decide": (("head_sha", f"{S}::test_decider_judges_review_on_event_head"),
+                                   ("merge_commit", f"{S}::test_decider_delivery_of_other_merge_commit_unavailable")),
+    "act_status.Decider.legacy": (("old_contract_result", f"{L}::test_decider_legacy_returns_contract_result"),
+                                  ("admission", f"{L}::test_candidate_delivered_after_activation_refused")),
+    "act_status.candidate_identity": (("ssot_form", f"{L}::test_candidate_identity_round_trips_ssot_form"),),
+    "act_status.legacy_contract_refusal": (("pending", f"{L}::test_node_not_pending_in_candidate_refused"),
+                                           ("bytes", f"{L}::test_node_bytes_changed_by_finalize_refused"),
+                                           ("hash_field", f"{L}::test_hash_field_not_matching_base_bytes_refused"),
+                                           ("pins", f"{L}::test_signature_under_changed_pins_refused")),
+    "act_status.LegacyProbe.__call__": (("edit_in_history", f"{L}::test_no_edit_of_node_in_history_refused"),
+                                        ("signature_commit", f"{L}::test_frontmatter_signature_differs_from_last_edit")),
+    "act_status.LegacyProbe._finalize_branch": (("via_pr", f"{L}::test_signature_not_through_pr_refused"),
+                                                ("finalize_form", f"{L}::test_signature_without_finalize_pr_refused")),
+    "act_status.LegacyProbe._candidate": (("ws_id", f"{L}::test_finalize_of_other_workstream_refused"),
+                                          *((c, f"{L}::test_candidate_absent_or_not_matching_signature[{c}]")
+                                            for c in ("absent", "not_merged", "other_merger", "other_time")),
+                                          *((f"ledger:{c}", f"{L}::test_ledger_record_binds_candidate_and_node[{c}]")
+                                            for c in ("absent", "other_candidate", "node_absent"))),
+    "act_status.LegacyProbe._offered": (("node_in_candidate", f"{L}::test_node_not_in_candidate_refused"),),
+    "act_status.LegacyProbe._verdict": (("old_allowlist", f"{L}::test_merger_outside_old_allowlist_refused"),
+                                        ("old_pin_missing", f"{L}::test_old_pin_missing_refused"),
+                                        ("old_pin_substituted", f"{L}::test_old_pin_substituted_is_unavailable"),
+                                        ("old_pin_unavailable", f"{L}::test_old_pin_unavailable_is_unavailable"),
+                                        ("old_pin_superseded", f"{L}::test_old_pin_superseded_is_policy_changed"),
+                                        ("snapshot_published", f"{L}::test_snapshot_not_published_in_candidate_refused")),
+    "act_status.Statuses.of": (("node", f"{S}::test_statuses_memo_is_per_node[approved_first]"),),
+    "act_status.Statuses.is_review": (("no_event_is_legacy", f"{S}::test_legacy_node_needs_provenance_not_frontmatter"),),
+    "act_status.Statuses._legacy": (("debt_before_probe", f"{S}::test_legacy_probe_not_called_for_debt_node"),),
+    "act_status.Statuses._compute": (("generation", f"{S}::test_previous_generation_envelope_with_same_bytes_refused"),
+                                     ("stop", f"{S}::test_stop_makes_node_not_approved"),
+                                     ("upstream", f"{S}::test_stopped_upstream_with_unchanged_bytes_blocks_downstream"),
+                                     ("delivery_verdict", f"{S}::test_rejected_delivery_not_approved")),
+    "act_status.Statuses._envelope": (*((f"envelope:{f}", f"{ENV}[{f}]") for f in ENVELOPE_FIELDS),
+                                      ("ws_id", f"{S}::test_envelope_of_other_workstream_not_used"),
+                                      ("node_bytes", f"{S}::test_provider_twin_changed_candidate_bytes_not_approved"),
+                                      ("current_pins", f"{S}::test_cascade_by_pins_without_a_history_record")),
+    "act_status.live_policy": (("binding", f"{G}::test_no_binding_is_unavailable_not_legacy"),
+                               ("mode", f"{G}::test_mode_unavailable_stops")),
+    "act_status.gate_run": (("snapshot_digest", f"{G}::test_review_mode_writes_provider_bound_to_digest"),
+                            ("product_mode", f"{G}::test_mode_unavailable_stops")),
+    # --- act_node: путь узла (Task 13)
+    "act_node.creation": (("mode_unset", f"{N}::test_unset_mode_refuses_creation"),
+                          ("pre_migration", f"{N}::test_pre_migration_keeps_legacy_creation")),
+    "act_node._manifest": (("parseable", f"{N}::test_unreadable_manifest_in_head_invalidates"),),
+    "act_node._binding_refusal": tuple((c, f"{N}::test_foreign_identity_binding_invalidates[{c}]")
+                                       for c in ("node_path", "product", "upstream_pins", "ws_id")),
+    "act_node._check_marked": (("act_mirror", f"{N}::test_act_removed_from_ledger_with_manifest_in_head"),),
+    "act_node.route": (("merged_unmarked_mode", f"{N}::test_merged_unmarked_with_unset_mode_stays_alive"),),
+    "act_node._merged": (("legacy_admission", f"{N}::test_legacy_candidate_merged_after_review_activation_refused"),),
+    "act_node.envelope_commit_defect": tuple((c, f"{N}::test_envelope_commit_defect_twins[{c}]")
+                                             for c in ("extra_path", "missing", "ws_id", "bytes")),
+    "act_node._reconcile_finalize": tuple((f"envelope:{f}", f"{FIN}[{f}]") for f in ENVELOPE_FIELDS),
+    "act_node._in_base": (("reachable", f"{N}::test_finalize_merged_outside_base_invalidates"),),
+    "act_node._require_in_base": (("finalize", f"{N}::test_finalize_merged_outside_base_invalidates"),
+                                  ("stop", f"{N}::test_reopen_refuses_stop_pr_outside_base")),
+    "act_node.reopen": (*((c, f"{N}::test_reopen_refuses_stop_pr_without_record[{c}]")
+                          for c in ("none", "other_node", "other_generation", "other_reason")),
+                        ("current_event_after", f"{N}::test_reopen_new_event_between_read_and_stop_check")),
+    # --- act_premerge (Task 15)
+    "act_premerge.request_of_branch": (("candidate_form", f"{P}::test_request_of_branch"),),
+    "act_premerge._trust": (("binding", f"{P}::test_no_binding_refused"),
+                            ("journal", f"{P}::test_journal_unavailable_is_unset"),
+                            ("perimeter_block", f"{P}::test_existing_block_stops_premerge"),
+                            ("perimeter_violation", f"{P}::test_detected_violation_registered_and_blocks_restart"),
+                            ("app_installations", f"{P}::test_app_installation_violation_recorded")),
+    "act_premerge._live": (("product_mode", f"{P}::test_product_mode_gate[unset]"),
+                           ("not_review", f"{P}::test_product_mode_gate[merge]")),
+    "act_premerge._boundary": (("wait", f"{P}::test_recent_approve_waits_past_second"),
+                               ("skew", f"{P}::test_clock_skew_beyond_ten_seconds_unset")),
+    "act_premerge._check": (*((c, f"{P}::test_manifest_of_other_identity_refused[{c}]")
+                              for c in ("product", "ws_id", "request_id")),
+                            ("policy_pin", f"{P}::test_stale_pin_refused"),
+                            ("merger", f"{P}::test_merger_outside_allowlist_refused"),
+                            ("manifest_present", f"{P}::test_no_manifest_refused"),
+                            ("reread", f"{P}::test_reread_sees_dismissal_unset")),
+    "act_premerge._act": (("head_sha", f"{P}::test_review_facts_head_differs_refused"),
+                          ("act", f"{P}::test_no_approve_refused")),
+    # --- act_app_token (Task 15a)
+    "act_app_token._pages": (("completeness", f"{K}::test_full_last_page_requires_empty_next"),),
+    "act_app_token.installations_refusal": (("trust_repo", f"{K}::test_installation_on_trust_repo_is_violation"),
+                                            ("second_page", f"{K}::test_violation_on_second_installations_page"),
+                                            ("total_count", f"{K}::test_repositories_total_mismatch_is_unavailable")),
+    "act_app_token.app_identity": (("jwt_identity", f"{K}::test_identity_unreadable_is_unavailable"),),
+    # --- act_barrier (Task 16)
+    "act_barrier._marked": tuple((c, f"{B}::test_malformed_or_foreign_manifest_is_not_a_marker[{c}]")
+                                 for c in ("not_manifest", "bad_yaml", "ws_id", "request_id", "product")),
+    "act_barrier._migrated": tuple((c, f"{B}::test_marker_must_be_human_unedited_and_this_request[{c}]")
+                                   for c in ("author", "edited", "old_form", "ws_id", "request_id", "product")),
+    "act_barrier._signed": (("signer_and_time", f"{B}::test_merged_legacy_without_signature_in_base_is_live"),
+                            ("status", f"{B}::test_unapproved_node_in_base_is_live")),
+    "act_barrier._candidate_nodes": (("composition", f"{B}::test_partial_finalize_leaves_candidate_live"),
+                                     ("pending", f"{B}::test_candidate_without_pending_nodes_is_live")),
+    "act_barrier._legacy_resolved": (*((f"finalize_{c}", f"{B}::test_merged_candidate_without_finalize_is_live[{c}]")
+                                       for c in ("absent", "open", "closed")),
+                                     ("not_from_finalize", f"{B}::test_empty_finalize_does_not_resolve")),
+    "act_barrier._judge": (("open_candidate", f"{B}::test_open_unmarked_stage_is_live[candidate]"),
+                           ("open_finalize", f"{B}::test_open_unmarked_stage_is_live[finalize]"),
+                           ("open_brief", f"{B}::test_open_unmarked_stage_is_live[brief]"),
+                           ("merged_brief", f"{B}::test_merged_brief_needs_human_confirmation")),
+    "act_barrier._local_brief_stamp": tuple((c, f"{B}::test_local_brief_stamp_binds_product_pr_and_file[{c}]")
+                                            for c in ("other_product", "other_pr", "no_stamp")),
+    "act_barrier._local_items": (("live_local", f"{B}::test_local_live_request_without_pr_is_item"),
+                                 ("unreadable", f"{B}::test_unreadable_local_ledger_incomplete")),
+    "act_barrier.live_unmarked": (("draining", f"{B}::test_draining_off_incomplete"),
+                                  ("attestation", f"{B}::test_without_attestation_incomplete"),
+                                  ("pagination", f"{B}::test_broken_pagination_incomplete"),
+                                  ("local_ledger", f"{B}::test_unreadable_local_ledger_incomplete")),
+    "act_barrier.live_review_requests": (("product_gaps", f"{B}::test_review_preview_unavailable_product_incomplete"),),
+    "act_barrier.invalidate": (("ws_id", f"{B}::test_invalidate_touches_only_selected_workstream"),
+                               ("human", f"{B}::test_invalidate_posts_marker_for_human_only")),
+}
 
-#: Признаки положительного суждения в коде части B; функция с признаком обязана быть
-#: местом таблицы. Места без признака (возвращают `None`/`bool`) внесены вручную.
-MARKERS = {"APPROVED", "Accepted", "LegacyAccepted", "complete_request", "EXIT_OK", "_memo"}
-MODULES = ("act_status", "act_node", "act_premerge", "act_barrier")
+_ADAPTER = "адаптер чтения steward: перевод исхода библиотеки, суждения не выносит"
+_HELPER = "вычисляет вход суждения; судит вызывающий вход (его двойники в JUDGMENT)"
+_BUILD = "строит значение/запрос; суждения не выносит"
+_IO = "транспорт/ввод-вывод; суждения не выносит"
+NOT_JUDGMENT: dict[str, str] = {
+    **{f"act_facts.{n}": _ADAPTER for n in (
+        "_v3", "_call", "_own", "gh_transport", "_delivery", "read", "open_review", "effective",
+        "event_stamps", "review_requires", "_activation", "history", "activation")},
+    "act_anon._NoRedirect.redirect_request": "транспортная политика (3xx не исполняется); не суждение об объекте",
+    "act_anon._default_open": _IO, "act_anon._response": _IO,
+    "act_anon.AnonTransport.__init__": _BUILD, "act_anon.AnonTransport._fetch": _IO,
+    **{f"act_check.{n}": _HELPER for n in (
+        "_activations", "_stamps", "_requires", "_epoch_at", "_span", "_until_t", "_mode_events",
+        "_earlier", "_mode_history")},
+    "act_trust.TrustRoot.id_tuple": _BUILD, "act_trust.Trust.source": _BUILD,
+    "act_trust.Trust.epochs": _BUILD, "act_trust.Trust.root": _BUILD,
+    "act_trust.Journal.status": "протокол (Protocol); суждение — у реализаций",
+    "act_trust.Journal.record": "протокол (Protocol); запись, не суждение",
+    "act_trust.default_readers": _BUILD, "act_trust._get": _IO, "act_trust._repo_path": _BUILD,
+    "act_trust.gh_get": _IO,
+    "act_trust.credentials": "перечень того, что процесс держит; судит _self_report",
+    "act_trust._roles": _BUILD, "act_trust._register": "запись события периметра; отказ — у вызывающего",
+    "act_trust._modes": _HELPER,
+    "act_journal._now": _BUILD, "act_journal._publisher_present": "проверка наличия файла издателя; выбор — journal_for",
+    "act_journal.ForgeEpochs.__init__": _BUILD, "act_journal.ForgeEpochs.head": _IO,
+    "act_journal._root_id": _BUILD, "act_journal._status_of": _HELPER,
+    "act_journal.DevJournal.__init__": _BUILD, "act_journal.DevJournal._open": _IO,
+    "act_journal.DevJournal._request": _IO, "act_journal.DevJournal.record": "запись события; не суждение",
+    "act_journal.InstalledJournal.__init__": _BUILD,
+    "act_journal.InstalledJournal.record": "запись события через издателя; не суждение",
+    "act_identity.RequestIdentity.manifest_path": _BUILD,
+    "act_identity.RequestIdentity.migration_marker": _BUILD,
+    "act_identity.RequestIdentity.memo_key": _BUILD,
+    "act_journal_wire._now": _BUILD, "act_journal_wire._root_id": _BUILD,
+    "act_journal_wire.WireJournal.__init__": _BUILD, "act_journal_wire.WireJournal._call": _IO,
+    "act_journal_wire.WireJournal.record": "запись события; не суждение",
+    "act_journal_wire.DevStoreJournal.__init__": _BUILD, "act_journal_wire.DevStoreJournal._open": _IO,
+    "act_journal_wire.DevStoreJournal.record": "запись события; не суждение",
+    "act_status._rel": _BUILD, "act_status._node_paths": _BUILD,
+    "act_status._no": "форматирует ответ провайдера `not_approved:<код>:<деталь>`",
+    "act_status.load_history": "собирает события; суждение о каждом — _event",
+    "act_status.real_deps": _BUILD, "act_status.Decider.__init__": _BUILD,
+    "act_status.Decider.journal": _BUILD, "act_status.Decider.trust": "делегирует load_trust (его двойники)",
+    "act_status.Decider._head_hashes": _HELPER, "act_status.LegacyProbe.__init__": _BUILD,
+    "act_status.LegacyProbe._changes": _IO, "act_status.Statuses.__init__": _BUILD,
+    "act_status.Statuses._upstreams": _BUILD, "act_status.Statuses._stopped": "выбирает текст причины; статус решён _compute",
+    "act_status._blobs": _IO, "act_status._statuses": _BUILD, "act_status.statuses_at_base": _BUILD,
+    "act_status.mode_probe": "точка подмены для тестов вне act_*; суждение — live_policy",
+    "act_status._gate_statuses": "собирает статусы для провайдера; суждения — Statuses",
+    "act_node.generation_of": _BUILD, "act_node.request_of": _BUILD, "act_node.manifest_file": _BUILD,
+    "act_node.label_for": _BUILD, "act_node._invalidate": "терминальная запись; причина — у вызывающего",
+    "act_node._open": "оркестровка открытого PR; суждения — _check_marked, mode_probe, _try_agent_merge",
+    "act_node._legacy": "адаптер к approve_node._legacy_outcome (двойники — LegacyProbe._verdict)",
+    "act_node._head_hashes": _HELPER,
+    "act_node._record_act": "запись акта; повтор с другим актом — защита от гонки записи, не суждение о чужом объекте",
+    "act_node._finalize": "оркестровка finalize; суждения — envelope_commit_defect, _reconcile_finalize",
+    "act_node._agent_merge": "оркестровка агентского мержа; форма — envelope_commit_defect",
+    "act_node.audit_late_dismissals": "аудит; решения не меняет (приёмка №10)",
+    "act_premerge._Stop.__init__": _BUILD, "act_premerge._manifest_text": _IO,
+    "act_premerge.app_installations": "фабрика проверки; суждение — act_app_token.installations_refusal",
+    "act_premerge._parser": _BUILD, "act_premerge.real_deps": _BUILD,
+    "act_premerge.main": "отображение исхода _check в код выхода",
+    "act_app_token._NoRedirect.redirect_request": "транспортная политика; не суждение об объекте",
+    "act_app_token._http": _IO, "act_app_token._jwt": _BUILD, "act_app_token._token": _IO,
+    "act_app_token.main": "CLI вокруг app_identity",
+    "act_barrier._kind": "классификация формы ветки; суждения — _judge",
+    "act_barrier._identity": _BUILD, "act_barrier._head": _IO,
+    "act_barrier.main": "CLI вокруг live_unmarked/invalidate",
+}
+
+#: Перекрёстная проверка: функция с признаком положительного суждения — в JUDGMENT.
+MARKERS = {"APPROVED", "Accepted", "LegacyAccepted", "complete_request"}
 
 
-def _functions(module: str) -> dict[str, ast.FunctionDef]:
-    tree = ast.parse((ROOT / "governance" / f"{module}.py").read_text(encoding="utf-8"))
+def _functions() -> dict[str, ast.FunctionDef]:
     found: dict[str, ast.FunctionDef] = {}
-
-    def visit(node: ast.AST, prefix: str) -> None:
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, ast.ClassDef):
-                visit(child, f"{prefix}{child.name}.")
-            elif isinstance(child, ast.FunctionDef):
-                found[f"{module}.{prefix}{child.name}"] = child
-
-    visit(tree, "")
+    for module in MODULES:
+        tree = ast.parse((ROOT / "governance" / f"{module}.py").read_text(encoding="utf-8"))
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef):
+                found[f"{module}.{node.name}"] = node
+            elif isinstance(node, ast.ClassDef):
+                for item in node.body:
+                    if isinstance(item, ast.FunctionDef):
+                        found[f"{module}.{node.name}.{item.name}"] = item
     return found
+
+
+ROWS = [(site, comp, ref) for site, rows in JUDGMENT.items() for comp, ref in rows]
 
 
 def _test_function(ref: str) -> ast.FunctionDef | None:
@@ -13596,14 +14256,25 @@ def _test_function(ref: str) -> ast.FunctionDef | None:
     file = ROOT / path
     if not file.is_file():
         return None
-    name = name.split("[")[0]
     tree = ast.parse(file.read_text(encoding="utf-8"))
-    return next((n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name),
-                None)
+    return next((n for n in tree.body if isinstance(n, ast.FunctionDef)
+                 and n.name == name.split("[")[0]), None)
 
 
-@pytest.mark.parametrize("site,component,ref", TABLE,
-                         ids=[f"{s}:{c}" for s, c, _r in TABLE])
+def test_every_function_classified_exactly_once() -> None:
+    functions = set(_functions())
+    judged, plain = set(JUDGMENT), set(NOT_JUDGMENT)
+    assert sorted(functions - judged - plain) == [], "функции вне реестров"
+    assert sorted(judged & plain) == [], "функции в обоих реестрах"
+    assert sorted((judged | plain) - functions) == [], "реестр называет исчезнувшие функции"
+
+
+def test_every_judgment_has_rows_and_every_exemption_a_reason() -> None:
+    assert [s for s, rows in JUDGMENT.items() if not rows] == []
+    assert [s for s, why in NOT_JUDGMENT.items() if not why.strip()] == []
+
+
+@pytest.mark.parametrize("site,component,ref", ROWS, ids=[f"{s}:{c}" for s, c, _r in ROWS])
 def test_every_row_has_a_negative_twin(site: str, component: str, ref: str) -> None:
     fn = _test_function(ref)
     assert fn is not None, f"{site} × {component}: теста {ref} нет"
@@ -13621,17 +14292,12 @@ def test_every_row_has_a_negative_twin(site: str, component: str, ref: str) -> N
         assert any(param in ids for ids in literal_ids), f"{ref}: такого id нет"
 
 
-def test_every_positive_site_is_in_table() -> None:
-    sites = {s for s, _c, _r in TABLE}
-    functions = {k: v for m in MODULES for k, v in _functions(m).items()}
-    missing_code = sorted(s for s in sites if s not in functions)
-    assert missing_code == [], f"места таблицы без кода (переименованы?): {missing_code}"
+def test_markers_imply_judgment() -> None:
     marked = sorted(
-        name for name, fn in functions.items()
-        if not name.endswith(".__init__")
-        and {getattr(n, "id", getattr(n, "attr", None)) for n in ast.walk(fn)} & MARKERS
+        name for name, fn in _functions().items()
+        if {getattr(n, "id", getattr(n, "attr", None)) for n in ast.walk(fn)} & MARKERS
     )
-    assert [m for m in marked if m not in sites] == []
+    assert [m for m in marked if m not in JUDGMENT] == []
 ```
 
 - [ ] **Step 2: Run** `uv run pytest tests/test_act_barrier.py tests/test_act_identity_table.py -v`
