@@ -83,6 +83,12 @@ function = "_graphql_repository"
 count = 1
 reason = "`gh api graphql` с собранными аргументами (сам authority-root)"
 
+[[site]]
+module = "governance/act_journal_wire.py"
+function = "_publish"
+count = 1
+reason = "узкий клиент журнала периметра обвязки мержа: только `sudo -n -u df-publisher …/df-publish <операция>` (argv сверяется; сам authority-root)"
+
 # Динамическая загрузка кода вне ЗЦ (правило п.3 инварианта): `importlib`,
 # `ctypes`, `multiprocessing`, `__import__`/`getattr` по `subprocess`/`os`.
 # Правило НЕ покрывает `exec`/`eval`/`compile`/`runpy` — названо, а не
