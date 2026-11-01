@@ -17,7 +17,8 @@ steward), пинованным набором политик (`approval-policy` 
 `governance`) — общий читатель фактов; pytest; ruff; pyrefly.
 
 **Spec:** `docs/superpowers/specs/2026-10-12-approval-act-review-design.md` (rev 14, подписана
-владельцем 2026-10-12; rev 15 — уточнения по решениям владельца 13.10). План спорит со спекой, а не заменяет её: исполнитель читает обе.
+владельцем 2026-10-12; rev 15 — уточнения по решениям владельца 13.10; rev 18 — решение владельца
+С-1, 01.11: read-only токен истории, §6.2). План спорит со спекой, а не заменяет её: исполнитель читает обе.
 
 ## Global Constraints
 
@@ -110,7 +111,8 @@ API → ревью обновлённого плана → реализация.
 транспорта; `load_source()` выводится из контура решений в Task 12a (тест на отсутствие вызова
 из пути решения). Детализация части B на воротах учитывает эти изменения, а также спеку B
 (`2026-10-13-df-installer-design.md`):
-- в v1 оба источника доверия **публичны**, чтение содержимого без credentials; App-читателя нет;
+- в v1 оба источника доверия **публичны**, чтение содержимого без credentials; App-читателя нет
+  (С-1, 01.11, спека rev 18 §6.2: либо read-only токеном истории из привязки — Task 11c);
 - самоотчёт — каждым процессом по credentials, которые он держит (спека B §6.1): `df-exec` —
   токен machine user на **обоих** репо доверия; издатель — установки App продукта;
 - **два развёртывания** (спека B §5.4): во флоте владельца до спеки B действует Task 15a —
@@ -147,7 +149,7 @@ API → ревью обновлённого плана → реализация.
 | A — чистое ядро | 1–10, 5a | ничего (steward только `classify_actor`, уже в пине) | PR devtools #1 (authority-root → человек) |
 | A' — CLI журнала | 10a | Часть A влита | PR devtools (authority-root → человек) |
 | H — шаги человека | H1–H2 | 10a влита | PR в `approval-policy`, репо `df-trust` + привязка `/etc/df/trust.toml` |
-| B — интеграция узла | 11, 11a, 11b, 12, 12a, 14, 13, 13a, 15, 15a, 16 (порядок исполнения — ревизия 31.10) | **M0 steward** выпущен (v0.2.0, `68f46a9`, 31.10); H1–H2 | PR devtools #2 |
+| B — интеграция узла | 11, 11a, 11b, 12, 12a, 14, 11c, 13, 13a, 15, 15a, 16 (порядок исполнения — ревизия 31.10; 11c — решение владельца С-1, 01.11) | **M0 steward** выпущен (v0.2.0, `68f46a9`, 31.10); H1–H2 | PR devtools #2 |
 | C — путь брифа | 17 | **M2 discovery** | PR devtools #3 |
 | D — живая приёмка M3 | 18 | B, C | evidence в devtools |
 | E — дефолт M4 | 19 | D пройдена | PR devtools #4 |
@@ -263,7 +265,11 @@ def run_vector(vector: Mapping) -> VectorOutcome      # VectorOutcome(problems, 
 история и активация (`read_policy_history`, `read_activation`) — только REST и **обязаны**
 читаться без credentials. `GhTransport` без токена отдаёт `Response(status=None)` →
 `Unavailable: transport`, поэтому devtools реализует собственный анонимный REST-транспорт
-(`governance/act_anon.py`, Task 11b). Любое исключение из вызова библиотеки — «факт не
+(`governance/act_anon.py`, Task 11b). **С-1 (01.11, спека rev 18 §6.2):** тот же транспорт с
+read-only токеном истории из защищённой привязки (Task 11c); библиотека credentials не
+проверяет, а буква инструкции steward («обязаны работать без credentials», «токен потребителю
+не предлагается») выведена из прежней §6.2 и устарела — inbox-issue steward#232 (раздел
+«Решение владельца 01.11 (С-1)»). Любое исключение из вызова библиотеки — «факт не
 установлен», как `Unavailable`, никогда не разрешение (инструкция, «Транспорт»; адаптер ловит
 `Exception` на каждой границе вызова).
 
@@ -282,7 +288,7 @@ def run_vector(vector: Mapping) -> VectorOutcome      # VectorOutcome(problems, 
 | `effective_reviews` → `Unavailable` на неканоничном `t` | `ValueError` (О8) | адаптер форматирует `t` из `Clock.t` (`parse_ts` уже нормализовал) и всё равно ловит исключение → `Unavailable` |
 | форма `merged_by_login` не задана | GraphQL-форма без `[bot]` (О9) | без изменений в ядре: `act_policy.classify` и `same_login` уже равняют `slug[bot]` ≡ `slug` (Review Focus 2); фабрика `tests/act_check_cases.py` переходит на `"df-reviewer"` |
 | «`v3.GhTransport(...)` or equivalent» | `GhTransport(gh_config_dir=None, *, timeout=60)` (О10) | Task 11a `act_facts.gh_transport(path)`; профиль — `~/.config/review` (`REVIEW_GH_CONFIG_DIR`) |
-| история по **закреплённой** ветке | ветка обязана быть веткой по умолчанию источника, иначе `branch_not_default` (О11) | `APPROVAL_POLICY_BRANCH` в `df-trust/source.env` обязан равняться default branch `approval-policy` (fail-closed при смене); df-trust читает своя функция по закреплённой ветке (спека §6.1 п. 1 «не следует за сменой default branch») — steward туда не вызывается. Примечание к H1/H2 |
+| история по **закреплённой** ветке | ветка обязана быть веткой по умолчанию источника, иначе `branch_not_default` (О11) | `APPROVAL_POLICY_BRANCH` в `df-trust/source.env` обязан равняться default branch `approval-policy` (fail-closed при смене; с rev 18 — требование спеки §6.1 п. 1, решение владельца С-2); df-trust читает своя функция по закреплённой ветке (спека §6.1 п. 1 «не следует за сменой default branch») — steward туда не вызывается. Примечание к H1/H2 |
 | — | О12 снято в r2 | — |
 | этап отказа по `previous_state`/`submitted_at`/`DISMISSED` без события не задан | отказ на **чтении**; `effective_reviews` повторяет проверки (О13) | Task 12: фабрика контекста обязана давать целые факты — отозванное ревью в состоянии `DISMISSED` (иначе `malformed` в обоих порядках и вместо `Ambiguous` получился бы `Unavailable`) |
 | гейты без нового параметра работают как прежде | `act_mode` обязателен, ломающее (О14) | **Task 11 в том же коммите, что пин**: все вызовы `gate-check` и `collect_bundle` получают явный `legacy`; Task 14 заменяет его результатом admission продукта + провайдером |
@@ -2862,7 +2868,8 @@ git commit -m "feat(act): локальная настройка установк
   корневой коммит (якорь-корень дал бы нарушение формы истории и событие периметра на первом же
   решении). Цепочка `anchor…HEAD` от merge-коммита H1 корень не включает;
 - `APPROVAL_POLICY_BRANCH` в `df-trust/source.env` обязан совпадать с веткой по умолчанию
-  `approval-policy` (О11: иначе каждое чтение истории — `Unavailable: branch_not_default`);
+  `approval-policy` (О11: иначе каждое чтение истории — `Unavailable: branch_not_default`;
+  с rev 18 — требование спеки §6.1 п. 1, решение владельца С-2);
 - привязка H2 п. 4 — формат `df/trust/v1` установщика (`schema`, `host`,
   `df_trust_repository_id`, `df_trust_full_name`, `df_trust_branch`,
   `approval_policy_repository_id`, `transport = "public"`); её разбирает и `act_trust` (Р-6).
@@ -2970,7 +2977,8 @@ steward#211). Этот коммит сверяет «Интерфейс M0» с 
 не находит неопределённых имён; длина строк приводится `ruff format` при реализации (после
 форматирования остаются единичные строковые литералы длиннее 88 — их переносит исполнитель).
 
-**Порядок исполнения части B:** 11 → 11a → 11b → 12 → 12a → 14 → 13 → 13a → 15 → 15a → 16. Все
+**Порядок исполнения части B:** 11 → 11a → 11b → 12 → 12a → 14 → 11c → 13 → 13a → 15 → 15a → 16
+(11c — решение владельца С-1, 01.11: сразу после Task 14, чей `real_deps` она меняет). Все
 задачи — один PR devtools #2 (authority-root, мерж человеком); каждый шаг коммита держит полный
 набор зелёным (`uv run pytest -q` и `uv run --group governance pytest -q` c
 `GOVERNANCE_REQUIRED=1`).
@@ -2980,8 +2988,8 @@ steward#211). Этот коммит сверяет «Интерфейс M0» с 
 | # | Решение | Почему | Цена, если неверно |
 |---|---|---|---|
 | Р-1 | **снято ревизией b1** (B1-5): спека буквально — режим по истории `ACT_MODE` (§6.1, §10); нет привязки — режим не установлен (`Unavailable`), не legacy | — | — |
-| Р-2 | Читатель снимка `df-trust` — свой (REST анонимно: `repositories/{id}` → имя, голова закреплённой ветки, first-parent обход, версии `epochs.yaml` по `contents?ref=`); имя репо обязано совпасть с `df_trust_full_name` привязки | steward читает только `approval-policy` и требует default branch (О11), а спека §6.1 п. 1 запрещает следовать за default branch `df-trust` | переименование `df-trust` даёт `Unavailable` до правки привязки человеком (консервативно) |
-| Р-3 | Кэш анонимных ответов — только в памяти процесса и только для путей, неизменных по SHA (`commits/{sha}`, `git/trees/{sha}`, `git/blobs/{oid}`, `contents/…?ref={sha}`) | диск пишет агент того же пользователя: подменённый ответ коммита (родители) скрыл бы прямой push, а проверить содержимое коммита по SHA из REST нельзя | при пределе 60 анонимных запросов/ч несколько решений в час → `Unavailable: http`; см. вопрос к спеке С-1 |
+| Р-2 | Читатель снимка `df-trust` — свой (REST транспортом источников доверия в одном из двух режимов, выбор — защищённой привязкой `/etc/df/trust.toml`: ключа `history_gh_config_dir` нет — анонимно (`AnonTransport()`), ключ есть — read-only токеном истории профиля из этого ключа (`AnonTransport(token=…)`), токен не получен — `Unavailable` без единого запроса и без анонимного чтения; транспорт строит только `load_trust` фабрикой `history_transport` из привязки, извне он не принимается; Task 11c, спека rev 18 §6.2; чтения: `repositories/{id}` → имя, голова закреплённой ветки, first-parent обход, версии `epochs.yaml` по `contents?ref=`); имя репо обязано совпасть с `df_trust_full_name` привязки | steward читает только `approval-policy` и требует default branch (О11), а спека §6.1 п. 1 запрещает следовать за default branch `df-trust` | переименование `df-trust` даёт `Unavailable` до правки привязки человеком (консервативно) |
+| Р-3 | Кэш анонимных ответов — только в памяти процесса и только для путей, неизменных по SHA (`commits/{sha}`, `git/trees/{sha}`, `git/blobs/{oid}`, `contents/…?ref={sha}`) | диск пишет агент того же пользователя: подменённый ответ коммита (родители) скрыл бы прямой push, а проверить содержимое коммита по SHA из REST нельзя | без токена истории: при пределе 60 анонимных запросов/ч несколько решений в час → `Unavailable: http`. **С-1 решён владельцем 01.11** (раздел «Решение владельца 01.11 (С-1)»): с ключом привязки — read-only токен истории, 5000 запросов/ч; правило кэша то же (Task 11c) |
 | Р-4 | **снято ревизией b1** (B1-4): `HistoryViolation` в диапазоне любой эпохи — событие периметра и отказ (§6.3); от возраста диапазона не зависит | — | — |
 | Р-5 | Журнал периметра во флоте владельца — режим разработки: то же хранилище `df.publisher.perimeter` в `$XDG_STATE_HOME/darkfactory/perimeter/root/var/lib/df/perimeter/`; в установке `df` (есть `/opt/df/libexec/df-publish`) — клиент издателя (`df.perimeter_client`); без контекста прогона `df` — `Unavailable`. В событии — настоящий `approval_policy_repository_id` привязки (B1-18) | спека §6.3: «в режиме разработки … в том же формате»; формат — схема этапа 2a; путь `Layout` установщика не настраивается под произвольный каталог | в установке `df` до подключения источника эпох (этап 3 установщика, решение владельца 26.10) все решения — `Unavailable: no_binding`; часть B работает во флоте владельца |
 | Р-6 | Свой строгий разбор `trust.toml` в `act_trust` (те же ключи, `O_NOFOLLOW`, владелец root, не пишется группой/всеми); тест сверяет исход с `df.stage2_config.parse_trust` на тех же фикстурах | `act_trust` входит в цепочку `act_premerge` (обвязка мержа), а `df.stage2_config` тянет полдюжины модулей `df/`, не входящих в `_HARNESS_PREFIXES` | два разборщика одного файла; расхождение ловит тест равенства, а не ревью |
@@ -2999,9 +3007,13 @@ steward#211). Этот коммит сверяет «Интерфейс M0» с 
 
 **Вопросы к спеке** (план не поглощает; список — в отчёте ревизии): С-1 — анонимный REST
 (спека §6.2, 60 запросов/ч на IP) против чтения истории обоих источников доверия перед **каждым**
-решением: по оценке 20–40 запросов на решение без кэша между процессами. С-2 — O11 (ветка
+решением: по оценке 20–40 запросов на решение без кэша между процессами; **решено владельцем
+01.11** — read-only токен истории (спека rev 18 §6.2; раздел «Решение владельца 01.11 (С-1)»,
+Task 11c). С-2 — O11 (ветка
 источника политики обязана быть default branch) — новое ограничение, которого нет в §6.1;
-поглощается как fail-closed предусловие H1/H2, но в спеку его стоит внести. С-3 — §9.1 (а) п. 4
+поглощается как fail-closed предусловие H1/H2, но в спеку его стоит внести; **решено владельцем
+01.11** — внесено в спеку rev 18 §6.1 п. 1 (раздел «Решение владельца 01.11 (С-1)», п. С-2),
+новой задачи нет. С-3 — §9.1 (а) п. 4
 («производный статус из проверенного конверта» в каноническом хеше DAG) требует чтений форджи в
 `_content_anchor`, который сегодня их не делает; **решено владельцем 01.11 (В-1 ниже)**: хеш
 остаётся локальным, проверенный статус спрашивается перед каждым no-op.
@@ -3207,7 +3219,8 @@ error=…)`, «отказ | None», `raise`), но полноту не дока�
 - **(а) Спека буквально** — `_content_anchor` получает проверенный статус `Statuses.of` и
   подставляет его вместо `status` узла `review/v1`. Следствия: доверенный контекст и чтения форджи
   во всех четырёх местах `_content_anchor` (сегодня без форджи), каждое no-op §I5 тратит
-  анонимную квоту (С-1); недоступность форджи — `Unavailable` вместо no-op.
+  анонимную квоту (С-1; после решения 01.11 — квоту токена истории, если он настроен, Task 11c);
+  недоступность форджи — `Unavailable` вместо no-op.
 - **(б) Байты всех файлов `approvals/` воркстрима** (конверты, манифесты, остановки) в манифесте
   хеша. Следствия: без форджи; любое новое поколение, остановка, supersede меняют хеш — no-op не
   скроет изменение допуска; хеш меняется и от байтов, не влияющих на допуск (лишний перегон §I5,
@@ -3612,6 +3625,95 @@ error=…)`, «отказ | None», `raise`), но полноту не дока�
   перед no-op), хотя статус не входит в саму проекцию хеша; §9.1 п. 0a («последний доставленный
   candidate, чей манифест включает узел») при (Б) читается как «последний **принятый**» — правка
   формулировки спеки предложена в отчёте ревизии, план её не решает.
+
+### Решение владельца 01.11 (С-1)
+
+Слова владельца (01.11), дословно:
+
+> «С-1 — да, read-only токен для истории»
+
+> «С-2 — да, добавляй в rev 18»
+
+**С-2** (там же, 01.11): ограничение steward M0 О11 — ветка `approval-policy`, закреплённая
+человеком (`APPROVAL_POLICY_BRANCH` в `df-trust/source.env`), обязана быть default branch репо
+`approval-policy`, иначе `unavailable` — внесено в спеку rev 18 как требование §6.1 п. 1; смена
+default branch останавливает решения до исправления закрепления человеком. Новой задачи нет:
+план уже поглощает О11 fail-closed — `act_facts.history` (Task 11a, `branch_not_default` →
+`Unavailable`), предусловие H1/H2, строка сверки «история по закреплённой ветке» в «Интерфейсе
+M0»; там добавлена ссылка на §6.1. Снимок `df-trust` (Р-2) по-прежнему читается по ветке привязки,
+не по default branch. Ниже — С-1.
+
+Повод — вопрос к спеке С-1 (ревизия 31.10; minor 2 платного ревью #666): история обоих
+источников доверия (`approval-policy` через транспорт steward v3; снимок `df-trust` через
+`act_trust.read_trust_snapshot` — first-parent ≤ `MAX_CHAIN` = 500, ~3 запроса на звено) читается
+анонимным REST (`act_anon.AnonTransport`); анонимная квота GitHub — 60 запросов/ч на IP, одно
+решение — ~20–40+ запросов и растёт с историей `df-trust` → каждое решение `Unavailable: http`
+(fail-closed, но основной путь стоит). Спека — rev 18 §6.2, §9.4, §13. Правила контроллера
+(R1–R9), по которым написана Task 11c:
+
+- **R1 — транспорт.** Чтения истории и содержимого источников доверия — REST с выделенным
+  read-only токеном («токен истории»), тот же протокол и те же гарантии, что у `AnonTransport`
+  (только `GET` относительного пути, без прокси и перенаправлений, память только по SHA,
+  blob-oid в `contents_bytes`, проверки `_REPO`/40-hex). Один путь кода: `AnonTransport(token=…)`.
+  Токен — только в заголовке `Authorization`; не в argv, окружении дочерних процессов,
+  диагностике, ключах памяти, исключениях.
+- **R2 — откуда токен.** Защищённая привязка (`act_trust.load_binding`: root, не пишется
+  группой/всеми) получает необязательный ключ `history_gh_config_dir` — каталог профиля `gh`
+  `history`. Токен — `gh auth token --hostname github.com` под `GH_CONFIG_DIR=<каталог>`,
+  окружение очищено как у `gh_get`; не из `GH_TOKEN`/`GITHUB_TOKEN`/окружения исполнителя.
+  Место запуска проходит правило `allowed_literal_programs` (`gh`) контракта `spawn-sites.toml`
+  (Р-22); тест инварианта остаётся зелёным без правки контракта.
+  Остаточный риск D6-1 (пустой профиль → токен github.com из системного keyring) ограничен R3:
+  самоотчёт идёт тем же значением, что и чтения (получено один раз на решение; один транспорт для всех чтений решения, журнала и STALE), поэтому
+  подставленный токен с правом записи — нарушение, а не обход.
+- **R3 — самоотчёт.** Токен истории — удерживаемый credential: запись `profile:history`
+  создаёт `load_trust` из того же значения токена, что и транспорт (не `act_trust.credentials()`,
+  решение после c1-r6); самоотчёт §6.2 (б) на обоих репо доверия (`push`/`maintain`/
+  `admin` — `false`; нет поля, 404, ошибка → `Unavailable`); право записи — нарушение периметра.
+- **R4 — тип токена.** Fine-grained PAT «public repositories (read-only)» без доступа к
+  репозиториям или classic PAT без scopes; квота 5000 запросов/ч; создаёт человек (ключи и PAT
+  через агента не проходят), шаг человека установщика.
+- **R5 — нет ключа ≠ сломанный ключ.** Ключа нет — анонимный транспорт (v1 без изменений). Ключ
+  есть, но профиля нет / токен не читается / самоотчёт не чист → `Unavailable` с причиной;
+  **тихого возврата к анонимному чтению нет**.
+- **R6 — только публичные.** Токен приватные источники не открывает (§6.2 остаётся); проверки
+  идентичности (`repository_id`, `df_trust_full_name`) не меняются; чтение токеном не доказывает
+  отсутствия прав у других credentials.
+- **R7 — область.** Транспорт истории обслуживает историю и активации `approval-policy`
+  (`act_facts.history`/`activation`), снимок `df-trust` (`read_trust_snapshot`, время якорей,
+  `ForgeEpochs`), ruleset и `allow_rebase_merge`. Чтения продукта и GraphQL фактов PR
+  (`gh_transport` с токеном агента) не меняются.
+- **R8 — сторона установщика** (решение контроллера 01.11): разбор ключа в
+  `df/stage2_config.py` (`parse_trust`: необязательный ключ, только абсолютный путь; схема
+  остаётся `df/trust/v1`, файлы без ключа корректны) — **в Task 11c**; запись ключа
+  `darkfactory setup-trust`, проверка `darkfactory doctor` и шаг человека «создать профиль
+  `history`» — handoff этапу установщика 2b/3 (пункт в `TODO.md`). На хосте со старой версией
+  `df` человек ключ не вписывает (прежний `parse_trust` отвергает незнакомый ключ); сторона акта
+  обязана работать с привязкой без ключа (R5).
+- **R9 — место в плане.** Новая Task 11c, исполняется сразу после Task 14 (до 13): 11 → 11a →
+  11b → 12 → 12a → 14 → **11c** → 13 → 13a → 15 → 15a → 16. Меняет `act_anon`, `act_trust`
+  (ключ привязки, фабрика `history_transport`, `load_trust` строит транспорт сам — решение
+  контроллера после c1-r6), `act_context`, разбор ключа в `df/stage2_config.py` (R8) и
+  `act_status` Task 14; Task 13+ не затронуты (листинги `act_premerge` Task 15 приведены к новым
+  подписям).
+
+**Выборы исполнителя плана внутри R1–R9** (спека и правила молчали; **Р-18, Р-19, Р-22 приняты
+контроллером 01.11**, Р-18 внесён в текст спеки §6.2):
+
+| # | Решение | Почему | Цена, если неверно |
+|---|---|---|---|
+| Р-18 | Самоотчёт `profile:history` идёт **через сам транспорт истории** (`GET repos/{repo}` с тем же `Authorization`), а не `gh api`; `gh_get` для `profile:history` отказывает. Ревью c1-r4/c1-r6 (решения контроллера): `load_trust` сам строит транспорт из привязки, сам создаёт запись самоотчёта `profile:history` из того же значения токена и выполняет её `_history_self_report(transport, snap)` тем же объектом, которым идут все чтения истории; `readers.as_credential` для неё не вызывается никогда | R1 запрещает токен в окружении дочерних процессов, а `gh_get` передаёт токен credential через `GH_TOKEN`; R2 требует то же значение, что у чтений, — транспорт даёт его по построению | второй способ самоотчёта (REST вместо `gh api`); расхождение форм ответа ловит тот же `permissions_refusal` |
+| Р-19 | Неисправный настроенный токен → `history_transport` возвращает `Unavailable(f"токен истории: {причина}")`, `load_trust` отдаёт его до первого запроса (после c1-r6 `RefusedTransport` не нужен: транспорт строит только `load_trust`) | ни один путь чтения не может уйти анонимно — анонимный транспорт при ключе не строится вовсе | нет |
+| Р-23 | **Один транспорт на решение** (C7-01, решение контроллера): журнал периметра перечитывает снимок тем же объектом транспорта, что построил `load_trust`. `read_trust_snapshot(transport, binding)` кладёт транспорт в `TrustSnapshot.transport`; `DevJournal.status/record(snap)` передаёт `snap.transport` в `ForgeEpochs.via(...)`; `ForgeEpochs(binding)` перечитывает `read_trust_snapshot(<этот транспорт>, binding)`, транспорт не строит и токен не читает; повторы `STALE` (до трёх) — тем же транспортом | спека §6.2: транспорт строит вход решения только из привязки; второе чтение токена дало бы неотчитанный credential | нет; `InstalledJournal` и узкий журнал (`act_journal_wire`) снимок в этом процессе не перечитывают (издатель — отдельный процесс со своими чтениями) |
+| Р-20 | Профиль существует, только если `<каталог>/hosts.yml` — файл; иначе `Unavailable` **до** запуска `gh` | R5 («профиля нет» → `Unavailable`); при отсутствующем каталоге `gh auth token` отдал бы токен из keyring (D6-1) | профиль с токеном только в keyring без `hosts.yml` не распознаётся — отказ, не расширение |
+| Р-21 | Значение ключа — абсолютный путь; токен — `[A-Za-z0-9_]+`, иначе `Unavailable` без значения в причине | относительный путь разрешался бы от cwd исполнителя; форма токена исключает управляющие символы в заголовке | токен нового формата GitHub с другими символами даст `Unavailable` до правки формы |
+| Р-22 | Место запуска `gh auth token` проходит правило `allowed_literal_programs` (`gh`) контракта `spawn-sites.toml`, как `gh_get`; поимённой записи нет | `tests/test_author_sandbox_invariant.py::violations` считает только нелитеральные программы: запись `[[site]]` для литерального `gh` дала бы «в перечне 1, найдено 0» — красный тест | место проходит по правилу контракта, а не записью; argv и окружение держит тест Task 11c, `test_spawn_and_dynamic_load_sites_match_the_contract` — зелёный без правки контракта |
+
+**Инструкция steward устарела** (`steward/docs/approval-facts-v3.md:79–86`, «История политики:
+собственный анонимный REST-транспорт», и «Заметки §12» п. 1): «обязаны работать без
+credentials», «токен потребителю не предлагается» выведены из прежней §6.2 devtools. Библиотека
+credentials не проверяет, код steward не меняется; правка текста — у steward, inbox-issue
+**steward#232** (отправлен контроллером).
 ### Task 11: Пин steward v0.2.0, совместимость вызовов gate-check, gate-catalog v3
 
 **Files:**
@@ -4636,6 +4738,10 @@ git commit -m "feat(act): адаптер approval-facts/v3, вендор кон�
 ```
 
 ### Task 11b: Анонимный REST-транспорт `act_anon`
+
+> **С-1 (01.11):** текст задачи — как влита; тот же транспорт получает необязательный read-only
+> токен истории в Task 11c (`AnonTransport(token=…)`, спека rev 18 §6.2). Утверждения ниже «без
+> `Authorization`» верны для транспорта без токена.
 
 **Files:**
 - Create: `governance/act_anon.py`
@@ -6023,13 +6129,14 @@ git commit -m "feat(act): полная проверка доставки на с
    клиент `act_journal_wire`, ревизия b1): `blocked` → `Unavailable`; `STALE` → перечитать снимок и
    повторить (не более трёх снимков).
 3. Самоотчёт **каждого** credential процесса (`credentials`: профиль агента, фактический профиль
-   мержа, `GH_TOKEN`, `GITHUB_TOKEN`; совпадающие — один раз) на **обоих** репо доверия:
+   мержа, `GH_TOKEN`, `GITHUB_TOKEN`; совпадающие — один раз; с Task 11c — и `profile:history`) на **обоих** репо доверия:
    `permissions_refusal` → `Violation` (у любого credential, перекрывает чужие `Unavailable`) →
    событие + `Unavailable`; иначе `Unavailable` → `Unavailable` без события.
 4. Ruleset закреплённой ветки каждого репо доверия: типы правил ⊇ {`deletion`,
    `non_fast_forward`, `pull_request`}, иначе нарушение (с указанием репо); `bypass_actors` не
    читается и вывод «bypass нет» не делается (№33).
-5. `allow_rebase_merge` у `approval-policy` (анонимно): четыре состояния (раздел «Решения
+5. `allow_rebase_merge` у `approval-policy` (анонимно; с Task 11c — токеном истории, если он
+   настроен): четыре состояния (раздел «Решения
    владельца», п. 1); `None`/нет ключа → `Trust.unverified = ("allow_rebase_merge",)`.
 
 `load_anchor_times(t)`: время якоря **каждой** эпохи — `merged_at` из `read_activation` (№19);
@@ -8557,6 +8664,1109 @@ git add governance/act_trust.py governance/act_journal.py governance/act_context
   tests/test_act_identity.py tests/test_act_journal_wire.py tests/test_act_perimeter.py
 git commit -m "feat(act): доверенный контекст — снимок df-trust, журнал периметра, диапазоны эпох (спека A rev 16 §6)"
 ```
+
+### Task 11c: Read-only токен истории
+
+Исполняется **после Task 14, до Task 13** (решение владельца С-1, 01.11; «Порядок исполнения
+части B»): меняет `act_status` Task 14 (`real_deps`, `live_policy`) и `act_context` Task 12a;
+листинги `act_premerge` Task 15 уже написаны под новые подписи. Основание — спека rev 18 §6.2 и
+раздел «Решение владельца 01.11 (С-1)» (R1–R9, Р-18…Р-23).
+
+**Механизм — вход решения строит транспорт источников доверия сам** (решение контроллера после
+ревью c1-r6: четыре круга подряд находили дыры в проверке подключения, собранного снаружи, —
+C3-01, C4-01, C5-01/02, C6-01/02; поверхность убрана, а не проверяется). `act_trust.load_trust`
+не принимает транспорт источников доверия ни в каком виде: он строит его из защищённой привязки
+единственной фабрикой `history_transport`, сам создаёт запись самоотчёта `profile:history` из того
+же значения токена и выполняет самоотчёт тем же объектом транспорта. Внедряемы только
+низкоуровневые швы ввода-вывода: `open_url` (сеть) и `token_source` (процесс `gh auth token`).
+`Readers` транспорта больше не несёт — только `as_credential` для самоотчёта прочих credentials.
+
+**Files:**
+- Modify: `governance/act_anon.py` (`AnonTransport(token=…)`, маскировка токена в тексте сбоя
+  доставки)
+- Modify: `governance/act_trust.py` (ключ привязки `history_gh_config_dir`, `history_token`,
+  `history_transport`; `load_trust(..., open_url=None, token_source=None)` строит транспорт сам,
+  `_creds_refusal`, `_history_self_report`; `TrustSnapshot.transport`, свойство `Trust.transport`;
+  `Readers(as_credential)` без `anon`; `default_readers()` → `Readers(gh_get)`;
+  `load_anchor_times(trust, t)`, `load_ranges(trust, anchor_at, t, journal)` — транспорт из
+  `trust`; `Credential.token` без `repr`; `transport_fact`; отказ `gh_get` для `profile:history`)
+- Modify: `governance/act_context.py` (`delivery_verdict`: `load_anchor_times(trust, t)`,
+  `load_ranges(trust, …)` вместо `readers.anon`)
+- Modify: `governance/act_journal.py` (Р-23, C7-01: `ForgeEpochs(binding)` + `via(transport)`
+  вместо `reread`; `DevJournal(state_home, run_id, binding, policy_repository_id)` передаёт
+  `snap.transport` в `ForgeEpochs.via` в `status`/`record`; `journal_for(..., binding=…)` вместо
+  `reread=…`)
+- Modify: `governance/act_status.py` (Task 14: `real_deps` — `journal_for(..., binding=binding)`;
+  `live_policy` — новые подписи `load_anchor_times`/`load_ranges`)
+- Modify: `governance/act_facts.py` (только докстринги модуля `:12–13` и `history` `:171`:
+  «анонимный» → «транспорт источников доверия, который строит `load_trust` (Task 11c)»)
+- Modify: `df/stage2_config.py` (R8, решение контроллера 01.11: `TrustBinding.history_gh_config_dir`,
+  `parse_trust` принимает необязательный ключ; схема `df/trust/v1` не меняется)
+- Modify: `TODO.md` (пункт handoff R8 — см. «Вне задачи»)
+- Не меняется: `contracts/author-sandbox/v1/spawn-sites.toml` — место `gh auth token` проходит
+  правило `allowed_literal_programs` (Р-22); `tests/test_author_sandbox_invariant.py` остаётся
+  зелёным без правки
+- Test: `tests/test_act_anon.py`, `tests/test_act_trust.py`, `tests/test_act_context.py`,
+  `tests/test_act_journal.py` (миграция `ForgeEpochs`/`journal_for` на `binding`),
+  `tests/df/test_stage2_config.py`; Create: `tests/test_act_wiring.py` (детектор построения
+  транспорта вне фабрики и реестр известных мест сборки `WIRING_SITES`)
+
+**Interfaces:**
+- Consumes: 11b (`AnonTransport`, `contents_bytes`, `_HEADERS`, `_default_open`), 12a (`Binding`,
+  `parse_binding`, `_BINDING_KEYS`, `load_binding`, `Credential`, `credentials`, `gh_get`,
+  `_GH_ENV_DROPPED`, `SUPPORTED_HOST`, `Readers`, `default_readers`, `_self_report`, `load_trust`,
+  `read_trust_snapshot`, `load_anchor_times`, `load_ranges`, `act_context.delivery_verdict`),
+  14 (`act_status.real_deps`, `live_policy`, `Deps`); этап 1 установщика (`df.config._check_keys`,
+  `_need`, `ConfigError`).
+- Produces (`df.stage2_config`): `TrustBinding(..., transport, history_gh_config_dir: str | None =
+  None)` — `__post_init__`: `None` или строка с `PurePosixPath(value).is_absolute()`, иначе
+  `ConfigError("history_gh_config_dir: must be an absolute path")`; `parse_trust` —
+  `_check_keys(data, _TRUST_KEYS, {"history_gh_config_dir"}, "trust.toml")`. Писателя
+  `trust.toml` в `df/` нет — правка только разбора.
+- Produces (`act_anon`):
+  `AnonTransport(*, open_url: Callable[..., Any] | None = None, timeout: float = TIMEOUT,
+  token: str | None = None)` — с токеном каждый запрос несёт `Authorization: Bearer <token>`,
+  без токена заголовка нет; остальное (только `GET` относительного пути, без перенаправлений и
+  прокси, `MAX_BODY`, память `_IMMUTABLE`, `sent`) — как в 11b; `Response.error` токена не
+  содержит (`***`).
+- Produces (`act_trust`):
+  `HISTORY_KEY = "history_gh_config_dir"`, `HISTORY_LABEL = "profile:history"`;
+  `HISTORY_NOT_WIRED = "самоотчёт: credential не из закрытого набора credentials()"`;
+  `Binding(host, df_trust_repository_id, df_trust_full_name, df_trust_branch,
+  approval_policy_repository_id, transport, history_gh_config_dir: Path | None = None)`;
+  `parse_binding(text) -> Binding` — `HISTORY_KEY` необязателен, если есть — абсолютный путь
+  (`TrustError`); `load_binding` — без изменений;
+  `history_token(config_dir: Path) -> str | Unavailable`;
+  `history_transport(binding: Binding, *, open_url: Callable[..., Any] | None = None,
+  token_source: Callable[[Path], str | Unavailable] | None = None) -> AnonTransport |
+  Unavailable` — **единственное** место построения транспорта источников доверия;
+  `TrustSnapshot(root, full_name, source, epochs, transport=None)` — `transport` объявлен
+  `field(default=None, repr=False, compare=False)`; его задаёт `read_trust_snapshot(transport,
+  binding)` (транспорт, которым снимок прочитан); `Trust.transport` — свойство
+  `self.snapshot.transport` (отдельного поля нет);
+  `load_trust(readers, binding, journal, *, creds, open_url=None, token_source=None) -> Trust |
+  Unavailable`;
+  `load_anchor_times(trust, t)`, `load_ranges(trust, anchor_at, t, journal)` — читают
+  `trust.transport` (параметр `anon` удалён);
+  `Readers(as_credential: Callable[[Credential, str], Fact[object]])`; `default_readers() ->
+  Readers` (`Readers(gh_get)`);
+  `Credential(label, gh_config_dir=None, token=None)` — `token` объявлен `field(default=None,
+  repr=False)`;
+  `transport_fact(transport, cred: Credential, path: str) -> Fact[object]`;
+  `credentials(env, *, agent_dir, merge_dir=None)` — без изменений (токена истории в нём нет).
+- Produces (`act_journal`): `ForgeEpochs(binding: Binding)` с `via(transport) -> None` и
+  `head(root)` — `read_trust_snapshot(<транспорт из via>, binding)`; без `via` —
+  `store.Unavailable("транспорт решения не передан")`; `DevJournal(state_home, run_id, binding,
+  policy_repository_id)`; `journal_for(*, state_home, run_id, binding, env,
+  policy_repository_id)`. Протокол `Journal` (`status`, `record`) не меняется.
+
+Правила (R1–R7). `history_transport`: ключа нет → свежий `AnonTransport(open_url=open_url)`,
+`token_source` не вызывается; ключ `D` → `(token_source or history_token)(D)` **ровно один раз**:
+`Unavailable` → `Unavailable(f"токен истории: {причина}")` без единого запроса (R5, Р-19 — сбой
+токена виден в причине); строка → `AnonTransport(open_url=open_url, token=<значение>)`.
+`load_trust` по порядку: «нет credentials» (как в 12a) → `_creds_refusal(creds)` → транспорт
+`history_transport(binding, …)` → снимок и журнал (`read_trust_snapshot(transport, …)`) →
+`_self_report(readers, creds, snap)` (только переданные credentials, `readers.as_credential`) →
+при ключе — `_history_self_report(transport, snap)` → `_rulesets(transport, …)` →
+`_rebase(transport, …)` → `Trust(snap, unverified)`. Время якорей, диапазоны и наборы
+политик читают `trust.transport` (R7) — другого транспорта у решения нет. Значение токена не
+входит ни в одну причину `Unavailable`, ни в `Fact.detail`, ни в `repr`.
+
+- **Запись самоотчёта `profile:history` создаётся только внутри `load_trust`** — из того же
+  значения токена, которым построен транспорт: самоотчёт выполняет `_history_self_report(transport,
+  snap)` — `GET repos/{approval-policy}` и `GET repos/{df-trust}` **этим объектом**
+  (`transport_fact` → `permissions_refusal`; нарушение — событие и отказ, иначе `Unavailable` с
+  меткой `profile:history` и репо). `readers.as_credential` для неё не вызывается (Р-18).
+- **Закрытый набор форм credentials** (`_creds_refusal`, единственная проверка формы, до
+  ввода-вывода): допустимы ровно формы `credentials()` — `profile:agent`, `profile:merge` (есть
+  `gh_config_dir`, нет `token`), `env:GH_TOKEN`, `env:GITHUB_TOKEN` (есть `token`, нет
+  `gh_config_dir`). Любой иной credential — с меткой `profile:history`, с неизвестной меткой, с
+  токеном под меткой профиля — → `Unavailable(HISTORY_NOT_WIRED)`, ни одного запроса и ни одного
+  вызова `token_source`.
+- **Р-23 — один транспорт на решение** (C7-01). Журнал периметра перечитывает голову
+  `df-trust` во время `journal.status`/`record` внутри `load_trust` (и при повторах `STALE`, до
+  трёх снимков). Он делает это **тем же объектом транспорта**: снимок несёт транспорт
+  (`TrustSnapshot.transport`), `DevJournal` передаёт его `ForgeEpochs.via`, а `ForgeEpochs`
+  хранит только привязку. Ни журнал, ни повтор снимка транспорт не строят и `token_source` не
+  вызывают: на решение — ровно одно чтение токена.
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_act_anon.py`. Тесты 11b, держащие
+  гарантии транспорта, получают параметр `kw` (`KW` ниже) и строят транспорт
+  `AnonTransport(open_url=…, **kw)` (`_anon(routes, **kw)`): `test_redirect_is_not_followed`,
+  `test_oversized_response_refused`, `test_only_relative_get`, `test_link_and_query_passed_through`,
+  `test_memo_only_for_sha_addressed_paths`, `test_memo_negatives`, `test_memo_returns_copies`,
+  `test_library_reads_activation_through_it`, `test_contents_bytes_bound_to_tree_blob_oid`,
+  `test_contents_bytes_checked_against_blob_oid`, `test_absent_only_from_full_tree`,
+  `test_contents_404_with_path_in_tree_is_unavailable`, `test_truncated_tree_is_unavailable_not_absent`,
+  `test_unreadable_commit_is_unavailable`, `test_bad_repo_slug_sends_nothing`,
+  `test_contents_bytes_rejects_non_sha_ref`, `test_real_opener_does_not_follow_redirects`,
+  `test_env_proxy_is_ignored`. `_Redirector` дополнительно пишет путь каждого запроса в
+  `_Redirector.seen` (очищается в тесте): `test_real_opener_does_not_follow_redirects[token-…]`
+  утверждает `_Redirector.seen == [f"/repos/o/r/{code}"]` — запрос с заголовком не повторён на
+  `Location`. `test_no_credentials_ever` остаётся без параметра (анонимная ветка). Новые тесты:
+
+```python
+TOKEN = "ghp_History0token"
+KW = pytest.mark.parametrize("kw", [{}, {"token": TOKEN}], ids=["anon", "token"])
+COMMIT = "repos/o/r/commits/" + "c" * 40
+
+
+@pytest.mark.parametrize(
+    ("kw", "auth"), [({}, None), ({"token": TOKEN}, f"Bearer {TOKEN}")], ids=["anon", "token"]
+)
+def test_token_only_in_authorization_header(kw: dict, auth: str | None) -> None:
+    """R1: токен — только заголовок `Authorization`; без токена заголовка нет."""
+    fake = _Fake({act_anon.API + "repos/o/r": (200, {"id": 1}, None)})
+    act_anon.AnonTransport(open_url=fake, **kw).send(_get("repos/o/r"))
+    headers = fake.headers[0]
+    assert headers.get("Authorization") == auth
+    assert all(TOKEN not in v for k, v in headers.items() if k != "Authorization")
+
+
+def test_token_never_in_error_sent_or_memo() -> None:
+    """R1: текст сбоя доставки, журнал `sent`, ключи памяти и `repr` — без токена."""
+
+    def leaky(req, timeout):  # noqa: ANN001
+        raise OSError(f"proxy said: {dict(req.header_items())}")
+
+    resp = act_anon.AnonTransport(open_url=leaky, token=TOKEN).send(_get(COMMIT))
+    assert resp.status is None and TOKEN not in resp.error and "***" in resp.error
+    t = act_anon.AnonTransport(
+        open_url=_Fake({act_anon.API + COMMIT: (200, {}, None)}), token=TOKEN
+    )
+    t.send(_get(COMMIT))
+    assert t.sent == [COMMIT] and list(t._memo) == [COMMIT]
+    assert TOKEN not in repr(t)
+```
+
+`tests/test_act_trust.py` (импорты дополняются `io`, `json`, `subprocess`, `from dataclasses
+import replace`, `from types import SimpleNamespace`, `from email.message import Message`, `act_anon` в импорт `governance`;
+`DF_TOKEN_ENV` — пять имён `_GH_ENV_DROPPED`). **Миграция тестов 12a** на новые подписи (без
+изменения их утверждений): стенд `_Wire` (ниже) встаёт рядом с `Anon`; помощник `load` —
+`act_trust.load_trust(act_trust.Readers(as_credential(answers or {})), binding(), journal or
+Journal(), creds=creds, open_url=_Wire(routes))`; `test_missing_bypass_field_not_read`,
+`test_issue_signal_not_part_of_protocol`, `test_load_trust_without_credentials_unavailable` —
+`wire = _Wire(...)`, `open_url=wire`, пути из `[p for p, _ in wire.calls]` вместо `anon.sent`;
+вызовы `load_anchor_times(anon, trust, t)` / `load_ranges(anon, trust, …)` →
+`load_anchor_times(_via(trust, anon), t)` / `load_ranges(_via(trust, anon), …)`, где
+`_via(trust, anon) = replace(trust, snapshot=replace(trust.snapshot, transport=anon))`.
+`tests/test_act_journal.py`: `ForgeEpochs(Head(...))` → `ForgeEpochs(binding())` с
+`monkeypatch.setattr(act_journal, "read_trust_snapshot", lambda t, b: …)` и `via(object())`;
+`journal_for(..., reread=…)` → `journal_for(..., binding=binding())`; новый
+`test_forge_epochs_without_transport_unavailable` (без `via` → `store.Unavailable("транспорт
+решения не передан")`, `read_trust_snapshot` не вызывается). `tests/test_act_context.py:73,165`: `act_trust.Readers(lambda c, p:
+None)`. Новые тесты:
+
+```python
+TOKEN = "ghp_History0token"
+HISTORY_TOML = BINDING_TOML + 'history_gh_config_dir = "/etc/df/gh-history"\n'
+DF_TOKEN_ENV = (
+    "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"
+)
+
+
+class _Done:
+    def __init__(self, rc: int, out: str = "", err: str = "") -> None:
+        self.returncode, self.stdout, self.stderr = rc, out, err
+
+
+class _Answer(io.BytesIO):
+    def __init__(self, status: int, body: object) -> None:
+        super().__init__(json.dumps(body).encode())
+        self.status, self.headers = status, Message()
+
+
+class _Wire:
+    """`open_url` настоящего `AnonTransport` поверх маршрутов `trust_routes`;
+    журнал `(путь, заголовки)` каждого ушедшего запроса."""
+
+    def __init__(self, routes: dict) -> None:
+        self.routes, self.calls = routes, []
+
+    def __call__(self, req, timeout: float):  # noqa: ANN001
+        path = req.full_url.removeprefix(act_anon.API)
+        self.calls.append((path, dict(req.header_items())))
+        return _Answer(*self.routes[path])
+
+
+class _Tokens:
+    """`token_source`: журнал вызовов; значения — по очереди (последнее повторяется)."""
+
+    def __init__(self, *values: object) -> None:
+        self.values, self.calls = list(values), []
+
+    def __call__(self, config_dir: Path) -> object:
+        self.calls.append(config_dir)
+        return self.values[min(len(self.calls), len(self.values)) - 1]
+
+
+def _profile(tmp_path: Path) -> Path:
+    profile = tmp_path / "gh-history"
+    profile.mkdir()
+    (profile / "hosts.yml").write_text("github.com:\n  user: reader\n")
+    return profile
+
+
+def _with_history(tmp_path: Path) -> act_trust.Binding:
+    return replace(binding(), history_gh_config_dir=tmp_path / "gh-history")
+
+
+def _self_reported(routes: dict) -> dict:
+    """Ответы `GET repos/{repo}` с `permissions` — для самоотчёта транспортом (Р-18)."""
+    routes[f"repos/{DT}"] = (200, {"full_name": DT, **_perms()})
+    routes[f"repos/{AP}"] = (200, {**routes[f"repos/{AP}"][1], **_perms()})
+    return routes
+
+
+def _decide(b, routes_or_wire, *, creds=(AGENT,), tokens=None, readers=None, journal=None):
+    """`load_trust` только через швы `open_url`/`token_source`."""
+    wire = routes_or_wire if isinstance(routes_or_wire, _Wire) else _Wire(routes_or_wire)
+    got = act_trust.load_trust(
+        readers or act_trust.Readers(as_credential({})), b, journal or Journal(),
+        creds=creds, open_url=wire, token_source=tokens or _Tokens(TOKEN),
+    )
+    return got, wire
+
+
+def test_binding_history_key_optional() -> None:
+    assert binding().history_gh_config_dir is None
+    got = act_trust.parse_binding(HISTORY_TOML)
+    assert got.history_gh_config_dir == Path("/etc/df/gh-history")
+
+
+@pytest.mark.parametrize("value", ['""', '"gh-history"', "1"], ids=["empty", "relative", "int"])
+def test_binding_history_key_must_be_absolute_path(value: str) -> None:
+    with pytest.raises(act_trust.TrustError, match="history_gh_config_dir — абсолютный путь"):
+        act_trust.parse_binding(BINDING_TOML + f"history_gh_config_dir = {value}\n")
+
+
+def test_binding_history_key_agrees_with_installer() -> None:
+    """Р-6 + R8: оба разборщика принимают ключ с тем же значением и отвергают те же
+    недопустимые значения (абсолютный путь — и только он)."""
+    from df.config import ConfigError
+    from df.stage2_config import parse_trust
+
+    ours, theirs = act_trust.parse_binding(HISTORY_TOML), parse_trust(HISTORY_TOML)
+    assert ours.history_gh_config_dir == Path(theirs.history_gh_config_dir)
+    assert parse_trust(BINDING_TOML).history_gh_config_dir is None
+    for value in ('""', '"gh-history"', "1"):
+        text = BINDING_TOML + f"history_gh_config_dir = {value}\n"
+        with pytest.raises(act_trust.TrustError):
+            act_trust.parse_binding(text)
+        with pytest.raises(ConfigError, match="history_gh_config_dir"):
+            parse_trust(text)
+
+
+def test_history_token_spawn_argv_and_env(monkeypatch, tmp_path: Path) -> None:
+    """R2: `gh auth token --hostname github.com` под профилем; окружение — как у `gh_get`."""
+    seen: list[tuple[list[str], dict[str, str]]] = []
+
+    def run(argv, *, env, **kw):  # noqa: ANN001, ANN003
+        seen.append((argv, env))
+        return _Done(0, out=TOKEN + "\n")
+
+    for var in DF_TOKEN_ENV:
+        monkeypatch.setenv(var, "stray")
+    monkeypatch.setattr(act_trust.subprocess, "run", run)
+    assert act_trust.history_token(_profile(tmp_path)) == TOKEN
+    argv, env = seen[0]
+    assert argv == ["gh", "auth", "token", "--hostname", "github.com"]
+    assert not set(DF_TOKEN_ENV) & set(env)
+    assert env["GH_CONFIG_DIR"] == str(tmp_path / "gh-history")
+
+
+SECRET = "ghp_Leak0secret"
+
+
+@pytest.mark.parametrize(
+    ("case", "answer", "reason"),
+    [
+        ("missing", None, "профиль токена истории"),
+        ("no_hosts", None, "профиль токена истории"),
+        ("exit", _Done(1, out=SECRET, err=f"bad {SECRET}"),
+         "gh auth token (profile:history): код выхода 1"),
+        ("empty", _Done(0, out="\n", err=SECRET), "gh auth token (profile:history): пустой вывод"),
+        ("form", _Done(0, out=f"{SECRET} extra\n"),
+         "gh auth token (profile:history): вывод не в форме токена"),
+        ("oserror", OSError(f"exec failed: {SECRET}"), "gh auth token (profile:history): OSError"),
+        ("timeout", subprocess.TimeoutExpired(["gh"], 60, output=SECRET, stderr=SECRET),
+         "gh auth token (profile:history): TimeoutExpired"),
+    ],
+    ids=["missing", "no_hosts", "exit", "empty", "form", "oserror", "timeout"],
+)
+def test_history_token_failures_are_unavailable(
+    monkeypatch, tmp_path: Path, case: str, answer: object, reason: str
+) -> None:
+    """R5 / Р-20, Р-21, C1-02: профиля нет — `gh` не запускается (keyring); причина —
+    фиксированная строка с кодом выхода или именем класса исключения, ни stdout, ни
+    stderr, ни текста исключения (секрет — в каждом из них)."""
+    profile = tmp_path / "gh-history"
+    if case == "no_hosts":
+        profile.mkdir()
+    elif case != "missing":
+        _profile(tmp_path)
+
+    def run(*a, **k):  # noqa: ANN002, ANN003
+        if answer is None:
+            pytest.fail("gh запущен без профиля")
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(act_trust.subprocess, "run", run)
+    got = act_trust.history_token(profile)
+    assert isinstance(got, Unavailable) and reason in got.reason
+    assert SECRET not in got.reason
+
+
+@pytest.mark.parametrize("answer", [
+    _Done(1, out=SECRET, err=SECRET), _Done(0, out=f"{SECRET} x"),
+    OSError(SECRET), subprocess.TimeoutExpired(["gh"], 60, output=SECRET, stderr=SECRET),
+], ids=["exit", "form", "oserror", "timeout"])
+def test_history_token_error_absent_from_final_reason(monkeypatch, tmp_path, answer) -> None:
+    """C1-02: и в конечной причине решения (`history_transport` → `load_trust`, настоящий
+    `history_token` по умолчанию) секрета нет; запросов нет."""
+    _profile(tmp_path)
+
+    def run(*a, **k):  # noqa: ANN002, ANN003
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(act_trust.subprocess, "run", run)
+    wire = _Wire({})
+    got = act_trust.load_trust(act_trust.Readers(as_credential({})), _with_history(tmp_path),
+                               Journal(), creds=(AGENT,), open_url=wire)
+    assert isinstance(got, Unavailable) and "токен истории: gh auth token" in got.reason
+    assert SECRET not in got.reason and wire.calls == []
+
+
+def test_credential_repr_hides_token() -> None:
+    assert "s3cret" not in repr(act_trust.Credential("env:GH_TOKEN", token="s3cret"))
+
+
+def test_gh_get_refuses_history_profile(monkeypatch) -> None:
+    """Р-18: самоотчёт токена истории не идёт через `gh` (токен не уходит в окружение)."""
+    monkeypatch.setattr(act_trust.subprocess, "run", lambda *a, **k: pytest.fail("gh"))
+    cred = act_trust.Credential("profile:history", gh_config_dir=Path("/etc/df/gh-history"))
+    got = act_trust.gh_get(cred, "repos/o/p")
+    assert got.outcome is Outcome.UNAVAILABLE
+    assert "только через транспорт истории" in got.detail
+
+
+def test_transport_fact_failure_is_unavailable() -> None:
+    cred = act_trust.Credential("profile:history")
+    got = act_trust.transport_fact(Anon({"repos/o/p": (403, {"message": "x"})}), cred, "repos/o/p")
+    assert got.outcome is Outcome.UNAVAILABLE
+    assert got.detail.startswith("GET repos/o/p (profile:history): HTTP 403")
+
+
+def test_transport_fact_passes_body_exactly() -> None:
+    """C1-01: успешное тело ответа уходит в `Fact` без изменений."""
+    body = {"full_name": AP, "permissions": {"push": True, "maintain": False,
+            "admin": False, "pull": True}, "extra": [1, {"k": None}]}
+    cred = act_trust.Credential("profile:history")
+    got = act_trust.transport_fact(Anon({"repos/o/p": (200, body)}), cred, "repos/o/p")
+    assert got.outcome is Outcome.FOUND and got.value == body
+
+
+# --- вход решения строит транспорт сам (C6, решение контроллера) -------------------
+
+
+def test_history_transport_built_from_binding(monkeypatch, tmp_path: Path) -> None:
+    """(а) Ключа нет — анонимно, `token_source` не вызывается. Ключ `D` — ровно один вызов
+    `token_source(D)`, все запросы решения с этим токеном, самоотчёт `profile:history`
+    на обоих репо — тем же транспортом; `Trust.transport` — тот же объект."""
+    monkeypatch.setattr(act_trust.subprocess, "run", lambda *a, **k: pytest.fail("gh"))
+    tokens = _Tokens(TOKEN, "ghp_Second0value")
+    got, wire = _decide(binding(), _self_reported(trust_routes(None, J1)), tokens=tokens)
+    assert isinstance(got, act_trust.Trust) and tokens.calls == [] and wire.calls
+    assert all("Authorization" not in h for _, h in wire.calls)
+    got, wire = _decide(
+        _with_history(tmp_path), _self_reported(trust_routes(None, J1)), tokens=tokens
+    )
+    assert isinstance(got, act_trust.Trust)
+    assert tokens.calls == [tmp_path / "gh-history"]
+    assert all(h.get("Authorization") == f"Bearer {TOKEN}" for _, h in wire.calls)
+    assert {p for p, _ in wire.calls} >= {f"repos/{AP}", f"repos/{DT}"}
+    assert isinstance(got.transport, act_anon.AnonTransport)
+    assert {p for p, _ in wire.calls} == set(got.transport.sent)
+
+
+@pytest.mark.parametrize("keyed", [False, True], ids=["no_key", "key"])
+@pytest.mark.parametrize(
+    "extra",
+    [
+        act_trust.Credential("profile:history", gh_config_dir=Path("/etc/df/gh-history")),
+        act_trust.Credential("profile:history", token="t"),
+        act_trust.Credential("env:OTHER_TOKEN", token="t"),
+        act_trust.Credential("profile:agent", gh_config_dir=Path("/x"), token="t"),
+        act_trust.Credential("env:GH_TOKEN", gh_config_dir=Path("/x"), token="t"),
+        act_trust.Credential("profile:agent"),
+        act_trust.Credential("profile:merge"),
+        act_trust.Credential("env:GH_TOKEN"),
+        act_trust.Credential("env:GITHUB_TOKEN"),
+    ],
+    ids=["history_dir", "history_token", "unknown_label", "profile_with_token", "env_with_dir",
+         "agent_without_dir", "merge_without_dir", "gh_token_without_token",
+         "github_token_without_token"],
+)
+def test_caller_history_credential_refused_before_io(tmp_path, keyed: bool, extra) -> None:
+    """(б) Credential вне закрытого набора форм `credentials()` → `HISTORY_NOT_WIRED`:
+    ни одного запроса, `token_source` не вызывается."""
+    tokens = _Tokens(TOKEN)
+    b = _with_history(tmp_path) if keyed else binding()
+    got, wire = _decide(b, trust_routes(None, J1), creds=(AGENT, extra), tokens=tokens)
+    assert isinstance(got, Unavailable) and got.reason == act_trust.HISTORY_NOT_WIRED
+    assert wire.calls == [] and tokens.calls == []
+
+
+@pytest.mark.parametrize("keyed", [False, True], ids=["no_key", "key"])
+def test_injected_transport_cannot_reach_trust_reads(tmp_path, keyed: bool) -> None:
+    """(в) Объект, похожий на прежние `Readers` с транспортом (`anon`, `history`), — его
+    транспорт не получает ни одного запроса источников доверия; все чтения — через
+    `open_url` транспорта, построенного `load_trust`."""
+
+    class Recorder:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        def send(self, request):  # noqa: ANN001
+            self.sent.append(request.path)
+            return v3.Response(200, body={})
+
+    stale = Recorder()
+    readers = SimpleNamespace(
+        anon=stale, history=act_trust.Credential("profile:history"),
+        as_credential=as_credential({}),
+    )
+    b = _with_history(tmp_path) if keyed else binding()
+    got, wire = _decide(b, _self_reported(trust_routes(None, J1)), readers=readers)
+    assert isinstance(got, act_trust.Trust)
+    assert stale.sent == [] and wire.calls and got.transport is not stale
+
+
+@pytest.mark.parametrize("stale_first", [False, True], ids=["clear", "stale_then_clear"])
+def test_one_token_per_decision_through_journal(monkeypatch, tmp_path, stale_first: bool) -> None:
+    """C7-01: настоящий путь журнала (`journal_for` → `DevJournal` → `ForgeEpochs.head`) и
+    повтор `STALE`: `token_source` вызван ровно один раз на решение, каждый запрос — с T1,
+    T2 не появляется ни в одном заголовке. Тот же `_Tokens` стоит и на месте
+    `history_token` по умолчанию — построение транспорта в перечитывании его бы вызвало."""
+    from governance import act_journal
+
+    tokens = _Tokens(TOKEN, "ghp_Second0value")
+    monkeypatch.setattr(act_trust, "history_token", tokens)
+    monkeypatch.setattr(act_trust.subprocess, "run", lambda *a, **k: pytest.fail("gh"))
+    monkeypatch.setattr(act_journal, "_publisher_present", lambda: False)
+    b = _with_history(tmp_path)
+    journal = act_journal.journal_for(
+        state_home=tmp_path / "state", run_id="r", binding=b, env={}, policy_repository_id=22
+    )
+    if stale_first:  # первый ответ журнала — STALE: load_trust перечитывает снимок
+        real_status = journal.status
+        answers = [act_trust.STALE]
+        monkeypatch.setattr(
+            journal, "status", lambda snap: answers.pop() if answers else real_status(snap)
+        )
+    got, wire = _decide(b, _self_reported(trust_routes(None, J1)), tokens=tokens,
+                        journal=journal)
+    assert isinstance(got, act_trust.Trust)
+    assert tokens.calls == [tmp_path / "gh-history"]
+    assert all(h.get("Authorization") == f"Bearer {TOKEN}" for _, h in wire.calls)
+    assert not any("ghp_Second0value" in str(h) for _, h in wire.calls)
+    heads = [p for p, _ in wire.calls if p == f"repositories/11"]
+    assert len(heads) >= (2 if stale_first else 1)
+
+
+@pytest.fixture()
+def history_world(monkeypatch, tmp_path: Path):
+    """Ключ в привязке; профиль агента — стенд; `gh` запрещён.
+    Возвращает `load(routes, journal) -> Trust | Unavailable`."""
+    monkeypatch.setattr(act_trust.subprocess, "run", lambda *a, **k: pytest.fail("gh"))
+
+    def run(routes: dict, journal: Journal) -> object:
+        return _decide(_with_history(tmp_path), routes, journal=journal)[0]
+
+    return run
+
+
+@pytest.mark.parametrize(("repo", "role"), [(AP, "approval-policy"), (DT, "df-trust")])
+def test_history_self_report_push_is_violation(history_world, repo: str, role: str) -> None:
+    """R3, C1-01: ответ `GET repos/{repo}` транспортом истории с `push: true` —
+    нарушение периметра этого репо (событие + отказ)."""
+    routes = _self_reported(trust_routes(None, J1))
+    routes[f"repos/{repo}"] = (200, {**routes[f"repos/{repo}"][1], **_perms(True)})
+    journal = Journal()
+    got = history_world(routes, journal)
+    assert isinstance(got, Unavailable) and got.reason.startswith("нарушение периметра: ")
+    assert len(journal.records) == 1 and journal.records[0][0] == role
+    assert journal.records[0][1].startswith(f"profile:history на {repo}: ")
+
+
+@pytest.mark.parametrize("repo", [AP, DT])
+@pytest.mark.parametrize(
+    ("answer", "tail"),
+    [
+        ((200, {"full_name": "x"}), "права credential на источнике не получены"),
+        ((403, {"message": "Forbidden"}), "HTTP 403"),
+    ],
+    ids=["no_permissions", "http_403"],
+)
+def test_history_self_report_unreadable_is_unavailable(
+    history_world, repo: str, answer: tuple, tail: str
+) -> None:
+    """R3, C1-01: нет `permissions` или HTTP 403 транспортом истории — `Unavailable`
+    без события, с меткой credential и репо."""
+    routes = _self_reported(trust_routes(None, J1))
+    routes[f"repos/{repo}"] = answer
+    journal = Journal()
+    got = history_world(routes, journal)
+    assert isinstance(got, Unavailable) and journal.records == []
+    assert f"самоотчёт profile:history на {repo}: " in got.reason
+    assert got.reason.endswith(tail)
+
+
+def test_as_credential_never_called_for_history(tmp_path) -> None:
+    """`readers.as_credential` получает только переданные не-history credential."""
+    asked: list[str] = []
+
+    def recorder(cred: act_trust.Credential, path: str) -> Fact[object]:
+        asked.append(cred.label)
+        return Fact(Outcome.FOUND, _perms(), "ok")
+
+    got, _ = _decide(_with_history(tmp_path), _self_reported(trust_routes(None, J1)),
+                     readers=act_trust.Readers(recorder))
+    assert isinstance(got, act_trust.Trust)
+    assert asked == ["profile:agent", "profile:agent"]
+
+
+@pytest.mark.parametrize(
+    "why", ["профиль токена истории /etc/df/gh-history не найден", "gh auth token: exit 1"]
+)
+def test_broken_history_token_no_anonymous_fallback(tmp_path, why: str) -> None:
+    """R5 / Р-19, отрицательный двойник: ключ есть, токена нет — ни одного запроса."""
+    got, wire = _decide(_with_history(tmp_path), trust_routes(None, J1),
+                        tokens=_Tokens(Unavailable(why)))
+    assert isinstance(got, Unavailable) and got.reason == f"токен истории: {why}"
+    assert wire.calls == []
+
+
+# --- матрица самоотчёта (C2-01: механизм вместо точечных тестов) ------------------
+# Строки — виды credential, столбцы — состояния самоотчёта на одном репо. Четыре вида
+# передаёт `credentials()`, `profile:history` создаёт `load_trust` (ключ в привязке).
+# `gh_get` — записывающий стенд. Не чистая клетка отличается от чистой ТОЛЬКО
+# состоянием этого credential.
+
+KINDS = ("profile:agent", "profile:merge", "profile:history", "env:GH_TOKEN", "env:GITHUB_TOKEN")
+STATES = ("push", "no_permissions", "http_403")
+CELLS = [(k, s, r) for k in KINDS for s in STATES for r in (AP, DT)]
+ROLE = {AP: "approval-policy", DT: "df-trust"}
+
+
+def _gh_answer(state: str, repo: str) -> Fact[object]:
+    return {
+        "push": Fact(Outcome.FOUND, _perms(True), "ok"),
+        "no_permissions": Fact(Outcome.FOUND, {"full_name": repo}, "ok"),
+        "http_403": unavailable(f"gh api repos/{repo}: HTTP 403"),
+    }[state]
+
+
+def _wire_answer(routes: dict, state: str, repo: str) -> tuple[int, object]:
+    return {
+        "push": (200, {**routes[f"repos/{repo}"][1], **_perms(True)}),
+        "no_permissions": (200, {"full_name": repo}),
+        "http_403": (403, {"message": "Forbidden"}),
+    }[state]
+
+
+def _matrix(monkeypatch, tmp_path: Path, cell: tuple[str, str, str] | None):
+    """Один прогон `load_trust` со всеми пятью видами; `cell` — (вид, состояние, репо)
+    единственного отклонения или `None` (все чисты)."""
+    seen: list[tuple[act_trust.Credential, str]] = []
+    kind, state, repo = cell or (None, None, None)
+
+    def gh_get(cred: act_trust.Credential, path: str) -> Fact[object]:
+        seen.append((cred, path))
+        if cred.label == kind and path == f"repos/{repo}":
+            return _gh_answer(state, repo)
+        return Fact(Outcome.FOUND, _perms(), "ok")
+
+    monkeypatch.setattr(act_trust, "gh_get", gh_get)
+    monkeypatch.setattr(act_trust.subprocess, "run", lambda *a, **k: pytest.fail("gh"))
+    routes = _self_reported(trust_routes(None, J1))
+    if kind == "profile:history":
+        routes[f"repos/{repo}"] = _wire_answer(routes, state, repo)
+    creds = act_trust.credentials(
+        {"GH_TOKEN": "tok-gh", "GITHUB_TOKEN": "tok-github"},
+        agent_dir=tmp_path / "review", merge_dir=tmp_path / "merge",
+    )
+    journal = Journal()
+    got, wire = _decide(_with_history(tmp_path), routes, creds=creds,
+                        readers=act_trust.default_readers(), journal=journal)
+    return got, journal, seen, creds, wire
+
+
+def test_self_report_matrix_clean_routes_every_credential(monkeypatch, tmp_path) -> None:
+    """Чистая строка: решение есть; каждый переданный credential дошёл до `gh_get` ТЕМ ЖЕ
+    объектом на оба репо; history — только транспортом, с заголовком токена."""
+    got, journal, seen, creds, wire = _matrix(monkeypatch, tmp_path, None)
+    assert isinstance(got, act_trust.Trust) and journal.records == []
+    assert {c.label for c in creds} == set(KINDS) - {"profile:history"}
+    assert all(c.label != "profile:history" for c, _ in seen)
+    for cred in creds:
+        assert [p for c, p in seen if c is cred] == [f"repos/{AP}", f"repos/{DT}"]
+    assert {p for p, h in wire.calls if h.get("Authorization") == f"Bearer {TOKEN}"} >= {
+        f"repos/{AP}", f"repos/{DT}"
+    }
+
+
+@pytest.mark.parametrize(("kind", "state", "repo"), CELLS,
+                         ids=[f"{k}-{s}-{ROLE[r]}" for k, s, r in CELLS])
+def test_self_report_matrix_cell(monkeypatch, tmp_path, kind: str, state: str, repo: str) -> None:
+    """Каждая не чистая клетка: `push` — нарушение с событием ровно этого credential и
+    репо; `no_permissions`/`http_403` — `Unavailable` без события с меткой credential."""
+    got, journal, seen, creds, _ = _matrix(monkeypatch, tmp_path, (kind, state, repo))
+    assert isinstance(got, Unavailable)
+    if kind != "profile:history":  # маршрутизация: самоотчёт этого credential дошёл до gh_get
+        assert any(c.label == kind and p == f"repos/{repo}" for c, p in seen)
+    if state == "push":
+        assert got.reason.startswith("нарушение периметра: ")
+        assert journal.records == [(ROLE[repo], journal.records[0][1])]
+        assert journal.records[0][1].startswith(f"{kind} на {repo}: ")
+    else:
+        assert journal.records == []
+        assert f"самоотчёт {kind} на {repo}: " in got.reason
+```
+
+`tests/df/test_stage2_config.py` (рядом с `test_trust_unknown_key`; `TRUST` — фикстура файла):
+
+```python
+HISTORY = 'history_gh_config_dir = "/etc/df/gh-history"\n'
+
+
+def test_trust_history_key_absent_unchanged() -> None:
+    b = parse_trust(TRUST.format(transport="public"))
+    assert b.history_gh_config_dir is None and b.root_id == ("github.com", 5, "main")
+
+
+def test_trust_history_key_absolute_path() -> None:
+    b = parse_trust(TRUST.format(transport="public") + HISTORY)
+    assert b.history_gh_config_dir == "/etc/df/gh-history"
+
+
+@pytest.mark.parametrize("value", ['""', '"gh-history"', '"./gh"', "1"],
+                         ids=["empty", "relative", "dot", "int"])
+def test_trust_history_key_rejects_bad_path(value: str) -> None:
+    with pytest.raises(ConfigError, match="history_gh_config_dir: must be an absolute path"):
+        parse_trust(TRUST.format(transport="public") + f"history_gh_config_dir = {value}\n")
+```
+
+`test_trust_unknown_key` остаётся: прочие незнакомые ключи отвергаются.
+
+`tests/test_act_wiring.py` (новый; **детектор, а не доказательство полноты**: полноту даёт то,
+что `load_trust` транспорт извне не принимает):
+
+```python
+"""Транспорт источников доверия строит только `act_trust.history_transport` (С-1, C6).
+
+ДЕТЕКТОР, А НЕ ДОКАЗАТЕЛЬСТВО ПОЛНОТЫ. Сканер ищет в `governance/` построение
+`AnonTransport` вне фабрики в трёх формах: прямой вызов, атрибутный
+(`act_anon.AnonTransport(...)`) и через алиас `from … import AnonTransport as T`.
+Присваивания и прочие обходы он не ловит и ловить не обязан: транспорт, построенный
+где угодно ещё, до решения не доходит — `load_trust` строит свой. Реестр
+`WIRING_SITES` — известные боевые места сборки зависимостей решения; тест прогоняет
+каждое через `load_trust` с ключом истории (перекрёстная проверка, не полнота).
+"""
+
+from __future__ import annotations
+
+import ast
+from collections.abc import Callable
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+pytest.importorskip("steward")
+
+from governance import act_status, act_trust  # noqa: E402
+from governance.act_time import Unavailable  # noqa: E402
+from tests.test_act_trust import (  # noqa: E402
+    AP, J1, TOKEN, Journal, _perms, _self_reported, _Tokens, _Wire, as_credential, trust_routes,
+)
+
+ROOT = Path(__file__).resolve().parent.parent
+ENV = {"REVIEW_GH_CONFIG_DIR": "/x/review", "MERGE_GH_CONFIG_DIR": "/x/merge"}
+Site = Callable[[Path], tuple[act_trust.Readers, tuple[act_trust.Credential, ...]]]
+_CTOR = "AnonTransport"
+#: Единственное разрешённое место построения — исключается поимённо.
+_FACTORY = frozenset({"governance/act_trust.py::history_transport"})
+
+
+def _status_site(tmp_path: Path):
+    state = SimpleNamespace(repo_slug="o/p", ws_id="w", target_dir=str(tmp_path), run_id="r")
+    env = {**ENV, "XDG_CONFIG_HOME": str(tmp_path / "cfg"), "XDG_STATE_HOME": str(tmp_path)}
+    deps = act_status.real_deps(state, env=env)
+    return deps.readers, deps.creds
+
+
+#: `<файл>::<функция>` → сборка зависимостей решения этим местом. Task 15 добавляет
+#: обязательную строку `governance/act_premerge.py::real_deps`.
+WIRING_SITES: dict[str, Site] = {
+    "governance/act_status.py::real_deps": _status_site,
+}
+
+
+def _constructions(rel: str, text: str) -> set[str]:
+    """Места построения `AnonTransport` трёх распознаваемых форм в одном модуле."""
+    tree = ast.parse(text)
+    names = {_CTOR} | {
+        a.asname
+        for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+        for a in node.names if a.name == _CTOR and a.asname
+    }
+    found: set[str] = set()
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(fn):
+            f = node.func if isinstance(node, ast.Call) else None
+            if (isinstance(f, ast.Name) and f.id in names) or (
+                isinstance(f, ast.Attribute) and f.attr == _CTOR
+            ):
+                found.add(f"{rel}::{fn.name}")
+    return found - _FACTORY
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        "from governance.act_anon import AnonTransport\ndef f():\n    AnonTransport()\n",
+        "from governance import act_anon\ndef f():\n    act_anon.AnonTransport(token='t')\n",
+        "from governance.act_anon import AnonTransport as T\ndef f():\n    T()\n",
+    ],
+    ids=["direct", "attribute", "import_alias"],
+)
+def test_detector_sees_claimed_forms(src: str) -> None:
+    assert _constructions("governance/x.py", src) == {"governance/x.py::f"}
+
+
+def test_detector_excludes_only_the_factory() -> None:
+    src = ("from governance.act_anon import AnonTransport\n"
+           "def history_transport(b):\n    return AnonTransport()\n"
+           "def default_readers():\n    return AnonTransport()\n")
+    assert _constructions("governance/act_trust.py", src) == {
+        "governance/act_trust.py::default_readers"
+    }
+
+
+def test_no_trust_transport_outside_factory() -> None:
+    found = {
+        site
+        for path in sorted((ROOT / "governance").rglob("*.py"))
+        if path.name != "act_anon.py"
+        for site in _constructions(path.relative_to(ROOT).as_posix(), path.read_text("utf-8"))
+    }
+    assert found == set()
+
+
+@pytest.mark.parametrize("site", sorted(WIRING_SITES))
+def test_wiring_site_decides_with_history_token(monkeypatch, tmp_path: Path, site: str) -> None:
+    """Сборка места проходит закрытый набор форм credentials, а токен истории с `push`
+    на источнике даёт нарушение периметра, а не решение."""
+    with_key = act_trust.Binding(
+        "github.com", 11, "owner/df-trust", "main", 22, "public", tmp_path / "gh-history"
+    )
+    routes = _self_reported(trust_routes(None, J1))
+    routes[f"repos/{AP}"] = (200, {**routes[f"repos/{AP}"][1], **_perms(True)})
+    monkeypatch.setattr(act_trust, "load_binding", lambda *a, **k: with_key)
+    monkeypatch.setattr(act_trust, "gh_get", as_credential({}))
+    readers, creds = WIRING_SITES[site](tmp_path)
+    got = act_trust.load_trust(readers, with_key, Journal(), creds=creds,
+                               open_url=_Wire(routes), token_source=_Tokens(TOKEN))
+    assert isinstance(got, Unavailable)
+    assert got.reason.startswith("нарушение периметра: profile:history на ")
+```
+
+Вызовы в тестах не сканируются; `act_anon.py` — определение класса, не место построения.
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run --group governance pytest tests/test_act_anon.py tests/test_act_trust.py tests/test_act_context.py tests/df/test_stage2_config.py tests/test_act_wiring.py -v`
+Expected: FAIL — `TypeError: AnonTransport.__init__() got an unexpected keyword argument 'token'`,
+`TypeError: load_trust() got an unexpected keyword argument 'open_url'`, `AttributeError: …
+'history_token'`, `TrustError: trust.toml: ключи …` на `HISTORY_TOML`, `ConfigError: trust.toml:
+unknown key 'history_gh_config_dir'`. Тесты 11b с `[anon]` — PASS (гарантии не тронуты).
+
+- [ ] **Step 3: Transport with the history token** — `governance/act_anon.py` (докстринг модуля:
+  «без credentials либо с read-only токеном истории, спека rev 18 §6.2»):
+
+```python
+class AnonTransport:
+    """`Transport` steward источников доверия: без credentials либо с read-only
+    токеном истории (спека rev 18 §6.2); строит только `act_trust.history_transport`;
+    `sent` — пути, ушедшие в сеть."""
+
+    def __init__(
+        self,
+        *,
+        open_url: Callable[..., Any] | None = None,
+        timeout: float = TIMEOUT,
+        token: str | None = None,
+    ) -> None:
+        self._open = open_url or _default_open()
+        self._timeout = timeout
+        self._token = token
+        auth = {} if token is None else {"Authorization": f"Bearer {token}"}
+        self._headers = _HEADERS | auth
+        self._memo: dict[str, Any] = {}
+        self.sent: list[str] = []
+
+    # send — без изменений; _fetch строит запрос с `headers=self._headers`, а
+    # сбой доставки — `cls(None, error=self._mask(f"anon: {type(exc).__name__}: {exc}"))`
+
+    def _mask(self, text: str) -> str:
+        """Значение токена в тексте сбоя — `***` (R1)."""
+        return text if self._token is None else text.replace(self._token, "***")
+```
+
+Перенаправления не исполняются (`_NoRedirect`), прокси окружения не используются
+(`ProxyHandler({})`) — поэтому заголовок с токеном не уходит ни на `Location`, ни в прокси;
+`API` — `https://api.github.com/`, другого хоста у транспорта нет.
+
+- [ ] **Step 4: Binding key, token, factory, decision entry** — `governance/act_trust.py`
+  (импорты: `re`, `field` из `dataclasses`):
+
+```python
+HISTORY_KEY = "history_gh_config_dir"
+HISTORY_LABEL = "profile:history"
+HISTORY_NOT_WIRED = "самоотчёт: credential не из закрытого набора credentials()"
+_TOKEN_FORM = re.compile(r"[A-Za-z0-9_]+")
+#: Закрытый набор форм `credentials()`: метка → (есть gh_config_dir, есть token).
+_CRED_SHAPES = {
+    "profile:agent": (True, False),
+    "profile:merge": (True, False),
+    "env:GH_TOKEN": (False, True),
+    "env:GITHUB_TOKEN": (False, True),
+}
+
+
+@dataclass(frozen=True)
+class Binding:
+    """Защищённая привязка `/etc/df/trust.toml` (спека B §3.7; Р-6; С-1 — `HISTORY_KEY`)."""
+
+    host: str
+    df_trust_repository_id: int
+    df_trust_full_name: str
+    df_trust_branch: str
+    approval_policy_repository_id: int
+    transport: str
+    history_gh_config_dir: Path | None = None
+
+
+@dataclass(frozen=True)
+class Credential:
+    """Credential, который процесс ДЕРЖИТ: профиль `gh` либо токен окружения."""
+
+    label: str
+    gh_config_dir: Path | None = None
+    token: str | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True)
+class Readers:
+    """Самоотчёт переданных credentials (`gh api` под каждым). Транспорта источников
+    доверия здесь нет: его строит `load_trust` (Task 11c, C6)."""
+
+    as_credential: Callable[[Credential, str], Fact[object]]
+
+
+@dataclass(frozen=True)
+class TrustSnapshot:
+    """`source.env` и журнал эпох из ОДНОГО снимка; `transport` — чем он прочитан."""
+
+    root: TrustRoot
+    full_name: str
+    source: SourceV2
+    epochs: tuple[Epoch, ...]
+    transport: Any = field(default=None, repr=False, compare=False)
+
+
+# Trust: поля прежние; новое свойство
+#     @property
+#     def transport(self) -> Any:
+#         return self.snapshot.transport
+
+
+def default_readers() -> Readers:
+    """Боевой самоотчёт: `gh api` под credential."""
+    return Readers(gh_get)
+
+
+def history_transport(
+    binding: Binding,
+    *,
+    open_url: Callable[..., Any] | None = None,
+    token_source: Callable[[Path], str | Unavailable] | None = None,
+) -> AnonTransport | Unavailable:
+    """Единственное место построения транспорта источников доверия (С-1, C6):
+    ключа нет — анонимный; ключ `D` — токен `(token_source or history_token)(D)`
+    ровно один раз; сбой — `Unavailable(f"токен истории: {причина}")`."""
+
+
+def _creds_refusal(creds: Sequence[Credential]) -> Unavailable | None:
+    """Каждый credential — форма из `_CRED_SHAPES`, иначе `HISTORY_NOT_WIRED`."""
+
+
+def _history_self_report(transport: Any, snap: TrustSnapshot) -> Found:
+    """Самоотчёт `profile:history` объектом транспорта решения: `GET repos/{repo}`
+    обоих репо доверия через `transport_fact`, вердикт — `permissions_refusal`;
+    нарушение `(роль, f"profile:history на {repo}: …")`, недоступность
+    `Unavailable(f"самоотчёт profile:history на {repo}: …")`."""
+
+
+def load_trust(
+    readers: Readers,
+    binding: Binding,
+    journal: Journal,
+    *,
+    creds: Sequence[Credential],
+    open_url: Callable[..., Any] | None = None,
+    token_source: Callable[[Path], str | Unavailable] | None = None,
+) -> Trust | Unavailable:
+    """Обязательные проверки перед решением (12a) на транспорте, который строит сам
+    (порядок — правила Task 11c)."""
+
+
+def transport_fact(transport: Any, cred: Credential, path: str) -> Fact[object]:
+    """`GET <path>` транспортом решения; не 200 или не объект — `unavailable(
+    f"GET {path} ({cred.label}): HTTP {status} {error}")`."""
+
+
+def history_token(config_dir: Path) -> str | Unavailable:
+    """Токен профиля `history`: `gh auth token --hostname github.com` под
+    `GH_CONFIG_DIR=<config_dir>`, окружение без `_GH_ENV_DROPPED`, `timeout=60`.
+    `<config_dir>/hosts.yml` не файл — `Unavailable` ДО запуска `gh` (Р-20).
+
+    Безопасный формат причин (C1-02): только фиксированные строки
+    `f"gh auth token ({HISTORY_LABEL}): " + <хвост>`, где хвост — `код выхода
+    {rc}` | `пустой вывод` | `вывод не в форме токена` | `{type(exc).__name__}`
+    (`OSError`, `TimeoutExpired`). stdout, stderr и `str(exc)` в причину не
+    попадают никогда — ни целиком, ни срезом."""
+```
+
+`parse_binding`: проверка ключей — `set(_BINDING_KEYS) <= keys <= set(_BINDING_KEYS) | {HISTORY_KEY}`
+(сообщение сохраняет «ключи …» — строка реестра `keys`); значение `HISTORY_KEY`, если есть, —
+`str` с `Path(value).is_absolute()`, иначе `TrustError(f"trust.toml: {HISTORY_KEY} — абсолютный
+путь")`; в `Binding` — `Path(value)` либо `None`. `gh_get` первой строкой отказывает
+`profile:history` (`unavailable(f"gh api {path} ({HISTORY_LABEL}): самоотчёт токена истории —
+только через транспорт истории")`). `_snapshot_for_decision`, `_rulesets`, `_rebase` получают
+транспорт аргументом вместо `readers.anon`; `load_anchor_times(trust, t)` и `load_ranges(trust,
+anchor_at, t, journal)` читают `trust.transport` (и передают его в `act_facts.activation`/
+`history`, `policy_set`); `_self_report` — без изменений (ему приходят только формы
+`_CRED_SHAPES`). `act_context.delivery_verdict` — `load_anchor_times(trust, t)`,
+`load_ranges(trust, anchors, t, journal)`.
+
+- [ ] **Step 4a: Installer parser** — `df/stage2_config.py` по Produces (`df.stage2_config`):
+  поле `history_gh_config_dir: str | None = None` последним в `TrustBinding`, проверка в
+  `__post_init__`, необязательный ключ в `_check_keys`, значение `data.get(...)` в конструктор.
+  Схема и прочие ключи без изменений; потребители `TrustBinding` (`df/run_start.py`,
+  `df/publisher/perimeter.py`) поле не читают.
+
+- [ ] **Step 5: `act_journal` and `act_status` of Task 14** — `governance/act_journal.py` по
+  Produces (`act_journal`): `DevJournal.status(snap)` и `record(snap, …)` первой строкой
+  `self.epochs.via(snap.transport)`; тип `Reread` удаляется. `governance/act_status.py`: в
+  `real_deps` закрытие журнала — `act_journal.journal_for(state_home=…, run_id=…,
+  binding=binding, env=env, policy_repository_id=…)` (было `reread=lambda:
+  act_trust.read_trust_snapshot(readers.anon, binding)`; аргумент `readers` закрытия больше не
+  используется, сигнатура `Deps.journal` прежняя); `Deps(readers=act_trust.default_readers(), …,
+  creds=act_trust.credentials(env, agent_dir=agent, merge_dir=merge), …)` — подписи прежние;
+  в `live_policy` — `act_trust.load_anchor_times(trust, now)`, `act_trust.load_ranges(trust,
+  anchors, now, journal)`. Докстринг `real_deps`: «Боевые зависимости: привязка, самоотчёт `gh`,
+  журнал (Р-5); транспорт источников доверия строит `load_trust` (Task 11c)». Докстринги
+  `act_facts` — по Files.
+
+- [ ] **Step 6: Run tests to verify they pass**
+
+Run: `uv run --group governance pytest tests/test_act_anon.py tests/test_act_trust.py tests/test_act_context.py tests/test_act_journal.py tests/test_act_status.py tests/df/test_stage2_config.py tests/test_act_wiring.py tests/test_author_sandbox_invariant.py -v`
+Expected: PASS (`test_spawn_and_dynamic_load_sites_match_the_contract` — без правки контракта,
+Р-22). Затем полный набор: `uv run pytest -q` и `GOVERNANCE_REQUIRED=1 uv run --group governance
+pytest -q`. ruff, pyrefly — чисто.
+
+- [ ] **Step 7: Mutation pass** — в scratch-копии (`git worktree add` во временный каталог), по
+  одной мутации на прогон названного теста; выживший мутант блокирует коммит, таблица «мутация →
+  упавший тест» — в описание PR. **Предусловие:** базовый прогон Step 6 зелёный целиком, в том
+  числе вся матрица (`test_self_report_matrix_*`, 31 случай); мутация засчитывается, только если
+  тест падает на утверждении маршрутизации, отказа или события (`assert` после
+  `load_trust`/`gh_get` в теле теста), а не на сборке стенда (`_matrix`, `_decide`, фикстуры) —
+  в описании PR для каждой мутации указывается строка упавшего `assert` (C3-02):
+
+  | # | Мутация | Должен упасть |
+  |---|---|---|
+  | 1 | `__init__`: заголовок `Authorization` не добавляется / добавляется всегда | `test_token_only_in_authorization_header[token]` / `[anon]` |
+  | 2 | `_mask` возвращает текст как есть | `test_token_never_in_error_sent_or_memo` |
+  | 4 | `parse_binding`: ключ обязателен / любой лишний ключ допустим / проверка абсолютного пути снята | `test_binding_history_key_optional` / `test_binding_rejects_bad_text[keys]` / `test_binding_history_key_must_be_absolute_path` |
+  | 5 | `history_token`: без проверки `hosts.yml` / без очистки окружения / без проверки кода выхода / пустого / формы | `…_failures_are_unavailable[missing,no_hosts]` / `test_history_token_spawn_argv_and_env` / `[exit]` / `[empty]` / `[form]` |
+  | 5a | `history_token`: в причину добавлен `done.stderr`, `done.stdout` или `str(exc)` (снятие безопасного формата C1-02) | `test_history_token_failures_are_unavailable[exit,empty,form,oserror,timeout]`, `test_history_token_error_absent_from_final_reason` |
+  | 6 | `history_transport`: сбой токена → анонимный транспорт / токен читается при отсутствии ключа | `test_broken_history_token_no_anonymous_fallback`, `test_history_token_error_absent_from_final_reason` / `test_history_transport_built_from_binding` |
+  | M1 | `load_trust` берёт транспорт у вызывающего (`getattr(readers, "anon", None) or history_transport(...)`) | `test_injected_transport_cannot_reach_trust_reads[no_key,key]` |
+  | M2 | `load_trust` пропускает `_history_self_report` | `test_history_self_report_push_is_violation`, `test_self_report_matrix_cell[profile:history-push-…]`, `test_wiring_site_decides_with_history_token` |
+  | M3 | токен читается дважды, транспорт строится со вторым значением (`token_source(D)` повторно) | `test_history_transport_built_from_binding` (`tokens.calls == [D]`, заголовок `Bearer TOKEN`) |
+  | M5 | `ForgeEpochs.head` строит транспорт сам (`history_transport(self._binding)`) вместо `via` / повтор `STALE` в `_snapshot_for_decision` строит новый транспорт | `test_one_token_per_decision_through_journal[clear]` / `[stale_then_clear]` (`tokens.calls == [D]`, нет `ghp_Second0value` в заголовках) |
+  | M4 | `_creds_refusal`, по отдельности: (i) снят целиком; (ii) нет проверки метки в `_CRED_SHAPES`; (iii) нет требования `gh_config_dir` у профиля; (iv) нет требования `token` у env; (v) нет запрета `token` у профиля; (vi) нет запрета `gh_config_dir` у env | (i) все случаи `test_caller_history_credential_refused_before_io`; (ii) `[…-history_dir,history_token,unknown_label]`; (iii) `[…-agent_without_dir,merge_without_dir]`; (iv) `[…-gh_token_without_token,github_token_without_token]`; (v) `[…-profile_with_token]`; (vi) `[…-env_with_dir]` |
+  | 7 | самоотчёт `profile:history` через `readers.as_credential` вместо транспорта | `test_as_credential_never_called_for_history`, `test_history_self_report_push_is_violation` |
+  | 7a | `transport_fact` подменяет `permissions` чистыми (`push/maintain/admin = false`) | `test_history_self_report_push_is_violation[approval-policy,df-trust]`, `test_transport_fact_passes_body_exactly` |
+  | 7b | `_self_report`: для переданных credential готовые чистые `permissions` вместо `readers.as_credential` | `test_self_report_matrix_cell[profile:agent-…]`, `[profile:merge-…]`, `[env:GH_TOKEN-…]`, `[env:GITHUB_TOKEN-…]` (все состояния), `test_self_report_matrix_clean_routes_every_credential` |
+  | 7c | `_self_report` подменяет объект credential копией или теряет один вид | `test_self_report_matrix_clean_routes_every_credential` (утверждения тождества объекта и состава множеством) |
+  | 8 | отказ `gh_get` для `profile:history` снят | `test_gh_get_refuses_history_profile` |
+  | 10 | `Credential.token` с `repr=True` | `test_credential_repr_hides_token` |
+  | 11 | `transport_fact`: статус не проверяется | `test_transport_fact_failure_is_unavailable`, `test_history_self_report_unreadable_is_unavailable[http_403-…]` |
+  | 12 | детектор: не разворачивает `import … as` / не видит атрибутный вызов / исключает файл, а не фабрику | `test_detector_sees_claimed_forms[import_alias]` / `[attribute]` / `test_detector_excludes_only_the_factory` |
+  | 13 | `parse_trust`: ключ не в необязательных | `test_trust_history_key_absolute_path`, `test_binding_history_key_agrees_with_installer` |
+  | 14 | `TrustBinding.__post_init__`: проверка абсолютного пути снята | `test_trust_history_key_rejects_bad_path[empty,relative,dot]` |
+
+  Строки для реестра Task 16 (`tests/test_act_identity_table.py` создаёт Task 16, она идёт
+  позже — её исполнитель вносит эти строки; листинг Task 16 помечен):
+  новые места суждения `act_trust.history_token` (`profile`, `exit`, `empty`, `form`, `spawn`;
+  мутации 5, 5a), `act_trust.history_transport` (`token_unavailable` — тест
+  `test_broken_history_token_no_anonymous_fallback`, мутация 6), `act_trust._creds_refusal`
+  (`shape` — `HISTORY_NOT_WIRED`, тест `test_caller_history_credential_refused_before_io`, мутация
+  M4), `act_trust._history_self_report` (`violation` — `isinstance(verdict, Violation)`, тест
+  `test_history_self_report_push_is_violation`, мутации M2, 7, 7a; `unreadable` — тест
+  `test_history_self_report_unreadable_is_unavailable`, мутация 11), `act_trust.transport_fact`
+  (`http`); новые строки `act_trust.parse_binding#history_path`,
+  `act_trust.gh_get#history_label`, `act_trust.load_trust#own_transport` (`MODIFIED_EXISTING`,
+  тест `test_injected_transport_cannot_reach_trust_reads`, мутации M1, M3); литерал строки
+  `parse_binding/keys` — по новой проверке ключей; `act_trust.default_readers` остаётся
+  `NOT_JUDGMENT` (`_BUILD`); `act_journal.ForgeEpochs.head#no_transport` (`MODIFIED_EXISTING`,
+  тест `test_forge_epochs_without_transport_unavailable`); в `NOT_JUDGMENT` —
+  `act_journal.ForgeEpochs.via` (`_BUILD`), `act_trust.Trust.transport` (`_BUILD`),
+  `act_anon.AnonTransport._mask` (маскировка текста; отказа нет). Строки мутаций входят в обязательный проход Task 16 Step 4a.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add governance/act_anon.py governance/act_trust.py governance/act_context.py \
+  governance/act_journal.py governance/act_status.py governance/act_facts.py \
+  df/stage2_config.py TODO.md tests/test_act_anon.py tests/test_act_trust.py \
+  tests/test_act_context.py tests/test_act_journal.py tests/df/test_stage2_config.py \
+  tests/test_act_wiring.py
+git commit -m "feat(act): read-only токен истории источников доверия (С-1, спека rev 18 §6.2)"
+```
+
+**Вне задачи:**
+- **R8, сторона установщика** — handoff этапу 2b/3 установщика (спека B): запись ключа
+  `darkfactory setup-trust`, проверка профиля и самоотчёта `darkfactory doctor`, шаг человека
+  «создать PAT (R4) и профиль `history`: `GH_CONFIG_DIR=<каталог> gh auth login --hostname
+  github.com --with-token`». Разбор ключа (`parse_trust`) — уже в этой задаче. Задача заводит
+  пункт `TODO.md` devtools (`slug: df-trust-history-token`). **Человек не вписывает ключ на
+  хосте, где стоит `df` версии до этой задачи**: прежний `parse_trust` отвергает незнакомый ключ
+  (`darkfactory doctor`, издатель и `run_start` упадут на разборе привязки); без ключа акт
+  работает анонимно (R5).
+- **Инструкция steward** (`docs/approval-facts-v3.md:79–86`, «Заметки §12» п. 1) устарела —
+  inbox-issue steward#232 (отправлен контроллером); код steward не меняется.
+- Живой замер квоты (5000/ч, остаток `x-ratelimit-remaining` на решение) — в приёмке Task 18
+  вместе с журналом `Trust.transport.sent`.
 
 ### Task 13: Путь узла — общий вход, создание заявки, леджер, finalize в конверт, остановка, аудит
 
@@ -13774,6 +14984,8 @@ def real_deps(state: RunState, env: Mapping[str, str] | None = None) -> Deps:
         )
 
     binding = act_trust.load_binding()
+    # Task 11c (С-1, исполняется после этой задачи): `journal_for(..., binding=binding)` —
+    # журнал перечитывает снимок транспортом решения (Р-23); транспорт строит `load_trust`.
     return Deps(
         readers=act_trust.default_readers(),
         binding=binding,
@@ -14273,8 +15485,8 @@ def live_policy(state: RunState, deps: Deps) -> LivePolicy | Unavailable:
     if isinstance(trust, Unavailable):
         return trust
     now = deps.now()
-    anchors = act_trust.load_anchor_times(deps.readers.anon, trust, now)
-    loaded = act_trust.load_ranges(deps.readers.anon, trust, anchors, now, journal)
+    anchors = act_trust.load_anchor_times(deps.readers.anon, trust, now)  # 11c: (trust, now)
+    loaded = act_trust.load_ranges(deps.readers.anon, trust, anchors, now, journal)  # 11c: (trust, …)
     if isinstance(loaded, Unavailable):
         return loaded
     ranges, sets = loaded
@@ -14691,9 +15903,19 @@ git commit -m "feat(act): статус узла review/v1 — история, pr
 - Modify: `tests/harness_trust.py` (форма запуска с `--group governance`; `has_label` в
   `SAFE_COMMANDS`)
 - Test: `tests/test_act_premerge.py`; дополнить `tests/test_merge_pr.py` (стаб `uv`)
+- Modify: `tests/test_act_wiring.py` (Task 11c) — **обязательная** строка реестра
+  `"governance/act_premerge.py::real_deps": _premerge_site`: `_premerge_site(tmp_path)` вызывает
+  `act_premerge.real_deps(args, env=ENV)` с `args.merge_profile="/x/merge"`, `args.repo`,
+  `args.pr` и возвращает `(deps.readers, deps.creds)`;
+  `test_wiring_site_decides_with_history_token[…act_premerge…]` держит, что сборка предпроверки
+  проходит закрытый набор форм credentials и даёт отказ при токене истории с `push` (C2-02;
+  транспорт строит `load_trust`, Task 11c). `act_premerge` транспорт `AnonTransport` не строит —
+  иначе красный `test_no_trust_transport_outside_factory`
 
 **Interfaces:**
-- Consumes: Tasks 4, 5, 7 (`find_act`), 11a, 11b, 12 (`live_policy_refusal`), 12a (`load_binding`,
+- Consumes: Tasks 4, 5, 7 (`find_act`), 11a, 11b, 11c (`load_trust` строит транспорт сам,
+  `load_anchor_times(trust, t)`, `load_ranges(trust, …)`, `Readers(as_credential)`,
+  `WIRING_SITES`), 12 (`live_policy_refusal`), 12a (`load_binding`,
   `load_trust` **с журналом** — `act_journal_wire.journal_for_premerge`, `load_anchor_times`,
   `load_ranges(..., journal)`, `product_mode`, `current_activation`, `act_identity`).
 - Produces: запуск **файлом** из `merge-pr.sh`:
@@ -14861,7 +16083,7 @@ class World:
 
     def run(self, *extra: str) -> int:
         deps = act_premerge.PremergeDeps(
-            readers=act_trust.Readers(object(), self.as_credential), gh=object(),
+            readers=act_trust.Readers(self.as_credential), gh=object(),
             binding=BINDING, journal=self.journal, now=lambda: self.clock[0],
             sleep=self.sleep, creds=self.creds, installations=self.installations)
         argv = ["--repo", SLUG, "--pr", "7", "--head", HEAD, "--head-ref", BRANCH,
@@ -14996,7 +16218,7 @@ def test_app_installations_unknown_is_unset(world: World, capsys) -> None:
 
 def test_no_binding_refused(world: World, monkeypatch, capsys) -> None:
     deps = act_premerge.PremergeDeps(
-        readers=act_trust.Readers(object(), world.as_credential), gh=object(), binding=None,
+        readers=act_trust.Readers(world.as_credential), gh=object(), binding=None,
         journal=Unavailable("нет привязки"), now=lambda: NOW, sleep=world.sleep, creds=())
     argv = ["--repo", SLUG, "--pr", "7", "--head", HEAD, "--head-ref", BRANCH,
             "--merge-profile", "/x", "--merger", "m", "--merger-type", "Bot"]
@@ -15229,8 +16451,8 @@ def _manifest_text(deps: PremergeDeps, repo: str, head: str, path: str) -> str |
 def _live(deps: PremergeDeps, trust: act_trust.Trust, product: str):
     """Текущая активация, её набор и режим продукта по ПОЛНОЙ истории (B1-5)."""
     now = deps.now()
-    anchors = act_trust.load_anchor_times(deps.readers.anon, trust, now)
-    loaded = act_trust.load_ranges(deps.readers.anon, trust, anchors, now, deps.journal)
+    anchors = act_trust.load_anchor_times(trust, now)  # Task 11c: транспорт — из `trust`
+    loaded = act_trust.load_ranges(trust, anchors, now, deps.journal)
     if isinstance(loaded, Unavailable):
         raise _Stop(EXIT_UNSET, f"история источника политики: {loaded.reason}")
     ranges, sets = loaded
@@ -15339,7 +16561,8 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def real_deps(args: argparse.Namespace, env: dict[str, str] | None = None) -> PremergeDeps:
-    """Боевые чтения: анонимный REST, GraphQL под профилем агента, привязка, журнал."""
+    """Боевые чтения: GraphQL под профилем агента, привязка, журнал, самоотчёт `gh`;
+    транспорт источников доверия строит `load_trust` (Task 11c)."""
     env = dict(os.environ) if env is None else env
     binding = act_trust.load_binding()
     journal: Any = Unavailable("нет привязки")
@@ -15457,7 +16680,8 @@ Expected: PASS. `shellcheck merge-pr.sh` — чисто. Полный набор
 
 ```bash
 git add governance/act_premerge.py governance/act_decision.py governance/act_projection.py \
-  merge-pr.sh tests/harness_trust.py tests/test_act_premerge.py tests/test_merge_pr.py
+  merge-pr.sh tests/harness_trust.py tests/test_act_premerge.py tests/test_merge_pr.py \
+  tests/test_act_wiring.py
 git commit -m "feat(merge-pr): доставка candidate review/v1 агентом после предпроверки и границы секунды"
 ```
 
@@ -17379,6 +18603,8 @@ NOT_JUDGMENT = {
     "act_trust.Trust.epochs": _BUILD, "act_trust.Trust.root": _BUILD,
     "act_trust.Journal.status": "протокол (Protocol); суждение — у реализаций",
     "act_trust.Journal.record": "протокол (Protocol); запись, не суждение",
+    # С-1: `act_trust.default_readers` остаётся `_BUILD` и после Task 11c (`Readers(gh_get)`);
+    # места суждения Task 11c — в её Step 7
     "act_trust.default_readers": _BUILD, "act_trust._repo_path": _BUILD,
     "act_trust.credentials": "перечень того, что процесс держит; судит `_self_report`",
     "act_trust._roles": _BUILD,
@@ -18254,6 +19480,13 @@ if __name__ == "__main__":
   двойник (тип результата — до обращения к полям; изоляция, при которой обход даёт другой
   итог, а не исключение) или добавляется оператор `BYPASS` с корректными данными. Подмена
   причины (O3) строку не закрывает. Файл результата коммитится.
+
+  Обязательные мутации входа решения (Task 11c, C6): M1 — `load_trust` берёт транспорт у
+  вызывающего; M2 — пропуск самоотчёта `profile:history`; M3 — второе чтение токена; M4 — снятие
+  закрытого набора форм credentials. Каждая — по своим тестам Task 11c и по
+  `test_wiring_site_decides_with_history_token[<место>]` для **каждой** строки
+  `tests/test_act_wiring.py::WIRING_SITES` (на момент Task 16 — `act_status.real_deps`,
+  `act_premerge.real_deps`); выживший мутант блокирует коммит, как строки реестра.
 
 `tests/act_mutation.py`:
 
