@@ -168,32 +168,89 @@ def _contents(raw: bytes, *, sha: str | None = None) -> dict:
     }
 
 
+REF = "d" * 40
+ROOT = "1" * 40
+SUB = "2" * 40
+
+
+def _tree(*entries: tuple[str, str, str], truncated: bool = False) -> dict:
+    return {
+        "truncated": truncated,
+        "tree": [{"path": n, "type": k, "sha": s} for n, k, s in entries],
+    }
+
+
+def _world(*, file_path: str = "policy/modes.yaml", **over: tuple) -> dict:
+    """Маршруты: коммит -> корень {policy/, epochs? нет} -> policy/{modes.yaml}."""
+    base = act_anon.API + "repos/o/r/"
+    routes = {
+        base + f"commits/{REF}": (200, {"commit": {"tree": {"sha": ROOT}}}, None),
+        base + f"git/trees/{ROOT}": (200, _tree(("policy", "tree", SUB)), None),
+        base + f"git/trees/{SUB}": (200, _tree(("modes.yaml", "blob", "3" * 40)), None),
+        base + f"contents/{file_path}?ref={REF}": (
+            200,
+            _contents(b"modes: {}\n"),
+            None,
+        ),
+    }
+    routes.update({base + k: v for k, v in over.items()})
+    return routes
+
+
+def _anon(routes: dict) -> tuple[act_anon.AnonTransport, _Fake]:
+    fake = _Fake(routes)
+    return act_anon.AnonTransport(open_url=fake), fake
+
+
 def test_contents_bytes_checked_against_blob_oid() -> None:
-    ref = "d" * 40
-    url = act_anon.API + f"repos/o/r/contents/policy/modes.yaml?ref={ref}"
-    t = act_anon.AnonTransport(
-        open_url=_Fake({url: (200, _contents(b"modes: {}\n"), None)})
+    t, _ = _anon(_world())
+    assert act_anon.contents_bytes(t, "o/r", "policy/modes.yaml", REF) == b"modes: {}\n"
+    bad, _ = _anon(
+        _world(
+            **{
+                f"contents/policy/modes.yaml?ref={REF}": (
+                    200,
+                    _contents(b"x", sha="e" * 40),
+                    None,
+                )
+            }
+        )
     )
-    assert act_anon.contents_bytes(t, "o/r", "policy/modes.yaml", ref) == b"modes: {}\n"
-    bad = act_anon.AnonTransport(
-        open_url=_Fake({url: (200, _contents(b"x", sha="e" * 40), None)})
-    )
-    got = act_anon.contents_bytes(bad, "o/r", "policy/modes.yaml", ref)
+    got = act_anon.contents_bytes(bad, "o/r", "policy/modes.yaml", REF)
     assert isinstance(got, Unavailable) and "содержимое не равно blob" in got.reason
 
 
-def test_contents_absent_vs_unreadable() -> None:
-    ref = "d" * 40
-    url = act_anon.API + f"repos/o/r/contents/epochs.yaml?ref={ref}"
-    gone = act_anon.AnonTransport(
-        open_url=_Fake({url: (404, {"message": "Not Found"}, None)})
-    )
-    assert act_anon.contents_bytes(gone, "o/r", "epochs.yaml", ref) is None
-    limit = act_anon.AnonTransport(
-        open_url=_Fake({url: (403, {"message": "rate"}, None)})
-    )
-    got = act_anon.contents_bytes(limit, "o/r", "epochs.yaml", ref)
-    assert isinstance(got, Unavailable) and ": HTTP 403" in got.reason
+def test_absent_only_from_full_tree() -> None:
+    t, _ = _anon(_world())
+    assert act_anon.contents_bytes(t, "o/r", "epochs.yaml", REF) is None
+    assert act_anon.contents_bytes(t, "o/r", "policy/other.yaml", REF) is None
+    assert act_anon.contents_bytes(t, "o/r", "policy/modes.yaml/x", REF) is None
+
+
+def test_contents_404_with_path_in_tree_is_unavailable() -> None:
+    t, _ = _anon(_world(**{f"contents/policy/modes.yaml?ref={REF}": (404, {}, None)}))
+    got = act_anon.contents_bytes(t, "o/r", "policy/modes.yaml", REF)
+    assert isinstance(got, Unavailable) and "HTTP 404" in got.reason
+
+
+def test_truncated_tree_is_unavailable_not_absent() -> None:
+    t, _ = _anon(_world(**{f"git/trees/{ROOT}": (200, _tree(truncated=True), None)}))
+    got = act_anon.contents_bytes(t, "o/r", "epochs.yaml", REF)
+    assert isinstance(got, Unavailable) and "не полностью" in got.reason
+
+
+@pytest.mark.parametrize("status", [403, 404, 500])
+def test_unreadable_commit_is_unavailable(status: int) -> None:
+    t, _ = _anon(_world(**{f"commits/{REF}": (status, {"message": "x"}, None)}))
+    got = act_anon.contents_bytes(t, "o/r", "epochs.yaml", REF)
+    assert isinstance(got, Unavailable) and f"HTTP {status}" in got.reason
+
+
+@pytest.mark.parametrize("repo", ["approval-policy", "o/", "/r", "o/r/x", "o/r?x"])
+def test_bad_repo_slug_sends_nothing(repo: str) -> None:
+    t, fake = _anon({})
+    got = act_anon.contents_bytes(t, repo, "a", REF)
+    assert isinstance(got, Unavailable) and t.sent == [] and fake.headers == []
 
 
 class _Redirector(http.server.BaseHTTPRequestHandler):

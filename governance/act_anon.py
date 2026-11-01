@@ -117,27 +117,72 @@ class AnonTransport:
             return cls(None, error=f"anon: {type(exc).__name__}: {exc}")
 
 
+_REPO = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
+_PRESENT = object()
+
+
+def _tree_entry(transport: Any, repo: str, tree: str, name: str, where: str) -> Any:
+    """Запись `name` в полностью прочитанном дереве; `None` — её там нет."""
+    from steward.approvalfacts.v3 import Request
+
+    resp = transport.send(Request("GET", f"repos/{repo}/git/trees/{tree}"))
+    body = resp.body
+    if resp.status != 200 or not isinstance(body, dict):
+        return Unavailable(f"{where}: дерево {tree[:12]}: HTTP {resp.status}")
+    entries = body.get("tree")
+    if body.get("truncated") is not False or not isinstance(entries, list):
+        return Unavailable(f"{where}: дерево {tree[:12]} прочитано не полностью")
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("path") == name:
+            return entry
+    return None
+
+
+def _locate(transport: Any, repo: str, parts: list[str], ref: str, where: str) -> Any:
+    """`None` — пути нет в полном дереве коммита; `_PRESENT` — файл есть."""
+    from steward.approvalfacts.v3 import Request
+
+    resp = transport.send(Request("GET", f"repos/{repo}/commits/{ref}"))
+    commit = resp.body.get("commit") if isinstance(resp.body, dict) else None
+    tree = commit.get("tree") if isinstance(commit, dict) else None
+    sha = tree.get("sha") if isinstance(tree, dict) else None
+    if resp.status != 200 or not isinstance(sha, str) or not _SHA.fullmatch(sha):
+        return Unavailable(f"{where}: коммит не прочитан: HTTP {resp.status}")
+    for depth, name in enumerate(parts):
+        entry = _tree_entry(transport, repo, sha, name, where)
+        if entry is None or isinstance(entry, Unavailable):
+            return entry
+        last = depth == len(parts) - 1
+        kind, sha = entry.get("type"), str(entry.get("sha"))
+        if kind == "blob" and last:
+            return _PRESENT
+        if kind == "blob":
+            return None
+        if kind != "tree" or last or not _SHA.fullmatch(sha):
+            return Unavailable(f"{where}: запись дерева {name!r} типа {kind!r}")
+    return None
+
+
 def contents_bytes(
     transport: Any, repo: str, path: str, ref: str
 ) -> bytes | None | Unavailable:
-    """Байты `path` в коммите `ref`; `None` — установленно нет (404).
+    """Байты `path` в коммите `ref`; `None` — пути нет в полном дереве коммита.
 
-    `ref` — SHA уже прочитанного коммита: 404 тогда значит «пути нет», а не
-    «нет коммита». Содержимое обязано хешироваться в git-oid `sha` ответа.
+    Отсутствие устанавливается только деревом (`truncated = false`), прочитанным
+    по сегментам пути; HTTP 404 никогда не «установленное отсутствие» (контракт
+    steward). `ref` — 40-hex SHA. Содержимое обязано хешироваться в git-oid `sha`.
     """
     from steward.approvalfacts.v3 import Request
 
-    if not _SHA.fullmatch(ref):
-        return Unavailable(f"{repo}:{path}: ref не 40-hex SHA: {ref!r}")
-    owner, _, name = repo.partition("/")
-    api = (
-        f"repos/{quote(owner, safe='')}/{quote(name, safe='')}/contents/"
-        f"{quote(path)}?ref={ref}"
-    )
     where = f"{repo}@{ref[:12]}:{path}"
+    parts = path.split("/")
+    if not _REPO.fullmatch(repo) or not _SHA.fullmatch(ref) or not all(parts):
+        return Unavailable(f"{where}: repo/path/ref не в форме owner/name, путь, SHA")
+    found = _locate(transport, repo, parts, ref, where)
+    if found is not _PRESENT:
+        return found
+    api = f"repos/{repo}/contents/{quote(path)}?ref={ref}"
     resp = transport.send(Request("GET", api))
-    if resp.status == 404:
-        return None
     body = resp.body
     if resp.status != 200 or not isinstance(body, dict):
         return Unavailable(f"{where}: HTTP {resp.status} {resp.error or ''}".rstrip())
