@@ -3195,7 +3195,7 @@ error=…)`, «отказ | None», `raise`), но полноту не дока�
 для узлов `review/v1`. Слова владельца: «В-1 — локальный хеш содержимого допустим как оптимизация,
 но он не заменяет проверку одобрения. Перед успешным no-op для review/v1 проверяется актуальный
 допуск.» Принят гибрид (Task 14): вариант (б) — хеш как оптимизация — плюс свежая проверка
-`Statuses.of` узлов `review/v1` перед no-op §I5 (`task_bridge._review_noop_refusal`). История
+`Statuses.of` узлов `review/v1` перед каждым успехом без полного пути (`act_status.noop_refusal`). История
 вопроса (до решения). Спека §9.1 (а) п. 4: «в каноническую проекцию входит производный статус
 из проверенного конверта».
 
@@ -3457,20 +3457,59 @@ error=…)`, «отказ | None», `raise`), но полноту не дока�
   как история выбора.
 - **В-1 → гибрид** (Task 14, шаг `_canonical_dag_hash` — из «ждёт решения» в конкретный):
   байты всех `approvals/` воркстрима в хеше DAG остаются оптимизацией; перед бесследным no-op
-  §I5 (`deliver_superseded` — единственное место no-op по хешу; три других вызова
-  `_content_anchor` величину записывают, раннер no-op по хешу не делает)
-  `task_bridge._review_noop_refusal` заново спрашивает `statuses_at_base(...).of` каждого узла с
-  событием `review/v1`; не `approved`, `unavailable:` или режим не установлен — no-op нет, дальше
-  гейт §I12 по прежним правилам. Тесты: хеш тот же + узел одобрен → no-op; хеш тот же +
-  остановка доставлена / ревью отозвано / доверенный контекст недоступен / режим не
-  установлен → no-op нет, вызван гейт; продукт до миграции — статусы не читаются. Квота С-1:
-  каждый no-op §I5 продукта в `review` стоит одного чтения статусов (доверенный контекст и факты
-  форджи по узлам `review/v1`), как прогон гейта доставки.
-- **Реестр Task 16**: `act_envelope.node_history` (3 строки), `task_bridge._review_noop_refusal`
-  (4), `task_bridge.deliver_superseded#review_noop` (1, `BYPASS` `if traceless:`),
-  `current_event`/`next_generation` — в `MODIFIED_EXISTING` с причиной «выводится из
-  `node_history`». Применимость операторов при ревизии — 267/267 (257 по коду scratch, 10 по AST
-  фрагментов); мутации 8 новых строк — 8 закрыто (6 условие → `False`, 2 `BYPASS`).
+  §I5 заново спрашивается актуальный допуск. Тесты: хеш тот же + узел одобрен → no-op; хеш тот
+  же + остановка доставлена / ревью отозвано / доверенный контекст недоступен / режим не
+  установлен → no-op нет, вызван гейт; продукт до миграции — статусы не читаются.
+- **Правки по d1** (ревью `plan-review-d1`, 2 major одного класса — «ещё один успешный выход без
+  свежей проверки допуска»; второй экземпляр класса → перечень, а не заплатка). Правило владельца
+  «перед успешным no-op для review/v1 проверяется актуальный допуск» применено к **любому
+  успешному раннему выходу**: no-op по хешу, повтор шага по сохранённому `completed`, переход
+  волны по завершённой заявке, возврат уже доставленного PR, повтор доставки из намерения,
+  no-op предложения по frontmatter. Одна точка проверки — `act_status.noop_refusal(state, ops,
+  dag, nodes)` (Task 14): каждый названный узел с событием `review/v1` — `approved` по
+  `statuses_at_base`; режим не установлен / не `approved` / `unavailable:` — успеха нет (fail
+  closed); продукт не в `review` — прежние правила, статусы не читаются (квота С-1 — по одному
+  чтению статусов на каждый такой выход продукта в `review`). D1-1: `_propose` отказывает при
+  `Unavailable` режима сразу после `mode_probe`, до любого no-op. D1-2: сохранённый зелёный S4/S8
+  при неподтверждённом допуске исполняется заново.
+
+  Перечень успешных ранних выходов в путях, которые трогает часть B (`runner.py`,
+  `task_bridge.py`, `approve_node.py`, листинги `act_node.py`; сверено по master `a16e305`):
+
+  | # | Место | Что пропускает | Проверка допуска | Тест |
+  |---|---|---|---|---|
+  | 1 | `task_bridge.deliver_superseded`, no-op §I5 (равный `content_anchor`) | переиздание и гейт §I12 | `_admission_refusal` до no-op; не подтверждено — гейт §I12 по прежним правилам | `test_review_noop_with_fresh_approval`, `test_review_noop_refused_without_fresh_approval[stop_delivered/act_revoked/trust_unavailable]`, `…_when_mode_unset` |
+  | 2 | `deliver_superseded`, повтор `--replace-revision 1` | новую ревизию, гейт | `_require_admission` перед `return repeated` | `test_stored_success_requires_admission[v1_replacement]` |
+  | 3 | `deliver_superseded`, `return_pr` (ревизия `completed`, PR открыт) | новую ревизию, гейт | `_require_admission` перед возвратом | `…[returned_pr]` |
+  | 4 | `deliver_superseded`, `complete` (PR ревизии вмержен) | гейт | то же | `…[returned_merged]` |
+  | 5 | `deliver_superseded`, `continue` с открытым PR | гейт | то же | `…[returned_open]` |
+  | 6 | `deliver_superseded`, повтор доставки из намерения (`started`, PR нет) | гейт §I12 (судился при записи намерения) | `_require_admission` до `_recover_commit` (до эффекта) | `…[redo_intent]` |
+  | 7 | `deliver_superseded`, открытая v1 | новую ревизию, гейт | `_require_admission` перед возвратом | `…[returned_v1]` |
+  | 8 | `task_bridge.deliver_for_run`, `op completed` (вкл. ответ замены v1) | гейт §I12 | `_require_admission` после проверки `pr` | `…[for_run_completed]`, `test_for_run_completed_returns_pr_with_admission` |
+  | 9 | `deliver_for_run`, принят существующий PR по ветке | гейт §I12 | `_require_admission` перед `return existing` | `…[for_run_adopted]` |
+  | 10 | `runner._step_gate`, сохранённый `completed` S4 | гейт steward S4 | `noop_refusal` по узлам уровней ниже волны; нет — гейт заново | `test_s4_completed_gate_rerun_without_admission[stop_delivered/admission_unavailable]`, `test_s4_completed_gate_kept_with_admission` |
+  | 11 | `runner._step_s8`, сохранённый `completed`/`exit=0` | authoritative-гейт S8 | `noop_refusal` по всем узлам; нет — гейт заново | `test_s8_completed_gate_rerun_without_admission[…]`, `test_s8_completed_gate_kept_with_admission` |
+  | 12 | `runner._next_wave` (resume по завершённой заявке ~1058, два выхода `_finalize_wave`) | допуск узлов волны перед следующей | `noop_refusal` по узлам волны; нет — `stopped_review` | `test_next_wave_needs_admission[…]` |
+  | 13 | `approve_node._propose`, режим `Unavailable` | любой no-op | отказ сразу после `mode_probe` (D1-1) | `test_frontmatter_noop_refused_when_mode_unavailable` |
+  | 14 | `approve_node._propose`, no-op по frontmatter в продукте `review` (узел без события) | provenance старого акта (§9.1 (а) п. 3) | `Statuses.of` — не `approved` → новая заявка; `unavailable:` → отказ | `test_frontmatter_noop_in_review_needs_status` |
+  | 15 | `approve_node._propose`, no-op узла `review/v1` | — | уже `Statuses.of == approved` (Task 13) | `test_review_noop_needs_current_status` |
+  | 16 | `approve_node.propose_from_source` | — | успешного выхода без записи нет; `creation` отказывает на `Unavailable` до записи | — |
+  | 17 | `approve_node` старые завершения finalize (`_reconcile_finalize`, «уже в base») | — | только заявки без маркера; в продукте `review` `route` их до старого кода не пускает | — |
+  | 18 | `act_node.route` → `_merged` → `_finalize`/`_reconcile_finalize` | — | полный путь: вердикт доставки заново в каждом вызове | — |
+  | 19 | `act_node.reopen` «остановка уже доставлена», `repropose` завершённой | — | успех — отнятие допуска / отказ, не одобрение | — |
+  | 20 | прочие `completed`-выходы раннера (`_step_wave_branch`, `_step_materialize_brief`, `_step_authoring`, `_step_commit`, `_step_edge`, `_step_candidate`, интервью), `advance` при `merge completed` | — | допуска не судят; следующий судящий шаг — №10–12 | — |
+  | 21 | `task_bridge.deliver_approve` | — | штамп tasks-спеки, узлов бандла не судит (§I12, таблица) | — |
+
+  Строки 1–14 — с проверкой (14 мест, 12 из них новые в d1), 15–21 — разобраны и проверки не
+  требуют (причина в строке).
+- **Реестр Task 16**: `act_envelope.node_history` (3), `act_status.noop_refusal` (4),
+  `task_bridge._require_admission` (1), `deliver_superseded#…` (7), `deliver_for_run#…` (2),
+  `runner._step_gate#completed_admission`, `runner._step_s8#completed_admission`,
+  `runner._next_wave#admission`, `approve_node._propose#mode_unavailable`,
+  `#legacy_noop_review`; `current_event`/`next_generation` — в `MODIFIED_EXISTING`,
+  `task_bridge._admission_refusal` — в `NOT_JUDGMENT` (делегирует). Применимость операторов —
+  281/281 (269 по коду scratch, 12 по AST фрагментов); мутации новых строк: 8 (п. 9, В-1) + 17
+  (d1, исполнимые в scratch) — все закрыты; `_propose#…` (2) — на стенде `World`, Step 4a.
 - **Буква спеки**: В-1 теперь соответствует цели §9.1 (а) п. 4 (проверенный статус спрашивается
   перед no-op), хотя статус не входит в саму проекцию хеша; §9.1 п. 0a («последний доставленный
   candidate, чей манифест включает узел») при (Б) читается как «последний **принятый**» — правка
@@ -9019,6 +9058,46 @@ def test_legacy_candidate_merged_after_review_activation_refused(world: World,
     assert world.state.ops[key]["status"] == al.STATUS_INVALIDATED
 
 
+def test_frontmatter_noop_refused_when_mode_unavailable(world: World, stand: Stand) -> None:
+    """d1 (D1-1): узел честно одобрен по frontmatter, режим акта не установлен — отказ сразу
+    после `mode_probe`, до любого no-op (успеха без актуального допуска нет)."""
+    stand.mode = act_trust.PRE_MIGRATION
+    drive_to_approved(world, "charter")
+    stand.mode_unset = "нет привязки корня доверия"
+    with pytest.raises(RuntimeError, match="режим акта продукта .узел charter.: нет привязки"):
+        approve(world, "charter")
+
+
+def test_frontmatter_noop_in_review_needs_status(world: World, stand: Stand,
+                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    """d1: продукт в `review`, узел без события `review/v1` честно одобрен по frontmatter —
+    no-op только при актуальном статусе (provenance старого акта, §9.1 (а) п. 3); иначе —
+    новая заявка, не no-op."""
+    stand.mode = act_trust.PRE_MIGRATION
+    drive_to_approved(world, "charter")
+    stand.mode = "review"
+    monkeypatch.setattr(act_status.Statuses, "of", lambda self, node: act_status.APPROVED)
+    noop = approve(world, "charter")
+    assert noop.message == "charter: честно одобрен — одобрять нечего (no-op)"
+    monkeypatch.setattr(act_status.Statuses, "of",
+                        lambda self, node: "not_approved:legacy_provenance")
+    outcome = approve(world, "charter")
+    assert outcome.request is not None and outcome.request in world.state.ops
+
+
+def test_review_noop_needs_current_status(world: World, stand: Stand,
+                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    """d1: no-op узла `review/v1` — только по актуальному `Statuses.of`; остановка,
+    доставленная после одобрения, даёт новую заявку, а не no-op."""
+    monkeypatch.setattr(act_status.Statuses, "is_review", lambda self, node: node == "charter")
+    monkeypatch.setattr(act_status.Statuses, "of", lambda self, node: act_status.APPROVED)
+    noop = approve(world, "charter")
+    assert noop.message == "charter: честно одобрен (review/v1) — no-op"
+    monkeypatch.setattr(act_status.Statuses, "of", lambda self, node: "not_approved:stopped:g1")
+    outcome = approve(world, "charter")
+    assert outcome.request is not None and outcome.request in world.state.ops
+
+
 def test_merged_unmarked_with_unset_mode_stays_alive(world: World, stand: Stand) -> None:
     """B1-5: смёржен без маркера, режим продукта не установлен (откат review → merge) —
     заявка жива, старый код не продолжает."""
@@ -10108,8 +10187,10 @@ def _try_agent_merge(state, ops, dag, op, nodes, pr, head, *,
 
     deps = act_node.DEPS_FACTORY(state)
     live = act_status.mode_probe(state, deps)  # один раз: и статус, и режим создания
+    if isinstance(live, Unavailable):  # d1 (D1-1): до любого no-op — режим неизвестен
+        raise _unresolved(f"режим акта продукта (узел {node_id}): {live.reason}")
     statuses = (act_status.statuses_at_base(state, ops, dag, live, deps)
-                if not isinstance(live, Unavailable) and live.mode == "review" else None)
+                if live.mode == "review" else None)
 ```
 
 после `_require_no_reopened_pr(...)`, до `self_hash`:
@@ -10130,6 +10211,14 @@ def _try_agent_merge(state, ops, dag, op, nodes, pr, head, *,
         debt = _review_debt(node_id, text, verdict)
     else:
         debt = na.node_debt(node_id, text, upstream_blobs)
+        if debt is None and statuses is not None:
+            # d1: продукт в `review` — frontmatter без долга лишь предпосылка (§9.1 (а) п. 3);
+            # no-op только при актуальном статусе узла (provenance старого акта)
+            verdict = statuses.of(node_id)
+            if verdict.startswith("unavailable:"):
+                raise _unresolved(f"статус узла {node_id} без события review/v1: {verdict}")
+            if verdict != act_status.APPROVED:
+                debt = _review_debt(node_id, text, verdict)
         if debt is None:
             return ApprovalOutcome(f"{node_id}: честно одобрен — одобрять нечего (no-op)")
         if debt.kind in (na.DEBT_PINS, na.DEBT_UNKNOWN_STATUS):
@@ -10137,7 +10226,10 @@ def _try_agent_merge(state, ops, dag, op, nodes, pr, head, *,
 ```
 
 (Порядок «гварды до первой записи» сохраняется: `mode_probe`, `statuses_at_base` и `creation`
-только читают; неустановленный режим отказывает в `creation` до записи.)
+только читают. Неустановленный режим отказывает **сразу после `mode_probe`**, до любого no-op
+(ревью d1, D1-1): прежняя редакция оставляла `statuses=None` и отдавала no-op по frontmatter.
+Каждый успешный ранний выход `_propose` для продукта в `review` идёт от `Statuses.of` — перечень
+в разделе ревизии «Решения владельца 01.11».)
 Присоединение и запись:
 
 ```python
@@ -10854,10 +10946,12 @@ B1-6, B1-8, B1-9 — см. «Правки по ревью b1».
 - Modify: `governance/node_approval.py` (`DEBT_REVIEW_V1`)
 - Modify: `governance/approve_node.py` (`_legacy_outcome` + `LegacyHalt` выделены из
   `_reconcile_candidate` ~1787 — Step 3a; `read_dag_state` ~480, `_require_upstream_ready` ~939)
-- Modify: `governance/runner.py` (`_step_gate` S4 ~3275, `_step_s8` ~4024 — режим и провайдер)
+- Modify: `governance/runner.py` (`_step_gate` S4 ~3275, `_step_s8` ~4024 — режим и провайдер;
+  сохранённый зелёный гейт S4/S8 и `_next_wave` ~1300 — актуальный допуск, d1)
 - Modify: `governance/task_bridge.py` (`_canonical_dag_hash` ~1138 — байты `approvals/` как
-  оптимизация; `deliver_superseded` ~4155 и новый `_review_noop_refusal` — свежий допуск узлов
-  `review/v1` перед no-op §I5; В-1, решение владельца 01.11)
+  оптимизация; `_admission_refusal`/`_require_admission` — актуальный допуск перед no-op §I5
+  `deliver_superseded` и перед каждым успехом по сохранённому результату; В-1, решение
+  владельца 01.11, d1)
 - Modify: `tests/conftest.py` — изоляция путей акта для тестов вне `act_*` (перенесено сюда из
   Task 13: с этой задачи старые пути зовут `mode_probe`)
 - Test: `tests/test_act_status.py`, `tests/test_act_legacy.py`, `tests/test_act_gate.py`;
@@ -10897,7 +10991,10 @@ B1-6, B1-8, B1-9 — см. «Правки по ревью b1».
   `act_status.gate_run(state, ops, dag, *, candidate, out, deps=None) -> tuple[str, str | None] | Unavailable`;
   `act_status.pr_for_merge(ops, slug, merge_commit) -> int | Unavailable`;
   `act_status.REQUEST_BINDING`; `node_approval.DEBT_REVIEW_V1 = "review_v1"`;
-  `task_bridge._review_noop_refusal(state, ops, legacy_bundle) -> str | None` (В-1).
+  `act_status.noop_refusal(state, ops, dag, nodes=None, deps=None) -> str | None` — одна точка
+  «актуальный допуск перед успехом без полного пути» (В-1, d1);
+  `task_bridge._admission_refusal(state, ops, legacy_bundle) -> str | None`,
+  `task_bridge._require_admission(state, ops, legacy_bundle, done) -> None`.
 
 **Режим продукта сейчас** (§6.1, §10; ревизия b1, B1-5): `live_policy` — привязка обязательна
 (нет — `Unavailable`), режим — `act_trust.product_mode` по **истории** режима: записи не было
@@ -10938,20 +11035,19 @@ first-parent базы (доставленная заявка с манифест
 Гибрид: (1) в манифест хеша входят блобы **всех** файлов `approvals/` воркстрима — конверты,
 манифесты заявок (`requests/`), записи остановки (вариант (б), листинг Step 5): новое поколение,
 остановка, supersede меняют хеш без чтений форджи; у продукта без `approvals/` величина прежняя;
-(2) равный хеш для узлов `review/v1` **одного** no-op не даёт: перед бесследным no-op §I5
-(`deliver_superseded`) `_review_noop_refusal` заново спрашивает допуск каждого узла с событием
-`review/v1` тем же входом, что гейт доставки (`act_status.statuses_at_base`, доверенный контекст
-§9.1); не `approved`, `unavailable:` или режим не установлен — no-op не объявляется, дальше гейт
-§I12 (`read_dag_state`) по прежним правилам: долг — отказ, недоступно — стоп. Продукт не в
-`review` — прежнее правило §I5, статусы не читаются. Мест no-op по хешу в коде одно — §I5
-`deliver_superseded`; из четырёх вызовов `_content_anchor` остальные три записывают величину
-(`_delivered_content_anchor` ~2333 при реконсиляции, через него ~2552, штамп доставки ~2585) и
-no-op не объявляют; раннер no-op по хешу не делает (сверено по `content_anchor`/
-`SupersedeResult`/`deliver_superseded` в `governance/runner.py`); no-op `approve_node._propose`/
-`propose_from_source` для `review/v1` уже идёт от `Statuses.of` (Task 13). Буква спеки: §9.1 (а)
-п. 4 требует, чтобы изменение допуска не скрывалось за no-op, — проверенный статус спрашивается
-перед каждым no-op. Цена — квота С-1: каждый no-op §I5 продукта в `review` читает доверенный
-контекст и факты форджи по узлам `review/v1` (как один прогон гейта доставки).
+(2) равный хеш для узлов `review/v1` **одного** no-op не даёт. Класс шире хеша (ревью d1):
+**любой успешный ранний выход** — no-op §I5, повтор шага по сохранённому результату (`completed`
+S4/S8), переход волны по завершённой заявке, возврат уже доставленного PR, no-op предложения по
+frontmatter — для продукта в `review` требует актуального допуска. Одна точка —
+`act_status.noop_refusal(state, ops, dag, nodes)`: каждый названный узел с событием `review/v1` —
+`approved` по `statuses_at_base` (доверенный контекст §9.1); режим не установлен, не `approved`,
+`unavailable:` — причина, успеха нет (fail closed); продукт не в `review` — прежние правила,
+статусы не читаются. Полный перечень мест (site × что пропускает × где проверка × тест) — в
+разделе ревизии «Решения владельца 01.11»; код — Step 5 (мост, раннер) и Task 13 (`_propose`).
+Буква спеки: §9.1 (а) п. 4 требует, чтобы изменение допуска не скрывалось за no-op, —
+проверенный статус спрашивается перед каждым успехом без полного пути. Цена — квота С-1: каждый
+такой выход продукта в `review` читает доверенный контекст и факты форджи по узлам `review/v1`
+(как один прогон гейта доставки).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -12168,6 +12264,103 @@ def test_s4_stops_when_act_mode_unset(tmp_path: Path, runs_root, monkeypatch) ->
     findings = (rs.run_dir("r-act-gate") / "gate-findings.txt").read_text(encoding="utf-8")
     assert "GC-ACT-UNAVAILABLE(devtools)" in findings and "HTTP 403" in findings
     assert ops.gate_modes == []
+
+
+def _review_admission(monkeypatch, verdicts: dict[str, str]) -> None:
+    """Продукт в `review`; узлы с событием `review/v1` — с заданными статусами."""
+    from governance import act_status
+
+    live = SimpleNamespace(mode="review")
+    monkeypatch.setattr(act_status, "mode_probe", lambda state, deps=None: live)
+    statuses = SimpleNamespace(is_review=lambda node: node in verdicts,
+                               of=lambda node: verdicts[node])
+    monkeypatch.setattr(act_status, "statuses_at_base",
+                        lambda state, ops, dag, live, deps=None: statuses)
+
+
+def _wave_state(tmp_path: Path, run_id: str, wave: int) -> tuple[rs.RunState, FakeOps]:
+    ops = FakeOps(s8_exit=0)
+    state = _wave_run_at_s8(tmp_path, run_id, ops)
+    state.wave = wave
+    return state, ops
+
+
+def _gate_rerun(*_args, **_kwargs):
+    raise RuntimeError("гейт S4 заново")
+
+
+ADMISSION_LOST = ["not_approved:stopped:g1", "unavailable:df-trust: HTTP 403"]
+
+
+@pytest.mark.parametrize("verdict", ADMISSION_LOST, ids=["stop_delivered", "admission_unavailable"])
+def test_s4_completed_gate_rerun_without_admission(tmp_path, runs_root, monkeypatch, capsys,
+                                                   verdict: str) -> None:
+    """Решение владельца 01.11 (d1, D1-2): повторный вход в S4 с сохранённым зелёным гейтом —
+    после доставленной остановки узла нижнего уровня или при недоступном допуске гейт
+    исполняется заново, а не пропускается."""
+    from governance import runner
+
+    state, ops = _wave_state(tmp_path, "r-adm-s4", wave=2)
+    state.ops[runner.wave_key(state, "gate-candidate")] = {"status": "completed"}
+    _review_admission(monkeypatch, {"charter": verdict})
+    monkeypatch.setattr(runner, "wave_profile_dir", _gate_rerun)
+    with pytest.raises(RuntimeError, match="гейт S4 заново"):
+        runner._step_gate(state, ops)
+    assert f"допуск review/v1 не подтверждён (узел charter: {verdict})" in capsys.readouterr().out
+
+
+def test_s4_completed_gate_kept_with_admission(tmp_path, runs_root, monkeypatch) -> None:
+    """d1: допуск подтверждён — сохранённый S4 пропускается, как раньше."""
+    from governance import runner
+
+    state, ops = _wave_state(tmp_path, "r-adm-s4-ok", wave=2)
+    state.ops[runner.wave_key(state, "gate-candidate")] = {"status": "completed"}
+    _review_admission(monkeypatch, {"charter": "approved"})
+    monkeypatch.setattr(runner, "wave_profile_dir", _gate_rerun)
+    assert runner._step_gate(state, ops) is True
+
+
+@pytest.mark.parametrize("verdict", ADMISSION_LOST, ids=["stop_delivered", "admission_unavailable"])
+def test_s8_completed_gate_rerun_without_admission(tmp_path, runs_root, monkeypatch, capsys,
+                                                   verdict: str) -> None:
+    """d1 (D1-2): повторный вход в S8 с сохранённым `exit=0` — после доставленной остановки
+    или при недоступном допуске гейт исполняется заново (здесь — до чекаута базы)."""
+    from governance import runner
+
+    state, ops = _wave_state(tmp_path, "r-adm-s8", wave=5)
+    state.ops["gate-authoritative"] = {"status": "completed", "exit": 0, "output": ""}
+    _review_admission(monkeypatch, {"design": verdict})
+
+    def _checkout(*_args):
+        raise RuntimeError("чекаут базы: гейт заново")
+
+    monkeypatch.setattr(ops, "checkout_and_pull", _checkout)
+    assert runner._step_s8(state, ops) is False
+    assert state.ops["gate-authoritative"]["status"] == "started"
+    assert f"допуск review/v1 не подтверждён (узел design: {verdict})" in capsys.readouterr().out
+
+
+def test_s8_completed_gate_kept_with_admission(tmp_path, runs_root, monkeypatch) -> None:
+    """d1: допуск подтверждён — сохранённый `exit=0` завершает S8, как раньше."""
+    from governance import runner
+
+    state, ops = _wave_state(tmp_path, "r-adm-s8-ok", wave=5)
+    state.ops["gate-authoritative"] = {"status": "completed", "exit": 0, "output": ""}
+    _review_admission(monkeypatch, {"design": "approved"})
+    assert runner._step_s8(state, ops) is True
+
+
+@pytest.mark.parametrize("verdict", ADMISSION_LOST, ids=["stop_delivered", "admission_unavailable"])
+def test_next_wave_needs_admission(tmp_path, runs_root, monkeypatch, verdict: str) -> None:
+    """d1: переход волны по завершённой заявке — только при актуальном допуске узлов волны;
+    иначе `stopped_review`, волна та же."""
+    from governance import runner
+
+    state, ops = _wave_state(tmp_path, "r-adm-next", wave=1)
+    _review_admission(monkeypatch, {"charter": verdict})
+    monkeypatch.setattr(runner, "advance", lambda state, ops, *, lock: state)
+    got = runner._next_wave(state, ops, lock=None)
+    assert (got.status, got.wave) == ("stopped_review", 1)
 ```
 
 Дополнение `tests/test_governance_task_bridge.py` (В-1, решение владельца 01.11):
@@ -12328,6 +12521,44 @@ def test_noop_without_review_nodes_reads_no_statuses(tmp_path, monkeypatch) -> N
                         lambda *a, **k: pytest.fail("статусы для продукта до миграции"))
     state = _equal_anchor_state(tmp_path, monkeypatch)
     assert tb.deliver_superseded(state, _ProvOps(prs=[_MERGED_PR])) == tb.SupersedeResult("noop")
+
+
+def _for_run_completed(tmp_path: Path, monkeypatch) -> int:
+    """Доставка уже записана `completed` — повтор возвращает её PR."""
+    state = _recon_state(tmp_path, monkeypatch, op={"status": "completed", "pr": 5})
+    return task_bridge.deliver_for_run(state, _ReconOps())
+
+
+#: Успешные выходы по сохранённому результату (d1): сценарий — существующий тест этого исхода.
+_STORED_SUCCESS = {
+    "for_run_completed": lambda tp, mp, cs: _for_run_completed(tp, mp),
+    "for_run_adopted": lambda tp, mp, cs: test_deliver_for_run_adopts_existing_pr_by_branch(tp, mp),
+    "returned_pr": lambda tp, mp, cs: test_supersede_returns_existing_pr_when_revision_completed(tp, mp),
+    "returned_merged": lambda tp, mp, cs: test_supersede_completes_started_revision_with_merged_pr(tp, mp),
+    "returned_open": lambda tp, mp, cs: test_supersede_resumes_started_revision_with_open_pr(tp, mp),
+    "returned_v1": lambda tp, mp, cs: test_supersede_returns_open_pr_of_first_delivery(tp, mp),
+    "v1_replacement": lambda tp, mp, cs: test_replace_v1_repeat_after_live_replacement_explains(
+        "OPEN", tp, mp, cs),
+    "redo_intent": lambda tp, mp, cs: test_supersede_resumes_started_revision_without_pr(tp, mp),
+}
+
+
+def test_for_run_completed_returns_pr_with_admission(tmp_path, monkeypatch) -> None:
+    """d1: допуск подтверждён (продукт до миграции) — повтор возвращает записанный PR."""
+    assert _for_run_completed(tmp_path, monkeypatch) == 5
+
+
+@pytest.mark.parametrize("site", sorted(_STORED_SUCCESS))
+def test_stored_success_requires_admission(tmp_path, monkeypatch, capsys, site: str) -> None:
+    """Решение владельца 01.11 (d1): успех по сохранённому результату — возврат уже
+    доставленного PR, повтор доставки из намерения — для продукта в `review` только при
+    актуальном допуске узлов `review/v1`; иначе отказ, успеха нет."""
+    from governance import act_status
+
+    monkeypatch.setattr(act_status, "noop_refusal",
+                        lambda *a, **k: "узел requirements: not_approved:stopped:g1")
+    with pytest.raises(RuntimeError, match="допуск review/v1 не подтверждён — узел requirements"):
+        _STORED_SUCCESS[site](tmp_path, monkeypatch, capsys)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -12538,7 +12769,7 @@ import json
 import os
 import re
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13229,6 +13460,33 @@ def mode_probe(state: RunState, deps: Deps | None = None) -> LivePolicy | Unavai
     return live_policy(state, deps or real_deps(state))
 
 
+def noop_refusal(state: RunState, ops: Ops, dag: Dag, nodes: Iterable[str] | None = None,
+                 deps: Deps | None = None) -> str | None:
+    """Почему успех без полного пути не допускается, или `None` (решение владельца 01.11).
+
+    Любой успешный ранний выход — бесследный no-op §I5, повтор шага по сохранённому
+    результату, переход волны по завершённой заявке, возврат уже доставленного PR — для
+    продукта в `review` требует актуального допуска: каждый названный узел (`None` — все узлы
+    DAG) с событием `review/v1` — `approved` по `statuses_at_base` (доверенный контекст,
+    §9.1). Режим не установлен, узел не `approved` или статус недоступен — причина (fail
+    closed); продукт не в `review` — `None`, прежние правила. Цена — квота С-1."""
+    live = mode_probe(state, deps)
+    if isinstance(live, Unavailable):
+        return f"режим акта продукта: {live.reason}"
+    if live.mode != "review":
+        return None
+    statuses = statuses_at_base(state, ops, dag, live, deps)
+    wanted = None if nodes is None else set(nodes)
+    for fname, _upstreams in dag:
+        node = bundle_dag.node_id(fname)
+        if (wanted is not None and node not in wanted) or not statuses.is_review(node):
+            continue
+        verdict = statuses.of(node)
+        if verdict != APPROVED:
+            return f"узел {node}: {verdict}"
+    return None
+
+
 # --- гейты steward (Р-10) -----------------------------------------------------------
 
 
@@ -13412,42 +13670,31 @@ envelope_path`, `PurePosixPath` — уже в модуле.
 
 (докстринг `_canonical_dag_hash` дополняется абзацем «`review/v1`: байты всех файлов
 `workstreams/<ws-id>/approvals/` — конверты, манифесты, остановки — входят в хеш, эпоха `v3`
-(В-1); равный хеш одного no-op узлов `review/v1` не даёт — `_review_noop_refusal`».)
+(В-1); равный хеш одного no-op узлов `review/v1` не даёт — `_admission_refusal`».)
 
-`governance/task_bridge.py`, В-1 часть (2) — свежий допуск перед no-op §I5. Новая функция (перед
-`deliver_superseded`; `_dag_for` и `_node_id` — уже в модуле, импорты `act_status`/`act_time`
-локальные, как у прочих путей вне `act_*`, — цикла импорта нет):
+`governance/task_bridge.py`, В-1 часть (2) и d1 — актуальный допуск перед успехом без полного
+пути. Две функции (перед `deliver_superseded`; `_dag_for` — уже в модуле, импорт `act_status`
+локальный, как у прочих путей вне `act_*`, — цикла импорта нет):
 
 ```python
-def _review_noop_refusal(
+def _admission_refusal(
     state: RunState, ops: Ops, legacy_bundle: int | None
 ) -> str | None:
-    """Почему бесследный no-op §I5 не объявляется для узлов `review/v1`, или `None`.
-
-    В-1 (решение владельца 01.11): равный `content_anchor` (байты DAG и всех файлов
-    `approvals/` воркстрима) — оптимизация, а не проверка одобрения. Перед no-op каждый
-    узел с событием `review/v1` проверяется заново тем же входом, что гейт доставки
-    (`act_status.statuses_at_base` по доверенному контексту, §9.1): не `approved` или
-    недоступно — причина; режим акта не установлен — причина. Продукт не в `review` —
-    `None`: прежнее правило §I5. Цена — чтения форджи на каждый no-op (С-1)."""
+    """Актуальный допуск узлов `review/v1` бандла перед успехом без полного пути
+    (решение владельца 01.11) — `act_status.noop_refusal` по DAG прогона."""
     from governance import act_status
-    from governance.act_time import Unavailable
 
-    live = act_status.mode_probe(state)
-    if isinstance(live, Unavailable):
-        return f"режим акта продукта: {live.reason}"
-    if live.mode != "review":
-        return None
-    dag = _dag_for(legacy_bundle)
-    statuses = act_status.statuses_at_base(state, ops, dag, live)
-    for fname, _upstreams in dag:
-        node = _node_id(fname)
-        if not statuses.is_review(node):
-            continue
-        verdict = statuses.of(node)
-        if verdict != act_status.APPROVED:
-            return f"узел {node}: {verdict}"
-    return None
+    return act_status.noop_refusal(state, ops, _dag_for(legacy_bundle))
+
+
+def _require_admission(
+    state: RunState, ops: Ops, legacy_bundle: int | None, done: str
+) -> None:
+    """Успех по сохранённому результату (доставка уже есть) — только при актуальном
+    допуске узлов `review/v1`; иначе отказ (fail closed), сохранённое не меняется."""
+    refusal = _admission_refusal(state, ops, legacy_bundle)
+    if refusal is not None:
+        raise RuntimeError(f"{done}, но допуск review/v1 не подтверждён — {refusal}")
 ```
 
 `deliver_superseded` (~4510–4542): условие бесследного no-op выносится в имя `traceless` (комментарий
@@ -13461,7 +13708,7 @@ def _review_noop_refusal(
     # В-1 (решение владельца 01.11): равный хеш — оптимизация, допуск узлов
     # `review/v1` проверяется заново перед no-op; не подтверждён — дальше гейт
     # §I12 (`read_dag_state`) по прежним правилам: долг — отказ, недоступно — стоп.
-    unconfirmed = _review_noop_refusal(state, ops, legacy_bundle) if traceless else None
+    unconfirmed = _admission_refusal(state, ops, legacy_bundle) if traceless else None
     if unconfirmed is not None:
         print(
             "апстрим не менялся, но допуск review/v1 не подтверждён — "
@@ -13471,8 +13718,83 @@ def _review_noop_refusal(
         ...  # прежнее тело no-op: печать, `_debt_notice`, `return SupersedeResult("noop")`
 ```
 
-Существующие тесты no-op — без правок: `tests/conftest.py` даёт продукт до миграции, статусы не
-читаются (`test_noop_without_review_nodes_reads_no_statuses`).
+Успехи по сохранённому результату (d1) — строка `_require_admission(...)` **перед** каждым:
+
+| Место (master `a16e305`) | Вставка |
+|---|---|
+| `deliver_for_run`, `op completed` (~2514; покрывает и возврат замены v1, и `return pr_done`) | после `if pr_done is None: raise _missing_pr(state)`: `_require_admission(state, ops, legacy_bundle, f"tasks-спека уже доставлена (PR #{pr_done})")` |
+| `deliver_for_run`, найден PR по ветке (~2557) | перед `return existing`: `_require_admission(state, ops, legacy_bundle, f"принят существующий PR #{existing}")` |
+| `deliver_superseded`, повтор `--replace-revision 1` (~4282) | перед `return repeated`: `_require_admission(state, ops, legacy_bundle, f"возврат PR #{repeated.pr} замены первой доставки")` |
+| `deliver_superseded`, `return_pr` (~4336) | перед `return SupersedeResult("returned", pr)`: `… f"возврат PR #{pr} ревизии {n}"` |
+| `deliver_superseded`, `complete` (MERGED, ~4350) | перед возвратом: `… f"возврат вмерженного PR #{pr} ревизии {n}"` |
+| `deliver_superseded`, `continue` с открытым PR (~4377) | перед возвратом: `… f"возврат открытого PR #{pr} ревизии {n}"` |
+| `deliver_superseded`, повтор доставки из намерения (`started`, PR нет, ~4385) | перед `_recover_commit(...)` (до любого эффекта): `… f"повтор доставки ревизии {n} из намерения"` |
+| `deliver_superseded`, открытая v1 (~4489) | перед `return SupersedeResult("returned", v1_pr)`: `… f"возврат PR #{v1_pr} первой доставки"` |
+
+Отказ — `RuntimeError` «<что>, но допуск review/v1 не подтверждён — <причина>»; сохранённое не
+меняется. Существующие тесты этих исходов — без правок: `tests/conftest.py` даёт продукт до
+миграции, `noop_refusal` возвращает `None` без чтения статусов.
+
+`governance/runner.py` (d1, D1-2) — сохранённый зелёный гейт и переход волны. `_step_gate` — вместо
+`if op_status(state, key) == "completed": return True`:
+
+```python
+    key = wave_key(state, "gate-candidate")
+    if op_status(state, key) == "completed":
+        # Решение владельца 01.11: сохранённый зелёный гейт — успех без полного пути;
+        # для `review/v1` — только при актуальном допуске судимых им узлов (уровни
+        # ниже волны), иначе гейт заново по прежним правилам.
+        from governance import act_status
+
+        settled = [n for n, level in bundle_dag.levels(_wave_dag()).items()
+                   if level < _wave_level(state)]
+        refusal = act_status.noop_refusal(state, ops, _wave_dag(), settled)
+        if refusal is None:
+            return True
+        print(f"S4: сохранённый гейт не принят — допуск review/v1 не подтверждён "
+              f"({refusal}); гейт заново")
+        op_start(state, key)
+```
+
+`_step_s8` — перед `if gate_op is not None and gate_op["status"] == "completed":` (существующий
+`gate_op = state.ops.get(key)` — первая строка фрагмента):
+
+```python
+    gate_op = state.ops.get(key)
+
+    if gate_op is not None and gate_op["status"] == "completed" and gate_op.get("exit") == 0:
+        # Решение владельца 01.11: сохранённый зелёный S8 — успех без полного пути;
+        # для `review/v1` — только при актуальном допуске всех узлов, иначе гейт заново.
+        from governance import act_status
+
+        refusal = act_status.noop_refusal(state, ops, _wave_dag())
+        if refusal is not None:
+            print(f"S8: сохранённый гейт не принят — допуск review/v1 не подтверждён "
+                  f"({refusal}); гейт заново")
+            op_start(state, key)
+            gate_op = state.ops[key]
+```
+
+`_next_wave` (~1300; три вызова — resume по завершённой заявке ~1058 и два в `_finalize_wave`) —
+первыми строками тела:
+
+```python
+    from governance import act_status
+
+    dag = _wave_dag()
+    wave_nodes = [n for n, level in bundle_dag.levels(dag).items()
+                  if level == _wave_level(state)]
+    refusal = act_status.noop_refusal(state, ops, dag, wave_nodes)
+    if refusal is not None:
+        # Решение владельца 01.11: переход по завершённой заявке — успех по сохранённому
+        # результату; для `review/v1` — только при актуальном допуске узлов волны.
+        _stop_with_comment(
+            state, ops, "stopped_review",
+            f"волна {state.wave}: заявка завершена, но допуск review/v1 не подтверждён — "
+            f"{refusal}; разберите узел (`--reopen`/`--repropose`), затем resume",
+        )
+        return state
+```
 
 - [ ] **Step 6: Run tests to verify they pass**
 
@@ -15254,7 +15576,7 @@ EXISTING_ADDITIONS = {
     "approval_ledger": ("record_review_act", "audit_events", "record_audit", "successor_of"),
     "act_decision": ("find_act", "merger_allowed"),
     "act_envelope": ("expected_envelope", "node_history"),
-    "task_bridge": ("_review_noop_refusal",),
+    "task_bridge": ("_admission_refusal", "_require_admission"),
     "act_settings": ("config_home",),
     "approve_node": ("_legacy_outcome", "_review_debt"),
 }
@@ -15263,13 +15585,15 @@ EXISTING_ADDITIONS = {
 #: ведёт ревьюер задачи (детектор формы его не доказывает); сверено с листингами Tasks 11–16.
 MODIFIED_EXISTING = {
     "approve_node._propose": ("act_incompatible", "other_pin", "status_unavailable",
-                              "successor_joins_live"),
+                              "successor_joins_live", "mode_unavailable",
+                              "legacy_noop_review"),
     "approve_node.read_dag_state": ("mode_unset", "status_unavailable", "review_debt"),
     "approve_node._require_upstream_ready": ("mode_unset", "upstream_unavailable",
                                              "upstream_not_approved"),
     "approve_node._try_agent_merge": ("form",),
-    "runner._step_gate": ("act_mode_unset",),
-    "runner._step_s8": ("act_mode_unset",),
+    "runner._step_gate": ("act_mode_unset", "completed_admission"),
+    "runner._step_s8": ("act_mode_unset", "completed_admission"),
+    "runner._next_wave": ("admission",),
     "act_envelope.envelope_refusal": ("bytes", "pins"),
     "approve_node._advance": "маршрутизация в `act_node.route` до выбора шага; своей проверки нет",
     "approve_node._reconcile_candidate": "проверки вынесены в `_legacy_outcome` (Task 14 Step 3a), новых нет",
@@ -15279,7 +15603,10 @@ MODIFIED_EXISTING = {
     "approval_ledger.start_request": "пишет поле `predecessor`; проверок нет",
     "task_bridge._canonical_dag_hash": "хеш (В-1), не суждение",
     "task_bridge._content_anchor": "пробрасывает `ws_id`; не суждение",
-    "task_bridge.deliver_superseded": ("review_noop",),
+    "task_bridge.deliver_superseded": ("review_noop", "replacement_repeat", "returned_pr",
+                                       "returned_merged", "returned_open", "redo_intent",
+                                       "returned_v1"),
+    "task_bridge.deliver_for_run": ("completed", "adopted"),
     "act_envelope.current_event": "выводится из `node_history` (п. 9 (Б), 01.11); своей проверки нет",
     "act_envelope.next_generation": "выводится из `node_history` (п. 9 (Б), 01.11); своей проверки нет",
     "ops.RealOps.gate_check_s8": "аргументы `--act-mode`/`--node-status`; не суждение",
@@ -15704,20 +16031,24 @@ JUDGMENT = {
           f"{E}::test_non_monotonic_request_ignored",
           '"узел req: поколение 2 не больше прежнего 2"'),
     ),
-    "task_bridge._review_noop_refusal": (  # В-1, решение владельца 01.11
-        r("mode_unset", "task_bridge._review_noop_refusal", "isinstance(live, Unavailable)",
+    "act_status.noop_refusal": (  # В-1 и d1, решение владельца 01.11
+        r("mode_unset", "act_status.noop_refusal", "isinstance(live, Unavailable)",
           f"{TB}::test_review_noop_refused_when_mode_unset",
           '"бесследного no-op нет (режим акта продукта: нет привязки)"'),
-        r("stopped", "task_bridge._review_noop_refusal", "verdict != act_status.APPROVED",
+        r("stopped", "act_status.noop_refusal", "verdict != APPROVED",
           f"{TB}::test_review_noop_refused_without_fresh_approval[stop_delivered]",
           '"not_approved:stopped:g1"'),
-        r("act_revoked", "task_bridge._review_noop_refusal", "verdict != act_status.APPROVED",
+        r("act_revoked", "act_status.noop_refusal", "verdict != APPROVED",
           f"{TB}::test_review_noop_refused_without_fresh_approval[act_revoked]",
           '"not_approved:act:d1_no_act"'),
-        r("unavailable", "task_bridge._review_noop_refusal", "verdict != act_status.APPROVED",
+        r("unavailable", "act_status.noop_refusal", "verdict != APPROVED",
           f"{TB}::test_review_noop_refused_without_fresh_approval[trust_unavailable]",
           '"unavailable:df-trust: HTTP 403"'),
     ),
+    "task_bridge._require_admission": (r("refused", "task_bridge._require_admission",
+                                         "if refusal is not None",
+                                         f"{TB}::test_stored_success_requires_admission[returned_pr]",
+                                         '"допуск review/v1 не подтверждён — узел requirements"'),),
     "act_status.Statuses._compute": (
         r("stop", "act_status.Statuses._compute", "isinstance(current, DeliveredStop)",
           f"{S}::test_stop_makes_node_not_approved", '"not_approved:stopped:g1"'),
@@ -16038,6 +16369,47 @@ JUDGMENT = {
                                            "tests/test_governance_runner.py::test_s4_stops_when_act_mode_unset"),),
     "runner._step_s8#act_mode_unset": (r("mode", "runner._step_s8", "S8: режим акта не установлен",
                                          "tests/test_governance_runner.py::test_s8_stops_when_act_mode_unset"),),
+    'task_bridge.deliver_superseded#replacement_repeat': (r("admission", 'task_bridge.deliver_superseded', 'f"возврат PR #{repeated.pr} замены первой доставки"',
+        f"{TB}::test_stored_success_requires_admission[v1_replacement]",
+        '"допуск review/v1 не подтверждён — узел requirements"'),),
+    'task_bridge.deliver_superseded#returned_pr': (r("admission", 'task_bridge.deliver_superseded', 'f"возврат PR #{pr} ревизии {n}"',
+        f"{TB}::test_stored_success_requires_admission[returned_pr]",
+        '"допуск review/v1 не подтверждён — узел requirements"'),),
+    'task_bridge.deliver_superseded#returned_merged': (r("admission", 'task_bridge.deliver_superseded', 'f"возврат вмерженного PR #{pr} ревизии {n}"',
+        f"{TB}::test_stored_success_requires_admission[returned_merged]",
+        '"допуск review/v1 не подтверждён — узел requirements"'),),
+    'task_bridge.deliver_superseded#returned_open': (r("admission", 'task_bridge.deliver_superseded', 'f"возврат открытого PR #{pr} ревизии {n}"',
+        f"{TB}::test_stored_success_requires_admission[returned_open]",
+        '"допуск review/v1 не подтверждён — узел requirements"'),),
+    'task_bridge.deliver_superseded#redo_intent': (r("admission", 'task_bridge.deliver_superseded', 'f"повтор доставки ревизии {n} из намерения"',
+        f"{TB}::test_stored_success_requires_admission[redo_intent]",
+        '"допуск review/v1 не подтверждён — узел requirements"'),),
+    'task_bridge.deliver_superseded#returned_v1': (r("admission", 'task_bridge.deliver_superseded', 'f"возврат PR #{v1_pr} первой доставки"',
+        f"{TB}::test_stored_success_requires_admission[returned_v1]",
+        '"допуск review/v1 не подтверждён — узел requirements"'),),
+    'task_bridge.deliver_for_run#completed': (r("admission", 'task_bridge.deliver_for_run', 'f"tasks-спека уже доставлена (PR #{pr_done})"',
+        f"{TB}::test_stored_success_requires_admission[for_run_completed]",
+        '"допуск review/v1 не подтверждён — узел requirements"'),),
+    'task_bridge.deliver_for_run#adopted': (r("admission", 'task_bridge.deliver_for_run', 'f"принят существующий PR #{existing}"',
+        f"{TB}::test_stored_success_requires_admission[for_run_adopted]",
+        '"допуск review/v1 не подтверждён — узел requirements"'),),
+    "runner._step_gate#completed_admission": (r("admission", "runner._step_gate", "refusal is None",
+        "tests/test_governance_runner.py::test_s4_completed_gate_rerun_without_admission[stop_delivered]",
+        '"гейт S4 заново"'),),
+    "runner._step_s8#completed_admission": (r("admission", "runner._step_s8", "refusal is not None",
+        "tests/test_governance_runner.py::test_s8_completed_gate_rerun_without_admission[stop_delivered]",
+        '"started"'),),
+    "runner._next_wave#admission": (r("admission", "runner._next_wave", "refusal is not None",
+        "tests/test_governance_runner.py::test_next_wave_needs_admission[stop_delivered]",
+        '"stopped_review"'),),
+    "approve_node._propose#mode_unavailable": (r("mode", "approve_node._propose",
+        "режим акта продукта (узел {node_id})",
+        f"{N}::test_frontmatter_noop_refused_when_mode_unavailable",
+        '"режим акта продукта .узел charter.: нет привязки"'),),
+    "approve_node._propose#legacy_noop_review": (r("status", "approve_node._propose",
+        "debt is None and statuses is not None",
+        f"{N}::test_frontmatter_noop_in_review_needs_status",
+        "outcome.request in world.state.ops"),),
     "task_bridge.deliver_superseded#review_noop": (r("noop", "task_bridge.deliver_superseded",
                                                      "traceless and unconfirmed is None",
                                                      f"{TB}::test_review_noop_refused_without_fresh_approval[stop_delivered]",
@@ -16058,6 +16430,7 @@ _HELPER = "вычисляет вход суждения без собствен�
 _BUILD = "строит значение/запрос; проверок-отказов нет"
 _IO = "транспорт/ввод-вывод без проверки-отказа"
 NOT_JUDGMENT = {
+    "task_bridge._admission_refusal": "делегирует `act_status.noop_refusal` (место суждения)",
     **{f"act_facts.{n}": _ADAPTER for n in (
         "_v3", "gh_transport", "_delivery", "read", "open_review", "effective", "event_stamps",
         "review_requires", "_activation", "history", "activation")},
@@ -16924,7 +17297,7 @@ if __name__ == "__main__":
   (`approve_node._propose#…`, `read_dag_state#…`, `_require_upstream_ready#…`,
   `_try_agent_merge#form`, `runner._step_gate#…`, `runner._step_s8#…`) и прогнанные при ревизии
   плана. Сначала — применимость операторов ко ВСЕМ строкам без запуска двойников (b6, B6-4;
-  ожидается `267/267`: при ревизии 01.11 — 257 по коду scratch и 10 строк
+  ожидается `281/281`: при ревизии d1 (01.11) — 269 по коду scratch и 12 строк
   `<функция>#<проверка>` по AST фрагментов плана; `n/a` чинится оператором `BYPASS` или записью `RULED`, не пропуском):
 
   ```bash
@@ -17076,6 +17449,8 @@ BYPASS: dict[str, tuple[str, str]] = {
         'return "review", str(out)'),
     'act_status.load_history:base_unread': ('    if rows is None:\n        return Unavailable',
         '    if rows is None:\n        rows = []\n    if False:\n        return Unavailable'),
+    'act_status.noop_refusal:mode_unset': ('return f"режим акта продукта: {live.reason}"',
+        'return None'),
     'act_status.pr_for_merge:exactly_one': ('    if len(found) != 1:',
         '    if not found:\n        found = [7]\n    if False:'),
     'act_trust._checked_epochs:transition': ('return Unavailable(f"недопустимый переход журнала: {exc}")',
@@ -17104,10 +17479,28 @@ BYPASS: dict[str, tuple[str, str]] = {
         'head = "0" * 40'),
     'approve_node._legacy_outcome:old_pin_missing': ('    if not pinned:\n',
         '    if not pinned:\n        pinned = {"sha": None, "fingerprint": None}\n    if False:\n'),
+    'approve_node._propose#mode_unavailable:mode': ('raise _unresolved(f"режим акта продукта (узел {node_id}): {live.reason}")',
+        'live = act_status.LivePolicy("merge", None, None, None, None)'),
     'approve_node._try_agent_merge#form:form': ('defect = form() if form is not None else _envelope_form_defect(state, ops, dag, op, nodes, head)',
         'defect = None'),
-    'task_bridge._review_noop_refusal:mode_unset': ('return f"режим акта продукта: {live.reason}"',
-        'return None'),
+    'runner._step_gate#completed_admission:admission': ('if refusal is None:',
+        'if True:'),
+    'task_bridge.deliver_for_run#adopted:admission': ('_require_admission(state, ops, legacy_bundle, f"принят существующий PR #{existing}")',
+        'pass'),
+    'task_bridge.deliver_for_run#completed:admission': ('_require_admission(state, ops, legacy_bundle, f"tasks-спека уже доставлена (PR #{pr_done})")',
+        'pass'),
+    'task_bridge.deliver_superseded#redo_intent:admission': ('_require_admission(state, ops, legacy_bundle, f"повтор доставки ревизии {n} из намерения")',
+        'pass'),
+    'task_bridge.deliver_superseded#replacement_repeat:admission': ('_require_admission(state, ops, legacy_bundle, f"возврат PR #{repeated.pr} замены первой доставки")',
+        'pass'),
+    'task_bridge.deliver_superseded#returned_merged:admission': ('_require_admission(state, ops, legacy_bundle, f"возврат вмерженного PR #{pr} ревизии {n}")',
+        'pass'),
+    'task_bridge.deliver_superseded#returned_open:admission': ('_require_admission(state, ops, legacy_bundle, f"возврат открытого PR #{pr} ревизии {n}")',
+        'pass'),
+    'task_bridge.deliver_superseded#returned_pr:admission': ('_require_admission(state, ops, legacy_bundle, f"возврат PR #{pr} ревизии {n}")',
+        'pass'),
+    'task_bridge.deliver_superseded#returned_v1:admission': ('_require_admission(state, ops, legacy_bundle, f"возврат PR #{v1_pr} первой доставки")',
+        'pass'),
     'task_bridge.deliver_superseded#review_noop:noop': ('if traceless and unconfirmed is None:',
         'if traceless:'),
 }
