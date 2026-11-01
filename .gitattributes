@@ -1,3 +1,10 @@
 # criteria-closure/v1 ownership fixtures: the bytes are the cases (CRLF, lone CR,
 # BOM, NUL, form feed) — never normalize (spec-runner ships the same attribute).
 contracts/criteria-closure/v1/fixtures/** -text
+
+# approval-facts/v3 (часть B, Task 11a): завендоренные векторы steward@68f46a9 —
+# побайтовая копия апстрима, целостность держит тест copy-integrity по MANIFEST.json.
+# Декларация generated для codex-review-кита (как в steward/.gitattributes): действует
+# со следующего PR после влития — объявить и спрятать тем же патчем нельзя.
+contracts/approval-facts/v3/vectors/** linguist-generated=true
+contracts/approval-facts/v3/MANIFEST.json linguist-generated=true
