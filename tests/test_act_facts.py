@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC
+from datetime import UTC, timedelta, timezone
 
 import pytest
 
@@ -51,6 +51,38 @@ def test_effective_keys_by_review_login() -> None:
     eff = act_facts.effective(facts, Clock(parse_ts("2026-10-12T10:00:00Z")))
     assert list(eff) == ["alice"] and eff["alice"].login == "alice"
     assert eff["alice"].commit_id == HEAD
+
+
+def test_effective_rekeys_by_login_not_by_library_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ключ результата — `review.login`, даже если библиотека ключует иначе."""
+    review = v3.Review("11", "alice", "User", "APPROVED", HEAD, "2026-10-12T09:00:00Z")
+    monkeypatch.setattr(
+        v3, "effective_reviews", lambda facts, t, before: {"not-alice": review}
+    )
+    eff = act_facts.effective(_facts(review), Clock(parse_ts("2026-10-12T10:00:00Z")))
+    assert list(eff) == ["alice"]
+
+
+def test_effective_converts_non_utc_clock_to_utc() -> None:
+    """Aware-время с локальным офсетом: в steward уходит UTC, а не стенные часы с `Z`."""
+    seen: list[str] = []
+    facts = _facts(
+        v3.Review("11", "alice", "User", "APPROVED", HEAD, "2026-10-12T09:00:00Z")
+    )
+    real = v3.effective_reviews
+
+    def spy(f, t, before):
+        seen.append(t)
+        return real(f, t, before=before)
+
+    plus3 = timezone(timedelta(hours=3))
+    t = parse_ts("2026-10-12T10:00:00Z").astimezone(plus3)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(v3, "effective_reviews", spy)
+        act_facts.effective(facts, Clock(t))
+    assert seen == ["2026-10-12T10:00:00Z"]
 
 
 def test_call_turns_exception_into_unavailable() -> None:

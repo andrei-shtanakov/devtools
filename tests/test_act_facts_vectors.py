@@ -75,7 +75,6 @@ def test_adapter_act(path: Path) -> None:
     eff = act_facts.effective(facts, clock)
     assert not isinstance(eff, Unavailable), eff
     assert {login: r.state for login, r in eff.items()} == expect["effective"]
-    assert all(login == r.login for login, r in eff.items())
     for login, commit in expect.get("effective_commit", {}).items():
         assert eff[login].commit_id == commit
     for name, want in expect.get("delivery", {}).items():

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -121,7 +121,8 @@ def open_review(transport: Any, repo: str, pr: int) -> Any | Unavailable:
 def effective(facts: Any, clock: Clock) -> dict[str, ReviewView] | Unavailable:
     """Эффективные ревью на `clock` (steward §3.5); ключ — `review.login`."""
     v3 = _v3()
-    stamp = clock.t.strftime(STAMP)
+    # Clock принимает любую aware-зону; steward ждёт UTC-метку — приводим, а не клеймим `Z`.
+    stamp = clock.t.astimezone(UTC).strftime(STAMP)
     before = frozenset(k for k in clock.before if k[0] in _REVIEW_KEYS)
     got = _own(
         _call(
