@@ -3563,7 +3563,13 @@ error=…)`, «отказ | None», `raise`), но полноту не дока�
     git-credential` с `GH_CONFIG_DIR` профиля runner'а (`REVIEW_GH_CONFIG_DIR`, как прочие вызовы
     `gh` агента); публичный продукт — анонимно; токен не попадает ни в argv, ни в диагностику;
   - все чтения проверки (история, `LegacyProbe`, байты, входы, догрузка головы squash-PR) — через
-    `SnapshotOps` (временный репозиторий + SHA снимка); прочие методы — базовых `Ops`;
+    `SnapshotOps` (временный репозиторий + SHA снимка). `SnapshotOps` — deny-by-default: пять
+    методов git снимка и allowlist форджи `SNAPSHOT_FORGE_METHODS` (`brief_pr_fact`, `find_pr`,
+    `pr_facts`, `prs_containing_commit`, `repo_file_fact`, `policy_version_fact` — сверено по
+    всем вызовам внутри проверки); любой другой метод — `AttributeError` с именем метода, так что
+    новое чтение git внутри проверки падает громко, а не читает клон. Тесты: непереопределённые
+    методы git (`blob_in_commit`, `commit_files`, `checkout_and_pull`, `is_ancestor`, …) —
+    отказ; мета-проверка — ни один метод allowlist не принимает `target_dir` и не запускает `git`;
   - тесты: инъекция `insteadOf` в config клона, в глобальный, через `GIT_CONFIG_COUNT`, в config
     клона между созданием снимка и fetch, унаследованный `GIT_DIR` — снимок свежий; команда
     fetch изолирована (окружение, сброс helper'а, канонический URL); приватный продукт — токен
@@ -3574,7 +3580,8 @@ error=…)`, «отказ | None», `raise`), но полноту не дока�
   - предусловие развёртывания (профиль `gh` runner'а для приватного продукта) — в п. 8 выше и в
     Task 14 рядом с привязкой `/etc/df/trust.toml`.
 - **Реестр Task 16**: `act_envelope.node_history` (3), `act_status.noop_refusal` (4 + 2 d2 + 2 d3),
-  `act_status.fresh_base` (2), `ops.RealOps._snapshot_url` (1), `_credential_helper` (1),
+  `act_status.fresh_base` (2), `ops.SnapshotOps.__getattr__` (1, deny), `ops.RealOps._snapshot_url` (1),
+  `_credential_helper` (1),
   `_snapshot_env` (4), `_snapshot_git` (1), `ops.RealOps.snapshot_open` (4, из них `--refmap=`/
   `FETCH_HEAD` — `RULED`),
   `runner._step_s8#run_status` (1),
@@ -3583,7 +3590,7 @@ error=…)`, «отказ | None», `raise`), но полноту не дока�
   `runner._next_wave#admission`, `approve_node._propose#mode_unavailable`,
   `#legacy_noop_review`; `current_event`/`next_generation` — в `MODIFIED_EXISTING`,
   `task_bridge._admission_refusal` — в `NOT_JUDGMENT` (делегирует). Применимость операторов —
-  300/300 (288 по коду scratch, 12 по AST фрагментов); мутации новых строк: 8 (п. 9, В-1) + 17
+  301/301 (289 по коду scratch, 12 по AST фрагментов); мутации новых строк: 8 (п. 9, В-1) + 17
   (d1, исполнимые в scratch) — все закрыты; `_propose#…` (2) — на стенде `World`, Step 4a.
 - **Буква спеки**: В-1 теперь соответствует цели §9.1 (а) п. 4 (проверенный статус спрашивается
   перед no-op), хотя статус не входит в саму проекцию хеша; §9.1 п. 0a («последний доставленный
@@ -12133,6 +12140,30 @@ def test_admission_reads_only_the_snapshot(tmp_path: Path, monkeypatch) -> None:
                   if path in ("", "spec/10-requirements.md", envelope_path(WS, "requirements"))}
     assert node_reads == snapshot_refs
     assert all(len(ref) == 40 and set(ref) <= set("0123456789abcdef") for ref, _p in reads)
+
+
+@pytest.mark.parametrize("name", ["blob_in_commit", "commit_files", "checkout_and_pull",
+                                  "is_ancestor", "show_repo_file_bytes"])
+def test_snapshot_ops_denies_unlisted_methods(tmp_path: Path, name: str) -> None:
+    """d5 (deny-by-default): метод вне пяти git-методов снимка и allowlist форджи —
+    `AttributeError` с именем метода; клон не читается."""
+    _origin, clone, ops = remote_stop_world(tmp_path)
+    with act_status.fresh_base(clone_state(clone), ops) as (_sha, reader):
+        with pytest.raises(AttributeError, match=f"{name!r} не разрешён"):
+            getattr(reader, name)
+
+
+def test_snapshot_forge_allowlist_reads_no_clone() -> None:
+    """d5: каждый метод allowlist форджи `SnapshotOps` — метод `RealOps` без `target_dir` и
+    без запуска `git`: локальный клон он прочитать не может."""
+    import inspect
+
+    from governance import ops as ops_mod
+
+    readers = [name for name in sorted(ops_mod.SNAPSHOT_FORGE_METHODS)
+               if "target_dir" in inspect.signature(getattr(RealOps, name)).parameters
+               or '"git"' in inspect.getsource(getattr(RealOps, name))]
+    assert readers == []
 ```
 
 `tests/test_act_legacy.py`:
@@ -13141,7 +13172,8 @@ Expected: FAIL — `ImportError: cannot import name 'act_status' from 'governanc
 ```
 
 Изолированный снимок базы продукта (ревью d3–d5): модульные `_REPO_SLUG`,
-`_SNAPSHOT_ENV_KEEP`, `SnapshotRepo`, `SnapshotOps`, `_SNAPSHOT_FETCH`, `_parse_first_parent`
+`_SNAPSHOT_ENV_KEEP`, `SnapshotRepo`, `SNAPSHOT_FORGE_METHODS`, `SnapshotOps` (deny-by-default),
+`_SNAPSHOT_FETCH`, `_parse_first_parent`
 (рядом с `_ISSUE_URL_RE`; в импорты — `import tempfile`, `import uuid`,
 `from dataclasses import dataclass`). `origin` клона, его `config`, глобальная и системная
 конфигурация git и `GIT_*` окружения в снимок не попадают; другой источник — только
@@ -13167,15 +13199,30 @@ class SnapshotRepo:
     url: str
 
 
+#: Методы базовых `Ops`, которые `SnapshotOps` пропускает: только форджа (сеть, `gh`), ни один
+#: не читает локальный клон (ревью d5, deny-by-default). Любой другой метод — отказ.
+SNAPSHOT_FORGE_METHODS = frozenset({
+    "brief_pr_fact", "find_pr", "pr_facts", "prs_containing_commit", "repo_file_fact",
+    "policy_version_fact",
+})
+
+
 class SnapshotOps:
-    """`Ops` поверх снимка: чтения git — из временного репозитория снимка с изолированным
-    окружением (`target_dir` вызова не используется); прочие методы — базовых `Ops`."""
+    """`Ops` поверх снимка, deny-by-default: пять методов git — из временного репозитория
+    снимка с изолированным окружением (`target_dir` вызова не используется), методы форджи
+    из `SNAPSHOT_FORGE_METHODS` — базовых `Ops`; любой другой метод — `AttributeError`:
+    новое чтение git внутри проверки допуска падает громко, а не читает клон."""
 
     def __init__(self, base: RealOps, repo: SnapshotRepo) -> None:
         self._base, self.repo = base, repo
 
     def __getattr__(self, name: str) -> object:
-        return getattr(self._base, name)
+        if name in SNAPSHOT_FORGE_METHODS:
+            return getattr(self._base, name)
+        raise AttributeError(
+            f"SnapshotOps: метод {name!r} не разрешён внутри проверки допуска "
+            "(deny-by-default: git — только из снимка, иное — форджа из allowlist)"
+        )
 
     def _git(self, *args: str, text: bool = True) -> subprocess.CompletedProcess:
         return self._base._snapshot_git(self.repo.git_dir, *args, text=text)
@@ -16829,6 +16876,10 @@ JUDGMENT = {
     "ops.RealOps._snapshot_git": (r("helper_reset", "ops.RealOps._snapshot_git",
                                     '"credential.helper="', f"{S}::test_production_snapshot_command_is_isolated",
                                     '"credential.helper=!gh auth git-credential"'),),
+    "ops.SnapshotOps.__getattr__": (r("deny", "ops.SnapshotOps.__getattr__",
+                                      "if name in SNAPSHOT_FORGE_METHODS",
+                                      f"{S}::test_snapshot_ops_denies_unlisted_methods[blob_in_commit]",
+                                      "не разрешён"),),
     "ops.RealOps.snapshot_open": (  # d3–d5: свежий изолированный снимок базы продукта
         r("slug_shape", "ops.RealOps.snapshot_open", "not _REPO_SLUG.fullmatch(repo_slug)",
           f"{S}::test_snapshot_rejects_non_slug_source[local_path]", "не owner/repo"),
@@ -17323,7 +17374,6 @@ NOT_JUDGMENT = {
     "ops.Ops.snapshot_reader": "протокол", "ops.Ops.snapshot_close": "протокол",
     "ops.RealOps.snapshot_reader": _BUILD, "ops.RealOps.snapshot_close": _IO,
     "ops.SnapshotOps.__init__": _BUILD,
-    "ops.SnapshotOps.__getattr__": "делегирует базовым `Ops` (форджа); чтения git снимка — свои",
     "ops.SnapshotOps._git": _IO, "ops.SnapshotOps.first_parent_changes": _IO,
     "ops.SnapshotOps.show_file": _IO, "ops.SnapshotOps.show_file_bytes": _IO,
     "ops.SnapshotOps.rev_parse": _IO, "ops.SnapshotOps.fetch_branch": _IO,
@@ -18129,7 +18179,7 @@ if __name__ == "__main__":
   (`approve_node._propose#…`, `read_dag_state#…`, `_require_upstream_ready#…`,
   `_try_agent_merge#form`, `runner._step_gate#…`, `runner._step_s8#…`) и прогнанные при ревизии
   плана. Сначала — применимость операторов ко ВСЕМ строкам без запуска двойников (b6, B6-4;
-  ожидается `300/300`: при ревизии d5 (01.11) — 288 по коду scratch и 12 строк
+  ожидается `301/301`: при ревизии d5 (01.11) — 289 по коду scratch и 12 строк
   `<функция>#<проверка>` по AST фрагментов плана; `n/a` чинится оператором `BYPASS` или записью `RULED`, не пропуском):
 
   ```bash
@@ -18343,6 +18393,8 @@ BYPASS: dict[str, tuple[str, str]] = {
         'f"https://example.invalid/{repo_slug}.git"'),
     'ops.RealOps.snapshot_open:own_repo': ('tempfile.mkdtemp(prefix="act-snapshot-")',
         'os.path.join(tempfile.gettempdir(), "act-snapshot-shared")'),
+    'ops.SnapshotOps.__getattr__:deny': ('        raise AttributeError(\n',
+        '        return getattr(self._base, name)\n        raise AttributeError(\n'),
     'runner._step_gate#completed_admission:admission': ('if refusal is None:',
         'if True:'),
     'runner._step_s8#run_status:status': ('state.status = "running"',
