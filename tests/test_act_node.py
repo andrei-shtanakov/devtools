@@ -85,6 +85,26 @@ class BodyOps(Ops):
     """Стенд approve_node + тело PR и файлы манифестов из origin (форджа стенда
     отдаёт по `repo_file_fact` только файлы политики)."""
 
+    def __init__(self, forge) -> None:
+        super().__init__(forge)
+        self.merge_bases: list[tuple[int, str | None]] = []
+
+    def merge(self, repo_name: str, pr: int, sha: str, base: str | None = None) -> int:
+        self.merge_bases.append((pr, base))
+        return super().merge(repo_name, pr, sha, base)
+
+    def pr_facts(self, repo_slug: str, pr: int) -> dict:
+        """+ `baseRefName` (запись PR `base`, умолчание `master`; `None` — не назван)."""
+        facts = super().pr_facts(repo_slug, pr)
+        facts["baseRefName"] = self.forge.prs[pr].get("base", "master")
+        return facts
+
+    def remote_branch_head_fact(self, repo_slug: str, branch: str) -> Fact[str]:
+        head = self.forge.head_of(branch)
+        if head is None:
+            return Fact(Outcome.ABSENT, None, "нет ветки")
+        return Fact(Outcome.FOUND, head, "ok")
+
     def pr_body_fact(self, repo_slug: str, pr: int) -> Fact[str]:
         return Fact(Outcome.FOUND, self.forge.prs[pr]["body"], "ok")
 
@@ -1074,12 +1094,128 @@ def test_reopen_well_formed_found_stop_pr_merged_at_verified_head(
     approve(world, "charter")
     stop_pr = _foreign_stop_pr(world, {stop_path(WS_ID, "charter", 1): _OWN_STOP})
     head = world.forge.head_of(world.forge.prs[stop_pr]["branch"])
+    base = world.forge.head_of("master")
     msg = act_node.reopen(
         world.state, world.ops, an.bundle_dag.dag_for(None), "charter"
     )
     assert msg is not None and f"PR #{stop_pr}" in msg
     assert world.forge.merge_calls[-1] == (stop_pr, head)
+    # база пинуется той верхушкой, против которой сверялась форма (I1, ретаргет)
+    assert world.ops.merge_bases[-1] == (stop_pr, base)
     assert world.forge.prs[stop_pr]["state"] == "MERGED"
+
+
+def test_reopen_stop_pr_into_other_branch_refused(world: World, stand: Stand) -> None:
+    """Ревью I1: верной формы stop-PR, но вливается не в базу прогона — агентский
+    мерж не вызывается (форма, проверенная против master, — не форма PR в чужую
+    ветку)."""
+    _deliver(world, stand)
+    approve(world, "charter")
+    stop_pr = _foreign_stop_pr(world, {stop_path(WS_ID, "charter", 1): _OWN_STOP})
+    world.forge.prs[stop_pr]["base"] = "release-x"
+    calls = len(world.forge.merge_calls)
+    with pytest.raises(RuntimeError, match="вливается в release-x.*разберите вручную"):
+        act_node.reopen(world.state, world.ops, an.bundle_dag.dag_for(None), "charter")
+    assert world.forge.prs[stop_pr]["state"] == "OPEN"
+    assert len(world.forge.merge_calls) == calls
+
+
+def test_reopen_stop_pr_base_unreadable_unresolved(world: World, stand: Stand) -> None:
+    """Ревью I1: база stop-PR не названа — факт не установлен, мержа нет."""
+    _deliver(world, stand)
+    approve(world, "charter")
+    stop_pr = _foreign_stop_pr(world, {stop_path(WS_ID, "charter", 1): _OWN_STOP})
+    world.forge.prs[stop_pr]["base"] = None
+    calls = len(world.forge.merge_calls)
+    with pytest.raises(RuntimeError, match="факт не установлен.*база stop-PR"):
+        act_node.reopen(world.state, world.ops, an.bundle_dag.dag_for(None), "charter")
+    assert len(world.forge.merge_calls) == calls
+
+
+def test_reopen_closed_stop_pr_names_remedy(world: World, stand: Stand) -> None:
+    """Ревью M1: stop-PR на ветке закрыт без мержа, ветка на месте — отказ называет
+    выход (удалить ветку остановки на remote, повторить); после удаления ветки
+    `reopen` открывает свой stop-PR и доставляет остановку."""
+    _deliver(world, stand)
+    approve(world, "charter")
+    branch = f"stop/{WS_ID}-charter-g1"
+    stop_pr = _foreign_stop_pr(world, {"unrelated.txt": "x\n"})
+    world.forge.prs[stop_pr]["state"] = "CLOSED"
+    with pytest.raises(
+        RuntimeError,
+        match=f"stop-PR #{stop_pr} закрыт без мержа.*git push origin --delete {branch}"
+        ".*повторите --reopen charter",
+    ):
+        act_node.reopen(world.state, world.ops, an.bundle_dag.dag_for(None), "charter")
+    world.ops.delete_remote_branch(SLUG, branch)
+    msg = act_node.reopen(
+        world.state, world.ops, an.bundle_dag.dag_for(None), "charter"
+    )
+    assert msg is not None and f"PR #{stop_pr}" not in msg
+
+
+def test_reopen_stop_branch_without_pr_names_remedy(world: World, stand: Stand) -> None:
+    """Ревью M2: ветка остановки на remote есть, PR нет (упавший заход между push и
+    созданием PR) — без усыновления: отказ называет выход, PR не создаётся."""
+    _deliver(world, stand)
+    approve(world, "charter")
+    branch = f"stop/{WS_ID}-charter-g1"
+    _git(world.human, "fetch", "-q", "origin")
+    _git(world.human, "switch", "-qC", branch, "origin/master")
+    rel = stop_path(WS_ID, "charter", 1)
+    (world.human / rel).parent.mkdir(parents=True, exist_ok=True)
+    (world.human / rel).write_text(_OWN_STOP)
+    _git(world.human, "add", "-A")
+    _git(world.human, "commit", "-qm", "stop без PR")
+    _git(world.human, "push", "-q", "origin", branch)
+    before = len(world.forge.prs)
+    with pytest.raises(
+        RuntimeError,
+        match=f"ветка есть без stop-PR.*git push origin --delete {branch}",
+    ):
+        act_node.reopen(world.state, world.ops, an.bundle_dag.dag_for(None), "charter")
+    assert len(world.forge.prs) == before
+
+
+def test_review_stamp_keys_in_base_fail_closed_on_content(
+    world: World, stand: Stand
+) -> None:
+    """Ревью M3: во frontmatter узла в base — штамп-ключи `review/v1`; хеш заявки
+    (проекция старого акта) ≠ хешу головы в проекции `review/v1` — доставка
+    отказывает по I_CONTENT, а не засчитывается."""
+    from governance import act_decision
+
+    _git(world.human, "fetch", "-q", "origin")
+    _git(world.human, "switch", "-q", "master")
+    _git(world.human, "reset", "-q", "--hard", "origin/master")
+    path = world.human / "spec" / "00-charter.md"
+    path.write_text(
+        path.read_text().replace(
+            "status: draft\n",
+            "status: draft\napproval_act: review/v1\napproval_review_id: '5'\n",
+        )
+    )
+    _git(world.human, "commit", "-qam", "stamp keys")
+    _git(world.human, "push", "-q", "origin", "master")
+    world.sync()
+    key, _op, pr = _candidate(world)
+    head = world.forge.head_of(world.forge.prs[pr]["branch"])
+    req = parse_manifest(_show(world.target, f"{head}:{manifest_path(WS_ID, key)}"))
+    hashes = act_node._head_hashes(world.state, world.ops, req, head)
+    assert isinstance(hashes, dict)
+    entry = req.nodes["charter"]
+    delivery = DeliveryView(
+        True,
+        "m" * 40,
+        "2026-10-12T12:00:00Z",
+        "df-reviewer",
+        "Bot",
+        head,
+        True,
+        {entry.path: ("b" * 40, "b" * 40)},
+    )
+    got = act_decision._delivery_refusal(req, head, delivery, hashes)
+    assert isinstance(got, Rejected) and got.code == act_decision.I_CONTENT
 
 
 def test_reopen_post_merge_record_check_is_independent(

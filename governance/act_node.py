@@ -674,14 +674,22 @@ def _merge_stop_pr(
     path: str,
     record: str,
 ) -> None:
-    """Агентский мерж открытого stop-PR — только проверенной формы и с пином
-    проверенной головы (как finalize: `_try_agent_merge(form=…)`). PR на ветке
-    остановки мог открыть кто угодно: дифф целиком (все коммиты) обязан быть
-    ровно записью остановки, иначе мерж не выполняется."""
+    """Агентский мерж открытого stop-PR — только проверенной формы, с пином
+    проверенной головы и базы (как finalize: `_try_agent_merge(form=…)`). PR на
+    ветке остановки мог открыть кто угодно: он обязан вливаться в базу прогона, а
+    дифф целиком (все коммиты) — быть ровно записью остановки; иначе мерж не
+    выполняется."""
     if not head:
         raise an._unresolved(f"голова stop-PR #{pr} не названа")
+    base_sha = ops.rev_parse(state.target_dir, an._base_ref(state))
+    if base_sha is None:
+        raise an._unresolved(f"верхушка базы {an._base_ref(state)} не разрешается")
     ops.fetch_branch(state.target_dir, branch)
-    defect = stop_pr_defect(state, ops, pr, head, path, record)
+
+    def form() -> str | None:
+        return stop_pr_defect(state, ops, pr, head, base_sha, path, record)
+
+    defect = form()
     if defect is not None:
         raise RuntimeError(
             f"{defect} — агентский мерж не выполнен, узел {node} остаётся одобренным; "
@@ -698,7 +706,8 @@ def _merge_stop_pr(
         [node],
         pr,
         head,
-        form=lambda: stop_pr_defect(state, ops, pr, head, path, record),
+        form=form,
+        base=base_sha,
     )
     if refusal is not None:
         raise RuntimeError(
@@ -708,11 +717,24 @@ def _merge_stop_pr(
 
 
 def stop_pr_defect(
-    state: RunState, ops: Ops, pr: int, head: str, path: str, record: str
+    state: RunState,
+    ops: Ops,
+    pr: int,
+    head: str,
+    base_sha: str,
+    path: str,
+    record: str,
 ) -> str | None:
-    """Форма stop-PR против базы: весь дифф `base...head` — ровно добавление
-    `path`, и в `head` по нему лежит ровно ожидаемая запись остановки."""
-    fact = ops.compare_files_fact(state.repo_slug, an._base_ref(state), head)
+    """Форма stop-PR против базы: PR вливается в базу прогона (`baseRefName`,
+    перечитывается при каждой проверке — ретаргет закрыт и пином базы у мержа),
+    весь дифф `base_sha...head` — ровно добавление `path`, в `head` по нему —
+    ровно ожидаемая запись остановки."""
+    target = an._pr_facts(state, ops, pr).get("baseRefName")
+    if not isinstance(target, str) or not target:
+        raise an._unresolved(f"база stop-PR #{pr} не названа")
+    if target != an._base_ref(state):
+        return f"stop-PR #{pr} вливается в {target}, а не в базу {an._base_ref(state)}"
+    fact = ops.compare_files_fact(state.repo_slug, base_sha, head)
     if fact.outcome is not Outcome.FOUND or fact.value is None:
         raise an._unresolved(f"файлы stop-PR #{pr} — {fact.detail}")
     files = sorted(fact.value)
@@ -726,14 +748,37 @@ def stop_pr_defect(
 def _stop_pr(
     state: RunState, ops: Ops, node: str, gen: int, path: str, record: str
 ) -> tuple[str, int, str]:
-    """Ветка stop-PR узла, номер и голова: найденный по ветке либо созданный."""
+    """Ветка stop-PR узла, номер и голова: найденный по ветке либо созданный.
+
+    Найденный PR, закрытый без мержа, остановку не доставит — создаётся свой, но
+    только если ветки остановки на remote нет: ветку без PR (чужую либо от
+    упавшего захода между push и созданием PR) механика не усыновляет, отказ
+    называет выход."""
     branch = f"stop/{state.ws_id}-{node}-g{gen}"
     found = af.search_pr(ops, state.repo_slug, branch, any_state=True)
     if found.outcome is Outcome.UNAVAILABLE:
         raise an._unresolved(f"поиск stop-PR на ветке {branch} — {found.detail}")
+    closed: int | None = None
     if found.outcome is Outcome.FOUND:
         pr = int(found.value or 0)
-        return branch, pr, an.pr_head(state, ops, pr) or ""
+        facts = an._pr_facts(state, ops, pr)
+        if an._disposition(facts, pr) is not Disposition.CLOSED_UNMERGED:
+            return branch, pr, an.pr_head(state, ops, pr) or ""
+        closed = pr
+    remote = ops.remote_branch_head_fact(state.repo_slug, branch)
+    if remote.outcome is Outcome.UNAVAILABLE:
+        raise an._unresolved(f"ветка остановки {branch} на remote — {remote.detail}")
+    if remote.outcome is Outcome.FOUND:
+        what = (
+            f"stop-PR #{closed} закрыт без мержа"
+            if closed is not None
+            else "ветка есть без stop-PR"
+        )
+        raise RuntimeError(
+            f"{what} ({branch}) — остановка не доставлена, узел {node} остаётся "
+            f"одобренным. Выход: удалите ветку остановки на remote "
+            f"(`git push origin --delete {branch}`), затем повторите --reopen {node}"
+        )
     ops.switch_to(state.target_dir, branch, an._base_ref(state))
     file = Path(state.target_dir) / path
     file.parent.mkdir(parents=True, exist_ok=True)

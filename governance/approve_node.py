@@ -2721,6 +2721,7 @@ def _try_agent_merge(
     head: str,
     *,
     form: Callable[[], str | None] | None = None,
+    base: str | None = None,
 ) -> MergeRefusal | None:
     """Агентский мерж finalize: None — вмержен; иначе отказ с причиной и
     признаком, помогает ли здесь человеческий мерж. Идемпотентно: гейт
@@ -2755,16 +2756,17 @@ def _try_agent_merge(
     missing = _missing_approving_review(state, ops, pr)
     if missing is not None:
         return MergeRefusal(missing, human_merge_helps=False)
-    # База не пинуется намеренно: у конверта заявки нет вердикта, от базы
-    # которого его можно было бы пиновать, — пин базы есть свойство
-    # вызывающего с вердиктом (accept-pr). Обвязка сверяет пин с живой
-    # верхушкой (devtools#223), но пиновать здесь по-прежнему нечего.
+    # Конверт finalize базу не пинует: у него нет вердикта, от базы которого
+    # его можно было бы пиновать, — пин базы есть свойство вызывающего с
+    # вердиктом (accept-pr). `base` передаёт вызывающий, чья форма проверена
+    # против конкретной верхушки базы (stop-PR `reopen`): обвязка сверяет пин
+    # с живой верхушкой текущей базы PR (devtools#223), ретаргет — отказ.
     waited = _await_required_checks(state, ops, pr, head)
     if waited is not None:
         return waited
     code = 0
     for attempt in range(_MERGE_ATTEMPTS):
-        code = ops.merge(state.repo, pr, head, None)
+        code = ops.merge(state.repo, pr, head, base)
         if code == 0:
             return None
         if code not in _TRANSIENT_MERGE_CODES or attempt == _MERGE_ATTEMPTS - 1:
