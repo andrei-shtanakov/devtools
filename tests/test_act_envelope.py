@@ -304,3 +304,13 @@ def test_history_consumers_agree(history: list) -> None:
         assert reason == f"узел req: одобрение поколения {gen} остановлено"
     else:
         assert (reason is None) is (state.current is NEW)
+
+
+def test_stop_generation_zero_before_request_ignored() -> None:
+    """П. 9 (Б): остановка «поколения 0» без принятой заявки — тоже не событие:
+    действующего поколения нет, отнимать нечего (узел не запирается)."""
+    zero = DeliveredStop("3" * 40, StopRecord("req", 0, "нулевое поколение"))
+    state = node_history([zero], "req")
+    assert state.current is None and len(state.ignored) == 1
+    assert state.ignored[0].reason == "узел req: остановка поколения 0, действует 0"
+    assert node_history([zero, OLD], "req").current is OLD
