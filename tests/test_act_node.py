@@ -1204,6 +1204,9 @@ def test_review_stamp_keys_in_base_fail_closed_on_content(
     hashes = act_node._head_hashes(world.state, world.ops, req, head)
     assert isinstance(hashes, dict)
     entry = req.nodes["charter"]
+    # сравнение — против хеша леджера (манифест — его зеркало), заглушек решения нет
+    assert world.state.ops[key]["content_hashes"]["charter"] == entry.content_hash
+    assert hashes[entry.path] != entry.content_hash
     delivery = DeliveryView(
         True,
         "m" * 40,
