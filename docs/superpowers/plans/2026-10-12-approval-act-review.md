@@ -3512,14 +3512,29 @@ error=…)`, «отказ | None», `raise`), но полноту не дока�
   обнаружения — прогон не `completed`. Колонка «Статус прогона при отказе» выше: утечка
   терминального статуса была только в S8 (строка 11); в мосту прогон остаётся `completed`
   намеренно — отказ относится к доставке, а не к шагу прогона.
-- **Реестр Task 16**: `act_envelope.node_history` (3), `act_status.noop_refusal` (4 + 2 d2),
+- **Правки по d3** (ревью `plan-review-d3`; второй круг класса «свежий снимок — не свежая база
+  продукта» → сменён механизм): `act_status.fresh_base` возвращает **SHA**, а не имя ref.
+  Источник — `Ops.fetch_snapshot(target_dir, repo_slug, branch)`: `origin` обязан называть ровно
+  `repo_slug` (после `insteadOf`; отстающий fork / чужой репозиторий — отказ), явный refspec
+  `+refs/heads/<base>:refs/act/fresh/<base>` (не зависит от `remote.origin.fetch`), значение —
+  SHA полученного объекта; URL в диагностику не попадает. Этот SHA — **единственный снимок** всех
+  чтений проверки: `_statuses(…, snapshot=)` передаёт его в `load_history` и `LegacyProbe`
+  (прежде там оставался локальный `state.base_ref`), `statuses_at_base(…, ref=)` — в байты и
+  входы узлов. Сквозные тесты на настоящем git без подмены `statuses_at_base`: продукт с
+  доставленной остановкой и устаревший клон — `noop_refusal` видит остановку, а сама
+  локальная база дала бы «approved»; нестандартный `remote.origin.fetch` — снимок свежий;
+  `origin` → fork — отказ; продукт недоступен / `origin` нет — отказ; запись refs —
+  история и provenance читаются только SHA снимка; S4, S8, `_next_wave` на том же стенде
+  успеха не дают.
+- **Реестр Task 16**: `act_envelope.node_history` (3), `act_status.noop_refusal` (4 + 2 d2 + 2 d3),
+  `ops.RealOps.fetch_snapshot` (4, d3),
   `act_status.fresh_base` (1), `runner._step_s8#run_status` (1),
   `task_bridge._require_admission` (1), `deliver_superseded#…` (7), `deliver_for_run#…` (2),
   `runner._step_gate#completed_admission`, `runner._step_s8#completed_admission`,
   `runner._next_wave#admission`, `approve_node._propose#mode_unavailable`,
   `#legacy_noop_review`; `current_event`/`next_generation` — в `MODIFIED_EXISTING`,
   `task_bridge._admission_refusal` — в `NOT_JUDGMENT` (делегирует). Применимость операторов —
-  286/286 (274 по коду scratch, 12 по AST фрагментов); мутации новых строк: 8 (п. 9, В-1) + 17
+  292/292 (280 по коду scratch, 12 по AST фрагментов); мутации новых строк: 8 (п. 9, В-1) + 17
   (d1, исполнимые в scratch) — все закрыты; `_propose#…` (2) — на стенде `World`, Step 4a.
 - **Буква спеки**: В-1 теперь соответствует цели §9.1 (а) п. 4 (проверенный статус спрашивается
   перед no-op), хотя статус не входит в саму проекцию хеша; §9.1 п. 0a («последний доставленный
@@ -10973,7 +10988,7 @@ B1-6, B1-8, B1-9 — см. «Правки по ревью b1».
 
 **Files:**
 - Create: `governance/act_status.py`
-- Modify: `governance/ops.py` (`Ops.first_parent_changes` + `RealOps`)
+- Modify: `governance/ops.py` (`Ops.first_parent_changes`, `Ops.fetch_snapshot` + `RealOps`)
 - Modify: `governance/act_settings.py` (`config_home(env)` — заметки части A, п. 11)
 - Modify: `governance/act_envelope.py` (`envelope_refusal`: причины «байты» и «пины» раздельно)
 - Modify: `governance/node_approval.py` (`DEBT_REVIEW_V1`)
@@ -11026,8 +11041,11 @@ B1-6, B1-8, B1-9 — см. «Правки по ревью b1».
   `act_status.REQUEST_BINDING`; `node_approval.DEBT_REVIEW_V1 = "review_v1"`;
   `act_status.noop_refusal(state, ops, dag, nodes=None, deps=None) -> str | None` — одна точка
   «актуальный допуск перед успехом без полного пути» (В-1, d1), по свежему снимку базы
-  `act_status.fresh_base(state, ops) -> str | Unavailable` (`git fetch origin <base>` →
-  `origin/<base>`, d2); `statuses_at_base(..., *, ref=None)`;
+  `act_status.fresh_base(state, ops) -> str | Unavailable` — SHA ветки базы репозитория
+  `repo_slug` (d2, d3); `statuses_at_base(..., *, ref=None)` — `ref` становится единственным
+  снимком истории, provenance, байтов и входов;
+  `Ops.fetch_snapshot(target_dir, repo_slug, branch) -> Fact[str]` (источник сверен с
+  `repo_slug`, явный refspec в `refs/act/fresh/<branch>`, SHA полученного объекта);
   `task_bridge._admission_refusal(state, ops, legacy_bundle) -> str | None`,
   `task_bridge._require_admission(state, ops, legacy_bundle, done) -> None`.
 
@@ -11720,6 +11738,131 @@ def test_config_home_resolution() -> None:
     assert config_home({"XDG_CONFIG_HOME": "/cfg"}) == Path("/cfg")
     assert config_home({"XDG_CONFIG_HOME": "relative"}) == Path.home() / ".config"
     assert config_home({}) == Path.home() / ".config"
+
+
+def remote_stop_world(tmp_path: Path, node: str = "requirements",
+                      fname: str = "10-requirements.md") -> tuple[Path, Path, "GitOps"]:
+    """d3: репозиторий продукта `<tmp>/owner/p` с доставленной заявкой `review/v1` узла и его
+    конвертом; локальный клон снят ДО того, как в продукт доставлена остановка (база клона
+    устарела). Возвращает (продукт, клон, ops с форджей стенда)."""
+    origin = tmp_path / "owner" / "p"
+    origin.parent.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "master", str(origin)], check=True)
+    _git(origin, "config", "user.email", "t@e.st")
+    _git(origin, "config", "user.name", "t")
+    (origin / "README.md").write_text("x\n")
+    _git(origin, "add", "-A")
+    _git(origin, "commit", "-qm", "init")
+    text = node_text(node)
+    req = request("approve-1-0-1", {node: (self_hash_v(text, "review/v1"), 1)},
+                  path_of=lambda n: f"spec/{fname}")
+    head = _branch(origin, "cand", {f"spec/{fname}": text,
+                                    manifest_path(WS, req.request_id): render_manifest(req)})
+    merge = _merge(origin, "cand")
+    _branch(origin, "final", {envelope_path(WS, node): envelope(DeliveredRequest(merge, head, req),
+                                                                node)})
+    _merge(origin, "final")
+    clone = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", str(origin), str(clone)], check=True)
+    _branch(origin, "stop", {stop_path(WS, node, 1): render_stop(StopRecord(node, 1, "переоткрыт"))})
+    _merge(origin, "stop")
+    return origin, clone, GitOps({merge: (11, head)})
+
+
+def review_live(monkeypatch) -> None:
+    """Продукт в `review`; доверенный вердикт доставки — «принят» (стенд без форджи).
+    `statuses_at_base` и чтения git — настоящие."""
+    live = SimpleNamespace(mode="review", trust=None, journal=None)
+    monkeypatch.setattr(act_status, "mode_probe", lambda state, deps=None: live)
+    monkeypatch.setattr(act_status, "real_deps", lambda state, env=None: None)
+    monkeypatch.setattr(act_status.Decider, "__call__",
+                        lambda self, event: Accepted("m" * 40, "df-reviewer", "11", "alice"))
+
+
+def clone_state(clone: Path, **over) -> SimpleNamespace:
+    fields = {"repo_slug": SLUG, "ws_id": WS, "target_dir": str(clone), "bundle_dir": "spec",
+              "base_ref": "master", "brief": None}
+    return SimpleNamespace(**{**fields, **over})
+
+
+STOPPED = "узел requirements: not_approved:stopped:g1"
+
+
+def test_noop_refusal_reads_fresh_product_base(tmp_path: Path, monkeypatch) -> None:
+    """d3 (D3-1): локальная база клона устарела — по ней узел «approved»; проверка допуска
+    берёт свежий снимок продукта и видит остановку, без подмены `statuses_at_base`."""
+    _origin, clone, ops = remote_stop_world(tmp_path)
+    review_live(monkeypatch)
+    state = clone_state(clone)
+    stale = act_status.statuses_at_base(state, ops, DAG, act_status.mode_probe(state), None)
+    assert stale.of("requirements") == "approved"
+    assert act_status.noop_refusal(state, ops, DAG, ["requirements"]) == STOPPED
+
+
+def test_noop_refusal_fresh_with_nonstandard_fetch_refspec(tmp_path: Path, monkeypatch) -> None:
+    """d3 (D3-2): `remote.origin.fetch` не отображает базу в `origin/master` — снимок всё
+    равно свежий (явный refspec в приватный ref, SHA полученного объекта)."""
+    _origin, clone, ops = remote_stop_world(tmp_path)
+    _git(clone, "config", "remote.origin.fetch", "+refs/heads/none:refs/remotes/origin/none")
+    review_live(monkeypatch)
+    assert act_status.noop_refusal(clone_state(clone), ops, DAG, ["requirements"]) == STOPPED
+
+
+def test_noop_refusal_refuses_foreign_origin(tmp_path: Path, monkeypatch) -> None:
+    """d3 (D3-3): `origin` клона указывает на отстающий fork — свежесть базы продукта не
+    установлена, отказ (а не «approved» по fork'у)."""
+    _origin, clone, ops = remote_stop_world(tmp_path)
+    fork = tmp_path / "fork" / "p"
+    subprocess.run(["git", "clone", "-q", "--bare", str(clone), str(fork)], check=True)
+    _git(clone, "remote", "set-url", "origin", str(fork))
+    review_live(monkeypatch)
+    got = act_status.noop_refusal(clone_state(clone), ops, DAG, ["requirements"])
+    assert got == "свежая база: снимок owner/p@master: origin указывает не на owner/p"
+
+
+def test_noop_refusal_refuses_unfetchable_product(tmp_path: Path, monkeypatch) -> None:
+    """d3: репозиторий продукта не отвечает (путь исчез) — отказ, а не локальная база."""
+    origin, clone, ops = remote_stop_world(tmp_path)
+    origin.rename(tmp_path / "owner" / "gone")
+    review_live(monkeypatch)
+    got = act_status.noop_refusal(clone_state(clone), ops, DAG, ["requirements"])
+    assert got == "свежая база: снимок owner/p@master: fetch owner/p master: код 128"
+
+
+class RecordingGitOps(GitOps):
+    """Git стенда, записывающий снимки, которыми читались история и файлы."""
+
+    def __init__(self, prs) -> None:
+        super().__init__(prs)
+        self.refs: set[str] = set()
+
+    def first_parent_changes(self, target_dir, ref):
+        self.refs.add(ref)
+        return super().first_parent_changes(target_dir, ref)
+
+
+def test_admission_reads_only_the_snapshot(tmp_path: Path, monkeypatch) -> None:
+    """d3: внутри проверки допуска история и provenance старого акта читаются ОДНИМ свежим
+    снимком (SHA), никогда — локальной веткой или `origin/<base>`."""
+    _origin, clone, base_ops = remote_stop_world(tmp_path)
+    ops = RecordingGitOps(base_ops.prs)
+    review_live(monkeypatch)
+    state = clone_state(clone)
+    snapshot = act_status.fresh_base(state, ops)
+    statuses = act_status.statuses_at_base(state, ops, DAG, act_status.mode_probe(state), None,
+                                           ref=snapshot)
+    statuses.legacy("spec/15-behaviour-spec.md", BEH_TEXT)  # provenance — тем же снимком
+    snapshot_refs = {snapshot}
+    assert ops.refs == snapshot_refs
+
+
+def test_noop_refusal_refuses_clone_without_origin(tmp_path: Path, monkeypatch) -> None:
+    """d3: у клона нет `origin` — источник снимка не установлен, отказ."""
+    _origin, clone, ops = remote_stop_world(tmp_path)
+    _git(clone, "remote", "remove", "origin")
+    review_live(monkeypatch)
+    got = act_status.noop_refusal(clone_state(clone), ops, DAG, ["requirements"])
+    assert got == "свежая база: снимок owner/p@master: remote origin не читается"
 ```
 
 `tests/test_act_legacy.py`:
@@ -12201,7 +12344,7 @@ def test_cli_accepts_provider_file_and_reports_not_approved(tmp_path: Path) -> N
     assert "GC-ACT-PROVIDER-MISSING" in without.stdout + without.stderr
 
 
-NEW_OPS = {"first_parent_changes", "pr_body_fact", "gate_snapshot_digest"}
+NEW_OPS = {"first_parent_changes", "pr_body_fact", "gate_snapshot_digest", "fetch_snapshot"}
 HISTORY = {"statuses_at_base", "load_history", "Decider"}
 _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
 
@@ -12301,19 +12444,25 @@ def test_s4_stops_when_act_mode_unset(tmp_path: Path, runs_root, monkeypatch) ->
     assert ops.gate_modes == []
 
 
+FRESH = "f" * 40  # SHA свежего снимка базы продукта (`Ops.fetch_snapshot`)
+
+
 def _review_admission(monkeypatch, ops, remote: dict[str, str], *, fetched: bool = True,
                       local: dict[str, str] | None = None) -> None:
-    """Продукт в `review`. Статусы зависят от снимка базы: свежий `origin/master` — `remote`,
-    локальная ветка — `local` (по умолчанию «approved»: устаревшая база остановки не видит)."""
+    """Продукт в `review`. Статусы зависят от снимка базы: свежий SHA — `remote`, локальная
+    ветка — `local` (по умолчанию «approved»: устаревшая база остановки не видит)."""
     from governance import act_status
+    from governance.facts import Fact, Outcome, unavailable
 
     live = SimpleNamespace(mode="review")
     monkeypatch.setattr(act_status, "mode_probe", lambda state, deps=None: live)
-    monkeypatch.setattr(ops, "fetch_branch", lambda target_dir, branch: fetched, raising=False)
+    snapshot = Fact(Outcome.FOUND, FRESH, "ok") if fetched else unavailable("fetch: код 128")
+    monkeypatch.setattr(ops, "fetch_snapshot", lambda target_dir, slug, branch: snapshot,
+                        raising=False)
     stale = local if local is not None else {node: "approved" for node in remote}
 
     def at_base(state, ops_, dag, live_, deps=None, *, ref=None):
-        verdicts = remote if ref == "origin/master" else stale
+        verdicts = remote if ref == FRESH else stale
         return SimpleNamespace(is_review=lambda node: node in verdicts,
                                of=lambda node: verdicts[node])
 
@@ -12473,6 +12622,23 @@ def test_s8_lost_admission_run_not_completed_when_checkout_fails(tmp_path, runs_
     got = locked_runner.advance(state, ops)
     assert got.status == "running"
     assert rs.load("r-adm-s8-status").status == "running"
+
+
+@pytest.mark.parametrize("site", sorted(ADMISSION_SITES))
+def test_stale_clone_remote_stop_end_to_end(tmp_path, runs_root, monkeypatch, site: str) -> None:
+    """d3 (D3-1): настоящий git — в продукте доставлена остановка `charter`, локальный клон
+    устарел; `statuses_at_base` и чтения не подменены — S4, S8, `_next_wave` успеха не дают."""
+    from tests.test_act_status import WS, clone_state, remote_stop_world, review_live
+
+    outcome, wave, _node = ADMISSION_SITES[site]
+    _origin, clone, git_ops = remote_stop_world(tmp_path / "git", node="charter",
+                                                fname="00-charter.md")
+    state, _fake = _wave_state(tmp_path, f"r-adm-e2e-{site}", wave=wave)
+    for name, value in vars(clone_state(clone, ws_id=WS)).items():
+        setattr(state, name, value)
+    rs.save(state)
+    review_live(monkeypatch)
+    assert outcome(state, git_ops, monkeypatch) == "no_success"
 ```
 
 Дополнение `tests/test_governance_task_bridge.py` (В-1, решение владельца 01.11):
@@ -12555,7 +12721,7 @@ def _review_mode(monkeypatch, verdicts: dict[str, str]) -> None:
         def of(self, node: str) -> str:
             return verdicts[node]
 
-    monkeypatch.setattr(act_status, "fresh_base", lambda state, ops: "origin/master")
+    monkeypatch.setattr(act_status, "fresh_base", lambda state, ops: "f" * 40)
     monkeypatch.setattr(act_status, "statuses_at_base",
                         lambda state, ops, dag, live, deps=None, *, ref=None: _Statuses())
 
@@ -12687,6 +12853,59 @@ Expected: FAIL — `ImportError: cannot import name 'act_status' from 'governanc
     def first_parent_changes(
         self, target_dir: str, ref: str
     ) -> list[tuple[str, tuple[str, ...], tuple[tuple[str, str], ...]]] | None: ...
+
+    def fetch_snapshot(self, target_dir: str, repo_slug: str, branch: str) -> Fact[str]: ...
+```
+
+`RealOps.fetch_snapshot` (ревью d3) и разбор URL remote — модульный помощник рядом с
+`_ISSUE_URL_RE`:
+
+```python
+#: `owner/repo` в URL remote: scp-форма и `https://`/`ssh://` только на github.com — ровно два
+#: сегмента пути; локальный путь (стенды) — два последних сегмента; `.git`, `/` — без них.
+_REMOTE_SLUG = (
+    re.compile(r"^(?:[a-z+]+://)?(?:[^@/\s]+@)?github\.com[:/]"
+               r"(?P<slug>[^/\s]+/[^/\s]+?)(?:\.git)?/?$", re.IGNORECASE),
+    re.compile(r"^(?:file://)?/(?:[^\s]*/)?(?P<slug>[^/\s]+/[^/\s]+?)(?:\.git)?/?$"),
+)
+
+
+def _slug_of_url(url: str) -> str | None:
+    """`owner/repo` из URL remote (в нижнем регистре) — сверка источника снимка (d3)."""
+    match = next((m for m in (p.match(url) for p in _REMOTE_SLUG) if m), None)
+    return match.group("slug").lower() if match else None
+```
+
+```python
+    def fetch_snapshot(self, target_dir: str, repo_slug: str, branch: str) -> Fact[str]:
+        """Свежий снимок ветки `branch` репозитория продукта `repo_slug` — SHA (ревью d3).
+
+        Источник — `origin`, чей URL (после `insteadOf`) называет ровно `repo_slug`:
+        отстающий fork или чужой репозиторий свежести базы продукта не устанавливают.
+        Явный refspec в приватный ref `refs/act/fresh/<branch>` — независимо от
+        `remote.origin.fetch`; значение — SHA только что полученного объекта. URL в
+        диагностику не попадает (в нём бывают учётные данные)."""
+        url = subprocess.run(["git", "-C", target_dir, "remote", "get-url", "origin"],
+                             capture_output=True, text=True, check=False)
+        if url.returncode != 0:
+            return unavailable("remote origin не читается")
+        if _slug_of_url(url.stdout.strip()) != repo_slug.lower():
+            return unavailable(f"origin указывает не на {repo_slug}")
+        private = f"refs/act/fresh/{branch}"
+        done = subprocess.run(
+            ["git", "-C", target_dir, "fetch", "--quiet", "--no-tags", "origin",
+             f"+refs/heads/{branch}:{private}"],
+            capture_output=True, text=True, check=False,
+        )
+        if done.returncode != 0:
+            return unavailable(f"fetch {repo_slug} {branch}: код {done.returncode}")
+        sha = subprocess.run(
+            ["git", "-C", target_dir, "rev-parse", "--verify", "--quiet", f"{private}^{{commit}}"],
+            capture_output=True, text=True, check=False,
+        )
+        if sha.returncode != 0 or not sha.stdout.strip():
+            return unavailable(f"снимок {repo_slug} {branch} не разрешается")
+        return Fact(Outcome.FOUND, sha.stdout.strip(), "ok")
 ```
 
 ```python
@@ -13496,14 +13715,16 @@ def _blobs(state: RunState, ops: Ops, dag: Dag, ref: str | None):
 
 
 def _statuses(state: RunState, ops: Ops, dag: Dag, live: LivePolicy, deps: Deps, *,
-              text_of: Callable[[str], str | None], ref: str | None) -> Statuses:
-    base = state.base_ref or "master"
+              text_of: Callable[[str], str | None], ref: str | None,
+              snapshot: str) -> Statuses:
+    """`snapshot` — единственный снимок базы для истории и provenance старого акта (d3);
+    `ref` — входы узлов (`None` — рабочее дерево S4), `text_of` — байты узлов."""
     decider = Decider(state, ops, deps, dag, trust=live.trust, journal=live.journal)
     paths = _node_paths(state, dag)
     return Statuses(
-        dag=dag, ws_id=state.ws_id, history=load_history(ops, state, base),
+        dag=dag, ws_id=state.ws_id, history=load_history(ops, state, snapshot),
         node_path=paths.__getitem__, text_of=text_of, blobs_of=_blobs(state, ops, dag, ref),
-        decide=decider, legacy=LegacyProbe(state, ops, base, decider.legacy, dag),
+        decide=decider, legacy=LegacyProbe(state, ops, snapshot, decider.legacy, dag),
     )
 
 
@@ -13512,11 +13733,12 @@ def statuses_at_base(state: RunState, ops: Ops, dag: Dag, live: LivePolicy,
     """Статусы по базе для гейта доставки и предложений (`read_dag_state`).
 
     Только для продукта в `review` (`live.mode`); иначе путь старый (§10). `ref` — снимок
-    базы, отличный от локальной ветки (`fresh_base` → `origin/<base>`, d2)."""
+    базы вместо локальной ветки (SHA от `fresh_base`, d3): им читаются история, provenance,
+    байты и входы узлов — всё."""
     base = ref or state.base_ref or "master"
     return _statuses(state, ops, dag, live, deps or real_deps(state),
                      text_of=lambda path: ops.show_file(state.target_dir, base, path),
-                     ref=base)
+                     ref=base, snapshot=base)
 
 
 # --- режим продукта сейчас (§10; ревизия b1, B1-5) ----------------------------------
@@ -13575,13 +13797,16 @@ def mode_probe(state: RunState, deps: Deps | None = None) -> LivePolicy | Unavai
 
 
 def fresh_base(state: RunState, ops: Ops) -> str | Unavailable:
-    """Свежий снимок базы для проверки допуска (ревью d2): `git fetch origin <base>` →
-    `origin/<base>`. Сбой обновления — `Unavailable`: по устаревшей локальной базе
-    допуск не подтверждается (остановка могла быть доставлена после последнего pull)."""
+    """Свежий снимок базы продукта для проверки допуска (ревью d2, d3): SHA ветки `<base>`
+    репозитория `state.repo_slug`, полученный только что (`Ops.fetch_snapshot`: источник
+    сверен с `repo_slug`, явный refspec в приватный ref, а не `remote.origin.fetch`). Этот
+    SHA — единственный снимок всех чтений проверки. Сбой — `Unavailable`: по устаревшей
+    локальной базе допуск не подтверждается."""
     base = state.base_ref or "master"
-    if not ops.fetch_branch(state.target_dir, base):
-        return Unavailable(f"база {base} не обновлена (fetch origin {base})")
-    return f"origin/{base}"
+    fact = ops.fetch_snapshot(state.target_dir, state.repo_slug, base)
+    if fact.outcome is not FactOutcome.FOUND or fact.value is None:
+        return Unavailable(f"снимок {state.repo_slug}@{base}: {fact.detail}")
+    return fact.value
 
 
 def noop_refusal(state: RunState, ops: Ops, dag: Dag, nodes: Iterable[str] | None = None,
@@ -13625,7 +13850,8 @@ def _gate_statuses(state: RunState, ops: Ops, dag: Dag, deps: Deps,
         file = worktree / path
         return file.read_text(encoding="utf-8") if file.is_file() else None
 
-    st = _statuses(state, ops, dag, live, deps, text_of=text_of, ref=None)
+    st = _statuses(state, ops, dag, live, deps, text_of=text_of, ref=None,
+                   snapshot=state.base_ref or "master")
     paths = _node_paths(state, dag)
     return {node: st.of(node) for node, path in paths.items() if (worktree / path).is_file()}
 
@@ -15702,7 +15928,8 @@ MODULES = ("act_facts", "act_anon", "act_check", "act_trust", "act_journal", "ac
 EXISTING_ADDITIONS = {
     "ops": ("_gate_check_exe", "_act_args", "Ops.gate_snapshot_digest",
             "RealOps.gate_snapshot_digest", "Ops.first_parent_changes",
-            "RealOps.first_parent_changes", "Ops.pr_body_fact", "RealOps.pr_body_fact"),
+            "RealOps.first_parent_changes", "Ops.pr_body_fact", "RealOps.pr_body_fact",
+            "Ops.fetch_snapshot", "RealOps.fetch_snapshot", "_slug_of_url"),
     "approval_ledger": ("record_review_act", "audit_events", "record_audit", "successor_of"),
     "act_decision": ("find_act", "merger_allowed"),
     "act_envelope": ("expected_envelope", "node_history"),
@@ -16162,15 +16389,34 @@ JUDGMENT = {
           f"{E}::test_non_monotonic_request_ignored",
           '"узел req: поколение 2 не больше прежнего 2"'),
     ),
-    "act_status.fresh_base": (r("fetch_failed", "act_status.fresh_base",
-                                "if not ops.fetch_branch(state.target_dir, base)",
+    "act_status.fresh_base": (r("snapshot_unavailable", "act_status.fresh_base",
+                                "fact.outcome is not FactOutcome.FOUND or fact.value is None",
                                 f"{RN}::test_admission_refused_when_base_not_refreshed[s4]",
                                 '"no_success"'),),
+    "ops.RealOps.fetch_snapshot": (  # d3: свежий снимок базы продукта — SHA
+        r("origin_identity", "ops.RealOps.fetch_snapshot",
+          "_slug_of_url(url.stdout.strip()) != repo_slug.lower()",
+          f"{S}::test_noop_refusal_refuses_foreign_origin",
+          '"свежая база: снимок owner/p@master: origin указывает не на owner/p"'),
+        r("origin_missing", "ops.RealOps.fetch_snapshot", "url.returncode != 0",
+          f"{S}::test_noop_refusal_refuses_clone_without_origin",
+          '"свежая база: снимок owner/p@master: remote origin не читается"'),
+        r("fetch_failed", "ops.RealOps.fetch_snapshot", "done.returncode != 0",
+          f"{S}::test_noop_refusal_refuses_unfetchable_product",
+          '"свежая база: снимок owner/p@master: fetch owner/p master: код 128"'),
+        r("private_ref", "ops.RealOps.fetch_snapshot", 'f"{private}^{{commit}}"',
+          f"{S}::test_noop_refusal_fresh_with_nonstandard_fetch_refspec", "STOPPED"),
+    ),
     "act_status.noop_refusal": (  # В-1, d1, d2 — решение владельца 01.11
         r("stale_base", "act_status.noop_refusal", "isinstance(ref, Unavailable)",
           f"{RN}::test_admission_refused_when_base_not_refreshed[s8]", '"no_success"'),
         r("fresh_ref", "act_status.noop_refusal", "ref=ref",
-          f"{RN}::test_remote_stop_with_stale_local_base_no_success[next_wave]", '"no_success"'),
+          f"{RN}::test_stale_clone_remote_stop_end_to_end[next_wave]", '"no_success"'),
+        r("history_snapshot", "act_status._statuses", "load_history(ops, state, snapshot)",
+          f"{S}::test_noop_refusal_reads_fresh_product_base", "STOPPED"),
+        r("legacy_snapshot", "act_status._statuses",
+          "LegacyProbe(state, ops, snapshot, decider.legacy, dag)",
+          f"{S}::test_admission_reads_only_the_snapshot", "ops.refs == snapshot_refs"),
         r("mode_unset", "act_status.noop_refusal", "isinstance(live, Unavailable)",
           f"{TB}::test_review_noop_refused_when_mode_unset",
           '"бесследного no-op нет (режим акта продукта: нет привязки)"'),
@@ -16640,7 +16886,8 @@ NOT_JUDGMENT = {
     # дополнения части B в существующие модули
     "ops._gate_check_exe": _BUILD, "ops._act_args": _BUILD,
     "ops.Ops.gate_snapshot_digest": "протокол", "ops.Ops.first_parent_changes": "протокол",
-    "ops.Ops.pr_body_fact": "протокол",
+    "ops.Ops.pr_body_fact": "протокол", "ops.Ops.fetch_snapshot": "протокол",
+    "ops._slug_of_url": "разбор URL remote; несовпадение судит `RealOps.fetch_snapshot`",
     "ops.RealOps.gate_snapshot_digest": "возвращает код и вывод CLI; судит `gate_run`",
     "approval_ledger.record_review_act": "запись акта; проверок нет",
     "approval_ledger.audit_events": _BUILD,
@@ -17442,7 +17689,7 @@ if __name__ == "__main__":
   (`approve_node._propose#…`, `read_dag_state#…`, `_require_upstream_ready#…`,
   `_try_agent_merge#form`, `runner._step_gate#…`, `runner._step_s8#…`) и прогнанные при ревизии
   плана. Сначала — применимость операторов ко ВСЕМ строкам без запуска двойников (b6, B6-4;
-  ожидается `286/286`: при ревизии d2 (01.11) — 274 по коду scratch и 12 строк
+  ожидается `292/292`: при ревизии d3 (01.11) — 280 по коду scratch и 12 строк
   `<функция>#<проверка>` по AST фрагментов плана; `n/a` чинится оператором `BYPASS` или записью `RULED`, не пропуском):
 
   ```bash
@@ -17596,6 +17843,10 @@ BYPASS: dict[str, tuple[str, str]] = {
         '    if rows is None:\n        rows = []\n    if False:\n        return Unavailable'),
     'act_status.noop_refusal:fresh_ref': ('statuses_at_base(state, ops, dag, live, deps, ref=ref)',
         'statuses_at_base(state, ops, dag, live, deps)'),
+    'act_status.noop_refusal:history_snapshot': ('load_history(ops, state, snapshot)',
+        'load_history(ops, state, state.base_ref or "master")'),
+    'act_status.noop_refusal:legacy_snapshot': ('LegacyProbe(state, ops, snapshot, decider.legacy, dag)',
+        'LegacyProbe(state, ops, state.base_ref or "master", decider.legacy, dag)'),
     'act_status.noop_refusal:mode_unset': ('return f"режим акта продукта: {live.reason}"',
         'return None'),
     'act_status.pr_for_merge:exactly_one': ('    if len(found) != 1:',
@@ -17630,6 +17881,8 @@ BYPASS: dict[str, tuple[str, str]] = {
         'live = act_status.LivePolicy("merge", None, None, None, None)'),
     'approve_node._try_agent_merge#form:form': ('defect = form() if form is not None else _envelope_form_defect(state, ops, dag, op, nodes, head)',
         'defect = None'),
+    'ops.RealOps.fetch_snapshot:private_ref': ('f"{private}^{{commit}}"',
+        'f"refs/remotes/origin/{branch}^{{commit}}"'),
     'runner._step_gate#completed_admission:admission': ('if refusal is None:',
         'if True:'),
     'runner._step_s8#run_status:status': ('state.status = "running"',
