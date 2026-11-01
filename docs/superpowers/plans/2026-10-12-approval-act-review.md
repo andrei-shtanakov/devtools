@@ -2960,6 +2960,11 @@ steward#211). Этот коммит сверяет «Интерфейс M0» с 
    `/etc/df/trust.toml` режим «не установлен» (стоп шага, отказ создания заявки), а не legacy. До
    слияния PR devtools #2 привязка ставится на каждой машине, где идут путь узла или раннер; в
    тестах вне `act_*` режим подменяет `tests/conftest.py` (`mode_probe` → `PRE_MIGRATION`).
+   **Профиль `gh` runner'а — второе предусловие** (ревью d5): для приватного продукта
+   `REVIEW_GH_CONFIG_DIR` (по умолчанию `~/.config/review`) аутентифицирован на github.com с
+   правом чтения продукта — проверка допуска берёт свежий снимок базы по HTTPS через
+   `gh auth git-credential`, не через `origin`/SSH клона; иначе отказ (fail closed). Публичный
+   продукт читается анонимно.
 
 Листинги части B проверены при ревизии: все полные модули разбираются `ast`, `ruff --select F`
 не находит неопределённых имён; длина строк приводится `ruff format` при реализации (после
@@ -3543,16 +3548,42 @@ error=…)`, «отказ | None», `raise`), но полноту не дока�
   - тест записи чтений расширен: история, provenance, байты узла, конверт и прямые входы — один
     SHA снимка, прочие чтения — только по SHA коммитов истории;
   - чередующиеся вызовы (один — из отстающего источника) держат свои ref'ы и читают свои SHA.
+- **Правки по d5** (ревью `plan-review-d5`: TOCTOU `insteadOf` и учётные данные приватного
+  продукта; решение team-lead — изолированный репозиторий снимка):
+  - `Ops.snapshot_open` создаёт временный bare-репозиторий (`mkdtemp`, удаляется в `finally`
+    `fresh_base`, в т. ч. при исключении) с `objects/info/alternates` на объекты продукта — в
+    репозиторий продукта не пишется ничего (ни ref'ов, ни `FETCH_HEAD`, ни конфигурации);
+  - каждый вызов git снимка — `--git-dir=<временный>` и окружение из allowlist
+    (`PATH`, `HOME`, локаль, `TMPDIR`, сертификаты) + `GIT_CONFIG_NOSYSTEM=1`,
+    `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_TERMINAL_PROMPT=0`, пустой `GIT_ASKPASS`; ни одной
+    `GIT_*` извне; конфигурация временного репозитория — наша, без `url.*`: переписать источник
+    через репозиторий продукта, глобальную конфигурацию или `GIT_CONFIG_*` нельзя вовсе —
+    отдельная предпроверка `insteadOf` снята;
+  - учётные данные: `-c credential.helper=` (сброс) и `-c credential.helper=!gh auth
+    git-credential` с `GH_CONFIG_DIR` профиля runner'а (`REVIEW_GH_CONFIG_DIR`, как прочие вызовы
+    `gh` агента); публичный продукт — анонимно; токен не попадает ни в argv, ни в диагностику;
+  - все чтения проверки (история, `LegacyProbe`, байты, входы, догрузка головы squash-PR) — через
+    `SnapshotOps` (временный репозиторий + SHA снимка); прочие методы — базовых `Ops`;
+  - тесты: инъекция `insteadOf` в config клона, в глобальный, через `GIT_CONFIG_COUNT`, в config
+    клона между созданием снимка и fetch, унаследованный `GIT_DIR` — снимок свежий; команда
+    fetch изолирована (окружение, сброс helper'а, канонический URL); приватный продукт — токен
+    только от helper'а, глобальный helper не участвует; токена нет в argv и диагностике;
+    профиль `gh` без токена — публичный продукт читается, запрос не интерактивен; снимок
+    удаляется при исключении; чередующиеся снимки независимы; сквозные тесты устаревшего клона
+    сохранены;
+  - предусловие развёртывания (профиль `gh` runner'а для приватного продукта) — в п. 8 выше и в
+    Task 14 рядом с привязкой `/etc/df/trust.toml`.
 - **Реестр Task 16**: `act_envelope.node_history` (3), `act_status.noop_refusal` (4 + 2 d2 + 2 d3),
-  `act_status.fresh_base` (3), `ops.RealOps._snapshot_url` (1), `ops.RealOps.fetch_snapshot`
-  (6: форма slug, insteadOf, fetch, `--refmap=` — `RULED`, `FETCH_HEAD`, ref вызова),
+  `act_status.fresh_base` (2), `ops.RealOps._snapshot_url` (1), `_credential_helper` (1),
+  `_snapshot_env` (4), `_snapshot_git` (1), `ops.RealOps.snapshot_open` (4, из них `--refmap=`/
+  `FETCH_HEAD` — `RULED`),
   `runner._step_s8#run_status` (1),
   `task_bridge._require_admission` (1), `deliver_superseded#…` (7), `deliver_for_run#…` (2),
   `runner._step_gate#completed_admission`, `runner._step_s8#completed_admission`,
   `runner._next_wave#admission`, `approve_node._propose#mode_unavailable`,
   `#legacy_noop_review`; `current_event`/`next_generation` — в `MODIFIED_EXISTING`,
   `task_bridge._admission_refusal` — в `NOT_JUDGMENT` (делегирует). Применимость операторов —
-  297/297 (285 по коду scratch, 12 по AST фрагментов); мутации новых строк: 8 (п. 9, В-1) + 17
+  300/300 (288 по коду scratch, 12 по AST фрагментов); мутации новых строк: 8 (п. 9, В-1) + 17
   (d1, исполнимые в scratch) — все закрыты; `_propose#…` (2) — на стенде `World`, Step 4a.
 - **Буква спеки**: В-1 теперь соответствует цели §9.1 (а) п. 4 (проверенный статус спрашивается
   перед no-op), хотя статус не входит в саму проекцию хеша; §9.1 п. 0a («последний доставленный
@@ -11006,8 +11037,8 @@ B1-6, B1-8, B1-9 — см. «Правки по ревью b1».
 
 **Files:**
 - Create: `governance/act_status.py`
-- Modify: `governance/ops.py` (`Ops.first_parent_changes`, `Ops.fetch_snapshot`, `Ops.drop_ref` +
-  `RealOps`, `RealOps._snapshot_url`)
+- Modify: `governance/ops.py` (`Ops.first_parent_changes`, `Ops.snapshot_open/_reader/_close` +
+  `RealOps`; `SnapshotRepo`, `SnapshotOps` — изолированный снимок базы, d5)
 - Modify: `governance/act_settings.py` (`config_home(env)` — заметки части A, п. 11)
 - Modify: `governance/act_envelope.py` (`envelope_refusal`: причины «байты» и «пины» раздельно)
 - Modify: `governance/node_approval.py` (`DEBT_REVIEW_V1`)
@@ -11060,13 +11091,14 @@ B1-6, B1-8, B1-9 — см. «Правки по ревью b1».
   `act_status.REQUEST_BINDING`; `node_approval.DEBT_REVIEW_V1 = "review_v1"`;
   `act_status.noop_refusal(state, ops, dag, nodes=None, deps=None) -> str | None` — одна точка
   «актуальный допуск перед успехом без полного пути» (В-1, d1), по свежему снимку базы
-  `act_status.fresh_base(state, ops)` — контекстный менеджер, отдаёт SHA ветки базы продукта
-  `repo_slug` или `Unavailable`, держит ref вызова `refs/act/fresh/<uuid>` до конца чтений
-  (d2–d4); `statuses_at_base(..., *, ref=None)` — `ref` становится единственным снимком
-  истории, provenance, байтов и входов;
-  `Ops.fetch_snapshot(target_dir, repo_slug, branch, hold) -> Fact[str]` (источник —
-  `https://github.com/<repo_slug>.git`, переписывание `insteadOf` — отказ, `--refmap=`,
-  `--no-write-fetch-head`, SHA полученного объекта), `Ops.drop_ref(target_dir, ref)`;
+  `act_status.fresh_base(state, ops)` — контекстный менеджер: `(SHA ветки базы продукта
+  repo_slug, Ops чтений из снимка)` или `Unavailable`; снимок удаляется по выходе (d2–d5);
+  `statuses_at_base(..., *, ref=None)` — `ref` становится единственным снимком истории,
+  provenance, байтов и входов;
+  `Ops.snapshot_open(target_dir, repo_slug, branch) -> Fact[SnapshotRepo]` (временный bare-
+  репозиторий с `alternates` на объекты продукта, fetch `https://github.com/<repo_slug>.git` в
+  изолированном окружении, credential helper — `gh` профиля runner'а),
+  `Ops.snapshot_reader(repo) -> Ops`, `Ops.snapshot_close(repo)`;
   `task_bridge._admission_refusal(state, ops, legacy_bundle) -> str | None`,
   `task_bridge._require_admission(state, ops, legacy_bundle, done) -> None`.
 
@@ -11078,7 +11110,12 @@ B1-6, B1-8, B1-9 — см. «Правки по ревью b1».
 `_require_upstream_ready`, создание заявки, общий вход Task 13) спрашивают `mode_probe`. Следствие
 спеки, а не решение плана: на каждой машине, где исполняется путь узла или раннер, нужна привязка
 `/etc/df/trust.toml` (H2 п. 4) — иначе все эти пути останавливаются; порядок «H1–H2 до части B»
-уже в таблице «Порядок и зависимости».
+уже в таблице «Порядок и зависимости». **Второе предусловие развёртывания** (ревью d5): для
+приватного продукта профиль `gh` runner'а (`REVIEW_GH_CONFIG_DIR`, по умолчанию
+`~/.config/review`) аутентифицирован на github.com с правом чтения продукта — снимок базы для
+проверки допуска берётся по HTTPS через `gh auth git-credential`, а не через `origin`/SSH клона;
+без этого каждая проверка допуска продукта в `review` — отказ (fail closed). Публичный продукт
+читается анонимно.
 
 **Правила статуса** (§9.1 п. 0a–4) — только для продукта в `review`: событие узла — последнее по
 first-parent базы (доставленная заявка с манифестом, запись остановки; supersede — более поздняя
@@ -11132,6 +11169,7 @@ frontmatter — для продукта в `review` требует актуал�
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -11836,17 +11874,18 @@ def test_noop_refusal_reads_fresh_product_base(tmp_path: Path, monkeypatch) -> N
     assert act_status.noop_refusal(state, ops, DAG, ["requirements"]) == STOPPED
 
 
-def test_snapshot_fetch_leaves_other_refs_untouched(tmp_path: Path, monkeypatch) -> None:
-    """d3 (D3-2), d4 (D3-5): `remote.origin.fetch` отображает базу в постороннюю ветку
-    `local-keep` — снимок всё равно свежий, а `local-keep`, tracking-ref'ы и прочие ref'ы
-    не тронуты (`--refmap=`), `FETCH_HEAD` не пишется, служебный ref удалён."""
+def test_snapshot_leaves_product_repo_untouched(tmp_path: Path, monkeypatch) -> None:
+    """d4–d5: снимок — во временном репозитории: ref'ы клона (в т. ч. `local-keep` из
+    mapping `remote.origin.fetch`), его `config` и `FETCH_HEAD` не тронуты; снимок свежий."""
     _origin, clone, ops = remote_stop_world(tmp_path)
     _git(clone, "branch", "local-keep")
     _git(clone, "config", "remote.origin.fetch", "+refs/heads/master:refs/heads/local-keep")
-    before = _refs(clone)
+    config = clone / ".git" / "config"
+    refs_before, config_before = _refs(clone), config.read_text()
     review_live(monkeypatch)
     assert act_status.noop_refusal(clone_state(clone), ops, DAG, ["requirements"]) == STOPPED
-    assert _refs(clone) == before
+    assert _refs(clone) == refs_before
+    assert config.read_text() == config_before
     fetch_head = clone / ".git" / "FETCH_HEAD"
     assert fetch_head.exists() is False
 
@@ -11862,24 +11901,71 @@ def test_snapshot_ignores_origin_of_the_clone(tmp_path: Path, monkeypatch) -> No
     assert act_status.noop_refusal(clone_state(clone), ops, DAG, ["requirements"]) == STOPPED
 
 
-def test_production_snapshot_source_is_canonical_url(tmp_path: Path, monkeypatch) -> None:
-    """d4 (D3-3): боевой источник — только `https://github.com/<repo_slug>.git`; `origin`
-    не спрашивается. Подменённый `subprocess` фиксирует команды без сети."""
+def test_injected_git_config_and_env_have_no_effect(tmp_path: Path, monkeypatch) -> None:
+    """d5 (TOCTOU D3-3): `url.*.insteadOf` на отстающую копию — в config клона, в
+    глобальном (`GIT_CONFIG_GLOBAL`), через `GIT_CONFIG_COUNT/KEY/VALUE`, и в config клона
+    МЕЖДУ созданием снимка и fetch; унаследованный `GIT_DIR` — ничего не меняет: снимок
+    свежий, источник — продукт."""
     from governance import ops as ops_mod
 
-    calls: list[list[str]] = []
+    origin, clone, ops = remote_stop_world(tmp_path)
+    stale = tmp_path / "stale" / "owner" / "p"
+    subprocess.run(["git", "clone", "-q", "--bare", str(clone), str(stale)], check=True)
+    rule = (f"url.{stale}.insteadOf", str(origin))
+    _git(clone, "config", *rule)
+    glob = tmp_path / "global.gitconfig"
+    glob.write_text(f'[url "{stale}"]\n\tinsteadOf = {origin}\n')
+    for key, value in {"GIT_CONFIG_GLOBAL": str(glob), "GIT_CONFIG_COUNT": "1",
+                       "GIT_CONFIG_KEY_0": rule[0], "GIT_CONFIG_VALUE_0": rule[1],
+                       "GIT_DIR": str(stale)}.items():
+        monkeypatch.setenv(key, value)
+    real_run = subprocess.run
 
-    def run(cmd, **_kw):
-        calls.append(cmd)
-        out = cmd[-1] + "\n" if "ls-remote" in cmd else ""  # переписывания нет
-        return subprocess.CompletedProcess(cmd, 0 if "ls-remote" in cmd else 128, out, "")
+    def run(cmd, **kw):
+        done = real_run(cmd, **kw)
+        if "init" in cmd:  # между созданием снимка и fetch
+            real_run(["git", "-C", str(clone), "config", "--add", *rule],
+                     env={"PATH": os.environ["PATH"]}, check=True)
+        return done
 
     monkeypatch.setattr(ops_mod.subprocess, "run", run)
-    got = RealOps().fetch_snapshot(str(tmp_path), "owner/p", "master", "refs/act/fresh/x")
-    fetch = next(c for c in calls if "fetch" in c)
-    assert fetch[fetch.index("--refmap=") + 1] == "https://github.com/owner/p.git"
-    assert not any("origin" in c for c in calls)
-    assert got.outcome is Outcome.UNAVAILABLE
+    review_live(monkeypatch)
+    assert act_status.noop_refusal(clone_state(clone), ops, DAG, ["requirements"]) == STOPPED
+
+
+def test_production_snapshot_command_is_isolated(tmp_path: Path, monkeypatch) -> None:
+    """d4–d5: боевой источник — только `https://github.com/<repo_slug>.git`; `origin` не
+    спрашивается; fetch — во временном репозитории, credential helper сброшен и задан
+    явно (`gh` профиля runner'а), окружение — из allowlist без `GIT_*` извне, запросов нет."""
+    from governance import ops as ops_mod
+
+    _origin, clone, _ops = remote_stop_world(tmp_path)
+    profile = tmp_path / "review-profile"
+    monkeypatch.setenv("REVIEW_GH_CONFIG_DIR", str(profile))
+    monkeypatch.setenv("GIT_DIR", "/elsewhere")
+    calls: list[tuple[list[str], dict]] = []
+    real_run = subprocess.run
+
+    def run(cmd, **kw):
+        calls.append((cmd, kw.get("env") or {}))
+        if "fetch" in cmd:
+            return subprocess.CompletedProcess(cmd, 128, "", "")
+        return real_run(cmd, **kw)
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", run)
+    got = RealOps().snapshot_open(str(clone), "owner/p", "master")
+    cmd, env = next((c, e) for c, e in calls if "fetch" in c)
+    assert cmd[cmd.index("--refmap=") + 1] == "https://github.com/owner/p.git"
+    assert cmd[2:6] == ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"]
+    isolation = tuple(env.get(k) for k in ("GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL",
+                                            "GIT_TERMINAL_PROMPT", "GH_CONFIG_DIR"))
+    assert isolation == ("1", os.devnull, "0", str(profile))
+    assert [k for k in env if k.startswith("GIT_") and k not in ISOLATION] == []
+    assert not any("origin" in c for c, _e in calls)
+    assert got.detail == "fetch owner/p master: код 128"
+
+
+ISOLATION = {"GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_TERMINAL_PROMPT", "GIT_ASKPASS"}
 
 
 @pytest.mark.parametrize("slug", ["file:///tmp/stale/owner/p", "/tmp/stale/owner/p",
@@ -11891,23 +11977,13 @@ def test_snapshot_rejects_non_slug_source(tmp_path: Path, monkeypatch, slug: str
     from governance import ops as ops_mod
 
     monkeypatch.setattr(ops_mod.subprocess, "run", lambda *a, **k: pytest.fail("git"))
-    got = RealOps().fetch_snapshot(str(tmp_path), slug, "master", "refs/act/fresh/x")
+    got = RealOps().snapshot_open(str(tmp_path), slug, "master")
     assert got.detail == f"repo_slug {slug!r} — не owner/repo"
 
 
-def test_snapshot_source_rewritten_by_insteadof_refused(tmp_path: Path) -> None:
-    """d4 (D3-3): `url.<локальный путь>.insteadOf` переписывает боевой URL продукта —
-    отказ до fetch (без сети)."""
-    _origin, clone, _ops = remote_stop_world(tmp_path)
-    stale = tmp_path / "stale" / "owner" / "p"
-    subprocess.run(["git", "clone", "-q", "--bare", str(clone), str(stale)], check=True)
-    _git(clone, "config", f"url.{stale}.insteadOf", "https://github.com/owner/p.git")
-    got = RealOps().fetch_snapshot(str(clone), "owner/p", "master", "refs/act/fresh/x")
-    assert got.detail == "источник снимка owner/p переписан конфигурацией git"
-
-
 def test_noop_refusal_refuses_unfetchable_product(tmp_path: Path, monkeypatch) -> None:
-    """d3: репозиторий продукта не отвечает (путь исчез) — отказ, а не локальная база."""
+    """d3: репозиторий продукта не отвечает (путь исчез) — отказ, а не локальная база;
+    временный снимок удалён."""
     origin, clone, ops = remote_stop_world(tmp_path)
     origin.rename(tmp_path / "owner" / "gone")
     review_live(monkeypatch)
@@ -11915,64 +11991,148 @@ def test_noop_refusal_refuses_unfetchable_product(tmp_path: Path, monkeypatch) -
     assert got == "свежая база: снимок owner/p@master: fetch owner/p master: код 128"
 
 
-def test_interleaved_snapshots_hold_their_own_refs(tmp_path: Path) -> None:
-    """d4 (D3-4): два чередующихся вызова на одном клоне — один из отстающего источника;
-    каждый держит свой ref `refs/act/fresh/<uuid>` и читает свой SHA; после выхода ref'ов
-    не остаётся."""
+def test_interleaved_snapshots_are_independent(tmp_path: Path) -> None:
+    """d4–d5 (D3-4): два чередующихся вызова на одном клоне — один из отстающего источника;
+    у каждого свой временный репозиторий и свой SHA; после выхода оба удалены."""
     origin, clone, fresh_ops = remote_stop_world(tmp_path)
     stale = tmp_path / "stale" / "owner" / "p"
     subprocess.run(["git", "clone", "-q", "--bare", str(clone), str(stale)], check=True)
     stale_ops = ProductOps(fresh_ops.prs, stale)
     state = clone_state(clone)
     with act_status.fresh_base(state, fresh_ops) as a, act_status.fresh_base(state, stale_ops) as b:
-        held = _git(clone, "for-each-ref", "--format=%(objectname)", "refs/act/fresh/")
-        assert (a, b) == (_git(origin, "rev-parse", "master"), _git(stale, "rev-parse", "master"))
-        snapshots = {a, b}
-        assert set(held.split()) == snapshots
-    assert _git(clone, "for-each-ref", "refs/act/fresh/") == ""
+        dirs = [a[1].repo.git_dir, b[1].repo.git_dir]
+        assert (a[0], b[0]) == (_git(origin, "rev-parse", "master"), _git(stale, "rev-parse", "master"))
+        assert len(set(dirs)) == 2
+    assert [Path(d).exists() for d in dirs] == [False, False]
+
+
+def test_snapshot_removed_on_exception(tmp_path: Path) -> None:
+    """d5: исключение внутри проверки — временный репозиторий снимка всё равно удалён."""
+    _origin, clone, ops = remote_stop_world(tmp_path)
+    seen: list[str] = []
+    with pytest.raises(RuntimeError, match="сбой чтения"):
+        with act_status.fresh_base(clone_state(clone), ops) as snapshot:
+            seen.append(snapshot[1].repo.git_dir)
+            raise RuntimeError("сбой чтения")
+    assert Path(seen[0]).exists() is False
+
+
+class CredentialOps(ProductOps):
+    """Шов теста: credential helper — скрипт, отдающий токен; никакого другого пути."""
+
+    def __init__(self, prs, product: Path, helper: str) -> None:
+        super().__init__(prs, product)
+        self.helper = helper
+
+    def _credential_helper(self) -> str:
+        return self.helper
+
+
+TOKEN = "ghs_TEST_TOKEN_SECRET"
+
+
+def token_helper(tmp_path: Path) -> str:
+    """Helper-скрипт: токен — из файла (как у `gh`), не в собственном тексте helper'а."""
+    secret = tmp_path / "token"
+    secret.write_text(TOKEN)
+    return (f'!f() {{ test "$1" = get && echo username=x-access-token && '
+            f'echo "password=$(cat {secret})"; }}; f')
+
+
+def test_private_product_credentials_come_only_from_the_helper(tmp_path: Path,
+                                                               monkeypatch) -> None:
+    """d5 (D3-6): приватный продукт — учётные данные отдаёт только явно заданный helper,
+    без интерактивного запроса; helper глобальной конфигурации не участвует."""
+    _origin, _clone, ops = remote_stop_world(tmp_path)
+    glob = tmp_path / "global.gitconfig"
+    glob.write_text("[credential]\n\thelper = \"!echo password=FOREIGN\"\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(glob))
+    cred = CredentialOps(ops.prs, ops.product, token_helper(tmp_path))
+    git_dir = tmp_path / "probe.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(git_dir)], check=True)
+    done = cred._snapshot_git(str(git_dir), "credential", "fill",
+                              stdin="protocol=https\nhost=github.com\npath=owner/p.git\n\n")
+    assert f"password={TOKEN}" in done.stdout
+
+
+def test_token_never_in_argv_or_diagnostics(tmp_path: Path, monkeypatch) -> None:
+    """d5: fetch приватного продукта не удался — токена нет ни в argv, ни в диагностике."""
+    from governance import ops as ops_mod
+
+    _origin, clone, ops = remote_stop_world(tmp_path)
+    cred = CredentialOps(ops.prs, ops.product, token_helper(tmp_path))
+    cred._snapshot_url = lambda slug: "https://127.0.0.1:9/owner/p.git"  # отказ соединения
+    argv: list[str] = []
+    real_run = subprocess.run
+    monkeypatch.setattr(ops_mod.subprocess, "run",
+                        lambda cmd, **kw: argv.extend(cmd) or real_run(cmd, **kw))
+    got = cred.snapshot_open(str(clone), "owner/p", "master")
+    assert got.outcome is Outcome.UNAVAILABLE
+    assert TOKEN not in " ".join(argv) + got.detail
+
+
+def test_public_product_works_without_gh_token(tmp_path: Path, monkeypatch) -> None:
+    """d5: профиль `gh` без токена — публичный (здесь локальный) продукт читается анонимно,
+    helper не мешает; запрос учётных данных не интерактивен и завершается отказом."""
+    _origin, clone, ops = remote_stop_world(tmp_path)
+    monkeypatch.setenv("REVIEW_GH_CONFIG_DIR", str(tmp_path / "empty-profile"))
+    review_live(monkeypatch)
+    assert act_status.noop_refusal(clone_state(clone), ops, DAG, ["requirements"]) == STOPPED
+    git_dir = tmp_path / "probe.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(git_dir)], check=True)
+    failing = CredentialOps(ops.prs, ops.product, "!false")
+    done = failing._snapshot_git(str(git_dir), "credential", "fill",
+                                 stdin="protocol=https\nhost=github.com\npath=owner/p.git\n\n")
+    assert done.returncode != 0
 
 
 class RecordingGitOps(ProductOps):
-    """Git стенда, записывающий снимки всех чтений: история, байты, входы."""
+    """Git стенда: любое чтение git мимо снимка (по `target_dir` клона) — записывается."""
 
     def __init__(self, prs, product: Path) -> None:
         super().__init__(prs, product)
-        self.refs: set[str] = set()
-        self.reads: set[tuple[str, str]] = set()
+        self.outside: list[str] = []
 
     def first_parent_changes(self, target_dir, ref):
-        self.refs.add(ref)
+        self.outside.append(f"first_parent {ref}")
         return super().first_parent_changes(target_dir, ref)
 
     def show_file(self, target_dir, ref, path):
-        self.reads.add((ref, path))
+        self.outside.append(f"show {ref}:{path}")
         return super().show_file(target_dir, ref, path)
-
-    def show_file_bytes(self, target_dir, ref, path):
-        self.reads.add((ref, path))
-        return super().show_file_bytes(target_dir, ref, path)
 
 
 def test_admission_reads_only_the_snapshot(tmp_path: Path, monkeypatch) -> None:
-    """d3–d4: внутри проверки допуска история, provenance старого акта, байты узла,
-    конверт и прямые входы читаются ОДНИМ свежим снимком (SHA); прочие чтения — только по
-    SHA коммитов истории, никогда по локальной ветке или `origin/<base>`."""
+    """d3–d5: внутри проверки допуска история, provenance старого акта, байты узла,
+    конверт и прямые входы читаются из временного репозитория снимка по ОДНОМУ SHA; мимо
+    снимка (клоном продукта) не читается ничего."""
+    from governance import ops as ops_mod
+
     origin, clone, base_ops = remote_stop_world(tmp_path)
     ops = RecordingGitOps(base_ops.prs, origin)
+    reads: list[tuple[str, str]] = []
+    for name in ("first_parent_changes", "show_file", "show_file_bytes"):
+        real = getattr(ops_mod.SnapshotOps, name)
+
+        def record(self, target_dir, ref, *rest, _real=real):
+            reads.append((ref, rest[0] if rest else ""))
+            return _real(self, target_dir, ref, *rest)
+
+        monkeypatch.setattr(ops_mod.SnapshotOps, name, record)
     review_live(monkeypatch)
     state = clone_state(clone)
-    with act_status.fresh_base(state, ops) as snapshot:
-        statuses = act_status.statuses_at_base(state, ops, DAG, act_status.mode_probe(state),
+    with act_status.fresh_base(state, ops) as (snapshot, reader):
+        statuses = act_status.statuses_at_base(state, reader, DAG, act_status.mode_probe(state),
                                                None, ref=snapshot)
         statuses.of("requirements")
         statuses.blobs_of("behaviour-spec")  # прямой вход — requirements
         statuses.legacy("spec/15-behaviour-spec.md", BEH_TEXT)  # provenance
+    assert ops.outside == []
     snapshot_refs = {snapshot}
-    assert ops.refs == snapshot_refs
-    node_reads = {ref for ref, path in ops.reads
-                  if path in ("spec/10-requirements.md", envelope_path(WS, "requirements"))}
+    node_reads = {ref for ref, path in reads
+                  if path in ("", "spec/10-requirements.md", envelope_path(WS, "requirements"))}
     assert node_reads == snapshot_refs
-    assert all(len(ref) == 40 and set(ref) <= set("0123456789abcdef") for ref, _p in ops.reads)
+    assert all(len(ref) == 40 and set(ref) <= set("0123456789abcdef") for ref, _p in reads)
 ```
 
 `tests/test_act_legacy.py`:
@@ -12454,8 +12614,8 @@ def test_cli_accepts_provider_file_and_reports_not_approved(tmp_path: Path) -> N
     assert "GC-ACT-PROVIDER-MISSING" in without.stdout + without.stderr
 
 
-NEW_OPS = {"first_parent_changes", "pr_body_fact", "gate_snapshot_digest", "fetch_snapshot",
-           "drop_ref"}
+NEW_OPS = {"first_parent_changes", "pr_body_fact", "gate_snapshot_digest", "snapshot_open",
+           "snapshot_reader", "snapshot_close"}
 HISTORY = {"statuses_at_base", "load_history", "Decider"}
 _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
 
@@ -12555,7 +12715,7 @@ def test_s4_stops_when_act_mode_unset(tmp_path: Path, runs_root, monkeypatch) ->
     assert ops.gate_modes == []
 
 
-FRESH = "f" * 40  # SHA свежего снимка базы продукта (`Ops.fetch_snapshot`)
+FRESH = "f" * 40  # SHA свежего снимка базы продукта (`Ops.snapshot_open`)
 
 
 def _review_admission(monkeypatch, ops, remote: dict[str, str], *, fetched: bool = True,
@@ -12564,13 +12724,16 @@ def _review_admission(monkeypatch, ops, remote: dict[str, str], *, fetched: bool
     ветка — `local` (по умолчанию «approved»: устаревшая база остановки не видит)."""
     from governance import act_status
     from governance.facts import Fact, Outcome, unavailable
+    from governance.ops import SnapshotRepo
 
     live = SimpleNamespace(mode="review")
     monkeypatch.setattr(act_status, "mode_probe", lambda state, deps=None: live)
-    snapshot = Fact(Outcome.FOUND, FRESH, "ok") if fetched else unavailable("fetch: код 128")
-    monkeypatch.setattr(ops, "fetch_snapshot", lambda target_dir, slug, branch, hold: snapshot,
+    snapshot = (Fact(Outcome.FOUND, SnapshotRepo("/нет", FRESH, "u"), "ok") if fetched
+                else unavailable("fetch: код 128"))
+    monkeypatch.setattr(ops, "snapshot_open", lambda target_dir, slug, branch: snapshot,
                         raising=False)
-    monkeypatch.setattr(ops, "drop_ref", lambda target_dir, ref: None, raising=False)
+    monkeypatch.setattr(ops, "snapshot_reader", lambda repo: ops, raising=False)
+    monkeypatch.setattr(ops, "snapshot_close", lambda repo: None, raising=False)
     stale = local if local is not None else {node: "approved" for node in remote}
 
     def at_base(state, ops_, dag, live_, deps=None, *, ref=None):
@@ -12834,7 +12997,8 @@ def _review_mode(monkeypatch, verdicts: dict[str, str]) -> None:
         def of(self, node: str) -> str:
             return verdicts[node]
 
-    monkeypatch.setattr(act_status, "fresh_base", lambda state, ops: nullcontext("f" * 40))
+    monkeypatch.setattr(act_status, "fresh_base",
+                        lambda state, ops: nullcontext(("f" * 40, ops)))
     monkeypatch.setattr(act_status, "statuses_at_base",
                         lambda state, ops, dag, live, deps=None, *, ref=None: _Statuses())
 
@@ -12967,68 +13131,188 @@ Expected: FAIL — `ImportError: cannot import name 'act_status' from 'governanc
         self, target_dir: str, ref: str
     ) -> list[tuple[str, tuple[str, ...], tuple[tuple[str, str], ...]]] | None: ...
 
-    def fetch_snapshot(
-        self, target_dir: str, repo_slug: str, branch: str, hold: str
-    ) -> Fact[str]: ...
+    def snapshot_open(
+        self, target_dir: str, repo_slug: str, branch: str
+    ) -> Fact[SnapshotRepo]: ...
 
-    def drop_ref(self, target_dir: str, ref: str) -> None: ...
+    def snapshot_reader(self, repo: SnapshotRepo) -> Ops: ...
+
+    def snapshot_close(self, repo: SnapshotRepo) -> None: ...
 ```
 
-`RealOps._snapshot_url`, `fetch_snapshot`, `drop_ref` (ревью d3, d4) и форма `repo_slug` —
-модульная константа рядом с `_ISSUE_URL_RE`. `origin` клона не читается; другой источник —
-только переопределение `_snapshot_url` в тестовом наследнике:
+Изолированный снимок базы продукта (ревью d3–d5): модульные `_REPO_SLUG`,
+`_SNAPSHOT_ENV_KEEP`, `SnapshotRepo`, `SnapshotOps`, `_SNAPSHOT_FETCH`, `_parse_first_parent`
+(рядом с `_ISSUE_URL_RE`; в импорты — `import tempfile`, `import uuid`,
+`from dataclasses import dataclass`). `origin` клона, его `config`, глобальная и системная
+конфигурация git и `GIT_*` окружения в снимок не попадают; другой источник — только
+переопределение `_snapshot_url` в тестовом наследнике:
 
 ```python
 #: Форма `repo_slug` продукта: `owner/repo` по правилам имён GitHub — ничего, что git принял
 #: бы за путь, схему или опцию.
 _REPO_SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/(?!\.\.?$)[A-Za-z0-9_.-]+")
+#: Окружение git снимка базы — только эти переменные (ревью d5): ни одной `GIT_*` извне.
+_SNAPSHOT_ENV_KEEP = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "SSL_CERT_FILE",
+                      "SSL_CERT_DIR")
+
+
+@dataclass(frozen=True)
+class SnapshotRepo:
+    """Изолированный снимок базы продукта (ревью d5): временный bare-репозиторий
+    (`objects/info/alternates` → объекты продукта; в продукт ничего не пишется), SHA
+    ветки базы и канонический URL источника."""
+
+    git_dir: str
+    sha: str
+    url: str
+
+
+class SnapshotOps:
+    """`Ops` поверх снимка: чтения git — из временного репозитория снимка с изолированным
+    окружением (`target_dir` вызова не используется); прочие методы — базовых `Ops`."""
+
+    def __init__(self, base: RealOps, repo: SnapshotRepo) -> None:
+        self._base, self.repo = base, repo
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._base, name)
+
+    def _git(self, *args: str, text: bool = True) -> subprocess.CompletedProcess:
+        return self._base._snapshot_git(self.repo.git_dir, *args, text=text)
+
+    def first_parent_changes(
+        self, target_dir: str, ref: str
+    ) -> list[tuple[str, tuple[str, ...], tuple[tuple[str, str], ...]]] | None:
+        done = self._git("log", "--first-parent", "--reverse", "--diff-merges=first-parent",
+                         "--no-renames", "--name-status", "--format=%x00%H %P", ref)
+        return _parse_first_parent(done.stdout) if done.returncode == 0 else None
+
+    def show_file(self, target_dir: str, ref: str, path: str) -> str | None:
+        done = self._git("show", f"{ref}:{path}")
+        return done.stdout if done.returncode == 0 else None
+
+    def show_file_bytes(self, target_dir: str, ref: str, path: str) -> bytes | None:
+        done = self._git("show", f"{ref}:{path}", text=False)
+        return done.stdout if done.returncode == 0 else None
+
+    def rev_parse(self, target_dir: str, ref: str) -> str | None:
+        return self._git("rev-parse", "--verify", "--quiet", ref).stdout.strip() or None
+
+    def fetch_branch(self, target_dir: str, branch: str) -> bool:
+        """Догрузка ref'а (голова squash-PR `refs/pull/N/head`) — в снимок, тем же
+        изолированным fetch из канонического источника."""
+        ref = branch if branch.startswith("refs/") else f"refs/heads/{branch}"
+        done = self._git(*_SNAPSHOT_FETCH, self.repo.url,
+                         f"+{ref}:refs/snap/extra/{uuid.uuid4().hex}")
+        return done.returncode == 0
+
+
+#: Fetch снимка: без тегов, без `FETCH_HEAD`, без отображения `remote.*.fetch`.
+_SNAPSHOT_FETCH = ("fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=")
+
+
+def _parse_first_parent(
+    stdout: str,
+) -> list[tuple[str, tuple[str, ...], tuple[tuple[str, str], ...]]]:
+    """Разбор `git log --first-parent --name-status --format=%x00%H %P`."""
+    rows: list[tuple[str, tuple[str, ...], tuple[tuple[str, str], ...]]] = []
+    for chunk in stdout.split("\x00")[1:]:
+        lines = [ln for ln in chunk.splitlines() if ln.strip()]
+        commit, *parents = lines[0].split()
+        changes = tuple(
+            (ln.split("\t", 1)[0], ln.split("\t", 1)[1]) for ln in lines[1:] if "\t" in ln
+        )
+        rows.append((commit, tuple(parents), changes))
+    return rows
 ```
+
+Методы `RealOps`:
 
 ```python
     def _snapshot_url(self, repo_slug: str) -> str:
         """Источник снимка базы продукта — канонический URL из `repo_slug` (ревью d4).
 
-        `origin` клона не читается и не разбирается: он может указывать на fork или копию.
-        Другой источник — только переопределение метода в тестовом наследнике (локальный
-        стенд); ни конфигурация, ни окружение его не задают."""
+        `origin` клона не читается: он может указывать на fork или копию. Другой
+        источник — только переопределение метода в тестовом наследнике (локальный стенд);
+        ни конфигурация, ни окружение его не задают."""
         return f"https://github.com/{repo_slug}.git"
 
-    def fetch_snapshot(
-        self, target_dir: str, repo_slug: str, branch: str, hold: str
-    ) -> Fact[str]:
-        """Свежий снимок ветки `branch` продукта `repo_slug` — SHA (ревью d3, d4).
+    def _credential_helper(self) -> str:
+        """Единственный credential helper fetch снимка — `gh` профиля runner'а (d5)."""
+        return "!gh auth git-credential"
 
-        Источник — `_snapshot_url(repo_slug)`; если `url.*.insteadOf` переписывает его
-        (`git ls-remote --get-url`), отказ. Объект кладётся в `hold` — уникальный ref
-        вызова (`refs/act/fresh/<uuid>`), который вызывающий удаляет (`drop_ref`) после
-        всех чтений; `--refmap=` отключает побочные обновления по `remote.*.fetch`,
-        `--no-write-fetch-head` — запись `FETCH_HEAD`. URL в диагностику не попадает."""
+    def _snapshot_env(self) -> dict[str, str]:
+        """Изолированное окружение git снимка (d5): переменные — из allowlist, конфигурации
+        system/global нет, интерактивных запросов нет; `gh` — профиль runner'а
+        (`REVIEW_GH_CONFIG_DIR`, как прочие вызовы `gh` от агента)."""
+        env = {k: os.environ[k] for k in _SNAPSHOT_ENV_KEEP if k in os.environ}
+        profile = Path(os.environ.get("REVIEW_GH_CONFIG_DIR") or REVIEW_GH_CONFIG_DIR)
+        env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                   GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="", SSH_ASKPASS="",
+                   GH_CONFIG_DIR=str(profile), GH_PROMPT_DISABLED="1")
+        return env
+
+    def _snapshot_git(self, git_dir: str, *args: str, text: bool = True,
+                      stdin: str | None = None) -> subprocess.CompletedProcess:
+        """git над снимком: `--git-dir` временного репозитория, изолированное окружение,
+        credential helper сброшен и задан явно. Токен в argv не попадает (его отдаёт
+        helper через stdin/stdout git)."""
+        return subprocess.run(
+            ["git", f"--git-dir={git_dir}", "-c", "credential.helper=",
+             "-c", f"credential.helper={self._credential_helper()}", *args],
+            capture_output=True, text=text, input=stdin, check=False,
+            env=self._snapshot_env(),
+        )
+
+    def snapshot_open(
+        self, target_dir: str, repo_slug: str, branch: str
+    ) -> Fact[SnapshotRepo]:
+        """Свежий изолированный снимок ветки `branch` продукта `repo_slug` (ревью d3–d5).
+
+        Временный bare-репозиторий (свой `config` без `url.*`; объекты продукта — через
+        `objects/info/alternates`, в продукт ничего не пишется); fetch из
+        `_snapshot_url(repo_slug)` в изолированном окружении; SHA полученного объекта.
+        Конфигурация репозитория продукта, глобальная и системная, `GIT_*` окружения на
+        источник и fetch не влияют. Неудача — `Unavailable`, временный каталог удалён;
+        URL и токен в диагностику не попадают."""
         if not _REPO_SLUG.fullmatch(repo_slug):
             return unavailable(f"repo_slug {repo_slug!r} — не owner/repo")
-        url = self._snapshot_url(repo_slug)
-        resolved = subprocess.run(["git", "-C", target_dir, "ls-remote", "--get-url", url],
-                                  capture_output=True, text=True, check=False)
-        if resolved.returncode != 0 or resolved.stdout.strip() != url:
-            return unavailable(f"источник снимка {repo_slug} переписан конфигурацией git")
-        done = subprocess.run(
-            ["git", "-C", target_dir, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
-             "--refmap=", url, f"+refs/heads/{branch}:{hold}"],
-            capture_output=True, text=True, check=False,
+        common = subprocess.run(
+            ["git", "-C", target_dir, "rev-parse", "--path-format=absolute",
+             "--git-common-dir"],
+            capture_output=True, text=True, check=False, env=self._snapshot_env(),
         )
-        if done.returncode != 0:
-            return unavailable(f"fetch {repo_slug} {branch}: код {done.returncode}")
-        sha = subprocess.run(
-            ["git", "-C", target_dir, "rev-parse", "--verify", "--quiet", f"{hold}^{{commit}}"],
-            capture_output=True, text=True, check=False,
-        )
-        if sha.returncode != 0 or not sha.stdout.strip():
-            return unavailable(f"снимок {repo_slug} {branch} не разрешается")
-        return Fact(Outcome.FOUND, sha.stdout.strip(), "ok")
+        if common.returncode != 0 or not common.stdout.strip():
+            return unavailable("репозиторий продукта не читается")
+        git_dir = tempfile.mkdtemp(prefix="act-snapshot-")
+        try:
+            init = self._snapshot_git(git_dir, "init", "--quiet", "--bare", "--template=")
+            if init.returncode != 0:
+                return unavailable(f"снимок не создан: код {init.returncode}")
+            alternates = Path(git_dir) / "objects" / "info" / "alternates"
+            alternates.write_text(f"{common.stdout.strip()}/objects\n", encoding="utf-8")
+            url = self._snapshot_url(repo_slug)
+            done = self._snapshot_git(git_dir, *_SNAPSHOT_FETCH, url,
+                                      f"+refs/heads/{branch}:refs/snap/base")
+            if done.returncode != 0:
+                return unavailable(f"fetch {repo_slug} {branch}: код {done.returncode}")
+            sha = self._snapshot_git(git_dir, "rev-parse", "--verify", "--quiet",
+                                     "refs/snap/base^{commit}").stdout.strip()
+            if not sha:
+                return unavailable(f"снимок {repo_slug} {branch} не разрешается")
+            repo, git_dir = SnapshotRepo(git_dir, sha, url), ""
+            return Fact(Outcome.FOUND, repo, "ok")
+        finally:
+            if git_dir:
+                shutil.rmtree(git_dir, ignore_errors=True)
 
-    def drop_ref(self, target_dir: str, ref: str) -> None:
-        """Удалить служебный ref (`refs/act/fresh/<uuid>`); отсутствующий — не ошибка."""
-        subprocess.run(["git", "-C", target_dir, "update-ref", "-d", ref],
-                       capture_output=True, text=True, check=False)
+    def snapshot_reader(self, repo: SnapshotRepo) -> SnapshotOps:
+        """`Ops`, читающие git только из снимка (история, байты, входы, головы PR)."""
+        return SnapshotOps(self, repo)
+
+    def snapshot_close(self, repo: SnapshotRepo) -> None:
+        """Удалить временный репозиторий снимка."""
+        shutil.rmtree(repo.git_dir, ignore_errors=True)
 ```
 
 ```python
@@ -13049,15 +13333,7 @@ _REPO_SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/(?!\.\.?$)[A-Za-z0-9_.-]+")
         )
         if done.returncode != 0:
             return None
-        rows: list[tuple[str, tuple[str, ...], tuple[tuple[str, str], ...]]] = []
-        for chunk in done.stdout.split("\x00")[1:]:
-            lines = [ln for ln in chunk.splitlines() if ln.strip()]
-            commit, *parents = lines[0].split()
-            changes = tuple(
-                (ln.split("\t", 1)[0], ln.split("\t", 1)[1]) for ln in lines[1:] if "\t" in ln
-            )
-            rows.append((commit, tuple(parents), changes))
-        return rows
+        return _parse_first_parent(done.stdout)
 ```
 
 `governance/act_settings.py`:
@@ -13224,7 +13500,6 @@ import json
 import os
 import re
 import time
-import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -13922,22 +14197,22 @@ def mode_probe(state: RunState, deps: Deps | None = None) -> LivePolicy | Unavai
 
 
 @contextmanager
-def fresh_base(state: RunState, ops: Ops) -> Iterator[str | Unavailable]:
-    """Свежий снимок базы продукта для проверки допуска (ревью d2–d4): SHA ветки `<base>`
-    репозитория `state.repo_slug`, полученный только что (`Ops.fetch_snapshot`). Объект
-    держит уникальный ref вызова `refs/act/fresh/<uuid>` — до конца блока `with`, то есть
-    до конца всех чтений проверки, затем он удаляется. Этот SHA — единственный снимок всех
-    чтений. Сбой — `Unavailable`: по устаревшей локальной базе допуск не подтверждается."""
+def fresh_base(state: RunState, ops: Ops) -> Iterator[tuple[str, Ops] | Unavailable]:
+    """Свежий изолированный снимок базы продукта для проверки допуска (ревью d2–d5):
+    `(SHA ветки <base> репозитория state.repo_slug, Ops чтений из снимка)` или
+    `Unavailable`. Снимок — временный репозиторий (`Ops.snapshot_open`): живёт до конца
+    блока `with`, то есть до конца всех чтений проверки, затем удаляется — и при
+    исключении. Все чтения проверки идут через отданные `Ops` и этот SHA."""
     base = state.base_ref or "master"
-    hold = f"refs/act/fresh/{uuid.uuid4().hex}"
+    fact = ops.snapshot_open(state.target_dir, state.repo_slug, base)
+    if fact.outcome is not FactOutcome.FOUND or fact.value is None:
+        yield Unavailable(f"снимок {state.repo_slug}@{base}: {fact.detail}")
+        return
+    repo = fact.value
     try:
-        fact = ops.fetch_snapshot(state.target_dir, state.repo_slug, base, hold)
-        if fact.outcome is not FactOutcome.FOUND or fact.value is None:
-            yield Unavailable(f"снимок {state.repo_slug}@{base}: {fact.detail}")
-        else:
-            yield fact.value
+        yield repo.sha, ops.snapshot_reader(repo)
     finally:
-        ops.drop_ref(state.target_dir, hold)
+        ops.snapshot_close(repo)
 
 
 def noop_refusal(state: RunState, ops: Ops, dag: Dag, nodes: Iterable[str] | None = None,
@@ -13950,16 +14225,17 @@ def noop_refusal(state: RunState, ops: Ops, dag: Dag, nodes: Iterable[str] | Non
     DAG) с событием `review/v1` — `approved` по `statuses_at_base` на свежем снимке базы
     продукта (доверенный контекст, §9.1). Режим не установлен, снимок не получен, узел не
     `approved` или статус недоступен — причина (fail closed); продукт не в `review` —
-    `None`, прежние правила. Все чтения — внутри `with fresh_base(...)`. Цена — квота С-1."""
+    `None`, прежние правила. Все чтения — внутри `with fresh_base(...)`, через `Ops` снимка. Цена — квота С-1."""
     live = mode_probe(state, deps)
     if isinstance(live, Unavailable):
         return f"режим акта продукта: {live.reason}"
     if live.mode != "review":
         return None
-    with fresh_base(state, ops) as ref:  # d2–d4: не по устаревшей локальной базе
-        if isinstance(ref, Unavailable):
-            return f"свежая база: {ref.reason}"
-        statuses = statuses_at_base(state, ops, dag, live, deps, ref=ref)
+    with fresh_base(state, ops) as snapshot:  # d2–d5: изолированный свежий снимок продукта
+        if isinstance(snapshot, Unavailable):
+            return f"свежая база: {snapshot.reason}"
+        ref, reader = snapshot
+        statuses = statuses_at_base(state, reader, dag, live, deps, ref=ref)
         wanted = None if nodes is None else set(nodes)
         for fname, _upstreams in dag:
             node = bundle_dag.node_id(fname)
@@ -16061,8 +16337,13 @@ EXISTING_ADDITIONS = {
     "ops": ("_gate_check_exe", "_act_args", "Ops.gate_snapshot_digest",
             "RealOps.gate_snapshot_digest", "Ops.first_parent_changes",
             "RealOps.first_parent_changes", "Ops.pr_body_fact", "RealOps.pr_body_fact",
-            "Ops.fetch_snapshot", "RealOps.fetch_snapshot", "RealOps._snapshot_url",
-            "Ops.drop_ref", "RealOps.drop_ref"),
+            "RealOps._snapshot_url", "RealOps._credential_helper", "RealOps._snapshot_env",
+            "RealOps._snapshot_git", "Ops.snapshot_open", "RealOps.snapshot_open",
+            "Ops.snapshot_reader", "RealOps.snapshot_reader", "Ops.snapshot_close",
+            "RealOps.snapshot_close", "SnapshotOps.__init__", "SnapshotOps.__getattr__",
+            "SnapshotOps._git", "SnapshotOps.first_parent_changes", "SnapshotOps.show_file",
+            "SnapshotOps.show_file_bytes", "SnapshotOps.rev_parse", "SnapshotOps.fetch_branch",
+            "_parse_first_parent"),
     "approval_ledger": ("record_review_act", "audit_events", "record_audit", "successor_of"),
     "act_decision": ("find_act", "merger_allowed"),
     "act_envelope": ("expected_envelope", "node_history"),
@@ -16526,36 +16807,41 @@ JUDGMENT = {
         r("snapshot_unavailable", "act_status.fresh_base",
           "fact.outcome is not FactOutcome.FOUND or fact.value is None",
           f"{RN}::test_admission_refused_when_base_not_refreshed[s4]", '"no_success"'),
-        r("per_call_ref", "act_status.fresh_base", 'f"refs/act/fresh/{uuid.uuid4().hex}"',
-          f"{S}::test_interleaved_snapshots_hold_their_own_refs",
-          "set(held.split()) == snapshots"),
-        r("dropped", "act_status.fresh_base", "ops.drop_ref(state.target_dir, hold)",
-          f"{S}::test_interleaved_snapshots_hold_their_own_refs", '== ""'),
+        r("closed", "act_status.fresh_base", "ops.snapshot_close(repo)",
+          f"{S}::test_snapshot_removed_on_exception", "Path(seen[0]).exists() is False"),
     ),
     "ops.RealOps._snapshot_url": (r("canonical", "ops.RealOps._snapshot_url",
-                                    'f"https://github.com/{repo_slug}.git"',
-                                    f"{S}::test_production_snapshot_source_is_canonical_url",
+                                    'f"https://github.com/{repo_slug}.git"', f"{S}::test_production_snapshot_command_is_isolated",
                                     '"https://github.com/owner/p.git"'),),
-    "ops.RealOps.fetch_snapshot": (  # d3–d4: свежий снимок базы продукта — SHA
-        r("slug_shape", "ops.RealOps.fetch_snapshot", "not _REPO_SLUG.fullmatch(repo_slug)",
+    "ops.RealOps._credential_helper": (r("gh_profile", "ops.RealOps._credential_helper",
+                                         '"!gh auth git-credential"', f"{S}::test_production_snapshot_command_is_isolated",
+                                         '"credential.helper=!gh auth git-credential"'),),
+    "ops.RealOps._snapshot_env": (  # d5: изолированное окружение git снимка
+        r("allowlist", "ops.RealOps._snapshot_env", "for k in _SNAPSHOT_ENV_KEEP if k in os.environ",
+          f"{S}::test_injected_git_config_and_env_have_no_effect", "STOPPED"),
+        r("no_global", "ops.RealOps._snapshot_env", "GIT_CONFIG_GLOBAL=os.devnull", f"{S}::test_production_snapshot_command_is_isolated",
+          '"0", str(profile)'),
+        r("no_prompt", "ops.RealOps._snapshot_env", 'GIT_TERMINAL_PROMPT="0"', f"{S}::test_production_snapshot_command_is_isolated",
+          '"0", str(profile)'),
+        r("runner_profile", "ops.RealOps._snapshot_env", 'os.environ.get("REVIEW_GH_CONFIG_DIR")', f"{S}::test_production_snapshot_command_is_isolated",
+          '"0", str(profile)'),
+    ),
+    "ops.RealOps._snapshot_git": (r("helper_reset", "ops.RealOps._snapshot_git",
+                                    '"credential.helper="', f"{S}::test_production_snapshot_command_is_isolated",
+                                    '"credential.helper=!gh auth git-credential"'),),
+    "ops.RealOps.snapshot_open": (  # d3–d5: свежий изолированный снимок базы продукта
+        r("slug_shape", "ops.RealOps.snapshot_open", "not _REPO_SLUG.fullmatch(repo_slug)",
           f"{S}::test_snapshot_rejects_non_slug_source[local_path]", "не owner/repo"),
-        r("rewritten", "ops.RealOps.fetch_snapshot",
-          "resolved.returncode != 0 or resolved.stdout.strip() != url",
-          f"{S}::test_snapshot_source_rewritten_by_insteadof_refused",
-          '"источник снимка owner/p переписан конфигурацией git"'),
-        r("fetch_failed", "ops.RealOps.fetch_snapshot", "done.returncode != 0",
+        r("fetch_failed", "ops.RealOps.snapshot_open", "done.returncode != 0",
           f"{S}::test_noop_refusal_refuses_unfetchable_product",
           '"свежая база: снимок owner/p@master: fetch owner/p master: код 128"'),
-        r("refmap", "ops.RealOps.fetch_snapshot", '"--refmap="',
-          f"{S}::test_snapshot_fetch_leaves_other_refs_untouched", "_refs(clone) == before"),
-        r("fetch_head", "ops.RealOps.fetch_snapshot", '"--no-write-fetch-head"',
-          f"{S}::test_snapshot_fetch_leaves_other_refs_untouched",
-          "fetch_head.exists() is False"),
-        r("hold_ref", "ops.RealOps.fetch_snapshot", 'f"{hold}^{{commit}}"',
-          f"{S}::test_snapshot_fetch_leaves_other_refs_untouched", "STOPPED"),
+        r("own_repo", "ops.RealOps.snapshot_open", 'tempfile.mkdtemp(prefix="act-snapshot-")',
+          f"{S}::test_interleaved_snapshots_are_independent", "len(set(dirs)) == 2"),
+        r("refmap", "ops.RealOps.snapshot_open", "*_SNAPSHOT_FETCH, url",
+          f"{S}::test_snapshot_leaves_product_repo_untouched", "_refs(clone) == refs_before"),
     ),
     "act_status.noop_refusal": (  # В-1, d1, d2 — решение владельца 01.11
-        r("stale_base", "act_status.noop_refusal", "isinstance(ref, Unavailable)",
+        r("stale_base", "act_status.noop_refusal", "isinstance(snapshot, Unavailable)",
           f"{RN}::test_admission_refused_when_base_not_refreshed[s8]", '"no_success"'),
         r("fresh_ref", "act_status.noop_refusal", "ref=ref",
           f"{RN}::test_stale_clone_remote_stop_end_to_end[next_wave]", '"no_success"'),
@@ -16563,7 +16849,7 @@ JUDGMENT = {
           f"{S}::test_noop_refusal_reads_fresh_product_base", "STOPPED"),
         r("legacy_snapshot", "act_status._statuses",
           "LegacyProbe(state, ops, snapshot, decider.legacy, dag)",
-          f"{S}::test_admission_reads_only_the_snapshot", "ops.refs == snapshot_refs"),
+          f"{S}::test_admission_reads_only_the_snapshot", "node_reads == snapshot_refs"),
         r("mode_unset", "act_status.noop_refusal", "isinstance(live, Unavailable)",
           f"{TB}::test_review_noop_refused_when_mode_unset",
           '"бесследного no-op нет (режим акта продукта: нет привязки)"'),
@@ -17033,9 +17319,15 @@ NOT_JUDGMENT = {
     # дополнения части B в существующие модули
     "ops._gate_check_exe": _BUILD, "ops._act_args": _BUILD,
     "ops.Ops.gate_snapshot_digest": "протокол", "ops.Ops.first_parent_changes": "протокол",
-    "ops.Ops.pr_body_fact": "протокол", "ops.Ops.fetch_snapshot": "протокол",
-    "ops.Ops.drop_ref": "протокол",
-    "ops.RealOps.drop_ref": "удаляет служебный ref `refs/act/fresh/<uuid>`; не суждение",
+    "ops.Ops.pr_body_fact": "протокол", "ops.Ops.snapshot_open": "протокол",
+    "ops.Ops.snapshot_reader": "протокол", "ops.Ops.snapshot_close": "протокол",
+    "ops.RealOps.snapshot_reader": _BUILD, "ops.RealOps.snapshot_close": _IO,
+    "ops.SnapshotOps.__init__": _BUILD,
+    "ops.SnapshotOps.__getattr__": "делегирует базовым `Ops` (форджа); чтения git снимка — свои",
+    "ops.SnapshotOps._git": _IO, "ops.SnapshotOps.first_parent_changes": _IO,
+    "ops.SnapshotOps.show_file": _IO, "ops.SnapshotOps.show_file_bytes": _IO,
+    "ops.SnapshotOps.rev_parse": _IO, "ops.SnapshotOps.fetch_branch": _IO,
+    "ops._parse_first_parent": "разбор вывода `git log`; не суждение",
     "ops.RealOps.gate_snapshot_digest": "возвращает код и вывод CLI; судит `gate_run`",
     "approval_ledger.record_review_act": "запись акта; проверок нет",
     "approval_ledger.audit_events": _BUILD,
@@ -17837,7 +18129,7 @@ if __name__ == "__main__":
   (`approve_node._propose#…`, `read_dag_state#…`, `_require_upstream_ready#…`,
   `_try_agent_merge#form`, `runner._step_gate#…`, `runner._step_s8#…`) и прогнанные при ревизии
   плана. Сначала — применимость операторов ко ВСЕМ строкам без запуска двойников (b6, B6-4;
-  ожидается `297/297`: при ревизии d4 (01.11) — 285 по коду scratch и 12 строк
+  ожидается `300/300`: при ревизии d5 (01.11) — 288 по коду scratch и 12 строк
   `<функция>#<проверка>` по AST фрагментов плана; `n/a` чинится оператором `BYPASS` или записью `RULED`, не пропуском):
 
   ```bash
@@ -17985,15 +18277,15 @@ BYPASS: dict[str, tuple[str, str]] = {
         'return next(iter(self._memo.values()))'),
     'act_status._event:request:no_pr': ('        if isinstance(pr, Unavailable):\n            return pr',
         '        if isinstance(pr, Unavailable):\n            return None'),
-    'act_status.fresh_base:dropped': ('ops.drop_ref(state.target_dir, hold)',
+    'act_status.fresh_base:closed': ('ops.snapshot_close(repo)',
         'pass'),
-    'act_status.fresh_base:per_call_ref': ('hold = f"refs/act/fresh/{uuid.uuid4().hex}"',
-        'hold = "refs/act/fresh/shared"'),
+    'act_status.fresh_base:snapshot_unavailable': ('yield Unavailable(f"снимок {state.repo_slug}@{base}: {fact.detail}")',
+        'yield base, ops'),
     'act_status.gate_run:snapshot_digest': ('return Unavailable(f"gate-check --print-snapshot-digest: код {rc}: {digest}")',
         'return "review", str(out)'),
     'act_status.load_history:base_unread': ('    if rows is None:\n        return Unavailable',
         '    if rows is None:\n        rows = []\n    if False:\n        return Unavailable'),
-    'act_status.noop_refusal:fresh_ref': ('statuses_at_base(state, ops, dag, live, deps, ref=ref)',
+    'act_status.noop_refusal:fresh_ref': ('statuses_at_base(state, reader, dag, live, deps, ref=ref)',
         'statuses_at_base(state, ops, dag, live, deps)'),
     'act_status.noop_refusal:history_snapshot': ('load_history(ops, state, snapshot)',
         'load_history(ops, state, state.base_ref or "master")'),
@@ -18001,6 +18293,8 @@ BYPASS: dict[str, tuple[str, str]] = {
         'LegacyProbe(state, ops, state.base_ref or "master", decider.legacy, dag)'),
     'act_status.noop_refusal:mode_unset': ('return f"режим акта продукта: {live.reason}"',
         'return None'),
+    'act_status.noop_refusal:stale_base': ('return f"свежая база: {snapshot.reason}"',
+        'snapshot = (state.base_ref or "master", ops)'),
     'act_status.pr_for_merge:exactly_one': ('    if len(found) != 1:',
         '    if not found:\n        found = [7]\n    if False:'),
     'act_trust._checked_epochs:transition': ('return Unavailable(f"недопустимый переход журнала: {exc}")',
@@ -18033,12 +18327,22 @@ BYPASS: dict[str, tuple[str, str]] = {
         'live = act_status.LivePolicy("merge", None, None, None, None)'),
     'approve_node._try_agent_merge#form:form': ('defect = form() if form is not None else _envelope_form_defect(state, ops, dag, op, nodes, head)',
         'defect = None'),
+    'ops.RealOps._credential_helper:gh_profile': ('"!gh auth git-credential"',
+        '"!gh auth git-credential --other"'),
+    'ops.RealOps._snapshot_env:allowlist': ('{k: os.environ[k] for k in _SNAPSHOT_ENV_KEEP if k in os.environ}',
+        'dict(os.environ)'),
+    'ops.RealOps._snapshot_env:no_global': ('GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,',
+        'GIT_CONFIG_NOSYSTEM="1",'),
+    'ops.RealOps._snapshot_env:no_prompt': ('GIT_TERMINAL_PROMPT="0", ',
+        ''),
+    'ops.RealOps._snapshot_env:runner_profile': ('os.environ.get("REVIEW_GH_CONFIG_DIR") or REVIEW_GH_CONFIG_DIR',
+        'REVIEW_GH_CONFIG_DIR'),
+    'ops.RealOps._snapshot_git:helper_reset': ('"-c", "credential.helper=",\n             ',
+        ''),
     'ops.RealOps._snapshot_url:canonical': ('f"https://github.com/{repo_slug}.git"',
         'f"https://example.invalid/{repo_slug}.git"'),
-    'ops.RealOps.fetch_snapshot:fetch_head': ('"--no-write-fetch-head",',
-        ''),
-    'ops.RealOps.fetch_snapshot:hold_ref': ('f"{hold}^{{commit}}"',
-        'f"refs/remotes/origin/{branch}^{{commit}}"'),
+    'ops.RealOps.snapshot_open:own_repo': ('tempfile.mkdtemp(prefix="act-snapshot-")',
+        'os.path.join(tempfile.gettempdir(), "act-snapshot-shared")'),
     'runner._step_gate#completed_admission:admission': ('if refusal is None:',
         'if True:'),
     'runner._step_s8#run_status:status': ('state.status = "running"',
@@ -18074,8 +18378,8 @@ RULED: dict[str, str] = {
         'причина «lost» порождается хранилищем `df.publisher` (exc.reason), обработчик общий; обход невозможен (без БД нечем продолжить); двойник утверждает причину хранилища',
     'act_journal_wire.DevStoreJournal._open:missing':
         'нет файла блокировки — нет хранилища, продолжить без дескриптора нечем; обход невозможен, проверяется причина (O3)',
-    'ops.RealOps.fetch_snapshot:refmap':
-        "источник снимка — URL, а не имя remote: git не применяет `remote.*.fetch` к fetch по URL (проверено и при URL, равном `remote.origin.url`), поэтому `--refmap=` — защита на случай смены источника на имя remote; обход неотличим, пока источник — URL; изоляция ref'ов проверяется двойником `test_snapshot_fetch_leaves_other_refs_untouched`",
+    'ops.RealOps.snapshot_open:refmap':
+        'fetch снимка — по URL и во временный репозиторий без `remote.*`: git не применяет `remote.*.fetch` к fetch по URL (проверено), а `FETCH_HEAD` пишется во временный репозиторий, который удаляется; `--refmap=` и `--no-write-fetch-head` в `_SNAPSHOT_FETCH` — защита на случай смены источника; обход неотличим; неприкосновенность репозитория продукта проверяет двойник `test_snapshot_leaves_product_repo_untouched`',
 }
 
 
