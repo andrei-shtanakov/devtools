@@ -2766,6 +2766,16 @@ def _try_agent_merge(
         return waited
     code = 0
     for attempt in range(_MERGE_ATTEMPTS):
+        if base is not None and form is not None:
+            # Ожидание проверок и пауза ретрая — минуты: PR могли перенацелить на
+            # ветку с той же верхушкой, что база, и `--expect-base` это пропустит
+            # (сверяет с верхушкой ТЕКУЩЕЙ базы PR). Форма (вкл. `baseRefName`) —
+            # заново прямо перед мержем; только у вызывающего с пином базы.
+            late = form()
+            if late is not None:
+                return MergeRefusal(
+                    f"агентский мерж НЕ выполнен — {late}", human_merge_helps=True
+                )
         code = ops.merge(state.repo, pr, head, base)
         if code == 0:
             return None

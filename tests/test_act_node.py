@@ -1289,8 +1289,67 @@ def test_reopen_refuses_stop_pr_outside_base(world: World, stand: Stand) -> None
     _key, _pr = _deliver(world, stand)
     approve(world, "charter")
     world.ops.is_ancestor = lambda target, sha, ref: False  # type: ignore[method-assign]
-    with pytest.raises(RuntimeError, match="не в базу"):
+    branch = f"stop/{WS_ID}-charter-g1"
+    with pytest.raises(
+        RuntimeError,
+        match=f"не в базу master.*разберите вручную.*git push origin --delete {branch}"
+        ".*повторите --reopen charter",
+    ):
         act_node.reopen(world.state, world.ops, an.bundle_dag.dag_for(None), "charter")
+
+
+def test_reopen_found_stop_pr_merged_outside_base_names_remedy(
+    world: World, stand: Stand
+) -> None:
+    """Fix round 2: найденный stop-PR смёржен не в базу — остановку он не доставит;
+    при ветке на remote отказ называет выход, после удаления ветки `reopen`
+    доставляет остановку своим stop-PR."""
+    _deliver(world, stand)
+    approve(world, "charter")
+    branch = f"stop/{WS_ID}-charter-g1"
+    stop_pr = _foreign_stop_pr(world, {stop_path(WS_ID, "charter", 1): _OWN_STOP})
+    elsewhere = world.forge.head_of(branch)  # «merge-коммит» вне истории master
+    world.forge.prs[stop_pr].update(
+        state="MERGED",
+        mergedBy={"login": "someone"},
+        mergedAt="2026-10-12T13:00:00Z",
+        mergeCommit={"oid": elsewhere},
+    )
+    with pytest.raises(
+        RuntimeError,
+        match=f"stop-PR #{stop_pr} смёржен не в базу master.*git push origin --delete "
+        f"{branch}.*повторите --reopen charter",
+    ):
+        act_node.reopen(world.state, world.ops, an.bundle_dag.dag_for(None), "charter")
+    world.ops.delete_remote_branch(SLUG, branch)
+    msg = act_node.reopen(
+        world.state, world.ops, an.bundle_dag.dag_for(None), "charter"
+    )
+    assert msg is not None and f"PR #{stop_pr}" not in msg
+
+
+def test_reopen_stop_pr_retargeted_during_checks_wait_not_merged(
+    world: World, stand: Stand, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 2: форма прошла, но за время ожидания обязательных проверок PR
+    перенацелили на другую ветку — форма перепроверяется прямо перед мержем,
+    агентский мерж не вызывается."""
+    _deliver(world, stand)
+    approve(world, "charter")
+    stop_pr = _foreign_stop_pr(world, {stop_path(WS_ID, "charter", 1): _OWN_STOP})
+    real_wait = an._await_required_checks
+
+    def retarget_while_waiting(state, ops, pr, head):
+        got = real_wait(state, ops, pr, head)
+        world.forge.prs[stop_pr]["base"] = "release-x"
+        return got
+
+    monkeypatch.setattr(an, "_await_required_checks", retarget_while_waiting)
+    calls = len(world.forge.merge_calls)
+    with pytest.raises(RuntimeError, match="вливается в release-x.*разберите вручную"):
+        act_node.reopen(world.state, world.ops, an.bundle_dag.dag_for(None), "charter")
+    assert len(world.forge.merge_calls) == calls
+    assert world.forge.prs[stop_pr]["state"] == "OPEN"
 
 
 def test_reopen_of_legacy_node_is_old_path(world: World, stand: Stand) -> None:

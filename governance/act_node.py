@@ -648,7 +648,7 @@ def reopen(state: RunState, ops: Ops, dag: Dag, node: str) -> str | None:
     if event.outcome is not Outcome.FOUND or event.value is None:
         raise an._unresolved(f"merge-коммит stop-PR #{pr} — {event.detail}")
     commit = event.value.commit
-    _require_stop_delivered(state, ops, pr, commit, path, record, node, gen)
+    _require_stop_delivered(state, ops, branch, pr, commit, path, record, node, gen)
     # положительное суждение «остановлен» — тем же входом, что статус (B2-3):
     # действующее событие узла в истории базы — именно эта остановка этим
     # merge-коммитом
@@ -710,6 +710,12 @@ def _merge_stop_pr(
         base=base_sha,
     )
     if refusal is not None:
+        late = form()  # форма разошлась за время ожидания — тот же отказ, что первый
+        if late is not None:
+            raise RuntimeError(
+                f"{late} — агентский мерж не выполнен, узел {node} остаётся "
+                "одобренным; разберите вручную"
+            )
         raise RuntimeError(
             f"stop-PR #{pr}: {refusal.reason} — остановка не доставлена, узел {node} "
             "остаётся одобренным; повторите --reopen"
@@ -758,26 +764,20 @@ def _stop_pr(
     found = af.search_pr(ops, state.repo_slug, branch, any_state=True)
     if found.outcome is Outcome.UNAVAILABLE:
         raise an._unresolved(f"поиск stop-PR на ветке {branch} — {found.detail}")
-    closed: int | None = None
+    what = "ветка есть без stop-PR"
     if found.outcome is Outcome.FOUND:
         pr = int(found.value or 0)
-        facts = an._pr_facts(state, ops, pr)
-        if an._disposition(facts, pr) is not Disposition.CLOSED_UNMERGED:
+        unusable = _unusable_stop_pr(state, ops, pr, path, record)
+        if unusable is None:
             return branch, pr, an.pr_head(state, ops, pr) or ""
-        closed = pr
+        what = unusable
     remote = ops.remote_branch_head_fact(state.repo_slug, branch)
     if remote.outcome is Outcome.UNAVAILABLE:
         raise an._unresolved(f"ветка остановки {branch} на remote — {remote.detail}")
     if remote.outcome is Outcome.FOUND:
-        what = (
-            f"stop-PR #{closed} закрыт без мержа"
-            if closed is not None
-            else "ветка есть без stop-PR"
-        )
         raise RuntimeError(
             f"{what} ({branch}) — остановка не доставлена, узел {node} остаётся "
-            f"одобренным. Выход: удалите ветку остановки на remote "
-            f"(`git push origin --delete {branch}`), затем повторите --reopen {node}"
+            f"одобренным. {_remedy(branch, node)}"
         )
     ops.switch_to(state.target_dir, branch, an._base_ref(state))
     file = Path(state.target_dir) / path
@@ -799,9 +799,44 @@ def _stop_pr(
     return branch, pr, head
 
 
+def _remedy(branch: str, node: str) -> str:
+    """Выход из тупика ветки остановки: без неё `reopen` откроет свой stop-PR."""
+    return (
+        f"Выход: удалите ветку остановки на remote (`git push origin --delete "
+        f"{branch}`), затем повторите --reopen {node}"
+    )
+
+
+def _unusable_stop_pr(
+    state: RunState, ops: Ops, pr: int, path: str, record: str
+) -> str | None:
+    """Почему найденный stop-PR остановку не доставит (`None` — годен: открыт либо
+    смёржен в базу с ожидаемой записью). Закрыт без мержа, смёржен не в базу или
+    без записи — его повторный разбор ничего не даст."""
+    facts = an._pr_facts(state, ops, pr)
+    where = an._disposition(facts, pr)
+    if where is Disposition.CLOSED_UNMERGED:
+        return f"stop-PR #{pr} закрыт без мержа"
+    if where is not Disposition.MERGED:
+        return None
+    event = af.merge_event(facts)
+    if event.outcome is not Outcome.FOUND or event.value is None:
+        raise an._unresolved(f"merge-коммит stop-PR #{pr} — {event.detail}")
+    commit = event.value.commit
+    reached = ops.is_ancestor(state.target_dir, commit, an._base_ref(state))
+    if reached is None:
+        raise an._unresolved(f"stop-PR #{pr}: достижимость из базы")
+    if not reached:
+        return f"stop-PR #{pr} смёржен не в базу {an._base_ref(state)}"
+    if ops.show_file(state.target_dir, commit, path) != record:
+        return f"stop-PR #{pr} смёржен без записи остановки {path}"
+    return None
+
+
 def _require_stop_delivered(
     state: RunState,
     ops: Ops,
+    branch: str,
     pr: int,
     commit: str,
     path: str,
@@ -815,12 +850,15 @@ def _require_stop_delivered(
         raise an._unresolved(f"stop-PR #{pr}: достижимость из базы")
     if not reached:
         raise RuntimeError(
-            f"stop-PR #{pr} смёржен не в базу — узел {node} остаётся одобренным"
+            f"stop-PR #{pr} смёржен не в базу {an._base_ref(state)} — остановка не "
+            f"доставлена, узел {node} остаётся одобренным; разберите вручную (мерж в "
+            f"чужую ветку — откатите там при необходимости). {_remedy(branch, node)}"
         )
     if ops.show_file(state.target_dir, commit, path) != record:
         raise RuntimeError(
             f"stop-PR #{pr} не несёт записи остановки {path} узла {node} поколения "
-            f"{gen} — узел остаётся одобренным; разберите PR вручную"
+            f"{gen} — узел остаётся одобренным; разберите PR вручную. "
+            f"{_remedy(branch, node)}"
         )
 
 
