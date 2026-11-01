@@ -12784,3 +12784,247 @@ def test_prerelease_spec_runner_keeps_oracle_unavailable(tmp_path, monkeypatch) 
         criteria_contract.MinVersion("4.5.0"),
         is_vendored=True,
     )
+
+
+def _canon_bundle(root: Path, rel: str) -> tuple:
+    dag = task_bridge._dag_for(None)
+    bundle = root / rel
+    bundle.mkdir(parents=True)
+    for fname, _ in dag:
+        (bundle / fname).write_text(f"---\nstatus: approved\n---\n{fname}\n")
+    return dag
+
+
+@pytest.mark.parametrize("rel", ["workstreams/ws-7/spec", "spec"])
+def test_canonical_hash_sees_new_generation_and_stops(tmp_path: Path, rel: str) -> None:
+    """B1-6/B2-2: новый манифест (поколение с теми же байтами узла и прежним конвертом)
+    и запись остановки меняют хеш при ЛЮБОМ `bundle_dir` — каталог `approvals/` берётся
+    из идентичности воркстрима (путь производителя), не из `bundle_dir`; пустой или
+    отсутствующий `approvals/` — прежнее значение."""
+    dag = _canon_bundle(tmp_path, rel)
+
+    def canon() -> str:
+        return task_bridge._canonical_dag_hash(str(tmp_path), rel, dag, ws_id="ws-7")
+
+    before = canon()
+    assert before == task_bridge._canonical_dag_hash(str(tmp_path), rel, dag)
+    approvals = tmp_path / "workstreams/ws-7/approvals"
+    approvals.mkdir(parents=True, exist_ok=True)
+    assert canon() == before
+    (approvals / "requirements.yaml").write_text("envelope: r1\n")
+    with_envelope = canon()
+    (approvals / "requests").mkdir()
+    (approvals / "requests" / "approve-3-1-1.yaml").write_text("act: review/v1\n")
+    with_new_generation = canon()
+    assert len({before, with_envelope, with_new_generation}) == 3
+    (approvals / "stops").mkdir()
+    (approvals / "stops" / "requirements-g1.yaml").write_text("stop\n")
+    assert canon() != with_new_generation
+
+
+def test_canonical_hash_ignores_other_workstream_approvals(tmp_path: Path) -> None:
+    """B2-2: `approvals/` чужого воркстрима и корня репо в хеш этого не входят."""
+    rel = "spec"
+    dag = _canon_bundle(tmp_path, rel)
+    before = task_bridge._canonical_dag_hash(str(tmp_path), rel, dag, ws_id="ws-7")
+    for other in ("workstreams/ws-8/approvals/requests", "approvals/requests"):
+        (tmp_path / other).mkdir(parents=True)
+        (tmp_path / other / "approve-1-0-1.yaml").write_text("act: review/v1\n")
+    assert (
+        task_bridge._canonical_dag_hash(str(tmp_path), rel, dag, ws_id="ws-7") == before
+    )
+
+
+def test_canonical_hash_with_approvals_is_a_new_epoch(tmp_path: Path) -> None:
+    """B2-2: величина с байтами `approvals/` несопоставима с величиной без них
+    (`v3` против `v2`): `_delivered_content_anchor`, не видящий `approvals/` head,
+    даёт `comparison: unavailable`, а не ложное «содержание то же»."""
+    rel = "workstreams/ws-7/spec"
+    dag = _canon_bundle(tmp_path, rel)
+    plain = task_bridge._canonical_dag_hash(str(tmp_path), rel, dag)
+    (tmp_path / "workstreams/ws-7/approvals").mkdir()
+    (tmp_path / "workstreams/ws-7/approvals/requirements.yaml").write_text("e\n")
+    acted = task_bridge._canonical_dag_hash(str(tmp_path), rel, dag, ws_id="ws-7")
+    assert plain.startswith("v2:") and acted.startswith("v3:")
+    assert not task_bridge._comparable_anchors(plain, acted)
+
+
+def _review_mode(monkeypatch, verdicts: dict[str, str]) -> None:
+    """Продукт в `review`; `statuses_at_base` отвечает заданными статусами узлов."""
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from governance import act_status
+
+    live = SimpleNamespace(mode="review")
+    monkeypatch.setattr(act_status, "mode_probe", lambda state, deps=None: live)
+
+    class _Statuses:
+        def is_review(self, node: str) -> bool:
+            return node in verdicts
+
+        def of(self, node: str) -> str:
+            # узлы старого пути (без события) — одобрены: диагностика
+            # `_debt_notice` после no-op спрашивает статусы всех узлов
+            return verdicts.get(node, "approved")
+
+    monkeypatch.setattr(
+        act_status, "fresh_base", lambda state, ops: nullcontext(("f" * 40, ops))
+    )
+    monkeypatch.setattr(
+        act_status,
+        "statuses_at_base",
+        lambda state, ops, dag, live, deps=None, *, ref=None: _Statuses(),
+    )
+
+
+def _equal_anchor_state(tmp_path: Path, monkeypatch):
+    """Запись доставки с тем же `content_anchor`, что у текущего дерева (хеш не менялся)."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {
+        "status": "completed",
+        "pr": 5,
+        "anchor": "БЛОБ-ДОСТАВКИ-v1",
+        "content_anchor": tb._content_anchor(state.target_dir, state.bundle_dir, None),
+    }
+    rs.save(state)
+    return state
+
+
+def _gate_reached(*_args):
+    raise RuntimeError("гейт §I12 вызван")
+
+
+def test_review_noop_with_fresh_approval(tmp_path, monkeypatch) -> None:
+    """В-1 (решение владельца 01.11): хеш не менялся и узел `review/v1` одобрен сейчас —
+    бесследный no-op §I5 прежний."""
+    from governance import task_bridge as tb
+
+    _review_mode(monkeypatch, {"requirements": "approved"})
+    state = _equal_anchor_state(tmp_path, monkeypatch)
+    monkeypatch.setattr(tb, "_approved_dag_or_refuse", _gate_reached)
+    assert tb.deliver_superseded(
+        state, _ProvOps(prs=[_MERGED_PR])
+    ) == tb.SupersedeResult("noop")
+
+
+@pytest.mark.parametrize(
+    "verdict",
+    [
+        "not_approved:stopped:g1",
+        "not_approved:act:d1_no_act",
+        "unavailable:df-trust: HTTP 403",
+    ],
+    ids=["stop_delivered", "act_revoked", "trust_unavailable"],
+)
+def test_review_noop_refused_without_fresh_approval(
+    tmp_path, monkeypatch, capsys, verdict: str
+) -> None:
+    """В-1: хеш не менялся, но допуск узла `review/v1` отозван (остановка, ревью
+    отозвано) или не проверяется (доверенный контекст недоступен) — no-op не объявляется,
+    дальше гейт §I12 по прежним правилам."""
+    from governance import task_bridge as tb
+
+    _review_mode(monkeypatch, {"requirements": verdict})
+    state = _equal_anchor_state(tmp_path, monkeypatch)
+    monkeypatch.setattr(tb, "_approved_dag_or_refuse", _gate_reached)
+    with pytest.raises(RuntimeError, match="гейт §I12 вызван"):
+        tb.deliver_superseded(state, _ProvOps(prs=[_MERGED_PR]))
+    out = capsys.readouterr().out
+    assert f"бесследного no-op нет (узел requirements: {verdict})" in out
+
+
+def test_review_noop_refused_when_mode_unset(tmp_path, monkeypatch, capsys) -> None:
+    """В-1: режим акта не установлен (нет привязки) — no-op не объявляется."""
+    from governance import act_status
+    from governance import task_bridge as tb
+    from governance.act_time import Unavailable
+
+    monkeypatch.setattr(
+        act_status, "mode_probe", lambda state, deps=None: Unavailable("нет привязки")
+    )
+    state = _equal_anchor_state(tmp_path, monkeypatch)
+    monkeypatch.setattr(tb, "_approved_dag_or_refuse", _gate_reached)
+    with pytest.raises(RuntimeError, match="гейт §I12 вызван"):
+        tb.deliver_superseded(state, _ProvOps(prs=[_MERGED_PR]))
+    assert (
+        "бесследного no-op нет (режим акта продукта: нет привязки)"
+        in capsys.readouterr().out
+    )
+
+
+def test_noop_without_review_nodes_reads_no_statuses(tmp_path, monkeypatch) -> None:
+    """В-1: продукт до миграции — правило §I5 прежнее, статусы не читаются (квота С-1)."""
+    from governance import act_status
+    from governance import task_bridge as tb
+
+    monkeypatch.setattr(
+        act_status,
+        "statuses_at_base",
+        lambda *a, **k: pytest.fail("статусы для продукта до миграции"),
+    )
+    state = _equal_anchor_state(tmp_path, monkeypatch)
+    assert tb.deliver_superseded(
+        state, _ProvOps(prs=[_MERGED_PR])
+    ) == tb.SupersedeResult("noop")
+
+
+def _for_run_completed(tmp_path: Path, monkeypatch) -> int:
+    """Доставка уже записана `completed` — повтор возвращает её PR."""
+    state = _recon_state(tmp_path, monkeypatch, op={"status": "completed", "pr": 5})
+    return task_bridge.deliver_for_run(state, _ReconOps())
+
+
+#: Успешные выходы по сохранённому результату (d1): сценарий — существующий тест этого исхода.
+_STORED_SUCCESS = {
+    "for_run_completed": lambda tp, mp, cs: _for_run_completed(tp, mp),
+    "for_run_adopted": lambda tp, mp, cs: (
+        test_deliver_for_run_adopts_existing_pr_by_branch(tp, mp)
+    ),
+    "returned_pr": lambda tp, mp, cs: (
+        test_supersede_returns_existing_pr_when_revision_completed(tp, mp)
+    ),
+    "returned_merged": lambda tp, mp, cs: (
+        test_supersede_completes_started_revision_with_merged_pr(tp, mp)
+    ),
+    "returned_open": lambda tp, mp, cs: (
+        test_supersede_resumes_started_revision_with_open_pr(tp, mp)
+    ),
+    "returned_v1": lambda tp, mp, cs: test_supersede_returns_open_pr_of_first_delivery(
+        tp, mp
+    ),
+    "v1_replacement": lambda tp, mp, cs: (
+        test_replace_v1_repeat_after_live_replacement_explains("OPEN", tp, mp, cs)
+    ),
+    "redo_intent": lambda tp, mp, cs: (
+        test_supersede_resumes_started_revision_without_pr(tp, mp)
+    ),
+}
+
+
+def test_for_run_completed_returns_pr_with_admission(tmp_path, monkeypatch) -> None:
+    """d1: допуск подтверждён (продукт до миграции) — повтор возвращает записанный PR."""
+    assert _for_run_completed(tmp_path, monkeypatch) == 5
+
+
+@pytest.mark.parametrize("site", sorted(_STORED_SUCCESS))
+def test_stored_success_requires_admission(
+    tmp_path, monkeypatch, capsys, site: str
+) -> None:
+    """Решение владельца 01.11 (d1): успех по сохранённому результату — возврат уже
+    доставленного PR, повтор доставки из намерения — для продукта в `review` только при
+    актуальном допуске узлов `review/v1`; иначе отказ, успеха нет."""
+    from governance import act_status
+
+    monkeypatch.setattr(
+        act_status,
+        "noop_refusal",
+        lambda *a, **k: "узел requirements: not_approved:stopped:g1",
+    )
+    with pytest.raises(
+        RuntimeError, match="допуск review/v1 не подтверждён — узел requirements"
+    ):
+        _STORED_SUCCESS[site](tmp_path, monkeypatch, capsys)

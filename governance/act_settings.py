@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,6 +27,16 @@ class ActSettings:
 
     review_v1: bool
     draining: bool
+
+
+def config_home(env: Mapping[str, str]) -> Path:
+    """`$XDG_CONFIG_HOME` (только абсолютный, как требует XDG), иначе `~/.config`.
+
+    То же правило обязана применять discovery для `act.toml` (M2, заметки
+    части A п. 11) — расхождение дало бы draining только у одного из двух.
+    """
+    raw = env.get("XDG_CONFIG_HOME", "")
+    return Path(raw) if raw and Path(raw).is_absolute() else Path.home() / ".config"
 
 
 def load_settings(config_home: Path) -> ActSettings:

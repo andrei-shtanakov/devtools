@@ -139,6 +139,7 @@ DEBT_UNSIGNED = "unsigned"
 DEBT_PINS = "pins"
 DEBT_MIGRATION = "migration"
 DEBT_SELF_HASH = "self_hash"
+DEBT_REVIEW_V1 = "review_v1"
 
 
 @dataclass(frozen=True)

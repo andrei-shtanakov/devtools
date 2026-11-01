@@ -48,6 +48,9 @@ from governance import approval_facts as af
 from governance import approval_ledger as al
 from governance import brief_input, bundle_dag, bundle_inputs, pr_checks
 from governance import node_approval as na
+from governance.act_check import LegacyAccepted
+from governance.act_decision import Rejected
+from governance.act_time import Unavailable
 from governance.approval_facts import Disposition, Outcome
 from governance.frontmatter import split_frontmatter, update_frontmatter
 from governance.ops import Ops
@@ -509,6 +512,18 @@ def read_dag_state(
     установленное расхождение source bytes — отдельный `forbidden`, потому
     что повтор запроса его не исправит.
     """
+    from governance import act_status
+
+    # Продукт в `review` судится статусом `review/v1` (§9.1), иначе — прежний
+    # предикат; режим не установлен — факт не установлен (ревизия b1, B1-5).
+    live = act_status.mode_probe(state)
+    if isinstance(live, Unavailable):
+        return DagState(None, unresolved=f"режим акта продукта: {live.reason}")
+    statuses = (
+        act_status.statuses_at_base(state, ops, dag, live)
+        if live.mode == "review"
+        else None
+    )
     texts: dict[str, str] = {}
     for fname, _ in dag:
         fact = af.read_blob_text(
@@ -533,6 +548,13 @@ def read_dag_state(
             return DagState(None, forbidden=inputs.detail)
         if inputs.outcome is not Outcome.FOUND or inputs.value is None:
             return DagState(None, unresolved=inputs.detail)
+        if statuses is not None:
+            verdict = statuses.of(node)
+            if verdict.startswith("unavailable:"):
+                return DagState(None, unresolved=verdict)
+            if verdict != act_status.APPROVED:
+                debts.append(_review_debt(node, texts[node], verdict))
+            continue
         debt = na.node_debt(
             node,
             texts[node],
@@ -545,6 +567,19 @@ def read_dag_state(
         return DagState(None, debts=tuple(debts))
     nodes = bundle_dag.composition(dag)
     return DagState(ApprovedDag(nodes, bundle_dag.composition_fingerprint(nodes)))
+
+
+def _review_debt(node: str, text: str, verdict: str) -> na.NodeDebt:
+    """Долг узла в продукте `review`: причина — ответ статуса, процедура —
+    новая заявка `review/v1`."""
+    status = split_frontmatter(text)[0].get("status")
+    return na.NodeDebt(
+        node,
+        status,
+        na.DEBT_REVIEW_V1,
+        verdict.removeprefix("not_approved:"),
+        f"--approve-node {node} (заявка review/v1: approve человека по head)",
+    )
 
 
 def _intent_of(record: dict, wave: int) -> tuple[list[str], str]:
@@ -956,8 +991,28 @@ def _require_upstream_ready(
     своих upstream, значит индукция покрывает всё замыкание предков — а
     замыкание, собранное помимо этой команды, ловит условие (3) предиката.
     """
+    from governance import act_status
+
+    live = act_status.mode_probe(state)
+    if isinstance(live, Unavailable):
+        raise _unresolved(f"режим акта продукта (upstream {node_id}): {live.reason}")
+    statuses = (
+        act_status.statuses_at_base(state, ops, dag, live)
+        if live.mode == "review"
+        else None
+    )
     for up in _upstreams(dag, node_id):
         text = _base_text(ops, state, _filename(dag, up))
+        if statuses is not None:
+            verdict = statuses.of(up)
+            if verdict.startswith("unavailable:"):
+                raise _unresolved(f"upstream {up} узла {node_id}: {verdict}")
+            if verdict != act_status.APPROVED:
+                raise RuntimeError(
+                    f"upstream {up} не одобрен (review/v1): "
+                    f"{_review_debt(up, text, verdict).reason}"
+                )
+            continue
         debt = na.node_debt(
             up,
             text,
@@ -1836,27 +1891,8 @@ def _reconcile_candidate(
             "изменено",
             request=key,
         )
-    if not published:
-        # PR закрыт либо вмержен, а наш коммит в его голову не попал:
-        # предложение, которое заявка ВЫНЕСЛА, человеку не показывали.
-        # Факт положительно установлен (обе величины прочитаны), и он
-        # противоречит заявке — значит терминальный статус, а не отказ с
-        # сохранением. Восстановление обычное: новый candidate.
-        al.invalidate_request(
-            state,
-            key,
-            f"в голове PR #{pr} ({facts.get('headRefOid')}) лежат не все "
-            f"узлы снимка заявки ({', '.join(op['nodes'])}), а PR уже "
-            "закрыт либо вмержен: предъявлено человеку было не то, что "
-            "заявка выносит",
-        )
-        raise RuntimeError(
-            f"PR #{pr} завершён не на предложении заявки {key} — часть её "
-            "узлов человеку не предъявлялась. Заявка invalidated; "
-            "восстановление: новый candidate над теми же узлами"
-        )
     event = af.merge_event(facts)
-    if event.outcome is Outcome.ABSENT:
+    if published and event.outcome is Outcome.ABSENT:
         al.abandon_request(
             state, key, f"candidate-PR #{pr} закрыт без мержа — не одобрено"
         )
@@ -1866,66 +1902,121 @@ def _reconcile_candidate(
             "штатным восстановлением",
             request=key,
         )
-    if event.outcome is not Outcome.FOUND:
-        raise _unresolved(f"акт мержа candidate-PR #{pr} — {event.detail}")
-    merged = event.value
-    assert merged is not None
+    verdict = _legacy_outcome(state, ops, dag, op, key, facts)
+    if isinstance(verdict, LegacyHalt):
+        raise _unresolved(verdict.text) if verdict.wrap else RuntimeError(verdict.text)
+    if isinstance(verdict, Rejected):
+        al.invalidate_request(state, key, verdict.detail)
+        detail = verdict.detail.removeprefix(f"{verdict.code}: ")
+        raise RuntimeError(
+            _LEGACY_RAISE[verdict.code].format(pr=pr, key=key, detail=detail)
+        )
+    merged, authorization = verdict.evidence
+    al.record_merge(state, key, merged, authorization)
+    return _finalize(state, ops, dag, state.ops[key], key, facts)
+
+
+@dataclass(frozen=True)
+class LegacyHalt:
+    """Старый путь не установил факт: `text` — прежнее сообщение; `wrap` —
+    через `_unresolved` (иначе прежний `RuntimeError` с тем же текстом)."""
+
+    text: str
+    wrap: bool = True
+
+
+_LEGACY_UNPUBLISHED = "legacy_unpublished"
+_LEGACY_UNPINNED = "legacy_unpinned"
+_LEGACY_SIGNATURE = "legacy_signature"
+
+
+def _legacy_outcome(
+    state: RunState,
+    ops: Ops,
+    dag: tuple[tuple[str, tuple[str, ...]], ...],
+    op: dict,
+    key: str,
+    facts: dict,
+) -> LegacyAccepted | Rejected | LegacyHalt:
+    """Вердикт старого кода по смёрженному candidate без побочных эффектов.
+
+    Тот же код судит старый путь (`_reconcile_candidate`) и provenance
+    старого одобрения в продукте `review` (`act_status.LegacyProbe`, ревизия
+    b3, B3-1): опубликованный снимок, закреплённый пин политики, его
+    отпечаток, `authorized_signature` мержера по прежнему allowlist."""
+    pr = op["candidate_pr"]
+    published = _snapshot_is_published(state, ops, dag, op, facts.get("headRefOid"))
+    if published is None:
+        return LegacyHalt(
+            f"состав предложения в голове PR #{pr} — объект недоступен "
+            "либо голова не названа"
+        )
+    if not published:
+        return Rejected(
+            _LEGACY_UNPUBLISHED,
+            f"в голове PR #{pr} ({facts.get('headRefOid')}) лежат не все "
+            f"узлы снимка заявки ({', '.join(op['nodes'])}), а PR уже "
+            "закрыт либо вмержен: предъявлено человеку было не то, что "
+            "заявка выносит",
+        )
+    event = af.merge_event(facts)
+    if event.outcome is not Outcome.FOUND or event.value is None:
+        return LegacyHalt(f"акт мержа candidate-PR #{pr} — {event.detail}")
     # Политика перечитывается по ПИНУ заявки (спека approval-policy §4.4).
     # Неустановленный факт (сеть) и отказы об инструменте/окружении
     # сохраняют заявку; смена версии — установленный факт о паре версий →
-    # invalidated с причиной `policy_changed` (D3, подписано 2026-09-22),
-    # запись заявки сохраняется целиком; новый candidate — повторное
-    # установление авторизации под новой версией.
+    # invalidated с причиной `policy_changed` (D3, подписано 2026-09-22).
     pinned = op.get("policy")
     if not pinned:
-        al.invalidate_request(
-            state,
-            key,
+        return Rejected(
+            _LEGACY_UNPINNED,
             "заявка не закрепила версию политики (старый формат, §4.6)",
-        )
-        raise RuntimeError(
-            f"заявка {key} не закрепила версию политики — invalidated; "
-            "восстановление: новый candidate над теми же узлами"
         )
     policy = af.policy_snapshot(ops, pinned_sha=pinned["sha"])
     if policy.outcome is Outcome.UNAVAILABLE:
-        raise _unresolved(f"политика подписи для мержа PR #{pr}: {policy.detail}")
+        return LegacyHalt(f"политика подписи для мержа PR #{pr}: {policy.detail}")
     if policy.outcome is Outcome.FORBIDDEN:
         refusal = policy.value
         assert isinstance(refusal, af.PolicyRefusal)
         if refusal.kind == af.POLICY_REFUSAL_SUPERSEDED:
-            al.invalidate_request(
-                state, key, f"{af.INVALIDATION_POLICY_CHANGED}: {refusal.detail}"
+            return Rejected(
+                af.INVALIDATION_POLICY_CHANGED,
+                f"{af.INVALIDATION_POLICY_CHANGED}: {refusal.detail}",
             )
-            raise RuntimeError(
-                f"{refusal.detail}. Заявка {key} — invalidated; повторное "
-                "установление авторизации — новый candidate над теми же узлами"
-            )
-        raise RuntimeError(
+        return LegacyHalt(
             f"{refusal.detail}. Заявка {key} жива, факт мержа не записан; "
-            "исправьте источник/окружение и повторите"
+            "исправьте источник/окружение и повторите",
+            wrap=False,
         )
     snapshot = policy.value
     assert isinstance(snapshot, af.PolicySnapshot)
     if snapshot.fingerprint != pinned["fingerprint"]:
-        raise RuntimeError(
+        return LegacyHalt(
             f"политика {snapshot.source}: прочитано не то, что закрепляла "
             f"заявка {key} (отпечаток {snapshot.fingerprint} ≠ "
             f"{pinned['fingerprint']}) — подмена или сбой пути чтения; "
-            "заявка жива, ничего не записано"
+            "заявка жива, ничего не записано",
+            wrap=False,
         )
-    signature = af.authorized_signature(merged, snapshot)
+    signature = af.authorized_signature(event.value, snapshot)
     if signature.outcome is Outcome.FORBIDDEN:
-        al.invalidate_request(state, key, signature.detail)
-        raise RuntimeError(
-            f"{signature.detail}. Заявка {key} — invalidated; "
-            "восстановление: новый candidate над теми же узлами, мерж "
-            "учёткой из allowlist даст верную подпись"
-        )
-    authorization = signature.value
-    assert authorization is not None
-    al.record_merge(state, key, merged, authorization)
-    return _finalize(state, ops, dag, state.ops[key], key, facts)
+        return Rejected(_LEGACY_SIGNATURE, signature.detail)
+    return LegacyAccepted(event.value.login, evidence=(event.value, signature.value))
+
+
+#: Тексты отказа старого пути — те же, что писал `_reconcile_candidate` до
+#: выделения `_legacy_outcome`.
+_LEGACY_RAISE = {
+    _LEGACY_UNPUBLISHED: "PR #{pr} завершён не на предложении заявки {key} — часть "
+    "её узлов человеку не предъявлялась. Заявка invalidated; восстановление: "
+    "новый candidate над теми же узлами",
+    _LEGACY_UNPINNED: "заявка {key} не закрепила версию политики — invalidated; "
+    "восстановление: новый candidate над теми же узлами",
+    af.INVALIDATION_POLICY_CHANGED: "{detail}. Заявка {key} — invalidated; повторное "
+    "установление авторизации — новый candidate над теми же узлами",
+    _LEGACY_SIGNATURE: "{detail}. Заявка {key} — invalidated; восстановление: новый "
+    "candidate над теми же узлами, мерж учёткой из allowlist даст верную подпись",
+}
 
 
 def _record_finalize_identity(state: RunState, ops: Ops, key: str, pr: int) -> None:

@@ -72,3 +72,23 @@ def _halt_gate_admits(monkeypatch):
     except ImportError:
         return
     monkeypatch.setattr(runner, "_HALT_GATE", lambda slug: None)
+
+
+@pytest.fixture(autouse=True)
+def _act_isolation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """Изоляция путей акта (Task 14): привязка корня доверия — несуществующий
+    файл (машина разработчика с настоящей `/etc/df/trust.toml` не уводит тесты
+    в сеть), `mode_probe` — продукт до миграции (§10 legacy-эпоха, тот же исход
+    admission, что дал бы пустой журнал режима). Тесты `act_*` подменяют
+    `mode_probe` сами; без зависимостей модуля подменять нечего."""
+    try:
+        from governance import act_status, act_trust
+    except ImportError:
+        return
+    monkeypatch.setattr(
+        act_trust, "BINDING_PATH", tmp_path_factory.getbasetemp() / "no-trust.toml"
+    )
+    pre = act_status.LivePolicy(act_trust.PRE_MIGRATION, None, None, None, None)
+    monkeypatch.setattr(act_status, "mode_probe", lambda state, deps=None: pre)

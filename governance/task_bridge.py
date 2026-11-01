@@ -33,6 +33,7 @@ from governance import (
     decomposition_guard,
     design_guard,
 )
+from governance.act_envelope import envelope_path
 from governance.approve_node import (
     approve_node,
     read_dag_state,
@@ -1133,6 +1134,9 @@ _CANON_CUT_KEYS = ("approved_by", "approved_at", "version")
 #: v1 по построению — fail-closed, потому что любое иное чтение объявляет
 #: несопоставимое сопоставимым.
 _CANON_VERSION = "v2"
+#: Эпоха величины с байтами `approvals/` воркстрима (В-1, решение владельца
+#: 01.11): несопоставима с `v2` (`_comparable_anchors`).
+_CANON_VERSION_ACT = "v3"
 
 
 def _canonical_dag_hash(
@@ -1140,6 +1144,8 @@ def _canonical_dag_hash(
     bundle_dir: str,
     dag: tuple[tuple[str, tuple[str, ...]], ...],
     source_paths: tuple[str, ...] = (),
+    *,
+    ws_id: str | None = None,
 ) -> str:
     """Канонический хэш DAG: содержание бандла без провенанса approve.
 
@@ -1174,6 +1180,12 @@ def _canonical_dag_hash(
     Величина несёт ОТМЕТКУ ЭПОХИ (`v2:<хеш>`): процедура менялась, и
     записи двух эпох несопоставимы — ни как равные, ни как содержательно
     разные (`_comparable_anchors`).
+
+    `review/v1`: байты всех файлов `workstreams/<ws-id>/approvals/` —
+    конверты, манифесты, остановки — входят в хеш, эпоха `v3` (В-1, решение
+    владельца 01.11). Каталог — из идентичности воркстрима (путь
+    производителя, `act_envelope.envelope_path`), не из `bundle_dir`. Равный
+    хеш одного no-op узлов `review/v1` не даёт — `_admission_refusal`.
     """
     canon: dict[str, str] = {}
     lines: list[str] = []
@@ -1187,6 +1199,14 @@ def _canonical_dag_hash(
         node_id = _node_id(fname)
         canon[node_id] = blob_sha1(join_frontmatter(meta, body))
         lines.append(f"{node_id} {canon[node_id]}")
+    acted = False
+    if ws_id is not None:
+        approvals = Path(target_dir) / PurePosixPath(envelope_path(ws_id, "_")).parent
+        if approvals.is_dir():
+            for path in sorted(p for p in approvals.rglob("*") if p.is_file()):
+                rel = path.relative_to(approvals).as_posix()
+                lines.append(f"approvals {rel} {blob_sha1_bytes(path.read_bytes())}")
+                acted = True
     for relative in source_paths:
         source_path = base / relative
         try:
@@ -1199,7 +1219,8 @@ def _canonical_dag_hash(
             ) from exc
         source_blob = blob_sha1_bytes(data)
         lines.append(f"source {relative} {source_blob}")
-    return f"{_CANON_VERSION}:{blob_sha1(chr(10).join(lines) + chr(10))}"
+    version = _CANON_VERSION_ACT if acted else _CANON_VERSION
+    return f"{version}:{blob_sha1(chr(10).join(lines) + chr(10))}"
 
 
 def _canon_epoch(value: str) -> str:
@@ -1347,6 +1368,8 @@ def _content_anchor(
     bundle_dir: str,
     legacy_bundle: int | None = None,
     brief: dict[str, object] | None = None,
+    *,
+    ws_id: str | None = None,
 ) -> str:
     """`content_anchor` §I5: канонический хэш активного DAG в base.
 
@@ -1401,7 +1424,7 @@ def _content_anchor(
                     f"brief descriptor несёт непереносимый source path {path!r}"
                 )
         source_paths = tuple(raw_paths)
-    return _canonical_dag_hash(target_dir, bundle_dir, dag, source_paths)
+    return _canonical_dag_hash(target_dir, bundle_dir, dag, source_paths, ws_id=ws_id)
 
 
 def _prospective_anchor(
@@ -2515,6 +2538,9 @@ def deliver_for_run(
         pr_done = op.get("pr")
         if pr_done is None:
             raise _missing_pr(state)
+        _require_admission(
+            state, ops, legacy_bundle, f"tasks-спека уже доставлена (PR #{pr_done})"
+        )
         # §5 спеки 2026-09-28: при неразряженной замене v1 её закрытый PR
         # не возвращается — до раннего возврата, гейт §I12 ниже не мешает.
         replacement_pr = _v1_replacement_answer(state, ops, pr_done)
@@ -2544,6 +2570,11 @@ def deliver_for_run(
                 "решите судьбу ветки/PR вручную, повторная доставка "
                 "поверх отклонённой не выполняется"
             )
+        # Решение владельца 01.11 (d1): принять уже доставленный PR — успех
+        # без полного пути; отказ — до записи, сохранённое не меняется.
+        _require_admission(
+            state, ops, legacy_bundle, f"принят существующий PR #{existing}"
+        )
         op_complete(
             state,
             "tasks-deliver",
@@ -2583,7 +2614,11 @@ def deliver_for_run(
         """
         stamped["anchor"] = commit_facts["anchor_blob"]
         stamped["content_anchor"] = _content_anchor(
-            state.target_dir, state.bundle_dir, legacy_bundle, state.brief
+            state.target_dir,
+            state.bundle_dir,
+            legacy_bundle,
+            state.brief,
+            ws_id=state.ws_id,
         )
 
     # Гейт §I12 — непосредственно перед ПЕРВЫМ delivery-эффектом, а не
@@ -4152,6 +4187,27 @@ def _require_no_successful_delivery(
         )
 
 
+def _admission_refusal(
+    state: RunState, ops: Ops, legacy_bundle: int | None
+) -> str | None:
+    """Актуальный допуск узлов `review/v1` бандла перед успехом без полного
+    пути (решение владельца 01.11) — `act_status.noop_refusal` по DAG прогона."""
+    from governance import act_status
+
+    return act_status.noop_refusal(state, ops, _dag_for(legacy_bundle))
+
+
+def _require_admission(
+    state: RunState, ops: Ops, legacy_bundle: int | None, done: str
+) -> None:
+    """Успех по сохранённому результату (доставка уже есть) — только при
+    актуальном допуске узлов `review/v1`; иначе отказ (fail closed),
+    сохранённое не меняется."""
+    refusal = _admission_refusal(state, ops, legacy_bundle)
+    if refusal is not None:
+        raise RuntimeError(f"{done}, но допуск review/v1 не подтверждён — {refusal}")
+
+
 def deliver_superseded(
     state: RunState,
     ops: Ops,
@@ -4245,6 +4301,12 @@ def deliver_superseded(
     if replace is not None and replace.revision == 1:
         repeated = _v1_replacement_repeat(state, ops)
         if repeated is not None:
+            _require_admission(
+                state,
+                ops,
+                legacy_bundle,
+                f"возврат PR #{repeated.pr} замены первой доставки",
+            )
             return repeated
     replace_fields = _validate_replacement(state, ops, replace) if replace else {}
 
@@ -4331,10 +4393,16 @@ def deliver_superseded(
             # Окно «PR новой ревизии создан, ветка заменённой ещё жива»:
             # хвост замены доводится и на возврате существующего PR, иначе
             # он не доводился бы никогда — этот исход терминален.
+            _require_admission(
+                state, ops, legacy_bundle, f"возврат PR #{pr} ревизии {n}"
+            )
             _replacement_cleanup(state, ops, op)
             print(f"ревизия {n} уже доставлена — PR #{pr}; новая ревизия не заводится")
             return SupersedeResult("returned", pr)
         if decision == "complete":
+            _require_admission(
+                state, ops, legacy_bundle, f"возврат вмерженного PR #{pr} ревизии {n}"
+            )
             _complete_revision(
                 state,
                 n,
@@ -4364,6 +4432,9 @@ def deliver_superseded(
             # ЛОКАЛЬНЫЙ head, и уехавшая локальная ветка ломала бы строку
             # §I3 «started | PR OPEN | идентичность сошлась», которая
             # обещает возврат существующего PR.
+            _require_admission(
+                state, ops, legacy_bundle, f"возврат открытого PR #{pr} ревизии {n}"
+            )
             _complete_revision(
                 state,
                 n,
@@ -4381,6 +4452,11 @@ def deliver_superseded(
         # commit_paths на пустом индексе не создаёт второй коммит.
         # Бросает на чужом коммите/ветке и на «head_sha записан, ветки в
         # клоне нет» (там опознавать нечем, а переиздание затёрло бы SHA).
+        # Решение владельца 01.11 (d1): гейт §I12 судился при записи
+        # намерения — актуальный допуск проверяется до любого эффекта.
+        _require_admission(
+            state, ops, legacy_bundle, f"повтор доставки ревизии {n} из намерения"
+        )
         _recover_commit(state, ops, n, op)
         # NSD-ревизия несёт S8 evidence (§3 спеки 2026-09-28): путь
         # возобновления до предиката не доходит, признак — в намерении.
@@ -4481,6 +4557,9 @@ def deliver_superseded(
             # C-1).
             v1_pr = _reconcile_v1(state, ops, prev_op)
             if v1_pr is not None:
+                _require_admission(
+                    state, ops, legacy_bundle, f"возврат PR #{v1_pr} первой доставки"
+                )
                 print(
                     f"первая доставка уже открыта PR #{v1_pr} — "
                     "переиздавать нечего, пока он не вмержен; новая "
@@ -4508,11 +4587,15 @@ def deliver_superseded(
     # §I5 — ДО провенанса и ДО любого сетевого вызова: `content_anchor`
     # считается локально по проштампованному дереву и подписи не видит.
     content = _content_anchor(
-        state.target_dir, state.bundle_dir, legacy_bundle, state.brief
+        state.target_dir,
+        state.bundle_dir,
+        legacy_bundle,
+        state.brief,
+        ws_id=state.ws_id,
     )
     recorded_content = prev_op.get("content_anchor")
     comparable = _comparable_anchors(recorded_content, content)
-    if (
+    traceless = (
         # Незакрытое обязательство замены снимает бесследный no-op §I5:
         # он отвечает про АПСТРИМ, а замена — про ПРЕДЛОЖЕНИЕ. Живой
         # случай (дефект подписи при неизменном апстриме) даёт равные
@@ -4525,7 +4608,18 @@ def deliver_superseded(
         # no-op молча испарил бы обязательство при RC 0, оставив
         # отозванный PR открытым, а его ветку живой.
         not replace_fields and comparable and recorded_content == content
-    ):
+    )
+    # В-1 (решение владельца 01.11): равный хеш — оптимизация, допуск узлов
+    # `review/v1` проверяется заново перед no-op; не подтверждён — дальше гейт
+    # §I12 (`read_dag_state`) по прежним правилам: долг — отказ, недоступно —
+    # стоп.
+    unconfirmed = _admission_refusal(state, ops, legacy_bundle) if traceless else None
+    if unconfirmed is not None:
+        print(
+            "апстрим не менялся, но допуск review/v1 не подтверждён — "
+            f"бесследного no-op нет ({unconfirmed})"
+        )
+    if traceless and unconfirmed is None:
         print(
             "апстрим не менялся — переиздание не требуется "
             f"(content_anchor {content[:7]})"

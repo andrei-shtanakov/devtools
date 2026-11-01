@@ -1305,7 +1305,27 @@ def _next_wave(state: RunState, ops: Ops, *, lock: rl.RunLock) -> RunState:
     `resume` идут только в `_step_s8` (в волнах бандл-PR нет, мержей было
     пять — по одному на candidate).
     """
-    total = bundle_dag.wave_count(_wave_dag())
+    from governance import act_status
+
+    dag = _wave_dag()
+    wave_nodes = [
+        n for n, level in bundle_dag.levels(dag).items() if level == _wave_level(state)
+    ]
+    refusal = act_status.noop_refusal(state, ops, dag, wave_nodes)
+    if refusal is not None:
+        # Решение владельца 01.11: переход по завершённой заявке — успех по
+        # сохранённому результату; для `review/v1` — только при актуальном
+        # допуске узлов волны.
+        _stop_with_comment(
+            state,
+            ops,
+            "stopped_review",
+            f"волна {state.wave}: заявка завершена, но допуск review/v1 не "
+            f"подтверждён — {refusal}; разберите узел (`--reopen`/`--repropose`), "
+            "затем resume",
+        )
+        return state
+    total = bundle_dag.wave_count(dag)
     if state.wave >= total:
         if op_status(state, "merge") != "completed":
             state.head = _verified_result_sha(state)
@@ -3239,9 +3259,27 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     candidate_state остаётся у консоли (bundle_summary) — её view-model этот
     шаг не трогает.
     """
+    from governance import act_status
+    from governance.act_time import Unavailable
+
     key = wave_key(state, "gate-candidate")
     if op_status(state, key) == "completed":
-        return True
+        # Решение владельца 01.11: сохранённый зелёный гейт — успех без полного
+        # пути; для `review/v1` — только при актуальном допуске судимых им
+        # узлов (уровни ниже волны), иначе гейт заново по прежним правилам.
+        settled = [
+            n
+            for n, level in bundle_dag.levels(_wave_dag()).items()
+            if level < _wave_level(state)
+        ]
+        refusal = act_status.noop_refusal(state, ops, _wave_dag(), settled)
+        if refusal is None:
+            return True
+        print(
+            "S4: сохранённый гейт не принят — допуск review/v1 не подтверждён "
+            f"({refusal}); гейт заново"
+        )
+        op_start(state, key)
     _ensure_started(state, key)
     profile_arg = state.profile
     # S5: гейт steward судит бандл по профилю, а у волны бандл неполон —
@@ -3272,8 +3310,31 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     # исключению посреди гейта тоже не должен оставлять описание чужого
     # состояния. Каждая ветка ниже пишет файл заново целиком.
     (run_dir(state.run_id) / "gate-findings.txt").unlink(missing_ok=True)
+    # Режим gate-check — по режиму продукта (Р-10); в `review` — провайдер
+    # статусов узлов (§12 п. 3). Режим не установлен — стоп, не legacy (B1-5).
+    gate = act_status.gate_run(
+        state,
+        ops,
+        _wave_dag(),
+        candidate=True,
+        out=run_dir(state.run_id) / "node-status-s4.json",
+    )
+    if isinstance(gate, Unavailable):
+        (run_dir(state.run_id) / "gate-findings.txt").write_text(
+            "error GC-ACT-UNAVAILABLE(devtools): режим акта не установлен — "
+            f"{gate.reason}\n",
+            encoding="utf-8",
+        )
+        state.status = "stopped_gate"
+        save(state)
+        return False
+    act_mode, provider = gate
     rc, output = ops.gate_check_candidate(
-        state.target_dir, state.bundle_dir, profile_arg, act_mode="legacy"
+        state.target_dir,
+        state.bundle_dir,
+        profile_arg,
+        act_mode=act_mode,
+        node_status=provider,
     )
     if rc != 0:
         (run_dir(state.run_id) / "gate-findings.txt").write_text(
@@ -3964,9 +4025,33 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
     на диске без файла, и resume падал на `read_text()`
     (`FileNotFoundError`) вместо того, чтобы довести fail-путь до конца.
     """
+    from governance import act_status
+    from governance.act_time import Unavailable
+
     key = "gate-authoritative"
     findings_path = run_dir(state.run_id) / "s8-findings.txt"
     gate_op = state.ops.get(key)
+
+    if (
+        gate_op is not None
+        and gate_op["status"] == "completed"
+        and gate_op.get("exit") == 0
+    ):
+        # Решение владельца 01.11: сохранённый зелёный S8 — успех без полного
+        # пути; для `review/v1` — только при актуальном допуске всех узлов,
+        # иначе гейт заново.
+        refusal = act_status.noop_refusal(state, ops, _wave_dag())
+        if refusal is not None:
+            print(
+                "S8: сохранённый гейт не принят — допуск review/v1 не "
+                f"подтверждён ({refusal}); гейт заново"
+            )
+            # d2: допуск утрачен — прогон не завершён; нетерминальный статус
+            # сохраняется (`op_start` пишет состояние) ДО любого шага,
+            # способного упасть
+            state.status = "running"
+            op_start(state, key)
+            gate_op = state.ops[key]
 
     if gate_op is not None and gate_op["status"] == "completed":
         if gate_op.get("exit") == 0:
@@ -4021,8 +4106,26 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
             state.target_dir,
             str(run_dir(state.run_id) / "s8-gate-verdicts.stale.jsonl"),
         )
+        gate = act_status.gate_run(
+            state,
+            ops,
+            _wave_dag(),
+            candidate=False,
+            out=run_dir(state.run_id) / "node-status-s8.json",
+        )
+        if isinstance(gate, Unavailable):
+            print(
+                f"S8: режим акта не установлен — {gate.reason}; шаг остановлен "
+                "(resumable)"
+            )
+            return False
+        act_mode, provider = gate
         exit_code, output = ops.gate_check_s8(
-            state.target_dir, state.bundle_dir, state.profile, act_mode="legacy"
+            state.target_dir,
+            state.bundle_dir,
+            state.profile,
+            act_mode=act_mode,
+            node_status=provider,
         )
         # Ретроспектива 2026-09-02 (@id:runner-s8-verdicts-cleanup):
         # --emit-verdicts оставляет .steward/gate_verdicts.jsonl в корне
