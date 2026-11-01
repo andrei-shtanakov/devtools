@@ -313,15 +313,19 @@ def test_gate_check_s8_command_matches_real_cli(monkeypatch):
     calls = _install_fake_run(monkeypatch, returncode=0, stdout="ok\n")
     ops = RealOps()
 
-    result = ops.gate_check_s8("/tmp/devtools", "/tmp/devtools/spec", "lite")
+    result = ops.gate_check_s8(
+        "/tmp/devtools", "/tmp/devtools/spec", "lite", act_mode="legacy"
+    )
 
     assert result == (0, "ok\n")
     call = calls[0]
-    assert call.argv[-4:] == [
+    assert call.argv[-6:] == [
         "/tmp/devtools/spec",
         "--profile",
         "lite",
         "--emit-verdicts",
+        "--act-mode",
+        "legacy",
     ]
     assert call.argv[0].endswith("gate-check")
     assert call.kwargs["cwd"] == "/tmp/devtools"
@@ -338,7 +342,9 @@ def test_gate_check_s8_returns_combined_output_on_failure(monkeypatch):
     )
     ops = RealOps()
 
-    result = ops.gate_check_s8("/tmp/devtools", "/tmp/devtools/spec", "lite")
+    result = ops.gate_check_s8(
+        "/tmp/devtools", "/tmp/devtools/spec", "lite", act_mode="legacy"
+    )
 
     assert result == (1, "GC-X: bad\nwarn\n")
     assert len(calls) == 1

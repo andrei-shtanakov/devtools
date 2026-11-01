@@ -21,7 +21,7 @@ default-groups = ["dev", "conductor"]
 # workspace-relative path, so the pin is reproducible and does not follow a
 # sibling checkout. Bump deliberately in its own PR.
 plan-fields = { git = "https://github.com/andrei-shtanakov/dispatcher", rev = "f7f2cbcbbffc8d83870848317228c0a3487780ec", subdirectory = "packages/plan-fields" }
-steward = { git = "https://github.com/andrei-shtanakov/steward", rev = "b77ee0ded6cd750ed092f7574969d43f043edc6e" }
+steward = { git = "https://github.com/andrei-shtanakov/steward", rev = "68f46a9b2e5cfe9ecd1f09524e986c3f687f4155" }
 
 [dependency-groups]
 dev = [
