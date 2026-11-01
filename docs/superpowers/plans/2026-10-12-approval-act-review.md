@@ -2948,7 +2948,8 @@ steward#211). Этот коммит сверяет «Интерфейс M0» с 
    номера расходились с зависимостями. Сборка `DeliveryContext` вынесена в `act_context` (Task 12a),
    чтобы и 13, и 14 её потребляли.
 6. **Task 13** — вопрос владельца по п. 9 заметок части A (остановка не действующего поколения)
-   записан с двумя вариантами; зависимые шаги помечены `[ждёт решения владельца]`.
+   **решён владельцем 01.11: вариант (Б)** с единым вычислением состояния истории
+   (`act_envelope.node_history`, Task 13 Step 8); см. «Решения владельца 01.11».
 7. **Task 15** — `act_premerge` опрашивает журнал периметра, как каждый потребитель (спека §6.3):
    узкий клиент `act_journal_wire` (Task 12a, Step 5b) — тот же формат и правило блокировки без
    импорта `df/`, поэтому цепочка обвязки мержа остаётся в `_HARNESS_PREFIXES` (Р-16). Нарушение,
@@ -2985,7 +2986,7 @@ steward#211). Этот коммит сверяет «Интерфейс M0» с 
 | Р-10 | **механизм b1** (B1-5): `gate-check` S4/S8 — `--act-mode` по `product_mode` (история режима): `review` → провайдер; `PRE_MIGRATION`/`merge` → `legacy`; удаление записи, откат `review → merge`, нет привязки, недочитанная история → стоп шага | О14 требует результат admission; спека §10 запрещает выводить режим из одного текущего значения | продукт в `merge` с уже доставленной заявкой `review/v1` (невозможно по барьеру §10) упрётся в `GC-ACT-MODE-CONFLICT` — fail-closed |
 | Р-11 | **дополнено b1** (B1-15): проверка конверта после мержа finalize — побайтовое равенство с `render_envelope(ожидаемый)` на merge-коммите finalize **и** достижимость этого коммита из базы (`is_ancestor`); `reopen` — наличие и идентичность `StopRecord` в stop-PR, достижимость его merge-коммита | прежняя редакция ссылалась на Task 14 из Task 13; доставка в нужную базу — часть утверждения «конверт в base» | нет |
 | Р-12 | Вендоренный `contracts/approval-facts/` — в authority-root и `_HARNESS_PREFIXES` | данные тестов ядра акта защищаются так же, как сами тесты `tests/test_act_*` (заметки части A, строка 10) | PR, правящий только векторы, мержит человек |
-| Р-13 | **переведено в вопрос владельцу В-1** (B1-6): канонический хеш DAG — отступление от буквы спеки; вариант по умолчанию закрывает дыру supersede (блобы всех `approvals/`) | — | — |
+| Р-13 | **решено владельцем 01.11 (В-1)**: гибрид — байты всех `approvals/` в хеше DAG как оптимизация; перед каждым no-op §I5 узлы `review/v1` проверяются заново (`Statuses.of`), хеш один no-op не даёт | — | — |
 | Р-14 | `--repropose` брифа переезжает из Task 13a в Task 17 | заявка брифа с пином активации (`v2`) появляется только с M2 discovery — переиздавать до неё нечего | до части C выход для брифа — новая заявка через `brief-propose` |
 | Р-15 | **усилено b1** (B1-13): барьер считает смёрженный legacy-candidate разобранным, только если каждый узел, отданный candidate на одобрение (`approval_pending` в его голове, состав — независимо от finalize), подписан этим или более поздним актом в базе; пустой состав — живой пункт; пины узла не судит | §10 п. 2 спрашивает «доведена или инвалидирована», а не «узел без долга»; дрейф пинов после законного акта — долг узла | узел с долгом пинов пройдёт барьер и встанет на гейте доставки |
 | Р-16 | Предпроверка мержа пишет журнал периметра узким клиентом `act_journal_wire`: в установке `df` — протокол издателя `df/publisher-request/v1` (`sudo -n -u df-publisher df-publish`), в режиме разработки — то же SQLite-хранилище (правило блокировки и вставка `pending` в `BEGIN IMMEDIATE`); совпадение форматов держит тест на одном файле базы | спека §6.3 требует журнал у каждого потребителя; цепочка обвязки мержа не может включать `df/` без смены процесса ревью этих путей (решение владельца, не плана) | второй писатель того же хранилища: расхождение схемы ловит тест равенства с `df.publisher.perimeter`, номер эпохи `pending` назначает полный журнал |
@@ -2997,7 +2998,8 @@ steward#211). Этот коммит сверяет «Интерфейс M0» с 
 источника политики обязана быть default branch) — новое ограничение, которого нет в §6.1;
 поглощается как fail-closed предусловие H1/H2, но в спеку его стоит внести. С-3 — §9.1 (а) п. 4
 («производный статус из проверенного конверта» в каноническом хеше DAG) требует чтений форджи в
-`_content_anchor`, который сегодня их не делает; решение — за владельцем (В-1 ниже).
+`_content_anchor`, который сегодня их не делает; **решено владельцем 01.11 (В-1 ниже)**: хеш
+остаётся локальным, проверенный статус спрашивается перед каждым no-op.
 
 
 ### Правки по ревью b1
@@ -3189,9 +3191,13 @@ error=…)`, «отказ | None», `raise`), но полноту не дока�
 `governance/` и `tests/` — список мест сверяется с деревом при исполнении задачи, а не с
 памятью плана.
 
-**Вопрос владельцу В-1** (ревизия b1, B1-6; вопрос к спеке С-3) — канонический хеш DAG для узлов
-`review/v1`. Спека §9.1 (а) п. 4: «в каноническую проекцию входит производный статус из
-проверенного конверта».
+**В-1 — решено владельцем 01.11** (ревизия b1, B1-6; вопрос к спеке С-3) — канонический хеш DAG
+для узлов `review/v1`. Слова владельца: «В-1 — локальный хеш содержимого допустим как оптимизация,
+но он не заменяет проверку одобрения. Перед успешным no-op для review/v1 проверяется актуальный
+допуск.» Принят гибрид (Task 14): вариант (б) — хеш как оптимизация — плюс свежая проверка
+`Statuses.of` узлов `review/v1` перед no-op §I5 (`task_bridge._review_noop_refusal`). История
+вопроса (до решения). Спека §9.1 (а) п. 4: «в каноническую проекцию входит производный статус
+из проверенного конверта».
 
 - **(а) Спека буквально** — `_content_anchor` получает проверенный статус `Statuses.of` и
   подставляет его вместо `status` узла `review/v1`. Следствия: доверенный контекст и чтения форджи
@@ -3201,9 +3207,9 @@ error=…)`, «отказ | None», `raise`), но полноту не дока�
   хеша. Следствия: без форджи; любое новое поколение, остановка, supersede меняют хеш — no-op не
   скроет изменение допуска; хеш меняется и от байтов, не влияющих на допуск (лишний перегон §I5,
   не пропуск).
-- **Рекомендация: (б)** — та же гарантия «изменение допуска не скрыто», без чтений форджи в
-  `_content_anchor`; цена — лишние перегоны. Шаг `_canonical_dag_hash` Task 14 помечен
-  `[ждёт решения владельца В-1]`; листинг — вариант (б), тест
+- **Рекомендация исполнителя была (б)** — та же гарантия «изменение допуска не скрыто», без
+  чтений форджи в `_content_anchor`; цена — лишние перегоны. Шаг `_canonical_dag_hash` Task 14 был помечен
+  «ждёт решения владельца В-1»; листинг — вариант (б), тест
   `test_canonical_hash_sees_new_generation_and_stops` проходит при обоих вариантах.
 
 ### Правки по ревью b2
@@ -3427,6 +3433,48 @@ error=…)`, «отказ | None», `raise`), но полноту не дока�
   константа против литерала; положительные — конъюнкт `and`, `startswith`. Переписан один
   двойник: `test_read_dag_state_review_debt` (генератор в `any(...)` — неподдерживаемая форма →
   явный отбор долгов и сравнение причины).
+
+### Решения владельца 01.11
+
+Слова владельца (01.11), дословно:
+
+> «П. 9 — Б, с единым вычислением состояния истории. В-1 — локальный хеш содержимого допустим
+> как оптимизация, но он не заменяет проверку одобрения. Перед успешным no-op для review/v1
+> проверяется актуальный допуск.»
+
+- **П. 9 заметок части A → вариант (Б)** (Task 13 Step 8 — из «ждёт решения» в конкретный шаг):
+  `act_envelope.node_history(history, node) -> NodeHistory(current, generation, top, ignored)` —
+  один проход по записям узла; заявка с поколением не больше действующего и остановка не
+  действующего поколения (или без принятой заявки) игнорируются с причиной, не становятся
+  событием и не сдвигают поколение. `current_event`, `next_generation`, `envelope_refusal`,
+  `Statuses` (`of`, `is_review`, `_stopped`), `act_node.reopen`, `act_node.generation_of` выводят
+  своё из него; `generation_refusal` удалён. Тесты части A `test_non_monotonic_generation_refused`
+  → `test_non_monotonic_request_ignored`, `test_stop_of_other_generation_refused` →
+  `test_stop_of_other_generation_is_noop`; новые — остановка без заявки, заявка `g+1` после
+  проигнорированной записи, согласие потребителей (`test_history_consumers_agree`: 10 историй,
+  `test_statuses_agree_with_node_history`: 5), остановка не делает узел старого пути `review`;
+  Task 14-тест `test_ignored_record_then_next_generation_approves`. Текст варианта (А) — только
+  как история выбора.
+- **В-1 → гибрид** (Task 14, шаг `_canonical_dag_hash` — из «ждёт решения» в конкретный):
+  байты всех `approvals/` воркстрима в хеше DAG остаются оптимизацией; перед бесследным no-op
+  §I5 (`deliver_superseded` — единственное место no-op по хешу; три других вызова
+  `_content_anchor` величину записывают, раннер no-op по хешу не делает)
+  `task_bridge._review_noop_refusal` заново спрашивает `statuses_at_base(...).of` каждого узла с
+  событием `review/v1`; не `approved`, `unavailable:` или режим не установлен — no-op нет, дальше
+  гейт §I12 по прежним правилам. Тесты: хеш тот же + узел одобрен → no-op; хеш тот же +
+  остановка доставлена / ревью отозвано / доверенный контекст недоступен / режим не
+  установлен → no-op нет, вызван гейт; продукт до миграции — статусы не читаются. Квота С-1:
+  каждый no-op §I5 продукта в `review` стоит одного чтения статусов (доверенный контекст и факты
+  форджи по узлам `review/v1`), как прогон гейта доставки.
+- **Реестр Task 16**: `act_envelope.node_history` (3 строки), `task_bridge._review_noop_refusal`
+  (4), `task_bridge.deliver_superseded#review_noop` (1, `BYPASS` `if traceless:`),
+  `current_event`/`next_generation` — в `MODIFIED_EXISTING` с причиной «выводится из
+  `node_history`». Применимость операторов при ревизии — 267/267 (257 по коду scratch, 10 по AST
+  фрагментов); мутации 8 новых строк — 8 закрыто (6 условие → `False`, 2 `BYPASS`).
+- **Буква спеки**: В-1 теперь соответствует цели §9.1 (а) п. 4 (проверенный статус спрашивается
+  перед no-op), хотя статус не входит в саму проекцию хеша; §9.1 п. 0a («последний доставленный
+  candidate, чей манифест включает узел») при (Б) читается как «последний **принятый**» — правка
+  формулировки спеки предложена в отчёте ревизии, план её не решает.
 ### Task 11: Пин steward v0.2.0, совместимость вызовов gate-check, gate-catalog v3
 
 **Files:**
@@ -8389,11 +8437,14 @@ git commit -m "feat(act): доверенный контекст — снимок
 - Modify: `governance/approval_ledger.py` (`start_request(..., act, generations)`,
   `extend_request(..., generation)`, `record_review_act`, `record_audit`, `audit_events`)
 - Modify: `governance/act_decision.py` (публичный `find_act`), `governance/act_envelope.py`
-  (публичный `expected_envelope`)
+  (публичный `expected_envelope`; Step 8 — `node_history`, удаление `generation_refusal`)
+- Modify: `governance/act_status.py` (Step 8 — `Statuses._compute` без `generation_refusal`)
 - Modify: `governance/ops.py` (`Ops.pr_body_fact` + `RealOps`)
 - Modify: `governance/runner.py` (`reopen` ~1172 — остановка до волны; `resume` ~899 — аудит;
   `_print_status` ~4093 — события аудита)
-- Test: `tests/test_act_node.py`, `tests/test_act_ops_body.py`; `tests/test_governance_approve_node.py`,
+- Test: `tests/test_act_node.py`, `tests/test_act_ops_body.py`; `tests/test_act_envelope.py` (две
+  правки ожиданий части A, Step 8) и `tests/test_act_status.py` (Step 8);
+  `tests/test_governance_approve_node.py`,
   `tests/test_governance_approval_ledger.py`, `tests/test_governance_runner.py` — без правок
   ожиданий (регрессия старого пути)
 
@@ -8422,29 +8473,32 @@ git commit -m "feat(act): доверенный контекст — снимок
   event) -> bool`, `approval_ledger.audit_events(state, key) -> list[dict]`;
   `act_decision.find_act(head_sha, effective, policy) -> ReviewView | None`;
   `act_envelope.expected_envelope(current, node, review_id) -> Envelope`;
+  `act_envelope.node_history(history, node) -> NodeHistory` (`current`, `generation`, `top`,
+  `ignored: tuple[Ignored, ...]`), `act_envelope.Ignored(event, reason)`; удалено —
+  `act_envelope.generation_refusal` (Step 8);
   `Ops.pr_body_fact(repo_slug, pr) -> Fact[str]`.
 
-**Вопрос владельца [п. 9 заметок части A] — до записи остановок.** Одна доставленная остановка с
-номером **не действующего** поколения либо заявка с **неубывающим** поколением (обе — записи
-в first-parent базы, переписать нельзя) по коду части A (`act_envelope.generation_refusal`) делают
-узел «не одобрен» **навсегда**: никакая последующая заявка его не вернёт. Полномочий это не даёт
-(запись только отнимает), но это риск живучести: любой смёрженный в базу PR с таким файлом —
-отказ в обслуживании узла.
+**П. 9 заметок части A — решено владельцем 01.11: вариант (Б).** Слова владельца (01.11):
 
-| | Вариант (А): блокировка остаётся | Вариант (Б): чужое поколение — no-op |
-|---|---|---|
-| Остановка `g ≠` действующего | узел «не одобрен» навсегда | событие игнорируется (`current_event` и `generation_refusal` его пропускают) — отнимать нечего |
-| Заявка `g ≤` последнего | узел «не одобрен» навсегда | отвергается только эта заявка: она не становится событием узла и не сдвигает «последнее поколение»; следующая заявка с бо́льшим поколением одобряет узел как обычно |
-| Выход для оператора | новый воркстрим (новый `ws-id`), история базы не переписывается | штатный `--approve-node` / `--repropose` |
-| Что меняется в коде | ничего в `act_envelope`; Task 14 — причина `not_approved:` дополняется текстом выхода; README раздела установки — runbook | `act_envelope.current_event`/`generation_refusal` — пропуск таких событий; тесты части A `test_non_monotonic_generation_refused`, `test_stop_of_other_generation_refused` меняют ожидание на «событие проигнорировано»; Task 14 — тест «после проигнорированной записи заявка `g+1` одобряет узел» |
-| Риск | DoS узла одним PR в базу | принятие истории, в которой лежит запись, не созданная этим кодом (только отнимающая или проигнорированная) |
+> «П. 9 — Б, с единым вычислением состояния истории. В-1 — локальный хеш содержимого допустим
+> как оптимизация, но он не заменяет проверку одобрения. Перед успешным no-op для review/v1
+> проверяется актуальный допуск.»
 
-**Рекомендация исполнителя плана — (Б):** запись остановки может только отнимать, поэтому
-игнорирование её для не действующего поколения не расширяет ничьих полномочий; заявка с
-неубывающим поколением не создаётся кодом devtools (`next_generation`) и не должна иметь силы ни
-одобрить, ни запереть узел. Шаги, зависящие от ответа, помечены **[ждёт решения владельца]**;
-остальная задача от ответа не зависит (остановка, которую пишет `act_node.reopen`, всегда несёт
-действующее поколение).
+Суть: одна доставленная остановка с номером **не действующего** поколения либо заявка с
+**неубывающим** поколением (обе — записи first-parent базы, переписать нельзя) по коду части A
+(`act_envelope.generation_refusal`) делали узел «не одобрен» навсегда. По решению такие записи
+**игнорируются**: не становятся событием узла и не сдвигают действующее поколение; следующая
+заявка с бо́льшим поколением одобряет узел как обычно. Состояние истории узла вычисляется
+**один раз** — `act_envelope.node_history(history, node) -> NodeHistory(current, generation, top,
+ignored)` (Step 8); `current_event`, `next_generation`, `envelope_refusal`, `Statuses`
+(`of`/`is_review`/`_stopped`), `act_node.reopen` и `generation_of` выводят своё из него;
+`generation_refusal` удаляется — второго правила пропуска нет нигде. Остановка, которую пишет
+`act_node.reopen`, всегда несёт действующее поколение (`node_history(...).current`).
+
+История выбора (до решения): вариант (А) — «блокировка остаётся», выход — новый воркстрим;
+отклонён: одна запись в базе — отказ в обслуживании узла. Риск (Б), принятый владельцем:
+история может нести запись, не созданную этим кодом (только отнимающую или проигнорированную);
+полномочий она не даёт.
 
 **Общий вход (спека §10 «до выбора читателя, для обоих путей»; §2 «режим — из манифеста»).**
 Маршрутизация — в `_advance`, до выбора любого шага, кроме создания:
@@ -10192,31 +10246,229 @@ def _try_agent_merge(state, ops, dag, op, nodes, pr, head, *,
 `act_node.reopen` подменён на поднимающий `RuntimeError` → `runner.reopen` отказывает, `state.wave`
 и op'ы волн не тронуты.
 
-- [ ] **Step 8 [ждёт решения владельца]: остановки не действующего поколения** — только при
-варианте (Б): `act_envelope.current_event` и `generation_refusal` пропускают остановку с
-`generation ≠ last` и заявку с `generation ≤ last` (не обновляя `last`); тесты части A
-`test_non_monotonic_generation_refused` → `test_non_monotonic_request_ignored`,
-`test_stop_of_other_generation_refused` → `test_stop_of_other_generation_is_noop`; в
-`tests/test_act_status.py` — `test_ignored_record_then_next_generation_approves`. При варианте (А)
-шаг заменяется одной строкой в `act_status.Statuses._compute`: причина `not_approved:` дополняется
-«выход — новый воркстрим (история базы не переписывается)».
+- [ ] **Step 8: Единое состояние истории узла — п. 9, вариант (Б) (решение владельца 01.11)**
+
+`governance/act_envelope.py` — `current_event`, `generation_refusal`, `next_generation` (~196–223)
+заменяются одним вычислением; `generation_refusal` удаляется (потребителей вне `act_envelope`,
+`act_status` и `tests/test_act_envelope.py` нет — сверено по дереву master `a16e305`):
+
+```python
+@dataclass(frozen=True)
+class Ignored:
+    """Запись узла, не ставшая его событием (п. 9 заметок части A, вариант (Б))."""
+
+    event: Event
+    reason: str
+
+
+@dataclass(frozen=True)
+class NodeHistory:
+    """Действующее состояние истории узла — единственное вычисление (решение владельца
+    01.11): `current` — действующее событие; `generation` — поколение последней принятой
+    заявки (0 — не было); `top` — наибольшее поколение среди ВСЕХ записей узла, включая
+    проигнорированные (`next_generation` его превышает: новый файл не совпадёт с лежащим);
+    `ignored` — записи, не ставшие событием, с причиной."""
+
+    current: Event | None
+    generation: int
+    top: int
+    ignored: tuple[Ignored, ...]
+
+
+def node_history(history: History, node: str) -> NodeHistory:
+    """Один проход по записям узла, старые первыми. Заявка с поколением не больше
+    действующего и остановка не действующего поколения игнорируются: не становятся
+    событием и не сдвигают поколение — полномочий не дают и узел не запирают."""
+    current: Event | None = None
+    last = top = 0
+    ignored: list[Ignored] = []
+    for event in history:
+        if not _touches(event, node):
+            continue
+        gen = _generation(event, node)
+        top = max(top, gen)
+        if isinstance(event, DeliveredStop) and (gen != last or last == 0):
+            reason = f"узел {node}: остановка поколения {gen}, действует {last}"
+            ignored.append(Ignored(event, reason))
+            continue
+        if isinstance(event, DeliveredRequest) and gen <= last:
+            reason = f"узел {node}: поколение {gen} не больше прежнего {last}"
+            ignored.append(Ignored(event, reason))
+            continue
+        if isinstance(event, DeliveredRequest):
+            last = gen
+        current = event
+    return NodeHistory(current, last, top, tuple(ignored))
+
+
+def current_event(history: History, node: str) -> Event | None:
+    """Действующее событие узла — из `node_history`."""
+    return node_history(history, node).current
+
+
+def next_generation(history: History, node: str) -> int:
+    """Поколение следующей заявки узла — из `node_history`."""
+    return node_history(history, node).top + 1
+```
+
+`envelope_refusal` — первые три строки (`broken = generation_refusal(...)` / `if broken ...` /
+`return broken`) удаляются: событие узла — `current_event` (то есть `node_history`), проверки
+конверта прежние.
+
+`governance/act_status.py` (листинг Task 14) — из импорта `governance.act_envelope` убирается
+`generation_refusal`, из `Statuses._compute` — три строки `broken = generation_refusal(...)` /
+`if broken is not None:` / `return f"not_approved:{broken}"`. `is_review`, `_stopped` и
+`_compute` берут событие через `current_event` — то есть из того же `node_history`;
+`act_node.reopen` (событие и поколение остановки) и `act_node.generation_of` (`next_generation`)
+— тоже. Других мест пропуска записей нет: правило живёт в одной функции.
+
+`tests/test_act_envelope.py` (тесты части A) — в импорте `generation_refusal` заменяется на
+`node_history`; `test_non_monotonic_generation_refused` заменяется на:
+
+```python
+def test_non_monotonic_request_ignored() -> None:
+    """П. 9 заметок части A, вариант (Б) (решение владельца 01.11): заявка с поколением не
+    больше действующего — не событие узла; действующее событие и поколение прежние."""
+    stale = DeliveredRequest("5" * 40, "a5" * 20, _req("approve-2-1-4", 2))
+    state = node_history([OLD, NEW, stale], "req")
+    assert state.current is NEW and state.generation == 2
+    assert len(state.ignored) == 1
+    assert state.ignored[0].reason == "узел req: поколение 2 не больше прежнего 2"
+    assert envelope_refusal(_env(NEW), [OLD, NEW, stale], "req", "h" * 40, PINS, "21") is None
+```
+
+`test_stop_of_other_generation_refused` заменяется на (вместе с новыми тестами согласия):
+
+```python
+def test_stop_of_other_generation_is_noop() -> None:
+    """П. 9 (Б): остановка не действующего поколения отнимать нечего — игнорируется."""
+    stale = DeliveredStop("3" * 40, StopRecord("req", 1, "не то поколение"))
+    state = node_history([OLD, NEW, stale], "req")
+    assert state.current is NEW
+    assert len(state.ignored) == 1
+    assert state.ignored[0].reason == "узел req: остановка поколения 1, действует 2"
+    assert envelope_refusal(_env(NEW), [OLD, NEW, stale], "req", "h" * 40, PINS, "21") is None
+
+
+def test_stop_before_any_request_ignored() -> None:
+    """П. 9 (Б): остановка узла без принятой заявки — не событие; узел остаётся без
+    события (старый путь), следующее поколение — выше записи."""
+    stray = DeliveredStop("3" * 40, StopRecord("req", 1, "чужая запись"))
+    state = node_history([stray], "req")
+    assert state.current is None and state.generation == 0
+    assert len(state.ignored) == 1
+    assert state.ignored[0].reason == "узел req: остановка поколения 1, действует 0"
+    assert next_generation([stray], "req") == 2
+
+
+def test_ignored_request_then_next_generation_is_current() -> None:
+    """П. 9 (Б): после проигнорированной записи заявка `g+1` — действующее событие."""
+    stale = DeliveredRequest("5" * 40, "a5" * 20, _req("approve-2-1-4", 2))
+    history = [OLD, NEW, stale, AGAIN]
+    assert node_history(history, "req").current is AGAIN
+    assert envelope_refusal(_env(AGAIN), history, "req", "h" * 40, PINS, "21") is None
+    assert next_generation(history, "req") == 4
+
+
+STRAY_STOP = DeliveredStop("6" * 40, StopRecord("req", 9, "чужое поколение"))
+STALE_REQ = DeliveredRequest("5" * 40, "a5" * 20, _req("approve-2-1-4", 1))
+
+
+@pytest.mark.parametrize("history", [
+    [], [OLD], [OLD, NEW], [OLD, NEW, STOP2], [OLD, NEW, STOP2, AGAIN], [STRAY_STOP],
+    [OLD, STRAY_STOP], [OLD, NEW, STALE_REQ], [OLD, NEW, STOP2, STALE_REQ, AGAIN],
+    [OLD, NEW, STOP2, STOP2],
+], ids=["empty", "one", "two", "stopped", "after_stop", "stray_stop", "stop_other_gen",
+        "stale_request", "stale_then_next", "double_stop"])
+def test_history_consumers_agree(history: list) -> None:
+    """Решение владельца 01.11: одно вычисление состояния — `current_event`,
+    `next_generation` и `envelope_refusal` выводятся из `node_history`, второго правила
+    пропуска нет."""
+    state = node_history(history, "req")
+    assert current_event(history, "req") is state.current
+    assert next_generation(history, "req") == state.top + 1
+    reason = envelope_refusal(_env(NEW), history, "req", "h" * 40, PINS, "21")
+    if state.current is None:
+        assert reason == "узел req: нет доставленной заявки review/v1"
+    elif isinstance(state.current, DeliveredStop):
+        gen = state.current.stop.generation
+        assert reason == f"узел req: одобрение поколения {gen} остановлено"
+    else:
+        assert (reason is None) is (state.current is NEW)
+```
+
+`tests/test_act_status.py` — в импорт `governance.act_envelope` добавляются `next_generation`,
+`node_history`; тесты:
+
+```python
+STRAY = DeliveredStop("d" * 40, StopRecord("behaviour-spec", 7, "чужое поколение"))
+
+
+def _beh(rid: str, merge: str, gen: int) -> DeliveredRequest:
+    return delivered(rid, merge, {"behaviour-spec": (H_BEH, gen)},
+                     {"behaviour-spec": {"requirements": "blob-req"}})
+
+
+def test_ignored_record_then_next_generation_approves() -> None:
+    """П. 9 заметок части A, вариант (Б) (решение владельца 01.11): проигнорированные
+    записи (остановка чужого поколения, заявка с неубывающим поколением) узел не запирают —
+    одобрение прежнего поколения действует, следующая заявка `g+1` одобряет узел."""
+    (r1, r2), snap = both_approved()
+    history = (r1, r2, STRAY, _beh("approve-3-1-1", "c" * 40, 1))
+    assert statuses(history, snap).of("behaviour-spec") == "approved"
+    gen = next_generation(history, "behaviour-spec")
+    r4 = _beh("approve-4-1-1", "e" * 40, gen)
+    history = (*history, r4)
+    assert "конверт другого поколения" in statuses(history, snap).of("behaviour-spec")
+    snap.files[envelope_path(WS, "behaviour-spec")] = envelope(r4, "behaviour-spec")
+    assert statuses(history, snap).of("behaviour-spec") == "approved"
+
+
+@pytest.mark.parametrize("tail", ["none", "stray_stop", "stale_request", "own_stop",
+                                  "stray_then_own_stop"])
+def test_statuses_agree_with_node_history(tail: str) -> None:
+    """Решение владельца 01.11: `Statuses` выводит событие узла из того же `node_history`,
+    что `current_event`/`envelope_refusal`/`reopen`, — второго правила пропуска нет."""
+    (r1, r2), snap = both_approved()
+    own = DeliveredStop("e" * 40, StopRecord("behaviour-spec", 1, "переоткрыт"))
+    extra = {"none": (), "stray_stop": (STRAY,), "own_stop": (own,),
+             "stale_request": (_beh("approve-3-1-1", "c" * 40, 1),),
+             "stray_then_own_stop": (STRAY, own)}[tail]
+    history = (r1, r2, *extra)
+    state = node_history(history, "behaviour-spec")
+    st = statuses(history, snap)
+    assert st.is_review("behaviour-spec") is (state.current is not None)
+    expected = ("approved" if state.current is r2 else
+                f"not_approved:stopped:g{state.current.stop.generation}")
+    assert st.of("behaviour-spec") == expected
+
+
+def test_stray_stop_does_not_make_legacy_node_review() -> None:
+    """П. 9 (Б): остановка узла без события `review/v1` — не событие; узел остаётся на
+    старом пути с тем же ответом, что без записи (DoS одной записью невозможен)."""
+    _history, snap = both_approved()
+    stray = DeliveredStop("d" * 40, StopRecord("requirements", 1, "чужая запись"))
+    st = statuses((stray,), snap)
+    assert st.is_review("requirements") is False
+    assert st.of("requirements") == statuses((), snap).of("requirements")
+```
 
 - [ ] **Step 9: Run tests to verify they pass**
 
-Run: `uv run --group governance pytest tests/test_act_node.py tests/test_governance_approve_node.py tests/test_governance_approval_ledger.py tests/test_governance_runner.py -v`
+Run: `uv run --group governance pytest tests/test_act_node.py tests/test_act_envelope.py tests/test_act_status.py tests/test_governance_approve_node.py tests/test_governance_approval_ledger.py tests/test_governance_runner.py -v`
 Expected: PASS; существующие тесты старого пути — без правок ожиданий (`tests/conftest.py`
 Task 14 даёт продукт до миграции: `route` для заявки без маркера возвращает `None`,
-`_legacy_outcome` держит прежние тексты). Полный набор в обоих режимах, ruff, pyrefly. Перед
-коммитом при варианте (Б) вопроса п. 9 — ещё `tests/test_act_envelope.py tests/test_act_status.py`.
+`_legacy_outcome` держит прежние тексты); у тестов части A `test_act_envelope.py` меняются
+ожидания ровно двух тестов (Step 8, п. 9 (Б)). Полный набор в обоих режимах, ruff, pyrefly.
 
 - [ ] **Step 10: Commit**
 
 ```bash
 git add governance/act_node.py governance/approve_node.py governance/approval_ledger.py \
   governance/act_decision.py governance/act_envelope.py governance/ops.py governance/runner.py \
-  tests/test_act_node.py tests/test_act_ops_body.py tests/test_governance_runner.py
-# Step 8, вариант (А): + governance/act_status.py
-# Step 8, вариант (Б): + tests/test_act_envelope.py tests/test_act_status.py (act_envelope.py уже в списке)
+  governance/act_status.py \
+  tests/test_act_node.py tests/test_act_ops_body.py tests/test_governance_runner.py \
+  tests/test_act_envelope.py tests/test_act_status.py
 git commit -m "feat(act): путь узла review/v1 — общий вход admission, заявка с манифестом, конверт, остановка, аудит"
 ```
 
@@ -10603,8 +10855,9 @@ B1-6, B1-8, B1-9 — см. «Правки по ревью b1».
 - Modify: `governance/approve_node.py` (`_legacy_outcome` + `LegacyHalt` выделены из
   `_reconcile_candidate` ~1787 — Step 3a; `read_dag_state` ~480, `_require_upstream_ready` ~939)
 - Modify: `governance/runner.py` (`_step_gate` S4 ~3275, `_step_s8` ~4024 — режим и провайдер)
-- Modify: `governance/task_bridge.py` (`_canonical_dag_hash` ~1138 — **[ждёт решения владельца
-  В-1]**, вариант по умолчанию ниже)
+- Modify: `governance/task_bridge.py` (`_canonical_dag_hash` ~1138 — байты `approvals/` как
+  оптимизация; `deliver_superseded` ~4155 и новый `_review_noop_refusal` — свежий допуск узлов
+  `review/v1` перед no-op §I5; В-1, решение владельца 01.11)
 - Modify: `tests/conftest.py` — изоляция путей акта для тестов вне `act_*` (перенесено сюда из
   Task 13: с этой задачи старые пути зовут `mode_probe`)
 - Test: `tests/test_act_status.py`, `tests/test_act_legacy.py`, `tests/test_act_gate.py`;
@@ -10613,7 +10866,7 @@ B1-6, B1-8, B1-9 — см. «Правки по ревью b1».
 
 **Interfaces:**
 - Consumes: Tasks 5, 5a, 8 (`parse_manifest`, `manifest_path`, `self_hash_v`, `envelope_refusal`,
-  `generation_refusal`, `current_event`, `parse_envelope`, `parse_stop`, `envelope_path`,
+  `generation_refusal` — до Task 13 Step 8, затем `node_history`, `current_event`, `parse_envelope`, `parse_stop`, `envelope_path`,
   `stop_path`), 11, 11a, 12, 12a (`act_trust` с `product_mode`, `act_context.delivery_verdict`,
   `act_journal`, `act_identity`).
 - Produces:
@@ -10643,7 +10896,8 @@ B1-6, B1-8, B1-9 — см. «Правки по ревью b1».
   Unavailable`, `act_status.mode_probe(state, deps=None)` — единая точка «режим продукта сейчас»;
   `act_status.gate_run(state, ops, dag, *, candidate, out, deps=None) -> tuple[str, str | None] | Unavailable`;
   `act_status.pr_for_merge(ops, slug, merge_commit) -> int | Unavailable`;
-  `act_status.REQUEST_BINDING`; `node_approval.DEBT_REVIEW_V1 = "review_v1"`.
+  `act_status.REQUEST_BINDING`; `node_approval.DEBT_REVIEW_V1 = "review_v1"`;
+  `task_bridge._review_noop_refusal(state, ops, legacy_bundle) -> str | None` (В-1).
 
 **Режим продукта сейчас** (§6.1, §10; ревизия b1, B1-5): `live_policy` — привязка обязательна
 (нет — `Unavailable`), режим — `act_trust.product_mode` по **истории** режима: записи не было
@@ -10657,7 +10911,9 @@ B1-6, B1-8, B1-9 — см. «Правки по ревью b1».
 
 **Правила статуса** (§9.1 п. 0a–4) — только для продукта в `review`: событие узла — последнее по
 first-parent базы (доставленная заявка с манифестом, запись остановки; supersede — более поздняя
-заявка). Есть событие: `generation_refusal` → остановка → идентичность и привязка заявки +
+заявка; событие и записи, не ставшие событием, — одно вычисление `act_envelope.node_history`
+после Task 13 Step 8, п. 9 (Б), решение владельца 01.11; до него — `generation_refusal`). Есть
+событие: остановка → идентичность и привязка заявки +
 вердикт её доставки (`Decider`) → `envelope_refusal` по байтам **снимка** → каждый прямой upstream
 `approved` (рекурсивно); остановленный upstream — `not_approved:upstream_stopped:<A>`. **Нет
 события** (§9.1 (а) п. 3, B1-3): frontmatter без долга (`node_debt`) — лишь предпосылка; одобрение
@@ -10676,14 +10932,26 @@ first-parent базы (доставленная заявка с манифест
 исполнителя плана Р-9 (правило — спека). Провайдер отвечает за снимок, который читает steward
 (§12 п. 3): S4 — байты рабочего дерева волны, S8 и гейт доставки — база.
 
-**Канонический хеш DAG — [ждёт решения владельца В-1]** (вопрос к спеке С-3). Спека §9.1 (а)
-п. 4: «в каноническую проекцию входит производный статус из проверенного конверта». Вариант по
-умолчанию (листинг ниже): в манифест хеша входят блобы **всех** файлов `approvals/` воркстрима —
-конверты, манифесты заявок (`requests/`), записи остановки; новое действующее поколение (новый
-манифест) меняет хеш даже при прежних байтах узла и прежнем конверте (B1-6); у продукта без
-`approvals/` величина прежняя. Вариант спеки буквально — проверенный статус `Statuses.of` в
-проекции: требует доверенного контекста во всех четырёх местах `_content_anchor` (+ чтения
-форджи на каждый §I5). Шаг Step 5 (часть `task_bridge`) исполняется после ответа владельца.
+**Канонический хеш DAG и no-op §I5 — В-1, решено владельцем 01.11** (вопрос к спеке С-3). Слова
+владельца (01.11): «В-1 — локальный хеш содержимого допустим как оптимизация, но он не заменяет
+проверку одобрения. Перед успешным no-op для review/v1 проверяется актуальный допуск.»
+Гибрид: (1) в манифест хеша входят блобы **всех** файлов `approvals/` воркстрима — конверты,
+манифесты заявок (`requests/`), записи остановки (вариант (б), листинг Step 5): новое поколение,
+остановка, supersede меняют хеш без чтений форджи; у продукта без `approvals/` величина прежняя;
+(2) равный хеш для узлов `review/v1` **одного** no-op не даёт: перед бесследным no-op §I5
+(`deliver_superseded`) `_review_noop_refusal` заново спрашивает допуск каждого узла с событием
+`review/v1` тем же входом, что гейт доставки (`act_status.statuses_at_base`, доверенный контекст
+§9.1); не `approved`, `unavailable:` или режим не установлен — no-op не объявляется, дальше гейт
+§I12 (`read_dag_state`) по прежним правилам: долг — отказ, недоступно — стоп. Продукт не в
+`review` — прежнее правило §I5, статусы не читаются. Мест no-op по хешу в коде одно — §I5
+`deliver_superseded`; из четырёх вызовов `_content_anchor` остальные три записывают величину
+(`_delivered_content_anchor` ~2333 при реконсиляции, через него ~2552, штамп доставки ~2585) и
+no-op не объявляют; раннер no-op по хешу не делает (сверено по `content_anchor`/
+`SupersedeResult`/`deliver_superseded` в `governance/runner.py`); no-op `approve_node._propose`/
+`propose_from_source` для `review/v1` уже идёт от `Statuses.of` (Task 13). Буква спеки: §9.1 (а)
+п. 4 требует, чтобы изменение допуска не скрывалось за no-op, — проверенный статус спрашивается
+перед каждым no-op. Цена — квота С-1: каждый no-op §I5 продукта в `review` читает доверенный
+контекст и факты форджи по узлам `review/v1` (как один прогон гейта доставки).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -11902,7 +12170,7 @@ def test_s4_stops_when_act_mode_unset(tmp_path: Path, runs_root, monkeypatch) ->
     assert ops.gate_modes == []
 ```
 
-Дополнение `tests/test_governance_task_bridge.py` (вариант по умолчанию В-1):
+Дополнение `tests/test_governance_task_bridge.py` (В-1, решение владельца 01.11):
 
 ```python
 def _canon_bundle(root: Path, rel: str) -> tuple:
@@ -11964,6 +12232,102 @@ def test_canonical_hash_with_approvals_is_a_new_epoch(tmp_path: Path) -> None:
     acted = task_bridge._canonical_dag_hash(str(tmp_path), rel, dag, ws_id="ws-7")
     assert plain.startswith("v2:") and acted.startswith("v3:")
     assert not task_bridge._comparable_anchors(plain, acted)
+
+
+def _review_mode(monkeypatch, verdicts: dict[str, str]) -> None:
+    """Продукт в `review`; `statuses_at_base` отвечает заданными статусами узлов."""
+    from types import SimpleNamespace
+
+    from governance import act_status
+
+    live = SimpleNamespace(mode="review")
+    monkeypatch.setattr(act_status, "mode_probe", lambda state, deps=None: live)
+
+    class _Statuses:
+        def is_review(self, node: str) -> bool:
+            return node in verdicts
+
+        def of(self, node: str) -> str:
+            return verdicts[node]
+
+    monkeypatch.setattr(act_status, "statuses_at_base",
+                        lambda state, ops, dag, live, deps=None: _Statuses())
+
+
+def _equal_anchor_state(tmp_path: Path, monkeypatch):
+    """Запись доставки с тем же `content_anchor`, что у текущего дерева (хеш не менялся)."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {
+        "status": "completed", "pr": 5, "anchor": "БЛОБ-ДОСТАВКИ-v1",
+        "content_anchor": tb._content_anchor(state.target_dir, state.bundle_dir, None),
+    }
+    rs.save(state)
+    return state
+
+
+def _gate_reached(*_args):
+    raise RuntimeError("гейт §I12 вызван")
+
+
+def test_review_noop_with_fresh_approval(tmp_path, monkeypatch) -> None:
+    """В-1 (решение владельца 01.11): хеш не менялся и узел `review/v1` одобрен сейчас —
+    бесследный no-op §I5 прежний."""
+    from governance import task_bridge as tb
+
+    _review_mode(monkeypatch, {"requirements": "approved"})
+    state = _equal_anchor_state(tmp_path, monkeypatch)
+    monkeypatch.setattr(tb, "_approved_dag_or_refuse", _gate_reached)
+    assert tb.deliver_superseded(state, _ProvOps(prs=[_MERGED_PR])) == tb.SupersedeResult("noop")
+
+
+@pytest.mark.parametrize("verdict", [
+    "not_approved:stopped:g1",
+    "not_approved:act:d1_no_act",
+    "unavailable:df-trust: HTTP 403",
+], ids=["stop_delivered", "act_revoked", "trust_unavailable"])
+def test_review_noop_refused_without_fresh_approval(tmp_path, monkeypatch, capsys,
+                                                    verdict: str) -> None:
+    """В-1: хеш не менялся, но допуск узла `review/v1` отозван (остановка, ревью
+    отозвано) или не проверяется (доверенный контекст недоступен) — no-op не объявляется,
+    дальше гейт §I12 по прежним правилам."""
+    from governance import task_bridge as tb
+
+    _review_mode(monkeypatch, {"requirements": verdict})
+    state = _equal_anchor_state(tmp_path, monkeypatch)
+    monkeypatch.setattr(tb, "_approved_dag_or_refuse", _gate_reached)
+    with pytest.raises(RuntimeError, match="гейт §I12 вызван"):
+        tb.deliver_superseded(state, _ProvOps(prs=[_MERGED_PR]))
+    out = capsys.readouterr().out
+    assert f"бесследного no-op нет (узел requirements: {verdict})" in out
+
+
+def test_review_noop_refused_when_mode_unset(tmp_path, monkeypatch, capsys) -> None:
+    """В-1: режим акта не установлен (нет привязки) — no-op не объявляется."""
+    from governance import act_status
+    from governance import task_bridge as tb
+    from governance.act_time import Unavailable
+
+    monkeypatch.setattr(act_status, "mode_probe",
+                        lambda state, deps=None: Unavailable("нет привязки"))
+    state = _equal_anchor_state(tmp_path, monkeypatch)
+    monkeypatch.setattr(tb, "_approved_dag_or_refuse", _gate_reached)
+    with pytest.raises(RuntimeError, match="гейт §I12 вызван"):
+        tb.deliver_superseded(state, _ProvOps(prs=[_MERGED_PR]))
+    assert "бесследного no-op нет (режим акта продукта: нет привязки)" in capsys.readouterr().out
+
+
+def test_noop_without_review_nodes_reads_no_statuses(tmp_path, monkeypatch) -> None:
+    """В-1: продукт до миграции — правило §I5 прежнее, статусы не читаются (квота С-1)."""
+    from governance import act_status
+    from governance import task_bridge as tb
+
+    monkeypatch.setattr(act_status, "statuses_at_base",
+                        lambda *a, **k: pytest.fail("статусы для продукта до миграции"))
+    state = _equal_anchor_state(tmp_path, monkeypatch)
+    assert tb.deliver_superseded(state, _ProvOps(prs=[_MERGED_PR])) == tb.SupersedeResult("noop")
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -13019,8 +13383,8 @@ B1-8 как класс B1-7): новые методы `Ops` части B (`first
         return False
 ```
 
-`governance/task_bridge.py`, `_canonical_dag_hash` — **[ждёт решения владельца В-1]**, вариант по
-умолчанию. Каталог `approvals/` — **из идентичности воркстрима**, путём производителя
+`governance/task_bridge.py`, `_canonical_dag_hash` — В-1 (решение владельца 01.11), часть (1):
+байты `approvals/` как оптимизация. Каталог `approvals/` — **из идентичности воркстрима**, путём производителя
 (`act_envelope.envelope_path`), а не из `bundle_dir` (ревизия b2, B2-2: при `--bundle-dir spec`
 `base.parent / "approvals"` читал бы `<repo>/approvals/`). Сигнатура получает ключевой
 `ws_id: str | None = None`; `_content_anchor(..., *, ws_id=None)` его пробрасывает; вызовы
@@ -13048,9 +13412,67 @@ envelope_path`, `PurePosixPath` — уже в модуле.
 
 (докстринг `_canonical_dag_hash` дополняется абзацем «`review/v1`: байты всех файлов
 `workstreams/<ws-id>/approvals/` — конверты, манифесты, остановки — входят в хеш, эпоха `v3`
-(В-1)…». При варианте спеки буквально — `_content_anchor` получает статусы `Statuses.of` и
-подставляет их вместо `status` узлов `review/v1`; тесты supersede и чужого воркстрима те же,
-тест эпохи — на величину со статусами.)
+(В-1); равный хеш одного no-op узлов `review/v1` не даёт — `_review_noop_refusal`».)
+
+`governance/task_bridge.py`, В-1 часть (2) — свежий допуск перед no-op §I5. Новая функция (перед
+`deliver_superseded`; `_dag_for` и `_node_id` — уже в модуле, импорты `act_status`/`act_time`
+локальные, как у прочих путей вне `act_*`, — цикла импорта нет):
+
+```python
+def _review_noop_refusal(
+    state: RunState, ops: Ops, legacy_bundle: int | None
+) -> str | None:
+    """Почему бесследный no-op §I5 не объявляется для узлов `review/v1`, или `None`.
+
+    В-1 (решение владельца 01.11): равный `content_anchor` (байты DAG и всех файлов
+    `approvals/` воркстрима) — оптимизация, а не проверка одобрения. Перед no-op каждый
+    узел с событием `review/v1` проверяется заново тем же входом, что гейт доставки
+    (`act_status.statuses_at_base` по доверенному контексту, §9.1): не `approved` или
+    недоступно — причина; режим акта не установлен — причина. Продукт не в `review` —
+    `None`: прежнее правило §I5. Цена — чтения форджи на каждый no-op (С-1)."""
+    from governance import act_status
+    from governance.act_time import Unavailable
+
+    live = act_status.mode_probe(state)
+    if isinstance(live, Unavailable):
+        return f"режим акта продукта: {live.reason}"
+    if live.mode != "review":
+        return None
+    dag = _dag_for(legacy_bundle)
+    statuses = act_status.statuses_at_base(state, ops, dag, live)
+    for fname, _upstreams in dag:
+        node = _node_id(fname)
+        if not statuses.is_review(node):
+            continue
+        verdict = statuses.of(node)
+        if verdict != act_status.APPROVED:
+            return f"узел {node}: {verdict}"
+    return None
+```
+
+`deliver_superseded` (~4510–4542): условие бесследного no-op выносится в имя `traceless` (комментарий
+про `replace_fields` — прежний, без правок), и no-op требует подтверждённого допуска:
+
+```python
+    traceless = (
+        # (прежний комментарий про `replace_fields` — без изменений)
+        not replace_fields and comparable and recorded_content == content
+    )
+    # В-1 (решение владельца 01.11): равный хеш — оптимизация, допуск узлов
+    # `review/v1` проверяется заново перед no-op; не подтверждён — дальше гейт
+    # §I12 (`read_dag_state`) по прежним правилам: долг — отказ, недоступно — стоп.
+    unconfirmed = _review_noop_refusal(state, ops, legacy_bundle) if traceless else None
+    if unconfirmed is not None:
+        print(
+            "апстрим не менялся, но допуск review/v1 не подтверждён — "
+            f"бесследного no-op нет ({unconfirmed})"
+        )
+    if traceless and unconfirmed is None:
+        ...  # прежнее тело no-op: печать, `_debt_notice`, `return SupersedeResult("noop")`
+```
+
+Существующие тесты no-op — без правок: `tests/conftest.py` даёт продукт до миграции, статусы не
+читаются (`test_noop_without_review_nodes_reads_no_statuses`).
 
 - [ ] **Step 6: Run tests to verify they pass**
 
@@ -14831,7 +15253,8 @@ EXISTING_ADDITIONS = {
             "RealOps.first_parent_changes", "Ops.pr_body_fact", "RealOps.pr_body_fact"),
     "approval_ledger": ("record_review_act", "audit_events", "record_audit", "successor_of"),
     "act_decision": ("find_act", "merger_allowed"),
-    "act_envelope": ("expected_envelope",),
+    "act_envelope": ("expected_envelope", "node_history"),
+    "task_bridge": ("_review_noop_refusal",),
     "act_settings": ("config_home",),
     "approve_node": ("_legacy_outcome", "_review_debt"),
 }
@@ -14856,12 +15279,16 @@ MODIFIED_EXISTING = {
     "approval_ledger.start_request": "пишет поле `predecessor`; проверок нет",
     "task_bridge._canonical_dag_hash": "хеш (В-1), не суждение",
     "task_bridge._content_anchor": "пробрасывает `ws_id`; не суждение",
+    "task_bridge.deliver_superseded": ("review_noop",),
+    "act_envelope.current_event": "выводится из `node_history` (п. 9 (Б), 01.11); своей проверки нет",
+    "act_envelope.next_generation": "выводится из `node_history` (п. 9 (Б), 01.11); своей проверки нет",
     "ops.RealOps.gate_check_s8": "аргументы `--act-mode`/`--node-status`; не суждение",
     "ops.RealOps.gate_check_candidate": "аргументы `--act-mode`/`--node-status`; не суждение",
     "bundle_state.candidate_state": "`act_mode=\"legacy\"` в `collect_bundle`; не суждение",
 }
 
 S, N, L = "tests/test_act_status.py", "tests/test_act_node.py", "tests/test_act_legacy.py"
+E, TB = "tests/test_act_envelope.py", "tests/test_governance_task_bridge.py"
 P, B, C = "tests/test_act_premerge.py", "tests/test_act_barrier.py", "tests/test_act_check.py"
 T, J, W = "tests/test_act_trust.py", "tests/test_act_journal.py", "tests/test_act_journal_wire.py"
 I, A, G = "tests/test_act_identity.py", "tests/test_act_anon.py", "tests/test_act_gate.py"
@@ -15263,6 +15690,34 @@ JUDGMENT = {
     "act_status.Statuses._legacy": (r("debt_first", "act_status.Statuses._legacy", "if debt is not None",
                                       f"{S}::test_legacy_probe_not_called_for_debt_node",
                                       '"not_approved:debt_status"'),),
+    "act_envelope.node_history": (  # п. 9 (Б), решение владельца 01.11
+        r("stop_generation", "act_envelope.node_history",
+          "isinstance(event, DeliveredStop) and (gen != last or last == 0)",
+          f"{E}::test_stop_of_other_generation_is_noop",
+          '"узел req: остановка поколения 1, действует 2"'),
+        r("stop_without_request", "act_envelope.node_history",
+          "isinstance(event, DeliveredStop) and (gen != last or last == 0)",
+          f"{E}::test_stop_before_any_request_ignored",
+          '"узел req: остановка поколения 1, действует 0"'),
+        r("request_generation", "act_envelope.node_history",
+          "isinstance(event, DeliveredRequest) and gen <= last",
+          f"{E}::test_non_monotonic_request_ignored",
+          '"узел req: поколение 2 не больше прежнего 2"'),
+    ),
+    "task_bridge._review_noop_refusal": (  # В-1, решение владельца 01.11
+        r("mode_unset", "task_bridge._review_noop_refusal", "isinstance(live, Unavailable)",
+          f"{TB}::test_review_noop_refused_when_mode_unset",
+          '"бесследного no-op нет (режим акта продукта: нет привязки)"'),
+        r("stopped", "task_bridge._review_noop_refusal", "verdict != act_status.APPROVED",
+          f"{TB}::test_review_noop_refused_without_fresh_approval[stop_delivered]",
+          '"not_approved:stopped:g1"'),
+        r("act_revoked", "task_bridge._review_noop_refusal", "verdict != act_status.APPROVED",
+          f"{TB}::test_review_noop_refused_without_fresh_approval[act_revoked]",
+          '"not_approved:act:d1_no_act"'),
+        r("unavailable", "task_bridge._review_noop_refusal", "verdict != act_status.APPROVED",
+          f"{TB}::test_review_noop_refused_without_fresh_approval[trust_unavailable]",
+          '"unavailable:df-trust: HTTP 403"'),
+    ),
     "act_status.Statuses._compute": (
         r("stop", "act_status.Statuses._compute", "isinstance(current, DeliveredStop)",
           f"{S}::test_stop_makes_node_not_approved", '"not_approved:stopped:g1"'),
@@ -15583,6 +16038,10 @@ JUDGMENT = {
                                            "tests/test_governance_runner.py::test_s4_stops_when_act_mode_unset"),),
     "runner._step_s8#act_mode_unset": (r("mode", "runner._step_s8", "S8: режим акта не установлен",
                                          "tests/test_governance_runner.py::test_s8_stops_when_act_mode_unset"),),
+    "task_bridge.deliver_superseded#review_noop": (r("noop", "task_bridge.deliver_superseded",
+                                                     "traceless and unconfirmed is None",
+                                                     f"{TB}::test_review_noop_refused_without_fresh_approval[stop_delivered]",
+                                                     '"гейт §I12 вызван"'),),
     "act_envelope.envelope_refusal#bytes": (r("bytes", "act_envelope.envelope_refusal",
                                               "байты узла изменились после одобрения",
                                               f"{S}::test_provider_twin_changed_candidate_bytes_not_approved"),),
@@ -16465,8 +16924,8 @@ if __name__ == "__main__":
   (`approve_node._propose#…`, `read_dag_state#…`, `_require_upstream_ready#…`,
   `_try_agent_merge#form`, `runner._step_gate#…`, `runner._step_s8#…`) и прогнанные при ревизии
   плана. Сначала — применимость операторов ко ВСЕМ строкам без запуска двойников (b6, B6-4;
-  ожидается `259/259`: при ревизии — 249 по коду scratch и 10 строк `<функция>#<проверка>` по
-  AST фрагментов плана; `n/a` чинится оператором `BYPASS` или записью `RULED`, не пропуском):
+  ожидается `267/267`: при ревизии 01.11 — 257 по коду scratch и 10 строк
+  `<функция>#<проверка>` по AST фрагментов плана; `n/a` чинится оператором `BYPASS` или записью `RULED`, не пропуском):
 
   ```bash
   uv run --group governance python tests/act_mutation.py --check --out /tmp/act-mutation-check.json
@@ -16647,6 +17106,10 @@ BYPASS: dict[str, tuple[str, str]] = {
         '    if not pinned:\n        pinned = {"sha": None, "fingerprint": None}\n    if False:\n'),
     'approve_node._try_agent_merge#form:form': ('defect = form() if form is not None else _envelope_form_defect(state, ops, dag, op, nodes, head)',
         'defect = None'),
+    'task_bridge._review_noop_refusal:mode_unset': ('return f"режим акта продукта: {live.reason}"',
+        'return None'),
+    'task_bridge.deliver_superseded#review_noop:noop': ('if traceless and unconfirmed is None:',
+        'if traceless:'),
 }
 #: Обход невозможен (без данных продолжить нечем) — решение ревьюера с причиной.
 RULED: dict[str, str] = {
