@@ -421,3 +421,13 @@ def test_decider_legacy_returns_contract_result(monkeypatch) -> None:
     refused = Rejected(act_status.PINS, "пины")
     assert decider.legacy(5, lambda: refused) is refused
     assert decider.legacy(5, lambda: LegacyAccepted("alice")) == LegacyAccepted("alice")
+
+
+def test_unsigned_last_edit_is_not_a_signature(world, monkeypatch) -> None:
+    """Подпись без `approved_by`/`approved_at` — не подпись, даже если последняя
+    правка узла несёт ту же пустоту (`__call__`, до поиска PR)."""
+    text = _text("approved")
+    (world.repo / NODE).write_text(text)
+    _git(world.repo, "commit", "-qam", "unsigned approved")
+    world.signed_by_pr = {_git(world.repo, "rev-parse", "HEAD"): 6}
+    assert code(judge(world, monkeypatch, text)) == act_status.NOT_SIGNATURE

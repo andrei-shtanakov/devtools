@@ -1349,3 +1349,186 @@ def test_foreign_home_credentials_have_no_effect(tmp_path: Path, monkeypatch) ->
     expected = [("home", [], True, str((home / ".config" / "review").resolve()))]
     snapshot_home = list(seen)
     assert snapshot_home == expected
+
+
+# --- журнал, эпохи, снимок: собственные отказы исполнителя ----------------------------
+
+
+def test_decider_without_journal_unavailable(monkeypatch) -> None:
+    """Ревизия b1 (M7): доверие передано, журнала нет и загрузить его нечем —
+    вердикт не выносится, `delivery_verdict` не зовётся."""
+    monkeypatch.setattr(
+        act_context,
+        "delivery_verdict",
+        lambda *a, **k: pytest.fail("вердикт без журнала"),
+    )
+    state = SimpleNamespace(
+        repo_slug=SLUG, ws_id=WS, target_dir="/t", bundle_dir="spec"
+    )
+    deps = act_status.Deps(
+        readers=None,
+        binding=object(),
+        journal=None,
+        creds=(),
+        gh=None,
+        now=None,
+        sleep=None,
+        settings=None,
+    )
+    decider = act_status.Decider(state, object(), deps, DAG, trust=object())
+    got = decider.legacy(5, lambda: pytest.fail("старый контракт"))
+    assert isinstance(got, Unavailable) and got.reason == "журнал периметра не задан"
+
+
+def test_live_policy_without_epochs_unavailable(monkeypatch) -> None:
+    """Пустой журнал эпох — режим не установлен, а не исключение и не legacy."""
+    from governance import act_trust
+
+    monkeypatch.setattr(
+        act_trust,
+        "load_trust",
+        lambda readers, binding, journal, creds: SimpleNamespace(epochs=()),
+    )
+    monkeypatch.setattr(
+        act_trust, "load_anchor_times", lambda *a: pytest.fail("якоря без эпох")
+    )
+    deps = act_status.Deps(
+        readers=None,
+        binding=object(),
+        journal=lambda readers, binding: NoEvents(),
+        creds=(),
+        gh=None,
+        now=None,
+        sleep=None,
+        settings=None,
+    )
+    got = act_status.live_policy(SimpleNamespace(repo_slug=SLUG), deps)
+    assert isinstance(got, Unavailable) and got.reason == "журнал эпох не прочитан"
+
+
+def test_snapshot_of_non_repository_unavailable(tmp_path: Path) -> None:
+    """`target_dir` — не репозиторий: снимок не создаётся, fetch не зовётся."""
+    got = RealOps().snapshot_open(str(tmp_path), "owner/p", "master")
+    assert got.outcome is Outcome.UNAVAILABLE
+    assert got.detail == "репозиторий продукта не читается"
+
+
+# --- читатели вне act_*: read_dag_state и _require_upstream_ready (Step 5) ------------
+
+
+class _BaseOps:
+    """Байты узлов в base — словарь; другое не читается."""
+
+    def __init__(self, texts: dict[str, str]) -> None:
+        self.texts = texts
+
+    def show_file(self, target, ref, path):
+        return self.texts.get(path)
+
+
+def _reader_state() -> SimpleNamespace:
+    return SimpleNamespace(
+        repo_slug=SLUG,
+        ws_id=WS,
+        target_dir="/t",
+        bundle_dir="spec",
+        base_ref="master",
+        brief=None,
+        ops={},
+    )
+
+
+def _review_statuses(monkeypatch, verdicts: dict[str, str]) -> None:
+    monkeypatch.setattr(
+        act_status,
+        "mode_probe",
+        lambda state, deps=None: SimpleNamespace(mode="review"),
+    )
+    monkeypatch.setattr(
+        act_status,
+        "statuses_at_base",
+        lambda state, ops, dag, live, deps=None, *, ref=None: SimpleNamespace(
+            of=verdicts.__getitem__
+        ),
+    )
+
+
+BASE_TEXTS = {
+    "spec/10-requirements.md": REQ_TEXT,
+    "spec/15-behaviour-spec.md": BEH_TEXT,
+}
+
+
+def test_read_dag_state_mode_unset_unresolved(monkeypatch) -> None:
+    from governance import approve_node
+
+    monkeypatch.setattr(
+        act_status, "mode_probe", lambda state, deps=None: Unavailable("нет привязки")
+    )
+    got = approve_node.read_dag_state(_reader_state(), _BaseOps(BASE_TEXTS), DAG)
+    assert (
+        got.evidence is None and got.unresolved == "режим акта продукта: нет привязки"
+    )
+
+
+def test_read_dag_state_review_statuses(monkeypatch) -> None:
+    """`review`: долг — ответ статуса (`review_v1`), `unavailable:` — не установлено,
+    одобрены все — свидетельство."""
+    from governance import approve_node
+
+    ops = _BaseOps(BASE_TEXTS)
+    _review_statuses(
+        monkeypatch,
+        {"requirements": "approved", "behaviour-spec": "not_approved:stopped:g1"},
+    )
+    debt = approve_node.read_dag_state(_reader_state(), ops, DAG)
+    assert [(d.node_id, d.kind, d.reason) for d in debt.debts] == [
+        ("behaviour-spec", "review_v1", "stopped:g1")
+    ]
+    _review_statuses(
+        monkeypatch,
+        {"requirements": "unavailable:df-trust: 502", "behaviour-spec": "approved"},
+    )
+    unresolved = approve_node.read_dag_state(_reader_state(), ops, DAG)
+    assert unresolved.unresolved == "unavailable:df-trust: 502"
+    _review_statuses(
+        monkeypatch, {"requirements": "approved", "behaviour-spec": "approved"}
+    )
+    assert approve_node.read_dag_state(_reader_state(), ops, DAG).evidence is not None
+
+
+@pytest.mark.parametrize(
+    "case", ["mode_unset", "upstream_unavailable", "upstream_not_approved", "approved"]
+)
+def test_require_upstream_ready_in_review(monkeypatch, case: str) -> None:
+    """`approve_node._require_upstream_ready#mode_unset|upstream_unavailable|
+    upstream_not_approved`: у каждой ветки своя причина; одобренный upstream — готов."""
+    from governance import approve_node
+
+    verdict = {
+        "upstream_unavailable": "unavailable:df-trust: 502",
+        "upstream_not_approved": "not_approved:stopped:g1",
+    }.get(case, "approved")
+    _review_statuses(monkeypatch, {"requirements": verdict})
+    if case == "mode_unset":
+        monkeypatch.setattr(
+            act_status,
+            "mode_probe",
+            lambda state, deps=None: Unavailable("нет привязки"),
+        )
+    call = lambda: approve_node._require_upstream_ready(  # noqa: E731
+        _reader_state(), _BaseOps(BASE_TEXTS), DAG, "behaviour-spec"
+    )
+    reason = {
+        "mode_unset": "режим акта продукта (upstream behaviour-spec): нет привязки",
+        "upstream_unavailable": "upstream requirements узла behaviour-spec: "
+        "unavailable:df-trust: 502",
+        "upstream_not_approved": "upstream requirements не одобрен (review/v1): "
+        "stopped:g1",
+    }.get(case)
+    if reason is None:
+        assert call() is None
+        return
+    with pytest.raises(RuntimeError) as exc:
+        call()
+    assert reason in str(exc.value)

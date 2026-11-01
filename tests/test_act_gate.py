@@ -67,6 +67,10 @@ def test_no_binding_is_unavailable_not_legacy(tmp_path: Path, monkeypatch) -> No
     )
     assert isinstance(got, Unavailable) and not (tmp_path / "ns.json").exists()
     assert got.reason.startswith("нет привязки корня доверия")
+    assert (
+        "/etc/df/trust.toml" in got.reason
+        and "режим продукта не установлен" in got.reason
+    )
 
 
 def test_unreadable_binding_stops(tmp_path: Path, monkeypatch) -> None:
