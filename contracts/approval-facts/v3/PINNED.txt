@@ -1,0 +1,5 @@
+upstream: andrei-shtanakov/steward
+commit: 68f46a9b2e5cfe9ecd1f09524e986c3f687f4155
+MANIFEST.json c5ec768d63dde658ea9fec7ed604a3beaf7f29549ed3461a62f021725da6982e
+README.md 8a19d1b9b9ff5bdeed97b5595779ff5068c8d52dffefb81bfdfa4eee3d286bda
+SCHEMA.json ce88e3436b0adb3484b9410dd27fb924ce18c08f7c57f0c4d507c62dc27f2d8b

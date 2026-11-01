@@ -141,6 +141,7 @@ def test_prefixes_read_from_the_ssot_file() -> None:
         "governance/act_",
         "tests/test_act_",
         "tests/act_cases",
+        "contracts/approval-facts/",
         # Шаблон CI корня доверия df-trust (установка копирует его).
         "templates/df-trust/",
         # Установщик df исполняется от root (stage 1, Task 1): код и тесты
@@ -447,7 +448,12 @@ def test_author_sandbox_chain_is_in_both_protected_lists() -> None:
             assert entry in harness, entry
 
 
-_ACT_CHAIN = ("governance/act_", "tests/test_act_", "tests/act_cases")
+_ACT_CHAIN = (
+    "governance/act_",
+    "tests/test_act_",
+    "tests/act_cases",
+    "contracts/approval-facts/",
+)
 
 
 def test_act_chain_is_in_both_protected_lists() -> None:

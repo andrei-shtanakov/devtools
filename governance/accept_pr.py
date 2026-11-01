@@ -135,6 +135,9 @@ _HARNESS_PREFIXES = (
     # агента: агентская правка теста ослабила бы проверку ядра.
     "tests/test_act_",
     "tests/act_cases",
+    # Векторы сбора approval-facts v3 — данные тестов ядра акта; их подмена
+    # ослабила бы проверку так же, как правка самих тестов (Р-12).
+    "contracts/approval-facts/",
     # Шаблон CI корня доверия df-trust: его копирует установка.
     "templates/df-trust/",
     "pyproject.toml",
