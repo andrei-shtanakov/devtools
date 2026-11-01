@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import http.server
 import io
 import json
+import threading
 import urllib.error
 from email.message import Message
 from pathlib import Path
@@ -192,3 +194,80 @@ def test_contents_absent_vs_unreadable() -> None:
     )
     got = act_anon.contents_bytes(limit, "o/r", "epochs.yaml", ref)
     assert isinstance(got, Unavailable) and ": HTTP 403" in got.reason
+
+
+class _Redirector(http.server.BaseHTTPRequestHandler):
+    def do_GET(self) -> None:  # noqa: N802
+        code = int(self.path.rsplit("/", 1)[-1])
+        self.send_response(code)
+        self.send_header("Location", "/elsewhere")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *args: object) -> None:
+        return None
+
+
+@pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
+def test_real_opener_does_not_follow_redirects(
+    monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    """Настоящий opener/_NoRedirect против loopback-сервера."""
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Redirector)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        monkeypatch.setattr(act_anon, "API", f"http://127.0.0.1:{server.server_port}/")
+        resp = act_anon.AnonTransport().send(_get(f"repos/o/r/{code}"))
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert resp.status == code
+
+
+def test_env_proxy_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        monkeypatch.setenv(var, "http://127.0.0.1:9")
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Redirector)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        monkeypatch.setattr(act_anon, "API", f"http://127.0.0.1:{server.server_port}/")
+        monkeypatch.setenv("NO_PROXY", "")
+        resp = act_anon.AnonTransport().send(_get("repos/o/r/301"))
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert resp.status == 301, "запрос ушёл на сервер, а не в прокси из окружения"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "repos/o/r/branches/" + "a" * 40,
+        "repos/o/r/contents/x?ref=main",
+        "repos/o/r/git/refs/heads/main",
+    ],
+)
+def test_memo_negatives(path: str) -> None:
+    fake = _Fake({act_anon.API + path: (200, {}, None)})
+    t = act_anon.AnonTransport(open_url=fake)
+    t.send(_get(path))
+    t.send(_get(path))
+    assert t.sent == [path, path]
+
+
+def test_memo_returns_copies() -> None:
+    path = "repos/o/r/commits/" + "c" * 40
+    t = act_anon.AnonTransport(
+        open_url=_Fake({act_anon.API + path: (200, {"k": [1]}, None)})
+    )
+    t.send(_get(path)).body["k"].append(2)
+    t.send(_get(path)).body["k"].append(3)
+    assert t.send(_get(path)).body == {"k": [1]}
+
+
+def test_contents_bytes_rejects_non_sha_ref() -> None:
+    t = act_anon.AnonTransport(open_url=_Fake({}))
+    got = act_anon.contents_bytes(t, "o/r", "a", "main&x=1")
+    assert isinstance(got, Unavailable) and t.sent == []

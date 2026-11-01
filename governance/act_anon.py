@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import copy
 import hashlib
 import json
 import re
@@ -32,6 +33,7 @@ TIMEOUT = 30.0
 #: Путь, который не относительный путь API: флаг, абсолютный, вложенный URL,
 #: обратный слэш, пробельный символ (тот же класс, что у `GhTransport`).
 _UNSAFE_PATH = re.compile(r"\A[-/]|://|\\|\s")
+_SHA = re.compile(r"[0-9a-f]{40}")
 _IMMUTABLE = re.compile(
     r"\Arepos/[^/?]+/[^/?]+/(?:commits/[0-9a-f]{40}"
     r"|git/trees/[0-9a-f]{40}(?:\?recursive=1)?"
@@ -51,7 +53,9 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _default_open() -> Callable[..., Any]:
-    return urllib.request.build_opener(_NoRedirect).open
+    # Пустой ProxyHandler: прокси из окружения (и их credentials) не используются.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+    return opener.open
 
 
 def _response(cls: Any, status: int, stream: Any, link: str | None) -> Any:
@@ -91,10 +95,10 @@ class AnonTransport:
                 None, error=f"anon: только GET относительного пути: {path!r}"
             )
         if path in self._memo:
-            return self._memo[path]
+            return copy.deepcopy(self._memo[path])
         resp = self._fetch(path, Response)
         if resp.status == 200 and _IMMUTABLE.match(path):
-            self._memo[path] = resp
+            self._memo[path] = copy.deepcopy(resp)
         return resp
 
     def _fetch(self, path: str, cls: Any) -> Any:
@@ -123,6 +127,8 @@ def contents_bytes(
     """
     from steward.approvalfacts.v3 import Request
 
+    if not _SHA.fullmatch(ref):
+        return Unavailable(f"{repo}:{path}: ref не 40-hex SHA: {ref!r}")
     owner, _, name = repo.partition("/")
     api = (
         f"repos/{quote(owner, safe='')}/{quote(name, safe='')}/contents/"
