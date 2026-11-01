@@ -1287,6 +1287,25 @@ def test_history_transport_built_from_binding(monkeypatch, tmp_path: Path) -> No
     assert TOKEN not in repr(got)
 
 
+def test_snapshot_repr_hides_transport_even_if_it_leaks(tmp_path: Path) -> None:
+    """`TrustSnapshot.transport` вне `repr`: транспорт с токеном в собственном
+    `repr` не раскрывает его ни через снимок, ни через `Trust` (ревью 11c, M7)."""
+
+    class Leaky:
+        def __repr__(self) -> str:
+            return f"Leaky({TOKEN})"
+
+    got, _ = _decide(
+        _with_history(tmp_path),
+        _self_reported(trust_routes(None, J1)),
+        tokens=_Tokens(TOKEN),
+    )
+    assert isinstance(got, act_trust.Trust)
+    snap = replace(got.snapshot, transport=Leaky())
+    assert TOKEN in repr(snap.transport)
+    assert TOKEN not in repr(snap) and TOKEN not in repr(replace(got, snapshot=snap))
+
+
 @pytest.mark.parametrize("keyed", [False, True], ids=["no_key", "key"])
 @pytest.mark.parametrize(
     "extra",

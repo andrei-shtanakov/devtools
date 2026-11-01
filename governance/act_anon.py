@@ -92,7 +92,8 @@ class AnonTransport:
         self.sent: list[str] = []
 
     def send(self, request: Any) -> Any:
-        """Один `GET` (анонимно либо с токеном истории); не-`GET` и не относительный путь — `status=None`."""
+        """Один `GET` (анонимно либо с токеном истории); не-`GET` и не
+        относительный путь — `status=None`."""
         from steward.approvalfacts.v3 import Response
 
         path = getattr(request, "path", "")

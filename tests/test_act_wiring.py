@@ -163,22 +163,25 @@ _SEAM_PASS = frozenset({("governance/act_trust.py::load_trust", "history_transpo
 
 def _seam_calls(rel: str, text: str) -> set[str]:
     """Вызовы `load_trust`/`history_transport` со швом (`open_url`, `token_source`
-    или `**kwargs`) в модуле: `<файл>::<функция>-><вызываемое>`."""
+    или `**kwargs`) в модуле — в функциях, теле класса и на уровне модуля:
+    `<файл>::<функция | <module>>-><вызываемое>`."""
     found: set[str] = set()
-    for fn in ast.walk(ast.parse(text)):
-        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        for node in ast.walk(fn):
-            if not isinstance(node, ast.Call):
+
+    def visit(node: ast.AST, owner: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                visit(child, child.name)
                 continue
-            f = node.func
-            name = f.id if isinstance(f, ast.Name) else getattr(f, "attr", None)
-            if name not in _ENTRIES:
-                continue
-            if any(k.arg is None or k.arg in _SEAMS for k in node.keywords):
-                site = f"{rel}::{fn.name}"
-                if (site, name) not in _SEAM_PASS:
+            if isinstance(child, ast.Call):
+                f = child.func
+                name = f.id if isinstance(f, ast.Name) else getattr(f, "attr", None)
+                seam = any(k.arg is None or k.arg in _SEAMS for k in child.keywords)
+                site = f"{rel}::{owner}"
+                if name in _ENTRIES and seam and (site, name) not in _SEAM_PASS:
                     found.add(f"{site}->{name}")
+            visit(child, owner)
+
+    visit(ast.parse(text), "<module>")
     return found
 
 
@@ -190,8 +193,18 @@ def _seam_calls(rel: str, text: str) -> set[str]:
         ("def f(b, **kw):\n    act_trust.load_trust(r, b, j, **kw)\n", True),
         ("def f(b):\n    act_trust.load_trust(r, b, j, creds=c)\n", False),
         ("def f(b):\n    other(b, open_url=o)\n", False),
+        ("load_trust(r, b, j, creds=c, open_url=o)\n", True),
+        ("class K:\n    t = history_transport(b, token_source=t)\n", True),
     ],
-    ids=["name_open_url", "attr_token_source", "kwargs", "clean", "other_callee"],
+    ids=[
+        "name_open_url",
+        "attr_token_source",
+        "kwargs",
+        "clean",
+        "other_callee",
+        "module_level",
+        "class_body",
+    ],
 )
 def test_seam_detector_sees_claimed_forms(src: str, found: bool) -> None:
     assert bool(_seam_calls("governance/x.py", src)) is found
