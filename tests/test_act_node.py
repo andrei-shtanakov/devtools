@@ -52,7 +52,7 @@ from governance.act_request import (  # noqa: E402
 from governance.act_settings import ActSettings  # noqa: E402
 from governance.act_source import SourceV2  # noqa: E402
 from governance.act_time import Ambiguous, Unavailable, parse_ts  # noqa: E402
-from governance.facts import Fact, Outcome  # noqa: E402
+from governance.facts import Fact, Outcome, unavailable  # noqa: E402
 from tests.act_cases import FILES  # noqa: E402
 from tests.test_act_context import NoEvents  # noqa: E402
 from tests.test_governance_approve_node import (  # noqa: E402
@@ -104,6 +104,28 @@ class BodyOps(Ops):
     def _snapshot_url(self, repo_slug: str) -> str:
         """Свежий снимок базы (`noop_refusal`) — из origin стенда, не из сети."""
         return str(self.forge.origin)
+
+    def compare_files_fact(self, repo_slug: str, base: str, head: str):
+        """REST compare стенда — `git diff --name-status base...head` в origin."""
+        done = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.forge.origin),
+                "diff",
+                "--name-status",
+                "--no-renames",
+                f"{base}...{head}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if done.returncode != 0:
+            return unavailable(f"compare {base}...{head}: {done.stderr.strip()}")
+        names = {"A": "added", "M": "modified", "D": "removed"}
+        rows = (line.split("\t", 1) for line in done.stdout.splitlines() if line)
+        return Fact(Outcome.FOUND, tuple((p, names[st]) for st, p in rows), "ok")
 
     def prs_containing_commit(self, repo_slug, sha):
         return [
@@ -959,21 +981,38 @@ def test_reopen_writes_stop_of_current_generation(world: World, stand: Stand) ->
     assert again is None  # действующее событие — уже остановка
 
 
-@pytest.mark.parametrize(
-    "record", ["none", "other_node", "other_generation", "other_reason"]
-)
-def test_reopen_refuses_stop_pr_without_record(
-    world: World, stand: Stand, record: str
-) -> None:
-    """B1-15/B2-3/B3-4: на ветке stop-PR лежит ОТКРЫТЫЙ PR с подменой (файла нет /
-    остановка другого узла / другого поколения / другие байты). Первое чтение истории
-    видит действующую заявку; `reopen` находит этот PR, мержит его и только ПОСЛЕ
-    мержа сверяет запись — подмена ловится проверкой записи, а не ранним выходом."""
-    _key, _pr = _deliver(world, stand)
-    approve(world, "charter")
+def _foreign_stop_pr(world: World, files: dict[str, str]) -> int:
+    """ОТКРЫТЫЙ PR на ветке остановки `charter` g1, открытый не `reopen`-ом."""
     branch = f"stop/{WS_ID}-charter-g1"
     _git(world.human, "fetch", "-q", "origin")
-    _git(world.human, "switch", "-qc", branch, "origin/master")
+    _git(world.human, "switch", "-qC", branch, "origin/master")
+    for rel, text in files.items():
+        (world.human / rel).parent.mkdir(parents=True, exist_ok=True)
+        (world.human / rel).write_text(text)
+    _git(world.human, "add", "-A")
+    _git(world.human, "commit", "-qm", "stop?")
+    _git(world.human, "push", "-q", "origin", branch)
+    return world.ops.create_pr(str(world.target), SLUG, branch, "t", "b", "")
+
+
+_OWN_STOP = render_stop(
+    StopRecord("charter", 1, act_node.STOP_REASON.format(node="charter"))
+)
+
+
+@pytest.mark.parametrize(
+    "record",
+    ["none", "other_node", "other_generation", "other_reason", "extra_file"],
+)
+def test_reopen_refuses_foreign_stop_pr_before_merge(
+    world: World, stand: Stand, record: str
+) -> None:
+    """Находка безопасности (reopen foreign PR): на ветке stop-PR лежит ОТКРЫТЫЙ чужой
+    PR с подменой (файла нет / остановка другого узла / другого поколения / другие
+    байты / верная запись плюс лишний файл). Форма сверяется по ВСЕМУ диффу против
+    базы ДО мержа — агентский мерж не вызывается, PR остаётся открытым."""
+    _deliver(world, stand)
+    approve(world, "charter")
     files = {
         "none": {"unrelated.txt": "x\n"},
         "other_node": {
@@ -987,18 +1026,76 @@ def test_reopen_refuses_stop_pr_without_record(
                 StopRecord("charter", 1, "не тот повод")
             )
         },
+        "extra_file": {
+            stop_path(WS_ID, "charter", 1): _OWN_STOP,
+            "spec/00-charter.md": "подменённый узел\n",
+        },
     }[record]
-    for rel, text in files.items():
-        (world.human / rel).parent.mkdir(parents=True, exist_ok=True)
-        (world.human / rel).write_text(text)
+    stop_pr = _foreign_stop_pr(world, files)
+    calls = len(world.forge.merge_calls)
+    with pytest.raises(RuntimeError, match=f"stop-PR #{stop_pr}.*разберите вручную"):
+        act_node.reopen(world.state, world.ops, an.bundle_dag.dag_for(None), "charter")
+    assert world.forge.prs[stop_pr]["state"] == "OPEN"
+    assert len(world.forge.merge_calls) == calls
+
+
+def test_reopen_extra_file_in_earlier_commit_refused(
+    world: World, stand: Stand
+) -> None:
+    """Форма — по всем коммитам PR, не по голове: лишний файл в первом коммите,
+    голова добавляет только верную запись — мерж не выполняется."""
+    _deliver(world, stand)
+    approve(world, "charter")
+    branch = f"stop/{WS_ID}-charter-g1"
+    _git(world.human, "fetch", "-q", "origin")
+    _git(world.human, "switch", "-qC", branch, "origin/master")
+    (world.human / "smuggled.txt").write_text("x\n")
     _git(world.human, "add", "-A")
-    _git(world.human, "commit", "-qm", "not a stop")
+    _git(world.human, "commit", "-qm", "smuggle")
+    rel = stop_path(WS_ID, "charter", 1)
+    (world.human / rel).parent.mkdir(parents=True, exist_ok=True)
+    (world.human / rel).write_text(_OWN_STOP)
+    _git(world.human, "add", "-A")
+    _git(world.human, "commit", "-qm", "stop")
     _git(world.human, "push", "-q", "origin", branch)
     stop_pr = world.ops.create_pr(str(world.target), SLUG, branch, "t", "b", "")
-    assert world.forge.prs[stop_pr]["state"] == "OPEN"  # подмена — до мержа reopen-ом
+    calls = len(world.forge.merge_calls)
+    with pytest.raises(RuntimeError, match="разберите вручную"):
+        act_node.reopen(world.state, world.ops, an.bundle_dag.dag_for(None), "charter")
+    assert world.forge.prs[stop_pr]["state"] == "OPEN"
+    assert len(world.forge.merge_calls) == calls
+
+
+def test_reopen_well_formed_found_stop_pr_merged_at_verified_head(
+    world: World, stand: Stand
+) -> None:
+    """Найденный stop-PR верной формы мержится агентом с пином проверенной головы."""
+    _deliver(world, stand)
+    approve(world, "charter")
+    stop_pr = _foreign_stop_pr(world, {stop_path(WS_ID, "charter", 1): _OWN_STOP})
+    head = world.forge.head_of(world.forge.prs[stop_pr]["branch"])
+    msg = act_node.reopen(
+        world.state, world.ops, an.bundle_dag.dag_for(None), "charter"
+    )
+    assert msg is not None and f"PR #{stop_pr}" in msg
+    assert world.forge.merge_calls[-1] == (stop_pr, head)
+    assert world.forge.prs[stop_pr]["state"] == "MERGED"
+
+
+def test_reopen_post_merge_record_check_is_independent(
+    world: World, stand: Stand, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B1-15 (второй рубеж): даже если предпроверка формы пропустила подмену,
+    доставка доказывается базой — запись на merge-коммите не та, узел остаётся
+    одобренным."""
+    _deliver(world, stand)
+    approve(world, "charter")
+    wrong = render_stop(StopRecord("charter", 1, "не тот повод"))
+    stop_pr = _foreign_stop_pr(world, {stop_path(WS_ID, "charter", 1): wrong})
+    monkeypatch.setattr(act_node, "stop_pr_defect", lambda *a: None)
     with pytest.raises(RuntimeError, match="записи остановки"):
         act_node.reopen(world.state, world.ops, an.bundle_dag.dag_for(None), "charter")
-    assert world.forge.prs[stop_pr]["state"] == "MERGED"  # проверка — после мержа
+    assert world.forge.prs[stop_pr]["state"] == "MERGED"
 
 
 def test_reopen_already_delivered_stop_is_idempotent(

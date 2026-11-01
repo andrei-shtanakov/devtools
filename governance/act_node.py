@@ -634,18 +634,11 @@ def reopen(state: RunState, ops: Ops, dag: Dag, node: str) -> str | None:
     gen = current.request.nodes[node].generation
     stop = StopRecord(node, gen, STOP_REASON.format(node=node))
     path = stop_path(state.ws_id, node, gen)
-    pr, head = _stop_pr(state, ops, node, gen, path, render_stop(stop))
+    record = render_stop(stop)
+    branch, pr, head = _stop_pr(state, ops, node, gen, path, record)
     facts = an._pr_facts(state, ops, pr)
     if an._disposition(facts, pr) is Disposition.OPEN:
-        missing = an._missing_approving_review(state, ops, pr)
-        if missing is not None:
-            raise RuntimeError(f"{missing}; затем повторите --reopen {node}")
-        code = ops.merge(state.repo, pr, head, None)
-        if code != 0:
-            raise RuntimeError(
-                f"stop-PR #{pr}: агентский мерж отказал кодом {code} — остановка не "
-                f"доставлена, узел {node} остаётся одобренным; повторите --reopen"
-            )
+        _merge_stop_pr(state, ops, dag, node, branch, pr, head, path, record)
         facts = an._pr_facts(state, ops, pr)
     if an._disposition(facts, pr) is not Disposition.MERGED:
         raise RuntimeError(
@@ -655,7 +648,7 @@ def reopen(state: RunState, ops: Ops, dag: Dag, node: str) -> str | None:
     if event.outcome is not Outcome.FOUND or event.value is None:
         raise an._unresolved(f"merge-коммит stop-PR #{pr} — {event.detail}")
     commit = event.value.commit
-    _require_stop_delivered(state, ops, pr, commit, path, render_stop(stop), node, gen)
+    _require_stop_delivered(state, ops, pr, commit, path, record, node, gen)
     # положительное суждение «остановлен» — тем же входом, что статус (B2-3):
     # действующее событие узла в истории базы — именно эта остановка этим
     # merge-коммитом
@@ -670,17 +663,77 @@ def reopen(state: RunState, ops: Ops, dag: Dag, node: str) -> str | None:
     return f"остановка {path} (g{gen}) доставлена PR #{pr}"
 
 
+def _merge_stop_pr(
+    state: RunState,
+    ops: Ops,
+    dag: Dag,
+    node: str,
+    branch: str,
+    pr: int,
+    head: str,
+    path: str,
+    record: str,
+) -> None:
+    """Агентский мерж открытого stop-PR — только проверенной формы и с пином
+    проверенной головы (как finalize: `_try_agent_merge(form=…)`). PR на ветке
+    остановки мог открыть кто угодно: дифф целиком (все коммиты) обязан быть
+    ровно записью остановки, иначе мерж не выполняется."""
+    if not head:
+        raise an._unresolved(f"голова stop-PR #{pr} не названа")
+    ops.fetch_branch(state.target_dir, branch)
+    defect = stop_pr_defect(state, ops, pr, head, path, record)
+    if defect is not None:
+        raise RuntimeError(
+            f"{defect} — агентский мерж не выполнен, узел {node} остаётся одобренным; "
+            "разберите вручную"
+        )
+    missing = an._missing_approving_review(state, ops, pr)
+    if missing is not None:
+        raise RuntimeError(f"{missing}; затем повторите --reopen {node}")
+    refusal = an._try_agent_merge(
+        state,
+        ops,
+        dag,
+        {"finalize_branch": branch},
+        [node],
+        pr,
+        head,
+        form=lambda: stop_pr_defect(state, ops, pr, head, path, record),
+    )
+    if refusal is not None:
+        raise RuntimeError(
+            f"stop-PR #{pr}: {refusal.reason} — остановка не доставлена, узел {node} "
+            "остаётся одобренным; повторите --reopen"
+        )
+
+
+def stop_pr_defect(
+    state: RunState, ops: Ops, pr: int, head: str, path: str, record: str
+) -> str | None:
+    """Форма stop-PR против базы: весь дифф `base...head` — ровно добавление
+    `path`, и в `head` по нему лежит ровно ожидаемая запись остановки."""
+    fact = ops.compare_files_fact(state.repo_slug, an._base_ref(state), head)
+    if fact.outcome is not Outcome.FOUND or fact.value is None:
+        raise an._unresolved(f"файлы stop-PR #{pr} — {fact.detail}")
+    files = sorted(fact.value)
+    if files != [(path, "added")]:
+        return f"stop-PR #{pr} трогает {files}, ожидалось ровно добавление {path}"
+    if ops.show_file(state.target_dir, head, path) != record:
+        return f"stop-PR #{pr}: {path} в {head[:12]} — не ожидаемая запись остановки"
+    return None
+
+
 def _stop_pr(
     state: RunState, ops: Ops, node: str, gen: int, path: str, record: str
-) -> tuple[int, str]:
-    """stop-PR узла и пин его головы: найденный по ветке либо созданный."""
+) -> tuple[str, int, str]:
+    """Ветка stop-PR узла, номер и голова: найденный по ветке либо созданный."""
     branch = f"stop/{state.ws_id}-{node}-g{gen}"
     found = af.search_pr(ops, state.repo_slug, branch, any_state=True)
     if found.outcome is Outcome.UNAVAILABLE:
         raise an._unresolved(f"поиск stop-PR на ветке {branch} — {found.detail}")
     if found.outcome is Outcome.FOUND:
         pr = int(found.value or 0)
-        return pr, an.pr_head(state, ops, pr) or ""
+        return branch, pr, an.pr_head(state, ops, pr) or ""
     ops.switch_to(state.target_dir, branch, an._base_ref(state))
     file = Path(state.target_dir) / path
     file.parent.mkdir(parents=True, exist_ok=True)
@@ -698,7 +751,7 @@ def _stop_pr(
         f"Запись остановки (спека §8, Q1): `{path}`. Только отзывает.",
         "",
     )
-    return pr, head
+    return branch, pr, head
 
 
 def _require_stop_delivered(
