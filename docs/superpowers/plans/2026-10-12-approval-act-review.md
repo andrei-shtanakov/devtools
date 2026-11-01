@@ -3476,39 +3476,50 @@ error=…)`, «отказ | None», `raise`), но полноту не дока�
   Перечень успешных ранних выходов в путях, которые трогает часть B (`runner.py`,
   `task_bridge.py`, `approve_node.py`, листинги `act_node.py`; сверено по master `a16e305`):
 
-  | # | Место | Что пропускает | Проверка допуска | Тест |
-  |---|---|---|---|---|
-  | 1 | `task_bridge.deliver_superseded`, no-op §I5 (равный `content_anchor`) | переиздание и гейт §I12 | `_admission_refusal` до no-op; не подтверждено — гейт §I12 по прежним правилам | `test_review_noop_with_fresh_approval`, `test_review_noop_refused_without_fresh_approval[stop_delivered/act_revoked/trust_unavailable]`, `…_when_mode_unset` |
-  | 2 | `deliver_superseded`, повтор `--replace-revision 1` | новую ревизию, гейт | `_require_admission` перед `return repeated` | `test_stored_success_requires_admission[v1_replacement]` |
-  | 3 | `deliver_superseded`, `return_pr` (ревизия `completed`, PR открыт) | новую ревизию, гейт | `_require_admission` перед возвратом | `…[returned_pr]` |
-  | 4 | `deliver_superseded`, `complete` (PR ревизии вмержен) | гейт | то же | `…[returned_merged]` |
-  | 5 | `deliver_superseded`, `continue` с открытым PR | гейт | то же | `…[returned_open]` |
-  | 6 | `deliver_superseded`, повтор доставки из намерения (`started`, PR нет) | гейт §I12 (судился при записи намерения) | `_require_admission` до `_recover_commit` (до эффекта) | `…[redo_intent]` |
-  | 7 | `deliver_superseded`, открытая v1 | новую ревизию, гейт | `_require_admission` перед возвратом | `…[returned_v1]` |
-  | 8 | `task_bridge.deliver_for_run`, `op completed` (вкл. ответ замены v1) | гейт §I12 | `_require_admission` после проверки `pr` | `…[for_run_completed]`, `test_for_run_completed_returns_pr_with_admission` |
-  | 9 | `deliver_for_run`, принят существующий PR по ветке | гейт §I12 | `_require_admission` перед `return existing` | `…[for_run_adopted]` |
-  | 10 | `runner._step_gate`, сохранённый `completed` S4 | гейт steward S4 | `noop_refusal` по узлам уровней ниже волны; нет — гейт заново | `test_s4_completed_gate_rerun_without_admission[stop_delivered/admission_unavailable]`, `test_s4_completed_gate_kept_with_admission` |
-  | 11 | `runner._step_s8`, сохранённый `completed`/`exit=0` | authoritative-гейт S8 | `noop_refusal` по всем узлам; нет — гейт заново | `test_s8_completed_gate_rerun_without_admission[…]`, `test_s8_completed_gate_kept_with_admission` |
-  | 12 | `runner._next_wave` (resume по завершённой заявке ~1058, два выхода `_finalize_wave`) | допуск узлов волны перед следующей | `noop_refusal` по узлам волны; нет — `stopped_review` | `test_next_wave_needs_admission[…]` |
-  | 13 | `approve_node._propose`, режим `Unavailable` | любой no-op | отказ сразу после `mode_probe` (D1-1) | `test_frontmatter_noop_refused_when_mode_unavailable` |
-  | 14 | `approve_node._propose`, no-op по frontmatter в продукте `review` (узел без события) | provenance старого акта (§9.1 (а) п. 3) | `Statuses.of` — не `approved` → новая заявка; `unavailable:` → отказ | `test_frontmatter_noop_in_review_needs_status` |
-  | 15 | `approve_node._propose`, no-op узла `review/v1` | — | уже `Statuses.of == approved` (Task 13) | `test_review_noop_needs_current_status` |
-  | 16 | `approve_node.propose_from_source` | — | успешного выхода без записи нет; `creation` отказывает на `Unavailable` до записи | — |
-  | 17 | `approve_node` старые завершения finalize (`_reconcile_finalize`, «уже в base») | — | только заявки без маркера; в продукте `review` `route` их до старого кода не пускает | — |
-  | 18 | `act_node._reconcile_finalize` — «узлы одобрены» после мержа finalize (гонка: остановка доставлена между актом и мержем) | объявление одобрения | `noop_refusal` по узлам заявки после сверки конверта: заявка завершается, но успеха нет — `RuntimeError` с фактическим состоянием | `test_stop_between_act_and_finalize_merge_not_reported_approved` |
-  | 19 | `act_node.reopen` «остановка уже доставлена», `repropose` завершённой | — | успех — отнятие допуска / отказ, не одобрение | — |
-  | 20 | прочие `completed`-выходы раннера (`_step_wave_branch`, `_step_materialize_brief`, `_step_authoring`, `_step_commit`, `_step_edge`, `_step_candidate`, интервью), `advance` при `merge completed` | — | допуска не судят; следующий судящий шаг — №10–12 | — |
-  | 21 | `task_bridge.deliver_approve` | — | штамп tasks-спеки, узлов бандла не судит (§I12, таблица) | — |
+  | # | Место | Что пропускает | Проверка допуска | Тест | Статус прогона при отказе |
+  |---|---|---|---|---|---|
+  | 1 | `task_bridge.deliver_superseded`, no-op §I5 (равный `content_anchor`) | переиздание и гейт §I12 | `_admission_refusal` до no-op; не подтверждено — гейт §I12 по прежним правилам | `test_review_noop_with_fresh_approval`, `test_review_noop_refused_without_fresh_approval[stop_delivered/act_revoked/trust_unavailable]`, `…_when_mode_unset` | не меняется (прогон `completed`; отказ — гейт §I12 доставки, не шаг прогона) |
+  | 2 | `deliver_superseded`, повтор `--replace-revision 1` | новую ревизию, гейт | `_require_admission` перед `return repeated` | `test_stored_success_requires_admission[v1_replacement]` | не меняется (`completed`): отказ относится к доставке, статус прогона её не утверждает |
+  | 3 | `deliver_superseded`, `return_pr` (ревизия `completed`, PR открыт) | новую ревизию, гейт | `_require_admission` перед возвратом | `…[returned_pr]` | то же |
+  | 4 | `deliver_superseded`, `complete` (PR ревизии вмержен) | гейт | то же | `…[returned_merged]` | то же |
+  | 5 | `deliver_superseded`, `continue` с открытым PR | гейт | то же | `…[returned_open]` | то же |
+  | 6 | `deliver_superseded`, повтор доставки из намерения (`started`, PR нет) | гейт §I12 (судился при записи намерения) | `_require_admission` до `_recover_commit` (до эффекта) | `…[redo_intent]` | то же |
+  | 7 | `deliver_superseded`, открытая v1 | новую ревизию, гейт | `_require_admission` перед возвратом | `…[returned_v1]` | то же |
+  | 8 | `task_bridge.deliver_for_run`, `op completed` (вкл. ответ замены v1) | гейт §I12 | `_require_admission` после проверки `pr` | `…[for_run_completed]`, `test_for_run_completed_returns_pr_with_admission` | то же |
+  | 9 | `deliver_for_run`, принят существующий PR по ветке | гейт §I12 | `_require_admission` перед `return existing` | `…[for_run_adopted]` | то же |
+  | 10 | `runner._step_gate`, сохранённый `completed` S4 | гейт steward S4 | `noop_refusal` по узлам уровней ниже волны; нет — гейт заново | `test_s4_completed_gate_rerun_without_admission[stop_delivered/admission_unavailable]`, `test_s4_completed_gate_kept_with_admission` | `running` уже (S4 исполняется только внутри `advance` при `running`); `op_start` пишет состояние до гейта |
+  | 11 | `runner._step_s8`, сохранённый `completed`/`exit=0` | authoritative-гейт S8 | `noop_refusal` по всем узлам; нет — гейт заново | `test_s8_completed_gate_rerun_without_admission[…]`, `test_s8_completed_gate_kept_with_admission` | **`running` — сохраняется до чекаута и гейта (d2, D2-2)**; прежде оставался `completed` |
+  | 12 | `runner._next_wave` (resume по завершённой заявке ~1058, два выхода `_finalize_wave`) | допуск узлов волны перед следующей | `noop_refusal` по узлам волны; нет — `stopped_review` | `test_next_wave_needs_admission[…]` | `stopped_review` — `_stop_with_comment` сохраняет статус первым |
+  | 13 | `approve_node._propose`, режим `Unavailable` | любой no-op | отказ сразу после `mode_probe` (D1-1) | `test_frontmatter_noop_refused_when_mode_unavailable` | не применимо (CLI); в раннере — `_finalize_wave` → `stopped_review`/`stopped_stale` |
+  | 14 | `approve_node._propose`, no-op по frontmatter в продукте `review` (узел без события) | provenance старого акта (§9.1 (а) п. 3) | `Statuses.of` — не `approved` → новая заявка; `unavailable:` → отказ | `test_frontmatter_noop_in_review_needs_status` | то же |
+  | 15 | `approve_node._propose`, no-op узла `review/v1` | — | уже `Statuses.of == approved` (Task 13) | `test_review_noop_needs_current_status` | то же |
+  | 16 | `approve_node.propose_from_source` | — | успешного выхода без записи нет; `creation` отказывает на `Unavailable` до записи | — | — |
+  | 17 | `approve_node` старые завершения finalize (`_reconcile_finalize`, «уже в base») | — | только заявки без маркера; в продукте `review` `route` их до старого кода не пускает | — | — |
+  | 18 | `act_node._reconcile_finalize` — «узлы одобрены» после мержа finalize (гонка: остановка доставлена между актом и мержем) | объявление одобрения | `noop_refusal` по узлам заявки после сверки конверта: заявка завершается, но успеха нет — `RuntimeError` с фактическим состоянием | `test_stop_between_act_and_finalize_merge_not_reported_approved` | заявка `completed`; в раннере `_finalize_wave._approve` → `stopped_stale` (нетерминальный) |
+  | 19 | `act_node.reopen` «остановка уже доставлена», `repropose` завершённой | — | успех — отнятие допуска / отказ, не одобрение | — | — |
+  | 20 | прочие `completed`-выходы раннера (`_step_wave_branch`, `_step_materialize_brief`, `_step_authoring`, `_step_commit`, `_step_edge`, `_step_candidate`, интервью), `advance` при `merge completed` | — | допуска не судят; следующий судящий шаг — №10–12 | — | — |
+  | 21 | `task_bridge.deliver_approve` | — | штамп tasks-спеки, узлов бандла не судит (§I12, таблица) | — | — |
 
   Строки 1–14 и 18 — с проверкой (15 мест; 12 новых в d1, строка 18 — решением team-lead о
   гонке stop/finalize), остальные 6 — разобраны и проверки не требуют (причина в строке).
-- **Реестр Task 16**: `act_envelope.node_history` (3), `act_status.noop_refusal` (4),
+- **Правки по d2** (ревью `plan-review-d2`): D2-1 — проверка допуска видит **свежую базу**: в
+  одной точке, `act_status.noop_refusal`, перед `statuses_at_base` — `fresh_base` (`git fetch
+  origin <base>` → снимок `origin/<base>`, `statuses_at_base(..., ref=…)`); сбой обновления —
+  отказ («свежая база: …»), локальная, возможно устаревшая, ветка не читается. Тесты: локальная
+  база «approved», на origin доставлена остановка → успеха нет для S4, S8, `_next_wave`; `fetch`
+  не удался → успеха нет (те же три места). D2-2 — S8 при утраченном допуске сохраняет
+  нетерминальный `running` до чекаута и гейта; регрессия через `advance`: чекаут падает после
+  обнаружения — прогон не `completed`. Колонка «Статус прогона при отказе» выше: утечка
+  терминального статуса была только в S8 (строка 11); в мосту прогон остаётся `completed`
+  намеренно — отказ относится к доставке, а не к шагу прогона.
+- **Реестр Task 16**: `act_envelope.node_history` (3), `act_status.noop_refusal` (4 + 2 d2),
+  `act_status.fresh_base` (1), `runner._step_s8#run_status` (1),
   `task_bridge._require_admission` (1), `deliver_superseded#…` (7), `deliver_for_run#…` (2),
   `runner._step_gate#completed_admission`, `runner._step_s8#completed_admission`,
   `runner._next_wave#admission`, `approve_node._propose#mode_unavailable`,
   `#legacy_noop_review`; `current_event`/`next_generation` — в `MODIFIED_EXISTING`,
   `task_bridge._admission_refusal` — в `NOT_JUDGMENT` (делегирует). Применимость операторов —
-  282/282 (270 по коду scratch, 12 по AST фрагментов); мутации новых строк: 8 (п. 9, В-1) + 17
+  286/286 (274 по коду scratch, 12 по AST фрагментов); мутации новых строк: 8 (п. 9, В-1) + 17
   (d1, исполнимые в scratch) — все закрыты; `_propose#…` (2) — на стенде `World`, Step 4a.
 - **Буква спеки**: В-1 теперь соответствует цели §9.1 (а) п. 4 (проверенный статус спрашивается
   перед no-op), хотя статус не входит в саму проекцию хеша; §9.1 п. 0a («последний доставленный
@@ -11014,7 +11025,9 @@ B1-6, B1-8, B1-9 — см. «Правки по ревью b1».
   `act_status.pr_for_merge(ops, slug, merge_commit) -> int | Unavailable`;
   `act_status.REQUEST_BINDING`; `node_approval.DEBT_REVIEW_V1 = "review_v1"`;
   `act_status.noop_refusal(state, ops, dag, nodes=None, deps=None) -> str | None` — одна точка
-  «актуальный допуск перед успехом без полного пути» (В-1, d1);
+  «актуальный допуск перед успехом без полного пути» (В-1, d1), по свежему снимку базы
+  `act_status.fresh_base(state, ops) -> str | Unavailable` (`git fetch origin <base>` →
+  `origin/<base>`, d2); `statuses_at_base(..., *, ref=None)`;
   `task_bridge._admission_refusal(state, ops, legacy_bundle) -> str | None`,
   `task_bridge._require_admission(state, ops, legacy_bundle, done) -> None`.
 
@@ -12288,16 +12301,23 @@ def test_s4_stops_when_act_mode_unset(tmp_path: Path, runs_root, monkeypatch) ->
     assert ops.gate_modes == []
 
 
-def _review_admission(monkeypatch, verdicts: dict[str, str]) -> None:
-    """Продукт в `review`; узлы с событием `review/v1` — с заданными статусами."""
+def _review_admission(monkeypatch, ops, remote: dict[str, str], *, fetched: bool = True,
+                      local: dict[str, str] | None = None) -> None:
+    """Продукт в `review`. Статусы зависят от снимка базы: свежий `origin/master` — `remote`,
+    локальная ветка — `local` (по умолчанию «approved»: устаревшая база остановки не видит)."""
     from governance import act_status
 
     live = SimpleNamespace(mode="review")
     monkeypatch.setattr(act_status, "mode_probe", lambda state, deps=None: live)
-    statuses = SimpleNamespace(is_review=lambda node: node in verdicts,
+    monkeypatch.setattr(ops, "fetch_branch", lambda target_dir, branch: fetched, raising=False)
+    stale = local if local is not None else {node: "approved" for node in remote}
+
+    def at_base(state, ops_, dag, live_, deps=None, *, ref=None):
+        verdicts = remote if ref == "origin/master" else stale
+        return SimpleNamespace(is_review=lambda node: node in verdicts,
                                of=lambda node: verdicts[node])
-    monkeypatch.setattr(act_status, "statuses_at_base",
-                        lambda state, ops, dag, live, deps=None: statuses)
+
+    monkeypatch.setattr(act_status, "statuses_at_base", at_base)
 
 
 def _wave_state(tmp_path: Path, run_id: str, wave: int) -> tuple[rs.RunState, FakeOps]:
@@ -12309,6 +12329,10 @@ def _wave_state(tmp_path: Path, run_id: str, wave: int) -> tuple[rs.RunState, Fa
 
 def _gate_rerun(*_args, **_kwargs):
     raise RuntimeError("гейт S4 заново")
+
+
+def _checkout_fails(*_args):
+    raise RuntimeError("чекаут базы: гейт заново")
 
 
 ADMISSION_LOST = ["not_approved:stopped:g1", "unavailable:df-trust: HTTP 403"]
@@ -12324,7 +12348,7 @@ def test_s4_completed_gate_rerun_without_admission(tmp_path, runs_root, monkeypa
 
     state, ops = _wave_state(tmp_path, "r-adm-s4", wave=2)
     state.ops[runner.wave_key(state, "gate-candidate")] = {"status": "completed"}
-    _review_admission(monkeypatch, {"charter": verdict})
+    _review_admission(monkeypatch, ops, {"charter": verdict})
     monkeypatch.setattr(runner, "wave_profile_dir", _gate_rerun)
     with pytest.raises(RuntimeError, match="гейт S4 заново"):
         runner._step_gate(state, ops)
@@ -12337,7 +12361,7 @@ def test_s4_completed_gate_kept_with_admission(tmp_path, runs_root, monkeypatch)
 
     state, ops = _wave_state(tmp_path, "r-adm-s4-ok", wave=2)
     state.ops[runner.wave_key(state, "gate-candidate")] = {"status": "completed"}
-    _review_admission(monkeypatch, {"charter": "approved"})
+    _review_admission(monkeypatch, ops, {"charter": "approved"})
     monkeypatch.setattr(runner, "wave_profile_dir", _gate_rerun)
     assert runner._step_gate(state, ops) is True
 
@@ -12351,12 +12375,8 @@ def test_s8_completed_gate_rerun_without_admission(tmp_path, runs_root, monkeypa
 
     state, ops = _wave_state(tmp_path, "r-adm-s8", wave=5)
     state.ops["gate-authoritative"] = {"status": "completed", "exit": 0, "output": ""}
-    _review_admission(monkeypatch, {"design": verdict})
-
-    def _checkout(*_args):
-        raise RuntimeError("чекаут базы: гейт заново")
-
-    monkeypatch.setattr(ops, "checkout_and_pull", _checkout)
+    _review_admission(monkeypatch, ops, {"design": verdict})
+    monkeypatch.setattr(ops, "checkout_and_pull", _checkout_fails)
     assert runner._step_s8(state, ops) is False
     assert state.ops["gate-authoritative"]["status"] == "started"
     assert f"допуск review/v1 не подтверждён (узел design: {verdict})" in capsys.readouterr().out
@@ -12368,7 +12388,7 @@ def test_s8_completed_gate_kept_with_admission(tmp_path, runs_root, monkeypatch)
 
     state, ops = _wave_state(tmp_path, "r-adm-s8-ok", wave=5)
     state.ops["gate-authoritative"] = {"status": "completed", "exit": 0, "output": ""}
-    _review_admission(monkeypatch, {"design": "approved"})
+    _review_admission(monkeypatch, ops, {"design": "approved"})
     assert runner._step_s8(state, ops) is True
 
 
@@ -12379,10 +12399,80 @@ def test_next_wave_needs_admission(tmp_path, runs_root, monkeypatch, verdict: st
     from governance import runner
 
     state, ops = _wave_state(tmp_path, "r-adm-next", wave=1)
-    _review_admission(monkeypatch, {"charter": verdict})
+    _review_admission(monkeypatch, ops, {"charter": verdict})
     monkeypatch.setattr(runner, "advance", lambda state, ops, *, lock: state)
     got = runner._next_wave(state, ops, lock=None)
     assert (got.status, got.wave) == ("stopped_review", 1)
+
+
+def _site_s4(state, ops, monkeypatch) -> str:
+    from governance import runner
+
+    state.ops[runner.wave_key(state, "gate-candidate")] = {"status": "completed"}
+    monkeypatch.setattr(runner, "wave_profile_dir", _gate_rerun)
+    try:
+        runner._step_gate(state, ops)
+    except RuntimeError:
+        return "no_success"
+    return "success"
+
+
+def _site_s8(state, ops, monkeypatch) -> str:
+    from governance import runner
+
+    state.ops["gate-authoritative"] = {"status": "completed", "exit": 0, "output": ""}
+    monkeypatch.setattr(ops, "checkout_and_pull", _checkout_fails)
+    return "success" if runner._step_s8(state, ops) else "no_success"
+
+
+def _site_next_wave(state, ops, monkeypatch) -> str:
+    from governance import runner
+
+    monkeypatch.setattr(runner, "advance", lambda state, ops, *, lock: state)
+    got = runner._next_wave(state, ops, lock=None)
+    return "no_success" if got.status == "stopped_review" else "success"
+
+
+#: Сайт → (исход, волна, узел, допуск которого спрашивается).
+ADMISSION_SITES = {"s4": (_site_s4, 2, "charter"), "s8": (_site_s8, 5, "design"),
+                   "next_wave": (_site_next_wave, 1, "charter")}
+
+
+@pytest.mark.parametrize("site", sorted(ADMISSION_SITES))
+def test_remote_stop_with_stale_local_base_no_success(tmp_path, runs_root, monkeypatch,
+                                                      site: str) -> None:
+    """d2 (D2-1): локальная база устарела («approved»), на origin остановка уже доставлена —
+    проверка читает свежий снимок, успеха нет."""
+    outcome, wave, node = ADMISSION_SITES[site]
+    state, ops = _wave_state(tmp_path, f"r-adm-stale-{site}", wave=wave)
+    _review_admission(monkeypatch, ops, {node: "not_approved:stopped:g1"})
+    assert outcome(state, ops, monkeypatch) == "no_success"
+
+
+@pytest.mark.parametrize("site", sorted(ADMISSION_SITES))
+def test_admission_refused_when_base_not_refreshed(tmp_path, runs_root, monkeypatch,
+                                                   site: str) -> None:
+    """d2 (D2-1): свежий снимок базы не получен (`fetch` не удался) — успеха нет, хотя
+    локальная база говорит «approved»."""
+    outcome, wave, node = ADMISSION_SITES[site]
+    state, ops = _wave_state(tmp_path, f"r-adm-fetch-{site}", wave=wave)
+    _review_admission(monkeypatch, ops, {node: "approved"}, fetched=False)
+    assert outcome(state, ops, monkeypatch) == "no_success"
+
+
+def test_s8_lost_admission_run_not_completed_when_checkout_fails(tmp_path, runs_root,
+                                                                 monkeypatch) -> None:
+    """d2 (D2-2): прогон `completed`, сохранённый S8 `exit=0`, допуск утрачен; чекаут базы
+    после обнаружения падает — прогон не остаётся `completed` (статус сохранён до чекаута)."""
+    state, ops = _wave_state(tmp_path, "r-adm-s8-status", wave=5)
+    state.status = "completed"
+    state.ops["gate-authoritative"] = {"status": "completed", "exit": 0, "output": ""}
+    rs.save(state)
+    _review_admission(monkeypatch, ops, {"design": "not_approved:stopped:g1"})
+    monkeypatch.setattr(ops, "checkout_and_pull", _checkout_fails)
+    got = locked_runner.advance(state, ops)
+    assert got.status == "running"
+    assert rs.load("r-adm-s8-status").status == "running"
 ```
 
 Дополнение `tests/test_governance_task_bridge.py` (В-1, решение владельца 01.11):
@@ -12465,8 +12555,9 @@ def _review_mode(monkeypatch, verdicts: dict[str, str]) -> None:
         def of(self, node: str) -> str:
             return verdicts[node]
 
+    monkeypatch.setattr(act_status, "fresh_base", lambda state, ops: "origin/master")
     monkeypatch.setattr(act_status, "statuses_at_base",
-                        lambda state, ops, dag, live, deps=None: _Statuses())
+                        lambda state, ops, dag, live, deps=None, *, ref=None: _Statuses())
 
 
 def _equal_anchor_state(tmp_path: Path, monkeypatch):
@@ -13417,11 +13508,12 @@ def _statuses(state: RunState, ops: Ops, dag: Dag, live: LivePolicy, deps: Deps,
 
 
 def statuses_at_base(state: RunState, ops: Ops, dag: Dag, live: LivePolicy,
-                     deps: Deps | None = None) -> Statuses:
+                     deps: Deps | None = None, *, ref: str | None = None) -> Statuses:
     """Статусы по базе для гейта доставки и предложений (`read_dag_state`).
 
-    Только для продукта в `review` (`live.mode`); иначе путь старый (§10)."""
-    base = state.base_ref or "master"
+    Только для продукта в `review` (`live.mode`); иначе путь старый (§10). `ref` — снимок
+    базы, отличный от локальной ветки (`fresh_base` → `origin/<base>`, d2)."""
+    base = ref or state.base_ref or "master"
     return _statuses(state, ops, dag, live, deps or real_deps(state),
                      text_of=lambda path: ops.show_file(state.target_dir, base, path),
                      ref=base)
@@ -13482,6 +13574,16 @@ def mode_probe(state: RunState, deps: Deps | None = None) -> LivePolicy | Unavai
     return live_policy(state, deps or real_deps(state))
 
 
+def fresh_base(state: RunState, ops: Ops) -> str | Unavailable:
+    """Свежий снимок базы для проверки допуска (ревью d2): `git fetch origin <base>` →
+    `origin/<base>`. Сбой обновления — `Unavailable`: по устаревшей локальной базе
+    допуск не подтверждается (остановка могла быть доставлена после последнего pull)."""
+    base = state.base_ref or "master"
+    if not ops.fetch_branch(state.target_dir, base):
+        return Unavailable(f"база {base} не обновлена (fetch origin {base})")
+    return f"origin/{base}"
+
+
 def noop_refusal(state: RunState, ops: Ops, dag: Dag, nodes: Iterable[str] | None = None,
                  deps: Deps | None = None) -> str | None:
     """Почему успех без полного пути не допускается, или `None` (решение владельца 01.11).
@@ -13497,7 +13599,10 @@ def noop_refusal(state: RunState, ops: Ops, dag: Dag, nodes: Iterable[str] | Non
         return f"режим акта продукта: {live.reason}"
     if live.mode != "review":
         return None
-    statuses = statuses_at_base(state, ops, dag, live, deps)
+    ref = fresh_base(state, ops)  # d2: не по устаревшей локальной базе
+    if isinstance(ref, Unavailable):
+        return f"свежая база: {ref.reason}"
+    statuses = statuses_at_base(state, ops, dag, live, deps, ref=ref)
     wanted = None if nodes is None else set(nodes)
     for fname, _upstreams in dag:
         node = bundle_dag.node_id(fname)
@@ -13793,6 +13898,9 @@ def _require_admission(
         if refusal is not None:
             print(f"S8: сохранённый гейт не принят — допуск review/v1 не подтверждён "
                   f"({refusal}); гейт заново")
+            # d2: допуск утрачен — прогон не завершён; нетерминальный статус сохраняется
+            # (`op_start` пишет состояние) ДО любого шага, способного упасть
+            state.status = "running"
             op_start(state, key)
             gate_op = state.ops[key]
 ```
@@ -15614,7 +15722,7 @@ MODIFIED_EXISTING = {
                                              "upstream_not_approved"),
     "approve_node._try_agent_merge": ("form",),
     "runner._step_gate": ("act_mode_unset", "completed_admission"),
-    "runner._step_s8": ("act_mode_unset", "completed_admission"),
+    "runner._step_s8": ("act_mode_unset", "completed_admission", "run_status"),
     "runner._next_wave": ("admission",),
     "act_envelope.envelope_refusal": ("bytes", "pins"),
     "approve_node._advance": "маршрутизация в `act_node.route` до выбора шага; своей проверки нет",
@@ -15638,6 +15746,7 @@ MODIFIED_EXISTING = {
 
 S, N, L = "tests/test_act_status.py", "tests/test_act_node.py", "tests/test_act_legacy.py"
 E, TB = "tests/test_act_envelope.py", "tests/test_governance_task_bridge.py"
+RN = "tests/test_governance_runner.py"
 P, B, C = "tests/test_act_premerge.py", "tests/test_act_barrier.py", "tests/test_act_check.py"
 T, J, W = "tests/test_act_trust.py", "tests/test_act_journal.py", "tests/test_act_journal_wire.py"
 I, A, G = "tests/test_act_identity.py", "tests/test_act_anon.py", "tests/test_act_gate.py"
@@ -16053,7 +16162,15 @@ JUDGMENT = {
           f"{E}::test_non_monotonic_request_ignored",
           '"узел req: поколение 2 не больше прежнего 2"'),
     ),
-    "act_status.noop_refusal": (  # В-1 и d1, решение владельца 01.11
+    "act_status.fresh_base": (r("fetch_failed", "act_status.fresh_base",
+                                "if not ops.fetch_branch(state.target_dir, base)",
+                                f"{RN}::test_admission_refused_when_base_not_refreshed[s4]",
+                                '"no_success"'),),
+    "act_status.noop_refusal": (  # В-1, d1, d2 — решение владельца 01.11
+        r("stale_base", "act_status.noop_refusal", "isinstance(ref, Unavailable)",
+          f"{RN}::test_admission_refused_when_base_not_refreshed[s8]", '"no_success"'),
+        r("fresh_ref", "act_status.noop_refusal", "ref=ref",
+          f"{RN}::test_remote_stop_with_stale_local_base_no_success[next_wave]", '"no_success"'),
         r("mode_unset", "act_status.noop_refusal", "isinstance(live, Unavailable)",
           f"{TB}::test_review_noop_refused_when_mode_unset",
           '"бесследного no-op нет (режим акта продукта: нет привязки)"'),
@@ -16425,6 +16542,8 @@ JUDGMENT = {
     "runner._step_s8#completed_admission": (r("admission", "runner._step_s8", "refusal is not None",
         "tests/test_governance_runner.py::test_s8_completed_gate_rerun_without_admission[stop_delivered]",
         '"started"'),),
+    "runner._step_s8#run_status": (r("status", "runner._step_s8", 'state.status = "running"',
+        f"{RN}::test_s8_lost_admission_run_not_completed_when_checkout_fails", '"running"'),),
     "runner._next_wave#admission": (r("admission", "runner._next_wave", "refusal is not None",
         "tests/test_governance_runner.py::test_next_wave_needs_admission[stop_delivered]",
         '"stopped_review"'),),
@@ -17323,7 +17442,7 @@ if __name__ == "__main__":
   (`approve_node._propose#…`, `read_dag_state#…`, `_require_upstream_ready#…`,
   `_try_agent_merge#form`, `runner._step_gate#…`, `runner._step_s8#…`) и прогнанные при ревизии
   плана. Сначала — применимость операторов ко ВСЕМ строкам без запуска двойников (b6, B6-4;
-  ожидается `282/282`: при ревизии d1 (01.11) — 270 по коду scratch и 12 строк
+  ожидается `286/286`: при ревизии d2 (01.11) — 274 по коду scratch и 12 строк
   `<функция>#<проверка>` по AST фрагментов плана; `n/a` чинится оператором `BYPASS` или записью `RULED`, не пропуском):
 
   ```bash
@@ -17475,6 +17594,8 @@ BYPASS: dict[str, tuple[str, str]] = {
         'return "review", str(out)'),
     'act_status.load_history:base_unread': ('    if rows is None:\n        return Unavailable',
         '    if rows is None:\n        rows = []\n    if False:\n        return Unavailable'),
+    'act_status.noop_refusal:fresh_ref': ('statuses_at_base(state, ops, dag, live, deps, ref=ref)',
+        'statuses_at_base(state, ops, dag, live, deps)'),
     'act_status.noop_refusal:mode_unset': ('return f"режим акта продукта: {live.reason}"',
         'return None'),
     'act_status.pr_for_merge:exactly_one': ('    if len(found) != 1:',
@@ -17511,6 +17632,8 @@ BYPASS: dict[str, tuple[str, str]] = {
         'defect = None'),
     'runner._step_gate#completed_admission:admission': ('if refusal is None:',
         'if True:'),
+    'runner._step_s8#run_status:status': ('state.status = "running"',
+        'pass'),
     'task_bridge.deliver_for_run#adopted:admission': ('_require_admission(state, ops, legacy_bundle, f"принят существующий PR #{existing}")',
         'pass'),
     'task_bridge.deliver_for_run#completed:admission': ('_require_admission(state, ops, legacy_bundle, f"tasks-спека уже доставлена (PR #{pr_done})")',
