@@ -1902,7 +1902,7 @@ def _reconcile_candidate(
             "штатным восстановлением",
             request=key,
         )
-    verdict = _legacy_outcome(state, ops, dag, op, key, facts)
+    verdict = _legacy_verdict(state, ops, op, key, facts, published)
     if isinstance(verdict, LegacyHalt):
         raise _unresolved(verdict.text) if verdict.wrap else RuntimeError(verdict.text)
     if isinstance(verdict, Rejected):
@@ -1944,8 +1944,22 @@ def _legacy_outcome(
     старого одобрения в продукте `review` (`act_status.LegacyProbe`, ревизия
     b3, B3-1): опубликованный снимок, закреплённый пин политики, его
     отпечаток, `authorized_signature` мержера по прежнему allowlist."""
-    pr = op["candidate_pr"]
     published = _snapshot_is_published(state, ops, dag, op, facts.get("headRefOid"))
+    return _legacy_verdict(state, ops, op, key, facts, published)
+
+
+def _legacy_verdict(
+    state: RunState,
+    ops: Ops,
+    op: dict,
+    key: str,
+    facts: dict,
+    published: bool | None,
+) -> LegacyAccepted | Rejected | LegacyHalt:
+    """`_legacy_outcome` по уже вычисленной опубликованности снимка:
+    `_reconcile_candidate` считает её один раз (`fetch_branch` и чтения
+    блобов — не повторяются, ревью PR #667)."""
+    pr = op["candidate_pr"]
     if published is None:
         return LegacyHalt(
             f"состав предложения в голове PR #{pr} — объект недоступен "

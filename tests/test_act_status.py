@@ -1580,3 +1580,144 @@ def test_decider_legacy_empty_paths_through_real_facts_read() -> None:
     assert got == WaitingDelivery()
     ops = [getattr(r, "op", None) for r in transport.sent]
     assert "StewardV3Delivery" in ops and "StewardV3Blobs" not in ops
+
+
+# --- раунд 2 (ревью PR #667) ----------------------------------------------------------
+
+
+@pytest.fixture()
+def bad_settings(tmp_path: Path, monkeypatch) -> None:
+    """`act.toml` с неизвестным ключом; `mode_probe` — настоящий (`real_deps`)."""
+    cfg = tmp_path / "cfg"
+    (cfg / "darkfactory").mkdir(parents=True)
+    (cfg / "darkfactory" / "act.toml").write_text("review_v1 = true\nlol = 1\n")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg))
+    monkeypatch.setattr(
+        act_status,
+        "mode_probe",
+        lambda state, deps=None: act_status.live_policy(
+            state, deps or act_status.real_deps(state)
+        ),
+    )
+
+
+def test_bad_settings_is_a_named_refusal(bad_settings, tmp_path: Path) -> None:
+    """Нечитаемый `act.toml` — названный fail-closed отказ на каждом читателе
+    режима, а не трассировка `SettingsError`."""
+    from governance import approve_node
+
+    state = _reader_state()
+    got = approve_node.read_dag_state(state, _BaseOps(BASE_TEXTS), DAG)
+    assert got.evidence is None
+    assert got.unresolved.startswith("режим акта продукта: настройки акта: ")
+    refusal = act_status.noop_refusal(state, _BaseOps(BASE_TEXTS), DAG)
+    assert refusal is not None
+    assert refusal.startswith("режим акта продукта: настройки акта: ")
+    gate = act_status.gate_run(
+        state, object(), DAG, candidate=True, out=tmp_path / "ns.json"
+    )
+    assert isinstance(gate, Unavailable) and gate.reason.startswith("настройки акта: ")
+    assert not (tmp_path / "ns.json").exists()
+
+
+class DigestOps(ProductOps):
+    """Продукт стенда + дайджест снимка gate-check."""
+
+    def gate_snapshot_digest(self, target_dir, bundle_dir, *, candidate):
+        return 0, "sha256:" + "a" * 64
+
+
+@pytest.mark.parametrize("edit", ["envelope", "node"])
+def test_s8_provider_reads_base_not_worktree(
+    tmp_path: Path, monkeypatch, edit: str
+) -> None:
+    """S4 — рабочее дерево волны, S8 — база: незакоммиченная правка конверта или
+    узла в клоне меняет ответ провайдера S4, но не S8."""
+    import json
+
+    _origin, clone, ops = remote_stop_world(tmp_path)
+    review_live(monkeypatch)
+    state = clone_state(clone)
+    path = clone / (
+        envelope_path(WS, "requirements")
+        if edit == "envelope"
+        else "spec/10-requirements.md"
+    )
+    if edit == "envelope":  # подменённый конверт лежит только в рабочем дереве
+        env = parse_envelope(path.read_text())
+        path.write_text(render_envelope(replace(env, review_id="99")))
+    else:
+        path.write_text(path.read_text() + "правка рабочего дерева\n")
+    digest_ops = DigestOps(ops.prs, ops.product)
+    deps = act_status.Deps(
+        readers=None,
+        binding=None,
+        journal=None,
+        creds=(),
+        gh=None,
+        now=None,
+        sleep=None,
+        settings=None,
+    )
+
+    def provider(candidate: bool) -> dict:
+        out = tmp_path / f"ns-{candidate}.json"
+        got = act_status.gate_run(
+            state, digest_ops, DAG, candidate=candidate, out=out, deps=deps
+        )
+        assert got == ("review", str(out))
+        return json.loads(out.read_text())["nodes"]
+
+    assert provider(False) == {"requirements": "approved"}
+    assert provider(True)["requirements"].startswith("not_approved:")
+
+
+def test_noop_refusal_empty_nodes_opens_no_snapshot(monkeypatch) -> None:
+    """Пустой набор узлов — `None` без снимка базы и без истории (квота С-1)."""
+    review_live(monkeypatch)
+
+    class _NoSnapshot:
+        def snapshot_open(self, *a):
+            pytest.fail("снимок для пустого набора узлов")
+
+        def first_parent_changes(self, *a):
+            pytest.fail("история для пустого набора узлов")
+
+    assert (
+        act_status.noop_refusal(clone_state(Path("/t")), _NoSnapshot(), DAG, []) is None
+    )
+
+
+def test_s8_provider_reads_inputs_from_base(tmp_path: Path, monkeypatch) -> None:
+    """S8: прямые входы узла — из базы. Upstream есть только untracked-файлом в
+    рабочем дереве: S8 его не видит (вход не прочитан — `unavailable:`), S4 видит."""
+    import json
+
+    _origin, clone, ops = remote_stop_world(
+        tmp_path, node="behaviour-spec", fname="15-behaviour-spec.md"
+    )
+    review_live(monkeypatch)
+    (clone / "spec/10-requirements.md").write_text(REQ_TEXT)  # только в рабочем дереве
+    digest_ops = DigestOps(ops.prs, ops.product)
+    deps = act_status.Deps(
+        readers=None,
+        binding=None,
+        journal=None,
+        creds=(),
+        gh=None,
+        now=None,
+        sleep=None,
+        settings=None,
+    )
+
+    def provider(candidate: bool) -> dict:
+        out = tmp_path / f"ns-{candidate}.json"
+        act_status.gate_run(
+            clone_state(clone), digest_ops, DAG, candidate=candidate, out=out, deps=deps
+        )
+        return json.loads(out.read_text())["nodes"]
+
+    s8, s4 = provider(False), provider(True)
+    assert set(s8) == {"behaviour-spec"}
+    assert s8["behaviour-spec"].startswith("unavailable:прямые входы behaviour-spec")
+    assert not s4["behaviour-spec"].startswith("unavailable:")
