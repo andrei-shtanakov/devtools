@@ -2664,8 +2664,18 @@ class MergeRefusal:
     human_merge_helps: bool
 
 
-def _missing_approving_review(state: RunState, ops: Ops, pr: int) -> str | None:
+def _missing_approving_review(
+    state: RunState,
+    ops: Ops,
+    pr: int,
+    *,
+    kind: str = "finalize-PR",
+    retry: str | None = None,
+) -> str | None:
     """Есть ли у finalize-PR действующее одобряющее ревью? None — есть.
+
+    `kind`/`retry` — вид PR и команда повтора в тексте отказа для иного
+    вызывающего (stop-PR `--reopen`); по умолчанию тексты finalize прежние.
 
     Правило репозитория требует одного одобряющего ревью, а автор PR —
     учётка, запустившая механику, и себя она апрувить не может. У свежего
@@ -2690,9 +2700,9 @@ def _missing_approving_review(state: RunState, ops: Ops, pr: int) -> str | None:
     reviews = ops.pr_reviews(state.repo_slug, pr)
     if reviews is None:
         return (
-            f"агентский мерж НЕ выполнен — список ревью finalize-PR #{pr} "
+            f"агентский мерж НЕ выполнен — список ревью {kind} #{pr} "
             "не получен: «одобрения нет» и «его не видно» неразличимы, "
-            "fail-closed. Процедура: повторите вызов"
+            f"fail-closed. Процедура: повторите {retry or 'вызов'}"
         )
     effective: dict[str, str] = {}
     for review in reviews:
@@ -2703,11 +2713,11 @@ def _missing_approving_review(state: RunState, ops: Ops, pr: int) -> str | None:
     if "APPROVED" in effective.values():
         return None
     return (
-        f"агентский мерж НЕ выполнен — у finalize-PR #{pr} нет действующего "
+        f"агентский мерж НЕ выполнен — у {kind} #{pr} нет действующего "
         "одобряющего ревью, которого требует правило репозитория. "
         f"Процедура: опубликуйте scope-аттестацию (`review-pr.sh {pr}`; для "
         "PR, подтверждённого как prose-only, она публикуется без вызова "
-        "модели), затем повторите тот же вызов `--approve-node`"
+        f"модели), затем повторите {retry or 'тот же вызов `--approve-node`'}"
     )
 
 
@@ -2722,6 +2732,8 @@ def _try_agent_merge(
     *,
     form: Callable[[], str | None] | None = None,
     base: str | None = None,
+    kind: str = "finalize-PR",
+    retry: str | None = None,
 ) -> MergeRefusal | None:
     """Агентский мерж finalize: None — вмержен; иначе отказ с причиной и
     признаком, помогает ли здесь человеческий мерж. Идемпотентно: гейт
@@ -2753,7 +2765,7 @@ def _try_agent_merge(
         return MergeRefusal(
             f"агентский мерж НЕ выполнен — {defect}", human_merge_helps=True
         )
-    missing = _missing_approving_review(state, ops, pr)
+    missing = _missing_approving_review(state, ops, pr, kind=kind, retry=retry)
     if missing is not None:
         return MergeRefusal(missing, human_merge_helps=False)
     # Конверт finalize базу не пинует: у него нет вердикта, от базы которого

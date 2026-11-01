@@ -1445,3 +1445,25 @@ def test_legacy_accepted_in_merge_mode_continues_old_path(
     approve(world, "charter")
     assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
     assert world.base_meta("00-charter.md")["status"] == "approved"
+
+
+def test_reopen_stop_pr_without_approving_review_names_stop_procedure(
+    world: World, stand: Stand
+) -> None:
+    """PR #671 (minor 1): у свежего stop-PR одобряющего ревью нет — отказ называет
+    stop-PR и одну процедуру: scope-аттестация, затем `--reopen` (не finalize-PR и
+    не `--approve-node`)."""
+    _deliver(world, stand)
+    approve(world, "charter")
+    world.forge.default_reviews = []
+    calls = len(world.forge.merge_calls)
+    with pytest.raises(RuntimeError) as err:
+        act_node.reopen(world.state, world.ops, an.bundle_dag.dag_for(None), "charter")
+    text = str(err.value)
+    stop_pr = next(
+        n for n, r in world.forge.prs.items() if r["branch"].startswith("stop/")
+    )
+    assert f"stop-PR #{stop_pr}" in text and f"review-pr.sh {stop_pr}" in text
+    assert "затем повторите `--reopen charter`" in text
+    assert "finalize-PR" not in text and "--approve-node" not in text
+    assert len(world.forge.merge_calls) == calls

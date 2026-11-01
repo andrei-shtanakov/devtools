@@ -82,7 +82,16 @@ def _act_isolation(
     файл (машина разработчика с настоящей `/etc/df/trust.toml` не уводит тесты
     в сеть), `mode_probe` — продукт до миграции (§10 legacy-эпоха, тот же исход
     admission, что дал бы пустой журнал режима). Тесты `act_*` подменяют
-    `mode_probe` сами; без зависимостей модуля подменять нечего."""
+    `mode_probe` сами; без зависимостей модуля подменять нечего.
+
+    Настройки установки (`$XDG_CONFIG_HOME/darkfactory/act.toml`, `real_deps`)
+    — из пустого временного каталога: настоящий `~/.config/darkfactory/act.toml`
+    машины (например, `act_migration = "draining"` у разработчика миграции) на
+    исход набора не влияет; тесты, которым нужны свои настройки, подставляют
+    их сами (ревью PR #671)."""
+    monkeypatch.setenv(
+        "XDG_CONFIG_HOME", str(tmp_path_factory.getbasetemp() / "xdg-config")
+    )
     try:
         from governance import act_status, act_trust
     except ImportError:
