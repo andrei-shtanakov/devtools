@@ -18,8 +18,11 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 from urllib.parse import quote
 
 from governance import author_launch
@@ -40,6 +43,81 @@ REVIEW_GH_CONFIG_DIR = Path.home() / ".config" / "review"
 
 _PR_URL_RE = re.compile(r"/pull/(\d+)")
 _ISSUE_URL_RE = re.compile(r"/issues/(\d+)")
+#: Форма `repo_slug` продукта: `owner/repo` по правилам имён GitHub — ничего,
+#: что git принял бы за путь, схему или опцию.
+_REPO_SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/(?!\.\.?$)[A-Za-z0-9_.-]+")
+#: Окружение git снимка базы — только эти переменные (ревью d5): ни одной
+#: `GIT_*` извне.
+_SNAPSHOT_ENV_KEEP = (
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "TMPDIR",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+)
+#: Fetch снимка: без тегов, без `FETCH_HEAD`, без отображения `remote.*.fetch`.
+_SNAPSHOT_FETCH = (
+    "fetch",
+    "--quiet",
+    "--no-tags",
+    "--no-write-fetch-head",
+    "--refmap=",
+)
+FirstParentRows = list[tuple[str, tuple[str, ...], tuple[tuple[str, str], ...]]]
+
+
+@dataclass(frozen=True)
+class SnapshotRepo:
+    """Изолированный снимок базы продукта (ревью d5, d6): временный каталог —
+    bare-репозиторий `repo.git` (`objects/info/alternates` → объекты продукта;
+    в продукт ничего не пишется) и пустой `home` процессов git снимка; SHA
+    ветки базы и канонический URL источника."""
+
+    git_dir: str
+    sha: str
+    url: str
+
+
+#: Методы базовых `Ops`, которые `SnapshotOps` пропускает: только форджа (сеть,
+#: `gh`), ни один не читает локальный клон (ревью d5, deny-by-default). Любой
+#: другой метод — отказ.
+SNAPSHOT_FORGE_METHODS = frozenset(
+    {
+        "brief_pr_fact",
+        "find_pr",
+        "pr_facts",
+        "prs_containing_commit",
+        "repo_file_fact",
+        "policy_version_fact",
+    }
+)
+
+
+def _parse_first_parent(stdout: str) -> FirstParentRows:
+    """Разбор `git log --first-parent --name-status --format=%x00%H %P`."""
+    rows: FirstParentRows = []
+    for chunk in stdout.split("\x00")[1:]:
+        lines = [ln for ln in chunk.splitlines() if ln.strip()]
+        commit, *parents = lines[0].split()
+        changes = tuple(
+            (ln.split("\t", 1)[0], ln.split("\t", 1)[1])
+            for ln in lines[1:]
+            if "\t" in ln
+        )
+        rows.append((commit, tuple(parents), changes))
+    return rows
+
+
+_FIRST_PARENT_LOG = (
+    "log",
+    "--first-parent",
+    "--reverse",
+    "--diff-merges=first-parent",
+    "--no-renames",
+    "--name-status",
+    "--format=%x00%H %P",
+)
 _REMOTE_BRANCH_HEAD_QUERY = (
     "query($o:String!,$n:String!,$q:String!){"
     "repository(owner:$o,name:$n){"
@@ -362,6 +440,71 @@ class Ops(Protocol):
     def show_file_for_carry(
         self, target_dir: str, ref: str, path: str
     ) -> str | None: ...
+
+    def first_parent_changes(
+        self, target_dir: str, ref: str
+    ) -> FirstParentRows | None: ...
+
+    def snapshot_open(
+        self, target_dir: str, repo_slug: str, branch: str
+    ) -> Fact[SnapshotRepo]: ...
+
+    def snapshot_reader(self, repo: SnapshotRepo) -> Ops: ...
+
+    def snapshot_close(self, repo: SnapshotRepo) -> None: ...
+
+
+class SnapshotOps:
+    """`Ops` поверх снимка, deny-by-default: пять методов git — из временного
+    репозитория снимка с изолированным окружением (`target_dir` вызова не
+    используется), методы форджи из `SNAPSHOT_FORGE_METHODS` — базовых `Ops`;
+    любой другой метод — `AttributeError`: новое чтение git внутри проверки
+    допуска падает громко, а не читает клон."""
+
+    def __init__(self, base: RealOps, repo: SnapshotRepo) -> None:
+        self._base, self.repo = base, repo
+
+    def __getattr__(self, name: str) -> object:
+        if name in SNAPSHOT_FORGE_METHODS:
+            return getattr(self._base, name)
+        raise AttributeError(
+            f"SnapshotOps: метод {name!r} не разрешён внутри проверки допуска "
+            "(deny-by-default: git — только из снимка, иное — форджа из allowlist)"
+        )
+
+    def _git(self, *args: str, text: bool = True) -> subprocess.CompletedProcess:
+        return self._base._snapshot_git(self.repo.git_dir, *args, text=text)
+
+    def first_parent_changes(self, target_dir: str, ref: str) -> FirstParentRows | None:
+        """First-parent `ref` из снимка (как `RealOps.first_parent_changes`)."""
+        done = self._git(*_FIRST_PARENT_LOG, ref)
+        return _parse_first_parent(done.stdout) if done.returncode == 0 else None
+
+    def show_file(self, target_dir: str, ref: str, path: str) -> str | None:
+        """`git show <ref>:<path>` из снимка."""
+        done = self._git("show", f"{ref}:{path}")
+        return done.stdout if done.returncode == 0 else None
+
+    def show_file_bytes(self, target_dir: str, ref: str, path: str) -> bytes | None:
+        """`git show <ref>:<path>` из снимка, точные байты."""
+        done = self._git("show", f"{ref}:{path}", text=False)
+        return done.stdout if done.returncode == 0 else None
+
+    def rev_parse(self, target_dir: str, ref: str) -> str | None:
+        """SHA ссылки в снимке; `None` — нет."""
+        done = self._git("rev-parse", "--verify", "--quiet", ref)
+        return done.stdout.strip() or None
+
+    def fetch_branch(self, target_dir: str, branch: str) -> bool:
+        """Догрузка ref'а (голова squash-PR `refs/pull/N/head`) — в снимок, тем
+        же изолированным fetch из канонического источника."""
+        ref = branch if branch.startswith("refs/") else f"refs/heads/{branch}"
+        done = self._git(
+            *_SNAPSHOT_FETCH,
+            self.repo.url,
+            f"+{ref}:refs/snap/extra/{uuid.uuid4().hex}",
+        )
+        return done.returncode == 0
 
 
 def _closure_event(node: object) -> tuple[str, str, str] | None:
@@ -2481,6 +2624,158 @@ class RealOps(BriefFactsMixin):
             check=False,
         )
         return done.stdout if done.returncode == 0 else None
+
+    def first_parent_changes(self, target_dir: str, ref: str) -> FirstParentRows | None:
+        """First-parent `ref` (старые первыми): коммит, родители, изменения
+        против ПЕРВОГО родителя (`--diff-merges=first-parent`, без
+        переименований).
+
+        Без pathspec намеренно: упрощение истории по пути скрыло бы
+        merge-коммит, TREESAME второму родителю, — ровно доставку candidate.
+        `None` — git не ответил (факт не установлен)."""
+        done = subprocess.run(
+            ["git", "-C", target_dir, *_FIRST_PARENT_LOG, ref],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if done.returncode != 0:
+            return None
+        return _parse_first_parent(done.stdout)
+
+    def _snapshot_url(self, repo_slug: str) -> str:
+        """Источник снимка базы продукта — канонический URL из `repo_slug`
+        (ревью d4).
+
+        `origin` клона не читается: он может указывать на fork или копию.
+        Другой источник — только переопределение метода в тестовом наследнике
+        (локальный стенд); ни конфигурация, ни окружение его не задают."""
+        return f"https://github.com/{repo_slug}.git"
+
+    def _credential_helper(self) -> str:
+        """Единственный credential helper fetch снимка — `gh` профиля runner'а."""
+        return "!gh auth git-credential"
+
+    def _snapshot_env(self, home: Path) -> dict[str, str]:
+        """Изолированное окружение git снимка (d5, d6): переменные — из
+        allowlist, конфигурации system/global нет, интерактивных запросов нет;
+        `HOME` и `XDG_CONFIG_HOME` — пустой каталог снимка (ни `~/.netrc`, ни
+        `~/.gitconfig`, ни чужой `gh` настоящего HOME); `gh` — профиль
+        runner'а (`REVIEW_GH_CONFIG_DIR`, как прочие вызовы `gh` агента),
+        абсолютный путь разрешён ДО подмены HOME."""
+        env = {k: os.environ[k] for k in _SNAPSHOT_ENV_KEEP if k in os.environ}
+        profile = Path(os.environ.get("REVIEW_GH_CONFIG_DIR") or REVIEW_GH_CONFIG_DIR)
+        env.update(
+            GIT_CONFIG_NOSYSTEM="1",
+            GIT_CONFIG_GLOBAL=os.devnull,
+            GIT_TERMINAL_PROMPT="0",
+            GIT_ASKPASS="",
+            SSH_ASKPASS="",
+            HOME=str(home),
+            XDG_CONFIG_HOME=str(home / ".config"),
+            GH_CONFIG_DIR=str(profile.expanduser().resolve()),
+            GH_PROMPT_DISABLED="1",
+        )
+        return env
+
+    def _snapshot_git(
+        self,
+        git_dir: str,
+        *args: str,
+        text: bool = True,
+        stdin: str | None = None,
+    ) -> subprocess.CompletedProcess:
+        """git над снимком: `--git-dir` временного репозитория, изолированное
+        окружение с пустым `HOME` снимка (соседний каталог `home`), credential
+        helper сброшен и задан явно. Токен в argv не попадает (его отдаёт
+        helper через stdin/stdout git)."""
+        return subprocess.run(
+            [
+                "git",
+                f"--git-dir={git_dir}",
+                "-c",
+                "credential.helper=",
+                "-c",
+                f"credential.helper={self._credential_helper()}",
+                *args,
+            ],
+            capture_output=True,
+            text=text,
+            input=stdin,
+            check=False,
+            env=self._snapshot_env(Path(git_dir).parent / "home"),
+        )
+
+    def snapshot_open(
+        self, target_dir: str, repo_slug: str, branch: str
+    ) -> Fact[SnapshotRepo]:
+        """Свежий изолированный снимок ветки `branch` продукта `repo_slug`
+        (ревью d3–d5).
+
+        Временный bare-репозиторий (свой `config` без `url.*`; объекты
+        продукта — через `objects/info/alternates`, в продукт ничего не
+        пишется); fetch из `_snapshot_url(repo_slug)` в изолированном
+        окружении; SHA полученного объекта. Конфигурация репозитория продукта,
+        глобальная и системная, `GIT_*` окружения на источник и fetch не
+        влияют. Неудача — `Unavailable`, временный каталог удалён; URL и
+        токен в диагностику не попадают."""
+        if not _REPO_SLUG.fullmatch(repo_slug):
+            return unavailable(f"repo_slug {repo_slug!r} — не owner/repo")
+        root = tempfile.mkdtemp(prefix="act-snapshot-")
+        git_dir, home = str(Path(root) / "repo.git"), Path(root) / "home"
+        try:
+            home.mkdir()
+            common = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    target_dir,
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--git-common-dir",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=self._snapshot_env(home),
+            )
+            if common.returncode != 0 or not common.stdout.strip():
+                return unavailable("репозиторий продукта не читается")
+            init = self._snapshot_git(
+                git_dir, "init", "--quiet", "--bare", "--template="
+            )
+            if init.returncode != 0:
+                return unavailable(f"снимок не создан: код {init.returncode}")
+            alternates = Path(git_dir) / "objects" / "info" / "alternates"
+            alternates.parent.mkdir(parents=True, exist_ok=True)
+            alternates.write_text(
+                f"{common.stdout.strip()}/objects\n", encoding="utf-8"
+            )
+            url = self._snapshot_url(repo_slug)
+            done = self._snapshot_git(
+                git_dir, *_SNAPSHOT_FETCH, url, f"+refs/heads/{branch}:refs/snap/base"
+            )
+            if done.returncode != 0:
+                return unavailable(f"fetch {repo_slug} {branch}: код {done.returncode}")
+            sha = self._snapshot_git(
+                git_dir, "rev-parse", "--verify", "--quiet", "refs/snap/base^{commit}"
+            ).stdout.strip()
+            if not sha:
+                return unavailable(f"снимок {repo_slug} {branch} не разрешается")
+            repo, root = SnapshotRepo(git_dir, sha, url), ""
+            return Fact(Outcome.FOUND, repo, "ok")
+        finally:
+            if root:
+                shutil.rmtree(root, ignore_errors=True)
+
+    def snapshot_reader(self, repo: SnapshotRepo) -> Ops:
+        """`Ops`, читающие git только из снимка (история, байты, входы, головы
+        PR); прочее — форджа из allowlist либо `AttributeError`."""
+        return cast(Ops, SnapshotOps(self, repo))
+
+    def snapshot_close(self, repo: SnapshotRepo) -> None:
+        """Удалить временный каталог снимка (репозиторий и пустой `home`)."""
+        shutil.rmtree(Path(repo.git_dir).parent, ignore_errors=True)
 
     def show_repo_file_bytes(self, repo_slug: str, ref: str, path: str) -> bytes | None:
         """Read exact repository bytes through the durable forge API."""

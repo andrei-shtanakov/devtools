@@ -266,9 +266,8 @@ def envelope_refusal(
         return f"узел {node}: конверт другого поколения ({env.generation})"
     if env != expected:
         return f"узел {node}: конверт не совпадает с манифестом заявки"
-    if (
-        node_self_hash != expected.self_hash
-        or dict(upstream_pins) != expected.upstream_pins
-    ):
-        return f"узел {node}: байты или upstream-пины изменились после одобрения"
+    if node_self_hash != expected.self_hash:
+        return f"узел {node}: байты узла изменились после одобрения"
+    if dict(upstream_pins) != expected.upstream_pins:
+        return f"узел {node}: upstream-пины изменились после одобрения"
     return None

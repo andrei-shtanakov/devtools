@@ -83,7 +83,7 @@ def test_mode_switch_same_second_ambiguous() -> None:
         ranges=ranges,
         modes=modes,
         request_act=None,
-        legacy=LegacyAccepted("df-reviewer[bot]"),
+        legacy=lambda: LegacyAccepted("df-reviewer[bot]"),
     )
     assert check_delivery(ctx) == Ambiguous()
 
@@ -96,7 +96,7 @@ def test_first_merge_entry_same_second_admitted() -> None:
         ranges=ranges,
         modes=modes,
         request_act=None,
-        legacy=LegacyAccepted("df-reviewer[bot]"),
+        legacy=lambda: LegacyAccepted("df-reviewer[bot]"),
     )
     assert check_delivery(ctx) == LegacyAccepted("df-reviewer[bot]")
 
@@ -108,7 +108,10 @@ def test_switch_in_t_rejected_both_sides_is_rejection(legacy_code: str) -> None:
     ranges = {1: (act("p1", "08:00:00"), act("p2", "10:00:00"))}
     modes = {sha("p1"): "merge", sha("p2"): "review"}
     ctx = context(
-        ranges=ranges, modes=modes, request_act=None, legacy=Rejected(legacy_code)
+        ranges=ranges,
+        modes=modes,
+        request_act=None,
+        legacy=lambda: Rejected(legacy_code),
     )
     assert code(check_delivery(ctx)) in (legacy_code, ADMISSION)
 
@@ -192,7 +195,7 @@ def test_new_epoch_cannot_restart_migration() -> None:
         modes=modes,
         request_act=None,
         pin="p1",
-        legacy=LegacyAccepted("bob"),
+        legacy=lambda: LegacyAccepted("bob"),
     )
     assert isinstance(check_delivery(ctx), Unavailable)
 
@@ -232,7 +235,7 @@ def test_merge_mode_in_new_epoch_needs_prior_history() -> None:
         modes={sha("p1"): "merge"},
         request_act=None,
         pin="p1",
-        legacy=LegacyAccepted("bob"),
+        legacy=lambda: LegacyAccepted("bob"),
     )
     assert isinstance(check_delivery(ctx), Unavailable)
 
@@ -323,7 +326,7 @@ def test_merged_without_merged_at_unavailable() -> None:
 
 def test_empty_epochs_unavailable_not_old_reader() -> None:
     """Ревью #665: пустой журнал эпох не читается как доставка до bootstrap."""
-    ctx = context(epochs=(), request_act=None, legacy=LegacyAccepted("bob"))
+    ctx = context(epochs=(), request_act=None, legacy=lambda: LegacyAccepted("bob"))
     got = check_delivery(ctx)
     assert isinstance(got, Unavailable) and got.reason == "журнал эпох не прочитан"
 
@@ -354,7 +357,9 @@ def test_activations_out_of_order_unavailable() -> None:
 
 def test_before_bootstrap_unmarked_goes_to_old_reader() -> None:
     """Приёмка №7: доставка до якоря эпохи 1, заявка без маркера — старый код."""
-    ctx = context(merged_at="07:00:00", request_act=None, legacy=LegacyAccepted("bob"))
+    ctx = context(
+        merged_at="07:00:00", request_act=None, legacy=lambda: LegacyAccepted("bob")
+    )
     assert check_delivery(ctx) == LegacyAccepted("bob")
 
 
@@ -391,7 +396,7 @@ def test_mode_entry_removed_or_reverted(modes: dict, expected: object) -> None:
         ranges=ranges,
         modes={sha(k): v for k, v in modes.items()},
         pin="p2",
-        legacy=LegacyAccepted("bob"),
+        legacy=lambda: LegacyAccepted("bob"),
     )
     got = check_delivery(ctx)
     if expected is Unavailable:
@@ -409,7 +414,9 @@ def test_mixed_policy_refused() -> None:
 def test_other_product_switch_does_not_touch_merge_product() -> None:
     """Приёмка №38: режим считается по продукту доставки."""
     ctx = context(
-        modes={sha("p1"): "merge"}, request_act=None, legacy=LegacyAccepted("bob")
+        modes={sha("p1"): "merge"},
+        request_act=None,
+        legacy=lambda: LegacyAccepted("bob"),
     )
     assert check_delivery(ctx) == LegacyAccepted("bob")
 
@@ -476,7 +483,7 @@ def test_own_epoch_anchor_time_unavailable() -> None:
     ctx = context(
         anchor_at={sha("p1"): Unavailable("нет объекта")},
         request_act=None,
-        legacy=LegacyAccepted("bob"),
+        legacy=lambda: LegacyAccepted("bob"),
     )
     got = check_delivery(ctx)
     assert isinstance(got, Unavailable) and got.reason == "нет объекта"
@@ -511,3 +518,13 @@ def test_pinned_policy_defensive_guards() -> None:
     unread = replace(ctx, policy_sets={})
     got = _pinned_policy(unread, (act("p1", "08:00:00"),), clock)
     assert isinstance(got, Unavailable) and got.reason == "набор не загружен"
+
+
+def test_old_code_not_called_before_admission() -> None:
+    """I-1 ревью Task 14: заявка без маркера в диапазоне `review` — отказ admission,
+    старый код (`legacy`) не получает управления."""
+    ctx = context(
+        request_act=None,
+        legacy=lambda: pytest.fail("старый код до admission"),
+    )
+    assert code(check_delivery(ctx)) == ADMISSION

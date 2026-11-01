@@ -10607,3 +10607,284 @@ def test_boundary_probe_failure_through_runner_removes_call_dir(
     assert not boundary.marker.exists()
     for before, after in ops.around:
         assert before == after
+
+
+def test_s8_stops_when_act_mode_unset(
+    tmp_path: Path, runs_root, monkeypatch, capsys
+) -> None:
+    """b5 (`runner._step_s8#act_mode_unset`): режим акта не установлен на S8 — шаг
+    останавливается (resumable), authoritative-гейт не зовётся."""
+    from governance import act_status, runner
+    from governance.act_time import Unavailable
+
+    ops = FakeOps(s8_exit=0)
+    # прогон, доехавший до S8 (тот же приём, что у тестов самого S8)
+    state = _wave_run_at_s8(tmp_path, "r-act-s8", ops)
+    monkeypatch.setattr(
+        act_status, "gate_run", lambda *a, **k: Unavailable("df-trust: HTTP 403")
+    )
+    before = len(ops.calls)
+    assert runner._step_s8(state, ops) is False
+    assert (
+        "S8: режим акта не установлен — df-trust: HTTP 403" in capsys.readouterr().out
+    )
+    assert not any(c[0] == "gate_check_s8" for c in ops.calls[before:])
+
+
+def test_s4_stops_when_act_mode_unset(tmp_path: Path, runs_root, monkeypatch) -> None:
+    """B1-5/B1-8: режим акта не установлен — стоп S4 с причиной, гейт steward не зовётся."""
+    from governance import act_status
+    from governance.act_time import Unavailable
+
+    monkeypatch.setattr(
+        act_status, "gate_run", lambda *a, **k: Unavailable("df-trust: HTTP 403")
+    )
+    ops = FakeOps()
+    state = locked_runner.start(**_start_kwargs(tmp_path, "r-act-gate", ops))
+    assert state.status == "stopped_gate"
+    findings = (rs.run_dir("r-act-gate") / "gate-findings.txt").read_text(
+        encoding="utf-8"
+    )
+    assert "GC-ACT-UNAVAILABLE(devtools)" in findings and "HTTP 403" in findings
+    assert ops.gate_modes == []
+
+
+FRESH = "f" * 40  # SHA свежего снимка базы продукта (`Ops.snapshot_open`)
+
+
+def _review_admission(
+    monkeypatch,
+    ops,
+    remote: dict[str, str],
+    *,
+    fetched: bool = True,
+    local: dict[str, str] | None = None,
+) -> None:
+    """Продукт в `review`. Статусы зависят от снимка базы: свежий SHA — `remote`, локальная
+    ветка — `local` (по умолчанию «approved»: устаревшая база остановки не видит)."""
+    from governance import act_status
+    from governance.facts import Fact, Outcome, unavailable
+    from governance.ops import SnapshotRepo
+
+    live = SimpleNamespace(mode="review")
+    monkeypatch.setattr(act_status, "mode_probe", lambda state, deps=None: live)
+    snapshot = (
+        Fact(Outcome.FOUND, SnapshotRepo("/нет", FRESH, "u"), "ok")
+        if fetched
+        else unavailable("fetch: код 128")
+    )
+    monkeypatch.setattr(
+        ops, "snapshot_open", lambda target_dir, slug, branch: snapshot, raising=False
+    )
+    monkeypatch.setattr(ops, "snapshot_reader", lambda repo: ops, raising=False)
+    monkeypatch.setattr(ops, "snapshot_close", lambda repo: None, raising=False)
+    stale = local if local is not None else {node: "approved" for node in remote}
+
+    def at_base(state, ops_, dag, live_, deps=None, *, ref=None):
+        verdicts = remote if ref == FRESH else stale
+        return SimpleNamespace(
+            is_review=lambda node: node in verdicts, of=lambda node: verdicts[node]
+        )
+
+    monkeypatch.setattr(act_status, "statuses_at_base", at_base)
+
+
+def _wave_state(tmp_path: Path, run_id: str, wave: int) -> tuple[rs.RunState, FakeOps]:
+    ops = FakeOps(s8_exit=0)
+    state = _wave_run_at_s8(tmp_path, run_id, ops)
+    state.wave = wave
+    return state, ops
+
+
+def _gate_rerun(*_args, **_kwargs):
+    raise RuntimeError("гейт S4 заново")
+
+
+def _checkout_fails(*_args):
+    raise RuntimeError("чекаут базы: гейт заново")
+
+
+ADMISSION_LOST = ["not_approved:stopped:g1", "unavailable:df-trust: HTTP 403"]
+
+
+@pytest.mark.parametrize(
+    "verdict", ADMISSION_LOST, ids=["stop_delivered", "admission_unavailable"]
+)
+def test_s4_completed_gate_rerun_without_admission(
+    tmp_path, runs_root, monkeypatch, capsys, verdict: str
+) -> None:
+    """Решение владельца 01.11 (d1, D1-2): повторный вход в S4 с сохранённым зелёным гейтом —
+    после доставленной остановки узла нижнего уровня или при недоступном допуске гейт
+    исполняется заново, а не пропускается."""
+    from governance import runner
+
+    state, ops = _wave_state(tmp_path, "r-adm-s4", wave=2)
+    state.ops[runner.wave_key(state, "gate-candidate")] = {"status": "completed"}
+    _review_admission(monkeypatch, ops, {"charter": verdict})
+    monkeypatch.setattr(runner, "wave_profile_dir", _gate_rerun)
+    with pytest.raises(RuntimeError, match="гейт S4 заново"):
+        runner._step_gate(state, ops)
+    assert (
+        f"допуск review/v1 не подтверждён (узел charter: {verdict})"
+        in capsys.readouterr().out
+    )
+
+
+def test_s4_completed_gate_kept_with_admission(
+    tmp_path, runs_root, monkeypatch
+) -> None:
+    """d1: допуск подтверждён — сохранённый S4 пропускается, как раньше."""
+    from governance import runner
+
+    state, ops = _wave_state(tmp_path, "r-adm-s4-ok", wave=2)
+    state.ops[runner.wave_key(state, "gate-candidate")] = {"status": "completed"}
+    _review_admission(monkeypatch, ops, {"charter": "approved"})
+    monkeypatch.setattr(runner, "wave_profile_dir", _gate_rerun)
+    assert runner._step_gate(state, ops) is True
+
+
+@pytest.mark.parametrize(
+    "verdict", ADMISSION_LOST, ids=["stop_delivered", "admission_unavailable"]
+)
+def test_s8_completed_gate_rerun_without_admission(
+    tmp_path, runs_root, monkeypatch, capsys, verdict: str
+) -> None:
+    """d1 (D1-2): повторный вход в S8 с сохранённым `exit=0` — после доставленной остановки
+    или при недоступном допуске гейт исполняется заново (здесь — до чекаута базы)."""
+    from governance import runner
+
+    state, ops = _wave_state(tmp_path, "r-adm-s8", wave=5)
+    state.ops["gate-authoritative"] = {"status": "completed", "exit": 0, "output": ""}
+    _review_admission(monkeypatch, ops, {"design": verdict})
+    monkeypatch.setattr(ops, "checkout_and_pull", _checkout_fails)
+    assert runner._step_s8(state, ops) is False
+    assert state.ops["gate-authoritative"]["status"] == "started"
+    assert (
+        f"допуск review/v1 не подтверждён (узел design: {verdict})"
+        in capsys.readouterr().out
+    )
+
+
+def test_s8_completed_gate_kept_with_admission(
+    tmp_path, runs_root, monkeypatch
+) -> None:
+    """d1: допуск подтверждён — сохранённый `exit=0` завершает S8, как раньше."""
+    from governance import runner
+
+    state, ops = _wave_state(tmp_path, "r-adm-s8-ok", wave=5)
+    state.ops["gate-authoritative"] = {"status": "completed", "exit": 0, "output": ""}
+    _review_admission(monkeypatch, ops, {"design": "approved"})
+    assert runner._step_s8(state, ops) is True
+
+
+@pytest.mark.parametrize(
+    "verdict", ADMISSION_LOST, ids=["stop_delivered", "admission_unavailable"]
+)
+def test_next_wave_needs_admission(
+    tmp_path, runs_root, monkeypatch, verdict: str
+) -> None:
+    """d1: переход волны по завершённой заявке — только при актуальном допуске узлов волны;
+    иначе `stopped_review`, волна та же."""
+    from governance import runner
+
+    state, ops = _wave_state(tmp_path, "r-adm-next", wave=1)
+    _review_admission(monkeypatch, ops, {"charter": verdict})
+    monkeypatch.setattr(runner, "advance", lambda state, ops, *, lock: state)
+    got = runner._next_wave(state, ops, lock=None)
+    assert (got.status, got.wave) == ("stopped_review", 1)
+
+
+def _site_s4(state, ops, monkeypatch) -> str:
+    from governance import runner
+
+    state.ops[runner.wave_key(state, "gate-candidate")] = {"status": "completed"}
+    monkeypatch.setattr(runner, "wave_profile_dir", _gate_rerun)
+    try:
+        runner._step_gate(state, ops)
+    except RuntimeError:
+        return "no_success"
+    return "success"
+
+
+def _site_s8(state, ops, monkeypatch) -> str:
+    from governance import runner
+
+    state.ops["gate-authoritative"] = {"status": "completed", "exit": 0, "output": ""}
+    monkeypatch.setattr(ops, "checkout_and_pull", _checkout_fails)
+    return "success" if runner._step_s8(state, ops) else "no_success"
+
+
+def _site_next_wave(state, ops, monkeypatch) -> str:
+    from governance import runner
+
+    monkeypatch.setattr(runner, "advance", lambda state, ops, *, lock: state)
+    got = runner._next_wave(state, ops, lock=None)
+    return "no_success" if got.status == "stopped_review" else "success"
+
+
+#: Сайт → (исход, волна, узел, допуск которого спрашивается).
+ADMISSION_SITES = {
+    "s4": (_site_s4, 2, "charter"),
+    "s8": (_site_s8, 5, "design"),
+    "next_wave": (_site_next_wave, 1, "charter"),
+}
+
+
+@pytest.mark.parametrize("site", sorted(ADMISSION_SITES))
+def test_remote_stop_with_stale_local_base_no_success(
+    tmp_path, runs_root, monkeypatch, site: str
+) -> None:
+    """d2 (D2-1): локальная база устарела («approved»), на origin остановка уже доставлена —
+    проверка читает свежий снимок, успеха нет."""
+    outcome, wave, node = ADMISSION_SITES[site]
+    state, ops = _wave_state(tmp_path, f"r-adm-stale-{site}", wave=wave)
+    _review_admission(monkeypatch, ops, {node: "not_approved:stopped:g1"})
+    assert outcome(state, ops, monkeypatch) == "no_success"
+
+
+@pytest.mark.parametrize("site", sorted(ADMISSION_SITES))
+def test_admission_refused_when_base_not_refreshed(
+    tmp_path, runs_root, monkeypatch, site: str
+) -> None:
+    """d2 (D2-1): свежий снимок базы не получен (`fetch` не удался) — успеха нет, хотя
+    локальная база говорит «approved»."""
+    outcome, wave, node = ADMISSION_SITES[site]
+    state, ops = _wave_state(tmp_path, f"r-adm-fetch-{site}", wave=wave)
+    _review_admission(monkeypatch, ops, {node: "approved"}, fetched=False)
+    assert outcome(state, ops, monkeypatch) == "no_success"
+
+
+def test_s8_lost_admission_run_not_completed_when_checkout_fails(
+    tmp_path, runs_root, monkeypatch
+) -> None:
+    """d2 (D2-2): прогон `completed`, сохранённый S8 `exit=0`, допуск утрачен; чекаут базы
+    после обнаружения падает — прогон не остаётся `completed` (статус сохранён до чекаута)."""
+    state, ops = _wave_state(tmp_path, "r-adm-s8-status", wave=5)
+    state.status = "completed"
+    state.ops["gate-authoritative"] = {"status": "completed", "exit": 0, "output": ""}
+    rs.save(state)
+    _review_admission(monkeypatch, ops, {"design": "not_approved:stopped:g1"})
+    monkeypatch.setattr(ops, "checkout_and_pull", _checkout_fails)
+    got = locked_runner.advance(state, ops)
+    assert got.status == "running"
+    assert rs.load("r-adm-s8-status").status == "running"
+
+
+@pytest.mark.parametrize("site", sorted(ADMISSION_SITES))
+def test_stale_clone_remote_stop_end_to_end(
+    tmp_path, runs_root, monkeypatch, site: str
+) -> None:
+    """d3 (D3-1): настоящий git — в продукте доставлена остановка `charter`, локальный клон
+    устарел; `statuses_at_base` и чтения не подменены — S4, S8, `_next_wave` успеха не дают."""
+    from tests.test_act_status import WS, clone_state, remote_stop_world, review_live
+
+    outcome, wave, _node = ADMISSION_SITES[site]
+    _origin, clone, git_ops = remote_stop_world(
+        tmp_path / "git", node="charter", fname="00-charter.md"
+    )
+    state, _fake = _wave_state(tmp_path, f"r-adm-e2e-{site}", wave=wave)
+    for name, value in vars(clone_state(clone, ws_id=WS)).items():
+        setattr(state, name, value)
+    rs.save(state)
+    review_live(monkeypatch)
+    assert outcome(state, git_ops, monkeypatch) == "no_success"
