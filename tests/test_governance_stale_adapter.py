@@ -29,7 +29,7 @@ def _artifacts(tmp_path: Path, *, behaviour_ok: bool = True):
     roles = load_roles_catalog(profile.parent / "roles.yaml")
     graph = load_profile(profile, roles)
     bundle = make_bundle(tmp_path, behaviour_ok=behaviour_ok)
-    artifacts, _ = collect_bundle(graph, bundle)
+    artifacts, _ = collect_bundle(graph, bundle, act_mode="legacy")
     return bundle, artifacts
 
 
@@ -50,7 +50,7 @@ def test_stale_pin_is_reported(tmp_path: Path) -> None:
     profile = make_profile(tmp_path)
     roles = load_roles_catalog(profile.parent / "roles.yaml")
     graph = load_profile(profile, roles)
-    artifacts, _ = collect_bundle(graph, bundle)
+    artifacts, _ = collect_bundle(graph, bundle, act_mode="legacy")
     findings = check_stale(artifacts)
     assert len(findings) == 1
     f = findings[0]
@@ -65,7 +65,7 @@ def test_pin_to_absent_upstream_is_reported(tmp_path: Path) -> None:
     profile = make_profile(tmp_path)
     roles = load_roles_catalog(profile.parent / "roles.yaml")
     graph = load_profile(profile, roles)
-    artifacts, _ = collect_bundle(graph, bundle)
+    artifacts, _ = collect_bundle(graph, bundle, act_mode="legacy")
     findings = check_stale(artifacts)
     assert [f.upstream for f in findings] == ["requirements"]
     assert findings[0].actual is None  # «факт недоступен», не «совпало»

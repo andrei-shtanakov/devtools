@@ -852,12 +852,26 @@ def _runner_ops(gate_real: bool):
     class Ops(FakeOps):
         gate_inputs: list[bytes]
 
-        def gate_check_candidate(self, target_dir, bundle_dir, profile):
+        def gate_check_candidate(
+            self, target_dir, bundle_dir, profile, *, act_mode, node_status=None
+        ):
             node = Path(target_dir) / bundle_dir / "00-charter.md"
             self.gate_inputs = [*getattr(self, "gate_inputs", []), node.read_bytes()]
             if gate_real:
-                return RealOps().gate_check_candidate(target_dir, bundle_dir, profile)
-            return super().gate_check_candidate(target_dir, bundle_dir, profile)
+                return RealOps().gate_check_candidate(
+                    target_dir,
+                    bundle_dir,
+                    profile,
+                    act_mode=act_mode,
+                    node_status=node_status,
+                )
+            return super().gate_check_candidate(
+                target_dir,
+                bundle_dir,
+                profile,
+                act_mode=act_mode,
+                node_status=node_status,
+            )
 
     ops = Ops()
     ops.author = types.MethodType(RealOps.author, ops)  # type: ignore[method-assign]

@@ -35,7 +35,7 @@ def _graph(tmp_path: Path):
 def test_collect_bundle_surface(tmp_path: Path) -> None:
     graph = _graph(tmp_path)
     bundle = make_bundle(tmp_path, behaviour_ok=True)
-    artifacts, findings = collect_bundle(graph, bundle)
+    artifacts, findings = collect_bundle(graph, bundle, act_mode="legacy")
     assert all(isinstance(a, Artifact) for a in artifacts)
     assert all(isinstance(f, Finding) for f in findings)
     node_ids = {a.node_id for a in artifacts}
@@ -47,7 +47,7 @@ def test_collect_bundle_surface(tmp_path: Path) -> None:
 def test_finding_shape_is_pinned(tmp_path: Path) -> None:
     graph = _graph(tmp_path)
     bundle = make_bundle(tmp_path, behaviour_ok=False)
-    artifacts, _ = collect_bundle(graph, bundle)
+    artifacts, _ = collect_bundle(graph, bundle, act_mode="legacy")
     findings = check_behaviour_spec(graph, artifacts)
     assert findings, "плохой behaviour-spec обязан дать findings"
     f = findings[0]
@@ -66,7 +66,7 @@ def test_behaviour_gate_ids(tmp_path: Path) -> None:
     """
     graph = _graph(tmp_path)
     bundle = make_bundle(tmp_path, behaviour_ok=False)
-    artifacts, _ = collect_bundle(graph, bundle)
+    artifacts, _ = collect_bundle(graph, bundle, act_mode="legacy")
     ids = {f.rule_id for f in check_behaviour_spec(graph, artifacts)}
     assert ids == {"GC-BEH-TRACE", "GC-BEH-COVERAGE"}, ids
 
@@ -78,7 +78,7 @@ def test_behaviour_gate_ids_check_planned(tmp_path: Path) -> None:
     checked_by-биндинга (`behaviour.py:184-198`, финальное ревью I-1)."""
     graph = _graph(tmp_path)
     bundle = make_bundle_with_behaviour(tmp_path, BEHAVIOUR_NO_CHECKED_MD)
-    artifacts, _ = collect_bundle(graph, bundle)
+    artifacts, _ = collect_bundle(graph, bundle, act_mode="legacy")
     ids = {f.rule_id for f in check_behaviour_spec(graph, artifacts)}
     assert ids == {"GC-CHECK-PLANNED"}, ids
 
@@ -86,7 +86,7 @@ def test_behaviour_gate_ids_check_planned(tmp_path: Path) -> None:
 def test_good_bundle_is_clean(tmp_path: Path) -> None:
     graph = _graph(tmp_path)
     bundle = make_bundle(tmp_path, behaviour_ok=True)
-    artifacts, collect_findings = collect_bundle(graph, bundle)
+    artifacts, collect_findings = collect_bundle(graph, bundle, act_mode="legacy")
     beh_findings = check_behaviour_spec(graph, artifacts)
     errors = [f for f in [*collect_findings, *beh_findings] if f.severity == "error"]
     assert errors == []
@@ -98,7 +98,7 @@ def test_trace_matrix_surface(tmp_path: Path) -> None:
     непустым ``checks``, на реально хорошем бандле фикстур."""
     graph = _graph(tmp_path)
     bundle = make_bundle(tmp_path, behaviour_ok=True)
-    artifacts, _ = collect_bundle(graph, bundle)
+    artifacts, _ = collect_bundle(graph, bundle, act_mode="legacy")
     matrix = build_trace_matrix(graph, artifacts)
     assert matrix is not None
     assert matrix.keys() == {"profile", "requirements"}
@@ -141,7 +141,7 @@ def test_spec_graph_nodes_is_a_dict(tmp_path: Path) -> None:
 def test_upstream_hashes_shape(tmp_path: Path) -> None:
     graph = _graph(tmp_path)
     bundle = make_bundle(tmp_path, behaviour_ok=True)
-    artifacts, _ = collect_bundle(graph, bundle)
+    artifacts, _ = collect_bundle(graph, bundle, act_mode="legacy")
     beh = next(a for a in artifacts if a.node_id == "behaviour-spec")
     assert isinstance(beh.meta.upstream_hashes, tuple)
     pinned = dict(beh.meta.upstream_hashes)
