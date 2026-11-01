@@ -300,6 +300,8 @@ class Ops(Protocol):
 
     def repo_file_fact(self, repo_slug: str, sha: str, path: str) -> Fact[str]: ...
 
+    def pr_body_fact(self, repo_slug: str, pr: int) -> Fact[str]: ...
+
     # Факты brief-маршрута (спека need-stage §11.4.6, `governance/brief_facts.py`).
     def brief_pr_fact(self, repo_slug: str, pr: int) -> Fact[BriefPrFacts]: ...
 
@@ -1698,6 +1700,29 @@ class RealOps(BriefFactsMixin):
             check=True,
         )
         return json.loads(done.stdout)
+
+    def pr_body_fact(self, repo_slug: str, pr: int) -> Fact[str]:
+        """Тело PR (зеркало манифеста `review/v1`): FOUND / UNAVAILABLE."""
+        done = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "view",
+                str(pr),
+                "-R",
+                repo_slug,
+                "--json",
+                "body",
+                "--jq",
+                ".body",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if done.returncode != 0:
+            return unavailable(f"тело PR #{pr}: {done.stderr.strip()[:200]}")
+        return Fact(Outcome.FOUND, done.stdout.rstrip("\n"), "ok")
 
     def pr_closure(self, repo_slug: str, pr: int) -> dict | None:
         """Кто и когда закрыл PR — `{state, closed_by, closed_at,

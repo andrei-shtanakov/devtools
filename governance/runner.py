@@ -952,6 +952,11 @@ def resume(run_id: str, ops: Ops, *, lock: rl.RunLock) -> RunState:
             f"run {run_id!r} — merged_unverified навсегда; создайте "
             "verification-run через verify(...)"
         )
+    from governance import act_node
+
+    # Аудит позднего отзыва завершённых заявок `review/v1` (§8, приёмка №10):
+    # решения не меняет, события — в соседней записи `audit-<заявка>`.
+    act_node.audit_completed(state, ops)
     if state.remediated_by:
         # Verification-потомок судится СВОИМ предикатом (§2a), а не
         # стражем режима: его путь — только S8, и авторинга в нём нет.
@@ -1215,6 +1220,13 @@ def reopen(
         state.status = "stopped_dirty"
         save(state)
         return state
+    from governance import act_node
+
+    # Остановка действующего одобрения `review/v1` (§8, Q1) — до правки
+    # `state`: не доставлена — отказ, узел остаётся одобренным.
+    stopped = act_node.reopen(state, ops, dag, node)
+    if stopped is not None:
+        print(f"reopen: {stopped}")
     state.wave = levels[node] + 1
     count = (state.ops.get(f"reopen-{state.wave}") or {}).get("count", 0) + 1
     state.ops[f"reopen-{state.wave}"] = {

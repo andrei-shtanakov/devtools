@@ -8153,6 +8153,59 @@ def test_stale_level_is_reapproved_over_base_without_authoring(
     assert resumed.status == "waiting_human_merge"
 
 
+def test_reopen_stops_review_node_before_wave(
+    tmp_path: Path,
+    runs_root,
+    monkeypatch,
+) -> None:
+    """Task 13 (§8, Q1): остановка `review/v1` — первым шагом `reopen`, до правки
+    `state`; не доставлена (`act_node.reopen` отказал) — `state.wave` и op'ы волн
+    не тронуты, узел остаётся одобренным."""
+    from governance import act_node
+    from governance import approval_ledger as al
+
+    ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
+    _fake_wave_adapters(monkeypatch, ops)
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-reopen-stop", ops))
+    al.abandon_request(state, state.ops["candidate-1"]["request"], "стенд")
+    rs.save(state)
+    ops.base_files = _all_approved()
+    before = rs.load("r-reopen-stop")
+    seen: list[str] = []
+
+    def refuse(state, ops_, dag, node):
+        seen.append(node)
+        raise RuntimeError("stop-PR #9: агентский мерж отказал кодом 3")
+
+    monkeypatch.setattr(act_node, "reopen", refuse)
+    with pytest.raises(RuntimeError, match="агентский мерж отказал"):
+        locked_runner.reopen("r-reopen-stop", "charter", ops)
+    after = rs.load("r-reopen-stop")
+    assert seen == ["charter"]
+    assert after.wave == before.wave and after.ops == before.ops
+    assert after.branch == before.branch
+
+
+def test_resume_audits_completed_review_requests(
+    tmp_path: Path,
+    runs_root,
+    monkeypatch,
+) -> None:
+    """Task 13 (§8, приёмка №10): `resume` аудирует поздний отзыв завершённых заявок
+    `review/v1` — до шагов прогона, решения не меняя."""
+    from governance import act_node
+
+    ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
+    _fake_wave_adapters(monkeypatch, ops)
+    locked_runner.start(**_waves_kwargs(tmp_path, "r-resume-audit", ops))
+    audited: list[str] = []
+    monkeypatch.setattr(
+        act_node, "audit_completed", lambda state, ops_: audited.append(state.run_id)
+    )
+    locked_runner.resume("r-resume-audit", ops)
+    assert audited == ["r-resume-audit"]
+
+
 def test_reopen_refuses_legacy_runs_and_finished_waves(
     tmp_path: Path,
     runs_root,

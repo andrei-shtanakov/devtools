@@ -40,16 +40,25 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from governance import approval_branches
 from governance.approval_facts import Authorization, MergeEvent
 from governance.run_state import RunState, save
+
+if TYPE_CHECKING:
+    from governance.act_decision import Accepted, DeliveryView
+    from governance.act_trust import TrustRoot
 
 #: Префикс ключа заявки в `state.ops`. Форма ключа — `approve-<W>-<K>-<A>`,
 #: те же три числа, что в имени ветки (§I12), и по тому же основанию, по
 #: которому §I4 держит номер ревизии в ключе `tasks-deliver-v<N>`: запись
 #: журнала обязана быть адресуема тем же, чем адресуема её работа.
 REQUEST_PREFIX = "approve-"
+#: Соседняя запись аудита заявки: терминальная запись не мутируется (§I4),
+#: а события аудита приходят после завершения. Ключ не разбирается как
+#: заявка (`requests` требует ровно три числа после `approve-`).
+AUDIT_PREFIX = "audit-"
 
 #: Живой статус заявки — один; терминальных три, и различие между ними
 #: журнальное (§I12): `completed` — узлы одобрены и конверт записан;
@@ -361,8 +370,10 @@ def start_request(
     nodes: list[str],
     content_hashes: dict[str, str],
     upstream_pins: dict[str, dict[str, str]],
-    policy: dict[str, str] | None = None,
+    policy: dict[str, object] | None = None,
     source_sha: str | None = None,
+    act: str | None = None,
+    generations: dict[str, int] | None = None,
 ) -> str:
     """Write-ahead намерения заявки (§I4); → её ключ в леджере.
 
@@ -404,6 +415,9 @@ def start_request(
         # base. Фиксируется write-ahead: снимок заявки без источника
         # нельзя ни привести к ветке, ни сверить на повторе.
         "source_sha": source_sha,
+        # Режим заявки — зеркало манифеста в коммите candidate (§7); None —
+        # заявка без маркера. Расхождение с манифестом — отказ (act_node).
+        **({"act": act, "generations": dict(generations or {})} if act else {}),
         "branch": approval_branches.candidate_branch(ws_id, wave, step, attempt),
         "finalize_branch": approval_branches.finalize_branch(
             ws_id, wave, step, attempt
@@ -496,6 +510,7 @@ def extend_request(
     node_id: str,
     content_hash: str,
     upstream_pins: dict[str, str],
+    generation: int | None = None,
 ) -> None:
     """Добавить узел к заявке того же шага (накопление в одной ветке, §I12).
 
@@ -516,12 +531,20 @@ def extend_request(
             f"узел {node_id} уже вынесен заявкой {key} — снимок заявки не "
             "перезаписывается"
         )
+    # Поколение узла `review/v1` — тем же write'ом, что снимок (зеркало
+    # манифеста); у заявки без маркера его нет.
+    extra = (
+        {"generations": {**op["generations"], node_id: generation}}
+        if generation is not None
+        else {}
+    )
     _update(
         state,
         key,
         nodes=[*op["nodes"], node_id],
         content_hashes={**op["content_hashes"], node_id: content_hash},
         upstream_pins={**op["upstream_pins"], node_id: dict(upstream_pins)},
+        **extra,
     )
 
 
@@ -554,6 +577,68 @@ def record_merge(
         merge_commit=event.commit,
         authorization=authorization.as_record(),
     )
+
+
+def record_review_act(
+    state: RunState,
+    key: str,
+    accepted: Accepted,
+    delivery: DeliveryView,
+    activation_commit: str,
+    unverified: tuple[str, ...],
+    trust_root: TrustRoot,
+) -> None:
+    """Акт review/v1 и доставка — одним write'ом (спека §7, `run.json`).
+
+    Верхнеуровневые `merged_by`/`merged_at`/`merge_commit`/`authorization`
+    обязательны: по ним `next_step` переводит заявку в FINALIZE.
+    `unverified` пишется всегда, пустой — как `[]`.
+    """
+    _update(
+        state,
+        key,
+        merged_by=accepted.merged_by,
+        merged_at=delivery.merged_at,
+        merge_commit=accepted.merge_commit,
+        authorization={
+            "login": accepted.login,
+            "policy": activation_commit,
+            "source": f"review/v1:{accepted.review_id}",
+        },
+        review_id=accepted.review_id,
+        review_commit=delivery.head_at_merge,
+        approved_by=accepted.login,
+        delivery={
+            "merge_commit": accepted.merge_commit,
+            "merged_at": delivery.merged_at,
+            "merged_by": accepted.merged_by,
+        },
+        unverified_premises=list(unverified),
+        trust_root={
+            "host": trust_root.host,
+            "repository_id": trust_root.repository_id,
+            "branch": trust_root.branch,
+            "snapshot_sha": trust_root.snapshot_sha,
+        },
+    )
+
+
+def audit_events(state: RunState, key: str) -> list[dict]:
+    """События аудита заявки (поздний отзыв), в порядке записи."""
+    return list((state.ops.get(AUDIT_PREFIX + key) or {}).get("events", []))
+
+
+def record_audit(state: RunState, key: str, event: dict) -> bool:
+    """Дописать событие аудита; повтор того же `review_id` — False (идемпотентно)."""
+    events = audit_events(state, key)
+    if any(e.get("review_id") == event.get("review_id") for e in events):
+        return False
+    state.ops[AUDIT_PREFIX + key] = {
+        "status": "completed",
+        "events": [*events, dict(event)],
+    }
+    save(state)
+    return True
 
 
 def record_finalize_pr(state: RunState, key: str, pr: int) -> None:
