@@ -2221,7 +2221,7 @@ class RealOps(BriefFactsMixin):
     ) -> tuple[int, str]:
         """gate-check --candidate <bundle_dir> --profile <profile>.
 
-        Публичный prospective-режим steward#140 (перепроверен на пине b77ee0d,
+        Публичный prospective-режим steward#140 (перепроверен на пине 68f46a9,
         docs/gate-check-candidate.md): проверяет содержимое каталога БЕЗ
         git-фактов; ref-зависимые гейты объявляются `not_evaluated` на
         stderr. Коды прежние: 0 чисто, 1 error-находки, 2 ошибка

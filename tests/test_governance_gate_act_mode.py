@@ -136,7 +136,7 @@ def test_cli_refuses_without_act_mode(tmp_path: Path) -> None:
     pytest.importorskip("steward")
     exe = ROOT / ".venv" / "bin" / "gate-check"
     if not exe.exists():
-        pytest.skip("gate-check не установлен в .venv")
+        pytest.skip("gate-check CLI недоступен (uv sync без группы governance)")
     done = subprocess.run(
         [str(exe), str(tmp_path)], capture_output=True, text=True, check=False
     )
