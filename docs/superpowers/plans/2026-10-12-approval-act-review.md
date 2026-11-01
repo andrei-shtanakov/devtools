@@ -3579,10 +3579,26 @@ error=…)`, «отказ | None», `raise`), но полноту не дока�
     сохранены;
   - предусловие развёртывания (профиль `gh` runner'а для приватного продукта) — в п. 8 выше и в
     Task 14 рядом с привязкой `/etc/df/trust.toml`.
+- **Правки по d6** (ревью `plan-review-d6`: какими учётными данными аутентифицируется fetch
+  снимка): D6-2 — процессы git снимка получают свежий пустой `HOME` (каталог `home` внутри
+  временного каталога снимка, удаляется вместе с ним) и `XDG_CONFIG_HOME` внутри него; путь
+  профиля `REVIEW_GH_CONFIG_DIR` разрешается в абсолютный ДО подмены HOME и передаётся helper'у
+  как `GH_CONFIG_DIR`. Регрессия: посторонние `~/.netrc` и `~/.gitconfig` (с credential helper)
+  в настоящем HOME не участвуют — fetch снимка видит пустой HOME, профиль `gh` — абсолютный путь.
+- **Остаточный риск D6-1** (принят решением team-lead, не перепроектируется): `GH_CONFIG_DIR`
+  не изолирует системный keyring — при пустом профиле `gh auth git-credential` может вернуть
+  общий токен github.com из keyring (`TokenFromKeyring("github.com")`), и приватный продукт
+  будет прочитан более широким токеном, чем у профиля ревью. Целостность проверки допуска от
+  личности читающего не зависит: URL канонический (`https://github.com/<repo_slug>.git`),
+  содержимое адресовано SHA полученного снимка, чтения — только из него; худший случай —
+  чтение приватного продукта более широким токеном (гигиена учётных данных), а не обход
+  допуска. Последующая работа (TODO): собственный credential helper, читающий токен только
+  профиля (`hosts.yml` профиля), без fallback к keyring — `gh` хранит токены в общем keyring с
+  ключом по хосту; триггер — требование изоляции учётных данных между профилями.
 - **Реестр Task 16**: `act_envelope.node_history` (3), `act_status.noop_refusal` (4 + 2 d2 + 2 d3),
   `act_status.fresh_base` (2), `ops.SnapshotOps.__getattr__` (1, deny), `ops.RealOps._snapshot_url` (1),
   `_credential_helper` (1),
-  `_snapshot_env` (4), `_snapshot_git` (1), `ops.RealOps.snapshot_open` (4, из них `--refmap=`/
+  `_snapshot_env` (6, из них 2 — пустой HOME и абсолютный профиль, d6), `_snapshot_git` (1), `ops.RealOps.snapshot_open` (4, из них `--refmap=`/
   `FETCH_HEAD` — `RULED`),
   `runner._step_s8#run_status` (1),
   `task_bridge._require_admission` (1), `deliver_superseded#…` (7), `deliver_for_run#…` (2),
@@ -3590,7 +3606,7 @@ error=…)`, «отказ | None», `raise`), но полноту не дока�
   `runner._next_wave#admission`, `approve_node._propose#mode_unavailable`,
   `#legacy_noop_review`; `current_event`/`next_generation` — в `MODIFIED_EXISTING`,
   `task_bridge._admission_refusal` — в `NOT_JUDGMENT` (делегирует). Применимость операторов —
-  301/301 (289 по коду scratch, 12 по AST фрагментов); мутации новых строк: 8 (п. 9, В-1) + 17
+  303/303 (291 по коду scratch, 12 по AST фрагментов); мутации новых строк: 8 (п. 9, В-1) + 17
   (d1, исполнимые в scratch) — все закрыты; `_propose#…` (2) — на стенде `World`, Step 4a.
 - **Буква спеки**: В-1 теперь соответствует цели §9.1 (а) п. 4 (проверенный статус спрашивается
   перед no-op), хотя статус не входит в саму проекцию хеша; §9.1 п. 0a («последний доставленный
@@ -11122,7 +11138,9 @@ B1-6, B1-8, B1-9 — см. «Правки по ревью b1».
 `~/.config/review`) аутентифицирован на github.com с правом чтения продукта — снимок базы для
 проверки допуска берётся по HTTPS через `gh auth git-credential`, а не через `origin`/SSH клона;
 без этого каждая проверка допуска продукта в `review` — отказ (fail closed). Публичный продукт
-читается анонимно.
+читается анонимно. Процессы git снимка получают пустой `HOME` снимка: `~/.netrc` и `~/.gitconfig`
+настоящего HOME не участвуют (ревью d6). Остаточный риск D6-1 (fallback `gh` к общему keyring)
+— в разделе ревизии «Решения владельца 01.11».
 
 **Правила статуса** (§9.1 п. 0a–4) — только для продукта в `review`: событие узла — последнее по
 first-parent базы (доставленная заявка с манифестом, запись остановки; supersede — более поздняя
@@ -12164,6 +12182,38 @@ def test_snapshot_forge_allowlist_reads_no_clone() -> None:
                if "target_dir" in inspect.signature(getattr(RealOps, name)).parameters
                or '"git"' in inspect.getsource(getattr(RealOps, name))]
     assert readers == []
+
+
+def test_foreign_home_credentials_have_no_effect(tmp_path: Path, monkeypatch) -> None:
+    """d6 (D6-2): чужие `~/.netrc` и `~/.gitconfig` настоящего HOME не участвуют — процессы
+    git снимка получают пустой `HOME` (и `XDG_CONFIG_HOME`) внутри временного каталога
+    снимка; профиль `gh` передаётся абсолютным путём, разрешённым ДО подмены HOME."""
+    from governance import ops as ops_mod
+
+    _origin, clone, ops = remote_stop_world(tmp_path)
+    home = tmp_path / "real-home"
+    home.mkdir()
+    (home / ".netrc").write_text("machine github.com login x-access-token password FOREIGN\n")
+    (home / ".gitconfig").write_text('[credential]\n\thelper = "!echo password=FOREIGN"\n')
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("REVIEW_GH_CONFIG_DIR", "~/.config/review")
+    seen: list[tuple[str, list[str], bool, str]] = []
+    real_run = subprocess.run
+
+    def run(cmd, **kw):
+        if "fetch" in cmd:
+            env = kw["env"]
+            seen.append((Path(env["HOME"]).name, sorted(os.listdir(env["HOME"])),
+                         Path(env.get("XDG_CONFIG_HOME", "")).parent == Path(env["HOME"]),
+                         env["GH_CONFIG_DIR"]))
+        return real_run(cmd, **kw)
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", run)
+    review_live(monkeypatch)
+    assert act_status.noop_refusal(clone_state(clone), ops, DAG, ["requirements"]) == STOPPED
+    expected = [("home", [], True, str((home / ".config" / "review").resolve()))]
+    snapshot_home = list(seen)
+    assert snapshot_home == expected
 ```
 
 `tests/test_act_legacy.py`:
@@ -13184,15 +13234,14 @@ Expected: FAIL — `ImportError: cannot import name 'act_status' from 'governanc
 #: бы за путь, схему или опцию.
 _REPO_SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/(?!\.\.?$)[A-Za-z0-9_.-]+")
 #: Окружение git снимка базы — только эти переменные (ревью d5): ни одной `GIT_*` извне.
-_SNAPSHOT_ENV_KEEP = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "SSL_CERT_FILE",
-                      "SSL_CERT_DIR")
+_SNAPSHOT_ENV_KEEP = ("PATH", "LANG", "LC_ALL", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR")
 
 
 @dataclass(frozen=True)
 class SnapshotRepo:
-    """Изолированный снимок базы продукта (ревью d5): временный bare-репозиторий
-    (`objects/info/alternates` → объекты продукта; в продукт ничего не пишется), SHA
-    ветки базы и канонический URL источника."""
+    """Изолированный снимок базы продукта (ревью d5, d6): временный каталог — bare-репозиторий
+    `repo.git` (`objects/info/alternates` → объекты продукта; в продукт ничего не пишется) и
+    пустой `home` процессов git снимка; SHA ветки базы и канонический URL источника."""
 
     git_dir: str
     sha: str
@@ -13288,27 +13337,30 @@ def _parse_first_parent(
         """Единственный credential helper fetch снимка — `gh` профиля runner'а (d5)."""
         return "!gh auth git-credential"
 
-    def _snapshot_env(self) -> dict[str, str]:
-        """Изолированное окружение git снимка (d5): переменные — из allowlist, конфигурации
-        system/global нет, интерактивных запросов нет; `gh` — профиль runner'а
-        (`REVIEW_GH_CONFIG_DIR`, как прочие вызовы `gh` от агента)."""
+    def _snapshot_env(self, home: Path) -> dict[str, str]:
+        """Изолированное окружение git снимка (d5, d6): переменные — из allowlist,
+        конфигурации system/global нет, интерактивных запросов нет; `HOME` и
+        `XDG_CONFIG_HOME` — пустой каталог снимка (ни `~/.netrc`, ни `~/.gitconfig`, ни
+        чужой `gh` настоящего HOME); `gh` — профиль runner'а (`REVIEW_GH_CONFIG_DIR`, как
+        прочие вызовы `gh` агента), абсолютный путь разрешён ДО подмены HOME."""
         env = {k: os.environ[k] for k in _SNAPSHOT_ENV_KEEP if k in os.environ}
         profile = Path(os.environ.get("REVIEW_GH_CONFIG_DIR") or REVIEW_GH_CONFIG_DIR)
         env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
                    GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="", SSH_ASKPASS="",
-                   GH_CONFIG_DIR=str(profile), GH_PROMPT_DISABLED="1")
+                   HOME=str(home), XDG_CONFIG_HOME=str(home / ".config"),
+                   GH_CONFIG_DIR=str(profile.expanduser().resolve()), GH_PROMPT_DISABLED="1")
         return env
 
     def _snapshot_git(self, git_dir: str, *args: str, text: bool = True,
                       stdin: str | None = None) -> subprocess.CompletedProcess:
-        """git над снимком: `--git-dir` временного репозитория, изолированное окружение,
-        credential helper сброшен и задан явно. Токен в argv не попадает (его отдаёт
-        helper через stdin/stdout git)."""
+        """git над снимком: `--git-dir` временного репозитория, изолированное окружение
+        с пустым `HOME` снимка (соседний каталог `home`), credential helper сброшен и задан
+        явно. Токен в argv не попадает (его отдаёт helper через stdin/stdout git)."""
         return subprocess.run(
             ["git", f"--git-dir={git_dir}", "-c", "credential.helper=",
              "-c", f"credential.helper={self._credential_helper()}", *args],
             capture_output=True, text=text, input=stdin, check=False,
-            env=self._snapshot_env(),
+            env=self._snapshot_env(Path(git_dir).parent / "home"),
         )
 
     def snapshot_open(
@@ -13324,15 +13376,17 @@ def _parse_first_parent(
         URL и токен в диагностику не попадают."""
         if not _REPO_SLUG.fullmatch(repo_slug):
             return unavailable(f"repo_slug {repo_slug!r} — не owner/repo")
-        common = subprocess.run(
-            ["git", "-C", target_dir, "rev-parse", "--path-format=absolute",
-             "--git-common-dir"],
-            capture_output=True, text=True, check=False, env=self._snapshot_env(),
-        )
-        if common.returncode != 0 or not common.stdout.strip():
-            return unavailable("репозиторий продукта не читается")
-        git_dir = tempfile.mkdtemp(prefix="act-snapshot-")
+        root = tempfile.mkdtemp(prefix="act-snapshot-")
+        git_dir, home = str(Path(root) / "repo.git"), Path(root) / "home"
+        home.mkdir()
         try:
+            common = subprocess.run(
+                ["git", "-C", target_dir, "rev-parse", "--path-format=absolute",
+                 "--git-common-dir"],
+                capture_output=True, text=True, check=False, env=self._snapshot_env(home),
+            )
+            if common.returncode != 0 or not common.stdout.strip():
+                return unavailable("репозиторий продукта не читается")
             init = self._snapshot_git(git_dir, "init", "--quiet", "--bare", "--template=")
             if init.returncode != 0:
                 return unavailable(f"снимок не создан: код {init.returncode}")
@@ -13347,19 +13401,19 @@ def _parse_first_parent(
                                      "refs/snap/base^{commit}").stdout.strip()
             if not sha:
                 return unavailable(f"снимок {repo_slug} {branch} не разрешается")
-            repo, git_dir = SnapshotRepo(git_dir, sha, url), ""
+            repo, root = SnapshotRepo(git_dir, sha, url), ""
             return Fact(Outcome.FOUND, repo, "ok")
         finally:
-            if git_dir:
-                shutil.rmtree(git_dir, ignore_errors=True)
+            if root:
+                shutil.rmtree(root, ignore_errors=True)
 
     def snapshot_reader(self, repo: SnapshotRepo) -> SnapshotOps:
         """`Ops`, читающие git только из снимка (история, байты, входы, головы PR)."""
         return SnapshotOps(self, repo)
 
     def snapshot_close(self, repo: SnapshotRepo) -> None:
-        """Удалить временный репозиторий снимка."""
-        shutil.rmtree(repo.git_dir, ignore_errors=True)
+        """Удалить временный каталог снимка (репозиторий и пустой `home`)."""
+        shutil.rmtree(Path(repo.git_dir).parent, ignore_errors=True)
 ```
 
 ```python
@@ -16870,6 +16924,12 @@ JUDGMENT = {
           '"0", str(profile)'),
         r("no_prompt", "ops.RealOps._snapshot_env", 'GIT_TERMINAL_PROMPT="0"', f"{S}::test_production_snapshot_command_is_isolated",
           '"0", str(profile)'),
+        r("empty_home", "ops.RealOps._snapshot_env", "HOME=str(home)",
+          f"{S}::test_foreign_home_credentials_have_no_effect",
+          "snapshot_home == expected"),
+        r("profile_resolved", "ops.RealOps._snapshot_env", "profile.expanduser().resolve()",
+          f"{S}::test_foreign_home_credentials_have_no_effect",
+          "snapshot_home == expected"),
         r("runner_profile", "ops.RealOps._snapshot_env", 'os.environ.get("REVIEW_GH_CONFIG_DIR")', f"{S}::test_production_snapshot_command_is_isolated",
           '"0", str(profile)'),
     ),
@@ -18179,7 +18239,7 @@ if __name__ == "__main__":
   (`approve_node._propose#…`, `read_dag_state#…`, `_require_upstream_ready#…`,
   `_try_agent_merge#form`, `runner._step_gate#…`, `runner._step_s8#…`) и прогнанные при ревизии
   плана. Сначала — применимость операторов ко ВСЕМ строкам без запуска двойников (b6, B6-4;
-  ожидается `301/301`: при ревизии d5 (01.11) — 289 по коду scratch и 12 строк
+  ожидается `303/303`: при ревизии d6 (01.11) — 291 по коду scratch и 12 строк
   `<функция>#<проверка>` по AST фрагментов плана; `n/a` чинится оператором `BYPASS` или записью `RULED`, не пропуском):
 
   ```bash
@@ -18381,10 +18441,14 @@ BYPASS: dict[str, tuple[str, str]] = {
         '"!gh auth git-credential --other"'),
     'ops.RealOps._snapshot_env:allowlist': ('{k: os.environ[k] for k in _SNAPSHOT_ENV_KEEP if k in os.environ}',
         'dict(os.environ)'),
+    'ops.RealOps._snapshot_env:empty_home': ('HOME=str(home), XDG_CONFIG_HOME=str(home / ".config"),',
+        'HOME=os.environ.get("HOME", ""),'),
     'ops.RealOps._snapshot_env:no_global': ('GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,',
         'GIT_CONFIG_NOSYSTEM="1",'),
     'ops.RealOps._snapshot_env:no_prompt': ('GIT_TERMINAL_PROMPT="0", ',
         ''),
+    'ops.RealOps._snapshot_env:profile_resolved': ('str(profile.expanduser().resolve())',
+        'str(profile)'),
     'ops.RealOps._snapshot_env:runner_profile': ('os.environ.get("REVIEW_GH_CONFIG_DIR") or REVIEW_GH_CONFIG_DIR',
         'REVIEW_GH_CONFIG_DIR'),
     'ops.RealOps._snapshot_git:helper_reset': ('"-c", "credential.helper=",\n             ',
