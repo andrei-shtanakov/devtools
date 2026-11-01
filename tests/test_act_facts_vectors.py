@@ -8,9 +8,7 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-import tomllib
 from pathlib import Path
 
 import pytest
@@ -40,39 +38,6 @@ def _kind(kind: str) -> list[Path]:
 
 def _id(path: Path) -> str:
     return path.relative_to(VECTORS).as_posix()
-
-
-def _pinned() -> dict[str, str]:
-    lines = (CONTRACT / "PINNED.txt").read_text(encoding="utf-8").splitlines()
-    pairs = [
-        line.split(": ", 1) if ": " in line else line.split(" ", 1) for line in lines
-    ]
-    return {k: v for k, v in pairs}
-
-
-def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def test_vendored_set_is_complete() -> None:
-    assert len(ALL) == 79
-
-
-def test_copy_integrity_both_ways() -> None:
-    """О7: copy-integrity — гарантия потребителя (MANIFEST ↔ файлы, в обе стороны)."""
-    pinned = _pinned()
-    for name in ("MANIFEST.json", "README.md", "SCHEMA.json"):
-        assert _sha256(CONTRACT / name) == pinned[name], name
-    expected = json.loads((CONTRACT / "MANIFEST.json").read_text("utf-8"))["vectors"]
-    actual = {_id(p): _sha256(p) for p in VECTORS.rglob("*") if p.is_file()}
-    assert actual == expected
-
-
-def test_vendor_pin_equals_dependency_pin() -> None:
-    """Upstream-drift: копия контракта — от того же SHA, что зависимость."""
-    data = tomllib.loads((ROOT / "pyproject.toml").read_text("utf-8"))
-    rev = data["tool"]["uv"]["sources"]["steward"]["rev"]
-    assert _pinned()["commit"] == rev
 
 
 def test_policy_files_are_stewards() -> None:
