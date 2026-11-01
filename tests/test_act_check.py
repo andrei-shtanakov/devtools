@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 pytest.importorskip("steward")
@@ -10,8 +12,10 @@ from governance.act_check import (  # noqa: E402
     ADMISSION,
     EPOCH_GAP,
     POLICY_CHANGED,
+    POLICY_SOURCE,
     REQUEST_BINDING,
     LegacyAccepted,
+    _pinned_policy,
     _requires,
     check_delivery,
     live_policy_refusal,
@@ -19,7 +23,12 @@ from governance.act_check import (  # noqa: E402
 from governance.act_decision import Accepted, Rejected, WaitingDelivery  # noqa: E402
 from governance.act_epochs import Epoch  # noqa: E402
 from governance.act_request import PolicyPin  # noqa: E402
-from governance.act_time import Ambiguous, Unavailable, parse_ts  # noqa: E402
+from governance.act_time import (  # noqa: E402
+    Ambiguous,
+    Clock,
+    Unavailable,
+    parse_ts,
+)
 from tests.act_cases import code  # noqa: E402
 from tests.act_cases_facts import PATH, act, context, review, sha, ts  # noqa: E402
 
@@ -183,6 +192,7 @@ def test_new_epoch_cannot_restart_migration() -> None:
         modes=modes,
         request_act=None,
         pin="p1",
+        legacy=LegacyAccepted("bob"),
     )
     assert isinstance(check_delivery(ctx), Unavailable)
 
@@ -222,6 +232,7 @@ def test_merge_mode_in_new_epoch_needs_prior_history() -> None:
         modes={sha("p1"): "merge"},
         request_act=None,
         pin="p1",
+        legacy=LegacyAccepted("bob"),
     )
     assert isinstance(check_delivery(ctx), Unavailable)
 
@@ -361,7 +372,12 @@ def test_bytes_and_content_are_distinct_refusals() -> None:
 )
 def test_mode_entry_removed_or_reverted(modes: dict, expected: object) -> None:
     ranges = {1: (act("p1", "08:00:00"), act("p2", "09:00:00"))}
-    ctx = context(ranges=ranges, modes={sha(k): v for k, v in modes.items()}, pin="p2")
+    ctx = context(
+        ranges=ranges,
+        modes={sha(k): v for k, v in modes.items()},
+        pin="p2",
+        legacy=LegacyAccepted("bob"),
+    )
     got = check_delivery(ctx)
     if expected is Unavailable:
         assert isinstance(got, Unavailable)
@@ -437,3 +453,46 @@ def test_requires_orders_review_and_same_second_activations() -> None:
     assert req[("dismissal", "11")] == frozenset({("review", "11")})
     assert req[("activation", sha("p3"))] == frozenset({("activation", sha("p2"))})
     assert ("activation", sha("p2")) not in req
+
+
+def test_own_epoch_anchor_time_unavailable() -> None:
+    """Время якоря эпохи доставки не установлено — `Unavailable`, а не «до
+    bootstrap» (иначе немаркированная заявка ушла бы старому коду)."""
+    ctx = context(
+        anchor_at={sha("p1"): Unavailable("нет объекта")},
+        request_act=None,
+        legacy=LegacyAccepted("bob"),
+    )
+    got = check_delivery(ctx)
+    assert isinstance(got, Unavailable) and got.reason == "нет объекта"
+
+
+@pytest.mark.parametrize(
+    "field", [{"repo": "evil/approval-policy"}, {"branch": "evil"}]
+)
+def test_foreign_policy_source_refused(field: dict[str, str]) -> None:
+    """Пин на чужой источник с тем же sha активации — `policy_source` (§6)."""
+    ctx = context()
+    assert ctx.request is not None
+    request = replace(ctx.request, policy=replace(ctx.request.policy, **field))
+    assert code(check_delivery(replace(ctx, request=request))) == POLICY_SOURCE
+
+
+def test_effective_reviews_unavailable_kept() -> None:
+    """Шаг 5: steward не установил эффективные ревью (отзыв ревью в
+    состоянии APPROVED — malformed, О13) → `Unavailable`, не D1."""
+    reviews = (review("11", "alice", "09:50:00"),)
+    ctx = context(reviews=reviews, dismissals=(("11", "09:55:00"),))
+    assert isinstance(check_delivery(ctx), Unavailable)
+
+
+def test_pinned_policy_defensive_guards() -> None:
+    """Защита в глубину: из `check_delivery` недостижимо (`_mode_events` уже
+    прочитал все наборы `own`), но `_pinned_policy` сам не доверяет вызывающему."""
+    ctx = context()
+    clock = Clock(parse_ts(ts("10:00:00")))
+    empty = _pinned_policy(ctx, (), clock)
+    assert isinstance(empty, Unavailable)
+    unread = replace(ctx, policy_sets={})
+    got = _pinned_policy(unread, (act("p1", "08:00:00"),), clock)
+    assert isinstance(got, Unavailable) and got.reason == "набор не загружен"
