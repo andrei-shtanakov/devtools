@@ -2948,7 +2948,8 @@ steward#211). Этот коммит сверяет «Интерфейс M0» с 
    номера расходились с зависимостями. Сборка `DeliveryContext` вынесена в `act_context` (Task 12a),
    чтобы и 13, и 14 её потребляли.
 6. **Task 13** — вопрос владельца по п. 9 заметок части A (остановка не действующего поколения)
-   записан с двумя вариантами; зависимые шаги помечены `[ждёт решения владельца]`.
+   **решён владельцем 01.11: вариант (Б)** с единым вычислением состояния истории
+   (`act_envelope.node_history`, Task 13 Step 8); см. «Решения владельца 01.11».
 7. **Task 15** — `act_premerge` опрашивает журнал периметра, как каждый потребитель (спека §6.3):
    узкий клиент `act_journal_wire` (Task 12a, Step 5b) — тот же формат и правило блокировки без
    импорта `df/`, поэтому цепочка обвязки мержа остаётся в `_HARNESS_PREFIXES` (Р-16). Нарушение,
@@ -2959,6 +2960,11 @@ steward#211). Этот коммит сверяет «Интерфейс M0» с 
    `/etc/df/trust.toml` режим «не установлен» (стоп шага, отказ создания заявки), а не legacy. До
    слияния PR devtools #2 привязка ставится на каждой машине, где идут путь узла или раннер; в
    тестах вне `act_*` режим подменяет `tests/conftest.py` (`mode_probe` → `PRE_MIGRATION`).
+   **Профиль `gh` runner'а — второе предусловие** (ревью d5): для приватного продукта
+   `REVIEW_GH_CONFIG_DIR` (по умолчанию `~/.config/review`) аутентифицирован на github.com с
+   правом чтения продукта — проверка допуска берёт свежий снимок базы по HTTPS через
+   `gh auth git-credential`, не через `origin`/SSH клона; иначе отказ (fail closed). Публичный
+   продукт читается анонимно.
 
 Листинги части B проверены при ревизии: все полные модули разбираются `ast`, `ruff --select F`
 не находит неопределённых имён; длина строк приводится `ruff format` при реализации (после
@@ -2985,7 +2991,7 @@ steward#211). Этот коммит сверяет «Интерфейс M0» с 
 | Р-10 | **механизм b1** (B1-5): `gate-check` S4/S8 — `--act-mode` по `product_mode` (история режима): `review` → провайдер; `PRE_MIGRATION`/`merge` → `legacy`; удаление записи, откат `review → merge`, нет привязки, недочитанная история → стоп шага | О14 требует результат admission; спека §10 запрещает выводить режим из одного текущего значения | продукт в `merge` с уже доставленной заявкой `review/v1` (невозможно по барьеру §10) упрётся в `GC-ACT-MODE-CONFLICT` — fail-closed |
 | Р-11 | **дополнено b1** (B1-15): проверка конверта после мержа finalize — побайтовое равенство с `render_envelope(ожидаемый)` на merge-коммите finalize **и** достижимость этого коммита из базы (`is_ancestor`); `reopen` — наличие и идентичность `StopRecord` в stop-PR, достижимость его merge-коммита | прежняя редакция ссылалась на Task 14 из Task 13; доставка в нужную базу — часть утверждения «конверт в base» | нет |
 | Р-12 | Вендоренный `contracts/approval-facts/` — в authority-root и `_HARNESS_PREFIXES` | данные тестов ядра акта защищаются так же, как сами тесты `tests/test_act_*` (заметки части A, строка 10) | PR, правящий только векторы, мержит человек |
-| Р-13 | **переведено в вопрос владельцу В-1** (B1-6): канонический хеш DAG — отступление от буквы спеки; вариант по умолчанию закрывает дыру supersede (блобы всех `approvals/`) | — | — |
+| Р-13 | **решено владельцем 01.11 (В-1)**: гибрид — байты всех `approvals/` в хеше DAG как оптимизация; перед каждым no-op §I5 узлы `review/v1` проверяются заново (`Statuses.of`), хеш один no-op не даёт | — | — |
 | Р-14 | `--repropose` брифа переезжает из Task 13a в Task 17 | заявка брифа с пином активации (`v2`) появляется только с M2 discovery — переиздавать до неё нечего | до части C выход для брифа — новая заявка через `brief-propose` |
 | Р-15 | **усилено b1** (B1-13): барьер считает смёрженный legacy-candidate разобранным, только если каждый узел, отданный candidate на одобрение (`approval_pending` в его голове, состав — независимо от finalize), подписан этим или более поздним актом в базе; пустой состав — живой пункт; пины узла не судит | §10 п. 2 спрашивает «доведена или инвалидирована», а не «узел без долга»; дрейф пинов после законного акта — долг узла | узел с долгом пинов пройдёт барьер и встанет на гейте доставки |
 | Р-16 | Предпроверка мержа пишет журнал периметра узким клиентом `act_journal_wire`: в установке `df` — протокол издателя `df/publisher-request/v1` (`sudo -n -u df-publisher df-publish`), в режиме разработки — то же SQLite-хранилище (правило блокировки и вставка `pending` в `BEGIN IMMEDIATE`); совпадение форматов держит тест на одном файле базы | спека §6.3 требует журнал у каждого потребителя; цепочка обвязки мержа не может включать `df/` без смены процесса ревью этих путей (решение владельца, не плана) | второй писатель того же хранилища: расхождение схемы ловит тест равенства с `df.publisher.perimeter`, номер эпохи `pending` назначает полный журнал |
@@ -2997,7 +3003,8 @@ steward#211). Этот коммит сверяет «Интерфейс M0» с 
 источника политики обязана быть default branch) — новое ограничение, которого нет в §6.1;
 поглощается как fail-closed предусловие H1/H2, но в спеку его стоит внести. С-3 — §9.1 (а) п. 4
 («производный статус из проверенного конверта» в каноническом хеше DAG) требует чтений форджи в
-`_content_anchor`, который сегодня их не делает; решение — за владельцем (В-1 ниже).
+`_content_anchor`, который сегодня их не делает; **решено владельцем 01.11 (В-1 ниже)**: хеш
+остаётся локальным, проверенный статус спрашивается перед каждым no-op.
 
 
 ### Правки по ревью b1
@@ -3189,9 +3196,13 @@ error=…)`, «отказ | None», `raise`), но полноту не дока�
 `governance/` и `tests/` — список мест сверяется с деревом при исполнении задачи, а не с
 памятью плана.
 
-**Вопрос владельцу В-1** (ревизия b1, B1-6; вопрос к спеке С-3) — канонический хеш DAG для узлов
-`review/v1`. Спека §9.1 (а) п. 4: «в каноническую проекцию входит производный статус из
-проверенного конверта».
+**В-1 — решено владельцем 01.11** (ревизия b1, B1-6; вопрос к спеке С-3) — канонический хеш DAG
+для узлов `review/v1`. Слова владельца: «В-1 — локальный хеш содержимого допустим как оптимизация,
+но он не заменяет проверку одобрения. Перед успешным no-op для review/v1 проверяется актуальный
+допуск.» Принят гибрид (Task 14): вариант (б) — хеш как оптимизация — плюс свежая проверка
+`Statuses.of` узлов `review/v1` перед каждым успехом без полного пути (`act_status.noop_refusal`). История
+вопроса (до решения). Спека §9.1 (а) п. 4: «в каноническую проекцию входит производный статус
+из проверенного конверта».
 
 - **(а) Спека буквально** — `_content_anchor` получает проверенный статус `Statuses.of` и
   подставляет его вместо `status` узла `review/v1`. Следствия: доверенный контекст и чтения форджи
@@ -3201,9 +3212,9 @@ error=…)`, «отказ | None», `raise`), но полноту не дока�
   хеша. Следствия: без форджи; любое новое поколение, остановка, supersede меняют хеш — no-op не
   скроет изменение допуска; хеш меняется и от байтов, не влияющих на допуск (лишний перегон §I5,
   не пропуск).
-- **Рекомендация: (б)** — та же гарантия «изменение допуска не скрыто», без чтений форджи в
-  `_content_anchor`; цена — лишние перегоны. Шаг `_canonical_dag_hash` Task 14 помечен
-  `[ждёт решения владельца В-1]`; листинг — вариант (б), тест
+- **Рекомендация исполнителя была (б)** — та же гарантия «изменение допуска не скрыто», без
+  чтений форджи в `_content_anchor`; цена — лишние перегоны. Шаг `_canonical_dag_hash` Task 14 был помечен
+  «ждёт решения владельца В-1»; листинг — вариант (б), тест
   `test_canonical_hash_sees_new_generation_and_stops` проходит при обоих вариантах.
 
 ### Правки по ревью b2
@@ -3427,6 +3438,180 @@ error=…)`, «отказ | None», `raise`), но полноту не дока�
   константа против литерала; положительные — конъюнкт `and`, `startswith`. Переписан один
   двойник: `test_read_dag_state_review_debt` (генератор в `any(...)` — неподдерживаемая форма →
   явный отбор долгов и сравнение причины).
+
+### Решения владельца 01.11
+
+Слова владельца (01.11), дословно:
+
+> «П. 9 — Б, с единым вычислением состояния истории. В-1 — локальный хеш содержимого допустим
+> как оптимизация, но он не заменяет проверку одобрения. Перед успешным no-op для review/v1
+> проверяется актуальный допуск.»
+
+- **П. 9 заметок части A → вариант (Б)** (Task 13 Step 8 — из «ждёт решения» в конкретный шаг):
+  `act_envelope.node_history(history, node) -> NodeHistory(current, generation, top, ignored)` —
+  один проход по записям узла; заявка с поколением не больше действующего и остановка не
+  действующего поколения (или без принятой заявки) игнорируются с причиной, не становятся
+  событием и не сдвигают поколение. `current_event`, `next_generation`, `envelope_refusal`,
+  `Statuses` (`of`, `is_review`, `_stopped`), `act_node.reopen`, `act_node.generation_of` выводят
+  своё из него; `generation_refusal` удалён. Тесты части A `test_non_monotonic_generation_refused`
+  → `test_non_monotonic_request_ignored`, `test_stop_of_other_generation_refused` →
+  `test_stop_of_other_generation_is_noop`; новые — остановка без заявки, заявка `g+1` после
+  проигнорированной записи, согласие потребителей (`test_history_consumers_agree`: 10 историй,
+  `test_statuses_agree_with_node_history`: 5), остановка не делает узел старого пути `review`;
+  Task 14-тест `test_ignored_record_then_next_generation_approves`. Текст варианта (А) — только
+  как история выбора.
+- **В-1 → гибрид** (Task 14, шаг `_canonical_dag_hash` — из «ждёт решения» в конкретный):
+  байты всех `approvals/` воркстрима в хеше DAG остаются оптимизацией; перед бесследным no-op
+  §I5 заново спрашивается актуальный допуск. Тесты: хеш тот же + узел одобрен → no-op; хеш тот
+  же + остановка доставлена / ревью отозвано / доверенный контекст недоступен / режим не
+  установлен → no-op нет, вызван гейт; продукт до миграции — статусы не читаются.
+- **Правки по d1** (ревью `plan-review-d1`, 2 major одного класса — «ещё один успешный выход без
+  свежей проверки допуска»; второй экземпляр класса → перечень, а не заплатка). Правило владельца
+  «перед успешным no-op для review/v1 проверяется актуальный допуск» применено к **любому
+  успешному раннему выходу**: no-op по хешу, повтор шага по сохранённому `completed`, переход
+  волны по завершённой заявке, возврат уже доставленного PR, повтор доставки из намерения,
+  no-op предложения по frontmatter. Одна точка проверки — `act_status.noop_refusal(state, ops,
+  dag, nodes)` (Task 14): каждый названный узел с событием `review/v1` — `approved` по
+  `statuses_at_base`; режим не установлен / не `approved` / `unavailable:` — успеха нет (fail
+  closed); продукт не в `review` — прежние правила, статусы не читаются (квота С-1 — по одному
+  чтению статусов на каждый такой выход продукта в `review`). D1-1: `_propose` отказывает при
+  `Unavailable` режима сразу после `mode_probe`, до любого no-op. D1-2: сохранённый зелёный S4/S8
+  при неподтверждённом допуске исполняется заново.
+
+  Перечень успешных ранних выходов в путях, которые трогает часть B (`runner.py`,
+  `task_bridge.py`, `approve_node.py`, листинги `act_node.py`; сверено по master `a16e305`):
+
+  | # | Место | Что пропускает | Проверка допуска | Тест | Статус прогона при отказе |
+  |---|---|---|---|---|---|
+  | 1 | `task_bridge.deliver_superseded`, no-op §I5 (равный `content_anchor`) | переиздание и гейт §I12 | `_admission_refusal` до no-op; не подтверждено — гейт §I12 по прежним правилам | `test_review_noop_with_fresh_approval`, `test_review_noop_refused_without_fresh_approval[stop_delivered/act_revoked/trust_unavailable]`, `…_when_mode_unset` | не меняется (прогон `completed`; отказ — гейт §I12 доставки, не шаг прогона) |
+  | 2 | `deliver_superseded`, повтор `--replace-revision 1` | новую ревизию, гейт | `_require_admission` перед `return repeated` | `test_stored_success_requires_admission[v1_replacement]` | не меняется (`completed`): отказ относится к доставке, статус прогона её не утверждает |
+  | 3 | `deliver_superseded`, `return_pr` (ревизия `completed`, PR открыт) | новую ревизию, гейт | `_require_admission` перед возвратом | `…[returned_pr]` | то же |
+  | 4 | `deliver_superseded`, `complete` (PR ревизии вмержен) | гейт | то же | `…[returned_merged]` | то же |
+  | 5 | `deliver_superseded`, `continue` с открытым PR | гейт | то же | `…[returned_open]` | то же |
+  | 6 | `deliver_superseded`, повтор доставки из намерения (`started`, PR нет) | гейт §I12 (судился при записи намерения) | `_require_admission` до `_recover_commit` (до эффекта) | `…[redo_intent]` | то же |
+  | 7 | `deliver_superseded`, открытая v1 | новую ревизию, гейт | `_require_admission` перед возвратом | `…[returned_v1]` | то же |
+  | 8 | `task_bridge.deliver_for_run`, `op completed` (вкл. ответ замены v1) | гейт §I12 | `_require_admission` после проверки `pr` | `…[for_run_completed]`, `test_for_run_completed_returns_pr_with_admission` | то же |
+  | 9 | `deliver_for_run`, принят существующий PR по ветке | гейт §I12 | `_require_admission` перед `return existing` | `…[for_run_adopted]` | то же |
+  | 10 | `runner._step_gate`, сохранённый `completed` S4 | гейт steward S4 | `noop_refusal` по узлам уровней ниже волны; нет — гейт заново | `test_s4_completed_gate_rerun_without_admission[stop_delivered/admission_unavailable]`, `test_s4_completed_gate_kept_with_admission` | `running` уже (S4 исполняется только внутри `advance` при `running`); `op_start` пишет состояние до гейта |
+  | 11 | `runner._step_s8`, сохранённый `completed`/`exit=0` | authoritative-гейт S8 | `noop_refusal` по всем узлам; нет — гейт заново | `test_s8_completed_gate_rerun_without_admission[…]`, `test_s8_completed_gate_kept_with_admission` | **`running` — сохраняется до чекаута и гейта (d2, D2-2)**; прежде оставался `completed` |
+  | 12 | `runner._next_wave` (resume по завершённой заявке ~1058, два выхода `_finalize_wave`) | допуск узлов волны перед следующей | `noop_refusal` по узлам волны; нет — `stopped_review` | `test_next_wave_needs_admission[…]` | `stopped_review` — `_stop_with_comment` сохраняет статус первым |
+  | 13 | `approve_node._propose`, режим `Unavailable` | любой no-op | отказ сразу после `mode_probe` (D1-1) | `test_frontmatter_noop_refused_when_mode_unavailable` | не применимо (CLI); в раннере — `_finalize_wave` → `stopped_review`/`stopped_stale` |
+  | 14 | `approve_node._propose`, no-op по frontmatter в продукте `review` (узел без события) | provenance старого акта (§9.1 (а) п. 3) | `Statuses.of` — не `approved` → новая заявка; `unavailable:` → отказ | `test_frontmatter_noop_in_review_needs_status` | то же |
+  | 15 | `approve_node._propose`, no-op узла `review/v1` | — | уже `Statuses.of == approved` (Task 13) | `test_review_noop_needs_current_status` | то же |
+  | 16 | `approve_node.propose_from_source` | — | успешного выхода без записи нет; `creation` отказывает на `Unavailable` до записи | — | — |
+  | 17 | `approve_node` старые завершения finalize (`_reconcile_finalize`, «уже в base») | — | только заявки без маркера; в продукте `review` `route` их до старого кода не пускает | — | — |
+  | 18 | `act_node._reconcile_finalize` — «узлы одобрены» после мержа finalize (гонка: остановка доставлена между актом и мержем) | объявление одобрения | `noop_refusal` по узлам заявки после сверки конверта: заявка завершается, но успеха нет — `RuntimeError` с фактическим состоянием | `test_stop_between_act_and_finalize_merge_not_reported_approved` | заявка `completed`; в раннере `_finalize_wave._approve` → `stopped_stale` (нетерминальный) |
+  | 19 | `act_node.reopen` «остановка уже доставлена», `repropose` завершённой | — | успех — отнятие допуска / отказ, не одобрение | — | — |
+  | 20 | прочие `completed`-выходы раннера (`_step_wave_branch`, `_step_materialize_brief`, `_step_authoring`, `_step_commit`, `_step_edge`, `_step_candidate`, интервью), `advance` при `merge completed` | — | допуска не судят; следующий судящий шаг — №10–12 | — | — |
+  | 21 | `task_bridge.deliver_approve` | — | штамп tasks-спеки, узлов бандла не судит (§I12, таблица) | — | — |
+
+  Строки 1–14 и 18 — с проверкой (15 мест; 12 новых в d1, строка 18 — решением team-lead о
+  гонке stop/finalize), остальные 6 — разобраны и проверки не требуют (причина в строке).
+- **Правки по d2** (ревью `plan-review-d2`): D2-1 — проверка допуска видит **свежую базу**: в
+  одной точке, `act_status.noop_refusal`, перед `statuses_at_base` — `fresh_base` (`git fetch
+  origin <base>` → снимок `origin/<base>`, `statuses_at_base(..., ref=…)`); сбой обновления —
+  отказ («свежая база: …»), локальная, возможно устаревшая, ветка не читается. Тесты: локальная
+  база «approved», на origin доставлена остановка → успеха нет для S4, S8, `_next_wave`; `fetch`
+  не удался → успеха нет (те же три места). D2-2 — S8 при утраченном допуске сохраняет
+  нетерминальный `running` до чекаута и гейта; регрессия через `advance`: чекаут падает после
+  обнаружения — прогон не `completed`. Колонка «Статус прогона при отказе» выше: утечка
+  терминального статуса была только в S8 (строка 11); в мосту прогон остаётся `completed`
+  намеренно — отказ относится к доставке, а не к шагу прогона.
+- **Правки по d3** (ревью `plan-review-d3`; второй круг класса «свежий снимок — не свежая база
+  продукта» → сменён механизм): `act_status.fresh_base` возвращает **SHA**, а не имя ref.
+  Источник — `Ops.fetch_snapshot(target_dir, repo_slug, branch)`: `origin` обязан называть ровно
+  `repo_slug` (после `insteadOf`; отстающий fork / чужой репозиторий — отказ), явный refspec
+  `+refs/heads/<base>:refs/act/fresh/<base>` (не зависит от `remote.origin.fetch`), значение —
+  SHA полученного объекта; URL в диагностику не попадает. Этот SHA — **единственный снимок** всех
+  чтений проверки: `_statuses(…, snapshot=)` передаёт его в `load_history` и `LegacyProbe`
+  (прежде там оставался локальный `state.base_ref`), `statuses_at_base(…, ref=)` — в байты и
+  входы узлов. Сквозные тесты на настоящем git без подмены `statuses_at_base`: продукт с
+  доставленной остановкой и устаревший клон — `noop_refusal` видит остановку, а сама
+  локальная база дала бы «approved»; нестандартный `remote.origin.fetch` — снимок свежий;
+  `origin` → fork — отказ; продукт недоступен / `origin` нет — отказ; запись refs —
+  история и provenance читаются только SHA снимка; S4, S8, `_next_wave` на том же стенде
+  успеха не дают.
+- **Правки по d4** (ревью `plan-review-d4`; упрощение вместо разбора `origin`):
+  - источник снимка — `RealOps._snapshot_url(repo_slug)` = `https://github.com/<repo_slug>.git`;
+    `origin` клона не читается и не разбирается; `repo_slug` обязан иметь форму `owner/repo`
+    (локальный путь, `file://`, `..`, опция — отказ без запуска git); переписывание URL через
+    `url.*.insteadOf` (`git ls-remote --get-url`) — отказ; локальный источник — только
+    переопределение `_snapshot_url` в тестовом наследнике (`ProductOps`), ни конфигурация, ни
+    окружение его не задают;
+  - `act_status.fresh_base` — контекстный менеджер: уникальный ref вызова
+    `refs/act/fresh/<uuid>` держит объект до конца всех чтений проверки (`with` в
+    `noop_refusal`) и удаляется в `finally` (`Ops.drop_ref`);
+  - `git fetch --quiet --no-tags --no-write-fetch-head --refmap= <url> +refs/heads/<base>:<ref>`;
+    посторонние ветки (в т. ч. `local-keep` из mapping `remote.origin.fetch`) и tracking-ref'ы
+    не тронуты, `FETCH_HEAD` не пишется — тест; `--refmap=` при источнике-URL избыточен (git не
+    применяет `remote.*.fetch` к fetch по URL, проверено) — строка реестра в `RULED`;
+  - тест записи чтений расширен: история, provenance, байты узла, конверт и прямые входы — один
+    SHA снимка, прочие чтения — только по SHA коммитов истории;
+  - чередующиеся вызовы (один — из отстающего источника) держат свои ref'ы и читают свои SHA.
+- **Правки по d5** (ревью `plan-review-d5`: TOCTOU `insteadOf` и учётные данные приватного
+  продукта; решение team-lead — изолированный репозиторий снимка):
+  - `Ops.snapshot_open` создаёт временный bare-репозиторий (`mkdtemp`, удаляется в `finally`
+    `fresh_base`, в т. ч. при исключении) с `objects/info/alternates` на объекты продукта — в
+    репозиторий продукта не пишется ничего (ни ref'ов, ни `FETCH_HEAD`, ни конфигурации);
+  - каждый вызов git снимка — `--git-dir=<временный>` и окружение из allowlist
+    (`PATH`, `HOME`, локаль, `TMPDIR`, сертификаты) + `GIT_CONFIG_NOSYSTEM=1`,
+    `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_TERMINAL_PROMPT=0`, пустой `GIT_ASKPASS`; ни одной
+    `GIT_*` извне; конфигурация временного репозитория — наша, без `url.*`: переписать источник
+    через репозиторий продукта, глобальную конфигурацию или `GIT_CONFIG_*` нельзя вовсе —
+    отдельная предпроверка `insteadOf` снята;
+  - учётные данные: `-c credential.helper=` (сброс) и `-c credential.helper=!gh auth
+    git-credential` с `GH_CONFIG_DIR` профиля runner'а (`REVIEW_GH_CONFIG_DIR`, как прочие вызовы
+    `gh` агента); публичный продукт — анонимно; токен не попадает ни в argv, ни в диагностику;
+  - все чтения проверки (история, `LegacyProbe`, байты, входы, догрузка головы squash-PR) — через
+    `SnapshotOps` (временный репозиторий + SHA снимка). `SnapshotOps` — deny-by-default: пять
+    методов git снимка и allowlist форджи `SNAPSHOT_FORGE_METHODS` (`brief_pr_fact`, `find_pr`,
+    `pr_facts`, `prs_containing_commit`, `repo_file_fact`, `policy_version_fact` — сверено по
+    всем вызовам внутри проверки); любой другой метод — `AttributeError` с именем метода, так что
+    новое чтение git внутри проверки падает громко, а не читает клон. Тесты: непереопределённые
+    методы git (`blob_in_commit`, `commit_files`, `checkout_and_pull`, `is_ancestor`, …) —
+    отказ; мета-проверка — ни один метод allowlist не принимает `target_dir` и не запускает `git`;
+  - тесты: инъекция `insteadOf` в config клона, в глобальный, через `GIT_CONFIG_COUNT`, в config
+    клона между созданием снимка и fetch, унаследованный `GIT_DIR` — снимок свежий; команда
+    fetch изолирована (окружение, сброс helper'а, канонический URL); приватный продукт — токен
+    только от helper'а, глобальный helper не участвует; токена нет в argv и диагностике;
+    профиль `gh` без токена — публичный продукт читается, запрос не интерактивен; снимок
+    удаляется при исключении; чередующиеся снимки независимы; сквозные тесты устаревшего клона
+    сохранены;
+  - предусловие развёртывания (профиль `gh` runner'а для приватного продукта) — в п. 8 выше и в
+    Task 14 рядом с привязкой `/etc/df/trust.toml`.
+- **Правки по d6** (ревью `plan-review-d6`: какими учётными данными аутентифицируется fetch
+  снимка): D6-2 — процессы git снимка получают свежий пустой `HOME` (каталог `home` внутри
+  временного каталога снимка, удаляется вместе с ним) и `XDG_CONFIG_HOME` внутри него; путь
+  профиля `REVIEW_GH_CONFIG_DIR` разрешается в абсолютный ДО подмены HOME и передаётся helper'у
+  как `GH_CONFIG_DIR`. Регрессия: посторонние `~/.netrc` и `~/.gitconfig` (с credential helper)
+  в настоящем HOME не участвуют — fetch снимка видит пустой HOME, профиль `gh` — абсолютный путь.
+- **Остаточный риск D6-1** (принят решением team-lead, не перепроектируется): `GH_CONFIG_DIR`
+  не изолирует системный keyring — при пустом профиле `gh auth git-credential` может вернуть
+  общий токен github.com из keyring (`TokenFromKeyring("github.com")`), и приватный продукт
+  будет прочитан более широким токеном, чем у профиля ревью. Целостность проверки допуска от
+  личности читающего не зависит: URL канонический (`https://github.com/<repo_slug>.git`),
+  содержимое адресовано SHA полученного снимка, чтения — только из него; худший случай —
+  чтение приватного продукта более широким токеном (гигиена учётных данных), а не обход
+  допуска. Последующая работа (TODO): собственный credential helper, читающий токен только
+  профиля (`hosts.yml` профиля), без fallback к keyring — `gh` хранит токены в общем keyring с
+  ключом по хосту; триггер — требование изоляции учётных данных между профилями.
+- **Реестр Task 16**: `act_envelope.node_history` (3), `act_status.noop_refusal` (4 + 2 d2 + 2 d3),
+  `act_status.fresh_base` (2), `ops.SnapshotOps.__getattr__` (1, deny), `ops.RealOps._snapshot_url` (1),
+  `_credential_helper` (1),
+  `_snapshot_env` (6, из них 2 — пустой HOME и абсолютный профиль, d6), `_snapshot_git` (1), `ops.RealOps.snapshot_open` (4, из них `--refmap=`/
+  `FETCH_HEAD` — `RULED`),
+  `runner._step_s8#run_status` (1),
+  `task_bridge._require_admission` (1), `deliver_superseded#…` (7), `deliver_for_run#…` (2),
+  `runner._step_gate#completed_admission`, `runner._step_s8#completed_admission`,
+  `runner._next_wave#admission`, `approve_node._propose#mode_unavailable`,
+  `#legacy_noop_review`; `current_event`/`next_generation` — в `MODIFIED_EXISTING`,
+  `task_bridge._admission_refusal` — в `NOT_JUDGMENT` (делегирует). Применимость операторов —
+  303/303 (291 по коду scratch, 12 по AST фрагментов); мутации новых строк: 8 (п. 9, В-1) + 17
+  (d1, исполнимые в scratch) — все закрыты; `_propose#…` (2) — на стенде `World`, Step 4a.
+- **Буква спеки**: В-1 теперь соответствует цели §9.1 (а) п. 4 (проверенный статус спрашивается
+  перед no-op), хотя статус не входит в саму проекцию хеша; §9.1 п. 0a («последний доставленный
+  candidate, чей манифест включает узел») при (Б) читается как «последний **принятый**» — правка
+  формулировки спеки предложена в отчёте ревизии, план её не решает.
 ### Task 11: Пин steward v0.2.0, совместимость вызовов gate-check, gate-catalog v3
 
 **Files:**
@@ -8389,11 +8574,14 @@ git commit -m "feat(act): доверенный контекст — снимок
 - Modify: `governance/approval_ledger.py` (`start_request(..., act, generations)`,
   `extend_request(..., generation)`, `record_review_act`, `record_audit`, `audit_events`)
 - Modify: `governance/act_decision.py` (публичный `find_act`), `governance/act_envelope.py`
-  (публичный `expected_envelope`)
+  (публичный `expected_envelope`; Step 8 — `node_history`, удаление `generation_refusal`)
+- Modify: `governance/act_status.py` (Step 8 — `Statuses._compute` без `generation_refusal`)
 - Modify: `governance/ops.py` (`Ops.pr_body_fact` + `RealOps`)
 - Modify: `governance/runner.py` (`reopen` ~1172 — остановка до волны; `resume` ~899 — аудит;
   `_print_status` ~4093 — события аудита)
-- Test: `tests/test_act_node.py`, `tests/test_act_ops_body.py`; `tests/test_governance_approve_node.py`,
+- Test: `tests/test_act_node.py`, `tests/test_act_ops_body.py`; `tests/test_act_envelope.py` (две
+  правки ожиданий части A, Step 8) и `tests/test_act_status.py` (Step 8);
+  `tests/test_governance_approve_node.py`,
   `tests/test_governance_approval_ledger.py`, `tests/test_governance_runner.py` — без правок
   ожиданий (регрессия старого пути)
 
@@ -8422,29 +8610,32 @@ git commit -m "feat(act): доверенный контекст — снимок
   event) -> bool`, `approval_ledger.audit_events(state, key) -> list[dict]`;
   `act_decision.find_act(head_sha, effective, policy) -> ReviewView | None`;
   `act_envelope.expected_envelope(current, node, review_id) -> Envelope`;
+  `act_envelope.node_history(history, node) -> NodeHistory` (`current`, `generation`, `top`,
+  `ignored: tuple[Ignored, ...]`), `act_envelope.Ignored(event, reason)`; удалено —
+  `act_envelope.generation_refusal` (Step 8);
   `Ops.pr_body_fact(repo_slug, pr) -> Fact[str]`.
 
-**Вопрос владельца [п. 9 заметок части A] — до записи остановок.** Одна доставленная остановка с
-номером **не действующего** поколения либо заявка с **неубывающим** поколением (обе — записи
-в first-parent базы, переписать нельзя) по коду части A (`act_envelope.generation_refusal`) делают
-узел «не одобрен» **навсегда**: никакая последующая заявка его не вернёт. Полномочий это не даёт
-(запись только отнимает), но это риск живучести: любой смёрженный в базу PR с таким файлом —
-отказ в обслуживании узла.
+**П. 9 заметок части A — решено владельцем 01.11: вариант (Б).** Слова владельца (01.11):
 
-| | Вариант (А): блокировка остаётся | Вариант (Б): чужое поколение — no-op |
-|---|---|---|
-| Остановка `g ≠` действующего | узел «не одобрен» навсегда | событие игнорируется (`current_event` и `generation_refusal` его пропускают) — отнимать нечего |
-| Заявка `g ≤` последнего | узел «не одобрен» навсегда | отвергается только эта заявка: она не становится событием узла и не сдвигает «последнее поколение»; следующая заявка с бо́льшим поколением одобряет узел как обычно |
-| Выход для оператора | новый воркстрим (новый `ws-id`), история базы не переписывается | штатный `--approve-node` / `--repropose` |
-| Что меняется в коде | ничего в `act_envelope`; Task 14 — причина `not_approved:` дополняется текстом выхода; README раздела установки — runbook | `act_envelope.current_event`/`generation_refusal` — пропуск таких событий; тесты части A `test_non_monotonic_generation_refused`, `test_stop_of_other_generation_refused` меняют ожидание на «событие проигнорировано»; Task 14 — тест «после проигнорированной записи заявка `g+1` одобряет узел» |
-| Риск | DoS узла одним PR в базу | принятие истории, в которой лежит запись, не созданная этим кодом (только отнимающая или проигнорированная) |
+> «П. 9 — Б, с единым вычислением состояния истории. В-1 — локальный хеш содержимого допустим
+> как оптимизация, но он не заменяет проверку одобрения. Перед успешным no-op для review/v1
+> проверяется актуальный допуск.»
 
-**Рекомендация исполнителя плана — (Б):** запись остановки может только отнимать, поэтому
-игнорирование её для не действующего поколения не расширяет ничьих полномочий; заявка с
-неубывающим поколением не создаётся кодом devtools (`next_generation`) и не должна иметь силы ни
-одобрить, ни запереть узел. Шаги, зависящие от ответа, помечены **[ждёт решения владельца]**;
-остальная задача от ответа не зависит (остановка, которую пишет `act_node.reopen`, всегда несёт
-действующее поколение).
+Суть: одна доставленная остановка с номером **не действующего** поколения либо заявка с
+**неубывающим** поколением (обе — записи first-parent базы, переписать нельзя) по коду части A
+(`act_envelope.generation_refusal`) делали узел «не одобрен» навсегда. По решению такие записи
+**игнорируются**: не становятся событием узла и не сдвигают действующее поколение; следующая
+заявка с бо́льшим поколением одобряет узел как обычно. Состояние истории узла вычисляется
+**один раз** — `act_envelope.node_history(history, node) -> NodeHistory(current, generation, top,
+ignored)` (Step 8); `current_event`, `next_generation`, `envelope_refusal`, `Statuses`
+(`of`/`is_review`/`_stopped`), `act_node.reopen` и `generation_of` выводят своё из него;
+`generation_refusal` удаляется — второго правила пропуска нет нигде. Остановка, которую пишет
+`act_node.reopen`, всегда несёт действующее поколение (`node_history(...).current`).
+
+История выбора (до решения): вариант (А) — «блокировка остаётся», выход — новый воркстрим;
+отклонён: одна запись в базе — отказ в обслуживании узла. Риск (Б), принятый владельцем:
+история может нести запись, не созданную этим кодом (только отнимающую или проигнорированную);
+полномочий она не даёт.
 
 **Общий вход (спека §10 «до выбора читателя, для обоих путей»; §2 «режим — из манифеста»).**
 Маршрутизация — в `_advance`, до выбора любого шага, кроме создания:
@@ -8965,6 +9156,46 @@ def test_legacy_candidate_merged_after_review_activation_refused(world: World,
     assert world.state.ops[key]["status"] == al.STATUS_INVALIDATED
 
 
+def test_frontmatter_noop_refused_when_mode_unavailable(world: World, stand: Stand) -> None:
+    """d1 (D1-1): узел честно одобрен по frontmatter, режим акта не установлен — отказ сразу
+    после `mode_probe`, до любого no-op (успеха без актуального допуска нет)."""
+    stand.mode = act_trust.PRE_MIGRATION
+    drive_to_approved(world, "charter")
+    stand.mode_unset = "нет привязки корня доверия"
+    with pytest.raises(RuntimeError, match="режим акта продукта .узел charter.: нет привязки"):
+        approve(world, "charter")
+
+
+def test_frontmatter_noop_in_review_needs_status(world: World, stand: Stand,
+                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    """d1: продукт в `review`, узел без события `review/v1` честно одобрен по frontmatter —
+    no-op только при актуальном статусе (provenance старого акта, §9.1 (а) п. 3); иначе —
+    новая заявка, не no-op."""
+    stand.mode = act_trust.PRE_MIGRATION
+    drive_to_approved(world, "charter")
+    stand.mode = "review"
+    monkeypatch.setattr(act_status.Statuses, "of", lambda self, node: act_status.APPROVED)
+    noop = approve(world, "charter")
+    assert noop.message == "charter: честно одобрен — одобрять нечего (no-op)"
+    monkeypatch.setattr(act_status.Statuses, "of",
+                        lambda self, node: "not_approved:legacy_provenance")
+    outcome = approve(world, "charter")
+    assert outcome.request is not None and outcome.request in world.state.ops
+
+
+def test_review_noop_needs_current_status(world: World, stand: Stand,
+                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    """d1: no-op узла `review/v1` — только по актуальному `Statuses.of`; остановка,
+    доставленная после одобрения, даёт новую заявку, а не no-op."""
+    monkeypatch.setattr(act_status.Statuses, "is_review", lambda self, node: node == "charter")
+    monkeypatch.setattr(act_status.Statuses, "of", lambda self, node: act_status.APPROVED)
+    noop = approve(world, "charter")
+    assert noop.message == "charter: честно одобрен (review/v1) — no-op"
+    monkeypatch.setattr(act_status.Statuses, "of", lambda self, node: "not_approved:stopped:g1")
+    outcome = approve(world, "charter")
+    assert outcome.request is not None and outcome.request in world.state.ops
+
+
 def test_merged_unmarked_with_unset_mode_stays_alive(world: World, stand: Stand) -> None:
     """B1-5: смёржен без маркера, режим продукта не установлен (откат review → merge) —
     заявка жива, старый код не продолжает."""
@@ -9127,6 +9358,19 @@ def test_crash_after_finalize_merge_before_complete(world: World, stand: Stand,
     approve(world, "charter")
     assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
     assert len([n for n, r in world.forge.prs.items() if r["branch"].endswith("-final")]) == 1
+
+
+def test_stop_between_act_and_finalize_merge_not_reported_approved(
+        world: World, stand: Stand, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Решение владельца 01.11 (гонка stop/finalize): остановка поколения доставлена между
+    актом и мержем finalize — заявка завершена (конверт в base), но «одобрены» не
+    объявляется: ответ называет фактическое состояние узла."""
+    key, pr = _deliver(world, stand)
+    monkeypatch.setattr(act_status.Statuses, "is_review", lambda self, node: True)
+    monkeypatch.setattr(act_status.Statuses, "of", lambda self, node: "not_approved:stopped:g1")
+    with pytest.raises(RuntimeError, match="узлы не одобрены — узел charter: not_approved:stopped:g1"):
+        approve(world, "charter")
+    assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
 
 
 def test_finalize_merged_outside_base_invalidates(world: World, stand: Stand) -> None:
@@ -9911,6 +10155,15 @@ def _reconcile_finalize(state, ops, dag, key, expected) -> an.ApprovalOutcome:
             _invalidate(state, key, f"PR конверта #{pr} доставил не тот конверт узла {node}")
     an._ensure_finalize_identity(state, ops, key, op)
     al.complete_request(state, key)
+    # Решение владельца 01.11 (гонка stop/finalize): заявка завершена — конверт в base, — но
+    # «одобрены» объявляется только при актуальном допуске; остановка, доставленная между
+    # актом и мержем finalize, — фактическое состояние вместо успеха.
+    refusal = act_status.noop_refusal(state, ops, dag, list(expected))
+    if refusal is not None:
+        raise RuntimeError(
+            f"конверт review/v1 в base (PR #{pr}), заявка {key} завершена, но узлы не "
+            f"одобрены — {refusal}"
+        )
     return an.ApprovalOutcome(
         f"конверт review/v1 в base (PR #{pr}): узлы {', '.join(expected)} одобрены, "
         f"заявка {key} завершена",
@@ -10054,8 +10307,10 @@ def _try_agent_merge(state, ops, dag, op, nodes, pr, head, *,
 
     deps = act_node.DEPS_FACTORY(state)
     live = act_status.mode_probe(state, deps)  # один раз: и статус, и режим создания
+    if isinstance(live, Unavailable):  # d1 (D1-1): до любого no-op — режим неизвестен
+        raise _unresolved(f"режим акта продукта (узел {node_id}): {live.reason}")
     statuses = (act_status.statuses_at_base(state, ops, dag, live, deps)
-                if not isinstance(live, Unavailable) and live.mode == "review" else None)
+                if live.mode == "review" else None)
 ```
 
 после `_require_no_reopened_pr(...)`, до `self_hash`:
@@ -10076,6 +10331,14 @@ def _try_agent_merge(state, ops, dag, op, nodes, pr, head, *,
         debt = _review_debt(node_id, text, verdict)
     else:
         debt = na.node_debt(node_id, text, upstream_blobs)
+        if debt is None and statuses is not None:
+            # d1: продукт в `review` — frontmatter без долга лишь предпосылка (§9.1 (а) п. 3);
+            # no-op только при актуальном статусе узла (provenance старого акта)
+            verdict = statuses.of(node_id)
+            if verdict.startswith("unavailable:"):
+                raise _unresolved(f"статус узла {node_id} без события review/v1: {verdict}")
+            if verdict != act_status.APPROVED:
+                debt = _review_debt(node_id, text, verdict)
         if debt is None:
             return ApprovalOutcome(f"{node_id}: честно одобрен — одобрять нечего (no-op)")
         if debt.kind in (na.DEBT_PINS, na.DEBT_UNKNOWN_STATUS):
@@ -10083,7 +10346,10 @@ def _try_agent_merge(state, ops, dag, op, nodes, pr, head, *,
 ```
 
 (Порядок «гварды до первой записи» сохраняется: `mode_probe`, `statuses_at_base` и `creation`
-только читают; неустановленный режим отказывает в `creation` до записи.)
+только читают. Неустановленный режим отказывает **сразу после `mode_probe`**, до любого no-op
+(ревью d1, D1-1): прежняя редакция оставляла `statuses=None` и отдавала no-op по frontmatter.
+Каждый успешный ранний выход `_propose` для продукта в `review` идёт от `Statuses.of` — перечень
+в разделе ревизии «Решения владельца 01.11».)
 Присоединение и запись:
 
 ```python
@@ -10192,31 +10458,229 @@ def _try_agent_merge(state, ops, dag, op, nodes, pr, head, *,
 `act_node.reopen` подменён на поднимающий `RuntimeError` → `runner.reopen` отказывает, `state.wave`
 и op'ы волн не тронуты.
 
-- [ ] **Step 8 [ждёт решения владельца]: остановки не действующего поколения** — только при
-варианте (Б): `act_envelope.current_event` и `generation_refusal` пропускают остановку с
-`generation ≠ last` и заявку с `generation ≤ last` (не обновляя `last`); тесты части A
-`test_non_monotonic_generation_refused` → `test_non_monotonic_request_ignored`,
-`test_stop_of_other_generation_refused` → `test_stop_of_other_generation_is_noop`; в
-`tests/test_act_status.py` — `test_ignored_record_then_next_generation_approves`. При варианте (А)
-шаг заменяется одной строкой в `act_status.Statuses._compute`: причина `not_approved:` дополняется
-«выход — новый воркстрим (история базы не переписывается)».
+- [ ] **Step 8: Единое состояние истории узла — п. 9, вариант (Б) (решение владельца 01.11)**
+
+`governance/act_envelope.py` — `current_event`, `generation_refusal`, `next_generation` (~196–223)
+заменяются одним вычислением; `generation_refusal` удаляется (потребителей вне `act_envelope`,
+`act_status` и `tests/test_act_envelope.py` нет — сверено по дереву master `a16e305`):
+
+```python
+@dataclass(frozen=True)
+class Ignored:
+    """Запись узла, не ставшая его событием (п. 9 заметок части A, вариант (Б))."""
+
+    event: Event
+    reason: str
+
+
+@dataclass(frozen=True)
+class NodeHistory:
+    """Действующее состояние истории узла — единственное вычисление (решение владельца
+    01.11): `current` — действующее событие; `generation` — поколение последней принятой
+    заявки (0 — не было); `top` — наибольшее поколение среди ВСЕХ записей узла, включая
+    проигнорированные (`next_generation` его превышает: новый файл не совпадёт с лежащим);
+    `ignored` — записи, не ставшие событием, с причиной."""
+
+    current: Event | None
+    generation: int
+    top: int
+    ignored: tuple[Ignored, ...]
+
+
+def node_history(history: History, node: str) -> NodeHistory:
+    """Один проход по записям узла, старые первыми. Заявка с поколением не больше
+    действующего и остановка не действующего поколения игнорируются: не становятся
+    событием и не сдвигают поколение — полномочий не дают и узел не запирают."""
+    current: Event | None = None
+    last = top = 0
+    ignored: list[Ignored] = []
+    for event in history:
+        if not _touches(event, node):
+            continue
+        gen = _generation(event, node)
+        top = max(top, gen)
+        if isinstance(event, DeliveredStop) and (gen != last or last == 0):
+            reason = f"узел {node}: остановка поколения {gen}, действует {last}"
+            ignored.append(Ignored(event, reason))
+            continue
+        if isinstance(event, DeliveredRequest) and gen <= last:
+            reason = f"узел {node}: поколение {gen} не больше прежнего {last}"
+            ignored.append(Ignored(event, reason))
+            continue
+        if isinstance(event, DeliveredRequest):
+            last = gen
+        current = event
+    return NodeHistory(current, last, top, tuple(ignored))
+
+
+def current_event(history: History, node: str) -> Event | None:
+    """Действующее событие узла — из `node_history`."""
+    return node_history(history, node).current
+
+
+def next_generation(history: History, node: str) -> int:
+    """Поколение следующей заявки узла — из `node_history`."""
+    return node_history(history, node).top + 1
+```
+
+`envelope_refusal` — первые три строки (`broken = generation_refusal(...)` / `if broken ...` /
+`return broken`) удаляются: событие узла — `current_event` (то есть `node_history`), проверки
+конверта прежние.
+
+`governance/act_status.py` (листинг Task 14) — из импорта `governance.act_envelope` убирается
+`generation_refusal`, из `Statuses._compute` — три строки `broken = generation_refusal(...)` /
+`if broken is not None:` / `return f"not_approved:{broken}"`. `is_review`, `_stopped` и
+`_compute` берут событие через `current_event` — то есть из того же `node_history`;
+`act_node.reopen` (событие и поколение остановки) и `act_node.generation_of` (`next_generation`)
+— тоже. Других мест пропуска записей нет: правило живёт в одной функции.
+
+`tests/test_act_envelope.py` (тесты части A) — в импорте `generation_refusal` заменяется на
+`node_history`; `test_non_monotonic_generation_refused` заменяется на:
+
+```python
+def test_non_monotonic_request_ignored() -> None:
+    """П. 9 заметок части A, вариант (Б) (решение владельца 01.11): заявка с поколением не
+    больше действующего — не событие узла; действующее событие и поколение прежние."""
+    stale = DeliveredRequest("5" * 40, "a5" * 20, _req("approve-2-1-4", 2))
+    state = node_history([OLD, NEW, stale], "req")
+    assert state.current is NEW and state.generation == 2
+    assert len(state.ignored) == 1
+    assert state.ignored[0].reason == "узел req: поколение 2 не больше прежнего 2"
+    assert envelope_refusal(_env(NEW), [OLD, NEW, stale], "req", "h" * 40, PINS, "21") is None
+```
+
+`test_stop_of_other_generation_refused` заменяется на (вместе с новыми тестами согласия):
+
+```python
+def test_stop_of_other_generation_is_noop() -> None:
+    """П. 9 (Б): остановка не действующего поколения отнимать нечего — игнорируется."""
+    stale = DeliveredStop("3" * 40, StopRecord("req", 1, "не то поколение"))
+    state = node_history([OLD, NEW, stale], "req")
+    assert state.current is NEW
+    assert len(state.ignored) == 1
+    assert state.ignored[0].reason == "узел req: остановка поколения 1, действует 2"
+    assert envelope_refusal(_env(NEW), [OLD, NEW, stale], "req", "h" * 40, PINS, "21") is None
+
+
+def test_stop_before_any_request_ignored() -> None:
+    """П. 9 (Б): остановка узла без принятой заявки — не событие; узел остаётся без
+    события (старый путь), следующее поколение — выше записи."""
+    stray = DeliveredStop("3" * 40, StopRecord("req", 1, "чужая запись"))
+    state = node_history([stray], "req")
+    assert state.current is None and state.generation == 0
+    assert len(state.ignored) == 1
+    assert state.ignored[0].reason == "узел req: остановка поколения 1, действует 0"
+    assert next_generation([stray], "req") == 2
+
+
+def test_ignored_request_then_next_generation_is_current() -> None:
+    """П. 9 (Б): после проигнорированной записи заявка `g+1` — действующее событие."""
+    stale = DeliveredRequest("5" * 40, "a5" * 20, _req("approve-2-1-4", 2))
+    history = [OLD, NEW, stale, AGAIN]
+    assert node_history(history, "req").current is AGAIN
+    assert envelope_refusal(_env(AGAIN), history, "req", "h" * 40, PINS, "21") is None
+    assert next_generation(history, "req") == 4
+
+
+STRAY_STOP = DeliveredStop("6" * 40, StopRecord("req", 9, "чужое поколение"))
+STALE_REQ = DeliveredRequest("5" * 40, "a5" * 20, _req("approve-2-1-4", 1))
+
+
+@pytest.mark.parametrize("history", [
+    [], [OLD], [OLD, NEW], [OLD, NEW, STOP2], [OLD, NEW, STOP2, AGAIN], [STRAY_STOP],
+    [OLD, STRAY_STOP], [OLD, NEW, STALE_REQ], [OLD, NEW, STOP2, STALE_REQ, AGAIN],
+    [OLD, NEW, STOP2, STOP2],
+], ids=["empty", "one", "two", "stopped", "after_stop", "stray_stop", "stop_other_gen",
+        "stale_request", "stale_then_next", "double_stop"])
+def test_history_consumers_agree(history: list) -> None:
+    """Решение владельца 01.11: одно вычисление состояния — `current_event`,
+    `next_generation` и `envelope_refusal` выводятся из `node_history`, второго правила
+    пропуска нет."""
+    state = node_history(history, "req")
+    assert current_event(history, "req") is state.current
+    assert next_generation(history, "req") == state.top + 1
+    reason = envelope_refusal(_env(NEW), history, "req", "h" * 40, PINS, "21")
+    if state.current is None:
+        assert reason == "узел req: нет доставленной заявки review/v1"
+    elif isinstance(state.current, DeliveredStop):
+        gen = state.current.stop.generation
+        assert reason == f"узел req: одобрение поколения {gen} остановлено"
+    else:
+        assert (reason is None) is (state.current is NEW)
+```
+
+`tests/test_act_status.py` — в импорт `governance.act_envelope` добавляются `next_generation`,
+`node_history`; тесты:
+
+```python
+STRAY = DeliveredStop("d" * 40, StopRecord("behaviour-spec", 7, "чужое поколение"))
+
+
+def _beh(rid: str, merge: str, gen: int) -> DeliveredRequest:
+    return delivered(rid, merge, {"behaviour-spec": (H_BEH, gen)},
+                     {"behaviour-spec": {"requirements": "blob-req"}})
+
+
+def test_ignored_record_then_next_generation_approves() -> None:
+    """П. 9 заметок части A, вариант (Б) (решение владельца 01.11): проигнорированные
+    записи (остановка чужого поколения, заявка с неубывающим поколением) узел не запирают —
+    одобрение прежнего поколения действует, следующая заявка `g+1` одобряет узел."""
+    (r1, r2), snap = both_approved()
+    history = (r1, r2, STRAY, _beh("approve-3-1-1", "c" * 40, 1))
+    assert statuses(history, snap).of("behaviour-spec") == "approved"
+    gen = next_generation(history, "behaviour-spec")
+    r4 = _beh("approve-4-1-1", "e" * 40, gen)
+    history = (*history, r4)
+    assert "конверт другого поколения" in statuses(history, snap).of("behaviour-spec")
+    snap.files[envelope_path(WS, "behaviour-spec")] = envelope(r4, "behaviour-spec")
+    assert statuses(history, snap).of("behaviour-spec") == "approved"
+
+
+@pytest.mark.parametrize("tail", ["none", "stray_stop", "stale_request", "own_stop",
+                                  "stray_then_own_stop"])
+def test_statuses_agree_with_node_history(tail: str) -> None:
+    """Решение владельца 01.11: `Statuses` выводит событие узла из того же `node_history`,
+    что `current_event`/`envelope_refusal`/`reopen`, — второго правила пропуска нет."""
+    (r1, r2), snap = both_approved()
+    own = DeliveredStop("e" * 40, StopRecord("behaviour-spec", 1, "переоткрыт"))
+    extra = {"none": (), "stray_stop": (STRAY,), "own_stop": (own,),
+             "stale_request": (_beh("approve-3-1-1", "c" * 40, 1),),
+             "stray_then_own_stop": (STRAY, own)}[tail]
+    history = (r1, r2, *extra)
+    state = node_history(history, "behaviour-spec")
+    st = statuses(history, snap)
+    assert st.is_review("behaviour-spec") is (state.current is not None)
+    expected = ("approved" if state.current is r2 else
+                f"not_approved:stopped:g{state.current.stop.generation}")
+    assert st.of("behaviour-spec") == expected
+
+
+def test_stray_stop_does_not_make_legacy_node_review() -> None:
+    """П. 9 (Б): остановка узла без события `review/v1` — не событие; узел остаётся на
+    старом пути с тем же ответом, что без записи (DoS одной записью невозможен)."""
+    _history, snap = both_approved()
+    stray = DeliveredStop("d" * 40, StopRecord("requirements", 1, "чужая запись"))
+    st = statuses((stray,), snap)
+    assert st.is_review("requirements") is False
+    assert st.of("requirements") == statuses((), snap).of("requirements")
+```
 
 - [ ] **Step 9: Run tests to verify they pass**
 
-Run: `uv run --group governance pytest tests/test_act_node.py tests/test_governance_approve_node.py tests/test_governance_approval_ledger.py tests/test_governance_runner.py -v`
+Run: `uv run --group governance pytest tests/test_act_node.py tests/test_act_envelope.py tests/test_act_status.py tests/test_governance_approve_node.py tests/test_governance_approval_ledger.py tests/test_governance_runner.py -v`
 Expected: PASS; существующие тесты старого пути — без правок ожиданий (`tests/conftest.py`
 Task 14 даёт продукт до миграции: `route` для заявки без маркера возвращает `None`,
-`_legacy_outcome` держит прежние тексты). Полный набор в обоих режимах, ruff, pyrefly. Перед
-коммитом при варианте (Б) вопроса п. 9 — ещё `tests/test_act_envelope.py tests/test_act_status.py`.
+`_legacy_outcome` держит прежние тексты); у тестов части A `test_act_envelope.py` меняются
+ожидания ровно двух тестов (Step 8, п. 9 (Б)). Полный набор в обоих режимах, ruff, pyrefly.
 
 - [ ] **Step 10: Commit**
 
 ```bash
 git add governance/act_node.py governance/approve_node.py governance/approval_ledger.py \
   governance/act_decision.py governance/act_envelope.py governance/ops.py governance/runner.py \
-  tests/test_act_node.py tests/test_act_ops_body.py tests/test_governance_runner.py
-# Step 8, вариант (А): + governance/act_status.py
-# Step 8, вариант (Б): + tests/test_act_envelope.py tests/test_act_status.py (act_envelope.py уже в списке)
+  governance/act_status.py \
+  tests/test_act_node.py tests/test_act_ops_body.py tests/test_governance_runner.py \
+  tests/test_act_envelope.py tests/test_act_status.py
 git commit -m "feat(act): путь узла review/v1 — общий вход admission, заявка с манифестом, конверт, остановка, аудит"
 ```
 
@@ -10596,15 +11060,19 @@ B1-6, B1-8, B1-9 — см. «Правки по ревью b1».
 
 **Files:**
 - Create: `governance/act_status.py`
-- Modify: `governance/ops.py` (`Ops.first_parent_changes` + `RealOps`)
+- Modify: `governance/ops.py` (`Ops.first_parent_changes`, `Ops.snapshot_open/_reader/_close` +
+  `RealOps`; `SnapshotRepo`, `SnapshotOps` — изолированный снимок базы, d5)
 - Modify: `governance/act_settings.py` (`config_home(env)` — заметки части A, п. 11)
 - Modify: `governance/act_envelope.py` (`envelope_refusal`: причины «байты» и «пины» раздельно)
 - Modify: `governance/node_approval.py` (`DEBT_REVIEW_V1`)
 - Modify: `governance/approve_node.py` (`_legacy_outcome` + `LegacyHalt` выделены из
   `_reconcile_candidate` ~1787 — Step 3a; `read_dag_state` ~480, `_require_upstream_ready` ~939)
-- Modify: `governance/runner.py` (`_step_gate` S4 ~3275, `_step_s8` ~4024 — режим и провайдер)
-- Modify: `governance/task_bridge.py` (`_canonical_dag_hash` ~1138 — **[ждёт решения владельца
-  В-1]**, вариант по умолчанию ниже)
+- Modify: `governance/runner.py` (`_step_gate` S4 ~3275, `_step_s8` ~4024 — режим и провайдер;
+  сохранённый зелёный гейт S4/S8 и `_next_wave` ~1300 — актуальный допуск, d1)
+- Modify: `governance/task_bridge.py` (`_canonical_dag_hash` ~1138 — байты `approvals/` как
+  оптимизация; `_admission_refusal`/`_require_admission` — актуальный допуск перед no-op §I5
+  `deliver_superseded` и перед каждым успехом по сохранённому результату; В-1, решение
+  владельца 01.11, d1)
 - Modify: `tests/conftest.py` — изоляция путей акта для тестов вне `act_*` (перенесено сюда из
   Task 13: с этой задачи старые пути зовут `mode_probe`)
 - Test: `tests/test_act_status.py`, `tests/test_act_legacy.py`, `tests/test_act_gate.py`;
@@ -10613,7 +11081,7 @@ B1-6, B1-8, B1-9 — см. «Правки по ревью b1».
 
 **Interfaces:**
 - Consumes: Tasks 5, 5a, 8 (`parse_manifest`, `manifest_path`, `self_hash_v`, `envelope_refusal`,
-  `generation_refusal`, `current_event`, `parse_envelope`, `parse_stop`, `envelope_path`,
+  `generation_refusal` — до Task 13 Step 8, затем `node_history`, `current_event`, `parse_envelope`, `parse_stop`, `envelope_path`,
   `stop_path`), 11, 11a, 12, 12a (`act_trust` с `product_mode`, `act_context.delivery_verdict`,
   `act_journal`, `act_identity`).
 - Produces:
@@ -10643,7 +11111,19 @@ B1-6, B1-8, B1-9 — см. «Правки по ревью b1».
   Unavailable`, `act_status.mode_probe(state, deps=None)` — единая точка «режим продукта сейчас»;
   `act_status.gate_run(state, ops, dag, *, candidate, out, deps=None) -> tuple[str, str | None] | Unavailable`;
   `act_status.pr_for_merge(ops, slug, merge_commit) -> int | Unavailable`;
-  `act_status.REQUEST_BINDING`; `node_approval.DEBT_REVIEW_V1 = "review_v1"`.
+  `act_status.REQUEST_BINDING`; `node_approval.DEBT_REVIEW_V1 = "review_v1"`;
+  `act_status.noop_refusal(state, ops, dag, nodes=None, deps=None) -> str | None` — одна точка
+  «актуальный допуск перед успехом без полного пути» (В-1, d1), по свежему снимку базы
+  `act_status.fresh_base(state, ops)` — контекстный менеджер: `(SHA ветки базы продукта
+  repo_slug, Ops чтений из снимка)` или `Unavailable`; снимок удаляется по выходе (d2–d5);
+  `statuses_at_base(..., *, ref=None)` — `ref` становится единственным снимком истории,
+  provenance, байтов и входов;
+  `Ops.snapshot_open(target_dir, repo_slug, branch) -> Fact[SnapshotRepo]` (временный bare-
+  репозиторий с `alternates` на объекты продукта, fetch `https://github.com/<repo_slug>.git` в
+  изолированном окружении, credential helper — `gh` профиля runner'а),
+  `Ops.snapshot_reader(repo) -> Ops`, `Ops.snapshot_close(repo)`;
+  `task_bridge._admission_refusal(state, ops, legacy_bundle) -> str | None`,
+  `task_bridge._require_admission(state, ops, legacy_bundle, done) -> None`.
 
 **Режим продукта сейчас** (§6.1, §10; ревизия b1, B1-5): `live_policy` — привязка обязательна
 (нет — `Unavailable`), режим — `act_trust.product_mode` по **истории** режима: записи не было
@@ -10653,11 +11133,20 @@ B1-6, B1-8, B1-9 — см. «Правки по ревью b1».
 `_require_upstream_ready`, создание заявки, общий вход Task 13) спрашивают `mode_probe`. Следствие
 спеки, а не решение плана: на каждой машине, где исполняется путь узла или раннер, нужна привязка
 `/etc/df/trust.toml` (H2 п. 4) — иначе все эти пути останавливаются; порядок «H1–H2 до части B»
-уже в таблице «Порядок и зависимости».
+уже в таблице «Порядок и зависимости». **Второе предусловие развёртывания** (ревью d5): для
+приватного продукта профиль `gh` runner'а (`REVIEW_GH_CONFIG_DIR`, по умолчанию
+`~/.config/review`) аутентифицирован на github.com с правом чтения продукта — снимок базы для
+проверки допуска берётся по HTTPS через `gh auth git-credential`, а не через `origin`/SSH клона;
+без этого каждая проверка допуска продукта в `review` — отказ (fail closed). Публичный продукт
+читается анонимно. Процессы git снимка получают пустой `HOME` снимка: `~/.netrc` и `~/.gitconfig`
+настоящего HOME не участвуют (ревью d6). Остаточный риск D6-1 (fallback `gh` к общему keyring)
+— в разделе ревизии «Решения владельца 01.11».
 
 **Правила статуса** (§9.1 п. 0a–4) — только для продукта в `review`: событие узла — последнее по
 first-parent базы (доставленная заявка с манифестом, запись остановки; supersede — более поздняя
-заявка). Есть событие: `generation_refusal` → остановка → идентичность и привязка заявки +
+заявка; событие и записи, не ставшие событием, — одно вычисление `act_envelope.node_history`
+после Task 13 Step 8, п. 9 (Б), решение владельца 01.11; до него — `generation_refusal`). Есть
+событие: остановка → идентичность и привязка заявки +
 вердикт её доставки (`Decider`) → `envelope_refusal` по байтам **снимка** → каждый прямой upstream
 `approved` (рекурсивно); остановленный upstream — `not_approved:upstream_stopped:<A>`. **Нет
 события** (§9.1 (а) п. 3, B1-3): frontmatter без долга (`node_debt`) — лишь предпосылка; одобрение
@@ -10676,14 +11165,25 @@ first-parent базы (доставленная заявка с манифест
 исполнителя плана Р-9 (правило — спека). Провайдер отвечает за снимок, который читает steward
 (§12 п. 3): S4 — байты рабочего дерева волны, S8 и гейт доставки — база.
 
-**Канонический хеш DAG — [ждёт решения владельца В-1]** (вопрос к спеке С-3). Спека §9.1 (а)
-п. 4: «в каноническую проекцию входит производный статус из проверенного конверта». Вариант по
-умолчанию (листинг ниже): в манифест хеша входят блобы **всех** файлов `approvals/` воркстрима —
-конверты, манифесты заявок (`requests/`), записи остановки; новое действующее поколение (новый
-манифест) меняет хеш даже при прежних байтах узла и прежнем конверте (B1-6); у продукта без
-`approvals/` величина прежняя. Вариант спеки буквально — проверенный статус `Statuses.of` в
-проекции: требует доверенного контекста во всех четырёх местах `_content_anchor` (+ чтения
-форджи на каждый §I5). Шаг Step 5 (часть `task_bridge`) исполняется после ответа владельца.
+**Канонический хеш DAG и no-op §I5 — В-1, решено владельцем 01.11** (вопрос к спеке С-3). Слова
+владельца (01.11): «В-1 — локальный хеш содержимого допустим как оптимизация, но он не заменяет
+проверку одобрения. Перед успешным no-op для review/v1 проверяется актуальный допуск.»
+Гибрид: (1) в манифест хеша входят блобы **всех** файлов `approvals/` воркстрима — конверты,
+манифесты заявок (`requests/`), записи остановки (вариант (б), листинг Step 5): новое поколение,
+остановка, supersede меняют хеш без чтений форджи; у продукта без `approvals/` величина прежняя;
+(2) равный хеш для узлов `review/v1` **одного** no-op не даёт. Класс шире хеша (ревью d1):
+**любой успешный ранний выход** — no-op §I5, повтор шага по сохранённому результату (`completed`
+S4/S8), переход волны по завершённой заявке, возврат уже доставленного PR, no-op предложения по
+frontmatter — для продукта в `review` требует актуального допуска. Одна точка —
+`act_status.noop_refusal(state, ops, dag, nodes)`: каждый названный узел с событием `review/v1` —
+`approved` по `statuses_at_base` (доверенный контекст §9.1); режим не установлен, не `approved`,
+`unavailable:` — причина, успеха нет (fail closed); продукт не в `review` — прежние правила,
+статусы не читаются. Полный перечень мест (site × что пропускает × где проверка × тест) — в
+разделе ревизии «Решения владельца 01.11»; код — Step 5 (мост, раннер) и Task 13 (`_propose`).
+Буква спеки: §9.1 (а) п. 4 требует, чтобы изменение допуска не скрывалось за no-op, —
+проверенный статус спрашивается перед каждым успехом без полного пути. Цена — квота С-1: каждый
+такой выход продукта в `review` читает доверенный контекст и факты форджи по узлам `review/v1`
+(как один прогон гейта доставки).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -10694,6 +11194,7 @@ first-parent базы (доставленная заявка с манифест
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -11321,6 +11822,398 @@ def test_config_home_resolution() -> None:
     assert config_home({"XDG_CONFIG_HOME": "/cfg"}) == Path("/cfg")
     assert config_home({"XDG_CONFIG_HOME": "relative"}) == Path.home() / ".config"
     assert config_home({}) == Path.home() / ".config"
+
+
+class ProductOps(GitOps):
+    """Git и форджа стенда; источник снимка базы — локальный репозиторий продукта.
+    Единственный путь к локальному источнику — переопределение `_snapshot_url` в тесте."""
+
+    def __init__(self, prs, product: Path) -> None:
+        super().__init__(prs)
+        self.product = product
+
+    def _snapshot_url(self, repo_slug: str) -> str:
+        return str(self.product)
+
+
+def remote_stop_world(tmp_path: Path, node: str = "requirements",
+                      fname: str = "10-requirements.md") -> tuple[Path, Path, ProductOps]:
+    """d3–d4: репозиторий продукта с доставленной заявкой `review/v1` узла и его конвертом;
+    локальный клон снят ДО того, как в продукт доставлена остановка (база клона устарела).
+    Возвращает (продукт, клон, ops с форджей стенда и источником снимка — продуктом)."""
+    origin = tmp_path / "owner" / "p"
+    origin.parent.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "master", str(origin)], check=True)
+    _git(origin, "config", "user.email", "t@e.st")
+    _git(origin, "config", "user.name", "t")
+    (origin / "README.md").write_text("x\n")
+    _git(origin, "add", "-A")
+    _git(origin, "commit", "-qm", "init")
+    text = node_text(node)
+    req = request("approve-1-0-1", {node: (self_hash_v(text, "review/v1"), 1)},
+                  path_of=lambda n: f"spec/{fname}")
+    head = _branch(origin, "cand", {f"spec/{fname}": text,
+                                    manifest_path(WS, req.request_id): render_manifest(req)})
+    merge = _merge(origin, "cand")
+    _branch(origin, "final", {envelope_path(WS, node): envelope(DeliveredRequest(merge, head, req),
+                                                                node)})
+    _merge(origin, "final")
+    clone = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", str(origin), str(clone)], check=True)
+    _branch(origin, "stop", {stop_path(WS, node, 1): render_stop(StopRecord(node, 1, "переоткрыт"))})
+    _merge(origin, "stop")
+    return origin, clone, ProductOps({merge: (11, head)}, origin)
+
+
+def review_live(monkeypatch) -> None:
+    """Продукт в `review`; доверенный вердикт доставки — «принят» (стенд без форджи).
+    `statuses_at_base` и чтения git — настоящие."""
+    live = SimpleNamespace(mode="review", trust=None, journal=None)
+    monkeypatch.setattr(act_status, "mode_probe", lambda state, deps=None: live)
+    monkeypatch.setattr(act_status, "real_deps", lambda state, env=None: None)
+    monkeypatch.setattr(act_status.Decider, "__call__",
+                        lambda self, event: Accepted("m" * 40, "df-reviewer", "11", "alice"))
+
+
+def clone_state(clone: Path, **over) -> SimpleNamespace:
+    fields = {"repo_slug": SLUG, "ws_id": WS, "target_dir": str(clone), "bundle_dir": "spec",
+              "base_ref": "master", "brief": None}
+    return SimpleNamespace(**{**fields, **over})
+
+
+def _refs(repo: Path) -> str:
+    return _git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
+
+
+STOPPED = "узел requirements: not_approved:stopped:g1"
+
+
+def test_noop_refusal_reads_fresh_product_base(tmp_path: Path, monkeypatch) -> None:
+    """d3 (D3-1): локальная база клона устарела — по ней узел «approved»; проверка допуска
+    берёт свежий снимок продукта и видит остановку, без подмены `statuses_at_base`."""
+    _origin, clone, ops = remote_stop_world(tmp_path)
+    review_live(monkeypatch)
+    state = clone_state(clone)
+    stale = act_status.statuses_at_base(state, ops, DAG, act_status.mode_probe(state), None)
+    assert stale.of("requirements") == "approved"
+    assert act_status.noop_refusal(state, ops, DAG, ["requirements"]) == STOPPED
+
+
+def test_snapshot_leaves_product_repo_untouched(tmp_path: Path, monkeypatch) -> None:
+    """d4–d5: снимок — во временном репозитории: ref'ы клона (в т. ч. `local-keep` из
+    mapping `remote.origin.fetch`), его `config` и `FETCH_HEAD` не тронуты; снимок свежий."""
+    _origin, clone, ops = remote_stop_world(tmp_path)
+    _git(clone, "branch", "local-keep")
+    _git(clone, "config", "remote.origin.fetch", "+refs/heads/master:refs/heads/local-keep")
+    config = clone / ".git" / "config"
+    refs_before, config_before = _refs(clone), config.read_text()
+    review_live(monkeypatch)
+    assert act_status.noop_refusal(clone_state(clone), ops, DAG, ["requirements"]) == STOPPED
+    assert _refs(clone) == refs_before
+    assert config.read_text() == config_before
+    fetch_head = clone / ".git" / "FETCH_HEAD"
+    assert fetch_head.exists() is False
+
+
+def test_snapshot_ignores_origin_of_the_clone(tmp_path: Path, monkeypatch) -> None:
+    """d4 (D3-3): `origin` клона не читается — отстающая копия с совпадающим суффиксом пути
+    (`…/stale/owner/p`) свежести не подменяет; снимок — из источника продукта."""
+    _origin, clone, ops = remote_stop_world(tmp_path)
+    stale = tmp_path / "stale" / "owner" / "p"
+    subprocess.run(["git", "clone", "-q", "--bare", str(clone), str(stale)], check=True)
+    _git(clone, "remote", "set-url", "origin", str(stale))
+    review_live(monkeypatch)
+    assert act_status.noop_refusal(clone_state(clone), ops, DAG, ["requirements"]) == STOPPED
+
+
+def test_injected_git_config_and_env_have_no_effect(tmp_path: Path, monkeypatch) -> None:
+    """d5 (TOCTOU D3-3): `url.*.insteadOf` на отстающую копию — в config клона, в
+    глобальном (`GIT_CONFIG_GLOBAL`), через `GIT_CONFIG_COUNT/KEY/VALUE`, и в config клона
+    МЕЖДУ созданием снимка и fetch; унаследованный `GIT_DIR` — ничего не меняет: снимок
+    свежий, источник — продукт."""
+    from governance import ops as ops_mod
+
+    origin, clone, ops = remote_stop_world(tmp_path)
+    stale = tmp_path / "stale" / "owner" / "p"
+    subprocess.run(["git", "clone", "-q", "--bare", str(clone), str(stale)], check=True)
+    rule = (f"url.{stale}.insteadOf", str(origin))
+    _git(clone, "config", *rule)
+    glob = tmp_path / "global.gitconfig"
+    glob.write_text(f'[url "{stale}"]\n\tinsteadOf = {origin}\n')
+    for key, value in {"GIT_CONFIG_GLOBAL": str(glob), "GIT_CONFIG_COUNT": "1",
+                       "GIT_CONFIG_KEY_0": rule[0], "GIT_CONFIG_VALUE_0": rule[1],
+                       "GIT_DIR": str(stale)}.items():
+        monkeypatch.setenv(key, value)
+    real_run = subprocess.run
+
+    def run(cmd, **kw):
+        done = real_run(cmd, **kw)
+        if "init" in cmd:  # между созданием снимка и fetch
+            real_run(["git", "-C", str(clone), "config", "--add", *rule],
+                     env={"PATH": os.environ["PATH"]}, check=True)
+        return done
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", run)
+    review_live(monkeypatch)
+    assert act_status.noop_refusal(clone_state(clone), ops, DAG, ["requirements"]) == STOPPED
+
+
+def test_production_snapshot_command_is_isolated(tmp_path: Path, monkeypatch) -> None:
+    """d4–d5: боевой источник — только `https://github.com/<repo_slug>.git`; `origin` не
+    спрашивается; fetch — во временном репозитории, credential helper сброшен и задан
+    явно (`gh` профиля runner'а), окружение — из allowlist без `GIT_*` извне, запросов нет."""
+    from governance import ops as ops_mod
+
+    _origin, clone, _ops = remote_stop_world(tmp_path)
+    profile = tmp_path / "review-profile"
+    monkeypatch.setenv("REVIEW_GH_CONFIG_DIR", str(profile))
+    monkeypatch.setenv("GIT_DIR", "/elsewhere")
+    calls: list[tuple[list[str], dict]] = []
+    real_run = subprocess.run
+
+    def run(cmd, **kw):
+        calls.append((cmd, kw.get("env") or {}))
+        if "fetch" in cmd:
+            return subprocess.CompletedProcess(cmd, 128, "", "")
+        return real_run(cmd, **kw)
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", run)
+    got = RealOps().snapshot_open(str(clone), "owner/p", "master")
+    cmd, env = next((c, e) for c, e in calls if "fetch" in c)
+    assert cmd[cmd.index("--refmap=") + 1] == "https://github.com/owner/p.git"
+    assert cmd[2:6] == ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"]
+    isolation = tuple(env.get(k) for k in ("GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL",
+                                            "GIT_TERMINAL_PROMPT", "GH_CONFIG_DIR"))
+    assert isolation == ("1", os.devnull, "0", str(profile))
+    assert [k for k in env if k.startswith("GIT_") and k not in ISOLATION] == []
+    assert not any("origin" in c for c, _e in calls)
+    assert got.detail == "fetch owner/p master: код 128"
+
+
+ISOLATION = {"GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_TERMINAL_PROMPT", "GIT_ASKPASS"}
+
+
+@pytest.mark.parametrize("slug", ["file:///tmp/stale/owner/p", "/tmp/stale/owner/p",
+                                  "../owner/p", "owner/p/extra", "-uowner/p", "owner/.."],
+                         ids=["file_url", "local_path", "dotdot", "extra", "dash", "dot_repo"])
+def test_snapshot_rejects_non_slug_source(tmp_path: Path, monkeypatch, slug: str) -> None:
+    """d4: в источник снимка не попадает ни локальный путь, ни `file://`, ни что-либо,
+    кроме `owner/repo`; git не запускается."""
+    from governance import ops as ops_mod
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", lambda *a, **k: pytest.fail("git"))
+    got = RealOps().snapshot_open(str(tmp_path), slug, "master")
+    assert got.detail == f"repo_slug {slug!r} — не owner/repo"
+
+
+def test_noop_refusal_refuses_unfetchable_product(tmp_path: Path, monkeypatch) -> None:
+    """d3: репозиторий продукта не отвечает (путь исчез) — отказ, а не локальная база;
+    временный снимок удалён."""
+    origin, clone, ops = remote_stop_world(tmp_path)
+    origin.rename(tmp_path / "owner" / "gone")
+    review_live(monkeypatch)
+    got = act_status.noop_refusal(clone_state(clone), ops, DAG, ["requirements"])
+    assert got == "свежая база: снимок owner/p@master: fetch owner/p master: код 128"
+
+
+def test_interleaved_snapshots_are_independent(tmp_path: Path) -> None:
+    """d4–d5 (D3-4): два чередующихся вызова на одном клоне — один из отстающего источника;
+    у каждого свой временный репозиторий и свой SHA; после выхода оба удалены."""
+    origin, clone, fresh_ops = remote_stop_world(tmp_path)
+    stale = tmp_path / "stale" / "owner" / "p"
+    subprocess.run(["git", "clone", "-q", "--bare", str(clone), str(stale)], check=True)
+    stale_ops = ProductOps(fresh_ops.prs, stale)
+    state = clone_state(clone)
+    with act_status.fresh_base(state, fresh_ops) as a, act_status.fresh_base(state, stale_ops) as b:
+        dirs = [a[1].repo.git_dir, b[1].repo.git_dir]
+        assert (a[0], b[0]) == (_git(origin, "rev-parse", "master"), _git(stale, "rev-parse", "master"))
+        assert len(set(dirs)) == 2
+    assert [Path(d).exists() for d in dirs] == [False, False]
+
+
+def test_snapshot_removed_on_exception(tmp_path: Path) -> None:
+    """d5: исключение внутри проверки — временный репозиторий снимка всё равно удалён."""
+    _origin, clone, ops = remote_stop_world(tmp_path)
+    seen: list[str] = []
+    with pytest.raises(RuntimeError, match="сбой чтения"):
+        with act_status.fresh_base(clone_state(clone), ops) as snapshot:
+            seen.append(snapshot[1].repo.git_dir)
+            raise RuntimeError("сбой чтения")
+    assert Path(seen[0]).exists() is False
+
+
+class CredentialOps(ProductOps):
+    """Шов теста: credential helper — скрипт, отдающий токен; никакого другого пути."""
+
+    def __init__(self, prs, product: Path, helper: str) -> None:
+        super().__init__(prs, product)
+        self.helper = helper
+
+    def _credential_helper(self) -> str:
+        return self.helper
+
+
+TOKEN = "ghs_TEST_TOKEN_SECRET"
+
+
+def token_helper(tmp_path: Path) -> str:
+    """Helper-скрипт: токен — из файла (как у `gh`), не в собственном тексте helper'а."""
+    secret = tmp_path / "token"
+    secret.write_text(TOKEN)
+    return (f'!f() {{ test "$1" = get && echo username=x-access-token && '
+            f'echo "password=$(cat {secret})"; }}; f')
+
+
+def test_private_product_credentials_come_only_from_the_helper(tmp_path: Path,
+                                                               monkeypatch) -> None:
+    """d5 (D3-6): приватный продукт — учётные данные отдаёт только явно заданный helper,
+    без интерактивного запроса; helper глобальной конфигурации не участвует."""
+    _origin, _clone, ops = remote_stop_world(tmp_path)
+    glob = tmp_path / "global.gitconfig"
+    glob.write_text("[credential]\n\thelper = \"!echo password=FOREIGN\"\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(glob))
+    cred = CredentialOps(ops.prs, ops.product, token_helper(tmp_path))
+    git_dir = tmp_path / "probe.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(git_dir)], check=True)
+    done = cred._snapshot_git(str(git_dir), "credential", "fill",
+                              stdin="protocol=https\nhost=github.com\npath=owner/p.git\n\n")
+    assert f"password={TOKEN}" in done.stdout
+
+
+def test_token_never_in_argv_or_diagnostics(tmp_path: Path, monkeypatch) -> None:
+    """d5: fetch приватного продукта не удался — токена нет ни в argv, ни в диагностике."""
+    from governance import ops as ops_mod
+
+    _origin, clone, ops = remote_stop_world(tmp_path)
+    cred = CredentialOps(ops.prs, ops.product, token_helper(tmp_path))
+    cred._snapshot_url = lambda slug: "https://127.0.0.1:9/owner/p.git"  # отказ соединения
+    argv: list[str] = []
+    real_run = subprocess.run
+    monkeypatch.setattr(ops_mod.subprocess, "run",
+                        lambda cmd, **kw: argv.extend(cmd) or real_run(cmd, **kw))
+    got = cred.snapshot_open(str(clone), "owner/p", "master")
+    assert got.outcome is Outcome.UNAVAILABLE
+    assert TOKEN not in " ".join(argv) + got.detail
+
+
+def test_public_product_works_without_gh_token(tmp_path: Path, monkeypatch) -> None:
+    """d5: профиль `gh` без токена — публичный (здесь локальный) продукт читается анонимно,
+    helper не мешает; запрос учётных данных не интерактивен и завершается отказом."""
+    _origin, clone, ops = remote_stop_world(tmp_path)
+    monkeypatch.setenv("REVIEW_GH_CONFIG_DIR", str(tmp_path / "empty-profile"))
+    review_live(monkeypatch)
+    assert act_status.noop_refusal(clone_state(clone), ops, DAG, ["requirements"]) == STOPPED
+    git_dir = tmp_path / "probe.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(git_dir)], check=True)
+    failing = CredentialOps(ops.prs, ops.product, "!false")
+    done = failing._snapshot_git(str(git_dir), "credential", "fill",
+                                 stdin="protocol=https\nhost=github.com\npath=owner/p.git\n\n")
+    assert done.returncode != 0
+
+
+class RecordingGitOps(ProductOps):
+    """Git стенда: любое чтение git мимо снимка (по `target_dir` клона) — записывается."""
+
+    def __init__(self, prs, product: Path) -> None:
+        super().__init__(prs, product)
+        self.outside: list[str] = []
+
+    def first_parent_changes(self, target_dir, ref):
+        self.outside.append(f"first_parent {ref}")
+        return super().first_parent_changes(target_dir, ref)
+
+    def show_file(self, target_dir, ref, path):
+        self.outside.append(f"show {ref}:{path}")
+        return super().show_file(target_dir, ref, path)
+
+
+def test_admission_reads_only_the_snapshot(tmp_path: Path, monkeypatch) -> None:
+    """d3–d5: внутри проверки допуска история, provenance старого акта, байты узла,
+    конверт и прямые входы читаются из временного репозитория снимка по ОДНОМУ SHA; мимо
+    снимка (клоном продукта) не читается ничего."""
+    from governance import ops as ops_mod
+
+    origin, clone, base_ops = remote_stop_world(tmp_path)
+    ops = RecordingGitOps(base_ops.prs, origin)
+    reads: list[tuple[str, str]] = []
+    for name in ("first_parent_changes", "show_file", "show_file_bytes"):
+        real = getattr(ops_mod.SnapshotOps, name)
+
+        def record(self, target_dir, ref, *rest, _real=real):
+            reads.append((ref, rest[0] if rest else ""))
+            return _real(self, target_dir, ref, *rest)
+
+        monkeypatch.setattr(ops_mod.SnapshotOps, name, record)
+    review_live(monkeypatch)
+    state = clone_state(clone)
+    with act_status.fresh_base(state, ops) as (snapshot, reader):
+        statuses = act_status.statuses_at_base(state, reader, DAG, act_status.mode_probe(state),
+                                               None, ref=snapshot)
+        statuses.of("requirements")
+        statuses.blobs_of("behaviour-spec")  # прямой вход — requirements
+        statuses.legacy("spec/15-behaviour-spec.md", BEH_TEXT)  # provenance
+    assert ops.outside == []
+    snapshot_refs = {snapshot}
+    node_reads = {ref for ref, path in reads
+                  if path in ("", "spec/10-requirements.md", envelope_path(WS, "requirements"))}
+    assert node_reads == snapshot_refs
+    assert all(len(ref) == 40 and set(ref) <= set("0123456789abcdef") for ref, _p in reads)
+
+
+@pytest.mark.parametrize("name", ["blob_in_commit", "commit_files", "checkout_and_pull",
+                                  "is_ancestor", "show_repo_file_bytes"])
+def test_snapshot_ops_denies_unlisted_methods(tmp_path: Path, name: str) -> None:
+    """d5 (deny-by-default): метод вне пяти git-методов снимка и allowlist форджи —
+    `AttributeError` с именем метода; клон не читается."""
+    _origin, clone, ops = remote_stop_world(tmp_path)
+    with act_status.fresh_base(clone_state(clone), ops) as (_sha, reader):
+        with pytest.raises(AttributeError, match=f"{name!r} не разрешён"):
+            getattr(reader, name)
+
+
+def test_snapshot_forge_allowlist_reads_no_clone() -> None:
+    """d5: каждый метод allowlist форджи `SnapshotOps` — метод `RealOps` без `target_dir` и
+    без запуска `git`: локальный клон он прочитать не может."""
+    import inspect
+
+    from governance import ops as ops_mod
+
+    readers = [name for name in sorted(ops_mod.SNAPSHOT_FORGE_METHODS)
+               if "target_dir" in inspect.signature(getattr(RealOps, name)).parameters
+               or '"git"' in inspect.getsource(getattr(RealOps, name))]
+    assert readers == []
+
+
+def test_foreign_home_credentials_have_no_effect(tmp_path: Path, monkeypatch) -> None:
+    """d6 (D6-2): чужие `~/.netrc` и `~/.gitconfig` настоящего HOME не участвуют — процессы
+    git снимка получают пустой `HOME` (и `XDG_CONFIG_HOME`) внутри временного каталога
+    снимка; профиль `gh` передаётся абсолютным путём, разрешённым ДО подмены HOME."""
+    from governance import ops as ops_mod
+
+    _origin, clone, ops = remote_stop_world(tmp_path)
+    home = tmp_path / "real-home"
+    home.mkdir()
+    (home / ".netrc").write_text("machine github.com login x-access-token password FOREIGN\n")
+    (home / ".gitconfig").write_text('[credential]\n\thelper = "!echo password=FOREIGN"\n')
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("REVIEW_GH_CONFIG_DIR", "~/.config/review")
+    seen: list[tuple[str, list[str], bool, str]] = []
+    real_run = subprocess.run
+
+    def run(cmd, **kw):
+        if "fetch" in cmd:
+            env = kw["env"]
+            seen.append((Path(env["HOME"]).name, sorted(os.listdir(env["HOME"])),
+                         Path(env.get("XDG_CONFIG_HOME", "")).parent == Path(env["HOME"]),
+                         env["GH_CONFIG_DIR"]))
+        return real_run(cmd, **kw)
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", run)
+    review_live(monkeypatch)
+    assert act_status.noop_refusal(clone_state(clone), ops, DAG, ["requirements"]) == STOPPED
+    expected = [("home", [], True, str((home / ".config" / "review").resolve()))]
+    snapshot_home = list(seen)
+    assert snapshot_home == expected
 ```
 
 `tests/test_act_legacy.py`:
@@ -11802,7 +12695,8 @@ def test_cli_accepts_provider_file_and_reports_not_approved(tmp_path: Path) -> N
     assert "GC-ACT-PROVIDER-MISSING" in without.stdout + without.stderr
 
 
-NEW_OPS = {"first_parent_changes", "pr_body_fact", "gate_snapshot_digest"}
+NEW_OPS = {"first_parent_changes", "pr_body_fact", "gate_snapshot_digest", "snapshot_open",
+           "snapshot_reader", "snapshot_close"}
 HISTORY = {"statuses_at_base", "load_history", "Decider"}
 _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
 
@@ -11900,9 +12794,210 @@ def test_s4_stops_when_act_mode_unset(tmp_path: Path, runs_root, monkeypatch) ->
     findings = (rs.run_dir("r-act-gate") / "gate-findings.txt").read_text(encoding="utf-8")
     assert "GC-ACT-UNAVAILABLE(devtools)" in findings and "HTTP 403" in findings
     assert ops.gate_modes == []
+
+
+FRESH = "f" * 40  # SHA свежего снимка базы продукта (`Ops.snapshot_open`)
+
+
+def _review_admission(monkeypatch, ops, remote: dict[str, str], *, fetched: bool = True,
+                      local: dict[str, str] | None = None) -> None:
+    """Продукт в `review`. Статусы зависят от снимка базы: свежий SHA — `remote`, локальная
+    ветка — `local` (по умолчанию «approved»: устаревшая база остановки не видит)."""
+    from governance import act_status
+    from governance.facts import Fact, Outcome, unavailable
+    from governance.ops import SnapshotRepo
+
+    live = SimpleNamespace(mode="review")
+    monkeypatch.setattr(act_status, "mode_probe", lambda state, deps=None: live)
+    snapshot = (Fact(Outcome.FOUND, SnapshotRepo("/нет", FRESH, "u"), "ok") if fetched
+                else unavailable("fetch: код 128"))
+    monkeypatch.setattr(ops, "snapshot_open", lambda target_dir, slug, branch: snapshot,
+                        raising=False)
+    monkeypatch.setattr(ops, "snapshot_reader", lambda repo: ops, raising=False)
+    monkeypatch.setattr(ops, "snapshot_close", lambda repo: None, raising=False)
+    stale = local if local is not None else {node: "approved" for node in remote}
+
+    def at_base(state, ops_, dag, live_, deps=None, *, ref=None):
+        verdicts = remote if ref == FRESH else stale
+        return SimpleNamespace(is_review=lambda node: node in verdicts,
+                               of=lambda node: verdicts[node])
+
+    monkeypatch.setattr(act_status, "statuses_at_base", at_base)
+
+
+def _wave_state(tmp_path: Path, run_id: str, wave: int) -> tuple[rs.RunState, FakeOps]:
+    ops = FakeOps(s8_exit=0)
+    state = _wave_run_at_s8(tmp_path, run_id, ops)
+    state.wave = wave
+    return state, ops
+
+
+def _gate_rerun(*_args, **_kwargs):
+    raise RuntimeError("гейт S4 заново")
+
+
+def _checkout_fails(*_args):
+    raise RuntimeError("чекаут базы: гейт заново")
+
+
+ADMISSION_LOST = ["not_approved:stopped:g1", "unavailable:df-trust: HTTP 403"]
+
+
+@pytest.mark.parametrize("verdict", ADMISSION_LOST, ids=["stop_delivered", "admission_unavailable"])
+def test_s4_completed_gate_rerun_without_admission(tmp_path, runs_root, monkeypatch, capsys,
+                                                   verdict: str) -> None:
+    """Решение владельца 01.11 (d1, D1-2): повторный вход в S4 с сохранённым зелёным гейтом —
+    после доставленной остановки узла нижнего уровня или при недоступном допуске гейт
+    исполняется заново, а не пропускается."""
+    from governance import runner
+
+    state, ops = _wave_state(tmp_path, "r-adm-s4", wave=2)
+    state.ops[runner.wave_key(state, "gate-candidate")] = {"status": "completed"}
+    _review_admission(monkeypatch, ops, {"charter": verdict})
+    monkeypatch.setattr(runner, "wave_profile_dir", _gate_rerun)
+    with pytest.raises(RuntimeError, match="гейт S4 заново"):
+        runner._step_gate(state, ops)
+    assert f"допуск review/v1 не подтверждён (узел charter: {verdict})" in capsys.readouterr().out
+
+
+def test_s4_completed_gate_kept_with_admission(tmp_path, runs_root, monkeypatch) -> None:
+    """d1: допуск подтверждён — сохранённый S4 пропускается, как раньше."""
+    from governance import runner
+
+    state, ops = _wave_state(tmp_path, "r-adm-s4-ok", wave=2)
+    state.ops[runner.wave_key(state, "gate-candidate")] = {"status": "completed"}
+    _review_admission(monkeypatch, ops, {"charter": "approved"})
+    monkeypatch.setattr(runner, "wave_profile_dir", _gate_rerun)
+    assert runner._step_gate(state, ops) is True
+
+
+@pytest.mark.parametrize("verdict", ADMISSION_LOST, ids=["stop_delivered", "admission_unavailable"])
+def test_s8_completed_gate_rerun_without_admission(tmp_path, runs_root, monkeypatch, capsys,
+                                                   verdict: str) -> None:
+    """d1 (D1-2): повторный вход в S8 с сохранённым `exit=0` — после доставленной остановки
+    или при недоступном допуске гейт исполняется заново (здесь — до чекаута базы)."""
+    from governance import runner
+
+    state, ops = _wave_state(tmp_path, "r-adm-s8", wave=5)
+    state.ops["gate-authoritative"] = {"status": "completed", "exit": 0, "output": ""}
+    _review_admission(monkeypatch, ops, {"design": verdict})
+    monkeypatch.setattr(ops, "checkout_and_pull", _checkout_fails)
+    assert runner._step_s8(state, ops) is False
+    assert state.ops["gate-authoritative"]["status"] == "started"
+    assert f"допуск review/v1 не подтверждён (узел design: {verdict})" in capsys.readouterr().out
+
+
+def test_s8_completed_gate_kept_with_admission(tmp_path, runs_root, monkeypatch) -> None:
+    """d1: допуск подтверждён — сохранённый `exit=0` завершает S8, как раньше."""
+    from governance import runner
+
+    state, ops = _wave_state(tmp_path, "r-adm-s8-ok", wave=5)
+    state.ops["gate-authoritative"] = {"status": "completed", "exit": 0, "output": ""}
+    _review_admission(monkeypatch, ops, {"design": "approved"})
+    assert runner._step_s8(state, ops) is True
+
+
+@pytest.mark.parametrize("verdict", ADMISSION_LOST, ids=["stop_delivered", "admission_unavailable"])
+def test_next_wave_needs_admission(tmp_path, runs_root, monkeypatch, verdict: str) -> None:
+    """d1: переход волны по завершённой заявке — только при актуальном допуске узлов волны;
+    иначе `stopped_review`, волна та же."""
+    from governance import runner
+
+    state, ops = _wave_state(tmp_path, "r-adm-next", wave=1)
+    _review_admission(monkeypatch, ops, {"charter": verdict})
+    monkeypatch.setattr(runner, "advance", lambda state, ops, *, lock: state)
+    got = runner._next_wave(state, ops, lock=None)
+    assert (got.status, got.wave) == ("stopped_review", 1)
+
+
+def _site_s4(state, ops, monkeypatch) -> str:
+    from governance import runner
+
+    state.ops[runner.wave_key(state, "gate-candidate")] = {"status": "completed"}
+    monkeypatch.setattr(runner, "wave_profile_dir", _gate_rerun)
+    try:
+        runner._step_gate(state, ops)
+    except RuntimeError:
+        return "no_success"
+    return "success"
+
+
+def _site_s8(state, ops, monkeypatch) -> str:
+    from governance import runner
+
+    state.ops["gate-authoritative"] = {"status": "completed", "exit": 0, "output": ""}
+    monkeypatch.setattr(ops, "checkout_and_pull", _checkout_fails)
+    return "success" if runner._step_s8(state, ops) else "no_success"
+
+
+def _site_next_wave(state, ops, monkeypatch) -> str:
+    from governance import runner
+
+    monkeypatch.setattr(runner, "advance", lambda state, ops, *, lock: state)
+    got = runner._next_wave(state, ops, lock=None)
+    return "no_success" if got.status == "stopped_review" else "success"
+
+
+#: Сайт → (исход, волна, узел, допуск которого спрашивается).
+ADMISSION_SITES = {"s4": (_site_s4, 2, "charter"), "s8": (_site_s8, 5, "design"),
+                   "next_wave": (_site_next_wave, 1, "charter")}
+
+
+@pytest.mark.parametrize("site", sorted(ADMISSION_SITES))
+def test_remote_stop_with_stale_local_base_no_success(tmp_path, runs_root, monkeypatch,
+                                                      site: str) -> None:
+    """d2 (D2-1): локальная база устарела («approved»), на origin остановка уже доставлена —
+    проверка читает свежий снимок, успеха нет."""
+    outcome, wave, node = ADMISSION_SITES[site]
+    state, ops = _wave_state(tmp_path, f"r-adm-stale-{site}", wave=wave)
+    _review_admission(monkeypatch, ops, {node: "not_approved:stopped:g1"})
+    assert outcome(state, ops, monkeypatch) == "no_success"
+
+
+@pytest.mark.parametrize("site", sorted(ADMISSION_SITES))
+def test_admission_refused_when_base_not_refreshed(tmp_path, runs_root, monkeypatch,
+                                                   site: str) -> None:
+    """d2 (D2-1): свежий снимок базы не получен (`fetch` не удался) — успеха нет, хотя
+    локальная база говорит «approved»."""
+    outcome, wave, node = ADMISSION_SITES[site]
+    state, ops = _wave_state(tmp_path, f"r-adm-fetch-{site}", wave=wave)
+    _review_admission(monkeypatch, ops, {node: "approved"}, fetched=False)
+    assert outcome(state, ops, monkeypatch) == "no_success"
+
+
+def test_s8_lost_admission_run_not_completed_when_checkout_fails(tmp_path, runs_root,
+                                                                 monkeypatch) -> None:
+    """d2 (D2-2): прогон `completed`, сохранённый S8 `exit=0`, допуск утрачен; чекаут базы
+    после обнаружения падает — прогон не остаётся `completed` (статус сохранён до чекаута)."""
+    state, ops = _wave_state(tmp_path, "r-adm-s8-status", wave=5)
+    state.status = "completed"
+    state.ops["gate-authoritative"] = {"status": "completed", "exit": 0, "output": ""}
+    rs.save(state)
+    _review_admission(monkeypatch, ops, {"design": "not_approved:stopped:g1"})
+    monkeypatch.setattr(ops, "checkout_and_pull", _checkout_fails)
+    got = locked_runner.advance(state, ops)
+    assert got.status == "running"
+    assert rs.load("r-adm-s8-status").status == "running"
+
+
+@pytest.mark.parametrize("site", sorted(ADMISSION_SITES))
+def test_stale_clone_remote_stop_end_to_end(tmp_path, runs_root, monkeypatch, site: str) -> None:
+    """d3 (D3-1): настоящий git — в продукте доставлена остановка `charter`, локальный клон
+    устарел; `statuses_at_base` и чтения не подменены — S4, S8, `_next_wave` успеха не дают."""
+    from tests.test_act_status import WS, clone_state, remote_stop_world, review_live
+
+    outcome, wave, _node = ADMISSION_SITES[site]
+    _origin, clone, git_ops = remote_stop_world(tmp_path / "git", node="charter",
+                                                fname="00-charter.md")
+    state, _fake = _wave_state(tmp_path, f"r-adm-e2e-{site}", wave=wave)
+    for name, value in vars(clone_state(clone, ws_id=WS)).items():
+        setattr(state, name, value)
+    rs.save(state)
+    review_live(monkeypatch)
+    assert outcome(state, git_ops, monkeypatch) == "no_success"
 ```
 
-Дополнение `tests/test_governance_task_bridge.py` (вариант по умолчанию В-1):
+Дополнение `tests/test_governance_task_bridge.py` (В-1, решение владельца 01.11):
 
 ```python
 def _canon_bundle(root: Path, rel: str) -> tuple:
@@ -11964,6 +13059,143 @@ def test_canonical_hash_with_approvals_is_a_new_epoch(tmp_path: Path) -> None:
     acted = task_bridge._canonical_dag_hash(str(tmp_path), rel, dag, ws_id="ws-7")
     assert plain.startswith("v2:") and acted.startswith("v3:")
     assert not task_bridge._comparable_anchors(plain, acted)
+
+
+def _review_mode(monkeypatch, verdicts: dict[str, str]) -> None:
+    """Продукт в `review`; `statuses_at_base` отвечает заданными статусами узлов."""
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from governance import act_status
+
+    live = SimpleNamespace(mode="review")
+    monkeypatch.setattr(act_status, "mode_probe", lambda state, deps=None: live)
+
+    class _Statuses:
+        def is_review(self, node: str) -> bool:
+            return node in verdicts
+
+        def of(self, node: str) -> str:
+            return verdicts[node]
+
+    monkeypatch.setattr(act_status, "fresh_base",
+                        lambda state, ops: nullcontext(("f" * 40, ops)))
+    monkeypatch.setattr(act_status, "statuses_at_base",
+                        lambda state, ops, dag, live, deps=None, *, ref=None: _Statuses())
+
+
+def _equal_anchor_state(tmp_path: Path, monkeypatch):
+    """Запись доставки с тем же `content_anchor`, что у текущего дерева (хеш не менялся)."""
+    from governance import run_state as rs
+    from governance import task_bridge as tb
+
+    state = _recon_state(tmp_path, monkeypatch)
+    state.ops["tasks-deliver"] = {
+        "status": "completed", "pr": 5, "anchor": "БЛОБ-ДОСТАВКИ-v1",
+        "content_anchor": tb._content_anchor(state.target_dir, state.bundle_dir, None),
+    }
+    rs.save(state)
+    return state
+
+
+def _gate_reached(*_args):
+    raise RuntimeError("гейт §I12 вызван")
+
+
+def test_review_noop_with_fresh_approval(tmp_path, monkeypatch) -> None:
+    """В-1 (решение владельца 01.11): хеш не менялся и узел `review/v1` одобрен сейчас —
+    бесследный no-op §I5 прежний."""
+    from governance import task_bridge as tb
+
+    _review_mode(monkeypatch, {"requirements": "approved"})
+    state = _equal_anchor_state(tmp_path, monkeypatch)
+    monkeypatch.setattr(tb, "_approved_dag_or_refuse", _gate_reached)
+    assert tb.deliver_superseded(state, _ProvOps(prs=[_MERGED_PR])) == tb.SupersedeResult("noop")
+
+
+@pytest.mark.parametrize("verdict", [
+    "not_approved:stopped:g1",
+    "not_approved:act:d1_no_act",
+    "unavailable:df-trust: HTTP 403",
+], ids=["stop_delivered", "act_revoked", "trust_unavailable"])
+def test_review_noop_refused_without_fresh_approval(tmp_path, monkeypatch, capsys,
+                                                    verdict: str) -> None:
+    """В-1: хеш не менялся, но допуск узла `review/v1` отозван (остановка, ревью
+    отозвано) или не проверяется (доверенный контекст недоступен) — no-op не объявляется,
+    дальше гейт §I12 по прежним правилам."""
+    from governance import task_bridge as tb
+
+    _review_mode(monkeypatch, {"requirements": verdict})
+    state = _equal_anchor_state(tmp_path, monkeypatch)
+    monkeypatch.setattr(tb, "_approved_dag_or_refuse", _gate_reached)
+    with pytest.raises(RuntimeError, match="гейт §I12 вызван"):
+        tb.deliver_superseded(state, _ProvOps(prs=[_MERGED_PR]))
+    out = capsys.readouterr().out
+    assert f"бесследного no-op нет (узел requirements: {verdict})" in out
+
+
+def test_review_noop_refused_when_mode_unset(tmp_path, monkeypatch, capsys) -> None:
+    """В-1: режим акта не установлен (нет привязки) — no-op не объявляется."""
+    from governance import act_status
+    from governance import task_bridge as tb
+    from governance.act_time import Unavailable
+
+    monkeypatch.setattr(act_status, "mode_probe",
+                        lambda state, deps=None: Unavailable("нет привязки"))
+    state = _equal_anchor_state(tmp_path, monkeypatch)
+    monkeypatch.setattr(tb, "_approved_dag_or_refuse", _gate_reached)
+    with pytest.raises(RuntimeError, match="гейт §I12 вызван"):
+        tb.deliver_superseded(state, _ProvOps(prs=[_MERGED_PR]))
+    assert "бесследного no-op нет (режим акта продукта: нет привязки)" in capsys.readouterr().out
+
+
+def test_noop_without_review_nodes_reads_no_statuses(tmp_path, monkeypatch) -> None:
+    """В-1: продукт до миграции — правило §I5 прежнее, статусы не читаются (квота С-1)."""
+    from governance import act_status
+    from governance import task_bridge as tb
+
+    monkeypatch.setattr(act_status, "statuses_at_base",
+                        lambda *a, **k: pytest.fail("статусы для продукта до миграции"))
+    state = _equal_anchor_state(tmp_path, monkeypatch)
+    assert tb.deliver_superseded(state, _ProvOps(prs=[_MERGED_PR])) == tb.SupersedeResult("noop")
+
+
+def _for_run_completed(tmp_path: Path, monkeypatch) -> int:
+    """Доставка уже записана `completed` — повтор возвращает её PR."""
+    state = _recon_state(tmp_path, monkeypatch, op={"status": "completed", "pr": 5})
+    return task_bridge.deliver_for_run(state, _ReconOps())
+
+
+#: Успешные выходы по сохранённому результату (d1): сценарий — существующий тест этого исхода.
+_STORED_SUCCESS = {
+    "for_run_completed": lambda tp, mp, cs: _for_run_completed(tp, mp),
+    "for_run_adopted": lambda tp, mp, cs: test_deliver_for_run_adopts_existing_pr_by_branch(tp, mp),
+    "returned_pr": lambda tp, mp, cs: test_supersede_returns_existing_pr_when_revision_completed(tp, mp),
+    "returned_merged": lambda tp, mp, cs: test_supersede_completes_started_revision_with_merged_pr(tp, mp),
+    "returned_open": lambda tp, mp, cs: test_supersede_resumes_started_revision_with_open_pr(tp, mp),
+    "returned_v1": lambda tp, mp, cs: test_supersede_returns_open_pr_of_first_delivery(tp, mp),
+    "v1_replacement": lambda tp, mp, cs: test_replace_v1_repeat_after_live_replacement_explains(
+        "OPEN", tp, mp, cs),
+    "redo_intent": lambda tp, mp, cs: test_supersede_resumes_started_revision_without_pr(tp, mp),
+}
+
+
+def test_for_run_completed_returns_pr_with_admission(tmp_path, monkeypatch) -> None:
+    """d1: допуск подтверждён (продукт до миграции) — повтор возвращает записанный PR."""
+    assert _for_run_completed(tmp_path, monkeypatch) == 5
+
+
+@pytest.mark.parametrize("site", sorted(_STORED_SUCCESS))
+def test_stored_success_requires_admission(tmp_path, monkeypatch, capsys, site: str) -> None:
+    """Решение владельца 01.11 (d1): успех по сохранённому результату — возврат уже
+    доставленного PR, повтор доставки из намерения — для продукта в `review` только при
+    актуальном допуске узлов `review/v1`; иначе отказ, успеха нет."""
+    from governance import act_status
+
+    monkeypatch.setattr(act_status, "noop_refusal",
+                        lambda *a, **k: "узел requirements: not_approved:stopped:g1")
+    with pytest.raises(RuntimeError, match="допуск review/v1 не подтверждён — узел requirements"):
+        _STORED_SUCCESS[site](tmp_path, monkeypatch, capsys)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -11979,6 +13211,209 @@ Expected: FAIL — `ImportError: cannot import name 'act_status' from 'governanc
     def first_parent_changes(
         self, target_dir: str, ref: str
     ) -> list[tuple[str, tuple[str, ...], tuple[tuple[str, str], ...]]] | None: ...
+
+    def snapshot_open(
+        self, target_dir: str, repo_slug: str, branch: str
+    ) -> Fact[SnapshotRepo]: ...
+
+    def snapshot_reader(self, repo: SnapshotRepo) -> Ops: ...
+
+    def snapshot_close(self, repo: SnapshotRepo) -> None: ...
+```
+
+Изолированный снимок базы продукта (ревью d3–d5): модульные `_REPO_SLUG`,
+`_SNAPSHOT_ENV_KEEP`, `SnapshotRepo`, `SNAPSHOT_FORGE_METHODS`, `SnapshotOps` (deny-by-default),
+`_SNAPSHOT_FETCH`, `_parse_first_parent`
+(рядом с `_ISSUE_URL_RE`; в импорты — `import tempfile`, `import uuid`,
+`from dataclasses import dataclass`). `origin` клона, его `config`, глобальная и системная
+конфигурация git и `GIT_*` окружения в снимок не попадают; другой источник — только
+переопределение `_snapshot_url` в тестовом наследнике:
+
+```python
+#: Форма `repo_slug` продукта: `owner/repo` по правилам имён GitHub — ничего, что git принял
+#: бы за путь, схему или опцию.
+_REPO_SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/(?!\.\.?$)[A-Za-z0-9_.-]+")
+#: Окружение git снимка базы — только эти переменные (ревью d5): ни одной `GIT_*` извне.
+_SNAPSHOT_ENV_KEEP = ("PATH", "LANG", "LC_ALL", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR")
+
+
+@dataclass(frozen=True)
+class SnapshotRepo:
+    """Изолированный снимок базы продукта (ревью d5, d6): временный каталог — bare-репозиторий
+    `repo.git` (`objects/info/alternates` → объекты продукта; в продукт ничего не пишется) и
+    пустой `home` процессов git снимка; SHA ветки базы и канонический URL источника."""
+
+    git_dir: str
+    sha: str
+    url: str
+
+
+#: Методы базовых `Ops`, которые `SnapshotOps` пропускает: только форджа (сеть, `gh`), ни один
+#: не читает локальный клон (ревью d5, deny-by-default). Любой другой метод — отказ.
+SNAPSHOT_FORGE_METHODS = frozenset({
+    "brief_pr_fact", "find_pr", "pr_facts", "prs_containing_commit", "repo_file_fact",
+    "policy_version_fact",
+})
+
+
+class SnapshotOps:
+    """`Ops` поверх снимка, deny-by-default: пять методов git — из временного репозитория
+    снимка с изолированным окружением (`target_dir` вызова не используется), методы форджи
+    из `SNAPSHOT_FORGE_METHODS` — базовых `Ops`; любой другой метод — `AttributeError`:
+    новое чтение git внутри проверки допуска падает громко, а не читает клон."""
+
+    def __init__(self, base: RealOps, repo: SnapshotRepo) -> None:
+        self._base, self.repo = base, repo
+
+    def __getattr__(self, name: str) -> object:
+        if name in SNAPSHOT_FORGE_METHODS:
+            return getattr(self._base, name)
+        raise AttributeError(
+            f"SnapshotOps: метод {name!r} не разрешён внутри проверки допуска "
+            "(deny-by-default: git — только из снимка, иное — форджа из allowlist)"
+        )
+
+    def _git(self, *args: str, text: bool = True) -> subprocess.CompletedProcess:
+        return self._base._snapshot_git(self.repo.git_dir, *args, text=text)
+
+    def first_parent_changes(
+        self, target_dir: str, ref: str
+    ) -> list[tuple[str, tuple[str, ...], tuple[tuple[str, str], ...]]] | None:
+        done = self._git("log", "--first-parent", "--reverse", "--diff-merges=first-parent",
+                         "--no-renames", "--name-status", "--format=%x00%H %P", ref)
+        return _parse_first_parent(done.stdout) if done.returncode == 0 else None
+
+    def show_file(self, target_dir: str, ref: str, path: str) -> str | None:
+        done = self._git("show", f"{ref}:{path}")
+        return done.stdout if done.returncode == 0 else None
+
+    def show_file_bytes(self, target_dir: str, ref: str, path: str) -> bytes | None:
+        done = self._git("show", f"{ref}:{path}", text=False)
+        return done.stdout if done.returncode == 0 else None
+
+    def rev_parse(self, target_dir: str, ref: str) -> str | None:
+        return self._git("rev-parse", "--verify", "--quiet", ref).stdout.strip() or None
+
+    def fetch_branch(self, target_dir: str, branch: str) -> bool:
+        """Догрузка ref'а (голова squash-PR `refs/pull/N/head`) — в снимок, тем же
+        изолированным fetch из канонического источника."""
+        ref = branch if branch.startswith("refs/") else f"refs/heads/{branch}"
+        done = self._git(*_SNAPSHOT_FETCH, self.repo.url,
+                         f"+{ref}:refs/snap/extra/{uuid.uuid4().hex}")
+        return done.returncode == 0
+
+
+#: Fetch снимка: без тегов, без `FETCH_HEAD`, без отображения `remote.*.fetch`.
+_SNAPSHOT_FETCH = ("fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=")
+
+
+def _parse_first_parent(
+    stdout: str,
+) -> list[tuple[str, tuple[str, ...], tuple[tuple[str, str], ...]]]:
+    """Разбор `git log --first-parent --name-status --format=%x00%H %P`."""
+    rows: list[tuple[str, tuple[str, ...], tuple[tuple[str, str], ...]]] = []
+    for chunk in stdout.split("\x00")[1:]:
+        lines = [ln for ln in chunk.splitlines() if ln.strip()]
+        commit, *parents = lines[0].split()
+        changes = tuple(
+            (ln.split("\t", 1)[0], ln.split("\t", 1)[1]) for ln in lines[1:] if "\t" in ln
+        )
+        rows.append((commit, tuple(parents), changes))
+    return rows
+```
+
+Методы `RealOps`:
+
+```python
+    def _snapshot_url(self, repo_slug: str) -> str:
+        """Источник снимка базы продукта — канонический URL из `repo_slug` (ревью d4).
+
+        `origin` клона не читается: он может указывать на fork или копию. Другой
+        источник — только переопределение метода в тестовом наследнике (локальный стенд);
+        ни конфигурация, ни окружение его не задают."""
+        return f"https://github.com/{repo_slug}.git"
+
+    def _credential_helper(self) -> str:
+        """Единственный credential helper fetch снимка — `gh` профиля runner'а (d5)."""
+        return "!gh auth git-credential"
+
+    def _snapshot_env(self, home: Path) -> dict[str, str]:
+        """Изолированное окружение git снимка (d5, d6): переменные — из allowlist,
+        конфигурации system/global нет, интерактивных запросов нет; `HOME` и
+        `XDG_CONFIG_HOME` — пустой каталог снимка (ни `~/.netrc`, ни `~/.gitconfig`, ни
+        чужой `gh` настоящего HOME); `gh` — профиль runner'а (`REVIEW_GH_CONFIG_DIR`, как
+        прочие вызовы `gh` агента), абсолютный путь разрешён ДО подмены HOME."""
+        env = {k: os.environ[k] for k in _SNAPSHOT_ENV_KEEP if k in os.environ}
+        profile = Path(os.environ.get("REVIEW_GH_CONFIG_DIR") or REVIEW_GH_CONFIG_DIR)
+        env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                   GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="", SSH_ASKPASS="",
+                   HOME=str(home), XDG_CONFIG_HOME=str(home / ".config"),
+                   GH_CONFIG_DIR=str(profile.expanduser().resolve()), GH_PROMPT_DISABLED="1")
+        return env
+
+    def _snapshot_git(self, git_dir: str, *args: str, text: bool = True,
+                      stdin: str | None = None) -> subprocess.CompletedProcess:
+        """git над снимком: `--git-dir` временного репозитория, изолированное окружение
+        с пустым `HOME` снимка (соседний каталог `home`), credential helper сброшен и задан
+        явно. Токен в argv не попадает (его отдаёт helper через stdin/stdout git)."""
+        return subprocess.run(
+            ["git", f"--git-dir={git_dir}", "-c", "credential.helper=",
+             "-c", f"credential.helper={self._credential_helper()}", *args],
+            capture_output=True, text=text, input=stdin, check=False,
+            env=self._snapshot_env(Path(git_dir).parent / "home"),
+        )
+
+    def snapshot_open(
+        self, target_dir: str, repo_slug: str, branch: str
+    ) -> Fact[SnapshotRepo]:
+        """Свежий изолированный снимок ветки `branch` продукта `repo_slug` (ревью d3–d5).
+
+        Временный bare-репозиторий (свой `config` без `url.*`; объекты продукта — через
+        `objects/info/alternates`, в продукт ничего не пишется); fetch из
+        `_snapshot_url(repo_slug)` в изолированном окружении; SHA полученного объекта.
+        Конфигурация репозитория продукта, глобальная и системная, `GIT_*` окружения на
+        источник и fetch не влияют. Неудача — `Unavailable`, временный каталог удалён;
+        URL и токен в диагностику не попадают."""
+        if not _REPO_SLUG.fullmatch(repo_slug):
+            return unavailable(f"repo_slug {repo_slug!r} — не owner/repo")
+        root = tempfile.mkdtemp(prefix="act-snapshot-")
+        git_dir, home = str(Path(root) / "repo.git"), Path(root) / "home"
+        home.mkdir()
+        try:
+            common = subprocess.run(
+                ["git", "-C", target_dir, "rev-parse", "--path-format=absolute",
+                 "--git-common-dir"],
+                capture_output=True, text=True, check=False, env=self._snapshot_env(home),
+            )
+            if common.returncode != 0 or not common.stdout.strip():
+                return unavailable("репозиторий продукта не читается")
+            init = self._snapshot_git(git_dir, "init", "--quiet", "--bare", "--template=")
+            if init.returncode != 0:
+                return unavailable(f"снимок не создан: код {init.returncode}")
+            alternates = Path(git_dir) / "objects" / "info" / "alternates"
+            alternates.write_text(f"{common.stdout.strip()}/objects\n", encoding="utf-8")
+            url = self._snapshot_url(repo_slug)
+            done = self._snapshot_git(git_dir, *_SNAPSHOT_FETCH, url,
+                                      f"+refs/heads/{branch}:refs/snap/base")
+            if done.returncode != 0:
+                return unavailable(f"fetch {repo_slug} {branch}: код {done.returncode}")
+            sha = self._snapshot_git(git_dir, "rev-parse", "--verify", "--quiet",
+                                     "refs/snap/base^{commit}").stdout.strip()
+            if not sha:
+                return unavailable(f"снимок {repo_slug} {branch} не разрешается")
+            repo, root = SnapshotRepo(git_dir, sha, url), ""
+            return Fact(Outcome.FOUND, repo, "ok")
+        finally:
+            if root:
+                shutil.rmtree(root, ignore_errors=True)
+
+    def snapshot_reader(self, repo: SnapshotRepo) -> SnapshotOps:
+        """`Ops`, читающие git только из снимка (история, байты, входы, головы PR)."""
+        return SnapshotOps(self, repo)
+
+    def snapshot_close(self, repo: SnapshotRepo) -> None:
+        """Удалить временный каталог снимка (репозиторий и пустой `home`)."""
+        shutil.rmtree(Path(repo.git_dir).parent, ignore_errors=True)
 ```
 
 ```python
@@ -11999,15 +13434,7 @@ Expected: FAIL — `ImportError: cannot import name 'act_status' from 'governanc
         )
         if done.returncode != 0:
             return None
-        rows: list[tuple[str, tuple[str, ...], tuple[tuple[str, str], ...]]] = []
-        for chunk in done.stdout.split("\x00")[1:]:
-            lines = [ln for ln in chunk.splitlines() if ln.strip()]
-            commit, *parents = lines[0].split()
-            changes = tuple(
-                (ln.split("\t", 1)[0], ln.split("\t", 1)[1]) for ln in lines[1:] if "\t" in ln
-            )
-            rows.append((commit, tuple(parents), changes))
-        return rows
+        return _parse_first_parent(done.stdout)
 ```
 
 `governance/act_settings.py`:
@@ -12174,7 +13601,8 @@ import json
 import os
 import re
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12788,26 +14216,30 @@ def _blobs(state: RunState, ops: Ops, dag: Dag, ref: str | None):
 
 
 def _statuses(state: RunState, ops: Ops, dag: Dag, live: LivePolicy, deps: Deps, *,
-              text_of: Callable[[str], str | None], ref: str | None) -> Statuses:
-    base = state.base_ref or "master"
+              text_of: Callable[[str], str | None], ref: str | None,
+              snapshot: str) -> Statuses:
+    """`snapshot` — единственный снимок базы для истории и provenance старого акта (d3);
+    `ref` — входы узлов (`None` — рабочее дерево S4), `text_of` — байты узлов."""
     decider = Decider(state, ops, deps, dag, trust=live.trust, journal=live.journal)
     paths = _node_paths(state, dag)
     return Statuses(
-        dag=dag, ws_id=state.ws_id, history=load_history(ops, state, base),
+        dag=dag, ws_id=state.ws_id, history=load_history(ops, state, snapshot),
         node_path=paths.__getitem__, text_of=text_of, blobs_of=_blobs(state, ops, dag, ref),
-        decide=decider, legacy=LegacyProbe(state, ops, base, decider.legacy, dag),
+        decide=decider, legacy=LegacyProbe(state, ops, snapshot, decider.legacy, dag),
     )
 
 
 def statuses_at_base(state: RunState, ops: Ops, dag: Dag, live: LivePolicy,
-                     deps: Deps | None = None) -> Statuses:
+                     deps: Deps | None = None, *, ref: str | None = None) -> Statuses:
     """Статусы по базе для гейта доставки и предложений (`read_dag_state`).
 
-    Только для продукта в `review` (`live.mode`); иначе путь старый (§10)."""
-    base = state.base_ref or "master"
+    Только для продукта в `review` (`live.mode`); иначе путь старый (§10). `ref` — снимок
+    базы вместо локальной ветки (SHA от `fresh_base`, d3): им читаются история, provenance,
+    байты и входы узлов — всё."""
+    base = ref or state.base_ref or "master"
     return _statuses(state, ops, dag, live, deps or real_deps(state),
                      text_of=lambda path: ops.show_file(state.target_dir, base, path),
-                     ref=base)
+                     ref=base, snapshot=base)
 
 
 # --- режим продукта сейчас (§10; ревизия b1, B1-5) ----------------------------------
@@ -12865,6 +14297,57 @@ def mode_probe(state: RunState, deps: Deps | None = None) -> LivePolicy | Unavai
     return live_policy(state, deps or real_deps(state))
 
 
+@contextmanager
+def fresh_base(state: RunState, ops: Ops) -> Iterator[tuple[str, Ops] | Unavailable]:
+    """Свежий изолированный снимок базы продукта для проверки допуска (ревью d2–d5):
+    `(SHA ветки <base> репозитория state.repo_slug, Ops чтений из снимка)` или
+    `Unavailable`. Снимок — временный репозиторий (`Ops.snapshot_open`): живёт до конца
+    блока `with`, то есть до конца всех чтений проверки, затем удаляется — и при
+    исключении. Все чтения проверки идут через отданные `Ops` и этот SHA."""
+    base = state.base_ref or "master"
+    fact = ops.snapshot_open(state.target_dir, state.repo_slug, base)
+    if fact.outcome is not FactOutcome.FOUND or fact.value is None:
+        yield Unavailable(f"снимок {state.repo_slug}@{base}: {fact.detail}")
+        return
+    repo = fact.value
+    try:
+        yield repo.sha, ops.snapshot_reader(repo)
+    finally:
+        ops.snapshot_close(repo)
+
+
+def noop_refusal(state: RunState, ops: Ops, dag: Dag, nodes: Iterable[str] | None = None,
+                 deps: Deps | None = None) -> str | None:
+    """Почему успех без полного пути не допускается, или `None` (решение владельца 01.11).
+
+    Любой успешный ранний выход — бесследный no-op §I5, повтор шага по сохранённому
+    результату, переход волны по завершённой заявке, возврат уже доставленного PR — для
+    продукта в `review` требует актуального допуска: каждый названный узел (`None` — все узлы
+    DAG) с событием `review/v1` — `approved` по `statuses_at_base` на свежем снимке базы
+    продукта (доверенный контекст, §9.1). Режим не установлен, снимок не получен, узел не
+    `approved` или статус недоступен — причина (fail closed); продукт не в `review` —
+    `None`, прежние правила. Все чтения — внутри `with fresh_base(...)`, через `Ops` снимка. Цена — квота С-1."""
+    live = mode_probe(state, deps)
+    if isinstance(live, Unavailable):
+        return f"режим акта продукта: {live.reason}"
+    if live.mode != "review":
+        return None
+    with fresh_base(state, ops) as snapshot:  # d2–d5: изолированный свежий снимок продукта
+        if isinstance(snapshot, Unavailable):
+            return f"свежая база: {snapshot.reason}"
+        ref, reader = snapshot
+        statuses = statuses_at_base(state, reader, dag, live, deps, ref=ref)
+        wanted = None if nodes is None else set(nodes)
+        for fname, _upstreams in dag:
+            node = bundle_dag.node_id(fname)
+            if (wanted is not None and node not in wanted) or not statuses.is_review(node):
+                continue
+            verdict = statuses.of(node)
+            if verdict != APPROVED:
+                return f"узел {node}: {verdict}"
+    return None
+
+
 # --- гейты steward (Р-10) -----------------------------------------------------------
 
 
@@ -12876,7 +14359,8 @@ def _gate_statuses(state: RunState, ops: Ops, dag: Dag, deps: Deps,
         file = worktree / path
         return file.read_text(encoding="utf-8") if file.is_file() else None
 
-    st = _statuses(state, ops, dag, live, deps, text_of=text_of, ref=None)
+    st = _statuses(state, ops, dag, live, deps, text_of=text_of, ref=None,
+                   snapshot=state.base_ref or "master")
     paths = _node_paths(state, dag)
     return {node: st.of(node) for node, path in paths.items() if (worktree / path).is_file()}
 
@@ -13019,8 +14503,8 @@ B1-8 как класс B1-7): новые методы `Ops` части B (`first
         return False
 ```
 
-`governance/task_bridge.py`, `_canonical_dag_hash` — **[ждёт решения владельца В-1]**, вариант по
-умолчанию. Каталог `approvals/` — **из идентичности воркстрима**, путём производителя
+`governance/task_bridge.py`, `_canonical_dag_hash` — В-1 (решение владельца 01.11), часть (1):
+байты `approvals/` как оптимизация. Каталог `approvals/` — **из идентичности воркстрима**, путём производителя
 (`act_envelope.envelope_path`), а не из `bundle_dir` (ревизия b2, B2-2: при `--bundle-dir spec`
 `base.parent / "approvals"` читал бы `<repo>/approvals/`). Сигнатура получает ключевой
 `ws_id: str | None = None`; `_content_anchor(..., *, ws_id=None)` его пробрасывает; вызовы
@@ -13048,9 +14532,134 @@ envelope_path`, `PurePosixPath` — уже в модуле.
 
 (докстринг `_canonical_dag_hash` дополняется абзацем «`review/v1`: байты всех файлов
 `workstreams/<ws-id>/approvals/` — конверты, манифесты, остановки — входят в хеш, эпоха `v3`
-(В-1)…». При варианте спеки буквально — `_content_anchor` получает статусы `Statuses.of` и
-подставляет их вместо `status` узлов `review/v1`; тесты supersede и чужого воркстрима те же,
-тест эпохи — на величину со статусами.)
+(В-1); равный хеш одного no-op узлов `review/v1` не даёт — `_admission_refusal`».)
+
+`governance/task_bridge.py`, В-1 часть (2) и d1 — актуальный допуск перед успехом без полного
+пути. Две функции (перед `deliver_superseded`; `_dag_for` — уже в модуле, импорт `act_status`
+локальный, как у прочих путей вне `act_*`, — цикла импорта нет):
+
+```python
+def _admission_refusal(
+    state: RunState, ops: Ops, legacy_bundle: int | None
+) -> str | None:
+    """Актуальный допуск узлов `review/v1` бандла перед успехом без полного пути
+    (решение владельца 01.11) — `act_status.noop_refusal` по DAG прогона."""
+    from governance import act_status
+
+    return act_status.noop_refusal(state, ops, _dag_for(legacy_bundle))
+
+
+def _require_admission(
+    state: RunState, ops: Ops, legacy_bundle: int | None, done: str
+) -> None:
+    """Успех по сохранённому результату (доставка уже есть) — только при актуальном
+    допуске узлов `review/v1`; иначе отказ (fail closed), сохранённое не меняется."""
+    refusal = _admission_refusal(state, ops, legacy_bundle)
+    if refusal is not None:
+        raise RuntimeError(f"{done}, но допуск review/v1 не подтверждён — {refusal}")
+```
+
+`deliver_superseded` (~4510–4542): условие бесследного no-op выносится в имя `traceless` (комментарий
+про `replace_fields` — прежний, без правок), и no-op требует подтверждённого допуска:
+
+```python
+    traceless = (
+        # (прежний комментарий про `replace_fields` — без изменений)
+        not replace_fields and comparable and recorded_content == content
+    )
+    # В-1 (решение владельца 01.11): равный хеш — оптимизация, допуск узлов
+    # `review/v1` проверяется заново перед no-op; не подтверждён — дальше гейт
+    # §I12 (`read_dag_state`) по прежним правилам: долг — отказ, недоступно — стоп.
+    unconfirmed = _admission_refusal(state, ops, legacy_bundle) if traceless else None
+    if unconfirmed is not None:
+        print(
+            "апстрим не менялся, но допуск review/v1 не подтверждён — "
+            f"бесследного no-op нет ({unconfirmed})"
+        )
+    if traceless and unconfirmed is None:
+        ...  # прежнее тело no-op: печать, `_debt_notice`, `return SupersedeResult("noop")`
+```
+
+Успехи по сохранённому результату (d1) — строка `_require_admission(...)` **перед** каждым:
+
+| Место (master `a16e305`) | Вставка |
+|---|---|
+| `deliver_for_run`, `op completed` (~2514; покрывает и возврат замены v1, и `return pr_done`) | после `if pr_done is None: raise _missing_pr(state)`: `_require_admission(state, ops, legacy_bundle, f"tasks-спека уже доставлена (PR #{pr_done})")` |
+| `deliver_for_run`, найден PR по ветке (~2557) | перед `return existing`: `_require_admission(state, ops, legacy_bundle, f"принят существующий PR #{existing}")` |
+| `deliver_superseded`, повтор `--replace-revision 1` (~4282) | перед `return repeated`: `_require_admission(state, ops, legacy_bundle, f"возврат PR #{repeated.pr} замены первой доставки")` |
+| `deliver_superseded`, `return_pr` (~4336) | перед `return SupersedeResult("returned", pr)`: `… f"возврат PR #{pr} ревизии {n}"` |
+| `deliver_superseded`, `complete` (MERGED, ~4350) | перед возвратом: `… f"возврат вмерженного PR #{pr} ревизии {n}"` |
+| `deliver_superseded`, `continue` с открытым PR (~4377) | перед возвратом: `… f"возврат открытого PR #{pr} ревизии {n}"` |
+| `deliver_superseded`, повтор доставки из намерения (`started`, PR нет, ~4385) | перед `_recover_commit(...)` (до любого эффекта): `… f"повтор доставки ревизии {n} из намерения"` |
+| `deliver_superseded`, открытая v1 (~4489) | перед `return SupersedeResult("returned", v1_pr)`: `… f"возврат PR #{v1_pr} первой доставки"` |
+
+Отказ — `RuntimeError` «<что>, но допуск review/v1 не подтверждён — <причина>»; сохранённое не
+меняется. Существующие тесты этих исходов — без правок: `tests/conftest.py` даёт продукт до
+миграции, `noop_refusal` возвращает `None` без чтения статусов.
+
+`governance/runner.py` (d1, D1-2) — сохранённый зелёный гейт и переход волны. `_step_gate` — вместо
+`if op_status(state, key) == "completed": return True`:
+
+```python
+    key = wave_key(state, "gate-candidate")
+    if op_status(state, key) == "completed":
+        # Решение владельца 01.11: сохранённый зелёный гейт — успех без полного пути;
+        # для `review/v1` — только при актуальном допуске судимых им узлов (уровни
+        # ниже волны), иначе гейт заново по прежним правилам.
+        from governance import act_status
+
+        settled = [n for n, level in bundle_dag.levels(_wave_dag()).items()
+                   if level < _wave_level(state)]
+        refusal = act_status.noop_refusal(state, ops, _wave_dag(), settled)
+        if refusal is None:
+            return True
+        print(f"S4: сохранённый гейт не принят — допуск review/v1 не подтверждён "
+              f"({refusal}); гейт заново")
+        op_start(state, key)
+```
+
+`_step_s8` — перед `if gate_op is not None and gate_op["status"] == "completed":` (существующий
+`gate_op = state.ops.get(key)` — первая строка фрагмента):
+
+```python
+    gate_op = state.ops.get(key)
+
+    if gate_op is not None and gate_op["status"] == "completed" and gate_op.get("exit") == 0:
+        # Решение владельца 01.11: сохранённый зелёный S8 — успех без полного пути;
+        # для `review/v1` — только при актуальном допуске всех узлов, иначе гейт заново.
+        from governance import act_status
+
+        refusal = act_status.noop_refusal(state, ops, _wave_dag())
+        if refusal is not None:
+            print(f"S8: сохранённый гейт не принят — допуск review/v1 не подтверждён "
+                  f"({refusal}); гейт заново")
+            # d2: допуск утрачен — прогон не завершён; нетерминальный статус сохраняется
+            # (`op_start` пишет состояние) ДО любого шага, способного упасть
+            state.status = "running"
+            op_start(state, key)
+            gate_op = state.ops[key]
+```
+
+`_next_wave` (~1300; три вызова — resume по завершённой заявке ~1058 и два в `_finalize_wave`) —
+первыми строками тела:
+
+```python
+    from governance import act_status
+
+    dag = _wave_dag()
+    wave_nodes = [n for n, level in bundle_dag.levels(dag).items()
+                  if level == _wave_level(state)]
+    refusal = act_status.noop_refusal(state, ops, dag, wave_nodes)
+    if refusal is not None:
+        # Решение владельца 01.11: переход по завершённой заявке — успех по сохранённому
+        # результату; для `review/v1` — только при актуальном допуске узлов волны.
+        _stop_with_comment(
+            state, ops, "stopped_review",
+            f"волна {state.wave}: заявка завершена, но допуск review/v1 не подтверждён — "
+            f"{refusal}; разберите узел (`--reopen`/`--repropose`), затем resume",
+        )
+        return state
+```
 
 - [ ] **Step 6: Run tests to verify they pass**
 
@@ -14828,10 +16437,18 @@ MODULES = ("act_facts", "act_anon", "act_check", "act_trust", "act_journal", "ac
 EXISTING_ADDITIONS = {
     "ops": ("_gate_check_exe", "_act_args", "Ops.gate_snapshot_digest",
             "RealOps.gate_snapshot_digest", "Ops.first_parent_changes",
-            "RealOps.first_parent_changes", "Ops.pr_body_fact", "RealOps.pr_body_fact"),
+            "RealOps.first_parent_changes", "Ops.pr_body_fact", "RealOps.pr_body_fact",
+            "RealOps._snapshot_url", "RealOps._credential_helper", "RealOps._snapshot_env",
+            "RealOps._snapshot_git", "Ops.snapshot_open", "RealOps.snapshot_open",
+            "Ops.snapshot_reader", "RealOps.snapshot_reader", "Ops.snapshot_close",
+            "RealOps.snapshot_close", "SnapshotOps.__init__", "SnapshotOps.__getattr__",
+            "SnapshotOps._git", "SnapshotOps.first_parent_changes", "SnapshotOps.show_file",
+            "SnapshotOps.show_file_bytes", "SnapshotOps.rev_parse", "SnapshotOps.fetch_branch",
+            "_parse_first_parent"),
     "approval_ledger": ("record_review_act", "audit_events", "record_audit", "successor_of"),
     "act_decision": ("find_act", "merger_allowed"),
-    "act_envelope": ("expected_envelope",),
+    "act_envelope": ("expected_envelope", "node_history"),
+    "task_bridge": ("_admission_refusal", "_require_admission"),
     "act_settings": ("config_home",),
     "approve_node": ("_legacy_outcome", "_review_debt"),
 }
@@ -14840,13 +16457,15 @@ EXISTING_ADDITIONS = {
 #: ведёт ревьюер задачи (детектор формы его не доказывает); сверено с листингами Tasks 11–16.
 MODIFIED_EXISTING = {
     "approve_node._propose": ("act_incompatible", "other_pin", "status_unavailable",
-                              "successor_joins_live"),
+                              "successor_joins_live", "mode_unavailable",
+                              "legacy_noop_review"),
     "approve_node.read_dag_state": ("mode_unset", "status_unavailable", "review_debt"),
     "approve_node._require_upstream_ready": ("mode_unset", "upstream_unavailable",
                                              "upstream_not_approved"),
     "approve_node._try_agent_merge": ("form",),
-    "runner._step_gate": ("act_mode_unset",),
-    "runner._step_s8": ("act_mode_unset",),
+    "runner._step_gate": ("act_mode_unset", "completed_admission"),
+    "runner._step_s8": ("act_mode_unset", "completed_admission", "run_status"),
+    "runner._next_wave": ("admission",),
     "act_envelope.envelope_refusal": ("bytes", "pins"),
     "approve_node._advance": "маршрутизация в `act_node.route` до выбора шага; своей проверки нет",
     "approve_node._reconcile_candidate": "проверки вынесены в `_legacy_outcome` (Task 14 Step 3a), новых нет",
@@ -14856,12 +16475,20 @@ MODIFIED_EXISTING = {
     "approval_ledger.start_request": "пишет поле `predecessor`; проверок нет",
     "task_bridge._canonical_dag_hash": "хеш (В-1), не суждение",
     "task_bridge._content_anchor": "пробрасывает `ws_id`; не суждение",
+    "task_bridge.deliver_superseded": ("review_noop", "replacement_repeat", "returned_pr",
+                                       "returned_merged", "returned_open", "redo_intent",
+                                       "returned_v1"),
+    "task_bridge.deliver_for_run": ("completed", "adopted"),
+    "act_envelope.current_event": "выводится из `node_history` (п. 9 (Б), 01.11); своей проверки нет",
+    "act_envelope.next_generation": "выводится из `node_history` (п. 9 (Б), 01.11); своей проверки нет",
     "ops.RealOps.gate_check_s8": "аргументы `--act-mode`/`--node-status`; не суждение",
     "ops.RealOps.gate_check_candidate": "аргументы `--act-mode`/`--node-status`; не суждение",
     "bundle_state.candidate_state": "`act_mode=\"legacy\"` в `collect_bundle`; не суждение",
 }
 
 S, N, L = "tests/test_act_status.py", "tests/test_act_node.py", "tests/test_act_legacy.py"
+E, TB = "tests/test_act_envelope.py", "tests/test_governance_task_bridge.py"
+RN = "tests/test_governance_runner.py"
 P, B, C = "tests/test_act_premerge.py", "tests/test_act_barrier.py", "tests/test_act_check.py"
 T, J, W = "tests/test_act_trust.py", "tests/test_act_journal.py", "tests/test_act_journal_wire.py"
 I, A, G = "tests/test_act_identity.py", "tests/test_act_anon.py", "tests/test_act_gate.py"
@@ -15263,6 +16890,94 @@ JUDGMENT = {
     "act_status.Statuses._legacy": (r("debt_first", "act_status.Statuses._legacy", "if debt is not None",
                                       f"{S}::test_legacy_probe_not_called_for_debt_node",
                                       '"not_approved:debt_status"'),),
+    "act_envelope.node_history": (  # п. 9 (Б), решение владельца 01.11
+        r("stop_generation", "act_envelope.node_history",
+          "isinstance(event, DeliveredStop) and (gen != last or last == 0)",
+          f"{E}::test_stop_of_other_generation_is_noop",
+          '"узел req: остановка поколения 1, действует 2"'),
+        r("stop_without_request", "act_envelope.node_history",
+          "isinstance(event, DeliveredStop) and (gen != last or last == 0)",
+          f"{E}::test_stop_before_any_request_ignored",
+          '"узел req: остановка поколения 1, действует 0"'),
+        r("request_generation", "act_envelope.node_history",
+          "isinstance(event, DeliveredRequest) and gen <= last",
+          f"{E}::test_non_monotonic_request_ignored",
+          '"узел req: поколение 2 не больше прежнего 2"'),
+    ),
+    "act_status.fresh_base": (
+        r("snapshot_unavailable", "act_status.fresh_base",
+          "fact.outcome is not FactOutcome.FOUND or fact.value is None",
+          f"{RN}::test_admission_refused_when_base_not_refreshed[s4]", '"no_success"'),
+        r("closed", "act_status.fresh_base", "ops.snapshot_close(repo)",
+          f"{S}::test_snapshot_removed_on_exception", "Path(seen[0]).exists() is False"),
+    ),
+    "ops.RealOps._snapshot_url": (r("canonical", "ops.RealOps._snapshot_url",
+                                    'f"https://github.com/{repo_slug}.git"', f"{S}::test_production_snapshot_command_is_isolated",
+                                    '"https://github.com/owner/p.git"'),),
+    "ops.RealOps._credential_helper": (r("gh_profile", "ops.RealOps._credential_helper",
+                                         '"!gh auth git-credential"', f"{S}::test_production_snapshot_command_is_isolated",
+                                         '"credential.helper=!gh auth git-credential"'),),
+    "ops.RealOps._snapshot_env": (  # d5: изолированное окружение git снимка
+        r("allowlist", "ops.RealOps._snapshot_env", "for k in _SNAPSHOT_ENV_KEEP if k in os.environ",
+          f"{S}::test_injected_git_config_and_env_have_no_effect", "STOPPED"),
+        r("no_global", "ops.RealOps._snapshot_env", "GIT_CONFIG_GLOBAL=os.devnull", f"{S}::test_production_snapshot_command_is_isolated",
+          '"0", str(profile)'),
+        r("no_prompt", "ops.RealOps._snapshot_env", 'GIT_TERMINAL_PROMPT="0"', f"{S}::test_production_snapshot_command_is_isolated",
+          '"0", str(profile)'),
+        r("empty_home", "ops.RealOps._snapshot_env", "HOME=str(home)",
+          f"{S}::test_foreign_home_credentials_have_no_effect",
+          "snapshot_home == expected"),
+        r("profile_resolved", "ops.RealOps._snapshot_env", "profile.expanduser().resolve()",
+          f"{S}::test_foreign_home_credentials_have_no_effect",
+          "snapshot_home == expected"),
+        r("runner_profile", "ops.RealOps._snapshot_env", 'os.environ.get("REVIEW_GH_CONFIG_DIR")', f"{S}::test_production_snapshot_command_is_isolated",
+          '"0", str(profile)'),
+    ),
+    "ops.RealOps._snapshot_git": (r("helper_reset", "ops.RealOps._snapshot_git",
+                                    '"credential.helper="', f"{S}::test_production_snapshot_command_is_isolated",
+                                    '"credential.helper=!gh auth git-credential"'),),
+    "ops.SnapshotOps.__getattr__": (r("deny", "ops.SnapshotOps.__getattr__",
+                                      "if name in SNAPSHOT_FORGE_METHODS",
+                                      f"{S}::test_snapshot_ops_denies_unlisted_methods[blob_in_commit]",
+                                      "не разрешён"),),
+    "ops.RealOps.snapshot_open": (  # d3–d5: свежий изолированный снимок базы продукта
+        r("slug_shape", "ops.RealOps.snapshot_open", "not _REPO_SLUG.fullmatch(repo_slug)",
+          f"{S}::test_snapshot_rejects_non_slug_source[local_path]", "не owner/repo"),
+        r("fetch_failed", "ops.RealOps.snapshot_open", "done.returncode != 0",
+          f"{S}::test_noop_refusal_refuses_unfetchable_product",
+          '"свежая база: снимок owner/p@master: fetch owner/p master: код 128"'),
+        r("own_repo", "ops.RealOps.snapshot_open", 'tempfile.mkdtemp(prefix="act-snapshot-")',
+          f"{S}::test_interleaved_snapshots_are_independent", "len(set(dirs)) == 2"),
+        r("refmap", "ops.RealOps.snapshot_open", "*_SNAPSHOT_FETCH, url",
+          f"{S}::test_snapshot_leaves_product_repo_untouched", "_refs(clone) == refs_before"),
+    ),
+    "act_status.noop_refusal": (  # В-1, d1, d2 — решение владельца 01.11
+        r("stale_base", "act_status.noop_refusal", "isinstance(snapshot, Unavailable)",
+          f"{RN}::test_admission_refused_when_base_not_refreshed[s8]", '"no_success"'),
+        r("fresh_ref", "act_status.noop_refusal", "ref=ref",
+          f"{RN}::test_stale_clone_remote_stop_end_to_end[next_wave]", '"no_success"'),
+        r("history_snapshot", "act_status._statuses", "load_history(ops, state, snapshot)",
+          f"{S}::test_noop_refusal_reads_fresh_product_base", "STOPPED"),
+        r("legacy_snapshot", "act_status._statuses",
+          "LegacyProbe(state, ops, snapshot, decider.legacy, dag)",
+          f"{S}::test_admission_reads_only_the_snapshot", "node_reads == snapshot_refs"),
+        r("mode_unset", "act_status.noop_refusal", "isinstance(live, Unavailable)",
+          f"{TB}::test_review_noop_refused_when_mode_unset",
+          '"бесследного no-op нет (режим акта продукта: нет привязки)"'),
+        r("stopped", "act_status.noop_refusal", "verdict != APPROVED",
+          f"{TB}::test_review_noop_refused_without_fresh_approval[stop_delivered]",
+          '"not_approved:stopped:g1"'),
+        r("act_revoked", "act_status.noop_refusal", "verdict != APPROVED",
+          f"{TB}::test_review_noop_refused_without_fresh_approval[act_revoked]",
+          '"not_approved:act:d1_no_act"'),
+        r("unavailable", "act_status.noop_refusal", "verdict != APPROVED",
+          f"{TB}::test_review_noop_refused_without_fresh_approval[trust_unavailable]",
+          '"unavailable:df-trust: HTTP 403"'),
+    ),
+    "task_bridge._require_admission": (r("refused", "task_bridge._require_admission",
+                                         "if refusal is not None",
+                                         f"{TB}::test_stored_success_requires_admission[returned_pr]",
+                                         '"допуск review/v1 не подтверждён — узел requirements"'),),
     "act_status.Statuses._compute": (
         r("stop", "act_status.Statuses._compute", "isinstance(current, DeliveredStop)",
           f"{S}::test_stop_makes_node_not_approved", '"not_approved:stopped:g1"'),
@@ -15352,10 +17067,14 @@ JUDGMENT = {
     "act_node._finalize": (r("commit_made", "act_node._finalize", "if head is None:\n            raise",
                              f"{N}::test_envelope_commit_not_made_is_refused",
                              '"коммит конверта не состоялся"'),),
-    "act_node._reconcile_finalize": tuple(
-        r(f"envelope:{f}", "act_node._reconcile_finalize", "if got != text",
-          f"{N}::test_finalize_delivered_envelope_component_substituted_invalidates[{f}]",
-          '"не тот конверт"') for f in ENVELOPE_FIELDS),
+    "act_node._reconcile_finalize": (
+        *(r(f"envelope:{f}", "act_node._reconcile_finalize", "if got != text",
+            f"{N}::test_finalize_delivered_envelope_component_substituted_invalidates[{f}]",
+            '"не тот конверт"') for f in ENVELOPE_FIELDS),
+        r("current_admission", "act_node._reconcile_finalize", "if refusal is not None",
+          f"{N}::test_stop_between_act_and_finalize_merge_not_reported_approved",
+          '"узлы не одобрены — узел charter: not_approved:stopped:g1"'),
+    ),
     "act_node._require_in_base": (r("in_base", "act_node._require_in_base", "if not reached",
                                     f"{N}::test_finalize_merged_outside_base_invalidates", '"не в базу"'),),
     "act_node.reopen": (
@@ -15583,6 +17302,53 @@ JUDGMENT = {
                                            "tests/test_governance_runner.py::test_s4_stops_when_act_mode_unset"),),
     "runner._step_s8#act_mode_unset": (r("mode", "runner._step_s8", "S8: режим акта не установлен",
                                          "tests/test_governance_runner.py::test_s8_stops_when_act_mode_unset"),),
+    'task_bridge.deliver_superseded#replacement_repeat': (r("admission", 'task_bridge.deliver_superseded', 'f"возврат PR #{repeated.pr} замены первой доставки"',
+        f"{TB}::test_stored_success_requires_admission[v1_replacement]",
+        '"допуск review/v1 не подтверждён — узел requirements"'),),
+    'task_bridge.deliver_superseded#returned_pr': (r("admission", 'task_bridge.deliver_superseded', 'f"возврат PR #{pr} ревизии {n}"',
+        f"{TB}::test_stored_success_requires_admission[returned_pr]",
+        '"допуск review/v1 не подтверждён — узел requirements"'),),
+    'task_bridge.deliver_superseded#returned_merged': (r("admission", 'task_bridge.deliver_superseded', 'f"возврат вмерженного PR #{pr} ревизии {n}"',
+        f"{TB}::test_stored_success_requires_admission[returned_merged]",
+        '"допуск review/v1 не подтверждён — узел requirements"'),),
+    'task_bridge.deliver_superseded#returned_open': (r("admission", 'task_bridge.deliver_superseded', 'f"возврат открытого PR #{pr} ревизии {n}"',
+        f"{TB}::test_stored_success_requires_admission[returned_open]",
+        '"допуск review/v1 не подтверждён — узел requirements"'),),
+    'task_bridge.deliver_superseded#redo_intent': (r("admission", 'task_bridge.deliver_superseded', 'f"повтор доставки ревизии {n} из намерения"',
+        f"{TB}::test_stored_success_requires_admission[redo_intent]",
+        '"допуск review/v1 не подтверждён — узел requirements"'),),
+    'task_bridge.deliver_superseded#returned_v1': (r("admission", 'task_bridge.deliver_superseded', 'f"возврат PR #{v1_pr} первой доставки"',
+        f"{TB}::test_stored_success_requires_admission[returned_v1]",
+        '"допуск review/v1 не подтверждён — узел requirements"'),),
+    'task_bridge.deliver_for_run#completed': (r("admission", 'task_bridge.deliver_for_run', 'f"tasks-спека уже доставлена (PR #{pr_done})"',
+        f"{TB}::test_stored_success_requires_admission[for_run_completed]",
+        '"допуск review/v1 не подтверждён — узел requirements"'),),
+    'task_bridge.deliver_for_run#adopted': (r("admission", 'task_bridge.deliver_for_run', 'f"принят существующий PR #{existing}"',
+        f"{TB}::test_stored_success_requires_admission[for_run_adopted]",
+        '"допуск review/v1 не подтверждён — узел requirements"'),),
+    "runner._step_gate#completed_admission": (r("admission", "runner._step_gate", "refusal is None",
+        "tests/test_governance_runner.py::test_s4_completed_gate_rerun_without_admission[stop_delivered]",
+        '"гейт S4 заново"'),),
+    "runner._step_s8#completed_admission": (r("admission", "runner._step_s8", "refusal is not None",
+        "tests/test_governance_runner.py::test_s8_completed_gate_rerun_without_admission[stop_delivered]",
+        '"started"'),),
+    "runner._step_s8#run_status": (r("status", "runner._step_s8", 'state.status = "running"',
+        f"{RN}::test_s8_lost_admission_run_not_completed_when_checkout_fails", '"running"'),),
+    "runner._next_wave#admission": (r("admission", "runner._next_wave", "refusal is not None",
+        "tests/test_governance_runner.py::test_next_wave_needs_admission[stop_delivered]",
+        '"stopped_review"'),),
+    "approve_node._propose#mode_unavailable": (r("mode", "approve_node._propose",
+        "режим акта продукта (узел {node_id})",
+        f"{N}::test_frontmatter_noop_refused_when_mode_unavailable",
+        '"режим акта продукта .узел charter.: нет привязки"'),),
+    "approve_node._propose#legacy_noop_review": (r("status", "approve_node._propose",
+        "debt is None and statuses is not None",
+        f"{N}::test_frontmatter_noop_in_review_needs_status",
+        "outcome.request in world.state.ops"),),
+    "task_bridge.deliver_superseded#review_noop": (r("noop", "task_bridge.deliver_superseded",
+                                                     "traceless and unconfirmed is None",
+                                                     f"{TB}::test_review_noop_refused_without_fresh_approval[stop_delivered]",
+                                                     '"гейт §I12 вызван"'),),
     "act_envelope.envelope_refusal#bytes": (r("bytes", "act_envelope.envelope_refusal",
                                               "байты узла изменились после одобрения",
                                               f"{S}::test_provider_twin_changed_candidate_bytes_not_approved"),),
@@ -15599,6 +17365,7 @@ _HELPER = "вычисляет вход суждения без собствен�
 _BUILD = "строит значение/запрос; проверок-отказов нет"
 _IO = "транспорт/ввод-вывод без проверки-отказа"
 NOT_JUDGMENT = {
+    "task_bridge._admission_refusal": "делегирует `act_status.noop_refusal` (место суждения)",
     **{f"act_facts.{n}": _ADAPTER for n in (
         "_v3", "gh_transport", "_delivery", "read", "open_review", "effective", "event_stamps",
         "review_requires", "_activation", "history", "activation")},
@@ -15663,7 +17430,14 @@ NOT_JUDGMENT = {
     # дополнения части B в существующие модули
     "ops._gate_check_exe": _BUILD, "ops._act_args": _BUILD,
     "ops.Ops.gate_snapshot_digest": "протокол", "ops.Ops.first_parent_changes": "протокол",
-    "ops.Ops.pr_body_fact": "протокол",
+    "ops.Ops.pr_body_fact": "протокол", "ops.Ops.snapshot_open": "протокол",
+    "ops.Ops.snapshot_reader": "протокол", "ops.Ops.snapshot_close": "протокол",
+    "ops.RealOps.snapshot_reader": _BUILD, "ops.RealOps.snapshot_close": _IO,
+    "ops.SnapshotOps.__init__": _BUILD,
+    "ops.SnapshotOps._git": _IO, "ops.SnapshotOps.first_parent_changes": _IO,
+    "ops.SnapshotOps.show_file": _IO, "ops.SnapshotOps.show_file_bytes": _IO,
+    "ops.SnapshotOps.rev_parse": _IO, "ops.SnapshotOps.fetch_branch": _IO,
+    "ops._parse_first_parent": "разбор вывода `git log`; не суждение",
     "ops.RealOps.gate_snapshot_digest": "возвращает код и вывод CLI; судит `gate_run`",
     "approval_ledger.record_review_act": "запись акта; проверок нет",
     "approval_ledger.audit_events": _BUILD,
@@ -16465,8 +18239,8 @@ if __name__ == "__main__":
   (`approve_node._propose#…`, `read_dag_state#…`, `_require_upstream_ready#…`,
   `_try_agent_merge#form`, `runner._step_gate#…`, `runner._step_s8#…`) и прогнанные при ревизии
   плана. Сначала — применимость операторов ко ВСЕМ строкам без запуска двойников (b6, B6-4;
-  ожидается `259/259`: при ревизии — 249 по коду scratch и 10 строк `<функция>#<проверка>` по
-  AST фрагментов плана; `n/a` чинится оператором `BYPASS` или записью `RULED`, не пропуском):
+  ожидается `303/303`: при ревизии d6 (01.11) — 291 по коду scratch и 12 строк
+  `<функция>#<проверка>` по AST фрагментов плана; `n/a` чинится оператором `BYPASS` или записью `RULED`, не пропуском):
 
   ```bash
   uv run --group governance python tests/act_mutation.py --check --out /tmp/act-mutation-check.json
@@ -16613,10 +18387,24 @@ BYPASS: dict[str, tuple[str, str]] = {
         'return next(iter(self._memo.values()))'),
     'act_status._event:request:no_pr': ('        if isinstance(pr, Unavailable):\n            return pr',
         '        if isinstance(pr, Unavailable):\n            return None'),
+    'act_status.fresh_base:closed': ('ops.snapshot_close(repo)',
+        'pass'),
+    'act_status.fresh_base:snapshot_unavailable': ('yield Unavailable(f"снимок {state.repo_slug}@{base}: {fact.detail}")',
+        'yield base, ops'),
     'act_status.gate_run:snapshot_digest': ('return Unavailable(f"gate-check --print-snapshot-digest: код {rc}: {digest}")',
         'return "review", str(out)'),
     'act_status.load_history:base_unread': ('    if rows is None:\n        return Unavailable',
         '    if rows is None:\n        rows = []\n    if False:\n        return Unavailable'),
+    'act_status.noop_refusal:fresh_ref': ('statuses_at_base(state, reader, dag, live, deps, ref=ref)',
+        'statuses_at_base(state, ops, dag, live, deps)'),
+    'act_status.noop_refusal:history_snapshot': ('load_history(ops, state, snapshot)',
+        'load_history(ops, state, state.base_ref or "master")'),
+    'act_status.noop_refusal:legacy_snapshot': ('LegacyProbe(state, ops, snapshot, decider.legacy, dag)',
+        'LegacyProbe(state, ops, state.base_ref or "master", decider.legacy, dag)'),
+    'act_status.noop_refusal:mode_unset': ('return f"режим акта продукта: {live.reason}"',
+        'return None'),
+    'act_status.noop_refusal:stale_base': ('return f"свежая база: {snapshot.reason}"',
+        'snapshot = (state.base_ref or "master", ops)'),
     'act_status.pr_for_merge:exactly_one': ('    if len(found) != 1:',
         '    if not found:\n        found = [7]\n    if False:'),
     'act_trust._checked_epochs:transition': ('return Unavailable(f"недопустимый переход журнала: {exc}")',
@@ -16645,8 +18433,54 @@ BYPASS: dict[str, tuple[str, str]] = {
         'head = "0" * 40'),
     'approve_node._legacy_outcome:old_pin_missing': ('    if not pinned:\n',
         '    if not pinned:\n        pinned = {"sha": None, "fingerprint": None}\n    if False:\n'),
+    'approve_node._propose#mode_unavailable:mode': ('raise _unresolved(f"режим акта продукта (узел {node_id}): {live.reason}")',
+        'live = act_status.LivePolicy("merge", None, None, None, None)'),
     'approve_node._try_agent_merge#form:form': ('defect = form() if form is not None else _envelope_form_defect(state, ops, dag, op, nodes, head)',
         'defect = None'),
+    'ops.RealOps._credential_helper:gh_profile': ('"!gh auth git-credential"',
+        '"!gh auth git-credential --other"'),
+    'ops.RealOps._snapshot_env:allowlist': ('{k: os.environ[k] for k in _SNAPSHOT_ENV_KEEP if k in os.environ}',
+        'dict(os.environ)'),
+    'ops.RealOps._snapshot_env:empty_home': ('HOME=str(home), XDG_CONFIG_HOME=str(home / ".config"),',
+        'HOME=os.environ.get("HOME", ""),'),
+    'ops.RealOps._snapshot_env:no_global': ('GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,',
+        'GIT_CONFIG_NOSYSTEM="1",'),
+    'ops.RealOps._snapshot_env:no_prompt': ('GIT_TERMINAL_PROMPT="0", ',
+        ''),
+    'ops.RealOps._snapshot_env:profile_resolved': ('str(profile.expanduser().resolve())',
+        'str(profile)'),
+    'ops.RealOps._snapshot_env:runner_profile': ('os.environ.get("REVIEW_GH_CONFIG_DIR") or REVIEW_GH_CONFIG_DIR',
+        'REVIEW_GH_CONFIG_DIR'),
+    'ops.RealOps._snapshot_git:helper_reset': ('"-c", "credential.helper=",\n             ',
+        ''),
+    'ops.RealOps._snapshot_url:canonical': ('f"https://github.com/{repo_slug}.git"',
+        'f"https://example.invalid/{repo_slug}.git"'),
+    'ops.RealOps.snapshot_open:own_repo': ('tempfile.mkdtemp(prefix="act-snapshot-")',
+        'os.path.join(tempfile.gettempdir(), "act-snapshot-shared")'),
+    'ops.SnapshotOps.__getattr__:deny': ('        raise AttributeError(\n',
+        '        return getattr(self._base, name)\n        raise AttributeError(\n'),
+    'runner._step_gate#completed_admission:admission': ('if refusal is None:',
+        'if True:'),
+    'runner._step_s8#run_status:status': ('state.status = "running"',
+        'pass'),
+    'task_bridge.deliver_for_run#adopted:admission': ('_require_admission(state, ops, legacy_bundle, f"принят существующий PR #{existing}")',
+        'pass'),
+    'task_bridge.deliver_for_run#completed:admission': ('_require_admission(state, ops, legacy_bundle, f"tasks-спека уже доставлена (PR #{pr_done})")',
+        'pass'),
+    'task_bridge.deliver_superseded#redo_intent:admission': ('_require_admission(state, ops, legacy_bundle, f"повтор доставки ревизии {n} из намерения")',
+        'pass'),
+    'task_bridge.deliver_superseded#replacement_repeat:admission': ('_require_admission(state, ops, legacy_bundle, f"возврат PR #{repeated.pr} замены первой доставки")',
+        'pass'),
+    'task_bridge.deliver_superseded#returned_merged:admission': ('_require_admission(state, ops, legacy_bundle, f"возврат вмерженного PR #{pr} ревизии {n}")',
+        'pass'),
+    'task_bridge.deliver_superseded#returned_open:admission': ('_require_admission(state, ops, legacy_bundle, f"возврат открытого PR #{pr} ревизии {n}")',
+        'pass'),
+    'task_bridge.deliver_superseded#returned_pr:admission': ('_require_admission(state, ops, legacy_bundle, f"возврат PR #{pr} ревизии {n}")',
+        'pass'),
+    'task_bridge.deliver_superseded#returned_v1:admission': ('_require_admission(state, ops, legacy_bundle, f"возврат PR #{v1_pr} первой доставки")',
+        'pass'),
+    'task_bridge.deliver_superseded#review_noop:noop': ('if traceless and unconfirmed is None:',
+        'if traceless:'),
 }
 #: Обход невозможен (без данных продолжить нечем) — решение ревьюера с причиной.
 RULED: dict[str, str] = {
@@ -16660,6 +18494,8 @@ RULED: dict[str, str] = {
         'причина «lost» порождается хранилищем `df.publisher` (exc.reason), обработчик общий; обход невозможен (без БД нечем продолжить); двойник утверждает причину хранилища',
     'act_journal_wire.DevStoreJournal._open:missing':
         'нет файла блокировки — нет хранилища, продолжить без дескриптора нечем; обход невозможен, проверяется причина (O3)',
+    'ops.RealOps.snapshot_open:refmap':
+        'fetch снимка — по URL и во временный репозиторий без `remote.*`: git не применяет `remote.*.fetch` к fetch по URL (проверено), а `FETCH_HEAD` пишется во временный репозиторий, который удаляется; `--refmap=` и `--no-write-fetch-head` в `_SNAPSHOT_FETCH` — защита на случай смены источника; обход неотличим; неприкосновенность репозитория продукта проверяет двойник `test_snapshot_leaves_product_repo_untouched`',
 }
 
 
