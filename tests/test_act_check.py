@@ -313,6 +313,21 @@ def test_not_merged_waits() -> None:
     assert check_delivery(context(merged=False)) == WaitingDelivery()
 
 
+def test_merged_without_merged_at_unavailable() -> None:
+    """Ревью #665: «смёржен, метки нет» — `Unavailable`, не `WaitingDelivery`."""
+    ctx = context()
+    ctx = replace(ctx, delivery=replace(ctx.delivery, merged_at=None))
+    got = check_delivery(ctx)
+    assert isinstance(got, Unavailable) and got.reason == "доставка: нет merged_at"
+
+
+def test_empty_epochs_unavailable_not_old_reader() -> None:
+    """Ревью #665: пустой журнал эпох не читается как доставка до bootstrap."""
+    ctx = context(epochs=(), request_act=None, legacy=LegacyAccepted("bob"))
+    got = check_delivery(ctx)
+    assert isinstance(got, Unavailable) and got.reason == "журнал эпох не прочитан"
+
+
 def test_agent_outside_merger_list() -> None:
     """Приёмка №6 и №16: агент (или machine user) вне AUTHORIZED_MERGER_ACCOUNTS."""
     assert code(check_delivery(context(merger=("ai-prosto", "User")))) == "d3_merger"

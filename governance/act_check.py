@@ -106,8 +106,10 @@ Outcome = (
 def check_delivery(ctx: DeliveryContext) -> Outcome:
     """Исход доставки по §8.2: единственный вердикт либо `Ambiguous`."""
     merged_at = ctx.delivery.merged_at
-    if not ctx.delivery.merged or merged_at is None:
+    if not ctx.delivery.merged:
         return WaitingDelivery()
+    if merged_at is None:
+        return Unavailable("доставка: нет merged_at")
     t = parse_ts(merged_at)
     group = sorted(k for k, at in _stamps(ctx).items() if at == t)
     return resolve(t, group, _requires(ctx), lambda clock: _decide(ctx, clock))
@@ -155,7 +157,10 @@ def _epoch_at(
     ctx: DeliveryContext, clock: Clock
 ) -> Epoch | None | Rejected | Unavailable:
     """Эпоха доставки: обход от последней эпохи назад (e7: старые якоря не нужны,
-    если более поздний уже предшествует T)."""
+    если более поздний уже предшествует T). Пустой журнал — не «до bootstrap»:
+    корректный журнал содержит хотя бы эпоху 1 (`parse_journal`)."""
+    if not ctx.epochs:
+        return Unavailable("журнал эпох не прочитан")
     for epoch in reversed(ctx.epochs):
         anchor = ctx.anchor_at.get(
             epoch.anchor, Unavailable("время якоря не загружено")
