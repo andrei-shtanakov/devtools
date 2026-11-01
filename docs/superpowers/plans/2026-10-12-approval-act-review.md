@@ -3495,20 +3495,20 @@ error=…)`, «отказ | None», `raise`), но полноту не дока�
   | 15 | `approve_node._propose`, no-op узла `review/v1` | — | уже `Statuses.of == approved` (Task 13) | `test_review_noop_needs_current_status` |
   | 16 | `approve_node.propose_from_source` | — | успешного выхода без записи нет; `creation` отказывает на `Unavailable` до записи | — |
   | 17 | `approve_node` старые завершения finalize (`_reconcile_finalize`, «уже в base») | — | только заявки без маркера; в продукте `review` `route` их до старого кода не пускает | — |
-  | 18 | `act_node.route` → `_merged` → `_finalize`/`_reconcile_finalize` | — | полный путь: вердикт доставки заново в каждом вызове | — |
+  | 18 | `act_node._reconcile_finalize` — «узлы одобрены» после мержа finalize (гонка: остановка доставлена между актом и мержем) | объявление одобрения | `noop_refusal` по узлам заявки после сверки конверта: заявка завершается, но успеха нет — `RuntimeError` с фактическим состоянием | `test_stop_between_act_and_finalize_merge_not_reported_approved` |
   | 19 | `act_node.reopen` «остановка уже доставлена», `repropose` завершённой | — | успех — отнятие допуска / отказ, не одобрение | — |
   | 20 | прочие `completed`-выходы раннера (`_step_wave_branch`, `_step_materialize_brief`, `_step_authoring`, `_step_commit`, `_step_edge`, `_step_candidate`, интервью), `advance` при `merge completed` | — | допуска не судят; следующий судящий шаг — №10–12 | — |
   | 21 | `task_bridge.deliver_approve` | — | штамп tasks-спеки, узлов бандла не судит (§I12, таблица) | — |
 
-  Строки 1–14 — с проверкой (14 мест, 12 из них новые в d1), 15–21 — разобраны и проверки не
-  требуют (причина в строке).
+  Строки 1–14 и 18 — с проверкой (15 мест; 12 новых в d1, строка 18 — решением team-lead о
+  гонке stop/finalize), остальные 6 — разобраны и проверки не требуют (причина в строке).
 - **Реестр Task 16**: `act_envelope.node_history` (3), `act_status.noop_refusal` (4),
   `task_bridge._require_admission` (1), `deliver_superseded#…` (7), `deliver_for_run#…` (2),
   `runner._step_gate#completed_admission`, `runner._step_s8#completed_admission`,
   `runner._next_wave#admission`, `approve_node._propose#mode_unavailable`,
   `#legacy_noop_review`; `current_event`/`next_generation` — в `MODIFIED_EXISTING`,
   `task_bridge._admission_refusal` — в `NOT_JUDGMENT` (делегирует). Применимость операторов —
-  281/281 (269 по коду scratch, 12 по AST фрагментов); мутации новых строк: 8 (п. 9, В-1) + 17
+  282/282 (270 по коду scratch, 12 по AST фрагментов); мутации новых строк: 8 (п. 9, В-1) + 17
   (d1, исполнимые в scratch) — все закрыты; `_propose#…` (2) — на стенде `World`, Step 4a.
 - **Буква спеки**: В-1 теперь соответствует цели §9.1 (а) п. 4 (проверенный статус спрашивается
   перед no-op), хотя статус не входит в саму проекцию хеша; §9.1 п. 0a («последний доставленный
@@ -9262,6 +9262,19 @@ def test_crash_after_finalize_merge_before_complete(world: World, stand: Stand,
     assert len([n for n, r in world.forge.prs.items() if r["branch"].endswith("-final")]) == 1
 
 
+def test_stop_between_act_and_finalize_merge_not_reported_approved(
+        world: World, stand: Stand, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Решение владельца 01.11 (гонка stop/finalize): остановка поколения доставлена между
+    актом и мержем finalize — заявка завершена (конверт в base), но «одобрены» не
+    объявляется: ответ называет фактическое состояние узла."""
+    key, pr = _deliver(world, stand)
+    monkeypatch.setattr(act_status.Statuses, "is_review", lambda self, node: True)
+    monkeypatch.setattr(act_status.Statuses, "of", lambda self, node: "not_approved:stopped:g1")
+    with pytest.raises(RuntimeError, match="узлы не одобрены — узел charter: not_approved:stopped:g1"):
+        approve(world, "charter")
+    assert world.state.ops[key]["status"] == al.STATUS_COMPLETED
+
+
 def test_finalize_merged_outside_base_invalidates(world: World, stand: Stand) -> None:
     """B1-15: конверт верен, но merge-коммит finalize недостижим из базы — не «в base»."""
     key, pr = _deliver(world, stand)
@@ -10044,6 +10057,15 @@ def _reconcile_finalize(state, ops, dag, key, expected) -> an.ApprovalOutcome:
             _invalidate(state, key, f"PR конверта #{pr} доставил не тот конверт узла {node}")
     an._ensure_finalize_identity(state, ops, key, op)
     al.complete_request(state, key)
+    # Решение владельца 01.11 (гонка stop/finalize): заявка завершена — конверт в base, — но
+    # «одобрены» объявляется только при актуальном допуске; остановка, доставленная между
+    # актом и мержем finalize, — фактическое состояние вместо успеха.
+    refusal = act_status.noop_refusal(state, ops, dag, list(expected))
+    if refusal is not None:
+        raise RuntimeError(
+            f"конверт review/v1 в base (PR #{pr}), заявка {key} завершена, но узлы не "
+            f"одобрены — {refusal}"
+        )
     return an.ApprovalOutcome(
         f"конверт review/v1 в base (PR #{pr}): узлы {', '.join(expected)} одобрены, "
         f"заявка {key} завершена",
@@ -16138,10 +16160,14 @@ JUDGMENT = {
     "act_node._finalize": (r("commit_made", "act_node._finalize", "if head is None:\n            raise",
                              f"{N}::test_envelope_commit_not_made_is_refused",
                              '"коммит конверта не состоялся"'),),
-    "act_node._reconcile_finalize": tuple(
-        r(f"envelope:{f}", "act_node._reconcile_finalize", "if got != text",
-          f"{N}::test_finalize_delivered_envelope_component_substituted_invalidates[{f}]",
-          '"не тот конверт"') for f in ENVELOPE_FIELDS),
+    "act_node._reconcile_finalize": (
+        *(r(f"envelope:{f}", "act_node._reconcile_finalize", "if got != text",
+            f"{N}::test_finalize_delivered_envelope_component_substituted_invalidates[{f}]",
+            '"не тот конверт"') for f in ENVELOPE_FIELDS),
+        r("current_admission", "act_node._reconcile_finalize", "if refusal is not None",
+          f"{N}::test_stop_between_act_and_finalize_merge_not_reported_approved",
+          '"узлы не одобрены — узел charter: not_approved:stopped:g1"'),
+    ),
     "act_node._require_in_base": (r("in_base", "act_node._require_in_base", "if not reached",
                                     f"{N}::test_finalize_merged_outside_base_invalidates", '"не в базу"'),),
     "act_node.reopen": (
@@ -17297,7 +17323,7 @@ if __name__ == "__main__":
   (`approve_node._propose#…`, `read_dag_state#…`, `_require_upstream_ready#…`,
   `_try_agent_merge#form`, `runner._step_gate#…`, `runner._step_s8#…`) и прогнанные при ревизии
   плана. Сначала — применимость операторов ко ВСЕМ строкам без запуска двойников (b6, B6-4;
-  ожидается `281/281`: при ревизии d1 (01.11) — 269 по коду scratch и 12 строк
+  ожидается `282/282`: при ревизии d1 (01.11) — 270 по коду scratch и 12 строк
   `<функция>#<проверка>` по AST фрагментов плана; `n/a` чинится оператором `BYPASS` или записью `RULED`, не пропуском):
 
   ```bash
