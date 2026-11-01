@@ -2941,9 +2941,10 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       `betta-tester` (R15-2); после прогона стенд чист (0 открытых PR, только `master`).
       Evidence — `docs/evidence/2026-10-30-df-stage2a-acceptance.md`. Три строки мержа §4.5
       — пункт 2b ниже.
-- [ ] Отозвать PAT machine-учётки `betta-tester` и удалить секреты environment `df-stage2-live` (`DF_STAND_APP_KEY`, `DF_STAND_MACHINE_TOKEN`) после закрытия этапа 2a — действие владельца; для живых строк 2b стенд заводится заново @owner:github:andrei-shtanakov @id:df-stage2a-stand-secrets-revoke @epic:eco.dark-factory
+- [x] Отозвать PAT machine-учётки `betta-tester` и удалить секреты environment `df-stage2-live` (`DF_STAND_APP_KEY`, `DF_STAND_MACHINE_TOKEN`) после закрытия этапа 2a — действие владельца; для живых строк 2b стенд заводится заново @owner:github:andrei-shtanakov @id:df-stage2a-stand-secrets-revoke @epic:eco.dark-factory
       PAT classic, `repo`, срок 30 дней (R15-2); ключ App стенда — тоже секрет
       environment. Прогон 41044119428 отозвал свои токены установки сам (`tokens_revoked`).
+      Закрыто 01.11: владелец отозвал PAT и удалил секреты; environment `df-stage2-live` — 0 секретов (сверено агентом).
 - [ ] Этап 2b спеки B — мерж издателя: `act_premerge` как предпроверка `merge`, поверхность candidate D16 и полный состав PR, вид stop, три строки мержа §4.5 живьём @owner:github:andrei-shtanakov @id:df-installer-stage2b @epic:eco.dark-factory @blocked_by:todo://devtools/approval-act-node @blocked_by:todo://devtools/df-installer-stage2a
 - [ ] Смена закреплённого `uv`, Python профиля или пина члена `core`: перемерить то, что закреплено за прежним значением @owner:github:andrei-shtanakov @id:df-installer-pin-drift @epic:eco.dark-factory @trigger:"смена UV_PINNED_VERSION, Python профиля или пина члена core в манифесте"
       `uv`: замер `UV_PROJECT_KEYS_<версия>` (дополнение A1/A2 предполётной проверки Task 7a)
