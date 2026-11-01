@@ -241,3 +241,66 @@ def test_installed_record_sends_publisher_request(monkeypatch) -> None:
     data, op = sent[0]
     req = preq.parse("record-violation", data)
     assert op == "record-violation" and req.fields["source"] == "df-trust"
+
+
+def _installed_answer(monkeypatch, outcome: str, result: dict) -> None:
+    """Издатель стенда: `perimeter_client.status` зовёт `sudo_call` модуля."""
+
+    def call(
+        data: bytes,
+        layout=None,
+        *,
+        operation: str = "perimeter-status",
+        timeout: float = 60.0,
+    ):
+        assert operation == "perimeter-status"
+        resp = {
+            "schema": "df/publisher-response/v1",
+            "outcome": outcome,
+            "reason": "snapshot_moved" if outcome != "done" else None,
+            "result": result,
+            "evidence": {},
+        }
+        return (json.dumps(resp) + "\n").encode()
+
+    monkeypatch.setattr(act_journal.perimeter_client, "sudo_call", call)
+
+
+def test_installed_status_stale_snapshot_is_stale(monkeypatch) -> None:
+    """M4 (R1): снимок сдвинулся у издателя — `STALE`, решающий перечитает доверие."""
+    _installed_answer(monkeypatch, "stale_snapshot", {"snapshot_sha": "2" * 40})
+    assert act_journal.InstalledJournal("run-7").status(snap(1)) == act_trust.STALE
+
+
+def test_installed_status_unavailable(monkeypatch) -> None:
+    _installed_answer(
+        monkeypatch,
+        "done",
+        preq.perimeter_result("unavailable", "no_binding", None, None),
+    )
+    got = act_journal.InstalledJournal("run-7").status(snap(1))
+    assert isinstance(got, Unavailable) and got.reason == "периметр: no_binding"
+
+
+def test_installed_status_passes_clear_and_blocked(monkeypatch) -> None:
+    for state in ("clear", "blocked"):
+        _installed_answer(
+            monkeypatch, "done", preq.perimeter_result(state, None, "1" * 40, 1)
+        )
+        assert act_journal.InstalledJournal("run-7").status(snap(1)) == state
+
+
+def test_dev_journal_mkdir_failure_is_unavailable(tmp_path: Path, monkeypatch) -> None:
+    """M8: каталог хранилища не создать — `Unavailable` из `journal_for`."""
+    monkeypatch.setattr(act_journal, "_publisher_present", lambda: False)
+    (tmp_path / "darkfactory").write_text("file", encoding="utf-8")
+    got = act_journal.journal_for(
+        state_home=tmp_path,
+        run_id="r",
+        reread=Head(snap()),
+        env={},
+        policy_repository_id=POLICY_ID,
+    )
+    assert isinstance(got, Unavailable) and got.reason.startswith(
+        "журнал периметра (dev): "
+    )

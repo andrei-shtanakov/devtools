@@ -2,7 +2,7 @@
 
 Перед КАЖДЫМ решением: привязка `/etc/df/trust.toml` → снимок `df-trust`
 (SHA фиксируется; `source.env` и все версии `epochs.yaml` — из него) →
-журнал событий периметра (если передан) → самоотчёт каждого credential →
+журнал событий периметра (обязателен) → самоотчёт каждого credential →
 ruleset обоих репо доверия → `allow_rebase_merge`; затем лениво — время
 якорей и диапазоны эпох с наборами ≤ T. Недоступное обязательное чтение —
 `Unavailable` без события; событие — только для установленного нарушения.
@@ -55,6 +55,16 @@ MAX_BINDING = 64 << 10
 STALE = "stale_snapshot"
 REQUIRED_RULES = frozenset({"deletion", "non_fast_forward", "pull_request"})
 REBASE_PREMISE = "allow_rebase_merge"
+#: Окружение `gh`, которое подменило бы credential или хост самоотчёта.
+_GH_ENV_DROPPED = frozenset(
+    {
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_HOST",
+        "GH_ENTERPRISE_TOKEN",
+        "GITHUB_ENTERPRISE_TOKEN",
+    }
+)
 _BINDING_KEYS = (
     "host",
     "df_trust_repository_id",
@@ -215,6 +225,8 @@ def load_binding(
         return Unavailable(f"привязка {path}: {exc}")
     finally:
         os.close(fd)
+    if len(raw) > MAX_BINDING:
+        return Unavailable(f"привязка {path}: больше {MAX_BINDING} байт")
     try:
         return parse_binding(raw.decode("utf-8"))
     except (TrustError, UnicodeDecodeError) as exc:
@@ -364,16 +376,17 @@ def read_trust_snapshot(anon: Any, binding: Binding) -> TrustSnapshot | Unavaila
 
 
 def gh_get(cred: Credential, path: str) -> Fact[object]:
-    """`gh api <path>` ИМЕННО этим credential: токены окружения снимаются,
-    чтобы профиль не подменился чужим токеном."""
-    env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN")}
+    """`gh api <path>` ИМЕННО этим credential на `github.com`: токены и хост
+    окружения снимаются, чтобы профиль не подменился чужим токеном, а
+    самоотчёт не ушёл на другой хост."""
+    env = {k: v for k, v in os.environ.items() if k not in _GH_ENV_DROPPED}
     if cred.token is not None:
         env["GH_TOKEN"] = cred.token
     if cred.gh_config_dir is not None:
         env["GH_CONFIG_DIR"] = str(cred.gh_config_dir)
     try:
         done = subprocess.run(
-            ["gh", "api", path],
+            ["gh", "api", "--hostname", SUPPORTED_HOST, path],
             env=env,
             capture_output=True,
             text=True,
@@ -510,6 +523,8 @@ def load_trust(
     Журнал периметра обязателен у КАЖДОГО потребителя, включая предпроверку
     мержа (ревизия b1: `act_journal_wire`): блок, зарегистрированный другим
     потребителем, учитывается, а обнаруженное здесь нарушение сохраняется."""
+    if not creds:
+        return Unavailable("самоотчёт: процесс не назвал ни одного credential")
     snap = _snapshot_for_decision(readers, binding, journal)
     if isinstance(snap, Unavailable):
         return snap

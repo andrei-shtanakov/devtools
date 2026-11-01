@@ -34,6 +34,8 @@ RESPONSE_SCHEMA = "df/publisher-response/v1"
 PUBLISHER = "df-publisher"
 SUDO = "/usr/bin/sudo"
 PUBLISH = Path("/opt/df/libexec/df-publish")
+#: Операции издателя, которые этот клиент вызывает (и только они).
+OPERATIONS = ("perimeter-status", "record-violation")
 #: Каталог хранилища режима разработки — тот же, что `act_journal.DevJournal`.
 DEV_BASE = Path("darkfactory/perimeter/root/var/lib/df/perimeter")
 DB_NAME, LOCK, MARKER, RESTORE_INTENT = (
@@ -65,8 +67,9 @@ def _root_id(snap: TrustSnapshot) -> dict[str, object]:
 def _publish(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
     """Единственное место порождения процесса модуля (`spawn-sites.toml`):
     только `sudo -n -u df-publisher …/df-publish <операция>`."""
-    if argv[:5] != [SUDO, "-n", "-u", PUBLISHER, str(PUBLISH)] or len(argv) != 6:
-        raise OSError(f"не вызов издателя: {argv[:5]}")
+    prefix = [SUDO, "-n", "-u", PUBLISHER, str(PUBLISH)]
+    if argv[:5] != prefix or len(argv) != 6 or argv[5] not in OPERATIONS:
+        raise OSError(f"не вызов издателя: {argv}")
     return subprocess.run(argv, **kwargs)  # noqa: PLW1510 — check=False у вызывающего
 
 
@@ -171,7 +174,9 @@ class DevStoreJournal:
             if not stat.S_ISREG(os.lstat(db).st_mode):
                 return Unavailable("журнал периметра (dev): integrity")
             fd = os.open(self.base / LOCK, _LOCK_FLAGS)
-        except FileNotFoundError:
+        except FileNotFoundError as exc:
+            if Path(exc.filename or "") == self.base / LOCK:
+                return Unavailable(f"журнал периметра (dev): нет {LOCK} при базе")
             lost = (self.base / MARKER).exists()
             return Unavailable(
                 f"журнал периметра (dev): {'lost' if lost else 'не создан'}"

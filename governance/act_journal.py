@@ -233,4 +233,7 @@ def journal_for(
                 "периметр: установка df без контекста прогона (DF_RUN_ID)"
             )
         return InstalledJournal(df_run)
-    return DevJournal(state_home, run_id, reread, policy_repository_id)
+    try:
+        return DevJournal(state_home, run_id, reread, policy_repository_id)
+    except OSError as exc:
+        return Unavailable(f"журнал периметра (dev): {exc}")

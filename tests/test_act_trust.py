@@ -238,6 +238,24 @@ def test_binding_symlink_or_foreign_owner_refused(tmp_path: Path) -> None:
     )
 
 
+def test_binding_oversize_refused(tmp_path: Path) -> None:
+    """M2: файл больше `MAX_BINDING` не разбирается усечённым."""
+    big = tmp_path / "trust.toml"
+    big.write_text(BINDING_TOML + "#" * act_trust.MAX_BINDING + "\n", encoding="utf-8")
+    got = act_trust.load_binding(big, owner_uid=os.getuid())
+    assert isinstance(got, Unavailable) and "больше" in got.reason
+
+
+@pytest.mark.parametrize("mode", [0o664, 0o646], ids=["group", "world"])
+def test_binding_writable_by_others_refused(tmp_path: Path, mode: int) -> None:
+    """M3: привязка, которую пишет группа или все, — не доверенная."""
+    path = tmp_path / "trust.toml"
+    path.write_text(BINDING_TOML, encoding="utf-8")
+    path.chmod(mode)
+    got = act_trust.load_binding(path, owner_uid=os.getuid())
+    assert isinstance(got, Unavailable) and "без записи группы/всех" in got.reason
+
+
 # --- снимок df-trust (§6.1 п. 1, §6.5, №45) --------------------------------
 
 
@@ -877,3 +895,76 @@ def test_activation_without_actors_file_unavailable() -> None:
     assert isinstance(got, Unavailable) and got.reason.endswith(
         ": нет policy/actors.yaml"
     )
+
+
+def test_chain_longer_than_max_unavailable(monkeypatch) -> None:
+    """M3: first-parent обход ограничен `MAX_CHAIN`."""
+    monkeypatch.setattr(act_trust, "MAX_CHAIN", 1)
+    got = act_trust.read_trust_snapshot(Anon(trust_routes(J1, J1)), binding())
+    assert isinstance(got, Unavailable) and "цепочка длиннее 1" in got.reason
+
+
+def test_credentials_list_distinct_merge_profile(tmp_path: Path) -> None:
+    """M3: отдельный профиль мержа — свой credential."""
+    got = act_trust.credentials(
+        {"GITHUB_TOKEN": "b"},
+        agent_dir=tmp_path / "review",
+        merge_dir=tmp_path / "merge",
+    )
+    assert [c.label for c in got] == [
+        "profile:agent",
+        "profile:merge",
+        "env:GITHUB_TOKEN",
+    ]
+    assert got[1].gh_config_dir == tmp_path / "merge"
+
+
+def test_self_report_without_permissions_names_reason() -> None:
+    """M6: самоотчёт получен, но без поля `permissions` — причина не «ok»."""
+    journal = Journal()
+    answers = {("profile:agent", f"repos/{DT}"): Fact(Outcome.FOUND, {"id": 1}, "ok")}
+    got = load(trust_routes(None, J1), journal, answers=answers)
+    assert isinstance(got, Unavailable) and journal.records == []
+    assert got.reason.endswith("права credential на источнике не получены")
+
+
+def test_load_trust_without_credentials_unavailable() -> None:
+    """M8: пустой набор credential не проходит самоотчёт «вакуумно»."""
+    anon = Anon(trust_routes(None, J1))
+    got = act_trust.load_trust(
+        act_trust.Readers(anon, as_credential({})), binding(), Journal(), creds=()
+    )
+    assert isinstance(got, Unavailable) and "ни одного credential" in got.reason
+    assert anon.sent == []
+
+
+def test_gh_get_pins_host_and_drops_host_env(monkeypatch) -> None:
+    """M1: самоотчёт — только `github.com`; `GH_HOST`, enterprise-токены не идут."""
+    seen: list[tuple[list[str], dict[str, str]]] = []
+
+    class Done:
+        returncode, stdout, stderr = 0, "{}", ""
+
+    def run(argv, *, env, **kw):  # noqa: ANN001, ANN003
+        seen.append((argv, env))
+        return Done()
+
+    for var in (
+        "GH_HOST",
+        "GH_ENTERPRISE_TOKEN",
+        "GITHUB_ENTERPRISE_TOKEN",
+        "GITHUB_TOKEN",
+    ):
+        monkeypatch.setenv(var, "stray")
+    monkeypatch.setattr(act_trust.subprocess, "run", run)
+    act_trust.gh_get(AGENT, "repos/o/p")
+    argv, env = seen[0]
+    assert argv == ["gh", "api", "--hostname", "github.com", "repos/o/p"]
+    assert not {
+        "GH_HOST",
+        "GH_ENTERPRISE_TOKEN",
+        "GITHUB_ENTERPRISE_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+    } & set(env)
+    assert env["GH_CONFIG_DIR"] == "/x/review"

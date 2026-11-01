@@ -229,9 +229,34 @@ def test_publish_refuses_anything_but_the_publisher(monkeypatch) -> None:
     import subprocess
 
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("spawned"))
+    prefix = [act_journal_wire.SUDO, "-n", "-u", "df-publisher"]
+    prefix.append(str(act_journal_wire.PUBLISH))
     for argv in (
         ["sh", "-c", "x"],
         [act_journal_wire.SUDO, "-n", "-u", "root", "x", "y"],
+        [*prefix, "merge"],  # чужая операция издателя
+        [*prefix, "perimeter-status", "extra"],
+        prefix,
     ):
         with pytest.raises(OSError, match="не вызов издателя"):
             act_journal_wire._publish(argv)
+
+
+def test_publish_runs_known_operations(monkeypatch) -> None:
+    import subprocess
+
+    ran: list[list[str]] = []
+    monkeypatch.setattr(subprocess, "run", lambda argv, **k: ran.append(argv))
+    for op in ("perimeter-status", "record-violation"):
+        argv = [act_journal_wire.SUDO, "-n", "-u", "df-publisher"]
+        act_journal_wire._publish([*argv, str(act_journal_wire.PUBLISH), op])
+    assert [a[-1] for a in ran] == ["perimeter-status", "record-violation"]
+
+
+def test_missing_lock_with_database_named_exactly(tmp_path: Path) -> None:
+    """M8: нет `db.lock` при существующей базе — не «lost»/«не создан»."""
+    full, narrow = pair(tmp_path, Head(snap()))
+    full.status(snap())
+    (narrow.base / "db.lock").unlink()
+    got = narrow.status(snap())
+    assert isinstance(got, Unavailable) and got.reason.endswith("нет db.lock при базе")
