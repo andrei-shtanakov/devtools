@@ -209,7 +209,8 @@ class Deps:
 
 
 def real_deps(state: RunState, env: Mapping[str, str] | None = None) -> Deps:
-    """Боевые зависимости: привязка, анонимный REST, профиль агента, журнал (Р-5)."""
+    """Боевые зависимости: привязка, самоотчёт `gh`, журнал (Р-5); транспорт
+    источников доверия строит `load_trust` (Task 11c)."""
     env = dict(os.environ) if env is None else env
     home = Path.home()
     agent = Path(env.get("REVIEW_GH_CONFIG_DIR") or home / ".config" / "review")
@@ -219,10 +220,11 @@ def real_deps(state: RunState, env: Mapping[str, str] | None = None) -> Deps:
     def journal(readers: Any, binding: act_trust.Binding) -> Any:
         from governance import act_journal
 
+        del readers  # снимок журнал перечитывает транспортом решения (Р-23)
         return act_journal.journal_for(
             state_home=state_home,
             run_id=state.run_id,
-            reread=lambda: act_trust.read_trust_snapshot(readers.anon, binding),
+            binding=binding,
             env=env,
             policy_repository_id=binding.approval_policy_repository_id,
         )
@@ -954,8 +956,8 @@ def live_policy(state: RunState, deps: Deps) -> LivePolicy | Unavailable:
     if not trust.epochs:
         return Unavailable("журнал эпох не прочитан")
     now = deps.now()
-    anchors = act_trust.load_anchor_times(deps.readers.anon, trust, now)
-    loaded = act_trust.load_ranges(deps.readers.anon, trust, anchors, now, journal)
+    anchors = act_trust.load_anchor_times(trust, now)
+    loaded = act_trust.load_ranges(trust, anchors, now, journal)
     if isinstance(loaded, Unavailable):
         return loaded
     ranges, sets = loaded

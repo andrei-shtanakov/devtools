@@ -12,7 +12,7 @@ import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Literal
 
@@ -276,6 +276,9 @@ _TRUST_KEYS = {
     "approval_policy_repository_id",
     "transport",
 }
+#: Optional: the `gh` profile of the read-only history token (spec A rev 18
+#: section 6.2); the installer only parses it, writing it is stage 2b/3.
+HISTORY_KEY = "history_gh_config_dir"
 
 
 @dataclass(frozen=True)
@@ -288,6 +291,7 @@ class TrustBinding:
     df_trust_branch: str
     approval_policy_repository_id: int
     transport: Literal["public"]
+    history_gh_config_dir: str | None = None
 
     def __post_init__(self) -> None:
         _nonempty(self.host, "host")
@@ -297,6 +301,13 @@ class TrustBinding:
             value = getattr(self, key)
             _need(_is_int(value) and value > 0, key, "must be a positive integer")
         _need(self.transport == "public", "transport", "only 'public' in v1")
+        history = self.history_gh_config_dir
+        _need(
+            history is None
+            or (isinstance(history, str) and PurePosixPath(history).is_absolute()),
+            HISTORY_KEY,
+            "must be an absolute path",
+        )
 
     @property
     def root_id(self) -> tuple[str, int, str]:
@@ -307,8 +318,11 @@ class TrustBinding:
 def parse_trust(text: str) -> TrustBinding:
     """Parse the text of `trust.toml`."""
     data = _parse_toml(text, _TRUST)
-    _check_keys(data, _TRUST_KEYS, set(), "trust.toml")
-    return TrustBinding(**{k: data[k] for k in _TRUST_KEYS})  # type: ignore[arg-type]
+    _check_keys(data, _TRUST_KEYS, {HISTORY_KEY}, "trust.toml")
+    return TrustBinding(
+        **{k: data[k] for k in _TRUST_KEYS},  # type: ignore[arg-type]
+        history_gh_config_dir=data.get(HISTORY_KEY),
+    )
 
 
 def load_trust(path: Path) -> TrustBinding | None:

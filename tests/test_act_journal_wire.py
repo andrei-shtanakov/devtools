@@ -12,7 +12,11 @@ from governance import act_journal, act_journal_wire
 from governance.act_epochs import Epoch
 from governance.act_source import SourceV2
 from governance.act_time import Unavailable
-from governance.act_trust import STALE, TrustRoot, TrustSnapshot
+from governance.act_trust import STALE, Binding, TrustRoot, TrustSnapshot
+
+#: Транспорт решения стенда: полный журнал перечитывает голову им (Р-23, Task 11c).
+TRANSPORT = object()
+BINDING = Binding("github.com", 11, "owner/df-trust", "main", 22, "public")
 
 
 def snap(epoch: int = 1, sha: str = "1" * 40) -> TrustSnapshot:
@@ -21,6 +25,7 @@ def snap(epoch: int = 1, sha: str = "1" * 40) -> TrustSnapshot:
         "owner/df-trust",
         SourceV2("owner/ap", "main", "a" * 40, frozenset({"o"})),
         tuple(Epoch(i, "a" * 40) for i in range(1, epoch + 1)),
+        transport=TRANSPORT,
     )
 
 
@@ -28,29 +33,40 @@ class Head:
     def __init__(self, current: object) -> None:
         self.current = current
 
-    def __call__(self) -> object:
+    def __call__(self, transport: object, binding: Binding) -> object:
+        assert transport is TRANSPORT and binding == BINDING
         return self.current
 
 
-def pair(tmp_path: Path, head: Head):
-    full = act_journal.DevJournal(tmp_path.resolve(), "run-1", head, 22)
-    narrow = act_journal_wire.DevStoreJournal(tmp_path.resolve(), "run-1", 22)
-    return full, narrow
+@pytest.fixture()
+def pair(monkeypatch: pytest.MonkeyPatch):
+    """`pair(tmp_path, head)` — полный и узкий журналы на одной базе; полный
+    перечитывает голову через `head` (`act_journal.read_trust_snapshot`)."""
+
+    def make(tmp_path: Path, head: Head):
+        monkeypatch.setattr(act_journal, "read_trust_snapshot", head)
+        full = act_journal.DevJournal(tmp_path.resolve(), "run-1", BINDING, 22)
+        narrow = act_journal_wire.DevStoreJournal(tmp_path.resolve(), "run-1", 22)
+        return full, narrow
+
+    return make
 
 
-def test_same_directory_as_full_journal(tmp_path: Path) -> None:
+def test_same_directory_as_full_journal(tmp_path: Path, pair) -> None:
     full, narrow = pair(tmp_path, Head(snap()))
     assert narrow.base == full.layout.perimeter_dir
 
 
-def test_missing_store_is_unavailable(tmp_path: Path) -> None:
+def test_missing_store_is_unavailable(tmp_path: Path, pair) -> None:
     _, narrow = pair(tmp_path, Head(snap()))
     got = narrow.status(snap())
     assert isinstance(got, Unavailable) and got.reason.endswith("не создан")
     assert isinstance(narrow.record(snap(), "df-trust", "x"), Unavailable)
 
 
-def test_narrow_pending_blocks_and_full_journal_completes_it(tmp_path: Path) -> None:
+def test_narrow_pending_blocks_and_full_journal_completes_it(
+    tmp_path: Path, pair
+) -> None:
     head = Head(snap(1))
     full, narrow = pair(tmp_path, head)
     assert full.status(snap(1)) == "clear"  # полный журнал создаёт базу
@@ -63,14 +79,14 @@ def test_narrow_pending_blocks_and_full_journal_completes_it(tmp_path: Path) -> 
     assert narrow.status(snap(2, "2" * 40)) == "clear"
 
 
-def test_registered_by_full_journal_seen_by_narrow(tmp_path: Path) -> None:
+def test_registered_by_full_journal_seen_by_narrow(tmp_path: Path, pair) -> None:
     head = Head(snap(1))
     full, narrow = pair(tmp_path, head)
     full.record(snap(1), "df-trust", "x")
     assert narrow.status(snap(1)) == full.status(snap(1)) == "blocked"
 
 
-def test_restore_intent_and_corruption_unavailable(tmp_path: Path) -> None:
+def test_restore_intent_and_corruption_unavailable(tmp_path: Path, pair) -> None:
     full, narrow = pair(tmp_path, Head(snap()))
     full.status(snap())
     (narrow.base / "restore.intent").write_text("x")
@@ -177,7 +193,9 @@ def test_wire_garbled_or_refused_answers_unavailable() -> None:
     )
 
 
-def test_record_insert_failure_is_unavailable(tmp_path: Path, monkeypatch) -> None:
+def test_record_insert_failure_is_unavailable(
+    tmp_path: Path, pair, monkeypatch
+) -> None:
     """b4: вставка события в хранилище не удалась — `Unavailable`, не «записано»."""
     import os
     import sqlite3
@@ -253,7 +271,7 @@ def test_publish_runs_known_operations(monkeypatch) -> None:
     assert [a[-1] for a in ran] == ["perimeter-status", "record-violation"]
 
 
-def test_missing_lock_with_database_named_exactly(tmp_path: Path) -> None:
+def test_missing_lock_with_database_named_exactly(tmp_path: Path, pair) -> None:
     """M8: нет `db.lock` при существующей базе — не «lost»/«не создан»."""
     full, narrow = pair(tmp_path, Head(snap()))
     full.status(snap())
@@ -333,7 +351,7 @@ def _intent_link(tmp_path, monkeypatch, full, narrow, head) -> None:
     ids=["max_events", "schema", "invariant", "meta", "intent_symlink", "marker_link"],
 )
 def test_both_clients_refuse_the_same_store(
-    tmp_path: Path, monkeypatch, spoil, reason: str
+    tmp_path: Path, pair, monkeypatch, spoil, reason: str
 ) -> None:
     """Ревью #666: на одном файле узкий клиент не отвечает `clear` там, где
     полный журнал (`open_db` → `_verify`) отказывает."""

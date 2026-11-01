@@ -2946,6 +2946,12 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       environment. Прогон 41044119428 отозвал свои токены установки сам (`tokens_revoked`).
       Закрыто 01.11: владелец отозвал PAT и удалил секреты; environment `df-stage2-live` — 0 секретов (сверено агентом).
 - [ ] Этап 2b спеки B — мерж издателя: `act_premerge` как предпроверка `merge`, поверхность candidate D16 и полный состав PR, вид stop, три строки мержа §4.5 живьём @owner:github:andrei-shtanakov @id:df-installer-stage2b @epic:eco.dark-factory @blocked_by:todo://devtools/approval-act-node @blocked_by:todo://devtools/df-installer-stage2a
+- [ ] Токен истории на стороне установщика (R8, С-1): `darkfactory setup-trust` пишет `history_gh_config_dir` в `trust.toml`, `darkfactory doctor` проверяет профиль и самоотчёт, шаг человека — read-only PAT (R4) и профиль `history` @owner:github:andrei-shtanakov @id:df-trust-history-token @epic:eco.dark-factory @blocked_by:todo://devtools/df-installer-stage2b
+      Разбор ключа (`df.stage2_config.parse_trust`, `act_trust.parse_binding`) — Task 11c
+      части B approval-act. Шаг человека: `GH_CONFIG_DIR=<каталог> gh auth login --hostname
+      github.com --with-token`. Ключ НЕ вписывать на хосте с `df` версии до Task 11c: прежний
+      `parse_trust` отвергает незнакомый ключ (`darkfactory doctor`, издатель и `run_start`
+      упадут на разборе привязки). Без ключа акт работает анонимно (R5).
 - [ ] Смена закреплённого `uv`, Python профиля или пина члена `core`: перемерить то, что закреплено за прежним значением @owner:github:andrei-shtanakov @id:df-installer-pin-drift @epic:eco.dark-factory @trigger:"смена UV_PINNED_VERSION, Python профиля или пина члена core в манифесте"
       `uv`: замер `UV_PROJECT_KEYS_<версия>` (дополнение A1/A2 предполётной проверки Task 7a)
       и таблица записи пути корня в `tests/df/fixtures/locks/SOURCES.md`, переименовать

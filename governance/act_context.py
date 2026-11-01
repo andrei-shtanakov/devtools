@@ -49,8 +49,8 @@ def delivery_verdict(
     if facts is None or delivery.merged_at is None:
         return WaitingDelivery(), delivery
     t = parse_ts(delivery.merged_at)
-    anchors = act_trust.load_anchor_times(readers.anon, trust, t)
-    loaded = act_trust.load_ranges(readers.anon, trust, anchors, t, journal)
+    anchors = act_trust.load_anchor_times(trust, t)
+    loaded = act_trust.load_ranges(trust, anchors, t, journal)
     if isinstance(loaded, Unavailable):
         return loaded, delivery
     ranges, sets = loaded

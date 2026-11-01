@@ -1,7 +1,9 @@
-"""Анонимный REST-транспорт источников доверия (спека §6.2, steward §12 п. 1).
+"""REST-транспорт источников доверия (спека rev 18 §6.2, steward §12 п. 1).
 
-Реализация протокола `steward.approvalfacts.v3.Transport` БЕЗ credentials:
-`GET https://api.github.com/<path>` без `Authorization`, без перенаправлений,
+Реализация протокола `steward.approvalfacts.v3.Transport` без credentials либо
+с read-only токеном истории (спека rev 18 §6.2; строит только
+`act_trust.history_transport`): `GET https://api.github.com/<path>` без
+`Authorization` (с токеном — только `Authorization: Bearer`), без перенаправлений,
 с пределом размера ответа. Любой HTTP-ответ — `Response(status, body,
 link)`, классификацию делает библиотека; сбой доставки — `Response(None,
 error=…)`; исключений `send` не бросает (инструкция steward, «Транспорт»).
@@ -70,13 +72,22 @@ def _response(cls: Any, status: int, stream: Any, link: str | None) -> Any:
 
 
 class AnonTransport:
-    """`Transport` steward без credentials; `sent` — пути, ушедшие в сеть."""
+    """`Transport` steward источников доверия: без credentials либо с read-only
+    токеном истории (спека rev 18 §6.2); строит только
+    `act_trust.history_transport`; `sent` — пути, ушедшие в сеть."""
 
     def __init__(
-        self, *, open_url: Callable[..., Any] | None = None, timeout: float = TIMEOUT
+        self,
+        *,
+        open_url: Callable[..., Any] | None = None,
+        timeout: float = TIMEOUT,
+        token: str | None = None,
     ) -> None:
         self._open = open_url or _default_open()
         self._timeout = timeout
+        self._token = token
+        auth = {} if token is None else {"Authorization": f"Bearer {token}"}
+        self._headers = _HEADERS | auth
         self._memo: dict[str, Any] = {}
         self.sent: list[str] = []
 
@@ -103,7 +114,7 @@ class AnonTransport:
 
     def _fetch(self, path: str, cls: Any) -> Any:
         self.sent.append(path)
-        req = urllib.request.Request(API + path, method="GET", headers=_HEADERS)
+        req = urllib.request.Request(API + path, method="GET", headers=self._headers)
         try:
             try:
                 with self._open(req, timeout=self._timeout) as answer:
@@ -114,7 +125,11 @@ class AnonTransport:
                 link = err.headers.get("Link") if err.headers is not None else None
                 return _response(cls, err.code, err, link)
         except Exception as exc:  # noqa: BLE001 — send не бросает (инструкция steward)
-            return cls(None, error=f"anon: {type(exc).__name__}: {exc}")
+            return cls(None, error=self._mask(f"anon: {type(exc).__name__}: {exc}"))
+
+    def _mask(self, text: str) -> str:
+        """Значение токена в тексте сбоя — `***` (R1)."""
+        return text if self._token is None else text.replace(self._token, "***")
 
 
 _REPO = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")

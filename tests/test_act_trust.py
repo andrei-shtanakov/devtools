@@ -4,8 +4,14 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
+import json
 import os
+import subprocess
+from dataclasses import replace
+from email.message import Message
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,7 +19,7 @@ pytest.importorskip("steward")
 
 from steward.approvalfacts import v3  # noqa: E402
 
-from governance import act_facts, act_source, act_trust  # noqa: E402
+from governance import act_anon, act_facts, act_source, act_trust  # noqa: E402
 from governance.act_epochs import Epoch  # noqa: E402
 from governance.act_time import Unavailable, parse_ts  # noqa: E402
 from governance.facts import Fact, Outcome, unavailable  # noqa: E402
@@ -174,8 +180,100 @@ AGENT = act_trust.Credential("profile:agent", gh_config_dir=Path("/x/review"))
 
 
 def load(routes: dict, journal: Journal | None = None, creds=(AGENT,), answers=None):
-    readers = act_trust.Readers(Anon(routes), as_credential(answers or {}))
-    return act_trust.load_trust(readers, binding(), journal or Journal(), creds=creds)
+    return act_trust.load_trust(
+        act_trust.Readers(as_credential(answers or {})),
+        binding(),
+        journal or Journal(),
+        creds=creds,
+        open_url=_Wire(routes),
+    )
+
+
+def _via(trust: act_trust.Trust, anon: object) -> act_trust.Trust:
+    """Доверие, прочитанное транспортом `anon` (стенд якорей и диапазонов)."""
+    return replace(trust, snapshot=replace(trust.snapshot, transport=anon))
+
+
+TOKEN = "ghp_History0token"
+HISTORY_TOML = BINDING_TOML + 'history_gh_config_dir = "/etc/df/gh-history"\n'
+DF_TOKEN_ENV = (
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_HOST",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+)
+
+
+class _Done:
+    def __init__(self, rc: int, out: str = "", err: str = "") -> None:
+        self.returncode, self.stdout, self.stderr = rc, out, err
+
+
+class _Answer(io.BytesIO):
+    def __init__(self, status: int, body: object) -> None:
+        super().__init__(json.dumps(body).encode())
+        self.status, self.headers = status, Message()
+
+
+class _Wire:
+    """`open_url` настоящего `AnonTransport` поверх маршрутов `trust_routes`;
+    журнал `(путь, заголовки)` каждого ушедшего запроса."""
+
+    def __init__(self, routes: dict) -> None:
+        self.routes, self.calls = routes, []
+
+    def __call__(self, req, timeout: float):  # noqa: ANN001
+        path = req.full_url.removeprefix(act_anon.API)
+        self.calls.append((path, dict(req.header_items())))
+        return _Answer(*self.routes[path])
+
+
+class _Tokens:
+    """`token_source`: журнал вызовов; значения — по очереди (последнее повторяется)."""
+
+    def __init__(self, *values: object) -> None:
+        self.values, self.calls = list(values), []
+
+    def __call__(self, config_dir: Path) -> object:
+        self.calls.append(config_dir)
+        return self.values[min(len(self.calls), len(self.values)) - 1]
+
+
+def _profile(tmp_path: Path) -> Path:
+    profile = tmp_path / "gh-history"
+    profile.mkdir()
+    (profile / "hosts.yml").write_text("github.com:\n  user: reader\n")
+    return profile
+
+
+def _with_history(tmp_path: Path) -> act_trust.Binding:
+    return replace(binding(), history_gh_config_dir=tmp_path / "gh-history")
+
+
+def _self_reported(routes: dict) -> dict:
+    """Ответы `GET repos/{repo}` с `permissions` — для самоотчёта транспортом (Р-18)."""
+    routes[f"repos/{DT}"] = (200, {"full_name": DT, **_perms()})
+    routes[f"repos/{AP}"] = (200, {**routes[f"repos/{AP}"][1], **_perms()})
+    return routes
+
+
+def _decide(
+    b, routes_or_wire, *, creds=(AGENT,), tokens=None, readers=None, journal=None
+):
+    """`load_trust` только через швы `open_url`/`token_source`."""
+    wire = (
+        routes_or_wire if isinstance(routes_or_wire, _Wire) else _Wire(routes_or_wire)
+    )
+    got = act_trust.load_trust(
+        readers or act_trust.Readers(as_credential({})),
+        b,
+        journal or Journal(),
+        creds=creds,
+        open_url=wire,
+        token_source=tokens or _Tokens(TOKEN),
+    )
+    return got, wire
 
 
 # --- привязка (Р-6; без Р-1 — ревизия b1) -----------------------------------
@@ -478,20 +576,28 @@ def test_ruleset_without_pull_request_is_violation() -> None:
 
 def test_missing_bypass_field_not_read() -> None:
     """Приёмка №33: рантайм не делает вывода «bypass нет» — поле не запрашивается."""
-    anon = Anon(trust_routes(None, J1))
+    wire = _Wire(trust_routes(None, J1))
     act_trust.load_trust(
-        act_trust.Readers(anon, as_credential({})), binding(), Journal(), creds=(AGENT,)
+        act_trust.Readers(as_credential({})),
+        binding(),
+        Journal(),
+        creds=(AGENT,),
+        open_url=wire,
     )
-    assert not any("rulesets" in p or "bypass" in p for p in anon.sent)
+    assert not any("rulesets" in p or "bypass" in p for p, _ in wire.calls)
 
 
 def test_issue_signal_not_part_of_protocol() -> None:
     """Приёмка №39: issues не читаются вовсе."""
-    anon = Anon(trust_routes(None, J1))
+    wire = _Wire(trust_routes(None, J1))
     act_trust.load_trust(
-        act_trust.Readers(anon, as_credential({})), binding(), Journal(), creds=(AGENT,)
+        act_trust.Readers(as_credential({})),
+        binding(),
+        Journal(),
+        creds=(AGENT,),
+        open_url=wire,
     )
-    assert not any("/issues" in p for p in anon.sent)
+    assert not any("/issues" in p for p, _ in wire.calls)
 
 
 def test_rebase_false_is_verified() -> None:
@@ -562,7 +668,7 @@ def test_anchor_time_from_activation_not_commit_date(monkeypatch) -> None:
         lambda t, s, sha: _activation(sha, "2026-10-12T08:00:00Z"),
     )
     times = act_trust.load_anchor_times(
-        Anon({}), _trust((Epoch(1, BOOT),)), parse_ts("2026-10-12T10:00:00Z")
+        _via(_trust((Epoch(1, BOOT),)), Anon({})), parse_ts("2026-10-12T10:00:00Z")
     )
     assert times == {BOOT: parse_ts("2026-10-12T08:00:00Z")}
 
@@ -578,7 +684,7 @@ def test_old_anchor_unavailable_is_kept_not_blocking(monkeypatch) -> None:
     monkeypatch.setattr(act_facts, "activation", activation)
     epochs = (Epoch(1, BOOT, BOOT, "2026-10-11T00:00:00Z", "x"), Epoch(2, "c" * 40))
     times = act_trust.load_anchor_times(
-        Anon({}), _trust(epochs), parse_ts("2026-10-12T10:00:00Z")
+        _via(_trust(epochs), Anon({})), parse_ts("2026-10-12T10:00:00Z")
     )
     assert isinstance(times[BOOT], Unavailable)
     assert times["c" * 40] == parse_ts("2026-10-12T08:00:00Z")
@@ -609,8 +715,7 @@ def test_history_violation_records_event(name: str) -> None:
     spec, trust = _history_case(name)
     journal = Journal()
     got = act_trust.load_ranges(
-        v3.replay_transport(spec["transport"]),
-        trust,
+        _via(trust, v3.replay_transport(spec["transport"])),
         {spec["anchor"]: parse_ts("2026-01-01T00:00:00Z")},
         parse_ts("2027-01-01T00:00:00Z"),
         journal,
@@ -627,8 +732,7 @@ def test_single_commit_rebase_merge_not_detected(monkeypatch) -> None:
     )
     journal = Journal()
     got = act_trust.load_ranges(
-        v3.replay_transport(spec["transport"]),
-        trust,
+        _via(trust, v3.replay_transport(spec["transport"])),
         {spec["anchor"]: parse_ts("2026-01-01T00:00:00Z")},
         parse_ts("2027-01-01T00:00:00Z"),
         journal,
@@ -655,8 +759,7 @@ def test_closed_epoch_break_registers_event(monkeypatch) -> None:
     epochs = (Epoch(1, BOOT, BOOT, "2026-10-11T00:00:00Z", "x"), Epoch(2, "c" * 40))
     journal = Journal()
     got = act_trust.load_ranges(
-        Anon({}),
-        _trust(epochs),
+        _via(_trust(epochs), Anon({})),
         {
             BOOT: parse_ts("2026-10-01T00:00:00Z"),
             "c" * 40: parse_ts("2026-10-12T08:00:00Z"),
@@ -671,8 +774,7 @@ def test_closed_epoch_break_registers_event(monkeypatch) -> None:
 def test_unknown_anchor_time_makes_range_unavailable(monkeypatch) -> None:
     monkeypatch.setattr(act_facts, "history", lambda t, s, a, u: pytest.fail("read"))
     got = act_trust.load_ranges(
-        Anon({}),
-        _trust((Epoch(1, BOOT),)),
+        _via(_trust((Epoch(1, BOOT),)), Anon({})),
         {BOOT: Unavailable("object_missing")},
         parse_ts("2026-10-12T10:00:00Z"),
         Journal(),
@@ -813,8 +915,7 @@ def test_history_read_failure_no_event(monkeypatch) -> None:
     )
     journal = Journal()
     got = act_trust.load_ranges(
-        Anon({}),
-        _trust((Epoch(1, BOOT),)),
+        _via(_trust((Epoch(1, BOOT),)), Anon({})),
         {BOOT: parse_ts("2026-10-12T08:00:00Z")},
         parse_ts("2026-10-12T10:00:00Z"),
         journal,
@@ -835,8 +936,7 @@ def test_policy_sets_after_t_not_loaded(monkeypatch) -> None:
         lambda anon, source, a: loaded.append(a.merge_commit) or Unavailable("x"),
     )
     act_trust.load_ranges(
-        Anon({}),
-        _trust((Epoch(1, BOOT),)),
+        _via(_trust((Epoch(1, BOOT),)), Anon({})),
         {BOOT: parse_ts("2026-10-12T08:00:00Z")},
         parse_ts("2026-10-12T10:00:00Z"),
         Journal(),
@@ -930,12 +1030,16 @@ def test_self_report_without_permissions_names_reason() -> None:
 
 def test_load_trust_without_credentials_unavailable() -> None:
     """M8: пустой набор credential не проходит самоотчёт «вакуумно»."""
-    anon = Anon(trust_routes(None, J1))
+    wire = _Wire(trust_routes(None, J1))
     got = act_trust.load_trust(
-        act_trust.Readers(anon, as_credential({})), binding(), Journal(), creds=()
+        act_trust.Readers(as_credential({})),
+        binding(),
+        Journal(),
+        creds=(),
+        open_url=wire,
     )
     assert isinstance(got, Unavailable) and "ни одного credential" in got.reason
-    assert anon.sent == []
+    assert [p for p, _ in wire.calls] == []
 
 
 def test_gh_get_pins_host_and_drops_host_env(monkeypatch) -> None:
@@ -968,3 +1072,547 @@ def test_gh_get_pins_host_and_drops_host_env(monkeypatch) -> None:
         "GH_TOKEN",
     } & set(env)
     assert env["GH_CONFIG_DIR"] == "/x/review"
+
+
+# --- токен истории (С-1, спека rev 18 §6.2; Task 11c) ----------------------------
+
+
+def test_binding_history_key_optional() -> None:
+    assert binding().history_gh_config_dir is None
+    got = act_trust.parse_binding(HISTORY_TOML)
+    assert got.history_gh_config_dir == Path("/etc/df/gh-history")
+
+
+@pytest.mark.parametrize(
+    "value", ['""', '"gh-history"', "1"], ids=["empty", "relative", "int"]
+)
+def test_binding_history_key_must_be_absolute_path(value: str) -> None:
+    with pytest.raises(
+        act_trust.TrustError, match="history_gh_config_dir — абсолютный путь"
+    ):
+        act_trust.parse_binding(BINDING_TOML + f"history_gh_config_dir = {value}\n")
+
+
+def test_binding_history_key_agrees_with_installer() -> None:
+    """Р-6 + R8: оба разборщика принимают ключ с тем же значением и отвергают те же
+    недопустимые значения (абсолютный путь — и только он)."""
+    from df.config import ConfigError
+    from df.stage2_config import parse_trust
+
+    ours, theirs = act_trust.parse_binding(HISTORY_TOML), parse_trust(HISTORY_TOML)
+    assert ours.history_gh_config_dir == Path(theirs.history_gh_config_dir)
+    assert parse_trust(BINDING_TOML).history_gh_config_dir is None
+    for value in ('""', '"gh-history"', "1"):
+        text = BINDING_TOML + f"history_gh_config_dir = {value}\n"
+        with pytest.raises(act_trust.TrustError):
+            act_trust.parse_binding(text)
+        with pytest.raises(ConfigError, match="history_gh_config_dir"):
+            parse_trust(text)
+
+
+def test_history_token_spawn_argv_and_env(monkeypatch, tmp_path: Path) -> None:
+    """R2: `gh auth token --hostname github.com` под профилем; окружение — как у `gh_get`."""
+    seen: list[tuple[list[str], dict[str, str]]] = []
+
+    def run(argv, *, env, **kw):  # noqa: ANN001, ANN003
+        seen.append((argv, env))
+        return _Done(0, out=TOKEN + "\n")
+
+    for var in DF_TOKEN_ENV:
+        monkeypatch.setenv(var, "stray")
+    monkeypatch.setattr(act_trust.subprocess, "run", run)
+    assert act_trust.history_token(_profile(tmp_path)) == TOKEN
+    argv, env = seen[0]
+    assert argv == ["gh", "auth", "token", "--hostname", "github.com"]
+    assert not set(DF_TOKEN_ENV) & set(env)
+    assert env["GH_CONFIG_DIR"] == str(tmp_path / "gh-history")
+
+
+SECRET = "ghp_Leak0secret"
+
+
+@pytest.mark.parametrize(
+    ("case", "answer", "reason"),
+    [
+        ("missing", None, "профиль токена истории"),
+        ("no_hosts", None, "профиль токена истории"),
+        (
+            "exit",
+            _Done(1, out=SECRET, err=f"bad {SECRET}"),
+            "gh auth token (profile:history): код выхода 1",
+        ),
+        (
+            "empty",
+            _Done(0, out="\n", err=SECRET),
+            "gh auth token (profile:history): пустой вывод",
+        ),
+        (
+            "form",
+            _Done(0, out=f"{SECRET} extra\n"),
+            "gh auth token (profile:history): вывод не в форме токена",
+        ),
+        (
+            "oserror",
+            OSError(f"exec failed: {SECRET}"),
+            "gh auth token (profile:history): OSError",
+        ),
+        (
+            "timeout",
+            subprocess.TimeoutExpired(["gh"], 60, output=SECRET, stderr=SECRET),
+            "gh auth token (profile:history): TimeoutExpired",
+        ),
+    ],
+    ids=["missing", "no_hosts", "exit", "empty", "form", "oserror", "timeout"],
+)
+def test_history_token_failures_are_unavailable(
+    monkeypatch, tmp_path: Path, case: str, answer: object, reason: str
+) -> None:
+    """R5 / Р-20, Р-21, C1-02: профиля нет — `gh` не запускается (keyring); причина —
+    фиксированная строка с кодом выхода или именем класса исключения, ни stdout, ни
+    stderr, ни текста исключения (секрет — в каждом из них)."""
+    profile = tmp_path / "gh-history"
+    if case == "no_hosts":
+        profile.mkdir()
+    elif case != "missing":
+        _profile(tmp_path)
+
+    def run(*a, **k):  # noqa: ANN002, ANN003
+        if answer is None:
+            pytest.fail("gh запущен без профиля")
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(act_trust.subprocess, "run", run)
+    got = act_trust.history_token(profile)
+    assert isinstance(got, Unavailable) and reason in got.reason
+    assert SECRET not in got.reason
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        _Done(1, out=SECRET, err=SECRET),
+        _Done(0, out=f"{SECRET} x"),
+        OSError(SECRET),
+        subprocess.TimeoutExpired(["gh"], 60, output=SECRET, stderr=SECRET),
+    ],
+    ids=["exit", "form", "oserror", "timeout"],
+)
+def test_history_token_error_absent_from_final_reason(
+    monkeypatch, tmp_path, answer
+) -> None:
+    """C1-02: и в конечной причине решения (`history_transport` → `load_trust`, настоящий
+    `history_token` по умолчанию) секрета нет; запросов нет."""
+    _profile(tmp_path)
+
+    def run(*a, **k):  # noqa: ANN002, ANN003
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(act_trust.subprocess, "run", run)
+    wire = _Wire({})
+    got = act_trust.load_trust(
+        act_trust.Readers(as_credential({})),
+        _with_history(tmp_path),
+        Journal(),
+        creds=(AGENT,),
+        open_url=wire,
+    )
+    assert isinstance(got, Unavailable) and "токен истории: gh auth token" in got.reason
+    assert SECRET not in got.reason and wire.calls == []
+
+
+def test_credential_repr_hides_token() -> None:
+    assert "s3cret" not in repr(act_trust.Credential("env:GH_TOKEN", token="s3cret"))
+
+
+def test_gh_get_refuses_history_profile(monkeypatch) -> None:
+    """Р-18: самоотчёт токена истории не идёт через `gh` (токен не уходит в окружение)."""
+    monkeypatch.setattr(act_trust.subprocess, "run", lambda *a, **k: pytest.fail("gh"))
+    cred = act_trust.Credential(
+        "profile:history", gh_config_dir=Path("/etc/df/gh-history")
+    )
+    got = act_trust.gh_get(cred, "repos/o/p")
+    assert got.outcome is Outcome.UNAVAILABLE
+    assert "только через транспорт истории" in got.detail
+
+
+def test_transport_fact_failure_is_unavailable() -> None:
+    cred = act_trust.Credential("profile:history")
+    got = act_trust.transport_fact(
+        Anon({"repos/o/p": (403, {"message": "x"})}), cred, "repos/o/p"
+    )
+    assert got.outcome is Outcome.UNAVAILABLE
+    assert got.detail.startswith("GET repos/o/p (profile:history): HTTP 403")
+
+
+def test_transport_fact_passes_body_exactly() -> None:
+    """C1-01: успешное тело ответа уходит в `Fact` без изменений."""
+    body = {
+        "full_name": AP,
+        "permissions": {"push": True, "maintain": False, "admin": False, "pull": True},
+        "extra": [1, {"k": None}],
+    }
+    cred = act_trust.Credential("profile:history")
+    got = act_trust.transport_fact(Anon({"repos/o/p": (200, body)}), cred, "repos/o/p")
+    assert got.outcome is Outcome.FOUND and got.value == body
+
+
+# --- вход решения строит транспорт сам (C6, решение контроллера) -------------------
+
+
+def test_history_transport_built_from_binding(monkeypatch, tmp_path: Path) -> None:
+    """(а) Ключа нет — анонимно, `token_source` не вызывается. Ключ `D` — ровно один вызов
+    `token_source(D)`, все запросы решения с этим токеном, самоотчёт `profile:history`
+    на обоих репо — тем же транспортом; `Trust.transport` — тот же объект."""
+    monkeypatch.setattr(act_trust.subprocess, "run", lambda *a, **k: pytest.fail("gh"))
+    tokens = _Tokens(TOKEN, "ghp_Second0value")
+    got, wire = _decide(
+        binding(), _self_reported(trust_routes(None, J1)), tokens=tokens
+    )
+    assert isinstance(got, act_trust.Trust) and tokens.calls == [] and wire.calls
+    assert all("Authorization" not in h for _, h in wire.calls)
+    got, wire = _decide(
+        _with_history(tmp_path), _self_reported(trust_routes(None, J1)), tokens=tokens
+    )
+    assert isinstance(got, act_trust.Trust)
+    assert tokens.calls == [tmp_path / "gh-history"]
+    assert all(h.get("Authorization") == f"Bearer {TOKEN}" for _, h in wire.calls)
+    assert {p for p, _ in wire.calls} >= {f"repos/{AP}", f"repos/{DT}"}
+    assert isinstance(got.transport, act_anon.AnonTransport)
+    assert {p for p, _ in wire.calls} == set(got.transport.sent)
+
+
+@pytest.mark.parametrize("keyed", [False, True], ids=["no_key", "key"])
+@pytest.mark.parametrize(
+    "extra",
+    [
+        act_trust.Credential(
+            "profile:history", gh_config_dir=Path("/etc/df/gh-history")
+        ),
+        act_trust.Credential("profile:history", token="t"),
+        act_trust.Credential("env:OTHER_TOKEN", token="t"),
+        act_trust.Credential("profile:agent", gh_config_dir=Path("/x"), token="t"),
+        act_trust.Credential("env:GH_TOKEN", gh_config_dir=Path("/x"), token="t"),
+        act_trust.Credential("profile:agent"),
+        act_trust.Credential("profile:merge"),
+        act_trust.Credential("env:GH_TOKEN"),
+        act_trust.Credential("env:GITHUB_TOKEN"),
+    ],
+    ids=[
+        "history_dir",
+        "history_token",
+        "unknown_label",
+        "profile_with_token",
+        "env_with_dir",
+        "agent_without_dir",
+        "merge_without_dir",
+        "gh_token_without_token",
+        "github_token_without_token",
+    ],
+)
+def test_caller_history_credential_refused_before_io(
+    tmp_path, keyed: bool, extra
+) -> None:
+    """(б) Credential вне закрытого набора форм `credentials()` → `HISTORY_NOT_WIRED`:
+    ни одного запроса, `token_source` не вызывается."""
+    tokens = _Tokens(TOKEN)
+    b = _with_history(tmp_path) if keyed else binding()
+    got, wire = _decide(b, trust_routes(None, J1), creds=(AGENT, extra), tokens=tokens)
+    assert isinstance(got, Unavailable) and got.reason == act_trust.HISTORY_NOT_WIRED
+    assert wire.calls == [] and tokens.calls == []
+
+
+@pytest.mark.parametrize("keyed", [False, True], ids=["no_key", "key"])
+def test_injected_transport_cannot_reach_trust_reads(tmp_path, keyed: bool) -> None:
+    """(в) Объект, похожий на прежние `Readers` с транспортом (`anon`, `history`), — его
+    транспорт не получает ни одного запроса источников доверия; все чтения — через
+    `open_url` транспорта, построенного `load_trust`."""
+
+    class Recorder:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        def send(self, request):  # noqa: ANN001
+            self.sent.append(request.path)
+            return v3.Response(200, body={})
+
+    stale = Recorder()
+    readers = SimpleNamespace(
+        anon=stale,
+        history=act_trust.Credential("profile:history"),
+        as_credential=as_credential({}),
+    )
+    b = _with_history(tmp_path) if keyed else binding()
+    got, wire = _decide(b, _self_reported(trust_routes(None, J1)), readers=readers)
+    assert isinstance(got, act_trust.Trust)
+    assert stale.sent == [] and wire.calls and got.transport is not stale
+
+
+@pytest.mark.parametrize(
+    "stale_first", [False, True], ids=["clear", "stale_then_clear"]
+)
+def test_one_token_per_decision_through_journal(
+    monkeypatch, tmp_path, stale_first: bool
+) -> None:
+    """C7-01: настоящий путь журнала (`journal_for` → `DevJournal` → `ForgeEpochs.head`) и
+    повтор `STALE`: `token_source` вызван ровно один раз на решение, каждый запрос — с T1,
+    T2 не появляется ни в одном заголовке. Тот же `_Tokens` стоит и на месте
+    `history_token` по умолчанию — построение транспорта в перечитывании его бы вызвало."""
+    from governance import act_journal
+
+    tokens = _Tokens(TOKEN, "ghp_Second0value")
+    monkeypatch.setattr(act_trust, "history_token", tokens)
+    monkeypatch.setattr(act_trust.subprocess, "run", lambda *a, **k: pytest.fail("gh"))
+    monkeypatch.setattr(act_journal, "_publisher_present", lambda: False)
+    b = _with_history(tmp_path)
+    journal = act_journal.journal_for(
+        state_home=tmp_path / "state",
+        run_id="r",
+        binding=b,
+        env={},
+        policy_repository_id=22,
+    )
+    if stale_first:  # первый ответ журнала — STALE: load_trust перечитывает снимок
+        real_status = journal.status
+        answers = [act_trust.STALE]
+        monkeypatch.setattr(
+            journal,
+            "status",
+            lambda snap: answers.pop() if answers else real_status(snap),
+        )
+    got, wire = _decide(
+        b, _self_reported(trust_routes(None, J1)), tokens=tokens, journal=journal
+    )
+    assert isinstance(got, act_trust.Trust)
+    assert tokens.calls == [tmp_path / "gh-history"]
+    assert all(h.get("Authorization") == f"Bearer {TOKEN}" for _, h in wire.calls)
+    assert not any("ghp_Second0value" in str(h) for _, h in wire.calls)
+    heads = [p for p, _ in wire.calls if p == "repositories/11"]
+    assert len(heads) >= (2 if stale_first else 1)
+
+
+@pytest.fixture()
+def history_world(monkeypatch, tmp_path: Path):
+    """Ключ в привязке; профиль агента — стенд; `gh` запрещён.
+    Возвращает `load(routes, journal) -> Trust | Unavailable`."""
+    monkeypatch.setattr(act_trust.subprocess, "run", lambda *a, **k: pytest.fail("gh"))
+
+    def run(routes: dict, journal: Journal) -> object:
+        return _decide(_with_history(tmp_path), routes, journal=journal)[0]
+
+    return run
+
+
+@pytest.mark.parametrize(("repo", "role"), [(AP, "approval-policy"), (DT, "df-trust")])
+def test_history_self_report_push_is_violation(
+    history_world, repo: str, role: str
+) -> None:
+    """R3, C1-01: ответ `GET repos/{repo}` транспортом истории с `push: true` —
+    нарушение периметра этого репо (событие + отказ)."""
+    routes = _self_reported(trust_routes(None, J1))
+    routes[f"repos/{repo}"] = (200, {**routes[f"repos/{repo}"][1], **_perms(True)})
+    journal = Journal()
+    got = history_world(routes, journal)
+    assert isinstance(got, Unavailable) and got.reason.startswith(
+        "нарушение периметра: "
+    )
+    assert len(journal.records) == 1 and journal.records[0][0] == role
+    assert journal.records[0][1].startswith(f"profile:history на {repo}: ")
+
+
+@pytest.mark.parametrize("repo", [AP, DT])
+@pytest.mark.parametrize(
+    ("answer", "tail"),
+    [
+        ((200, {"full_name": "x"}), "права credential на источнике не получены"),
+        ((403, {"message": "Forbidden"}), "HTTP 403"),
+    ],
+    ids=["no_permissions", "http_403"],
+)
+def test_history_self_report_unreadable_is_unavailable(
+    history_world, repo: str, answer: tuple, tail: str
+) -> None:
+    """R3, C1-01: нет `permissions` или HTTP 403 транспортом истории — `Unavailable`
+    без события, с меткой credential и репо."""
+    routes = _self_reported(trust_routes(None, J1))
+    routes[f"repos/{repo}"] = answer
+    journal = Journal()
+    got = history_world(routes, journal)
+    assert isinstance(got, Unavailable) and journal.records == []
+    assert f"самоотчёт profile:history на {repo}: " in got.reason
+    assert got.reason.endswith(tail)
+
+
+def test_as_credential_never_called_for_history(tmp_path) -> None:
+    """`readers.as_credential` получает только переданные не-history credential."""
+    asked: list[str] = []
+
+    def recorder(cred: act_trust.Credential, path: str) -> Fact[object]:
+        asked.append(cred.label)
+        return Fact(Outcome.FOUND, _perms(), "ok")
+
+    got, _ = _decide(
+        _with_history(tmp_path),
+        _self_reported(trust_routes(None, J1)),
+        readers=act_trust.Readers(recorder),
+    )
+    assert isinstance(got, act_trust.Trust)
+    assert asked == ["profile:agent", "profile:agent"]
+
+
+@pytest.mark.parametrize(
+    "why",
+    ["профиль токена истории /etc/df/gh-history не найден", "gh auth token: exit 1"],
+)
+def test_broken_history_token_no_anonymous_fallback(tmp_path, why: str) -> None:
+    """R5 / Р-19, отрицательный двойник: ключ есть, токена нет — ни одного запроса."""
+    got, wire = _decide(
+        _with_history(tmp_path),
+        trust_routes(None, J1),
+        tokens=_Tokens(Unavailable(why)),
+    )
+    assert isinstance(got, Unavailable) and got.reason == f"токен истории: {why}"
+    assert wire.calls == []
+
+
+# --- матрица самоотчёта (C2-01: механизм вместо точечных тестов) ------------------
+# Строки — виды credential, столбцы — состояния самоотчёта на одном репо. Четыре вида
+# передаёт `credentials()`, `profile:history` создаёт `load_trust` (ключ в привязке).
+# `gh_get` — записывающий стенд. Не чистая клетка отличается от чистой ТОЛЬКО
+# состоянием этого credential.
+
+KINDS = (
+    "profile:agent",
+    "profile:merge",
+    "profile:history",
+    "env:GH_TOKEN",
+    "env:GITHUB_TOKEN",
+)
+STATES = ("push", "no_permissions", "http_403")
+CELLS = [(k, s, r) for k in KINDS for s in STATES for r in (AP, DT)]
+ROLE = {AP: "approval-policy", DT: "df-trust"}
+
+
+def _gh_answer(state: str, repo: str) -> Fact[object]:
+    return {
+        "push": Fact(Outcome.FOUND, _perms(True), "ok"),
+        "no_permissions": Fact(Outcome.FOUND, {"full_name": repo}, "ok"),
+        "http_403": unavailable(f"gh api repos/{repo}: HTTP 403"),
+    }[state]
+
+
+def _wire_answer(routes: dict, state: str, repo: str) -> tuple[int, object]:
+    return {
+        "push": (200, {**routes[f"repos/{repo}"][1], **_perms(True)}),
+        "no_permissions": (200, {"full_name": repo}),
+        "http_403": (403, {"message": "Forbidden"}),
+    }[state]
+
+
+def _matrix(monkeypatch, tmp_path: Path, cell: tuple[str, str, str] | None):
+    """Один прогон `load_trust` со всеми пятью видами; `cell` — (вид, состояние, репо)
+    единственного отклонения или `None` (все чисты)."""
+    seen: list[tuple[act_trust.Credential, str]] = []
+    kind, state, repo = cell or (None, None, None)
+
+    def gh_get(cred: act_trust.Credential, path: str) -> Fact[object]:
+        seen.append((cred, path))
+        if cred.label == kind and path == f"repos/{repo}":
+            return _gh_answer(state, repo)
+        return Fact(Outcome.FOUND, _perms(), "ok")
+
+    monkeypatch.setattr(act_trust, "gh_get", gh_get)
+    monkeypatch.setattr(act_trust.subprocess, "run", lambda *a, **k: pytest.fail("gh"))
+    routes = _self_reported(trust_routes(None, J1))
+    if kind == "profile:history":
+        routes[f"repos/{repo}"] = _wire_answer(routes, state, repo)
+    creds = act_trust.credentials(
+        {"GH_TOKEN": "tok-gh", "GITHUB_TOKEN": "tok-github"},
+        agent_dir=tmp_path / "review",
+        merge_dir=tmp_path / "merge",
+    )
+    journal = Journal()
+    got, wire = _decide(
+        _with_history(tmp_path),
+        routes,
+        creds=creds,
+        readers=act_trust.default_readers(),
+        journal=journal,
+    )
+    return got, journal, seen, creds, wire
+
+
+def test_self_report_matrix_clean_routes_every_credential(
+    monkeypatch, tmp_path
+) -> None:
+    """Чистая строка: решение есть; каждый переданный credential дошёл до `gh_get` ТЕМ ЖЕ
+    объектом на оба репо; history — только транспортом, с заголовком токена."""
+    got, journal, seen, creds, wire = _matrix(monkeypatch, tmp_path, None)
+    assert isinstance(got, act_trust.Trust) and journal.records == []
+    assert {c.label for c in creds} == set(KINDS) - {"profile:history"}
+    assert all(c.label != "profile:history" for c, _ in seen)
+    for cred in creds:
+        assert [p for c, p in seen if c is cred] == [f"repos/{AP}", f"repos/{DT}"]
+    assert {
+        p for p, h in wire.calls if h.get("Authorization") == f"Bearer {TOKEN}"
+    } >= {f"repos/{AP}", f"repos/{DT}"}
+
+
+@pytest.mark.parametrize(
+    ("kind", "state", "repo"), CELLS, ids=[f"{k}-{s}-{ROLE[r]}" for k, s, r in CELLS]
+)
+def test_self_report_matrix_cell(
+    monkeypatch, tmp_path, kind: str, state: str, repo: str
+) -> None:
+    """Каждая не чистая клетка: `push` — нарушение с событием ровно этого credential и
+    репо; `no_permissions`/`http_403` — `Unavailable` без события с меткой credential."""
+    got, journal, seen, _creds, _ = _matrix(monkeypatch, tmp_path, (kind, state, repo))
+    assert isinstance(got, Unavailable)
+    if (
+        kind != "profile:history"
+    ):  # маршрутизация: самоотчёт этого credential дошёл до gh_get
+        assert any(c.label == kind and p == f"repos/{repo}" for c, p in seen)
+    if state == "push":
+        assert got.reason.startswith("нарушение периметра: ")
+        assert journal.records == [(ROLE[repo], journal.records[0][1])]
+        assert journal.records[0][1].startswith(f"{kind} на {repo}: ")
+    else:
+        assert journal.records == []
+        assert f"самоотчёт {kind} на {repo}: " in got.reason
+
+
+def test_history_violation_wins_over_passed_credential_gap(history_world) -> None:
+    """Отклонение 11c-D1: нарушение `profile:history` регистрируется, даже если
+    самоотчёт переданного credential недоступен (как «нарушение побеждает» в 12a)."""
+    routes = _self_reported(trust_routes(None, J1))
+    routes[f"repos/{DT}"] = (200, {**routes[f"repos/{DT}"][1], **_perms(True)})
+    journal = Journal()
+    got = act_trust.load_trust(
+        act_trust.Readers(
+            as_credential({("profile:agent", f"repos/{AP}"): unavailable("HTTP 404")})
+        ),
+        replace(binding(), history_gh_config_dir=Path("/etc/df/gh-history")),
+        journal,
+        creds=(AGENT,),
+        open_url=_Wire(routes),
+        token_source=_Tokens(TOKEN),
+    )
+    assert isinstance(got, Unavailable) and got.reason.startswith("нарушение периметра")
+    assert journal.records[0][1].startswith(f"profile:history на {DT}: ")
+
+
+@pytest.mark.parametrize(
+    "value", ["", "ghp_x y", "ghp\nx", 7], ids=["empty", "space", "newline", "int"]
+)
+def test_token_source_value_not_token_form_refused(tmp_path, value: object) -> None:
+    """Отклонение 11c-D2: значение шва `token_source` не в форме токена — отказ без
+    запросов (заголовок не строится из произвольной строки)."""
+    got, wire = _decide(
+        _with_history(tmp_path), trust_routes(None, J1), tokens=_Tokens(value)
+    )
+    assert isinstance(got, Unavailable)
+    assert got.reason == "токен истории: значение не в форме токена"
+    assert wire.calls == []

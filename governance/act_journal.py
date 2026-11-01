@@ -12,9 +12,10 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from df import perimeter_client
 from df.paths import Layout, default_layout
@@ -22,10 +23,9 @@ from df.publisher import perimeter as store
 from df.publisher import request as preq
 from df.stage2_config import TrustBinding
 from governance.act_time import Unavailable
-from governance.act_trust import STALE, TrustSnapshot
+from governance.act_trust import STALE, Binding, TrustSnapshot, read_trust_snapshot
 
 DEV_ROOT = Path("darkfactory") / "perimeter" / "root"
-Reread = Callable[[], TrustSnapshot | Unavailable]
 
 
 def _now() -> str:
@@ -37,13 +37,24 @@ def _publisher_present() -> bool:
 
 
 class ForgeEpochs:
-    """`EpochSource` издателя поверх чтения снимка `df-trust` с форджа."""
+    """`EpochSource` издателя поверх чтения снимка `df-trust` с форджа.
 
-    def __init__(self, reread: Reread) -> None:
-        self._reread = reread
+    Хранит только привязку; транспорт — тот, которым прочитан снимок решения
+    (`via`, Р-23, C7-01): перечитывание головы его не строит и токен истории
+    второй раз не читает."""
+
+    def __init__(self, binding: Binding) -> None:
+        self._binding = binding
+        self._transport: Any = None
+
+    def via(self, transport: Any) -> None:
+        """Транспорт решения для следующих `head`."""
+        self._transport = transport
 
     def head(self, root: tuple[str, int, str]) -> store.Snapshot | store.Unavailable:
-        snap = self._reread()
+        if self._transport is None:
+            return store.Unavailable("транспорт решения не передан")
+        snap = read_trust_snapshot(self._transport, self._binding)
         if isinstance(snap, Unavailable):
             return store.Unavailable(f"df-trust: {snap.reason}")
         if snap.root.id_tuple != tuple(root):
@@ -75,13 +86,17 @@ class DevJournal:
     """Режим разработки: хранилище этапа 2a в каталоге пользователя."""
 
     def __init__(
-        self, state_home: Path, run_id: str, reread: Reread, policy_repository_id: int
+        self,
+        state_home: Path,
+        run_id: str,
+        binding: Binding,
+        policy_repository_id: int,
     ) -> None:
         base = (state_home / DEV_ROOT).resolve()
         base.mkdir(parents=True, exist_ok=True)
         self.layout = Layout(base)
         self.run_id = run_id
-        self.epochs = ForgeEpochs(reread)
+        self.epochs = ForgeEpochs(binding)
         # настоящий id approval-policy из привязки: по нему издатель пишет
         # `violated_repository_id` события роли approval-policy (B1-18)
         self.policy_repository_id = policy_repository_id
@@ -106,6 +121,7 @@ class DevJournal:
         return preq.parse(op, json.dumps(data, sort_keys=True).encode("utf-8"))
 
     def status(self, snap: TrustSnapshot) -> str | Unavailable:
+        self.epochs.via(snap.transport)
         req = self._request(
             "perimeter-status",
             {
@@ -127,6 +143,7 @@ class DevJournal:
     def record(
         self, snap: TrustSnapshot, source: str, detail: str
     ) -> Unavailable | None:
+        self.epochs.via(snap.transport)
         req = self._request(
             "record-violation",
             {
@@ -221,7 +238,7 @@ def journal_for(
     *,
     state_home: Path,
     run_id: str,
-    reread: Reread,
+    binding: Binding,
     env: Mapping[str, str],
     policy_repository_id: int,
 ) -> DevJournal | InstalledJournal | Unavailable:
@@ -234,6 +251,6 @@ def journal_for(
             )
         return InstalledJournal(df_run)
     try:
-        return DevJournal(state_home, run_id, reread, policy_repository_id)
+        return DevJournal(state_home, run_id, binding, policy_repository_id)
     except OSError as exc:
         return Unavailable(f"журнал периметра (dev): {exc}")

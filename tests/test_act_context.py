@@ -57,12 +57,12 @@ def _wire(monkeypatch, ctx, *, merged: bool = True) -> None:
         lambda t, repo, pr, paths: (delivery, ctx.facts if merged else None),
     )
     monkeypatch.setattr(
-        act_trust, "load_anchor_times", lambda anon, trust, t: dict(ctx.anchor_at)
+        act_trust, "load_anchor_times", lambda trust, t: dict(ctx.anchor_at)
     )
     monkeypatch.setattr(
         act_trust,
         "load_ranges",
-        lambda anon, trust, anchors, t, journal: (
+        lambda trust, anchors, t, journal: (
             dict(ctx.ranges),
             dict(ctx.policy_sets),
         ),
@@ -70,7 +70,7 @@ def _wire(monkeypatch, ctx, *, merged: bool = True) -> None:
 
 
 def _verdict(ctx, **kw):
-    readers = act_trust.Readers(object(), lambda c, p: None)
+    readers = act_trust.Readers(lambda c, p: None)
     args: dict[str, object] = {
         "product": ctx.product,
         "pr": 7,
@@ -162,7 +162,7 @@ def test_loader_supplies_prior_epochs_for_merge_admission(monkeypatch) -> None:
         epochs,
     )
     outcome, _ = act_context.delivery_verdict(
-        act_trust.Readers(object(), lambda c, p: None),
+        act_trust.Readers(lambda c, p: None),
         act_trust.Trust(snap, ()),
         NoEvents(),
         product=ctx.product,
