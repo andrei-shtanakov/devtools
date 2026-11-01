@@ -118,7 +118,6 @@ class AnonTransport:
 
 
 _REPO = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
-_PRESENT = object()
 
 
 def _tree_entry(transport: Any, repo: str, tree: str, name: str, where: str) -> Any:
@@ -139,7 +138,7 @@ def _tree_entry(transport: Any, repo: str, tree: str, name: str, where: str) -> 
 
 
 def _locate(transport: Any, repo: str, parts: list[str], ref: str, where: str) -> Any:
-    """`None` — пути нет в полном дереве коммита; `_PRESENT` — файл есть."""
+    """`None` — пути нет в полном дереве коммита; строка — blob-oid файла из дерева."""
     from steward.approvalfacts.v3 import Request
 
     resp = transport.send(Request("GET", f"repos/{repo}/commits/{ref}"))
@@ -155,7 +154,9 @@ def _locate(transport: Any, repo: str, parts: list[str], ref: str, where: str) -
         last = depth == len(parts) - 1
         kind, sha = entry.get("type"), str(entry.get("sha"))
         if kind == "blob" and last:
-            return _PRESENT
+            if not _SHA.fullmatch(sha):
+                return Unavailable(f"{where}: blob-oid {name!r} не SHA")
+            return sha
         if kind == "blob":
             return None
         if kind != "tree" or last or not _SHA.fullmatch(sha):
@@ -170,7 +171,7 @@ def contents_bytes(
 
     Отсутствие устанавливается только деревом (`truncated = false`), прочитанным
     по сегментам пути; HTTP 404 никогда не «установленное отсутствие» (контракт
-    steward). `ref` — 40-hex SHA. Содержимое обязано хешироваться в git-oid `sha`.
+    steward). `ref` — 40-hex SHA. Содержимое обязано хешироваться в blob-oid записи дерева коммита.
     """
     from steward.approvalfacts.v3 import Request
 
@@ -179,7 +180,7 @@ def contents_bytes(
     if not _REPO.fullmatch(repo) or not _SHA.fullmatch(ref) or not all(parts):
         return Unavailable(f"{where}: repo/path/ref не в форме owner/name, путь, SHA")
     found = _locate(transport, repo, parts, ref, where)
-    if found is not _PRESENT:
+    if not isinstance(found, str):
         return found
     api = f"repos/{repo}/contents/{quote(path)}?ref={ref}"
     resp = transport.send(Request("GET", api))
@@ -194,6 +195,8 @@ def contents_bytes(
         )
     except (binascii.Error, ValueError):
         return Unavailable(f"{where}: содержимое не base64")
-    if hashlib.sha1(b"blob %d\x00" % len(raw) + raw).hexdigest() != body.get("sha"):
-        return Unavailable(f"{where}: содержимое не равно blob {body.get('sha')!r}")
+    # Привязка к коммиту `ref` — blob-oid записи дерева, не самоотчёт ответа contents.
+    oid = hashlib.sha1(b"blob %d\x00" % len(raw) + raw).hexdigest()
+    if oid != found or body.get("sha") != found:
+        return Unavailable(f"{where}: содержимое не равно blob дерева {found!r}")
     return raw

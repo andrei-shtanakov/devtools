@@ -168,6 +168,8 @@ def _contents(raw: bytes, *, sha: str | None = None) -> dict:
     }
 
 
+MODES = b"modes: {}\n"
+MODES_OID = hashlib.sha1(b"blob %d\x00" % len(MODES) + MODES).hexdigest()
 REF = "d" * 40
 ROOT = "1" * 40
 SUB = "2" * 40
@@ -186,7 +188,11 @@ def _world(*, file_path: str = "policy/modes.yaml", **over: tuple) -> dict:
     routes = {
         base + f"commits/{REF}": (200, {"commit": {"tree": {"sha": ROOT}}}, None),
         base + f"git/trees/{ROOT}": (200, _tree(("policy", "tree", SUB)), None),
-        base + f"git/trees/{SUB}": (200, _tree(("modes.yaml", "blob", "3" * 40)), None),
+        base + f"git/trees/{SUB}": (
+            200,
+            _tree(("modes.yaml", "blob", MODES_OID)),
+            None,
+        ),
         base + f"contents/{file_path}?ref={REF}": (
             200,
             _contents(b"modes: {}\n"),
@@ -200,6 +206,19 @@ def _world(*, file_path: str = "policy/modes.yaml", **over: tuple) -> dict:
 def _anon(routes: dict) -> tuple[act_anon.AnonTransport, _Fake]:
     fake = _Fake(routes)
     return act_anon.AnonTransport(open_url=fake), fake
+
+
+def test_contents_bytes_bound_to_tree_blob_oid() -> None:
+    """Самосогласованный ответ contents с чужим blob — не байты пути в коммите."""
+    other = b"other\n"
+    t, _ = _anon(
+        _world(
+            **{f"contents/policy/modes.yaml?ref={REF}": (200, _contents(other), None)}
+        )
+    )
+    got = act_anon.contents_bytes(t, "o/r", "policy/modes.yaml", REF)
+    assert isinstance(got, Unavailable)
+    assert "blob дерева" in got.reason
 
 
 def test_contents_bytes_checked_against_blob_oid() -> None:
