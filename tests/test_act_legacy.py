@@ -431,3 +431,33 @@ def test_unsigned_last_edit_is_not_a_signature(world, monkeypatch) -> None:
     _git(world.repo, "commit", "-qam", "unsigned approved")
     world.signed_by_pr = {_git(world.repo, "rev-parse", "HEAD"): 6}
     assert code(judge(world, monkeypatch, text)) == act_status.NOT_SIGNATURE
+
+
+def test_old_code_not_run_after_activation(world, monkeypatch) -> None:
+    """I-1 ревью Task 14: доставка candidate после активации — отказ admission, а
+    старый код (`_legacy_outcome`, его `fetch_branch`) не исполняется вовсе."""
+    from governance import approve_node
+
+    world.mode = "review"
+    monkeypatch.setattr(
+        approve_node,
+        "_legacy_outcome",
+        lambda *a, **k: pytest.fail("старый код после активации"),
+    )
+    monkeypatch.setattr(
+        Ops,
+        "fetch_branch",
+        lambda self, *a: pytest.fail("fetch_branch после активации"),
+    )
+    assert code(judge(world, monkeypatch)).startswith("legacy_admission:")
+
+
+def test_candidate_identity_unknown_placeholder_is_not_candidate(monkeypatch) -> None:
+    """M-6 ревью Task 14: шаблон SSOT с неизвестным плейсхолдером — ветка той же
+    формы не candidate (`None`), а не `KeyError` из круговой подстановки."""
+    monkeypatch.setattr(
+        ab,
+        "candidate_template",
+        lambda: "spec/{ws_id}-approve-{wave}-{step}-{attempt}-{extra}",
+    )
+    assert act_status.candidate_identity("spec/ws-7-approve-1-0-1-5") is None

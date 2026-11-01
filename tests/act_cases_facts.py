@@ -5,6 +5,7 @@
 `_HARNESS_PREFIXES`).
 """
 
+from collections.abc import Callable
 from datetime import datetime
 
 from steward.approvalfacts import v3
@@ -89,7 +90,7 @@ def context(
     merger: tuple[str, str] = ("df-reviewer", "Bot"),
     blobs: dict[str, tuple[str | None, str]] | None = None,
     self_hash: str = DIGEST,
-    legacy: object = None,
+    legacy: Callable[[], object] | None = None,
 ) -> DeliveryContext:
     ranges = ranges or {1: (act("p1", "08:00:00"),)}
     activations = [

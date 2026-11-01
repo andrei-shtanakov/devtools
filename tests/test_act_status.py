@@ -1047,9 +1047,12 @@ def test_production_snapshot_command_is_isolated(tmp_path: Path, monkeypatch) ->
             "GIT_CONFIG_GLOBAL",
             "GIT_TERMINAL_PROMPT",
             "GH_CONFIG_DIR",
+            "GIT_ASKPASS",
+            "SSH_ASKPASS",
+            "GH_PROMPT_DISABLED",
         )
     )
-    assert isolation == ("1", os.devnull, "0", str(profile))
+    assert isolation == ("1", os.devnull, "0", str(profile), "", "", "1")
     assert [k for k in env if k.startswith("GIT_") and k not in ISOLATION] == []
     assert not any("origin" in c for c, _e in calls)
     assert got.detail == "fetch owner/p master: код 128"
@@ -1532,3 +1535,48 @@ def test_require_upstream_ready_in_review(monkeypatch, case: str) -> None:
     with pytest.raises(RuntimeError) as exc:
         call()
     assert reason in str(exc.value)
+
+
+class _OpenPrTransport:
+    """Транспорт фактов стенда: PR не смёржен (GraphQL и REST согласны)."""
+
+    def __init__(self) -> None:
+        self.sent: list[object] = []
+
+    def send(self, request):
+        from steward.approvalfacts import v3
+
+        self.sent.append(request)
+        if request.op is not None:
+            pull = {"merged": False, "state": "OPEN"}
+            return v3.Response(200, {"data": {"repository": {"pullRequest": pull}}})
+        return v3.Response(200, {"merged": False, "state": "open"})
+
+
+def test_decider_legacy_empty_paths_through_real_facts_read() -> None:
+    """M-4 ревью Task 14: `Decider.legacy` зовёт настоящий `act_facts.read` с
+    `paths=()` — steward принимает пустой набор (без `ValueError` → `Unavailable`),
+    blob'ы путей не запрашиваются; несмёрженный PR — ожидание, старый код не зовётся."""
+    from governance.act_decision import WaitingDelivery
+
+    transport = _OpenPrTransport()
+    state = SimpleNamespace(
+        repo_slug=SLUG, ws_id=WS, target_dir="/t", bundle_dir="spec"
+    )
+    deps = act_status.Deps(
+        readers=None,
+        binding=object(),
+        journal=None,
+        creds=(),
+        gh=transport,
+        now=None,
+        sleep=None,
+        settings=None,
+    )
+    decider = act_status.Decider(
+        state, object(), deps, DAG, trust=object(), journal=NoEvents()
+    )
+    got = decider.legacy(5, lambda: pytest.fail("старый код у несмёржённого PR"))
+    assert got == WaitingDelivery()
+    ops = [getattr(r, "op", None) for r in transport.sent]
+    assert "StewardV3Delivery" in ops and "StewardV3Blobs" not in ops

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -69,6 +70,10 @@ def delivery_verdict(
         anchor_at=anchors,
         ranges=ranges,
         policy_sets=sets,
-        legacy=legacy() if request is None and legacy is not None else None,
+        # Лениво и один раз: старый код — только после `OLD_READER`, и не по
+        # разу на каждый порядок группы равных меток (§8.2, I-1 ревью Task 14).
+        legacy=functools.cache(legacy)
+        if request is None and legacy is not None
+        else None,
     )
     return check_delivery(ctx), delivery

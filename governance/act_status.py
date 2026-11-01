@@ -491,9 +491,12 @@ def candidate_identity(branch: str) -> tuple[str, str] | None:
     try:
         ws_id = m["ws_id"]
         w, k, a = int(m["wave"]), int(m["step"]), int(m["attempt"])
+        # круговая подстановка внутри `try`: неизвестный плейсхолдер шаблона
+        # (`candidate_branch` → `KeyError`) — «не candidate», а не исключение
+        round_trip = approval_branches.candidate_branch(ws_id, w, k, a)
     except (IndexError, KeyError):
         return None  # шаблон без ожидаемых плейсхолдеров — форма не опознана
-    if approval_branches.candidate_branch(ws_id, w, k, a) != branch:
+    if round_trip != branch:
         return None
     return ws_id, al.request_key(w, k, a)
 

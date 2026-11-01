@@ -13010,6 +13010,17 @@ def test_for_run_completed_returns_pr_with_admission(tmp_path, monkeypatch) -> N
     assert _for_run_completed(tmp_path, monkeypatch) == 5
 
 
+#: Сайт с эффектом → функция эффекта, которую отказ допуска обязан опередить
+#: (строки 3–6 и 9 таблицы d1): отказ не меняет сохранённого.
+_STORED_EFFECT = {
+    "returned_pr": "_replacement_cleanup",
+    "returned_merged": "_complete_revision",
+    "returned_open": "_complete_revision",
+    "redo_intent": "_recover_commit",
+    "for_run_adopted": "op_complete",
+}
+
+
 @pytest.mark.parametrize("site", sorted(_STORED_SUCCESS))
 def test_stored_success_requires_admission(
     tmp_path, monkeypatch, capsys, site: str
@@ -13024,6 +13035,11 @@ def test_stored_success_requires_admission(
         "noop_refusal",
         lambda *a, **k: "узел requirements: not_approved:stopped:g1",
     )
+    effect = _STORED_EFFECT.get(site)
+    if effect is not None:  # M-2 ревью Task 14: отказ — ДО эффекта
+        monkeypatch.setattr(
+            task_bridge, effect, lambda *a, **k: pytest.fail(f"{effect} до допуска")
+        )
     with pytest.raises(
         RuntimeError, match="допуск review/v1 не подтверждён — узел requirements"
     ):

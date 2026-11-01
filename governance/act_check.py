@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from itertools import pairwise
@@ -77,7 +77,10 @@ class DeliveryContext:
     anchor_at: Mapping[str, datetime | Unavailable]
     ranges: Mapping[int, Span | Unavailable]
     policy_sets: Mapping[str, PolicySet | Unavailable]
-    legacy: LegacyAccepted | Rejected | Unavailable | None = None
+    #: Вердикт старого кода — ЛЕНИВО: зовётся только в ветке `OLD_READER` (старый
+    #: код получает управление только после admission, Global Constraints);
+    #: `delivery_verdict` мемоизирует его на перебор порядков §8.2.
+    legacy: Callable[[], LegacyAccepted | Rejected | Unavailable] | None = None
 
 
 @dataclass(frozen=True)
@@ -296,10 +299,10 @@ def _pinned_policy(
 
 
 def _legacy_verdict(ctx: DeliveryContext) -> Outcome:
-    """Вердикт старого кода потребителя, вычисленный им до перебора."""
+    """Вердикт старого кода потребителя — вычисляется здесь, после `OLD_READER`."""
     if ctx.legacy is None:
         return Unavailable("вердикт старой проверки не вычислен")
-    return ctx.legacy
+    return ctx.legacy()
 
 
 def _decide(ctx: DeliveryContext, clock: Clock) -> Outcome:

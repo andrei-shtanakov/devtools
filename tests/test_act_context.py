@@ -176,3 +176,23 @@ def test_loader_supplies_prior_epochs_for_merge_admission(monkeypatch) -> None:
         legacy=lambda: LegacyAccepted("bob"),
     )
     assert outcome == LegacyAccepted("bob")
+
+
+def test_old_code_called_once_across_equal_stamp_orders(monkeypatch) -> None:
+    """I-1 ревью Task 14: `OLD_READER` в группе равных меток (оба порядка §8.2
+    судятся старым кодом) — `delivery_verdict` зовёт его не больше одного раза."""
+    ranges = {1: (act("p1", "08:00:00"), act("p2", "10:00:00"))}
+    ctx = context(
+        ranges=ranges,
+        modes={sha("p1"): None, sha("p2"): "merge"},
+        request_act=None,
+    )
+    _wire(monkeypatch, ctx)
+    calls: list[int] = []
+    outcome, _ = _verdict(
+        ctx,
+        request=None,
+        request_act=None,
+        legacy=lambda: calls.append(1) or LegacyAccepted("df-reviewer[bot]"),
+    )
+    assert outcome == LegacyAccepted("df-reviewer[bot]") and calls == [1]
