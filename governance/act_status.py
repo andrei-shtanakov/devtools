@@ -59,7 +59,12 @@ from governance.act_request import (
     manifest_path,
     parse_manifest,
 )
-from governance.act_settings import ActSettings, config_home, load_settings
+from governance.act_settings import (
+    ActSettings,
+    SettingsError,
+    config_home,
+    load_settings,
+)
 from governance.act_time import Ambiguous, Unavailable
 from governance.facts import Outcome as FactOutcome
 from governance.frontmatter import split_frontmatter
@@ -200,7 +205,7 @@ class Deps:
     gh: Any
     now: Any  # () -> datetime
     sleep: Any  # (float) -> None
-    settings: ActSettings | None
+    settings: ActSettings | Unavailable | None  # Unavailable — act.toml не читается
 
 
 def real_deps(state: RunState, env: Mapping[str, str] | None = None) -> Deps:
@@ -232,8 +237,17 @@ def real_deps(state: RunState, env: Mapping[str, str] | None = None) -> Deps:
         gh=act_facts.gh_transport(agent) if bound else None,
         now=lambda: datetime.now(UTC).replace(microsecond=0),
         sleep=time.sleep,
-        settings=load_settings(config_home(env)),
+        settings=_settings(env),
     )
+
+
+def _settings(env: Mapping[str, str]) -> ActSettings | Unavailable:
+    """Настройки установки (`act.toml`); не читаются — названный отказ, а не
+    трассировка `SettingsError` мимо обработчиков `RuntimeError` (ревью PR #667)."""
+    try:
+        return load_settings(config_home(env))
+    except SettingsError as exc:
+        return Unavailable(f"настройки акта: {exc}")
 
 
 def _load_journal(deps: Deps) -> Any:
@@ -922,7 +936,10 @@ def live_policy(state: RunState, deps: Deps) -> LivePolicy | Unavailable:
     """Режим продукта сейчас по истории режима (`act_trust.product_mode`).
 
     Нет привязки, удалённая запись, откат `review → merge`, недочитанная
-    нужная история — `Unavailable`, а не legacy (§6.1, §10; ревизия b1)."""
+    нужная история — `Unavailable`, а не legacy (§6.1, §10; ревизия b1).
+    Нечитаемые настройки установки — такой же отказ конфигурации."""
+    if isinstance(deps.settings, Unavailable):
+        return deps.settings
     if deps.binding is None:
         return Unavailable(
             "нет привязки корня доверия /etc/df/trust.toml (§6.1 п. 1) — "
@@ -1009,6 +1026,8 @@ def noop_refusal(
     if live.mode != "review":
         return None
     wanted = None if nodes is None else set(nodes)
+    if wanted is not None and not wanted:
+        return None  # судить нечего: без снимка и истории (квота С-1, ревью PR #667)
     with fresh_base(state, ops) as snapshot:  # d2–d5: изолированный свежий снимок
         if isinstance(snapshot, Unavailable):
             return f"свежая база: {snapshot.reason}"
@@ -1030,14 +1049,28 @@ def noop_refusal(
 
 
 def _gate_statuses(
-    state: RunState, ops: Ops, dag: Dag, deps: Deps, live: LivePolicy
+    state: RunState,
+    ops: Ops,
+    dag: Dag,
+    deps: Deps,
+    live: LivePolicy,
+    *,
+    candidate: bool,
 ) -> dict[str, str]:
+    """Статусы для провайдера — по тому снимку, который читает steward (§12
+    п. 3): S4 (`candidate`) — байты и входы рабочего дерева волны; S8 — база
+    (`state.base_ref`), как `statuses_at_base`."""
+    base = state.base_ref or "master"
     worktree = Path(state.target_dir)
 
-    def text_of(path: str) -> str | None:
+    def worktree_text(path: str) -> str | None:
         file = worktree / path
         return file.read_text(encoding="utf-8") if file.is_file() else None
 
+    def base_text(path: str) -> str | None:
+        return ops.show_file(state.target_dir, base, path)
+
+    text_of = worktree_text if candidate else base_text
     st = _statuses(
         state,
         ops,
@@ -1045,12 +1078,12 @@ def _gate_statuses(
         live,
         deps,
         text_of=text_of,
-        ref=None,
-        snapshot=state.base_ref or "master",
+        ref=None if candidate else base,
+        snapshot=base,
     )
     paths = _node_paths(state, dag)
     return {
-        node: st.of(node) for node, path in paths.items() if (worktree / path).is_file()
+        node: st.of(node) for node, path in paths.items() if text_of(path) is not None
     }
 
 
@@ -1076,7 +1109,9 @@ def gate_run(
     )
     if rc != 0 or not digest.startswith("sha256:"):
         return Unavailable(f"gate-check --print-snapshot-digest: код {rc}: {digest}")
-    nodes = _gate_statuses(state, ops, dag, deps or real_deps(state), live)
+    nodes = _gate_statuses(
+        state, ops, dag, deps or real_deps(state), live, candidate=candidate
+    )
     out.write_text(
         json.dumps({"snapshot_digest": digest, "nodes": nodes}, sort_keys=True),
         encoding="utf-8",

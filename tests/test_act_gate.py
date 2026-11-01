@@ -156,7 +156,9 @@ def test_review_mode_writes_provider_bound_to_digest(
     monkeypatch.setattr(
         act_status,
         "_gate_statuses",
-        lambda state, ops, dag, deps, live: {"requirements": "approved"},
+        lambda state, ops, dag, deps, live, *, candidate: (
+            {"requirements": "approved"} if candidate else {}
+        ),
     )
 
     class _Ops:

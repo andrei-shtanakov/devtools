@@ -3873,3 +3873,21 @@ def test_checks_wait_is_pinned_to_the_head_it_started_on(
     assert world.forge.merge_calls == [], "чужую голову не мержим"
     assert "голов" in outcome.message.lower()
     assert al.is_live(world.state.ops[key])
+
+
+def test_reconcile_publication_is_read_once(world: World, monkeypatch) -> None:
+    """Ревью PR #667: реконсиляция смёрженного candidate считает опубликованность
+    снимка (`fetch_branch` + чтения блобов) ОДИН раз, а не дважды."""
+    approve(world, "charter")
+    _key, op = only_request(world)
+    merge_pr(world, op["candidate_pr"])
+    calls: list[int] = []
+    real = an._snapshot_is_published
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(an, "_snapshot_is_published", counted)
+    approve(world, "charter")
+    assert calls == [1]
