@@ -60,6 +60,12 @@ count = 1
 reason = "`gate-check --candidate` steward из venv devtools либо PATH"
 
 [[site]]
+module = "governance/ops.py"
+function = "gate_snapshot_digest"
+count = 1
+reason = "`gate-check --print-snapshot-digest` steward из venv devtools либо PATH"
+
+[[site]]
 module = "governance/edge_check/reviewer.py"
 function = "harness_version"
 count = 1

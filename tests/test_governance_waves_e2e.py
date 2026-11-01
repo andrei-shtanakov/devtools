@@ -203,10 +203,14 @@ class E2EOps(ForgeOps):
         (bundle / fname).write_text(_frontmatter(kind, pins) + body, encoding="utf-8")
         return 0
 
-    def gate_check_candidate(self, target_dir, bundle_dir, profile):
+    def gate_check_candidate(
+        self, target_dir, bundle_dir, profile, *, act_mode, node_status=None
+    ):
         return 0, ""
 
-    def gate_check_s8(self, target_dir, bundle_dir, profile):
+    def gate_check_s8(
+        self, target_dir, bundle_dir, profile, *, act_mode, node_status=None
+    ):
         return 0, ""
 
     def collect_gate_verdicts(self, target_dir: str, dest: str) -> bool:

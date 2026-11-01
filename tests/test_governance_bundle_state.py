@@ -372,7 +372,7 @@ def test_bundle_state_requires_design(tmp_path: Path) -> None:
 
     roles = load_roles_catalog(profile.parent / "roles.yaml")
     graph = load_profile(profile, roles)
-    artifacts, _findings = collect_bundle(graph, bundle)
+    artifacts, _findings = collect_bundle(graph, bundle, act_mode="legacy")
     design_artifact = next(a for a in artifacts if a.node_id == "design")
     assert design_artifact.meta.status == "draft"
 
@@ -384,6 +384,6 @@ def test_bundle_state_requires_design(tmp_path: Path) -> None:
     assert "design" not in state.required_absent
     assert by_id["design"].status == "candidate_valid"
 
-    artifacts, _findings = collect_bundle(graph, bundle)
+    artifacts, _findings = collect_bundle(graph, bundle, act_mode="legacy")
     design_artifact = next(a for a in artifacts if a.node_id == "design")
     assert design_artifact.meta.status == "approved"

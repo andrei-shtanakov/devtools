@@ -64,10 +64,15 @@ class BundleState:
 
 
 def candidate_state(profile_path: Path, bundle_dir: Path) -> BundleState:
-    """Состояние бандла по его содержимому (голова ветки, PR ещё может не быть)."""
+    """Состояние бандла по его содержимому (голова ветки, PR ещё может не быть).
+
+    Консоль — read-модель без чтений форджи: провайдера акта здесь не бывает,
+    поэтому `act_mode="legacy"`; бандл с конвертами `review/v1` консоль покажет
+    находкой `GC-ACT-MODE-CONFLICT` (статусов акта она не вычисляет).
+    """
     roles = load_roles_catalog(Path(profile_path).parent / "roles.yaml")
     graph = load_profile(profile_path, roles)
-    artifacts, findings = collect_bundle(graph, bundle_dir)
+    artifacts, findings = collect_bundle(graph, bundle_dir, act_mode="legacy")
     findings = [*findings, *check_behaviour_spec(graph, artifacts)]
     supplemental_blobs: dict[str, str] = {}
     if (bundle_dir / brief_input.PRIMARY_REL).is_file():

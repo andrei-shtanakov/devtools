@@ -3273,7 +3273,7 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     # состояния. Каждая ветка ниже пишет файл заново целиком.
     (run_dir(state.run_id) / "gate-findings.txt").unlink(missing_ok=True)
     rc, output = ops.gate_check_candidate(
-        state.target_dir, state.bundle_dir, profile_arg
+        state.target_dir, state.bundle_dir, profile_arg, act_mode="legacy"
     )
     if rc != 0:
         (run_dir(state.run_id) / "gate-findings.txt").write_text(
@@ -4022,7 +4022,7 @@ def _step_s8(state: RunState, ops: Ops) -> bool:
             str(run_dir(state.run_id) / "s8-gate-verdicts.stale.jsonl"),
         )
         exit_code, output = ops.gate_check_s8(
-            state.target_dir, state.bundle_dir, state.profile
+            state.target_dir, state.bundle_dir, state.profile, act_mode="legacy"
         )
         # Ретроспектива 2026-09-02 (@id:runner-s8-verdicts-cleanup):
         # --emit-verdicts оставляет .steward/gate_verdicts.jsonl в корне

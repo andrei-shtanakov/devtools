@@ -154,6 +154,8 @@ class FakeOps:
     collect_verdicts_queue: list[bool] = field(default_factory=list)
     # Очередь ответов S4 `gate_check_candidate`; пустая/исчерпанная -> (0, "")
     gate_candidate: list[tuple[int, str]] = field(default_factory=list)
+    # act_mode каждого вызова gate-check (S4 и S8) по порядку
+    gate_modes: list[str] = field(default_factory=list)
     find_pr_error: str | None = None
     dirty: bool = False
     checkout_and_pull_error: str | None = None
@@ -512,17 +514,31 @@ class FakeOps:
         return path in self.existing_files
 
     def gate_check_candidate(
-        self, target_dir: str, bundle_dir: str, profile: str
+        self,
+        target_dir: str,
+        bundle_dir: str,
+        profile: str,
+        *,
+        act_mode: str,
+        node_status: str | None = None,
     ) -> tuple[int, str]:
         self.calls.append(("gate_check_candidate", bundle_dir))
+        self.gate_modes.append(act_mode)
         if self.gate_candidate:
             return self.gate_candidate.pop(0)
         return (0, "")
 
     def gate_check_s8(
-        self, target_dir: str, bundle_dir: str, profile: str
+        self,
+        target_dir: str,
+        bundle_dir: str,
+        profile: str,
+        *,
+        act_mode: str,
+        node_status: str | None = None,
     ) -> tuple[int, str]:
         self.calls.append(("gate_check_s8", bundle_dir))
+        self.gate_modes.append(act_mode)
         return self.s8_exit, self.s8_output
 
     def collect_gate_verdicts(self, target_dir: str, dest: str) -> bool:
@@ -1690,10 +1706,22 @@ def test_real_candidate_gate_accepts_materialized_brief_source(
             return rc
 
         def gate_check_candidate(
-            self, target_dir: str, bundle_dir: str, profile: str
+            self,
+            target_dir: str,
+            bundle_dir: str,
+            profile: str,
+            *,
+            act_mode: str,
+            node_status: str | None = None,
         ) -> tuple[int, str]:
             self.calls.append(("gate_check_candidate", bundle_dir))
-            return RealOps().gate_check_candidate(target_dir, bundle_dir, profile)
+            return RealOps().gate_check_candidate(
+                target_dir,
+                bundle_dir,
+                profile,
+                act_mode=act_mode,
+                node_status=node_status,
+            )
 
     source = _brief_source(tmp_path)
     ops = CliBriefOps(review_exit=1)
@@ -1996,6 +2024,21 @@ def _wave_run_at_s8(
         state.base_ref = base_ref
     rs.save(state)
     return state
+
+
+def test_s8_passes_legacy_act_mode_until_act(tmp_path: Path, runs_root) -> None:
+    """До части B заявок `review/v1` нет: шаг S8 называет `legacy` явно."""
+    ops = FakeOps(
+        review_exit=0,
+        facts=GREEN_PR_FACTS,
+        files=GREEN_BUNDLE_FILES,
+        s8_exit=0,
+    )
+
+    state = _wave_run_at_s8(tmp_path, "r-s8-mode", ops)
+    runner._step_s8(state, ops)
+
+    assert ops.gate_modes == ["legacy"]
 
 
 def test_s8_success_completes(tmp_path: Path, runs_root) -> None:
@@ -2740,6 +2783,7 @@ def test_green_gate_removes_findings_of_the_previous_round(
     result = locked_runner.resume(run_id, ops)
 
     assert result.ops[f"gate-candidate-{result.wave}"]["status"] == "completed"
+    assert set(ops.gate_modes) == {"legacy"}  # S4 до части B (Task 14)
     assert not findings_file.exists(), (
         "зелёный гейт оставил находки прошлого круга: "
         + findings_file.read_text(encoding="utf-8")
@@ -2891,10 +2935,22 @@ def test_gate_seam_required_absent_blocks_without_mock(
 
     class CliGateOps(FakeOps):
         def gate_check_candidate(
-            self, target_dir: str, bundle_dir: str, profile: str
+            self,
+            target_dir: str,
+            bundle_dir: str,
+            profile: str,
+            *,
+            act_mode: str,
+            node_status: str | None = None,
         ) -> tuple[int, str]:
             self.calls.append(("gate_check_candidate", bundle_dir))
-            return RealOps().gate_check_candidate(target_dir, bundle_dir, profile)
+            return RealOps().gate_check_candidate(
+                target_dir,
+                bundle_dir,
+                profile,
+                act_mode=act_mode,
+                node_status=node_status,
+            )
 
     charter_text = (
         "---\nspec_stage: charter\nstatus: draft\nowner_role: analysts\n"

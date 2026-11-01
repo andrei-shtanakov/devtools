@@ -264,7 +264,7 @@ dev = [
     { name = "pytest", specifier = ">=8" },
 ]
 governance = [
-    { name = "steward", git = "https://github.com/andrei-shtanakov/steward?rev=b77ee0ded6cd750ed092f7574969d43f043edc6e" },
+    { name = "steward", git = "https://github.com/andrei-shtanakov/steward?rev=68f46a9b2e5cfe9ecd1f09524e986c3f687f4155" },
     { name = "textual", specifier = ">=1" },
 ]
 selfcheck = [
@@ -726,8 +726,8 @@ wheels = [
 
 [[package]]
 name = "steward"
-version = "0.1.0"
-source = { git = "https://github.com/andrei-shtanakov/steward?rev=b77ee0ded6cd750ed092f7574969d43f043edc6e#b77ee0ded6cd750ed092f7574969d43f043edc6e" }
+version = "0.2.0"
+source = { git = "https://github.com/andrei-shtanakov/steward?rev=68f46a9b2e5cfe9ecd1f09524e986c3f687f4155#68f46a9b2e5cfe9ecd1f09524e986c3f687f4155" }
 dependencies = [
     { name = "jsonschema" },
     { name = "pyyaml" },

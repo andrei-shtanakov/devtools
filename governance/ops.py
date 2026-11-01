@@ -304,13 +304,29 @@ class Ops(Protocol):
     ) -> None: ...
 
     def gate_check_s8(
-        self, target_dir: str, bundle_dir: str, profile: str
+        self,
+        target_dir: str,
+        bundle_dir: str,
+        profile: str,
+        *,
+        act_mode: str,
+        node_status: str | None = None,
+    ) -> tuple[int, str]: ...
+
+    def gate_snapshot_digest(
+        self, target_dir: str, bundle_dir: str, *, candidate: bool
     ) -> tuple[int, str]: ...
 
     def collect_gate_verdicts(self, target_dir: str, dest: str) -> bool: ...
 
     def gate_check_candidate(
-        self, target_dir: str, bundle_dir: str, profile: str
+        self,
+        target_dir: str,
+        bundle_dir: str,
+        profile: str,
+        *,
+        act_mode: str,
+        node_status: str | None = None,
     ) -> tuple[int, str]: ...
 
     def edge_check_level(
@@ -776,6 +792,21 @@ def author_prompt(
         "Author the governance bundle content for this kind/subject."
         f"{source_guidance}"
     )
+
+
+def _gate_check_exe() -> str:
+    exe = DEVTOOLS_ROOT / ".venv" / "bin" / "gate-check"
+    return str(exe) if exe.exists() else "gate-check"
+
+
+def _act_args(act_mode: str, node_status: str | None) -> list[str]:
+    """`--act-mode` обязателен на пине steward v0.2.0 (О14): результат
+    admission вызывающего, steward его не выводит; провайдер — только при
+    `review` (CLI steward сам отказывает кодом 2 на `legacy` + провайдер)."""
+    args = ["--act-mode", act_mode]
+    if node_status is not None:
+        args += ["--node-status", node_status]
+    return args
 
 
 class RealOps(BriefFactsMixin):
@@ -2103,7 +2134,13 @@ class RealOps(BriefFactsMixin):
         subprocess.run(["git", "commit", "-m", message], cwd=target_dir, check=True)
 
     def gate_check_s8(
-        self, target_dir: str, bundle_dir: str, profile: str
+        self,
+        target_dir: str,
+        bundle_dir: str,
+        profile: str,
+        *,
+        act_mode: str,
+        node_status: str | None = None,
     ) -> tuple[int, str]:
         """gate-check <bundle_dir> --profile <profile> --emit-verdicts.
 
@@ -2118,11 +2155,18 @@ class RealOps(BriefFactsMixin):
         Возвращает ``(returncode, combined_output)`` (финальное ревью M-2):
         §5 требует, чтобы findings S8 сохранялись в леджере прогона и в теле
         remediation-issue, а не только код возврата.
+
+        ``--act-mode`` обязателен с steward v0.2.0 (approval-facts v3, О14).
         """
-        exe = DEVTOOLS_ROOT / ".venv" / "bin" / "gate-check"
-        cmd = str(exe) if exe.exists() else "gate-check"
         done = subprocess.run(
-            [cmd, bundle_dir, "--profile", profile, "--emit-verdicts"],
+            [
+                _gate_check_exe(),
+                bundle_dir,
+                "--profile",
+                profile,
+                "--emit-verdicts",
+                *_act_args(act_mode, node_status),
+            ],
             cwd=target_dir,
             capture_output=True,
             text=True,
@@ -2130,6 +2174,21 @@ class RealOps(BriefFactsMixin):
         )
         output = done.stdout + done.stderr
         return done.returncode, output
+
+    def gate_snapshot_digest(
+        self, target_dir: str, bundle_dir: str, *, candidate: bool
+    ) -> tuple[int, str]:
+        """`gate-check --print-snapshot-digest [--candidate] <dir>` (§7.2.3):
+        дайджест снимка, к которому привязывается ответ провайдера."""
+        flags = ["--candidate"] if candidate else []
+        done = subprocess.run(
+            [_gate_check_exe(), "--print-snapshot-digest", *flags, bundle_dir],
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return done.returncode, done.stdout.strip() or done.stderr
 
     def collect_gate_verdicts(self, target_dir: str, dest: str) -> bool:
         """Переносит <target>/.steward/gate_verdicts.jsonl в dest.
@@ -2152,7 +2211,13 @@ class RealOps(BriefFactsMixin):
         return True
 
     def gate_check_candidate(
-        self, target_dir: str, bundle_dir: str, profile: str
+        self,
+        target_dir: str,
+        bundle_dir: str,
+        profile: str,
+        *,
+        act_mode: str,
+        node_status: str | None = None,
     ) -> tuple[int, str]:
         """gate-check --candidate <bundle_dir> --profile <profile>.
 
@@ -2161,11 +2226,17 @@ class RealOps(BriefFactsMixin):
         git-фактов; ref-зависимые гейты объявляются `not_evaluated` на
         stderr. Коды прежние: 0 чисто, 1 error-находки, 2 ошибка
         конфигурации. cwd=target_dir — профиль резолвится от репо, как в S8.
+        ``--act-mode`` обязателен с steward v0.2.0 (О14).
         """
-        exe = DEVTOOLS_ROOT / ".venv" / "bin" / "gate-check"
-        cmd = str(exe) if exe.exists() else "gate-check"
         done = subprocess.run(
-            [cmd, "--candidate", bundle_dir, "--profile", profile],
+            [
+                _gate_check_exe(),
+                "--candidate",
+                bundle_dir,
+                "--profile",
+                profile,
+                *_act_args(act_mode, node_status),
+            ],
             cwd=target_dir,
             capture_output=True,
             text=True,
