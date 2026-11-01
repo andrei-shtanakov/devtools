@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import sqlite3
@@ -53,10 +54,60 @@ _BLOCKING = (
     "AND (state = 'pending' OR (state = 'registered' AND epoch >= ?))"
 )
 _LOCK_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+# Обязательные проверки открытия хранилища — копия `df.publisher.perimeter`
+# (`open_db` → `_verify`): на том же файле узкий клиент отказывает там же,
+# где полный журнал. Совпадение констант и SQL держит
+# `tests/test_act_journal_wire.py` (сверка с `df/` и двойники на одном файле).
+MAX_EVENTS = 10_000
+SCHEMA_VERSION = "1"
+#: sha256 отсортированных строк `type\tname\tsql` из `sqlite_master` схемы издателя.
+SCHEMA_DIGEST = "d684c9a00188611d5f8ab2ba80f2b9633ec3e6dabd0a768b2a30c963e07f880f"
+_INVARIANTS = (
+    "SELECT count(*) FROM events WHERE state NOT IN ('pending', 'registered')",
+    (
+        "SELECT count(*) FROM events "
+        "WHERE state = 'registered' AND typeof(epoch) != 'integer'"
+    ),
+    "SELECT count(*) FROM events WHERE state = 'pending' AND epoch IS NOT NULL",
+    (
+        "SELECT count(*) FROM transitions "
+        "WHERE event_id NOT IN (SELECT event_id FROM events)"
+    ),
+)
 
 
 def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def schema_digest(conn: sqlite3.Connection) -> str:
+    """Отпечаток схемы базы (то, что издатель сравнивает целиком)."""
+    found = conn.execute(
+        "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
+    )
+    rows = sorted("\t".join((str(t), str(n), str(s))) for t, n, s in found)
+    return hashlib.sha256("\n".join(rows).encode("utf-8")).hexdigest()
+
+
+def _refusal(conn: sqlite3.Connection) -> str | None:
+    """Проверки `_verify` издателя одним чтением; `None` — база годна."""
+    conn.execute("BEGIN")
+    try:
+        if conn.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
+            return "integrity"
+        if schema_digest(conn) != SCHEMA_DIGEST:
+            return "integrity"
+        meta = dict(conn.execute("SELECT key, value FROM meta").fetchall())
+        if meta.keys() != {"schema", "admission"} or meta["schema"] != SCHEMA_VERSION:
+            return "integrity"
+        if any(conn.execute(sql).fetchone()[0] for sql in _INVARIANTS):
+            return "integrity"
+        if conn.execute("SELECT count(*) FROM events").fetchone()[0] > MAX_EVENTS:
+            return "too_many_events"
+        # `restored_pending` допускает только полный журнал (`admit`)
+        return None if meta["admission"] == "ready" else "restore_pending"
+    finally:
+        conn.execute("COMMIT")
 
 
 def _root_id(snap: TrustSnapshot) -> dict[str, object]:
@@ -167,7 +218,7 @@ class DevStoreJournal:
         self.policy_repository_id = policy_repository_id
 
     def _open(self) -> tuple[int, sqlite3.Connection] | Unavailable:
-        if (self.base / RESTORE_INTENT).exists():
+        if os.path.lexists(self.base / RESTORE_INTENT):
             return Unavailable("журнал периметра (dev): restore_incomplete")
         db = self.base / DB_NAME
         try:
@@ -177,7 +228,7 @@ class DevStoreJournal:
         except FileNotFoundError as exc:
             if Path(exc.filename or "") == self.base / LOCK:
                 return Unavailable(f"журнал периметра (dev): нет {LOCK} при базе")
-            lost = (self.base / MARKER).exists()
+            lost = os.path.lexists(self.base / MARKER)
             return Unavailable(
                 f"журнал периметра (dev): {'lost' if lost else 'не создан'}"
             )
@@ -202,13 +253,9 @@ class DevStoreJournal:
             conn.execute("PRAGMA synchronous = EXTRA")
             if sys.platform == "darwin":
                 conn.execute("PRAGMA fullfsync = ON")
-            if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                raise sqlite3.DatabaseError("integrity_check")
-            admission = conn.execute(
-                "SELECT value FROM meta WHERE key = 'admission'"
-            ).fetchone()
-            if admission is None or admission[0] != "ready":
-                raise sqlite3.DatabaseError("restore_pending")
+            refused = _refusal(conn)
+            if refused is not None:
+                raise sqlite3.DatabaseError(refused)
         except sqlite3.Error as exc:
             if conn is not None:
                 conn.close()

@@ -260,3 +260,88 @@ def test_missing_lock_with_database_named_exactly(tmp_path: Path) -> None:
     (narrow.base / "db.lock").unlink()
     got = narrow.status(snap())
     assert isinstance(got, Unavailable) and got.reason.endswith("нет db.lock при базе")
+
+
+def test_open_checks_are_the_publishers() -> None:
+    """Константы и SQL проверок открытия — те же, что у `df.publisher.perimeter`."""
+    import sqlite3
+
+    from df.publisher import perimeter as store
+
+    assert act_journal_wire.MAX_EVENTS == store.MAX_EVENTS
+    assert act_journal_wire.SCHEMA_VERSION == store.SCHEMA_VERSION
+    assert act_journal_wire._INVARIANTS == store._INVARIANTS
+    conn = sqlite3.connect(":memory:")
+    for sql in store.SCHEMA:
+        conn.execute(sql)
+    assert act_journal_wire.schema_digest(conn) == act_journal_wire.SCHEMA_DIGEST
+
+
+def _sql(narrow: act_journal_wire.DevStoreJournal, *statements: str) -> None:
+    import sqlite3
+
+    conn = sqlite3.connect(narrow.base / "events.sqlite", isolation_level=None)
+    for sql in statements:
+        conn.execute(sql)
+    conn.close()
+
+
+def _too_many(tmp_path: Path, monkeypatch, full, narrow, head) -> None:
+    from df.publisher import perimeter as store
+
+    for i in range(3):
+        full.record(snap(1), "df-trust", f"e{i}")
+    head.current = snap(2, "2" * 40)  # события E1 больше не блокируют
+    monkeypatch.setattr(store, "MAX_EVENTS", 2)
+    monkeypatch.setattr(act_journal_wire, "MAX_EVENTS", 2)
+
+
+def _schema_drift(tmp_path, monkeypatch, full, narrow, head) -> None:
+    _sql(narrow, "CREATE TABLE extra (x INTEGER)")
+
+
+def _bad_state(tmp_path, monkeypatch, full, narrow, head) -> None:
+    full.record(snap(1), "df-trust", "x")
+    head.current = snap(2, "2" * 40)
+    _sql(narrow, "UPDATE events SET state = 'odd'")
+
+
+def _meta_version(tmp_path, monkeypatch, full, narrow, head) -> None:
+    _sql(narrow, "UPDATE meta SET value = '2' WHERE key = 'schema'")
+
+
+def _marker_link(tmp_path, monkeypatch, full, narrow, head) -> None:
+    (narrow.base / "events.sqlite").unlink()
+    (narrow.base / "created").unlink()
+    (narrow.base / "created").symlink_to(tmp_path / "nowhere")
+
+
+def _intent_link(tmp_path, monkeypatch, full, narrow, head) -> None:
+    (narrow.base / "restore.intent").symlink_to(tmp_path / "nowhere")
+
+
+@pytest.mark.parametrize(
+    ("spoil", "reason"),
+    [
+        (_too_many, "too_many_events"),
+        (_schema_drift, "integrity"),
+        (_bad_state, "integrity"),
+        (_meta_version, "integrity"),
+        (_intent_link, "restore_incomplete"),
+        (_marker_link, "lost"),
+    ],
+    ids=["max_events", "schema", "invariant", "meta", "intent_symlink", "marker_link"],
+)
+def test_both_clients_refuse_the_same_store(
+    tmp_path: Path, monkeypatch, spoil, reason: str
+) -> None:
+    """Ревью #666: на одном файле узкий клиент не отвечает `clear` там, где
+    полный журнал (`open_db` → `_verify`) отказывает."""
+    head = Head(snap(1))
+    full, narrow = pair(tmp_path, head)
+    assert full.status(snap(1)) == narrow.status(snap(1)) == "clear"
+    spoil(tmp_path, monkeypatch, full, narrow, head)
+    now = head.current
+    got_full, got_narrow = full.status(now), narrow.status(now)
+    assert isinstance(got_full, Unavailable) and reason in got_full.reason
+    assert isinstance(got_narrow, Unavailable) and got_narrow.reason.endswith(reason)
