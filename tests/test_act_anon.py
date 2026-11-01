@@ -298,10 +298,10 @@ def test_bad_repo_slug_sends_nothing(kw: dict, repo: str) -> None:
 
 
 class _Redirector(http.server.BaseHTTPRequestHandler):
-    seen: list[str] = []
+    seen: list[tuple[str, str | None]] = []
 
     def do_GET(self) -> None:  # noqa: N802
-        _Redirector.seen.append(self.path)
+        _Redirector.seen.append((self.path, self.headers.get("Authorization")))
         code = int(self.path.rsplit("/", 1)[-1])
         self.send_response(code)
         self.send_header("Location", "/elsewhere")
@@ -329,8 +329,9 @@ def test_real_opener_does_not_follow_redirects(
     finally:
         server.shutdown()
         server.server_close()
+    auth = f"Bearer {TOKEN}" if kw else None
+    assert _Redirector.seen == [(f"/repos/o/r/{code}", auth)]  # не на `Location`
     assert resp.status == code
-    assert _Redirector.seen == [f"/repos/o/r/{code}"]
 
 
 @KW
@@ -413,3 +414,17 @@ def test_token_never_in_error_sent_or_memo() -> None:
     t.send(_get(COMMIT))
     assert t.sent == [COMMIT] and list(t._memo) == [COMMIT]
     assert TOKEN not in repr(t)
+
+
+@pytest.mark.parametrize(
+    "api", [None, "https://example.invalid/"], ids=["github_api", "other_host"]
+)
+def test_real_opener_refuses_network_in_tests(monkeypatch, api: str | None) -> None:
+    """Страж `tests/conftest.py`: транспорт без `open_url` не ходит в сеть, а
+    падает с названной причиной (ревью Task 11c, Minor 1)."""
+    from tests.conftest import NETWORK_REFUSED
+
+    if api is not None:
+        monkeypatch.setattr(act_anon, "API", api)
+    with pytest.raises(pytest.fail.Exception, match=NETWORK_REFUSED):
+        act_anon.AnonTransport(token=TOKEN).send(_get("repos/o/r"))

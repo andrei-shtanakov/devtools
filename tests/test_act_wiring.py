@@ -152,3 +152,69 @@ def test_wiring_site_decides_with_history_token(
     )
     assert isinstance(got, Unavailable)
     assert got.reason.startswith("нарушение периметра: profile:history на ")
+
+
+#: Швы ввода-вывода решения: внедряют только тесты (ревью Task 11c, Minor 6).
+_SEAMS = frozenset({"open_url", "token_source"})
+_ENTRIES = frozenset({"load_trust", "history_transport"})
+#: Единственная боевая передача швов — `load_trust` в свою фабрику.
+_SEAM_PASS = frozenset({("governance/act_trust.py::load_trust", "history_transport")})
+
+
+def _seam_calls(rel: str, text: str) -> set[str]:
+    """Вызовы `load_trust`/`history_transport` со швом (`open_url`, `token_source`
+    или `**kwargs`) в модуле: `<файл>::<функция>-><вызываемое>`."""
+    found: set[str] = set()
+    for fn in ast.walk(ast.parse(text)):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Call):
+                continue
+            f = node.func
+            name = f.id if isinstance(f, ast.Name) else getattr(f, "attr", None)
+            if name not in _ENTRIES:
+                continue
+            if any(k.arg is None or k.arg in _SEAMS for k in node.keywords):
+                site = f"{rel}::{fn.name}"
+                if (site, name) not in _SEAM_PASS:
+                    found.add(f"{site}->{name}")
+    return found
+
+
+@pytest.mark.parametrize(
+    ("src", "found"),
+    [
+        ("def f(b):\n    load_trust(r, b, j, creds=c, open_url=o)\n", True),
+        ("def f(b):\n    act_trust.history_transport(b, token_source=t)\n", True),
+        ("def f(b, **kw):\n    act_trust.load_trust(r, b, j, **kw)\n", True),
+        ("def f(b):\n    act_trust.load_trust(r, b, j, creds=c)\n", False),
+        ("def f(b):\n    other(b, open_url=o)\n", False),
+    ],
+    ids=["name_open_url", "attr_token_source", "kwargs", "clean", "other_callee"],
+)
+def test_seam_detector_sees_claimed_forms(src: str, found: bool) -> None:
+    assert bool(_seam_calls("governance/x.py", src)) is found
+
+
+def test_seam_detector_exempts_only_load_trust_factory_call() -> None:
+    src = (
+        "def load_trust(b, open_url=None):\n"
+        "    return history_transport(b, open_url=open_url)\n"
+        "def real_deps(b):\n    return history_transport(b, open_url=1)\n"
+    )
+    assert _seam_calls("governance/act_trust.py", src) == {
+        "governance/act_trust.py::real_deps->history_transport"
+    }
+
+
+def test_no_production_caller_injects_seams() -> None:
+    """Боевой вызов со швом подал бы решению поддельные источники доверия."""
+    found = {
+        site
+        for path in sorted((ROOT / "governance").rglob("*.py"))
+        for site in _seam_calls(
+            path.relative_to(ROOT).as_posix(), path.read_text("utf-8")
+        )
+    }
+    assert found == set()

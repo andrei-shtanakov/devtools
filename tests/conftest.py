@@ -92,3 +92,36 @@ def _act_isolation(
     )
     pre = act_status.LivePolicy(act_trust.PRE_MIGRATION, None, None, None, None)
     monkeypatch.setattr(act_status, "mode_probe", lambda state, deps=None: pre)
+
+
+#: Хосты, на которые настоящий opener `act_anon` ходит в тестах (loopback-стенды).
+_LOOPBACK = frozenset({"127.0.0.1", "::1", "localhost"})
+NETWORK_REFUSED = "тест обратился в сеть мимо шва open_url"
+
+
+@pytest.fixture(autouse=True)
+def _act_no_real_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Настоящий opener `AnonTransport` (транспорт, собранный без `open_url`) в
+    тестах ходит только на loopback; иной хост — `pytest.fail` с названной
+    причиной, а не сетевой запрос (ревью Task 11c, Minor 1). Боевой код не
+    меняется."""
+    from urllib.parse import urlsplit
+
+    try:
+        from governance import act_anon
+    except ImportError:
+        return
+    real = act_anon._default_open
+
+    def guarded() -> object:
+        opener = real()
+
+        def open_url(req: object, *args: object, **kwargs: object) -> object:
+            url = getattr(req, "full_url", req)
+            if urlsplit(str(url)).hostname not in _LOOPBACK:
+                pytest.fail(f"{NETWORK_REFUSED}: {url}")
+            return opener(req, *args, **kwargs)
+
+        return open_url
+
+    monkeypatch.setattr(act_anon, "_default_open", guarded)

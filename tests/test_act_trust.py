@@ -1116,6 +1116,7 @@ def test_history_token_spawn_argv_and_env(monkeypatch, tmp_path: Path) -> None:
 
     def run(argv, *, env, **kw):  # noqa: ANN001, ANN003
         seen.append((argv, env))
+        assert kw["timeout"] == 60
         return _Done(0, out=TOKEN + "\n")
 
     for var in DF_TOKEN_ENV:
@@ -1283,6 +1284,7 @@ def test_history_transport_built_from_binding(monkeypatch, tmp_path: Path) -> No
     assert {p for p, _ in wire.calls} >= {f"repos/{AP}", f"repos/{DT}"}
     assert isinstance(got.transport, act_anon.AnonTransport)
     assert {p for p, _ in wire.calls} == set(got.transport.sent)
+    assert TOKEN not in repr(got)
 
 
 @pytest.mark.parametrize("keyed", [False, True], ids=["no_key", "key"])
@@ -1616,3 +1618,33 @@ def test_token_source_value_not_token_form_refused(tmp_path, value: object) -> N
     assert isinstance(got, Unavailable)
     assert got.reason == "токен истории: значение не в форме токена"
     assert wire.calls == []
+
+
+@pytest.mark.parametrize("via", ["same", "symlink"])
+@pytest.mark.parametrize("label", ["profile:agent", "profile:merge"])
+def test_profile_shared_with_history_refused_before_io(
+    tmp_path: Path, label: str, via: str
+) -> None:
+    """Ревью Task 11c, Minor 3 (решение контроллера): профиль агента/мержа, который
+    разрешается в каталог профиля истории, — отказ до ввода-вывода."""
+    profile = _profile(tmp_path)
+    shared = profile
+    if via == "symlink":
+        shared = tmp_path / "alias"
+        shared.symlink_to(profile)
+    cred = act_trust.Credential(label, gh_config_dir=shared)
+    creds = (cred,) if label == "profile:agent" else (AGENT, cred)
+    tokens = _Tokens(TOKEN)
+    got, wire = _decide(
+        _with_history(tmp_path), trust_routes(None, J1), creds=creds, tokens=tokens
+    )
+    assert isinstance(got, Unavailable)
+    assert got.reason == act_trust.HISTORY_PROFILE_SHARED
+    assert wire.calls == [] and tokens.calls == []
+
+
+def test_profile_separation_only_with_history_key(tmp_path: Path) -> None:
+    """Без ключа истории каталог профиля агента ничем не ограничен."""
+    cred = act_trust.Credential("profile:agent", gh_config_dir=_profile(tmp_path))
+    got, _ = _decide(binding(), trust_routes(None, J1), creds=(cred,))
+    assert isinstance(got, act_trust.Trust)

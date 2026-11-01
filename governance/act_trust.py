@@ -80,6 +80,7 @@ _BINDING_KEYS = (
 HISTORY_KEY = "history_gh_config_dir"
 HISTORY_LABEL = "profile:history"
 HISTORY_NOT_WIRED = "самоотчёт: credential не из закрытого набора credentials()"
+HISTORY_PROFILE_SHARED = "самоотчёт: профиль credential совпадает с профилем истории"
 _TOKEN_FORM = re.compile(r"[A-Za-z0-9_]+")
 #: Закрытый набор форм `credentials()`: метка → (есть gh_config_dir, есть token).
 _CRED_SHAPES = {
@@ -546,6 +547,21 @@ def _creds_refusal(creds: Sequence[Credential]) -> Unavailable | None:
     return None
 
 
+def _shared_profile_refusal(
+    creds: Sequence[Credential], binding: Binding
+) -> Unavailable | None:
+    """Профиль истории отдельный от профилей агента и мержа (§6.2): credential с
+    тем же каталогом `gh` — `HISTORY_PROFILE_SHARED` до ввода-вывода (ревью 11c)."""
+    history = binding.history_gh_config_dir
+    if history is None:
+        return None
+    own = history.resolve()
+    for cred in creds:
+        if cred.gh_config_dir is not None and cred.gh_config_dir.resolve() == own:
+            return Unavailable(HISTORY_PROFILE_SHARED)
+    return None
+
+
 def _self_report(
     readers: Readers, creds: Sequence[Credential], snap: TrustSnapshot
 ) -> Found:
@@ -680,7 +696,7 @@ def load_trust(
     потребителем, учитывается, а обнаруженное здесь нарушение сохраняется."""
     if not creds:
         return Unavailable("самоотчёт: процесс не назвал ни одного credential")
-    refused = _creds_refusal(creds)
+    refused = _creds_refusal(creds) or _shared_profile_refusal(creds, binding)
     if refused is not None:
         return refused
     transport = history_transport(binding, open_url=open_url, token_source=token_source)

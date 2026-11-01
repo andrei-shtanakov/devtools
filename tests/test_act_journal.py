@@ -340,3 +340,15 @@ def test_dev_journal_mkdir_failure_is_unavailable(tmp_path: Path, monkeypatch) -
     assert isinstance(got, Unavailable) and got.reason.startswith(
         "журнал периметра (dev): "
     )
+
+
+def test_record_without_prior_status_registers_epoch(tmp_path: Path, journal) -> None:
+    """Р-23 (ревью Task 11c, Minor 2): `record` сам передаёт транспорт снимка
+    `ForgeEpochs.via` — событие сразу `registered` с эпохой, а не `pending`."""
+    import sqlite3
+
+    j = journal(tmp_path, Head(snap(1)))
+    assert j.record(snap(1), "df-trust", "push у профиля мержа") is None
+    db = j.layout.perimeter_dir / "events.sqlite"
+    rows = sqlite3.connect(db).execute("SELECT state, epoch FROM events").fetchall()
+    assert rows == [("registered", 1)]
