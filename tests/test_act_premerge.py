@@ -215,6 +215,19 @@ def test_boundary_exactly_two_seconds_ago_does_not_sleep(world: World) -> None:
     assert world.run() == 0 and world.slept == []
 
 
+def test_boundary_unparsed_stamp_is_unset() -> None:
+    """Task 16 (`_boundary`): метка события не разобрана — граница не вычислена,
+    «не установлено» (2), а не отказ и не граница без этого события."""
+    from types import SimpleNamespace
+
+    facts = SimpleNamespace(
+        reviews=[SimpleNamespace(submitted_at="не-метка")], dismissals=[]
+    )
+    with pytest.raises(act_premerge._Stop, match="метка события не разобрана") as got:
+        act_premerge._boundary(facts, [])
+    assert got.value.code == act_premerge.EXIT_UNSET
+
+
 def test_wait_of_exactly_ten_seconds_is_allowed(world: World) -> None:
     world.approve_at = "2026-10-12T12:00:08Z"
     assert world.run() == 0 and world.slept == [10.0]

@@ -790,6 +790,19 @@ def test_unmarked_merged_admitted_legacy_accepted_refused(world, stand):
     assert al.successor_of(world.state, key) is None
 
 
+def test_unmarked_merged_trusted_context_unavailable_refused(world, stand, monkeypatch):
+    """Task 16 (`_delivery_outcome`): доверенный контекст не загружен — отказ с его
+    причиной до погребения, предшественник жив."""
+    key, _pr = _legacy_merged(world, stand)
+    stand.mode = "review"
+    monkeypatch.setattr(
+        act_status.Decider, "context", lambda self: Unavailable("журнал недоступен")
+    )
+    with pytest.raises(RuntimeError, match="доверенный контекст: журнал недоступен"):
+        _repropose(world, key)
+    assert world.state.ops[key]["status"] == al.STATUS_STARTED
+
+
 def test_unmarked_merged_unnamed_head_refused(world, stand, monkeypatch):
     key, pr = _legacy_merged(world, stand)
     stand.mode = "review"

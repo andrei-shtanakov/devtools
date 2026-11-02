@@ -16,7 +16,7 @@ WORKSPACE ?= ..
 MANIFEST ?= $(WORKSPACE)/ai-orchestrators-workspace/workspace-manifest.toml
 
 .DEFAULT_GOAL := help
-.PHONY: help status fetch pull dirty branches bootstrap drift conformance catalog-fixtures graph-drift plan-check plan-check-selftest todo-context todo-work plan-check-fixture inbox issues morning evening snapshot fleet-report today salvage config-policy install arch-freshness arch-freshness-read behaviour-run spec-loop behaviour-console behaviour-tasks brief-propose brief-approve accept-pr preflight edge-check selfcheck selfcheck-dogfood criteria-close conductor sandbox-admit
+.PHONY: help status fetch pull dirty branches bootstrap drift conformance catalog-fixtures graph-drift plan-check plan-check-selftest todo-context todo-work plan-check-fixture inbox issues morning evening snapshot fleet-report today salvage config-policy install arch-freshness arch-freshness-read behaviour-run spec-loop behaviour-console behaviour-tasks brief-propose brief-approve accept-pr preflight edge-check selfcheck selfcheck-dogfood criteria-close conductor sandbox-admit act-barrier
 
 help:
 	@echo "Цели:"
@@ -61,6 +61,7 @@ help:
 	@echo "  make behaviour-tasks ARGS='--run-id …' — draft tasks.md-спека из бандла PR-ом (approve — человек)"
 	@echo "  make behaviour-tasks ARGS='--run-id … --approve-node <node-id>' — одобрение узла бандла: candidate-PR → мерж ЧЕЛОВЕКОМ (это и есть акт; make human-merge ARGS='<repo> <pr>' — тот же акт командой ТАМ, ГДЕ на PR есть одобряющее ревью: защиту ветки команда не обходит, --admin у неё нет — devtools#277) → повтор той же команды дописывает подпись финализирующим PR-ом и по умолчанию сам его мержит агентом (ADR-ECO-011 D5; человеческий мерж finalize — настройка 'Мерж: человек' в CLAUDE.md цели). Единственная дорога узла в approved (§I12); порядок — топологический, доставка одобренность только проверяет"
 	@echo "  make behaviour-tasks ARGS='--run-id … --legacy-bundle=3' — точный состав charter+requirements+behaviour-spec, без design/acceptance/decomposition (WS-SMOKE-001, non-conformant против team-exp); =4 — + design, без acceptance/decomposition; =5 — + decomposition, без acceptance (бандл до раскатки acceptance-узла, decomposition пинует только design); без флага — полный DAG (+ acceptance, decomposition пинует design и acceptance); состав каталога обязан совпасть РОВНО"
+	@echo "  make act-barrier ARGS='--product owner/repo [--attest-drained <установка>]… [--confirm-resolved <pr>]… [--invalidate <pr>] [--json]' — барьер миграции акта review/v1 (§10): живые заявки без маркера по форджу и леджерам; выходы 0 — пусто и полно, 1 — есть живые, 2 — инвалидация отвергнута, 3 — неполно (человеческий контекст)"
 	@echo "  make accept-pr ARGS='--repo <r> --pr <n>' — приёмка integration-PR spec-runner: ревью → чеки → DarkFactory-мерж"
 	@echo "  make preflight ARGS='--repo <r>' — преflight перед прогоном spec-runner: конфиг-эталон / insteadOf / state-DB / live-smoke"
 	@echo "  make selfcheck ARGS='[--repo r | --all] [--sched-dir ~/Library/LaunchAgents] [--judge [--judge-max N] [--judge-model M]]' — самодиагностика: баги, мёртвое, дубли, LLM-вызовы (отчёт в out/selfcheck/)"
@@ -108,6 +109,7 @@ behaviour-run: ; @uv run --frozen --group governance python -m governance.runner
 spec-loop: ; @uv run --frozen --group governance python -m governance.spec_loop --subject "$(SUBJECT)" --repo "$(REPO)" $(ARGS)
 behaviour-console: ; @uv run --frozen --group governance python -m governance.console $(ARGS)
 behaviour-tasks: ; @uv run --frozen --group governance python -m governance.task_bridge $(ARGS)
+act-barrier: ; @uv run --frozen --group governance python -m governance.act_barrier $(ARGS)
 accept-pr: ; @uv run --frozen python -m governance.accept_pr $(ARGS)
 human-merge: ; @sh ./human-merge.sh $(ARGS)
 brief-propose: ; @uv run --frozen python -m governance.brief_tools propose --run "$(RUN)"
