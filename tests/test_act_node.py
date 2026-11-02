@@ -307,6 +307,14 @@ def test_unset_mode_refuses_creation(world: World, stand: Stand) -> None:
     assert al.requests(world.state) == []
 
 
+def test_creation_refuses_unset_mode_itself(world: World) -> None:
+    """Task 16: `creation` сама отказывает при неустановленном режиме, не полагаясь
+    на ранний отказ `_propose` (вызывающий может её не иметь)."""
+    deps = act_status.Deps(None, None, None, (), None, None, None, None)
+    with pytest.raises(RuntimeError, match="режим акта продукта: нет привязки"):
+        act_node.creation(world.state, world.ops, deps, Unavailable("нет привязки"))
+
+
 def test_pre_migration_keeps_legacy_creation(world: World, stand: Stand) -> None:
     stand.mode = act_trust.PRE_MIGRATION
     _key, op, pr = _candidate(world)
@@ -1317,8 +1325,9 @@ def test_reopen_found_stop_pr_merged_outside_base_names_remedy(
     )
     with pytest.raises(
         RuntimeError,
-        match=f"stop-PR #{stop_pr} смёржен не в базу master.*git push origin --delete "
-        f"{branch}.*повторите --reopen charter",
+        # «(<ветка>)» — отказ найденного PR (`_unusable_stop_pr`), а не второй рубеж
+        match=f"stop-PR #{stop_pr} смёржен не в базу master \\({branch}\\).*git push "
+        f"origin --delete {branch}.*повторите --reopen charter",
     ):
         act_node.reopen(world.state, world.ops, an.bundle_dag.dag_for(None), "charter")
     world.ops.delete_remote_branch(SLUG, branch)

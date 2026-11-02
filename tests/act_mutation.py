@@ -403,9 +403,65 @@ BYPASS: dict[str, tuple[str, str]] = {
         'f"https://github.com/{repo_slug}.git"',
         'f"https://example.invalid/{repo_slug}.git"',
     ),
+    "act_node._head_hashes:head_bytes": (
+        'return Unavailable(f"{entry.path} в {head[:12]} не читается")',
+        'text = "---\\nspec_stage: x\\nstatus: approval_pending\\nversion: 1\\n---\\nтело\\n"',
+    ),
+    "act_node._finalize:commit_made": (
+        'raise RuntimeError("коммит конверта не состоялся: HEAD не разрешается")',
+        'head = "0" * 40',
+    ),
+    "act_check._legacy_verdict:legacy_missing": (
+        'return Unavailable("вердикт старой проверки не вычислен")',
+        'return LegacyAccepted("alice")',
+    ),
+    "approve_node._require_upstream_ready#mode_unset:mode": (
+        'raise _unresolved(f"режим акта продукта (upstream {node_id}): {live.reason}")',
+        'live = act_status.LivePolicy("merge", None, None, None, None)',
+    ),
+    "approve_node.read_dag_state#mode_unset:mode": (
+        'return DagState(None, unresolved=f"режим акта продукта: {live.reason}")',
+        'live = act_status.LivePolicy("merge", None, None, None, None)',
+    ),
+    "approve_node._supersedes_undecided:history_unread": (
+        "if predecessor is None or isinstance(statuses.history, Unavailable):\n        return False",
+        "if predecessor is None:\n        return False\n    if isinstance(statuses.history, Unavailable):\n        return True",
+    ),
+    "act_node.reopen:mode_unset": (
+        'raise an._unresolved(f"режим акта продукта (--reopen {node}): {live.reason}")',
+        'live = act_status.LivePolicy("merge", None, None, None, None)',
+    ),
+    "act_node.route:merged_unmarked_mode": (
+        'raise an._unresolved(f"режим акта продукта: {live.reason}")',
+        "live = act_status.LivePolicy(act_trust.PRE_MIGRATION, None, None, None, None)",
+    ),
+    "act_node._undecided_delivery:mode_unset": (
+        'raise an._unresolved(f"режим акта продукта (--repropose {key}): {live.reason}")',
+        "live = act_status.LivePolicy(act_trust.PRE_MIGRATION, None, None, None, None)",
+    ),
+    "act_node._marked_verdict:history": (
+        'raise an._unresolved(f"история заявок узлов: {history.reason}")',
+        "history = ()",
+    ),
+    "act_node._open:act": (
+        "    if act is None:\n        return an.ApprovalOutcome(",
+        '    if act is None:\n        act = type("Act", (), {"login": "nobody"})()\n    if False:\n        return an.ApprovalOutcome(',
+    ),
+    "act_app_token.installations_refusal:repos_unreadable": (
+        'return Unavailable(f"репо установки {ident}: {repos.reason}")',
+        "repos = []",
+    ),
+    "runner._step_gate#act_mode_unset:mode": (
+        '    if isinstance(gate, Unavailable):\n        (run_dir(state.run_id) / "gate-findings.txt").write_text(',
+        '    if isinstance(gate, Unavailable):\n        gate = ("legacy", None)\n    if False:\n        (run_dir(state.run_id) / "gate-findings.txt").write_text(',
+    ),
+    "runner._step_s8#act_mode_unset:mode": (
+        "        if isinstance(gate, Unavailable):\n            print(",
+        '        if isinstance(gate, Unavailable):\n            gate = ("legacy", None)\n        if False:\n            print(',
+    ),
     "ops.RealOps.snapshot_open:own_repo": (
         'tempfile.mkdtemp(prefix="act-snapshot-")',
-        'os.path.join(tempfile.gettempdir(), "act-snapshot-shared")',
+        'os.makedirs(os.path.join(tempfile.gettempdir(), "act-snapshot-shared"), exist_ok=True) or os.path.join(tempfile.gettempdir(), "act-snapshot-shared")',
     ),
     "ops.SnapshotOps.__getattr__:deny": (
         "        raise AttributeError(\n",
@@ -455,6 +511,15 @@ BYPASS: dict[str, tuple[str, str]] = {
 }
 #: Обход невозможен (без данных продолжить нечем) — решение ревьюера с причиной.
 RULED: dict[str, str] = {
+    "ops.RealOps.snapshot_open:own_repo": "общий каталог двух снимков: второй `snapshot_open` падает на `mkdir home` (`FileExistsError`) до любых чтений — смешения снимков нет, мутант виден исключением, а не утверждением; независимость проверяет двойник `test_interleaved_snapshots_are_independent`",
+    "runner._step_gate#act_mode_unset:mode": "без проверки S4 продолжает волну legacy-гейтом; на стенде следующий шаг (`approve_node`) падает исключением «факт не установлен» — мутант виден, но не утверждением; тот же класс у S8 (`runner._step_s8#act_mode_unset`) закрыт утверждением",
+    "act_status._load_journal:journal_unset": "журнала периметра нет (`deps.journal is None`): без него продолжить нечем — вызов `None`; обход с корректными данными подменил бы журнал решения; проверяется причина (O3)",
+    "act_node.repropose:unknown": "заявки нет в леджере: переиздавать нечего (`op` = `None`), обход невозможен; проверяется причина (O3)",
+    "act_node._marked_verdict:delivery_in_history": "события доставки заявки в истории нет: судить нечего (`Decider(None)`), обход с корректными данными подменил бы саму доставку; проверяется причина (O3)",
+    "act_node.reopen:already_stopped": "действующее событие узла — остановка: поколения заявки нет, продолжить нечем; ранний выход идемпотентности, двойник утверждает отсутствие второго stop-PR",
+    "act_node._merge_stop_pr:form": "второй рубеж: та же форма (`stop_pr_defect`) перепроверяется в `_try_agent_merge(form=…)` до мержа и после ожидания проверок (`late`); обход первой проверки неотличим по исходу (мержа нет, отказ «разберите вручную»), выигрыш первой — ранний отказ без ожидания проверок",
+    "act_node._merge_stop_pr:approving_review": "второй рубеж: `_try_agent_merge` проверяет то же одобряющее ревью тем же `_missing_approving_review(kind, retry)` до мержа; обход неотличим по исходу и тексту",
+    "task_bridge.main#repropose_exclusive:cli": "отказ argparse до чтения прогона; без него `main` исполняет второе действие на стенде без git (`CalledProcessError`) — мутант виден, но не утверждением; проверяется сообщение (O3)",
     "act_check.check_delivery:not_merged": "PR не смёржен (или нет merged_at): нет T — перебор порядков на T невозможен, `parse_ts(None)`; обход с корректными данными подменил бы факт мержа, проверяемый этой же строкой; двойник утверждает `WaitingDelivery()`",
     "act_context.delivery_verdict:not_merged": "PR не смёржен: нет T и фактов доставки — продолжить без них нечем; обход с корректными данными невозможен, проверяется причина (O3) и отдельный двойник «ranges не читаются»",
     "act_journal.DevJournal._open:store": "хранилище журнала не открывается (битое/утраченное): продолжить без БД нечем; обход невозможен, проверяется причина (O3)",
@@ -515,7 +580,7 @@ def _guard_off(src: str, fn: ast.AST, lit: str) -> str | None:
     return src[: pos(best.test)] + "False" + src[pos(best.test, True) :]
 
 
-def _run(twin: str) -> str:
+def _run(twin: str, verbose: bool = False) -> str:
     # байткод — только своего кода (мутант меняет `governance/`); `.venv` не трогается
     for top in ("governance", "tests"):
         for cache in (ROOT / top).rglob("__pycache__"):
@@ -539,9 +604,11 @@ def _run(twin: str) -> str:
         check=False,
         env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
     )
+    tail = done.stdout[-4000:]
+    if verbose:
+        print(f"--- {twin}\n{tail}", file=sys.stderr)
     if done.returncode == 0:
         return "survived"
-    tail = done.stdout[-4000:]
     closed = r"^E\s+(AssertionError|assert )|DID NOT RAISE|Regex pattern did not match|^E\s+Failed:"
     return "closed" if re.search(closed, tail, re.MULTILINE) else "error"
 
@@ -598,6 +665,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--shard", type=_shard, help="k/n — прогнать k-ю часть строк")
     p.add_argument("--merge", nargs="+", type=Path, help="собрать итоги частей в --out")
+    p.add_argument(
+        "--verbose", action="store_true", help="хвост вывода двойника — в stderr"
+    )
     args = p.parse_args(argv)
     if args.merge:
         return _merge(args.merge, args.out)
@@ -640,7 +710,7 @@ def main(argv: list[str] | None = None) -> int:
             continue
         path.write_text(mutated, encoding="utf-8")
         try:
-            status = _run(twin)
+            status = _run(twin, args.verbose)
         finally:
             path.write_text(src, encoding="utf-8")
         results.append(

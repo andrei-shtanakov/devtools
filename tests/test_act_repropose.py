@@ -599,6 +599,17 @@ def _merged_ambiguous(world: World, stand: Stand) -> str:
     return key
 
 
+def test_undecided_delivery_mode_unset_refused(world, stand, monkeypatch):
+    """Task 16: режим не установлен к моменту решения о погребении — отказ самого
+    `_undecided_delivery` (гварды создания проверены отдельно и здесь сняты)."""
+    key, _pr = _legacy_merged(world, stand)
+    monkeypatch.setattr(act_node, "_require_successor_creatable", lambda *a: None)
+    stand.mode_unset = "нет привязки"
+    with pytest.raises(RuntimeError, match="режим акта продукта .--repropose"):
+        _repropose(world, key)
+    assert world.state.ops[key]["status"] == al.STATUS_STARTED
+
+
 def test_merged_predecessor_outside_review_mode_refused(world, stand):
     key = _merged_ambiguous(world, stand)
     stand.mode = "merge"
