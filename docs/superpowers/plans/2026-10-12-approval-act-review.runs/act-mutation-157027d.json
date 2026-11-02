@@ -1100,6 +1100,16 @@
   "operator": "BYPASS"
  },
  {
+  "row": "act_node._open:checks",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._open:checks_retry",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
   "row": "act_node._legacy.verdict:halt",
   "status": "closed",
   "operator": "O1"
@@ -1670,6 +1680,11 @@
   "operator": "O1"
  },
  {
+  "row": "act_barrier._judge:closed_live",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
   "row": "act_barrier._local_brief_stamp:run",
   "status": "closed",
   "operator": "BYPASS"
@@ -1682,7 +1697,12 @@
  {
   "row": "act_barrier._local_items:live_local",
   "status": "closed",
-  "operator": "O1"
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_barrier._local_items:with_candidate_pr",
+  "status": "closed",
+  "operator": "BYPASS"
  },
  {
   "row": "act_barrier._local_items:unreadable",
@@ -1708,6 +1728,11 @@
   "row": "act_barrier.live_unmarked:pagination",
   "status": "closed",
   "operator": "O1"
+ },
+ {
+  "row": "act_barrier.live_unmarked:local_dedup",
+  "status": "closed",
+  "operator": "BYPASS"
  },
  {
   "row": "act_barrier.live_review_requests:pr_exception",
