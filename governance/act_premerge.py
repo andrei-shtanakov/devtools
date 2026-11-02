@@ -241,12 +241,34 @@ def _act(args: argparse.Namespace, deps: PremergeDeps, policy: PolicySet) -> Any
         raise _Stop(
             EXIT_REFUSED, f"голова PR {facts.head_sha[:12]} ≠ --head {args.head[:12]}"
         )
-    effective = act_facts.effective(facts, Clock(deps.now()))
+    now = deps.now()
+    effective = act_facts.effective(facts, Clock(now))
     if isinstance(effective, Unavailable):
         raise _Stop(EXIT_UNSET, effective.reason)
     if find_act(args.head, effective, policy) is None:
+        if _approve_in_current_second(facts, args.head, now):
+            raise _Stop(
+                EXIT_UNSET,
+                f"approve на {args.head[:12]} — в текущей секунде: на срезе T он "
+                "ещё не предшествует T (§8.2); повтор уместен",
+            )
         raise _Stop(EXIT_REFUSED, f"нет approve человека на {args.head[:12]}")
     return facts
+
+
+def _approve_in_current_second(facts: Any, head: str, now: datetime) -> bool:
+    """APPROVED на `head` с `submitted_at` (до секунды) ≥ T: срез T его не видит
+    (равная секунда предшествует T только по `before`), но через секунду увидит —
+    это «не установлено», а не отказ (ревью PR #673)."""
+    for r in facts.reviews:
+        if r.state != "APPROVED" or r.commit_id != head or not r.submitted_at:
+            continue
+        try:
+            if parse_ts(r.submitted_at) >= now:
+                return True
+        except ValueError:
+            return True  # метку не разобрать — тоже не установлено
+    return False
 
 
 def _parser() -> argparse.ArgumentParser:

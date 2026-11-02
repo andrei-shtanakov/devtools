@@ -433,10 +433,7 @@ def test_human_merge_label_refusal_text_unchanged(fleet: Fleet) -> None:
         GH_STUB_HEADREF="feat/ordinary", GH_STUB_LABELS="human-merge-required"
     )
     assert res.returncode == 3
-    assert res.stderr == (
-        "PR andrei-shtanakov/demo#7: лейбл 'human-merge-required' — PR явно "
-        "оставлен человеку. Мержит человек.\n"
-    )
+    assert res.stderr == HUMAN_MERGE_REFUSAL
 
 
 def test_unlabelled_candidate_still_refused(fleet: Fleet) -> None:
@@ -450,6 +447,31 @@ def test_review_candidate_with_human_merge_label_refused(fleet: Fleet) -> None:
     res = fleet.run(**_candidate(GH_STUB_LABELS=labels))
     assert res.returncode == 3 and fleet.merge_calls() == []
     assert "human-merge-required" in res.stderr
+
+
+HUMAN_MERGE_REFUSAL = (
+    "PR andrei-shtanakov/demo#7: лейбл 'human-merge-required' — PR явно "
+    "оставлен человеку. Мержит человек.\n"
+)
+
+
+@pytest.mark.parametrize("rc", ["2", "0"])
+def test_human_merge_label_wins_over_premerge(fleet: Fleet, rc: str) -> None:
+    """Ревью PR #673: рубильник `human-merge-required` — поверх предпроверки:
+    терминальный 3 с текстом про лейбл, предпроверка не запускается."""
+    labels = "human-approval-required\nhuman-merge-required"
+    res = fleet.run(**_candidate(GH_STUB_LABELS=labels, UV_STUB_RC=rc))
+    assert res.returncode == 3 and res.stderr == HUMAN_MERGE_REFUSAL
+    assert fleet.premerge_calls() == [] and fleet.merge_calls() == []
+
+
+def test_unlabelled_candidate_with_human_merge_label_keeps_candidate_text(
+    fleet: Fleet,
+) -> None:
+    """Порядок прежних отказов не сдвинут: candidate без лейбла review/v1 —
+    текст отказа по форме, как на master."""
+    res = fleet.run(**_candidate(GH_STUB_LABELS="human-merge-required"))
+    assert res.returncode == 3 and res.stderr == CANDIDATE_REFUSAL
 
 
 def test_review_candidate_still_meets_later_guards(fleet: Fleet) -> None:

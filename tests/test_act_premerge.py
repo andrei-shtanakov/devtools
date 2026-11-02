@@ -46,6 +46,7 @@ SNAP = act_trust.TrustSnapshot(
 )
 BINDING = act_trust.Binding("github.com", 11, "owner/df-trust", "main", 22, "public")
 REAL_LOAD_TRUST = act_trust.load_trust
+REAL_EFFECTIVE = act_facts.effective
 CLEAN = {"admin": False, "maintain": False, "push": False}
 TOKEN_CRED = act_trust.Credential("env:GH_TOKEN", token="ghp_x")
 
@@ -586,3 +587,44 @@ def test_real_deps_holds_agent_and_merge_profiles(tmp_path: Path) -> None:
     ]
     assert deps.binding is None and isinstance(deps.journal, Unavailable)
     assert deps.installations is None
+
+
+def _real_clock(world: World, monkeypatch, *reviews) -> None:
+    """Настоящие `Clock`/`effective` (steward): равная секунда — по `before`."""
+    monkeypatch.setattr(act_facts, "effective", REAL_EFFECTIVE)
+    facts = v3.ReviewFacts(SLUG, 7, HEAD, "master", "OPEN", tuple(reviews), ())
+    world.reads = [facts, facts]
+
+
+def _approve(at: str, *, state: str = "APPROVED", commit: str = HEAD) -> v3.Review:
+    return v3.Review("11", "alice", "User", state, commit, at)
+
+
+def test_approve_in_current_second_is_unset(world: World, monkeypatch, capsys):
+    """Ревью PR #673: approve той же секунды, что T, срезу T ещё не виден —
+    «не установлено» (2, повтор уместен), а не отказ 3."""
+    _real_clock(world, monkeypatch, _approve("2026-10-12T12:00:00Z"))
+    assert world.run() == 2
+    assert "в текущей секунде" in capsys.readouterr().err
+
+
+def test_approve_one_second_ago_is_the_act(world: World, monkeypatch) -> None:
+    _real_clock(world, monkeypatch, _approve("2026-10-12T11:59:59Z"))
+    assert world.run() == 0 and world.slept == [1.0]
+
+
+@pytest.mark.parametrize(
+    "reviews",
+    [
+        (),
+        (_approve("2026-10-12T12:00:00Z", commit="2" * 40),),
+        (_approve("2026-10-12T12:00:00Z", state="COMMENTED"),),
+    ],
+    ids=["no_approve", "approve_on_other_commit", "same_second_not_approve"],
+)
+def test_no_act_without_same_second_approve_refused(
+    world, monkeypatch, capsys, reviews
+):
+    _real_clock(world, monkeypatch, *reviews)
+    assert world.run() == 3
+    assert "нет approve человека" in capsys.readouterr().err

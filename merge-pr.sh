@@ -412,6 +412,14 @@ fi
 # мерж человеком). Предпроверка исполняется ФАЙЛОМ в своём окружении: `-I`,
 # пакет по пути, цепочка импортов и `pyproject.toml`/`uv.lock` — под
 # authority-root и `_HARNESS_PREFIXES` (сверяет tests/harness_trust.py).
+#
+# Рубильник `human-merge-required` — поверх любых форм (гвард 3), в том числе
+# поверх предпроверки: PR, оставленный человеку, получает терминальный 3 с
+# текстом про лейбл, и предпроверка не запускается (её код 2 — «повтор
+# уместен» — увёл бы вызывающего в бесполезные повторы; ревью PR #673).
+# Для candidate без лейбла review/v1 порядок отказов прежний.
+human_merge_refusal="PR ${slug}#${pr}: лейбл '$HUMAN_MERGE_LABEL' — PR явно \
+оставлен человеку. Мержит человек."
 # shellcheck disable=SC2254
 case "$head_ref" in
     $finalize_glob) : ;;
@@ -420,6 +428,9 @@ case "$head_ref" in
 '$head_ref' — candidate-PR шага одобрения (§I12). Его мерж человеком из \
 allowlist И ЕСТЬ акт одобрения узлов; агентский мерж сжёг бы заявку впустую. \
 Мержит человек."
+        if has_label "$HUMAN_MERGE_LABEL"; then
+            die 3 "$human_merge_refusal"
+        fi
         premerge_rc=0
         premerge_out=$(cd "$script_dir" && UV_PROJECT_ENVIRONMENT="$premerge_env" \
             uv run --frozen --exact --group governance --no-config --no-env-file \
@@ -437,8 +448,7 @@ allowlist И ЕСТЬ акт одобрения узлов; агентский �
         esac ;;
 esac
 if has_label "$HUMAN_MERGE_LABEL"; then
-    die 3 "PR ${slug}#${pr}: лейбл '$HUMAN_MERGE_LABEL' — PR явно \
-оставлен человеку. Мержит человек."
+    die 3 "$human_merge_refusal"
 fi
 
 # --- Гвард 4: authority-root пути (ADR-ECO-004 I2) -------------------------
