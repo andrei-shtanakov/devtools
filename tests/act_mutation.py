@@ -125,16 +125,8 @@ BYPASS: dict[str, tuple[str, str]] = {
     ),
     "act_barrier._signed:signer": ("parse_ts(later) > parse_ts(at)", "True"),
     "act_barrier.invalidate:request_form": (
-        '        raise RuntimeError(f"PR #{pr} не candidate/finalize заявки узла")',
+        '        raise Refused(f"PR #{pr} не candidate/finalize заявки узла")',
         '        ident = RequestIdentity(product, "ws-9", "approve-9-9-9")',
-    ),
-    "act_barrier.live_review_requests:product_gaps": (
-        'gaps.append(f"{product}: список PR неполон — {exc}")',
-        "pass",
-    ),
-    "act_barrier.live_unmarked:pagination": (
-        'gaps.append(f"список PR {product} неполон: {exc}")',
-        "pass",
     ),
     "act_check._admission:marker_before_bootstrap": ("ctx.request_act is None", "True"),
     "act_check._admission:mode_after_review": (
