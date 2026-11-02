@@ -565,9 +565,19 @@
   "operator": "BYPASS"
  },
  {
+  "row": "act_status.pr_for_merge:ops_failure",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
   "row": "act_status._pr_head:head_fetched",
   "status": "closed",
   "operator": "O1"
+ },
+ {
+  "row": "act_status._pr_head:ops_failure",
+  "status": "closed",
+  "operator": "BYPASS"
  },
  {
   "row": "act_status._request_event:request:path",
@@ -705,6 +715,11 @@
   "operator": "O1"
  },
  {
+  "row": "act_status.LegacyProbe._finalize_branch:ops_failure",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
   "row": "act_status.LegacyProbe._candidate:ws_id",
   "status": "closed",
   "operator": "O1"
@@ -743,6 +758,11 @@
   "row": "act_status.LegacyProbe._merged_candidate:candidate_time",
   "status": "closed",
   "operator": "O1"
+ },
+ {
+  "row": "act_status.LegacyProbe._merged_candidate:ops_failure",
+  "status": "closed",
+  "operator": "BYPASS"
  },
  {
   "row": "act_status.LegacyProbe._offered:node_in_candidate",
@@ -1968,5 +1988,75 @@
   "row": "ops.RealOps.pr_body_fact:gh_failed",
   "status": "closed",
   "operator": "O1"
+ },
+ {
+  "row": "act_node._require_head_content:unavailable",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_node._require_head_content:drift",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._run_base_tip:retarget",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._run_base_tip:tip",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_premerge.main:usage",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "approve_node._commit_paths:ops_failure",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "approve_node._content_hash:act_projection",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "approve_node._content_hash:projection_refused",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "runner._deliver_review_candidate:unresolved",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "runner._deliver_review_candidate:not_waiting",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "edge_check/publish.surface_violations#own_manifest:own_manifest",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "runner._resume_wave#review_delivery:review_delivery",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "approve_node._ensure_finalize_identity#find_pr_failure:ops_failure",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "approve_node._await_required_checks#pr_facts_failure:pr_facts",
+  "status": "closed",
+  "operator": "BYPASS"
  }
 ]
