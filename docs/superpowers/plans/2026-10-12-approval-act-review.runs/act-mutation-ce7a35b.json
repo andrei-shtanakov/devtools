@@ -1,0 +1,1887 @@
+[
+ {
+  "row": "act_facts._call:library_exception",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_facts._own:steward_unavailable",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_anon.AnonTransport.send:memo_only_sha",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_anon.AnonTransport.send:relative_get",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_anon._response:size_limit",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_anon.AnonTransport._fetch:transport_failure",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_anon.contents_bytes:blob_oid",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_anon.contents_bytes:form",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_anon.contents_bytes:unreadable",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_anon.contents_bytes:not_file",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_anon.contents_bytes:base64",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_anon._locate:commit_unreadable",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_anon._locate:blob_oid_form",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_anon._locate:entry_type",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_anon._tree_entry:tree_unreadable",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_anon._tree_entry:truncated",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_check.check_delivery:not_merged",
+  "status": "ruled",
+  "note": "PR не смёржен (или нет merged_at): нет T — перебор порядков на T невозможен, `parse_ts(None)`; обход с корректными данными подменил бы факт мержа, проверяемый этой же строкой; двойник утверждает `WaitingDelivery()`"
+ },
+ {
+  "row": "act_check.check_delivery:product",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_check.check_delivery:act_head",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_check.live_policy_refusal:current_activation",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_check._admission:mode_after_review",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_check._admission:marker_before_bootstrap",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_check._epoch_at:interepoch_gap",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_check._span:activation_order",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_check._pinned_policy:activation_pin",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_check._pinned_policy:mixed_set",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_check._decide:approver",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_check._decide:dismissal",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_check._decide:merger",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_check._decide:bytes",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_check._decide:content",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_check._legacy_verdict:legacy_missing",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_trust.parse_binding:transport",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust.parse_binding:keys",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust.parse_binding:ids",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust.load_binding:owner",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust.load_binding:absent",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_trust._get:http_status",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust._named:full_name",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust._named:public",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust._chain:commit_identity",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust._journal_versions:journal_deleted",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_trust._checked_epochs:bootstrap_first",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust._checked_epochs:transition",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_trust.read_trust_snapshot:head_named",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_trust.gh_get:gh_failed",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust.gh_get:not_json",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_trust.gh_get:history_label",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust._report:push_on_policy",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust._report:push_on_df_trust",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust._report:unreadable",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust._report:history_push",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust._self_reports:violation_wins",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_trust._creds_refusal:shape",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust._shared_profile_refusal:shared",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust.history_token:hosts",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust.history_token:spawn",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_trust.history_token:exit",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust.history_token:empty",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust.history_token:form",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust.history_transport:token_failed",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust.history_transport:token_form",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust.transport_fact:status",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust._rulesets:pull_request_rule",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust._rebase:rebase_true",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust._rebase:rebase_hidden",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust._register:violation_event",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_trust._snapshot_for_decision:blocked",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust._snapshot_for_decision:stale",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust.load_trust:violation_wins",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust.policy_set:bytes_vs_activation",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust.policy_set:actors_file",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust.load_ranges:history_violation",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_trust.load_ranges:unknown_anchor",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_trust._modes:unread_set",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_trust.product_mode:never_entered",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_trust.product_mode:removed",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust.product_mode:rolled_back",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_trust.product_mode:prior_epoch",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_trust.current_activation:open_epoch",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_journal.ForgeEpochs.head:root",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_journal._status_of:snapshot_identity",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_journal._status_of:state",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_journal.DevJournal._open:store",
+  "status": "ruled",
+  "note": "хранилище журнала не открывается (битое/утраченное): продолжить без БД нечем; обход невозможен, проверяется причина (O3)"
+ },
+ {
+  "row": "act_journal.DevJournal.status:stale",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_journal.DevJournal.status:lost",
+  "status": "ruled",
+  "note": "причина «lost» порождается хранилищем `df.publisher` (exc.reason), обработчик общий; обход невозможен (без БД нечем продолжить); двойник утверждает причину хранилища"
+ },
+ {
+  "row": "act_journal.DevJournal.record:store_refused",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_journal.InstalledJournal.status:df_run",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_journal.InstalledJournal.record:refused",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_journal.journal_for:df_run",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_journal_wire.WireJournal._call:garbled",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_journal_wire.WireJournal.status:snapshot_identity",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_journal_wire.WireJournal.record:refused",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_journal_wire.DevStoreJournal._open:restore",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_journal_wire.DevStoreJournal._open:missing",
+  "status": "ruled",
+  "note": "нет файла блокировки — нет хранилища, продолжить без дескриптора нечем; обход невозможен, проверяется причина (O3)"
+ },
+ {
+  "row": "act_journal_wire.DevStoreJournal.status:blocking",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_journal_wire.DevStoreJournal.record:insert_failed",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_journal_wire._publish:publisher_only",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_journal_wire._refusal:schema",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_journal_wire._refusal:meta",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_journal_wire._refusal:invariant",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_journal_wire._refusal:max_events",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_journal_wire.journal_for_premerge:df_run",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_context.delivery_verdict:not_merged",
+  "status": "ruled",
+  "note": "PR не смёржен: нет T и фактов доставки — продолжить без них нечем; обход с корректными данными невозможен, проверяется причина (O3) и отдельный двойник «ranges не читаются»"
+ },
+ {
+  "row": "act_context.delivery_verdict:legacy_only_unmarked",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_identity.manifest_refusal:product",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_identity.manifest_refusal:ws_id",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_identity.manifest_refusal:request_id",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_identity.paths_refusal:node_in_dag",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_identity.paths_refusal:node_path",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_identity.head_manifest_refusal:in_head",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_identity.head_manifest_refusal:bytes",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.pr_for_merge:exactly_one",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_status._pr_head:head_fetched",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status._request_event:request:path",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status._request_event:request:no_pr",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_status._event:immutable",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status._event:stop:ws_id",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status._event:stop:path",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.load_history:base_unread",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_status.Decider._binding:identity",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.Decider._binding:head_manifest",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.Decider._pins_refusal:upstream_pins",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.Decider.__call__:memo_key",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_status.Decider.__call__:memo_request",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_status._load_journal:binding",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status._load_journal:journal_unset",
+  "status": "ruled",
+  "note": "журнала периметра нет (`deps.journal is None`): без него продолжить нечем — вызов `None`; обход с корректными данными подменил бы журнал решения; проверяется причина (O3)"
+ },
+ {
+  "row": "act_status._settings:settings",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_status.Decider._head_hashes:head_bytes",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_status.Decider._decide:merge_commit",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.Decider._decide:head_sha",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_status.Decider.legacy:contract_result",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_status.candidate_identity:ssot_roundtrip",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.legacy_contract_refusal:pending",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.legacy_contract_refusal:bytes",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.legacy_contract_refusal:hash_field",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.legacy_contract_refusal:pins",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.LegacyProbe.__call__:edit_in_history",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.LegacyProbe.__call__:signature_commit",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.LegacyProbe._finalize_branch:via_pr",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_status.LegacyProbe._finalize_branch:finalize_form",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.LegacyProbe._candidate:ws_id",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.LegacyProbe._candidate:ledger_record",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_status.LegacyProbe._candidate:ledger_candidate",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.LegacyProbe._candidate:ledger_node",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_status.LegacyProbe._merged_candidate:candidate_exists",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.LegacyProbe._merged_candidate:candidate_merged",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.LegacyProbe._merged_candidate:candidate_merger",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.LegacyProbe._merged_candidate:candidate_time",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.LegacyProbe._offered:node_in_candidate",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.LegacyProbe._verdict:admission",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.LegacyProbe._verdict.contract:byte_contract",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.Statuses.of:memo_node",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_status.Statuses.is_review:no_event",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_status.Statuses._legacy:debt_first",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_envelope.node_history:stop_generation",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_envelope.node_history:stop_without_request",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_envelope.node_history:request_generation",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.fresh_base:snapshot_unavailable",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_status.fresh_base:closed",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "ops.RealOps._snapshot_url:canonical",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "ops.RealOps._credential_helper:gh_profile",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "ops.RealOps._snapshot_env:allowlist",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "ops.RealOps._snapshot_env:no_global",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "ops.RealOps._snapshot_env:no_prompt",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "ops.RealOps._snapshot_env:empty_home",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "ops.RealOps._snapshot_env:profile_resolved",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "ops.RealOps._snapshot_env:runner_profile",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "ops.RealOps._snapshot_git:helper_reset",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "ops.SnapshotOps.__getattr__:deny",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "ops.RealOps.snapshot_open:slug_shape",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "ops.RealOps.snapshot_open:fetch_failed",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "ops.RealOps.snapshot_open:own_repo",
+  "status": "ruled",
+  "note": "общий каталог двух снимков: второй `snapshot_open` падает на `mkdir home` (`FileExistsError`) до любых чтений — смешения снимков нет, мутант виден исключением, а не утверждением; независимость проверяет двойник `test_interleaved_snapshots_are_independent`"
+ },
+ {
+  "row": "ops.RealOps.snapshot_open:refmap",
+  "status": "ruled",
+  "note": "fetch снимка — по URL и во временный репозиторий без `remote.*`: git не применяет `remote.*.fetch` к fetch по URL (проверено), а `FETCH_HEAD` пишется во временный репозиторий, который удаляется; `--refmap=` и `--no-write-fetch-head` в `_SNAPSHOT_FETCH` — защита на случай смены источника; обход неотличим; неприкосновенность репозитория продукта проверяет двойник `test_snapshot_leaves_product_repo_untouched`"
+ },
+ {
+  "row": "act_status.noop_refusal:stale_base",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_status.noop_refusal:fresh_ref",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_status.noop_refusal:history_snapshot",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_status.noop_refusal:legacy_snapshot",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_status.noop_refusal:mode_unset",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_status.noop_refusal:stopped",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.noop_refusal:act_revoked",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.noop_refusal:unavailable",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "task_bridge._require_admission:refused",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.Statuses._compute:stop",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.Statuses._compute:upstream",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.Statuses._compute:delivery_verdict",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_status.Statuses._envelope:envelope:node",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.Statuses._envelope:envelope:request_id",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.Statuses._envelope:envelope:generation",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.Statuses._envelope:envelope:manifest_path",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.Statuses._envelope:envelope:head_sha",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.Statuses._envelope:envelope:self_hash",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.Statuses._envelope:envelope:upstream_pins",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.Statuses._envelope:envelope:merge_commit",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.Statuses._envelope:envelope:review_id",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.Statuses._envelope:envelope:policy",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.Statuses._envelope:ws_id",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_status.Statuses._envelope:node_bytes",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.Statuses._envelope:current_pins",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.Statuses._envelope:generation",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status._blobs.read:inputs_unread",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.live_policy:binding",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.gate_run:legacy_mode",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_status.gate_run:snapshot_digest",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_node.creation:mode_unset",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node.creation:draining",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node.creation:review_v1_off",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._manifest:parseable",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_node._binding_refusal:identity",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._binding_refusal:upstream_pins",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._check_marked:act_mirror",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node.route:merged_unmarked_mode",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_node._open:mode",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._open:live_pin",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._open:head",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._open:act",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_node._legacy.verdict:halt",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._head_hashes:head_bytes",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_node._merged:rejected",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._record_act:recorded_act",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node.envelope_commit_defect:paths",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node.envelope_commit_defect:bytes",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._finalize:commit_made",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_node._reconcile_finalize:envelope:node",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._reconcile_finalize:envelope:request_id",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._reconcile_finalize:envelope:generation",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._reconcile_finalize:envelope:manifest_path",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._reconcile_finalize:envelope:head_sha",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._reconcile_finalize:envelope:self_hash",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._reconcile_finalize:envelope:upstream_pins",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._reconcile_finalize:envelope:merge_commit",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._reconcile_finalize:envelope:review_id",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._reconcile_finalize:envelope:policy",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._reconcile_finalize:current_admission",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._require_in_base:in_base",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node.reopen:mode_unset",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_node.reopen:current_event_after",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node.reopen:already_stopped",
+  "status": "ruled",
+  "note": "действующее событие узла — остановка: поколения заявки нет, продолжить нечем; ранний выход идемпотентности, двойник утверждает отсутствие второго stop-PR"
+ },
+ {
+  "row": "act_node.repropose:unknown",
+  "status": "ruled",
+  "note": "заявки нет в леджере: переиздавать нечего (`op` = `None`), обход невозможен; проверяется причина (O3)"
+ },
+ {
+  "row": "act_node.repropose:completed",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node.repropose:status",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node.repropose:after_merge",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._require_stop_delivered:in_base",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._require_stop_delivered:record",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._merge_stop_pr:form",
+  "status": "ruled",
+  "note": "второй рубеж: та же форма (`stop_pr_defect`) перепроверяется в `_try_agent_merge(form=…)` до мержа и после ожидания проверок (`late`); обход первой проверки неотличим по исходу (мержа нет, отказ «разберите вручную»), выигрыш первой — ранний отказ без ожидания проверок"
+ },
+ {
+  "row": "act_node._merge_stop_pr:approving_review",
+  "status": "ruled",
+  "note": "второй рубеж: `_try_agent_merge` проверяет то же одобряющее ревью тем же `_missing_approving_review(kind, retry)` до мержа; обход неотличим по исходу и тексту"
+ },
+ {
+  "row": "act_node._merge_stop_pr:late_form",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node.stop_pr_defect:base_named",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node.stop_pr_defect:target",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node.stop_pr_defect:files",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node.stop_pr_defect:record",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._stop_pr:branch_without_pr",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._unusable_stop_pr:closed",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._unusable_stop_pr:outside_base",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._continue_successor:successor_terminal",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._continue_successor:source_missing",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._continue_successor:not_accumulating",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._undecided_delivery:mode_unset",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_node._undecided_delivery:accepted",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_node._undecided_delivery:legacy_accepted",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_node._delivery_outcome:context",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_node._marked_verdict:mode",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._marked_verdict:history",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_node._marked_verdict:delivery_in_history",
+  "status": "ruled",
+  "note": "события доставки заявки в истории нет: судить нечего (`Decider(None)`), обход с корректными данными подменил бы саму доставку; проверяется причина (O3)"
+ },
+ {
+  "row": "act_node._unmarked_verdict:legacy_halt",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_node._unmarked_verdict:head_named",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_premerge.request_of_branch:form",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_premerge._trust:binding",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_premerge._trust:journal",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_premerge._trust:app_unknown",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_premerge._trust:app_violation",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_premerge._live:mode_unset",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_premerge._live:not_review",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_premerge._check:identity",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_premerge._check:manifest_present",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_premerge._check:merger",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_premerge._check:skew",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_premerge._check:reread",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_premerge._act:head_sha",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_premerge._act:act",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_premerge._act:current_second",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_premerge._approve_in_current_second:same_second",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_premerge._boundary:stamp",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_premerge._manifest_text:utf8",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_app_token._page_ids:completeness",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_app_token._page_ids:entry_id",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_app_token._page_ids:total_count",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_app_token._page_ids:pages_limit",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_app_token._bearer:key_unread",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_app_token._bearer:key_unsigned",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_app_token._token:token",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_app_token.app_identity:app",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_app_token.app_identity:installation",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_app_token.app_identity:repo_form",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_app_token.installations_refusal:trust_repo",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_app_token.installations_refusal:second_page",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_app_token.installations_refusal:repos_unreadable",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_barrier._identity:request_form",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_barrier._marked:absent",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_barrier._marked:unparsed",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_barrier._marked:foreign",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_barrier._marked:head",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_barrier._marked:manifest_unread",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_barrier._migrated:author",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_barrier._migrated:edited",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_barrier._migrated:identity",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_barrier._migrated:comments_unread",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_barrier._signed:status",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_barrier._signed:frontmatter",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_barrier._signed:signer",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_barrier._candidate_nodes:pending",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_barrier._candidate_nodes:unread",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_barrier._legacy_resolved:finalize_merged",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_barrier._legacy_resolved:node_in_base",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_barrier._legacy_resolved:nodes_found",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_barrier._legacy_resolved:merger_named",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_barrier._judge:brief_open",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_barrier._judge:brief_merged",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_barrier._judge:open_unmarked",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_barrier._judge:migrated",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_barrier._local_brief_stamp:run",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_barrier._local_brief_stamp:file",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_barrier._local_items:live_local",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_barrier._local_items:unreadable",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_barrier.live_unmarked:draining",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_barrier.live_unmarked:attestation",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_barrier.live_unmarked:pagination",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_barrier.live_review_requests:product_gaps",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_barrier.invalidate:human",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_barrier.invalidate:request_form",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_barrier.invalidate:ws_id",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "approve_node._legacy_verdict:old_allowlist",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "approve_node._legacy_verdict:old_pin_missing",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "approve_node._legacy_verdict:old_pin_substituted",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "approve_node._legacy_verdict:old_pin_unavailable",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "approve_node._legacy_verdict:old_pin_superseded",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "approve_node._legacy_verdict:snapshot_published",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "approval_ledger.successor_of:single_successor",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "approve_node._supersedes_undecided:other_request",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "approve_node._supersedes_undecided:history_unread",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "approve_node._require_no_join_for_successor:successor_joins_live",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "approve_node._require_no_join_for_successor:second_successor",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "approve_node._require_same_act:act",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "approve_node._creation_policy:policy_pin",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "approve_node.require_clean_synced_base:dirty",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "ops.RealOps.first_parent_changes:git_failed",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "approve_node._propose#status_unavailable:status",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "approve_node.read_dag_state#mode_unset:mode",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "approve_node.read_dag_state#status_unavailable:status",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "approve_node.read_dag_state#review_debt:debt",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "approve_node._require_upstream_ready#mode_unset:mode",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "approve_node._require_upstream_ready#upstream_unavailable:status",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "approve_node._require_upstream_ready#upstream_not_approved:debt",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "approve_node._try_agent_merge#form:form",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "approve_node.approve_node#successor_over_live:successor",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "approve_node.propose_from_source#source_successor:successor",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "task_bridge.main#repropose_exclusive:cli",
+  "status": "ruled",
+  "note": "отказ argparse до чтения прогона; без него `main` исполняет второе действие на стенде без git (`CalledProcessError`) — мутант виден, но не утверждением; проверяется сообщение (O3)"
+ },
+ {
+  "row": "runner._step_gate#act_mode_unset:mode",
+  "status": "ruled",
+  "note": "без проверки S4 продолжает волну legacy-гейтом; на стенде следующий шаг (`approve_node`) падает исключением «факт не установлен» — мутант виден, но не утверждением; тот же класс у S8 (`runner._step_s8#act_mode_unset`) закрыт утверждением"
+ },
+ {
+  "row": "runner._step_s8#act_mode_unset:mode",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "task_bridge.deliver_superseded#replacement_repeat:admission",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "task_bridge.deliver_superseded#returned_pr:admission",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "task_bridge.deliver_superseded#returned_merged:admission",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "task_bridge.deliver_superseded#returned_open:admission",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "task_bridge.deliver_superseded#redo_intent:admission",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "task_bridge.deliver_superseded#returned_v1:admission",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "task_bridge.deliver_for_run#completed:admission",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "task_bridge.deliver_for_run#adopted:admission",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "runner._step_gate#completed_admission:admission",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "runner._step_s8#completed_admission:admission",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "runner._step_s8#run_status:status",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "runner._next_wave#admission:admission",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "approve_node._propose#mode_unavailable:mode",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "approve_node._propose#legacy_noop_review:status",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "task_bridge.deliver_superseded#review_noop:noop",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_envelope.envelope_refusal#bytes:bytes",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_envelope.envelope_refusal#pins:pins",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "ops.RealOps.pr_body_fact:gh_failed",
+  "status": "closed",
+  "operator": "O1"
+ }
+]
