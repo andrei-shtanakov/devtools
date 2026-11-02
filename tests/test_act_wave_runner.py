@@ -157,3 +157,117 @@ def test_review_runner_twin_foreign_manifest_stops_review(
     assert runner._step_candidate(world.state, world.ops) is False
     assert world.state.status == "stopped_review"
     assert world.forge.prs == {}
+
+
+# --- I-2: resume волны доставляет одобренный candidate (§9.1) ---------------------
+
+
+@pytest.fixture()
+def next_wave(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """`_next_wave` — граница теста: переход к следующей волне не ведём."""
+    seen: list[int] = []
+
+    def fake(state, ops, *, lock):
+        seen.append(state.wave)
+        return state
+
+    monkeypatch.setattr(runner, "_next_wave", fake)
+    return seen
+
+
+def _resume(world: World):
+    return runner._resume_wave(world.state, world.ops, lock=None)  # type: ignore[arg-type]
+
+
+def test_review_candidate_pause_asks_for_approve_not_merge(
+    world: World, stand: Stand
+) -> None:
+    _key, _op, pr = _published(world)
+    assert world.state.status == act_node.WAITING_HUMAN_APPROVAL
+    (where, body) = world.ops.comments[-1]
+    assert where == pr and "approve" in body
+    assert "ждёт человеческого мержа" not in body and "мерж = акт" not in body
+
+
+def test_resume_approve_agent_merge_then_finalize(
+    world: World, stand: Stand, next_wave: list[int]
+) -> None:
+    key, _op, pr = _published(world)
+    stand.approve_head(pr)
+    first = _resume(world)
+    assert first.status == act_node.WAITING_DELIVERY
+    assert [c[0] for c in world.forge.merge_calls] == [pr], "агентская доставка"
+    assert world.forge.prs[pr]["state"] == "MERGED"
+    assert next_wave == []
+    second = _resume(world)
+    op = second.ops[key]
+    assert op["status"] == al.STATUS_COMPLETED and op["approved_by"] == "alice"
+    assert next_wave == [1], "finalize → следующая волна"
+    world.sync()
+    assert (world.target / envelope_path(WS_ID, "charter")).is_file()
+
+
+def test_resume_without_approve_waits_and_does_not_merge(
+    world: World, stand: Stand, next_wave: list[int]
+) -> None:
+    key, _op, _pr = _published(world)
+    out = _resume(world)
+    assert out.status == act_node.WAITING_HUMAN_APPROVAL
+    assert world.forge.merge_calls == [] and next_wave == []
+    assert out.ops[key]["status"] == al.STATUS_STARTED
+
+
+def test_resume_non_human_approve_does_not_merge(
+    world: World, stand: Stand, next_wave: list[int]
+) -> None:
+    from governance.act_decision import ReviewView
+
+    _key, _op, pr = _published(world)
+    head = world.forge.head_of(world.forge.prs[pr]["branch"])
+    stand.effective = {
+        "ai-prosto": ReviewView("12", "ai-prosto", "User", "APPROVED", head),
+        "df-reviewer[bot]": ReviewView(
+            "13", "df-reviewer[bot]", "Bot", "APPROVED", head
+        ),
+    }
+    out = _resume(world)
+    assert out.status == act_node.WAITING_HUMAN_APPROVAL
+    assert world.forge.merge_calls == [] and next_wave == []
+
+
+def test_resume_human_merge_is_still_counted(
+    world: World, stand: Stand, next_wave: list[int]
+) -> None:
+    """D3(а): человек смержил candidate сам — доставка засчитывается."""
+    from tests.test_governance_approve_node import merge_pr
+
+    key, _op, pr = _published(world)
+    stand.approve_head(pr)
+    merge_pr(world, pr)
+    out = _resume(world)
+    assert out.ops[key]["status"] == al.STATUS_COMPLETED
+    assert world.forge.merge_calls == [] or world.forge.merge_calls[0][0] != pr
+    assert next_wave == [1]
+
+
+def test_resume_unresolved_is_stopped_review(
+    world: World, stand: Stand, next_wave: list[int]
+) -> None:
+    key, _op, _pr = _published(world)
+    stand.mode_unset = "нет привязки корня доверия"
+    out = _resume(world)
+    assert out.status == "stopped_review"
+    assert out.ops[key]["status"] == al.STATUS_STARTED, "заявка жива"
+    assert world.forge.merge_calls == [] and next_wave == []
+
+
+def test_resume_agent_merge_refused_is_not_a_merge_request(
+    world: World, stand: Stand, monkeypatch: pytest.MonkeyPatch, next_wave: list[int]
+) -> None:
+    """Approve есть, обвязка отказала: стоп с причиной, без просьбы о мерже."""
+    _key, _op, pr = _published(world)
+    stand.approve_head(pr)
+    monkeypatch.setattr(world.ops, "merge", lambda *a, **k: 3)
+    out = _resume(world)
+    assert out.status == "stopped_review"
+    assert world.forge.prs[pr]["state"] == "OPEN" and next_wave == []
