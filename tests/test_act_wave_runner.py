@@ -343,3 +343,40 @@ def test_checklist_body_asks_review_v1_for_approve_not_merge() -> None:
     assert "мерж candidate человеком" not in review
     assert "подпись создаёт мерж candidate человеком из allowlist." in legacy
     assert "approve этого PR" not in legacy
+
+
+_PENDING_CHECK = [{"name": "test", "status": "IN_PROGRESS"}]
+_RED_CHECKS = [{"name": "test", "conclusion": "FAILURE"}]
+
+
+def test_resume_waits_delivery_while_required_checks_run(
+    world: World, stand: Stand, next_wave: list[int]
+) -> None:
+    """Ревью PR #675 (minor): approve поставлен, пока обязательные проверки candidate
+    идут, — доставка ждёт их тем же `_await_required_checks`, что finalize; не
+    дождалась — `waiting_delivery` без мержа (повтор уместен), а не отказ форджи
+    кодом 4 и `stopped_review`."""
+    key, _op, pr = _published(world)
+    stand.approve_head(pr)
+    world.forge.checks = _PENDING_CHECK
+    out = _resume(world)
+    assert out.status == act_node.WAITING_DELIVERY
+    assert world.forge.merge_calls == [] and world.forge.prs[pr]["state"] == "OPEN"
+    assert out.ops[key]["status"] == al.STATUS_STARTED and next_wave == []
+    world.forge.checks = [{"name": "test", "conclusion": "SUCCESS"}]
+    again = _resume(world)
+    assert again.status == act_node.WAITING_DELIVERY
+    assert world.forge.prs[pr]["state"] == "MERGED"
+
+
+def test_resume_red_required_checks_stop_review(
+    world: World, stand: Stand, next_wave: list[int]
+) -> None:
+    """Красные обязательные проверки candidate — мержа нет, `stopped_review`:
+    чинит автор изменения, повтор не поможет."""
+    _key, _op, pr = _published(world)
+    stand.approve_head(pr)
+    world.forge.checks = _RED_CHECKS
+    out = _resume(world)
+    assert out.status == "stopped_review"
+    assert world.forge.merge_calls == [] and next_wave == []

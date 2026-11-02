@@ -2790,6 +2790,9 @@ class MergeRefusal:
 
     reason: str
     human_merge_helps: bool
+    #: повтор того же вызова уместен (проверки ещё идут) — у доставки candidate
+    #: `review/v1` это `waiting_delivery`, а не остановка
+    retry: bool = False
 
 
 def _missing_approving_review(
@@ -2929,7 +2932,7 @@ def _try_agent_merge(
 
 
 def _await_required_checks(
-    state: RunState, ops: Ops, pr: int, head: str
+    state: RunState, ops: Ops, pr: int, head: str, *, kind: str = "finalize-PR"
 ) -> MergeRefusal | None:
     """Ждёт обязательные проверки PR'а; `None` — можно мержить.
 
@@ -2950,7 +2953,7 @@ def _await_required_checks(
         actual = facts.get("headRefOid")
         if actual != head:
             return MergeRefusal(
-                f"голова finalize-PR #{pr} уехала за время ожидания "
+                f"голова {kind} #{pr} уехала за время ожидания "
                 f"проверок: ждали {head[:8]}, на PR {str(actual)[:8]}. "
                 "Агентский мерж не выполнен — повторите вызов",
                 human_merge_helps=False,
@@ -2960,17 +2963,18 @@ def _await_required_checks(
             return None
         if verdict == "red":
             return MergeRefusal(
-                f"обязательные проверки finalize-PR #{pr} красные "
+                f"обязательные проверки {kind} #{pr} красные "
                 f"({pr_checks.failing_names(facts)}) — агентский мерж не "
                 "выполнен; чинит автор изменения, не мерж",
                 human_merge_helps=False,
             )
         _SLEEP(_CHECKS_POLL_SECONDS)
     return MergeRefusal(
-        f"обязательные проверки finalize-PR #{pr} не завершились за "
+        f"обязательные проверки {kind} #{pr} не завершились за "
         f"{int(_CHECKS_POLL_LIMIT * _CHECKS_POLL_SECONDS)} с — агентский "
         "мерж не выполнен; повторите вызов, когда проверки дойдут",
         human_merge_helps=False,
+        retry=True,
     )
 
 

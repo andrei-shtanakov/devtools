@@ -279,12 +279,24 @@ def _judge(
     merged: Collection[str],
     humans: frozenset[str],
     confirmed: frozenset[int],
+    live_local: Mapping[int, str],
 ) -> str | tuple[str] | None:
-    """Пункт отчёта, `None` — разобран, `(gap,)` — факт не установлен."""
+    """Пункт отчёта, `None` — разобран, `(gap,)` — факт не установлен.
+
+    CLOSED разобран, только если живой локальной заявки этого candidate нет
+    (`live_local`: номер candidate-PR → заявка): закрытие кнопкой форджи запись
+    не терминализует — это делает следующий вызов агента (ревью PR #675)."""
     branch, state, number = pr.branch, pr.state, pr.number
     kind = _kind(branch)
-    if kind is None or state == "CLOSED":
+    if kind is None:
         return None
+    if state == "CLOSED":
+        label = live_local.get(number) if kind == "candidate" else None
+        if label is None:
+            return None
+        return (
+            f"#{number} candidate CLOSED без мержа — живая заявка {label} без маркера"
+        )
     ident = _identity(product, branch)
     unmigrated = NO_MARKER
     if ident is not None:
@@ -336,10 +348,15 @@ def _local_brief_stamp(product: str, number: int) -> str | None:
     return why
 
 
-def _local_items(product: str, runs: Iterable[str]) -> tuple[list[str], list[str]]:
-    """Живые заявки локальных леджеров без маркера, не дошедшие до PR; нечитаемый
-    леджер — пробел полноты."""
-    items: list[str] = []
+def _local_items(
+    product: str, runs: Iterable[str]
+) -> tuple[list[tuple[str, str, int | None]], list[str]]:
+    """Живые заявки локальных леджеров без маркера — `(пункт, заявка, candidate-PR)`,
+    ЛЮБЫЕ, с PR и без (ревью PR #675: закрытый candidate живой заявки форджа-проход
+    разобранным не считает, но и PR вне списка не должен прятать заявку);
+    нечитаемый леджер — пробел полноты. Дубли с форджа-проходом снимает
+    `live_unmarked`."""
+    items: list[tuple[str, str, int | None]] = []
     gaps: list[str] = []
     for run_id in runs:
         try:
@@ -350,10 +367,12 @@ def _local_items(product: str, runs: Iterable[str]) -> tuple[list[str], list[str
         if state.repo_slug != product:
             continue
         for nums, op in al.live_requests(state):
-            if op.get("act") != ACT_REVIEW_V1 and op.get("candidate_pr") is None:
-                items.append(
-                    f"{run_id}:{al.request_key(*nums)} — заявка без маркера до PR"
-                )
+            if op.get("act") == ACT_REVIEW_V1:
+                continue
+            pr = op.get("candidate_pr")
+            where = "до PR" if pr is None else f"(candidate #{pr})"
+            label = f"{run_id}:{al.request_key(*nums)}"
+            items.append((f"{label} — заявка без маркера {where}", label, pr))
     return items, gaps
 
 
@@ -378,18 +397,22 @@ def live_unmarked(
     if broken is not None:
         gaps.append(f"список PR {product} неполон: {broken}")
     merged = {p.branch for p in prs if p.state == "MERGED"}
+    local, local_gaps = _local_items(product, runs)
+    live_local = {pr: label for _item, label, pr in local if pr is not None}
+    reported: set[int] = set()
     for pr in prs:
         try:
-            verdict = _judge(product, ops, pr, merged, humans, confirmed)
+            verdict = _judge(product, ops, pr, merged, humans, confirmed, live_local)
         except Exception as exc:  # noqa: BLE001 — любой сбой чтения форджи — пробел
             verdict = (f"#{pr.number}: факты PR не установлены — {exc!r}",)
         if isinstance(verdict, tuple):
             gaps.append(verdict[0])
         elif verdict is not None:
             items.append(verdict)
-    local, local_gaps = _local_items(product, runs)
+            reported.add(pr.number)
+    items += [item for item, _label, pr in local if pr is None or pr not in reported]
     return BarrierReport(
-        tuple(items + local), not (gaps or local_gaps), tuple(gaps + local_gaps)
+        tuple(items), not (gaps or local_gaps), tuple(gaps + local_gaps)
     )
 
 

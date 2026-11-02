@@ -319,6 +319,16 @@ def _open(
             f"human_approvers по head {head[:12]}. Заявка {key} жива",
             request=key,
         )
+    # обязательные проверки — тем же ожиданием, что finalize и stop-PR: approve,
+    # поставленный пока они идут, иначе упирался бы в 405 форджи (код 4) раз на
+    # волну (ревью PR #675; devtools#277)
+    waited = an._await_required_checks(state, ops, pr, head, kind="candidate-PR")
+    if waited is not None:
+        lead = f"{WAITING_DELIVERY}: " if waited.retry else ""
+        return an.ApprovalOutcome(
+            f"{lead}approve {act.login} есть, {waited.reason}. Заявка {key} жива",
+            request=key,
+        )
     code = ops.merge(state.repo, pr, head, base_tip)
     if code != 0:
         hint = an._MERGE_CODE_HINTS.get(code, "мерж не выполнен")

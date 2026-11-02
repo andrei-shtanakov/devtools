@@ -476,6 +476,62 @@ def test_local_live_request_without_pr_is_item(monkeypatch) -> None:
     assert got.items == ("r1:approve-2-1-1 — заявка без маркера до PR",)
 
 
+def _ledger(monkeypatch, live: list) -> None:
+    """Один локальный прогон продукта `P` (`r1`) с живыми заявками `live`."""
+    from types import SimpleNamespace
+
+    from governance import approval_ledger as al
+
+    monkeypatch.setattr(rs, "load", lambda rid: SimpleNamespace(repo_slug=P))
+    monkeypatch.setattr(rs, "all_run_ids", lambda: ("r1",))
+    monkeypatch.setattr(al, "live_requests", lambda state: live)
+
+
+def test_closed_candidate_with_live_record_is_item(monkeypatch) -> None:
+    """Ревью PR #675 (major): candidate закрыт без мержа, а заявка в леджере жива
+    (агент ещё не терминализовал её) — пункт отчёта, один, без дубля локального
+    прохода."""
+    _ledger(monkeypatch, [((2, 1, 1), {"candidate_pr": 5})])
+    got = run(Ops([pr(5, CAND, "CLOSED")]), runs=("r1",))
+    assert got.items == (
+        "#5 candidate CLOSED без мержа — живая заявка r1:approve-2-1-1 без маркера",
+    )
+
+
+def test_closed_candidate_with_terminal_record_is_resolved(monkeypatch) -> None:
+    """Заявка закрытого candidate терминальна (в живых её нет) — разобрано."""
+    _ledger(monkeypatch, [])
+    got = run(Ops([pr(5, CAND, "CLOSED")]), runs=("r1",))
+    assert got.items == () and got.complete
+
+
+def test_local_live_request_with_pr_is_item(monkeypatch) -> None:
+    """Локальный проход называет и заявку с `candidate_pr`, если форджа-проход её не
+    назвал (PR не виден списку) — фильтр «до PR» снят."""
+    _ledger(monkeypatch, [((2, 1, 1), {"candidate_pr": 9})])
+    got = run(Ops([]), runs=("r1",))
+    assert got.items == ("r1:approve-2-1-1 — заявка без маркера (candidate #9)",)
+
+
+def test_open_candidate_not_duplicated_by_local_pass(monkeypatch) -> None:
+    """Живая заявка OPEN candidate — один пункт (форджа-проход), не два."""
+    _ledger(monkeypatch, [((2, 1, 1), {"candidate_pr": 5})])
+    got = run(Ops([pr(5, CAND, "OPEN")]), runs=("r1",))
+    assert len(got.items) == 1 and got.items[0].startswith("#5 candidate OPEN")
+
+
+def test_cli_closed_candidate_with_live_record_exits_live(monkeypatch, capsys) -> None:
+    _ledger(monkeypatch, [((2, 1, 1), {"candidate_pr": 5})])
+    got = _cli(
+        monkeypatch,
+        _CliOps([pr(5, CAND, "CLOSED")]),
+        _live(),
+        ["--attest-drained", "f"],
+    )
+    assert got == act_barrier.EXIT_LIVE
+    assert "#5 candidate CLOSED без мержа" in capsys.readouterr().out
+
+
 def test_unreadable_local_ledger_incomplete(monkeypatch) -> None:
     """B3-2: нечитаемый леджер прогона — пробел полноты, а не «пусто» (`live_unmarked`)."""
 

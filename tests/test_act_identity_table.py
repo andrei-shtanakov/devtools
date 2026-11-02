@@ -1936,6 +1936,20 @@ JUDGMENT = {
             f"{N}::test_open_without_approve_waits",
             "WAITING_HUMAN_APPROVAL",
         ),
+        r(
+            "checks",
+            "act_node._open",
+            "if waited is not None",
+            f"{WR}::test_resume_red_required_checks_stop_review",
+            '"stopped_review"',
+        ),
+        r(
+            "checks_retry",
+            "act_node._open",
+            "if waited.retry",
+            f"{WR}::test_resume_waits_delivery_while_required_checks_run",
+            "act_node.WAITING_DELIVERY",
+        ),
     ),
     "act_node._legacy.verdict": (
         r(
@@ -2769,6 +2783,13 @@ JUDGMENT = {
             f"{B}::test_human_migration_marker_resolves",
             ".items == ()",
         ),
+        r(
+            "closed_live",
+            "act_barrier._judge",
+            "label = live_local.get(number)",
+            f"{B}::test_closed_candidate_with_live_record_is_item",
+            '"#5 candidate CLOSED без мержа — живая заявка r1:approve-2-1-1 без маркера"',
+        ),
     ),
     "act_barrier._local_brief_stamp": (
         r(
@@ -2790,9 +2811,16 @@ JUDGMENT = {
         r(
             "live_local",
             "act_barrier._local_items",
-            'op.get("act") != ACT_REVIEW_V1 and op.get("candidate_pr") is None',
+            "items.append((",
             f"{B}::test_local_live_request_without_pr_is_item",
             '"r1:approve-2-1-1 — заявка без маркера до PR"',
+        ),
+        r(
+            "with_candidate_pr",
+            "act_barrier._local_items",
+            'if op.get("act") == ACT_REVIEW_V1',
+            f"{B}::test_local_live_request_with_pr_is_item",
+            '"r1:approve-2-1-1 — заявка без маркера (candidate #9)"',
         ),
         r(
             "unreadable",
@@ -2830,6 +2858,13 @@ JUDGMENT = {
             "список PR {product} неполон",
             f"{B}::test_broken_pagination_incomplete",
             '"список PR owner/p неполон',
+        ),
+        r(
+            "local_dedup",
+            "act_barrier.live_unmarked",
+            "pr not in reported",
+            f"{B}::test_open_candidate_not_duplicated_by_local_pass",
+            "len(got.items) == 1",
         ),
     ),
     "act_barrier.live_review_requests": (

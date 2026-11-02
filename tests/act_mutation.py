@@ -569,6 +569,23 @@ BYPASS: dict[str, tuple[str, str]] = {
         'raise RuntimeError(f"self-hash узла в проекции {act}: {exc}") from exc',
         "return na.self_hash(text)",
     ),
+    # ревью PR #675: барьер и закрытый candidate живой заявки
+    "act_barrier._judge:closed_live": (
+        'label = live_local.get(number) if kind == "candidate" else None',
+        "label = None",
+    ),
+    "act_barrier._local_items:live_local": (
+        'items.append((f"{label} — заявка без маркера {where}", label, pr))',
+        "pass",
+    ),
+    "act_barrier._local_items:with_candidate_pr": (
+        'if op.get("act") == ACT_REVIEW_V1:',
+        'if op.get("act") == ACT_REVIEW_V1 or op.get("candidate_pr") is not None:',
+    ),
+    "act_barrier.live_unmarked:local_dedup": (
+        "pr is None or pr not in reported",
+        "True",
+    ),
     # N-5: узкий `except` на фактах candidate в resume
     "runner._resume_wave#pr_facts_failure:ops_failure": (
         "        except OPS_FAILURES as exc:",
