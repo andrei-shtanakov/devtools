@@ -2040,6 +2040,11 @@
   "operator": "O1"
  },
  {
+  "row": "runner._deliver_review_candidate:retry_code",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
   "row": "edge_check/publish.surface_violations#own_manifest:own_manifest",
   "status": "closed",
   "operator": "O1"
@@ -2048,6 +2053,11 @@
   "row": "runner._resume_wave#review_delivery:review_delivery",
   "status": "closed",
   "operator": "O1"
+ },
+ {
+  "row": "runner._resume_wave#pr_facts_failure:ops_failure",
+  "status": "closed",
+  "operator": "BYPASS"
  },
  {
   "row": "approve_node._ensure_finalize_identity#find_pr_failure:ops_failure",
