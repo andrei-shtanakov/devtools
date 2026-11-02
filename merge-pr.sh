@@ -25,7 +25,9 @@
 #   1. ветка формы candidate-шага одобрения (§I12): её мерж человеком из
 #      allowlist И ЕСТЬ акт одобрения узла бандла. Смержи её агент —
 #      merger окажется вне allowlist, подпись не создастся, заявка умрёт,
-#      а человеческий акт будет потрачен впустую;
+#      а человеческий акт будет потрачен впустую. Исключение — candidate
+#      заявки review/v1 (лейбл `human-approval-required`): акт там — approve
+#      человека, доставка — агентом, после предпроверки `act_premerge`;
 #   2. (снят правкой ADR-ECO-011 D5, 2026-09-14) ветка формы финализирующего
 #      PR больше не отказ по форме: он подписи не создаёт, а лишь
 #      записывает состоявшуюся; по умолчанию его мержит агент, а
@@ -91,7 +93,10 @@
 # выводится slug — не часть worktree), бинарь `gh` (PATH оператора),
 # профиль `~/.config/review`, python-модули governance (импортированы до
 # материализации) — КРОМЕ `governance/halt_gate.py`: его merge-pr.sh
-# исполняет из дерева (`python3 -I`), и он в обоих перечнях. Добавляя сюда
+# исполняет из дерева (`python3 -I`), и он в обоих перечнях; и
+# `governance/act_premerge.py` с цепочкой импортов и `pyproject.toml`/`uv.lock`
+# (запуск файлом в своём окружении, цепочку сверяет tests/harness_trust.py).
+# Добавляя сюда
 # чтение или исполнение чего-либо из `$script_dir`, проверьте, что путь
 # накрыт `_HARNESS_PREFIXES` и authority-root.
 #
@@ -139,6 +144,20 @@ die() {
     exit "$_code"
 }
 
+# Есть ли лейбл `$1` среди `$labels` (по строке на имя; имя лейбла GitHub
+# перевода строки не содержит, а пробелы — может). Сравнение — целой строкой
+# в `case` с закавыченным образцом: ни разбиения на слова, ни раскрытия
+# глобов (лейбл `human-*` не совпадёт с файлом `human-approval-required` в
+# текущем каталоге — ревью Task 15, M1), глобальное состояние не меняется.
+has_label() {
+    _nl='
+'
+    case "$_nl$labels$_nl" in
+        *"$_nl$1$_nl"*) return 0 ;;
+    esac
+    return 1
+}
+
 # Профиль мержа — тот же, что у публикации ревью (review-pr.sh): мерж от
 # ОСНОВНОГО аккаунта записал бы агентский мерж человеческим, обнулив
 # `merged_by` — наблюдаемый различитель agent/human.
@@ -150,6 +169,14 @@ AGENT_LOGIN="${AGENT_LOGIN:-${REVIEW_LOGIN:-ai-prosto}}"
 
 #: Лейбл-рубильник «этот PR мержит человек».
 HUMAN_MERGE_LABEL="human-merge-required"
+#: Лейбл candidate-PR «акт — approve человека, доставляет агент» (review/v1).
+HUMAN_APPROVAL_LABEL="human-approval-required"
+#: Своё окружение предпроверки акта (как у brief_merge_check в human-merge.sh):
+#: задаётся здесь, не наследуется.
+premerge_env="${HOME}/.cache/devtools/act-premerge-venv"
+#: Тип актора мержа для D3 предпроверки: профиль — учётка machine user (`User`);
+#: App-режим (Task 15a) ставит `Bot`.
+merger_type="User"
 
 gh_a() {
     GH_CONFIG_DIR="$MERGE_GH_CONFIG_DIR" gh "$@"
@@ -377,25 +404,52 @@ fi
 # (ADR-ECO-011 D5): она удовлетворяет и глобу candidate, поэтому
 # исключается ДО проверки candidate-формы, иначе гвард 1 назвал бы её
 # актом одобрения.
+#
+# Candidate С лейблом `human-approval-required` — заявка review/v1: акт —
+# approve человека, доставка — агентом (спека §8.2, §9.1). Ей — предпроверка
+# акта: 0 → дальше прежние гварды и мерж с пином `sha=`, 3 → отказ, всё иное
+# (вкл. сбой запуска) → 2. Candidate без лейбла — прежний отказ (legacy-акт —
+# мерж человеком). Предпроверка исполняется ФАЙЛОМ в своём окружении: `-I`,
+# пакет по пути, цепочка импортов и `pyproject.toml`/`uv.lock` — под
+# authority-root и `_HARNESS_PREFIXES` (сверяет tests/harness_trust.py).
+#
+# Рубильник `human-merge-required` — поверх любых форм (гвард 3), в том числе
+# поверх предпроверки: PR, оставленный человеку, получает терминальный 3 с
+# текстом про лейбл, и предпроверка не запускается (её код 2 — «повтор
+# уместен» — увёл бы вызывающего в бесполезные повторы; ревью PR #673).
+# Для candidate без лейбла review/v1 порядок отказов прежний.
+human_merge_refusal="PR ${slug}#${pr}: лейбл '$HUMAN_MERGE_LABEL' — PR явно \
+оставлен человеку. Мержит человек."
 # shellcheck disable=SC2254
 case "$head_ref" in
     $finalize_glob) : ;;
     $candidate_glob)
-        die 3 "PR ${slug}#${pr}: ветка '$head_ref' — candidate-PR шага \
-одобрения (§I12). Его мерж человеком из allowlist И ЕСТЬ акт одобрения \
-узлов; агентский мерж сжёг бы заявку впустую. Мержит человек." ;;
+        has_label "$HUMAN_APPROVAL_LABEL" || die 3 "PR ${slug}#${pr}: ветка \
+'$head_ref' — candidate-PR шага одобрения (§I12). Его мерж человеком из \
+allowlist И ЕСТЬ акт одобрения узлов; агентский мерж сжёг бы заявку впустую. \
+Мержит человек."
+        if has_label "$HUMAN_MERGE_LABEL"; then
+            die 3 "$human_merge_refusal"
+        fi
+        premerge_rc=0
+        premerge_out=$(cd "$script_dir" && UV_PROJECT_ENVIRONMENT="$premerge_env" \
+            uv run --frozen --exact --group governance --no-config --no-env-file \
+            python -I "$script_dir/governance/act_premerge.py" \
+            --repo "$slug" --pr "$pr" --head "$head_oid" --head-ref "$head_ref" \
+            --merge-profile "$MERGE_GH_CONFIG_DIR" --merger "$login" \
+            --merger-type "$merger_type" 2>&1) || premerge_rc=$?
+        [ -z "$premerge_out" ] || echo "$premerge_out" >&2
+        case "$premerge_rc" in
+            0) : ;;
+            3) die 3 "PR ${slug}#${pr}: предпроверка акта review/v1 отказала \
+— мерж не выполняется" ;;
+            *) die 2 "PR ${slug}#${pr}: предпроверка акта review/v1 не \
+установила факт (код $premerge_rc) — мерж не выполняется; повтор уместен" ;;
+        esac ;;
 esac
-_saved_ifs="$IFS"
-IFS='
-'
-for _label in $labels; do
-    if [ "$_label" = "$HUMAN_MERGE_LABEL" ]; then
-        IFS="$_saved_ifs"
-        die 3 "PR ${slug}#${pr}: лейбл '$HUMAN_MERGE_LABEL' — PR явно \
-оставлен человеку. Мержит человек."
-    fi
-done
-IFS="$_saved_ifs"
+if has_label "$HUMAN_MERGE_LABEL"; then
+    die 3 "$human_merge_refusal"
+fi
 
 # --- Гвард 4: authority-root пути (ADR-ECO-004 I2) -------------------------
 # CLAUDE.md объявляет такие диффы «всегда человеку», а обвязку — единственным
@@ -444,6 +498,7 @@ fi
 # Файлы — в позиционные параметры (их всё равно перезаписывает сборка
 # команды мержа ниже): так перебор идёт без жонглирования IFS внутри тела.
 # `set -f` — чтобы имя файла с `*` не разъехалось в глоб.
+_saved_ifs="$IFS"
 IFS='
 '
 set -f

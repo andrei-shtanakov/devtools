@@ -101,5 +101,9 @@ module = "governance/brief_merge_check.py"
 reason = "загрузка пакета через `importlib.util` вне `sys.path` (ревью #573; сам authority-root)"
 
 [[dynamic_import]]
+module = "governance/act_premerge.py"
+reason = "загрузка пакета через `importlib.util` вне `sys.path` — приём `brief_merge_check` (Task 15, запуск файлом из merge-pr.sh; сам authority-root)"
+
+[[dynamic_import]]
 module = "governance/discovery_approval.py"
 reason = "`exec(compile(...))` вендор-копии contracts/discovery-approval/v1/ с пином sha256; вне триггеров правила, записано для видимости (сам authority-root)"

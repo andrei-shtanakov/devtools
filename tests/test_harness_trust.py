@@ -24,12 +24,28 @@ EXPECTED_CHAIN = [
     "approval_branches.sh",
     "contracts/approval-branches/v1/patterns.env",
     "contracts/approval-policy-source/v1/source.env",
+    "contracts/approval-policy-source/v2/source.env",
     "contracts/authority-root/v1/paths.env",
     "contracts/discovery-approval/v1",
     "contracts/discovery-approval/v1/approval.py",
     "contracts/discovery-approval/v1/gate_check.py",
     "contracts/discovery-approval/v1/hashing.py",
     "governance/__init__.py",
+    "governance/act_admission.py",
+    "governance/act_anon.py",
+    "governance/act_check.py",
+    "governance/act_decision.py",
+    "governance/act_epochs.py",
+    "governance/act_facts.py",
+    "governance/act_identity.py",
+    "governance/act_journal_wire.py",
+    "governance/act_perimeter.py",
+    "governance/act_policy.py",
+    "governance/act_premerge.py",
+    "governance/act_request.py",
+    "governance/act_source.py",
+    "governance/act_time.py",
+    "governance/act_trust.py",
     "governance/approval_request.py",
     "governance/brief_facts.py",
     "governance/brief_merge_check.py",
@@ -61,6 +77,7 @@ def test_trust_chain_is_what_we_think() -> None:
         ("source", "approval_branches.sh"),
         ("py-stdlib", "governance/halt_gate.py"),
         ("py-uv", "governance/brief_merge_check.py"),
+        ("py-uv", "governance/act_premerge.py"),
     }
     assert sorted(ht.required_paths(ROOT)) == EXPECTED_CHAIN
 
@@ -137,6 +154,21 @@ def test_synthetic_repo_fully_protected_passes(tmp_path: Path) -> None:  # дв�
     assert ht.violations(root, ALL, ALL) == []
 
 
+def test_governance_group_form_is_a_py_uv_launch(tmp_path: Path) -> None:  # двойник
+    """Форма предпроверки акта (Task 15) распознаётся как `py-uv` — с теми же
+    требованиями к цепочке и `UV_DEPENDENCY_FILES`."""
+    launch = _GOOD_LAUNCH.replace(
+        "--exact --no-config", "--exact --group governance --no-config"
+    )
+    root = _repo(tmp_path, launch)
+    found, problems = ht.launches(root)
+    assert problems == []
+    assert ("py-uv", "governance/entry.py") in {(x.kind, x.path) for x in found}
+    assert ht.violations(root, ALL, ALL) == []
+    without_lock = tuple(p for p in ALL if p != "uv.lock")
+    assert any(v.startswith("uv.lock") for v in ht.violations(root, without_lock, ALL))
+
+
 @pytest.mark.parametrize(
     ("unprotected", "b_lazy"),
     [
@@ -169,6 +201,18 @@ def test_unprotected_link_fails(tmp_path: Path, unprotected: str, b_lazy: bool) 
         (  # без своего окружения
             "x=$(uv run --frozen --exact --no-config --no-env-file "
             'python -I "$script_dir/governance/entry.py")\n'
+        ),
+        (  # форма группы governance без своего окружения (Task 15)
+            "x=$(uv run --frozen --exact --group governance --no-config "
+            '--no-env-file python -I "$script_dir/governance/entry.py")\n'
+        ),
+        (  # иная группа — не распознанная форма
+            "x=$(UV_PROJECT_ENVIRONMENT=e uv run --frozen --exact --group dev "
+            '--no-config --no-env-file python -I "$script_dir/governance/entry.py")\n'
+        ),
+        (  # группа governance без --frozen
+            "x=$(UV_PROJECT_ENVIRONMENT=e uv run --exact --group governance "
+            '--no-config --no-env-file python -I "$script_dir/governance/entry.py")\n'
         ),
         'python3 "$script_dir/governance/entry.py"\n',  # без -I
         'bash "$script_dir/tool.sh"\n',

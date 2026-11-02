@@ -131,6 +131,13 @@ case "$*" in
 esac
 """
 
+UV_STUB = """#!/usr/bin/env bash
+# Стаб uv: предпроверка акта review/v1 (Task 15) — лог вызова и код из env.
+echo "uv UV_PROJECT_ENVIRONMENT=[${UV_PROJECT_ENVIRONMENT-}] $*" >> "$GH_STUB_LOG"
+if [ -n "${UV_STUB_SAY:-}" ]; then echo "$UV_STUB_SAY" >&2; fi
+exit "${UV_STUB_RC:-0}"
+"""
+
 
 class Fleet:
     """Синтетический флот: каталог репо с GitHub-origin и стабом gh."""
@@ -168,6 +175,9 @@ class Fleet:
         gh = self.stub_bin / "gh"
         gh.write_text(GH_STUB)
         gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
+        uv = self.stub_bin / "uv"
+        uv.write_text(UV_STUB)
+        uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
 
     def env(self, **extra: str) -> dict[str, str]:
         env = os.environ.copy()
@@ -182,9 +192,12 @@ class Fleet:
         env.update(extra)
         return env
 
-    def run(self, *args: str, **env_extra: str) -> subprocess.CompletedProcess[str]:
+    def run(
+        self, *args: str, cwd: Path | None = None, **env_extra: str
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["sh", str(SCRIPT), "demo", "7", *args],
+            cwd=cwd,
             env=self.env(**env_extra),
             capture_output=True,
             text=True,
@@ -193,6 +206,13 @@ class Fleet:
 
     def gh_calls(self) -> str:
         return self.gh_log.read_text() if self.gh_log.exists() else ""
+
+    def calls(self) -> list[str]:
+        """Все строки журнала стабов (`gh` и `uv`)."""
+        return self.gh_calls().splitlines()
+
+    def premerge_calls(self) -> list[str]:
+        return [ln for ln in self.calls() if ln.startswith("uv ")]
 
     def merge_calls(self) -> list[str]:
         """Строки журнала, которыми вызывался merge API."""
@@ -294,6 +314,188 @@ def test_candidate_branch_blocks_merge(fleet: Fleet) -> None:
     assert res.returncode == 3, res.stderr
     assert "candidate-PR" in res.stderr
     assert fleet.merge_calls() == []
+
+
+#: Отказ candidate без лейбла review/v1 — побайтово прежний текст (Task 15).
+CANDIDATE_REFUSAL = (
+    "PR andrei-shtanakov/demo#7: ветка 'spec/ws-42-approve-3-2-1' — candidate-PR "
+    "шага одобрения (§I12). Его мерж человеком из allowlist И ЕСТЬ акт одобрения "
+    "узлов; агентский мерж сжёг бы заявку впустую. Мержит человек.\n"
+)
+
+
+def test_unlabelled_candidate_refusal_text_unchanged(fleet: Fleet) -> None:
+    res = fleet.run(
+        GH_STUB_HEADREF=approval_branches.candidate_branch("ws-42", 3, 2, 1)
+    )
+    assert res.returncode == 3 and res.stderr == CANDIDATE_REFUSAL
+
+
+# --- candidate review/v1: доставка агентом после предпроверки (Task 15) ------
+
+
+def _candidate(**env: str) -> dict[str, str]:
+    return {
+        "GH_STUB_HEADREF": approval_branches.candidate_branch("ws-42", 3, 2, 1),
+        **env,
+    }
+
+
+def test_review_candidate_premerge_ok_merges_with_pin(fleet: Fleet) -> None:
+    res = fleet.run(**_candidate(GH_STUB_LABELS="human-approval-required"))
+    assert res.returncode == 0, res.stderr
+    assert any(
+        "act_premerge.py" in c and "--group governance" in c for c in fleet.calls()
+    )
+    assert any(f"sha={HEAD_SHA}" in c for c in fleet.merge_calls())
+
+
+def test_review_candidate_premerge_gets_exact_arguments(fleet: Fleet) -> None:
+    """Форма запуска и аргументы — ровно те, что разбирает `act_premerge`; своё
+    окружение задаётся обвязкой."""
+    res = fleet.run(**_candidate(GH_STUB_LABELS="human-approval-required"))
+    assert res.returncode == 0, res.stderr
+    [call] = fleet.premerge_calls()
+    env = f"{os.environ['HOME']}/.cache/devtools/act-premerge-venv"
+    script = SCRIPT.parent / "governance" / "act_premerge.py"
+    assert call == (
+        f"uv UV_PROJECT_ENVIRONMENT=[{env}] run --frozen --exact --group governance "
+        f"--no-config --no-env-file python -I {script} --repo andrei-shtanakov/demo "
+        f"--pr 7 --head {HEAD_SHA} --head-ref spec/ws-42-approve-3-2-1 "
+        f"--merge-profile {fleet.profile_dir} --merger ai-prosto --merger-type User"
+    )
+
+
+def test_review_candidate_premerge_refusal_is_3(fleet: Fleet) -> None:
+    res = fleet.run(
+        **_candidate(
+            GH_STUB_LABELS="human-approval-required",
+            UV_STUB_RC="3",
+            UV_STUB_SAY="act_premerge: нет approve человека",
+        )
+    )
+    assert res.returncode == 3 and fleet.merge_calls() == []
+    assert "act_premerge: нет approve человека" in res.stderr
+    assert "предпроверка акта review/v1 отказала" in res.stderr
+
+
+@pytest.mark.parametrize("rc", ["2", "1", "4", "127"])
+def test_review_candidate_premerge_unset_is_2(fleet: Fleet, rc: str) -> None:
+    res = fleet.run(
+        **_candidate(GH_STUB_LABELS="human-approval-required", UV_STUB_RC=rc)
+    )
+    assert res.returncode == 2 and fleet.merge_calls() == []
+    assert f"(код {rc})" in res.stderr
+
+
+def test_review_candidate_label_found_among_others(fleet: Fleet) -> None:
+    labels = "documentation\nhuman-approval-required\nmy label"
+    res = fleet.run(**_candidate(GH_STUB_LABELS=labels))
+    assert res.returncode == 0, res.stderr
+    assert len(fleet.premerge_calls()) == 1 and len(fleet.merge_calls()) == 1
+
+
+def test_similar_approval_label_is_not_review_candidate(fleet: Fleet) -> None:
+    """Совпадение точное: похожий лейбл — прежний отказ candidate, без предпроверки."""
+    labels = "human-approval-required-not\nhuman-approval"
+    res = fleet.run(**_candidate(GH_STUB_LABELS=labels))
+    assert res.returncode == 3 and "candidate-PR" in res.stderr
+    assert fleet.premerge_calls() == [] and fleet.merge_calls() == []
+
+
+def _glob_bait(fleet: Fleet, name: str) -> Path:
+    """Каталог вызова с файлом, чьё имя совпадает с глобом-лейблом `human-*`."""
+    cwd = fleet.tmp / "cwd"
+    cwd.mkdir(exist_ok=True)
+    (cwd / name).write_text("")
+    return cwd
+
+
+def test_glob_label_does_not_match_file_as_approval_label(fleet: Fleet) -> None:
+    """Ревью Task 15, M1: лейбл `human-*` и файл `human-approval-required` в
+    каталоге вызова — не лейбл review/v1; candidate остаётся отказом."""
+    cwd = _glob_bait(fleet, "human-approval-required")
+    res = fleet.run(cwd=cwd, **_candidate(GH_STUB_LABELS="human-*"))
+    assert res.returncode == 3 and res.stderr == CANDIDATE_REFUSAL
+    assert fleet.premerge_calls() == [] and fleet.merge_calls() == []
+
+
+def test_glob_label_does_not_match_file_as_human_merge_label(fleet: Fleet) -> None:
+    """Тот же класс для `human-merge-required`: файл-приманка лейблом не становится."""
+    cwd = _glob_bait(fleet, "human-merge-required")
+    res = fleet.run(cwd=cwd, GH_STUB_HEADREF="feat/ordinary", GH_STUB_LABELS="human-*")
+    assert res.returncode == 0, res.stderr
+    assert len(fleet.merge_calls()) == 1
+
+
+def test_human_merge_label_refusal_text_unchanged(fleet: Fleet) -> None:
+    res = fleet.run(
+        GH_STUB_HEADREF="feat/ordinary", GH_STUB_LABELS="human-merge-required"
+    )
+    assert res.returncode == 3
+    assert res.stderr == HUMAN_MERGE_REFUSAL
+
+
+def test_unlabelled_candidate_still_refused(fleet: Fleet) -> None:
+    res = fleet.run(**_candidate())
+    assert res.returncode == 3 and "candidate-PR" in res.stderr
+    assert not any("act_premerge" in c for c in fleet.calls())
+
+
+def test_review_candidate_with_human_merge_label_refused(fleet: Fleet) -> None:
+    labels = "human-approval-required\nhuman-merge-required"
+    res = fleet.run(**_candidate(GH_STUB_LABELS=labels))
+    assert res.returncode == 3 and fleet.merge_calls() == []
+    assert "human-merge-required" in res.stderr
+
+
+HUMAN_MERGE_REFUSAL = (
+    "PR andrei-shtanakov/demo#7: лейбл 'human-merge-required' — PR явно "
+    "оставлен человеку. Мержит человек.\n"
+)
+
+
+@pytest.mark.parametrize("rc", ["2", "0"])
+def test_human_merge_label_wins_over_premerge(fleet: Fleet, rc: str) -> None:
+    """Ревью PR #673: рубильник `human-merge-required` — поверх предпроверки:
+    терминальный 3 с текстом про лейбл, предпроверка не запускается."""
+    labels = "human-approval-required\nhuman-merge-required"
+    res = fleet.run(**_candidate(GH_STUB_LABELS=labels, UV_STUB_RC=rc))
+    assert res.returncode == 3 and res.stderr == HUMAN_MERGE_REFUSAL
+    assert fleet.premerge_calls() == [] and fleet.merge_calls() == []
+
+
+def test_unlabelled_candidate_with_human_merge_label_keeps_candidate_text(
+    fleet: Fleet,
+) -> None:
+    """Порядок прежних отказов не сдвинут: candidate без лейбла review/v1 —
+    текст отказа по форме, как на master."""
+    res = fleet.run(**_candidate(GH_STUB_LABELS="human-merge-required"))
+    assert res.returncode == 3 and res.stderr == CANDIDATE_REFUSAL
+
+
+def test_review_candidate_still_meets_later_guards(fleet: Fleet) -> None:
+    """Предпроверка не заменяет гварды ниже: authority-root путь — отказ."""
+    res = fleet.run(
+        **_candidate(
+            GH_STUB_LABELS="human-approval-required", GH_STUB_FILES="merge-pr.sh"
+        )
+    )
+    assert res.returncode == 3 and fleet.merge_calls() == []
+    assert len(fleet.premerge_calls()) == 1
+
+
+@pytest.mark.parametrize("branch", ["feat/ordinary", "finalize"])
+def test_approval_label_off_candidate_runs_no_premerge(
+    fleet: Fleet, branch: str
+) -> None:
+    """Лейбл review/v1 вне формы candidate (обычная ветка, finalize) — предпроверки
+    нет: решает форма, лейбл лишь выбирает путь candidate."""
+    if branch == "finalize":
+        branch = approval_branches.finalize_branch("ws-42", 3, 2, 1)
+    res = fleet.run(GH_STUB_HEADREF=branch, GH_STUB_LABELS="human-approval-required")
+    assert res.returncode == 0, res.stderr
+    assert fleet.premerge_calls() == [] and len(fleet.merge_calls()) == 1
 
 
 def test_candidate_guard_survives_wave_numbering(fleet: Fleet) -> None:
@@ -1036,6 +1238,9 @@ def test_shell_reads_authority_ssot_and_hardcodes_nothing() -> None:
         "approval_branches.sh",
         # Исполняемый вход стоп-крана (`python3 -I "$script_dir/…"`).
         "governance/halt_gate.py",
+        # Исполняемый вход предпроверки акта review/v1 (Task 15): префикс
+        # authority-root `governance/act_` покрывает `act_premerge.py`.
+        "governance/act_",
     }
     checked = [p for p in authority_root.prefixes() if p not in own]
     assert checked, (

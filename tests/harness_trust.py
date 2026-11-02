@@ -38,7 +38,7 @@ SAFE_COMMANDS = frozenset(
         # функции самих скриптов и подключаемых ssot_env.sh/approval_branches.sh
         # (их тела проверяются тем же разбором)
         "die", "usage", "gh_a", "gh_h", "approval_globs", "ssot_key",
-        "brief_check_failed",
+        "brief_check_failed", "has_label",
     }
 )  # fmt: skip
 _KEYWORDS = {"then", "else", "do", "if", "elif", "while", "until", "!", "time"}
@@ -46,6 +46,12 @@ _SOURCE = re.compile(r'^\.\s+"\$script_dir/([^"]+)"$')
 _PY_STDLIB = re.compile(r'^python3\s+-I\s+"\$script_dir/([^"]+\.py)"(\s.*)?$')
 _PY_UV = re.compile(
     r"^uv run --frozen --exact --no-config --no-env-file "
+    r'python -I "\$script_dir/([^"]+\.py)"(\s.*)?$'
+)
+#: Та же форма с группой зависимостей `governance` (предпроверка акта, Task 15):
+#: отдельное правило — прежняя форма не ослабляется.
+_PY_UV_GOV = re.compile(
+    r"^uv run --frozen --exact --group governance --no-config --no-env-file "
     r'python -I "\$script_dir/([^"]+\.py)"(\s.*)?$'
 )
 _ASSIGN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(\"[^\"]*\"|'[^']*'|\S*)(\s+|$)")
@@ -204,7 +210,7 @@ def _scan(root: Path, script: str, seen: set[str]) -> tuple[list[Launch], list[s
                 problems += extra
         elif m := _PY_STDLIB.match(command):
             found.append(Launch(script, "py-stdlib", m.group(1)))
-        elif m := _PY_UV.match(command):
+        elif m := _PY_UV.match(command) or _PY_UV_GOV.match(command):
             if "UV_PROJECT_ENVIRONMENT" not in env:
                 problems.append(
                     f"{script}: uv без собственного UV_PROJECT_ENVIRONMENT: {segment}"
