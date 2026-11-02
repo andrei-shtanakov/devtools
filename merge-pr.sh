@@ -177,9 +177,21 @@ premerge_env="${HOME}/.cache/devtools/act-premerge-venv"
 #: Тип актора мержа для D3 предпроверки: профиль — учётка machine user (`User`);
 #: App-режим (Task 15a) ставит `Bot`.
 merger_type="User"
+#: App-режим (Task 15a): `MERGE_APP_ID` и `MERGE_APP_KEY` (путь к ключу в
+#: `$XDG_CONFIG_HOME/darkfactory/apps/`) — только для candidate review/v1;
+#: finalize и stop — прежним профилем (ADR-ECO-011 D5). Половина пары — отказ.
+app_mode=0
 
+# В App-режиме (Task 15a) после установления личности App — токен установки
+# окружением `gh` (не экспортируется: прочие процессы обвязки его не видят);
+# до того и в режиме профиля — профиль агента.
+app_token=""
 gh_a() {
-    GH_CONFIG_DIR="$MERGE_GH_CONFIG_DIR" gh "$@"
+    if [ -n "$app_token" ]; then
+        GH_TOKEN="$app_token" gh "$@"
+    else
+        GH_CONFIG_DIR="$MERGE_GH_CONFIG_DIR" gh "$@"
+    fi
 }
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
@@ -290,15 +302,27 @@ esac
 # --- Профиль ---------------------------------------------------------------
 # Preflight ДО чтения PR: не тот профиль — мержить нельзя ничего, и узнать
 # об этом надо раньше, чем что-либо решено про сам PR.
+#
+# App-режим: токен установки App на `gh api user` получает 403 (спека §9.4),
+# поэтому личность App устанавливается после чтения фактов PR — допустимость
+# режима зависит от метки и формы ветки (гвард ниже). Профиль нужен и здесь:
+# стоп-кран и факты PR читаются им.
+if [ -n "${MERGE_APP_ID:-}" ] || [ -n "${MERGE_APP_KEY:-}" ]; then
+    [ -n "${MERGE_APP_ID:-}" ] && [ -n "${MERGE_APP_KEY:-}" ] || die 2 "App-режим: \
+нужны оба MERGE_APP_ID и MERGE_APP_KEY"
+    app_mode=1
+fi
 [ -d "$MERGE_GH_CONFIG_DIR" ] || die 2 "профиля агента нет: \
 $MERGE_GH_CONFIG_DIR — выполните:
   GH_CONFIG_DIR=\"$MERGE_GH_CONFIG_DIR\" gh auth login --hostname github.com --web"
-if ! login=$(gh_a api user --jq .login 2>&1); then
+if [ "$app_mode" -eq 1 ]; then
+    login=""
+elif ! login=$(gh_a api user --jq .login 2>&1); then
     die 2 "профиль агента не отвечает: $login"
 fi
-[ "$login" = "$AGENT_LOGIN" ] || die 2 "профиль отдаёт логин '$login', \
-ожидался '$AGENT_LOGIN' — merge-pr.sh выполняет только агентский мерж; \
-человеческий мерж делается человеком, не этой обвязкой"
+[ "$app_mode" -eq 1 ] || [ "$login" = "$AGENT_LOGIN" ] || die 2 "профиль \
+отдаёт логин '$login', ожидался '$AGENT_LOGIN' — merge-pr.sh выполняет только \
+агентский мерж; человеческий мерж делается человеком, не этой обвязкой"
 
 # --- Стоп-кран (D2) ---------------------------------------------------------
 # После профиля: читаем тем же агентским токеном, что будет мержить. Отказ
@@ -420,6 +444,19 @@ fi
 # Для candidate без лейбла review/v1 порядок отказов прежний.
 human_merge_refusal="PR ${slug}#${pr}: лейбл '$HUMAN_MERGE_LABEL' — PR явно \
 оставлен человеку. Мержит человек."
+# App-режим — только candidate review/v1 (Task 15a): прочим PR при выставленных
+# `MERGE_APP_*` — отказ 2, не тихий откат на профиль. Финализирующая форма
+# удовлетворяет и глобу candidate, поэтому исключается первой.
+if [ "$app_mode" -eq 1 ]; then
+    # shellcheck disable=SC2254
+    case "$head_ref" in
+        $finalize_glob) die 2 "App-режим только для candidate review/v1; \
+finalize мержится прежним профилем (без MERGE_APP_*)" ;;
+        $candidate_glob) has_label "$HUMAN_APPROVAL_LABEL" || die 2 "App-режим \
+только для candidate review/v1 (метка $HUMAN_APPROVAL_LABEL)" ;;
+        *) die 2 "App-режим только для candidate review/v1" ;;
+    esac
+fi
 # shellcheck disable=SC2254
 case "$head_ref" in
     $finalize_glob) : ;;
@@ -432,12 +469,49 @@ allowlist И ЕСТЬ акт одобрения узлов; агентский �
             die 3 "$human_merge_refusal"
         fi
         premerge_rc=0
-        premerge_out=$(cd "$script_dir" && UV_PROJECT_ENVIRONMENT="$premerge_env" \
-            uv run --frozen --exact --group governance --no-config --no-env-file \
-            python -I "$script_dir/governance/act_premerge.py" \
-            --repo "$slug" --pr "$pr" --head "$head_oid" --head-ref "$head_ref" \
-            --merge-profile "$MERGE_GH_CONFIG_DIR" --merger "$login" \
-            --merger-type "$merger_type" 2>&1) || premerge_rc=$?
+        if [ "$app_mode" -eq 1 ]; then
+            # Личность App (спека §9.4): `<slug>[bot]` и токен установки на
+            # целевой репо — две строки stdout; токен не печатается и в текст
+            # отказов не попадает.
+            app_out=$(cd "$script_dir" && UV_PROJECT_ENVIRONMENT="$premerge_env" \
+                uv run --frozen --exact --group governance --no-config --no-env-file \
+                python -I "$script_dir/governance/act_app_token.py" \
+                --app-id "$MERGE_APP_ID" --key "$MERGE_APP_KEY" --repo "$slug") \
+                || die 2 "PR ${slug}#${pr}: App-режим — личность App не \
+установлена; мерж не выполняется, повтор уместен"
+            [ "$(printf '%s\n' "$app_out" | grep -c '')" -eq 2 ] || die 2 "PR \
+${slug}#${pr}: App-режим — ответ личности App не из двух строк"
+            login=$(printf '%s\n' "$app_out" | sed -n '1p')
+            app_token=$(printf '%s\n' "$app_out" | sed -n '2p')
+            case "${login%\[bot\]}" in
+                "$login"|""|*[!A-Za-z0-9_.-]*) die 2 "PR \
+${slug}#${pr}: App-режим — логин App не формы <slug>[bot]" ;;
+            esac
+            case "$app_token" in
+                ""|*[!A-Za-z0-9_]*) die 2 "PR ${slug}#${pr}: \
+App-режим — токен установки пуст или не той формы" ;;
+            esac
+            merger_type="Bot"
+            # Предпроверка — с пустым `GH_TOKEN`: производный токен установки
+            # она не держит и не самоотчитывает (§6.2), установки App
+            # проверяются у держателя ключа (`--app-id`/`--app-key`).
+            premerge_out=$(cd "$script_dir" && GH_TOKEN="" \
+                UV_PROJECT_ENVIRONMENT="$premerge_env" \
+                uv run --frozen --exact --group governance --no-config --no-env-file \
+                python -I "$script_dir/governance/act_premerge.py" \
+                --repo "$slug" --pr "$pr" --head "$head_oid" --head-ref "$head_ref" \
+                --merge-profile "$MERGE_GH_CONFIG_DIR" --merger "$login" \
+                --merger-type "$merger_type" \
+                --app-id "$MERGE_APP_ID" --app-key "$MERGE_APP_KEY" 2>&1) \
+                || premerge_rc=$?
+        else
+            premerge_out=$(cd "$script_dir" && UV_PROJECT_ENVIRONMENT="$premerge_env" \
+                uv run --frozen --exact --group governance --no-config --no-env-file \
+                python -I "$script_dir/governance/act_premerge.py" \
+                --repo "$slug" --pr "$pr" --head "$head_oid" --head-ref "$head_ref" \
+                --merge-profile "$MERGE_GH_CONFIG_DIR" --merger "$login" \
+                --merger-type "$merger_type" 2>&1) || premerge_rc=$?
+        fi
         [ -z "$premerge_out" ] || echo "$premerge_out" >&2
         case "$premerge_rc" in
             0) : ;;
@@ -608,7 +682,11 @@ else
     head_note="голова вызывающим НЕ пинована (нет --expect-head)"
 fi
 if [ "$dry_run" -eq 1 ]; then
-    echo "dry-run: GH_CONFIG_DIR=$MERGE_GH_CONFIG_DIR gh $*"
+    if [ -n "$app_token" ]; then
+        echo "dry-run: GH_TOKEN=<токен установки App> gh $*"
+    else
+        echo "dry-run: GH_CONFIG_DIR=$MERGE_GH_CONFIG_DIR gh $*"
+    fi
     echo "гварды пройдены: ветка '$head_ref', голова $head_oid, \
 $head_note, $base_note, от $login"
     exit 0

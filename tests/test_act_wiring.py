@@ -58,7 +58,9 @@ def _status_site(tmp_path: Path):
 
 
 def _premerge_site(tmp_path: Path):
-    args = argparse.Namespace(merge_profile="/x/merge", repo="o/p", pr=7)
+    args = argparse.Namespace(
+        merge_profile="/x/merge", repo="o/p", pr=7, app_id=None, app_key=None
+    )
     env = {**ENV, "XDG_STATE_HOME": str(tmp_path)}
     deps = act_premerge.real_deps(args, env=env)
     return deps.readers, deps.creds

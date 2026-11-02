@@ -234,6 +234,7 @@ dev = [
     { name = "pytest" },
 ]
 governance = [
+    { name = "pyjwt", extra = ["crypto"] },
     { name = "steward" },
     { name = "textual" },
 ]
@@ -264,6 +265,7 @@ dev = [
     { name = "pytest", specifier = ">=8" },
 ]
 governance = [
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.8" },
     { name = "steward", git = "https://github.com/andrei-shtanakov/steward?rev=68f46a9b2e5cfe9ecd1f09524e986c3f687f4155" },
     { name = "textual", specifier = ">=1" },
 ]

@@ -36,7 +36,8 @@ BASE_SHA = "89abcdef0123456789abcdef0123456789abcdef"
 
 GH_STUB = """#!/usr/bin/env bash
 # Стаб gh: логирует каждый вызов, отвечает по переменным GH_STUB_*.
-echo "GH_CONFIG_DIR=${GH_CONFIG_DIR:-} gh $*" >> "$GH_STUB_LOG"
+echo "${GH_TOKEN:+GH_TOKEN=$GH_TOKEN }GH_CONFIG_DIR=${GH_CONFIG_DIR:-} gh $*" \\
+  >> "$GH_STUB_LOG"
 case "$*" in
   *"rulesets?"*)
     # Стоп-кран (D2): листинг наборов правил, как его печатает `--jq` —
@@ -132,8 +133,15 @@ esac
 """
 
 UV_STUB = """#!/usr/bin/env bash
-# Стаб uv: предпроверка акта review/v1 (Task 15) — лог вызова и код из env.
-echo "uv UV_PROJECT_ENVIRONMENT=[${UV_PROJECT_ENVIRONMENT-}] $*" >> "$GH_STUB_LOG"
+# Стаб uv: предпроверка акта review/v1 (Task 15) — лог вызова и код из env;
+# личность App (Task 15a) — две строки `UV_STUB_APP_OUT` и код `UV_STUB_APP_RC`.
+echo "uv GH_TOKEN=[${GH_TOKEN-<unset>}] \\
+UV_PROJECT_ENVIRONMENT=[${UV_PROJECT_ENVIRONMENT-}] $*" >> "$GH_STUB_LOG"
+case "$*" in
+  *act_app_token.py*)
+    printf '%s' "${UV_STUB_APP_OUT-$(printf 'df-reviewer[bot]\\nghs_inst\\n')}"
+    exit "${UV_STUB_APP_RC:-0}" ;;
+esac
 if [ -n "${UV_STUB_SAY:-}" ]; then echo "$UV_STUB_SAY" >&2; fi
 exit "${UV_STUB_RC:-0}"
 """
@@ -181,6 +189,15 @@ class Fleet:
 
     def env(self, **extra: str) -> dict[str, str]:
         env = os.environ.copy()
+        # Токены и App-режим машины не влияют на исход: журнал стабов их пишет.
+        for var in (
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "GH_CONFIG_DIR",
+            "MERGE_APP_ID",
+            "MERGE_APP_KEY",
+        ):
+            env.pop(var, None)
         env.update(
             PATH=f"{self.stub_bin}:{env['PATH']}",
             FLEET_ROOT=str(self.fleet_root),
@@ -359,8 +376,9 @@ def test_review_candidate_premerge_gets_exact_arguments(fleet: Fleet) -> None:
     env = f"{os.environ['HOME']}/.cache/devtools/act-premerge-venv"
     script = SCRIPT.parent / "governance" / "act_premerge.py"
     assert call == (
-        f"uv UV_PROJECT_ENVIRONMENT=[{env}] run --frozen --exact --group governance "
-        f"--no-config --no-env-file python -I {script} --repo andrei-shtanakov/demo "
+        f"uv GH_TOKEN=[<unset>] UV_PROJECT_ENVIRONMENT=[{env}] run --frozen --exact "
+        f"--group governance --no-config --no-env-file python -I {script} "
+        "--repo andrei-shtanakov/demo "
         f"--pr 7 --head {HEAD_SHA} --head-ref spec/ws-42-approve-3-2-1 "
         f"--merge-profile {fleet.profile_dir} --merger ai-prosto --merger-type User"
     )
@@ -1434,3 +1452,183 @@ def test_the_halt_is_read_with_the_agents_profile(fleet: Fleet) -> None:
     halt_reads = [ln for ln in fleet.gh_calls().splitlines() if "rulesets" in ln]
     assert halt_reads, "the halt was not read at all"
     assert all(f"GH_CONFIG_DIR={fleet.profile_dir} " in ln for ln in halt_reads)
+
+
+# --- App-режим: candidate review/v1 доставляет GitHub App (Task 15a) ----------
+
+APP_KEY = "/keys/darkfactory/apps/df-reviewer.pem"
+APP_TOKEN = "ghs_inst"
+
+
+def _app(**env: str) -> dict[str, str]:
+    return {"MERGE_APP_ID": "5285716", "MERGE_APP_KEY": APP_KEY, **env}
+
+
+def _app_candidate(**env: str) -> dict[str, str]:
+    return _candidate(**_app(GH_STUB_LABELS="human-approval-required", **env))
+
+
+def _no_secret(res: subprocess.CompletedProcess[str], secret: str = APP_TOKEN) -> None:
+    assert secret not in res.stdout and secret not in res.stderr
+
+
+def test_app_mode_identity_premerge_and_merge_as_bot(fleet: Fleet) -> None:
+    """Личность — JWT App (без `gh api user`: токен установки получает 403),
+    предпроверка — `--merger <slug>[bot] --merger-type Bot` с пустым `GH_TOKEN`
+    и ключом App, мерж и всё после личности — токеном установки."""
+    res = fleet.run(**_app_candidate())
+    assert res.returncode == 0, res.stderr
+    _no_secret(res)
+    assert "api user" not in fleet.gh_calls()
+    env = f"{os.environ['HOME']}/.cache/devtools/act-premerge-venv"
+    gov = SCRIPT.parent / "governance"
+    form = (
+        f"UV_PROJECT_ENVIRONMENT=[{env}] run --frozen --exact --group governance "
+        "--no-config --no-env-file python -I"
+    )
+    assert fleet.premerge_calls() == [
+        (
+            f"uv GH_TOKEN=[<unset>] {form} {gov / 'act_app_token.py'} "
+            f"--app-id 5285716 --key {APP_KEY} --repo andrei-shtanakov/demo"
+        ),
+        (
+            f"uv GH_TOKEN=[] {form} {gov / 'act_premerge.py'} "
+            f"--repo andrei-shtanakov/demo --pr 7 --head {HEAD_SHA} "
+            f"--head-ref spec/ws-42-approve-3-2-1 --merge-profile {fleet.profile_dir} "
+            "--merger df-reviewer[bot] --merger-type Bot "
+            f"--app-id 5285716 --app-key {APP_KEY}"
+        ),
+    ]
+    assert fleet.merge_calls() == [
+        (
+            f"GH_TOKEN={APP_TOKEN} GH_CONFIG_DIR= gh api -X PUT "
+            "repos/andrei-shtanakov/demo/pulls/7/merge "
+            f"-f merge_method=squash -f sha={HEAD_SHA}"
+        )
+    ]
+    compare = [c for c in fleet.calls() if "/compare/" in c]
+    assert compare and all(c.startswith(f"GH_TOKEN={APP_TOKEN} ") for c in compare)
+    # До личности App — профиль (стоп-кран, факты PR), токена там нет.
+    view = [c for c in fleet.calls() if "headRefName" in c]
+    assert view == [c for c in view if c.startswith("GH_CONFIG_DIR=")] and view
+    assert "от df-reviewer[bot]" in res.stdout
+
+
+def test_app_mode_dry_run_hides_token(fleet: Fleet) -> None:
+    res = fleet.run("--dry-run", **_app_candidate())
+    assert res.returncode == 0, res.stderr
+    _no_secret(res)
+    assert "GH_TOKEN=<токен установки App> gh api -X PUT" in res.stdout
+    assert fleet.merge_calls() == []
+
+
+@pytest.mark.parametrize(
+    "branch,labels",
+    [
+        ("feat/ordinary", "human-approval-required"),
+        (
+            approval_branches.finalize_branch("ws-42", 3, 2, 1),
+            "human-approval-required",
+        ),
+        (approval_branches.candidate_branch("ws-42", 3, 2, 1), ""),
+        (approval_branches.candidate_branch("ws-42", 3, 2, 1), "human-approval"),
+    ],
+    ids=["ordinary", "finalize", "candidate_unlabelled", "candidate_similar_label"],
+)
+def test_app_mode_only_for_review_candidate(fleet: Fleet, branch, labels) -> None:
+    """Прочим PR при `MERGE_APP_*` — отказ 2, не тихий откат на профиль; личность
+    App не запрашивается. Finalize удовлетворяет и глобу candidate — исключён."""
+    res = fleet.run(**_app(GH_STUB_HEADREF=branch, GH_STUB_LABELS=labels))
+    assert res.returncode == 2, res.stderr
+    assert "App-режим только для candidate review/v1" in res.stderr
+    assert fleet.premerge_calls() == [] and fleet.merge_calls() == []
+    assert "api user" not in fleet.gh_calls()
+
+
+def test_app_mode_unlabelled_candidate_names_label(fleet: Fleet) -> None:
+    res = fleet.run(**_candidate(**_app()))
+    assert res.returncode == 2
+    assert "(метка human-approval-required)" in res.stderr
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"MERGE_APP_ID": "5"},
+        {"MERGE_APP_KEY": APP_KEY},
+        {"MERGE_APP_ID": "5", "MERGE_APP_KEY": ""},
+    ],
+    ids=["id_only", "key_only", "key_empty"],
+)
+def test_app_mode_half_config_refused(fleet: Fleet, env: dict[str, str]) -> None:
+    """Половина пары — отказ 2 до любого `gh`, не режим профиля."""
+    res = fleet.run(**_candidate(GH_STUB_LABELS="human-approval-required", **env))
+    assert res.returncode == 2
+    assert "нужны оба MERGE_APP_ID и MERGE_APP_KEY" in res.stderr
+    assert fleet.calls() == []
+
+
+def test_app_mode_human_merge_label_wins(fleet: Fleet) -> None:
+    """Рубильник `human-merge-required` — до личности App и предпроверки."""
+    labels = "human-approval-required\nhuman-merge-required"
+    res = fleet.run(**_candidate(**_app(GH_STUB_LABELS=labels)))
+    assert res.returncode == 3 and res.stderr == HUMAN_MERGE_REFUSAL
+    assert fleet.premerge_calls() == [] and fleet.merge_calls() == []
+
+
+def test_app_identity_failure_is_2(fleet: Fleet) -> None:
+    res = fleet.run(**_app_candidate(UV_STUB_APP_RC="2", UV_STUB_APP_OUT=""))
+    assert res.returncode == 2
+    assert "личность App не установлена" in res.stderr
+    assert len(fleet.premerge_calls()) == 1 and fleet.merge_calls() == []
+
+
+@pytest.mark.parametrize(
+    "out",
+    [
+        "df-reviewer[bot]",
+        f"df-reviewer[bot]\n{APP_TOKEN}\nextra",
+        f"df-reviewer\n{APP_TOKEN}",
+        f"[bot]\n{APP_TOKEN}",
+        f"df reviewer[bot]\n{APP_TOKEN}",
+        f"x[bot][bot]\n{APP_TOKEN}",
+        "df-reviewer[bot]\n",
+        f"df-reviewer[bot]\n{APP_TOKEN} x",
+        f"df-reviewer[bot]\n{APP_TOKEN}$x",
+    ],
+    ids=[
+        "one_line",
+        "three_lines",
+        "no_bot",
+        "bot_only",
+        "space_login",
+        "double_bot",
+        "empty_token",
+        "space_token",
+        "odd_token",
+    ],
+)
+def test_app_identity_malformed_is_2_without_token(fleet: Fleet, out: str) -> None:
+    """Разбор ответа личности строгий; токен в тексты отказов не попадает."""
+    res = fleet.run(**_app_candidate(UV_STUB_APP_OUT=out))
+    assert res.returncode == 2, res.stderr
+    assert "App-режим" in res.stderr
+    _no_secret(res)
+    assert len(fleet.premerge_calls()) == 1 and fleet.merge_calls() == []
+
+
+@pytest.mark.parametrize("rc,code", [("3", 3), ("2", 2)])
+def test_app_mode_premerge_verdict_stops_merge(fleet: Fleet, rc: str, code: int):
+    res = fleet.run(**_app_candidate(UV_STUB_RC=rc))
+    assert res.returncode == code and fleet.merge_calls() == []
+    _no_secret(res)
+
+
+def test_profile_mode_unchanged_without_app_vars(fleet: Fleet) -> None:
+    """Без `MERGE_APP_*` — прежний режим: `gh api user`, `--merger-type User`."""
+    res = fleet.run(**_candidate(GH_STUB_LABELS="human-approval-required"))
+    assert res.returncode == 0, res.stderr
+    assert "api user" in fleet.gh_calls()
+    [call] = fleet.premerge_calls()
+    assert "--merger ai-prosto --merger-type User" in call and "--app-id" not in call
+    assert not any(c.startswith("GH_TOKEN=") for c in fleet.calls())
