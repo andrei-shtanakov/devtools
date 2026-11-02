@@ -555,8 +555,10 @@ MANDATORY: dict[str, tuple[str, str, str, tuple[str, ...]]] = {
     "M3:second_token_read": (
         "act_trust.load_trust",
         "    if isinstance(transport, Unavailable):\n        return transport\n",
-        "    if isinstance(transport, Unavailable):\n        return transport\n"
-        "    history_transport(binding, open_url=open_url, token_source=token_source)\n",
+        (
+            "    if isinstance(transport, Unavailable):\n        return transport\n"
+            "    history_transport(binding, open_url=open_url, token_source=token_source)\n"
+        ),
         (
             "tests/test_act_trust.py::test_one_token_per_decision_through_journal",
             _TRUST_SEAMS,
