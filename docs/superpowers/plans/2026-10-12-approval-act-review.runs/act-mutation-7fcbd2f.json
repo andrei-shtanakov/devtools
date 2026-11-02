@@ -1230,11 +1230,6 @@
   "operator": "O1"
  },
  {
-  "row": "act_node._merge_stop_pr:late_form",
-  "status": "closed",
-  "operator": "O1"
- },
- {
   "row": "act_node.stop_pr_defect:base_named",
   "status": "closed",
   "operator": "O1"
@@ -1505,6 +1500,11 @@
   "operator": "O1"
  },
  {
+  "row": "act_barrier.main:usage",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
   "row": "act_barrier.main:crash_incomplete",
   "status": "closed",
   "operator": "BYPASS"
@@ -1690,6 +1690,11 @@
   "operator": "O1"
  },
  {
+  "row": "act_barrier.live_review_requests:pr_exception",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
   "row": "act_barrier.live_review_requests:pr_unread",
   "status": "closed",
   "operator": "O1"
@@ -1848,6 +1853,21 @@
   "row": "task_bridge.main#repropose_exclusive:cli",
   "status": "closed",
   "operator": "O1"
+ },
+ {
+  "row": "approve_node._try_agent_merge#stop_review:review",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "approve_node._try_agent_merge#stop_late_form:late_form",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "approve_node._try_agent_merge#stop_form_first:form_first",
+  "status": "ruled",
+  "note": "у stop-PR (`base` и `form` переданы) первую проверку формы маскирует та же `form()` в цикле перед каждой попыткой мержа (`#stop_late_form`, closed): обход первой неотличим по исходу — мержа нет, отказ формы тот же; у finalize-PR (без `base`) первая проверка единственная и закрыта строкой `#form`"
  },
  {
   "row": "runner._step_gate#act_mode_unset:mode",
