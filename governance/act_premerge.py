@@ -271,12 +271,33 @@ def _approve_in_current_second(facts: Any, head: str, now: datetime) -> bool:
     return False
 
 
+def app_installations(app_id: int, key: Path, *, http: Any = None) -> Installations:
+    """Самоотчёт установок App у держателя ключа (§6.2; ревизия b1, B1-11).
+
+    Производный токен установки предпроверка не держит (`merge-pr.sh` запускает
+    её с `GH_TOKEN=""`), поэтому `_self_report` его не опрашивает; прочие
+    credentials процесса (`GITHUB_TOKEN`, профили) проверяются как обычно."""
+    from governance import act_app_token
+
+    def check(binding: act_trust.Binding) -> act_trust.Found:
+        repos = {
+            "approval-policy": binding.approval_policy_repository_id,
+            "df-trust": binding.df_trust_repository_id,
+        }
+        extra = {} if http is None else {"http": http}
+        return act_app_token.installations_refusal(app_id, key, repos, **extra)
+
+    return check
+
+
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="act_premerge")
     for name in ("--repo", "--head", "--head-ref", "--merge-profile", "--merger"):
         p.add_argument(name, required=True)
     p.add_argument("--pr", required=True, type=int)
     p.add_argument("--merger-type", required=True, choices=("User", "Bot"))
+    p.add_argument("--app-id", type=int, default=None)
+    p.add_argument("--app-key", type=Path, default=None)
     return p
 
 
@@ -307,12 +328,20 @@ def real_deps(
         creds=act_trust.credentials(
             env, agent_dir=agent, merge_dir=Path(args.merge_profile)
         ),
+        installations=(
+            None
+            if args.app_id is None
+            else app_installations(args.app_id, args.app_key)
+        ),
     )
 
 
 def main(argv: Sequence[str] | None = None, deps: PremergeDeps | None = None) -> int:
     """CLI предпроверки; см. докстринг модуля."""
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if (args.app_id is None) != (args.app_key is None):
+        parser.error("App-режим: нужны оба --app-id и --app-key")
     if deps is None:
         deps = real_deps(args)
     try:

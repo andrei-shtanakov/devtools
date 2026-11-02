@@ -573,7 +573,9 @@ def test_real_deps_holds_agent_and_merge_profiles(tmp_path: Path) -> None:
     профиль мержа из `--merge-profile`, токены окружения."""
     import argparse
 
-    args = argparse.Namespace(merge_profile="/x/merge", repo=SLUG, pr=7)
+    args = argparse.Namespace(
+        merge_profile="/x/merge", repo=SLUG, pr=7, app_id=None, app_key=None
+    )
     env = {
         "REVIEW_GH_CONFIG_DIR": "/x/review",
         "GH_TOKEN": "ghp_t",
@@ -628,3 +630,39 @@ def test_no_act_without_same_second_approve_refused(
     _real_clock(world, monkeypatch, *reviews)
     assert world.run() == 3
     assert "нет approve человека" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [("--app-id", "5"), ("--app-key", "/k.pem")],
+    ids=["id_only", "key_only"],
+)
+def test_app_half_pair_is_usage_error(world: World, capsys, extra) -> None:
+    """Task 15a: `--app-id`/`--app-key` — оба или ни одного; половина — отказ
+    разбора (2) до любых чтений, не откат на режим профиля."""
+    with pytest.raises(SystemExit) as exc:
+        world.run(*extra)
+    assert exc.value.code == 2
+    assert "нужны оба --app-id и --app-key" in capsys.readouterr().err
+
+
+def test_real_deps_app_mode_wires_installations(monkeypatch, tmp_path) -> None:
+    """`--app-id`/`--app-key` → самоотчёт установок держателя ключа; ключ и id
+    доходят до `installations_refusal` с id репо доверия из привязки."""
+    import argparse
+
+    from governance import act_app_token
+
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        act_app_token,
+        "installations_refusal",
+        lambda app_id, key, repos, **kw: seen.append((app_id, key, repos, kw)),
+    )
+    args = argparse.Namespace(
+        merge_profile="/x/merge", repo=SLUG, pr=7, app_id=5, app_key=Path("/k.pem")
+    )
+    deps = act_premerge.real_deps(args, env={"XDG_STATE_HOME": str(tmp_path)})
+    assert deps.installations is not None
+    assert deps.installations(BINDING) is None
+    assert seen == [(5, Path("/k.pem"), {"approval-policy": 22, "df-trust": 11}, {})]

@@ -134,3 +134,20 @@ def _act_no_real_network(monkeypatch: pytest.MonkeyPatch) -> None:
         return open_url
 
     monkeypatch.setattr(act_anon, "_default_open", guarded)
+
+
+@pytest.fixture(autouse=True)
+def _act_app_no_real_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Боевой opener `act_app_token` (личность и установки App, Task 15a) в тестах
+    в сеть не ходит: обращение — `pytest.fail`; тесты подменяют HTTP-шов сами."""
+    try:
+        from governance import act_app_token
+    except ImportError:
+        return
+
+    def refuse(req: object, *args: object, **kwargs: object) -> object:
+        url = getattr(req, "full_url", req)
+        pytest.fail(f"{NETWORK_REFUSED}: {url}")
+
+    # Метод экземпляра, не сам opener: его обработчики (`_NoRedirect`) сверяются.
+    monkeypatch.setattr(act_app_token._OPENER, "open", refuse)

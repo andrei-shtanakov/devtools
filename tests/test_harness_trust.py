@@ -33,6 +33,7 @@ EXPECTED_CHAIN = [
     "governance/__init__.py",
     "governance/act_admission.py",
     "governance/act_anon.py",
+    "governance/act_app_token.py",
     "governance/act_check.py",
     "governance/act_decision.py",
     "governance/act_epochs.py",
@@ -78,6 +79,7 @@ def test_trust_chain_is_what_we_think() -> None:
         ("py-stdlib", "governance/halt_gate.py"),
         ("py-uv", "governance/brief_merge_check.py"),
         ("py-uv", "governance/act_premerge.py"),
+        ("py-uv", "governance/act_app_token.py"),
     }
     assert sorted(ht.required_paths(ROOT)) == EXPECTED_CHAIN
 
