@@ -263,10 +263,9 @@ def _listing(product: str, ops: Any) -> tuple[list[PrRecord], str | None]:
     """Все PR продукта; сбой списка или запись неожиданной формы — причина
     неполноты (записи правильной формы всё равно судятся)."""
     try:
-        raw = ops.prs_by_head_prefix(product, "")
-    except RuntimeError as exc:
-        return [], str(exc)
-    records = [_record(r) for r in raw]
+        records = [_record(r) for r in ops.prs_by_head_prefix(product, "")]
+    except Exception as exc:  # noqa: BLE001 — любой сбой чтения списка — пробел (N3)
+        return [], str(exc) or repr(exc)
     found = [r for r in records if r is not None]
     if len(found) != len(records):
         return found, f"{len(records) - len(found)} записей неожиданной формы"
@@ -462,9 +461,15 @@ def human_context(
 
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI барьера: 0 — пусто и полно; 1 — есть живые; 2 — действие человеческого
-    контекста отвергнуто; 3 — неполно (в т. ч. любой сбой чтения)."""
+    контекста отвергнуто; 3 — неполно (в т. ч. любой сбой чтения).
+
+    Ошибка разбора аргументов и `--help` — тоже 3: отчёта нет, значит барьер не
+    пройден (fail-closed); argparse печатает свою справку/причину в stderr/stdout,
+    а коды 0 «пусто» и 2 «отвергнуто» не возникают (ревью Task 16, N2)."""
     try:
         return _main(argv)
+    except SystemExit:  # argparse: --help или неверный аргумент — отчёта нет
+        return EXIT_INCOMPLETE
     except Refused as exc:
         print(f"act_barrier: {exc}", file=sys.stderr)
         return EXIT_REFUSED

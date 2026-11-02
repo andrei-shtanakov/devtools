@@ -940,3 +940,68 @@ def test_cli_unexpected_exception_is_incomplete(monkeypatch, capsys) -> None:
 
     assert ab_mod.main(["--product", P]) == 3
     assert "TypeError" in capsys.readouterr().err
+
+
+# --- N2/N3 повторного ревью Task 16 -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["--product", P, "--confirm-resolved", "x"], ["--product", P, "--help"], []],
+    ids=["bad_value", "help", "no_product"],
+)
+def test_cli_usage_and_help_are_incomplete(monkeypatch, capsys, argv) -> None:
+    """Ошибка разбора аргументов и `--help` — 3 «неполно» (отчёта нет): не 0
+    «пусто и полно» и не 2 «отвергнуто»."""
+    from governance import ops as ops_module
+
+    monkeypatch.setattr(ops_module, "RealOps", lambda: pytest.fail("до разбора — нет"))
+    assert act_barrier.main(argv) == act_barrier.EXIT_INCOMPLETE
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        FileNotFoundError("gh"),
+        OSError("сеть"),
+        TypeError("не список"),
+        KeyError("data"),
+    ],
+    ids=["no_gh", "oserror", "type", "key"],
+)
+def test_listing_any_read_failure_is_a_gap(error: Exception) -> None:
+    """`_listing`: любой сбой чтения списка PR — пробел (и в превью Q9), а не
+    исключение мимо отчёта."""
+
+    class Down(Ops):
+        def prs_by_head_prefix(self, slug: str, prefix: str) -> list[dict]:
+            raise error
+
+    got = act_barrier.live_review_requests({P: Down([])})
+    assert got.items == () and got.complete is False
+    assert got.gaps == (f"owner/p: список PR неполон — {str(error) or repr(error)}",)
+
+
+def test_listing_non_list_answer_is_a_gap() -> None:
+    """Ответ списка не итерируемый — пробел."""
+
+    class Odd(Ops):
+        def prs_by_head_prefix(self, slug: str, prefix: str) -> object:
+            return 7
+
+    got = run(Odd([]))
+    assert not got.complete and got.gaps[0].startswith("список PR owner/p неполон: ")
+
+
+def test_review_preview_per_pr_exception_is_a_gap() -> None:
+    """Q9: исключение чтения фактов одного PR в превью — пробел, `complete=False`."""
+
+    class Broken(Ops):
+        def pr_facts(self, slug: str, pr: int) -> dict:
+            raise subprocess.CalledProcessError(1, ["gh"])
+
+    got = act_barrier.live_review_requests({P: Broken([pr(5, CAND, "OPEN")])})
+    assert got.items == () and got.complete is False
+    assert got.gaps[0].startswith(
+        "owner/p#5: факты PR не установлены — CalledProcessError"
+    )

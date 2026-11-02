@@ -78,12 +78,29 @@ BYPASS: dict[str, tuple[str, str]] = {
         'return Unavailable(f"GET {path}: больше {MAX_PAGES} страниц")',
         "return items",
     ),
-    "act_barrier._listing:list_failed": ("return [], str(exc)", "return [], None"),
+    "act_barrier._listing:list_failed": (
+        "return [], str(exc) or repr(exc)",
+        "return [], None",
+    ),
     "act_barrier.live_unmarked:pr_exception": (
         'verdict = (f"#{pr.number}: факты PR не установлены — {exc!r}",)',
         "verdict = None",
     ),
-    "act_barrier.main:crash_incomplete": ("return EXIT_INCOMPLETE", "return EXIT_LIVE"),
+    "act_barrier.main:crash_incomplete": (
+        'барьер неполон", file=sys.stderr)\n        return EXIT_INCOMPLETE',
+        'барьер неполон", file=sys.stderr)\n        return EXIT_LIVE',
+    ),
+    "act_barrier.main:usage": (
+        (
+            "    except SystemExit:  # argparse: --help или неверный аргумент — отчёта нет\n"
+            "        return EXIT_INCOMPLETE"
+        ),
+        "    except SystemExit as exc:\n        return int(exc.code or 0)",
+    ),
+    "act_barrier.live_review_requests:pr_exception": (
+        'marked = f"#{pr.number}: факты PR не установлены — {exc!r}"',
+        "marked = False",
+    ),
     "act_barrier.main:refused": ("return EXIT_REFUSED", "return EXIT_INCOMPLETE"),
     "act_barrier._candidate_nodes:pending": (
         "if found and _pending(text.value)",
@@ -511,6 +528,7 @@ BYPASS: dict[str, tuple[str, str]] = {
 }
 #: Обход невозможен (без данных продолжить нечем) — решение ревьюера с причиной.
 RULED: dict[str, str] = {
+    "approve_node._try_agent_merge#stop_form_first:form_first": "у stop-PR (`base` и `form` переданы) первую проверку формы маскирует та же `form()` в цикле перед каждой попыткой мержа (`#stop_late_form`, closed): обход первой неотличим по исходу — мержа нет, отказ формы тот же; у finalize-PR (без `base`) первая проверка единственная и закрыта строкой `#form`",
     "ops.RealOps.snapshot_open:own_repo": "общий каталог двух снимков: второй `snapshot_open` падает на `mkdir home` (`FileExistsError`) до любых чтений — смешения снимков нет, мутант виден исключением, а не утверждением; независимость проверяет двойник `test_interleaved_snapshots_are_independent`",
     "runner._step_gate#act_mode_unset:mode": 'без проверки (O1) `act_mode, provider = gate` распаковывает `Unavailable` и падает `TypeError` — fail-closed, но исключением; BYPASS `gate = ("legacy", None)` пускает S4 дальше, и на стенде следующий шаг (`approve_node`) падает исключением «факт не установлен» — мутант виден, но не утверждением; тот же класс у S8 (`runner._step_s8#act_mode_unset`) закрыт утверждением',
     "act_status._load_journal:journal_unset": "журнала периметра нет (`deps.journal is None`): без него продолжить нечем — вызов `None`; обход с корректными данными подменил бы журнал решения; проверяется причина (O3)",

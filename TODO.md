@@ -2955,6 +2955,18 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 - [ ] Запрет сети в тестах шире `act_anon`: настоящие opener-ы `df/publisher/github.py`, `df/launch_release.py`, `df/manifest.py` вне autouse-сторожа `tests/conftest.py`; сравнение профилей истории — `os.path.samefile` на регистронезависимой ФС @owner:github:andrei-shtanakov @id:act-test-network-guard-wider @epic:eco.dark-factory @trigger:"тест df/ или act_ без шва сети, либо ложное совпадение профилей на macOS"
       Ревью Task 11c (повторное, 01.11): сторож ловит только `act_anon._default_open`;
       `resolve()` не нормализует регистр на APFS.
+- [ ] Реестр идентичности акта: двойники для проверок-отказов без строки в `tests/test_act_identity_table.py` @owner:github:andrei-shtanakov @id:act-identity-registry-uncovered-checks @epic:eco.dark-factory @trigger:"правка любой из перечисленных проверок или следующий мутационный проход части B"
+      Ревью Task 16 (M8): место суждения в реестре есть, но отдельные отказы внутри него
+      без двойника и строки — мутационный проход их не видит. Перечень: `act_anon.contents_bytes`
+      (форма slug/пути/ref до запроса); `act_status._request_event` (манифест в истории не
+      разбирается — `except RequestError`); `act_status.LegacyProbe._merged_candidate`
+      (`RuntimeError` поиска candidate → `unavailable:`); `act_node.stop_pr_defect` (факт
+      файлов compare не прочитан → `_unresolved`); `act_node._stop_pr` (поиск stop-PR и
+      ветка на remote не прочитаны → `_unresolved`); прочие пути `_unresolved` для
+      нечитаемых фактов в `act_node` (`reopen`: merge-коммит stop-PR, история после
+      stop-PR; `_unusable_stop_pr`: merge-коммит, достижимость; `_merge_stop_pr`: голова и
+      верхушка базы). На каждый — отрицательный двойник с причиной, строка `JUDGMENT`,
+      затем `tests/act_mutation.py --only <строка>`.
 - [ ] Смена закреплённого `uv`, Python профиля или пина члена `core`: перемерить то, что закреплено за прежним значением @owner:github:andrei-shtanakov @id:df-installer-pin-drift @epic:eco.dark-factory @trigger:"смена UV_PINNED_VERSION, Python профиля или пина члена core в манифесте"
       `uv`: замер `UV_PROJECT_KEYS_<версия>` (дополнение A1/A2 предполётной проверки Task 7a)
       и таблица записи пути корня в `tests/df/fixtures/locks/SOURCES.md`, переименовать

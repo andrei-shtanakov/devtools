@@ -125,7 +125,13 @@ MODIFIED_EXISTING = {
         "upstream_unavailable",
         "upstream_not_approved",
     ),
-    "approve_node._try_agent_merge": ("form",),
+    # stop-PR (Task 13; рубежи после M3 ревью Task 16): ревью и форма в цикле мержа
+    "approve_node._try_agent_merge": (
+        "form",
+        "stop_review",
+        "stop_late_form",
+        "stop_form_first",
+    ),
     "runner._step_gate": ("act_mode_unset", "completed_admission"),
     "runner._step_s8": ("act_mode_unset", "completed_admission", "run_status"),
     "runner._next_wave": ("admission",),
@@ -2059,13 +2065,6 @@ JUDGMENT = {
             f"{N}::test_reopen_stop_pr_without_approving_review_names_stop_procedure",
             'f"review-pr.sh {stop_pr}"',
         ),
-        r(
-            "late_form",
-            "act_node._merge_stop_pr",
-            "if late is not None",
-            f"{N}::test_reopen_stop_pr_retargeted_during_checks_wait_not_merged",
-            '"вливается в release-x.*разберите вручную"',
-        ),
     ),
     "act_node.stop_pr_defect": (
         r(
@@ -2477,7 +2476,7 @@ JUDGMENT = {
         r(
             "list_failed",
             "act_barrier._listing",
-            "except RuntimeError as exc",
+            "except Exception as exc",
             f"{B}::test_broken_pagination_incomplete",
             '"список PR owner/p неполон',
         ),
@@ -2500,9 +2499,16 @@ JUDGMENT = {
     ),
     "act_barrier.main": (
         r(
+            "usage",
+            "act_barrier.main",
+            "except SystemExit",
+            f"{B}::test_cli_usage_and_help_are_incomplete",
+            "act_barrier.EXIT_INCOMPLETE",
+        ),
+        r(
             "crash_incomplete",
             "act_barrier.main",
-            "return EXIT_INCOMPLETE",
+            "барьер неполон",
             f"{B}::test_cli_unexpected_exception_is_incomplete",
             '"TypeError"',
         ),
@@ -2782,6 +2788,13 @@ JUDGMENT = {
     ),
     "act_barrier.live_review_requests": (
         r(
+            "pr_exception",
+            "act_barrier.live_review_requests",
+            "факты PR не установлены",
+            f"{B}::test_review_preview_per_pr_exception_is_a_gap",
+            '"owner/p#5: факты PR не установлены — CalledProcessError"',
+        ),
+        r(
             "pr_unread",
             "act_barrier.live_review_requests",
             'gaps.append(f"{product}{marked}")',
@@ -3047,6 +3060,33 @@ JUDGMENT = {
             "--repropose — отдельное действие",
             f"{RP}::test_cli_repropose_with_approve_node_runs_neither",
             "ran == []",
+        ),
+    ),
+    "approve_node._try_agent_merge#stop_review": (
+        r(
+            "review",
+            "approve_node._try_agent_merge",
+            "if missing is not None",
+            f"{N}::test_reopen_stop_pr_without_approving_review_names_stop_procedure",
+            'f"review-pr.sh {stop_pr}"',
+        ),
+    ),
+    "approve_node._try_agent_merge#stop_late_form": (
+        r(
+            "late_form",
+            "approve_node._try_agent_merge",
+            "if late is not None",
+            f"{N}::test_reopen_stop_pr_retargeted_during_checks_wait_not_merged",
+            '"вливается в release-x.*разберите вручную"',
+        ),
+    ),
+    "approve_node._try_agent_merge#stop_form_first": (
+        r(
+            "form_first",
+            "approve_node._try_agent_merge",
+            "if defect is not None",
+            f"{N}::test_reopen_refuses_foreign_stop_pr_before_merge[extra_file]",
+            'f"stop-PR #{stop_pr}.*разберите вручную"',
         ),
     ),
     "runner._step_gate#act_mode_unset": (
