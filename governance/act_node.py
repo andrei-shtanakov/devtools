@@ -348,7 +348,7 @@ def _head_hashes(
     return hashes
 
 
-def _merged(
+def _delivery_outcome(
     state: RunState,
     ops: Ops,
     dag: Dag,
@@ -359,8 +359,12 @@ def _merged(
     req: NodeRequest | None,
     facts: dict,
     deps: act_status.Deps,
-) -> an.ApprovalOutcome | None:
-    """Смёржен: admission и решение по доставке (Task 12a), затем finalize."""
+) -> tuple[Any, DeliveryView | None, act_trust.Trust]:
+    """Admission и решение по доставке смёрженного candidate — без записей.
+
+    Один путь для `_merged` (`--approve-node`) и `--repropose` (m-3 ревью
+    PR #672): заявка без маркера после миграции судится admission-ом, старый
+    читатель получает управление только через него."""
     context = act_status.Decider(state, ops, deps, dag).context()
     if isinstance(context, Unavailable):
         raise an._unresolved(f"доверенный контекст: {context.reason}")
@@ -378,6 +382,25 @@ def _merged(
         facts_transport=deps.gh,
         self_hashes=lambda: _head_hashes(state, ops, req, head) if req else {},
         legacy=_legacy(state, ops, dag, op, key, facts),
+    )
+    return outcome, delivery, trust
+
+
+def _merged(
+    state: RunState,
+    ops: Ops,
+    dag: Dag,
+    op: dict,
+    key: str,
+    pr: int,
+    head: str,
+    req: NodeRequest | None,
+    facts: dict,
+    deps: act_status.Deps,
+) -> an.ApprovalOutcome | None:
+    """Смёржен: admission и решение по доставке (Task 12a), затем finalize."""
+    outcome, delivery, trust = _delivery_outcome(
+        state, ops, dag, op, key, pr, head, req, facts, deps
     )
     if isinstance(outcome, LegacyAccepted):
         return None
@@ -600,6 +623,230 @@ def _require_in_base(
         raise an._unresolved(f"{what}: достижимость {commit[:12]} из базы")
     if not reached:
         _invalidate(state, key, f"{what} смёржен не в базу {an._base_ref(state)}")
+
+
+# --- переиздание (--repropose) -------------------------------------------------------
+
+REPROPOSED = "reproposed: переиздание заявки оператором (--repropose)"
+#: Шаги после засчитанного мержа candidate: акт (или авторизация мержа) уже
+#: записан, продолжение — `--approve-node`, не переиздание.
+_AFTER_MERGE = (al.Step.FINALIZE, al.Step.AWAIT_FINALIZE_MERGE)
+
+
+def repropose(
+    state: RunState, ops: Ops, key: str, *, legacy_bundle: int | None = None
+) -> an.ApprovalOutcome:
+    """`--repropose <key>`: преемник заявки; терминальная запись не переписывается.
+
+    Терминальный предшественник не трогается; живой (candidate не засчитан)
+    — `invalidated: reproposed: <причина>`. Открытые PR предшественника
+    закрываются (иначе `_require_no_reopened_pr` не пустит новый candidate),
+    затем создаётся новая заявка с `predecessor: <key>` и текущим пином.
+    Гварды `--approve-node` до первой записи — ДО погребения (правило 3:
+    отказ без эффектов). Повтор находит преемника (`successor_of`) и
+    продолжает его; второго не заводит.
+    """
+    op = {al.request_key(*nums): rec for nums, rec in al.requests(state)}.get(key)
+    if op is None:
+        raise RuntimeError(f"заявки {key} нет в леджере")
+    status = op.get("status")
+    if status == al.STATUS_COMPLETED:
+        raise RuntimeError(
+            f"заявка {key} завершена — одобрение не переиздаётся; остановить его — "
+            "`--reopen <node>`"
+        )
+    if status != al.STATUS_STARTED and status not in al.TERMINAL_STATUSES:
+        raise RuntimeError(f"заявка {key}: статус {status!r} не распознан")
+    if al.next_step(op) in _AFTER_MERGE:
+        raise RuntimeError(
+            f"заявка {key}: мерж candidate уже засчитан — продолжение "
+            "`--approve-node`, не переиздание"
+        )
+    successor = al.successor_of(state, key)
+    if successor is not None:
+        return _continue_successor(state, ops, key, successor, legacy_bundle)
+    dag = bundle_dag.dag_for(legacy_bundle)
+    _require_successor_creatable(state, ops, dag, op)
+    if al.is_live(op):
+        why = _undecided_delivery(state, ops, dag, key, op)
+        al.invalidate_request(state, key, f"reproposed: {why}" if why else REPROPOSED)
+    # причина закрытия — из записи предшественника (свежей, после инвалидации)
+    an._close_buried_proposals(state, ops, key)
+    return _create_successor(state, ops, key, state.ops[key], legacy_bundle)
+
+
+def _require_successor_creatable(
+    state: RunState, ops: Ops, dag: Dag, op: Mapping
+) -> None:
+    """Гварды, которые `--approve-node` проверяет до первой записи: чистое
+    дерево и свежий base, состав бандла, узлы в активном DAG, upstream
+    одобрены (ревью PR #672, находка 1)."""
+    an.require_clean_synced_base(state, ops, dag)
+    nodes = list(op["nodes"])
+    an._require_known(dag, nodes)
+    for node in nodes:
+        an._require_upstream_ready(state, ops, dag, node)
+
+
+def _undecided_delivery(
+    state: RunState, ops: Ops, dag: Dag, key: str, op: Mapping
+) -> str | None:
+    """Живой предшественник со смёрженным candidate: акт не хоронится (m-1, m-3).
+
+    → установленная причина для погребения (`<code>: <detail>` у `Rejected`,
+    причина `Unavailable`/`Ambiguous`) либо `None` — candidate не смёржен.
+    `Accepted`/`LegacyAccepted` (и любой иной исход) — отказ, продолжение
+    `--approve-node`. Временный `Unavailable` от постоянного здесь не
+    отличить: переиздание — явное действие оператора и ничего не одобряет.
+    """
+    pr = op.get("candidate_pr")
+    if pr is None:
+        return None
+    facts = an._pr_facts(state, ops, pr)
+    if an._disposition(facts, pr) is not Disposition.MERGED:
+        return None
+    deps = DEPS_FACTORY(state)
+    live = act_status.mode_probe(state, deps)
+    if isinstance(live, Unavailable):
+        raise an._unresolved(f"режим акта продукта (--repropose {key}): {live.reason}")
+    if op.get("act") == ACT_REVIEW_V1:
+        verdict = _marked_verdict(state, ops, dag, key, pr, deps, live)
+    else:
+        verdict = _unmarked_verdict(state, ops, dag, op, key, pr, facts, deps, live)
+    if isinstance(verdict, Rejected):
+        return f"{verdict.code}: {verdict.detail.removeprefix(verdict.code + ': ')}"
+    if isinstance(verdict, (Unavailable, Ambiguous)):
+        return verdict.reason
+    raise RuntimeError(
+        f"заявка {key}: доставка candidate-PR #{pr} засчитывается (акт есть) — "
+        "продолжение `--approve-node`, не переиздание"
+    )
+
+
+def _marked_verdict(
+    state: RunState,
+    ops: Ops,
+    dag: Dag,
+    key: str,
+    pr: int,
+    deps: act_status.Deps,
+    live: act_status.LivePolicy,
+) -> Any:
+    """Вердикт доставки `review/v1` — тем же `Decider`, что у статусов узла."""
+    if live.mode != "review":
+        raise an._unresolved(f"заявка review/v1, а режим продукта сейчас — {live.mode}")
+    base = an._base_ref(state)
+    history = act_status.load_history(ops, state, base)
+    if isinstance(history, Unavailable):
+        raise an._unresolved(f"история заявок узлов: {history.reason}")
+    event = next(
+        (
+            e
+            for e in history
+            if isinstance(e, DeliveredRequest) and e.request.request_id == key
+        ),
+        None,
+    )
+    if event is None:
+        raise an._unresolved(
+            f"candidate-PR #{pr} заявки {key} смёржен, а доставки в истории {base} нет"
+        )
+    decide = act_status.Decider(
+        state, ops, deps, dag, trust=live.trust, journal=live.journal
+    )
+    return decide(event)
+
+
+def _unmarked_verdict(
+    state: RunState,
+    ops: Ops,
+    dag: Dag,
+    op: Mapping,
+    key: str,
+    pr: int,
+    facts: dict,
+    deps: act_status.Deps,
+    live: act_status.LivePolicy,
+) -> Any:
+    """Заявка без маркера — как у `route`: до миграции судит старый код
+    (`_legacy_outcome`), после — admission и старый читатель через него
+    (`_delivery_outcome`, ревью PR #672, находка 4)."""
+    if live.mode == act_trust.PRE_MIGRATION:
+        verdict = an._legacy_outcome(state, ops, dag, dict(op), key, facts)
+        if isinstance(verdict, an.LegacyHalt):
+            raise an._unresolved(
+                f"вердикт старого кода (--repropose {key}): {verdict.text}"
+            )
+        return verdict
+    head = facts.get("headRefOid")
+    if not isinstance(head, str) or len(head) != 40:
+        raise an._unresolved(f"голова candidate-PR #{pr} не названа")
+    outcome, _delivery, _trust = _delivery_outcome(
+        state, ops, dag, dict(op), key, pr, head, None, facts, deps
+    )
+    return outcome
+
+
+def _create_successor(
+    state: RunState,
+    ops: Ops,
+    key: str,
+    op: Mapping,
+    legacy_bundle: int | None = None,
+) -> an.ApprovalOutcome:
+    """Новая заявка над узлами предшественника; текущий пин берёт `creation`."""
+    nodes = list(op["nodes"])
+    if op.get("source_sha"):
+        return an.propose_from_source(
+            state,
+            ops,
+            nodes,
+            op["source_sha"],
+            legacy_bundle=legacy_bundle,
+            predecessor=key,
+        )
+    # `predecessor` — у КАЖДОГО узла: второй узел дописывается только в своего
+    # преемника, а неустановленный статус пропускает лишь его (I-1)
+    for node in nodes:
+        outcome = an.approve_node(
+            state, ops, node, legacy_bundle=legacy_bundle, predecessor=key
+        )
+    return outcome
+
+
+def _continue_successor(
+    state: RunState,
+    ops: Ops,
+    key: str,
+    successor: str,
+    legacy_bundle: int | None,
+) -> an.ApprovalOutcome:
+    """Повтор `--repropose`: продвинуть уже созданного преемника."""
+    succ = state.ops[successor]
+    if not al.is_live(succ):
+        raise RuntimeError(
+            f"заявка {key} уже переиздана: преемник {successor} — "
+            f"{succ.get('status')}; продолжение — от него"
+        )
+    missing = [n for n in state.ops[key]["nodes"] if n not in succ["nodes"]]
+    if missing and succ.get("source_sha"):
+        raise RuntimeError(
+            f"преемник {successor} заявки {key} без узлов {', '.join(missing)} "
+            "(байты ветки волны) — разберите вручную"
+        )
+    if missing and not an._still_accumulating(state, ops, succ):
+        # дописка завела бы ВТОРУЮ запись с тем же `predecessor` (ревью PR #672,
+        # находка 3); узлы без преемника — разбор вручную (передано в Task 16)
+        raise RuntimeError(
+            f"преемник {successor} заявки {key} уже не накапливает узлы (candidate "
+            f"за мержем), а узлов {', '.join(missing)} в нём нет — второй "
+            f"преемник не создаётся. Доведите {successor} "
+            f"(`--approve-node {succ['nodes'][0]}`); узлы {', '.join(missing)} "
+            "этой командой не переиздаются — разберите вручную"
+        )
+    for node in missing:  # падение между узлами при создании преемника
+        an.approve_node(state, ops, node, legacy_bundle=legacy_bundle, predecessor=key)
+    return an.approve_node(state, ops, succ["nodes"][0], legacy_bundle=legacy_bundle)
 
 
 # --- переоткрытие и аудит ------------------------------------------------------------
