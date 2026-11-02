@@ -1221,13 +1221,13 @@
  },
  {
   "row": "act_node._merge_stop_pr:form",
-  "status": "ruled",
-  "note": "второй рубеж: та же форма (`stop_pr_defect`) перепроверяется в `_try_agent_merge(form=…)` до мержа и после ожидания проверок (`late`); обход первой проверки неотличим по исходу (мержа нет, отказ «разберите вручную»), выигрыш первой — ранний отказ без ожидания проверок"
+  "status": "closed",
+  "operator": "O1"
  },
  {
-  "row": "act_node._merge_stop_pr:approving_review",
-  "status": "ruled",
-  "note": "второй рубеж: `_try_agent_merge` проверяет то же одобряющее ревью тем же `_missing_approving_review(kind, retry)` до мержа; обход неотличим по исходу и тексту"
+  "row": "act_node._merge_stop_pr:refusal",
+  "status": "closed",
+  "operator": "O1"
  },
  {
   "row": "act_node._merge_stop_pr:late_form",
@@ -1485,6 +1485,41 @@
   "operator": "BYPASS"
  },
  {
+  "row": "act_barrier._record:shape",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_barrier._listing:list_failed",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_barrier._listing:records",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_barrier.human_context:human",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_barrier.main:crash_incomplete",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_barrier.main:refused",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
+  "row": "act_barrier._main:activation",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
   "row": "act_barrier._identity:request_form",
   "status": "closed",
   "operator": "BYPASS"
@@ -1550,12 +1585,27 @@
   "operator": "BYPASS"
  },
  {
+  "row": "act_barrier._candidate_nodes:facts_unread",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
   "row": "act_barrier._candidate_nodes:pending",
   "status": "closed",
   "operator": "BYPASS"
  },
  {
   "row": "act_barrier._candidate_nodes:unread",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_barrier._legacy_resolved:tip_unread",
+  "status": "closed",
+  "operator": "O1"
+ },
+ {
+  "row": "act_barrier._legacy_resolved:base_unread",
   "status": "closed",
   "operator": "O1"
  },
@@ -1620,6 +1670,11 @@
   "operator": "BYPASS"
  },
  {
+  "row": "act_barrier.live_unmarked:pr_exception",
+  "status": "closed",
+  "operator": "BYPASS"
+ },
+ {
   "row": "act_barrier.live_unmarked:draining",
   "status": "closed",
   "operator": "O1"
@@ -1632,12 +1687,22 @@
  {
   "row": "act_barrier.live_unmarked:pagination",
   "status": "closed",
-  "operator": "BYPASS"
+  "operator": "O1"
+ },
+ {
+  "row": "act_barrier.live_review_requests:pr_unread",
+  "status": "closed",
+  "operator": "O1"
  },
  {
   "row": "act_barrier.live_review_requests:product_gaps",
   "status": "closed",
-  "operator": "BYPASS"
+  "operator": "O1"
+ },
+ {
+  "row": "act_barrier.invalidate:listing",
+  "status": "closed",
+  "operator": "O1"
  },
  {
   "row": "act_barrier.invalidate:human",
@@ -1781,13 +1846,13 @@
  },
  {
   "row": "task_bridge.main#repropose_exclusive:cli",
-  "status": "ruled",
-  "note": "отказ argparse до чтения прогона; без него `main` исполняет второе действие на стенде без git (`CalledProcessError`) — мутант виден, но не утверждением; проверяется сообщение (O3)"
+  "status": "closed",
+  "operator": "O1"
  },
  {
   "row": "runner._step_gate#act_mode_unset:mode",
   "status": "ruled",
-  "note": "без проверки S4 продолжает волну legacy-гейтом; на стенде следующий шаг (`approve_node`) падает исключением «факт не установлен» — мутант виден, но не утверждением; тот же класс у S8 (`runner._step_s8#act_mode_unset`) закрыт утверждением"
+  "note": "без проверки (O1) `act_mode, provider = gate` распаковывает `Unavailable` и падает `TypeError` — fail-closed, но исключением; BYPASS `gate = (\"legacy\", None)` пускает S4 дальше, и на стенде следующий шаг (`approve_node`) падает исключением «факт не установлен» — мутант виден, но не утверждением; тот же класс у S8 (`runner._step_s8#act_mode_unset`) закрыт утверждением"
  },
  {
   "row": "runner._step_s8#act_mode_unset:mode",
