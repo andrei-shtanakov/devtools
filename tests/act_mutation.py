@@ -529,6 +529,81 @@ RULED: dict[str, str] = {
 }
 
 
+_TRUST_SEAMS = "tests/test_act_wiring.py::test_wiring_site_decides_with_history_token"
+#: Обязательные мутации входа решения (Task 11c, C6; Task 16 Step 4a): функция,
+#: фрагмент, замена, двойники — тесты Task 11c и каждая строка `WIRING_SITES`
+#: (`test_wiring_site_decides_with_history_token`). Прогон — `--mandatory`.
+MANDATORY: dict[str, tuple[str, str, str, tuple[str, ...]]] = {
+    "M1:transport_not_from_binding": (
+        "act_trust.load_trust",
+        "transport = history_transport(binding, open_url=open_url, token_source=token_source)",
+        "transport = AnonTransport(open_url=open_url)",
+        (
+            "tests/test_act_trust.py::test_history_transport_built_from_binding",
+            _TRUST_SEAMS,
+        ),
+    ),
+    "M2:history_self_report_skipped": (
+        "act_trust.load_trust",
+        "transport if keyed else None",
+        "None",
+        (
+            "tests/test_act_trust.py::test_history_self_report_push_is_violation",
+            _TRUST_SEAMS,
+        ),
+    ),
+    "M3:second_token_read": (
+        "act_trust.load_trust",
+        "    if isinstance(transport, Unavailable):\n        return transport\n",
+        "    if isinstance(transport, Unavailable):\n        return transport\n"
+        "    history_transport(binding, open_url=open_url, token_source=token_source)\n",
+        (
+            "tests/test_act_trust.py::test_one_token_per_decision_through_journal",
+            _TRUST_SEAMS,
+        ),
+    ),
+    "M4:credential_shapes_open": (
+        "act_trust.load_trust",
+        "refused = _creds_refusal(creds) or _shared_profile_refusal(creds, binding)",
+        "refused = _shared_profile_refusal(creds, binding)",
+        (
+            "tests/test_act_trust.py::test_caller_history_credential_refused_before_io",
+            _TRUST_SEAMS,
+        ),
+    ),
+}
+
+
+def _mandatory(check: bool) -> list[dict]:
+    """M1–M4: каждая мутация — по своим тестам Task 11c и по всем местам
+    `WIRING_SITES`; выживший мутант блокирует коммит, как строка реестра."""
+    results = []
+    for key, (where, old, new, twins) in MANDATORY.items():
+        path = ROOT / "governance" / f"{where.split('.')[0]}.py"
+        src, fn = _locate(path, where)
+        seg = (ast.get_source_segment(src, fn) or "") if fn is not None else ""
+        if seg.count(old) != 1:
+            results.append({"row": key, "status": "n/a", "note": "фрагмент не найден"})
+            continue
+        if check:
+            results.append({"row": key, "status": "applicable"})
+            continue
+        path.write_text(src.replace(seg, seg.replace(old, new), 1), encoding="utf-8")
+        try:
+            got = [_run(twin) for twin in twins]
+        finally:
+            path.write_text(src, encoding="utf-8")
+        status = (
+            "error"
+            if "error" in got
+            else ("closed" if all(g == "closed" for g in got) else "survived")
+        )
+        results.append(
+            {"row": key, "status": status, "twins": dict(zip(twins, got, strict=True))}
+        )
+    return results
+
+
 def _locate(path: Path, qualified: str) -> tuple[str, ast.AST | None]:
     src = path.read_text(encoding="utf-8")
     defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
@@ -668,9 +743,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--verbose", action="store_true", help="хвост вывода двойника — в stderr"
     )
+    p.add_argument(
+        "--mandatory", action="store_true", help="только мутации M1–M4 (Task 11c)"
+    )
     args = p.parse_args(argv)
     if args.merge:
         return _merge(args.merge, args.out)
+    if args.mandatory:
+        return _report(_mandatory(args.check), args.out)
     rows = list(ROWS)
     if args.shard:
         k, n = args.shard
