@@ -357,6 +357,18 @@ def _sync_base_and_settle(
     иначе переодобрение по base после переоткрытия требовало бы полного
     DAG. В волновом режиме base обязан быть префиксом DAG по уровням.
     """
+    require_clean_synced_base(state, ops, dag)
+    _settle_requests_outside_dag(state, ops, dag)
+
+
+def require_clean_synced_base(
+    state: RunState, ops: Ops, dag: tuple[tuple[str, tuple[str, ...]], ...]
+) -> None:
+    """Чистое дерево, свежий base, состав бандла — без записей в леджер и форджу.
+
+    Общая голова входа `approve_node`/`propose_from_source`; `--repropose`
+    зовёт её ДО погребения предшественника (правило 3: отказ без эффектов).
+    """
     if ops.is_dirty(state.target_dir):
         raise RuntimeError(
             f"target_dir {state.target_dir!r} грязный — одобрение не "
@@ -370,7 +382,6 @@ def _sync_base_and_settle(
     bundle_dag.check_bundle_composition(
         state.target_dir, state.bundle_dir, dag, mode=mode
     )
-    _settle_requests_outside_dag(state, ops, dag)
 
 
 def _require_known(
@@ -465,7 +476,7 @@ def _propose(
     nodes = bundle_dag.composition(dag)
     fingerprint = bundle_dag.composition_fingerprint(nodes)
     joined = _join_target(state, ops, fingerprint, step)
-    _require_no_join_for_successor(joined, predecessor)
+    _require_no_join_for_successor(state, joined, predecessor)
     if joined is not None and joined[1].get("source_sha") is not None:
         raise RuntimeError(
             f"живая заявка {al.request_key(*joined[0])} шага несёт байты "
@@ -525,7 +536,9 @@ def _supersedes_undecided(
 
 
 def _require_no_join_for_successor(
-    joined: tuple[tuple[int, int, int], dict] | None, predecessor: str | None
+    state: RunState,
+    joined: tuple[tuple[int, int, int], dict] | None,
+    predecessor: str | None,
 ) -> None:
     """Преемник (`--repropose`) дописывается только в СВОЮ заявку.
 
@@ -543,6 +556,15 @@ def _require_no_join_for_successor(
             f"живая заявка шага {al.request_key(*joined[0])} уже есть — продвиньте "
             f"её, преемник {predecessor} не создаётся"
         )
+    if predecessor is not None and joined is None:
+        # один преемник на заявку — проверяется в момент записи, а не только
+        # обходом `successor_of` в `--repropose`
+        existing = al.successor_of(state, predecessor)
+        if existing is not None:
+            raise RuntimeError(
+                f"у заявки {predecessor} уже есть преемник {existing} — второй "
+                "не создаётся"
+            )
 
 
 def _require_same_act(
@@ -927,7 +949,7 @@ def propose_from_source(
     nodes = bundle_dag.composition(dag)
     fingerprint = bundle_dag.composition_fingerprint(nodes)
     joined = _join_target(state, ops, fingerprint, step)
-    _require_no_join_for_successor(joined, predecessor)
+    _require_no_join_for_successor(state, joined, predecessor)
     if joined is not None and joined[1].get("source_sha") != source_sha:
         raise RuntimeError(
             f"живая заявка {al.request_key(*joined[0])} шага несёт байты из "

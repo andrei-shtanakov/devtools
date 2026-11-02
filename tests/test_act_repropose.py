@@ -575,7 +575,9 @@ def test_merged_predecessor_with_rejected_delivery_proceeds(world, stand):
     approve(world, "charter")
     stand.verdict = Rejected("d3_merger", "мержер вне allowlist")
     _repropose(world, key)
-    assert world.state.ops[key]["reason"] == act_node.REPROPOSED
+    assert world.state.ops[key]["reason"] == (
+        "reproposed: d3_merger: мержер вне allowlist"
+    )
     assert al.successor_of(world.state, key) is not None
 
 
@@ -663,7 +665,7 @@ def test_legacy_merged_not_accepted_proceeds(world, stand, monkeypatch):
         an, "_legacy_outcome", lambda *a: Rejected("legacy_signature", "не тот")
     )
     _repropose(world, key)
-    assert world.state.ops[key]["reason"] == act_node.REPROPOSED
+    assert world.state.ops[key]["reason"] == "reproposed: legacy_signature: не тот"
     assert al.successor_of(world.state, key) is not None
 
 
@@ -674,6 +676,134 @@ def test_legacy_merged_outcome_unresolved_refused(world, stand, monkeypatch):
         _repropose(world, key)
     assert world.state.ops[key]["status"] == al.STATUS_STARTED
     assert al.successor_of(world.state, key) is None
+
+
+# --- ревью PR #672: гварды до эффектов, причина, один преемник, admission ---------
+
+
+def _assert_untouched(world: World, key: str, pr: int) -> None:
+    assert world.state.ops[key]["status"] == al.STATUS_STARTED
+    assert world.forge.prs[pr]["state"] == "OPEN"
+    assert al.successor_of(world.state, key) is None
+
+
+def test_dirty_tree_refused_before_burial(world, stand):
+    """Находка 1: грязное дерево — отказ ДО погребения и закрытия PR."""
+    key = approve(world, "charter").request
+    pr = world.state.ops[key]["candidate_pr"]
+    (world.target / "stray.txt").write_text("след упавшего захода\n")
+    with pytest.raises(RuntimeError, match="грязный"):
+        _repropose(world, key)
+    _assert_untouched(world, key, pr)
+
+
+def test_foreign_bundle_composition_refused_before_burial(world, stand):
+    key = approve(world, "charter").request
+    pr = world.state.ops[key]["candidate_pr"]
+    with pytest.raises(RuntimeError):
+        act_node.repropose(world.state, world.ops, key, legacy_bundle=3)
+    _assert_untouched(world, key, pr)
+
+
+def test_node_outside_active_dag_refused_before_burial(world, stand):
+    key = approve(world, "charter").request
+    pr = world.state.ops[key]["candidate_pr"]
+    world.state.ops[key] = {**world.state.ops[key], "nodes": ["ghost"]}
+    with pytest.raises(RuntimeError, match="не входит в активный DAG"):
+        _repropose(world, key)
+    _assert_untouched(world, key, pr)
+
+
+def test_upstream_not_ready_refused_before_burial(world, stand, monkeypatch):
+    from tests.test_act_node import _level_three
+
+    _level_three(world, stand, monkeypatch)
+    stand.mode = "review"
+    key = approve(world, "design").request
+    pr = world.state.ops[key]["candidate_pr"]
+    monkeypatch.setattr(
+        act_status.Statuses, "of", lambda self, node: "not_approved:stopped:g1"
+    )
+    with pytest.raises(RuntimeError, match="не одобрен"):
+        _repropose(world, key)
+    _assert_untouched(world, key, pr)
+
+
+def test_ambiguous_burial_reason_carries_the_fact(world, stand):
+    """Находка 2: причина погребения несёт установленный исход доставки."""
+    from governance.act_time import AMBIGUOUS
+
+    key = _merged_ambiguous(world, stand)
+    _repropose(world, key)
+    assert world.state.ops[key]["reason"] == f"reproposed: {AMBIGUOUS}"
+
+
+def test_merged_successor_with_missing_node_refused(world, stand, monkeypatch):
+    """Находка 3: преемник уже за мержем, узла в нём нет — отказ с названием,
+    второго преемника нет."""
+    key = _two_node_ambiguous(world, stand, monkeypatch)
+    real = an.approve_node
+    failed: list[str] = []
+
+    def flaky(state, ops, node, **kwargs):
+        if node == "acceptance" and not failed:
+            failed.append(node)
+            raise RuntimeError("упали между узлами")
+        return real(state, ops, node, **kwargs)
+
+    monkeypatch.setattr(an, "approve_node", flaky)
+    with pytest.raises(RuntimeError, match="между узлами"):
+        _repropose(world, key)
+    succ = al.successor_of(world.state, key)
+    assert succ is not None
+    spr = world.state.ops[succ]["candidate_pr"]
+    stand.approve_head(spr)
+    approve(world, "design")  # агентская доставка преемника
+    assert world.forge.prs[spr]["state"] == "MERGED"
+    with pytest.raises(RuntimeError, match="уже не накапливает узлы .*acceptance"):
+        _repropose(world, key)
+    with pytest.raises(RuntimeError, match=f"уже есть преемник {succ}"):
+        an.approve_node(world.state, world.ops, "acceptance", predecessor=key)
+    succs = [k for k, op in world.state.ops.items() if op.get("predecessor") == key]
+    assert succs == [succ]
+
+
+def test_unmarked_merged_after_migration_goes_through_admission(world, stand):
+    """Находка 4: заявка без маркера после миграции — admission, не старый
+    контракт; `Rejected(admission)` пускает переиздание с этой причиной."""
+    key, _pr = _legacy_merged(world, stand)
+    stand.mode = "review"
+    stand.verdict = Rejected("admission", "ACT_MODE=review: заявка без маркера")
+    _repropose(world, key)
+    assert world.state.ops[key]["reason"].startswith("reproposed: admission")
+    assert al.successor_of(world.state, key) is not None
+
+
+def test_unmarked_merged_admitted_legacy_accepted_refused(world, stand):
+    """После миграции admission пустил старого читателя, и тот засчитал мерж —
+    отказ (стенд: `request=None` → `legacy()` → `LegacyAccepted`)."""
+    key, _pr = _legacy_merged(world, stand)
+    stand.mode = "review"
+    with pytest.raises(RuntimeError, match="засчитывается"):
+        _repropose(world, key)
+    assert world.state.ops[key]["status"] == al.STATUS_STARTED
+    assert al.successor_of(world.state, key) is None
+
+
+def test_unmarked_merged_unnamed_head_refused(world, stand, monkeypatch):
+    key, pr = _legacy_merged(world, stand)
+    stand.mode = "review"
+    stand.verdict = Rejected("admission", "ACT_MODE=review: заявка без маркера")
+    real = world.ops.pr_facts
+
+    def headless(slug, number):
+        facts = real(slug, number)
+        return {**facts, "headRefOid": None} if number == pr else facts
+
+    monkeypatch.setattr(world.ops, "pr_facts", headless)
+    with pytest.raises(RuntimeError, match=f"голова candidate-PR #{pr} не названа"):
+        _repropose(world, key)
+    assert world.state.ops[key]["status"] == al.STATUS_STARTED
 
 
 # --- путь ветки волны (`propose_from_source`) ----------------------------------------
