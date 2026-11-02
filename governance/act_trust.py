@@ -7,6 +7,9 @@ ruleset обоих репо доверия → `allow_rebase_merge`; затем 
 якорей и диапазоны эпох с наборами ≤ T. Недоступное обязательное чтение —
 `Unavailable` без события; событие — только для установленного нарушения.
 `act_source.load_source()` (файл devtools) здесь не вызывается (§6.5).
+Транспорт источников доверия строит сам `load_trust` (`history_transport`:
+анонимный либо с read-only токеном истории, С-1, спека rev 18 §6.2); один
+объект на решение читает снимок, журнал периметра, якоря и диапазоны.
 
 Модуль в цепочке обвязки мержа (`act_premerge`): только `governance/act_*`,
 `governance/facts`, `ssot_env`, stdlib. Журнал периметра — протокол
@@ -18,11 +21,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import tomllib
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from itertools import pairwise
 from pathlib import Path
@@ -73,6 +77,18 @@ _BINDING_KEYS = (
     "approval_policy_repository_id",
     "transport",
 )
+HISTORY_KEY = "history_gh_config_dir"
+HISTORY_LABEL = "profile:history"
+HISTORY_NOT_WIRED = "самоотчёт: credential не из закрытого набора credentials()"
+HISTORY_PROFILE_SHARED = "самоотчёт: профиль credential совпадает с профилем истории"
+_TOKEN_FORM = re.compile(r"[A-Za-z0-9_]+")
+#: Закрытый набор форм `credentials()`: метка → (есть gh_config_dir, есть token).
+_CRED_SHAPES = {
+    "profile:agent": (True, False),
+    "profile:merge": (True, False),
+    "env:GH_TOKEN": (False, True),
+    "env:GITHUB_TOKEN": (False, True),
+}
 Span = tuple[ActivationView, ...]
 
 
@@ -82,7 +98,7 @@ class TrustError(ValueError):
 
 @dataclass(frozen=True)
 class Binding:
-    """Защищённая привязка `/etc/df/trust.toml` (спека B §3.7; Р-6)."""
+    """Защищённая привязка `/etc/df/trust.toml` (спека B §3.7; Р-6; С-1 — `HISTORY_KEY`)."""
 
     host: str
     df_trust_repository_id: int
@@ -90,6 +106,7 @@ class Binding:
     df_trust_branch: str
     approval_policy_repository_id: int
     transport: str
+    history_gh_config_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -109,12 +126,14 @@ class TrustRoot:
 
 @dataclass(frozen=True)
 class TrustSnapshot:
-    """`source.env` и журнал эпох из ОДНОГО зафиксированного снимка."""
+    """`source.env` и журнал эпох из ОДНОГО зафиксированного снимка;
+    `transport` — транспорт решения, которым снимок прочитан (Р-23)."""
 
     root: TrustRoot
     full_name: str
     source: SourceV2
     epochs: tuple[Epoch, ...]
+    transport: Any = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -136,6 +155,11 @@ class Trust:
     def root(self) -> TrustRoot:
         return self.snapshot.root
 
+    @property
+    def transport(self) -> Any:
+        """Транспорт источников доверия решения — единственный (R7)."""
+        return self.snapshot.transport
+
 
 @dataclass(frozen=True)
 class Credential:
@@ -143,7 +167,7 @@ class Credential:
 
     label: str
     gh_config_dir: Path | None = None
-    token: str | None = None
+    token: str | None = field(default=None, repr=False)
 
 
 class Journal(Protocol):
@@ -162,15 +186,15 @@ class Journal(Protocol):
 
 @dataclass(frozen=True)
 class Readers:
-    """Инжектируемые чтения: анонимный REST и GET от имени credential."""
+    """Самоотчёт переданных credentials (`gh api` под каждым). Транспорта источников
+    доверия здесь нет: его строит `load_trust` (Task 11c, C6)."""
 
-    anon: Any
     as_credential: Callable[[Credential, str], Fact[object]]
 
 
 def default_readers() -> Readers:
-    """Боевые чтения: `AnonTransport` и `gh api` под credential."""
-    return Readers(AnonTransport(), gh_get)
+    """Боевой самоотчёт: `gh api` под credential."""
+    return Readers(gh_get)
 
 
 # --- привязка -------------------------------------------------------------------
@@ -184,7 +208,8 @@ def parse_binding(text: str) -> Binding:
         raise TrustError(f"trust.toml не TOML: {exc}") from exc
     if data.get("schema") != BINDING_SCHEMA:
         raise TrustError(f"trust.toml: схема не {BINDING_SCHEMA}")
-    if set(data) - {"schema"} != set(_BINDING_KEYS):
+    keys = set(data) - {"schema"}
+    if not set(_BINDING_KEYS) <= keys <= set(_BINDING_KEYS) | {HISTORY_KEY}:
         raise TrustError(
             f"trust.toml: ключи {sorted(data)}, нужны {list(_BINDING_KEYS)}"
         )
@@ -196,7 +221,15 @@ def parse_binding(text: str) -> Binding:
         raise TrustError("trust.toml: host/имя/ветка — непустые строки")
     if data["transport"] != "public":
         raise TrustError('trust.toml: v1 поддерживает только transport = "public"')
-    return Binding(**{k: data[k] for k in _BINDING_KEYS})
+    history = data.get(HISTORY_KEY)
+    if history is not None and (
+        not isinstance(history, str) or not Path(history).is_absolute()
+    ):
+        raise TrustError(f"trust.toml: {HISTORY_KEY} — абсолютный путь")
+    return Binding(
+        **{k: data[k] for k in _BINDING_KEYS},
+        history_gh_config_dir=None if history is None else Path(history),
+    )
 
 
 def load_binding(
@@ -369,7 +402,79 @@ def read_trust_snapshot(anon: Any, binding: Binding) -> TrustSnapshot | Unavaila
     root = TrustRoot(
         binding.host, binding.df_trust_repository_id, binding.df_trust_branch, head
     )
-    return TrustSnapshot(root, repo, source, epochs)
+    return TrustSnapshot(root, repo, source, epochs, transport=anon)
+
+
+# --- транспорт источников доверия (С-1, спека rev 18 §6.2) ---------------------------
+
+
+def history_transport(
+    binding: Binding,
+    *,
+    open_url: Callable[..., Any] | None = None,
+    token_source: Callable[[Path], str | Unavailable] | None = None,
+) -> AnonTransport | Unavailable:
+    """Единственное место построения транспорта источников доверия (С-1, C6):
+    ключа нет — анонимный; ключ `D` — токен `(token_source or history_token)(D)`
+    ровно один раз; сбой — `Unavailable(f"токен истории: {причина}")` без
+    анонимного отката (R5)."""
+    config_dir = binding.history_gh_config_dir
+    if config_dir is None:
+        return AnonTransport(open_url=open_url)
+    token = (token_source or history_token)(config_dir)
+    if isinstance(token, Unavailable):
+        return Unavailable(f"токен истории: {token.reason}")
+    if not isinstance(token, str) or not _TOKEN_FORM.fullmatch(token):
+        return Unavailable("токен истории: значение не в форме токена")
+    return AnonTransport(open_url=open_url, token=token)
+
+
+def history_token(config_dir: Path) -> str | Unavailable:
+    """Токен профиля `history`: `gh auth token --hostname github.com` под
+    `GH_CONFIG_DIR=<config_dir>`, окружение без `_GH_ENV_DROPPED`, `timeout=60`.
+    `<config_dir>/hosts.yml` не файл — `Unavailable` ДО запуска `gh` (Р-20).
+
+    Безопасный формат причин (C1-02): только фиксированные строки
+    `f"gh auth token ({HISTORY_LABEL}): " + <хвост>`, где хвост — `код выхода
+    {rc}` | `пустой вывод` | `вывод не в форме токена` | `{type(exc).__name__}`
+    (`OSError`, `TimeoutExpired`). stdout, stderr и `str(exc)` в причину не
+    попадают никогда — ни целиком, ни срезом."""
+    if not (config_dir / "hosts.yml").is_file():
+        return Unavailable(f"профиль токена истории {config_dir}: нет hosts.yml")
+    env = {k: v for k, v in os.environ.items() if k not in _GH_ENV_DROPPED}
+    env["GH_CONFIG_DIR"] = str(config_dir)
+    where = f"gh auth token ({HISTORY_LABEL})"
+    try:
+        done = subprocess.run(
+            ["gh", "auth", "token", "--hostname", SUPPORTED_HOST],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return Unavailable(f"{where}: {type(exc).__name__}")
+    if done.returncode != 0:
+        return Unavailable(f"{where}: код выхода {done.returncode}")
+    token = done.stdout.strip()
+    if not token:
+        return Unavailable(f"{where}: пустой вывод")
+    if not _TOKEN_FORM.fullmatch(token):
+        return Unavailable(f"{where}: вывод не в форме токена")
+    return token
+
+
+def transport_fact(transport: Any, cred: Credential, path: str) -> Fact[object]:
+    """`GET <path>` транспортом решения; не 200 или не объект — `unavailable(
+    f"GET {path} ({cred.label}): HTTP {status} {error}")`; тело — как есть."""
+    from steward.approvalfacts.v3 import Request
+
+    resp = transport.send(Request("GET", path))
+    if resp.status != 200 or not isinstance(resp.body, dict):
+        why = f"HTTP {resp.status} {resp.error or ''}".rstrip()
+        return unavailable(f"GET {path} ({cred.label}): {why}")
+    return Fact(Outcome.FOUND, resp.body, "ok")
 
 
 # --- периметр -----------------------------------------------------------------------
@@ -378,7 +483,13 @@ def read_trust_snapshot(anon: Any, binding: Binding) -> TrustSnapshot | Unavaila
 def gh_get(cred: Credential, path: str) -> Fact[object]:
     """`gh api <path>` ИМЕННО этим credential на `github.com`: токены и хост
     окружения снимаются, чтобы профиль не подменился чужим токеном, а
-    самоотчёт не ушёл на другой хост."""
+    самоотчёт не ушёл на другой хост. `profile:history` сюда не ходит (Р-18):
+    его токен не уходит в окружение `gh`."""
+    if cred.label == HISTORY_LABEL:
+        return unavailable(
+            f"gh api {path} ({HISTORY_LABEL}): самоотчёт токена истории — "
+            "только через транспорт истории"
+        )
     env = {k: v for k, v in os.environ.items() if k not in _GH_ENV_DROPPED}
     if cred.token is not None:
         env["GH_TOKEN"] = cred.token
@@ -426,13 +537,56 @@ Found = tuple[str, str] | Unavailable | None
 """Нарушение `(роль репо, деталь)`, недоступность или чисто."""
 
 
+def _creds_refusal(creds: Sequence[Credential]) -> Unavailable | None:
+    """Каждый credential — форма из `_CRED_SHAPES`, иначе `HISTORY_NOT_WIRED`
+    (до ввода-вывода: `profile:history` создаёт только `load_trust`)."""
+    for cred in creds:
+        shape = (cred.gh_config_dir is not None, cred.token is not None)
+        if _CRED_SHAPES.get(cred.label) != shape:
+            return Unavailable(HISTORY_NOT_WIRED)
+    return None
+
+
+def _shared_profile_refusal(
+    creds: Sequence[Credential], binding: Binding
+) -> Unavailable | None:
+    """Профиль истории отдельный от профилей агента и мержа (§6.2): credential с
+    тем же каталогом `gh` — `HISTORY_PROFILE_SHARED` до ввода-вывода (ревью 11c)."""
+    history = binding.history_gh_config_dir
+    if history is None:
+        return None
+    own = history.resolve()
+    for cred in creds:
+        if cred.gh_config_dir is not None and cred.gh_config_dir.resolve() == own:
+            return Unavailable(HISTORY_PROFILE_SHARED)
+    return None
+
+
 def _self_report(
     readers: Readers, creds: Sequence[Credential], snap: TrustSnapshot
+) -> Found:
+    return _report(readers.as_credential, creds, snap)
+
+
+def _history_self_report(transport: Any, snap: TrustSnapshot) -> Found:
+    """Самоотчёт `profile:history` объектом транспорта решения: `GET repos/{repo}`
+    обоих репо доверия через `transport_fact`, вердикт — `permissions_refusal`
+    (Р-18; `readers.as_credential` не вызывается)."""
+    history = Credential(HISTORY_LABEL)
+    return _report(
+        lambda cred, path: transport_fact(transport, cred, path), (history,), snap
+    )
+
+
+def _report(
+    read: Callable[[Credential, str], Fact[object]],
+    creds: Sequence[Credential],
+    snap: TrustSnapshot,
 ) -> Found:
     gap: Unavailable | None = None
     for cred in creds:
         for role, repo in _roles(snap):
-            fact = readers.as_credential(cred, _repo_path(repo))
+            fact = read(cred, _repo_path(repo))
             body = fact.value if fact.outcome is Outcome.FOUND else None
             perms = body.get("permissions") if isinstance(body, dict) else None
             verdict = permissions_refusal(perms if isinstance(perms, dict) else None)
@@ -492,10 +646,10 @@ def _register(
 
 
 def _snapshot_for_decision(
-    readers: Readers, binding: Binding, journal: Journal
+    transport: Any, binding: Binding, journal: Journal
 ) -> TrustSnapshot | Unavailable:
     for _ in range(3):
-        snap = read_trust_snapshot(readers.anon, binding)
+        snap = read_trust_snapshot(transport, binding)
         if isinstance(snap, Unavailable):
             return snap
         state = journal.status(snap)
@@ -511,28 +665,52 @@ def _snapshot_for_decision(
     return Unavailable("снимок df-trust сдвигается быстрее проверки периметра")
 
 
+def _self_reports(
+    readers: Readers, creds: Sequence[Credential], snap: TrustSnapshot, history: Any
+) -> Found:
+    """Переданные credentials, затем (при ключе) `profile:history` транспортом
+    решения; нарушение любого побеждает недоступность другого (как в 12a)."""
+    found = _self_report(readers, creds, snap)
+    if isinstance(found, tuple) or history is None:
+        return found
+    own = _history_self_report(history, snap)
+    return own if isinstance(own, tuple) or found is None else found
+
+
 def load_trust(
     readers: Readers,
     binding: Binding,
     journal: Journal,
     *,
     creds: Sequence[Credential],
+    open_url: Callable[..., Any] | None = None,
+    token_source: Callable[[Path], str | Unavailable] | None = None,
 ) -> Trust | Unavailable:
-    """Обязательные проверки перед решением (п. 1–5 Task 12a), с ранним выходом.
+    """Обязательные проверки перед решением (п. 1–5 Task 12a), с ранним выходом,
+    на транспорте, который строит сам (Task 11c, C6): снаружи внедряемы только
+    швы ввода-вывода `open_url` и `token_source`; токен читается раз на решение,
+    тот же объект транспорта читает снимок, журнал периметра и повторы `STALE`.
 
     Журнал периметра обязателен у КАЖДОГО потребителя, включая предпроверку
     мержа (ревизия b1: `act_journal_wire`): блок, зарегистрированный другим
     потребителем, учитывается, а обнаруженное здесь нарушение сохраняется."""
     if not creds:
         return Unavailable("самоотчёт: процесс не назвал ни одного credential")
-    snap = _snapshot_for_decision(readers, binding, journal)
+    refused = _creds_refusal(creds) or _shared_profile_refusal(creds, binding)
+    if refused is not None:
+        return refused
+    transport = history_transport(binding, open_url=open_url, token_source=token_source)
+    if isinstance(transport, Unavailable):
+        return transport
+    snap = _snapshot_for_decision(transport, binding, journal)
     if isinstance(snap, Unavailable):
         return snap
+    keyed = binding.history_gh_config_dir is not None
     unverified: tuple[str, ...] = ()
     for check in (
-        lambda: _self_report(readers, creds, snap),
-        lambda: _rulesets(readers.anon, snap),
-        lambda: _rebase(readers.anon, snap),
+        lambda: _self_reports(readers, creds, snap, transport if keyed else None),
+        lambda: _rulesets(transport, snap),
+        lambda: _rebase(transport, snap),
     ):
         found = check()
         if found == REBASE_PREMISE:
@@ -547,9 +725,7 @@ def load_trust(
 # --- якоря, диапазоны, наборы --------------------------------------------------------
 
 
-def load_anchor_times(
-    anon: Any, trust: Trust, t: datetime
-) -> dict[str, datetime | Unavailable]:
+def load_anchor_times(trust: Trust, t: datetime) -> dict[str, datetime | Unavailable]:
     """Время якоря КАЖДОЙ эпохи (`merged_at` активации, №19).
 
     Не лениво (ревизия b1, B1-10): admission при `merge`/без записи на T
@@ -558,12 +734,13 @@ def load_anchor_times(
     старого якоря записывается `Unavailable` и мешает лишь решению, которое от
     него зависит (`_epoch_at` идёт от новой эпохи назад и до старого якоря не
     доходит, если новый уже предшествует T). `t` — для симметрии с
-    `load_ranges` и будущего предела обхода; на чтение не влияет.
+    `load_ranges` и будущего предела обхода; на чтение не влияет. Читает
+    транспортом решения `trust.transport` (R7).
     """
     del t
     times: dict[str, datetime | Unavailable] = {}
     for epoch in reversed(trust.epochs):
-        got = act_facts.activation(anon, trust.source, epoch.anchor)
+        got = act_facts.activation(trust.transport, trust.source, epoch.anchor)
         times[epoch.anchor] = got if isinstance(got, Unavailable) else got.merged_at
     return times
 
@@ -592,7 +769,6 @@ def policy_set(
 
 
 def load_ranges(
-    anon: Any,
     trust: Trust,
     anchor_at: Mapping[str, datetime | Unavailable],
     t: datetime,
@@ -607,7 +783,9 @@ def load_ranges(
     отказ (§6.3; ревизия b1 сняла исключение для закрытых эпох). Недочитанный
     диапазон — значение `Unavailable`: решение спросит его, только если оно от
     него зависит (e5, e7). Эпоха с неизвестным временем якоря — `Unavailable`.
+    Читает транспортом решения `trust.transport` (R7).
     """
+    anon = trust.transport
     ranges: dict[int, Span | Unavailable] = {}
     sets: dict[str, PolicySet | Unavailable] = {}
     for epoch in trust.epochs:

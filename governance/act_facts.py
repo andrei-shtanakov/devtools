@@ -9,8 +9,8 @@
 Второй реализации логики ревью здесь нет — только перекладка полей.
 
 Транспорт выбирает вызывающий (правило steward §12 п. 1): факты акта —
-`gh_transport` (GraphQL с токеном), история и активация — анонимный
-`act_anon.AnonTransport`.
+`gh_transport` (GraphQL с токеном), история и активация — транспорт
+источников доверия, который строит `load_trust` (Task 11c).
 """
 
 from __future__ import annotations
@@ -168,7 +168,8 @@ def history(
 ) -> tuple[ActivationFact, ...] | HistoryBreak | Unavailable:
     """Активации ветки источника `anchor…until` по first-parent (steward §3.7).
 
-    Транспорт — анонимный (`act_anon`); ветка обязана быть default branch
+    Транспорт — источников доверия, который строит `load_trust` (Task 11c); ветка
+    обязана быть default branch
     источника (О11), иначе `Unavailable: branch_not_default`.
     """
     v3 = _v3()

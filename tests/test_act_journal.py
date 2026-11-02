@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from df.publisher import request as preq
 from governance import act_journal, act_trust
 from governance.act_epochs import Epoch
@@ -12,6 +14,8 @@ from governance.act_source import SourceV2
 from governance.act_time import Unavailable
 
 ROOT = act_trust.TrustRoot("github.com", 11, "main", "1" * 40)
+#: Транспорт решения стенда: снимок несёт его, журнал передаёт `ForgeEpochs.via`.
+TRANSPORT = object()
 
 
 def snap(epoch: int = 1, sha: str = "1" * 40) -> act_trust.TrustSnapshot:
@@ -22,27 +26,40 @@ def snap(epoch: int = 1, sha: str = "1" * 40) -> act_trust.TrustSnapshot:
         "owner/df-trust",
         SourceV2("owner/ap", "main", "a" * 40, frozenset({"o"})),
         epochs,
+        transport=TRANSPORT,
     )
 
 
 class Head:
-    """Источник эпох стенда: текущий снимок корня или недоступность."""
+    """`read_trust_snapshot` стенда: текущий снимок корня или недоступность;
+    перечитывание обязано идти транспортом решения."""
 
     def __init__(self, current: object) -> None:
         self.current = current
 
-    def __call__(self) -> object:
+    def __call__(self, transport: object, binding: act_trust.Binding) -> object:
+        assert transport is TRANSPORT and binding == BINDING
         return self.current
 
 
 POLICY_ID = 22
+BINDING = act_trust.Binding(
+    "github.com", 11, "owner/df-trust", "main", POLICY_ID, "public"
+)
 
 
-def journal(tmp_path: Path, head: Head) -> act_journal.DevJournal:
-    return act_journal.DevJournal(tmp_path.resolve(), "run-1", head, POLICY_ID)
+@pytest.fixture()
+def journal(monkeypatch: pytest.MonkeyPatch):
+    """`journal(tmp_path, head)` — dev-журнал, перечитывающий голову через `head`."""
+
+    def make(tmp_path: Path, head: Head) -> act_journal.DevJournal:
+        monkeypatch.setattr(act_journal, "read_trust_snapshot", head)
+        return act_journal.DevJournal(tmp_path.resolve(), "run-1", BINDING, POLICY_ID)
+
+    return make
 
 
-def test_event_names_the_violated_repository(tmp_path: Path) -> None:
+def test_event_names_the_violated_repository(tmp_path: Path, journal) -> None:
     """B1-18: событие роли approval-policy несёт id approval-policy, не df-trust."""
     import sqlite3
 
@@ -60,7 +77,7 @@ def test_event_names_the_violated_repository(tmp_path: Path) -> None:
     assert rows == [("approval-policy", POLICY_ID), ("df-trust", 11)]
 
 
-def test_clear_then_blocked_then_new_epoch(tmp_path: Path) -> None:
+def test_clear_then_blocked_then_new_epoch(tmp_path: Path, journal) -> None:
     head = Head(snap(1))
     j = journal(tmp_path, head)
     assert j.status(snap(1)) == "clear"
@@ -70,7 +87,7 @@ def test_clear_then_blocked_then_new_epoch(tmp_path: Path) -> None:
     assert j.status(snap(2, "2" * 40)) == "clear"
 
 
-def test_pending_blocks_until_epochs_known(tmp_path: Path) -> None:
+def test_pending_blocks_until_epochs_known(tmp_path: Path, journal) -> None:
     """Приёмка №36: журнал эпох недоступен при регистрации → pending, блокирует."""
     head = Head(Unavailable("df-trust: 403"))
     j = journal(tmp_path, head)
@@ -82,12 +99,12 @@ def test_pending_blocks_until_epochs_known(tmp_path: Path) -> None:
     assert j.status(snap(2, "2" * 40)) == "clear"
 
 
-def test_stale_snapshot_reported(tmp_path: Path) -> None:
+def test_stale_snapshot_reported(tmp_path: Path, journal) -> None:
     head = Head(snap(1, "2" * 40))
     assert journal(tmp_path, head).status(snap(1)) == act_trust.STALE
 
 
-def test_corrupted_store_blocks(tmp_path: Path) -> None:
+def test_corrupted_store_blocks(tmp_path: Path, journal) -> None:
     """Заметки части A, п. 12: битое хранилище — fail-closed, новая эпоха не снимает."""
     head = Head(snap(1))
     j = journal(tmp_path, head)
@@ -121,15 +138,19 @@ def test_status_answer_about_other_snapshot_unavailable() -> None:
     assert isinstance(odd, Unavailable) and odd.reason == "периметр: x"
 
 
-def test_forge_epochs_refuse_other_root() -> None:
+def test_forge_epochs_refuse_other_root(monkeypatch) -> None:
     """b4: источник эпох отвечает только о своём корне."""
-    epochs = act_journal.ForgeEpochs(Head(snap(1)))
+    monkeypatch.setattr(act_journal, "read_trust_snapshot", Head(snap(1)))
+    epochs = act_journal.ForgeEpochs(BINDING)
+    epochs.via(TRANSPORT)
     other = epochs.head(("github.com", 99, "main"))
     assert (
         isinstance(other, act_journal.store.Unavailable)
         and other.reason == "root_mismatch"
     )
-    gone = act_journal.ForgeEpochs(Head(Unavailable("403")))
+    monkeypatch.setattr(act_journal, "read_trust_snapshot", Head(Unavailable("403")))
+    gone = act_journal.ForgeEpochs(BINDING)
+    gone.via(TRANSPORT)
     lost = gone.head(ROOT.id_tuple)
     assert (
         isinstance(lost, act_journal.store.Unavailable)
@@ -137,8 +158,23 @@ def test_forge_epochs_refuse_other_root() -> None:
     )
 
 
+@pytest.mark.parametrize("passed", [False, True], ids=["no_via", "via_none"])
+def test_forge_epochs_without_transport_unavailable(monkeypatch, passed: bool) -> None:
+    """Р-23, C7-01: без транспорта решения голова не перечитывается и транспорт
+    не строится — `store.Unavailable`, `read_trust_snapshot` не вызывается."""
+    monkeypatch.setattr(
+        act_journal, "read_trust_snapshot", lambda t, b: pytest.fail("перечитано")
+    )
+    epochs = act_journal.ForgeEpochs(BINDING)
+    if passed:  # снимок без транспорта (`TrustSnapshot.transport` — None)
+        epochs.via(None)
+    got = epochs.head(ROOT.id_tuple)
+    assert isinstance(got, act_journal.store.Unavailable)
+    assert got.reason == "транспорт решения не передан"
+
+
 def test_dev_record_refused_by_store_is_unavailable(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, journal, monkeypatch
 ) -> None:
     """b4: хранилище отказало в записи события — `Unavailable` с его причиной."""
     j = journal(tmp_path, Head(snap(1)))
@@ -177,7 +213,7 @@ def test_installed_record_refused_is_unavailable(monkeypatch) -> None:
     )
 
 
-def test_deleted_store_with_marker_is_lost(tmp_path: Path) -> None:
+def test_deleted_store_with_marker_is_lost(tmp_path: Path, journal) -> None:
     head = Head(snap(1))
     j = journal(tmp_path, head)
     j.status(snap(1))
@@ -191,7 +227,7 @@ def test_installed_journal_requires_df_run(tmp_path: Path, monkeypatch) -> None:
     got = act_journal.journal_for(
         state_home=tmp_path,
         run_id="r",
-        reread=Head(snap()),
+        binding=BINDING,
         env={},
         policy_repository_id=POLICY_ID,
     )
@@ -199,7 +235,7 @@ def test_installed_journal_requires_df_run(tmp_path: Path, monkeypatch) -> None:
     dev = act_journal.journal_for(
         state_home=tmp_path,
         run_id="r",
-        reread=Head(snap()),
+        binding=BINDING,
         env={"DF_RUN_ID": "run-7"},
         policy_repository_id=POLICY_ID,
     )
@@ -211,7 +247,7 @@ def test_dev_journal_without_publisher(tmp_path: Path, monkeypatch) -> None:
     got = act_journal.journal_for(
         state_home=tmp_path,
         run_id="r",
-        reread=Head(snap()),
+        binding=BINDING,
         env={"DF_RUN_ID": "ignored"},
         policy_repository_id=POLICY_ID,
     )
@@ -297,10 +333,22 @@ def test_dev_journal_mkdir_failure_is_unavailable(tmp_path: Path, monkeypatch) -
     got = act_journal.journal_for(
         state_home=tmp_path,
         run_id="r",
-        reread=Head(snap()),
+        binding=BINDING,
         env={},
         policy_repository_id=POLICY_ID,
     )
     assert isinstance(got, Unavailable) and got.reason.startswith(
         "журнал периметра (dev): "
     )
+
+
+def test_record_without_prior_status_registers_epoch(tmp_path: Path, journal) -> None:
+    """Р-23 (ревью Task 11c, Minor 2): `record` сам передаёт транспорт снимка
+    `ForgeEpochs.via` — событие сразу `registered` с эпохой, а не `pending`."""
+    import sqlite3
+
+    j = journal(tmp_path, Head(snap(1)))
+    assert j.record(snap(1), "df-trust", "push у профиля мержа") is None
+    db = j.layout.perimeter_dir / "events.sqlite"
+    rows = sqlite3.connect(db).execute("SELECT state, epoch FROM events").fetchall()
+    assert rows == [("registered", 1)]

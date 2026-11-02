@@ -291,6 +291,33 @@ def test_trust_unknown_key() -> None:
         parse_trust(TRUST.format(transport="public") + "x = 1\n")
 
 
+HISTORY = 'history_gh_config_dir = "/etc/df/gh-history"\n'
+
+
+def test_trust_history_key_absent_unchanged() -> None:
+    b = parse_trust(TRUST.format(transport="public"))
+    assert b.history_gh_config_dir is None and b.root_id == ("github.com", 5, "main")
+
+
+def test_trust_history_key_absolute_path() -> None:
+    b = parse_trust(TRUST.format(transport="public") + HISTORY)
+    assert b.history_gh_config_dir == "/etc/df/gh-history"
+
+
+@pytest.mark.parametrize(
+    "value",
+    ['""', '"gh-history"', '"./gh"', "1"],
+    ids=["empty", "relative", "dot", "int"],
+)
+def test_trust_history_key_rejects_bad_path(value: str) -> None:
+    with pytest.raises(
+        ConfigError, match="history_gh_config_dir: must be an absolute path"
+    ):
+        parse_trust(
+            TRUST.format(transport="public") + f"history_gh_config_dir = {value}\n"
+        )
+
+
 def test_run_record_roundtrip() -> None:
     rec = record()
     assert parse_run(dump_run(rec)) == rec
