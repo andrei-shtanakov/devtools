@@ -193,34 +193,63 @@ def _generation(event: Event, node: str) -> int:
     return event.request.nodes[node].generation
 
 
-def current_event(history: History, node: str) -> Event | None:
-    """Действующее событие узла: последнее по first-parent."""
-    for event in reversed(history):
-        if _touches(event, node):
-            return event
-    return None
+@dataclass(frozen=True)
+class Ignored:
+    """Запись узла, не ставшая его событием (п. 9 заметок части A, вариант (Б))."""
+
+    event: Event
+    reason: str
 
 
-def generation_refusal(history: History, node: str) -> str | None:
-    """Поколения заявок узла строго растут; остановка — того же поколения."""
-    last = 0
+@dataclass(frozen=True)
+class NodeHistory:
+    """Действующее состояние истории узла — единственное вычисление (решение
+    владельца 01.11): `current` — действующее событие; `generation` — поколение
+    последней принятой заявки (0 — не было); `top` — наибольшее поколение среди
+    ВСЕХ записей узла, включая проигнорированные (`next_generation` его
+    превышает: новый файл не совпадёт с лежащим); `ignored` — записи, не
+    ставшие событием, с причиной."""
+
+    current: Event | None
+    generation: int
+    top: int
+    ignored: tuple[Ignored, ...]
+
+
+def node_history(history: History, node: str) -> NodeHistory:
+    """Один проход по записям узла, старые первыми. Заявка с поколением не больше
+    действующего и остановка не действующего поколения игнорируются: не становятся
+    событием и не сдвигают поколение — полномочий не дают и узел не запирают."""
+    current: Event | None = None
+    last = top = 0
+    ignored: list[Ignored] = []
     for event in history:
         if not _touches(event, node):
             continue
         gen = _generation(event, node)
-        if isinstance(event, DeliveredStop):
-            if gen != last:
-                return f"узел {node}: остановка поколения {gen}, действует {last}"
-        elif gen <= last:
-            return f"узел {node}: поколение {gen} не больше прежнего {last}"
-        last = gen
-    return None
+        top = max(top, gen)
+        if isinstance(event, DeliveredStop) and (gen != last or last == 0):
+            reason = f"узел {node}: остановка поколения {gen}, действует {last}"
+            ignored.append(Ignored(event, reason))
+            continue
+        if isinstance(event, DeliveredRequest) and gen <= last:
+            reason = f"узел {node}: поколение {gen} не больше прежнего {last}"
+            ignored.append(Ignored(event, reason))
+            continue
+        if isinstance(event, DeliveredRequest):
+            last = gen
+        current = event
+    return NodeHistory(current, last, top, tuple(ignored))
+
+
+def current_event(history: History, node: str) -> Event | None:
+    """Действующее событие узла — из `node_history`."""
+    return node_history(history, node).current
 
 
 def next_generation(history: History, node: str) -> int:
-    """Поколение следующей заявки узла."""
-    gens = [_generation(e, node) for e in history if _touches(e, node)]
-    return max(gens, default=0) + 1
+    """Поколение следующей заявки узла — из `node_history`."""
+    return node_history(history, node).top + 1
 
 
 def _expected(current: DeliveredRequest, node: str, review_id: str) -> Envelope:
@@ -239,6 +268,11 @@ def _expected(current: DeliveredRequest, node: str, review_id: str) -> Envelope:
     )
 
 
+def expected_envelope(current: DeliveredRequest, node: str, review_id: str) -> Envelope:
+    """Конверт, который обязан лежать в базе для действующей заявки (finalize)."""
+    return _expected(current, node, review_id)
+
+
 def envelope_refusal(
     env: Envelope | None,
     history: History,
@@ -248,9 +282,6 @@ def envelope_refusal(
     review_id: str,
 ) -> str | None:
     """Причина «не одобрен» либо `None` (§9.1 п. 0a, 1, 2; §8 остановка)."""
-    broken = generation_refusal(history, node)
-    if broken is not None:
-        return broken
     current = current_event(history, node)
     if current is None:
         return f"узел {node}: нет доставленной заявки review/v1"

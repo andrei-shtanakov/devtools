@@ -20,6 +20,8 @@ from governance.act_envelope import (  # noqa: E402
     Envelope,
     StopRecord,
     envelope_path,
+    next_generation,
+    node_history,
     parse_envelope,
     render_envelope,
     render_stop,
@@ -191,6 +193,71 @@ def test_stopped_upstream_with_unchanged_bytes_blocks_downstream() -> None:
     stop = DeliveredStop("d" * 40, StopRecord("requirements", 1, "переоткрыт"))
     st = statuses((r1, r2, stop), snap)
     assert st.of("behaviour-spec") == "not_approved:upstream_stopped:requirements"
+
+
+STRAY = DeliveredStop("d" * 40, StopRecord("behaviour-spec", 7, "чужое поколение"))
+
+
+def _beh(rid: str, merge: str, gen: int) -> DeliveredRequest:
+    return delivered(
+        rid,
+        merge,
+        {"behaviour-spec": (H_BEH, gen)},
+        {"behaviour-spec": {"requirements": "blob-req"}},
+    )
+
+
+def test_ignored_record_then_next_generation_approves() -> None:
+    """П. 9 заметок части A, вариант (Б) (решение владельца 01.11): проигнорированные
+    записи (остановка чужого поколения, заявка с неубывающим поколением) узел не запирают —
+    одобрение прежнего поколения действует, следующая заявка `g+1` одобряет узел."""
+    (r1, r2), snap = both_approved()
+    history = (r1, r2, STRAY, _beh("approve-3-1-1", "c" * 40, 1))
+    assert statuses(history, snap).of("behaviour-spec") == "approved"
+    gen = next_generation(history, "behaviour-spec")
+    r4 = _beh("approve-4-1-1", "e" * 40, gen)
+    history = (*history, r4)
+    assert "конверт другого поколения" in statuses(history, snap).of("behaviour-spec")
+    snap.files[envelope_path(WS, "behaviour-spec")] = envelope(r4, "behaviour-spec")
+    assert statuses(history, snap).of("behaviour-spec") == "approved"
+
+
+@pytest.mark.parametrize(
+    "tail", ["none", "stray_stop", "stale_request", "own_stop", "stray_then_own_stop"]
+)
+def test_statuses_agree_with_node_history(tail: str) -> None:
+    """Решение владельца 01.11: `Statuses` выводит событие узла из того же `node_history`,
+    что `current_event`/`envelope_refusal`/`reopen`, — второго правила пропуска нет."""
+    (r1, r2), snap = both_approved()
+    own = DeliveredStop("e" * 40, StopRecord("behaviour-spec", 1, "переоткрыт"))
+    extra = {
+        "none": (),
+        "stray_stop": (STRAY,),
+        "own_stop": (own,),
+        "stale_request": (_beh("approve-3-1-1", "c" * 40, 1),),
+        "stray_then_own_stop": (STRAY, own),
+    }[tail]
+    history = (r1, r2, *extra)
+    state = node_history(history, "behaviour-spec")
+    st = statuses(history, snap)
+    assert st.is_review("behaviour-spec") is (state.current is not None)
+    current = state.current
+    expected = (
+        "approved"
+        if current is r2
+        else f"not_approved:stopped:g{current.stop.generation}"  # type: ignore[union-attr]
+    )
+    assert st.of("behaviour-spec") == expected
+
+
+def test_stray_stop_does_not_make_legacy_node_review() -> None:
+    """П. 9 (Б): остановка узла без события `review/v1` — не событие; узел остаётся на
+    старом пути с тем же ответом, что без записи (DoS одной записью невозможен)."""
+    _history, snap = both_approved()
+    stray = DeliveredStop("d" * 40, StopRecord("requirements", 1, "чужая запись"))
+    st = statuses((stray,), snap)
+    assert st.is_review("requirements") is False
+    assert st.of("requirements") == statuses((), snap).of("requirements")
 
 
 def test_cascade_by_pins_without_a_history_record() -> None:

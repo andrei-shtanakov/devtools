@@ -118,6 +118,13 @@ def _act(
     return None
 
 
+def find_act(
+    head_sha: str, effective: Mapping[str, ReviewView], policy: PolicySet
+) -> ReviewView | None:
+    """Действительный approve человека на `head_sha` (D1) — для живой заявки."""
+    return _act(head_sha, effective, policy)
+
+
 def _merger_ok(policy: PolicySet, login: str, hint: str | None) -> bool:
     actor = classify(policy, login, hint)
     if actor == "agent":

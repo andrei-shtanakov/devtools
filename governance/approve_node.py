@@ -41,8 +41,10 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from governance import approval_facts as af
 from governance import approval_ledger as al
@@ -50,12 +52,16 @@ from governance import brief_input, bundle_dag, bundle_inputs, pr_checks
 from governance import node_approval as na
 from governance.act_check import LegacyAccepted
 from governance.act_decision import Rejected
+from governance.act_request import ACT_REVIEW_V1
 from governance.act_time import Unavailable
 from governance.approval_facts import Disposition, Outcome
 from governance.frontmatter import split_frontmatter, update_frontmatter
 from governance.ops import Ops
 from governance.policy_sources import build_authority, load_safety
 from governance.run_state import RunState
+
+if TYPE_CHECKING:
+    from governance.act_node import Creation
 
 
 def finalize_merge_policy(target_dir: str) -> tuple[str, str]:
@@ -309,6 +315,11 @@ def approve_node(
     dag = bundle_dag.dag_for(legacy_bundle)
     _sync_base_and_settle(state, ops, dag)
     _require_known(dag, [node_id])
+    from governance import act_node
+
+    # Аудит позднего отзыва завершённых заявок `review/v1` (§8, приёмка №10):
+    # решения не меняет, события — в соседней записи леджера.
+    act_node.audit_completed(state, ops)
     # Сверка состава — по ВСЕМ живым заявкам и ДО ветвления, а не внутри
     # ветки продвижения. Заявка, у которой выпали ВСЕ узлы, иначе
     # недостижима ни одним вызовом: по её узлам приходит отказ «нет в
@@ -373,21 +384,53 @@ def _propose(
     node_id: str,
 ) -> ApprovalOutcome:
     """Решение по состоянию узла в base и, если надо, фаза 1."""
+    from governance import act_node, act_status
+
     fname = _filename(dag, node_id)
     text = _base_text(ops, state, fname)
     upstream_blobs = _base_upstream_blobs(ops, state, dag, node_id)
-    debt = na.node_debt(node_id, text, upstream_blobs)
-    if debt is None:
-        # Пункт 4: повтор над честно одобренным узлом. Ни записи в файл, ни
-        # candidate-PR, ни инкремента `version` — иначе сменился бы блоб
-        # узла, его downstream уехал бы в `stale`, и каждый лишний вызов
-        # плодил бы долг одобрения на ровном месте.
-        return ApprovalOutcome(f"{node_id}: честно одобрен — одобрять нечего (no-op)")
-    if debt.kind in (na.DEBT_PINS, na.DEBT_UNKNOWN_STATUS):
-        # Пункт 6: молчаливая перепиновка здесь означала бы ровно то
-        # действие, которым spec-runner#410 сделал ложное утверждение
-        # истинным на вид.
-        raise RuntimeError(debt.render())
+    deps = act_node.DEPS_FACTORY(state)
+    live = act_status.mode_probe(state, deps)  # один раз: и статус, и режим создания
+    if isinstance(live, Unavailable):  # d1 (D1-1): до любого no-op — режим неизвестен
+        raise _unresolved(f"режим акта продукта (узел {node_id}): {live.reason}")
+    statuses = (
+        act_status.statuses_at_base(state, ops, dag, live, deps)
+        if live.mode == "review"
+        else None
+    )
+    if statuses is not None and statuses.is_review(node_id):
+        verdict = statuses.of(node_id)
+        if verdict == act_status.APPROVED:
+            return ApprovalOutcome(f"{node_id}: честно одобрен (review/v1) — no-op")
+        if verdict.startswith("unavailable:"):
+            raise _unresolved(f"статус узла {node_id}: {verdict}")
+        debt = _review_debt(node_id, text, verdict)
+    else:
+        debt = na.node_debt(node_id, text, upstream_blobs)
+        if debt is None and statuses is not None:
+            # d1: продукт в `review` — frontmatter без долга лишь предпосылка
+            # (§9.1 (а) п. 3); no-op только при актуальном статусе узла
+            # (provenance старого акта)
+            verdict = statuses.of(node_id)
+            if verdict.startswith("unavailable:"):
+                raise _unresolved(
+                    f"статус узла {node_id} без события review/v1: {verdict}"
+                )
+            if verdict != act_status.APPROVED:
+                debt = _review_debt(node_id, text, verdict)
+        if debt is None:
+            # Пункт 4: повтор над честно одобренным узлом. Ни записи в файл, ни
+            # candidate-PR, ни инкремента `version` — иначе сменился бы блоб
+            # узла, его downstream уехал бы в `stale`, и каждый лишний вызов
+            # плодил бы долг одобрения на ровном месте.
+            return ApprovalOutcome(
+                f"{node_id}: честно одобрен — одобрять нечего (no-op)"
+            )
+        if debt.kind in (na.DEBT_PINS, na.DEBT_UNKNOWN_STATUS):
+            # Пункт 6: молчаливая перепиновка здесь означала бы ровно то
+            # действие, которым spec-runner#410 сделал ложное утверждение
+            # истинным на вид.
+            raise RuntimeError(debt.render())
 
     # Политика подписи закрепляется ДО первой записи (спека approval-policy
     # §4.3): новая заявка — актуальная версия; присоединение к живой —
@@ -399,6 +442,7 @@ def _propose(
     # отказ по политике на них был бы ложным (devtools#332).
     _require_upstream_ready(state, ops, dag, node_id)
     _require_no_reopened_pr(state, ops, node_id)
+    made = act_node.creation(state, ops, deps, live)  # отказ — до первой записи
 
     self_hash = na.self_hash(text)
     step = _levels(dag)[node_id]
@@ -412,14 +456,18 @@ def _propose(
             "предлагается по base — в одну заявку они не соединяются; "
             "дождитесь её терминализации и повторите"
         )
-    snapshot = _pinned_policy(state, ops, joined, node_id)
+    _require_same_act(joined, made.act)
+    policy_record = _creation_policy(state, ops, joined, node_id, made)
+    generation = act_node.generation_of(made, node_id) if made.act else None
 
     _close_obsolete_wave(state, nodes, fingerprint)
     wave = _wave_for(state, nodes, fingerprint)
     if joined is not None:
         nums, _op = joined
         key = al.request_key(*nums)
-        al.extend_request(state, key, node_id, self_hash, upstream_blobs)
+        al.extend_request(
+            state, key, node_id, self_hash, upstream_blobs, generation=generation
+        )
     else:
         attempt = al.next_attempt(state, wave, step)
         key = al.start_request(
@@ -431,9 +479,45 @@ def _propose(
             [node_id],
             {node_id: self_hash},
             {node_id: upstream_blobs},
-            policy=snapshot.as_record(),
+            policy=policy_record,
+            act=made.act,
+            generations={node_id: generation} if generation is not None else None,
         )
     return _publish_candidate(state, ops, dag, key, debt)
+
+
+def _require_same_act(
+    joined: tuple[tuple[int, int, int], dict] | None, act: str | None
+) -> None:
+    """Присоединение — только к живой заявке той же версии акта (b5/b6)."""
+    if joined is not None and joined[1].get("act") != act:
+        raise RuntimeError(
+            f"живая заявка {al.request_key(*joined[0])} шага — акт "
+            f"{joined[1].get('act') or 'без маркера'}, новая — "
+            f"{act or 'без маркера'}: в одну заявку они не соединяются; дождитесь "
+            "её терминализации"
+        )
+
+
+def _creation_policy(
+    state: RunState,
+    ops: Ops,
+    joined: tuple[tuple[int, int, int], dict] | None,
+    what: str,
+    made: Creation,
+) -> dict[str, object]:
+    """Пин политики новой заявки ДО первой записи: без маркера — снимок
+    approval-policy (§4.3); `review/v1` — текущая активация, присоединение —
+    только к заявке с тем же пином."""
+    if made.act is None or made.pin is None:
+        return _pinned_policy(state, ops, joined, what).as_record()
+    record = made.pin.as_record()
+    if joined is not None and joined[1].get("policy") != record:
+        raise RuntimeError(
+            f"живая заявка {al.request_key(*joined[0])} закрепила другую активацию "
+            "политики — узел не дописан; дождитесь её policy_changed / --repropose"
+        )
+    return record
 
 
 @dataclass(frozen=True)
@@ -757,6 +841,12 @@ def propose_from_source(
             )
         _require_upstream_ready(state, ops, dag, node)
         _require_no_reopened_pr(state, ops, node)
+    from governance import act_node, act_status
+
+    deps = act_node.DEPS_FACTORY(state)
+    live = act_status.mode_probe(state, deps)
+    made = act_node.creation(state, ops, deps, live)  # отказ — до первой записи
+    generations = {n: act_node.generation_of(made, n) for n in node_ids}
     hashes = {
         node: na.self_hash(_source_text(ops, state, source_sha, _filename(dag, node)))
         for node in node_ids
@@ -774,7 +864,10 @@ def propose_from_source(
             f"{joined[1].get('source_sha')!r}, а не из {source_sha[:8]} — "
             "в одну заявку они не соединяются; дождитесь её терминализации"
         )
-    snapshot = _pinned_policy(state, ops, joined, f"узлов {', '.join(node_ids)}")
+    _require_same_act(joined, made.act)
+    policy_record = _creation_policy(
+        state, ops, joined, f"узлов {', '.join(node_ids)}", made
+    )
 
     _close_obsolete_wave(state, nodes, fingerprint)
     wave = _wave_for(state, nodes, fingerprint)
@@ -792,11 +885,20 @@ def propose_from_source(
             [first],
             {first: hashes[first]},
             {first: pins[first]},
-            policy=snapshot.as_record(),
+            policy=policy_record,
             source_sha=source_sha,
+            act=made.act,
+            generations={first: generations[first]} if made.act else None,
         )
     for node in remaining:
-        al.extend_request(state, key, node, hashes[node], pins[node])
+        al.extend_request(
+            state,
+            key,
+            node,
+            hashes[node],
+            pins[node],
+            generation=generations[node] if made.act else None,
+        )
     return _publish_candidate(state, ops, dag, key, push=push)
 
 
@@ -903,6 +1005,8 @@ def _policy_ref(op: dict) -> str:
     policy = op.get("policy") or {}
     if not policy:
         return "политики (заявка старого формата)"
+    if op.get("act") == ACT_REVIEW_V1:
+        return f"политики {policy['repo']}@{policy['activation_commit']} (review/v1)"
     return f"политики approval-policy@{policy['sha']}"
 
 
@@ -1284,6 +1388,18 @@ def _sync_branch_to_snapshot(
         path.write_text(carried, encoding="utf-8")
         changed.append(rel)
         changed += _cascade_stale(state, dag, node)
+    from governance import act_node
+
+    # Манифест `review/v1` — в коммит candidate (§2, §7): режим и пины живут
+    # внутри одобряемого коммита; заявка без маркера манифеста не несёт.
+    manifest = act_node.manifest_file(state, dag, op, key)
+    if manifest is not None:
+        rel, text = manifest
+        path = Path(state.target_dir) / rel
+        if not (path.is_file() and path.read_text(encoding="utf-8") == text):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+            changed.append(rel)
     forced = _sync_source_layer(state, ops, op)
     changed += forced
     if not changed:
@@ -1519,6 +1635,8 @@ def _publish_candidate(
         )
         al.record_candidate_nodes(state, key, op["nodes"])
     ops.push_branch(state.target_dir, op["branch"])
+    from governance import act_node
+
     if pr is None:
         pr = _adopt_or_create_pr(
             state,
@@ -1527,8 +1645,17 @@ def _publish_candidate(
             op["head_sha"],
             _candidate_title(state, op),
             _candidate_body(state, op, debt),
+            act_node.label_for(op),
         )
         al.record_candidate_pr(state, key, pr, nodes=op["nodes"])
+    if op.get("act") == ACT_REVIEW_V1:
+        return ApprovalOutcome(
+            f"{', '.join(op['nodes'])}: вынесены на одобрение, candidate-PR "
+            f"#{pr}. Одобрение — approve человека из human_approvers по head "
+            "этого PR; после approve повторите вызов — агент доставит PR",
+            request=key,
+            changed=changed,
+        )
     return ApprovalOutcome(
         f"{', '.join(op['nodes'])}: вынесены на одобрение, candidate-PR "
         f"#{pr}. Одобрение совершает МЕРЖ этого PR учёткой из "
@@ -1544,6 +1671,28 @@ def _candidate_title(state: RunState, op: dict) -> str:
 
 
 def _candidate_body(state: RunState, op: dict, debt: na.NodeDebt | None) -> str:
+    if op.get("act") == ACT_REVIEW_V1:
+        policy = op["policy"]
+        return "\n".join(
+            [
+                (
+                    f"Предложение об одобрении узлов бандла {state.ws_id} (§I12, "
+                    "акт review/v1)."
+                ),
+                "",
+                (
+                    "**Акт одобрения — approve человека из `human_approvers` по "
+                    "head этого PR.** Мерж выполнит агент после акта; мерж "
+                    "человеком подписи не создаёт."
+                ),
+                "",
+                f"Узлы: {', '.join(op['nodes'])}.",
+                f"run-id: {state.run_id}",
+                "act: review/v1",
+                f"policy-activation: {policy['activation_commit']}",
+                *(["", f"Повод: {debt.reason}."] if debt is not None else []),
+            ]
+        )
     lines = [
         f"Предложение об одобрении узлов бандла {state.ws_id} (§I12).",
         "",
@@ -1693,6 +1842,15 @@ def _advance(
     сделала, и после падения второе восстанавливается только из леджера.
     """
     step = al.next_step(op)
+    if step is not al.Step.CREATE_CANDIDATE:
+        # Общий вход (спека §10 «до выбора читателя, для обоих путей»; §2
+        # «режим — из манифеста»): маршрут решает по фактам PR и манифесту его
+        # головы; `None` — старый код продолжает.
+        from governance import act_node
+
+        routed = act_node.route(state, ops, dag, op, key, step)
+        if routed is not None:
+            return routed
     if step is al.Step.CREATE_CANDIDATE:
         # Ни одного «если упали до коммита» здесь больше нет: публикация
         # приводит ветку к снимку целиком и сама решает, что дописать.
@@ -2506,8 +2664,18 @@ class MergeRefusal:
     human_merge_helps: bool
 
 
-def _missing_approving_review(state: RunState, ops: Ops, pr: int) -> str | None:
+def _missing_approving_review(
+    state: RunState,
+    ops: Ops,
+    pr: int,
+    *,
+    kind: str = "finalize-PR",
+    retry: str | None = None,
+) -> str | None:
     """Есть ли у finalize-PR действующее одобряющее ревью? None — есть.
+
+    `kind`/`retry` — вид PR и команда повтора в тексте отказа для иного
+    вызывающего (stop-PR `--reopen`); по умолчанию тексты finalize прежние.
 
     Правило репозитория требует одного одобряющего ревью, а автор PR —
     учётка, запустившая механику, и себя она апрувить не может. У свежего
@@ -2532,9 +2700,9 @@ def _missing_approving_review(state: RunState, ops: Ops, pr: int) -> str | None:
     reviews = ops.pr_reviews(state.repo_slug, pr)
     if reviews is None:
         return (
-            f"агентский мерж НЕ выполнен — список ревью finalize-PR #{pr} "
+            f"агентский мерж НЕ выполнен — список ревью {kind} #{pr} "
             "не получен: «одобрения нет» и «его не видно» неразличимы, "
-            "fail-closed. Процедура: повторите вызов"
+            f"fail-closed. Процедура: повторите {retry or 'вызов'}"
         )
     effective: dict[str, str] = {}
     for review in reviews:
@@ -2545,11 +2713,11 @@ def _missing_approving_review(state: RunState, ops: Ops, pr: int) -> str | None:
     if "APPROVED" in effective.values():
         return None
     return (
-        f"агентский мерж НЕ выполнен — у finalize-PR #{pr} нет действующего "
+        f"агентский мерж НЕ выполнен — у {kind} #{pr} нет действующего "
         "одобряющего ревью, которого требует правило репозитория. "
         f"Процедура: опубликуйте scope-аттестацию (`review-pr.sh {pr}`; для "
         "PR, подтверждённого как prose-only, она публикуется без вызова "
-        "модели), затем повторите тот же вызов `--approve-node`"
+        f"модели), затем повторите {retry or 'тот же вызов `--approve-node`'}"
     )
 
 
@@ -2561,6 +2729,11 @@ def _try_agent_merge(
     nodes: list[str],
     pr: int,
     head: str,
+    *,
+    form: Callable[[], str | None] | None = None,
+    base: str | None = None,
+    kind: str = "finalize-PR",
+    retry: str | None = None,
 ) -> MergeRefusal | None:
     """Агентский мерж finalize: None — вмержен; иначе отказ с причиной и
     признаком, помогает ли здесь человеческий мерж. Идемпотентно: гейт
@@ -2581,24 +2754,41 @@ def _try_agent_merge(
                 f"{op['finalize_branch']}) и повторите вызов",
                 human_merge_helps=False,
             )
-    defect = _envelope_form_defect(state, ops, dag, op, nodes, head)
+    # `form` — проверка формы коммита конверта `review/v1`
+    # (`act_node.envelope_commit_defect`); без неё — конверт frontmatter.
+    defect = (
+        form()
+        if form is not None
+        else _envelope_form_defect(state, ops, dag, op, nodes, head)
+    )
     if defect is not None:
         return MergeRefusal(
             f"агентский мерж НЕ выполнен — {defect}", human_merge_helps=True
         )
-    missing = _missing_approving_review(state, ops, pr)
+    missing = _missing_approving_review(state, ops, pr, kind=kind, retry=retry)
     if missing is not None:
         return MergeRefusal(missing, human_merge_helps=False)
-    # База не пинуется намеренно: у конверта заявки нет вердикта, от базы
-    # которого его можно было бы пиновать, — пин базы есть свойство
-    # вызывающего с вердиктом (accept-pr). Обвязка сверяет пин с живой
-    # верхушкой (devtools#223), но пиновать здесь по-прежнему нечего.
+    # Конверт finalize базу не пинует: у него нет вердикта, от базы которого
+    # его можно было бы пиновать, — пин базы есть свойство вызывающего с
+    # вердиктом (accept-pr). `base` передаёт вызывающий, чья форма проверена
+    # против конкретной верхушки базы (stop-PR `reopen`): обвязка сверяет пин
+    # с живой верхушкой текущей базы PR (devtools#223), ретаргет — отказ.
     waited = _await_required_checks(state, ops, pr, head)
     if waited is not None:
         return waited
     code = 0
     for attempt in range(_MERGE_ATTEMPTS):
-        code = ops.merge(state.repo, pr, head, None)
+        if base is not None and form is not None:
+            # Ожидание проверок и пауза ретрая — минуты: PR могли перенацелить на
+            # ветку с той же верхушкой, что база, и `--expect-base` это пропустит
+            # (сверяет с верхушкой ТЕКУЩЕЙ базы PR). Форма (вкл. `baseRefName`) —
+            # заново прямо перед мержем; только у вызывающего с пином базы.
+            late = form()
+            if late is not None:
+                return MergeRefusal(
+                    f"агентский мерж НЕ выполнен — {late}", human_merge_helps=True
+                )
+        code = ops.merge(state.repo, pr, head, base)
         if code == 0:
             return None
         if code not in _TRANSIENT_MERGE_CODES or attempt == _MERGE_ATTEMPTS - 1:

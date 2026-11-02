@@ -3891,3 +3891,26 @@ def test_reconcile_publication_is_read_once(world: World, monkeypatch) -> None:
     monkeypatch.setattr(an, "_snapshot_is_published", counted)
     approve(world, "charter")
     assert calls == [1]
+
+
+def test_suite_ignores_real_install_settings(
+    world: World, tmp_path: Path, monkeypatch
+) -> None:
+    """PR #671 (minor 2): `act.toml` в домашнем каталоге машины (здесь — HOME стенда
+    с `act_migration = "draining"`) на набор не влияет: `_act_isolation` уводит
+    `XDG_CONFIG_HOME` в пустой каталог, предложение без маркера создаётся."""
+    import os
+
+    from governance import act_status
+
+    home = tmp_path / "home"
+    (home / ".config" / "darkfactory").mkdir(parents=True)
+    (home / ".config" / "darkfactory" / "act.toml").write_text(
+        'act_migration = "draining"\n', encoding="utf-8"
+    )
+    monkeypatch.setenv("HOME", str(home))
+    settings = act_status._settings(dict(os.environ))
+    assert not isinstance(settings, act_status.Unavailable) and not settings.draining
+    outcome = approve(world, "charter")
+    assert outcome.request is not None
+    assert world.state.ops[outcome.request].get("act") is None

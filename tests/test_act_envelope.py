@@ -17,8 +17,8 @@ from governance.act_envelope import (
     current_event,
     envelope_path,
     envelope_refusal,
-    generation_refusal,
     next_generation,
+    node_history,
     parse_envelope,
     parse_stop,
     render_envelope,
@@ -112,10 +112,18 @@ def test_new_generation_after_stop_approved() -> None:
     assert next_generation(history, "req") == 4
 
 
-def test_non_monotonic_generation_refused() -> None:
+def test_non_monotonic_request_ignored() -> None:
+    """П. 9 заметок части A, вариант (Б) (решение владельца 01.11): заявка с поколением не
+    больше действующего — не событие узла; действующее событие и поколение прежние."""
     stale = DeliveredRequest("5" * 40, "a5" * 20, _req("approve-2-1-4", 2))
-    reason = generation_refusal([OLD, NEW, stale], "req")
-    assert reason and "не больше" in reason
+    state = node_history([OLD, NEW, stale], "req")
+    assert state.current is NEW and state.generation == 2
+    assert len(state.ignored) == 1
+    assert state.ignored[0].reason == "узел req: поколение 2 не больше прежнего 2"
+    assert (
+        envelope_refusal(_env(NEW), [OLD, NEW, stale], "req", "h" * 40, PINS, "21")
+        is None
+    )
 
 
 def test_envelope_with_other_policy_pin_refused() -> None:
@@ -217,8 +225,92 @@ def test_no_delivered_request_not_approved() -> None:
         assert reason and "нет доставленной заявки" in reason
 
 
-def test_stop_of_other_generation_refused() -> None:
-    """Остановка обязана называть действующее поколение."""
+def test_stop_of_other_generation_is_noop() -> None:
+    """П. 9 (Б): остановка не действующего поколения отнимать нечего — игнорируется."""
     stale = DeliveredStop("3" * 40, StopRecord("req", 1, "не то поколение"))
-    reason = envelope_refusal(_env(NEW), [OLD, NEW, stale], "req", "h" * 40, PINS, "21")
-    assert reason and "остановка поколения 1, действует 2" in reason
+    state = node_history([OLD, NEW, stale], "req")
+    assert state.current is NEW
+    assert len(state.ignored) == 1
+    assert state.ignored[0].reason == "узел req: остановка поколения 1, действует 2"
+    assert (
+        envelope_refusal(_env(NEW), [OLD, NEW, stale], "req", "h" * 40, PINS, "21")
+        is None
+    )
+
+
+def test_stop_before_any_request_ignored() -> None:
+    """П. 9 (Б): остановка узла без принятой заявки — не событие; узел остаётся без
+    события (старый путь), следующее поколение — выше записи."""
+    stray = DeliveredStop("3" * 40, StopRecord("req", 1, "чужая запись"))
+    state = node_history([stray], "req")
+    assert state.current is None and state.generation == 0
+    assert len(state.ignored) == 1
+    assert state.ignored[0].reason == "узел req: остановка поколения 1, действует 0"
+    assert next_generation([stray], "req") == 2
+
+
+def test_ignored_request_then_next_generation_is_current() -> None:
+    """П. 9 (Б): после проигнорированной записи заявка `g+1` — действующее событие."""
+    stale = DeliveredRequest("5" * 40, "a5" * 20, _req("approve-2-1-4", 2))
+    history = [OLD, NEW, stale, AGAIN]
+    assert node_history(history, "req").current is AGAIN
+    assert envelope_refusal(_env(AGAIN), history, "req", "h" * 40, PINS, "21") is None
+    assert next_generation(history, "req") == 4
+
+
+STRAY_STOP = DeliveredStop("6" * 40, StopRecord("req", 9, "чужое поколение"))
+STALE_REQ = DeliveredRequest("5" * 40, "a5" * 20, _req("approve-2-1-4", 1))
+
+
+@pytest.mark.parametrize(
+    "history",
+    [
+        [],
+        [OLD],
+        [OLD, NEW],
+        [OLD, NEW, STOP2],
+        [OLD, NEW, STOP2, AGAIN],
+        [STRAY_STOP],
+        [OLD, STRAY_STOP],
+        [OLD, NEW, STALE_REQ],
+        [OLD, NEW, STOP2, STALE_REQ, AGAIN],
+        [OLD, NEW, STOP2, STOP2],
+    ],
+    ids=[
+        "empty",
+        "one",
+        "two",
+        "stopped",
+        "after_stop",
+        "stray_stop",
+        "stop_other_gen",
+        "stale_request",
+        "stale_then_next",
+        "double_stop",
+    ],
+)
+def test_history_consumers_agree(history: list) -> None:
+    """Решение владельца 01.11: одно вычисление состояния — `current_event`,
+    `next_generation` и `envelope_refusal` выводятся из `node_history`, второго правила
+    пропуска нет."""
+    state = node_history(history, "req")
+    assert current_event(history, "req") is state.current
+    assert next_generation(history, "req") == state.top + 1
+    reason = envelope_refusal(_env(NEW), history, "req", "h" * 40, PINS, "21")
+    if state.current is None:
+        assert reason == "узел req: нет доставленной заявки review/v1"
+    elif isinstance(state.current, DeliveredStop):
+        gen = state.current.stop.generation
+        assert reason == f"узел req: одобрение поколения {gen} остановлено"
+    else:
+        assert (reason is None) is (state.current is NEW)
+
+
+def test_stop_generation_zero_before_request_ignored() -> None:
+    """П. 9 (Б): остановка «поколения 0» без принятой заявки — тоже не событие:
+    действующего поколения нет, отнимать нечего (узел не запирается)."""
+    zero = DeliveredStop("3" * 40, StopRecord("req", 0, "нулевое поколение"))
+    state = node_history([zero], "req")
+    assert state.current is None and len(state.ignored) == 1
+    assert state.ignored[0].reason == "узел req: остановка поколения 0, действует 0"
+    assert node_history([zero, OLD], "req").current is OLD

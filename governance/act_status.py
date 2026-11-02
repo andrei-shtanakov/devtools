@@ -41,7 +41,6 @@ from governance.act_envelope import (
     current_event,
     envelope_path,
     envelope_refusal,
-    generation_refusal,
     parse_envelope,
     parse_stop,
     stop_path,
@@ -320,8 +319,10 @@ class Decider:
                 )
         return self._trust
 
-    def _context(self) -> tuple[act_trust.Trust, Any] | Unavailable:
-        """Доверие и журнал, на котором оно загружено; любое — или `Unavailable`."""
+    def context(self) -> tuple[act_trust.Trust, Any] | Unavailable:
+        """Доверие и журнал, на котором оно загружено, — пара для
+        `act_context.delivery_verdict` (журнал настоящий, ревизия b1); любое
+        недоступное — `Unavailable`."""
         trust = self.trust()
         if isinstance(trust, Unavailable):
             return trust
@@ -402,7 +403,7 @@ class Decider:
         refused = self._binding(event, ident)
         if refused is not None:
             return refused
-        context = self._context()
+        context = self.context()
         if isinstance(context, Unavailable):
             return context
         trust, journal = context
@@ -434,7 +435,7 @@ class Decider:
         старой проверки `contract()` (`LegacyAccepted` | `Rejected` |
         `Unavailable`), никогда не безусловный `LegacyAccepted` (ревизия b2,
         B2-1)."""
-        context = self._context()
+        context = self.context()
         if isinstance(context, Unavailable):
             return context
         trust, journal = context
@@ -809,9 +810,6 @@ class Statuses:
         current = current_event(self.history, node)
         if current is None:
             return self._legacy(node)
-        broken = generation_refusal(self.history, node)
-        if broken is not None:
-            return f"not_approved:{broken}"
         if isinstance(current, DeliveredStop):
             return f"not_approved:stopped:g{current.stop.generation}"
         verdict = self.decide(current)
