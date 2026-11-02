@@ -1185,14 +1185,7 @@ def test_reopen_stop_branch_without_pr_names_remedy(world: World, stand: Stand) 
     assert len(world.forge.prs) == before
 
 
-def test_review_stamp_keys_in_base_fail_closed_on_content(
-    world: World, stand: Stand
-) -> None:
-    """Ревью M3: во frontmatter узла в base — штамп-ключи `review/v1`; хеш заявки
-    (проекция старого акта) ≠ хешу головы в проекции `review/v1` — доставка
-    отказывает по I_CONTENT, а не засчитывается."""
-    from governance import act_decision
-
+def _stamp_keys_in_base(world: World) -> None:
     _git(world.human, "fetch", "-q", "origin")
     _git(world.human, "switch", "-q", "master")
     _git(world.human, "reset", "-q", "--hard", "origin/master")
@@ -1206,15 +1199,29 @@ def test_review_stamp_keys_in_base_fail_closed_on_content(
     _git(world.human, "commit", "-qam", "stamp keys")
     _git(world.human, "push", "-q", "origin", "master")
     world.sync()
+
+
+def test_review_stamp_keys_in_base_hashed_in_review_projection(
+    world: World, stand: Stand
+) -> None:
+    """Ревью M3 → интеграционное ревью части B, m-2: во frontmatter узла в base —
+    штамп-ключи `review/v1`; `content_hash` заявки считается в проекции ЕЁ акта,
+    поэтому равен хешу головы в проекции `review/v1`, и I-content акт не сжигает
+    (прежде хеш заявки шёл старой проекцией и доставка отказывала после акта)."""
+    from governance import act_decision
+    from governance.act_projection import self_hash_v
+
+    _stamp_keys_in_base(world)
     key, _op, pr = _candidate(world)
     head = world.forge.head_of(world.forge.prs[pr]["branch"])
     req = parse_manifest(_show(world.target, f"{head}:{manifest_path(WS_ID, key)}"))
     hashes = act_node._head_hashes(world.state, world.ops, req, head)
     assert isinstance(hashes, dict)
     entry = req.nodes["charter"]
-    # сравнение — против хеша леджера (манифест — его зеркало), заглушек решения нет
+    text = _show(world.target, f"{head}:{entry.path}")
     assert world.state.ops[key]["content_hashes"]["charter"] == entry.content_hash
-    assert hashes[entry.path] != entry.content_hash
+    assert entry.content_hash == self_hash_v(text, "review/v1") == hashes[entry.path]
+    assert entry.content_hash != na.self_hash(text), "старая проекция — другая"
     delivery = DeliveryView(
         True,
         "m" * 40,
@@ -1226,7 +1233,87 @@ def test_review_stamp_keys_in_base_fail_closed_on_content(
         {entry.path: ("b" * 40, "b" * 40)},
     )
     got = act_decision._delivery_refusal(req, head, delivery, hashes)
-    assert isinstance(got, Rejected) and got.code == act_decision.I_CONTENT
+    assert got is None
+
+
+def test_open_content_drift_invalidates_before_merge(
+    world: World, stand: Stand, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m-2: байты головы ≠ `content_hash` манифеста — отказ ДО агентской доставки
+    (после мержа I-content сжёг бы акт человека)."""
+    key, _op, pr = _candidate(world)
+    stand.approve_head(pr)
+    monkeypatch.setattr(
+        act_node,
+        "_head_hashes",
+        lambda state, ops, req, head: {e.path: "0" * 40 for e in req.nodes.values()},
+    )
+    with pytest.raises(RuntimeError, match="i_content"):
+        approve(world, "charter")
+    assert world.forge.merge_calls == []
+    assert world.state.ops[key]["status"] == al.STATUS_INVALIDATED
+
+
+def test_open_head_hashes_unreadable_unresolved(
+    world: World, stand: Stand, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key, _op, pr = _candidate(world)
+    stand.approve_head(pr)
+    monkeypatch.setattr(
+        act_node, "_head_hashes", lambda *a: Unavailable("show не ответил")
+    )
+    with pytest.raises(RuntimeError, match="факт не установлен"):
+        approve(world, "charter")
+    assert world.forge.merge_calls == []
+    assert world.state.ops[key]["status"] == al.STATUS_STARTED
+
+
+def test_open_delivers_with_run_base_pin(world: World, stand: Stand) -> None:
+    """m-3: доставка candidate пинует базу прогона (`--expect-base`)."""
+    _key, _op, pr = _candidate(world)
+    stand.approve_head(pr)
+    tip = world.forge.head_of("master")
+    approve(world, "charter")
+    assert world.ops.merge_bases[-1] == (pr, tip)
+
+
+def test_open_base_tip_unreadable_unresolved(
+    world: World, stand: Stand, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m-3: верхушка базы прогона на фордже не прочитана — доставки нет."""
+    key, _op, pr = _candidate(world)
+    stand.approve_head(pr)
+    real = world.ops.remote_branch_head_fact
+
+    def tip(repo_slug: str, branch: str) -> Fact[str]:
+        if branch == "master":
+            return unavailable("сеть")
+        return real(repo_slug, branch)
+
+    monkeypatch.setattr(world.ops, "remote_branch_head_fact", tip)
+    with pytest.raises(RuntimeError, match="верхушка базы master"):
+        approve(world, "charter")
+    assert world.forge.merge_calls == []
+    assert world.state.ops[key]["status"] == al.STATUS_STARTED
+
+
+def test_content_hash_marker_of_other_act_refused() -> None:
+    """m-2: маркер `approval_act` узла не равен акту заявки — проекция не
+    вычисляется, заявка не создаётся (отказ до записи)."""
+    text = "---\nspec_stage: x\napproval_act: review/v9\n---\nтело\n"
+    with pytest.raises(RuntimeError, match="self-hash узла в проекции review/v1"):
+        an._content_hash(text, "review/v1")
+
+
+def test_open_retargeted_candidate_not_delivered(world: World, stand: Stand) -> None:
+    """m-3: candidate, перенацеленный с базы прогона, агентом не доставляется."""
+    key, _op, pr = _candidate(world)
+    stand.approve_head(pr)
+    world.forge.prs[pr]["base"] = "release"
+    with pytest.raises(RuntimeError, match="базу прогона"):
+        approve(world, "charter")
+    assert world.forge.merge_calls == []
+    assert world.state.ops[key]["status"] == al.STATUS_STARTED
 
 
 def test_reopen_post_merge_record_check_is_independent(

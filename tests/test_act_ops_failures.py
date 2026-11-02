@@ -36,6 +36,15 @@ def _raise(exc: BaseException):
     return call
 
 
+def _outcome(call):
+    """Результат вызова либо поднятое им исключение — двойник утверждает о нём,
+    поэтому мутант (узкий `except`) краснит утверждение, а не прогон."""
+    try:
+        return call()
+    except BaseException as exc:  # noqa: BLE001 — предмет утверждения
+        return exc
+
+
 def test_ops_failures_cover_realops_producers() -> None:
     for kind in (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
         assert kind in OPS_FAILURES
@@ -45,15 +54,15 @@ def test_ops_failures_cover_realops_producers() -> None:
 def test_pr_head_failure_is_unavailable(exc: BaseException) -> None:
     ops = SimpleNamespace(pr_facts=_raise(exc))
     state = SimpleNamespace(repo_slug=SLUG, target_dir="/nonexistent")
-    got = act_status._pr_head(ops, state, 7)  # type: ignore[arg-type]
+    got = _outcome(lambda: act_status._pr_head(ops, state, 7))  # type: ignore[arg-type]
     assert isinstance(got, Unavailable) and "голова PR #7" in got.reason
 
 
 @pytest.mark.parametrize("exc", FAILURES, ids=lambda e: type(e).__name__)
 def test_pr_for_merge_failure_is_unavailable(exc: BaseException) -> None:
     ops = SimpleNamespace(prs_containing_commit=_raise(exc))
-    got = act_status.pr_for_merge(ops, SLUG, "m" * 40)  # type: ignore[arg-type]
-    assert isinstance(got, Unavailable)
+    got = _outcome(lambda: act_status.pr_for_merge(ops, SLUG, "m" * 40))  # type: ignore[arg-type]
+    assert isinstance(got, Unavailable) and "PR merge-коммита" in got.reason
 
 
 def _probe(ops: object) -> act_status.LegacyProbe:
@@ -66,21 +75,25 @@ def test_legacy_merged_candidate_pr_facts_failure_unavailable(
     exc: BaseException,
 ) -> None:
     ops = SimpleNamespace(find_pr=lambda *_a, **_k: 7, pr_facts=_raise(exc))
-    got = _probe(ops)._merged_candidate("cand", "human", "2026-11-01T00:00:00Z")
-    assert isinstance(got, str) and got.startswith("unavailable:")
+    probe = _probe(ops)
+    got = _outcome(
+        lambda: probe._merged_candidate("cand", "human", "2026-11-01T00:00:00Z")
+    )
+    assert isinstance(got, str) and got.startswith("unavailable:candidate cand")
 
 
 @pytest.mark.parametrize("exc", FAILURES, ids=lambda e: type(e).__name__)
 def test_legacy_finalize_branch_failure_unavailable(exc: BaseException) -> None:
     ops = SimpleNamespace(prs_containing_commit=_raise(exc))
-    got = _probe(ops)._finalize_branch("c" * 40)
-    assert got.startswith("unavailable:")
+    probe = _probe(ops)
+    got = _outcome(lambda: probe._finalize_branch("c" * 40))
+    assert isinstance(got, str) and got.startswith("unavailable:PR коммита подписи")
 
 
 @pytest.mark.parametrize("exc", FAILURES, ids=lambda e: type(e).__name__)
 def test_read_pr_failure_is_unavailable(exc: BaseException) -> None:
     ops = SimpleNamespace(pr_facts=_raise(exc))
-    fact = approval_facts.read_pr(ops, SLUG, 7)  # type: ignore[arg-type]
+    fact = _outcome(lambda: approval_facts.read_pr(ops, SLUG, 7))  # type: ignore[arg-type]
     assert fact.value is None and "запрос не удался" in fact.detail
 
 
@@ -89,23 +102,23 @@ def test_finalize_identity_find_pr_failure_unresolved(exc: BaseException) -> Non
     ops = SimpleNamespace(find_pr=_raise(exc))
     state = SimpleNamespace(repo_slug=SLUG)
     op = {"finalize_branch": "approve/x-final"}
-    with pytest.raises(RuntimeError, match="факт не установлен"):
-        an._ensure_finalize_identity(state, ops, "k", op)  # type: ignore[arg-type]
+    err = _outcome(lambda: an._ensure_finalize_identity(state, ops, "k", op))  # type: ignore[arg-type]
+    assert isinstance(err, RuntimeError) and "факт не установлен" in str(err)
 
 
 @pytest.mark.parametrize("exc", FAILURES, ids=lambda e: type(e).__name__)
 def test_await_checks_pr_facts_failure_unresolved(exc: BaseException) -> None:
     ops = SimpleNamespace(pr_facts=_raise(exc))
     state = SimpleNamespace(repo_slug=SLUG)
-    with pytest.raises(RuntimeError, match="факт не установлен"):
-        an._await_required_checks(state, ops, 7, "h" * 40)  # type: ignore[arg-type]
+    err = _outcome(lambda: an._await_required_checks(state, ops, 7, "h" * 40))  # type: ignore[arg-type]
+    assert isinstance(err, RuntimeError) and "факт не установлен" in str(err)
 
 
 @pytest.mark.parametrize("exc", FAILURES, ids=lambda e: type(e).__name__)
 def test_commit_paths_failure_unresolved(exc: BaseException) -> None:
     ops = SimpleNamespace(commit_paths=_raise(exc))
-    with pytest.raises(RuntimeError, match="факт не установлен"):
-        an._commit_paths(ops, "/x", ["a"], "msg")  # type: ignore[arg-type]
+    err = _outcome(lambda: an._commit_paths(ops, "/x", ["a"], "msg"))  # type: ignore[arg-type]
+    assert isinstance(err, RuntimeError) and "факт не установлен" in str(err)
 
 
 def test_barrier_pr_facts_failure_is_a_gap() -> None:

@@ -524,6 +524,60 @@ BYPASS: dict[str, tuple[str, str]] = {
     "task_bridge.deliver_superseded#review_noop:noop": (
         "if traceless and unconfirmed is None:",
         "if traceless:",
+    ),  # интеграционное ревью части B, I-3: узкий `except` (класс C1) — двойник с
+    # `CalledProcessError` краснит утверждение, а не прогон (`_outcome`)
+    "act_status.pr_for_merge:ops_failure": (
+        "    except OPS_FAILURES as exc:",
+        "    except RuntimeError as exc:",
+    ),
+    "act_status._pr_head:ops_failure": (
+        "    except OPS_FAILURES as exc:",
+        "    except RuntimeError as exc:",
+    ),
+    "act_status.LegacyProbe._finalize_branch:ops_failure": (
+        "        except OPS_FAILURES as exc:",
+        "        except RuntimeError as exc:",
+    ),
+    "act_status.LegacyProbe._merged_candidate:ops_failure": (
+        "        except OPS_FAILURES as exc:",
+        "        except RuntimeError as exc:",
+    ),
+    "approve_node._commit_paths:ops_failure": (
+        "    except OPS_FAILURES as exc:",
+        "    except RuntimeError as exc:",
+    ),
+    "approve_node._ensure_finalize_identity#find_pr_failure:ops_failure": (
+        "        except OPS_FAILURES as exc:",
+        "        except RuntimeError as exc:",
+    ),
+    "approve_node._await_required_checks#pr_facts_failure:pr_facts": (
+        "facts = _pr_facts(state, ops, pr)",
+        "facts = ops.pr_facts(state.repo_slug, pr)",
+    ),
+    # m-7: прежнее поведение argparse (код 2 «повтор»)
+    "act_premerge.main:usage": (
+        "    except SystemExit:",
+        "    except SystemExit as exc:\n        return int(exc.code or 0)\n    except ValueError:",
+    ),
+    # m-2: обход несущей проверки — сверка пропускает, доставка идёт штатно
+    "act_node._require_head_content:unavailable": (
+        'raise an._unresolved(f"self-hash узлов в голове PR #{pr}: {hashes.reason}")',
+        "return",
+    ),
+    "approve_node._content_hash:act_projection": ("if act is None:", "if True:"),
+    "approve_node._content_hash:projection_refused": (
+        'raise RuntimeError(f"self-hash узла в проекции {act}: {exc}") from exc',
+        "return na.self_hash(text)",
+    ),
+    # I-2: отказ `approve_node` читается как ожидание
+    "runner._deliver_review_candidate:unresolved": (
+        (
+            "        _stop_on_refusal(\n"
+            '            state, ops, request, exc, f"доставка candidate-PR #{pr} заявки {request}"\n'
+            "        )\n"
+            "        return state"
+        ),
+        "        outcome = an.ApprovalOutcome(act_node.WAITING_HUMAN_APPROVAL)",
     ),
 }
 #: Обход невозможен (без данных продолжить нечем) — решение ревьюера с причиной.

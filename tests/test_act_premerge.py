@@ -652,11 +652,22 @@ def test_no_act_without_same_second_approve_refused(
 )
 def test_app_half_pair_is_usage_error(world: World, capsys, extra) -> None:
     """Task 15a: `--app-id`/`--app-key` — оба или ни одного; половина — отказ
-    разбора (2) до любых чтений, не откат на режим профиля."""
-    with pytest.raises(SystemExit) as exc:
-        world.run(*extra)
-    assert exc.value.code == 2
+    разбора до любых чтений, не откат на режим профиля. Код — 3 (m-7):
+    `merge-pr.sh` читает 2 как «повтор уместен», а расхождение версий обвязки
+    повтор не лечит."""
+    assert world.run(*extra) == act_premerge.EXIT_REFUSED
     assert "нужны оба --app-id и --app-key" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["--bogus"], [], ["--help"], ["--repo", "o/p", "--pr", "x"]],
+    ids=["unknown", "empty", "help", "bad_type"],
+)
+def test_argparse_error_is_terminal_not_retry(argv: list[str]) -> None:
+    """m-7: ошибка разбора — 3 («не мержить, не повторять»), не 2 («повтор»);
+    до чтений: зависимости не строятся."""
+    assert act_premerge.main(argv) == act_premerge.EXIT_REFUSED
 
 
 def test_real_deps_app_mode_wires_installations(monkeypatch, tmp_path) -> None:

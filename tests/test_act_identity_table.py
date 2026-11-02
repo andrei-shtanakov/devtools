@@ -105,7 +105,12 @@ EXISTING_ADDITIONS = {
         "_require_same_act",
         "_creation_policy",
         "require_clean_synced_base",
+        # интеграционное ревью части B: I-3 (коммит без трассировки), m-2 (проекция)
+        "_commit_paths",
+        "_content_hash",
     ),
+    # интеграционное ревью части B, I-2: доставка candidate `review/v1` на resume
+    "runner": ("_deliver_review_candidate", "_stop_on_refusal"),
 }
 #: Изменённые частью B СУЩЕСТВУЮЩИЕ функции (не дополнения): новая проверка — кортеж имён,
 #: каждое — ключ `JUDGMENT` `<функция>#<имя>`; новой проверки нет — причина строкой. Список
@@ -173,6 +178,17 @@ MODIFIED_EXISTING = {
     "runner.reopen": "делегирует `act_node.reopen` (место суждения); своей проверки нет",
     "task_bridge.deliver_for_run._capture_anchor": "пробрасывает `ws_id`; не суждение",
     "task_bridge.main": ("repropose_exclusive",),
+    # интеграционное ревью части B (I-1–I-3, m-2)
+    "edge_check/publish.surface_violations": ("own_manifest",),
+    "runner._resume_wave": ("review_delivery",),
+    "runner._step_candidate": "пауза `review/v1` — `waiting_human_approval` и текст об approve; проверки-отказа нет",
+    "runner._finalize_wave": "стоп по отказу вынесен в `_stop_on_refusal` без изменений текста",
+    "runner._wave_pause": "параметр статуса паузы; не суждение",
+    "approve_node._ensure_finalize_identity": ("find_pr_failure",),
+    "approve_node._await_required_checks": ("pr_facts_failure",),
+    "approve_node._carried_text": "сверка байтов заявки — хешем `_content_hash` её акта (m-2); проверка прежняя",
+    "approve_node._verify_nodes_in_base": "self-hash в base — `_content_hash` акта заявки (m-2); проверка прежняя",
+    "edge_check/publish.publish_wave": "коммит evidence — через `an._commit_paths` (I-3); проверки прежние",
 }
 
 S, N, L = (
@@ -203,6 +219,7 @@ X, K, F = (
     "tests/test_act_facts.py",
 )
 RP, OB = "tests/test_act_repropose.py", "tests/test_act_ops_body.py"
+OF, WR = "tests/test_act_ops_failures.py", "tests/test_act_wave_runner.py"
 ENVELOPE_FIELDS = (
     "node",
     "request_id",
@@ -1142,6 +1159,13 @@ JUDGMENT = {
             f"{S}::test_pr_for_merge_needs_exactly_one",
             '"нужен ровно один"',
         ),
+        r(
+            "ops_failure",
+            "act_status.pr_for_merge",
+            "except OPS_FAILURES",
+            f"{OF}::test_pr_for_merge_failure_is_unavailable[CalledProcessError]",
+            '"PR merge-коммита"',
+        ),
     ),
     "act_status._pr_head": (
         r(
@@ -1149,6 +1173,13 @@ JUDGMENT = {
             "act_status._pr_head",
             "не догружена",
             f"{S}::test_history_fetches_squash_head_absent_locally",
+        ),
+        r(
+            "ops_failure",
+            "act_status._pr_head",
+            "except OPS_FAILURES",
+            f"{OF}::test_pr_head_failure_is_unavailable[CalledProcessError]",
+            '"голова PR #7"',
         ),
     ),
     # событие-заявка разбирается в `_request_event` (вынесено при Task 14)
@@ -1369,6 +1400,13 @@ JUDGMENT = {
             f"{L}::test_signature_without_finalize_pr_refused",
             "act_status.NOT_FINALIZE",
         ),
+        r(
+            "ops_failure",
+            "act_status.LegacyProbe._finalize_branch",
+            "except OPS_FAILURES",
+            f"{OF}::test_legacy_finalize_branch_failure_unavailable[CalledProcessError]",
+            '"unavailable:PR коммита подписи"',
+        ),
     ),
     "act_status.LegacyProbe._candidate": (
         r(
@@ -1428,6 +1466,13 @@ JUDGMENT = {
             "_no(CANDIDATE_TIME",
             f"{L}::test_candidate_absent_or_not_matching_signature[other_time]",
             "act_status.CANDIDATE_TIME",
+        ),
+        r(
+            "ops_failure",
+            "act_status.LegacyProbe._merged_candidate",
+            "except OPS_FAILURES",
+            f"{OF}::test_legacy_merged_candidate_pr_facts_failure_unavailable[CalledProcessError]",
+            '"unavailable:candidate cand"',
         ),
     ),
     "act_status.LegacyProbe._offered": (
@@ -1879,7 +1924,7 @@ JUDGMENT = {
         r(
             "head",
             "act_node._open",
-            "facts.head_sha != head",
+            "review.head_sha != head",
             f"{N}::test_open_candidate_head_moved_between_reads",
             '"сдвинулась между чтениями"',
         ),
@@ -3265,6 +3310,125 @@ JUDGMENT = {
             '"тело PR #7: no network"',
         ),
     ),
+    # --- интеграционное ревью части B (I-1–I-3, m-2, m-3, m-7)
+    "act_node._require_head_content": (
+        r(
+            "unavailable",
+            "act_node._require_head_content",
+            "isinstance(hashes, Unavailable)",
+            f"{N}::test_open_head_hashes_unreadable_unresolved",
+            '"факт не установлен"',
+        ),
+        r(
+            "drift",
+            "act_node._require_head_content",
+            "if drift",
+            f"{N}::test_open_content_drift_invalidates_before_merge",
+            '"i_content"',
+        ),
+    ),
+    "act_node._run_base_tip": (
+        r(
+            "retarget",
+            "act_node._run_base_tip",
+            "target != base",
+            f"{N}::test_open_retargeted_candidate_not_delivered",
+            '"базу прогона"',
+        ),
+        r(
+            "tip",
+            "act_node._run_base_tip",
+            "tip.outcome is not Outcome.FOUND",
+            f"{N}::test_open_base_tip_unreadable_unresolved",
+            '"верхушка базы master"',
+        ),
+    ),
+    "act_premerge.main": (
+        r(
+            "usage",
+            "act_premerge.main",
+            "except SystemExit",
+            f"{P}::test_argparse_error_is_terminal_not_retry[unknown]",
+            "act_premerge.EXIT_REFUSED",
+        ),
+    ),
+    "approve_node._commit_paths": (
+        r(
+            "ops_failure",
+            "approve_node._commit_paths",
+            "except OPS_FAILURES",
+            f"{OF}::test_commit_paths_failure_unresolved[CalledProcessError]",
+            '"факт не установлен"',
+        ),
+    ),
+    "approve_node._content_hash": (
+        r(
+            "act_projection",
+            "approve_node._content_hash",
+            "if act is None:",
+            f"{N}::test_review_stamp_keys_in_base_hashed_in_review_projection",
+            "got is None",
+        ),
+        r(
+            "projection_refused",
+            "approve_node._content_hash",
+            "except ProjectionError",
+            f"{N}::test_content_hash_marker_of_other_act_refused",
+            '"self-hash узла в проекции review/v1"',
+        ),
+    ),
+    "runner._deliver_review_candidate": (
+        r(
+            "unresolved",
+            "runner._deliver_review_candidate",
+            "except RuntimeError as exc",
+            f"{WR}::test_resume_unresolved_is_stopped_review",
+            '"stopped_review"',
+        ),
+        r(
+            "not_waiting",
+            "runner._deliver_review_candidate",
+            "if waiting is None",
+            f"{WR}::test_resume_agent_merge_refused_is_not_a_merge_request",
+            '"stopped_review"',
+        ),
+    ),
+    "edge_check/publish.surface_violations#own_manifest": (
+        r(
+            "own_manifest",
+            "edge_check/publish.surface_violations",
+            'op.get("act") == ACT_REVIEW_V1',
+            f"{WR}::test_review_wave_publishes_candidate_with_its_manifest",
+            '"completed"',
+        ),
+    ),
+    "runner._resume_wave#review_delivery": (
+        r(
+            "review_delivery",
+            "runner._resume_wave",
+            'op.get("act") == ACT_REVIEW_V1',
+            f"{WR}::test_resume_approve_agent_merge_then_finalize",
+            "act_node.WAITING_DELIVERY",
+        ),
+    ),
+    "approve_node._ensure_finalize_identity#find_pr_failure": (
+        r(
+            "ops_failure",
+            "approve_node._ensure_finalize_identity",
+            "except OPS_FAILURES",
+            f"{OF}::test_finalize_identity_find_pr_failure_unresolved[CalledProcessError]",
+            '"факт не установлен"',
+        ),
+    ),
+    "approve_node._await_required_checks#pr_facts_failure": (
+        r(
+            "pr_facts",
+            "approve_node._await_required_checks",
+            "facts = _pr_facts(state, ops, pr)",
+            f"{OF}::test_await_checks_pr_facts_failure_unresolved[CalledProcessError]",
+            '"факт не установлен"',
+        ),
+    ),
 }
 
 
@@ -3383,7 +3547,6 @@ NOT_JUDGMENT = {
     "act_premerge.app_installations.check": "делегирует `act_app_token.installations_refusal`",
     "act_premerge._parser": _BUILD,
     "act_premerge.real_deps": _BUILD,
-    "act_premerge.main": "отображение исхода `_check` в код выхода",
     "act_app_token._NoRedirect.redirect_request": "транспортная политика; отказа об объекте нет",
     "act_app_token._http": _IO,
     "act_app_token._build_opener": _BUILD,
@@ -3421,6 +3584,7 @@ NOT_JUDGMENT = {
     "act_settings.config_home": "правило пути XDG; относительный путь — откат на дефолт, не отказ",
     "approve_node._review_debt": _BUILD,
     "approve_node._legacy_outcome": "вычисляет опубликованность снимка; делегирует `_legacy_verdict`",
+    "runner._stop_on_refusal": "выбор стоп-статуса по уже вынесенному отказу `approve_node` (вынесено из `_finalize_wave`); не суждение",
 }
 
 #: Ложные срабатывания детектора проверок-отказов: путь, похожий на отказ, отказом

@@ -1083,7 +1083,7 @@ def _resume_wave(state: RunState, ops: Ops, *, lock: rl.RunLock) -> RunState | N
     if not op.get("merged_by"):
         facts = ops.pr_facts(state.repo_slug, pr)
         if facts.get("state") == "OPEN" and op.get("act") == ACT_REVIEW_V1:
-            return _deliver_review_candidate(state, ops, request, pr, lock=lock)
+            return _deliver_review_candidate(state, ops, request, pr)
         if facts.get("state") == "OPEN":
             print(
                 f"resume: волна {state.wave} — candidate-PR #{pr} открыт, "
@@ -1097,7 +1097,7 @@ def _resume_wave(state: RunState, ops: Ops, *, lock: rl.RunLock) -> RunState | N
 
 
 def _deliver_review_candidate(
-    state: RunState, ops: Ops, request: str, pr: int, *, lock: rl.RunLock
+    state: RunState, ops: Ops, request: str, pr: int
 ) -> RunState:
     """Открытый candidate `review/v1` на resume (§9.1; интеграционное ревью
     части B, I-2): `approve_node` → `act_node.route` → `_open` — действующий
@@ -1119,8 +1119,6 @@ def _deliver_review_candidate(
             state, ops, request, exc, f"доставка candidate-PR #{pr} заявки {request}"
         )
         return state
-    if (state.ops.get(request) or {}).get("status") == al.STATUS_COMPLETED:
-        return _next_wave(state, ops, lock=lock)
     waiting = next(
         (
             status

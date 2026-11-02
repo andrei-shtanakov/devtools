@@ -53,6 +53,7 @@ from governance import node_approval as na
 from governance.act_check import LegacyAccepted
 from governance.act_decision import Rejected
 from governance.act_envelope import DeliveredRequest, current_event
+from governance.act_projection import ProjectionError, self_hash_v
 from governance.act_request import ACT_REVIEW_V1
 from governance.act_time import OPS_FAILURES, Ambiguous, Unavailable
 from governance.approval_facts import Disposition, Outcome
@@ -226,6 +227,22 @@ def _pr_facts(state: RunState, ops: Ops, pr: int) -> dict:
     if fact.outcome is not Outcome.FOUND or not isinstance(fact.value, dict):
         raise _unresolved(f"факты PR #{pr} — {fact.detail}")
     return fact.value
+
+
+def _content_hash(text: str, act: str | None) -> str:
+    """Self-hash узла, который заявка выносит, — в проекции ЕЁ акта.
+
+    `review/v1` проверяет I-content проекцией `self_hash_v(·, review/v1)`;
+    старая проекция (`na.self_hash`) расходится с ней, если frontmatter узла
+    несёт штамп-ключи `review/v1`, и тогда доставка отказывала бы уже ПОСЛЕ
+    акта человека (интеграционное ревью части B, m-2). Заявка без маркера —
+    прежний хеш байт в байт."""
+    if act is None:
+        return na.self_hash(text)
+    try:
+        return self_hash_v(text, act)
+    except ProjectionError as exc:
+        raise RuntimeError(f"self-hash узла в проекции {act}: {exc}") from exc
 
 
 def _commit_paths(
@@ -482,7 +499,7 @@ def _propose(
     _require_no_reopened_pr(state, ops, node_id)
     made = act_node.creation(state, ops, deps, live)  # отказ — до первой записи
 
-    self_hash = na.self_hash(text)
+    self_hash = _content_hash(text, made.act)
     step = _levels(dag)[node_id]
     nodes = bundle_dag.composition(dag)
     fingerprint = bundle_dag.composition_fingerprint(nodes)
@@ -950,7 +967,9 @@ def propose_from_source(
     made = act_node.creation(state, ops, deps, live)  # отказ — до первой записи
     generations = {n: act_node.generation_of(made, n) for n in node_ids}
     hashes = {
-        node: na.self_hash(_source_text(ops, state, source_sha, _filename(dag, node)))
+        node: _content_hash(
+            _source_text(ops, state, source_sha, _filename(dag, node)), made.act
+        )
         for node in node_ids
     }
     pins = {
@@ -1420,7 +1439,7 @@ def _carried_text(
     fname = _filename(dag, node)
     text = _node_text(ops, state, op, fname)
     recorded = op["content_hashes"][node]
-    actual = na.self_hash(text)
+    actual = _content_hash(text, op.get("act"))
     if actual != recorded:
         raise RuntimeError(
             f"{node}: собственные байты в источнике не те, что вынесла "
@@ -2553,7 +2572,7 @@ def _verify_nodes_in_base(
     for node in op["nodes"]:
         text = _base_text(ops, state, _filename(dag, node))
         meta, _ = split_frontmatter(text)
-        recomputed = na.self_hash(text)
+        recomputed = _content_hash(text, op.get("act"))
         _require(
             state,
             key,

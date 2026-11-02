@@ -26,7 +26,13 @@ from governance import approval_facts as af
 from governance import approval_ledger as al
 from governance import approve_node as an
 from governance.act_check import LegacyAccepted, live_policy_refusal
-from governance.act_decision import Accepted, DeliveryView, Rejected, find_act
+from governance.act_decision import (
+    I_CONTENT,
+    Accepted,
+    DeliveryView,
+    Rejected,
+    find_act,
+)
 from governance.act_envelope import (
     DeliveredRequest,
     DeliveredStop,
@@ -263,7 +269,7 @@ def route(
     where = an._disposition(facts, pr)
     req = _check_marked(state, ops, dag, op, key, pr, head)
     if where is Disposition.OPEN:
-        return None if req is None else _open(state, ops, key, pr, head, req)
+        return None if req is None else _open(state, ops, key, pr, facts, req)
     if where is Disposition.CLOSED_UNMERGED:
         return None
     deps = DEPS_FACTORY(state)
@@ -279,9 +285,14 @@ def route(
 
 
 def _open(
-    state: RunState, ops: Ops, key: str, pr: int, head: str, req: NodeRequest
+    state: RunState, ops: Ops, key: str, pr: int, facts: dict, req: NodeRequest
 ) -> an.ApprovalOutcome:
-    """Открытый candidate `review/v1`: живое правило, D1 на голове, доставка агентом."""
+    """Открытый candidate `review/v1`: живое правило, D1 на голове, доставка агентом.
+
+    До мержа (интеграционное ревью части B): байты головы равны `content_hash`
+    манифеста (m-2 — иначе I-content сжёг бы акт после доставки), candidate
+    нацелен на базу прогона и мержится с пином её верхушки (m-3)."""
+    head = facts["headRefOid"]
     deps = DEPS_FACTORY(state)
     live = act_status.mode_probe(state, deps)
     if isinstance(live, Unavailable):
@@ -291,12 +302,14 @@ def _open(
     refusal = live_policy_refusal(req.policy, live.activation.merge_commit)
     if refusal is not None:
         _invalidate(state, key, refusal)
-    facts = act_facts.open_review(deps.gh, state.repo_slug, pr)
-    if isinstance(facts, Unavailable):
-        raise an._unresolved(f"ревью candidate-PR #{pr}: {facts.reason}")
-    if facts.head_sha != head:
+    _require_head_content(state, ops, key, pr, head, req)
+    base_tip = _run_base_tip(state, ops, pr, facts)
+    review = act_facts.open_review(deps.gh, state.repo_slug, pr)
+    if isinstance(review, Unavailable):
+        raise an._unresolved(f"ревью candidate-PR #{pr}: {review.reason}")
+    if review.head_sha != head:
         raise an._unresolved(f"голова PR #{pr} сдвинулась между чтениями")
-    effective = act_facts.effective(facts, Clock(deps.now()))
+    effective = act_facts.effective(review, Clock(deps.now()))
     if isinstance(effective, Unavailable):
         raise an._unresolved(f"эффективные ревью PR #{pr}: {effective.reason}")
     act = find_act(head, effective, live.policy)
@@ -306,7 +319,7 @@ def _open(
             f"human_approvers по head {head[:12]}. Заявка {key} жива",
             request=key,
         )
-    code = ops.merge(state.repo, pr, head, None)
+    code = ops.merge(state.repo, pr, head, base_tip)
     if code != 0:
         hint = an._MERGE_CODE_HINTS.get(code, "мерж не выполнен")
         return an.ApprovalOutcome(
@@ -319,6 +332,45 @@ def _open(
         f"{act.login}; повторите вызов — решение по доставке и конверт",
         request=key,
     )
+
+
+def _require_head_content(
+    state: RunState, ops: Ops, key: str, pr: int, head: str, req: NodeRequest
+) -> None:
+    """I-content до доставки (m-2): self-hash узлов в голове в проекции `review/v1`
+    равен `content_hash` манифеста; иначе заявка терминальна — тот же факт после
+    мержа дал бы `Rejected(i_content)`. Не прочитано — отказ без эффектов."""
+    hashes = _head_hashes(state, ops, req, head)
+    if isinstance(hashes, Unavailable):
+        raise an._unresolved(f"self-hash узлов в голове PR #{pr}: {hashes.reason}")
+    drift = sorted(
+        e.path for e in req.nodes.values() if hashes.get(e.path) != e.content_hash
+    )
+    if drift:
+        _invalidate(
+            state,
+            key,
+            f"{I_CONTENT}: байты {', '.join(drift)} в голове {head[:12]} не равны "
+            "content_hash манифеста — доставка не выполняется",
+        )
+
+
+def _run_base_tip(state: RunState, ops: Ops, pr: int, facts: dict) -> str:
+    """Верхушка базы прогона на фордже — пин `--expect-base` доставки (m-3).
+
+    Candidate, перенацеленный на другую ветку, не доставляется: он влился бы в
+    чужую базу и получил бы `NOT_IN_BASE`, сжигая акт. Перенацеливание
+    обратимо — отказ без эффектов, заявка жива."""
+    base = an._base_ref(state)
+    target = facts.get("baseRefName")
+    if target != base:
+        raise an._unresolved(
+            f"candidate-PR #{pr} нацелен на {target!r}, а не на базу прогона {base}"
+        )
+    tip = ops.remote_branch_head_fact(state.repo_slug, base)
+    if tip.outcome is not Outcome.FOUND or not tip.value:
+        raise an._unresolved(f"верхушка базы {base} на фордже — {tip.detail}")
+    return tip.value
 
 
 def _legacy(
