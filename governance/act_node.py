@@ -657,13 +657,17 @@ def _require_no_accepted_delivery(
     отказ, продолжение `--approve-node`. `Unavailable`/`Ambiguous`/`Rejected`
     — переиздание идёт. Временный `Unavailable` от постоянного здесь не
     отличить: переиздание — явное действие оператора и ничего не одобряет.
-    Заявка без маркера (старый путь) этой проверки не имеет: её вердикт —
-    старый код, который засчитывает мерж шагом `FINALIZE` (`_AFTER_MERGE`).
+    Заявка без маркера — вердикт старого кода (`_legacy_outcome`, m-3).
     """
     pr = op.get("candidate_pr")
-    if op.get("act") != ACT_REVIEW_V1 or pr is None:
+    if pr is None:
         return
-    if an._disposition(an._pr_facts(state, ops, pr), pr) is not Disposition.MERGED:
+    facts = an._pr_facts(state, ops, pr)
+    if an._disposition(facts, pr) is not Disposition.MERGED:
+        return
+    dag = bundle_dag.dag_for(legacy_bundle)
+    if op.get("act") != ACT_REVIEW_V1:
+        _require_legacy_not_accepted(state, ops, dag, key, op, facts)
         return
     deps = DEPS_FACTORY(state)
     live = act_status.mode_probe(state, deps)
@@ -688,16 +692,34 @@ def _require_no_accepted_delivery(
         raise an._unresolved(
             f"candidate-PR #{pr} заявки {key} смёржен, а доставки в истории {base} нет"
         )
-    dag = bundle_dag.dag_for(legacy_bundle)
     decide = act_status.Decider(
         state, ops, deps, dag, trust=live.trust, journal=live.journal
     )
     if isinstance(decide(event), (Unavailable, Ambiguous, Rejected)):
         return
-    raise RuntimeError(
+    raise RuntimeError(_accepted_refusal(key, pr))
+
+
+def _accepted_refusal(key: str, pr: int) -> str:
+    return (
         f"заявка {key}: доставка candidate-PR #{pr} засчитывается (акт есть) — "
         "продолжение `--approve-node`, не переиздание"
     )
+
+
+def _require_legacy_not_accepted(
+    state: RunState, ops: Ops, dag: Dag, key: str, op: Mapping, facts: dict
+) -> None:
+    """Заявка без маркера со смёрженным candidate (m-3): `LegacyAccepted` старого
+    кода (тот же `_legacy_outcome`, что у `--approve-node`) — отказ; иной исход —
+    переиздание (§10 п. 2: `act_migrated` / `--repropose`); не установлен — отказ."""
+    verdict = an._legacy_outcome(state, ops, dag, dict(op), key, facts)
+    if isinstance(verdict, an.LegacyHalt):
+        raise an._unresolved(
+            f"вердикт старого кода (--repropose {key}): {verdict.text}"
+        )
+    if isinstance(verdict, LegacyAccepted):
+        raise RuntimeError(_accepted_refusal(key, op["candidate_pr"]))
 
 
 def _create_successor(

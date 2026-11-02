@@ -623,6 +623,59 @@ def test_merged_predecessor_missing_from_history_refused(world, stand, monkeypat
     assert world.state.ops[key]["status"] == al.STATUS_STARTED
 
 
+def _legacy_merged(world: World, stand: Stand) -> tuple[str, int]:
+    """Заявка без маркера (до миграции), candidate смёржен человеком, мерж ещё не
+    засчитан `--approve-node`."""
+    from governance import act_trust
+    from tests.test_governance_approve_node import merge_pr
+
+    stand.mode = act_trust.PRE_MIGRATION
+    key = approve(world, "charter").request
+    assert "act" not in world.state.ops[key]
+    pr = world.state.ops[key]["candidate_pr"]
+    merge_pr(world, pr)
+    return key, pr
+
+
+def test_legacy_merged_accepted_refused(world, stand):
+    """m-3: вердикт старого кода `LegacyAccepted` — акт не хоронится."""
+    from governance.act_check import LegacyAccepted
+
+    key, pr = _legacy_merged(world, stand)
+    op = world.state.ops[key]
+    facts = an._pr_facts(world.state, world.ops, pr)
+    dag = an.bundle_dag.dag_for(None)
+    assert isinstance(
+        an._legacy_outcome(world.state, world.ops, dag, dict(op), key, facts),
+        LegacyAccepted,
+    )
+    before = copy.deepcopy(op)
+    with pytest.raises(RuntimeError, match="засчитывается .* `--approve-node`"):
+        _repropose(world, key)
+    assert world.state.ops[key] == before
+    assert world.forge.prs[pr]["state"] == "MERGED"
+    assert al.successor_of(world.state, key) is None
+
+
+def test_legacy_merged_not_accepted_proceeds(world, stand, monkeypatch):
+    key, _pr = _legacy_merged(world, stand)
+    monkeypatch.setattr(
+        an, "_legacy_outcome", lambda *a: Rejected("legacy_signature", "не тот")
+    )
+    _repropose(world, key)
+    assert world.state.ops[key]["reason"] == act_node.REPROPOSED
+    assert al.successor_of(world.state, key) is not None
+
+
+def test_legacy_merged_outcome_unresolved_refused(world, stand, monkeypatch):
+    key, _pr = _legacy_merged(world, stand)
+    monkeypatch.setattr(an, "_legacy_outcome", lambda *a: an.LegacyHalt("сеть"))
+    with pytest.raises(RuntimeError, match="вердикт старого кода .*сеть"):
+        _repropose(world, key)
+    assert world.state.ops[key]["status"] == al.STATUS_STARTED
+    assert al.successor_of(world.state, key) is None
+
+
 # --- путь ветки волны (`propose_from_source`) ----------------------------------------
 
 
