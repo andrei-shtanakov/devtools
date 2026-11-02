@@ -311,6 +311,17 @@ if [ -n "${MERGE_APP_ID:-}" ] || [ -n "${MERGE_APP_KEY:-}" ]; then
     [ -n "${MERGE_APP_ID:-}" ] && [ -n "${MERGE_APP_KEY:-}" ] || die 2 "App-режим: \
 нужны оба MERGE_APP_ID и MERGE_APP_KEY"
     app_mode=1
+    # Ключ — только из каталога ключей App установки, обычный читаемый файл;
+    # `..` в пути — отказ (выход за каталог). Иное — 2, не откат на профиль.
+    _apps_dir="${XDG_CONFIG_HOME:-$HOME/.config}/darkfactory/apps/"
+    case "$MERGE_APP_KEY" in
+        */../*|*/..) die 2 "App-режим: MERGE_APP_KEY содержит '..' — \
+$MERGE_APP_KEY" ;;
+        "$_apps_dir"?*) : ;;
+        *) die 2 "App-режим: MERGE_APP_KEY вне $_apps_dir — $MERGE_APP_KEY" ;;
+    esac
+    [ -f "$MERGE_APP_KEY" ] && [ -r "$MERGE_APP_KEY" ] || die 2 "App-режим: \
+MERGE_APP_KEY не обычный читаемый файл — $MERGE_APP_KEY"
 fi
 [ -d "$MERGE_GH_CONFIG_DIR" ] || die 2 "профиля агента нет: \
 $MERGE_GH_CONFIG_DIR — выполните:
@@ -325,7 +336,11 @@ fi
 агентский мерж; человеческий мерж делается человеком, не этой обвязкой"
 
 # --- Стоп-кран (D2) ---------------------------------------------------------
-# После профиля: читаем тем же агентским токеном, что будет мержить. Отказ
+# После профиля: читаем профилем агента. В режиме профиля это тот же токен,
+# что будет мержить; в App-режиме — нет: стоп-кран и факты PR читаются
+# профилем агента (его логин здесь не сверяется — `gh api user` App-режим
+# пропускает), а токеном установки App идёт только мерж и всё после личности
+# App (compare, удаление ветки). Отказ
 # на всём, кроме «выключен» или «не взведён» (contracts/halt-admission/v1).
 # `python3 -I <файл>`: исполняется РОВНО этот файл — изолированный режим не
 # читает PYTHONPATH и user site и не кладёт каталоги дерева в sys.path, так
@@ -446,8 +461,12 @@ human_merge_refusal="PR ${slug}#${pr}: лейбл '$HUMAN_MERGE_LABEL' — PR я
 оставлен человеку. Мержит человек."
 # App-режим — только candidate review/v1 (Task 15a): прочим PR при выставленных
 # `MERGE_APP_*` — отказ 2, не тихий откат на профиль. Финализирующая форма
-# удовлетворяет и глобу candidate, поэтому исключается первой.
+# удовлетворяет и глобу candidate, поэтому исключается первой. Рубильник
+# `human-merge-required` — поверх и этого гварда: терминальный 3 (ревью Task 15a).
 if [ "$app_mode" -eq 1 ]; then
+    if has_label "$HUMAN_MERGE_LABEL"; then
+        die 3 "$human_merge_refusal"
+    fi
     # shellcheck disable=SC2254
     case "$head_ref" in
         $finalize_glob) die 2 "App-режим только для candidate review/v1; \

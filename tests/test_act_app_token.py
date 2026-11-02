@@ -45,9 +45,11 @@ class Http:
         self, routes: dict, visible: dict[int, list[int]] | None = None
     ) -> None:
         self.routes, self.visible, self.seen = routes, visible or {}, []
+        self.bodies: list[dict | None] = []
 
     def __call__(self, method: str, path: str, auth: str, body: dict | None = None):
         self.seen.append((method, path, auth))
+        self.bodies.append(body)
         if (method, path) in self.routes:
             return self.routes[(method, path)]
         if path == REPOS.format(1) and auth.startswith("token ghs_"):
@@ -101,10 +103,26 @@ def test_identity_uses_jwt_not_gh_user(key) -> None:
     assert claims["iss"] == "5285716"
     assert (claims["iat"], claims["exp"]) == (1_700_000_000 - 60, 1_700_000_000 + 540)
     assert not any(p == "/user" for _, p, _ in http.seen)
-    # Токен — на установку целевого репо, без сужения тела запроса.
     assert http.seen[1:] == [
         ("GET", "/repos/o/p/installation", http.seen[0][2]),
         ("POST", "/app/installations/9/access_tokens", http.seen[0][2]),
+    ]
+
+
+def test_identity_token_narrowed_to_target_repo(key) -> None:
+    """Ревью Task 15a, m1: токен мержа — только на целевой репо (имя без
+    владельца) и только contents/pull_requests на запись (мерж, compare,
+    удаление ветки)."""
+    http = Http(dict(IDENTITY_OK))
+    got = act_app_token.app_identity(1, key[0], "o/p", http=http, now=0)
+    assert got == ("df-probe-reviewer[bot]", "ghs_x")
+    assert http.bodies == [
+        None,
+        None,
+        {
+            "repositories": ["p"],
+            "permissions": {"contents": "write", "pull_requests": "write"},
+        },
     ]
 
 

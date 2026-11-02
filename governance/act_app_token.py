@@ -47,6 +47,9 @@ MAX_PAGES = 50
 REPO_SLUG = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 #: Slug App: одна строка stdout без пробелов (логин `<slug>[bot]`).
 APP_SLUG = re.compile(r"[A-Za-z0-9_.-]+")
+#: Полномочия токена мержа: `PUT …/pulls/{n}/merge`, `GET …/compare`,
+#: `DELETE …/git/refs/heads/{ветка}` — contents и pull_requests на запись.
+MERGE_PERMISSIONS = {"contents": "write", "pull_requests": "write"}
 Http = Callable[..., tuple[int, Any]]
 Found = tuple[str, str] | Unavailable | None
 """Как `act_trust.Found`: нарушение `(роль репо, деталь)`, недоступность или чисто."""
@@ -158,7 +161,9 @@ def app_identity(
     installation = data.get("id") if isinstance(data, dict) else None
     if status != 200 or type(installation) is not int:
         return Unavailable(f"установка App на {repo}: HTTP {status}")
-    token = _token(http, bearer, installation)
+    # Токен сужен до целевого репо и полномочий мержа (ревью Task 15a, m1).
+    narrow = {"repositories": [repo.split("/", 1)[1]], "permissions": MERGE_PERMISSIONS}
+    token = _token(http, bearer, installation, narrow)
     if isinstance(token, Unavailable):
         return token
     return f"{slug}[bot]", token
