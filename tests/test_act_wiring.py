@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import argparse
 import ast
 from collections.abc import Callable
 from pathlib import Path
@@ -20,7 +21,7 @@ import pytest
 
 pytest.importorskip("steward")
 
-from governance import act_status, act_trust  # noqa: E402
+from governance import act_premerge, act_status, act_trust  # noqa: E402
 from governance.act_time import Unavailable  # noqa: E402
 from tests.test_act_trust import (  # noqa: E402
     AP,
@@ -56,10 +57,17 @@ def _status_site(tmp_path: Path):
     return deps.readers, deps.creds
 
 
-#: `<файл>::<функция>` → сборка зависимостей решения этим местом. Task 15 добавляет
-#: обязательную строку `governance/act_premerge.py::real_deps`.
+def _premerge_site(tmp_path: Path):
+    args = argparse.Namespace(merge_profile="/x/merge", repo="o/p", pr=7)
+    env = {**ENV, "XDG_STATE_HOME": str(tmp_path)}
+    deps = act_premerge.real_deps(args, env=env)
+    return deps.readers, deps.creds
+
+
+#: `<файл>::<функция>` → сборка зависимостей решения этим местом.
 WIRING_SITES: dict[str, Site] = {
     "governance/act_status.py::real_deps": _status_site,
+    "governance/act_premerge.py::real_deps": _premerge_site,
 }
 
 

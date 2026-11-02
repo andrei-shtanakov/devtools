@@ -6,10 +6,10 @@
 
 from __future__ import annotations
 
-# TODO(Part B, Task 15 `act_premerge`): когда проекция акта станет частью
-# харнесс-записи, `governance/node_approval` и `governance/stale_adapter`
-# обязаны войти в authority-root/_HARNESS_PREFIXES
-# (tests/test_governance_authority_root.py это проверяет). Сейчас — нет.
+# `governance/node_approval` и `governance/stale_adapter` не в authority-root:
+# предпроверка мержа (`act_premerge`) проекцию не импортирует. Если цепочка
+# обвязки их втянет, `tests/harness_trust.py` потребует их защитить
+# (`tests/test_act_premerge.py::test_premerge_chain_has_no_df_and_no_projection`).
 from governance.frontmatter import join_frontmatter, split_frontmatter
 from governance.node_approval import APPROVAL_ENVELOPE_KEYS
 from governance.stale_adapter import blob_sha1

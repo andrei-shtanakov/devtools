@@ -132,6 +132,11 @@ def _merger_ok(policy: PolicySet, login: str, hint: str | None) -> bool:
     return actor == "human" and login in policy.approvers
 
 
+def merger_allowed(policy: PolicySet, login: str, hint: str | None) -> bool:
+    """D3 до мержа: тот же предикат, что `decide` применит к фактической доставке."""
+    return _merger_ok(policy, login, hint)
+
+
 def _delivery_refusal(
     request: NodeRequest,
     head_sha: str,
