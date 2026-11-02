@@ -52,8 +52,9 @@ from governance import brief_input, bundle_dag, bundle_inputs, pr_checks
 from governance import node_approval as na
 from governance.act_check import LegacyAccepted
 from governance.act_decision import Rejected
+from governance.act_envelope import DeliveredRequest, current_event
 from governance.act_request import ACT_REVIEW_V1
-from governance.act_time import Unavailable
+from governance.act_time import Ambiguous, Unavailable
 from governance.approval_facts import Disposition, Outcome
 from governance.frontmatter import split_frontmatter, update_frontmatter
 from governance.ops import Ops
@@ -61,6 +62,7 @@ from governance.policy_sources import build_authority, load_safety
 from governance.run_state import RunState
 
 if TYPE_CHECKING:
+    from governance import act_status
     from governance.act_node import Creation
 
 
@@ -298,8 +300,12 @@ def approve_node(
     node_id: str,
     *,
     legacy_bundle: int | None = None,
+    predecessor: str | None = None,
 ) -> ApprovalOutcome:
     """Один вызов одобрения узла: предложение либо продвижение заявки.
+
+    `predecessor` — ключ заявки, которую новая переиздаёт (`--repropose`):
+    вызов обязан ЗАВЕСТИ заявку, а не продвинуть чужую живую.
 
     Порядок ровно такой, каким его задаёт §I12:
 
@@ -330,8 +336,14 @@ def approve_node(
     live = al.live_request_over(state, node_id)
     if live is not None:
         nums, op = live
+        if predecessor is not None:
+            raise RuntimeError(
+                f"над узлом {node_id} уже есть живая заявка "
+                f"{al.request_key(*nums)} — продвиньте её, преемник "
+                f"{predecessor} не создаётся"
+            )
         return _advance(state, ops, dag, op, al.request_key(*nums))
-    return _propose(state, ops, dag, node_id)
+    return _propose(state, ops, dag, node_id, predecessor=predecessor)
 
 
 def _sync_base_and_settle(
@@ -382,6 +394,8 @@ def _propose(
     ops: Ops,
     dag: tuple[tuple[str, tuple[str, ...]], ...],
     node_id: str,
+    *,
+    predecessor: str | None = None,
 ) -> ApprovalOutcome:
     """Решение по состоянию узла в base и, если надо, фаза 1."""
     from governance import act_node, act_status
@@ -402,7 +416,9 @@ def _propose(
         verdict = statuses.of(node_id)
         if verdict == act_status.APPROVED:
             return ApprovalOutcome(f"{node_id}: честно одобрен (review/v1) — no-op")
-        if verdict.startswith("unavailable:"):
+        if verdict.startswith("unavailable:") and not _supersedes_undecided(
+            statuses, node_id, predecessor
+        ):
             raise _unresolved(f"статус узла {node_id}: {verdict}")
         debt = _review_debt(node_id, text, verdict)
     else:
@@ -449,6 +465,7 @@ def _propose(
     nodes = bundle_dag.composition(dag)
     fingerprint = bundle_dag.composition_fingerprint(nodes)
     joined = _join_target(state, ops, fingerprint, step)
+    _require_no_join_for_successor(joined, predecessor)
     if joined is not None and joined[1].get("source_sha") is not None:
         raise RuntimeError(
             f"живая заявка {al.request_key(*joined[0])} шага несёт байты "
@@ -482,8 +499,45 @@ def _propose(
             policy=policy_record,
             act=made.act,
             generations={node_id: generation} if generation is not None else None,
+            predecessor=predecessor,
         )
     return _publish_candidate(state, ops, dag, key, debt)
+
+
+def _supersedes_undecided(
+    statuses: act_status.Statuses, node_id: str, predecessor: str | None
+) -> bool:
+    """Неустановленный статус узла не мешает преемнику ровно одной заявки.
+
+    Действующее событие узла — доставка самого предшественника, и решения
+    по ней нет (`Ambiguous` / `Unavailable`, §6: штатный выход —
+    `--repropose`). Преемник её только вытесняет (поколение `top + 1`) и
+    ничего не одобряет. Любое другое неустановленное — отказ, как раньше.
+    """
+    if predecessor is None or isinstance(statuses.history, Unavailable):
+        return False
+    current = current_event(statuses.history, node_id)
+    if not isinstance(current, DeliveredRequest):
+        return False
+    if current.request.request_id != predecessor:
+        return False
+    return isinstance(statuses.decide(current), (Unavailable, Ambiguous))
+
+
+def _require_no_join_for_successor(
+    joined: tuple[tuple[int, int, int], dict] | None, predecessor: str | None
+) -> None:
+    """Преемник (`--repropose`) — всегда НОВАЯ заявка, не дописка в живую.
+
+    Присоединение к живой заявке шага унесло бы переиздание в чужую ветку
+    и PR, а связь `predecessor` — потерялась бы: повтор `--repropose` не
+    нашёл бы преемника и завёл бы следующий.
+    """
+    if predecessor is not None and joined is not None:
+        raise RuntimeError(
+            f"живая заявка шага {al.request_key(*joined[0])} уже есть — продвиньте "
+            f"её, преемник {predecessor} не создаётся"
+        )
 
 
 def _require_same_act(
@@ -788,6 +842,7 @@ def propose_from_source(
     *,
     legacy_bundle: int | None = None,
     push: bool = True,
+    predecessor: str | None = None,
 ) -> ApprovalOutcome:
     """Заявка волны: узлы ОДНОГО уровня, байты — из коммита ветки волны.
 
@@ -825,6 +880,11 @@ def propose_from_source(
         )
     step = steps.pop()
     resumed = _same_live_request(state, node_ids, source_sha)
+    if resumed is not None and predecessor is not None:
+        raise RuntimeError(
+            f"живая заявка {resumed} над теми же узлами уже есть — продвиньте её, "
+            f"преемник {predecessor} не создаётся"
+        )
     if resumed is not None:
         # Падение между `start_request` и записью ключа заявки вызывающим
         # (ревью #346): заявка над теми же узлами из того же коммита уже
@@ -858,6 +918,7 @@ def propose_from_source(
     nodes = bundle_dag.composition(dag)
     fingerprint = bundle_dag.composition_fingerprint(nodes)
     joined = _join_target(state, ops, fingerprint, step)
+    _require_no_join_for_successor(joined, predecessor)
     if joined is not None and joined[1].get("source_sha") != source_sha:
         raise RuntimeError(
             f"живая заявка {al.request_key(*joined[0])} шага несёт байты из "
@@ -889,6 +950,7 @@ def propose_from_source(
             source_sha=source_sha,
             act=made.act,
             generations={first: generations[first]} if made.act else None,
+            predecessor=predecessor,
         )
     for node in remaining:
         al.extend_request(

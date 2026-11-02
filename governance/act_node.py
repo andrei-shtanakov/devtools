@@ -602,6 +602,102 @@ def _require_in_base(
         _invalidate(state, key, f"{what} смёржен не в базу {an._base_ref(state)}")
 
 
+# --- переиздание (--repropose) -------------------------------------------------------
+
+REPROPOSED = "reproposed: переиздание заявки оператором (--repropose)"
+#: Шаги после засчитанного мержа candidate: акт (или авторизация мержа) уже
+#: записан, продолжение — `--approve-node`, не переиздание.
+_AFTER_MERGE = (al.Step.FINALIZE, al.Step.AWAIT_FINALIZE_MERGE)
+
+
+def repropose(
+    state: RunState, ops: Ops, key: str, *, legacy_bundle: int | None = None
+) -> an.ApprovalOutcome:
+    """`--repropose <key>`: преемник заявки; терминальная запись не переписывается.
+
+    Терминальный предшественник не трогается; живой (candidate не засчитан)
+    — `invalidated: reproposed`. Открытые PR предшественника закрываются
+    (иначе `_require_no_reopened_pr` не пустит новый candidate), затем
+    создаётся новая заявка с `predecessor: <key>` и текущим пином. Повтор
+    находит преемника (`successor_of`) и продолжает его; второго не заводит.
+    """
+    op = {al.request_key(*nums): rec for nums, rec in al.requests(state)}.get(key)
+    if op is None:
+        raise RuntimeError(f"заявки {key} нет в леджере")
+    status = op.get("status")
+    if status == al.STATUS_COMPLETED:
+        raise RuntimeError(
+            f"заявка {key} завершена — одобрение не переиздаётся; остановить его — "
+            "`--reopen <node>`"
+        )
+    if status != al.STATUS_STARTED and status not in al.TERMINAL_STATUSES:
+        raise RuntimeError(f"заявка {key}: статус {status!r} не распознан")
+    if al.next_step(op) in _AFTER_MERGE:
+        raise RuntimeError(
+            f"заявка {key}: мерж candidate уже засчитан — продолжение "
+            "`--approve-node`, не переиздание"
+        )
+    successor = al.successor_of(state, key)
+    if successor is not None:
+        return _continue_successor(state, ops, key, successor, legacy_bundle)
+    if al.is_live(op):
+        al.invalidate_request(state, key, REPROPOSED)
+    # причина закрытия — из записи предшественника (свежей, после инвалидации)
+    an._close_buried_proposals(state, ops, key)
+    return _create_successor(state, ops, key, state.ops[key], legacy_bundle)
+
+
+def _create_successor(
+    state: RunState,
+    ops: Ops,
+    key: str,
+    op: Mapping,
+    legacy_bundle: int | None = None,
+) -> an.ApprovalOutcome:
+    """Новая заявка над узлами предшественника; текущий пин берёт `creation`."""
+    nodes = list(op["nodes"])
+    if op.get("source_sha"):
+        return an.propose_from_source(
+            state,
+            ops,
+            nodes,
+            op["source_sha"],
+            legacy_bundle=legacy_bundle,
+            predecessor=key,
+        )
+    outcome = an.approve_node(
+        state, ops, nodes[0], legacy_bundle=legacy_bundle, predecessor=key
+    )
+    for node in nodes[1:]:
+        outcome = an.approve_node(state, ops, node, legacy_bundle=legacy_bundle)
+    return outcome
+
+
+def _continue_successor(
+    state: RunState,
+    ops: Ops,
+    key: str,
+    successor: str,
+    legacy_bundle: int | None,
+) -> an.ApprovalOutcome:
+    """Повтор `--repropose`: продвинуть уже созданного преемника."""
+    succ = state.ops[successor]
+    if not al.is_live(succ):
+        raise RuntimeError(
+            f"заявка {key} уже переиздана: преемник {successor} — "
+            f"{succ.get('status')}; продолжение — от него"
+        )
+    missing = [n for n in state.ops[key]["nodes"] if n not in succ["nodes"]]
+    if missing and succ.get("source_sha"):
+        raise RuntimeError(
+            f"преемник {successor} заявки {key} без узлов {', '.join(missing)} "
+            "(байты ветки волны) — разберите вручную"
+        )
+    for node in missing:  # падение между узлами при создании преемника
+        an.approve_node(state, ops, node, legacy_bundle=legacy_bundle)
+    return an.approve_node(state, ops, succ["nodes"][0], legacy_bundle=legacy_bundle)
+
+
 # --- переоткрытие и аудит ------------------------------------------------------------
 
 STOP_REASON = "переоткрытие узла {node}"
