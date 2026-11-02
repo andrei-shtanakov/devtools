@@ -936,16 +936,10 @@ def _merge_stop_pr(
     def form() -> str | None:
         return stop_pr_defect(state, ops, pr, head, base_sha, path, record)
 
-    defect = form()
-    if defect is not None:
-        raise RuntimeError(
-            f"{defect} — агентский мерж не выполнен, узел {node} остаётся одобренным; "
-            "разберите вручную"
-        )
+    # Форму и одобряющее ревью проверяет сам `_try_agent_merge` до ожидания
+    # проверок и до мержа (ревью Task 16, M3: прежние первые проверки здесь были
+    # мёртвым дублем); отказ формы называется ниже по перепроверке `form()`.
     retry = f"`--reopen {node}`"
-    missing = an._missing_approving_review(state, ops, pr, kind="stop-PR", retry=retry)
-    if missing is not None:
-        raise RuntimeError(missing)
     refusal = an._try_agent_merge(
         state,
         ops,
@@ -960,7 +954,7 @@ def _merge_stop_pr(
         retry=retry,
     )
     if refusal is not None:
-        late = form()  # форма разошлась за время ожидания — тот же отказ, что первый
+        late = form()  # отказ формы (до мержа или после ожидания проверок)
         if late is not None:
             raise RuntimeError(
                 f"{late} — агентский мерж не выполнен, узел {node} остаётся "

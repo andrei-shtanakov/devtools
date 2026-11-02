@@ -141,6 +141,7 @@ def test_prefixes_read_from_the_ssot_file() -> None:
         "governance/act_",
         "tests/test_act_",
         "tests/act_cases",
+        "tests/act_mutation",
         "contracts/approval-facts/",
         # Шаблон CI корня доверия df-trust (установка копирует его).
         "templates/df-trust/",
@@ -452,6 +453,7 @@ _ACT_CHAIN = (
     "governance/act_",
     "tests/test_act_",
     "tests/act_cases",
+    "tests/act_mutation",
     "contracts/approval-facts/",
 )
 
@@ -469,7 +471,12 @@ def test_act_chain_is_in_both_protected_lists() -> None:
 
 @pytest.mark.parametrize(
     "path",
-    ["tests/test_act_decision.py", "tests/act_cases.py", "governance/act_time.py"],
+    [
+        "tests/test_act_decision.py",
+        "tests/act_cases.py",
+        "tests/act_mutation.py",
+        "governance/act_time.py",
+    ],
 )
 def test_act_chain_paths_are_authority_root(path: str) -> None:
     assert authority_root.touched([path, "README.md"]) == [path]

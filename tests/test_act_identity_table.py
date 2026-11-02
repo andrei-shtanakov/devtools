@@ -2048,14 +2048,14 @@ JUDGMENT = {
         r(
             "form",
             "act_node._merge_stop_pr",
-            "if defect is not None",
+            "if late is not None",
             f"{N}::test_reopen_refuses_foreign_stop_pr_before_merge[extra_file]",
             'f"stop-PR #{stop_pr}.*разберите вручную"',
         ),
         r(
-            "approving_review",
+            "refusal",
             "act_node._merge_stop_pr",
-            "if missing is not None",
+            "if refusal is not None",
             f"{N}::test_reopen_stop_pr_without_approving_review_names_stop_procedure",
             'f"review-pr.sh {stop_pr}"',
         ),
@@ -2464,6 +2464,65 @@ JUDGMENT = {
         ),
     ),
     # --- act_barrier (Task 16)
+    "act_barrier._record": (
+        r(
+            "shape",
+            "act_barrier._record",
+            "or state not in _PR_STATES",
+            f"{B}::test_unexpected_record_shape_is_a_gap",
+            '"список PR owner/p неполон: 1 записей неожиданной формы"',
+        ),
+    ),
+    "act_barrier._listing": (
+        r(
+            "list_failed",
+            "act_barrier._listing",
+            "except RuntimeError as exc",
+            f"{B}::test_broken_pagination_incomplete",
+            '"список PR owner/p неполон',
+        ),
+        r(
+            "records",
+            "act_barrier._listing",
+            "len(found) != len(records)",
+            f"{B}::test_unexpected_record_shape_is_a_gap",
+            '"список PR owner/p неполон: 1 записей неожиданной формы"',
+        ),
+    ),
+    "act_barrier.human_context": (
+        r(
+            "human",
+            "act_barrier.human_context",
+            'flags and (caller or "") not in humans',
+            f"{B}::test_human_context_refuses_agent",
+            '"только человек из human_approvers"',
+        ),
+    ),
+    "act_barrier.main": (
+        r(
+            "crash_incomplete",
+            "act_barrier.main",
+            "return EXIT_INCOMPLETE",
+            f"{B}::test_cli_unexpected_exception_is_incomplete",
+            '"TypeError"',
+        ),
+        r(
+            "refused",
+            "act_barrier.main",
+            "return EXIT_REFUSED",
+            f"{B}::test_cli_invalidate_by_agent_refused",
+            '"human_approvers"',
+        ),
+    ),
+    "act_barrier._main": (
+        r(
+            "activation",
+            "act_barrier._main",
+            "isinstance(live, Unavailable)",
+            f"{B}::test_cli_unavailable_activation_is_incomplete",
+            '"текущая активация — нет привязки"',
+        ),
+    ),
     "act_barrier._identity": (
         r(
             "request_form",
@@ -2565,6 +2624,13 @@ JUDGMENT = {
     ),
     "act_barrier._candidate_nodes": (
         r(
+            "facts_unread",
+            "act_barrier._candidate_nodes",
+            "files.outcome is not Outcome.FOUND or files.value is None or head is None",
+            f"{B}::test_candidate_files_unread_is_a_gap",
+            '"#5: состав или голова candidate не прочитаны"',
+        ),
+        r(
             "pending",
             "act_barrier._candidate_nodes",
             "if found and _pending(text.value)",
@@ -2580,6 +2646,20 @@ JUDGMENT = {
         ),
     ),
     "act_barrier._legacy_resolved": (
+        r(
+            "tip_unread",
+            "act_barrier._legacy_resolved",
+            "tip.outcome is not Outcome.FOUND or tip.value is None",
+            f"{B}::test_legacy_base_tip_unread_is_a_gap",
+            '"#5: голова базы не прочитана"',
+        ),
+        r(
+            "base_unread",
+            "act_barrier._legacy_resolved",
+            "if text.outcome is Outcome.UNAVAILABLE",
+            f"{B}::test_legacy_base_node_unread_is_a_gap",
+            'f"#5: {NODE} в базе не прочитан"',
+        ),
         r(
             "finalize_merged",
             "act_barrier._legacy_resolved",
@@ -2672,6 +2752,13 @@ JUDGMENT = {
     ),
     "act_barrier.live_unmarked": (
         r(
+            "pr_exception",
+            "act_barrier.live_unmarked",
+            "факты PR не установлены",
+            f"{B}::test_forge_exception_per_pr_is_a_gap",
+            '"#5: факты PR не установлены — CalledProcessError"',
+        ),
+        r(
             "draining",
             "act_barrier.live_unmarked",
             "if not draining",
@@ -2695,6 +2782,13 @@ JUDGMENT = {
     ),
     "act_barrier.live_review_requests": (
         r(
+            "pr_unread",
+            "act_barrier.live_review_requests",
+            'gaps.append(f"{product}{marked}")',
+            f"{B}::test_review_preview_unread_pr_is_a_gap",
+            '"owner/p#5: манифест не прочитан — сеть"',
+        ),
+        r(
             "product_gaps",
             "act_barrier.live_review_requests",
             "{product}: список PR неполон",
@@ -2703,6 +2797,13 @@ JUDGMENT = {
         ),
     ),
     "act_barrier.invalidate": (
+        r(
+            "listing",
+            "act_barrier.invalidate",
+            "branch is None and broken is not None",
+            f"{B}::test_cli_invalidate_listing_failure_is_incomplete",
+            '"pagination broken"',
+        ),
         r(
             "human",
             "act_barrier.invalidate",
@@ -2944,8 +3045,8 @@ JUDGMENT = {
             "cli",
             "task_bridge.main",
             "--repropose — отдельное действие",
-            f"{RP}::test_cli_repropose_is_a_separate_action",
-            '"--repropose — отдельное действие"',
+            f"{RP}::test_cli_repropose_with_approve_node_runs_neither",
+            "ran == []",
         ),
     ),
     "runner._step_gate#act_mode_unset": (
@@ -3251,7 +3352,6 @@ NOT_JUDGMENT = {
     "act_barrier._kind": "классификация формы ветки; суждения — `_judge`",
     "act_barrier._head": _IO,
     "act_barrier._pending": "узел отдан на одобрение (`status: approval_pending`); не узел — `False`, отказ судит `_legacy_resolved`",
-    "act_barrier.main": "CLI вокруг `live_unmarked`/`invalidate`",
     # дополнения части B в существующие модули
     "ops._gate_check_exe": _BUILD,
     "ops._act_args": _BUILD,

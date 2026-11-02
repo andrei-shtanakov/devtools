@@ -939,6 +939,38 @@ def test_cli_repropose_is_a_separate_action(tmp_path, monkeypatch, capsys, extra
     assert "--repropose — отдельное действие" in capsys.readouterr().err
 
 
+def test_cli_repropose_with_approve_node_runs_neither(tmp_path, monkeypatch, capsys):
+    """Ревью Task 16, M4: `--repropose` вместе с `--approve-node` — отказ argparse до
+    любого действия; ни одно из двух не исполняется (молча побеждающего нет)."""
+    from governance import task_bridge as tb
+
+    _completed_run(tmp_path, monkeypatch)
+    ran: list[str] = []
+
+    def record(name):
+        def act(*a, **k):
+            ran.append(name)
+            return an.ApprovalOutcome(name)
+
+        return act
+
+    monkeypatch.setattr(tb, "approve_node", record("approve_node"))
+    monkeypatch.setattr(act_node, "repropose", record("repropose"))
+    monkeypatch.setattr(tb, "RealOps", lambda: object())
+    with pytest.raises(SystemExit):
+        tb.main(
+            [
+                "--run-id",
+                "r-repropose",
+                "--repropose",
+                "approve-1-0-1",
+                "--approve-node",
+                "charter",
+            ]
+        )
+    assert ran == []
+
+
 def test_cli_repropose_dispatches(tmp_path, monkeypatch, capsys):
     from governance import task_bridge as tb
 

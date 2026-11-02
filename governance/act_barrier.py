@@ -2,9 +2,14 @@
 
 Полнота выводится из форджи, локальные леджеры — дополнение (другую
 установку локально не видно). Пустой отчёт без draining и без аттестации
-других установок — не полнота (`gaps`). Вызывает `darkfactory setup-repo
+других установок — не полнота (`gaps`). Вызывается из `darkfactory setup-repo
 apply` (спека B) в человеческом контексте дважды: перед предложением
-активации и перед её мержем.
+активации и непосредственно перед её мержем. Точки вызова — на стороне спеки B
+(handoff), в этом репо их нет.
+
+Записи форджи читаются в той форме, которую отдаёт `RealOps` (контракт формы —
+`tests/test_act_barrier.py`); неожиданная форма или исключение чтения — пробел
+полноты, а не пропуск и не «есть живые».
 """
 
 from __future__ import annotations
@@ -12,7 +17,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -32,6 +36,22 @@ from governance.frontmatter import split_frontmatter
 PENDING = "approval_pending"
 #: Выходы CLI: пусто и полно; есть живые; инвалидация отвергнута; неполно.
 EXIT_CLEAN, EXIT_LIVE, EXIT_REFUSED, EXIT_INCOMPLETE = 0, 1, 2, 3
+
+
+class Refused(RuntimeError):
+    """Действие человеческого контекста отвергнуто (CLI: код 2)."""
+
+
+@dataclass(frozen=True)
+class PrRecord:
+    """Запись списка PR форджи: номер, ветка головы, состояние."""
+
+    number: int
+    branch: str
+    state: str
+
+
+_PR_STATES = frozenset({"OPEN", "CLOSED", "MERGED"})
 
 
 @dataclass(frozen=True)
@@ -222,16 +242,47 @@ def _legacy_resolved(
     return None
 
 
+def _record(raw: object) -> PrRecord | None:
+    """Запись `RealOps.prs_by_head_prefix` (`{"number", "head": {"ref"}, "state"}`);
+    иная форма — `None` (вызывающий объявляет список неполным)."""
+    if not isinstance(raw, dict):
+        return None
+    head = raw.get("head")
+    branch = head.get("ref") if isinstance(head, dict) else None
+    number, state = raw.get("number"), raw.get("state")
+    if (
+        type(number) is not int
+        or not isinstance(branch, str)
+        or state not in _PR_STATES
+    ):
+        return None
+    return PrRecord(number, branch, str(state))
+
+
+def _listing(product: str, ops: Any) -> tuple[list[PrRecord], str | None]:
+    """Все PR продукта; сбой списка или запись неожиданной формы — причина
+    неполноты (записи правильной формы всё равно судятся)."""
+    try:
+        raw = ops.prs_by_head_prefix(product, "")
+    except RuntimeError as exc:
+        return [], str(exc)
+    records = [_record(r) for r in raw]
+    found = [r for r in records if r is not None]
+    if len(found) != len(records):
+        return found, f"{len(records) - len(found)} записей неожиданной формы"
+    return found, None
+
+
 def _judge(
     product: str,
     ops: Any,
-    pr: dict,
+    pr: PrRecord,
     merged: Collection[str],
     humans: frozenset[str],
     confirmed: frozenset[int],
 ) -> str | tuple[str] | None:
     """Пункт отчёта, `None` — разобран, `(gap,)` — факт не установлен."""
-    branch, state, number = pr["headRefName"], pr["state"], pr["number"]
+    branch, state, number = pr.branch, pr.state, pr.number
     kind = _kind(branch)
     if kind is None or state == "CLOSED":
         return None
@@ -324,14 +375,15 @@ def live_unmarked(
         gaps.append("draining не включён (act.toml act_migration)")
     if not attested:
         gaps.append("draining других установок не подтверждён (--attest-drained)")
-    try:
-        prs = ops.prs_by_head_prefix(product, "")
-    except RuntimeError as exc:
-        gaps.append(f"список PR {product} неполон: {exc}")
-        prs = []
-    merged = {p["headRefName"] for p in prs if p["state"] == "MERGED"}
+    prs, broken = _listing(product, ops)
+    if broken is not None:
+        gaps.append(f"список PR {product} неполон: {broken}")
+    merged = {p.branch for p in prs if p.state == "MERGED"}
     for pr in prs:
-        verdict = _judge(product, ops, pr, merged, humans, confirmed)
+        try:
+            verdict = _judge(product, ops, pr, merged, humans, confirmed)
+        except Exception as exc:  # noqa: BLE001 — любой сбой чтения форджи — пробел
+            verdict = (f"#{pr.number}: факты PR не установлены — {exc!r}",)
         if isinstance(verdict, tuple):
             gaps.append(verdict[0])
         elif verdict is not None:
@@ -348,19 +400,20 @@ def live_review_requests(ops_by_product: Mapping[str, Any]) -> BarrierReport:
     items: list[str] = []
     gaps: list[str] = []
     for product, ops in ops_by_product.items():
-        try:
-            prs = ops.prs_by_head_prefix(product, "")
-        except RuntimeError as exc:
-            gaps.append(f"{product}: список PR неполон — {exc}")
-            continue
+        prs, broken = _listing(product, ops)
+        if broken is not None:
+            gaps.append(f"{product}: список PR неполон — {broken}")
         for pr in prs:
-            if pr["state"] != "OPEN" or _kind(pr["headRefName"]) != "candidate":
+            if pr.state != "OPEN" or _kind(pr.branch) != "candidate":
                 continue
-            marked = _marked(product, ops, pr["number"], pr["headRefName"])
+            try:
+                marked = _marked(product, ops, pr.number, pr.branch)
+            except Exception as exc:  # noqa: BLE001 — сбой чтения форджи — пробел
+                marked = f"#{pr.number}: факты PR не установлены — {exc!r}"
             if isinstance(marked, str):
-                gaps.append(f"{product}{marked}")
+                gaps.append(f"{product}{marked}")  # голова/манифест PR не прочитаны
             elif marked is True:
-                items.append(f"{product}#{pr['number']} — живая заявка review/v1")
+                items.append(f"{product}#{pr.number} — живая заявка review/v1")
     return BarrierReport(tuple(items), not gaps, tuple(gaps))
 
 
@@ -370,23 +423,22 @@ def invalidate(
     """`act_migrated` по форджу: маркер от человека из `human_approvers` (§10 п. 2);
     локальный леджер — только в прогонах того же `(repo_slug, ws_id)` (B1-14)."""
     if caller not in humans:
-        raise RuntimeError(
+        raise Refused(
             f"{caller} не в human_approvers текущей активации — маркер не ставится"
         )
-    branch = next(
-        (
-            p["headRefName"]
-            for p in ops.prs_by_head_prefix(product, "")
-            if p["number"] == pr
-        ),
-        None,
-    )
+    prs, broken = _listing(product, ops)
+    branch = next((p.branch for p in prs if p.number == pr), None)
+    if branch is None and broken is not None:
+        raise RuntimeError(f"список PR {product} неполон: {broken}")
     ident = _identity(product, branch or "")
     if ident is None:
-        raise RuntimeError(f"PR #{pr} не candidate/finalize заявки узла")
+        raise Refused(f"PR #{pr} не candidate/finalize заявки узла")
     ops.comment(product, pr, ident.migration_marker)
     for run_id in rs.all_run_ids():
-        state = rs.load(run_id)
+        try:
+            state = rs.load(run_id)
+        except (OSError, ValueError, TypeError):
+            continue  # нечитаемый леджер называет следующий отчёт (`_local_items`)
         if (state.repo_slug, state.ws_id) != (ident.product, ident.ws_id):
             continue  # тот же ключ в другом воркстриме — другая заявка (B1-14)
         op = state.ops.get(ident.request_id)
@@ -395,10 +447,34 @@ def invalidate(
     return ident.request_id
 
 
+def human_context(
+    caller: str | None, humans: frozenset[str], flags: Sequence[str]
+) -> None:
+    """Флаги человеческого контекста (`--invalidate`, `--confirm-resolved`,
+    `--attest-drained`) — только от логина из `human_approvers` текущей
+    активации; иначе `Refused` (defense-in-depth: агент не самоаттестуется)."""
+    if flags and (caller or "") not in humans:
+        raise Refused(
+            f"{', '.join(flags)} — только человек из human_approvers; "
+            f"вызывающий {caller or '(не назван)'}"
+        )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    """CLI барьера: 0 — пусто и полно; 1 — есть живые; 2 — инвалидация
-    отвергнута; 3 — неполно (в т. ч. сбой чтения)."""
-    from governance.act_settings import SettingsError, config_home, load_settings
+    """CLI барьера: 0 — пусто и полно; 1 — есть живые; 2 — действие человеческого
+    контекста отвергнуто; 3 — неполно (в т. ч. любой сбой чтения)."""
+    try:
+        return _main(argv)
+    except Refused as exc:
+        print(f"act_barrier: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+    except Exception as exc:  # noqa: BLE001 — любой сбой — «неполно», не «есть живые»
+        print(f"act_barrier: {exc!r} — барьер неполон", file=sys.stderr)
+        return EXIT_INCOMPLETE
+
+
+def _main(argv: Sequence[str] | None) -> int:
+    from governance.act_settings import config_home, load_settings
     from governance.act_time import Unavailable
     from governance.ops import RealOps
 
@@ -411,39 +487,37 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = p.parse_args(argv)
     ops = RealOps()
     probe = SimpleNamespace(repo_slug=args.product, run_id="act-barrier", base_ref=None)
-    try:
-        live = act_status.live_policy(probe, act_status.real_deps(probe))  # type: ignore[arg-type]
-        draining = load_settings(config_home(os.environ)).draining
-    except (RuntimeError, OSError, SettingsError) as exc:
-        print(f"act_barrier: {exc} — барьер неполон", file=sys.stderr)
-        return EXIT_INCOMPLETE
+    live = act_status.live_policy(probe, act_status.real_deps(probe))  # type: ignore[arg-type]
+    draining = load_settings(config_home(os.environ)).draining
     if isinstance(live, Unavailable):
         print(f"act_barrier: текущая активация — {live.reason}", file=sys.stderr)
         return EXIT_INCOMPLETE
     humans = frozenset(live.policy.approvers)
-    try:
-        if args.invalidate is not None:
-            caller = ops.caller_login() or ""
-            try:
-                key = invalidate(
-                    args.product, ops, args.invalidate, humans=humans, caller=caller
-                )
-            except RuntimeError as exc:
-                print(f"act_barrier: {exc}", file=sys.stderr)
-                return EXIT_REFUSED
-            print(f"act_migrated: {key}")
-        report = live_unmarked(
-            args.product,
-            ops,
-            humans=humans,
-            confirmed=frozenset(args.confirm_resolved),
-            attested=tuple(args.attest_drained),
-            draining=draining,
-            runs=rs.all_run_ids(),
+    flags = [
+        name
+        for name, used in (
+            ("--invalidate", args.invalidate is not None),
+            ("--confirm-resolved", bool(args.confirm_resolved)),
+            ("--attest-drained", bool(args.attest_drained)),
         )
-    except (RuntimeError, OSError, subprocess.CalledProcessError) as exc:
-        print(f"act_barrier: {exc} — барьер неполон", file=sys.stderr)
-        return EXIT_INCOMPLETE
+        if used
+    ]
+    caller = ops.caller_login() if flags else None
+    human_context(caller, humans, flags)
+    if args.invalidate is not None:
+        key = invalidate(
+            args.product, ops, args.invalidate, humans=humans, caller=caller or ""
+        )
+        print(f"act_migrated: {key}")
+    report = live_unmarked(
+        args.product,
+        ops,
+        humans=humans,
+        confirmed=frozenset(args.confirm_resolved),
+        attested=tuple(args.attest_drained),
+        draining=draining,
+        runs=rs.all_run_ids(),
+    )
     if args.json:
         body = {"items": report.items, "complete": report.complete, "gaps": report.gaps}
         print(json.dumps(body, ensure_ascii=False))

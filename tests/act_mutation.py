@@ -7,7 +7,8 @@
 
 - `closed` — двойник упал на утверждении (`AssertionError`, `DID NOT RAISE`, regex
   `match=`, `pytest.fail`);
-- `survived` — двойник прошёл; `error` — упал иным исключением; `n/a` — оператор не
+- `survived` — двойник прошёл; `error` — упал иным исключением либо красный ещё до
+  мутации (двойник сначала прогоняется на чистом коде); `n/a` — оператор не
   применим. Любой из трёх БЛОКИРУЕТ коммит Task 16: двойник или оператор чинятся, либо
   строка вносится в `RULED` с причиной (решение ревьюера задачи, видно в диффе).
 
@@ -77,6 +78,13 @@ BYPASS: dict[str, tuple[str, str]] = {
         'return Unavailable(f"GET {path}: больше {MAX_PAGES} страниц")',
         "return items",
     ),
+    "act_barrier._listing:list_failed": ("return [], str(exc)", "return [], None"),
+    "act_barrier.live_unmarked:pr_exception": (
+        'verdict = (f"#{pr.number}: факты PR не установлены — {exc!r}",)',
+        "verdict = None",
+    ),
+    "act_barrier.main:crash_incomplete": ("return EXIT_INCOMPLETE", "return EXIT_LIVE"),
+    "act_barrier.main:refused": ("return EXIT_REFUSED", "return EXIT_INCOMPLETE"),
     "act_barrier._candidate_nodes:pending": (
         "if found and _pending(text.value)",
         "if found",
@@ -512,14 +520,11 @@ BYPASS: dict[str, tuple[str, str]] = {
 #: Обход невозможен (без данных продолжить нечем) — решение ревьюера с причиной.
 RULED: dict[str, str] = {
     "ops.RealOps.snapshot_open:own_repo": "общий каталог двух снимков: второй `snapshot_open` падает на `mkdir home` (`FileExistsError`) до любых чтений — смешения снимков нет, мутант виден исключением, а не утверждением; независимость проверяет двойник `test_interleaved_snapshots_are_independent`",
-    "runner._step_gate#act_mode_unset:mode": "без проверки S4 продолжает волну legacy-гейтом; на стенде следующий шаг (`approve_node`) падает исключением «факт не установлен» — мутант виден, но не утверждением; тот же класс у S8 (`runner._step_s8#act_mode_unset`) закрыт утверждением",
+    "runner._step_gate#act_mode_unset:mode": 'без проверки (O1) `act_mode, provider = gate` распаковывает `Unavailable` и падает `TypeError` — fail-closed, но исключением; BYPASS `gate = ("legacy", None)` пускает S4 дальше, и на стенде следующий шаг (`approve_node`) падает исключением «факт не установлен» — мутант виден, но не утверждением; тот же класс у S8 (`runner._step_s8#act_mode_unset`) закрыт утверждением',
     "act_status._load_journal:journal_unset": "журнала периметра нет (`deps.journal is None`): без него продолжить нечем — вызов `None`; обход с корректными данными подменил бы журнал решения; проверяется причина (O3)",
     "act_node.repropose:unknown": "заявки нет в леджере: переиздавать нечего (`op` = `None`), обход невозможен; проверяется причина (O3)",
     "act_node._marked_verdict:delivery_in_history": "события доставки заявки в истории нет: судить нечего (`Decider(None)`), обход с корректными данными подменил бы саму доставку; проверяется причина (O3)",
     "act_node.reopen:already_stopped": "действующее событие узла — остановка: поколения заявки нет, продолжить нечем; ранний выход идемпотентности, двойник утверждает отсутствие второго stop-PR",
-    "act_node._merge_stop_pr:form": "второй рубеж: та же форма (`stop_pr_defect`) перепроверяется в `_try_agent_merge(form=…)` до мержа и после ожидания проверок (`late`); обход первой проверки неотличим по исходу (мержа нет, отказ «разберите вручную»), выигрыш первой — ранний отказ без ожидания проверок",
-    "act_node._merge_stop_pr:approving_review": "второй рубеж: `_try_agent_merge` проверяет то же одобряющее ревью тем же `_missing_approving_review(kind, retry)` до мержа; обход неотличим по исходу и тексту",
-    "task_bridge.main#repropose_exclusive:cli": "отказ argparse до чтения прогона; без него `main` исполняет второе действие на стенде без git (`CalledProcessError`) — мутант виден, но не утверждением; проверяется сообщение (O3)",
     "act_check.check_delivery:not_merged": "PR не смёржен (или нет merged_at): нет T — перебор порядков на T невозможен, `parse_ts(None)`; обход с корректными данными подменил бы факт мержа, проверяемый этой же строкой; двойник утверждает `WaitingDelivery()`",
     "act_context.delivery_verdict:not_merged": "PR не смёржен: нет T и фактов доставки — продолжить без них нечем; обход с корректными данными невозможен, проверяется причина (O3) и отдельный двойник «ranges не читаются»",
     "act_journal.DevJournal._open:store": "хранилище журнала не открывается (битое/утраченное): продолжить без БД нечем; обход невозможен, проверяется причина (O3)",
@@ -529,7 +534,17 @@ RULED: dict[str, str] = {
 }
 
 
-_TRUST_SEAMS = "tests/test_act_wiring.py::test_wiring_site_decides_with_history_token"
+def _wiring_sites() -> tuple[str, ...]:
+    """Двойник места сборки — по ОДНОМУ узлу на каждую строку `WIRING_SITES`
+    (ревью Task 16, I2): `-x` по непараметризованному узлу доказал бы только
+    первое место."""
+    from tests.test_act_wiring import WIRING_SITES
+
+    node = "tests/test_act_wiring.py::test_wiring_site_decides_with_history_token"
+    return tuple(f"{node}[{site}]" for site in sorted(WIRING_SITES))
+
+
+_TRUST_SEAMS = _wiring_sites()
 #: Обязательные мутации входа решения (Task 11c, C6; Task 16 Step 4a): функция,
 #: фрагмент, замена, двойники — тесты Task 11c и каждая строка `WIRING_SITES`
 #: (`test_wiring_site_decides_with_history_token`). Прогон — `--mandatory`.
@@ -540,7 +555,7 @@ MANDATORY: dict[str, tuple[str, str, str, tuple[str, ...]]] = {
         "transport = AnonTransport(open_url=open_url)",
         (
             "tests/test_act_trust.py::test_history_transport_built_from_binding",
-            _TRUST_SEAMS,
+            *_TRUST_SEAMS,
         ),
     ),
     "M2:history_self_report_skipped": (
@@ -549,7 +564,7 @@ MANDATORY: dict[str, tuple[str, str, str, tuple[str, ...]]] = {
         "None",
         (
             "tests/test_act_trust.py::test_history_self_report_push_is_violation",
-            _TRUST_SEAMS,
+            *_TRUST_SEAMS,
         ),
     ),
     "M3:second_token_read": (
@@ -561,7 +576,7 @@ MANDATORY: dict[str, tuple[str, str, str, tuple[str, ...]]] = {
         ),
         (
             "tests/test_act_trust.py::test_one_token_per_decision_through_journal",
-            _TRUST_SEAMS,
+            *_TRUST_SEAMS,
         ),
     ),
     "M4:credential_shapes_open": (
@@ -570,10 +585,16 @@ MANDATORY: dict[str, tuple[str, str, str, tuple[str, ...]]] = {
         "refused = _shared_profile_refusal(creds, binding)",
         (
             "tests/test_act_trust.py::test_caller_history_credential_refused_before_io",
-            _TRUST_SEAMS,
+            *_TRUST_SEAMS,
         ),
     ),
 }
+
+
+def _green(twin: str) -> bool:
+    """Двойник зелёный на чистом коде (ревью Task 16, M7): красный двойник упал бы
+    и без мутации — такая строка не «closed», а ошибка."""
+    return _run(twin) == "survived"
 
 
 def _mandatory(check: bool) -> list[dict]:
@@ -589,6 +610,16 @@ def _mandatory(check: bool) -> list[dict]:
             continue
         if check:
             results.append({"row": key, "status": "applicable"})
+            continue
+        red = [twin for twin in twins if not _green(twin)]
+        if red:
+            results.append(
+                {
+                    "row": key,
+                    "status": "error",
+                    "note": f"двойник красный без мутации: {red}",
+                }
+            )
             continue
         path.write_text(src.replace(seg, seg.replace(old, new), 1), encoding="utf-8")
         try:
@@ -789,6 +820,11 @@ def main(argv: list[str] | None = None) -> int:
             continue
         if args.check:
             results.append({"row": key, "status": "applicable"})
+            continue
+        if not _green(twin):
+            results.append(
+                {"row": key, "status": "error", "note": "двойник красный без мутации"}
+            )
             continue
         path.write_text(mutated, encoding="utf-8")
         try:

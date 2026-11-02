@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+from typing import Any
+from unittest import mock
+
 import pytest
 
 from governance import act_barrier
@@ -11,6 +16,7 @@ from governance.act_identity import RequestIdentity
 from governance.act_request import NodeEntry, NodeRequest, PolicyPin, render_manifest
 from governance.brief_facts import BriefPrFacts, DefaultBranch, PrComment
 from governance.facts import Fact, Outcome
+from governance.ops import RealOps as _REAL_OPS
 
 P = "owner/p"
 HEAD = "1" * 40
@@ -49,9 +55,60 @@ def signed(by: str = "alice", at: str = "2026-10-01T10:00:00Z") -> str:
     return f"---\nstatus: approved\napproved_by: {by}\napproved_at: '{at}'\n---\nтело\n"
 
 
+def _real(method: str, payload: object, *args: object) -> Any:
+    """Ответ НАСТОЯЩЕГО `RealOps.<method>` на подставленный вывод `gh` (C1 ревью
+    Task 16): фейк отдаёт ровно ту форму, которую строит боевой код. Класс взят при
+    импорте модуля: CLI-тесты подменяют `ops.RealOps` фейком."""
+    done = subprocess.CompletedProcess([], 0, stdout=json.dumps(payload), stderr="")
+    with mock.patch.object(subprocess, "run", return_value=done):
+        return getattr(_REAL_OPS(), method)(*args)
+
+
+def _pr_page(nodes: list[dict]) -> list[dict]:
+    """`gh api graphql --paginate --slurp` по списку PR — одна страница."""
+    info = {"hasNextPage": False, "endCursor": None}
+    return [
+        {"data": {"repository": {"pullRequests": {"nodes": nodes, "pageInfo": info}}}}
+    ]
+
+
+def _file_payload(text: str | None) -> dict:
+    blob = {"text": text, "isBinary": False, "isTruncated": False}
+    return {
+        "data": {
+            "repository": {
+                "object": {"file": None if text is None else {"object": blob}}
+            }
+        }
+    }
+
+
+def _comment_node(c: PrComment) -> dict:
+    author = {"login": c.author} if c.author else None
+    return {
+        "id": c.id,
+        "author": author,
+        "body": c.body,
+        "createdAt": c.created_at,
+        "lastEditedAt": c.last_edited_at,
+    }
+
+
+def _pr_payload(block: str, nodes: list[dict], **fields: object) -> dict:
+    info = {"hasNextPage": False, "endCursor": None}
+    node = {**fields, block: {"nodes": nodes, "pageInfo": info}}
+    return {"data": {"repository": {"pullRequest": node}}}
+
+
+#: Поля `gh pr view --json` факта `pr_facts`, которые фейк отдаёт (контракт формы).
+PR_FACT_FIELDS = ("headRefOid", "mergedBy", "mergedAt", "state")
+
+
 class Ops:
+    """Форджа стенда: каждый ответ — через парсер `RealOps` (форма боевая)."""
+
     def __init__(self, prs: list[dict], **kw: object) -> None:
-        self.prs = prs
+        self.prs = prs  # узлы GraphQL списка PR (`pr()`)
         self.files: dict[tuple[str, str], str] = {
             (HEAD, NODE): PENDING,
             **kw.get("files", {}),
@@ -65,51 +122,57 @@ class Ops:
     def prs_by_head_prefix(self, slug: str, prefix: str) -> list[dict]:
         if self.fail_list:
             raise RuntimeError("graphql: pagination broken")
-        return self.prs
+        return _real("prs_by_head_prefix", _pr_page(self.prs), slug, prefix)
 
     def pr_facts(self, slug: str, pr: int) -> dict:
         rec = next(p for p in self.prs if p["number"] == pr)
-        return {
-            "headRefOid": rec.get("head", HEAD),
-            "mergedBy": {"login": "alice"},
-            "mergedAt": "2026-10-01T10:00:00Z",
-            "state": rec["state"],
-        }
+        raw = dict(
+            zip(
+                PR_FACT_FIELDS,
+                (HEAD, {"login": "alice"}, "2026-10-01T10:00:00Z", rec["state"]),
+                strict=True,
+            )
+        )
+        return _real("pr_facts", raw, slug, pr)
 
     def repo_file_fact(self, slug: str, sha: str, path: str) -> Fact[str]:
         if "/approvals/requests/" in path:
             text = self.manifests.get(sha)
         else:
             text = self.files.get((sha, path))
-        return (
-            Fact(Outcome.FOUND, text, "ok")
-            if text
-            else Fact(Outcome.ABSENT, None, "нет")
-        )
+        return _real("repo_file_fact", _file_payload(text or None), slug, sha, path)
 
     def brief_pr_fact(self, slug: str, pr: int) -> Fact[BriefPrFacts]:
         files = self.pr_files.get(pr, ((NODE, "MODIFIED"),))
-        return Fact(
-            Outcome.FOUND,
-            BriefPrFacts(
-                pr,
-                "MERGED",
-                "master",
-                CAND,
-                HEAD,
-                files,
-                "ai-prosto",
-                "2026-10-01T10:05:00Z",
-                "f" * 40,
-            ),
-            "ok",
+        payload = _pr_payload(
+            "files",
+            [{"path": f, "changeType": c} for f, c in files],
+            state="MERGED",
+            baseRefName="master",
+            headRefName=CAND,
+            headRefOid=HEAD,
+            mergedAt="2026-10-01T10:05:00Z",
+            mergedBy={"login": "ai-prosto"},
+            mergeCommit={"oid": "f" * 40},
         )
+        return _real("brief_pr_fact", payload, slug, pr)
 
     def default_branch_fact(self, slug: str) -> Fact[DefaultBranch]:
-        return Fact(Outcome.FOUND, DefaultBranch("master", TIP), "ok")
+        ref = {"name": "master", "target": {"oid": TIP}}
+        return _real(
+            "default_branch_fact",
+            {"data": {"repository": {"defaultBranchRef": ref}}},
+            slug,
+        )
 
     def pr_comments_fact(self, slug: str, pr: int) -> Fact[list[PrComment]]:
-        return Fact(Outcome.FOUND, self.comments.get(pr, []), "ok")
+        nodes = [_comment_node(c) for c in self.comments.get(pr, [])]
+        return _real(
+            "pr_comments_fact",
+            _pr_payload("comments", nodes, headRefOid=HEAD),
+            slug,
+            pr,
+        )
 
     def comment(self, slug: str, pr: int, body: str) -> None:
         self.posted.append((pr, body))
@@ -127,14 +190,14 @@ def run(ops: Ops, **kw: object) -> act_barrier.BarrierReport:
     return act_barrier.live_unmarked(P, ops, **args)
 
 
-def pr(number: int, branch: str, state: str, **kw: object) -> dict:
+def pr(number: int, branch: str, state: str) -> dict:
+    """Узел GraphQL списка PR (`prs_by_head_prefix` разбирает его сам)."""
     return {
         "number": number,
-        "headRefName": branch,
-        "state": state,
         "title": "",
         "body": "",
-        **kw,
+        "headRefName": branch,
+        "state": state,
     }
 
 
@@ -501,6 +564,16 @@ class _Unreadable(Ops):
             return Fact(Outcome.UNAVAILABLE, None, "сеть")
         return super().pr_comments_fact(slug, pr)
 
+    def default_branch_fact(self, slug: str) -> Fact[DefaultBranch]:
+        if self.what == "tip":
+            return Fact(Outcome.UNAVAILABLE, None, "сеть")
+        return super().default_branch_fact(slug)
+
+    def brief_pr_fact(self, slug: str, pr: int) -> Fact[BriefPrFacts]:
+        if self.what == "pr_files":
+            return Fact(Outcome.UNAVAILABLE, None, "сеть")
+        return super().brief_pr_fact(slug, pr)
+
 
 @pytest.mark.parametrize(
     "what,gap",
@@ -584,8 +657,12 @@ def test_invalidate_refuses_non_request_pr() -> None:
 
 
 class _CliOps(Ops):
+    def __init__(self, prs: list[dict], *, caller: str = "alice", **kw: object) -> None:
+        super().__init__(prs, **kw)
+        self.caller = caller
+
     def caller_login(self) -> str | None:
-        return "ai-prosto"
+        return self.caller
 
 
 def _cli(monkeypatch, ops: Ops, live: object, argv: list[str]) -> int:
@@ -634,7 +711,7 @@ def test_cli_unavailable_activation_is_incomplete(monkeypatch, capsys) -> None:
 def test_cli_invalidate_by_agent_refused(monkeypatch, capsys) -> None:
     """`--invalidate` из контекста не человека из `human_approvers` — отказ 2, маркер
     не пишется."""
-    ops = _CliOps([pr(5, CAND, "OPEN")])
+    ops = _CliOps([pr(5, CAND, "OPEN")], caller="ai-prosto")
     got = _cli(
         monkeypatch, ops, _live(), ["--invalidate", "5", "--attest-drained", "f"]
     )
@@ -652,4 +729,214 @@ def test_cli_forge_failure_is_incomplete(monkeypatch, capsys) -> None:
     got = _cli(
         monkeypatch, Broken([pr(5, CAND, "OPEN")]), _live(), ["--attest-drained", "f"]
     )
-    assert got == 3 and "gh: сеть" in capsys.readouterr().err
+    assert got == 3 and "gap: #5: факты PR не установлены" in capsys.readouterr().out
+
+
+# --- C1 ревью Task 16: форма записей — та, что строит RealOps -------------------------
+
+
+def _argv_fields(method: str, *args: object) -> list[str]:
+    """Поля `--json`, которые `RealOps.<method>` спрашивает у `gh`."""
+    from governance.ops import RealOps
+
+    done = subprocess.CompletedProcess([], 0, stdout="{}", stderr="")
+    with mock.patch.object(subprocess, "run", return_value=done) as run:
+        getattr(RealOps(), method)(*args)
+    argv = run.call_args.args[0]
+    return argv[argv.index("--json") + 1].split(",")
+
+
+def test_contract_pr_facts_fields_are_requested_by_realops() -> None:
+    """Каждое поле `pr_facts`, которое читает барьер и отдаёт фейк, спрашивает и
+    `RealOps` (`gh pr view --json`)."""
+    assert set(PR_FACT_FIELDS) <= set(_argv_fields("pr_facts", P, 5))
+
+
+def test_contract_pr_listing_is_realops_shape() -> None:
+    """Запись списка — `{"number", "head": {"ref"}, "state", …}` (как у RealOps), и
+    барьер судит её, а не падает `KeyError` (C1)."""
+    got = Ops([pr(5, CAND, "OPEN")]).prs_by_head_prefix(P, "")
+    assert got == [
+        {"number": 5, "title": "", "body": "", "head": {"ref": CAND}, "state": "OPEN"}
+    ]
+    assert act_barrier._record(got[0]) == act_barrier.PrRecord(5, CAND, "OPEN")
+
+
+@pytest.mark.parametrize(
+    "method,args,kind",
+    [
+        ("repo_file_fact", (P, HEAD, NODE), str),
+        ("brief_pr_fact", (P, 5), BriefPrFacts),
+        ("default_branch_fact", (P,), DefaultBranch),
+        ("pr_comments_fact", (P, 5), list),
+    ],
+    ids=["repo_file", "brief_pr", "default_branch", "comments"],
+)
+def test_contract_fact_readers_are_realops(
+    method: str, args: tuple, kind: type
+) -> None:
+    """Факты, которые читает барьер, фейк отдаёт парсером RealOps: FOUND с
+    значением боевого типа."""
+    got = getattr(Ops([pr(5, CAND, "OPEN")]), method)(*args)
+    assert got.outcome is Outcome.FOUND and isinstance(got.value, kind)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"number": 5, "headRefName": CAND, "state": "OPEN"},  # прежняя (ложная) форма
+        {"number": "5", "head": {"ref": CAND}, "state": "OPEN"},
+        {"number": 5, "head": {"ref": CAND}, "state": "DRAFT"},
+        {"number": 5, "head": None, "state": "OPEN"},
+    ],
+    ids=["head_ref_name", "number_str", "state", "head_none"],
+)
+def test_unexpected_record_shape_is_a_gap(bad: dict) -> None:
+    """Запись списка неожиданной формы — список неполон (пробел), а не пропуск и не
+    исключение."""
+
+    class Odd(Ops):
+        def prs_by_head_prefix(self, slug: str, prefix: str) -> list[dict]:
+            return [bad]
+
+    got = run(Odd([]))
+    assert got.items == () and not got.complete
+    assert got.gaps == ("список PR owner/p неполон: 1 записей неожиданной формы",)
+
+
+def test_forge_exception_per_pr_is_a_gap() -> None:
+    """Исключение чтения фактов PR (`gh pr view` с `check=True`) — пробел этого PR."""
+
+    class Broken(Ops):
+        def pr_facts(self, slug: str, pr: int) -> dict:
+            raise subprocess.CalledProcessError(1, ["gh"])
+
+    got = run(Broken([pr(5, CAND, "OPEN")]))
+    assert got.items == () and not got.complete
+    assert got.gaps[0].startswith("#5: факты PR не установлены — CalledProcessError")
+
+
+def test_listing_through_real_graphql_parser() -> None:
+    """Сквозной путь: настоящий `RealOps.prs_by_head_prefix` на ответе GraphQL →
+    `live_unmarked` (без фейка списка)."""
+    from governance.ops import RealOps
+
+    class Live(Ops):
+        def prs_by_head_prefix(self, slug: str, prefix: str) -> list[dict]:
+            payload = json.dumps(_pr_page([pr(5, CAND, "OPEN")]))
+            done = subprocess.CompletedProcess([], 0, stdout=payload, stderr="")
+            with mock.patch.object(subprocess, "run", return_value=done):
+                return RealOps().prs_by_head_prefix(slug, prefix)
+
+    got = run(Live([pr(5, CAND, "OPEN")]))
+    assert got.items == (
+        "#5 candidate OPEN без маркера: манифеста нет в голове; маркера миграции нет",
+    )
+
+
+# --- I1 ревью Task 16: пробелы полноты на уровне PR -----------------------------------
+
+
+def test_review_preview_unread_pr_is_a_gap() -> None:
+    """Q9: голова/манифест OPEN candidate не прочитаны — пробел, `complete=False`, а не
+    «последствий нет»."""
+    got = act_barrier.live_review_requests(
+        {P: _Unreadable([pr(5, CAND, "OPEN")], what="manifest")}
+    )
+    assert got.items == () and got.complete is False
+    assert got.gaps == ("owner/p#5: манифест не прочитан — сеть",)
+
+
+def test_legacy_base_tip_unread_is_a_gap() -> None:
+    """`_legacy_resolved`: голова базы не прочитана — пробел."""
+    ops = _Unreadable([pr(5, CAND, "MERGED"), pr(6, FINAL, "MERGED")], what="tip")
+    got = run(ops)
+    assert got.items == () and got.gaps == ("#5: голова базы не прочитана",)
+
+
+def test_legacy_base_node_unread_is_a_gap() -> None:
+    """`_legacy_resolved`: узел в базе UNAVAILABLE — пробел, а не «узла нет»."""
+
+    class BaseDown(Ops):
+        def repo_file_fact(self, slug: str, sha: str, path: str) -> Fact[str]:
+            if sha == TIP:
+                return Fact(Outcome.UNAVAILABLE, None, "сеть")
+            return super().repo_file_fact(slug, sha, path)
+
+    got = run(BaseDown([pr(5, CAND, "MERGED"), pr(6, FINAL, "MERGED")]))
+    assert got.items == () and got.gaps == (f"#5: {NODE} в базе не прочитан",)
+
+
+def test_candidate_files_unread_is_a_gap() -> None:
+    """`_candidate_nodes`: состав candidate не прочитан — пробел."""
+    ops = _Unreadable([pr(5, CAND, "MERGED"), pr(6, FINAL, "MERGED")], what="pr_files")
+    got = run(ops)
+    assert got.items == ()
+    assert got.gaps == ("#5: состав или голова candidate не прочитаны",)
+
+
+# --- M1/M6 ревью Task 16: коды CLI и человеческий контекст ----------------------------
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--attest-drained", "fleet"],
+        ["--confirm-resolved", "7", "--attest-drained", "f"],
+    ],
+    ids=["attest", "confirm"],
+)
+def test_cli_human_flags_from_agent_refused(monkeypatch, capsys, argv) -> None:
+    """`--attest-drained`/`--confirm-resolved` от не-человека — 2: агент не
+    самоаттестуется."""
+    got = _cli(monkeypatch, _CliOps([], caller="ai-prosto"), _live(), argv)
+    assert got == 2 and "только человек из human_approvers" in capsys.readouterr().err
+
+
+def test_human_context_refuses_agent() -> None:
+    """`human_context`: флаг человеческого контекста от логина вне списка — отказ."""
+    with pytest.raises(act_barrier.Refused, match="только человек из human_approvers"):
+        act_barrier.human_context(
+            "ai-prosto", frozenset({"alice"}), ["--attest-drained"]
+        )
+    act_barrier.human_context("ai-prosto", frozenset({"alice"}), [])
+
+
+def test_cli_invalidate_listing_failure_is_incomplete(monkeypatch, capsys) -> None:
+    """Сбой списка PR внутри `--invalidate` — 3 «неполно», а не 2 «отвергнута»."""
+    got = _cli(
+        monkeypatch,
+        _CliOps([pr(5, CAND, "OPEN")], fail_list=True),
+        _live(),
+        ["--invalidate", "5", "--attest-drained", "f"],
+    )
+    assert got == 3 and "pagination broken" in capsys.readouterr().err
+
+
+def test_invalidate_skips_unreadable_ledger(monkeypatch) -> None:
+    """Битый леджер не роняет инвалидацию после записи маркера; его назовёт отчёт."""
+
+    def broken(run_id):
+        raise ValueError("битый run.json")
+
+    monkeypatch.setattr(rs, "all_run_ids", lambda: ["r1"])
+    monkeypatch.setattr(rs, "load", broken)
+    ops = Ops([pr(5, CAND, "OPEN")])
+    key = act_barrier.invalidate(P, ops, 5, humans=frozenset({"alice"}), caller="alice")
+    assert key == "approve-2-1-1" and ops.posted == [(5, MARK)]
+
+
+def test_cli_unexpected_exception_is_incomplete(monkeypatch, capsys) -> None:
+    """Непредвиденное исключение (`TypeError`) — 3, не 1 «есть живые»."""
+    from governance import act_status
+
+    def boom(probe, deps):
+        raise TypeError("неожиданно")
+
+    got = _cli(monkeypatch, _CliOps([]), _live(), ["--attest-drained", "f"])
+    assert got == 0
+    monkeypatch.setattr(act_status, "live_policy", boom)
+    from governance import act_barrier as ab_mod
+
+    assert ab_mod.main(["--product", P]) == 3
+    assert "TypeError" in capsys.readouterr().err
