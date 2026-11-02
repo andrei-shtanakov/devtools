@@ -12,7 +12,11 @@ from pathlib import Path
 
 import pytest
 
-jwt = pytest.importorskip("jwt")
+# Причина скипа — в форме, которую узнаёт детектор conftest (`GOVERNANCE_REQUIRED`).
+jwt = pytest.importorskip("jwt", reason="pyjwt недоступен без группы governance")
+pytest.importorskip(
+    "cryptography", reason="cryptography недоступна без группы governance"
+)
 from cryptography.hazmat.primitives import serialization  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
 
@@ -167,8 +171,26 @@ def test_installation_id_not_int_is_unavailable(key, ident) -> None:
 
 @pytest.mark.parametrize(
     "answer",
-    [(201, {"token": ""}), (201, {}), (200, {"token": "ghs_x"}), (403, None)],
-    ids=["empty", "missing", "not_201", "forbidden"],
+    [
+        (201, {"token": ""}),
+        (201, {}),
+        (200, {"token": "ghs_x"}),
+        (403, None),
+        (201, {"token": 5}),
+        (201, {"token": "ghs x"}),
+        (201, {"token": "ghs_x\nextra"}),
+        (201, ["ghs_x"]),
+    ],
+    ids=[
+        "empty",
+        "missing",
+        "not_201",
+        "forbidden",
+        "not_str",
+        "space",
+        "newline",
+        "not_object",
+    ],  # fmt: skip
 )
 def test_identity_token_refused_is_unavailable(key, answer) -> None:
     routes = {**IDENTITY_OK, ("POST", "/app/installations/9/access_tokens"): answer}
@@ -283,11 +305,38 @@ def test_too_many_installation_pages_is_unavailable(key, monkeypatch) -> None:
     assert isinstance(got, Unavailable) and "больше 2 страниц" in got.reason
 
 
-@pytest.mark.parametrize("item", [{"id": "9"}, {"id": True}, {}, 9], ids=str)
+BAD_ENTRIES = [{"id": "9"}, {"id": True}, {}, {"id": None}, 9, "owner/df-trust"]
+
+
+@pytest.mark.parametrize("item", BAD_ENTRIES, ids=str)
 def test_installation_without_int_id_is_unavailable(key, item) -> None:
     http = Http({("GET", INST.format(1)): (200, [item])})
     got = act_app_token.installations_refusal(1, key[0], TRUST, http=http, now=0)
-    assert got == Unavailable("установка без id")
+    assert got == Unavailable("GET /app/installations (стр. 1): запись без целого id")
+
+
+@pytest.mark.parametrize("item", BAD_ENTRIES, ids=str)
+def test_repository_entry_without_int_id_is_unavailable(key, item) -> None:
+    """Ревью PR #674 (major): запись списка репо установки без целого `id` —
+    не «чисто», а `Unavailable`, даже когда `total_count` сходится и рядом
+    разобранная запись."""
+    body = {"total_count": 2, "repositories": [{"id": 7}, item]}
+    http = Http({**_installs([{"id": 9}]), ("GET", REPOS.format(1)): (200, body)})
+    got = act_app_token.installations_refusal(1, key[0], TRUST, http=http, now=0)
+    assert got == Unavailable(
+        "репо установки 9: GET /installation/repositories (стр. 1): "
+        "запись без целого id"
+    )
+
+
+def test_bad_entry_on_full_page_is_unavailable(key) -> None:
+    """Строгость на каждой странице, не только на последней."""
+    first = [{"id": n} for n in range(99)] + [{"name": "x"}]
+    http = Http(
+        {("GET", INST.format(1)): (200, first), ("GET", INST.format(2)): (200, [])}
+    )
+    got = act_app_token.installations_refusal(1, key[0], TRUST, http=http, now=0)
+    assert isinstance(got, Unavailable) and "стр. 1" in got.reason
 
 
 @pytest.mark.parametrize(
@@ -356,6 +405,39 @@ class _Answer(io.BytesIO):
     def __init__(self, status: int, body: object) -> None:
         super().__init__(json.dumps(body).encode())
         self.status = status
+
+
+def test_opener_ignores_environment_proxies(monkeypatch) -> None:
+    """Ревью PR #674 (m1): как `act_anon` — пустой ProxyHandler. Пустой в цепочку
+    не встаёт (нет протоколов), но вытесняет умолчание, читающее `*_proxy`
+    окружения; двойник — opener без него при выставленном прокси проксирует."""
+    monkeypatch.setenv("https_proxy", "http://user:pw@proxy.example:3128")
+
+    def proxied(opener: urllib.request.OpenerDirector) -> list[object]:
+        return [
+            h for h in opener.handlers if isinstance(h, urllib.request.ProxyHandler)
+        ]
+
+    assert proxied(act_app_token._build_opener()) == []
+    assert proxied(urllib.request.build_opener(act_app_token._NoRedirect)) != []
+
+
+def test_oversized_body_is_refused(monkeypatch) -> None:
+    """Тело больше `MAX_BODY` — сбой транспорта (код 0), а не разбор: тело из
+    цифр разбиралось бы и целиком, и усечённым — отказ даёт только предел."""
+    monkeypatch.setattr(act_app_token, "MAX_BODY", 16)
+    opener = _Opener({"/app": (200, int("1" * 17))})
+    monkeypatch.setattr(act_app_token, "_OPENER", opener)
+    assert act_app_token._http("GET", "/app", "Bearer x") == (0, None)
+
+
+def test_body_at_limit_is_read(key, monkeypatch) -> None:
+    body = json.dumps({"slug": "df"}).encode()
+    monkeypatch.setattr(act_app_token, "MAX_BODY", len(body))
+    monkeypatch.setattr(
+        act_app_token, "_OPENER", _Opener({"/app": (200, {"slug": "df"})})
+    )
+    assert act_app_token._http("GET", "/app", "Bearer x") == (200, {"slug": "df"})
 
 
 class _Opener:

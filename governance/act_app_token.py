@@ -38,6 +38,7 @@ import urllib.request  # noqa: E402
 from collections.abc import Callable, Mapping  # noqa: E402
 from typing import Any  # noqa: E402
 
+from governance.act_anon import MAX_BODY  # noqa: E402
 from governance.act_time import Unavailable  # noqa: E402
 
 API = "https://api.github.com"
@@ -47,6 +48,8 @@ MAX_PAGES = 50
 REPO_SLUG = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 #: Slug App: одна строка stdout без пробелов (логин `<slug>[bot]`).
 APP_SLUG = re.compile(r"[A-Za-z0-9_.-]+")
+#: Токен установки: одна строка stdout, та же форма, что сверяет `merge-pr.sh`.
+TOKEN = re.compile(r"[A-Za-z0-9_]+")
 #: Полномочия токена мержа: `PUT …/pulls/{n}/merge`, `GET …/compare`,
 #: `DELETE …/git/refs/heads/{ветка}` — contents и pull_requests на запись.
 MERGE_PERMISSIONS = {"contents": "write", "pull_requests": "write"}
@@ -64,13 +67,20 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-_OPENER = urllib.request.build_opener(_NoRedirect)
+def _build_opener() -> urllib.request.OpenerDirector:
+    """Как `act_anon`: пустой ProxyHandler — прокси из окружения (и их
+    credentials) не используются; перенаправления не исполняются."""
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+
+
+_OPENER = _build_opener()
 
 
 def _http(
     method: str, path: str, auth: str, body: dict | None = None
 ) -> tuple[int, Any]:
-    """Запрос к API GitHub; ошибка — `(код, None)`, сбой транспорта — `(0, None)`."""
+    """Запрос к API GitHub; ошибка — `(код, None)`; сбой транспорта и тело больше
+    `MAX_BODY` (предел `act_anon`) — `(0, None)`."""
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
         API + path,
@@ -85,7 +95,10 @@ def _http(
     )
     try:
         with _OPENER.open(req, timeout=30) as answer:
-            return answer.status, json.loads(answer.read() or b"null")
+            raw = answer.read(MAX_BODY + 1)
+            if len(raw) > MAX_BODY:
+                return 0, None
+            return answer.status, json.loads(raw or b"null")
     except urllib.error.HTTPError as err:
         return err.code, None
     except (OSError, ValueError, http.client.HTTPException):
@@ -96,12 +109,16 @@ def _field(data: Any, field: str) -> Any:
     return data.get(field) if isinstance(data, dict) else None
 
 
-def _pages(http: Http, path: str, auth: str, field: str | None) -> list | Unavailable:
-    """Все страницы списка: до первой неполной страницы (полнота по построению).
+def _page_ids(
+    http: Http, path: str, auth: str, field: str | None
+) -> list[int] | Unavailable:
+    """`id` всех записей списка: до первой неполной страницы (полнота по построению).
 
     `field` — ключ списка в объекте с `total_count` (тогда сумма сверяется с
-    ним); `None` — ответ сам список. Больше `MAX_PAGES` — `Unavailable`."""
-    items: list = []
+    ним); `None` — ответ сам список. Каждая запись — объект с целым `id`, иначе
+    `Unavailable`: неразобранная запись не выпадает молча (ревью PR #674).
+    Больше `MAX_PAGES` — `Unavailable`."""
+    items: list[int] = []
     total: object = None
     for page in range(1, MAX_PAGES + 1):
         status, data = http("GET", f"{path}?per_page={PER_PAGE}&page={page}", auth)
@@ -110,7 +127,10 @@ def _pages(http: Http, path: str, auth: str, field: str | None) -> list | Unavai
             return Unavailable(f"GET {path} (стр. {page}): HTTP {status}")
         if field is not None:
             total = _field(data, "total_count")
-        items.extend(chunk)
+        ids = [_field(entry, "id") for entry in chunk]
+        if any(type(ident) is not int for ident in ids):
+            return Unavailable(f"GET {path} (стр. {page}): запись без целого id")
+        items.extend(ids)
         if len(chunk) < PER_PAGE:
             if field is not None and (type(total) is not int or total != len(items)):
                 return Unavailable(f"GET {path}: {len(items)} из total_count={total!r}")
@@ -138,8 +158,8 @@ def _token(
 ) -> str | Unavailable:
     path = f"/app/installations/{installation}/access_tokens"
     status, data = http("POST", path, bearer, body)
-    token = data.get("token") if isinstance(data, dict) else None
-    if status != 201 or not isinstance(token, str) or not token:
+    token = _field(data, "token")
+    if status != 201 or not isinstance(token, str) or TOKEN.fullmatch(token) is None:
         return Unavailable(f"токен установки {installation}: HTTP {status}")
     return token
 
@@ -154,11 +174,11 @@ def app_identity(
     if isinstance(bearer, Unavailable):
         return bearer
     status, data = http("GET", "/app", bearer)
-    slug = data.get("slug") if isinstance(data, dict) else None
+    slug = _field(data, "slug")
     if status != 200 or not isinstance(slug, str) or APP_SLUG.fullmatch(slug) is None:
         return Unavailable(f"GET /app: HTTP {status}")
     status, data = http("GET", f"/repos/{repo}/installation", bearer)
-    installation = data.get("id") if isinstance(data, dict) else None
+    installation = _field(data, "id")
     if status != 200 or type(installation) is not int:
         return Unavailable(f"установка App на {repo}: HTTP {status}")
     # Токен сужен до целевого репо и полномочий мержа (ревью Task 15a, m1).
@@ -183,23 +203,19 @@ def installations_refusal(
     bearer = _bearer(app_id, key, now)
     if isinstance(bearer, Unavailable):
         return bearer
-    installations = _pages(http, "/app/installations", bearer, None)
+    installations = _page_ids(http, "/app/installations", bearer, None)
     if isinstance(installations, Unavailable):
         return installations
-    for item in installations:
-        ident = item.get("id") if isinstance(item, dict) else None
-        if type(ident) is not int:
-            return Unavailable("установка без id")
+    for ident in installations:
         token = _token(http, bearer, ident, {"permissions": {"metadata": "read"}})
         if isinstance(token, Unavailable):
             return token
         auth = f"token {token}"
-        repos = _pages(http, "/installation/repositories", auth, "repositories")
+        repos = _page_ids(http, "/installation/repositories", auth, "repositories")
         if isinstance(repos, Unavailable):
             return Unavailable(f"репо установки {ident}: {repos.reason}")
-        seen = {r.get("id") for r in repos if isinstance(r, dict)}
         for role, repo_id in trust_repos.items():
-            if repo_id in seen:
+            if repo_id in repos:
                 return role, f"установка App {ident} видит {role} ({repo_id})"
     return None
 
