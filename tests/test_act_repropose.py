@@ -468,8 +468,159 @@ def test_base_successor_passes_legacy_bundle_and_predecessor(world, stand, monke
     act_node._create_successor(world.state, world.ops, "approve-1-1-1", op, 6)
     assert seen == [
         ("design", {"legacy_bundle": 6, "predecessor": "approve-1-1-1"}),
-        ("acceptance", {"legacy_bundle": 6}),
+        ("acceptance", {"legacy_bundle": 6, "predecessor": "approve-1-1-1"}),
     ]
+
+
+# --- fix round 1: I-1 (многоузловой преемник), m-1 (засчитываемый акт) ------------
+
+
+def _two_node_ambiguous(world: World, stand: Stand, monkeypatch) -> str:
+    """Заявка над `[design, acceptance]`, смёржена агентом, вердикт `Ambiguous`."""
+    from tests.test_act_node import _level_three
+
+    _level_three(world, stand, monkeypatch)
+    stand.mode = "review"
+    key = approve(world, "design").request
+    approve(world, "acceptance")
+    assert world.state.ops[key]["nodes"] == ["design", "acceptance"]
+    stand.approve_head(world.state.ops[key]["candidate_pr"])
+    approve(world, "design")  # агентская доставка
+    stand.verdict = Ambiguous()
+    with pytest.raises(RuntimeError, match="--repropose"):
+        approve(world, "design")
+    return key
+
+
+def test_two_node_ambiguous_gives_one_successor_over_both(world, stand, monkeypatch):
+    """I-1: второй узел (статус тоже `unavailable:` — та же доставка) дописывается
+    в своего преемника, а не упирается в отказ."""
+    key = _two_node_ambiguous(world, stand, monkeypatch)
+    _repropose(world, key)
+    succs = [k for k, op in world.state.ops.items() if op.get("predecessor") == key]
+    assert len(succs) == 1
+    assert world.state.ops[succs[0]]["nodes"] == ["design", "acceptance"]
+    assert world.state.ops[succs[0]]["generations"] == {"design": 2, "acceptance": 2}
+
+
+def test_two_node_ambiguous_crash_between_nodes_recovers(world, stand, monkeypatch):
+    key = _two_node_ambiguous(world, stand, monkeypatch)
+    real = an.approve_node
+    failed: list[str] = []
+
+    def flaky(state, ops, node, **kwargs):
+        if node == "acceptance" and not failed:
+            failed.append(node)
+            raise RuntimeError("упали между узлами")
+        return real(state, ops, node, **kwargs)
+
+    monkeypatch.setattr(an, "approve_node", flaky)
+    with pytest.raises(RuntimeError, match="между узлами"):
+        _repropose(world, key)
+    succ = al.successor_of(world.state, key)
+    assert succ is not None and world.state.ops[succ]["nodes"] == ["design"]
+    _repropose(world, key)
+    succs = [k for k, op in world.state.ops.items() if op.get("predecessor") == key]
+    assert succs == [succ]
+    assert world.state.ops[succ]["nodes"] == ["design", "acceptance"]
+
+
+def test_foreign_live_request_of_the_step_still_refused(world, stand, monkeypatch):
+    """Чужая живая заявка шага (без `predecessor`) — преемник к ней не дописывается."""
+    from tests.test_act_node import _level_three
+
+    _level_three(world, stand, monkeypatch)
+    stand.mode = "review"
+    key = approve(world, "design").request
+    approve(world, "acceptance")
+    pr = world.state.ops[key]["candidate_pr"]
+    al.invalidate_request(world.state, key, "проверка")
+    world.forge.prs[pr]["state"] = "CLOSED"
+    foreign = approve(world, "acceptance").request
+    assert foreign != key
+    with pytest.raises(RuntimeError, match="уже есть — продвиньте её"):
+        _repropose(world, key)
+    assert al.successor_of(world.state, key) is None
+    assert world.state.ops[foreign]["nodes"] == ["acceptance"]
+
+
+def test_approve_node_with_predecessor_advances_own_successor(world, stand):
+    """Живая заявка над узлом — свой преемник: продвигается, а не отказ."""
+    key = approve(world, "charter").request
+    succ = _repropose(world, key).request
+    out = an.approve_node(world.state, world.ops, "charter", predecessor=key)
+    assert out.request == succ
+    assert al.successor_of(world.state, key) == succ
+
+
+def test_merged_predecessor_with_accepted_delivery_refused(world, stand):
+    """m-1: candidate смёржен, решение по доставке — `Accepted` (акт ещё не
+    засчитан `--approve-node`): не инвалидируется, PR не трогается."""
+    key = approve(world, "charter").request
+    pr = world.state.ops[key]["candidate_pr"]
+    stand.approve_head(pr)
+    approve(world, "charter")  # агентская доставка, акт ещё не записан
+    before = copy.deepcopy(world.state.ops[key])
+    with pytest.raises(RuntimeError, match="засчитывается .* `--approve-node`"):
+        _repropose(world, key)
+    assert world.state.ops[key] == before
+    assert world.state.ops[key]["status"] == al.STATUS_STARTED
+    assert world.forge.prs[pr]["state"] == "MERGED"
+    assert al.successor_of(world.state, key) is None
+
+
+def test_merged_predecessor_with_rejected_delivery_proceeds(world, stand):
+    key = approve(world, "charter").request
+    stand.approve_head(world.state.ops[key]["candidate_pr"])
+    approve(world, "charter")
+    stand.verdict = Rejected("d3_merger", "мержер вне allowlist")
+    _repropose(world, key)
+    assert world.state.ops[key]["reason"] == act_node.REPROPOSED
+    assert al.successor_of(world.state, key) is not None
+
+
+def test_merged_predecessor_mode_unset_refused(world, stand):
+    key = approve(world, "charter").request
+    stand.approve_head(world.state.ops[key]["candidate_pr"])
+    approve(world, "charter")
+    stand.mode_unset = "нет привязки"
+    with pytest.raises(RuntimeError, match="нет привязки"):
+        _repropose(world, key)
+    assert world.state.ops[key]["status"] == al.STATUS_STARTED
+
+
+def _merged_ambiguous(world: World, stand: Stand) -> str:
+    key = approve(world, "charter").request
+    stand.approve_head(world.state.ops[key]["candidate_pr"])
+    approve(world, "charter")
+    stand.verdict = Ambiguous()
+    return key
+
+
+def test_merged_predecessor_outside_review_mode_refused(world, stand):
+    key = _merged_ambiguous(world, stand)
+    stand.mode = "merge"
+    with pytest.raises(RuntimeError, match="режим продукта сейчас — merge"):
+        _repropose(world, key)
+    assert world.state.ops[key]["status"] == al.STATUS_STARTED
+
+
+def test_merged_predecessor_history_unreadable_refused(world, stand, monkeypatch):
+    key = _merged_ambiguous(world, stand)
+    monkeypatch.setattr(
+        act_status, "load_history", lambda ops, state, base: Unavailable("сбой")
+    )
+    with pytest.raises(RuntimeError, match="история заявок узлов: сбой"):
+        _repropose(world, key)
+    assert world.state.ops[key]["status"] == al.STATUS_STARTED
+
+
+def test_merged_predecessor_missing_from_history_refused(world, stand, monkeypatch):
+    key = _merged_ambiguous(world, stand)
+    monkeypatch.setattr(act_status, "load_history", lambda ops, state, base: ())
+    with pytest.raises(RuntimeError, match="доставки в истории"):
+        _repropose(world, key)
+    assert world.state.ops[key]["status"] == al.STATUS_STARTED
 
 
 # --- путь ветки волны (`propose_from_source`) ----------------------------------------
@@ -506,6 +657,20 @@ def test_source_resume_refuses_successor(waves: World) -> None:
             waves.state, waves.ops, ["charter"], sha, predecessor="approve-9-9-9"
         )
     assert "predecessor" not in waves.state.ops[key]
+
+
+def test_source_resume_of_own_successor_continues(waves: World) -> None:
+    from tests.test_governance_approve_node import _node_text, authored_branch
+
+    sha = authored_branch(waves, 1, {"00-charter.md": _node_text("charter")})
+    first = an.propose_from_source(
+        waves.state, waves.ops, ["charter"], sha, predecessor="approve-9-9-9"
+    )
+    again = an.propose_from_source(
+        waves.state, waves.ops, ["charter"], sha, predecessor="approve-9-9-9"
+    )
+    assert again.request == first.request
+    assert len(al.requests(waves.state)) == 1
 
 
 def test_source_successor_does_not_join_live_step(waves: World) -> None:
@@ -595,3 +760,15 @@ def test_cli_repropose_refusal_returns_one(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(act_node, "repropose", fake)
     assert tb.main(["--run-id", "r-repropose", "--repropose", "approve-9-9-9"]) == 1
     assert "task_bridge: заявки approve-9-9-9 нет в леджере" in capsys.readouterr().out
+
+
+def test_cli_repropose_with_reason_refused(tmp_path, monkeypatch, capsys):
+    """m-2: причина `--repropose` — константа; `--reason` молча не съедается."""
+    from governance import task_bridge as tb
+
+    _completed_run(tmp_path, monkeypatch)
+    with pytest.raises(SystemExit):
+        tb.main(
+            ["--run-id", "r-repropose", "--repropose", "approve-1-0-1", "--reason", "x"]
+        )
+    assert "--reason осмыслен только" in capsys.readouterr().err

@@ -336,7 +336,7 @@ def approve_node(
     live = al.live_request_over(state, node_id)
     if live is not None:
         nums, op = live
-        if predecessor is not None:
+        if predecessor is not None and op.get("predecessor") != predecessor:
             raise RuntimeError(
                 f"над узлом {node_id} уже есть живая заявка "
                 f"{al.request_key(*nums)} — продвиньте её, преемник "
@@ -527,13 +527,18 @@ def _supersedes_undecided(
 def _require_no_join_for_successor(
     joined: tuple[tuple[int, int, int], dict] | None, predecessor: str | None
 ) -> None:
-    """Преемник (`--repropose`) — всегда НОВАЯ заявка, не дописка в живую.
+    """Преемник (`--repropose`) дописывается только в СВОЮ заявку.
 
-    Присоединение к живой заявке шага унесло бы переиздание в чужую ветку
-    и PR, а связь `predecessor` — потерялась бы: повтор `--repropose` не
+    Своя — живая заявка шага с тем же `predecessor` (второй узел того же
+    переиздания). Присоединение к чужой унесло бы переиздание в чужую ветку
+    и PR, а связь `predecessor` потерялась бы: повтор `--repropose` не
     нашёл бы преемника и завёл бы следующий.
     """
-    if predecessor is not None and joined is not None:
+    if (
+        predecessor is not None
+        and joined is not None
+        and joined[1].get("predecessor") != predecessor
+    ):
         raise RuntimeError(
             f"живая заявка шага {al.request_key(*joined[0])} уже есть — продвиньте "
             f"её, преемник {predecessor} не создаётся"
@@ -880,7 +885,11 @@ def propose_from_source(
         )
     step = steps.pop()
     resumed = _same_live_request(state, node_ids, source_sha)
-    if resumed is not None and predecessor is not None:
+    if (
+        resumed is not None
+        and predecessor is not None
+        and state.ops[resumed].get("predecessor") != predecessor
+    ):
         raise RuntimeError(
             f"живая заявка {resumed} над теми же узлами уже есть — продвиньте её, "
             f"преемник {predecessor} не создаётся"

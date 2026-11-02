@@ -641,10 +641,63 @@ def repropose(
     if successor is not None:
         return _continue_successor(state, ops, key, successor, legacy_bundle)
     if al.is_live(op):
+        _require_no_accepted_delivery(state, ops, key, op, legacy_bundle)
         al.invalidate_request(state, key, REPROPOSED)
     # причина закрытия — из записи предшественника (свежей, после инвалидации)
     an._close_buried_proposals(state, ops, key)
     return _create_successor(state, ops, key, state.ops[key], legacy_bundle)
+
+
+def _require_no_accepted_delivery(
+    state: RunState, ops: Ops, key: str, op: Mapping, legacy_bundle: int | None
+) -> None:
+    """Живой предшественник со смёрженным candidate: акт не хоронится (m-1).
+
+    Вердикт доставки — тем же `Decider`, что у статусов узла: `Accepted` —
+    отказ, продолжение `--approve-node`. `Unavailable`/`Ambiguous`/`Rejected`
+    — переиздание идёт. Временный `Unavailable` от постоянного здесь не
+    отличить: переиздание — явное действие оператора и ничего не одобряет.
+    Заявка без маркера (старый путь) этой проверки не имеет: её вердикт —
+    старый код, который засчитывает мерж шагом `FINALIZE` (`_AFTER_MERGE`).
+    """
+    pr = op.get("candidate_pr")
+    if op.get("act") != ACT_REVIEW_V1 or pr is None:
+        return
+    if an._disposition(an._pr_facts(state, ops, pr), pr) is not Disposition.MERGED:
+        return
+    deps = DEPS_FACTORY(state)
+    live = act_status.mode_probe(state, deps)
+    if isinstance(live, Unavailable):
+        raise an._unresolved(f"режим акта продукта (--repropose {key}): {live.reason}")
+    if live.mode != "review":
+        raise an._unresolved(f"заявка review/v1, а режим продукта сейчас — {live.mode}")
+    base = an._base_ref(state)
+    ops.checkout_and_pull(state.target_dir, base)
+    history = act_status.load_history(ops, state, base)
+    if isinstance(history, Unavailable):
+        raise an._unresolved(f"история заявок узлов: {history.reason}")
+    event = next(
+        (
+            e
+            for e in history
+            if isinstance(e, DeliveredRequest) and e.request.request_id == key
+        ),
+        None,
+    )
+    if event is None:
+        raise an._unresolved(
+            f"candidate-PR #{pr} заявки {key} смёржен, а доставки в истории {base} нет"
+        )
+    dag = bundle_dag.dag_for(legacy_bundle)
+    decide = act_status.Decider(
+        state, ops, deps, dag, trust=live.trust, journal=live.journal
+    )
+    if isinstance(decide(event), (Unavailable, Ambiguous, Rejected)):
+        return
+    raise RuntimeError(
+        f"заявка {key}: доставка candidate-PR #{pr} засчитывается (акт есть) — "
+        "продолжение `--approve-node`, не переиздание"
+    )
 
 
 def _create_successor(
@@ -665,11 +718,12 @@ def _create_successor(
             legacy_bundle=legacy_bundle,
             predecessor=key,
         )
-    outcome = an.approve_node(
-        state, ops, nodes[0], legacy_bundle=legacy_bundle, predecessor=key
-    )
-    for node in nodes[1:]:
-        outcome = an.approve_node(state, ops, node, legacy_bundle=legacy_bundle)
+    # `predecessor` — у КАЖДОГО узла: второй узел дописывается только в своего
+    # преемника, а неустановленный статус пропускает лишь его (I-1)
+    for node in nodes:
+        outcome = an.approve_node(
+            state, ops, node, legacy_bundle=legacy_bundle, predecessor=key
+        )
     return outcome
 
 
@@ -694,7 +748,7 @@ def _continue_successor(
             "(байты ветки волны) — разберите вручную"
         )
     for node in missing:  # падение между узлами при создании преемника
-        an.approve_node(state, ops, node, legacy_bundle=legacy_bundle)
+        an.approve_node(state, ops, node, legacy_bundle=legacy_bundle, predecessor=key)
     return an.approve_node(state, ops, succ["nodes"][0], legacy_bundle=legacy_bundle)
 
 
