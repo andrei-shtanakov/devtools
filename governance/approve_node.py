@@ -44,7 +44,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from governance import approval_facts as af
 from governance import approval_ledger as al
@@ -54,7 +54,7 @@ from governance.act_check import LegacyAccepted
 from governance.act_decision import Rejected
 from governance.act_envelope import DeliveredRequest, current_event
 from governance.act_request import ACT_REVIEW_V1
-from governance.act_time import Ambiguous, Unavailable
+from governance.act_time import OPS_FAILURES, Ambiguous, Unavailable
 from governance.approval_facts import Disposition, Outcome
 from governance.frontmatter import split_frontmatter, update_frontmatter
 from governance.ops import Ops
@@ -226,6 +226,17 @@ def _pr_facts(state: RunState, ops: Ops, pr: int) -> dict:
     if fact.outcome is not Outcome.FOUND or not isinstance(fact.value, dict):
         raise _unresolved(f"факты PR #{pr} — {fact.detail}")
     return fact.value
+
+
+def _commit_paths(
+    ops: Ops, target_dir: str, paths: list[str], message: str, **force: Any
+) -> None:
+    """`ops.commit_paths` либо отказ без эффектов: `CalledProcessError` из
+    `check=True` — «факт не установлен», а не трассировка (I-3, `OPS_FAILURES`)."""
+    try:
+        ops.commit_paths(target_dir, paths, message, **force)
+    except OPS_FAILURES as exc:
+        raise _unresolved(f"коммит {', '.join(paths)} не состоялся ({exc})") from exc
 
 
 def _disposition(facts: dict, pr: int) -> Disposition:
@@ -1500,7 +1511,8 @@ def _sync_branch_to_snapshot(
     # `force_paths` — только когда source-слой есть: форма вызова без него
     # остаётся прежней (стенды подменяют `commit_paths` тремя аргументами).
     force = {"force_paths": tuple(forced)} if forced else {}
-    ops.commit_paths(
+    _commit_paths(
+        ops,
         state.target_dir,
         changed,
         f"spec: {state.ws_id} — узел(ы) {', '.join(op['nodes'])} вынесены "
@@ -2333,7 +2345,7 @@ def _ensure_finalize_identity(state: RunState, ops: Ops, key: str, op: dict) -> 
             # `any_state=True` обязателен: искомый finalize УЖЕ вмержен,
             # а поиск по умолчанию видит только открытые PR (ревью #393).
             pr = ops.find_pr(state.repo_slug, branch, any_state=True)
-        except RuntimeError as exc:
+        except OPS_FAILURES as exc:
             raise _unresolved(
                 f"поиск finalize-PR заявки {key} по ветке {branch}: {exc}"
             ) from exc
@@ -2646,7 +2658,8 @@ def _publish_envelope(
                 encoding="utf-8",
             )
             changed.append(_rel(state, _filename(dag, node)))
-        ops.commit_paths(
+        _commit_paths(
+            ops,
             state.target_dir,
             changed,
             f"spec: {state.ws_id} — конверт подписи узлов "
@@ -2911,7 +2924,7 @@ def _await_required_checks(
     лечит время и повторный вызов.
     """
     for _ in range(_CHECKS_POLL_LIMIT):
-        facts = ops.pr_facts(state.repo_slug, pr)
+        facts = _pr_facts(state, ops, pr)
         actual = facts.get("headRefOid")
         if actual != head:
             return MergeRefusal(

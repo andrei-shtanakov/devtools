@@ -497,7 +497,8 @@ def _finalize(
             path = Path(state.target_dir) / envelope_path(state.ws_id, node)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text, encoding="utf-8")
-        ops.commit_paths(
+        an._commit_paths(
+            ops,
             state.target_dir,
             paths,
             f"spec: {state.ws_id} — конверт review/v1 узлов {nodes}",
@@ -1027,8 +1028,8 @@ def _stop_pr(
     file = Path(state.target_dir) / path
     file.parent.mkdir(parents=True, exist_ok=True)
     file.write_text(record, encoding="utf-8")
-    ops.commit_paths(
-        state.target_dir, [path], f"spec: {state.ws_id} — остановка {node} g{gen}"
+    an._commit_paths(
+        ops, state.target_dir, [path], f"spec: {state.ws_id} — остановка {node} g{gen}"
     )
     ops.push_branch(state.target_dir, branch)
     head = ops.rev_parse(state.target_dir, "HEAD") or ""

@@ -194,7 +194,8 @@ def publish_wave(
             target = Path(state.target_dir) / path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
-        ops.commit_paths(
+        an._commit_paths(
+            ops,
             state.target_dir,
             list(files),
             f"evidence: edge-check волны W{state.wave} для заявки {key} (fleet-agent)",

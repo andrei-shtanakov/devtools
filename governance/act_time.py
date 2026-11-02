@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Callable, Hashable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -50,6 +51,21 @@ class Unavailable:
     """Факт не установлен: решение не принимается, заявка жива."""
 
     reason: str
+
+
+OPS_FAILURES: tuple[type[Exception], ...] = (
+    RuntimeError,
+    OSError,
+    ValueError,
+    subprocess.SubprocessError,
+)
+"""Всё, чем отказывает вызов `Ops` (интеграционное ревью части B, I-3).
+
+`RealOps` поднимает `RuntimeError` по ненулевому коду, `CalledProcessError` из
+`check=True` (`pr_facts`, `commit_paths`), `OSError` без бинаря, `ValueError` на
+битом JSON. Любой из них у читателя акта — `Unavailable`/«факт не установлен»,
+а не трассировка: каждый `try` вокруг `ops.*` в модулях акта ловит это
+множество целиком (`tests/test_act_ops_failures.py`), а не свою часть его."""
 
 
 @dataclass(frozen=True)

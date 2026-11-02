@@ -64,7 +64,7 @@ from governance.act_settings import (
     config_home,
     load_settings,
 )
-from governance.act_time import Ambiguous, Unavailable
+from governance.act_time import OPS_FAILURES, Ambiguous, Unavailable
 from governance.facts import Outcome as FactOutcome
 from governance.frontmatter import split_frontmatter
 
@@ -91,7 +91,7 @@ def pr_for_merge(ops: Ops, slug: str, merge_commit: str) -> int | Unavailable:
     squash)."""
     try:
         prs = ops.prs_containing_commit(slug, merge_commit)
-    except RuntimeError as exc:
+    except OPS_FAILURES as exc:
         return Unavailable(f"PR merge-коммита {merge_commit[:12]}: {exc}")
     found = [
         p["number"]
@@ -108,7 +108,7 @@ def pr_for_merge(ops: Ops, slug: str, merge_commit: str) -> int | Unavailable:
 def _pr_head(ops: Ops, state: RunState, pr: int) -> str | Unavailable:
     try:
         head = ops.pr_facts(state.repo_slug, pr).get("headRefOid")
-    except (RuntimeError, OSError, ValueError) as exc:
+    except OPS_FAILURES as exc:
         return Unavailable(f"голова PR #{pr}: {exc}")
     if not isinstance(head, str) or len(head) != 40:
         return Unavailable(f"голова PR #{pr} не названа")
@@ -621,7 +621,7 @@ class LegacyProbe:
         slug = self.state.repo_slug
         try:
             prs = self.ops.prs_containing_commit(slug, commit)
-        except RuntimeError as exc:
+        except OPS_FAILURES as exc:
             return f"unavailable:PR коммита подписи {commit[:12]}: {exc}"
         merged = [
             p["number"]
@@ -647,7 +647,7 @@ class LegacyProbe:
         try:
             candidate = self.ops.find_pr(slug, candidate_branch, any_state=True)
             facts = self.ops.pr_facts(slug, candidate) if candidate is not None else {}
-        except RuntimeError as exc:
+        except OPS_FAILURES as exc:
             return f"unavailable:candidate {candidate_branch}: {exc}"
         if candidate is None:
             return _no(NO_CANDIDATE, f"нет candidate-PR {candidate_branch}")
