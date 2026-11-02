@@ -143,6 +143,15 @@ def test_prefixes_read_from_the_ssot_file() -> None:
         "tests/act_cases",
         "tests/act_mutation",
         "contracts/approval-facts/",
+        # Цепочка решения «одобрено» вне `act_` (интеграционное ревью части B,
+        # I-4): хеш и поля проекции, сверка upstream-пинов, autouse-фикстуры
+        # защищённых тестов и сверка цепочки предпроверки.
+        "governance/node_approval",
+        "governance/stale_adapter",
+        "governance/bundle_inputs",
+        "tests/conftest",
+        "tests/harness_trust",
+        "tests/test_harness_trust",
         # Шаблон CI корня доверия df-trust (установка копирует его).
         "templates/df-trust/",
         # Установщик df исполняется от root (stage 1, Task 1): код и тесты
@@ -467,6 +476,68 @@ def test_act_chain_is_in_both_protected_lists() -> None:
     for prefix in _ACT_CHAIN:
         assert prefix in prefixes, prefix
         assert prefix in harness, prefix
+
+
+# Интеграционное ревью части B, I-4: модули и тесты, на которых стоит решение
+# «одобрено» вне префикса `governance/act_`. `act_projection` берёт хеш
+# (`stale_adapter.blob_sha1`) и исключаемые поля (`node_approval`);
+# `bundle_inputs.direct_blobs` сверяет upstream-пины; `tests/conftest` —
+# autouse-фикстуры защищённых `tests/test_act_*`; `harness_trust` и его тест —
+# сверка цепочки предпроверки. Обвязка мержа их НЕ исполняет, поэтому
+# в `_HARNESS_PREFIXES` их нет — защита только на стадии мержа.
+_ACT_DECISION_CHAIN = (
+    "governance/node_approval",
+    "governance/stale_adapter",
+    "governance/bundle_inputs",
+    "tests/conftest",
+    "tests/harness_trust",
+    "tests/test_harness_trust",
+)
+
+
+def test_act_decision_chain_is_authority_root_not_harness() -> None:
+    prefixes = set(authority_root.prefixes())
+    harness = set(accept_pr._HARNESS_PREFIXES)
+    for prefix in _ACT_DECISION_CHAIN:
+        assert prefix in prefixes, prefix
+        assert prefix not in harness, prefix
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "governance/node_approval.py",
+        "governance/stale_adapter.py",
+        "governance/bundle_inputs.py",
+        "tests/conftest.py",
+        "tests/harness_trust.py",
+        "tests/test_harness_trust.py",
+    ],
+)
+def test_act_decision_chain_paths_are_authority_root(path: str) -> None:
+    assert authority_root.touched([path, "README.md"]) == [path]
+
+
+def test_act_projection_imports_are_protected() -> None:
+    """Каждый локальный импорт `act_projection` (I-content, сверка конверта)
+    под authority-root: новый импорт из незащищённого модуля краснеет здесь."""
+    root = Path(__file__).resolve().parent.parent
+    tree = ast.parse((root / "governance/act_projection.py").read_text("utf-8"))
+    local: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            if node.module == "governance":
+                local |= {f"governance/{a.name}.py" for a in node.names}
+            elif node.module.startswith("governance."):
+                local.add(node.module.replace(".", "/") + ".py")
+        elif isinstance(node, ast.Import):
+            local |= {
+                a.name.replace(".", "/") + ".py"
+                for a in node.names
+                if a.name.startswith("governance.")
+            }
+    assert local, "прибор не видит импортов act_projection"
+    assert [p for p in sorted(local) if not authority_root.touched([p])] == []
 
 
 @pytest.mark.parametrize(
