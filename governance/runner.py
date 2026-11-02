@@ -52,6 +52,7 @@ from governance import approve_node as an
 from governance import interview as iv
 from governance import run_lock as rl
 from governance.act_request import ACT_REVIEW_V1
+from governance.act_time import OPS_FAILURES
 from governance.author_launch import AuthorCall, LaunchOutcome
 from governance.edge_check import coordinator as edge_coordinator
 from governance.edge_check import publish as edge_publish
@@ -1081,7 +1082,17 @@ def _resume_wave(state: RunState, ops: Ops, *, lock: rl.RunLock) -> RunState | N
         save(state)
         return advance(state, ops, lock=lock)
     if not op.get("merged_by"):
-        facts = ops.pr_facts(state.repo_slug, pr)
+        try:
+            facts = ops.pr_facts(state.repo_slug, pr)
+        except OPS_FAILURES as exc:
+            _stop_with_comment(
+                state,
+                ops,
+                "stopped_review",
+                f"волна {state.wave}: факты candidate-PR #{pr} заявки {request} "
+                f"не прочитаны ({exc}) — факт не установлен, повторите resume",
+            )
+            return state
         if facts.get("state") == "OPEN" and op.get("act") == ACT_REVIEW_V1:
             return _deliver_review_candidate(state, ops, request, pr)
         if facts.get("state") == "OPEN":
@@ -1127,6 +1138,10 @@ def _deliver_review_candidate(
         ),
         None,
     )
+    if outcome.merge_code in _DELIVERY_RETRY_CODES:
+        # approve есть, обвязка отказала транзиентно (2 — факт не установлен,
+        # 5 — голова/база уехали): «approve есть, PR не смержен» (§11.1, строка 5)
+        waiting = act_node.WAITING_DELIVERY
     if waiting is None:
         _stop_with_comment(
             state,
@@ -1141,6 +1156,11 @@ def _deliver_review_candidate(
         state.status = waiting
         save(state)
     return state
+
+
+#: Коды `merge-pr.sh`, при которых повтор доставки уместен (§11.1, строка 5); 3, 4 и
+#: 6 — отказ гварда, форджи или стоп-кран: `stopped_review`.
+_DELIVERY_RETRY_CODES = frozenset({2, 5})
 
 
 def _stop_on_refusal(

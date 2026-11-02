@@ -326,6 +326,7 @@ def _open(
             f"approve {act.login} есть, агентская доставка отказала кодом {code}: "
             f"{hint}. Заявка {key} жива",
             request=key,
+            merge_code=code,
         )
     return an.ApprovalOutcome(
         f"{WAITING_DELIVERY}: candidate-PR #{pr} доставлен агентом после approve "

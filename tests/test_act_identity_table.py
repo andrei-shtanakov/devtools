@@ -180,7 +180,7 @@ MODIFIED_EXISTING = {
     "task_bridge.main": ("repropose_exclusive",),
     # интеграционное ревью части B (I-1–I-3, m-2)
     "edge_check/publish.surface_violations": ("own_manifest",),
-    "runner._resume_wave": ("review_delivery",),
+    "runner._resume_wave": ("review_delivery", "pr_facts_failure"),
     "runner._step_candidate": "пауза `review/v1` — `waiting_human_approval` и текст об approve; проверки-отказа нет",
     "runner._finalize_wave": "стоп по отказу вынесен в `_stop_on_refusal` без изменений текста",
     "runner._wave_pause": "параметр статуса паузы; не суждение",
@@ -188,7 +188,8 @@ MODIFIED_EXISTING = {
     "approve_node._await_required_checks": ("pr_facts_failure",),
     "approve_node._carried_text": "сверка байтов заявки — хешем `_content_hash` её акта (m-2); проверка прежняя",
     "approve_node._verify_nodes_in_base": "self-hash в base — `_content_hash` акта заявки (m-2); проверка прежняя",
-    "edge_check/publish.publish_wave": "коммит evidence — через `an._commit_paths` (I-3); проверки прежние",
+    "edge_check/publish.publish_wave": "коммит evidence — через `an._commit_paths` (I-3), акт заявки — в текст ревью (N-2); проверки прежние",
+    "edge_check/publish.checklist_body": "текст одобряющего ревью по акту заявки (N-2); не суждение",
 }
 
 S, N, L = (
@@ -3389,8 +3390,15 @@ JUDGMENT = {
             "not_waiting",
             "runner._deliver_review_candidate",
             "if waiting is None",
-            f"{WR}::test_resume_agent_merge_refused_is_not_a_merge_request",
+            f"{WR}::test_resume_agent_merge_refused_is_not_a_merge_request[3]",
             '"stopped_review"',
+        ),
+        r(
+            "retry_code",
+            "runner._deliver_review_candidate",
+            "outcome.merge_code in _DELIVERY_RETRY_CODES",
+            f"{WR}::test_resume_transient_merge_refusal_waits_delivery[2]",
+            "act_node.WAITING_DELIVERY",
         ),
     ),
     "edge_check/publish.surface_violations#own_manifest": (
@@ -3409,6 +3417,15 @@ JUDGMENT = {
             'op.get("act") == ACT_REVIEW_V1',
             f"{WR}::test_resume_approve_agent_merge_then_finalize",
             "act_node.WAITING_DELIVERY",
+        ),
+    ),
+    "runner._resume_wave#pr_facts_failure": (
+        r(
+            "ops_failure",
+            "runner._resume_wave",
+            "except OPS_FAILURES",
+            f"{WR}::test_resume_pr_facts_failure_is_stopped_review",
+            '"stopped_review"',
         ),
     ),
     "approve_node._ensure_finalize_identity#find_pr_failure": (

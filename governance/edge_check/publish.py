@@ -103,7 +103,10 @@ def level_verdict(records: dict[tuple[str, str], dict]) -> str:
 
 
 def checklist_body(
-    state: RunState, head: str, records: dict[tuple[str, str], dict]
+    state: RunState,
+    head: str,
+    records: dict[tuple[str, str], dict],
+    act: str | None = None,
 ) -> str:
     lines = [
         f"<!-- {EDGE_MARKER} head={head} -->",
@@ -129,8 +132,13 @@ def checklist_body(
         ),
         (
             "Это одобрение публикует результат edge-check (D16) и снимает правило "
-            "одобряющего ревью; подписью узла оно НЕ является — подпись создаёт "
-            "мерж candidate человеком из allowlist."
+            "одобряющего ревью; подписью узла оно НЕ является — акт одобрения — "
+            "approve этого PR человеком из human_approvers по его голове "
+            "(review/v1, §9.1); мержить candidate не нужно, его доставляет агент."
+            if act == ACT_REVIEW_V1
+            else "Это одобрение публикует результат edge-check (D16) и снимает "
+            "правило одобряющего ревью; подписью узла оно НЕ является — подпись "
+            "создаёт мерж candidate человеком из allowlist."
         ),
     ]
     return "\n".join(lines)
@@ -228,7 +236,7 @@ def publish_wave(
     latest = ops.latest_review_body(state.repo_slug, pr) or ""
     if marker_line in latest and effective.get(review_login()) == "APPROVED":
         return CODE_OK
-    body = checklist_body(state, head, records)
+    body = checklist_body(state, head, records, op.get("act"))
     if not ops.publish_review(
         state.repo_slug, pr, event="APPROVE", body=body, marker=EDGE_MARKER
     ):

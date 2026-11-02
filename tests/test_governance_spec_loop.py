@@ -1424,6 +1424,36 @@ def test_wave_resume_pause_names_wave_and_pr(
     assert "finalize-PR #641" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize(
+    ("status", "hint"),
+    [
+        ("waiting_human_approval", "ждём approve candidate-PR #640"),
+        ("waiting_delivery", "approve есть, candidate-PR #640"),
+    ],
+)
+def test_review_wave_pause_is_continued_with_its_own_hint(
+    runs_root, tmp_path, monkeypatch, capsys, status: str, hint: str
+) -> None:
+    """N-1: паузы `review/v1` кнопка продолжает `runner.resume`, как
+    `waiting_human_merge`, и печатает свой следующий шаг; мерж не просит."""
+    state = _mk_run(
+        "fleet-inbox-20260901-abc123",
+        "Fleet Inbox",
+        ws_id="fleet-inbox-20260901",
+        status=status,
+        target_dir=str(tmp_path / "alpha"),
+        authoring="waves",
+    )
+    _seed_wave_candidate(state, 3, 640)
+    rs.save(state)
+    env = _LoopEnv(monkeypatch, tmp_path, resume_result=state)
+    rc = spec_loop.main(["--subject", "Fleet Inbox", "--repo", "alpha"])
+    assert rc == 0 and env.calls == [("resume", "fleet-inbox-20260901-abc123")]
+    out = capsys.readouterr().out
+    assert hint in out and "wave=3/5" in out and "make spec-loop" in out
+    assert "человеческий мерж" not in out and "не продолжает" not in out
+
+
 def test_wave_pause_names_finalize_when_its_merge_was_refused(
     runs_root, tmp_path, monkeypatch, capsys
 ) -> None:

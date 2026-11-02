@@ -89,6 +89,7 @@ def test_review_wave_publishes_candidate_with_its_manifest(
     text = _show(world.target, f"{head}:{manifest_path(WS_ID, key)}")
     assert f"request_id: {key}" in text or key in text
     assert world.forge.reviews[pr][-1]["state"] == "APPROVED"  # edge-check
+    assert "approve этого PR" in world.forge.reviews[pr][-1]["body"]  # N-2
 
 
 def _tamper(world: World, key: str, path: str) -> None:
@@ -261,13 +262,84 @@ def test_resume_unresolved_is_stopped_review(
     assert world.forge.merge_calls == [] and next_wave == []
 
 
+@pytest.mark.parametrize("code", [3, 4, 6])
 def test_resume_agent_merge_refused_is_not_a_merge_request(
-    world: World, stand: Stand, monkeypatch: pytest.MonkeyPatch, next_wave: list[int]
+    world: World,
+    stand: Stand,
+    monkeypatch: pytest.MonkeyPatch,
+    next_wave: list[int],
+    code: int,
 ) -> None:
-    """Approve есть, обвязка отказала: стоп с причиной, без просьбы о мерже."""
-    _key, _op, pr = _published(world)
+    """Approve есть, обвязка отказала гвардом (3), форджей (4) или стоп-краном (6):
+    повтор не поможет — стоп с причиной, без просьбы о мерже (N-3)."""
+    key, _op, pr = _published(world)
     stand.approve_head(pr)
-    monkeypatch.setattr(world.ops, "merge", lambda *a, **k: 3)
+    monkeypatch.setattr(world.ops, "merge", lambda *a, **k: code)
     out = _resume(world)
     assert out.status == "stopped_review"
     assert world.forge.prs[pr]["state"] == "OPEN" and next_wave == []
+    assert out.ops[key]["status"] == al.STATUS_STARTED
+
+
+@pytest.mark.parametrize("code", [2, 5])
+def test_resume_transient_merge_refusal_waits_delivery(
+    world: World,
+    stand: Stand,
+    monkeypatch: pytest.MonkeyPatch,
+    next_wave: list[int],
+    code: int,
+) -> None:
+    """N-3 (§11.1, строка 5): approve есть, PR не смержен из-за транзиентного кода
+    обвязки (2 — факт не установлен, 5 — голова/база уехали) — `waiting_delivery`,
+    без продвижения; повтор resume доставляет."""
+    key, _op, pr = _published(world)
+    stand.approve_head(pr)
+    real = world.ops.merge
+    monkeypatch.setattr(world.ops, "merge", lambda *a, **k: code)
+    out = _resume(world)
+    assert out.status == act_node.WAITING_DELIVERY
+    assert world.forge.prs[pr]["state"] == "OPEN" and next_wave == []
+    assert out.ops[key]["status"] == al.STATUS_STARTED
+    monkeypatch.setattr(world.ops, "merge", real)
+    again = _resume(world)
+    assert again.status == act_node.WAITING_DELIVERY
+    assert world.forge.prs[pr]["state"] == "MERGED"
+
+
+def test_resume_pr_facts_failure_is_stopped_review(
+    world: World, stand: Stand, monkeypatch: pytest.MonkeyPatch, next_wave: list[int]
+) -> None:
+    """N-5: сбой `gh` на фактах candidate в resume — `stopped_review` с причиной,
+    а не трассировка (класс I-3)."""
+    import subprocess
+
+    from governance.run_state import run_dir
+
+    key, _op, _pr = _published(world)
+
+    def broken(*_a, **_k):
+        raise subprocess.CalledProcessError(1, ["gh", "pr", "view"])
+
+    monkeypatch.setattr(world.ops, "pr_facts", broken)
+    try:
+        got = _resume(world)
+    except BaseException as exc:  # noqa: BLE001 — предмет утверждения
+        got = exc
+    assert not isinstance(got, BaseException) and got.status == "stopped_review"
+    reason = (run_dir(world.state.run_id) / "stop-reason.txt").read_text()
+    assert "не прочитаны" in reason and next_wave == []
+    assert world.state.ops[key]["status"] == al.STATUS_STARTED
+
+
+def test_checklist_body_asks_review_v1_for_approve_not_merge() -> None:
+    """N-2: одобряющее ревью edge-check на candidate review/v1 просит approve PR;
+    у заявки без маркера текст прежний (мерж человеком)."""
+    from types import SimpleNamespace
+
+    state = SimpleNamespace(wave=1, run_id="r", bundle_dir="workstreams/w/spec")
+    review = pub.checklist_body(state, "h" * 40, _wave_records(), "review/v1")  # type: ignore[arg-type]
+    legacy = pub.checklist_body(state, "h" * 40, _wave_records())  # type: ignore[arg-type]
+    assert "approve этого PR человеком из human_approvers" in review
+    assert "мерж candidate человеком" not in review
+    assert "подпись создаёт мерж candidate человеком из allowlist." in legacy
+    assert "approve этого PR" not in legacy

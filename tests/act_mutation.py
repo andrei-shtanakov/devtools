@@ -569,6 +569,11 @@ BYPASS: dict[str, tuple[str, str]] = {
         'raise RuntimeError(f"self-hash узла в проекции {act}: {exc}") from exc',
         "return na.self_hash(text)",
     ),
+    # N-5: узкий `except` на фактах candidate в resume
+    "runner._resume_wave#pr_facts_failure:ops_failure": (
+        "        except OPS_FAILURES as exc:",
+        "        except RuntimeError as exc:",
+    ),
     # I-2: отказ `approve_node` читается как ожидание
     "runner._deliver_review_candidate:unresolved": (
         (
