@@ -145,19 +145,16 @@ die() {
 }
 
 # Есть ли лейбл `$1` среди `$labels` (по строке на имя; имя лейбла GitHub
-# перевода строки не содержит, а пробелы — может).
+# перевода строки не содержит, а пробелы — может). Сравнение — целой строкой
+# в `case` с закавыченным образцом: ни разбиения на слова, ни раскрытия
+# глобов (лейбл `human-*` не совпадёт с файлом `human-approval-required` в
+# текущем каталоге — ревью Task 15, M1), глобальное состояние не меняется.
 has_label() {
-    _want="$1"
-    _saved_ifs="$IFS"
-    IFS='
+    _nl='
 '
-    for _label in $labels; do
-        if [ "$_label" = "$_want" ]; then
-            IFS="$_saved_ifs"
-            return 0
-        fi
-    done
-    IFS="$_saved_ifs"
+    case "$_nl$labels$_nl" in
+        *"$_nl$1$_nl"*) return 0 ;;
+    esac
     return 1
 }
 

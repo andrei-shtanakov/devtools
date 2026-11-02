@@ -192,9 +192,12 @@ class Fleet:
         env.update(extra)
         return env
 
-    def run(self, *args: str, **env_extra: str) -> subprocess.CompletedProcess[str]:
+    def run(
+        self, *args: str, cwd: Path | None = None, **env_extra: str
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["sh", str(SCRIPT), "demo", "7", *args],
+            cwd=cwd,
             env=self.env(**env_extra),
             capture_output=True,
             text=True,
@@ -398,6 +401,42 @@ def test_similar_approval_label_is_not_review_candidate(fleet: Fleet) -> None:
     res = fleet.run(**_candidate(GH_STUB_LABELS=labels))
     assert res.returncode == 3 and "candidate-PR" in res.stderr
     assert fleet.premerge_calls() == [] and fleet.merge_calls() == []
+
+
+def _glob_bait(fleet: Fleet, name: str) -> Path:
+    """Каталог вызова с файлом, чьё имя совпадает с глобом-лейблом `human-*`."""
+    cwd = fleet.tmp / "cwd"
+    cwd.mkdir(exist_ok=True)
+    (cwd / name).write_text("")
+    return cwd
+
+
+def test_glob_label_does_not_match_file_as_approval_label(fleet: Fleet) -> None:
+    """Ревью Task 15, M1: лейбл `human-*` и файл `human-approval-required` в
+    каталоге вызова — не лейбл review/v1; candidate остаётся отказом."""
+    cwd = _glob_bait(fleet, "human-approval-required")
+    res = fleet.run(cwd=cwd, **_candidate(GH_STUB_LABELS="human-*"))
+    assert res.returncode == 3 and res.stderr == CANDIDATE_REFUSAL
+    assert fleet.premerge_calls() == [] and fleet.merge_calls() == []
+
+
+def test_glob_label_does_not_match_file_as_human_merge_label(fleet: Fleet) -> None:
+    """Тот же класс для `human-merge-required`: файл-приманка лейблом не становится."""
+    cwd = _glob_bait(fleet, "human-merge-required")
+    res = fleet.run(cwd=cwd, GH_STUB_HEADREF="feat/ordinary", GH_STUB_LABELS="human-*")
+    assert res.returncode == 0, res.stderr
+    assert len(fleet.merge_calls()) == 1
+
+
+def test_human_merge_label_refusal_text_unchanged(fleet: Fleet) -> None:
+    res = fleet.run(
+        GH_STUB_HEADREF="feat/ordinary", GH_STUB_LABELS="human-merge-required"
+    )
+    assert res.returncode == 3
+    assert res.stderr == (
+        "PR andrei-shtanakov/demo#7: лейбл 'human-merge-required' — PR явно "
+        "оставлен человеку. Мержит человек.\n"
+    )
 
 
 def test_unlabelled_candidate_still_refused(fleet: Fleet) -> None:
