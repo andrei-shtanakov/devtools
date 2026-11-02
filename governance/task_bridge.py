@@ -4932,6 +4932,14 @@ def main(argv: list[str] | None = None) -> int:
         "approved-узел с разошедшимися пинами — отказ",
     )
     parser.add_argument(
+        "--repropose",
+        default=None,
+        metavar="REQUEST-KEY",
+        help="переиздать заявку на одобрение узла (approve-W-K-A) новой заявкой с "
+        "текущим пином: штатный выход после policy_changed, ambiguous_event_order "
+        "и неустранимого «факт не установлен»; прежняя запись не переписывается",
+    )
+    parser.add_argument(
         "--supersede",
         action="store_true",
         help="переиздать tasks-спеку после correction'а апстрима: новая "
@@ -4999,6 +5007,16 @@ def main(argv: list[str] | None = None) -> int:
             "--approve-node — отдельное действие: запускайте его "
             "отдельным прогоном, не вместе с "
             + ", ".join(name for name, used in others.items() if used)
+        )
+    if args.repropose is not None and (
+        args.approve_node is not None or any(others.values())
+    ):
+        # Та же мотивировка, что у --approve-node: действие в прогоне одно.
+        used = ["--approve-node"] if args.approve_node is not None else []
+        used += [name for name, flag in others.items() if flag]
+        parser.error(
+            "--repropose — отдельное действие: запускайте его отдельным "
+            "прогоном, не вместе с " + ", ".join(used)
         )
     if args.abandon_revision is not None and args.supersede:
         # Спека этого сочетания не описывает, а прогон делает ОДНО
@@ -5097,6 +5115,18 @@ def main(argv: list[str] | None = None) -> int:
                 ops,
                 args.approve_node,
                 legacy_bundle=args.legacy_bundle,
+            )
+        except RuntimeError as exc:
+            print(f"task_bridge: {exc}")
+            return 1
+        print(outcome.message)
+        return 0
+    if args.repropose is not None:
+        from governance import act_node
+
+        try:
+            outcome = act_node.repropose(
+                state, ops, args.repropose, legacy_bundle=args.legacy_bundle
             )
         except RuntimeError as exc:
             print(f"task_bridge: {exc}")

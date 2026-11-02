@@ -114,6 +114,24 @@ def requests(state: RunState) -> list[tuple[tuple[int, int, int], dict]]:
     return sorted(found)
 
 
+def successor_of(state: RunState, key: str) -> str | None:
+    """Ключ заявки-преемника (`predecessor == key`); `None` — её нет.
+
+    Два преемника одной заявки — состояние, которого `--repropose` не
+    создаёт; выбрать между ними молча значило бы продолжить не ту.
+    """
+    found = [
+        request_key(*nums)
+        for nums, op in requests(state)
+        if op.get("predecessor") == key
+    ]
+    if len(found) > 1:
+        raise RuntimeError(
+            f"у заявки {key} несколько преемников {found} — разберите вручную"
+        )
+    return found[0] if found else None
+
+
 def next_step(op: dict) -> Step | None:
     """Шаг, который заявке остался; `None` — заявка терминальна.
 
@@ -374,8 +392,12 @@ def start_request(
     source_sha: str | None = None,
     act: str | None = None,
     generations: dict[str, int] | None = None,
+    predecessor: str | None = None,
 ) -> str:
     """Write-ahead намерения заявки (§I4); → её ключ в леджере.
+
+    `predecessor` — ключ заявки, которую эта переиздаёт (`--repropose`, §6):
+    запись предшественника не переписывается, связь живёт в преемнике.
 
     `source_sha` — коммит, из которого заявка берёт байты узлов (спека
     sequential-node-approval S2/S4: ветка волны с авторскими байтами);
@@ -418,6 +440,9 @@ def start_request(
         # Режим заявки — зеркало манифеста в коммите candidate (§7); None —
         # заявка без маркера. Расхождение с манифестом — отказ (act_node).
         **({"act": act, "generations": dict(generations or {})} if act else {}),
+        # Переиздание (`--repropose`): ключ предшественника; его доказательства
+        # остаются в его записи.
+        **({"predecessor": predecessor} if predecessor else {}),
         "branch": approval_branches.candidate_branch(ws_id, wave, step, attempt),
         "finalize_branch": approval_branches.finalize_branch(
             ws_id, wave, step, attempt
