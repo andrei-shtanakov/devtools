@@ -3893,6 +3893,21 @@ def test_row_check_literal_belongs_to_one_check(
     )
 
 
+def _empty_container(node: ast.AST) -> bool:
+    """Пустой список/словарь (`[]`, `{}`) — сборщик, который наполняет проверяемый код.
+
+    Структурно, а не сравнением `ast.dump` с узлом, собранным руками: на CPython 3.12
+    у разобранного `[]` есть `ctx=Load()`, у `ast.List(elts=[])` — нет, и дампы
+    расходились; 3.13 дописывает `ctx` по умолчанию и прячет пустые поля — дампы
+    совпадали. Итог зависел от версии: на 3.12 сборщик `calls: list[int] = []`
+    читался как «данные», и наблюдение `calls == [1]` не засчитывалось (CI #675)."""
+    if isinstance(node, ast.List):
+        return not node.elts
+    if isinstance(node, ast.Dict):
+        return not node.keys
+    return False
+
+
 def asserts_reason(fn: ast.FunctionDef, module_src: str, tlit: str) -> bool:
     """Причина участвует в проверяемом условии о результате (b5–b7, B3-10/B6-3/B7-1).
 
@@ -3994,7 +4009,6 @@ def asserts_reason(fn: ast.FunctionDef, module_src: str, tlit: str) -> bool:
 
     # локальные данные без вычисления (`commit = "…"`) — ожидание; пустой контейнер — сборщик,
     # который наполняет проверяемый код (`seen = []`), — наблюдение
-    empty = (ast.List(elts=[]), ast.Dict(keys=[], values=[]))
     data: set[str] = set()
     changed = True
     while changed:  # данные — из литералов и других данных, не из наблюдаемых имён
@@ -4010,7 +4024,7 @@ def asserts_reason(fn: ast.FunctionDef, module_src: str, tlit: str) -> bool:
             refs = {r.id for r in ast.walk(value) if isinstance(r, ast.Name)} - local
             if (
                 no_call(value)
-                and ast.dump(value) not in {ast.dump(e) for e in empty}
+                and not _empty_container(value)
                 and refs <= bound | constants | data | pure
                 and not names <= data
             ):
@@ -4107,6 +4121,18 @@ def asserts_reason(fn: ast.FunctionDef, module_src: str, tlit: str) -> bool:
     return False
 
 
+@pytest.mark.parametrize(
+    "src,expected",
+    [("[]", True), ("{}", True), ("[1]", False), ('{"k": 1}', False), ("()", False)],
+)
+def test_empty_container_is_structural(src: str, expected: bool) -> None:
+    """Разобранный и собранный руками пустой контейнер судятся одинаково (3.12/3.13)."""
+    assert _empty_container(ast.parse(src, mode="eval").body) is expected
+    if expected:
+        built = ast.List(elts=[]) if src == "[]" else ast.Dict(keys=[], values=[])
+        assert _empty_container(built) is True
+
+
 def _assert_src(body: str, module: str = "") -> bool:
     """Вспомогательное для самопроверки механизма: тело теста → asserts_reason."""
     src = (
@@ -4122,6 +4148,13 @@ def _assert_src(body: str, module: str = "") -> bool:
     "body,module,expected",
     [
         ('got = f()\nassert got.reason == "ПРИЧИНА"', "", True),
+        # сборщик (пустой контейнер, наполняет проверяемый код) — наблюдение, на любой
+        # версии CPython (3.12: `ast.dump` разобранного `[]` несёт `ctx`)
+        ('calls: list[str] = []\nf(calls)\nassert calls == ["ПРИЧИНА"]', "", True),
+        ('calls = []\nf(calls)\nassert calls == ["ПРИЧИНА"]', "", True),
+        ('seen = {}\nf(seen)\nassert seen == {"k": "ПРИЧИНА"}', "", True),
+        # непустой список — данные, не наблюдение: сравнение двух ожиданий
+        ('calls = ["x"]\nassert calls == ["ПРИЧИНА"]', "", False),
         ('expected = "ПРИЧИНА"\ngot = f()\nassert got.reason == expected', "", True),
         ('with pytest.raises(E, match="ПРИЧИНА"):\n    f()', "", True),
         (
@@ -4167,6 +4200,10 @@ def _assert_src(body: str, module: str = "") -> bool:
     ],
     ids=[
         "literal_in_assert",
+        "collector_annotated",
+        "collector_plain",
+        "collector_dict",
+        "nonempty_list_is_data",
         "bound_name",
         "raises_match",
         "assignment_only",
