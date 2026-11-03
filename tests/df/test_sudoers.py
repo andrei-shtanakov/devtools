@@ -72,7 +72,7 @@ def test_render_under_r_root(tmp_path: Path) -> None:
     text = sudoers.render(Layout(root), OP)
     expected = _fixture("expected.txt").replace("/opt/df/", f"{root}/opt/df/")
     assert text == expected
-    assert text.count(f"{root}/opt/df/libexec/") == 12
+    assert text.count(f"{root}/opt/df/libexec/") == 14
 
 
 def test_render_no_wildcard_all_only_as_host() -> None:
@@ -85,6 +85,35 @@ def test_render_no_wildcard_all_only_as_host() -> None:
             continue
         assert re.findall(r"\bALL\b", line) == ["ALL"], line
         assert re.match(r"\S+ ALL=\(", line), line
+
+
+PRECHECK_DEFAULTS = (
+    f"Defaults!{LIBEXEC}/df-precheck command_timeout=180, !log_input, "
+    "!log_output, !log_stdin, !log_stdout, !log_stderr, !log_ttyin, !log_ttyout"
+)
+PRECHECK_RULE = (
+    f'df-publisher ALL=(df-precheck) NOPASSWD: NOSETENV: {LIBEXEC}/df-precheck ""'
+)
+
+
+def test_render_precheck_rule_and_defaults() -> None:
+    """Plan decision 5 verbatim: one command binding (sudo's timeout, no
+    input or output logging) and the publisher's one argument-less rule."""
+    lines = sudoers.render(ROOT, OP).splitlines()
+    assert lines.count(PRECHECK_DEFAULTS) == 1
+    assert lines.count(PRECHECK_RULE) == 1
+    assert lines.index(PRECHECK_DEFAULTS) < lines.index(PRECHECK_RULE)
+    assert [line for line in lines if "df-precheck" in line] == [
+        PRECHECK_DEFAULTS,
+        PRECHECK_RULE,
+    ]
+    assert sudoers.INPUT_LOG_KEYS == ("log_input", "log_stdin", "log_ttyin")
+    off = {f"!{key}" for key in (*sudoers.INPUT_LOG_KEYS, *sudoers.LOG_KEYS)}
+    assert set(PRECHECK_DEFAULTS.split(", ")[1:]) == off
+    assert sudoers.expected_grants(ROOT, OP)["df-publisher"] == {
+        sudoers.Grant("df-precheck", sudoers.TAGS, f'{LIBEXEC}/df-precheck ""')
+    }
+    assert "df-precheck" not in sudoers.expected_grants(ROOT, OP)
 
 
 @pytest.mark.parametrize("operator", [*roles.ROLE_USERS, "root", "df-build"])
@@ -162,6 +191,19 @@ def test_validate_real_visudo() -> None:
     assert sudoers.validate(sudoers.render(ROOT, OP)) == []
     broken = sudoers.render(ROOT, OP).replace("ALL=(df-exec)", "ALL=(df-exec")
     assert sudoers.validate(broken) != []
+
+
+@pytest.mark.skipif(not VISUDO_USABLE, reason="нет /usr/sbin/visudo")
+def test_visudo_accepts_rendered_text() -> None:
+    """As in 2a: the host's visudo accepts the whole rendered text, now with
+    `command_timeout` and the input-log keys of the `df-precheck` binding;
+    a misspelled key in that binding is rejected (the check is real)."""
+    if sudoers.sudo_flavor() == "sudo-rs":
+        pytest.skip("sudo-rs: v1 refuses it (test_validate_real_visudo)")
+    text = sudoers.render(ROOT, OP)
+    assert PRECHECK_DEFAULTS in text and PRECHECK_RULE in text
+    assert sudoers.validate(text) == []
+    assert sudoers.validate(text.replace("!log_stdin", "!log_stdinx")) != []
 
 
 # --- sudo flavor -------------------------------------------------------------
@@ -402,7 +444,42 @@ def test_policy_operator_extra_rules_unchecked(monkeypatch: pytest.MonkeyPatch) 
     assert _problems(OP) == []
 
 
-@pytest.mark.parametrize("name", ["df-publisher", "df-build"])
+def test_precheck_has_no_rules(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`df-precheck` may run nothing through sudo: «not allowed» is clean,
+    any rule (even its own command) is a problem."""
+    assert "df-precheck" in roles.ROLE_USERS
+    _sudo(monkeypatch, {"df-precheck": _fixture("sudo-l-linux-df-precheck.txt")})
+    assert _problems("df-precheck") == []
+    text = (
+        "User df-precheck may run the following commands on ubuntu-ci:\n"
+        f'    (df-precheck) {PRINTED} {LIBEXEC}/df-precheck ""\n'
+    )
+    _sudo(monkeypatch, {"df-precheck": text})
+    assert _problems("df-precheck") == ["sudo -l -U df-precheck: some"]
+
+
+@pytest.mark.parametrize(
+    "new,named",
+    [
+        # no longer argument-less
+        (f"(df-precheck) {PRINTED} {LIBEXEC}/df-precheck", "df-precheck"),
+        # a wider RunAs
+        (f'(ALL) {PRINTED} {LIBEXEC}/df-precheck ""', "(ALL)"),
+    ],
+)
+def test_policy_publisher_rule_differs(
+    monkeypatch: pytest.MonkeyPatch, new: str, named: str
+) -> None:
+    """`df-publisher` has exactly the precheck rule now."""
+    old = f'(df-precheck) {PRINTED} {LIBEXEC}/df-precheck ""'
+    _edited(monkeypatch, "df-publisher", old, new)
+    problems = _problems("df-publisher")
+    extra = [p for p in problems if "лишнее правило" in p]
+    assert extra and named in extra[0], problems
+    assert any("нет правила" in p for p in problems), problems
+
+
+@pytest.mark.parametrize("name", ["df-precheck", "df-build"])
 def test_policy_no_rule_role_with_a_rule(
     monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
@@ -456,20 +533,20 @@ def _agreement_cases() -> list[tuple[str, int, str]]:
     ]
     found = [(n, c, p.read_text()) for n, c, p in cases]
     for os_name in OSES:
-        text = _fixture(f"sudo-l-{os_name}-df-publisher.txt")
-        found.append((f"{os_name}-publisher", 0, text))
+        text = _fixture(f"sudo-l-{os_name}-df-precheck.txt")
+        found.append((f"{os_name}-precheck", 0, text))
         some = _fixture(f"sudo-l-{os_name}-runner.txt").replace("runner", "{name}")
         found.append((f"{os_name}-some", 0, some))
     return found
 
 
 @pytest.mark.parametrize("case,code,text", _agreement_cases())
-@pytest.mark.parametrize("name", ["df-build", "df-publisher"])
+@pytest.mark.parametrize("name", ["df-build", "df-precheck"])
 def test_policy_no_rule_roles_agree_with_platform(
     monkeypatch: pytest.MonkeyPatch, case: str, code: int, text: str, name: str
 ) -> None:
-    """R8: `df-build` / `df-publisher` reuse `platform.sudo_rules` verbatim."""
-    renamed = re.sub(r"df-build|df-publisher|\{name\}", name, text)
+    """R8: `df-build` / `df-precheck` reuse `platform.sudo_rules` verbatim."""
+    renamed = re.sub(r"df-build|df-precheck|\{name\}", name, text)
     _sudo(monkeypatch, {name: renamed}, code=code)
     rules = plat.sudo_rules(name)
     expected = [] if rules == "none" else [f"sudo -l -U {name}: {rules}"]
@@ -492,7 +569,7 @@ def _io(
             outputs[name] = outputs[name].replace(old, new)
     seen = _sudo(monkeypatch, outputs)
     problems = sudoers.io_log_problems(ROOT)
-    assert [argv[4] for argv in seen] == ["df-exec", "df-review"]
+    assert [argv[4] for argv in seen] == ["df-exec", "df-review", "df-publisher"]
     return problems
 
 
@@ -637,3 +714,135 @@ def test_io_log_unverifiable(
         assert problem.startswith(
             f"sudo -l -U {name}: нарушено: конфигурация I/O-журнала не проверяема"
         )
+
+
+# --- io_log_problems: the precheck command (plan decision 5) -----------------
+
+PRECHECK_BINDING = f"    {PRECHECK_DEFAULTS}\n"
+
+
+def _io_publisher(monkeypatch: pytest.MonkeyPatch, old: str, new: str) -> list[str]:
+    outputs = _role_outputs("linux")
+    assert old in outputs["df-publisher"]
+    outputs["df-publisher"] = outputs["df-publisher"].replace(old, new)
+    _sudo(monkeypatch, outputs)
+    return sudoers.io_log_problems(ROOT)
+
+
+def _publisher_says(*items: str) -> list[str]:
+    return [f"sudo -l -U df-publisher: {LIBEXEC}/df-precheck: {i}" for i in items]
+
+
+def test_io_log_publish_ignores_the_precheck_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 2b listings of `df-exec`/`df-review` print the precheck binding
+    too (sudo lists every command binding); it does not cover df-publish."""
+    assert _io(monkeypatch, _binding(PRECHECK_BINDING.rstrip("\n"))) == []
+
+
+MATCHING = "use_pty"
+
+
+@pytest.mark.parametrize(
+    "old,new",
+    [
+        # the binding turns generic input and output logging off
+        (MATCHING, "use_pty, log_input, log_output, log_stdin, log_ttyin"),
+        # no binding and nothing on: sudo's default is off
+        (PRECHECK_BINDING, ""),
+        # a RunAs binding comes before the command binding
+        (PRECHECK_BINDING, "    Defaults>df-precheck log_input\n" + PRECHECK_BINDING),
+        # another command's input logging
+        (PRECHECK_BINDING, PRECHECK_BINDING + "    Defaults!/usr/bin/x log_stdin\n"),
+        (PRECHECK_BINDING, PRECHECK_BINDING + "    Defaults>root log_input\n"),
+    ],
+)
+def test_io_log_precheck_off(
+    monkeypatch: pytest.MonkeyPatch, old: str, new: str
+) -> None:
+    assert _io_publisher(monkeypatch, old, new) == []
+
+
+@pytest.mark.parametrize(
+    "binding,old,new,items",
+    [
+        # without the binding, generic input logging records the token
+        (
+            False,
+            MATCHING,
+            "use_pty, log_input, log_stdin",
+            ("log_input включён", "log_stdin включён"),
+        ),
+        # the RunAs binding alone
+        (
+            False,
+            "Runas and Command-specific defaults for df-publisher:\n",
+            (
+                "Runas and Command-specific defaults for df-publisher:\n"
+                "    Defaults>df-precheck log_input\n"
+            ),
+            ("log_input включён",),
+        ),
+        # a later binding of the same command turns a key back on
+        (
+            True,
+            PRECHECK_BINDING,
+            PRECHECK_BINDING + f"    Defaults!{LIBEXEC}/df-precheck log_ttyin\n",
+            ("log_ttyin включён",),
+        ),
+        (
+            True,
+            PRECHECK_BINDING,
+            PRECHECK_BINDING + "    Defaults!ALL log_stdout\n",
+            ("log_stdout включён",),
+        ),
+    ],
+)
+def test_io_log_precheck_on(
+    monkeypatch: pytest.MonkeyPatch,
+    binding: bool,
+    old: str,
+    new: str,
+    items: tuple[str, ...],
+) -> None:
+    outputs = _role_outputs("linux")
+    text = outputs["df-publisher"]
+    if not binding:
+        text = text.replace(PRECHECK_BINDING, "")
+    assert old in text
+    outputs["df-publisher"] = text.replace(old, new)
+    _sudo(monkeypatch, outputs)
+    assert sudoers.io_log_problems(ROOT) == _publisher_says(*items)
+
+
+def test_io_log_precheck_tags(monkeypatch: pytest.MonkeyPatch) -> None:
+    old = f"(df-precheck) {PRINTED}"
+    for tag in ("LOG_INPUT", "LOG_OUTPUT"):
+        problems = _io_publisher(monkeypatch, old, f"(df-precheck) {tag}: {PRINTED}")
+        assert problems == _publisher_says(f"правило с тегом {tag}")
+    assert (
+        _io_publisher(monkeypatch, old, f"(df-precheck) NOLOG_INPUT: {PRINTED}") == []
+    )
+
+
+@pytest.mark.parametrize(
+    "old,new",
+    [
+        (MATCHING, "use_pty, log_input=yes"),
+        (MATCHING, "use_pty, log_stdin, !log_stdin"),
+        (PRECHECK_BINDING, PRECHECK_BINDING + "    Defaults!PRECHECK log_input\n"),
+        (PRECHECK_BINDING, PRECHECK_BINDING + "    Defaults>%staff log_stdin\n"),
+        (
+            PRECHECK_BINDING,
+            PRECHECK_BINDING + "    Defaults!/usr/local/bin/df-precheck log_input\n",
+        ),
+        (PRECHECK_BINDING, PRECHECK_BINDING + "    Defaults:df-publisher log_input\n"),
+        ("Matching Defaults", "Unknown Defaults"),
+    ],
+)
+def test_io_log_precheck_unverifiable(
+    monkeypatch: pytest.MonkeyPatch, old: str, new: str
+) -> None:
+    [problem] = _io_publisher(monkeypatch, old, new)
+    assert problem.startswith(f"sudo -l -U df-publisher: {sudoers.UNVERIFIABLE}")

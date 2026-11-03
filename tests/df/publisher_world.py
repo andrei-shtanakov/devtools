@@ -77,12 +77,12 @@ def tmp_layout(tmp_path: Path) -> Layout:
     return lay
 
 
-EXEC, REVIEW = 601, 602
+EXEC, REVIEW, PRECHECK = 601, 602, 604
 A = entry("rel-a")
 
 
 class World:
-    """A fake layout with the three role accounts and a registered run."""
+    """A fake layout with the four role accounts and a registered run."""
 
     def __init__(self, fake: FakeLayout) -> None:
         self.fake = fake
@@ -143,6 +143,7 @@ def build_world(fake_layout: FakeLayout, monkeypatch: pytest.MonkeyPatch) -> Wor
         "df-exec": Account("df-exec", EXEC, 1, "ready", "t"),
         "df-review": Account("df-review", REVIEW, 1, "ready", "t"),
         "df-publisher": Account("df-publisher", me, os.getgid(), "ready", "t"),
+        "df-precheck": Account("df-precheck", PRECHECK, 1, "ready", "t"),
     }
     lay.accounts.write_text(dump_accounts(rows))  # type: ignore[arg-type]
     text = dump_publisher(expected_publisher(rows))  # type: ignore[arg-type]

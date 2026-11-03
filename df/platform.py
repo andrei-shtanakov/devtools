@@ -50,7 +50,9 @@ ROOT_UID = 0
 BUILD_USER = "df-build"
 BUILD_STEP = "build-user"
 #: The accounts `create_service_user` may create (`roles.ROLE_USERS` + builder).
-SERVICE_USERS = frozenset({BUILD_USER, "df-exec", "df-review", "df-publisher"})
+SERVICE_USERS = frozenset(
+    {BUILD_USER, "df-exec", "df-review", "df-publisher", "df-precheck"}
+)
 
 
 def home_tmp_name(name: str) -> str:

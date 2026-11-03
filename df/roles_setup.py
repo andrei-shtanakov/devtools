@@ -14,8 +14,8 @@ this order, each settled by its own check so that a repeat changes nothing:
    database is lost and refused, never recreated;
 5. `libexec`: the wrappers, for the admin Python of `current`;
 6. `sudoers`: `/etc/sudoers.d/df`;
-7. `verify`: wrappers and the effective sudo policy of five names (always run,
-   once; a failure names the retry).
+7. `verify`: wrappers and the effective sudo policy of the roles, `df-build`
+   and the operator (always run, once; a failure names the retry).
 """
 
 from __future__ import annotations
@@ -427,8 +427,8 @@ def record_created(layout: Layout) -> None:
 
 
 def _verify_problems(layout: Layout, operator: str, python: Path) -> list[str]:
-    """Wrappers, then the effective sudo policy of the three roles, `df-build`
-    and the operator, then the I/O log of `df-publish`."""
+    """Wrappers, then the effective sudo policy of the roles, `df-build` and
+    the operator, then the I/O log of `df-publish` and `df-precheck`."""
     problems = libexec.wrapper_problems(layout, python)
     names = (*roles.ROLE_USERS, plat.BUILD_USER, operator)
     for name in names:

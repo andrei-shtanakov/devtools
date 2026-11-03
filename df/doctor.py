@@ -758,7 +758,7 @@ def _judge(parts: Sequence[_Part]) -> str:
 
 
 def _users(ctx: _Level2) -> str:
-    """`verify_service_user` for the three roles."""
+    """`verify_service_user` for every role of `ROLE_USERS`."""
     problems = [
         f"{name}: {problem}"
         for name in roles.ROLE_USERS
@@ -771,8 +771,9 @@ def _users(ctx: _Level2) -> str:
 
 def _sudoers(ctx: _Level2) -> str:
     """The installed file is root's `0440` text of `render` and `visudo`
-    accepts that text (the same bytes); the effective policy of five names
-    (decision 13: the roles, `df-build`, the operator); the I/O log."""
+    accepts that text (the same bytes); the effective policy of the roles,
+    `df-build` and the operator (decision 13); the I/O log of `df-publish`
+    and of `df-precheck` (stage 2b plan decision 5)."""
     operator = _operator(ctx)
     path = sudoers.SUDOERS_FILE
     problems = _sudoers_text_problems(ctx.layout, operator)

@@ -1,6 +1,7 @@
 # `/etc/sudoers.d/df` and `sudo -n -l -U <name>` of the stage-2 roles
 
-`expected.txt` — the exact text of `sudoers.render(Layout(Path("/")),
+`expected.txt` — the exact text (since stage 2b Task 6 with the
+`df-precheck` binding and rule of plan decision 5) of `sudoers.render(Layout(Path("/")),
 "runner")` (Task 3). The text installed in CI (`sudoers/df` of the run below)
 is the same apart from the `<R>` prefix of the paths.
 
@@ -13,12 +14,14 @@ roles made by `roles.ensure_roles` in a `<R>` world, then
 
 - `macos` — macos-15 (artifact `df-stage1-macos-15`, `sudoers/<name>.fixture.txt`);
 - `linux` — ubuntu-24.04 (artifact `df-stage1-ubuntu-24.04`, the same files);
-- `<name>`: `df-exec`, `df-review`, `df-publisher`; `runner` is the
+- `<name>`: `df-exec`, `df-review`, `runner` (the 2a `df-publisher`
+  capture, then «not allowed», is now `df-precheck`'s, see below); `runner` is the
   runner's own account, the operator of the generated rules (its other
   rules are the image's: Linux `(ALL) NOPASSWD: ALL`; macOS
   `(ALL) NOPASSWD: ALL` and `(root) NOPASSWD: ALL`).
 
-Exit code 0 and empty stderr in all eight (`<name>.rc`, `<name>.err`).
+Exit code 0 and empty stderr in all eight captured in that run (`<name>.rc`,
+`<name>.err`), the 2a `df-publisher` pair included.
 
 The only edits (made by the test itself, `_as_fixture`; checked against the
 raw `<name>.txt` of the same artifact with `diff`): the `<R>` prefix of the
@@ -38,3 +41,16 @@ Synthesized, not captured (no real case exists to capture):
   sudo's line buffer wraps on a narrow terminal (Defaults continue with 4
   spaces, rules with 8). sudo never wraps output to a pipe, so this is only a
   tolerance check of the parser.
+
+Synthesized in stage 2b Task 6 (the `df-precheck` rule; to be recaptured by
+the root rows of Task 10 on both OSes):
+
+- `sudo-l-<os>-df-publisher.txt` — `df-publisher` now has one rule. The
+  defaults section is the runner's capture of the same OS; the bindings are
+  the two `Defaults!` lines of `expected.txt` as sudo printed the 2a one; the
+  rule prints its tags in the captured order `NOSETENV: NOPASSWD:`.
+- `sudo-l-<os>-df-precheck.txt` — the 2a capture of `df-publisher` («not
+  allowed to run sudo», a role without rules) with the name replaced.
+
+The 2a captures of `df-exec`, `df-review` and `runner` predate the
+`df-precheck` binding; tests add it by editing where it matters.

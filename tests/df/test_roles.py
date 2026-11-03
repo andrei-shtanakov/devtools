@@ -29,11 +29,10 @@ def layout(tmp_path: Path) -> Layout:
 
 @pytest.fixture()
 def role_world(monkeypatch: pytest.MonkeyPatch) -> World:
-    """Fake OS with ids for three roles; homes are owned by their account."""
+    """Fake OS with ids for the roles; homes are owned by their account."""
     world = account_world(monkeypatch)
-    monkeypatch.setattr(
-        plat, "ID_RANGE", {"macos-arm64": range(FIRST_ID, FIRST_ID + 3)}
-    )
+    ids = range(FIRST_ID, FIRST_ID + len(roles.ROLE_USERS))
+    monkeypatch.setattr(plat, "ID_RANGE", {"macos-arm64": ids})
     owners: dict[int, int] = {}
 
     def fchown(fd: int, uid: int, _gid: int) -> None:
@@ -47,7 +46,7 @@ def role_world(monkeypatch: pytest.MonkeyPatch) -> World:
 
 
 def test_role_users_exact() -> None:
-    assert roles.ROLE_USERS == ("df-exec", "df-review", "df-publisher")
+    assert roles.ROLE_USERS == ("df-exec", "df-review", "df-publisher", "df-precheck")
     assert roles.MODEL_ROLE_USERS == {"df-exec", "df-review"}
 
 
@@ -115,8 +114,8 @@ def test_ensure_roles_creates_all_ready(layout: Layout, role_world: World) -> No
 
 def test_ensure_roles_distinct_ids(layout: Layout, role_world: World) -> None:
     accounts = roles.ensure_roles(layout)
-    assert len({a.uid for a in accounts.values()}) == 3
-    assert len({a.gid for a in accounts.values()}) == 3
+    assert len({a.uid for a in accounts.values()}) == len(roles.ROLE_USERS)
+    assert len({a.gid for a in accounts.values()}) == len(roles.ROLE_USERS)
 
 
 def test_ensure_roles_is_idempotent(layout: Layout, role_world: World) -> None:

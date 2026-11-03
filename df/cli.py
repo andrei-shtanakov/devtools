@@ -10,7 +10,8 @@ lock, settles and reads the snapshot itself. Subcommands: `init` and
 (Task 11); `doctor [--product P [--operator NAME]] [--json]` (Tasks 12, 13,
 `df.doctor`); `cli set openssl PATH` (stage 2a, Task 4a); `perimeter
 restore --from PATH | --empty [--set-aside-old]` (stage 2a, Task 11r); `setup-agent app-key --app-id N
---file PATH | machine-token --file PATH` (stage 2a, Task 12).
+--file PATH | machine-token --file PATH` (stage 2a, Task 12); `precheck serve`
+(stage 2b, Task 6: the wrapper `df-precheck` as the role `df-precheck`).
 
 Exit codes (M7): 0 success; 2 a refusal or a configuration error, with the
 step named; 3 `NeedsHuman` (the instruction on stderr); 1 a program error
@@ -21,12 +22,13 @@ with its traceback. `doctor`: 0 level 1 reached, 2 not reached (R68); with
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import sys
 import traceback
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import NoReturn
@@ -34,6 +36,7 @@ from typing import NoReturn
 from df import (
     accept,
     admin,
+    admin_tree,
     doctor,
     fsutil,
     inputs,
@@ -91,6 +94,20 @@ _UNSET = "—"
 SERVICE_COMMANDS = frozenset({"publisher"})
 #: What `publisher serve` takes: the five operations and the self-check.
 PUBLISHER_ARGS = (*OPERATIONS, "self-check")
+#: `precheck serve` (stage 2b): the role, its whole environment (plus its
+#: HOME), the program and the pure-Python `site/` of the admin tree.
+PRECHECK_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C"}
+PRECHECK_MODULE = "governance.act_precheck"
+SITE_DIR = "site"
+_NOT_PRECHECK = "precheck serve: только от учётки df-precheck"
+_NO_PRECHECK = (
+    "precheck serve: релиз без предпроверки: в административном дереве "
+    f"нет {admin_tree.PRECHECK_FILE}"
+)
+_NO_SITE = (
+    "precheck serve: в административном дереве нет каталога site/ "
+    "при governance/act_precheck.py: переустановите релиз"
+)
 #: Seconds root waits for `publisher perimeter-restore` (the barrier wait,
 #: a copy of up to `perimeter.MAX_COPY` and its integrity check).
 RESTORE_TIMEOUT = 600.0
@@ -379,7 +396,8 @@ def _add_service(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
     `df.libexec` call them, one exact shape each); `publisher perimeter-init`
     and `publisher perimeter-restore (--stdin | --empty) [--set-aside-old]`
     (readers as `df-publisher`, which `roles setup` and `perimeter restore`
-    run; no wrapper or sudoers rule reaches them)."""
+    run; no wrapper or sudoers rule reaches them); `precheck serve` (a
+    reader as `df-precheck`, the wrapper `df-precheck`; no argument)."""
     opts = {"exit_on_error": False, "add_help": False, "allow_abbrev": False}
     group = sub.add_parser("roles", **opts)
     words = group.add_subparsers(
@@ -397,6 +415,11 @@ def _add_service(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
     source.add_argument("--stdin", action="store_true")
     source.add_argument("--empty", action="store_true")
     put.add_argument("--set-aside-old", action="store_true")
+    precheck = sub.add_parser("precheck", **opts)
+    words = precheck.add_subparsers(
+        dest="precheck_command", required=True, parser_class=_Parser
+    )
+    words.add_parser("serve", **opts)
     sub.add_parser("run", **opts).add_argument("words", nargs=argparse.REMAINDER)
     sub.add_parser("launch", **opts).add_argument("words", nargs="+")
 
@@ -437,6 +460,8 @@ def _reader(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
         return _run(args, lay, read)
     if args.command in SERVICE_COMMANDS:
         return _publisher(args, lay, read)
+    if args.command == "precheck":
+        return _precheck_serve(lay, read)
     if args.command == "doctor":
         return _doctor(args, lay, read)
     if isinstance(read, Transitional):
@@ -478,6 +503,48 @@ def _publisher(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
         raise Refusal(doctor.transitional_text(read.generation))
     snap = state.parse_snapshot(read.value, lay, mode="reader")
     return publisher_main.main([args.operation], layout=lay, snapshot=snap)
+
+
+def _precheck_serve(lay: Layout, read: ReadResult) -> int:
+    """`precheck serve` (spec 4.1 rev 10, plan decisions 3-5): only the
+    `df-precheck` of `accounts.toml` (else exit 2, nothing else done), only
+    on a release whose admin tree has the program (a legacy one is refused
+    by name) and its `site/` (a tree with the program but without it, too).
+    Then the environment becomes exactly `PRECHECK_ENV` plus the
+    role's HOME, `admin/<id>/site` goes to the END of `sys.path` (after
+    `admin/<id>`, which the entry put first, and stdlib), and the program
+    of that tree answers the one request on stdin."""
+    account = load_accounts(lay.accounts).get(roles.PRECHECK_USER)
+    if account is None or account.state != "ready" or os.getuid() != account.uid:
+        raise Refusal(_NOT_PRECHECK)
+    if isinstance(read, Transitional):
+        raise Refusal(doctor.transitional_text(read.generation))
+    snap = state.parse_snapshot(read.value, lay, mode="reader")
+    if snap.release_id is None or snap.entry is None:
+        raise Refusal("precheck serve: нет активного релиза")
+    tree = lay.admin_dir(snap.release_id)
+    if not os.path.lexists(tree / admin_tree.PRECHECK_FILE):
+        raise Refusal(_NO_PRECHECK)
+    if not os.path.isdir(tree / SITE_DIR):
+        raise Refusal(_NO_SITE)
+    home = lay.role_home(roles.PRECHECK_USER)
+    os.environ.clear()
+    os.environ.update({**PRECHECK_ENV, "HOME": str(home)})
+    sys.path.append(str(tree / SITE_DIR))
+    serve = _load_serve(tree)
+    return serve(
+        sys.stdin.buffer, sys.stdout, admin_digest=snap.entry.admin_digest, home=home
+    )
+
+
+def _load_serve(tree: Path) -> Callable[..., int]:
+    """`serve` of `PRECHECK_MODULE`, which must come from `tree` (the admin
+    tree the entry checked against `admin_digest`)."""
+    module = importlib.import_module(PRECHECK_MODULE)
+    where = Path(str(module.__file__)).parent
+    if where != tree / "governance":
+        raise Refusal(f"precheck serve: {PRECHECK_MODULE} не из {tree}: {where}")
+    return module.serve
 
 
 _PERIMETER_TEXTS = {

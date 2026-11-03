@@ -428,6 +428,42 @@ def test_steward_commit_hostile_member_refused(
     assert not (tmp_path / "site" / "steward" / "evil.py").exists()
 
 
+def test_steward_archive_stalled_mid_stream_is_bounded(
+    fl: FakeLayout,
+    served: Served,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`git archive` that sends part of the archive and then stalls without
+    exiting: the stream read is bounded by `GIT_TIMEOUT` like every other
+    git call -- `TreeError` naming the deadline, the process group killed;
+    the partial `site/` is left to the caller's recovery."""
+    monkeypatch.setattr(admin_tree, "GIT_TIMEOUT", 5.0)
+    world = site_world()
+    pid_file = tmp_path / "archive.pid"
+    stall = (
+        'case " $* " in *" archive "*)\n'
+        f'  {SYSTEM_GIT} "$@" | head -c 1536\n'
+        f"  echo $$ > {pid_file}\n"
+        "  exec sleep 120;;\n"
+        "esac\n"
+    )
+    dest = tmp_path / "site"
+    started = time.monotonic()
+    with pytest.raises(TreeError, match="срок 5 с истёк"):
+        install_site(
+            dest,
+            local_pins(world, served),
+            layout=fl.layout,
+            fetch=served.fetch,
+            git=wrapper(tmp_path, world, extra=stall),
+        )
+    assert time.monotonic() - started < 60
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_file.read_text()), 0)
+    assert (dest / "steward").is_dir()  # partial, as the protocol expects
+
+
 def test_steward_cache_never_read_through_a_parent_repo(
     fl: FakeLayout, tmp_path: Path
 ) -> None:
@@ -706,11 +742,11 @@ def test_entry_does_not_import_site(tmp_path: Path, argv: list[str]) -> None:
     assert (got["yaml"], got["steward"]) == (False, False)
 
 
-def test_no_df_module_adds_site_to_sys_path() -> None:
-    """Every `sys.path` change in `df/` today is a `sys.path.insert(0, …)` of
-    a code root -- the entry's `admin/<id>`, bootstrap's checkout, the
-    release launcher's tree -- none names `site`; Task 6's `precheck serve`
-    will be the first to add `site/`, at the end."""
+def test_only_precheck_serve_adds_site_to_sys_path() -> None:
+    """Every `sys.path` change in `df/` is a `sys.path.insert(0, …)` of a
+    code root -- the entry's `admin/<id>`, bootstrap's checkout, the release
+    launcher's tree -- none naming `site`; the one exception is Task 6's
+    `precheck serve`, which appends `site/` at the end."""
     changes: list[tuple[str, str]] = []
     for path in sorted((ROOT / "df").rglob("*.py")):
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
@@ -722,11 +758,16 @@ def test_no_df_module_adds_site_to_sys_path() -> None:
                 continue
             rel = path.relative_to(ROOT).as_posix()
             changes.append((rel, ast.unparse(node)))
+            if node.func.attr == "append":
+                assert rel == "df/cli.py", (rel, ast.unparse(node))
+                assert ast.unparse(node) == "sys.path.append(str(tree / SITE_DIR))"
+                continue
             assert node.func.attr == "insert", (rel, ast.unparse(node))
             assert ast.unparse(node.args[0]) == "0"
             assert "site" not in ast.unparse(node.args[1])
     assert sorted(rel for rel, _ in changes) == [
         "df/bootstrap.py",
+        "df/cli.py",
         "df/launch_release.py",
         "df/launcher_entry.py",
     ]

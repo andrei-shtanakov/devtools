@@ -190,7 +190,8 @@ def _emit(out: IO[str], report: Mapping[str, object], code: int) -> int:
 
 
 def _foreign_paths(layout: Layout) -> list[Path]:
-    others = (layout.role_home(r) for r in ("df-exec", "df-review", "df-publisher"))
+    roles = ("df-exec", "df-review", "df-publisher", "df-precheck")
+    others = (layout.role_home(r) for r in roles)
     return [
         layout.secrets_dir,
         layout.publisher_dir,

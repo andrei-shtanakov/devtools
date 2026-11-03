@@ -77,6 +77,11 @@ SIBLING_INSTALLATION = 78
 BOT = "df-bot"
 OPERATOR = "alice"
 UIDS = {"df-exec": 71001, "df-review": 71002, "df-publisher": 71003}
+#: Stage 2b: the precheck role, no model role (not in the role reports).
+PRECHECK_UID = 71004
+#: The real check, before the `l2` fixture replaces it.
+REAL_IO_LOG = sudoers.io_log_problems
+SUDOERS_FIXTURES = Path(__file__).parent / "fixtures" / "sudoers"
 LEVEL2_IDS = [
     "roles.users",
     "roles.sudoers",
@@ -228,7 +233,7 @@ def l2(fake_installed: World, tmp_path: Path) -> L2:
     mp = w.mp
     _no_sudo(mp)
     accounts = load_accounts(w.lay.accounts)
-    for name, uid in UIDS.items():
+    for name, uid in (*UIDS.items(), ("df-precheck", PRECHECK_UID)):
         accounts[name] = Account(name, uid, uid, "ready", "2026-10-29T00:00:00Z")
     fsutil.write_atomic(w.lay.accounts, dump_accounts(accounts))
     seed_models(w)
@@ -497,9 +502,78 @@ def test_sudoers_validate_and_policy_problems_broken(
     monkeypatch.setattr(sudoers, "io_log_problems", lambda _l: ["log_output"])
     c = l2.level2()["roles.sudoers"]
     assert c.status == "нарушено"
-    assert seen == ["df-exec", "df-review", "df-publisher", "df-build", OPERATOR]
+    assert seen == [
+        "df-exec",
+        "df-review",
+        "df-publisher",
+        "df-precheck",
+        "df-build",
+        OPERATOR,
+    ]
     assert len(c.problems) == 3
     assert "parse error" in c.problems[0]
+
+
+def _listings(lay: Layout, edit: tuple[str, str] | None) -> dict[str, sudoers.Listing]:
+    """The listings of the generated rules under `lay`'s root; `edit`
+    changes `df-publisher`'s."""
+    found = {}
+    for name in ("df-exec", "df-review", "df-publisher"):
+        text = (SUDOERS_FIXTURES / f"sudo-l-linux-{name}.txt").read_text()
+        if name == "df-publisher" and edit is not None:
+            assert edit[0] in text
+            text = text.replace(*edit)
+        text = text.replace("/opt/df/", f"{lay.opt}/")
+        found[name] = sudoers.parse_listing(name, text)
+    return found
+
+
+PRECHECK_BINDING = (
+    "    Defaults!/opt/df/libexec/df-precheck command_timeout=180, !log_input, "
+    "!log_output, !log_stdin, !log_stdout, !log_stderr, !log_ttyin, !log_ttyout\n"
+)
+
+
+@pytest.mark.parametrize(
+    "edit,needle",
+    [
+        (None, None),
+        # sudo's generic input logging, turned off by the command binding
+        (("use_pty", "use_pty, log_input, log_stdin"), None),
+        # the binding gone: the read token would be in the I/O log
+        (
+            (PRECHECK_BINDING, "    Defaults>df-precheck log_stdin\n"),
+            "{libexec}/df-precheck: log_stdin включён",
+        ),
+        (
+            ("(df-precheck) NOSETENV:", "(df-precheck) LOG_INPUT: NOSETENV:"),
+            "{libexec}/df-precheck: правило с тегом LOG_INPUT",
+        ),
+        (
+            (PRECHECK_BINDING, PRECHECK_BINDING + "    Defaults!PRECHECK log_input\n"),
+            "конфигурация I/O-журнала не проверяема",
+        ),
+    ],
+)
+def test_doctor_flags_effective_input_logging(
+    l2: L2,
+    monkeypatch: pytest.MonkeyPatch,
+    edit: tuple[str, str] | None,
+    needle: str | None,
+) -> None:
+    """Plan decision 5: doctor reads the effective input and output logging
+    of the precheck command from `sudo -l -U df-publisher` (the real parser
+    and the real `io_log_problems` on the listings); unverifiable is broken."""
+    listings = _listings(l2.lay, edit)
+    monkeypatch.setattr(sudoers, "io_log_problems", REAL_IO_LOG)
+    monkeypatch.setattr(sudoers, "read_listing", listings.__getitem__)
+    status, reason = status_of(l2, "roles.sudoers")
+    if needle is None:
+        assert status == doctor.OK, reason
+        return
+    assert status == "нарушено"
+    assert "sudo -l -U df-publisher: " in reason
+    assert needle.format(libexec=l2.lay.libexec) in reason
 
 
 def test_libexec_broken(l2: L2) -> None:
@@ -1246,7 +1320,7 @@ def test_other_operator_keeps_operator_free_problems(
         f"укажите --operator {OPERATOR}"
     )
     assert c.problems == (io, note)
-    names = ["df-exec", "df-review", "df-publisher", "df-build"]
+    names = ["df-exec", "df-review", "df-publisher", "df-precheck", "df-build"]
     assert asked == [(n, OPERATOR) for n in names]
 
 
