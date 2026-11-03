@@ -24,21 +24,26 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import ssl
 import stat
 import subprocess
 import tarfile
+import time
 import tomllib
+import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
+from email.message import Message
 from pathlib import Path, PurePosixPath
 from typing import IO
 
 from df import platform as plat
-from df.build import GIT_ISOLATION, git_fetch_argv, git_rev_parse_argv
-from df.digest import TreeError, open_regular
+from df.build import GIT_ISOLATION
+from df.digest import TreeError
+from df.inputs import read_capped
 from df.paths import Layout
 from df.sources import UnsupportedLock, source_from_lock
 
@@ -76,12 +81,18 @@ STEWARD_REPO = "steward.git"
 #: Seconds for one git command or download; bytes a download may have.
 GIT_TIMEOUT = 600.0
 FETCH_TIMEOUT = 120.0
+FETCH_DEADLINE = 600.0
 SDIST_CAP = 64 << 20
 STDERR_REPORT_BYTES = 4096
 
-_NEW_FILE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
-_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-_CHUNK = 1 << 20
+#: Flags of a new file in the admin tree or the cache: never an existing name.
+NEW_FILE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+#: Flags of a directory opened in the admin tree: never through a link.
+DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+#: Bytes per read and write of a copied file or a stream.
+CHUNK = 1 << 20
+#: Bytes a checkout's `uv.lock` may have.
+LOCK_CAP = 16 << 20
 
 Fetch = Callable[[str], bytes]
 
@@ -103,6 +114,7 @@ class SiteSources:
     sdist: bytes
     steward_repo: Path
     steward_commit: str
+    git_env: Mapping[str, str]
 
 
 def governance_files() -> tuple[str, ...]:
@@ -187,15 +199,53 @@ def _is_sha256(value: str) -> bool:
     return len(value) == 64 and all(c in "0123456789abcdef" for c in value)
 
 
-def fetch_url(url: str) -> bytes:
-    """GET `url` as root, no proxy or other setting from the environment,
-    at most `SDIST_CAP` bytes (more is `TreeError`)."""
-    if urllib.parse.urlsplit(url).scheme not in ("https", "http"):
-        raise TreeError(f"{url}: не http(s)")
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+class _HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    """Follows a redirect only to another `https` URL."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: Message,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        if urllib.parse.urlsplit(newurl).scheme != "https":
+            raise urllib.error.URLError(f"перенаправление не на https: {newurl}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def fetch_url(
+    url: str,
+    *,
+    context: ssl.SSLContext | None = None,
+    deadline: float = FETCH_DEADLINE,
+) -> bytes:
+    """GET the `https` URL `url` as root: no proxy or other setting from the
+    environment, redirects only to `https` (no other scheme handler), at most
+    `SDIST_CAP` bytes and `deadline` seconds for the whole download (each
+    socket operation `FETCH_TIMEOUT`); anything else is `TreeError`.
+    `context` is the TLS context (default: the system's verification)."""
+    if urllib.parse.urlsplit(url).scheme != "https":
+        raise TreeError(f"{url}: не https")
+    opener = urllib.request.OpenerDirector()
+    for handler in (
+        urllib.request.ProxyHandler({}),
+        urllib.request.HTTPSHandler(context=context),
+        _HttpsOnlyRedirect(),
+        urllib.request.HTTPDefaultErrorHandler(),
+        urllib.request.HTTPErrorProcessor(),
+    ):
+        opener.add_handler(handler)
+    end = time.monotonic() + deadline
+    data = b""
     try:
         with opener.open(url, timeout=FETCH_TIMEOUT) as response:
-            data = response.read(SDIST_CAP + 1)
+            while len(data) <= SDIST_CAP and (chunk := response.read(CHUNK)):
+                data += chunk
+                if time.monotonic() > end:
+                    raise TreeError(f"{url}: срок {deadline} с истёк")
     except OSError as exc:
         raise TreeError(f"{url}: {exc}") from exc
     if len(data) > SDIST_CAP:
@@ -223,7 +273,13 @@ def site_sources(
     steward: `steward.git` (bare, made if absent) must hold the pinned commit
     and its tree (`_has_commit`), else `git fetch <url> <commit>` with
     `FETCH_HEAD` equal to the pin, then the same check. `fetch=None`: a
-    missing or bad artifact is `TreeError`, never fetched."""
+    missing or bad artifact is `TreeError`, never fetched.
+
+    Trust: the sdist is re-hashed on every use, but git does not re-verify
+    the content of the objects of `steward.git` it reads -- those bytes are
+    trusted because `admin-home` is root's `0700` (step 2, F6), so only root
+    can have written them. Every git call names the repository by
+    `--git-dir` (no discovery of a parent repository)."""
     cache = layout.admin_home / SITE_SRC
     _ensure_cache_dir(cache)
     sdist = _sdist(cache, pins, fetch)
@@ -233,7 +289,7 @@ def site_sources(
         if fetch is None:
             raise TreeError(f"{repo}: нет коммита {pins.steward_commit} (без сети)")
         _fetch_steward(git, repo, pins, env)
-    return SiteSources(sdist, repo, pins.steward_commit)
+    return SiteSources(sdist, repo, pins.steward_commit, env)
 
 
 def git_env(layout: Layout, git: Path) -> dict[str, str]:
@@ -275,17 +331,14 @@ def _sdist(cache: Path, pins: SitePins, fetch: Fetch | None) -> bytes:
 
 
 def _read_cached(path: Path) -> bytes | None:
-    try:
-        fd = open_regular(path)
-    except FileNotFoundError:
+    """The cached sdist (`None`: absent); an oversize or unreadable one is
+    `b""`, which no pin matches, so it is replaced."""
+    if not os.path.lexists(path):
         return None
     try:
-        data = b""
-        while len(data) <= SDIST_CAP and (chunk := os.read(fd, _CHUNK)):
-            data += chunk
-    finally:
-        os.close(fd)
-    return data
+        return read_capped(path, SDIST_CAP)
+    except TreeError:
+        return b""
 
 
 def _write_cache(path: Path, data: bytes) -> None:
@@ -296,9 +349,9 @@ def _write_cache(path: Path, data: bytes) -> None:
         os.unlink(tmp)
     except FileNotFoundError:
         pass
-    fd = os.open(tmp, _NEW_FILE, 0o600)
+    fd = os.open(tmp, NEW_FILE, 0o600)
     try:
-        _write_all(fd, data)
+        write_all(fd, data)
     finally:
         os.close(fd)
     os.rename(tmp, path)
@@ -318,7 +371,7 @@ def _has_commit(git: Path, repo: Path, commit: str, env: dict[str, str]) -> bool
     those types)."""
     if not os.path.isdir(repo):
         return False
-    argv = [str(git), "-C", str(repo), "cat-file", "--batch-check"]
+    argv = [str(git), f"--git-dir={repo}", "cat-file", "--batch-check"]
     query = f"{commit}^{{commit}}\n{commit}^{{tree}}\n".encode()
     result = plat.run_with_input(argv, query, timeout=GIT_TIMEOUT, env=env)
     if not _ok(result):
@@ -329,27 +382,18 @@ def _has_commit(git: Path, repo: Path, commit: str, env: dict[str, str]) -> bool
 
 
 def _fetch_steward(git: Path, repo: Path, pins: SitePins, env: dict[str, str]) -> None:
-    tool, where = str(git), str(repo)
-    _checked(_git(git, ["init", "-q", "--bare", "--template=", where], env), "init")
-    _checked(
-        plat.run_command(
-            git_fetch_argv(tool, where, pins.steward_url, pins.steward_commit),
-            timeout=GIT_TIMEOUT,
-            env=env,
-        ),
-        "fetch",
-    )
-    head = _checked(
-        plat.run_command(git_rev_parse_argv(tool, where), timeout=GIT_TIMEOUT, env=env),
-        "rev-parse",
-    )
+    """`git init --bare` (idempotent), fetch exactly the pinned commit,
+    `FETCH_HEAD` equal to it, then `_has_commit`."""
+    where = f"--git-dir={repo}"
+    url, commit = pins.steward_url, pins.steward_commit
+    _checked(_git(git, ["init", "-q", "--bare", "--template=", str(repo)], env), "init")
+    _checked(_git(git, [where, "fetch", "-q", "--depth=1", url, commit], env), "fetch")
+    head = _checked(_git(git, [where, "rev-parse", "FETCH_HEAD"], env), "rev-parse")
     got = head.decode("utf-8", "replace").strip()
-    if got != pins.steward_commit:
-        raise TreeError(
-            f"steward: FETCH_HEAD {got!r}, в uv.lock {pins.steward_commit!r}"
-        )
-    if not _has_commit(git, repo, pins.steward_commit, env):
-        raise TreeError(f"steward: нет дерева коммита {pins.steward_commit}")
+    if got != commit:
+        raise TreeError(f"steward: FETCH_HEAD {got!r}, в uv.lock {commit!r}")
+    if not _has_commit(git, repo, commit, env):
+        raise TreeError(f"steward: нет дерева коммита {commit}")
 
 
 def _ok(result: plat.RunResult) -> bool:
@@ -380,12 +424,12 @@ def write_site(dest: Path, sources: SiteSources, *, git: Path) -> None:
     Files are born `0600`, then `fchmod` `0755` (any x bit) or `0644`;
     directories `0755`. No sync here: the caller's protocol syncs the tree.
     A malformed archive is `TreeError`."""
-    _make_dir(dest)
-    _make_dir(dest / "yaml")
+    make_tree_dir(dest)
+    make_tree_dir(dest / "yaml")
     try:
         with tarfile.open(fileobj=io.BytesIO(sources.sdist), mode="r:gz") as tar:
             _extract(tar, dest / "yaml", _sdist_rel)
-        _make_dir(dest / "steward")
+        make_tree_dir(dest / "steward")
         with (
             _archive(git, sources) as stream,
             tarfile.open(fileobj=stream, mode="r|") as tar,
@@ -455,15 +499,17 @@ def _make_parents(dest: Path, rel: tuple[str, ...]) -> None:
     for name in rel:
         current = current / name
         try:
-            _make_dir(current)
+            make_tree_dir(current)
         except FileExistsError:
             if not stat.S_ISDIR(os.lstat(current).st_mode):
                 raise TreeError(f"{current}: не каталог") from None
 
 
-def _make_dir(path: Path) -> None:
+def make_tree_dir(path: Path) -> None:
+    """A new directory of the admin tree: born `0700`, then `fchmod` `0755`
+    (whatever the umask); no sync (the protocol syncs the tree)."""
     os.mkdir(path, 0o700)
-    fd = os.open(path, _DIR_FLAGS)
+    fd = os.open(path, DIR_FLAGS)
     try:
         os.fchmod(fd, 0o755)
     finally:
@@ -471,16 +517,17 @@ def _make_dir(path: Path) -> None:
 
 
 def _write_member(path: Path, source: IO[bytes], mode: int) -> None:
-    fd = os.open(path, _NEW_FILE, 0o600)
+    fd = os.open(path, NEW_FILE, 0o600)
     try:
         os.fchmod(fd, mode)
-        while chunk := source.read(_CHUNK):
-            _write_all(fd, chunk)
+        while chunk := source.read(CHUNK):
+            write_all(fd, chunk)
     finally:
         os.close(fd)
 
 
-def _write_all(fd: int, data: bytes) -> None:
+def write_all(fd: int, data: bytes) -> None:
+    """Write all of `data` to `fd` (short writes continued)."""
     view = memoryview(data)
     while view:
         view = view[os.write(fd, view) :]
@@ -493,20 +540,18 @@ def _archive(git: Path, sources: SiteSources) -> Iterator[IO[bytes]]:
     exit of the reader kills the process group."""
     argv = [
         str(git),
-        "-C",
-        str(sources.steward_repo),
+        f"--git-dir={sources.steward_repo}",
         "archive",
         "--format=tar",
         sources.steward_commit,
         STEWARD_SOURCE_DIR,
     ]
-    env = {"PATH": "/usr/bin:/bin", "LANG": "C", **GIT_ISOLATION}
     proc = subprocess.Popen(
         argv,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
-        env=env,
+        env=dict(sources.git_env),
         cwd="/",
         start_new_session=True,
     )
@@ -514,7 +559,8 @@ def _archive(git: Path, sources: SiteSources) -> Iterator[IO[bytes]]:
     done = False
     try:
         yield proc.stdout
-        proc.stdout.read()  # drain the end-of-archive padding
+        while proc.stdout.read(CHUNK):  # drain the end-of-archive padding
+            pass
         done = True
     finally:
         proc.stdout.close()

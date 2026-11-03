@@ -27,7 +27,9 @@ from pathlib import Path, PurePosixPath
 from df import accept, acl, admin_tree, fsutil
 from df import build as build_mod
 from df import platform as plat
+from df.admin_tree import CHUNK, DIR_FLAGS, NEW_FILE, make_tree_dir, write_all
 from df.digest import TreeError, check_links, open_regular, tree_digest
+from df.inputs import read_capped
 from df.journal import StepFailed
 from df.launcher_entry import Refused, entry_text
 from df.lockset import UV_PINNED_VERSION
@@ -52,12 +54,9 @@ LINK_TMP = ".darkfactory.tmp"
 _STEP = "admin"
 _LAUNCHER_STEP = "launcher"
 _FACTS_STEP = "facts"
-_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-_NEW_FILE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 _PEEK = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 _NO_WRITE_OTHERS = stat.S_IWGRP | stat.S_IWOTH
 _SPECIAL_BITS = stat.S_ISUID | stat.S_ISGID
-_CHUNK = 1 << 20
 _PYTHON = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 _UV_VERSION = re.compile(r"uv (\S+)(?: .*)?")
 
@@ -173,7 +172,7 @@ def _ensure_admin_home(layout: Layout) -> None:
     born `0700`, durable), so no crash leaves a mode the check refuses.
     """
     home = layout.admin_home
-    parent = os.open(home.parent, _DIR_FLAGS)
+    parent = os.open(home.parent, DIR_FLAGS)
     try:
         if not os.path.lexists(home):  # step 2 makes it; settled there too
             fsutil.make_dir(parent, home.name, 0o700, path=home)
@@ -291,14 +290,20 @@ def expected_admin_digest(devtools_ref: Path, *, layout: Layout, git: Path) -> s
     sdist's sha256 and steward's commit and tree re-checked against
     `devtools_ref/uv.lock`); a missing or bad artifact is `TreeError`, never
     a download. Writes nothing under the layout but that cache's directory;
-    needs read access to `admin-home` (root on a host). A legacy checkout
+    needs read access to `admin-home` (root on a host). Every refusal --
+    a step's, the OS's -- is `TreeError`. A legacy checkout
     (`admin_tree.release_has_precheck` false) is `df/` only, as installed."""
-    sources = _site_sources(devtools_ref, layout=layout, fetch=None, git=git)
-    with tempfile.TemporaryDirectory(prefix="df-admin-digest-") as tmp:
-        dest = Path(tmp) / "admin"
-        _make_dir(dest)
-        _fill_admin(dest, devtools_ref, sources, git)
-        return tree_digest(dest, exclude=frozenset())
+    try:
+        sources = _site_sources(devtools_ref, layout=layout, fetch=None, git=git)
+        with tempfile.TemporaryDirectory(prefix="df-admin-digest-") as tmp:
+            dest = Path(tmp) / "admin"
+            make_tree_dir(dest)
+            _fill_admin(dest, devtools_ref, sources, git)
+            return tree_digest(dest, exclude=frozenset())
+    except StepFailed as exc:
+        raise TreeError(exc.detail) from exc
+    except OSError as exc:
+        raise TreeError(f"{devtools_ref}: {exc}") from exc
 
 
 def admin_python_problems(
@@ -422,7 +427,7 @@ def install_admin(
         raise StepFailed(_STEP, f"{devtools_ref / 'df'}: не каталог")
     try:
         sources = _site_sources(devtools_ref, layout=layout, fetch=fetch, git=git)
-        _make_dir(dest)
+        make_tree_dir(dest)
         fsutil.fault_point("created", dest)
         _fill_admin(dest, devtools_ref, sources, git)
     except (OSError, TreeError) as exc:
@@ -449,15 +454,11 @@ def _site_sources(
 
 
 def _site_pins(devtools_ref: Path) -> admin_tree.SitePins:
-    """`admin_tree.locked_pins` of the checkout's `uv.lock` (a regular file)."""
-    fd = open_regular(devtools_ref / "uv.lock")
-    try:
-        data = b""
-        while chunk := os.read(fd, _CHUNK):
-            data += chunk
-    finally:
-        os.close(fd)
-    return admin_tree.locked_pins(data)
+    """`admin_tree.locked_pins` of the checkout's `uv.lock` (a regular file
+    of at most `admin_tree.LOCK_CAP` bytes)."""
+    return admin_tree.locked_pins(
+        read_capped(devtools_ref / "uv.lock", admin_tree.LOCK_CAP)
+    )
 
 
 def _fill_admin(
@@ -480,22 +481,13 @@ def _fill_admin(
         for name in parts[:-1]:
             current = current / name
             if not os.path.lexists(current):
-                _make_dir(current)
+                make_tree_dir(current)
         _copy_file(devtools_ref.joinpath(*parts), dest.joinpath(*parts))
     admin_tree.write_site(dest / "site", sources, git=git)
 
 
-def _make_dir(path: Path) -> None:
-    os.mkdir(path, 0o700)
-    fd = os.open(path, _DIR_FLAGS)
-    try:
-        os.fchmod(fd, 0o755)
-    finally:
-        os.close(fd)
-
-
 def _copy_dir(src: Path, dst: Path) -> None:
-    _make_dir(dst)
+    make_tree_dir(dst)
     with os.scandir(src) as entries:
         listing = sorted(entries, key=lambda e: e.name)
     for entry in listing:
@@ -516,21 +508,15 @@ def _copy_file(src: Path, dst: Path) -> None:
     fd_in = open_regular(src)
     try:
         mode = 0o755 if os.fstat(fd_in).st_mode & 0o111 else 0o644
-        fd_out = os.open(dst, _NEW_FILE, 0o600)
+        fd_out = os.open(dst, NEW_FILE, 0o600)
         try:
             os.fchmod(fd_out, mode)
-            while chunk := os.read(fd_in, _CHUNK):
-                _write_all(fd_out, chunk)
+            while chunk := os.read(fd_in, CHUNK):
+                write_all(fd_out, chunk)
         finally:
             os.close(fd_out)
     finally:
         os.close(fd_in)
-
-
-def _write_all(fd: int, data: bytes) -> None:
-    view = memoryview(data)
-    while view:
-        view = view[os.write(fd, view) :]
 
 
 def admin_ready(
@@ -609,7 +595,7 @@ def link_command(layout: Layout) -> None:
     name = layout.launcher.name
     tmp = LINK_TMP
     try:
-        fd = os.open(layout.local_bin, _DIR_FLAGS)
+        fd = os.open(layout.local_bin, DIR_FLAGS)
     except OSError as exc:
         raise StepFailed(_LAUNCHER_STEP, f"{layout.local_bin}: {exc}") from exc
     try:

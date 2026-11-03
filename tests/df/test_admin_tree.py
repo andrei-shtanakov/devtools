@@ -15,10 +15,12 @@ import json
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tarfile
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -50,6 +52,7 @@ from tests.df.site_world import (
     SiteWorld,
     git,
     git_wrapper,
+    prime_cache,
     real_site_world,
     sdist_members,
     site_world,
@@ -69,28 +72,71 @@ def fl(monkeypatch: pytest.MonkeyPatch, fake_layout: FakeLayout) -> FakeLayout:
     return layout
 
 
-class Served:
-    """A local HTTP server answering every GET with `body` (settable)."""
+OPENSSL = shutil.which("openssl", path="/usr/bin:/bin")
 
-    def __init__(self, body: bytes) -> None:
+
+class Served:
+    """A local HTTPS server (a self-signed certificate for 127.0.0.1, trusted
+    by `context` only): `/pyyaml.tar.gz` answers `body` (settable);
+    `/to-http`, `/to-ftp`, `/to-https` redirect there; `/slow` trickles."""
+
+    def __init__(self, body: bytes, certs: Path) -> None:
         self.body = body
         self.paths: list[str] = []
+        cert, key = certs / "c.pem", certs / "k.pem"
+        if OPENSSL is None:
+            pytest.skip("openssl не найден")
+        assert OPENSSL is not None
+        subprocess.run(
+            [OPENSSL, "req", "-x509", "-newkey", "rsa:2048", "-nodes"]
+            + ["-keyout", str(key), "-out", str(cert), "-days", "1"]
+            + ["-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1"],
+            check=True,
+            capture_output=True,
+            timeout=60,
+        )
         served = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802 - stdlib name
                 served.paths.append(self.path)
+                port = served.server.server_address[1]
+                target = {
+                    "/to-http": f"http://127.0.0.1:{port}/pyyaml.tar.gz",
+                    "/to-ftp": f"ftp://127.0.0.1:{port}/pyyaml.tar.gz",
+                    "/to-https": f"https://127.0.0.1:{port}/pyyaml.tar.gz",
+                }.get(self.path)
+                if target is not None:
+                    self.send_response(302)
+                    self.send_header("Location", target)
+                    self.end_headers()
+                    return
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(served.body)))
                 self.end_headers()
-                self.wfile.write(served.body)
+                if self.path != "/slow":
+                    self.wfile.write(served.body)
+                    return
+                for byte in served.body[:40]:
+                    self.wfile.write(bytes([byte]))
+                    self.wfile.flush()
+                    time.sleep(0.05)
 
             def log_message(self, *_args: object) -> None:
                 pass
 
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/pyyaml.tar.gz"
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.load_cert_chain(cert, key)
+        self.server.socket = tls.wrap_socket(self.server.socket, server_side=True)
+        self.base = f"https://127.0.0.1:{self.server.server_address[1]}"
+        self.url = f"{self.base}/pyyaml.tar.gz"
+        self.context = ssl.create_default_context(cafile=str(cert))
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def fetch(self, url: str, **kw: float) -> bytes:
+        """`fetch_url` trusting this server's certificate."""
+        return admin_tree.fetch_url(url, context=self.context, **kw)
 
     def close(self) -> None:
         self.server.shutdown()
@@ -98,8 +144,10 @@ class Served:
 
 
 @pytest.fixture()
-def served() -> Iterator[Served]:
-    server = Served(site_world().sdist)
+def served(tmp_path: Path) -> Iterator[Served]:
+    certs = tmp_path / "certs"
+    certs.mkdir()
+    server = Served(site_world().sdist, certs)
     yield server
     server.close()
 
@@ -213,7 +261,7 @@ def test_sdist_sha_mismatch_refused(
             dest,
             pins,
             layout=fl.layout,
-            fetch=admin_tree.fetch_url,
+            fetch=served.fetch,
             git=wrapper(tmp_path, world),
         )
     assert not os.path.lexists(dest)
@@ -225,7 +273,7 @@ def test_sdist_sha_mismatch_refused(
         dest,
         pins,
         layout=fl.layout,
-        fetch=admin_tree.fetch_url,
+        fetch=served.fetch,
         git=wrapper(tmp_path, world),
     )
     assert stale.read_bytes() == world.sdist
@@ -233,55 +281,103 @@ def test_sdist_sha_mismatch_refused(
     assert sorted(os.listdir(cache(fl.layout))) == [stale.name, STEWARD_REPO]
 
 
-def _sdist_with(extra: tuple[str, bytes | None, int, str]) -> bytes:
-    """The stand-in sdist plus one hostile member `(name, data, mode, kind)`."""
+def test_fetch_url_https_only(served: Served) -> None:
+    """Only `https`: an `http` URL, and a redirect to `http` or `ftp`, are
+    refused; a redirect to `https` is followed."""
+    assert served.fetch(f"{served.base}/to-https") == served.body
+    http_url = served.url.replace("https://", "http://")
+    with pytest.raises(TreeError, match="не https"):
+        served.fetch(http_url)
+    for path in ("/to-http", "/to-ftp"):
+        with pytest.raises(TreeError, match="перенаправление не на https"):
+            served.fetch(f"{served.base}{path}")
+
+
+def test_fetch_url_whole_download_deadline(served: Served) -> None:
+    """A server trickling bytes (each read inside the socket timeout) is
+    cut by the deadline of the whole download."""
+    with pytest.raises(TreeError, match="срок"):
+        served.fetch(f"{served.base}/slow", deadline=0.3)
+
+
+def test_fetch_url_refuses_an_untrusted_certificate(served: Served) -> None:
+    with pytest.raises(TreeError, match="CERTIFICATE_VERIFY_FAILED|certificate"):
+        admin_tree.fetch_url(served.url)
+
+
+def _sdist_with(extra: tuple[str, bytes | None, int, str], *, first: bool) -> bytes:
+    """The stand-in sdist with one hostile member `(name, data, mode, kind)`
+    placed before or after the legitimate ones."""
+    hostile = _tar_info(extra)
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        if first:
+            tar.addfile(*hostile)
         for name, data, mode in sdist_members(stand_in_dir() / "yaml"):
-            info = tarfile.TarInfo(name)
-            info.mode = mode
-            if data is None:
-                info.type = tarfile.DIRTYPE
-            else:
-                info.size = len(data)
-            tar.addfile(info, None if data is None else io.BytesIO(data))
-        name, data, mode, kind = extra
-        info = tarfile.TarInfo(name)
-        info.mode = mode
-        if kind == "sym":
-            info.type, info.linkname = tarfile.SYMTYPE, "/etc/passwd"
-        elif kind == "hard":
-            info.type, info.linkname = tarfile.LNKTYPE, f"{SDIST_TOP}/setup.py"
-        else:
-            assert data is not None
-            info.size = len(data)
-        tar.addfile(info, None if data is None else io.BytesIO(data))
+            kind = "dir" if data is None else "reg"
+            tar.addfile(*_tar_info((name, data, mode, kind)))
+        if not first:
+            tar.addfile(*hostile)
     return buf.getvalue()
 
 
+def _tar_info(
+    member: tuple[str, bytes | None, int, str],
+) -> tuple[tarfile.TarInfo, io.BytesIO | None]:
+    name, data, mode, kind = member
+    info = tarfile.TarInfo(name)
+    info.mode = mode
+    if kind == "sym":
+        info.type, info.linkname = tarfile.SYMTYPE, "/etc/passwd"
+    elif kind == "hard":
+        info.type, info.linkname = tarfile.LNKTYPE, f"{SDIST_TOP}/setup.py"
+    elif kind == "dir":
+        info.type = tarfile.DIRTYPE
+    else:
+        assert data is not None
+        info.size = len(data)
+    return info, None if data is None else io.BytesIO(data)
+
+
+NOT_REGULAR = "не файл и не каталог"
+DOTDOT = "'..' в архиве"
+FORBIDDEN_NAME = "запрещённое имя"
+#: Hostile sdist members and the refusal each must get (`match`).
 HOSTILE = {
-    "symlink": (f"{SDIST_TOP}/lib/yaml/evil.py", None, 0o644, "sym"),
-    "hardlink": (f"{SDIST_TOP}/lib/yaml/hard.py", None, 0o644, "hard"),
-    "dotdot": (f"{SDIST_TOP}/lib/yaml/../../../evil.py", b"x", 0o644, "reg"),
-    "dotdot-outside": (f"{SDIST_TOP}/../evil.py", b"x", 0o644, "reg"),
-    "absolute": ("/tmp/evil.py", b"x", 0o644, "reg"),
-    "native": (f"{SDIST_TOP}/lib/yaml/_yaml.cpython-312-darwin.so", b"x", 0o755, "reg"),
-    "pth": (f"{SDIST_TOP}/lib/yaml/x.pth", b"import os", 0o644, "reg"),
-    "bytecode": (f"{SDIST_TOP}/lib/yaml/__pycache__/x.py", b"x", 0o644, "reg"),
+    "symlink": ((f"{SDIST_TOP}/lib/yaml/evil.py", None, 0o644, "sym"), NOT_REGULAR),
+    "hardlink": ((f"{SDIST_TOP}/lib/yaml/hard.py", None, 0o644, "hard"), NOT_REGULAR),
+    "dotdot": ((f"{SDIST_TOP}/lib/yaml/../../../evil.py", b"x", 0o644, "reg"), DOTDOT),
+    "dotdot-outside": ((f"{SDIST_TOP}/../evil.py", b"x", 0o644, "reg"), DOTDOT),
+    "absolute": (("/tmp/evil.py", b"x", 0o644, "reg"), "абсолютное имя"),
+    "native": (
+        (f"{SDIST_TOP}/lib/yaml/_yaml.cpython-312-darwin.so", b"x", 0o755, "reg"),
+        FORBIDDEN_NAME,
+    ),
+    "pth": (
+        (f"{SDIST_TOP}/lib/yaml/x.pth", b"import os", 0o644, "reg"),
+        FORBIDDEN_NAME,
+    ),
+    "bytecode": (
+        (f"{SDIST_TOP}/lib/yaml/__pycache__/x.py", b"x", 0o644, "reg"),
+        FORBIDDEN_NAME,
+    ),
 }
 
 
+@pytest.mark.parametrize("first", [True, False], ids=["first", "last"])
 @pytest.mark.parametrize("hostile", sorted(HOSTILE))
 def test_sdist_link_or_dotdot_refused(
-    fl: FakeLayout, tmp_path: Path, hostile: str
+    fl: FakeLayout, tmp_path: Path, hostile: str, first: bool
 ) -> None:
     """No link, absolute name or `..` (anywhere), no native code, `.pth`
-    or bytecode in `lib/yaml`: refused, whatever the order of members."""
+    or bytecode in `lib/yaml`: refused by its own rule, whether the member
+    comes before or after the legitimate ones."""
     world = site_world()
-    sdist = _sdist_with(HOSTILE[hostile])
+    member, why = HOSTILE[hostile]
+    sdist = _sdist_with(member, first=first)
     sha = hashlib.sha256(sdist).hexdigest()
     pins = SitePins(YAML_URL, sha, world.pins().steward_url, world.commit)
-    with pytest.raises(TreeError):
+    with pytest.raises(TreeError, match=re.escape(why)):
         install_site(
             tmp_path / "site",
             pins,
@@ -290,6 +386,75 @@ def test_sdist_link_or_dotdot_refused(
             git=wrapper(tmp_path, world),
         )
     assert not os.path.lexists(tmp_path / "evil.py")
+
+
+@pytest.mark.parametrize(
+    "hostile,why", [("symlink", NOT_REGULAR), ("native", FORBIDDEN_NAME)]
+)
+def test_steward_commit_hostile_member_refused(
+    fl: FakeLayout, tmp_path: Path, hostile: str, why: str
+) -> None:
+    """A steward commit with a symbolic link or a native module under
+    `src/steward`, through the stream path (`git archive` into `r|`):
+    refused by its rule; the archive process is gone."""
+    work = tmp_path / "steward-work"
+    pkg = work / "src" / "steward"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    if hostile == "symlink":
+        (pkg / "evil.py").symlink_to("/etc/passwd")
+    else:
+        (pkg / "_x.cpython-312-darwin.so").write_bytes(b"\x7fELF")
+    git("init", "-q", "--template=", str(work))
+    git("add", "-A", cwd=work)
+    git("commit", "-q", "-m", "hostile", cwd=work)
+    commit = git("rev-parse", "HEAD", cwd=work).strip()
+    world = site_world()
+    cache(fl.layout).mkdir(mode=0o700)
+    (cache(fl.layout) / f"pyyaml-{world.sha256}.tar.gz").write_bytes(world.sdist)
+    git(
+        "clone",
+        "-q",
+        "--bare",
+        "--template=",
+        str(work),
+        str(cache(fl.layout) / STEWARD_REPO),
+    )
+    pins = SitePins(YAML_URL, world.sha256, world.pins().steward_url, commit)
+    with pytest.raises(TreeError, match=re.escape(why)):
+        install_site(
+            tmp_path / "site", pins, layout=fl.layout, fetch=None, git=SYSTEM_GIT
+        )
+    assert not (tmp_path / "site" / "steward" / "evil.py").exists()
+
+
+def test_steward_cache_never_read_through_a_parent_repo(
+    fl: FakeLayout, tmp_path: Path
+) -> None:
+    """An empty `steward.git` inside another repository: with `--git-dir`
+    git never discovers the parent -- the parent's commit is not "cached";
+    online the directory is initialised and fetched properly."""
+    lay = fl.layout
+    world = site_world()
+    git("init", "-q", "--template=", str(lay.root))
+    (lay.root / "marker").write_text("parent\n")
+    git("add", "marker", cwd=lay.root)
+    git("commit", "-q", "-m", "parent", cwd=lay.root)
+    parent = git("rev-parse", "HEAD", cwd=lay.root).strip()
+    cache(lay).mkdir(mode=0o700)
+    (cache(lay) / f"pyyaml-{world.sha256}.tar.gz").write_bytes(world.sdist)
+    (cache(lay) / STEWARD_REPO).mkdir()
+    pins = SitePins(YAML_URL, world.sha256, world.pins().steward_url, parent)
+    with pytest.raises(TreeError, match="без сети"):
+        admin_tree.site_sources(pins, layout=lay, fetch=None, git=SYSTEM_GIT)
+    got = admin_tree.site_sources(
+        world.pins(),
+        layout=lay,
+        fetch=lambda _url: pytest.fail("cached sdist matches"),
+        git=wrapper(tmp_path, world),
+    )
+    assert got.steward_commit == world.commit
+    assert (cache(lay) / STEWARD_REPO / "HEAD").is_file()
 
 
 @pytest.mark.parametrize("body", [b"not a tar", b"\x1f\x8b\x08\x00truncated"])
@@ -313,7 +478,7 @@ def test_steward_fetch_head_mismatch_refused(fl: FakeLayout, tmp_path: Path) -> 
     world = site_world()
     other = "0" * 40
     extra = (
-        'if [ "$3" = rev-parse ] && [ "$4" = FETCH_HEAD ]; then\n'
+        'if [ "$2" = rev-parse ] && [ "$3" = FETCH_HEAD ]; then\n'
         f"  echo {other}; exit 0\n"
         "fi\n"
     )
@@ -382,7 +547,7 @@ def test_install_admin_exact_tree(
 
     def fetch(url: str) -> bytes:  # the lock's https URL, served locally
         assert url == YAML_URL
-        return admin_tree.fetch_url(served.url)
+        return served.fetch(served.url)
 
     admin.install_admin(
         lay, ID, devtools_ref=ref, git=wrapper(tmp_path, world), fetch=fetch
@@ -740,3 +905,25 @@ def test_partial_closure_refused(fl: FakeLayout, missing: str) -> None:
 def test_full_closure_is_a_precheck_release(fl: FakeLayout) -> None:
     assert admin_tree.release_has_precheck(devtools_ref(fl))
     assert admin_tree.PRECHECK_FILE in admin_tree.governance_files()
+
+
+@pytest.mark.parametrize("case", ["no-df", "unreadable-module"])
+def test_expected_admin_digest_raises_only_tree_error(
+    fl: FakeLayout, case: str
+) -> None:
+    """A step's refusal (`df/` missing: `StepFailed`) and an OS error (an
+    unreadable module) both reach the caller as `TreeError`, which the
+    provenance check turns into its own refusal."""
+    lay = fl.layout
+    ref = devtools_ref(fl)
+    prime_cache(lay)
+    if case == "no-df":
+        shutil.rmtree(ref / "df")
+        why = "не каталог"
+    else:
+        if os.geteuid() == 0:
+            pytest.skip("root reads a 0000 file")
+        (ref / "governance" / "act_time.py").chmod(0)
+        why = "act_time.py"
+    with pytest.raises(TreeError, match=why):
+        admin.expected_admin_digest(ref, layout=lay, git=SYSTEM_GIT)

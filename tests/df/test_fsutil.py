@@ -449,8 +449,14 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
     ("admin", "install_admin_python", "os.rename", 1): (
         "protocol install_admin_python: sync_tree before, sync_dir after"
     ),
-    ("admin", "_make_dir", "os.mkdir", 1): "protocol install_admin: sync_tree",
-    ("admin", "_make_dir", "os.fchmod", 1): "protocol install_admin: sync_tree",
+    ("admin", "_ensure_admin_home", "os.open", 1): (
+        "a read: admin_tree.DIR_FLAGS (O_RDONLY|O_DIRECTORY|O_NOFOLLOW), "
+        "imported, so the scan cannot resolve it"
+    ),
+    ("admin", "link_command", "os.open", 1): (
+        "a read: admin_tree.DIR_FLAGS (O_RDONLY|O_DIRECTORY|O_NOFOLLOW), "
+        "imported, so the scan cannot resolve it"
+    ),
     ("admin", "_copy_file", "os.open", 1): "protocol install_admin: sync_tree",
     ("admin", "_copy_file", "os.fchmod", 1): "protocol install_admin: sync_tree",
     ("admin", "", "import tempfile", 1): "expected_admin_digest's scratch copy",
@@ -475,8 +481,12 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
     ("admin_tree", "_write_cache", "os.rename", 1): (
         "site-src: scratch cache, re-checked on every use (sha256, cat-file): a lost rename is fetched again"
     ),
-    ("admin_tree", "_make_dir", "os.mkdir", 1): "protocol install_admin: sync_tree",
-    ("admin_tree", "_make_dir", "os.fchmod", 1): "protocol install_admin: sync_tree",
+    ("admin_tree", "make_tree_dir", "os.mkdir", 1): (
+        "protocol install_admin: sync_tree"
+    ),
+    ("admin_tree", "make_tree_dir", "os.fchmod", 1): (
+        "protocol install_admin: sync_tree"
+    ),
     ("admin_tree", "_write_member", "os.open", 1): "protocol install_admin: sync_tree",
     ("admin_tree", "_write_member", "os.fchmod", 1): (
         "protocol install_admin: sync_tree"
