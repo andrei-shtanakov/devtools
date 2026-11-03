@@ -10,10 +10,13 @@ change between calls (an extra installation, say):
   -verify` (header, `iss` = the App, `iat`/`exp` around now, the signature);
   anything else is `401`;
 - an installation token minted here reads `/installation/repositories` and
-  the repositories of its installation;
+  the repositories of its installation, and `DELETE /installation/token`
+  revokes it (2b Task 10: the precheck client's `finally`);
 - the machine user's token reads `/user` and `/repos/<full_name>`;
 - `GET /repos/<full_name>/pulls/<n>` and `.../reviews` answer the
-  scenario's `pulls` and `reviews` (Task 15 reuses them).
+  scenario's `pulls` and `reviews` (Task 15 reuses them), and
+  `GET /repos/<full_name>/commits/<sha>/pulls` its `commit_pulls` (the
+  delivery facts the precheck reads, 2b Task 10).
 
 Nothing here is a real credential: the key is generated per run, the
 tokens are fixture strings.
@@ -75,6 +78,9 @@ class Scenario:
     reviews: dict[tuple[str, int], list[dict[str, object]]] = field(
         default_factory=dict
     )
+    commit_pulls: dict[tuple[str, str], list[dict[str, object]]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True)
@@ -97,6 +103,8 @@ class FakeGitHub:
     openssl: Path
     seen: list[Seen] = field(default_factory=list)
     tokens: dict[str, int] = field(default_factory=dict)
+    #: Every installation token minted, revoked or not, in order.
+    minted: list[str] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def paths(self, auth: str | None = None) -> list[str]:
@@ -163,6 +171,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - http.server's name
         self._serve("POST")
 
+    def do_DELETE(self) -> None:  # noqa: N802 - http.server's name
+        self._serve("DELETE")
+
     def _serve(self, method: str) -> None:
         fake = self.server.fake
         length = int(self.headers.get("Content-Length") or 0)
@@ -172,7 +183,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         kind, status, answer = _answer(fake, method, path, auth, body)
         with fake.lock:
             fake.seen.append(Seen(method, path, kind, status))
-        data = json.dumps(answer).encode("utf-8")
+        # `None` is an empty body (`204 No Content`)
+        data = b"" if answer is None else json.dumps(answer).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
@@ -206,6 +218,10 @@ def _answer(
     with fake.lock:
         installation = fake.tokens.get(auth)
     if installation is not None:
+        if (method, path) == ("DELETE", "/installation/token"):
+            with fake.lock:
+                fake.tokens.pop(auth, None)
+            return "installation", 204, None
         return ("installation", *_installation(sc, installation, method, path))
     if auth == sc.machine_token:
         return ("machine", *_machine(sc, method, path))
@@ -243,6 +259,7 @@ def _mint(fake: FakeGitHub, ident: str, body: bytes) -> tuple[int, object]:
     token = f"ghs_fixture{secrets.token_hex(16)}"
     with fake.lock:
         fake.tokens[token] = found.id
+        fake.minted.append(token)
     expires = datetime.fromtimestamp(time.time() + TOKEN_LIFE - 60, UTC)
     return 201, {
         "token": token,
@@ -275,7 +292,8 @@ def _machine(sc: Scenario, method: str, path: str) -> tuple[int, object]:
 def _repo_paths(
     sc: Scenario, path: str, visible: tuple[int, ...]
 ) -> tuple[int, object]:
-    """`/repos/<owner>/<name>[/pulls/<n>[/reviews]]` of a visible repo."""
+    """`/repos/<owner>/<name>[/pulls/<n>[/reviews] | /commits/<sha>/pulls]` of
+    a visible repo."""
     words = path.strip("/").split("/")
     if words[:1] != ["repos"] or len(words) < 3:
         return 404, {"message": "Not Found"}
@@ -296,6 +314,10 @@ def _repo_paths(
             return 200, sc.pulls[key]
         if rest[2:] == ["reviews"] and key in sc.pulls:
             return 200, sc.reviews.get(key, [])
+    if len(rest) == 3 and rest[0] == "commits" and rest[2] == "pulls":
+        pulls = sc.commit_pulls.get((full_name, rest[1]))
+        if pulls is not None:
+            return 200, pulls
     return 404, {"message": "Not Found"}
 
 

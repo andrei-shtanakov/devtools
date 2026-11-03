@@ -24,13 +24,18 @@ job `stage2a (<os>)`, R14-6).
 from __future__ import annotations
 
 import errno
+import fcntl
 import json
 import os
 import pwd
+import secrets
+import signal
 import sqlite3
 import subprocess
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import pytest
@@ -40,15 +45,41 @@ from df import platform as plat
 from df.config import load_accounts
 from df.publisher import perimeter
 from df.publisher.github import SelfCheckResult
+from df.publisher.precheck import command as precheck_command
 from df.publisher.request import Response
 from tests.df.conftest import stage1_out
 from tests.df.fake_github import Installation
 from tests.df.observe import observe_root_access
+from tests.df.precheck_world import (
+    INHERIT_HOLDER,
+    MEMORY_HOLDER,
+    PROC_MEM_READER,
+    Observed,
+    PrecheckWorld,
+    Proc,
+    driver_result,
+    environment,
+    fd_names,
+    live_of,
+    lldb_argv,
+    lldb_bytes,
+    observe,
+    precheck_world,
+    processes,
+    silent_server,
+    spawn_as,
+    wait_for,
+)
 from tests.df.roles_world import (
+    APP_ID,
+    BASE_ENV,
     FIXTURE_FROM_CHECKOUT,
     INSTALLATION_ID,
+    IO_STREAMS,
     IOLOG_FILE,
+    NO_RULE,
     OPERATOR,
+    OS_DIR,
     PRODUCT_ID,
     PUBLISHER,
     REVOKED_REASON,
@@ -57,14 +88,21 @@ from tests.df.roles_world import (
     TRUST_TEXT,
     RolesWorld,
     SudoDiag,
+    UnjudgedGrant,
+    admin_python,
     as_operator,
     as_user,
+    classify_sudo,
     evidence,
+    fixture_form,
     found_in,
+    grants_cover,
+    host_names,
     install_sudoers_file,
     io_sessions,
     new_request_id,
     pr_request,
+    real_site_pins,
     registry_text,
     remove_etc,
     response_of,
@@ -81,6 +119,7 @@ from tests.df.root_world import (
     infra,
     run,
     serve_repo,
+    write_evidence,
 )
 
 pytestmark = [pytest.mark.root, pytest.mark.stage2a]
@@ -96,9 +135,13 @@ SENDER_REFUSALS = ("not_publisher_uid", "sender_unknown", "operation_not_allowed
 
 @pytest.fixture(scope="module")
 def roles_repo(acceptance_top: Path) -> Iterator[FixtureRepo]:
-    """The fixture repo with `FIXTURE_FROM_CHECKOUT` (R14-3)."""
+    """The fixture repo with `FIXTURE_FROM_CHECKOUT` (R14-3) and the real
+    `site/` pins (`real_site_pins`, 2b Task 10)."""
     bare, sha = build_fixture_repo(
-        acceptance_top, FIXTURE_FROM_CHECKOUT, name="roles-fixture"
+        acceptance_top,
+        FIXTURE_FROM_CHECKOUT,
+        name="roles-fixture",
+        site=real_site_pins(),
     )
     with serve_repo(acceptance_top, bare) as url:
         yield FixtureRepo(url, sha)
@@ -990,3 +1033,528 @@ def events(db: Path) -> list[str]:
         return [str(r[0]) for r in conn.execute("SELECT state FROM events")]
     finally:
         conn.close()
+
+
+# ---------- stage 2b: the role df-precheck (Task 10) ----------
+
+PRECHECK = "df-precheck"
+#: The bounds of the rungs (plan decision 5): the precheck's `DEADLINE`
+#: (150 s) plus slack, the client's wait, sudo's `command_timeout` (180 s)
+#: plus its kill.
+RUNG1_BOUND = 155.0
+CLIENT_BOUND = 200.0
+RUNG2_BOUND = 185.0
+NOT_VERIFIED = "not_verified"
+LINUX = plat.detect_platform() == "linux-x86_64"
+
+
+@pytest.fixture(scope="module")
+def pw(rw: RolesWorld) -> Iterator[PrecheckWorld]:
+    """The product repository and its stop PRs (`precheck_world`)."""
+    with precheck_world(rw) as world:
+        yield world
+
+
+def regular_files(directory: Path) -> list[Path]:
+    """Regular files under `directory` (root lists them)."""
+    return sorted(p for p in directory.rglob("*") if p.is_file() and not p.is_symlink())
+
+
+def root_read(path: Path) -> int:
+    """`errno` of root opening and reading `path` (0: read)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            os.read(fd, 1)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        return exc.errno or -1
+    return 0
+
+
+def test_precheck_reads_denied(rw: RolesWorld) -> None:
+    """`df-precheck` cannot read the App key, the publisher's files, the
+    perimeter's files or the machine user's token (the OS refuses,
+    `EACCES`). Control: root reads every one of them."""
+    lay = rw.layout
+    token = lay.role_home("df-exec").joinpath(".config", "df", "github-token")
+    groups = {
+        "app_key": [lay.app_key(APP_ID)],
+        "publisher": regular_files(lay.publisher_dir),
+        "perimeter": regular_files(lay.perimeter_dir),
+        "machine_token": [token],
+    }
+    empty = [name for name, files in groups.items() if not files]
+    if empty:
+        infra(f"нет файлов для строки чтения: {empty}")
+    files = [f for group in groups.values() for f in group]
+    got = rw.role_probe(PRECHECK, [("read", str(f), "") for f in files])
+    control = [root_read(f) for f in files]
+    evidence(
+        "precheck-reads.json",
+        {
+            str(f): {PRECHECK: g, "root": c}
+            for f, g, c in zip(files, got, control, strict=True)
+        },
+    )
+    assert control == [0] * len(files)
+    assert got == [errno.EACCES] * len(files)
+
+
+def memory_observer(pid: int, address: int, length: int, python: str) -> list[str]:
+    """The observer of the memory row: `/proc/<pid>/mem` (Linux) or `lldb`
+    (`task_for_pid`, macOS)."""
+    if LINUX:
+        return [
+            python,
+            "-I",
+            "-S",
+            "-c",
+            PROC_MEM_READER,
+            str(pid),
+            str(address),
+            str(length),
+        ]
+    return lldb_argv(pid, address, length)
+
+
+def read_bytes(seen: Observed) -> bytes:
+    """What the memory observer read (`b""`: nothing)."""
+    if not LINUX:
+        return lldb_bytes(seen.stdout)
+    try:
+        found = json.loads(seen.stdout)
+    except ValueError:
+        return b""
+    return (
+        bytes.fromhex(found["hex"])
+        if isinstance(found, dict) and "hex" in found
+        else b""
+    )
+
+
+def test_precheck_cannot_read_publisher_memory(rw: RolesWorld) -> None:
+    """A `df-publisher` process holds a sentinel at a known address and
+    length; `df-precheck` cannot read it through `/proc/<pid>/mem` (Linux)
+    or `lldb -p` (`task_for_pid`, macOS). Control: root, by the same
+    observer, reads the sentinel's bytes. A root control that does not work
+    on this host is `not_verified` (xfail), never a pass (r5 N2)."""
+    sentinel = f"df-acc-mem-{secrets.token_hex(10)}".encode()
+    python = str(admin_python(rw.layout))
+    holder = spawn_as(
+        PUBLISHER,
+        [python, "-I", "-S", "-c", MEMORY_HOLDER, sentinel.hex()],
+        env=BASE_ENV,
+        stdin=subprocess.PIPE,
+    )
+    try:
+        line = holder.stdout.readline() if holder.stdout else b""
+        words = line.split()
+        if len(words) != 3:
+            infra(f"процесс с sentinel не запустился: {line!r}")
+        pid, address, length = (int(w) for w in words)
+        argv = memory_observer(pid, address, length, python)
+        role = observe(argv, user=PRECHECK, timeout=90)
+        plat.reap_user_processes(PRECHECK)
+        root = observe(argv, user=None, timeout=90)
+    finally:
+        stop_holder(holder)
+    role_bytes, root_bytes = read_bytes(role), read_bytes(root)
+    status = "pass" if root_bytes == sentinel else NOT_VERIFIED
+    evidence(
+        f"precheck-memory-{OS_DIR}.json",
+        {
+            "status": status,
+            "observer": argv,
+            PRECHECK: {**role.shown(), "read_sentinel": sentinel in role_bytes},
+            "root": {**root.shown(), "read_sentinel": root_bytes == sentinel},
+        },
+    )
+    assert sentinel not in role_bytes and role_bytes == b"", role.shown()
+    if LINUX:
+        found = json.loads(role.stdout)
+        assert found.get("errno") in (errno.EACCES, errno.EPERM), found
+    else:
+        assert role.code != 0, role.shown()
+    if root_bytes != sentinel:
+        if LINUX:
+            infra(f"root не прочитал sentinel через /proc/<pid>/mem: {root.shown()}")
+        pytest.xfail(f"{NOT_VERIFIED}: root lldb не прочитал sentinel: {root.shown()}")
+
+
+def stop_holder(holder: subprocess.Popen[bytes]) -> None:
+    """End a holder process: a line on its stdin, then a kill if needed."""
+    try:
+        if holder.stdin is not None:
+            holder.stdin.write(b"\n")
+            holder.stdin.close()
+        holder.wait(timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        holder.kill()
+        holder.wait(timeout=30)
+
+
+@pytest.mark.parametrize(
+    ("case", "caller", "extra"),
+    [
+        ("df-exec", "df-exec", ()),
+        ("df-review", "df-review", ()),
+        ("operator", OPERATOR, ()),
+        ("df-publisher-argument", PUBLISHER, ("extra",)),
+    ],
+)
+def test_precheck_callers_refused_by_sudo(
+    rw: RolesWorld, case: str, caller: str, extra: tuple[str, ...]
+) -> None:
+    """`df-exec`, `df-review` and the operator calling `df-precheck`, and
+    `df-publisher` calling it with an argument: sudo refuses (exit 1, its
+    diagnostic at `LC_ALL=C`; «a password is required» counts only where
+    sudo's own listing grants no rule for the command, R14-10). The
+    operator of a host whose own rules let it run anything as anyone (the
+    hosted runner's `(ALL) NOPASSWD: ALL`) is `not_verified` there.
+    Control: `test_precheck_publisher_passes_sudo`."""
+    wrapper = rw.wrapper(PRECHECK)
+    done = as_user(caller, [*precheck_command(rw.layout), *extra])
+    text = done.stderr.decode("utf-8", "replace")
+    out = stage1_out()
+    name = f"precheck-{case}"
+    write_evidence(
+        out,
+        f"sudo-diag/{OS_DIR}/{name}.txt",
+        fixture_form(text, rw.layout.root, host_names()),
+    )
+    write_evidence(out, f"sudo-diag/{OS_DIR}/{name}.rc", f"{done.returncode}\n")
+    covered = precheck_granted(caller, " ".join([wrapper, *extra]))
+    if caller == OPERATOR and covered:
+        reason = f"{NOT_VERIFIED}: правила образа дают {caller} любую команду от любого"
+        write_evidence(out, f"sudo-diag/{OS_DIR}/{name}.mechanism", reason + "\n")
+        pytest.xfail(f"{reason}; {shown(done)}")
+    kind = classify_sudo(done.returncode, text)
+    if kind is None:
+        infra(f"нераспознанная диагностика sudo ({case}): {shown(done)}")
+    assert done.stdout == b"", shown(done)
+    assert not covered, f"политика sudo разрешает {caller}: {shown(done)}"
+    mechanism = NO_RULE if kind == "password-required" else str(kind)
+    assert kind in ("not-allowed", "password-required"), shown(done)
+    write_evidence(out, f"sudo-diag/{OS_DIR}/{name}.mechanism", mechanism + "\n")
+
+
+def precheck_granted(role: str, command: str) -> bool:
+    """Whether sudo's own policy for `role` (`sudo -n -l -U`) lets it run
+    `command` as `df-precheck`; a grant not judged exactly is infra."""
+    try:
+        listing = sudoers.read_listing(role)
+        wrapper = command.split(" ", 1)[0]
+        return grants_cover(
+            listing.grants | listing.carried, PRECHECK, wrapper, command
+        )
+    except (sudoers.ListingError, UnjudgedGrant) as exc:
+        infra(f"sudo -l -U {role}: {exc}")
+        raise
+
+
+def test_precheck_publisher_passes_sudo(rw: RolesWorld) -> None:
+    """Control of the sudo rows: `df-publisher` with no argument passes
+    sudo and reaches `precheck serve`, which refuses the empty request
+    itself (exit 2, its own diagnostic)."""
+    done = as_user(PUBLISHER, list(precheck_command(rw.layout)))
+    evidence("precheck-publisher-passes.json", shown(done))
+    assert done.returncode == 2, shown(done)
+    assert b"df-precheck: invalid request" in done.stderr, shown(done)
+    assert classify_sudo(1, done.stderr.decode("utf-8", "replace")) is None
+
+
+def observe_process(pid: int) -> dict[str, object]:
+    """Descriptors, environment and UID of `pid`, as root."""
+    proc = next((p for p in processes() if p.pid == pid), None)
+    return {
+        "uid": None if proc is None else proc.uid,
+        "fds": fd_names(pid),
+        "environment": environment(pid),
+    }
+
+
+def test_precheck_inherits_nothing(rw: RolesWorld) -> None:
+    """A publisher opens a sentinel descriptor without `CLOEXEC`, holds a
+    sentinel variable and starts the precheck command, which blocks reading
+    its stdin (no request written yet). Root's observer (`/proc/<pid>/fd`
+    and `environ` on Linux, `lsof -p` and `ps -E` on macOS) sees neither in
+    the precheck process, whose UID is `df-precheck`. Control: the same
+    observer sees both in the publisher."""
+    marker = secrets.token_hex(12)
+    sentinel = rw.work / f"precheck-sentinel-{marker}"
+    sentinel.write_text("sentinel\n")
+    os.chmod(sentinel, 0o644)
+    real = os.path.realpath(sentinel)
+    python = str(admin_python(rw.layout))
+    argv = [python, "-I", "-S", "-c", INHERIT_HOLDER, str(sentinel)]
+    argv.append(json.dumps(list(precheck_command(rw.layout))))
+    env = {**BASE_ENV, "DF_ACC_SENTINEL": marker}
+    holder = spawn_as(PUBLISHER, argv, env=env, stdin=subprocess.PIPE)
+    uid = rw.uid(PRECHECK)
+    try:
+        first = json.loads(holder.stdout.readline() if holder.stdout else b"null")
+        found = wait_for(
+            lambda: [p for p in live_of(uid) if "precheck serve" in p.command], 60
+        )
+        if not found or not isinstance(first, dict):
+            infra(f"процесс проверяющего не появился: {first!r}")
+        assert isinstance(found, list) and isinstance(first, dict)
+        time.sleep(3)  # past its imports: blocked reading stdin
+        target = found[0]
+        alive = [p.pid for p in live_of(uid)]
+        seen = {
+            PRECHECK: observe_process(target.pid),
+            PUBLISHER: observe_process(int(first["pid"])),
+        }
+    finally:
+        stop_holder(holder)
+    tail = holder.stdout.read() if holder.stdout else b""
+    evidence(
+        "precheck-inherit.json",
+        {
+            "sentinel": real,
+            "marker": marker,
+            "seen": seen,
+            "alive": alive,
+            "holder": first,
+            "end": tail.decode("utf-8", "replace"),
+        },
+    )
+    publisher, precheck = seen[PUBLISHER], seen[PRECHECK]
+    assert any(n.endswith(f":{real}") for n in publisher["fds"]), publisher
+    assert f"DF_ACC_SENTINEL={marker}" in str(publisher["environment"]), publisher
+    assert target.pid in alive, "проверяющий не ждал запроса"
+    assert precheck["uid"] == uid, precheck
+    assert not any(real in n for n in precheck["fds"]), precheck
+    assert marker not in str(precheck["environment"]), precheck
+
+
+def test_precheck_stop_through_the_chain(rw: RolesWorld, pw: PrecheckWorld) -> None:
+    """The positive stop: the publisher's client (the fake GitHub's read
+    token) → sudo → the entry → `act_precheck` over the squash-delivered
+    history on the dumb-HTTP git server → `allow`, bound and with the admin
+    digest of `current`, the token revoked. Control: the stop of the stale
+    generation is `refuse`."""
+    before = len(rw.fake.paths())
+    allow = pw.ask(pw.current)
+    stale = pw.ask(pw.stale)
+    seen = rw.fake.paths()[before:]
+    evidence(
+        "precheck-stop.json",
+        {"allow": allow, "stale": stale, "github": seen, "git": pw.git.log[-40:]},
+    )
+    assert allow.get("refused", "?") is None, allow
+    assert allow["version"] == "df-precheck/1", allow
+    assert allow["admin_digest"] == rw.current_entry().admin_digest, allow
+    assert allow["revoke"] == "ok", allow
+    assert stale.get("refused") == "stop_generation_not_current: stop g1, current g2"
+    assert seen.count("DELETE /installation/token") == 2, seen
+    assert pw.git.log and all(ok for _path, ok in pw.git.log), pw.git.log
+    assert pw.snapshots() == []
+
+
+@pytest.mark.parametrize("case", ["global", "control"])
+def test_precheck_input_not_logged(
+    rw: RolesWorld, pw: PrecheckWorld, case: str
+) -> None:
+    """Global `Defaults log_input, log_output` in a test `sudoers.d`
+    fragment: the read token of the request is in no stream of sudo's I/O
+    log and `io_log_problems` (doctor's check) is empty. Control: with the
+    command's own logging back on (`Defaults!<df-precheck> log_input,
+    log_output` after it), the token is in the log and the check flags it."""
+    iolog = rw.work / f"iolog-precheck-{case}"
+    text = f"Defaults log_input, log_output, iolog_dir={iolog}\n"
+    if case == "control":
+        text += f"Defaults!{rw.wrapper(PRECHECK)} log_input, log_output\n"
+    install_sudoers_file(IOLOG_FILE, text)
+    try:
+        problems = sudoers.io_log_problems(rw.layout)
+        before = len(rw.fake.minted)
+        result = pw.ask(pw.current)
+        tokens = rw.fake.minted[before:]
+    finally:
+        os.unlink(IOLOG_FILE)
+    sessions = io_sessions(iolog)
+    found = [str(p) for t in tokens for p in found_in(sessions, t, IO_STREAMS)]
+    evidence(
+        f"precheck-iolog-{case}.json",
+        {
+            "config": text,
+            "problems": problems,
+            "result": result,
+            "sessions": [str(s.path) for s in sessions],
+            "token_in": found,
+        },
+    )
+    assert len(tokens) == 1 and result.get("refused", "?") is None, result
+    if case == "global":
+        assert problems == []
+        assert found == []
+        return
+    assert any(PRECHECK in p for p in problems), problems
+    assert found, "контроль: токен не найден в I/O-журнале"
+
+
+def lock_free(pw: PrecheckWorld) -> bool:
+    """Root takes `<home>/precheck.lock` exclusively without waiting."""
+    fd = os.open(pw.home / "precheck.lock", os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    finally:
+        os.close(fd)
+    return True
+
+
+def test_precheck_git_hang_rung1(rw: RolesWorld, pw: PrecheckWorld) -> None:
+    """`git_base` is a port that accepts and never answers: rung 1, the
+    precheck's own deadline — `unset: deadline` within 155 s, no process of
+    `df-precheck` left (its git children killed), no snapshot, the lock
+    free."""
+    with silent_server() as url:
+        result = pw.ask(pw.current, git_base=url)
+    uid = rw.uid(PRECHECK)
+    left = [] if wait_for(lambda: live_of(uid) == [], 10) else live_of(uid)
+    record = {
+        "result": result,
+        "left": [p.command for p in left],
+        "snapshots": pw.snapshots(),
+        "lock_free": lock_free(pw),
+    }
+    evidence("precheck-rung1.json", record)
+    assert result.get("refused") == "precheck_unset: deadline", result
+    assert float(result["end"]) - float(result["start"]) <= RUNG1_BOUND, result
+    assert left == [] and record["snapshots"] == [] and record["lock_free"]
+
+
+@dataclass
+class StoppedRun:
+    """A run of the positive stop whose precheck root stopped: the client's
+    result, the precheck's and its sudo's PIDs, samples of the processes
+    (`sample`) until the client returned, the snapshots left."""
+
+    result: dict[str, object]
+    target: int
+    sudo: int
+    stopped_at: float
+    samples: list[dict[str, object]]
+    snapshots: list[str]
+
+    def since_start(self, at: object) -> float:
+        """Seconds from the client's start to the monotonic instant `at`."""
+        return float(str(at)) - float(str(self.result["start"]))
+
+    def gone_after(self) -> float | None:
+        """Seconds from the client's start until no `df-precheck` process
+        was seen (`None`: never)."""
+        gone = [s for s in self.samples if not s["precheck"]]
+        return self.since_start(gone[0]["t"]) if gone else None
+
+    def after(self, seconds: float) -> list[dict[str, object]]:
+        """The samples taken later than `seconds` after the client's start."""
+        return [s for s in self.samples if self.since_start(s["t"]) > seconds]
+
+
+def stopped_precheck(rw: RolesWorld, pw: PrecheckWorld) -> StoppedRun:
+    """Run the positive stop with a slow git server; root `SIGSTOP`s the
+    precheck process once its snapshot exists; sample the processes of
+    `df-precheck` (and its sudo) every second until the client returns.
+    Whatever happens, the precheck, its sudo and the client end here."""
+    uid = rw.uid(PRECHECK)
+    pw.git.delay = 2.0
+    proc = pw.start(pw.current)
+    target: Proc | None = None
+    try:
+        if not wait_for(pw.snapshots, 60):
+            infra("снимок проверяющего не появился")
+        found = wait_for(
+            lambda: [p for p in live_of(uid) if "precheck serve" in p.command], 10
+        )
+        if not isinstance(found, list):
+            infra("процесс проверяющего не найден")
+        assert isinstance(found, list)
+        target = found[0]
+        os.kill(target.pid, signal.SIGSTOP)
+        stopped_at = time.monotonic()
+        pw.git.delay = 0.0
+        samples: list[dict[str, object]] = []
+        while proc.poll() is None:
+            samples.append(sample(uid, target.ppid))
+            time.sleep(1.0)
+        result = driver_result(proc, 60)
+    finally:
+        pw.git.delay = 0.0
+        end_stopped(proc, target)
+    return StoppedRun(
+        result, target.pid, target.ppid, stopped_at, samples, pw.snapshots()
+    )
+
+
+def sample(uid: int, sudo_pid: int) -> dict[str, object]:
+    """The live processes of `uid` and the state of the sudo above them."""
+    everyone = processes()
+    mine = [p for p in everyone if p.uid == uid and not p.stat.startswith("Z")]
+    sudo = next((p for p in everyone if p.pid == sudo_pid), None)
+    return {
+        "t": time.monotonic(),
+        "precheck": [[p.pid, p.stat, p.command[:120]] for p in mine],
+        "sudo": None if sudo is None else [sudo.pid, sudo.stat, sudo.command[:120]],
+    }
+
+
+def end_stopped(proc: subprocess.Popen[bytes], target: Proc | None) -> None:
+    """The precheck and its sudo (both possibly stopped), then the client,
+    are gone."""
+    for pid in () if target is None else (target.pid, target.ppid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    if proc.poll() is None:
+        proc.kill()
+    proc.wait(timeout=30)
+    plat.reap_user_processes(PRECHECK)
+
+
+def test_precheck_command_timeout_rung2(rw: RolesWorld, pw: PrecheckWorld) -> None:
+    """The precheck itself hangs (root's `SIGSTOP` after its snapshot
+    exists): rung 2, sudo's `command_timeout` — the client answers
+    `precheck_failed: timeout` within 200 s, no process of `df-precheck`
+    185 s after the start, and the next call clears the snapshot left."""
+    run = stopped_precheck(rw, pw)
+    after = pw.ask(pw.current)
+    gone = run.gone_after()
+    evidence(
+        "precheck-rung2.json",
+        {
+            **asdict(run),
+            "gone_after": gone,
+            "next": after,
+            "next_snapshots": pw.snapshots(),
+        },
+    )
+    assert run.result.get("refused") == "precheck_failed: timeout", run.result
+    assert run.since_start(run.result["end"]) <= CLIENT_BOUND, run.result
+    assert gone is not None and gone <= RUNG2_BOUND, gone
+    assert run.snapshots, "снимок прерванного запуска не остался"
+    assert after.get("refused", "?") is None and pw.snapshots() == [], after
+
+
+def test_precheck_command_timeout_control(rw: RolesWorld, pw: PrecheckWorld) -> None:
+    """Control of rung 2: with the command's `command_timeout` off
+    (`Defaults!<df-precheck> !command_timeout` after it), the stopped
+    precheck is alive 185 s after the start — it was sudo that ended it."""
+    off = f"Defaults!{rw.wrapper(PRECHECK)} !command_timeout\n"
+    install_sudoers_file(IOLOG_FILE, off)
+    try:
+        run = stopped_precheck(rw, pw)
+    finally:
+        os.unlink(IOLOG_FILE)
+    late = run.after(RUNG2_BOUND)
+    evidence("precheck-rung2-control.json", {**asdict(run), "config": off})
+    after = pw.ask(pw.current)
+    assert late and all(s["precheck"] for s in late), late[:3]
+    assert after.get("refused", "?") is None and pw.snapshots() == [], after

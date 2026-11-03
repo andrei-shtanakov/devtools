@@ -8,7 +8,10 @@ no other root, so a `<R>` world cannot run a role's operation):
 1. the approved uv copied to the README's `UV_DIR`, then one committed
    `bootstrap init` (in process, as stage 1's `installed_world`) of the
    fixture repo, which holds `FIXTURE_FROM_CHECKOUT` of this checkout
-   (R14-3: defined here once, Task 15 imports it);
+   (R14-3: defined here once, Task 15 imports it) and pins this checkout's
+   real `site/` sources (`real_site_pins`, 2b Task 10): the install fetches
+   the PyYAML sdist and the steward commit over the network, as the live
+   stand's does, so `df-precheck` runs the real pure yaml and steward;
 2. as the operator `runner` through its own `sudo`: `darkfactory cli set
    openssl`, `darkfactory roles setup --operator runner`;
 3. root writes the fixture `products.toml` (product 1, App 1) and points
@@ -60,6 +63,7 @@ import pytest
 
 from df import cli, fsutil, journal, models, perimeter_client, roles, run_start, sudoers
 from df import platform as plat
+from df.admin_tree import SitePins, locked_pins
 from df.config import (
     ConfigError,
     ReleaseEntry,
@@ -88,13 +92,13 @@ from tests.df.fake_github import (
 )
 from tests.df.root_world import (
     ADMIN_TREE_PATHS,
+    REPO_ROOT,
     FixtureRepo,
     InstalledWorld,
     RootWorld,
     assert_committed,
     current_id,
     infra,
-    prime_on_install,
     remove_service_user,
     run,
     write_evidence,
@@ -104,6 +108,15 @@ from tests.df.root_world import (
 #: the admin tree's sources -- `df/`, the precheck closure and its contracts,
 #: among them the approval-branch patterns `merge` routing reads (2b Task 5).
 FIXTURE_FROM_CHECKOUT = ADMIN_TREE_PATHS
+
+
+def real_site_pins() -> SitePins:
+    """The `site/` pins of this checkout's `uv.lock` (2b Task 10): the
+    fixture repo's lock carries them, so the install fetches the real
+    sources."""
+    return locked_pins((REPO_ROOT / "uv.lock").read_bytes())
+
+
 OPERATOR = "runner"
 PRODUCT_ID = 1
 APP_ID = 1
@@ -802,9 +815,8 @@ def roles_world(
         stack.callback(teardown_install, layout, keep)
         stack.callback(teardown_roles, layout)
         world = RootWorld(layout, repo, approved_uv(), top, control_url)
-        with pytest.MonkeyPatch.context() as mp:
-            prime_on_install(mp)  # the stand-in `site/` sources (2b Task 5)
-            installed = install_production(world)
+        # the real `site/` of `real_site_pins`, fetched by the install
+        installed = install_production(world)
         work = top / "roles"
         work.mkdir(mode=0o755)
         os.chmod(work, 0o755)
