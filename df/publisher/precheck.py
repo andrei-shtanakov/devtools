@@ -326,8 +326,9 @@ def _revoke(oc: OpContext, token: str) -> str:
 
 
 def _mask(text: str, token: str) -> str:
-    """`text` with every occurrence of `token` masked."""
-    return TOKEN_MASK.join(text.split(token))
+    """`text` with every occurrence of `token` masked (an empty `token`
+    masks nothing: `str.split("")` would raise)."""
+    return TOKEN_MASK.join(text.split(token)) if token else text
 
 
 __all__ = [
