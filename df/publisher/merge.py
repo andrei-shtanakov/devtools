@@ -852,11 +852,13 @@ def merge(ctx: Context) -> Response:
     except GitHubUnavailable:
         return Response("unknown", "github_unavailable", evidence=_state_evidence(ctx))
     except GitHubRefused as exc:
-        return Response("refused", ops.refusal_reason(exc))
+        reason = ops.refusal_reason(exc)
+        return Response("refused", reason, evidence=_state_evidence(ctx))
     except Refused as exc:
         if exc.verified_not_done:
             raise
-        return Response("refused", exc.reason, evidence=exc.evidence)
+        evidence = {**_state_evidence(ctx), **exc.evidence}
+        return Response("refused", exc.reason, evidence=evidence)
 
 
 def _state_evidence(ctx: Context) -> dict[str, object]:

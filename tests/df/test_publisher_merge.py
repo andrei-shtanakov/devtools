@@ -1681,6 +1681,32 @@ def test_evidence_complete_and_recovered_from_phase(
     assert len(checker.requests) == 1  # metadata from the phase, not anew
 
 
+def test_refusal_past_intent_carries_evidence(
+    world: World,
+    sgh: MergeGitHub,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-review: a `GitHubRefused` (and a plain refusal) leaving `merge()`
+    past the intent carries the phases' evidence; the frame then answers
+    `unknown: state_exists: …` with it."""
+    sgh.put_mode = "hold"
+    run(world, capsys)
+    for exc in (github.GitHubRefused("nope", 403), Refused("plain")):
+
+        def fail(*args: object, exc: Exception = exc) -> Response:
+            raise exc
+
+        monkeypatch.setattr(merge, "recover_merge", fail)
+        resp = run(world, capsys)
+        assert resp.outcome == "unknown"
+        assert (resp.reason or "").startswith("state_exists: ")
+        assert resp.evidence["kind"] == "stop"
+        assert resp.evidence["attestation_review_id"] == 100
+        assert resp.evidence["precheck"]["base_tip"] == TIP  # type: ignore[index]
+    assert len(sgh.puts) == 1
+
+
 def test_has_state_sees_phases_not_ownerships(
     world: World, sgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
 ) -> None:
