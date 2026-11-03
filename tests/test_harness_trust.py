@@ -156,6 +156,13 @@ def test_synthetic_repo_fully_protected_passes(tmp_path: Path) -> None:  # дв�
     assert ht.violations(root, ALL, ALL) == []
 
 
+def test_trap_forms_are_recognized(tmp_path: Path) -> None:  # двойник
+    """Task 9, п. 9d: снятие, функция скрипта и `'exit N'` — не запуск."""
+    traps = "trap revoke_app_token EXIT\ntrap 'exit 130' INT\ntrap - EXIT\n"
+    root = _repo(tmp_path, _GOOD_LAUNCH + traps)
+    assert ht.launches(root)[1] == []
+
+
 def test_governance_group_form_is_a_py_uv_launch(tmp_path: Path) -> None:  # двойник
     """Форма предпроверки акта (Task 15) распознаётся как `py-uv` — с теми же
     требованиями к цепочке и `UV_DEPENDENCY_FILES`."""
@@ -230,6 +237,31 @@ def test_unprotected_link_fails(tmp_path: Path, unprotected: str, b_lazy: bool) 
         "$script_dir/governance/entry.py\n",
         'py=python3\n$py -I "$script_dir/governance/entry.py"\n',
         "unknown_helper --pr 7\n",
+        # Task 9, п. 9d: обработчик `trap` — не произвольная строка
+        "trap 'python3 -I x.py' EXIT\n",
+        "trap unknown_helper EXIT\n",
+        "trap 'exit 1; eval x' EXIT\n",
+        'trap "exit 1" EXIT\n',
+        "trap revoke_app_token USR1\n",
+        # ревью Task 9, m3: зонды ревьюера закреплены — обработчики DEBUG/ERR/RETURN
+        # исполняются на каждой команде/возврате/ошибке
+        "trap revoke_app_token DEBUG\n",
+        "trap revoke_app_token ERR\n",
+        "trap revoke_app_token RETURN\n",
+        "trap revoke_app_token 0\n",
+        "trap revoke_app_token EXIT INT\n",
+        "trap revoke_app_token EXIT DEBUG\n",
+        "trap -- revoke_app_token EXIT\n",
+        'trap "$(echo revoke_app_token)" EXIT\n',
+        'trap "$h" EXIT\n',
+        "trap eval EXIT\n",
+        "trap 'exit 1'\"; eval x\" EXIT\n",
+        "trap revoke_app_token EXIT; eval x\n",
+        "builtin trap revoke_app_token EXIT\n",
+        "alias trap=eval\n",
+        "trap revoke_app_token EXIT \\\n    INT\n",
+        # nit 4: нормализация пробелов не выдаёт иной сырой текст за `'exit N'`
+        "trap 'exit\n1' EXIT\n",
     ],
 )
 def test_unrecognized_launch_fails(tmp_path: Path, launch: str) -> None:

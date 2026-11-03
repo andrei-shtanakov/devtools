@@ -28,17 +28,26 @@ INST = "/app/installations?per_page=100&page={}"
 REPOS = "/installation/repositories?per_page=100&page={}"
 
 
+def _pem(pk: rsa.RSAPrivateKey) -> bytes:
+    return pk.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+
+
+def _apps(tmp_path: Path) -> Path:
+    """Каталог ключей App (`<config>/darkfactory/apps`, как у `merge-pr.sh`)."""
+    apps = tmp_path / "darkfactory" / "apps"
+    apps.mkdir(parents=True, exist_ok=True)
+    return apps
+
+
 @pytest.fixture()
 def key(tmp_path):
     pk = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    path = tmp_path / "app.pem"
-    path.write_bytes(
-        pk.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.PKCS8,
-            serialization.NoEncryption(),
-        )
-    )
+    path = _apps(tmp_path) / "app.pem"
+    path.write_bytes(_pem(pk))
     return path, pk.public_key()
 
 
@@ -360,7 +369,7 @@ def test_repos_failure_reason_has_no_token(key) -> None:
 
 
 def test_bad_key_reason_has_no_key_bytes(tmp_path: Path) -> None:
-    bad = tmp_path / "bad.pem"
+    bad = _apps(tmp_path) / "bad.pem"
     bad.write_text(
         "-----BEGIN PRIVATE KEY-----\nU0VDUkVUS0VZQllURVM=\n-----END PRIVATE KEY-----\n"
     )
@@ -376,9 +385,76 @@ def test_bad_key_reason_has_no_key_bytes(tmp_path: Path) -> None:
 
 def test_missing_key_is_unavailable(tmp_path: Path) -> None:
     got = act_app_token.app_identity(
-        1, tmp_path / "nope.pem", "o/p", http=Http({}), now=0
+        1, _apps(tmp_path) / "nope.pem", "o/p", http=Http({}), now=0
     )
     assert isinstance(got, Unavailable) and "не прочитан" in got.reason
+
+
+# --- ключ без ссылок после `darkfactory/apps` (Task 9, п. 9c) -----------------
+
+
+def _identity_refused(key: Path) -> str:
+    http = Http(dict(IDENTITY_OK))
+    got = act_app_token.app_identity(1, key, "o/p", http=http, now=0)
+    assert isinstance(got, Unavailable) and http.seen == []
+    return got.reason
+
+
+@pytest.mark.parametrize("swap", ["file", "dir"])
+def test_key_swapped_to_link_after_shell_check_refused(tmp_path: Path, swap) -> None:
+    """Окно между `-L` обвязки и чтением: путь, чистый на проверке, подменён
+    ссылкой (на другой годный ключ) — читатель ссылку не проходит (O_NOFOLLOW)."""
+    apps = _apps(tmp_path)
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "k.pem").write_bytes(
+        _pem(rsa.generate_private_key(public_exponent=65537, key_size=2048))
+    )
+    (apps / "team").mkdir()
+    key = apps / "team" / "k.pem"
+    key.write_bytes((other / "k.pem").read_bytes())
+    # здесь обвязка уже проверила путь; подмена — после проверки
+    if swap == "file":
+        key.unlink()
+        key.symlink_to(other / "k.pem")
+    else:
+        (apps / "team" / "k.pem").unlink()
+        (apps / "team").rmdir()
+        (apps / "team").symlink_to(other)
+    reason = _identity_refused(key)
+    assert "путь после darkfactory/apps через ссылку" in reason
+    assert reason.startswith(f"ключ App {key}:")
+
+
+def test_key_in_real_subdir_is_read(tmp_path: Path, key) -> None:  # двойник
+    deep = _apps(tmp_path) / "team" / "deep"
+    deep.mkdir(parents=True)
+    (deep / "k.pem").write_bytes(key[0].read_bytes())
+    assert act_app_token._read_key(deep / "k.pem") == key[0].read_bytes()
+
+
+def test_key_link_before_anchor_is_allowed(tmp_path: Path, key) -> None:  # двойник
+    """Ссылки ДО `darkfactory/apps` (например `/tmp` на macOS) — не предмет 9c."""
+    (tmp_path / "cfg").symlink_to(tmp_path)
+    via = tmp_path / "cfg" / "darkfactory" / "apps" / key[0].name
+    assert act_app_token._read_key(via) == key[0].read_bytes()
+
+
+@pytest.mark.parametrize(
+    "rel",
+    ["app.pem", "darkfactory/apps", "darkfactory/apps/../apps/app.pem"],
+    ids=["no_anchor", "anchor_itself", "dotdot"],
+)
+def test_key_outside_anchor_refused(tmp_path: Path, key, rel: str) -> None:
+    (tmp_path / "app.pem").write_bytes(key[0].read_bytes())
+    reason = _identity_refused(tmp_path / rel)
+    assert "вне каталога darkfactory/apps" in reason
+
+
+def test_key_not_regular_file_refused(tmp_path: Path) -> None:
+    fifo = _apps(tmp_path) / "fifo.pem"
+    os.mkfifo(fifo)
+    assert "не обычный файл" in _identity_refused(fifo)
 
 
 # --- HTTP-шов и CLI ----------------------------------------------------------
@@ -504,6 +580,74 @@ def test_main_http_error_code(key, monkeypatch, capsys) -> None:
     argv = ["--app-id", "5", "--key", str(key[0]), "--repo", "o/p"]
     assert act_app_token.main(argv) == 2
     assert capsys.readouterr().err == "act_app_token: GET /app: HTTP 404\n"
+
+
+# --- отзыв токена установки (Task 9, п. 9d) ------------------------------------
+
+
+def test_revoke_deletes_installation_token() -> None:
+    http = Http({("DELETE", "/installation/token"): (204, None)})
+    assert act_app_token.revoke("ghs_tok", http=http) is None
+    assert http.seen == [("DELETE", "/installation/token", "token ghs_tok")]
+
+
+def test_revoke_refused_is_unavailable_without_token() -> None:
+    http = Http({("DELETE", "/installation/token"): (401, None)})
+    got = act_app_token.revoke("ghs_tok", http=http)
+    assert isinstance(got, Unavailable)
+    assert got.reason == "отзыв токена установки: HTTP 401"
+    assert "ghs_tok" not in got.reason
+
+
+@pytest.mark.parametrize("token", ["", "ghs tok", "ghs_tok\n", "ghs_a\nghs_b"])
+def test_revoke_malformed_token_no_request(token: str) -> None:
+    http = Http({})
+    got = act_app_token.revoke(token, http=http)
+    assert isinstance(got, Unavailable)
+    assert got.reason == "токен установки не той формы"
+    assert http.seen == []
+
+
+def test_revoke_reads_token_from_stdin_only(monkeypatch, capsys) -> None:
+    """Токен — только stdin: не argv (виден в `ps`) и не окружение."""
+    opener = _Opener({"/installation/token": (204, None)})
+    monkeypatch.setattr(act_app_token, "_OPENER", opener)
+    monkeypatch.setenv("GH_TOKEN", "ghs_env")
+    monkeypatch.setattr("sys.stdin", io.StringIO("ghs_tok\n"))
+    assert act_app_token.main(["--revoke"]) == 0
+    assert capsys.readouterr() == ("", "")
+    [req] = opener.requests
+    assert req.get_method() == "DELETE"
+    assert req.full_url == "https://api.github.com/installation/token"
+    assert req.get_header("Authorization") == "token ghs_tok"
+    # Пустой stdin — отказ без запроса, токен окружения не подхватывается.
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    assert act_app_token.main(["--revoke"]) == 2
+    assert len(opener.requests) == 1
+    assert "ghs_env" not in capsys.readouterr().err
+    # Токен в argv и смешение с аргументами личности — ошибка разбора; токен из
+    # argv в stderr не повторяется (ревью Task 9, nit 6).
+    for argv in (["--revoke", "ghs_tok"], ["--revoke", "--repo", "o/p"]):
+        with pytest.raises(SystemExit) as exc:
+            act_app_token.main(argv)
+        assert exc.value.code == 2
+        assert "ghs_tok" not in capsys.readouterr().err
+    assert len(opener.requests) == 1
+
+
+def test_revoke_failure_is_2_without_token(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(act_app_token, "_OPENER", _Opener({}))
+    monkeypatch.setattr("sys.stdin", io.StringIO("ghs_tok\n"))
+    assert act_app_token.main(["--revoke"]) == 2
+    out = capsys.readouterr()
+    assert out.out == ""
+    assert out.err == "act_app_token: отзыв токена установки: HTTP 404\n"
+
+
+def test_identity_args_still_required(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        act_app_token.main(["--app-id", "5", "--repo", "o/p"])
+    assert exc.value.code == 2
 
 
 @pytest.mark.slow

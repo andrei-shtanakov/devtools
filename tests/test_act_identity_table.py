@@ -2831,14 +2831,39 @@ JUDGMENT = {
             '"больше 2 страниц"',
         ),
     ),
-    "act_app_token._bearer": (
+    "act_app_token._open_no_link": (
         r(
             "key_unread",
-            "act_app_token._bearer",
-            "except OSError",
+            "act_app_token._open_no_link",
+            "не прочитан",
             f"{K}::test_missing_key_is_unavailable",
             '"не прочитан"',
         ),
+        r(
+            "key_link",
+            "act_app_token._open_no_link",
+            "if link:",
+            f"{K}::test_key_swapped_to_link_after_shell_check_refused",
+            '"путь после darkfactory/apps через ссылку"',
+        ),
+    ),
+    "act_app_token._read_key": (
+        r(
+            "key_anchor",
+            "act_app_token._read_key",
+            "anchor is None or anchor >= len(parts)",
+            f"{K}::test_key_outside_anchor_refused",
+            '"вне каталога darkfactory/apps"',
+        ),
+        r(
+            "key_regular",
+            "act_app_token._read_key",
+            "stat.S_ISREG(",
+            f"{K}::test_key_not_regular_file_refused",
+            '"не обычный файл"',
+        ),
+    ),
+    "act_app_token._bearer": (
         r(
             "key_unsigned",
             "act_app_token._bearer",
@@ -2854,6 +2879,22 @@ JUDGMENT = {
             "status != 201",
             f"{K}::test_installation_token_refused_is_unavailable",
             '"токен установки 9: HTTP 502"',
+        ),
+    ),
+    "act_app_token.revoke": (
+        r(
+            "revoke_form",
+            "act_app_token.revoke",
+            "TOKEN.fullmatch(token) is None",
+            f"{K}::test_revoke_malformed_token_no_request",
+            '"токен установки не той формы"',
+        ),
+        r(
+            "revoke_status",
+            "act_app_token.revoke",
+            "status != 204",
+            f"{K}::test_revoke_refused_is_unavailable_without_token",
+            '"отзыв токена установки: HTTP 401"',
         ),
     ),
     "act_app_token.app_identity": (
@@ -4022,7 +4063,7 @@ NOT_JUDGMENT = {
     "act_app_token._http": _IO,
     "act_app_token._build_opener": _BUILD,
     "act_app_token._field": _BUILD,
-    "act_app_token.main": "CLI вокруг `app_identity`",
+    "act_app_token.main": "CLI вокруг `app_identity` и `revoke`",
     "act_barrier._kind": "классификация формы ветки; суждения — `_judge`",
     "act_barrier._head": _IO,
     "act_barrier._pending": "узел отдан на одобрение (`status: approval_pending`); не узел — `False`, отказ судит `_legacy_resolved`",
