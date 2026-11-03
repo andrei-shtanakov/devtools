@@ -398,7 +398,8 @@ def installation_token(
     clock: Clock = time.time,
 ) -> Token:
     """Mint an installation token; what GitHub granted must equal what was
-    asked (`token_scope_mismatch`) and expire within the hour."""
+    asked (`token_scope_mismatch`) and expire within the hour. A missing,
+    empty or blank token is `GitHubUnavailable` (an unexpected answer)."""
     if repository_ids is not None and not repository_ids:
         raise ValueError("repository_ids must not be empty")
     request: dict[str, object] = {}
@@ -411,8 +412,10 @@ def installation_token(
     _, data = call(
         "POST", path, jwt, request or None, transport=transport, api_base=api_base
     )
-    if not isinstance(data, dict) or not isinstance(data.get("token"), str):
+    value = data.get("token") if isinstance(data, dict) else None
+    if not isinstance(value, str) or not value.strip():
         raise GitHubUnavailable("access_tokens: unexpected answer")
+    assert isinstance(data, dict)
     if repository_ids is not None and "repositories" not in data:
         raise GitHubRefused("token_scope_mismatch")
     granted_repos = _id_list(data.get("repositories", []), "repositories")
@@ -422,7 +425,7 @@ def installation_token(
     if permissions is not None and not _scope_ok(granted, permissions):
         raise GitHubRefused("token_scope_mismatch")
     expires = _expires_at(data.get("expires_at"), now)
-    return Token(data["token"], expires, granted, granted_repos)
+    return Token(value, expires, granted, granted_repos)
 
 
 def _is_next(params: str) -> bool:

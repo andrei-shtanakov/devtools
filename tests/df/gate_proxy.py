@@ -1,7 +1,7 @@
 """A loopback proxy to the GitHub API with one gate (Task 15 row 4(b), R15-5).
 
 `serve_gate_proxy()` listens on `http://127.0.0.1:<port>`, the form the
-publisher's `api_base` admits (`stage2_config._check_api_base`), and passes
+publisher's `api_base` admits (`stage2_config._check_base`), and passes
 every request to `upstream` (`https://api.github.com`) unchanged: method,
 path with query, body and headers, minus `Host`, `Accept-Encoding` and the
 hop-by-hop ones. The answer comes back the same way; the API's own URLs in a

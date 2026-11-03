@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import fnmatch
+import json
 import os
 import plistlib
 import stat
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -2808,3 +2810,163 @@ def test_run_with_input_uses_system_env_and_root_cwd() -> None:
 def test_run_with_input_missing_executable_is_not_launched() -> None:
     done = plat.run_with_input(["/nonexistent/prog"], b"x")
     assert not done.launched
+
+
+# --- run_supervised (stage 2b, Task 7) ----------------------------------------
+
+
+def _script(tmp_path: Path, body: str, name: str = "child") -> str:
+    """An executable Python script in `tmp_path` (isolated interpreter)."""
+    path = tmp_path / name
+    path.write_text(f"#!{sys.executable} -I\nimport os, sys, time\n{body}\n")
+    path.chmod(0o755)
+    return str(path)
+
+
+SUPERVISED_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C"}
+
+
+def test_run_supervised_feeds_stdin_and_reads_stdout(tmp_path: Path) -> None:
+    child = _script(tmp_path, "sys.stdout.write(sys.stdin.read()[::-1])")
+    result = plat.run_supervised(
+        [child], b"abc", limit=1024, wait=30, env=SUPERVISED_ENV
+    )
+    assert (result.status, result.signal, result.stdout) == (0, None, b"cba")
+    assert not result.oversize and result.elapsed < 30
+
+
+def test_run_supervised_oversize_drained_not_killed(tmp_path: Path) -> None:
+    """1 MiB over a 64 KiB limit: read to EOF and dropped; the child ends by
+    itself (it would be stuck on a full pipe, or die of SIGPIPE, otherwise)."""
+    child = _script(
+        tmp_path,
+        "sys.stdout.buffer.write(b'x' * (1 << 20)); sys.stdout.flush()\n"
+        "open(sys.argv[0] + '.done', 'w').close()",
+    )
+    result = plat.run_supervised([child], b"", limit=64 << 10, wait=30, env={})
+    assert (result.status, result.signal) == (0, None)
+    assert result.oversize and result.stdout == b"x" * (64 << 10)
+    assert Path(child + ".done").exists()
+
+
+def test_run_supervised_wait_expiry_leaves_child_running(tmp_path: Path) -> None:
+    child = _script(
+        tmp_path, "time.sleep(1.5)\nopen(sys.argv[0] + '.done', 'w').close()"
+    )
+    result = plat.run_supervised([child], b"", limit=1024, wait=0.3, env={})
+    assert (result.status, result.signal) == (None, None)
+    assert result.elapsed < 1.5
+    for _ in range(100):  # it was never signalled: it finishes its own work
+        if Path(child + ".done").exists():
+            break
+        time.sleep(0.05)
+    assert Path(child + ".done").exists()
+
+
+def test_run_supervised_reports_a_signal(tmp_path: Path) -> None:
+    child = _script(tmp_path, "import signal\nos.kill(os.getpid(), signal.SIGTERM)")
+    result = plat.run_supervised([child], b"", limit=1024, wait=30, env={})
+    assert (result.status, result.signal) == (None, 15)
+
+
+def test_run_supervised_exit_code(tmp_path: Path) -> None:
+    child = _script(tmp_path, "sys.exit(3)")
+    result = plat.run_supervised([child], b"", limit=1024, wait=30, env={})
+    assert (result.status, result.signal) == (3, None)
+
+
+def test_run_supervised_sends_no_signal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Neither on oversize nor on wait expiry does the supervisor kill."""
+    sent: list[object] = []
+    monkeypatch.setattr(os, "kill", lambda *a: sent.append(a))
+    monkeypatch.setattr(os, "killpg", lambda *a: sent.append(a))
+    monkeypatch.setattr(subprocess.Popen, "send_signal", lambda *a: sent.append(a))
+    big = _script(tmp_path, "sys.stdout.buffer.write(b'y' * (1 << 20))", "big")
+    slow = _script(tmp_path, "time.sleep(1)", "slow")
+    plat.run_supervised([big], b"", limit=1024, wait=30, env={})
+    plat.run_supervised([slow], b"", limit=1024, wait=0.1, env={})
+    assert sent == []
+
+
+def test_run_supervised_env_and_descriptors_minimal(tmp_path: Path) -> None:
+    """Exactly the given environment; no descriptor beyond 0, 1, 2 (an
+    inheritable one of ours is not passed); stderr is not a pipe."""
+    child = _script(
+        tmp_path,
+        "import json, stat\n"
+        "fds = sorted(int(f) for f in os.listdir('/dev/fd'))\n"
+        "err = stat.S_ISFIFO(os.fstat(2).st_mode)\n"
+        "print(json.dumps({'env': dict(os.environ), 'fds': fds, 'err': err}))",
+    )
+    leak = os.open(tmp_path, os.O_RDONLY)  # an inheritable-looking fd of ours
+    os.set_inheritable(leak, True)
+    try:
+        result = plat.run_supervised(
+            [child], b"", limit=1 << 16, wait=30, env=SUPERVISED_ENV
+        )
+    finally:
+        os.close(leak)
+    seen = json.loads(result.stdout)
+    # added inside the child: macOS CoreFoundation, Python's C locale coercion
+    own = ("__CF_USER_TEXT_ENCODING", "LC_CTYPE")
+    env = {k: v for k, v in seen["env"].items() if k not in own}
+    assert env == SUPERVISED_ENV
+    assert seen["fds"] == [0, 1, 2, 3]  # 3: the listing's own directory
+    assert seen["err"] is False
+
+
+def test_run_supervised_child_not_reading_stdin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A request larger than the pipe buffer to a child that never reads:
+    nothing blocks past `wait`, no thread is left behind, and our end of
+    stdin is closed when `run_supervised` returns."""
+    stdin_fds: list[tuple[subprocess.Popen[bytes], int]] = []
+
+    class Seen(subprocess.Popen):  # type: ignore[type-arg]
+        def __init__(self, *a: Any, **kw: Any) -> None:
+            super().__init__(*a, **kw)
+            assert self.stdin is not None
+            stdin_fds.append((self, self.stdin.fileno()))
+
+    monkeypatch.setattr(plat.subprocess, "Popen", Seen)
+    child = _script(tmp_path, "time.sleep(1.0)")
+    before = threading.active_count()
+    started = time.monotonic()
+    result = plat.run_supervised(
+        [child], b"x" * (1 << 20), limit=1024, wait=0.3, env={}
+    )
+    assert time.monotonic() - started < 1.0
+    assert (result.status, result.signal) == (None, None)
+    assert threading.active_count() == before
+    ((proc, fd),) = stdin_fds
+    assert proc.stdin is not None and proc.stdin.closed
+    with pytest.raises(OSError):  # the descriptor itself is gone (EBADF)
+        os.fstat(fd)
+
+
+def test_run_supervised_closes_stdin_after_writing(tmp_path: Path) -> None:
+    """The child gets all of `data` and then EOF (our end is closed)."""
+    child = _script(tmp_path, "sys.stdout.write(str(len(sys.stdin.buffer.read())))")
+    data = b"y" * (300 << 10)  # larger than any pipe buffer
+    result = plat.run_supervised([child], data, limit=1024, wait=30, env={})
+    assert (result.status, result.stdout) == (0, str(len(data)).encode())
+
+
+def test_run_supervised_child_exits_without_reading(tmp_path: Path) -> None:
+    child = _script(tmp_path, "sys.stdout.write('done')")
+    result = plat.run_supervised([child], b"z" * (1 << 20), limit=1024, wait=30, env={})
+    assert (result.status, result.stdout) == (0, b"done")
+
+
+def test_run_supervised_launch_failure(tmp_path: Path) -> None:
+    result = plat.run_supervised(
+        [str(tmp_path / "missing")], b"", limit=1024, wait=5, env={}
+    )
+    assert (result.status, result.signal, result.stdout) == (
+        plat.LAUNCH_FAILED,
+        None,
+        b"",
+    )
