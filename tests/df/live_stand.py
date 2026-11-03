@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import itertools
 import json
 import os
 import re
@@ -197,6 +198,12 @@ DELIVERY_WAIT = 60.0
 SNAPSHOT_DEADLINE = 120.0
 #: The node of the seeded request and of the stop record (rows 10-12).
 NODE = "n1"
+#: Row 12: answers of the identical request (`POLL` apart) while GitHub's
+#: read still lags the cut `PUT` (spec 5.4, the operator's step 2); the
+#: replay after the settled answer is not counted.
+RECONCILE_TRIES = 4
+#: The one answer a repeat may give while the read lags.
+LAGGING = (3, "unknown", "merge_not_confirmed")
 FORBIDDEN = "Resource not accessible by integration"
 _TAG = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,63}", re.ASCII)
 _LS_TREE = re.compile(r"([0-7]{6}) (blob|tree|commit) ([0-9a-f]{40,64})\t(.+)")
@@ -1118,11 +1125,17 @@ def conflicting_pr(st: Stand) -> tuple[int, object]:
         st.make_branch(branch, tip)
         st.put_file(branch, path, text)
     number = st.open_pr("conflict", head, base)
+    return number, wait_mergeable(st, number)
+
+
+def wait_mergeable(st: Stand, number: int) -> object:
+    """The PR's `mergeable` once GitHub has computed it (polled; `None`
+    after `MERGEABLE_WAIT`)."""
     deadline = time.monotonic() + MERGEABLE_WAIT
     while True:
         mergeable = st.gh.pull(number).get("mergeable")
         if mergeable is not None or time.monotonic() >= deadline:
-            return number, mergeable
+            return mergeable
         time.sleep(POLL)
 
 
@@ -1593,7 +1606,9 @@ def seed(st: Stand, name: str, ws: str, evidence: str) -> dict[str, object]:
     manifest, `seed_manifest`) and merges it with its own token (squash,
     `sha` = head). Control (infrastructure if not, polled up to
     `DELIVERY_WAIT`): the checker's `load_history` sees the seed as the
-    current request of `n1` g1."""
+    current request of `n1` g1. Preconditions (infrastructure): squash
+    merges allowed on the stand (H7), the seed PR mergeable."""
+    squash_problem(st.gh.call("GET", st.gh.repo("")))
     tip = st.gh.ref_sha(st.default_branch)
     if tip is None:
         infra(f"нет ветки {st.default_branch}")
@@ -1606,6 +1621,9 @@ def seed(st: Stand, name: str, ws: str, evidence: str) -> dict[str, object]:
     number = st.open_pr(name, branch, st.default_branch)
     if not st.wait_head(number, head, time.monotonic() + 60):
         infra(f"голова PR засева {number} не стала {head}")
+    mergeable = wait_mergeable(st, number)
+    if mergeable is not True:
+        infra(f"PR засева {number}: mergeable={mergeable!r}; мержа не было")
     body = {"merge_method": "squash", "sha": head}
     merged = st.gh.call("PUT", st.gh.repo(f"/pulls/{number}/merge"), body)
     commit = merged.get("sha") if isinstance(merged, dict) else None
@@ -1633,6 +1651,14 @@ def seed(st: Stand, name: str, ws: str, evidence: str) -> dict[str, object]:
     if problem is not None:
         infra(f"засев {ws}: load_history проверяющего не видит заявку g1: {problem}")
     return found
+
+
+def squash_problem(repo: object) -> None:
+    """H7: the stand allows squash merges (`allow_squash_merge` of `GET
+    /repos/{full_name}`), else infrastructure naming the owner's step."""
+    allowed = repo.get("allow_squash_merge") if isinstance(repo, dict) else None
+    if allowed is not True:
+        infra(f"H7: squash-мерж на стенде не разрешён (allow_squash_merge={allowed!r})")
 
 
 def open_stop_pr(st: Stand, name: str, ws: str) -> dict[str, object]:
@@ -1665,7 +1691,7 @@ def merge_put_re(full_name: str, number: int) -> re.Pattern[str]:
 
 def merge_puts(seen: Sequence[Seen], full_name: str, number: int) -> list[Seen]:
     """The proxy's log of the PR's merge `PUT`s: every one that reached the
-    proxy, delivered upstream or not."""
+    proxy, answered upstream or not."""
     path = merge_put_re(full_name, number)
     return [s for s in seen if s.method == "PUT" and path.fullmatch(s.path)]
 
@@ -1708,25 +1734,59 @@ def check_head_changed(
     expect(resp.evidence.get("replayed") is True, f"повтор не replay: {resp}")
     expect(len(puts) == 1, f"PUT выше: {len(puts)} ({puts})")
     put = puts[0]
-    expect(put.delivered_upstream and put.status == 409, f"PUT выше: {put}")
+    expect(put.upstream_answered and put.status == 409, f"PUT выше: {put}")
+
+
+def lagging(answer: tuple[int, Response]) -> bool:
+    """Whether `answer` is the one a repeat may give while GitHub's read
+    lags the cut `PUT` (`LAGGING`)."""
+    rc, resp = answer
+    return (rc, resp.outcome, resp.reason) == LAGGING
+
+
+def settle_merge(
+    ask: Callable[[], tuple[int, Response]],
+    tries: int = RECONCILE_TRIES,
+    *,
+    wait: Callable[[float], None] = time.sleep,
+) -> list[tuple[int, Response]]:
+    """Row 12's answers of one identical request: repeated (`POLL` apart, at
+    most `tries` in all) while it is `LAGGING`; once it is anything else,
+    one more repeat (the replay). The last answer still lagging means the
+    bound passed."""
+    answers = [ask()]
+    while lagging(answers[-1]) and len(answers) < tries:
+        wait(POLL)
+        answers.append(ask())
+    if not lagging(answers[-1]):
+        answers.append(ask())
+    return answers
 
 
 def check_reconciled(
-    first: tuple[int, Response],
-    again: tuple[int, Response],
+    answers: Sequence[tuple[int, Response]],
     pr: Mapping[str, object],
     puts: Sequence[Seen],
     *,
     bot: str,
     head: str,
 ) -> None:
-    """Row 12's verdict: `done` found by reconciliation (the premise named),
-    the PR merged by the App's bot at `head` with the answered merge commit;
-    the identical repeat the same `done`, a replay; one `PUT` upstream, its
-    answer not delivered downstream."""
-    rc, resp = first
+    """Row 12's verdict over `settle_merge`'s answers: only `LAGGING` before
+    the settled one; the settled one `done` found by reconciliation (the
+    premise named, not a replay), the PR merged by the App's bot at `head`
+    with the answered merge commit; then the same `done`, a replay; one
+    `PUT` upstream over all of them, its answer not written downstream."""
+    waited = list(itertools.takewhile(lagging, answers))
+    settled = list(answers[len(waited) :])
+    expect(
+        settled != [],
+        f"сверка не сошлась за {len(waited)} повторов: {LAGGING[1]}: {LAGGING[2]}",
+    )
+    expect(len(settled) == 2, f"после сверки ответов {len(settled)}: {settled}")
+    rc, resp = settled[0]
     expect((rc, resp.outcome) == (0, "done"), f"merge: {rc} {resp}")
     expect(resp.evidence.get("premise") == merge.PREMISE, f"не сверка: {resp}")
+    expect(resp.evidence.get("replayed") is not True, f"сверка — replay: {resp}")
     commit = resp.result.get("merge_commit")
     expect(resp.result.get("head_sha") == head, f"голова ответа: {resp.result}")
     head_obj = pr.get("head")
@@ -1739,23 +1799,31 @@ def check_reconciled(
         f"PR на GitHub: merged {pr.get('merged')}, merged_by {pr.get('merged_by')}, "
         f"merge_commit {pr.get('merge_commit_sha')}, ответ {commit}",
     )
-    rc, resp = again
+    rc, resp = settled[1]
     expect((rc, resp.outcome) == (0, "done"), f"повтор: {rc} {resp}")
     expect(resp.evidence.get("replayed") is True, f"повтор не replay: {resp}")
     expect(resp.result.get("merge_commit") == commit, f"повтор: {resp.result}")
     expect(len(puts) == 1, f"PUT выше: {len(puts)} ({puts})")
     put = puts[0]
-    expect(put.delivered_upstream and not put.answered_downstream, f"PUT выше: {put}")
+    expect(put.upstream_answered and not put.answered_downstream, f"PUT выше: {put}")
 
 
-def _answers(
-    first: tuple[int, Response], again: tuple[int, Response] | None
-) -> dict[str, object]:
-    def row(answer: tuple[int, Response]) -> list[object]:
-        rc, resp = answer
-        return [rc, resp.outcome, resp.reason, dict(resp.result), dict(resp.evidence)]
+def _answers(answers: Sequence[tuple[int, Response]]) -> list[list[object]]:
+    """Every answer of a row's request, in order, for the evidence."""
+    return [
+        [rc, resp.outcome, resp.reason, dict(resp.result), dict(resp.evidence)]
+        for rc, resp in answers
+    ]
 
-    return {"first": row(first), "repeat": None if again is None else row(again)}
+
+def keep_merge(st: Stand, name: str, number: int) -> dict[str, object]:
+    """The PR as it is now; if merged, its merge commit is kept for row 9's
+    evidence (it stays on the default branch)."""
+    pull = st.gh.pull(number)
+    commit = pull.get("merge_commit_sha")
+    if pull.get("merged") is True and isinstance(commit, str):
+        st.merges[name] = commit
+    return pull
 
 
 def row10_seed(st: Stand) -> dict[str, object]:
@@ -1812,15 +1880,15 @@ def row11_head_change(st: Stand) -> dict[str, object]:
         if held and "done" in box:
             again = st.ask("df-exec", "merge", data)
         seen = proxy.requests()
+    if new:
+        st.heads["stop"] = new
+    pull = keep_merge(st, "stop", pr)
     done = box.get("done")
     if done is None or not held:
         why = "нет ответа" if done is None else shown(done)
         infra(f"PUT не дошёл до прокси: {why}")
     assert done is not None and again is not None
-    if new:
-        st.heads["stop"] = new
     first = st.answer("merge", done)
-    pull = st.gh.pull(pr)
     puts = merge_puts(seen, st.full_name, pr)
     attested = attestations(st, pr, merge_key(st, data), head)
     st.record(
@@ -1831,7 +1899,7 @@ def row11_head_change(st: Stand) -> dict[str, object]:
             "pushed": new,
             "head_was_new_before_release": moved,
             "proxy": [asdict(s) for s in seen],
-            "answers": _answers(first, again),
+            "answers": _answers([first, again]),
             "pr": {"state": pull.get("state"), "merged": pull.get("merged")},
             "attestations_at_head": attested,
         },
@@ -1848,11 +1916,13 @@ def row12_dropped_answer(st: Stand) -> dict[str, object]:
     """Row 12: a new seed and stop-PR (`stand-<tag>-b`); `df-exec` → `merge`
     with `gate_proxy` passing the `PUT …/merge` on and cutting its answer
     (`drop_response`): the publisher reconciles to `done` (the PR merged by
-    the App's bot at the head); the identical repeat is the same `done`,
-    replayed, and the proxy saw one `PUT`. (A `PUT` still executing is
+    the App's bot at the head) -- while GitHub's read lags, the identical
+    request is repeated (`settle_merge`, spec 5.4 step 2) and may only be
+    `unknown: merge_not_confirmed`; then the same `done`, replayed; the
+    proxy saw one `PUT` over all of them. (A `PUT` still executing is
     tested offline: `test_put_in_flight_open_is_unknown_then_done`.)
     Control (infrastructure): the `PUT` reached GitHub, was executed (200)
-    and its answer was not delivered downstream."""
+    and its answer was not written downstream."""
     ws = stand_ws(st.args.tag, "b")
     seed(st, "seed-b", ws, "row12-seed.json")
     stop = open_stop_pr(st, "stop-b", ws)
@@ -1860,12 +1930,9 @@ def row12_dropped_answer(st: Stand) -> dict[str, object]:
     data = merge_payload(st, pr, head, "row12")
     gate = gate_proxy.drop_response("PUT", merge_put_re(st.full_name, pr))
     with serve_gate_proxy(gate=gate) as proxy, api_base(st, proxy.url):
-        first = st.ask("df-exec", "merge", data)
-        again = st.ask("df-exec", "merge", data)
+        answers = settle_merge(lambda: st.ask("df-exec", "merge", data))
         seen = proxy.requests()
-    pull = st.gh.pull(pr)
-    if pull.get("merged") is True and isinstance(pull.get("merge_commit_sha"), str):
-        st.merges["stop-b"] = str(pull["merge_commit_sha"])
+    pull = keep_merge(st, "stop-b", pr)
     puts = merge_puts(seen, st.full_name, pr)
     attested = attestations(st, pr, merge_key(st, data), head)
     st.record(
@@ -1874,7 +1941,8 @@ def row12_dropped_answer(st: Stand) -> dict[str, object]:
             "stop_pr": stop,
             "api_base": {"value": proxy.url, "note": "нештатный API: прокси"},
             "proxy": [asdict(s) for s in seen],
-            "answers": _answers(first, again),
+            "answers": _answers(answers),
+            "reconcile_tries": RECONCILE_TRIES,
             "pr": {
                 "state": pull.get("state"),
                 "merged": pull.get("merged"),
@@ -1886,9 +1954,9 @@ def row12_dropped_answer(st: Stand) -> dict[str, object]:
         },
     )
     cut = [s for s in puts if not s.answered_downstream]
-    if not cut or not cut[0].delivered_upstream or cut[0].status != 200:
+    if not cut or not cut[0].upstream_answered or cut[0].status != 200:
         infra(f"контроль: PUT не исполнен выше или ответ не оборван: {puts}")
-    check_reconciled(first, again, pull, puts, bot=st.bot, head=head)
+    check_reconciled(answers, pull, puts, bot=st.bot, head=head)
     expect(len(attested) == 1, f"аттестации на голове {head}: {attested}")
     return {"merge_commit": st.merges.get("stop-b"), "puts": len(puts)}
 

@@ -23,9 +23,12 @@ query) matches its pattern whole; later ones pass:
   it (`dropped` is set): the request was executed, its answer is lost.
 
 Requests are recorded as method, path, status, whether held, and two facts
-kept apart: `delivered_upstream` (the upstream answered it, `status` is its
+kept apart: `upstream_answered` (the upstream answered it, `status` is its
 answer) and `answered_downstream` (the answer was written to the client) --
-never headers or bodies, which carry tokens.
+never headers or bodies, which carry tokens. Neither is more than that: a
+request the upstream did not answer (a read timeout) may still have been
+executed there, and a write that did not fail may reach a client that has
+already given up.
 
 Used only by `tests/df/live_stand.py`; its offline tests
 (`tests/df/test_gate_proxy.py`) run it against a local upstream.
@@ -100,15 +103,16 @@ REVIEW_HOLD = hold("POST", REVIEWS_POST)
 @dataclass(frozen=True)
 class Seen:
     """One request the proxy took (no header, no body): `status` is the
-    upstream's answer when `delivered_upstream`, else the proxy's 502;
-    `answered_downstream` is whether that answer was written to the client."""
+    upstream's answer when `upstream_answered`, else the proxy's 502 (the
+    request may still have been executed upstream); `answered_downstream`
+    is whether writing that answer to the client did not fail."""
 
     method: str
     path: str
     status: int
     held: bool
     expired: bool = False
-    delivered_upstream: bool = True
+    upstream_answered: bool = True
     answered_downstream: bool = True
 
 
@@ -218,7 +222,7 @@ def _handler(proxy: GateProxy) -> type[http.server.BaseHTTPRequestHandler]:
                 status = resp.status
             except OSError:
                 seen = Seen(
-                    self.command, path, 502, held, expired, delivered_upstream=False
+                    self.command, path, 502, held, expired, upstream_answered=False
                 )
                 self.write(proxy.record(seen), lambda: self.send_error(502))
                 return

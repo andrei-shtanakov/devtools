@@ -111,7 +111,7 @@ def test_gate_proxy_passes_requests_through(upstream: Upstream) -> None:
     assert [(s.method, s.path, s.status, s.held) for s in seen] == [
         ("GET", "/repos/o/r/pulls/1", 200, False)
     ]
-    assert [(s.delivered_upstream, s.answered_downstream) for s in seen] == [
+    assert [(s.upstream_answered, s.answered_downstream) for s in seen] == [
         (True, True)
     ]
 
@@ -176,7 +176,7 @@ def test_hold_put_orders_hold_push_release(upstream: Upstream) -> None:
         ("PUT", MERGE),
     ]
     assert [(s.method, s.held, s.expired) for s in seen] == [("PUT", True, False)]
-    assert (seen[0].delivered_upstream, seen[0].answered_downstream) == (True, True)
+    assert (seen[0].upstream_answered, seen[0].answered_downstream) == (True, True)
 
 
 def test_hold_put_lets_other_requests_pass(upstream: Upstream) -> None:
@@ -197,8 +197,8 @@ def test_drop_response_executes_one_put_and_cuts_the_answer(
     """Row 12: the publisher's `PUT` (its own client) reaches the upstream
     and is executed there once; its answer never comes back, the client sees
     a transport failure (`GitHubUnavailable`, no retry). The log says the
-    request was delivered upstream (with the upstream's status) and the
-    answer not delivered downstream; a later request passes normally."""
+    request was answered upstream (with the upstream's status) and the
+    answer not written downstream; a later request passes normally."""
     gate = gate_proxy.drop_response("PUT", MERGE_RE)
     body = {"merge_method": "squash", "sha": "a" * 40}
     with gate_proxy.serve_gate_proxy(upstream.url, gate=gate) as proxy:
@@ -210,20 +210,23 @@ def test_drop_response_executes_one_put_and_cuts_the_answer(
     assert status == 200
     assert upstream.calls() == [("PUT", MERGE), ("GET", "/repos/o/r/pulls/7")]
     assert [
-        (s.method, s.status, s.delivered_upstream, s.answered_downstream) for s in seen
+        (s.method, s.status, s.upstream_answered, s.answered_downstream) for s in seen
     ] == [("PUT", 200, True, False), ("GET", 200, True, True)]
     assert not proxy.held.is_set()
 
 
-def test_failed_upstream_is_not_delivered(upstream: Upstream) -> None:
-    """An upstream that does not answer: the request is logged as not
-    delivered upstream (502 downstream), never as executed."""
+def test_unanswered_upstream_is_logged_so(upstream: Upstream) -> None:
+    """An upstream that does not answer (here: nothing listens) is logged
+    `upstream_answered=False` with the proxy's 502. That says no answer
+    came, not that nothing was executed: a read timeout of a live upstream
+    is logged the same, which is why the rows count every `PUT` that
+    reached the proxy (`live_stand.merge_puts`)."""
     dead = f"http://127.0.0.1:{_free_port()}"
     with gate_proxy.serve_gate_proxy(dead) as proxy:
         with pytest.raises(GitHubUnavailable):
             github.call("GET", "/repos/o/r/pulls/7", "t0k", api_base=proxy.url)
         seen = proxy.requests()
-    assert [(s.status, s.delivered_upstream, s.answered_downstream) for s in seen] == [
+    assert [(s.status, s.upstream_answered, s.answered_downstream) for s in seen] == [
         (502, False, True)
     ]
 

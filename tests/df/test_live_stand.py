@@ -688,60 +688,243 @@ def _answer(
     return rc, Response(outcome, reason, result, evidence)  # type: ignore[arg-type]
 
 
+HC_FIRST = _answer("refused", "head_changed")
+HC_AGAIN = _answer("refused", "head_changed", replayed=True)
+HC_PR: dict[str, object] = {"state": "open", "merged": False}
+HC_PUTS = [_seen(held=True)]
+
+
 def test_head_changed_verdict() -> None:
     """Row 11: `refused: head_changed`, the same on the repeat (replayed),
     the PR open and not merged, one `PUT` upstream answered 409."""
-    first = _answer("refused", "head_changed")
-    again = _answer("refused", "head_changed", replayed=True)
-    pr: dict[str, object] = {"state": "open", "merged": False}
-    puts = [_seen(held=True)]
-    live_stand.check_head_changed(first, again, pr, puts)
-    bad = {
-        "merged": (first, again, {"state": "closed", "merged": True}, puts),
-        "other reason": (_answer("refused", "pr_state"), again, pr, puts),
-        "repeat not replayed": (first, _answer("refused", "head_changed"), pr, puts),
-        "two puts": (first, again, pr, puts * 2),
-        "put merged": (first, again, pr, [_seen(status=200)]),
-        "no put": (first, again, pr, []),
-    }
-    for name, args in bad.items():
-        with pytest.raises(RowFailed):
-            live_stand.check_head_changed(*args)
-        assert name
+    live_stand.check_head_changed(HC_FIRST, HC_AGAIN, HC_PR, HC_PUTS)
 
 
-def test_reconciled_verdict() -> None:
-    """Row 12: `done` by reconciliation (the premise named), the PR merged
-    by the bot at the head with the answered merge commit; the repeat is the
-    same `done`, replayed; one `PUT` upstream, its answer cut."""
-    head, commit, bot = "h" * 40, "c" * 40, "df-app[bot]"
-    result = {"merge_commit": commit, "head_sha": head}
-    first = _answer("done", None, **result)
-    again = _answer("done", None, replayed=True, **result)
-    pr: dict[str, object] = {
-        "merged": True,
-        "merged_by": {"login": bot, "type": "Bot"},
-        "head": {"sha": head},
-        "merge_commit_sha": commit,
-    }
-    puts = [_seen(status=200, down=False)]
-    live_stand.check_reconciled(first, again, pr, puts, bot=bot, head=head)
-    human = {**pr, "merged_by": {"login": "someone", "type": "User"}}
-    bad = {
-        "unknown": (_answer("unknown", "merge_not_confirmed"), again, pr, puts),
-        "by human": (first, again, human, puts),
-        "other commit": (first, again, {**pr, "merge_commit_sha": "d" * 40}, puts),
-        "not replayed": (first, _answer("done", None, **result), pr, puts),
-        "two puts": (first, again, pr, puts * 2),
-        "answered": (first, again, pr, [_seen(status=200)]),
-    }
-    for name, args in bad.items():
-        with pytest.raises(RowFailed):
-            live_stand.check_reconciled(*args, bot=bot, head=head)
-        assert name
-    no_premise = (0, Response("done", None, result, {"kind": "stop"}))
-    with pytest.raises(RowFailed):
-        live_stand.check_reconciled(no_premise, again, pr, puts, bot=bot, head=head)
+@pytest.mark.parametrize(
+    ("first", "again", "pr", "puts", "why"),
+    [
+        pytest.param(
+            HC_FIRST,
+            HC_AGAIN,
+            {"state": "closed", "merged": True},
+            HC_PUTS,
+            "PR после отказа",
+            id="merged",
+        ),
+        pytest.param(
+            _answer("refused", "pr_state"),
+            HC_AGAIN,
+            HC_PR,
+            HC_PUTS,
+            "merge:",
+            id="other-reason",
+        ),
+        pytest.param(
+            HC_FIRST,
+            _answer("refused", "head_changed"),
+            HC_PR,
+            HC_PUTS,
+            "повтор не replay",
+            id="repeat-not-replayed",
+        ),
+        pytest.param(
+            HC_FIRST, HC_AGAIN, HC_PR, HC_PUTS * 2, "PUT выше: 2", id="two-puts"
+        ),
+        pytest.param(
+            HC_FIRST,
+            HC_AGAIN,
+            HC_PR,
+            [_seen(status=200)],
+            "PUT выше: Seen",
+            id="put-merged",
+        ),
+        pytest.param(
+            HC_FIRST,
+            HC_AGAIN,
+            HC_PR,
+            [_seen(held=True, up=False)],
+            "PUT выше: Seen",
+            id="409-not-from-upstream",
+        ),
+        pytest.param(HC_FIRST, HC_AGAIN, HC_PR, [], "PUT выше: 0", id="no-put"),
+    ],
+)
+def test_head_changed_verdict_refuses(
+    first: tuple[int, Response],
+    again: tuple[int, Response],
+    pr: dict[str, object],
+    puts: list[gate_proxy.Seen],
+    why: str,
+) -> None:
+    with pytest.raises(RowFailed, match=re.escape(why)):
+        live_stand.check_head_changed(first, again, pr, puts)
+
+
+RC_HEAD, RC_COMMIT, RC_BOT = "h" * 40, "c" * 40, "df-app[bot]"
+RC_RESULT = {"merge_commit": RC_COMMIT, "head_sha": RC_HEAD}
+RC_DONE = _answer("done", None, **RC_RESULT)
+RC_REPLAY = _answer("done", None, replayed=True, **RC_RESULT)
+RC_LAG = _answer("unknown", "merge_not_confirmed")
+RC_PR: dict[str, object] = {
+    "merged": True,
+    "merged_by": {"login": RC_BOT, "type": "Bot"},
+    "head": {"sha": RC_HEAD},
+    "merge_commit_sha": RC_COMMIT,
+}
+RC_PUTS = [_seen(status=200, down=False)]
+
+
+def check_rc(
+    answers: list[tuple[int, Response]],
+    pr: dict[str, object] = RC_PR,
+    puts: list[gate_proxy.Seen] = RC_PUTS,
+) -> None:
+    live_stand.check_reconciled(answers, pr, puts, bot=RC_BOT, head=RC_HEAD)
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [
+        pytest.param([RC_DONE, RC_REPLAY], id="no-lag"),
+        pytest.param([RC_LAG, RC_DONE, RC_REPLAY], id="one-lagging-read"),
+        pytest.param([RC_LAG, RC_LAG, RC_LAG, RC_DONE, RC_REPLAY], id="three"),
+    ],
+)
+def test_reconciled_verdict(answers: list[tuple[int, Response]]) -> None:
+    """Row 12: only `unknown: merge_not_confirmed` while the read lags,
+    then `done` by reconciliation (the premise named), the PR merged by the
+    bot at the head with the answered merge commit, then the same `done`,
+    replayed; one `PUT` upstream over all answers, its answer cut."""
+    check_rc(answers)
+
+
+@pytest.mark.parametrize(
+    ("answers", "pr", "puts", "why"),
+    [
+        pytest.param(
+            [RC_LAG] * 4,
+            RC_PR,
+            RC_PUTS,
+            "сверка не сошлась за 4 повторов",
+            id="lag-beyond-bound",
+        ),
+        pytest.param(
+            [_answer("unknown", "github_unavailable"), RC_DONE, RC_REPLAY],
+            RC_PR,
+            RC_PUTS,
+            "после сверки ответов 3",
+            id="other-unknown-before-done",
+        ),
+        pytest.param(
+            [RC_LAG, RC_REPLAY, RC_REPLAY],
+            RC_PR,
+            RC_PUTS,
+            "не сверка",
+            id="replay-as-first-done",
+        ),
+        pytest.param(
+            [RC_DONE, RC_REPLAY],
+            {**RC_PR, "merged_by": {"login": "someone", "type": "User"}},
+            RC_PUTS,
+            "PR на GitHub",
+            id="by-human",
+        ),
+        pytest.param(
+            [RC_DONE, RC_REPLAY],
+            {**RC_PR, "merge_commit_sha": "d" * 40},
+            RC_PUTS,
+            "PR на GitHub",
+            id="other-commit",
+        ),
+        pytest.param(
+            [RC_DONE, RC_DONE],
+            RC_PR,
+            RC_PUTS,
+            "повтор не replay",
+            id="repeat-not-replayed",
+        ),
+        pytest.param(
+            [RC_LAG, RC_DONE, RC_REPLAY],
+            RC_PR,
+            RC_PUTS + [_seen(status=200)],
+            "PUT выше: 2",
+            id="second-put-among-repeats",
+        ),
+        pytest.param(
+            [RC_DONE, RC_REPLAY],
+            RC_PR,
+            [_seen(status=200)],
+            "PUT выше: Seen",
+            id="answer-not-cut",
+        ),
+        pytest.param(
+            [(0, Response("done", None, RC_RESULT, {"kind": "stop"})), RC_REPLAY],
+            RC_PR,
+            RC_PUTS,
+            "не сверка",
+            id="no-premise",
+        ),
+    ],
+)
+def test_reconciled_verdict_refuses(
+    answers: list[tuple[int, Response]],
+    pr: dict[str, object],
+    puts: list[gate_proxy.Seen],
+    why: str,
+) -> None:
+    with pytest.raises(RowFailed, match=re.escape(why)):
+        check_rc(answers, pr, puts)
+
+
+def test_settle_merge_repeats_only_while_lagging() -> None:
+    """The identical request is repeated while it answers `unknown:
+    merge_not_confirmed` (at most `RECONCILE_TRIES` in all), then once more
+    for the replay; past the bound no replay is asked for."""
+
+    def asker(
+        script: list[tuple[int, Response]],
+    ) -> tuple[list[int], Callable[[], tuple[int, Response]]]:
+        calls: list[int] = []
+
+        def ask() -> tuple[int, Response]:
+            calls.append(1)
+            return script[len(calls) - 1]
+
+        return calls, ask
+
+    waits: list[float] = []
+    calls, ask = asker([RC_LAG, RC_LAG, RC_DONE, RC_REPLAY])
+    got = live_stand.settle_merge(ask, wait=waits.append)
+    assert got == [RC_LAG, RC_LAG, RC_DONE, RC_REPLAY] and len(calls) == 4
+    assert waits == [live_stand.POLL] * 2
+    calls, ask = asker([RC_LAG] * 9)
+    got = live_stand.settle_merge(ask, wait=waits.append)
+    assert got == [RC_LAG] * live_stand.RECONCILE_TRIES
+    with pytest.raises(RowFailed, match="не сошлась"):
+        check_rc(got)
+    refused = _answer("refused", "pr_state")
+    calls, ask = asker([refused, refused])
+    got = live_stand.settle_merge(ask, wait=waits.append)
+    assert got == [refused, refused]
+
+
+@pytest.mark.parametrize(
+    ("repo", "allowed"),
+    [
+        ({"allow_squash_merge": True}, True),
+        ({"allow_squash_merge": False}, False),
+        ({}, False),
+        (None, False),
+    ],
+)
+def test_squash_preflight_names_h7(repo: object, allowed: bool) -> None:
+    """H7: the seed's preflight is infrastructure naming the owner's step
+    unless the stand allows squash merges."""
+    if allowed:
+        live_stand.squash_problem(repo)
+        return
+    with pytest.raises(pytest.fail.Exception, match=f"{INFRA}.*H7"):
+        live_stand.squash_problem(repo)
 
 
 @dataclass
@@ -751,13 +934,20 @@ class StubGitHub:
     states: dict[int, str]
     refs: set[str]
     patched: list[int] = field(default_factory=list)
+    merged: dict[int, str] = field(default_factory=dict)
     full_name: str = "o/r"
 
     def repo(self, rest: str) -> str:
         return f"/repos/{self.full_name}{rest}"
 
     def pull(self, number: int) -> dict[str, object]:
-        return {"state": self.states[number]}
+        if number in self.merged:
+            return {
+                "state": "closed",
+                "merged": True,
+                "merge_commit_sha": self.merged[number],
+            }
+        return {"state": self.states[number], "merged": False}
 
     def ref_sha(self, branch: str) -> str | None:
         return "a" * 40 if branch in self.refs else None
@@ -799,3 +989,23 @@ def test_cleanup_closes_open_prs_and_keeps_the_merges(tmp_path: Path) -> None:
         (tmp_path / "live" / OS_DIR / "row9-cleanup.json").read_text()
     )
     assert evidence["kept_on_default_branch"] == {"seed": "m" * 40}
+
+
+def test_keep_merge_records_a_merged_pr(tmp_path: Path) -> None:
+    """Row 11's infra paths and row 12: a PR found merged is kept for row
+    9's evidence; an open one is not."""
+    gh = StubGitHub({3: "open"}, set())
+    st = live_stand.Stand(
+        cast(RolesWorld, None),
+        live_stand.StandArgs(tmp_path, tmp_path, "s", 1, 2, 3, "t"),
+        StandSecrets(tmp_path / "k", tmp_path / "t", "ghp_x"),
+        cast(live_stand.MachineGitHub, gh),
+        cast(live_stand.Product, None),
+        "master",
+        "bot[bot]",
+    )
+    assert live_stand.keep_merge(st, "stop", 3)["state"] == "open"
+    assert st.merges == {}
+    gh.merged[3] = "e" * 40
+    live_stand.keep_merge(st, "stop", 3)
+    assert st.merges == {"stop": "e" * 40}
