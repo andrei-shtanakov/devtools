@@ -4,186 +4,231 @@
 > (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use
 > checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** операция издателя `merge` действительно мержит. Предпроверку исполняет отдельная
-роль ОС `df-precheck` без ключа App, тем же кодом `governance/act_*`, что конвейер. Издатель
-сам держит свои ограничения: продукт, отправитель, операцию, точный SHA. Он публикует
-аттестацию для finalize и stop, мержит с серверным `sha` и после неопределённого исхода
-сверяется с GitHub. Приёмка — три строки мержа §4.5 живьём на стенде, на маршруте stop.
+**Goal:** операция издателя `merge` действительно мержит PR вида **stop**. Предпроверку
+исполняет отдельная роль ОС `df-precheck` без ключа App, кодом `governance/act_*`
+административного дерева. Издатель сам держит свои ограничения. Он публикует аттестацию,
+мержит с серверным `sha` и восстанавливается после сбоя по долговечным фазам. Приёмка —
+три строки мержа §4.5 живьём на стенде (маршрут stop) и строки изоляции `df-precheck` в
+root CI.
 
 **Architecture:** издатель (`df-publisher`, ключ App) остаётся на stdlib (§4.1). Для
-предпроверки он выпускает суженный токен чтения продукта и вызывает
-`sudo -n -u df-precheck /opt/df/libexec/df-precheck` по точной команде. Запрос уходит в stdin,
-вердикт возвращается в stdout. `df-precheck` исполняет административное дерево
-`/opt/df/admin/<id>`: к пакету `df/` добавляются нужные модули `governance/` и каталог
-`site/` с чистым Python steward и pyyaml. Дерево ставит root, сверка — по `admin_digest`.
-Код `df-build` не исполняет ни один из двух процессов.
+предпроверки он выпускает суженный токен чтения одного продукта и вызывает
+`sudo -n -u df-precheck /opt/df/libexec/df-precheck` по точной команде. Запрос с токеном
+уходит в stdin, связанный вердикт возвращается в stdout. `df-precheck` исполняет
+административное дерево `/opt/df/admin/<id>`: `df/`, модули замыкания `governance/`,
+`contracts/` и `site/`. В `site/` лежит только чистый Python (steward по коммиту, pyyaml из
+sdist), всё сверено с `uv.lock` и покрыто `admin_digest`. Историю доставок проверяющий
+читает из временного git-снимка своим адаптером. Код `df-build` не исполняет ни один из
+двух процессов.
 
-**Tech Stack:** Python ≥ 3.12. В `df/` только stdlib. `governance/act_*` использует
-steward `68f46a9` и pyyaml, оба без нативных расширений. Системные `sudo`, `git`, `openssl`.
-Тесты: pytest, ruff, pyrefly.
+**Tech Stack:** Python ≥ 3.12. В `df/` только stdlib. В `governance/act_*` — steward
+`68f46a9` и pyyaml 6.0.3 в чистом Python. Системные `sudo` (классический 1.9), `git`,
+`openssl`. Тесты: pytest, ruff, pyrefly.
 
 **Spec:** `docs/superpowers/specs/2026-10-13-df-installer-design.md` **rev 10** (этот PR:
-§2.5, §3.9, §4.1, §4.5, §5.4, §5.5, §10) и спека A **rev 16**. Этап 2b — это §2.5, строка 2b;
-§4.5, три строки мержа; §5.4, исполнение `merge`; §5.6 в части `merge`; §10, строка 2b.
-План спорит со спекой, а не заменяет её: исполнитель читает обе.
+§2.5, §3.9, §4.1, §4.5, §5.4, §5.5, §10) и спека A **rev 16**. Этап 2b — §2.5, строка 2b;
+§4.5, три строки мержа и строки `df-precheck`; §5.4, исполнение `merge` для stop; §5.6 в
+части `merge`; §10, строка 2b. План спорит со спекой, а не заменяет её.
 
 ## Решения (03.11)
 
 1. **Предпроверка — отдельная роль ОС `df-precheck`** (вариант Б, решение владельца 03.11).
-   Держатель ключа App не загружает сторонних пакетов. Предпроверка исполняется от роли без
-   ключа, из административного дерева, а не из релиза `df-build`. Четыре требования
-   (Codex, приняты владельцем 03.11):
+   Держатель ключа App не загружает сторонних пакетов. Четыре требования (Codex, приняты
+   владельцем 03.11):
    1. `df-precheck` не читает ключ App, память и закрытые файлы издателя (`/etc/df/secrets`,
-      `/var/lib/df/publisher`, `/var/lib/df/perimeter`). Лишних дескрипторов он не наследует
-      (sudo `closefrom`, `close_fds`), токенов записи не получает. Токен чтения выпускается
-      на один продукт с `contents: read`, `pull_requests: read`.
+      `/var/lib/df/publisher`, `/var/lib/df/perimeter`). Лишних дескрипторов не
+      наследует, токенов записи не получает.
    2. Проверяющий запускается только фиксированной командой
-      `/opt/df/libexec/df-precheck` без аргументов. Ни отправитель, ни запрос не выбирают
-      программу, путь, модуль или вид проверки вне таблицы.
-   3. Вердикт связан с запросом: `schema`, `nonce`, `repository_id`, `pr`, `head_sha`,
-      `kind`, `request_digest`. Таймаут, ненулевой код, вывод больше предела, разбор с
-      ошибкой или несовпадение любого поля дают отказ
-      `refused: precheck_failed: <причина>`.
-   4. Издатель сам проверяет продукт по `products.toml`, отправителя, операцию,
-      `run_id`, `head_sha`, вид и полный состав PR. Мержит он только с `sha = head_sha`.
-      Ответ проверяющего разрешает **ровно этот** мерж и не открывает никакого другого
-      запроса к GitHub.
+      `/opt/df/libexec/df-precheck` без аргументов.
+   3. Вердикт связан с запросом (`nonce`, `request_digest`, `repository_id`, `pr`,
+      `head_sha`, `kind`). Таймаут, ненулевой код, вывод больше предела, разбор с ошибкой
+      или несовпадение любого поля дают отказ.
+   4. Издатель сам проверяет продукт, отправителя, операцию, `run_id`, `head_sha`, ветку,
+      вид и полный состав PR со статусами. Мержит ровно этот PR с `sha = head_sha`.
 
-   **Граница (записать в спеку §5.4 явно):** изоляция защищает секреты издателя. Правильность
-   вердикта, если сама предпроверка скомпрометирована (подмена steward или pyyaml в
-   административном дереве), она не гарантирует. Такой код может выдать «разрешено». Это
-   ограничивают пины и хеши административного дерева (решение 3), серверный `sha` и проверка
-   фактов доставки по спеке A, которая окончательно устанавливает действительность акта.
-2. **Периметр и журнал — у издателя** (следствие требования 1). Для candidate и brief
-   издатель сам вычисляет состояние корня тем же кодом, что `perimeter-status` (§5.2).
-   При `blocked` или `unavailable` он отказывает до вызова проверяющего. Состояние уходит
-   проверяющему полем запроса `perimeter`. В проверяющем `act_trust.Journal` — адаптер
-   только для чтения над этим полем. Нарушения, которые проверяющий обнаружил
-   (самоотчёт установок, форма истории), возвращаются в вердикте списком `violations`.
-   Издатель регистрирует их своей логикой `record-violation`, источник обнаружения —
-   `precheck`, и отказывает. Файлов журнала проверяющий не читает. Установки App издатель
-   проверяет сам, как в 2a (решение 10 плана 2a), поэтому `PremergeDeps.installations` у
-   проверяющего — `None`.
-3. **Состав административного дерева.** `/opt/df/admin/<id>/` содержит:
+   **Граница** (спека §5.4): изоляция защищает секреты издателя, но не правильность
+   вердикта, если предпроверка скомпрометирована.
+2. **В 2b исполняется только вид stop. Candidate и finalize переходят в этап 3** (r1 N3,
+   N5, N7, N13; **на подпись владельца** — это сужает строку 2b таблицы §2.5).
+   Основание проверено по коду:
+   - предпроверка candidate (`act_premerge._trust` → `act_trust.load_trust`) требует
+     привязки `/etc/df/trust.toml` и непустого самоотчёта credentials;
+   - решение по доставке для finalize (`act_node._delivery_outcome`) требует того же
+     `trust`;
+   - единственный production `EpochSource` издателя — `NO_BINDING` (`perimeter.py:236`).
+
+   Привязка, источник эпох, контекст credentials производного токена, источник
+   `bundle_dir`/DAG для D16, идентичность App-мержера и `review_id` из окончательного
+   решения доставки проектируются вместе в плане этапа 3. Там же общая функция поверхности
+   D16 по полному составу PR. В 2b издатель отвечает на candidate и finalize
+   `refused: kind_unavailable_until_stage3: <kind>`, на brief —
+   `refused: brief_precheck_unavailable` (часть C), и никого не зовёт. Роль, протокол,
+   административное дерево, фазы мержа и сверка строятся в 2b и исполняются живьём на stop.
+   Этап 3 добавляет виды, а не механизм.
+3. **Состав административного дерева** (r1, оценка решения 3). `/opt/df/admin/<id>/`:
    - `df/`, как раньше;
-   - `governance/` — ровно модули замыкания импорта `governance/act_precheck.py`. Список
-     хранится константой `df/admin_tree.py:GOVERNANCE_MODULES`, тест сверяет его с
-     AST-замыканием;
-   - `contracts/` — ровно файлы, которые эти модули читают относительно `__file__`
-     (`contracts/approval-branches/v1/patterns.env` и то, что найдёт тест Task 4);
-   - `site/` — только чистый Python: пакет `yaml/` из колеса pyyaml (версия и sha256 колеса
-     из `uv.lock`, нативный `_yaml*.so` не копируется) и пакет `steward/` из `src/steward`
-     коммита, закреплённого в `uv.lock` (`68f46a9…`). Root забирает этот коммит git'ом
-     в `admin-home`: `git init` + `fetch <url> <sha>`, затем сверяет, что `FETCH_HEAD` равен
-     пину.
+   - `governance/` — модули **AST-замыкания** `governance/act_precheck.py`, включая
+     условные и отложенные импорты. Константа `df/admin_tree.py:GOVERNANCE_MODULES`, тест
+     сверяет её с замыканием. Чтобы замыкание было узким, построчный разбор first-parent
+     выносится из `governance/ops.py` в новый `governance/act_git_rows.py` (Task 2), а
+     `ops.py` импортирует его оттуда;
+   - `contracts/` — ровно файлы, которые эти модули читают относительно `__file__`.
+     Перечень `CONTRACT_FILES` сверяет тест;
+   - `site/yaml/` — каталог `lib/yaml` из **sdist** PyYAML 6.0.3. Колеса `none-any` в
+     `uv.lock` нет (замер r1, `uv.lock:481–484`, sha256
+     `d76623373421df22fb4cf8817020cbb7ef15c725b9d5e45f17e189bfc384190f`). Архив
+     проверяется по sha256 до распаковки. При извлечении нет ссылок, абсолютных путей и
+     `..`, сборки нет;
+   - `site/steward/` — `src/steward` коммита
+     `68f46a9b2e5cfe9ecd1f09524e986c3f687f4155`. Root делает `git init` и
+     `git fetch <url из uv.lock> <sha>` в `admin-home`, сверяет `FETCH_HEAD` с пином и
+     извлекает дерево через `git archive`.
 
-   Замер 03.11: при импорте `act_premerge`, `act_status`, `act_envelope`,
-   `steward.gatecheck.approval` и `steward.approvalfacts.v3` сторонние модули — только
-   `steward` и `yaml`. В `governance/` `CSafeLoader` нигде не используется, поэтому
-   достаточно чистого pyyaml. Сборки колёс нет, бэкенд сборки не исполняется,
-   `uv pip install` не используется. Проверка дерева (`admin_code_problems`) дополнительно
-   отвергает в `admin/<id>` любой `*.so`, `*.dylib`, `*.pyd` и `*.pth`. `admin_digest`
-   покрывает всё дерево.
-4. **Вход проверяющего — существующий вход команды** (как решение 3 плана 2a). Обёртка
-   `/opt/df/libexec/df-precheck` запускает `<административный Python> -I -B -S
-   /opt/df/bin/darkfactory-entry.py precheck serve`. Вход сверяет `admin/<id>` по
-   `admin_digest` до импорта. Подкоманда `precheck serve` добавляет `admin/<id>/site` в
-   `sys.path` после `admin/<id>` и импортирует `governance.act_precheck`. Замороженный договор
-   входа не меняется.
-5. **Новая роль и одно правило sudoers.** `df-precheck` входит в `platform.SERVICE_USERS`
-   и в `roles.ROLE_USERS`. Домашний каталог `0700`, оболочка nologin, без
-   административных групп, без секретов. Правило:
-   `df-publisher ALL=(df-precheck) NOPASSWD: NOSETENV: /opt/df/libexec/df-precheck ""`
-   (`""` запрещает аргументы). У `df-precheck` своих правил нет (`_NO_RULES`).
-   `!log_output` действует и здесь: в запросе есть токен чтения.
-6. **Вид stop — шаблон контракта** (решение владельца 03.11).
-   `contracts/approval-branches/v1/patterns.env` получает
-   `APPROVAL_STOP_TEMPLATE=stop/{ws_id}-{node}-g{generation}`. Производитель
-   (`act_node._stop_pr`) и проверяющий (`approval_branches`, издатель) берут правило оттуда.
-   Это путь обвязки и authority-root, мерж владельца.
-7. **Вид brief в 2b отказывает** `refused: brief_precheck_unavailable`. Предпроверка
-   брифа — часть C (Task 17 плана approval-act), её ещё нет.
-8. **Способ мержа — `squash`**, константа издателя. Rebase-мерж запрещён спекой A, а
-   линейная история ruleset'а merge-коммит отвергает. Отказ GitHub (squash выключен в
-   продукте) — `refused: <причина GitHub>`.
-9. **Аттестация finalize и stop** (§5.4): после положительного вердикта издатель публикует
-   ревью App `APPROVE` с `commit_id = head_sha` и маркером
-   `<!-- df-publisher:v1 attestation=<finalize|stop> request_key=<key> head_sha=<sha> -->`.
-   Потом пишет намерение мержа и мержит. Повтор после сбоя сначала ищет свою аттестацию по
-   маркеру (как `reconcile_review`), второй не публикует.
-10. **Сверка мержа** (§5.6). Намерение `{"request_key","head_sha","kind","intent_at"}`
-    записывается до `PUT`. После таймаута, сбоя транспорта или 5xx издатель читает
-    `GET /pulls/{n}`. Результат `done` с `merge_commit`, если `merged` истинно,
-    `merged_by.login == <slug>[bot]`, `merged_by.type == "Bot"`, `head.sha == head_sha` и
-    `merged_at >= intent_at`. Иначе `unknown: merge_not_confirmed`. Слепого повтора нет.
-    Если PR смёржен кем-то другим или с другой головой, результатом запроса он не
-    объявляется.
-11. **История доставок у проверяющего** читается из временного снимка git, а не через
-    API. Проверяющий делает `git init --bare` во временном каталоге своего HOME и
-    `fetch --no-tags --filter=blob:none origin <base_tip> <head_sha>`. Заголовок
-    авторизации передаётся через `--config-env`, токена нет ни в argv, ни в конфиге.
-    Дальше работает класс `act_precheck.SnapshotGit` с методами `first_parent_changes`,
-    `show_file`, `show_file_bytes`, `commit_files`. Формат вывода тот же, что у
-    `governance/ops.py:_FIRST_PARENT_LOG` / `_parse_first_parent`, переиспользуется
-    импортом. После проверки снимок удаляется.
-12. **Живая приёмка 2b — маршрут stop** (решение владельца 03.11). Строки §4.5 «смена head»,
-    «идентичный повтор», «сверка после таймаута» исполняются на stop-PR стенда. Стенд
-    засевается доставленной заявкой `review/v1` поколения 1 (коммит в `master`). Живые
-    candidate и finalize **не закрыты** до их приёмки: candidate требует привязки
-    `df-trust` и стендов политики (этап 3), finalize — акта на candidate. Evidence и §10 их
-    учитывают отдельно, без заявления «все виды мержа проверены».
-13. **Стенд заводится заново** (TODO `df-stage2a-stand-secrets-revoke`). Шаги человека
-    H5–H8 (ниже). Репозиторий, App и environment те же, что в 2a: `df-roles-probe-private`,
-    App 5285716, `df-stage2-live`. Machine user — `betta-tester` с новым classic PAT (R15-2).
-    Ruleset'а на стенде нет (R15-1), поэтому живой мерж без одобрения GitHub пропустил бы.
-    Аттестацию строки проверяют по факту ревью, а не по отказу ruleset.
-14. **Хвосты части B для App-режима `merge-pr.sh`** (TODO `df-installer-stage2b`, п. 9a/9c/9d)
-    — Task 9:
-    - 9c: путь ключа не должен проходить через символические ссылки, ни сам файл, ни
-      каталоги после `apps/`;
-    - 9d: токен установки отзывается после `PUT` (`DELETE /installation/token`) при любом
-      исходе;
-    - 9a остаётся как есть, с ruling в TODO: факты PR и стоп-кран от логина не зависят,
-      сбой доступа даёт отказ.
+   Проверка дерева отвергает `*.so`, `*.dylib`, `*.pyd`, `*.pth`, ссылки и байт-код.
+   `admin_digest` покрывает всё. Вход команды (root, читатели) и издатель `site/` не
+   импортируют: `site` добавляет только подкоманда `precheck serve`, после проверки UID.
+   Добавляет она его **в конец** `sys.path`, после `admin/<id>` и путей stdlib.
+4. **Вход проверяющего — существующий вход команды.** Обёртка `df-precheck` запускает
+   `<административный Python> -I -B -S /opt/df/bin/darkfactory-entry.py precheck serve`.
+   Вход сверяет `admin/<id>` по `admin_digest` до импорта. Договор входа не меняется.
+5. **Роль и правило sudoers** (r1 N10, N11). `df-precheck` входит в
+   `platform.SERVICE_USERS` и `roles.ROLE_USERS`: nologin, домашний каталог `0700`, без
+   административных групп и секретов, своих правил нет (`_NO_RULES`). Правило и его
+   Defaults:
+   ```
+   Defaults!/opt/df/libexec/df-precheck command_timeout=180, !log_input, !log_output, !log_stdin, !log_stdout, !log_stderr, !log_ttyin, !log_ttyout
+   df-publisher ALL=(df-precheck) NOPASSWD: NOSETENV: /opt/df/libexec/df-precheck ""
+   ```
+   - `command_timeout` — sudo (root) сам завершает команду и её группу процессов. Издатель
+     убить процесс другой UID не может, а SIGKILL, посланный sudo, до команды не доходит.
+     Внешний таймаут издателя (`PRECHECK_TIMEOUT = 200.0`) срабатывает позже и только
+     страхует, отказ остаётся тем же;
+   - журналирование входа и выхода выключено. В stdin идёт токен чтения, а `log_input`
+     и `log_stdin` его иначе записали бы. `sudoers.LOG_KEYS` расширяется ключами входа,
+     а `doctor` проверяет **эффективные** значения для этой команды по `sudo -l -U
+     df-publisher` (разбор как в 2a). Непроверяемая настройка — «нарушено».
+6. **Вид stop — шаблон контракта** (решение владельца 03.11):
+   `APPROVAL_STOP_TEMPLATE=stop/{ws_id}-{node}-g{generation}`. Ветка разбирается **при
+   известном `ws_id`**, который берётся из пути файла остановки:
+   `parse_stop_branch(ref, ws_id) -> tuple[str, int] | None`. Производитель
+   (`act_node._stop_pr`), проверяющий и издатель пользуются одним правилом.
+7. **Способ мержа — `squash`**, константа издателя.
+8. **Фазы операции `merge`** (r1 N1, N2, N16). Состояние операции — последовательность
+   долговечных записей фаз, каждая пишется один раз (`store.phase(res, name, payload)` →
+   `<intent>.<name>`, `fsync` файла и каталога):
+   - `attest` пишется **до** `POST` ревью-аттестации: `{request_key, head_sha, kind}`;
+   - `attested` — после ответа GitHub, подтверждённого чтением (автор = бот App,
+     `commit_id = head_sha`, `state = APPROVED`, маркер с `request_key`): `{review_id}`;
+   - `merge` — до финального чтения PR: `{request_key, head_sha}`;
+   - `armed` — после чтения, которое **после** записи `merge` показало PR открытым с
+     головой `head_sha`: `{read_at}`. Только после `armed` выполняется `PUT`;
+   - результат — как в 2a (`store.result`).
+
+   Пока издатель держит **блокировку PR** (`flock` на
+   `/var/lib/df/publisher/locks/merge-<repository_id>-<pr>`) от `merge` до результата,
+   второй запрос того же App на тот же PR не может вклиниться. Значит, мерж ботом с
+   `head_sha` после `armed` — наш мерж, и метки времени не сравниваются (N16).
+
+   **Восстановление идёт первым** (N1). Если фазы есть, после проверок идентичности и
+   полномочий (продукт, `run_id`, self-check, токен) издатель сразу сверяет и ничего
+   нового не делает:
+   - есть `armed`: `GET /pulls/{n}`; смёржен, `merged_by` = бот (`login`, `type == "Bot"`),
+     `head.sha == head_sha` → `done` с `merge_commit`; открыт → `refused: not_merged` с
+     `verified_not_done=True`; иное → `unknown: merge_not_confirmed`;
+   - есть `merge`, нет `armed` (`PUT` не было): PR открыт, голова прежняя → путь продолжается
+     с чтения и `armed`; смёржен → `unknown: merge_not_confirmed` (чужое действие не
+     объявляется своим);
+   - есть `attest`, нет `attested`: полный обход ревью PR. Ровно одна своя аттестация →
+     записать `attested` и продолжать. Нет → `unknown: attestation_not_confirmed` без
+     повторного `POST`: клиент повторяет с новым `request_id`. Больше одной →
+     `unknown: duplicate_attestations`.
+
+   Отказ с `verified_not_done=True` проходит через `merge()` до `main._run_handler`
+   (сейчас `merge.py:300–301` теряет признак). Отказы до фазы `attest` — обычные `refused`.
+9. **Аттестация** (§5.4): ревью App `APPROVE` на `commit_id = head_sha` с маркером
+   `<!-- df-publisher:v1 attestation=stop request_key=<key> head_sha=<sha> -->`. Тело
+   формирует издатель, недоверенного текста нет.
+10. **История доставок у проверяющего** (r1 N6). Адаптер
+    `governance/act_history_snapshot.py:SnapshotHistory` реализует ровно те методы `Ops`,
+    которые вызывает `act_status.load_history`. Остальные дают `AttributeError`
+    (deny-by-default, как у `SnapshotOps`):
+    - git-методы над временным bare-репо в HOME роли: `first_parent_changes`,
+      `show_file`, `show_file_bytes`, `rev_parse`, `fetch_branch`. Fetch идёт без
+      `--filter`, блоб-фетчей нет. Авторизация — переменные окружения процесса git
+      `GIT_CONFIG_COUNT=1`, `GIT_CONFIG_KEY_0=http.extraHeader`,
+      `GIT_CONFIG_VALUE_0=Authorization: Bearer <token>`, без argv и без файла конфига.
+      Догрузка squash-головы — `refs/pull/<N>/head`, как в `_pr_head`;
+    - forge-методы через `TokenTransport` (Task 2) поверх REST:
+      `prs_containing_commit(slug, sha)` → `GET /repos/{slug}/commits/{sha}/pulls`,
+      нормализуется в `{"number", "state": "MERGED"|…, "mergeCommit"}`;
+      `pr_facts(slug, pr)` → `GET /repos/{slug}/pulls/{pr}` → `{"headRefOid"}`.
+      Форма ответа — по снимкам steward и документации REST, не выдуманная.
+
+    `load_history(ops, state, base_ref)` принимает вместо `RunState` протокол
+    `act_status.HistoryScope` (`ws_id`, `repo_slug`, `target_dir`). `RunState` ему
+    удовлетворяет, тесты `act_status` не меняются.
+11. **Статусы изменений — часть фактов PR** (r1 N8). Издатель передаёт `changes`:
+    список `[status, path, previous_filename|None]` из compare. Stop требует ровно одну
+    запись `added` по пути `stop_path(...)`, rename отвергается. Ту же форму издатель
+    проверяет сам при маршрутизации (требование 4), проверяющий — повторно.
+12. **Evidence `merge`** (r1 N14): `kind`; `precheck` (`version`, `admin_digest` из
+    вердикта, `revoke`: `ok|<ошибка>`); `attestation_review_id`; `merge_commit`;
+    `trust_root` — `{"unavailable": "no_binding"}` в 2b, по форме §5.5. Метаданные
+    предпроверки записываются в фазу `attest` и при восстановлении берутся оттуда, а не
+    вычисляются заново.
+13. **Живая приёмка 2b — маршрут stop** (решение владельца 03.11; r1 N9, N15). Засев —
+    техническим PR. Машинный пользователь открывает PR с манифестом `review/v1` для
+    `ws = stand-<tag>`, узел `n1`, и мержит его через API (squash). Связь merge commit ↔
+    PR ↔ head — настоящая, `load_history` видит `DeliveredRequest` поколения 1. Засев не
+    является приёмкой candidate и не изображает человеческий акт. Это записывается в
+    evidence. `gate_proxy` получает режимы «держать `PUT`» и «выполнить `PUT` выше,
+    оборвать ответ вниз».
+14. **Стенд заводится заново** (TODO `df-stage2a-stand-secrets-revoke`). Репо, App и
+    environment те же, что в 2a. Machine user `betta-tester` получает новый classic PAT
+    (R15-2). Ruleset'а нет (R15-1): аттестация доказывается фактом ревью, серверное
+    принуждение ruleset 2b не доказывает. Шаги человека — H5–H8.
+15. **Хвосты части B для App-режима `merge-pr.sh`** (п. 9a/9c/9d) — Task 9:
+    - 9c: путь ключа без ссылок, ни сам файл, ни каталоги после `apps/`;
+    - 9d: токен установки отзывается через `trap` сразу после выдачи, при любом выходе;
+      исходный код выхода сохраняется;
+    - 9a: ruling в TODO.
 
 ## Global Constraints
 
-- Пакет `df/` — только stdlib (`tests/df/test_launcher_entry.py:340`, шаблон проверки
-  `names - {"__future__"} <= set(sys.stdlib_module_names)`). Это касается и
-  `df/publisher/precheck.py`.
-- `governance/act_precheck.py` импортирует только `governance/act_*`, `governance/facts`,
-  `governance/ssot_env`, `governance/ops` (только `_FIRST_PARENT_LOG`, `_parse_first_parent`,
-  `FirstParentRows`), `steward`, `yaml` и stdlib. Импорт `df` запрещён.
-- Код не читает `_cowork_output/`. Разговор по-русски, код и имена файлов по-английски.
-- Тесты не трогают `~/.claude`, `~/.codex`, `~/.config/gh` и настоящих credentials. Сеть в
-  тестах — только локальный фейк (`tests/df/fake_github.py`).
-- Тесты запускаются на переднем плане:
-  `perl -e 'alarm 590; exec @ARGV' -- uv run --group governance pytest <path> -q
-  -p no:cacheprovider`.
-- Все файлы плана, кроме `governance/edge_check/publish.py` и
-  `tests/test_edge_check_*.py`, — authority-root (`df/`, `tests/df/`, `governance/act_`,
-  `contracts/approval-branches/`, `merge-pr.sh`, `.github/`). PR этапа сливает **владелец**.
-- Пределы: запрос к проверяющему ≤ 64 КиБ, вердикт ≤ 64 КиБ, `PRECHECK_TIMEOUT = 180.0` с
-  (две секунды на границу акта + снимок git), `COMPARE_FILE_CAP = 300` (без изменений).
-- Строки ответа — схема `df/publisher-response/v1` без новых верхних ключей. Новые причины
-  — только в `reason`.
+- Пакет `df/` — только stdlib, включая `df/publisher/precheck.py` (проверка
+  `tests/df/test_launcher_entry.py:340`).
+- `governance/act_precheck.py` и его замыкание: `governance/act_*`, `governance/facts`,
+  `governance/ssot_env`, `governance/approval_branches`, `steward`, `yaml`, stdlib. Ни
+  `df`, ни `governance/ops`, ни `governance/runner` в замыкании быть не должно.
+- `_cowork_output/` не читается. Разговор по-русски, код по-английски.
+- Тесты не трогают `~/.claude`, `~/.codex`, `~/.config/gh` и настоящих credentials.
+  Сеть — только локальные фейки.
+- Тесты на переднем плане:
+  `perl -e 'alarm 590; exec @ARGV' -- uv run --group governance pytest <path> -q -p no:cacheprovider`.
+- Все файлы плана, кроме `governance/ops.py`, — authority-root (`df/`, `tests/df/`,
+  префикс `governance/act_`, `contracts/approval-branches/`, `merge-pr.sh`,
+  `approval_branches.sh`, `.github/`). PR этапа сливает **владелец**.
+- Пределы: запрос ≤ 64 КиБ, вердикт ≤ 64 КиБ (параметр `limit` у `run_with_input`,
+  сейчас 1 МиБ, `platform.py:269`); `command_timeout=180`, `PRECHECK_TIMEOUT = 200.0`;
+  `COMPARE_FILE_CAP = 300`.
+- Ответ издателя — схема `df/publisher-response/v1` без новых верхних ключей.
 
 ## Review Focus
 
-1. **Проверяющий завис или ответил чужим вердиктом.** Ожидание: отказ
-   `precheck_failed: timeout` / `binding_mismatch`, процесс убит, мержа нет. Тест — Task 7,
-   `test_precheck_timeout_kills_and_refuses`, `test_precheck_verdict_for_other_head_refused`.
-2. **Голова сменилась между вердиктом и мержем.** Ожидание: GitHub отвечает 409 на `sha`,
-   исход `refused: head_changed`, намерение остаётся, повтор того же запроса даёт
-   `refused` через сверку, а не второй `PUT`. Тест — Task 8, `test_head_change_after_precheck`.
-3. **Ответ на `PUT` потерян, а PR смёржен.** Ожидание: сверка находит мерж ботом с этой
-   головой после `intent_at` и возвращает `done`. Смёржен человеком — `unknown`. Тест —
-   Task 8, `test_lost_put_reconciles_done` / `test_merged_by_human_is_unknown`.
-4. **Посторонний файл в раннем коммите candidate при чистом последнем evidence-коммите.**
-   Ожидание: отказ D16 по полному составу PR. Тест — Task 2, `test_foreign_file_in_early_commit`.
-5. **Stop на устаревшее поколение или с расхождением пути и содержимого.** Ожидание: отказ.
-   Тест — Task 4, `test_stop_for_superseded_generation_refused`,
-   `test_stop_path_content_mismatch_refused`.
+1. **Проверяющий завис вместе с потомком git.** Ожидание: sudo завершает группу по
+   `command_timeout`, издатель отвечает `refused: precheck_failed: timeout`, процессов
+   роли и снимка не остаётся. Тест — Task 10, root, обе ОС.
+2. **Голова сменилась между вердиктом и мержем.** Ожидание: `armed` не пишется или `PUT`
+   получает 409; исход `refused: head_changed`; повтор — тот же исход без второго `PUT`.
+   Тест — Task 8, `test_head_change_after_precheck`.
+3. **Ответ на `PUT` потерян, PR смёржен.** Ожидание: `done` по фазе `armed`. Смёржен
+   человеком — `unknown`. Тест — Task 8, `test_lost_put_reconciles_done`,
+   `test_merged_by_human_is_unknown`.
+4. **Ответ на `POST` аттестации потерян.** Ожидание: восстановление находит ровно одну
+   свою аттестацию и продолжает. Не находит — `unknown`, второго `POST` нет. Тест — Task 8,
+   `test_lost_attestation_post_*`.
+5. **Stop на устаревшее поколение, изменение уже доставленного файла остановки,
+   расхождение пути, ветки и содержимого.** Ожидание: отказ до аттестации. Тест — Task 4.
 
 ---
 
@@ -191,279 +236,198 @@ steward `68f46a9` и pyyaml, оба без нативных расширений
 
 | Файл | Роль | Task |
 |---|---|---|
-| `contracts/approval-branches/v1/patterns.env` | `APPROVAL_STOP_TEMPLATE` | 1 |
-| `governance/approval_branches.py`, `governance/act_node.py` | `stop_branch(ws, node, gen)` из контракта | 1 |
-| `governance/act_surface.py` (новый) | общая функция поверхности D16 по набору путей | 2 |
-| `governance/edge_check/publish.py` | `surface_violations` через `act_surface` | 2 |
-| `governance/act_forge_http.py` (новый) | `Transport` steward поверх HTTPS с токеном | 3 |
-| `governance/act_precheck.py` (новый) | программа проверяющего: схемы, виды, снимок git | 4 |
-| `df/admin_tree.py` (новый), `df/admin.py` | состав и установка административного дерева, `site/` | 5 |
-| `df/roles*.py`, `df/sudoers.py`, `df/libexec.py`, `df/platform.py`, `df/cli.py`, `df/doctor.py` | роль `df-precheck`, правило, обёртка, `precheck serve` | 6 |
-| `df/publisher/precheck.py` (новый) | клиент издателя: токен, вызов, связывание вердикта | 7 |
-| `df/publisher/merge.py`, `df/publisher/ops.py` | stop, аттестация, намерение, `PUT`, сверка, evidence | 8 |
-| `merge-pr.sh`, `governance/act_app_token.py` | хвосты 9c/9d | 9 |
-| `tests/df/test_acceptance_root_roles.py`, `.github/workflows/df-stage1.yml` | root-строки изоляции `df-precheck` | 10 |
-| `tests/df/live_stand.py`, `.github/workflows/df-stage2-live.yml` | живые строки 10–12 | 11 |
-| `docs/evidence/2026-11-XX-df-stage2b-acceptance.md`, `TODO.md` | evidence и учёт | 12 |
+| `contracts/approval-branches/v1/patterns.env`, `approval_branches.{py,sh}`, `governance/act_node.py` | шаблон stop | 1 |
+| `governance/act_git_rows.py` (новый), `governance/ops.py`, `governance/act_forge_http.py` (новый) | разбор first-parent, HTTPS-транспорт с токеном | 2 |
+| `governance/act_history_snapshot.py` (новый), `governance/act_status.py` | адаптер истории, `HistoryScope` | 3 |
+| `governance/act_precheck.py` (новый) | программа проверяющего (stop) | 4 |
+| `df/admin_tree.py` (новый), `df/admin.py` | административное дерево | 5 |
+| `df/platform.py`, `df/roles*.py`, `df/sudoers.py`, `df/libexec.py`, `df/cli.py`, `df/doctor.py` | роль, правило, обёртка, `precheck serve` | 6 |
+| `df/platform.py` (`limit`), `df/publisher/precheck.py` (новый) | клиент издателя | 7 |
+| `df/publisher/{merge,ops,store,main}.py` | маршрут stop, фазы, аттестация, `PUT`, сверка, evidence | 8 |
+| `merge-pr.sh`, `governance/act_app_token.py` | 9c/9d | 9 |
+| `tests/df/test_acceptance_root_roles.py`, `tests/df/roles_world.py`, `.github/workflows/df-stage1.yml` | root-строки | 10 |
+| `tests/df/gate_proxy.py`, `tests/df/live_stand.py`, `.github/workflows/df-stage2-live.yml` | живые строки | 11 |
+| evidence, `TODO.md` | учёт | 12 |
 
 ---
 
 ### Task 1: шаблон ветки stop в контракте
 
-**Files:**
-- Modify: `contracts/approval-branches/v1/patterns.env` (после строки 42)
-- Modify: `governance/approval_branches.py`, `governance/act_node.py:1062-1071`
-- Modify: `df/publisher/merge.py:141-154` (распознавание ветки stop)
-- Test: `tests/test_approval_branches.py`, `tests/test_act_node.py` (или файл, где тест
-  `_stop_pr`), `tests/df/test_publisher_merge.py`
+**Files:** `contracts/approval-branches/v1/patterns.env` (после строки 42),
+`governance/approval_branches.py`, `approval_branches.sh`, `governance/act_node.py:1062-1071`,
+`df/publisher/merge.py:141-185`; тесты `tests/test_approval_branches.py`, тест `_stop_pr`,
+`tests/df/test_publisher_merge.py`, `tests/test_harness_trust.py`.
 
 **Interfaces:**
-- Produces: строка `APPROVAL_STOP_TEMPLATE=stop/{ws_id}-{node}-g{generation}`;
-  `approval_branches.stop_branch(ws_id: str, node: str, generation: int) -> str`;
-  `approval_branches.parse_stop_branch(ref: str) -> tuple[str, str, int] | None`;
-  в `df/publisher/merge.py` — `_STOP_KEY = "APPROVAL_STOP_TEMPLATE"` и `"stop"` в
-  `branch_kinds`.
+- Produces: `approval_branches.stop_branch(ws_id: str, node: str, generation: int) -> str`;
+  `approval_branches.parse_stop_branch(ref: str, ws_id: str) -> tuple[str, int] | None`;
+  `df/publisher/merge.py`: `_STOP_KEY = "APPROVAL_STOP_TEMPLATE"`, вид `stop` в
+  `branch_kinds`; `route(head_ref, changes, patterns) -> Kind | Refused`, где
+  `changes: Sequence[Change]`, `Change = tuple[str, str, str | None]`.
 
-- [ ] **Step 1: Тесты.** `test_stop_branch_renders_template`:
-  `stop_branch("ws1", "design", 3) == "stop/ws1-design-g3"`.
-  `test_parse_stop_branch_roundtrip` для пар (ws, node) с дефисами в `node`:
-  `parse_stop_branch("stop/ws1-acc-test-g12")` даёт кортеж, если `ws_id` берётся из
-  известного `ws` вызова. Если разбор двусмысленный, функция принимает `ws_id` аргументом:
-  `parse_stop_branch(ref, ws_id) -> tuple[str, int] | None`. Выберите вторую форму, если
-  двусмысленность подтвердится на `ws_id` с дефисом. Тест с `ws_id="a-b"` и
-  `node="c"` обязателен. `test_act_node_stop_pr_uses_contract`: ветка `_stop_pr` равна
-  `stop_branch(...)`. В `df`: `test_stop_branch_routes_stop` — ветка `stop/ws-n-g2` плюс один
-  путь `workstreams/ws/approvals/stops/n-g2.yaml` дают `route(...) == "stop"`;
-  `test_stop_glob_equals_the_contract` по образцу `test_glob_equals_the_contract` (`:114`).
-- [ ] **Step 2:** прогнать тесты, убедиться, что они падают.
-- [ ] **Step 3:** добавить строку в `patterns.env` с комментарием «stop-PR — запись
-  остановки поколения (спека A §9.1); мержит агент (D5) или издатель (спека B §5.4)».
-  `approval_branches.py` и `approval_branches.sh` читают ключ тем же способом, что
-  `APPROVAL_CANDIDATE_TEMPLATE`. В `route()` (`merge.py:167-185`) stop требует ровно один
-  путь `STOP_PATH`, а `node` и `generation` пути совпадают с веткой. Иначе
-  `ambiguous_kind`.
-- [ ] **Step 4:** прогнать `tests/test_approval_branches.py tests/df/test_publisher_merge.py`
-  и тесты `act_node` — PASS. Отдельно `tests/test_harness_trust.py`: путь обвязки изменён,
-  проверка хешей обвязки должна быть согласована.
-- [ ] **Step 5:** коммит `feat(approval-branches): stop branch template in the contract`.
+- [ ] **Step 1: Тесты:** `test_stop_branch_renders_template`
+  (`stop_branch("ws1","design",3) == "stop/ws1-design-g3"`);
+  `test_parse_stop_branch_with_dashed_ws_and_node` (`ws_id="a-b"`, `node="c-d"`);
+  `test_parse_stop_branch_rejects_other_ws`; `test_act_node_stop_pr_uses_contract`;
+  `test_shell_reader_reads_stop_template`; `test_stop_routes_on_one_added_file`;
+  `test_stop_modified_or_renamed_file_ambiguous`; `test_stop_branch_path_mismatch_ambiguous`;
+  `test_stop_glob_equals_the_contract`.
+- [ ] **Step 2:** FAIL. **Step 3:** реализовать. В `route` stop — ровно одна запись
+  `("added", path, None)` под `STOP_PATH`, а `node`/`generation` пути равны разбору ветки
+  при `ws_id` из пути. Иначе `ambiguous_kind`.
+- [ ] **Step 4:** PASS. **Step 5:** коммит `feat(approval-branches): stop branch template`.
 
-### Task 2: общая поверхность D16 по полному составу PR
+### Task 2: `act_git_rows` и `TokenTransport`
 
-**Files:**
-- Create: `governance/act_surface.py`
-- Modify: `governance/edge_check/publish.py:61-95`
-- Test: `tests/test_act_surface.py`, `tests/test_act_wave_runner.py` (регрессия I-1)
+**Files:** создать `governance/act_git_rows.py`, `governance/act_forge_http.py`; изменить
+`governance/ops.py` (импорт из `act_git_rows`); тесты `tests/test_act_git_rows.py`,
+`tests/test_act_forge_http.py`.
 
 **Interfaces:**
+- Produces: `act_git_rows.FIRST_PARENT_LOG`, `act_git_rows.parse_first_parent(stdout) ->
+  FirstParentRows`, `FirstParentRows`. `ops._FIRST_PARENT_LOG`/`_parse_first_parent`
+  остаются именами-синонимами. `act_forge_http.TokenTransport(token, *, api_base,
+  opener=None, timeout=60.0)` с методом `send(request) -> Response` (протокол
+  `steward.approvalfacts.v3.transport.Transport`) и `get_json(path) -> tuple[int, object]`
+  для REST-методов адаптера. Opener — `build_opener(ProxyHandler({}), _NoRedirect)`, тело
+  до `act_anon.MAX_BODY + 1`, `Authorization: Bearer`. Только GET и GraphQL-query,
+  полный обход страниц по `Link`.
+- [ ] **Step 1: Тесты:** `test_ops_reexports_rows` (тождество объектов);
+  `test_parse_first_parent_unchanged` (прежние фикстуры); `test_get_sends_bearer`;
+  `test_graphql_query_only`; `test_redirect_not_followed`; `test_body_over_limit`;
+  `test_env_proxy_ignored`; `test_token_absent_from_errors`; `test_paging_complete`.
+- [ ] **Step 2–4:** FAIL → реализовать → PASS (+ все тесты, импортирующие `ops`).
+- [ ] **Step 5:** коммит `refactor(act): git row parser module and token transport`.
+
+### Task 3: адаптер истории и `HistoryScope`
+
+**Files:** создать `governance/act_history_snapshot.py`; изменить
+`governance/act_status.py` (`HistoryScope`); тест `tests/test_act_history_snapshot.py`.
+
+**Interfaces:**
+- Consumes: Task 2.
 - Produces:
   ```python
-  @dataclass(frozen=True)
-  class Surface:
+  class HistoryScope(Protocol):
       ws_id: str
-      bundle_dir: str          # "workstreams/<ws>/bundle" relative to the repo root
-      nodes: tuple[str, ...]
-      dag: tuple[tuple[str, tuple[str, ...]], ...]
-      manifest: str | None     # manifest path of the request (review/v1) or None
-  def allowed(surface: Surface, path: str) -> bool
-  def surface_refusal(surface: Surface, paths: Iterable[str]) -> str | None
+      repo_slug: str
+      target_dir: str
+  @dataclass(frozen=True)
+  class Scope:            # in act_history_snapshot
+      ws_id: str
+      repo_slug: str
+      target_dir: str
+  class SnapshotHistory:  # deny-by-default Ops for load_history
+      def __init__(self, git_dir: Path, transport: TokenTransport, token: str,
+                   *, git_base: str) -> None
+  def open_snapshot(home: Path, full_name: str, refs: Sequence[str], token: str,
+                    *, git_base: str) -> Path        # bare repo; caller removes
   ```
-  `surface_refusal` возвращает первую причину вида `"вне поверхности D16: <path>"` или
-  `None`. Разрешено: `manifest`; файлы `nodes` и их `_downstream_closure` через
-  `bundle_dag.node_filenames(dag)` под `bundle_dir`; префикс
-  `<parent(bundle_dir)>/evidence/edge-check/` только для `*.json`; префикс
-  `<bundle_dir>/00-discovery/`, если `"charter"` в `nodes` (W1).
-
-- [ ] **Step 1: Тесты** (`tests/test_act_surface.py`):
-  `test_real_candidate_after_edge_check_allowed` (узлы, downstream, evidence, манифест);
-  `test_w1_discovery_allowed_only_with_charter`; `test_stale_downstream_allowed`;
-  `test_foreign_file_refused`; `test_evidence_of_other_ws_refused`;
-  `test_foreign_file_in_early_commit` — набор путей всего PR (дифф к базе) содержит
-  посторонний файл, последний коммит чистый → отказ; `test_manifest_of_other_request_refused`.
-  Регрессия: существующие тесты I-1 в `tests/test_act_wave_runner.py` зелёные без правок.
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3:** реализовать `act_surface`. `surface_violations` строит `Surface` из
-  `state`, `op`, `key` и вызывает `allowed` для путей коммита. Сигнатура и поведение не
-  меняются: одна логика, два вызова (коммит у конвейера, PR у проверяющего).
-- [ ] **Step 4:** PASS для обоих файлов и `tests/test_edge_check_*`.
-- [ ] **Step 5:** коммит `refactor(act): shared D16 surface over a path set`.
-
-### Task 3: транспорт steward поверх HTTPS с токеном
-
-**Files:**
-- Create: `governance/act_forge_http.py`
-- Test: `tests/test_act_forge_http.py`
-
-**Interfaces:**
-- Consumes: `steward.approvalfacts.v3.transport.Transport`, `Request`, `Response`.
-- Produces: `class TokenTransport: def __init__(self, token: str, *, api_base: str =
-  "https://api.github.com", opener=None, timeout: float = 60.0)`;
-  `def send(self, request: Request) -> Response`.
-  GET и GraphQL-query — как у `GhTransport`. Opener:
-  `build_opener(ProxyHandler({}), _NoRedirect)` (образец `act_anon`), тело читается
-  до `act_anon.MAX_BODY + 1` с отказом при превышении. Заголовок
-  `Authorization: Bearer <token>`. Сбой → `Response(status=None, error=<без токена>)`.
-
-- [ ] **Step 1: Тесты:** `test_get_sends_bearer_and_parses_link`,
-  `test_graphql_query_posts_json`, `test_mutation_refused` (не query → `Response(None)` без
-  запроса), `test_redirect_not_followed`, `test_body_over_limit_is_failure`,
-  `test_env_proxy_ignored` (`https_proxy` в окружении не используется),
-  `test_token_absent_from_error_text`. Источник формы запроса — `Request` steward и его
-  `ReplayTransport`. Новых форм не выдумывать: свериться со снимками steward.
-- [ ] **Step 2:** FAIL. **Step 3:** реализовать. **Step 4:** PASS.
-- [ ] **Step 5:** коммит `feat(act): token HTTPS transport for approval facts`.
+  `git_base` — `https://github.com` в production, локальный адрес в тестах. Это поле
+  запроса издателя: издатель берёт его из `publisher.toml` рядом с `api_base`.
+- [ ] **Step 1: Тесты** (настоящий `git` над временными репо, dumb-HTTP сервер на
+  127.0.0.1 с проверкой заголовка, replay forge-ответов):
+  `test_squash_delivery_head_fetched_from_pull_ref` (голова candidate не предок базы);
+  `test_production_load_history_sees_delivered_request`;
+  `test_direct_commit_is_not_delivery` (прямой коммит манифеста → `Unavailable`);
+  `test_unlisted_method_raises`; `test_git_argv_and_config_have_no_token` (наблюдатель
+  argv над обёрткой `git` и `config --list` снимка); `test_header_sent_on_every_fetch`;
+  `test_prs_containing_commit_normalized_from_rest`; `test_runstate_still_satisfies_scope`.
+- [ ] **Step 2–4:** FAIL → реализовать → PASS (+ `tests/test_act_status*.py`).
+- [ ] **Step 5:** коммит `feat(act): snapshot history adapter for the precheck`.
 
 ### Task 4: программа проверяющего `governance/act_precheck.py`
 
-**Files:**
-- Create: `governance/act_precheck.py`
-- Modify (минимально, только если нужно для инъекции): `governance/act_premerge.py`
-- Test: `tests/test_act_precheck.py`
+**Files:** создать `governance/act_precheck.py`; тест `tests/test_act_precheck.py`.
 
 **Interfaces:**
-- Consumes: `act_surface.Surface/surface_refusal` (Task 2), `act_forge_http.TokenTransport`
-  (Task 3), `act_premerge.PremergeDeps`, `act_premerge` для candidate, `act_envelope`
-  (`stop_path`, `parse_stop`, `node_history`, `expected_envelope`, `envelope_path`,
-  `render_envelope`), `act_status.load_history`, `act_request.parse_manifest/manifest_path`,
-  `approval_branches.parse_stop_branch` (Task 1).
-- Produces (тот же договор читает Task 7):
-  - запрос `df/precheck-request/v1`, JSON, строгие ключи:
-    `schema, nonce, kind, repository_id, full_name, pr, head_sha, head_ref, base_ref,
-    base_tip, paths, token, perimeter, api_base`. `kind ∈ {candidate, finalize, stop}`,
-    `paths` — отсортированный список полного состава PR, `perimeter` —
-    `{"state": "clear", "snapshot_sha": str, "trust_root": {...}} | null` (null для
-    finalize и stop);
-  - вердикт `df/precheck-verdict/v1`:
-    `schema, nonce, request_digest, repository_id, pr, head_sha, kind, outcome, reason,
-    violations, version`. `outcome ∈ {allow, refuse, unset}`,
-    `request_digest = sha256(canonical(request без token))`, `version` —
-    `PRECHECK_VERSION = "df-precheck/1"` и `admin_digest` активного релиза (Task 6 передаёт
-    его через `df.cli`);
-  - `def serve(stdin: BinaryIO, stdout: TextIO, *, admin_digest: str,
-    deps: PrecheckDeps | None = None) -> int`
-    — код 0 при любом вердикте, 2 при неразбираемом запросе (вердикта нет);
-  - `class SnapshotGit` (решение 11): методы `first_parent_changes(target_dir, ref)`,
-    `show_file`, `show_file_bytes`, `commit_files` в форме `governance/ops.Ops`;
-  - `@dataclass(frozen=True) class PrecheckDeps`: `transport_for: Callable[[str, str],
-    Transport]`, `snapshot: Callable[[Request], SnapshotGit]`, `binding`, `now`, `sleep`.
+- Consumes: Tasks 1–3; `act_envelope.stop_path/parse_stop/node_history/DeliveredRequest`;
+  `act_status.load_history`.
+- Produces (договор, который читает Task 7):
+  - запрос `df/precheck-request/v1` со строгими ключами: `schema, nonce, kind,
+    repository_id, full_name, pr, head_sha, head_ref, base_ref, base_tip, changes, token,
+    api_base, git_base`. `kind ∈ {"stop"}` (этап 3 расширит перечень);
+  - вердикт `df/precheck-verdict/v1`: `schema, nonce, request_digest, repository_id, pr,
+    head_sha, kind, outcome, reason, version, admin_digest`. `outcome ∈ {allow, refuse,
+    unset}`, `request_digest = sha256(canonical_json(request без "token"))`,
+    `version = PRECHECK_VERSION = "df-precheck/1"`;
+  - `def serve(stdin: BinaryIO, stdout: TextIO, *, admin_digest: str, home: Path,
+    deps: PrecheckDeps | None = None) -> int` — 0 при любом вердикте, 2 при запросе,
+    который не разобран (вердикта нет);
+  - `PrecheckDeps(transport_for, snapshot_for, now)` для тестов.
+  Stop: `changes == [["added", stop_path(ws,node,gen), None]]`; ветка разбирается при `ws`
+  из пути; `parse_stop(show_file(head_sha, path))` даёт `StopRecord(node, gen, …)`, равный
+  пути; `node_history(load_history(SnapshotHistory, Scope(ws,…), base_tip), node).current`
+  — `DeliveredRequest` поколения `gen`. Иначе `refuse` с причиной. Ошибка чтения —
+  `unset`. Снимок открывается в `home/precheck-snapshots/<nonce>` и удаляется в
+  `finally`. На старте удаляются снимки, оставшиеся от прерванных вызовов. Работу
+  сериализует `flock` на `home/precheck.lock`.
+- [ ] **Step 1: Тесты:** `test_stop_current_generation_allowed`;
+  `test_stop_for_superseded_generation_refused`; `test_stop_already_stopped_refused`;
+  `test_stop_path_content_mismatch_refused`; `test_stop_branch_mismatch_refused`;
+  `test_stop_modifying_delivered_stop_refused`; `test_history_unavailable_is_unset`;
+  `test_unknown_request_key_exit_2`; `test_kind_candidate_rejected_by_schema`;
+  `test_verdict_binds_request`; `test_token_not_in_verdict_or_stderr`;
+  `test_snapshot_removed_after_run_and_stale_cleared`.
+- [ ] **Step 2–4:** FAIL → реализовать → PASS.
+- [ ] **Step 5:** коммит `feat(act): precheck program (stop) for the df publisher`.
 
-Логика по видам:
-- **candidate.** Манифест — единственный изменённый PR файл под `.../approvals/requests/`
-  (`act_request.manifest_path`). Он должен быть в `paths` с `ws` и ключом, совпадающими с
-  веткой (`act_premerge.request_of_branch(head_ref)`). DAG и узлы — из манифеста и
-  `bundle_dag` на `head_sha` снимка. Затем `surface_refusal(Surface(...), paths)`. Затем
-  ядро `act_premerge._check` с `PremergeDeps`: `gh = TokenTransport(token)`, `binding` из
-  `/etc/df/trust.toml` (`act_trust.load_binding`; без него — `refuse`
-  `"заявка review/v1 без корня доверия"`, как сейчас), `journal = RequestJournal(perimeter)`,
-  `creds = ()`, `installations = None`, `merger = <slug>[bot]`, `merger_type = "Bot"`.
-  Если `_check` не вызывается без argparse, выделить в `act_premerge` функцию
-  `check(fields: PremergeFields, deps: PremergeDeps) -> tuple[int, str]`; CLI вызывает её же.
-  Коды 0/2/3 переходят в `allow`/`unset`/`refuse`.
-- **finalize.** Доставленная заявка — по ветке кандидата (без суффикса) в истории
-  `base_tip` (`load_history` над `SnapshotGit`). `review_id` акта —
-  `act_facts.open_review`/`find_act` на смёрженном candidate-PR через `TokenTransport`.
-  Ожидаемые конверты — `expected_envelope` по узлам заявки. `paths` должен в точности
-  совпасть с `envelope_path` узлов, содержимое на `head_sha` — с `render_envelope` (форма
-  `envelope_commit_defect`, но по полному составу PR).
-- **stop.** `paths == [stop_path(ws, node, gen)]`, ветка — `stop_branch(ws, node, gen)`.
-  `parse_stop(content@head)` даёт `StopRecord(node, gen, ...)`, совпадающий с путём.
-  `node_history(load_history(base_tip), node)`: `current` — `DeliveredRequest` поколения
-  `gen` (спека A §9.1). Остановка уже действующего поколения или устаревшего — `refuse`.
+### Task 5: административное дерево
 
-- [ ] **Step 1: Тесты** (фейковый транспорт `ReplayTransport` steward и настоящий
-  `SnapshotGit` над временным репо из `git` в `tmp_path`):
-  - candidate: `test_candidate_allowed_with_act_on_final_head`,
-    `test_approve_before_evidence_commit_not_counted` (D1),
-    `test_foreign_file_in_pr_refused`, `test_no_binding_refused`,
-    `test_violation_returned_not_recorded` (самоотчёт истории → `violations` не пуст,
-    `outcome = refuse`, файлов журнала нет);
-  - finalize: `test_finalize_exact_envelopes_allowed`,
-    `test_finalize_extra_path_refused`, `test_finalize_content_mismatch_refused`,
-    `test_finalize_without_delivered_candidate_refused`;
-  - stop: `test_stop_current_generation_allowed`,
-    `test_stop_for_superseded_generation_refused`, `test_stop_path_content_mismatch_refused`,
-    `test_stop_branch_mismatch_refused`;
-  - протокол: `test_unknown_request_key_exit_2`, `test_kind_brief_is_not_accepted` (схема
-    отвергает), `test_verdict_binds_request` (nonce, digest, pr, head_sha, kind),
-    `test_token_not_in_verdict_or_stderr`, `test_snapshot_removed_after_run`,
-    `test_snapshot_git_argv_has_no_token` (наблюдатель argv над подменённым `git`);
-  - замыкание: `test_import_closure_is_declared` — AST-замыкание `act_precheck` равно
-    `df.admin_tree.GOVERNANCE_MODULES` (Task 5 добавит константу; до неё тест в этом файле
-    сверяет с явным списком и переносится в Task 5).
-- [ ] **Step 2:** FAIL. **Step 3:** реализовать. **Step 4:** PASS, плюс
-  `tests/test_act_premerge.py`: CLI ведёт себя как раньше.
-- [ ] **Step 5:** коммит `feat(act): precheck program for the df publisher`.
-
-### Task 5: административное дерево с `governance/`, `contracts/` и `site/`
-
-**Files:**
-- Create: `df/admin_tree.py`
-- Modify: `df/admin.py` (`install_admin`, `admin_code_problems`, `expected_admin_digest`)
-- Test: `tests/df/test_admin_tree.py`, `tests/df/test_admin.py`
+**Files:** создать `df/admin_tree.py`; изменить `df/admin.py` (`install_admin`,
+`admin_code_problems`, `expected_admin_digest`); тесты `tests/df/test_admin_tree.py`,
+`tests/df/test_admin.py`.
 
 **Interfaces:**
-- Produces: `GOVERNANCE_MODULES: tuple[str, ...]` (имена файлов под `governance/`),
-  `CONTRACT_FILES: tuple[str, ...]`, `SITE_PACKAGES = ("yaml", "steward")`,
-  `FORBIDDEN_SUFFIXES = (".so", ".dylib", ".pyd", ".pth")`;
-  `def locked_pins(uv_lock: bytes) -> SitePins` (pyyaml: версия, имя и sha256 чистого колеса
-  `py3-none-any` или sdist; steward: url и коммит); `def install_site(layout, release_id, *,
-  devtools_ref: Path, pins: SitePins, fetch: Fetcher) -> None`.
-  Если в `uv.lock` нет чистого колеса pyyaml, `yaml/` берётся из **sdist** по sha256 из
-  `uv.lock`: каталог `lib/yaml` архива без сборки. Это решение Step 1 по замеру. Выдумывать
-  колесо нельзя.
-
-- [ ] **Step 1: Замер** (в отчёт задачи): какие артефакты pyyaml есть в `uv.lock`, и какое
-  дерево `src/steward` у закреплённого коммита.
-- [ ] **Step 2: Тесты:** `test_governance_modules_equal_import_closure` (перенос из Task 4);
-  `test_contract_files_cover_file_relative_reads`; `test_install_admin_copies_exact_tree`
-  (`df/`, только перечисленные `governance/*`, `contracts/*`, `site/yaml`, `site/steward`,
-  больше ничего); `test_native_extension_refused` (`.so` в `site` → `admin_code_problems`);
-  `test_pth_refused`; `test_digest_covers_site` (правка байта в `site/yaml` меняет digest и
-  ломает `admin_ready`); `test_pin_mismatch_refused` (sha256 артефакта или `FETCH_HEAD` не
-  равны пину → `StepFailed("admin")`, дерева нет); `test_site_imports_under_dash_S`
-  (административный Python `-I -B -S` с `sys.path = [admin/<id>, admin/<id>/site]`
-  импортирует `governance.act_precheck`).
-- [ ] **Step 3:** FAIL. **Step 4:** реализовать. Скачивание и `git fetch` идут от root в
-  `admin-home` с `admin_env`, без `uv`. Протокол прежний: staging → `sync_tree` → `rename`.
-  `expected_admin_digest` строит то же дерево.
-- [ ] **Step 5:** PASS, плюс root-тест установки `tests/df/test_acceptance_root*.py` для
-  activate (локально пропускается, в CI — job stage1).
-- [ ] **Step 6:** коммит `feat(df): admin tree carries the precheck closure and pure site`.
+- Produces: `GOVERNANCE_MODULES`, `CONTRACT_FILES`, `FORBIDDEN_SUFFIXES = (".so",
+  ".dylib", ".pyd", ".pth", ".pyc")`;
+  `@dataclass(frozen=True) class SitePins: yaml_url: str; yaml_sha256: str;
+  steward_url: str; steward_commit: str`;
+  `def locked_pins(uv_lock: bytes) -> SitePins` (`tomllib`, sdist pyyaml, git-источник
+  steward);
+  `def install_site(dest: Path, pins: SitePins, *, layout: Layout,
+  fetch: Callable[[str], bytes], git: Path) -> None`.
+- [ ] **Step 1: Тесты:** `test_governance_modules_equal_ast_closure` (включая отложенные
+  импорты; `ops`, `runner`, `df` вне замыкания); `test_contract_files_cover_file_relative_reads`;
+  `test_locked_pins_from_uv_lock` (значения из `uv.lock` этого дерева);
+  `test_sdist_sha_mismatch_refused`; `test_sdist_link_or_dotdot_refused`;
+  `test_steward_fetch_head_mismatch_refused`; `test_install_admin_exact_tree`;
+  `test_native_extension_refused`; `test_pth_refused`; `test_digest_covers_site`;
+  `test_entry_does_not_import_site` (вход команды и `publisher serve` не видят `site` в
+  `sys.path`); `test_precheck_imports_under_dash_S` (административный Python `-I -B -S`,
+  `sys.path` = stdlib + `admin/<id>` + `admin/<id>/site`, импорт
+  `governance.act_precheck`).
+- [ ] **Step 2–4:** FAIL → реализовать (staging → проверка → `sync_tree` → `rename`, как
+  у `install_admin_python`; `fetch` — `urllib` от root с `admin_env`, без `uv`) → PASS.
+- [ ] **Step 5:** коммит `feat(df): admin tree with the precheck closure and pure site`.
 
 ### Task 6: роль `df-precheck`, правило, обёртка, `precheck serve`
 
-**Files:**
-- Modify: `df/platform.py` (`SERVICE_USERS`), `df/roles.py`, `df/roles_setup.py`,
-  `df/sudoers.py` (`_rules`, `_NO_RULES`), `df/libexec.py` (`_SUBCOMMANDS`), `df/cli.py`
-  (`precheck serve`), `df/doctor.py` (проверки роли)
-- Test: `tests/df/test_roles_setup.py`, `tests/df/test_sudoers.py`,
-  `tests/df/test_libexec.py`, `tests/df/test_cli.py`, `tests/df/test_doctor*.py`
+**Files:** `df/platform.py`, `df/roles.py`, `df/roles_setup.py`, `df/sudoers.py`
+(`_rules`, `_NO_RULES`, `LOG_KEYS`, Defaults команды), `df/libexec.py`, `df/cli.py`,
+`df/doctor.py`; соответствующие тесты в `tests/df/`.
 
 **Interfaces:**
-- Produces: обёртка `/opt/df/libexec/df-precheck` (вход `precheck serve`);
-  правило `("df-publisher", "df-precheck", ((f'{precheck} ""',),))`; в `df.cli` —
-  подкоманда `precheck serve`. Она проверяет `getuid() == uid(df-precheck)`, ставит
-  `sys.path` (решение 4), импортирует `governance.act_precheck` и вызывает
-  `serve(sys.stdin.buffer, sys.stdout, admin_digest=<admin_digest записи current>)`.
-
-- [ ] **Step 1: Тесты:** `test_render_has_precheck_rule_without_args`;
-  `test_precheck_has_no_rules`; `test_roles_setup_creates_precheck_role` (nologin, `0700`,
-  не в `ADMIN_GROUPS`, не в группах `df-publisher`); `test_wrapper_text_precheck`;
-  `test_precheck_serve_refuses_other_uid`; `test_doctor_reports_precheck_role`.
-  Повторный `roles setup` на установке 2a добавляет роль, правило и обёртку, текст sudoers
-  сверяется с ожидаемым.
-- [ ] **Step 2:** FAIL. **Step 3:** реализовать. **Step 4:** PASS.
+- Produces: обёртка `/opt/df/libexec/df-precheck`; текст правила и Defaults из решения 5;
+  `sudoers.INPUT_LOG_KEYS = ("log_input", "log_stdin", "log_ttyin")`; подкоманда
+  `precheck serve`. Порядок: `getuid() == uid(df-precheck)`, иначе код 2; затем окружение
+  процесса заменяется на `{"PATH": "/usr/bin:/bin", "LANG": "C", "HOME": <home роли>}`;
+  `site` добавляется в конец `sys.path`; импорт и вызов `serve(...)`.
+- [ ] **Step 1: Тесты:** `test_render_precheck_rule_and_defaults`;
+  `test_visudo_accepts_rendered_text` (как в 2a); `test_precheck_has_no_rules`;
+  `test_doctor_flags_effective_input_logging`; `test_roles_setup_creates_precheck_role`;
+  `test_wrapper_text_precheck`; `test_precheck_serve_refuses_other_uid`;
+  `test_precheck_serve_resets_environment`; `test_roles_setup_rerun_on_2a_install`.
+- [ ] **Step 2–4:** FAIL → реализовать → PASS.
 - [ ] **Step 5:** коммит `feat(df): df-precheck role, sudoers rule and wrapper`.
 
 ### Task 7: клиент издателя `df/publisher/precheck.py`
 
-**Files:**
-- Create: `df/publisher/precheck.py`
-- Modify: `df/publisher/merge.py` (`Precheck` получает факты PR)
-- Test: `tests/df/test_publisher_precheck.py`
+**Files:** создать `df/publisher/precheck.py`; изменить `df/platform.py`
+(`run_with_input(..., limit: int = _OUTPUT_LIMIT)`); тест
+`tests/df/test_publisher_precheck.py`.
 
 **Interfaces:**
-- Consumes: `ops.authorize(oc, ops.READ_PERMISSIONS)`, `platform.run_with_input`, договор
-  запроса и вердикта Task 4.
 - Produces:
   ```python
   @dataclass(frozen=True)
@@ -471,184 +435,176 @@ steward `68f46a9` и pyyaml, оба без нативных расширений
       head_ref: str
       base_ref: str
       base_tip: str
-      paths: tuple[str, ...]
-  class Precheck(Protocol):
-      def __call__(self, kind: Kind, ctx: OpContext, pr: Mapping[str, object],
-                   facts: PrFacts, perimeter: Mapping[str, object] | None) -> Refused | None: ...
-  def admin_precheck(kind, ctx, pr, facts, perimeter) -> Refused | None
-  PRECHECK_TIMEOUT = 180.0
-  PRECHECK_COMMAND = ("/usr/bin/sudo", "-n", "-u", "df-precheck", "<layout.opt>/libexec/df-precheck")
+      changes: tuple[Change, ...]
+  @dataclass(frozen=True)
+  class PrecheckResult:
+      refused: Refused | None
+      version: str | None
+      admin_digest: str | None
+      revoke: str            # "ok" or the error text, never the token
+  def admin_precheck(kind: Kind, oc: OpContext, pr: Mapping[str, object],
+                     facts: PrFacts) -> PrecheckResult
+  PRECHECK_TIMEOUT = 200.0
   ```
-  `admin_precheck`: токен чтения (один продукт, `READ_PERMISSIONS`) → запрос с
-  `nonce = secrets.token_hex(16)` → запуск с окружением `{"PATH": "/usr/bin:/bin", "LANG": "C"}`,
-  `cwd="/"`, `close_fds=True`, stdin = запрос, предел вывода 64 КиБ, таймаут → строгий
-  разбор вердикта и сверка связи (требование 3) → после вызова отзыв токена чтения
-  (`DELETE /installation/token`, ошибка отзыва в evidence, не в исход). `unset` →
-  `refused: precheck_unset: <reason>`. `refuse` → `refused: <reason>` (+ регистрация
-  `violations`, решение 2).
-
-- [ ] **Step 1: Тесты** (подменённая команда — исполняемый скрипт в `tmp_path`, отвечающий
-  заданным вердиктом): `test_allow_bound_verdict_passes`;
-  `test_precheck_verdict_for_other_head_refused`; `test_nonce_mismatch_refused`;
-  `test_digest_mismatch_refused`; `test_extra_key_refused`;
-  `test_precheck_timeout_kills_and_refuses` (процесс-группа убита, исход
-  `precheck_failed: timeout`); `test_oversized_output_refused`; `test_nonzero_exit_refused`;
-  `test_read_token_only` (запрос токена несёт ровно `READ_PERMISSIONS` и один
-  `repository_id`); `test_token_revoked_after_call`; `test_no_write_token_passed`;
-  `test_violations_registered_then_refused`; `test_df_has_no_governance_import` (stdlib-only
-  проверка файла).
-- [ ] **Step 2:** FAIL. **Step 3:** реализовать. **Step 4:** PASS.
+  Шаги: токен чтения (`READ_PERMISSIONS`, `repository_ids = [product]`) → запрос с
+  `nonce = secrets.token_hex(16)` → `run_with_input(("/usr/bin/sudo", "-n", "-u",
+  "df-precheck", <opt>/libexec/df-precheck), data, timeout=PRECHECK_TIMEOUT,
+  env={"PATH": "/usr/bin:/bin", "LANG": "C"}, limit=64 << 10)` → строгий разбор и сверка
+  связи → `DELETE /installation/token` в `finally`. `refuse` → `Refused(reason)`,
+  `unset` → `Refused("precheck_unset: …")`, нарушение протокола →
+  `Refused("precheck_failed: <timeout|exit|oversize|parse|binding_mismatch>")`.
+- [ ] **Step 1: Тесты** (исполняемый скрипт в `tmp_path` вместо команды):
+  `test_allow_bound_verdict_passes`; `test_verdict_for_other_head_refused`;
+  `test_nonce_mismatch_refused`; `test_digest_mismatch_refused`; `test_extra_key_refused`;
+  `test_timeout_refused`; `test_oversized_output_refused`; `test_nonzero_exit_refused`;
+  `test_read_token_only`; `test_token_revoked_after_call_even_on_failure`;
+  `test_token_absent_from_result_and_evidence`; `test_publisher_precheck_stdlib_only`.
+- [ ] **Step 2–4:** FAIL → реализовать → PASS.
 - [ ] **Step 5:** коммит `feat(publisher): precheck client bound to the request`.
 
-### Task 8: исполнение `merge`: stop, аттестация, намерение, `PUT`, сверка, evidence
+### Task 8: исполнение `merge` для stop
 
-**Files:**
-- Modify: `df/publisher/merge.py` (`_decide`, `merge`, `merge_op`), `df/publisher/ops.py`
-  (аттестация, сверка мержа)
-- Test: `tests/df/test_publisher_merge.py` (пересмотреть `test_no_mutating_calls`)
+**Files:** `df/publisher/merge.py`, `df/publisher/ops.py`, `df/publisher/store.py`
+(`phase`, `read_phases`), `df/publisher/main.py` (передача `verified_not_done`); тест
+`tests/df/test_publisher_merge.py` (`test_no_mutating_calls` пересматривается: мутирующие
+вызовы — только для stop после положительного вердикта).
 
 **Interfaces:**
-- Consumes: `admin_precheck` (Task 7), `perimeter` (вычисление состояния корня — та же
-  функция, что у `perimeter_status_op`; выделить `perimeter.root_state(ctx) -> Mapping`),
-  `ops._auth`, `ops._is_bot`, `ctx.record_intent`.
+- Consumes: Task 1 (`route` по `changes`), Task 7.
 - Produces: `MERGE_METHOD = "squash"`; `ATTESTATION_MARKER`;
-  `def reconcile_merge(oc, token, pr, intent) -> Response`; `PRECHECK_VERSION` в evidence.
-  Evidence `merge`: `kind`, `precheck` (`version`, `admin_digest`), `merge_commit` |
-  `review_id` (аттестации), `trust_root` (для candidate — из `perimeter`, иначе
-  `{"state": "not_applicable"}`).
+  `store.phase(res, name: str, payload: Mapping) -> None`,
+  `store.read_phases(res) -> dict[str, Mapping]`;
+  `def recover_merge(oc, auth, req, phases) -> Response`;
+  `pr_changes(oc, token, tip, head_sha) -> tuple[Change, ...]` (вместо `pr_paths`; путь
+  rename учитывается обеими сторонами).
 
-Порядок `_decide` (после шагов 1–10 2a):
-1. `kind == "brief"` → `refused: brief_precheck_unavailable` (решение 7).
-2. candidate: `perimeter.root_state` → `blocked` → `refused: perimeter_blocked`,
-   `unavailable:<r>` → `refused: perimeter_unavailable: <r>`.
-3. `admin_precheck(kind, oc, pr, facts, perimeter)`.
-4. Если `ctx.intent` есть → `reconcile_merge` (никаких новых действий до сверки).
-5. finalize и stop: найти свою аттестацию по маркеру; если её нет — опубликовать
-   (решение 9).
-6. Третье чтение PR: голова всё ещё `head_sha`, иначе `refused: head_changed`.
-7. `record_intent({"request_key","head_sha","kind","intent_at"})`.
-8. `PUT /repos/{full}/pulls/{n}/merge` `{"merge_method": "squash", "sha": head_sha}` токеном
-   `{"contents": "write", "pull_requests": "write"}`. 200 + `merged` → `done` с
-   `merge_commit`. 405/409 → сверка, затем `refused: head_changed` или
-   `refused: not_mergeable: <msg>`, с `verified_not_done=True`, только если сверка
-   подтвердила, что PR не смёржен. Таймаут, 5xx, транспорт → `reconcile_merge`.
+Порядок:
+1. Шаги 2a: контекст, шаблоны, self-check, токен чтения.
+2. Есть фазы → `recover_merge` (решение 8). Новых действий нет.
+3. Первое чтение PR, ветка, `head_repo`, `tip`, `changes`, второе чтение — как в 2a.
+4. `route` → candidate/finalize → `refused: kind_unavailable_until_stage3: <kind>`;
+   brief → `refused: brief_precheck_unavailable`.
+5. stop → `admin_precheck`. Отказ → `refused`, фаз нет.
+6. Фаза `attest` (с метаданными предпроверки) → `POST` аттестации → подтверждение →
+   `attested`. Неопределённый `POST` → `recover_merge`.
+7. Блокировка PR → фаза `merge` → чтение PR (открыт, голова `head_sha`, иначе
+   `refused: head_changed`, `verified_not_done=True`) → `armed`.
+8. `PUT /repos/{full}/pulls/{n}/merge` с `{"merge_method": "squash", "sha": head_sha}`,
+   токен `{"contents": "write", "pull_requests": "write"}`. 200 и `merged` → `done`.
+   405/409/422 → `recover_merge` (решит, `refused` с `verified_not_done` или `unknown`).
+   Таймаут/5xx/транспорт → `recover_merge`.
 
-- [ ] **Step 1: Тесты** (`MergeGitHub` с обработчиком `PUT`):
-  `test_stop_merged_with_server_sha` (тело `PUT` ровно `{"merge_method":"squash","sha":…}`);
-  `test_finalize_attested_then_merged` (ревью `APPROVE`, `commit_id`, маркер, затем `PUT`);
-  `test_retry_finds_own_attestation` (второй прогон после падения между ревью и намерением
-  второго ревью не публикует); `test_head_change_after_precheck` (409 → `refused:
-  head_changed`, повтор → тот же исход без второго `PUT`); `test_identical_retry_replays`
-  (`replayed: True`, `PUT` один); `test_lost_put_reconciles_done`;
-  `test_merged_by_human_is_unknown`; `test_merged_before_intent_is_unknown`;
-  `test_merged_other_head_is_unknown`; `test_candidate_blocked_perimeter_refused_before_precheck`
-  (проверяющий не вызван); `test_brief_refused`; `test_evidence_has_kind_precheck_trust_root`;
-  `test_precheck_refusal_writes_no_intent`.
-- [ ] **Step 2:** FAIL. **Step 3:** реализовать. **Step 4:** PASS всего `tests/df/`.
-- [ ] **Step 5:** коммит `feat(publisher): merge with attestation, intent and reconcile`.
+- [ ] **Step 1: Тесты** — через настоящий `main` и файловое хранилище, `MergeGitHub` с
+  `PUT` и ревью:
+  `test_stop_attested_then_merged_with_server_sha`; `test_identical_retry_replays`
+  (`replayed: True`, `PUT` один); `test_head_change_after_precheck`;
+  `test_head_change_after_armed_409`; `test_lost_put_reconciles_done`;
+  `test_crash_after_put_before_result_recovers_done` (новый процесс, intent и фазы на
+  диске, PR уже закрыт); `test_merged_by_human_is_unknown`;
+  `test_merged_without_armed_is_unknown`; `test_crash_after_merge_phase_before_armed_resumes`;
+  `test_lost_attestation_post_found_once_continues`;
+  `test_lost_attestation_post_not_found_unknown_no_repost`;
+  `test_duplicate_attestations_unknown`; `test_verified_refusal_kept_through_merge_wrapper`;
+  `test_concurrent_requests_same_pr_serialized`; `test_candidate_finalize_refused_stage3`;
+  `test_brief_refused`; `test_precheck_refusal_writes_no_phase`;
+  `test_evidence_complete_and_recovered_from_phase` (смена активного `admin_digest` между
+  попыткой и восстановлением не меняет evidence).
+- [ ] **Step 2–4:** FAIL → реализовать → PASS всего `tests/df/`.
+- [ ] **Step 5:** коммит `feat(publisher): stop merge with phases, attestation, reconcile`.
 
 ### Task 9: хвосты App-режима `merge-pr.sh` (9c, 9d)
 
-**Files:**
-- Modify: `merge-pr.sh:310-325` (ключ), `merge-pr.sh:494-543` (отзыв токена),
-  `governance/act_app_token.py` (`revoke(token)`)
-- Test: `tests/test_merge_pr.py`, `tests/test_act_app_token.py`
+**Files:** `merge-pr.sh:310-325`, `merge-pr.sh:494-543`, `governance/act_app_token.py`
+(`--revoke`, токен из stdin); тесты `tests/test_merge_pr.py`, `tests/test_act_app_token.py`.
 
-**Interfaces:**
-- Produces: `act_app_token.py --revoke` читает токен из stdin и делает
-  `DELETE /installation/token`, код 0/2. Путь ключа: каждый компонент после
-  `${XDG_CONFIG_HOME:-$HOME/.config}/darkfactory/apps/` и сам файл — не ссылка (`[ -L ]`
-  по цепочке), иначе код 3.
-
-- [ ] **Step 1: Тесты:** `test_app_key_symlink_refused` (файл-ссылка и каталог-ссылка внутри
-  `apps/`); `test_app_token_revoked_after_merge` (при успехе, при отказе `PUT`, при
-  `die`); `test_revoke_reads_token_from_stdin_only`.
-- [ ] **Step 2:** FAIL. **Step 3:** реализовать (`trap` на выход после выдачи токена).
-  **Step 4:** PASS `tests/test_merge_pr.py tests/test_act_*`.
+- [ ] **Step 1: Тесты:** `test_app_key_file_symlink_refused`,
+  `test_app_key_dir_symlink_under_apps_refused`; `test_token_revoked_on_success`,
+  `test_token_revoked_on_put_refusal`, `test_token_revoked_on_die_after_issue`,
+  `test_exit_status_preserved_when_revoke_fails`; `test_revoke_reads_token_from_stdin_only`.
+- [ ] **Step 2–4:** FAIL → реализовать (`trap` сразу после выдачи) → PASS.
 - [ ] **Step 5:** коммит `fix(merge-pr): app key without links, revoke installation token`.
-  TODO: закрыть 9c/9d, а для 9a записать ruling.
+  В TODO закрыть 9c/9d и записать ruling 9a.
 
-### Task 10: root-строки изоляции `df-precheck`
+### Task 10: root-строки `df-precheck`
 
-**Files:**
-- Modify: `tests/df/test_acceptance_root_roles.py`, `tests/df/roles_world.py`
-  (`FIXTURE_FROM_CHECKOUT` дополнить деревом Task 5), `.github/workflows/df-stage1.yml` (job
-  `stage2a` → без переименования, новые строки)
-- Test: тот же файл (в CI на обеих ОС)
+**Files:** `tests/df/test_acceptance_root_roles.py`, `tests/df/roles_world.py`
+(`FIXTURE_FROM_CHECKOUT` дополняется деревом Task 5), `.github/workflows/df-stage1.yml`
+(job `stage2a`).
 
-Строки (через настоящий `sudo` и обёртки):
+Строки (через настоящие `sudo` и обёртки, обе ОС):
 
-| Попытка | Ожидание |
-|---|---|
-| `df-precheck` читает `/etc/df/secrets/app-<N>.pem`, `/var/lib/df/publisher/*`, `/var/lib/df/perimeter/*`, `~df-exec/.config/df/github-token` | отказ ОС |
-| `df-exec`, `df-review`, человек вызывают `df-precheck` | отказ sudoers |
-| `df-publisher` вызывает `df-precheck` с аргументом | отказ sudoers |
-| самоотчёт `df-precheck` (вход `precheck serve` с запросом-самоотчётом теста) | UID роли, окружение ровно `PATH`, `LANG`, дескрипторы только 0–2 |
-| `df-precheck` пишет в `admin/<id>` | отказ ОС |
+| Строка | Механизм | Положительный контроль |
+|---|---|---|
+| `df-precheck` читает `/etc/df/secrets/app-*.pem`, `/var/lib/df/publisher/*`, `/var/lib/df/perimeter/*`, `~df-exec/.config/df/github-token` | отказ ОС | root читает те же файлы |
+| память издателя: процесс `df-publisher` с sentinel в памяти; `df-precheck` читает `/proc/<pid>/mem` (Linux) / `task_for_pid` через `lldb -p` или `vmmap` (macOS) | отказ ОС | root видит sentinel тем же наблюдателем |
+| `df-exec`, `df-review`, оператор вызывают `df-precheck`; `df-publisher` — с аргументом | отказ sudoers | `df-publisher` без аргументов — проходит |
+| унаследованное: издатель открывает sentinel-fd без `CLOEXEC` и держит sentinel-переменную; проверяющий заблокирован на чтении stdin (запрос ещё не записан) | root смотрит `/proc/<pid>/fd` и `environ` (Linux), `lsof -p` и `ps eww` (macOS): sentinel-fd и sentinel-переменной нет, UID = `df-precheck` | тот же наблюдатель видит sentinel у издателя |
+| зависание: стенд `git_base` — порт, который принимает соединение и молчит | `command_timeout`: возврат ≤ 200 с, `precheck_failed: timeout`, процессов UID `df-precheck` нет, каталогов снимков нет | — |
+| журналирование входа: глобальные `Defaults log_input, log_output` во временном sudoers-фрагменте теста | sentinel-токен запроса отсутствует в I/O-журнале sudo; `doctor` зелёный | без Defaults команды sentinel в журнале есть (контроль включённости) |
+| положительный stop: локальный фейк GitHub (`fake_github.py`) + dumb-HTTP git-репо со squash-доставкой | вердикт `allow` через всю цепочку издатель → sudo → вход → `act_precheck` | устаревшее поколение → `refuse` |
 
-- [ ] **Step 1:** тесты строк (`test_precheck_cannot_read_publisher_secrets`, …). Для
-  самоотчёта ввести в `act_precheck` тестовый вид запроса? **Нет**: самоотчёт снимает
-  наблюдатель процесса (`/proc/<pid>` на Linux, `lsof -p` на macOS) во время вызова с
-  зависшим транспортом (`api_base` → локальный порт, который не отвечает). Так в коде
-  проверяющего не появляется вида «только для тестов».
-- [ ] **Step 2:** локально пропуск (не root), в CI — job `stage2a`.
-- [ ] **Step 3:** коммит `test(df): root rows for df-precheck isolation`.
+- [ ] **Step 1:** тесты строк (имена `test_precheck_*`). Тестового вида запроса в
+  production-протоколе нет.
+- [ ] **Step 2:** локально пропуск (не root), в CI — job `stage2a` на обеих ОС.
+- [ ] **Step 3:** коммит `test(df): root rows for df-precheck`.
 
 ### Task 11: живые строки мержа на стенде
 
-**Files:**
-- Modify: `tests/df/live_stand.py` (строки 10–12, засев, уборка), `tests/df/test_live_stand.py`,
-  `.github/workflows/df-stage2-live.yml`
+**Files:** `tests/df/gate_proxy.py` (режимы), `tests/df/live_stand.py`,
+`tests/df/test_live_stand.py`, `tests/df/test_gate_proxy.py`,
+`.github/workflows/df-stage2-live.yml`.
+
+**Interfaces:**
+- Produces: `gate_proxy` с режимами `hold(method, path_re)` (держать до `release()`) и
+  `drop_response(method, path_re)` (переслать выше, дождаться ответа, оборвать соединение
+  вниз). Журнал различает «запрос доставлен выше» и «ответ доставлен вниз». Прежний режим
+  POST ревью сохраняется.
 
 Строки:
-- **10 «засев и stop-PR»:** машинный пользователь коммитит в `master` стенда манифест
-  `review/v1` для `ws = stand-<tag>`, узел `n1`, поколение 1 (доставленная заявка). Затем
-  создаёт ветку `stop_branch("stand-<tag>", "n1", 1)` с одним файлом
-  `stop_path(...)` (`render_stop`) и PR.
-- **11 «смена head»:** запрос `merge` идёт через `gate_proxy`, который держит `PUT` (образец
-  строки 4б). Пока `PUT` удержан, машинный пользователь пушит в ветку второй коммит. Затем
-  прокси отпускает `PUT`. Ожидание: `refused: head_changed`, PR не смёржен. Повтор того же
-  запроса — тот же исход без второго `PUT` (журнал прокси).
-- **12 «идентичный повтор» и «сверка после таймаута»:** новый stop-PR на новое
-  `ws = stand-<tag>-b`. Прокси пропускает `PUT`, но рвёт ответ. Ожидание: исход `done`
-  через сверку (`merged_by == <slug>[bot]`, голова). Повтор того же запроса — `done`,
-  `replayed: True`, `PUT` в журнале прокси один.
-- **Уборка (9):** закрыть открытые PR и удалить ветки. Коммиты засева и мержи остаются в
-  истории `master` стенда (уникальные `ws` по `tag`), это записывается в evidence.
+- **10 «засев»:** технический PR с манифестом `review/v1` для `ws = stand-<tag>`, узел `n1`;
+  машинный пользователь мержит его (squash). Evidence: номер PR, head, merge commit.
+  Контроль: `load_history` проверяющего видит `DeliveredRequest` g1. Затем stop-PR на
+  `stop_branch("stand-<tag>","n1",1)` с одним файлом `stop_path(...)`.
+- **11 «смена head»:** `hold("PUT", …/merge)`. Пока `PUT` удержан, машинный пользователь
+  пушит второй коммит. `release()`. Ожидание: `refused: head_changed`, PR не смёржен.
+  Повтор того же запроса — тот же исход, `PUT` выше один.
+- **12 «таймаут и идентичный повтор»:** новый засев и stop-PR (`ws = stand-<tag>-b`),
+  `drop_response("PUT", …/merge)`. Ожидание: `done` через сверку (`merged_by` = бот,
+  голова). Повтор — `done`, `replayed: True`, `PUT` выше один.
+- **9 «уборка»:** закрыть открытые PR, удалить ветки. Коммиты засева и мержи остаются в
+  истории `master` стенда, это записывается в evidence.
 
-- [ ] **Step 1:** офлайн-тесты помощников в `tests/df/test_live_stand.py` (порядок
-  зависимостей строк, разбор журнала прокси, отсутствие `DF_STAND_*` в чтении).
-- [ ] **Step 2:** workflow: прежние секреты и переменные, добавить строки в `ROWS`, `needs`.
+- [ ] **Step 1:** офлайн-тесты `gate_proxy` (порядок hold → push → release; один
+  выполненный `PUT` при оборванном ответе) и помощников `live_stand` (зависимости строк,
+  разбор журнала, отсутствие чтения `DF_STAND_*` вне живого прогона).
+- [ ] **Step 2:** workflow: строки в `ROWS`, `needs`.
 - [ ] **Step 3:** коммит `test(df): live merge rows on the stop route`.
 
 ### Task 12: живой прогон, evidence, учёт
 
-- [ ] **Step 1:** владелец выполняет H5–H8 и запускает `df-stage2-live` на `master`
-  (после мержа PR задач 1–11).
+- [ ] **Step 1:** владелец выполняет H5–H7 и запускает `df-stage2-live` на `master`.
 - [ ] **Step 2:** `docs/evidence/2026-11-XX-df-stage2b-acceptance.md`: прогон, ячейки,
-  строки 10–12, журнал прокси, `merged_by`, SHA. Отдельная таблица «виды мержа»: stop —
-  живьём; candidate, finalize — офлайн и root, живьём **не закрыты** (этап 3 / M3); brief —
-  отказ (часть C).
-- [ ] **Step 3:** TODO: закрыть `df-installer-stage2b` с указанием на evidence; добавить
-  пункты «живой мерж candidate издателем» (`@blocked_by` этапа 3) и «живой finalize»;
-  снять блокировку `df-trust-history-token`.
+  строки 10–12, журнал прокси, `merged_by`, SHA, засев. Таблица «виды мержа»: stop — живьём
+  и root; candidate, finalize — **не реализованы в 2b** (этап 3); brief — отказ (часть C).
+  Ни одной формулировки «все виды мержа проверены».
+- [ ] **Step 3:** TODO: закрыть `df-installer-stage2b`. Добавить пункт этапа 3
+  «предпроверка candidate и finalize издателем: привязка, EpochSource, контекст
+  credentials производного токена, `bundle_dir`/DAG D16, идентичность мержера, `review_id`
+  из решения доставки» с переносом находок r1 N3–N5, N7, N13. H8.
 - [ ] **Step 4:** PR evidence (owner-merge).
 
 ## Шаги человека
 
 - **H5.** Новый classic PAT `betta-tester`, `repo`, 30 дней → секрет
   `DF_STAND_MACHINE_TOKEN` environment `df-stage2-live`.
-- **H6.** Новый ключ App 5285716 → секрет `DF_STAND_APP_KEY`. Убедиться, что установка
-  170589886 охватывает `df-roles-probe-private` с `contents: write`, `pull_requests: write`.
-- **H7.** В настройках `df-roles-probe-private` разрешён squash-мерж.
-- **H8.** После прогона отозвать PAT и ключ, удалить секреты (как
-  `df-stage2a-stand-secrets-revoke`).
+- **H6.** Новый ключ App 5285716 → секрет `DF_STAND_APP_KEY`. Установка 170589886
+  охватывает `df-roles-probe-private` с `contents: write`, `pull_requests: write`.
+- **H7.** В `df-roles-probe-private` разрешён squash-мерж.
+- **H8.** После прогона, в том числе аварийного, отозвать PAT и ключ, удалить секреты.
 
 ## Вне этого плана
 
-- Живой мерж candidate и finalize издателем — после привязки `df-trust` и стендов политики
-  (этап 3, приёмка §10 строки 3) и M3 approval-act.
+- Предпроверка candidate и finalize издателем, общая функция поверхности D16 по полному
+  составу PR — этап 3 (решение 2).
 - Предпроверка брифа — часть C (Task 17 approval-act).
-- `setup-trust`, `history_gh_config_dir`, `--rebind` — этап 3.
-- Отзыв токена установки внутри издателя для `publish-review` — уже не нужен (токены
-  издателя живут час и не покидают процесс); не трогаем.
+- `setup-trust`, `history_gh_config_dir`, `--rebind`, production `EpochSource` — этап 3.
