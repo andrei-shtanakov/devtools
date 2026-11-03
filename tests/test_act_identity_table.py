@@ -625,9 +625,16 @@ JUDGMENT = {
         r(
             "unreadable",
             "act_precheck._stop_in_history",
-            "if text is None",
+            "if raw is None",
             f"{PC}::test_stop_record_absent_at_head_is_unset",
             '"stop_unreadable: "',
+        ),
+        r(
+            "utf8",
+            "act_precheck._stop_in_history",
+            "except UnicodeDecodeError",
+            f"{PC}::test_stop_record_not_utf8_refused",
+            '"stop_record_invalid: not UTF-8"',
         ),
         r(
             "record_invalid",

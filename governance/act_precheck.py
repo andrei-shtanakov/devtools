@@ -75,6 +75,12 @@ LOCK_POLL = 0.05
 
 _SHA = re.compile(r"[0-9a-f]{40}")
 _NONCE = re.compile(r"[0-9a-f]{32}")
+#: Branch name git accepts and `open_snapshot` fetches as `refs/heads/<name>`: its
+#: characters only, no leading `-`/`.`/`/`, no `..`, `//`, `/.`, `.lock` component
+#: end, no trailing `/` or `.`.
+_BRANCH = re.compile(
+    r"(?![-./])(?!.*(?:\.\.|//|/\.|\.lock/|\.lock$))[A-Za-z0-9_./-]*[A-Za-z0-9_-]"
+)
 _STOP_PATH = re.compile(
     r"workstreams/(?P<ws>[^/]+)/approvals/stops/(?P<node>[^/]+)-g(?P<gen>[0-9]{1,9})\.yaml"
 )
@@ -125,7 +131,7 @@ _CHECKS: dict[str, Callable[[object], bool]] = {
     "pr": _positive_int,
     "head_sha": _matches(_SHA),
     "head_ref": _text,
-    "base_ref": _text,
+    "base_ref": _matches(_BRANCH),
     "base_tip": _matches(_SHA),
     "changes": _changes,
     "token": _text,
@@ -323,9 +329,13 @@ def _stop_in_history(
     ops: SnapshotHistory, request: PrecheckRequest, target: StopTarget
 ) -> tuple[str, str]:
     """The record at the PR head matches its path and stops the current generation."""
-    text = ops.show_file("", request.head_sha, target.path)
-    if text is None:
+    raw = ops.show_file_bytes("", request.head_sha, target.path)
+    if raw is None:
         return UNSET, f"stop_unreadable: {target.path} at {request.head_sha[:12]}"
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return REFUSE, "stop_record_invalid: not UTF-8"
     try:
         record = parse_stop(text)
     except EnvelopeError as exc:
