@@ -84,7 +84,6 @@ EXISTING_ADDITIONS = {
         "SnapshotOps.show_file_bytes",
         "SnapshotOps.rev_parse",
         "SnapshotOps.fetch_branch",
-        "_parse_first_parent",
     ),
     "approval_ledger": (
         "record_review_act",
@@ -3625,7 +3624,6 @@ NOT_JUDGMENT = {
     "ops.SnapshotOps.show_file_bytes": _IO,
     "ops.SnapshotOps.rev_parse": _IO,
     "ops.SnapshotOps.fetch_branch": _IO,
-    "ops._parse_first_parent": "разбор вывода `git log`; не суждение",
     "ops.RealOps.gate_snapshot_digest": "возвращает код и вывод CLI; судит `gate_run`",
     "approval_ledger.record_review_act": "запись акта; проверок нет",
     "approval_ledger.audit_events": _BUILD,
