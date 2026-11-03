@@ -1,4 +1,5 @@
-"""A loopback proxy to the GitHub API with one gate (Task 15 row 4(b), R15-5).
+"""A loopback proxy to the GitHub API with one gate (Task 15 row 4(b), R15-5;
+stage 2b Task 11 rows 11 and 12).
 
 `serve_gate_proxy()` listens on `http://127.0.0.1:<port>`, the form the
 publisher's `api_base` admits (`stage2_config._check_base`), and passes
@@ -8,15 +9,26 @@ hop-by-hop ones. The answer comes back the same way; the API's own URLs in a
 `Link` header are rewritten to the proxy's base, so the publisher's paging
 (`github._next_url`) stays on its `api_base`.
 
-The gate: the first `POST /repos/<owner>/<name>/pulls/<n>/reviews` is held
-before it is passed on. `held` is set when it arrives; it goes on at
-`release()`, or after `HOLD_LIMIT` seconds (noted as `expired`: the publisher
-waits `github.TIMEOUT` = 20 s for an answer, so a longer hold would turn the
-row into a timeout). Requests are recorded as method, path, status and
-whether held -- never headers or bodies, which carry tokens.
+The gate acts on the first request of its method whose path (without the
+query) matches its pattern whole; later ones pass:
 
-Used only by `tests/df/live_stand.py`; its offline tests run it against a
-local upstream.
+- `hold(method, path_re)` (the default `REVIEW_HOLD`: the first `POST
+  /repos/<owner>/<name>/pulls/<n>/reviews`, stage 2a) holds the request
+  before it is passed on. `held` is set when it arrives; it goes on at
+  `release()`, or after `HOLD_LIMIT` seconds (noted as `expired`: the
+  publisher waits `github.TIMEOUT` = 20 s for an answer, so a longer hold
+  would turn the row into a timeout);
+- `drop_response(method, path_re)` passes the request on, waits for the
+  upstream's answer and closes the connection downstream without a byte of
+  it (`dropped` is set): the request was executed, its answer is lost.
+
+Requests are recorded as method, path, status, whether held, and two facts
+kept apart: `delivered_upstream` (the upstream answered it, `status` is its
+answer) and `answered_downstream` (the answer was written to the client) --
+never headers or bodies, which carry tokens.
+
+Used only by `tests/df/live_stand.py`; its offline tests
+(`tests/df/test_gate_proxy.py`) run it against a local upstream.
 """
 
 from __future__ import annotations
@@ -24,11 +36,13 @@ from __future__ import annotations
 import http.client
 import http.server
 import re
+import socket
 import ssl
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from typing import Literal
 from urllib.parse import urlsplit
 
 UPSTREAM = "https://api.github.com"
@@ -51,16 +65,51 @@ _HOP = frozenset(
 )
 _DROP_REQUEST = _HOP | {"host", "accept-encoding"}
 
+Mode = Literal["hold", "drop_response"]
+
+
+@dataclass(frozen=True)
+class Gate:
+    """What the proxy does to the first `method` request on a path that
+    matches `path_re` whole."""
+
+    mode: Mode
+    method: str
+    path_re: re.Pattern[str]
+
+    def matches(self, method: str, path: str) -> bool:
+        """Whether a request (`path` without the query) is of this gate."""
+        return method == self.method and self.path_re.fullmatch(path) is not None
+
+
+def hold(method: str, path_re: str | re.Pattern[str]) -> Gate:
+    """Hold the request until `release()` (or `HOLD_LIMIT`), then pass it on."""
+    return Gate("hold", method, re.compile(path_re))
+
+
+def drop_response(method: str, path_re: str | re.Pattern[str]) -> Gate:
+    """Pass the request on, wait for the answer, close the connection
+    downstream without it."""
+    return Gate("drop_response", method, re.compile(path_re))
+
+
+#: The stage-2a gate (row 4(b)): the first review POST is held.
+REVIEW_HOLD = hold("POST", REVIEWS_POST)
+
 
 @dataclass(frozen=True)
 class Seen:
-    """One request the proxy passed on (no header, no body)."""
+    """One request the proxy took (no header, no body): `status` is the
+    upstream's answer when `delivered_upstream`, else the proxy's 502;
+    `answered_downstream` is whether that answer was written to the client."""
 
     method: str
     path: str
     status: int
     held: bool
     expired: bool = False
+    delivered_upstream: bool = True
+    answered_downstream: bool = True
 
 
 @dataclass
@@ -69,8 +118,10 @@ class GateProxy:
 
     url: str
     upstream: str
+    gate: Gate = REVIEW_HOLD
     held: threading.Event = field(default_factory=threading.Event)
     released: threading.Event = field(default_factory=threading.Event)
+    dropped: threading.Event = field(default_factory=threading.Event)
     seen: list[Seen] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _gate_taken: bool = False
@@ -80,8 +131,8 @@ class GateProxy:
         self.released.set()
 
     def take_gate(self, method: str, path: str) -> bool:
-        """Whether this request is the one to hold (the first reviews POST)."""
-        if method != "POST" or REVIEWS_POST.fullmatch(path) is None:
+        """Whether this request is the one the gate acts on (its first)."""
+        if not self.gate.matches(method, path):
             return False
         with self._lock:
             if self._gate_taken:
@@ -89,9 +140,16 @@ class GateProxy:
             self._gate_taken = True
             return True
 
-    def record(self, item: Seen) -> None:
+    def record(self, item: Seen) -> int:
+        """Append `item`; its index (for `undelivered`)."""
         with self._lock:
             self.seen.append(item)
+            return len(self.seen) - 1
+
+    def undelivered(self, index: int) -> None:
+        """The answer of request `index` could not be written downstream."""
+        with self._lock:
+            self.seen[index] = replace(self.seen[index], answered_downstream=False)
 
     def requests(self) -> list[Seen]:
         """What was passed on so far, in order."""
@@ -144,7 +202,8 @@ def _handler(proxy: GateProxy) -> type[http.server.BaseHTTPRequestHandler]:
             path = self.path.split("?", 1)[0]
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length else None
-            held = proxy.take_gate(self.command, path)
+            gated = proxy.take_gate(self.command, path)
+            held = gated and proxy.gate.mode == "hold"
             expired = False
             if held:
                 proxy.held.set()
@@ -158,12 +217,26 @@ def _handler(proxy: GateProxy) -> type[http.server.BaseHTTPRequestHandler]:
                 answer = list(resp.getheaders())
                 status = resp.status
             except OSError:
-                proxy.record(Seen(self.command, path, 502, held, expired))
-                self.send_error(502)
+                seen = Seen(
+                    self.command, path, 502, held, expired, delivered_upstream=False
+                )
+                self.write(proxy.record(seen), lambda: self.send_error(502))
                 return
             finally:
                 conn.close()
-            proxy.record(Seen(self.command, path, status, held, expired))
+            if gated and proxy.gate.mode == "drop_response":
+                dropped = Seen(
+                    self.command, path, status, False, answered_downstream=False
+                )
+                proxy.record(dropped)
+                self.drop()
+                return
+            index = proxy.record(Seen(self.command, path, status, held, expired))
+            self.write(index, lambda: self.answer(status, answer, data))
+
+        def answer(
+            self, status: int, answer: list[tuple[str, str]], data: bytes
+        ) -> None:
             self.send_response(status)
             for name, value in answer:
                 if name.lower() in _HOP:
@@ -176,6 +249,25 @@ def _handler(proxy: GateProxy) -> type[http.server.BaseHTTPRequestHandler]:
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+            self.wfile.flush()
+
+        def write(self, index: int, send: Callable[[], None]) -> None:
+            """`send` the answer of request `index` downstream; a failed
+            write is noted (`answered_downstream=False`)."""
+            try:
+                send()
+            except OSError:
+                proxy.undelivered(index)
+                self.close_connection = True
+
+        def drop(self) -> None:
+            """Close the connection downstream without a byte of the answer."""
+            self.close_connection = True
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            proxy.dropped.set()
 
         def log_message(self, format: str, *args: object) -> None:  # noqa: A002
             """Quiet: a request line may carry nothing secret, but stay terse."""
@@ -184,10 +276,12 @@ def _handler(proxy: GateProxy) -> type[http.server.BaseHTTPRequestHandler]:
 
 
 @contextmanager
-def serve_gate_proxy(upstream: str = UPSTREAM) -> Iterator[GateProxy]:
-    """The proxy on `127.0.0.1` (module doc); a held request is released and
-    the server stopped on exit."""
-    proxy = GateProxy("", upstream)
+def serve_gate_proxy(
+    upstream: str = UPSTREAM, *, gate: Gate = REVIEW_HOLD
+) -> Iterator[GateProxy]:
+    """The proxy on `127.0.0.1` with `gate` (module doc); a held request is
+    released and the server stopped on exit."""
+    proxy = GateProxy("", upstream, gate)
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _handler(proxy))
     server.daemon_threads = True
     proxy.url = f"http://127.0.0.1:{server.server_address[1]}"

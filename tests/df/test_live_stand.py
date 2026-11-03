@@ -3,13 +3,15 @@
 The live phases of `tests/df/live_stand.py` run only in
 `.github/workflows/df-stage2-live.yml`; here: the provenance check before
 any secret is read (`test_live_provenance`), the evidence guard, the row
-verdicts and the loopback gate proxy against a local upstream. Nothing here
-reads the stand's variables or reaches the network.
+verdicts, the rows' dependencies and the helpers of the merge rows (stage
+2b, Task 11: the seed, the stop-PR, the proxy log, the verdicts of rows 11
+and 12, the cleanup). The gate proxy has its own tests
+(`tests/df/test_gate_proxy.py`). Nothing here reads the stand's variables
+or reaches the network.
 """
 
 from __future__ import annotations
 
-import http.server
 import json
 import os
 import re
@@ -17,10 +19,10 @@ import shutil
 import subprocess
 import threading
 import time
-import urllib.request
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -29,16 +31,28 @@ from df.admin_tree import CONTRACT_FILES, governance_files
 from df.build import GIT_ISOLATION
 from df.config import ReleaseEntry, ReleasesConfig, dump_releases
 from df.paths import Layout
+from df.publisher.merge import PREMISE, parse_patterns, route
+from df.publisher.request import Response
 from df.release import RELEASE_JSON
-from df.stage2_config import PublisherConfig
+from governance.act_envelope import (
+    DeliveredRequest,
+    DeliveredStop,
+    StopRecord,
+    parse_stop,
+    stop_path,
+)
+from governance.act_request import NodeEntry, NodeRequest, manifest_path, parse_manifest
+from governance.act_time import Unavailable
+from governance.approval_branches import stop_branch
 from tests.df import gate_proxy, live_stand
 from tests.df.live_stand import (
+    SKIPPED,
     ProvenanceError,
     RowFailed,
     StandSecrets,
 )
-from tests.df.roles_world import FIXTURE_FROM_CHECKOUT, OS_DIR
-from tests.df.root_world import INFRA, SYSTEM_GIT, infra
+from tests.df.roles_world import FIXTURE_FROM_CHECKOUT, OS_DIR, RolesWorld
+from tests.df.root_world import INFRA, REPO_ROOT, SYSTEM_GIT, infra
 from tests.df.site_world import prime_cache, write_checkout
 
 #: The approval-branch patterns `merge` routing reads (one of `CONTRACT_FILES`).
@@ -537,116 +551,251 @@ def test_no_test_reads_stand_variables() -> None:
     assert readers == []
 
 
-# ---------- the gate proxy (R15-5) ----------
+# ---------- the merge rows on the stop route (stage 2b, Task 11) ----------
+
+
+def test_merge_rows_needs() -> None:
+    """Row 11 needs the seed and the stop-PR of row 10; row 12 seeds its
+    own workstream and needs no other row; both come after the 2a rows."""
+    by_id = {r.id: r for r in live_stand.ROWS}
+    assert by_id["10"].needs == ()
+    assert by_id["11"].needs == ("10",)
+    assert by_id["12"].needs == ()
+    assert [r.id for r in live_stand.ROWS][-3:] == ["10", "11", "12"]
+
+
+def test_failed_seed_skips_row11_not_row12() -> None:
+    def fn(row_id: str) -> Callable[[object], dict[str, object]]:
+        def run(_st: object) -> dict[str, object]:
+            if row_id == "10":
+                raise RowFailed("seed fails")
+            return {}
+
+        return run
+
+    rows = tuple(
+        live_stand.Row(r.id, r.title, fn(r.id), r.needs)  # type: ignore[arg-type]
+        for r in live_stand.ROWS
+    )
+    cleanup = live_stand.Row("9", "z", fn("9"))  # type: ignore[arg-type]
+    results = live_stand.run_rows(object(), rows, cleanup)  # type: ignore[arg-type]
+    by_id = {name.split(" ", 1)[0]: v["status"] for name, v in results.items()}
+    assert (by_id["10"], by_id["11"], by_id["12"]) == ("fail", SKIPPED, "pass")
+    assert by_id["9"] == "pass"
+    assert live_stand.verdict(results) == live_stand.EXIT_FAILED
+
+
+def test_stand_workstreams_and_branches() -> None:
+    """The two workstreams of a run and their branches: the stop branches
+    are the contract's (`stop_branch`), every one is swept by `wipe`."""
+    tag = "123-1-linux"
+    assert live_stand.stand_ws(tag) == "stand-123-1-linux"
+    assert live_stand.stand_ws(tag, "b") == "stand-123-1-linux-b"
+    names = live_stand.tag_branches(tag)
+    assert names["stop"] == stop_branch("stand-123-1-linux", "n1", 1)
+    assert names["stop-b"] == stop_branch("stand-123-1-linux-b", "n1", 1)
+    assert names["seed"] != names["seed-b"]
+    assert len(set(names.values())) == len(names)
+
+
+def test_seed_manifest_is_a_delivered_request_of_g1() -> None:
+    """The seed's one file is a `review/v1` manifest of node `n1` g1 of the
+    workstream, at its own path (what `load_history` reads)."""
+    path, text = live_stand.seed_manifest("stand-t-b", "owner/stand")
+    req = parse_manifest(text)
+    assert path == manifest_path("stand-t-b", req.request_id)
+    assert (req.ws_id, req.product) == ("stand-t-b", "owner/stand")
+    assert {n: e.generation for n, e in req.nodes.items()} == {"n1": 1}
+
+
+def test_stop_pr_is_routed_as_stop_by_the_publisher() -> None:
+    """The stop-PR of the rows (one added record on the contract's branch)
+    is the kind `stop` by the publisher's own routing and its precheck's
+    path rule; its record names the node and generation of its path."""
+    ws = "stand-123-1-macos-b"
+    path, text = live_stand.stop_record(ws, "first")
+    assert path == stop_path(ws, "n1", 1)
+    assert parse_stop(text) == StopRecord("n1", 1, "first")
+    patterns = parse_patterns((REPO_ROOT / PATTERNS).read_text())
+    branch = live_stand.tag_branches("123-1-macos")["stop-b"]
+    assert route(branch, [("added", path, None)], patterns) == "stop"
+    assert route(branch, [("modified", path, None)], patterns) != "stop"
+
+
+def _request(ws: str, gen: int) -> NodeRequest:
+    _path, text = live_stand.seed_manifest(ws, "owner/stand")
+    req = parse_manifest(text)
+    entry = req.nodes["n1"]
+    nodes = {"n1": NodeEntry(entry.path, entry.content_hash, gen)}
+    return NodeRequest(
+        req.request_id, ws, req.product, nodes, req.upstream_pins, req.policy
+    )
+
+
+def test_delivered_seed_judges_the_history() -> None:
+    """Row 10's control: the current event of `n1` is the seed's merge
+    commit and head at g1; anything else is named."""
+    merge, head = "m" * 40, "h" * 40
+    seed = DeliveredRequest(merge, head, _request("w", 1))
+    assert live_stand.seed_problem((seed,), merge, head) is None
+    assert "нет" in str(live_stand.seed_problem((), merge, head))
+    other = DeliveredRequest("x" * 40, head, _request("w", 1))
+    assert live_stand.seed_problem((other,), merge, head) is not None
+    g2 = DeliveredRequest(merge, head, _request("w", 2))
+    assert live_stand.seed_problem((g2,), merge, head) is not None
+    stopped = (seed, DeliveredStop("s" * 40, StopRecord("n1", 1, "x")))
+    assert live_stand.seed_problem(stopped, merge, head) is not None
+    assert live_stand.seed_problem(Unavailable("boom"), merge, head) == "boom"
+
+
+def _seen(
+    method: str = "PUT",
+    path: str = "/repos/o/r/pulls/7/merge",
+    status: int = 409,
+    *,
+    held: bool = False,
+    up: bool = True,
+    down: bool = True,
+) -> gate_proxy.Seen:
+    return gate_proxy.Seen(method, path, status, held, False, up, down)
+
+
+def test_merge_puts_reads_the_proxy_log() -> None:
+    """Every `PUT` on the PR's merge path that reached the proxy, delivered
+    upstream or not; other requests and other PRs are not counted."""
+    log = [
+        _seen("GET", status=200),
+        _seen("POST", "/repos/o/r/pulls/7/reviews", 200),
+        _seen(held=True),
+        _seen(path="/repos/o/r/pulls/8/merge"),
+        _seen(status=502, up=False),
+    ]
+    puts = live_stand.merge_puts(log, "o/r", 7)
+    assert puts == [log[2], log[4]]
+    assert live_stand.merge_put_re("o/r", 7).fullmatch("/repos/o/r/pulls/7/merge")
+    assert not live_stand.merge_put_re("o/r", 7).fullmatch("/repos/o/r/pulls/70/merge")
+
+
+def _answer(
+    outcome: str, reason: str | None, *, replayed: bool = False, **result: object
+) -> tuple[int, Response]:
+    evidence: dict[str, object] = {"kind": "stop"}
+    if replayed:
+        evidence["replayed"] = True
+    if outcome == "done" and not replayed:
+        evidence["premise"] = PREMISE
+    rc = {"done": 0, "refused": 2}.get(outcome, 3)
+    return rc, Response(outcome, reason, result, evidence)  # type: ignore[arg-type]
+
+
+def test_head_changed_verdict() -> None:
+    """Row 11: `refused: head_changed`, the same on the repeat (replayed),
+    the PR open and not merged, one `PUT` upstream answered 409."""
+    first = _answer("refused", "head_changed")
+    again = _answer("refused", "head_changed", replayed=True)
+    pr: dict[str, object] = {"state": "open", "merged": False}
+    puts = [_seen(held=True)]
+    live_stand.check_head_changed(first, again, pr, puts)
+    bad = {
+        "merged": (first, again, {"state": "closed", "merged": True}, puts),
+        "other reason": (_answer("refused", "pr_state"), again, pr, puts),
+        "repeat not replayed": (first, _answer("refused", "head_changed"), pr, puts),
+        "two puts": (first, again, pr, puts * 2),
+        "put merged": (first, again, pr, [_seen(status=200)]),
+        "no put": (first, again, pr, []),
+    }
+    for name, args in bad.items():
+        with pytest.raises(RowFailed):
+            live_stand.check_head_changed(*args)
+        assert name
+
+
+def test_reconciled_verdict() -> None:
+    """Row 12: `done` by reconciliation (the premise named), the PR merged
+    by the bot at the head with the answered merge commit; the repeat is the
+    same `done`, replayed; one `PUT` upstream, its answer cut."""
+    head, commit, bot = "h" * 40, "c" * 40, "df-app[bot]"
+    result = {"merge_commit": commit, "head_sha": head}
+    first = _answer("done", None, **result)
+    again = _answer("done", None, replayed=True, **result)
+    pr: dict[str, object] = {
+        "merged": True,
+        "merged_by": {"login": bot, "type": "Bot"},
+        "head": {"sha": head},
+        "merge_commit_sha": commit,
+    }
+    puts = [_seen(status=200, down=False)]
+    live_stand.check_reconciled(first, again, pr, puts, bot=bot, head=head)
+    human = {**pr, "merged_by": {"login": "someone", "type": "User"}}
+    bad = {
+        "unknown": (_answer("unknown", "merge_not_confirmed"), again, pr, puts),
+        "by human": (first, again, human, puts),
+        "other commit": (first, again, {**pr, "merge_commit_sha": "d" * 40}, puts),
+        "not replayed": (first, _answer("done", None, **result), pr, puts),
+        "two puts": (first, again, pr, puts * 2),
+        "answered": (first, again, pr, [_seen(status=200)]),
+    }
+    for name, args in bad.items():
+        with pytest.raises(RowFailed):
+            live_stand.check_reconciled(*args, bot=bot, head=head)
+        assert name
+    no_premise = (0, Response("done", None, result, {"kind": "stop"}))
+    with pytest.raises(RowFailed):
+        live_stand.check_reconciled(no_premise, again, pr, puts, bot=bot, head=head)
 
 
 @dataclass
-class Upstream:
-    """A local stand-in for the API: records requests, answers 200 JSON."""
+class StubGitHub:
+    """`MachineGitHub` of row 9: PR states and branches in memory."""
 
-    url: str = ""
-    seen: list[tuple[str, str, str | None, str | None, bytes]] = field(
-        default_factory=list
+    states: dict[int, str]
+    refs: set[str]
+    patched: list[int] = field(default_factory=list)
+    full_name: str = "o/r"
+
+    def repo(self, rest: str) -> str:
+        return f"/repos/{self.full_name}{rest}"
+
+    def pull(self, number: int) -> dict[str, object]:
+        return {"state": self.states[number]}
+
+    def ref_sha(self, branch: str) -> str | None:
+        return "a" * 40 if branch in self.refs else None
+
+    def call(self, method: str, path: str, body: object | None = None) -> object:
+        if method == "PATCH":
+            number = int(path.rsplit("/", 1)[1])
+            if self.states[number] != "open":
+                raise live_stand.GitHubRefused("merged PR", 422)
+            self.patched.append(number)
+            self.states[number] = "closed"
+        elif method == "DELETE":
+            self.refs.discard(path.split("/git/refs/heads/", 1)[1])
+        return None
+
+
+def test_cleanup_closes_open_prs_and_keeps_the_merges(tmp_path: Path) -> None:
+    """Row 9: only open PRs are closed (a merged seed or stop PR is left
+    as it is), every branch deleted; the merges that stay on the default
+    branch are named in the evidence."""
+    gh = StubGitHub({1: "open", 2: "closed", 3: "open"}, {"a", "b"})
+    args = live_stand.StandArgs(tmp_path, tmp_path, "s", 1, 2, 3, "t")
+    st = live_stand.Stand(
+        cast(RolesWorld, None),
+        args,
+        StandSecrets(tmp_path / "k", tmp_path / "t", "ghp_x"),
+        cast(live_stand.MachineGitHub, gh),
+        cast(live_stand.Product, None),
+        "master",
+        "bot[bot]",
+        prs={"brief": 1, "seed": 2, "stop": 3},
+        branches=["a", "b"],
+        merges={"seed": "m" * 40},
     )
-
-
-@pytest.fixture()
-def upstream() -> Iterator[Upstream]:
-    up = Upstream()
-
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def answer(self) -> None:
-            length = int(self.headers.get("Content-Length") or 0)
-            body = self.rfile.read(length) if length else b""
-            up.seen.append(
-                (
-                    self.command,
-                    self.path,
-                    self.headers.get("Host"),
-                    self.headers.get("Authorization"),
-                    body,
-                )
-            )
-            data = b'{"ok": true}'
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            link = f'<{up.url}/repos/o/r/pulls/1/reviews?page=2>; rel="next"'
-            self.send_header("Link", link)
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-
-        do_GET = do_POST = answer  # noqa: N815 - http.server's names
-
-        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
-            """Quiet."""
-
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    up.url = f"http://127.0.0.1:{server.server_address[1]}"
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield up
-    finally:
-        server.shutdown()
-        server.server_close()
-
-
-def fetch(url: str, method: str = "GET", body: bytes | None = None) -> tuple[int, dict]:
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    req = urllib.request.Request(
-        url, data=body, method=method, headers={"Authorization": "Bearer t0k"}
+    found = live_stand.row9_cleanup(st)
+    assert gh.patched == [1, 3] and gh.refs == set()
+    assert found == {"closed": 3, "deleted": 2}
+    evidence = json.loads(
+        (tmp_path / "live" / OS_DIR / "row9-cleanup.json").read_text()
     )
-    with opener.open(req, timeout=10) as resp:
-        return resp.status, dict(resp.headers)
-
-
-def test_gate_proxy_passes_requests_through(upstream: Upstream) -> None:
-    """A request reaches the upstream unchanged but for `Host`; the answer's
-    `Link` is on the proxy's base; the publisher admits the proxy's URL as
-    its `api_base`."""
-    with gate_proxy.serve_gate_proxy(upstream.url) as proxy:
-        PublisherConfig({}, proxy.url)
-        status, headers = fetch(f"{proxy.url}/repos/o/r/pulls/1?x=1")
-        seen = proxy.requests()
-    assert status == 200
-    assert headers["Link"].startswith(f"<{proxy.url}/repos/o/r/pulls/1/reviews")
-    method, path, host, auth, _body = upstream.seen[0]
-    assert (method, path, auth) == ("GET", "/repos/o/r/pulls/1?x=1", "Bearer t0k")
-    assert host == upstream.url.removeprefix("http://")
-    assert [(s.method, s.path, s.status, s.held) for s in seen] == [
-        ("GET", "/repos/o/r/pulls/1", 200, False)
-    ]
-
-
-def test_gate_proxy_holds_the_first_review_post(upstream: Upstream) -> None:
-    """The first `POST …/pulls/{n}/reviews` waits for `release()` before it
-    reaches the upstream; a second one is not held."""
-    path = "/repos/o/r/pulls/7/reviews"
-    results: list[int] = []
-    with gate_proxy.serve_gate_proxy(upstream.url) as proxy:
-        worker = threading.Thread(
-            target=lambda: results.append(fetch(proxy.url + path, "POST", b"{}")[0])
-        )
-        worker.start()
-        assert proxy.held.wait(10)
-        assert upstream.seen == []
-        proxy.release()
-        worker.join(10)
-        fetch(proxy.url + path, "POST", b"{}")
-        seen = proxy.requests()
-    assert results == [200]
-    assert [(m, p) for m, p, *_ in upstream.seen] == [("POST", path)] * 2
-    assert [(s.held, s.expired) for s in seen] == [(True, False), (False, False)]
-
-
-def test_gate_proxy_hold_expires(
-    upstream: Upstream, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Without `release()` the held POST goes on after `HOLD_LIMIT`, noted
-    `expired` (the row then fails as infrastructure)."""
-    monkeypatch.setattr(gate_proxy, "HOLD_LIMIT", 0.2)
-    with gate_proxy.serve_gate_proxy(upstream.url) as proxy:
-        fetch(f"{proxy.url}/repos/o/r/pulls/7/reviews", "POST", b"{}")
-        seen = proxy.requests()
-    assert [(s.held, s.expired) for s in seen] == [(True, True)]
+    assert evidence["kept_on_default_branch"] == {"seed": "m" * 40}

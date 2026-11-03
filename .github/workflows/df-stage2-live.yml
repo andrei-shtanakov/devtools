@@ -11,6 +11,15 @@
 # checks provenance again before it reads a secret, closes its PRs and
 # deletes its branches) -> always: evidence scanned for the secrets, the
 # secrets and their installed copies removed, evidence uploaded.
+# Stage 2b (docs/superpowers/plans/2026-11-03-df-installer-stage2b.md, Task
+# 11) adds the merge rows on the stop route to the same script: 10 the seed
+# (the machine user squash-merges a review/v1 manifest; the checker's
+# load_history sees it) and the stop-PR, 11 a head moved while the PUT is
+# held by tests/df/gate_proxy.py, 12 the PUT's answer cut and the identical
+# repeat; row 9 closes the open PRs, the seeds' and row 12's merges stay on
+# the stand's default branch. They need the owner's steps H5 (a new classic
+# PAT of the machine user), H6 (a new App key) and H7 (squash merge allowed
+# on the stand); there is no ruleset (R15-1).
 # Actions pinned by full commit SHA, as df-stage1.yml.
 name: df-stage2-live
 
