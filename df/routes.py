@@ -626,13 +626,16 @@ class _Leaves:
         )
 
     def install_admin(self, _target: str) -> None:
-        """Leaf `install_admin` from root's trusted `devtools` checkout (F13)."""
+        """Leaf `install_admin` from root's trusted `devtools` checkout (F13),
+        `site/` sources with the plan's approved `git` (2b Task 5)."""
         ref = self.refs.get("devtools")
         if ref is None:
             raise StepFailed(
                 "admin", "профиль без devtools: нет административного кода"
             )
-        admin.install_admin(self.layout, self.release_id, devtools_ref=ref)
+        admin.install_admin(
+            self.layout, self.release_id, devtools_ref=ref, git=self.plan.git
+        )
 
     def reap(self, target: str) -> None:
         """Leaf `reap_user_processes`; leftovers are a journal warning (F28)."""

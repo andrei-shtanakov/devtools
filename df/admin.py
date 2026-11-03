@@ -1,7 +1,9 @@
 """Administrative environment of `darkfactory` (spec 3.9, Task 8a part 1).
 
 Root runs nothing the builder could write: the admin code is root's copy of
-`df/` from the trusted `devtools` checkout (`install_admin`), the admin
+`df/` from the trusted `devtools` checkout (`install_admin`; with the
+precheck's governance closure, contracts and pure-Python `site/`,
+`df.admin_tree`), the admin
 Python is installed by root with the approved `uv` (`install_admin_python`).
 Both are leaves of the route `admin`; `admin_ready` is the one definition of
 their readiness. The command `bin/darkfactory` runs the admin Python on the
@@ -22,7 +24,7 @@ import stat
 import tempfile
 from pathlib import Path, PurePosixPath
 
-from df import accept, acl, fsutil
+from df import accept, acl, admin_tree, fsutil
 from df import build as build_mod
 from df import platform as plat
 from df.digest import TreeError, check_links, open_regular, tree_digest
@@ -279,16 +281,24 @@ def admin_digest(layout: Layout, release_id: str) -> str:
     return tree_digest(layout.admin_dir(release_id), exclude=frozenset())
 
 
-def expected_admin_digest(df_dir: Path) -> str:
-    """The `admin_digest` an install of a checkout whose `df/` is `df_dir`
-    records (Task 15, provenance r3 N2): `df_dir` copied by `install_admin`'s
-    rules (`_copy_dir`: no bytecode, no link, modes `0755`/`0644`) into a
-    temporary `<tmp>/admin/df`, then `tree_digest` of `<tmp>/admin` with
-    nothing excluded -- the scope of `admin_digest`. Needs no root."""
+def expected_admin_digest(devtools_ref: Path, *, layout: Layout, git: Path) -> str:
+    """The `admin_digest` an install of the checkout `devtools_ref` records
+    (Task 15, provenance r3 N2; 2b Task 5): the tree `install_admin` writes
+    (`_fill_admin`: `df/`, the governance closure, the contract files and
+    `site/`) in a temporary `<tmp>/admin`, then `tree_digest` of it with
+    nothing excluded -- the scope of `admin_digest`. Offline: `site/` comes
+    only from the checked cache `admin-home/site-src` of `layout` (the
+    sdist's sha256 and steward's commit and tree re-checked against
+    `devtools_ref/uv.lock`); a missing or bad artifact is `TreeError`, never
+    a download. Writes nothing under the layout but that cache's directory;
+    needs read access to `admin-home` (root on a host)."""
+    sources = admin_tree.site_sources(
+        _site_pins(devtools_ref), layout=layout, fetch=None, git=git
+    )
     with tempfile.TemporaryDirectory(prefix="df-admin-digest-") as tmp:
         dest = Path(tmp) / "admin"
         _make_dir(dest)
-        _copy_dir(df_dir, dest / "df")
+        _fill_admin(dest, devtools_ref, sources, git)
         return tree_digest(dest, exclude=frozenset())
 
 
@@ -337,9 +347,11 @@ def admin_code_problems(layout: Layout, release_id: str) -> list[str]:
     No link on the chain from `/` to `admin/<id>` (M-5) and the chain passes
     `trusted_path_problems` (ACLs included); every object inside is a
     directory or a regular file (never a link: `install_admin` copies none),
-    never bytecode (`is_bytecode`: under `-B` a `.pyc` is still read, n-5),
-    root's, without group or other write and setuid/setgid bits
-    (`_object_problems`), and carries no ACL. A vanished object is a
+    never bytecode (`is_bytecode`: under `-B` a `.pyc` is still read, n-5)
+    nor a name of `admin_tree.FORBIDDEN_SUFFIXES` (`*.so`, `*.dylib`,
+    `*.pyd`, `*.pth`: native code or a startup hook), root's, without group
+    or other write and setuid/setgid bits (`_object_problems`), and carries
+    no ACL. A vanished object is a
     `TreeError`; any other `OSError` propagates.
     """
     admin = layout.admin_dir(release_id)
@@ -349,6 +361,10 @@ def admin_code_problems(layout: Layout, release_id: str) -> list[str]:
             path = Path(dirpath) / name
             if is_bytecode(name):
                 problems.append(f"{path}: байт-код в административном коде")
+            elif admin_tree.forbidden_name(name):
+                problems.append(
+                    f"{path}: нативный модуль или .pth в административном коде"
+                )
             st = _tree_lstat(path)
             if stat.S_ISLNK(st.st_mode):
                 problems.append(f"{path}: ссылка в административном коде")
@@ -372,32 +388,80 @@ def _tree_lstat(path: Path) -> os.stat_result:
         raise TreeError(f"{path}: {exc.strerror}") from exc
 
 
-def install_admin(layout: Layout, release_id: str, *, devtools_ref: Path) -> None:
-    """Protocol `install_admin`: root's copy of `<devtools_ref>/df/`.
+def install_admin(
+    layout: Layout,
+    release_id: str,
+    *,
+    devtools_ref: Path,
+    git: Path,
+    fetch: admin_tree.Fetch = admin_tree.fetch_url,
+) -> None:
+    """Protocol `install_admin`: root's admin tree from `devtools_ref`.
 
     `devtools_ref` is root's trusted checkout (Task 7), never the release
     tree. Precondition: `admin/<id>` is absent, else `StepFailed`, nothing
-    touched. Only directories and regular files are copied (a link or any
-    other type is a refusal); modes are set by `fchmod` — directories and
-    files with any x bit `0755`, other files `0644` (F13). Effects:
+    touched. Before the tree, the `site/` sources are checked (and fetched
+    into `admin-home/site-src` if absent or bad) against the pins of
+    `<devtools_ref>/uv.lock` with the approved `git` and `fetch`
+    (`admin_tree.site_sources`); a refusal there leaves no `admin/<id>`.
+    The copy (`_fill_admin`): `df/`, the modules of
+    `admin_tree.GOVERNANCE_MODULES`, `admin_tree.CONTRACT_FILES` and
+    `site/` written from the checked streams (2b Task 5). Only directories
+    and regular files are copied (a link or any other type is a refusal);
+    modes are set by `fchmod` — directories and files with any x bit
+    `0755`, other files `0644` (F13). Effects (unchanged by Task 5):
     `created` (partial) -> `created` (full) -> `sync_tree(admin/<id>)` ->
-    `sync_dir(admin)`.
+    `sync_dir(admin)`; an interrupted copy is a partial `admin/<id>`, which
+    the route removes (`admin=present`).
     """
     dest = layout.admin_dir(release_id)
     if os.path.lexists(dest):
         raise StepFailed(_STEP, f"{dest}: уже есть")
-    src = devtools_ref / "df"
-    if not accept.is_real_dir(src):
-        raise StepFailed(_STEP, f"{src}: не каталог")
+    if not accept.is_real_dir(devtools_ref / "df"):
+        raise StepFailed(_STEP, f"{devtools_ref / 'df'}: не каталог")
     try:
+        pins = _site_pins(devtools_ref)
+        sources = admin_tree.site_sources(pins, layout=layout, fetch=fetch, git=git)
         _make_dir(dest)
         fsutil.fault_point("created", dest)
-        _copy_dir(src, dest / "df")
+        _fill_admin(dest, devtools_ref, sources, git)
     except (OSError, TreeError) as exc:
         raise StepFailed(_STEP, f"административный код: {exc}") from exc
     fsutil.fault_point("created", dest)
     fsutil.sync_tree(dest)
     fsutil.sync_dir(layout.admin)
+
+
+def _site_pins(devtools_ref: Path) -> admin_tree.SitePins:
+    """`admin_tree.locked_pins` of the checkout's `uv.lock` (a regular file)."""
+    fd = open_regular(devtools_ref / "uv.lock")
+    try:
+        data = b""
+        while chunk := os.read(fd, _CHUNK):
+            data += chunk
+    finally:
+        os.close(fd)
+    return admin_tree.locked_pins(data)
+
+
+def _fill_admin(
+    dest: Path, devtools_ref: Path, sources: admin_tree.SiteSources, git: Path
+) -> None:
+    """The content of `admin/<id>` (`dest`, made): `df/`, governance,
+    contracts, `site/`."""
+    src = devtools_ref / "df"
+    if not accept.is_real_dir(src):
+        raise StepFailed(_STEP, f"{src}: не каталог")
+    _copy_dir(src, dest / "df")
+    for rel in (*admin_tree.governance_files(), *admin_tree.CONTRACT_FILES):
+        parts = PurePosixPath(rel).parts
+        current = dest
+        for name in parts[:-1]:
+            current = current / name
+            if not os.path.lexists(current):
+                _make_dir(current)
+        _copy_file(devtools_ref.joinpath(*parts), dest.joinpath(*parts))
+    admin_tree.write_site(dest / "site", sources, git=git)
 
 
 def _make_dir(path: Path) -> None:

@@ -457,6 +457,30 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
     ("admin", "expected_admin_digest", "tempfile.TemporaryDirectory", 1): (
         "expected_admin_digest's scratch copy (Task 15), never under the layout"
     ),
+    ("admin_tree", "fetch_url", ".open", 1): (
+        "an HTTP GET through an opener (`urllib`): reads the network, writes no file"
+    ),
+    ("admin_tree", "_ensure_cache_dir", "os.mkdir", 1): (
+        "site-src: scratch cache, re-checked on every use (sha256, cat-file)"
+    ),
+    ("admin_tree", "_sdist", "os.unlink", 1): (
+        "site-src: scratch cache, re-checked on every use (sha256, cat-file): a bad sdist dropped"
+    ),
+    ("admin_tree", "_write_cache", "os.unlink", 1): (
+        "site-src: scratch cache, re-checked on every use (sha256, cat-file): its own leftover temp"
+    ),
+    ("admin_tree", "_write_cache", "os.open", 1): (
+        "site-src: scratch cache, re-checked on every use (sha256, cat-file): O_EXCL temp"
+    ),
+    ("admin_tree", "_write_cache", "os.rename", 1): (
+        "site-src: scratch cache, re-checked on every use (sha256, cat-file): a lost rename is fetched again"
+    ),
+    ("admin_tree", "_make_dir", "os.mkdir", 1): "protocol install_admin: sync_tree",
+    ("admin_tree", "_make_dir", "os.fchmod", 1): "protocol install_admin: sync_tree",
+    ("admin_tree", "_write_member", "os.open", 1): "protocol install_admin: sync_tree",
+    ("admin_tree", "_write_member", "os.fchmod", 1): (
+        "protocol install_admin: sync_tree"
+    ),
     ("admin", "link_command", "os.symlink", 1): "protocol link_command: temp",
     ("admin", "link_command", "os.rename", 1): (
         "protocol link_command: sync_dir(local_bin)"
@@ -582,6 +606,13 @@ SUBPROCESS_CREATORS = {
     "uv python install (admin)": "protocol install_admin_python: sync_tree, rename",
     "uv sync / git / tar (build, as df-build)": "builder tree: copied, digested",
     "git / tar (root's checkout)": "scratch under verify/, fetched every run",
+    "git init / fetch / cat-file (admin site cache, root)": (
+        "the bare steward.git under admin-home/site-src: scratch, its pinned "
+        "commit and tree re-checked on every use"
+    ),
+    "git archive (admin site, root)": (
+        "creates nothing: its stdout is the tar stream write_site reads"
+    ),
     "cleaner find/chmod/rm (as df-build)": "protocol cleanup_tree: root syncs",
     "useradd / dscl (account)": "OS records, judged by verify_build_user",
     "probes: ps / pkill / sudo -l / getent / dscl -read / xcrun": (
@@ -664,6 +695,7 @@ PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
         "uv python install (admin)",
         "uv sync / git / tar (build, as df-build)",
         "git / tar (root's checkout)",
+        "git init / fetch / cat-file (admin site cache, root)",
         "cleaner find/chmod/rm (as df-build)",
         "useradd / dscl (account)",
         "probes: ps / pkill / sudo -l / getent / dscl -read / xcrun",
@@ -676,6 +708,9 @@ PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
         "sudo -u df-exec test -r / -x (doctor roles.isolation, root)",
         "sudo -u <role> sudo df-publish perimeter-status (doctor, root)",
         "sudo -u df-review sudo df-publish merge (doctor publisher.foreign)",
+    ),
+    ("admin_tree", "_archive", "subprocess.Popen", 1): (
+        "git archive (admin site, root)",
     ),
     ("platform", "spawn_as", "subprocess.Popen", 1): (
         "tar -cf - (copy producer, as df-build)",

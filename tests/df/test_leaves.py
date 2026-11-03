@@ -44,6 +44,7 @@ from tests.df.route_world import (
     write_accounts,
     write_state_mark,
 )
+from tests.df.site_world import SYSTEM_GIT
 
 PLATFORM = plat.detect_platform()
 RELEASE = "releases/<id>"
@@ -734,7 +735,10 @@ PRIMITIVES: Mapping[
     "install_admin": _simple(
         devtools_ref,
         lambda fl: admin.install_admin(
-            fl.layout, ID, devtools_ref=fl.layout.verify_dir / "devtools"
+            fl.layout,
+            ID,
+            devtools_ref=fl.layout.verify_dir / "devtools",
+            git=SYSTEM_GIT,
         ),
         "admin/<id>",
     ),

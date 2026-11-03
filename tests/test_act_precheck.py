@@ -23,6 +23,7 @@ from typing import Any
 
 import pytest
 
+from df.admin_tree import GOVERNANCE_MODULES
 from governance import act_precheck
 from governance.act_envelope import StopRecord, render_stop, stop_path
 from governance.act_forge_http import TokenTransport
@@ -692,22 +693,6 @@ def test_deadline_kills_git_and_answers_unset(
 
 # --- замыкание импортов ------------------------------------------------------------
 
-#: Замыкание `act_precheck` по AST (включая отложенные импорты); Task 5 замораживает
-#: его как `GOVERNANCE_MODULES`.
-CLOSURE = (
-    "governance",
-    "governance.act_anon",
-    "governance.act_envelope",
-    "governance.act_forge_http",
-    "governance.act_git_rows",
-    "governance.act_history",
-    "governance.act_history_snapshot",
-    "governance.act_precheck",
-    "governance.act_request",
-    "governance.act_time",
-    "governance.approval_branches",
-    "governance.ssot_env",
-)
 FORBIDDEN = (
     "governance.ops",
     "governance.runner",
@@ -754,7 +739,7 @@ def _closure(start: str) -> tuple[set[str], set[str]]:
 
 def test_closure_excludes_act_status_ops_df() -> None:
     local, external = _closure("governance.act_precheck")
-    assert sorted(local) == sorted(CLOSURE)
+    assert sorted(local) == sorted(GOVERNANCE_MODULES)  # Task 5: одна константа
     assert [m for m in FORBIDDEN if m in local] == []
     assert not any(m == "df" or m.startswith("df.") for m in local)
     allowed = set(sys.stdlib_module_names) | {"steward", "yaml"}
