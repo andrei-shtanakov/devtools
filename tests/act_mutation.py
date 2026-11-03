@@ -70,6 +70,39 @@ BYPASS: dict[str, tuple[str, str]] = {
         'raise ValueError(f"forge: commits/{sha[:12]}/pulls: unexpected shape")',
         "body = []",
     ),
+    "act_precheck.serve:token_scrub": (
+        'reason.replace(request.token, "[token]")',
+        "reason",
+    ),
+    "act_precheck._no_constant:constant": (
+        'raise json.JSONDecodeError(f"constant {name}", name, 0)',
+        "return float(name)",
+    ),
+    "act_precheck._decide:deadline": ('return UNSET, "deadline"', 'return ALLOW, ""'),
+    "act_precheck._decide:read_failed": (
+        'return UNSET, f"read_failed: {exc}"',
+        'return ALLOW, ""',
+    ),
+    "act_precheck._stop_in_history:unreadable": (
+        'return UNSET, f"stop_unreadable: {target.path} at {request.head_sha[:12]}"',
+        'text = ""',
+    ),
+    "act_precheck._stop_in_history:record_invalid": (
+        'return REFUSE, f"stop_record_invalid: {exc}"',
+        "record = target",
+    ),
+    "act_precheck._stop_in_history:history": (
+        'return UNSET, f"history_unavailable: {history.reason}"',
+        "history = ()",
+    ),
+    "act_precheck._stop_in_history:no_request": (
+        'return REFUSE, f"no_delivered_request: node {target.node}"',
+        'return ALLOW, ""',
+    ),
+    "act_precheck._stop_in_history:already_stopped": (
+        'return REFUSE, f"already_stopped: node {target.node} g{gen}"',
+        'return ALLOW, ""',
+    ),
     "act_forge_http.TokenTransport._refusal:read_only_method": (
         'return f"read-only transport: {method} {path}"',
         "return None",
@@ -628,6 +661,8 @@ BYPASS: dict[str, tuple[str, str]] = {
 }
 #: Обход невозможен (без данных продолжить нечем) — решение ревьюера с причиной.
 RULED: dict[str, str] = {
+    "act_precheck.parse_request:json": "запрос не JSON (или не UTF-8): данных нет, продолжить нечем; обход с корректными данными невозможен, проверяется причина (O3)",
+    "act_precheck._stop_target:stop_path": "путь не путь записи остановки: нет `ws_id`, узла и поколения — продолжить нечем; обход невозможен, проверяется причина (O3)",
     "approve_node._try_agent_merge#stop_form_first:form_first": "у stop-PR (`base` и `form` переданы) первую проверку формы маскирует та же `form()` в цикле перед каждой попыткой мержа (`#stop_late_form`, closed): обход первой неотличим по исходу — мержа нет, отказ формы тот же; у finalize-PR (без `base`) первая проверка единственная и закрыта строкой `#form`",
     "ops.RealOps.snapshot_open:own_repo": "общий каталог двух снимков: второй `snapshot_open` падает на `mkdir home` (`FileExistsError`) до любых чтений — смешения снимков нет, мутант виден исключением, а не утверждением; независимость проверяет двойник `test_interleaved_snapshots_are_independent`",
     "runner._step_gate#act_mode_unset:mode": 'без проверки (O1) `act_mode, provider = gate` распаковывает `Unavailable` и падает `TypeError` — fail-closed, но исключением; BYPASS `gate = ("legacy", None)` пускает S4 дальше, и на стенде следующий шаг (`approve_node`) падает исключением «факт не установлен» — мутант виден, но не утверждением; тот же класс у S8 (`runner._step_s8#act_mode_unset`) закрыт утверждением',
