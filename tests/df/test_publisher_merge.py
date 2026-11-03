@@ -44,7 +44,7 @@ class MergeGitHub(FakeGitHub):
         super().__init__(world)
         self.head_ref = CAND
         self.base_ref = "master"
-        self.files: list[object] = [{"filename": "README.md"}]
+        self.files: list[object] = [{"filename": "README.md", "status": "modified"}]
         self.file_gets = 0  # compare requests
         self.head_repo: object = 7
         self.title = "t"
@@ -73,7 +73,7 @@ class MergeGitHub(FakeGitHub):
         if method == "GET" and path.startswith(f"/repos/{REPO}/compare/"):
             self.file_gets += 1
             if path != COMPARE:  # any other pair of commits shows other files
-                return _reply({"files": [{"filename": STOP}]})
+                return _reply({"files": [{"filename": STOP, "status": "added"}]})
             return _reply({"files": self.files})
         return super().route(method, path, query, headers, data)
 
@@ -174,13 +174,19 @@ def test_branch_kinds_two_forms_are_ambiguous() -> None:
     patterns = {
         "APPROVAL_CANDIDATE_TEMPLATE": "brief/{x}-approve-{y}",
         "APPROVAL_FINALIZE_SUFFIX": "-final",
+        "APPROVAL_STOP_TEMPLATE": "stop/{ws_id}-{node}-g{generation}",
     }
     ref = "brief/a-approve-1"
     assert merge.branch_kinds(ref, patterns) == {"candidate", "brief"}
-    assert isinstance(merge.route(ref, [ENVELOPE], patterns), Refused)
+    assert isinstance(merge.route(ref, mod(ENVELOPE), patterns), Refused)
 
 
 # --- route --------------------------------------------------------------------
+
+
+def mod(*paths: str) -> list[merge.Change]:
+    """Modified files: the changes of a PR that is not a stop one."""
+    return [("modified", p, None) for p in paths]
 
 
 def amb(result: object) -> bool:
@@ -188,33 +194,139 @@ def amb(result: object) -> bool:
 
 
 def test_route_kinds() -> None:
-    assert merge.route(CAND, ["any/file.py"], REAL) == "candidate"
-    assert merge.route(CAND, [ENVELOPE], REAL) == "candidate"
-    assert merge.route("spec/ws-approve-1-2", ["x"], REAL) == "candidate"
-    assert merge.route(FINAL, [ENVELOPE], REAL) == "finalize"
-    assert merge.route(FINAL, [ENVELOPE, "workstreams/b/approvals/m.yaml"], REAL) == (
-        "finalize"
+    assert merge.route(CAND, mod("any/file.py"), REAL) == "candidate"
+    assert merge.route(CAND, mod(ENVELOPE), REAL) == "candidate"
+    assert merge.route("spec/ws-approve-1-2", mod("x"), REAL) == "candidate"
+    assert merge.route(FINAL, mod(ENVELOPE), REAL) == "finalize"
+    assert (
+        merge.route(FINAL, mod(ENVELOPE, "workstreams/b/approvals/m.yaml"), REAL)
+        == "finalize"
     )
-    assert merge.route("brief/x", ["docs/a.md"], REAL) == "brief"
+    assert merge.route("brief/x", mod("docs/a.md"), REAL) == "brief"
 
 
 def test_route_stop_file_is_ambiguous_on_any_branch() -> None:
     for ref in (CAND, FINAL, "brief/x", "feat/x"):
-        assert amb(merge.route(ref, [STOP], REAL)), ref
-        assert amb(merge.route(ref, [ENVELOPE, STOP], REAL)), ref
+        assert amb(merge.route(ref, mod(STOP), REAL)), ref
+        assert amb(merge.route(ref, mod(ENVELOPE, STOP), REAL)), ref
+
+
+STOP_REF = "stop/ws-n1-g2"
+
+
+def test_stop_routes_on_one_added_file() -> None:
+    added = [("added", STOP, None)]
+    assert merge.route(STOP_REF, added, REAL) == "stop"
+    assert merge.branch_kinds(STOP_REF, REAL) == {"stop"}
+    dashed = "workstreams/a-b/approvals/stops/c-d-g12.yaml"
+    assert merge.route("stop/a-b-c-d-g12", [("added", dashed, None)], REAL) == "stop"
+
+
+def test_stop_modified_or_renamed_file_ambiguous() -> None:
+    for change in (
+        ("modified", STOP, None),
+        ("removed", STOP, None),
+        ("renamed", STOP, "docs/old.md"),
+        ("renamed", STOP, STOP.replace("n1", "n2")),
+        ("added", STOP, "docs/old.md"),
+        ("", STOP, None),
+    ):
+        assert amb(merge.route(STOP_REF, [change], REAL)), change
+    added = ("added", STOP, None)
+    assert amb(merge.route(STOP_REF, [], REAL))
+    assert amb(merge.route(STOP_REF, [added, added], REAL))
+    assert amb(merge.route(STOP_REF, [added, *mod("docs/a.md")], REAL))
+    assert amb(merge.route(STOP_REF, [("added", ENVELOPE, None)], REAL))
+
+
+def test_stop_branch_path_mismatch_ambiguous() -> None:
+    added = [("added", STOP, None)]
+    for ref in (
+        "stop/ws-n1-g3",  # generation differs
+        "stop/ws-n2-g2",  # node differs
+        "stop/other-n1-g2",  # workstream differs
+        "stop/ws-n1-g02",  # not canonical
+        "stop/ws-n1-g",
+    ):
+        assert amb(merge.route(ref, added, REAL)), ref
+    # a stop record on another kind of branch is still ambiguous
+    assert amb(merge.route(CAND, added, REAL))
+    # the old path of a rename out of the stop directory counts
+    moved = [("renamed", "docs/moved.md", STOP)]
+    assert amb(merge.route(CAND, moved, REAL))
+    assert amb(merge.route(STOP_REF, moved, REAL))
+
+
+def _shapes(template: str) -> str:
+    return "APPROVAL_STOP_TEMPLATE=" + template
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "stop/{ws_id}-{node}",  # no generation
+        "stop/{ws_id}-g{generation}",  # no node
+        "stop/{node}-g{generation}",  # no workstream
+        "stop/{ws_id}-{node}-g{generation}-{ws_id}",  # twice
+        "stop/{ws_id}-{node}-g{generation}-{extra}",  # unknown
+    ],
+)
+def test_stop_template_of_another_shape_is_unavailable(template: str) -> None:
+    text = GOOD.replace(
+        "APPROVAL_STOP_TEMPLATE=stop/{ws_id}-{node}-g{generation}",
+        _shapes(template),
+    )
+    with pytest.raises(Refused) as info:
+        merge.parse_patterns(text)
+    assert info.value.reason == "patterns_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("ws", "node", "ref"),
+    [
+        ("ws", "x-g1", "stop/ws-x-g1-g2"),  # node that looks like a generation
+        ("ws", "n", "stop/ws-n-g02"),  # not canonical
+        ("ws", "n", "stop/ws--g2"),  # empty node
+        ("ws", "n", "stop/ws-n-g2/extra"),  # extra segment
+        ("ws", "n", "stop/ws-a/b-g1"),  # node spans a slash
+        ("a-b", "c-d", "stop/a-b-c-d-g12"),
+        ("ws", "n", "stop/ws-n-g2"),
+        ("ws", "n", "stop/ws-n-g"),
+    ],
+)
+def test_df_route_agrees_with_governance_parse(ws: str, node: str, ref: str) -> None:
+    """Both copies of the branch parser take or refuse the same branches, the
+    record path being the one the branch names."""
+    parsed = approval_branches.parse_stop_branch(ref, ws)
+    gen = parsed[1] if parsed else 2
+    name = parsed[0] if parsed else node
+    path = act_envelope.stop_path(ws, name, gen)
+    routed = merge.route(ref, [("added", path, None)], REAL)
+    assert (routed == "stop") == (parsed is not None), (ref, routed, parsed)
+
+
+def test_stop_glob_equals_the_contract() -> None:
+    template = REAL["APPROVAL_STOP_TEMPLATE"]
+    assert template == approval_branches.stop_template()
+    assert merge._template_glob(template) == approval_branches.stop_glob()
+    ws, node, gen = "a-b", "c-d", 4
+    ref = approval_branches.stop_branch(ws, node, gen)
+    path = act_envelope.stop_path(ws, node, gen)
+    assert merge.route(ref, [("added", path, None)], REAL) == "stop"
+    assert approval_branches.parse_stop_branch(ref, ws) == (node, gen)
 
 
 def test_route_finalize_with_other_paths_is_ambiguous() -> None:
-    assert amb(merge.route(FINAL, [ENVELOPE, "src/x.py"], REAL))
-    assert amb(merge.route(FINAL, [], REAL))
-    assert amb(merge.route(FINAL, ["workstreams/ws/approvals/stops/a.yaml"], REAL))
-    assert amb(merge.route(FINAL, ["workstreams/ws/approvals/x/y.yaml"], REAL))
-    assert amb(merge.route(FINAL, ["workstreams/ws/approvals/n1.yml"], REAL))
+    assert amb(merge.route(FINAL, mod(ENVELOPE, "src/x.py"), REAL))
+    assert amb(merge.route(FINAL, mod(), REAL))
+    assert amb(merge.route(FINAL, mod("workstreams/ws/approvals/stops/a.yaml"), REAL))
+    assert amb(merge.route(FINAL, mod("workstreams/ws/approvals/x/y.yaml"), REAL))
+    assert amb(merge.route(FINAL, mod("workstreams/ws/approvals/n1.yml"), REAL))
 
 
 def test_route_outside_the_forms_is_ambiguous() -> None:
-    assert amb(merge.route("feat/x", [ENVELOPE], REAL))
-    assert amb(merge.route("", [ENVELOPE], REAL))
+    assert amb(merge.route("feat/x", mod(ENVELOPE), REAL))
+    assert amb(merge.route("", mod(ENVELOPE), REAL))
 
 
 def test_path_templates_per_segment() -> None:
@@ -254,6 +366,7 @@ def test_path_templates_match_act_envelope() -> None:
 GOOD = (
     "# c\n\nAPPROVAL_CANDIDATE_TEMPLATE=spec/{ws_id}-approve-{wave}\n"
     "APPROVAL_FINALIZE_SUFFIX=-final\n"
+    "APPROVAL_STOP_TEMPLATE=stop/{ws_id}-{node}-g{generation}\n"
 )
 
 
@@ -283,6 +396,7 @@ def test_patterns_parsed_not_executed(world: World) -> None:
     assert merge.read_patterns(world.lay, world.snap) == {
         "APPROVAL_CANDIDATE_TEMPLATE": "spec/{ws_id}-approve-{wave}",
         "APPROVAL_FINALIZE_SUFFIX": "-final",
+        "APPROVAL_STOP_TEMPLATE": "stop/{ws_id}-{node}-g{generation}",
     }
 
 
@@ -312,7 +426,7 @@ def test_merge_always_precheck_unavailable_in_2a(
 ) -> None:
     for ref, files in ((CAND, ["a.py"]), (FINAL, [ENVELOPE]), ("brief/x", ["a.md"])):
         mgh.head_ref = ref
-        mgh.files = [{"filename": f} for f in files]
+        mgh.files = [{"filename": f, "status": "modified"} for f in files]
         resp = run(world, capsys, request_id=f"req-{len(ref):08d}")
         assert reason(resp) == ("refused", "precheck_unavailable"), ref
 
@@ -432,17 +546,29 @@ def test_merge_run_product_mismatch_before_any_call(
 def test_merge_stop_file_in_pr_is_ambiguous(
     world: World, mgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    mgh.files = [{"filename": STOP}]
+    mgh.files = [{"filename": STOP, "status": "modified"}]
     assert reason(run(world, capsys)) == ("refused", "ambiguous_kind")
+
+
+def test_merge_stop_pr_reaches_the_precheck(
+    world: World, mgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
+    mgh.head_ref = STOP_REF
+    mgh.files = [{"filename": STOP, "status": "added"}]
+    assert reason(run(world, capsys)) == ("refused", "precheck_unavailable")
 
 
 def test_rename_out_of_stops_does_not_escape(
     world: World, mgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    mgh.files = [{"filename": "docs/moved.md", "previous_filename": STOP}]
+    mgh.files = [
+        {"filename": "docs/moved.md", "status": "renamed", "previous_filename": STOP}
+    ]
     assert reason(run(world, capsys)) == ("refused", "ambiguous_kind")
     mgh.head_ref = FINAL
-    mgh.files = [{"filename": ENVELOPE, "previous_filename": "src/old.py"}]
+    mgh.files = [
+        {"filename": ENVELOPE, "status": "renamed", "previous_filename": "src/old.py"}
+    ]
     assert reason(run(world, capsys, request_id="req-00000002")) == (
         "refused",
         "ambiguous_kind",
@@ -481,9 +607,9 @@ def test_base_branch_with_a_slash_keeps_it(
 def test_299_files_are_fine_300_are_too_many(
     world: World, mgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    mgh.files = [{"filename": f"f{i}"} for i in range(299)]
+    mgh.files = [{"filename": f"f{i}", "status": "added"} for i in range(299)]
     assert reason(run(world, capsys)) == ("refused", "precheck_unavailable")
-    mgh.files = [{"filename": f"f{i}"} for i in range(300)]
+    mgh.files = [{"filename": f"f{i}", "status": "added"} for i in range(300)]
     resp = run(world, capsys, request_id="req-00000002")
     assert reason(resp) == ("refused", "too_many_files")
 
@@ -580,9 +706,9 @@ def test_precheck_gets_the_second_read(
 
 
 def test_brief_branch_with_an_envelope_is_ambiguous() -> None:
-    assert amb(merge.route("brief/x", [ENVELOPE], REAL))
-    assert amb(merge.route("brief/x", ["docs/a.md", ENVELOPE], REAL))
-    assert merge.route("brief/x", ["workstreams/ws/notes.md"], REAL) == "brief"
+    assert amb(merge.route("brief/x", mod(ENVELOPE), REAL))
+    assert amb(merge.route("brief/x", mod("docs/a.md", ENVELOPE), REAL))
+    assert merge.route("brief/x", mod("workstreams/ws/notes.md"), REAL) == "brief"
 
 
 PARITY = [
@@ -610,7 +736,11 @@ def test_patterns_parse_like_the_contract(text: str) -> None:
     refuse (a missing key, a duplicate, an empty value)."""
     from governance import ssot_env
 
-    keys = ("APPROVAL_CANDIDATE_TEMPLATE", "APPROVAL_FINALIZE_SUFFIX")
+    keys = (
+        "APPROVAL_CANDIDATE_TEMPLATE",
+        "APPROVAL_FINALIZE_SUFFIX",
+        "APPROVAL_STOP_TEMPLATE",
+    )
     found = [ssot_env.definition_lines(text, k) for k in keys]
     good = all(len(v) == 1 and v[0] for v in found)
     if not good:
@@ -657,7 +787,7 @@ def test_fork_pr_is_foreign(
     head_repo: object,
 ) -> None:
     mgh.head_ref = ref
-    mgh.files = [{"filename": ENVELOPE}]
+    mgh.files = [{"filename": ENVELOPE, "status": "modified"}]
     mgh.head_repo = head_repo
     assert reason(run(world, capsys)) == ("refused", "head_repo_foreign")
     assert mgh.file_gets == 0
@@ -669,7 +799,10 @@ def test_fork_pr_is_foreign(
         [{"nofilename": 1}],
         [{"filename": 3}],
         ["str"],
-        [{"filename": "a", "previous_filename": 5}],
+        [{"filename": "a", "status": "modified", "previous_filename": 5}],
+        [{"filename": "a"}],  # status is required
+        [{"filename": "a", "status": 3}],
+        [{"filename": "a", "status": ""}],
     ],
 )
 def test_bad_file_item_is_unavailable(
