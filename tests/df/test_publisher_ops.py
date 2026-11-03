@@ -820,7 +820,7 @@ def test_done_evidence_has_the_review(
 
 
 def test_auth_repr_hides_the_token() -> None:
-    assert "ghs_" not in repr(ops._Auth(BOT, "ghs_SECRET"))
+    assert "ghs_" not in repr(ops.Auth(BOT, "ghs_SECRET"))
 
 
 # --- round 1: read-token self-check, two Apps ---------------------------------

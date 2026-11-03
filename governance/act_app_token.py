@@ -3,7 +3,9 @@
 Исполняется `merge-pr.sh` файлом (форма Task 15): `uv run --frozen --exact --group
 governance --no-config --no-env-file python -I <этот файл> --app-id … --key …
 --repo …` → stdout две строки: `<slug>[bot]` и токен установки на целевой репо;
-иначе код 2 и причина в stderr (без токенов и байтов ключа). JWT —
+иначе код 2 и причина в stderr (без токенов и байтов ключа). `--revoke` (Task 9,
+п. 9d) — отзыв токена установки, сам токен — только stdin (не argv: виден в `ps`;
+не окружение): код 0 — отозван, 2 — нет. JWT —
 `pyjwt[crypto]` (группа governance, пин в uv.lock); HTTP — stdlib `urllib`, без
 перенаправлений.
 """
@@ -31,7 +33,9 @@ if __package__ in (None, "") and "governance" not in sys.modules:
 import argparse  # noqa: E402
 import http.client  # noqa: E402
 import json  # noqa: E402
+import os  # noqa: E402
 import re  # noqa: E402
+import stat  # noqa: E402
 import time  # noqa: E402
 import urllib.error  # noqa: E402
 import urllib.request  # noqa: E402
@@ -53,6 +57,10 @@ TOKEN = re.compile(r"[A-Za-z0-9_]+")
 #: Полномочия токена мержа: `PUT …/pulls/{n}/merge`, `GET …/compare`,
 #: `DELETE …/git/refs/heads/{ветка}` — contents и pull_requests на запись.
 MERGE_PERMISSIONS = {"contents": "write", "pull_requests": "write"}
+#: Каталог ключей App (как `merge-pr.sh`: `$XDG_CONFIG_HOME/darkfactory/apps/`):
+#: после него в пути ключа ссылок нет (Task 9, п. 9c).
+KEY_ANCHOR_PARTS = ("darkfactory", "apps")
+KEY_ANCHOR = "/".join(KEY_ANCHOR_PARTS)
 Http = Callable[..., tuple[int, Any]]
 Found = tuple[str, str] | Unavailable | None
 """Как `act_trust.Found`: нарушение `(роль репо, деталь)`, недоступность или чисто."""
@@ -138,6 +146,58 @@ def _page_ids(
     return Unavailable(f"GET {path}: больше {MAX_PAGES} страниц")
 
 
+def _open_no_link(name: str, flags: int, parent: int, key: Path) -> int | Unavailable:
+    """`os.open` компонента пути от `parent` без следования ссылке (`O_NOFOLLOW`);
+    ссылка (по `lstat` того же имени — только для текста отказа) и прочий сбой —
+    `Unavailable`."""
+    try:
+        return os.open(name, flags | os.O_NOFOLLOW, dir_fd=parent)
+    except OSError:
+        try:
+            link = stat.S_ISLNK(os.lstat(name, dir_fd=parent).st_mode)
+        except OSError:
+            link = False
+        if link:
+            return Unavailable(f"ключ App {key}: путь после {KEY_ANCHOR} через ссылку")
+        return Unavailable(f"ключ App {key} не прочитан")
+
+
+def _read_key(key: Path) -> bytes | Unavailable:
+    """Байты ключа без ссылок после `darkfactory/apps` (Task 9, п. 9c): каталоги и
+    файл открываются по `dir_fd` с `O_NOFOLLOW`, так что прочитан ровно тот путь,
+    что проверила обвязка (без окна подмены между её `-L` и чтением)."""
+    parts = key.parts
+    anchor = next(
+        (i + 2 for i in range(len(parts) - 1) if parts[i : i + 2] == KEY_ANCHOR_PARTS),
+        None,
+    )
+    if anchor is None or anchor >= len(parts) or ".." in parts[anchor:]:
+        return Unavailable(f"ключ App {key} вне каталога {KEY_ANCHOR}")
+    try:
+        fd = os.open(Path(*parts[:anchor]), os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return Unavailable(f"ключ App {key} не прочитан")
+    try:
+        for name in parts[anchor:-1]:
+            step = _open_no_link(name, os.O_RDONLY | os.O_DIRECTORY, fd, key)
+            if isinstance(step, Unavailable):
+                return step
+            os.close(fd)
+            fd = step
+        leaf = _open_no_link(parts[-1], os.O_RDONLY | os.O_NONBLOCK, fd, key)
+    finally:
+        os.close(fd)
+    if isinstance(leaf, Unavailable):
+        return leaf
+    with os.fdopen(leaf, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            return Unavailable(f"ключ App {key} не обычный файл")
+        try:
+            return handle.read()
+        except OSError:
+            return Unavailable(f"ключ App {key} не прочитан")
+
+
 def _bearer(app_id: int, key: Path, now: int | None) -> str | Unavailable:
     """`Bearer <JWT>` App; ключ не прочитан или не подписывает — `Unavailable`
     без текста исключения (в нём могли бы оказаться байты ключа)."""
@@ -145,10 +205,11 @@ def _bearer(app_id: int, key: Path, now: int | None) -> str | Unavailable:
 
     at = int(time.time()) if now is None else now
     claims = {"iat": at - 60, "exp": at + 540, "iss": str(app_id)}
+    data = _read_key(key)
+    if isinstance(data, Unavailable):
+        return data
     try:
-        return "Bearer " + jwt.encode(claims, key.read_bytes(), algorithm="RS256")
-    except OSError:
-        return Unavailable(f"ключ App {key} не прочитан")
+        return "Bearer " + jwt.encode(claims, data, algorithm="RS256")
     except Exception:  # noqa: BLE001 — разбор ключа: текст исключения не выводим
         return Unavailable(f"ключ App {key} не подписывает JWT (RS256)")
 
@@ -189,6 +250,17 @@ def app_identity(
     return f"{slug}[bot]", token
 
 
+def revoke(token: str, *, http: Http = _http) -> Unavailable | None:
+    """Отзыв токена установки (`DELETE /installation/token`, 204); `None` — отозван.
+    Токен не той формы — отказ без запроса; текст отказа токена не несёт."""
+    if TOKEN.fullmatch(token) is None:
+        return Unavailable("токен установки не той формы")
+    status, _data = http("DELETE", "/installation/token", f"token {token}")
+    if status != 204:
+        return Unavailable(f"отзыв токена установки: HTTP {status}")
+    return None
+
+
 def installations_refusal(
     app_id: int,
     key: Path,
@@ -221,12 +293,28 @@ def installations_refusal(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI для `merge-pr.sh`: две строки — `<slug>[bot]` и токен; иначе код 2."""
+    """CLI для `merge-pr.sh`: две строки — `<slug>[bot]` и токен; иначе код 2.
+    `--revoke` — отзыв токена из stdin (одна строка), без прочих аргументов."""
     p = argparse.ArgumentParser(prog="act_app_token")
-    p.add_argument("--app-id", required=True, type=int)
-    p.add_argument("--key", required=True, type=Path)
-    p.add_argument("--repo", required=True)
-    args = p.parse_args(argv)
+    p.add_argument("--revoke", action="store_true")
+    p.add_argument("--app-id", type=int)
+    p.add_argument("--key", type=Path)
+    p.add_argument("--repo")
+    # Лишние аргументы — отказ без их эха: токен, ошибочно переданный argv, не
+    # повторяется в stderr (ревью Task 9, nit 6).
+    args, extra = p.parse_known_args(argv)
+    if extra:
+        p.error("лишние аргументы (токен — только stdin)")
+    if args.revoke:
+        if (args.app_id, args.key, args.repo) != (None, None, None):
+            p.error("--revoke: токен только из stdin, без --app-id/--key/--repo")
+        failed = revoke(sys.stdin.read().removesuffix("\n"))
+        if failed is not None:
+            print(f"act_app_token: {failed.reason}", file=sys.stderr)
+            return 2
+        return 0
+    if args.app_id is None or args.key is None or args.repo is None:
+        p.error("нужны --app-id, --key и --repo")
     got = app_identity(args.app_id, args.key, args.repo)
     if isinstance(got, Unavailable):
         print(f"act_app_token: {got.reason}", file=sys.stderr)

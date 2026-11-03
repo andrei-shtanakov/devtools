@@ -1,4 +1,5 @@
-"""Live stand acceptance of stage 2a: the GitHub rows of spec 4.5 (Task 15).
+"""Live stand acceptance of stages 2a and 2b: the GitHub rows of spec 4.5
+(2a Task 15; the merge rows on the stop route, 2b Task 11).
 
 Run only by `.github/workflows/df-stage2-live.yml` (R15-6), as root, in the
 disposable runners of the environment `df-stage2-live` (the owner's approval,
@@ -38,9 +39,19 @@ and a merge with it are refused by GitHub `403`, each with its control
 (R15-1: the merge control is a deliberately conflicting PR, `405` with the
 full installation token); 6 the token in no `ps` snapshot (at least one
 strictly inside the read), publisher file, sudo I/O log or `.git/config`; 7 sudo refuses the other role's operation; 8 `merge` routes
-`brief/…` to `precheck_unavailable` and `stand/…` to `ambiguous_kind`; 9
-every PR closed and branch deleted. A row runs unless a row it needs
-(`Row.needs`) did not pass; a skipped row is recorded and fails the run.
+`brief/…` to `brief_precheck_unavailable` and `stand/…` to `ambiguous_kind`;
+stage 2b (plan decision 13): 10 the seed of `stand-<tag>` -- a technical PR
+with a `review/v1` manifest of node `n1`, squash-merged by the machine user
+(not an acceptance of candidate, no human act), seen by the checker's
+`load_history` as `DeliveredRequest` g1 -- and the stop-PR on
+`stop_branch("stand-<tag>", "n1", 1)`; 11 `merge` of it with the `PUT` held
+by the proxy while the head moves: `refused: head_changed`, the repeat the
+same with one `PUT`; 12 a new seed and stop-PR (`stand-<tag>-b`), the `PUT`'s
+answer cut by the proxy: `done` by reconciliation, the repeat `done`
+replayed with one `PUT`; 9 every open PR closed and branch deleted (the
+seeds' and row 12's merges stay on the default branch, named in the
+evidence). A row runs unless a row it needs (`Row.needs`) did not pass; a
+skipped row is recorded and fails the run.
 
 Exit codes: 0 every row passed, 1 a row failed, 2 infrastructure. No pytest
 test runs a phase or reads `DF_STAND_*`; `tests/df/test_live_stand.py` tests
@@ -51,12 +62,14 @@ from __future__ import annotations
 
 import argparse
 import base64
+import itertools
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -77,21 +90,48 @@ from df.admin_tree import locked_pins
 from df.build import GIT_ISOLATION
 from df.config import parse_releases
 from df.paths import MACHINE_TOKEN, Layout
-from df.publisher import github, ops, request, store
+from df.publisher import github, merge, ops, request, store
 from df.publisher.github import GitHubRefused, GitHubUnavailable
 from df.publisher.request import BadResponse, Response
 from df.release import RELEASE_JSON
 from df.stage2_config import (
     DEFAULT_API_BASE,
+    DEFAULT_GIT_BASE,
     Product,
     RunRecord,
     dump_products,
     dump_publisher,
     parse_publisher,
 )
+from governance.act_envelope import (
+    DeliveredStop,
+    History,
+    StopRecord,
+    node_history,
+    render_stop,
+    stop_path,
+)
+from governance.act_forge_http import TokenTransport
+from governance.act_history import load_history
+from governance.act_history_snapshot import (
+    DeadlineExceeded,
+    Scope,
+    SnapshotHistory,
+    open_snapshot,
+)
+from governance.act_request import (
+    NodeEntry,
+    NodeRequest,
+    PolicyPin,
+    manifest_path,
+    render_manifest,
+)
+from governance.act_time import Unavailable
+from governance.approval_branches import stop_branch
+from tests.df import gate_proxy
 from tests.df.ci_step0 import BASES, make_base
 from tests.df.fake_github import FakeGitHub
-from tests.df.gate_proxy import serve_gate_proxy
+from tests.df.gate_proxy import Seen, serve_gate_proxy
 from tests.df.roles_world import (
     FIXTURE_FROM_CHECKOUT,
     OPENSSL,
@@ -149,6 +189,21 @@ HEAD_WAIT = 10.0
 HEAD_POLL = 0.5
 MERGEABLE_WAIT = 120.0
 POLL = 2.0
+#: Rows 11 and 12: the publisher reaches its `PUT` after the precheck (whose
+#: client waits `PRECHECK_WAIT` = 200 s at most) and the attestation.
+PUT_WAIT = 300.0
+#: Row 10's control: how long GitHub may take to list the seed's merge
+#: commit under its PR (`commits/{sha}/pulls`), and the snapshot's deadline.
+DELIVERY_WAIT = 60.0
+SNAPSHOT_DEADLINE = 120.0
+#: The node of the seeded request and of the stop record (rows 10-12).
+NODE = "n1"
+#: Row 12: answers of the identical request (`POLL` apart) while GitHub's
+#: read still lags the cut `PUT` (spec 5.4, the operator's step 2); the
+#: replay after the settled answer is not counted.
+RECONCILE_TRIES = 4
+#: The one answer a repeat may give while the read lags.
+LAGGING = (3, "unknown", "merge_not_confirmed")
 FORBIDDEN = "Resource not accessible by integration"
 _TAG = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,63}", re.ASCII)
 _LS_TREE = re.compile(r"([0-7]{6}) (blob|tree|commit) ([0-9a-f]{40,64})\t(.+)")
@@ -531,6 +586,7 @@ class Stand:
     prs: dict[str, int] = field(default_factory=dict)
     heads: dict[str, str] = field(default_factory=dict)
     branches: list[str] = field(default_factory=list)
+    merges: dict[str, str] = field(default_factory=dict)
     carried: dict[str, object] = field(default_factory=dict, repr=False)
     revocable: dict[str, str] = field(default_factory=dict, repr=False)
 
@@ -548,7 +604,12 @@ class Stand:
     def ask(self, role: str, op: str, data: bytes) -> tuple[int, Response]:
         """`role` → `sudo -u df-publisher df-publish <op>`; exit code and
         the one response line (its text never shown: it may hold a token)."""
-        done = self.rw.publish(role, op, data)
+        return self.answer(op, self.rw.publish(role, op, data))
+
+    def answer(
+        self, op: str, done: subprocess.CompletedProcess[bytes]
+    ) -> tuple[int, Response]:
+        """The exit code and the one response line of a finished `op`."""
         lines = done.stdout.decode("utf-8", "replace").splitlines()
         try:
             if len(lines) != 1:
@@ -1038,7 +1099,16 @@ def tag_branches(tag: str) -> dict[str, str]:
         "conflict-head": f"df-stand-conflict/{tag}-head",
         "readtoken": f"df-stand-readtoken/{tag}",
         "control": f"df-stand-control/{tag}",
+        "seed": f"df-stand-seed/{tag}",
+        "seed-b": f"df-stand-seed/{tag}-b",
+        "stop": stop_branch(stand_ws(tag), NODE, 1),
+        "stop-b": stop_branch(stand_ws(tag, "b"), NODE, 1),
     }
+
+
+def stand_ws(tag: str, suffix: str = "") -> str:
+    """The workstream of rows 10-11 (`stand-<tag>`) or of row 12 (`-b`)."""
+    return f"stand-{tag}-{suffix}" if suffix else f"stand-{tag}"
 
 
 def conflicting_pr(st: Stand) -> tuple[int, object]:
@@ -1055,11 +1125,17 @@ def conflicting_pr(st: Stand) -> tuple[int, object]:
         st.make_branch(branch, tip)
         st.put_file(branch, path, text)
     number = st.open_pr("conflict", head, base)
+    return number, wait_mergeable(st, number)
+
+
+def wait_mergeable(st: Stand, number: int) -> object:
+    """The PR's `mergeable` once GitHub has computed it (polled; `None`
+    after `MERGEABLE_WAIT`)."""
     deadline = time.monotonic() + MERGEABLE_WAIT
     while True:
         mergeable = st.gh.pull(number).get("mergeable")
         if mergeable is not None or time.monotonic() >= deadline:
-            return number, mergeable
+            return mergeable
         time.sleep(POLL)
 
 
@@ -1250,15 +1326,29 @@ def rights_refusals(
 def full_installation_token(st: Stand) -> str:
     """The App's installation token without a narrowed scope (row 5's
     control only); its value joins `GUARD` and is revoked at the end."""
+    return app_token(st, "full installation token", None, None)
+
+
+def app_token(
+    st: Stand,
+    label: str,
+    repository_ids: list[int] | None,
+    permissions: Mapping[str, str] | None,
+) -> str:
+    """An installation token of the App (`label` in the evidence of the
+    revocation); its value joins `GUARD` and is revoked at the end."""
     jwt = github.app_jwt(
         st.args.app_id, st.secrets.app_key, openssl=OPENSSL, now=int(time.time())
     )
     GUARD.add(jwt)
     token = github.installation_token(
-        jwt, st.args.installation_id, repository_ids=None, permissions=None
+        jwt,
+        st.args.installation_id,
+        repository_ids=repository_ids,
+        permissions=permissions,
     )
     guard_token(token.value, "x-access-token")
-    st.revocable["full installation token"] = token.value
+    st.revocable[label] = token.value
     return token.value
 
 
@@ -1369,9 +1459,9 @@ def row7_sudo_refusals(st: Stand) -> dict[str, object]:
 
 def row8_merge_routes(st: Stand) -> dict[str, object]:
     """Row 8: `merge` from `df-exec`: `brief/…` → `refused:
-    precheck_unavailable`, `stand/…` → `refused: ambiguous_kind` (r1 N11).
+    brief_precheck_unavailable`, `stand/…` → `refused: ambiguous_kind` (r1 N11).
     Control: both answers come from past the sender check (`df-exec`)."""
-    wants = {"brief": "precheck_unavailable", "stand": "ambiguous_kind"}
+    wants = {"brief": "brief_precheck_unavailable", "stand": "ambiguous_kind"}
     found: dict[str, object] = {}
     answers: dict[str, tuple[int, Response]] = {}
     for name in wants:
@@ -1390,12 +1480,16 @@ def row8_merge_routes(st: Stand) -> dict[str, object]:
 
 
 def row9_cleanup(st: Stand) -> dict[str, object]:
-    """Row 9: every PR closed and every branch deleted by the machine user;
+    """Row 9: every open PR closed and every branch deleted by the machine
+    user (a merged PR -- the seeds, row 12's stop-PR -- is closed already);
     then each PR is `closed` and each branch absent. A failure fails the
-    run."""
+    run. The seeds' squash commits and row 12's merge stay on the default
+    branch: the evidence names them."""
     problems: list[str] = []
     for name, number in st.prs.items():
         try:
+            if st.gh.pull(number).get("state") != "open":
+                continue
             st.gh.call("PATCH", st.gh.repo(f"/pulls/{number}"), {"state": "closed"})
         except (GitHubRefused, GitHubUnavailable) as exc:
             problems.append(f"PR {name} #{number}: {exc}")
@@ -1418,12 +1512,478 @@ def row9_cleanup(st: Stand) -> dict[str, object]:
                 left.append(branch)
         except (GitHubRefused, GitHubUnavailable) as exc:
             left.append(f"{branch}: {exc}")
-    found = {"prs": states, "branches": st.branches, "left": left, "problems": problems}
+    found = {
+        "prs": states,
+        "branches": st.branches,
+        "left": left,
+        "problems": problems,
+        "kept_on_default_branch": dict(st.merges),
+        "note": "коммиты засева и мерж строки 12 остаются в истории ветки "
+        "по умолчанию стенда",
+    }
     st.record("row9-cleanup.json", found)
     expect(problems == [], f"уборка: {problems}")
     expect(set(states.values()) <= {"closed"}, f"PR не закрыты: {states}")
     expect(left == [], f"ветки остались: {left}")
     return {"closed": len(states), "deleted": len(st.branches)}
+
+
+# ---------- the merge rows on the stop route (stage 2b, Task 11) ----------
+
+
+def seed_manifest(ws: str, full_name: str) -> tuple[str, str]:
+    """The seed's one file (path, text): a `review/v1` manifest of node `n1`
+    at g1 of `ws`. A technical seed (plan decision 13): not an acceptance of
+    candidate and no human act; its node hash and policy pin are fixtures
+    (the stop route reads neither)."""
+    req = NodeRequest(
+        f"{ws}-seed",
+        ws,
+        full_name,
+        {NODE: NodeEntry(f"workstreams/{ws}/{NODE}.md", "sha256:" + "0" * 64, 1)},
+        {NODE: {}},
+        PolicyPin("fixture/none", "main", "0" * 40, {}),
+    )
+    return manifest_path(ws, req.request_id), render_manifest(req)
+
+
+def stop_record(ws: str, reason: str) -> tuple[str, str]:
+    """The stop-PR's one file (path, text): the record stopping `n1` g1."""
+    return stop_path(ws, NODE, 1), render_stop(StopRecord(NODE, 1, reason))
+
+
+def seed_problem(history: History | Unavailable, commit: str, head: str) -> str | None:
+    """Why `history` does not hold the seed (merge `commit`, PR `head`) as
+    the current request of `n1` at g1; `None` when it does."""
+    if isinstance(history, Unavailable):
+        return history.reason
+    current = node_history(history, NODE).current
+    if current is None:
+        return f"нет доставленной заявки узла {NODE}"
+    if isinstance(current, DeliveredStop):
+        return f"узел {NODE} остановлен: {current.merge_commit[:12]}"
+    gen = current.request.nodes[NODE].generation
+    if (current.merge_commit, current.head_sha, gen) != (commit, head, 1):
+        return (
+            f"действует заявка {current.merge_commit[:12]} "
+            f"с головой {current.head_sha[:12]} g{gen}"
+        )
+    return None
+
+
+def checker_history(st: Stand, ws: str, token: str) -> History | Unavailable:
+    """The checker's own reading of the default branch: `load_history` over
+    `SnapshotHistory` (as `act_precheck` reads the base), with a read token
+    of the App; the snapshot is removed after."""
+    home = Path(tempfile.mkdtemp(prefix="df-live-history-", dir=st.rw.work))
+    ref = f"refs/heads/{st.default_branch}"
+    deadline = time.monotonic() + SNAPSHOT_DEADLINE
+    try:
+        git_dir = open_snapshot(
+            home,
+            st.full_name,
+            [ref],
+            token,
+            git_base=DEFAULT_GIT_BASE,
+            deadline=deadline,
+        )
+        history = SnapshotHistory(
+            git_dir,
+            TokenTransport(token, api_base=DEFAULT_API_BASE),
+            token,
+            git_base=DEFAULT_GIT_BASE,
+            deadline=deadline,
+        )
+        return load_history(history, Scope(ws, st.full_name, ""), ref)
+    except (OSError, ValueError, DeadlineExceeded) as exc:
+        return Unavailable(f"снимок: {type(exc).__name__}: {exc}")
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def seed(st: Stand, name: str, ws: str, evidence: str) -> dict[str, object]:
+    """Rows 10 and 12: the machine user opens the seed PR `name` (one
+    manifest, `seed_manifest`) and merges it with its own token (squash,
+    `sha` = head). Control (infrastructure if not, polled up to
+    `DELIVERY_WAIT`): the checker's `load_history` sees the seed as the
+    current request of `n1` g1. Preconditions (infrastructure): squash
+    merges allowed on the stand (H7), the seed PR mergeable."""
+    squash_problem(st.gh.call("GET", st.gh.repo("")))
+    tip = st.gh.ref_sha(st.default_branch)
+    if tip is None:
+        infra(f"нет ветки {st.default_branch}")
+    assert tip is not None
+    branch = tag_branches(st.args.tag)[name]
+    st.make_branch(branch, tip)
+    path, text = seed_manifest(ws, st.full_name)
+    head = st.put_file(branch, path, text)
+    st.heads[name] = head
+    number = st.open_pr(name, branch, st.default_branch)
+    if not st.wait_head(number, head, time.monotonic() + 60):
+        infra(f"голова PR засева {number} не стала {head}")
+    require_mergeable(st, number, "PR засева")
+    body = {"merge_method": "squash", "sha": head}
+    try:
+        merged = st.gh.call("PUT", st.gh.repo(f"/pulls/{number}/merge"), body)
+    except GitHubRefused as exc:
+        if squash_refused(exc):
+            infra(f"H7: squash-мерж засева {number} отклонён: {exc.reason}")
+        raise
+    commit = merged.get("sha") if isinstance(merged, dict) else None
+    if not isinstance(commit, str):
+        raise GitHubUnavailable(f"merge засева {number}: нет sha")
+    st.merges[name] = commit
+    token = app_token(st, f"read token {ws}", [st.args.repo_id], ops.READ_PERMISSIONS)
+    deadline = time.monotonic() + DELIVERY_WAIT
+    while True:
+        problem = seed_problem(checker_history(st, ws, token), commit, head)
+        if problem is None or time.monotonic() >= deadline:
+            break
+        time.sleep(POLL)
+    found: dict[str, object] = {
+        "ws": ws,
+        "pr": number,
+        "head_sha": head,
+        "merge_commit": commit,
+        "manifest": path,
+        "load_history": problem or f"DeliveredRequest {NODE} g1",
+        "note": "технический засев machine user (squash): не приёмка candidate "
+        "и не акт человека",
+    }
+    st.record(evidence, found)
+    if problem is not None:
+        infra(f"засев {ws}: load_history проверяющего не видит заявку g1: {problem}")
+    return found
+
+
+def squash_problem(repo: object) -> None:
+    """H7 preflight: an explicit `allow_squash_merge: false` of `GET
+    /repos/{full_name}` is infrastructure naming the owner's step. GitHub
+    may leave the merge settings out for a token without admin rights (the
+    machine user's): an absent field is unknown, and the seed's own squash
+    `PUT` decides (`squash_refused`)."""
+    allowed = repo.get("allow_squash_merge") if isinstance(repo, dict) else None
+    if allowed is False:
+        infra("H7: squash-мерж на стенде не разрешён (allow_squash_merge=false)")
+
+
+def squash_refused(exc: GitHubRefused) -> bool:
+    """Whether the seed's squash `PUT` was refused for its merge method
+    (405 with a message about squash or the merge method): H7 not done."""
+    reason = exc.reason.lower()
+    return exc.status == 405 and ("squash" in reason or "merge method" in reason)
+
+
+def require_mergeable(st: Stand, number: int, what: str) -> None:
+    """Before a merge (the seed's, the publisher's in rows 11 and 12): the
+    PR's `mergeable` is `True` within `MERGEABLE_WAIT`, else infrastructure
+    (a mergeability GitHub has not computed is the stand's timing, not the
+    mechanism)."""
+    mergeable = wait_mergeable(st, number)
+    if mergeable is not True:
+        infra(f"{what} {number}: mergeable={mergeable!r}; мержа не было")
+
+
+def open_stop_pr(st: Stand, name: str, ws: str) -> dict[str, object]:
+    """The machine user opens the stop-PR `name` of `ws` from the default
+    branch's tip (past the seed): the branch `stop_branch(ws, n1, 1)`, one
+    added `stop_path(ws, n1, 1)`. Its facts as GitHub shows them."""
+    tip = st.gh.ref_sha(st.default_branch)
+    assert tip is not None
+    branch = tag_branches(st.args.tag)[name]
+    st.make_branch(branch, tip)
+    path, text = stop_record(ws, f"df live stand {st.args.tag}: stop of the seed")
+    st.heads[name] = st.put_file(branch, path, text)
+    number = st.open_pr(name, branch, st.default_branch)
+    pr = st.gh.pull(number)
+    base = pr.get("base")
+    return {
+        "pr": number,
+        "branch": branch,
+        "path": path,
+        "state": pr.get("state"),
+        "head_sha": head_of(pr),
+        "base": base.get("ref") if isinstance(base, dict) else None,
+    }
+
+
+def merge_put_re(full_name: str, number: int) -> re.Pattern[str]:
+    """The path of the PR's `PUT …/merge` (the proxy's gate)."""
+    return re.compile(re.escape(f"/repos/{full_name}/pulls/{number}/merge"))
+
+
+def merge_puts(seen: Sequence[Seen], full_name: str, number: int) -> list[Seen]:
+    """The proxy's log of the PR's merge `PUT`s: every one that reached the
+    proxy, answered upstream or not."""
+    path = merge_put_re(full_name, number)
+    return [s for s in seen if s.method == "PUT" and path.fullmatch(s.path)]
+
+
+def merge_key(st: Stand, data: bytes) -> str:
+    """The idempotency key the publisher derives for `df-exec`'s `merge`."""
+    req = request.parse("merge", data)
+    return store.idempotency_key(st.rw.uid("df-exec"), "merge", request.digest(req))
+
+
+def attestations(st: Stand, number: int, key: str, head: str) -> list[int]:
+    """Ids of the bot's `APPROVED` reviews at `head` with the publisher's
+    attestation marker of `key` (plan decision 9)."""
+    marker = merge.ATTESTATION_MARKER.format(kind="stop", key=key, sha=head)
+    return [
+        int(str(r.get("id")))
+        for r in st.bot_reviews(number)
+        if str(r.get("body") or "").endswith(marker)
+        and r.get("state") == "APPROVED"
+        and r.get("commit_id") == head
+    ]
+
+
+def check_head_changed(
+    first: tuple[int, Response],
+    again: tuple[int, Response],
+    pr: Mapping[str, object],
+    puts: Sequence[Seen],
+) -> None:
+    """Row 11's verdict: `refused: head_changed`, the PR open and not
+    merged, the identical repeat the same (a replay), one `PUT` upstream
+    and GitHub's answer to it 409."""
+    want = (2, "refused", "head_changed")
+    rc, resp = first
+    expect((rc, resp.outcome, resp.reason) == want, f"merge: {rc} {resp}")
+    state = (pr.get("state"), pr.get("merged"))
+    expect(state == ("open", False), f"PR после отказа: {state}")
+    rc, resp = again
+    expect((rc, resp.outcome, resp.reason) == want, f"повтор: {rc} {resp}")
+    expect(resp.evidence.get("replayed") is True, f"повтор не replay: {resp}")
+    expect(len(puts) == 1, f"PUT выше: {len(puts)} ({puts})")
+    put = puts[0]
+    expect(put.upstream_answered and put.status == 409, f"PUT выше: {put}")
+
+
+def lagging(answer: tuple[int, Response]) -> bool:
+    """Whether `answer` is the one a repeat may give while GitHub's read
+    lags the cut `PUT` (`LAGGING`)."""
+    rc, resp = answer
+    return (rc, resp.outcome, resp.reason) == LAGGING
+
+
+def settle_merge(
+    ask: Callable[[], tuple[int, Response]],
+    tries: int = RECONCILE_TRIES,
+    *,
+    wait: Callable[[float], None] = time.sleep,
+) -> list[tuple[int, Response]]:
+    """Row 12's answers of one identical request: repeated (`POLL` apart, at
+    most `tries` in all) while it is `LAGGING`; once it is anything else,
+    one more repeat (the replay). The last answer still lagging means the
+    bound passed."""
+    answers = [ask()]
+    while lagging(answers[-1]) and len(answers) < tries:
+        wait(POLL)
+        answers.append(ask())
+    if not lagging(answers[-1]):
+        answers.append(ask())
+    return answers
+
+
+def check_reconciled(
+    answers: Sequence[tuple[int, Response]],
+    pr: Mapping[str, object],
+    puts: Sequence[Seen],
+    *,
+    bot: str,
+    head: str,
+) -> None:
+    """Row 12's verdict over `settle_merge`'s answers: only `LAGGING` before
+    the settled one; the settled one `done` found by reconciliation (the
+    premise named, not a replay), the PR merged by the App's bot at `head`
+    with the answered merge commit; then the same `done`, a replay; one
+    `PUT` upstream over all of them, its answer not written downstream."""
+    waited = list(itertools.takewhile(lagging, answers))
+    settled = list(answers[len(waited) :])
+    expect(
+        settled != [],
+        f"сверка не сошлась за {len(waited)} повторов: {LAGGING[1]}: {LAGGING[2]}",
+    )
+    expect(len(settled) == 2, f"после сверки ответов {len(settled)}: {settled}")
+    rc, resp = settled[0]
+    expect((rc, resp.outcome) == (0, "done"), f"merge: {rc} {resp}")
+    expect(resp.evidence.get("premise") == merge.PREMISE, f"не сверка: {resp}")
+    expect(resp.evidence.get("replayed") is not True, f"сверка — replay: {resp}")
+    commit = resp.result.get("merge_commit")
+    expect(resp.result.get("head_sha") == head, f"голова ответа: {resp.result}")
+    head_obj = pr.get("head")
+    expect(
+        pr.get("merged") is True
+        and ops.is_bot({"user": pr.get("merged_by")}, bot)
+        and isinstance(head_obj, dict)
+        and head_obj.get("sha") == head
+        and pr.get("merge_commit_sha") == commit,
+        f"PR на GitHub: merged {pr.get('merged')}, merged_by {pr.get('merged_by')}, "
+        f"merge_commit {pr.get('merge_commit_sha')}, ответ {commit}",
+    )
+    rc, resp = settled[1]
+    expect((rc, resp.outcome) == (0, "done"), f"повтор: {rc} {resp}")
+    expect(resp.evidence.get("replayed") is True, f"повтор не replay: {resp}")
+    expect(resp.result.get("merge_commit") == commit, f"повтор: {resp.result}")
+    expect(len(puts) == 1, f"PUT выше: {len(puts)} ({puts})")
+    put = puts[0]
+    expect(put.upstream_answered and not put.answered_downstream, f"PUT выше: {put}")
+
+
+def _answers(answers: Sequence[tuple[int, Response]]) -> list[list[object]]:
+    """Every answer of a row's request, in order, for the evidence."""
+    return [
+        [rc, resp.outcome, resp.reason, dict(resp.result), dict(resp.evidence)]
+        for rc, resp in answers
+    ]
+
+
+def keep_merge(st: Stand, name: str, number: int) -> dict[str, object]:
+    """The PR as it is now; if merged, its merge commit is kept for row 9's
+    evidence (it stays on the default branch)."""
+    pull = st.gh.pull(number)
+    commit = pull.get("merge_commit_sha")
+    if pull.get("merged") is True and isinstance(commit, str):
+        st.merges[name] = commit
+    return pull
+
+
+def row10_seed(st: Stand) -> dict[str, object]:
+    """Row 10: the seed of `stand-<tag>` (`seed`: the machine user's squash
+    merge of a `review/v1` manifest of `n1`; control: the checker's
+    `load_history` sees `DeliveredRequest` g1), then the stop-PR on
+    `stop_branch("stand-<tag>", "n1", 1)` with the one file `stop_path(…)`.
+    Control: the stop-PR is open on the default branch at its commit."""
+    ws = stand_ws(st.args.tag)
+    seeded = seed(st, "seed", ws, "row10-seed.json")
+    stop = open_stop_pr(st, "stop", ws)
+    st.record("row10-stop-pr.json", stop)
+    if (stop["state"], stop["base"], stop["head_sha"]) != (
+        "open",
+        st.default_branch,
+        st.heads["stop"],
+    ):
+        infra(f"stop-PR: {stop}")
+    return {"seed_pr": seeded["pr"], "merge_commit": seeded["merge_commit"], **stop}
+
+
+def row11_head_change(st: Stand) -> dict[str, object]:
+    """Row 11: `df-exec` → `merge` of row 10's stop-PR with `api_base` =
+    `gate_proxy` holding the `PUT …/merge` (`hold`); while it is held the
+    machine user pushes a second commit; released, GitHub refuses the `PUT`
+    (409) and the publisher answers `refused: head_changed`, the PR not
+    merged; the identical repeat (through the proxy) is the same, a replay,
+    and the proxy saw one `PUT`. The attestation is the bot's review at the
+    old head. Controls (infrastructure): the `PUT` was held, not expired,
+    and the PR's head was the new commit before the release."""
+    pr, head = st.prs["stop"], st.heads["stop"]
+    ws = stand_ws(st.args.tag)
+    branch = tag_branches(st.args.tag)["stop"]
+    require_mergeable(st, pr, "stop-PR")
+    data = merge_payload(st, pr, head, "row11")
+    box: dict[str, subprocess.CompletedProcess[bytes]] = {}
+
+    def send() -> None:
+        box["done"] = st.rw.publish("df-exec", "merge", data)
+
+    gate = gate_proxy.hold("PUT", merge_put_re(st.full_name, pr))
+    again: tuple[int, Response] | None = None
+    with serve_gate_proxy(gate=gate) as proxy, api_base(st, proxy.url):
+        worker = threading.Thread(target=send, daemon=True)
+        worker.start()
+        held = wait_held(proxy.held, worker.is_alive, PUT_WAIT)
+        new, moved = "", False
+        if held:
+            deadline = time.monotonic() + HEAD_WAIT
+            path, text = stop_record(ws, f"df live stand {st.args.tag}: second")
+            new = st.put_file(branch, path, text)
+            moved = st.wait_head(pr, new, deadline, period=HEAD_POLL)
+        proxy.release()
+        worker.join(600)
+        if held and "done" in box:
+            again = st.ask("df-exec", "merge", data)
+        seen = proxy.requests()
+    if new:
+        st.heads["stop"] = new
+    pull = keep_merge(st, "stop", pr)
+    done = box.get("done")
+    if done is None or not held:
+        why = "нет ответа" if done is None else shown(done)
+        infra(f"PUT не дошёл до прокси: {why}")
+    assert done is not None and again is not None
+    first = st.answer("merge", done)
+    puts = merge_puts(seen, st.full_name, pr)
+    attested = attestations(st, pr, merge_key(st, data), head)
+    st.record(
+        "row11-head-change.json",
+        {
+            "api_base": {"value": proxy.url, "note": "нештатный API: прокси"},
+            "head": head,
+            "pushed": new,
+            "head_was_new_before_release": moved,
+            "proxy": [asdict(s) for s in seen],
+            "answers": _answers([first, again]),
+            "pr": {"state": pull.get("state"), "merged": pull.get("merged")},
+            "attestations_at_head": attested,
+        },
+    )
+    held_puts = [s for s in puts if s.held]
+    if not moved or not held_puts or held_puts[0].expired:
+        infra(f"окно PUT не удержано: голова {moved}, удержание {held_puts}")
+    check_head_changed(first, again, pull, puts)
+    expect(len(attested) == 1, f"аттестации на голове {head}: {attested}")
+    return {"head": head, "pushed": new, "puts": len(puts)}
+
+
+def row12_dropped_answer(st: Stand) -> dict[str, object]:
+    """Row 12: a new seed and stop-PR (`stand-<tag>-b`); `df-exec` → `merge`
+    with `gate_proxy` passing the `PUT …/merge` on and cutting its answer
+    (`drop_response`): the publisher reconciles to `done` (the PR merged by
+    the App's bot at the head) -- while GitHub's read lags, the identical
+    request is repeated (`settle_merge`, spec 5.4 step 2) and may only be
+    `unknown: merge_not_confirmed`; then the same `done`, replayed; the
+    proxy saw one `PUT` over all of them. (A `PUT` still executing is
+    tested offline: `test_put_in_flight_open_is_unknown_then_done`.)
+    Control (infrastructure): the `PUT` reached GitHub, was executed (200)
+    and its answer was not written downstream."""
+    ws = stand_ws(st.args.tag, "b")
+    seed(st, "seed-b", ws, "row12-seed.json")
+    stop = open_stop_pr(st, "stop-b", ws)
+    pr, head = st.prs["stop-b"], st.heads["stop-b"]
+    require_mergeable(st, pr, "stop-PR")
+    data = merge_payload(st, pr, head, "row12")
+    gate = gate_proxy.drop_response("PUT", merge_put_re(st.full_name, pr))
+    with serve_gate_proxy(gate=gate) as proxy, api_base(st, proxy.url):
+        answers = settle_merge(lambda: st.ask("df-exec", "merge", data))
+        seen = proxy.requests()
+    pull = keep_merge(st, "stop-b", pr)
+    puts = merge_puts(seen, st.full_name, pr)
+    attested = attestations(st, pr, merge_key(st, data), head)
+    st.record(
+        "row12-dropped-answer.json",
+        {
+            "stop_pr": stop,
+            "api_base": {"value": proxy.url, "note": "нештатный API: прокси"},
+            "proxy": [asdict(s) for s in seen],
+            "answers": _answers(answers),
+            "reconcile_tries": RECONCILE_TRIES,
+            "pr": {
+                "state": pull.get("state"),
+                "merged": pull.get("merged"),
+                "merged_by": login_of({"user": pull.get("merged_by")}),
+                "head_sha": head_of(pull),
+                "merge_commit_sha": pull.get("merge_commit_sha"),
+            },
+            "attestations_at_head": attested,
+        },
+    )
+    cut = [s for s in puts if not s.answered_downstream]
+    if not cut or not cut[0].upstream_answered or cut[0].status != 200:
+        infra(f"контроль: PUT не исполнен выше или ответ не оборван: {puts}")
+    check_reconciled(answers, pull, puts, bot=st.bot, head=head)
+    expect(len(attested) == 1, f"аттестации на голове {head}: {attested}")
+    return {"merge_commit": st.merges.get("stop-b"), "puts": len(puts)}
 
 
 @dataclass(frozen=True)
@@ -1444,7 +2004,8 @@ class Row:
 #: prerequisite did not pass is skipped, never passed; the others run. A
 #: control held by another row is a prerequisite too (R1-1): 4а's and 5б's
 #: review control is row 2, row 7's controls are rows 2 and 8 (so 8 runs
-#: first).
+#: first). The merge rows of stage 2b: 11 merges row 10's stop-PR, 12 seeds
+#: its own workstream.
 ROWS: tuple[Row, ...] = (
     Row("1", "PR от machine user", row1_open_prs),
     Row("2", "publish-review и повтор", row2_review_once, ("1",)),
@@ -1456,6 +2017,9 @@ ROWS: tuple[Row, ...] = (
     Row("6", "токен нигде", row6_no_token, ("5а",)),
     Row("8", "маршрутизация merge", row8_merge_routes, ("1",)),
     Row("7", "отказ sudo", row7_sudo_refusals, ("1", "2", "8")),
+    Row("10", "засев и stop-PR", row10_seed),
+    Row("11", "смена head при удержанном PUT", row11_head_change, ("10",)),
+    Row("12", "оборванный ответ PUT и повтор", row12_dropped_answer),
 )
 CLEANUP = Row("9", "уборка", row9_cleanup)
 SKIPPED = "не выполнялась"
