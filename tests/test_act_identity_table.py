@@ -496,6 +496,22 @@ JUDGMENT = {
             f"{PC}::test_token_not_in_verdict_or_stderr",
             "'stop/[token]'",
         ),
+        r(
+            "reason_cap",
+            "act_precheck.serve",
+            "if len(reason) > MAX_REASON",
+            f"{PC}::test_reason_truncated",
+            '"...[truncated]"',
+        ),
+    ),
+    "act_precheck._locked": (
+        r(
+            "lock_deadline",
+            "act_precheck._locked",
+            'raise DeadlineExceeded("precheck lock: deadline passed")',
+            f"{PC}::test_lock_wait_bounded_by_deadline",
+            "seen == []",
+        ),
     ),
     "act_precheck.parse_request": (
         r(
@@ -3891,7 +3907,8 @@ NOT_JUDGMENT = {
     "act_precheck.verdict": _BUILD,
     "act_precheck._judge_stop": "передаёт отказ `_stop_target` и решение `_stop_in_history`; своей проверки нет",
     "act_precheck._snapshot": _IO,
-    "act_precheck._locked": "уборка снимков прерванных вызовов под блокировкой; отказа нет",
+    "act_precheck._remove": _IO,
+    "act_precheck._remove.report": _IO,
     "act_history_snapshot.git_auth_env": _BUILD,
     "act_history_snapshot._env": _BUILD,
     "act_history_snapshot._url": _BUILD,

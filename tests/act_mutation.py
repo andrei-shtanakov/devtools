@@ -74,6 +74,10 @@ BYPASS: dict[str, tuple[str, str]] = {
         'reason.replace(request.token, "[token]")',
         "reason",
     ),
+    "act_precheck._locked:lock_deadline": (
+        'raise DeadlineExceeded("precheck lock: deadline passed") from None',
+        "break",
+    ),
     "act_precheck._no_constant:constant": (
         'raise json.JSONDecodeError(f"constant {name}", name, 0)',
         "return float(name)",

@@ -67,11 +67,16 @@ EXIT_REQUEST = 2
 ALLOW, REFUSE, UNSET = "allow", "refuse", "unset"
 SNAPSHOTS = "precheck-snapshots"
 LOCK = "precheck.lock"
+#: Reason characters kept in the verdict; the rest is PR-controlled bulk.
+MAX_REASON = 2048
+TRUNCATED = "...[truncated]"
+#: Seconds between attempts to take the lock shared.
+LOCK_POLL = 0.05
 
 _SHA = re.compile(r"[0-9a-f]{40}")
 _NONCE = re.compile(r"[0-9a-f]{32}")
 _STOP_PATH = re.compile(
-    r"workstreams/(?P<ws>[^/]+)/approvals/stops/(?P<node>[^/]+)-g(?P<gen>[0-9]+)\.yaml"
+    r"workstreams/(?P<ws>[^/]+)/approvals/stops/(?P<node>[^/]+)-g(?P<gen>[0-9]{1,9})\.yaml"
 )
 
 Change = tuple[str, str, str | None]
@@ -197,6 +202,8 @@ def serve(
         return EXIT_REQUEST
     outcome, reason = _decide(request, home, deps, deadline)
     reason = reason.replace(request.token, "[token]")
+    if len(reason) > MAX_REASON:
+        reason = reason[:MAX_REASON] + TRUNCATED
     stdout.write(json.dumps(verdict(request, outcome, reason, admin_digest)) + "\n")
     stdout.flush()
     return 0
@@ -354,7 +361,7 @@ def _snapshot(
     """`SnapshotHistory` over base and PR head in `home/precheck-snapshots/<nonce>`,
     removed on exit; the lock is held shared throughout."""
     root = home / SNAPSHOTS
-    with _locked(home, root):
+    with _locked(home, root, deadline, deps.now):
         work = root / request.nonce
         work.mkdir(mode=0o700)
         try:
@@ -378,13 +385,16 @@ def _snapshot(
                 clock=deps.now,
             )
         finally:
-            shutil.rmtree(work, ignore_errors=True)
+            _remove(work)
 
 
 @contextlib.contextmanager
-def _locked(home: Path, root: Path) -> Iterator[None]:
+def _locked(
+    home: Path, root: Path, deadline: float, clock: Callable[[], float]
+) -> Iterator[None]:
     """Hold `home/precheck.lock` shared; if no run holds it, first clear `root`
-    (snapshots of interrupted runs) under the exclusive lock."""
+    (snapshots of interrupted runs) under the exclusive lock. Waiting for the shared
+    lock past `deadline` — `DeadlineExceeded`."""
     root.mkdir(mode=0o700, exist_ok=True)
     fd = os.open(home / LOCK, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
     try:
@@ -394,8 +404,25 @@ def _locked(home: Path, root: Path) -> Iterator[None]:
             pass  # a live run: its snapshot is not stale
         else:
             for stale in root.iterdir():
-                shutil.rmtree(stale, ignore_errors=True)
-        fcntl.flock(fd, fcntl.LOCK_SH)
+                _remove(stale)
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if clock() >= deadline:
+                    raise DeadlineExceeded("precheck lock: deadline passed") from None
+                time.sleep(LOCK_POLL)
         yield
     finally:
         os.close(fd)
+
+
+def _remove(path: Path) -> None:
+    """Remove a snapshot directory; what could not be removed is named on stderr
+    (snapshots hold no token)."""
+
+    def report(_func: Callable[..., object], name: str, exc: BaseException) -> None:
+        print(f"df-precheck: snapshot not removed: {name}: {exc}", file=sys.stderr)
+
+    shutil.rmtree(path, onexc=report)

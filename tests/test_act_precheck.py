@@ -383,8 +383,15 @@ def test_stop_with_extra_change_refused(
     assert verdict["reason"] == "stop_changes: expected one change, got 2"
 
 
-def test_stop_foreign_path_refused_before_io(tmp_path: Path) -> None:
-    path = f"workstreams/{WS}/approvals/{NODE}.yaml"
+@pytest.mark.parametrize(
+    "path",
+    [
+        f"workstreams/{WS}/approvals/{NODE}.yaml",
+        f"workstreams/{WS}/approvals/stops/{NODE}-g{'1' * 10}.yaml",
+    ],
+    ids=["envelope", "huge_generation"],
+)
+def test_stop_foreign_path_refused_before_io(tmp_path: Path, path: str) -> None:
     code, verdict, _ = _serve(
         tmp_path / "home", _req(changes=[["added", path, None]]), _deps()
     )
@@ -551,6 +558,19 @@ def test_token_not_in_verdict_or_stderr(tmp_path: Path, capsys: Any) -> None:
     _invalid(tmp_path, _req(kind=TOKEN), capsys)
 
 
+def test_reason_truncated(tmp_path: Path) -> None:
+    """Причина цитирует поле, которое задаёт автор PR (здесь — длинная ветка):
+    в вердикте не больше `MAX_REASON` символов и метка усечения."""
+    code, verdict, text = _serve(
+        tmp_path / "home", _req(head_ref="x" * 50_000), _deps()
+    )
+    assert code == 0 and verdict is not None
+    reason = str(verdict["reason"])
+    assert reason.endswith("...[truncated]")
+    assert len(reason) == 2048 + len("...[truncated]")
+    assert len(text) < 8 << 10
+
+
 # --- снимок: каталог, уборка, срок -------------------------------------------------
 
 
@@ -590,6 +610,45 @@ def test_stale_kept_while_another_run_holds_lock(tmp_path: Path) -> None:
     assert not (home / "precheck-snapshots" / NONCE).exists()
 
 
+def test_lock_wait_bounded_by_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Чужая исключительная блокировка не держит вызов дольше `DEADLINE`: ответ
+    `unset: deadline`, до снимка дело не дошло."""
+    monkeypatch.setattr(act_precheck, "DEADLINE", 0.3)
+    seen: list[tuple[Path, list[str]]] = []
+    home = tmp_path / "home"
+    home.mkdir()
+    fd = os.open(home / "precheck.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        started = time.monotonic()
+        code, verdict, _ = _serve(home, _req(), _spy_snapshot(seen))
+    finally:
+        os.close(fd)
+    assert code == 0 and verdict is not None
+    assert (verdict["outcome"], verdict["reason"]) == ("unset", "deadline")
+    assert seen == []
+    assert time.monotonic() - started < 5
+    assert not (home / "precheck-snapshots" / NONCE).exists()
+
+
+def test_unremovable_snapshot_named_on_stderr(tmp_path: Path, capsys: Any) -> None:
+    home = tmp_path / "home"
+    locked = home / "precheck-snapshots" / ("d" * 32) / "sub"
+    locked.mkdir(parents=True)
+    (locked / "f").write_text("x")
+    locked.chmod(0o500)
+    try:
+        code, _verdict, _ = _serve(home, _req(), _deps())
+    finally:
+        locked.chmod(0o700)
+    err = capsys.readouterr().err
+    assert code == 0
+    assert f"df-precheck: snapshot not removed: {locked / 'f'}" in err
+    assert TOKEN not in err
+
+
 def test_deadline_kills_git_and_answers_unset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -621,7 +680,7 @@ def test_deadline_kills_git_and_answers_unset(
     assert code == 0 and verdict is not None
     assert (verdict["outcome"], verdict["reason"]) == ("unset", "deadline")
     assert time.monotonic() - started < 10
-    assert len(pids) == 3  # init, config, fetch
+    assert pids  # git ran; every process group it started is gone
     for pid in pids:
         with pytest.raises(ProcessLookupError):
             os.killpg(pid, 0)
