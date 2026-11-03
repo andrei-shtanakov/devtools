@@ -9,10 +9,13 @@ from email.message import Message
 from typing import Any
 
 import pytest
-from steward.approvalfacts.v3 import Request
 
-from governance import act_anon
-from governance.act_forge_http import TokenTransport
+pytest.importorskip("steward", reason="steward отсутствует: без группы governance")
+
+from steward.approvalfacts.v3 import Request  # noqa: E402
+
+from governance import act_anon  # noqa: E402
+from governance.act_forge_http import TokenTransport  # noqa: E402
 
 BASE = "https://forge.test/api/v3/"
 TOKEN = "tok-SECRET-123"
@@ -277,3 +280,11 @@ def test_get_json_without_page_timeout_uses_transport_timeout() -> None:
     t, op = _t(_Answer(b"{}"))
     t.get_json("x")
     assert op.timeouts == [60.0]
+
+
+def test_get_json_empty_first_page_is_still_first() -> None:
+    nxt = f'<{BASE}x?p=2>; rel="next"'
+    for page in (_Answer(b"{}", 500), _Answer(b'{"o": 1}')):
+        t, _ = _t(_Answer(b"[]", link=nxt), page)
+        with pytest.raises(OSError, match="mid-walk"):
+            t.get_json("x")

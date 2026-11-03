@@ -88,7 +88,7 @@ class TokenTransport:
 
         url: str | None = path
         items: list[object] = []
-        for _ in range(MAX_PAGES):
+        for page in range(MAX_PAGES):
             cap = self._timeout if page_timeout is None else page_timeout()
             resp = self.send(
                 Request("GET", url or path), timeout=min(self._timeout, cap)
@@ -96,11 +96,11 @@ class TokenTransport:
             if resp.status is None:
                 raise OSError(resp.error or "forge: transport failure")
             if resp.status != 200:
-                if items:
+                if page:
                     raise OSError(f"forge: HTTP {resp.status} mid-walk")
                 return resp.status, resp.body
             if not isinstance(resp.body, list):
-                if items:
+                if page:
                     raise OSError("forge: page shape changed mid-walk")
                 return resp.status, resp.body
             items.extend(resp.body)
