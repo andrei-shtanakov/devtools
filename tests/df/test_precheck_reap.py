@@ -302,3 +302,17 @@ def test_uid_zero_never_reaped() -> None:
 
 def test_pid_one_never_a_candidate() -> None:
     assert leftovers(UID, [proc(1, 0), proc(2, 0)]) == [proc(2, 0)]
+
+
+def test_kill_guard_not_swallowed_by_the_fence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The autouse guard of `conftest.py` still fails a test that reaches a
+    real kill through `cli._reap`, whose `except Exception` fence would
+    swallow an ordinary exception."""
+    from tests.df.conftest import ForbiddenKill
+
+    leftover = proc(999_999, 1)
+    monkeypatch.setattr(precheck_reap, "list_processes", lambda: [leftover])
+    with pytest.raises(ForbiddenKill):
+        cli._reap(UID)  # noqa: SLF001

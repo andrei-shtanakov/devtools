@@ -61,6 +61,11 @@ _PINNED_UV_SKIP = re.compile(r"uv не найден|не закреплённа�
 _skipped_for_uv: list[str] = []
 
 
+class ForbiddenKill(BaseException):
+    """A test reached a real kill. A `BaseException`, so no `except
+    Exception` fence (`cli._reap`) can swallow it."""
+
+
 @pytest.fixture(autouse=True)
 def _no_real_reap(monkeypatch: pytest.MonkeyPatch) -> None:
     """In process, `precheck serve` and doctor see no process and kill
@@ -71,7 +76,7 @@ def _no_real_reap(monkeypatch: pytest.MonkeyPatch) -> None:
     from df import precheck_reap
 
     def no_kill(pid: int, signo: int) -> None:
-        raise AssertionError(f"test killed {pid} with {signo}")
+        raise ForbiddenKill(f"test killed {pid} with {signo}")
 
     monkeypatch.setattr(precheck_reap, "list_processes", lambda: [])
     monkeypatch.setattr(precheck_reap, "kill", no_kill)
