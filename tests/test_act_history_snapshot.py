@@ -726,6 +726,7 @@ def test_rest_timeout_capped_by_deadline(tmp_path: Path) -> None:
     assert forge.timeouts == [5.0]
 
 
+@needs_steward  # срок теперь проверяется в `get_json` (импорт steward)
 def test_rest_past_deadline_sends_nothing(tmp_path: Path) -> None:
     clock = Clock()
     clock.now = 100.0
