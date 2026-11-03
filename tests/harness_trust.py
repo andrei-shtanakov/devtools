@@ -38,6 +38,7 @@ SAFE_COMMANDS = frozenset(
         # функции самих скриптов и подключаемых ssot_env.sh/approval_branches.sh
         # (их тела проверяются тем же разбором)
         "die", "usage", "gh_a", "gh_h", "approval_globs", "ssot_key",
+        "approval_template_glob",
         "brief_check_failed", "has_label",
     }
 )  # fmt: skip

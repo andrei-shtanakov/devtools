@@ -14,12 +14,8 @@
 #   1. каждый плейсхолдер → `*`;
 #   2. соседние `*`, разделённые одним разделителем, схлопываются — до
 #      неподвижной точки (ветка ПРЕЖНЕЙ арности `<W>-<K>` не пройдёт мимо).
-approval_globs() {
-    _patterns="$1"
-    _what="SSOT имён веток одобрения"
-    _template=$(ssot_key "$_patterns" APPROVAL_CANDIDATE_TEMPLATE "$_what") || exit $?
-    _suffix=$(ssot_key "$_patterns" APPROVAL_FINALIZE_SUFFIX "$_what") || exit $?
-    _glob=$(printf '%s\n' "$_template" | sed 's/{[A-Za-z_][A-Za-z0-9_]*}/*/g')
+approval_template_glob() {
+    _glob=$(printf '%s\n' "$1" | sed 's/{[A-Za-z_][A-Za-z0-9_]*}/*/g')
     while :; do
         _collapsed=$(printf '%s\n' "$_glob" | sed 's/\*[-._]\*/*/g')
         if [ "$_collapsed" = "$_glob" ]; then
@@ -27,5 +23,14 @@ approval_globs() {
         fi
         _glob="$_collapsed"
     done
+    printf '%s\n' "$_glob"
+}
+
+approval_globs() {
+    _patterns="$1"
+    _what="SSOT имён веток одобрения"
+    _template=$(ssot_key "$_patterns" APPROVAL_CANDIDATE_TEMPLATE "$_what") || exit $?
+    _suffix=$(ssot_key "$_patterns" APPROVAL_FINALIZE_SUFFIX "$_what") || exit $?
+    _glob=$(approval_template_glob "$_template")
     printf '%s\n%s\n' "$_glob" "$_glob$_suffix"
 }
