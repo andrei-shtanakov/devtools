@@ -26,7 +26,7 @@ sdist), всё сверено с `uv.lock` и покрыто `admin_digest`. И�
 `openssl`. Тесты: pytest, ruff, pyrefly.
 
 **Spec:** `docs/superpowers/specs/2026-10-13-df-installer-design.md` **rev 10** (этот PR:
-§2.5, §3.9, §4.1, §4.5, §5.4, §5.5, §10) и спека A **rev 16**. Этап 2b — §2.5, строка 2b;
+§2.5, §3.9, §4.1, §4.5, §5.4, §5.5, §10) и спека A (rev 16 по `depends_on` спеки B; текущий файл — rev 18, читать текущий). Этап 2b — §2.5, строка 2b;
 §4.5, три строки мержа и строки `df-precheck`; §5.4, исполнение `merge` для stop; §5.6 в
 части `merge`; §10, строка 2b. План спорит со спекой, а не заменяет её.
 
@@ -152,16 +152,26 @@ sdist), всё сверено с `uv.lock` и покрыто `admin_digest`. И�
      `O_EXCL` + `fsync` перед финальным чтением. Он переживает процесс и снимается только
      вместе с финальным результатом (`done` или проверенный `refused`) этого запроса.
      Запрос с другим ключом при чужом владении получает `refused: pr_busy` до любой своей
-     фазы. Нового состояния он не создаёт, поэтому отказ правдив. Предел: другая установка
-     с тем же App этой координации не видит. Спека (§5.6) объявляет одну установку на App,
-     а мерж, который в окне владения сделал кто-то другой, объявляется `unknown`, а не
-     `done`;
+     фазы. Нового состояния он не создаёт, поэтому отказ правдив. **Завершение владения
+     входит в crash-протокол** (r3 N2): (а) replay окончательного результата `merge` в
+     кадре `main` идемпотентно снимает владение, если файл владения называет ключ этого
+     запроса; (б) приобретение при существующем файле читает его `request_key`, и если у
+     того запроса есть сохранённый окончательный результат, снимает устаревшее владение и
+     берёт своё под блокировкой каталога `owners/`. Владение запроса без окончательного
+     результата (в том числе с `unknown`) не снимается никем;
+   - **предпосылка гарантии — исключительное использование App для мержа через
+     издатель этой установки** (r3 N3). Мерж тем же App другим инструментом или другой
+     установкой — **вне гарантии**: такой мерж с той же головой в окне владения может быть
+     засчитан запросу. Мерж другим актором (не бот App) всегда даёт `unknown`. Спека §5.6
+     формулирует это как ограничение, а не обещание распознавания;
    - **финальное чтение** (r2 N4) перед `armed`: PR открыт, `head.sha == head_sha`,
      `head.repo.id`, `head.ref` и `base.ref` равны `facts`. Изменилась база (`base.ref`) —
      `refused: base_changed` с `verified_not_done=True`. Сдвинулась вершина базы
      (`base_tip`) — пересчитать `changes` (compare новой вершины с головой) и повторить
      предпроверку. Отказ — `refused` с `verified_not_done=True`, `PUT` не было; новые
-     метаданные пишутся фазой `rechecked`. Неатомарность между `armed` и `PUT` остаётся,
+     метаданные пишутся фазой `rechecked.<n>` (`n` = 1, 2, … при последовательных
+     сдвигах; каждая со своим `base_tip`, `changes_digest`, digest запроса и метаданными).
+     Решающая проверка — последняя `rechecked.<n>`, иначе `attest`. Неатомарность между `armed` и `PUT` остаётся,
      как и согласованная неатомарность предпроверки и доставки (§5.4);
    - **результат** — как в 2a (`store.result`), затем снимается владение.
 
@@ -175,14 +185,16 @@ sdist), всё сверено с `uv.lock` и покрыто `admin_digest`. И�
    | `attest` | полный обход ревью: ровно одна своя аттестация → записать `attested`, продолжить; ни одной | `unknown: attestation_not_confirmed` (без нового `POST`; клиент — новый `request_id`) |
    | `attest` | больше одной | `unknown: duplicate_attestations` |
    | `attested` | PR открыт, факты равны → финальное чтение и `armed` | иначе `refused: head_changed`/`base_changed` проверенный |
+   | `rechecked.<n>` | как `attested`, решающая проверка — последняя | — |
    | `armed` без `put_answer` | PR смёржен ботом App с `head_sha` | `done` |
    | `armed` без `put_answer` | смёржен иначе | `unknown: merge_not_confirmed` |
-   | `armed` без `put_answer` | открыт, с `read_at` прошло < `PUT_SETTLE = 600` с | `unknown: merge_in_flight` (r2 N2: открытый PR после неопределённого `PUT` не доказывает отказ) |
-   | `armed` без `put_answer` | открыт, ≥ `PUT_SETTLE` | `refused: not_merged` проверенный (запрос GitHub не живёт 10 минут) |
+   | `armed` без `put_answer` | открыт, `head.sha == head_sha`, факты равны | **повторить `PUT`** с тем же `sha` под тем же владением (r3 N1). Это не слепой повтор: мерж PR не может произойти дважды, а `sha` пинит голову, так что эффект двух `PUT` равен эффекту одного. Дальше — по определённому ответу |
+   | `armed` без `put_answer` | открыт, голова иная | `refused: head_changed` проверенный: прежний `PUT` нёс прежний `sha` и смёржить новую голову не может |
+   | `armed` без `put_answer` | сбой чтения | `unknown: merge_not_confirmed` |
    | `put_answer` 409 | — | `refused: head_changed` проверенный |
    | `put_answer` 405/422, PR открыт | — | `refused: not_mergeable` проверенный |
-   | `put_answer` 405/422, PR смёржен | — | `unknown: merge_not_confirmed` |
-   | `put_answer` 200 | PR смёржен ботом с `head_sha` | `done` |
+   | `put_answer` 405/422 или 200, PR смёржен ботом App с `head_sha` | — | `done` |
+   | `put_answer` 405/422, PR смёржен иначе | — | `unknown: merge_not_confirmed` |
 
    Отказ с `verified_not_done=True` проходит через `merge()` до `main._run_handler`
    (сейчас `merge.py:300–301` теряет признак). Отказ до intent — обычный `refused`.
@@ -214,11 +226,12 @@ sdist), всё сверено с `uv.lock` и покрыто `admin_digest`. И�
     список `[status, path, previous_filename|None]` из compare. Stop требует ровно одну
     запись `added` по пути `stop_path(...)`, rename отвергается. Ту же форму издатель
     проверяет сам при маршрутизации (требование 4), проверяющий — повторно.
-12. **Evidence `merge`** (r1 N14): `kind`; `precheck` (`version`, `admin_digest` из
-    вердикта, `revoke`: `ok|<ошибка>`); `attestation_review_id`; `merge_commit`;
+12. **Evidence `merge`** (r1 N14, r3 N5): `kind`; `precheck` — **решающая** проверка
+    (`version`, `admin_digest`, `revoke`: `ok|<ошибка>`, `base_tip`, `request_digest`), а при
+    повторных — ещё `precheck_initial` (из `attest`); `attestation_review_id`; `merge_commit`;
     `trust_root` — `{"unavailable": "no_binding"}` в 2b, по форме §5.5. Метаданные
-    предпроверки записываются в фазу `attest` и при восстановлении берутся оттуда, а не
-    вычисляются заново.
+    каждой проверки записываются в её фазу (`attest`, `rechecked.<n>`) и при
+    восстановлении берутся оттуда, а не вычисляются заново.
 13. **Живая приёмка 2b — маршрут stop** (решение владельца 03.11; r1 N9, N15). Засев —
     техническим PR. Машинный пользователь открывает PR с манифестом `review/v1` для
     `ws = stand-<tag>`, узел `n1`, и мержит его через API (squash). Связь merge commit ↔
@@ -255,7 +268,7 @@ sdist), всё сверено с `uv.lock` и покрыто `admin_digest`. И�
   `approval_branches.sh`, `.github/`). PR этапа сливает **владелец**.
 - Пределы: запрос ≤ 64 КиБ, вердикт ≤ 64 КиБ (параметр `limit` у `run_with_input`,
   `run_supervised`); `DEADLINE = 150.0`, `command_timeout=180`, `PRECHECK_WAIT = 200.0`,
-  `PUT_SETTLE = 600`;
+  `PUT` повторяется только по таблице решения 8;
   `COMPARE_FILE_CAP = 300`.
 - Ответ издателя — схема `df/publisher-response/v1` без новых верхних ключей.
 
@@ -269,8 +282,8 @@ sdist), всё сверено с `uv.lock` и покрыто `admin_digest`. И�
    получает 409; исход `refused: head_changed`; повтор — тот же исход без второго `PUT`.
    Тест — Task 8, `test_head_change_after_precheck`.
 3. **Ответ на `PUT` потерян; PR смёржен или ещё нет.** Ожидание: смёржен ботом — `done`;
-   открыт — `unknown: merge_in_flight` до `PUT_SETTLE`, без окончательного отказа; смёржен
-   человеком — `unknown`. Тест — Task 8.
+   открыт с той же головой — повторный `PUT` с тем же `sha`; смёржен человеком — `unknown`.
+   Окончательный отказ по таймеру не ставится никогда. Тест — Task 8.
 4. **Ответ на `POST` аттестации потерян.** Ожидание: восстановление находит ровно одну
    свою аттестацию и продолжает. Не находит — `unknown`, второго `POST` нет. Тест — Task 8,
    `test_lost_attestation_post_*`.
@@ -454,8 +467,17 @@ sdist), всё сверено с `uv.lock` и покрыто `admin_digest`. И�
   `sys.path`); `test_precheck_imports_under_dash_S` (административный Python `-I -B -S`,
   `sys.path` = stdlib + `admin/<id>` + `admin/<id>/site`, импорт
   `governance.act_precheck`).
-- [ ] **Step 2–4:** FAIL → реализовать (staging → проверка → `sync_tree` → `rename`, как
-  у `install_admin_python`; `fetch` — `urllib` от root с `admin_env`, без `uv`) → PASS.
+- [ ] **Step 2–4:** FAIL → реализовать → PASS. **Протокол `install_admin` сохраняется**
+  (r3 N4): `created` (частичный) → `created` (полный) → `sync_tree(admin/<id>)` →
+  `sync_dir(admin)`, только расширяется содержимое копии: `df/`, `governance/*`,
+  `contracts/*` из `devtools_ref`, `site/*` из проверенных исходников. Исходники `site`
+  готовятся **до** протокола в `admin-home/site-src/<sha256>/` (sdist pyyaml) и
+  `admin-home/site-src/<commit>/` (steward). Это кэш с адресацией по содержимому, а не
+  состояние маршрута: при каждом использовании он заново сверяется по sha256 / `FETCH_HEAD`
+  и извлекается заново, если сверка не прошла. Новых промежуточных деревьев в модели
+  сбоев и rollback нет. `fetch` — `urllib` от root с `admin_env`, без `uv`.
+  Тест `test_install_admin_protocol_events_unchanged` сверяет события с нормативным
+  протоколом (`tests/df/test_admin.py:438–447`).
 - [ ] **Step 5:** коммит `feat(df): admin tree with the precheck closure and pure site`.
 
 ### Task 6: роль `df-precheck`, правило, обёртка, `precheck serve`
@@ -549,7 +571,7 @@ sdist), всё сверено с `uv.lock` и покрыто `admin_digest`. И�
 
 **Interfaces:**
 - Consumes: Task 1 (`route` по `changes`), Task 7.
-- Produces: `MERGE_METHOD = "squash"`; `ATTESTATION_MARKER`; `PUT_SETTLE = 600`;
+- Produces: `MERGE_METHOD = "squash"`; `ATTESTATION_MARKER`;
   `store.phase(res, name: str, payload: Mapping) -> None`,
   `store.read_phases(res) -> dict[str, Mapping]`,
   `store.own_pr(layout, repository_id: int, pr: int, request_key: str) -> bool` (`False` —
@@ -581,11 +603,16 @@ sdist), всё сверено с `uv.lock` и покрыто `admin_digest`. И�
   `test_exception_after_post_is_unknown_not_internal_refusal`;
   `test_revoked_run_with_state_is_unknown`; `test_corrupt_phase_counts_as_state`;
   `test_attested_without_armed_continues`;
-  `test_crash_after_armed_before_put_then_other_request_busy` (r2 N1: B получает
-  `pr_busy`, повтор A после `PUT_SETTLE` — `refused: not_merged`, а не `done`);
-  `test_put_in_flight_open_is_unknown_then_done` (r2 N2: `PUT` по таймауту, первый GET —
-  открыт → `unknown: merge_in_flight`, сервер завершает мерж, повтор → `done`, окончательный
-  `refused` не сохранялся); `test_put_409_head_changed`; `test_put_405_open_not_mergeable`;
+  `test_crash_after_armed_before_put_then_other_request_busy` (B получает `pr_busy`;
+  повтор A видит открытый PR и повторяет `PUT`);
+  `test_delayed_first_put_lands_after_resend` (r3 N1: первый `PUT` задержан фейком,
+  клиент по таймауту; повторный `PUT` получает 405, PR смёржен ботом → `done`;
+  окончательного отказа нет ни на одном шаге); `test_clock_jump_does_not_change_outcome`;
+  `test_crash_after_result_before_release_replay_releases` (r3 N2: повтор A снимает
+  владение, B проходит); `test_stale_owner_with_final_result_taken_over`;
+  `test_owner_with_unknown_never_released`; `test_other_tool_same_app_is_outside_guarantee`
+  (документирующий тест договора r3 N3: засчитывается, evidence помечает предпосылку);
+  `test_rechecked_twice_evidence_shows_decisive_and_initial` (r3 N5); `test_put_409_head_changed`; `test_put_405_open_not_mergeable`;
   `test_lost_put_reconciles_done`; `test_merged_by_human_is_unknown`;
   `test_retarget_between_precheck_and_final_read_refused` (r2 N4);
   `test_base_tip_moved_rechecks`; `test_lost_attestation_post_found_once_continues`;
