@@ -35,6 +35,10 @@ if TYPE_CHECKING:
 
 Kind = Literal["candidate", "brief", "finalize", "stop"]
 
+#: One changed file of a PR: `(status, path, previous_filename)`, as GitHub's
+#: compare lists it (`previous_filename` only for a rename).
+Change = tuple[str, str, str | None]
+
 #: Per-segment path templates (`*` never crosses `/`); a test holds them equal
 #: to `governance.act_envelope.envelope_path` and `stop_path`.
 ENVELOPE_PATH = ("workstreams", "*", "approvals", "*.yaml")
@@ -45,6 +49,7 @@ BRIEF_GLOB = "brief/*"
 COMPARE_FILE_CAP = 300
 _CANDIDATE_KEY = "APPROVAL_CANDIDATE_TEMPLATE"
 _FINALIZE_KEY = "APPROVAL_FINALIZE_SUFFIX"
+_STOP_KEY = "APPROVAL_STOP_TEMPLATE"
 _SHA = re.compile(r"[0-9a-f]{40}", re.ASCII)
 _PLACEHOLDER = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
 _ADJACENT_STARS = re.compile(r"\*[-._]\*")
@@ -87,7 +92,7 @@ def patterns_path(layout: Layout, snapshot: Snapshot) -> Path:
 
 
 def read_patterns(layout: Layout, snapshot: Snapshot) -> dict[str, str]:
-    """The two keys of `patterns.env`; anything else than a whole file with
+    """The three keys of `patterns.env`; anything else than a whole file with
     both keys is `patterns_unavailable`."""
     try:
         text = read_optional(patterns_path(layout, snapshot))
@@ -112,11 +117,11 @@ def _definitions(text: str, key: str) -> list[str]:
 
 
 def parse_patterns(text: str) -> dict[str, str]:
-    """Both keys; any other line is ignored, as in the contract's other two
+    """All three keys; any other line is ignored, as in the contract's other two
     halves. A missing key, a duplicate definition or an empty value is
     `patterns_unavailable`."""
     found: dict[str, str] = {}
-    for key in (_CANDIDATE_KEY, _FINALIZE_KEY):
+    for key in (_CANDIDATE_KEY, _FINALIZE_KEY, _STOP_KEY):
         values = _definitions(text, key)
         if len(values) != 1 or not values[0]:
             raise Refused("patterns_unavailable")
@@ -135,13 +140,43 @@ def _template_glob(template: str) -> str:
         glob = collapsed
 
 
+def _stop_regex(template: str, ws_id: str) -> re.Pattern[str]:
+    """The rule of `governance.approval_branches.parse_stop_branch`: the
+    template with a known `ws_id`, a node of any non-empty text, a generation
+    of digits."""
+    groups = {"node": "(?P<node>.+)", "generation": "(?P<generation>[0-9]+)"}
+    out = []
+    for part in re.split(r"(\{[A-Za-z_][A-Za-z0-9_]*\})", template):
+        if _PLACEHOLDER.fullmatch(part) is None:
+            out.append(re.escape(part))
+        elif part == "{ws_id}":
+            out.append(re.escape(ws_id))
+        else:
+            out.append(groups.get(part[1:-1], ".+"))
+    return re.compile("".join(out))
+
+
+def _stop_path_of_branch(head_ref: str, ws_id: str, template: str) -> str | None:
+    """The record path the stop branch `head_ref` of workstream `ws_id` names
+    (canonical forms only: the branch is rebuilt from what was parsed)."""
+    found = _stop_regex(template, ws_id).fullmatch(head_ref)
+    if found is None or "generation" not in found.groupdict():
+        return None
+    node, generation = found["node"], int(found["generation"])
+    if (
+        template.format_map({"ws_id": ws_id, "node": node, "generation": generation})
+        != head_ref
+    ):
+        return None
+    return f"workstreams/{ws_id}/approvals/stops/{node}-g{generation}.yaml"
+
+
 # --- routing ------------------------------------------------------------------
 
 
 def branch_kinds(head_ref: str, patterns: Mapping[str, str]) -> set[Kind]:
     """The kinds whose branch form `head_ref` has. A finalize branch is also
-    of the candidate form; it is only a finalize one. `stop` has no branch
-    form in 2a."""
+    of the candidate form; it is only a finalize one."""
     candidate = _template_glob(patterns[_CANDIDATE_KEY])
     finalize = candidate + patterns[_FINALIZE_KEY]
     kinds: set[Kind] = set()
@@ -151,6 +186,8 @@ def branch_kinds(head_ref: str, patterns: Mapping[str, str]) -> set[Kind]:
         kinds.add("candidate")
     if fnmatchcase(head_ref, BRIEF_GLOB):
         kinds.add("brief")
+    if fnmatchcase(head_ref, _template_glob(patterns[_STOP_KEY])):
+        kinds.add("stop")
     return kinds
 
 
@@ -164,18 +201,43 @@ def _matches(path: str, template: Sequence[str]) -> bool:
     )
 
 
+def _is_stop_change(
+    head_ref: str, changes: Sequence[Change], patterns: Mapping[str, str]
+) -> bool:
+    """A stop PR is exactly one added record whose path is under `STOP_PATH`
+    and equals the path its branch names (the workstream is the path's)."""
+    if len(changes) != 1:
+        return False
+    status, path, previous = changes[0]
+    if status != "added" or previous is not None:
+        return False
+    if not _matches(path, STOP_PATH):
+        return False
+    named = _stop_path_of_branch(head_ref, path.split("/")[1], patterns[_STOP_KEY])
+    return named == path
+
+
 def route(
-    head_ref: str, paths: Sequence[str], patterns: Mapping[str, str]
+    head_ref: str, changes: Sequence[Change], patterns: Mapping[str, str]
 ) -> Kind | Refused:
     """The kind of the PR, or `ambiguous_kind`: a branch outside the forms or
-    of two, a stop record among the paths (whatever the branch), a finalize
-    branch with any path but an envelope or with no path at all."""
-    if any(_matches(p, STOP_PATH) for p in paths):
-        return Refused("ambiguous_kind")
+    of two, a stop record among the paths of a PR that is not a stop one (the
+    old path of a rename counts), a stop branch that is not exactly one added
+    record it names, a finalize branch with any path but an envelope or with no
+    path at all."""
+    paths = [p for _, path, previous in changes for p in (path, previous) if p]
     kinds = branch_kinds(head_ref, patterns)
     if len(kinds) != 1:
         return Refused("ambiguous_kind")
     (kind,) = kinds
+    if kind == "stop":
+        return (
+            kind
+            if _is_stop_change(head_ref, changes, patterns)
+            else Refused("ambiguous_kind")
+        )
+    if any(_matches(p, STOP_PATH) for p in paths):
+        return Refused("ambiguous_kind")
     if kind == "brief" and any(_matches(p, ENVELOPE_PATH) for p in paths):
         return Refused("ambiguous_kind")
     if kind == "finalize" and not (
@@ -206,17 +268,19 @@ def _check_head_repo(oc: OpContext, pr: Mapping[str, object]) -> None:
         raise Refused("head_repo_foreign")
 
 
-def _paths_of(item: object) -> list[str]:
-    """The paths a file entry puts in play: the old path of a rename counts
-    too, or a rename out of `approvals/stops/` would escape the stop check."""
+def _change_of(item: object) -> Change:
+    """The change a file entry of the compare describes. A missing status is
+    kept empty (it routes nothing as a stop); a rename keeps its old path,
+    or a rename out of `approvals/stops/` would escape the stop check."""
     if not isinstance(item, dict) or not isinstance(item.get("filename"), str):
         raise GitHubUnavailable("files: unexpected item")
+    status = item.get("status", "")
     previous = item.get("previous_filename")
-    if previous is None:
-        return [item["filename"]]
-    if not isinstance(previous, str):
+    if not isinstance(status, str) or not (
+        previous is None or isinstance(previous, str)
+    ):
         raise GitHubUnavailable("files: unexpected item")
-    return [item["filename"], previous]
+    return (status, item["filename"], previous)
 
 
 def _get(oc: OpContext, token: str, path: str) -> object:
@@ -246,8 +310,10 @@ def base_tip(oc: OpContext, token: str, ref: str) -> str:
     return sha
 
 
-def pr_paths(oc: OpContext, token: str, tip: str, head_sha: str) -> list[str]:
-    """Every path of the diff `tip...head_sha`: two fixed commits, so the list
+def pr_changes(
+    oc: OpContext, token: str, tip: str, head_sha: str
+) -> tuple[Change, ...]:
+    """Every change of the diff `tip...head_sha`: two fixed commits, so the list
     cannot change under us (the PR's own files listing follows the live head).
     `COMPARE_FILE_CAP` files or more is `too_many_files`."""
     path = f"/repos/{oc.product.full_name}/compare/{tip}...{head_sha}"
@@ -257,7 +323,7 @@ def pr_paths(oc: OpContext, token: str, tip: str, head_sha: str) -> list[str]:
         raise GitHubUnavailable("compare: no files")
     if len(files) >= COMPARE_FILE_CAP:
         raise Refused("too_many_files")
-    return [p for item in files for p in _paths_of(item)]
+    return tuple(_change_of(item) for item in files)
 
 
 def _decide(ctx: Context, precheck: Precheck) -> NoReturn:
@@ -272,11 +338,11 @@ def _decide(ctx: Context, precheck: Precheck) -> NoReturn:
     head_ref = _head_ref(first)
     _check_head_repo(oc, first)
     tip = base_tip(oc, token, _base_ref(first))
-    paths = pr_paths(oc, token, tip, head_sha)
+    changes = pr_changes(oc, token, tip, head_sha)
     pr = ops.read_pr(oc, token, pr_number, head_sha)  # head and base did not move
     if _base_ref(pr) != _base_ref(first) or _head_ref(pr) != head_ref:
         raise Refused("pr_state")
-    kind = route(head_ref, paths, patterns)
+    kind = route(head_ref, changes, patterns)
     if isinstance(kind, Refused):
         raise kind
     refused = precheck(kind, oc, pr)
@@ -310,6 +376,7 @@ __all__ = [
     "ENVELOPE_PATH",
     "STOP_PATH",
     "UNAVAILABLE",
+    "Change",
     "Kind",
     "Precheck",
     "branch_kinds",

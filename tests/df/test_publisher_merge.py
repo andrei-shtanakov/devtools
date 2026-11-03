@@ -174,13 +174,19 @@ def test_branch_kinds_two_forms_are_ambiguous() -> None:
     patterns = {
         "APPROVAL_CANDIDATE_TEMPLATE": "brief/{x}-approve-{y}",
         "APPROVAL_FINALIZE_SUFFIX": "-final",
+        "APPROVAL_STOP_TEMPLATE": "stop/{ws_id}-{node}-g{generation}",
     }
     ref = "brief/a-approve-1"
     assert merge.branch_kinds(ref, patterns) == {"candidate", "brief"}
-    assert isinstance(merge.route(ref, [ENVELOPE], patterns), Refused)
+    assert isinstance(merge.route(ref, mod(ENVELOPE), patterns), Refused)
 
 
 # --- route --------------------------------------------------------------------
+
+
+def mod(*paths: str) -> list[merge.Change]:
+    """Modified files: the changes of a PR that is not a stop one."""
+    return [("modified", p, None) for p in paths]
 
 
 def amb(result: object) -> bool:
@@ -188,33 +194,90 @@ def amb(result: object) -> bool:
 
 
 def test_route_kinds() -> None:
-    assert merge.route(CAND, ["any/file.py"], REAL) == "candidate"
-    assert merge.route(CAND, [ENVELOPE], REAL) == "candidate"
-    assert merge.route("spec/ws-approve-1-2", ["x"], REAL) == "candidate"
-    assert merge.route(FINAL, [ENVELOPE], REAL) == "finalize"
-    assert merge.route(FINAL, [ENVELOPE, "workstreams/b/approvals/m.yaml"], REAL) == (
-        "finalize"
-    )
-    assert merge.route("brief/x", ["docs/a.md"], REAL) == "brief"
+    assert merge.route(CAND, mod("any/file.py"), REAL) == "candidate"
+    assert merge.route(CAND, mod(ENVELOPE), REAL) == "candidate"
+    assert merge.route("spec/ws-approve-1-2", mod("x"), REAL) == "candidate"
+    assert merge.route(FINAL, mod(ENVELOPE), REAL) == "finalize"
+    assert merge.route(
+        FINAL, mod(ENVELOPE, "workstreams/b/approvals/m.yaml"), REAL
+    ) == ("finalize")
+    assert merge.route("brief/x", mod("docs/a.md"), REAL) == "brief"
 
 
 def test_route_stop_file_is_ambiguous_on_any_branch() -> None:
     for ref in (CAND, FINAL, "brief/x", "feat/x"):
-        assert amb(merge.route(ref, [STOP], REAL)), ref
-        assert amb(merge.route(ref, [ENVELOPE, STOP], REAL)), ref
+        assert amb(merge.route(ref, mod(STOP), REAL)), ref
+        assert amb(merge.route(ref, mod(ENVELOPE, STOP), REAL)), ref
+
+
+STOP_REF = "stop/ws-n1-g2"
+
+
+def test_stop_routes_on_one_added_file() -> None:
+    added = [("added", STOP, None)]
+    assert merge.route(STOP_REF, added, REAL) == "stop"
+    assert merge.branch_kinds(STOP_REF, REAL) == {"stop"}
+    dashed = "workstreams/a-b/approvals/stops/c-d-g12.yaml"
+    assert merge.route("stop/a-b-c-d-g12", [("added", dashed, None)], REAL) == "stop"
+
+
+def test_stop_modified_or_renamed_file_ambiguous() -> None:
+    for change in (
+        ("modified", STOP, None),
+        ("removed", STOP, None),
+        ("renamed", STOP, "docs/old.md"),
+        ("renamed", STOP, STOP.replace("n1", "n2")),
+        ("added", STOP, "docs/old.md"),
+        ("", STOP, None),
+    ):
+        assert amb(merge.route(STOP_REF, [change], REAL)), change
+    added = ("added", STOP, None)
+    assert amb(merge.route(STOP_REF, [], REAL))
+    assert amb(merge.route(STOP_REF, [added, added], REAL))
+    assert amb(merge.route(STOP_REF, [added, *mod("docs/a.md")], REAL))
+    assert amb(merge.route(STOP_REF, [("added", ENVELOPE, None)], REAL))
+
+
+def test_stop_branch_path_mismatch_ambiguous() -> None:
+    added = [("added", STOP, None)]
+    for ref in (
+        "stop/ws-n1-g3",  # generation differs
+        "stop/ws-n2-g2",  # node differs
+        "stop/other-n1-g2",  # workstream differs
+        "stop/ws-n1-g02",  # not canonical
+        "stop/ws-n1-g",
+    ):
+        assert amb(merge.route(ref, added, REAL)), ref
+    # a stop record on another kind of branch is still ambiguous
+    assert amb(merge.route(CAND, added, REAL))
+    # the old path of a rename out of the stop directory counts
+    moved = [("renamed", "docs/moved.md", STOP)]
+    assert amb(merge.route(CAND, moved, REAL))
+    assert amb(merge.route(STOP_REF, moved, REAL))
+
+
+def test_stop_glob_equals_the_contract() -> None:
+    template = REAL["APPROVAL_STOP_TEMPLATE"]
+    assert template == approval_branches.stop_template()
+    assert merge._template_glob(template) == approval_branches.stop_glob()
+    ws, node, gen = "a-b", "c-d", 4
+    ref = approval_branches.stop_branch(ws, node, gen)
+    path = act_envelope.stop_path(ws, node, gen)
+    assert merge.route(ref, [("added", path, None)], REAL) == "stop"
+    assert approval_branches.parse_stop_branch(ref, ws) == (node, gen)
 
 
 def test_route_finalize_with_other_paths_is_ambiguous() -> None:
-    assert amb(merge.route(FINAL, [ENVELOPE, "src/x.py"], REAL))
-    assert amb(merge.route(FINAL, [], REAL))
-    assert amb(merge.route(FINAL, ["workstreams/ws/approvals/stops/a.yaml"], REAL))
-    assert amb(merge.route(FINAL, ["workstreams/ws/approvals/x/y.yaml"], REAL))
-    assert amb(merge.route(FINAL, ["workstreams/ws/approvals/n1.yml"], REAL))
+    assert amb(merge.route(FINAL, mod(ENVELOPE, "src/x.py"), REAL))
+    assert amb(merge.route(FINAL, mod(), REAL))
+    assert amb(merge.route(FINAL, mod("workstreams/ws/approvals/stops/a.yaml"), REAL))
+    assert amb(merge.route(FINAL, mod("workstreams/ws/approvals/x/y.yaml"), REAL))
+    assert amb(merge.route(FINAL, mod("workstreams/ws/approvals/n1.yml"), REAL))
 
 
 def test_route_outside_the_forms_is_ambiguous() -> None:
-    assert amb(merge.route("feat/x", [ENVELOPE], REAL))
-    assert amb(merge.route("", [ENVELOPE], REAL))
+    assert amb(merge.route("feat/x", mod(ENVELOPE), REAL))
+    assert amb(merge.route("", mod(ENVELOPE), REAL))
 
 
 def test_path_templates_per_segment() -> None:
@@ -254,6 +317,7 @@ def test_path_templates_match_act_envelope() -> None:
 GOOD = (
     "# c\n\nAPPROVAL_CANDIDATE_TEMPLATE=spec/{ws_id}-approve-{wave}\n"
     "APPROVAL_FINALIZE_SUFFIX=-final\n"
+    "APPROVAL_STOP_TEMPLATE=stop/{ws_id}-{node}-g{generation}\n"
 )
 
 
@@ -283,6 +347,7 @@ def test_patterns_parsed_not_executed(world: World) -> None:
     assert merge.read_patterns(world.lay, world.snap) == {
         "APPROVAL_CANDIDATE_TEMPLATE": "spec/{ws_id}-approve-{wave}",
         "APPROVAL_FINALIZE_SUFFIX": "-final",
+        "APPROVAL_STOP_TEMPLATE": "stop/{ws_id}-{node}-g{generation}",
     }
 
 
@@ -580,9 +645,9 @@ def test_precheck_gets_the_second_read(
 
 
 def test_brief_branch_with_an_envelope_is_ambiguous() -> None:
-    assert amb(merge.route("brief/x", [ENVELOPE], REAL))
-    assert amb(merge.route("brief/x", ["docs/a.md", ENVELOPE], REAL))
-    assert merge.route("brief/x", ["workstreams/ws/notes.md"], REAL) == "brief"
+    assert amb(merge.route("brief/x", mod(ENVELOPE), REAL))
+    assert amb(merge.route("brief/x", mod("docs/a.md", ENVELOPE), REAL))
+    assert merge.route("brief/x", mod("workstreams/ws/notes.md"), REAL) == "brief"
 
 
 PARITY = [
@@ -610,7 +675,11 @@ def test_patterns_parse_like_the_contract(text: str) -> None:
     refuse (a missing key, a duplicate, an empty value)."""
     from governance import ssot_env
 
-    keys = ("APPROVAL_CANDIDATE_TEMPLATE", "APPROVAL_FINALIZE_SUFFIX")
+    keys = (
+        "APPROVAL_CANDIDATE_TEMPLATE",
+        "APPROVAL_FINALIZE_SUFFIX",
+        "APPROVAL_STOP_TEMPLATE",
+    )
     found = [ssot_env.definition_lines(text, k) for k in keys]
     good = all(len(v) == 1 and v[0] for v in found)
     if not good:
