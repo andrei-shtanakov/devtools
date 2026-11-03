@@ -1540,7 +1540,7 @@ def test_precheck_stopped_reaped_by_next_call(
         young_age = age_of(target)
         young_snapshots = pw.snapshots()
         waited = wait_for(
-            lambda: (age_of(target) or 0.0) > precheck_reap.REAP_AFTER + 1, 90, 0.5
+            lambda: (age_of(target) or 0.0) > precheck_reap.REAP_AFTER + 1, 120, 0.5
         )
         reaped = pw.ask(pw.current)
         after = {"age": age_of(target), "sample": sample(rw.uid(PRECHECK), run.sudo)}

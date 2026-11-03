@@ -547,7 +547,10 @@ def _reap(uid: int) -> None:
     ancestors). A problem is a named reason on stderr and never stops the
     run; the program's own cleanup then removes the snapshots no live run
     holds."""
-    killed, problems = precheck_reap.reap(uid)
+    try:
+        killed, problems = precheck_reap.reap(uid)
+    except Exception as exc:  # noqa: BLE001 - the reap never stops the run
+        killed, problems = [], [f"{type(exc).__name__}: {exc}"]
     for problem in problems:
         print(f"{_REAP}: {problem}", file=sys.stderr)
     if killed:

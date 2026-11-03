@@ -34,10 +34,13 @@ from df import platform as plat
 from df.publisher.precheck import PRECHECK_WAIT
 
 #: Seconds after which a `df-precheck` process is a leftover: past the
-#: publisher's wait (rung 3), with a margin for its own start and the mint.
-REAP_AFTER = PRECHECK_WAIT + 10.0
+#: publisher's wait (rung 3), with a margin of 30 s for its own start and
+#: the mint (and for the next call's own start, so a leftover is never
+#: reaped by the call right after the wait).
+REAP_AFTER = PRECHECK_WAIT + 30.0
 #: Seconds `reap` waits for the killed processes to be gone.
 REAP_WAIT = 5.0
+ROOT_UID = 0
 PS = "/bin/ps"
 PS_COLUMNS = "pid=,ppid=,ruid=,etime=,stat="
 _ETIME = re.compile(r"(?:(?:(\d+)-)?(\d+):)?(\d+):(\d+)", re.ASCII)
@@ -124,8 +127,9 @@ def _proc_processes(proc: Path) -> list[ProcInfo]:
         if not entry.name.isdigit():
             continue
         try:
-            stat = (entry / "stat").read_text()
-            status = (entry / "status").read_text()
+            # bytes: `comm` is cut at 15 bytes, possibly inside a character
+            stat = (entry / "stat").read_bytes().decode("utf-8", "replace")
+            status = (entry / "status").read_bytes().decode("utf-8", "replace")
         except (FileNotFoundError, ProcessLookupError, PermissionError):
             # ended while read, or unreadable to this UID (`hidepid`): not
             # a process of this UID
@@ -152,12 +156,19 @@ def leftovers(
     uid: int, processes: Sequence[ProcInfo], *, own: int | None = None
 ) -> list[ProcInfo]:
     """The live processes of `uid` older than `REAP_AFTER`, without `own`
-    and its ancestors."""
+    and its ancestors; never pid 1, never any process of UID 0 (a role with
+    UID 0 is no role: `reap` refuses it by name)."""
+    if uid == ROOT_UID:
+        return []
     spared = _lineage(own, processes) if own is not None else set()
     return [
         p
         for p in processes
-        if p.ruid == uid and not p.zombie and p.age > REAP_AFTER and p.pid not in spared
+        if p.ruid == uid
+        and p.pid > 1
+        and not p.zombie
+        and p.age > REAP_AFTER
+        and p.pid not in spared
     ]
 
 
@@ -181,8 +192,8 @@ def reap(
     """`SIGKILL` every leftover of `uid` (`leftovers`, sparing `own`, by
     default this process, and its ancestors), then wait up to `wait`
     seconds for them to be gone. Returns the PIDs killed and the problems
-    as named reasons: a listing that fails (`ListingError`, `OSError`) is a
-    problem, not an exception. `lister` and `killer` default to
+    as named reasons: a listing that fails in any way is a problem, not an
+    exception; UID 0 is refused by name and nothing is killed. `lister` and `killer` default to
     `list_processes` and `kill`, looked up at the call (tests replace
     them).
 
@@ -192,14 +203,16 @@ def reap(
     kill remains; a PID reused inside it can only be another process of
     this UID (the kernel's permission rule), and the publisher calls the
     precheck one at a time."""
+    if uid == ROOT_UID:
+        return [], ["UID 0: уборка не выполняется (роль с UID 0 — не роль)"]
     lister = lister or list_processes
     killer = killer or kill
     own = os.getpid() if own is None else own
     try:
         old = leftovers(uid, lister(), own=own)
         again = {p.pid: p for p in lister()} if old else {}
-    except (ListingError, OSError) as exc:
-        return [], [f"процессы не прочитаны: {exc}"]
+    except Exception as exc:  # noqa: BLE001 - the fence: any listing failure
+        return [], [f"процессы не прочитаны: {type(exc).__name__}: {exc}"]
     killed, problems = [], []
     for proc in old:
         now = again.get(proc.pid)
@@ -217,8 +230,8 @@ def reap(
     while killed:
         try:
             alive = {p.pid for p in lister() if not p.zombie} & set(killed)
-        except (ListingError, OSError) as exc:
-            problems.append(f"процессы не прочитаны: {exc}")
+        except Exception as exc:  # noqa: BLE001 - the fence, as above
+            problems.append(f"процессы не прочитаны: {type(exc).__name__}: {exc}")
             break
         if not alive:
             break

@@ -81,7 +81,9 @@ def test_unparseable_listing_is_a_problem_not_a_crash() -> None:
         raise ListingError("ps: строка 'x'")
 
     killed, problems = reap(UID, lister=broken, killer=Host([]).killer, own=1)
-    assert killed == [] and problems == ["процессы не прочитаны: ps: строка 'x'"]
+    assert killed == [] and problems == [
+        "процессы не прочитаны: ListingError: ps: строка 'x'"
+    ]
 
 
 def test_kill_failure_named() -> None:
@@ -158,15 +160,15 @@ def test_proc_processes_skips_ended_and_unreadable(tmp_path: Path) -> None:
     hidden.mkdir()
     (hidden / "stat").write_text("9 (x) S 1\n")
     (hidden / "status").write_text("Uid:\t6\n")
-    real_read = Path.read_text
+    real_read = Path.read_bytes
 
-    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+    def read_bytes(path: Path) -> bytes:
         if path.parent == hidden:
             raise PermissionError(13, "Permission denied")
-        return real_read(path, *args, **kwargs)  # type: ignore[arg-type]
+        return real_read(path)
 
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(Path, "read_text", read_text)
+        mp.setattr(Path, "read_bytes", read_bytes)
         found = precheck_reap._proc_processes(root)  # noqa: SLF001
     assert [p.pid for p in found] == [7]
 
@@ -240,3 +242,63 @@ def test_cli_reap_reports_on_stderr(
     err = capsys.readouterr().err
     assert "precheck serve: уборка: процессы не прочитаны: x" in err
     assert "precheck serve: уборка: убиты [5]" in err
+
+
+def test_proc_processes_invalid_utf8_comm(tmp_path: Path) -> None:
+    """`comm` cut at 15 bytes inside a character (invalid UTF-8 in `stat`
+    and `status`) is read, not an exception."""
+    ticks = os.sysconf("SC_CLK_TCK")
+    rest = " ".join(["0"] * 17)
+    root = _proc_tree(tmp_path, "", "")
+    cut = "проверяющий".encode()[:15]
+    (root / "7" / "stat").write_bytes(
+        b"7 (" + cut + b") S 1 " + rest.encode() + f" {ticks} 0\n".encode()
+    )
+    (root / "7" / "status").write_bytes(b"Name:\t" + cut + b"\nUid:\t5\t5\t5\t5\n")
+    found = precheck_reap._proc_processes(root)  # noqa: SLF001
+    assert [(p.pid, p.ruid) for p in found] == [(7, 5)]
+
+
+@pytest.mark.parametrize(
+    "error", [UnicodeDecodeError("utf-8", b"", 0, 1, "x"), RuntimeError("x")]
+)
+def test_any_listing_failure_is_a_problem(error: Exception) -> None:
+    """The fence: whatever the lister raises becomes a named problem."""
+
+    def broken() -> list[ProcInfo]:
+        raise error
+
+    killed, problems = reap(UID, lister=broken, killer=Host([]).killer, own=1)
+    assert killed == [] and problems[0].startswith("процессы не прочитаны:")
+
+
+def test_serve_runs_when_the_reap_raises(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Even an exception out of `reap` itself never stops `precheck serve`:
+    `cli._reap` names it on stderr and returns."""
+
+    def explode(uid: int) -> tuple[list[int], list[str]]:
+        raise ValueError("decode")
+
+    monkeypatch.setattr(precheck_reap, "reap", explode)
+    cli._reap(7)  # noqa: SLF001
+    assert "precheck serve: уборка: ValueError: decode" in capsys.readouterr().err
+
+
+def test_uid_zero_never_reaped() -> None:
+    """A `df-precheck` record with UID 0 is no role: a named problem, no
+    listing, no kill."""
+
+    def no_listing() -> list[ProcInfo]:
+        raise AssertionError("listed")
+
+    host = Host([])
+    killed, problems = reap(0, lister=no_listing, killer=host.killer, own=1)
+    assert killed == [] and host.killed == []
+    assert problems == ["UID 0: уборка не выполняется (роль с UID 0 — не роль)"]
+    assert leftovers(0, [proc(10, uid=0)]) == []
+
+
+def test_pid_one_never_a_candidate() -> None:
+    assert leftovers(UID, [proc(1, 0), proc(2, 0)]) == [proc(2, 0)]
