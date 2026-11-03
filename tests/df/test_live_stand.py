@@ -12,6 +12,7 @@ or reaches the network.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import re
@@ -911,20 +912,45 @@ def test_settle_merge_repeats_only_while_lagging() -> None:
 @pytest.mark.parametrize(
     ("repo", "allowed"),
     [
-        ({"allow_squash_merge": True}, True),
-        ({"allow_squash_merge": False}, False),
-        ({}, False),
-        (None, False),
+        pytest.param({"allow_squash_merge": True}, True, id="true"),
+        pytest.param({"allow_squash_merge": False}, False, id="false"),
+        pytest.param({"full_name": "o/r"}, True, id="absent-is-unknown"),
+        pytest.param(None, True, id="not-an-object-is-unknown"),
     ],
 )
 def test_squash_preflight_names_h7(repo: object, allowed: bool) -> None:
-    """H7: the seed's preflight is infrastructure naming the owner's step
-    unless the stand allows squash merges."""
+    """H7: only an explicit `allow_squash_merge: false` is infrastructure
+    naming the owner's step; an absent field (a token without admin rights
+    may not see it) is unknown and left to the seed's own squash `PUT`."""
     if allowed:
         live_stand.squash_problem(repo)
         return
     with pytest.raises(pytest.fail.Exception, match=f"{INFRA}.*H7"):
         live_stand.squash_problem(repo)
+
+
+@pytest.mark.parametrize(
+    ("status", "reason", "refused"),
+    [
+        pytest.param(
+            405,
+            "Squash merges are not allowed on this repository.",
+            True,
+            id="squash-off",
+        ),
+        pytest.param(405, "Merge method squash is not allowed", True, id="method"),
+        pytest.param(405, "Pull Request is not mergeable", False, id="not-mergeable"),
+        pytest.param(409, "Head branch was modified", False, id="409"),
+        pytest.param(None, "squash", False, id="client-refusal"),
+    ],
+)
+def test_squash_refusal_of_the_seed_names_h7(
+    status: int | None, reason: str, refused: bool
+) -> None:
+    """With the setting unknown, the seed's squash `PUT` decides: a 405
+    about the merge method is H7 not done; any other refusal is not."""
+    exc = live_stand.GitHubRefused(reason, status)
+    assert live_stand.squash_refused(exc) is refused
 
 
 @dataclass
@@ -1009,3 +1035,69 @@ def test_keep_merge_records_a_merged_pr(tmp_path: Path) -> None:
     gh.merged[3] = "e" * 40
     live_stand.keep_merge(st, "stop", 3)
     assert st.merges == {"stop": "e" * 40}
+
+
+@dataclass
+class MergeableGitHub:
+    """`MachineGitHub` answering `mergeable` from a script (its last value
+    repeats)."""
+
+    script: list[object]
+    reads: int = 0
+
+    def pull(self, number: int) -> dict[str, object]:
+        value = self.script[min(self.reads, len(self.script) - 1)]
+        self.reads += 1
+        return {"number": number, "mergeable": value}
+
+
+def _mergeable_stand(tmp_path: Path, gh: MergeableGitHub) -> live_stand.Stand:
+    return live_stand.Stand(
+        cast(RolesWorld, None),
+        live_stand.StandArgs(tmp_path, tmp_path, "s", 1, 2, 3, "t"),
+        StandSecrets(tmp_path / "k", tmp_path / "t", "ghp_x"),
+        cast(live_stand.MachineGitHub, gh),
+        cast(live_stand.Product, None),
+        "master",
+        "bot[bot]",
+    )
+
+
+@pytest.mark.parametrize(
+    ("script", "passes"),
+    [
+        pytest.param([None, None, True], True, id="computed-later"),
+        pytest.param([True], True, id="at-once"),
+        pytest.param([None], False, id="never-computed"),
+        pytest.param([None, False], False, id="not-mergeable"),
+    ],
+)
+def test_require_mergeable_before_a_merge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    script: list[object],
+    passes: bool,
+) -> None:
+    """Rows 11 and 12 (and the seed) merge only once GitHub says the PR is
+    mergeable; uncomputed within `MERGEABLE_WAIT` or not mergeable is
+    infrastructure, never a red acceptance row."""
+    monkeypatch.setattr(live_stand, "MERGEABLE_WAIT", 0.3)
+    monkeypatch.setattr(live_stand, "POLL", 0.01)
+    gh = MergeableGitHub(script)
+    st = _mergeable_stand(tmp_path, gh)
+    if passes:
+        live_stand.require_mergeable(st, 5, "stop-PR")
+        assert gh.reads == len(script)
+        return
+    with pytest.raises(pytest.fail.Exception, match=f"{INFRA}.*stop-PR 5"):
+        live_stand.require_mergeable(st, 5, "stop-PR")
+
+
+def test_merge_rows_wait_for_mergeability() -> None:
+    """Rows 11 and 12 call `require_mergeable` on their stop-PR before the
+    publisher's `merge` (the seed too, before its squash `PUT`)."""
+    for fn in (live_stand.row11_head_change, live_stand.row12_dropped_answer):
+        source = inspect.getsource(fn)
+        assert source.index("require_mergeable(") < source.index("merge_payload(")
+    seed_src = inspect.getsource(live_stand.seed)
+    assert seed_src.index("require_mergeable(") < seed_src.index('"PUT"')

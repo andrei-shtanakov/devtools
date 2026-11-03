@@ -1621,11 +1621,14 @@ def seed(st: Stand, name: str, ws: str, evidence: str) -> dict[str, object]:
     number = st.open_pr(name, branch, st.default_branch)
     if not st.wait_head(number, head, time.monotonic() + 60):
         infra(f"голова PR засева {number} не стала {head}")
-    mergeable = wait_mergeable(st, number)
-    if mergeable is not True:
-        infra(f"PR засева {number}: mergeable={mergeable!r}; мержа не было")
+    require_mergeable(st, number, "PR засева")
     body = {"merge_method": "squash", "sha": head}
-    merged = st.gh.call("PUT", st.gh.repo(f"/pulls/{number}/merge"), body)
+    try:
+        merged = st.gh.call("PUT", st.gh.repo(f"/pulls/{number}/merge"), body)
+    except GitHubRefused as exc:
+        if squash_refused(exc):
+            infra(f"H7: squash-мерж засева {number} отклонён: {exc.reason}")
+        raise
     commit = merged.get("sha") if isinstance(merged, dict) else None
     if not isinstance(commit, str):
         raise GitHubUnavailable(f"merge засева {number}: нет sha")
@@ -1654,11 +1657,31 @@ def seed(st: Stand, name: str, ws: str, evidence: str) -> dict[str, object]:
 
 
 def squash_problem(repo: object) -> None:
-    """H7: the stand allows squash merges (`allow_squash_merge` of `GET
-    /repos/{full_name}`), else infrastructure naming the owner's step."""
+    """H7 preflight: an explicit `allow_squash_merge: false` of `GET
+    /repos/{full_name}` is infrastructure naming the owner's step. GitHub
+    may leave the merge settings out for a token without admin rights (the
+    machine user's): an absent field is unknown, and the seed's own squash
+    `PUT` decides (`squash_refused`)."""
     allowed = repo.get("allow_squash_merge") if isinstance(repo, dict) else None
-    if allowed is not True:
-        infra(f"H7: squash-мерж на стенде не разрешён (allow_squash_merge={allowed!r})")
+    if allowed is False:
+        infra("H7: squash-мерж на стенде не разрешён (allow_squash_merge=false)")
+
+
+def squash_refused(exc: GitHubRefused) -> bool:
+    """Whether the seed's squash `PUT` was refused for its merge method
+    (405 with a message about squash or the merge method): H7 not done."""
+    reason = exc.reason.lower()
+    return exc.status == 405 and ("squash" in reason or "merge method" in reason)
+
+
+def require_mergeable(st: Stand, number: int, what: str) -> None:
+    """Before a merge (the seed's, the publisher's in rows 11 and 12): the
+    PR's `mergeable` is `True` within `MERGEABLE_WAIT`, else infrastructure
+    (a mergeability GitHub has not computed is the stand's timing, not the
+    mechanism)."""
+    mergeable = wait_mergeable(st, number)
+    if mergeable is not True:
+        infra(f"{what} {number}: mergeable={mergeable!r}; мержа не было")
 
 
 def open_stop_pr(st: Stand, name: str, ws: str) -> dict[str, object]:
@@ -1857,6 +1880,7 @@ def row11_head_change(st: Stand) -> dict[str, object]:
     pr, head = st.prs["stop"], st.heads["stop"]
     ws = stand_ws(st.args.tag)
     branch = tag_branches(st.args.tag)["stop"]
+    require_mergeable(st, pr, "stop-PR")
     data = merge_payload(st, pr, head, "row11")
     box: dict[str, subprocess.CompletedProcess[bytes]] = {}
 
@@ -1927,6 +1951,7 @@ def row12_dropped_answer(st: Stand) -> dict[str, object]:
     seed(st, "seed-b", ws, "row12-seed.json")
     stop = open_stop_pr(st, "stop-b", ws)
     pr, head = st.prs["stop-b"], st.heads["stop-b"]
+    require_mergeable(st, pr, "stop-PR")
     data = merge_payload(st, pr, head, "row12")
     gate = gate_proxy.drop_response("PUT", merge_put_re(st.full_name, pr))
     with serve_gate_proxy(gate=gate) as proxy, api_base(st, proxy.url):
