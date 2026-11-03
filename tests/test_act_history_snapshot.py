@@ -23,7 +23,7 @@ import pytest
 
 from governance.act_envelope import DeliveredRequest
 from governance.act_forge_http import TokenTransport
-from governance.act_history import load_history
+from governance.act_history import load_history, pr_for_merge
 from governance.act_history_snapshot import (
     Scope,
     SnapshotHistory,
@@ -172,9 +172,11 @@ class GitServer:
 
 
 class _Answer(io.BytesIO):
-    def __init__(self, body: object, status: int = 200) -> None:
+    def __init__(self, body: object, status: int = 200, link: str = "") -> None:
         super().__init__(json.dumps(body).encode())
         self.status, self.headers = status, Message()
+        if link:
+            self.headers["Link"] = link
 
     def __enter__(self) -> _Answer:
         return self
@@ -186,15 +188,15 @@ class _Answer(io.BytesIO):
 class Forge:
     """Replay REST: путь → (статус, тело); каждый запрос — с Bearer токена."""
 
-    def __init__(self, answers: dict[str, tuple[int, object]]) -> None:
+    def __init__(self, answers: dict[str, tuple]) -> None:
         self.answers, self.paths = answers, []
 
     def __call__(self, req: Any, timeout: float = 0) -> _Answer:
         assert req.get_header("Authorization") == f"Bearer {TOKEN}"
         path = req.full_url.removeprefix(API)
         self.paths.append(path)
-        status, body = self.answers[path]
-        return _Answer(body, status)
+        status, body, *link = self.answers[path]
+        return _Answer(body, status, *link)
 
 
 def _merged(n: int, merge_commit: str) -> dict:
@@ -395,6 +397,8 @@ def test_git_argv_and_config_have_no_token(
             "GIT_ALLOW_PROTOCOL",
             *git_auth_env(TOKEN),
         }
+        # заголовок авторизации — только у fetch; log/show/rev-parse/config без него
+        assert ("GIT_CONFIG_VALUE_0" in kw["env"]) == ("fetch" in args)
         return real(args, **kw)
 
     monkeypatch.setattr(subprocess, "Popen", spy)
@@ -598,3 +602,32 @@ def test_rest_refuses_bad_slug(tmp_path: Path) -> None:
         _rest_snap(tmp_path, forge).pr_facts("../x", 7)
     assert failed.type is ValueError
     assert forge.paths == []
+
+
+@needs_steward
+def test_prs_containing_commit_reads_every_page(tmp_path: Path) -> None:
+    """Список PR не усекается первой страницей: смёрженный PR со второй страницы
+    виден, и «ровно один» `pr_for_merge` судит полный список."""
+    sha = "a" * 40
+    first = f"repos/{SLUG}/commits/{sha}/pulls"
+    nxt = f'<{API}{first}?page=2>; rel="next"'
+    forge = Forge(
+        {
+            first: (200, [{"number": 3, "state": "open", "merged_at": None}], nxt),
+            f"{first}?page=2": (200, [_merged(7, sha)]),
+        }
+    )
+    snap = _rest_snap(tmp_path, forge)
+    assert [p["number"] for p in snap.prs_containing_commit(SLUG, sha)] == [3, 7]
+    assert forge.paths == [first, f"{first}?page=2"]
+    assert pr_for_merge(snap, SLUG, sha) == 7
+
+
+def test_fetch_branch_refuses_bad_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_spawn(monkeypatch)
+    transport = TokenTransport(TOKEN, api_base=API, opener=Forge({}))
+    snap = SnapshotHistory(tmp_path, transport, TOKEN, git_base="http://x")
+    assert snap.fetch_branch("", "refs/heads/a..b") is False
+    assert snap.fetch_branch("", "--upload-pack=x") is False

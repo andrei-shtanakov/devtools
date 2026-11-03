@@ -430,6 +430,15 @@ JUDGMENT = {
             '"are not full ref names"',
         ),
     ),
+    "act_history_snapshot.SnapshotHistory.fetch_branch": (
+        r(
+            "full_ref",
+            "act_history_snapshot.SnapshotHistory.fetch_branch",
+            "if not _full_ref(ref)",
+            f"{HS}::test_fetch_branch_refuses_bad_ref",
+            "is False",
+        ),
+    ),
     "act_history_snapshot.SnapshotHistory.prs_containing_commit": (
         r(
             "shape",
@@ -3694,7 +3703,7 @@ NOT_JUDGMENT = {
     "act_history_snapshot.SnapshotHistory.show_file": _IO,
     "act_history_snapshot.SnapshotHistory.show_file_bytes": _IO,
     "act_history_snapshot.SnapshotHistory.rev_parse": _IO,
-    "act_history_snapshot.SnapshotHistory.fetch_branch": _IO,
+    "act_history_snapshot._full_ref": _HELPER,
     "act_history_snapshot.SnapshotHistory.pr_facts": "нормализация REST → `headRefOid`; судит `act_history._pr_head`",
     **{
         f"act_check.{n}": _HELPER

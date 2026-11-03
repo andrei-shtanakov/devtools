@@ -11,6 +11,11 @@ file; Bearer stays REST-only. git runs with an explicit minimal environment (no
 system/global config, no prompts, http(s) only, no redirects) and every call honours
 an absolute `time.monotonic()` deadline: on expiry the whole git process group is
 killed and `TimeoutError` is raised.
+
+Proxy and CA variables (`HTTPS_PROXY`, `SSL_CERT_FILE`, `GIT_SSL_CAINFO`, …) are
+deliberately not passed to git, matching `TokenTransport`, which ignores proxies:
+a role host behind a proxy gets a git/transport failure, not a proxied fetch
+(operator docs, Tasks 4/7).
 """
 
 from __future__ import annotations
@@ -139,7 +144,7 @@ def open_snapshot(
     """
     if not _FULL_NAME.fullmatch(full_name):
         raise ValueError(f"snapshot: full_name {full_name!r} is not owner/repo")
-    bad = [r for r in refs if not _REF.fullmatch(r) or ".." in r]
+    bad = [r for r in refs if not _full_ref(r)]
     if bad or not refs:
         raise ValueError(f"snapshot: refs {list(refs)!r} are not full ref names")
     git_dir = home / "repo.git"
@@ -160,6 +165,10 @@ def open_snapshot(
         shutil.rmtree(git_dir, ignore_errors=True)
         raise
     return git_dir
+
+
+def _full_ref(ref: str) -> bool:
+    return _REF.fullmatch(ref) is not None and ".." not in ref
 
 
 def _url(git_base: str, full_name: str) -> str:
@@ -225,6 +234,8 @@ class SnapshotHistory:
         """Fetch one more ref (squash head `refs/pull/N/head`) into the snapshot
         from the product named at `open_snapshot`."""
         ref = branch if branch.startswith("refs/") else f"refs/heads/{branch}"
+        if not _full_ref(ref):
+            return False
         name = self._run("config", "--get", NAME_KEY).stdout.strip()
         url = _url(self._git_base, name)
         done = self._run(*_FETCH, url, f"+{ref}:{ref}", token=self._token)
