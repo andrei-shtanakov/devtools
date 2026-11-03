@@ -54,6 +54,14 @@ BYPASS: dict[str, tuple[str, str]] = {
         "return cls(None, error=text)",
         "return cls(200, body={}, link=None)",
     ),
+    "act_forge_http.TokenTransport._refusal:read_only_method": (
+        'return f"read-only transport: {method} {path}"',
+        "return None",
+    ),
+    "act_forge_http.TokenTransport.get_json:page_cap": (
+        'raise OSError(f"forge: more than {MAX_PAGES} pages")',
+        "return 200, items",
+    ),
     "act_anon._locate:commit_unreadable": (
         'return Unavailable(f"{where}: коммит не прочитан: HTTP {resp.status}")',
         'sha = "1" * 40',

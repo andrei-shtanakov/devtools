@@ -188,3 +188,60 @@ def test_paging_edges() -> None:
         t, _ = _t(_Answer(b"[1]", link=nxt), page)
         with pytest.raises(OSError):
             t.get_json("x")
+
+
+def test_init_refuses_empty_token() -> None:
+    with pytest.raises(ValueError, match="forge: empty token"):
+        TokenTransport("", api_base=BASE)
+
+
+def test_send_refusal_is_status_none() -> None:
+    t, op = _t()
+    resp = t.send(Request("DELETE", "repos/o/r"))
+    assert resp.status is None
+    assert resp.error == "forge: read-only transport: DELETE repos/o/r"
+    assert op.reqs == []
+
+
+def test_refusal_unsafe_path() -> None:
+    t, _ = _t()
+    resp = t.send(Request("GET", "/abs"))
+    assert resp.error == "forge: not a relative API path: '/abs'"
+
+
+def test_refusal_graphql_not_query() -> None:
+    t, _ = _t()
+    resp = t.send(Request("POST", "graphql", op="M", query="mutation M{x}"))
+    assert resp.error == "forge: GraphQL text is not a query"
+
+
+def test_get_json_delivery_failure() -> None:
+    t, _ = _t(OSError("down"))
+    with pytest.raises(OSError, match="forge: OSError: down"):
+        t.get_json("x")
+
+
+def test_get_json_mid_walk_status() -> None:
+    t, _ = _t(_Answer(b"[1]", link=f'<{BASE}x?p=2>; rel="next"'), _Answer(b"{}", 500))
+    with pytest.raises(OSError, match="forge: HTTP 500 mid-walk"):
+        t.get_json("x")
+
+
+def test_get_json_mid_walk_shape() -> None:
+    t, _ = _t(_Answer(b"[1]", link=f'<{BASE}x?p=2>; rel="next"'), _Answer(b"{}"))
+    with pytest.raises(OSError, match="forge: page shape changed mid-walk"):
+        t.get_json("x")
+
+
+def test_get_json_page_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("governance.act_forge_http.MAX_PAGES", 2)
+    nxt = f'<{BASE}x?p=2>; rel="next"'
+    t, _ = _t(_Answer(b"[1]", link=nxt), _Answer(b"[2]", link=nxt))
+    with pytest.raises(OSError, match="forge: more than 2 pages"):
+        t.get_json("x")
+
+
+def test_get_json_next_outside_base() -> None:
+    t, _ = _t(_Answer(b"[1]", link='<https://other/x>; rel="next"'))
+    with pytest.raises(OSError, match="forge: Link next outside api_base"):
+        t.get_json("x")

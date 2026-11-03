@@ -43,6 +43,7 @@ MODULES = (
     "act_facts",
     "act_anon",
     "act_git_rows",
+    "act_forge_http",
     "act_check",
     "act_trust",
     "act_journal",
@@ -219,6 +220,7 @@ X, K, F = (
     "tests/test_act_app_token.py",
     "tests/test_act_facts.py",
 )
+FH = "tests/test_act_forge_http.py"
 RP, OB = "tests/test_act_repropose.py", "tests/test_act_ops_body.py"
 OF, WR = "tests/test_act_ops_failures.py", "tests/test_act_wave_runner.py"
 ENVELOPE_FIELDS = (
@@ -298,6 +300,87 @@ JUDGMENT = {
             "except Exception as exc",
             f"{A}::test_transport_failure_is_status_none",
             '"TimeoutError"',
+        ),
+    ),
+    # --- act_forge_http
+    "act_forge_http.TokenTransport.__init__": (
+        r(
+            "empty_token",
+            "act_forge_http.TokenTransport.__init__",
+            "if not token",
+            f"{FH}::test_init_refuses_empty_token",
+            '"forge: empty token"',
+        ),
+    ),
+    "act_forge_http.TokenTransport.send": (
+        r(
+            "refusal_status_none",
+            "act_forge_http.TokenTransport.send",
+            "refusal is not None",
+            f"{FH}::test_send_refusal_is_status_none",
+            '"forge: read-only transport: DELETE repos/o/r"',
+        ),
+    ),
+    "act_forge_http.TokenTransport._refusal": (
+        r(
+            "relative_path",
+            "act_forge_http.TokenTransport._refusal",
+            "_UNSAFE_PATH.search(path)",
+            f"{FH}::test_refusal_unsafe_path",
+            "\"forge: not a relative API path: '/abs'\"",
+        ),
+        r(
+            "graphql_query_only",
+            "act_forge_http.TokenTransport._refusal",
+            'return "GraphQL text is not a query"',
+            f"{FH}::test_refusal_graphql_not_query",
+            '"forge: GraphQL text is not a query"',
+        ),
+        r(
+            "read_only_method",
+            "act_forge_http.TokenTransport._refusal",
+            "read-only transport",
+            f"{FH}::test_send_refusal_is_status_none",
+            '"forge: read-only transport: DELETE repos/o/r"',
+        ),
+    ),
+    "act_forge_http.TokenTransport.get_json": (
+        r(
+            "delivery_failure",
+            "act_forge_http.TokenTransport.get_json",
+            "resp.status is None",
+            f"{FH}::test_get_json_delivery_failure",
+            '"forge: OSError: down"',
+        ),
+        r(
+            "mid_walk_status",
+            "act_forge_http.TokenTransport.get_json",
+            'raise OSError(f"forge: HTTP {resp.status} mid-walk")',
+            f"{FH}::test_get_json_mid_walk_status",
+            '"forge: HTTP 500 mid-walk"',
+        ),
+        r(
+            "mid_walk_shape",
+            "act_forge_http.TokenTransport.get_json",
+            'raise OSError("forge: page shape changed mid-walk")',
+            f"{FH}::test_get_json_mid_walk_shape",
+            '"forge: page shape changed mid-walk"',
+        ),
+        r(
+            "page_cap",
+            "act_forge_http.TokenTransport.get_json",
+            'raise OSError(f"forge: more than {MAX_PAGES} pages")',
+            f"{FH}::test_get_json_page_cap",
+            '"forge: more than 2 pages"',
+        ),
+    ),
+    "act_forge_http.TokenTransport._next_path": (
+        r(
+            "outside_api_base",
+            "act_forge_http.TokenTransport._next_path",
+            "url.startswith(self._base)",
+            f"{FH}::test_get_json_next_outside_base",
+            '"forge: Link next outside api_base"',
         ),
     ),
     "act_anon.contents_bytes": (
@@ -3512,6 +3595,8 @@ NOT_JUDGMENT = {
     "act_anon._default_open": _IO,
     "act_anon.AnonTransport.__init__": _BUILD,
     "act_anon.AnonTransport._fetch": _IO,
+    "act_forge_http.TokenTransport.__repr__": _BUILD,
+    "act_forge_http.TokenTransport._fetch": _IO,
     **{
         f"act_check.{n}": _HELPER
         for n in (
