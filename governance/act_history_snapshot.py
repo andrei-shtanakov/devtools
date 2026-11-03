@@ -2,8 +2,10 @@
 
 The precheck program runs as an unprivileged OS role. It reads delivery history from
 a temporary bare repository fetched over HTTP(S) and forge facts from GitHub REST
-through `TokenTransport`. `SnapshotHistory` implements exactly the `Ops` methods
-`act_history` calls; any other attribute is `AttributeError`.
+through `TokenTransport`. `SnapshotHistory` implements the `Ops` methods
+`act_history` calls (`act_history.HistoryOps`) plus `show_file_bytes`, which the
+precheck uses for the exact bytes of a stop record (plan decision 10); any other
+attribute is `AttributeError`.
 
 git auth: the header travels only in the git process environment (`GIT_CONFIG_*`,
 `Authorization: Basic base64("x-access-token:<token>")`) — never in argv or a config
@@ -11,8 +13,12 @@ file; Bearer stays REST-only. git runs with an explicit minimal environment (no
 system/global config, no prompts, http(s) only, no redirects) and every call honours
 an absolute `time.monotonic()` deadline: on expiry the whole git process group is
 killed and `DeadlineExceeded` is raised. REST calls honour the same deadline: each
-page's timeout is capped by the time left, no page starts after it, and an answer
-completed past it is discarded. `DeadlineExceeded` is not in
+page's timeout is capped by the time left, no page starts after it, its body is
+read in chunks with the deadline checked before each chunk (a dripping body does
+not outlive it), and an answer completed past it is discarded. Residual: the
+response header phase is bounded only by the socket timeout per read (at most
+the time left at the page start); a header drip is caught by rung 2 (the sudo
+`command_timeout` of the precheck). `DeadlineExceeded` is not in
 `act_time.OPS_FAILURES`, so `act_history` never turns it into `Unavailable`: it
 propagates out of `load_history` to the caller (`unset: deadline`).
 

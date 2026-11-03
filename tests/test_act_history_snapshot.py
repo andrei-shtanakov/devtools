@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 
+from governance import act_anon
 from governance.act_envelope import DeliveredRequest
 from governance.act_forge_http import TokenTransport
 from governance.act_history import load_history, pr_for_merge
@@ -799,12 +800,133 @@ def test_rest_second_page_after_deadline_raises(tmp_path: Path) -> None:
 
 @needs_steward
 def test_rest_answer_completed_after_deadline_raises(tmp_path: Path) -> None:
-    """Страница пришла успешно, но уже за сроком: ответ отбрасывается."""
+    """Последнее чтение тела (EOF) вернулось уже за сроком: ответ отбрасывается."""
     clock = Clock()
     clock.now = 95.0
-    answers = {f"repos/{SLUG}/pulls/7": (200, {"head": {"sha": "c" * 40}})}
-    forge = PagedForge(answers, clock, 10.0)
+
+    class LateEof(_Answer):
+        def read1(self, n: int = -1) -> bytes:
+            data = super().read1(n)
+            if not data:
+                clock.now = 105.0
+            return data
+
+    class LateForge(Forge):
+        def __call__(self, req: Any, timeout: float = 0) -> _Answer:
+            self.paths.append(req.full_url.removeprefix(API))
+            return LateEof({"head": {"sha": "c" * 40}})
+
+    forge = LateForge({})
     snap = _paged_snap(tmp_path, forge, clock)
     with pytest.raises(DeadlineExceeded, match="forge: deadline passed"):
         snap.pr_facts(SLUG, 7)
     assert forge.paths == [f"repos/{SLUG}/pulls/7"]
+
+
+# --- тело страницы порциями: «подтекающий» ответ не переживает срок ---------------
+
+
+class _Drip:
+    """Поток ответа: по байту на чтение; журнал размеров запрошенных чтений."""
+
+    status, headers = 200, Message()
+
+    def __init__(self, size: int = 100) -> None:
+        self.left, self.reads = size, []
+
+    def read1(self, n: int) -> bytes:
+        self.reads.append(n)
+        if not self.left:
+            return b""
+        self.left -= 1
+        return b" "
+
+    def read(self, n: int) -> bytes:
+        self.reads.append(n)
+        return b"{}"
+
+    def __enter__(self) -> _Drip:
+        return self
+
+    def __exit__(self, *a: object) -> None:
+        pass
+
+
+class _Resp:
+    def __init__(self, status: int | None, body: object = None, **kw: object):
+        self.status, self.body, self.error = status, body, kw.get("error")
+
+
+def test_fetch_response_checks_left_before_each_chunk() -> None:
+    drip, calls = _Drip(), []
+
+    def left() -> float:
+        calls.append(1)
+        if len(calls) > 3:
+            raise DeadlineExceeded("forge: deadline passed")
+        return 1.0
+
+    got = act_anon.fetch_response(
+        lambda req, timeout: drip, None, 1.0, _Resp, "forge", None, left
+    )
+    assert got.status is None
+    assert got.error == "forge: DeadlineExceeded: forge: deadline passed"
+    assert len(drip.reads) == 3  # четвёртая порция не читалась
+
+
+def test_fetch_response_without_left_reads_once() -> None:
+    drip = _Drip()
+    got = act_anon.fetch_response(
+        lambda req, timeout: drip, None, 1.0, _Resp, "forge", None
+    )
+    assert (got.status, got.body) == (200, {})
+    assert drip.reads == [act_anon.MAX_BODY + 1]
+
+
+class _DripServer:
+    """127.0.0.1: заголовки сразу, тело — по байту каждые 0.3 с (дольше срока)."""
+
+    def __init__(self) -> None:
+        stop = self.stop = threading.Event()
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 — имя метода http.server
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", "1000")
+                self.end_headers()
+                try:
+                    for _ in range(1000):
+                        if stop.wait(0.3):
+                            return
+                        self.wfile.write(b" ")
+                        self.wfile.flush()
+                except OSError:
+                    return
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}/"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+
+@needs_steward
+def test_dripping_page_raises_deadline(tmp_path: Path) -> None:
+    """Каждое чтение сокета укладывается в таймаут, но страница целиком — нет:
+    `DeadlineExceeded` по сроку, а не через 300 с подтекания."""
+    srv = _DripServer()
+    try:
+        transport = TokenTransport(TOKEN, api_base=srv.base, timeout=60.0)
+        snap = SnapshotHistory(
+            tmp_path, transport, TOKEN, git_base="http://x", deadline=_soon(1.0)
+        )
+        started = time.monotonic()
+        with pytest.raises(DeadlineExceeded, match="forge: deadline passed"):
+            snap.pr_facts(SLUG, 7)
+        assert time.monotonic() - started < 5
+    finally:
+        srv.stop.set()
+        srv.httpd.shutdown()
+        srv.httpd.server_close()

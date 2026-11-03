@@ -3696,6 +3696,7 @@ NOT_JUDGMENT = {
     },
     "act_anon._NoRedirect.redirect_request": "транспортная политика (3xx не исполняется); отказа об объекте нет",
     "act_anon._default_open": _IO,
+    "act_anon._read_bounded": "чтение тела порциями; срок судит `left()` вызывающего",
     "act_anon.AnonTransport.__init__": _BUILD,
     "act_anon.AnonTransport._fetch": _IO,
     "act_forge_http.TokenTransport.__repr__": _BUILD,

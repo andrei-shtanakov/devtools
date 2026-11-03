@@ -44,12 +44,19 @@ class TokenTransport:
     def __repr__(self) -> str:
         return f"TokenTransport(api_base={self._base!r})"
 
-    def send(self, request: Any, *, timeout: float | None = None) -> Any:
+    def send(
+        self,
+        request: Any,
+        *,
+        timeout: float | None = None,
+        left: Callable[[], float] | None = None,
+    ) -> Any:
         """Один запрос: `GET` относительного пути или GraphQL-query.
 
         Любой иной — `Response(None, error=…)` до сети. Ответ любого HTTP-статуса —
         `Response(status, body, link)`; сбой доставки — `status=None`. `timeout` —
-        таймаут этого запроса (по умолчанию — таймаут транспорта).
+        таймаут этого запроса (по умолчанию — таймаут транспорта); `left` — срок
+        вызывающего на чтение тела (`act_anon.fetch_response`).
         """
         seconds = self._timeout if timeout is None else timeout
         from steward.approvalfacts.v3 import Response
@@ -58,14 +65,14 @@ class TokenTransport:
         if refusal is not None:
             return Response(None, error=f"forge: {refusal}")
         if request.method == "GET":
-            return self._fetch(self._base + request.path, None, Response, seconds)
+            return self._fetch(self._base + request.path, None, Response, seconds, left)
         payload = {
             "query": request.query,
             "variables": dict(request.variables or {}),
             "operationName": request.op,
         }
         return self._fetch(
-            self._base + "graphql", json.dumps(payload), Response, seconds
+            self._base + "graphql", json.dumps(payload), Response, seconds, left
         )
 
     def get_json(
@@ -82,7 +89,10 @@ class TokenTransport:
         `page_timeout` (срок вызывающего) зовётся перед КАЖДОЙ страницей: таймаут
         страницы — `min(таймаут транспорта, page_timeout())`; исключение из него
         (вызывающий так сообщает «время вышло») выходит из `get_json` как есть, до
-        запроса страницы.
+        запроса страницы. Он же зовётся перед каждой порцией тела страницы:
+        исключение там — сбой доставки (`OSError`). Фаза заголовков ответа
+        ограничена только таймаутом сокета на каждое чтение (не больше срока на
+        начало страницы).
         """
         from steward.approvalfacts.v3 import Request
 
@@ -91,7 +101,9 @@ class TokenTransport:
         for page in range(MAX_PAGES):
             cap = self._timeout if page_timeout is None else page_timeout()
             resp = self.send(
-                Request("GET", url or path), timeout=min(self._timeout, cap)
+                Request("GET", url or path),
+                timeout=min(self._timeout, cap),
+                left=page_timeout,
             )
             if resp.status is None:
                 raise OSError(resp.error or "forge: transport failure")
@@ -134,7 +146,14 @@ class TokenTransport:
             return "GraphQL text is not a query"
         return f"read-only transport: {method} {path}"
 
-    def _fetch(self, url: str, data: str | None, cls: Any, timeout: float) -> Any:
+    def _fetch(
+        self,
+        url: str,
+        data: str | None,
+        cls: Any,
+        timeout: float,
+        left: Callable[[], float] | None = None,
+    ) -> Any:
         headers = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
@@ -147,4 +166,4 @@ class TokenTransport:
         req = urllib.request.Request(
             url, data=body, method="GET" if body is None else "POST", headers=headers
         )
-        return fetch_response(self._open, req, timeout, cls, "forge", self._token)
+        return fetch_response(self._open, req, timeout, cls, "forge", self._token, left)

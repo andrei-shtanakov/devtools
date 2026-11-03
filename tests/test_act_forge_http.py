@@ -253,27 +253,36 @@ def test_get_json_next_outside_base() -> None:
 
 
 def test_get_json_page_timeout_caps_each_page() -> None:
-    caps = iter([5.0, 99.0])
     nxt = f'<{BASE}x?p=2>; rel="next"'
     t, op = _t(_Answer(b"[1]", link=nxt), _Answer(b"[2]"))
-    assert t.get_json("x", page_timeout=lambda: next(caps)) == (200, [1, 2])
+    cap = lambda: 99.0 if op.reqs else 5.0  # noqa: E731
+    assert t.get_json("x", page_timeout=cap) == (200, [1, 2])
     assert op.timeouts == [5.0, 60.0]  # min(транспорт 60, срок) на каждой странице
 
 
+class _Stop(Exception):
+    pass
+
+
+def _stop() -> float:
+    raise _Stop("time")
+
+
 def test_get_json_page_timeout_signal_stops_before_page() -> None:
-    class Stop(Exception):
-        pass
+    t, op = _t(_Answer(b"[1]"))
+    with pytest.raises(_Stop):
+        t.get_json("x", page_timeout=_stop)
+    assert op.reqs == []  # страница не запрошена
 
-    def page_timeout() -> float:
-        if op.reqs:
-            raise Stop
-        return 5.0
 
+def test_get_json_page_timeout_signal_in_body_is_delivery_failure() -> None:
+    """Срок перепроверяется перед каждой порцией тела: сигнал посреди страницы —
+    сбой доставки, следующая страница не запрашивается."""
     nxt = f'<{BASE}x?p=2>; rel="next"'
     t, op = _t(_Answer(b"[1]", link=nxt), _Answer(b"[2]"))
-    with pytest.raises(Stop):
-        t.get_json("x", page_timeout=page_timeout)
-    assert len(op.reqs) == 1  # вторая страница не запрошена
+    with pytest.raises(OSError, match="forge: _Stop: time"):
+        t.get_json("x", page_timeout=lambda: _stop() if op.reqs else 5.0)
+    assert len(op.reqs) == 1
 
 
 def test_get_json_without_page_timeout_uses_transport_timeout() -> None:
