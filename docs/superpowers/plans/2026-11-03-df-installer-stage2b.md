@@ -155,7 +155,11 @@ sdist), всё сверено с `uv.lock` и покрыто `admin_digest`. И�
      `O_EXCL` + `fsync` перед финальным чтением. Он переживает процесс и снимается только
      вместе с финальным результатом (`done` или проверенный `refused`) этого запроса.
      Запрос с другим ключом при чужом владении получает `refused: pr_busy` до любой своей
-     фазы. Нового состояния он не создаёт, поэтому отказ правдив. **Завершение владения
+     фазы. Нового состояния он не создаёт, поэтому отказ правдив. **Поздний проигрыш**
+     (r5 N1): два запроса прошли раннюю проверку одновременно, оба дошли до `attested`, и
+     владение взял другой. Проигравший получает `refused: pr_busy` с
+     `verified_not_done=True`: `armed` у него нет, `PUT` не отправлялся. Результат
+     сохраняется, чужое владение не трогается. **Завершение владения
      входит в crash-протокол** (r3 N2): (а) replay окончательного результата `merge` в
      кадре `main` идемпотентно снимает владение, если файл владения называет ключ этого
      запроса; (б) приобретение при существующем файле читает его `request_key`, и если у
@@ -624,7 +628,9 @@ sdist), всё сверено с `uv.lock` и покрыто `admin_digest`. И�
   `test_single_attempt_409_is_verified_refusal`; `test_clock_jump_does_not_change_outcome`;
   `test_crash_after_result_before_release_replay_releases` (r3 N2: повтор A снимает
   владение, B проходит); `test_stale_owner_with_final_result_taken_over`;
-  `test_owner_with_unknown_never_released`; `test_other_tool_same_app_is_outside_guarantee`
+  `test_owner_with_unknown_never_released`; `test_late_owner_loss_after_attested_is_verified_busy`
+  (барьер после ранней проверки, оба дошли до `attested`; у проигравшего нет `armed` и
+  `PUT`, его replay даёт тот же отказ, владение победителя цело, `PUT` один); `test_other_tool_same_app_is_outside_guarantee`
   (документирующий тест договора r3 N3: засчитывается, evidence помечает предпосылку);
   `test_rechecked_twice_evidence_shows_decisive_and_initial` (r3 N5); `test_put_409_head_changed`; `test_put_405_open_not_mergeable`;
   `test_lost_put_reconciles_done`; `test_merged_by_human_is_unknown`;
@@ -662,7 +668,7 @@ sdist), всё сверено с `uv.lock` и покрыто `admin_digest`. И�
 | Строка | Механизм | Положительный контроль |
 |---|---|---|
 | `df-precheck` читает `/etc/df/secrets/app-*.pem`, `/var/lib/df/publisher/*`, `/var/lib/df/perimeter/*`, `~df-exec/.config/df/github-token` | отказ ОС | root читает те же файлы |
-| память издателя: процесс `df-publisher` с sentinel в памяти; `df-precheck` читает `/proc/<pid>/mem` (Linux) / `task_for_pid` через `lldb -p` или `vmmap` (macOS) | отказ ОС | root видит sentinel тем же наблюдателем |
+| память издателя: процесс `df-publisher` с sentinel в памяти по известному адресу и длине; `df-precheck` читает их через `/proc/<pid>/mem` (Linux) или `lldb -p <pid> --batch -o "memory read …"` (`task_for_pid`, macOS) | отказ ОС | root тем же наблюдателем читает **байты** sentinel и сравнивает их; если root-контроль в среде не работает — строка `not_verified`, не PASS (r5 N2) |
 | `df-exec`, `df-review`, оператор вызывают `df-precheck`; `df-publisher` — с аргументом | отказ sudoers | `df-publisher` без аргументов — проходит |
 | унаследованное: издатель открывает sentinel-fd без `CLOEXEC` и держит sentinel-переменную; проверяющий заблокирован на чтении stdin (запрос ещё не записан) | root смотрит `/proc/<pid>/fd` и `environ` (Linux), `lsof -p` и `ps eww` (macOS): sentinel-fd и sentinel-переменной нет, UID = `df-precheck` | тот же наблюдатель видит sentinel у издателя |
 | зависание git: `git_base` — порт, который принимает соединение и молчит | рубеж 1: `unset: deadline` за ≤ 155 с, git-потомков нет, снимка нет, lock свободен | — |
