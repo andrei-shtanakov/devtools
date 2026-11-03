@@ -633,6 +633,9 @@ def test_lock_wait_bounded_by_deadline(
     assert not (home / "precheck-snapshots" / NONCE).exists()
 
 
+@pytest.mark.skipif(
+    os.geteuid() == 0, reason="root ignores directory permissions: nothing fails"
+)
 def test_unremovable_snapshot_named_on_stderr(tmp_path: Path, capsys: Any) -> None:
     home = tmp_path / "home"
     locked = home / "precheck-snapshots" / ("d" * 32) / "sub"
