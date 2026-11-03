@@ -82,7 +82,7 @@ A = entry("rel-a")
 
 
 class World:
-    """A fake layout with the three role accounts and a registered run."""
+    """A fake layout with the four role accounts and a registered run."""
 
     def __init__(self, fake: FakeLayout) -> None:
         self.fake = fake

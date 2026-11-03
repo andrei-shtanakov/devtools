@@ -20,7 +20,8 @@ roles made by `roles.ensure_roles` in a `<R>` world, then
   rules are the image's: Linux `(ALL) NOPASSWD: ALL`; macOS
   `(ALL) NOPASSWD: ALL` and `(root) NOPASSWD: ALL`).
 
-Exit code 0 and empty stderr in all eight (`<name>.rc`, `<name>.err`).
+Exit code 0 and empty stderr in all eight captured in that run (`<name>.rc`,
+`<name>.err`), the 2a `df-publisher` pair included.
 
 The only edits (made by the test itself, `_as_fixture`; checked against the
 raw `<name>.txt` of the same artifact with `diff`): the `<R>` prefix of the

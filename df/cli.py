@@ -104,6 +104,10 @@ _NO_PRECHECK = (
     "precheck serve: релиз без предпроверки: в административном дереве "
     f"нет {admin_tree.PRECHECK_FILE}"
 )
+_NO_SITE = (
+    "precheck serve: в административном дереве нет каталога site/ "
+    "при governance/act_precheck.py: переустановите релиз"
+)
 #: Seconds root waits for `publisher perimeter-restore` (the barrier wait,
 #: a copy of up to `perimeter.MAX_COPY` and its integrity check).
 RESTORE_TIMEOUT = 600.0
@@ -505,7 +509,8 @@ def _precheck_serve(lay: Layout, read: ReadResult) -> int:
     """`precheck serve` (spec 4.1 rev 10, plan decisions 3-5): only the
     `df-precheck` of `accounts.toml` (else exit 2, nothing else done), only
     on a release whose admin tree has the program (a legacy one is refused
-    by name). Then the environment becomes exactly `PRECHECK_ENV` plus the
+    by name) and its `site/` (a tree with the program but without it, too).
+    Then the environment becomes exactly `PRECHECK_ENV` plus the
     role's HOME, `admin/<id>/site` goes to the END of `sys.path` (after
     `admin/<id>`, which the entry put first, and stdlib), and the program
     of that tree answers the one request on stdin."""
@@ -520,6 +525,8 @@ def _precheck_serve(lay: Layout, read: ReadResult) -> int:
     tree = lay.admin_dir(snap.release_id)
     if not os.path.lexists(tree / admin_tree.PRECHECK_FILE):
         raise Refusal(_NO_PRECHECK)
+    if not os.path.isdir(tree / SITE_DIR):
+        raise Refusal(_NO_SITE)
     home = lay.role_home(roles.PRECHECK_USER)
     os.environ.clear()
     os.environ.update({**PRECHECK_ENV, "HOME": str(home)})

@@ -369,7 +369,7 @@ def environ() -> Iterator[None]:
 
 
 def _precheck_world(
-    tmp_path: Path, uid: int, *, program: bool = True
+    tmp_path: Path, uid: int, *, program: bool = True, site: bool = True
 ) -> tuple[Layout, Stable]:
     """An account `df-precheck` of `uid`, release `r1` current, its admin
     tree with `governance/act_precheck.py` (`program`) or a legacy one."""
@@ -390,7 +390,8 @@ def _precheck_world(
     if program:
         (tree / "governance").mkdir()
         (tree / "governance" / "act_precheck.py").write_text("")
-        (tree / "site").mkdir()
+        if site:
+            (tree / "site").mkdir()
     entry = ReleaseEntry(RELEASE, "d", ADMIN_DIGEST, "3.12.13", "allowed", None)
     releases = dump_releases(ReleasesConfig((entry,))).encode()
     raw = state.RawSnapshot(0, RELEASE, releases, None, None, False)
@@ -531,3 +532,105 @@ def test_precheck_program_from_another_tree_refused(tmp_path: Path) -> None:
     pytest.importorskip("steward", reason="steward — без группы governance")
     with pytest.raises(cli.Refusal, match="act_precheck"):
         cli._load_serve(tmp_path)  # noqa: SLF001
+
+
+def test_precheck_serve_refuses_tree_without_site(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    environ: None,
+) -> None:
+    """The program without `site/`: a named refusal (exit 2), not a
+    traceback inside the program; nothing loaded, nothing changed."""
+    lay, read = _precheck_world(tmp_path, os.getuid(), site=False)
+    monkeypatch.setattr(cli, "_load_serve", _no_serve)
+    os.environ["DF_TEST_SENTINEL"] = "kept"
+    path = list(sys.path)
+    assert _precheck(lay, read) == 2
+    assert "нет каталога site/" in capsys.readouterr().err
+    assert sys.path == path and os.environ["DF_TEST_SENTINEL"] == "kept"
+
+
+@pytest.fixture()
+def fresh_governance(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """No `governance*` module loaded before or after; `sys.path` restored."""
+
+    def drop() -> None:
+        for name in [n for n in sys.modules if n.split(".")[0] == "governance"]:
+            del sys.modules[name]
+
+    saved = {n: m for n, m in sys.modules.items() if n.split(".")[0] == "governance"}
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    drop()
+    try:
+        yield
+    finally:
+        drop()
+        sys.modules.update(saved)
+
+
+def _fake_tree(root: Path) -> Path:
+    """An admin tree whose `governance.act_precheck.serve` answers 7."""
+    tree = root / "admin" / RELEASE
+    (tree / "governance").mkdir(parents=True)
+    (tree / "governance" / "__init__.py").write_text("")
+    (tree / "governance" / "act_precheck.py").write_text(
+        "def serve(*_a, **_k):\n    return 7\n"
+    )
+    return tree
+
+
+def test_load_serve_from_the_checked_tree(
+    tmp_path: Path, fresh_governance: None
+) -> None:
+    """The positive path as the entry sets it up: the tree first on
+    `sys.path` (`launcher_entry._import_df`) -- `serve` of that tree."""
+    tree = _fake_tree(Path(os.path.realpath(tmp_path)))
+    sys.path.insert(0, str(tree))
+    assert cli._load_serve(tree)() == 7  # noqa: SLF001
+
+
+def test_load_serve_refuses_a_module_outside_the_tree(
+    tmp_path: Path, fresh_governance: None
+) -> None:
+    """The module resolves to another tree than the one named: refused --
+    also when the named tree is the same directory by another spelling (not
+    `realpath`ed): the comparison is exact, the entry passes real paths."""
+    real = Path(os.path.realpath(tmp_path))
+    tree = _fake_tree(real / "a")
+    other = _fake_tree(real / "b")
+    sys.path.insert(0, str(other))
+    with pytest.raises(cli.Refusal, match="не из"):
+        cli._load_serve(tree)  # noqa: SLF001
+    for name in [n for n in sys.modules if n.split(".")[0] == "governance"]:
+        del sys.modules[name]
+    sys.path[0] = str(tree)
+    spelled = real / "a" / "admin" / ".." / "admin" / RELEASE
+    with pytest.raises(cli.Refusal, match="не из"):
+        cli._load_serve(spelled)  # noqa: SLF001
+
+
+def test_only_import_module_of_df_outside_df_is_the_precheck() -> None:
+    """`df` never imports `governance` statically; the one dynamic import of
+    a non-`df` module is `precheck serve`'s, of exactly the precheck
+    program. The entry's own `import_module` calls name `df.*` literals."""
+    import ast
+
+    calls: list[tuple[str, str]] = []
+    root = Path(cli.__file__).parent
+    for path in sorted(root.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "import_module"
+            ):
+                rel = path.relative_to(root.parent).as_posix()
+                calls.append((rel, ast.unparse(node.args[0])))
+    assert sorted(calls) == [
+        ("df/cli.py", "PRECHECK_MODULE"),
+        ("df/launcher_entry.py", "'df.cli'"),
+        ("df/launcher_entry.py", "'df.paths'"),
+        ("df/launcher_entry.py", "'df.state'"),
+    ]
+    assert cli.PRECHECK_MODULE == "governance.act_precheck"

@@ -183,9 +183,15 @@ def test_check_report(w: World, monkeypatch: pytest.MonkeyPatch) -> None:
         str(w.lay.secrets_dir),
         str(w.lay.publisher_dir),
         str(w.lay.role_home("df-review")),
+        str(w.lay.role_home("df-precheck")),
     }
     # nothing of the sandbox exists here: opening each fails with ENOENT
-    for path in (w.lay.secrets_dir, w.lay.publisher_dir, w.lay.role_home("df-exec")):
+    for path in (
+        w.lay.secrets_dir,
+        w.lay.publisher_dir,
+        w.lay.role_home("df-exec"),
+        w.lay.role_home("df-precheck"),
+    ):
         assert first["denied"][str(path)] == errno.ENOENT
 
 

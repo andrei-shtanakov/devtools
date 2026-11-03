@@ -202,7 +202,7 @@ def test_libexec_and_sudoers_are_installed(setup: Setup) -> None:
     assert setup.calls.installed == [sudoers.render(setup.lay, OPERATOR)]
 
 
-def test_verify_asks_five_names(setup: Setup) -> None:
+def test_verify_asks_the_roles_builder_and_operator(setup: Setup) -> None:
     setup.run()
     assert sorted(setup.calls.policy) == sorted(
         [*ROLE_USERS, plat.BUILD_USER, OPERATOR]
