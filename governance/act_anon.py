@@ -60,10 +60,38 @@ def _default_open() -> Callable[..., Any]:
     return opener.open
 
 
-def _response(cls: Any, status: int, stream: Any, link: str | None) -> Any:
-    raw = stream.read(MAX_BODY + 1)
+#: Порция тела при чтении со сроком вызывающего (`_read_bounded`).
+_CHUNK = 64 << 10
+
+
+def _read_bounded(stream: Any, left: Callable[[], float]) -> bytes:
+    """Тело порциями (`read1` — не больше одного чтения сокета): `left()` зовётся
+    перед каждой порцией и сам бросает, когда срок вышел; так «подтекающий» ответ
+    не продлевает обмен за срок. Читает не больше `MAX_BODY + 1` байт."""
+    read = getattr(stream, "read1", stream.read)
+    chunks: list[bytes] = []
+    size = 0
+    while size <= MAX_BODY:
+        left()
+        chunk = read(_CHUNK)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+    return b"".join(chunks)
+
+
+def _response(
+    cls: Any,
+    status: int,
+    stream: Any,
+    link: str | None,
+    who: str = "anon",
+    left: Callable[[], float] | None = None,
+) -> Any:
+    raw = stream.read(MAX_BODY + 1) if left is None else _read_bounded(stream, left)
     if len(raw) > MAX_BODY:
-        return cls(None, error=f"anon: ответ больше {MAX_BODY} байт")
+        return cls(None, error=f"{who}: ответ больше {MAX_BODY} байт")
     try:
         body = json.loads(raw) if raw else None
     except ValueError:
@@ -116,21 +144,37 @@ class AnonTransport:
     def _fetch(self, path: str, cls: Any) -> Any:
         self.sent.append(path)
         req = urllib.request.Request(API + path, method="GET", headers=self._headers)
-        try:
-            try:
-                with self._open(req, timeout=self._timeout) as answer:
-                    return _response(
-                        cls, answer.status, answer, answer.headers.get("Link")
-                    )
-            except urllib.error.HTTPError as err:
-                link = err.headers.get("Link") if err.headers is not None else None
-                return _response(cls, err.code, err, link)
-        except Exception as exc:  # noqa: BLE001 — send не бросает (инструкция steward)
-            return cls(None, error=self._mask(f"anon: {type(exc).__name__}: {exc}"))
+        return fetch_response(self._open, req, self._timeout, cls, "anon", self._token)
 
-    def _mask(self, text: str) -> str:
-        """Значение токена в тексте сбоя — `***` (R1)."""
-        return text if self._token is None else text.replace(self._token, "***")
+
+def fetch_response(
+    open_url: Callable[..., Any],
+    req: urllib.request.Request,
+    timeout: float,
+    cls: Any,
+    who: str,
+    secret: str | None,
+    left: Callable[[], float] | None = None,
+) -> Any:
+    """Один HTTP-обмен: любой HTTP-ответ — `cls(status, body, link)`, сбой доставки —
+    `cls(None, error=…)` с `secret`, замаскированным как `***` (R1); не бросает.
+    Общий для `AnonTransport` и `act_forge_http.TokenTransport`. `left` — срок
+    вызывающего: тело читается порциями с `left()` перед каждой, исключение из него
+    становится сбоем доставки; без `left` тело читается одним `read`, как прежде."""
+    try:
+        try:
+            with open_url(req, timeout=timeout) as answer:
+                return _response(
+                    cls, answer.status, answer, answer.headers.get("Link"), who, left
+                )
+        except urllib.error.HTTPError as err:
+            link = err.headers.get("Link") if err.headers is not None else None
+            return _response(cls, err.code, err, link, who, left)
+    except Exception as exc:  # noqa: BLE001 — send не бросает (инструкция steward)
+        text = f"{who}: {type(exc).__name__}: {exc}"
+        if secret:
+            text = text.replace(secret, "***")
+        return cls(None, error=text)
 
 
 _REPO = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")

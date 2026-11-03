@@ -449,13 +449,39 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
     ("admin", "install_admin_python", "os.rename", 1): (
         "protocol install_admin_python: sync_tree before, sync_dir after"
     ),
-    ("admin", "_make_dir", "os.mkdir", 1): "protocol install_admin: sync_tree",
-    ("admin", "_make_dir", "os.fchmod", 1): "protocol install_admin: sync_tree",
     ("admin", "_copy_file", "os.open", 1): "protocol install_admin: sync_tree",
     ("admin", "_copy_file", "os.fchmod", 1): "protocol install_admin: sync_tree",
     ("admin", "", "import tempfile", 1): "expected_admin_digest's scratch copy",
     ("admin", "expected_admin_digest", "tempfile.TemporaryDirectory", 1): (
         "expected_admin_digest's scratch copy (Task 15), never under the layout"
+    ),
+    ("admin_tree", "fetch_url", ".open", 1): (
+        "an HTTP GET through an opener (`urllib`): reads the network, writes no file"
+    ),
+    ("admin_tree", "_ensure_cache_dir", "os.mkdir", 1): (
+        "site-src: scratch cache, re-checked on every use (sha256, cat-file)"
+    ),
+    ("admin_tree", "_sdist", "os.unlink", 1): (
+        "site-src: scratch cache, re-checked on every use (sha256, cat-file): a bad sdist dropped"
+    ),
+    ("admin_tree", "_write_cache", "os.unlink", 1): (
+        "site-src: scratch cache, re-checked on every use (sha256, cat-file): its own leftover temp"
+    ),
+    ("admin_tree", "_write_cache", "os.open", 1): (
+        "site-src: scratch cache, re-checked on every use (sha256, cat-file): O_EXCL temp"
+    ),
+    ("admin_tree", "_write_cache", "os.rename", 1): (
+        "site-src: scratch cache, re-checked on every use (sha256, cat-file): a lost rename is fetched again"
+    ),
+    ("admin_tree", "make_tree_dir", "os.mkdir", 1): (
+        "protocol install_admin: sync_tree"
+    ),
+    ("admin_tree", "make_tree_dir", "os.fchmod", 1): (
+        "protocol install_admin: sync_tree"
+    ),
+    ("admin_tree", "_write_member", "os.open", 1): "protocol install_admin: sync_tree",
+    ("admin_tree", "_write_member", "os.fchmod", 1): (
+        "protocol install_admin: sync_tree"
     ),
     ("admin", "link_command", "os.symlink", 1): "protocol link_command: temp",
     ("admin", "link_command", "os.rename", 1): (
@@ -582,6 +608,13 @@ SUBPROCESS_CREATORS = {
     "uv python install (admin)": "protocol install_admin_python: sync_tree, rename",
     "uv sync / git / tar (build, as df-build)": "builder tree: copied, digested",
     "git / tar (root's checkout)": "scratch under verify/, fetched every run",
+    "git init / fetch / cat-file (admin site cache, root)": (
+        "the bare steward.git under admin-home/site-src: scratch, its pinned "
+        "commit and tree re-checked on every use"
+    ),
+    "git archive (admin site, root)": (
+        "creates nothing: its stdout is the tar stream write_site reads"
+    ),
     "cleaner find/chmod/rm (as df-build)": "protocol cleanup_tree: root syncs",
     "useradd / dscl (account)": "OS records, judged by verify_build_user",
     "probes: ps / pkill / sudo -l / getent / dscl -read / xcrun": (
@@ -664,6 +697,7 @@ PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
         "uv python install (admin)",
         "uv sync / git / tar (build, as df-build)",
         "git / tar (root's checkout)",
+        "git init / fetch / cat-file (admin site cache, root)",
         "cleaner find/chmod/rm (as df-build)",
         "useradd / dscl (account)",
         "probes: ps / pkill / sudo -l / getent / dscl -read / xcrun",
@@ -676,6 +710,9 @@ PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
         "sudo -u df-exec test -r / -x (doctor roles.isolation, root)",
         "sudo -u <role> sudo df-publish perimeter-status (doctor, root)",
         "sudo -u df-review sudo df-publish merge (doctor publisher.foreign)",
+    ),
+    ("admin_tree", "_archive", "subprocess.Popen", 1): (
+        "git archive (admin site, root)",
     ),
     ("platform", "spawn_as", "subprocess.Popen", 1): (
         "tar -cf - (copy producer, as df-build)",
@@ -707,6 +744,8 @@ class _Scope:
     kwonly: list[str] = field(default_factory=list)
     counts: dict[str, int] = field(default_factory=dict)
     values: dict[str, ast.expr] = field(default_factory=dict)
+    #: A name bound by `from df.<module> import <name>`: (module, name).
+    imports: dict[str, tuple[str, str]] = field(default_factory=dict)
 
     def binds(self, name: str) -> bool:
         return name in self.counts or name in self.params or name in self.kwonly
@@ -812,7 +851,11 @@ class _FsSites(ast.NodeVisitor):
         owner = owner or self.module_scope
         if expr.id in owner.params or expr.id in owner.kwonly:
             return self._param_flags(owner, expr.id, seen)
-        if owner.counts.get(expr.id) != 1 or expr.id not in owner.values:
+        if owner.counts.get(expr.id) != 1:
+            return None
+        if expr.id in owner.imports:
+            return _imported_flags(*owner.imports[expr.id], seen)
+        if expr.id not in owner.values:
             return None
         return self._flags(owner.values[expr.id], owner, seen)
 
@@ -991,12 +1034,45 @@ def _bindings(scope: _Scope, body: list[ast.stmt]) -> None:
                 scope.counts[name] = 2
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             scope.counts[node.name] = scope.counts.get(node.name, 0) + 1
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            _import_bindings(scope, node)
         for target in targets:
             for name in ast.walk(target):
                 if isinstance(name, ast.Name):
                     scope.counts[name.id] = scope.counts.get(name.id, 0) + 1
         if value is not None and len(targets) == 1 and isinstance(targets[0], ast.Name):
             scope.values[targets[0].id] = value
+
+
+def _import_bindings(scope: _Scope, node: ast.Import | ast.ImportFrom) -> None:
+    """An import binds its names (a later assignment makes them rebound);
+    `from df.<module> import <name>` is kept for `_imported_flags`."""
+    df_module = (
+        isinstance(node, ast.ImportFrom)
+        and node.level == 0
+        and (node.module or "").startswith("df.")
+    )
+    for alias in node.names:
+        local = alias.asname or alias.name.split(".")[0]
+        scope.counts[local] = scope.counts.get(local, 0) + 1
+        if df_module:
+            assert isinstance(node, ast.ImportFrom) and node.module is not None
+            scope.imports[local] = (node.module.removeprefix("df."), alias.name)
+
+
+def _imported_flags(module: str, name: str, seen: set[object]) -> Flags | None:
+    """The flags of `name` in `df/<module>`, by the same rules as a local
+    constant: its single module-level binding resolved in that module
+    (another import, a creating constant, anything unresolved: as there)."""
+    key = ("import", module, name)
+    path = Path(fsutil.__file__).parent.joinpath(*module.split("."))
+    path = path.with_suffix(".py") if path.with_suffix(".py").is_file() else path
+    if key in seen or not path.is_file():
+        return None
+    other = _visitor(path)
+    return other._flags(
+        ast.Name(id=name, ctx=ast.Load()), other.module_scope, seen | {key}
+    )
 
 
 def _walk_scope(body: list[ast.stmt]) -> Iterator[ast.AST]:
@@ -1143,6 +1219,22 @@ PLANTED = {
         "def h():\n    f(os.O_WRONLY | os.O_CREAT)\n"
     ),
     "no-create flags": "def f():\n    os.open('a', os.O_WRONLY | os.O_APPEND)\n",
+    # PR 681: a constant imported from a df module resolves there, and a
+    # creating one stays a finding
+    "imported creating const": (
+        "from df.admin_tree import NEW_FILE\ndef f():\n    os.open('a', NEW_FILE)\n"
+    ),
+    "imported non-const": (
+        "from df.admin_tree import make_tree_dir\n"
+        "def f():\n    os.open('a', make_tree_dir)\n"
+    ),
+    "imported then rebound": (
+        "from df.admin_tree import DIR_FLAGS\nDIR_FLAGS = os.O_WRONLY | os.O_CREAT\n"
+        "def f():\n    os.open('a', DIR_FLAGS)\n"
+    ),
+    "imported from a missing module": (
+        "from df.no_such import FLAGS\ndef f():\n    os.open('a', FLAGS)\n"
+    ),
 }
 
 
@@ -1191,6 +1283,8 @@ def test_the_guard_passes_literal_reads(tmp_path: Path) -> None:
         "def h(follow: bool) -> subprocess.Popen[bytes]:\n"
         "    g(os.O_RDONLY if follow else os.O_RDONLY | os.O_NOFOLLOW)\n"
         "import os as o\ndef k():\n    o.open('f', o.O_RDONLY)\n"
+        "from df.admin_tree import DIR_FLAGS\n"
+        "def m():\n    os.open('i', DIR_FLAGS)\n"
     )
     found = _scan(planted)
     assert found == [], found

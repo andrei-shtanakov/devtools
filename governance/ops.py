@@ -27,6 +27,11 @@ from urllib.parse import quote
 
 from governance import author_launch
 from governance import interview as _interview
+from governance.act_git_rows import (
+    FIRST_PARENT_LOG,
+    FirstParentRows,
+    parse_first_parent,
+)
 from governance.author_launch import AuthorCall, LaunchOutcome
 from governance.brief_facts import (
     BriefFactsMixin,
@@ -64,7 +69,6 @@ _SNAPSHOT_FETCH = (
     "--no-write-fetch-head",
     "--refmap=",
 )
-FirstParentRows = list[tuple[str, tuple[str, ...], tuple[tuple[str, str], ...]]]
 
 
 @dataclass(frozen=True)
@@ -94,30 +98,9 @@ SNAPSHOT_FORGE_METHODS = frozenset(
 )
 
 
-def _parse_first_parent(stdout: str) -> FirstParentRows:
-    """Разбор `git log --first-parent --name-status --format=%x00%H %P`."""
-    rows: FirstParentRows = []
-    for chunk in stdout.split("\x00")[1:]:
-        lines = [ln for ln in chunk.splitlines() if ln.strip()]
-        commit, *parents = lines[0].split()
-        changes = tuple(
-            (ln.split("\t", 1)[0], ln.split("\t", 1)[1])
-            for ln in lines[1:]
-            if "\t" in ln
-        )
-        rows.append((commit, tuple(parents), changes))
-    return rows
-
-
-_FIRST_PARENT_LOG = (
-    "log",
-    "--first-parent",
-    "--reverse",
-    "--diff-merges=first-parent",
-    "--no-renames",
-    "--name-status",
-    "--format=%x00%H %P",
-)
+#: Синонимы: разбор строк first-parent живёт в узком `act_git_rows`.
+_FIRST_PARENT_LOG = FIRST_PARENT_LOG
+_parse_first_parent = parse_first_parent
 _REMOTE_BRANCH_HEAD_QUERY = (
     "query($o:String!,$n:String!,$q:String!){"
     "repository(owner:$o,name:$n){"

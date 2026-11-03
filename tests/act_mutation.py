@@ -50,9 +50,74 @@ from tests.test_act_identity_table import ROWS  # noqa: E402
 
 #: Обход с корректными данными: `site:component` → (фрагмент в функции проверки, замена).
 BYPASS: dict[str, tuple[str, str]] = {
-    "act_anon.AnonTransport._fetch:transport_failure": (
-        'return cls(None, error=self._mask(f"anon: {type(exc).__name__}: {exc}"))',
+    "act_anon.fetch_response:transport_failure": (
+        "return cls(None, error=text)",
         "return cls(200, body={}, link=None)",
+    ),
+    "act_history_snapshot._git:deadline_kill": (
+        'raise DeadlineExceeded("git: deadline passed") from None',
+        "return subprocess.CompletedProcess(proc.args, -9, None, None)",
+    ),
+    "act_history_snapshot.SnapshotHistory._rest:deadline_during": (
+        '_timeout(self._deadline, self._clock, "forge")\n            raise',
+        "raise",
+    ),
+    "act_history_snapshot.SnapshotHistory._rest:deadline_after": (
+        "self._left()  # an answer that completed past the deadline is no fact either",
+        "pass",
+    ),
+    "act_history_snapshot.SnapshotHistory.prs_containing_commit:shape": (
+        'raise ValueError(f"forge: commits/{sha[:12]}/pulls: unexpected shape")',
+        "body = []",
+    ),
+    "act_precheck.serve:token_scrub": (
+        'reason.replace(request.token, "[token]")',
+        "reason",
+    ),
+    "act_precheck._locked:lock_deadline": (
+        'raise DeadlineExceeded("precheck lock: deadline passed") from None',
+        "break",
+    ),
+    "act_precheck._no_constant:constant": (
+        'raise json.JSONDecodeError(f"constant {name}", name, 0)',
+        "return float(name)",
+    ),
+    "act_precheck._decide:deadline": ('return UNSET, "deadline"', 'return ALLOW, ""'),
+    "act_precheck._decide:read_failed": (
+        'return UNSET, f"read_failed: {exc}"',
+        'return ALLOW, ""',
+    ),
+    "act_precheck._stop_in_history:unreadable": (
+        'return UNSET, f"stop_unreadable: {target.path} at {request.head_sha[:12]}"',
+        'raw = b""',
+    ),
+    "act_precheck._stop_in_history:utf8": (
+        'return REFUSE, "stop_record_invalid: not UTF-8"',
+        'text = raw.decode("utf-8", "replace")',
+    ),
+    "act_precheck._stop_in_history:record_invalid": (
+        'return REFUSE, f"stop_record_invalid: {exc}"',
+        "record = target",
+    ),
+    "act_precheck._stop_in_history:history": (
+        'return UNSET, f"history_unavailable: {history.reason}"',
+        "history = ()",
+    ),
+    "act_precheck._stop_in_history:no_request": (
+        'return REFUSE, f"no_delivered_request: node {target.node}"',
+        'return ALLOW, ""',
+    ),
+    "act_precheck._stop_in_history:already_stopped": (
+        'return REFUSE, f"already_stopped: node {target.node} g{gen}"',
+        'return ALLOW, ""',
+    ),
+    "act_forge_http.TokenTransport._refusal:read_only_method": (
+        'return f"read-only transport: {method} {path}"',
+        "return None",
+    ),
+    "act_forge_http.TokenTransport.get_json:page_cap": (
+        'raise OSError(f"forge: more than {MAX_PAGES} pages")',
+        "return 200, items",
     ),
     "act_anon._locate:commit_unreadable": (
         'return Unavailable(f"{where}: коммит не прочитан: HTTP {resp.status}")',
@@ -274,7 +339,7 @@ BYPASS: dict[str, tuple[str, str]] = {
         "return self._memo[node]",
         "return next(iter(self._memo.values()))",
     ),
-    "act_status._request_event:request:no_pr": (
+    "act_history._request_event:request:no_pr": (
         "    if isinstance(pr, Unavailable):\n        return pr",
         "    if isinstance(pr, Unavailable):\n        return None",
     ),
@@ -291,7 +356,7 @@ BYPASS: dict[str, tuple[str, str]] = {
         'return Unavailable(f"gate-check --print-snapshot-digest: код {rc}: {digest}")',
         'return "review", str(out)',
     ),
-    "act_status.load_history:base_unread": (
+    "act_history.load_history:base_unread": (
         "    if rows is None:\n        return Unavailable",
         "    if rows is None:\n        rows = []\n    if False:\n        return Unavailable",
     ),
@@ -315,7 +380,7 @@ BYPASS: dict[str, tuple[str, str]] = {
         'return f"свежая база: {snapshot.reason}"',
         'snapshot = (state.base_ref or "master", ops)',
     ),
-    "act_status.pr_for_merge:exactly_one": (
+    "act_history.pr_for_merge:exactly_one": (
         "    if len(found) != 1:",
         "    if not found:\n        found = [7]\n    if False:",
     ),
@@ -526,11 +591,11 @@ BYPASS: dict[str, tuple[str, str]] = {
         "if traceless:",
     ),  # интеграционное ревью части B, I-3: узкий `except` (класс C1) — двойник с
     # `CalledProcessError` краснит утверждение, а не прогон (`_outcome`)
-    "act_status.pr_for_merge:ops_failure": (
+    "act_history.pr_for_merge:ops_failure": (
         "    except OPS_FAILURES as exc:",
         "    except RuntimeError as exc:",
     ),
-    "act_status._pr_head:ops_failure": (
+    "act_history._pr_head:ops_failure": (
         "    except OPS_FAILURES as exc:",
         "    except RuntimeError as exc:",
     ),
@@ -604,6 +669,8 @@ BYPASS: dict[str, tuple[str, str]] = {
 }
 #: Обход невозможен (без данных продолжить нечем) — решение ревьюера с причиной.
 RULED: dict[str, str] = {
+    "act_precheck.parse_request:json": "запрос не JSON (или не UTF-8): данных нет, продолжить нечем; обход с корректными данными невозможен, проверяется причина (O3)",
+    "act_precheck._stop_target:stop_path": "путь не путь записи остановки: нет `ws_id`, узла и поколения — продолжить нечем; обход невозможен, проверяется причина (O3)",
     "approve_node._try_agent_merge#stop_form_first:form_first": "у stop-PR (`base` и `form` переданы) первую проверку формы маскирует та же `form()` в цикле перед каждой попыткой мержа (`#stop_late_form`, closed): обход первой неотличим по исходу — мержа нет, отказ формы тот же; у finalize-PR (без `base`) первая проверка единственная и закрыта строкой `#form`",
     "ops.RealOps.snapshot_open:own_repo": "общий каталог двух снимков: второй `snapshot_open` падает на `mkdir home` (`FileExistsError`) до любых чтений — смешения снимков нет, мутант виден исключением, а не утверждением; независимость проверяет двойник `test_interleaved_snapshots_are_independent`",
     "runner._step_gate#act_mode_unset:mode": 'без проверки (O1) `act_mode, provider = gate` распаковывает `Unavailable` и падает `TypeError` — fail-closed, но исключением; BYPASS `gate = ("legacy", None)` пускает S4 дальше, и на стенде следующий шаг (`approve_node`) падает исключением «факт не установлен» — мутант виден, но не утверждением; тот же класс у S8 (`runner._step_s8#act_mode_unset`) закрыт утверждением',

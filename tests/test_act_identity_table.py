@@ -42,6 +42,8 @@ ROOT = Path(__file__).resolve().parent.parent
 MODULES = (
     "act_facts",
     "act_anon",
+    "act_git_rows",
+    "act_forge_http",
     "act_check",
     "act_trust",
     "act_journal",
@@ -49,6 +51,9 @@ MODULES = (
     "act_identity",
     "act_journal_wire",
     "act_status",
+    "act_history",
+    "act_history_snapshot",
+    "act_precheck",
     "act_node",
     "act_premerge",
     "act_app_token",
@@ -84,7 +89,6 @@ EXISTING_ADDITIONS = {
         "SnapshotOps.show_file_bytes",
         "SnapshotOps.rev_parse",
         "SnapshotOps.fetch_branch",
-        "_parse_first_parent",
     ),
     "approval_ledger": (
         "record_review_act",
@@ -219,6 +223,9 @@ X, K, F = (
     "tests/test_act_app_token.py",
     "tests/test_act_facts.py",
 )
+FH = "tests/test_act_forge_http.py"
+HS = "tests/test_act_history_snapshot.py"
+PC = "tests/test_act_precheck.py"
 RP, OB = "tests/test_act_repropose.py", "tests/test_act_ops_body.py"
 OF, WR = "tests/test_act_ops_failures.py", "tests/test_act_wave_runner.py"
 ENVELOPE_FIELDS = (
@@ -291,13 +298,385 @@ JUDGMENT = {
             '"anon: ответ больше 8 байт"',
         ),
     ),
-    "act_anon.AnonTransport._fetch": (
+    "act_anon.fetch_response": (
         r(
             "transport_failure",
-            "act_anon.AnonTransport._fetch",
+            "act_anon.fetch_response",
             "except Exception as exc",
             f"{A}::test_transport_failure_is_status_none",
             '"TimeoutError"',
+        ),
+    ),
+    # --- act_forge_http
+    "act_forge_http.TokenTransport.__init__": (
+        r(
+            "empty_token",
+            "act_forge_http.TokenTransport.__init__",
+            "if not token",
+            f"{FH}::test_init_refuses_empty_token",
+            '"forge: empty token"',
+        ),
+    ),
+    "act_forge_http.TokenTransport.send": (
+        r(
+            "refusal_status_none",
+            "act_forge_http.TokenTransport.send",
+            "refusal is not None",
+            f"{FH}::test_send_refusal_is_status_none",
+            '"forge: read-only transport: DELETE repos/o/r"',
+        ),
+    ),
+    "act_forge_http.TokenTransport._refusal": (
+        r(
+            "relative_path",
+            "act_forge_http.TokenTransport._refusal",
+            "_UNSAFE_PATH.search(path)",
+            f"{FH}::test_refusal_unsafe_path",
+            "\"forge: not a relative API path: '/abs'\"",
+        ),
+        r(
+            "graphql_query_only",
+            "act_forge_http.TokenTransport._refusal",
+            'return "GraphQL text is not a query"',
+            f"{FH}::test_refusal_graphql_not_query",
+            '"forge: GraphQL text is not a query"',
+        ),
+        r(
+            "read_only_method",
+            "act_forge_http.TokenTransport._refusal",
+            "read-only transport",
+            f"{FH}::test_send_refusal_is_status_none",
+            '"forge: read-only transport: DELETE repos/o/r"',
+        ),
+    ),
+    "act_forge_http.TokenTransport.get_json": (
+        r(
+            "delivery_failure",
+            "act_forge_http.TokenTransport.get_json",
+            "resp.status is None",
+            f"{FH}::test_get_json_delivery_failure",
+            '"forge: OSError: down"',
+        ),
+        r(
+            "mid_walk_status",
+            "act_forge_http.TokenTransport.get_json",
+            'raise OSError(f"forge: HTTP {resp.status} mid-walk")',
+            f"{FH}::test_get_json_mid_walk_status",
+            '"forge: HTTP 500 mid-walk"',
+        ),
+        r(
+            "mid_walk_shape",
+            "act_forge_http.TokenTransport.get_json",
+            'raise OSError("forge: page shape changed mid-walk")',
+            f"{FH}::test_get_json_mid_walk_shape",
+            '"forge: page shape changed mid-walk"',
+        ),
+        r(
+            "page_cap",
+            "act_forge_http.TokenTransport.get_json",
+            'raise OSError(f"forge: more than {MAX_PAGES} pages")',
+            f"{FH}::test_get_json_page_cap",
+            '"forge: more than 2 pages"',
+        ),
+    ),
+    "act_forge_http.TokenTransport._next_path": (
+        r(
+            "outside_api_base",
+            "act_forge_http.TokenTransport._next_path",
+            "url.startswith(self._base)",
+            f"{FH}::test_get_json_next_outside_base",
+            '"forge: Link next outside api_base"',
+        ),
+    ),
+    # --- act_history_snapshot (этап 2b, Task 3)
+    "act_history_snapshot._timeout": (
+        r(
+            "deadline_passed",
+            "act_history_snapshot._timeout",
+            "if left <= 0",
+            f"{HS}::test_expired_deadline_spawns_no_git",
+            '"git: deadline passed"',
+        ),
+    ),
+    "act_history_snapshot._git": (
+        r(
+            "deadline_kill",
+            "act_history_snapshot._git",
+            "isinstance(exc, subprocess.TimeoutExpired)",
+            f"{HS}::test_fetch_respects_deadline",
+            '"git: deadline passed"',
+        ),
+    ),
+    "act_history_snapshot._require": (
+        r(
+            "git_failure",
+            "act_history_snapshot._require",
+            "if done.returncode != 0",
+            f"{HS}::test_fetch_failure_is_os_error",
+            '"snapshot: fetch owner/p: exit 128"',
+        ),
+    ),
+    "act_history_snapshot.open_snapshot": (
+        r(
+            "full_name",
+            "act_history_snapshot.open_snapshot",
+            "_FULL_NAME.fullmatch(full_name)",
+            f"{HS}::test_open_snapshot_refuses_bad_full_name",
+            "\"full_name 'owner' is not owner/repo\"",
+        ),
+        r(
+            "refs",
+            "act_history_snapshot.open_snapshot",
+            "if bad or not refs",
+            f"{HS}::test_open_snapshot_refuses_bad_refs",
+            '"are not full ref names"',
+        ),
+    ),
+    "act_history_snapshot.SnapshotHistory.fetch_branch": (
+        r(
+            "full_ref",
+            "act_history_snapshot.SnapshotHistory.fetch_branch",
+            "if not _full_ref(ref)",
+            f"{HS}::test_fetch_branch_refuses_bad_ref",
+            "is False",
+        ),
+    ),
+    "act_history_snapshot.SnapshotHistory.prs_containing_commit": (
+        r(
+            "shape",
+            "act_history_snapshot.SnapshotHistory.prs_containing_commit",
+            "not all(_is_pull(p) for p in body)",
+            f"{HS}::test_prs_containing_commit_shape_refused",
+            '"forge: commits/aaaaaaaaaaaa/pulls: unexpected"',
+        ),
+        r(
+            "merged_by_merged_at",
+            "act_history_snapshot.SnapshotHistory.prs_containing_commit",
+            'p.get("merged_at") is not None',
+            f"{HS}::test_prs_containing_commit_normalized_from_rest",
+            '"MERGED"',
+        ),
+    ),
+    "act_history_snapshot.SnapshotHistory._rest": (
+        r(
+            "slug",
+            "act_history_snapshot.SnapshotHistory._rest",
+            "_FULL_NAME.fullmatch(repo_slug)",
+            f"{HS}::test_rest_refuses_bad_slug",
+            "\"forge: repo_slug '../x' is not owner/repo\"",
+        ),
+        r(
+            "deadline_during",
+            "act_history_snapshot.SnapshotHistory._rest",
+            "except OSError",
+            f"{HS}::test_deadline_propagates_from_forge_path",
+            '"forge: deadline passed"',
+        ),
+        r(
+            "deadline_after",
+            "act_history_snapshot.SnapshotHistory._rest",
+            "self._left()  # an answer that completed past the deadline",
+            f"{HS}::test_rest_answer_completed_after_deadline_raises",
+            '"forge: deadline passed"',
+        ),
+        r(
+            "status",
+            "act_history_snapshot.SnapshotHistory._rest",
+            "if status != 200",
+            f"{HS}::test_rest_non_200_is_os_error",
+            '"forge: HTTP 404: repos/owner/p/pulls/7"',
+        ),
+    ),
+    # --- act_precheck (этап 2b, Task 4): запрос, вердикт, вид stop
+    "act_precheck.serve": (
+        r(
+            "token_scrub",
+            "act_precheck.serve",
+            'reason.replace(request.token, "[token]")',
+            f"{PC}::test_token_not_in_verdict_or_stderr",
+            "'stop/[token]'",
+        ),
+        r(
+            "reason_cap",
+            "act_precheck.serve",
+            "if len(reason) > MAX_REASON",
+            f"{PC}::test_reason_truncated",
+            '"...[truncated]"',
+        ),
+    ),
+    "act_precheck._locked": (
+        r(
+            "lock_deadline",
+            "act_precheck._locked",
+            'raise DeadlineExceeded("precheck lock: deadline passed")',
+            f"{PC}::test_lock_wait_bounded_by_deadline",
+            "seen == []",
+        ),
+    ),
+    "act_precheck.parse_request": (
+        r(
+            "size",
+            "act_precheck.parse_request",
+            "if len(raw) > MAX_REQUEST",
+            f"{PC}::test_oversize_request_exit_2",
+            '"request larger than 65536 bytes"',
+        ),
+        r(
+            "json",
+            "act_precheck.parse_request",
+            "except (UnicodeDecodeError, json.JSONDecodeError)",
+            f"{PC}::test_request_not_json_exit_2",
+            '"request is not JSON"',
+        ),
+        r(
+            "object",
+            "act_precheck.parse_request",
+            "if not isinstance(data, dict)",
+            f"{PC}::test_request_not_object_exit_2",
+            '"request is not a JSON object"',
+        ),
+        r(
+            "keys",
+            "act_precheck.parse_request",
+            "if set(data) != set(REQUEST_KEYS)",
+            f"{PC}::test_unknown_request_key_exit_2",
+            "\"keys: unexpected ['extra'], missing []\"",
+        ),
+        r(
+            "values",
+            "act_precheck.parse_request",
+            'f"invalid values: {bad}"',
+            f"{PC}::test_kind_candidate_rejected_by_schema",
+            "\"invalid values: ['kind']\"",
+        ),
+    ),
+    "act_precheck._no_duplicates": (
+        r(
+            "duplicate",
+            "act_precheck._no_duplicates",
+            'f"duplicate keys: {dups}"',
+            f"{PC}::test_duplicate_request_key_exit_2",
+            "\"duplicate keys: ['nonce']\"",
+        ),
+    ),
+    "act_precheck._no_constant": (
+        r(
+            "constant",
+            "act_precheck._no_constant",
+            "raise json.JSONDecodeError",
+            f"{PC}::test_request_not_json_exit_2",
+            '"request is not JSON"',
+        ),
+    ),
+    "act_precheck._decide": (
+        r(
+            "deadline",
+            "act_precheck._decide",
+            "except DeadlineExceeded",
+            f"{PC}::test_deadline_kills_git_and_answers_unset",
+            '("unset", "deadline")',
+        ),
+        r(
+            "read_failed",
+            "act_precheck._decide",
+            "except OPS_FAILURES",
+            f"{PC}::test_snapshot_failure_is_unset",
+            '"read_failed: snapshot: fetch owner/p"',
+        ),
+    ),
+    "act_precheck._stop_target": (
+        r(
+            "count",
+            "act_precheck._stop_target",
+            "if len(changes) != 1",
+            f"{PC}::test_stop_with_extra_change_refused",
+            '"stop_changes: expected one change, got 2"',
+        ),
+        r(
+            "addition",
+            "act_precheck._stop_target",
+            'if status != "added" or previous is not None',
+            f"{PC}::test_stop_modifying_delivered_stop_refused",
+            '" is not a plain addition"',
+        ),
+        r(
+            "stop_path",
+            "act_precheck._stop_target",
+            "if found is None",
+            f"{PC}::test_stop_foreign_path_refused_before_io",
+            'is not a stop record path"',
+        ),
+        r(
+            "canonical",
+            "act_precheck._stop_target",
+            "if stop_path(ws_id, node, generation) != path",
+            f"{PC}::test_stop_noncanonical_path_refused",
+            'is not canonical"',
+        ),
+        r(
+            "branch",
+            "act_precheck._stop_target",
+            "if parse_stop_branch(head_ref, ws_id) != (node, generation)",
+            f"{PC}::test_stop_branch_mismatch_refused",
+            '"stop_branch_mismatch: "',
+        ),
+    ),
+    "act_precheck._stop_in_history": (
+        r(
+            "unreadable",
+            "act_precheck._stop_in_history",
+            "if raw is None",
+            f"{PC}::test_stop_record_absent_at_head_is_unset",
+            '"stop_unreadable: "',
+        ),
+        r(
+            "utf8",
+            "act_precheck._stop_in_history",
+            "except UnicodeDecodeError",
+            f"{PC}::test_stop_record_not_utf8_refused",
+            '"stop_record_invalid: not UTF-8"',
+        ),
+        r(
+            "record_invalid",
+            "act_precheck._stop_in_history",
+            "except EnvelopeError",
+            f"{PC}::test_stop_record_invalid_refused",
+            '"stop_record_invalid: "',
+        ),
+        r(
+            "content",
+            "act_precheck._stop_in_history",
+            "if (record.node, record.generation) != (target.node, target.generation)",
+            f"{PC}::test_stop_path_content_mismatch_refused",
+            '"stop_content_mismatch: "',
+        ),
+        r(
+            "history",
+            "act_precheck._stop_in_history",
+            "if isinstance(history, Unavailable)",
+            f"{PC}::test_history_unavailable_is_unset",
+            '"history_unavailable: "',
+        ),
+        r(
+            "no_request",
+            "act_precheck._stop_in_history",
+            "if current is None",
+            f"{PC}::test_stop_without_delivered_request_refused",
+            '"no_delivered_request: node requirements"',
+        ),
+        r(
+            "already_stopped",
+            "act_precheck._stop_in_history",
+            "if isinstance(current, DeliveredStop)",
+            f"{PC}::test_stop_already_stopped_refused",
+            '"already_stopped: node requirements g1"',
+        ),
+        r(
+            "generation",
+            "act_precheck._stop_in_history",
+            "if delivered != target.generation",
+            f"{PC}::test_stop_for_superseded_generation_refused",
+            '"stop_generation_not_current: stop g1, current g2"',
         ),
     ),
     "act_anon.contents_bytes": (
@@ -1151,86 +1530,87 @@ JUDGMENT = {
             '"≠"',
         ),
     ),
-    # --- act_status (Task 14)
-    "act_status.pr_for_merge": (
+    # --- act_history (Task 14; вынесено из act_status — этап 2b, Task 3)
+    "act_history.pr_for_merge": (
         r(
             "exactly_one",
-            "act_status.pr_for_merge",
+            "act_history.pr_for_merge",
             "len(found) != 1",
             f"{S}::test_pr_for_merge_needs_exactly_one",
             '"нужен ровно один"',
         ),
         r(
             "ops_failure",
-            "act_status.pr_for_merge",
+            "act_history.pr_for_merge",
             "except OPS_FAILURES",
             f"{OF}::test_pr_for_merge_failure_is_unavailable[CalledProcessError]",
             '"PR merge-коммита"',
         ),
     ),
-    "act_status._pr_head": (
+    "act_history._pr_head": (
         r(
             "head_fetched",
-            "act_status._pr_head",
+            "act_history._pr_head",
             "не догружена",
             f"{S}::test_history_fetches_squash_head_absent_locally",
         ),
         r(
             "ops_failure",
-            "act_status._pr_head",
+            "act_history._pr_head",
             "except OPS_FAILURES",
             f"{OF}::test_pr_head_failure_is_unavailable[CalledProcessError]",
             '"голова PR #7"',
         ),
     ),
     # событие-заявка разбирается в `_request_event` (вынесено при Task 14)
-    "act_status._request_event": (
+    "act_history._request_event": (
         r(
             "request:path",
-            "act_status._request_event",
+            "act_history._request_event",
             "manifest_path(req.ws_id, req.request_id) != path",
             f"{S}::test_history_manifest_off_its_path_unavailable[ws_id]",
             '"манифест лежит не по своему пути"',
         ),
         r(
             "request:no_pr",
-            "act_status._request_event",
+            "act_history._request_event",
             "isinstance(pr, Unavailable)",
             f"{S}::test_history_manifest_commit_without_pr_unavailable",
             '"нужен ровно один"',
         ),
     ),
-    "act_status._event": (
+    "act_history._event": (
         r(
             "immutable",
-            "act_status._event",
+            "act_history._event",
             'if status != "A"',
             f"{S}::test_manifest_edited_after_delivery_unavailable",
             '"запись истории изменена после доставки"',
         ),
         r(
             "stop:ws_id",
-            "act_status._event",
+            "act_history._event",
             "if not path.startswith((requests_dir, stops_dir))",
             f"{S}::test_history_stop_of_other_workstream_ignored",
             "== ()",
         ),
         r(
             "stop:path",
-            "act_status._event",
+            "act_history._event",
             "остановка лежит не по своему пути",
             f"{S}::test_history_stop_off_its_path_unavailable[node]",
         ),
     ),
-    "act_status.load_history": (
+    "act_history.load_history": (
         r(
             "base_unread",
-            "act_status.load_history",
+            "act_history.load_history",
             "if rows is None",
             f"{S}::test_history_unreadable_base_unavailable",
             '"история master: first-parent не прочитан"',
         ),
     ),
+    # --- act_status (Task 14)
     "act_status.Decider._binding": (
         r(
             "identity",
@@ -3490,6 +3870,9 @@ _HELPER = (
 )
 _BUILD = "строит значение/запрос; проверок-отказов нет"
 _IO = "транспорт/ввод-вывод без проверки-отказа"
+_PC_FIELD = (
+    "предикат формы поля запроса; отказ выносит `parse_request` (`invalid values`)"
+)
 NOT_JUDGMENT = {
     "task_bridge._admission_refusal": "делегирует `act_status.noop_refusal` (место суждения)",
     **{
@@ -3510,8 +3893,44 @@ NOT_JUDGMENT = {
     },
     "act_anon._NoRedirect.redirect_request": "транспортная политика (3xx не исполняется); отказа об объекте нет",
     "act_anon._default_open": _IO,
+    "act_anon._read_bounded": "чтение тела порциями; срок судит `left()` вызывающего",
     "act_anon.AnonTransport.__init__": _BUILD,
-    "act_anon.AnonTransport._mask": "маскирует токен в тексте сбоя (R1); проверок нет",
+    "act_anon.AnonTransport._fetch": _IO,
+    "act_forge_http.TokenTransport.__repr__": _BUILD,
+    "act_forge_http.TokenTransport._fetch": _IO,
+    "act_history.HistoryOps.first_parent_changes": "протокол",
+    "act_history.HistoryOps.show_file": "протокол",
+    "act_history.HistoryOps.rev_parse": "протокол",
+    "act_history.HistoryOps.fetch_branch": "протокол",
+    "act_history.HistoryOps.prs_containing_commit": "протокол",
+    "act_history.HistoryOps.pr_facts": "протокол",
+    "act_precheck._positive_int": _PC_FIELD,
+    "act_precheck._matches": _PC_FIELD,
+    "act_precheck._text": _PC_FIELD,
+    "act_precheck._http_url": _PC_FIELD,
+    "act_precheck._change": _PC_FIELD,
+    "act_precheck._changes": _PC_FIELD,
+    "act_precheck._default_transport": _BUILD,
+    "act_precheck.request_digest": _BUILD,
+    "act_precheck.verdict": _BUILD,
+    "act_precheck._judge_stop": "передаёт отказ `_stop_target` и решение `_stop_in_history`; своей проверки нет",
+    "act_precheck._snapshot": _IO,
+    "act_precheck._remove": _IO,
+    "act_precheck._remove.report": _IO,
+    "act_history_snapshot.git_auth_env": _BUILD,
+    "act_history_snapshot._env": _BUILD,
+    "act_history_snapshot._url": _BUILD,
+    "act_history_snapshot._is_pull": "форма элемента ответа; отказ выносит `prs_containing_commit`",
+    "act_history_snapshot.SnapshotHistory.__init__": _BUILD,
+    "act_history_snapshot.SnapshotHistory.__repr__": _BUILD,
+    "act_history_snapshot.SnapshotHistory._run": _IO,
+    "act_history_snapshot.SnapshotHistory._left": "срок страницы REST; отказ выносит `_timeout`",
+    "act_history_snapshot.SnapshotHistory.first_parent_changes": _IO,
+    "act_history_snapshot.SnapshotHistory.show_file": _IO,
+    "act_history_snapshot.SnapshotHistory.show_file_bytes": _IO,
+    "act_history_snapshot.SnapshotHistory.rev_parse": _IO,
+    "act_history_snapshot._full_ref": _HELPER,
+    "act_history_snapshot.SnapshotHistory.pr_facts": "нормализация REST → `headRefOid`; судит `act_history._pr_head`",
     **{
         f"act_check.{n}": _HELPER
         for n in (
@@ -3625,7 +4044,7 @@ NOT_JUDGMENT = {
     "ops.SnapshotOps.show_file_bytes": _IO,
     "ops.SnapshotOps.rev_parse": _IO,
     "ops.SnapshotOps.fetch_branch": _IO,
-    "ops._parse_first_parent": "разбор вывода `git log`; не суждение",
+    "act_git_rows.parse_first_parent": "разбор вывода `git log`; не суждение",
     "ops.RealOps.gate_snapshot_digest": "возвращает код и вывод CLI; судит `gate_run`",
     "approval_ledger.record_review_act": "запись акта; проверок нет",
     "approval_ledger.audit_events": _BUILD,

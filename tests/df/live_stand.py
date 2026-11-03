@@ -73,6 +73,7 @@ import pytest
 from df import launch, models, run_start, setup_agent
 from df import platform as plat
 from df.admin import expected_admin_digest
+from df.admin_tree import locked_pins
 from df.build import GIT_ISOLATION
 from df.config import parse_releases
 from df.paths import MACHINE_TOKEN, Layout
@@ -334,7 +335,7 @@ def check_provenance(
     equal those of the checkout at `source_sha`; (2) the active release's
     `release.json` names member `devtools` at `fixture_sha`; (3) its
     `admin_digest` in `releases.toml` equals `expected_admin_digest` of the
-    checkout's `df/`. Any difference is a `ProvenanceError`."""
+    checkout (its whole admin tree, `site/` from the install's cache). Any difference is a `ProvenanceError`."""
     head = git_out(checkout, "rev-parse", "HEAD").strip()
     if head != source_sha:
         raise ProvenanceError(f"чекаут на {head}, а source_sha {source_sha}")
@@ -355,7 +356,7 @@ def check_provenance(
     if member != fixture_sha:
         raise ProvenanceError(f"release.json: {PIN_NAME} {member}, а не {fixture_sha}")
     entry = next((e for e in registry.releases if e.id == rid), None)
-    expected = expected_admin_digest(checkout / "df")
+    expected = expected_admin_digest(checkout, layout=layout, git=SYSTEM_GIT)
     if entry is None or entry.admin_digest != expected:
         found = None if entry is None else entry.admin_digest
         raise ProvenanceError(f"admin_digest {found}, а из чекаута {expected}")
@@ -1532,7 +1533,13 @@ def install_phase(source_sha: str, out: Path) -> int:
     top = live_top()
     os.mkdir(top, 0o755)
     os.chmod(top, 0o755)
-    bare, fixture_sha = build_fixture_repo(top, FIXTURE_FROM_CHECKOUT, name="live")
+    # The real `site/` pins of this checkout: the stand's install fetches the
+    # PyYAML sdist and the steward commit over the network (2b Task 5), so
+    # the precheck of later rows runs the real code.
+    pins = locked_pins((REPO_ROOT / "uv.lock").read_bytes())
+    bare, fixture_sha = build_fixture_repo(
+        top, FIXTURE_FROM_CHECKOUT, name="live", site=pins
+    )
     with serve_repo(top, bare) as url:
         world = RootWorld(
             PRODUCTION, FixtureRepo(url, fixture_sha), approved_uv(), top, ""

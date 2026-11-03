@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from df import acl, admin, fsutil, launcher_entry
+from df import acl, admin, admin_tree, fsutil, launcher_entry
 from df import build as build_mod
 from df import install_table as table
 from df import platform as plat
@@ -59,6 +59,7 @@ from tests.df.route_world import (
     setup_layout,
     write_accounts,
 )
+from tests.df.site_world import STAND_IN, SYSTEM_GIT, git_wrapper, site_world
 
 PLATFORM = plat.detect_platform()
 ADMIN = "admin/<id>"
@@ -437,22 +438,88 @@ def test_admin_tree_synced_before_mark(
 
 def test_install_admin_is_leaf(monkeypatch: pytest.MonkeyPatch, fl: FakeLayout) -> None:
     """S1-R9-N1: its events are exactly its protocol's — no mark, no removal,
-    no uv; an existing `admin/<id>` is refused and left untouched."""
+    no uv (the primed `site/` cache needs no fetch); an existing `admin/<id>`
+    is refused and left untouched."""
     lay = fl.layout
     runs = uv_runs(monkeypatch)
     ref = devtools_ref(fl)
     fl.clear()
-    admin.install_admin(lay, ID, devtools_ref=ref)
+    admin.install_admin(lay, ID, devtools_ref=ref, git=SYSTEM_GIT)
     assert normalize(fl.events) == expected_events(lay, "install_admin", None, ADMIN)
     assert len(table.PROTOCOLS["install_admin"]) == 4
     assert runs == [] and not lay.mark_file(ID).exists()
     before = tree_digest(lay.admin_dir(ID), exclude=frozenset())
     fl.clear()
     with pytest.raises(StepFailed) as exc:
-        admin.install_admin(lay, ID, devtools_ref=ref)
+        admin.install_admin(lay, ID, devtools_ref=ref, git=SYSTEM_GIT)
     assert exc.value.step == "admin"
     assert fl.events == []
     assert tree_digest(lay.admin_dir(ID), exclude=frozenset()) == before
+
+
+def test_install_admin_protocol_events_unchanged(fl: FakeLayout) -> None:
+    """r3 N4: the whole tree (`site/` included, its sources fetched into an
+    empty cache) changes nothing in the normative protocol: exactly
+    `created` (partial) -> `created` (full) -> `sync_tree` -> `sync_dir`."""
+    lay = fl.layout
+    ref = devtools_ref(fl)
+    shutil.rmtree(lay.admin_home / admin_tree.SITE_SRC)
+    world = site_world()
+    git = git_wrapper(lay.root.parent, world.repo)
+    fl.clear()
+    admin.install_admin(
+        lay, ID, devtools_ref=ref, git=git, fetch=lambda _u: world.sdist
+    )
+    dest = lay.admin_dir(ID)
+    assert fl.events == [
+        ("created", dest),
+        ("created", dest),
+        ("sync_tree", dest),
+        ("sync_dir", lay.admin),
+    ]
+    assert table.PROTOCOLS["install_admin"][:2] == (
+        ("change", "created", "копия `admin/<id>`: частичная"),
+        ("change", "created", "копия `admin/<id>`: полна"),
+    )
+    assert (dest / "site" / "steward" / "__init__.py").is_file()
+
+
+@pytest.mark.parametrize("source", ["yaml", "steward"])
+def test_interrupted_site_copy_recovers_to_clean_install(
+    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout, source: str
+) -> None:
+    """A crash after the first files of one `site/` source leaves a partial
+    `admin/<id>`; the route again removes it (`admin=present`) and installs:
+    the tree equals a clean install (`expected_admin_digest`, file list)."""
+    lay = fl.layout
+    prepare(fl, monkeypatch, admin_state())
+    real = admin_tree._write_member  # noqa: SLF001 - the crash point
+    written: list[Path] = []
+
+    def write_member(path: Path, data: object, mode: int) -> None:
+        if f"/site/{source}/" in str(path) and len(written) == 1:
+            raise Crash(str(path))
+        real(path, data, mode)  # type: ignore[arg-type]
+        if f"/site/{source}/" in str(path):
+            written.append(path)
+
+    monkeypatch.setattr(admin_tree, "_write_member", write_member)
+    with pytest.raises(Crash):
+        run_admin(fl)
+    partial = lay.admin_dir(ID) / "site" / source
+    assert [p.parent for p in written] and os.path.isdir(partial)
+    monkeypatch.setattr(admin_tree, "_write_member", real)
+    run_admin(fl)
+    ref = lay.verify_dir / "devtools"
+    expected = admin.expected_admin_digest(ref, layout=lay, git=SYSTEM_GIT)
+    assert admin.admin_digest(lay, ID) == expected
+    want = sorted(f"{s}/{rel}" for s, files in STAND_IN.items() for rel in files)
+    got = sorted(
+        p.relative_to(lay.admin_dir(ID) / "site").as_posix()
+        for p in (lay.admin_dir(ID) / "site").rglob("*")
+        if p.is_file()
+    )
+    assert got == want
 
 
 def test_admin_code_comes_from_reference_not_release(fl: FakeLayout) -> None:
@@ -471,9 +538,10 @@ def test_admin_code_comes_from_reference_not_release(fl: FakeLayout) -> None:
 
 
 def test_expected_admin_digest_is_install_admins(fl: FakeLayout) -> None:
-    """Task 15 (r3 N2): `expected_admin_digest` of a checkout's `df/` equals
-    the `admin_digest` its `install_admin` records -- bytecode skipped, an
-    executable file `0755` -- and a changed file changes it."""
+    """Task 15 (r3 N2): `expected_admin_digest` of a checkout equals the
+    `admin_digest` its `install_admin` records -- bytecode skipped, an
+    executable file `0755` -- and a changed file changes it (2b Task 5: the
+    whole tree, `site/` from the cache)."""
     lay = fl.layout
     ref = devtools_ref(fl)
     tool = ref / "df" / "tool.sh"
@@ -481,11 +549,11 @@ def test_expected_admin_digest_is_install_admins(fl: FakeLayout) -> None:
     tool.chmod(0o700)
     (ref / "df" / "__pycache__").mkdir()
     (ref / "df" / "__pycache__" / "x.cpython-312.pyc").write_bytes(b"\0")
-    admin.install_admin(lay, ID, devtools_ref=ref)
-    expected = admin.expected_admin_digest(ref / "df")
+    admin.install_admin(lay, ID, devtools_ref=ref, git=SYSTEM_GIT)
+    expected = admin.expected_admin_digest(ref, layout=lay, git=SYSTEM_GIT)
     assert expected == admin.admin_digest(lay, ID)
     (ref / "df" / "__init__.py").write_text('"""changed"""\n')
-    assert admin.expected_admin_digest(ref / "df") != expected
+    assert admin.expected_admin_digest(ref, layout=lay, git=SYSTEM_GIT) != expected
 
 
 def test_install_admin_without_devtools_ref(fl: FakeLayout) -> None:
@@ -549,7 +617,7 @@ def test_install_admin_modes_by_fchmod(fl: FakeLayout, umask: int) -> None:
     os.chmod(src / "sub", 0o777)
     old = os.umask(umask)
     try:
-        admin.install_admin(fl.layout, ID, devtools_ref=ref)
+        admin.install_admin(fl.layout, ID, devtools_ref=ref, git=SYSTEM_GIT)
     finally:
         os.umask(old)
     code = fl.layout.admin_dir(ID)
@@ -574,7 +642,7 @@ def test_install_admin_copies_only_files_and_dirs(fl: FakeLayout, bad: str) -> N
     else:
         shutil.rmtree(src)
     with pytest.raises(StepFailed) as exc:
-        admin.install_admin(fl.layout, ID, devtools_ref=ref)
+        admin.install_admin(fl.layout, ID, devtools_ref=ref, git=SYSTEM_GIT)
     assert exc.value.step == "admin"
 
 
@@ -584,7 +652,7 @@ def test_install_admin_copies_only_files_and_dirs(fl: FakeLayout, bad: str) -> N
 def ready_world(fl: FakeLayout) -> str:
     """An installed admin env; returns its digest."""
     install_python(fl)
-    admin.install_admin(fl.layout, ID, devtools_ref=devtools_ref(fl))
+    admin.install_admin(fl.layout, ID, devtools_ref=devtools_ref(fl), git=SYSTEM_GIT)
     return admin.admin_digest(fl.layout, ID)
 
 
@@ -783,7 +851,7 @@ def test_admin_code_refuses_bytecode_and_install_skips_it(fl: FakeLayout) -> Non
     (ref / "df" / "__pycache__" / "x.cpython-312.pyc").write_bytes(b"\0")
     (ref / "df" / "Y.PYC").write_bytes(b"\0")
     install_python(fl)
-    admin.install_admin(lay, ID, devtools_ref=ref)
+    admin.install_admin(lay, ID, devtools_ref=ref, git=SYSTEM_GIT)
     pkg = lay.admin_dir(ID) / "df"
     assert sorted(p.name for p in pkg.iterdir()) == ["__init__.py", "launcher_entry.py"]
     assert admin.admin_code_problems(lay, ID) == []
