@@ -51,6 +51,8 @@ MODULES = (
     "act_identity",
     "act_journal_wire",
     "act_status",
+    "act_history",
+    "act_history_snapshot",
     "act_node",
     "act_premerge",
     "act_app_token",
@@ -221,6 +223,7 @@ X, K, F = (
     "tests/test_act_facts.py",
 )
 FH = "tests/test_act_forge_http.py"
+HS = "tests/test_act_history_snapshot.py"
 RP, OB = "tests/test_act_repropose.py", "tests/test_act_ops_body.py"
 OF, WR = "tests/test_act_ops_failures.py", "tests/test_act_wave_runner.py"
 ENVELOPE_FIELDS = (
@@ -381,6 +384,82 @@ JUDGMENT = {
             "url.startswith(self._base)",
             f"{FH}::test_get_json_next_outside_base",
             '"forge: Link next outside api_base"',
+        ),
+    ),
+    # --- act_history_snapshot (этап 2b, Task 3)
+    "act_history_snapshot._timeout": (
+        r(
+            "deadline_passed",
+            "act_history_snapshot._timeout",
+            "if left <= 0",
+            f"{HS}::test_expired_deadline_spawns_no_git",
+            '"git: deadline passed"',
+        ),
+    ),
+    "act_history_snapshot._git": (
+        r(
+            "deadline_kill",
+            "act_history_snapshot._git",
+            "isinstance(exc, subprocess.TimeoutExpired)",
+            f"{HS}::test_fetch_respects_deadline",
+            '"git: deadline passed"',
+        ),
+    ),
+    "act_history_snapshot._require": (
+        r(
+            "git_failure",
+            "act_history_snapshot._require",
+            "if done.returncode != 0",
+            f"{HS}::test_fetch_failure_is_os_error",
+            '"snapshot: fetch owner/p: exit 128"',
+        ),
+    ),
+    "act_history_snapshot.open_snapshot": (
+        r(
+            "full_name",
+            "act_history_snapshot.open_snapshot",
+            "_FULL_NAME.fullmatch(full_name)",
+            f"{HS}::test_open_snapshot_refuses_bad_full_name",
+            "\"full_name 'owner' is not owner/repo\"",
+        ),
+        r(
+            "refs",
+            "act_history_snapshot.open_snapshot",
+            "if bad or not refs",
+            f"{HS}::test_open_snapshot_refuses_bad_refs",
+            '"are not full ref names"',
+        ),
+    ),
+    "act_history_snapshot.SnapshotHistory.prs_containing_commit": (
+        r(
+            "shape",
+            "act_history_snapshot.SnapshotHistory.prs_containing_commit",
+            "not all(_is_pull(p) for p in body)",
+            f"{HS}::test_prs_containing_commit_shape_refused",
+            '"forge: commits/aaaaaaaaaaaa/pulls: unexpected"',
+        ),
+        r(
+            "merged_by_merged_at",
+            "act_history_snapshot.SnapshotHistory.prs_containing_commit",
+            'p.get("merged_at") is not None',
+            f"{HS}::test_prs_containing_commit_normalized_from_rest",
+            '"MERGED"',
+        ),
+    ),
+    "act_history_snapshot.SnapshotHistory._rest": (
+        r(
+            "slug",
+            "act_history_snapshot.SnapshotHistory._rest",
+            "_FULL_NAME.fullmatch(repo_slug)",
+            f"{HS}::test_rest_refuses_bad_slug",
+            "\"forge: repo_slug '../x' is not owner/repo\"",
+        ),
+        r(
+            "status",
+            "act_history_snapshot.SnapshotHistory._rest",
+            "if status != 200",
+            f"{HS}::test_rest_non_200_is_os_error",
+            '"forge: HTTP 404: repos/owner/p/pulls/7"',
         ),
     ),
     "act_anon.contents_bytes": (
@@ -1234,86 +1313,87 @@ JUDGMENT = {
             '"≠"',
         ),
     ),
-    # --- act_status (Task 14)
-    "act_status.pr_for_merge": (
+    # --- act_history (Task 14; вынесено из act_status — этап 2b, Task 3)
+    "act_history.pr_for_merge": (
         r(
             "exactly_one",
-            "act_status.pr_for_merge",
+            "act_history.pr_for_merge",
             "len(found) != 1",
             f"{S}::test_pr_for_merge_needs_exactly_one",
             '"нужен ровно один"',
         ),
         r(
             "ops_failure",
-            "act_status.pr_for_merge",
+            "act_history.pr_for_merge",
             "except OPS_FAILURES",
             f"{OF}::test_pr_for_merge_failure_is_unavailable[CalledProcessError]",
             '"PR merge-коммита"',
         ),
     ),
-    "act_status._pr_head": (
+    "act_history._pr_head": (
         r(
             "head_fetched",
-            "act_status._pr_head",
+            "act_history._pr_head",
             "не догружена",
             f"{S}::test_history_fetches_squash_head_absent_locally",
         ),
         r(
             "ops_failure",
-            "act_status._pr_head",
+            "act_history._pr_head",
             "except OPS_FAILURES",
             f"{OF}::test_pr_head_failure_is_unavailable[CalledProcessError]",
             '"голова PR #7"',
         ),
     ),
     # событие-заявка разбирается в `_request_event` (вынесено при Task 14)
-    "act_status._request_event": (
+    "act_history._request_event": (
         r(
             "request:path",
-            "act_status._request_event",
+            "act_history._request_event",
             "manifest_path(req.ws_id, req.request_id) != path",
             f"{S}::test_history_manifest_off_its_path_unavailable[ws_id]",
             '"манифест лежит не по своему пути"',
         ),
         r(
             "request:no_pr",
-            "act_status._request_event",
+            "act_history._request_event",
             "isinstance(pr, Unavailable)",
             f"{S}::test_history_manifest_commit_without_pr_unavailable",
             '"нужен ровно один"',
         ),
     ),
-    "act_status._event": (
+    "act_history._event": (
         r(
             "immutable",
-            "act_status._event",
+            "act_history._event",
             'if status != "A"',
             f"{S}::test_manifest_edited_after_delivery_unavailable",
             '"запись истории изменена после доставки"',
         ),
         r(
             "stop:ws_id",
-            "act_status._event",
+            "act_history._event",
             "if not path.startswith((requests_dir, stops_dir))",
             f"{S}::test_history_stop_of_other_workstream_ignored",
             "== ()",
         ),
         r(
             "stop:path",
-            "act_status._event",
+            "act_history._event",
             "остановка лежит не по своему пути",
             f"{S}::test_history_stop_off_its_path_unavailable[node]",
         ),
     ),
-    "act_status.load_history": (
+    "act_history.load_history": (
         r(
             "base_unread",
-            "act_status.load_history",
+            "act_history.load_history",
             "if rows is None",
             f"{S}::test_history_unreadable_base_unavailable",
             '"история master: first-parent не прочитан"',
         ),
     ),
+    # --- act_status (Task 14)
     "act_status.Decider._binding": (
         r(
             "identity",
@@ -3597,6 +3677,25 @@ NOT_JUDGMENT = {
     "act_anon.AnonTransport._fetch": _IO,
     "act_forge_http.TokenTransport.__repr__": _BUILD,
     "act_forge_http.TokenTransport._fetch": _IO,
+    "act_history.HistoryOps.first_parent_changes": "протокол",
+    "act_history.HistoryOps.show_file": "протокол",
+    "act_history.HistoryOps.rev_parse": "протокол",
+    "act_history.HistoryOps.fetch_branch": "протокол",
+    "act_history.HistoryOps.prs_containing_commit": "протокол",
+    "act_history.HistoryOps.pr_facts": "протокол",
+    "act_history_snapshot.git_auth_env": _BUILD,
+    "act_history_snapshot._env": _BUILD,
+    "act_history_snapshot._url": _BUILD,
+    "act_history_snapshot._is_pull": "форма элемента ответа; отказ выносит `prs_containing_commit`",
+    "act_history_snapshot.SnapshotHistory.__init__": _BUILD,
+    "act_history_snapshot.SnapshotHistory.__repr__": _BUILD,
+    "act_history_snapshot.SnapshotHistory._run": _IO,
+    "act_history_snapshot.SnapshotHistory.first_parent_changes": _IO,
+    "act_history_snapshot.SnapshotHistory.show_file": _IO,
+    "act_history_snapshot.SnapshotHistory.show_file_bytes": _IO,
+    "act_history_snapshot.SnapshotHistory.rev_parse": _IO,
+    "act_history_snapshot.SnapshotHistory.fetch_branch": _IO,
+    "act_history_snapshot.SnapshotHistory.pr_facts": "нормализация REST → `headRefOid`; судит `act_history._pr_head`",
     **{
         f"act_check.{n}": _HELPER
         for n in (
