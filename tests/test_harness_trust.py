@@ -156,6 +156,13 @@ def test_synthetic_repo_fully_protected_passes(tmp_path: Path) -> None:  # дв�
     assert ht.violations(root, ALL, ALL) == []
 
 
+def test_trap_forms_are_recognized(tmp_path: Path) -> None:  # двойник
+    """Task 9, п. 9d: снятие, функция скрипта и `'exit N'` — не запуск."""
+    traps = "trap revoke_app_token EXIT\ntrap 'exit 130' INT\ntrap - EXIT\n"
+    root = _repo(tmp_path, _GOOD_LAUNCH + traps)
+    assert ht.launches(root)[1] == []
+
+
 def test_governance_group_form_is_a_py_uv_launch(tmp_path: Path) -> None:  # двойник
     """Форма предпроверки акта (Task 15) распознаётся как `py-uv` — с теми же
     требованиями к цепочке и `UV_DEPENDENCY_FILES`."""
@@ -230,6 +237,12 @@ def test_unprotected_link_fails(tmp_path: Path, unprotected: str, b_lazy: bool) 
         "$script_dir/governance/entry.py\n",
         'py=python3\n$py -I "$script_dir/governance/entry.py"\n',
         "unknown_helper --pr 7\n",
+        # Task 9, п. 9d: обработчик `trap` — не произвольная строка
+        "trap 'python3 -I x.py' EXIT\n",
+        "trap unknown_helper EXIT\n",
+        "trap 'exit 1; eval x' EXIT\n",
+        'trap "exit 1" EXIT\n',
+        "trap revoke_app_token USR1\n",
     ],
 )
 def test_unrecognized_launch_fails(tmp_path: Path, launch: str) -> None:

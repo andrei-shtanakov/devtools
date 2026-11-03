@@ -506,6 +506,72 @@ def test_main_http_error_code(key, monkeypatch, capsys) -> None:
     assert capsys.readouterr().err == "act_app_token: GET /app: HTTP 404\n"
 
 
+# --- отзыв токена установки (Task 9, п. 9d) ------------------------------------
+
+
+def test_revoke_deletes_installation_token() -> None:
+    http = Http({("DELETE", "/installation/token"): (204, None)})
+    assert act_app_token.revoke("ghs_tok", http=http) is None
+    assert http.seen == [("DELETE", "/installation/token", "token ghs_tok")]
+
+
+def test_revoke_refused_is_unavailable_without_token() -> None:
+    http = Http({("DELETE", "/installation/token"): (401, None)})
+    got = act_app_token.revoke("ghs_tok", http=http)
+    assert isinstance(got, Unavailable)
+    assert got.reason == "отзыв токена установки: HTTP 401"
+    assert "ghs_tok" not in got.reason
+
+
+@pytest.mark.parametrize("token", ["", "ghs tok", "ghs_tok\n", "ghs_a\nghs_b"])
+def test_revoke_malformed_token_no_request(token: str) -> None:
+    http = Http({})
+    got = act_app_token.revoke(token, http=http)
+    assert isinstance(got, Unavailable)
+    assert got.reason == "токен установки не той формы"
+    assert http.seen == []
+
+
+def test_revoke_reads_token_from_stdin_only(monkeypatch, capsys) -> None:
+    """Токен — только stdin: не argv (виден в `ps`) и не окружение."""
+    opener = _Opener({"/installation/token": (204, None)})
+    monkeypatch.setattr(act_app_token, "_OPENER", opener)
+    monkeypatch.setenv("GH_TOKEN", "ghs_env")
+    monkeypatch.setattr("sys.stdin", io.StringIO("ghs_tok\n"))
+    assert act_app_token.main(["--revoke"]) == 0
+    assert capsys.readouterr() == ("", "")
+    [req] = opener.requests
+    assert req.get_method() == "DELETE"
+    assert req.full_url == "https://api.github.com/installation/token"
+    assert req.get_header("Authorization") == "token ghs_tok"
+    # Пустой stdin — отказ без запроса, токен окружения не подхватывается.
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    assert act_app_token.main(["--revoke"]) == 2
+    assert len(opener.requests) == 1
+    assert "ghs_env" not in capsys.readouterr().err
+    # Токен в argv и смешение с аргументами личности — ошибка разбора.
+    for argv in (["--revoke", "ghs_tok"], ["--revoke", "--repo", "o/p"]):
+        with pytest.raises(SystemExit) as exc:
+            act_app_token.main(argv)
+        assert exc.value.code == 2
+    assert len(opener.requests) == 1
+
+
+def test_revoke_failure_is_2_without_token(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(act_app_token, "_OPENER", _Opener({}))
+    monkeypatch.setattr("sys.stdin", io.StringIO("ghs_tok\n"))
+    assert act_app_token.main(["--revoke"]) == 2
+    out = capsys.readouterr()
+    assert out.out == ""
+    assert out.err == "act_app_token: отзыв токена установки: HTTP 404\n"
+
+
+def test_identity_args_still_required(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        act_app_token.main(["--app-id", "5", "--repo", "o/p"])
+    assert exc.value.code == 2
+
+
 @pytest.mark.slow
 def test_runs_as_isolated_file_with_jwt_in_governance(tmp_path: Path, key) -> None:
     """Боевая форма запуска настоящим `uv` (офлайн, из кэша): `pyjwt[crypto]` —

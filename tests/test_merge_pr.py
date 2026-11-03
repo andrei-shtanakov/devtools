@@ -134,10 +134,14 @@ esac
 
 UV_STUB = """#!/usr/bin/env bash
 # Стаб uv: предпроверка акта review/v1 (Task 15) — лог вызова и код из env;
-# личность App (Task 15a) — две строки `UV_STUB_APP_OUT` и код `UV_STUB_APP_RC`.
+# личность App (Task 15a) — две строки `UV_STUB_APP_OUT` и код `UV_STUB_APP_RC`;
+# отзыв токена (Task 9) — stdin строкой `uv-stdin [...]`, код `UV_STUB_REVOKE_RC`.
 echo "uv GH_TOKEN=[${GH_TOKEN-<unset>}] \\
 UV_PROJECT_ENVIRONMENT=[${UV_PROJECT_ENVIRONMENT-}] $*" >> "$GH_STUB_LOG"
 case "$*" in
+  *act_app_token.py*--revoke*)
+    echo "uv-stdin [$(cat)]" >> "$GH_STUB_LOG"
+    exit "${UV_STUB_REVOKE_RC:-0}" ;;
   *act_app_token.py*)
     printf '%s' "${UV_STUB_APP_OUT-$(printf 'df-reviewer[bot]\\nghs_inst\\n')}"
     exit "${UV_STUB_APP_RC:-0}" ;;
@@ -1478,6 +1482,15 @@ def _no_secret(res: subprocess.CompletedProcess[str], secret: str = APP_TOKEN) -
     assert secret not in res.stdout and secret not in res.stderr
 
 
+def _revokes(fleet: Fleet) -> list[str]:
+    """Вызовы отзыва токена установки (`act_app_token.py --revoke`)."""
+    return [c for c in fleet.premerge_calls() if c.endswith(" --revoke")]
+
+
+def _identity_calls(fleet: Fleet) -> list[str]:
+    return [c for c in fleet.premerge_calls() if c not in _revokes(fleet)]
+
+
 def test_app_mode_identity_premerge_and_merge_as_bot(fleet: Fleet) -> None:
     """Личность — JWT App (без `gh api user`: токен установки получает 403),
     предпроверка — `--merger <slug>[bot] --merger-type Bot` с пустым `GH_TOKEN`
@@ -1504,6 +1517,7 @@ def test_app_mode_identity_premerge_and_merge_as_bot(fleet: Fleet) -> None:
             "--merger df-reviewer[bot] --merger-type Bot "
             f"--app-id 5285716 --app-key {fleet.app_key}"
         ),
+        f"uv GH_TOKEN=[<unset>] {form} {gov / 'act_app_token.py'} --revoke",
     ]
     assert fleet.merge_calls() == [
         (
@@ -1620,7 +1634,7 @@ def test_app_identity_malformed_is_2_without_token(fleet: Fleet, out: str) -> No
     assert res.returncode == 2, res.stderr
     assert "App-режим" in res.stderr
     _no_secret(res)
-    assert len(fleet.premerge_calls()) == 1 and fleet.merge_calls() == []
+    assert len(_identity_calls(fleet)) == 1 and fleet.merge_calls() == []
 
 
 @pytest.mark.parametrize("rc,code", [("3", 3), ("2", 2)])
@@ -1727,3 +1741,134 @@ def test_app_key_dir_defaults_to_home_config(fleet: Fleet) -> None:
     # Тот же ключ при XDG_CONFIG_HOME, указывающем в другое место, — вне каталога.
     res = fleet.run(**_app_candidate(fleet, MERGE_APP_KEY=str(key)))
     assert res.returncode == 2 and "вне" in res.stderr
+
+
+def test_app_key_file_symlink_refused(fleet: Fleet) -> None:
+    """Task 9, п. 9c: сам файл ключа — не ссылка, даже на ключ внутри `apps/`."""
+    link = fleet.app_key.parent / "link.pem"
+    link.symlink_to(fleet.app_key)
+    res = fleet.run(**_app_candidate(fleet, MERGE_APP_KEY=str(link)))
+    assert res.returncode == 2, res.stderr
+    assert "MERGE_APP_KEY" in res.stderr and "ссылк" in res.stderr
+    assert fleet.calls() == []
+
+
+@pytest.mark.parametrize("target", ["inside", "outside"])
+def test_app_key_dir_symlink_under_apps_refused(fleet: Fleet, target: str) -> None:
+    """Task 9, п. 9c: ни один каталог после `apps/` — не ссылка (любой уровень)."""
+    apps = fleet.app_key.parent
+    real = apps / "real" if target == "inside" else fleet.tmp / "elsewhere"
+    (real / "deep").mkdir(parents=True)
+    (real / "deep" / "k.pem").write_text("k\n")
+    (apps / "team").mkdir()
+    (apps / "team" / "sub").symlink_to(real)
+    key = apps / "team" / "sub" / "deep" / "k.pem"
+    res = fleet.run(**_app_candidate(fleet, MERGE_APP_KEY=str(key)))
+    assert res.returncode == 2, res.stderr
+    assert "MERGE_APP_KEY" in res.stderr and "ссылк" in res.stderr
+    assert f"{apps}/team/sub" in res.stderr
+    assert fleet.calls() == []
+
+
+def test_app_key_in_real_subdir_accepted(fleet: Fleet) -> None:
+    """Двойник 9c: настоящие подкаталоги `apps/` (и двойной `/`) не отказ."""
+    key = fleet.app_key.parent / "team" / "deep" / "k.pem"
+    key.parent.mkdir(parents=True)
+    key.write_text("k\n")
+    path = f"{fleet.app_key.parent}/team//deep/k.pem"
+    res = fleet.run(**_app_candidate(fleet, MERGE_APP_KEY=path))
+    assert res.returncode == 0, res.stderr
+
+
+def _stdin_lines(fleet: Fleet) -> list[str]:
+    return [c for c in fleet.calls() if c.startswith("uv-stdin ")]
+
+
+def test_token_revoked_on_success(fleet: Fleet) -> None:
+    """Task 9, п. 9d: после мержа токен установки отзывается — последним
+    вызовом, токеном из stdin (в argv его нет)."""
+    res = fleet.run(**_app_candidate(fleet))
+    assert res.returncode == 0, res.stderr
+    _no_secret(res)
+    assert len(_revokes(fleet)) == 1 and APP_TOKEN not in _revokes(fleet)[0]
+    assert _stdin_lines(fleet) == [f"uv-stdin [{APP_TOKEN}]"]
+    calls = fleet.calls()
+    assert calls.index(_revokes(fleet)[0]) > calls.index(fleet.merge_calls()[0])
+
+
+def test_token_revoked_on_put_refusal(fleet: Fleet) -> None:
+    res = fleet.run(**_app_candidate(fleet, GH_STUB_ACTUAL_OID="f" * 40))
+    assert res.returncode == 4, res.stderr
+    _no_secret(res)
+    assert len(_revokes(fleet)) == 1
+    assert _stdin_lines(fleet) == [f"uv-stdin [{APP_TOKEN}]"]
+
+
+@pytest.mark.parametrize(
+    "env,code",
+    [
+        ({"UV_STUB_RC": "3"}, 3),
+        ({"UV_STUB_RC": "2"}, 2),
+        ({"GH_STUB_FILES": "merge-pr.sh"}, 3),
+        ({"UV_STUB_APP_OUT": f"df-reviewer\n{APP_TOKEN}\n"}, 2),
+        ({"GH_STUB_COMPARE_FAIL": "1"}, 2),
+    ],
+    ids=[
+        "premerge_refusal",
+        "premerge_unset",
+        "authority_root",
+        "bad_login",
+        "compare",
+    ],
+)
+def test_token_revoked_on_die_after_issue(fleet: Fleet, env, code: int) -> None:
+    """Любой выход после выдачи токена — с отзывом; код выхода — прежний."""
+    res = fleet.run(**_app_candidate(fleet, **env))
+    assert res.returncode == code, res.stderr
+    _no_secret(res)
+    assert len(_revokes(fleet)) == 1 and fleet.merge_calls() == []
+    assert _stdin_lines(fleet) == [f"uv-stdin [{APP_TOKEN}]"]
+
+
+def test_token_revoked_on_dry_run(fleet: Fleet) -> None:
+    res = fleet.run("--dry-run", **_app_candidate(fleet))
+    assert res.returncode == 0, res.stderr
+    assert len(_revokes(fleet)) == 1 and fleet.merge_calls() == []
+
+
+@pytest.mark.parametrize(
+    "env,code",
+    [({}, 0), ({"UV_STUB_RC": "3"}, 3), ({"GH_STUB_ACTUAL_OID": "f" * 40}, 4)],
+    ids=["success", "premerge_refusal", "put_refusal"],
+)
+def test_exit_status_preserved_when_revoke_fails(fleet: Fleet, env, code: int):
+    """Сбой отзыва — заметка в stderr без токена; код выхода — исходный."""
+    res = fleet.run(**_app_candidate(fleet, UV_STUB_REVOKE_RC="2", **env))
+    assert res.returncode == code, res.stderr
+    _no_secret(res)
+    assert "токен установки App не отозван" in res.stderr
+    assert len(_revokes(fleet)) == 1
+    if code == 0:
+        assert "смержено:" in res.stdout
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"UV_STUB_APP_RC": "2", "UV_STUB_APP_OUT": ""},
+        {"UV_STUB_APP_OUT": "df-reviewer[bot]\nghs bad\n"},
+        {"UV_STUB_APP_OUT": f"df-reviewer[bot]\n{APP_TOKEN}\nextra"},
+    ],
+    ids=["identity_failed", "malformed_token", "three_lines"],
+)
+def test_no_revoke_without_issued_token(fleet: Fleet, env) -> None:
+    """Токена нет (или он не той формы) — отзывать нечего, отзыв не зовётся."""
+    res = fleet.run(**_app_candidate(fleet, **env))
+    assert res.returncode == 2, res.stderr
+    assert _revokes(fleet) == []
+
+
+def test_profile_mode_does_not_revoke(fleet: Fleet) -> None:
+    res = fleet.run(**_candidate(GH_STUB_LABELS="human-approval-required"))
+    assert res.returncode == 0, res.stderr
+    assert _revokes(fleet) == [] and _stdin_lines(fleet) == []

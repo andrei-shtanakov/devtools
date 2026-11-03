@@ -2856,6 +2856,22 @@ JUDGMENT = {
             '"токен установки 9: HTTP 502"',
         ),
     ),
+    "act_app_token.revoke": (
+        r(
+            "revoke_form",
+            "act_app_token.revoke",
+            "TOKEN.fullmatch(token) is None",
+            f"{K}::test_revoke_malformed_token_no_request",
+            '"токен установки не той формы"',
+        ),
+        r(
+            "revoke_status",
+            "act_app_token.revoke",
+            "status != 204",
+            f"{K}::test_revoke_refused_is_unavailable_without_token",
+            '"отзыв токена установки: HTTP 401"',
+        ),
+    ),
     "act_app_token.app_identity": (
         r(
             "app",
@@ -4022,7 +4038,7 @@ NOT_JUDGMENT = {
     "act_app_token._http": _IO,
     "act_app_token._build_opener": _BUILD,
     "act_app_token._field": _BUILD,
-    "act_app_token.main": "CLI вокруг `app_identity`",
+    "act_app_token.main": "CLI вокруг `app_identity` и `revoke`",
     "act_barrier._kind": "классификация формы ветки; суждения — `_judge`",
     "act_barrier._head": _IO,
     "act_barrier._pending": "узел отдан на одобрение (`status: approval_pending`); не узел — `False`, отказ судит `_legacy_resolved`",

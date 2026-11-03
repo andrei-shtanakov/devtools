@@ -3,7 +3,9 @@
 Исполняется `merge-pr.sh` файлом (форма Task 15): `uv run --frozen --exact --group
 governance --no-config --no-env-file python -I <этот файл> --app-id … --key …
 --repo …` → stdout две строки: `<slug>[bot]` и токен установки на целевой репо;
-иначе код 2 и причина в stderr (без токенов и байтов ключа). JWT —
+иначе код 2 и причина в stderr (без токенов и байтов ключа). `--revoke` (Task 9,
+п. 9d) — отзыв токена установки, сам токен — только stdin (не argv: виден в `ps`;
+не окружение): код 0 — отозван, 2 — нет. JWT —
 `pyjwt[crypto]` (группа governance, пин в uv.lock); HTTP — stdlib `urllib`, без
 перенаправлений.
 """
@@ -189,6 +191,17 @@ def app_identity(
     return f"{slug}[bot]", token
 
 
+def revoke(token: str, *, http: Http = _http) -> Unavailable | None:
+    """Отзыв токена установки (`DELETE /installation/token`, 204); `None` — отозван.
+    Токен не той формы — отказ без запроса; текст отказа токена не несёт."""
+    if TOKEN.fullmatch(token) is None:
+        return Unavailable("токен установки не той формы")
+    status, _data = http("DELETE", "/installation/token", f"token {token}")
+    if status != 204:
+        return Unavailable(f"отзыв токена установки: HTTP {status}")
+    return None
+
+
 def installations_refusal(
     app_id: int,
     key: Path,
@@ -221,12 +234,24 @@ def installations_refusal(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI для `merge-pr.sh`: две строки — `<slug>[bot]` и токен; иначе код 2."""
+    """CLI для `merge-pr.sh`: две строки — `<slug>[bot]` и токен; иначе код 2.
+    `--revoke` — отзыв токена из stdin (одна строка), без прочих аргументов."""
     p = argparse.ArgumentParser(prog="act_app_token")
-    p.add_argument("--app-id", required=True, type=int)
-    p.add_argument("--key", required=True, type=Path)
-    p.add_argument("--repo", required=True)
+    p.add_argument("--revoke", action="store_true")
+    p.add_argument("--app-id", type=int)
+    p.add_argument("--key", type=Path)
+    p.add_argument("--repo")
     args = p.parse_args(argv)
+    if args.revoke:
+        if (args.app_id, args.key, args.repo) != (None, None, None):
+            p.error("--revoke: токен только из stdin, без --app-id/--key/--repo")
+        failed = revoke(sys.stdin.read().removesuffix("\n"))
+        if failed is not None:
+            print(f"act_app_token: {failed.reason}", file=sys.stderr)
+            return 2
+        return 0
+    if args.app_id is None or args.key is None or args.repo is None:
+        p.error("нужны --app-id, --key и --repo")
     got = app_identity(args.app_id, args.key, args.repo)
     if isinstance(got, Unavailable):
         print(f"act_app_token: {got.reason}", file=sys.stderr)

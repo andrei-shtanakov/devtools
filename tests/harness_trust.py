@@ -39,9 +39,14 @@ SAFE_COMMANDS = frozenset(
         # (их тела проверяются тем же разбором)
         "die", "usage", "gh_a", "gh_h", "approval_globs", "ssot_key",
         "approval_template_glob",
-        "brief_check_failed", "has_label",
+        "brief_check_failed", "has_label", "revoke_app_token",
     }
 )  # fmt: skip
+#: `trap` (Task 9, п. 9d) — только снятие `-`, функция скрипта из `SAFE_COMMANDS`
+#: или `'exit N'`: строка-обработчик иной формы исполнялась бы непроверенной.
+_TRAP = re.compile(
+    r"^trap (-|[A-Za-z_][A-Za-z0-9_]*|'exit [0-9]+') (EXIT|HUP|INT|TERM)$"
+)
 _KEYWORDS = {"then", "else", "do", "if", "elif", "while", "until", "!", "time"}
 _SOURCE = re.compile(r'^\.\s+"\$script_dir/([^"]+)"$')
 _PY_STDLIB = re.compile(r'^python3\s+-I\s+"\$script_dir/([^"]+\.py)"(\s.*)?$')
@@ -217,6 +222,11 @@ def _scan(root: Path, script: str, seen: set[str]) -> tuple[list[Launch], list[s
                     f"{script}: uv без собственного UV_PROJECT_ENVIRONMENT: {segment}"
                 )
             found.append(Launch(script, "py-uv", m.group(1)))
+        elif word == "trap":
+            m = _TRAP.match(command)
+            handler = m.group(1) if m else ""
+            if not handler or (handler[0] not in "-'" and handler not in SAFE_COMMANDS):
+                problems.append(f"{script}: нераспознанный запуск: {segment}")
         elif word not in SAFE_COMMANDS:
             problems.append(f"{script}: нераспознанный запуск: {segment}")
     problems += _raw_check(script, text, [x for x in found if x.script == script])

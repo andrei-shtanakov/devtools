@@ -194,6 +194,23 @@ gh_a() {
     fi
 }
 
+# Отзыв токена установки App (Task 9, п. 9d) — EXIT-ловец, ставится сразу после
+# выдачи. Токен — только stdin `act_app_token.py --revoke` (не argv, не env);
+# сбой отзыва — заметка без токена, код выхода остаётся исходным.
+revoke_app_token() {
+    _rc=$?
+    trap - EXIT
+    if [ -n "$app_token" ]; then
+        printf '%s\n' "$app_token" | (cd "$script_dir" \
+            && UV_PROJECT_ENVIRONMENT="$premerge_env" \
+            uv run --frozen --exact --group governance --no-config --no-env-file \
+            python -I "$script_dir/governance/act_app_token.py" --revoke >&2) \
+            || echo "ЗАМЕТКА: токен установки App не отозван (истечёт сам \
+через час)" >&2
+    fi
+    exit "$_rc"
+}
+
 script_dir=$(cd "$(dirname "$0")" && pwd)
 . "$script_dir/ssot_env.sh"
 . "$script_dir/approval_branches.sh"
@@ -320,6 +337,21 @@ $MERGE_APP_KEY" ;;
         "$_apps_dir"?*) : ;;
         *) die 2 "App-режим: MERGE_APP_KEY вне $_apps_dir — $MERGE_APP_KEY" ;;
     esac
+    # Путь после `apps/` — без ссылок (Task 9, п. 9c): ни сам файл ключа, ни
+    # один каталог за `apps/`; `-f`/`-r` ниже идут за ссылкой и этого не видят.
+    _rest="${MERGE_APP_KEY#"$_apps_dir"}"
+    _walk="${_apps_dir%/}"
+    while [ -n "$_rest" ]; do
+        _part="${_rest%%/*}"
+        case "$_rest" in
+            */*) _rest="${_rest#*/}" ;;
+            *) _rest="" ;;
+        esac
+        [ -n "$_part" ] || continue
+        _walk="$_walk/$_part"
+        [ ! -L "$_walk" ] || die 2 "App-режим: MERGE_APP_KEY — путь через \
+ссылку $_walk"
+    done
     [ -f "$MERGE_APP_KEY" ] && [ -r "$MERGE_APP_KEY" ] || die 2 "App-режим: \
 MERGE_APP_KEY не обычный читаемый файл — $MERGE_APP_KEY"
 fi
@@ -502,13 +534,19 @@ allowlist И ЕСТЬ акт одобрения узлов; агентский �
 ${slug}#${pr}: App-режим — ответ личности App не из двух строк"
             login=$(printf '%s\n' "$app_out" | sed -n '1p')
             app_token=$(printf '%s\n' "$app_out" | sed -n '2p')
-            case "${login%\[bot\]}" in
-                "$login"|""|*[!A-Za-z0-9_.-]*) die 2 "PR \
-${slug}#${pr}: App-режим — логин App не формы <slug>[bot]" ;;
-            esac
             case "$app_token" in
                 ""|*[!A-Za-z0-9_]*) die 2 "PR ${slug}#${pr}: \
 App-режим — токен установки пуст или не той формы" ;;
+            esac
+            # Токен выдан — отзыв на любом выходе (Task 9, п. 9d); сигнал —
+            # через `exit`, чтобы сработал и EXIT-ловец (dash сам его не зовёт).
+            trap revoke_app_token EXIT
+            trap 'exit 129' HUP
+            trap 'exit 130' INT
+            trap 'exit 143' TERM
+            case "${login%\[bot\]}" in
+                "$login"|""|*[!A-Za-z0-9_.-]*) die 2 "PR \
+${slug}#${pr}: App-режим — логин App не формы <slug>[bot]" ;;
             esac
             merger_type="Bot"
             # Предпроверка — с пустым `GH_TOKEN`: производный токен установки
