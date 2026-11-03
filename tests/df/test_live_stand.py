@@ -3,13 +3,16 @@
 The live phases of `tests/df/live_stand.py` run only in
 `.github/workflows/df-stage2-live.yml`; here: the provenance check before
 any secret is read (`test_live_provenance`), the evidence guard, the row
-verdicts and the loopback gate proxy against a local upstream. Nothing here
-reads the stand's variables or reaches the network.
+verdicts, the rows' dependencies and the helpers of the merge rows (stage
+2b, Task 11: the seed, the stop-PR, the proxy log, the verdicts of rows 11
+and 12, the cleanup). The gate proxy has its own tests
+(`tests/df/test_gate_proxy.py`). Nothing here reads the stand's variables
+or reaches the network.
 """
 
 from __future__ import annotations
 
-import http.server
+import inspect
 import json
 import os
 import re
@@ -17,10 +20,10 @@ import shutil
 import subprocess
 import threading
 import time
-import urllib.request
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -29,16 +32,28 @@ from df.admin_tree import CONTRACT_FILES, governance_files
 from df.build import GIT_ISOLATION
 from df.config import ReleaseEntry, ReleasesConfig, dump_releases
 from df.paths import Layout
+from df.publisher.merge import PREMISE, parse_patterns, route
+from df.publisher.request import Response
 from df.release import RELEASE_JSON
-from df.stage2_config import PublisherConfig
+from governance.act_envelope import (
+    DeliveredRequest,
+    DeliveredStop,
+    StopRecord,
+    parse_stop,
+    stop_path,
+)
+from governance.act_request import NodeEntry, NodeRequest, manifest_path, parse_manifest
+from governance.act_time import Unavailable
+from governance.approval_branches import stop_branch
 from tests.df import gate_proxy, live_stand
 from tests.df.live_stand import (
+    SKIPPED,
     ProvenanceError,
     RowFailed,
     StandSecrets,
 )
-from tests.df.roles_world import FIXTURE_FROM_CHECKOUT, OS_DIR
-from tests.df.root_world import INFRA, SYSTEM_GIT, infra
+from tests.df.roles_world import FIXTURE_FROM_CHECKOUT, OS_DIR, RolesWorld
+from tests.df.root_world import INFRA, REPO_ROOT, SYSTEM_GIT, infra
 from tests.df.site_world import prime_cache, write_checkout
 
 #: The approval-branch patterns `merge` routing reads (one of `CONTRACT_FILES`).
@@ -537,116 +552,552 @@ def test_no_test_reads_stand_variables() -> None:
     assert readers == []
 
 
-# ---------- the gate proxy (R15-5) ----------
+# ---------- the merge rows on the stop route (stage 2b, Task 11) ----------
+
+
+def test_merge_rows_needs() -> None:
+    """Row 11 needs the seed and the stop-PR of row 10; row 12 seeds its
+    own workstream and needs no other row; both come after the 2a rows."""
+    by_id = {r.id: r for r in live_stand.ROWS}
+    assert by_id["10"].needs == ()
+    assert by_id["11"].needs == ("10",)
+    assert by_id["12"].needs == ()
+    assert [r.id for r in live_stand.ROWS][-3:] == ["10", "11", "12"]
+
+
+def test_failed_seed_skips_row11_not_row12() -> None:
+    def fn(row_id: str) -> Callable[[object], dict[str, object]]:
+        def run(_st: object) -> dict[str, object]:
+            if row_id == "10":
+                raise RowFailed("seed fails")
+            return {}
+
+        return run
+
+    rows = tuple(
+        live_stand.Row(r.id, r.title, fn(r.id), r.needs)  # type: ignore[arg-type]
+        for r in live_stand.ROWS
+    )
+    cleanup = live_stand.Row("9", "z", fn("9"))  # type: ignore[arg-type]
+    results = live_stand.run_rows(object(), rows, cleanup)  # type: ignore[arg-type]
+    by_id = {name.split(" ", 1)[0]: v["status"] for name, v in results.items()}
+    assert (by_id["10"], by_id["11"], by_id["12"]) == ("fail", SKIPPED, "pass")
+    assert by_id["9"] == "pass"
+    assert live_stand.verdict(results) == live_stand.EXIT_FAILED
+
+
+def test_stand_workstreams_and_branches() -> None:
+    """The two workstreams of a run and their branches: the stop branches
+    are the contract's (`stop_branch`), every one is swept by `wipe`."""
+    tag = "123-1-linux"
+    assert live_stand.stand_ws(tag) == "stand-123-1-linux"
+    assert live_stand.stand_ws(tag, "b") == "stand-123-1-linux-b"
+    names = live_stand.tag_branches(tag)
+    assert names["stop"] == stop_branch("stand-123-1-linux", "n1", 1)
+    assert names["stop-b"] == stop_branch("stand-123-1-linux-b", "n1", 1)
+    assert names["seed"] != names["seed-b"]
+    assert len(set(names.values())) == len(names)
+
+
+def test_seed_manifest_is_a_delivered_request_of_g1() -> None:
+    """The seed's one file is a `review/v1` manifest of node `n1` g1 of the
+    workstream, at its own path (what `load_history` reads)."""
+    path, text = live_stand.seed_manifest("stand-t-b", "owner/stand")
+    req = parse_manifest(text)
+    assert path == manifest_path("stand-t-b", req.request_id)
+    assert (req.ws_id, req.product) == ("stand-t-b", "owner/stand")
+    assert {n: e.generation for n, e in req.nodes.items()} == {"n1": 1}
+
+
+def test_stop_pr_is_routed_as_stop_by_the_publisher() -> None:
+    """The stop-PR of the rows (one added record on the contract's branch)
+    is the kind `stop` by the publisher's own routing and its precheck's
+    path rule; its record names the node and generation of its path."""
+    ws = "stand-123-1-macos-b"
+    path, text = live_stand.stop_record(ws, "first")
+    assert path == stop_path(ws, "n1", 1)
+    assert parse_stop(text) == StopRecord("n1", 1, "first")
+    patterns = parse_patterns((REPO_ROOT / PATTERNS).read_text())
+    branch = live_stand.tag_branches("123-1-macos")["stop-b"]
+    assert route(branch, [("added", path, None)], patterns) == "stop"
+    assert route(branch, [("modified", path, None)], patterns) != "stop"
+
+
+def _request(ws: str, gen: int) -> NodeRequest:
+    _path, text = live_stand.seed_manifest(ws, "owner/stand")
+    req = parse_manifest(text)
+    entry = req.nodes["n1"]
+    nodes = {"n1": NodeEntry(entry.path, entry.content_hash, gen)}
+    return NodeRequest(
+        req.request_id, ws, req.product, nodes, req.upstream_pins, req.policy
+    )
+
+
+def test_delivered_seed_judges_the_history() -> None:
+    """Row 10's control: the current event of `n1` is the seed's merge
+    commit and head at g1; anything else is named."""
+    merge, head = "m" * 40, "h" * 40
+    seed = DeliveredRequest(merge, head, _request("w", 1))
+    assert live_stand.seed_problem((seed,), merge, head) is None
+    assert "нет" in str(live_stand.seed_problem((), merge, head))
+    other = DeliveredRequest("x" * 40, head, _request("w", 1))
+    assert live_stand.seed_problem((other,), merge, head) is not None
+    g2 = DeliveredRequest(merge, head, _request("w", 2))
+    assert live_stand.seed_problem((g2,), merge, head) is not None
+    stopped = (seed, DeliveredStop("s" * 40, StopRecord("n1", 1, "x")))
+    assert live_stand.seed_problem(stopped, merge, head) is not None
+    assert live_stand.seed_problem(Unavailable("boom"), merge, head) == "boom"
+
+
+def _seen(
+    method: str = "PUT",
+    path: str = "/repos/o/r/pulls/7/merge",
+    status: int = 409,
+    *,
+    held: bool = False,
+    up: bool = True,
+    down: bool = True,
+) -> gate_proxy.Seen:
+    return gate_proxy.Seen(method, path, status, held, False, up, down)
+
+
+def test_merge_puts_reads_the_proxy_log() -> None:
+    """Every `PUT` on the PR's merge path that reached the proxy, delivered
+    upstream or not; other requests and other PRs are not counted."""
+    log = [
+        _seen("GET", status=200),
+        _seen("POST", "/repos/o/r/pulls/7/reviews", 200),
+        _seen(held=True),
+        _seen(path="/repos/o/r/pulls/8/merge"),
+        _seen(status=502, up=False),
+    ]
+    puts = live_stand.merge_puts(log, "o/r", 7)
+    assert puts == [log[2], log[4]]
+    assert live_stand.merge_put_re("o/r", 7).fullmatch("/repos/o/r/pulls/7/merge")
+    assert not live_stand.merge_put_re("o/r", 7).fullmatch("/repos/o/r/pulls/70/merge")
+
+
+def _answer(
+    outcome: str, reason: str | None, *, replayed: bool = False, **result: object
+) -> tuple[int, Response]:
+    evidence: dict[str, object] = {"kind": "stop"}
+    if replayed:
+        evidence["replayed"] = True
+    if outcome == "done" and not replayed:
+        evidence["premise"] = PREMISE
+    rc = {"done": 0, "refused": 2}.get(outcome, 3)
+    return rc, Response(outcome, reason, result, evidence)  # type: ignore[arg-type]
+
+
+HC_FIRST = _answer("refused", "head_changed")
+HC_AGAIN = _answer("refused", "head_changed", replayed=True)
+HC_PR: dict[str, object] = {"state": "open", "merged": False}
+HC_PUTS = [_seen(held=True)]
+
+
+def test_head_changed_verdict() -> None:
+    """Row 11: `refused: head_changed`, the same on the repeat (replayed),
+    the PR open and not merged, one `PUT` upstream answered 409."""
+    live_stand.check_head_changed(HC_FIRST, HC_AGAIN, HC_PR, HC_PUTS)
+
+
+@pytest.mark.parametrize(
+    ("first", "again", "pr", "puts", "why"),
+    [
+        pytest.param(
+            HC_FIRST,
+            HC_AGAIN,
+            {"state": "closed", "merged": True},
+            HC_PUTS,
+            "PR после отказа",
+            id="merged",
+        ),
+        pytest.param(
+            _answer("refused", "pr_state"),
+            HC_AGAIN,
+            HC_PR,
+            HC_PUTS,
+            "merge:",
+            id="other-reason",
+        ),
+        pytest.param(
+            HC_FIRST,
+            _answer("refused", "head_changed"),
+            HC_PR,
+            HC_PUTS,
+            "повтор не replay",
+            id="repeat-not-replayed",
+        ),
+        pytest.param(
+            HC_FIRST, HC_AGAIN, HC_PR, HC_PUTS * 2, "PUT выше: 2", id="two-puts"
+        ),
+        pytest.param(
+            HC_FIRST,
+            HC_AGAIN,
+            HC_PR,
+            [_seen(status=200)],
+            "PUT выше: Seen",
+            id="put-merged",
+        ),
+        pytest.param(
+            HC_FIRST,
+            HC_AGAIN,
+            HC_PR,
+            [_seen(held=True, up=False)],
+            "PUT выше: Seen",
+            id="409-not-from-upstream",
+        ),
+        pytest.param(HC_FIRST, HC_AGAIN, HC_PR, [], "PUT выше: 0", id="no-put"),
+    ],
+)
+def test_head_changed_verdict_refuses(
+    first: tuple[int, Response],
+    again: tuple[int, Response],
+    pr: dict[str, object],
+    puts: list[gate_proxy.Seen],
+    why: str,
+) -> None:
+    with pytest.raises(RowFailed, match=re.escape(why)):
+        live_stand.check_head_changed(first, again, pr, puts)
+
+
+RC_HEAD, RC_COMMIT, RC_BOT = "h" * 40, "c" * 40, "df-app[bot]"
+RC_RESULT = {"merge_commit": RC_COMMIT, "head_sha": RC_HEAD}
+RC_DONE = _answer("done", None, **RC_RESULT)
+RC_REPLAY = _answer("done", None, replayed=True, **RC_RESULT)
+RC_LAG = _answer("unknown", "merge_not_confirmed")
+RC_PR: dict[str, object] = {
+    "merged": True,
+    "merged_by": {"login": RC_BOT, "type": "Bot"},
+    "head": {"sha": RC_HEAD},
+    "merge_commit_sha": RC_COMMIT,
+}
+RC_PUTS = [_seen(status=200, down=False)]
+
+
+def check_rc(
+    answers: list[tuple[int, Response]],
+    pr: dict[str, object] = RC_PR,
+    puts: list[gate_proxy.Seen] = RC_PUTS,
+) -> None:
+    live_stand.check_reconciled(answers, pr, puts, bot=RC_BOT, head=RC_HEAD)
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [
+        pytest.param([RC_DONE, RC_REPLAY], id="no-lag"),
+        pytest.param([RC_LAG, RC_DONE, RC_REPLAY], id="one-lagging-read"),
+        pytest.param([RC_LAG, RC_LAG, RC_LAG, RC_DONE, RC_REPLAY], id="three"),
+    ],
+)
+def test_reconciled_verdict(answers: list[tuple[int, Response]]) -> None:
+    """Row 12: only `unknown: merge_not_confirmed` while the read lags,
+    then `done` by reconciliation (the premise named), the PR merged by the
+    bot at the head with the answered merge commit, then the same `done`,
+    replayed; one `PUT` upstream over all answers, its answer cut."""
+    check_rc(answers)
+
+
+@pytest.mark.parametrize(
+    ("answers", "pr", "puts", "why"),
+    [
+        pytest.param(
+            [RC_LAG] * 4,
+            RC_PR,
+            RC_PUTS,
+            "сверка не сошлась за 4 повторов",
+            id="lag-beyond-bound",
+        ),
+        pytest.param(
+            [_answer("unknown", "github_unavailable"), RC_DONE, RC_REPLAY],
+            RC_PR,
+            RC_PUTS,
+            "после сверки ответов 3",
+            id="other-unknown-before-done",
+        ),
+        pytest.param(
+            [RC_LAG, RC_REPLAY, RC_REPLAY],
+            RC_PR,
+            RC_PUTS,
+            "не сверка",
+            id="replay-as-first-done",
+        ),
+        pytest.param(
+            [RC_DONE, RC_REPLAY],
+            {**RC_PR, "merged_by": {"login": "someone", "type": "User"}},
+            RC_PUTS,
+            "PR на GitHub",
+            id="by-human",
+        ),
+        pytest.param(
+            [RC_DONE, RC_REPLAY],
+            {**RC_PR, "merge_commit_sha": "d" * 40},
+            RC_PUTS,
+            "PR на GitHub",
+            id="other-commit",
+        ),
+        pytest.param(
+            [RC_DONE, RC_DONE],
+            RC_PR,
+            RC_PUTS,
+            "повтор не replay",
+            id="repeat-not-replayed",
+        ),
+        pytest.param(
+            [RC_LAG, RC_DONE, RC_REPLAY],
+            RC_PR,
+            RC_PUTS + [_seen(status=200)],
+            "PUT выше: 2",
+            id="second-put-among-repeats",
+        ),
+        pytest.param(
+            [RC_DONE, RC_REPLAY],
+            RC_PR,
+            [_seen(status=200)],
+            "PUT выше: Seen",
+            id="answer-not-cut",
+        ),
+        pytest.param(
+            [(0, Response("done", None, RC_RESULT, {"kind": "stop"})), RC_REPLAY],
+            RC_PR,
+            RC_PUTS,
+            "не сверка",
+            id="no-premise",
+        ),
+    ],
+)
+def test_reconciled_verdict_refuses(
+    answers: list[tuple[int, Response]],
+    pr: dict[str, object],
+    puts: list[gate_proxy.Seen],
+    why: str,
+) -> None:
+    with pytest.raises(RowFailed, match=re.escape(why)):
+        check_rc(answers, pr, puts)
+
+
+def test_settle_merge_repeats_only_while_lagging() -> None:
+    """The identical request is repeated while it answers `unknown:
+    merge_not_confirmed` (at most `RECONCILE_TRIES` in all), then once more
+    for the replay; past the bound no replay is asked for."""
+
+    def asker(
+        script: list[tuple[int, Response]],
+    ) -> tuple[list[int], Callable[[], tuple[int, Response]]]:
+        calls: list[int] = []
+
+        def ask() -> tuple[int, Response]:
+            calls.append(1)
+            return script[len(calls) - 1]
+
+        return calls, ask
+
+    waits: list[float] = []
+    calls, ask = asker([RC_LAG, RC_LAG, RC_DONE, RC_REPLAY])
+    got = live_stand.settle_merge(ask, wait=waits.append)
+    assert got == [RC_LAG, RC_LAG, RC_DONE, RC_REPLAY] and len(calls) == 4
+    assert waits == [live_stand.POLL] * 2
+    calls, ask = asker([RC_LAG] * 9)
+    got = live_stand.settle_merge(ask, wait=waits.append)
+    assert got == [RC_LAG] * live_stand.RECONCILE_TRIES
+    with pytest.raises(RowFailed, match="не сошлась"):
+        check_rc(got)
+    refused = _answer("refused", "pr_state")
+    calls, ask = asker([refused, refused])
+    got = live_stand.settle_merge(ask, wait=waits.append)
+    assert got == [refused, refused]
+
+
+@pytest.mark.parametrize(
+    ("repo", "allowed"),
+    [
+        pytest.param({"allow_squash_merge": True}, True, id="true"),
+        pytest.param({"allow_squash_merge": False}, False, id="false"),
+        pytest.param({"full_name": "o/r"}, True, id="absent-is-unknown"),
+        pytest.param(None, True, id="not-an-object-is-unknown"),
+    ],
+)
+def test_squash_preflight_names_h7(repo: object, allowed: bool) -> None:
+    """H7: only an explicit `allow_squash_merge: false` is infrastructure
+    naming the owner's step; an absent field (a token without admin rights
+    may not see it) is unknown and left to the seed's own squash `PUT`."""
+    if allowed:
+        live_stand.squash_problem(repo)
+        return
+    with pytest.raises(pytest.fail.Exception, match=f"{INFRA}.*H7"):
+        live_stand.squash_problem(repo)
+
+
+@pytest.mark.parametrize(
+    ("status", "reason", "refused"),
+    [
+        pytest.param(
+            405,
+            "Squash merges are not allowed on this repository.",
+            True,
+            id="squash-off",
+        ),
+        pytest.param(405, "Merge method squash is not allowed", True, id="method"),
+        pytest.param(405, "Pull Request is not mergeable", False, id="not-mergeable"),
+        pytest.param(409, "Head branch was modified", False, id="409"),
+        pytest.param(None, "squash", False, id="client-refusal"),
+    ],
+)
+def test_squash_refusal_of_the_seed_names_h7(
+    status: int | None, reason: str, refused: bool
+) -> None:
+    """With the setting unknown, the seed's squash `PUT` decides: a 405
+    about the merge method is H7 not done; any other refusal is not."""
+    exc = live_stand.GitHubRefused(reason, status)
+    assert live_stand.squash_refused(exc) is refused
 
 
 @dataclass
-class Upstream:
-    """A local stand-in for the API: records requests, answers 200 JSON."""
+class StubGitHub:
+    """`MachineGitHub` of row 9: PR states and branches in memory."""
 
-    url: str = ""
-    seen: list[tuple[str, str, str | None, str | None, bytes]] = field(
-        default_factory=list
+    states: dict[int, str]
+    refs: set[str]
+    patched: list[int] = field(default_factory=list)
+    merged: dict[int, str] = field(default_factory=dict)
+    full_name: str = "o/r"
+
+    def repo(self, rest: str) -> str:
+        return f"/repos/{self.full_name}{rest}"
+
+    def pull(self, number: int) -> dict[str, object]:
+        if number in self.merged:
+            return {
+                "state": "closed",
+                "merged": True,
+                "merge_commit_sha": self.merged[number],
+            }
+        return {"state": self.states[number], "merged": False}
+
+    def ref_sha(self, branch: str) -> str | None:
+        return "a" * 40 if branch in self.refs else None
+
+    def call(self, method: str, path: str, body: object | None = None) -> object:
+        if method == "PATCH":
+            number = int(path.rsplit("/", 1)[1])
+            if self.states[number] != "open":
+                raise live_stand.GitHubRefused("merged PR", 422)
+            self.patched.append(number)
+            self.states[number] = "closed"
+        elif method == "DELETE":
+            self.refs.discard(path.split("/git/refs/heads/", 1)[1])
+        return None
+
+
+def test_cleanup_closes_open_prs_and_keeps_the_merges(tmp_path: Path) -> None:
+    """Row 9: only open PRs are closed (a merged seed or stop PR is left
+    as it is), every branch deleted; the merges that stay on the default
+    branch are named in the evidence."""
+    gh = StubGitHub({1: "open", 2: "closed", 3: "open"}, {"a", "b"})
+    args = live_stand.StandArgs(tmp_path, tmp_path, "s", 1, 2, 3, "t")
+    st = live_stand.Stand(
+        cast(RolesWorld, None),
+        args,
+        StandSecrets(tmp_path / "k", tmp_path / "t", "ghp_x"),
+        cast(live_stand.MachineGitHub, gh),
+        cast(live_stand.Product, None),
+        "master",
+        "bot[bot]",
+        prs={"brief": 1, "seed": 2, "stop": 3},
+        branches=["a", "b"],
+        merges={"seed": "m" * 40},
+    )
+    found = live_stand.row9_cleanup(st)
+    assert gh.patched == [1, 3] and gh.refs == set()
+    assert found == {"closed": 3, "deleted": 2}
+    evidence = json.loads(
+        (tmp_path / "live" / OS_DIR / "row9-cleanup.json").read_text()
+    )
+    assert evidence["kept_on_default_branch"] == {"seed": "m" * 40}
+
+
+def test_keep_merge_records_a_merged_pr(tmp_path: Path) -> None:
+    """Row 11's infra paths and row 12: a PR found merged is kept for row
+    9's evidence; an open one is not."""
+    gh = StubGitHub({3: "open"}, set())
+    st = live_stand.Stand(
+        cast(RolesWorld, None),
+        live_stand.StandArgs(tmp_path, tmp_path, "s", 1, 2, 3, "t"),
+        StandSecrets(tmp_path / "k", tmp_path / "t", "ghp_x"),
+        cast(live_stand.MachineGitHub, gh),
+        cast(live_stand.Product, None),
+        "master",
+        "bot[bot]",
+    )
+    assert live_stand.keep_merge(st, "stop", 3)["state"] == "open"
+    assert st.merges == {}
+    gh.merged[3] = "e" * 40
+    live_stand.keep_merge(st, "stop", 3)
+    assert st.merges == {"stop": "e" * 40}
+
+
+@dataclass
+class MergeableGitHub:
+    """`MachineGitHub` answering `mergeable` from a script (its last value
+    repeats)."""
+
+    script: list[object]
+    reads: int = 0
+
+    def pull(self, number: int) -> dict[str, object]:
+        value = self.script[min(self.reads, len(self.script) - 1)]
+        self.reads += 1
+        return {"number": number, "mergeable": value}
+
+
+def _mergeable_stand(tmp_path: Path, gh: MergeableGitHub) -> live_stand.Stand:
+    return live_stand.Stand(
+        cast(RolesWorld, None),
+        live_stand.StandArgs(tmp_path, tmp_path, "s", 1, 2, 3, "t"),
+        StandSecrets(tmp_path / "k", tmp_path / "t", "ghp_x"),
+        cast(live_stand.MachineGitHub, gh),
+        cast(live_stand.Product, None),
+        "master",
+        "bot[bot]",
     )
 
 
-@pytest.fixture()
-def upstream() -> Iterator[Upstream]:
-    up = Upstream()
-
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def answer(self) -> None:
-            length = int(self.headers.get("Content-Length") or 0)
-            body = self.rfile.read(length) if length else b""
-            up.seen.append(
-                (
-                    self.command,
-                    self.path,
-                    self.headers.get("Host"),
-                    self.headers.get("Authorization"),
-                    body,
-                )
-            )
-            data = b'{"ok": true}'
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            link = f'<{up.url}/repos/o/r/pulls/1/reviews?page=2>; rel="next"'
-            self.send_header("Link", link)
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-
-        do_GET = do_POST = answer  # noqa: N815 - http.server's names
-
-        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
-            """Quiet."""
-
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    up.url = f"http://127.0.0.1:{server.server_address[1]}"
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield up
-    finally:
-        server.shutdown()
-        server.server_close()
-
-
-def fetch(url: str, method: str = "GET", body: bytes | None = None) -> tuple[int, dict]:
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    req = urllib.request.Request(
-        url, data=body, method=method, headers={"Authorization": "Bearer t0k"}
-    )
-    with opener.open(req, timeout=10) as resp:
-        return resp.status, dict(resp.headers)
-
-
-def test_gate_proxy_passes_requests_through(upstream: Upstream) -> None:
-    """A request reaches the upstream unchanged but for `Host`; the answer's
-    `Link` is on the proxy's base; the publisher admits the proxy's URL as
-    its `api_base`."""
-    with gate_proxy.serve_gate_proxy(upstream.url) as proxy:
-        PublisherConfig({}, proxy.url)
-        status, headers = fetch(f"{proxy.url}/repos/o/r/pulls/1?x=1")
-        seen = proxy.requests()
-    assert status == 200
-    assert headers["Link"].startswith(f"<{proxy.url}/repos/o/r/pulls/1/reviews")
-    method, path, host, auth, _body = upstream.seen[0]
-    assert (method, path, auth) == ("GET", "/repos/o/r/pulls/1?x=1", "Bearer t0k")
-    assert host == upstream.url.removeprefix("http://")
-    assert [(s.method, s.path, s.status, s.held) for s in seen] == [
-        ("GET", "/repos/o/r/pulls/1", 200, False)
-    ]
-
-
-def test_gate_proxy_holds_the_first_review_post(upstream: Upstream) -> None:
-    """The first `POST …/pulls/{n}/reviews` waits for `release()` before it
-    reaches the upstream; a second one is not held."""
-    path = "/repos/o/r/pulls/7/reviews"
-    results: list[int] = []
-    with gate_proxy.serve_gate_proxy(upstream.url) as proxy:
-        worker = threading.Thread(
-            target=lambda: results.append(fetch(proxy.url + path, "POST", b"{}")[0])
-        )
-        worker.start()
-        assert proxy.held.wait(10)
-        assert upstream.seen == []
-        proxy.release()
-        worker.join(10)
-        fetch(proxy.url + path, "POST", b"{}")
-        seen = proxy.requests()
-    assert results == [200]
-    assert [(m, p) for m, p, *_ in upstream.seen] == [("POST", path)] * 2
-    assert [(s.held, s.expired) for s in seen] == [(True, False), (False, False)]
-
-
-def test_gate_proxy_hold_expires(
-    upstream: Upstream, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("script", "passes"),
+    [
+        pytest.param([None, None, True], True, id="computed-later"),
+        pytest.param([True], True, id="at-once"),
+        pytest.param([None], False, id="never-computed"),
+        pytest.param([None, False], False, id="not-mergeable"),
+    ],
+)
+def test_require_mergeable_before_a_merge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    script: list[object],
+    passes: bool,
 ) -> None:
-    """Without `release()` the held POST goes on after `HOLD_LIMIT`, noted
-    `expired` (the row then fails as infrastructure)."""
-    monkeypatch.setattr(gate_proxy, "HOLD_LIMIT", 0.2)
-    with gate_proxy.serve_gate_proxy(upstream.url) as proxy:
-        fetch(f"{proxy.url}/repos/o/r/pulls/7/reviews", "POST", b"{}")
-        seen = proxy.requests()
-    assert [(s.held, s.expired) for s in seen] == [(True, True)]
+    """Rows 11 and 12 (and the seed) merge only once GitHub says the PR is
+    mergeable; uncomputed within `MERGEABLE_WAIT` or not mergeable is
+    infrastructure, never a red acceptance row."""
+    monkeypatch.setattr(live_stand, "MERGEABLE_WAIT", 0.3)
+    monkeypatch.setattr(live_stand, "POLL", 0.01)
+    gh = MergeableGitHub(script)
+    st = _mergeable_stand(tmp_path, gh)
+    if passes:
+        live_stand.require_mergeable(st, 5, "stop-PR")
+        assert gh.reads == len(script)
+        return
+    with pytest.raises(pytest.fail.Exception, match=f"{INFRA}.*stop-PR 5"):
+        live_stand.require_mergeable(st, 5, "stop-PR")
+
+
+def test_merge_rows_wait_for_mergeability() -> None:
+    """Rows 11 and 12 call `require_mergeable` on their stop-PR before the
+    publisher's `merge` (the seed too, before its squash `PUT`)."""
+    for fn in (live_stand.row11_head_change, live_stand.row12_dropped_answer):
+        source = inspect.getsource(fn)
+        assert source.index("require_mergeable(") < source.index("merge_payload(")
+    seed_src = inspect.getsource(live_stand.seed)
+    assert seed_src.index("require_mergeable(") < seed_src.index('"PUT"')
