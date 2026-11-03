@@ -87,12 +87,37 @@ def test_redirect_not_followed() -> None:
     t, _ = _t(err)
     resp = t.send(Request("GET", "x"))
     assert resp.status == 302 and resp.body is None
-    handler = act_anon._NoRedirect()
-    assert handler.redirect_request() is None
+
+
+def test_default_opener_does_not_follow_redirect() -> None:
+    import http.server
+    import threading
+
+    hits: list[str] = []
+
+    class _H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            hits.append(self.path)
+            self.send_response(302)
+            self.send_header("Location", "/other")
+            self.end_headers()
+
+        def log_message(self, *a: object) -> None:
+            return None
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        t = TokenTransport(TOKEN, api_base=f"http://127.0.0.1:{srv.server_port}/")
+        resp = t.send(Request("GET", "x"))
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    assert resp.status == 302 and hits == ["/x"]
 
 
 def test_body_over_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("governance.act_forge_http.MAX_BODY", 8)
+    monkeypatch.setattr(act_anon, "MAX_BODY", 8)
     t, _ = _t(_Answer(b"[" + b"1," * 10 + b"1]"))
     resp = t.send(Request("GET", "x"))
     assert resp.status is None and "больше" in resp.error
@@ -132,7 +157,7 @@ def test_env_proxy_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_token_absent_from_errors() -> None:
-    t, _ = _t(OSError(f"boom {TOKEN}"), _Answer(b"{}", 500))
+    t, _ = _t(OSError(f"boom {TOKEN}"))
     resp = t.send(Request("GET", "x"))
     assert resp.status is None and TOKEN not in resp.error and "***" in resp.error
     assert TOKEN not in repr(t) and TOKEN not in str(vars(resp))
@@ -158,5 +183,8 @@ def test_paging_edges() -> None:
     t, _ = _t(_Answer(b"[1]", link='<https://other/x>; rel="next"'))
     with pytest.raises(OSError):
         t.get_json("x")
-    t, _ = _t(_Answer(b"[1]", link=f'<{BASE}x?p=2>; rel="next"'), _Answer(b"{}", 500))
-    assert t.get_json("x") == (500, {})
+    nxt = f'<{BASE}x?p=2>; rel="next"'
+    for page in (_Answer(b"{}", 500), _Answer(b'{"o": 1}')):
+        t, _ = _t(_Answer(b"[1]", link=nxt), page)
+        with pytest.raises(OSError):
+            t.get_json("x")

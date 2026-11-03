@@ -42,6 +42,7 @@ ROOT = Path(__file__).resolve().parent.parent
 MODULES = (
     "act_facts",
     "act_anon",
+    "act_git_rows",
     "act_check",
     "act_trust",
     "act_journal",
@@ -290,10 +291,10 @@ JUDGMENT = {
             '"anon: ответ больше 8 байт"',
         ),
     ),
-    "act_anon.AnonTransport._fetch": (
+    "act_anon.fetch_response": (
         r(
             "transport_failure",
-            "act_anon.AnonTransport._fetch",
+            "act_anon.fetch_response",
             "except Exception as exc",
             f"{A}::test_transport_failure_is_status_none",
             '"TimeoutError"',
@@ -3510,7 +3511,7 @@ NOT_JUDGMENT = {
     "act_anon._NoRedirect.redirect_request": "транспортная политика (3xx не исполняется); отказа об объекте нет",
     "act_anon._default_open": _IO,
     "act_anon.AnonTransport.__init__": _BUILD,
-    "act_anon.AnonTransport._mask": "маскирует токен в тексте сбоя (R1); проверок нет",
+    "act_anon.AnonTransport._fetch": _IO,
     **{
         f"act_check.{n}": _HELPER
         for n in (
@@ -3624,6 +3625,7 @@ NOT_JUDGMENT = {
     "ops.SnapshotOps.show_file_bytes": _IO,
     "ops.SnapshotOps.rev_parse": _IO,
     "ops.SnapshotOps.fetch_branch": _IO,
+    "act_git_rows.parse_first_parent": "разбор вывода `git log`; не суждение",
     "ops.RealOps.gate_snapshot_digest": "возвращает код и вывод CLI; судит `gate_run`",
     "approval_ledger.record_review_act": "запись акта; проверок нет",
     "approval_ledger.audit_events": _BUILD,

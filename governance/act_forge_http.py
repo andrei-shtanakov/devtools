@@ -15,20 +15,12 @@ import urllib.request
 from collections.abc import Callable
 from typing import Any
 
-from governance.act_anon import MAX_BODY, _NoRedirect
+from governance import act_anon
+from governance.act_anon import _UNSAFE_PATH, fetch_response
 
-#: Путь, который не относительный путь API (тот же класс, что у `GhTransport`).
-_UNSAFE_PATH = re.compile(r"\A[-/]|://|\\|\s")
 _NEXT = re.compile(r'<([^>]*)>\s*;\s*rel="next"')
 #: Предел страниц `get_json`: защита от бесконечной цепочки `Link`.
 MAX_PAGES = 100
-
-
-def _default_open() -> Callable[..., Any]:
-    # Пустой ProxyHandler: прокси окружения (и их credentials) не используются.
-    return urllib.request.build_opener(
-        urllib.request.ProxyHandler({}), _NoRedirect
-    ).open
 
 
 class TokenTransport:
@@ -46,7 +38,7 @@ class TokenTransport:
             raise ValueError("forge: empty token")
         self._token = token
         self._base = api_base if api_base.endswith("/") else api_base + "/"
-        self._open = opener or _default_open()
+        self._open = opener or act_anon._default_open()
         self._timeout = timeout
 
     def __repr__(self) -> str:
@@ -76,9 +68,9 @@ class TokenTransport:
         """`GET path` для REST-чтений адаптера: `(status, body)`.
 
         Список (JSON-массив) читается полностью: страницы по `Link rel="next"`
-        склеиваются (не более `MAX_PAGES`); объект — одна страница. Не-200 —
-        `(status, body)` без обхода. Сбой доставки, следующая страница вне
-        `api_base` и превышение предела — `OSError` (без токена в тексте).
+        склеиваются (не более `MAX_PAGES`); объект — одна страница. Не-200 на первой
+        странице — `(status, body)`. Сбой доставки, не-200 или смена формы посреди обхода, следующая страница
+        вне `api_base` и превышение предела — `OSError` (без токена в тексте).
         """
         from steward.approvalfacts.v3 import Request
 
@@ -89,8 +81,12 @@ class TokenTransport:
             if resp.status is None:
                 raise OSError(resp.error or "forge: transport failure")
             if resp.status != 200:
+                if items:
+                    raise OSError(f"forge: HTTP {resp.status} mid-walk")
                 return resp.status, resp.body
             if not isinstance(resp.body, list):
+                if items:
+                    raise OSError("forge: page shape changed mid-walk")
                 return resp.status, resp.body
             items.extend(resp.body)
             url = self._next_path(resp.link)
@@ -117,6 +113,7 @@ class TokenTransport:
             return None
         query = getattr(request, "query", None)
         if method == "POST" and path == "graphql":
+            # Подстрока: поле вроде `mutationCount` тоже отказ (read-only, намеренно).
             if isinstance(query, str) and "mutation" not in query:
                 return None
             return "GraphQL text is not a query"
@@ -135,26 +132,4 @@ class TokenTransport:
         req = urllib.request.Request(
             url, data=body, method="GET" if body is None else "POST", headers=headers
         )
-        try:
-            try:
-                with self._open(req, timeout=self._timeout) as answer:
-                    return self._response(
-                        cls, answer.status, answer, answer.headers.get("Link")
-                    )
-            except urllib.error.HTTPError as err:
-                link = err.headers.get("Link") if err.headers is not None else None
-                return self._response(cls, err.code, err, link)
-        except Exception as exc:  # noqa: BLE001 — send не бросает (инструкция steward)
-            text = f"forge: {type(exc).__name__}: {exc}"
-            return cls(None, error=text.replace(self._token, "***"))
-
-    @staticmethod
-    def _response(cls: Any, status: int, stream: Any, link: str | None) -> Any:
-        raw = stream.read(MAX_BODY + 1)
-        if len(raw) > MAX_BODY:
-            return cls(None, error=f"forge: ответ больше {MAX_BODY} байт")
-        try:
-            parsed = json.loads(raw) if raw else None
-        except ValueError:
-            parsed = None
-        return cls(status, body=parsed, link=link)
+        return fetch_response(self._open, req, self._timeout, cls, "forge", self._token)

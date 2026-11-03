@@ -50,8 +50,8 @@ from tests.test_act_identity_table import ROWS  # noqa: E402
 
 #: Обход с корректными данными: `site:component` → (фрагмент в функции проверки, замена).
 BYPASS: dict[str, tuple[str, str]] = {
-    "act_anon.AnonTransport._fetch:transport_failure": (
-        'return cls(None, error=self._mask(f"anon: {type(exc).__name__}: {exc}"))',
+    "act_anon.fetch_response:transport_failure": (
+        "return cls(None, error=text)",
         "return cls(200, body={}, link=None)",
     ),
     "act_anon._locate:commit_unreadable": (
