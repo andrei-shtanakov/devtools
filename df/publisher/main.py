@@ -8,8 +8,8 @@ one JSON line on stdout; the exit code is 0 for `done`, 3 for `unknown` and 2
 for every other outcome.
 
 An operation is an entry of `OPERATION_TABLE`. `publish-review`, `read-token`
-and `self-check` are implemented in `df.publisher.ops`, `merge` (routing only,
-never a merge) in `df.publisher.merge`, `record-violation` and
+and `self-check` are implemented in `df.publisher.ops`, `merge` (stage 2b:
+stop only) in `df.publisher.merge`, `record-violation` and
 `perimeter-status` in `df.publisher.perimeter`.
 """
 
@@ -68,6 +68,8 @@ class Context:
 
 
 Handler = Callable[[Context], Response]
+#: What follows a kept (or replayed) final result: `(layout, request, key)`.
+Finisher = Callable[[Layout, Request, str], None]
 
 
 #: Tests inject handlers here.
@@ -79,6 +81,8 @@ OPERATION_TABLE: dict[str, Handler] = {
     "perimeter-status": perimeter.perimeter_status_op,
     request.SELF_CHECK: ops.self_check_op,
 }
+#: `merge` releases its PR ownership with its final result (r3 N2).
+AFTER_FINAL: dict[str, Finisher] = {"merge": merge.release_owner}
 
 
 def sender(
@@ -304,6 +308,7 @@ def _under_key(
     kept = store.replay(res)
     if kept is not None:
         seen.verified = True  # a kept result was final when it was kept
+        _after_final(layout, op, req, res.key)
         evidence = {**kept.evidence, "replayed": True}
         return Response(kept.outcome, kept.reason, kept.result, evidence)
     replayed = op not in store.NOT_REPLAYED
@@ -325,7 +330,24 @@ def _under_key(
     resp = _run_handler(ctx, op, seen)
     resp = _decorate(resp, who, op, seen, snapshot)
     final = resp.outcome == "done" or (resp.outcome == "refused" and seen.verified)
-    return _keep(res, resp) if replayed and final else resp
+    if not (replayed and final):
+        return resp
+    resp = _keep(res, resp)
+    if resp.outcome != "unknown":
+        _after_final(layout, op, req, res.key)
+    return resp
+
+
+def _after_final(layout: Layout, op: str, req: Request, key: str) -> None:
+    """What ends with a kept final result (`AFTER_FINAL`); a failure leaves
+    a stale ownership the next acquisition takes over (plan decision 8)."""
+    finish = AFTER_FINAL.get(op)
+    if finish is None:
+        return
+    try:
+        finish(layout, req, key)
+    except Exception as exc:  # noqa: BLE001 - the result is kept already
+        print(f"publisher: {op}: not finished: {exc}", file=sys.stderr)
 
 
 def _run_handler(ctx: Context, op: str, seen: _Seen) -> Response:
@@ -333,7 +355,7 @@ def _run_handler(ctx: Context, op: str, seen: _Seen) -> Response:
         return OPERATION_TABLE[op](ctx)
     except Refused as exc:
         seen.verified = exc.verified_not_done
-        return Response("refused", exc.reason)
+        return Response("refused", exc.reason, evidence=exc.evidence)
     except Exception as exc:  # noqa: BLE001 - R23 judges it by what is on disk
         print(f"publisher: {type(exc).__name__}: {exc}", file=sys.stderr)
         return Response("refused", "internal_error")

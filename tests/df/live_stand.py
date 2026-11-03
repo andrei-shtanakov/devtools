@@ -38,7 +38,7 @@ and a merge with it are refused by GitHub `403`, each with its control
 (R15-1: the merge control is a deliberately conflicting PR, `405` with the
 full installation token); 6 the token in no `ps` snapshot (at least one
 strictly inside the read), publisher file, sudo I/O log or `.git/config`; 7 sudo refuses the other role's operation; 8 `merge` routes
-`brief/…` to `precheck_unavailable` and `stand/…` to `ambiguous_kind`; 9
+`brief/…` to `brief_precheck_unavailable` and `stand/…` to `ambiguous_kind`; 9
 every PR closed and branch deleted. A row runs unless a row it needs
 (`Row.needs`) did not pass; a skipped row is recorded and fails the run.
 
@@ -1369,9 +1369,9 @@ def row7_sudo_refusals(st: Stand) -> dict[str, object]:
 
 def row8_merge_routes(st: Stand) -> dict[str, object]:
     """Row 8: `merge` from `df-exec`: `brief/…` → `refused:
-    precheck_unavailable`, `stand/…` → `refused: ambiguous_kind` (r1 N11).
+    brief_precheck_unavailable`, `stand/…` → `refused: ambiguous_kind` (r1 N11).
     Control: both answers come from past the sender check (`df-exec`)."""
-    wants = {"brief": "precheck_unavailable", "stand": "ambiguous_kind"}
+    wants = {"brief": "brief_precheck_unavailable", "stand": "ambiguous_kind"}
     found: dict[str, object] = {}
     answers: dict[str, tuple[int, Response]] = {}
     for name in wants:

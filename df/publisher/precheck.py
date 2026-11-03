@@ -27,15 +27,18 @@ import re
 import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from df import platform
 from df.paths import Layout
 from df.publisher import github, ops
 from df.publisher.github import GitHubRefused, GitHubUnavailable
-from df.publisher.merge import Change, Kind
 from df.publisher.ops import OpContext
 from df.publisher.request import Refused
 from df.roles import PRECHECK_USER
+
+if TYPE_CHECKING:  # `merge` imports this module
+    from df.publisher.merge import Change, Kind
 
 REQUEST_SCHEMA = "df/precheck-request/v1"
 VERDICT_SCHEMA = "df/precheck-verdict/v1"

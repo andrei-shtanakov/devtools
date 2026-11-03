@@ -5,6 +5,10 @@ installation; `keys/<sha256(sender|op|digest)>.lock` serialises identical
 requests; `intents/<key>.json` is written durably before an external action
 and `results/<key>.json` after a final outcome; `journal.jsonl` has one line
 per request and never a secret.
+
+`merge` (stage 2b, plan decision 8) adds phases, `intents/<key>.<name>.json`,
+each written once, and the ownership of a PR, `owners/<repository_id>-<pr>.json`
+naming the request key that holds it (taken and released under `owners.lock`).
 """
 
 from __future__ import annotations
@@ -35,8 +39,13 @@ from df.publisher.request import (
 )
 
 IDS_LOCK = "ids.lock"
+OWNERS_LOCK = "owners.lock"
 JOURNAL = "journal.jsonl"
-SUBDIRS = ("ids", "keys", "intents", "results")
+SUBDIRS = ("ids", "keys", "intents", "results", "owners")
+#: The phases of `merge` in their order; `rechecked.<n>` sit between
+#: `attested` and `armed` (plan decision 8).
+PHASES = ("attest", "attested", "armed", "put_answer")
+RECHECKED = re.compile(r"rechecked\.([1-9][0-9]{0,3})", re.ASCII)
 #: What a replayed request gets back is a stored result; these three are
 #: computed (issued) anew at every call (spec 5.6).
 NOT_REPLAYED = frozenset({"perimeter-status", "read-token", request.SELF_CHECK})
@@ -288,12 +297,41 @@ def _write_state(path: Path, text: str) -> None:
 
 
 def has_state(layout: Layout, key: str) -> bool:
-    """An intent or a result of the idempotency key exists (`lstat` only; a
-    link or a damaged file counts). Fails closed: anything but "absent" (an
-    unreadable directory, say) is `True`."""
+    """An intent, a phase, a result of the idempotency key or an ownership
+    naming it exists (`lstat` only for the files of the key; a link or a
+    damaged file counts, and so does a damaged ownership). Fails closed:
+    anything but "absent" (an unreadable directory, say) is `True`."""
     base = layout.publisher_dir
     paths = (base / "intents" / f"{key}.json", base / "results" / f"{key}.json")
-    return any(_present(p) for p in paths)
+    if any(_present(p) for p in paths):
+        return True
+    return _has_phase(base / "intents", key) or _owns_any(base / "owners", key)
+
+
+def _has_phase(intents: Path, key: str) -> bool:
+    try:
+        names = [e.name for e in os.scandir(intents)]
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return any(name.startswith(f"{key}.") for name in names)
+
+
+def _owns_any(owners: Path, key: str) -> bool:
+    try:
+        names = [e.name for e in os.scandir(owners) if not _is_temp(e.name)]
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    for name in names:
+        try:
+            if _owner_record(owners / name).get("request_key") == key:
+                return True
+        except (OSError, ValueError):
+            return True
+    return False
 
 
 def _present(path: Path) -> bool:
@@ -304,6 +342,222 @@ def _present(path: Path) -> bool:
     except OSError:
         return True
     return True
+
+
+# --- phases of merge -------------------------------------------------------
+
+
+def _valid_phase(name: str) -> bool:
+    return name in PHASES or RECHECKED.fullmatch(name) is not None
+
+
+def phase_path(layout: Layout, key: str, name: str) -> Path:
+    """`intents/<key>.<name>.json`."""
+    return layout.publisher_dir / "intents" / f"{key}.{name}.json"
+
+
+def phase(res: Reservation, name: str, payload: Mapping[str, object]) -> None:
+    """Write phase `name` of the request durably, once: a phase that is
+    already there is an `OSError` (the key's lock is held, so nobody else
+    writes it)."""
+    if not _valid_phase(name):
+        raise ValueError(f"unknown phase {name!r}")
+    path = phase_path(res.layout, res.key, name)
+    if _present(path):
+        raise OSError(f"{path}: phase {name} already written")
+    record = {"request_id": res.request_id, "phase": name, "payload": dict(payload)}
+    _write_state(path, json.dumps(record, sort_keys=True))
+
+
+def read_phases(res: Reservation) -> dict[str, Mapping[str, object]]:
+    """Every phase of the request, by name. A phase file that cannot be
+    read or is not a phase record is an `OSError`: the state is damaged."""
+    return _phases_of(res.layout, res.key)
+
+
+def _phases_of(layout: Layout, key: str) -> dict[str, Mapping[str, object]]:
+    intents = layout.publisher_dir / "intents"
+    prefix, intent = f"{key}.", f"{key}.json"
+    found: dict[str, Mapping[str, object]] = {}
+    for name in sorted(e.name for e in os.scandir(intents)):
+        if not name.startswith(prefix) or name == intent:
+            continue
+        stem = name[len(prefix) :].removesuffix(".json")
+        if not name.endswith(".json") or not _valid_phase(stem):
+            raise OSError(f"{intents / name}: not a phase of {key}")
+        found[stem] = _phase_payload(intents / name, stem)
+    return found
+
+
+def _phase_payload(path: Path, name: str) -> Mapping[str, object]:
+    try:
+        record = json.loads(_read(path, MAX_STATE))
+    except ValueError as exc:
+        raise OSError(f"{path}: unreadable phase: {exc}") from exc
+    payload = record.get("payload") if isinstance(record, dict) else None
+    if not isinstance(payload, dict) or record.get("phase") != name:
+        raise OSError(f"{path}: not a phase record")
+    return payload
+
+
+def last_phase(phases: Mapping[str, object]) -> str | None:
+    """The latest phase of `phases` in the order of decision 8."""
+    order = [*PHASES[:2], *rechecks(phases), *PHASES[2:]]
+    present = [name for name in order if name in phases]
+    return present[-1] if present else None
+
+
+def rechecks(phases: Mapping[str, object]) -> list[str]:
+    """The `rechecked.<n>` names of `phases`, by `n`."""
+    numbered = [
+        (int(m.group(1)), name)
+        for name in phases
+        if (m := RECHECKED.fullmatch(name)) is not None
+    ]
+    return [name for _n, name in sorted(numbered)]
+
+
+# --- ownership of a PR --------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Owner:
+    """One ownership file, as `doctor` lists it."""
+
+    repository_id: int
+    pr: int
+    request_key: str
+    request_id: str | None
+    last_phase: str | None
+    taken_at: str
+    final: bool
+
+
+def owner_path(layout: Layout, repository_id: int, pr: int) -> Path:
+    """`owners/<repository_id>-<pr>.json`."""
+    return layout.publisher_dir / "owners" / f"{repository_id}-{pr}.json"
+
+
+def _owner_record(path: Path) -> dict[str, object]:
+    """The owner file's record; `ValueError` if it is not one."""
+    record = json.loads(_read(path))
+    if not isinstance(record, dict) or not isinstance(record.get("request_key"), str):
+        raise ValueError(f"{path}: not an owner record")
+    return record
+
+
+def _holder(path: Path) -> str | None:
+    """The request key the owner file names (`None`: no file). A damaged
+    file is an `OSError`: it holds the PR for nobody can tell whom."""
+    try:
+        return str(_owner_record(path)["request_key"])
+    except FileNotFoundError:
+        return None
+    except ValueError as exc:
+        raise OSError(str(exc)) from exc
+
+
+def _final(layout: Layout, key: str) -> bool:
+    return _present(layout.publisher_dir / "results" / f"{key}.json")
+
+
+def pr_busy(layout: Layout, repository_id: int, pr: int, request_key: str) -> bool:
+    """Another request holds the PR: the owner file names another key whose
+    request has no final result, or cannot be read (read only)."""
+    try:
+        holder = _holder(owner_path(layout, repository_id, pr))
+    except OSError:
+        return True
+    return holder not in (None, request_key) and not _final(layout, str(holder))
+
+
+def own_pr(layout: Layout, repository_id: int, pr: int, request_key: str) -> bool:
+    """Take the PR for `request_key` under `owners.lock` (durably, before
+    the final read). `True` if it is (or already was) this request's;
+    `False` if another request without a final result holds it. An
+    ownership whose request has a final result is stale and taken over."""
+    path = owner_path(layout, repository_id, pr)
+    fd = _lock_file(layout.publisher_dir / OWNERS_LOCK)
+    try:
+        try:
+            holder = _holder(path)
+        except OSError:
+            return False
+        if holder == request_key:
+            return True
+        if holder is not None and not _final(layout, holder):
+            return False
+        record = {
+            "request_key": request_key,
+            "repository_id": repository_id,
+            "pr": pr,
+            "taken_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        }
+        fsutil.write_atomic(path, json.dumps(record, sort_keys=True), 0o600)
+        return True
+    finally:
+        _unlock(fd)
+
+
+def release_pr(layout: Layout, repository_id: int, pr: int, request_key: str) -> bool:
+    """Remove the ownership if it names `request_key` (idempotent); whether
+    it was removed. Called only once the request's final result is kept."""
+    path = owner_path(layout, repository_id, pr)
+    fd = _lock_file(layout.publisher_dir / OWNERS_LOCK)
+    try:
+        try:
+            holder = _holder(path)
+        except OSError:
+            return False
+        if holder != request_key:
+            return False
+        fsutil.remove_durably(path)
+        return True
+    finally:
+        _unlock(fd)
+
+
+def owners(layout: Layout) -> list[Owner]:
+    """Every ownership file, with its request's id (from the intent), last
+    phase and whether the request has a final result. A damaged file is a
+    `ValueError`; an unreadable directory an `OSError`."""
+    directory = layout.publisher_dir / "owners"
+    try:
+        names = sorted(e.name for e in os.scandir(directory) if not _is_temp(e.name))
+    except FileNotFoundError:
+        return []
+    return [_owner_of(layout, directory / name) for name in names]
+
+
+def _owner_of(layout: Layout, path: Path) -> Owner:
+    record = _owner_record(path)
+    key = str(record["request_key"])
+    repository_id, pr = record.get("repository_id"), record.get("pr")
+    if type(repository_id) is not int or type(pr) is not int:
+        raise ValueError(f"{path}: not an owner record")
+    try:
+        phases = _phases_of(layout, key)
+    except OSError:
+        phases = {}
+    return Owner(
+        repository_id,
+        pr,
+        key,
+        _request_id_of(layout, key),
+        last_phase(phases),
+        str(record.get("taken_at")),
+        _final(layout, key),
+    )
+
+
+def _request_id_of(layout: Layout, key: str) -> str | None:
+    path = layout.publisher_dir / "intents" / f"{key}.json"
+    try:
+        record = json.loads(_read(path, MAX_STATE))
+    except (OSError, ValueError):
+        return None
+    found = record.get("request_id") if isinstance(record, dict) else None
+    return found if isinstance(found, str) else None
 
 
 def replay(res: Reservation) -> Response | None:

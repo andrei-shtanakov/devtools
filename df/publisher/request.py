@@ -59,12 +59,20 @@ class Refused(Exception):
 
     `verified_not_done` is for a handler that, after its reconciliation,
     proved the external action did not happen: only then may a request that
-    has an intent be answered `refused` (R23)."""
+    has an intent be answered `refused` (R23). `evidence` goes into the
+    answer's evidence."""
 
-    def __init__(self, reason: str, *, verified_not_done: bool = False) -> None:
+    def __init__(
+        self,
+        reason: str,
+        *,
+        verified_not_done: bool = False,
+        evidence: Mapping[str, object] | None = None,
+    ) -> None:
         super().__init__(reason)
         self.reason = reason
         self.verified_not_done = verified_not_done
+        self.evidence: Mapping[str, object] = dict(evidence or {})
 
 
 class InFlight(Exception):
