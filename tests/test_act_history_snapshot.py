@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-pytest.importorskip("steward")
+pytest.importorskip("steward", reason="steward — без группы governance")
 
 from governance.act_envelope import DeliveredRequest  # noqa: E402
 from governance.act_forge_http import TokenTransport  # noqa: E402

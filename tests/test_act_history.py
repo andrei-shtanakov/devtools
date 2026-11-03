@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("steward")
+pytest.importorskip("steward", reason="steward — без группы governance")
 
 from governance import act_history, act_status  # noqa: E402
 from governance.run_state import RunState  # noqa: E402
