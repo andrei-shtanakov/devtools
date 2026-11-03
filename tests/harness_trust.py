@@ -225,7 +225,13 @@ def _scan(root: Path, script: str, seen: set[str]) -> tuple[list[Launch], list[s
         elif word == "trap":
             m = _TRAP.match(command)
             handler = m.group(1) if m else ""
-            if not handler or (handler[0] not in "-'" and handler not in SAFE_COMMANDS):
+            # Нормализация пробелов `_commands` не должна выдать за `'exit N'`
+            # иной сырой текст (`'exit<LF>1'`): строка — дословно в скрипте.
+            if (
+                not handler
+                or command not in text
+                or (handler[0] not in "-'" and handler not in SAFE_COMMANDS)
+            ):
                 problems.append(f"{script}: нераспознанный запуск: {segment}")
         elif word not in SAFE_COMMANDS:
             problems.append(f"{script}: нераспознанный запуск: {segment}")

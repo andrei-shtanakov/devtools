@@ -146,6 +146,20 @@ case "$*" in
     printf '%s' "${UV_STUB_APP_OUT-$(printf 'df-reviewer[bot]\\nghs_inst\\n')}"
     exit "${UV_STUB_APP_RC:-0}" ;;
 esac
+# Сигнал во время предпроверки (Task 9): TERM непрерывной цепочке предков
+# `sh …/merge-pr.sh …` (обвязка и её подоболочки) — и только им; цепочка
+# собирается до сигнала (убитый подпроцесс обрывает `ppid`); `kill 0` в
+# песочнице macOS до оболочки не доходит.
+if [ -n "${UV_STUB_PREMERGE_TERM:-}" ]; then
+  p=$PPID; targets=""
+  while case "$(ps -o command= -p "$p")" in *"sh "*/merge-pr.sh" "*) :;; *) false;; esac
+  do
+    targets="$targets $p"
+    p=$(ps -o ppid= -p "$p" | tr -d ' ')
+  done
+  [ -n "$targets" ] && kill -TERM $targets
+  sleep 5
+fi
 if [ -n "${UV_STUB_SAY:-}" ]; then echo "$UV_STUB_SAY" >&2; fi
 exit "${UV_STUB_RC:-0}"
 """
@@ -1872,3 +1886,17 @@ def test_profile_mode_does_not_revoke(fleet: Fleet) -> None:
     res = fleet.run(**_candidate(GH_STUB_LABELS="human-approval-required"))
     assert res.returncode == 0, res.stderr
     assert _revokes(fleet) == [] and _stdin_lines(fleet) == []
+
+
+def test_token_revoked_on_sigterm(fleet: Fleet) -> None:
+    """TERM, пока токен выдан (во время предпроверки): ловец `exit 143` ведёт в
+    EXIT-ловец — токен отозван и под dash, где EXIT на сигнале сам не зовётся."""
+    res = subprocess.run(
+        ["sh", str(SCRIPT), "demo", "7"],
+        env=fleet.env(**_app_candidate(fleet, UV_STUB_PREMERGE_TERM="1")),
+        capture_output=True, text=True, check=False, timeout=60,
+    )  # fmt: skip
+    assert res.returncode == 143, res.stderr
+    _no_secret(res)
+    assert len(_revokes(fleet)) == 1 and fleet.merge_calls() == []
+    assert _stdin_lines(fleet) == [f"uv-stdin [{APP_TOKEN}]"]

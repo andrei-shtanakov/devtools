@@ -243,6 +243,25 @@ def test_unprotected_link_fails(tmp_path: Path, unprotected: str, b_lazy: bool) 
         "trap 'exit 1; eval x' EXIT\n",
         'trap "exit 1" EXIT\n',
         "trap revoke_app_token USR1\n",
+        # ревью Task 9, m3: зонды ревьюера закреплены — обработчики DEBUG/ERR/RETURN
+        # исполняются на каждой команде/возврате/ошибке
+        "trap revoke_app_token DEBUG\n",
+        "trap revoke_app_token ERR\n",
+        "trap revoke_app_token RETURN\n",
+        "trap revoke_app_token 0\n",
+        "trap revoke_app_token EXIT INT\n",
+        "trap revoke_app_token EXIT DEBUG\n",
+        "trap -- revoke_app_token EXIT\n",
+        'trap "$(echo revoke_app_token)" EXIT\n',
+        'trap "$h" EXIT\n',
+        "trap eval EXIT\n",
+        "trap 'exit 1'\"; eval x\" EXIT\n",
+        "trap revoke_app_token EXIT; eval x\n",
+        "builtin trap revoke_app_token EXIT\n",
+        "alias trap=eval\n",
+        "trap revoke_app_token EXIT \\\n    INT\n",
+        # nit 4: нормализация пробелов не выдаёт иной сырой текст за `'exit N'`
+        "trap 'exit\n1' EXIT\n",
     ],
 )
 def test_unrecognized_launch_fails(tmp_path: Path, launch: str) -> None:

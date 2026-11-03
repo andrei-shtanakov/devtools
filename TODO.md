@@ -2957,10 +2957,12 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       отзывается — срок 1 ч, сужен до репо и `contents/pull_requests:write` (п. 9d).
       Ruling 9a (Task 9 плана 2b): стоп-кран и факты PR читаются профилем без сверки
       логина — факты форджи от учётки не зависят, сбой доступа — отказ; кода не меняем.
-      9c закрыт (Task 9, PR #TBD): путь ключа после `apps/` без ссылок — ни сам файл, ни
-      каталоги за `apps/`. 9d закрыт (Task 9, PR #TBD): токен установки отзывается
-      EXIT-ловцом сразу после выдачи (`act_app_token.py --revoke`, токен из stdin) на
-      любом выходе, сбой отзыва — заметка, код выхода исходный.
+      9c закрыт (Task 9, этот PR): путь ключа после `apps/` без ссылок — ни сам файл,
+      ни каталоги за `apps/`; проверяет обвязка (`-L`) и сам читатель ключа
+      (`O_NOFOLLOW` по `dir_fd`), окна подмены нет. 9d закрыт (Task 9, этот PR): токен
+      установки отзывается EXIT-ловцом сразу после выдачи (`act_app_token.py
+      --revoke`, токен из stdin) на любом выходе, сбой отзыва — заметка, код выхода
+      исходный.
 - [ ] Токен истории на стороне установщика (R8, С-1): `darkfactory setup-trust` пишет `history_gh_config_dir` в `trust.toml`, `darkfactory doctor` проверяет профиль и самоотчёт, шаг человека — read-only PAT (R4) и профиль `history` @owner:github:andrei-shtanakov @id:df-trust-history-token @epic:eco.dark-factory @blocked_by:todo://devtools/df-installer-stage2b
       Разбор ключа (`df.stage2_config.parse_trust`, `act_trust.parse_binding`) — Task 11c
       части B approval-act. Шаг человека: `GH_CONFIG_DIR=<каталог> gh auth login --hostname

@@ -2831,14 +2831,39 @@ JUDGMENT = {
             '"больше 2 страниц"',
         ),
     ),
-    "act_app_token._bearer": (
+    "act_app_token._open_no_link": (
         r(
             "key_unread",
-            "act_app_token._bearer",
-            "except OSError",
+            "act_app_token._open_no_link",
+            "не прочитан",
             f"{K}::test_missing_key_is_unavailable",
             '"не прочитан"',
         ),
+        r(
+            "key_link",
+            "act_app_token._open_no_link",
+            "if link:",
+            f"{K}::test_key_swapped_to_link_after_shell_check_refused",
+            '"путь после darkfactory/apps через ссылку"',
+        ),
+    ),
+    "act_app_token._read_key": (
+        r(
+            "key_anchor",
+            "act_app_token._read_key",
+            "anchor is None or anchor >= len(parts)",
+            f"{K}::test_key_outside_anchor_refused",
+            '"вне каталога darkfactory/apps"',
+        ),
+        r(
+            "key_regular",
+            "act_app_token._read_key",
+            "stat.S_ISREG(",
+            f"{K}::test_key_not_regular_file_refused",
+            '"не обычный файл"',
+        ),
+    ),
+    "act_app_token._bearer": (
         r(
             "key_unsigned",
             "act_app_token._bearer",
