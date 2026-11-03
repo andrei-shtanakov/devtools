@@ -484,6 +484,31 @@ def test_precheck_serve_resets_environment(
     assert (seen["admin_digest"], seen["home"]) == (ADMIN_DIGEST, home)
 
 
+def test_precheck_serve_reaps_after_reset_before_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, environ: None
+) -> None:
+    """2b Task 10: the leftovers of earlier runs are reaped as the role,
+    after the environment reset and before the program loads."""
+    lay, read = _precheck_world(tmp_path, os.getuid())
+    order: list[object] = []
+
+    def reap(uid: int, home: Path) -> None:
+        order.append(("reap", uid, home, dict(os.environ)))
+
+    def load(_admin_dir: Path) -> object:
+        order.append("load")
+        return lambda *_a, **_k: 0
+
+    monkeypatch.setattr(cli, "_reap", reap)
+    monkeypatch.setattr(cli, "_load_serve", load)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    os.environ["GH_TOKEN"] = "t"
+    assert _precheck(lay, read) == 0
+    home = lay.role_home("df-precheck")
+    env = {"PATH": "/usr/bin:/bin", "LANG": "C", "HOME": str(home)}
+    assert order == [("reap", os.getuid(), home, env), "load"]
+
+
 def test_precheck_serve_passes_the_exit_code(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, environ: None
 ) -> None:

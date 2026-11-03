@@ -49,6 +49,7 @@ from df import (
     libexec,
     models,
     perimeter_client,
+    precheck_reap,
     probe,
     roles,
     roles_setup,
@@ -643,6 +644,7 @@ LEVEL2_IDS = (
     "roles.sudoers",
     "roles.libexec",
     "roles.isolation",
+    "roles.precheck",
     "publisher.answers",
     "publisher.foreign",
     "publisher.owners",
@@ -866,6 +868,28 @@ def _libexec(ctx: _Level2) -> str:
     if problems:
         raise _broken(problems)
     return ""
+
+
+def _precheck_leftovers(ctx: _Level2) -> str:
+    """Processes of `df-precheck` older than `precheck_reap.REAP_AFTER`
+    (2b Task 10): sudo's `command_timeout` does not end a stopped command,
+    the next precheck reaps them. Listed as a note of `ok`; processes that
+    cannot be read are «нарушено»."""
+    account = load_accounts(ctx.layout.accounts).get(roles.PRECHECK_USER)
+    if account is None:
+        raise _Outcome(NOT_CHECKED, f"нет записи {roles.PRECHECK_USER}")
+    try:
+        old = precheck_reap.leftovers(account.uid, precheck_reap.list_processes())
+    except precheck_reap.ListingError as exc:
+        raise _broken([f"процессы не прочитаны: {exc}"]) from exc
+    if not old:
+        return ""
+    pids = ", ".join(str(p.pid) for p in old)
+    after = int(precheck_reap.REAP_AFTER)
+    return (
+        f"процессы {roles.PRECHECK_USER} старше {after} с: {pids} "
+        "(их уберёт следующая предпроверка)"
+    )
 
 
 # --- 4: isolation, judged from inside the roles ---
@@ -1290,6 +1314,7 @@ _LEVEL2: tuple[tuple[str, Callable[[_Level2], str]], ...] = (
     ("roles.sudoers", _sudoers),
     ("roles.libexec", _libexec),
     ("roles.isolation", _isolation),
+    ("roles.precheck", _precheck_leftovers),
     ("publisher.answers", _answers),
     ("publisher.foreign", _foreign),
     ("publisher.owners", _owners),

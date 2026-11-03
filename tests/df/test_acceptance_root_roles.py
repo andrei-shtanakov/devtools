@@ -40,11 +40,12 @@ from pathlib import Path
 
 import pytest
 
-from df import doctor, launch, setup_agent, sudoers
+from df import doctor, launch, precheck_reap, setup_agent, sudoers
 from df import platform as plat
 from df.config import load_accounts
 from df.publisher import perimeter
 from df.publisher.github import SelfCheckResult
+from df.publisher.precheck import PRECHECK_WAIT
 from df.publisher.precheck import command as precheck_command
 from df.publisher.request import Response
 from tests.df.conftest import stage1_out
@@ -1430,11 +1431,19 @@ def test_precheck_git_hang_rung1(rw: RolesWorld, pw: PrecheckWorld) -> None:
     assert left == [] and record["snapshots"] == [] and record["lock_free"]
 
 
+#: The real process lister, before `conftest._no_real_reap` replaces it
+#: in this process (the root rows read real processes).
+REAL_PROCESSES = precheck_reap.list_processes
+#: Seconds over `PRECHECK_WAIT` the supervised call may take to return:
+#: its wait ends at `PRECHECK_WAIT`, then the pipe is closed.
+RETURN_SLACK = 1.0
+
+
 @dataclass
 class StoppedRun:
     """A run of the positive stop whose precheck root stopped: the client's
     result, the precheck's and its sudo's PIDs, samples of the processes
-    (`sample`) until the client returned, the snapshots left."""
+    (`sample`) until the client returned, the snapshots then."""
 
     result: dict[str, object]
     target: int
@@ -1443,26 +1452,13 @@ class StoppedRun:
     samples: list[dict[str, object]]
     snapshots: list[str]
 
-    def since_start(self, at: object) -> float:
-        """Seconds from the client's start to the monotonic instant `at`."""
-        return float(str(at)) - float(str(self.result["start"]))
-
-    def gone_after(self) -> float | None:
-        """Seconds from the client's start until no `df-precheck` process
-        was seen (`None`: never)."""
-        gone = [s for s in self.samples if not s["precheck"]]
-        return self.since_start(gone[0]["t"]) if gone else None
-
-    def after(self, seconds: float) -> list[dict[str, object]]:
-        """The samples taken later than `seconds` after the client's start."""
-        return [s for s in self.samples if self.since_start(s["t"]) > seconds]
-
 
 def stopped_precheck(rw: RolesWorld, pw: PrecheckWorld) -> StoppedRun:
     """Run the positive stop with a slow git server; root `SIGSTOP`s the
     precheck process once its snapshot exists; sample the processes of
     `df-precheck` (and its sudo) every second until the client returns.
-    Whatever happens, the precheck, its sudo and the client end here."""
+    The stopped processes stay (the caller ends them, `end_stopped`); on a
+    failure here they end at once."""
     uid = rw.uid(PRECHECK)
     pw.git.delay = 2.0
     proc = pw.start(pw.current)
@@ -1485,9 +1481,14 @@ def stopped_precheck(rw: RolesWorld, pw: PrecheckWorld) -> StoppedRun:
             samples.append(sample(uid, target.ppid))
             time.sleep(1.0)
         result = driver_result(proc, 60)
+    except BaseException:
+        end_stopped(target)
+        raise
     finally:
         pw.git.delay = 0.0
-        end_stopped(proc, target)
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=30)
     return StoppedRun(
         result, target.pid, target.ppid, stopped_at, samples, pw.snapshots()
     )
@@ -1505,56 +1506,68 @@ def sample(uid: int, sudo_pid: int) -> dict[str, object]:
     }
 
 
-def end_stopped(proc: subprocess.Popen[bytes], target: Proc | None) -> None:
-    """The precheck and its sudo (both possibly stopped), then the client,
-    are gone."""
+def end_stopped(target: Proc | None) -> None:
+    """The precheck and its sudo (both possibly stopped) are gone: the
+    sudo is root's, which no precheck reaps (spec 5.x, «Предел второго
+    рубежа»)."""
     for pid in () if target is None else (target.pid, target.ppid):
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-    if proc.poll() is None:
-        proc.kill()
-    proc.wait(timeout=30)
     plat.reap_user_processes(PRECHECK)
 
 
-def test_precheck_command_timeout_rung2(rw: RolesWorld, pw: PrecheckWorld) -> None:
+def age_of(pid: int) -> float | None:
+    """The age of `pid` by `precheck_reap`'s own reading (`None`: gone or
+    a zombie)."""
+    found = next((p for p in REAL_PROCESSES() if p.pid == pid), None)
+    return None if found is None or found.zombie else found.age
+
+
+def test_precheck_command_timeout_reaped(rw: RolesWorld, pw: PrecheckWorld) -> None:
     """The precheck itself hangs (root's `SIGSTOP` after its snapshot
-    exists): rung 2, sudo's `command_timeout` — the client answers
-    `precheck_failed: timeout` within 200 s, no process of `df-precheck`
-    185 s after the start, and the next call clears the snapshot left."""
+    exists). sudo stops itself with it, so rung 2 never fires (spec,
+    «Предел второго рубежа»): the client answers `precheck_failed: timeout`
+    at `PRECHECK_WAIT` from its sudo's start (rung 3), and the stopped
+    processes are still there. A call while they are younger than
+    `REAP_AFTER` spares them and their snapshot (a live run's lock); the
+    first call past it reaps them: no process of the first call is left,
+    its snapshot is gone, and that call's verdict is the normal `allow`."""
     run = stopped_precheck(rw, pw)
-    after = pw.ask(pw.current)
-    gone = run.gone_after()
+    target = run.target
+    try:
+        left = sample(rw.uid(PRECHECK), run.sudo)
+        young = pw.ask(pw.current)
+        young_age = age_of(target)
+        young_snapshots = pw.snapshots()
+        waited = wait_for(
+            lambda: (age_of(target) or 0.0) > precheck_reap.REAP_AFTER + 1, 90, 0.5
+        )
+        reaped = pw.ask(pw.current)
+        after = {"age": age_of(target), "sample": sample(rw.uid(PRECHECK), run.sudo)}
+    finally:
+        end_stopped(next((p for p in processes() if p.pid == target), None))
+    result = run.result
+    supervised = float(str(result["sudo_end"])) - float(str(result["sudo_start"]))
     evidence(
         "precheck-rung2.json",
         {
             **asdict(run),
-            "gone_after": gone,
-            "next": after,
-            "next_snapshots": pw.snapshots(),
+            "supervised_seconds": supervised,
+            "left_after_client": left,
+            "young": {"result": young, "age": young_age, "snapshots": young_snapshots},
+            "waited_past_threshold": bool(waited),
+            "reaped": {"result": reaped, **after, "snapshots": pw.snapshots()},
         },
     )
-    assert run.result.get("refused") == "precheck_failed: timeout", run.result
-    assert run.since_start(run.result["end"]) <= CLIENT_BOUND, run.result
-    assert gone is not None and gone <= RUNG2_BOUND, gone
-    assert run.snapshots, "снимок прерванного запуска не остался"
-    assert after.get("refused", "?") is None and pw.snapshots() == [], after
-
-
-def test_precheck_command_timeout_control(rw: RolesWorld, pw: PrecheckWorld) -> None:
-    """Control of rung 2: with the command's `command_timeout` off
-    (`Defaults!<df-precheck> !command_timeout` after it), the stopped
-    precheck is alive 185 s after the start — it was sudo that ended it."""
-    off = f"Defaults!{rw.wrapper(PRECHECK)} !command_timeout\n"
-    install_sudoers_file(IOLOG_FILE, off)
-    try:
-        run = stopped_precheck(rw, pw)
-    finally:
-        os.unlink(IOLOG_FILE)
-    late = run.after(RUNG2_BOUND)
-    evidence("precheck-rung2-control.json", {**asdict(run), "config": off})
-    after = pw.ask(pw.current)
-    assert late and all(s["precheck"] for s in late), late[:3]
-    assert after.get("refused", "?") is None and pw.snapshots() == [], after
+    assert result.get("refused") == "precheck_failed: timeout", result
+    assert supervised <= PRECHECK_WAIT + RETURN_SLACK, supervised
+    assert any(p[0] == target for p in left["precheck"]), left
+    assert young.get("refused", "?") is None, young
+    assert young_age is not None and set(run.snapshots) <= set(young_snapshots)
+    assert waited, "процесс не дожил до порога (убит раньше?)"
+    assert reaped.get("refused", "?") is None, reaped
+    assert after["age"] is None, after
+    assert not after["sample"]["precheck"], after
+    assert pw.snapshots() == []

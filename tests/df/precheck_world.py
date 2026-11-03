@@ -313,7 +313,8 @@ def silent_server() -> Iterator[str]:
 
 #: The publisher's call of the precheck: `admin_precheck` of the admin tree
 #: (`argv[1]`: the tree, the product and the PR's facts), its result and
-#: the monotonic instants around the call as one JSON line.
+#: the monotonic instants around the call (`start`, `end`) and around its
+#: supervised sudo command (`sudo_start`, `sudo_end`) as one JSON line.
 DRIVER = """
 import json, sys, time
 from pathlib import Path
@@ -333,6 +334,15 @@ facts = precheck.PrFacts(spec["product"], spec["head_ref"], spec["base_ref"],
                          spec["base_tip"], tuple(tuple(c) for c in spec["changes"]))
 pr = {"number": spec["pr"], "head": {"sha": spec["head_sha"]}}
 out = {"start": time.monotonic()}
+from df import platform as _plat
+_supervised = _plat.run_supervised
+def _timed(*args, **kwargs):
+    out["sudo_start"] = time.monotonic()
+    try:
+        return _supervised(*args, **kwargs)
+    finally:
+        out["sudo_end"] = time.monotonic()
+_plat.run_supervised = _timed
 try:
     res = precheck.admin_precheck("stop", oc, pr, facts)
 except Exception as exc:
