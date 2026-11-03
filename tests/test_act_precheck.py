@@ -89,19 +89,22 @@ class Repo:
         _git(self.work, "add", "-A")
         _git(self.work, "commit", "-qm", "init")
 
-    def branch(self, name: str, files: dict[str, str]) -> str:
+    def branch(self, name: str, files: dict[str, str | bytes]) -> str:
         _git(self.work, "switch", "-qc", name, "master")
         for rel, text in files.items():
             file = self.work / rel
             file.parent.mkdir(parents=True, exist_ok=True)
-            file.write_text(text)
+            if isinstance(text, bytes):
+                file.write_bytes(text)
+            else:
+                file.write_text(text)
         _git(self.work, "add", "-A")
         _git(self.work, "commit", "-qm", name)
         head = _git(self.work, "rev-parse", "HEAD")
         _git(self.work, "switch", "-q", "master")
         return head
 
-    def deliver(self, name: str, files: dict[str, str], pr: int) -> str:
+    def deliver(self, name: str, files: dict[str, str | bytes], pr: int) -> str:
         """Ветка `name` смёржена PR `pr` (merge-коммит); REST знает этот PR."""
         head = self.branch(name, files)
         _git(self.work, "merge", "-q", "--no-ff", name, "-m", f"Merge {name}")
@@ -302,6 +305,23 @@ def test_stop_record_invalid_refused(
 
 
 @needs_steward
+def test_stop_record_not_utf8_refused(
+    tmp_path: Path, repo: Repo, server: GitServer
+) -> None:
+    """Байт не UTF-8 в записи остановки — дефект содержимого PR (отказ), а не
+    ошибка чтения; запись в остальном корректна, так что обход дал бы `allow`."""
+    repo.deliver_request("approve-1-0-1", 1, 7)
+    text = render_stop(StopRecord(NODE, 1, "отозвано")).encode()
+    bad = text.replace("отозвано".encode(), b"r\xff")
+    head = repo.branch("stop-bytes", {STOP1: bad})
+    repo.pulls[STOP_PR] = head
+    repo.publish()
+    verdict = _run_stop(tmp_path, repo, server, head)
+    assert verdict["outcome"] == "refuse"
+    assert verdict["reason"] == "stop_record_invalid: not UTF-8"
+
+
+@needs_steward
 def test_stop_record_absent_at_head_is_unset(
     tmp_path: Path, repo: Repo, server: GitServer
 ) -> None:
@@ -469,6 +489,19 @@ def test_kind_candidate_rejected_by_schema(tmp_path: Path, capsys: Any) -> None:
         ("head_sha", "B" * 40),
         ("head_ref", ""),
         ("base_ref", 1),
+        ("base_ref", "-x"),
+        ("base_ref", ".x"),
+        ("base_ref", "a..b"),
+        ("base_ref", "a/.b"),
+        ("base_ref", "a//b"),
+        ("base_ref", "x.lock"),
+        ("base_ref", "x.lock/y"),
+        ("base_ref", "x/"),
+        ("base_ref", "x."),
+        ("base_ref", "a b"),
+        ("base_ref", "a\tb"),
+        ("base_ref", "a~1"),
+        ("base_ref", "release+1"),
         ("base_tip", "c" * 39),
         ("changes", [["added", "x"]]),
         ("changes", [["added", "x", 1]]),
@@ -483,6 +516,14 @@ def test_invalid_value_exit_2(
 ) -> None:
     err = _invalid(tmp_path, _req(**{key: value}), capsys)
     assert f"invalid values: [{key!r}]" in err
+
+
+@pytest.mark.parametrize("name", ["master", "release/2.0", "feat/a-b_c", "v1.x"])
+def test_valid_base_ref_accepted(tmp_path: Path, name: str) -> None:
+    code, verdict, _ = _serve(
+        tmp_path / "home", _req(base_ref=name, changes=[]), _deps()
+    )
+    assert code == 0 and verdict is not None
 
 
 def test_request_not_object_exit_2(tmp_path: Path, capsys: Any) -> None:

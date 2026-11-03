@@ -89,7 +89,11 @@ BYPASS: dict[str, tuple[str, str]] = {
     ),
     "act_precheck._stop_in_history:unreadable": (
         'return UNSET, f"stop_unreadable: {target.path} at {request.head_sha[:12]}"',
-        'text = ""',
+        'raw = b""',
+    ),
+    "act_precheck._stop_in_history:utf8": (
+        'return REFUSE, "stop_record_invalid: not UTF-8"',
+        'text = raw.decode("utf-8", "replace")',
     ),
     "act_precheck._stop_in_history:record_invalid": (
         'return REFUSE, f"stop_record_invalid: {exc}"',
