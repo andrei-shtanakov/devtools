@@ -327,3 +327,34 @@ def test_check_github_against_fake(fake: FakeGitHub, tmp_path: Path) -> None:
     row = report["products"][str(PRODUCT_ID)]  # type: ignore[index]
     assert row["permissions"]["push"] is True  # type: ignore[index]
     assert fake.paths("machine") == ["GET /user", "GET /repos/df-fixture/product"]
+
+
+def test_install_production_does_not_prime_the_site_cache(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """PR 681: `install_production` (shared with the live stand, which
+    installs into the real `/`) runs the real `install_admin`; only the
+    roles world's own caller primes the stand-in `site/` sources."""
+    from df import admin
+    from tests.df import roles_world
+
+    real = admin.install_admin
+    seen: list[bool] = []
+
+    class World:
+        layout = Layout(tmp_path)
+
+        def profile(self) -> object:
+            return None
+
+        def init_argv(self) -> list[str]:
+            return []
+
+        def bootstrap(self, _argv: list[str]) -> int:
+            seen.append(admin.install_admin is real)
+            return 0
+
+    monkeypatch.setattr(roles_world, "assert_committed", lambda _layout: None)
+    monkeypatch.setattr(roles_world, "current_id", lambda _layout: "rid")
+    roles_world.install_production(World())  # type: ignore[arg-type]
+    assert seen == [True]
