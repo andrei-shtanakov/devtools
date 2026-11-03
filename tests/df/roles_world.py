@@ -802,7 +802,9 @@ def roles_world(
         stack.callback(teardown_install, layout, keep)
         stack.callback(teardown_roles, layout)
         world = RootWorld(layout, repo, approved_uv(), top, control_url)
-        installed = install_production(world)
+        with pytest.MonkeyPatch.context() as mp:
+            prime_on_install(mp)  # the stand-in `site/` sources (2b Task 5)
+            installed = install_production(world)
         work = top / "roles"
         work.mkdir(mode=0o755)
         os.chmod(work, 0o755)
@@ -839,7 +841,6 @@ def install_production(world: RootWorld) -> InstalledWorld:
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(install, "_profile", lambda _cfg: world.profile())
-        prime_on_install(mp)  # the stand-in `site/` sources (2b Task 5)
         code = world.bootstrap(world.init_argv())
     if code != cli.EXIT_OK:
         infra(f"установка в /: код {code}")

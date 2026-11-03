@@ -428,6 +428,42 @@ def test_steward_commit_hostile_member_refused(
     assert not (tmp_path / "site" / "steward" / "evil.py").exists()
 
 
+def test_steward_archive_stalled_mid_stream_is_bounded(
+    fl: FakeLayout,
+    served: Served,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`git archive` that sends part of the archive and then stalls without
+    exiting: the stream read is bounded by `GIT_TIMEOUT` like every other
+    git call -- `TreeError` naming the deadline, the process group killed;
+    the partial `site/` is left to the caller's recovery."""
+    monkeypatch.setattr(admin_tree, "GIT_TIMEOUT", 5.0)
+    world = site_world()
+    pid_file = tmp_path / "archive.pid"
+    stall = (
+        'case " $* " in *" archive "*)\n'
+        f'  {SYSTEM_GIT} "$@" | head -c 1536\n'
+        f"  echo $$ > {pid_file}\n"
+        "  exec sleep 120;;\n"
+        "esac\n"
+    )
+    dest = tmp_path / "site"
+    started = time.monotonic()
+    with pytest.raises(TreeError, match="срок 5 с истёк"):
+        install_site(
+            dest,
+            local_pins(world, served),
+            layout=fl.layout,
+            fetch=served.fetch,
+            git=wrapper(tmp_path, world, extra=stall),
+        )
+    assert time.monotonic() - started < 60
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_file.read_text()), 0)
+    assert (dest / "steward").is_dir()  # partial, as the protocol expects
+
+
 def test_steward_cache_never_read_through_a_parent_repo(
     fl: FakeLayout, tmp_path: Path
 ) -> None:

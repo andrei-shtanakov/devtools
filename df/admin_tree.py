@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import select
 import ssl
 import stat
 import subprocess
@@ -533,11 +534,39 @@ def write_all(fd: int, data: bytes) -> None:
         view = view[os.write(fd, view) :]
 
 
+class _TimedStream(io.RawIOBase):
+    """The stdout of `git archive` under one deadline for the whole stream
+    (`GIT_TIMEOUT`, like every other git call here): a read that would pass
+    it kills the process group and is `TreeError`."""
+
+    def __init__(self, proc: subprocess.Popen[bytes], deadline: float) -> None:
+        super().__init__()
+        assert proc.stdout is not None
+        self._proc = proc
+        self._fd = proc.stdout.fileno()
+        self._deadline = deadline
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: memoryview) -> int:
+        remaining = self._deadline - time.monotonic()
+        ready = remaining > 0 and select.select([self._fd], [], [], remaining)[0]
+        if not ready:
+            _kill_group(self._proc)
+            raise TreeError(f"git archive (steward): срок {GIT_TIMEOUT:g} с истёк")
+        data = os.read(self._fd, len(buffer))
+        buffer[: len(data)] = data
+        return len(data)
+
+
 @contextmanager
 def _archive(git: Path, sources: SiteSources) -> Iterator[IO[bytes]]:
-    """`git archive <commit> src/steward` of the cached repo as a stream;
-    a non-zero exit (after the stream is read) is `TreeError`, an early
-    exit of the reader kills the process group."""
+    """`git archive <commit> src/steward` of the cached repo as a stream
+    bounded by `GIT_TIMEOUT` (`_TimedStream`); a non-zero exit (after the
+    stream is read) is `TreeError`, an early exit of the reader or an
+    expired deadline kills the process group (a partial `admin/<id>` is left
+    to the protocol's recovery)."""
     argv = [
         str(git),
         f"--git-dir={sources.steward_repo}",
@@ -556,10 +585,11 @@ def _archive(git: Path, sources: SiteSources) -> Iterator[IO[bytes]]:
         start_new_session=True,
     )
     assert proc.stdout is not None
+    stream = _TimedStream(proc, time.monotonic() + GIT_TIMEOUT)
     done = False
     try:
-        yield proc.stdout
-        while proc.stdout.read(CHUNK):  # drain the end-of-archive padding
+        yield stream
+        while stream.read(CHUNK):  # drain the end-of-archive padding
             pass
         done = True
     finally:
