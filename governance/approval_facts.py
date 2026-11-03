@@ -45,6 +45,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from governance import ssot_env
+from governance.act_time import OPS_FAILURES
 from governance.facts import Fact, Outcome, unavailable
 from governance.ops import Ops
 from governance.policy_rule import (  # noqa: F401 — реэкспорт для потребителей
@@ -118,7 +119,7 @@ def read_pr(ops: Ops, repo_slug: str, pr: int) -> Fact[dict]:
     """
     try:
         facts = ops.pr_facts(repo_slug, pr)
-    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as exc:
+    except OPS_FAILURES as exc:
         return unavailable(f"факты PR #{pr}: запрос не удался ({exc})")
     if not isinstance(facts, dict) or not facts:
         return unavailable(f"факты PR #{pr}: пустой либо неожиданный ответ")

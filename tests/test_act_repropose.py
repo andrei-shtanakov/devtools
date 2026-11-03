@@ -599,6 +599,17 @@ def _merged_ambiguous(world: World, stand: Stand) -> str:
     return key
 
 
+def test_undecided_delivery_mode_unset_refused(world, stand, monkeypatch):
+    """Task 16: режим не установлен к моменту решения о погребении — отказ самого
+    `_undecided_delivery` (гварды создания проверены отдельно и здесь сняты)."""
+    key, _pr = _legacy_merged(world, stand)
+    monkeypatch.setattr(act_node, "_require_successor_creatable", lambda *a: None)
+    stand.mode_unset = "нет привязки"
+    with pytest.raises(RuntimeError, match="режим акта продукта .--repropose"):
+        _repropose(world, key)
+    assert world.state.ops[key]["status"] == al.STATUS_STARTED
+
+
 def test_merged_predecessor_outside_review_mode_refused(world, stand):
     key = _merged_ambiguous(world, stand)
     stand.mode = "merge"
@@ -790,6 +801,19 @@ def test_unmarked_merged_admitted_legacy_accepted_refused(world, stand):
     assert al.successor_of(world.state, key) is None
 
 
+def test_unmarked_merged_trusted_context_unavailable_refused(world, stand, monkeypatch):
+    """Task 16 (`_delivery_outcome`): доверенный контекст не загружен — отказ с его
+    причиной до погребения, предшественник жив."""
+    key, _pr = _legacy_merged(world, stand)
+    stand.mode = "review"
+    monkeypatch.setattr(
+        act_status.Decider, "context", lambda self: Unavailable("журнал недоступен")
+    )
+    with pytest.raises(RuntimeError, match="доверенный контекст: журнал недоступен"):
+        _repropose(world, key)
+    assert world.state.ops[key]["status"] == al.STATUS_STARTED
+
+
 def test_unmarked_merged_unnamed_head_refused(world, stand, monkeypatch):
     key, pr = _legacy_merged(world, stand)
     stand.mode = "review"
@@ -913,6 +937,38 @@ def test_cli_repropose_is_a_separate_action(tmp_path, monkeypatch, capsys, extra
     with pytest.raises(SystemExit):
         tb.main(["--run-id", "r-repropose", "--repropose", "approve-1-0-1", *extra])
     assert "--repropose — отдельное действие" in capsys.readouterr().err
+
+
+def test_cli_repropose_with_approve_node_runs_neither(tmp_path, monkeypatch, capsys):
+    """Ревью Task 16, M4: `--repropose` вместе с `--approve-node` — отказ argparse до
+    любого действия; ни одно из двух не исполняется (молча побеждающего нет)."""
+    from governance import task_bridge as tb
+
+    _completed_run(tmp_path, monkeypatch)
+    ran: list[str] = []
+
+    def record(name):
+        def act(*a, **k):
+            ran.append(name)
+            return an.ApprovalOutcome(name)
+
+        return act
+
+    monkeypatch.setattr(tb, "approve_node", record("approve_node"))
+    monkeypatch.setattr(act_node, "repropose", record("repropose"))
+    monkeypatch.setattr(tb, "RealOps", lambda: object())
+    with pytest.raises(SystemExit):
+        tb.main(
+            [
+                "--run-id",
+                "r-repropose",
+                "--repropose",
+                "approve-1-0-1",
+                "--approve-node",
+                "charter",
+            ]
+        )
+    assert ran == []
 
 
 def test_cli_repropose_dispatches(tmp_path, monkeypatch, capsys):

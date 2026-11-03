@@ -803,8 +803,30 @@ def _print_values(values: dict[str, object]) -> None:
         print(f"{key + ':':<{width + 1}} {value}")
 
 
+#: Паузы волнового прогона, которые кнопка продолжает `runner.resume`:
+#: человеческий мерж (`merge`) и два ожидания `review/v1` (§9.1) — approve
+#: человека и решение по доставке агентом.
+WAVE_PAUSES = ("waiting_human_merge", "waiting_human_approval", "waiting_delivery")
+
+
 def _pause_message(state: rs.RunState) -> str:
-    """Что ждёт кнопка на `waiting_human_merge` — по модели авторинга."""
+    """Что ждёт кнопка на паузе волны (`WAVE_PAUSES`) — по модели авторинга."""
+    total = bundle_dag.wave_count(bundle_dag.BUNDLE_DAG)
+    if state.status == "waiting_human_approval":
+        return (
+            f"wave={state.wave}/{total}: ждём approve candidate-PR "
+            f"#{runner.wave_candidate_pr(state)} ({state.repo_slug}) человеком из "
+            "human_approvers по голове PR — это акт одобрения узлов волны "
+            "(review/v1, §9.1); мержить не нужно, candidate доставляет агент; "
+            "после approve повторите make spec-loop"
+        )
+    if state.status == "waiting_delivery":
+        return (
+            f"wave={state.wave}/{total}: approve есть, candidate-PR "
+            f"#{runner.wave_candidate_pr(state)} ({state.repo_slug}) в доставке "
+            "агентом — повторите make spec-loop (решение по доставке, finalize и "
+            "следующая волна)"
+        )
     if state.authoring != "waves":
         return (
             f"ждём мерж бандл-PR #{state.pr} ({state.repo_slug}) — "
@@ -958,9 +980,9 @@ def _dispatch(state: rs.RunState, ops, lock: run_lock.RunLock) -> int:
     """Действие по фактическому статусу найденного прогона."""
     if state.status == "brief_ready":
         return _brief_ready(state)
-    if state.status == "waiting_human_merge":
+    if state.status in WAVE_PAUSES:
         after = runner.resume(state.run_id, ops, lock=lock)
-        if after.status == "waiting_human_merge":
+        if after.status in WAVE_PAUSES:
             print(_pause_message(after))
             return 0
         if after.status == "completed":
@@ -985,7 +1007,7 @@ def _dispatch(state: rs.RunState, ops, lock: run_lock.RunLock) -> int:
             return 0
         if after.status == "stopped_interview":
             return _report_interview_stop(after)
-        if after.status == "waiting_human_merge":
+        if after.status in WAVE_PAUSES:
             print(_pause_message(after))
             return 0
         if after.status == "completed":
@@ -1400,7 +1422,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"{started.run_id}'"
             )
             return 0
-        if started.status == "waiting_human_merge":
+        if started.status in WAVE_PAUSES:
             print(_pause_message(started))
             return 0
         if started.status == "brief_ready":

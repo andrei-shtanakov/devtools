@@ -6,9 +6,10 @@
 
 from __future__ import annotations
 
-# `governance/node_approval` и `governance/stale_adapter` не в authority-root:
-# предпроверка мержа (`act_premerge`) проекцию не импортирует. Если цепочка
-# обвязки их втянет, `tests/harness_trust.py` потребует их защитить
+# `governance/node_approval` и `governance/stale_adapter` — под authority-root
+# (интеграционное ревью части B, I-4): хеш и исключаемые поля решают I-content;
+# импорты этого модуля сверяет `test_act_projection_imports_are_protected`.
+# Предпроверка мержа (`act_premerge`) проекцию не импортирует
 # (`tests/test_act_premerge.py::test_premerge_chain_has_no_df_and_no_projection`).
 from governance.frontmatter import join_frontmatter, split_frontmatter
 from governance.node_approval import APPROVAL_ENVELOPE_KEYS

@@ -215,6 +215,19 @@ def test_boundary_exactly_two_seconds_ago_does_not_sleep(world: World) -> None:
     assert world.run() == 0 and world.slept == []
 
 
+def test_boundary_unparsed_stamp_is_unset() -> None:
+    """Task 16 (`_boundary`): метка события не разобрана — граница не вычислена,
+    «не установлено» (2), а не отказ и не граница без этого события."""
+    from types import SimpleNamespace
+
+    facts = SimpleNamespace(
+        reviews=[SimpleNamespace(submitted_at="не-метка")], dismissals=[]
+    )
+    with pytest.raises(act_premerge._Stop, match="метка события не разобрана") as got:
+        act_premerge._boundary(facts, [])
+    assert got.value.code == act_premerge.EXIT_UNSET
+
+
 def test_wait_of_exactly_ten_seconds_is_allowed(world: World) -> None:
     world.approve_at = "2026-10-12T12:00:08Z"
     assert world.run() == 0 and world.slept == [10.0]
@@ -639,11 +652,22 @@ def test_no_act_without_same_second_approve_refused(
 )
 def test_app_half_pair_is_usage_error(world: World, capsys, extra) -> None:
     """Task 15a: `--app-id`/`--app-key` — оба или ни одного; половина — отказ
-    разбора (2) до любых чтений, не откат на режим профиля."""
-    with pytest.raises(SystemExit) as exc:
-        world.run(*extra)
-    assert exc.value.code == 2
+    разбора до любых чтений, не откат на режим профиля. Код — 3 (m-7):
+    `merge-pr.sh` читает 2 как «повтор уместен», а расхождение версий обвязки
+    повтор не лечит."""
+    assert world.run(*extra) == act_premerge.EXIT_REFUSED
     assert "нужны оба --app-id и --app-key" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["--bogus"], [], ["--help"], ["--repo", "o/p", "--pr", "x"]],
+    ids=["unknown", "empty", "help", "bad_type"],
+)
+def test_argparse_error_is_terminal_not_retry(argv: list[str]) -> None:
+    """m-7: ошибка разбора — 3 («не мержить, не повторять»), не 2 («повтор»);
+    до чтений: зависимости не строятся."""
+    assert act_premerge.main(argv) == act_premerge.EXIT_REFUSED
 
 
 def test_real_deps_app_mode_wires_installations(monkeypatch, tmp_path) -> None:

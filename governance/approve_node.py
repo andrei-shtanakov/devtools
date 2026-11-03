@@ -44,7 +44,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from governance import approval_facts as af
 from governance import approval_ledger as al
@@ -53,8 +53,9 @@ from governance import node_approval as na
 from governance.act_check import LegacyAccepted
 from governance.act_decision import Rejected
 from governance.act_envelope import DeliveredRequest, current_event
+from governance.act_projection import ProjectionError, self_hash_v
 from governance.act_request import ACT_REVIEW_V1
-from governance.act_time import Ambiguous, Unavailable
+from governance.act_time import OPS_FAILURES, Ambiguous, Unavailable
 from governance.approval_facts import Disposition, Outcome
 from governance.frontmatter import split_frontmatter, update_frontmatter
 from governance.ops import Ops
@@ -112,6 +113,8 @@ class ApprovalOutcome:
     message: str
     request: str | None = None
     changed: tuple[str, ...] = ()
+    #: код `merge-pr.sh`, когда агентская доставка отказала (иначе `None`)
+    merge_code: int | None = None
 
 
 # --- Общие мелочи -------------------------------------------------------
@@ -226,6 +229,33 @@ def _pr_facts(state: RunState, ops: Ops, pr: int) -> dict:
     if fact.outcome is not Outcome.FOUND or not isinstance(fact.value, dict):
         raise _unresolved(f"факты PR #{pr} — {fact.detail}")
     return fact.value
+
+
+def _content_hash(text: str, act: str | None) -> str:
+    """Self-hash узла, который заявка выносит, — в проекции ЕЁ акта.
+
+    `review/v1` проверяет I-content проекцией `self_hash_v(·, review/v1)`;
+    старая проекция (`na.self_hash`) расходится с ней, если frontmatter узла
+    несёт штамп-ключи `review/v1`, и тогда доставка отказывала бы уже ПОСЛЕ
+    акта человека (интеграционное ревью части B, m-2). Заявка без маркера —
+    прежний хеш байт в байт."""
+    if act is None:
+        return na.self_hash(text)
+    try:
+        return self_hash_v(text, act)
+    except ProjectionError as exc:
+        raise RuntimeError(f"self-hash узла в проекции {act}: {exc}") from exc
+
+
+def _commit_paths(
+    ops: Ops, target_dir: str, paths: list[str], message: str, **force: Any
+) -> None:
+    """`ops.commit_paths` либо отказ без эффектов: `CalledProcessError` из
+    `check=True` — «факт не установлен», а не трассировка (I-3, `OPS_FAILURES`)."""
+    try:
+        ops.commit_paths(target_dir, paths, message, **force)
+    except OPS_FAILURES as exc:
+        raise _unresolved(f"коммит {', '.join(paths)} не состоялся ({exc})") from exc
 
 
 def _disposition(facts: dict, pr: int) -> Disposition:
@@ -471,7 +501,7 @@ def _propose(
     _require_no_reopened_pr(state, ops, node_id)
     made = act_node.creation(state, ops, deps, live)  # отказ — до первой записи
 
-    self_hash = na.self_hash(text)
+    self_hash = _content_hash(text, made.act)
     step = _levels(dag)[node_id]
     nodes = bundle_dag.composition(dag)
     fingerprint = bundle_dag.composition_fingerprint(nodes)
@@ -939,7 +969,9 @@ def propose_from_source(
     made = act_node.creation(state, ops, deps, live)  # отказ — до первой записи
     generations = {n: act_node.generation_of(made, n) for n in node_ids}
     hashes = {
-        node: na.self_hash(_source_text(ops, state, source_sha, _filename(dag, node)))
+        node: _content_hash(
+            _source_text(ops, state, source_sha, _filename(dag, node)), made.act
+        )
         for node in node_ids
     }
     pins = {
@@ -1409,7 +1441,7 @@ def _carried_text(
     fname = _filename(dag, node)
     text = _node_text(ops, state, op, fname)
     recorded = op["content_hashes"][node]
-    actual = na.self_hash(text)
+    actual = _content_hash(text, op.get("act"))
     if actual != recorded:
         raise RuntimeError(
             f"{node}: собственные байты в источнике не те, что вынесла "
@@ -1500,7 +1532,8 @@ def _sync_branch_to_snapshot(
     # `force_paths` — только когда source-слой есть: форма вызова без него
     # остаётся прежней (стенды подменяют `commit_paths` тремя аргументами).
     force = {"force_paths": tuple(forced)} if forced else {}
-    ops.commit_paths(
+    _commit_paths(
+        ops,
         state.target_dir,
         changed,
         f"spec: {state.ws_id} — узел(ы) {', '.join(op['nodes'])} вынесены "
@@ -2333,7 +2366,7 @@ def _ensure_finalize_identity(state: RunState, ops: Ops, key: str, op: dict) -> 
             # `any_state=True` обязателен: искомый finalize УЖЕ вмержен,
             # а поиск по умолчанию видит только открытые PR (ревью #393).
             pr = ops.find_pr(state.repo_slug, branch, any_state=True)
-        except RuntimeError as exc:
+        except OPS_FAILURES as exc:
             raise _unresolved(
                 f"поиск finalize-PR заявки {key} по ветке {branch}: {exc}"
             ) from exc
@@ -2541,7 +2574,7 @@ def _verify_nodes_in_base(
     for node in op["nodes"]:
         text = _base_text(ops, state, _filename(dag, node))
         meta, _ = split_frontmatter(text)
-        recomputed = na.self_hash(text)
+        recomputed = _content_hash(text, op.get("act"))
         _require(
             state,
             key,
@@ -2646,7 +2679,8 @@ def _publish_envelope(
                 encoding="utf-8",
             )
             changed.append(_rel(state, _filename(dag, node)))
-        ops.commit_paths(
+        _commit_paths(
+            ops,
             state.target_dir,
             changed,
             f"spec: {state.ws_id} — конверт подписи узлов "
@@ -2729,6 +2763,7 @@ _MERGE_CODE_HINTS = {
         "форджа отклонила мерж — решение за ней; одобрение проверено до "
         "вызова, значит причина в другом правиле репозитория (rulesets)"
     ),
+    5: "голова или база уехали после проверки — повтор пинует новую верхушку",
     6: "стоп-кран DarkFactory включён — мерж после снятия стопа",
 }
 _SLEEP = time.sleep
@@ -2755,6 +2790,9 @@ class MergeRefusal:
 
     reason: str
     human_merge_helps: bool
+    #: повтор того же вызова уместен (проверки ещё идут) — у доставки candidate
+    #: `review/v1` это `waiting_delivery`, а не остановка
+    retry: bool = False
 
 
 def _missing_approving_review(
@@ -2894,7 +2932,7 @@ def _try_agent_merge(
 
 
 def _await_required_checks(
-    state: RunState, ops: Ops, pr: int, head: str
+    state: RunState, ops: Ops, pr: int, head: str, *, kind: str = "finalize-PR"
 ) -> MergeRefusal | None:
     """Ждёт обязательные проверки PR'а; `None` — можно мержить.
 
@@ -2911,11 +2949,11 @@ def _await_required_checks(
     лечит время и повторный вызов.
     """
     for _ in range(_CHECKS_POLL_LIMIT):
-        facts = ops.pr_facts(state.repo_slug, pr)
+        facts = _pr_facts(state, ops, pr)
         actual = facts.get("headRefOid")
         if actual != head:
             return MergeRefusal(
-                f"голова finalize-PR #{pr} уехала за время ожидания "
+                f"голова {kind} #{pr} уехала за время ожидания "
                 f"проверок: ждали {head[:8]}, на PR {str(actual)[:8]}. "
                 "Агентский мерж не выполнен — повторите вызов",
                 human_merge_helps=False,
@@ -2925,17 +2963,18 @@ def _await_required_checks(
             return None
         if verdict == "red":
             return MergeRefusal(
-                f"обязательные проверки finalize-PR #{pr} красные "
+                f"обязательные проверки {kind} #{pr} красные "
                 f"({pr_checks.failing_names(facts)}) — агентский мерж не "
                 "выполнен; чинит автор изменения, не мерж",
                 human_merge_helps=False,
             )
         _SLEEP(_CHECKS_POLL_SECONDS)
     return MergeRefusal(
-        f"обязательные проверки finalize-PR #{pr} не завершились за "
+        f"обязательные проверки {kind} #{pr} не завершились за "
         f"{int(_CHECKS_POLL_LIMIT * _CHECKS_POLL_SECONDS)} с — агентский "
         "мерж не выполнен; повторите вызов, когда проверки дойдут",
         human_merge_helps=False,
+        retry=True,
     )
 
 

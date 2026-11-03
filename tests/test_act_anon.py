@@ -282,6 +282,61 @@ def test_truncated_tree_is_unavailable_not_absent(kw: dict) -> None:
 
 
 @KW
+def test_unreadable_tree_is_unavailable(kw: dict) -> None:
+    """Task 16: дерево не прочитано — отказ `_tree_entry`, а не «пути нет»."""
+    t, _ = _anon(_world(**{f"git/trees/{ROOT}": (500, {"message": "x"}, None)}), **kw)
+    got = act_anon.contents_bytes(t, "o/r", "epochs.yaml", REF)
+    assert isinstance(got, Unavailable) and "HTTP 500" in got.reason
+
+
+@KW
+def test_tree_blob_oid_not_sha_is_unavailable(kw: dict) -> None:
+    """Task 16: blob-oid записи дерева не SHA — отказ, байты с ним не сверяются."""
+    t, _ = _anon(
+        _world(
+            **{f"git/trees/{SUB}": (200, _tree(("modes.yaml", "blob", "zz")), None)}
+        ),
+        **kw,
+    )
+    got = act_anon.contents_bytes(t, "o/r", "policy/modes.yaml", REF)
+    assert isinstance(got, Unavailable) and "blob-oid 'modes.yaml' не SHA" in got.reason
+
+
+@KW
+def test_tree_entry_of_other_type_is_unavailable(kw: dict) -> None:
+    """Task 16: промежуточный сегмент пути — не дерево (подмодуль) — отказ."""
+    t, _ = _anon(
+        _world(**{f"git/trees/{ROOT}": (200, _tree(("policy", "commit", SUB)), None)}),
+        **kw,
+    )
+    got = act_anon.contents_bytes(t, "o/r", "policy/modes.yaml", REF)
+    assert isinstance(got, Unavailable)
+    assert "запись дерева 'policy' типа 'commit'" in got.reason
+
+
+@KW
+def test_contents_not_a_file_is_unavailable(kw: dict) -> None:
+    """Task 16: ответ contents — не файл base64 — отказ."""
+    body = {**_contents(MODES), "type": "dir"}
+    t, _ = _anon(
+        _world(**{f"contents/policy/modes.yaml?ref={REF}": (200, body, None)}), **kw
+    )
+    got = act_anon.contents_bytes(t, "o/r", "policy/modes.yaml", REF)
+    assert isinstance(got, Unavailable) and "не файл base64" in got.reason
+
+
+@KW
+def test_contents_not_base64_is_unavailable(kw: dict) -> None:
+    """Task 16: содержимое не декодируется base64 — отказ до сверки blob."""
+    body = {**_contents(MODES), "content": "!!!"}
+    t, _ = _anon(
+        _world(**{f"contents/policy/modes.yaml?ref={REF}": (200, body, None)}), **kw
+    )
+    got = act_anon.contents_bytes(t, "o/r", "policy/modes.yaml", REF)
+    assert isinstance(got, Unavailable) and "содержимое не base64" in got.reason
+
+
+@KW
 @pytest.mark.parametrize("status", [403, 404, 500])
 def test_unreadable_commit_is_unavailable(kw: dict, status: int) -> None:
     t, _ = _anon(_world(**{f"commits/{REF}": (status, {"message": "x"}, None)}), **kw)

@@ -339,9 +339,15 @@ def real_deps(
 def main(argv: Sequence[str] | None = None, deps: PremergeDeps | None = None) -> int:
     """CLI предпроверки; см. докстринг модуля."""
     parser = _parser()
-    args = parser.parse_args(argv)
-    if (args.app_id is None) != (args.app_key is None):
-        parser.error("App-режим: нужны оба --app-id и --app-key")
+    try:
+        args = parser.parse_args(argv)
+        if (args.app_id is None) != (args.app_key is None):
+            parser.error("App-режим: нужны оба --app-id и --app-key")
+    except SystemExit:
+        # argparse (и `--help`): предпроверки не было — отказ 3, «не мержить и не
+        # повторять»; 2 `merge-pr.sh` читает как «повтор уместен», а расхождение
+        # версий обвязки повтор не лечит (интеграционное ревью части B, m-7).
+        return EXIT_REFUSED
     if deps is None:
         deps = real_deps(args)
     try:

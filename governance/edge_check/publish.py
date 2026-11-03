@@ -31,6 +31,7 @@ from pathlib import Path
 from governance import approval_ledger as al
 from governance import approve_node as an
 from governance import bundle_dag
+from governance.act_request import ACT_REVIEW_V1, manifest_path
 from governance.ops import Ops, review_login
 from governance.run_state import RunState
 
@@ -62,12 +63,16 @@ def surface_violations(
     ops: Ops,
     dag: tuple[tuple[str, tuple[str, ...]], ...],
     op: dict,
+    key: str,
 ) -> list[str]:
-    """Пути коммита заявки вне объявленной поверхности D16.
+    """Пути коммита заявки `key` вне объявленной поверхности D16.
 
     Поверхность: файлы узлов заявки, файлы их downstream-замыкания (каскад
     `stale` того же коммита), `00-discovery/*` для W1 (charter несёт
-    source-слой сам), `evidence/edge-check/`. Всё прочее — отказ до PR.
+    source-слой сам), `evidence/edge-check/`; у заявки `review/v1` — ровно
+    манифест ЕЁ САМОЙ (`act_request.manifest_path(ws, key)`, интеграционное
+    ревью части B, I-1). Чужой манифест и прочие `approvals/` — отказ до PR,
+    как и всё прочее.
     """
     head = op.get("head_sha")
     changed = ops.commit_files(state.target_dir, head) if head else None
@@ -78,6 +83,8 @@ def surface_violations(
     for node in list(nodes):
         nodes |= an._downstream_closure(dag, node)
     allowed = {f"{state.bundle_dir}/{names[n]}" for n in nodes if n in names}
+    if op.get("act") == ACT_REVIEW_V1:
+        allowed.add(manifest_path(state.ws_id, key))
     prefixes = [evidence_dir(state) + "/"]
     if "charter" in op["nodes"]:
         prefixes.append(f"{state.bundle_dir}/00-discovery/")
@@ -96,7 +103,10 @@ def level_verdict(records: dict[tuple[str, str], dict]) -> str:
 
 
 def checklist_body(
-    state: RunState, head: str, records: dict[tuple[str, str], dict]
+    state: RunState,
+    head: str,
+    records: dict[tuple[str, str], dict],
+    act: str | None = None,
 ) -> str:
     lines = [
         f"<!-- {EDGE_MARKER} head={head} -->",
@@ -122,8 +132,13 @@ def checklist_body(
         ),
         (
             "Это одобрение публикует результат edge-check (D16) и снимает правило "
-            "одобряющего ревью; подписью узла оно НЕ является — подпись создаёт "
-            "мерж candidate человеком из allowlist."
+            "одобряющего ревью; подписью узла оно НЕ является — акт одобрения — "
+            "approve этого PR человеком из human_approvers по его голове "
+            "(review/v1, §9.1); мержить candidate не нужно, его доставляет агент."
+            if act == ACT_REVIEW_V1
+            else "Это одобрение публикует результат edge-check (D16) и снимает "
+            "правило одобряющего ревью; подписью узла оно НЕ является — подпись "
+            "создаёт мерж candidate человеком из allowlist."
         ),
     ]
     return "\n".join(lines)
@@ -166,7 +181,7 @@ def publish_wave(
         )
     if level_verdict(records) != "PASS":
         return CODE_CHANGES
-    bad = surface_violations(state, ops, dag, op)
+    bad = surface_violations(state, ops, dag, op, key)
     if bad:
         raise RuntimeError(
             f"коммит заявки {key} ({head[:8]}) меняет пути вне поверхности "
@@ -194,7 +209,8 @@ def publish_wave(
             target = Path(state.target_dir) / path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
-        ops.commit_paths(
+        an._commit_paths(
+            ops,
             state.target_dir,
             list(files),
             f"evidence: edge-check волны W{state.wave} для заявки {key} (fleet-agent)",
@@ -220,7 +236,7 @@ def publish_wave(
     latest = ops.latest_review_body(state.repo_slug, pr) or ""
     if marker_line in latest and effective.get(review_login()) == "APPROVED":
         return CODE_OK
-    body = checklist_body(state, head, records)
+    body = checklist_body(state, head, records, op.get("act"))
     if not ops.publish_review(
         state.repo_slug, pr, event="APPROVE", body=body, marker=EDGE_MARKER
     ):

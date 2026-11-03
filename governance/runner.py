@@ -51,6 +51,8 @@ from governance import approval_ledger as al
 from governance import approve_node as an
 from governance import interview as iv
 from governance import run_lock as rl
+from governance.act_request import ACT_REVIEW_V1
+from governance.act_time import OPS_FAILURES
 from governance.author_launch import AuthorCall, LaunchOutcome
 from governance.edge_check import coordinator as edge_coordinator
 from governance.edge_check import publish as edge_publish
@@ -1035,7 +1037,8 @@ def _resume_wave(state: RunState, ops: Ops, *, lock: rl.RunLock) -> RunState | N
       новый candidate — через `--reopen`;
     - живая без `candidate_pr` / с незавершённым шагом candidate →
       публикация доигрывается тем же шагом (`advance`);
-    - живая с открытым candidate → стоим (`waiting_human_merge`);
+    - живая с открытым candidate → стоим (`waiting_human_merge`); у заявки
+      `review/v1` — доставка по акту (`_deliver_review_candidate`, §9.1);
     - candidate вмержен (или факт мержа уже записан) → `_finalize_wave`.
 
     Реконсиляция «человек смержил, минуя раннер» здесь же — ключуется на
@@ -1079,7 +1082,19 @@ def _resume_wave(state: RunState, ops: Ops, *, lock: rl.RunLock) -> RunState | N
         save(state)
         return advance(state, ops, lock=lock)
     if not op.get("merged_by"):
-        facts = ops.pr_facts(state.repo_slug, pr)
+        try:
+            facts = ops.pr_facts(state.repo_slug, pr)
+        except OPS_FAILURES as exc:
+            _stop_with_comment(
+                state,
+                ops,
+                "stopped_review",
+                f"волна {state.wave}: факты candidate-PR #{pr} заявки {request} "
+                f"не прочитаны ({exc}) — факт не установлен, повторите resume",
+            )
+            return state
+        if facts.get("state") == "OPEN" and op.get("act") == ACT_REVIEW_V1:
+            return _deliver_review_candidate(state, ops, request, pr)
         if facts.get("state") == "OPEN":
             print(
                 f"resume: волна {state.wave} — candidate-PR #{pr} открыт, "
@@ -1090,6 +1105,87 @@ def _resume_wave(state: RunState, ops: Ops, *, lock: rl.RunLock) -> RunState | N
                 save(state)
             return state
     return _finalize_wave(state, ops, request, lock=lock)
+
+
+def _deliver_review_candidate(
+    state: RunState, ops: Ops, request: str, pr: int
+) -> RunState:
+    """Открытый candidate `review/v1` на resume (§9.1; интеграционное ревью
+    части B, I-2): `approve_node` → `act_node.route` → `_open` — действующий
+    approve человека из `human_approvers` по голове и агентская доставка
+    (`merge-pr.sh`). Ожидания — `waiting_human_approval` (акта нет) и
+    `waiting_delivery` (candidate доставлен, решение по доставке и finalize —
+    следующим resume); мержа у человека они не просят. Отказ с сохранённой
+    заявкой (`_unresolved`) — `stopped_review`, как у `_finalize_wave`;
+    исход вне двух ожиданий (approve есть, обвязка мержа отказала) — тоже
+    `stopped_review` с текстом исхода: повтор resume перечитывает всё заново.
+    """
+    from governance import act_node
+
+    node = state.ops[request]["nodes"][0]
+    try:
+        outcome = an.approve_node(state, ops, node)
+    except RuntimeError as exc:
+        _stop_on_refusal(
+            state, ops, request, exc, f"доставка candidate-PR #{pr} заявки {request}"
+        )
+        return state
+    waiting = next(
+        (
+            status
+            for status in (act_node.WAITING_HUMAN_APPROVAL, act_node.WAITING_DELIVERY)
+            if outcome.message.startswith(status)
+        ),
+        None,
+    )
+    if outcome.merge_code in _DELIVERY_RETRY_CODES:
+        # approve есть, обвязка отказала транзиентно (2 — факт не установлен,
+        # 5 — голова/база уехали): «approve есть, PR не смержен» (§11.1, строка 5)
+        waiting = act_node.WAITING_DELIVERY
+    if waiting is None:
+        _stop_with_comment(
+            state,
+            ops,
+            "stopped_review",
+            f"волна {state.wave}: candidate-PR #{pr} заявки {request} не "
+            f"доставлен — {outcome.message}",
+        )
+        return state
+    print(f"resume: волна {state.wave} — {outcome.message}")
+    if state.status != waiting:
+        state.status = waiting
+        save(state)
+    return state
+
+
+#: Коды `merge-pr.sh`, при которых повтор доставки уместен (§11.1, строка 5); 3, 4 и
+#: 6 — отказ гварда, форджи или стоп-кран: `stopped_review`.
+_DELIVERY_RETRY_CODES = frozenset({2, 5})
+
+
+def _stop_on_refusal(
+    state: RunState, ops: Ops, request: str, exc: RuntimeError, stalled: str
+) -> None:
+    """Отказ `approve_node` на resume волны: терминализованная заявка —
+    `stopped_stale` (новый candidate через `--reopen`), иначе `stopped_review`
+    с причиной (заявка жива, повтор resume)."""
+    op_now = state.ops.get(request) or {}
+    if op_now.get("status") in al.TERMINAL_STATUSES:
+        _stop_with_comment(
+            state,
+            ops,
+            "stopped_stale",
+            f"волна {state.wave}: заявка {request} — "
+            f"{op_now.get('status')}: {exc}. Новый candidate — "
+            "через --reopen <node>",
+        )
+    else:
+        _stop_with_comment(
+            state,
+            ops,
+            "stopped_review",
+            f"волна {state.wave}: {stalled} не продвинулся — {exc}",
+        )
 
 
 def _finalize_wave(
@@ -1112,24 +1208,7 @@ def _finalize_wave(
         try:
             an.approve_node(state, ops, node)
         except RuntimeError as exc:
-            op_now = state.ops.get(request) or {}
-            if op_now.get("status") in al.TERMINAL_STATUSES:
-                _stop_with_comment(
-                    state,
-                    ops,
-                    "stopped_stale",
-                    f"волна {state.wave}: заявка {request} — "
-                    f"{op_now.get('status')}: {exc}. Новый candidate — "
-                    "через --reopen <node>",
-                )
-            else:
-                _stop_with_comment(
-                    state,
-                    ops,
-                    "stopped_review",
-                    f"волна {state.wave}: finalize заявки {request} не "
-                    f"продвинулся — {exc}",
-                )
+            _stop_on_refusal(state, ops, request, exc, f"finalize заявки {request}")
             return False
         return True
 
@@ -3815,10 +3894,17 @@ def _step_edge(state: RunState, ops: Ops) -> bool:
     return False
 
 
-def _wave_pause(state: RunState, ops: Ops, pr: int, body: str) -> None:
-    """`waiting_human_merge` волны: статус ДО best-effort комментария в
+def _wave_pause(
+    state: RunState,
+    ops: Ops,
+    pr: int,
+    body: str,
+    status: str = "waiting_human_merge",
+) -> None:
+    """Пауза волны (`waiting_human_merge`; у candidate `review/v1` —
+    `waiting_human_approval`): статус ДО best-effort комментария в
     candidate-PR (та же дисциплина, что `_stop_with_comment`)."""
-    state.status = "waiting_human_merge"
+    state.status = status
     save(state)
     try:
         ops.comment(state.repo_slug, pr, body)
@@ -3920,13 +4006,28 @@ def _step_candidate(state: RunState, ops: Ops) -> bool:
         source_sha=state.ops[key].get("source_sha"),
         reapprove=bool(state.ops[key].get("reapprove", False)),
     )
+    head = (
+        f"Волна {state.wave}/{bundle_dag.wave_count(_wave_dag())} прогона "
+        f"`{state.run_id}`: candidate-PR #{pr} над узлами "
+        f"{', '.join(state.ops[request]['nodes'])} "
+    )
+    if state.ops[request].get("act") == ACT_REVIEW_V1:
+        _wave_pause(
+            state,
+            ops,
+            pr,
+            head + "ждёт approve человека из human_approvers по голове PR "
+            "(review/v1: approve = акт одобрения, §9.1). Candidate доставляет "
+            "агент; после approve — resume: доставка, finalize агентом и "
+            "следующая волна.",
+            status="waiting_human_approval",
+        )
+        return False
     _wave_pause(
         state,
         ops,
         pr,
-        f"Волна {state.wave}/{bundle_dag.wave_count(_wave_dag())} прогона "
-        f"`{state.run_id}`: candidate-PR #{pr} над узлами "
-        f"{', '.join(state.ops[request]['nodes'])} ждёт человеческого мержа "
+        head + "ждёт человеческого мержа "
         "(мерж = акт одобрения, §I12). После мержа — resume: finalize "
         "агентом и следующая волна.",
     )

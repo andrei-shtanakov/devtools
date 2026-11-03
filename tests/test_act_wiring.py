@@ -152,16 +152,30 @@ def test_wiring_site_decides_with_history_token(
     monkeypatch.setattr(act_trust, "load_binding", lambda *a, **k: with_key)
     monkeypatch.setattr(act_trust, "gh_get", as_credential({}))
     readers, creds = WIRING_SITES[site](tmp_path)
+    wire, tokens = _Wire(routes), _Tokens(TOKEN)
     got = act_trust.load_trust(
-        readers,
-        with_key,
-        Journal(),
-        creds=creds,
-        open_url=_Wire(routes),
-        token_source=_Tokens(TOKEN),
+        readers, with_key, Journal(), creds=creds, open_url=wire, token_source=tokens
     )
     assert isinstance(got, Unavailable)
     assert got.reason.startswith("нарушение периметра: profile:history на ")
+    # Task 16 (M1, M3): транспорт — из привязки, токен истории прочитан ровно раз и
+    # уходит в каждом запросе решения
+    assert tokens.calls == [with_key.history_gh_config_dir]
+    assert wire.calls and all(
+        TOKEN in h.get("Authorization", "") for _path, h in wire.calls
+    )
+    # Task 16 (M4): credential вне закрытого набора форм рядом со сборкой места —
+    # отказ до ввода-вывода
+    extra = act_trust.Credential(act_trust.HISTORY_LABEL)
+    refused = act_trust.load_trust(
+        readers,
+        with_key,
+        Journal(),
+        creds=(*creds, extra),
+        open_url=_Wire(routes),
+        token_source=_Tokens(TOKEN),
+    )
+    assert refused == Unavailable(act_trust.HISTORY_NOT_WIRED)
 
 
 #: Швы ввода-вывода решения: внедряют только тесты (ревью Task 11c, Minor 6).

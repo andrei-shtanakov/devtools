@@ -2904,6 +2904,11 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 - [ ] Часть B — интеграция узла (Tasks 11–16, 12a, 13a, 15a); ворота: релиз M0 → детализация задач по фактическому API → ревью обновлённого плана → реализация @owner:github:andrei-shtanakov @id:approval-act-node @epic:eco.dark-factory @blocked_by:todo://steward/approval-facts-v3 @blocked_by:todo://devtools/approval-act-human-setup
 - [ ] Часть C — путь брифа `review/v1` (Task 17) @owner:github:andrei-shtanakov @id:approval-act-brief @epic:eco.dark-factory @blocked_by:todo://discovery/approve-review-v1 @blocked_by:todo://devtools/approval-act-node
 - [ ] Часть D — живая приёмка M3 (Task 18): стенд, затем реальный продукт; разрушительные сценарии — только на стенде по условиям Task 18 @owner:github:andrei-shtanakov @id:approval-act-acceptance-m3 @epic:eco.dark-factory @blocked_by:todo://devtools/approval-act-brief
+      Интеграционное ревью части B (02.11, отложенное): часы форджи впереди больше 8 с —
+      код 2 «часы расходятся», в `_open` — `waiting_human_approval` до прихода секунды (шаг
+      runbook, п. 7 таблицы); живой прогон JWT App и подтверждение прав установки (п. 9e);
+      symlink внутри `apps/` — каталог ключей оператора (п. 9c, либо в 2b); до приёмки —
+      `@id:act-merge-app-env-scope` (п. 9b, m-1).
 - [ ] Часть E — `review_v1` по умолчанию (Task 19), только после пройденной M3 @owner:github:andrei-shtanakov @id:approval-act-default-m4 @epic:eco.dark-factory @blocked_by:todo://devtools/approval-act-acceptance-m3
 
 ## Установщик df (команда darkfactory), спека B
@@ -2946,6 +2951,10 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       environment. Прогон 41044119428 отозвал свои токены установки сам (`tokens_revoked`).
       Закрыто 01.11: владелец отозвал PAT и удалил секреты; environment `df-stage2-live` — 0 секретов (сверено агентом).
 - [ ] Этап 2b спеки B — мерж издателя: `act_premerge` как предпроверка `merge`, поверхность candidate D16 и полный состав PR, вид stop, три строки мержа §4.5 живьём @owner:github:andrei-shtanakov @id:df-installer-stage2b @epic:eco.dark-factory @blocked_by:todo://devtools/approval-act-node @blocked_by:todo://devtools/df-installer-stage2a
+      Из интеграционного ревью части B approval-act (02.11, отложенное, App-режим): стоп-кран
+      и факты PR читаются профилем без сверки логина (п. 9a; факты форджи от учётки не
+      зависят, сбой доступа — отказ); symlink внутри `apps/` (п. 9c); токен установки не
+      отзывается — срок 1 ч, сужен до репо и `contents/pull_requests:write` (п. 9d).
 - [ ] Токен истории на стороне установщика (R8, С-1): `darkfactory setup-trust` пишет `history_gh_config_dir` в `trust.toml`, `darkfactory doctor` проверяет профиль и самоотчёт, шаг человека — read-only PAT (R4) и профиль `history` @owner:github:andrei-shtanakov @id:df-trust-history-token @epic:eco.dark-factory @blocked_by:todo://devtools/df-installer-stage2b
       Разбор ключа (`df.stage2_config.parse_trust`, `act_trust.parse_binding`) — Task 11c
       части B approval-act. Шаг человека: `GH_CONFIG_DIR=<каталог> gh auth login --hostname
@@ -2955,6 +2964,51 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 - [ ] Запрет сети в тестах шире `act_anon`: настоящие opener-ы `df/publisher/github.py`, `df/launch_release.py`, `df/manifest.py` вне autouse-сторожа `tests/conftest.py`; сравнение профилей истории — `os.path.samefile` на регистронезависимой ФС @owner:github:andrei-shtanakov @id:act-test-network-guard-wider @epic:eco.dark-factory @trigger:"тест df/ или act_ без шва сети, либо ложное совпадение профилей на macOS"
       Ревью Task 11c (повторное, 01.11): сторож ловит только `act_anon._default_open`;
       `resolve()` не нормализует регистр на APFS.
+- [ ] Реестр идентичности акта: двойники для проверок-отказов без строки в `tests/test_act_identity_table.py` @owner:github:andrei-shtanakov @id:act-identity-registry-uncovered-checks @epic:eco.dark-factory @trigger:"правка любой из перечисленных проверок или следующий мутационный проход части B"
+      Ревью Task 16 (M8): место суждения в реестре есть, но отдельные отказы внутри него
+      без двойника и строки — мутационный проход их не видит. Перечень: `act_anon.contents_bytes`
+      (форма slug/пути/ref до запроса); `act_status._request_event` (манифест в истории не
+      разбирается — `except RequestError`); `act_node.stop_pr_defect` (факт
+      файлов compare не прочитан → `_unresolved`); `act_node._stop_pr` (поиск stop-PR и
+      ветка на remote не прочитаны → `_unresolved`); прочие пути `_unresolved` для
+      нечитаемых фактов в `act_node` (`reopen`: merge-коммит stop-PR, история после
+      stop-PR; `_unusable_stop_pr`: merge-коммит, достижимость; `_merge_stop_pr`: голова и
+      верхушка базы); `RealOps.find_pr` — порядок «новые первыми» без двойника (п. 5
+      таблицы интеграционного ревью части B, 02.11: неверный выбор даёт отказ или «нет», не
+      одобрение). На каждый — отрицательный двойник с причиной, строка `JUDGMENT`,
+      затем `tests/act_mutation.py --only <строка>`. `LegacyProbe._merged_candidate`
+      (сбой поиска candidate → `unavailable:`) закрыт строкой `ops_failure` (I-3, 02.11).
+- [ ] Чтения статуса акта по локальной базе продукта → свежий снимок: провайдер S4/S8, `read_dag_state`, no-op `_propose` и `_require_upstream_ready` читают `state.base_ref` клона, а не `fresh_base`; `_pr_head` догружает объекты в клон продукта; `_binding_refusal` (`fetch_branch(op["branch"])`) без отката на `refs/pull/{pr}/head` @owner:github:andrei-shtanakov @id:act-status-local-base-reads @epic:eco.dark-factory @trigger:"живой случай: остановка, увиденная с опозданием, либо `_unresolved` на смёрженном candidate, чья ветка удалена"
+      Интеграционное ревью части B (02.11; M-1, M-7, m-9; acceptable debt): каждое событие
+      сверяется с форджей (`pr_for_merge`, доставка steward, `merge_commit`), поэтому
+      локальная база может только запоздать относительно остановки, но не создать
+      одобрение; S8 перед гейтом делает `checkout_and_pull`, ранние выходы закрыты
+      `noop_refusal` на свежем снимке. Объекты в клоне адресуются по содержимому, голова
+      сверяется по SHA форджи. m-9: после auto-delete ветки, если голова только на remote
+      (человек допушил и смержил сам), `direct_blobs`/`_head_hashes` дают `_unresolved` на
+      каждом вызове — нужен тот же откат, что у `_pr_head`.
+- [ ] `MERGE_APP_*` только для доставки candidate: `RealOps.merge` снимает переменные App-режима, если вызывающий явно его не включил (только `act_node._open`) @owner:github:andrei-shtanakov @id:act-merge-app-env-scope @epic:eco.dark-factory @trigger:"до живой приёмки M3 (approval-act-acceptance-m3) либо первый App-режим на хосте"
+      Интеграционное ревью части B (02.11; m-1, п. 9b): переменные, выставленные для
+      доставки candidate, наследуют все прочие `ops.merge` того же процесса (finalize,
+      stop-PR, `accept-pr`, S7) — `merge-pr.sh` отвечает `die 2` «App-режим только для
+      candidate», `_try_agent_merge` трижды повторяет транзиентный код. Fail-closed, выход —
+      вызов без переменных.
+- [ ] Finalize и stop-PR `review/v1` — проза для роутера ревью: `workstreams/*/approvals/*` в `PROSE` (`contracts/review-scope/v1/prose-paths.env`, authority-root) либо принять расход и поправить текст `_missing_approving_review` @owner:github:andrei-shtanakov @id:act-review-scope-approvals-prose @epic:eco.dark-factory @trigger:"решение владельца; первый finalize/stop-PR review/v1 под платным ревью"
+      Интеграционное ревью части B (02.11, m-4): `workstreams/*/approvals/*.yaml` сейчас не
+      проза, `review-pr.sh` зовёт модель вместо scope-аттестации, а текст отказа обещает
+      аттестацию prose-only. Правка `PROSE` — authority-root, мержит человек.
+- [ ] Зеркало тела candidate-PR не хоронит заявку терминально: расхождение строк `act:`/`policy-activation:` — `_unresolved` с перерендером тела, либо явно описать в runbook @owner:github:andrei-shtanakov @id:act-pr-body-mirror-terminal @epic:eco.dark-factory @trigger:"первая правка тела candidate review/v1 человеком (цитата, редактура) после approve"
+      Интеграционное ревью части B (02.11, m-5): `act_node` (`mirror_mismatch` →
+      `_invalidate`) инвалидирует заявку даже после approve; спека требует отказа, но не
+      обязательно терминального.
+- [ ] Событие истории `review/v1` привязано к форме ветки candidate: PR доставки обязан иметь `candidate_identity(head_ref) == (ws_id, request_id)` @owner:github:andrei-shtanakov @id:act-history-event-candidate-form @epic:eco.dark-factory @trigger:"правка `act_status._request_event` или смёрженный не-candidate PR с манифестом в истории продукта"
+      Интеграционное ревью части B (02.11, m-6, defense-in-depth): засчитывается любой
+      смёрженный PR, чей merge-коммит добавил манифест; approve человека на постороннем PR
+      с манифестом, хешами и пинами одобрил бы узлы. Акт при этом есть (D1), но §9.1 п. 0a
+      говорит о «candidate-коммите».
+- [ ] Многоузловой преемник в окне сбоя: текст отказа `_continue_successor` называет выход — довести преемника, затем `--approve-node <пропущенный узел>` заведёт новую заявку @owner:github:andrei-shtanakov @id:act-repropose-multinode-gap @epic:eco.dark-factory @trigger:"правка `act_node._continue_successor` либо живой тупик преемника"
+      Интеграционное ревью части B (02.11; m-8, п. 6 таблицы; acceptable debt): отказ
+      назван («разберите вручную»), рабочий выход существует, но в тексте не назван.
 - [ ] Смена закреплённого `uv`, Python профиля или пина члена `core`: перемерить то, что закреплено за прежним значением @owner:github:andrei-shtanakov @id:df-installer-pin-drift @epic:eco.dark-factory @trigger:"смена UV_PINNED_VERSION, Python профиля или пина члена core в манифесте"
       `uv`: замер `UV_PROJECT_KEYS_<версия>` (дополнение A1/A2 предполётной проверки Task 7a)
       и таблица записи пути корня в `tests/df/fixtures/locks/SOURCES.md`, переименовать
