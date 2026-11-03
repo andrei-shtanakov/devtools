@@ -9,6 +9,8 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -91,6 +93,7 @@ SERVICE = [
     ["launch", "df-review", "check"],
     ["publisher", "serve", "merge"],
     ["publisher", "serve", "self-check"],
+    ["precheck", "serve"],
     ["run", "start", "--product", "7"],
     ["run", "resume", "run-1"],
     ["run", "resume", "run-1", "--accept-model-change", "--from-step", "2"],
@@ -224,6 +227,9 @@ BAD_SERVICE = [
     ["launch", "exec", "df-exec", "Check;rm"],
     ["roles"],
     ["roles", "setup", "extra"],
+    ["precheck"],
+    ["precheck", "serve", "extra"],
+    ["precheck", "other"],
 ]
 
 
@@ -343,3 +349,185 @@ def test_documented_stage2_sequence_parses() -> None:
         assert launcher_entry.mode_of(argv) == "writer"
         assert cli.parsed_mode(cli._parse(argv)) == "writer"  # noqa: SLF001
     assert " ".join(commands[0]) in roles_setup._NO_OPENSSL  # noqa: SLF001
+
+
+# --- stage 2b Task 6: `precheck serve` as `df-precheck` ---------------------
+
+RELEASE = "r1"
+ADMIN_DIGEST = "sha256:" + "a" * 64
+
+
+@pytest.fixture()
+def environ() -> Iterator[None]:
+    """`precheck serve` replaces the process environment: give it back."""
+    saved = dict(os.environ)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+def _precheck_world(
+    tmp_path: Path, uid: int, *, program: bool = True
+) -> tuple[Layout, Stable]:
+    """An account `df-precheck` of `uid`, release `r1` current, its admin
+    tree with `governance/act_precheck.py` (`program`) or a legacy one."""
+    from df.config import (
+        Account,
+        ReleaseEntry,
+        ReleasesConfig,
+        dump_accounts,
+        dump_releases,
+    )
+
+    lay = Layout(Path(os.path.realpath(tmp_path)))
+    lay.install_dir.mkdir(parents=True)
+    row = Account("df-precheck", uid, os.getgid(), "ready", "t")
+    lay.accounts.write_text(dump_accounts({"df-precheck": row}))
+    tree = lay.admin_dir(RELEASE)
+    (tree / "df").mkdir(parents=True)
+    if program:
+        (tree / "governance").mkdir()
+        (tree / "governance" / "act_precheck.py").write_text("")
+        (tree / "site").mkdir()
+    entry = ReleaseEntry(RELEASE, "d", ADMIN_DIGEST, "3.12.13", "allowed", None)
+    releases = dump_releases(ReleasesConfig((entry,))).encode()
+    raw = state.RawSnapshot(0, RELEASE, releases, None, None, False)
+    return lay, Stable(raw, 0)
+
+
+def _precheck(lay: Layout, read: object) -> int:
+    return cli.main(
+        ["precheck", "serve"],
+        mode="reader",
+        read=read,  # type: ignore[arg-type]
+        lock_fd=None,
+        layout=lay,
+    )
+
+
+def _no_serve(_admin_dir: Path) -> object:
+    raise AssertionError("the precheck program was loaded")
+
+
+def test_precheck_serve_is_a_reader() -> None:
+    argv = ["precheck", "serve"]
+    assert launcher_entry.mode_of(argv) == "reader"
+    assert cli.parsed_mode(cli._parse(argv)) == "reader"  # noqa: SLF001
+
+
+@pytest.mark.parametrize("uid_delta", [1, None])
+def test_precheck_serve_refuses_other_uid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    environ: None,
+    uid_delta: int | None,
+) -> None:
+    """Another UID (or no `df-precheck` account): exit 2 before anything
+    else -- the environment, `sys.path` and the program stay untouched."""
+    lay, read = _precheck_world(tmp_path, os.getuid() + (uid_delta or 0))
+    if uid_delta is None:
+        from df.config import dump_accounts
+
+        lay.accounts.write_text(dump_accounts({}))
+    monkeypatch.setattr(cli, "_load_serve", _no_serve)
+    os.environ["DF_TEST_SENTINEL"] = "kept"
+    path = list(sys.path)
+    assert _precheck(lay, read) == 2
+    assert "только от учётки df-precheck" in capsys.readouterr().err
+    assert os.environ["DF_TEST_SENTINEL"] == "kept"
+    assert sys.path == path
+
+
+def test_precheck_serve_resets_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    environ: None,
+) -> None:
+    """The role's own process: the environment becomes exactly PATH, LANG
+    and the role's HOME; `site` goes to the END of `sys.path`; then
+    `serve(stdin, stdout, admin_digest=<record>, home=<role home>)`."""
+    lay, read = _precheck_world(tmp_path, os.getuid())
+    tree = lay.admin_dir(RELEASE)
+    seen: dict[str, object] = {}
+
+    def serve(stdin: object, stdout: object, *, admin_digest: str, home: Path) -> int:
+        seen.update(
+            env=dict(os.environ),
+            path=list(sys.path),
+            streams=(stdin, stdout),
+            admin_digest=admin_digest,
+            home=home,
+        )
+        return 0
+
+    def load(admin_dir: Path) -> object:
+        seen["loaded_from"] = admin_dir
+        seen["path_at_load"] = list(sys.path)
+        return serve
+
+    monkeypatch.setattr(cli, "_load_serve", load)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    for key, value in (("PYTHONPATH", "/evil"), ("GH_TOKEN", "t"), ("LANG", "x")):
+        os.environ[key] = value
+    before = list(sys.path)
+    assert str(tree / "site") not in before
+    assert _precheck(lay, read) == 0
+    home = lay.role_home("df-precheck")
+    assert seen["env"] == {"PATH": "/usr/bin:/bin", "LANG": "C", "HOME": str(home)}
+    assert seen["path_at_load"] == [*before, str(tree / "site")]
+    assert seen["loaded_from"] == tree
+    assert seen["streams"] == (sys.stdin.buffer, sys.stdout)
+    assert (seen["admin_digest"], seen["home"]) == (ADMIN_DIGEST, home)
+
+
+def test_precheck_serve_passes_the_exit_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, environ: None
+) -> None:
+    lay, read = _precheck_world(tmp_path, os.getuid())
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    monkeypatch.setattr(cli, "_load_serve", lambda _d: lambda *_a, **_k: 2)
+    assert _precheck(lay, read) == 2
+
+
+def test_precheck_serve_refuses_release_without_precheck(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    environ: None,
+) -> None:
+    """Spec 3.9 rev 10: a legacy release (no `governance/act_precheck.py`
+    in its admin tree) is refused by name, exit 2, nothing loaded."""
+    lay, read = _precheck_world(tmp_path, os.getuid(), program=False)
+    monkeypatch.setattr(cli, "_load_serve", _no_serve)
+    os.environ["DF_TEST_SENTINEL"] = "kept"
+    path = list(sys.path)
+    assert _precheck(lay, read) == 2
+    err = capsys.readouterr().err
+    assert "релиз без предпроверки" in err and "governance/act_precheck.py" in err
+    assert sys.path == path and os.environ["DF_TEST_SENTINEL"] == "kept"
+
+
+def test_precheck_serve_refuses_transitional(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    environ: None,
+) -> None:
+    from df.journal import Transitional
+
+    lay, _read = _precheck_world(tmp_path, os.getuid())
+    monkeypatch.setattr(cli, "_load_serve", _no_serve)
+    assert _precheck(lay, Transitional(1)) == 2
+    assert capsys.readouterr().err
+
+
+def test_precheck_program_from_another_tree_refused(tmp_path: Path) -> None:
+    """The program must come from the checked admin tree: a
+    `governance.act_precheck` found elsewhere (here: this checkout) is a
+    refusal, never served."""
+    pytest.importorskip("steward", reason="steward — без группы governance")
+    with pytest.raises(cli.Refusal, match="act_precheck"):
+        cli._load_serve(tmp_path)  # noqa: SLF001

@@ -1,0 +1,1 @@
+User df-precheck is not allowed to run sudo on mac-mini.

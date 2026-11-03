@@ -56,7 +56,12 @@ TRUST = (
 def accounts() -> dict[str, Account]:
     return {
         n: Account(n, uid, uid, "ready", "t")
-        for n, uid in (("df-exec", 601), ("df-review", 602), ("df-publisher", 603))
+        for n, uid in (
+            ("df-exec", 601),
+            ("df-review", 602),
+            ("df-publisher", 603),
+            ("df-precheck", 604),
+        )
     }
 
 
@@ -80,7 +85,7 @@ def test_publisher_expected_table() -> None:
         "record-violation",
         "perimeter-status",
     }
-    assert 603 not in cfg.senders
+    assert 603 not in cfg.senders and 604 not in cfg.senders
     assert cfg.api_base == "https://api.github.com"
 
 
@@ -96,7 +101,7 @@ def with_account(**changes: Account | None) -> dict[str, Account]:
 
 
 def test_expected_publisher_missing_role_refused() -> None:
-    for role in ("df_exec", "df_review", "df_publisher"):
+    for role in ("df_exec", "df_review", "df_publisher", "df_precheck"):
         with pytest.raises(ConfigError, match=role.replace("_", "-")):
             expected_publisher(with_account(**{role: None}))
 
@@ -117,6 +122,13 @@ def test_expected_publisher_publisher_uid_equals_sender_refused() -> None:
     clash = Account("df-publisher", 602, 602, "ready", "t")
     with pytest.raises(ConfigError, match="602"):
         expected_publisher(with_account(df_publisher=clash))
+
+
+def test_expected_publisher_precheck_uid_equals_publisher_refused() -> None:
+    """Stage 2b: the precheck role shares no UID with the key holder."""
+    clash = Account("df-precheck", 603, 603, "ready", "t")
+    with pytest.raises(ConfigError, match="603"):
+        expected_publisher(with_account(df_precheck=clash))
 
 
 def test_publisher_roundtrip_and_unknown_key() -> None:

@@ -28,7 +28,12 @@ from df.state import Snapshot
 from tests.df.conftest import FakeLayout
 
 OPERATOR = "alice"
-ROLE_UID = {"df-exec": 70001, "df-review": 70002, "df-publisher": 70003}
+ROLE_UID = {
+    "df-exec": 70001,
+    "df-review": 70002,
+    "df-publisher": 70003,
+    "df-precheck": 70004,
+}
 SHA = "0" * 40
 
 
@@ -205,6 +210,64 @@ def test_verify_asks_five_names(setup: Setup) -> None:
     assert setup.calls.io_log == 1
 
 
+def test_roles_setup_creates_precheck_role(setup: Setup) -> None:
+    """Stage 2b: `df-precheck` is a role like the others -- created by
+    `ensure_roles`, verified, its wrapper written, its sudo policy asked
+    (none of its own) -- and the publisher may run its wrapper."""
+    setup.run()
+    account = load_accounts(setup.lay.accounts)["df-precheck"]
+    assert (account.uid, account.state) == (ROLE_UID["df-precheck"], "ready")
+    assert "df-precheck" in setup.calls.policy
+    python = libexec.admin_python_of(setup.lay, setup.snap)
+    wrapper = setup.lay.libexec / "df-precheck"
+    assert wrapper.read_text() == libexec.wrapper_text(
+        setup.lay, "libexec/df-precheck", python
+    )
+    precheck = setup.lay.libexec / "df-precheck"
+    rule = f'df-publisher ALL=(df-precheck) NOPASSWD: NOSETENV: {precheck} ""'
+    assert rule in setup.calls.installed[0].splitlines()
+
+
+def test_roles_setup_rerun_on_2a_install(setup: Setup) -> None:
+    """A host set up by 2a (three roles, four wrappers, the 2a sudoers
+    text): the 2b `roles setup` adds the role, the wrapper and the rule;
+    the directories, `publisher.toml` and the perimeter stay untouched."""
+    setup.run()
+    lay = setup.lay
+    accounts = load_accounts(lay.accounts)
+    del accounts["df-precheck"]
+    fsutil.write_atomic(lay.accounts, dump_accounts(accounts))
+    (lay.libexec / "df-precheck").unlink()
+    two_a = "".join(
+        line
+        for line in sudoers.render(lay, OPERATOR).splitlines(keepends=True)
+        if "df-precheck" not in line
+    )
+    setup.sudoers_file.chmod(0o640)
+    setup.sudoers_file.write_text(two_a)
+    setup.sudoers_file.chmod(0o440)
+    publisher = (lay.etc / "publisher.toml").read_bytes()
+    before = len(setup.steps())
+    setup.run()
+    new = [row for row in setup.steps()[before:] if row[1] != "start"]
+    assert new == [
+        ("roles", "done"),
+        ("dirs", "skip"),
+        ("publisher-config", "skip"),
+        ("perimeter-init", "skip"),
+        ("libexec", "done"),
+        ("sudoers", "done"),
+        ("verify", "done"),
+    ]
+    assert "df-precheck" in load_accounts(lay.accounts)
+    assert setup.calls.installed[-1] == sudoers.render(lay, OPERATOR)
+    assert setup.sudoers_file.read_text() == sudoers.render(lay, OPERATOR)
+    python = libexec.admin_python_of(lay, setup.snap)
+    assert libexec.wrapper_problems(lay, python) == []
+    assert (lay.etc / "publisher.toml").read_bytes() == publisher
+    assert len(setup.calls.run_as) == 1
+
+
 def test_idempotent(setup: Setup) -> None:
     setup.run()
     setup.fake.events.clear()
@@ -216,7 +279,7 @@ def test_idempotent(setup: Setup) -> None:
     # verify has nothing to settle but always probes, once
     want = [(name, "skip") for name in roles_setup.STEP_NAMES[:-1]]
     assert new == [*want, ("verify", "start"), ("verify", "done")]
-    assert len(setup.calls.policy) == 10
+    assert len(setup.calls.policy) == 12
     assert not [e for e in setup.fake.events if e[0] in ("created", "chmod")]
     assert len(setup.calls.run_as) == 1
 
@@ -330,7 +393,7 @@ def test_verify_failure_is_a_refusal_naming_the_problem(setup: Setup) -> None:
         setup.run()
     assert info.value.step == "verify"
     assert str(info.value).endswith("исправьте и повторите darkfactory roles setup")
-    assert len(setup.calls.policy) == 5  # one probe, not three
+    assert len(setup.calls.policy) == 6  # one probe, not three
 
 
 def test_stale_wrapper_is_rewritten(setup: Setup) -> None:

@@ -114,8 +114,9 @@ def expected_publisher(accounts: Mapping[str, Account]) -> PublisherConfig:
     """The table of spec 5.2 for the model roles.
 
     Refuses (`ConfigError`) unless every role of `ROLE_USERS` is present and
-    `ready` and the three UIDs are distinct: a shared UID would silently
-    merge two roles' rights, and the publisher is never a sender.
+    `ready` and their UIDs are distinct: a shared UID would silently merge
+    two roles' rights (the precheck role's with the key holder's, too), and
+    the publisher is never a sender.
     """
     for name in ROLE_USERS:
         _need(name in accounts, name, "role account is missing")

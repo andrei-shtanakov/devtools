@@ -706,11 +706,11 @@ def test_entry_does_not_import_site(tmp_path: Path, argv: list[str]) -> None:
     assert (got["yaml"], got["steward"]) == (False, False)
 
 
-def test_no_df_module_adds_site_to_sys_path() -> None:
-    """Every `sys.path` change in `df/` today is a `sys.path.insert(0, …)` of
-    a code root -- the entry's `admin/<id>`, bootstrap's checkout, the
-    release launcher's tree -- none names `site`; Task 6's `precheck serve`
-    will be the first to add `site/`, at the end."""
+def test_only_precheck_serve_adds_site_to_sys_path() -> None:
+    """Every `sys.path` change in `df/` is a `sys.path.insert(0, …)` of a
+    code root -- the entry's `admin/<id>`, bootstrap's checkout, the release
+    launcher's tree -- none naming `site`; the one exception is Task 6's
+    `precheck serve`, which appends `site/` at the end."""
     changes: list[tuple[str, str]] = []
     for path in sorted((ROOT / "df").rglob("*.py")):
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
@@ -722,11 +722,16 @@ def test_no_df_module_adds_site_to_sys_path() -> None:
                 continue
             rel = path.relative_to(ROOT).as_posix()
             changes.append((rel, ast.unparse(node)))
+            if node.func.attr == "append":
+                assert rel == "df/cli.py", (rel, ast.unparse(node))
+                assert ast.unparse(node) == "sys.path.append(str(tree / SITE_DIR))"
+                continue
             assert node.func.attr == "insert", (rel, ast.unparse(node))
             assert ast.unparse(node.args[0]) == "0"
             assert "site" not in ast.unparse(node.args[1])
     assert sorted(rel for rel, _ in changes) == [
         "df/bootstrap.py",
+        "df/cli.py",
         "df/launch_release.py",
         "df/launcher_entry.py",
     ]

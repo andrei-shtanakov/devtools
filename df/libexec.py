@@ -1,4 +1,5 @@
-"""The `libexec/` wrappers of stage 2a (spec 4.2; Task 4).
+"""The `libexec/` wrappers of stage 2a (spec 4.2; Task 4) and stage 2b
+(`df-precheck`, plan decision 4).
 
 Each wrapper is a root-owned `0755` `sh` script of one `exec` line: the
 administrative Python of the `current` record runs the stage-1 entry
@@ -8,7 +9,8 @@ the Python itself, so the path of the interpreter is written here and nowhere
 else. A new release with another admin Python makes them stale:
 `wrappers_stale` is what `darkfactory install` uses to say so (exit code 0),
 `wrapper_problems` shows it in full (doctor's `roles.libexec`, Task 13) and
-`darkfactory roles setup` rewrites them.
+`darkfactory roles setup` rewrites them. A host set up before a wrapper was
+added (2a, without `df-precheck`) is stale the same way.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ WRAPPERS: tuple[str, ...] = (
     "libexec/df-launch",
     "libexec/df-review-run",
     "libexec/df-publish",
+    "libexec/df-precheck",
     "bin/df-run-start",
 )
 #: The entry subcommand (with its fixed words) of each wrapper.
@@ -38,6 +41,8 @@ _SUBCOMMANDS = {
     "libexec/df-launch": "launch exec",
     "libexec/df-review-run": "launch exec df-review review",
     "libexec/df-publish": "publisher serve",
+    # no argument: sudoers allows `df-precheck ""` only
+    "libexec/df-precheck": "precheck serve",
     # `start` or `resume` is the caller's first argument
     "bin/df-run-start": "run",
 }
@@ -104,10 +109,13 @@ def wrappers_present(layout: Layout) -> bool:
 
 def wrappers_stale(layout: Layout, admin_python: Path) -> bool:
     """Some wrapper exists and holds another text: written for another admin
-    Python (or by another version). Absent wrappers are not stale -- a
-    stage-1-only host has none."""
+    Python (or by another version); or some exist and one is missing: set up
+    before it was added. A stage-1-only host has none: not stale."""
+    if not wrappers_present(layout):
+        return False
     return any(
-        any(TEXT_MISMATCH in p for p in _text_problems(layout, name, admin_python))
+        not os.path.lexists(wrapper_path(layout, name))
+        or any(TEXT_MISMATCH in p for p in _text_problems(layout, name, admin_python))
         for name in WRAPPERS
     )
 
