@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from df.admin import expected_admin_digest
+from df.admin_tree import CONTRACT_FILES, governance_files
 from df.build import GIT_ISOLATION
 from df.config import ReleaseEntry, ReleasesConfig, dump_releases
 from df.paths import Layout
@@ -39,6 +40,9 @@ from tests.df.live_stand import (
 from tests.df.roles_world import FIXTURE_FROM_CHECKOUT, OS_DIR
 from tests.df.root_world import INFRA, SYSTEM_GIT, infra
 from tests.df.site_world import prime_cache, write_checkout
+
+#: The approval-branch patterns `merge` routing reads (one of `CONTRACT_FILES`).
+PATTERNS = "contracts/approval-branches/v1/patterns.env"
 
 RID = "r-live-1"
 GIT_ENV = {
@@ -134,7 +138,7 @@ def pw(tmp_path: Path) -> ProvWorld:
     write_checkout(checkout)  # the rest of the admin tree (2b Task 5)
     (checkout / "df" / "__init__.py").write_text('"""df"""\n')
     (checkout / "df" / "sub" / "tool.py").write_text("print(1)\n")
-    patterns = checkout / FIXTURE_FROM_CHECKOUT[1]
+    patterns = checkout / PATTERNS
     patterns.parent.mkdir(parents=True, exist_ok=True)
     patterns.write_text("APPROVAL_FINALIZE_SUFFIX=-final\n")
     (checkout / "README.md").write_text("not carried\n")
@@ -175,7 +179,7 @@ def change_fixture_df(pw: ProvWorld) -> None:
 
 
 def drop_patterns(pw: ProvWorld) -> None:
-    git(pw.fixture, "rm", "-q", FIXTURE_FROM_CHECKOUT[1])
+    git(pw.fixture, "rm", "-q", PATTERNS)
     pw.refit("no patterns")
 
 
@@ -243,7 +247,8 @@ def test_live_provenance_control(pw: ProvWorld) -> None:
     assert set(prov.blobs) == {
         "df/__init__.py",
         "df/sub/tool.py",
-        FIXTURE_FROM_CHECKOUT[1],
+        *governance_files(),
+        *CONTRACT_FILES,
     }
 
 

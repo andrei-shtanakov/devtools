@@ -619,3 +619,67 @@ def test_precheck_imports_under_dash_S(fl: FakeLayout, tmp_path: Path) -> None:
         "flags": [1, 1, 1],
     }
     assert not list(tree.rglob("__pycache__"))
+
+
+# ---------- the root worlds' fixture (non-root half) ----------
+
+
+def test_root_fixture_repo_installs_offline(
+    monkeypatch: pytest.MonkeyPatch, fl: FakeLayout, tmp_path: Path
+) -> None:
+    """The root worlds' `devtools` fixture (`build_fixture_repo`, as the
+    root run builds it) fetched by root's own `fetch_reference`, installed
+    by `install_admin` under `prime_on_install` with every download refused:
+    a clean admin tree with this checkout's closure and contracts; the
+    appended `site/` pins are unreached by the build's lock walk and the
+    lock still passes `uv lock --check`."""
+    from df import inputs, lockset
+    from df.manifest import RepoPin
+    from df.markers import marker_env
+    from tests.df.root_world import (
+        ADMIN_TREE_PATHS,
+        PYTHON,
+        build_fixture_repo,
+        prime_on_install,
+    )
+
+    top = tmp_path / "top"
+    top.mkdir()
+    bare, sha = build_fixture_repo(top)
+    lay = fl.layout
+    pin = RepoPin("devtools", f"file://{bare}", sha, ())
+    ref = inputs.fetch_reference(
+        pin, lay.verify_dir / "devtools", git=SYSTEM_GIT, layout=lay
+    )
+    for rel in ADMIN_TREE_PATHS[1:]:
+        assert (ref / rel).read_bytes() == (ROOT / rel).read_bytes(), rel
+    lock = (ref / "uv.lock").read_bytes()
+    assert locked_pins(lock) == site_world().pins()
+    for platform in ("macos-arm64", "linux-x86_64"):
+        env = marker_env(platform, PYTHON)
+        got = lockset.expected_distributions(lock, groups=(), env=env, root_dir=ref)
+        assert sorted(d.name for d in got) == ["dfprobe", "six"]
+    uv = shutil.which("uv")
+    if uv is not None:
+        check = subprocess.run(
+            [uv, "lock", "--check", "--offline", "--python", sys.executable],
+            cwd=ref,
+            env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "UV_NO_CONFIG": "1"},
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        assert check.returncode == 0, check.stderr
+    shutil.rmtree(cache(lay), ignore_errors=True)  # nothing cached yet
+
+    def offline(url: str) -> bytes:
+        raise TreeError(f"{url}: сеть запрещена")
+
+    prime_on_install(monkeypatch)
+    admin.install_admin(lay, ID, devtools_ref=ref, git=SYSTEM_GIT, fetch=offline)
+    tree = lay.admin_dir(ID)
+    assert admin.admin_code_problems(lay, ID) == []
+    assert (tree / "governance" / "act_precheck.py").is_file()
+    assert (tree / CONTRACT_FILES[0]).is_file()
+    assert sorted(os.listdir(tree / "site")) == ["steward", "yaml"]

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import atexit
 import functools
+import gzip
 import hashlib
 import io
 import os
@@ -83,11 +84,9 @@ def _pure_files(package: Path) -> list[Path]:
 
 def tar_bytes(members: list[tuple[str, bytes | None, int]], *, gz: bool) -> bytes:
     """A tar (gzip'ed if `gz`) of `(name, data or None for a dir, mode)`,
-    mtime 0, so the bytes are deterministic."""
+    mtime 0 (the gzip header's too), so the bytes are deterministic."""
     buf = io.BytesIO()
-    with tarfile.open(
-        fileobj=buf, mode="w:gz" if gz else "w", format=tarfile.PAX_FORMAT
-    ) as tar:
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tar:
         for name, data, mode in members:
             info = tarfile.TarInfo(name)
             info.mtime = 0
@@ -98,7 +97,12 @@ def tar_bytes(members: list[tuple[str, bytes | None, int]], *, gz: bool) -> byte
             else:
                 info.size = len(data)
                 tar.addfile(info, io.BytesIO(data))
-    return buf.getvalue()
+    if not gz:
+        return buf.getvalue()
+    out = io.BytesIO()
+    with gzip.GzipFile(fileobj=out, mode="wb", mtime=0) as packed:
+        packed.write(buf.getvalue())
+    return out.getvalue()
 
 
 def sdist_members(package: Path) -> list[tuple[str, bytes | None, int]]:
@@ -197,13 +201,12 @@ def real_site_world() -> SiteWorld:
     return build_world(Path(yaml.__file__).parent, Path(steward.__file__).parent)
 
 
-def uv_lock(pins: SitePins) -> bytes:
-    """A `uv.lock` pinning `pins` the way uv writes them."""
+def lock_packages(pins: SitePins) -> str:
+    """The `[[package]]` entries of the two `site/` sources, as uv writes them
+    (appended to a project's lock they stay unreached: nothing installs them)."""
     commit = pins.steward_commit
     git_source = f"{pins.steward_url}?rev={commit}#{commit}"
-    return f"""version = 1
-revision = 3
-
+    return f"""
 [[package]]
 name = "pyyaml"
 version = "6.0.3"
@@ -214,7 +217,12 @@ sdist = {{ url = "{pins.yaml_url}", hash = "sha256:{pins.yaml_sha256}", size = 1
 name = "steward"
 version = "0.2.0"
 source = {{ git = "{git_source}" }}
-""".encode()
+"""
+
+
+def uv_lock(pins: SitePins) -> bytes:
+    """A `uv.lock` pinning `pins` the way uv writes them."""
+    return ("version = 1\nrevision = 3\n" + lock_packages(pins)).encode()
 
 
 def git_wrapper(directory: Path, repo: Path, *, extra: str = "") -> Path:

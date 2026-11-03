@@ -73,6 +73,7 @@ import pytest
 from df import launch, models, run_start, setup_agent
 from df import platform as plat
 from df.admin import expected_admin_digest
+from df.admin_tree import locked_pins
 from df.build import GIT_ISOLATION
 from df.config import parse_releases
 from df.paths import MACHINE_TOKEN, Layout
@@ -1532,7 +1533,13 @@ def install_phase(source_sha: str, out: Path) -> int:
     top = live_top()
     os.mkdir(top, 0o755)
     os.chmod(top, 0o755)
-    bare, fixture_sha = build_fixture_repo(top, FIXTURE_FROM_CHECKOUT, name="live")
+    # The real `site/` pins of this checkout: the stand's install fetches the
+    # PyYAML sdist and the steward commit over the network (2b Task 5), so
+    # the precheck of later rows runs the real code.
+    pins = locked_pins((REPO_ROOT / "uv.lock").read_bytes())
+    bare, fixture_sha = build_fixture_repo(
+        top, FIXTURE_FROM_CHECKOUT, name="live", site=pins
+    )
     with serve_repo(top, bare) as url:
         world = RootWorld(
             PRODUCTION, FixtureRepo(url, fixture_sha), approved_uv(), top, ""

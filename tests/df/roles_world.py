@@ -87,20 +87,23 @@ from tests.df.fake_github import (
     serve_fake_github,
 )
 from tests.df.root_world import (
+    ADMIN_TREE_PATHS,
     FixtureRepo,
     InstalledWorld,
     RootWorld,
     assert_committed,
     current_id,
     infra,
+    prime_on_install,
     remove_service_user,
     run,
     write_evidence,
 )
 
 #: What the fixture repo carries from this checkout (R14-3, plan Task 15):
-#: `df/` and the approval-branch patterns `merge` routing reads.
-FIXTURE_FROM_CHECKOUT = ("df", "contracts/approval-branches/v1/patterns.env")
+#: the admin tree's sources -- `df/`, the precheck closure and its contracts,
+#: among them the approval-branch patterns `merge` routing reads (2b Task 5).
+FIXTURE_FROM_CHECKOUT = ADMIN_TREE_PATHS
 OPERATOR = "runner"
 PRODUCT_ID = 1
 APP_ID = 1
@@ -836,6 +839,7 @@ def install_production(world: RootWorld) -> InstalledWorld:
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(install, "_profile", lambda _cfg: world.profile())
+        prime_on_install(mp)  # the stand-in `site/` sources (2b Task 5)
         code = world.bootstrap(world.init_argv())
     if code != cli.EXIT_OK:
         infra(f"установка в /: код {code}")

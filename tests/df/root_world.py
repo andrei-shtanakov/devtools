@@ -10,8 +10,13 @@ Runs only as root in the disposable CI runners (the root gate of
   root `0755` copy of the pinned uv on `PATH`.
 - Profile pin (R91): `install._profile` returns a profile of one repo named
   `devtools` (the admin code comes from its `df/`): the fixture project
-  `tests/df/fixtures/proj/` plus this checkout's `df/`, committed with a
-  fixed author and date into a root-owned bare repo. Served `file://` on
+  `tests/df/fixtures/proj/` plus this checkout's `ADMIN_TREE_PATHS` (`df/`,
+  the precheck closure, its contracts; 2b Task 5) and the `site/` pins
+  appended to its `uv.lock` (unreached by the build), committed with a
+  fixed author and date into a root-owned bare repo. The pins are the
+  stand-in sources of `tests/df/site_world`, primed into the world's
+  `admin-home/site-src` right before the leaf (`prime_on_install`):
+  `install_admin` stays offline. Served `file://` on
   Linux; on macOS git refuses a `file://` repo of another owner ("dubious
   ownership", Step 0), so a `git daemon` on 127.0.0.1 serves it (`git://`).
 - `df-build` (R90): absent when a world starts (a leftover fails the test
@@ -43,11 +48,13 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from df import cli, install, journal, launcher_entry, lockset, state
+from df import admin, cli, install, journal, launcher_entry, lockset, state
 from df import platform as plat
+from df.admin_tree import CONTRACT_FILES, SitePins, governance_files
 from df.build import GIT_ISOLATION
 from df.config import Account, InstallConfig, load_accounts
 from df.journal import StepFailed, run_steps
@@ -60,6 +67,7 @@ from df.manifest import (
 )
 from df.paths import Layout
 from tests.df.ci_step0 import BASES, make_base
+from tests.df.site_world import lock_packages, prime_cache, site_world
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_PROJECT = Path(__file__).parent / "fixtures" / "proj"
@@ -84,6 +92,9 @@ INFRA = "инфраструктура"
 ROLE_ENV: Mapping[str, str] = {"PATH": "/usr/bin:/bin", "LANG": "C"}
 _SYSTEM_ENV = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C"}
 _worlds = itertools.count(1)
+#: What a `devtools` fixture repo carries from this checkout: the admin
+#: tree's sources (2b Task 5: `df/`, the precheck closure, its contracts).
+ADMIN_TREE_PATHS: tuple[str, ...] = ("df", *governance_files(), *CONTRACT_FILES)
 #: Never part of the pin: bytecode, caches and editor leftovers (M7).
 FIXTURE_IGNORE = shutil.ignore_patterns(
     "__pycache__", "*.pyc", ".*.swp", "*~", ".DS_Store", ".pytest_cache", ".venv"
@@ -156,12 +167,20 @@ def _git_env(home: Path) -> dict[str, str]:
 
 
 def build_fixture_repo(
-    top: Path, paths: Sequence[str] = ("df",), name: str = "fixture"
+    top: Path,
+    paths: Sequence[str] = ADMIN_TREE_PATHS,
+    name: str = "fixture",
+    *,
+    site: SitePins | None = None,
 ) -> tuple[Path, str]:
     """`<top>/<name>.git` (bare, root's) of the fixture project plus `paths`
-    of this checkout (directories or files, relative to its root)."""
+    of this checkout (directories or files, relative to its root), its
+    `uv.lock` with the `site/` pins `site` appended (default: the stand-in
+    sources `prime_on_install` primes; the build never reaches them)."""
     src = top / f"{name}-src"
     shutil.copytree(FIXTURE_PROJECT, src, ignore=FIXTURE_IGNORE)
+    with (src / "uv.lock").open("a") as lock:
+        lock.write(lock_packages(site or site_world().pins()))
     for relative in paths:
         origin, target = REPO_ROOT / relative, src / relative
         if origin.is_dir():
@@ -464,6 +483,23 @@ def make_world(top: Path, repo: FixtureRepo, control_url: str) -> RootWorld:
     os.mkdir(layout.build_home.parent, 0o755)
     os.chmod(layout.build_home.parent, 0o755)
     return RootWorld(layout, repo, _uv_copy(layout), top, control_url)
+
+
+def prime_on_install(mp: pytest.MonkeyPatch) -> None:
+    """While `mp` is active, each `admin.install_admin` of this process (the
+    route's leaf, in-process bootstrap) first primes the layout's
+    `admin-home/site-src` with the stand-in `site/` sources, as an earlier
+    install's fetch leaves it, then runs the real leaf: `install_admin` needs
+    no network (2b Task 5). Priming at the leaf, not in `make_world`, leaves
+    the directories before it to step 2 and the writer lock (`admin-home`
+    exists by then)."""
+    real = admin.install_admin
+
+    def install_admin(layout: Layout, release_id: str, **kw: Any) -> None:
+        prime_cache(layout)
+        real(layout, release_id, **kw)
+
+    mp.setattr(admin, "install_admin", install_admin)
 
 
 def _uv_copy(layout: Layout) -> Path:
