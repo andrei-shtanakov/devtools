@@ -53,6 +53,7 @@ MODULES = (
     "act_status",
     "act_history",
     "act_history_snapshot",
+    "act_precheck",
     "act_node",
     "act_premerge",
     "act_app_token",
@@ -224,6 +225,7 @@ X, K, F = (
 )
 FH = "tests/test_act_forge_http.py"
 HS = "tests/test_act_history_snapshot.py"
+PC = "tests/test_act_precheck.py"
 RP, OB = "tests/test_act_repropose.py", "tests/test_act_ops_body.py"
 OF, WR = "tests/test_act_ops_failures.py", "tests/test_act_wave_runner.py"
 ENVELOPE_FIELDS = (
@@ -483,6 +485,198 @@ JUDGMENT = {
             "if status != 200",
             f"{HS}::test_rest_non_200_is_os_error",
             '"forge: HTTP 404: repos/owner/p/pulls/7"',
+        ),
+    ),
+    # --- act_precheck (этап 2b, Task 4): запрос, вердикт, вид stop
+    "act_precheck.serve": (
+        r(
+            "token_scrub",
+            "act_precheck.serve",
+            'reason.replace(request.token, "[token]")',
+            f"{PC}::test_token_not_in_verdict_or_stderr",
+            "'stop/[token]'",
+        ),
+        r(
+            "reason_cap",
+            "act_precheck.serve",
+            "if len(reason) > MAX_REASON",
+            f"{PC}::test_reason_truncated",
+            '"...[truncated]"',
+        ),
+    ),
+    "act_precheck._locked": (
+        r(
+            "lock_deadline",
+            "act_precheck._locked",
+            'raise DeadlineExceeded("precheck lock: deadline passed")',
+            f"{PC}::test_lock_wait_bounded_by_deadline",
+            "seen == []",
+        ),
+    ),
+    "act_precheck.parse_request": (
+        r(
+            "size",
+            "act_precheck.parse_request",
+            "if len(raw) > MAX_REQUEST",
+            f"{PC}::test_oversize_request_exit_2",
+            '"request larger than 65536 bytes"',
+        ),
+        r(
+            "json",
+            "act_precheck.parse_request",
+            "except (UnicodeDecodeError, json.JSONDecodeError)",
+            f"{PC}::test_request_not_json_exit_2",
+            '"request is not JSON"',
+        ),
+        r(
+            "object",
+            "act_precheck.parse_request",
+            "if not isinstance(data, dict)",
+            f"{PC}::test_request_not_object_exit_2",
+            '"request is not a JSON object"',
+        ),
+        r(
+            "keys",
+            "act_precheck.parse_request",
+            "if set(data) != set(REQUEST_KEYS)",
+            f"{PC}::test_unknown_request_key_exit_2",
+            "\"keys: unexpected ['extra'], missing []\"",
+        ),
+        r(
+            "values",
+            "act_precheck.parse_request",
+            'f"invalid values: {bad}"',
+            f"{PC}::test_kind_candidate_rejected_by_schema",
+            "\"invalid values: ['kind']\"",
+        ),
+    ),
+    "act_precheck._no_duplicates": (
+        r(
+            "duplicate",
+            "act_precheck._no_duplicates",
+            'f"duplicate keys: {dups}"',
+            f"{PC}::test_duplicate_request_key_exit_2",
+            "\"duplicate keys: ['nonce']\"",
+        ),
+    ),
+    "act_precheck._no_constant": (
+        r(
+            "constant",
+            "act_precheck._no_constant",
+            "raise json.JSONDecodeError",
+            f"{PC}::test_request_not_json_exit_2",
+            '"request is not JSON"',
+        ),
+    ),
+    "act_precheck._decide": (
+        r(
+            "deadline",
+            "act_precheck._decide",
+            "except DeadlineExceeded",
+            f"{PC}::test_deadline_kills_git_and_answers_unset",
+            '("unset", "deadline")',
+        ),
+        r(
+            "read_failed",
+            "act_precheck._decide",
+            "except OPS_FAILURES",
+            f"{PC}::test_snapshot_failure_is_unset",
+            '"read_failed: snapshot: fetch owner/p"',
+        ),
+    ),
+    "act_precheck._stop_target": (
+        r(
+            "count",
+            "act_precheck._stop_target",
+            "if len(changes) != 1",
+            f"{PC}::test_stop_with_extra_change_refused",
+            '"stop_changes: expected one change, got 2"',
+        ),
+        r(
+            "addition",
+            "act_precheck._stop_target",
+            'if status != "added" or previous is not None',
+            f"{PC}::test_stop_modifying_delivered_stop_refused",
+            '" is not a plain addition"',
+        ),
+        r(
+            "stop_path",
+            "act_precheck._stop_target",
+            "if found is None",
+            f"{PC}::test_stop_foreign_path_refused_before_io",
+            'is not a stop record path"',
+        ),
+        r(
+            "canonical",
+            "act_precheck._stop_target",
+            "if stop_path(ws_id, node, generation) != path",
+            f"{PC}::test_stop_noncanonical_path_refused",
+            'is not canonical"',
+        ),
+        r(
+            "branch",
+            "act_precheck._stop_target",
+            "if parse_stop_branch(head_ref, ws_id) != (node, generation)",
+            f"{PC}::test_stop_branch_mismatch_refused",
+            '"stop_branch_mismatch: "',
+        ),
+    ),
+    "act_precheck._stop_in_history": (
+        r(
+            "unreadable",
+            "act_precheck._stop_in_history",
+            "if raw is None",
+            f"{PC}::test_stop_record_absent_at_head_is_unset",
+            '"stop_unreadable: "',
+        ),
+        r(
+            "utf8",
+            "act_precheck._stop_in_history",
+            "except UnicodeDecodeError",
+            f"{PC}::test_stop_record_not_utf8_refused",
+            '"stop_record_invalid: not UTF-8"',
+        ),
+        r(
+            "record_invalid",
+            "act_precheck._stop_in_history",
+            "except EnvelopeError",
+            f"{PC}::test_stop_record_invalid_refused",
+            '"stop_record_invalid: "',
+        ),
+        r(
+            "content",
+            "act_precheck._stop_in_history",
+            "if (record.node, record.generation) != (target.node, target.generation)",
+            f"{PC}::test_stop_path_content_mismatch_refused",
+            '"stop_content_mismatch: "',
+        ),
+        r(
+            "history",
+            "act_precheck._stop_in_history",
+            "if isinstance(history, Unavailable)",
+            f"{PC}::test_history_unavailable_is_unset",
+            '"history_unavailable: "',
+        ),
+        r(
+            "no_request",
+            "act_precheck._stop_in_history",
+            "if current is None",
+            f"{PC}::test_stop_without_delivered_request_refused",
+            '"no_delivered_request: node requirements"',
+        ),
+        r(
+            "already_stopped",
+            "act_precheck._stop_in_history",
+            "if isinstance(current, DeliveredStop)",
+            f"{PC}::test_stop_already_stopped_refused",
+            '"already_stopped: node requirements g1"',
+        ),
+        r(
+            "generation",
+            "act_precheck._stop_in_history",
+            "if delivered != target.generation",
+            f"{PC}::test_stop_for_superseded_generation_refused",
+            '"stop_generation_not_current: stop g1, current g2"',
         ),
     ),
     "act_anon.contents_bytes": (
@@ -3676,6 +3870,9 @@ _HELPER = (
 )
 _BUILD = "строит значение/запрос; проверок-отказов нет"
 _IO = "транспорт/ввод-вывод без проверки-отказа"
+_PC_FIELD = (
+    "предикат формы поля запроса; отказ выносит `parse_request` (`invalid values`)"
+)
 NOT_JUDGMENT = {
     "task_bridge._admission_refusal": "делегирует `act_status.noop_refusal` (место суждения)",
     **{
@@ -3707,6 +3904,19 @@ NOT_JUDGMENT = {
     "act_history.HistoryOps.fetch_branch": "протокол",
     "act_history.HistoryOps.prs_containing_commit": "протокол",
     "act_history.HistoryOps.pr_facts": "протокол",
+    "act_precheck._positive_int": _PC_FIELD,
+    "act_precheck._matches": _PC_FIELD,
+    "act_precheck._text": _PC_FIELD,
+    "act_precheck._http_url": _PC_FIELD,
+    "act_precheck._change": _PC_FIELD,
+    "act_precheck._changes": _PC_FIELD,
+    "act_precheck._default_transport": _BUILD,
+    "act_precheck.request_digest": _BUILD,
+    "act_precheck.verdict": _BUILD,
+    "act_precheck._judge_stop": "передаёт отказ `_stop_target` и решение `_stop_in_history`; своей проверки нет",
+    "act_precheck._snapshot": _IO,
+    "act_precheck._remove": _IO,
+    "act_precheck._remove.report": _IO,
     "act_history_snapshot.git_auth_env": _BUILD,
     "act_history_snapshot._env": _BUILD,
     "act_history_snapshot._url": _BUILD,
