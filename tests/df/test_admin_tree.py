@@ -854,7 +854,18 @@ def test_root_fixture_repo_installs_offline(
 # ---------- legacy releases ----------
 
 
-@pytest.mark.parametrize("shape", ["df-only", "older-modules"])
+#: The closure files devtools 335188f (the umbrella's `core` pin) already has.
+OLD_MODULES_335188F = {
+    "governance/__init__.py",
+    "governance/act_envelope.py",
+    "governance/act_request.py",
+    "governance/act_time.py",
+    "governance/approval_branches.py",
+    "governance/ssot_env.py",
+}
+
+
+@pytest.mark.parametrize("shape", ["df-only", "335188f"])
 def test_legacy_checkout_installs_df_only(fl: FakeLayout, shape: str) -> None:
     """No `act_precheck.py` (as devtools 335188f, pinned by the umbrella's
     `core`: some closure modules and the patterns, not the program): the
@@ -864,7 +875,7 @@ def test_legacy_checkout_installs_df_only(fl: FakeLayout, shape: str) -> None:
     ref = devtools_ref(fl)
     (ref / "uv.lock").unlink()
     shutil.rmtree(cache(lay))
-    keep = {"governance/__init__.py", "governance/act_time.py", *CONTRACT_FILES}
+    keep = {*OLD_MODULES_335188F, *CONTRACT_FILES}
     for rel in (*admin_tree.governance_files(), *CONTRACT_FILES):
         if shape == "df-only" or rel not in keep:
             (ref / rel).unlink()
