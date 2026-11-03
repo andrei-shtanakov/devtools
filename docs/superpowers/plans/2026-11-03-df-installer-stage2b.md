@@ -146,7 +146,10 @@ sdist), всё сверено с `uv.lock` и покрыто `admin_digest`. И�
      - `armed` — `{read_at}` после финального чтения. Пишется под владением PR
        (ниже), чтение сделано после записи владения, `PUT` идёт только после `armed`;
      - `put_answer` — `{status}` для **определённого** HTTP-ответа на `PUT`
-       (200/405/409/422). При таймауте, транспортной ошибке или 5xx фаза не пишется;
+       (200/405/409/422). При таймауте, транспортной ошибке или 5xx фаза не пишется.
+       **`PUT` в операции отправляется не больше одного раза** (r4 N1): только для
+       единственной попытки определённый отрицательный ответ доказывает, что мержа этой
+       попыткой не будет;
    - **владение PR** (r2 N1) — долговечный файл
      `/var/lib/df/publisher/owners/<repository_id>-<pr>.json` с `request_key`, созданный
      `O_EXCL` + `fsync` перед финальным чтением. Он переживает процесс и снимается только
@@ -188,12 +191,10 @@ sdist), всё сверено с `uv.lock` и покрыто `admin_digest`. И�
    | `rechecked.<n>` | как `attested`, решающая проверка — последняя | — |
    | `armed` без `put_answer` | PR смёржен ботом App с `head_sha` | `done` |
    | `armed` без `put_answer` | смёржен иначе | `unknown: merge_not_confirmed` |
-   | `armed` без `put_answer` | открыт, `head.sha == head_sha`, факты равны | **повторить `PUT`** с тем же `sha` под тем же владением (r3 N1). Это не слепой повтор: мерж PR не может произойти дважды, а `sha` пинит голову, так что эффект двух `PUT` равен эффекту одного. Дальше — по определённому ответу |
-   | `armed` без `put_answer` | открыт, голова иная | `refused: head_changed` проверенный: прежний `PUT` нёс прежний `sha` и смёржить новую голову не может |
-   | `armed` без `put_answer` | сбой чтения | `unknown: merge_not_confirmed` |
+   | `armed` без `put_answer` | открыт (любая голова) или сбой чтения | `unknown: merge_not_confirmed` (r4 N1). Повторного `PUT` нет: отрицательное наблюдение не доказывает, что потерянный `PUT` не исполнится, ведь голова может вернуться к `head_sha`. Владение остаётся; продолжение после закрытия PR производителем — новым PR |
    | `put_answer` 409 | — | `refused: head_changed` проверенный |
    | `put_answer` 405/422, PR открыт | — | `refused: not_mergeable` проверенный |
-   | `put_answer` 405/422 или 200, PR смёржен ботом App с `head_sha` | — | `done` |
+   | `put_answer` 200, PR смёржен ботом App с `head_sha` | — | `done` |
    | `put_answer` 405/422, PR смёржен иначе | — | `unknown: merge_not_confirmed` |
 
    Отказ с `verified_not_done=True` проходит через `merge()` до `main._run_handler`
@@ -282,8 +283,9 @@ sdist), всё сверено с `uv.lock` и покрыто `admin_digest`. И�
    получает 409; исход `refused: head_changed`; повтор — тот же исход без второго `PUT`.
    Тест — Task 8, `test_head_change_after_precheck`.
 3. **Ответ на `PUT` потерян; PR смёржен или ещё нет.** Ожидание: смёржен ботом — `done`;
-   открыт с той же головой — повторный `PUT` с тем же `sha`; смёржен человеком — `unknown`.
-   Окончательный отказ по таймеру не ставится никогда. Тест — Task 8.
+   открыт — `unknown`, владение остаётся, второго `PUT` нет; смёржен человеком — `unknown`.
+   Окончательный отказ по таймеру или по отрицательному наблюдению не ставится. Тест —
+   Task 8.
 4. **Ответ на `POST` аттестации потерян.** Ожидание: восстановление находит ровно одну
    свою аттестацию и продолжает. Не находит — `unknown`, второго `POST` нет. Тест — Task 8,
    `test_lost_attestation_post_*`.
@@ -470,12 +472,19 @@ sdist), всё сверено с `uv.lock` и покрыто `admin_digest`. И�
 - [ ] **Step 2–4:** FAIL → реализовать → PASS. **Протокол `install_admin` сохраняется**
   (r3 N4): `created` (частичный) → `created` (полный) → `sync_tree(admin/<id>)` →
   `sync_dir(admin)`, только расширяется содержимое копии: `df/`, `governance/*`,
-  `contracts/*` из `devtools_ref`, `site/*` из проверенных исходников. Исходники `site`
-  готовятся **до** протокола в `admin-home/site-src/<sha256>/` (sdist pyyaml) и
-  `admin-home/site-src/<commit>/` (steward). Это кэш с адресацией по содержимому, а не
-  состояние маршрута: при каждом использовании он заново сверяется по sha256 / `FETCH_HEAD`
-  и извлекается заново, если сверка не прошла. Новых промежуточных деревьев в модели
-  сбоев и rollback нет. `fetch` — `urllib` от root с `admin_env`, без `uv`.
+  `contracts/*` из `devtools_ref`, `site/*` из проверенных исходников (r4 N2).
+  **Распакованного кэша нет.** Кэшируются только исходные артефакты: архив sdist
+  (`admin-home/site-src/pyyaml-<sha256>.tar.gz`, при каждом использовании сверяется по
+  sha256, при несовпадении удаляется и скачивается заново) и git-репозиторий steward
+  (`admin-home/site-src/steward.git`, при каждом использовании проверяется, что коммит пина
+  есть и `git cat-file -e <sha>^{tree}`). Файлы `site/` пишутся в `admin/<id>/site`
+  **внутри** шага копирования протокола прямо из потока: `tarfile` над проверенным
+  архивом (только `lib/yaml/**`, только обычные файлы, без `..` и абсолютных путей) и
+  `git archive <sha> src/steward` через pipe в `tarfile`. Частичная копия — это обычная
+  частичная `admin/<id>`, которую маршрут уже умеет убирать. Новых промежуточных деревьев
+  в модели сбоев нет. Тест `test_interrupted_site_copy_recovers_to_clean_install`
+  (обрыв после нескольких файлов каждого источника, повтор даёт дерево, равное чистой
+  установке). `fetch` — `urllib` от root с `admin_env`, без `uv`.
   Тест `test_install_admin_protocol_events_unchanged` сверяет события с нормативным
   протоколом (`tests/df/test_admin.py:438–447`).
 - [ ] **Step 5:** коммит `feat(df): admin tree with the precheck closure and pure site`.
@@ -534,6 +543,7 @@ sdist), всё сверено с `uv.lock` и покрыто `admin_digest`. И�
       refused: Refused | None
       version: str | None
       admin_digest: str | None
+      request_digest: str | None   # of the bound verdict; None if none was bound
       revoke: str            # "ok" or the error text, never the token
   def admin_precheck(kind: Kind, oc: OpContext, pr: Mapping[str, object],
                      facts: PrFacts) -> PrecheckResult
@@ -556,6 +566,8 @@ sdist), всё сверено с `uv.lock` и покрыто `admin_digest`. И�
   `test_signal_exit_is_timeout`; `test_nonzero_exit_refused`; `test_read_token_only`;
   `test_token_revoked_after_call_even_on_failure`;
   `test_token_absent_from_result_and_evidence`; `test_publisher_precheck_stdlib_only`;
+  `test_request_digest_matches_sent_request` (захват stdin, независимый расчёт digest
+  без токена);
   `test_git_base_default_and_custom_reach_request`; `test_git_base_invalid_refused`;
   `test_2a_publisher_toml_still_parses`.
 - [ ] **Step 2–4:** FAIL → реализовать → PASS.
@@ -604,10 +616,12 @@ sdist), всё сверено с `uv.lock` и покрыто `admin_digest`. И�
   `test_revoked_run_with_state_is_unknown`; `test_corrupt_phase_counts_as_state`;
   `test_attested_without_armed_continues`;
   `test_crash_after_armed_before_put_then_other_request_busy` (B получает `pr_busy`;
-  повтор A видит открытый PR и повторяет `PUT`);
-  `test_delayed_first_put_lands_after_resend` (r3 N1: первый `PUT` задержан фейком,
-  клиент по таймауту; повторный `PUT` получает 405, PR смёржен ботом → `done`;
-  окончательного отказа нет ни на одном шаге); `test_clock_jump_does_not_change_outcome`;
+  повтор A видит открытый PR → `unknown`, `PUT` не отправлен);
+  `test_held_put_head_moves_and_returns_then_lands` (r4 N1: удержанный `PUT₁` → таймаут →
+  голова H₂ → восстановление `unknown` → голова снова H → `PUT₁` исполнен → повтор `done`;
+  окончательного отказа и снятия владения не было ни на одном шаге);
+  `test_single_put_ever` (журнал фейка: в любой последовательности сбоев `PUT` ≤ 1);
+  `test_single_attempt_409_is_verified_refusal`; `test_clock_jump_does_not_change_outcome`;
   `test_crash_after_result_before_release_replay_releases` (r3 N2: повтор A снимает
   владение, B проходит); `test_stale_owner_with_final_result_taken_over`;
   `test_owner_with_unknown_never_released`; `test_other_tool_same_app_is_outside_guarantee`
