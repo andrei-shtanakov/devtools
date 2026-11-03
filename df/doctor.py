@@ -71,7 +71,7 @@ from df.digest import TreeError
 from df.journal import StepFailed, Transitional
 from df.launch import SUDO
 from df.paths import Layout
-from df.publisher import request
+from df.publisher import request, store
 from df.publisher.github import SelfCheckResult
 from df.publisher.perimeter import MAX_EVENTS
 from df.publisher.request import BadResponse, Response
@@ -645,6 +645,7 @@ LEVEL2_IDS = (
     "roles.isolation",
     "publisher.answers",
     "publisher.foreign",
+    "publisher.owners",
     "product.registered",
     "github.machine_user",
     "github.app",
@@ -670,6 +671,8 @@ _LEVEL1_FIRST = "уровень 1 не достигнут"
 SUDOERS_MARGIN = 64 * 1024
 UNREGISTERED = "продукт не зарегистрирован"
 NO_MODEL_ACCESS = "доступ к моделям не подтверждён"
+UNRESOLVED_OWNERS = "владения PR без окончательного результата"
+DAMAGED_OWNERS = "файл владения PR повреждён"
 TRUST_STAGE3 = "источники доверия: не проверено (этап 3)"
 _APP_RIGHTS = ("contents", "pull_requests")
 _WRITE_LEVELS = frozenset({"write", "admin"})
@@ -1075,6 +1078,33 @@ def _foreign(ctx: _Level2) -> str:
     )
 
 
+def _owners(ctx: _Level2) -> str:
+    """Spec 5.4, the operator's step 1: the PR ownerships of P whose request
+    has no final result (product, PR, `request_id`, last phase, time). They
+    are a property, not a fault (step 5): the check stays `ok` and names
+    them. A damaged ownership file of P (or one whose name has no product)
+    is «нарушено»; another product's never touches P's line."""
+    mine = [
+        o
+        for o in store.owners(ctx.layout)
+        if o.repository_id in (ctx.product, None) and not o.final
+    ]
+    damaged = [f"{_owner_row(o)}: {o.damaged}" for o in mine if o.damaged]
+    rows = [_owner_row(o) for o in mine if not o.damaged]
+    held = f"{UNRESOLVED_OWNERS} ({ctx.product}): {_summary(rows)}" if rows else ""
+    if damaged:
+        problems = [*damaged, *([held] if held else [])]
+        raise _Outcome(BROKEN, f"{DAMAGED_OWNERS}: {_summary(problems)}", problems)
+    return held
+
+
+def _owner_row(o: store.Owner) -> str:
+    if o.damaged:
+        return f"PR {o.pr if o.pr is not None else '?'}"
+    phase = "фазы нарушены" if o.phases_damaged else f"фаза {o.last_phase or 'intent'}"
+    return f"PR {o.pr}: request_id {o.request_id or '?'}, {phase}, с {o.taken_at}"
+
+
 # --- 7-10: the product ---
 
 
@@ -1262,6 +1292,7 @@ _LEVEL2: tuple[tuple[str, Callable[[_Level2], str]], ...] = (
     ("roles.isolation", _isolation),
     ("publisher.answers", _answers),
     ("publisher.foreign", _foreign),
+    ("publisher.owners", _owners),
     ("product.registered", _product_check),
     ("github.machine_user", _machine_user),
     ("github.app", _app),

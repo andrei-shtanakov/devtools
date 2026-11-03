@@ -89,6 +89,7 @@ LEVEL2_IDS = [
     "roles.isolation",
     "publisher.answers",
     "publisher.foreign",
+    "publisher.owners",
     "product.registered",
     "github.machine_user",
     "github.app",

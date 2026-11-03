@@ -69,7 +69,7 @@ class OpContext:
 
 
 @dataclass(frozen=True)
-class _Auth:
+class Auth:
     """The App's bot login and an installation token for one repository."""
 
     bot: str
@@ -228,7 +228,7 @@ def _jwt(oc: OpContext) -> str:
         raise Refused("app_key_unusable") from None
 
 
-def _auth(oc: OpContext) -> _Auth:
+def review_auth(oc: OpContext) -> Auth:
     """The bot's login and a review token (before any intent)."""
     jwt = _jwt(oc)
     try:
@@ -238,20 +238,21 @@ def _auth(oc: OpContext) -> _Auth:
     except GitHubRefused as exc:
         raise Refused(refusal_reason(exc)) from None
     token = authorize(oc, REVIEW_PERMISSIONS)
-    return _Auth(f"{slug}[bot]", token.value)
+    return Auth(f"{slug}[bot]", token.value)
 
 
 # --- publish-review -----------------------------------------------------------
 
 
-def _is_bot(review: Mapping[str, object], bot: str) -> bool:
+def is_bot(review: Mapping[str, object], bot: str) -> bool:
+    """`review` (or any object with a `user`) is authored by the bot `bot`."""
     user = review.get("user")
     if not isinstance(user, dict):
         return False
     return user.get("login") == bot and user.get("type") == "Bot"
 
 
-def _check_pr(oc: OpContext, auth: _Auth, pr: int, head_sha: str) -> None:
+def _check_pr(oc: OpContext, auth: Auth, pr: int, head_sha: str) -> None:
     """The PR is open, of this product, at `head_sha` (`pr_state`)."""
     read_pr(oc, auth.token, pr, head_sha)
 
@@ -296,7 +297,7 @@ def _review_text(req: Request, key: str) -> str:
 
 
 def _post_review(
-    oc: OpContext, auth: _Auth, req: Request, key: str
+    oc: OpContext, auth: Auth, req: Request, key: str
 ) -> Mapping[str, object] | None:
     """POST the review; `None` if the outcome is ambiguous (reconcile)."""
     fields = req.fields
@@ -329,9 +330,7 @@ def _done(ident: int, head_sha: str) -> Response:
     return Response("done", None, ids, dict(ids))
 
 
-def _posted(
-    data: Mapping[str, object], auth: _Auth, req: Request, key: str
-) -> Response:
+def _posted(data: Mapping[str, object], auth: Auth, req: Request, key: str) -> Response:
     """The POST's answer is the review we asked for: same commit, decision's
     state, our marker last, authored by the bot."""
     ident = data.get("id")
@@ -343,7 +342,7 @@ def _posted(
         and data.get("state") == STATES[str(req.fields["decision"])]
         and isinstance(body, str)
         and body.endswith("\n\n" + _marker(req, key))
-        and _is_bot(data, auth.bot)
+        and is_bot(data, auth.bot)
     )
     if not ok:
         return Response("unknown", "review_response_unexpected")
@@ -351,7 +350,9 @@ def _posted(
     return _done(ident, head_sha)
 
 
-def _list_reviews(oc: OpContext, auth: _Auth, pr: object) -> list[dict[str, object]]:
+def list_reviews(oc: OpContext, auth: Auth, pr: object) -> list[dict[str, object]]:
+    """Every review of PR `pr` (all pages); an item that is not an object is
+    `GitHubUnavailable`."""
     path = f"/repos/{oc.product.full_name}/pulls/{pr}/reviews"
     items = github.paged_array(path, auth.token, oc.transport, api_base=oc.api_base)
     if not all(isinstance(item, dict) for item in items):
@@ -359,14 +360,14 @@ def _list_reviews(oc: OpContext, auth: _Auth, pr: object) -> list[dict[str, obje
     return [item for item in items if isinstance(item, dict)]
 
 
-def reconcile_review(oc: OpContext, auth: _Auth, req: Request, key: str) -> Response:
+def reconcile_review(oc: OpContext, auth: Auth, req: Request, key: str) -> Response:
     """Look for the review this request's marker names among the PR's reviews
     (every page): exactly one from the bot matching the decision is `done`;
     none or several is `unknown`."""
     head_sha = str(req.fields["head_sha"])
     suffix = "\n\n" + _marker(req, key)
     try:
-        reviews = _list_reviews(oc, auth, req.fields["pr"])
+        reviews = list_reviews(oc, auth, req.fields["pr"])
     except GitHubUnavailable:
         return Response("unknown", "reconcile_unavailable")
     except GitHubRefused as exc:
@@ -374,7 +375,7 @@ def reconcile_review(oc: OpContext, auth: _Auth, req: Request, key: str) -> Resp
     mine = [
         r
         for r in reviews
-        if _is_bot(r, auth.bot) and str(r.get("body") or "").endswith(suffix)
+        if is_bot(r, auth.bot) and str(r.get("body") or "").endswith(suffix)
     ]
     if not mine:
         return Response("unknown", "review_not_found")
@@ -403,7 +404,7 @@ def publish_review(ctx: Context) -> Response:
     if len(_review_text(req, key)) > MAX_REVIEW_BODY:
         raise Refused("body_too_long")
     self_check_first(oc)
-    auth = _auth(oc)
+    auth = review_auth(oc)
     if ctx.intent is not None:
         return reconcile_review(oc, auth, req, key)
     head_sha = str(req.fields["head_sha"])
@@ -488,15 +489,19 @@ def self_check_op(ctx: Context) -> Response:
 __all__ = [
     "MARKER",
     "Answer",
+    "Auth",
     "OpContext",
     "authorize",
     "build_context",
     "escape_body",
+    "is_bot",
+    "list_reviews",
     "publish_review",
     "read_pr",
     "read_token",
     "reconcile_review",
     "refusal_reason",
+    "review_auth",
     "self_check_first",
     "self_check_op",
 ]
