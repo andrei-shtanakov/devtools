@@ -37,7 +37,9 @@ from tests.df.precheck_world import (
     ProductRepo,
     TokenGitServer,
     delivery_facts,
+    lldb_argv,
     lldb_bytes,
+    observe,
     processes,
     silent_server,
 )
@@ -225,3 +227,54 @@ def test_driver_compiles() -> None:
         check=False,
     )
     assert done.returncode == 0 and "errno" in json.loads(done.stdout)
+
+
+def test_observer_refuses_off_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No debugger attach off root: `observe` refuses before any process
+    starts (a local `lldb -p` asks the human for Developer Tools access)."""
+    if os.geteuid() == 0:
+        pytest.skip("as root the observer runs (CI)")
+
+    def no_process(*args: object, **kwargs: object) -> None:
+        raise AssertionError(f"started a process: {args}")
+
+    monkeypatch.setattr(subprocess, "run", no_process)
+    monkeypatch.setattr(subprocess, "Popen", no_process)
+    for user in (None, "nobody"):
+        with pytest.raises(PermissionError):
+            observe(lldb_argv(os.getpid(), 0, 1), user=user, timeout=1)
+
+
+def test_memory_row_skips_before_the_observer() -> None:
+    """Off root the memory row (and every precheck root row) is skipped by
+    the root gate at collection, even with `DF_ROOT_ACCEPTANCE=1`: no
+    fixture and no observer runs."""
+    if os.geteuid() == 0:
+        pytest.skip("as root the gate opens (CI)")
+    env = {**os.environ, "DF_ROOT_ACCEPTANCE": "1"}
+    env.pop("DF_STAGE1_OUT", None)
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-rs",
+            "-p",
+            "no:cacheprovider",
+            "-m",
+            "root",
+            "-k",
+            "precheck",
+            "tests/df/test_acceptance_root_roles.py",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=300,
+        check=False,
+    )
+    assert done.returncode == 0, done.stdout[-2000:]
+    assert "passed" not in done.stdout and "failed" not in done.stdout
+    assert "root-приёмка: нужны euid 0" in done.stdout
+    assert " skipped" in done.stdout

@@ -657,7 +657,11 @@ class Observed:
 
 def observe(argv: Sequence[str], *, user: str | None, timeout: float) -> Observed:
     """`argv` as `user` (direct drop) or as root (`None`), stdin closed,
-    within `timeout` seconds."""
+    within `timeout` seconds. Only root runs an observer: off root (a
+    workstation) it is a `PermissionError` before anything starts -- a
+    debugger attach there would ask the human for Developer Tools access."""
+    if os.geteuid() != 0:
+        raise PermissionError(f"observer only as root: {argv[0]}")
     extra: dict[str, object] = {}
     env = dict(BASE_ENV)
     if user is not None:
