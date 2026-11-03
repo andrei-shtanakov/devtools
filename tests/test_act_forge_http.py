@@ -37,9 +37,11 @@ class _Opener:
     def __init__(self, *answers: Any) -> None:
         self.answers = list(answers)
         self.reqs: list[Any] = []
+        self.timeouts: list[float] = []
 
     def __call__(self, req: Any, timeout: float = 0) -> Any:
         self.reqs.append(req)
+        self.timeouts.append(timeout)
         ans = self.answers.pop(0)
         if isinstance(ans, BaseException):
             raise ans
@@ -245,3 +247,33 @@ def test_get_json_next_outside_base() -> None:
     t, _ = _t(_Answer(b"[1]", link='<https://other/x>; rel="next"'))
     with pytest.raises(OSError, match="forge: Link next outside api_base"):
         t.get_json("x")
+
+
+def test_get_json_page_timeout_caps_each_page() -> None:
+    caps = iter([5.0, 99.0])
+    nxt = f'<{BASE}x?p=2>; rel="next"'
+    t, op = _t(_Answer(b"[1]", link=nxt), _Answer(b"[2]"))
+    assert t.get_json("x", page_timeout=lambda: next(caps)) == (200, [1, 2])
+    assert op.timeouts == [5.0, 60.0]  # min(транспорт 60, срок) на каждой странице
+
+
+def test_get_json_page_timeout_signal_stops_before_page() -> None:
+    class Stop(Exception):
+        pass
+
+    def page_timeout() -> float:
+        if op.reqs:
+            raise Stop
+        return 5.0
+
+    nxt = f'<{BASE}x?p=2>; rel="next"'
+    t, op = _t(_Answer(b"[1]", link=nxt), _Answer(b"[2]"))
+    with pytest.raises(Stop):
+        t.get_json("x", page_timeout=page_timeout)
+    assert len(op.reqs) == 1  # вторая страница не запрошена
+
+
+def test_get_json_without_page_timeout_uses_transport_timeout() -> None:
+    t, op = _t(_Answer(b"{}"))
+    t.get_json("x")
+    assert op.timeouts == [60.0]

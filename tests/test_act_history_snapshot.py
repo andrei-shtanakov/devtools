@@ -724,7 +724,6 @@ def test_rest_timeout_capped_by_deadline(tmp_path: Path) -> None:
     )
     assert snap.pr_facts(SLUG, 7) == {"headRefOid": None}
     assert forge.timeouts == [5.0]
-    assert transport._timeout == 60.0  # восстановлен после вызова
 
 
 def test_rest_past_deadline_sends_nothing(tmp_path: Path) -> None:
@@ -738,3 +737,60 @@ def test_rest_past_deadline_sends_nothing(tmp_path: Path) -> None:
     with pytest.raises(DeadlineExceeded, match="forge: deadline passed"):
         snap.pr_facts(SLUG, 7)
     assert forge.paths == []
+
+
+class PagedForge(Forge):
+    """Две страницы `commits/{sha}/pulls`; каждая «идёт» `step` секунд по часам."""
+
+    def __init__(self, answers: dict, clock: Clock, step: float) -> None:
+        super().__init__(answers)
+        self.clock, self.step, self.timeouts = clock, step, []
+
+    def __call__(self, req: Any, timeout: float = 0) -> _Answer:
+        self.timeouts.append(timeout)
+        answer = super().__call__(req, timeout)
+        self.clock.now += self.step
+        return answer
+
+
+def _two_pages(clock: Clock, step: float) -> tuple[PagedForge, str]:
+    sha = "a" * 40
+    first = f"repos/{SLUG}/commits/{sha}/pulls"
+    nxt = f'<{API}{first}?page=2>; rel="next"'
+    forge = PagedForge(
+        {
+            first: (200, [{"number": 3, "state": "open", "merged_at": None}], nxt),
+            f"{first}?page=2": (200, [_merged(7, sha)]),
+        },
+        clock,
+        step,
+    )
+    return forge, sha
+
+
+def _paged_snap(tmp_path: Path, forge: Forge, clock: Clock) -> SnapshotHistory:
+    transport = TokenTransport(TOKEN, api_base=API, opener=forge, timeout=60.0)
+    return SnapshotHistory(
+        tmp_path, transport, TOKEN, git_base="http://x", deadline=100.0, clock=clock
+    )
+
+
+@needs_steward
+def test_rest_each_page_capped_by_deadline(tmp_path: Path) -> None:
+    clock = Clock()
+    clock.now = 95.0
+    forge, sha = _two_pages(clock, 2.0)
+    snap = _paged_snap(tmp_path, forge, clock)
+    assert [p["number"] for p in snap.prs_containing_commit(SLUG, sha)] == [3, 7]
+    assert forge.timeouts == [5.0, 3.0]
+
+
+@needs_steward
+def test_rest_second_page_after_deadline_raises(tmp_path: Path) -> None:
+    clock = Clock()
+    clock.now = 95.0
+    forge, sha = _two_pages(clock, 5.0)
+    snap = _paged_snap(tmp_path, forge, clock)
+    with pytest.raises(DeadlineExceeded, match="forge: deadline passed"):
+        snap.prs_containing_commit(SLUG, sha)
+    assert len(forge.paths) == 1  # вторая страница не запрошена

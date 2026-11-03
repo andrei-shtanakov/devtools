@@ -3706,6 +3706,7 @@ NOT_JUDGMENT = {
     "act_history_snapshot.SnapshotHistory.__init__": _BUILD,
     "act_history_snapshot.SnapshotHistory.__repr__": _BUILD,
     "act_history_snapshot.SnapshotHistory._run": _IO,
+    "act_history_snapshot.SnapshotHistory._left": "срок страницы REST; отказ выносит `_timeout`",
     "act_history_snapshot.SnapshotHistory.first_parent_changes": _IO,
     "act_history_snapshot.SnapshotHistory.show_file": _IO,
     "act_history_snapshot.SnapshotHistory.show_file_bytes": _IO,

@@ -44,27 +44,33 @@ class TokenTransport:
     def __repr__(self) -> str:
         return f"TokenTransport(api_base={self._base!r})"
 
-    def send(self, request: Any) -> Any:
+    def send(self, request: Any, *, timeout: float | None = None) -> Any:
         """Один запрос: `GET` относительного пути или GraphQL-query.
 
         Любой иной — `Response(None, error=…)` до сети. Ответ любого HTTP-статуса —
-        `Response(status, body, link)`; сбой доставки — `status=None`.
+        `Response(status, body, link)`; сбой доставки — `status=None`. `timeout` —
+        таймаут этого запроса (по умолчанию — таймаут транспорта).
         """
+        seconds = self._timeout if timeout is None else timeout
         from steward.approvalfacts.v3 import Response
 
         refusal = self._refusal(request)
         if refusal is not None:
             return Response(None, error=f"forge: {refusal}")
         if request.method == "GET":
-            return self._fetch(self._base + request.path, None, Response)
+            return self._fetch(self._base + request.path, None, Response, seconds)
         payload = {
             "query": request.query,
             "variables": dict(request.variables or {}),
             "operationName": request.op,
         }
-        return self._fetch(self._base + "graphql", json.dumps(payload), Response)
+        return self._fetch(
+            self._base + "graphql", json.dumps(payload), Response, seconds
+        )
 
-    def get_json(self, path: str) -> tuple[int, object]:
+    def get_json(
+        self, path: str, *, page_timeout: Callable[[], float] | None = None
+    ) -> tuple[int, object]:
         """`GET path` для REST-чтений адаптера: `(status, body)`.
 
         Список (JSON-массив) читается полностью: страницы по `Link rel="next"`
@@ -72,13 +78,21 @@ class TokenTransport:
         странице — `(status, body)`. Сбой доставки, не-200 или смена формы посреди
         обхода, следующая страница вне `api_base` и превышение предела — `OSError`
         (без токена в тексте).
+
+        `page_timeout` (срок вызывающего) зовётся перед КАЖДОЙ страницей: таймаут
+        страницы — `min(таймаут транспорта, page_timeout())`; исключение из него
+        (вызывающий так сообщает «время вышло») выходит из `get_json` как есть, до
+        запроса страницы.
         """
         from steward.approvalfacts.v3 import Request
 
         url: str | None = path
         items: list[object] = []
         for _ in range(MAX_PAGES):
-            resp = self.send(Request("GET", url or path))
+            cap = self._timeout if page_timeout is None else page_timeout()
+            resp = self.send(
+                Request("GET", url or path), timeout=min(self._timeout, cap)
+            )
             if resp.status is None:
                 raise OSError(resp.error or "forge: transport failure")
             if resp.status != 200:
@@ -120,7 +134,7 @@ class TokenTransport:
             return "GraphQL text is not a query"
         return f"read-only transport: {method} {path}"
 
-    def _fetch(self, url: str, data: str | None, cls: Any) -> Any:
+    def _fetch(self, url: str, data: str | None, cls: Any, timeout: float) -> Any:
         headers = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
@@ -133,4 +147,4 @@ class TokenTransport:
         req = urllib.request.Request(
             url, data=body, method="GET" if body is None else "POST", headers=headers
         )
-        return fetch_response(self._open, req, self._timeout, cls, "forge", self._token)
+        return fetch_response(self._open, req, timeout, cls, "forge", self._token)

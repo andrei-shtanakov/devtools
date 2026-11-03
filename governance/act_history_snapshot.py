@@ -10,8 +10,8 @@ git auth: the header travels only in the git process environment (`GIT_CONFIG_*`
 file; Bearer stays REST-only. git runs with an explicit minimal environment (no
 system/global config, no prompts, http(s) only, no redirects) and every call honours
 an absolute `time.monotonic()` deadline: on expiry the whole git process group is
-killed and `DeadlineExceeded` is raised. REST calls honour the same deadline (each
-call's transport timeout is capped by the time left). `DeadlineExceeded` is not in
+killed and `DeadlineExceeded` is raised. REST calls honour the same deadline: each
+page's timeout is capped by the time left, and no page starts after it. `DeadlineExceeded` is not in
 `act_time.OPS_FAILURES`, so `act_history` never turns it into `Unavailable`: it
 propagates out of `load_history` to the caller (`unset: deadline`).
 
@@ -281,20 +281,20 @@ class SnapshotHistory:
         head = body.get("head") if isinstance(body, dict) else None
         return {"headRefOid": head.get("sha") if isinstance(head, dict) else None}
 
+    def _left(self) -> float:
+        """Seconds left for one REST page; none — `DeadlineExceeded`."""
+        return _timeout(self._deadline, self._clock, "forge")
+
     def _rest(self, repo_slug: str, tail: str) -> object:
         if not _FULL_NAME.fullmatch(repo_slug):
             raise ValueError(f"forge: repo_slug {repo_slug!r} is not owner/repo")
-        left = _timeout(self._deadline, self._clock, "forge")
-        transport, saved = self._transport, self._transport._timeout
-        transport._timeout = min(saved, left)  # each request of this call
+        path = f"repos/{repo_slug}/{tail}"
         try:
-            status, body = transport.get_json(f"repos/{repo_slug}/{tail}")
+            status, body = self._transport.get_json(path, page_timeout=self._left)
         except OSError:
             # a transport failure past the deadline is the deadline, not a fact
             _timeout(self._deadline, self._clock, "forge")
             raise
-        finally:
-            transport._timeout = saved
         if status != 200:
             raise OSError(f"forge: HTTP {status}: repos/{repo_slug}/{tail}")
         return body
