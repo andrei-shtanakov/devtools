@@ -7,7 +7,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from governance import act_git_rows, ops
+import pytest
+
+pytest.importorskip("steward", reason="steward отсутствует: без группы governance")
+
+from governance import act_git_rows, ops  # noqa: E402
 
 
 def test_ops_reexports_rows() -> None:
