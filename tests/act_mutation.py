@@ -55,8 +55,12 @@ BYPASS: dict[str, tuple[str, str]] = {
         "return cls(200, body={}, link=None)",
     ),
     "act_history_snapshot._git:deadline_kill": (
-        'raise TimeoutError("git: deadline passed") from None',
+        'raise DeadlineExceeded("git: deadline passed") from None',
         "return subprocess.CompletedProcess(proc.args, -9, None, None)",
+    ),
+    "act_history_snapshot.SnapshotHistory._rest:deadline_during": (
+        '_timeout(self._deadline, self._clock, "forge")\n            raise',
+        "raise",
     ),
     "act_history_snapshot.SnapshotHistory.prs_containing_commit:shape": (
         'raise ValueError(f"forge: commits/{sha[:12]}/pulls: unexpected shape")',

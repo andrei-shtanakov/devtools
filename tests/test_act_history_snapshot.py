@@ -25,6 +25,7 @@ from governance.act_envelope import DeliveredRequest
 from governance.act_forge_http import TokenTransport
 from governance.act_history import load_history, pr_for_merge
 from governance.act_history_snapshot import (
+    DeadlineExceeded,
     Scope,
     SnapshotHistory,
     git_auth_env,
@@ -233,14 +234,33 @@ def server(product: Product) -> Iterator[GitServer]:
     srv.httpd.server_close()
 
 
-def _snapshot(tmp_path: Path, server: GitServer, forge: Forge) -> SnapshotHistory:
+def _snapshot(
+    tmp_path: Path, server: GitServer, forge: Any, clock: Clock | None = None
+) -> SnapshotHistory:
+    """Снимок через сервер; с `clock` — поддельные часы и срок 100.0."""
     home = tmp_path / "home"
     home.mkdir()
     git_dir = open_snapshot(
         home, SLUG, [MASTER], TOKEN, git_base=server.base, deadline=_soon()
     )
     transport = TokenTransport(TOKEN, api_base=API, opener=forge)
-    return SnapshotHistory(git_dir, transport, TOKEN, git_base=server.base)
+    if clock is None:
+        return SnapshotHistory(
+            git_dir, transport, TOKEN, git_base=server.base, deadline=_soon()
+        )
+    return SnapshotHistory(
+        git_dir, transport, TOKEN, git_base=server.base, deadline=100.0, clock=clock
+    )
+
+
+class Clock:
+    """Поддельные часы: `deadline=100.0`; `now` двигает тест или подделка форджи."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
 
 
 def _soon(seconds: float = 60.0) -> float:
@@ -315,7 +335,9 @@ def test_direct_commit_is_not_delivery(
 
 def test_unlisted_method_raises(tmp_path: Path) -> None:
     transport = TokenTransport(TOKEN, api_base=API, opener=Forge({}))
-    snap = SnapshotHistory(tmp_path, transport, TOKEN, git_base="http://x")
+    snap = SnapshotHistory(
+        tmp_path, transport, TOKEN, git_base="http://x", deadline=_soon()
+    )
     public = {n for n in dir(snap) if not n.startswith("_")}
     assert public == ALLOWED
     for name in ("merge", "pr_body_fact", "snapshot_open", "show_file_for_carry"):
@@ -458,7 +480,9 @@ def test_fetch_respects_deadline(
     home.mkdir()
     started = time.monotonic()
     try:
-        with pytest.raises(OSError, match="git: deadline passed") as failed:
+        with pytest.raises(
+            (DeadlineExceeded, OSError), match="git: deadline passed"
+        ) as failed:
             open_snapshot(
                 home,
                 SLUG,
@@ -469,7 +493,7 @@ def test_fetch_respects_deadline(
             )
     finally:
         silent.close()
-    assert failed.type is TimeoutError
+    assert failed.type is DeadlineExceeded
     assert time.monotonic() - started < 10
     assert not (home / "repo.git").exists()
     assert len(pids) == 3  # init, config, fetch
@@ -486,7 +510,7 @@ def test_expired_deadline_spawns_no_git(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _no_spawn(monkeypatch)
-    with pytest.raises(TimeoutError, match="git: deadline passed"):
+    with pytest.raises(DeadlineExceeded, match="git: deadline passed"):
         open_snapshot(
             tmp_path, SLUG, [MASTER], TOKEN, git_base="http://x", deadline=_soon(-1)
         )
@@ -542,7 +566,9 @@ def test_fetch_failure_is_os_error(
 
 def _rest_snap(tmp_path: Path, forge: Forge) -> SnapshotHistory:
     transport = TokenTransport(TOKEN, api_base=API, opener=forge)
-    return SnapshotHistory(tmp_path, transport, TOKEN, git_base="http://x")
+    return SnapshotHistory(
+        tmp_path, transport, TOKEN, git_base="http://x", deadline=_soon()
+    )
 
 
 @needs_steward
@@ -628,6 +654,87 @@ def test_fetch_branch_refuses_bad_ref(
 ) -> None:
     _no_spawn(monkeypatch)
     transport = TokenTransport(TOKEN, api_base=API, opener=Forge({}))
-    snap = SnapshotHistory(tmp_path, transport, TOKEN, git_base="http://x")
+    snap = SnapshotHistory(
+        tmp_path, transport, TOKEN, git_base="http://x", deadline=_soon()
+    )
     assert snap.fetch_branch("", "refs/heads/a..b") is False
     assert snap.fetch_branch("", "--upload-pack=x") is False
+
+
+# --- срок: DeadlineExceeded выходит из `load_history`, а не становится Unavailable ---
+
+
+class SlowForge(Forge):
+    """Ответ по пути `slow` «идёт» за срок: часы уходят за него, транспорт падает
+    таймаутом (то, что `fetch_response` превращает в `OSError`)."""
+
+    def __init__(self, answers: dict, clock: Clock, slow: str) -> None:
+        super().__init__(answers)
+        self.clock, self.slow, self.timeouts = clock, slow, []
+
+    def __call__(self, req: Any, timeout: float = 0) -> _Answer:
+        self.timeouts.append(timeout)
+        if req.full_url.removeprefix(API) == self.slow:
+            self.clock.now = 101.0
+            raise TimeoutError("timed out")
+        return super().__call__(req, timeout)
+
+
+def test_deadline_propagates_from_git_path(
+    tmp_path: Path, product: Product, server: GitServer
+) -> None:
+    product.publish({})
+    clock = Clock()
+    snap = _snapshot(tmp_path, server, Forge({}), clock)
+    clock.now = 100.0
+    with pytest.raises(DeadlineExceeded, match="git: deadline passed"):
+        load_history(snap, SCOPE, MASTER)
+
+
+@needs_steward
+@pytest.mark.parametrize("slow", ["pulls", "head"], ids=["pr_for_merge", "pr_head"])
+def test_deadline_propagates_from_forge_path(
+    tmp_path: Path, product: Product, server: GitServer, slow: str
+) -> None:
+    """Сбой транспорта после срока — сам срок: `pr_for_merge` и `_pr_head` его не
+    глотают (`DeadlineExceeded` вне `OPS_FAILURES`)."""
+    head = product.branch("cand")
+    m1 = product.merge("cand")
+    product.publish({7: head})
+    clock = Clock()
+    path = (
+        f"repos/{SLUG}/commits/{m1}/pulls"
+        if slow == "pulls"
+        else f"repos/{SLUG}/pulls/7"
+    )
+    forge = SlowForge(_forge(m1, head).answers, clock, path)
+    snap = _snapshot(tmp_path, server, forge, clock)
+    with pytest.raises(DeadlineExceeded, match="forge: deadline passed"):
+        load_history(snap, SCOPE, MASTER)
+
+
+@needs_steward
+def test_rest_timeout_capped_by_deadline(tmp_path: Path) -> None:
+    clock = Clock()
+    clock.now = 95.0
+    forge = SlowForge({f"repos/{SLUG}/pulls/7": (200, {"head": None})}, clock, "-")
+    transport = TokenTransport(TOKEN, api_base=API, opener=forge, timeout=60.0)
+    snap = SnapshotHistory(
+        tmp_path, transport, TOKEN, git_base="http://x", deadline=100.0, clock=clock
+    )
+    assert snap.pr_facts(SLUG, 7) == {"headRefOid": None}
+    assert forge.timeouts == [5.0]
+    assert transport._timeout == 60.0  # восстановлен после вызова
+
+
+def test_rest_past_deadline_sends_nothing(tmp_path: Path) -> None:
+    clock = Clock()
+    clock.now = 100.0
+    forge = Forge({})
+    transport = TokenTransport(TOKEN, api_base=API, opener=forge)
+    snap = SnapshotHistory(
+        tmp_path, transport, TOKEN, git_base="http://x", deadline=100.0, clock=clock
+    )
+    with pytest.raises(DeadlineExceeded, match="forge: deadline passed"):
+        snap.pr_facts(SLUG, 7)
+    assert forge.paths == []

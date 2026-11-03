@@ -10,7 +10,10 @@ git auth: the header travels only in the git process environment (`GIT_CONFIG_*`
 file; Bearer stays REST-only. git runs with an explicit minimal environment (no
 system/global config, no prompts, http(s) only, no redirects) and every call honours
 an absolute `time.monotonic()` deadline: on expiry the whole git process group is
-killed and `TimeoutError` is raised.
+killed and `DeadlineExceeded` is raised. REST calls honour the same deadline (each
+call's transport timeout is capped by the time left). `DeadlineExceeded` is not in
+`act_time.OPS_FAILURES`, so `act_history` never turns it into `Unavailable`: it
+propagates out of `load_history` to the caller (`unset: deadline`).
 
 Proxy and CA variables (`HTTPS_PROXY`, `SSL_CERT_FILE`, `GIT_SSL_CAINFO`, …) are
 deliberately not passed to git, matching `TokenTransport`, which ignores proxies:
@@ -28,7 +31,7 @@ import shutil
 import signal
 import subprocess
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -46,6 +49,13 @@ NAME_KEY = "df.fullname"
 _FETCH = ("fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=")
 #: Not secret, so argv: the auth header must not follow a redirect to another host.
 _NO_REDIRECTS = ("-c", "http.followRedirects=false")
+
+
+Clock = Callable[[], float]
+
+
+class DeadlineExceeded(Exception):
+    """The absolute deadline passed (deliberately outside `OPS_FAILURES`)."""
 
 
 @dataclass(frozen=True)
@@ -80,12 +90,11 @@ def _env(home: Path, token: str | None) -> dict[str, str]:
     return env | git_auth_env(token) if token is not None else env
 
 
-def _timeout(deadline: float | None) -> float | None:
-    if deadline is None:
-        return None
-    left = deadline - time.monotonic()
+def _timeout(deadline: float, clock: Clock, what: str) -> float:
+    """Seconds left before `deadline`; none left — `DeadlineExceeded`."""
+    left = deadline - clock()
     if left <= 0:
-        raise TimeoutError("git: deadline passed")
+        raise DeadlineExceeded(f"{what}: deadline passed")
     return left
 
 
@@ -93,12 +102,13 @@ def _git(
     git_dir: Path,
     *args: str,
     home: Path,
-    deadline: float | None,
+    deadline: float,
+    clock: Clock,
     token: str | None = None,
     text: bool = True,
 ) -> subprocess.CompletedProcess:
     """One git call over `git_dir`; the token, if any, only via environment."""
-    timeout = _timeout(deadline)
+    timeout = _timeout(deadline, clock, "git")
     proc = subprocess.Popen(
         ["git", f"--git-dir={git_dir}", *_NO_REDIRECTS, *args],
         stdin=subprocess.DEVNULL,
@@ -115,7 +125,7 @@ def _git(
             os.killpg(proc.pid, signal.SIGKILL)
         proc.communicate()
         if isinstance(exc, subprocess.TimeoutExpired):
-            raise TimeoutError("git: deadline passed") from None
+            raise DeadlineExceeded("git: deadline passed") from None
         raise
     return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
 
@@ -134,13 +144,15 @@ def open_snapshot(
     *,
     git_base: str,
     deadline: float,
+    clock: Clock = time.monotonic,
 ) -> Path:
     """Fetch `refs` (each `+ref:ref`, no `--filter`) of `full_name` into a new bare
     repository `home/repo.git` and return its path; the caller removes it.
 
     `home` is an existing caller-owned directory and git's `HOME`; `deadline` is an
-    absolute `time.monotonic()` instant. Invalid input — `ValueError`; git failure —
-    `OSError`; deadline — `TimeoutError`. On any failure the repository is removed.
+    absolute `clock()` (default `time.monotonic`) instant. Invalid input —
+    `ValueError`; git failure — `OSError`; deadline — `DeadlineExceeded`. On any
+    failure the repository is removed.
     """
     if not _FULL_NAME.fullmatch(full_name):
         raise ValueError(f"snapshot: full_name {full_name!r} is not owner/repo")
@@ -159,7 +171,9 @@ def open_snapshot(
                 token,
             ),
         ):
-            done = _git(git_dir, *args, home=home, deadline=deadline, token=secret)
+            done = _git(
+                git_dir, *args, home=home, deadline=deadline, clock=clock, token=secret
+            )
             _require(done, what)
     except BaseException:
         shutil.rmtree(git_dir, ignore_errors=True)
@@ -179,8 +193,9 @@ class SnapshotHistory:
     """`Ops` of `act_history` over a snapshot from `open_snapshot`.
 
     git methods read `git_dir` (`target_dir` arguments are ignored); forge methods
-    read REST through `transport`. `deadline` (absolute `time.monotonic()`, `None` —
-    none) bounds every git call. Methods not defined here do not exist.
+    read REST through `transport`. `deadline` (absolute `clock()` instant, default
+    clock `time.monotonic`) bounds every git and REST call: past it every method
+    raises `DeadlineExceeded`. Methods not defined here do not exist.
     """
 
     def __init__(
@@ -190,10 +205,11 @@ class SnapshotHistory:
         token: str,
         *,
         git_base: str,
-        deadline: float | None = None,
+        deadline: float,
+        clock: Clock = time.monotonic,
     ) -> None:
         self._git_dir, self._transport, self._token = git_dir, transport, token
-        self._git_base, self._deadline = git_base, deadline
+        self._git_base, self._deadline, self._clock = git_base, deadline, clock
 
     def __repr__(self) -> str:
         return f"SnapshotHistory({self._git_dir!s})"
@@ -206,6 +222,7 @@ class SnapshotHistory:
             *args,
             home=self._git_dir.parent,
             deadline=self._deadline,
+            clock=self._clock,
             token=token,
             text=text,
         )
@@ -267,7 +284,17 @@ class SnapshotHistory:
     def _rest(self, repo_slug: str, tail: str) -> object:
         if not _FULL_NAME.fullmatch(repo_slug):
             raise ValueError(f"forge: repo_slug {repo_slug!r} is not owner/repo")
-        status, body = self._transport.get_json(f"repos/{repo_slug}/{tail}")
+        left = _timeout(self._deadline, self._clock, "forge")
+        transport, saved = self._transport, self._transport._timeout
+        transport._timeout = min(saved, left)  # each request of this call
+        try:
+            status, body = transport.get_json(f"repos/{repo_slug}/{tail}")
+        except OSError:
+            # a transport failure past the deadline is the deadline, not a fact
+            _timeout(self._deadline, self._clock, "forge")
+            raise
+        finally:
+            transport._timeout = saved
         if status != 200:
             raise OSError(f"forge: HTTP {status}: repos/{repo_slug}/{tail}")
         return body

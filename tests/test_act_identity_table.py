@@ -464,6 +464,13 @@ JUDGMENT = {
             "\"forge: repo_slug '../x' is not owner/repo\"",
         ),
         r(
+            "deadline_during",
+            "act_history_snapshot.SnapshotHistory._rest",
+            "except OSError",
+            f"{HS}::test_deadline_propagates_from_forge_path",
+            '"forge: deadline passed"',
+        ),
+        r(
             "status",
             "act_history_snapshot.SnapshotHistory._rest",
             "if status != 200",
