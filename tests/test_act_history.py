@@ -6,12 +6,8 @@ import ast
 import dataclasses
 from pathlib import Path
 
-import pytest
-
-pytest.importorskip("steward", reason="steward — без группы governance")
-
-from governance import act_history, act_status  # noqa: E402
-from governance.run_state import RunState  # noqa: E402
+from governance import act_history, act_status
+from governance.run_state import RunState
 
 ROOT = Path(__file__).resolve().parent.parent
 MOVED = ("load_history", "_event", "_request_event", "pr_for_merge", "_pr_head")

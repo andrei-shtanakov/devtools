@@ -4,6 +4,7 @@ dumb-HTTP git-сервер на 127.0.0.1 и replay REST-ответов форд
 from __future__ import annotations
 
 import base64
+import importlib.util
 import io
 import json
 import os
@@ -20,21 +21,36 @@ from typing import Any
 
 import pytest
 
-pytest.importorskip("steward", reason="steward — без группы governance")
-
-from governance.act_envelope import DeliveredRequest  # noqa: E402
-from governance.act_forge_http import TokenTransport  # noqa: E402
-from governance.act_history import load_history  # noqa: E402
-from governance.act_history_snapshot import (  # noqa: E402
+from governance.act_envelope import DeliveredRequest
+from governance.act_forge_http import TokenTransport
+from governance.act_history import load_history
+from governance.act_history_snapshot import (
     Scope,
     SnapshotHistory,
     git_auth_env,
     open_snapshot,
 )
-from governance.act_request import manifest_path, render_manifest  # noqa: E402
-from governance.act_time import Unavailable  # noqa: E402
-from tests.test_act_status import H_REQ, SLUG, WS, request  # noqa: E402
+from governance.act_projection import self_hash_v
+from governance.act_request import (
+    NodeEntry,
+    NodeRequest,
+    PolicyPin,
+    manifest_path,
+    render_manifest,
+)
+from governance.act_time import Unavailable
 
+#: Чтение REST (`TokenTransport.get_json`) тянет steward; git-строки — нет и
+#: идут и в CI без группы governance.
+needs_steward = pytest.mark.skipif(
+    importlib.util.find_spec("steward") is None,
+    reason="steward — без группы governance",
+)
+WS, SLUG = "ws-7", "owner/p"
+H_REQ = self_hash_v("---\nspec_stage: requirements\n---\nтело\n", "review/v1")
+PIN = PolicyPin(
+    "owner/approval-policy", "main", "p" * 40, {"policy/modes.yaml": "0" * 64}
+)
 TOKEN = "ghs_SECRET-token-123"
 BASIC = "Basic " + base64.b64encode(f"x-access-token:{TOKEN}".encode()).decode()
 B64 = BASIC.removeprefix("Basic ")
@@ -77,7 +93,15 @@ class Product:
         (self.work / "README.md").write_text("x\n")
         _git(self.work, "add", "-A")
         _git(self.work, "commit", "-qm", "init")
-        self.req = request("approve-1-0-1", {"requirements": (H_REQ, 1)})
+        entry = NodeEntry("spec/10-requirements.md", H_REQ, 1)
+        self.req = NodeRequest(
+            "approve-1-0-1",
+            WS,
+            SLUG,
+            {"requirements": entry},
+            {"requirements": {}},
+            PIN,
+        )
         self.path = manifest_path(WS, self.req.request_id)
 
     def branch(self, name: str) -> str:
@@ -227,6 +251,7 @@ SCOPE = Scope(WS, SLUG, "/nonexistent-target-dir")
 # --- история через снимок ----------------------------------------------------------
 
 
+@needs_steward
 def test_production_load_history_sees_delivered_request(
     tmp_path: Path, product: Product, server: GitServer
 ) -> None:
@@ -239,6 +264,7 @@ def test_production_load_history_sees_delivered_request(
     assert forge.paths == [f"repos/{SLUG}/commits/{m1}/pulls", f"repos/{SLUG}/pulls/7"]
 
 
+@needs_steward
 def test_squash_delivery_head_fetched_from_pull_ref(
     tmp_path: Path, product: Product, server: GitServer
 ) -> None:
@@ -252,6 +278,7 @@ def test_squash_delivery_head_fetched_from_pull_ref(
     assert snap.rev_parse("", "refs/pull/7/head") == head
 
 
+@needs_steward
 def test_squash_head_without_pull_ref_unavailable(
     tmp_path: Path, product: Product, server: GitServer
 ) -> None:
@@ -262,6 +289,7 @@ def test_squash_head_without_pull_ref_unavailable(
     assert isinstance(got, Unavailable) and "не догружена" in got.reason
 
 
+@needs_steward
 @pytest.mark.parametrize("pulls", ["none", "open"])
 def test_direct_commit_is_not_delivery(
     tmp_path: Path, product: Product, server: GitServer, pulls: str
@@ -312,6 +340,7 @@ def test_git_auth_env_exact() -> None:
     }
 
 
+@needs_steward
 def test_server_accepts_basic_rejects_bearer(
     tmp_path: Path, product: Product, server: GitServer
 ) -> None:
@@ -341,6 +370,7 @@ def test_server_accepts_basic_rejects_bearer(
     assert len([p for p, _a in server.log if "info/refs" in p]) == 2  # open + pull ref
 
 
+@needs_steward
 def test_git_argv_and_config_have_no_token(
     tmp_path: Path,
     product: Product,
@@ -511,6 +541,7 @@ def _rest_snap(tmp_path: Path, forge: Forge) -> SnapshotHistory:
     return SnapshotHistory(tmp_path, transport, TOKEN, git_base="http://x")
 
 
+@needs_steward
 def test_prs_containing_commit_normalized_from_rest(tmp_path: Path) -> None:
     sha = "a" * 40
     forge = Forge(
@@ -537,6 +568,7 @@ def test_prs_containing_commit_normalized_from_rest(tmp_path: Path) -> None:
     assert snap.pr_facts(SLUG, 2) == {"headRefOid": None}
 
 
+@needs_steward
 @pytest.mark.parametrize(
     "body", [{"message": "x"}, [{"number": "7"}], [{"number": True}], ["x"]]
 )
@@ -551,6 +583,7 @@ def test_prs_containing_commit_shape_refused(tmp_path: Path, body: object) -> No
         snap.prs_containing_commit(SLUG, sha)
 
 
+@needs_steward
 def test_rest_non_200_is_os_error(tmp_path: Path) -> None:
     snap = _rest_snap(tmp_path, Forge({f"repos/{SLUG}/pulls/7": (404, {})}))
     with pytest.raises(OSError, match="forge: HTTP 404: repos/owner/p/pulls/7"):
