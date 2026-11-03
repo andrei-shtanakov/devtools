@@ -50,6 +50,7 @@ COMPARE_FILE_CAP = 300
 _CANDIDATE_KEY = "APPROVAL_CANDIDATE_TEMPLATE"
 _FINALIZE_KEY = "APPROVAL_FINALIZE_SUFFIX"
 _STOP_KEY = "APPROVAL_STOP_TEMPLATE"
+_STOP_PLACEHOLDERS = ("{ws_id}", "{node}", "{generation}")
 _SHA = re.compile(r"[0-9a-f]{40}", re.ASCII)
 _PLACEHOLDER = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
 _ADJACENT_STARS = re.compile(r"\*[-._]\*")
@@ -93,7 +94,8 @@ def patterns_path(layout: Layout, snapshot: Snapshot) -> Path:
 
 def read_patterns(layout: Layout, snapshot: Snapshot) -> dict[str, str]:
     """The three keys of `patterns.env`; anything else than a whole file with
-    both keys is `patterns_unavailable`."""
+    all three keys (and a stop template of the known shape) is
+    `patterns_unavailable`."""
     try:
         text = read_optional(patterns_path(layout, snapshot))
     except ConfigError:
@@ -126,6 +128,9 @@ def parse_patterns(text: str) -> dict[str, str]:
         if len(values) != 1 or not values[0]:
             raise Refused("patterns_unavailable")
         found[key] = values[0]
+    placeholders = _PLACEHOLDER.findall(found[_STOP_KEY])
+    if sorted(placeholders) != sorted(_STOP_PLACEHOLDERS):
+        raise Refused("patterns_unavailable")
     return found
 
 
@@ -269,15 +274,17 @@ def _check_head_repo(oc: OpContext, pr: Mapping[str, object]) -> None:
 
 
 def _change_of(item: object) -> Change:
-    """The change a file entry of the compare describes. A missing status is
-    kept empty (it routes nothing as a stop); a rename keeps its old path,
-    or a rename out of `approvals/stops/` would escape the stop check."""
+    """The change a file entry of the compare describes (`status` is required);
+    a rename keeps its old path, or a rename out of `approvals/stops/` would
+    escape the stop check."""
     if not isinstance(item, dict) or not isinstance(item.get("filename"), str):
         raise GitHubUnavailable("files: unexpected item")
-    status = item.get("status", "")
+    status = item.get("status")
     previous = item.get("previous_filename")
-    if not isinstance(status, str) or not (
-        previous is None or isinstance(previous, str)
+    if (
+        not isinstance(status, str)
+        or not status
+        or not (previous is None or isinstance(previous, str))
     ):
         raise GitHubUnavailable("files: unexpected item")
     return (status, item["filename"], previous)

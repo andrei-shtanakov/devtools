@@ -34,12 +34,3 @@ approval_globs() {
     _glob=$(approval_template_glob "$_template")
     printf '%s\n%s\n' "$_glob" "$_glob$_suffix"
 }
-
-# approval_stop_glob <patterns-file> — глоб формы ветки stop-PR (одна строка);
-# тот же двухшаговый вывод, что у candidate. Вызывать как
-# `glob=$(approval_stop_glob …) || exit $?`.
-approval_stop_glob() {
-    _template=$(ssot_key "$1" APPROVAL_STOP_TEMPLATE "SSOT имён веток одобрения") ||
-        exit $?
-    approval_template_glob "$_template"
-}
