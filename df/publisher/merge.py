@@ -81,8 +81,9 @@ PATTERNS_RELATIVE = ("contracts", "approval-branches", "v1", "patterns.env")
 
 def patterns_path(layout: Layout, snapshot: Snapshot) -> Path:
     """`patterns.env` in the active release's source tree (`patterns_unavailable`
-    if no release is active). Never relative to this module: the publisher
-    runs from the admin tree, which holds `df/` only."""
+    if no release is active). Never relative to this module: a release is
+    judged by its own copy of the contract, not by the copy the admin tree
+    happens to carry (since 2b it holds `contracts/` too, for the precheck)."""
     if snapshot.release_id is None:
         raise Refused("patterns_unavailable")
     try:
