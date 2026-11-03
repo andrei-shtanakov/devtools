@@ -596,7 +596,8 @@ sdist), всё сверено с `uv.lock` и покрыто `admin_digest`. И�
   `store.read_phases(res) -> dict[str, Mapping]`,
   `store.own_pr(layout, repository_id: int, pr: int, request_key: str) -> bool` (`False` —
   чужое владение), `store.release_pr(...)`;
-  `def recover_merge(oc, auth, req, intent, phases) -> Response` (таблица решения 8);
+  `def recover_merge(run: MergeRun, intent, phases) -> Response` (таблица решения 8;
+  `MergeRun` несёт `oc`, `auth`, токен чтения, `req`, резервирование и шаблоны);
   `pr_changes(oc, token, tip, head_sha) -> tuple[Change, ...]` (вместо `pr_paths`).
 
 Порядок (без фаз):

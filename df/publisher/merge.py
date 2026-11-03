@@ -76,8 +76,12 @@ ATTESTATION_MARKER = (
 MERGE_PERMISSIONS = {"contents": "write", "pull_requests": "write"}
 #: No `df-trust` binding before stage 3 (spec 5.5, rev 10).
 TRUST_ROOT: Mapping[str, str] = {"unavailable": "no_binding"}
-#: HTTP answers of the `PUT` that settle the one attempt (decision 8).
-DEFINITE_PUT = frozenset({200, 405, 409, 422})
+#: HTTP answers of the `PUT` that settle the one attempt (decision 8): a 4xx
+#: was not executed, so the only `PUT` of the request will not merge.
+DEFINITE_PUT = frozenset({200, 401, 403, 404, 405, 409, 422})
+#: Of those, the ones that mean "not merged" (with the PR still open).
+_NOT_MERGEABLE = frozenset({405, 422})
+_PUT_REFUSED = frozenset({401, 403, 404})
 #: Base tip moves the final read follows before it gives up (`base_unstable`).
 MAX_RECHECKS = 5
 #: What a `done` found by observation (not by the `PUT`'s own 200) rests on.
@@ -484,7 +488,7 @@ def recover_merge(
     _check_intent(run, intent)
     found: Phases = dict(phases)
     if "armed" in found:
-        return _settle(run, found)
+        return _settle(run, _facts_of(intent), found)
     if "put_answer" in found:
         raise OSError("merge: put_answer without armed")
     if "attested" in found:
@@ -528,12 +532,21 @@ def _verified(exc: Refused | str, phases: Phases) -> Refused:
     )
 
 
+#: Facts a moved base tip changes: they are checked again, not compared.
+_TIP_FACTS = ("base_tip", "changes_digest")
+
+
+def _stable(facts: Mapping[str, object]) -> dict[str, object]:
+    return {k: v for k, v in facts.items() if k not in _TIP_FACTS}
+
+
 def _resume(run: MergeRun, intent: Mapping[str, object], phases: Phases) -> Response:
-    """Only the intent: the PR must still be what it was; then the precheck
-    again and the attestation."""
+    """Only the intent: the PR must still be what it was (a moved base tip
+    is a recheck, spec 5.4: routing and the precheck run on the current
+    compare); then the attestation."""
     try:
         pr, facts = _read_facts(run.oc, run.read, run.number, run.head_sha)
-        if _facts_record(facts) != _facts_of(intent):
+        if _stable(_facts_record(facts)) != _stable(_facts_of(intent)):
             raise Refused("pr_facts_changed")
         _check_kind(route(facts.head_ref, facts.changes, run.patterns))
         if store.pr_busy(run.oc.layout, run.repository_id, run.number, run.res.key):
@@ -638,7 +651,7 @@ def _arm(run: MergeRun, intent: Mapping[str, object], phases: Phases) -> Respons
     status = _put(run, token)
     if status is not None:
         _write(run, phases, "put_answer", {"status": status})
-    return _settle(run, phases)
+    return _settle(run, _facts_of(intent), phases)
 
 
 def _prepare(run: MergeRun, intent: Mapping[str, object], phases: Phases) -> str:
@@ -733,11 +746,13 @@ def _put(run: MergeRun, token: str) -> int | None:
 # --- the outcome --------------------------------------------------------------
 
 
-def _settle(run: MergeRun, phases: Phases) -> Response:
+def _settle(run: MergeRun, facts: Mapping[str, object], phases: Phases) -> Response:
     """After `armed`: the outcome by `put_answer` and the PR as it is. A PR
-    merged by the App's bot at `head_sha` is `done`; open after 405/422 is a
-    verified `not_mergeable`; 409 a verified `head_changed`; anything else
-    `unknown: merge_not_confirmed` (no timer, no second `PUT`)."""
+    merged by the App's bot at `head_sha` into the checked base is `done`;
+    open after 405/422 is a verified `not_mergeable`, after 401/403/404 a
+    verified `put_refused: <status>`; 409 a verified `head_changed`;
+    anything else `unknown: merge_not_confirmed` (no timer, no second
+    `PUT`)."""
     answer = phases.get("put_answer")
     status = None if answer is None else answer.get("status")
     if answer is not None and status not in DEFINITE_PUT:
@@ -748,17 +763,22 @@ def _settle(run: MergeRun, phases: Phases) -> Response:
         pr = _get_pr(run)
     except (GitHubUnavailable, GitHubRefused):
         return _unknown("merge_not_confirmed", phases)
-    merged = _merged_by_app(run, pr)
+    merged = _merged_by_app(run, pr, facts)
     if merged is not None:
         return _done(run, phases, merged, reconciled=status != 200)
-    if status in (405, 422) and pr.get("state") == "open":
+    if pr.get("state") == "open" and status in _NOT_MERGEABLE:
         raise _verified("not_mergeable", phases)
+    if pr.get("state") == "open" and status in _PUT_REFUSED:
+        raise _verified(f"put_refused: {status}", phases)
     return _unknown("merge_not_confirmed", phases)
 
 
-def _merged_by_app(run: MergeRun, pr: Mapping[str, object]) -> str | None:
+def _merged_by_app(
+    run: MergeRun, pr: Mapping[str, object], facts: Mapping[str, object]
+) -> str | None:
     """The merge commit if the PR is merged by the App's bot with `head_sha`
-    into the product."""
+    into the product's checked base branch (a retarget between the final
+    read and the `PUT` is "merged otherwise")."""
     head, base = pr.get("head"), pr.get("base")
     repo = base.get("repo") if isinstance(base, dict) else None
     sha = pr.get("merge_commit_sha")
@@ -769,6 +789,8 @@ def _merged_by_app(run: MergeRun, pr: Mapping[str, object]) -> str | None:
         and head.get("sha") == run.head_sha
         and isinstance(repo, dict)
         and repo.get("id") == run.repository_id
+        and isinstance(base, dict)
+        and base.get("ref") == facts["base_ref"]
         and isinstance(sha, str)
         and _SHA.fullmatch(sha) is not None
     )
@@ -824,15 +846,29 @@ def merge(ctx: Context) -> Response:
     try:
         return _decide(ctx)
     except ops.Answer as answer:
-        return answer.response
+        resp = answer.response
+        evidence = {**_state_evidence(ctx), **resp.evidence}
+        return Response(resp.outcome, resp.reason, resp.result, evidence)
     except GitHubUnavailable:
-        return Response("unknown", "github_unavailable")
+        return Response("unknown", "github_unavailable", evidence=_state_evidence(ctx))
     except GitHubRefused as exc:
         return Response("refused", ops.refusal_reason(exc))
     except Refused as exc:
         if exc.verified_not_done:
             raise
         return Response("refused", exc.reason, evidence=exc.evidence)
+
+
+def _state_evidence(ctx: Context) -> dict[str, object]:
+    """The evidence of the phases past the intent (spec 5.5), for an answer
+    that did not come with it; nothing before the intent or if the phases
+    cannot be read (the frame then judges by what is on disk)."""
+    if not ctx.intent_written:
+        return {}
+    try:
+        return _evidence(store.read_phases(ctx.reservation))
+    except (OSError, ValueError):
+        return {}
 
 
 def merge_op(ctx: Context) -> Response:

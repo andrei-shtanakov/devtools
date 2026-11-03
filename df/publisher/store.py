@@ -297,15 +297,16 @@ def _write_state(path: Path, text: str) -> None:
 
 
 def has_state(layout: Layout, key: str) -> bool:
-    """An intent, a phase, a result of the idempotency key or an ownership
-    naming it exists (`lstat` only for the files of the key; a link or a
-    damaged file counts, and so does a damaged ownership). Fails closed:
-    anything but "absent" (an unreadable directory, say) is `True`."""
+    """An intent, a phase or a result of the idempotency key exists (`lstat`
+    only; a link or a damaged file counts). Fails closed: anything but
+    "absent" (an unreadable directory, say) is `True`. Ownerships are not
+    scanned: a request owns a PR only past its intent, and another PR's
+    damaged ownership must not change unrelated answers."""
     base = layout.publisher_dir
     paths = (base / "intents" / f"{key}.json", base / "results" / f"{key}.json")
     if any(_present(p) for p in paths):
         return True
-    return _has_phase(base / "intents", key) or _owns_any(base / "owners", key)
+    return _has_phase(base / "intents", key)
 
 
 def _has_phase(intents: Path, key: str) -> bool:
@@ -316,22 +317,6 @@ def _has_phase(intents: Path, key: str) -> bool:
     except OSError:
         return True
     return any(name.startswith(f"{key}.") for name in names)
-
-
-def _owns_any(owners: Path, key: str) -> bool:
-    try:
-        names = [e.name for e in os.scandir(owners) if not _is_temp(e.name)]
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True
-    for name in names:
-        try:
-            if _owner_record(owners / name).get("request_key") == key:
-                return True
-        except (OSError, ValueError):
-            return True
-    return False
 
 
 def _present(path: Path) -> bool:
@@ -422,15 +407,19 @@ def rechecks(phases: Mapping[str, object]) -> list[str]:
 
 @dataclass(frozen=True)
 class Owner:
-    """One ownership file, as `doctor` lists it."""
+    """One ownership file, as `doctor` lists it. `damaged` names what is
+    wrong with the file itself (then only the ids of its name are known);
+    `phases_damaged`: the request's phase files cannot be read."""
 
-    repository_id: int
-    pr: int
-    request_key: str
+    repository_id: int | None
+    pr: int | None
+    request_key: str | None
     request_id: str | None
     last_phase: str | None
-    taken_at: str
+    taken_at: str | None
     final: bool
+    damaged: str | None = None
+    phases_damaged: bool = False
 
 
 def owner_path(layout: Layout, repository_id: int, pr: int) -> Path:
@@ -517,10 +506,15 @@ def release_pr(layout: Layout, repository_id: int, pr: int, request_key: str) ->
         _unlock(fd)
 
 
+_OWNER_NAME = re.compile(r"([1-9][0-9]{0,18})-([1-9][0-9]{0,18})\.json", re.ASCII)
+
+
 def owners(layout: Layout) -> list[Owner]:
-    """Every ownership file, with its request's id (from the intent), last
-    phase and whether the request has a final result. A damaged file is a
-    `ValueError`; an unreadable directory an `OSError`."""
+    """Every ownership file, one entry each, with its request's id (from the
+    intent), last phase and whether the request has a final result. A file
+    that is not an ownership record is an entry with `damaged` (its ids from
+    its name, if the name has them): one file never hides the others. An
+    unreadable directory is an `OSError`."""
     directory = layout.publisher_dir / "owners"
     try:
         names = sorted(e.name for e in os.scandir(directory) if not _is_temp(e.name))
@@ -530,15 +524,21 @@ def owners(layout: Layout) -> list[Owner]:
 
 
 def _owner_of(layout: Layout, path: Path) -> Owner:
-    record = _owner_record(path)
-    key = str(record["request_key"])
-    repository_id, pr = record.get("repository_id"), record.get("pr")
-    if type(repository_id) is not int or type(pr) is not int:
-        raise ValueError(f"{path}: not an owner record")
+    named = _OWNER_NAME.fullmatch(path.name)
+    repository_id = int(named.group(1)) if named else None
+    pr = int(named.group(2)) if named else None
     try:
-        phases = _phases_of(layout, key)
+        record = _owner_record(path)
+    except (OSError, ValueError) as exc:
+        return Owner(repository_id, pr, None, None, None, None, False, str(exc))
+    key = str(record["request_key"])
+    if (record.get("repository_id"), record.get("pr")) != (repository_id, pr):
+        why = f"{path}: record does not match its name"
+        return Owner(repository_id, pr, key, None, None, None, False, why)
+    try:
+        phases, broken = _phases_of(layout, key), False
     except OSError:
-        phases = {}
+        phases, broken = {}, True
     return Owner(
         repository_id,
         pr,
@@ -547,6 +547,7 @@ def _owner_of(layout: Layout, path: Path) -> Owner:
         last_phase(phases),
         str(record.get("taken_at")),
         _final(layout, key),
+        phases_damaged=broken,
     )
 
 

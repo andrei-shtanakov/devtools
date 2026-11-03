@@ -147,7 +147,7 @@ class MergeGitHub(FakeGitHub):
         if mode == "hold":
             self.held = data
             raise TimeoutError("held")
-        if mode in ("403", "405", "409", "422", "500"):
+        if mode in ("401", "403", "404", "405", "409", "422", "500"):
             return _reply({"message": mode}, int(mode))
         reply = self.execute(data)
         if mode == "lost_after":
@@ -1657,7 +1657,7 @@ def test_evidence_complete_and_recovered_from_phase(
 ) -> None:
     sgh.put_mode = "hold"
     first = run(world, capsys)
-    assert first.evidence["precheck"] == first.evidence["precheck"]
+    assert "precheck" in first.evidence
     sgh.release_held()
     resp = run(world, capsys)
     assert resp.outcome == "done"
@@ -1681,20 +1681,146 @@ def test_evidence_complete_and_recovered_from_phase(
     assert len(checker.requests) == 1  # metadata from the phase, not anew
 
 
-def test_has_state_sees_phases_and_owner(
+def test_has_state_sees_phases_not_ownerships(
     world: World, sgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
 ) -> None:
     sgh.put_mode = "hold"
     run(world, capsys)
     key = key_of(world)
     (world.lay.publisher_dir / "intents" / f"{key}.json").unlink()
+    assert store.has_state(world.lay, key)  # the phases alone
     for name in ("attest", "attested", "armed"):
         store.phase_path(world.lay, key, name).unlink()
-    assert store.has_state(world.lay, key)  # the ownership names it
-    store.owner_path(world.lay, 7, 12).unlink()
-    assert not store.has_state(world.lay, key)
+    assert owner_file(world) is not None
+    assert not store.has_state(world.lay, key)  # an ownership is not scanned
     store.owner_path(world.lay, 7, 12).write_text("{broken")
-    assert store.has_state(world.lay, key)  # a damaged ownership counts
+    assert not store.has_state(world.lay, key)
+
+
+def test_damaged_owner_of_another_pr_changes_nothing(
+    world: World, sgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Review M3: a damaged ownership of PR 99 neither turns a plain refusal
+    of `publish-review` into `unknown` nor stops a merge of PR 12."""
+    owners = world.lay.publisher_dir / "owners"
+    owners.mkdir(mode=0o700)
+    (owners / "7-99.json").write_text("{broken")
+    sgh.pr_state = "closed"
+    _, refused = world.run("publish-review", raw_of("publish-review"), capsys=capsys)
+    assert reason(refused) == ("refused", "pr_state")
+    sgh.pr_state = "open"
+    resp = run(world, capsys, request_id="req-00000002")
+    assert resp.outcome == "done", resp
+    assert (owners / "7-99.json").read_text() == "{broken"
+
+
+def test_damaged_owner_of_the_pr_keeps_it_busy(
+    world: World, sgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
+    owners = world.lay.publisher_dir / "owners"
+    owners.mkdir(mode=0o700)
+    (owners / "7-12.json").write_text("{broken")
+    assert reason(run(world, capsys)) == ("refused", "pr_busy")
+    assert sgh.puts == [] and world.files("intents") == []
+
+
+def test_retarget_after_final_read_merged_is_unknown(
+    world: World, sgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Review M1 (S2): the PR is retargeted between the final read and the
+    PUT, and the merge lands on the other base: "merged otherwise"."""
+
+    def retarget() -> None:
+        sgh.base_ref = "release"
+
+    sgh.before_put = retarget
+    resp = run(world, capsys)
+    assert reason(resp) == ("unknown", "merge_not_confirmed")
+    assert sgh.merged and len(sgh.puts) == 1
+    assert owner_file(world) is not None
+
+
+@pytest.mark.parametrize("status", ["401", "403", "404"])
+def test_put_4xx_open_is_verified_refusal(
+    world: World, sgh: MergeGitHub, capsys: pytest.CaptureFixture[str], status: str
+) -> None:
+    """Review M5: a definite negative answer to the one PUT (spec 5.4)."""
+    sgh.put_mode = status
+    resp = run(world, capsys)
+    assert reason(resp) == ("refused", f"put_refused: {status}")
+    assert phases(world)[-1] == "put_answer"
+    assert world.files("results") != [] and owner_file(world) is None
+    again = run(world, capsys)
+    assert again.evidence["replayed"] is True and len(sgh.puts) == 1
+
+
+def test_put_403_merged_otherwise_is_unknown(
+    world: World, sgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def human() -> None:
+        sgh.execute({"sha": SHA}, by={"login": "human", "type": "User"})
+
+    sgh.put_mode, sgh.before_put = "403", human
+    assert reason(run(world, capsys)) == ("unknown", "merge_not_confirmed")
+
+
+def test_resume_after_tip_move_rechecks(
+    world: World,
+    sgh: MergeGitHub,
+    checker: FakePrecheck,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review M6: only the intent on disk, the base tip moved: a recheck on
+    the current compare, not `pr_facts_changed`."""
+    crash_at(monkeypatch, f"{key_of(world)}.json")  # the intent itself
+    crashes(world, capsys)
+    assert phases(world) == [] and world.files("intents") != []
+    sgh.tip = TIP_2
+    resp = run(world, capsys)
+    assert resp.outcome == "done", resp
+    assert checker.requests[-1]["base_tip"] == TIP_2
+    assert resp.evidence["precheck"]["base_tip"] == TIP_2  # type: ignore[index]
+
+
+def test_resume_after_retarget_is_refused(
+    world: World,
+    sgh: MergeGitHub,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    crash_at(monkeypatch, f"{key_of(world)}.json")
+    crashes(world, capsys)
+    sgh.base_ref = "release"
+    resp = run(world, capsys)
+    assert reason(resp) == ("refused", "pr_facts_changed")
+    assert world.files("results") != [] and sgh.puts == []
+
+
+def test_unknown_past_intent_carries_evidence(
+    world: World,
+    sgh: MergeGitHub,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review M7: GitHub unavailable at the final read (past `attested`):
+    the `unknown` names the kind, the precheck and the attestation."""
+    real = sgh.route
+    refs: list[int] = []
+
+    def route(method: str, path: str, *rest: object) -> Reply:
+        if "/git/ref/heads/" in path:
+            refs.append(1)
+            if len(refs) == 2:
+                return 503, {}, b""
+        return real(method, path, *rest)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(sgh, "route", route)
+    resp = run(world, capsys)
+    assert reason(resp) == ("unknown", "github_unavailable")
+    assert resp.evidence["kind"] == "stop"
+    assert resp.evidence["attestation_review_id"] == 100
+    assert resp.evidence["precheck"]["base_tip"] == TIP  # type: ignore[index]
 
 
 def test_doctor_lists_unresolved_owners(
@@ -1720,6 +1846,19 @@ def test_doctor_damaged_owner_is_broken(world: World) -> None:
     ctx = doctor._Level2(world.snap, world.lay, True, product=7)
     check = doctor._run("publisher.owners", doctor._owners, ctx)
     assert check.status == doctor.BROKEN
+    assert doctor.DAMAGED_OWNERS in check.reason and "PR 12" in check.reason
+    other = doctor._Level2(world.snap, world.lay, True, product=8)
+    assert doctor._run("publisher.owners", doctor._owners, other).status == "ok"
+
+
+def test_doctor_damaged_phases_are_named(
+    world: World, sgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sgh.put_mode = "hold"
+    run(world, capsys)
+    store.phase_path(world.lay, key_of(world), "armed").write_text("{bad")
+    text = doctor._owners(doctor._Level2(world.snap, world.lay, True, product=7))
+    assert "фазы нарушены" in text and "фаза intent" not in text
 
 
 def test_readme_documents_unknown_procedure() -> None:
