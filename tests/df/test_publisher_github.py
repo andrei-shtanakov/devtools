@@ -202,6 +202,19 @@ def test_token_scope_mismatch() -> None:
         _mint(_token_reply([9], PERMS), perms=PERMS)
 
 
+@pytest.mark.parametrize("value", ["", " ", "\t\n", None, 7], ids=repr)
+def test_token_empty_or_missing_is_unexpected(value: object) -> None:
+    """An empty or blank token is refused like a missing one."""
+    status, headers, raw = _token_reply([7], PERMS)
+    data = json.loads(raw)
+    if value is None:
+        del data["token"]
+    else:
+        data["token"] = value
+    with pytest.raises(GitHubUnavailable, match="access_tokens: unexpected answer"):
+        _mint((status, headers, json.dumps(data).encode()), perms=PERMS)
+
+
 def test_token_metadata_read_is_tolerated() -> None:
     plus = {**PERMS, "metadata": "read"}
     assert _mint(_token_reply([7], plus), perms=PERMS).permissions == plus

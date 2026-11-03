@@ -524,6 +524,34 @@ def test_token_absent_from_result_and_evidence(stand: Stand) -> None:
     }
 
 
+@pytest.mark.parametrize("value", ["", "   "], ids=["empty", "blank"])
+def test_empty_minted_token_is_a_named_answer(
+    stand: Stand, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """GitHub answering an empty token: a named answer before any request,
+    never a `ValueError` out of the masking in `finally`."""
+    real = stand.fake.mint
+
+    def empty(path: str, data: dict[str, object]) -> Reply:
+        status, headers, raw = real(path, data)
+        return status, headers, json.dumps({**json.loads(raw), "token": value}).encode()
+
+    monkeypatch.setattr(stand.fake, "mint", empty)
+    with pytest.raises(ops.Answer) as info:
+        stand.call()
+    assert (info.value.response.outcome, info.value.response.reason) == (
+        "unknown",
+        "github_unavailable",
+    )
+    assert not stand.capture.exists() and stand.fake.revoked == []
+
+
+@pytest.mark.parametrize("text", ["", "why", "a[token]b"])
+def test_mask_with_empty_token_is_a_no_op(text: str) -> None:
+    assert precheck._mask(text, "") == text
+    assert precheck._mask(f"x{TOKEN}y", TOKEN) == "x[token]y"
+
+
 def test_token_not_minted_for_bad_facts(stand: Stand) -> None:
     """Requirement 4: the publisher holds its own checks; nothing is asked
     for a PR of another repository, and no token is minted."""
