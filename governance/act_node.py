@@ -19,6 +19,7 @@ from governance import (
     act_facts,
     act_status,
     act_trust,
+    approval_branches,
     bundle_dag,
     bundle_inputs,
 )
@@ -1068,7 +1069,7 @@ def _stop_pr(
     только если ветки остановки на remote нет: ветку без PR (чужую либо от
     упавшего захода между push и созданием PR) механика не усыновляет, отказ
     называет выход."""
-    branch = f"stop/{state.ws_id}-{node}-g{gen}"
+    branch = approval_branches.stop_branch(state.ws_id, node, gen)
     found = af.search_pr(ops, state.repo_slug, branch, any_state=True)
     if found.outcome is Outcome.UNAVAILABLE:
         raise an._unresolved(f"поиск stop-PR на ветке {branch} — {found.detail}")

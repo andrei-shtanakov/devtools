@@ -54,6 +54,22 @@ BYPASS: dict[str, tuple[str, str]] = {
         "return cls(None, error=text)",
         "return cls(200, body={}, link=None)",
     ),
+    "act_history_snapshot._git:deadline_kill": (
+        'raise DeadlineExceeded("git: deadline passed") from None',
+        "return subprocess.CompletedProcess(proc.args, -9, None, None)",
+    ),
+    "act_history_snapshot.SnapshotHistory._rest:deadline_during": (
+        '_timeout(self._deadline, self._clock, "forge")\n            raise',
+        "raise",
+    ),
+    "act_history_snapshot.SnapshotHistory._rest:deadline_after": (
+        "self._left()  # an answer that completed past the deadline is no fact either",
+        "pass",
+    ),
+    "act_history_snapshot.SnapshotHistory.prs_containing_commit:shape": (
+        'raise ValueError(f"forge: commits/{sha[:12]}/pulls: unexpected shape")',
+        "body = []",
+    ),
     "act_forge_http.TokenTransport._refusal:read_only_method": (
         'return f"read-only transport: {method} {path}"',
         "return None",
@@ -282,7 +298,7 @@ BYPASS: dict[str, tuple[str, str]] = {
         "return self._memo[node]",
         "return next(iter(self._memo.values()))",
     ),
-    "act_status._request_event:request:no_pr": (
+    "act_history._request_event:request:no_pr": (
         "    if isinstance(pr, Unavailable):\n        return pr",
         "    if isinstance(pr, Unavailable):\n        return None",
     ),
@@ -299,7 +315,7 @@ BYPASS: dict[str, tuple[str, str]] = {
         'return Unavailable(f"gate-check --print-snapshot-digest: код {rc}: {digest}")',
         'return "review", str(out)',
     ),
-    "act_status.load_history:base_unread": (
+    "act_history.load_history:base_unread": (
         "    if rows is None:\n        return Unavailable",
         "    if rows is None:\n        rows = []\n    if False:\n        return Unavailable",
     ),
@@ -323,7 +339,7 @@ BYPASS: dict[str, tuple[str, str]] = {
         'return f"свежая база: {snapshot.reason}"',
         'snapshot = (state.base_ref or "master", ops)',
     ),
-    "act_status.pr_for_merge:exactly_one": (
+    "act_history.pr_for_merge:exactly_one": (
         "    if len(found) != 1:",
         "    if not found:\n        found = [7]\n    if False:",
     ),
@@ -534,11 +550,11 @@ BYPASS: dict[str, tuple[str, str]] = {
         "if traceless:",
     ),  # интеграционное ревью части B, I-3: узкий `except` (класс C1) — двойник с
     # `CalledProcessError` краснит утверждение, а не прогон (`_outcome`)
-    "act_status.pr_for_merge:ops_failure": (
+    "act_history.pr_for_merge:ops_failure": (
         "    except OPS_FAILURES as exc:",
         "    except RuntimeError as exc:",
     ),
-    "act_status._pr_head:ops_failure": (
+    "act_history._pr_head:ops_failure": (
         "    except OPS_FAILURES as exc:",
         "    except RuntimeError as exc:",
     ),

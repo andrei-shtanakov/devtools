@@ -40,9 +40,11 @@ class _Opener:
     def __init__(self, *answers: Any) -> None:
         self.answers = list(answers)
         self.reqs: list[Any] = []
+        self.timeouts: list[float] = []
 
     def __call__(self, req: Any, timeout: float = 0) -> Any:
         self.reqs.append(req)
+        self.timeouts.append(timeout)
         ans = self.answers.pop(0)
         if isinstance(ans, BaseException):
             raise ans
@@ -248,6 +250,45 @@ def test_get_json_next_outside_base() -> None:
     t, _ = _t(_Answer(b"[1]", link='<https://other/x>; rel="next"'))
     with pytest.raises(OSError, match="forge: Link next outside api_base"):
         t.get_json("x")
+
+
+def test_get_json_page_timeout_caps_each_page() -> None:
+    nxt = f'<{BASE}x?p=2>; rel="next"'
+    t, op = _t(_Answer(b"[1]", link=nxt), _Answer(b"[2]"))
+    cap = lambda: 99.0 if op.reqs else 5.0  # noqa: E731
+    assert t.get_json("x", page_timeout=cap) == (200, [1, 2])
+    assert op.timeouts == [5.0, 60.0]  # min(транспорт 60, срок) на каждой странице
+
+
+class _Stop(Exception):
+    pass
+
+
+def _stop() -> float:
+    raise _Stop("time")
+
+
+def test_get_json_page_timeout_signal_stops_before_page() -> None:
+    t, op = _t(_Answer(b"[1]"))
+    with pytest.raises(_Stop):
+        t.get_json("x", page_timeout=_stop)
+    assert op.reqs == []  # страница не запрошена
+
+
+def test_get_json_page_timeout_signal_in_body_is_delivery_failure() -> None:
+    """Срок перепроверяется перед каждой порцией тела: сигнал посреди страницы —
+    сбой доставки, следующая страница не запрашивается."""
+    nxt = f'<{BASE}x?p=2>; rel="next"'
+    t, op = _t(_Answer(b"[1]", link=nxt), _Answer(b"[2]"))
+    with pytest.raises(OSError, match="forge: _Stop: time"):
+        t.get_json("x", page_timeout=lambda: _stop() if op.reqs else 5.0)
+    assert len(op.reqs) == 1
+
+
+def test_get_json_without_page_timeout_uses_transport_timeout() -> None:
+    t, op = _t(_Answer(b"{}"))
+    t.get_json("x")
+    assert op.timeouts == [60.0]
 
 
 def test_get_json_empty_first_page_is_still_first() -> None:

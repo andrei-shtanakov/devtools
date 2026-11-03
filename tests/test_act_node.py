@@ -18,6 +18,7 @@ from governance import (  # noqa: E402
     act_node,
     act_status,
     act_trust,
+    approval_branches,
 )
 from governance import approval_ledger as al  # noqa: E402
 from governance import approve_node as an  # noqa: E402
@@ -1007,6 +1008,28 @@ def test_reopen_writes_stop_of_current_generation(world: World, stand: Stand) ->
         world.state, world.ops, an.bundle_dag.dag_for(None), "charter"
     )
     assert again is None  # действующее событие — уже остановка
+
+
+def test_act_node_stop_pr_uses_contract(
+    world: World, stand: Stand, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ветку stop-PR строит контракт, а не литерал в `act_node`: изменённый
+    шаблон меняет и имя ветки созданного PR."""
+    patterns = tmp_path / "patterns.env"
+    patterns.write_text(
+        approval_branches.PATTERNS_PATH.read_text().replace(
+            "APPROVAL_STOP_TEMPLATE=stop/", "APPROVAL_STOP_TEMPLATE=halt/"
+        )
+    )
+    monkeypatch.setattr(approval_branches, "PATTERNS_PATH", patterns)
+    _deliver(world, stand)
+    approve(world, "charter")
+    act_node.reopen(world.state, world.ops, an.bundle_dag.dag_for(None), "charter")
+    branches = [r["branch"] for r in world.forge.prs.values()]
+    expected = approval_branches.stop_branch(WS_ID, "charter", 1)
+    assert expected == f"halt/{WS_ID}-charter-g1"
+    assert expected in branches
+    assert not any(b.startswith("stop/") for b in branches)
 
 
 def _foreign_stop_pr(world: World, files: dict[str, str]) -> int:
