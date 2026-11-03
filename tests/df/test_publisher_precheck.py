@@ -345,6 +345,16 @@ def test_extra_key_refused(stand: Stand) -> None:
             {},
         ),
         ("pass", {}),
+        (PRINT, {"outcome": "refuse"}),  # a refusal without a reason
+        (PRINT, {"outcome": "unset"}),
+        (PRINT, {"reason": "why"}),  # allow carries no reason
+        (PRINT, {"version": "v" * 65}),
+        (PRINT, {"version": "df-precheck/1 "}),
+        (PRINT, {"version": "df\u2011precheck/1"}),
+        ('sys.stdout.write(json.dumps(verdict) + " \\n")', {}),
+        ('sys.stdout.write(json.dumps(verdict) + "\\r\\n")', {}),
+        ('sys.stdout.write(" " + json.dumps(verdict) + "\\n")', {}),
+        ('sys.stdout.write(json.dumps(verdict, separators=(",", ":")) + "\\n")', {}),
     ],
     ids=[
         "missing-key",
@@ -364,6 +374,16 @@ def test_extra_key_refused(stand: Stand) -> None:
         "not-utf8",
         "duplicate-key",
         "empty",
+        "refuse-no-reason",
+        "unset-no-reason",
+        "allow-with-reason",
+        "long-version",
+        "version-space",
+        "version-charset",
+        "trailing-space",
+        "crlf",
+        "leading-space",
+        "other-separators",
     ],
 )
 def test_malformed_verdict_refused(

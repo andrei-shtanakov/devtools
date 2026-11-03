@@ -304,8 +304,11 @@ def run_supervised(
 
     Nobody is ever signalled (plan decision 5): a command of another UID is
     out of reach, so one still running at `wait` is only no longer awaited
-    and is left to its own bound (sudo's `command_timeout`); its stdout pipe
-    is closed. A command that cannot start is `status=LAUNCH_FAILED`."""
+    and is left to its own bound (sudo's `command_timeout`). No thread: stdin
+    is written non-blocking by the same loop that reads stdout, and both our
+    pipe ends are closed on every path before the return (a child that never
+    reads gets EOF or EPIPE, never our descriptor). A command that cannot
+    start is `status=LAUNCH_FAILED`."""
     started = time.monotonic()
     deadline = started + wait
     try:
@@ -323,15 +326,14 @@ def run_supervised(
             LAUNCH_FAILED, None, b"", False, time.monotonic() - started
         )
     assert proc.stdin is not None and proc.stdout is not None
-    # A thread: a command that does not read must not block the wait.
-    threading.Thread(target=_feed, args=(proc.stdin, data), daemon=True).start()
     try:
-        out, oversize = _drain(proc.stdout.fileno(), deadline, limit)
+        out, oversize = _exchange(proc.stdin, proc.stdout, data, deadline, limit)
         try:
             code = proc.wait(max(deadline - time.monotonic(), 0.0))
         except subprocess.TimeoutExpired:
             code = None
     finally:
+        _close(proc.stdin)
         proc.stdout.close()
     elapsed = time.monotonic() - started
     if code is not None and code < 0:
@@ -339,23 +341,57 @@ def run_supervised(
     return SupervisedResult(code, None, out, oversize, elapsed)
 
 
-def _drain(fd: int, deadline: float, limit: int) -> tuple[bytes, bool]:
-    """Read `fd` to EOF or `deadline`: the first `limit` bytes, and whether
-    more came (read and dropped, so the writer is never stuck)."""
+def _exchange(
+    stdin: IO[bytes], stdout: IO[bytes], data: bytes, deadline: float, limit: int
+) -> tuple[bytes, bool]:
+    """Write `data` to `stdin` (closed once written, or when the child stops
+    reading) while reading `stdout` to EOF or `deadline`: the first `limit`
+    bytes, and whether more came (read and dropped, so the writer is never
+    stuck)."""
+    in_fd, out_fd = stdin.fileno(), stdout.fileno()
+    os.set_blocking(in_fd, False)
+    pending = memoryview(data)
     out = bytearray()
     oversize = False
     with selectors.DefaultSelector() as sel:
-        sel.register(fd, selectors.EVENT_READ)
+        sel.register(out_fd, selectors.EVENT_READ)
+        if pending:
+            sel.register(in_fd, selectors.EVENT_WRITE)
+        else:
+            _close(stdin)
         while (left := deadline - time.monotonic()) > 0:
-            if not sel.select(left):
-                continue
-            chunk = _read_chunk(fd)
-            if not chunk:
-                break
-            room = max(limit - len(out), 0)
-            oversize = oversize or len(chunk) > room
-            out += chunk[:room]
+            for key, _ in sel.select(left):
+                if key.fd == in_fd:
+                    pending = _write_some(in_fd, pending)
+                    if not pending:
+                        sel.unregister(in_fd)
+                        _close(stdin)
+                    continue
+                chunk = _read_chunk(out_fd)
+                if not chunk:
+                    return bytes(out), oversize
+                room = max(limit - len(out), 0)
+                oversize = oversize or len(chunk) > room
+                out += chunk[:room]
     return bytes(out), oversize
+
+
+def _write_some(fd: int, pending: memoryview) -> memoryview:
+    """One non-blocking write; a child that closed its stdin takes no more."""
+    try:
+        return pending[os.write(fd, pending) :]
+    except BlockingIOError:
+        return pending
+    except OSError:  # EPIPE: the rest is not wanted
+        return pending[len(pending) :]
+
+
+def _close(pipe: IO[bytes]) -> None:
+    """Close our end of a pipe; an error (EPIPE on flush) changes nothing."""
+    try:
+        pipe.close()
+    except OSError:
+        pass
 
 
 def run_as(

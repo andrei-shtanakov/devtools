@@ -61,6 +61,8 @@ _SHA = re.compile(r"[0-9a-f]{40}", re.ASCII)
 _HEX64 = re.compile(r"[0-9a-f]{64}", re.ASCII)
 _NONCE = re.compile(r"[0-9a-f]{32}", re.ASCII)
 _ADMIN_DIGEST = re.compile(r"sha256:[0-9a-f]{64}", re.ASCII)
+#: `act_precheck.PRECHECK_VERSION` has no cap of its own: a short name.
+_VERSION = re.compile(r"[A-Za-z0-9._/-]{1,64}", re.ASCII)
 
 
 def _positive_int(value: object) -> bool:
@@ -81,7 +83,7 @@ _VERDICT_CHECKS: dict[str, Callable[[object], bool]] = {
     "kind": lambda v: v in KINDS,
     "outcome": lambda v: v in (ALLOW, REFUSE, UNSET),
     "reason": lambda v: isinstance(v, str) and len(v) <= MAX_REASON,
-    "version": lambda v: isinstance(v, str) and v != "",
+    "version": _matches(_VERSION),
     "admin_digest": _matches(_ADMIN_DIGEST),
 }
 
@@ -257,14 +259,16 @@ def classify(run: platform.SupervisedResult) -> str | None:
 
 
 def parse_verdict(raw: bytes) -> Mapping[str, object] | None:
-    """One `df/precheck-verdict/v1` object on one line ending in a newline,
-    exactly its keys, each of its form; anything else is `None`."""
-    body = raw.removesuffix(b"\n")
-    if body == raw or b"\n" in body:
-        return None
+    """One `df/precheck-verdict/v1` object, exactly its keys, each of its
+    form, the reason tied to the outcome (empty for `allow` only, as
+    `act_precheck` writes it); anything else is `None`.
+
+    Byte-exact: `raw` must be what `act_precheck.serve` writes for that
+    object (`json.dumps` defaults, then one `\n`), so no whitespace, `\r` or
+    other spelling passes."""
     try:
         data = json.loads(
-            body.decode("utf-8"),
+            raw.decode("utf-8"),
             object_pairs_hook=_no_duplicates,
             parse_constant=_no_constant,
         )
@@ -273,6 +277,10 @@ def parse_verdict(raw: bytes) -> Mapping[str, object] | None:
     if not isinstance(data, dict) or set(data) != set(_VERDICT_CHECKS):
         return None
     if not all(check(data[key]) for key, check in _VERDICT_CHECKS.items()):
+        return None
+    if (data["outcome"] == ALLOW) != (data["reason"] == ""):
+        return None
+    if raw != (json.dumps(data) + "\n").encode("utf-8"):
         return None
     return data
 

@@ -9,6 +9,7 @@ import plistlib
 import stat
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -2914,6 +2915,35 @@ def test_run_supervised_env_and_descriptors_minimal(tmp_path: Path) -> None:
     assert env == SUPERVISED_ENV
     assert seen["fds"] == [0, 1, 2, 3]  # 3: the listing's own directory
     assert seen["err"] is False
+
+
+def test_run_supervised_child_not_reading_stdin(tmp_path: Path) -> None:
+    """A request larger than the pipe buffer to a child that never reads:
+    nothing blocks past `wait`, no thread is left behind, and our end of
+    stdin is closed (the child sees EOF... or nothing, but not our fd)."""
+    child = _script(tmp_path, "time.sleep(1.0)")
+    before = threading.active_count()
+    started = time.monotonic()
+    result = plat.run_supervised(
+        [child], b"x" * (1 << 20), limit=1024, wait=0.3, env={}
+    )
+    assert time.monotonic() - started < 1.0
+    assert (result.status, result.signal) == (None, None)
+    assert threading.active_count() == before
+
+
+def test_run_supervised_closes_stdin_after_writing(tmp_path: Path) -> None:
+    """The child gets all of `data` and then EOF (our end is closed)."""
+    child = _script(tmp_path, "sys.stdout.write(str(len(sys.stdin.buffer.read())))")
+    data = b"y" * (300 << 10)  # larger than any pipe buffer
+    result = plat.run_supervised([child], data, limit=1024, wait=30, env={})
+    assert (result.status, result.stdout) == (0, str(len(data)).encode())
+
+
+def test_run_supervised_child_exits_without_reading(tmp_path: Path) -> None:
+    child = _script(tmp_path, "sys.stdout.write('done')")
+    result = plat.run_supervised([child], b"z" * (1 << 20), limit=1024, wait=30, env={})
+    assert (result.status, result.stdout) == (0, b"done")
 
 
 def test_run_supervised_launch_failure(tmp_path: Path) -> None:
