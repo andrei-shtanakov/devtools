@@ -13,6 +13,7 @@ import importlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -683,3 +684,59 @@ def test_root_fixture_repo_installs_offline(
     assert (tree / "governance" / "act_precheck.py").is_file()
     assert (tree / CONTRACT_FILES[0]).is_file()
     assert sorted(os.listdir(tree / "site")) == ["steward", "yaml"]
+
+
+# ---------- legacy releases ----------
+
+
+@pytest.mark.parametrize("shape", ["df-only", "older-modules"])
+def test_legacy_checkout_installs_df_only(fl: FakeLayout, shape: str) -> None:
+    """No `act_precheck.py` (as devtools 335188f, pinned by the umbrella's
+    `core`: some closure modules and the patterns, not the program): the
+    admin tree is exactly `df/`, no pins read (no `uv.lock`), the cache never
+    touched, and `expected_admin_digest` agrees."""
+    lay = fl.layout
+    ref = devtools_ref(fl)
+    (ref / "uv.lock").unlink()
+    shutil.rmtree(cache(lay))
+    keep = {"governance/__init__.py", "governance/act_time.py", *CONTRACT_FILES}
+    for rel in (*admin_tree.governance_files(), *CONTRACT_FILES):
+        if shape == "df-only" or rel not in keep:
+            (ref / rel).unlink()
+    assert not admin_tree.release_has_precheck(ref)
+
+    def offline(url: str) -> bytes:
+        raise AssertionError(f"no download for a legacy release: {url}")
+
+    admin.install_admin(lay, ID, devtools_ref=ref, git=SYSTEM_GIT, fetch=offline)
+    tree = lay.admin_dir(ID)
+    assert walk_files(tree) == ["df/", "df/__init__.py", "df/launcher_entry.py"]
+    assert not os.path.lexists(cache(lay))
+    assert admin.admin_code_problems(lay, ID) == []
+    digest = admin.expected_admin_digest(ref, layout=lay, git=SYSTEM_GIT)
+    assert digest == admin.admin_digest(lay, ID)
+    assert not os.path.lexists(cache(lay))
+
+
+@pytest.mark.parametrize(
+    "missing", ["governance/act_anon.py", "governance/__init__.py", CONTRACT_FILES[0]]
+)
+def test_partial_closure_refused(fl: FakeLayout, missing: str) -> None:
+    """`act_precheck.py` present but a closure module or a contract file
+    missing: refused, naming it -- no admin tree, no fallback to `df/` only."""
+    lay = fl.layout
+    ref = devtools_ref(fl)
+    (ref / missing).unlink()
+    with pytest.raises(TreeError, match=f"нет: {re.escape(missing)}"):
+        admin_tree.release_has_precheck(ref)
+    with pytest.raises(StepFailed, match=re.escape(missing)) as exc:
+        admin.install_admin(lay, ID, devtools_ref=ref, git=SYSTEM_GIT)
+    assert exc.value.step == "admin"
+    assert not os.path.lexists(lay.admin_dir(ID))
+    with pytest.raises(TreeError, match=re.escape(missing)):
+        admin.expected_admin_digest(ref, layout=lay, git=SYSTEM_GIT)
+
+
+def test_full_closure_is_a_precheck_release(fl: FakeLayout) -> None:
+    assert admin_tree.release_has_precheck(devtools_ref(fl))
+    assert admin_tree.PRECHECK_FILE in admin_tree.governance_files()

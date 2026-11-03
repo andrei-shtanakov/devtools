@@ -291,10 +291,9 @@ def expected_admin_digest(devtools_ref: Path, *, layout: Layout, git: Path) -> s
     sdist's sha256 and steward's commit and tree re-checked against
     `devtools_ref/uv.lock`); a missing or bad artifact is `TreeError`, never
     a download. Writes nothing under the layout but that cache's directory;
-    needs read access to `admin-home` (root on a host)."""
-    sources = admin_tree.site_sources(
-        _site_pins(devtools_ref), layout=layout, fetch=None, git=git
-    )
+    needs read access to `admin-home` (root on a host). A legacy checkout
+    (`admin_tree.release_has_precheck` false) is `df/` only, as installed."""
+    sources = _site_sources(devtools_ref, layout=layout, fetch=None, git=git)
     with tempfile.TemporaryDirectory(prefix="df-admin-digest-") as tmp:
         dest = Path(tmp) / "admin"
         _make_dir(dest)
@@ -403,7 +402,9 @@ def install_admin(
     touched. Before the tree, the `site/` sources are checked (and fetched
     into `admin-home/site-src` if absent or bad) against the pins of
     `<devtools_ref>/uv.lock` with the approved `git` and `fetch`
-    (`admin_tree.site_sources`); a refusal there leaves no `admin/<id>`.
+    (`admin_tree.site_sources`); a refusal there leaves no `admin/<id>`. A
+    legacy checkout without the precheck program
+    (`admin_tree.release_has_precheck`) gets `df/` only, pins unread.
     The copy (`_fill_admin`): `df/`, the modules of
     `admin_tree.GOVERNANCE_MODULES`, `admin_tree.CONTRACT_FILES` and
     `site/` written from the checked streams (2b Task 5). Only directories
@@ -420,8 +421,7 @@ def install_admin(
     if not accept.is_real_dir(devtools_ref / "df"):
         raise StepFailed(_STEP, f"{devtools_ref / 'df'}: не каталог")
     try:
-        pins = _site_pins(devtools_ref)
-        sources = admin_tree.site_sources(pins, layout=layout, fetch=fetch, git=git)
+        sources = _site_sources(devtools_ref, layout=layout, fetch=fetch, git=git)
         _make_dir(dest)
         fsutil.fault_point("created", dest)
         _fill_admin(dest, devtools_ref, sources, git)
@@ -430,6 +430,22 @@ def install_admin(
     fsutil.fault_point("created", dest)
     fsutil.sync_tree(dest)
     fsutil.sync_dir(layout.admin)
+
+
+def _site_sources(
+    devtools_ref: Path,
+    *,
+    layout: Layout,
+    fetch: admin_tree.Fetch | None,
+    git: Path,
+) -> admin_tree.SiteSources | None:
+    """The checked `site/` sources of a checkout with the precheck program;
+    `None` for a legacy one (`release_has_precheck`: no pins read, the cache
+    untouched); a partial closure is `TreeError`."""
+    if not admin_tree.release_has_precheck(devtools_ref):
+        return None
+    pins = _site_pins(devtools_ref)
+    return admin_tree.site_sources(pins, layout=layout, fetch=fetch, git=git)
 
 
 def _site_pins(devtools_ref: Path) -> admin_tree.SitePins:
@@ -445,14 +461,19 @@ def _site_pins(devtools_ref: Path) -> admin_tree.SitePins:
 
 
 def _fill_admin(
-    dest: Path, devtools_ref: Path, sources: admin_tree.SiteSources, git: Path
+    dest: Path,
+    devtools_ref: Path,
+    sources: admin_tree.SiteSources | None,
+    git: Path,
 ) -> None:
-    """The content of `admin/<id>` (`dest`, made): `df/`, governance,
-    contracts, `site/`."""
+    """The content of `admin/<id>` (`dest`, made): `df/`, then -- unless a
+    legacy release (`sources` is `None`) -- governance, contracts, `site/`."""
     src = devtools_ref / "df"
     if not accept.is_real_dir(src):
         raise StepFailed(_STEP, f"{src}: не каталог")
     _copy_dir(src, dest / "df")
+    if sources is None:
+        return
     for rel in (*admin_tree.governance_files(), *admin_tree.CONTRACT_FILES):
         parts = PurePosixPath(rel).parts
         current = dest

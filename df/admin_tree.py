@@ -59,6 +59,8 @@ GOVERNANCE_MODULES: tuple[str, ...] = (
     "governance.approval_branches",
     "governance.ssot_env",
 )
+#: The precheck program: its presence makes a checkout a precheck release.
+PRECHECK_FILE = "governance/act_precheck.py"
 #: Files those modules read relative to their `__file__` (repo-relative).
 CONTRACT_FILES: tuple[str, ...] = ("contracts/approval-branches/v1/patterns.env",)
 #: Never in the admin tree: native code, startup hooks, bytecode.
@@ -112,6 +114,30 @@ def governance_files() -> tuple[str, ...]:
         else "/".join(name.split(".")) + ".py"
         for name in GOVERNANCE_MODULES
     )
+
+
+def release_has_precheck(devtools_ref: Path) -> bool:
+    """Whether the checkout carries the precheck program (spec 3.9 rev 10).
+
+    No `governance/act_precheck.py`: a legacy release (`False`), its admin
+    tree is `df/` only and `precheck serve` (Task 6) refuses on it. With it,
+    every file of `governance_files()` and `CONTRACT_FILES` must be there
+    (`True`); a partial closure is `TreeError` naming what is missing --
+    never a silent fallback. Modules of the closure an older release has for
+    other reasons do not make it a precheck release."""
+    if not os.path.lexists(devtools_ref / PRECHECK_FILE):
+        return False
+    missing = [
+        rel
+        for rel in (*governance_files(), *CONTRACT_FILES)
+        if not os.path.lexists(devtools_ref / rel)
+    ]
+    if missing:
+        raise TreeError(
+            f"{devtools_ref}: неполное замыкание предпроверки, нет: "
+            + ", ".join(missing)
+        )
+    return True
 
 
 def forbidden_name(name: str) -> bool:
