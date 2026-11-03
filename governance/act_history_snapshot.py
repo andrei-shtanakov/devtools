@@ -11,7 +11,8 @@ file; Bearer stays REST-only. git runs with an explicit minimal environment (no
 system/global config, no prompts, http(s) only, no redirects) and every call honours
 an absolute `time.monotonic()` deadline: on expiry the whole git process group is
 killed and `DeadlineExceeded` is raised. REST calls honour the same deadline: each
-page's timeout is capped by the time left, and no page starts after it. `DeadlineExceeded` is not in
+page's timeout is capped by the time left, no page starts after it, and an answer
+completed past it is discarded. `DeadlineExceeded` is not in
 `act_time.OPS_FAILURES`, so `act_history` never turns it into `Unavailable`: it
 propagates out of `load_history` to the caller (`unset: deadline`).
 
@@ -295,6 +296,7 @@ class SnapshotHistory:
             # a transport failure past the deadline is the deadline, not a fact
             _timeout(self._deadline, self._clock, "forge")
             raise
+        self._left()  # an answer that completed past the deadline is no fact either
         if status != 200:
             raise OSError(f"forge: HTTP {status}: repos/{repo_slug}/{tail}")
         return body

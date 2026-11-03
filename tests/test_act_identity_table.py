@@ -471,6 +471,13 @@ JUDGMENT = {
             '"forge: deadline passed"',
         ),
         r(
+            "deadline_after",
+            "act_history_snapshot.SnapshotHistory._rest",
+            "self._left()  # an answer that completed past the deadline",
+            f"{HS}::test_rest_answer_completed_after_deadline_raises",
+            '"forge: deadline passed"',
+        ),
+        r(
             "status",
             "act_history_snapshot.SnapshotHistory._rest",
             "if status != 200",

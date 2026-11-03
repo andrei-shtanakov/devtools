@@ -795,3 +795,16 @@ def test_rest_second_page_after_deadline_raises(tmp_path: Path) -> None:
     with pytest.raises(DeadlineExceeded, match="forge: deadline passed"):
         snap.prs_containing_commit(SLUG, sha)
     assert len(forge.paths) == 1  # вторая страница не запрошена
+
+
+@needs_steward
+def test_rest_answer_completed_after_deadline_raises(tmp_path: Path) -> None:
+    """Страница пришла успешно, но уже за сроком: ответ отбрасывается."""
+    clock = Clock()
+    clock.now = 95.0
+    answers = {f"repos/{SLUG}/pulls/7": (200, {"head": {"sha": "c" * 40}})}
+    forge = PagedForge(answers, clock, 10.0)
+    snap = _paged_snap(tmp_path, forge, clock)
+    with pytest.raises(DeadlineExceeded, match="forge: deadline passed"):
+        snap.pr_facts(SLUG, 7)
+    assert forge.paths == [f"repos/{SLUG}/pulls/7"]

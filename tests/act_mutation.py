@@ -62,6 +62,10 @@ BYPASS: dict[str, tuple[str, str]] = {
         '_timeout(self._deadline, self._clock, "forge")\n            raise',
         "raise",
     ),
+    "act_history_snapshot.SnapshotHistory._rest:deadline_after": (
+        "self._left()  # an answer that completed past the deadline is no fact either",
+        "pass",
+    ),
     "act_history_snapshot.SnapshotHistory.prs_containing_commit:shape": (
         'raise ValueError(f"forge: commits/{sha[:12]}/pulls: unexpected shape")',
         "body = []",
