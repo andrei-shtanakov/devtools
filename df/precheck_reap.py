@@ -1,20 +1,20 @@
-"""Leftover processes and snapshots of `df-precheck` (stage 2b, Task 10).
+"""Leftover processes of `df-precheck` (stage 2b, Task 10).
 
 The precheck has three timeout rungs (plan decision 5): its own `DEADLINE`
-(150 s), sudo's `command_timeout` (180 s) and the publisher's wait
-(`PRECHECK_WAIT`, 200 s). Rung 2 kills a running or blocked command, but
-not a stopped one -- sudo suspends itself when its command stops (CI run
-41673160363, both OSes) -- nor the git children, which run in their own
-session. The publisher's guarantee is rung 3 alone: it answers
-`precheck_failed: timeout` at `PRECHECK_WAIT` and signals no one.
+(150 s), sudo's `command_timeout` (180 s, configured; that it fires is not
+proved by a row) and the publisher's wait (`PRECHECK_WAIT`, 200 s). A
+stopped command is never ended by rung 2 -- sudo suspends itself when its
+command stops (CI run 41673160363, both OSes) -- nor are the git children,
+which run in their own session. The publisher's guarantee is rung 3 alone:
+it answers `precheck_failed: timeout` at `PRECHECK_WAIT` and signals no one.
 
 So every `precheck serve` first reaps what earlier runs left: each process
 whose real UID is `df-precheck` and whose age exceeds `REAP_AFTER` (no
 precheck the publisher still waits for is that old) gets `SIGKILL`, never
-the caller itself or its ancestors; then, under the precheck's own lock
-discipline (`precheck.lock` exclusive without waiting: no live run holds
-it shared), the snapshots left under `<home>/precheck-snapshots` are
-removed. `darkfactory doctor` lists such processes (`roles.precheck`).
+the caller itself or its ancestors. Killing a leftover releases its shared
+hold of `precheck.lock`; the program's own stale-snapshot cleanup
+(`act_precheck._locked`) then removes its snapshot. `darkfactory doctor`
+lists such processes (`roles.precheck`).
 
 Processes are read from `/proc` (Linux) or `/bin/ps` with explicit columns
 (macOS); an unknown form is `ListingError`, never a guess. Stdlib only.
@@ -22,11 +22,8 @@ Processes are read from `/proc` (Linux) or `/bin/ps` with explicit columns
 
 from __future__ import annotations
 
-import contextlib
-import fcntl
 import os
 import re
-import shutil
 import signal
 import time
 from collections.abc import Callable, Sequence
@@ -41,10 +38,6 @@ from df.publisher.precheck import PRECHECK_WAIT
 REAP_AFTER = PRECHECK_WAIT + 10.0
 #: Seconds `reap` waits for the killed processes to be gone.
 REAP_WAIT = 5.0
-#: `act_precheck.SNAPSHOTS` / `act_precheck.LOCK` (the key holder's side
-#: does not import `governance`; tests hold them equal).
-SNAPSHOTS = "precheck-snapshots"
-LOCK = "precheck.lock"
 PS = "/bin/ps"
 PS_COLUMNS = "pid=,ppid=,ruid=,etime=,stat="
 _ETIME = re.compile(r"(?:(?:(\d+)-)?(\d+):)?(\d+):(\d+)", re.ASCII)
@@ -55,10 +48,6 @@ _PROC_STAT = re.compile(
 
 class ListingError(Exception):
     """The processes could not be read in a known form."""
-
-
-class SnapshotError(Exception):
-    """The leftover snapshots could not be made consistent."""
 
 
 @dataclass(frozen=True)
@@ -120,20 +109,26 @@ def _etime_seconds(value: str) -> float:
 
 def _proc_processes(proc: Path) -> list[ProcInfo]:
     """`/proc/<pid>/stat` and `status` of every process; one that ends
-    while read is skipped."""
+    while read, or whose files this UID cannot read, is skipped."""
     try:
         uptime = float((proc / "uptime").read_text().split()[0])
     except (OSError, ValueError, IndexError) as exc:
         raise ListingError(f"/proc/uptime: {exc}") from exc
     ticks = os.sysconf("SC_CLK_TCK")
     found = []
-    for entry in proc.iterdir():
+    try:
+        entries = list(proc.iterdir())
+    except OSError as exc:
+        raise ListingError(f"{proc}: {exc}") from exc
+    for entry in entries:
         if not entry.name.isdigit():
             continue
         try:
             stat = (entry / "stat").read_text()
             status = (entry / "status").read_text()
-        except (FileNotFoundError, ProcessLookupError):
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            # ended while read, or unreadable to this UID (`hidepid`): not
+            # a process of this UID
             continue
         except OSError as exc:
             raise ListingError(f"{entry}: {exc}") from exc
@@ -186,18 +181,30 @@ def reap(
     """`SIGKILL` every leftover of `uid` (`leftovers`, sparing `own`, by
     default this process, and its ancestors), then wait up to `wait`
     seconds for them to be gone. Returns the PIDs killed and the problems
-    (named reasons; never raises). `lister` and `killer` default to
+    as named reasons: a listing that fails (`ListingError`, `OSError`) is a
+    problem, not an exception. `lister` and `killer` default to
     `list_processes` and `kill`, looked up at the call (tests replace
-    them)."""
+    them).
+
+    PID reuse: the processes are read twice and a leftover is killed only
+    if the second reading still shows it with this UID and at least its
+    age (a reused PID is younger). The gap between that reading and the
+    kill remains; a PID reused inside it can only be another process of
+    this UID (the kernel's permission rule), and the publisher calls the
+    precheck one at a time."""
     lister = lister or list_processes
     killer = killer or kill
     own = os.getpid() if own is None else own
     try:
         old = leftovers(uid, lister(), own=own)
-    except ListingError as exc:
+        again = {p.pid: p for p in lister()} if old else {}
+    except (ListingError, OSError) as exc:
         return [], [f"процессы не прочитаны: {exc}"]
     killed, problems = [], []
     for proc in old:
+        now = again.get(proc.pid)
+        if now is None or now.zombie or now.ruid != uid or now.age < proc.age:
+            continue  # gone, or the PID is someone else's now
         try:
             killer(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
@@ -210,7 +217,7 @@ def reap(
     while killed:
         try:
             alive = {p.pid for p in lister() if not p.zombie} & set(killed)
-        except ListingError as exc:
+        except (ListingError, OSError) as exc:
             problems.append(f"процессы не прочитаны: {exc}")
             break
         if not alive:
@@ -222,53 +229,10 @@ def reap(
     return killed, problems
 
 
-def clear_snapshots(home: Path) -> list[str]:
-    """Remove the snapshots under `<home>/precheck-snapshots` if no run
-    holds `<home>/precheck.lock` (exclusive, without waiting; a live run
-    holds it shared and its snapshot stays). Returns what was removed; a
-    lock or snapshot that cannot be handled is `SnapshotError`; no home
-    at all is nothing to clear (the program then fails on its own)."""
-    root = home / SNAPSHOTS
-    if not home.is_dir():
-        return []
-    try:
-        fd = os.open(home / LOCK, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
-    except OSError as exc:
-        raise SnapshotError(f"{LOCK}: {exc}") from exc
-    try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return []  # a live run: its snapshot is not stale
-        except OSError as exc:
-            raise SnapshotError(f"{LOCK}: {exc}") from exc
-        return _remove_all(root)
-    finally:
-        with contextlib.suppress(OSError):
-            os.close(fd)
-
-
-def _remove_all(root: Path) -> list[str]:
-    try:
-        names = sorted(p.name for p in root.iterdir())
-    except FileNotFoundError:
-        return []
-    except OSError as exc:
-        raise SnapshotError(f"{root}: {exc}") from exc
-    for name in names:
-        try:
-            shutil.rmtree(root / name)
-        except OSError as exc:
-            raise SnapshotError(f"{root / name}: {exc}") from exc
-    return names
-
-
 __all__ = [
     "REAP_AFTER",
     "ListingError",
     "ProcInfo",
-    "SnapshotError",
-    "clear_snapshots",
     "leftovers",
     "list_processes",
     "parse_ps",

@@ -533,7 +533,7 @@ def _precheck_serve(lay: Layout, read: ReadResult) -> int:
     home = lay.role_home(roles.PRECHECK_USER)
     os.environ.clear()
     os.environ.update({**PRECHECK_ENV, "HOME": str(home)})
-    _reap(account.uid, home)
+    _reap(account.uid)
     sys.path.append(str(tree / SITE_DIR))
     serve = _load_serve(tree)
     return serve(
@@ -541,21 +541,17 @@ def _precheck_serve(lay: Layout, read: ReadResult) -> int:
     )
 
 
-def _reap(uid: int, home: Path) -> None:
+def _reap(uid: int) -> None:
     """The leftovers of earlier precheck runs (`precheck_reap`): processes
     of `uid` older than `REAP_AFTER` are killed (never this one or its
-    ancestors), then the snapshots no live run holds are removed. A problem
-    of the processes is a named reason on stderr and does not stop the run;
-    snapshots that cannot be made consistent refuse it."""
+    ancestors). A problem is a named reason on stderr and never stops the
+    run; the program's own cleanup then removes the snapshots no live run
+    holds."""
     killed, problems = precheck_reap.reap(uid)
     for problem in problems:
         print(f"{_REAP}: {problem}", file=sys.stderr)
     if killed:
         print(f"{_REAP}: убиты {killed}", file=sys.stderr)
-    try:
-        precheck_reap.clear_snapshots(home)
-    except precheck_reap.SnapshotError as exc:
-        raise Refusal(f"{_REAP}: снимки: {exc}") from exc
 
 
 def _load_serve(tree: Path) -> Callable[..., int]:

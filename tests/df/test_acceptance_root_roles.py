@@ -1039,12 +1039,8 @@ def events(db: Path) -> list[str]:
 # ---------- stage 2b: the role df-precheck (Task 10) ----------
 
 PRECHECK = "df-precheck"
-#: The bounds of the rungs (plan decision 5): the precheck's `DEADLINE`
-#: (150 s) plus slack, the client's wait, sudo's `command_timeout` (180 s)
-#: plus its kill.
+#: Rung 1's bound: the precheck's `DEADLINE` (150 s) plus slack.
 RUNG1_BOUND = 155.0
-CLIENT_BOUND = 200.0
-RUNG2_BOUND = 185.0
 NOT_VERIFIED = "not_verified"
 LINUX = plat.detect_platform() == "linux-x86_64"
 
@@ -1525,10 +1521,12 @@ def age_of(pid: int) -> float | None:
     return None if found is None or found.zombie else found.age
 
 
-def test_precheck_command_timeout_reaped(rw: RolesWorld, pw: PrecheckWorld) -> None:
+def test_precheck_stopped_reaped_by_next_call(
+    rw: RolesWorld, pw: PrecheckWorld
+) -> None:
     """The precheck itself hangs (root's `SIGSTOP` after its snapshot
-    exists). sudo stops itself with it, so rung 2 never fires (spec,
-    «Предел второго рубежа»): the client answers `precheck_failed: timeout`
+    exists). sudo stops itself with it, so `command_timeout` does not end
+    it (spec, «Предел второго рубежа»): the client answers `precheck_failed: timeout`
     at `PRECHECK_WAIT` from its sudo's start (rung 3), and the stopped
     processes are still there. A call while they are younger than
     `REAP_AFTER` spares them and their snapshot (a live run's lock); the

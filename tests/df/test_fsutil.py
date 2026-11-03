@@ -435,15 +435,6 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
     ),
     ("inputs", "", "import shutil", 1): "root's checkout: scratch",
     ("receive", "", "import shutil", 1): "protocol remove_own_tree: rmtree",
-    ("precheck_reap", "", "import shutil", 1): (
-        "df-precheck's own home: leftover snapshots (scratch, no protocol)"
-    ),
-    ("precheck_reap", "clear_snapshots", "os.open", 1): (
-        "precheck.lock in df-precheck's home, as act_precheck opens it"
-    ),
-    ("precheck_reap", "_remove_all", "shutil.rmtree", 1): (
-        "leftover snapshots under precheck.lock exclusive (scratch)"
-    ),
     ("acl", "_libsystem", "ctypes.CDLL", 1): "ACL reads only: acl_get_*_np, acl_free",
     ("platform", "_rename_function", "ctypes.CDLL", 1): (
         "rename_noreplace (renameatx_np/renameat2) of the build home: "

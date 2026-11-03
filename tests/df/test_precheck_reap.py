@@ -1,11 +1,11 @@
-"""`df.precheck_reap`: leftovers of `df-precheck` (2b Task 10, option c).
+"""`df.precheck_reap`: leftover processes of `df-precheck` (2b Task 10,
+option c).
 
 The lister and the killer are injected: no test reads or signals a real
 process (the autouse `_no_real_reap` of `conftest.py` guards the rest)."""
 
 from __future__ import annotations
 
-import fcntl
 import os
 import signal
 from pathlib import Path
@@ -13,12 +13,11 @@ from pathlib import Path
 import pytest
 
 from df import cli, precheck_reap, sudoers
+from df import platform as plat
 from df.precheck_reap import (
     REAP_AFTER,
     ListingError,
     ProcInfo,
-    SnapshotError,
-    clear_snapshots,
     leftovers,
     parse_ps,
     reap,
@@ -26,6 +25,8 @@ from df.precheck_reap import (
 from df.publisher.precheck import PRECHECK_WAIT
 
 UID = 4242
+#: `list_processes` before the autouse `_no_real_reap` replaces it.
+REAL_LIST = precheck_reap.list_processes
 OLD = REAP_AFTER + 1
 YOUNG = REAP_AFTER - 1
 
@@ -52,13 +53,6 @@ class Host:
 def test_rungs_order() -> None:
     """The threshold lies past every rung: sudo's 180 s, the wait's 200 s."""
     assert sudoers.PRECHECK_TIMEOUT < PRECHECK_WAIT < REAP_AFTER
-
-
-def test_names_equal_act_precheck() -> None:
-    from governance import act_precheck
-
-    assert precheck_reap.SNAPSHOTS == act_precheck.SNAPSHOTS
-    assert precheck_reap.LOCK == act_precheck.LOCK
 
 
 def test_old_process_killed_young_spared() -> None:
@@ -153,75 +147,96 @@ def test_proc_processes_refuses_unknown(tmp_path: Path) -> None:
         precheck_reap._proc_processes(root)  # noqa: SLF001
 
 
-def _home(tmp_path: Path, names: tuple[str, ...]) -> Path:
-    home = tmp_path / "home"
-    for name in names:
-        (home / precheck_reap.SNAPSHOTS / name / "repo.git").mkdir(parents=True)
-    home.mkdir(exist_ok=True)
-    return home
+def test_proc_processes_skips_ended_and_unreadable(tmp_path: Path) -> None:
+    """A process gone while read (no `stat`) and one whose files this UID
+    cannot read (`hidepid`) are skipped, not a failure."""
+    ticks = os.sysconf("SC_CLK_TCK")
+    rest = " ".join(["0"] * 17)
+    root = _proc_tree(tmp_path, f"7 (a) S 1 {rest} {ticks} 0\n", "Uid:\t5\n")
+    (root / "8").mkdir()  # ended: no files
+    hidden = root / "9"
+    hidden.mkdir()
+    (hidden / "stat").write_text("9 (x) S 1\n")
+    (hidden / "status").write_text("Uid:\t6\n")
+    real_read = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path.parent == hidden:
+            raise PermissionError(13, "Permission denied")
+        return real_read(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(Path, "read_text", read_text)
+        found = precheck_reap._proc_processes(root)  # noqa: SLF001
+    assert [p.pid for p in found] == [7]
 
 
-def test_snapshots_cleared_when_no_run_holds_the_lock(tmp_path: Path) -> None:
-    home = _home(tmp_path, ("a" * 32, "b" * 32))
-    assert clear_snapshots(home) == ["a" * 32, "b" * 32]
-    assert list((home / precheck_reap.SNAPSHOTS).iterdir()) == []
+def test_list_processes_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """macOS: `ps` with the fixed columns; its failure is `ListingError`.
+    Linux: `/proc`."""
+    lister = REAL_LIST
+    seen: list[list[str]] = []
 
+    def run(argv: list[str], **_kw: object) -> plat.RunResult:
+        seen.append(list(argv))
+        return plat.RunResult(0, b"  1 0 0 00:05 Ss\n", b"", True)
 
-def test_snapshots_of_a_live_run_kept(tmp_path: Path) -> None:
-    """A live run holds the lock shared: nothing is removed."""
-    home = _home(tmp_path, ("c" * 32,))
-    fd = os.open(home / precheck_reap.LOCK, os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_SH)
-        assert clear_snapshots(home) == []
-    finally:
-        os.close(fd)
-    assert [p.name for p in (home / precheck_reap.SNAPSHOTS).iterdir()] == ["c" * 32]
-
-
-def test_snapshot_not_removable_refused(tmp_path: Path) -> None:
-    if os.geteuid() == 0:
-        pytest.skip("root removes anything")
-    home = _home(tmp_path, ("d" * 32,))
-    locked = home / precheck_reap.SNAPSHOTS / ("d" * 32)
-    locked.chmod(0o500)
-    try:
-        with pytest.raises(SnapshotError):
-            clear_snapshots(home)
-    finally:
-        locked.chmod(0o700)
-
-
-def test_no_home_nothing_to_clear(tmp_path: Path) -> None:
-    assert clear_snapshots(tmp_path / "absent") == []
-
-
-def test_serve_reaps_before_the_program(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """`precheck serve`: the reap runs after the environment reset and
-    before the program loads; its problems go to stderr by name and do not
-    stop the run; snapshots that cannot be cleared refuse it."""
-    order: list[str] = []
-
-    def fake_reap(uid: int) -> tuple[list[int], list[str]]:
-        order.append(f"reap {uid} {os.environ.get('HOME')}")
-        return [5], ["процессы не прочитаны: x"]
-
-    monkeypatch.setattr(precheck_reap, "reap", fake_reap)
+    monkeypatch.setattr(plat, "detect_platform", lambda: "macos-arm64")
+    monkeypatch.setattr(plat, "run_command", run)
+    assert lister() == [ProcInfo(1, 0, 0, 5.0, False)]
+    assert seen == [["/bin/ps", "-A", "-o", "pid=,ppid=,ruid=,etime=,stat="]]
     monkeypatch.setattr(
-        precheck_reap, "clear_snapshots", lambda h: order.append("clear")
+        plat, "run_command", lambda *_a, **_k: plat.RunResult(1, b"", b"x", True)
     )
-    home = tmp_path / "h"
-    cli._reap(7, home)  # noqa: SLF001
-    assert order == [f"reap 7 {os.environ.get('HOME')}", "clear"]
+    with pytest.raises(ListingError, match="ps: код 1"):
+        lister()
+    calls: list[Path] = []
+    monkeypatch.setattr(plat, "detect_platform", lambda: "linux-x86_64")
+    monkeypatch.setattr(
+        precheck_reap, "_proc_processes", lambda p: calls.append(p) or []
+    )
+    assert lister() == [] and calls == [Path("/proc")]
+
+
+def test_vanished_process_skipped() -> None:
+    """A leftover gone before the kill (`ProcessLookupError`) is neither
+    killed nor a problem."""
+
+    def gone(pid: int, signo: int) -> None:
+        raise ProcessLookupError(3, "No such process")
+
+    killed, problems = reap(UID, lister=Host([proc(60)]).lister, killer=gone, own=1)
+    assert (killed, problems) == ([], [])
+
+
+def test_reused_pid_not_killed() -> None:
+    """The second reading shows the PID younger (reused): no kill."""
+    readings = iter([[proc(70)], [proc(70, age=1.0)]])
+    host = Host([])
+    killed, problems = reap(
+        UID, lister=lambda: next(readings), killer=host.killer, own=1
+    )
+    assert (killed, problems, host.killed) == ([], [], [])
+
+
+def test_listing_oserror_is_a_problem() -> None:
+    def broken() -> list[ProcInfo]:
+        raise OSError(5, "Input/output error")
+
+    killed, problems = reap(UID, lister=broken, killer=Host([]).killer, own=1)
+    assert killed == [] and problems[0].startswith("процессы не прочитаны:")
+
+
+def test_cli_reap_reports_on_stderr(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`cli._reap`: problems and kills are named on stderr and never stop
+    the run (the order against the environment reset and the program load
+    is `test_cli.py::test_precheck_serve_reaps_after_reset_before_load`)."""
+    monkeypatch.setattr(
+        precheck_reap, "reap", lambda uid: ([5], ["процессы не прочитаны: x"])
+    )
+    cli._reap(7)  # noqa: SLF001
     err = capsys.readouterr().err
     assert "precheck serve: уборка: процессы не прочитаны: x" in err
-    assert "убиты [5]" in err
-
-    def bad(_home: Path) -> list[str]:
-        raise SnapshotError("precheck.lock: denied")
-
-    monkeypatch.setattr(precheck_reap, "clear_snapshots", bad)
-    with pytest.raises(cli.Refusal, match="уборка: снимки: precheck.lock: denied"):
-        cli._reap(7, home)  # noqa: SLF001
+    assert "precheck serve: уборка: убиты [5]" in err

@@ -492,8 +492,8 @@ def test_precheck_serve_reaps_after_reset_before_load(
     lay, read = _precheck_world(tmp_path, os.getuid())
     order: list[object] = []
 
-    def reap(uid: int, home: Path) -> None:
-        order.append(("reap", uid, home, dict(os.environ)))
+    def reap(uid: int) -> None:
+        order.append(("reap", uid, dict(os.environ)))
 
     def load(_admin_dir: Path) -> object:
         order.append("load")
@@ -506,7 +506,7 @@ def test_precheck_serve_reaps_after_reset_before_load(
     assert _precheck(lay, read) == 0
     home = lay.role_home("df-precheck")
     env = {"PATH": "/usr/bin:/bin", "LANG": "C", "HOME": str(home)}
-    assert order == [("reap", os.getuid(), home, env), "load"]
+    assert order == [("reap", os.getuid(), env), "load"]
 
 
 def test_precheck_serve_passes_the_exit_code(
