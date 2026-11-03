@@ -166,11 +166,13 @@ sdist), всё сверено с `uv.lock` и покрыто `admin_digest`. И�
      того запроса есть сохранённый окончательный результат, снимает устаревшее владение и
      берёт своё под блокировкой каталога `owners/`. Владение запроса без окончательного
      результата (в том числе с `unknown`) не снимается никем;
-   - **предпосылка гарантии — исключительное использование App для мержа через
-     издатель этой установки** (r3 N3). Мерж тем же App другим инструментом или другой
-     установкой — **вне гарантии**: такой мерж с той же головой в окне владения может быть
+   - **предпосылка гарантии** (r3 N3; формулировка владельца 03.11): для обслуживаемых репозиториев App выполняет мерж **только через один издатель** с его долговечным журналом; другие скрипты, CI и независимые экземпляры издателя App для мержа не используют (решение владельца 03.11). Мерж
+     тем же App в обход издателя — **вне гарантии**: такой мерж с той же головой в окне владения может быть
      засчитан запросу. Мерж другим актором (не бот App) всегда даёт `unknown`. Спека §5.6
-     формулирует это как ограничение, а не обещание распознавания;
+     формулирует это как ограничение, а не обещание распознавания. **Порядок оператора
+     при `unknown`** документируется в спеке §5.4 и README (Task 8): повтор того же
+     запроса, запрет ручного мержа тем же App, продолжение новым PR, файлы владения не
+     удаляются; `doctor` перечисляет владения без окончательного результата;
    - **финальное чтение** (r2 N4) перед `armed`: PR открыт, `head.sha == head_sha`,
      `head.repo.id`, `head.ref` и `base.ref` равны `facts`. Изменилась база (`base.ref`) —
      `refused: base_changed` с `verified_not_done=True`. Сдвинулась вершина базы
@@ -581,7 +583,9 @@ sdist), всё сверено с `uv.lock` и покрыто `admin_digest`. И�
 
 **Files:** `df/publisher/merge.py`, `df/publisher/ops.py`, `df/publisher/store.py`
 (`phase`, `read_phases`, владение PR, `has_state` видит фазы и владение),
-`df/publisher/main.py` (передача `verified_not_done`); тест
+`df/publisher/main.py` (передача `verified_not_done`), `df/doctor.py` (проверка
+`publisher.owners`: владения без окончательного результата), `README.md` (раздел «Издатель:
+исход `unknown` мержа» — порядок оператора из спеки §5.4, решение владельца 03.11); тест
 `tests/df/test_publisher_merge.py` (`test_no_mutating_calls` пересматривается: мутирующие
 вызовы — только для stop после положительного вердикта).
 
@@ -628,7 +632,8 @@ sdist), всё сверено с `uv.lock` и покрыто `admin_digest`. И�
   `test_single_attempt_409_is_verified_refusal`; `test_clock_jump_does_not_change_outcome`;
   `test_crash_after_result_before_release_replay_releases` (r3 N2: повтор A снимает
   владение, B проходит); `test_stale_owner_with_final_result_taken_over`;
-  `test_owner_with_unknown_never_released`; `test_late_owner_loss_after_attested_is_verified_busy`
+  `test_owner_with_unknown_never_released`; `test_doctor_lists_unresolved_owners`; `test_readme_documents_unknown_procedure`
+  (README содержит пять шагов порядка оператора); `test_late_owner_loss_after_attested_is_verified_busy`
   (барьер после ранней проверки, оба дошли до `attested`; у проигравшего нет `armed` и
   `PUT`, его replay даёт тот же отказ, владение победителя цело, `PUT` один); `test_other_tool_same_app_is_outside_guarantee`
   (документирующий тест договора r3 N3: засчитывается, evidence помечает предпосылку);
