@@ -620,6 +620,42 @@ def _bare_oc() -> OpContext:
     )
 
 
+#: A refusal reason of every awkward kind: Cyrillic, both quotes, a
+#: backslash, control characters, a non-breaking space, U+2028 and `/`.
+AWKWARD = 'отказ: "узел" «n1» \\ \x00\x07\x1b\t\n\r\u00a0\u2028 a/b </script>'
+
+
+@pytest.mark.parametrize(
+    "outcome,decided",
+    [("allow", ""), ("refuse", AWKWARD), ("unset", f"read_failed: {AWKWARD}")],
+)
+def test_real_serve_output_passes_the_client_parser(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, outcome: str, decided: str
+) -> None:
+    """The byte-exact check is coupled to the producer's spelling: the bytes
+    the real `act_precheck.serve` writes (its masking, truncation and
+    `json.dumps`) are accepted as they are, every field round-trips."""
+    pytest.importorskip("steward", reason="steward — без группы governance")
+    import io
+
+    monkeypatch.setattr(act_precheck, "_decide", lambda *_a: (outcome, decided))
+    raw = _valid_request()
+    out = io.BytesIO()
+    stdout = io.TextIOWrapper(out, encoding="utf-8", newline="")
+    code = act_precheck.serve(
+        io.BytesIO(raw), stdout, admin_digest=ADMIN, home=tmp_path
+    )
+    stdout.flush()
+    assert code == 0
+    written = out.getvalue()
+    parsed = precheck.parse_verdict(written)
+    assert parsed is not None
+    request = act_precheck.parse_request(raw)
+    assert parsed == act_precheck.verdict(request, outcome, decided, ADMIN)
+    assert parsed["reason"] == decided
+    assert parsed["request_digest"] == precheck.request_digest(json.loads(raw))
+
+
 def test_request_digest_equals_the_precheck_rule() -> None:
     data = json.loads(_valid_request())
     data["changes"][0][1] = "workstreams/ws/approvals/stops/ü-g2.yaml"

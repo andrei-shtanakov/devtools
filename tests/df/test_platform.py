@@ -2917,10 +2917,21 @@ def test_run_supervised_env_and_descriptors_minimal(tmp_path: Path) -> None:
     assert seen["err"] is False
 
 
-def test_run_supervised_child_not_reading_stdin(tmp_path: Path) -> None:
+def test_run_supervised_child_not_reading_stdin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A request larger than the pipe buffer to a child that never reads:
     nothing blocks past `wait`, no thread is left behind, and our end of
-    stdin is closed (the child sees EOF... or nothing, but not our fd)."""
+    stdin is closed when `run_supervised` returns."""
+    stdin_fds: list[tuple[subprocess.Popen[bytes], int]] = []
+
+    class Seen(subprocess.Popen):  # type: ignore[type-arg]
+        def __init__(self, *a: Any, **kw: Any) -> None:
+            super().__init__(*a, **kw)
+            assert self.stdin is not None
+            stdin_fds.append((self, self.stdin.fileno()))
+
+    monkeypatch.setattr(plat.subprocess, "Popen", Seen)
     child = _script(tmp_path, "time.sleep(1.0)")
     before = threading.active_count()
     started = time.monotonic()
@@ -2930,6 +2941,10 @@ def test_run_supervised_child_not_reading_stdin(tmp_path: Path) -> None:
     assert time.monotonic() - started < 1.0
     assert (result.status, result.signal) == (None, None)
     assert threading.active_count() == before
+    ((proc, fd),) = stdin_fds
+    assert proc.stdin is not None and proc.stdin.closed
+    with pytest.raises(OSError):  # the descriptor itself is gone (EBADF)
+        os.fstat(fd)
 
 
 def test_run_supervised_closes_stdin_after_writing(tmp_path: Path) -> None:
