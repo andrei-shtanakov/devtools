@@ -241,6 +241,62 @@ def test_api_base_wrong_type() -> None:
         parse_publisher(PUB + "api_base = 1\n")
 
 
+# --- git_base (stage 2b, Task 7) ----------------------------------------------
+
+#: A `publisher.toml` as roles setup of stage 2a wrote it: no `git_base`.
+PUB_2A = (
+    PUB
+    + 'api_base = "http://127.0.0.1:8080"\n'
+    + '\n[[sender]]\nuid = 601\noperations = ["merge"]\n'
+)
+
+
+def test_2a_publisher_toml_still_parses() -> None:
+    cfg = parse_publisher(PUB_2A)
+    assert cfg.git_base == "https://github.com"
+    assert cfg.api_base == "http://127.0.0.1:8080"
+    assert dump_publisher(cfg) == PUB_2A  # the default is not written
+    assert expected_publisher(accounts()).git_base == "https://github.com"
+
+
+@pytest.mark.parametrize(
+    "base", ["https://github.com", "http://127.0.0.1:1", "http://127.0.0.1:65535"]
+)
+def test_git_base_accepted(base: str) -> None:
+    cfg = parse_publisher(PUB + f'git_base = "{base}"\n')
+    assert cfg.git_base == base
+    assert parse_publisher(dump_publisher(cfg)) == cfg
+
+
+@pytest.mark.parametrize(
+    "base",
+    [
+        "http://github.com",
+        "https://github.com/",
+        "https://api.github.com",
+        "https://example.com",
+        "https://127.0.0.1:8080",
+        "http://localhost:8080",
+        "http://127.0.0.1",
+        "http://127.0.0.1:0",
+        "http://127.0.0.1:65536",
+        "http://127.0.0.1:8080/",
+        "file:///srv/git",
+        "",
+    ],
+)
+def test_git_base_invalid_refused(base: str) -> None:
+    with pytest.raises(ConfigError, match="git_base"):
+        parse_publisher(PUB + f'git_base = "{base}"\n')
+    with pytest.raises(ConfigError, match="git_base"):
+        PublisherConfig({}, "https://api.github.com", base)
+
+
+def test_git_base_wrong_type() -> None:
+    with pytest.raises(ConfigError, match="git_base"):
+        parse_publisher(PUB + "git_base = 1\n")
+
+
 def test_products_roundtrip_and_keys() -> None:
     text = ROW.format(rid=9) + ROW.format(rid=3)
     prods = parse_products('schema = "df/products/v1"\n' + text)

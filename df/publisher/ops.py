@@ -64,6 +64,8 @@ class OpContext:
     now: float
     api_base: str
     products: Mapping[int, Product]
+    #: `publisher.toml`'s `git_base`, handed to the precheck.
+    git_base: str
 
 
 @dataclass(frozen=True)
@@ -143,6 +145,7 @@ def build_context(ctx: Context) -> OpContext:
         time.time(),
         ctx.api_base,
         products,
+        ctx.git_base,
     )
 
 

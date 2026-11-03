@@ -39,7 +39,9 @@ OPERATIONS: tuple[str, ...] = (
     "perimeter-status",
 )
 DEFAULT_API_BASE = "https://api.github.com"
-_LOOPBACK_API = re.compile(r"http://127\.0\.0\.1:([1-9][0-9]{0,4})", re.ASCII)
+#: Where the precheck fetches history over git (stage 2b, plan decision 10).
+DEFAULT_GIT_BASE = "https://github.com"
+_LOOPBACK = re.compile(r"http://127\.0\.0\.1:([1-9][0-9]{0,4})", re.ASCII)
 _MAX_PORT = 65535
 #: Spec 5.2: what each model role's UID may ask the publisher for.
 _ROLE_OPERATIONS: Mapping[str, frozenset[str]] = MappingProxyType(
@@ -77,13 +79,16 @@ def _rows(data: Mapping[str, object], key: str) -> list[dict[str, object]]:
 
 @dataclass(frozen=True)
 class PublisherConfig:
-    """`/etc/df/publisher.toml`: sender UID -> operations, and the API base."""
+    """`/etc/df/publisher.toml`: sender UID -> operations, the API base and
+    the git base (both https GitHub, or a loopback fake in tests)."""
 
     senders: Mapping[int, frozenset[str]]
     api_base: str = DEFAULT_API_BASE
+    git_base: str = DEFAULT_GIT_BASE
 
     def __post_init__(self) -> None:
-        _check_api_base(self.api_base)
+        _check_base("api_base", self.api_base, DEFAULT_API_BASE)
+        _check_base("git_base", self.git_base, DEFAULT_GIT_BASE)
         for uid, ops in self.senders.items():
             _need(_is_int(uid) and uid >= 0, "uid", "must be a non-negative integer")
             _need(bool(ops), f"uid {uid}", "operations must not be empty")
@@ -96,18 +101,15 @@ class PublisherConfig:
         )
 
 
-def _check_api_base(value: object) -> None:
-    _need(isinstance(value, str), "api_base", "must be a string")
+def _check_base(key: str, value: object, default: str) -> None:
+    """`default` (https) or a loopback fake `http://127.0.0.1:<port>`."""
+    _need(isinstance(value, str), key, "must be a string")
     assert isinstance(value, str)
-    if value == DEFAULT_API_BASE:
+    if value == default:
         return
-    found = _LOOPBACK_API.fullmatch(value)
+    found = _LOOPBACK.fullmatch(value)
     ok = found is not None and int(found[1]) <= _MAX_PORT
-    _need(
-        ok,
-        "api_base",
-        f"must be {DEFAULT_API_BASE!r} or http://127.0.0.1:<port>, got {value!r}",
-    )
+    _need(ok, key, f"must be {default!r} or http://127.0.0.1:<port>, got {value!r}")
 
 
 def expected_publisher(accounts: Mapping[str, Account]) -> PublisherConfig:
@@ -127,22 +129,24 @@ def expected_publisher(accounts: Mapping[str, Account]) -> PublisherConfig:
         _need(uid not in by_uid, name, f"uid {uid} is shared with {by_uid.get(uid)}")
         by_uid[uid] = name
     senders = {accounts[name].uid: ops for name, ops in _ROLE_OPERATIONS.items()}
-    return PublisherConfig(senders, DEFAULT_API_BASE)
+    return PublisherConfig(senders, DEFAULT_API_BASE, DEFAULT_GIT_BASE)
 
 
 def parse_publisher(text: str) -> PublisherConfig:
     """Strictly parse the text of `publisher.toml`."""
     data = _parse_toml(text, _PUBLISHER)
-    _check_keys(data, set(), {"api_base", "sender"}, "publisher.toml")
+    _check_keys(data, set(), {"api_base", "git_base", "sender"}, "publisher.toml")
     senders: dict[int, frozenset[str]] = {}
     for row in _rows(data, "sender"):
         uid, ops = _parse_sender(row)
         _need(uid not in senders, "sender", f"duplicate uid {uid}")
         senders[uid] = ops
     base = data.get("api_base", DEFAULT_API_BASE)
-    _check_api_base(base)
-    assert isinstance(base, str)
-    return PublisherConfig(senders, base)
+    git = data.get("git_base", DEFAULT_GIT_BASE)
+    _check_base("api_base", base, DEFAULT_API_BASE)
+    _check_base("git_base", git, DEFAULT_GIT_BASE)
+    assert isinstance(base, str) and isinstance(git, str)
+    return PublisherConfig(senders, base, git)
 
 
 def _parse_sender(row: dict[str, object]) -> tuple[int, frozenset[str]]:
@@ -168,6 +172,8 @@ def dump_publisher(cfg: PublisherConfig) -> str:
     data: dict[str, object] = {"schema": _PUBLISHER}
     if cfg.api_base != DEFAULT_API_BASE:
         data["api_base"] = cfg.api_base
+    if cfg.git_base != DEFAULT_GIT_BASE:
+        data["git_base"] = cfg.git_base
     rows = [
         {"uid": uid, "operations": sorted(cfg.senders[uid])}
         for uid in sorted(cfg.senders)

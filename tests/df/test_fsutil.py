@@ -684,6 +684,11 @@ SUBPROCESS_CREATORS = {
         "sudo let it through, df-publish refuses the empty request and "
         "writes its journal line; root keeps the exit code and stdout length"
     ),
+    "sudo -n -u df-precheck df-precheck (publisher precheck client)": (
+        "the precheck's own protocol as its role (stage 2b): its snapshot "
+        "under its home, removed in finally or by the next run under its "
+        "lock; the request comes on stdin, the publisher keeps only stdout"
+    ),
     "darkfactory publisher perimeter-restore (restore, as df-publisher)": (
         "protocol restore of the role (Task 11r): its own files under "
         "perimeter/ (stage, set-aside/, restore.intent, events.sqlite); the "
@@ -718,6 +723,9 @@ PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
         "sudo -u df-exec test -r / -x (doctor roles.isolation, root)",
         "sudo -u <role> sudo df-publish perimeter-status (doctor, root)",
         "sudo -u df-review sudo df-publish merge (doctor publisher.foreign)",
+    ),
+    ("platform", "run_supervised", "subprocess.Popen", 1): (
+        "sudo -n -u df-precheck df-precheck (publisher precheck client)",
     ),
     ("admin_tree", "_archive", "subprocess.Popen", 1): (
         "git archive (admin site, root)",

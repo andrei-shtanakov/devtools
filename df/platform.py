@@ -273,6 +273,91 @@ def run_with_input(
     )
 
 
+@dataclass(frozen=True)
+class SupervisedResult:
+    """Outcome of `run_supervised`.
+
+    `status` is the exit code; `None` when there is none: the process was
+    still running when `wait` passed (`signal` is `None` too) or a signal
+    ended it (`signal`). `stdout` is at most `limit` bytes; `oversize=True`:
+    more came and was read and dropped. `elapsed`: seconds of supervision.
+    """
+
+    status: int | None
+    signal: int | None
+    stdout: bytes
+    oversize: bool
+    elapsed: float
+
+
+def run_supervised(
+    argv: Sequence[str],
+    data: bytes,
+    *,
+    limit: int,
+    wait: float,
+    env: Mapping[str, str],
+) -> SupervisedResult:
+    """Run `argv` with `data` on a stdin pipe, exactly `env`, stderr to
+    `/dev/null` and no other descriptor (`close_fds`); read stdout to EOF,
+    keeping `limit` bytes, and wait for the exit, all within `wait` seconds.
+
+    Nobody is ever signalled (plan decision 5): a command of another UID is
+    out of reach, so one still running at `wait` is only no longer awaited
+    and is left to its own bound (sudo's `command_timeout`); its stdout pipe
+    is closed. A command that cannot start is `status=LAUNCH_FAILED`."""
+    started = time.monotonic()
+    deadline = started + wait
+    try:
+        proc = subprocess.Popen(
+            list(argv),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=dict(env),
+            cwd="/",
+            close_fds=True,
+        )
+    except OSError:
+        return SupervisedResult(
+            LAUNCH_FAILED, None, b"", False, time.monotonic() - started
+        )
+    assert proc.stdin is not None and proc.stdout is not None
+    # A thread: a command that does not read must not block the wait.
+    threading.Thread(target=_feed, args=(proc.stdin, data), daemon=True).start()
+    try:
+        out, oversize = _drain(proc.stdout.fileno(), deadline, limit)
+        try:
+            code = proc.wait(max(deadline - time.monotonic(), 0.0))
+        except subprocess.TimeoutExpired:
+            code = None
+    finally:
+        proc.stdout.close()
+    elapsed = time.monotonic() - started
+    if code is not None and code < 0:
+        return SupervisedResult(None, -code, out, oversize, elapsed)
+    return SupervisedResult(code, None, out, oversize, elapsed)
+
+
+def _drain(fd: int, deadline: float, limit: int) -> tuple[bytes, bool]:
+    """Read `fd` to EOF or `deadline`: the first `limit` bytes, and whether
+    more came (read and dropped, so the writer is never stuck)."""
+    out = bytearray()
+    oversize = False
+    with selectors.DefaultSelector() as sel:
+        sel.register(fd, selectors.EVENT_READ)
+        while (left := deadline - time.monotonic()) > 0:
+            if not sel.select(left):
+                continue
+            chunk = _read_chunk(fd)
+            if not chunk:
+                break
+            room = max(limit - len(out), 0)
+            oversize = oversize or len(chunk) > room
+            out += chunk[:room]
+    return bytes(out), oversize
+
+
 def run_as(
     user: str,
     argv: Sequence[str],

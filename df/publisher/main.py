@@ -57,6 +57,8 @@ class Context:
     intent: Mapping[str, object] | None
     #: `publisher.toml`'s `api_base`: every GitHub call goes there.
     api_base: str
+    #: `publisher.toml`'s `git_base`: the precheck fetches history there.
+    git_base: str
     intent_written: bool = False
 
     def record_intent(self, payload: Mapping[str, object]) -> None:
@@ -159,7 +161,7 @@ def main(
     seen = _Seen()
     try:
         cfg = _load_config(layout)
-        seen.api_base = cfg.api_base
+        seen.api_base, seen.git_base = cfg.api_base, cfg.git_base
         who = _authenticate(layout, cfg, op, uid, gid, env)
     except Refused as exc:
         _journal_sender_refusal(layout, op, env, exc.reason)
@@ -186,8 +188,9 @@ class _Seen:
     request: Request | None = None
     digest: str | None = None
     key: str | None = None
-    #: `publisher.toml`'s `api_base`, once the file was read.
+    #: `publisher.toml`'s `api_base` and `git_base`, once the file was read.
     api_base: str | None = None
+    git_base: str | None = None
     #: A handler proved the action was not done (or a kept result is replayed).
     verified: bool = False
 
@@ -305,7 +308,7 @@ def _under_key(
         return Response(kept.outcome, kept.reason, kept.result, evidence)
     replayed = op not in store.NOT_REPLAYED
     earlier = store.read_intent(res) if replayed else None
-    if seen.api_base is None:
+    if seen.api_base is None or seen.git_base is None:
         raise Refused("publisher_config_invalid")
     ctx = Context(
         layout,
@@ -316,6 +319,7 @@ def _under_key(
         res,
         earlier,
         seen.api_base,
+        seen.git_base,
         earlier is not None,
     )
     resp = _run_handler(ctx, op, seen)
