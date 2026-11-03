@@ -77,7 +77,11 @@ MERGE_PERMISSIONS = {"contents": "write", "pull_requests": "write"}
 #: No `df-trust` binding before stage 3 (spec 5.5, rev 10).
 TRUST_ROOT: Mapping[str, str] = {"unavailable": "no_binding"}
 #: HTTP answers of the `PUT` that settle the one attempt (decision 8): a 4xx
-#: was not executed, so the only `PUT` of the request will not merge.
+#: was not executed, so the only `PUT` of the request will not merge (spec
+#: 5.4: a definite negative answer is a verified refusal). A transient 401,
+#: 403 or 404 (a rate limit, a permission hiccup) therefore costs
+#: availability, not safety: the request is refused for good and the operator
+#: retries with a new `request_id`.
 DEFINITE_PUT = frozenset({200, 401, 403, 404, 405, 409, 422})
 #: Of those, the ones that mean "not merged" (with the PR still open).
 _NOT_MERGEABLE = frozenset({405, 422})

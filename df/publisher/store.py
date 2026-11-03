@@ -320,6 +320,9 @@ def _has_phase(intents: Path, key: str) -> bool:
 
 
 def _present(path: Path) -> bool:
+    """Something may be at `path`: an `lstat` error other than "absent" is
+    `True`. Only for fail-closed questions ("is there state?", "is the phase
+    written?"); never for one whose `True` releases something (`_final`)."""
     try:
         os.lstat(path)
     except (FileNotFoundError, NotADirectoryError):
@@ -447,7 +450,16 @@ def _holder(path: Path) -> str | None:
 
 
 def _final(layout: Layout, key: str) -> bool:
-    return _present(layout.publisher_dir / "results" / f"{key}.json")
+    """The request has a kept final result: its result file is surely there
+    and a regular file. This releases an ownership, so it must fail the
+    other way from `_present`: any `lstat` error (EACCES, EIO, ...) or a
+    link is "no final result" -- the owner stays busy and `doctor` lists it,
+    never a takeover that could send a second `PUT`."""
+    try:
+        st = os.lstat(layout.publisher_dir / "results" / f"{key}.json")
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode)
 
 
 def pr_busy(layout: Layout, repository_id: int, pr: int, request_key: str) -> bool:

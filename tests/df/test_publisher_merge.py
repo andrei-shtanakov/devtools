@@ -8,7 +8,9 @@ GitHub; the next attempt is a new `main` call on the same disk."""
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
@@ -1440,6 +1442,49 @@ def test_stale_owner_with_final_result_taken_over(
     resp = run(world, capsys, request_id="req-B0000001", head_sha=SHA_B)
     assert resp.outcome == "done", resp
     assert holders == [b_key] and owner_file(world) is None
+
+
+@pytest.mark.parametrize("code", [errno.EACCES, errno.EIO])
+def test_unreadable_result_keeps_the_owner_busy(
+    world: World,
+    sgh: MergeGitHub,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    code: int,
+) -> None:
+    """PR #684 review: A's result is kept but cannot be `lstat`ed; that is
+    "no final result", so B gets `pr_busy`, `own_pr` takes nothing over,
+    doctor lists the ownership, and there is no second PUT."""
+    sgh.put_mode = "409"
+    monkeypatch.setattr(store, "result", _dying_result(monkeypatch, store.result))
+    crashes(world, capsys)
+    a_key = key_of(world)
+    result = world.lay.publisher_dir / "results" / f"{a_key}.json"
+    assert result.is_file()
+    real = os.lstat
+
+    def lstat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+        if Path(str(path)) == result:
+            raise OSError(code, os.strerror(code), str(path))
+        return real(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "lstat", lstat)
+    sgh.pr_head, sgh.put_mode = SHA_B, "ok"
+    other = run(world, capsys, request_id="req-B0000001", head_sha=SHA_B)
+    assert reason(other) == ("refused", "pr_busy")
+    assert not store.own_pr(world.lay, 7, 12, "f" * 64)
+    assert owner_file(world)["request_key"] == a_key  # type: ignore[index]
+    text = doctor._owners(doctor._Level2(world.snap, world.lay, True, product=7))
+    assert "PR 12" in text
+    assert len(sgh.puts) == 1
+
+
+def test_result_link_is_not_final(world: World) -> None:
+    results = world.lay.publisher_dir / "results"
+    results.mkdir(mode=0o700, exist_ok=True)
+    (results / ("a" * 64 + ".json")).symlink_to(world.lay.publisher_dir / "nowhere")
+    assert not store._final(world.lay, "a" * 64)
+    assert store.has_state(world.lay, "a" * 64)  # fail-closed the other way
 
 
 def test_owner_with_unknown_never_released(
