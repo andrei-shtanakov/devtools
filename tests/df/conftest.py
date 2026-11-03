@@ -397,10 +397,11 @@ def root_world(
     """A fresh root world (R90): `<R>`, the root uv copy, the profile pin
     through `install._profile` (R91); `df-build` removed afterwards."""
     from df import install
-    from tests.df.root_world import make_world, teardown_world
+    from tests.df.root_world import make_world, prime_on_install, teardown_world
 
     world = make_world(acceptance_top, fixture_repo, control_url)
     monkeypatch.setattr(install, "_profile", lambda _cfg: world.profile())
+    prime_on_install(monkeypatch)
     yield world
     out = stage1_out()
     keep = None
@@ -432,12 +433,18 @@ def installed_world(
     `df-build` fails a fresh world as infrastructure). Torn down like
     `root_world` at the end of the module."""
     from df import install
-    from tests.df.root_world import install_once, make_world, teardown_world
+    from tests.df.root_world import (
+        install_once,
+        make_world,
+        prime_on_install,
+        teardown_world,
+    )
 
     world = make_world(acceptance_top, fixture_repo, control_url)
     try:
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(install, "_profile", lambda _cfg: world.profile())
+            prime_on_install(mp)
             installed = install_once(world)
         yield installed
     finally:

@@ -19,6 +19,7 @@ import pytest
 from df import accept, admin, cli, fsutil, install, journal, launcher_entry, state
 from df import build as build_mod
 from df import platform as plat
+from df.admin_tree import SITE_SRC
 from df.config import (
     Account,
     InstallConfig,
@@ -405,15 +406,20 @@ def _active_state_problems(
 
 def unsynced_besides_checkout(world: World) -> list[str]:
     """`unsynced()` without what nothing syncs by design: root's checkout
-    (fetched again on every run), what is inside the build home
+    (fetched again on every run), the `site/` source cache
+    `admin-home/site-src` (re-checked on every use, 2b Task 5), what is
+    inside the build home
     (`cleanup_build_home`: «nothing is synced», spec 3.3) and a quarantined
     tree but for its name (df-build's tree, never a fact source: its
     content and its root's own mode and owner are df-build's -- root never
     syncs them; the name in the quarantine `cleanup_tree` syncs is checked)."""
     lay = world.lay
+    site_src = lay.admin_home / SITE_SRC
     scratch = tuple(
-        str(p.relative_to(lay.root)) + "/" for p in (lay.verify_dir, lay.build_home)
+        str(p.relative_to(lay.root)) + "/"
+        for p in (lay.verify_dir, lay.build_home, site_src)
     )
+    scratch_names = (str(site_src.relative_to(lay.root)),)
     quarantine = str(lay.quarantine.relative_to(lay.root)) + "/"
     named = world.m.durable_names(lay.quarantine)
 
@@ -424,7 +430,7 @@ def unsynced_besides_checkout(world: World) -> list[str]:
     return [
         p
         for p in world.m.unsynced()
-        if not p.startswith(scratch) and not quarantined(p)
+        if not p.startswith(scratch) and p not in scratch_names and not quarantined(p)
     ]
 
 

@@ -45,6 +45,7 @@ from df.paths import Layout
 from df.receive import CopyLimits
 from df.routes import RouteContext, implementation, run_route
 from tests.df.conftest import BUILD_UID, FakeLayout
+from tests.df.site_world import SYSTEM_GIT, prime_cache, write_checkout
 
 ID = "rel1"
 #: The one Python with a measured Tcl/Tk removal list (`build_mod.TCLTK_REMOVED`).
@@ -641,11 +642,15 @@ def fake_uv(fl: FakeLayout) -> Path:
 
 def devtools_ref(fl: FakeLayout) -> Path:
     """Root's trusted `devtools` checkout: a small `df/` under `verify` with
-    the dev entry module (the release's entry source, M-1)."""
+    the dev entry module (the release's entry source, M-1), the governance
+    closure, contracts and a `uv.lock` of the stand-in `site/` sources
+    (2b Task 5), whose cache `admin-home/site-src` is primed: no fetch."""
     ref = fl.layout.verify_dir / "devtools"
     (ref / "df").mkdir(parents=True, exist_ok=True)
     (ref / "df" / "__init__.py").write_text('"""admin code"""\n')
     shutil.copyfile(launcher_entry.__file__, ref / "df" / "launcher_entry.py")
+    write_checkout(ref)
+    prime_cache(fl.layout)
     return ref
 
 
@@ -662,7 +667,7 @@ def release_world(fl: FakeLayout) -> ReleaseEntry:
         admin.install_admin_python(
             lay, PY, uv=fake_uv(fl), platform=plat.detect_platform()
         )
-    admin.install_admin(lay, ID, devtools_ref=devtools_ref(fl))
+    admin.install_admin(lay, ID, devtools_ref=devtools_ref(fl), git=SYSTEM_GIT)
     entry = ReleaseEntry(
         ID,
         routes.release_digest(tree),
