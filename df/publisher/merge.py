@@ -147,9 +147,9 @@ def _template_glob(template: str) -> str:
 
 def _stop_regex(template: str, ws_id: str) -> re.Pattern[str]:
     """The rule of `governance.approval_branches.parse_stop_branch`: the
-    template with a known `ws_id`, a node of any non-empty text, a generation
+    template with a known `ws_id`, a node of one non-empty path segment, a generation
     of digits."""
-    groups = {"node": "(?P<node>.+)", "generation": "(?P<generation>[0-9]+)"}
+    groups = {"node": "(?P<node>[^/]+)", "generation": "(?P<generation>[0-9]+)"}
     out = []
     for part in re.split(r"(\{[A-Za-z_][A-Za-z0-9_]*\})", template):
         if _PLACEHOLDER.fullmatch(part) is None:

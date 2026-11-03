@@ -288,6 +288,7 @@ def test_stop_template_of_another_shape_is_unavailable(template: str) -> None:
         ("ws", "n", "stop/ws-n-g02"),  # not canonical
         ("ws", "n", "stop/ws--g2"),  # empty node
         ("ws", "n", "stop/ws-n-g2/extra"),  # extra segment
+        ("ws", "n", "stop/ws-a/b-g1"),  # node spans a slash
         ("a-b", "c-d", "stop/a-b-c-d-g12"),
         ("ws", "n", "stop/ws-n-g2"),
         ("ws", "n", "stop/ws-n-g"),

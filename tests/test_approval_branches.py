@@ -1,7 +1,11 @@
-"""Stop-ветка контракта `approval-branches` (Task 1 этапа 2b): python-половина
-и shell-читатель выводят форму из одного шаблона `APPROVAL_STOP_TEMPLATE`."""
+"""Stop-ветка контракта `approval-branches` (Task 1 этапа 2b): python-читатель
+(`governance.approval_branches`) выводит имя и разбор из шаблона
+`APPROVAL_STOP_TEMPLATE`. Shell-читателя ключа нет: `merge-pr.sh` stop-PR не
+маршрутизирует; шаблон читают издатель df и `act_node`."""
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 
@@ -41,7 +45,37 @@ def test_parse_stop_branch_rejects_other_ws() -> None:
         "spec/ws-n-g1",
         "xstop/ws-n-g1",
         "stop/ws-n-g1/extra",
+        "stop/ws-a/b-g1",  # node is one path segment
     ],
 )
 def test_parse_stop_branch_rejects_malformed(ref: str) -> None:
     assert ab.parse_stop_branch(ref, "ws") is None
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "stop/{ws_id}-{node}",  # no generation
+        "stop/{ws_id}-{node}-g{generation}-{node}",  # repeated
+        "stop/{ws_id}-{node}-g{generation}-{extra}",  # unknown
+        "stop/fixed",
+    ],
+)
+def test_stop_template_of_wrong_shape_is_refused(
+    template: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bad = tmp_path / "patterns.env"
+    bad.write_text(
+        ab.PATTERNS_PATH.read_text().replace(
+            "stop/{ws_id}-{node}-g{generation}", template
+        )
+    )
+    monkeypatch.setattr(ab, "PATTERNS_PATH", bad)
+    for call in (
+        ab.stop_template,
+        ab.stop_glob,
+        lambda: ab.stop_branch("ws", "n", 1),
+        lambda: ab.parse_stop_branch("stop/ws-n-g1", "ws"),
+    ):
+        with pytest.raises(RuntimeError, match="плейсхолдеры"):
+            call()

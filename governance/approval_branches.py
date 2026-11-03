@@ -44,6 +44,7 @@ _ADJACENT_STARS = re.compile(r"\*[-._]\*")
 _CANDIDATE_KEY = "APPROVAL_CANDIDATE_TEMPLATE"
 _FINALIZE_KEY = "APPROVAL_FINALIZE_SUFFIX"
 _STOP_KEY = "APPROVAL_STOP_TEMPLATE"
+_STOP_PLACEHOLDERS = ("{ws_id}", "{node}", "{generation}")
 
 
 def _read_key(key: str) -> str:
@@ -67,8 +68,18 @@ def finalize_suffix() -> str:
 
 
 def stop_template() -> str:
-    """Шаблон ветки stop-PR как он записан в SSOT."""
-    return _read_key(_STOP_KEY)
+    """Шаблон ветки stop-PR как он записан в SSOT.
+
+    Fail-closed: плейсхолдеры обязаны быть ровно `{ws_id}`, `{node}`,
+    `{generation}`, каждый по одному разу; иное — RuntimeError (а не молчаливая
+    подстановка с лишними аргументами)."""
+    template = _read_key(_STOP_KEY)
+    if sorted(_PLACEHOLDER.findall(template)) != sorted(_STOP_PLACEHOLDERS):
+        raise RuntimeError(
+            f"в {PATTERNS_PATH} {_STOP_KEY}={template!r}: ожидались плейсхолдеры "
+            "{ws_id}, {node}, {generation} ровно по одному разу"
+        )
+    return template
 
 
 def candidate_branch(ws_id: str, wave: int, step: int, attempt: int) -> str:
@@ -145,9 +156,9 @@ def stop_branch(ws_id: str, node: str, generation: int) -> str:
 
 
 def _stop_regex(template: str, ws_id: str) -> re.Pattern[str]:
-    """Регэксп шаблона с известным `ws_id`: узел — любая непустая строка,
+    """Регэксп шаблона с известным `ws_id`: узел — непустой сегмент пути (без `/`),
     поколение — цифры. Неизвестный плейсхолдер — KeyError, как в `format`."""
-    groups = {"node": "(?P<node>.+)", "generation": "(?P<generation>[0-9]+)"}
+    groups = {"node": "(?P<node>[^/]+)", "generation": "(?P<generation>[0-9]+)"}
     parts = re.split(r"(\{[A-Za-z_][A-Za-z0-9_]*\})", template)
     out = []
     for part in parts:
