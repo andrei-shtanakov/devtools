@@ -6,8 +6,14 @@ from pathlib import Path
 
 import pytest
 
+from df.admin_tree import CONTRACT_FILES, governance_files
+from df.paths import Layout
 from tests.df import live_install
-from tests.df.root_world import CORE_MANIFEST
+from tests.df.root_world import (
+    CORE_MANIFEST,
+    PRECHECK_SITE,
+    precheck_tree_problems,
+)
 from tests.df.test_cli import README, documented_command
 
 
@@ -63,3 +69,50 @@ def test_main_refuses_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(live_install.os, "geteuid", lambda: 0)
     assert live_install.main(["--out", str(tmp_path), "--work", str(tmp_path)]) == 2
     assert list(tmp_path.iterdir()) == []
+
+
+RELEASE_ID = "be2c76f20d0e-linux-x86_64-1"
+
+
+def _admin_tree(root: Path, shape: str) -> Layout:
+    """An installed admin tree under `root`: a precheck release's (`full`),
+    the legacy 335188f one (`df/` only, as `install_admin` makes it), or the
+    closure without `site/` (`no-site`)."""
+    layout = Layout(root)
+    tree = layout.admin_dir(RELEASE_ID)
+    files = ["df/__init__.py", "df/launcher_entry.py"]
+    if shape != "legacy":
+        files += [*governance_files(), *CONTRACT_FILES]
+    for rel in files:
+        (tree / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tree / rel).write_text("")
+    if shape == "full":
+        for name in PRECHECK_SITE:
+            (tree / "site" / name).mkdir(parents=True)
+    return layout
+
+
+def test_admin_precheck_accepts_a_precheck_tree(tmp_path: Path) -> None:
+    layout = _admin_tree(tmp_path, "full")
+    assert live_install.admin_precheck(layout, RELEASE_ID) == []
+
+
+@pytest.mark.parametrize(
+    ("shape", "named"),
+    [("legacy", "релиз без предпроверки"), ("no-site", "site")],
+)
+def test_admin_precheck_refuses(tmp_path: Path, shape: str, named: str) -> None:
+    """A pin back to a legacy devtools (or a tree without `site/`) fails the
+    live install: both live forms read `precheck_tree_problems`."""
+    layout = _admin_tree(tmp_path, shape)
+    with pytest.raises(live_install.Failure, match=named):
+        live_install.admin_precheck(layout, RELEASE_ID)
+    assert precheck_tree_problems(layout.admin_dir(RELEASE_ID)) != []
+
+
+def test_partial_closure_is_a_problem(tmp_path: Path) -> None:
+    """`act_precheck.py` with a closure module missing names the module."""
+    layout = _admin_tree(tmp_path, "full")
+    (layout.admin_dir(RELEASE_ID) / "governance" / "act_anon.py").unlink()
+    problems = precheck_tree_problems(layout.admin_dir(RELEASE_ID))
+    assert len(problems) == 1 and "governance/act_anon.py" in problems[0]

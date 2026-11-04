@@ -43,6 +43,7 @@ from tests.df.root_world import (
     infra,
     install_once,
     make_world,
+    precheck_tree_problems,
     teardown_world,
     write_evidence,
 )
@@ -81,7 +82,8 @@ def live_argv(uv: Path) -> list[str]:
 @pytest.mark.network  # the manifest, the members and their wheels
 def test_live_core_install(live_world: RootWorld) -> None:
     """`init` of profile `core` at `CORE_MANIFEST` commits; the release holds
-    every member at its manifest pin; `darkfactory doctor --json` reaches
+    every member at its manifest pin and its admin tree the precheck closure
+    (a pure read, not `doctor --product`); `darkfactory doctor --json` reaches
     level 1 with every check `ok`; each member's entrypoints run `--help`."""
     world, facts = live_world, {"platform": PLATFORM}
     try:
@@ -111,6 +113,9 @@ def _install_and_check(world: RootWorld, facts: dict[str, Any]) -> None:
     assert (record["manifest_repo"], record["manifest_sha"]) == CORE_MANIFEST
     assert record["profile"] == CORE_PROFILE
     assert {r["name"]: r["sha"] for r in record["repos"]} == pins, record["repos"]
+    problems = precheck_tree_problems(installed.layout.admin_dir(installed.release_id))
+    facts["admin_precheck"] = problems
+    assert problems == [], problems
     report = _doctor(world, facts)
     not_ok = [c for c in report["checks"] if c["status"] != doctor.OK]
     assert report["level1"] == "reached" and not_ok == [], not_ok
