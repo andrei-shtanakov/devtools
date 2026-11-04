@@ -200,6 +200,27 @@ def test_list_processes_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
     assert lister() == [] and calls == [Path("/proc")]
 
 
+def test_ps_bounded_by_a_short_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Final review m3: `ps` is bounded by `PS_TIMEOUT` (a few seconds), so
+    a hung listing cannot use up the margin between rung 1 and rung 3; its
+    timeout is a named problem of `reap`, never an exception."""
+    timeouts: list[object] = []
+
+    def hung(argv: list[str], **kw: object) -> plat.RunResult:
+        timeouts.append(kw.get("timeout"))
+        return plat.RunResult(-9, b"", b"", True, timed_out=True)
+
+    monkeypatch.setattr(plat, "detect_platform", lambda: "macos-arm64")
+    monkeypatch.setattr(plat, "run_command", hung)
+    assert 0 < precheck_reap.PS_TIMEOUT <= 5.0
+    with pytest.raises(ListingError, match=r"^ps: срок 3 с истёк$"):
+        REAL_LIST()
+    killed, problems = reap(UID, lister=REAL_LIST, killer=Host([]).killer, own=1)
+    assert killed == []
+    assert problems == ["процессы не прочитаны: ListingError: ps: срок 3 с истёк"]
+    assert timeouts == [precheck_reap.PS_TIMEOUT] * 2
+
+
 def test_vanished_process_skipped() -> None:
     """A leftover gone before the kill (`ProcessLookupError`) is neither
     killed nor a problem."""

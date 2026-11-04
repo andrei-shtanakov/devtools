@@ -42,6 +42,11 @@ REAP_AFTER = PRECHECK_WAIT + 30.0
 REAP_WAIT = 5.0
 ROOT_UID = 0
 PS = "/bin/ps"
+#: Seconds one `ps` listing may take. `reap` lists before the program
+#: starts its `DEADLINE` (twice, then while it waits for the killed; a
+#: failed listing ends the wait), so a hung `ps` must not use up the margin
+#: between rung 1 and rung 3 (50 s). A timeout is `ListingError`.
+PS_TIMEOUT = 3.0
 PS_COLUMNS = "pid=,ppid=,ruid=,etime=,stat="
 _ETIME = re.compile(r"(?:(?:(\d+)-)?(\d+):)?(\d+):(\d+)", re.ASCII)
 _PROC_STAT = re.compile(
@@ -77,7 +82,9 @@ def list_processes() -> list[ProcInfo]:
     """Every process of the host (`/proc` on Linux, `ps` on macOS)."""
     if plat.detect_platform() == "linux-x86_64":
         return _proc_processes(Path("/proc"))
-    result = plat.run_command([PS, "-A", "-o", PS_COLUMNS], timeout=30.0)
+    result = plat.run_command([PS, "-A", "-o", PS_COLUMNS], timeout=PS_TIMEOUT)
+    if result.timed_out:
+        raise ListingError(f"ps: срок {PS_TIMEOUT:g} с истёк")
     if not result.launched or result.returncode != 0:
         raise ListingError(f"ps: код {result.returncode}")
     return parse_ps(result.stdout.decode("ascii", "replace"))
