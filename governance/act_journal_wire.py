@@ -83,27 +83,39 @@ _INVARIANTS = (
         "SELECT count(*) FROM trust_observations WHERE route NOT IN "
         "('perimeter-status', 'trust-status', 'merge')"
     ),
-    (
-        "SELECT count(*) FROM trust_observations WHERE (CASE WHEN "
-        "json_valid(event_ids) THEN json_type(event_ids) END) IS NOT 'array' OR "
-        "(CASE WHEN json_valid(binding) THEN json_type(binding) END) IS NOT "
-        "'object' OR (CASE WHEN json_valid(binding) THEN json_type(binding, "
-        "'$.df_trust_repository_id') END) IS NOT 'integer' OR (CASE WHEN "
-        "json_valid(binding) THEN json_type(binding, "
-        "'$.approval_policy_repository_id') END) IS NOT 'integer'"
-    ),
-    (
-        "SELECT count(*) FROM trust_observations AS o, json_each(COALESCE(CASE WHEN"
-        " json_valid(o.event_ids) THEN CASE json_type(o.event_ids) WHEN 'array' "
-        "THEN o.event_ids END END, '[]')) AS j WHERE j.type != 'integer' OR j.value"
-        " NOT IN (SELECT event_id FROM events)"
-    ),
     "SELECT count(*) FROM trust_heads WHERE row_version < 1",
     (
         "SELECT count(*) FROM trust_heads WHERE finding_event_id IS NOT NULL AND "
         "finding_event_id NOT IN (SELECT event_id FROM events)"
     ),
 )
+#: The repository ids every observation's `binding` names.
+_BINDING_IDS = ("df_trust_repository_id", "approval_policy_repository_id")
+
+
+def _observations_ok(conn: sqlite3.Connection) -> bool:
+    """The JSON of every observation row, checked in Python (SQLite's JSON
+    functions are not guaranteed below 3.38): `event_ids` a list of ids of
+    existing events, `binding` an object with integer repository ids."""
+    events = {row[0] for row in conn.execute("SELECT event_id FROM events")}
+    rows = conn.execute("SELECT event_ids, binding FROM trust_observations")
+    for raw_ids, raw_binding in rows:
+        ids, binding = _json(raw_ids), _json(raw_binding)
+        if not isinstance(ids, list) or not isinstance(binding, dict):
+            return False
+        if any(type(i) is not int or i not in events for i in ids):
+            return False
+        if any(type(binding.get(k)) is not int for k in _BINDING_IDS):
+            return False
+    return True
+
+
+def _json(raw: str) -> object:
+    """`raw` parsed; `None` when it is not JSON text (any type)."""
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _now() -> str:
@@ -133,6 +145,8 @@ def _refusal(conn: sqlite3.Connection) -> str | None:
         if meta["schema"] != SCHEMA_VERSION or meta["restored"] not in RESTORED:
             return "integrity"
         if any(conn.execute(sql).fetchone()[0] for sql in _INVARIANTS):
+            return "integrity"
+        if not _observations_ok(conn):
             return "integrity"
         if conn.execute("SELECT count(*) FROM events").fetchone()[0] > MAX_EVENTS:
             return "too_many_events"

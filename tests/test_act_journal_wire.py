@@ -289,6 +289,14 @@ def test_open_checks_are_the_publishers() -> None:
     assert act_journal_wire.MAX_EVENTS == store.MAX_EVENTS
     assert act_journal_wire.SCHEMA_VERSION == store.SCHEMA_VERSION
     assert act_journal_wire._INVARIANTS == store._INVARIANTS
+    for sql in act_journal_wire._INVARIANTS:  # JSON is checked in Python
+        assert "json_" not in sql.lower(), sql
+    import inspect
+
+    assert act_journal_wire._BINDING_IDS == store._BINDING_IDS
+    for name in ("_observations_ok", "_json"):  # the same Python check
+        mine = inspect.getsource(getattr(act_journal_wire, name))
+        assert mine == inspect.getsource(getattr(store, name))
     conn = sqlite3.connect(":memory:")
     for sql in store.SCHEMA:
         conn.execute(sql)
@@ -328,6 +336,34 @@ def _meta_version(tmp_path, monkeypatch, full, narrow, head) -> None:
     _sql(narrow, "UPDATE meta SET value = '3' WHERE key = 'schema'")
 
 
+def _observation(full, narrow, sql: str) -> None:
+    """One observation through the publisher's code, then `sql` on its row."""
+    from df.publisher import perimeter as store
+    from df.publisher import trust_state
+    from df.stage2_config import TrustBinding
+
+    binding = TrustBinding("github.com", 11, "owner/df-trust", "main", 22, "public")
+    ctx = trust_state.ctx_id("trust-status", binding, "a", "r", None, "1" * 40, None)
+    with store.open_db(full.layout) as db:
+        trust_state.open_observation(
+            db, binding.root_id, ctx, route="trust-status", binding=binding,
+            admin_digest="a", rules="r", accepted=None, head="1" * 40, policy=None,
+        )  # fmt: skip
+    _sql(narrow, f"UPDATE trust_observations SET {sql}")
+
+
+def _observation_type(tmp_path, monkeypatch, full, narrow, head) -> None:
+    _observation(full, narrow, "event_ids = '{}'")
+
+
+def _observation_event(tmp_path, monkeypatch, full, narrow, head) -> None:
+    _observation(full, narrow, "event_ids = '[7]'")
+
+
+def _observation_binding(tmp_path, monkeypatch, full, narrow, head) -> None:
+    _observation(full, narrow, "binding = '{}'")
+
+
 def _marker_link(tmp_path, monkeypatch, full, narrow, head) -> None:
     (narrow.base / "events.sqlite").unlink()
     (narrow.base / "created").unlink()
@@ -345,10 +381,23 @@ def _intent_link(tmp_path, monkeypatch, full, narrow, head) -> None:
         (_schema_drift, "integrity"),
         (_bad_state, "integrity"),
         (_meta_version, "integrity"),
+        (_observation_type, "integrity"),
+        (_observation_event, "integrity"),
+        (_observation_binding, "integrity"),
         (_intent_link, "restore_incomplete"),
         (_marker_link, "lost"),
     ],
-    ids=["max_events", "schema", "invariant", "meta", "intent_symlink", "marker_link"],
+    ids=[
+        "max_events",
+        "schema",
+        "invariant",
+        "meta",
+        "observation_type",
+        "observation_event",
+        "observation_binding",
+        "intent_symlink",
+        "marker_link",
+    ],
 )
 def test_both_clients_refuse_the_same_store(
     tmp_path: Path, pair, monkeypatch, spoil, reason: str

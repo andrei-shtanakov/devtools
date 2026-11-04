@@ -510,6 +510,14 @@ def test_conservative_needs_an_epoch_rule(lay: Layout) -> None:
             trust_state.conservative(db, ROOT, obs.ctx, obs.id)  # type: ignore[call-arg]
 
 
+def test_invariants_use_no_sql_json_functions() -> None:
+    """JSON1 is not guaranteed on SQLite 3.31-3.37 (or a build without it):
+    a `json_` call in the open checks would make every open fail. JSON is
+    checked in Python (`_observations_ok`) instead."""
+    for sql in perimeter._INVARIANTS:  # noqa: SLF001
+        assert "json_" not in sql.lower(), sql
+
+
 @pytest.mark.parametrize(
     "sql",
     [
@@ -520,6 +528,12 @@ def test_conservative_needs_an_epoch_rule(lay: Layout) -> None:
         "UPDATE trust_observations SET binding = 'not json'",
         "UPDATE trust_observations SET binding = '[]'",
         "UPDATE trust_observations SET binding = '{}'",
+        "UPDATE trust_observations SET event_ids = 5",
+        "UPDATE trust_observations SET event_ids = '[true]'",
+        (
+            "UPDATE trust_observations SET binding = "
+            '\'{"df_trust_repository_id": "5", "approval_policy_repository_id": 6}\''
+        ),
     ],
 )
 def test_corrupt_observation_row_is_integrity(lay: Layout, sql: str) -> None:

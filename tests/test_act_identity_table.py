@@ -1454,11 +1454,42 @@ JUDGMENT = {
             '"integrity"',
         ),
         r(
+            "observation_json",
+            "act_journal_wire._refusal",
+            "not _observations_ok(conn)",
+            f"{W}::test_both_clients_refuse_the_same_store[observation_event]",
+            '"integrity"',
+        ),
+        r(
             "max_events",
             "act_journal_wire._refusal",
             "> MAX_EVENTS",
             f"{W}::test_both_clients_refuse_the_same_store[max_events]",
             '"too_many_events"',
+        ),
+    ),
+    # JSON строк наблюдений — копия `perimeter._observations_ok` (схема 2, Task 8)
+    "act_journal_wire._observations_ok": (
+        r(
+            "observation_type",
+            "act_journal_wire._observations_ok",
+            "not isinstance(ids, list)",
+            f"{W}::test_both_clients_refuse_the_same_store[observation_type]",
+            '"integrity"',
+        ),
+        r(
+            "observation_event",
+            "act_journal_wire._observations_ok",
+            "i not in events",
+            f"{W}::test_both_clients_refuse_the_same_store[observation_event]",
+            '"integrity"',
+        ),
+        r(
+            "observation_binding",
+            "act_journal_wire._observations_ok",
+            "binding.get(k)) is not int",
+            f"{W}::test_both_clients_refuse_the_same_store[observation_binding]",
+            '"integrity"',
         ),
     ),
     "act_journal_wire.journal_for_premerge": (
@@ -4015,6 +4046,7 @@ NOT_JUDGMENT = {
     "act_journal_wire._now": _BUILD,
     "act_journal_wire._root_id": _BUILD,
     "act_journal_wire.schema_digest": "отпечаток схемы базы; сверяет `_refusal`",
+    "act_journal_wire._json": "разбор JSON строки наблюдения; `None` — не JSON",
     "act_journal_wire.WireJournal.__init__": _BUILD,
     "act_journal_wire.DevStoreJournal.__init__": _BUILD,
     "act_status._rel": _BUILD,
@@ -4106,6 +4138,9 @@ GUARD_EXEMPT = {
     "approval_ledger.record_audit": "`False` — событие уже записано (идемпотентность)",
     "act_node.manifest_file": "`None` — заявка без маркера (legacy), не отказ",
     "act_barrier._pending": "`False` — файл без frontmatter не узел бандла (не отказ)",
+    "act_journal_wire._json": (
+        "`None` — не JSON; отказ решает проверка типа в `_observations_ok`"
+    ),
 }
 
 
