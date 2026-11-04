@@ -368,6 +368,35 @@ def test_installer_refuses_pin_with_unlisted_import(fl: FakeLayout, where: str) 
         admin.expected_admin_digest(ref, layout=lay, git=SYSTEM_GIT)
 
 
+@pytest.mark.parametrize("file_kept", [False, True], ids=["file-gone", "file-kept"])
+def test_installer_requires_2b_files_of_the_pin(
+    fl: FakeLayout, file_kept: bool
+) -> None:
+    """Fix round 1: a pin whose own list omits a 2b module (here
+    `governance.act_time`) -- whether the pin also lacks its file or not --
+    is refused at install, naming the file, and no `admin/<id>` is made:
+    `precheck serve` needs every 2b file (v1 runs on them), so such a tree
+    could serve nothing (2b refused it at install too)."""
+    lay = fl.layout
+    ref = devtools_ref(fl)
+    modules = [m for m in LEGACY_2B.modules if m != "governance.act_time"]
+    _write_list(
+        ref,
+        f"{_V1}modules = {json.dumps(modules)}\n"
+        f"contract_files = {json.dumps(list(LEGACY_2B.contract_files))}\n",
+    )
+    if not file_kept:
+        (ref / "governance" / "act_time.py").unlink()
+    with pytest.raises(TreeError, match=r"governance/act_time\.py"):
+        admin_tree.release_has_precheck(ref)
+    with pytest.raises(StepFailed, match=r"governance/act_time\.py") as exc:
+        admin.install_admin(lay, ID, devtools_ref=ref, git=SYSTEM_GIT)
+    assert exc.value.step == "admin"
+    assert not os.path.lexists(lay.admin_dir(ID))
+    with pytest.raises(TreeError, match=r"governance/act_time\.py"):
+        admin.expected_admin_digest(ref, layout=lay, git=SYSTEM_GIT)
+
+
 @pytest.mark.parametrize(
     "source,needle",
     [

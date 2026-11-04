@@ -1106,7 +1106,9 @@ def _precheck_chain(ctx: _Level2) -> str:
     the program, its `site/` and imports; anything else is «нарушено» with
     its cause -- also a refusal over a tree an older installer built
     without files of its list (`admin_tree.INCOMPLETE_TREE` on stderr: v1
-    served, v2 refused; 3a Task 1), which names the reinstall. Like every
+    served, v2 refused; 3a Task 1), which names the reinstall; with stderr
+    truncated that line may be lost, so the refusal proves nothing
+    («данные недоступны»). Like every
     `precheck serve`, the probe reaps leftovers first (`roles.precheck` has
     listed them before)."""
     result = publisher_precheck(ctx.layout)
@@ -1116,6 +1118,8 @@ def _precheck_chain(ctx: _Level2) -> str:
     tail = _tail(result)
     refused = result.returncode == PRECHECK_EXIT and tail.startswith(PRECHECK_REFUSAL)
     if refused and not result.stdout:
+        if result.stderr_truncated:  # the incomplete-tree line may be dropped
+            raise _Outcome(UNAVAILABLE, f"{what}: stderr усечён, отказ не доказан")
         incomplete = _incomplete_tree(result)
         if incomplete:
             raise _Outcome(BROKEN, f"{what}: {incomplete}")

@@ -275,14 +275,22 @@ def release_has_precheck(devtools_ref: Path) -> bool:
     """Whether the checkout carries the precheck program (spec 3.9 rev 10).
 
     No `governance/act_precheck.py`: a legacy release (`False`), its admin
-    tree is `df/` only and `precheck serve` refuses on it. With it, every
-    file of its list (`load_tree_list`) must be there (`True`); a partial
-    tree is `TreeError` naming what is missing -- never a silent fallback.
-    Modules of the closure an older release has for other reasons do not
-    make it a precheck release."""
+    tree is `df/` only and `precheck serve` refuses on it. With it, its list
+    (`load_tree_list`) must keep every file of `LEGACY_2B` (v1 runs on
+    them; `precheck serve` refuses a tree without them) and every listed
+    file must be there (`True`); otherwise `TreeError` naming the files --
+    never a silent fallback. Modules of the closure an older release has
+    for other reasons do not make it a precheck release."""
     if not os.path.lexists(devtools_ref / PRECHECK_FILE):
         return False
-    missing = tree_problems(devtools_ref, load_tree_list(devtools_ref))
+    listing = load_tree_list(devtools_ref)
+    unlisted = [rel for rel in LEGACY_2B.files() if rel not in listing.files()]
+    if unlisted:
+        raise TreeError(
+            f"{devtools_ref}: {TREE_LIST} без файлов предпроверки 2b: "
+            + ", ".join(unlisted)
+        )
+    missing = tree_problems(devtools_ref, listing)
     if missing:
         raise TreeError(
             f"{devtools_ref}: неполное замыкание предпроверки, нет: "
