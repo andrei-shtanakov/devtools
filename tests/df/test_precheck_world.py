@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -43,8 +44,10 @@ from tests.df.precheck_world import (
     processes,
     silent_server,
 )
+from tests.df.test_cli import environ, fresh_governance  # noqa: F401 - fixtures
 
 FULL_NAME = "df-fixture/product"
+GIT = Path(str(shutil.which("git"))).resolve()
 TOKEN = "ghs_fixtureLocalTokenNotASecret"
 
 
@@ -95,7 +98,26 @@ def _verdict(
     pytest.importorskip("steward")
     from governance import act_precheck
 
-    request = {
+    request = _request(ask, fake, git_base)
+    home.mkdir(exist_ok=True)
+    out = io.StringIO()
+    raw = io.BytesIO(json.dumps(request).encode())
+    code = act_precheck.serve(
+        raw,
+        out,
+        admin_digest="sha256:" + "a" * 64,
+        home=home,
+        complete_v2=True,
+        gh=None,
+        git=GIT,
+    )
+    assert code == 0, out.getvalue()
+    return json.loads(out.getvalue())
+
+
+def _request(ask: Ask, fake: FakeGitHub, git_base: str) -> dict[str, object]:
+    """The v1 stop request the client would send for `ask`."""
+    return {
         "schema": "df/precheck-request/v1",
         "nonce": "0123456789abcdef0123456789abcdef",
         "kind": "stop",
@@ -111,14 +133,6 @@ def _verdict(
         "api_base": fake.url,
         "git_base": git_base,
     }
-    home.mkdir(exist_ok=True)
-    out = io.StringIO()
-    raw = io.BytesIO(json.dumps(request).encode())
-    code = act_precheck.serve(
-        raw, out, admin_digest="sha256:" + "a" * 64, home=home, complete_v2=True
-    )
-    assert code == 0, out.getvalue()
-    return json.loads(out.getvalue())
 
 
 def test_world_current_stop_allowed_stale_refused(
@@ -159,6 +173,43 @@ def test_world_git_refuses_a_revoked_token(
     verdict = _verdict(tmp_path / "home", current, fake, git.base)
     assert verdict["outcome"] == "unset"
     assert git.log and not any(ok for _path, ok in git.log)
+
+
+@pytest.mark.usefixtures("environ", "fresh_governance")
+def test_no_gh_no_binding_stop_served(
+    tmp_path: Path,
+    fake: FakeGitHub,
+    product: tuple[ProductRepo, Ask, Ask, TokenGitServer],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An install without `gh` and without `trust.toml` (a 2b host after
+    3a): the real `precheck serve` hands the program `gh=None` and the
+    approved `git`, and a stop is judged as in 2b -- `allow` for the current
+    generation, read through git at that path."""
+    pytest.importorskip("steward")
+    from df import admin_tree
+    from tests.df.test_cli import _precheck, _precheck_world
+
+    _repo, current, _stale, git = product
+    lay, read = _precheck_world(tmp_path / "df", os.getuid())
+    tree = lay.admin_dir("r1")
+    checkout = Path(admin_tree.__file__).resolve().parents[1]
+    listed = admin_tree.load_tree_list(checkout)
+    for rel in (*listed.files(), admin_tree.TREE_LIST):
+        (tree / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(checkout / rel, tree / rel)
+    lay.role_home("df-precheck").mkdir(parents=True)
+    assert not (lay.etc / "trust.toml").exists()
+    sys.path.insert(0, str(tree))
+    request = _request(current, fake, git.base)
+    stdin = io.TextIOWrapper(io.BytesIO(json.dumps(request).encode()))
+    monkeypatch.setattr(sys, "stdin", stdin)
+    assert _precheck(lay, read) == 0
+    out, err = capsys.readouterr()
+    verdict = json.loads(out)
+    assert (verdict["outcome"], verdict["reason"]) == ("allow", ""), err
+    assert git.log and all(ok for _path, ok in git.log)
 
 
 def test_silent_server_accepts_and_never_answers() -> None:

@@ -220,13 +220,20 @@ def serve(
     admin_digest: str,
     home: Path,
     complete_v2: bool,
+    gh: Path | None,
+    git: Path,
     deps: PrecheckDeps | None = None,
 ) -> int:
     """Answer one request: 0 with a verdict on stdout, 2 without one (bad request).
 
     `admin_digest` goes into the verdict verbatim; `home` is the role's existing
     home directory (snapshots and lock live there); `complete_v2` — the admin tree
-    holds every file of its list (else v2 is refused `tree_incomplete`)."""
+    holds every file of its list (else v2 is refused `tree_incomplete`). `gh` and
+    `git` are the approved absolute paths of `install.toml` that `precheck serve`
+    passes (df spec 3.10 rev 11): git runs only at `git`; `gh` (`None` — no history
+    profile) is the v2 program's, which reads the history token with
+    `partial(act_trust.history_token_at, gh=gh, role_home=home)` (stage 3a Task 7;
+    v1 never runs `gh`)."""
     deps = deps or DEFAULT_DEPS
     deadline = deps.now() + DEADLINE
     try:
@@ -237,7 +244,7 @@ def serve(
     if isinstance(request, RequestV2):
         answer = verdict_v2(request, admin_digest, complete_v2=complete_v2)
     else:
-        outcome, reason = _decide(request, home, deps, deadline)
+        outcome, reason = _decide(request, home, git, deps, deadline)
         reason = reason.replace(request.token, "[token]")
         if len(reason) > MAX_REASON:
             reason = reason[:MAX_REASON] + TRUNCATED
@@ -350,11 +357,15 @@ def verdict(
 
 
 def _decide(
-    request: PrecheckRequest, home: Path, deps: PrecheckDeps, deadline: float
+    request: PrecheckRequest,
+    home: Path,
+    git: Path,
+    deps: PrecheckDeps,
+    deadline: float,
 ) -> tuple[str, str]:
     """(outcome, reason) of the kind; read failures and the deadline — `unset`."""
     try:
-        return _judge_stop(request, home, deps, deadline)
+        return _judge_stop(request, home, git, deps, deadline)
     except DeadlineExceeded:
         return UNSET, "deadline"
     except OPS_FAILURES as exc:
@@ -362,12 +373,16 @@ def _decide(
 
 
 def _judge_stop(
-    request: PrecheckRequest, home: Path, deps: PrecheckDeps, deadline: float
+    request: PrecheckRequest,
+    home: Path,
+    git: Path,
+    deps: PrecheckDeps,
+    deadline: float,
 ) -> tuple[str, str]:
     target = _stop_target(request.changes, request.head_ref)
     if isinstance(target, str):
         return REFUSE, target
-    with _snapshot(request, home, deps, deadline) as ops:
+    with _snapshot(request, home, git, deps, deadline) as ops:
         return _stop_in_history(ops, request, target)
 
 
@@ -430,10 +445,14 @@ def _stop_in_history(
 
 @contextlib.contextmanager
 def _snapshot(
-    request: PrecheckRequest, home: Path, deps: PrecheckDeps, deadline: float
+    request: PrecheckRequest,
+    home: Path,
+    git: Path,
+    deps: PrecheckDeps,
+    deadline: float,
 ) -> Iterator[SnapshotHistory]:
     """`SnapshotHistory` over base and PR head in `home/precheck-snapshots/<nonce>`,
-    removed on exit; the lock is held shared throughout."""
+    git at `git`, removed on exit; the lock is held shared throughout."""
     root = home / SNAPSHOTS
     with _locked(home, root, deadline, deps.now):
         work = root / request.nonce
@@ -445,6 +464,7 @@ def _snapshot(
                 request.full_name,
                 refs,
                 request.token,
+                git=git,
                 git_base=request.git_base,
                 deadline=deadline,
                 clock=deps.now,
@@ -454,6 +474,7 @@ def _snapshot(
                 git_dir,
                 transport,
                 request.token,
+                git=git,
                 git_base=request.git_base,
                 deadline=deadline,
                 clock=deps.now,

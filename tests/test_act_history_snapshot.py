@@ -8,6 +8,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import socket
 import subprocess
 import threading
@@ -58,6 +59,8 @@ BASIC = "Basic " + base64.b64encode(f"x-access-token:{TOKEN}".encode()).decode()
 B64 = BASIC.removeprefix("Basic ")
 API = "https://api.forge.test/"
 MASTER = "refs/heads/master"
+#: git снимка — только по абсолютному пути (договор запуска df, спека B §3.10 rev 11).
+GIT = Path(str(shutil.which("git"))).resolve()
 ALLOWED = {
     "first_parent_changes",
     "show_file",
@@ -242,15 +245,21 @@ def _snapshot(
     home = tmp_path / "home"
     home.mkdir()
     git_dir = open_snapshot(
-        home, SLUG, [MASTER], TOKEN, git_base=server.base, deadline=_soon()
+        home, SLUG, [MASTER], TOKEN, git=GIT, git_base=server.base, deadline=_soon()
     )
     transport = TokenTransport(TOKEN, api_base=API, opener=forge)
     if clock is None:
         return SnapshotHistory(
-            git_dir, transport, TOKEN, git_base=server.base, deadline=_soon()
+            git_dir, transport, TOKEN, git=GIT, git_base=server.base, deadline=_soon()
         )
     return SnapshotHistory(
-        git_dir, transport, TOKEN, git_base=server.base, deadline=100.0, clock=clock
+        git_dir,
+        transport,
+        TOKEN,
+        git=GIT,
+        git_base=server.base,
+        deadline=100.0,
+        clock=clock,
     )
 
 
@@ -337,7 +346,7 @@ def test_direct_commit_is_not_delivery(
 def test_unlisted_method_raises(tmp_path: Path) -> None:
     transport = TokenTransport(TOKEN, api_base=API, opener=Forge({}))
     snap = SnapshotHistory(
-        tmp_path, transport, TOKEN, git_base="http://x", deadline=_soon()
+        tmp_path, transport, TOKEN, git=GIT, git_base="http://x", deadline=_soon()
     )
     public = {n for n in dir(snap) if not n.startswith("_")}
     assert public == ALLOWED
@@ -437,6 +446,7 @@ def test_git_argv_and_config_have_no_token(
             SLUG,
             ["refs/heads/absent"],
             TOKEN,
+            git=GIT,
             git_base=server.base,
             deadline=_soon(),
         )
@@ -489,6 +499,7 @@ def test_fetch_respects_deadline(
                 SLUG,
                 [MASTER],
                 TOKEN,
+                git=GIT,
                 git_base=f"http://127.0.0.1:{silent.getsockname()[1]}",
                 deadline=_soon(1.5),
             )
@@ -513,7 +524,13 @@ def test_expired_deadline_spawns_no_git(
     _no_spawn(monkeypatch)
     with pytest.raises(DeadlineExceeded, match="git: deadline passed"):
         open_snapshot(
-            tmp_path, SLUG, [MASTER], TOKEN, git_base="http://x", deadline=_soon(-1)
+            tmp_path,
+            SLUG,
+            [MASTER],
+            TOKEN,
+            git=GIT,
+            git_base="http://x",
+            deadline=_soon(-1),
         )
     assert not (tmp_path / "repo.git").exists()
 
@@ -524,7 +541,13 @@ def test_open_snapshot_refuses_bad_full_name(
     _no_spawn(monkeypatch)
     with pytest.raises(ValueError, match="full_name 'owner' is not owner/repo"):
         open_snapshot(
-            tmp_path, "owner", [MASTER], TOKEN, git_base="http://x", deadline=_soon()
+            tmp_path,
+            "owner",
+            [MASTER],
+            TOKEN,
+            git=GIT,
+            git_base="http://x",
+            deadline=_soon(),
         )
     assert not (tmp_path / "repo.git").exists()
 
@@ -540,9 +563,98 @@ def test_open_snapshot_refuses_bad_refs(
     _no_spawn(monkeypatch)
     with pytest.raises(ValueError, match="are not full ref names"):
         open_snapshot(
-            tmp_path, SLUG, refs, TOKEN, git_base="http://x", deadline=_soon()
+            tmp_path, SLUG, refs, TOKEN, git=GIT, git_base="http://x", deadline=_soon()
         )
     assert not (tmp_path / "repo.git").exists()
+
+
+@pytest.mark.parametrize(
+    "git", ["git", "bin/git", ""], ids=["bare", "relative", "empty"]
+)
+def test_git_absolute_path_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git: str
+) -> None:
+    """Договор запуска df (спека B §3.10 rev 11): git — только по абсолютному пути;
+    иначе `ValueError` до любого запуска, без поиска в `PATH`."""
+    _no_spawn(monkeypatch)
+    with pytest.raises(ValueError, match="is not an absolute path"):
+        open_snapshot(
+            tmp_path,
+            SLUG,
+            [MASTER],
+            TOKEN,
+            git=Path(git),
+            git_base="http://x",
+            deadline=_soon(),
+        )
+    assert not (tmp_path / "repo.git").exists()
+    transport = TokenTransport(TOKEN, api_base=API, opener=Forge({}))
+    with pytest.raises(ValueError, match="is not an absolute path"):
+        SnapshotHistory(
+            tmp_path,
+            transport,
+            TOKEN,
+            git=Path(git),
+            git_base="http://x",
+            deadline=_soon(),
+        )
+
+
+def _wrapped_git(tmp_path: Path) -> tuple[Path, Path]:
+    """git по абсолютному пути вне `PATH`: обёртка пишет argv в журнал и исполняет
+    настоящий git; в `PATH` процесса — отравленный `git`, который падает."""
+    log = tmp_path / "git.log"
+    wrapper = tmp_path / "approved" / "git"
+    wrapper.parent.mkdir()
+    wrapper.write_text(f'#!/bin/sh\necho "$PATH" >> {log}\nexec {GIT} "$@"\n')
+    wrapper.chmod(0o755)
+    poison = tmp_path / "poison"
+    poison.mkdir()
+    (poison / "git").write_text("#!/bin/sh\nexit 97\n")
+    (poison / "git").chmod(0o755)
+    return wrapper, poison
+
+
+def test_snapshot_history_git_by_path(
+    tmp_path: Path,
+    product: Product,
+    server: GitServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`open_snapshot` и методы `SnapshotHistory` запускают git ровно по `git=`
+    (argv[0]); `PATH` git — его каталог, `/usr/bin`, `/bin`, не `PATH` процесса
+    (отравленный `git` там не запускается)."""
+    product.publish({})
+    head = _git(product.work, "rev-parse", "HEAD")
+    wrapper, poison = _wrapped_git(tmp_path)
+    monkeypatch.setenv("PATH", f"{poison}:{os.environ['PATH']}")
+    argvs: list[str] = []
+    real = subprocess.Popen
+
+    def spy(args: list[str], **kw: Any) -> subprocess.Popen:
+        argvs.append(args[0])
+        return real(args, **kw)
+
+    monkeypatch.setattr(subprocess, "Popen", spy)
+    home = tmp_path / "home"
+    home.mkdir()
+    git_dir = open_snapshot(
+        home,
+        SLUG,
+        [MASTER],
+        TOKEN,
+        git=wrapper,
+        git_base=server.base,
+        deadline=_soon(),
+    )
+    transport = TokenTransport(TOKEN, api_base=API, opener=Forge({}))
+    snap = SnapshotHistory(
+        git_dir, transport, TOKEN, git=wrapper, git_base=server.base, deadline=_soon()
+    )
+    assert snap.rev_parse("", MASTER) == head
+    assert argvs == [str(wrapper)] * 4  # init, config, fetch, rev-parse
+    paths = (tmp_path / "git.log").read_text().split()
+    assert paths == [f"{wrapper.parent}:/usr/bin:/bin"] * 4
 
 
 def test_fetch_failure_is_os_error(
@@ -555,6 +667,7 @@ def test_fetch_failure_is_os_error(
             SLUG,
             ["refs/heads/absent"],
             TOKEN,
+            git=GIT,
             git_base=server.base,
             deadline=_soon(),
         )
@@ -568,7 +681,7 @@ def test_fetch_failure_is_os_error(
 def _rest_snap(tmp_path: Path, forge: Forge) -> SnapshotHistory:
     transport = TokenTransport(TOKEN, api_base=API, opener=forge)
     return SnapshotHistory(
-        tmp_path, transport, TOKEN, git_base="http://x", deadline=_soon()
+        tmp_path, transport, TOKEN, git=GIT, git_base="http://x", deadline=_soon()
     )
 
 
@@ -656,7 +769,7 @@ def test_fetch_branch_refuses_bad_ref(
     _no_spawn(monkeypatch)
     transport = TokenTransport(TOKEN, api_base=API, opener=Forge({}))
     snap = SnapshotHistory(
-        tmp_path, transport, TOKEN, git_base="http://x", deadline=_soon()
+        tmp_path, transport, TOKEN, git=GIT, git_base="http://x", deadline=_soon()
     )
     assert snap.fetch_branch("", "refs/heads/a..b") is False
     assert snap.fetch_branch("", "--upload-pack=x") is False
@@ -721,7 +834,13 @@ def test_rest_timeout_capped_by_deadline(tmp_path: Path) -> None:
     forge = SlowForge({f"repos/{SLUG}/pulls/7": (200, {"head": None})}, clock, "-")
     transport = TokenTransport(TOKEN, api_base=API, opener=forge, timeout=60.0)
     snap = SnapshotHistory(
-        tmp_path, transport, TOKEN, git_base="http://x", deadline=100.0, clock=clock
+        tmp_path,
+        transport,
+        TOKEN,
+        git=GIT,
+        git_base="http://x",
+        deadline=100.0,
+        clock=clock,
     )
     assert snap.pr_facts(SLUG, 7) == {"headRefOid": None}
     assert forge.timeouts == [5.0]
@@ -734,7 +853,13 @@ def test_rest_past_deadline_sends_nothing(tmp_path: Path) -> None:
     forge = Forge({})
     transport = TokenTransport(TOKEN, api_base=API, opener=forge)
     snap = SnapshotHistory(
-        tmp_path, transport, TOKEN, git_base="http://x", deadline=100.0, clock=clock
+        tmp_path,
+        transport,
+        TOKEN,
+        git=GIT,
+        git_base="http://x",
+        deadline=100.0,
+        clock=clock,
     )
     with pytest.raises(DeadlineExceeded, match="forge: deadline passed"):
         snap.pr_facts(SLUG, 7)
@@ -773,7 +898,13 @@ def _two_pages(clock: Clock, step: float) -> tuple[PagedForge, str]:
 def _paged_snap(tmp_path: Path, forge: Forge, clock: Clock) -> SnapshotHistory:
     transport = TokenTransport(TOKEN, api_base=API, opener=forge, timeout=60.0)
     return SnapshotHistory(
-        tmp_path, transport, TOKEN, git_base="http://x", deadline=100.0, clock=clock
+        tmp_path,
+        transport,
+        TOKEN,
+        git=GIT,
+        git_base="http://x",
+        deadline=100.0,
+        clock=clock,
     )
 
 
@@ -920,7 +1051,12 @@ def test_dripping_page_raises_deadline(tmp_path: Path) -> None:
     try:
         transport = TokenTransport(TOKEN, api_base=srv.base, timeout=60.0)
         snap = SnapshotHistory(
-            tmp_path, transport, TOKEN, git_base="http://x", deadline=_soon(1.0)
+            tmp_path,
+            transport,
+            TOKEN,
+            git=GIT,
+            git_base="http://x",
+            deadline=_soon(1.0),
         )
         started = time.monotonic()
         with pytest.raises(DeadlineExceeded, match="forge: deadline passed"):

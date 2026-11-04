@@ -1,4 +1,5 @@
-"""`darkfactory cli set openssl PATH` (stage 2a, Task 4a; owner 27.10).
+"""`darkfactory cli set openssl|gh PATH` (stage 2a, Task 4a; owner 27.10;
+`gh` with its sha256: stage 3a, owner 04.11).
 
 The one supported way to add the optional approved `openssl` (spec 3.7) to
 the `install.toml` of an existing install: a root writer under the writer
@@ -24,11 +25,13 @@ import pytest
 from df import cli, doctor, fsutil, journal, launcher_entry, roles_setup, state
 from df import platform as plat
 from df.config import (
+    ConfigError,
     InstallConfig,
     config_digest,
     dump_install,
     load_install,
     load_pending,
+    parse_install,
 )
 from df.doctor import level1_checks, level1_reached
 from df.journal import Stable
@@ -462,3 +465,157 @@ def test_no_openssl_message_names_the_command() -> None:
     assert (
         "sudo darkfactory cli set openssl /usr/bin/openssl" in roles_setup._NO_OPENSSL  # noqa: SLF001
     )
+
+
+# ---------- `cli set gh` (stage 3a, owner 04.11; spec 3.7, 3.10 rev 11) ----------
+
+
+def fake_gh(tmp_path: Path, version: str = plat.GH_PINNED_VERSION) -> Path:
+    """A `gh` answering `--version` with `version`; each run is logged."""
+    gh = tmp_path / "bin" / "gh"
+    gh.parent.mkdir(exist_ok=True)
+    log = tmp_path / "gh.log"
+    gh.write_text(
+        f'#!/bin/sh\necho "$*" >> {log}\n'
+        f'echo "gh version {version} (2026-10-20)"\n'
+        f'echo "https://github.com/cli/cli/releases/tag/v{version}"\n'
+    )
+    gh.chmod(0o755)
+    return gh
+
+
+def set_gh(gh: Path) -> list[str]:
+    return ["cli", "set", "gh", str(gh)]
+
+
+def test_cli_set_gh_records_path_and_sha256(
+    w: World, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`gh` that passes the policy and is the pinned version: its path in
+    `approved_cli`, the sha256 of its file in `approved_cli_sha256`; every
+    other field stays; the same value again is a no-op."""
+    gh = fake_gh(tmp_path)
+    seen = record_policy(w)
+    old = load_install(install_toml(w))
+    assert w.writer(set_gh(gh)) == 0
+    new = load_install(install_toml(w))
+    digest = plat.file_sha256(gh)
+    assert new == replace(
+        old,
+        approved_cli={**old.approved_cli, "gh": gh},
+        approved_cli_sha256={"gh": digest},
+    )
+    assert f'gh = "{digest}"' in install_toml(w).read_text()
+    assert seen == [{"gh": gh}]
+    assert digest in capsys.readouterr().out
+    before = files(w)
+    assert w.writer(set_gh(gh)) == 0
+    assert "не изменён" in capsys.readouterr().out
+    assert files(w) == before
+
+
+def test_cli_set_gh_new_binary_records_new_sha256(w: World, tmp_path: Path) -> None:
+    """The same path with other bytes (an upgrade of the pinned copy) is a
+    change: the new sha256 is written."""
+    gh = fake_gh(tmp_path)
+    record_policy(w)
+    assert w.writer(set_gh(gh)) == 0
+    with gh.open("a") as extra:
+        extra.write("# other bytes\n")
+    assert w.writer(set_gh(gh)) == 0
+    assert load_install(install_toml(w)).approved_cli_sha256 == {
+        "gh": plat.file_sha256(gh)
+    }
+
+
+@pytest.mark.parametrize("version", ["2.100.0", "2.102.10", "garbage"])
+def test_cli_set_gh_requires_pinned_version(
+    w: World, tmp_path: Path, version: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gh = fake_gh(tmp_path, version)
+    record_policy(w)
+    before = files(w)
+    assert w.writer(set_gh(gh)) == 2
+    err = capsys.readouterr().err
+    assert f"нужна закреплённая {plat.GH_PINNED_VERSION}" in err
+    assert files(w) == before
+
+
+def test_cli_set_gh_version_runs_in_the_allowlisted_env(
+    w: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`gh --version` runs with exactly `GH_ENV_KEYS`, a fresh `HOME` (gone
+    after the call) -- `GH_TOKEN` of the process never reaches it."""
+    record_policy(w)
+    monkeypatch.setenv("GH_TOKEN", "ghp_stray")
+    gh = tmp_path / "bin" / "gh"
+    gh.parent.mkdir()
+    out = tmp_path / "env.txt"
+    gh.write_text(
+        f"#!/bin/sh\n/usr/bin/env > {out}\n"
+        f'echo "gh version {plat.GH_PINNED_VERSION} (2026-10-20)"\n'
+    )
+    gh.chmod(0o755)
+    assert w.writer(set_gh(gh)) == 0
+    env = dict(line.split("=", 1) for line in out.read_text().splitlines())
+    shell_own = {"PWD", "SHLVL", "_", "OLDPWD", "__CF_USER_TEXT_ENCODING"}
+    assert set(env) - shell_own == set(plat.GH_ENV_KEYS)
+    assert (env["PATH"], env["LANG"], env["GH_NO_UPDATE_NOTIFIER"]) == (
+        "/usr/bin:/bin",
+        "C",
+        "1",
+    )
+    assert not Path(env["HOME"]).exists()
+
+
+def test_cli_set_gh_refuses_untrusted_path(
+    w: World, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The approved-CLI policy first: an untrusted `gh` is refused before
+    it is ever run (no `--version`), nothing changes."""
+    gh = fake_gh(tmp_path)
+    seen = record_policy(w, {"gh": ["владелец не root"]})
+    before = files(w)
+    assert w.writer(set_gh(gh)) == 2
+    assert "gh: владелец не root" in capsys.readouterr().err
+    assert files(w) == before
+    assert seen == [{"gh": gh}]
+    assert not (tmp_path / "gh.log").exists()
+
+
+def test_install_toml_sha256_schema(w: World, tmp_path: Path) -> None:
+    """The optional table: a file without it parses (and renders as before
+    3a); a sha256 without a path in `approved_cli`, an approved `gh`
+    without its sha256, a malformed digest or a name not pinned by content
+    are parse refusals."""
+    text = install_toml(w).read_text()
+    cfg = load_install(install_toml(w))
+    assert "approved_cli_sha256" not in text and cfg.approved_cli_sha256 == {}
+    assert dump_install(cfg) == text
+    digest = "a" * 64
+    gh_line = f'gh = "{tmp_path}/gh"\n'
+    cases = {
+        "no path": (text + f'\n[approved_cli_sha256]\ngh = "{digest}"\n', "no path"),
+        "no sha": (
+            text.replace("[approved_cli]\n", "[approved_cli]\n" + gh_line),
+            "missing for: gh",
+        ),
+        "form": (
+            text.replace("[approved_cli]\n", "[approved_cli]\n" + gh_line)
+            + '\n[approved_cli_sha256]\ngh = "ABC"\n',
+            "64 lowercase hex",
+        ),
+        "name": (
+            text + f'\n[approved_cli_sha256]\ngit = "{digest}"\n',
+            "not a CLI pinned by sha256",
+        ),
+    }
+    for _case, (bad, reason) in cases.items():
+        with pytest.raises(ConfigError, match=reason):
+            parse_install(bad)
+    good = replace(
+        cfg,
+        approved_cli={**cfg.approved_cli, "gh": tmp_path / "gh"},
+        approved_cli_sha256={"gh": digest},
+    )
+    assert parse_install(dump_install(good)) == good

@@ -15,6 +15,7 @@ import fcntl
 import functools
 import glob
 import grp
+import hashlib
 import os
 import plistlib
 import pwd
@@ -24,6 +25,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import termios
 import threading
 import time
@@ -70,6 +72,14 @@ UNKNOWN_PID = -1
 STDERR_TAIL_BYTES = 16 << 10
 #: `returncode` of a command whose executable could not be started.
 LAUNCH_FAILED = 127
+#: The approved `gh` (spec 3.10 rev 11): the official release of this
+#: version. A copy of `governance.act_trust.GH_PINNED_VERSION` (neither
+#: package imports the other; a test holds them equal).
+GH_PINNED_VERSION = "2.102.1"
+#: The whole environment of a `gh` launch, by key (spec 3.10 rev 11); a
+#: copy of `governance.act_trust.GH_ENV_KEYS`.
+GH_ENV_KEYS = ("PATH", "HOME", "LANG", "GH_CONFIG_DIR", "GH_NO_UPDATE_NOTIFIER")
+_GH_VERSION = re.compile(r"gh version (\S+)(?: |$)")
 
 TAR_FLAGS: Mapping[PlatformName, tuple[str, ...]] = {
     "macos-arm64": (
@@ -1959,6 +1969,36 @@ def approved_cli_problems(cli: Mapping[str, Path], platform: PlatformName) -> li
         if found:
             problems.append(f"{name}: {_INSTALL_HINT.format(name=name)}")
     return problems
+
+
+def gh_version_problems(gh: Path) -> list[str]:
+    """`gh --version` of the approved `gh` names `GH_PINNED_VERSION` (spec
+    3.10 rev 11); empty means it does. Run only after `gh` passed
+    `approved_cli_problems`, with exactly `GH_ENV_KEYS` and a fresh `HOME`
+    (removed after the call), never the caller's environment."""
+    with tempfile.TemporaryDirectory(prefix="df-gh-") as home:
+        env = {
+            "PATH": "/usr/bin:/bin",
+            "HOME": home,
+            "LANG": "C",
+            "GH_CONFIG_DIR": home,
+            "GH_NO_UPDATE_NOTIFIER": "1",
+        }
+        result = run_command([str(gh), "--version"], timeout=30.0, env=env)
+    if not result.launched or result.timed_out or result.returncode != 0:
+        return [f"gh: {gh} --version: не выполнен ({_brief(result)})"]
+    found = _GH_VERSION.match(result.stdout.decode("utf-8", "replace"))
+    version = found.group(1) if found else "не распознана"
+    if version == GH_PINNED_VERSION:
+        return []
+    return [f"gh: {gh}: версия {version}, нужна закреплённая {GH_PINNED_VERSION}"]
+
+
+def file_sha256(path: Path) -> str:
+    """Lowercase hex SHA-256 of the file `path` names (its link followed, as
+    `exec` follows it); a failed read raises its `OSError`."""
+    with open(path, "rb") as file:
+        return hashlib.file_digest(file, "sha256").hexdigest()
 
 
 def _cli_problems(

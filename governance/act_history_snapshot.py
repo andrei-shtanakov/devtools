@@ -9,8 +9,11 @@ attribute is `AttributeError`.
 
 git auth: the header travels only in the git process environment (`GIT_CONFIG_*`,
 `Authorization: Basic base64("x-access-token:<token>")`) — never in argv or a config
-file; Bearer stays REST-only. git runs with an explicit minimal environment (no
-system/global config, no prompts, http(s) only, no redirects) and every call honours
+file; Bearer stays REST-only. git runs only by the absolute path its caller passes
+(`git=`, the approved `git` of `install.toml`, df spec 3.10 rev 11 -- never looked up
+in `PATH`) with an explicit minimal environment (`PATH` = git's directory,
+`/usr/bin`, `/bin` as for the build's git; no system/global config, no prompts,
+http(s) only, no redirects) and every call honours
 an absolute `time.monotonic()` deadline: on expiry the whole git process group is
 killed and `DeadlineExceeded` is raised. REST calls honour the same deadline: each
 page's timeout is capped by the time left, no page starts after it, its body is
@@ -84,9 +87,9 @@ def git_auth_env(token: str) -> dict[str, str]:
     }
 
 
-def _env(home: Path, token: str | None) -> dict[str, str]:
+def _env(git: Path, home: Path, token: str | None) -> dict[str, str]:
     env = {
-        "PATH": os.environ.get("PATH", os.defpath),
+        "PATH": ":".join(dict.fromkeys([str(git.parent), "/usr/bin", "/bin"])),
         "HOME": str(home),
         "LC_ALL": "C",
         "GIT_CONFIG_NOSYSTEM": "1",
@@ -105,9 +108,17 @@ def _timeout(deadline: float, clock: Clock, what: str) -> float:
     return left
 
 
+def _absolute_git(git: Path) -> Path:
+    """`git` as given; not an absolute path — `ValueError` (no `PATH` lookup)."""
+    if not git.is_absolute():
+        raise ValueError(f"snapshot: git {str(git)!r} is not an absolute path")
+    return git
+
+
 def _git(
     git_dir: Path,
     *args: str,
+    git: Path,
     home: Path,
     deadline: float,
     clock: Clock,
@@ -117,12 +128,12 @@ def _git(
     """One git call over `git_dir`; the token, if any, only via environment."""
     timeout = _timeout(deadline, clock, "git")
     proc = subprocess.Popen(
-        ["git", f"--git-dir={git_dir}", *_NO_REDIRECTS, *args],
+        [str(git), f"--git-dir={git_dir}", *_NO_REDIRECTS, *args],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=text,
-        env=_env(home, token),
+        env=_env(git, home, token),
         start_new_session=True,
     )
     try:
@@ -149,6 +160,7 @@ def open_snapshot(
     refs: Sequence[str],
     token: str,
     *,
+    git: Path,
     git_base: str,
     deadline: float,
     clock: Clock = time.monotonic,
@@ -156,11 +168,13 @@ def open_snapshot(
     """Fetch `refs` (each `+ref:ref`, no `--filter`) of `full_name` into a new bare
     repository `home/repo.git` and return its path; the caller removes it.
 
-    `home` is an existing caller-owned directory and git's `HOME`; `deadline` is an
-    absolute `clock()` (default `time.monotonic`) instant. Invalid input —
-    `ValueError`; git failure — `OSError`; deadline — `DeadlineExceeded`. On any
-    failure the repository is removed.
+    `git` is the absolute path of the git to run; `home` is an existing
+    caller-owned directory and git's `HOME`; `deadline` is an absolute `clock()`
+    (default `time.monotonic`) instant. Invalid input — `ValueError`; git failure —
+    `OSError`; deadline — `DeadlineExceeded`. On any failure the repository is
+    removed.
     """
+    _absolute_git(git)
     if not _FULL_NAME.fullmatch(full_name):
         raise ValueError(f"snapshot: full_name {full_name!r} is not owner/repo")
     bad = [r for r in refs if not _full_ref(r)]
@@ -179,7 +193,13 @@ def open_snapshot(
             ),
         ):
             done = _git(
-                git_dir, *args, home=home, deadline=deadline, clock=clock, token=secret
+                git_dir,
+                *args,
+                git=git,
+                home=home,
+                deadline=deadline,
+                clock=clock,
+                token=secret,
             )
             _require(done, what)
     except BaseException:
@@ -200,7 +220,8 @@ class SnapshotHistory:
     """`Ops` of `act_history` over a snapshot from `open_snapshot`.
 
     git methods read `git_dir` (`target_dir` arguments are ignored); forge methods
-    read REST through `transport`. `deadline` (absolute `clock()` instant, default
+    read REST through `transport`; git runs only at the absolute path `git`.
+    `deadline` (absolute `clock()` instant, default
     clock `time.monotonic`) bounds every git and REST call: past it every method
     raises `DeadlineExceeded`. Methods not defined here do not exist.
     """
@@ -211,10 +232,12 @@ class SnapshotHistory:
         transport: TokenTransport,
         token: str,
         *,
+        git: Path,
         git_base: str,
         deadline: float,
         clock: Clock = time.monotonic,
     ) -> None:
+        self._git = _absolute_git(git)
         self._git_dir, self._transport, self._token = git_dir, transport, token
         self._git_base, self._deadline, self._clock = git_base, deadline, clock
 
@@ -227,6 +250,7 @@ class SnapshotHistory:
         return _git(
             self._git_dir,
             *args,
+            git=self._git,
             home=self._git_dir.parent,
             deadline=self._deadline,
             clock=self._clock,

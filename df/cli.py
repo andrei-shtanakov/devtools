@@ -8,7 +8,7 @@ the snapshot the entry read under the lock it holds; bootstrap takes the
 lock, settles and reads the snapshot itself. Subcommands: `init` and
 `install` (Task 9); `models list|set` (Task 10); `doctor --probe-models`
 (Task 11); `doctor [--product P [--operator NAME]] [--json]` (Tasks 12, 13,
-`df.doctor`); `cli set openssl PATH` (stage 2a, Task 4a); `perimeter
+`df.doctor`); `cli set openssl|gh PATH` (stage 2a, Task 4a; `gh`: 3a); `perimeter
 restore --from PATH | --empty [--set-aside-old]` (stage 2a, Task 11r); `setup-agent app-key --app-id N
 --file PATH | machine-token --file PATH` (stage 2a, Task 12); `precheck serve`
 (stage 2b, Task 6: the wrapper `df-precheck` as the role `df-precheck`).
@@ -56,6 +56,7 @@ from df import (
 )
 from df import platform as plat
 from df.config import (
+    HASHED_CLI,
     ConfigError,
     InstallConfig,
     Pending,
@@ -88,8 +89,9 @@ _NO_REGISTRY = "реестр продуктов не поддерживаетс�
 _NO_INSTALL = "нет /etc/df/install.toml: начните с bootstrap init"
 _STALE_WRAPPERS = "обёртки ролей устарели: выполните darkfactory roles setup"
 _NO_OPERATOR = "roles setup: укажите --operator (SUDO_USER не задан)"
-#: The one approved CLI `cli set` may add to an existing install (owner 27.10).
-CLI_SETTABLE = "openssl"
+#: The approved CLIs `cli set` may add to an existing install (owner 27.10;
+#: `gh` with its sha256, owner 04.11).
+CLI_SETTABLE = ("openssl", "gh")
 _UNSET = "—"
 #: Subcommands of the roles' side (Tasks 5-7); readers.
 SERVICE_COMMANDS = frozenset({"publisher"})
@@ -522,7 +524,10 @@ def _precheck_serve(lay: Layout, read: ReadResult) -> int:
     plus the role's HOME, the leftovers of earlier runs are reaped
     (`_reap`), `admin/<id>/site` goes to the END of `sys.path` (after
     `admin/<id>`, which the entry put first, and stdlib), and the program of
-    that tree answers the one request on stdin."""
+    that tree answers the one request on stdin. `gh` and `git` are the
+    approved paths of the snapshot's `install.toml` (spec 3.10 rev 11, no
+    `PATH`): `gh` only if approved, its sha256 checked against the file at
+    this launch (`_approved_gh`); without it the program gets `gh=None`."""
     account = load_accounts(lay.accounts).get(roles.PRECHECK_USER)
     if account is None or account.state != "ready" or os.getuid() != account.uid:
         raise Refusal(_NOT_PRECHECK)
@@ -536,6 +541,10 @@ def _precheck_serve(lay: Layout, read: ReadResult) -> int:
         raise Refusal(_NO_PRECHECK)
     if not os.path.isdir(tree / SITE_DIR):
         raise Refusal(_NO_SITE)
+    cfg = snap.install
+    if cfg is None:
+        raise Refusal(f"precheck serve: {_NO_INSTALL}")
+    gh = _approved_gh(cfg)
     complete_v2 = _tree_complete(tree)
     home = lay.role_home(roles.PRECHECK_USER)
     os.environ.clear()
@@ -549,7 +558,29 @@ def _precheck_serve(lay: Layout, read: ReadResult) -> int:
         admin_digest=snap.entry.admin_digest,
         home=home,
         complete_v2=complete_v2,
+        gh=gh,
+        git=cfg.approved_cli["git"],
     )
+
+
+def _approved_gh(cfg: InstallConfig) -> Path | None:
+    """The approved `gh` whose file still has the sha256 `install.toml`
+    records (spec 3.7 rev 11, checked at every launch); `None` when no `gh`
+    is approved (the history profile is then unavailable). A mismatch or an
+    unreadable file is a refusal, never a fallback to `PATH`."""
+    gh = cfg.approved_cli.get("gh")
+    if gh is None:
+        return None
+    try:
+        digest = plat.file_sha256(gh)
+    except OSError as exc:
+        raise Refusal(f"precheck serve: gh {gh}: {exc.strerror}") from exc
+    if digest != cfg.approved_cli_sha256["gh"]:
+        raise Refusal(
+            f"precheck serve: gh {gh}: sha256 не совпадает с install.toml "
+            "(повторите darkfactory cli set gh)"
+        )
+    return gh
 
 
 def _tree_complete(tree: Path) -> bool:
@@ -900,34 +931,38 @@ def _models_set(args: argparse.Namespace, lay: Layout, snap: Snapshot) -> int:
 
 
 def _cli_set(args: argparse.Namespace, lay: Layout, snap: Snapshot) -> int:
-    """Set the optional approved `openssl` in `install.toml` (spec 3.7).
+    """Set an optional approved CLI (`CLI_SETTABLE`) in `install.toml`
+    (spec 3.7).
 
-    Only `openssl`, an absolute path that passes the approved-CLI policy
-    (spec 3.10); every other field stays. The same value again writes
-    nothing and opens no generation. Otherwise one `write_atomic` between
-    `generation_begin` and `generation_end`, as `models set`. The config
-    digest changes with it; it is compared only within one install run
-    (`pending.toml` and that run's marks), never against a finished one.
+    An absolute path that passes the approved-CLI policy (spec 3.10); `gh`
+    also passes `gh_version_problems` (run only after the policy) and its
+    sha256 goes to `approved_cli_sha256`. Every other field stays. The same
+    value again writes nothing and opens no generation. Otherwise one
+    `write_atomic` between `generation_begin` and `generation_end`, as
+    `models set`. The config digest changes with it; it is compared only
+    within one install run (`pending.toml` and that run's marks), never
+    against a finished one.
     """
-    if args.name != CLI_SETTABLE:
+    name = args.name
+    if name not in CLI_SETTABLE:
         raise Refusal(
-            f"cli set: {args.name!r} не задаётся этой командой: "
-            f"в v1 только {CLI_SETTABLE}"
+            f"cli set: {name!r} не задаётся этой командой: "
+            f"в v1 только {', '.join(CLI_SETTABLE)}"
         )
     path = Path(args.path)
     if not args.path or not path.is_absolute():
-        raise Refusal(f"cli set {CLI_SETTABLE}: путь {args.path!r} не абсолютный")
+        raise Refusal(f"cli set {name}: путь {args.path!r} не абсолютный")
     cfg = snap.install
     if cfg is None:
         raise Refusal(_NO_INSTALL)
-    problems = plat.approved_cli_problems({CLI_SETTABLE: path}, plat.detect_platform())
+    problems = plat.approved_cli_problems({name: path}, plat.detect_platform())
     if problems:
         raise Refusal("; ".join(problems))
+    new = _with_cli(cfg, name, path)
     _close_odd_generation(lay, snap)  # before the no-op too (PR #643)
-    if cfg.approved_cli.get(CLI_SETTABLE) == path:
-        print(f"darkfactory: {CLI_SETTABLE} уже {path}: install.toml не изменён")
+    if new == cfg:
+        print(f"darkfactory: {name} уже {path}: install.toml не изменён")
         return EXIT_OK
-    new = replace(cfg, approved_cli={**cfg.approved_cli, CLI_SETTABLE: path})
     journal.generation_begin(lay)
     try:
         fsutil.write_atomic(
@@ -937,8 +972,27 @@ def _cli_set(args: argparse.Namespace, lay: Layout, snap: Snapshot) -> int:
         journal.generation_end(lay)  # as `models set`: the old file is whole
         raise
     journal.generation_end(lay)
-    print(f"darkfactory: {CLI_SETTABLE} = {path} записан в /etc/df/install.toml")
+    digest = new.approved_cli_sha256.get(name)
+    pinned = f" (sha256 {digest})" if digest else ""
+    print(f"darkfactory: {name} = {path}{pinned} записан в /etc/df/install.toml")
     return EXIT_OK
+
+
+def _with_cli(cfg: InstallConfig, name: str, path: Path) -> InstallConfig:
+    """`cfg` with `name` approved at `path`; a `HASHED_CLI` must be the
+    pinned version and gets the sha256 of its file."""
+    approved = {**cfg.approved_cli, name: path}
+    if name not in HASHED_CLI:
+        return replace(cfg, approved_cli=approved)
+    problems = plat.gh_version_problems(path)
+    if problems:
+        raise Refusal("; ".join(problems))
+    try:
+        digest = plat.file_sha256(path)
+    except OSError as exc:
+        raise Refusal(f"cli set {name}: {path}: {exc.strerror}") from exc
+    hashes = {**cfg.approved_cli_sha256, name: digest}
+    return replace(cfg, approved_cli=approved, approved_cli_sha256=hashes)
 
 
 def _perimeter_restore(args: argparse.Namespace, lay: Layout, snap: Snapshot) -> int:

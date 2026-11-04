@@ -43,6 +43,7 @@ from governance.act_request import (
 )
 from tests.test_act_history_snapshot import (
     API,
+    GIT,
     H_REQ,
     PIN,
     SLUG,
@@ -209,6 +210,8 @@ def _serve(
         admin_digest=ADMIN,
         home=home,
         complete_v2=complete_v2,
+        gh=None,
+        git=GIT,
         deps=deps,
     )
     text = out.getvalue()
@@ -710,6 +713,21 @@ def test_snapshot_removed_after_run_and_stale_cleared(tmp_path: Path) -> None:
     assert code == 0 and verdict is not None and verdict["outcome"] == "unset"
     assert seen == [(home / "precheck-snapshots" / NONCE, [NONCE])]
     assert list((home / "precheck-snapshots").iterdir()) == []
+
+
+def test_serve_passes_the_approved_git_to_the_snapshot(tmp_path: Path) -> None:
+    """Договор запуска df (спека B §3.10 rev 11): снимок получает ровно `git`,
+    который `precheck serve` взял из `install.toml`."""
+    seen: list[object] = []
+
+    def snapshot_for(home: Path, *a: Any, **kw: Any) -> Path:
+        seen.append(kw["git"])
+        return open_snapshot(home, *a, **kw)
+
+    deps = PrecheckDeps(_deps().transport_for, snapshot_for, time.monotonic)
+    code, verdict, _ = _serve(tmp_path / "home", _req(), deps)
+    assert code == 0 and verdict is not None
+    assert seen == [GIT]
 
 
 def test_stale_kept_while_another_run_holds_lock(tmp_path: Path) -> None:

@@ -22,8 +22,10 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
+import tempfile
 import tomllib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -69,6 +71,13 @@ _GH_ENV_DROPPED = frozenset(
         "GITHUB_ENTERPRISE_TOKEN",
     }
 )
+#: Закреплённая версия `gh` установки df (спека B §3.10 rev 11); копия
+#: `df.platform.GH_PINNED_VERSION` (пакеты не импортируют друг друга, тест держит
+#: их равными).
+GH_PINNED_VERSION = "2.102.1"
+#: Всё окружение запуска `gh` по договору df (спека B §3.10 rev 11) — разрешительный
+#: список; копия `df.platform.GH_ENV_KEYS`.
+GH_ENV_KEYS = ("PATH", "HOME", "LANG", "GH_CONFIG_DIR", "GH_NO_UPDATE_NOTIFIER")
 _BINDING_KEYS = (
     "host",
     "df_trust_repository_id",
@@ -430,8 +439,45 @@ def history_transport(
 
 
 def history_token(config_dir: Path) -> str | Unavailable:
-    """Токен профиля `history`: `gh auth token --hostname github.com` под
-    `GH_CONFIG_DIR=<config_dir>`, окружение без `_GH_ENV_DROPPED`, `timeout=60`.
+    """Токен профиля `history` для развёртывания флота (вне договора df):
+    `gh` из `PATH`, окружение процесса без `_GH_ENV_DROPPED`; дальше —
+    `_auth_token`."""
+    env = {k: v for k, v in os.environ.items() if k not in _GH_ENV_DROPPED}
+    env["GH_CONFIG_DIR"] = str(config_dir)
+    return _auth_token(config_dir, "gh", env)
+
+
+def history_token_at(
+    config_dir: Path, *, gh: Path, role_home: Path
+) -> str | Unavailable:
+    """Токен профиля `history` по договору запуска df (спека B §3.10 rev 11): `gh`
+    только по абсолютному пути `gh` (без отката к `PATH`), окружение — ровно
+    `GH_ENV_KEYS` (`GH_TOKEN`/`GITHUB_TOKEN` процесса до `gh` не доходят), `HOME` —
+    новый каталог вызова в `role_home`, удаляемый после вызова. df передаёт её
+    в `history_transport` как `partial(history_token_at, gh=..., role_home=...)`.
+    Причины — в формате `_auth_token`."""
+    where = f"gh auth token ({HISTORY_LABEL})"
+    if not gh.is_absolute():
+        return Unavailable(f"{where}: путь gh не абсолютный")
+    try:
+        call = tempfile.mkdtemp(prefix="gh-call-", dir=role_home)
+    except OSError as exc:
+        return Unavailable(f"{where}: каталог вызова: {type(exc).__name__}")
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": call,
+        "LANG": "C",
+        "GH_CONFIG_DIR": str(config_dir),
+        "GH_NO_UPDATE_NOTIFIER": "1",
+    }
+    try:
+        return _auth_token(config_dir, str(gh), env)
+    finally:
+        shutil.rmtree(call, ignore_errors=True)
+
+
+def _auth_token(config_dir: Path, gh: str, env: dict[str, str]) -> str | Unavailable:
+    """`<gh> auth token --hostname github.com` в окружении `env`, `timeout=60`.
     `<config_dir>/hosts.yml` не файл — `Unavailable` ДО запуска `gh` (Р-20).
 
     Безопасный формат причин (C1-02): только фиксированные строки
@@ -441,12 +487,10 @@ def history_token(config_dir: Path) -> str | Unavailable:
     попадают никогда — ни целиком, ни срезом."""
     if not (config_dir / "hosts.yml").is_file():
         return Unavailable(f"профиль токена истории {config_dir}: нет hosts.yml")
-    env = {k: v for k, v in os.environ.items() if k not in _GH_ENV_DROPPED}
-    env["GH_CONFIG_DIR"] = str(config_dir)
     where = f"gh auth token ({HISTORY_LABEL})"
     try:
         done = subprocess.run(
-            ["gh", "auth", "token", "--hostname", SUPPORTED_HOST],
+            [gh, "auth", "token", "--hostname", SUPPORTED_HOST],
             env=env,
             capture_output=True,
             text=True,

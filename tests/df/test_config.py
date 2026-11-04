@@ -134,7 +134,9 @@ def test_install_requires_git_uv_tar(missing: str, tmp_path: Path) -> None:
 
 
 def test_install_extra_cli_allowed() -> None:
-    cfg = make_cfg(approved_cli={**CLI, "gh": Path("/usr/bin/gh")})
+    """An extra approved CLI round-trips; `gh` (a `HASHED_CLI`) only with
+    its sha256 (stage 3a, `tests/df/test_cli_set.py`)."""
+    cfg = make_cfg(approved_cli={**CLI, "jq": Path("/usr/bin/jq")})
     assert parse_install(dump_install(cfg)) == cfg
 
 

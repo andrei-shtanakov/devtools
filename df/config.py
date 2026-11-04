@@ -12,7 +12,7 @@ import re
 import stat
 import tomllib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -42,6 +42,9 @@ STATE_SCHEMAS: Mapping[str, str] = {
     "runs/<id>.json": "df/run/v1",
 }
 REQUIRED_CLI = frozenset({"git", "uv", "tar"})
+#: Approved CLIs pinned by content (spec 3.7 rev 11): each has its sha256 in
+#: `approved_cli_sha256`, checked at every launch.
+HASHED_CLI = frozenset({"gh"})
 
 SHA1 = re.compile(r"[0-9a-f]{40}", re.ASCII)
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -133,12 +136,18 @@ def _digest_text(text: str) -> str:
 
 @dataclass(frozen=True)
 class InstallConfig:
-    """`/etc/df/install.toml`."""
+    """`/etc/df/install.toml`.
+
+    `approved_cli_sha256` (optional table, rev 11): the sha256 of each
+    `HASHED_CLI` in `approved_cli`, written by `darkfactory cli set gh`. A
+    release before 3a refuses such a file (an unknown key), so rolling back
+    to one after `cli set gh` is impossible (spec 7.4)."""
 
     manifest_repo: str
     manifest_sha: str
     profile: str
     approved_cli: Mapping[str, Path]
+    approved_cli_sha256: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         _nonempty(self.manifest_repo, "manifest_repo")
@@ -156,6 +165,21 @@ class InstallConfig:
                 name,
                 "approved_cli path must be absolute",
             )
+        _check_hashes(self.approved_cli, self.approved_cli_sha256)
+
+
+def _check_hashes(cli: Mapping[str, Path], hashes: Mapping[str, str]) -> None:
+    for name, digest in hashes.items():
+        key = f"approved_cli_sha256.{name}"
+        _need(name in HASHED_CLI, key, "not a CLI pinned by sha256")
+        _need(name in cli, key, "no path for it in approved_cli")
+        _need(
+            isinstance(digest, str) and bool(_SHA256.fullmatch(digest)),
+            key,
+            "must be 64 lowercase hex characters",
+        )
+    unhashed = sorted(HASHED_CLI & set(cli) - set(hashes))
+    _need(not unhashed, "approved_cli_sha256", f"missing for: {', '.join(unhashed)}")
 
 
 def parse_install(text: str) -> InstallConfig:
@@ -164,7 +188,7 @@ def parse_install(text: str) -> InstallConfig:
     _check_keys(
         data,
         {"manifest_repo", "manifest_sha", "profile", "approved_cli"},
-        set(),
+        {"approved_cli_sha256"},
         "install.toml",
     )
     table = data["approved_cli"]
@@ -174,6 +198,9 @@ def parse_install(text: str) -> InstallConfig:
     for name, value in table.items():
         _need(isinstance(value, str), name, "approved_cli path must be a string")
         cli[name] = Path(value)
+    hashes = data.get("approved_cli_sha256", {})
+    _need(isinstance(hashes, dict), "approved_cli_sha256", "must be a table")
+    assert isinstance(hashes, dict)
     for key in ("manifest_repo", "manifest_sha", "profile"):
         _need(isinstance(data[key], str), key, "must be a string")
     return InstallConfig(
@@ -181,6 +208,7 @@ def parse_install(text: str) -> InstallConfig:
         str(data["manifest_sha"]),
         str(data["profile"]),
         cli,
+        dict(hashes),
     )
 
 
@@ -190,18 +218,19 @@ def load_install(path: Path) -> InstallConfig:
 
 
 def dump_install(cfg: InstallConfig) -> str:
-    """Render `install.toml` deterministically."""
-    return dumps(
-        {
-            "schema": KNOWN_SCHEMAS["install.toml"],
-            "manifest_repo": cfg.manifest_repo,
-            "manifest_sha": cfg.manifest_sha,
-            "profile": cfg.profile,
-            "approved_cli": {
-                k: str(cfg.approved_cli[k]) for k in sorted(cfg.approved_cli)
-            },
-        }
-    )
+    """Render `install.toml` deterministically; without hashed CLIs the text
+    (and `config_digest`) is the one a release before 3a wrote."""
+    data: dict[str, object] = {
+        "schema": KNOWN_SCHEMAS["install.toml"],
+        "manifest_repo": cfg.manifest_repo,
+        "manifest_sha": cfg.manifest_sha,
+        "profile": cfg.profile,
+        "approved_cli": {k: str(cfg.approved_cli[k]) for k in sorted(cfg.approved_cli)},
+    }
+    if cfg.approved_cli_sha256:
+        hashes = cfg.approved_cli_sha256
+        data["approved_cli_sha256"] = {k: hashes[k] for k in sorted(hashes)}
+    return dumps(data)
 
 
 def config_digest(cfg: InstallConfig) -> str:
