@@ -79,12 +79,12 @@ PROFILE_NAME = "p"
 #: The pin's name: `install_admin` copies `<checkout of devtools>/df`.
 PIN_NAME = "devtools"
 MANIFEST_REPO = "fixture/manifest"
-#: The umbrella manifest that pins profile `core` (ai-orchestrators-workspace#52,
-#: merge commit on `main`): the one source of the `core` inventory and of the
-#: live install.
+#: The umbrella manifest that pins profile `core` (ai-orchestrators-workspace#54:
+#: devtools at 291cb30, a precheck release): the one source of the `core`
+#: inventory and of the live install.
 CORE_MANIFEST = (
     "andrei-shtanakov/ai-orchestrators-workspace",
-    "080f15e6b8fa3497a369f959e5466c1391bf2700",
+    "be2c76f20d0ed56565701eb6109557b390162416",
 )
 CORE_PROFILE = "core"
 FIXED_DATE = "2026-10-01T00:00:00+00:00"

@@ -895,7 +895,7 @@ def test_root_fixture_repo_installs_offline(
 # ---------- legacy releases ----------
 
 
-#: The closure files devtools 335188f (the umbrella's `core` pin) already has.
+#: The closure files devtools 335188f (the umbrella's legacy `core` pin) has.
 OLD_MODULES_335188F = {
     "governance/__init__.py",
     "governance/act_envelope.py",
@@ -908,8 +908,8 @@ OLD_MODULES_335188F = {
 
 @pytest.mark.parametrize("shape", ["df-only", "335188f"])
 def test_legacy_checkout_installs_df_only(fl: FakeLayout, shape: str) -> None:
-    """No `act_precheck.py` (as devtools 335188f, pinned by the umbrella's
-    `core`: some closure modules and the patterns, not the program): the
+    """No `act_precheck.py` (as devtools 335188f, the umbrella's legacy
+    `core` pin: some closure modules and the patterns, not the program): the
     admin tree is exactly `df/`, no pins read (no `uv.lock`), the cache never
     touched, and `expected_admin_digest` agrees."""
     lay = fl.layout
