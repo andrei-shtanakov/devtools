@@ -23,7 +23,9 @@ What README «Установка DarkFactory: этап 1» says, as processes:
 3. The README first-install command verbatim (`documented_command`, the
    placeholders filled), a process of root through `sudo`; the install
    journal is copied out whatever its result.
-4. `sudo darkfactory doctor --json`: level 1 reached, every check `ok`.
+4. `sudo darkfactory doctor --json`: level 1 reached, every check `ok`;
+   `release.json` names the manifest pins and the release's admin tree
+   carries the precheck closure and `site/` (a read, no `doctor --product`).
 5. Every declared console entrypoint of every member `--help` as this
    (unprivileged) user, exit 0; then `doctor` again, every check `ok`.
 
@@ -50,7 +52,12 @@ from df.lockset import UV_PINNED_VERSION
 from df.manifest import fetch_manifest, parse_profile
 from df.paths import Layout
 from df.release import RELEASE_JSON
-from tests.df.root_world import CORE_MANIFEST, CORE_PROFILE, PYTHON
+from tests.df.root_world import (
+    CORE_MANIFEST,
+    CORE_PROFILE,
+    PYTHON,
+    precheck_tree_problems,
+)
 from tests.df.test_cli import PYTHON_PLACEHOLDER, SHA_PLACEHOLDER, documented_command
 
 #: README «Утверждённые CLI»: the approved copy of uv.
@@ -161,6 +168,7 @@ def run(platform: plat.PlatformName, work: Path, live: Path, facts: dict) -> Non
     facts["pins"] = pins
     release = layout.current.resolve()
     facts["release"] = release_facts(release, pins)
+    facts["admin_precheck"] = admin_precheck(layout, facts["release"]["id"])
     facts["smoke"] = smoke(release, list(pins), work)
     after = live / f"{platform}-production-doctor-after-smoke.json"
     facts["doctor_after_smoke"] = doctor(doctor_argv, after)
@@ -384,6 +392,15 @@ def release_facts(release: Path, pins: Mapping[str, str]) -> dict[str, Any]:
     ):
         raise Failure(f"release.json не совпал с манифестом: {facts}")
     return facts
+
+
+def admin_precheck(layout: Layout, release_id: str) -> list[str]:
+    """The release's admin tree carries the precheck closure and `site/` (a
+    read as this user; `doctor --product` is not run): empty, or `Failure`."""
+    problems = precheck_tree_problems(layout.admin_dir(release_id))
+    if problems:
+        raise Failure(f"административное дерево без предпроверки: {problems}")
+    return problems
 
 
 def smoke(release: Path, names: list[str], work: Path) -> dict[str, Any]:

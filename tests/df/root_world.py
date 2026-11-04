@@ -54,7 +54,14 @@ import pytest
 
 from df import admin, cli, install, journal, launcher_entry, lockset, state
 from df import platform as plat
-from df.admin_tree import CONTRACT_FILES, SitePins, governance_files
+from df.admin_tree import (
+    CONTRACT_FILES,
+    PRECHECK_FILE,
+    SitePins,
+    TreeError,
+    governance_files,
+    release_has_precheck,
+)
 from df.build import GIT_ISOLATION
 from df.config import Account, InstallConfig, load_accounts
 from df.journal import StepFailed, run_steps
@@ -79,12 +86,14 @@ PROFILE_NAME = "p"
 #: The pin's name: `install_admin` copies `<checkout of devtools>/df`.
 PIN_NAME = "devtools"
 MANIFEST_REPO = "fixture/manifest"
-#: The umbrella manifest that pins profile `core` (ai-orchestrators-workspace#52,
-#: merge commit on `main`): the one source of the `core` inventory and of the
-#: live install.
+#: The umbrella manifest that pins profile `core` (ai-orchestrators-workspace#54:
+#: devtools at 291cb30, a precheck release): the one source of the `core`
+#: inventory and of the live install. Both live forms check the installed
+#: admin tree with `precheck_tree_problems`: a pin back to a legacy devtools
+#: fails them.
 CORE_MANIFEST = (
     "andrei-shtanakov/ai-orchestrators-workspace",
-    "080f15e6b8fa3497a369f959e5466c1391bf2700",
+    "be2c76f20d0ed56565701eb6109557b390162416",
 )
 CORE_PROFILE = "core"
 FIXED_DATE = "2026-10-01T00:00:00+00:00"
@@ -443,6 +452,30 @@ def core_profile() -> Profile:
     if profile.python != PYTHON or not profile.repos:
         pytest.fail(f"манифест {repo}@{sha}: {profile}, нужен Python {PYTHON}")
     return profile
+
+
+#: `site/` of a precheck release's admin tree: the two pure-Python sources.
+PRECHECK_SITE = ["steward", "yaml"]
+
+
+def precheck_tree_problems(tree: Path) -> list[str]:
+    """Why the installed admin tree `tree` is not a precheck release's, as
+    text (empty: it is): the whole closure (`release_has_precheck`, read on
+    the installed tree, whose relative paths are the checkout's) and `site/`
+    holding exactly `PRECHECK_SITE`. A pure read; nothing runs."""
+    try:
+        if not release_has_precheck(tree):
+            return [f"{tree}: нет {PRECHECK_FILE} — релиз без предпроверки"]
+    except TreeError as exc:
+        return [str(exc)]
+    site = tree / cli.SITE_DIR
+    try:
+        names = sorted(os.listdir(site))
+    except OSError as exc:
+        return [f"{site}: {type(exc).__name__}: {exc}"]
+    if names != PRECHECK_SITE:
+        return [f"{site}: {names}, нужно {PRECHECK_SITE}"]
+    return []
 
 
 def current_id(layout: Layout) -> str | None:

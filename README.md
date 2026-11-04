@@ -384,7 +384,7 @@ sudo <python-3.12+> -I -B -S <чекаут-devtools>/df/bootstrap.py init \
 - Python профиля — только `3.12.13`: для иной версии нет измеренного списка удаляемых
   компонентов Tcl/Tk, и шаг `manifest` отказывает до любого изменения хоста.
 - Профиль `core` описан в манифесте зонтика (`[df.profiles.core]`, коммит
-  `080f15e6b8fa3497a369f959e5466c1391bf2700`); его живая установка этой командой — в CI
+  `be2c76f20d0ed56565701eb6109557b390162416`); его живая установка этой командой — в CI
   `df-stage1` (раздел «Приёмка»).
 
 Дальше — команда (ссылка `/usr/local/bin/darkfactory`, если `/usr/local/bin` проходит
@@ -499,11 +499,14 @@ Tools. Возврат — `sudo xcode-select -s <путь к Xcode>/Contents/Dev
 CI `df-stage1` (`.github/workflows/df-stage1.yml`): macOS arm64 и Ubuntu x86_64, root-тесты
 только в одноразовых runner-ах GitHub. Evidence —
 `docs/evidence/2026-10-26-df-stage1-acceptance.md`. Живая установка профиля `core` по
-манифесту зонтика (`080f15e`) — в двух формах: в root-мире тестов (`<R>`, в процессе,
+манифесту зонтика (`be2c76f`) — в двух формах: в root-мире тестов (`<R>`, в процессе,
 `tests/df/test_acceptance_root_live.py`) и в раскладке `/` командой выше как процесс
 (`tests/df/live_install.py`: подготовка по разделу «Подготовка», `sudo darkfactory doctor
---json` — уровень 1, `--help` каждой точки входа от непривилегированного пользователя);
-результаты — evidence §9.
+--json` — уровень 1, `--help` каждой точки входа от непривилегированного пользователя;
+обе формы читают административное дерево релиза: замыкание предпроверки и `site/`);
+результаты — evidence §9. Evidence §9 записывает прежний манифест `080f15e`; перепин на
+`be2c76f` (devtools `291cb30`) проверен прогонами `df-stage1` 41807376276 и 41813353150
+(PR #691), запись — пункт TODO `df-core-repin-precheck`.
 
 ## Установка DarkFactory: этап 2
 
@@ -580,7 +583,7 @@ sudo darkfactory setup-agent machine-token --file <файл с токеном ma
   `refused: brief_precheck_unavailable`, вне форм — `refused: ambiguous_kind`.
 - Мерж stop — только на релизе, чей пин devtools содержит `governance/act_precheck.py`:
   административное дерево и код издателя берутся из этого пина. Релиз со старым пином (у
-  профиля `core` сейчас легаси `335188f`) мерж stop не исполняет: его издатель — этапа 2a
+  профиля `core` до перепина — легаси `335188f`) мерж stop не исполняет: его издатель — этапа 2a
   и отвечает `refused: ambiguous_kind`; дерево с кодом 2b без программы `precheck serve`
   отвергает по имени («релиз без предпроверки»), и `doctor --product` называет причину в
   строке `publisher.precheck`. Эта проба `sudo darkfactory doctor --product` запускает
