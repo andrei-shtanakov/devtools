@@ -2950,7 +2950,17 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       PAT classic, `repo`, срок 30 дней (R15-2); ключ App стенда — тоже секрет
       environment. Прогон 41044119428 отозвал свои токены установки сам (`tokens_revoked`).
       Закрыто 01.11: владелец отозвал PAT и удалил секреты; environment `df-stage2-live` — 0 секретов (сверено агентом).
-- [ ] Этап 2b спеки B — мерж издателя: `act_premerge` как предпроверка `merge`, поверхность candidate D16 и полный состав PR, вид stop, три строки мержа §4.5 живьём @owner:github:andrei-shtanakov @id:df-installer-stage2b @epic:eco.dark-factory @blocked_by:todo://devtools/approval-act-node @blocked_by:todo://devtools/df-installer-stage2a
+- [x] Этап 2b спеки B — мерж издателя: `act_premerge` как предпроверка `merge`, поверхность candidate D16 и полный состав PR, вид stop, три строки мержа §4.5 живьём @owner:github:andrei-shtanakov @id:df-installer-stage2b @epic:eco.dark-factory @blocked_by:todo://devtools/approval-act-node @blocked_by:todo://devtools/df-installer-stage2a
+      Закрыто 04.11. План — `docs/superpowers/plans/2026-11-03-df-installer-stage2b.md`
+      (12 задач), спека B rev 10; решение 2 (владелец 03.11): в 2b исполняется только вид
+      stop, candidate и finalize — этап 3 (пункт ниже), бриф — отказ до части C. Живая
+      приёмка пройдена: прогон `df-stage2-live` 41784019134 на `master` `4ab390d`, обе ячейки
+      (macOS arm64, Ubuntu x86_64) зелёные, строки стенда 1–12 `pass`; строка 11 — смена head
+      при удержанном `PUT` → `refused: head_changed`, строка 12 — оборванный ответ `PUT` →
+      `done` сверкой (`merged_by` — бот App), `PUT` выше один. Root-строки `df-precheck` —
+      Task 10 (#686, CI 41711022785); оператор — `not_verified` на hosted runner-ах. Прогон
+      41773122578 упал на дефекте стенда (нет группы `governance`), исправлено #689.
+      Evidence — `docs/evidence/2026-11-04-df-stage2b-acceptance.md`.
       Из интеграционного ревью части B approval-act (02.11, отложенное, App-режим): стоп-кран
       и факты PR читаются профилем без сверки логина (п. 9a; факты форджи от учётки не
       зависят, сбой доступа — отказ); symlink внутри `apps/` (п. 9c); токен установки не
@@ -2963,7 +2973,28 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       установки отзывается EXIT-ловцом сразу после выдачи (`act_app_token.py
       --revoke`, токен из stdin) на любом выходе, сбой отзыва — заметка, код выхода
       исходный.
-- [ ] Токен истории на стороне установщика (R8, С-1): `darkfactory setup-trust` пишет `history_gh_config_dir` в `trust.toml`, `darkfactory doctor` проверяет профиль и самоотчёт, шаг человека — read-only PAT (R4) и профиль `history` @owner:github:andrei-shtanakov @id:df-trust-history-token @epic:eco.dark-factory @blocked_by:todo://devtools/df-installer-stage2b
+- [ ] Этап 3 спеки B — предпроверка candidate и finalize издателем: привязка, EpochSource, контекст credentials производного токена, `bundle_dir`/DAG D16, идентичность мержера, `review_id` из решения доставки @owner:github:andrei-shtanakov @id:df-installer-stage3-precheck @epic:eco.dark-factory
+      Решение 2 плана 2b (владелец 03.11): до этапа 3 издатель отвечает `refused:
+      kind_unavailable_until_stage3: <kind>`. Протокол — новая версия схем
+      `df/precheck-request/v2`, `df/precheck-verdict/v2` (контекст корня, адаптация
+      credentials и журнала, нарушения периметра); там же общая функция поверхности D16 по
+      полному составу PR. Перенос находок r1 ревью плана 2b
+      (`_cowork_output/2026-10-13-df-installer/stage2b-r1-codex.md`): N3 — `creds=()`
+      блокирует candidate (`act_trust.load_trust` отказывает на пустом самоотчёте; нужен
+      режим проверки для производного read-only токена, без фиктивного credential); N4 —
+      идентичность App-мержера (`merger_login`/`merger_type` устанавливает издатель, входят в
+      digest); N5 — доверенный источник `bundle_dir` и варианта DAG для D16 (не из
+      манифеста PR); N7 — `review_id` finalize из окончательного решения доставки, как
+      `act_node._merged`, а не поиском текущего approve; N13 — production `EpochSource`
+      (сейчас только `NO_BINDING`) и `RequestJournal` `status`/`record`. Приёмка candidate и
+      finalize — строка 3 §10 спеки.
+- [x] Отозвать PAT `betta-tester` и ключ App 5285716 стенда, удалить секреты environment `df-stage2-live` (`DF_STAND_APP_KEY`, `DF_STAND_MACHINE_TOKEN`) после живой приёмки 2b — H8, действие владельца @owner:github:andrei-shtanakov @id:df-stage2b-stand-secrets-revoke @epic:eco.dark-factory
+      Прогон 41784019134 отозвал свои токены установки и чтения сам (`tokens_revoked`). В
+      отзыв входит и ключ, который при H6 сперва лёг переменной environment (открытый текст),
+      до переноса в Secrets 04.11 04:23Z (evidence 2b §11).
+      Закрыто 04.11: владелец отозвал PAT и ключи App (в том числе побывавший в переменной)
+      и удалил секреты; environment `df-stage2-live` — 0 секретов (сверено через API).
+- [ ] Токен истории на стороне установщика (R8, С-1): `darkfactory setup-trust` пишет `history_gh_config_dir` в `trust.toml`, `darkfactory doctor` проверяет профиль и самоотчёт, шаг человека — read-only PAT (R4) и профиль `history` @owner:github:andrei-shtanakov @id:df-trust-history-token @epic:eco.dark-factory @blocked_by:todo://devtools/df-installer-stage3-precheck
       Разбор ключа (`df.stage2_config.parse_trust`, `act_trust.parse_binding`) — Task 11c
       части B approval-act. Шаг человека: `GH_CONFIG_DIR=<каталог> gh auth login --hostname
       github.com --with-token`. Ключ НЕ вписывать на хосте с `df` версии до Task 11c: прежний
