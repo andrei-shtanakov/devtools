@@ -352,9 +352,16 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
 `SCHEMA_VERSION:86`, `_verify:500-516`, `admit:910-921`, `restore_conservative:924-948`,
 `record_violation:1013-1048`, `create_db:313-346` — ранний `return "present"` заменяется
 проверкой и переходом существующей базы), `df/cli.py` (`publisher perimeter-init` выполняет
-переход), `df/roles_setup.py:169-174,344-351` (`_perimeter_ready` при существующей базе
-возвращает «не готово», шаг `perimeter-init` выполняется всегда, и проверку/переход
-существующей базы делает издатель); тесты `tests/df/test_trust_state.py`,
+переход), `df/publisher/perimeter.py:_stage:723` (восстановление пишет `restored = true` в
+новую базу), `df/roles_setup.py:134-192,344-351`
+(шаг `perimeter-init`: `Step.check` в `journal._execute` (`df/journal.py:499`) — и условие
+пропуска, и постусловие, поэтому вместо файлового предиката — **флаг этого запуска**, как
+`verified` в `_steps:146`: `checked: list[bool]`; `check = lambda: _perimeter_lost(layout) or
+bool(checked)` — `_perimeter_lost` сохраняет отказ «база потеряна при маркерах»
+(`perimeter.LOST_TEXT`) и иначе возвращает `False`; `do` вызывает `perimeter-init` у издателя,
+и только при ответе `created | migrated | current` — `checked.append(True)`; так проверку или
+переход существующей базы издатель выполняет ровно один раз за запуск, а постусловие истинно
+после успеха); тесты `tests/df/test_trust_state.py`,
 `tests/df/test_perimeter_migrate.py`, `tests/df/test_perimeter*.py`, `tests/df/test_roles_setup.py`.
 
 **Interfaces:**
@@ -381,7 +388,11 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
   выполните darkfactory roles setup")`. План написан под рекомендованный вариант (а) вопроса 7
   (вопрос остаётся открытым). **Допустимая база 2b:** схема ровно `"1"` (`_expected_schema` 2b
   хранится константой), таблица `events` пуста, `trust.toml` нет. Одна транзакция `BEGIN
-  IMMEDIATE`: `CREATE TABLE` `trust_heads`, `trust_observations`; `meta` += `restored = false`;
+  IMMEDIATE`: `CREATE TABLE` `trust_heads`, `trust_observations`; `meta` += `restored`, где
+  **известное восстановление не теряется**: `admission = restored_pending` в v1 (база
+  `restore --empty` или из копии, `perimeter._stage:723`, `test_restore_empty_is_pending`) —
+  `restored = true`; иначе — `false` (вариант (а) относится только к **неизвестной** истории,
+  вопрос 7 этим не решается);
   `meta.schema = "2"`; `COMMIT` (прагмы журнала); `transitions`, `admission` не меняются.
   **Недопустимая база 2b** (схема `"1"`, но события есть или `trust.toml` есть) — отказ
   `Unavailable("migration_precondition")` **без изменений**, решает человек. История
@@ -396,13 +407,25 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
   событиями мигрирует с `restored = true`; первый корень после `setup-trust` допускается по К». Остальное — модель §6.1: `register_findings` —
   своя транзакция без условия на голову; `advance_head` — CAS по `row_version` с чтением
   головы под блокировкой; эпоха — из проверенного текущего снимка, иначе `pending`;
-  `restored` отделён от `admission`.
+  `restored` отделён от `admission`, **постоянен и никогда не возвращается в `false`**: в схеме
+  `"2"` его ставит сама операция восстановления (`_stage`) при создании новой базы — до
+  `admit`/`restore_conservative`, которые снимают `restored_pending`; при переходе v1 —
+  в той же транзакции, что `meta.schema = "2"`, то есть до любого последующего снятия
+  `restored_pending` (`restore_conservative:924`).
 - [ ] **Step 1: Тесты:** `test_migrate_admissible_2b_db`;
   `test_migrate_non_admissible_2b_db_refused_unchanged` (события или `trust.toml`);
   `test_migrate_killed_before_commit_whole_v1_then_completes`;
   `test_migrate_killed_after_commit_whole_v2_rerun_current_verified`;
   `test_migrate_rerun_idempotent`; `test_unknown_schema_untouched_integrity`;
   `test_v1_db_ordinary_open_names_migration`; `test_roles_setup_rerun_with_markers_migrates_v1`;
+  `test_roles_setup_completes_all_steps_fresh_v1_v2_and_rerun` (весь `roles setup` до `libexec`,
+  `sudoers`, `verify` — для свежей установки, базы v1, базы v2 и повторного запуска);
+  `test_roles_setup_lost_db_with_markers_refused`;
+  `test_restored_empty_v1_migrates_restored_true`;
+  `test_restored_empty_v1_admit_r1_then_rebind_r2_conservative` (восстановленная пустая v1 →
+  переход → допуск R1 → поздний `--rebind R2` → R2 по К);
+  `test_restored_flag_never_returns_false` (после `restore_conservative` и `admit`);
+  `test_restore_v2_sets_restored_before_admission`;
   `test_roles_setup_unknown_schema_refusal_passed_through`;
   `test_observation_dedup_equal_ctx_only`; `test_trust_status_does_not_complete_merge_observation`;
   `test_two_p_two_events`; `test_finding_registered_without_advance`;
@@ -679,8 +702,10 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
 6. **Как `gh` попадает в `install.toml`:** расширить `cli set` (сейчас по решению 27.10 —
    только `openssl`) или задавать при `init`/`install`. O12 решил «утверждённый CLI по
    абсолютному пути», но не способ записи.
-7. **Значение `restored` при переходе базы 2b** (Task 8). Спека не говорит, считать ли базу
-   2b «восстановленной». Варианты: (а) `restored = false` — в базе 2b не может быть событий
+7. **Значение `restored` при переходе базы 2b с неизвестной историей** (Task 8). Известное
+   восстановление (`admission = restored_pending`) всегда даёт `restored = true` (решение
+   ведущего 04.11); вопрос — только о базе `ready`, история восстановлений которой не
+   сохранена. Спека не говорит, считать ли такую базу 2b «восстановленной». Варианты: (а) `restored = false` — в базе 2b не может быть событий
    доверия (`record-violation` без привязки — `refused: no_binding`, §6.1), переход проверяет
    это предусловием (таблица `events` пуста, `trust.toml` нет; иначе — отказ перехода,
    решает человек); (б) `restored = true`, если `admission` когда-либо был
