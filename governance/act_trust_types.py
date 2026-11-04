@@ -54,9 +54,22 @@ ROUTE_KINDS: Mapping[Route, frozenset[str]] = MappingProxyType(
 )
 
 
+def clip_detail(text: str) -> str:
+    """Clip ``text`` to ``MAX_DETAIL_BYTES`` of UTF-8 at a character boundary.
+
+    Producers clip first; ``Finding`` still refuses an over-long detail.
+    """
+    raw = text.encode("utf-8")[:MAX_DETAIL_BYTES]
+    return raw.decode("utf-8", errors="ignore")
+
+
 @dataclass(frozen=True)
 class Finding:
-    """One finding: a kind from KINDS, the repo role, a short detail."""
+    """One finding: a kind from KINDS, the repo role, a short detail.
+
+    The detail limit is an invariant (``ValueError``); use ``clip_detail``
+    before constructing.
+    """
 
     kind: str
     role: Role
