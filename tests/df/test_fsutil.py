@@ -512,6 +512,10 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
         "idempotent: a retry removes it again before _make_home syncs the parent"
     ),
     ("platform", "_cleanup_at", "os.unlink", 1): "protocol cleanup_tree: link",
+    ("platform", "", "import tempfile", 1): "gh_version_problems' call HOME",
+    ("platform", "gh_version_problems", "tempfile.TemporaryDirectory", 1): (
+        "the fresh HOME of `gh --version` (spec 3.10 rev 11), never under the layout"
+    ),
     ("platform", "_rmdir_empty", "os.rmdir", 1): "protocol cleanup_tree: tree",
     ("platform", "_quarantine", "os.rename", 1): (
         "protocol cleanup_tree: quarantine, then parent synced"
