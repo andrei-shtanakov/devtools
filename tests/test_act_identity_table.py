@@ -197,6 +197,7 @@ MODIFIED_EXISTING = {
     "approve_node._verify_nodes_in_base": "self-hash в base — `_content_hash` акта заявки (m-2); проверка прежняя",
     "edge_check/publish.publish_wave": "коммит evidence — через `an._commit_paths` (I-3), акт заявки — в текст ревью (N-2); проверки прежние",
     "edge_check/publish.checklist_body": "текст одобряющего ревью по акту заявки (N-2); не суждение",
+    "edge_check/publish.evidence_dir": "каталог evidence — из `ws_id` через `act_surface.evidence_dir`, не из `bundle_dir` (df 3a); не суждение",
 }
 
 S, N, L = (
