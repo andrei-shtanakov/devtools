@@ -676,6 +676,12 @@ SUBPROCESS_CREATORS = {
         "sudo let it through, df-publish refuses the empty request and "
         "writes its journal line; root keeps the exit code and stdout length"
     ),
+    "sudo -u df-publisher sudo df-precheck (doctor publisher.precheck)": (
+        "creates nothing: the deliberately invalid request ({}) is refused "
+        "at parsing, before any snapshot; before that, precheck serve reaps "
+        "(SIGKILL to df-precheck processes older than REAP_AFTER); root "
+        "keeps the exit code, stdout and the stderr tail"
+    ),
     "sudo -n -u df-precheck df-precheck (publisher precheck client)": (
         "the precheck's own protocol as its role (stage 2b): its snapshot "
         "under its home, removed in finally or by the next run under its "
@@ -715,6 +721,7 @@ PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
         "sudo -u df-exec test -r / -x (doctor roles.isolation, root)",
         "sudo -u <role> sudo df-publish perimeter-status (doctor, root)",
         "sudo -u df-review sudo df-publish merge (doctor publisher.foreign)",
+        "sudo -u df-publisher sudo df-precheck (doctor publisher.precheck)",
     ),
     ("platform", "run_supervised", "subprocess.Popen", 1): (
         "sudo -n -u df-precheck df-precheck (publisher precheck client)",

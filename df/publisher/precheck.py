@@ -36,6 +36,7 @@ from df.publisher.github import GitHubRefused, GitHubUnavailable
 from df.publisher.ops import OpContext
 from df.publisher.request import Refused
 from df.roles import PRECHECK_USER
+from df.stage2_config import no_constant, no_duplicates
 
 if TYPE_CHECKING:  # `merge` imports this module
     from df.publisher.merge import Change, Kind
@@ -272,8 +273,8 @@ def parse_verdict(raw: bytes) -> Mapping[str, object] | None:
     try:
         data = json.loads(
             raw.decode("utf-8"),
-            object_pairs_hook=_no_duplicates,
-            parse_constant=_no_constant,
+            object_pairs_hook=no_duplicates,
+            parse_constant=no_constant,
         )
     except (UnicodeDecodeError, ValueError, RecursionError):
         return None
@@ -286,17 +287,6 @@ def parse_verdict(raw: bytes) -> Mapping[str, object] | None:
     if raw != (json.dumps(data) + "\n").encode("utf-8"):
         return None
     return data
-
-
-def _no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    keys = [k for k, _v in pairs]
-    if len(set(keys)) != len(keys):
-        raise ValueError("duplicate keys")
-    return dict(pairs)
-
-
-def _no_constant(name: str) -> object:
-    raise ValueError(f"constant {name}")
 
 
 def _bound(verdict: Mapping[str, object], request: Mapping[str, object]) -> bool:

@@ -24,7 +24,7 @@ from types import MappingProxyType
 from typing import Literal, get_args
 
 from df.launch import RUN_ID
-from df.stage2_config import OPERATIONS
+from df.stage2_config import OPERATIONS, no_constant, no_duplicates
 
 MAX_BYTES = 65536
 READ_TIMEOUT = 5.0
@@ -277,24 +277,11 @@ _SCHEMAS: Mapping[str, Mapping[str, Check]] = MappingProxyType(
 # --- parsing ------------------------------------------------------------------
 
 
-def _no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"duplicate key {key!r}")
-        result[key] = value
-    return result
-
-
-def _no_constant(name: str) -> object:
-    raise ValueError(f"constant {name} is not JSON")
-
-
 def _load(raw: bytes) -> object:
     try:
         text = raw.decode("utf-8")
         return json.loads(
-            text, object_pairs_hook=_no_duplicates, parse_constant=_no_constant
+            text, object_pairs_hook=no_duplicates, parse_constant=no_constant
         )
     except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise Refused(f"bad_request: not JSON ({type(exc).__name__})") from exc
@@ -379,7 +366,7 @@ def emit(resp: Response) -> str:
 def parse_response(raw: bytes | str) -> Response:
     """A client's reading of a response line; anything else is `BadResponse`."""
     try:
-        data = json.loads(raw, object_pairs_hook=_no_duplicates)
+        data = json.loads(raw, object_pairs_hook=no_duplicates)
     except (ValueError, RecursionError) as exc:
         raise BadResponse(f"not JSON: {exc}") from exc
     keys = {"schema", "outcome", "reason", "result", "evidence"}
