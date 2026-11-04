@@ -2400,7 +2400,10 @@ root от имени `df-publisher` запускает команду издат
 токена; исправна она, только если программа сама отказала (код 2, `df-precheck: invalid
 request` в stderr). Иное — «нарушено» с причиной: отказ sudo (нет правила — повторить
 `roles setup`), программная ошибка, отказ входа или `precheck serve` по имени. В рантайме
-stderr проверяющего издатель не читает: причина `precheck_failed: exit` видна в `doctor`.
+stderr проверяющего издатель не читает: причина `precheck_failed: exit` видна в `doctor`. Проба
+`sudo darkfactory doctor --product` запускает настоящий `precheck serve`, который сначала
+посылает `SIGKILL` процессам `df-precheck` старше `REAP_AFTER` (230 с); `roles.precheck`
+перечисляет их до пробы.
 
 **Порядок оператора при `unknown` мержа** (решение владельца 03.11). Владение PR при
 `unknown` сохраняется. Оператор:
