@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import dataclasses
 import errno
+import io
 import json
 import os
 from pathlib import Path
@@ -81,6 +82,8 @@ UIDS = {"df-exec": 71001, "df-review": 71002, "df-publisher": 71003}
 PRECHECK_UID = 71004
 #: The real check, before the `l2` fixture replaces it.
 REAL_IO_LOG = sudoers.io_log_problems
+#: The real nested seam, before the `l2` fixture replaces it.
+REAL_PUBLISHER_PRECHECK = doctor.publisher_precheck
 SUDOERS_FIXTURES = Path(__file__).parent / "fixtures" / "sudoers"
 LEVEL2_IDS = [
     "roles.users",
@@ -89,6 +92,7 @@ LEVEL2_IDS = [
     "roles.isolation",
     "roles.precheck",
     "publisher.answers",
+    "publisher.precheck",
     "publisher.foreign",
     "publisher.owners",
     "product.registered",
@@ -97,6 +101,10 @@ LEVEL2_IDS = [
     "models.access",
 ]
 FRESH = "подтверждён 2026-10-29T00:00:00+00:00"
+#: What `precheck serve` answers the probe: its own refusal (exit 2).
+PRECHECK_REFUSED = plat.RunResult(
+    2, b"", b"df-precheck: invalid request: keys: unexpected [], missing [...]\n", True
+)
 
 
 def answer(outcome: str, reason: str | None, result: dict[str, object]) -> bytes:
@@ -149,6 +157,7 @@ class L2:
     github: plat.RunResult
     self_check: bytes | Exception
     probe_current: bool = True
+    precheck: plat.RunResult = dataclasses.field(default=PRECHECK_REFUSED)
     calls: list[tuple[object, ...]] = dataclasses.field(default_factory=list)
 
     @property
@@ -290,6 +299,10 @@ def _seams(world: L2, mp: pytest.MonkeyPatch) -> None:
         world.calls.append(("merge",))
         return world.merge
 
+    def publisher_precheck(layout: Layout) -> plat.RunResult:
+        world.calls.append(("precheck",))
+        return world.precheck
+
     def self_check(layout: Layout, *, purpose: str = "") -> bytes:
         world.calls.append(("self-check", purpose))
         if isinstance(world.self_check, Exception):
@@ -311,6 +324,7 @@ def _seams(world: L2, mp: pytest.MonkeyPatch) -> None:
     mp.setattr(doctor, "role_access", role_access)
     mp.setattr(doctor, "role_perimeter_status", role_perimeter_status)
     mp.setattr(doctor, "review_merge", review_merge)
+    mp.setattr(doctor, "publisher_precheck", publisher_precheck)
     mp.setattr(doctor, "operator_gh", lambda _o: world.gh_dir)
     mp.setattr(setup_agent, "publisher_self_check", self_check)
     mp.setattr(setup_agent, "exec_check_github", exec_check_github)
@@ -801,6 +815,93 @@ def test_answers_not_ok(l2: L2, out: bytes | plat.RunResult, status: str) -> Non
     assert status_of(l2, "publisher.answers")[0] == status
 
 
+def test_precheck_chain_refuses_the_probe_ok(l2: L2) -> None:
+    """Final review I1: `precheck serve`'s own refusal of the probe (exit 2,
+    `df-precheck: invalid request`, nothing on stdout) is the whole chain
+    publisher → sudo → wrapper → entry → program holding."""
+    assert status_of(l2, "publisher.precheck") == ("ok", "")
+    assert ("precheck",) in l2.calls
+
+
+@pytest.mark.parametrize(
+    "result,status,needle",
+    [
+        pytest.param(
+            plat.RunResult(1, b"", b"sudo: a password is required\n", True),
+            "нарушено",
+            "sudo отказал: sudo: a password is required; "
+            "повторите `darkfactory roles setup`",
+            id="no-sudo-rule",
+        ),
+        pytest.param(
+            plat.RunResult(
+                1,
+                b"",
+                b"Traceback (most recent call last):\n  ...\n"
+                b"ModuleNotFoundError: No module named 'yaml'\n",
+                True,
+            ),
+            "нарушено",
+            "программная ошибка precheck serve: "
+            "ModuleNotFoundError: No module named 'yaml'",
+            id="exit-bug",
+        ),
+        pytest.param(
+            plat.RunResult(
+                2, b"", "precheck serve: релиз без предпроверки\n".encode(), True
+            ),
+            "нарушено",
+            "отказ: precheck serve: релиз без предпроверки",
+            id="refusal",
+        ),
+        pytest.param(
+            plat.RunResult(0, b'{"outcome": "allow"}\n', b"", True),
+            "нарушено",
+            "ответ на заведомо невалидный запрос: код 0, stdout 21 байт",
+            id="answered",
+        ),
+        pytest.param(
+            plat.RunResult(-1, b"", b"", False),
+            "данные недоступны",
+            "df-publisher → df-precheck: нет ответа",
+            id="not-launched",
+        ),
+        pytest.param(
+            plat.RunResult(-9, b"", b"", True, timed_out=True),
+            "данные недоступны",
+            "df-publisher → df-precheck: нет ответа",
+            id="timed-out",
+        ),
+    ],
+)
+def test_precheck_chain_not_ok_names_the_cause(
+    l2: L2, result: plat.RunResult, status: str, needle: str
+) -> None:
+    l2.precheck = result
+    got, reason = status_of(l2, "publisher.precheck")
+    assert got == status and needle in reason, reason
+
+
+def test_precheck_probe_is_refused_by_the_program(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The probe's expectation is the program's exact refusal: `serve` on
+    `PRECHECK_PROBE` exits `EXIT_REQUEST` with `PRECHECK_REFUSAL` on stderr
+    and writes no verdict; the probe carries no token."""
+    act_precheck = pytest.importorskip("governance.act_precheck")
+    out = io.StringIO()
+    code = act_precheck.serve(
+        io.BytesIO(doctor.PRECHECK_PROBE),
+        out,
+        admin_digest="sha256:" + "0" * 64,
+        home=tmp_path,
+    )
+    assert code == act_precheck.EXIT_REQUEST == doctor.PRECHECK_EXIT
+    assert out.getvalue() == ""
+    assert capsys.readouterr().err.startswith(doctor.PRECHECK_REFUSAL)
+    assert b"token" not in doctor.PRECHECK_PROBE
+
+
 def test_foreign_refused_by_sudo_ok(l2: L2) -> None:
     assert status_of(l2, "publisher.foreign") == ("ok", "")
     assert ("merge",) in l2.calls
@@ -1043,10 +1144,17 @@ def test_nested_seams_go_through_the_roles_sudo(
     publish = str(lay.libexec / "df-publish")
     doctor.role_perimeter_status(lay, "df-exec", b"{}")
     doctor.review_merge(lay)
+    REAL_PUBLISHER_PRECHECK(lay)
     inner = ["/usr/bin/sudo", "-n", "-u", "df-publisher", publish]
+    wrapper = str(lay.libexec / "df-precheck")
     assert calls == [
         (["/usr/bin/sudo", "-n", "-u", "df-exec", *inner, "perimeter-status"], b"{}"),
         (["/usr/bin/sudo", "-n", "-u", "df-review", *inner, "merge"], b""),
+        (
+            ["/usr/bin/sudo", "-n", "-u", "df-publisher"]
+            + ["/usr/bin/sudo", "-n", "-u", "df-precheck", wrapper],
+            doctor.PRECHECK_PROBE,
+        ),
     ]
 
 
