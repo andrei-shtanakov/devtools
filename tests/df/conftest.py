@@ -61,6 +61,27 @@ _PINNED_UV_SKIP = re.compile(r"uv не найден|не закреплённа�
 _skipped_for_uv: list[str] = []
 
 
+class ForbiddenKill(BaseException):
+    """A test reached a real kill. A `BaseException`, so no `except
+    Exception` fence (`cli._reap`) can swallow it."""
+
+
+@pytest.fixture(autouse=True)
+def _no_real_reap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """In process, `precheck serve` and doctor see no process and kill
+    none: the fake `df-precheck` of a test is often this user, whose other
+    processes a real reap would kill (2b Task 10). Tests of the reap pass
+    their own lister and killer; root rows run the real one in its own
+    process."""
+    from df import precheck_reap
+
+    def no_kill(pid: int, signo: int) -> None:
+        raise ForbiddenKill(f"test killed {pid} with {signo}")
+
+    monkeypatch.setattr(precheck_reap, "list_processes", lambda: [])
+    monkeypatch.setattr(precheck_reap, "kill", no_kill)
+
+
 def root_gate_reason(euid: int, env: Mapping[str, str]) -> str | None:
     """Why a `root` test is skipped here; `None` when the gate is open."""
     if euid == 0 and env.get(ROOT_ACCEPTANCE_ENV) == "1":

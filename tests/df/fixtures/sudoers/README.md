@@ -42,15 +42,23 @@ Synthesized, not captured (no real case exists to capture):
   spaces, rules with 8). sudo never wraps output to a pipe, so this is only a
   tolerance check of the parser.
 
-Synthesized in stage 2b Task 6 (the `df-precheck` rule; to be recaptured by
-the root rows of Task 10 on both OSes):
+Synthesized in stage 2b Task 6 and **confirmed by capture in stage 2b Task 10**
+(CI run https://github.com/andrei-shtanakov/devtools/actions/runs/41697032967,
+head 8fd5d3d, the same test and artifacts `df-stage1-<os>`, `sudoers/<name>.fixture.txt`;
+exit code 0 and empty stderr for all five names on both OSes): the captures
+of `df-publisher` and `df-precheck` are byte for byte the synthesized files,
+so the files below are now real captures:
 
-- `sudo-l-<os>-df-publisher.txt` — `df-publisher` now has one rule. The
-  defaults section is the runner's capture of the same OS; the bindings are
-  the two `Defaults!` lines of `expected.txt` as sudo printed the 2a one; the
-  rule prints its tags in the captured order `NOSETENV: NOPASSWD:`.
-- `sudo-l-<os>-df-precheck.txt` — the 2a capture of `df-publisher` («not
-  allowed to run sudo», a role without rules) with the name replaced.
+- `sudo-l-<os>-df-publisher.txt` — `df-publisher`'s one rule; real sudo
+  prints both `Defaults!` bindings under "Runas and Command-specific
+  defaults" as `expected.txt` writes them (`command_timeout=180` included,
+  unchanged) and the rule's tags as `NOSETENV: NOPASSWD:`.
+- `sudo-l-<os>-df-precheck.txt` — a role without rules («not allowed to run
+  sudo»).
 
 The 2a captures of `df-exec`, `df-review` and `runner` predate the
-`df-precheck` binding; tests add it by editing where it matters.
+`df-precheck` binding; tests add it by editing where it matters. Run
+41697032967 shows that edit is the only difference: its captures of the three
+differ from these files by exactly the line
+`    Defaults!/opt/df/libexec/df-precheck command_timeout=180, …` (both OSes, checked
+with `diff`).

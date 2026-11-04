@@ -87,6 +87,7 @@ LEVEL2_IDS = [
     "roles.sudoers",
     "roles.libexec",
     "roles.isolation",
+    "roles.precheck",
     "publisher.answers",
     "publisher.foreign",
     "publisher.owners",
@@ -585,6 +586,39 @@ def test_libexec_broken(l2: L2) -> None:
 
 
 # --- 4: isolation ---
+
+
+def test_precheck_leftovers_note_or_broken(
+    l2: L2, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2b Task 10: `df-precheck` processes older than `REAP_AFTER` are a
+    note of `ok` (the next precheck reaps them); young ones, zombies and
+    other UIDs are not listed; processes that cannot be read are
+    «нарушено»."""
+    from df import precheck_reap
+    from df.precheck_reap import REAP_AFTER, ListingError, ProcInfo
+
+    assert status_of(l2, "roles.precheck") == ("ok", "")
+    table = [
+        ProcInfo(501, 1, PRECHECK_UID, REAP_AFTER + 5, False),
+        ProcInfo(502, 1, PRECHECK_UID, REAP_AFTER - 5, False),
+        ProcInfo(503, 1, PRECHECK_UID, REAP_AFTER + 5, True),
+        ProcInfo(504, 1, PRECHECK_UID + 1, REAP_AFTER + 5, False),
+    ]
+    monkeypatch.setattr(precheck_reap, "list_processes", lambda: table)
+    status, reason = status_of(l2, "roles.precheck")
+    assert status == "ok"
+    assert reason == (
+        f"процессы df-precheck старше {int(REAP_AFTER)} с: 501 "
+        "(их уберёт следующая предпроверка)"
+    )
+
+    def broken() -> list[ProcInfo]:
+        raise ListingError("ps: код 1")
+
+    monkeypatch.setattr(precheck_reap, "list_processes", broken)
+    status, reason = status_of(l2, "roles.precheck")
+    assert status == "нарушено" and "процессы не прочитаны: ps: код 1" in reason
 
 
 @pytest.mark.parametrize(

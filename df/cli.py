@@ -46,6 +46,7 @@ from df import (
     launcher_entry,
     libexec,
     models,
+    precheck_reap,
     probe,
     roles,
     roles_setup,
@@ -108,6 +109,7 @@ _NO_SITE = (
     "precheck serve: в административном дереве нет каталога site/ "
     "при governance/act_precheck.py: переустановите релиз"
 )
+_REAP = "precheck serve: уборка"
 #: Seconds root waits for `publisher perimeter-restore` (the barrier wait,
 #: a copy of up to `perimeter.MAX_COPY` and its integrity check).
 RESTORE_TIMEOUT = 600.0
@@ -511,9 +513,10 @@ def _precheck_serve(lay: Layout, read: ReadResult) -> int:
     on a release whose admin tree has the program (a legacy one is refused
     by name) and its `site/` (a tree with the program but without it, too).
     Then the environment becomes exactly `PRECHECK_ENV` plus the
-    role's HOME, `admin/<id>/site` goes to the END of `sys.path` (after
-    `admin/<id>`, which the entry put first, and stdlib), and the program
-    of that tree answers the one request on stdin."""
+    role's HOME, the leftovers of earlier runs are reaped (`_reap`),
+    `admin/<id>/site` goes to the END of `sys.path` (after `admin/<id>`,
+    which the entry put first, and stdlib), and the program of that tree
+    answers the one request on stdin."""
     account = load_accounts(lay.accounts).get(roles.PRECHECK_USER)
     if account is None or account.state != "ready" or os.getuid() != account.uid:
         raise Refusal(_NOT_PRECHECK)
@@ -530,11 +533,28 @@ def _precheck_serve(lay: Layout, read: ReadResult) -> int:
     home = lay.role_home(roles.PRECHECK_USER)
     os.environ.clear()
     os.environ.update({**PRECHECK_ENV, "HOME": str(home)})
+    _reap(account.uid)
     sys.path.append(str(tree / SITE_DIR))
     serve = _load_serve(tree)
     return serve(
         sys.stdin.buffer, sys.stdout, admin_digest=snap.entry.admin_digest, home=home
     )
+
+
+def _reap(uid: int) -> None:
+    """The leftovers of earlier precheck runs (`precheck_reap`): processes
+    of `uid` older than `REAP_AFTER` are killed (never this one or its
+    ancestors). A problem is a named reason on stderr and never stops the
+    run; the program's own cleanup then removes the snapshots no live run
+    holds."""
+    try:
+        killed, problems = precheck_reap.reap(uid)
+    except Exception as exc:  # noqa: BLE001 - the reap never stops the run
+        killed, problems = [], [f"{type(exc).__name__}: {exc}"]
+    for problem in problems:
+        print(f"{_REAP}: {problem}", file=sys.stderr)
+    if killed:
+        print(f"{_REAP}: убиты {killed}", file=sys.stderr)
 
 
 def _load_serve(tree: Path) -> Callable[..., int]:
