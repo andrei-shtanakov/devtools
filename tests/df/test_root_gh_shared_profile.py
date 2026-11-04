@@ -130,7 +130,10 @@ def _cases(
         cases[f"{name}/{MEMBERS[0]}"] = _token(
             gh, MEMBERS[0], homes[MEMBERS[0]], profiles[name]
         )
-    cases["keychain"] = _keychain_cases(gh, profiles)
+    ro_home = base.parent / "home-read-only"
+    ro_home.mkdir(mode=0o755)
+    cases[f"read-only-home/{MEMBERS[0]}"] = _token(gh, MEMBERS[0], ro_home, base)
+    cases["keychain"] = _keychain_cases(gh, profiles, homes[OPERATOR])
     cases["unchanged"] = {
         name: _snapshot(p) == before[name] for name, p in profiles.items()
     }
@@ -139,7 +142,9 @@ def _cases(
     return cases
 
 
-def _keychain_cases(gh: Path, profiles: dict[str, Path]) -> dict[str, object]:
+def _keychain_cases(
+    gh: Path, profiles: dict[str, Path], isolated: Path
+) -> dict[str, object]:
     """macOS: an item `gh:github.com`/`df-history` in the operator's keychain."""
     if not MACOS:
         return {"skipped": "linux: no Secret Service on the runner"}
@@ -151,6 +156,10 @@ def _keychain_cases(gh: Path, profiles: dict[str, Path]) -> dict[str, object]:
     try:
         for name in ("base", "no-token"):
             found[name] = _token(gh, OPERATOR, home, profiles[name])
+        # The same lookup with HOME away from the login keychain (env reset).
+        found["no-token/isolated-home"] = _token(
+            gh, OPERATOR, isolated, profiles["no-token"]
+        )
     finally:
         delete = [*security, "delete-generic-password", "-a", ACCOUNT]
         found["delete"] = _brief(_as(OPERATOR, home, [*delete, "-s", f"gh:{HOST}"]))
