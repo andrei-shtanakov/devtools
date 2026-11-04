@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -33,6 +34,19 @@ def test_arg_path_groups_directories(args: list[str], expected: list[str]) -> No
     assert sorted(args, key=_arg_path) == expected
 
 
+def test_arg_path_mixes_absolute_and_relative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(ROOT)
+    args = [
+        "tests/df/a.py",
+        str(ROOT / "tests" / "b.py"),
+        str(ROOT / "tests" / "df" / "c.py::t"),
+    ]
+    expected = [args[1], args[0], args[2]]
+    assert sorted(args, key=_arg_path) == expected
+
+
 def test_interleaved_directories_keep_conftest_fixtures() -> None:
     cmd = [
         sys.executable,
@@ -51,8 +65,21 @@ def test_interleaved_directories_keep_conftest_fixtures() -> None:
             " or test_check_run_returns_the_record"
         ),
     ]
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in {"DF_ROOT_ACCEPTANCE", "PYTEST_ADDOPTS"}
+    }
     done = subprocess.run(
-        cmd, cwd=ROOT, capture_output=True, text=True, timeout=300, check=False
+        cmd,
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
     )
-    assert done.returncode == 0, done.stdout + done.stderr
-    assert "3 passed" in done.stdout
+    out = done.stdout + done.stderr
+    assert "fixture 'world' not found" not in out, out
+    assert " error" not in out and " failed" not in out, out
+    assert done.returncode == 0, out

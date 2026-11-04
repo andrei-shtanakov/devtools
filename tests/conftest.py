@@ -48,8 +48,8 @@ def _note_governance_skip(report: pytest.CollectReport | pytest.TestReport) -> N
 
 
 def _arg_path(arg: str) -> tuple[str, ...]:
-    """Directory-wise sort key of a command-line test argument."""
-    return Path(arg.split("::", 1)[0]).parts
+    """Directory-wise sort key of a command-line test argument (absolute path)."""
+    return Path(arg.split("::", 1)[0]).resolve().parts
 
 
 @pytest.hookimpl(tryfirst=True)
