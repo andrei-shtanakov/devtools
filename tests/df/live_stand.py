@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import importlib
 import itertools
 import json
 import os
@@ -205,6 +206,11 @@ RECONCILE_TRIES = 4
 #: The one answer a repeat may give while the read lags.
 LAGGING = (3, "unknown", "merge_not_confirmed")
 FORBIDDEN = "Resource not accessible by integration"
+#: The modules the stand's own process imports lazily (rows 10 and 12: the
+#: checker's `load_history` over `TokenTransport`); the venv gets them from
+#: the `governance` group (`uv sync --group governance` in the workflow).
+#: `stand_imports_problem` checks them before any secret or GitHub write.
+STAND_IMPORTS = ("steward.approvalfacts.v3",)
 _TAG = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,63}", re.ASCII)
 _LS_TREE = re.compile(r"([0-7]{6}) (blob|tree|commit) ([0-9a-f]{40,64})\t(.+)")
 #: Git of the stand: no system or global config (no credential helper), no
@@ -2126,6 +2132,10 @@ def stand_phase(args: StandArgs) -> int:
     """`stand` (module doc). The scan of the evidence for every in-process
     secret runs whatever happens (an outer `finally`)."""
     require_ci_root()
+    problem = stand_imports_problem(STAND_IMPORTS)
+    if problem is not None:
+        record(args.out, "stand-imports-refused.json", {"refused": problem})
+        infra(problem)
     top = live_top()
     prov, secrets = gate(args.source_sha, args.secrets, top=top, layout=PRODUCTION)
     rid = current_id(PRODUCTION)
@@ -2168,6 +2178,17 @@ def stand_phase(args: StandArgs) -> int:
             )
             code = EXIT_INFRA
     return code
+
+
+def stand_imports_problem(names: Sequence[str]) -> str | None:
+    """Why a module of `names` does not import in this venv (the first
+    one, named); `None` when all do."""
+    for name in names:
+        try:
+            importlib.import_module(name)
+        except ImportError as exc:
+            return f"окружение стенда: модуль {name} не импортируется: {exc}"
+    return None
 
 
 def set_up(rw: RolesWorld, args: StandArgs, secrets: StandSecrets) -> Stand:
