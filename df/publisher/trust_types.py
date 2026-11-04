@@ -7,6 +7,7 @@ Stdlib only. Mirror of ``governance/act_trust_types.py`` (``df`` never imports
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -17,6 +18,8 @@ Route = Literal["perimeter-status", "trust-status", "merge"]
 
 MAX_DETAIL_BYTES = 512
 MAX_EPOCHS = 64
+
+_SURROGATES = re.compile("[\ud800-\udfff]")
 
 _BOTH: frozenset[Role] = frozenset({"approval-policy", "df-trust"})
 _TRUST: frozenset[Role] = frozenset({"df-trust"})
@@ -69,9 +72,13 @@ def detail_size(text: str) -> int:
 def clip_detail(text: str) -> str:
     """Longest code-point prefix of ``text`` with ``detail_size`` within the limit.
 
-    Cuts on code points, so neither a character nor an escape is split.
-    Producers clip first; ``Finding`` still refuses an over-long detail.
+    Cuts on code points, so neither a character nor an escape is split. Lone
+    surrogates (``json.loads`` yields them from untrusted text) are replaced
+    by U+FFFD first. Producers clip first; ``Finding`` still refuses an
+    over-long detail, and text with surrogates (``detail_size`` raises
+    ``ValueError``).
     """
+    text = _SURROGATES.sub("\ufffd", text)
     low, high = 0, len(text)
     while low < high:
         mid = (low + high + 1) // 2

@@ -97,6 +97,14 @@ def test_clip_detail_mixed_escapes(mod: ModuleType) -> None:
     mod.Finding("token_write", "df-trust", clipped)
 
 
+def test_clip_detail_replaces_lone_surrogates(mod: ModuleType) -> None:
+    clipped = mod.clip_detail("a\ud800b")
+    assert clipped == "a\ufffdb"
+    mod.Finding("token_write", "df-trust", clipped)
+    with pytest.raises(ValueError):
+        mod.Finding("token_write", "df-trust", "a\ud800b")
+
+
 def test_detail_measured_on_serialised_form(mod: ModuleType) -> None:
     with pytest.raises(ValueError):
         mod.Finding("token_write", "df-trust", "\x01" * 512)
