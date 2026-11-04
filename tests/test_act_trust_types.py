@@ -72,7 +72,7 @@ def test_clip_detail_at_character_boundary(mod: ModuleType) -> None:
     # "x" shifts the 2-byte characters so the 512-byte cut falls mid-character
     text = "x" + "я" * 300
     clipped = mod.clip_detail(text)
-    assert len(clipped.encode("utf-8")) <= mod.MAX_DETAIL_BYTES
+    assert mod.detail_size(clipped) <= mod.MAX_DETAIL_BYTES
     assert clipped == text[: len(clipped)] and len(clipped) == 256
     mod.Finding("token_write", "df-trust", clipped)
 
@@ -80,6 +80,36 @@ def test_clip_detail_at_character_boundary(mod: ModuleType) -> None:
 def test_clip_detail_short_text_unchanged(mod: ModuleType) -> None:
     assert mod.clip_detail("short") == "short"
     assert mod.clip_detail("я" * 256) == "я" * 256
+
+
+def test_clip_detail_control_characters(mod: ModuleType) -> None:
+    clipped = mod.clip_detail("\x01" * 600)
+    assert mod.detail_size(clipped) <= mod.MAX_DETAIL_BYTES
+    assert clipped == "\x01" * 85  # six serialised bytes each
+
+
+def test_clip_detail_mixed_escapes(mod: ModuleType) -> None:
+    text = '"\\\x01ж😀' * 100
+    clipped = mod.clip_detail(text)
+    assert mod.detail_size(clipped) <= mod.MAX_DETAIL_BYTES
+    assert text.startswith(clipped)
+    assert mod.detail_size(text[: len(clipped) + 1]) > mod.MAX_DETAIL_BYTES
+    mod.Finding("token_write", "df-trust", clipped)
+
+
+def test_clip_detail_replaces_lone_surrogates(mod: ModuleType) -> None:
+    clipped = mod.clip_detail("a\ud800b")
+    assert clipped == "a\ufffdb"
+    mod.Finding("token_write", "df-trust", clipped)
+    with pytest.raises(ValueError):
+        mod.Finding("token_write", "df-trust", "a\ud800b")
+
+
+def test_detail_measured_on_serialised_form(mod: ModuleType) -> None:
+    with pytest.raises(ValueError):
+        mod.Finding("token_write", "df-trust", "\x01" * 512)
+    assert mod.detail_size("\x01") == 6
+    assert mod.detail_size("я") == 2
 
 
 def _shape(mod: ModuleType) -> dict[str, object]:
