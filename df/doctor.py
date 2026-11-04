@@ -667,6 +667,10 @@ PRECHECK_EXIT = 2
 PRECHECK_REFUSAL = "df-precheck: invalid request"
 #: How sudo's own refusals begin (no rule, unknown user, `-n`).
 _SUDO_REFUSALS = ("sudo:", "Sorry, user")
+#: Seconds `roles.precheck` gives its process listing: generous, unlike the
+#: reap's `precheck_reap.PS_TIMEOUT` (a slow `ps` on a loaded host is not
+#: «нарушено»; doctor has no rung margin to keep).
+LEFTOVERS_TIMEOUT = 30.0
 #: Seconds root waits for a role's `check`, `test -r` or a nested call.
 ROLE_TIMEOUT = 60.0
 TEST = "/bin/test"
@@ -889,7 +893,8 @@ def _precheck_leftovers(ctx: _Level2) -> str:
     if account is None:
         raise _Outcome(NOT_CHECKED, f"нет записи {roles.PRECHECK_USER}")
     try:
-        old = precheck_reap.leftovers(account.uid, precheck_reap.list_processes())
+        listing = precheck_reap.list_processes(timeout=LEFTOVERS_TIMEOUT)
+        old = precheck_reap.leftovers(account.uid, listing)
     except precheck_reap.ListingError as exc:
         raise _broken([f"процессы не прочитаны: {exc}"]) from exc
     if not old:

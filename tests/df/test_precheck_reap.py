@@ -219,6 +219,10 @@ def test_ps_bounded_by_a_short_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     assert killed == []
     assert problems == ["процессы не прочитаны: ListingError: ps: срок 3 с истёк"]
     assert timeouts == [precheck_reap.PS_TIMEOUT] * 2
+    timeouts.clear()
+    with pytest.raises(ListingError, match=r"^ps: срок 30 с истёк$"):
+        REAL_LIST(timeout=30.0)
+    assert timeouts == [30.0]
 
 
 def test_vanished_process_skipped() -> None:

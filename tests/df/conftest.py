@@ -78,7 +78,7 @@ def _no_real_reap(monkeypatch: pytest.MonkeyPatch) -> None:
     def no_kill(pid: int, signo: int) -> None:
         raise ForbiddenKill(f"test killed {pid} with {signo}")
 
-    monkeypatch.setattr(precheck_reap, "list_processes", lambda: [])
+    monkeypatch.setattr(precheck_reap, "list_processes", lambda **_kw: [])
     monkeypatch.setattr(precheck_reap, "kill", no_kill)
 
 

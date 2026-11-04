@@ -619,7 +619,13 @@ def test_precheck_leftovers_note_or_broken(
         ProcInfo(503, 1, PRECHECK_UID, REAP_AFTER + 5, True),
         ProcInfo(504, 1, PRECHECK_UID + 1, REAP_AFTER + 5, False),
     ]
-    monkeypatch.setattr(precheck_reap, "list_processes", lambda: table)
+    timeouts: list[object] = []
+
+    def listing(**kw: object) -> list[ProcInfo]:
+        timeouts.append(kw.get("timeout"))
+        return table
+
+    monkeypatch.setattr(precheck_reap, "list_processes", listing)
     status, reason = status_of(l2, "roles.precheck")
     assert status == "ok"
     assert reason == (
@@ -627,7 +633,9 @@ def test_precheck_leftovers_note_or_broken(
         "(их уберёт следующая предпроверка)"
     )
 
-    def broken() -> list[ProcInfo]:
+    assert timeouts == [doctor.LEFTOVERS_TIMEOUT] == [30.0]
+
+    def broken(**_kw: object) -> list[ProcInfo]:
         raise ListingError("ps: код 1")
 
     monkeypatch.setattr(precheck_reap, "list_processes", broken)
