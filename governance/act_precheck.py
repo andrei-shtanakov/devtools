@@ -11,10 +11,10 @@ goes to stderr without the token.
 Requests are dispatched by `schema` (stage 3a, spec 5.4 rev 11): v1 as below;
 `df/precheck-request/v2` gets a `df/precheck-verdict/v2` refusal -- `tree_incomplete`
 when the admin tree lacks files of its list (`complete_v2` false: `precheck serve`
-checked it before this module was imported), else the answer of the v2 program
-`governance.act_precheck_v2`, imported only then (stage 3a Task 7 fills it in). The
-module's own imports stay within the 2b closure, so a tree an older installer built
-still serves v1 and refuses v2 by name.
+checked it before this module was imported), else `v2_unavailable` until the v2
+program lands. The module's own imports stay within the 2b closure, so a tree an
+older installer built still serves v1; the v2 program is imported only after the
+check.
 
 In 2b only kind `stop` is served (decision 2): the PR adds exactly one stop record
 (decision 11), its branch is the stop branch of that record (decision 6), the record
@@ -70,11 +70,12 @@ REQUEST_SCHEMA_V2 = "df/precheck-request/v2"
 VERDICT_SCHEMA_V2 = "df/precheck-verdict/v2"
 PRECHECK_VERSION_V2 = "df-precheck/2"
 TREE_INCOMPLETE = "tree_incomplete"
-#: The refusal of v2 on a tree without the v2 program's files (stage 3a Task 1).
+#: The v2 refusals of the minimal dispatcher (stage 3a Task 1; Task 7 serves v2).
 REASON_TREE_INCOMPLETE = (
     "tree_incomplete: the admin tree was built by an installer older than its "
     "df/precheck_tree.toml; reinstall the release"
 )
+REASON_V2_UNAVAILABLE = "v2_unavailable: protocol v2 is not served yet"
 #: Kinds served by protocol v1; stage 3 adds kinds in v2 schemas, not here.
 KINDS = ("stop",)
 MAX_REQUEST = 64 << 10
@@ -234,7 +235,7 @@ def serve(
         print(f"df-precheck: invalid request: {exc}", file=sys.stderr)
         return EXIT_REQUEST
     if isinstance(request, RequestV2):
-        answer = _answer_v2(request, admin_digest, complete_v2)
+        answer = verdict_v2(request, admin_digest, complete_v2=complete_v2)
     else:
         outcome, reason = _decide(request, home, deps, deadline)
         reason = reason.replace(request.token, "[token]")
@@ -287,24 +288,15 @@ def parse_request_v2(data: dict[str, object]) -> RequestV2:
     return RequestV2(str(nonce), request_digest(data))
 
 
-def _answer_v2(
-    request: RequestV2, admin_digest: str, complete_v2: bool
-) -> dict[str, object]:
-    """`tree_incomplete` without importing anything, else the v2 program's answer
-    (imported here, after `precheck serve` checked the tree)."""
-    if not complete_v2:
-        return verdict_v2(
-            request, TREE_INCOMPLETE, REASON_TREE_INCOMPLETE, admin_digest
-        )
-    from governance import act_precheck_v2
-
-    return act_precheck_v2.answer(request, admin_digest)
-
-
 def verdict_v2(
-    request: RequestV2, outcome: str, reason: str, admin_digest: str
+    request: RequestV2, admin_digest: str, *, complete_v2: bool
 ) -> dict[str, object]:
-    """`df/precheck-verdict/v2` bound to `request` (minimal until stage 3a Task 7)."""
+    """The `df/precheck-verdict/v2` refusal of the minimal dispatcher."""
+    if complete_v2:
+        # Stage 3a Task 7: the v2 program is imported here, after the check.
+        outcome, reason = REFUSE, REASON_V2_UNAVAILABLE
+    else:
+        outcome, reason = TREE_INCOMPLETE, REASON_TREE_INCOMPLETE
     return {
         "schema": VERDICT_SCHEMA_V2,
         "nonce": request.nonce,

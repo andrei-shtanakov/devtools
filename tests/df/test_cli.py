@@ -668,19 +668,20 @@ def test_load_serve_refuses_a_module_outside_the_tree(
         cli._load_serve(spelled)  # noqa: SLF001
 
 
-def _installed_tree(lay: Layout, *, old: bool) -> Path:
-    """The admin tree an installer builds from this checkout as the pin:
-    in `df/` the pin's own list (grown past 2b: the v2 program), and outside
-    `df/` the real files -- of `LEGACY_2B` only for a 2b installer
-    (`old`, spec 3.9 rev 11, the 2b -> 3a path), else of the whole list."""
+def _old_installer_tree(lay: Layout) -> Path:
+    """The admin tree a 2b installer builds from a pin whose list grew past
+    2b (spec 3.9 rev 11, the 2b -> 3a path): the real 2b files of this
+    checkout (`LEGACY_2B`, all it copies outside `df/`), and in `df/` the
+    pin's list -- this checkout's plus a v2 module the tree lacks."""
     tree = lay.admin_dir(RELEASE)
-    grown = admin_tree.load_tree_list(admin_tree_root())
-    assert set(grown.files()) > set(admin_tree.LEGACY_2B.files())
-    for rel in (admin_tree.LEGACY_2B if old else grown).files():
-        (tree / rel).parent.mkdir(parents=True, exist_ok=True)
+    for rel in admin_tree.LEGACY_2B.files():
         shutil.copyfile(admin_tree_root() / rel, tree / rel)
-    shutil.copyfile(
-        admin_tree_root() / admin_tree.TREE_LIST, tree / admin_tree.TREE_LIST
+    grown = admin_tree.load_tree_list(admin_tree_root())
+    modules = json.dumps([*grown.modules, "governance.act_precheck_v2"])
+    contracts = json.dumps(list(grown.contract_files))
+    (tree / admin_tree.TREE_LIST).write_text(
+        f'schema = "{admin_tree.TREE_SCHEMA}"\n'
+        f"modules = {modules}\ncontract_files = {contracts}\n"
     )
     return tree
 
@@ -725,8 +726,16 @@ def test_old_installer_tree_v1_served_v2_refused_by_name(
     `ModuleNotFoundError`."""
     pytest.importorskip("steward", reason="steward — без группы governance")
     lay, read = _precheck_world(tmp_path, os.getuid())
-    tree = _installed_tree(lay, old=True)
-    verdict, err = _serve_in(tree, lay, read, schema, monkeypatch, capsys)
+    tree = _old_installer_tree(lay)
+    sys.path.insert(0, str(tree))
+    request = _request_v1()
+    if schema == "v2":
+        request = {"schema": "df/precheck-request/v2", "nonce": "0" * 32}
+    stdin = io.TextIOWrapper(io.BytesIO(json.dumps(request).encode()))
+    monkeypatch.setattr(sys, "stdin", stdin)
+    assert _precheck(lay, read) == 0
+    out, err = capsys.readouterr()
+    verdict = json.loads(out)
     assert admin_tree.INCOMPLETE_TREE in err
     assert "governance/act_precheck_v2.py" in err
     assert "ModuleNotFoundError" not in err and "Traceback" not in err
@@ -738,50 +747,6 @@ def test_old_installer_tree_v1_served_v2_refused_by_name(
         assert verdict["outcome"] == "tree_incomplete"
         assert "reinstall" in verdict["reason"]
     assert "governance.act_precheck_v2" not in sys.modules
-
-
-def _serve_in(
-    tree: Path,
-    lay: Layout,
-    read: object,
-    schema: str,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> tuple[dict[str, object], str]:
-    """The verdict and stderr of the real `precheck serve` over `tree` (first on
-    `sys.path`, as the entry puts it) for a v1 or a v2 request."""
-    sys.path.insert(0, str(tree))
-    request = _request_v1()
-    if schema == "v2":
-        request = {"schema": "df/precheck-request/v2", "nonce": "0" * 32}
-    stdin = io.TextIOWrapper(io.BytesIO(json.dumps(request).encode()))
-    monkeypatch.setattr(sys, "stdin", stdin)
-    assert _precheck(lay, read) == 0
-    out, err = capsys.readouterr()
-    return json.loads(out), err
-
-
-def test_complete_tree_imports_the_v2_program_after_the_check(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    environ: None,
-    fresh_governance: None,
-) -> None:
-    """A tree with every file of its list: nothing named on stderr, and a v2
-    request is answered by `governance.act_precheck_v2` of that tree (until
-    Task 7: `v2_unavailable`)."""
-    pytest.importorskip("steward", reason="steward — без группы governance")
-    lay, read = _precheck_world(tmp_path, os.getuid())
-    tree = _installed_tree(lay, old=False)
-    verdict, err = _serve_in(tree, lay, read, "v2", monkeypatch, capsys)
-    assert admin_tree.INCOMPLETE_TREE not in err
-    assert (verdict["outcome"], verdict["reason"]) == (
-        "refuse",
-        "v2_unavailable: protocol v2 is not served yet",
-    )
-    module = sys.modules["governance.act_precheck_v2"]
-    assert Path(str(module.__file__)).parent == tree / "governance"
 
 
 def test_only_import_module_of_df_outside_df_is_the_precheck() -> None:

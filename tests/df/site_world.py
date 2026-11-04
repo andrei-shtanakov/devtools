@@ -26,11 +26,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from df.admin_tree import (
+    LEGACY_2B,
     SITE_SRC,
     STEWARD_REPO,
-    TREE_LIST,
     SitePins,
-    load_tree_list,
 )
 from df.paths import Layout
 
@@ -256,21 +255,18 @@ def write_checkout(
     ref: Path, world: SiteWorld | None = None, *, real: bool = False
 ) -> None:
     """The admin-tree part of a trusted `devtools` checkout at `ref`: the
-    files of this checkout's `df/precheck_tree.toml` -- one-line stand-ins, or with
+    governance closure and contract files -- one-line stand-ins, or with
     `real` this tree's own (the crash model reads every byte of a tree on
     each capture, so route worlds keep them small) -- and a `uv.lock`
     pinning the test sources (`df/` is the caller's)."""
     world = world or site_world()
-    for rel in load_tree_list(ROOT).files():
+    for rel in LEGACY_2B.files():
         target = ref / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         if real:
             shutil.copyfile(ROOT / rel, target)
         else:
             target.write_text(f"# stand-in of {rel}\n")
-    if real:  # this tree's program: the pin's list must name its closure
-        (ref / TREE_LIST).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(ROOT / TREE_LIST, ref / TREE_LIST)
     (ref / "uv.lock").write_bytes(uv_lock(world.pins()))
 
 

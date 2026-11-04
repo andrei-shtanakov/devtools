@@ -32,7 +32,7 @@ import pytest
 import yaml
 
 from df.admin import expected_admin_digest
-from df.admin_tree import load_tree_list
+from df.admin_tree import LEGACY_2B
 from df.build import GIT_ISOLATION
 from df.config import ReleaseEntry, ReleasesConfig, dump_releases
 from df.paths import Layout
@@ -61,7 +61,7 @@ from tests.df.root_world import INFRA, REPO_ROOT, SYSTEM_GIT, infra
 from tests.df.site_world import prime_cache, write_checkout
 
 #: The approval-branch patterns `merge` routing reads (a contract file of
-#: the precheck tree list).
+#: `LEGACY_2B`).
 PATTERNS = "contracts/approval-branches/v1/patterns.env"
 
 RID = "r-live-1"
@@ -267,7 +267,7 @@ def test_live_provenance_control(pw: ProvWorld) -> None:
     assert set(prov.blobs) == {
         "df/__init__.py",
         "df/sub/tool.py",
-        *load_tree_list(REPO_ROOT).files(),  # what `write_checkout` carries
+        *LEGACY_2B.files(),
     }
 
 
