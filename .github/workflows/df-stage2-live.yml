@@ -71,7 +71,9 @@ jobs:
           sudo -n xcode-select -s "$clt" || fail "xcode-select -s failed"
           test "$(xcode-select -p)" = "$clt" || fail "selection did not stick"
       - run: uv python install 3.12
-      - run: uv sync --frozen
+      # The governance group: steward, which the stand imports itself (rows 10
+      # and 12, `STAND_IMPORTS` of tests/df/live_stand.py).
+      - run: uv sync --frozen --group governance
       - name: verify CommandLineTools with df policy (R96)
         if: runner.os == 'macOS'
         run: >

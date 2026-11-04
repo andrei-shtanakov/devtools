@@ -12,12 +12,15 @@ or reaches the network.
 
 from __future__ import annotations
 
+import ast
 import inspect
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -26,6 +29,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+import yaml
 
 from df.admin import expected_admin_digest
 from df.admin_tree import CONTRACT_FILES, governance_files
@@ -1101,3 +1105,172 @@ def test_merge_rows_wait_for_mergeability() -> None:
         assert source.index("require_mergeable(") < source.index("merge_payload(")
     seed_src = inspect.getsource(live_stand.seed)
     assert seed_src.index("require_mergeable(") < seed_src.index('"PUT"')
+
+
+# ---------- the stand's own imports (2b Task 12, run 41773122578) ----------
+
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "df-stage2-live.yml"
+#: The repository's own top-level packages (not dependencies).
+OWN_PACKAGES = frozenset({"df", "governance", "tests"})
+#: Import names whose distribution is named otherwise.
+DISTRIBUTIONS = {"yaml": "pyyaml", "jwt": "pyjwt"}
+
+
+def _requirement_name(spec: str) -> str:
+    """`pyjwt[crypto]>=2.8` -> `pyjwt` (normalised as uv does)."""
+    name = re.match(r"[A-Za-z0-9._-]+", spec)
+    assert name is not None, spec
+    return re.sub(r"[-_.]+", "-", name.group(0)).lower()
+
+
+def _distribution(module: str) -> str:
+    """The requirement name providing the import `module`."""
+    root = module.split(".")[0]
+    return _requirement_name(DISTRIBUTIONS.get(root, root))
+
+
+def _own_module_file(name: str) -> Path | None:
+    """The file of the repository's module `name`, if it has one."""
+    base = REPO_ROOT.joinpath(*name.split("."))
+    for path in (base.with_suffix(".py"), base / "__init__.py"):
+        if path.is_file():
+            return path
+    return None
+
+
+def _imported_names(node: ast.Import | ast.ImportFrom) -> list[str]:
+    """The absolute modules an import statement may load."""
+    if isinstance(node, ast.Import):
+        return [alias.name for alias in node.names]
+    if node.level or node.module is None:
+        return []
+    return [node.module] + [f"{node.module}.{a.name}" for a in node.names]
+
+
+def _stand_closure() -> dict[str, ast.Module]:
+    """The repository's modules `tests/df/live_stand.py` reaches by import
+    (static, lazy imports included), parsed."""
+    seen: dict[str, ast.Module] = {}
+    todo = ["tests.df.live_stand"]
+    while todo:
+        name = todo.pop()
+        path = _own_module_file(name)
+        if name in seen or path is None:
+            continue
+        tree = ast.parse(path.read_text())
+        seen[name] = tree
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                todo.extend(
+                    n for n in _imported_names(node) if n.split(".")[0] in OWN_PACKAGES
+                )
+    return seen
+
+
+def _lazy_third_party(tree: ast.Module) -> set[str]:
+    """Third-party modules imported below the module level of `tree`."""
+    top = {id(node) for node in tree.body}
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Import, ast.ImportFrom)) or id(node) in top:
+            continue
+        names = _imported_names(node)
+        for name in names[:1] if isinstance(node, ast.ImportFrom) else names:
+            root = name.split(".")[0]
+            if root not in sys.stdlib_module_names and root not in OWN_PACKAGES:
+                found.add(name)
+    return found
+
+
+def _pyproject() -> dict[str, object]:
+    import tomllib
+
+    return tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
+
+
+def _synced_requirements() -> set[str]:
+    """The requirement names the workflow's one `uv sync` installs: the
+    project's dependencies, the default groups unless turned off, and every
+    `--group`."""
+    steps = yaml.safe_load(WORKFLOW.read_text())["jobs"]["live"]["steps"]
+    syncs = [
+        shlex.split(line)
+        for step in steps
+        for line in str(step.get("run", "")).splitlines()
+        if line.strip().startswith("uv sync")
+    ]
+    assert len(syncs) == 1, syncs
+    argv = syncs[0]
+    project = _pyproject()
+    groups_table = cast(dict[str, list[str]], project["dependency-groups"])
+    tool = cast(dict[str, dict[str, list[str]]], project["tool"])
+    groups = (
+        set() if "--no-default-groups" in argv else set(tool["uv"]["default-groups"])
+    )
+    groups |= {argv[i + 1] for i, arg in enumerate(argv) if arg == "--group"}
+    if "--all-groups" in argv:
+        groups |= set(groups_table)
+    deps = cast(dict[str, list[str]], project["project"])["dependencies"]
+    specs = list(deps) + [s for g in groups for s in groups_table[g]]
+    return {_requirement_name(s) for s in specs}
+
+
+def test_stand_lazy_imports_are_preflighted() -> None:
+    """Every third-party module the stand's process imports lazily (so its
+    absence shows only when a row reaches it, as `steward` did in rows 10
+    and 12 of run 41773122578) is a project dependency or under
+    `STAND_IMPORTS`, which the stand phase checks first."""
+    always = {
+        _requirement_name(s)
+        for s in cast(dict[str, list[str]], _pyproject()["project"])["dependencies"]
+    }
+    roots = {name.split(".")[0] for name in live_stand.STAND_IMPORTS}
+    lazy = {
+        name: module
+        for module, tree in _stand_closure().items()
+        for name in _lazy_third_party(tree)
+    }
+    assert "steward.approvalfacts.v3" in lazy, "the scan no longer sees the row"
+    uncovered = {
+        name: module
+        for name, module in lazy.items()
+        if _distribution(name) not in always and name.split(".")[0] not in roots
+    }
+    assert uncovered == {}
+
+
+def test_stand_imports_are_synced_by_the_workflow() -> None:
+    """The packages of `STAND_IMPORTS` are requirements of a group the
+    workflow's `uv sync` installs into the stand's `.venv`."""
+    synced = _synced_requirements()
+    missing = [
+        name for name in live_stand.STAND_IMPORTS if _distribution(name) not in synced
+    ]
+    assert missing == []
+
+
+def test_stand_imports_problem_names_the_module() -> None:
+    assert live_stand.stand_imports_problem(("json", "os.path")) is None
+    problem = live_stand.stand_imports_problem(("json", "df_absent_module.sub"))
+    assert problem is not None and "df_absent_module.sub" in problem
+
+
+def test_stand_phase_checks_imports_before_the_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A module of `STAND_IMPORTS` that does not import: exit 2 naming it,
+    evidence written, before the gate reads a secret (and so before any
+    GitHub call or row)."""
+
+    def no_gate(*args: object, **kwargs: object) -> object:
+        raise AssertionError("the gate ran")
+
+    monkeypatch.setattr(live_stand, "require_ci_root", lambda: None)
+    monkeypatch.setattr(live_stand, "gate", no_gate)
+    monkeypatch.setattr(live_stand, "STAND_IMPORTS", ("df_absent_module",))
+    argv = ["stand", "--source-sha", "0" * 40, "--out", str(tmp_path)]
+    argv += ["--secrets", str(tmp_path / "none"), "--repo-id", "1"]
+    argv += ["--app-id", "2", "--installation-id", "3", "--tag", "t-1"]
+    assert live_stand.main(argv) == live_stand.EXIT_INFRA
+    refused = tmp_path / "live" / OS_DIR / "stand-imports-refused.json"
+    assert "df_absent_module" in json.loads(refused.read_text())["refused"]
