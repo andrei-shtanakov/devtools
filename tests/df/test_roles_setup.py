@@ -463,6 +463,27 @@ def test_perimeter_init_needs_a_known_answer(
     assert info.value.step == "perimeter-init"
 
 
+def test_perimeter_init_answer_ok_but_file_missing_names_it(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The publisher answers `current`, yet the marker is missing: the
+    postcondition still checks the files, and the refusal names the file
+    (the step's `why`)."""
+    setup.run()
+    marker = setup.lay.perimeter_dir / perimeter.MARKER
+    marker.unlink()
+
+    def answers(_user: str, _argv: list[str], **_kw: object) -> plat.RunResult:
+        return plat.RunResult(0, b"perimeter-init: current\n", b"", True)
+
+    monkeypatch.setattr(plat, "run_as", answers)
+    with pytest.raises(StepFailed) as info:
+        setup.run()
+    assert info.value.step == "perimeter-init"
+    assert "постусловие не выполнено" in str(info.value)
+    assert f"{marker}: нет файла" in str(info.value)
+
+
 def test_perimeter_init_finishes_a_missing_marker(setup: Setup) -> None:
     setup.run()
     (setup.lay.perimeter_dir / perimeter.MARKER).unlink()

@@ -85,6 +85,11 @@ def accept(
         assert out == "accepted"
 
 
+def PENDING(_conn: sqlite3.Connection, _root: Root) -> int | None:  # noqa: N802
+    """No verified current snapshot: the registration rule's `pending`."""
+    return None
+
+
 def epochs_at(head: str) -> trust_state.EpochOf:
     return trust_state.current_epoch(lambda: head, BINDING, ADMIN, RULES)
 
@@ -333,7 +338,12 @@ def test_unresolved_until_journal_readable(lay: Layout) -> None:
         obs = observe(db, accepted=H1, head=H2)
         for status in ("tree_incomplete", "unset"):
             assert trust_state.OUTCOME_OF_VERDICT[status] == "unresolved"
-            assert trust_state.apply_status(db, ROOT, obs.id, status) == "unresolved"
+            assert (
+                trust_state.apply_status(
+                    db, ROOT, obs.id, status, epochs_of=epochs_at(H1)
+                )
+                == "unresolved"
+            )
         assert trust_state.blocked(db.conn, ROOT)
         assert observe(db, accepted=H1, head=H2).id == obs.id  # still the one
     with perimeter.open_db(lay) as db:  # the journal is readable again
@@ -350,7 +360,9 @@ def test_context_change_conservative(lay: Layout) -> None:
     accept(lay, H1, 1)
     with perimeter.open_db(lay) as db:
         obs = observe(db, accepted=H1, head=H2)
-        trust_state.apply_status(db, ROOT, obs.id, "tree_incomplete")
+        trust_state.apply_status(
+            db, ROOT, obs.id, "tree_incomplete", epochs_of=epochs_at(H1)
+        )
     newer = replace(BINDING, approval_policy_repository_id=7)
     assert trust_state.stale_context(obs, newer, ADMIN, RULES)
     assert trust_state.stale_context(obs, BINDING, "admin-2", RULES)
@@ -358,7 +370,8 @@ def test_context_change_conservative(lay: Layout) -> None:
         event = trust_state.conservative(
             db, ROOT, obs.ctx, obs.id, epochs_of=epochs_at(H1)
         )
-        assert trust_state.conservative(db, ROOT, obs.ctx, obs.id) == event
+        again = trust_state.conservative(db, ROOT, obs.ctx, obs.id, epochs_of=PENDING)
+        assert again == event
     assert outcome(lay, obs.id) == "conservative"
     assert events(lay) == [
         (event, "registered", 1, trust_state.CONSERVATIVE_SOURCE, None)
@@ -374,11 +387,13 @@ def test_unsupported_size_conservative(lay: Layout) -> None:
         obs = observe(db, accepted=H1, head=H2)
         assert trust_state.OUTCOME_OF_VERDICT["unsupported_size"] == "conservative"
         assert (
-            trust_state.apply_status(db, ROOT, obs.id, "unsupported_size")
+            trust_state.apply_status(
+                db, ROOT, obs.id, "unsupported_size", epochs_of=PENDING
+            )
             == "conservative"
         )
         with pytest.raises(KeyError):
-            trust_state.apply_status(db, ROOT, obs.id, "clean")
+            trust_state.apply_status(db, ROOT, obs.id, "clean", epochs_of=PENDING)
     assert outcome(lay, obs.id) == "conservative"
     assert [e[1:4] for e in events(lay)] == [
         ("pending", None, trust_state.CONSERVATIVE_SOURCE)
@@ -451,7 +466,7 @@ def test_rebind_same_triple_cold_history_kept(lay: Layout) -> None:
         assert trust_state.head_valid(head, BINDING, ADMIN, RULES)
         assert not trust_state.head_valid(head, rebound, ADMIN, RULES)
         assert trust_state.stale_context(old, rebound, ADMIN, RULES)
-        trust_state.conservative(db, ROOT, old.ctx, old.id)
+        trust_state.conservative(db, ROOT, old.ctx, old.id, epochs_of=PENDING)
         new = observe(db, accepted=H1, head=H2, binding=rebound)
         assert new.id != old.id
         out = trust_state.advance_head(
@@ -487,6 +502,40 @@ def test_superseded_when_the_head_moved(lay: Layout) -> None:
     assert head is not None and head.sha == H1
 
 
+def test_conservative_needs_an_epoch_rule(lay: Layout) -> None:
+    """The epoch of a K event is the caller's choice, never a default."""
+    with perimeter.open_db(lay) as db:
+        obs = observe(db)
+        with pytest.raises(TypeError):
+            trust_state.conservative(db, ROOT, obs.ctx, obs.id)  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "UPDATE trust_observations SET event_ids = 'not json'",
+        "UPDATE trust_observations SET event_ids = '{}'",
+        "UPDATE trust_observations SET event_ids = '[\"x\"]'",
+        "UPDATE trust_observations SET event_ids = '[999]'",
+        "UPDATE trust_observations SET binding = 'not json'",
+        "UPDATE trust_observations SET binding = '[]'",
+        "UPDATE trust_observations SET binding = '{}'",
+    ],
+)
+def test_corrupt_observation_row_is_integrity(lay: Layout, sql: str) -> None:
+    """A damaged observation row is a database that fails its check
+    (`unavailable`), never a program error of a later read."""
+    with perimeter.open_db(lay) as db:
+        observe(db)
+    conn = sqlite3.connect(lay.perimeter_dir / perimeter.DB_NAME)
+    conn.execute(sql)
+    conn.commit()
+    conn.close()
+    with pytest.raises(Unavailable) as info:
+        perimeter.open_db(lay)
+    assert info.value.reason == "integrity"
+
+
 # --- crash points ----------------------------------------------------------------
 
 
@@ -507,7 +556,7 @@ def _crash_child(root: str, point: str, obs: int, ctx: str) -> None:
                 db, ROOT, obs, lambda: H2, last_epoch=1, source_digest="env"
             )
         else:
-            trust_state.conservative(db, ROOT, ctx, obs)
+            trust_state.conservative(db, ROOT, ctx, obs, epochs_of=PENDING)
     os._exit(3)  # the point was never reached
 
 
@@ -556,7 +605,7 @@ def test_crash_points(lay: Layout, point: str) -> None:
             )
             assert got == "accepted"
         else:
-            trust_state.conservative(db, ROOT, obs.ctx, obs.id)
+            trust_state.conservative(db, ROOT, obs.ctx, obs.id, epochs_of=PENDING)
             assert outcome(lay, obs.id) == "conservative"
     assert not (lay.perimeter_dir / perimeter.JOURNAL).exists()
 

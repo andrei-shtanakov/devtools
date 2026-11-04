@@ -170,7 +170,10 @@ def _steps(layout: Layout, operator: str, python: Path) -> list[Step]:
         ),
         Step(
             "perimeter-init",
-            lambda: _perimeter_lost(layout) or bool(checked),
+            lambda: (
+                _perimeter_lost(layout)
+                or (bool(checked) and not _perimeter_problems(layout))
+            ),
             lambda: _perimeter_init(layout, python, checked),
             lambda: _perimeter_problems(layout),
         ),

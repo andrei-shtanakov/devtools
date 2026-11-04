@@ -96,6 +96,14 @@ ADMISSIONS = ("ready", "restored_pending")
 #: `meta.restored`: set by a restore, never back to `false` (spec 6.1).
 RESTORED = ("false", "true")
 DB_RESTORE = "db_restore"
+#: The refusal of `restore` for a copy of a schema-1 database (decision 7(a):
+#: a 2b copy is not restorable on 3a).
+COPY_SCHEMA_1 = "copy: schema_1"
+COPY_SCHEMA_1_TEXT = (
+    "копия не принята: это база схемы 1 (этап 2b), а восстановить на этом "
+    "этапе можно только копию базы схемы 2; ничего не изменено. Выход: sudo "
+    "darkfactory perimeter restore --empty или --from <копия базы схемы 2>"
+)
 #: The reason of an ordinary open of a schema-1 database.
 MIGRATION_REQUIRED = "schema_migration_required: выполните darkfactory roles setup"
 MIGRATION_PRECONDITION_TEXT = (
@@ -277,6 +285,19 @@ _INVARIANTS = (
     (
         "SELECT count(*) FROM trust_observations "
         "WHERE route NOT IN ('perimeter-status', 'trust-status', 'merge')"
+    ),
+    (
+        "SELECT count(*) FROM trust_observations WHERE NOT json_valid(event_ids) "
+        "OR json_type(event_ids) != 'array' OR NOT json_valid(binding) "
+        "OR json_type(binding) != 'object' "
+        "OR json_type(binding, '$.df_trust_repository_id') IS NOT 'integer' "
+        "OR json_type(binding, '$.approval_policy_repository_id') IS NOT 'integer'"
+    ),
+    (
+        "SELECT count(*) FROM trust_observations AS o, json_each(CASE WHEN "
+        "json_valid(o.event_ids) AND json_type(o.event_ids) = 'array' "
+        "THEN o.event_ids ELSE '[]' END) AS j "
+        "WHERE j.type != 'integer' OR j.value NOT IN (SELECT event_id FROM events)"
     ),
     "SELECT count(*) FROM trust_heads WHERE row_version < 1",
     (
@@ -473,8 +494,7 @@ def _migrate(layout: Layout) -> Literal["migrated", "current"]:
             if _read_version(conn) == SCHEMA_VERSION:
                 _verify(conn)
                 return "current"
-            if _lexists(layout.etc / "trust.toml"):
-                raise Unavailable("migration_precondition")
+            _no_binding(layout)
             with _write(conn):
                 if _checked_version(conn) != SCHEMA_VERSION_V1 or _count(conn):
                     raise Unavailable("migration_precondition")
@@ -488,12 +508,26 @@ def _migrate(layout: Layout) -> Literal["migrated", "current"]:
                 conn.execute(
                     "UPDATE meta SET value = ? WHERE key = 'schema'", (SCHEMA_VERSION,)
                 )
+                _no_binding(layout)  # again, right before the commit
                 MIGRATE_STEP("before-commit")
             MIGRATE_STEP("committed")
             _verify(conn)
         finally:
             conn.close()
     return "migrated"
+
+
+def _no_binding(layout: Layout) -> None:
+    """The migration's precondition on `trust.toml`, fail-closed: only a
+    `FileNotFoundError` is "absent"; the file or any other error of its
+    probe is `migration_precondition`."""
+    try:
+        os.lstat(layout.etc / "trust.toml")
+    except FileNotFoundError:
+        return
+    except OSError:
+        pass
+    raise Unavailable("migration_precondition")
 
 
 def _read_version(conn: sqlite3.Connection) -> str:
@@ -972,6 +1006,8 @@ def _stage(tmp: Path, copy: bytes | None) -> None:
     try:
         conn = _connect_verified(tmp)
     except Unavailable as exc:
+        if exc.reason == MIGRATION_REQUIRED:
+            raise Unavailable(COPY_SCHEMA_1) from None
         raise Unavailable(f"copy: {exc.reason}") from None
     try:
         with _mapped(), _write(conn):
@@ -1133,6 +1169,8 @@ def _move_aside(src: Path, dst: Path) -> None:
 
 def restore_text(reason: str) -> str:
     """The human's text of a refused `restore`."""
+    if reason == COPY_SCHEMA_1:
+        return COPY_SCHEMA_1_TEXT
     if reason.startswith("copy: "):
         return f"копия не принята ({reason.removeprefix('copy: ')}): ничего не изменено"
     return RESTORE_TEXTS.get(reason, f"perimeter restore: {reason}")
@@ -1471,6 +1509,8 @@ def perimeter_status_op(ctx: Context) -> Response:
 
 __all__ = [
     "BUSY_TIMEOUT_MS",
+    "COPY_SCHEMA_1",
+    "COPY_SCHEMA_1_TEXT",
     "DB_NAME",
     "EPOCHS",
     "INTEGRITY_TEXT",

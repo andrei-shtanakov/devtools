@@ -302,6 +302,9 @@ def test_restored_empty_v1_admit_r1_then_rebind_r2_conservative(lay: Layout) -> 
 
 
 def test_restored_flag_never_returns_false(lay: Layout) -> None:
+    """Admission, a repeated admission, a second restore over a restored
+    database (empty and from a copy whose `restored = true`) and
+    `perimeter-init`: the flag stays `true` throughout."""
     make_v1(lay, "restored_pending")
     perimeter.create_db(lay)
     with perimeter.open_db(lay) as db:
@@ -310,8 +313,81 @@ def test_restored_flag_never_returns_false(lay: Layout) -> None:
         perimeter.admit(db, Epochs(S1, 1), ROOT)
         assert perimeter.admission(db.conn) == "ready"
         assert perimeter.restored(db.conn)
+    copy = db_file(lay).read_bytes()  # a copy of a restored, admitted database
+    assert meta(lay)["restored"] == "true"
+    for source in (copy, None):
+        assert perimeter.restore(lay, source) == "restored"
+        assert meta(lay)["admission"] == "restored_pending"
+        assert meta(lay)["restored"] == "true"
+        with perimeter.open_db(lay) as db:
+            perimeter.admit(db, Epochs(S1, 1), ROOT)
+        assert meta(lay) == {"schema": "2", "admission": "ready", "restored": "true"}
     assert perimeter.create_db(lay) == "current"
     assert meta(lay)["restored"] == "true"
+
+
+def test_restore_of_a_schema_1_copy_names_the_exits(lay: Layout) -> None:
+    """Decision 7(a): a 2b copy is not restorable on 3a. The refusal names
+    the real exits (`--empty`, a copy of a schema-2 database), not
+    `roles setup`; nothing changes."""
+    make_v1(lay)
+    copy = db_file(lay).read_bytes()
+    db_file(lay).unlink()
+    with pytest.raises(Unavailable) as info:
+        perimeter.restore(lay, copy)
+    text = perimeter.restore_text(info.value.reason)
+    assert "--empty" in text and "схемы 2" in text
+    assert "roles setup" not in text
+    assert not db_file(lay).exists()
+
+
+def test_migrate_trust_toml_unreadable_refused_unchanged(
+    lay: Layout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The binding cannot be probed (EACCES): fail closed, nothing changes."""
+    make_v1(lay)
+    before = digest(db_file(lay))
+    target = lay.etc / "trust.toml"
+    real = os.lstat
+
+    def lstat(path: object, *a: object, **kw: object) -> os.stat_result:
+        if Path(str(path)) == target:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real(path, *a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "lstat", lstat)
+    with pytest.raises(Unavailable) as info:
+        perimeter.create_db(lay)
+    monkeypatch.undo()
+    assert info.value.reason == "migration_precondition"
+    assert digest(db_file(lay)) == before
+    assert meta(lay) == {"schema": "1", "admission": "ready"}
+
+
+def test_migrate_trust_toml_written_during_the_transaction_refused(
+    lay: Layout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A binding that appears after the first probe is seen again inside
+    the write transaction, before `COMMIT`: rolled back, schema 1 stays."""
+    make_v1(lay)
+    target = lay.etc / "trust.toml"
+    real = os.lstat
+    calls: list[int] = []
+
+    def lstat(path: object, *a: object, **kw: object) -> os.stat_result:
+        if Path(str(path)) == target:
+            calls.append(1)
+            if len(calls) == 2:
+                target.write_text("# written by root meanwhile\n")
+        return real(path, *a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "lstat", lstat)
+    with pytest.raises(Unavailable) as info:
+        perimeter.create_db(lay)
+    monkeypatch.undo()
+    assert info.value.reason == "migration_precondition"
+    assert len(calls) == 2
+    assert meta(lay) == {"schema": "1", "admission": "ready"}
 
 
 @pytest.mark.parametrize("source", ["empty", "copy"])

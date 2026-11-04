@@ -334,13 +334,16 @@ def _known(conn: sqlite3.Connection, root: Root) -> bool:
     )
 
 
-def apply_status(db: Db, root: Root, obs: int, status: str) -> Outcome:
+def apply_status(
+    db: Db, root: Root, obs: int, status: str, *, epochs_of: EpochOf
+) -> Outcome:
     """A typed status of the checker (`OUTCOME_OF_VERDICT`; `KeyError` for
     any other): `unresolved` keeps the observation unfinished, K completes
-    it conservatively."""
+    it conservatively (its event's epoch by `epochs_of`)."""
     if OUTCOME_OF_VERDICT[status] == "unresolved":
         return unresolved(db, root, obs)
-    conservative(db, root, _by_id(db.conn, root, obs).obs.ctx, obs)
+    ctx = _by_id(db.conn, root, obs).obs.ctx
+    conservative(db, root, ctx, obs, epochs_of=epochs_of)
     return "conservative"
 
 
@@ -477,14 +480,13 @@ def _put_head(
     )  # fmt: skip
 
 
-def conservative(
-    db: Db, root: Root, ctx: str, obs: int, *, epochs_of: EpochOf | None = None
-) -> int:
+def conservative(db: Db, root: Root, ctx: str, obs: int, *, epochs_of: EpochOf) -> int:
     """K: the conservative event of (root, `ctx`) -- `request_key` = (root,
     `ctx`, `conservative`), idempotent -- and the observation's terminal
     `conservative`, in one transaction. The epoch is `epochs_of`'s (the
-    registration rule); without it, `pending`. An observation already
-    completed otherwise is `ValueError`."""
+    registration rule, read inside the transaction; `None` is `pending`);
+    the caller always chooses it. An observation already completed
+    otherwise is `ValueError`."""
     conn = db.conn
     with perimeter.write(conn):
         row = _by_id(conn, root, obs)
@@ -492,8 +494,7 @@ def conservative(
             raise ValueError(f"observation {obs} is not of {ctx}")
         if row.outcome not in UNFINISHED and row.outcome != "conservative":
             raise ValueError(f"observation {obs} is already {row.outcome}")
-        epoch = None if epochs_of is None else epochs_of(conn, root)
-        event = _conclude(conn, row, epoch)
+        event = _conclude(conn, row, epochs_of(conn, root))
         TRUST_STEP("conservative")
     return event
 
