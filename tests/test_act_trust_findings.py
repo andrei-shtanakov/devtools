@@ -10,7 +10,7 @@ import pytest
 from governance import act_trust_findings as tf
 from governance.act_epochs import Epoch
 from governance.act_source import SourceV2
-from governance.act_trust_types import KINDS, MAX_DETAIL_BYTES, Finding
+from governance.act_trust_types import KINDS, MAX_DETAIL_BYTES, Finding, clip_detail
 
 P = "p" * 40
 LIMIT = 32 * 1024
@@ -60,10 +60,10 @@ def _envelope(epochs: int = 3, admins: int = 1, **source: str) -> dict[str, obje
 
 
 def _all_findings() -> list[Finding]:
-    # 512 bytes each: 2-, 3- and 4-byte UTF-8 characters plus JSON-escaped ones
-    details = ["я" * 256, "語" * 170 + "ab", "😀" * 128, '"\\' * 256]
+    # clipped to 512 bytes: 2-, 3- and 4-byte UTF-8 plus JSON-escaped characters
+    details = ["я" * 300, "語" * 170 + "ab" + "語", "😀" * 200, '"\\' * 300]
     return [
-        Finding(kind, role, details[i % len(details)])
+        Finding(kind, role, clip_detail(details[i % len(details)]))
         for i, (kind, role) in enumerate(
             (k, r) for k, roles in sorted(KINDS.items()) for r in sorted(roles)
         )
@@ -183,10 +183,3 @@ def test_envelope_over_budget_rejected() -> None:
 def test_reserved_keys_rejected() -> None:
     with pytest.raises(ValueError, match="reserved"):
         tf.fit_verdict({**_envelope(), "findings": []}, [], "")
-
-
-def test_clip_detail_on_character_boundary() -> None:
-    assert tf.clip_detail("я" * 300) == "я" * 256
-    assert tf.clip_detail("a" + "語" * 200) == "a" + "語" * 170
-    assert tf.clip_detail("short") == "short"
-    Finding("token_write", "df-trust", tf.clip_detail("😀" * 200))

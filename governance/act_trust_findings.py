@@ -18,7 +18,6 @@ from typing import Protocol
 
 from governance.act_source import SourceV2
 from governance.act_trust_types import (
-    MAX_DETAIL_BYTES,
     MAX_EPOCHS,
     ROUTE_KINDS,
     Finding,
@@ -96,11 +95,6 @@ def source_descriptor(source: SourceV2, raw: bytes) -> SourceDescriptor:
         admins_count=len(source.policy_admins),
         admins_digest=hashlib.sha256(admins).hexdigest(),
     )
-
-
-def clip_detail(text: str) -> str:
-    """A finding detail cut to 512 bytes of UTF-8 on a character boundary."""
-    return text.encode("utf-8")[:MAX_DETAIL_BYTES].decode("utf-8", "ignore")
 
 
 def fit_verdict(
