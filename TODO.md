@@ -3062,7 +3062,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       Финальное ревью 2b (04.11) при совместном запуске `test_publisher_merge` и
       `test_publisher_main` дефект не воспроизвело — нужен прогон всех трёх и разбор, какая
       фикстура `world` теряется (имя совпадает в нескольких мирах `tests/df`).
-- [ ] Мерж stop на закреплённом релизе: пин devtools члена `core` в манифесте зонтика снять с легаси `335188f` на коммит с `governance/act_precheck.py`, затем поднять `CORE_MANIFEST` в `tests/df/root_world.py` и прогнать `df-stage1` @owner:github:andrei-shtanakov @id:df-core-repin-precheck @epic:eco.dark-factory @blocked_by:todo://devtools/df-installer-stage2b
+- [x] Мерж stop на закреплённом релизе: пин devtools члена `core` в манифесте зонтика снять с легаси `335188f` на коммит с `governance/act_precheck.py`, затем поднять `CORE_MANIFEST` в `tests/df/root_world.py` и прогнать `df-stage1` @owner:github:andrei-shtanakov @id:df-core-repin-precheck @epic:eco.dark-factory @blocked_by:todo://devtools/df-installer-stage2b — PR #691; пин зонтика: ai-orchestrators-workspace#54 влит merge-коммитом `fe80aa9` (родители `080f15e`, `be2c76f`; дерево `fe80aa9` совпадает с `be2c76f`), `CORE_MANIFEST` = `be2c76f` (на `main`), devtools `291cb30`; `df-stage1` 41807376276 зелёный на обеих ОС (живая установка — уровень 1, 11/11 `ok`; правило (в) — 0 проблем); мерж stop на закреплённом релизе вживую не доказан — в приёмку этапа 3a
       Финальное ревью 2b (04.11, minor 6; ledger строка 70): живые строки `core` ставят
       devtools `335188f` — релиз без предпроверки; издатель такого релиза мерж stop не
       исполняет (`precheck serve` отказывает по имени, `doctor` — `publisher.precheck`
