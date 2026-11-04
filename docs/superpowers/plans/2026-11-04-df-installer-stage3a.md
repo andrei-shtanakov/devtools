@@ -322,7 +322,9 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
   - вердикт `df/precheck-verdict/v2`: **обязательная связка** `schema, nonce, request_digest,
     ctx_id, op, root {host, df_trust_repository_id, branch}`; для `trust` — `snapshot_sha` (=
     H), `accepted_sha`; для `merge` — `repository_id, pr, head_sha` (= C), `kind`,
-    `expected_snapshot_sha` (= X); затем `outcome ∈ {allow, refuse, unset, tree_incomplete,
+    **`snapshot_sha`** (снимок, на котором построен вердикт; спека §5.4 п. 3, §5.4 «Протокол
+    v2») и эхо `expected_snapshot_sha`; межполевая сверка издателем: `snapshot_sha` вердикта =
+    `expected_snapshot_sha` запроса = X (Task 11, `_bound`); затем `outcome ∈ {allow, refuse, unset, tree_incomplete,
     unsupported_size}, reason, relation, last_epoch | null, source (SourceDescriptor),
     ranges (RangeDescriptor) | null, policy (эхо PolicyPin) | null, findings[], diagnostics,
     version = "df-precheck/2", admin_digest` (≤ 32 КиБ — Task 6).
@@ -338,7 +340,8 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
   `test_finalize_review_id_from_delivery`; `test_finalize_wrong_envelopes_refused`;
   `test_merger_substitution_changes_digest_and_refuses`; `test_stale_snapshot_adapter`;
   `test_derived_credential_mode_not_empty_creds`; `test_reeval_merge_returns_policy_break`;
-  `test_binding_echoes_c_x_pr_kind_root` (связка вердикта несёт C, X, PR, kind, корень);
+  `test_binding_echoes_c_x_pr_kind_root` (связка вердикта несёт C, X, PR, kind, корень,
+  `snapshot_sha` = X);
   `test_closure_excludes_jwt_ops_df` (AST, включая отложенные импорты).
 - [ ] **Step 2–4:** FAIL → реализовать → PASS. **Step 5:** коммит
   `feat(act): precheck protocol v2 (trust, candidate, finalize)`.
@@ -347,8 +350,12 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
 
 **Files:** создать `df/publisher/trust_state.py`; изменить `df/publisher/perimeter.py` (`SCHEMA`,
 `SCHEMA_VERSION:86`, `_verify:500-516`, `admit:910-921`, `restore_conservative:924-948`,
-`record_violation:1013-1048`), `df/cli.py` (`publisher perimeter-init` выполняет переход);
-тесты `tests/df/test_trust_state.py`, `tests/df/test_perimeter_migrate.py`, `tests/df/test_perimeter*.py`.
+`record_violation:1013-1048`, `create_db:313-346` — ранний `return "present"` заменяется
+проверкой и переходом существующей базы), `df/cli.py` (`publisher perimeter-init` выполняет
+переход), `df/roles_setup.py:169-174,344-351` (`_perimeter_ready` при существующей базе
+возвращает «не готово», шаг `perimeter-init` выполняется всегда, и проверку/переход
+существующей базы делает издатель); тесты `tests/df/test_trust_state.py`,
+`tests/df/test_perimeter_migrate.py`, `tests/df/test_perimeter*.py`, `tests/df/test_roles_setup.py`.
 
 **Interfaces:**
 - Consumes: Task 4 (`df/publisher/trust_types.py`).
@@ -366,23 +373,37 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
   def known_roots(conn, current: Root) -> list[Root]   # events ∪ trust_heads ∪ trust_observations ∪ привязка
   def mark_restored(conn) -> None; def restored(conn) -> bool
   def migrate(layout: Layout) -> Literal["migrated", "current"]          # переход схемы
+  # create_db(layout) -> Literal["created", "migrated", "current"]   (было "created" | "present")
   SCHEMA_VERSION = "2"
   ```
   **Переход схемы** `"1"` (2b) → `"2"`: только командой `publisher perimeter-init` (её вызывает
   `roles setup`); обычное открытие базы схемы `"1"` — `Unavailable("schema_migration_required:
-  выполните darkfactory roles setup")`. Предусловие: схема ровно `"1"` (`_expected_schema` 2b
-  хранится константой). Одна транзакция `BEGIN IMMEDIATE`: `CREATE TABLE` `trust_heads`,
-  `trust_observations`; `meta` += `restored` (значение — по ответу на вопрос 7); `meta.schema =
-  "2"`; `COMMIT` (прагмы журнала). События, `transitions`, `admission` не меняются. Прерывание —
-  атомарность SQLite: база остаётся в `"1"`, повтор выполняет переход. Схема `"2"` — `current`
-  (идемпотентно). Неизвестная схема — `Unavailable("integrity")`, база не трогается, решает
-  человек (§6.1 «Восстановление базы»). Остальное — модель §6.1: `register_findings` —
+  выполните darkfactory roles setup")`. План написан под рекомендованный вариант (а) вопроса 7
+  (вопрос остаётся открытым). **Допустимая база 2b:** схема ровно `"1"` (`_expected_schema` 2b
+  хранится константой), таблица `events` пуста, `trust.toml` нет. Одна транзакция `BEGIN
+  IMMEDIATE`: `CREATE TABLE` `trust_heads`, `trust_observations`; `meta` += `restored = false`;
+  `meta.schema = "2"`; `COMMIT` (прагмы журнала); `transitions`, `admission` не меняются.
+  **Недопустимая база 2b** (схема `"1"`, но события есть или `trust.toml` есть) — отказ
+  `Unavailable("migration_precondition")` **без изменений**, решает человек. История
+  восстановления из текущего `admission` не выводится (`restore_conservative`,
+  `perimeter.py:924`, возвращает его в `ready`). **Прерывание — два допустимых исхода:** целая
+  `"1"` (процесс завершён до `COMMIT`; повтор выполняет переход) либо целая `"2"` (после
+  `COMMIT`, ответ потерян; повтор возвращает `current` после **полной** проверки — `meta`,
+  схема, инварианты, как `_verify`, `perimeter.py:500`). Схема `"2"` — `current`. Неизвестная
+  схема — `Unavailable("integrity")`, база не трогается, решает человек (§6.1 «Восстановление
+  базы»); `roles setup` передаёт отказ с причиной. **Если владелец выберет (б)**, строки «допустимая
+  база мигрирует» и «недопустимая база — отказ без изменений» заменяются на «база 2b с любыми
+  событиями мигрирует с `restored = true`; первый корень после `setup-trust` допускается по К». Остальное — модель §6.1: `register_findings` —
   своя транзакция без условия на голову; `advance_head` — CAS по `row_version` с чтением
   головы под блокировкой; эпоха — из проверенного текущего снимка, иначе `pending`;
   `restored` отделён от `admission`.
-- [ ] **Step 1: Тесты:** `test_migrate_2b_db_preserves_events_transitions_admission`;
-  `test_migrate_interrupted_stays_v1_then_completes`; `test_migrate_rerun_idempotent`;
-  `test_unknown_schema_untouched_integrity`; `test_v1_db_ordinary_open_names_migration`;
+- [ ] **Step 1: Тесты:** `test_migrate_admissible_2b_db`;
+  `test_migrate_non_admissible_2b_db_refused_unchanged` (события или `trust.toml`);
+  `test_migrate_killed_before_commit_whole_v1_then_completes`;
+  `test_migrate_killed_after_commit_whole_v2_rerun_current_verified`;
+  `test_migrate_rerun_idempotent`; `test_unknown_schema_untouched_integrity`;
+  `test_v1_db_ordinary_open_names_migration`; `test_roles_setup_rerun_with_markers_migrates_v1`;
+  `test_roles_setup_unknown_schema_refusal_passed_through`;
   `test_observation_dedup_equal_ctx_only`; `test_trust_status_does_not_complete_merge_observation`;
   `test_two_p_two_events`; `test_finding_registered_without_advance`;
   `test_concurrent_advance_one_wins_findings_kept`; `test_rollback_h1_h2_h1_finding_after_restart`;
@@ -413,12 +434,12 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
       # GET /repos/{…} тем же значением токена на обоих репо: push/maintain/admin
   def read_branch_head(transport, full_name: str, branch: str) -> str | Unavailable
   ```
-- [ ] **Step 1: Тесты** (быстрый путь `perimeter-status`, H = A): `test_token_write_permission_finding`
-  (`push`/`maintain`/`admin` = `true` — находка `token_write`, не `clear`);
-  `test_permissions_missing_unavailable`; `test_403_404_unavailable`;
-  `test_unreadable_profile_unavailable_no_anonymous`; `test_no_key_anonymous`;
-  `test_same_token_value_for_reads_and_report`; `test_publisher_closure_stdlib` (AST-замыкание
-  `df.publisher.main` — только stdlib и `df`).
+- [ ] **Step 1: Тесты** (модульные): `test_self_report_write_permission_finding`
+  (`push`/`maintain`/`admin` = `true` — находка `token_write`); `test_self_report_permissions_missing_unavailable`;
+  `test_self_report_403_404_unavailable`; `test_unreadable_profile_unavailable_no_anonymous`;
+  `test_no_key_anonymous`; `test_same_token_value_for_reads_and_report`;
+  `test_publisher_closure_stdlib` (AST-корни `df.publisher.main` **и** `df.publisher.history` —
+  только stdlib и `df`).
 - [ ] **Step 2–4:** FAIL → реализовать → PASS. **Step 5:** коммит
   `feat(df): publisher history-token transport and self-report`.
 
@@ -448,7 +469,11 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
   last_epoch, state, unverified, findings`. Корень прогона сверяется у всех PR-операций
   (`_check_root`). Установка App на `approval-policy`/`df-trust` — находка настроек. Ключа
   истории нет — анонимно с предупреждением (O14).
-- [ ] **Step 1: Тесты:** `test_fast_path_only_without_open_observations`;
+- [ ] **Step 1: Тесты:** быстрый путь `perimeter-status` (H = A) с путём Task 9:
+  `test_fast_path_token_write_not_clear`, `test_fast_path_permissions_missing_unavailable`,
+  `test_fast_path_403_404_unavailable`, `test_fast_path_unreadable_profile_no_anonymous`;
+  `test_publisher_closure_stdlib` повторно (после подключения `history.py` к `main`);
+  `test_fast_path_only_without_open_observations`;
   `test_head_moved_creates_observation`; `test_trust_status_always_calls_checker`;
   `test_trust_status_root_only`; `test_root_validates_response_schema_and_root`;
   `test_pin_policy_by_id_default_branch`; `test_trust_verdict_substituted_h_or_root_unbound`;
@@ -468,7 +493,8 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
 - Consumes: Tasks 7–10; фазы и сверка 2b без изменений.
 - Produces: `admin_precheck(kind, oc, pr, facts, *, obs: Observation) -> PrecheckResult` (v2
   для candidate/finalize с `head_sha` = C и `expected_snapshot_sha` = X; v1 для stop);
-  `_bound` v2 сверяет всю обязательную связку Task 7 и `check_ranges` (Task 10);
+  `_bound` v2 сверяет всю обязательную связку Task 7, межполевое `snapshot_sha` вердикта =
+  `expected_snapshot_sha` запроса = X и `check_ranges` (Task 10);
   `admit(db, root, obs, verdict) -> None | Refused("perimeter_blocked")` — одна транзакция:
   завершить своё наблюдение, зарегистрировать находки, заново применить И (голова в
   транзакции = X = принятой записи, нет других незавершённых наблюдений и блокирующих
@@ -480,6 +506,7 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
   `test_other_open_observation_positive_verdict_no_put`; `test_head_moved_from_x_before_admission_no_put`;
   `test_precheck_timeout_no_root_stop`; `test_reevaluated_merge_observation_never_puts`;
   `test_substitution_c_x_pr_kind_root_each_unbound` (пять независимых подмен);
+  `test_echo_x_correct_but_snapshot_sha_missing_or_other_refused`;
   `test_ranges_correct_p_other_set_unbound_at_merge`; `test_admin_digest_mismatch_refused`;
   `test_trust_root_identity_for_stop_with_binding`; `test_finalize_attested_then_merged`;
   `test_history_token_required`; `test_stop_unchanged_v1`.
@@ -490,7 +517,9 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
 
 **Files:** создать `df/setup_trust.py`; изменить `df/cli.py` (подкоманды `setup-trust check`
 — читатель, человек; `setup-trust write` — писатель, root; обе с `--rebind`),
-`df/launcher_entry.py:68-80` (`WRITER_COMMANDS += ("setup-trust", "write")`), `df/roles.py`,
+`df/launcher_entry.py:68-80` (`WRITER_COMMANDS += (("setup-trust", "write"),)` — кортеж
+кортежей; `mode_of` `:215`), `df/cli.py:245-260` (`parsed_mode` распознаёт `setup_trust_command
+== "write"`), `df/roles.py`,
 `df/roles_setup.py:134-210` (`_role_problems` учитывает группу `df-history` и членство —
 повторный `roles setup` на хосте 2b её создаёт), `df/platform.py` (группа, членство оператора);
 тесты `tests/df/test_setup_trust.py`, `tests/df/test_roles_setup.py`, `tests/df/test_launcher_entry.py`.
@@ -518,7 +547,8 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
   `test_profile_written_root_group_modes`; `test_binding_from_args_parsed_strictly`;
   `test_write_refuses_report_digest_mismatch`; `test_verify_after_write_unavailable_not_finished`;
   `test_rebind_full_check`; `test_roles_setup_rerun_on_2b_creates_history_group`;
-  `test_roles_setup_history_group_exact`; `test_setup_trust_write_takes_writer_lock_via_entry`
+  `test_roles_setup_history_group_exact`; `test_setup_trust_check_runs_as_non_root_reader`;
+  `test_setup_trust_write_requires_root_and_writer_lock`; `test_setup_trust_write_takes_writer_lock_via_entry`
   (через настоящий вход команды); `test_epochs_exhausted_text_names_exit`.
 - [ ] **Step 2–4:** FAIL → реализовать → PASS. **Step 5:** коммит `feat(df): setup-trust`.
 
@@ -551,12 +581,16 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
 - профиль истории: член читает, посторонний — отказ ОС; токен истории не в argv, I/O-журнале
   sudo, evidence;
 - строка оператора — (i) PASS, (ii) «не проверено, принято исключение»;
-- **обновление:** установка кодом 2b (`291cb30`) — роли, `events.sqlite` схемы `"1"` с
-  блокирующим событием фикстуры (вставлено от `df-publisher`) → установка пина этой ветки
+- **обновление** (вариант (а) вопроса 7): установка кодом 2b (`291cb30`) — роли, допустимая
+  `events.sqlite` схемы `"1"` (событий нет, `trust.toml` нет) → установка пина этой ветки
   установщиком 2b → stop `allow`, candidate — `tree_incomplete` до импорта → `roles setup`
-  кодом 3a: переход схемы, событие и блокировка сохранены, группа `df-history` создана →
-  повтор `roles setup` — идемпотентно → повторная установка кодом 3a — новый `<id>`,
-  candidate доходит до программы v2;
+  кодом 3a (маркеры уже есть): переход схемы, `transitions` и `admission` сохранены, группа
+  `df-history` создана → повтор `roles setup` — `current`, идемпотентно → повторная установка
+  кодом 3a — новый `<id>`, candidate доходит до программы v2; отдельно — **недопустимая** база
+  2b (вставлено событие от `df-publisher`): `roles setup` отказывает `migration_precondition`,
+  база побайтово не изменилась. Если владелец выберет (б), эти две строки заменяются строкой
+  «база 2b с событием мигрирует с `restored = true`, событие и блокировка сохранены, первый
+  корень после `setup-trust` — по К»;
 - установка без `gh` и без привязки — stop обслуживается;
 - 65 эпох → `unsupported_size: epochs` → новый корень → `--rebind` → новый прогон (фейк GitHub).
 - [ ] **Step 1:** тесты строк (`test_root_trust_*`); локально пропуск, в CI — job `stage2a`.
