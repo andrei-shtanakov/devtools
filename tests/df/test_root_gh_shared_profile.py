@@ -269,7 +269,7 @@ def _create(top: Path) -> dict[str, Path]:
             _ok(["/usr/bin/dscl", ".", "-append", f"/Groups/{HISTORY}",
                  "GroupMembership", user])  # fmt: skip
         _ok(["/usr/bin/dscacheutil", "-flushcache"])
-        _ok(["/usr/sbin/dsmemberutil", "flushcache"])
+        _ok(["/usr/bin/dsmemberutil", "flushcache"])
     else:
         _ok(["/usr/sbin/groupadd", "-r", OWN])
         _ok(["/usr/sbin/groupadd", "-r", HISTORY])
@@ -286,6 +286,14 @@ def _create(top: Path) -> dict[str, Path]:
 
 
 def _remove() -> None:
+    """Best effort: a failed removal is printed, never raised."""
+    try:
+        _remove_all()
+    except OSError as exc:
+        print(f"cleanup: {exc}")
+
+
+def _remove_all() -> None:
     if MACOS:
         for path in (*(f"/Users/{u}" for u in (*MEMBERS, OUTSIDER)),
                      f"/Groups/{HISTORY}", f"/Groups/{OWN}"):  # fmt: skip
@@ -294,7 +302,7 @@ def _remove() -> None:
     else:
         for user in (*MEMBERS, OUTSIDER):
             subprocess.run(["/usr/sbin/userdel", "-f", user], check=False)
-        subprocess.run(["/usr/sbin/gpasswd", "-d", OPERATOR, HISTORY], check=False)
+        subprocess.run(["/usr/bin/gpasswd", "-d", OPERATOR, HISTORY], check=False)
         for group in (HISTORY, OWN):
             subprocess.run(["/usr/sbin/groupdel", group], check=False)
 
