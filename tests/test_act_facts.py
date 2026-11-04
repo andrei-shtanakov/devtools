@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -141,3 +143,71 @@ def test_before_carries_only_review_keys() -> None:
     )
     eff = act_facts.effective(facts, clock)
     assert eff["alice"].state == "APPROVED"
+
+
+VECTORS = Path(__file__).resolve().parent.parent / "contracts/approval-facts/v3/vectors"
+POLICY = SourceV2(
+    "andrei-shtanakov/approval-policy", "main", "0" * 40, frozenset({"x"})
+)
+BRANCH_PATH = "repos/andrei-shtanakov/approval-policy/branches/main"
+ANCHOR = "6dcd4ce23d88e2ee9568ba546c007c63d9131c1b"
+
+
+class _GitHub:
+    """Fake GitHub over history vectors: answers by path, any order, any number of
+    times; the branch head is movable. Unknown paths are 404."""
+
+    def __init__(self, *vectors: str, branch_head: str | None = None) -> None:
+        self.answers: dict[str, v3.Response] = {}
+        self.sent: list[str] = []
+        for name in vectors:
+            spec = json.loads((VECTORS / "history" / f"{name}.json").read_text())
+            for ex in spec["transport"]["exchanges"]:
+                req, resp = ex["request"], ex["response"]
+                self.answers.setdefault(
+                    req["path"],
+                    v3.Response(
+                        resp["status"], resp.get("body"), resp.get("link"), None
+                    ),
+                )
+        if branch_head is not None:
+            self.answers[BRANCH_PATH] = v3.Response(
+                200, {"name": "main", "commit": {"sha": branch_head}}
+            )
+
+    def send(self, request: v3.Request) -> v3.Response:
+        self.sent.append(request.path)
+        return self.answers.get(request.path, v3.Response(404, {"message": "Nope"}))
+
+
+def test_policy_history_until_pinned_p() -> None:
+    """The open epoch is read up to the pinned P, not to the moved branch head."""
+    p_sha = "50c9e8d5fc98727b4bbc93cf5d64a68db647f04f"
+    pinned = act_facts.history(_GitHub("merge_squash_neutral"), POLICY, ANCHOR, None)
+    assert isinstance(pinned, tuple)
+    assert pinned[-1].merge_commit == p_sha
+    moved = _GitHub("merge_squash_neutral", branch_head="f" * 40)
+    got = act_facts.history(moved, POLICY, ANCHOR, None, head=p_sha)
+    assert got == pinned
+    assert BRANCH_PATH not in moved.sent  # the current head is never consulted
+    # without `head` the 2b behaviour stays: the current branch head is read
+    assert isinstance(act_facts.history(moved, POLICY, ANCHOR, None), Unavailable)
+
+
+def test_policy_rollback_after_p_same_break() -> None:
+    """A break before P survives a later rollback of the branch to the anchor."""
+    p_sha = "ae4f281df5a5d0ff3cad6371f76d5c29b6d953ec"
+    before = act_facts.history(_GitHub("direct_push"), POLICY, ANCHOR, None)
+    assert isinstance(before, act_facts.HistoryBreak)
+    rolled = _GitHub("direct_push", "merge_squash_neutral", branch_head=ANCHOR)
+    hidden = act_facts.history(rolled, POLICY, ANCHOR, None)
+    assert isinstance(hidden, tuple)  # read to the current head the break is gone
+    assert act_facts.history(rolled, POLICY, ANCHOR, None, head=p_sha) == before
+
+
+def test_closed_epoch_until_wins_over_head() -> None:
+    """A closed epoch is read to its `until`; `head` only pins the open epoch."""
+    until = "ae4f281df5a5d0ff3cad6371f76d5c29b6d953ec"
+    hub = _GitHub("merge_squash_neutral")
+    closed = act_facts.history(hub, POLICY, ANCHOR, until)
+    assert act_facts.history(hub, POLICY, ANCHOR, until, head="f" * 40) == closed

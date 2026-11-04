@@ -1,0 +1,192 @@
+"""Trust descriptors and the verdict size budget (installer spec §6.1)."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+
+import pytest
+
+from governance import act_trust_findings as tf
+from governance.act_epochs import Epoch
+from governance.act_source import SourceV2
+from governance.act_trust_types import KINDS, MAX_DETAIL_BYTES, Finding
+
+P = "p" * 40
+LIMIT = 32 * 1024
+
+
+def _sha(i: int, salt: str) -> str:
+    return hashlib.sha1(f"{salt}{i}".encode()).hexdigest()
+
+
+def _epochs(n: int) -> list[Epoch]:
+    closed = [
+        Epoch(i, _sha(i, "anchor"), last_confirmed=_sha(i, "last")) for i in range(1, n)
+    ]
+    return [*closed, Epoch(n, _sha(n, "anchor"))]
+
+
+def _source(admins: int = 1, *, name: str = "o/approval-policy", branch: str = "main"):
+    who = frozenset(f"administrator-{i:08d}-x" for i in range(admins))
+    raw = (
+        f"APPROVAL_POLICY_REPO={name}\nAPPROVAL_POLICY_BRANCH={branch}\n"
+        f"BOOTSTRAP_ACTIVATION={'b' * 40}\nPOLICY_ADMINS={','.join(sorted(who))}\n"
+    ).encode()
+    return SourceV2(name, branch, "b" * 40, who), raw
+
+
+def _envelope(epochs: int = 3, admins: int = 1, **source: str) -> dict[str, object]:
+    src, raw = _source(admins, **source)
+    return {
+        "schema": "df-trust-verdict/v1",
+        "origin_route": "merge",
+        "root_id": "r" * 64,
+        "ctx_id": "c" * 64,
+        "binding": {
+            "host": "github.com",
+            "df_trust_repository_id": 123456789012,
+            "df_trust_full_name": "o" * 39 + "/" + "d" * 100,
+            "approval_policy_repository_id": 210987654321,
+            "admin_digest": "a" * 64,
+        },
+        "a_sha": "1" * 40,
+        "x_sha": "2" * 40,
+        "p_sha": P,
+        "last_epoch": epochs,
+        "ranges": tf.range_descriptor(_epochs(epochs), P),
+        "source": tf.source_descriptor(src, raw),
+    }
+
+
+def _all_findings() -> list[Finding]:
+    # 512 bytes each: 2-, 3- and 4-byte UTF-8 characters plus JSON-escaped ones
+    details = ["я" * 256, "語" * 170 + "ab", "😀" * 128, '"\\' * 256]
+    return [
+        Finding(kind, role, details[i % len(details)])
+        for i, (kind, role) in enumerate(
+            (k, r) for k, roles in sorted(KINDS.items()) for r in sorted(roles)
+        )
+    ]
+
+
+def test_range_descriptor_closed_and_open() -> None:
+    got = tf.range_descriptor(_epochs(3), P)
+    assert got.ranges == (
+        (1, _sha(1, "anchor"), _sha(1, "last")),
+        (2, _sha(2, "anchor"), _sha(2, "last")),
+        (3, _sha(3, "anchor"), P),
+    )
+    rows = [list(r) for r in got.ranges]
+    canon = json.dumps(rows, separators=(",", ":")).encode()
+    assert got.digest == hashlib.sha256(canon).hexdigest()
+    assert tf.range_descriptor(_epochs(3), "q" * 40).digest != got.digest
+
+
+def test_65_epochs_unsupported_size() -> None:
+    assert len(tf.range_descriptor(_epochs(64), P).ranges) == 64
+    with pytest.raises(tf.UnsupportedSize) as caught:
+        tf.range_descriptor(_epochs(65), P)
+    assert caught.value.field == "epochs"
+    assert str(caught.value) == "unsupported_size: epochs"
+
+
+@pytest.mark.parametrize(
+    ("kw", "field"),
+    [
+        ({"name": "o/" + "n" * 139}, "policy_full_name"),
+        ({"branch": "b" * 256}, "policy_branch"),
+    ],
+)
+def test_source_over_limit_unsupported_size(kw: dict[str, str], field: str) -> None:
+    src, raw = _source(**kw)
+    with pytest.raises(tf.UnsupportedSize) as caught:
+        tf.source_descriptor(src, raw)
+    assert caught.value.field == field
+
+
+def test_source_descriptor_at_limits() -> None:
+    src, raw = _source(name="o/" + "n" * 138, branch="b" * 255)
+    got = tf.source_descriptor(src, raw)
+    assert got.policy_full_name == src.repo and got.policy_branch == src.branch
+    assert got.digest == hashlib.sha256(raw).hexdigest()
+    assert got.bootstrap_activation == "b" * 40
+
+
+def test_policy_admins_4000_compact() -> None:
+    src, raw = _source(4000)
+    assert len(raw) > 88 * 1000  # the list itself would not fit the budget
+    got = tf.source_descriptor(src, raw)
+    assert got.admins_count == 4000
+    joined = "\n".join(sorted(src.policy_admins)).encode()
+    assert got.admins_digest == hashlib.sha256(joined).hexdigest()
+    verdict = tf.fit_verdict(_envelope(admins=4000), _all_findings(), "")
+    assert len(verdict) <= LIMIT
+    assert b"administrator-" not in verdict
+    assert json.loads(verdict)["source"]["admins_count"] == 4000
+
+
+def test_64_epochs_all_16_combinations_max_details_fit_32k() -> None:
+    findings = _all_findings()
+    assert len(findings) == 16
+    assert all(len(f.detail.encode()) == MAX_DETAIL_BYTES for f in findings)
+    envelope = _envelope(64, 4000, name="o" * 39 + "/" + "n" * 100, branch="é" * 127)
+    verdict = tf.fit_verdict(envelope, findings, "диагностика " * 10_000)
+    assert len(verdict) <= LIMIT
+    doc = json.loads(verdict)
+    assert len(doc["ranges"]["ranges"]) == 64
+    got = {(f["kind"], f["role"]): f["detail"] for f in doc["findings"]}
+    assert got == {(f.kind, f.role): f.detail for f in findings}
+    assert doc["diagnostics"].startswith("диагностика")
+
+
+def test_codes_never_truncated() -> None:
+    findings = _all_findings()
+    envelope = _envelope(64)
+    bare = tf.fit_verdict(envelope, findings, "")
+    verdict = tf.fit_verdict(envelope, findings, "ж" * LIMIT)
+    assert len(verdict) <= LIMIT
+    doc = json.loads(verdict)
+    assert {**doc, "diagnostics": ""} == json.loads(bare)
+    assert doc["diagnostics"] and set(doc["diagnostics"]) == {"ж"}
+    # the cut is the remainder: one more character would not fit
+    assert len(verdict) + len("ж".encode()) > LIMIT
+
+
+def test_short_diagnostics_kept_whole() -> None:
+    doc = json.loads(tf.fit_verdict(_envelope(), [], 'line "one"\nline two'))
+    assert doc["diagnostics"] == 'line "one"\nline two'
+    assert doc["findings"] == []
+
+
+def test_kind_outside_route_rejected() -> None:
+    envelope = {**_envelope(), "origin_route": "trust-status"}
+    breaks = Finding("policy_history_break", "approval-policy", "x")
+    with pytest.raises(ValueError, match="outside route"):
+        tf.fit_verdict(envelope, [breaks], "")
+    with pytest.raises(ValueError, match="unknown origin_route"):
+        tf.fit_verdict({**envelope, "origin_route": "stop"}, [], "")
+    tf.fit_verdict({**envelope, "origin_route": "merge"}, [breaks], "")
+
+
+def test_one_finding_per_kind_and_role() -> None:
+    twice = [Finding("token_write", "df-trust", "a")] * 2
+    with pytest.raises(ValueError, match="duplicate finding"):
+        tf.fit_verdict(_envelope(), twice, "")
+
+
+def test_envelope_over_budget_rejected() -> None:
+    with pytest.raises(ValueError, match="envelope over"):
+        tf.fit_verdict({**_envelope(), "extra": "x" * LIMIT}, [], "")
+
+
+def test_reserved_keys_rejected() -> None:
+    with pytest.raises(ValueError, match="reserved"):
+        tf.fit_verdict({**_envelope(), "findings": []}, [], "")
+
+
+def test_clip_detail_on_character_boundary() -> None:
+    assert tf.clip_detail("я" * 300) == "я" * 256
+    assert tf.clip_detail("a" + "語" * 200) == "a" + "語" * 170
+    assert tf.clip_detail("short") == "short"
+    Finding("token_write", "df-trust", tf.clip_detail("😀" * 200))
