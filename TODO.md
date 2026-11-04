@@ -2994,7 +2994,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       до переноса в Secrets 04.11 04:23Z (evidence 2b §11).
       Закрыто 04.11: владелец отозвал PAT и ключи App (в том числе побывавший в переменной)
       и удалил секреты; environment `df-stage2-live` — 0 секретов (сверено через API).
-- [ ] Токен истории на стороне установщика (R8, С-1): `darkfactory setup-trust` пишет `history_gh_config_dir` в `trust.toml`, `darkfactory doctor` проверяет профиль и самоотчёт, шаг человека — read-only PAT (R4) и профиль `history` @owner:github:andrei-shtanakov @id:df-trust-history-token @epic:eco.dark-factory @blocked_by:todo://devtools/df-installer-stage2b
+- [ ] Токен истории на стороне установщика (R8, С-1): `darkfactory setup-trust` пишет `history_gh_config_dir` в `trust.toml`, `darkfactory doctor` проверяет профиль и самоотчёт, шаг человека — read-only PAT (R4) и профиль `history` @owner:github:andrei-shtanakov @id:df-trust-history-token @epic:eco.dark-factory @blocked_by:todo://devtools/df-installer-stage3-precheck
       Разбор ключа (`df.stage2_config.parse_trust`, `act_trust.parse_binding`) — Task 11c
       части B approval-act. Шаг человека: `GH_CONFIG_DIR=<каталог> gh auth login --hostname
       github.com --with-token`. Ключ НЕ вписывать на хосте с `df` версии до Task 11c: прежний
