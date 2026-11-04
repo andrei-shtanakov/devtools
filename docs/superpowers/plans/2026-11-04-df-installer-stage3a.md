@@ -149,8 +149,9 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
 
 ### Task 2: договор запуска `gh` и `git`
 
-**Files:** `df/cli.py:91-92,880-915` (путь записи `gh` в `install.toml` — по ответу на вопрос
-6), `df/config.py:44` (`REQUIRED_CLI` не меняется), `df/cli.py` (`precheck serve` передаёт
+**Files:** `df/cli.py:91-92,880-915` (решение владельца 6: `cli set` расширяется на `gh` —
+абсолютный путь и sha256, по образцу `openssl`; `CLI_SETTABLE` — `("openssl", "gh")`),
+`df/config.py:44` (`REQUIRED_CLI` не меняется), `df/cli.py` (`precheck serve` передаёт
 пути), `governance/act_trust.py:411-466`, `governance/act_history_snapshot.py:108-125`,
 `governance/act_precheck.py:372-384` (вызов `open_snapshot`); тесты `tests/df/test_cli_set.py`,
 `tests/test_act_trust.py`, `tests/test_act_history_snapshot.py`, `tests/test_act_precheck.py`;
@@ -174,8 +175,9 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
   `gh is None` — профиль истории недоступен (v2 `op: trust`/`merge` с ключом — отказ). Все
   вызовы `open_snapshot` и `serve` обновлены в этой задаче. `call_home` — временный каталог
   вызова в домашнем каталоге роли, удаляется после вызова.
-- [ ] **Step 1: Тесты:** `test_gh_registration_requires_pinned_version`;
-  `test_gh_registration_refuses_untrusted_path`; `test_gh_env_allowlist_and_call_home`
+- [ ] **Step 1: Тесты:** `test_cli_set_gh_records_path_and_sha256`;
+  `test_cli_set_gh_requires_pinned_version`; `test_cli_set_gh_refuses_untrusted_path`;
+  `test_gh_sha256_mismatch_refused_at_launch`; `test_gh_env_allowlist_and_call_home`
   (`GH_TOKEN`, `GITHUB_TOKEN` процесса не доходят); `test_missing_gh_refused_no_path_fallback`;
   `test_git_absolute_path_only`; `test_no_gh_no_binding_stop_served` (установка без `gh` и без
   `trust.toml` — stop через `serve` как в 2b).
@@ -385,14 +387,13 @@ bool(checked)` — `_perimeter_lost` сохраняет отказ «база п
   ```
   **Переход схемы** `"1"` (2b) → `"2"`: только командой `publisher perimeter-init` (её вызывает
   `roles setup`); обычное открытие базы схемы `"1"` — `Unavailable("schema_migration_required:
-  выполните darkfactory roles setup")`. План написан под рекомендованный вариант (а) вопроса 7
-  (вопрос остаётся открытым). **Допустимая база 2b:** схема ровно `"1"` (`_expected_schema` 2b
+  выполните darkfactory roles setup")`. Решение владельца 7 — вариант (а). **Допустимая база 2b:** схема ровно `"1"` (`_expected_schema` 2b
   хранится константой), таблица `events` пуста, `trust.toml` нет. Одна транзакция `BEGIN
   IMMEDIATE`: `CREATE TABLE` `trust_heads`, `trust_observations`; `meta` += `restored`, где
   **известное восстановление не теряется**: `admission = restored_pending` в v1 (база
   `restore --empty` или из копии, `perimeter._stage:723`, `test_restore_empty_is_pending`) —
-  `restored = true`; иначе — `false` (вариант (а) относится только к **неизвестной** истории,
-  вопрос 7 этим не решается);
+  `restored = true`; иначе — `false` (решение владельца 7: «Известное восстановление всегда
+  сохраняется»);
   `meta.schema = "2"`; `COMMIT` (прагмы журнала); `transitions`, `admission` не меняются.
   **Недопустимая база 2b** (схема `"1"`, но события есть или `trust.toml` есть) — отказ
   `Unavailable("migration_precondition")` **без изменений**, решает человек. История
@@ -402,9 +403,7 @@ bool(checked)` — `_perimeter_lost` сохраняет отказ «база п
   `COMMIT`, ответ потерян; повтор возвращает `current` после **полной** проверки — `meta`,
   схема, инварианты, как `_verify`, `perimeter.py:500`). Схема `"2"` — `current`. Неизвестная
   схема — `Unavailable("integrity")`, база не трогается, решает человек (§6.1 «Восстановление
-  базы»); `roles setup` передаёт отказ с причиной. **Если владелец выберет (б)**, строки «допустимая
-  база мигрирует» и «недопустимая база — отказ без изменений» заменяются на «база 2b с любыми
-  событиями мигрирует с `restored = true`; первый корень после `setup-trust` допускается по К». Остальное — модель §6.1: `register_findings` —
+  базы»); `roles setup` передаёт отказ с причиной. Остальное — модель §6.1: `register_findings` —
   своя транзакция без условия на голову; `advance_head` — CAS по `row_version` с чтением
   головы под блокировкой; эпоха — из проверенного текущего снимка, иначе `pending`;
   `restored` отделён от `admission`, **постоянен и никогда не возвращается в `false`**: в схеме
@@ -604,16 +603,14 @@ bool(checked)` — `_perimeter_lost` сохраняет отказ «база п
 - профиль истории: член читает, посторонний — отказ ОС; токен истории не в argv, I/O-журнале
   sudo, evidence;
 - строка оператора — (i) PASS, (ii) «не проверено, принято исключение»;
-- **обновление** (вариант (а) вопроса 7): установка кодом 2b (`291cb30`) — роли, допустимая
+- **обновление** (решение владельца 7, вариант (а)): установка кодом 2b (`291cb30`) — роли, допустимая
   `events.sqlite` схемы `"1"` (событий нет, `trust.toml` нет) → установка пина этой ветки
   установщиком 2b → stop `allow`, candidate — `tree_incomplete` до импорта → `roles setup`
   кодом 3a (маркеры уже есть): переход схемы, `transitions` и `admission` сохранены, группа
   `df-history` создана → повтор `roles setup` — `current`, идемпотентно → повторная установка
   кодом 3a — новый `<id>`, candidate доходит до программы v2; отдельно — **недопустимая** база
   2b (вставлено событие от `df-publisher`): `roles setup` отказывает `migration_precondition`,
-  база побайтово не изменилась. Если владелец выберет (б), эти две строки заменяются строкой
-  «база 2b с событием мигрирует с `restored = true`, событие и блокировка сохранены, первый
-  корень после `setup-trust` — по К»;
+  база побайтово не изменилась;
 - установка без `gh` и без привязки — stop обслуживается;
 - 65 эпох → `unsupported_size: epochs` → новый корень → `--rebind` → новый прогон (фейк GitHub).
 - [ ] **Step 1:** тесты строк (`test_root_trust_*`); локально пропуск, в CI — job `stage2a`.
@@ -626,8 +623,9 @@ bool(checked)` — `_perimeter_lost` сохраняет отказ «база п
 тесты `tests/df/test_live_trust_stand.py`.
 
 Строки:
-- **замер холодного пути** — ветка-замер стенда с N = 50 коммитов first-parent (5 меняют
-  журнал; вопрос 3), пустые факты после обновления административного дерева (новый
+- **замер холодного пути** — отдельная ветка-замер в `df-roles-probe-trust` с N = 50 коммитов
+  first-parent (5 меняют журнал), прямые коммиты без ruleset, ветка удаляется после замера
+  (решение владельца 3), пустые факты после обновления административного дерева (новый
   `admin_digest`), обе ОС: время `op: trust`, число запросов — в артефакт;
 - bootstrap-порядок на пустых `df-roles-probe-policy`, `df-roles-probe-trust`; показ публикуемого;
 - таблица запросов §6.1;
@@ -642,12 +640,20 @@ bool(checked)` — `_perimeter_lost` сохраняет отказ «база п
 
 **Files:** `governance/act_precheck.py` (`DEADLINE` для v2), `df/publisher/precheck.py`
 (`PRECHECK_WAIT`), `df/precheck_reap.py` (`REAP_AFTER`), `df/sudoers.py` (`command_timeout`),
-спека §4.1, §5.4 (значения); README «Поддерживаемая длина истории».
+спека §4.1 (значение `command_timeout`), §5.4 (значения); README «Поддерживаемая длина истории».
 
-**Interfaces:** значения — из артефакта Task 15 по правилу владельца (вопрос 1); до ответа
-задача не начинается.
-- [ ] **Step 1:** тест `test_v2_deadlines_from_measurement` (константы равны значениям из
-  записанного замера; порядок `DEADLINE < command_timeout < PRECHECK_WAIT < REAP_AFTER`).
+**Interfaces:** по решению владельца 1: M — максимум времени холодного `op: trust` из артефакта
+Task 15 на обеих ОС (секунды); `DEADLINE_v2 = 10 × ceil(2 × M / 10)`; `command_timeout =
+DEADLINE_v2 + 30`, `PRECHECK_WAIT = DEADLINE_v2 + 50`, `REAP_AFTER = DEADLINE_v2 + 80` (интервалы
+2b: 150/180/200/230); поддерживаемая длина истории — N, при котором холодный проход ≤
+`DEADLINE_v2 / 2`. Значения записываются константами вместе с M и ссылкой на прогон.
+```python
+def v2_deadlines(m_seconds: float) -> tuple[int, int, int, int]
+    # (DEADLINE, command_timeout, PRECHECK_WAIT, REAP_AFTER)
+```
+- [ ] **Step 1: Тесты:** `test_v2_deadline_formula` (`M = 61.0` → `(130, 160, 180, 210)`;
+  `M = 75.0` → `(150, 180, 200, 230)` — интервалы 2b); `test_v2_constants_equal_formula_of_recorded_m`;
+  `test_supported_history_half_deadline` (замер ≤ `DEADLINE_v2 / 2`).
 - [ ] **Step 2–4:** FAIL → выставить → PASS (+ root-строки рубежей 2b). **Step 5:** коммит
   `feat(df): v2 precheck deadlines from the cold-path measurement`.
 
@@ -669,49 +675,45 @@ bool(checked)` — `_perimeter_lost` сохраняет отказ «база п
 
 ## Шаги человека
 
-- **H1** (предложено, ждёт подтверждения владельца — вопрос 2): очистка `df-roles-probe` —
+- **H1** (решение владельца 2): очистка `df-roles-probe` —
   закрыть PR #7, удалить ветки `agent/codeowners`, `agent/drop-owners-2`, `agent/probe-1`,
   `agent/self-own`, `brief/probe-6a`, `brief/probe-6b`, поправить README («Throwaway spike»),
   заменить коллаборатора `ai-prosto` на `betta-tester`.
-- **H2.** Владелец проверяет: установка App 170589886 — «Only select repositories», репо доверия
-  не охвачены; App установлен на `df-roles-probe`.
+- **H2** (**открыт, не подтверждён владельцем; обязателен до живого прогона 1**). Владелец
+  проверяет: установка App 170589886 — «Only select repositories», репо доверия не охвачены;
+  App установлен на `df-roles-probe`.
 - **H3.** Пустые публичные `df-roles-probe-policy`, `df-roles-probe-trust` (O8); PR-ы человека по
   шаблонам `setup-trust`, ruleset-ы, мерж человеком; `modes.yaml` — `review` для
   `df-roles-probe`, первая активация без предпросмотра по O9а (условия — в evidence).
 - **H4.** Новый classic PAT `betta-tester` и новый ключ App 5285716 → секреты
   `df-stage3-live`.
-- **H5.** Read-only токен истории (тип — вопрос 4) → секрет; профиль пишет root в прогоне.
+- **H5.** Read-only токен истории — fine-grained «public repositories, read-only» без доступа к
+  репо (решение владельца 4) → секрет; профиль пишет root в прогоне.
 - **H6.** Временный fine-grained PAT владельца, только чтение, на два репо доверия (O9б) → секрет.
 - **H7.** Approve владельца на candidate-PR в каждой ячейке второго прогона.
 - **H8.** После каждого прогона (в том числе аварийного): отзыв PAT, ключа, токенов; удаление
   секретов.
 - **H9.** Перепин `core` в манифесте зонтика на коммит этапа 3a (TODO `df-core-repin-precheck`) —
-  PR в `ai-orchestrators-workspace`, вне этого репо.
+  PR в `ai-orchestrators-workspace`, вне этого репо; **после живого прогона 2** (решение
+  владельца 5).
 
-## Вопросы владельцу
+## Решения владельца (04.11)
 
-1. **Правило сроков v2 по замеру.** Спека требует выставить сроки по строке-замеру, но не
-   задаёт формулу (запас над измеренным максимумом). Нужна формула или значения.
-2. **Очистка `df-roles-probe`** (H1) — подтвердить.
-3. **Ветка-замер в `df-roles-probe-trust`** для N = 50 коммитов: создать её прямыми коммитами
-   без ruleset (это замер, не приёмка защиты) — разрешить?
-4. **Тип токена истории** на стенде: classic без scopes или fine-grained «public repositories,
-   read-only» (спека A rev 18 допускает оба).
-5. **Порядок перепина `core`** (H9) относительно живых прогонов: до прогона 1 или после
-   прогона 2.
-6. **Как `gh` попадает в `install.toml`:** расширить `cli set` (сейчас по решению 27.10 —
-   только `openssl`) или задавать при `init`/`install`. O12 решил «утверждённый CLI по
-   абсолютному пути», но не способ записи.
-7. **Значение `restored` при переходе базы 2b с неизвестной историей** (Task 8). Известное
-   восстановление (`admission = restored_pending`) всегда даёт `restored = true` (решение
-   ведущего 04.11); вопрос — только о базе `ready`, история восстановлений которой не
-   сохранена. Спека не говорит, считать ли такую базу 2b «восстановленной». Варианты: (а) `restored = false` — в базе 2b не может быть событий
-   доверия (`record-violation` без привязки — `refused: no_binding`, §6.1), переход проверяет
-   это предусловием (таблица `events` пуста, `trust.toml` нет; иначе — отказ перехода,
-   решает человек); (б) `restored = true`, если `admission` когда-либо был
-   `restored_pending` (база 2b этой истории не хранит — то есть всегда `true`), и тогда
-   первый корень после `setup-trust` допускается по К (событие до следующей эпохи сразу после
-   bootstrap). Рекомендация — (а).
+Все семь вопросов плана приняты по рекомендациям; цитаты — слова владельца.
+
+1. **Сроки v2:** «DEADLINE_v2 = 10 × ceil(2 × M / 10), где M — максимум холодного замера на обеих
+   ОС. История поддерживается при времени ≤ половины срока. Для остальных рубежей предлагаю
+   сохранить интервалы 2b: D+30, D+50, D+80.» — Task 16.
+2. **Очистка `df-roles-probe`** — да (H1).
+3. **Ветка-замер** — да: отдельная ветка, удаляется после замера (Task 15).
+4. **Токен истории** — fine-grained, только чтение (H5).
+5. **Перепин `core`** — после живого прогона 2 (H9).
+6. **`gh` в `install.toml`** — расширить `cli set` на `gh`: абсолютный путь и sha256, по образцу
+   `openssl` (Task 2).
+7. **База 2b при переходе:** «Вариант (а): пустая events, отсутствует trust.toml; иначе отказ без
+   изменений. Известное восстановление всегда сохраняется.» — Task 8, Task 14.
+
+Открыт: **H2** (проверка установки App) — до живого прогона 1.
 
 ## Вне этого плана
 
