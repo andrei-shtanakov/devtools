@@ -1,9 +1,10 @@
-"""Contents of the administrative tree beyond `df/` (spec 3.9 rev 10, 2b Task 5).
+"""Contents of the administrative tree beyond `df/` (spec 3.9 rev 11, 2b Task 5).
 
 `/opt/df/admin/<id>/` carries, next to `df/`, what the precheck program
-`governance/act_precheck.py` runs on: its import closure
-(`GOVERNANCE_MODULES`), the contract files it reads relative to its own
-`__file__` (`CONTRACT_FILES`) and `site/` -- pure Python only: `yaml/` from
+`governance/act_precheck.py` runs on: its import closure and the contract
+files it reads relative to its own `__file__` -- both listed by the pin's
+`df/precheck_tree.toml` (`TREE_LIST`, read as data; a legacy pin without it
+gets `LEGACY_2B`) -- and `site/` -- pure Python only: `yaml/` from
 the PyYAML sdist and `steward/` from `src/steward` of the steward commit,
 both pinned in root's trusted `devtools/uv.lock` (`locked_pins`).
 
@@ -21,9 +22,11 @@ the command's entry and the publisher never do.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import io
 import os
+import re
 import select
 import ssl
 import stat
@@ -48,27 +51,22 @@ from df.inputs import read_capped
 from df.paths import Layout
 from df.sources import UnsupportedLock, source_from_lock
 
-#: The AST import closure of `governance/act_precheck.py`, deferred imports
-#: included (`tests/df/test_admin_tree.py` recomputes it). Its external names
-#: are the stdlib, `steward` and `yaml` (`site/`).
-GOVERNANCE_MODULES: tuple[str, ...] = (
-    "governance",
-    "governance.act_anon",
-    "governance.act_envelope",
-    "governance.act_forge_http",
-    "governance.act_git_rows",
-    "governance.act_history",
-    "governance.act_history_snapshot",
-    "governance.act_precheck",
-    "governance.act_request",
-    "governance.act_time",
-    "governance.approval_branches",
-    "governance.ssot_env",
-)
 #: The precheck program: its presence makes a checkout a precheck release.
 PRECHECK_FILE = "governance/act_precheck.py"
-#: Files those modules read relative to their `__file__` (repo-relative).
-CONTRACT_FILES: tuple[str, ...] = ("contracts/approval-branches/v1/patterns.env",)
+PRECHECK_MODULE = "governance.act_precheck"
+#: The pin's list of the precheck tree (spec 3.9 rev 11): data inside `df/`,
+#: which every installer copies whole.
+TREE_LIST = "df/precheck_tree.toml"
+TREE_SCHEMA = "df/precheck-tree/v1"
+TREE_LIST_CAP = 64 << 10
+#: Bytes a module of the pin may have when its imports are read.
+MODULE_CAP = 4 << 20
+#: Why `precheck serve` cannot serve v2 on a tree (`doctor` names it).
+INCOMPLETE_TREE = (
+    "дерево предпроверки собрано установщиком старше перечня "
+    f"{TREE_LIST} (запросы v2 отказаны) — переустановите релиз"
+)
+_MODULE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
 #: Never in the admin tree: native code, startup hooks, bytecode.
 FORBIDDEN_SUFFIXES = (".so", ".dylib", ".pyd", ".pth", ".pyc")
 #: The two packages of `site/` and where each comes from.
@@ -99,6 +97,51 @@ Fetch = Callable[[str], bytes]
 
 
 @dataclass(frozen=True)
+class TreeList:
+    """The precheck tree beyond `df/`: modules and repo-relative contract files.
+
+    A listed module is a package (`<a>/<b>/__init__.py`) when another listed
+    module lies inside it, else a plain module (`<a>/<b>.py`)."""
+
+    modules: tuple[str, ...]
+    contract_files: tuple[str, ...]
+
+    def module_files(self) -> tuple[str, ...]:
+        """Repo-relative files of `modules`, in their order."""
+        return tuple(
+            _module_rel(
+                name, package=any(m.startswith(f"{name}.") for m in self.modules)
+            )
+            for name in self.modules
+        )
+
+    def files(self) -> tuple[str, ...]:
+        """Every repo-relative file of the list: modules, then contracts."""
+        return (*self.module_files(), *self.contract_files)
+
+
+#: The list of every pin without `TREE_LIST` (2b): the AST import closure of
+#: its `act_precheck`, frozen. A pin's list keeps all of it (spec 3.9 rev 11).
+LEGACY_2B = TreeList(
+    modules=(
+        "governance",
+        "governance.act_anon",
+        "governance.act_envelope",
+        "governance.act_forge_http",
+        "governance.act_git_rows",
+        "governance.act_history",
+        "governance.act_history_snapshot",
+        "governance.act_precheck",
+        "governance.act_request",
+        "governance.act_time",
+        "governance.approval_branches",
+        "governance.ssot_env",
+    ),
+    contract_files=("contracts/approval-branches/v1/patterns.env",),
+)
+
+
+@dataclass(frozen=True)
 class SitePins:
     """The two `site/` sources as `uv.lock` pins them."""
 
@@ -118,33 +161,128 @@ class SiteSources:
     git_env: Mapping[str, str]
 
 
-def governance_files() -> tuple[str, ...]:
-    """Repo-relative files of `GOVERNANCE_MODULES` (all plain modules but
-    the package itself)."""
-    return tuple(
-        "governance/__init__.py"
-        if name == "governance"
-        else "/".join(name.split(".")) + ".py"
-        for name in GOVERNANCE_MODULES
+def _module_rel(name: str, *, package: bool) -> str:
+    base = "/".join(name.split("."))
+    return f"{base}/__init__.py" if package else f"{base}.py"
+
+
+def load_tree_list(devtools_ref: Path) -> TreeList:
+    """The `TREE_LIST` of the checkout (or tree) `devtools_ref`, read as data
+    (`tomllib`, nothing of the pin executed); no file is a legacy pin:
+    `LEGACY_2B`. Exactly the keys `schema`, `modules`, `contract_files`;
+    modules are dotted names, contract files relative paths without `.` or
+    `..`, neither repeated; anything else is `TreeError`."""
+    path = devtools_ref / TREE_LIST
+    if not os.path.lexists(path):
+        return LEGACY_2B
+    try:
+        data = tomllib.loads(read_capped(path, TREE_LIST_CAP).decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise TreeError(f"{path}: не разбирается: {exc}") from exc
+    if set(data) != {"schema", "modules", "contract_files"}:
+        raise TreeError(f"{path}: ключи {sorted(data)}")
+    if data["schema"] != TREE_SCHEMA:
+        raise TreeError(f"{path}: schema {data['schema']!r}, нужна {TREE_SCHEMA}")
+    modules = _names(path, data["modules"], _MODULE_NAME.fullmatch)
+    contracts = _names(path, data["contract_files"], _contract_rel)
+    return TreeList(modules, contracts)
+
+
+def _names(
+    path: Path, value: object, valid: Callable[[str], object]
+) -> tuple[str, ...]:
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise TreeError(f"{path}: не список строк: {value!r}")
+    bad = [v for v in value if not valid(v)]
+    if bad or len(set(value)) != len(value):
+        raise TreeError(f"{path}: недопустимые или повторённые имена: {value!r}")
+    return tuple(value)
+
+
+def _contract_rel(rel: str) -> bool:
+    parts = rel.split("/")
+    return (
+        all(p not in ("", ".", "..") for p in parts)
+        and "\\" not in rel
+        and not forbidden_name(rel)
     )
+
+
+def closure_problems(devtools_ref: Path, listing: TreeList) -> list[str]:
+    """Why the AST import closure of the pin's `act_precheck.py` (every
+    `import` anywhere in a module, deferred ones included; stdlib `ast`, no
+    code of the pin executed) is not within `listing.modules` -- empty: it
+    is. A module of the checkout outside the list, a listed one resolving
+    to another file, a relative import or an unreadable module is named."""
+    listed = dict(zip(listing.modules, listing.module_files(), strict=True))
+    found, problems = _closure(devtools_ref)
+    for name, rel in sorted(found.items()):
+        if name not in listed:
+            problems.append(f"{name} ({rel}) не в {TREE_LIST}")
+        elif listed[name] != rel:
+            problems.append(f"{name}: в {TREE_LIST} {listed[name]}, в пине {rel}")
+    return problems
+
+
+def _closure(root: Path) -> tuple[dict[str, str], list[str]]:
+    """({module: repo-relative file}, problems) of `PRECHECK_MODULE` in
+    `root`: a name is a module of the checkout when its file is there (a
+    package's parent is part of the closure); other names are external."""
+    found: dict[str, str] = {}
+    problems: list[str] = []
+    todo = [PRECHECK_MODULE]
+    while todo:
+        name = todo.pop()
+        rel = _module_in(root, name)
+        if name in found or rel is None:
+            continue
+        found[name] = rel
+        if "." in name:
+            todo.append(name.rsplit(".", 1)[0])
+        try:
+            tree = ast.parse(read_capped(root / rel, MODULE_CAP), filename=rel)
+        except (TreeError, SyntaxError, ValueError) as exc:
+            problems.append(f"{rel}: не разбирается: {exc}")
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                todo += [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                if node.level != 0 or not node.module:
+                    problems.append(f"{rel}: относительный импорт")
+                    continue
+                todo += [node.module, *(f"{node.module}.{a.name}" for a in node.names)]
+    return found, problems
+
+
+def _module_in(root: Path, name: str) -> str | None:
+    """The repo-relative file of module `name` in `root` (a plain module
+    first, then a package), or `None`: not a module of the checkout."""
+    for package in (False, True):
+        rel = _module_rel(name, package=package)
+        if os.path.lexists(root / rel):
+            return rel
+    return None
+
+
+def tree_problems(tree: Path, listing: TreeList) -> list[str]:
+    """The files of `listing` that `tree` (a checkout or an admin tree)
+    lacks, repo-relative; empty: none."""
+    return [rel for rel in listing.files() if not os.path.lexists(tree / rel)]
 
 
 def release_has_precheck(devtools_ref: Path) -> bool:
     """Whether the checkout carries the precheck program (spec 3.9 rev 10).
 
     No `governance/act_precheck.py`: a legacy release (`False`), its admin
-    tree is `df/` only and `precheck serve` (Task 6) refuses on it. With it,
-    every file of `governance_files()` and `CONTRACT_FILES` must be there
-    (`True`); a partial closure is `TreeError` naming what is missing --
-    never a silent fallback. Modules of the closure an older release has for
-    other reasons do not make it a precheck release."""
+    tree is `df/` only and `precheck serve` refuses on it. With it, every
+    file of its list (`load_tree_list`) must be there (`True`); a partial
+    tree is `TreeError` naming what is missing -- never a silent fallback.
+    Modules of the closure an older release has for other reasons do not
+    make it a precheck release."""
     if not os.path.lexists(devtools_ref / PRECHECK_FILE):
         return False
-    missing = [
-        rel
-        for rel in (*governance_files(), *CONTRACT_FILES)
-        if not os.path.lexists(devtools_ref / rel)
-    ]
+    missing = tree_problems(devtools_ref, load_tree_list(devtools_ref))
     if missing:
         raise TreeError(
             f"{devtools_ref}: неполное замыкание предпроверки, нет: "

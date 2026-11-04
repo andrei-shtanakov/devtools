@@ -41,6 +41,7 @@ from typing import Literal
 from df import (
     acl,
     admin,
+    admin_tree,
     boundary,
     digest,
     fsutil,
@@ -1103,8 +1104,11 @@ def _precheck_chain(ctx: _Level2) -> str:
     (exit `PRECHECK_EXIT`, `PRECHECK_REFUSAL`, nothing on stdout) proves the
     sudoers rule, the wrapper, the entry and its digest, the role's record,
     the program, its `site/` and imports; anything else is «нарушено» with
-    its cause. Like every `precheck serve`, the probe reaps leftovers first
-    (`roles.precheck` has listed them before)."""
+    its cause -- also a refusal over a tree an older installer built
+    without files of its list (`admin_tree.INCOMPLETE_TREE` on stderr: v1
+    served, v2 refused; 3a Task 1), which names the reinstall. Like every
+    `precheck serve`, the probe reaps leftovers first (`roles.precheck` has
+    listed them before)."""
     result = publisher_precheck(ctx.layout)
     what = f"{perimeter_client.PUBLISHER} → {roles.PRECHECK_USER}"
     if not result.launched or result.timed_out or result.stdout_truncated:
@@ -1112,8 +1116,17 @@ def _precheck_chain(ctx: _Level2) -> str:
     tail = _tail(result)
     refused = result.returncode == PRECHECK_EXIT and tail.startswith(PRECHECK_REFUSAL)
     if refused and not result.stdout:
+        incomplete = _incomplete_tree(result)
+        if incomplete:
+            raise _Outcome(BROKEN, f"{what}: {incomplete}")
         return ""
     raise _Outcome(BROKEN, f"{what}: {_precheck_cause(result, tail)}")
+
+
+def _incomplete_tree(result: plat.RunResult) -> str:
+    """The stderr line of `precheck serve` naming an incomplete tree, or ""."""
+    lines = result.stderr.decode("utf-8", "replace").splitlines()
+    return next((ln for ln in lines if admin_tree.INCOMPLETE_TREE in ln), "")
 
 
 def _precheck_cause(result: plat.RunResult, tail: str) -> str:

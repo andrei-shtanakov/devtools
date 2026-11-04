@@ -8,6 +8,14 @@ through a fixed command. It reads one strict `df/precheck-request/v1` JSON objec
 does not parse or violates the schema gets exit code 2 and no verdict; the reason
 goes to stderr without the token.
 
+Requests are dispatched by `schema` (stage 3a, spec 5.4 rev 11): v1 as below;
+`df/precheck-request/v2` gets a `df/precheck-verdict/v2` refusal -- `tree_incomplete`
+when the admin tree lacks files of its list (`complete_v2` false: `precheck serve`
+checked it before this module was imported), else `v2_unavailable` until the v2
+program lands. The module's own imports stay within the 2b closure, so a tree an
+older installer built still serves v1; the v2 program is imported only after the
+check.
+
 In 2b only kind `stop` is served (decision 2): the PR adds exactly one stop record
 (decision 11), its branch is the stop branch of that record (decision 6), the record
 at the PR head matches its path, and the stopped generation is the current delivered
@@ -58,6 +66,16 @@ from governance.approval_branches import parse_stop_branch
 REQUEST_SCHEMA = "df/precheck-request/v1"
 VERDICT_SCHEMA = "df/precheck-verdict/v1"
 PRECHECK_VERSION = "df-precheck/1"
+REQUEST_SCHEMA_V2 = "df/precheck-request/v2"
+VERDICT_SCHEMA_V2 = "df/precheck-verdict/v2"
+PRECHECK_VERSION_V2 = "df-precheck/2"
+TREE_INCOMPLETE = "tree_incomplete"
+#: The v2 refusals of the minimal dispatcher (stage 3a Task 1; Task 7 serves v2).
+REASON_TREE_INCOMPLETE = (
+    "tree_incomplete: the admin tree was built by an installer older than its "
+    "df/precheck_tree.toml; reinstall the release"
+)
+REASON_V2_UNAVAILABLE = "v2_unavailable: protocol v2 is not served yet"
 #: Kinds served by protocol v1; stage 3 adds kinds in v2 schemas, not here.
 KINDS = ("stop",)
 MAX_REQUEST = 64 << 10
@@ -162,6 +180,14 @@ class PrecheckRequest:
 
 
 @dataclass(frozen=True)
+class RequestV2:
+    """A `df/precheck-request/v2` as far as the minimal dispatcher reads it."""
+
+    nonce: str
+    digest: str
+
+
+@dataclass(frozen=True)
 class PrecheckDeps:
     """Seams for tests: REST transport, snapshot opener (`open_snapshot`), clock."""
 
@@ -193,31 +219,55 @@ def serve(
     *,
     admin_digest: str,
     home: Path,
+    complete_v2: bool,
     deps: PrecheckDeps | None = None,
 ) -> int:
     """Answer one request: 0 with a verdict on stdout, 2 without one (bad request).
 
     `admin_digest` goes into the verdict verbatim; `home` is the role's existing
-    home directory (snapshots and lock live there)."""
+    home directory (snapshots and lock live there); `complete_v2` — the admin tree
+    holds every file of its list (else v2 is refused `tree_incomplete`)."""
     deps = deps or DEFAULT_DEPS
     deadline = deps.now() + DEADLINE
     try:
-        request = parse_request(stdin.read(MAX_REQUEST + 1))
+        data = load_request(stdin.read(MAX_REQUEST + 1))
+        is_v2 = data.get("schema") == REQUEST_SCHEMA_V2
+        request = parse_request_v2(data) if is_v2 else request_v1(data)
     except InvalidRequest as exc:
         print(f"df-precheck: invalid request: {exc}", file=sys.stderr)
         return EXIT_REQUEST
+    if isinstance(request, RequestV2):
+        answer = verdict_v2(request, admin_digest, complete_v2=complete_v2)
+    else:
+        answer = _answer_v1(request, home, deps, deadline, admin_digest)
+    stdout.write(json.dumps(answer) + "\n")
+    stdout.flush()
+    return 0
+
+
+def _answer_v1(
+    request: PrecheckRequest,
+    home: Path,
+    deps: PrecheckDeps,
+    deadline: float,
+    admin_digest: str,
+) -> dict[str, object]:
     outcome, reason = _decide(request, home, deps, deadline)
     reason = reason.replace(request.token, "[token]")
     if len(reason) > MAX_REASON:
         reason = reason[:MAX_REASON] + TRUNCATED
-    stdout.write(json.dumps(verdict(request, outcome, reason, admin_digest)) + "\n")
-    stdout.flush()
-    return 0
+    return verdict(request, outcome, reason, admin_digest)
 
 
 def parse_request(raw: bytes) -> PrecheckRequest:
     """Strict `df/precheck-request/v1`; any deviation — `InvalidRequest` whose text
     names keys, never values."""
+    return request_v1(load_request(raw))
+
+
+def load_request(raw: bytes) -> dict[str, object]:
+    """The request as a JSON object (at most `MAX_REQUEST` bytes, no duplicate
+    keys, no `NaN`-like constants), any schema; else `InvalidRequest`."""
     if len(raw) > MAX_REQUEST:
         raise InvalidRequest(f"request larger than {MAX_REQUEST} bytes")
     try:
@@ -230,6 +280,11 @@ def parse_request(raw: bytes) -> PrecheckRequest:
         raise InvalidRequest(f"request is not JSON ({type(exc).__name__})") from None
     if not isinstance(data, dict):
         raise InvalidRequest("request is not a JSON object")
+    return data
+
+
+def request_v1(data: dict[str, object]) -> PrecheckRequest:
+    """Strict `df/precheck-request/v1` of a loaded request (`load_request`)."""
     if set(data) != set(REQUEST_KEYS):
         extra = sorted(set(data) - set(REQUEST_KEYS))
         missing = sorted(set(REQUEST_KEYS) - set(data))
@@ -237,11 +292,41 @@ def parse_request(raw: bytes) -> PrecheckRequest:
     bad = [k for k in REQUEST_KEYS if not _CHECKS[k](data[k])]
     if bad:
         raise InvalidRequest(f"invalid values: {bad}")
+    changes = data["changes"]
+    assert isinstance(changes, list)
     return PrecheckRequest(
         **{k: data[k] for k in REQUEST_KEYS if k not in ("schema", "changes")},
-        changes=tuple((s, p, prev) for s, p, prev in data["changes"]),
+        changes=tuple((s, p, prev) for s, p, prev in changes),
         digest=request_digest(data),
     )
+
+
+def parse_request_v2(data: dict[str, object]) -> RequestV2:
+    """A loaded `df/precheck-request/v2`: until the v2 program (stage 3a Task 7)
+    only `nonce` is checked, the verdict binds it and `request_digest`."""
+    if not _matches(_NONCE)(data.get("nonce")):
+        raise InvalidRequest("invalid values: ['nonce']")
+    return RequestV2(str(data["nonce"]), request_digest(data))
+
+
+def verdict_v2(
+    request: RequestV2, admin_digest: str, *, complete_v2: bool
+) -> dict[str, object]:
+    """The `df/precheck-verdict/v2` refusal of the minimal dispatcher."""
+    if complete_v2:
+        # Stage 3a Task 7: the v2 program is imported here, after the check.
+        outcome, reason = REFUSE, REASON_V2_UNAVAILABLE
+    else:
+        outcome, reason = TREE_INCOMPLETE, REASON_TREE_INCOMPLETE
+    return {
+        "schema": VERDICT_SCHEMA_V2,
+        "nonce": request.nonce,
+        "request_digest": request.digest,
+        "outcome": outcome,
+        "reason": reason,
+        "version": PRECHECK_VERSION_V2,
+        "admin_digest": admin_digest,
+    }
 
 
 def _no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:

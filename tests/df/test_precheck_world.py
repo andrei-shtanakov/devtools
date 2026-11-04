@@ -114,7 +114,9 @@ def _verdict(
     home.mkdir(exist_ok=True)
     out = io.StringIO()
     raw = io.BytesIO(json.dumps(request).encode())
-    code = act_precheck.serve(raw, out, admin_digest="sha256:" + "a" * 64, home=home)
+    code = act_precheck.serve(
+        raw, out, admin_digest="sha256:" + "a" * 64, home=home, complete_v2=True
+    )
     assert code == 0, out.getvalue()
     return json.loads(out.getvalue())
 

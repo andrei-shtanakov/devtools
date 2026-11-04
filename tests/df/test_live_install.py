@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from df.admin_tree import CONTRACT_FILES, governance_files
+from df.admin_tree import LEGACY_2B
 from df.paths import Layout
 from tests.df import live_install
 from tests.df.root_world import (
@@ -82,7 +82,7 @@ def _admin_tree(root: Path, shape: str) -> Layout:
     tree = layout.admin_dir(RELEASE_ID)
     files = ["df/__init__.py", "df/launcher_entry.py"]
     if shape != "legacy":
-        files += [*governance_files(), *CONTRACT_FILES]
+        files += [*LEGACY_2B.files()]
     for rel in files:
         (tree / rel).parent.mkdir(parents=True, exist_ok=True)
         (tree / rel).write_text("")
