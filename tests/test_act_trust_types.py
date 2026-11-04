@@ -6,6 +6,7 @@ import dataclasses
 import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -44,28 +45,47 @@ def test_route_kinds() -> None:
     assert all(v <= set(gov.KINDS) for v in gov.ROUTE_KINDS.values())
 
 
-def test_detail_byte_limit() -> None:
+@pytest.fixture(params=[gov, mirror], ids=["governance", "publisher"])
+def mod(request: pytest.FixtureRequest) -> ModuleType:
+    return request.param
+
+
+def test_detail_byte_limit(mod: ModuleType) -> None:
     ok = "я" * 256  # 512 bytes in UTF-8
-    assert gov.Finding("token_write", "df-trust", ok).detail == ok
+    assert mod.Finding("token_write", "df-trust", ok).detail == ok
     with pytest.raises(ValueError):
-        gov.Finding("token_write", "df-trust", ok + "x")
+        mod.Finding("token_write", "df-trust", ok + "x")
     with pytest.raises(ValueError):
-        gov.Finding("not_descendant", "approval-policy", "")
+        mod.Finding("not_descendant", "approval-policy", "")
     with pytest.raises(ValueError):
-        gov.Finding("nope", "df-trust", "")
+        mod.Finding("nope", "df-trust", "")
 
 
-def test_range_descriptor_epoch_limit() -> None:
+def test_range_descriptor_epoch_limit(mod: ModuleType) -> None:
     rows = tuple((i, "a", "b") for i in range(64))
-    assert gov.RangeDescriptor(rows, "d").ranges == rows
+    assert mod.RangeDescriptor(rows, "d").ranges == rows
     with pytest.raises(ValueError):
-        gov.RangeDescriptor(rows + ((64, "a", "b"),), "d")
+        mod.RangeDescriptor(rows + ((64, "a", "b"),), "d")
 
 
-def _shape(mod: object) -> dict[str, object]:
+def test_clip_detail_at_character_boundary(mod: ModuleType) -> None:
+    # "x" shifts the 2-byte characters so the 512-byte cut falls mid-character
+    text = "x" + "я" * 300
+    clipped = mod.clip_detail(text)
+    assert len(clipped.encode("utf-8")) <= mod.MAX_DETAIL_BYTES
+    assert clipped == text[: len(clipped)] and len(clipped) == 256
+    mod.Finding("token_write", "df-trust", clipped)
+
+
+def test_clip_detail_short_text_unchanged(mod: ModuleType) -> None:
+    assert mod.clip_detail("short") == "short"
+    assert mod.clip_detail("я" * 256) == "я" * 256
+
+
+def _shape(mod: ModuleType) -> dict[str, object]:
     return {
-        "kinds": {k: set(v) for k, v in mod.KINDS.items()},  # type: ignore[attr-defined]
-        "routes": {k: set(v) for k, v in mod.ROUTE_KINDS.items()},  # type: ignore[attr-defined]
+        "kinds": {k: set(v) for k, v in mod.KINDS.items()},
+        "routes": {k: set(v) for k, v in mod.ROUTE_KINDS.items()},
         "fields": {
             n: [f.name for f in dataclasses.fields(getattr(mod, n))]
             for n in (
