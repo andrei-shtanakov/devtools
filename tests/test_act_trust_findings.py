@@ -10,10 +10,24 @@ import pytest
 from governance import act_trust_findings as tf
 from governance.act_epochs import Epoch
 from governance.act_source import SourceV2
-from governance.act_trust_types import KINDS, MAX_DETAIL_BYTES, Finding, clip_detail
+from governance.act_trust_types import (
+    KINDS,
+    MAX_DETAIL_BYTES,
+    Finding,
+    PolicyPin,
+    clip_detail,
+    detail_size,
+)
 
 P = "p" * 40
 LIMIT = 32 * 1024
+MAX_NAME = "o" * 39 + "/" + "n" * 100  # 140 bytes
+MAX_BRANCH = "é" * 127 + "b"  # 255 bytes
+# Detail variants that escape worst in JSON: C0 controls are 6 bytes each.
+DETAILS = {
+    "controls": ["\x01" * 600],
+    "mixed": ['"\\\x01\x1fя語😀' * 100, "я" * 300, "語" * 200, "😀" * 200],
+}
 
 
 def _sha(i: int, salt: str) -> str:
@@ -50,18 +64,19 @@ def _envelope(epochs: int = 3, admins: int = 1, **source: str) -> dict[str, obje
             "approval_policy_repository_id": 210987654321,
             "admin_digest": "a" * 64,
         },
-        "a_sha": "1" * 40,
-        "x_sha": "2" * 40,
-        "p_sha": P,
+        "relation": "descendant",
+        "rules_version": "df-trust-rules/v1",
+        "accepted_sha": "1" * 40,
+        "snapshot_sha": "2" * 40,
+        "policy": PolicyPin(src.repo, src.branch, P),
         "last_epoch": epochs,
         "ranges": tf.range_descriptor(_epochs(epochs), P),
         "source": tf.source_descriptor(src, raw),
     }
 
 
-def _all_findings() -> list[Finding]:
-    # clipped to 512 bytes: 2-, 3- and 4-byte UTF-8 plus JSON-escaped characters
-    details = ["я" * 300, "語" * 170 + "ab" + "語", "😀" * 200, '"\\' * 300]
+def _all_findings(variant: str = "mixed") -> list[Finding]:
+    details = DETAILS[variant]
     return [
         Finding(kind, role, clip_detail(details[i % len(details)]))
         for i, (kind, role) in enumerate(
@@ -126,15 +141,24 @@ def test_policy_admins_4000_compact() -> None:
     assert json.loads(verdict)["source"]["admins_count"] == 4000
 
 
-def test_64_epochs_all_16_combinations_max_details_fit_32k() -> None:
-    findings = _all_findings()
+@pytest.mark.parametrize("variant", sorted(DETAILS))
+def test_64_epochs_all_16_combinations_max_details_fit_32k(variant: str) -> None:
+    """The true worst case: maximal epochs, admins, name, branch and details
+    that escape worst; the bytes `fit_verdict` returns are the wire form."""
+    findings = _all_findings(variant)
     assert len(findings) == 16
-    assert all(len(f.detail.encode()) == MAX_DETAIL_BYTES for f in findings)
-    envelope = _envelope(64, 4000, name="o" * 39 + "/" + "n" * 100, branch="é" * 127)
-    verdict = tf.fit_verdict(envelope, findings, "диагностика " * 10_000)
+    assert all(
+        MAX_DETAIL_BYTES - 6 < detail_size(f.detail) <= MAX_DETAIL_BYTES
+        for f in findings
+    )
+    envelope = _envelope(64, 4000, name=MAX_NAME, branch=MAX_BRANCH)
+    bare = tf.fit_verdict(envelope, findings, "")  # the maximal legal input fits
+    assert len(bare) <= LIMIT
+    verdict = tf.fit_verdict(envelope, findings, "диагностика\x01 " * 10_000)
     assert len(verdict) <= LIMIT
     doc = json.loads(verdict)
     assert len(doc["ranges"]["ranges"]) == 64
+    assert doc["policy"] == {"full_name": MAX_NAME, "branch": MAX_BRANCH, "p_sha": P}
     got = {(f["kind"], f["role"]): f["detail"] for f in doc["findings"]}
     assert got == {(f.kind, f.role): f.detail for f in findings}
     assert doc["diagnostics"].startswith("диагностика")
@@ -175,11 +199,31 @@ def test_one_finding_per_kind_and_role() -> None:
         tf.fit_verdict(_envelope(), twice, "")
 
 
-def test_envelope_over_budget_rejected() -> None:
-    with pytest.raises(ValueError, match="envelope over"):
+def test_envelope_over_budget_unsupported_size() -> None:
+    with pytest.raises(tf.UnsupportedSize) as caught:
         tf.fit_verdict({**_envelope(), "extra": "x" * LIMIT}, [], "")
+    assert caught.value.field == "verdict"
+
+
+@pytest.mark.parametrize(
+    ("epochs", "message"),
+    [
+        ([], "no epochs"),
+        ([Epoch(2, "a" * 40)], "not contiguous"),
+        ([Epoch(1, "a" * 40), Epoch(3, "b" * 40)], "not contiguous"),
+        ([Epoch(1, "a" * 40), Epoch(2, "b" * 40)], "open epoch 1"),
+    ],
+)
+def test_range_descriptor_malformed_epochs(epochs: list[Epoch], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        tf.range_descriptor(epochs, P)
 
 
 def test_reserved_keys_rejected() -> None:
     with pytest.raises(ValueError, match="reserved"):
         tf.fit_verdict({**_envelope(), "findings": []}, [], "")
+
+
+def test_lone_surrogates_in_diagnostics_replaced() -> None:
+    doc = json.loads(tf.fit_verdict(_envelope(), [], "bad \ud800 text"))
+    assert doc["diagnostics"] == "bad \ufffd text"

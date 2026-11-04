@@ -1,9 +1,11 @@
 """Trust descriptors and the bounded verdict (installer spec §6.1, «Размер вердикта»).
 
-The mandatory envelope is bounded by construction: the ranges descriptor carries
-at most 64 epochs, the ``source.env`` descriptor carries the count and digest of
-``POLICY_ADMINS`` instead of the list. Codes and mandatory fields are never
-truncated; only the diagnostics are cut by bytes to the remaining budget.
+The verdict is bounded by construction: the ranges descriptor carries at most 64
+epochs, the ``source.env`` descriptor carries the count and digest of
+``POLICY_ADMINS`` instead of the list, and each finding detail is bounded on its
+canonical serialised (JSON-escaped) form, so escaping cannot inflate it. Codes and
+mandatory fields are never truncated; only the diagnostics are cut by bytes to the
+remaining budget.
 
 Stdlib only: the module joins the ``act_precheck`` import closure (Task 7).
 """
@@ -13,6 +15,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Protocol
 
@@ -29,6 +32,7 @@ VERDICT_LIMIT = 32 * 1024
 MAX_FULL_NAME_BYTES = 140
 MAX_BRANCH_BYTES = 255
 _RESERVED = ("findings", "diagnostics")
+_SURROGATES = re.compile("[\ud800-\udfff]")
 
 
 class UnsupportedSize(Exception):
@@ -72,6 +76,13 @@ def range_descriptor(epochs: Sequence[EpochLike], p_sha: str) -> RangeDescriptor
     """Expected ranges: closed ``anchor…last_confirmed``, open ``anchor…P``."""
     if len(epochs) > MAX_EPOCHS:
         raise UnsupportedSize("epochs")
+    if not epochs:
+        raise ValueError("no epochs")
+    if [e.epoch for e in epochs] != list(range(1, len(epochs) + 1)):
+        raise ValueError("epoch numbers not contiguous from 1")
+    for e in epochs[:-1]:
+        if e.last_confirmed is None:
+            raise ValueError(f"open epoch {e.epoch} before the last")
     ranges = tuple(
         (e.epoch, e.anchor, e.last_confirmed if e.last_confirmed is not None else p_sha)
         for e in epochs
@@ -100,11 +111,15 @@ def source_descriptor(source: SourceV2, raw: bytes) -> SourceDescriptor:
 def fit_verdict(
     envelope: Mapping[str, object], findings: Iterable[Finding], diagnostics: str
 ) -> bytes:
-    """Serialised verdict ≤ 32 KiB; only ``diagnostics`` is cut to the remainder.
+    """The verdict's wire bytes, ≤ 32 KiB; only ``diagnostics`` is cut to fit.
 
-    A finding outside the kinds of ``envelope["origin_route"]``, a second
-    finding of one (kind, role) or an envelope that leaves no budget is a
-    caller error (``ValueError``): the envelope is bounded by construction.
+    The returned bytes are the wire form (canonical JSON, UTF-8), so the bound
+    is on what is sent. It holds by construction for every legal input: the
+    descriptors are bounded and details are bounded on their serialised form.
+    An envelope that still leaves no budget is ``UnsupportedSize("verdict")``,
+    the typed reproducible outcome. A finding outside the kinds of
+    ``envelope["origin_route"]``, a second finding of one (kind, role), an
+    unknown route or a reserved key is a caller error (``ValueError``).
     """
     route = envelope.get("origin_route")
     if route not in ROUTE_KINDS:
@@ -114,8 +129,9 @@ def fit_verdict(
     rows = _finding_rows(findings, ROUTE_KINDS[route])
     doc = {**envelope, "findings": rows, "diagnostics": ""}
     if len(_canonical(doc)) > VERDICT_LIMIT:
-        raise ValueError(f"envelope over {VERDICT_LIMIT} bytes")
-    return _canonical({**doc, "diagnostics": _fit_text(doc, diagnostics)})
+        raise UnsupportedSize("verdict")
+    text = _SURROGATES.sub("\ufffd", diagnostics)  # untrusted; must encode
+    return _canonical({**doc, "diagnostics": _fit_text(doc, text)})
 
 
 def _finding_rows(
