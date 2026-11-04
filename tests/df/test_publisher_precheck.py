@@ -607,9 +607,9 @@ def test_protocol_constants_equal_the_precheck() -> None:
     """The repeated half of the protocol and the three rungs stay equal."""
     from df import cli, sudoers
 
-    shape = act_precheck.verdict(
-        act_precheck.parse_request(_valid_request()), "allow", "", ADMIN
-    )
+    request = act_precheck.parse_request(_valid_request())
+    assert isinstance(request, act_precheck.PrecheckRequest)
+    shape = act_precheck.verdict(request, "allow", "", ADMIN)
     assert set(shape) == set(precheck._VERDICT_CHECKS)
     assert precheck.parse_verdict((json.dumps(shape) + "\n").encode()) == shape
     assert precheck.KINDS == act_precheck.KINDS

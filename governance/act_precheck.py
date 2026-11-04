@@ -230,44 +230,27 @@ def serve(
     deps = deps or DEFAULT_DEPS
     deadline = deps.now() + DEADLINE
     try:
-        data = load_request(stdin.read(MAX_REQUEST + 1))
-        is_v2 = data.get("schema") == REQUEST_SCHEMA_V2
-        request = parse_request_v2(data) if is_v2 else request_v1(data)
+        request = parse_request(stdin.read(MAX_REQUEST + 1))
     except InvalidRequest as exc:
         print(f"df-precheck: invalid request: {exc}", file=sys.stderr)
         return EXIT_REQUEST
     if isinstance(request, RequestV2):
         answer = verdict_v2(request, admin_digest, complete_v2=complete_v2)
     else:
-        answer = _answer_v1(request, home, deps, deadline, admin_digest)
+        outcome, reason = _decide(request, home, deps, deadline)
+        reason = reason.replace(request.token, "[token]")
+        if len(reason) > MAX_REASON:
+            reason = reason[:MAX_REASON] + TRUNCATED
+        answer = verdict(request, outcome, reason, admin_digest)
     stdout.write(json.dumps(answer) + "\n")
     stdout.flush()
     return 0
 
 
-def _answer_v1(
-    request: PrecheckRequest,
-    home: Path,
-    deps: PrecheckDeps,
-    deadline: float,
-    admin_digest: str,
-) -> dict[str, object]:
-    outcome, reason = _decide(request, home, deps, deadline)
-    reason = reason.replace(request.token, "[token]")
-    if len(reason) > MAX_REASON:
-        reason = reason[:MAX_REASON] + TRUNCATED
-    return verdict(request, outcome, reason, admin_digest)
-
-
-def parse_request(raw: bytes) -> PrecheckRequest:
-    """Strict `df/precheck-request/v1`; any deviation — `InvalidRequest` whose text
-    names keys, never values."""
-    return request_v1(load_request(raw))
-
-
-def load_request(raw: bytes) -> dict[str, object]:
-    """The request as a JSON object (at most `MAX_REQUEST` bytes, no duplicate
-    keys, no `NaN`-like constants), any schema; else `InvalidRequest`."""
+def parse_request(raw: bytes) -> PrecheckRequest | RequestV2:
+    """Strict `df/precheck-request/v1`, or by its `schema` a v2 request
+    (`parse_request_v2`); any deviation — `InvalidRequest` whose text names keys,
+    never values."""
     if len(raw) > MAX_REQUEST:
         raise InvalidRequest(f"request larger than {MAX_REQUEST} bytes")
     try:
@@ -280,11 +263,8 @@ def load_request(raw: bytes) -> dict[str, object]:
         raise InvalidRequest(f"request is not JSON ({type(exc).__name__})") from None
     if not isinstance(data, dict):
         raise InvalidRequest("request is not a JSON object")
-    return data
-
-
-def request_v1(data: dict[str, object]) -> PrecheckRequest:
-    """Strict `df/precheck-request/v1` of a loaded request (`load_request`)."""
+    if data.get("schema") == REQUEST_SCHEMA_V2:
+        return parse_request_v2(data)
     if set(data) != set(REQUEST_KEYS):
         extra = sorted(set(data) - set(REQUEST_KEYS))
         missing = sorted(set(REQUEST_KEYS) - set(data))
@@ -292,21 +272,20 @@ def request_v1(data: dict[str, object]) -> PrecheckRequest:
     bad = [k for k in REQUEST_KEYS if not _CHECKS[k](data[k])]
     if bad:
         raise InvalidRequest(f"invalid values: {bad}")
-    changes = data["changes"]
-    assert isinstance(changes, list)
     return PrecheckRequest(
         **{k: data[k] for k in REQUEST_KEYS if k not in ("schema", "changes")},
-        changes=tuple((s, p, prev) for s, p, prev in changes),
+        changes=tuple((s, p, prev) for s, p, prev in data["changes"]),
         digest=request_digest(data),
     )
 
 
 def parse_request_v2(data: dict[str, object]) -> RequestV2:
-    """A loaded `df/precheck-request/v2`: until the v2 program (stage 3a Task 7)
+    """A `df/precheck-request/v2` object: until the v2 program (stage 3a Task 7)
     only `nonce` is checked, the verdict binds it and `request_digest`."""
-    if not _matches(_NONCE)(data.get("nonce")):
+    nonce = data.get("nonce")
+    if not _matches(_NONCE)(nonce):
         raise InvalidRequest("invalid values: ['nonce']")
-    return RequestV2(str(data["nonce"]), request_digest(data))
+    return RequestV2(str(nonce), request_digest(data))
 
 
 def verdict_v2(

@@ -550,6 +550,16 @@ JUDGMENT = {
             "\"invalid values: ['kind']\"",
         ),
     ),
+    # --- act_precheck (этап 3a, Task 1): минимальный диспетчер v2
+    "act_precheck.parse_request_v2": (
+        r(
+            "nonce",
+            "act_precheck.parse_request_v2",
+            """raise InvalidRequest("invalid values: ['nonce']")""",
+            f"{PC}::test_v2_bad_nonce_exit_2",
+            "\"invalid values: ['nonce']\"",
+        ),
+    ),
     "act_precheck._no_duplicates": (
         r(
             "duplicate",
@@ -3954,6 +3964,7 @@ NOT_JUDGMENT = {
     "act_precheck._default_transport": _BUILD,
     "act_precheck.request_digest": _BUILD,
     "act_precheck.verdict": _BUILD,
+    "act_precheck.verdict_v2": "строит вердикт v2; исход по `complete_v2`, который судит `precheck serve` (`df/cli._tree_complete`)",
     "act_precheck._judge_stop": "передаёт отказ `_stop_target` и решение `_stop_in_history`; своей проверки нет",
     "act_precheck._snapshot": _IO,
     "act_precheck._remove": _IO,
