@@ -107,6 +107,30 @@ def levels(
     return out
 
 
+def downstream_closure(
+    dag: tuple[tuple[str, tuple[str, ...]], ...], node: str
+) -> set[str]:
+    """Транзитивное downstream-замыкание узла — без него самого.
+
+    Критерий именно транзитивный (§I12): каскад `stale` меняет файл каждого
+    узла замыкания, значит любая живая заявка внутри него посчитана против
+    байтов, которых после этого узла не станет. Одно определение на
+    governance: его спрашивают и `approve_node` (инвалидация заявок), и
+    поверхность D16 (`act_surface`) — переехало из `approve_node`, чтобы
+    узкое замыкание проверяющего не тянуло `approve_node`.
+    """
+    closure: set[str] = set()
+    frontier = [node]
+    while frontier:
+        current = frontier.pop()
+        for fname, ups in dag:
+            child = node_id(fname)
+            if current in ups and child not in closure:
+                closure.add(child)
+                frontier.append(child)
+    return closure
+
+
 def wave_count(dag: tuple[tuple[str, tuple[str, ...]], ...]) -> int:
     """Число волн DAG — число уровней (волны 1-based: `wave = level + 1`)."""
     return max(levels(dag).values(), default=-1) + 1
