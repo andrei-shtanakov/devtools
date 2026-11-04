@@ -578,6 +578,12 @@ sudo darkfactory setup-agent machine-token --file <файл с токеном ma
   (предпроверка `df-precheck`, аттестация App, `PUT` со `sha = head_sha`, способ `squash`);
   candidate и finalize — `refused: kind_unavailable_until_stage3: <вид>`, `brief/…` —
   `refused: brief_precheck_unavailable`, вне форм — `refused: ambiguous_kind`.
+- Мерж stop — только на релизе, чей пин devtools содержит `governance/act_precheck.py`:
+  административное дерево и код издателя берутся из этого пина. Релиз со старым пином (у
+  профиля `core` сейчас легаси `335188f`) мерж stop не исполняет: его издатель — этапа 2a
+  и отвечает `refused: ambiguous_kind`; дерево с кодом 2b без программы `precheck serve`
+  отвергает по имени («релиз без предпроверки»), и `doctor --product` называет причину в
+  строке `publisher.precheck`.
 - Журнал периметра без привязки к корню доверия: `perimeter-status` отвечает
   `unavailable: no_binding` (привязка `df-trust` — этап 3).
 - Одна UID на роль: процесс одного прогона может назвать `run_id` другого (предел гарантии,

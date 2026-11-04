@@ -3026,3 +3026,26 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       (`core_profile()` сам разрешит новые пины) и прогнать `df-stage1` — инвентаризация
       нативных артефактов (Task 14-B) и живая установка до установки на хосты: решение о
       правиле (в) принято только для замеренных входов.
+- [ ] Дефект порядка фикстур в `tests/df`: `test_publisher_merge`, `test_harness_trust` и `test_publisher_main` одним вызовом pytest дают `fixture 'world' not found` @owner:github:andrei-shtanakov @id:df-tests-world-fixture-order @epic:eco.dark-factory @trigger:"следующая правка фикстур `tests/df` либо повтор ошибки в CI"
+      Существовал до этапа 2b (ledger 2b, строки 31 и 69); по отдельности модули зелёные.
+      Финальное ревью 2b (04.11) при совместном запуске `test_publisher_merge` и
+      `test_publisher_main` дефект не воспроизвело — нужен прогон всех трёх и разбор, какая
+      фикстура `world` теряется (имя совпадает в нескольких мирах `tests/df`).
+- [ ] Мерж stop на закреплённом релизе: пин devtools члена `core` в манифесте зонтика снять с легаси `335188f` на коммит с `governance/act_precheck.py`, затем поднять `CORE_MANIFEST` в `tests/df/root_world.py` и прогнать `df-stage1` @owner:github:andrei-shtanakov @id:df-core-repin-precheck @epic:eco.dark-factory @blocked_by:todo://devtools/df-installer-stage2b
+      Финальное ревью 2b (04.11, minor 6; ledger строка 70): живые строки `core` ставят
+      devtools `335188f` — релиз без предпроверки; издатель такого релиза мерж stop не
+      исполняет (`precheck serve` отказывает по имени, `doctor` — `publisher.precheck`
+      «нарушено»). Перепин манифеста — PR в репо зонтика (не этот файл); здесь — подъём
+      `CORE_MANIFEST` и прогон `df-stage1` по порядку `df-installer-pin-drift`.
+- [ ] Издатель сверяет `admin_digest` вердикта предпроверки со своим ожидаемым (`snapshot.entry.admin_digest`): расхождение — `precheck_failed: binding_mismatch` @owner:github:andrei-shtanakov @id:df-precheck-admin-digest-crosscheck @epic:eco.dark-factory @trigger:"этап 3 спеки B либо протокол предпроверки v2"
+      Финальное ревью 2b (04.11, minor 4): `df/publisher/precheck.py` проверяет
+      `admin_digest` вердикта только по форме. Если между стартом издателя и запуском
+      `df-precheck` активирован другой релиз, вердикт выдаст другое дерево; сейчас это видно
+      лишь в evidence (`publisher_release.digest` против `precheck.admin_digest`).
+      Требование 3 этапа 2b этого не требует; сверка дешёвая и fail-closed.
+- [ ] `git` предпроверки — по утверждённому абсолютному пути, а не из `PATH`: `governance/act_history_snapshot.py` запускает `"git"` при `PATH=/usr/bin:/bin` @owner:github:andrei-shtanakov @id:df-precheck-git-approved-path @epic:eco.dark-factory @trigger:"расширение политики утверждённых CLI сверх `/usr/bin/git` либо правка `act_history_snapshot._git`"
+      Финальное ревью 2b (04.11, minor 8): сейчас совпадает с утверждённым `install.toml`
+      (поддерживается только `/usr/bin/git`, README «Утверждённые CLI»), но связь неявная и
+      без теста. В `df/` константы утверждённого пути `git` нет (`approved_cli["git"]` —
+      значение `install.toml`), поэтому путь надо передать проверяющему из конфигурации
+      (запрос или окружение `precheck serve`) и закрепить тестом.
