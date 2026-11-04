@@ -47,6 +47,25 @@ def _note_governance_skip(report: pytest.CollectReport | pytest.TestReport) -> N
         _skipped_for_governance.append(report.nodeid)
 
 
+def _arg_path(arg: str) -> tuple[str, ...]:
+    """Directory-wise sort key of a command-line test argument (absolute path)."""
+    return Path(arg.split("::", 1)[0]).resolve().parts
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Keep command-line arguments of one directory adjacent.
+
+    Since pytest 9 a conftest's fixtures belong to the `Package` node that
+    first collected it. Arguments like `tests/df/a.py tests/b.py tests/df/c.py`
+    re-enter `tests/df` as a NEW node and `c.py` loses every fixture of
+    `tests/df/conftest.py` (`fixture 'world' not found`, TODO
+    `df-tests-world-fixture-order`). A stable sort by path restores the
+    adjacency; the order inside one file is untouched."""
+    config = session.config
+    config.args = sorted(config.args, key=_arg_path)
+
+
 def pytest_collectreport(report: pytest.CollectReport) -> None:
     _note_governance_skip(report)
 

@@ -2919,7 +2919,11 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 > subagent-driven; Task 1 (authority-root для `df/`, `tests/df/`) первой и с человеческим
 > мержем.
 
-- [ ] Установщик df (команда darkfactory), этап 1 (конфигурация, установка, модели): план `docs/superpowers/plans/2026-10-16-df-installer-stage1.md` @owner:github:andrei-shtanakov @id:df-installer-stage1 @epic:eco.dark-factory
+- [x] Установщик df (команда darkfactory), этап 1 (конфигурация, установка, модели): план `docs/superpowers/plans/2026-10-16-df-installer-stage1.md` @owner:github:andrei-shtanakov @id:df-installer-stage1 @epic:eco.dark-factory
+      Закрыто 26.10: приёмка §10 (§3.8, CI на обеих платформах) — evidence
+      `docs/evidence/2026-10-26-df-stage1-acceptance.md`, PR #635 (merge 497ce3f); живая
+      установка `core` — пункт `df-installer-stage1-live` ниже. Изоляция харнессов и проверки
+      от имени ролей — ворота этапа 2 (evidence, итог и §6).
 - [x] Живая установка профиля `core` на macOS arm64 и Ubuntu x86_64 по манифесту зонтика (`080f15e`, ai-orchestrators-workspace#52) в CI `df-stage1`, в двух формах — в раскладке `/` командой README как процессом и в root-мире `<R>` в процессе; в обеих `doctor --json` — уровень 1, все проверки `ok`, `--help` каждой объявленной точки входа не от root; до неё — повтор инвентаризации нативных артефактов `core` правилом (в) на пинах манифеста; закрывает приёмку этапа 1 по §10 @owner:github:andrei-shtanakov @id:df-installer-stage1-live @epic:eco.dark-factory — PR #635 (merge 497ce3f); обе формы зелёные на обеих ОС: `doctor` уровень 1, 11/11 `ok`, 8/8 точек входа; правило (в) — 0 проблем; evidence §9, §9.1, прогоны 40330172102 и 40336167843 (голова 9267463); ссылка `/usr/local/bin/darkfactory` не проверялась — оговорено в §9.1
       Манифест доставлен: ai-orchestrators-workspace#52 влит (`080f15e`), #51 закрыт,
       impresario — отдельно (ai-orchestrators-workspace#53). Инвентаризация больше не держит
@@ -3057,12 +3061,18 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       (`core_profile()` сам разрешит новые пины) и прогнать `df-stage1` — инвентаризация
       нативных артефактов (Task 14-B) и живая установка до установки на хосты: решение о
       правиле (в) принято только для замеренных входов.
-- [ ] Дефект порядка фикстур в `tests/df`: `test_publisher_merge`, `test_harness_trust` и `test_publisher_main` одним вызовом pytest дают `fixture 'world' not found` @owner:github:andrei-shtanakov @id:df-tests-world-fixture-order @epic:eco.dark-factory @trigger:"следующая правка фикстур `tests/df` либо повтор ошибки в CI"
+- [x] Дефект порядка фикстур в `tests/df`: `test_publisher_merge`, `test_harness_trust` и `test_publisher_main` одним вызовом pytest дают `fixture 'world' not found` @owner:github:andrei-shtanakov @id:df-tests-world-fixture-order @epic:eco.dark-factory @trigger:"следующая правка фикстур `tests/df` либо повтор ошибки в CI"
       Существовал до этапа 2b (ledger 2b, строки 31 и 69); по отдельности модули зелёные.
       Финальное ревью 2b (04.11) при совместном запуске `test_publisher_merge` и
       `test_publisher_main` дефект не воспроизвело — нужен прогон всех трёх и разбор, какая
       фикстура `world` теряется (имя совпадает в нескольких мирах `tests/df`).
-- [ ] Мерж stop на закреплённом релизе: пин devtools члена `core` в манифесте зонтика снять с легаси `335188f` на коммит с `governance/act_precheck.py`, затем поднять `CORE_MANIFEST` в `tests/df/root_world.py` и прогнать `df-stage1` @owner:github:andrei-shtanakov @id:df-core-repin-precheck @epic:eco.dark-factory @blocked_by:todo://devtools/df-installer-stage2b
+      Закрыто 04.11: имя `world` ни при чём. В pytest 9 фикстуры conftest привязаны к узлу
+      `Package`, собравшему его первым; аргументы `tests/df/a.py tests/b.py tests/df/c.py`
+      входят в `tests/df` вторым, новым узлом, и `c.py` теряет все фикстуры
+      `tests/df/conftest.py` (воспроизводится любым файлом `tests/` между двумя файлами
+      `tests/df`). Исправление — `pytest_sessionstart` в `tests/conftest.py` сортирует
+      аргументы по пути; регрессия — `tests/test_arg_order.py`.
+- [ ] Мерж stop на закреплённом релизе: пин devtools члена `core` в манифесте зонтика снять с легаси `335188f` на коммит с `governance/act_precheck.py`, затем поднять `CORE_MANIFEST` в `tests/df/root_world.py` и прогнать `df-stage1` @owner:github:andrei-shtanakov @id:df-core-repin-precheck @epic:eco.dark-factory
       Финальное ревью 2b (04.11, minor 6; ledger строка 70): живые строки `core` ставят
       devtools `335188f` — релиз без предпроверки; издатель такого релиза мерж stop не
       исполняет (`precheck serve` отказывает по имени, `doctor` — `publisher.precheck`
