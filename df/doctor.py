@@ -12,7 +12,7 @@ spec 3.6) is shown apart: probes are level 2 and never change level 1.
 
 Level 2 is root's only (R13-3): it asks the roles and the publisher through
 the real `sudo` (the seams `role_check`, `role_access`,
-`role_perimeter_status`, `review_merge`, and `setup_agent`'s
+`role_perimeter_status`, `review_merge`, `publisher_precheck`, and `setup_agent`'s
 `publisher_self_check` and `exec_check_github`) and judges their answers with
 the production parsers; `products.toml` is read live, like `publisher.toml`.
 The perimeter journal's line comes from the same `self-check` answer and is
@@ -72,7 +72,7 @@ from df.digest import TreeError
 from df.journal import StepFailed, Transitional
 from df.launch import SUDO
 from df.paths import Layout
-from df.publisher import request, store
+from df.publisher import precheck, request, store
 from df.publisher.github import SelfCheckResult
 from df.publisher.perimeter import MAX_EVENTS
 from df.publisher.request import BadResponse, Response
@@ -646,6 +646,7 @@ LEVEL2_IDS = (
     "roles.isolation",
     "roles.precheck",
     "publisher.answers",
+    "publisher.precheck",
     "publisher.foreign",
     "publisher.owners",
     "product.registered",
@@ -657,6 +658,19 @@ PERIMETER_ID = "perimeter.journal"
 #: The run id of `publisher.answers`: never registered, so the publisher
 #: answers `refused: run_unknown` (r2 N3: «отвечает» needs no run).
 PROBE_RUN_ID = "doctor-probe"
+#: What `publisher.precheck` sends `df-precheck`: no request at all (no
+#: key of `df/precheck-request/v1`, so no token), which `precheck serve`
+#: refuses itself with `PRECHECK_EXIT` and `PRECHECK_REFUSAL` on stderr
+#: (`act_precheck.serve`; a test holds them equal).
+PRECHECK_PROBE = b"{}"
+PRECHECK_EXIT = 2
+PRECHECK_REFUSAL = "df-precheck: invalid request"
+#: How sudo's own refusals begin (no rule, unknown user, `-n`).
+_SUDO_REFUSALS = ("sudo:", "Sorry, user")
+#: Seconds `roles.precheck` gives its process listing: generous, unlike the
+#: reap's `precheck_reap.PS_TIMEOUT` (a slow `ps` on a loaded host is not
+#: «нарушено»; doctor has no rung margin to keep).
+LEFTOVERS_TIMEOUT = 30.0
 #: Seconds root waits for a role's `check`, `test -r` or a nested call.
 ROLE_TIMEOUT = 60.0
 TEST = "/bin/test"
@@ -879,7 +893,8 @@ def _precheck_leftovers(ctx: _Level2) -> str:
     if account is None:
         raise _Outcome(NOT_CHECKED, f"нет записи {roles.PRECHECK_USER}")
     try:
-        old = precheck_reap.leftovers(account.uid, precheck_reap.list_processes())
+        listing = precheck_reap.list_processes(timeout=LEFTOVERS_TIMEOUT)
+        old = precheck_reap.leftovers(account.uid, listing)
     except precheck_reap.ListingError as exc:
         raise _broken([f"процессы не прочитаны: {exc}"]) from exc
     if not old:
@@ -1079,6 +1094,42 @@ def _answer_of(ctx: _Level2, role: str) -> _Part | None:
     if (resp.outcome, resp.reason) != ("refused", "run_unknown"):
         return (BROKEN, f"{what}: {resp.outcome}: {resp.reason}, ждали run_unknown")
     return None
+
+
+def _precheck_chain(ctx: _Level2) -> str:
+    """Final review I1: the chain publisher → sudo → `df-precheck` wrapper →
+    entry → `precheck serve`, through the real `sudo`, as the publisher runs
+    it (`publisher_precheck`). The program's own refusal of `PRECHECK_PROBE`
+    (exit `PRECHECK_EXIT`, `PRECHECK_REFUSAL`, nothing on stdout) proves the
+    sudoers rule, the wrapper, the entry and its digest, the role's record,
+    the program, its `site/` and imports; anything else is «нарушено» with
+    its cause. Like every `precheck serve`, the probe reaps leftovers first
+    (`roles.precheck` has listed them before)."""
+    result = publisher_precheck(ctx.layout)
+    what = f"{perimeter_client.PUBLISHER} → {roles.PRECHECK_USER}"
+    if not result.launched or result.timed_out or result.stdout_truncated:
+        raise _Outcome(UNAVAILABLE, f"{what}: нет ответа")
+    tail = _tail(result)
+    refused = result.returncode == PRECHECK_EXIT and tail.startswith(PRECHECK_REFUSAL)
+    if refused and not result.stdout:
+        return ""
+    raise _Outcome(BROKEN, f"{what}: {_precheck_cause(result, tail)}")
+
+
+def _precheck_cause(result: plat.RunResult, tail: str) -> str:
+    """Why the probe was not refused by the program: it answered, sudo
+    refused (no rule: `roles setup` was not re-run), a program error
+    (`EXIT_BUG`: its last traceback line), or another refusal by name."""
+    if result.returncode == 0 or result.stdout:
+        return (
+            "ответ на заведомо невалидный запрос: "
+            f"код {result.returncode}, stdout {len(result.stdout)} байт"
+        )
+    if tail.startswith(_SUDO_REFUSALS):
+        return f"sudo отказал: {tail}; повторите `darkfactory roles setup`"
+    if result.returncode == 1:
+        return f"программная ошибка precheck serve: {tail}"
+    return f"отказ: {tail}"
 
 
 def _foreign(ctx: _Level2) -> str:
@@ -1316,6 +1367,7 @@ _LEVEL2: tuple[tuple[str, Callable[[_Level2], str]], ...] = (
     ("roles.isolation", _isolation),
     ("roles.precheck", _precheck_leftovers),
     ("publisher.answers", _answers),
+    ("publisher.precheck", _precheck_chain),
     ("publisher.foreign", _foreign),
     ("publisher.owners", _owners),
     ("product.registered", _product_check),
@@ -1428,6 +1480,15 @@ def review_merge(layout: Layout) -> plat.RunResult:
     """`df-publish merge` asked by `df-review`, which has no such rule; empty
     stdin. The tests' seam."""
     return _through_role(layout, "df-review", "merge", b"")
+
+
+def publisher_precheck(layout: Layout) -> plat.RunResult:
+    """The publisher's own precheck command (`precheck.command`) as
+    `df-publisher` (root runs `sudo -n -u df-publisher sudo -n -u df-precheck
+    <libexec>/df-precheck`) with `PRECHECK_PROBE` on stdin. The tests'
+    seam."""
+    argv = [SUDO, "-n", "-u", perimeter_client.PUBLISHER, *precheck.command(layout)]
+    return plat.run_with_input(argv, PRECHECK_PROBE, timeout=ROLE_TIMEOUT)
 
 
 def _through_role(

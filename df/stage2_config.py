@@ -477,7 +477,7 @@ def parse_run(text: str) -> RunRecord:
     """Strictly parse a run record; any deviation is a `ConfigError`."""
     try:
         data = json.loads(
-            text, parse_constant=_no_constant, object_pairs_hook=_no_duplicates
+            text, parse_constant=no_constant, object_pairs_hook=no_duplicates
         )
     except (ValueError, RecursionError) as exc:
         raise ConfigError(f"schema {_RUN}: invalid JSON: {exc}") from exc
@@ -499,7 +499,8 @@ def parse_run(text: str) -> RunRecord:
     )
 
 
-def _no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+def no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Strict JSON `object_pairs_hook`: a repeated key is `ValueError`."""
     result: dict[str, object] = {}
     for key, value in pairs:
         if key in result:
@@ -508,7 +509,8 @@ def _no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-def _no_constant(name: str) -> object:
+def no_constant(name: str) -> object:
+    """Strict JSON `parse_constant`: `NaN` and the infinities are `ValueError`."""
     raise ValueError(f"constant {name} is not allowed")
 
 
@@ -579,7 +581,7 @@ def parse_model_change(line: str) -> ModelChange:
     """Strictly parse one event line; any deviation is a `ConfigError`."""
     try:
         data = json.loads(
-            line, parse_constant=_no_constant, object_pairs_hook=_no_duplicates
+            line, parse_constant=no_constant, object_pairs_hook=no_duplicates
         )
     except (ValueError, RecursionError) as exc:
         raise ConfigError(f"model_change: invalid JSON: {exc}") from exc

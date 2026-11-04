@@ -428,10 +428,12 @@ def test_self_check_only_root(rw: RolesWorld) -> None:
 
 
 def test_doctor_level2(rw: RolesWorld) -> None:
-    """R14-5: `sudo darkfactory doctor --product 1 --json`: checks 1-9 `ok`
-    (`github.app` with its stage-3 note), `models.access` «не проверено» (no
-    probe), level 2 not reached — Task 13's real-host assumptions (nested
-    sudo, `/bin/test`, `sudo -l`) hold."""
+    """R14-5: `sudo darkfactory doctor --product 1 --json`: every check but
+    `models.access` `ok` (`github.app` with its stage-3 note), `models.access`
+    «не проверено» (no probe), level 2 not reached — Task 13's real-host
+    assumptions (nested sudo, `/bin/test`, `sudo -l`) hold. 2b final review
+    I1: `publisher.precheck` `ok` with no note — the real chain publisher →
+    sudo → `df-precheck` → `precheck serve` refused the probe itself."""
     done = rw.darkfactory(["doctor", "--product", str(PRODUCT_ID), "--json"])
     evidence("doctor-level2.json", done.stdout.decode("utf-8", "replace"))
     try:
@@ -444,6 +446,7 @@ def test_doctor_level2(rw: RolesWorld) -> None:
     first_nine = {k: v[0] for k, v in statuses.items() if k != "models.access"}
     assert first_nine == dict.fromkeys(first_nine, doctor.OK), statuses
     assert statuses["github.app"][1].startswith(doctor.TRUST_STAGE3)
+    assert statuses["publisher.precheck"] == (doctor.OK, ""), statuses
     assert statuses["models.access"][0] == doctor.NOT_CHECKED
     assert report["level2"] == "not reached"
     assert done.returncode == doctor.EXIT_NOT_REACHED
