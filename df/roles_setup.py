@@ -8,10 +8,11 @@ this order, each settled by its own check so that a repeat changes nothing:
    intents, so two parallel creations could take the same id);
 2. `dirs`: the stage-2 directories, born in their final owner and mode;
 3. `publisher-config`: `/etc/df/publisher.toml` from the accounts;
-4. `perimeter-init`: the perimeter database, created as `df-publisher` by the
+4. `perimeter-init`: the perimeter database, created -- or an existing one
+   checked and migrated to the current schema -- as `df-publisher` by the
    admin Python of `current` running the entry (`publisher perimeter-init`),
-   then root's `/var/lib/df/perimeter.created`; a marker (either) without the
-   database is lost and refused, never recreated;
+   then root's `/var/lib/df/perimeter.created`; asked once per run; a marker
+   (either) without the database is lost and refused, never recreated;
 5. `libexec`: the wrappers, for the admin Python of `current`;
 6. `sudoers`: `/etc/sudoers.d/df`;
 7. `verify`: wrappers and the effective sudo policy of the roles, `df-build`
@@ -144,6 +145,7 @@ def _steps(layout: Layout, operator: str, python: Path) -> list[Step]:
         )
 
     verified: list[bool] = []
+    checked: list[bool] = []  # the publisher answered this run
 
     def verify() -> None:
         """One probe per run; a pure check would be run three times."""
@@ -168,8 +170,8 @@ def _steps(layout: Layout, operator: str, python: Path) -> list[Step]:
         ),
         Step(
             "perimeter-init",
-            lambda: _perimeter_ready(layout),
-            lambda: _perimeter_init(layout, python),
+            lambda: _perimeter_lost(layout) or bool(checked),
+            lambda: _perimeter_init(layout, python, checked),
             lambda: _perimeter_problems(layout),
         ),
         Step(
@@ -341,14 +343,18 @@ def _perimeter_files(layout: Layout) -> tuple[Path, ...]:
     return (base / perimeter.DB_NAME, base / perimeter.MARKER, layout.perimeter_created)
 
 
-def _perimeter_ready(layout: Layout) -> bool:
-    """All three files: done; no database while a marker (either) exists:
-    lost, a refusal -- even if the whole `perimeter/` is gone; otherwise
-    `do()` (nothing yet, or a creation interrupted before a marker)."""
+#: The answers of `publisher perimeter-init` that settle the step.
+_INIT_DONE = frozenset({"created", "migrated", "current"})
+
+
+def _perimeter_lost(layout: Layout) -> bool:
+    """No database while a marker (either) exists: lost, a refusal -- even
+    if the whole `perimeter/` is gone; otherwise `False`: the publisher is
+    asked (to create, or to check and migrate the existing database)."""
     db, marker, created = (os.path.lexists(p) for p in _perimeter_files(layout))
     if not db and (marker or created):
         raise StepFailed("perimeter-init", perimeter.LOST_TEXT)
-    return db and marker and created
+    return False
 
 
 def _perimeter_problems(layout: Layout) -> list[str]:
@@ -356,16 +362,24 @@ def _perimeter_problems(layout: Layout) -> list[str]:
     return [f"{p}: нет файла" for p in files if not os.path.lexists(p)]
 
 
-def _perimeter_init(layout: Layout, python: Path) -> None:
-    """`create_db` as `df-publisher` (`publisher perimeter-init`)."""
+def _perimeter_init(layout: Layout, python: Path, checked: list[bool]) -> None:
+    """`create_db` as `df-publisher` (`publisher perimeter-init`); only an
+    answer of `_INIT_DONE` settles the step (`checked`). A refusal (`lost`,
+    `integrity`, `migration_precondition`) is passed on with its text."""
     result = run_as_publisher(layout, python, ["perimeter-init"], timeout=_INIT_TIMEOUT)
-    if publisher_succeeded(result):
+    lines = result.stdout.decode("utf-8", "replace").splitlines()
+    outcome = lines[-1].removeprefix("perimeter-init: ") if lines else ""
+    if publisher_succeeded(result) and outcome in _INIT_DONE:
         try:
             record_created(layout)
         except OSError as exc:
             raise StepFailed("perimeter-init", f"{exc}{_RETRY}") from exc
+        checked.append(True)
         return
-    raise StepFailed("perimeter-init", publisher_failure(result) + _RETRY)
+    detail = publisher_failure(result)
+    if publisher_succeeded(result):
+        detail = f"{detail}: неизвестный ответ {outcome!r}"
+    raise StepFailed("perimeter-init", detail + _RETRY)
 
 
 def run_as_publisher(

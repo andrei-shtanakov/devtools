@@ -570,6 +570,7 @@ def _load_serve(tree: Path) -> Callable[..., int]:
 _PERIMETER_TEXTS = {
     "lost": perimeter.LOST_TEXT,
     "integrity": perimeter.INTEGRITY_TEXT,
+    "migration_precondition": perimeter.MIGRATION_PRECONDITION_TEXT,
 }
 
 
@@ -582,7 +583,8 @@ def _require_publisher(lay: Layout, command: str) -> None:
 
 
 def _perimeter_init(lay: Layout) -> int:
-    """`publisher perimeter-init`: the perimeter database, as `df-publisher`."""
+    """`publisher perimeter-init`: the perimeter database, as `df-publisher`:
+    `created`, `migrated` (schema 1 -> 2, owner decision 7) or `current`."""
     _require_publisher(lay, "perimeter-init")
     try:
         outcome = perimeter.create_db(lay)
