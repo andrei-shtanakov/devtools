@@ -286,17 +286,23 @@ _INVARIANTS = (
         "SELECT count(*) FROM trust_observations "
         "WHERE route NOT IN ('perimeter-status', 'trust-status', 'merge')"
     ),
+    # `json_type` of malformed JSON raises: each is guarded by `json_valid`
     (
-        "SELECT count(*) FROM trust_observations WHERE NOT json_valid(event_ids) "
-        "OR json_type(event_ids) != 'array' OR NOT json_valid(binding) "
-        "OR json_type(binding) != 'object' "
-        "OR json_type(binding, '$.df_trust_repository_id') IS NOT 'integer' "
-        "OR json_type(binding, '$.approval_policy_repository_id') IS NOT 'integer'"
+        "SELECT count(*) FROM trust_observations WHERE "
+        "(CASE WHEN json_valid(event_ids) THEN json_type(event_ids) END) "
+        "IS NOT 'array' OR "
+        "(CASE WHEN json_valid(binding) THEN json_type(binding) END) "
+        "IS NOT 'object' OR "
+        "(CASE WHEN json_valid(binding) THEN "
+        "json_type(binding, '$.df_trust_repository_id') END) IS NOT 'integer' OR "
+        "(CASE WHEN json_valid(binding) THEN "
+        "json_type(binding, '$.approval_policy_repository_id') END) "
+        "IS NOT 'integer'"
     ),
     (
-        "SELECT count(*) FROM trust_observations AS o, json_each(CASE WHEN "
-        "json_valid(o.event_ids) AND json_type(o.event_ids) = 'array' "
-        "THEN o.event_ids ELSE '[]' END) AS j "
+        "SELECT count(*) FROM trust_observations AS o, json_each(COALESCE("
+        "CASE WHEN json_valid(o.event_ids) THEN CASE json_type(o.event_ids) "
+        "WHEN 'array' THEN o.event_ids END END, '[]')) AS j "
         "WHERE j.type != 'integer' OR j.value NOT IN (SELECT event_id FROM events)"
     ),
     "SELECT count(*) FROM trust_heads WHERE row_version < 1",

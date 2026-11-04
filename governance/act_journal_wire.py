@@ -59,19 +59,49 @@ _LOCK_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 # где полный журнал. Совпадение констант и SQL держит
 # `tests/test_act_journal_wire.py` (сверка с `df/` и двойники на одном файле).
 MAX_EVENTS = 10_000
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
+RESTORED = ("false", "true")
 #: sha256 отсортированных строк `type\tname\tsql` из `sqlite_master` схемы издателя.
-SCHEMA_DIGEST = "d684c9a00188611d5f8ab2ba80f2b9633ec3e6dabd0a768b2a30c963e07f880f"
+SCHEMA_DIGEST = "012d109ababcd26fb8ddb5e1ee702491b294724bf2aeeafbb48e6cadd803cef3"
 _INVARIANTS = (
     "SELECT count(*) FROM events WHERE state NOT IN ('pending', 'registered')",
     (
-        "SELECT count(*) FROM events "
-        "WHERE state = 'registered' AND typeof(epoch) != 'integer'"
+        "SELECT count(*) FROM events WHERE state = 'registered' AND typeof(epoch) "
+        "!= 'integer'"
     ),
     "SELECT count(*) FROM events WHERE state = 'pending' AND epoch IS NOT NULL",
     (
-        "SELECT count(*) FROM transitions "
-        "WHERE event_id NOT IN (SELECT event_id FROM events)"
+        "SELECT count(*) FROM transitions WHERE event_id NOT IN (SELECT event_id "
+        "FROM events)"
+    ),
+    (
+        "SELECT count(*) FROM trust_observations WHERE outcome NOT IN ('open', "
+        "'unresolved', 'accepted', 'finding_registered', 'superseded', "
+        "'conservative')"
+    ),
+    (
+        "SELECT count(*) FROM trust_observations WHERE route NOT IN "
+        "('perimeter-status', 'trust-status', 'merge')"
+    ),
+    (
+        "SELECT count(*) FROM trust_observations WHERE (CASE WHEN "
+        "json_valid(event_ids) THEN json_type(event_ids) END) IS NOT 'array' OR "
+        "(CASE WHEN json_valid(binding) THEN json_type(binding) END) IS NOT "
+        "'object' OR (CASE WHEN json_valid(binding) THEN json_type(binding, "
+        "'$.df_trust_repository_id') END) IS NOT 'integer' OR (CASE WHEN "
+        "json_valid(binding) THEN json_type(binding, "
+        "'$.approval_policy_repository_id') END) IS NOT 'integer'"
+    ),
+    (
+        "SELECT count(*) FROM trust_observations AS o, json_each(COALESCE(CASE WHEN"
+        " json_valid(o.event_ids) THEN CASE json_type(o.event_ids) WHEN 'array' "
+        "THEN o.event_ids END END, '[]')) AS j WHERE j.type != 'integer' OR j.value"
+        " NOT IN (SELECT event_id FROM events)"
+    ),
+    "SELECT count(*) FROM trust_heads WHERE row_version < 1",
+    (
+        "SELECT count(*) FROM trust_heads WHERE finding_event_id IS NOT NULL AND "
+        "finding_event_id NOT IN (SELECT event_id FROM events)"
     ),
 )
 
@@ -98,7 +128,9 @@ def _refusal(conn: sqlite3.Connection) -> str | None:
         if schema_digest(conn) != SCHEMA_DIGEST:
             return "integrity"
         meta = dict(conn.execute("SELECT key, value FROM meta").fetchall())
-        if meta.keys() != {"schema", "admission"} or meta["schema"] != SCHEMA_VERSION:
+        if meta.keys() != {"schema", "admission", "restored"}:
+            return "integrity"
+        if meta["schema"] != SCHEMA_VERSION or meta["restored"] not in RESTORED:
             return "integrity"
         if any(conn.execute(sql).fetchone()[0] for sql in _INVARIANTS):
             return "integrity"

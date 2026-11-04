@@ -325,7 +325,7 @@ def _bad_state(tmp_path, monkeypatch, full, narrow, head) -> None:
 
 
 def _meta_version(tmp_path, monkeypatch, full, narrow, head) -> None:
-    _sql(narrow, "UPDATE meta SET value = '2' WHERE key = 'schema'")
+    _sql(narrow, "UPDATE meta SET value = '3' WHERE key = 'schema'")
 
 
 def _marker_link(tmp_path, monkeypatch, full, narrow, head) -> None:
