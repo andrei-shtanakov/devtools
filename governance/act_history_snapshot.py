@@ -12,8 +12,8 @@ git auth: the header travels only in the git process environment (`GIT_CONFIG_*`
 file; Bearer stays REST-only. git runs only by the absolute path its caller passes
 (`git=`, the approved `git` of `install.toml`, df spec 3.10 rev 11 -- never looked up
 in `PATH`) with an explicit minimal environment (`PATH` = git's directory,
-`/usr/bin`, `/bin` as for the build's git; no system/global config, no prompts,
-http(s) only, no redirects) and every call honours
+`/usr/bin`, `/bin`, `LANG=C` and no system attributes as for the build's git; no
+system/global config, no prompts, http(s) only, no redirects) and every call honours
 an absolute `time.monotonic()` deadline: on expiry the whole git process group is
 killed and `DeadlineExceeded` is raised. REST calls honour the same deadline: each
 page's timeout is capped by the time left, no page starts after it, its body is
@@ -88,10 +88,14 @@ def git_auth_env(token: str) -> dict[str, str]:
 
 
 def _env(git: Path, home: Path, token: str | None) -> dict[str, str]:
+    """git's whole environment: the build's (df `inputs._git_env` with
+    `build.GIT_ISOLATION`, df spec 3.2/3.10 -- mirrored, `df` is not imported)
+    plus http(s) only."""
     env = {
         "PATH": ":".join(dict.fromkeys([str(git.parent), "/usr/bin", "/bin"])),
+        "LANG": "C",
         "HOME": str(home),
-        "LC_ALL": "C",
+        "GIT_ATTR_NOSYSTEM": "1",
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_TERMINAL_PROMPT": "0",

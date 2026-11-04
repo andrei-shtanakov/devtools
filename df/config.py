@@ -178,8 +178,12 @@ def _check_hashes(cli: Mapping[str, Path], hashes: Mapping[str, str]) -> None:
             key,
             "must be 64 lowercase hex characters",
         )
-    unhashed = sorted(HASHED_CLI & set(cli) - set(hashes))
-    _need(not unhashed, "approved_cli_sha256", f"missing for: {', '.join(unhashed)}")
+    for name in sorted(HASHED_CLI & set(cli) - set(hashes)):
+        # `init --cli gh=` or a file from before 3a: only `cli set` pins it
+        raise ConfigError(
+            f"approved_cli_sha256: no sha256 for {name}: "
+            f"run `darkfactory cli set {name} PATH`"
+        )
 
 
 def parse_install(text: str) -> InstallConfig:

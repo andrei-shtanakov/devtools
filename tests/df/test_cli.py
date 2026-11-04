@@ -644,6 +644,21 @@ def _gh_file(tmp_path: Path) -> Path:
     return gh
 
 
+def _trusting(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """The trusted-path policy passes every path it is asked about (a tmp
+    fixture is never root's); the paths are recorded."""
+    from df import platform as plat
+
+    asked: list[Path] = []
+
+    def policy(path: Path) -> list[str]:
+        asked.append(path)
+        return []
+
+    monkeypatch.setattr(plat, "trusted_path_problems", policy)
+    return asked
+
+
 def _serve_tools(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
     """`_load_serve` replaced by one recording the `gh`/`git` it is given."""
     seen: dict[str, object] = {}
@@ -667,9 +682,36 @@ def test_precheck_serve_passes_the_approved_gh(
     gh = _gh_file(tmp_path)
     install = _install(gh=(gh, plat.file_sha256(gh)))
     lay, read = _precheck_world(tmp_path, os.getuid(), install=install)
+    asked = _trusting(monkeypatch)
     seen = _serve_tools(monkeypatch)
     assert _precheck(lay, read) == 0
     assert seen == {"gh": gh, "git": GIT}
+    assert asked == [gh]
+
+
+def test_gh_untrusted_path_refused_at_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    environ: None,
+) -> None:
+    """The trusted-path policy also runs at every launch (the sha256 pins
+    the bytes, the policy who may swap them): a `gh` whose directory is
+    world-writable (and, in a tmp fixture, not root's) is refused with the
+    policy's reason even though its sha256 still matches."""
+    from df import platform as plat
+
+    gh = _gh_file(tmp_path)
+    gh.parent.chmod(0o777)
+    install = _install(gh=(gh, plat.file_sha256(gh)))
+    lay, read = _precheck_world(tmp_path, os.getuid(), install=install)
+    monkeypatch.setattr(cli, "_load_serve", _no_serve)
+    os.environ["DF_TEST_SENTINEL"] = "kept"
+    assert _precheck(lay, read) == 2
+    err = capsys.readouterr().err
+    assert f"precheck serve: gh {gh}: " in err
+    assert str(gh.parent) in err
+    assert os.environ["DF_TEST_SENTINEL"] == "kept"
 
 
 @pytest.mark.parametrize("damage", ["bytes", "absent"])
@@ -688,6 +730,7 @@ def test_gh_sha256_mismatch_refused_at_launch(
     gh = _gh_file(tmp_path)
     install = _install(gh=(gh, plat.file_sha256(gh)))
     lay, read = _precheck_world(tmp_path, os.getuid(), install=install)
+    _trusting(monkeypatch)
     if damage == "bytes":
         gh.write_bytes(b"#!/bin/sh\necho other\n")
     else:

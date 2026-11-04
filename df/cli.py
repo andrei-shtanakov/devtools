@@ -526,7 +526,7 @@ def _precheck_serve(lay: Layout, read: ReadResult) -> int:
     `admin/<id>`, which the entry put first, and stdlib), and the program of
     that tree answers the one request on stdin. `gh` and `git` are the
     approved paths of the snapshot's `install.toml` (spec 3.10 rev 11, no
-    `PATH`): `gh` only if approved, its sha256 checked against the file at
+    `PATH`): `gh` only if approved, its path policy and sha256 checked at
     this launch (`_approved_gh`); without it the program gets `gh=None`."""
     account = load_accounts(lay.accounts).get(roles.PRECHECK_USER)
     if account is None or account.state != "ready" or os.getuid() != account.uid:
@@ -564,13 +564,19 @@ def _precheck_serve(lay: Layout, read: ReadResult) -> int:
 
 
 def _approved_gh(cfg: InstallConfig) -> Path | None:
-    """The approved `gh` whose file still has the sha256 `install.toml`
-    records (spec 3.7 rev 11, checked at every launch); `None` when no `gh`
-    is approved (the history profile is then unavailable). A mismatch or an
-    unreadable file is a refusal, never a fallback to `PATH`."""
+    """The approved `gh`, checked at every launch (spec 3.7, 3.10 rev 11):
+    its path passes the trusted-path policy (who may swap the file) and its
+    file still has the sha256 `install.toml` records (which bytes). `None`
+    when no `gh` is approved (the history profile is then unavailable). A
+    problem is a refusal, never a fallback to `PATH`. Residual: the file is
+    hashed here and executed later by path (TOCTOU); neither check closes
+    that window -- only a writer the policy already refused could use it."""
     gh = cfg.approved_cli.get("gh")
     if gh is None:
         return None
+    problems = plat.trusted_path_problems(gh)
+    if problems:
+        raise Refusal(f"precheck serve: gh {gh}: {'; '.join(problems)}")
     try:
         digest = plat.file_sha256(gh)
     except OSError as exc:

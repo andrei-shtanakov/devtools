@@ -422,7 +422,8 @@ def test_git_argv_and_config_have_no_token(
         assert set(kw["env"]) <= {
             "PATH",
             "HOME",
-            "LC_ALL",
+            "LANG",
+            "GIT_ATTR_NOSYSTEM",
             "GIT_CONFIG_NOSYSTEM",
             "GIT_CONFIG_GLOBAL",
             "GIT_TERMINAL_PROMPT",
@@ -629,10 +630,12 @@ def test_snapshot_history_git_by_path(
     wrapper, poison = _wrapped_git(tmp_path)
     monkeypatch.setenv("PATH", f"{poison}:{os.environ['PATH']}")
     argvs: list[str] = []
+    envs: list[dict[str, str]] = []
     real = subprocess.Popen
 
     def spy(args: list[str], **kw: Any) -> subprocess.Popen:
         argvs.append(args[0])
+        envs.append(kw["env"])
         return real(args, **kw)
 
     monkeypatch.setattr(subprocess, "Popen", spy)
@@ -655,6 +658,19 @@ def test_snapshot_history_git_by_path(
     assert argvs == [str(wrapper)] * 4  # init, config, fetch, rev-parse
     paths = (tmp_path / "git.log").read_text().split()
     assert paths == [f"{wrapper.parent}:/usr/bin:/bin"] * 4
+    # the build's git isolation (df `build.GIT_ISOLATION`, spec B §3.2) plus HOME
+    # and http(s) only; the auth header only on fetch
+    assert envs[0] == {
+        "PATH": f"{wrapper.parent}:/usr/bin:/bin",
+        "LANG": "C",
+        "HOME": str(home),
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_ALLOW_PROTOCOL": "http:https",
+    }
+    assert envs[2] == envs[0] | git_auth_env(TOKEN)
 
 
 def test_fetch_failure_is_os_error(
