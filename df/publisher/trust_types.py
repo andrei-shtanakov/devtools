@@ -6,6 +6,7 @@ Stdlib only. Mirror of ``governance/act_trust_types.py`` (``df`` never imports
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -54,20 +55,38 @@ ROUTE_KINDS: Mapping[Route, frozenset[str]] = MappingProxyType(
 )
 
 
-def clip_detail(text: str) -> str:
-    """Clip ``text`` to ``MAX_DETAIL_BYTES`` of UTF-8 at a character boundary.
+def detail_size(text: str) -> int:
+    """Serialised size of a detail, in bytes, without the surrounding quotes.
 
+    Measured on ``json.dumps(text, ensure_ascii=False)`` encoded as UTF-8, the
+    form the verdict is serialised in: C0 control characters grow to six bytes
+    (``\\uXXXX``). Escaping never shrinks text, so this also bounds the raw
+    UTF-8 size.
+    """
+    return len(json.dumps(text, ensure_ascii=False).encode("utf-8")) - 2
+
+
+def clip_detail(text: str) -> str:
+    """Longest code-point prefix of ``text`` with ``detail_size`` within the limit.
+
+    Cuts on code points, so neither a character nor an escape is split.
     Producers clip first; ``Finding`` still refuses an over-long detail.
     """
-    raw = text.encode("utf-8")[:MAX_DETAIL_BYTES]
-    return raw.decode("utf-8", errors="ignore")
+    low, high = 0, len(text)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if detail_size(text[:mid]) <= MAX_DETAIL_BYTES:
+            low = mid
+        else:
+            high = mid - 1
+    return text[:low]
 
 
 @dataclass(frozen=True)
 class Finding:
     """One finding: a kind from KINDS, the repo role, a short detail.
 
-    The detail limit is an invariant (``ValueError``); use ``clip_detail``
+    The detail limit (``detail_size``) is an invariant (``ValueError``); use ``clip_detail``
     before constructing.
     """
 
@@ -80,7 +99,7 @@ class Finding:
             raise ValueError(f"unknown finding kind: {self.kind!r}")
         if self.role not in KINDS[self.kind]:
             raise ValueError(f"kind {self.kind!r} not allowed for role {self.role!r}")
-        if len(self.detail.encode("utf-8")) > MAX_DETAIL_BYTES:
+        if detail_size(self.detail) > MAX_DETAIL_BYTES:
             raise ValueError(f"detail over {MAX_DETAIL_BYTES} bytes")
 
 
