@@ -26,7 +26,8 @@ MAX_BRANCH = "é" * 127 + "b"  # 255 bytes
 # Detail variants that escape worst in JSON: C0 controls are 6 bytes each.
 DETAILS = {
     "controls": ["\x01" * 600],
-    "mixed": ['"\\\x01\x1fя語😀' * 100, "я" * 300, "語" * 200, "😀" * 200],
+    # a lone surrogate (from untrusted JSON) goes through clip_detail as U+FFFD
+    "mixed": ['"\\\x01\x1fя語😀\ud800' * 100, "я" * 300, "語" * 200, "😀" * 200],
 }
 
 
@@ -162,6 +163,7 @@ def test_64_epochs_all_16_combinations_max_details_fit_32k(variant: str) -> None
     got = {(f["kind"], f["role"]): f["detail"] for f in doc["findings"]}
     assert got == {(f.kind, f.role): f.detail for f in findings}
     assert doc["diagnostics"].startswith("диагностика")
+    assert ("\ufffd" in verdict.decode()) == (variant == "mixed")
 
 
 def test_codes_never_truncated() -> None:
