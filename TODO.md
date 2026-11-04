@@ -2988,10 +2988,12 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       `act_node._merged`, а не поиском текущего approve; N13 — production `EpochSource`
       (сейчас только `NO_BINDING`) и `RequestJournal` `status`/`record`. Приёмка candidate и
       finalize — строка 3 §10 спеки.
-- [ ] Отозвать PAT `betta-tester` и ключ App 5285716 стенда, удалить секреты environment `df-stage2-live` (`DF_STAND_APP_KEY`, `DF_STAND_MACHINE_TOKEN`) после живой приёмки 2b — H8, действие владельца @owner:github:andrei-shtanakov @id:df-stage2b-stand-secrets-revoke @epic:eco.dark-factory
+- [x] Отозвать PAT `betta-tester` и ключ App 5285716 стенда, удалить секреты environment `df-stage2-live` (`DF_STAND_APP_KEY`, `DF_STAND_MACHINE_TOKEN`) после живой приёмки 2b — H8, действие владельца @owner:github:andrei-shtanakov @id:df-stage2b-stand-secrets-revoke @epic:eco.dark-factory
       Прогон 41784019134 отозвал свои токены установки и чтения сам (`tokens_revoked`). В
       отзыв входит и ключ, который при H6 сперва лёг переменной environment (открытый текст),
       до переноса в Secrets 04.11 04:23Z (evidence 2b §11).
+      Закрыто 04.11: владелец отозвал PAT и ключи App (в том числе побывавший в переменной)
+      и удалил секреты; environment `df-stage2-live` — 0 секретов (сверено через API).
 - [ ] Токен истории на стороне установщика (R8, С-1): `darkfactory setup-trust` пишет `history_gh_config_dir` в `trust.toml`, `darkfactory doctor` проверяет профиль и самоотчёт, шаг человека — read-only PAT (R4) и профиль `history` @owner:github:andrei-shtanakov @id:df-trust-history-token @epic:eco.dark-factory @blocked_by:todo://devtools/df-installer-stage2b
       Разбор ключа (`df.stage2_config.parse_trust`, `act_trust.parse_binding`) — Task 11c
       части B approval-act. Шаг человека: `GH_CONFIG_DIR=<каталог> gh auth login --hostname
