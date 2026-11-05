@@ -30,6 +30,7 @@ from df import platform
 from df.publisher import github
 from df.publisher.github import Transport
 from df.publisher.perimeter import Unavailable
+from df.publisher.request import SHA
 from df.publisher.trust_types import Finding, Role, clip_detail
 from df.stage2_config import TrustBinding
 
@@ -40,9 +41,10 @@ SOURCE_FILE = "source.env"
 #: Seconds `gh auth token` may take.
 GH_TIMEOUT = 60.0
 _TOKEN_FORM = re.compile(r"[A-Za-z0-9_]+")
-_SHA = re.compile(r"[0-9a-f]{40}")
 _FULL_NAME = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
 _WRITE = ("push", "maintain", "admin")
+#: Tree modes of a regular file; a symlink (`120000`) is a blob too.
+_REGULAR_MODES = ("100644", "100755")
 _HEADERS = {
     "Accept": "application/vnd.github+json",
     "X-GitHub-Api-Version": "2022-11-28",
@@ -86,6 +88,8 @@ def history_transport(token: str | None, *, send: Transport | None = None) -> Tr
     without one no `Authorization` at all (a caller's header is dropped).
     `send` defaults to `github.default_transport` (no proxy from the
     environment, no redirect followed); tests pass a fake."""
+    if token is not None and not _TOKEN_FORM.fullmatch(token):
+        raise ValueError("history transport: not a token")
     auth = {} if token is None else {"Authorization": f"Bearer {token}"}
 
     def transport(
@@ -112,7 +116,19 @@ def self_report(
     token value as the reads. A literal `true` in `push`/`maintain`/`admin`
     is a `token_write` finding, whatever else failed; otherwise an error, a
     missing `permissions` or a non-bool field is `Unavailable` (never
-    `false`); all three `false` on both is `None`."""
+    `false`); all three `false` on both is `None`.
+
+    `/repositories/{id}` is used deliberately in place of the spec table's
+    `/repos/{owner}/{name}`: the same answer, and the id is the binding's
+    identity. `policy_repository` must be the bound
+    `approval_policy_repository_id`; another id is `Unavailable` (the
+    report would run on a repository the binding does not name)."""
+    bound = binding.approval_policy_repository_id
+    if policy_repository != bound:
+        return Unavailable(
+            f"history self-report: policy repository {policy_repository} "
+            f"is not the bound {bound}"
+        )
     gap: Unavailable | None = None
     targets: tuple[tuple[Role, int], ...] = (
         ("approval-policy", policy_repository),
@@ -139,7 +155,7 @@ def read_branch_head(
         return body
     commit = body.get("commit") if isinstance(body, dict) else None
     sha = commit.get("sha") if isinstance(commit, dict) else None
-    if not isinstance(sha, str) or not _SHA.fullmatch(sha):
+    if not isinstance(sha, str) or not SHA.fullmatch(sha):
         return Unavailable(f"{full_name}: head of {branch!r} not read")
     return sha
 
@@ -154,7 +170,7 @@ def read_source_digest(
     `source.env`, the blob's bytes must hash to that id. A file missing from
     the tree is `Unavailable` too (the fast path only compares digests)."""
     where = f"{full_name}@{sha[:12]}:{SOURCE_FILE}"
-    if not _FULL_NAME.fullmatch(full_name) or not _SHA.fullmatch(sha):
+    if not _FULL_NAME.fullmatch(full_name) or not SHA.fullmatch(sha):
         return Unavailable(f"{where}: not owner/name and a full SHA")
     oid = _source_oid(transport, full_name, sha, where)
     if isinstance(oid, Unavailable):
@@ -173,14 +189,9 @@ def _is_file(path: Path) -> bool:
 
 
 def _gh_env(config: str, home: str) -> dict[str, str]:
-    """Exactly `platform.GH_ENV_KEYS` (spec 3.10 rev 11); a test holds them equal."""
-    return {
-        "PATH": "/usr/bin:/bin",
-        "HOME": home,
-        "LANG": "C",
-        "GH_CONFIG_DIR": config,
-        "GH_NO_UPDATE_NOTIFIER": "1",
-    }
+    """Exactly `platform.GH_ENV_KEYS` (spec 3.10 rev 11), in their order."""
+    values = ("/usr/bin:/bin", home, "C", config, "1")
+    return dict(zip(platform.GH_ENV_KEYS, values, strict=True))
 
 
 def _auth_token(gh: Path, env: Mapping[str, str]) -> str | Unavailable:
@@ -235,7 +246,7 @@ def _source_oid(
         not isinstance(commit, dict)
         or commit.get("sha") != sha
         or not isinstance(tree_sha, str)
-        or not _SHA.fullmatch(tree_sha)
+        or not SHA.fullmatch(tree_sha)
     ):
         return Unavailable(f"{where}: commit not read")
     listing = _get(transport, f"{_repo_path(full_name)}/git/trees/{tree_sha}")
@@ -253,7 +264,9 @@ def _source_oid(
             oid = entry.get("sha")
             if entry.get("type") != "blob" or not isinstance(oid, str):
                 return Unavailable(f"{where}: not a file")
-            if not _SHA.fullmatch(oid):
+            if entry.get("mode") not in _REGULAR_MODES:
+                return Unavailable(f"{where}: not a regular file")
+            if not SHA.fullmatch(oid):
                 return Unavailable(f"{where}: blob id is not a SHA")
             return oid
     return Unavailable(f"{where}: no such file")

@@ -61,7 +61,9 @@ def _oid(raw: bytes) -> str:
     return hashlib.sha1(b"blob %d\x00" % len(raw) + raw).hexdigest()
 
 
-def _source_routes(raw: bytes, *, oid: str | None = None) -> dict[str, Reply]:
+def _source_routes(
+    raw: bytes, *, oid: str | None = None, mode: str | None = "100644"
+) -> dict[str, Reply]:
     blob = oid or _oid(raw)
     base = f"{API}/repos/{REPO}"
     content = base64.b64encode(raw).decode()
@@ -74,7 +76,12 @@ def _source_routes(raw: bytes, *, oid: str | None = None) -> dict[str, Reply]:
                 "truncated": False,
                 "tree": [
                     {"path": "README.md", "type": "blob", "sha": "c" * 40},
-                    {"path": "source.env", "type": "blob", "sha": blob},
+                    {
+                        "path": "source.env",
+                        "mode": mode,
+                        "type": "blob",
+                        "sha": blob,
+                    },
                 ],
             }
         ),
@@ -165,6 +172,10 @@ def test_history_token_launch_contract(
         (RunResult(1, TOKEN.encode(), b"no token", launched=True), "exit code 1"),
         (_ok(b"\n"), "empty output"),
         (_ok(b"not a token!\n"), "output is not a token"),
+        (
+            RunResult(0, TOKEN.encode(), b"", launched=True, stdout_truncated=True),
+            "output is not a token",
+        ),
     ],
 )
 def test_unreadable_profile_unavailable_no_anonymous(
@@ -388,3 +399,50 @@ def test_read_branch_head() -> None:
     gone = history.history_transport(TOKEN, send=FakeSend({url: _json({}, 404)}))
     got = history.read_branch_head(gone, REPO, "release/1")
     assert isinstance(got, Unavailable) and "HTTP 404" in got.reason
+
+
+def test_call_home_not_created_unavailable(
+    monkeypatch: pytest.MonkeyPatch, profile: Path, tmp_path: Path
+) -> None:
+    """`mkdtemp` in `role_home` failing (here: no such directory) is
+    `Unavailable` naming the exception type; `gh` never runs."""
+    gh = FakeGh(_ok())
+    monkeypatch.setattr(platform, "run_command", gh)
+    binding = replace(BINDING, history_gh_config_dir=str(profile))
+    got = history.history_token(
+        binding, gh=Path("/opt/gh"), role_home=tmp_path / "missing"
+    )
+    assert isinstance(got, Unavailable)
+    assert got.reason == "gh auth token (history): call directory: FileNotFoundError"
+    assert gh.calls == []
+
+
+@pytest.mark.parametrize("token", ["", "ghp_x\r\n", "a b", "tok\u00e9n"])
+def test_transport_refuses_token_not_in_form(token: str) -> None:
+    """The transport re-checks the token form (defence in depth, as
+    governance's `history_transport` does)."""
+    with pytest.raises(ValueError, match="not a token"):
+        history.history_transport(token, send=FakeSend({}))
+
+
+def test_self_report_policy_repository_must_be_bound() -> None:
+    """A policy id other than the binding's is `Unavailable` before any read."""
+    send = FakeSend({})
+    transport = history.history_transport(TOKEN, send=send)
+    got = history.self_report(transport, BINDING, POLICY_ID + 1)
+    assert isinstance(got, Unavailable) and "not the bound" in got.reason
+    assert send.calls == []
+
+
+@pytest.mark.parametrize("mode", ["100755", "120000", "160000", None])
+def test_read_source_digest_regular_file_only(mode: str | None) -> None:
+    """Only a regular file (`100644`, `100755`) is digested; a symlink, a
+    submodule or a missing mode is `Unavailable`."""
+    raw = b"X=1\n"
+    routes = _source_routes(raw, mode=mode)
+    transport = history.history_transport(TOKEN, send=FakeSend(routes))
+    got = history.read_source_digest(transport, REPO, HEAD)
+    if mode == "100755":
+        assert got == hashlib.sha256(raw).hexdigest()
+    else:
+        assert isinstance(got, Unavailable) and "not a regular file" in got.reason

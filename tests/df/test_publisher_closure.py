@@ -64,4 +64,15 @@ def test_publisher_closure_stdlib() -> None:
     """Every module the two roots reach is stdlib or `df`."""
     local, external = _closure(ROOTS)
     assert set(ROOTS) <= local
+    # Positive anchors: the walker really follows imports.
+    assert {"df.publisher.github", "df.platform", "df.publisher.perimeter"} <= local
+    assert {"urllib", "sqlite3", "subprocess"} <= external
     assert sorted(external - {"__future__"} - set(sys.stdlib_module_names)) == []
+
+
+def test_closure_reports_non_stdlib() -> None:
+    """The walker reports a non-stdlib top-level package: `governance`
+    reached from a governance root is external, not hidden."""
+    _local, external = _closure(("governance.act_trust",))
+    assert "governance" in external
+    assert "governance" not in sys.stdlib_module_names
