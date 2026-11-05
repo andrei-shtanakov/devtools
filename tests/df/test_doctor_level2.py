@@ -21,8 +21,8 @@ from typing import get_args
 
 import pytest
 
-from df import build as build_mod
 from df import (
+    admin_tree,
     cli,
     doctor,
     fsutil,
@@ -35,6 +35,7 @@ from df import (
     state,
     sudoers,
 )
+from df import build as build_mod
 from df import platform as plat
 from df.config import Account, ConfigError, dump_accounts, load_accounts
 from df.doctor import Check, level1_checks
@@ -890,6 +891,32 @@ def test_precheck_chain_not_ok_names_the_cause(
     assert got == status and needle in reason, reason
 
 
+def test_incomplete_tree_doctor_names_reinstall(l2: L2) -> None:
+    """The 2b -> 3a path (spec 3.9 rev 11): a tree an older installer built
+    still refuses the probe itself (v1 is served), but `precheck serve`
+    named the shortfall first -- `publisher.precheck` is «нарушено» with
+    that line, which names the reinstall."""
+    line = f"precheck serve: {admin_tree.INCOMPLETE_TREE}: нет governance/x.py"
+    stderr = f"{line}\n{doctor.PRECHECK_REFUSAL}: keys: unexpected []\n"
+    l2.precheck = plat.RunResult(doctor.PRECHECK_EXIT, b"", stderr.encode(), True)
+    got, reason = status_of(l2, "publisher.precheck")
+    assert got == "нарушено"
+    assert line in reason and "переустановите релиз" in reason
+
+
+def test_precheck_chain_truncated_stderr_not_ok(l2: L2) -> None:
+    """Fix round 1: with stderr truncated the line naming an incomplete tree
+    may be among the dropped bytes -- the probe's own refusal in the tail is
+    no proof, so `publisher.precheck` is not «ok» and says why."""
+    stderr = f"{doctor.PRECHECK_REFUSAL}: keys: unexpected []\n".encode()
+    l2.precheck = plat.RunResult(
+        doctor.PRECHECK_EXIT, b"", stderr, True, stderr_truncated=True
+    )
+    got, reason = status_of(l2, "publisher.precheck")
+    assert got == "данные недоступны"
+    assert "stderr усечён" in reason
+
+
 def test_precheck_probe_is_refused_by_the_program(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -903,6 +930,7 @@ def test_precheck_probe_is_refused_by_the_program(
         out,
         admin_digest="sha256:" + "0" * 64,
         home=tmp_path,
+        complete_v2=True,
     )
     assert code == act_precheck.EXIT_REQUEST == doctor.PRECHECK_EXIT
     assert out.getvalue() == ""
