@@ -807,14 +807,22 @@ def _after_verdict(
 
 
 def _settle_pending(oc: OpContext, trust: TrustRun) -> None:
-    """A positive verdict of this call that a new check replaces (the base
-    tip moved): its observation is completed by it, not admitted."""
+    """A positive verdict of this call that is not admitted (a new check
+    replaces it, or the call ends otherwise): its observation is completed
+    by it -- or by K when the binding moved since the check (Task 8 M7,
+    re-review R1-I1: K before any write that follows the checker)."""
     pending, trust.pending = trust.pending, None
     if pending is None:
         return
+    sess = trust.sess
     try:
         with perimeter.open_db(oc.layout) as db:
-            _admission(trust.sess, db, pending, admit=False)
+            if trust_routes.binding_moved(sess):
+                trust_routes.conservative_of(
+                    db, sess.root, pending.obs, sess.epochs_of()
+                )
+                return
+            _admission(sess, db, pending, admit=False)
     except Unavailable as exc:
         raise Refused(f"perimeter_unavailable: {exc.reason}") from None
 

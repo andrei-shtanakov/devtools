@@ -2754,3 +2754,33 @@ def test_trust_root_x_of_the_decisive_check() -> None:
     stop = {"kind": "stop", "trust_root": IDENTITY}
     attest = {"attest": {"precheck": {"base_tip": TIP}}}
     assert merge._evidence_of(stop, attest)["trust_root"] == IDENTITY
+
+
+# --- fix round 2 (re-review R1-I1) --------------------------------------------------
+
+
+def test_binding_moved_before_settlement_is_conservative(
+    world: World, mgh: MergeGitHub, v2: V2, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R1-I1: a finalize `allow`, `trust.toml` rewritten during the
+    attestation (`--rebind` of the same triple, other parameters), the
+    listing unavailable: the `unknown` call settles its observation by K,
+    not `accepted`; no `PUT`."""
+    mgh.head_ref, mgh.files = FINAL, [{"filename": ENVELOPE, "status": "modified"}]
+    mgh.list_down = True
+
+    def rebind() -> None:
+        text = (world.lay.etc / "trust.toml").read_text()
+        (world.lay.etc / "trust.toml").write_text(
+            text.replace(
+                "approval_policy_repository_id = 6",
+                "approval_policy_repository_id = 66",
+            )
+        )
+
+    mgh.after_post = rebind
+    resp = run(world, capsys)
+    assert reason(resp) == ("unknown", "reconcile_unavailable")
+    _no_put(mgh)
+    assert [o[-1] for o in merge_observations(world)] == ["conservative"]
+    assert [e[2] for e in trust_events(world)] == [trust_state.CONSERVATIVE_SOURCE]
