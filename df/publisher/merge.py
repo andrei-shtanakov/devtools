@@ -39,6 +39,7 @@ import hashlib
 import itertools
 import json
 import re
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -471,19 +472,50 @@ def _decide(ctx: Context) -> Response:
         )
     if store.pr_busy(ctx.layout, oc.product.repository_id, number, res.key):
         raise Refused("pr_busy", evidence=_base_evidence(kind, oc.binding))
-    checked = _precheck(oc, pr, facts, kind, trust)
-    auth = auth or ops.review_auth(oc)
-    x = checked.get("snapshot_sha")
-    intent = {
-        "request_key": res.key,
-        "head_sha": head_sha,
-        "kind": kind,
-        "facts": _facts_record(facts),
-        "trust_root": trust_root(oc.binding, None if x is None else str(x)),
-    }
-    ctx.record_intent(intent)
-    run = MergeRun(oc, auth, read, req, res, patterns, kind, trust, _base_of(intent))
-    return _after_check(run, intent, {}, checked)
+
+    def first() -> Response:
+        checked = _precheck(oc, pr, facts, kind, trust)
+        bot = auth or ops.review_auth(oc)
+        x = checked.get("snapshot_sha")
+        intent = {
+            "request_key": res.key,
+            "head_sha": head_sha,
+            "kind": kind,
+            "facts": _facts_record(facts),
+            "trust_root": trust_root(oc.binding, None if x is None else str(x)),
+        }
+        ctx.record_intent(intent)
+        base = _base_of(intent)
+        run = MergeRun(oc, bot, read, req, res, patterns, kind, trust, base)
+        return _after_check(run, intent, {}, checked)
+
+    return _settling(oc, trust, first)
+
+
+def _settling(
+    oc: OpContext, trust: TrustRun | None, act: Callable[[], Response]
+) -> Response:
+    """`act`, then (review I1) a positive verdict of this call that did not
+    reach the admission -- an `unknown`, a refusal, any exception -- completes
+    its observation (`admit=False`: `accepted`/`superseded`, no `PUT`), so a
+    repeat can check anew. Best effort: the answer is never masked. A crash
+    (`BaseException`) leaves it to re-evaluation: a lost answer."""
+    try:
+        resp = act()
+    except Exception:
+        _leave(oc, trust)
+        raise
+    _leave(oc, trust)
+    return resp
+
+
+def _leave(oc: OpContext, trust: TrustRun | None) -> None:
+    if trust is None or trust.pending is None:
+        return
+    try:
+        _settle_pending(oc, trust)
+    except Exception as exc:  # noqa: BLE001 - the answer stays the one given
+        print(f"publisher: merge observation not settled: {exc}", file=sys.stderr)
 
 
 def _recover(
@@ -512,7 +544,7 @@ def _recover(
         except Refused as exc:
             raise _verified(run, exc, dict(phases)) from None
         run = replace(run, trust=trust)
-    return recover_merge(run, intent, phases)
+    return _settling(oc, run.trust, lambda: recover_merge(run, intent, phases))
 
 
 def trust_root(binding: TrustBinding | None, snapshot: str | None) -> dict[str, object]:
@@ -584,7 +616,8 @@ def _trust_run(
     history key (`history_token_required`, O14: `op: merge` never reads
     anonymously), the bundle directory of the PR's workstream and the
     session (the history token and the publisher's self-report on the trust
-    sources) -- all before the review token is minted (`auth`)."""
+    sources). `auth` is called last: a first call mints the review token
+    only after these checks (a repeat has it already)."""
     binding = oc.binding
     if binding is None:
         raise Refused("no_binding")
@@ -655,7 +688,13 @@ def _precheck(
         checked = {**result.evidence(), "base_tip": facts.base_tip}
         snapshot = None
     else:
-        result, snapshot = _trust_precheck(oc, pr, facts, kind, trust)
+        try:
+            result, snapshot = _trust_precheck(oc, pr, facts, kind, trust)
+        except Refused as exc:  # review M4: the kind and the root, as elsewhere
+            evidence = {**_base_evidence(kind, oc.binding), **exc.evidence}
+            raise Refused(
+                exc.reason, verified_not_done=exc.verified_not_done, evidence=evidence
+            ) from None
         checked = {**result.evidence(), "base_tip": facts.base_tip}
         checked["snapshot_sha"] = snapshot
     if result.refused is not None:
@@ -718,7 +757,7 @@ def _merge_observation(
         raise Refused(f"unsupported_size: {policy.field}")
     binding, admin = sess.binding, sess.admin_digest
     ctx = trust_state.ctx_id("merge", binding, admin, RULES_VERSION, x, x, policy)
-    return trust_state.open_observation(
+    obs = trust_state.open_observation(
         db,
         sess.root,
         ctx,
@@ -730,6 +769,11 @@ def _merge_observation(
         head=x,
         policy=policy,
     )
+    if sess.own is not None:  # the publisher's own self-report, as `observe`
+        own = [sess.own]
+        trust_state.register_findings(db, sess.root, obs.ctx, own, sess.epochs_of())
+        raise Refused(PERIMETER_BLOCKED)
+    return obs
 
 
 def _after_verdict(
@@ -814,6 +858,7 @@ def _admit(run: MergeRun) -> None:
                 raise Refused(PERIMETER_BLOCKED)
             _admission(sess, db, pending, admit=True)
     except Unavailable as exc:
+        trust.pending = pending  # rolled back: `_settling` completes it
         raise Refused(f"perimeter_unavailable: {exc.reason}") from None
 
 
@@ -860,7 +905,7 @@ def _check_intent(run: MergeRun, intent: Mapping[str, object]) -> None:
     ok = (
         intent.get("request_key") == run.res.key
         and intent.get("head_sha") == run.head_sha
-        and intent.get("kind") == run.kind
+        and intent.get("kind") in KINDS
         and isinstance(facts, dict)
         and sorted(facts) == sorted(FACT_KEYS)
     )
@@ -1207,7 +1252,13 @@ def _evidence_of(base: Mapping[str, object], phases: Phases) -> dict[str, object
     evidence: dict[str, object] = dict(base)
     initial = _initial(phases)
     if initial is not None:
-        evidence["precheck"] = dict(_decisive(phases))
+        decisive = dict(_decisive(phases))
+        evidence["precheck"] = decisive
+        root = evidence.get("trust_root")
+        x = decisive.get("snapshot_sha")
+        if isinstance(root, dict) and "snapshot_sha" in root and x is not None:
+            # review M3: X of the check that decides (a repeat may check anew)
+            evidence["trust_root"] = {**root, "snapshot_sha": x}
         if store.rechecks(phases):
             evidence["precheck_initial"] = initial.get("precheck")
     if "attested" in phases:

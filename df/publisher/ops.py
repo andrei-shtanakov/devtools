@@ -70,6 +70,9 @@ class OpContext:
     #: `trust.toml` (`None`: no binding): its trust sources must carry no
     #: installation of the App (spec 6.1).
     binding: TrustBinding | None = None
+    #: `admin_digest` of the publisher's `current` record (`None`: none):
+    #: every precheck verdict must carry it (spec 5.4 p. 3, rev 11).
+    admin_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -156,6 +159,7 @@ def build_context(ctx: Context) -> OpContext:
         products,
         ctx.git_base,
         binding,
+        None if ctx.snapshot.entry is None else ctx.snapshot.entry.admin_digest,
     )
 
 

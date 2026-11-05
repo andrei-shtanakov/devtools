@@ -13,7 +13,8 @@ most `LIMIT` bytes (more is drained and dropped) and stops waiting after
 `DEADLINE` of 150 s, sudo's `command_timeout` of 180 s). A timeout, a non-zero
 exit, oversized or malformed output, or a verdict not bound to this very
 request (`nonce`, `request_digest`, `repository_id`, `pr`, `head_sha`, `kind`)
-is a refusal (requirement 3). The token is revoked in `finally`.
+or to the publisher (`admin_digest` = its `current` record's, spec 5.4 p. 3
+rev 11) is a refusal (requirement 3). The token is revoked in `finally`.
 
 Candidate and finalize (stage 3a, Task 11) go through protocol v2, `op:
 merge`, with the same command, wait and token: the request adds the
@@ -180,7 +181,7 @@ def admin_precheck(
     try:
         request = _request(kind, oc, number, head_sha, facts, token)
         if obs is None:
-            refused, verdict = _ask(oc.layout, request, token)
+            refused, verdict = _ask(oc.layout, request, token, oc.admin_digest)
         else:
             refused, verdict, bound = _ask_v2(oc, request, token, obs)
     finally:
@@ -251,10 +252,14 @@ def request_digest(request: Mapping[str, object]) -> str:
 
 
 def _ask(
-    layout: Layout, request: Mapping[str, object], token: str
+    layout: Layout,
+    request: Mapping[str, object],
+    token: str,
+    admin_digest: str | None,
 ) -> tuple[Refused | None, Mapping[str, object] | None]:
-    """Run the command on `request`: the refusal (if any) and the bound
-    verdict (`None` unless one was bound)."""
+    """Run the command on `request`: the refusal (if any) and the verdict
+    bound to it and to the publisher's `admin_digest` (`None` unless one was
+    bound; no record of the publisher binds nothing)."""
     data = json.dumps(request, separators=(",", ":")).encode("utf-8")
     if len(data) > LIMIT:
         return Refused("precheck_request_too_large"), None
@@ -267,7 +272,7 @@ def _ask(
     verdict = parse_verdict(run.stdout)
     if verdict is None:
         return _failed("parse"), None
-    if not _bound(verdict, request):
+    if not _bound(verdict, request, admin_digest):
         return _failed("binding_mismatch"), None
     reason = _mask(str(verdict["reason"]), token)
     if verdict["outcome"] == REFUSE:
@@ -354,9 +359,16 @@ def parse_verdict(raw: bytes) -> Mapping[str, object] | None:
     return data
 
 
-def _bound(verdict: Mapping[str, object], request: Mapping[str, object]) -> bool:
-    """The verdict answers this request: its bound fields and digest."""
+def _bound(
+    verdict: Mapping[str, object],
+    request: Mapping[str, object],
+    admin_digest: str | None,
+) -> bool:
+    """The verdict answers this request (its bound fields and digest) from
+    the publisher's admin tree (`admin_digest`)."""
     if verdict["request_digest"] != request_digest(request):
+        return False
+    if admin_digest is None or verdict["admin_digest"] != admin_digest:
         return False
     return all(verdict[key] == request[key] for key in BOUND)
 

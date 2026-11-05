@@ -951,3 +951,37 @@ def test_admit_merge_is_one_transaction(
     with pytest.raises(RuntimeError):
         admit(lay, obs.id, MV("refuse", "perimeter_findings: x", (RULESET,), True))
     assert outcome(lay, obs.id) == "open" and events(lay) == []
+
+
+def test_admit_merge_settle_head_unreadable_keeps_the_reason(lay: Layout) -> None:
+    """Review M1: without the admission an unreadable head is no verified
+    snapshot -- the findings registered `pending`, a clean verdict left
+    unresolved; with the admission it is `Unavailable`."""
+    accept(lay, H1, 2)
+
+    def gone() -> str:
+        raise Unavailable("github_unavailable")
+
+    with perimeter.open_db(lay) as db:
+        found = merge_obs(db)
+        clean = merge_obs(db, policy=P2)
+    verdict = MV("refuse", "perimeter_findings: x", (RULESET,), True)
+    with perimeter.open_db(lay) as db:
+        kw = {"head_read": gone, "binding": BINDING, "admin_digest": ADMIN}
+        assert (
+            trust_state.admit_merge(
+                db, ROOT, found.id, verdict, rules=RULES, admit=False, **kw
+            )  # fmt: skip
+            is None
+        )
+        assert (
+            trust_state.admit_merge(
+                db, ROOT, clean.id, MV(), rules=RULES, admit=False, **kw
+            )  # fmt: skip
+            is None
+        )
+        with pytest.raises(Unavailable):
+            trust_state.admit_merge(db, ROOT, clean.id, MV(), rules=RULES, **kw)
+    assert outcome(lay, found.id) == "finding_registered"
+    assert outcome(lay, clean.id) == "unresolved"
+    assert [(e[1], e[2]) for e in events(lay)] == [("pending", None)]

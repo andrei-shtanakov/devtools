@@ -741,12 +741,14 @@ def admit_merge(
     accepted row under the current check, the own observation `accepted`,
     no other unfinished observation, no blocking event (`pending` events
     registered first at the verified epoch); else `Refused(PERIMETER_BLOCKED)`.
+    Without the admission an unreadable head is no verified snapshot
+    (`None`, review M1); with it, `Unavailable`.
     The caller writes `armed` and sends the `PUT` only after `None`, after
     the `COMMIT`."""
     conn = db.conn
     with perimeter.write(conn):
         row = _by_id(conn, root, obs)
-        head = head_read()
+        head = _head_or_none(head_read, required=admit)
         acc = accepted_head(conn, root)
         current = acc is not None and head_valid(acc, binding, admin_digest, rules)
         verified = None if acc is None or not current or head != acc.sha else acc
@@ -759,15 +761,28 @@ def admit_merge(
     return None if ok else Refused(PERIMETER_BLOCKED)
 
 
+def _head_or_none(head_read: Callable[[], str], *, required: bool) -> str | None:
+    """The head read with the lock held; without the admission (review M1)
+    an unreadable one is `None`, as the registration rule reads it: the
+    findings `pending`, a clean verdict unresolved, the reason kept."""
+    try:
+        return head_read()
+    except Unavailable:
+        if required:
+            raise
+        return None
+
+
 def _complete_merge(
     conn: sqlite3.Connection,
     row: _Row,
     verdict: MergeVerdict,
     verified: Head | None,
-    head: str,
+    head: str | None,
 ) -> None:
     """Steps (1) and (2) of `admit_merge`; `verified` is the accepted row
-    when the head read now is its SHA under the current check."""
+    when the head read now is its SHA under the current check (`head` is
+    `None` when it could not be read: no CAS, the observation unfinished)."""
     epoch = None if verified is None else verified.last_epoch
     if verdict.findings:
         _register(conn, row, verdict.findings, epoch)
@@ -777,7 +792,7 @@ def _complete_merge(
     mapped = OUTCOME_OF_VERDICT.get(verdict.outcome)
     if mapped == "conservative":
         _conclude(conn, row, epoch, verdict.reason)
-    elif mapped is None and verdict.verified:
+    elif mapped is None and verdict.verified and head is not None:
         obs = row.obs
         same = (
             verified is not None
