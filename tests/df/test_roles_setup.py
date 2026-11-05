@@ -484,6 +484,25 @@ def test_perimeter_init_answer_ok_but_file_missing_names_it(
     assert f"{marker}: нет файла" in str(info.value)
 
 
+def test_migration_precondition_is_not_a_retry(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The publisher refuses `migration_precondition`: `roles setup` passes
+    the text naming the exit and does not add «повторите roles setup» --
+    a repeat never helps."""
+    text = perimeter.MIGRATION_PRECONDITION_TEXT
+
+    def refuses(_user: str, _argv: list[str], **_kw: object) -> plat.RunResult:
+        return plat.RunResult(2, b"", f"darkfactory: {text}\n".encode(), True)
+
+    monkeypatch.setattr(plat, "run_as", refuses)
+    with pytest.raises(StepFailed) as info:
+        setup.run()
+    assert info.value.step == "perimeter-init"
+    assert text in str(info.value)
+    assert "повторите darkfactory roles setup" not in str(info.value)
+
+
 def test_perimeter_init_finishes_a_missing_marker(setup: Setup) -> None:
     setup.run()
     (setup.lay.perimeter_dir / perimeter.MARKER).unlink()

@@ -83,6 +83,16 @@ _INVARIANTS = (
         "SELECT count(*) FROM trust_observations WHERE route NOT IN "
         "('perimeter-status', 'trust-status', 'merge')"
     ),
+    "SELECT count(*) FROM events WHERE typeof(root_repository_id) != 'integer'",
+    (
+        "SELECT count(*) FROM trust_heads WHERE typeof(root_repository_id) != "
+        "'integer' OR typeof(last_epoch) != 'integer' OR typeof(row_version) != "
+        "'integer'"
+    ),
+    (
+        "SELECT count(*) FROM trust_observations WHERE typeof(root_repository_id) "
+        "!= 'integer' OR typeof(row_version) != 'integer'"
+    ),
     "SELECT count(*) FROM trust_heads WHERE row_version < 1",
     (
         "SELECT count(*) FROM trust_heads WHERE finding_event_id IS NOT NULL AND "

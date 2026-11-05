@@ -341,6 +341,58 @@ def test_restore_of_a_schema_1_copy_names_the_exits(lay: Layout) -> None:
     assert not db_file(lay).exists()
 
 
+def test_migration_precondition_names_the_exits(lay: Layout) -> None:
+    """A bound 2b host (`trust.toml`) or one with events never migrates: a
+    repeat cannot help, so the refusal names the human's exit
+    (`restore --empty` or a schema-2 copy), never a bare retry."""
+    from df import cli
+
+    text = perimeter.MIGRATION_PRECONDITION_TEXT
+    assert cli._PERIMETER_TEXTS["migration_precondition"] == text  # noqa: SLF001
+    assert "sudo darkfactory perimeter restore --empty" in text
+    assert "--from <копия базы схемы 2>" in text
+    assert "повторите" not in text
+    make_v1(lay)
+    (lay.etc / "trust.toml").write_text("# a binding\n")
+    with pytest.raises(Unavailable, match="migration_precondition"):
+        perimeter.create_db(lay)
+
+
+def _integrity_checks(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every `PRAGMA integrity_check` the store runs, traced."""
+    seen: list[str] = []
+    real = perimeter._connect  # noqa: SLF001
+
+    def connect(path: Path) -> sqlite3.Connection:
+        conn = real(path)
+        conn.set_trace_callback(
+            lambda sql: seen.append(sql) if "integrity_check" in sql else None
+        )
+        return conn
+
+    monkeypatch.setattr(perimeter, "_connect", connect)
+    return seen
+
+
+def test_create_db_checks_a_current_database_once(
+    lay: Layout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Schema 2 already: `perimeter-init` runs one full check (one
+    `integrity_check`), still fail-closed."""
+    perimeter.create_db(lay)
+    seen = _integrity_checks(monkeypatch)
+    assert perimeter.create_db(lay) == "current"
+    assert len(seen) == 1
+    conn = raw(lay)
+    conn.execute(
+        "INSERT INTO trust_heads VALUES ('github.com', 5, 'main', 'x', 1, 'd', "
+        "'a', 'r', 'b', 0, 't', NULL)"
+    )
+    conn.close()
+    with pytest.raises(Unavailable, match="integrity"):
+        perimeter.create_db(lay)
+
+
 def test_migrate_trust_toml_unreadable_refused_unchanged(
     lay: Layout, monkeypatch: pytest.MonkeyPatch
 ) -> None:

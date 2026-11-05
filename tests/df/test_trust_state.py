@@ -521,6 +521,39 @@ def test_invariants_use_no_sql_json_functions() -> None:
 @pytest.mark.parametrize(
     "sql",
     [
+        "UPDATE trust_heads SET last_epoch = 'x'",
+        "UPDATE trust_heads SET row_version = 'x'",
+        "UPDATE trust_heads SET root_repository_id = 'x'",
+        "UPDATE trust_heads SET finding_event_id = 'x'",
+        "UPDATE trust_heads SET last_epoch = 1.5",
+        "UPDATE trust_observations SET row_version = 'x'",
+        "UPDATE trust_observations SET root_repository_id = 'x'",
+        "UPDATE events SET root_repository_id = 'x'",
+    ],
+)
+def test_corrupt_integer_column_is_integrity(lay: Layout, sql: str) -> None:
+    """An integer column of the trust tables holding text (INTEGER affinity
+    keeps it) is refused when opened, not an `int()` error of a later read
+    (`internal_error`)."""
+    accept(lay, H1, 1)
+    with perimeter.open_db(lay) as db:
+        obs = observe(db, accepted=H1, head=H2)
+        trust_state.register_findings(db, ROOT, obs.ctx, [RULESET], epochs_at(H1))
+        trust_state.advance_head(
+            db, ROOT, obs.id, lambda: H2, last_epoch=1, source_digest="env"
+        )
+    conn = sqlite3.connect(lay.perimeter_dir / perimeter.DB_NAME)
+    conn.execute(sql)
+    conn.commit()
+    conn.close()
+    with pytest.raises(Unavailable) as info:
+        perimeter.open_db(lay)
+    assert info.value.reason == "integrity"
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
         "UPDATE trust_observations SET event_ids = 'not json'",
         "UPDATE trust_observations SET event_ids = '{}'",
         "UPDATE trust_observations SET event_ids = '[\"x\"]'",

@@ -108,7 +108,11 @@ COPY_SCHEMA_1_TEXT = (
 MIGRATION_REQUIRED = "schema_migration_required: выполните darkfactory roles setup"
 MIGRATION_PRECONDITION_TEXT = (
     "база периметра схемы 1 не переводится на схему 2: в ней уже есть события "
-    "или есть /etc/df/trust.toml; ничего не изменено, нужен человек"
+    "или есть /etc/df/trust.toml; ничего не изменено, и повтор этого не "
+    "изменит. Выход — новая база: sudo darkfactory perimeter restore --empty "
+    "(события базы схемы 1 не переносятся, база допускается консервативно) "
+    "или --from <копия базы схемы 2>; затем sudo darkfactory roles setup "
+    "завершит остальные шаги"
 )
 LOST_TEXT = (
     "база периметра потеряна: есть отметка perimeter/created, нет "
@@ -285,6 +289,18 @@ _INVARIANTS = (
     (
         "SELECT count(*) FROM trust_observations "
         "WHERE route NOT IN ('perimeter-status', 'trust-status', 'merge')"
+    ),
+    # INTEGER affinity keeps text that is not a number: the reads `int()` it
+    ("SELECT count(*) FROM events WHERE typeof(root_repository_id) != 'integer'"),
+    (
+        "SELECT count(*) FROM trust_heads WHERE "
+        "typeof(root_repository_id) != 'integer' OR "
+        "typeof(last_epoch) != 'integer' OR typeof(row_version) != 'integer'"
+    ),
+    (
+        "SELECT count(*) FROM trust_observations WHERE "
+        "typeof(root_repository_id) != 'integer' OR "
+        "typeof(row_version) != 'integer'"
     ),
     "SELECT count(*) FROM trust_heads WHERE row_version < 1",
     (
@@ -487,9 +503,12 @@ def _migrate(layout: Layout) -> Literal["migrated", "current"]:
     with _mapped():
         conn = _connect(_db_path(layout))
         try:
-            if _read_version(conn) == SCHEMA_VERSION:
+            try:  # schema 2: this is the one full check of the open
                 _verify(conn)
                 return "current"
+            except Unavailable as exc:
+                if exc.reason != MIGRATION_REQUIRED:
+                    raise
             _no_binding(layout)
             with _write(conn):
                 if _checked_version(conn) != SCHEMA_VERSION_V1 or _count(conn):
@@ -524,12 +543,6 @@ def _no_binding(layout: Layout) -> None:
     except OSError:
         pass
     raise Unavailable("migration_precondition")
-
-
-def _read_version(conn: sqlite3.Connection) -> str:
-    """`_checked_version` in one read transaction of its own."""
-    with _transaction(conn, "BEGIN"):
-        return _checked_version(conn)
 
 
 def _checked_version(conn: sqlite3.Connection) -> str:

@@ -382,6 +382,8 @@ def _perimeter_init(layout: Layout, python: Path, checked: list[bool]) -> None:
     detail = publisher_failure(result)
     if publisher_succeeded(result):
         detail = f"{detail}: неизвестный ответ {outcome!r}"
+    if perimeter.MIGRATION_PRECONDITION_TEXT in detail:
+        raise StepFailed("perimeter-init", detail)  # its exit is named; no retry
     raise StepFailed("perimeter-init", detail + _RETRY)
 
 
