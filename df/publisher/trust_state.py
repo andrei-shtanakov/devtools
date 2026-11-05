@@ -80,7 +80,8 @@ def _no_step(_name: str) -> None:
 
 
 #: Called inside each write transaction before its `COMMIT` with the
-#: operation's name: `observation`, `findings`, `advance`, `conservative`.
+#: operation's name: `observation`, `findings`, `advance`, `conservative`,
+#: `ranges`.
 TRUST_STEP: Callable[[str], None] = _no_step
 
 
@@ -206,6 +207,16 @@ def _of_ctx(
             f"{where} ORDER BY observation_id DESC LIMIT 1", (*root, ctx)
         ).fetchone()
     return None if found is None else _row(found)
+
+
+def outcome_of(conn: sqlite3.Connection, obs: int) -> Outcome:
+    """The observation's outcome now."""
+    found = conn.execute(
+        "SELECT outcome FROM trust_observations WHERE observation_id = ?", (obs,)
+    ).fetchone()
+    if found is None:
+        raise ValueError(f"no observation {obs}")
+    return cast(Outcome, str(found[0]))
 
 
 def unfinished(conn: sqlite3.Connection, root: Root) -> list[Observation]:
@@ -579,6 +590,38 @@ def _event(
     )
 
 
+def ranges_digest(conn: sqlite3.Connection, obs: int) -> str | None:
+    """The digest of the ranges descriptor the observation pinned at its
+    first bound verdict (`merge` only), or `None`."""
+    found = conn.execute(
+        "SELECT ranges_digest FROM trust_observations WHERE observation_id = ?",
+        (obs,),
+    ).fetchone()
+    if found is None:
+        raise ValueError(f"no observation {obs}")
+    return None if found[0] is None else str(found[0])
+
+
+def pin_ranges(db: Db, root: Root, obs: int, digest: str) -> str:
+    """Record `digest` as the observation's ranges digest unless one is
+    already pinned (own transaction); the pinned digest after the call.
+    Only a `merge` observation pins ranges (its inputs include P)."""
+    conn = db.conn
+    with perimeter.write(conn):
+        row = _by_id(conn, root, obs)
+        if row.obs.route != "merge":
+            raise ValueError(f"observation {obs} is not of the merge route")
+        stored = ranges_digest(conn, obs)
+        if stored is not None:
+            return stored
+        conn.execute(
+            "UPDATE trust_observations SET ranges_digest = ? WHERE observation_id = ?",
+            (digest, obs),
+        )
+        TRUST_STEP("ranges")
+    return digest
+
+
 # --- invariant I and the epoch rule ----------------------------------------------
 
 
@@ -648,6 +691,9 @@ __all__ = [
     "known_roots",
     "mark_restored",
     "open_observation",
+    "outcome_of",
+    "pin_ranges",
+    "ranges_digest",
     "register_findings",
     "restored",
     "stale_context",

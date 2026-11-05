@@ -31,7 +31,8 @@ def test_valid_request_parses(op: str) -> None:
     req = request.parse(op, raw_of(op))
     assert req.operation == op
     assert req.request_id == RID
-    assert req.run_id == (None if op == "self-check" else "run-1")
+    admin = op in ("self-check", "trust-status")
+    assert req.run_id == (None if admin else "run-1")
 
 
 FIELDS = [(op, name) for op in OPS for name in VALID[op]]

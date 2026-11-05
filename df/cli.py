@@ -95,8 +95,9 @@ CLI_SETTABLE = ("openssl", "gh")
 _UNSET = "—"
 #: Subcommands of the roles' side (Tasks 5-7); readers.
 SERVICE_COMMANDS = frozenset({"publisher"})
-#: What `publisher serve` takes: the five operations and the self-check.
-PUBLISHER_ARGS = (*OPERATIONS, "self-check")
+#: What `publisher serve` takes: the five operations and root's two
+#: (`self-check`, `trust-status`).
+PUBLISHER_ARGS = (*OPERATIONS, "self-check", "trust-status")
 #: `precheck serve` (stage 2b): the role, its whole environment (plus its
 #: HOME), the program and the pure-Python `site/` of the admin tree.
 PRECHECK_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C"}

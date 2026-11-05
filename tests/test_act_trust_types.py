@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
+from typing import get_args
 
 import pytest
 
@@ -164,3 +165,84 @@ def test_finding_and_ranges_refusals_named() -> None:
         gov.Finding("token_write", "df-trust", "x" * 600)
     with pytest.raises(ValueError, match="more than 64 epochs"):
         gov.RangeDescriptor(((1, "a", "b"),) * 65, "d")
+
+
+# --- the checker's contract as the publisher mirrors it (stage 3a, Task 10) ---
+
+
+def test_trust_routes_mirrors_checker_constants() -> None:
+    """`df.publisher.trust_routes` repeats the checker's contract (`df` never
+    imports `governance`); each value is pinned to its source."""
+    pytest.importorskip("steward")
+    from df.publisher import trust_routes as routes
+    from governance import (
+        act_history_snapshot,
+        act_precheck,
+        act_precheck_v2,
+        act_trust_findings,
+        act_trust_pair,
+    )
+
+    assert routes.REQUEST_SCHEMA_V2 == act_precheck.REQUEST_SCHEMA_V2
+    assert routes.VERDICT_SCHEMA_V2 == act_precheck.VERDICT_SCHEMA_V2
+    assert routes.PRECHECK_VERSION_V2 == act_precheck.PRECHECK_VERSION_V2
+    assert routes.TREE_INCOMPLETE == act_precheck.TREE_INCOMPLETE
+    assert routes.RULES_VERSION == act_precheck_v2.RULES_VERSION
+    assert routes.validation(routes.RULES_VERSION, "sha256:x") == (
+        act_precheck_v2.validation_of("sha256:x")
+    )
+    assert routes.VERDICT_LIMIT == act_trust_findings.VERDICT_LIMIT
+    assert routes.MAX_FULL_NAME_BYTES == act_trust_findings.MAX_FULL_NAME_BYTES
+    assert routes.MAX_BRANCH_BYTES == act_trust_findings.MAX_BRANCH_BYTES
+    assert routes.MAX_INT == act_precheck_v2.MAX_INT
+    assert routes.HISTORY_TOKEN_REQUIRED == act_trust_pair.HISTORY_TOKEN_REQUIRED
+    assert routes.UNVERIFIED == act_trust_pair.UNVERIFIED
+    assert routes.SOURCE_FINDINGS == act_precheck_v2.SOURCE_FINDINGS
+    assert set(routes.RELATIONS) == set(get_args(act_trust_pair.Relation))
+    assert routes.BRANCH.pattern == act_precheck._BRANCH.pattern
+    assert routes.FULL_NAME.pattern == act_history_snapshot._FULL_NAME.pattern
+    assert routes.HOST.pattern == act_precheck_v2._HOST.pattern
+    outcomes = {
+        act_precheck_v2.ALLOW,
+        act_precheck_v2.REFUSE,
+        act_precheck_v2.UNSET,
+        act_precheck_v2.UNSUPPORTED,
+    }
+    assert {routes.ALLOW, routes.REFUSE, routes.UNSET, routes.UNSUPPORTED} == outcomes
+
+
+@dataclasses.dataclass(frozen=True)
+class _Epoch:
+    epoch: int
+    anchor: str
+    last_confirmed: str | None
+
+
+@pytest.mark.parametrize("count", [1, 2, 7, 64])
+def test_range_digest_mirror_byte_equal(count: int) -> None:
+    """Carry 10: the publisher's `range_digest` gives the digest
+    `act_trust_findings.range_descriptor` gives, on the same ranges, and
+    `check_ranges` accepts that descriptor."""
+    pytest.importorskip("steward")
+    from df.publisher import trust_routes as routes
+    from governance import act_trust_findings
+
+    p_sha = "f" * 40
+    epochs = [
+        _Epoch(n, f"{n:040x}", None if n == count else f"{n + 100:040x}")
+        for n in range(1, count + 1)
+    ]
+    desc = act_trust_findings.range_descriptor(epochs, p_sha)
+    assert routes.range_digest(desc.ranges) == desc.digest
+    mirrored = mirror.RangeDescriptor(desc.ranges, desc.digest)
+    assert routes.check_ranges(
+        mirrored, last_epoch=count, p_sha=p_sha, stored_digest=desc.digest
+    )
+    # a non-ASCII value: the digest would differ with `ensure_ascii=True`
+    odd = ((1, "ж" * 40, p_sha),)
+    assert (
+        routes.range_digest(odd)
+        == act_trust_findings.hashlib.sha256(
+            act_trust_findings._canonical([list(r) for r in odd])
+        ).hexdigest()
+    )

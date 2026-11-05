@@ -160,6 +160,19 @@ def read_branch_head(
     return sha
 
 
+def read_repository(
+    transport: Transport, repo_id: int
+) -> Mapping[str, object] | Unavailable:
+    """The repository object of `GET /repositories/{repo_id}` (the id is the
+    binding's anchor, spec 6.1 «Закрепление P»)."""
+    body = _get(transport, f"repositories/{repo_id}")
+    if isinstance(body, Unavailable):
+        return body
+    if not isinstance(body, dict):
+        return Unavailable(f"repositories/{repo_id}: not an object")
+    return body
+
+
 def read_source_digest(
     transport: Transport, full_name: str, sha: str
 ) -> str | Unavailable:

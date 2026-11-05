@@ -28,10 +28,12 @@ schema-1 database of stage 2b is moved on only by `perimeter-init`
 A restored copy (`admission = restored_pending`) is not complete: once the
 epoch source answers for every known root, one transaction records a
 conservative `registered(E)` per root (source `db_restore`) and admits the
-copy; until then it is `unavailable: restore_pending`. In 2a the only epoch
-source in the code is `NO_BINDING`. `restore` (root's `darkfactory perimeter
-restore`, run as `df-publisher`; Task 11r) puts a copy, or an empty database,
-in place: always `restored_pending`, never `ready`.
+copy; until then it is `unavailable: restore_pending`. The epoch source of
+the perimeter routes is the accepted head of the trust state
+(`trust_routes.AcceptedEpochs`); `record-violation` reads none (`DEFERRED`).
+`restore` (root's `darkfactory perimeter restore`, run as `df-publisher`;
+Task 11r) puts a copy, or an empty database, in place: always
+`restored_pending`, never `ready`.
 
 The epoch of a registration is read inside the write transaction, with the
 write lock held. A remote read cannot be made atomic with the `COMMIT`: an
@@ -68,7 +70,7 @@ from df.config import ConfigError
 from df.paths import Layout
 from df.publisher.github import PerimeterStats
 from df.publisher.request import Refused, Request, Response, perimeter_result
-from df.stage2_config import TrustBinding, load_trust
+from df.stage2_config import RunRecord, TrustBinding, load_trust
 
 if TYPE_CHECKING:
     from df.publisher.main import Context
@@ -318,11 +320,6 @@ MAX_JSON = 64 << 10
 #: The repository ids every observation's `binding` names.
 _BINDING_IDS = ("df_trust_repository_id", "approval_policy_repository_id")
 _ROOT_WHERE = "root_host = ? AND root_repository_id = ? AND root_branch = ?"
-_BLOCKING = (
-    f"SELECT event_id FROM events WHERE {_ROOT_WHERE} AND "
-    "(state = 'pending' OR (state = 'registered' AND epoch >= ?)) "
-    "ORDER BY event_id"
-)
 _BUSY_CODES = frozenset({sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED})
 _BROKEN_CODES = frozenset(
     {sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB, sqlite3.SQLITE_SCHEMA}
@@ -363,9 +360,21 @@ class _NoBinding:
 
 
 NO_BINDING: EpochSource = _NoBinding()
-#: The source the operations use; the only one in the code is `NO_BINDING`
-#: (tests substitute theirs).
-EPOCHS: EpochSource = NO_BINDING
+
+
+class _Deferred:
+    """`record-violation` reads no remote head: its event is `pending` and
+    `perimeter-status` registers it at the verified epoch (spec 6.1: an
+    unread epoch never cancels a registration, it is only later)."""
+
+    def head(self, root: Root) -> Snapshot | Unavailable:
+        return Unavailable(DEFERRED_REASON)
+
+
+#: The provenance of an event `record-violation` leaves `pending`.
+DEFERRED_REASON = "registered_by_perimeter_status"
+#: The epoch source of `record-violation` and of its admission check.
+DEFERRED: EpochSource = _Deferred()
 
 
 # --- the database ---------------------------------------------------------------
@@ -1376,6 +1385,34 @@ def record_violation(
     return _recorded(root, row)
 
 
+def record_app_installations(
+    layout: Layout, binding: TrustBinding, found: Sequence[tuple[int, str, int]]
+) -> None:
+    """A perimeter event of the bound root for every App installation on a
+    trust source (`(installation id, role, repository id)`, spec 6.1),
+    `pending` (no remote head is read; `perimeter-status` registers it);
+    `request_key` = (root, `app_installation`, installation, role), so a
+    repeat finds its event. One transaction; `Unavailable` if it fails."""
+    root = binding.root_id
+    with open_db(layout) as db, _mapped(), _write(db.conn):
+        for inst, role, repo in found:
+            key = json.dumps(
+                [*root, "app_installation", inst, role], separators=(",", ":")
+            )
+            if _by_key(db.conn, key) is not None:
+                continue
+            insert_event(
+                db.conn,
+                root,
+                key=key,
+                epoch=None,
+                provenance=_provenance(DEFERRED.head(root)),
+                detected_by="publisher:app_installations",
+                detail=f"App installation {inst} reaches {role} ({repo})",
+                violated=(role, repo),
+            )
+
+
 def _by_key(
     conn: sqlite3.Connection, key: str
 ) -> tuple[int, str, int | None, str] | None:
@@ -1423,19 +1460,39 @@ def perimeter_status(
             if isinstance(head, Unavailable):
                 return status_unavailable(head.reason)
             if head.sha != req.fields["expected_snapshot_sha"]:
-                moved = {"snapshot_sha": head.sha}
-                return Response("stale_snapshot", "snapshot_moved", moved)
-            _register_pending(conn, root, head)
-            found = conn.execute(_BLOCKING, (*root, head.last_epoch)).fetchall()
+                return stale_snapshot(head.sha)
+            register_pending(conn, root, head)
+            blocking = blocking_events(conn, root, head.last_epoch)
     except Unavailable as exc:
         return status_unavailable(exc.reason)
-    blocking = [int(r[0]) for r in found]
     state = "blocked" if blocking else "clear"
     result = perimeter_result(state, None, head.sha, head.last_epoch)
     return Response("done", None, {**result, "events": blocking})
 
 
-def _register_pending(conn: sqlite3.Connection, root: Root, head: Snapshot) -> None:
+def stale_snapshot(sha: str) -> Response:
+    """`stale_snapshot`: the head is `sha`, not the one the client expected."""
+    return Response("stale_snapshot", "snapshot_moved", {"snapshot_sha": sha})
+
+
+def blocking_events(
+    conn: sqlite3.Connection, root: Root, last_epoch: int | None
+) -> list[int]:
+    """The root's blocking events (the blocking rule, spec 6.1): `pending`,
+    or `registered(E)` with `E >= last_epoch` -- any `registered` one when
+    the last epoch is unknown (`None`)."""
+    found = conn.execute(
+        f"SELECT event_id FROM events WHERE {_ROOT_WHERE} AND (state = 'pending' "
+        "OR (state = 'registered' AND (? IS NULL OR epoch >= ?))) "
+        "ORDER BY event_id",
+        (*root, last_epoch, last_epoch),
+    ).fetchall()
+    return [int(r[0]) for r in found]
+
+
+def register_pending(conn: sqlite3.Connection, root: Root, head: Snapshot) -> None:
+    """Every `pending` event of `root` registered at `head`'s last epoch
+    (inside the caller's write transaction; idempotent)."""
     pending = conn.execute(
         f"SELECT event_id FROM events WHERE {_ROOT_WHERE} AND state = 'pending'",
         root,
@@ -1477,7 +1534,9 @@ def stats(layout: Layout) -> PerimeterStats | Unavailable:
 # --- the operations --------------------------------------------------------------
 
 
-def _binding(ctx: Context) -> TrustBinding | None:
+def binding_of(ctx: Context) -> TrustBinding | None:
+    """`trust.toml`, or `None` when absent; a broken one is
+    `trust_config_invalid`."""
     try:
         return load_trust(ctx.layout.etc / "trust.toml")
     except ConfigError as exc:
@@ -1485,24 +1544,33 @@ def _binding(ctx: Context) -> TrustBinding | None:
         raise Refused("trust_config_invalid") from exc
 
 
-def _check_root(ctx: Context, binding: TrustBinding) -> Root:
+def check_run_root(binding: TrustBinding, record: RunRecord | None) -> Root:
+    """The run's root must be the binding's (spec 5.8): after `--rebind` a
+    run of the old root gets no operation over a PR and registers nothing
+    in the new root (`root_mismatch`)."""
+    if record is None or record.root_id != binding.root_id:
+        raise Refused("root_mismatch")
+    return binding.root_id
+
+
+def check_root(ctx: Context, binding: TrustBinding) -> Root:
     """The request's root must be the binding's and the run's (spec 5.3):
     a message of an old root is never carried over to a new one."""
-    want = root_of(ctx.request)
-    record = ctx.record
-    if binding.root_id != want or record is None or record.root_id != want:
+    if root_of(ctx.request) != binding.root_id:
         raise Refused("root_mismatch")
-    return want
+    return check_run_root(binding, ctx.record)
 
 
 def record_violation_op(ctx: Context) -> Response:
     """`record-violation`: the bindings and the database are checked before
     the intent (their refusals are truthful), then the intent, then one
-    transaction. A repeat (an intent exists) answers the row its key found."""
-    binding = _binding(ctx)
+    transaction. A repeat (an intent exists) answers the row its key found.
+    No remote head is read here: the event is `pending` (`DEFERRED`) until
+    `perimeter-status` registers it at the verified epoch."""
+    binding = binding_of(ctx)
     if binding is None:
         raise Refused("no_binding")
-    root = _check_root(ctx, binding)
+    root = check_root(ctx, binding)
     try:
         db = open_db(ctx.layout)
     except Unavailable as exc:
@@ -1510,14 +1578,14 @@ def record_violation_op(ctx: Context) -> Response:
     key = ctx.reservation.key
     with db:
         try:
-            admit(db, EPOCHS, root)
+            admit(db, DEFERRED, root)
         except Unavailable as exc:
             raise Refused(f"perimeter_unavailable: {exc.reason}") from None
         if ctx.intent is None:
             ctx.record_intent({"request_key": key})
         try:
             return record_violation(
-                db.conn, ctx.sender, ctx.request, key, EPOCHS, binding
+                db.conn, ctx.sender, ctx.request, key, DEFERRED, binding
             )
         except Unavailable as raised:
             exc = full_or(raised, ctx.layout.perimeter_dir)
@@ -1535,31 +1603,13 @@ def _not_committed(conn: sqlite3.Connection, key: str) -> bool:
         return False
 
 
-def perimeter_status_op(ctx: Context) -> Response:
-    """`perimeter-status`: computed anew at every call, no intent. No
-    binding is `unavailable: no_binding` (decision 14)."""
-    binding = _binding(ctx)
-    if binding is None:
-        return status_unavailable("no_binding")
-    root = _check_root(ctx, binding)
-    try:
-        db = open_db(ctx.layout)
-    except Unavailable as exc:
-        return status_unavailable(exc.reason)
-    with db:
-        try:
-            admit(db, EPOCHS, root)
-        except Unavailable as exc:
-            return status_unavailable(exc.reason)
-        return perimeter_status(db.conn, ctx.request, EPOCHS)
-
-
 __all__ = [
     "BUSY_TIMEOUT_MS",
     "COPY_SCHEMA_1",
     "COPY_SCHEMA_1_TEXT",
     "DB_NAME",
-    "EPOCHS",
+    "DEFERRED",
+    "DEFERRED_REASON",
     "INTEGRITY_TEXT",
     "JOURNAL",
     "LOCK",
@@ -1585,6 +1635,10 @@ __all__ = [
     "Unavailable",
     "admission",
     "admit",
+    "binding_of",
+    "blocking_events",
+    "check_root",
+    "check_run_root",
     "create_db",
     "insert_event",
     "known_roots",
@@ -1592,15 +1646,17 @@ __all__ = [
     "migrate",
     "open_db",
     "perimeter_status",
-    "perimeter_status_op",
     "pragmas",
+    "record_app_installations",
     "record_violation",
     "record_violation_op",
+    "register_pending",
     "restore",
     "restore_conservative",
     "restore_text",
     "restored",
     "root_of",
+    "stale_snapshot",
     "stats",
     "status_unavailable",
     "write",

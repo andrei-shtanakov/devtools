@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from df import cli
-from df.config import dump_accounts
+from df.config import ConfigError, dump_accounts
 from df.journal import Stable
 from df.paths import Layout
 from df.publisher import main as pmain
@@ -141,6 +141,28 @@ def test_self_check_only_from_root_sender() -> None:
     assert reason_of("self-check", None) == "sender_unknown"
 
 
+def test_trust_status_root_only(
+    world: World, table: dict[str, list[Context]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Spec 5.2 rev 11: `trust-status` is root's alone (`SUDO_UID = 0`), like
+    `self-check`; no model role may ask for it, and no line of
+    `publisher.toml` can grant it."""
+    assert who("trust-status", "0") == 0
+    for uid in ("601", "602", "604", "777"):
+        assert reason_of("trust-status", uid) == "operation_not_allowed"
+    assert reason_of("trust-status", None) == "sender_unknown"
+    with pytest.raises(ConfigError, match="unknown operation"):
+        PublisherConfig({601: frozenset({"trust-status"})})
+    assert "trust-status" not in OPERATIONS
+    calls = install(table, "trust-status", lambda _c: Response("done", None, {}))
+    code, resp = world.run("trust-status", sudo="601", capsys=capsys)
+    assert (code, resp.reason, calls) == (2, "operation_not_allowed", [])
+    code, resp = world.run("trust-status", capsys=capsys)  # root
+    assert (code, resp.outcome, len(calls)) == (0, "done", 1)
+    assert calls[0].record is None  # no run: an administrative operation
+    assert "trust-status" in cli.PUBLISHER_ARGS
+
+
 def test_root_is_not_a_table_sender_even_if_listed() -> None:
     cfg = PublisherConfig({0: frozenset({"merge"})})
     with pytest.raises(Refused) as info:
@@ -149,7 +171,7 @@ def test_root_is_not_a_table_sender_even_if_listed() -> None:
 
 
 def test_admin_operations_is_a_constant() -> None:
-    assert pmain.ADMIN_OPERATIONS == frozenset({"self-check"})
+    assert pmain.ADMIN_OPERATIONS == frozenset({"self-check", "trust-status"})
 
 
 # --- the run --------------------------------------------------------------------

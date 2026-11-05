@@ -46,9 +46,11 @@ SUBDIRS = ("ids", "keys", "intents", "results", "owners")
 #: `attested` and `armed` (plan decision 8).
 PHASES = ("attest", "attested", "armed", "put_answer")
 RECHECKED = re.compile(r"rechecked\.([1-9][0-9]{0,3})", re.ASCII)
-#: What a replayed request gets back is a stored result; these three are
-#: computed (issued) anew at every call (spec 5.6).
-NOT_REPLAYED = frozenset({"perimeter-status", "read-token", request.SELF_CHECK})
+#: What a replayed request gets back is a stored result; these four are
+#: computed (issued) anew at every call (spec 5.6; `trust-status`, 5.2).
+NOT_REPLAYED = frozenset(
+    {"perimeter-status", "read-token", request.SELF_CHECK, request.TRUST_STATUS}
+)
 #: Response keys whose value is never written to the journal.
 SECRET_KEYS = frozenset({"token"})
 REDACTED = "<redacted>"

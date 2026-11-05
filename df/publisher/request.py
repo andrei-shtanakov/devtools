@@ -31,7 +31,10 @@ READ_TIMEOUT = 5.0
 REQUEST_SCHEMA = "df/publisher-request/v1"
 RESPONSE_SCHEMA = "df/publisher-response/v1"
 SELF_CHECK = "self-check"
-ALL_OPERATIONS = (*OPERATIONS, SELF_CHECK)
+#: Root's view of the trust state (spec 5.2 rev 11), like `self-check` an
+#: administrative operation: no run, no `run_id`.
+TRUST_STATUS = "trust-status"
+ALL_OPERATIONS = (*OPERATIONS, SELF_CHECK, TRUST_STATUS)
 MAX_BODY = 60000
 MAX_DETAIL = 4000
 MAX_RUN_ID = 256
@@ -270,6 +273,7 @@ _SCHEMAS: Mapping[str, Mapping[str, Check]] = MappingProxyType(
             "expected_snapshot_sha": _sha("expected_snapshot_sha"),
         },
         SELF_CHECK: {"schema": _schema, "request_id": _request_id},
+        TRUST_STATUS: {"schema": _schema, "request_id": _request_id},
     }
 )
 
@@ -383,3 +387,88 @@ def parse_response(raw: bytes | str) -> Response:
         if not isinstance(data[name], dict):
             raise BadResponse(f"{name} must be an object")
     return Response(data["outcome"], reason, data["result"], data["evidence"])
+
+
+# --- trust-status, root's reading -------------------------------------------------
+
+#: The keys of the `result` of `trust-status`.
+TRUST_STATUS_KEYS = frozenset(
+    {
+        "root",
+        "snapshot_sha",
+        "last_epoch",
+        "state",
+        "reason",
+        "unverified",
+        "findings",
+    }
+)
+
+
+@dataclass(frozen=True)
+class TrustStatus:
+    """Root's reading of a `trust-status` answer: values for output and
+    evidence only -- no path or command is built from them (spec 5.2)."""
+
+    snapshot_sha: str | None
+    last_epoch: int | None
+    state: str
+    reason: str | None
+    unverified: tuple[str, ...]
+    findings: tuple[Mapping[str, str], ...]
+
+
+def parse_trust_status(raw: bytes | str, root: tuple[str, int, str]) -> TrustStatus:
+    """Root checks the answer (spec 5.2): `df/publisher-response/v1`,
+    `done`, the result's schema, and `result.root` equal to the binding
+    root read itself (`root`). Anything else is `BadResponse`."""
+    resp = parse_response(raw)
+    if resp.outcome != "done":
+        raise BadResponse(f"outcome {resp.outcome!r}: {resp.reason}")
+    data = dict(resp.result)
+    if set(data) != TRUST_STATUS_KEYS:
+        raise BadResponse(f"result keys must be {sorted(TRUST_STATUS_KEYS)}")
+    host, repo, branch = root
+    want = {"host": host, "repository_id": repo, "branch": branch}
+    if data["root"] != want:
+        raise BadResponse("result.root is not the binding's root")
+    state, reason = data["state"], data["reason"]
+    if state not in PERIMETER_STATES:
+        raise BadResponse(f"state {state!r}")
+    if reason is not None and not isinstance(reason, str):
+        raise BadResponse("reason must be a string or null")
+    sha, epoch = data["snapshot_sha"], data["last_epoch"]
+    if sha is not None and not (isinstance(sha, str) and SHA.fullmatch(sha)):
+        raise BadResponse("snapshot_sha must be a SHA or null")
+    if epoch is not None and not (_is_int(epoch) and epoch > 0):
+        raise BadResponse("last_epoch must be a positive integer or null")
+    if state == "clear" and (sha is None or epoch is None):
+        raise BadResponse("clear without a verified snapshot")
+    return TrustStatus(
+        sha,
+        epoch,
+        str(state),
+        reason,
+        _codes(data["unverified"]),
+        _finding_rows(data["findings"]),
+    )
+
+
+def _codes(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list) or not all(isinstance(c, str) for c in value):
+        raise BadResponse("unverified must be a list of strings")
+    return tuple(value)
+
+
+def _finding_rows(value: object) -> tuple[Mapping[str, str], ...]:
+    keys = {"kind", "role", "detail"}
+    ok = isinstance(value, list) and all(
+        isinstance(f, dict)
+        and set(f) == keys
+        and all(isinstance(v, str) for v in f.values())
+        for f in value
+    )
+    if not ok:
+        raise BadResponse("findings must be a list of {kind, role, detail}")
+    assert isinstance(value, list)
+    return tuple(MappingProxyType(dict(f)) for f in value)

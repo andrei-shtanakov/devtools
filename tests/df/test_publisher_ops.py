@@ -7,6 +7,7 @@ import base64
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import time
 from collections.abc import Mapping
@@ -875,3 +876,92 @@ def test_self_check_one_app_broken(
     resp = world.run("self-check", raw_of("self-check"), capsys=capsys)[1]
     assert resp.outcome == "done"
     assert resp.result["problems"] == ["app_unreadable: 43: github_401: denied"]
+
+
+# --- stage 3a, Task 10: the trust sources and the run's root -------------------
+
+TRUST_TOML = (
+    'schema = "df/trust/v1"\n'
+    'host = "github.com"\n'
+    "df_trust_repository_id = 5\n"
+    'df_trust_full_name = "o/df-trust"\n'
+    'df_trust_branch = "{branch}"\n'
+    "approval_policy_repository_id = 6\n"
+    'transport = "public"\n'
+)
+
+
+def bind_trust(world: World, branch: str = "main") -> None:
+    (world.lay.etc / "trust.toml").write_text(TRUST_TOML.format(branch=branch))
+
+
+def app_events(world: World) -> list[tuple[object, ...]]:
+    conn = sqlite3.connect(world.lay.perimeter_dir / perimeter.DB_NAME)
+    try:
+        return conn.execute(
+            "SELECT state, epoch, detected_by, violated_role, violated_repository_id, "
+            "root_branch FROM events ORDER BY event_id"
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(("repo", "role"), [(6, "approval-policy"), (5, "df-trust")])
+def test_app_on_trust_repo_finding(
+    world: World,
+    gh: FakeGitHub,
+    capsys: pytest.CaptureFixture[str],
+    repo: int,
+    role: str,
+) -> None:
+    """Spec 6.1: the App key's holder checks its installations; one on a
+    trust source is a violation -- registered as an event of the bound root
+    (`pending`, the next `perimeter-status` registers it), the operation
+    refused before any intent; a repeat finds the same event."""
+    bind_trust(world)
+    gh.extra_repos = [7, repo]
+    problem = f"app_installation_on_trust_source: 9: {role}"
+    for op in ("publish-review", "read-token", "publish-review"):
+        resp = world.run(op, raw_of(op, request_id=f"req-app-{op}"), capsys=capsys)[1]
+        assert (resp.outcome, resp.reason) == ("refused", problem)
+    assert world.files("intents") == []
+    assert app_events(world) == [
+        ("pending", None, "publisher:app_installations", role, repo, "main")
+    ]
+    resp = world.run("self-check", raw_of("self-check"), capsys=capsys)[1]
+    problems = cast(list[str], resp.result["problems"])
+    assert problems[0] == problem
+
+
+def test_app_off_trust_repos_without_binding_unchanged(
+    world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No binding: no trust source is known, the 2b check stands alone."""
+    gh.extra_repos = [7, 6]
+    resp = review(world, capsys)
+    assert (resp.outcome, resp.reason) == (
+        "refused",
+        "app_installation_outside_products: 9",
+    )
+    assert app_events(world) == []
+
+
+@pytest.mark.parametrize("op", ["publish-review", "read-token", "merge"])
+def test_old_root_run_refused_pr_ops(
+    op: str, world: World, gh: FakeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Spec 5.8: after `--rebind` (the binding's branch is `next`, the run's
+    root `main`) a run of the old root gets no operation over a PR; the
+    check comes before GitHub and before any intent. A run without a root
+    under a binding is refused the same way."""
+    bind_trust(world, "next")
+    resp = world.run(op, raw_of(op), capsys=capsys)[1]
+    assert (resp.outcome, resp.reason) == ("refused", "root_mismatch")
+    put_record(world.fake, replace(record("run-2", "rel-a"), root_id=None))
+    raw = raw_of(op, run_id="run-2", request_id="req-no-root-1")
+    resp = world.run(op, raw, capsys=capsys)[1]
+    assert (resp.outcome, resp.reason) == ("refused", "root_mismatch")
+    assert gh.calls == [] and world.files("intents") == []
+    bind_trust(world, "main")
+    resp = world.run(op, raw_of(op, request_id="req-same-root"), capsys=capsys)[1]
+    assert resp.reason != "root_mismatch"

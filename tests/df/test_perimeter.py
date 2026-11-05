@@ -26,6 +26,7 @@ from df.stage2_config import TrustBinding
 from tests.df.conftest import FakeLayout
 from tests.df.launch_world import put_record, record
 from tests.df.publisher_world import World, build_world, make_req, raw_of
+from tests.df.trust_world import TrustWorld, accept, install
 
 ROOT: Root = ("github.com", 5, "main")
 OTHER: Root = ("github.com", 8, "release")
@@ -452,12 +453,10 @@ def test_more_than_max_events_status_through_the_op(
     world: World, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(perimeter, "MAX_EVENTS", 1)
-    perimeter.EPOCHS.at(S1, 1)  # type: ignore[attr-defined]
     frame_record(world, capsys)
     _, resp = frame_record(world, capsys, request_id="req-viol-0002")
-    assert (resp.outcome, resp.result["state"]) == ("done", "registered")
+    assert (resp.outcome, resp.result["state"]) == ("done", "pending")
     assert len(rows(world.lay)) == 2
-    perimeter.EPOCHS.at(S2, 2)  # type: ignore[attr-defined]
     _, resp = frame_status(world, capsys, expected_snapshot_sha=S2)
     assert resp.result == perimeter_result("unavailable", "too_many_events", None, None)
 
@@ -890,6 +889,15 @@ def test_no_binding_source() -> None:
     assert isinstance(got, Unavailable) and got.reason == "no_binding"
 
 
+def test_record_violation_reads_no_head() -> None:
+    """Task 10: `perimeter.EPOCHS` is gone; `record-violation` reads no
+    remote head (`DEFERRED`), `perimeter-status` registers its event."""
+    assert not hasattr(perimeter, "EPOCHS")
+    got = perimeter.DEFERRED.head(ROOT)
+    assert isinstance(got, Unavailable)
+    assert got.reason == perimeter.DEFERRED_REASON
+
+
 def test_store_does_not_replay_status() -> None:
     assert "perimeter-status" in store.NOT_REPLAYED
     assert "record-violation" not in store.NOT_REPLAYED
@@ -909,12 +917,20 @@ TRUST = (
 
 
 @pytest.fixture()
-def world(fake_layout: FakeLayout, monkeypatch: pytest.MonkeyPatch) -> World:
+def trust(monkeypatch: pytest.MonkeyPatch) -> TrustWorld:
+    """The trust sources and the checker of the perimeter routes (fakes: no
+    route of these tests reaches the network)."""
+    return install(monkeypatch)
+
+
+@pytest.fixture()
+def world(
+    fake_layout: FakeLayout, monkeypatch: pytest.MonkeyPatch, trust: TrustWorld
+) -> World:
     w = build_world(fake_layout, monkeypatch)
     w.lay.perimeter_dir.mkdir(mode=0o700)
     perimeter.create_db(w.lay)
     (w.lay.etc / "trust.toml").write_text(TRUST.format(repo=5, branch="main"))
-    monkeypatch.setattr(perimeter, "EPOCHS", Epochs())
     return w
 
 
@@ -1044,7 +1060,7 @@ def test_frame_record_kept_and_replayed(
     assert (code, first.outcome, first.result["state"]) == (0, "done", "pending")
     assert first.evidence["event_id"] == first.result["event_id"]
     trust = cast(dict[str, object], first.evidence["trust_root"])
-    assert trust["unavailable"] == "epochs_unavailable"
+    assert trust["unavailable"] == perimeter.DEFERRED_REASON
     assert len(world.files("intents")) == 1 and len(world.files("results")) == 1
     code, again = frame_record(world, capsys)
     assert (code, again.result, again.evidence["replayed"]) == (0, first.result, True)
@@ -1059,7 +1075,6 @@ def test_frame_repeat_after_commit_finds_the_event(
     _, first = frame_record(world, capsys)
     for name in world.files("results"):
         (world.lay.publisher_dir / "results" / name).unlink()
-    perimeter.EPOCHS.at(S2, 2)  # type: ignore[attr-defined]
     code, again = frame_record(world, capsys)
     assert (code, again.outcome) == (0, "done")
     assert again.result == first.result
@@ -1153,9 +1168,13 @@ def test_no_binding_refuses(world: World, capsys: pytest.CaptureFixture[str]) ->
     assert world.files("intents") == [] and rows(world.lay) == []
 
 
-def test_frame_status_flow(world: World, capsys: pytest.CaptureFixture[str]) -> None:
+def test_frame_status_flow(
+    world: World, capsys: pytest.CaptureFixture[str], trust: TrustWorld
+) -> None:
+    """The fast path (H = A, nothing unfinished): the pending event is
+    registered at A's last epoch and blocks; no checker is asked."""
     _, rec = frame_record(world, capsys)
-    perimeter.EPOCHS.at(S1, 3)  # type: ignore[attr-defined]
+    accept(world.lay, S1, 3)
     code, resp = frame_status(world, capsys, expected_snapshot_sha=S2)
     assert (code, resp.outcome, resp.result) == (
         2,
@@ -1173,3 +1192,4 @@ def test_frame_status_flow(world: World, capsys: pytest.CaptureFixture[str]) -> 
     assert world.files("intents") == world.files("results")  # the record's only
     assert len(world.files("intents")) == 1
     assert rows(world.lay) == [("registered", 3)]
+    assert trust.checker.requests == []
