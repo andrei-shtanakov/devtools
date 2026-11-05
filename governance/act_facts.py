@@ -164,15 +164,26 @@ def _activation(a: Any) -> ActivationFact:
 
 
 def history(
-    transport: Any, source: SourceV2, anchor: str, until: str | None
+    transport: Any,
+    source: SourceV2,
+    anchor: str,
+    until: str | None,
+    *,
+    head: str | None = None,
 ) -> tuple[ActivationFact, ...] | HistoryBreak | Unavailable:
     """Активации ветки источника `anchor…until` по first-parent (steward §3.7).
 
     Транспорт — источников доверия, который строит `load_trust` (Task 11c); ветка
     обязана быть default branch
     источника (О11), иначе `Unavailable: branch_not_default`.
+
+    `head` — закреплённый издателем P (спека установщика §6.1): открытая эпоха
+    (`until is None`) читается до P по SHA, а не до текущей головы ветки, и
+    откат политики после P исход не меняет. Закрытая эпоха читается до своего
+    `until`; без `head` поведение 2b — до текущей головы.
     """
     v3 = _v3()
+    stop = until if until is not None else head
     got = _own(
         _call(
             "read_policy_history",
@@ -181,7 +192,7 @@ def history(
                 source.repo,
                 source.branch,
                 anchor=anchor,
-                until=until,
+                until=stop,
                 files=POLICY_FILES,
             ),
         )
