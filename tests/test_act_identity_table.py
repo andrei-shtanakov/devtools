@@ -233,6 +233,7 @@ PC = "tests/test_act_precheck.py"
 RP, OB = "tests/test_act_repropose.py", "tests/test_act_ops_body.py"
 OF, WR = "tests/test_act_ops_failures.py", "tests/test_act_wave_runner.py"
 SF = "tests/test_act_surface.py"
+TP = "tests/test_act_trust_pair.py"
 ENVELOPE_FIELDS = (
     "node",
     "request_id",
@@ -982,6 +983,39 @@ JUDGMENT = {
             "ответ не о том коммите",
         ),
     ),
+    # df этап 3a (Task 5): пара `df-trust` по SHA (`act_trust_pair`)
+    "act_trust._commit": (
+        r(
+            "gone",
+            "act_trust._commit",
+            "resp.status in GONE",
+            f"{TP}::test_unreadable_head_objects_history_unverifiable",
+            'f"коммит не читается (HTTP {status})"',
+        ),
+        r(
+            "http_status",
+            "act_trust._commit",
+            "resp.status != 200",
+            f"{TP}::test_head_read_temporarily_failing_is_unavailable",
+            'f"repos/{DT}/commits/{C2}: HTTP 500"',
+        ),
+    ),
+    "act_trust._source_at": (
+        r(
+            "absent",
+            "act_trust._source_at",
+            "if raw is None",
+            f"{TP}::test_source_env_invalid_finding[absent]",
+            '"нет source.env"',
+        ),
+        r(
+            "parse",
+            "act_trust._source_at",
+            "except (SourceError, UnicodeDecodeError) as exc",
+            f"{TP}::test_source_env_invalid_finding[invalid]",
+            '"ожидалась ровно одна"',
+        ),
+    ),
     "act_trust._journal_versions": (
         r(
             "journal_deleted",
@@ -989,6 +1023,13 @@ JUDGMENT = {
             "if versions:",
             f"{T}::test_journal_deleted_after_appearing_unavailable",
             "epochs.yaml удалён",
+        ),
+        r(
+            "journal_parse",
+            "act_trust._journal_versions",
+            "except (JournalError, UnicodeDecodeError) as exc",
+            f"{TP}::test_journal_parse_and_transition_findings",
+            '"journal_parse"',
         ),
     ),
     "act_trust._checked_epochs": (
@@ -1005,6 +1046,13 @@ JUDGMENT = {
             "except JournalError",
             f"{T}::test_rewritten_closed_epoch_in_history_unavailable",
             "недопустимый переход журнала",
+        ),
+        r(
+            "bootstrap_on_cold_only",
+            "act_trust._checked_epochs",
+            "bootstrap and (",
+            f"{TP}::test_validation_change_goes_cold",
+            '"не bootstrap"',
         ),
     ),
     "act_trust.read_trust_snapshot": (
@@ -1185,6 +1233,13 @@ JUDGMENT = {
         ),
     ),
     "act_trust._rebase": (
+        r(
+            "rebase_df_trust",
+            "act_trust._rebase",
+            "dict(_roles(snap))[role]",
+            f"{TP}::test_df_trust_rebase_allowed_finding",
+            '"rebase_allowed", "df-trust"',
+        ),
         r(
             "rebase_true",
             "act_trust._rebase",
@@ -4080,6 +4135,7 @@ NOT_JUDGMENT = {
     "act_trust._repo_path": _BUILD,
     "act_trust.credentials": "перечень того, что процесс держит; судит `_self_report`",
     "act_trust._roles": _BUILD,
+    "act_trust._refusal": "переводит находку истории в отказ читателя ветки; судят `_chain`, `_journal_versions`, `_checked_epochs`, `_source_at`",
     "act_trust.load_anchor_times": "собирает времена якорей; недоступность — значение, судит `_epoch_at`",
     "act_journal._now": _BUILD,
     "act_journal._publisher_present": "наличие файла издателя; выбор — `journal_for`",
