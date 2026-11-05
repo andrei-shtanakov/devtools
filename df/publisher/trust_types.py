@@ -17,6 +17,11 @@ Role = Literal["approval-policy", "df-trust"]
 Route = Literal["perimeter-status", "trust-status", "merge"]
 
 MAX_DETAIL_BYTES = 512
+#: The checker's rules version (`act_precheck_v2.RULES_VERSION`, df only:
+#: `tests/test_act_trust_types.py` pins it). With `admin_digest` it is the
+#: validation version of an accepted head, `<rules>:<admin_digest>`; the
+#: publisher stores the pair (ruling R1, amends D6).
+RULES_VERSION = "df-trust-rules/1"
 MAX_EPOCHS = 64
 
 _SURROGATES = re.compile("[\ud800-\udfff]")

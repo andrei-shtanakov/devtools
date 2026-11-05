@@ -188,6 +188,8 @@ def test_trust_routes_mirrors_checker_constants() -> None:
     assert routes.PRECHECK_VERSION_V2 == act_precheck.PRECHECK_VERSION_V2
     assert routes.TREE_INCOMPLETE == act_precheck.TREE_INCOMPLETE
     assert routes.RULES_VERSION == act_precheck_v2.RULES_VERSION
+    assert mirror.RULES_VERSION == act_precheck_v2.RULES_VERSION
+    assert routes.RULES_VERSION is mirror.RULES_VERSION
     assert routes.validation(routes.RULES_VERSION, "sha256:x") == (
         act_precheck_v2.validation_of("sha256:x")
     )

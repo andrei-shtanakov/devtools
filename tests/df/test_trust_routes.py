@@ -882,3 +882,47 @@ def test_binding_parameters_of_another_root(
     code, resp = world.run("perimeter-status", raw, capsys=capsys)
     assert (code, resp.reason) == (2, "root_mismatch")
     assert tw.sources.calls == [] and tw.checker.requests == []
+
+
+@pytest.mark.parametrize(
+    ("over", "rule"),
+    [
+        # a wrong rules prefix, the publisher's admin digest
+        ({"validation": f"df-trust-rules/2:{ADMIN}"}, "validation"),
+        # another admin digest, its validation consistent with it
+        (
+            {
+                "admin_digest": "sha256:" + "b" * 64,
+                "validation": f"{RULES_VERSION}:sha256:" + "b" * 64,
+            },
+            "admin_digest",
+        ),
+    ],
+)
+def test_validation_pair_mismatch_unbound(
+    world: World,
+    tw: TrustWorld,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    over: dict[str, object],
+    rule: str,
+) -> None:
+    """Ruling R1 (amends D6): the verdict binds on `validation ==
+    "<rules>:<admin_digest>"` and on `admin_digest` = the publisher's; either
+    mismatch is unbound, the observation `unresolved`, H not accepted."""
+    reasons: list[str] = []
+    real = trust_routes.bind
+
+    def spy(*a: object, **k: object) -> object:
+        got = real(*a, **k)  # type: ignore[arg-type]
+        reasons.append(getattr(got, "reason", ""))
+        return got
+
+    monkeypatch.setattr(trust_routes, "bind", spy)
+    accept(world.lay, S1, 2)
+    tw.sources.heads["main"] = S2
+    tw.checker.answer = lambda req: wire(verdict(req, **over))
+    status(world, capsys, S2)
+    assert reasons == [f"precheck_failed: binding_mismatch: {rule}"]
+    assert observations(world)[-1] == ("perimeter-status", S1, S2, "unresolved")
+    assert head(world) == (S1, 2, 1)

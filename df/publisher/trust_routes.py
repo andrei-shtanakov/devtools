@@ -50,6 +50,7 @@ from df.publisher.trust_state import OUTCOME_OF_VERDICT, EpochOf, Observation, O
 from df.publisher.trust_types import (
     MAX_DETAIL_BYTES,
     ROUTE_KINDS,
+    RULES_VERSION,
     AcceptedBase,
     Finding,
     PolicyPin,
@@ -70,9 +71,6 @@ REQUEST_SCHEMA_V2 = "df/precheck-request/v2"
 VERDICT_SCHEMA_V2 = "df/precheck-verdict/v2"
 PRECHECK_VERSION_V2 = "df-precheck/2"
 TREE_INCOMPLETE = "tree_incomplete"
-#: `act_precheck_v2.RULES_VERSION`: with `admin_digest`, the validation
-#: version of an accepted head (`validation` = `<rules>:<admin_digest>`).
-RULES_VERSION = "df-trust-rules/1"
 #: `act_trust_findings.VERDICT_LIMIT`: the serialised verdict, bytes.
 VERDICT_LIMIT = 32 * 1024
 MAX_FULL_NAME_BYTES = 140
