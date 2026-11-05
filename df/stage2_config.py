@@ -194,11 +194,16 @@ _PRODUCT_KEYS = {
     "machine_user",
     "checkout",
 }
+#: Optional since stage 3a (spec 5.4, rev 11): the bundle directory template and
+#: the DAG variant; 2b rows lack them and parse with the defaults.
+_PRODUCT_OPTIONAL = {"bundle_dir", "dag_variant"}
+DEFAULT_BUNDLE_DIR = "workstreams/{ws}/spec"
+DEFAULT_DAG_VARIANT: Literal["full"] = "full"
 
 
 @dataclass(frozen=True)
 class Product:
-    """One registered product (spec 3.7)."""
+    """One registered product (spec 3.7; bundle source spec 5.4)."""
 
     repository_id: int
     full_name: str
@@ -207,6 +212,9 @@ class Product:
     installation_id: int
     machine_user: str
     checkout: str
+    bundle_dir: str = DEFAULT_BUNDLE_DIR
+    #: Legacy DAG variants are refused in v1 (spec 5.4, rev 11).
+    dag_variant: Literal["full"] = DEFAULT_DAG_VARIANT
 
     def __post_init__(self) -> None:
         for key in ("repository_id", "app_id", "installation_id"):
@@ -216,6 +224,18 @@ class Product:
         _need(self.profile in ("fork", "write"), "profile", "must be fork or write")
         _nonempty(self.machine_user, "machine_user")
         _nonempty(self.checkout, "checkout")
+        _nonempty(self.bundle_dir, "bundle_dir")
+        bundle = PurePosixPath(self.bundle_dir)
+        _need(
+            not bundle.is_absolute() and ".." not in bundle.parts,
+            "bundle_dir",
+            "must be a relative path inside the product",
+        )
+        _need(
+            self.dag_variant == DEFAULT_DAG_VARIANT,
+            "dag_variant",
+            "only 'full' in v1; legacy DAG variants are refused",
+        )
 
 
 def parse_products(text: str) -> dict[int, Product]:
@@ -235,7 +255,7 @@ def parse_products(text: str) -> dict[int, Product]:
 
 
 def _parse_product(row: dict[str, object]) -> Product:
-    _check_keys(row, _PRODUCT_KEYS, set(), "product", allow_schema=False)
+    _check_keys(row, _PRODUCT_KEYS, _PRODUCT_OPTIONAL, "product", allow_schema=False)
     return Product(
         row["repository_id"],  # type: ignore[arg-type]
         row["full_name"],  # type: ignore[arg-type]
@@ -244,6 +264,8 @@ def _parse_product(row: dict[str, object]) -> Product:
         row["product_installation_id"],  # type: ignore[arg-type]
         row["machine_user"],  # type: ignore[arg-type]
         row["checkout"],  # type: ignore[arg-type]
+        row.get("bundle_dir", DEFAULT_BUNDLE_DIR),  # type: ignore[arg-type]
+        row.get("dag_variant", DEFAULT_DAG_VARIANT),  # type: ignore[arg-type]
     )
 
 
@@ -255,22 +277,27 @@ def load_products(path: Path) -> dict[int, Product]:
 
 def dump_products(products: Mapping[int, Product]) -> str:
     """Render `products.toml` sorted by `repository_id`."""
-    rows = [
-        {
-            "repository_id": p.repository_id,
-            "full_name": p.full_name,
-            "profile": p.profile,
-            "product_app_id": p.app_id,
-            "product_installation_id": p.installation_id,
-            "machine_user": p.machine_user,
-            "checkout": p.checkout,
-        }
-        for _, p in sorted(products.items())
-    ]
+    rows = [_product_row(p) for _, p in sorted(products.items())]
     data: dict[str, object] = {"schema": _PRODUCTS}
     if rows:
         data["product"] = rows
     return dumps(data)
+
+
+def _product_row(p: Product) -> dict[str, object]:
+    """One `[[product]]` row; 3a fields only when not default (2b-readable)."""
+    row: dict[str, object] = {
+        "repository_id": p.repository_id,
+        "full_name": p.full_name,
+        "profile": p.profile,
+        "product_app_id": p.app_id,
+        "product_installation_id": p.installation_id,
+        "machine_user": p.machine_user,
+        "checkout": p.checkout,
+    }
+    if p.bundle_dir != DEFAULT_BUNDLE_DIR:
+        row["bundle_dir"] = p.bundle_dir
+    return row
 
 
 # --- trust.toml -------------------------------------------------------------

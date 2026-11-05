@@ -22,7 +22,8 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
 коммит `7706fec`); этап 3a — §2.5 строка 3a, §10 строка 3a; нормативные разделы — §3.9, §3.10,
 §4.1, §4.5, §5.2, §5.4, §5.5, §6.1, §6.2, §8. Спека A — rev 18. Решения владельца O1–O14 приняты
 04.11 (§10). План спорит со спекой, а не заменяет её; нового решения план не вводит —
-неразрешённое спекой вынесено в «Вопросы владельцу».
+неразрешённое спекой вынесено в «Решения владельца» (принято 04.11); переход схемы базы
+периметра (Task 8) опирается на решение владельца 7.
 
 ## Global Constraints
 
@@ -36,6 +37,13 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
   `governance/ops`, `runner`, `act_status`, `act_node`, `edge_check`, ни `jwt` (§5.4, R9).
 - Перечень дерева предпроверки — данные `df/precheck_tree.toml`; модули 2b и
   `contracts/approval-branches/v1/patterns.env` не удаляются и не переименовываются (§3.9).
+- Верхнеуровневые импорты `governance/act_precheck.py` ⊆ `LEGACY_2B`; программа v2 — отдельный
+  модуль `governance/act_precheck_v2.py`, импортируемый отложенно, только после проверки
+  полноты дерева (§3.9: «Программа v2 импортирует своё замыкание после проверки»).
+- Общие константы — по одной копии на сторону замыкания и тест-зеркало: `GH_PINNED_VERSION`,
+  `GH_ENV_KEYS` — `governance/act_trust.py` и `df/platform.py` (`test_gh_constants_mirror`,
+  Task 2); `v2_deadlines` — `governance/act_precheck.py` и `df/publisher/precheck.py`
+  (`test_v2_deadlines_mirror`, Task 16); типы доверия — Task 4.
 - Протокол v1 (`df/precheck-request/v1`, `df/precheck-verdict/v1`, `kind ∈ ("stop",)`) не
   меняется; v2 — схемы `df/precheck-request/v2`, `df/precheck-verdict/v2` (§5.4).
 - Запрос и вердикт ≤ 64 КиБ; вердикт v2 ≤ **32 КиБ** сериализованно; деталь находки ≤ 512 байт
@@ -46,16 +54,20 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
   `GH_CONFIG_DIR`, `GH_NO_UPDATE_NOTIFIER=1` (§3.10).
 - Профиль токена истории — `/etc/df/history-gh`, `root:df-history`, `0750`/`0640`; группа
   `df-history` = `df-publisher`, `df-precheck`, оператор (§4.1).
-- Сроки рубежей до замера — значения 2b (`DEADLINE = 150.0`, `command_timeout=180`,
-  `PRECHECK_WAIT = 200.0`, `REAP_AFTER = 230`); изменяются только задачей 14 по замеру (§5.4).
+- Сроки рубежей до замера — значения 2b (`DEADLINE = 150.0`, `command_timeout=180` —
+  константа `PRECHECK_TIMEOUT`, `df/sudoers.py:40`, `PRECHECK_WAIT = 200.0`, `REAP_AFTER = 230`);
+  изменяются только задачей 16 по замеру (§5.4).
 - Ответ издателя — `df/publisher-response/v1` без новых верхних ключей.
 - `_cowork_output/` не читается. Разговор по-русски, код по-английски.
 - Тесты не трогают `~/.claude`, `~/.codex`, `~/.config/gh`, связку ключей и настоящие
   credentials; сеть — только локальные фейки (кроме живых строк); root-строки — только CI.
 - Тесты на переднем плане:
   `perl -e 'alarm 590; exec @ARGV' -- uv run --group governance pytest <path> -q -p no:cacheprovider`.
-- Все файлы плана, кроме `governance/edge_check/publish.py`, — authority-root (`df/`,
-  `tests/df/`, `governance/act_*`, `contracts/`, `.github/`). PR задач сливает **владелец**.
+- Каждый PR задачи содержит authority-root путь (`df/`, `tests/df/`, `governance/act_*`,
+  `tests/test_act_*`, `.github/`) — мерж владельцем. Не authority-root (перечень —
+  `contracts/authority-root/v1/paths.env`): `governance/edge_check/publish.py`,
+  `governance/approve_node.py`, `governance/bundle_dag.py`, `tests/test_edge_check_publish.py`
+  (Task 3); спека и README (Task 16); `docs/evidence/…`, `TODO.md` (Task 17).
 
 ## Review Focus
 
@@ -73,7 +85,8 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
    `test_old_installer_tree_v1_served_v2_refused_by_name`; root — Task 14.
 5. **Оператор запускает `gh` со своим настоящим `HOME`.** Ожидание: путь не допускается —
    отдельный `HOME` вызова, пустой профиль даёт отказ, а не токен из связки ключей. Тест —
-   Task 2, `test_gh_env_allowlist_and_call_home` и root-строка devtools#693 (macOS).
+   Task 2, `test_gh_env_allowlist_and_call_home` и root-строка devtools#693 (обе ОС; случай
+   связки ключей — macOS).
 
 ---
 
@@ -81,17 +94,17 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
 
 | Файл | Роль | Task |
 |---|---|---|
-| `df/precheck_tree.toml` (новый), `df/admin_tree.py`, `df/admin.py`, `df/cli.py` (`precheck serve`), `governance/act_precheck.py` (`serve`, диспетчер) | перечень дерева, проверка полноты, минимальный диспетчер v2 | 1 |
-| `df/cli.py`, `df/config.py`, `governance/act_trust.py` (`history_token_at`), `governance/act_history_snapshot.py`, `governance/act_precheck.py`, `tests/df/test_root_gh_shared_profile.py` (из devtools#693) | договор запуска | 2 |
-| `governance/act_surface.py` (новый), `governance/edge_check/publish.py`, `df/stage2_config.py` (`Product`) | поверхность D16, запись продукта | 3 |
+| `df/precheck_tree.toml` (новый), `df/admin_tree.py`, `df/admin.py`, `df/cli.py` (`precheck serve`), `df/doctor.py`, `governance/act_precheck.py` (`serve`, диспетчер) | перечень дерева, проверка полноты, минимальный диспетчер v2 | 1 |
+| `df/cli.py`, `df/config.py` (схема `install.toml`), `df/platform.py`, `governance/act_trust.py` (`history_token_at`), `governance/act_history_snapshot.py`, `governance/act_precheck.py`, `tests/df/test_root_gh_shared_profile.py` (из devtools#693), `.github/workflows/df-stage1.yml`, спека §3.7 | договор запуска | 2 |
+| `governance/act_surface.py` (новый), `governance/bundle_dag.py`, `governance/approve_node.py`, `governance/edge_check/publish.py`, `df/stage2_config.py` (`Product`) | поверхность D16, запись продукта | 3 |
 | `governance/act_trust_types.py` (новый), `df/publisher/trust_types.py` (новый) | общие типы доверия | 4 |
 | `governance/act_trust_pair.py` (новый), `governance/act_trust.py` | чтение пары по SHA, отношение, инкрементальность | 5 |
 | `governance/act_facts.py`, `governance/act_trust_findings.py` (новый) | история политики до P, дескрипторы, бюджет | 6 |
-| `governance/act_precheck.py`, `governance/act_premerge.py`, `governance/act_app_installations.py` (новый) | программа v2 | 7 |
+| `governance/act_precheck.py`, `governance/act_precheck_v2.py` (новый), `governance/act_premerge.py`, `governance/act_app_installations.py` (новый) | программа v2 | 7 |
 | `df/publisher/trust_state.py` (новый), `df/publisher/perimeter.py`, `df/cli.py` (`perimeter-init`) | состояние доверия, переход схемы | 8 |
 | `df/publisher/history.py` (новый) | токен истории и самоотчёт издателя | 9 |
 | `df/publisher/perimeter.py`, `df/publisher/trust_routes.py` (новый), `df/publisher/ops.py`, `df/publisher/main.py`, `df/publisher/request.py` | маршруты периметра, `trust-status`, сверка диапазонов | 10 |
-| `df/publisher/merge.py`, `df/publisher/precheck.py` | мерж candidate/finalize | 11 |
+| `df/publisher/merge.py`, `df/publisher/precheck.py`, `df/publisher/trust_state.py` (`admit_merge`) | мерж candidate/finalize | 11 |
 | `df/setup_trust.py` (новый), `df/cli.py`, `df/launcher_entry.py`, `df/roles.py`, `df/roles_setup.py`, `df/platform.py` | `setup-trust`, группа `df-history` | 12 |
 | `df/doctor.py`, `df/sudoers.py` | `doctor` уровня 3, строка оператора | 13 |
 | `tests/df/test_acceptance_root_trust.py` (новый), `tests/df/roles_world.py`, `.github/workflows/df-stage1.yml` | root-строки | 14 |
@@ -102,8 +115,9 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
 ---
 
 Правило всех задач: изменение сигнатуры переносится **вместе со всеми вызывающими местами**
-в той же задаче; задача, добавляющая импорт, достижимый из `act_precheck`, в том же коммите
-обновляет `df/precheck_tree.toml` (сторож — `test_list_matches_ast_closure`, Task 1); после
+в той же задаче; `df/precheck_tree.toml` **равен** AST-замыканию `act_precheck` (сторож —
+`test_list_matches_ast_closure`, Task 1) и меняется только в задаче, где импорт становится
+достижимым из `act_precheck` (модули Tasks 3, 5, 6 — в Task 7); после
 каждой задачи stop v1 обслуживается, а установка без `gh` и без привязки работает как в 2b
 (сторож — `test_no_gh_no_binding_stop_served`, Task 2).
 
@@ -113,9 +127,11 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
 обновления»).
 
 **Files:** создать `df/precheck_tree.toml`; изменить `df/admin_tree.py:54-71,121-150`,
-`df/admin.py:405-500`, `df/cli.py:515-545`, `governance/act_precheck.py:190-260` (`serve`,
-разбор `schema`); тесты `tests/df/test_admin_tree.py`, `tests/df/test_cli.py`,
-`tests/test_act_precheck.py`.
+`df/admin.py:395-500`, `df/cli.py:515-545`, `df/doctor.py` (`publisher.precheck` называет
+причину неполного дерева, §3.9), `governance/act_precheck.py:190-260` (`serve`, разбор
+`schema`); тесты `tests/df/test_admin_tree.py` (`test_governance_modules_equal_ast_closure`,
+`:170`, переводится на замороженный `LEGACY_2B`), `tests/df/test_cli.py`,
+`tests/df/test_doctor.py`, `tests/test_act_precheck.py`.
 
 **Interfaces:**
 - Produces:
@@ -139,7 +155,8 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
   при `complete_v2=False`, иначе `v2_unavailable` до Task 7. `precheck serve` и все вызовы
   `serve` в тестах передают `complete_v2`.
 - [ ] **Step 1: Тесты:** `test_tree_list_read_from_pin_as_data`; `test_legacy_pin_falls_back_to_2b_list`;
-  `test_list_matches_ast_closure`; `test_installer_refuses_pin_with_unlisted_import`
+  `test_list_matches_ast_closure` (равенство перечня и AST-замыкания);
+  `test_installer_refuses_pin_with_unlisted_import`
   (искусственный пин: `act_precheck.py` импортирует модуль, которого нет в перечне);
   `test_2b_modules_retained`; `test_old_installer_tree_v1_served_v2_refused_by_name`
   (дерево по `LEGACY_2B`: v1 обслужен, v2 — `tree_incomplete`, без `ModuleNotFoundError` в
@@ -151,7 +168,11 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
 
 **Files:** `df/cli.py:91-92,880-915` (решение владельца 6: `cli set` расширяется на `gh` —
 абсолютный путь и sha256, по образцу `openssl`; `CLI_SETTABLE` — `("openssl", "gh")`),
-`df/config.py:44` (`REQUIRED_CLI` не меняется), `df/cli.py` (`precheck serve` передаёт
+`df/config.py:141-205` (схема `install.toml`: необязательная таблица `approved_cli_sha256`
+с ключом `gh`; файл без неё корректен; ключ без пути в `approved_cli` — отказ разбора; релиз
+до 3a такой файл не разбирает — откат на него после `cli set gh` невозможен, §7.4),
+спека §3.7 строка `install.toml`, `df/platform.py` (`GH_PINNED_VERSION`, `GH_ENV_KEYS` — копия
+для `df/`), `df/config.py:44` (`REQUIRED_CLI` не меняется), `df/cli.py` (`precheck serve` передаёт
 пути), `governance/act_trust.py:411-466`, `governance/act_history_snapshot.py:108-125`,
 `governance/act_precheck.py:372-384` (вызов `open_snapshot`); тесты `tests/df/test_cli_set.py`,
 `tests/test_act_trust.py`, `tests/test_act_history_snapshot.py`, `tests/test_act_precheck.py`;
@@ -163,24 +184,30 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
   ```python
   GH_PINNED_VERSION = "2.102.1"
   GH_ENV_KEYS = ("PATH", "HOME", "LANG", "GH_CONFIG_DIR", "GH_NO_UPDATE_NOTIFIER")
-  def history_token_at(config_dir: Path, *, gh: Path, call_home: Path) -> str | Unavailable
+  def history_token_at(config_dir: Path, *, gh: Path, role_home: Path) -> str | Unavailable
+      # сама создаёт каталог вызова в role_home и удаляет его после вызова
   # history_transport(binding, *, open_url=None, token_source=None) — без изменений:
-  # df передаёт token_source=partial(history_token_at, gh=..., call_home=...);
+  # df передаёт token_source=partial(history_token_at, gh=..., role_home=...);
   # прежний history_token(config_dir) остаётся для развёртывания флота (б) — вне договора df
   def open_snapshot(home, full_name, refs, token, *, git: Path, git_base: str,
-                    deadline: float) -> Path
+                    deadline: float, clock=...) -> Path      # clock сохраняется (:146)
+  class SnapshotHistory:
+      def __init__(self, ..., *, git: Path) -> None          # `_run` (:227) — по пути
   def serve(..., complete_v2: bool, gh: Path | None, git: Path, deps=None) -> int
   ```
   `gh`/`git` программе даёт `precheck serve` из `install.toml` своего снимка (не запрос);
   `gh is None` — профиль истории недоступен (v2 `op: trust`/`merge` с ключом — отказ). Все
-  вызовы `open_snapshot` и `serve` обновлены в этой задаче. `call_home` — временный каталог
-  вызова в домашнем каталоге роли, удаляется после вызова.
+  вызовы `open_snapshot`, `SnapshotHistory` и `serve` обновлены в этой задаче. sha256 `gh`
+  сверяется при каждом запуске с `install.toml`.
 - [ ] **Step 1: Тесты:** `test_cli_set_gh_records_path_and_sha256`;
   `test_cli_set_gh_requires_pinned_version`; `test_cli_set_gh_refuses_untrusted_path`;
   `test_gh_sha256_mismatch_refused_at_launch`; `test_gh_env_allowlist_and_call_home`
   (`GH_TOKEN`, `GITHUB_TOKEN` процесса не доходят); `test_missing_gh_refused_no_path_fallback`;
-  `test_git_absolute_path_only`; `test_no_gh_no_binding_stop_served` (установка без `gh` и без
-  `trust.toml` — stop через `serve` как в 2b).
+  `test_git_absolute_path_only`; `test_snapshot_history_git_by_path`;
+  `test_call_dir_created_and_removed_per_call`; `test_install_toml_sha256_schema`
+  (без таблицы — корректно; sha256 без пути — отказ); `test_gh_constants_mirror`;
+  `test_no_gh_no_binding_stop_served` (установка без `gh` и без `trust.toml` — stop через
+  `serve` как в 2b).
 - [ ] **Step 2–4:** FAIL → реализовать → PASS. Root-строка `test_gh_shared_profile`
   (devtools#693) зелёная в `df-stage1` полного объёма на обеих ОС — приёмка задачи.
 - [ ] **Step 5:** коммит `feat(df): gh/git launch contract`; закрыть devtools#693 со ссылкой.
@@ -188,7 +215,9 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
 ### Task 3: узкая поверхность D16 и запись продукта
 
 **Files:** создать `governance/act_surface.py`; изменить `governance/edge_check/publish.py:61-95`,
-`df/stage2_config.py:200-260` (`Product`); тесты `tests/test_act_surface.py`,
+`governance/bundle_dag.py` (сюда переносится `_downstream_closure` из
+`governance/approve_node.py:158` как `downstream_closure`; `approve_node` и `act_surface`
+импортируют его, копии нет), `df/stage2_config.py:200-260` (`Product`); тесты `tests/test_act_surface.py`,
 `tests/test_edge_check_publish.py` (новый), `tests/df/test_stage2_config.py`.
 
 **Interfaces:**
@@ -246,8 +275,8 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
 
 ### Task 5: `act_trust` по SHA — пара `df-trust`, отношение, инкрементальность от A
 
-**Files:** создать `governance/act_trust_pair.py`; изменить `governance/act_trust.py:298-410,601-633`,
-`df/precheck_tree.toml`; тесты `tests/test_act_trust_pair.py`, `tests/test_act_trust.py`.
+**Files:** создать `governance/act_trust_pair.py`; изменить `governance/act_trust.py:298-410,601-633`;
+тесты `tests/test_act_trust_pair.py`, `tests/test_act_trust.py`.
 
 **Interfaces:**
 - Consumes: Tasks 2 (`history_token_at` через `token_source`), 4.
@@ -305,7 +334,8 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
 
 ### Task 7: программа проверяющего v2 — `op: trust`, `op: merge`
 
-**Files:** `governance/act_precheck.py` (замена `v2_unavailable` программой), `governance/act_premerge.py`,
+**Files:** `governance/act_precheck.py` (замена `v2_unavailable` отложенным вызовом
+`act_precheck_v2`), создать `governance/act_precheck_v2.py`, `governance/act_premerge.py`,
 создать `governance/act_app_installations.py` (`app_installations` из `act_premerge.py:274-290`),
 `df/precheck_tree.toml`; тесты `tests/test_act_precheck.py`, `tests/test_act_precheck_v2.py`,
 `tests/test_act_premerge.py`.
@@ -314,15 +344,17 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
 - Consumes: Tasks 1–6; `act_context.delivery_verdict` (`governance/act_context.py:26`).
 - Produces (договор Tasks 8–11):
   - запрос `df/precheck-request/v2`, общие ключи: `schema, nonce, op ∈ {trust, merge},
-    origin_route, ctx_id, binding {host, df_trust_repository_id, df_trust_full_name, branch,
-    approval_policy_repository_id}, policy (PolicyPin) | null`;
+    origin_route, ctx_id, observation_id, binding {host, df_trust_repository_id,
+    df_trust_full_name, branch, approval_policy_repository_id, history_gh_config_dir | null},
+    policy (PolicyPin) | null` (`history_gh_config_dir` входит и в `ctx_id`, §6.1 «Контекст
+    проверки»; `ctx_id` не заменяет `observation_id`, §6.1 «Проверка снимка доверия»);
     - `op: trust`: `trust_accepted (AcceptedBase | null), trust_head` (H);
     - `op: merge`: `expected_snapshot_sha` (X), `trust_accepted (AcceptedBase с sha = X)`,
       `preliminary_state = "clear"`, `kind ∈ {candidate, finalize}, repository_id, full_name,
       pr, head_sha` (**C — голова продуктового PR**), `head_ref, base_ref, base_tip, changes,
       token, merger_login, merger_type, bundle_dir, dag_variant, api_base, git_base`;
   - вердикт `df/precheck-verdict/v2`: **обязательная связка** `schema, nonce, request_digest,
-    ctx_id, op, root {host, df_trust_repository_id, branch}`; для `trust` — `snapshot_sha` (=
+    ctx_id, observation_id, op, root {host, df_trust_repository_id, branch}`; для `trust` — `snapshot_sha` (=
     H), `accepted_sha`; для `merge` — `repository_id, pr, head_sha` (= C), `kind`,
     **`snapshot_sha`** (снимок, на котором построен вердикт; спека §5.4 п. 3, §5.4 «Протокол
     v2») и эхо `expected_snapshot_sha`; межполевая сверка издателем: `snapshot_sha` вердикта =
@@ -335,8 +367,14 @@ pyyaml 6.0.3 в чистом Python; SQLite (stdlib); системные `sudo` 
   складывает находки; производный токен — режим «покрыт держателем ключа» (N3); candidate —
   `act_premerge` с мержером из запроса (N4), поверхность — `act_surface`; finalize —
   `act_context.delivery_verdict(..., legacy=None)` (N7). Допустимые находки —
-  `ROUTE_KINDS[origin_route]`.
-- [ ] **Step 1: Тесты:** `test_v1_stop_unchanged`; `test_dispatch_by_schema`;
+  `ROUTE_KINDS[origin_route]`. `Readers` программы v2 строятся с утверждённым `gh`
+  (`gh_get`), профиль истории — из `binding.history_gh_config_dir` запроса; `act_epochs._git`
+  и `history_token` (флот) на пути v2 не вызываются. Тип вердикта издателя — Task 10.
+- [ ] **Step 1: Тесты:** `test_v1_stop_unchanged`; `test_v2_served_when_complete` (заменяет
+  `test_v2_unavailable_until_task7`; `test_old_installer_tree_v1_served_v2_refused_by_name`
+  остаётся); `test_act_precheck_top_imports_within_legacy_2b`;
+  `test_v2_path_launches_only_approved_binaries` (`gh_get`, `history_token`, `act_epochs._git`
+  не запускают `gh`/`git` из `PATH`); `test_observation_id_echoed`; `test_dispatch_by_schema`;
   `test_trust_op_writes_nothing`; `test_candidate_allowed_with_act_on_final_head`;
   `test_approve_before_evidence_not_counted`; `test_candidate_foreign_file_refused`;
   `test_finalize_review_id_from_delivery`; `test_finalize_wrong_envelopes_refused`;
@@ -374,7 +412,14 @@ bool(checked)` — `_perimeter_lost` сохраняет отказ «база п
                     "superseded", "conservative"]
   def ctx_id(route: Route, binding: TrustBinding, admin_digest: str, rules: str,
              accepted: str | None, head: str, policy: PolicyPin | None) -> str
-  def open_observation(db: Db, root: Root, ctx: str, ...) -> int       # дедуп по (root, ctx)
+      # binding — все параметры, включая history_gh_config_dir
+  @dataclass(frozen=True)
+  class Observation:
+      id: int; root: Root; ctx: str; route: Route
+      accepted: str | None; head: str; policy: PolicyPin | None; row_version: int
+  def open_observation(db: Db, root: Root, ctx: str, ...) -> Observation   # дедуп по (root, ctx)
+  OUTCOME_OF_VERDICT = {"tree_incomplete": "unresolved", "unset": "unresolved",
+                        "unsupported_size": "conservative"}   # прочие — по жизненному циклу
   def register_findings(db: Db, root: Root, ctx: str, findings, epochs_of: Callable) -> list[int]
   def advance_head(db: Db, root: Root, obs: int, head_read: Callable[[], str]) -> Outcome
   def conservative(db: Db, root: Root, ctx: str, obs: int) -> int        # К
@@ -445,18 +490,20 @@ bool(checked)` — `_perimeter_lost` сохраняет отказ «база п
 `tests/df/test_publisher_closure.py`.
 
 **Interfaces:**
-- Consumes: Task 2 (утверждённый `gh`, `GH_ENV_KEYS`), Task 4.
+- Consumes: Task 2 (утверждённый `gh`; `GH_ENV_KEYS` — копия в `df/platform.py`), Task 4.
 - Produces (stdlib, владелец — издатель):
   ```python
-  def history_token(binding: TrustBinding, *, gh: Path, call_home: Path) -> str | None | Unavailable
+  def history_token(binding: TrustBinding, *, gh: Path, role_home: Path) -> str | None | Unavailable
       # None — ключа нет (анонимно); ключ есть и токен не получен — Unavailable, без отката
   def history_transport(token: str | None) -> Transport           # stdlib urllib, без прокси и перенаправлений
   def self_report(transport, binding: TrustBinding,
                   policy_repository: int) -> Finding | Unavailable | None
       # GET /repos/{…} тем же значением токена на обоих репо: push/maintain/admin
   def read_branch_head(transport, full_name: str, branch: str) -> str | Unavailable
+  def read_source_digest(transport, full_name: str, sha: str) -> str | Unavailable
+      # sha256 сырых байтов source.env на SHA (без разбора) — для быстрого пути
   ```
-- [ ] **Step 1: Тесты** (модульные): `test_self_report_write_permission_finding`
+- [ ] **Step 1: Тесты** (модульные): `test_read_source_digest_raw_bytes`; `test_self_report_write_permission_finding`
   (`push`/`maintain`/`admin` = `true` — находка `token_write`); `test_self_report_permissions_missing_unavailable`;
   `test_self_report_403_404_unavailable`; `test_unreadable_profile_unavailable_no_anonymous`;
   `test_no_key_anonymous`; `test_same_token_value_for_reads_and_report`;
@@ -472,16 +519,20 @@ bool(checked)` — `_perimeter_lost` сохраняет отказ «база п
 (установки App на источниках доверия в `self_check_first`, `_check_app`),
 `df/publisher/request.py` (операция `trust-status`), `df/publisher/main.py` (`SUDO_UID = 0` —
 `self-check` и `trust-status`), `df/stage2_config.py` (`expected_publisher`); тесты
-`tests/df/test_trust_routes.py`, `tests/df/test_publisher_main.py`, `tests/df/test_publisher_ops.py`.
+`tests/df/test_trust_routes.py`, `tests/df/test_publisher_main.py`, `tests/df/test_publisher_ops.py`,
+`tests/df/test_perimeter.py` (вызовы `perimeter.EPOCHS`, `:455,460,917,1062,1158`).
 
 **Interfaces:**
 - Consumes: Tasks 7, 8, 9.
 - Produces:
   ```python
-  def perimeter_status(ctx: Context) -> Response   # быстрый путь или наблюдение + op: trust
-  def trust_status_op(ctx: Context) -> Response     # всегда наблюдение + op: trust
-  def pin_policy(oc: OpContext, repository_id: int) -> PolicyPin   # GET /repositories/{id} → имя, default branch → голова
-  def run_trust(oc: OpContext, obs: Observation) -> Verdict | Unavailable   # v2, сверка связки и эха
+  # df/publisher/trust_routes.py (имена не совпадают с perimeter.perimeter_status/_op)
+  def route_perimeter_status(ctx: Context) -> Response   # быстрый путь или наблюдение + op: trust
+  def route_trust_status(ctx: Context) -> Response       # всегда наблюдение + op: trust
+  def pin_policy(ctx: Context, repository_id: int) -> PolicyPin   # GET /repositories/{id} → имя, default branch → голова
+  @dataclass(frozen=True)
+  class Verdict: ...        # разобранный и сверенный вердикт v2 (поля — связка Task 7)
+  def run_trust(ctx: Context, obs: Observation) -> Verdict | Unavailable   # v2, сверка связки и эха
   def check_ranges(desc: RangeDescriptor, *, last_epoch: int, p_sha: str,
                    stored_digest: str | None) -> bool
       # эпохи подряд 1…last_epoch; конец открытого диапазона = p_sha;
@@ -490,8 +541,14 @@ bool(checked)` — `_perimeter_lost` сохраняет отказ «база п
   Ответ `trust-status` — `df/publisher-response/v1`, `result`: `root, snapshot_sha,
   last_epoch, state, unverified, findings`. Корень прогона сверяется у всех PR-операций
   (`_check_root`). Установка App на `approval-policy`/`df-trust` — находка настроек. Ключа
-  истории нет — анонимно с предупреждением (O14).
-- [ ] **Step 1: Тесты:** быстрый путь `perimeter-status` (H = A) с путём Task 9:
+  истории нет — анонимно с предупреждением (O14). Быстрый путь сверяет digest `source.env` на
+  H (`read_source_digest`, Task 9) с записью. Исход вердикта → исход наблюдения —
+  `OUTCOME_OF_VERDICT` (Task 8). `perimeter-status` в `main` переключается на
+  `route_perimeter_status`; `perimeter.EPOCHS` удаляется вместе с тестовыми вызовами.
+- [ ] **Step 1: Тесты:** `test_trust_status_h_eq_a_removed_ruleset_finding`;
+  `test_verdict_outcome_mapping` (`tree_incomplete`, `unset` → `unresolved`;
+  `unsupported_size` → `conservative`); `test_fast_path_source_digest_changed_goes_observation`;
+  быстрый путь `perimeter-status` (H = A) с путём Task 9:
   `test_fast_path_token_write_not_clear`, `test_fast_path_permissions_missing_unavailable`,
   `test_fast_path_403_404_unavailable`, `test_fast_path_unreadable_profile_no_anonymous`;
   `test_publisher_closure_stdlib` повторно (после подключения `history.py` к `main`);
@@ -508,16 +565,18 @@ bool(checked)` — `_perimeter_lost` сохраняет отказ «база п
 ### Task 11: мерж candidate и finalize — окончательный допуск
 
 **Files:** `df/publisher/merge.py` (`_check_kind:444-453`, `_precheck:455-465`, `_KIND:424`,
-`TRUST_ROOT:78`), `df/publisher/precheck.py` (`admin_precheck:133`, `_bound:292`); тесты
-`tests/df/test_publisher_merge.py`, `tests/df/test_publisher_precheck.py`.
+`TRUST_ROOT:78`), `df/publisher/precheck.py` (`admin_precheck:133`, `_bound:292`),
+`df/publisher/trust_state.py` (`admit_merge`); тесты `tests/df/test_publisher_merge.py`,
+`tests/df/test_publisher_precheck.py`, `tests/df/test_trust_state.py`.
 
 **Interfaces:**
-- Consumes: Tasks 7–10; фазы и сверка 2b без изменений.
+- Consumes: Tasks 3 (`Product.bundle_dir`, `dag_variant`), 7–10; фазы и сверка 2b без изменений.
 - Produces: `admin_precheck(kind, oc, pr, facts, *, obs: Observation) -> PrecheckResult` (v2
   для candidate/finalize с `head_sha` = C и `expected_snapshot_sha` = X; v1 для stop);
   `_bound` v2 сверяет всю обязательную связку Task 7, межполевое `snapshot_sha` вердикта =
   `expected_snapshot_sha` запроса = X и `check_ranges` (Task 10);
-  `admit(db, root, obs, verdict) -> None | Refused("perimeter_blocked")` — одна транзакция:
+  `trust_state.admit_merge(db, root, obs, verdict) -> None | Refused("perimeter_blocked")`
+  (имя отлично от `perimeter.admit`) — одна транзакция:
   завершить своё наблюдение, зарегистрировать находки, заново применить И (голова в
   транзакции = X = принятой записи, нет других незавершённых наблюдений и блокирующих
   событий); после `COMMIT` — `armed` и `PUT`. Сверка `admin_digest` (`binding_mismatch`);
@@ -580,7 +639,7 @@ bool(checked)` — `_perimeter_lost` сохраняет отказ «база п
 `tests/df/test_doctor_level3.py`, `tests/df/test_sudoers.py`.
 
 **Interfaces:**
-- Consumes: Tasks 10, 12.
+- Consumes: Tasks 8 (`schema_migration_required`), 10, 12.
 - Produces: проверки `trust.binding`, `trust.history` (ключ, профиль, режимы, состав
   `df-history` точно), `trust.status` (через `trust-status`), `trust.unsupported_size` (выход
   §6.1), `perimeter.schema` (схема `"1"` — «нарушено: выполните roles setup»); строка
@@ -589,7 +648,8 @@ bool(checked)` — `_perimeter_lost` сохраняет отказ «база п
   Побочные эффекты проб — в выводе (§8).
 - [ ] **Step 1: Тесты:** `test_history_group_extra_member_broken`; `test_trust_status_schema_checked`;
   `test_operator_two_results_never_pass_ii`; `test_level3_shown_separately_from_level`;
-  `test_side_effects_listed`; `test_schema_v1_names_migration`.
+  `test_side_effects_listed`; `test_schema_v1_names_migration`;
+  `test_no_history_key_trust_history_broken` (привязка без ключа — «нарушено»).
 - [ ] **Step 2–4:** FAIL → реализовать → PASS. **Step 5:** коммит `feat(df): doctor level 3 (trust)`.
 
 ### Task 14: root-строки CI
@@ -597,9 +657,11 @@ bool(checked)` — `_perimeter_lost` сохраняет отказ «база п
 **Files:** создать `tests/df/test_acceptance_root_trust.py`; изменить `tests/df/roles_world.py`,
 `.github/workflows/df-stage1.yml` (job `stage2a`).
 
-Строки (обе ОС, фейк GitHub и dumb-HTTP git, как в 2b Task 10):
+Строки (обе ОС, фейк GitHub и dumb-HTTP git, как в Task 10 плана 2b
+`docs/superpowers/plans/2026-11-03-df-installer-stage2b.md`):
 - положительные candidate и finalize через всю цепочку издатель → sudo → вход → `act_precheck` v2;
 - `op: trust` через цепочку; `~df-precheck` после вызова без долговечного состояния;
+  удаление `~df-precheck/` между двумя вызовами исход не меняет;
 - профиль истории: член читает, посторонний — отказ ОС; токен истории не в argv, I/O-журнале
   sudo, evidence;
 - строка оператора — (i) PASS, (ii) «не проверено, принято исключение»;
@@ -631,7 +693,8 @@ bool(checked)` — `_perimeter_lost` сохраняет отказ «база п
 - таблица запросов §6.1;
 - `trust-status` с привязкой; App, установленный на репо доверия, → находка;
 - переписанная история `df-trust` (возврат на прежний SHA) → находка и холодный путь;
-- stop с привязкой: `trust_root` — идентичность (регресс строк 10–12 2b).
+- stop с привязкой: `trust_root` — идентичность (регресс строк 10–12 живой приёмки 2b,
+  `docs/evidence/2026-11-04-df-stage2b-acceptance.md`).
 - [ ] **Step 1:** офлайн-тесты помощников (`DF_STAND_*` не читаются вне живого прогона).
 - [ ] **Step 2:** workflow; **Step 3:** коммит `test(df): stage 3a live trust rows`.
 - [ ] **Step 4:** владелец выполняет H1–H6 и запускает прогон; артефакт замера сохраняется.
@@ -639,7 +702,8 @@ bool(checked)` — `_perimeter_lost` сохраняет отказ «база п
 ### Task 16: сроки v2 по замеру
 
 **Files:** `governance/act_precheck.py` (`DEADLINE` для v2), `df/publisher/precheck.py`
-(`PRECHECK_WAIT`), `df/precheck_reap.py` (`REAP_AFTER`), `df/sudoers.py` (`command_timeout`),
+(`PRECHECK_WAIT`, копия `v2_deadlines`), `df/precheck_reap.py` (`REAP_AFTER =
+PRECHECK_WAIT + 30.0`, `:40`, уже выводится), `df/sudoers.py` (`PRECHECK_TIMEOUT`, `:40`),
 спека §4.1 (значение `command_timeout`), §5.4 (значения); README «Поддерживаемая длина истории».
 
 **Interfaces:** по решению владельца 1: M — максимум времени холодного `op: trust` из артефакта
@@ -649,11 +713,13 @@ DEADLINE_v2 + 30`, `PRECHECK_WAIT = DEADLINE_v2 + 50`, `REAP_AFTER = DEADLINE_v2
 `DEADLINE_v2 / 2`. Значения записываются константами вместе с M и ссылкой на прогон.
 ```python
 def v2_deadlines(m_seconds: float) -> tuple[int, int, int, int]
-    # (DEADLINE, command_timeout, PRECHECK_WAIT, REAP_AFTER)
+    # (DEADLINE, command_timeout, PRECHECK_WAIT, REAP_AFTER);
+    # копии: governance/act_precheck.py и df/publisher/precheck.py
 ```
 - [ ] **Step 1: Тесты:** `test_v2_deadline_formula` (`M = 61.0` → `(130, 160, 180, 210)`;
   `M = 75.0` → `(150, 180, 200, 230)` — интервалы 2b); `test_v2_constants_equal_formula_of_recorded_m`;
-  `test_supported_history_half_deadline` (замер ≤ `DEADLINE_v2 / 2`).
+  `test_recorded_m_run_link_readme_n_agree` (записанные M, ссылка на прогон и N README
+  согласованы с константами); `test_v2_deadlines_mirror`.
 - [ ] **Step 2–4:** FAIL → выставить → PASS (+ root-строки рубежей 2b). **Step 5:** коммит
   `feat(df): v2 precheck deadlines from the cold-path measurement`.
 
@@ -730,7 +796,7 @@ def v2_deadlines(m_seconds: float) -> tuple[int, int, int, int]
   история и откат (5, 8, 15), гонка и прерывания (8), `source.env` (5), `--rebind` и
   восстановление (8, 14), замер холодного пути (15 → 16), ключ истории O14 (9–12), бюджет и 65
   эпох (6, 14), обновление 2b → 3a, включая базу периметра (1, 8, 12, 14), stop с привязкой
-  (11, 15). §3.9 — 1; §3.10 — 2; §4.1 — 12, 16; §4.5 — 13, 14; §5.2 — 10; §5.4 — 3, 7, 11; §5.5
+  (11, 15). §3.9 — 1; §3.10 — 2; §4.1 — 12, 16; §4.5 — 13, 14; §5.2 — 10; §5.4 — 3, 7, 11, 16; §5.5
   — 11; §6.1 — 4–11; §6.2 — 12; §8 — 13. Пробел — исключение §3.9 для процессов человека (3b).
 - **Рабочее состояние после каждой задачи:** сигнатуры `serve` (Tasks 1, 2), `open_snapshot`
   (Task 2) и `history` (Task 6, необязательный `head`) меняются вместе с вызывающими; общие

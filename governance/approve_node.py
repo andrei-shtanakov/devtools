@@ -57,6 +57,7 @@ from governance.act_projection import ProjectionError, self_hash_v
 from governance.act_request import ACT_REVIEW_V1
 from governance.act_time import OPS_FAILURES, Ambiguous, Unavailable
 from governance.approval_facts import Disposition, Outcome
+from governance.bundle_dag import downstream_closure
 from governance.frontmatter import split_frontmatter, update_frontmatter
 from governance.ops import Ops
 from governance.policy_sources import build_authority, load_safety
@@ -153,27 +154,6 @@ def _levels(dag: tuple[tuple[str, tuple[str, ...]], ...]) -> dict[str, int]:
     `dag`, который топологичен по построению.
     """
     return bundle_dag.levels(dag)
-
-
-def _downstream_closure(
-    dag: tuple[tuple[str, tuple[str, ...]], ...], node: str
-) -> set[str]:
-    """Транзитивное downstream-замыкание узла — без него самого.
-
-    Критерий именно транзитивный (§I12): каскад `stale` меняет файл каждого
-    узла замыкания, значит любая живая заявка внутри него посчитана против
-    байтов, которых после этого узла не станет.
-    """
-    closure: set[str] = set()
-    frontier = [node]
-    while frontier:
-        current = frontier.pop()
-        for fname, ups in dag:
-            child = bundle_dag.node_id(fname)
-            if current in ups and child not in closure:
-                closure.add(child)
-                frontier.append(child)
-    return closure
 
 
 def _unresolved(detail: str) -> RuntimeError:
@@ -1319,7 +1299,7 @@ def _invalidate_downstream(
     блокирующим, и воркстрим, где удаление не подтверждается, не заведёт
     новую заявку никогда.
     """
-    closure = _downstream_closure(dag, node_id)
+    closure = downstream_closure(dag, node_id)
     for nums, op in al.requests(state):
         key = al.request_key(*nums)
         if key == by_key:
