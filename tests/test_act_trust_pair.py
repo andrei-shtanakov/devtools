@@ -4,12 +4,20 @@ from __future__ import annotations
 
 import hashlib
 from collections import Counter
+from dataclasses import replace
+from pathlib import Path
+from typing import get_args
 
 import pytest
 
 pytest.importorskip("steward")
 
-from governance import act_trust, act_trust_findings, act_trust_pair  # noqa: E402
+from governance import (  # noqa: E402
+    act_trust,
+    act_trust_findings,
+    act_trust_pair,
+    act_trust_types,
+)
 from governance.act_source import parse_source  # noqa: E402
 from governance.act_time import Unavailable  # noqa: E402
 from governance.act_trust_types import AcceptedBase, Finding  # noqa: E402
@@ -312,10 +320,12 @@ def test_pair_repository_404_stays_unavailable() -> None:
 
 
 def test_load_trust_still_refuses_private_repo() -> None:
-    """I-4: `not_public` is pair-side only; `_named` keeps refusing."""
+    """I-4: `not_public` is pair-side only; the branch reader `load_trust` uses
+    keeps refusing a private policy repo."""
     routes = world(LINEAR)
+    routes[f"repos/{DT}/branches/main"] = (200, {"commit": {"sha": C2}})
     routes["repositories/22"] = (200, {"full_name": AP, "private": True})
-    got = act_trust._named(Anon(routes), 22, AP)
+    got = act_trust.read_trust_snapshot(Anon(routes), binding())
     assert isinstance(got, Unavailable)
     assert "только публичные" in got.reason
 
@@ -353,10 +363,14 @@ def snapshot(routes: dict) -> tuple[act_trust.TrustSnapshot, Anon]:
     return got.snapshot, anon
 
 
+def keyed_binding() -> act_trust.Binding:
+    return replace(binding(), history_gh_config_dir=Path("/etc/df/gh-history"))
+
+
 def settings(routes: dict, *, branch: str = "main", keyed: bool = True):
     snap, anon = snapshot(routes)
     return act_trust_pair.settings_findings(
-        anon, snap, policy_branch=branch, keyed=keyed
+        anon, keyed_binding() if keyed else binding(), snap, policy_branch=branch
     )
 
 
@@ -395,7 +409,9 @@ def test_settings_checks_called_explicitly(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(act_trust, "_history_report_of", record("self_report"))
     monkeypatch.setattr(act_trust, "_ruleset_of", record("rulesets"))
     monkeypatch.setattr(act_trust, "_rebase", record("rebase"))
-    got = act_trust_pair.settings_findings(anon, snap, policy_branch="main", keyed=True)
+    got = act_trust_pair.settings_findings(
+        anon, keyed_binding(), snap, policy_branch="main"
+    )
     assert got == act_trust_pair.Settings((), ())
     assert calls == [
         (name, role)
@@ -476,3 +492,17 @@ def test_settings_unkeyed_anonymous_with_warning(
     )
     got = settings(routes, keyed=False)
     assert got == act_trust_pair.Settings((), ("history_token_required",))
+
+
+def test_settings_keyed_binding_never_skips_self_report() -> None:
+    """N-1: keyed is derived from the binding; a push token is `token_write`."""
+    routes = settings_routes(rebase={DT: False, AP: False}, push=(DT,))
+    got = settings(routes, keyed=True)
+    assert isinstance(got, act_trust_pair.Settings)
+    assert [(f.kind, f.role) for f in got.findings] == [("token_write", "df-trust")]
+    assert got.unverified == ()
+
+
+def test_role_literals_equal() -> None:
+    """N-2: `act_trust.Role` mirrors `act_trust_types.Role`."""
+    assert get_args(act_trust.Role) == get_args(act_trust_types.Role)

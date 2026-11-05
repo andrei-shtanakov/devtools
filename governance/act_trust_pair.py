@@ -167,7 +167,7 @@ def read_pair(
 
 
 def settings_findings(
-    transport: Any, snap: TrustSnapshot, *, policy_branch: str, keyed: bool
+    transport: Any, binding: Binding, snap: TrustSnapshot, *, policy_branch: str
 ) -> Settings | Unavailable:
     """Settings at the moment of the call (spec §6.1, «Находки настроек»), per role.
 
@@ -176,7 +176,8 @@ def settings_findings(
     rules (``_ruleset_of``, ``ruleset_missing``) and ``allow_rebase_merge``
     (``_rebase``, ``rebase_allowed``); then the ``source.env`` policy branch
     against ``policy_branch``, the default branch the publisher resolved
-    (``policy_branch_mismatch``, С-2). ``keyed`` — the binding has a history key:
+    (``policy_branch_mismatch``, С-2). Keyed is derived from ``binding``, as in
+    ``load_trust`` (``history_gh_config_dir is not None``), never passed in:
     without it the self-report is skipped and ``history_token_required`` is
     unverified (O14: anonymous, with the warning); with it, an unreadable
     self-report is a gap, never an anonymous fallback. A hidden
@@ -185,6 +186,7 @@ def settings_findings(
     (``not_public``) is read with the identities, by ``read_pair``.
     """
     findings: list[Finding] = []
+    keyed = binding.history_gh_config_dir is not None
     unverified: list[str] = [] if keyed else [HISTORY_TOKEN_REQUIRED]
     gap: Unavailable | None = None
     for kind, check in _checks(transport, snap, keyed):

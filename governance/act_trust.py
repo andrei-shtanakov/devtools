@@ -101,8 +101,9 @@ _CRED_SHAPES = {
     "env:GITHUB_TOKEN": (False, True),
 }
 Span = tuple[ActivationView, ...]
-#: Trust repo role; the same literal as `act_trust_types.Role` (not imported: this
-#: module's import closure is pinned by `df/precheck_tree.toml`).
+#: Trust repo role; the same literal as `act_trust_types.Role` (a test keeps them
+#: equal). Kept out of `act_trust`'s imports until Task 7 decides the closure
+#: (ruling 6).
 Role = Literal["approval-policy", "df-trust"]
 
 
