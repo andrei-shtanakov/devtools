@@ -116,7 +116,10 @@ DEFINITE_PUT = frozenset({200, 401, 403, 404, 405, 409, 422})
 _NOT_MERGEABLE = frozenset({405, 422})
 _PUT_REFUSED = frozenset({401, 403, 404})
 #: Base tip moves the final read follows before it gives up (`base_unstable`).
+#: A repeat's own check of a candidate or finalize (spec 6.1: anew) is a
+#: `rechecked.<n>` marked `REPEAT` and spends none of them (paid review #706).
 MAX_RECHECKS = 5
+REPEAT = "repeat"
 #: What a `done` found by observation (not by the `PUT`'s own 200) rests on.
 PREMISE = "app_merges_only_through_this_publisher"
 FACT_KEYS = ("head_repo_id", "head_ref", "base_ref", "base_tip", "changes_digest")
@@ -452,7 +455,27 @@ Phases = dict[str, Mapping[str, object]]
 
 
 def _decide(ctx: Context) -> Response:
+    """Every refusal past the product's context names the root (spec 5.5:
+    `TrustRoot` always), once the PR is routed also its kind; a refusal's
+    own evidence (past the intent: from the phases) wins."""
     oc = ops.build_context(ctx)
+    try:
+        return _decide_for(ctx, oc)
+    except Refused as exc:
+        raise _with_evidence(
+            exc, {"trust_root": trust_root(oc.binding, None)}
+        ) from None
+
+
+def _with_evidence(exc: Refused, base: Mapping[str, object]) -> Refused:
+    """`exc` with `base` under its own evidence (its keys win)."""
+    evidence = {**base, **exc.evidence}
+    return Refused(
+        exc.reason, verified_not_done=exc.verified_not_done, evidence=evidence
+    )
+
+
+def _decide_for(ctx: Context, oc: OpContext) -> Response:
     patterns = read_patterns(ctx.layout, ctx.snapshot)
     ops.self_check_first(oc)
     # compare and branches need Contents read; pull_requests read alone is a 403
@@ -465,13 +488,33 @@ def _decide(ctx: Context) -> Response:
     number, head_sha = int(str(req.fields["pr"])), str(req.fields["head_sha"])
     pr, facts = _read_facts(oc, read, number, head_sha)
     kind = _check_kind(route(facts.head_ref, facts.changes, patterns))
+    try:
+        return _decide_kind(ctx, oc, read, patterns, pr, facts, kind)
+    except Refused as exc:
+        raise _with_evidence(exc, _base_evidence(kind, oc.binding)) from None
+
+
+def _decide_kind(
+    ctx: Context,
+    oc: OpContext,
+    read: str,
+    patterns: Mapping[str, str],
+    pr: Mapping[str, object],
+    facts: PrFacts,
+    kind: Kind,
+) -> Response:
+    """The routed PR: its trust side (candidate, finalize), the ownership,
+    the first check and on to the attestation or the final read."""
+    req, res = ctx.request, ctx.reservation
+    head_sha = str(req.fields["head_sha"])
     trust, auth = None, None
     if kind in V2_KINDS:
         trust, auth = _trust_run(
             ctx, oc, kind, facts.head_ref, patterns, lambda: ops.review_auth(oc)
         )
+    number = int(str(req.fields["pr"]))
     if store.pr_busy(ctx.layout, oc.product.repository_id, number, res.key):
-        raise Refused("pr_busy", evidence=_base_evidence(kind, oc.binding))
+        raise Refused("pr_busy")
 
     def first() -> Response:
         checked = _precheck(oc, pr, facts, kind, trust)
@@ -688,13 +731,7 @@ def _precheck(
         checked = {**result.evidence(), "base_tip": facts.base_tip}
         snapshot = None
     else:
-        try:
-            result, snapshot = _trust_precheck(oc, pr, facts, kind, trust)
-        except Refused as exc:  # review M4: the kind and the root, as elsewhere
-            evidence = {**_base_evidence(kind, oc.binding), **exc.evidence}
-            raise Refused(
-                exc.reason, verified_not_done=exc.verified_not_done, evidence=evidence
-            ) from None
+        result, snapshot = _trust_precheck(oc, pr, facts, kind, trust)
         checked = {**result.evidence(), "base_tip": facts.base_tip}
         checked["snapshot_sha"] = snapshot
     if result.refused is not None:
@@ -1105,13 +1142,17 @@ def _final_read(run: MergeRun, facts: Mapping[str, object], phases: Phases) -> N
     admission (a repeat) is checked again whatever the tip (spec 6.1: a
     repeat passes the precheck anew, with a new observation)."""
     expected = _decisive(phases).get("base_tip")
-    for n in itertools.count(len(store.rechecks(phases)) + 1):
+    names = store.rechecks(phases)
+    moved = sum(1 for name in names if not phases[name].get(REPEAT))
+    for n in itertools.count(len(names) + 1):
         pr = _get_pr(run)
         _same_pr(run, pr, facts)
         tip = base_tip(run.oc, run.read, str(facts["base_ref"]))
         if tip == expected and not _check_again(run):
             return
-        if n > MAX_RECHECKS:
+        repeat = tip == expected  # a repeat's own check: not a moved base
+        moved += 0 if repeat else 1
+        if moved > MAX_RECHECKS:
             raise Refused("base_unstable")
         changes = pr_changes(run.oc, run.read, tip, run.head_sha)
         head_ref = str(facts["head_ref"])
@@ -1119,6 +1160,8 @@ def _final_read(run: MergeRun, facts: Mapping[str, object], phases: Phases) -> N
         now = PrFacts(run.repository_id, head_ref, str(facts["base_ref"]), tip, changes)
         checked = _precheck(run.oc, pr, now, run.kind, run.trust)
         payload = {"precheck": checked, "changes_digest": changes_digest(changes)}
+        if repeat:
+            payload[REPEAT] = True
         _write(run, phases, f"rechecked.{n}", payload)
         expected = tip
 

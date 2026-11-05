@@ -926,11 +926,15 @@ def test_candidate_finalize_without_binding_refused(
 ) -> None:
     """Stage 3a: candidate and finalize need the `df-trust` binding; without
     one they are refused by name before the precheck, nothing written."""
-    for i, (ref, files) in enumerate(((CAND, ["a.py"]), (FINAL, [ENVELOPE]))):
+    for i, (ref, files, kind) in enumerate(
+        ((CAND, ["a.py"], "candidate"), (FINAL, [ENVELOPE], "finalize"))
+    ):
         mgh.head_ref = ref
         mgh.files = [{"filename": f, "status": "modified"} for f in files]
         resp = run(world, capsys, request_id=f"req-{i:08d}")
         assert reason(resp) == NO_BINDING
+        assert resp.evidence["kind"] == kind
+        assert resp.evidence["trust_root"] == merge.TRUST_ROOT
     assert checker.requests == [] and world.files("intents") == []
     _no_mutation(mgh)
 
@@ -2784,3 +2788,138 @@ def test_binding_moved_before_settlement_is_conservative(
     _no_put(mgh)
     assert [o[-1] for o in merge_observations(world)] == ["conservative"]
     assert [e[2] for e in trust_events(world)] == [trust_state.CONSERVATIVE_SOURCE]
+
+
+# --- paid review #706 ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("case", "why", "kind"),
+    [
+        ("history_key", "history_token_required", "candidate"),
+        ("bundle", "bundle_dir_without_ws", "candidate"),
+        ("busy", "pr_busy", "candidate"),
+        ("patterns", "patterns_unavailable", None),
+        ("files", "too_many_files", None),
+        ("closed", "pr_state", None),
+        ("fork", "head_repo_foreign", None),
+        ("route", "ambiguous_kind", None),
+        ("brief", "brief_precheck_unavailable", "brief"),
+    ],
+)
+def test_pre_intent_refusals_carry_kind_and_root(
+    world: World,
+    mgh: MergeGitHub,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    case: str,
+    why: str,
+    kind: str | None,
+) -> None:
+    """Spec 5.5: every refusal of `merge` names `TrustRoot` (the binding's
+    identity), and its kind once the PR is routed -- by class, before the
+    intent too."""
+    trust_world.install(monkeypatch)
+    if case == "history_key":
+        trust_world.write_trust(world.lay)
+    else:
+        keyed_trust(world, monkeypatch, tmp_path)
+    mgh.files = [{"filename": f"{BUNDLE}/n1.md", "status": "modified"}]
+    if case == "bundle":
+        shared = replace(PRODUCT, bundle_dir="spec")
+        (world.lay.etc / "products.toml").write_text(dump_products({7: shared}))
+    if case == "busy":
+        monkeypatch.setattr(store, "pr_busy", lambda *_a: True)
+    if case == "patterns":
+        put_patterns(world, None)
+    if case == "files":
+        mgh.files = [{"filename": f"f{i}", "status": "added"} for i in range(300)]
+    if case == "closed":
+        mgh.pr_state = "closed"
+    if case == "fork":
+        mgh.head_repo = 8
+    if case == "route":
+        mgh.head_ref = "feat/x"
+    if case == "brief":
+        mgh.head_ref = "brief/x"
+    resp = run(world, capsys)
+    assert reason(resp) == ("refused", why)
+    assert resp.evidence["trust_root"] == IDENTITY
+    assert resp.evidence.get("kind") == kind
+    assert world.files("intents") == []
+
+
+def test_no_binding_refusal_root_unavailable(
+    world: World, mgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Without a binding `TrustRoot` says so: `{"unavailable": "no_binding"}`."""
+    mgh.head_ref = "feat/x"
+    resp = run(world, capsys)
+    assert reason(resp) == ("refused", "ambiguous_kind")
+    assert resp.evidence["trust_root"] == merge.TRUST_ROOT
+
+
+def test_repeats_beyond_max_rechecks_end_done(
+    world: World,
+    mgh: MergeGitHub,
+    v2: V2,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Paid review #706: a repeat's own check is no moved base -- more
+    repeats than `MAX_RECHECKS` of an `unknown` past the check still end
+    `done` with the one `PUT`; each repeat checks anew."""
+    admit = merge._admit
+    left = [merge.MAX_RECHECKS + 2]  # the first call and 6 repeats fail
+
+    def flaky(run_: merge.MergeRun) -> None:
+        if left[0] > 0:
+            left[0] -= 1
+            raise github.GitHubUnavailable("transient")
+        admit(run_)
+
+    monkeypatch.setattr(merge, "_admit", flaky)
+    for _ in range(merge.MAX_RECHECKS + 2):
+        assert reason(run(world, capsys)) == ("unknown", "github_unavailable")
+        _no_put(mgh)
+    resp = run(world, capsys)
+    assert resp.outcome == "done", resp
+    assert len(mgh.puts) == 1
+    rechecks = [
+        n for n in world.files("intents") if ".rechecked." in n and n.endswith(".json")
+    ]
+    assert len(rechecks) == merge.MAX_RECHECKS + 2
+    assert all(o[-1] == "accepted" for o in merge_observations(world))
+    assert len(merge_observations(world)) == merge.MAX_RECHECKS + 3
+
+
+def test_moved_base_still_bounded_after_repeats(
+    world: World,
+    mgh: MergeGitHub,
+    v2: V2,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The budget still holds for a base that keeps moving, after repeats
+    spent their own checks: more than `MAX_RECHECKS` moves is a verified
+    `base_unstable`, no `PUT`."""
+    same = tuple((s, f, None) for s, f in (("modified", f"{BUNDLE}/n1.md"),))
+    monkeypatch.setattr(merge, "pr_changes", lambda *_a: same)
+    admit = merge._admit
+    left = [2]  # the first call and one repeat end `unknown`
+
+    def flaky(run_: merge.MergeRun) -> None:
+        if left[0] > 0:
+            left[0] -= 1
+            raise github.GitHubUnavailable("transient")
+        admit(run_)
+
+    monkeypatch.setattr(merge, "_admit", flaky)
+    for _ in range(2):
+        assert reason(run(world, capsys)) == ("unknown", "github_unavailable")
+    moves = [f"{i:x}" * 40 for i in range(1, merge.MAX_RECHECKS + 3)]
+    mgh.tips = [TIP, *moves]  # the repeat's own check, then the base moves
+    resp = run(world, capsys)
+    assert reason(resp) == ("refused", "base_unstable")
+    _no_put(mgh)
