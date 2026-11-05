@@ -151,6 +151,7 @@ _DSCL = "/usr/bin/dscl"
 _GETENT = "/usr/bin/getent"
 _GROUPADD = "/usr/sbin/groupadd"
 _USERADD = "/usr/sbin/useradd"
+_GPASSWD = "/usr/bin/gpasswd"
 _PKILL = "/usr/bin/pkill"
 _PS = "/bin/ps"
 _OTOOL = "/usr/bin/otool"
@@ -1297,6 +1298,89 @@ def _run_checked(argv: list[str], step: str) -> None:
     result = run_command(argv)
     if not result.launched or result.returncode != 0:
         raise StepFailed(step, f"{' '.join(argv)}: {_brief(result)}")
+
+
+# --- groups (stage 3a: `df-history`, spec 4.1 rev 11) --------------------------
+
+
+def group_gid(name: str) -> int | None:
+    """The GID of the group `name`, or `None` when there is none."""
+    try:
+        return grp.getgrnam(name).gr_gid
+    except KeyError:
+        return None
+
+
+def group_members(name: str) -> frozenset[str] | None:
+    """Who is in the group `name`: its listed members and every user whose
+    primary group it is; `None` when there is no such group."""
+    try:
+        entry = grp.getgrnam(name)
+    except KeyError:
+        return None
+    primary = {p.pw_name for p in pwd.getpwall() if p.pw_gid == entry.gr_gid}
+    return frozenset(entry.gr_mem) | primary
+
+
+def group_problems(name: str, members: Sequence[str]) -> list[str]:
+    """The group `name` exists, its GID is its own and not 0, and its members
+    are exactly `members` (an extra or a missing one is named)."""
+    gid = group_gid(name)
+    have = group_members(name)
+    if gid is None or have is None:
+        return [f"группы {name} нет"]
+    problems: list[str] = []
+    others = sorted({g.gr_name for g in grp.getgrall() if g.gr_gid == gid} - {name})
+    if gid == 0 or others:
+        problems.append(f"группа {name}: gid {gid} не свой ({', '.join(others)})")
+    extra, missing = sorted(have - set(members)), sorted(set(members) - have)
+    if extra:
+        problems.append(f"группа {name}: лишние члены {extra}")
+    if missing:
+        problems.append(f"группа {name}: нет членов {missing}")
+    return problems
+
+
+def ensure_group(name: str, members: Sequence[str]) -> None:
+    """Create the group `name` if absent (a free id of `ID_RANGE`) and set
+    its members to exactly `members`; a repeat changes nothing. The caller
+    holds the writer lock (`_free_id` is not atomic). Problems after the
+    commands are `StepFailed`."""
+    step = f"group:{name}"
+    platform = detect_platform()
+    for argv in group_argv(platform, name, members, gid=_group_gid_to_set(name)):
+        _run_checked(argv, step)
+    problems = group_problems(name, members)
+    if problems:
+        raise StepFailed(step, "; ".join(problems))
+
+
+def _group_gid_to_set(name: str) -> int | None:
+    """`None` when the group has its GID; else a free id for it (macOS: a
+    record left without `PrimaryGroupID` by a crash gets one too)."""
+    if group_gid(name) is not None:
+        return None
+    return _free_id(detect_platform(), name)
+
+
+def group_argv(
+    platform: PlatformName, name: str, members: Sequence[str], *, gid: int | None
+) -> list[list[str]]:
+    """The OS commands that make the group `name` (when `gid` is given) and
+    set its members to exactly `members`."""
+    if platform == "macos-arm64":
+        path = f"/Groups/{name}"
+        made = (
+            []
+            if gid is None
+            else [
+                [_DSCL, ".", "-create", path],
+                [_DSCL, ".", "-create", path, "PrimaryGroupID", str(gid)],
+            ]
+        )
+        return [*made, [_DSCL, ".", "-create", path, "GroupMembership", *members]]
+    made = [] if gid is None else [[_GROUPADD, "--system", "--gid", str(gid), name]]
+    return [*made, [_GPASSWD, "-M", ",".join(members), name]]
 
 
 def _home_absent(layout: Layout, account: Account) -> bool:

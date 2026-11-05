@@ -47,6 +47,9 @@ class Calls:
     io_log: int = 0
     policy_result: dict[str, list[str]] = field(default_factory=dict)
     run_as: list[tuple[str, list[str]]] = field(default_factory=list)
+    #: The fake OS groups (name -> members) and each `ensure_group` call.
+    groups: dict[str, set[str]] = field(default_factory=dict)
+    ensured: list[tuple[str, tuple[str, ...]]] = field(default_factory=list)
 
 
 @dataclass
@@ -117,6 +120,19 @@ def setup(
         return [] if name in known else [f"нет записи {name}"]
 
     monkeypatch.setattr(plat, "verify_service_user", verify)
+
+    def ensure_group(name: str, members: tuple[str, ...]) -> None:
+        calls.ensured.append((name, tuple(members)))
+        calls.groups[name] = set(members)
+
+    def group_problems(name: str, members: tuple[str, ...]) -> list[str]:
+        have = calls.groups.get(name)
+        if have is None:
+            return [f"группы {name} нет"]
+        return [] if have == set(members) else [f"группа {name}: {sorted(have)}"]
+
+    monkeypatch.setattr(plat, "ensure_group", ensure_group)
+    monkeypatch.setattr(plat, "group_problems", group_problems)
     monkeypatch.setattr(plat, "approved_cli_problems", lambda _cli, _plat: [])
     monkeypatch.setattr(plat, "trusted_path_problems", lambda _path: [])
     real_getpwnam = pwd.getpwnam
@@ -761,3 +777,147 @@ def test_odd_generation_close_waits_for_the_preconditions(setup: Setup) -> None:
     with pytest.raises(StepFailed):
         setup.run()
     assert journal.read_generation(setup.lay) == gen
+
+
+# --- stage 3a: the group `df-history` (spec 4.1 rev 11) ---------------------------
+
+HISTORY = {"df-publisher", "df-precheck", OPERATOR}
+
+
+def test_roles_setup_rerun_on_2b_creates_history_group(setup: Setup) -> None:
+    """A 2b host (roles, wrappers and sudoers in place, no `df-history`): a
+    repeat of `roles setup` creates the group with exactly its members in
+    step `roles` and changes nothing else; a further repeat is a no-op."""
+    setup.run()
+    assert setup.calls.groups == {roles.HISTORY_GROUP: HISTORY}
+    del setup.calls.groups[roles.HISTORY_GROUP]  # as a 2b release left it
+    installed = list(setup.calls.installed)
+    before = len(setup.steps())
+    setup.run()
+    second = setup.steps()[before:]
+    assert ("roles", "done") in second
+    assert setup.calls.groups == {roles.HISTORY_GROUP: HISTORY}
+    assert setup.calls.ensured[-1] == (
+        roles.HISTORY_GROUP,
+        ("df-publisher", "df-precheck", OPERATOR),
+    )
+    assert setup.calls.installed == installed  # sudoers untouched
+    ensured = len(setup.calls.ensured)
+    setup.run()
+    assert len(setup.calls.ensured) == ensured
+    assert ("roles", "skip") in setup.steps()
+
+
+@dataclass
+class FakeGroups:
+    """`grp`/`pwd` of a host with groups as given; commands are recorded."""
+
+    groups: dict[str, tuple[int, list[str]]]
+    primary: dict[str, int] = field(default_factory=dict)
+    commands: list[list[str]] = field(default_factory=list)
+
+
+@pytest.fixture()
+def fake_groups(monkeypatch: pytest.MonkeyPatch) -> FakeGroups:
+    import grp as grp_module
+
+    fake = FakeGroups({"staff": (20, [])})
+
+    def getgrnam(name: str) -> object:
+        if name not in fake.groups:
+            raise KeyError(name)
+        gid, members = fake.groups[name]
+        return grp_module.struct_group((name, "*", gid, list(members)))
+
+    def getgrall() -> list[object]:
+        return [getgrnam(n) for n in fake.groups]
+
+    def getpwall() -> list[object]:
+        return [
+            pwd.struct_passwd((n, "*", 9000 + i, gid, "", "/", "/bin/false"))
+            for i, (n, gid) in enumerate(fake.primary.items())
+        ]
+
+    def run_command(argv: list[str], **_kw: object) -> plat.RunResult:
+        fake.commands.append(list(argv))
+        if argv[:3] == ["/usr/bin/dscl", ".", "-create"] and len(argv) > 5:
+            name = argv[3].removeprefix("/Groups/")
+            gid, _members = fake.groups.get(name, (0, []))
+            if argv[4] == "PrimaryGroupID":
+                fake.groups[name] = (int(argv[5]), _members)
+            if argv[4] == "GroupMembership":
+                fake.groups[name] = (gid, list(argv[5:]))
+        if argv[0] == "/usr/sbin/groupadd":
+            fake.groups[argv[-1]] = (int(argv[3]), [])
+        if argv[0] == "/usr/bin/gpasswd":
+            gid, _members = fake.groups[argv[-1]]
+            fake.groups[argv[-1]] = (gid, argv[2].split(","))
+        return plat.RunResult(0, b"", b"", True)
+
+    monkeypatch.setattr(plat.grp, "getgrnam", getgrnam)
+    monkeypatch.setattr(plat.grp, "getgrall", getgrall)
+    monkeypatch.setattr(plat.pwd, "getpwall", getpwall)
+    monkeypatch.setattr(plat, "run_command", run_command)
+    monkeypatch.setattr(plat, "_free_id", lambda _p, _n: 400)
+    return fake
+
+
+MEMBERS = ("df-publisher", "df-precheck", OPERATOR)
+
+
+def test_roles_setup_history_group_exact(
+    fake_groups: FakeGroups, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Membership is exact: an extra member (listed, or by primary group)
+    and a missing one are named; `ensure_group` sets the whole list (never
+    appends) and a repeat runs no creation command."""
+    name = roles.HISTORY_GROUP
+    assert plat.group_problems(name, MEMBERS) == [f"группы {name} нет"]
+    fake_groups.groups[name] = (400, ["df-publisher", "mallory"])
+    fake_groups.primary["eve"] = 400
+    problems = plat.group_problems(name, MEMBERS)
+    assert problems == [
+        f"группа {name}: лишние члены ['eve', 'mallory']",
+        f"группа {name}: нет членов ['alice', 'df-precheck']",
+    ]
+    fake_groups.primary.clear()
+    for platform in ("macos-arm64", "linux-x86_64"):
+        monkeypatch.setattr(plat, "detect_platform", lambda p=platform: p)
+        fake_groups.groups[name] = (400, ["mallory"])
+        fake_groups.commands.clear()
+        plat.ensure_group(name, MEMBERS)
+        assert plat.group_problems(name, MEMBERS) == []
+        assert len(fake_groups.commands) == 1  # the group exists: members only
+    del fake_groups.groups[name]
+    fake_groups.commands.clear()
+    plat.ensure_group(name, MEMBERS)  # linux, absent: created with a free id
+    assert fake_groups.commands == [
+        ["/usr/sbin/groupadd", "--system", "--gid", "400", name],
+        ["/usr/bin/gpasswd", "-M", "df-publisher,df-precheck,alice", name],
+    ]
+    fake_groups.groups["other"] = (400, [])
+    with pytest.raises(StepFailed, match="gid 400 не свой"):
+        plat.ensure_group(name, MEMBERS)
+
+
+def test_history_group_argv_per_platform() -> None:
+    """macOS: `dscl -create` of the record, its GID and the whole
+    `GroupMembership`; Linux: `groupadd --system --gid`, `gpasswd -M`."""
+    name = roles.HISTORY_GROUP
+    assert plat.group_argv("macos-arm64", name, MEMBERS, gid=401) == [
+        ["/usr/bin/dscl", ".", "-create", f"/Groups/{name}"],
+        ["/usr/bin/dscl", ".", "-create", f"/Groups/{name}", "PrimaryGroupID", "401"],
+        [
+            "/usr/bin/dscl",
+            ".",
+            "-create",
+            f"/Groups/{name}",
+            "GroupMembership",
+            *MEMBERS,
+        ],
+    ]
+    assert plat.group_argv("linux-x86_64", name, MEMBERS, gid=None) == [
+        ["/usr/bin/gpasswd", "-M", ",".join(MEMBERS), name],
+    ]
+    assert roles.history_members(OPERATOR) == MEMBERS
+    assert "df-exec" not in MEMBERS and "df-review" not in MEMBERS

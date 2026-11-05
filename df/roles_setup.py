@@ -5,7 +5,9 @@ this order, each settled by its own check so that a repeat changes nothing:
 
 1. `roles`: `ensure_roles` -- the accounts are created one after another,
    only here and only under the lock (`platform._free_id` ignores `creating`
-   intents, so two parallel creations could take the same id);
+   intents, so two parallel creations could take the same id); then the
+   group `df-history` with exactly `df-publisher`, `df-precheck` and the
+   operator (stage 3a; a repeat on a 2b host creates it);
 2. `dirs`: the stage-2 directories, born in their final owner and mode;
 3. `publisher-config`: `/etc/df/publisher.toml` from the accounts;
 4. `perimeter-init`: the perimeter database, created -- or an existing one
@@ -157,9 +159,9 @@ def _steps(layout: Layout, operator: str, python: Path) -> list[Step]:
     return [
         Step(
             "roles",
-            lambda: not _role_problems(layout),
-            lambda: _ensure_roles(layout),
-            lambda: _role_problems(layout),
+            lambda: not _role_problems(layout, operator),
+            lambda: _ensure_roles(layout, operator),
+            lambda: _role_problems(layout, operator),
         ),
         Step("dirs", lambda: _dirs_ready(layout), lambda: _make_dirs(layout)),
         Step(
@@ -196,16 +198,20 @@ def _steps(layout: Layout, operator: str, python: Path) -> list[Step]:
 # --- roles ---------------------------------------------------------------------
 
 
-def _ensure_roles(layout: Layout) -> None:
-    """The only creation of the roles; the caller holds the writer lock."""
+def _ensure_roles(layout: Layout, operator: str) -> None:
+    """The only creation of the roles, then the group `df-history` with
+    exactly its members (a 2b host gets it on a repeat); the caller holds
+    the writer lock."""
     roles.ensure_roles(layout)
+    plat.ensure_group(roles.HISTORY_GROUP, roles.history_members(operator))
 
 
-def _role_problems(layout: Layout) -> list[str]:
+def _role_problems(layout: Layout, operator: str) -> list[str]:
     problems: list[str] = []
     for name in roles.ROLE_USERS:
         problems += plat.verify_service_user(layout, name)
-    return problems
+    members = roles.history_members(operator)
+    return problems + plat.group_problems(roles.HISTORY_GROUP, members)
 
 
 # --- directories ---------------------------------------------------------------

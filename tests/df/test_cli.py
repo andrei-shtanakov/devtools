@@ -993,3 +993,28 @@ def test_only_import_module_of_df_outside_df_is_the_precheck() -> None:
         ("df/launcher_entry.py", "'df.state'"),
     ]
     assert cli.PRECHECK_MODULE == "governance.act_precheck"
+
+
+# --- stage 3a Task 12: the `setup-trust` sequence of the README ---------------
+
+SECTION_3A = "## Установка DarkFactory: этап 3a (доверие)"
+
+
+def test_documented_setup_trust_sequence_parses() -> None:
+    """`check --templates`, `check` without sudo (readers), then `sudo
+    write` (a writer); placeholders filled, each argv parses."""
+    text = README.read_text(encoding="utf-8")
+    section = text.split(SECTION_3A, 1)[1].split("\n## ", 1)[0]
+    block = re.findall(r"```sh\n(.*?)```", section, re.DOTALL)[0]
+    filled = re.sub(r"<id [^>]+>", "7", block)
+    filled = filled.replace("<digest из check>", "sha256:" + "0" * 64)
+    filled = filled.replace("<файл токена истории>", "/t")
+    commands = [shlex.split(line) for line in filled.splitlines() if line.strip()]
+    assert [c[:2] for c in commands] == [["darkfactory", "setup-trust"]] * 2 + [
+        ["sudo", "darkfactory"]
+    ]
+    argvs = [c[1:] for c in commands[:2]] + [commands[2][2:]]
+    modes = ["reader", "reader", "writer"]
+    for argv, mode in zip(argvs, modes, strict=True):
+        assert launcher_entry.mode_of(argv) == mode
+        assert cli.parsed_mode(cli._parse(argv)) == mode  # noqa: SLF001

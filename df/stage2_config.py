@@ -311,7 +311,7 @@ _TRUST_KEYS = {
     "transport",
 }
 #: Optional: the `gh` profile of the read-only history token (spec A rev 18
-#: section 6.2); the installer only parses it, writing it is stage 2b/3.
+#: section 6.2); `setup-trust write` writes it (stage 3a).
 HISTORY_KEY = "history_gh_config_dir"
 
 
@@ -363,6 +363,22 @@ def load_trust(path: Path) -> TrustBinding | None:
     """Read `trust.toml` through the hardened reader; absent -> None."""
     text = read_optional(path)
     return None if text is None else parse_trust(text)
+
+
+def dump_trust(binding: TrustBinding) -> str:
+    """Render `trust.toml` (`parse_trust` reads it back as `binding`)."""
+    data: dict[str, object] = {
+        "schema": _TRUST,
+        "host": binding.host,
+        "df_trust_repository_id": binding.df_trust_repository_id,
+        "df_trust_full_name": binding.df_trust_full_name,
+        "df_trust_branch": binding.df_trust_branch,
+        "approval_policy_repository_id": binding.approval_policy_repository_id,
+        "transport": binding.transport,
+    }
+    if binding.history_gh_config_dir is not None:
+        data[HISTORY_KEY] = binding.history_gh_config_dir
+    return dumps(data)
 
 
 # --- run record -------------------------------------------------------------

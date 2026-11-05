@@ -69,8 +69,8 @@ def sudo_call(
 ) -> bytes:
     """`df-publish <operation>` through `sudo`; its stdout.
 
-    `operation` is `perimeter-status` (the consumers) or `self-check` (root's
-    `setup-agent`). `layout` is the caller's (the entry's root, D2); `None` is
+    `operation` is `perimeter-status` (the consumers), `self-check` (root's
+    `setup-agent`) or `trust-status` (root's `setup-trust write`). `layout` is the caller's (the entry's root, D2); `None` is
     the default layout. A response comes with any exit code (`refused` is 2);
     a call that did not start, timed out or overflowed is `OSError`."""
     lay = default_layout() if layout is None else layout

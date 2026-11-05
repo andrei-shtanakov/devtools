@@ -64,6 +64,8 @@ _PEM = re.compile(
     rb"-----END \1PRIVATE KEY-----\r?\n?"
 )
 _TOKEN = re.compile(rb"github_pat_[A-Za-z0-9_]{1,244}|ghp_[A-Za-z0-9]{1,251}")
+#: The form of a GitHub token (also `setup-trust`'s PAT and history token).
+TOKEN_FORM = _TOKEN
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _DIR_FOLLOW_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
 _WRITABLE = stat.S_IWGRP | stat.S_IWOTH
