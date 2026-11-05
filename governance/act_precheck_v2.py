@@ -127,6 +127,21 @@ DAG_VARIANTS: Mapping[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
 }
 ALLOW, REFUSE, UNSET = "allow", "refuse", "unset"
 UNSUPPORTED = "unsupported_size"
+#: A permanent condition of a pinned input (review D-c of 3a Task 10): the
+#: observation cannot be reproduced by any re-evaluation, so the publisher
+#: completes it by K (`OUTCOME_OF_VERDICT`). Its reasons are a closed set,
+#: bounded by construction (the detail goes to the diagnostics only); no
+#: finding kind is added (the closed list of spec §6.1 is the owner's).
+IRREPRODUCIBLE = "irreproducible"
+#: The policy pin names another repository than `source.env` at H: the pair
+#: (A, H) and the pinned P can never agree.
+PIN_MISMATCH = "irreproducible: policy_pin_mismatch"
+#: Objects of the policy history up to the pinned P are gone (GitHub answers
+#: 404/422 for them), not merely unreadable now.
+OBJECTS_MISSING = "irreproducible: policy_objects_missing"
+IRREPRODUCIBLE_REASONS = frozenset({PIN_MISMATCH, OBJECTS_MISSING})
+#: How steward names a missing object of a REST read (`http: <status> <path>`).
+_GONE = re.compile(r"http: (?:404|422) ")
 #: Seconds the alarm backstop waits past `deadline` (the snapshot's own deadline
 #: kills its git process groups first).
 ALARM_SLACK = 2.0
@@ -405,6 +420,17 @@ class Answer:
     findings: tuple[Finding, ...] = ()
     #: Unverified premises beyond the part's (`load_trust`'s `Trust.unverified`).
     unverified: tuple[str, ...] = ()
+    #: What an `irreproducible` reason names (to the diagnostics, not the reason).
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class Irreproducible:
+    """A permanent condition of a pinned input: `code` of
+    `IRREPRODUCIBLE_REASONS`, `detail` for the diagnostics."""
+
+    code: str
+    detail: str
 
 
 def answer(
@@ -516,6 +542,8 @@ def _wire(req: Request, got: Answer, admin_digest: str) -> bytes:
         got = Answer(UNSET, f"invariant_violated: {problem}")
     whole = _masked(got.reason, req)
     diagnostics = "" if clip_detail(whole) == whole else f"reason: {whole}"
+    if got.detail:
+        diagnostics = f"detail: {_masked(got.detail, req)}"
     try:
         envelope = _envelope(req, got, admin_digest)
         return fit_verdict(envelope, got.findings, diagnostics)
@@ -610,13 +638,14 @@ def trust_part(
     head: str,
     policy: PolicyPin,
     validation: str,
-) -> Part | Unavailable:
+) -> Part | Irreproducible | Unavailable:
     """The pair (A, H) by SHA and the settings at the moment of the call (spec
     §6.1). Both finding lists are merged: `not_public` comes only from the pair.
     `policy` — the coordinates the publisher resolved by id: its branch is the
     default branch С-2 compares with the `source.env` branch on H
     (`policy_branch_mismatch`). A pin naming another policy repository than
-    `source.env` on H is `Unavailable` (the pin is stale)."""
+    `source.env` on H is `Irreproducible(PIN_MISMATCH)`: H's `source.env` is
+    pinned by its SHA, so no re-evaluation of the pair can agree (D-c)."""
     pair = act_trust_pair.read_pair(
         transport, binding, accepted, head, validation=validation
     )
@@ -626,8 +655,9 @@ def trust_part(
         return Part(pair.relation, None, pair.source, pair.findings, ())
     source = pair.snapshot.source
     if policy.full_name != source.repo:
-        return Unavailable(
-            f"policy pin {policy.full_name!r} != source.env {source.repo!r} at H"
+        return Irreproducible(
+            PIN_MISMATCH,
+            f"policy pin {policy.full_name!r} != source.env {source.repo!r} at H",
         )
     settings = act_trust_pair.settings_findings(
         transport, binding, pair.snapshot, policy_branch=policy.branch
@@ -669,12 +699,16 @@ def _trust_op(req: TrustRequest, ctx: Context) -> Answer:
     )
     if isinstance(part, Unavailable):
         return Answer(UNSET, part.reason)
+    if isinstance(part, Irreproducible):
+        return Answer(IRREPRODUCIBLE, part.code, detail=part.detail)
     findings = part.findings
     ranges = None
     if common.origin_route == "merge" and part.snapshot is not None:
         p_sha = common.policy.p_sha
         ranges = dataclasses.asdict(range_descriptor(part.snapshot.epochs, p_sha))
         broken = policy_history_break(transport, part.snapshot, p_sha)
+        if isinstance(broken, Irreproducible):
+            return Answer(IRREPRODUCIBLE, broken.code, part, detail=broken.detail)
         if isinstance(broken, Unavailable):
             return Answer(UNSET, broken.reason, part)
         findings = (*findings, *broken)
@@ -683,13 +717,16 @@ def _trust_op(req: TrustRequest, ctx: Context) -> Answer:
 
 def policy_history_break(
     transport: Any, snap: act_trust.TrustSnapshot, p_sha: str
-) -> tuple[Finding, ...] | Unavailable:
+) -> tuple[Finding, ...] | Irreproducible | Unavailable:
     """The policy-source history of every epoch of the journal on X: closed
     `anchor…last_confirmed`, open `anchor…P` by SHA (spec §6.1, К). Every epoch
     is read, as `load_ranges` does: a broken form — the finding
     `policy_history_break` (one per role, the first epoch) — wins over another
-    epoch's gap; with no finding a gap is `Unavailable`."""
+    epoch's gap; then objects of the pinned history that GitHub says are gone
+    (404/422) — `Irreproducible(OBJECTS_MISSING)`, permanent (D-c) — win over
+    a gap that is only unreadable now (`Unavailable`)."""
     gap: Unavailable | None = None
+    gone: Unavailable | None = None
     for epoch in snap.epochs:
         got = act_facts.history(
             transport, snap.source, epoch.anchor, epoch.last_confirmed, head=p_sha
@@ -697,8 +734,12 @@ def policy_history_break(
         if isinstance(got, act_facts.HistoryBreak):
             detail = clip_detail(f"epoch {epoch.epoch}: {got.reason}")
             return (Finding("policy_history_break", "approval-policy", detail),)
-        if isinstance(got, Unavailable) and gap is None:
-            gap = got
+        if isinstance(got, Unavailable):
+            if _GONE.match(got.reason):
+                gone = gone or Unavailable(f"epoch {epoch.epoch}: {got.reason}")
+            gap = gap or got
+    if gone is not None:
+        return Irreproducible(OBJECTS_MISSING, gone.reason)
     return () if gap is None else gap
 
 
@@ -814,6 +855,8 @@ def _premerge_deps(
             req.policy,
             validation,
         )
+        if isinstance(part, Irreproducible):  # `op: merge` keeps it unset
+            return Unavailable(f"{part.code}: {part.detail}")
         if isinstance(part, Unavailable):
             return part
         seen[:] = [part]
