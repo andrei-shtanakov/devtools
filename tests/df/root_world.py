@@ -55,11 +55,10 @@ import pytest
 from df import admin, cli, install, journal, launcher_entry, lockset, state
 from df import platform as plat
 from df.admin_tree import (
-    CONTRACT_FILES,
     PRECHECK_FILE,
     SitePins,
     TreeError,
-    governance_files,
+    load_tree_list,
     release_has_precheck,
 )
 from df.build import GIT_ISOLATION
@@ -102,8 +101,12 @@ ROLE_ENV: Mapping[str, str] = {"PATH": "/usr/bin:/bin", "LANG": "C"}
 _SYSTEM_ENV = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C"}
 _worlds = itertools.count(1)
 #: What a `devtools` fixture repo carries from this checkout: the admin
-#: tree's sources (2b Task 5: `df/`, the precheck closure, its contracts).
-ADMIN_TREE_PATHS: tuple[str, ...] = ("df", *governance_files(), *CONTRACT_FILES)
+#: tree's sources (2b Task 5: `df/`, the precheck closure, its contracts --
+#: the files of this checkout's `df/precheck_tree.toml`).
+ADMIN_TREE_PATHS: tuple[str, ...] = (
+    "df",
+    *load_tree_list(Path(__file__).resolve().parents[2]).files(),
+)
 #: Never part of the pin: bytecode, caches and editor leftovers (M7).
 FIXTURE_IGNORE = shutil.ignore_patterns(
     "__pycache__", "*.pyc", ".*.swp", "*~", ".DS_Store", ".pytest_cache", ".venv"

@@ -58,6 +58,8 @@ MODULES = (
     "act_premerge",
     "act_app_token",
     "act_barrier",
+    # df этап 3a (Task 3): общая поверхность D16 конвейера и издателя (O6)
+    "act_surface",
 )
 #: Определения, которые часть B добавляет в существующие модули (полный перечень по
 #: листингам Tasks 11–16); изменённые существующие функции — в разделе ревизии плана.
@@ -183,7 +185,8 @@ MODIFIED_EXISTING = {
     "task_bridge.deliver_for_run._capture_anchor": "пробрасывает `ws_id`; не суждение",
     "task_bridge.main": ("repropose_exclusive",),
     # интеграционное ревью части B (I-1–I-3, m-2)
-    "edge_check/publish.surface_violations": ("own_manifest",),
+    # df этап 3a (Task 3): проверки поверхности вынесены в `act_surface` (O6)
+    "edge_check/publish.surface_violations": "делегирует `act_surface.surface_violations` (место суждения); своя проверка — прежний `_unresolved` состава коммита",
     "runner._resume_wave": ("review_delivery", "pr_facts_failure"),
     "runner._step_candidate": "пауза `review/v1` — `waiting_human_approval` и текст об approve; проверки-отказа нет",
     "runner._finalize_wave": "стоп по отказу вынесен в `_stop_on_refusal` без изменений текста",
@@ -194,6 +197,7 @@ MODIFIED_EXISTING = {
     "approve_node._verify_nodes_in_base": "self-hash в base — `_content_hash` акта заявки (m-2); проверка прежняя",
     "edge_check/publish.publish_wave": "коммит evidence — через `an._commit_paths` (I-3), акт заявки — в текст ревью (N-2); проверки прежние",
     "edge_check/publish.checklist_body": "текст одобряющего ревью по акту заявки (N-2); не суждение",
+    "edge_check/publish.evidence_dir": "каталог evidence — из `ws_id` через `act_surface.evidence_dir`, не из `bundle_dir` (df 3a); не суждение",
 }
 
 S, N, L = (
@@ -228,6 +232,7 @@ HS = "tests/test_act_history_snapshot.py"
 PC = "tests/test_act_precheck.py"
 RP, OB = "tests/test_act_repropose.py", "tests/test_act_ops_body.py"
 OF, WR = "tests/test_act_ops_failures.py", "tests/test_act_wave_runner.py"
+SF = "tests/test_act_surface.py"
 ENVELOPE_FIELDS = (
     "node",
     "request_id",
@@ -548,6 +553,16 @@ JUDGMENT = {
             'f"invalid values: {bad}"',
             f"{PC}::test_kind_candidate_rejected_by_schema",
             "\"invalid values: ['kind']\"",
+        ),
+    ),
+    # --- act_precheck (этап 3a, Task 1): минимальный диспетчер v2
+    "act_precheck.parse_request_v2": (
+        r(
+            "nonce",
+            "act_precheck.parse_request_v2",
+            """raise InvalidRequest("invalid values: ['nonce']")""",
+            f"{PC}::test_v2_bad_nonce_exit_2",
+            "\"invalid values: ['nonce']\"",
         ),
     ),
     "act_precheck._no_duplicates": (
@@ -3888,13 +3903,51 @@ JUDGMENT = {
             "act_node.WAITING_DELIVERY",
         ),
     ),
-    "edge_check/publish.surface_violations#own_manifest": (
+    # --- act_surface: поверхность заявки D16 (df этап 3a, Task 3; O6)
+    "act_surface.surface_violations": (
+        r(
+            "foreign_path",
+            "act_surface.surface_violations",
+            "if path not in allowed",
+            f"{SF}::test_surface_full_pr_foreign_file_in_early_commit_refused",
+            '"scripts/foreign.sh"',
+        ),
         r(
             "own_manifest",
-            "edge_check/publish.surface_violations",
-            'op.get("act") == ACT_REVIEW_V1',
-            f"{WR}::test_review_wave_publishes_candidate_with_its_manifest",
-            '"completed"',
+            "act_surface.surface_violations",
+            "act == ACT_REVIEW_V1",
+            f"{SF}::test_surface_manifest_included",
+            '"workstreams/WS-1/approvals/requests/approve-1-0-1.yaml"',
+        ),
+        r(
+            "downstream_closure",
+            "act_surface.surface_violations",
+            "downstream_closure(dag, node)",
+            f"{SF}::test_surface_stale_downstream_allowed",
+            '"workstreams/WS-1/spec/10-requirements.md"',
+        ),
+        r(
+            "w1_discovery",
+            "act_surface.surface_violations",
+            '"charter" in nodes',
+            f"{SF}::test_surface_w1_discovery_allowed",
+            '"workstreams/WS-1/spec/00-discovery/brief.md"',
+        ),
+    ),
+    "act_surface._own_evidence": (
+        r(
+            "evidence_json",
+            "act_surface._own_evidence",
+            "EVIDENCE_RE.fullmatch(path)",
+            f"{SF}::test_evidence_only_json",
+            '"workstreams/WS-1/evidence/edge-check/design--requirements.md"',
+        ),
+        r(
+            "evidence_ws",
+            "act_surface._own_evidence",
+            'path.startswith(evidence_dir(ws_id) + "/")',
+            f"{SF}::test_evidence_only_json",
+            '"workstreams/WS-OTHER/evidence/edge-check/design--requirements.json"',
         ),
     ),
     "runner._resume_wave#review_delivery": (
@@ -3946,6 +3999,7 @@ _PC_FIELD = (
     "предикат формы поля запроса; отказ выносит `parse_request` (`invalid values`)"
 )
 NOT_JUDGMENT = {
+    "act_surface.evidence_dir": "путь каталога evidence воркстрима; не суждение",
     "task_bridge._admission_refusal": "делегирует `act_status.noop_refusal` (место суждения)",
     **{
         f"act_facts.{n}": _ADAPTER
@@ -3985,6 +4039,7 @@ NOT_JUDGMENT = {
     "act_precheck._default_transport": _BUILD,
     "act_precheck.request_digest": _BUILD,
     "act_precheck.verdict": _BUILD,
+    "act_precheck.verdict_v2": "строит вердикт v2; исход по `complete_v2`, который судит `precheck serve` (`df/cli._tree_complete`)",
     "act_precheck._judge_stop": "передаёт отказ `_stop_target` и решение `_stop_in_history`; своей проверки нет",
     "act_precheck._snapshot": _IO,
     "act_precheck._remove": _IO,

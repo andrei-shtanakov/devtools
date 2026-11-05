@@ -28,14 +28,18 @@ import pytest
 
 from df import admin, admin_tree
 from df.admin_tree import (
-    CONTRACT_FILES,
     FORBIDDEN_SUFFIXES,
-    GOVERNANCE_MODULES,
+    LEGACY_2B,
     SITE_SRC,
     STEWARD_REPO,
+    TREE_LIST,
     SitePins,
+    TreeList,
+    closure_problems,
     install_site,
+    load_tree_list,
     locked_pins,
+    tree_problems,
 )
 from df.digest import TreeError
 from df.journal import StepFailed
@@ -61,7 +65,9 @@ from tests.df.site_world import (
     walk_files,
     write_checkout,
 )
-from tests.test_act_precheck import FORBIDDEN, _closure
+from tests.test_act_precheck import FORBIDDEN, _closure, _module_file
+
+CONTRACT_FILES = LEGACY_2B.contract_files
 
 
 @pytest.fixture()
@@ -167,31 +173,271 @@ def cache(layout: Layout) -> Path:
 # ---------- the closure and its contracts ----------
 
 
+def _import_time_closure(start: str) -> set[str]:
+    """Modules of this checkout that importing `start` executes: imports at
+    module level (also under `if`/`try`/class bodies), not inside functions,
+    followed transitively; a package's parent first."""
+    local, todo = set(), [start]
+    while todo:
+        name = todo.pop()
+        file = _module_file(name)
+        if name in local or file is None:
+            continue
+        local.add(name)
+        if "." in name:
+            todo.append(name.rsplit(".", 1)[0])
+        stack = list(ast.parse(file.read_text(encoding="utf-8")).body)
+        while stack:
+            node = stack.pop()
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+                continue
+            if isinstance(node, ast.Import):
+                todo += [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                todo += [node.module, *(f"{node.module}.{a.name}" for a in node.names)]
+            stack += list(ast.iter_child_nodes(node))
+    return local
+
+
 def test_governance_modules_equal_ast_closure() -> None:
-    """The constant is the AST closure of `act_precheck`, deferred imports
-    included; `ops`, `runner`, `df` stay out; external names are only the
-    stdlib, `steward` and `yaml`."""
+    """Retargeted to the frozen `LEGACY_2B` (3a Task 1, ruling 6): what
+    importing `act_precheck` executes stays within the 2b list -- so a tree
+    an older installer built still imports it and serves v1, the v2
+    program being imported only after the completeness check -- and the 2b
+    list stays within the AST closure (deferred imports included). `ops`,
+    `runner`, `df` stay out; external names are only the stdlib, `steward`
+    and `yaml`."""
     local, external = _closure("governance.act_precheck")
-    assert sorted(local) == sorted(GOVERNANCE_MODULES)
+    eager = _import_time_closure("governance.act_precheck")
+    assert eager <= set(LEGACY_2B.modules) <= local
+    assert "governance.act_precheck" in eager
     assert [
         m for m in (*FORBIDDEN, "governance.ops", "governance.runner") if m in local
     ] == []
     assert not any(m == "df" or m.startswith("df.") for m in local)
     assert sorted(external - set(sys.stdlib_module_names)) == ["steward", "yaml"]
-    assert all((ROOT / rel).is_file() for rel in admin_tree.governance_files())
+    assert all((ROOT / rel).is_file() for rel in LEGACY_2B.module_files())
+
+
+def test_list_matches_ast_closure() -> None:
+    """This checkout's `df/precheck_tree.toml` is EQUAL to the AST closure of
+    `act_precheck` (deferred imports included): a task that makes an import
+    reachable updates the list in the same commit. The installer's own
+    check (`closure_problems`) and the files (`tree_problems`) agree."""
+    local, _external = _closure("governance.act_precheck")
+    listing = load_tree_list(ROOT)
+    assert sorted(listing.modules) == sorted(local)
+    assert closure_problems(ROOT, listing) == []
+    assert tree_problems(ROOT, listing) == []
+
+
+def test_2b_modules_retained() -> None:
+    """Spec 3.9 rev 11 (the 2b -> 3a path): the list keeps every 2b module
+    and contract file, none renamed -- else the 2b installer, which copies
+    `LEGACY_2B` from this pin, would refuse it (`TreeError`)."""
+    listing = load_tree_list(ROOT)
+    assert set(LEGACY_2B.modules) <= set(listing.modules)
+    assert set(LEGACY_2B.contract_files) <= set(listing.contract_files)
+    assert set(LEGACY_2B.files()) <= set(listing.files())
+    assert all((ROOT / rel).is_file() for rel in LEGACY_2B.files())
+
+
+def test_legacy_pin_falls_back_to_2b_list(tmp_path: Path) -> None:
+    """A pin without `df/precheck_tree.toml` (2b) gets `LEGACY_2B`: the 2b
+    closure, frozen, with the package as `__init__.py`."""
+    (tmp_path / "df").mkdir()
+    assert load_tree_list(tmp_path) == LEGACY_2B
+    assert LEGACY_2B.modules == (
+        "governance",
+        "governance.act_anon",
+        "governance.act_envelope",
+        "governance.act_forge_http",
+        "governance.act_git_rows",
+        "governance.act_history",
+        "governance.act_history_snapshot",
+        "governance.act_precheck",
+        "governance.act_request",
+        "governance.act_time",
+        "governance.approval_branches",
+        "governance.ssot_env",
+    )
+    assert LEGACY_2B.contract_files == ("contracts/approval-branches/v1/patterns.env",)
+    assert LEGACY_2B.module_files()[:2] == (
+        "governance/__init__.py",
+        "governance/act_anon.py",
+    )
+
+
+def _write_list(ref: Path, text: str) -> None:
+    (ref / "df").mkdir(parents=True, exist_ok=True)
+    (ref / TREE_LIST).write_text(text)
+
+
+def test_tree_list_read_from_pin_as_data(tmp_path: Path) -> None:
+    """The pin's own list is read as data (`tomllib`): its modules and files,
+    not this checkout's and not the 2b constant; nothing of the pin runs."""
+    _write_list(
+        tmp_path,
+        'schema = "df/precheck-tree/v1"\n'
+        'modules = ["governance", "governance.act_precheck", "governance.x.y"]\n'
+        'contract_files = ["contracts/a/v1/a.env"]\n'
+        "# __import__('os').system('false') is never executed\n",
+    )
+    listing = load_tree_list(tmp_path)
+    assert listing == TreeList(
+        ("governance", "governance.act_precheck", "governance.x.y"),
+        ("contracts/a/v1/a.env",),
+    )
+    assert listing.files() == (
+        "governance/__init__.py",
+        "governance/act_precheck.py",
+        "governance/x/y.py",
+        "contracts/a/v1/a.env",
+    )
+    assert tree_problems(tmp_path, listing) == list(listing.files())
+
+
+_V1 = 'schema = "df/precheck-tree/v1"\n'
+_EMPTY = "modules = []\ncontract_files = []\n"
+
+
+def _contracts(value: str) -> str:
+    return f"{_V1}modules = []\ncontract_files = {value}\n"
+
+
+def _modules(value: str) -> str:
+    return f"{_V1}modules = {value}\ncontract_files = []\n"
+
+
+@pytest.mark.parametrize(
+    "text,why",
+    [
+        (f"schema = 1\n{_EMPTY}", "schema"),
+        (f'schema = "df/precheck-tree/v2"\n{_EMPTY}', "schema"),
+        (f"{_V1}modules = []\n", "ключи"),
+        (f"{_V1}{_EMPTY}x = 1\n", "ключи"),
+        (_modules("[1]"), "не список строк"),
+        (_modules('"governance"'), "не список строк"),
+        (_modules('["a..b"]'), "недопустимые"),
+        (_modules('["a", "a"]'), "повторённые"),
+        (_contracts('["/etc/passwd"]'), "недопустимые"),
+        (_contracts('["contracts/../x"]'), "недопустимые"),
+        (_contracts('["contracts/./x"]'), "недопустимые"),
+        (_contracts('["contracts/x.pth"]'), "недопустимые"),
+        ("schema = [", "не разбирается"),
+    ],
+)
+def test_tree_list_refusals(tmp_path: Path, text: str, why: str) -> None:
+    _write_list(tmp_path, text)
+    with pytest.raises(TreeError, match=why):
+        load_tree_list(tmp_path)
+
+
+def test_tree_list_link_refused(tmp_path: Path) -> None:
+    (tmp_path / "df").mkdir()
+    (tmp_path / "real.toml").write_text((ROOT / TREE_LIST).read_text())
+    (tmp_path / TREE_LIST).symlink_to(tmp_path / "real.toml")
+    with pytest.raises(TreeError, match="не открывается"):
+        load_tree_list(tmp_path)
+
+
+@pytest.mark.parametrize("where", ["top", "deferred"])
+def test_installer_refuses_pin_with_unlisted_import(fl: FakeLayout, where: str) -> None:
+    """An artificial pin whose `act_precheck.py` imports a module of the
+    checkout that its list lacks -- at the top or deferred in a function:
+    `closure_problems` names it, `install_admin` refuses (no admin tree)
+    and so does `expected_admin_digest`."""
+    lay = fl.layout
+    ref = devtools_ref(fl)
+    (ref / "governance" / "act_unlisted.py").write_text("")
+    source = (
+        "import governance.act_unlisted\n"
+        if where == "top"
+        else "def serve():\n    from governance import act_unlisted\n"
+    )
+    (ref / "governance" / "act_precheck.py").write_text(source)
+    problems = closure_problems(ref, load_tree_list(ref))
+    assert problems == [
+        f"governance.act_unlisted (governance/act_unlisted.py) не в {TREE_LIST}"
+    ]
+    with pytest.raises(StepFailed, match=r"governance\.act_unlisted") as exc:
+        admin.install_admin(lay, ID, devtools_ref=ref, git=SYSTEM_GIT)
+    assert exc.value.step == "admin"
+    assert not os.path.lexists(lay.admin_dir(ID))
+    with pytest.raises(TreeError, match=r"governance\.act_unlisted"):
+        admin.expected_admin_digest(ref, layout=lay, git=SYSTEM_GIT)
+
+
+@pytest.mark.parametrize("file_kept", [False, True], ids=["file-gone", "file-kept"])
+def test_installer_requires_2b_files_of_the_pin(
+    fl: FakeLayout, file_kept: bool
+) -> None:
+    """Fix round 1: a pin whose own list omits a 2b module (here
+    `governance.act_time`) -- whether the pin also lacks its file or not --
+    is refused at install, naming the file, and no `admin/<id>` is made:
+    `precheck serve` needs every 2b file (v1 runs on them), so such a tree
+    could serve nothing (2b refused it at install too)."""
+    lay = fl.layout
+    ref = devtools_ref(fl)
+    modules = [m for m in LEGACY_2B.modules if m != "governance.act_time"]
+    _write_list(
+        ref,
+        f"{_V1}modules = {json.dumps(modules)}\n"
+        f"contract_files = {json.dumps(list(LEGACY_2B.contract_files))}\n",
+    )
+    if not file_kept:
+        (ref / "governance" / "act_time.py").unlink()
+    with pytest.raises(TreeError, match=r"governance/act_time\.py"):
+        admin_tree.release_has_precheck(ref)
+    with pytest.raises(StepFailed, match=r"governance/act_time\.py") as exc:
+        admin.install_admin(lay, ID, devtools_ref=ref, git=SYSTEM_GIT)
+    assert exc.value.step == "admin"
+    assert not os.path.lexists(lay.admin_dir(ID))
+    with pytest.raises(TreeError, match=r"governance/act_time\.py"):
+        admin.expected_admin_digest(ref, layout=lay, git=SYSTEM_GIT)
+
+
+@pytest.mark.parametrize(
+    "source,needle",
+    [
+        ("from . import act_time\n", "относительный импорт"),
+        ("def (:\n", "не разбирается"),
+        ("import df.cli\n", "df ("),
+    ],
+)
+def test_closure_problems_named(fl: FakeLayout, source: str, needle: str) -> None:
+    ref = devtools_ref(fl)
+    (ref / "df" / "cli.py").write_text("")
+    (ref / "governance" / "act_precheck.py").write_text(source)
+    problems = closure_problems(ref, load_tree_list(ref))
+    assert any(needle in p for p in problems), problems
+
+
+def test_listed_module_resolving_to_another_file_named(tmp_path: Path) -> None:
+    """A module listed as plain while the pin has it as a package (or the
+    reverse) is named: the copy would take the wrong file."""
+    (tmp_path / "governance" / "x").mkdir(parents=True)
+    (tmp_path / "governance" / "__init__.py").write_text("")
+    (tmp_path / "governance" / "x" / "__init__.py").write_text("")
+    (tmp_path / "governance" / "act_precheck.py").write_text("import governance.x\n")
+    listing = TreeList(("governance", "governance.act_precheck", "governance.x"), ())
+    assert closure_problems(tmp_path, listing) == [
+        f"governance.x: в {TREE_LIST} governance/x.py, в пине governance/x/__init__.py"
+    ]
 
 
 def _uses_file(module: str) -> bool:
-    path = ROOT / admin_tree.governance_files()[GOVERNANCE_MODULES.index(module)]
+    listing = load_tree_list(ROOT)
+    path = ROOT / listing.module_files()[listing.modules.index(module)]
     tree = ast.parse(path.read_text(encoding="utf-8"))
     return any(isinstance(n, ast.Name) and n.id == "__file__" for n in ast.walk(tree))
 
 
 def test_contract_files_cover_file_relative_reads() -> None:
     """Every module of the closure that names `__file__` resolves it to
-    paths outside `governance/`; those paths are exactly `CONTRACT_FILES`,
-    each a regular file of this tree."""
-    users = [m for m in GOVERNANCE_MODULES if _uses_file(m)]
+    paths outside `governance/`; those paths are exactly the list's
+    contract files, each a regular file of this tree."""
+    users = [m for m in load_tree_list(ROOT).modules if _uses_file(m)]
     assert users  # positive control: approval_branches reads patterns.env
     found: set[str] = set()
     for name in users:
@@ -205,8 +451,9 @@ def test_contract_files_cover_file_relative_reads() -> None:
         }
         assert rels, f"{name}: names __file__ but no path outside governance/"
         found |= rels
-    assert sorted(found) == sorted(CONTRACT_FILES)
-    assert all((ROOT / rel).is_file() for rel in CONTRACT_FILES)
+    contracts = load_tree_list(ROOT).contract_files
+    assert sorted(found) == sorted(contracts)
+    assert all((ROOT / rel).is_file() for rel in contracts)
 
 
 def test_locked_pins_from_uv_lock() -> None:
@@ -594,7 +841,7 @@ def test_install_admin_exact_tree(
         "df/__init__.py",
         "df/launcher_entry.py",
         "governance/",
-        *admin_tree.governance_files(),
+        *LEGACY_2B.module_files(),
         "contracts/",
         "contracts/approval-branches/",
         "contracts/approval-branches/v1/",
@@ -917,7 +1164,7 @@ def test_legacy_checkout_installs_df_only(fl: FakeLayout, shape: str) -> None:
     (ref / "uv.lock").unlink()
     shutil.rmtree(cache(lay))
     keep = {*OLD_MODULES_335188F, *CONTRACT_FILES}
-    for rel in (*admin_tree.governance_files(), *CONTRACT_FILES):
+    for rel in LEGACY_2B.files():
         if shape == "df-only" or rel not in keep:
             (ref / rel).unlink()
     assert not admin_tree.release_has_precheck(ref)
@@ -956,7 +1203,7 @@ def test_partial_closure_refused(fl: FakeLayout, missing: str) -> None:
 
 def test_full_closure_is_a_precheck_release(fl: FakeLayout) -> None:
     assert admin_tree.release_has_precheck(devtools_ref(fl))
-    assert admin_tree.PRECHECK_FILE in admin_tree.governance_files()
+    assert admin_tree.PRECHECK_FILE in LEGACY_2B.module_files()
 
 
 @pytest.mark.parametrize("case", ["no-df", "unreadable-module"])

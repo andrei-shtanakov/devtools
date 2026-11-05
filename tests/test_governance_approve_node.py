@@ -3515,12 +3515,12 @@ def test_publish_wave_adds_evidence_creates_pr_and_approving_review(
         w.target, "show", "--name-only", "--format=", op["head_sha"]
     ).splitlines()
     assert sorted(files) == [
-        "evidence/edge-check/charter--charter-vs-customer-brief.json",
-        "evidence/edge-check/charter--charter-vs-engineer-brief.json",
+        f"workstreams/{WS_ID}/evidence/edge-check/charter--charter-vs-customer-brief.json",
+        f"workstreams/{WS_ID}/evidence/edge-check/charter--charter-vs-engineer-brief.json",
     ]
     evidence = _show(
         w.target,
-        f"{op['head_sha']}:evidence/edge-check/charter--charter-vs-customer-brief.json",
+        f"{op['head_sha']}:workstreams/{WS_ID}/evidence/edge-check/charter--charter-vs-customer-brief.json",
     )
     assert '"verdict": "PASS"' in evidence
     pr = op["candidate_pr"]
@@ -3542,7 +3542,8 @@ def test_publish_wave_adds_evidence_creates_pr_and_approving_review(
     w.sync()
     assert w.base_meta("00-charter.md")["status"] == na.STATUS_APPROVED
     assert (
-        w.target / "evidence/edge-check/charter--charter-vs-customer-brief.json"
+        w.target
+        / f"workstreams/{WS_ID}/evidence/edge-check/charter--charter-vs-customer-brief.json"
     ).exists()
 
 

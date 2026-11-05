@@ -109,6 +109,8 @@ _NO_SITE = (
     "precheck serve: в административном дереве нет каталога site/ "
     "при governance/act_precheck.py: переустановите релиз"
 )
+_NO_2B = "precheck serve: в административном дереве нет модулей предпроверки 2b"
+_INCOMPLETE = f"precheck serve: {admin_tree.INCOMPLETE_TREE}"
 _REAP = "precheck serve: уборка"
 #: Seconds root waits for `publisher perimeter-restore` (the barrier wait,
 #: a copy of up to `perimeter.MAX_COPY` and its integrity check).
@@ -511,12 +513,16 @@ def _precheck_serve(lay: Layout, read: ReadResult) -> int:
     """`precheck serve` (spec 4.1 rev 10, plan decisions 3-5): only the
     `df-precheck` of `accounts.toml` (else exit 2, nothing else done), only
     on a release whose admin tree has the program (a legacy one is refused
-    by name) and its `site/` (a tree with the program but without it, too).
-    Then the environment becomes exactly `PRECHECK_ENV` plus the
-    role's HOME, the leftovers of earlier runs are reaped (`_reap`),
-    `admin/<id>/site` goes to the END of `sys.path` (after `admin/<id>`,
-    which the entry put first, and stdlib), and the program of that tree
-    answers the one request on stdin."""
+    by name), its `site/` and the 2b modules v1 runs on (a tree without
+    them, too). Before anything is imported the tree is checked against its
+    own list (`admin_tree.load_tree_list`, `tree_problems`; 3a Task 1): a
+    tree an older installer built without files of the list is named on
+    stderr and still serves v1, its v2 requests are refused
+    (`complete_v2`). Then the environment becomes exactly `PRECHECK_ENV`
+    plus the role's HOME, the leftovers of earlier runs are reaped
+    (`_reap`), `admin/<id>/site` goes to the END of `sys.path` (after
+    `admin/<id>`, which the entry put first, and stdlib), and the program of
+    that tree answers the one request on stdin."""
     account = load_accounts(lay.accounts).get(roles.PRECHECK_USER)
     if account is None or account.state != "ready" or os.getuid() != account.uid:
         raise Refusal(_NOT_PRECHECK)
@@ -530,6 +536,7 @@ def _precheck_serve(lay: Layout, read: ReadResult) -> int:
         raise Refusal(_NO_PRECHECK)
     if not os.path.isdir(tree / SITE_DIR):
         raise Refusal(_NO_SITE)
+    complete_v2 = _tree_complete(tree)
     home = lay.role_home(roles.PRECHECK_USER)
     os.environ.clear()
     os.environ.update({**PRECHECK_ENV, "HOME": str(home)})
@@ -537,8 +544,28 @@ def _precheck_serve(lay: Layout, read: ReadResult) -> int:
     sys.path.append(str(tree / SITE_DIR))
     serve = _load_serve(tree)
     return serve(
-        sys.stdin.buffer, sys.stdout, admin_digest=snap.entry.admin_digest, home=home
+        sys.stdin.buffer,
+        sys.stdout,
+        admin_digest=snap.entry.admin_digest,
+        home=home,
+        complete_v2=complete_v2,
     )
+
+
+def _tree_complete(tree: Path) -> bool:
+    """Whether the admin tree holds every file of its list (spec 3.9 rev 11,
+    `df/` code only): the 2b files are required (v1 runs on them), a
+    shortfall of the rest is named on stderr and narrows the program to v1."""
+    missing_2b = admin_tree.tree_problems(tree, admin_tree.LEGACY_2B)
+    if missing_2b:
+        raise Refusal(f"{_NO_2B}: {', '.join(missing_2b)}")
+    try:
+        missing = admin_tree.tree_problems(tree, admin_tree.load_tree_list(tree))
+    except TreeError as exc:
+        raise Refusal(f"precheck serve: {exc}") from exc
+    if missing:
+        print(f"{_INCOMPLETE}: нет {', '.join(missing)}", file=sys.stderr)
+    return not missing
 
 
 def _reap(uid: int) -> None:

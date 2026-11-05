@@ -1,0 +1,23 @@
+# What the admin tree carries beyond `df/` for the precheck program
+# (spec 3.9 rev 11): the AST import closure of `governance/act_precheck.py`,
+# deferred imports included, and the files those modules read relative to
+# their `__file__`. Data, read by the installer with `tomllib` (never
+# executed); `tests/df/test_admin_tree.py` holds it equal to the closure.
+# A task that makes an import reachable from `act_precheck` updates it in
+# the same commit; the 2b modules and contract files are never removed.
+schema = "df/precheck-tree/v1"
+modules = [
+    "governance",
+    "governance.act_anon",
+    "governance.act_envelope",
+    "governance.act_forge_http",
+    "governance.act_git_rows",
+    "governance.act_history",
+    "governance.act_history_snapshot",
+    "governance.act_precheck",
+    "governance.act_request",
+    "governance.act_time",
+    "governance.approval_branches",
+    "governance.ssot_env",
+]
+contract_files = ["contracts/approval-branches/v1/patterns.env"]

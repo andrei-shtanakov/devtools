@@ -6,16 +6,19 @@ the documented command drifts from the `init` parser or from `InstallConfig`.
 
 from __future__ import annotations
 
+import io
+import json
 import os
 import re
 import shlex
+import shutil
 import sys
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-from df import cli, launcher_entry, roles_setup, state
+from df import admin_tree, cli, launcher_entry, roles_setup, state
 from df.config import REQUIRED_CLI, ConfigError, InstallConfig
 from df.journal import Stable
 from df.paths import Layout
@@ -418,7 +421,8 @@ def _precheck_world(
     tmp_path: Path, uid: int, *, program: bool = True, site: bool = True
 ) -> tuple[Layout, Stable]:
     """An account `df-precheck` of `uid`, release `r1` current, its admin
-    tree with `governance/act_precheck.py` (`program`) or a legacy one."""
+    tree with the 2b files as stand-ins (`program`: `act_precheck.py`
+    among them) or a legacy one."""
     from df.config import (
         Account,
         ReleaseEntry,
@@ -434,8 +438,9 @@ def _precheck_world(
     tree = lay.admin_dir(RELEASE)
     (tree / "df").mkdir(parents=True)
     if program:
-        (tree / "governance").mkdir()
-        (tree / "governance" / "act_precheck.py").write_text("")
+        for rel in admin_tree.LEGACY_2B.files():
+            (tree / rel).parent.mkdir(parents=True, exist_ok=True)
+            (tree / rel).write_text("")
         if site:
             (tree / "site").mkdir()
     entry = ReleaseEntry(RELEASE, "d", ADMIN_DIGEST, "3.12.13", "allowed", None)
@@ -495,18 +500,27 @@ def test_precheck_serve_resets_environment(
 ) -> None:
     """The role's own process: the environment becomes exactly PATH, LANG
     and the role's HOME; `site` goes to the END of `sys.path`; then
-    `serve(stdin, stdout, admin_digest=<record>, home=<role home>)`."""
+    `serve(stdin, stdout, admin_digest=<record>, home=<role home>,
+    complete_v2=True)` (a 2b tree: no list in its `df/`, `LEGACY_2B`)."""
     lay, read = _precheck_world(tmp_path, os.getuid())
     tree = lay.admin_dir(RELEASE)
     seen: dict[str, object] = {}
 
-    def serve(stdin: object, stdout: object, *, admin_digest: str, home: Path) -> int:
+    def serve(
+        stdin: object,
+        stdout: object,
+        *,
+        admin_digest: str,
+        home: Path,
+        complete_v2: bool,
+    ) -> int:
         seen.update(
             env=dict(os.environ),
             path=list(sys.path),
             streams=(stdin, stdout),
             admin_digest=admin_digest,
             home=home,
+            complete_v2=complete_v2,
         )
         return 0
 
@@ -528,6 +542,25 @@ def test_precheck_serve_resets_environment(
     assert seen["loaded_from"] == tree
     assert seen["streams"] == (sys.stdin.buffer, sys.stdout)
     assert (seen["admin_digest"], seen["home"]) == (ADMIN_DIGEST, home)
+    assert seen["complete_v2"] is True
+
+
+def test_precheck_serve_refuses_tree_without_2b_module(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    environ: None,
+) -> None:
+    """The program without a 2b module it imports: refused by name before
+    anything is imported (not a `ModuleNotFoundError` inside it)."""
+    lay, read = _precheck_world(tmp_path, os.getuid())
+    (lay.admin_dir(RELEASE) / "governance" / "act_time.py").unlink()
+    monkeypatch.setattr(cli, "_load_serve", _no_serve)
+    path = list(sys.path)
+    assert _precheck(lay, read) == 2
+    err = capsys.readouterr().err
+    assert "нет модулей предпроверки 2b: governance/act_time.py" in err
+    assert sys.path == path
 
 
 def test_precheck_serve_reaps_after_reset_before_load(
@@ -679,6 +712,87 @@ def test_load_serve_refuses_a_module_outside_the_tree(
     spelled = real / "a" / "admin" / ".." / "admin" / RELEASE
     with pytest.raises(cli.Refusal, match="не из"):
         cli._load_serve(spelled)  # noqa: SLF001
+
+
+def _old_installer_tree(lay: Layout) -> Path:
+    """The admin tree a 2b installer builds from a pin whose list grew past
+    2b (spec 3.9 rev 11, the 2b -> 3a path): the real 2b files of this
+    checkout (`LEGACY_2B`, all it copies outside `df/`), and in `df/` the
+    pin's list -- this checkout's plus a v2 module the tree lacks."""
+    tree = lay.admin_dir(RELEASE)
+    for rel in admin_tree.LEGACY_2B.files():
+        shutil.copyfile(admin_tree_root() / rel, tree / rel)
+    grown = admin_tree.load_tree_list(admin_tree_root())
+    modules = json.dumps([*grown.modules, "governance.act_precheck_v2"])
+    contracts = json.dumps(list(grown.contract_files))
+    (tree / admin_tree.TREE_LIST).write_text(
+        f'schema = "{admin_tree.TREE_SCHEMA}"\n'
+        f"modules = {modules}\ncontract_files = {contracts}\n"
+    )
+    return tree
+
+
+def admin_tree_root() -> Path:
+    return Path(admin_tree.__file__).resolve().parents[1]
+
+
+def _request_v1() -> dict[str, object]:
+    """A v1 stop request answered before any I/O (no change: `refuse`)."""
+    return {
+        "schema": "df/precheck-request/v1",
+        "nonce": "0" * 32,
+        "kind": "stop",
+        "repository_id": 42,
+        "full_name": "o/r",
+        "pr": 8,
+        "head_sha": "b" * 40,
+        "head_ref": "stop/x",
+        "base_ref": "main",
+        "base_tip": "c" * 40,
+        "changes": [],
+        "token": "ghs_t",
+        "api_base": "http://127.0.0.1:9",
+        "git_base": "http://127.0.0.1:9",
+    }
+
+
+@pytest.mark.parametrize("schema", ["v1", "v2"])
+def test_old_installer_tree_v1_served_v2_refused_by_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    environ: None,
+    fresh_governance: None,
+    schema: str,
+) -> None:
+    """A tree built by an installer older than its list, through the real
+    `precheck serve` and the real program of the tree: the shortfall is
+    named on stderr before the import; a v1 request is served (a v1
+    verdict), a v2 one is refused `tree_incomplete` by name -- never a
+    `ModuleNotFoundError`."""
+    pytest.importorskip("steward", reason="steward — без группы governance")
+    lay, read = _precheck_world(tmp_path, os.getuid())
+    tree = _old_installer_tree(lay)
+    sys.path.insert(0, str(tree))
+    request = _request_v1()
+    if schema == "v2":
+        request = {"schema": "df/precheck-request/v2", "nonce": "0" * 32}
+    stdin = io.TextIOWrapper(io.BytesIO(json.dumps(request).encode()))
+    monkeypatch.setattr(sys, "stdin", stdin)
+    assert _precheck(lay, read) == 0
+    out, err = capsys.readouterr()
+    verdict = json.loads(out)
+    assert admin_tree.INCOMPLETE_TREE in err
+    assert "governance/act_precheck_v2.py" in err
+    assert "ModuleNotFoundError" not in err and "Traceback" not in err
+    if schema == "v1":
+        assert verdict["schema"] == "df/precheck-verdict/v1"
+        assert verdict["outcome"] == "refuse"
+    else:
+        assert verdict["schema"] == "df/precheck-verdict/v2"
+        assert verdict["outcome"] == "tree_incomplete"
+        assert "reinstall" in verdict["reason"]
+    assert "governance.act_precheck_v2" not in sys.modules
 
 
 def test_only_import_module_of_df_outside_df_is_the_precheck() -> None:

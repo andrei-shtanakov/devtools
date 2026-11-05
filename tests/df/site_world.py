@@ -26,11 +26,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from df.admin_tree import (
-    CONTRACT_FILES,
+    LEGACY_2B,
     SITE_SRC,
     STEWARD_REPO,
     SitePins,
-    governance_files,
 )
 from df.paths import Layout
 
@@ -261,7 +260,7 @@ def write_checkout(
     each capture, so route worlds keep them small) -- and a `uv.lock`
     pinning the test sources (`df/` is the caller's)."""
     world = world or site_world()
-    for rel in (*governance_files(), *CONTRACT_FILES):
+    for rel in LEGACY_2B.files():
         target = ref / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         if real:

@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from df.admin_tree import GOVERNANCE_MODULES
+from df.admin_tree import load_tree_list
 from governance import act_precheck
 from governance.act_envelope import StopRecord, render_stop, stop_path
 from governance.act_forge_http import TokenTransport
@@ -196,12 +196,21 @@ def _serve(
     home: Path,
     payload: bytes | dict[str, object],
     deps: PrecheckDeps | None = None,
+    *,
+    complete_v2: bool = True,
 ) -> tuple[int, dict[str, object] | None, str]:
     """`serve` с байтами запроса: (код, вердикт или None, сырой stdout)."""
     home.mkdir(exist_ok=True)
     raw = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
     out = io.StringIO()
-    code = serve(io.BytesIO(raw), out, admin_digest=ADMIN, home=home, deps=deps)
+    code = serve(
+        io.BytesIO(raw),
+        out,
+        admin_digest=ADMIN,
+        home=home,
+        complete_v2=complete_v2,
+        deps=deps,
+    )
     text = out.getvalue()
     return code, (json.loads(text) if text else None), text
 
@@ -480,7 +489,7 @@ def test_kind_candidate_rejected_by_schema(tmp_path: Path, capsys: Any) -> None:
 @pytest.mark.parametrize(
     "key,value",
     [
-        ("schema", "df/precheck-request/v2"),
+        ("schema", "df/precheck-request/v3"),
         ("nonce", "../x"),
         ("nonce", NONCE.upper()),
         ("repository_id", True),
@@ -577,6 +586,74 @@ def test_verdict_binds_request(tmp_path: Path) -> None:
         "admin_digest": ADMIN,
     }
     assert PRECHECK_VERSION == "df-precheck/1"
+
+
+# --- протокол v2: минимальный диспетчер (этап 3a, Task 1) ----------------------
+
+
+def _req_v2(**over: object) -> dict[str, object]:
+    """Запрос `df/precheck-request/v2`: диспетчер до Task 7 читает только nonce."""
+    base: dict[str, object] = {
+        "schema": "df/precheck-request/v2",
+        "nonce": NONCE,
+        "op": "merge",
+        "token": TOKEN,
+    }
+    return base | over
+
+
+def _verdict_v2(payload: dict[str, object], outcome: str, reason: str) -> dict:
+    return {
+        "schema": "df/precheck-verdict/v2",
+        "nonce": NONCE,
+        "request_digest": request_digest(payload),
+        "outcome": outcome,
+        "reason": reason,
+        "version": "df-precheck/2",
+        "admin_digest": ADMIN,
+    }
+
+
+def test_v2_unavailable_until_task7(tmp_path: Path) -> None:
+    """Полное дерево: запрос v2 разобран по `schema` и отказан `v2_unavailable`
+    вердиктом v2, связанным с запросом; без сети и снимков; токена в нём нет."""
+    payload = _req_v2()
+    code, verdict, text = _serve(tmp_path / "home", payload, _deps())
+    assert code == 0 and text.count("\n") == 1
+    assert verdict == _verdict_v2(
+        payload, "refuse", "v2_unavailable: protocol v2 is not served yet"
+    )
+    assert TOKEN not in text
+    assert not (tmp_path / "home" / "precheck-snapshots").exists()
+
+
+def test_v2_on_incomplete_tree_is_tree_incomplete(tmp_path: Path) -> None:
+    """`complete_v2=False`: v2 — типизированный отказ `tree_incomplete` по имени,
+    v1 обслуживается как прежде."""
+    payload = _req_v2()
+    code, verdict, _ = _serve(tmp_path / "home", payload, _deps(), complete_v2=False)
+    assert code == 0
+    assert verdict == _verdict_v2(
+        payload, "tree_incomplete", act_precheck.REASON_TREE_INCOMPLETE
+    )
+    assert "reinstall" in act_precheck.REASON_TREE_INCOMPLETE
+    code, verdict, _ = _serve(
+        tmp_path / "home", _req(changes=[]), _deps(), complete_v2=False
+    )
+    assert code == 0 and verdict is not None
+    assert (verdict["schema"], verdict["outcome"]) == (
+        "df/precheck-verdict/v1",
+        "refuse",
+    )
+
+
+@pytest.mark.parametrize("nonce", [None, "../x", NONCE.upper(), 7])
+def test_v2_bad_nonce_exit_2(tmp_path: Path, capsys: Any, nonce: object) -> None:
+    payload = _req_v2(nonce=nonce)
+    if nonce is None:
+        del payload["nonce"]
+    err = _invalid(tmp_path, payload, capsys)
+    assert "invalid values: ['nonce']" in err
 
 
 def test_request_digest_ignores_token_only() -> None:
@@ -780,7 +857,7 @@ def _closure(start: str) -> tuple[set[str], set[str]]:
 
 def test_closure_excludes_act_status_ops_df() -> None:
     local, external = _closure("governance.act_precheck")
-    assert sorted(local) == sorted(GOVERNANCE_MODULES)  # Task 5: одна константа
+    assert sorted(local) == sorted(load_tree_list(ROOT).modules)  # 3a: перечень
     assert [m for m in FORBIDDEN if m in local] == []
     assert not any(m == "df" or m.startswith("df.") for m in local)
     allowed = set(sys.stdlib_module_names) | {"steward", "yaml"}

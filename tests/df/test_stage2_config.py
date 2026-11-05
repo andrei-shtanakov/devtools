@@ -570,3 +570,42 @@ def test_effective_pins_refuses_a_broken_chain() -> None:
     unknown = dump_model_change(event(pin(), other("m"), role="judge"))
     with pytest.raises(ConfigError, match="judge"):
         effective_pins(record(), [unknown])
+
+
+def test_products_toml_2b_rows_still_parse() -> None:
+    # строки 2b не знают полей 3a: умолчания, и дамп их не дописывает
+    prods = parse_products('schema = "df/products/v1"\n' + ROW.format(rid=1))
+    assert (prods[1].bundle_dir, prods[1].dag_variant) == (
+        "workstreams/{ws}/spec",
+        "full",
+    )
+    assert dump_products(prods) == dump_products(
+        {1: Product(1, "o/1", "fork", 11, 12, "bot", "/home/df-exec/1")}
+    )
+    assert "bundle_dir" not in dump_products(prods)
+
+
+def test_product_default_bundle_dir() -> None:
+    assert Product(1, "o/1", "fork", 11, 12, "bot", "/c").bundle_dir == (
+        "workstreams/{ws}/spec"
+    )
+    row = ROW.format(rid=1) + 'bundle_dir = "docs/{ws}/bundle"\n'
+    prods = parse_products('schema = "df/products/v1"\n' + row)
+    assert prods[1].bundle_dir == "docs/{ws}/bundle"
+    assert parse_products(dump_products(prods)) == prods
+
+
+@pytest.mark.parametrize("bad", ['""', '"/abs/{ws}/spec"', '"a/../{ws}"', "1"])
+def test_product_bad_bundle_dir_refused(bad: str) -> None:
+    row = ROW.format(rid=1) + f"bundle_dir = {bad}\n"
+    with pytest.raises(ConfigError, match="bundle_dir"):
+        parse_products('schema = "df/products/v1"\n' + row)
+
+
+@pytest.mark.parametrize("variant", ['"legacy5"', '"legacy3"', '"3"', "5"])
+def test_product_legacy_dag_variant_refused(variant: str) -> None:
+    row = ROW.format(rid=1) + f"dag_variant = {variant}\n"
+    with pytest.raises(ConfigError, match="dag_variant"):
+        parse_products('schema = "df/products/v1"\n' + row)
+    ok = ROW.format(rid=1) + 'dag_variant = "full"\n'
+    assert parse_products('schema = "df/products/v1"\n' + ok)[1].dag_variant == "full"

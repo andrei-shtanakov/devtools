@@ -22,6 +22,7 @@ import re
 import shlex
 import stat
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from df import accept, acl, admin_tree, fsutil
@@ -294,7 +295,7 @@ def expected_admin_digest(devtools_ref: Path, *, layout: Layout, git: Path) -> s
     a step's, the OS's -- is `TreeError`. A legacy checkout
     (`admin_tree.release_has_precheck` false) is `df/` only, as installed."""
     try:
-        sources = _site_sources(devtools_ref, layout=layout, fetch=None, git=git)
+        sources = _precheck_sources(devtools_ref, layout=layout, fetch=None, git=git)
         with tempfile.TemporaryDirectory(prefix="df-admin-digest-") as tmp:
             dest = Path(tmp) / "admin"
             make_tree_dir(dest)
@@ -409,9 +410,11 @@ def install_admin(
     `<devtools_ref>/uv.lock` with the approved `git` and `fetch`
     (`admin_tree.site_sources`); a refusal there leaves no `admin/<id>`. A
     legacy checkout without the precheck program
-    (`admin_tree.release_has_precheck`) gets `df/` only, pins unread.
-    The copy (`_fill_admin`): `df/`, the modules of
-    `admin_tree.GOVERNANCE_MODULES`, `admin_tree.CONTRACT_FILES` and
+    (`admin_tree.release_has_precheck`) gets `df/` only, pins unread;
+    one whose `act_precheck` imports a module outside the pin's list
+    (`admin_tree.closure_problems`, 3a Task 1) is refused, nothing made.
+    The copy (`_fill_admin`): `df/`, the files of the pin's list
+    (`admin_tree.load_tree_list`: modules and contract files) and
     `site/` written from the checked streams (2b Task 5). Only directories
     and regular files are copied (a link or any other type is a refusal);
     modes are set by `fchmod` — directories and files with any x bit
@@ -426,7 +429,7 @@ def install_admin(
     if not accept.is_real_dir(devtools_ref / "df"):
         raise StepFailed(_STEP, f"{devtools_ref / 'df'}: не каталог")
     try:
-        sources = _site_sources(devtools_ref, layout=layout, fetch=fetch, git=git)
+        sources = _precheck_sources(devtools_ref, layout=layout, fetch=fetch, git=git)
         make_tree_dir(dest)
         fsutil.fault_point("created", dest)
         _fill_admin(dest, devtools_ref, sources, git)
@@ -437,20 +440,37 @@ def install_admin(
     fsutil.sync_dir(layout.admin)
 
 
-def _site_sources(
+@dataclass(frozen=True)
+class _PrecheckSources:
+    """What a precheck release's admin tree is made of beyond `df/`."""
+
+    listing: admin_tree.TreeList
+    site: admin_tree.SiteSources
+
+
+def _precheck_sources(
     devtools_ref: Path,
     *,
     layout: Layout,
     fetch: admin_tree.Fetch | None,
     git: Path,
-) -> admin_tree.SiteSources | None:
-    """The checked `site/` sources of a checkout with the precheck program;
-    `None` for a legacy one (`release_has_precheck`: no pins read, the cache
-    untouched); a partial closure is `TreeError`."""
+) -> _PrecheckSources | None:
+    """The pin's tree list and the checked `site/` sources of a checkout
+    with the precheck program; `None` for a legacy one
+    (`release_has_precheck`: no pins read, the cache untouched). A partial
+    tree or a closure outside the list is `TreeError`."""
     if not admin_tree.release_has_precheck(devtools_ref):
         return None
+    listing = admin_tree.load_tree_list(devtools_ref)
+    problems = admin_tree.closure_problems(devtools_ref, listing)
+    if problems:
+        raise TreeError(
+            f"{devtools_ref}: замыкание {admin_tree.PRECHECK_FILE} вне перечня: "
+            + "; ".join(problems)
+        )
     pins = _site_pins(devtools_ref)
-    return admin_tree.site_sources(pins, layout=layout, fetch=fetch, git=git)
+    site = admin_tree.site_sources(pins, layout=layout, fetch=fetch, git=git)
+    return _PrecheckSources(listing, site)
 
 
 def _site_pins(devtools_ref: Path) -> admin_tree.SitePins:
@@ -464,18 +484,18 @@ def _site_pins(devtools_ref: Path) -> admin_tree.SitePins:
 def _fill_admin(
     dest: Path,
     devtools_ref: Path,
-    sources: admin_tree.SiteSources | None,
+    sources: _PrecheckSources | None,
     git: Path,
 ) -> None:
     """The content of `admin/<id>` (`dest`, made): `df/`, then -- unless a
-    legacy release (`sources` is `None`) -- governance, contracts, `site/`."""
+    legacy release (`sources` is `None`) -- the listed files, `site/`."""
     src = devtools_ref / "df"
     if not accept.is_real_dir(src):
         raise StepFailed(_STEP, f"{src}: не каталог")
     _copy_dir(src, dest / "df")
     if sources is None:
         return
-    for rel in (*admin_tree.governance_files(), *admin_tree.CONTRACT_FILES):
+    for rel in sources.listing.files():
         parts = PurePosixPath(rel).parts
         current = dest
         for name in parts[:-1]:
@@ -483,7 +503,7 @@ def _fill_admin(
             if not os.path.lexists(current):
                 make_tree_dir(current)
         _copy_file(devtools_ref.joinpath(*parts), dest.joinpath(*parts))
-    admin_tree.write_site(dest / "site", sources, git=git)
+    admin_tree.write_site(dest / "site", sources.site, git=git)
 
 
 def _copy_dir(src: Path, dst: Path) -> None:
