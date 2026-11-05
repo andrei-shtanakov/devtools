@@ -1226,6 +1226,7 @@ def test_reeval_merge_keeps_findings_over_transient_policy_gap(
     verdict, _ = run(tmp_path / "home", payload, gh)
     # re-review N2: the finding wins over a permanent gap too
     assert verdict["outcome"] == "refuse"
+    assert verdict["findings"][0]["kind"] == "rebase_allowed"
     assert [(f["kind"], f["role"]) for f in verdict["findings"]] == [
         ("rebase_allowed", "approval-policy")
     ]
@@ -1284,6 +1285,23 @@ def test_policy_break_wins_over_missing_objects(
     payload = trust_req(profile, origin_route="merge", trust_accepted=None)
     verdict, _ = run(tmp_path / "home", payload, gh)
     assert verdict["outcome"] == "refuse"
+
+
+def test_gone_matches_steward_reason() -> None:
+    """Paid review #705: `_GONE` matches the reason steward builds for a
+    missing object of a REST read (`_rest`: `_Fail("http", f"{status}
+    {path}")`), with or without the path; other statuses are transient."""
+    from steward.approvalfacts.v3 import _github, model
+
+    for status in (404, 422):
+        built = _github._Fail("http", f"{status} repos/o/r/commits/abc")
+        reason = built.unavailable().reason
+        assert act_precheck_v2._GONE.match(reason), reason
+        assert act_precheck_v2._GONE.match(
+            model.unavailable("http", str(status)).reason
+        )
+    for other in ("http: 403 repos/o/r", "http: 4040 x", "http: 502 x", "transport"):
+        assert not act_precheck_v2._GONE.match(other), other
 
 
 def test_irreproducible_reasons_closed() -> None:

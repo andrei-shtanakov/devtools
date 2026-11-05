@@ -421,14 +421,21 @@ class TrustStatus:
 def parse_trust_status(raw: bytes | str, root: tuple[str, int, str]) -> TrustStatus:
     """Root checks the answer (spec 5.2): `df/publisher-response/v1`,
     `done`, the result's schema, and `result.root` equal to the binding
-    root read itself (`root`). Anything else is `BadResponse`."""
+    root read itself (`root`) -- or null in the publisher's own answer
+    without a binding (`unavailable: no_binding`). Anything else is
+    `BadResponse`."""
     resp = parse_response(raw)
     if resp.outcome != "done":
         raise BadResponse(f"outcome {resp.outcome!r}: {resp.reason}")
     data = dict(resp.result)
     if set(data) != TRUST_STATUS_KEYS:
         raise BadResponse(f"result keys must be {sorted(TRUST_STATUS_KEYS)}")
-    if not _same_root(data["root"], root):
+    # the publisher without a binding answers `no_binding` with no root
+    unbound = data["root"] is None and (data["state"], data["reason"]) == (
+        "unavailable",
+        "no_binding",
+    )
+    if not unbound and not _same_root(data["root"], root):
         raise BadResponse("result.root is not the binding's root")
     state, reason = data["state"], data["reason"]
     if state not in PERIMETER_STATES:

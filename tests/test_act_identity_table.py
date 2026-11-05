@@ -4386,6 +4386,15 @@ JUDGMENT = {
             "PIN_MISMATCH",
         ),
     ),
+    "act_precheck_v2._trust_op": (
+        r(
+            "findings_over_gap",
+            "act_precheck_v2._trust_op",
+            "isinstance(broken, Irreproducible | Unavailable) and findings",
+            f"{V2}::test_reeval_merge_keeps_findings_over_transient_policy_gap",
+            '"rebase_allowed"',
+        ),
+    ),
     "act_precheck_v2.policy_history_break": (
         r(
             "policy_history_break",
@@ -4875,7 +4884,6 @@ NOT_JUDGMENT = {
     "act_precheck_v2._reason": _BUILD,
     "act_precheck_v2._masked": _BUILD,
     "act_precheck_v2._envelope": _BUILD,
-    "act_precheck_v2._trust_op": "передаёт исходы чтений и суждения `trust_part`, `policy_history_break`, `_decided`; своей проверки нет",
     "act_precheck_v2._findings_reason": _BUILD,
     "act_precheck_v2.Adapter.__init__": _BUILD,
     "act_precheck_v2.Adapter.record_finding": "хранит находку, найденную проверкой `load_trust`; не суждение",

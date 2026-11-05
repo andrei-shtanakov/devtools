@@ -881,7 +881,11 @@ def parse_verdict(
         return data if set(data) == _TREE_KEYS else None
     if set(data) != keys or len(raw) > VERDICT_LIMIT + 1:
         return None
-    if raw != canonical(data) + b"\n":
+    try:  # a lone surrogate (`\ud800`) parses, but has no UTF-8 form
+        wire = canonical(data)
+    except UnicodeEncodeError:
+        return None
+    if raw != wire + b"\n":
         return None
     return data
 

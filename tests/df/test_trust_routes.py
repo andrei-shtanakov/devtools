@@ -1246,3 +1246,46 @@ def test_perimeter_status_one_evaluation_per_call(
     assert resp.result["state"] == "unavailable"  # I: two still unfinished
     resp = status(world, capsys, S2)
     assert [r["observation_id"] for r in tw.checker.requests][1:] == [second]
+
+
+# --- paid review of #705 ---------------------------------------------------------
+
+
+def test_verdict_with_lone_surrogate_is_parse_failure(
+    world: World, tw: TrustWorld, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A verdict string with a lone surrogate (`\\ud800`, valid JSON, no
+    UTF-8 form) is `precheck_failed: parse`, the route answers `done` /
+    `unavailable` -- never `refused: internal_error`."""
+
+    def answer(req: dict[str, object]) -> bytes:
+        data = verdict(req, diagnostics="\ud800")
+        text = json.dumps(data, sort_keys=True, separators=(",", ":"))
+        return text.encode("ascii") + b"\n"
+
+    tw.checker.answer = answer
+    resp = tstatus(world, capsys)
+    assert (resp.outcome, resp.result["state"]) == ("done", "unavailable")
+    assert observations(world)[-1][3] == "unresolved"
+    raw = b'{"outcome":"allow","diagnostics":"\\ud800"}\n'
+    assert trust_routes.parse_verdict(raw) is None
+
+
+def test_root_reads_the_no_binding_answer(
+    world: World, tw: TrustWorld, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Root's reader accepts the publisher's own answer without a binding
+    (`root: null`, `unavailable: no_binding`); a null root with any other
+    state or reason is still `BadResponse`."""
+    (world.lay.etc / "trust.toml").unlink()
+    line = request.emit(tstatus(world, capsys))
+    got = request.parse_trust_status(line, ROOT)
+    assert (got.state, got.reason, got.snapshot_sha) == (
+        "unavailable",
+        "no_binding",
+        None,
+    )
+    data = json.loads(line)
+    other = {**data, "result": {**data["result"], "reason": "lost"}}
+    with pytest.raises(BadResponse, match="root"):
+        request.parse_trust_status(json.dumps(other), ROOT)
