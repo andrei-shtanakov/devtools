@@ -390,9 +390,8 @@ def _exit_2(tmp_path: Path, payload: dict[str, object], capsys: Any) -> str:
             {"origin_route": "trust-status"},
             "cross-field: op merge needs origin_route merge",
         ),
-        ({"policy": None}, "cross-field: op merge needs policy"),
     ],
-    ids=["accepted_not_x", "route", "policy"],
+    ids=["accepted_not_x", "route"],
 )
 def test_merge_cross_fields_exit_2(
     tmp_path: Path, capsys: Any, profile: Path, over: dict, why: str
@@ -414,13 +413,35 @@ def test_v2_invalid_value_named_exit_2(
     assert "invalid values: ['ctx_id']" in err
 
 
-def test_v2_trust_reeval_of_merge_needs_policy_exit_2(
-    tmp_path: Path, capsys: Any, profile: Path
+@pytest.mark.parametrize("op", ["trust", "merge"])
+def test_policy_mandatory_on_every_op_exit_2(
+    tmp_path: Path, capsys: Any, profile: Path, op: str
 ) -> None:
-    err = _exit_2(
-        tmp_path, trust_req(profile, origin_route="merge", policy=None), capsys
+    """Review D2: without the pinned coordinates С-2 cannot be checked."""
+    build = trust_req if op == "trust" else merge_req
+    err = _exit_2(tmp_path, build(profile, policy=None), capsys)
+    assert "invalid values: ['policy']" in err
+
+
+@pytest.mark.parametrize("op", ["trust", "merge"])
+def test_c2_policy_branch_mismatch_refused(
+    tmp_path: Path,
+    wire: _Wire,
+    gh: Path,
+    profile: Path,
+    candidate: Candidate,
+    op: str,
+) -> None:
+    """С-2: the `source.env` branch on H/X (`main`) is not the default branch
+    the publisher resolved (`trunk`): `policy_branch_mismatch@approval-policy`."""
+    policy = {"full_name": AP, "branch": "trunk", "p_sha": P}
+    build = trust_req if op == "trust" else merge_req
+    verdict, _ = run(tmp_path / "home", build(profile, policy=policy), gh)
+    assert verdict["outcome"] == "refuse"
+    assert verdict["reason"] == (
+        "perimeter_findings: policy_branch_mismatch@approval-policy"
     )
-    assert "cross-field: origin_route merge needs policy" in err
+    assert verdict["findings"][0]["kind"] == "policy_branch_mismatch"
 
 
 def test_observation_id_echoed(

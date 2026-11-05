@@ -4312,13 +4312,6 @@ JUDGMENT = {
             f"{V2}::test_v2_invalid_value_named_exit_2",
             "\"invalid values: ['ctx_id']\"",
         ),
-        r(
-            "reeval_policy",
-            "act_precheck_v2.parse",
-            '"cross-field: origin_route merge needs policy"',
-            f"{V2}::test_v2_trust_reeval_of_merge_needs_policy_exit_2",
-            '"cross-field: origin_route merge needs policy"',
-        ),
     ),
     "act_precheck_v2._merge_request": (
         r(
@@ -4327,13 +4320,6 @@ JUDGMENT = {
             'common.origin_route != "merge"',
             f"{V2}::test_merge_cross_fields_exit_2[route]",
             '"cross-field: op merge needs origin_route merge"',
-        ),
-        r(
-            "policy",
-            "act_precheck_v2._merge_request",
-            "common.policy is None",
-            f"{V2}::test_merge_cross_fields_exit_2[policy]",
-            '"cross-field: op merge needs policy"',
         ),
         r(
             "accepted_is_x",

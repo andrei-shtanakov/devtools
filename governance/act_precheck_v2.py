@@ -197,7 +197,7 @@ _COMMON: Checks = {
     "ctx_id": _matches(_DIGEST),
     "observation_id": _positive_int,
     "binding": lambda v: _object(v, _BINDING),
-    "policy": lambda v: v is None or _object(v, _POLICY),
+    "policy": lambda v: _object(v, _POLICY),
 }
 _TRUST: Checks = {
     "trust_accepted": lambda v: v is None or _object(v, _ACCEPTED),
@@ -246,7 +246,7 @@ class Common:
     ctx_id: str
     observation_id: int
     binding: act_trust.Binding
-    policy: PolicyPin | None
+    policy: PolicyPin
 
 
 @dataclass(frozen=True)
@@ -295,7 +295,15 @@ Request = TrustRequest | MergeRequest
 def parse(request: RequestV2) -> Request:
     """Strict `df/precheck-request/v2`: exactly the keys of its `op`, every value
     checked, the cross-field rules; any deviation — `InvalidRequest` naming keys,
-    never values."""
+    never values. `policy` is mandatory on every op (review D2: the publisher
+    always resolves the policy source by id, С-2 needs its default branch).
+
+    A binding or policy name over its limit (≤ 140 bytes, branch ≤ 255 bytes), a
+    non-branch form or an int outside `0 < v < 2**63` is a bad request too (exit
+    2, review D3): the publisher pre-validates these limits and types them itself
+    (`unsupported_size: <field>`, Task 10), so the echo of the envelope stays
+    bounded by construction. Names read from `source.env` keep the typed
+    `unsupported_size` of the checker."""
     data: dict[str, Any] = dict(request.data)
     op = data.get("op")
     checks = {**_COMMON, **(_MERGE if op == "merge" else _TRUST)}
@@ -308,8 +316,6 @@ def parse(request: RequestV2) -> Request:
         raise InvalidRequest(f"invalid values: {bad}")
     common = _common(data, request.digest)
     if op == "trust":
-        if common.origin_route == "merge" and common.policy is None:
-            raise InvalidRequest("cross-field: origin_route merge needs policy")
         accepted = data["trust_accepted"]
         return TrustRequest(
             common,
@@ -340,7 +346,7 @@ def _common(data: Mapping[str, Any], digest: str) -> Common:
         ctx_id=data["ctx_id"],
         observation_id=data["observation_id"],
         binding=binding,
-        policy=None if policy is None else PolicyPin(**policy),
+        policy=PolicyPin(**policy),
     )
 
 
@@ -348,8 +354,6 @@ def _merge_request(data: Mapping[str, Any], common: Common) -> MergeRequest:
     accepted = AcceptedBase(**data["trust_accepted"])
     if common.origin_route != "merge":
         raise InvalidRequest("cross-field: op merge needs origin_route merge")
-    if common.policy is None:
-        raise InvalidRequest("cross-field: op merge needs policy")
     if accepted.sha != data["expected_snapshot_sha"]:
         raise InvalidRequest("cross-field: trust_accepted.sha != expected_snapshot_sha")
     fields = {
@@ -515,7 +519,7 @@ def _envelope(req: Request, got: Answer, admin_digest: str) -> dict[str, object]
         if part is None or part.source is None
         else dataclasses.asdict(part.source),
         "ranges": got.ranges,
-        "policy": None if common.policy is None else dataclasses.asdict(common.policy),
+        "policy": dataclasses.asdict(common.policy),
         "unverified": [] if part is None else sorted(set(part.unverified)),
         "version": PRECHECK_VERSION_V2,
         "admin_digest": admin_digest,
@@ -541,14 +545,15 @@ def trust_part(
     binding: act_trust.Binding,
     accepted: AcceptedBase | None,
     head: str,
-    policy: PolicyPin | None,
+    policy: PolicyPin,
     validation: str,
 ) -> Part | Unavailable:
     """The pair (A, H) by SHA and the settings at the moment of the call (spec
     §6.1). Both finding lists are merged: `not_public` comes only from the pair.
-    `policy` — the default branch the publisher resolved (С-2); without a pin the
-    `source.env` branch is compared with itself. A pin naming another policy
-    repository than `source.env` on H is `Unavailable` (the pin is stale)."""
+    `policy` — the coordinates the publisher resolved by id: its branch is the
+    default branch С-2 compares with the `source.env` branch on H
+    (`policy_branch_mismatch`). A pin naming another policy repository than
+    `source.env` on H is `Unavailable` (the pin is stale)."""
     pair = act_trust_pair.read_pair(
         transport, binding, accepted, head, validation=validation
     )
@@ -557,13 +562,12 @@ def trust_part(
     if pair.snapshot is None:
         return Part(pair.relation, None, pair.source, pair.findings, ())
     source = pair.snapshot.source
-    if policy is not None and policy.full_name != source.repo:
+    if policy.full_name != source.repo:
         return Unavailable(
             f"policy pin {policy.full_name!r} != source.env {source.repo!r} at H"
         )
-    branch = source.branch if policy is None else policy.branch
     settings = act_trust_pair.settings_findings(
-        transport, binding, pair.snapshot, policy_branch=branch
+        transport, binding, pair.snapshot, policy_branch=policy.branch
     )
     if isinstance(settings, Unavailable):
         return settings
@@ -605,7 +609,6 @@ def _trust_op(req: TrustRequest, ctx: Context) -> Answer:
     findings = part.findings
     ranges = None
     if common.origin_route == "merge" and part.snapshot is not None:
-        assert common.policy is not None  # `parse`: origin merge carries P
         p_sha = common.policy.p_sha
         ranges = dataclasses.asdict(range_descriptor(part.snapshot.epochs, p_sha))
         broken = policy_history_break(transport, part.snapshot, p_sha)
