@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from itertools import pairwise
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from urllib.parse import quote
 
 from governance import act_facts
@@ -61,6 +61,8 @@ MAX_BINDING = 64 << 10
 STALE = "stale_snapshot"
 REQUIRED_RULES = frozenset({"deletion", "non_fast_forward", "pull_request"})
 REBASE_PREMISE = "allow_rebase_merge"
+#: HTTP statuses of a commit object that no longer reads (`history_unverifiable`).
+GONE = frozenset({404, 422})
 #: Окружение `gh`, которое подменило бы credential или хост самоотчёта.
 _GH_ENV_DROPPED = frozenset(
     {
@@ -99,6 +101,10 @@ _CRED_SHAPES = {
     "env:GITHUB_TOKEN": (False, True),
 }
 Span = tuple[ActivationView, ...]
+#: Trust repo role; the same literal as `act_trust_types.Role` (a test keeps them
+#: equal). Kept out of `act_trust`'s imports until Task 7 decides the closure
+#: (ruling 6).
+Role = Literal["approval-policy", "df-trust"]
 
 
 class TrustError(ValueError):
@@ -168,6 +174,16 @@ class Trust:
     def transport(self) -> Any:
         """Транспорт источников доверия решения — единственный (R7)."""
         return self.snapshot.transport
+
+
+@dataclass(frozen=True)
+class HistoryFault:
+    """A reproducible defect of the pinned `df-trust` history: finding `kind`
+    (role `df-trust`, spec §6.1) and its detail. `read_trust_snapshot` reports it
+    as `Unavailable(detail)`; the pair reader (`act_trust_pair`) as a finding."""
+
+    kind: str
+    detail: str
 
 
 @dataclass(frozen=True)
@@ -304,74 +320,145 @@ def _named(anon: Any, repo_id: int, expected: str) -> str | Unavailable:
     return expected
 
 
-def _chain(anon: Any, repo: str, head: str) -> list[str] | Unavailable:
+def _commit(anon: Any, repo: str, sha: str) -> dict | Unavailable | HistoryFault:
+    """`GET commits/{sha}`: HTTP 404/422 — the object no longer reads
+    (`history_unverifiable`, spec §6.1); any other failure is temporary.
+
+    Accepted risk (review of Task 5, M-3): a read replica that has not yet seen
+    a freshly pushed head may answer 404/422 for seconds; one such answer is
+    taken as "gone" without confirmation and blocks until the next epoch."""
+    from steward.approvalfacts.v3 import Request
+
+    path = f"{_repo_path(repo)}/commits/{sha}"
+    resp = anon.send(Request("GET", path))
+    if resp.status in GONE:
+        return HistoryFault(
+            "history_unverifiable",
+            f"{repo}@{sha[:12]}: коммит не читается (HTTP {resp.status})",
+        )
+    if resp.status != 200 or not isinstance(resp.body, dict):
+        return Unavailable(f"{path}: HTTP {resp.status} {resp.error or ''}".rstrip())
+    return resp.body
+
+
+def _chain(anon: Any, repo: str, head: str) -> list[str] | Unavailable | HistoryFault:
     """First-parent от `head` до корня; звенья от корня к голове."""
+    walked = _walk(anon, repo, head)
+    return walked if not isinstance(walked, tuple) else walked[0]
+
+
+def _walk(
+    anon: Any, repo: str, head: str, stop: str | None = None, *, room: int | None = None
+) -> tuple[list[str], str | None] | Unavailable | HistoryFault:
+    """First-parent walk from `head`, links root-to-head, and the first parent of
+    the last link read (`None` at the root).
+
+    With `stop` the walk ends on it (inclusive): the first link is `stop` iff
+    `head` is `stop` or its first-parent descendant; the walk can go on from the
+    returned parent. `room` — links still allowed (default `MAX_CHAIN`)."""
+    limit = MAX_CHAIN if room is None else room
     chain: list[str] = []
     sha: str | None = head
     while sha is not None:
-        if len(chain) == MAX_CHAIN:
+        if len(chain) == limit:
             return Unavailable(f"{repo}: цепочка длиннее {MAX_CHAIN}")
-        body = _get(anon, f"{_repo_path(repo)}/commits/{sha}")
-        if isinstance(body, Unavailable):
+        body = _commit(anon, repo, sha)
+        if not isinstance(body, dict):
             return body
-        parents = body.get("parents") if isinstance(body, dict) else None
-        if (
-            not isinstance(body, dict)
-            or body.get("sha") != sha
-            or not isinstance(parents, list)
-        ):
+        parents = body.get("parents")
+        if body.get("sha") != sha or not isinstance(parents, list):
             return Unavailable(f"{repo}@{sha[:12]}: ответ не о том коммите")
         chain.append(sha)
         first = (
             parents[0].get("sha") if parents and isinstance(parents[0], dict) else None
         )
         sha = first if isinstance(first, str) else None
-    return chain[::-1]
+        if chain[-1] == stop:
+            break
+    return chain[::-1], sha
 
 
 def _journal_versions(
-    anon: Any, repo: str, chain: Sequence[str]
-) -> list[tuple[Epoch, ...]] | Unavailable:
-    versions: list[tuple[Epoch, ...]] = []
-    last: bytes | None = None
+    anon: Any,
+    repo: str,
+    chain: Sequence[str],
+    start: tuple[bytes, tuple[Epoch, ...]] | None = None,
+) -> list[tuple[Epoch, ...]] | Unavailable | HistoryFault:
+    """Versions of the journal along `chain`, a change at a time. `start` — the
+    bytes and parse of an already read version before `chain` (the journal on A,
+    incremental path): it is the first version and is not read again."""
+    versions: list[tuple[Epoch, ...]] = [] if start is None else [start[1]]
+    last: bytes | None = None if start is None else start[0]
     for sha in chain:
         raw = contents_bytes(anon, repo, JOURNAL_FILE, sha)
         if isinstance(raw, Unavailable):
             return raw
         if raw is None:
             if versions:
-                return Unavailable(f"{repo}@{sha[:12]}: {JOURNAL_FILE} удалён")
+                return HistoryFault(
+                    "journal_transition", f"{repo}@{sha[:12]}: {JOURNAL_FILE} удалён"
+                )
             continue
         if raw == last:
             continue
         try:
             versions.append(parse_journal(raw.decode("utf-8")))
         except (JournalError, UnicodeDecodeError) as exc:
-            return Unavailable(f"{repo}@{sha[:12]}: {exc}")
+            return HistoryFault("journal_parse", f"{repo}@{sha[:12]}: {exc}")
         last = raw
     return versions
 
 
 def _checked_epochs(
-    versions: list[tuple[Epoch, ...]], source: SourceV2
-) -> tuple[Epoch, ...] | Unavailable:
+    versions: list[tuple[Epoch, ...]], source: SourceV2, *, bootstrap: bool = True
+) -> tuple[Epoch, ...] | HistoryFault:
+    """Forward journal transitions. `bootstrap=False`: the first version is the
+    accepted one (incremental path from A, spec §6.1) and is not checked against
+    `BOOTSTRAP_ACTIVATION`."""
     if not versions:
-        return Unavailable(f"в снимке нет {JOURNAL_FILE}")
+        return HistoryFault("journal_parse", f"в снимке нет {JOURNAL_FILE}")
     first = versions[0]
-    if (
+    if bootstrap and (
         len(first) != 1
         or first[0].closed
         or first[0].anchor != source.bootstrap_activation
     ):
-        return Unavailable(
-            "первая версия журнала — не bootstrap с BOOTSTRAP_ACTIVATION"
+        return HistoryFault(
+            "bootstrap_mismatch",
+            "первая версия журнала — не bootstrap с BOOTSTRAP_ACTIVATION",
         )
     try:
         for prev, new in pairwise(versions):
             check_transition(prev, new)
     except JournalError as exc:
-        return Unavailable(f"недопустимый переход журнала: {exc}")
+        return HistoryFault(
+            "journal_transition", f"недопустимый переход журнала: {exc}"
+        )
     return versions[-1]
+
+
+def _source_at(
+    anon: Any, repo: str, head: str
+) -> tuple[bytes, SourceV2] | Unavailable | HistoryFault:
+    """`source.env` bytes and parse at commit `head` (by SHA). The policy source
+    identity is the caller's: `_named` here, `not_public`-aware in the pair."""
+    raw = contents_bytes(anon, repo, SOURCE_FILE, head)
+    if isinstance(raw, Unavailable):
+        return raw
+    if raw is None:
+        return HistoryFault(
+            "source_env_invalid", f"{repo}@{head[:12]}: нет {SOURCE_FILE}"
+        )
+    try:
+        source = parse_source(raw.decode("utf-8"))
+    except (SourceError, UnicodeDecodeError) as exc:
+        return HistoryFault("source_env_invalid", f"{repo}@{head[:12]}: {exc}")
+    return raw, source
+
+
+def _refusal(got: Unavailable | HistoryFault) -> Unavailable:
+    """A history fault, for the branch reader, is a refusal with its detail."""
+    return got if isinstance(got, Unavailable) else Unavailable(got.detail)
 
 
 def read_trust_snapshot(anon: Any, binding: Binding) -> TrustSnapshot | Unavailable:
@@ -389,25 +476,22 @@ def read_trust_snapshot(anon: Any, binding: Binding) -> TrustSnapshot | Unavaila
     head = commit.get("sha") if isinstance(commit, dict) else None
     if not isinstance(head, str) or len(head) != 40:
         return Unavailable(f"{repo}: голова {binding.df_trust_branch} не прочитана")
-    raw_source = contents_bytes(anon, repo, SOURCE_FILE, head)
-    if not isinstance(raw_source, bytes):
-        return raw_source or Unavailable(f"{repo}@{head[:12]}: нет {SOURCE_FILE}")
-    try:
-        source = parse_source(raw_source.decode("utf-8"))
-    except (SourceError, UnicodeDecodeError) as exc:
-        return Unavailable(f"{repo}@{head[:12]}: {exc}")
+    found = _source_at(anon, repo, head)
+    if not isinstance(found, tuple):
+        return _refusal(found)
+    source = found[1]
     policy = _named(anon, binding.approval_policy_repository_id, source.repo)
     if isinstance(policy, Unavailable):
         return policy
     chain = _chain(anon, repo, head)
-    if isinstance(chain, Unavailable):
-        return chain
+    if not isinstance(chain, list):
+        return _refusal(chain)
     versions = _journal_versions(anon, repo, chain)
-    if isinstance(versions, Unavailable):
-        return versions
+    if not isinstance(versions, list):
+        return _refusal(versions)
     epochs = _checked_epochs(versions, source)
-    if isinstance(epochs, Unavailable):
-        return epochs
+    if isinstance(epochs, HistoryFault):
+        return _refusal(epochs)
     root = TrustRoot(
         binding.host, binding.df_trust_repository_id, binding.df_trust_branch, head
     )
@@ -573,11 +657,11 @@ def credentials(
     return tuple(found)
 
 
-def _roles(snap: TrustSnapshot) -> tuple[tuple[str, str], ...]:
+def _roles(snap: TrustSnapshot) -> tuple[tuple[Role, str], ...]:
     return (("approval-policy", snap.source.repo), ("df-trust", snap.full_name))
 
 
-Found = tuple[str, str] | Unavailable | None
+Found = tuple[Role, str] | Unavailable | None
 """Нарушение `(роль репо, деталь)`, недоступность или чисто."""
 
 
@@ -622,58 +706,100 @@ def _history_self_report(transport: Any, snap: TrustSnapshot) -> Found:
     )
 
 
+def _history_report_of(transport: Any, snap: TrustSnapshot, role: Role) -> Found:
+    """`_history_self_report` for the repo of one role (`op: trust`, spec §6.1:
+    one `token_write` per role)."""
+    return _report_of(
+        lambda cred, path: transport_fact(transport, cred, path),
+        Credential(HISTORY_LABEL),
+        role,
+        dict(_roles(snap))[role],
+    )
+
+
 def _report(
     read: Callable[[Credential, str], Fact[object]],
     creds: Sequence[Credential],
     snap: TrustSnapshot,
 ) -> Found:
+    """First violation over credentials × roles; else the first gap."""
     gap: Unavailable | None = None
     for cred in creds:
         for role, repo in _roles(snap):
-            fact = read(cred, _repo_path(repo))
-            body = fact.value if fact.outcome is Outcome.FOUND else None
-            perms = body.get("permissions") if isinstance(body, dict) else None
-            verdict = permissions_refusal(perms if isinstance(perms, dict) else None)
-            if isinstance(verdict, Violation):
-                return role, f"{cred.label} на {repo}: {verdict.detail}"
-            if isinstance(verdict, Unavailable) and gap is None:
-                why = verdict.reason if fact.outcome is Outcome.FOUND else fact.detail
-                gap = Unavailable(f"самоотчёт {cred.label} на {repo}: {why}")
+            found = _report_of(read, cred, role, repo)
+            if isinstance(found, tuple):
+                return found
+            if isinstance(found, Unavailable) and gap is None:
+                gap = found
     return gap
 
 
-def _rulesets(anon: Any, snap: TrustSnapshot) -> Found:
-    branches = {"approval-policy": snap.source.branch, "df-trust": snap.root.branch}
-    for role, repo in _roles(snap):
-        branch = quote(branches[role], safe="")
-        body = _get(anon, f"{_repo_path(repo)}/rules/branches/{branch}")
-        if isinstance(body, Unavailable):
-            return body
-        if not isinstance(body, list):
-            return Unavailable(f"{repo}: правила ветки — не список")
-        kinds = {r.get("type") for r in body if isinstance(r, dict)}
-        if missing := sorted(REQUIRED_RULES - kinds):
-            return role, f"{repo}@{branches[role]}: нет правил {missing}"
+def _report_of(
+    read: Callable[[Credential, str], Fact[object]],
+    cred: Credential,
+    role: Role,
+    repo: str,
+) -> Found:
+    """Self-report of one credential on one trust repo."""
+    fact = read(cred, _repo_path(repo))
+    body = fact.value if fact.outcome is Outcome.FOUND else None
+    perms = body.get("permissions") if isinstance(body, dict) else None
+    verdict = permissions_refusal(perms if isinstance(perms, dict) else None)
+    if isinstance(verdict, Violation):
+        return role, f"{cred.label} на {repo}: {verdict.detail}"
+    if isinstance(verdict, Unavailable):
+        why = verdict.reason if fact.outcome is Outcome.FOUND else fact.detail
+        return Unavailable(f"самоотчёт {cred.label} на {repo}: {why}")
     return None
 
 
-def _rebase(anon: Any, snap: TrustSnapshot) -> Found | str:
+def _rulesets(anon: Any, snap: TrustSnapshot) -> Found:
+    """First violation or failure over both trust repos (`load_trust`)."""
+    for role, _repo in _roles(snap):
+        found = _ruleset_of(anon, snap, role)
+        if found is not None:
+            return found
+    return None
+
+
+def _ruleset_of(anon: Any, snap: TrustSnapshot, role: Role) -> Found:
+    """Required branch rules on the pinned branch of the repo of `role`."""
+    repo = dict(_roles(snap))[role]
+    pinned = snap.source.branch if role == "approval-policy" else snap.root.branch
+    body = _get(anon, f"{_repo_path(repo)}/rules/branches/{quote(pinned, safe='')}")
+    if isinstance(body, Unavailable):
+        return body
+    if not isinstance(body, list):
+        return Unavailable(f"{repo}: правила ветки — не список")
+    kinds = {r.get("type") for r in body if isinstance(r, dict)}
+    if missing := sorted(REQUIRED_RULES - kinds):
+        return role, f"{repo}@{pinned}: нет правил {missing}"
+    return None
+
+
+def _rebase(
+    anon: Any, snap: TrustSnapshot, role: Role = "approval-policy"
+) -> Found | str:
     """Четыре состояния (решения владельца 13.10, п. 1).
 
+    `role` picks the repo: `load_trust` checks `approval-policy`; `op: trust`
+    checks `df-trust` too (spec §6.1).
+
     `REBASE_PREMISE` — значение скрыто: предпосылка не проверена."""
-    body = _get(anon, _repo_path(snap.source.repo))
+    repo = dict(_roles(snap))[role]
+    body = _get(anon, _repo_path(repo))
     if isinstance(body, Unavailable):
         return body
     if not isinstance(body, dict):
-        return Unavailable(f"{snap.source.repo}: ответ не объект")
+        return Unavailable(f"{repo}: ответ не объект")
     value = body.get("allow_rebase_merge")
     if value is None:
         return REBASE_PREMISE
     if value is True:
-        return "approval-policy", f"{snap.source.repo}: allow_rebase_merge = true"
+        return role, f"{repo}: allow_rebase_merge = true"
     if value is False:
         return None
-    return Unavailable(f"{snap.source.repo}: allow_rebase_merge = {value!r}")
+    return Unavailable(f"{repo}: allow_rebase_merge = {value!r}")
 
 
 def _register(

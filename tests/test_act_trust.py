@@ -449,6 +449,31 @@ def test_commit_answer_for_other_sha_unavailable() -> None:
     assert isinstance(got, Unavailable) and "ответ не о том коммите" in got.reason
 
 
+def test_branch_reader_reports_history_fault_as_unavailable() -> None:
+    """3a Task 5: a history fault (here an ancestor that no longer reads) stays a
+    refusal for the branch reader `load_trust` uses; it is a finding only in the
+    pair reader."""
+    routes = trust_routes(J1, J1)
+    routes[f"repos/{DT}/commits/{C0}"] = (404, {"message": "Not Found"})
+    got = act_trust.read_trust_snapshot(Anon(routes), binding())
+    assert isinstance(got, Unavailable)
+    assert got.reason == f"{DT}@{C0[:12]}: коммит не читается (HTTP 404)"
+
+
+def test_rebase_role_picks_repo() -> None:
+    """3a Task 5: `_rebase` checks the repo of the role; the default is
+    `approval-policy`, as `load_trust` uses it."""
+    routes = trust_routes(J1, rebase=False)
+    routes[f"repos/{DT}"] = (200, {"full_name": DT, "allow_rebase_merge": True})
+    snap = act_trust.read_trust_snapshot(Anon(routes), binding())
+    assert isinstance(snap, act_trust.TrustSnapshot)
+    assert act_trust._rebase(Anon(routes), snap) is None
+    assert act_trust._rebase(Anon(routes), snap, "df-trust") == (
+        "df-trust",
+        f"{DT}: allow_rebase_merge = true",
+    )
+
+
 def test_gh_get_failures_are_unavailable(monkeypatch) -> None:
     """b4: `gh api` упал / ответ не JSON — `Unavailable` с путём и credential."""
 

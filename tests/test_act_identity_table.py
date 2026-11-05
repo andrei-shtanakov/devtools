@@ -233,6 +233,7 @@ PC = "tests/test_act_precheck.py"
 RP, OB = "tests/test_act_repropose.py", "tests/test_act_ops_body.py"
 OF, WR = "tests/test_act_ops_failures.py", "tests/test_act_wave_runner.py"
 SF = "tests/test_act_surface.py"
+TP = "tests/test_act_trust_pair.py"
 ENVELOPE_FIELDS = (
     "node",
     "request_id",
@@ -973,13 +974,46 @@ JUDGMENT = {
             '"только публичные"',
         ),
     ),
-    "act_trust._chain": (
+    "act_trust._walk": (
         r(
             "commit_identity",
-            "act_trust._chain",
+            "act_trust._walk",
             'body.get("sha") != sha',
             f"{T}::test_commit_answer_for_other_sha_unavailable",
             "ответ не о том коммите",
+        ),
+    ),
+    # df этап 3a (Task 5): пара `df-trust` по SHA (`act_trust_pair`)
+    "act_trust._commit": (
+        r(
+            "gone",
+            "act_trust._commit",
+            "resp.status in GONE",
+            f"{TP}::test_unreadable_head_objects_history_unverifiable",
+            'f"коммит не читается (HTTP {status})"',
+        ),
+        r(
+            "http_status",
+            "act_trust._commit",
+            "resp.status != 200",
+            f"{TP}::test_head_read_temporarily_failing_is_unavailable",
+            'f"repos/{DT}/commits/{C2}: HTTP 500"',
+        ),
+    ),
+    "act_trust._source_at": (
+        r(
+            "absent",
+            "act_trust._source_at",
+            "if raw is None",
+            f"{TP}::test_source_env_invalid_finding[absent]",
+            '"нет source.env"',
+        ),
+        r(
+            "parse",
+            "act_trust._source_at",
+            "except (SourceError, UnicodeDecodeError) as exc",
+            f"{TP}::test_source_env_invalid_finding[invalid]",
+            '"ожидалась ровно одна"',
         ),
     ),
     "act_trust._journal_versions": (
@@ -989,6 +1023,13 @@ JUDGMENT = {
             "if versions:",
             f"{T}::test_journal_deleted_after_appearing_unavailable",
             "epochs.yaml удалён",
+        ),
+        r(
+            "journal_parse",
+            "act_trust._journal_versions",
+            "except (JournalError, UnicodeDecodeError) as exc",
+            f"{TP}::test_journal_parse_and_transition_findings",
+            '"journal_parse"',
         ),
     ),
     "act_trust._checked_epochs": (
@@ -1005,6 +1046,13 @@ JUDGMENT = {
             "except JournalError",
             f"{T}::test_rewritten_closed_epoch_in_history_unavailable",
             "недопустимый переход журнала",
+        ),
+        r(
+            "bootstrap_on_cold_only",
+            "act_trust._checked_epochs",
+            "bootstrap and (",
+            f"{TP}::test_validation_change_goes_cold",
+            '"не bootstrap"',
         ),
     ),
     "act_trust.read_trust_snapshot": (
@@ -1040,34 +1088,43 @@ JUDGMENT = {
         ),
     ),
     # самоотчёт переданных credentials и `profile:history` — один `_report` (Task 11c)
-    "act_trust._report": (
+    "act_trust._report_of": (
         r(
             "push_on_policy",
-            "act_trust._report",
+            "act_trust._report_of",
             "isinstance(verdict, Violation)",
             f"{T}::test_token_with_push_records_and_blocks",
             'startswith("env:GH_TOKEN на ")',
         ),
         r(
             "push_on_df_trust",
-            "act_trust._report",
+            "act_trust._report_of",
             "isinstance(verdict, Violation)",
             f"{T}::test_merge_profile_with_push_on_df_trust",
             'startswith("profile:merge на ")',
         ),
         r(
             "unreadable",
-            "act_trust._report",
-            "isinstance(verdict, Unavailable) and gap is None",
+            "act_trust._report_of",
+            "isinstance(verdict, Unavailable)",
             f"{T}::test_self_report_404_is_unavailable_without_record",
             'startswith("самоотчёт profile:agent")',
         ),
         r(
             "history_push",
-            "act_trust._report",
+            "act_trust._report_of",
             "isinstance(verdict, Violation)",
             f"{T}::test_history_violation_wins_over_passed_credential_gap",
             'startswith(f"profile:history на {DT}: ")',
+        ),
+    ),
+    "act_trust._report": (
+        r(
+            "first_gap",
+            "act_trust._report",
+            "isinstance(found, Unavailable) and gap is None",
+            f"{T}::test_self_report_404_is_unavailable_without_record",
+            'startswith("самоотчёт profile:agent")',
         ),
     ),
     "act_trust._self_reports": (
@@ -1177,14 +1234,30 @@ JUDGMENT = {
     ),
     "act_trust._rulesets": (
         r(
-            "pull_request_rule",
+            "first_wins",
             "act_trust._rulesets",
+            "if found is not None",
+            f"{T}::test_ruleset_without_pull_request_is_violation",
+            '"нет правил"',
+        ),
+    ),
+    "act_trust._ruleset_of": (
+        r(
+            "pull_request_rule",
+            "act_trust._ruleset_of",
             "missing := sorted(REQUIRED_RULES - kinds)",
             f"{T}::test_ruleset_without_pull_request_is_violation",
             '"нет правил"',
         ),
     ),
     "act_trust._rebase": (
+        r(
+            "rebase_df_trust",
+            "act_trust._rebase",
+            "dict(_roles(snap))[role]",
+            f"{TP}::test_df_trust_rebase_allowed_finding",
+            '"rebase_allowed", "df-trust"',
+        ),
         r(
             "rebase_true",
             "act_trust._rebase",
@@ -4111,6 +4184,9 @@ NOT_JUDGMENT = {
     "act_trust._repo_path": _BUILD,
     "act_trust.credentials": "перечень того, что процесс держит; судит `_self_report`",
     "act_trust._roles": _BUILD,
+    "act_trust._chain": "делегирует `_walk` (место суждения)",
+    "act_trust._history_report_of": "делегирует `_report_of` транспортом решения (место суждения)",
+    "act_trust._refusal": "переводит находку истории в отказ читателя ветки; судят `_chain`, `_journal_versions`, `_checked_epochs`, `_source_at`",
     "act_trust.load_anchor_times": "собирает времена якорей; недоступность — значение, судит `_epoch_at`",
     "act_journal._now": _BUILD,
     "act_journal._publisher_present": "наличие файла издателя; выбор — `journal_for`",
