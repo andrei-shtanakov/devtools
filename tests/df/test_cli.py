@@ -89,6 +89,26 @@ def test_documented_bootstrap_without_tar_refused_before_any_change(
     assert list(tmp_path.iterdir()) == []
 
 
+def test_init_with_gh_refused_naming_cli_set_after_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Stage 3a (paid review #697): `--cli gh=PATH` at `init` is a usage
+    error naming the real order -- `gh` (with its sha256) is set by
+    `darkfactory cli set gh PATH` after `darkfactory install` -- refused
+    before the lock creates anything."""
+    argv = [*documented_argv(), "--cli", "gh=/usr/local/libexec/darkfactory/bin/gh"]
+    with pytest.raises(cli.UsageError, match="после darkfactory install"):
+        cli._init_config(cli._parse(argv))  # noqa: SLF001
+    monkeypatch.setattr(cli, "ROOT_UID", os.geteuid())
+    lay = Layout(tmp_path / "root")
+    code = cli.main(argv, mode="bootstrap", read=None, lock_fd=None, layout=lay)
+    assert code == cli.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert "--cli gh: не задаётся при init" in err
+    assert "sudo darkfactory cli set gh PATH после darkfactory install" in err
+    assert list(tmp_path.iterdir()) == []
+
+
 # --- Task 4: roles setup and the service subcommands ------------------------
 
 SERVICE = [
@@ -358,6 +378,23 @@ def test_documented_stage2_sequence_parses() -> None:
 
 RELEASE = "r1"
 ADMIN_DIGEST = "sha256:" + "a" * 64
+GIT = Path(str(shutil.which("git"))).resolve()
+
+
+def _install(**hashed: tuple[Path, str]) -> bytes:
+    """`install.toml` of the precheck world: the approved `git` of this host
+    plus `hashed` CLIs (name -> path, sha256)."""
+    from df.config import dump_install
+
+    cli_paths = {"git": GIT, "uv": Path("/usr/bin/uv"), "tar": Path("/usr/bin/tar")}
+    cfg = InstallConfig(
+        "https://example.test/manifest.git",
+        "0" * 40,
+        "core",
+        {**cli_paths, **{n: p for n, (p, _d) in hashed.items()}},
+        {n: d for n, (_p, d) in hashed.items()},
+    )
+    return dump_install(cfg).encode()
 
 
 @pytest.fixture()
@@ -372,11 +409,16 @@ def environ() -> Iterator[None]:
 
 
 def _precheck_world(
-    tmp_path: Path, uid: int, *, program: bool = True, site: bool = True
+    tmp_path: Path,
+    uid: int,
+    *,
+    program: bool = True,
+    site: bool = True,
+    install: bytes | None = None,
 ) -> tuple[Layout, Stable]:
     """An account `df-precheck` of `uid`, release `r1` current, its admin
     tree with the 2b files as stand-ins (`program`: `act_precheck.py`
-    among them) or a legacy one."""
+    among them) or a legacy one; `install.toml` without `gh` unless given."""
     from df.config import (
         Account,
         ReleaseEntry,
@@ -399,7 +441,8 @@ def _precheck_world(
             (tree / "site").mkdir()
     entry = ReleaseEntry(RELEASE, "d", ADMIN_DIGEST, "3.12.13", "allowed", None)
     releases = dump_releases(ReleasesConfig((entry,))).encode()
-    raw = state.RawSnapshot(0, RELEASE, releases, None, None, False)
+    text = _install() if install is None else install
+    raw = state.RawSnapshot(0, RELEASE, releases, text, None, False)
     return lay, Stable(raw, 0)
 
 
@@ -455,7 +498,8 @@ def test_precheck_serve_resets_environment(
     """The role's own process: the environment becomes exactly PATH, LANG
     and the role's HOME; `site` goes to the END of `sys.path`; then
     `serve(stdin, stdout, admin_digest=<record>, home=<role home>,
-    complete_v2=True)` (a 2b tree: no list in its `df/`, `LEGACY_2B`)."""
+    complete_v2=True, gh=None, git=<approved git>)` (a 2b tree: no list in
+    its `df/`, `LEGACY_2B`; no `gh` approved)."""
     lay, read = _precheck_world(tmp_path, os.getuid())
     tree = lay.admin_dir(RELEASE)
     seen: dict[str, object] = {}
@@ -467,6 +511,8 @@ def test_precheck_serve_resets_environment(
         admin_digest: str,
         home: Path,
         complete_v2: bool,
+        gh: Path | None,
+        git: Path,
     ) -> int:
         seen.update(
             env=dict(os.environ),
@@ -475,6 +521,7 @@ def test_precheck_serve_resets_environment(
             admin_digest=admin_digest,
             home=home,
             complete_v2=complete_v2,
+            tools=(gh, git),
         )
         return 0
 
@@ -497,6 +544,7 @@ def test_precheck_serve_resets_environment(
     assert seen["streams"] == (sys.stdin.buffer, sys.stdout)
     assert (seen["admin_digest"], seen["home"]) == (ADMIN_DIGEST, home)
     assert seen["complete_v2"] is True
+    assert seen["tools"] == (None, GIT)
 
 
 def test_precheck_serve_refuses_tree_without_2b_module(
@@ -607,6 +655,131 @@ def test_precheck_serve_refuses_tree_without_site(
     assert _precheck(lay, read) == 2
     assert "нет каталога site/" in capsys.readouterr().err
     assert sys.path == path and os.environ["DF_TEST_SENTINEL"] == "kept"
+
+
+def _gh_file(tmp_path: Path) -> Path:
+    gh = tmp_path / "approved" / "gh"
+    gh.parent.mkdir()
+    gh.write_bytes(b"#!/bin/sh\nexit 0\n")
+    return gh
+
+
+def _trusting(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """The trusted-path policy passes every path it is asked about (a tmp
+    fixture is never root's); the paths are recorded."""
+    from df import platform as plat
+
+    asked: list[Path] = []
+
+    def policy(path: Path) -> list[str]:
+        asked.append(path)
+        return []
+
+    monkeypatch.setattr(plat, "trusted_path_problems", policy)
+    return asked
+
+
+def _serve_tools(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    """`_load_serve` replaced by one recording the `gh`/`git` it is given."""
+    seen: dict[str, object] = {}
+
+    def serve(*_a: object, gh: Path | None, git: Path, **_k: object) -> int:
+        seen.update(gh=gh, git=git)
+        return 0
+
+    monkeypatch.setattr(cli, "_load_serve", lambda _d: serve)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    return seen
+
+
+def test_precheck_serve_passes_the_approved_gh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, environ: None
+) -> None:
+    """Spec 3.10 rev 11: `gh` approved and its file matching the sha256 of
+    `install.toml` -- the program gets exactly that path (and `git`)."""
+    from df import platform as plat
+
+    gh = _gh_file(tmp_path)
+    install = _install(gh=(gh, plat.file_sha256(gh)))
+    lay, read = _precheck_world(tmp_path, os.getuid(), install=install)
+    asked = _trusting(monkeypatch)
+    seen = _serve_tools(monkeypatch)
+    assert _precheck(lay, read) == 0
+    assert seen == {"gh": gh, "git": GIT}
+    assert asked == [gh]
+
+
+def test_gh_untrusted_path_refused_at_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    environ: None,
+) -> None:
+    """The trusted-path policy also runs at every launch (the sha256 pins
+    the bytes, the policy who may swap them): a `gh` whose directory is
+    world-writable (and, in a tmp fixture, not root's) is refused with the
+    policy's reason even though its sha256 still matches."""
+    from df import platform as plat
+
+    gh = _gh_file(tmp_path)
+    gh.parent.chmod(0o777)
+    install = _install(gh=(gh, plat.file_sha256(gh)))
+    lay, read = _precheck_world(tmp_path, os.getuid(), install=install)
+    monkeypatch.setattr(cli, "_load_serve", _no_serve)
+    os.environ["DF_TEST_SENTINEL"] = "kept"
+    assert _precheck(lay, read) == 2
+    err = capsys.readouterr().err
+    assert f"precheck serve: gh {gh}: " in err
+    assert str(gh.parent) in err
+    assert os.environ["DF_TEST_SENTINEL"] == "kept"
+
+
+@pytest.mark.parametrize("damage", ["bytes", "absent"])
+def test_gh_sha256_mismatch_refused_at_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    environ: None,
+    damage: str,
+) -> None:
+    """The sha256 is checked at every launch: the approved `gh` changed
+    after `cli set gh` (or is gone) -- exit 2 with the reason, before the
+    environment changes or the program loads; no fallback to `PATH`."""
+    from df import platform as plat
+
+    gh = _gh_file(tmp_path)
+    install = _install(gh=(gh, plat.file_sha256(gh)))
+    lay, read = _precheck_world(tmp_path, os.getuid(), install=install)
+    _trusting(monkeypatch)
+    if damage == "bytes":
+        gh.write_bytes(b"#!/bin/sh\necho other\n")
+    else:
+        gh.unlink()
+    monkeypatch.setattr(cli, "_load_serve", _no_serve)
+    os.environ["DF_TEST_SENTINEL"] = "kept"
+    assert _precheck(lay, read) == 2
+    err = capsys.readouterr().err
+    assert f"precheck serve: gh {gh}: " in err
+    if damage == "bytes":
+        assert "sha256 не совпадает с install.toml" in err
+    assert os.environ["DF_TEST_SENTINEL"] == "kept"
+
+
+def test_precheck_serve_refuses_without_install_toml(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    environ: None,
+) -> None:
+    """No `install.toml` in the snapshot: no approved `git` -- refused."""
+    lay, read = _precheck_world(tmp_path, os.getuid())
+    raw = read.value
+    read = Stable(
+        state.RawSnapshot(0, RELEASE, raw.releases_text, None, None, False), 0
+    )
+    monkeypatch.setattr(cli, "_load_serve", _no_serve)
+    assert _precheck(lay, read) == 2
+    assert "нет /etc/df/install.toml" in capsys.readouterr().err
 
 
 @pytest.fixture()

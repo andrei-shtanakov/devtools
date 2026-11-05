@@ -931,6 +931,8 @@ def test_precheck_probe_is_refused_by_the_program(
         admin_digest="sha256:" + "0" * 64,
         home=tmp_path,
         complete_v2=True,
+        gh=None,
+        git=Path("/usr/bin/git"),
     )
     assert code == act_precheck.EXIT_REQUEST == doctor.PRECHECK_EXIT
     assert out.getvalue() == ""

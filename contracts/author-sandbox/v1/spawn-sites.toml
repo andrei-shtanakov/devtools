@@ -89,6 +89,18 @@ function = "_publish"
 count = 1
 reason = "узкий клиент журнала периметра обвязки мержа: только `sudo -n -u df-publisher …/df-publish <операция>` (argv сверяется; сам authority-root)"
 
+[[site]]
+module = "governance/act_history_snapshot.py"
+function = "_git"
+count = 1
+reason = "git снимка предпроверки по договору запуска df (спека B §3.10 rev 11): argv[0] — утверждённый абсолютный путь `git` из install.toml, без отката к PATH"
+
+[[site]]
+module = "governance/act_trust.py"
+function = "_auth_token"
+count = 1
+reason = "`gh auth token` профиля истории по договору запуска df (спека B §3.10 rev 11): argv[0] — утверждённый абсолютный путь `gh` из install.toml, без отката к PATH (флотовый `history_token` передаёт литерал \"gh\")"
+
 # Динамическая загрузка кода вне ЗЦ (правило п.3 инварианта): `importlib`,
 # `ctypes`, `multiprocessing`, `__import__`/`getattr` по `subprocess`/`os`.
 # Правило НЕ покрывает `exec`/`eval`/`compile`/`runpy` — названо, а не

@@ -512,6 +512,10 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
         "idempotent: a retry removes it again before _make_home syncs the parent"
     ),
     ("platform", "_cleanup_at", "os.unlink", 1): "protocol cleanup_tree: link",
+    ("platform", "", "import tempfile", 1): "gh_version_problems' call HOME",
+    ("platform", "gh_version_problems", "tempfile.TemporaryDirectory", 1): (
+        "the fresh HOME of `gh --version` (spec 3.10 rev 11), never under the layout"
+    ),
     ("platform", "_rmdir_empty", "os.rmdir", 1): "protocol cleanup_tree: tree",
     ("platform", "_quarantine", "os.rename", 1): (
         "protocol cleanup_tree: quarantine, then parent synced"
@@ -617,6 +621,10 @@ SUBPROCESS_CREATORS = {
     ),
     "cleaner find/chmod/rm (as df-build)": "protocol cleanup_tree: root syncs",
     "useradd / dscl (account)": "OS records, judged by verify_build_user",
+    "gh --version (cli set gh, root)": (
+        "its own HOME (and GH_CONFIG_DIR) is a fresh TemporaryDirectory removed "
+        "after the call; gh creates only .local/state/gh/device-id inside it"
+    ),
     "probes: ps / pkill / sudo -l / getent / dscl -read / xcrun": (
         "create nothing: reads, or a kill of df-build's processes"
     ),
@@ -712,6 +720,7 @@ PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
         "cleaner find/chmod/rm (as df-build)",
         "useradd / dscl (account)",
         "probes: ps / pkill / sudo -l / getent / dscl -read / xcrun",
+        "gh --version (cli set gh, root)",
         "darkfactory publisher perimeter-init (roles setup, as df-publisher)",
         "sudo df-publish perimeter-status (perimeter client)",
         "darkfactory publisher perimeter-restore (restore, as df-publisher)",

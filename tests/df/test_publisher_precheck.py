@@ -671,7 +671,13 @@ def test_real_serve_output_passes_the_client_parser(
     out = io.BytesIO()
     stdout = io.TextIOWrapper(out, encoding="utf-8", newline="")
     code = act_precheck.serve(
-        io.BytesIO(raw), stdout, admin_digest=ADMIN, home=tmp_path, complete_v2=True
+        io.BytesIO(raw),
+        stdout,
+        admin_digest=ADMIN,
+        home=tmp_path,
+        complete_v2=True,
+        gh=None,
+        git=Path("/usr/bin/git"),
     )
     stdout.flush()
     assert code == 0

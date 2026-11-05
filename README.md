@@ -426,6 +426,27 @@ root, без записи для группы и всех, без ACL; нати�
 
 Пути закрепляются в `/etc/df/install.toml`.
 
+**`gh` (этап 3a, спека §3.7, §3.10 rev 11).** Необязательный утверждённый CLI: токен истории
+(профиль `/etc/df/history-gh`) роль читает только им. Копия бинарника официального релиза
+`gh` [2.102.1](https://github.com/cli/cli/releases/tag/v2.102.1) (закреплённая версия; иная —
+отказ) в каталог root, как `uv`: архив `gh_2.102.1_macOS_arm64.zip` или
+`gh_2.102.1_linux_amd64.tar.gz`, сверенный по `gh_2.102.1_checksums.txt` релиза (macOS
+`08bfef98b50c553df122bb34ee8dcf415cae7d3b108891488964a0df07aa2aeb`, Linux
+`77b9e297e94c50336823d0f84de7ef1be60cba704601fa0d98f129f47a94987b`), затем:
+
+```sh
+sudo install -o root -m 0755 ./gh_2.102.1_<цель>/bin/gh /usr/local/libexec/darkfactory/bin/gh
+sudo darkfactory cli set gh /usr/local/libexec/darkfactory/bin/gh
+```
+
+`cli set gh` проверяет политику пути, затем версию (`gh --version`) и записывает путь в
+`approved_cli`, а sha256 файла — в `approved_cli_sha256`; sha256 сверяется при каждом запуске.
+Заменили бинарь — повторите `cli set gh`, иначе запуск откажет. `gh` и `git` запускаются только
+по этим путям, без отката к `PATH`; окружение `gh` — только `PATH`, `HOME` (свой каталог
+вызова), `LANG`, `GH_CONFIG_DIR`, `GH_NO_UPDATE_NOTIFIER` (`GH_TOKEN`/`GITHUB_TOKEN` до него не
+доходят). Релиз до 3a файл с `approved_cli_sha256` не разбирает: откат на него после
+`cli set gh` невозможен (спека §7.4).
+
 **macOS: каталог разработчика.** `/usr/bin/git` на macOS — обёртка `xcode-select`: она
 передаёт запуск инструменту из выбранного каталога разработчика, и `darkfactory` проверяет
 по той же политике доверия и этот инструмент, и цепочку путей к нему. Отказ значит:
@@ -524,8 +545,8 @@ sudo darkfactory roles setup
 
 Путь должен пройти политику утверждённых CLI (спека §3.10, как `git` и `tar` выше) на этом
 хосте: проверка делается при `cli set`, в `doctor` и при каждой установке; не прошёл — отказ
-с причиной, `install.toml` не меняется. `cli set` задаёт только `openssl`; повтор с тем же
-путём ничего не пишет. Оператор `roles setup` — `SUDO_USER`, иначе `--operator <имя>`.
+с причиной, `install.toml` не меняется. `cli set` задаёт только `openssl` и `gh` (выше); повтор
+с тем же значением ничего не пишет. Оператор `roles setup` — `SUDO_USER`, иначе `--operator <имя>`.
 
 Если `doctor` говорит «установка не завершена», её завершает только `sudo darkfactory
 install` (остальные писатели при незавершённой установке отказывают). Если он говорит «идёт

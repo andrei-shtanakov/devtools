@@ -421,6 +421,15 @@ JUDGMENT = {
             '"snapshot: fetch owner/p: exit 128"',
         ),
     ),
+    "act_history_snapshot._absolute_git": (
+        r(
+            "absolute",
+            "act_history_snapshot._absolute_git",
+            "if not git.is_absolute()",
+            f"{HS}::test_git_absolute_path_only[bare]",
+            '"is not an absolute path"',
+        ),
+    ),
     "act_history_snapshot.open_snapshot": (
         r(
             "full_name",
@@ -1088,41 +1097,57 @@ JUDGMENT = {
             "act_trust.HISTORY_PROFILE_SHARED",
         ),
     ),
-    "act_trust.history_token": (
+    "act_trust._auth_token": (
         r(
             "hosts",
-            "act_trust.history_token",
+            "act_trust._auth_token",
             'not (config_dir / "hosts.yml").is_file()',
             f"{T}::test_history_token_failures_are_unavailable[no_hosts]",
             '"профиль токена истории"',
         ),
         r(
             "spawn",
-            "act_trust.history_token",
+            "act_trust._auth_token",
             "except (OSError, subprocess.TimeoutExpired) as exc",
             f"{T}::test_history_token_failures_are_unavailable[oserror]",
             '"gh auth token (profile:history): OSError"',
         ),
         r(
             "exit",
-            "act_trust.history_token",
+            "act_trust._auth_token",
             "if done.returncode != 0",
             f"{T}::test_history_token_failures_are_unavailable[exit]",
             '"gh auth token (profile:history): код выхода 1"',
         ),
         r(
             "empty",
-            "act_trust.history_token",
+            "act_trust._auth_token",
             "if not token",
             f"{T}::test_history_token_failures_are_unavailable[empty]",
             '"gh auth token (profile:history): пустой вывод"',
         ),
         r(
             "form",
-            "act_trust.history_token",
+            "act_trust._auth_token",
             "if not _TOKEN_FORM.fullmatch(token)",
             f"{T}::test_history_token_failures_are_unavailable[form]",
             '"gh auth token (profile:history): вывод не в форме токена"',
+        ),
+    ),
+    "act_trust.history_token_at": (
+        r(
+            "absolute",
+            "act_trust.history_token_at",
+            "if not gh.is_absolute()",
+            f"{T}::test_missing_gh_refused_no_path_fallback[relative]",
+            '"gh auth token (profile:history): путь gh не абсолютный"',
+        ),
+        r(
+            "call_dir",
+            "act_trust.history_token_at",
+            "except OSError as exc",
+            f"{T}::test_call_dir_unavailable_is_unavailable",
+            '"gh auth token (profile:history): каталог вызова: FileNotFoundError"',
         ),
     ),
     "act_trust.history_transport": (
@@ -4051,6 +4076,7 @@ NOT_JUDGMENT = {
     # С-1: `act_trust.default_readers` остаётся `_BUILD` и после Task 11c (`Readers(gh_get)`);
     # места суждения Task 11c — в её Step 7
     "act_trust.default_readers": _BUILD,
+    "act_trust.history_token": "строит окружение флота; проверки — `_auth_token` (место суждения)",
     "act_trust._repo_path": _BUILD,
     "act_trust.credentials": "перечень того, что процесс держит; судит `_self_report`",
     "act_trust._roles": _BUILD,

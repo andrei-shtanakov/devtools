@@ -1190,6 +1190,135 @@ def test_history_token_failures_are_unavailable(
     assert SECRET not in got.reason
 
 
+# --- договор запуска `gh` df (спека B §3.10 rev 11) --------------------------------
+
+
+def _fake_gh(
+    tmp_path: Path, body: str = f"echo {TOKEN}", name: str = "approved"
+) -> tuple[Path, Path]:
+    """`gh` по абсолютному пути `tmp_path/name/gh`: пишет свой `HOME` в журнал,
+    кладёт туда `device-id` (как настоящий `gh`) и выполняет `body`."""
+    gh = tmp_path / name / "gh"
+    log = gh.parent / "gh.log"
+    gh.parent.mkdir()
+    state = '"$HOME/.local/state/gh"'
+    gh.write_text(
+        f'#!/bin/sh\necho "$HOME" >> {log}\nmkdir -p {state}\n'
+        f"echo id > {state}/device-id\n{body}\n"
+    )
+    gh.chmod(0o755)
+    return gh, log
+
+
+def _role_home(tmp_path: Path) -> Path:
+    home = tmp_path / "role-home"
+    home.mkdir()
+    return home
+
+
+def test_gh_env_allowlist_and_call_home(monkeypatch, tmp_path: Path) -> None:
+    """Окружение `gh auth token` — ровно `GH_ENV_KEYS` (`PATH=/usr/bin:/bin`,
+    `LANG=C`, `GH_NO_UPDATE_NOTIFIER=1`, профиль, `HOME` — каталог вызова в
+    `role_home`, не `HOME` процесса); `GH_TOKEN`/`GITHUB_TOKEN` процесса до `gh`
+    не доходят; argv[0] — переданный путь."""
+    seen: list[tuple[list[str], dict[str, str]]] = []
+
+    def run(argv, *, env, **kw):  # noqa: ANN001, ANN003
+        seen.append((argv, env))
+        assert Path(env["HOME"]).is_dir()
+        return _Done(0, out=TOKEN + "\n")
+
+    for var in DF_TOKEN_ENV:
+        monkeypatch.setenv(var, "stray")
+    monkeypatch.setattr(act_trust.subprocess, "run", run)
+    gh, home = tmp_path / "bin" / "gh", _role_home(tmp_path)
+    profile = _profile(tmp_path)
+    assert act_trust.history_token_at(profile, gh=gh, role_home=home) == TOKEN
+    argv, env = seen[0]
+    assert argv == [str(gh), "auth", "token", "--hostname", "github.com"]
+    assert tuple(env) == act_trust.GH_ENV_KEYS
+    call = Path(env["HOME"])
+    assert env == {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(call),
+        "LANG": "C",
+        "GH_CONFIG_DIR": str(profile),
+        "GH_NO_UPDATE_NOTIFIER": "1",
+    }
+    assert call.parent == home and str(call) != os.environ.get("HOME")
+
+
+def test_gh_env_reaches_a_real_gh_process(monkeypatch, tmp_path: Path) -> None:
+    """Настоящий процесс: токены окружения не доходят (иначе `gh` вернул бы их,
+    замер draft devtools#693)."""
+    for var in DF_TOKEN_ENV:
+        monkeypatch.setenv(var, "ghp_stray")
+    body = 'echo "${GH_TOKEN:-}${GITHUB_TOKEN:-}' + TOKEN + '"'
+    gh, _log = _fake_gh(tmp_path, body)
+    home = _role_home(tmp_path)
+    got = act_trust.history_token_at(_profile(tmp_path), gh=gh, role_home=home)
+    assert got == TOKEN
+
+
+def test_call_dir_created_and_removed_per_call(tmp_path: Path) -> None:
+    """Каждый вызов — свой новый каталог в `role_home`; после вызова (и после
+    отказа `gh`) его нет, `role_home` пуст; запись `gh` в `HOME` не мешает."""
+    gh, log = _fake_gh(tmp_path)
+    home = _role_home(tmp_path)
+    profile = _profile(tmp_path)
+    for _ in range(2):
+        assert act_trust.history_token_at(profile, gh=gh, role_home=home) == TOKEN
+    failing, flog = _fake_gh(tmp_path, "exit 1", name="failing")
+    got = act_trust.history_token_at(profile, gh=failing, role_home=home)
+    assert got == Unavailable("gh auth token (profile:history): код выхода 1")
+    calls = log.read_text().split() + flog.read_text().split()
+    assert len(set(calls)) == 3
+    assert all(Path(c).parent == home and not Path(c).exists() for c in calls)
+    assert list(home.iterdir()) == []
+
+
+def test_call_dir_unavailable_is_unavailable(tmp_path: Path) -> None:
+    """Каталог вызова не создать (нет `role_home`) — `Unavailable` без запуска."""
+    gh, log = _fake_gh(tmp_path)
+    got = act_trust.history_token_at(
+        _profile(tmp_path), gh=gh, role_home=tmp_path / "absent"
+    )
+    assert got == Unavailable(
+        "gh auth token (profile:history): каталог вызова: FileNotFoundError"
+    )
+    assert not log.exists()
+
+
+@pytest.mark.parametrize("where", ["absent", "relative"])
+def test_missing_gh_refused_no_path_fallback(
+    monkeypatch, tmp_path: Path, where: str
+) -> None:
+    """Нет бинаря по утверждённому пути (или путь не абсолютный) — `Unavailable`;
+    `gh` из `PATH` не запускается никогда."""
+    shadow, log = _fake_gh(tmp_path, name="on-path")
+    monkeypatch.setenv("PATH", f"{shadow.parent}:{os.environ['PATH']}")
+    gh = tmp_path / "nowhere" / "gh" if where == "absent" else Path("gh")
+    home = _role_home(tmp_path)
+    got = act_trust.history_token_at(_profile(tmp_path), gh=gh, role_home=home)
+    if where == "absent":
+        assert got == Unavailable("gh auth token (profile:history): FileNotFoundError")
+    else:
+        assert got == Unavailable(
+            "gh auth token (profile:history): путь gh не абсолютный"
+        )
+    assert not log.exists()
+    assert list(home.iterdir()) == []
+
+
+def test_gh_constants_mirror() -> None:
+    """Копии констант договора `gh` в `governance/` и `df/` равны (пакеты не
+    импортируют друг друга)."""
+    from df import platform as plat
+
+    assert act_trust.GH_PINNED_VERSION == plat.GH_PINNED_VERSION == "2.102.1"
+    assert act_trust.GH_ENV_KEYS == plat.GH_ENV_KEYS
+
+
 @pytest.mark.parametrize(
     "answer",
     [

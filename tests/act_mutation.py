@@ -401,9 +401,13 @@ BYPASS: dict[str, tuple[str, str]] = {
         "own if isinstance(own, tuple) or found is None else found",
         "found",
     ),
-    "act_trust.history_token:spawn": (
+    "act_trust._auth_token:spawn": (
         'return Unavailable(f"{where}: {type(exc).__name__}")',
         'return "ghp_mutant"',
+    ),
+    "act_trust.history_token_at:call_dir": (
+        'return Unavailable(f"{where}: каталог вызова: {type(exc).__name__}")',
+        'call = tempfile.mkdtemp(prefix="gh-call-")',
     ),
     "act_trust.current_activation:open_epoch": (
         '    if not span:\n        return Unavailable("в открытой эпохе нет активаций")',
