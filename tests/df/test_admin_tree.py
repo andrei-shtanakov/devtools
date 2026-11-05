@@ -1249,3 +1249,15 @@ def test_expected_admin_digest_raises_only_tree_error(
         why = "act_time.py"
     with pytest.raises(TreeError, match=why):
         admin.expected_admin_digest(ref, layout=lay, git=SYSTEM_GIT)
+
+
+def test_precheck_tree_is_authority_root() -> None:
+    """Review D4: the privileged checker runs every module and contract file of
+    `df/precheck_tree.toml`; each is under `AUTHORITY_ROOT_PREFIXES`, so no file
+    of the tree is agent-mergeable."""
+    from governance import authority_root
+
+    files = list(load_tree_list(ROOT).files())
+    assert files
+    assert [f for f in files if f not in authority_root.touched(files)] == []
+
