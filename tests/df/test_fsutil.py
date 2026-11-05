@@ -519,8 +519,8 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
     ("publisher.history", "", "import shutil", 1): "history_token's call HOME",
     ("publisher.history", "", "import tempfile", 1): "history_token's call HOME",
     ("publisher.history", "history_token", "tempfile.mkdtemp", 1): (
-        "the fresh HOME of `gh auth token` (spec 3.10 rev 11) in the role's "
-        "home, scratch: removed in finally, never read back, never under the layout"
+        "the fresh HOME of `gh auth token` (spec 3.10 rev 11): scratch under "
+        "the role's own home (a layout path), removed in finally, never read back"
     ),
     ("publisher.history", "history_token", "shutil.rmtree", 1): (
         "removes only its own call HOME made by mkdtemp in the same call; "
