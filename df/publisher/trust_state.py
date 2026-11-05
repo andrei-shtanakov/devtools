@@ -45,7 +45,13 @@ from df.publisher.perimeter import (
     mark_restored,
     restored,
 )
-from df.publisher.trust_types import ROUTE_KINDS, Finding, PolicyPin, Route
+from df.publisher.trust_types import (
+    ROUTE_KINDS,
+    Finding,
+    PolicyPin,
+    Route,
+    clip_detail,
+)
 from df.stage2_config import TrustBinding
 
 Outcome = Literal[
@@ -59,6 +65,8 @@ OUTCOME_OF_VERDICT: Mapping[str, Outcome] = MappingProxyType(
         "tree_incomplete": "unresolved",
         "unset": "unresolved",
         "unsupported_size": "conservative",
+        # a permanent condition of a pinned input (review D-c)
+        "irreproducible": "conservative",
     }
 )
 #: `detected_by` of a conservative completion (K).
@@ -71,7 +79,9 @@ _ROOT = "root_host = ? AND root_repository_id = ? AND root_branch = ?"
 _OBSERVATION = (
     "SELECT observation_id, root_host, root_repository_id, root_branch, ctx_id, "
     "route, accepted_sha, head_sha, policy_full_name, policy_branch, policy_sha, "
-    "row_version, outcome, event_ids, binding FROM trust_observations"
+    "row_version, outcome, event_ids, binding, accepted_last_epoch, "
+    "accepted_source_digest, accepted_rules, accepted_admin_digest "
+    "FROM trust_observations"
 )
 
 
@@ -80,7 +90,8 @@ def _no_step(_name: str) -> None:
 
 
 #: Called inside each write transaction before its `COMMIT` with the
-#: operation's name: `observation`, `findings`, `advance`, `conservative`.
+#: operation's name: `observation`, `findings`, `advance`, `conservative`,
+#: `ranges`.
 TRUST_STEP: Callable[[str], None] = _no_step
 
 
@@ -127,8 +138,21 @@ def _digest(value: object) -> str:
 
 
 @dataclass(frozen=True)
+class Pinned:
+    """A's record as the observation pinned it at creation (review D-a): the
+    base the checker needs, reproducible whatever `trust_heads` holds later."""
+
+    sha: str
+    last_epoch: int
+    source_digest: str
+    rules: str
+    admin_digest: str
+
+
+@dataclass(frozen=True)
 class Observation:
-    """An observation: its root, context, route and pinned inputs."""
+    """An observation: its root, context, route and pinned inputs (A's
+    record in `pinned`, `None` without A)."""
 
     id: int
     root: Root
@@ -138,6 +162,7 @@ class Observation:
     head: str
     policy: PolicyPin | None
     row_version: int
+    pinned: Pinned | None = None
 
 
 @dataclass(frozen=True)
@@ -165,8 +190,14 @@ class _Row:
 
 def _row(found: tuple) -> _Row:
     (oid, host, repo, branch, ctx, route, accepted, head, name, ref, p_sha,
-     version, outcome, events, binding) = found  # fmt: skip
+     version, outcome, events, binding, a_epoch, a_source, a_rules,
+     a_admin) = found  # fmt: skip
     policy = None if p_sha is None else PolicyPin(str(name), str(ref), str(p_sha))
+    pinned = None
+    if accepted is not None:
+        pinned = Pinned(
+            str(accepted), int(a_epoch), str(a_source), str(a_rules), str(a_admin)
+        )
     obs = Observation(
         int(oid),
         (str(host), int(repo), str(branch)),
@@ -176,6 +207,7 @@ def _row(found: tuple) -> _Row:
         str(head),
         policy,
         int(version),
+        pinned,
     )
     return _Row(
         obs, cast(Outcome, str(outcome)), json.loads(events), json.loads(binding)
@@ -206,6 +238,16 @@ def _of_ctx(
             f"{where} ORDER BY observation_id DESC LIMIT 1", (*root, ctx)
         ).fetchone()
     return None if found is None else _row(found)
+
+
+def outcome_of(conn: sqlite3.Connection, obs: int) -> Outcome:
+    """The observation's outcome now."""
+    found = conn.execute(
+        "SELECT outcome FROM trust_observations WHERE observation_id = ?", (obs,)
+    ).fetchone()
+    if found is None:
+        raise ValueError(f"no observation {obs}")
+    return cast(Outcome, str(found[0]))
 
 
 def unfinished(conn: sqlite3.Connection, root: Root) -> list[Observation]:
@@ -278,7 +320,9 @@ def open_observation(
 
     `ctx` must be the `ctx_id` of the other arguments and `accepted` the
     root's accepted SHA in the transaction (else `trust_head_moved`: the
-    caller reads A again). A root seen for the first time after a restore
+    caller reads A again). A's record (`last_epoch`, `source_digest`, check
+    version) is pinned in the row with it (`Observation.pinned`, review
+    D-a): re-evaluation never needs `trust_heads` again. A root seen for the first time after a restore
     (`restored`) is admitted by K: a conservative event comes first."""
     if root != binding.root_id:
         raise ValueError("the root is not the binding's")
@@ -295,6 +339,7 @@ def open_observation(
         if (None if row is None else row.sha) != accepted:
             raise Unavailable("trust_head_moved")
         version = 0 if row is None else row.row_version
+        pinned = None if row is None else _pin(row)
         if restored(conn) and not _known(conn, root):
             _event(conn, root, _key(root, ctx, "conservative"), None,
                    _provenance(accepted, head, ctx), CONSERVATIVE_SOURCE,
@@ -302,9 +347,11 @@ def open_observation(
         cur = conn.execute(
             "INSERT INTO trust_observations (root_host, root_repository_id, "
             "root_branch, ctx_id, route, binding, admin_digest, rules, "
-            "accepted_sha, row_version, head_sha, policy_full_name, policy_branch, "
-            "policy_sha, created_at, outcome, event_ids) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', '[]')",
+            "accepted_sha, accepted_last_epoch, accepted_source_digest, "
+            "accepted_rules, accepted_admin_digest, row_version, head_sha, "
+            "policy_full_name, policy_branch, policy_sha, created_at, outcome, "
+            "event_ids) VALUES "
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', '[]')",
             (
                 *root,
                 ctx,
@@ -313,6 +360,10 @@ def open_observation(
                 admin_digest,
                 rules,
                 accepted,
+                None if pinned is None else pinned.last_epoch,
+                None if pinned is None else pinned.source_digest,
+                None if pinned is None else pinned.rules,
+                None if pinned is None else pinned.admin_digest,
                 version,
                 head,
                 None if policy is None else policy.full_name,
@@ -323,7 +374,15 @@ def open_observation(
         )
         TRUST_STEP("observation")
     assert cur.lastrowid is not None
-    return Observation(cur.lastrowid, root, ctx, route, accepted, head, policy, version)
+    return Observation(
+        cur.lastrowid, root, ctx, route, accepted, head, policy, version, pinned
+    )
+
+
+def _pin(row: Head) -> Pinned:
+    return Pinned(
+        row.sha, row.last_epoch, row.source_digest, row.rules, row.admin_digest
+    )
 
 
 def _known(conn: sqlite3.Connection, root: Root) -> bool:
@@ -335,15 +394,22 @@ def _known(conn: sqlite3.Connection, root: Root) -> bool:
 
 
 def apply_status(
-    db: Db, root: Root, obs: int, status: str, *, epochs_of: EpochOf
+    db: Db,
+    root: Root,
+    obs: int,
+    status: str,
+    *,
+    epochs_of: EpochOf,
+    reason: str | None = None,
 ) -> Outcome:
     """A typed status of the checker (`OUTCOME_OF_VERDICT`; `KeyError` for
     any other): `unresolved` keeps the observation unfinished, K completes
-    it conservatively (its event's epoch by `epochs_of`)."""
+    it conservatively (its event's epoch by `epochs_of`, `reason` named in
+    its detail)."""
     if OUTCOME_OF_VERDICT[status] == "unresolved":
         return unresolved(db, root, obs)
     ctx = _by_id(db.conn, root, obs).obs.ctx
-    conservative(db, root, ctx, obs, epochs_of=epochs_of)
+    conservative(db, root, ctx, obs, epochs_of=epochs_of, reason=reason)
     return "conservative"
 
 
@@ -411,6 +477,7 @@ def advance_head(
     *,
     last_epoch: int,
     source_digest: str,
+    keep: bool = False,
 ) -> Outcome:
     """Accept H of a verified observation: a CAS in one write transaction.
 
@@ -422,7 +489,11 @@ def advance_head(
     accepted. The observation's outcome after the call: `accepted` or
     `superseded`; one with findings stays `finding_registered` either way
     (register first: `register_findings`); a terminal one is unchanged. A
-    head that cannot be read is `Unavailable`, nothing changed."""
+    head that cannot be read is `Unavailable`, nothing changed.
+
+    `keep` (review D-d): H is A again under the current check -- the CAS is
+    made, but the row is not written: no `row_version` bump, the epoch and
+    the digest of A stay (the caller bound the verdict to them)."""
     conn = db.conn
     with perimeter.write(conn):
         row = _by_id(conn, root, obs)
@@ -435,7 +506,7 @@ def advance_head(
             or (None if current is None else current.sha) != row.obs.accepted
             or head_read() != row.obs.head
         )
-        if not moved:
+        if not moved and not keep:
             finding = row.events[0] if row.events else None
             _put_head(conn, root, obs, version + 1, last_epoch, source_digest, finding)
         result: Outcome = "superseded" if moved else "accepted"
@@ -480,12 +551,21 @@ def _put_head(
     )  # fmt: skip
 
 
-def conservative(db: Db, root: Root, ctx: str, obs: int, *, epochs_of: EpochOf) -> int:
+def conservative(
+    db: Db,
+    root: Root,
+    ctx: str,
+    obs: int,
+    *,
+    epochs_of: EpochOf,
+    reason: str | None = None,
+) -> int:
     """K: the conservative event of (root, `ctx`) -- `request_key` = (root,
     `ctx`, `conservative`), idempotent -- and the observation's terminal
     `conservative`, in one transaction. The epoch is `epochs_of`'s (the
     registration rule, read inside the transaction; `None` is `pending`);
-    the caller always chooses it. An observation already completed
+    the caller always chooses it; `reason` (a typed status of the checker)
+    goes into the event's detail. An observation already completed
     otherwise is `ValueError`."""
     conn = db.conn
     with perimeter.write(conn):
@@ -494,25 +574,32 @@ def conservative(db: Db, root: Root, ctx: str, obs: int, *, epochs_of: EpochOf) 
             raise ValueError(f"observation {obs} is not of {ctx}")
         if row.outcome not in UNFINISHED and row.outcome != "conservative":
             raise ValueError(f"observation {obs} is already {row.outcome}")
-        event = _conclude(conn, row, epochs_of(conn, root))
+        event = _conclude(conn, row, epochs_of(conn, root), reason)
         TRUST_STEP("conservative")
     return event
 
 
-def conclude_unfinished(conn: sqlite3.Connection, root: Root, epoch: int) -> None:
+def conclude_unfinished(
+    conn: sqlite3.Connection, root: Root, epoch: int | None
+) -> None:
     """K for the admission of a restored database (inside its transaction):
     every unfinished observation of the copy is completed conservatively
-    at `epoch` -- the context of its creation cannot be reproduced."""
+    at `epoch` (`None`: `pending`, no verified head, review D-b) -- the
+    context of its creation cannot be reproduced."""
     for obs in unfinished(conn, root):
         _conclude(conn, _by_id(conn, root, obs.id), epoch)
 
 
-def _conclude(conn: sqlite3.Connection, row: _Row, epoch: int | None) -> int:
+def _conclude(
+    conn: sqlite3.Connection, row: _Row, epoch: int | None, reason: str | None = None
+) -> int:
     obs = row.obs
+    detail = "conservative completion of an observation (K)"
+    if reason is not None:
+        detail = clip_detail(f"{detail}: {reason}")
     event = _event(
         conn, obs.root, _key(obs.root, obs.ctx, "conservative"), epoch,
-        _provenance(obs.accepted, obs.head, obs.ctx), CONSERVATIVE_SOURCE,
-        "conservative completion of an observation (K)",
+        _provenance(obs.accepted, obs.head, obs.ctx), CONSERVATIVE_SOURCE, detail,
     )  # fmt: skip
     if row.outcome in UNFINISHED:
         _settle(conn, obs.id, "conservative", [event])
@@ -579,6 +666,38 @@ def _event(
     )
 
 
+def ranges_digest(conn: sqlite3.Connection, obs: int) -> str | None:
+    """The digest of the ranges descriptor the observation pinned at its
+    first bound verdict (`merge` only), or `None`."""
+    found = conn.execute(
+        "SELECT ranges_digest FROM trust_observations WHERE observation_id = ?",
+        (obs,),
+    ).fetchone()
+    if found is None:
+        raise ValueError(f"no observation {obs}")
+    return None if found[0] is None else str(found[0])
+
+
+def pin_ranges(db: Db, root: Root, obs: int, digest: str) -> str:
+    """Record `digest` as the observation's ranges digest unless one is
+    already pinned (own transaction); the pinned digest after the call.
+    Only a `merge` observation pins ranges (its inputs include P)."""
+    conn = db.conn
+    with perimeter.write(conn):
+        row = _by_id(conn, root, obs)
+        if row.obs.route != "merge":
+            raise ValueError(f"observation {obs} is not of the merge route")
+        stored = ranges_digest(conn, obs)
+        if stored is not None:
+            return stored
+        conn.execute(
+            "UPDATE trust_observations SET ranges_digest = ? WHERE observation_id = ?",
+            (digest, obs),
+        )
+        TRUST_STEP("ranges")
+    return digest
+
+
 # --- invariant I and the epoch rule ----------------------------------------------
 
 
@@ -635,6 +754,7 @@ __all__ = [
     "Head",
     "Observation",
     "Outcome",
+    "Pinned",
     "accepted_head",
     "advance_head",
     "apply_status",
@@ -648,6 +768,9 @@ __all__ = [
     "known_roots",
     "mark_restored",
     "open_observation",
+    "outcome_of",
+    "pin_ranges",
+    "ranges_digest",
     "register_findings",
     "restored",
     "stale_context",

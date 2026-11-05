@@ -185,11 +185,18 @@ _ENTRIES = frozenset({"load_trust", "history_transport"})
 #: §3.10 rev 11) — программа проверяющего v2 передаёт `token_source` с утверждённым
 #: `gh` (`partial(history_token_at, gh=…, role_home=…)`) в фабрику и через
 #: `act_premerge_core._trust` в `load_trust`; `open_url` боевой код не передаёт.
+#: Допуск — по шву (место, вызываемое, шов; платное ревью #704 P2): у двух мест
+#: v2 допущен только `token_source`, и `open_url=` там же ловится снова.
 _SEAM_PASS = frozenset(
     {
-        ("governance/act_trust.py::load_trust", "history_transport"),
-        ("governance/act_precheck_v2.py::_history", "history_transport"),
-        ("governance/act_premerge_core.py::_trust", "load_trust"),
+        ("governance/act_trust.py::load_trust", "history_transport", "open_url"),
+        ("governance/act_trust.py::load_trust", "history_transport", "token_source"),
+        (
+            "governance/act_precheck_v2.py::_history",
+            "history_transport",
+            "token_source",
+        ),
+        ("governance/act_premerge_core.py::_trust", "load_trust", "token_source"),
     }
 )
 
@@ -197,7 +204,8 @@ _SEAM_PASS = frozenset(
 def _seam_calls(rel: str, text: str) -> set[str]:
     """Вызовы `load_trust`/`history_transport` со швом (`open_url`, `token_source`
     или `**kwargs`) в модуле — в функциях, теле класса и на уровне модуля:
-    `<файл>::<функция | <module>>-><вызываемое>`."""
+    `<файл>::<функция | <module>>-><вызываемое>`. Шов, не допущенный для своего
+    места (`**kwargs` не допущен нигде), — находка."""
     found: set[str] = set()
 
     def visit(node: ast.AST, owner: str) -> None:
@@ -208,9 +216,15 @@ def _seam_calls(rel: str, text: str) -> set[str]:
             if isinstance(child, ast.Call):
                 f = child.func
                 name = f.id if isinstance(f, ast.Name) else getattr(f, "attr", None)
-                seam = any(k.arg is None or k.arg in _SEAMS for k in child.keywords)
+                seams = {
+                    "**" if k.arg is None else k.arg
+                    for k in child.keywords
+                    if k.arg is None or k.arg in _SEAMS
+                }
                 site = f"{rel}::{owner}"
-                if name in _ENTRIES and seam and (site, name) not in _SEAM_PASS:
+                if name in _ENTRIES and any(
+                    (site, name, seam) not in _SEAM_PASS for seam in seams
+                ):
                     found.add(f"{site}->{name}")
             visit(child, owner)
 
@@ -252,6 +266,39 @@ def test_seam_detector_exempts_only_load_trust_factory_call() -> None:
     assert _seam_calls("governance/act_trust.py", src) == {
         "governance/act_trust.py::real_deps->history_transport"
     }
+
+
+@pytest.mark.parametrize(
+    ("rel", "src"),
+    [
+        (
+            "governance/act_precheck_v2.py",
+            (
+                "def _history(b):\n"
+                "    return act_trust.history_transport(b, token_source=t, open_url=o)\n"
+            ),
+        ),
+        (
+            "governance/act_premerge_core.py",
+            (
+                "def _trust(d):\n"
+                "    return act_trust.load_trust(r, b, j, token_source=t, open_url=o)\n"
+            ),
+        ),
+        (
+            "governance/act_premerge_core.py",
+            "def _trust(d):\n    return act_trust.load_trust(r, b, j, **kw)\n",
+        ),
+    ],
+    ids=["v2_history_open_url", "premerge_trust_open_url", "premerge_trust_kwargs"],
+)
+def test_seam_pass_is_per_seam(rel: str, src: str) -> None:
+    """Paid review #704 P2: the two v2 sites admit only `token_source`; an
+    `open_url=` (or `**kwargs`) injected at them is caught again."""
+    assert _seam_calls(rel, src) != set()
+    clean = src.replace(", open_url=o", "")
+    if "**kw" not in clean:
+        assert _seam_calls(rel, clean) == set()
 
 
 def test_no_production_caller_injects_seams() -> None:

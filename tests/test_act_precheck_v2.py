@@ -1142,15 +1142,177 @@ def test_verdict_overflow_is_fixed_size(
     assert verdict["outcome"] == "unsupported_size" and verdict["findings"] == []
 
 
-def test_policy_pin_of_other_repo_unset(
+def test_policy_pin_of_other_repo_irreproducible(
     tmp_path: Path, wire: _Wire, gh: Path, profile: Path
 ) -> None:
     """The publisher's pin (by id) names another repository than `source.env` on
-    H: the pin is stale — not decided on."""
+    H: H's `source.env` is pinned by its SHA, so no re-evaluation can agree --
+    the typed terminal `irreproducible` (3a Task 10 review D-c), not `unset`;
+    the reason is the closed code, what it names is in the diagnostics."""
     policy = {"full_name": "owner/renamed", "branch": "main", "p_sha": P}
     verdict, _ = run(tmp_path / "home", trust_req(profile, policy=policy), gh)
-    assert verdict["outcome"] == "unset"
-    assert verdict["reason"].startswith("policy pin 'owner/renamed' != source.env")
+    assert verdict["outcome"] == act_precheck_v2.IRREPRODUCIBLE
+    assert verdict["reason"] == act_precheck_v2.PIN_MISMATCH
+    assert "owner/renamed" in verdict["diagnostics"]
+    assert verdict["relation"] is None and verdict["findings"] == []
+
+
+@pytest.mark.parametrize(
+    ("reason", "outcome"),
+    [
+        ("http: 404 repos/owner/approval-policy/commits/abc", "irreproducible"),
+        ("http: 422 repos/owner/approval-policy/commits/abc", "irreproducible"),
+        ("http: 502 repos/owner/approval-policy/commits/abc", "unset"),
+        ("transport: timed out", "unset"),
+    ],
+)
+def test_policy_objects_missing_irreproducible(
+    tmp_path: Path,
+    wire: _Wire,
+    gh: Path,
+    profile: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+    outcome: str,
+) -> None:
+    """D-c: objects of the policy history up to the pinned P that GitHub says
+    are gone (404/422) are permanent -- `irreproducible:
+    policy_objects_missing`; a gap that is only unreadable now stays `unset`."""
+    monkeypatch.setattr(act_facts, "history", lambda *a, **k: Unavailable(reason))
+    payload = trust_req(
+        profile, origin_route="merge", trust_accepted=accepted(), trust_head=X
+    )
+    verdict, _ = run(tmp_path / "home", payload, gh)
+    assert verdict["outcome"] == outcome
+    if outcome == "irreproducible":
+        assert verdict["reason"] == act_precheck_v2.OBJECTS_MISSING
+        assert reason in verdict["diagnostics"]
+        assert verdict["ranges"] is None and verdict["findings"] == []
+        assert verdict["relation"] == "descendant"
+
+
+def test_reeval_merge_keeps_findings_over_transient_policy_gap(
+    tmp_path: Path,
+    wire: _Wire,
+    gh: Path,
+    profile: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Paid review #704 P1: re-evaluating a `merge` observation, a settings
+    finding already established wins over a transient gap of the policy
+    history (`refuse` with the finding, I6 shape kept, ranges carried), and
+    over a permanent one (re-review N2); without a finding the transient gap
+    stays `unset`."""
+    wire.routes[f"repos/{AP}"] = (
+        200,
+        {"full_name": AP, "allow_rebase_merge": True, **_perms()},
+    )
+    payload = trust_req(
+        profile, origin_route="merge", trust_accepted=accepted(), trust_head=X
+    )
+    monkeypatch.setattr(
+        act_facts, "history", lambda *a, **k: Unavailable("transport: timed out")
+    )
+    verdict, _ = run(tmp_path / "home", payload, gh)
+    assert verdict["outcome"] == "refuse"
+    assert [(f["kind"], f["role"]) for f in verdict["findings"]] == [
+        ("rebase_allowed", "approval-policy")
+    ]
+    assert verdict["relation"] == "descendant" and verdict["source"] is not None
+    assert verdict["ranges"] is not None
+    monkeypatch.setattr(
+        act_facts, "history", lambda *a, **k: Unavailable("http: 404 repos/x/c/abc")
+    )
+    verdict, _ = run(tmp_path / "home", payload, gh)
+    # re-review N2: the finding wins over a permanent gap too
+    assert verdict["outcome"] == "refuse"
+    assert verdict["findings"][0]["kind"] == "rebase_allowed"
+    assert [(f["kind"], f["role"]) for f in verdict["findings"]] == [
+        ("rebase_allowed", "approval-policy")
+    ]
+    wire.routes[f"repos/{AP}"] = (
+        200,
+        {"full_name": AP, "allow_rebase_merge": False, **_perms()},
+    )
+    monkeypatch.setattr(
+        act_facts, "history", lambda *a, **k: Unavailable("transport: timed out")
+    )
+    verdict, _ = run(tmp_path / "home", payload, gh)
+    assert verdict["outcome"] == "unset" and verdict["findings"] == []
+
+
+def test_pin_mismatch_keeps_pair_findings(
+    tmp_path: Path, wire: _Wire, gh: Path, profile: Path
+) -> None:
+    """Re-review N2: H is not a descendant of A and its `source.env` names
+    another policy repository than the pin -- the pair's `not_descendant`
+    is reported (`refuse`), not swallowed by `irreproducible`."""
+    policy = {"full_name": "owner/renamed", "branch": "main", "p_sha": P}
+    payload = trust_req(
+        profile, policy=policy, trust_accepted=accepted(X), trust_head=C0
+    )
+    verdict, _ = run(tmp_path / "home", payload, gh)
+    assert verdict["outcome"] == "refuse"
+    assert ("not_descendant", "df-trust") in [
+        (f["kind"], f["role"]) for f in verdict["findings"]
+    ]
+    assert verdict["relation"] == "not_descendant"
+
+
+def test_pin_compared_case_insensitively(
+    tmp_path: Path, wire: _Wire, gh: Path, profile: Path
+) -> None:
+    """Re-review N4: GitHub owner/name are case-insensitive -- a pin that
+    differs from `source.env` only in case is the same repository, no K."""
+    policy = {"full_name": AP.upper(), "branch": "main", "p_sha": P}
+    verdict, _ = run(tmp_path / "home", trust_req(profile, policy=policy), gh)
+    assert verdict["outcome"] == "allow"
+
+
+def test_policy_break_wins_over_missing_objects(
+    tmp_path: Path, gh: Path, profile: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A broken form is a finding and wins over another epoch's gone objects."""
+    routes = _Wire(trust_routes(journal_x=J2))
+    monkeypatch.setattr(act_anon, "_default_open", lambda: routes)
+
+    def history(transport, source, anchor, until, *, head=None):  # noqa: ANN001, ANN202
+        if anchor == "b" * 40:
+            return Unavailable("http: 404 repos/x/commits/b")
+        return act_facts.HistoryBreak("commit_without_pr: late")
+
+    monkeypatch.setattr(act_facts, "history", history)
+    payload = trust_req(profile, origin_route="merge", trust_accepted=None)
+    verdict, _ = run(tmp_path / "home", payload, gh)
+    assert verdict["outcome"] == "refuse"
+
+
+def test_gone_matches_steward_reason() -> None:
+    """Paid review #705: `_GONE` matches the reason steward builds for a
+    missing object of a REST read (`_rest`: `_Fail("http", f"{status}
+    {path}")`), with or without the path; other statuses are transient."""
+    from steward.approvalfacts.v3 import _github, model
+
+    for status in (404, 422):
+        built = _github._Fail("http", f"{status} repos/o/r/commits/abc")
+        reason = built.unavailable().reason
+        assert act_precheck_v2._GONE.match(reason), reason
+        assert act_precheck_v2._GONE.match(
+            model.unavailable("http", str(status)).reason
+        )
+    for other in ("http: 403 repos/o/r", "http: 4040 x", "http: 502 x", "transport"):
+        assert not act_precheck_v2._GONE.match(other), other
+
+
+def test_irreproducible_reasons_closed() -> None:
+    assert act_precheck_v2.IRREPRODUCIBLE_REASONS == {
+        act_precheck_v2.PIN_MISMATCH,
+        act_precheck_v2.OBJECTS_MISSING,
+    }
+    assert all(
+        r.startswith(f"{act_precheck_v2.IRREPRODUCIBLE}: ")
+        for r in act_precheck_v2.IRREPRODUCIBLE_REASONS
+    )
 
 
 def test_candidate_legacy_dag_variant_refused(

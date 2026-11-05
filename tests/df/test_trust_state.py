@@ -706,3 +706,48 @@ def test_trust_state_stdlib_only() -> None:
         cwd=Path(__file__).resolve().parents[2],
     )
     assert out.stdout.strip() == "[]"
+
+
+def test_observation_pins_a_record(lay: Layout) -> None:
+    """Review D-a (3a Task 10): A's record is pinned in the observation at
+    creation and read back unchanged after A moves -- re-evaluation never
+    needs `trust_heads`; the integrity check holds both shapes."""
+    with perimeter.open_db(lay) as db:
+        cold = observe(db, accepted=None, head=H3, route="perimeter-status")
+    accept(lay, H1, 3)
+    with perimeter.open_db(lay) as db:
+        obs = observe(db, accepted=H1, head=H2)
+    assert obs.pinned == trust_state.Pinned(H1, 3, "env", RULES, ADMIN)
+    assert cold.pinned is None
+    accept(lay, H3, 4)  # A moves on
+    with perimeter.open_db(lay) as db:
+        found = {o.id: o.pinned for o in trust_state.unfinished(db.conn, ROOT)}
+    assert found[obs.id] == trust_state.Pinned(H1, 3, "env", RULES, ADMIN)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        (
+            "UPDATE trust_observations SET accepted_last_epoch = NULL "
+            "WHERE accepted_sha IS NOT NULL"
+        ),
+        "UPDATE trust_observations SET accepted_rules = 'x' WHERE accepted_sha IS NULL",
+        (
+            "UPDATE trust_observations SET accepted_last_epoch = 'three' "
+            "WHERE accepted_sha IS NOT NULL"
+        ),
+    ],
+)
+def test_pinned_record_invariants(lay: Layout, sql: str) -> None:
+    with perimeter.open_db(lay) as db:
+        observe(db, accepted=None, head=H3, route="perimeter-status")
+    accept(lay, H1, 3)
+    with perimeter.open_db(lay) as db:
+        observe(db, accepted=H1, head=H2)
+    conn = sqlite3.connect(lay.perimeter_dir / perimeter.DB_NAME)
+    conn.execute(sql)
+    conn.commit()
+    conn.close()
+    with pytest.raises(Unavailable, match="integrity"):
+        perimeter.open_db(lay).close()

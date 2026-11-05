@@ -53,6 +53,7 @@ VALID: dict[str, dict[str, object]] = {
         "expected_snapshot_sha": SHA,
     },
     "self-check": {"schema": request.REQUEST_SCHEMA, "request_id": RID},
+    "trust-status": {"schema": request.REQUEST_SCHEMA, "request_id": RID},
 }
 
 

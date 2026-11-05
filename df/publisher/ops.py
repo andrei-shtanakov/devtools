@@ -9,6 +9,7 @@ and never saves a result itself: the frame does (R23, R24 of Task 7).
 
 from __future__ import annotations
 
+import sys
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -26,7 +27,7 @@ from df.publisher.github import (
     Transport,
 )
 from df.publisher.request import Refused, Request, Response
-from df.stage2_config import Product, parse_products
+from df.stage2_config import Product, TrustBinding, parse_products
 
 if TYPE_CHECKING:
     from df.publisher.main import Context
@@ -66,6 +67,9 @@ class OpContext:
     products: Mapping[int, Product]
     #: `publisher.toml`'s `git_base`, handed to the precheck.
     git_base: str
+    #: `trust.toml` (`None`: no binding): its trust sources must carry no
+    #: installation of the App (spec 6.1).
+    binding: TrustBinding | None = None
 
 
 @dataclass(frozen=True)
@@ -127,11 +131,16 @@ def _key_of(layout: Layout, app_id: int) -> Path:
 
 def build_context(ctx: Context) -> OpContext:
     """The `OpContext` of the product the request names. The run must belong
-    to that product (`run_product_mismatch`); `product_unknown`,
+    to that product (`run_product_mismatch`) and, with a binding, to its
+    root (`root_mismatch`, spec 5.8: a run of the old root gets no operation
+    over a PR after `--rebind`); `product_unknown`,
     `products_config_invalid`, `openssl_not_configured` otherwise."""
     repository_id = int(str(ctx.request.fields["repository_id"]))
     if ctx.record is None or ctx.record.product != repository_id:
         raise Refused("run_product_mismatch")
+    binding = perimeter.binding_of(ctx)
+    if binding is not None:
+        perimeter.check_run_root(binding, ctx.record)
     products = _products(ctx.layout)
     product = products.get(repository_id)
     if product is None:
@@ -146,6 +155,7 @@ def build_context(ctx: Context) -> OpContext:
         ctx.api_base,
         products,
         ctx.git_base,
+        binding,
     )
 
 
@@ -161,9 +171,12 @@ def _check_app(
     transport: Transport,
     now: float,
     api_base: str,
+    binding: TrustBinding | None = None,
 ) -> SelfCheckResult:
-    """`github.self_check` with the clock fixed at `now`."""
-    return github.self_check(
+    """`github.self_check` with the clock fixed at `now`; an installation
+    that reaches a trust source of `binding` is a problem first
+    (`TRUST_SOURCE_PROBLEM`)."""
+    result = github.self_check(
         products,
         app_id,
         key,
@@ -172,10 +185,45 @@ def _check_app(
         api_base=api_base,
         clock=lambda: now,
     )
+    found = [
+        TRUST_SOURCE_PROBLEM.format(id=inst, role=role)
+        for inst, role, _repo in on_trust_sources(result, binding)
+    ]
+    if not found:
+        return result
+    problems = (*found, *result.problems)
+    return SelfCheckResult(result.installations, problems, result.perimeter)
+
+
+#: The problem of an App installation on `approval-policy` or `df-trust`.
+TRUST_SOURCE_PROBLEM = "app_installation_on_trust_source: {id}: {role}"
+
+
+def on_trust_sources(
+    result: SelfCheckResult, binding: TrustBinding | None
+) -> list[tuple[int, str, int]]:
+    """`(installation id, role, repository id)` of every installation that
+    reaches a trust source of `binding` (spec 6.1: the App key's holder
+    checks it; such an installation is a violation)."""
+    if binding is None:
+        return []
+    sources = {
+        binding.approval_policy_repository_id: "approval-policy",
+        binding.df_trust_repository_id: "df-trust",
+    }
+    return [
+        (inst.id, sources[repo], repo)
+        for inst in result.installations
+        for repo in inst.repository_ids
+        if repo in sources
+    ]
 
 
 def self_check_first(oc: OpContext) -> None:
-    """Decision 10: the App is checked before every operation."""
+    """Decision 10: the App is checked before every operation. An
+    installation on a trust source is registered as a perimeter event of
+    the bound root (`pending` until `perimeter-status` registers it at the
+    verified epoch), then refused."""
     try:
         result = _check_app(
             oc.products,
@@ -185,6 +233,7 @@ def self_check_first(oc: OpContext) -> None:
             oc.transport,
             oc.now,
             oc.api_base,
+            oc.binding,
         )
     except GitHubUnavailable:
         raise _unavailable() from None
@@ -192,6 +241,12 @@ def self_check_first(oc: OpContext) -> None:
         raise Refused(refusal_reason(exc)) from None
     except SigningFailed:
         raise Refused("app_key_unusable") from None
+    found = on_trust_sources(result, oc.binding)
+    if found and oc.binding is not None:
+        try:
+            perimeter.record_app_installations(oc.layout, oc.binding, found)
+        except perimeter.Unavailable as exc:
+            print(f"publisher: event not registered: {exc.reason}", file=sys.stderr)
     if result.problems:
         raise Refused(result.problems[0])
 
@@ -442,7 +497,11 @@ def read_token(ctx: Context) -> Response:
 
 
 def _check_one(
-    ctx: Context, products: Mapping[int, Product], app_id: int, openssl: Path
+    ctx: Context,
+    products: Mapping[int, Product],
+    app_id: int,
+    openssl: Path,
+    binding: TrustBinding | None,
 ) -> SelfCheckResult:
     """One App's check; a broken key or an unreadable App is a problem of
     that App, not the end of the report."""
@@ -455,6 +514,7 @@ def _check_one(
             github.default_transport,
             time.time(),
             ctx.api_base,
+            binding,
         )
     except SigningFailed:
         return SelfCheckResult((), (f"app_key_unusable: {app_id}",), None)
@@ -467,15 +527,21 @@ def _check_one(
 
 @_answers
 def self_check_op(ctx: Context) -> Response:
-    """`self-check` (root): every App of `products.toml` is checked; the
+    """`self-check` (root): every App of `products.toml` is checked (an
+    installation on a trust source of `trust.toml` is a problem); the
     installations and problems are put together with the perimeter's limits
     (`None` and a problem if the database cannot be opened)."""
     products = _products(ctx.layout)
     openssl = _openssl(ctx) if products else Path()
     installations: list[github.Installation] = []
     problems: list[str] = []
+    try:
+        binding = perimeter.binding_of(ctx)
+    except Refused as exc:
+        binding = None
+        problems.append(exc.reason)
     for app_id in sorted({p.app_id for p in products.values()}):
-        result = _check_one(ctx, products, app_id, openssl)
+        result = _check_one(ctx, products, app_id, openssl, binding)
         installations.extend(result.installations)
         problems.extend(result.problems)
     stats = perimeter.stats(ctx.layout)
@@ -488,6 +554,7 @@ def self_check_op(ctx: Context) -> Response:
 
 __all__ = [
     "MARKER",
+    "TRUST_SOURCE_PROBLEM",
     "Answer",
     "Auth",
     "OpContext",
@@ -496,6 +563,7 @@ __all__ = [
     "escape_body",
     "is_bot",
     "list_reviews",
+    "on_trust_sources",
     "publish_review",
     "read_pr",
     "read_token",

@@ -62,7 +62,7 @@ MAX_EVENTS = 10_000
 SCHEMA_VERSION = "2"
 RESTORED = ("false", "true")
 #: sha256 отсортированных строк `type\tname\tsql` из `sqlite_master` схемы издателя.
-SCHEMA_DIGEST = "012d109ababcd26fb8ddb5e1ee702491b294724bf2aeeafbb48e6cadd803cef3"
+SCHEMA_DIGEST = "5865d0730ecaf822214a4d8b73fc64d54aa70340ac9b89ca6e64dc30aba96f21"
 _INVARIANTS = (
     "SELECT count(*) FROM events WHERE state NOT IN ('pending', 'registered')",
     (
@@ -97,6 +97,18 @@ _INVARIANTS = (
     (
         "SELECT count(*) FROM trust_heads WHERE finding_event_id IS NOT NULL AND "
         "finding_event_id NOT IN (SELECT event_id FROM events)"
+    ),
+    (
+        "SELECT count(*) FROM trust_observations WHERE accepted_sha IS NULL "
+        "AND (accepted_last_epoch IS NOT NULL OR accepted_source_digest IS "
+        "NOT NULL OR accepted_rules IS NOT NULL OR accepted_admin_digest IS "
+        "NOT NULL)"
+    ),
+    (
+        "SELECT count(*) FROM trust_observations WHERE accepted_sha IS NOT "
+        "NULL AND (typeof(accepted_last_epoch) != 'integer' OR "
+        "typeof(accepted_source_digest) != 'text' OR typeof(accepted_rules) "
+        "!= 'text' OR typeof(accepted_admin_digest) != 'text')"
     ),
 )
 #: The longest observation JSON column `_json` parses (bytes). A legitimate
@@ -218,6 +230,10 @@ class WireJournal:
                 argv,
                 input=json.dumps(data, sort_keys=True).encode("utf-8"),
                 capture_output=True,
+                # must cover one v2 evaluation of `perimeter-status` (the
+                # publisher evaluates at most the oldest unfinished observation
+                # per call, `trust_routes.PERIMETER_STATUS_EVALUATIONS`, each up
+                # to its `PRECHECK_WAIT`); Task 16 sets both from the measurement
                 timeout=60,
                 check=False,
             )

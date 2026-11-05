@@ -70,6 +70,20 @@ def test_publisher_closure_stdlib() -> None:
     assert sorted(external - {"__future__"} - set(sys.stdlib_module_names)) == []
 
 
+def test_main_reaches_history_and_trust_routes() -> None:
+    """Task 10: `main` serves `perimeter-status` and `trust-status` through
+    `trust_routes`, which reads with `history`: both are in `main`'s own
+    closure now, and it is still stdlib and `df` only."""
+    local, external = _closure(("df.publisher.main",))
+    wired = {
+        "df.publisher.trust_routes",
+        "df.publisher.history",
+        "df.publisher.trust_state",
+    }
+    assert wired <= local
+    assert sorted(external - {"__future__"} - set(sys.stdlib_module_names)) == []
+
+
 def test_closure_reports_non_stdlib() -> None:
     """The walker reports a non-stdlib top-level package: `governance`
     reached from a governance root is external, not hidden."""

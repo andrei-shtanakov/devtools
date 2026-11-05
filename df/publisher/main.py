@@ -9,8 +9,9 @@ for every other outcome.
 
 An operation is an entry of `OPERATION_TABLE`. `publish-review`, `read-token`
 and `self-check` are implemented in `df.publisher.ops`, `merge` (stage 2b:
-stop only) in `df.publisher.merge`, `record-violation` and
-`perimeter-status` in `df.publisher.perimeter`.
+stop only) in `df.publisher.merge`, `record-violation` in
+`df.publisher.perimeter`, `perimeter-status` and root's `trust-status` in
+`df.publisher.trust_routes`.
 """
 
 from __future__ import annotations
@@ -25,14 +26,14 @@ from df import launch
 from df.config import ConfigError, load_accounts, read_optional
 from df.journal import StepFailed
 from df.paths import Layout
-from df.publisher import merge, ops, perimeter, request, store
+from df.publisher import merge, ops, perimeter, request, store, trust_routes
 from df.publisher.request import InFlight, Refused, Request, Response
 from df.stage2_config import PublisherConfig, RunRecord, parse_publisher
 from df.state import Snapshot
 
-#: Operations only root may ask for (decision 6): a constant of the code, not
-#: a line of `publisher.toml`.
-ADMIN_OPERATIONS = frozenset({request.SELF_CHECK})
+#: Operations only root may ask for (decision 6; `trust-status`, spec 5.2
+#: rev 11): a constant of the code, not a line of `publisher.toml`.
+ADMIN_OPERATIONS = frozenset({request.SELF_CHECK, request.TRUST_STATUS})
 PUBLISHER_USER = "df-publisher"
 _SUDO_UID = re.compile(r"0|[1-9][0-9]*", re.ASCII)
 _EXIT = {"done": 0, "unknown": 3}
@@ -78,8 +79,9 @@ OPERATION_TABLE: dict[str, Handler] = {
     "read-token": ops.read_token,
     "merge": merge.merge_op,
     "record-violation": perimeter.record_violation_op,
-    "perimeter-status": perimeter.perimeter_status_op,
+    "perimeter-status": trust_routes.route_perimeter_status,
     request.SELF_CHECK: ops.self_check_op,
+    request.TRUST_STATUS: trust_routes.route_trust_status,
 }
 #: `merge` releases its PR ownership with its final result (r3 N2).
 AFTER_FINAL: dict[str, Finisher] = {"merge": merge.release_owner}
