@@ -273,13 +273,17 @@ def test_seam_detector_exempts_only_load_trust_factory_call() -> None:
     [
         (
             "governance/act_precheck_v2.py",
-            "def _history(b):\n"
-            "    return act_trust.history_transport(b, token_source=t, open_url=o)\n",
+            (
+                "def _history(b):\n"
+                "    return act_trust.history_transport(b, token_source=t, open_url=o)\n"
+            ),
         ),
         (
             "governance/act_premerge_core.py",
-            "def _trust(d):\n"
-            "    return act_trust.load_trust(r, b, j, token_source=t, open_url=o)\n",
+            (
+                "def _trust(d):\n"
+                "    return act_trust.load_trust(r, b, j, token_source=t, open_url=o)\n"
+            ),
         ),
         (
             "governance/act_premerge_core.py",
