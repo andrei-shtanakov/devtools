@@ -140,8 +140,12 @@ PIN_MISMATCH = "irreproducible: policy_pin_mismatch"
 #: 404/422 for them), not merely unreadable now.
 OBJECTS_MISSING = "irreproducible: policy_objects_missing"
 IRREPRODUCIBLE_REASONS = frozenset({PIN_MISMATCH, OBJECTS_MISSING})
-#: How steward names a missing object of a REST read (`http: <status> <path>`).
-_GONE = re.compile(r"http: (?:404|422) ")
+#: How steward names a missing object of a REST read: `_Fail("http",
+#: f"{status} {path}")` in `steward/approvalfacts/v3/_github.py` (`_rest`),
+#: rendered by `model.unavailable` as `"http: <status> <path>"` (pinned by
+#: `test_gone_matches_steward_reason`). The status is matched as a whole
+#: word, so a reason without the path matches too.
+_GONE = re.compile(r"http: (?:404|422)\b")
 #: Seconds the alarm backstop waits past `deadline` (the snapshot's own deadline
 #: kills its git process groups first).
 ALARM_SLACK = 2.0
