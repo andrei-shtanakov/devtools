@@ -667,8 +667,8 @@ root:
 
 ```sh
 darkfactory setup-trust check --templates
-darkfactory setup-trust check --policy-repo-id <id approval-policy> --trust-repo-id <id df-trust> --trust-branch main --out /tmp/setup-trust-report.json
-sudo darkfactory setup-trust write --policy-repo-id <id approval-policy> --trust-repo-id <id df-trust> --trust-branch main --report /tmp/setup-trust-report.json --report-digest <digest из check> --history-token-file <файл токена истории>
+darkfactory setup-trust check --policy-repo-id <id approval-policy> --trust-repo-id <id df-trust> --trust-branch main --out ~/setup-trust-report.json
+sudo darkfactory setup-trust write --policy-repo-id <id approval-policy> --trust-repo-id <id df-trust> --trust-branch main --report ~/setup-trust-report.json --report-digest <digest из check> --history-token-file <файл токена истории>
 ```
 
 `check --templates` показывает публикуемое содержимое (`source.env`, `epochs.yaml`,
@@ -676,9 +676,11 @@ sudo darkfactory setup-trust write --policy-repo-id <id approval-policy> --trust
 читает периметр обоих репо (коды ответов — в отчёте, 403/404 — «не проверено») и печатает
 digest отчёта и команду записи. Стоп — тариф без rulesets, `allow_rebase_merge = true`, ветка
 `source.env` не default branch `approval-policy` (С-2), нет обязательных правил ветки, приватный
-репо. `write` сверяет digest и аргументы с отчётом, пишет профиль токена истории
+репо. `write` сверяет digest и аргументы с отчётом (отчёт старше часа не принимается; файл
+токена истории — ваш, `chmod 600`), пишет профиль токена истории
 `/etc/df/history-gh` (`root:df-history`, `0750`/`0640`; группу создаёт повтор
-`sudo darkfactory roles setup`), затем `/etc/df/trust.toml`, затем спрашивает `trust-status`;
+`sudo darkfactory roles setup`; группа, созданная не darkfactory, — отказ; членство
+оператора в уже открытых сессиях Linux действует с нового входа), затем `/etc/df/trust.toml`, затем спрашивает `trust-status`;
 evidence — `/var/lib/df/evidence/perimeter-<время>.json`. Без `--history-token-file` привязка
 не пишется (O14); `unavailable` после записи — «установка не завершена», код 3. Смена корня —
 обе фазы с `--rebind`. После приёмки PAT проверки отзывается.

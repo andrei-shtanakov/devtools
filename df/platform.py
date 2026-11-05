@@ -38,7 +38,15 @@ from xml.parsers.expat import ExpatError
 
 from df import fsutil
 from df.acl import acl_present_path
-from df.config import Account, ConfigError, dump_accounts, load_accounts
+from df.config import (
+    Account,
+    ConfigError,
+    GroupRecord,
+    dump_accounts,
+    dump_groups,
+    load_accounts,
+    load_groups,
+)
 from df.digest import TreeError
 from df.journal import StepFailed
 from df.paths import Layout
@@ -1322,14 +1330,30 @@ def group_members(name: str) -> frozenset[str] | None:
     return frozenset(entry.gr_mem) | primary
 
 
-def group_problems(name: str, members: Sequence[str]) -> list[str]:
-    """The group `name` exists, its GID is its own and not 0, and its members
-    are exactly `members` (an extra or a missing one is named)."""
+def group_problems(layout: Layout, name: str, members: Sequence[str]) -> list[str]:
+    """The group `name` is df's (`groups.toml`, `ready`), exists with the
+    recorded GID, its own and not 0, and its members are exactly `members`
+    (an extra or a missing one is named)."""
+    try:
+        record = load_groups(layout.groups).get(name)
+    except ConfigError as exc:
+        return [f"groups.toml: {exc}"]
+    if record is None:
+        return [f"нет записи группы {name} в groups.toml"]
+    problems = (
+        [] if record.state == "ready" else [f"группа {name}: state = {record.state}"]
+    )
+    return problems + _os_group_problems(name, members, record.gid)
+
+
+def _os_group_problems(name: str, members: Sequence[str], want: int) -> list[str]:
     gid = group_gid(name)
     have = group_members(name)
     if gid is None or have is None:
         return [f"группы {name} нет"]
     problems: list[str] = []
+    if gid != want:
+        problems.append(f"группа {name}: gid {gid}, записан {want}")
     others = sorted({g.gr_name for g in grp.getgrall() if g.gr_gid == gid} - {name})
     if gid == 0 or others:
         problems.append(f"группа {name}: gid {gid} не свой ({', '.join(others)})")
@@ -1341,26 +1365,57 @@ def group_problems(name: str, members: Sequence[str]) -> list[str]:
     return problems
 
 
-def ensure_group(name: str, members: Sequence[str]) -> None:
-    """Create the group `name` if absent (a free id of `ID_RANGE`) and set
-    its members to exactly `members`; a repeat changes nothing. The caller
-    holds the writer lock (`_free_id` is not atomic). Problems after the
-    commands are `StepFailed`."""
+def ensure_group(layout: Layout, name: str, members: Sequence[str]) -> None:
+    """Create the group `name` by intent, as `create_service_user` creates
+    an account: the intent (`groups.toml`, `creating`, a free id of
+    `ID_RANGE`) is written before the first OS command, and a group of that
+    name without our intent is refused (created not by darkfactory: its
+    hidden members -- macOS `GroupMembers`/`NestedGroups`, Linux gshadow
+    administrators -- would survive a rewrite of the member list). Then its
+    members are set to exactly `members`; `ready` after the check. A repeat
+    changes nothing. The caller holds the writer lock (`_free_id` is not
+    atomic)."""
     step = f"group:{name}"
     platform = detect_platform()
-    for argv in group_argv(platform, name, members, gid=_group_gid_to_set(name)):
-        _run_checked(argv, step)
-    problems = group_problems(name, members)
-    if problems:
-        raise StepFailed(step, "; ".join(problems))
+    try:
+        groups = load_groups(layout.groups)
+        record = groups.get(name)
+        if record is None:
+            record = _group_intent(platform, layout, groups, name)
+        gid = group_gid(name)
+        if gid is not None and gid != record.gid:
+            raise StepFailed(
+                step, f"группа {name}: gid {gid}, в намерении {record.gid}"
+            )
+        made = None if gid is not None else record.gid
+        for argv in group_argv(platform, name, members, gid=made):
+            _run_checked(argv, step)
+        problems = _os_group_problems(name, members, record.gid)
+        if problems:
+            raise StepFailed(step, "; ".join(problems))
+        if record.state != "ready":
+            ready = replace(record, state="ready")
+            fsutil.write_atomic(layout.groups, dump_groups({**groups, name: ready}))
+    except (OSError, ConfigError) as exc:
+        raise StepFailed(step, str(exc)) from exc
 
 
-def _group_gid_to_set(name: str) -> int | None:
-    """`None` when the group has its GID; else a free id for it (macOS: a
-    record left without `PrimaryGroupID` by a crash gets one too)."""
-    if group_gid(name) is not None:
-        return None
-    return _free_id(detect_platform(), name)
+def _group_intent(
+    platform: PlatformName,
+    layout: Layout,
+    groups: Mapping[str, GroupRecord],
+    name: str,
+) -> GroupRecord:
+    """Refuse a group record df did not make; else write the intent."""
+    if group_gid(name) is not None or read_record("group", name) is not None:
+        raise StepFailed(
+            f"group:{name}",
+            f"группа {name} существует, но создана не darkfactory: удалите её",
+        )
+    created = datetime.now(UTC).isoformat(timespec="seconds")
+    record = GroupRecord(name, _free_id(platform, name), "creating", created)
+    fsutil.write_atomic(layout.groups, dump_groups({**groups, name: record}))
+    return record
 
 
 def group_argv(

@@ -184,6 +184,11 @@ class Layout:
         return self.install_dir / "accounts.toml"
 
     @property
+    def groups(self) -> Path:
+        """Groups df created by intent (`df-history`, stage 3a)."""
+        return self.install_dir / "groups.toml"
+
+    @property
     def admin_home(self) -> Path:
         """`HOME` and cache of root's `uv` for the admin Python (scratch, `0700`)."""
         return self.install_dir / "admin-home"

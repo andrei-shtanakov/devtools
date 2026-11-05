@@ -130,7 +130,7 @@ def setup_app_key(
 
 
 def _read_key(source: Path) -> bytes:
-    data = _read_source(source, KEY_CAP)
+    data = read_source(source, KEY_CAP)
     if _PEM.fullmatch(data) is None:
         raise StepFailed(
             STEP,
@@ -168,7 +168,7 @@ def install_machine_token(layout: Layout, source: Path) -> None:
     must be `df-exec`'s directory, else a refusal with nothing changed.
     Its warnings (a found directory writable by others) are returned by
     `setup_machine_token` only."""
-    _install_token(layout, _read_token(source))
+    _install_token(layout, read_token(source))
 
 
 def setup_machine_token(
@@ -180,7 +180,7 @@ def setup_machine_token(
     """`install_machine_token`, then `before_check` (as `setup_app_key`),
     then `check_machine_token` (the token known to the check only to mask
     it)."""
-    token = _read_token(source)
+    token = read_token(source)
     warnings = _install_token(layout, token)
     before_check()
     check = check_machine_token(layout, token)
@@ -215,13 +215,15 @@ def _install_token(layout: Layout, token: bytes) -> tuple[str, ...]:
     return tuple(warnings)
 
 
-def _read_token(source: Path) -> bytes:
-    data = _read_source(source, TOKEN_CAP + 1)
+def read_token(source: Path, *, step: str = STEP, flag: str = "--file") -> bytes:
+    """One token line of the file `source` (`read_source`), else a refusal
+    of `step` naming `flag`."""
+    data = read_source(source, TOKEN_CAP + 1, step=step, flag=flag)
     token = data.removesuffix(b"\n")
     if _TOKEN.fullmatch(token) is None:  # its bounds are TOKEN_CAP's
         raise StepFailed(
-            STEP,
-            f"{source}: не токен (нужна одна строка github_pat_… или ghp_… "
+            step,
+            f"{flag} {source}: не токен (нужна одна строка github_pat_… или ghp_… "
             f"до {TOKEN_CAP} байт); ничего не записано",
         )
     return token
@@ -378,21 +380,24 @@ def _judge(fd: int, path: Path, layout: Layout, owner: int | None) -> None:
         )
 
 
-def _read_source(source: Path, cap: int) -> bytes:
+def read_source(
+    source: Path, cap: int, *, step: str = STEP, flag: str = "--file"
+) -> bytes:
     """The source as data: absolute, a regular file read without following a
-    final link, at most `cap` bytes. Never deleted."""
+    final link, at most `cap` bytes. Never deleted. A refusal is `step`'s
+    and names `flag`."""
     if not source.is_absolute():
-        raise StepFailed(STEP, f"--file {str(source)!r}: путь не абсолютный")
+        raise StepFailed(step, f"{flag} {str(source)!r}: путь не абсолютный")
     try:  # never open a device or a FIFO: refused before the open
         st = os.lstat(source)
     except OSError as exc:
-        raise StepFailed(STEP, f"--file {source}: {exc.strerror or exc}") from exc
+        raise StepFailed(step, f"{flag} {source}: {exc.strerror or exc}") from exc
     if not stat.S_ISREG(st.st_mode):
-        raise StepFailed(STEP, f"--file {source}: не обычный файл")
+        raise StepFailed(step, f"{flag} {source}: не обычный файл")
     try:
         return inputs.read_capped(source, cap)
     except TreeError as exc:
-        raise StepFailed(STEP, f"--file: {exc}") from exc
+        raise StepFailed(step, f"{flag}: {exc}") from exc
 
 
 def _account(layout: Layout, name: str) -> Account:

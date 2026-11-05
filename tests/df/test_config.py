@@ -266,6 +266,7 @@ def test_known_schemas() -> None:
     assert STATE_SCHEMAS == {
         "pending.toml": "df/pending/v1",
         "accounts.toml": "df/accounts/v1",
+        "groups.toml": "df/groups/v1",
         "accept/<id>.toml": "df/accept/v1",
         "runs/<id>.json": "df/run/v1",
     }

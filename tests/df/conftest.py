@@ -33,7 +33,7 @@ import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -80,6 +80,45 @@ def _no_real_reap(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(precheck_reap, "list_processes", lambda **_kw: [])
     monkeypatch.setattr(precheck_reap, "kill", no_kill)
+
+
+class ForbiddenMutation(BaseException):
+    """A non-root test reached a real command that changes the system's
+    users or groups (the dscl incident of 3a Task 12)."""
+
+
+#: Commands that change OS accounts or groups; `dscl` only with these verbs.
+_MUTATORS = frozenset(
+    {"dseditgroup", "groupadd", "groupdel", "groupmod", "gpasswd"}
+    | {"useradd", "userdel", "usermod"}
+)
+_DSCL_MUTATING = frozenset({"-create", "-delete", "-append", "-merge", "-change"})
+
+
+def system_mutation(argv: Sequence[str]) -> bool:
+    """Whether `argv` (or a command it wraps: `sudo`, `env`) changes OS
+    accounts or groups."""
+    names = [os.path.basename(str(a)) for a in argv]
+    if any(n in _MUTATORS for n in names):
+        return True
+    return "dscl" in names and any(str(a) in _DSCL_MUTATING for a in argv)
+
+
+@pytest.fixture(autouse=True)
+def _no_system_mutation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-root test never runs a real account or group mutation: every
+    process start goes through `platform._execute`, which refuses one here
+    (root rows run the real commands in CI)."""
+    if os.geteuid() == 0:
+        return
+    real = plat._execute  # noqa: SLF001
+
+    def guarded(argv: Sequence[str], **kw: Any) -> RunResult:
+        if system_mutation(argv):
+            raise ForbiddenMutation(f"test ran {list(argv)}")
+        return real(argv, **kw)
+
+    monkeypatch.setattr(plat, "_execute", guarded)
 
 
 def root_gate_reason(euid: int, env: Mapping[str, str]) -> str | None:

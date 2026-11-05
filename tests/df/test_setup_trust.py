@@ -271,7 +271,7 @@ def test_tariff_without_rulesets_stops() -> None:
     report = check(fake)
     assert not report.ok
     assert ("tariff_without_rulesets", "approval-policy") in kinds(report)
-    assert kinds(report).count(("tariff_without_rulesets", "df-trust")) == 2
+    assert kinds(report).count(("tariff_without_rulesets", "df-trust")) == 1
     fake = good_github()
     fake.answers[f"repos/{POLICY}/rules/branches/main"] = (200, RULES[1:])
     assert kinds(check(fake)) == [("ruleset_missing", "approval-policy")]
@@ -317,7 +317,9 @@ def test_policy_branch_not_default_stops() -> None:
         200,
         _content(SOURCE.replace("POLICY_ADMINS=alice", "POLICY_ADMINS= ,")),
     )
-    assert kinds(check(fake)) == [("source_env_invalid", "df-trust")]
+    found = kinds(check(fake))  # no allowlist: every principal is outside
+    assert found[0] == ("source_env_invalid", "df-trust")
+    assert set(found[1:]) == {("perimeter_principal", r) for r in setup_trust.ROLES}
 
 
 def test_pat_403_is_not_verified() -> None:
@@ -336,7 +338,7 @@ def test_pat_403_is_not_verified() -> None:
     assert "collaborators@approval-policy: не проверено (HTTP 404)" in report.unverified
     assert any(u.startswith("plan:") for u in report.unverified)
     hooks = report.facts["df-trust"]["hooks"]  # type: ignore[index]
-    assert hooks == {"status": 403, "value": None}
+    assert hooks == {"status": 403, "value": None, "truncated": False}
     assert (f"repos/{TRUST}/hooks?per_page=100", 403) in report.calls
     fake.answers[f"repositories/{POLICY_ID}"] = (403, {})
     report = check(fake)
@@ -383,6 +385,7 @@ class W:
     def token_file(self, token: str = HISTORY_TOKEN) -> Path:
         path = self.human / "history-token"
         path.write_text(token + "\n")
+        path.chmod(0o600)
         return path
 
     def write(
@@ -484,6 +487,7 @@ def test_no_history_profile_not_finished(w: W) -> None:
     assert w.status == [status_line()]  # trust-status not asked
     bad = w.human / "bad-token"
     bad.write_text("not a token\n")
+    bad.chmod(0o600)
     with pytest.raises(StepFailed, match="не токен"):
         w.write(token=bad)
     assert not (w.lay.etc / "trust.toml").exists()
@@ -838,3 +842,244 @@ def test_profile_and_evidence_paths_of_the_layout() -> None:
     lay = Layout(Path("/"))
     assert lay.history_gh == Path("/etc/df/history-gh")
     assert lay.evidence_dir == Path("/var/lib/df/evidence")
+
+
+# --- fix round 1: the allowlist of spec A 6.2 (а), pagination ----------------------
+
+
+def _with(fake: FakeGitHub, name: str, what: str, body: object) -> FakeGitHub:
+    paths = {
+        "collaborators": "collaborators?affiliation=all&per_page=100",
+        "teams": "teams?per_page=100",
+        "keys": "keys?per_page=100",
+        "ruleset": "rulesets/7",
+    }
+    fake.answers[f"repos/{name}/{paths[what]}"] = (200, body)
+    return fake
+
+
+def principal_stops(report: setup_trust.PerimeterReport) -> list[tuple[str, str]]:
+    return [(s.role, s.detail) for s in report.stops if s.kind == "perimeter_principal"]
+
+
+def test_collaborators_outside_policy_admins_stop() -> None:
+    """Write, maintain or admin (by role or permission) outside
+    `POLICY_ADMINS` is a stop; an admin in it (case-folded) and a reader are
+    not."""
+    people = [
+        {"login": "Alice", "role_name": "admin"},
+        {"login": "ai-prosto", "role_name": "write"},
+        {"login": "mo", "role_name": "maintain"},
+        {"login": "cu", "role_name": "custom", "permissions": {"push": True}},
+        {"login": "reader", "role_name": "read", "permissions": {"pull": True}},
+    ]
+    report = check(_with(good_github(), POLICY, "collaborators", people))
+    assert not report.ok
+    assert principal_stops(report) == [
+        ("approval-policy", f"collaborator:{n}: не в POLICY_ADMINS")
+        for n in ("ai-prosto", "mo", "cu")
+    ]
+    text = setup_trust.report_text(report)
+    assert "collaborator:Alice" in text
+    assert "collaborator:ai-prosto — НЕ в POLICY_ADMINS" in text
+    assert "reader" not in text
+
+
+def test_teams_with_push_stop() -> None:
+    teams = [
+        {"slug": "core", "permission": "push"},
+        {"slug": "ro", "permission": "pull"},
+    ]
+    report = check(_with(good_github(), TRUST, "teams", teams))
+    assert principal_stops(report) == [
+        ("df-trust", "team:core (push): не в POLICY_ADMINS")
+    ]
+
+
+def test_writable_deploy_keys_stop() -> None:
+    keys = [
+        {"id": 1, "title": "ci", "read_only": False},
+        {"id": 2, "title": "mirror", "read_only": True},
+        {"id": 3, "title": "odd"},
+    ]
+    report = check(_with(good_github(), TRUST, "keys", keys))
+    assert [d for _r, d in principal_stops(report)] == [
+        "deploy_key:1 'ci': не в POLICY_ADMINS",
+        "deploy_key:3 'odd': не в POLICY_ADMINS",
+    ]
+
+
+def test_bypass_actors_integration_deploykey_stop_others_premise() -> None:
+    """`Integration` and `DeployKey` are never a login: a stop. A type that
+    maps to no login, or a hidden list, is a named premise."""
+    actors = [
+        {"actor_type": "Integration", "actor_id": 9, "bypass_mode": "always"},
+        {"actor_type": "DeployKey", "actor_id": None},
+        {"actor_type": "RepositoryRole", "actor_id": 5},
+        {"actor_type": "OrganizationAdmin", "actor_id": 1},
+    ]
+    ruleset = {"id": 7, "name": "trust", "bypass_actors": actors}
+    report = check(_with(good_github(), POLICY, "ruleset", ruleset))
+    assert [d for _r, d in principal_stops(report)] == [
+        "bypass:Integration:9 (ruleset 7): не в POLICY_ADMINS",
+        "bypass:DeployKey:None (ruleset 7): не в POLICY_ADMINS",
+    ]
+    premises = [u for u in report.unverified if u.startswith("bypass_actors@")]
+    assert len(premises) == 2
+    assert "RepositoryRole 5 не сводится к логину" in premises[0]
+    hidden = check(_with(good_github(), TRUST, "ruleset", {"id": 7}))
+    assert hidden.ok
+    assert any("ruleset 7 — список не прочитан" in u for u in hidden.unverified)
+    assert "не проверено: bypass_actors@df-trust" in setup_trust.report_text(hidden)
+
+
+def test_full_page_is_truncated_not_verified() -> None:
+    """A full page (or a `Link` to the next) is «не проверено (truncated)»."""
+    readers = [{"login": f"u{i}", "role_name": "read"} for i in range(100)]
+    report = check(_with(good_github(), POLICY, "collaborators", readers))
+    assert "collaborators@approval-policy: не проверено (truncated: больше 100)" in (
+        report.unverified
+    )
+    entry = report.facts["approval-policy"]["collaborators"]  # type: ignore[index]
+    assert entry["truncated"] is True
+    fake = good_github()
+
+    def linked(method: str, url: str, headers: dict[str, str], body: bytes | None):  # noqa: ANN202
+        status, hdrs, raw = fake(method, url, headers, body)
+        if url.endswith("hooks?per_page=100"):
+            return status, {"Link": '<https://x/2>; rel="next"'}, raw
+        return status, hdrs, raw
+
+    report = setup_trust.check_perimeter(
+        linked, POLICY_ID, TRUST_ID, trust_branch="main", now=lambda: NOW
+    )
+    assert "hooks@df-trust: не проверено (truncated: больше 100)" in report.unverified
+
+
+def test_source_env_parser_agrees_with_the_checker() -> None:
+    """Every form the checker refuses, the installer refuses (and the good
+    ones both accept)."""
+    from governance.act_source import SourceError, parse_source
+
+    cases = [
+        SOURCE,
+        SOURCE + "POLICY_ADMINS=bob\n",
+        SOURCE.replace(ACTIVATION, "b" * 39),
+        SOURCE.replace(ACTIVATION, "B" * 40),
+        SOURCE.replace("POLICY_ADMINS=alice", "POLICY_ADMINS="),
+        SOURCE.replace("POLICY_ADMINS=alice", "POLICY_ADMINS= , ,"),
+        "# APPROVAL_POLICY_REPO=x/y\n" + SOURCE,
+        SOURCE.replace(
+            "APPROVAL_POLICY_BRANCH=main", "  APPROVAL_POLICY_BRANCH = main"
+        ),
+        SOURCE.replace(
+            "APPROVAL_POLICY_BRANCH=main", "  APPROVAL_POLICY_BRANCH=main  "
+        ),
+        SOURCE.replace("APPROVAL_POLICY_REPO=owner/approval-policy\n", ""),
+    ]
+    for text in cases:
+        try:
+            parse_source(text)
+            theirs = True
+        except SourceError:
+            theirs = False
+        try:
+            setup_trust.parse_source_env(text)
+            ours = True
+        except ValueError:
+            ours = False
+        assert ours == theirs, text
+
+
+def test_profile_format_is_the_measured_one() -> None:
+    """The profile is byte for byte the form devtools#693 measured."""
+    from tests.df.test_root_gh_shared_profile import CONFIG, FAKE, HOSTS
+
+    assert setup_trust.profile_files(FAKE) == {"config.yml": CONFIG, "hosts.yml": HOSTS}
+    assert setup_trust.PROFILE_LOGIN == "df-history"
+
+
+def test_history_token_file_owner_and_mode(
+    w: W, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The token file is the human's (`SUDO_UID`) or root's, without group or
+    other bits; anything else is refused before any write."""
+    token = w.token_file()
+    token.chmod(0o640)
+    with pytest.raises(StepFailed, match="права 0640"):
+        w.write(token=token)
+    token.chmod(0o600)
+    other = os.getuid() + 77
+    w.fake.set_owner(token, other)
+    monkeypatch.delenv("SUDO_UID", raising=False)
+    with pytest.raises(StepFailed, match=f"владелец uid {other}"):
+        w.write(token=token)
+    assert not w.lay.history_gh.exists() and not (w.lay.etc / "trust.toml").exists()
+    monkeypatch.setenv("SUDO_UID", str(other))
+    w.write(token=token)
+    assert (w.lay.etc / "trust.toml").exists()
+
+
+def test_rebind_message_names_the_field(w: W) -> None:
+    """The same triple with another parameter needs `--rebind` too, and the
+    refusal names what differs."""
+    from df.stage2_config import dump_trust
+
+    w.write()
+    binding = load_trust(w.lay.etc / "trust.toml")
+    assert binding is not None
+    (w.lay.etc / "trust.toml").write_text(
+        dump_trust(replace(binding, history_gh_config_dir=None))
+    )
+    with pytest.raises(StepFailed) as exc:
+        w.write()
+    assert "та же тройка" in exc.value.detail
+    assert "history_gh_config_dir: None →" in exc.value.detail
+
+
+def test_evidence_dir_of_another_mode_not_finished(w: W) -> None:
+    """After the write, an evidence directory that is not root's `0700` is
+    no crash: «не завершена» (exit 3), journalled."""
+    w.lay.evidence_dir.mkdir(mode=0o755)
+    os.chmod(w.lay.evidence_dir, 0o755)
+    with pytest.raises(NeedsHuman, match="evidence не записан"):
+        w.write()
+    assert w.rows() == [("setup-trust", "needs-human")]
+    assert list(w.lay.evidence_dir.iterdir()) == []
+
+
+def test_check_templates_takes_no_other_argument(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    lay = Layout(Path("/nonexistent-df-root"))
+    for extra in (["--out", "/x"], ["--policy-repo-id", "1"], ["--rebind"]):
+        code = cli.main(
+            ["setup-trust", "check", "--templates", *extra],
+            mode="reader",
+            read=Stable(RAW, 0),
+            lock_fd=None,
+            layout=lay,
+        )
+        assert code == cli.EXIT_REFUSED
+        assert "--templates: без других аргументов" in capsys.readouterr().err
+
+
+def test_system_mutation_guard() -> None:
+    """The autouse guard of `tests/df/conftest.py`: a non-root test that
+    reaches a real account or group mutation fails at `_execute`."""
+    from tests.df.conftest import ForbiddenMutation, system_mutation
+
+    for argv in (
+        ["/usr/bin/dscl", ".", "-create", "/Groups/x"],
+        ["/usr/bin/dscl", ".", "-append", "/Groups/x", "GroupMembership", "a"],
+        ["/usr/sbin/groupadd", "x"],
+        ["/usr/bin/gpasswd", "-M", "a", "x"],
+        ["/usr/bin/sudo", "-n", "/usr/sbin/useradd", "x"],
+        ["/usr/sbin/dseditgroup", "-o", "edit", "x"],
+    ):
+        assert system_mutation(argv), argv
+    assert not system_mutation(["/usr/bin/dscl", "-plist", ".", "-read", "/Groups/x"])
+    assert not system_mutation(["/usr/bin/getent", "group", "x"])
+    if os.geteuid() != 0:
+        with pytest.raises(ForbiddenMutation):
+            plat.run_command(["/usr/sbin/groupadd", "df-guard-probe"])

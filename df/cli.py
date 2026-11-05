@@ -916,6 +916,7 @@ def _roles_setup(args: argparse.Namespace, lay: Layout, snap: Snapshot) -> int:
     operator = _operator_of(args)
     roles_setup.run(lay, operator=operator, snap=snap)
     print(f"darkfactory: роли и обёртки настроены; оператор {operator}")
+    print(f"darkfactory: {roles_setup.next_login_note(operator)}")
     return EXIT_OK
 
 
@@ -1169,10 +1170,12 @@ def _setup_trust_check(args: argparse.Namespace) -> int:
     stop is exit 2 with the report still written (the draft evidence)."""
     if os.geteuid() == ROOT_UID:
         raise Refusal(setup_trust.CHECK_AS_ROOT)
+    given = (args.policy_repo_id, args.trust_repo_id, args.trust_branch, args.out)
+    if args.templates and (args.rebind or any(v is not None for v in given)):
+        raise UsageError("setup-trust check --templates: без других аргументов")
     print(setup_trust.show_publishable(), end="")
     if args.templates:
         return EXIT_OK
-    given = (args.policy_repo_id, args.trust_repo_id, args.trust_branch, args.out)
     if any(value is None for value in given):
         raise UsageError(
             "setup-trust check: нужны --policy-repo-id, --trust-repo-id, "

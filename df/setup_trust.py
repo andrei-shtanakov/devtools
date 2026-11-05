@@ -49,10 +49,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
 
-from df import fsutil, inputs, journal, perimeter_client, setup_agent
+from df import fsutil, journal, perimeter_client, setup_agent
 from df import platform as plat
 from df.config import ConfigError
-from df.digest import TreeError
 from df.journal import StepFailed
 from df.paths import Layout
 from df.publisher import github, history, request
@@ -98,8 +97,18 @@ STOP_KINDS = frozenset(
         "source_env_invalid",
         "policy_repository_mismatch",
         "unsupported_size",
+        "perimeter_principal",
     }
 )
+#: Answers read per list (one page; a full page is «не проверено»).
+PER_PAGE = 100
+#: Collaborators with these roles (or permissions) and teams with these
+#: permissions can write the source (spec A 6.2 (а)).
+WRITE_ROLES = frozenset({"admin", "maintain", "write"})
+WRITE_PERMS = ("admin", "maintain", "push")
+TEAM_WRITE = frozenset({"push", "maintain", "admin"})
+#: Bypass actor types that are never a login of `POLICY_ADMINS`.
+LOGINLESS_BYPASS = frozenset({"Integration", "DeployKey"})
 SOURCE_KEYS = (
     "APPROVAL_POLICY_REPO",
     "APPROVAL_POLICY_BRANCH",
@@ -268,18 +277,22 @@ class _Reader:
     calls: list[tuple[str, int | None]] = field(default_factory=list)
     stops: list[Stop] = field(default_factory=list)
     unverified: list[str] = field(default_factory=list)
+    #: The headers of the last answer (`Link` tells a cut list).
+    headers: Mapping[str, str] = field(default_factory=dict)
 
     def get(self, path: str) -> tuple[int | None, object]:
         """`GET <API>/<path>`: the status (`None`: not delivered) and the
         JSON body (`None`: none). No exception text is kept."""
+        self.headers = {}
         try:
-            status, _headers, raw = self.transport(
+            status, headers, raw = self.transport(
                 "GET", f"{github.API}/{path}", {}, None
             )
         except Exception:  # noqa: BLE001 - not delivered: «не проверено»
             self.calls.append((path, None))
             return None, None
         self.calls.append((path, status))
+        self.headers = headers
         try:
             return status, json.loads(raw) if raw else None
         except (ValueError, RecursionError):
@@ -290,6 +303,13 @@ class _Reader:
 
     def gap(self, what: str, status: int | None) -> None:
         self.unverified.append(f"{what}: не проверено ({_status(status)})")
+
+    def truncated(self, body: object) -> bool:
+        """The last answer is one full page or names a next one: the list
+        may be cut (only the first page is read)."""
+        link = next((v for k, v in self.headers.items() if k.lower() == "link"), "")
+        full = isinstance(body, list) and len(body) >= PER_PAGE
+        return full or 'rel="next"' in link
 
 
 def pat_transport(token: str) -> Transport:
@@ -345,11 +365,14 @@ def check_perimeter(
         head = _head(r, trust.full_name, trust_branch)
         source = _source(r, trust.full_name, trust_branch)
         branch = _policy_branch(r, policy, source)
+        admins = frozenset(_admin_list(source))
         for role, repo, pinned in (
             ("approval-policy", policy, branch),
             ("df-trust", trust, trust_branch),
         ):
-            facts[role] = {**_facts_of(facts, role), **_settings(r, role, repo, pinned)}
+            found = _settings(r, role, repo, pinned)
+            found["principals"] = _principals(r, role, found, admins)
+            facts[role] = {**_facts_of(facts, role), **found}
     for role in ROLES:  # spec 6.2: third-party App installations are invisible
         r.unverified.append(
             f"apps@{role}: установки сторонних App PAT не видит — подтверждает "
@@ -556,15 +579,28 @@ def _settings(r: _Reader, role: str, repo: _Repo, branch: str) -> dict[str, obje
     for name, path, shape in reads:
         status, body = r.get(path)
         if name == "protection" and status == 404 and _not_protected(body):
-            found[name] = {"status": 404, "value": "not protected"}
+            found[name] = {"status": 404, "value": "not protected", "truncated": False}
             continue
+        cut = status == 200 and (r.truncated(body) or _envs_cut(name, body))
         found[name] = {
             "status": status,
             "value": shape(body) if status == 200 else None,
+            "truncated": cut,
         }
         if status != 200:
             r.gap(f"{name}@{role}", status)
+        if cut:
+            r.unverified.append(
+                f"{name}@{role}: не проверено (truncated: больше {PER_PAGE})"
+            )
     return found
+
+
+def _envs_cut(name: str, body: object) -> bool:
+    if name != "environments" or not isinstance(body, dict):
+        return False
+    total, envs = body.get("total_count"), body.get("environments")
+    return isinstance(total, int) and isinstance(envs, list) and total > len(envs)
 
 
 def _rules(r: _Reader, role: str, repo: _Repo, branch: str) -> object:
@@ -592,17 +628,20 @@ def _rules(r: _Reader, role: str, repo: _Repo, branch: str) -> object:
 
 
 def _rulesets(r: _Reader, role: str, base: str) -> object:
-    """Every ruleset with its `bypass_actors`; a non-empty list is a premise
-    the human confirms (only `POLICY_ADMINS`, spec 6.2 item 2)."""
+    """Every ruleset with its `bypass_actors` (judged by `_principals`)."""
     status, body = r.get(f"{base}/rulesets?includes_parents=true&per_page=100")
     if _upgrade(status, body):
-        r.stop(
-            "tariff_without_rulesets", role, f"{base}/rulesets: недоступны на тарифе"
-        )
+        tariff = Stop("tariff_without_rulesets", role, "")
+        if not any((s.kind, s.role) == (tariff.kind, role) for s in r.stops):
+            r.stop(tariff.kind, role, f"{base}/rulesets: недоступны на тарифе")
         return None
     if status != 200 or not isinstance(body, list):
         r.gap(f"rulesets@{role}", status)
         return None
+    if r.truncated(body):
+        r.unverified.append(
+            f"rulesets@{role}: не проверено (truncated: больше {PER_PAGE})"
+        )
     found: list[object] = []
     for item in body:
         ruleset_id = item.get("id") if isinstance(item, dict) else None
@@ -622,12 +661,91 @@ def _rulesets(r: _Reader, role: str, base: str) -> object:
                 "bypass_actors": bypass,
             }
         )
-        if bypass != []:
-            r.unverified.append(
-                f"bypass_actors@{role}: ruleset {ruleset_id} — {bypass!r}; "
-                "допустимы только POLICY_ADMINS — подтверждает человек"
-            )
     return found
+
+
+def _admin_list(source: Mapping[str, object] | None) -> list[str]:
+    admins = None if source is None else source.get("policy_admins")
+    return [str(a) for a in admins] if isinstance(admins, list) else []
+
+
+def _principals(
+    r: _Reader, role: str, found: Mapping[str, object], admins: frozenset[str]
+) -> list[dict[str, object]]:
+    """The allowlist of spec A 6.2 (а), checked only here: every principal
+    with write, admin or bypass on the source must be in `POLICY_ADMINS`.
+    Principals: collaborators with admin/maintain/write (or such a
+    permission), teams with push or higher, deploy keys that are not
+    read-only, bypass actors of type `Integration`/`DeployKey` (never a
+    login). One outside the allowlist is a stop (`perimeter_principal`); a
+    bypass actor that maps to no login, or a missing `bypass_actors`, is a
+    named premise (the lists that were not read or were cut already are)."""
+    allowed = {a.casefold() for a in admins}
+    principals: list[tuple[str, str | None]] = []
+    for person in _value(found, "collaborators"):
+        if _writes(person):
+            principals.append((f"collaborator:{person.get('login')}", _login(person)))
+    for team in _value(found, "teams"):
+        if team.get("permission") in TEAM_WRITE:
+            principals.append(
+                (f"team:{team.get('slug')} ({team.get('permission')})", None)
+            )
+    for key in _value(found, "deploy_keys"):
+        if key.get("read_only") is not True:
+            principals.append(
+                (f"deploy_key:{key.get('id')} {key.get('title')!r}", None)
+            )
+    rulesets = found.get("rulesets")
+    for ruleset in rulesets if isinstance(rulesets, list) else []:
+        principals += _bypass(r, role, ruleset)
+    rows: list[dict[str, object]] = []
+    for name, login in principals:
+        ok = login is not None and login.casefold() in allowed
+        rows.append({"principal": name, "allowed": ok})
+        if not ok:
+            r.stop("perimeter_principal", role, f"{name}: не в POLICY_ADMINS")
+    return rows
+
+
+def _bypass(r: _Reader, role: str, ruleset: object) -> list[tuple[str, str | None]]:
+    if not isinstance(ruleset, dict):
+        return []
+    rid, actors = ruleset.get("id"), ruleset.get("bypass_actors")
+    if not isinstance(actors, list):  # a hidden field is not an empty list
+        r.unverified.append(
+            f"bypass_actors@{role}: ruleset {rid} — список не прочитан; "
+            "допустимы только POLICY_ADMINS — подтверждает человек"
+        )
+        return []
+    found: list[tuple[str, str | None]] = []
+    for actor in actors:
+        kind = actor.get("actor_type") if isinstance(actor, dict) else None
+        actor_id = actor.get("actor_id") if isinstance(actor, dict) else None
+        if kind in LOGINLESS_BYPASS:
+            found.append((f"bypass:{kind}:{actor_id} (ruleset {rid})", None))
+            continue
+        r.unverified.append(
+            f"bypass_actors@{role}: ruleset {rid} — {kind} {actor_id} не сводится к "
+            "логину; допустимы только POLICY_ADMINS — подтверждает человек"
+        )
+    return found
+
+
+def _value(found: Mapping[str, object], name: str) -> list[dict[str, object]]:
+    entry = found.get(name)
+    value = entry.get("value") if isinstance(entry, dict) else None
+    return _items(value)
+
+
+def _writes(person: Mapping[str, object]) -> bool:
+    perms = person.get("permissions")
+    granted = isinstance(perms, dict) and any(perms.get(k) is True for k in WRITE_PERMS)
+    return person.get("role") in WRITE_ROLES or granted
+
+
+def _login(person: Mapping[str, object]) -> str | None:
+    login = person.get("login")
+    return login if isinstance(login, str) else None
 
 
 def _upgrade(status: int | None, body: object) -> bool:
@@ -652,7 +770,14 @@ def _keys(body: object) -> object:
 
 
 def _people(body: object) -> object:
-    return [{"login": p.get("login"), "role": p.get("role_name")} for p in _items(body)]
+    return [
+        {
+            "login": p.get("login"),
+            "role": p.get("role_name"),
+            "permissions": p.get("permissions"),
+        }
+        for p in _items(body)
+    ]
 
 
 def _teams(body: object) -> object:
@@ -703,6 +828,14 @@ def report_text(report: PerimeterReport) -> str:
         trust,
         f"проверяющий: {report.checker}; запросов {len(report.calls)}",
     ]
+    for role in ROLES:
+        rows = _facts_of(report.facts, role).get("principals")
+        names = [
+            f"{x.get('principal')}{'' if x.get('allowed') else ' — НЕ в POLICY_ADMINS'}"
+            for x in (rows if isinstance(rows, list) else [])
+            if isinstance(x, dict)
+        ]
+        lines.append(f"{role}: запись/admin/bypass: {', '.join(names) or 'нет'}")
     lines += [f"СТОП {s.kind} ({s.role}): {s.detail}" for s in report.stops]
     lines += [f"не проверено: {u}" for u in report.unverified]
     return "\n".join(lines) + "\n"
@@ -731,7 +864,7 @@ def load_report(path: Path, digest: str) -> PerimeterReport:
     `digest`, parsed strictly."""
     if not _DIGEST.fullmatch(digest):
         raise StepFailed(STEP, f"--report-digest {digest!r}: нужно sha256:<64 hex>")
-    raw = _read_human_file(path, REPORT_CAP, "--report")
+    raw = setup_agent.read_source(path, REPORT_CAP, step=STEP, flag="--report")
     got = "sha256:" + hashlib.sha256(raw).hexdigest()
     if got != digest:
         raise StepFailed(
@@ -895,24 +1028,43 @@ def check_rebind(layout: Layout, binding: TrustBinding, *, rebind: bool) -> None
     if rebind and current is None:
         raise StepFailed(STEP, "--rebind без привязки: первая привязка — без --rebind")
     if not rebind and current is not None and current != binding:
+        changed = [
+            f"{name}: {getattr(current, name)!r} → {getattr(binding, name)!r}"
+            for name in TrustBinding.__dataclass_fields__
+            if getattr(current, name) != getattr(binding, name)
+        ]
+        what = "смена корня" if current.root_id != binding.root_id else "та же тройка"
         raise StepFailed(
             STEP,
-            f"привязка уже есть (корень {current.root_id}): смена корня — "
-            "darkfactory setup-trust check --rebind, затем write --rebind",
+            f"привязка уже есть ({what}; отличается {'; '.join(changed)}): "
+            "нужна новая полная проверка — darkfactory setup-trust check "
+            "--rebind, затем write --rebind",
         )
 
 
 def read_history_token(path: Path) -> str:
-    """The history token file, read as data: one GitHub token line."""
-    raw = _read_human_file(path, setup_agent.TOKEN_CAP + 1, "--history-token-file")
-    token = raw.removesuffix(b"\n")
-    if setup_agent.TOKEN_FORM.fullmatch(token) is None:
-        raise StepFailed(
-            STEP,
-            f"--history-token-file {path}: не токен (одна строка github_pat_… или "
-            "ghp_…); ничего не записано",
-        )
-    return token.decode("ascii")
+    """The history token file, read as data (`setup_agent.read_token`): the
+    human's own (`SUDO_UID`) or root's, private (no group or other bits) --
+    never a file another local user could have planted."""
+    flag = "--history-token-file"
+    try:
+        st = os.lstat(path)
+    except OSError:
+        st = None  # `read_token` names it
+    if st is not None:
+        owners = {plat.ROOT_UID}
+        sudo = os.environ.get("SUDO_UID", "")
+        if sudo.isascii() and sudo.isdigit():
+            owners.add(int(sudo))
+        owner, mode = fsutil.owner_uid(st), stat.S_IMODE(st.st_mode)
+        if owner not in owners or mode & 0o077:
+            raise StepFailed(
+                STEP,
+                f"{flag} {path}: владелец uid {owner}, права {mode:04o}; нужен "
+                "ваш файл (SUDO_UID) или root без прав группы и всех (chmod 600); "
+                "ничего не записано",
+            )
+    return setup_agent.read_token(path, step=STEP, flag=flag).decode("ascii")
 
 
 def profile_files(token: str) -> dict[str, str]:
@@ -1081,21 +1233,34 @@ def write_evidence(
         "trust_status": _status_record(status),
         "unverified": sorted({*report.unverified, *getattr(status, "unverified", ())}),
     }
-    parent = os.open(layout.var, _DIR_FLAGS)
-    try:
-        fsutil.make_dir(
-            parent,
-            layout.evidence_dir.name,
-            EVIDENCE_DIR_MODE,
-            path=layout.evidence_dir,
-        )
-    finally:
-        os.close(parent)
+    _evidence_dir(layout)
     stamp = now.strftime("%Y%m%dT%H%M%S%fZ")
     path = layout.evidence_dir / f"perimeter-{stamp}.json"
     text = json.dumps(data, sort_keys=True, ensure_ascii=False, indent=2) + "\n"
     fsutil.write_atomic(path, text, EVIDENCE_MODE)
     return path
+
+
+def _evidence_dir(layout: Layout) -> None:
+    """`/var/lib/df/evidence`, root's at exactly `EVIDENCE_DIR_MODE`: made,
+    or found so (a found one of another owner or a wider mode is refused)."""
+    where = layout.evidence_dir
+    parent = os.open(layout.var, _DIR_FLAGS)
+    try:
+        fsutil.make_dir(parent, where.name, EVIDENCE_DIR_MODE, path=where)
+        st = os.stat(where.name, dir_fd=parent, follow_symlinks=False)
+    finally:
+        os.close(parent)
+    mode = stat.S_IMODE(st.st_mode)
+    if (
+        not stat.S_ISDIR(st.st_mode)
+        or fsutil.owner_uid(st) != plat.ROOT_UID
+        or mode != EVIDENCE_DIR_MODE
+    ):
+        raise OSError(
+            f"{where}: владелец uid {fsutil.owner_uid(st)}, права {mode:04o}; "
+            f"нужен каталог root {EVIDENCE_DIR_MODE:04o}"
+        )
 
 
 def _status_record(status: TrustStatus | Refused) -> Mapping[str, object]:
@@ -1141,17 +1306,19 @@ def run_write(
         raise StepFailed(STEP, NO_HISTORY_PROFILE)
     write_binding(layout, binding, token_file)
     status = verify_after_write(layout)
-    evidence = write_evidence(layout, report, report_digest, binding, status, now=now())
+    try:
+        record = write_evidence(
+            layout, report, report_digest, binding, status, now=now()
+        )
+        evidence, kept = f"evidence: {record}", True
+    except OSError as exc:  # after the write: not finished, never a crash
+        evidence, kept = f"evidence не записан: {type(exc).__name__}: {exc}", False
     written = (
         f"записаны {layout.history_gh} и {layout.etc / 'trust.toml'} "
         f"(корень {binding.root_id})"
     )
-    lines = [
-        written,
-        *status_lines(status),
-        f"evidence: {evidence}",
-    ]
-    done = finished(status)
+    lines = [written, *status_lines(status), evidence]
+    done = finished(status) and kept
     journal.journal_event(
         layout.journal,
         run_id=uuid.uuid4().hex,
@@ -1165,26 +1332,6 @@ def run_write(
             "после приёмки"
         )
     return [*lines, "установка доверия завершена; отзовите PAT проверки периметра"]
-
-
-def _read_human_file(path: Path, cap: int, flag: str) -> bytes:
-    """A file of the human's, read by root as data: absolute, a regular file
-    (never a device, FIFO or link), at most `cap` bytes; never deleted."""
-    if not path.is_absolute():
-        raise StepFailed(STEP, f"{flag} {str(path)!r}: путь не абсолютный")
-    try:
-        st = os.lstat(path)
-    except OSError as exc:
-        raise StepFailed(STEP, f"{flag} {path}: {exc.strerror or exc}") from exc
-    if not stat.S_ISREG(st.st_mode):
-        raise StepFailed(STEP, f"{flag} {path}: не обычный файл")
-    try:
-        data = inputs.read_capped(path, cap)
-    except TreeError as exc:
-        raise StepFailed(STEP, f"{flag}: {exc}") from exc
-    if len(data) > cap:
-        raise StepFailed(STEP, f"{flag} {path}: больше {cap} байт")
-    return data
 
 
 def run_check(
