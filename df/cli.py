@@ -1157,6 +1157,11 @@ def _init_config(args: argparse.Namespace) -> InstallConfig:
         name, sep, path = item.partition("=")
         if not sep or not name or not path or name in cli:
             raise UsageError(f"--cli {item!r}: нужно NAME=PATH, каждое имя один раз")
+        if name in HASHED_CLI:
+            raise UsageError(
+                f"--cli {name}: не задаётся при init: sudo darkfactory cli set "
+                f"{name} PATH после darkfactory install (путь и sha256)"
+            )
         cli[name] = Path(path)
     return InstallConfig(args.manifest_repo, args.manifest_sha, args.profile, cli)
 

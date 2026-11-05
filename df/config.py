@@ -179,10 +179,11 @@ def _check_hashes(cli: Mapping[str, Path], hashes: Mapping[str, str]) -> None:
             "must be 64 lowercase hex characters",
         )
     for name in sorted(HASHED_CLI & set(cli) - set(hashes)):
-        # `init --cli gh=` or a file from before 3a: only `cli set` pins it
+        # a hand-written or pre-3a file (`init` refuses `--cli gh=`): only
+        # `cli set`, on a finished install, pins it
         raise ConfigError(
             f"approved_cli_sha256: no sha256 for {name}: "
-            f"run `darkfactory cli set {name} PATH`"
+            f"run `darkfactory cli set {name} PATH` after `darkfactory install`"
         )
 
 

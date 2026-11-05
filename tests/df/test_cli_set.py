@@ -598,7 +598,7 @@ def test_install_toml_sha256_schema(w: World, tmp_path: Path) -> None:
         "no path": (text + f'\n[approved_cli_sha256]\ngh = "{digest}"\n', "no path"),
         "no sha": (
             text.replace("[approved_cli]\n", "[approved_cli]\n" + gh_line),
-            "no sha256 for gh: run `darkfactory cli set gh PATH`",
+            "no sha256 for gh: run `darkfactory cli set gh PATH` after `darkfactory install`",
         ),
         "form": (
             text.replace("[approved_cli]\n", "[approved_cli]\n" + gh_line)
