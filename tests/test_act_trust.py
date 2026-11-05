@@ -1823,3 +1823,34 @@ def test_profile_separation_only_with_history_key(tmp_path: Path) -> None:
     cred = act_trust.Credential("profile:agent", gh_config_dir=_profile(tmp_path))
     got, _ = _decide(binding(), trust_routes(None, J1), creds=(cred,))
     assert isinstance(got, act_trust.Trust)
+
+
+def test_load_ranges_reads_open_epoch_to_pinned_p(monkeypatch) -> None:
+    """Task 7 review I3 (К): with `Trust.policy_head = P` the policy history is
+    read by SHA up to P — `act_facts.history(..., head=P)` for every epoch."""
+    seen: list[tuple[str, str | None, str | None]] = []
+
+    def history(t, s, anchor, until, head=None):  # noqa: ANN001, ANN202
+        seen.append((anchor, until, head))
+        return ()
+
+    monkeypatch.setattr(act_facts, "history", history)
+    p_sha = "f" * 40
+    trust = replace(_via(_trust((Epoch(1, BOOT),)), Anon({})), policy_head=p_sha)
+    got = act_trust.load_ranges(
+        trust,
+        {BOOT: parse_ts("2026-10-01T00:00:00Z")},
+        parse_ts("2026-10-12T10:00:00Z"),
+        Journal(),
+    )
+    assert not isinstance(got, Unavailable)
+    assert seen == [(BOOT, None, p_sha)]
+    unpinned = replace(trust, policy_head=None)
+    seen.clear()
+    act_trust.load_ranges(
+        unpinned,
+        {BOOT: parse_ts("2026-10-01T00:00:00Z")},
+        parse_ts("2026-10-12T10:00:00Z"),
+        Journal(),
+    )
+    assert seen == [(BOOT, None, None)]

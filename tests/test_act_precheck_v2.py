@@ -73,6 +73,7 @@ from tests.test_act_trust import (  # noqa: E402
     AP,
     DT,
     J1,
+    J2,
     SOURCE_ENV,
     _perms,
     _Wire,
@@ -81,6 +82,7 @@ from tests.test_act_trust import TOKEN as HISTORY_TOKEN  # noqa: E402
 from tests.test_act_trust_pair import world as pair_world  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
+REAL_LOAD_RANGES = act_trust.load_ranges
 NONCE = "0123456789abcdef0123456789abcdef"
 ADMIN = "a" * 64
 CTX = "c" * 64
@@ -106,10 +108,10 @@ RULES = [{"type": k} for k in ("deletion", "non_fast_forward", "pull_request")]
 # --- the stand -----------------------------------------------------------------------
 
 
-def trust_routes(**repo_extra: object) -> dict:
-    """`df-trust` C0 → X (journal J1), both repos public, rules and settings clean,
-    `permissions` of the history token read-only."""
-    routes = pair_world({C0: (None, J1), X: (C0, J1)})
+def trust_routes(journal_x: str = J1, **repo_extra: object) -> dict:
+    """`df-trust` C0 → X (journal J1, or `journal_x` on X), both repos public,
+    rules and settings clean, `permissions` of the history token read-only."""
+    routes = pair_world({C0: (None, J1), X: (C0, journal_x)})
     for repo in (DT, AP):
         routes[f"repos/{repo}/rules/branches/main"] = (200, RULES)
         body = {"full_name": repo, "allow_rebase_merge": False, **_perms()}
@@ -291,8 +293,6 @@ class Candidate:
 
 @pytest.fixture()
 def candidate(monkeypatch: pytest.MonkeyPatch) -> Candidate:
-    modes = POLICY.files_sha256  # the manifest pins the same set
-    assert modes
     return Candidate(monkeypatch)
 
 
@@ -337,27 +337,25 @@ def test_dispatch_by_schema(
         ({"origin_route": "other"}, "origin_route"),
         ({"trust_head": "H"}, "trust_head"),
         ({"policy": {"full_name": AP, "branch": "main"}}, "policy"),
+        ({"observation_id": 2**63}, "observation_id"),
+        ({"binding": {**binding(None), "df_trust_repository_id": 2**63}}, "binding"),
     ],
-    ids=["op", "ctx_id", "observation_id", "origin_route", "trust_head", "policy"],
+    ids=[
+        "op",
+        "ctx_id",
+        "observation_id",
+        "origin_route",
+        "trust_head",
+        "policy",
+        "int_bound",
+        "binding_int_bound",
+    ],
 )
 def test_strict_v2_request_exit_2(
     tmp_path: Path, capsys: Any, profile: Path, over: dict, named: str
 ) -> None:
-    home = tmp_path / "home"
-    home.mkdir()
-    out = io.StringIO()
-    code = serve(
-        io.BytesIO(json.dumps(trust_req(profile, **over)).encode()),
-        out,
-        admin_digest=ADMIN,
-        home=home,
-        complete_v2=True,
-        gh=None,
-        git=GIT,
-        deps=deps(),
-    )
-    assert code == 2 and out.getvalue() == ""
-    assert named in capsys.readouterr().err
+    """Review M1: ints are bounded `0 < v < 2**63` (the echo stays bounded)."""
+    assert named in _exit_2(tmp_path, trust_req(profile, **over), capsys)
 
 
 def _exit_2(tmp_path: Path, payload: dict[str, object], capsys: Any) -> str:
@@ -597,9 +595,10 @@ def test_reeval_merge_returns_policy_break(
     assert "commit_without_pr: abc" in verdict["findings"][0]["detail"]
     assert seen == [("b" * 40, None, P)]
     assert verdict["ranges"]["ranges"] == [[1, "b" * 40, P]]
-    # the same findings are not admissible on a narrower route
+    # the route `trust-status` reads no policy history: no ranges, no such finding
+    seen.clear()
     clean = run(tmp_path / "home", trust_req(profile), gh)[0]
-    assert clean["outcome"] == "allow" and clean["ranges"] is None
+    assert seen == [] and clean["findings"] == [] and clean["ranges"] is None
 
 
 def test_unsupported_size_is_typed(
@@ -1396,3 +1395,295 @@ def test_long_reason_clipped_whole_in_diagnostics(
     assert len(verdict["reason"].encode()) <= 512
     assert verdict["diagnostics"] == f"reason: мержер {'m' * 900}[token] не пройдёт D3"
     assert PRODUCT_TOKEN not in text
+
+
+# --- review round 1 -------------------------------------------------------------------
+
+
+def test_pre_read_refusal_shape(tmp_path: Path, wire: _Wire, gh: Path) -> None:
+    """Review I6: no pair read (`relation` null) — `source`, `last_epoch`,
+    `ranges` null and no findings; the reason is not a findings reason. The
+    unkeyed binding still names `history_token_required` (M3)."""
+    verdict, _ = run(tmp_path / "home", merge_req(None), gh)
+    assert verdict["outcome"] == "refuse"
+    assert verdict["relation"] is None
+    assert (verdict["source"], verdict["last_epoch"], verdict["ranges"]) == (
+        None,
+        None,
+        None,
+    )
+    assert verdict["findings"] == []
+    assert verdict["unverified"] == ["history_token_required"]
+    assert verdict["snapshot_sha"] == X  # an echo: nothing was read
+
+
+def test_unkeyed_trust_unset_still_names_history_token_required(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review M3: the code comes from the binding whatever the outcome."""
+    monkeypatch.setattr(act_anon, "_default_open", lambda: _Wire({}))
+    verdict, _ = run(tmp_path / "home", trust_req(None), None)
+    assert verdict["outcome"] == "unset" and verdict["relation"] is None
+    assert verdict["unverified"] == ["history_token_required"]
+
+
+def test_shape_contract_enforced(
+    tmp_path: Path,
+    wire: _Wire,
+    gh: Path,
+    profile: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review I6: a read pair without a source descriptor and without a source
+    finding breaks the contract — a named `unset`, not a mis-shaped verdict."""
+    broken = act_precheck_v2.Part("descendant", None, None, (), ())
+    monkeypatch.setattr(act_precheck_v2, "trust_part", lambda *a: broken)
+    verdict, _ = run(tmp_path / "home", trust_req(profile), gh)
+    assert verdict["outcome"] == "unset"
+    assert verdict["reason"] == "invariant_violated: source null with findings []"
+    assert (
+        act_precheck_v2._shape_problem(
+            act_precheck_v2.Answer("refuse", "x", None, None, (_finding(),))
+        )
+        == "findings without a read pair"
+    )
+
+
+def _finding() -> Finding:
+    return Finding("history_unverifiable", "df-trust", "gone")
+
+
+def test_trust_verdict_carries_validation(
+    tmp_path: Path, wire: _Wire, gh: Path, profile: Path, candidate: Candidate
+) -> None:
+    """Review D6: the publisher records the validation version verbatim."""
+    verdict, _ = run(tmp_path / "home", trust_req(profile), gh)
+    assert verdict["validation"] == "df-trust-rules/1:" + ADMIN
+    merge, _ = run(tmp_path / "home", merge_req(profile), gh)
+    assert "validation" not in merge
+
+
+def test_merge_unverified_includes_load_trust_premise(
+    tmp_path: Path,
+    wire: _Wire,
+    gh: Path,
+    profile: Path,
+    candidate: Candidate,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review M3: the settings read sees `allow_rebase_merge = false`, the
+    `load_trust` read sees it hidden — the verdict names the premise the
+    decision used."""
+    real = act_trust._rebase
+
+    def rebase(anon, snap, role=None):  # noqa: ANN001, ANN202
+        if role is None:  # `load_trust`'s own call
+            return act_trust.REBASE_PREMISE
+        return real(anon, snap, role)
+
+    monkeypatch.setattr(act_trust, "_rebase", rebase)
+    verdict, _ = run(tmp_path / "home", merge_req(profile), gh)
+    assert verdict["outcome"] == "allow"
+    assert verdict["unverified"] == ["allow_rebase_merge@approval-policy"]
+
+
+def test_policy_history_reads_all_epochs_finding_wins(
+    tmp_path: Path, gh: Path, profile: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review M4: epoch 1 unreadable, epoch 2 broken — the finding, as on the
+    merge path (`load_ranges` goes on past a gap)."""
+    routes = _Wire(trust_routes(journal_x=J2))
+    monkeypatch.setattr(act_anon, "_default_open", lambda: routes)
+
+    def history(transport, source, anchor, until, *, head=None):  # noqa: ANN001, ANN202
+        if anchor == "b" * 40:
+            return Unavailable("epoch 1 down")
+        return act_facts.HistoryBreak("commit_without_pr: late")
+
+    monkeypatch.setattr(act_facts, "history", history)
+    payload = trust_req(profile, origin_route="merge", trust_accepted=None)
+    verdict, _ = run(tmp_path / "home", payload, gh)
+    assert verdict["outcome"] == "refuse"
+    assert verdict["findings"][0]["detail"] == "epoch 2: commit_without_pr: late"
+    assert [r[0] for r in verdict["ranges"]["ranges"]] == [1, 2]
+
+
+def test_alarm_never_postpones_a_shorter_timer() -> None:
+    """Review M5: an outer timer shorter than ours fires on time (as our alarm),
+    and the outer one is re-armed after."""
+    import signal
+
+    saved = signal.getitimer(signal.ITIMER_REAL)
+    outer = signal.signal(signal.SIGALRM, lambda *a: None)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, 0.2)
+        started = time.monotonic()
+        with pytest.raises(act_precheck_v2.DeadlineAlarm, match="deadline passed"):
+            with act_precheck_v2._alarm(time.monotonic() + 60, time.monotonic):
+                time.sleep(3)
+        assert time.monotonic() - started < 2
+        assert signal.getitimer(signal.ITIMER_REAL)[0] > 0  # outer re-armed
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, outer)
+        if saved[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, *saved)
+
+
+def test_emit_binary_buffer_exact_bytes(
+    tmp_path: Path, wire: _Wire, gh: Path, profile: Path
+) -> None:
+    """Review M6: production stdout has a binary buffer — exactly the
+    `fit_verdict` bytes and a newline go through it."""
+    home = tmp_path / "home"
+    home.mkdir()
+    raw = io.BytesIO()
+    out = io.TextIOWrapper(raw, encoding="ascii")  # not UTF-8: bytes bypass it
+    code = serve(
+        io.BytesIO(json.dumps(trust_req(profile)).encode()),
+        out,
+        admin_digest=ADMIN,
+        home=home,
+        complete_v2=True,
+        gh=gh,
+        git=GIT,
+        deps=deps(),
+    )
+    out.flush()
+    wire_bytes = raw.getvalue()
+    assert code == 0 and wire_bytes.endswith(b"\n")
+    verdict = json.loads(wire_bytes)
+    envelope = {
+        k: v for k, v in verdict.items() if k not in ("findings", "diagnostics")
+    }
+    assert wire_bytes == act_trust_findings.fit_verdict(envelope, (), "") + b"\n"
+
+
+def test_reader_invariant_is_named_unset(
+    tmp_path: Path,
+    wire: _Wire,
+    gh: Path,
+    profile: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review M7: a broken invariant (`ValueError`) is a named `unset` verdict,
+    not a traceback without one."""
+
+    def malformed(epochs, p_sha):  # noqa: ANN001, ANN202
+        raise ValueError("epoch numbers not contiguous from 1")
+
+    monkeypatch.setattr(act_precheck_v2, "range_descriptor", malformed)
+    monkeypatch.setattr(act_facts, "history", lambda *a, **k: ())
+    payload = trust_req(profile, origin_route="merge")
+    verdict, _ = run(tmp_path / "home", payload, gh)
+    assert verdict["outcome"] == "unset"
+    assert verdict["reason"] == (
+        "invariant_violated: epoch numbers not contiguous from 1"
+    )
+
+
+def test_envelope_merge_commits_differ_refused(profile: Path) -> None:
+    """Review M15: the delivery decision names another merge commit than the
+    base history — refused by name, not as a confusing content mismatch."""
+    req = _request("approve-2-1-1", 1)
+    current = DeliveredRequest("m" * 40, "h" * 40, req)
+    path = envelope_path(WS, "requirements")
+    parsed = act_precheck_v2.parse(
+        act_precheck.parse_request_v2(
+            merge_req(profile, kind="finalize", changes=[["added", path, None]])
+        )
+    )
+    assert isinstance(parsed, act_precheck_v2.MergeRequest)
+    got = act_precheck_v2._envelopes(
+        parsed,
+        _Files({}),  # type: ignore[arg-type]
+        WS,
+        current,
+        Accepted("n" * 40, "df-reviewer[bot]", review_id="R1"),
+    )
+    assert got == (
+        3,
+        (
+            "merge_commit_mismatch: delivery decision nnnnnnnnnnnn != base history "
+            "mmmmmmmmmmmm"
+        ),
+    )
+
+
+def test_candidate_real_load_ranges_reads_to_pinned_p(
+    tmp_path: Path,
+    wire: _Wire,
+    gh: Path,
+    profile: Path,
+    candidate: Candidate,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review I3 (К): the candidate's policy history is read by the real
+    `load_ranges` up to the pinned P, not the current branch head."""
+    monkeypatch.setattr(act_trust, "load_ranges", REAL_LOAD_RANGES)
+    monkeypatch.setattr(
+        act_trust,
+        "load_anchor_times",
+        lambda *a: {"b" * 40: parse_ts("2026-10-12T08:00:00Z")},
+    )
+    heads: list[str | None] = []
+
+    def history(transport, source, anchor, until, *, head=None):  # noqa: ANN001, ANN202
+        heads.append(head)
+        return (act_facts.ActivationFact(1, ACT, parse_ts("2026-10-12T08:00:00Z"), {}),)
+
+    monkeypatch.setattr(act_facts, "history", history)
+    monkeypatch.setattr(act_trust, "policy_set", lambda *a: POLICY)
+    verdict, _ = run(tmp_path / "home", merge_req(profile), gh)
+    assert verdict["outcome"] == "allow"
+    assert heads and set(heads) == {P}
+
+
+def test_candidate_rename_from_foreign_path_refused(
+    tmp_path: Path, wire: _Wire, gh: Path, profile: Path, candidate: Candidate
+) -> None:
+    """Review I4: a rename out of a foreign path deletes it — the `previous`
+    side is surface-checked too."""
+    changes = [*CHANGES[1:], ["renamed", NODE_FILE, "scripts/foreign.sh"]]
+    verdict, _ = run(tmp_path / "home", merge_req(profile, changes=changes), gh)
+    assert verdict["outcome"] == "refuse"
+    assert verdict["reason"] == "surface_violation: scripts/foreign.sh"
+
+
+def test_candidate_removed_manifest_is_not_changed(
+    tmp_path: Path, wire: _Wire, gh: Path, profile: Path, candidate: Candidate
+) -> None:
+    """Review I4: the manifest counts only when added or modified."""
+    manifest_row = ["removed", manifest_path(WS, "approve-2-1-1"), None]
+    changes = [CHANGES[0], manifest_row, CHANGES[2]]
+    verdict, _ = run(tmp_path / "home", merge_req(profile, changes=changes), gh)
+    assert verdict["outcome"] == "refuse"
+    assert verdict["reason"].endswith("is not changed by this PR")
+
+
+def test_finalize_rename_onto_envelope_refused(
+    tmp_path: Path,
+    wire: _Wire,
+    gh: Path,
+    profile: Path,
+    product: tuple[Repo, GitServer],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review I4: a foreign file renamed onto the expected envelope path has an
+    exact `touched` set — only the plain-change rule refuses it."""
+    repo, srv = product
+    fin = _finalize_world(repo)
+    _accepting(monkeypatch, fin["merge"], [])
+    renamed = [["renamed", fin["path"], "README.md"]]
+    verdict = _finalize_run(tmp_path, repo, srv, fin, profile, gh, changes=renamed)
+    assert verdict["outcome"] == "refuse"
+    assert verdict["reason"].startswith("envelope_set: the PR changes")
+
+
+def test_premerge_deps_without_approved_gh_is_invariant(profile: Path) -> None:
+    req = act_precheck_v2.parse(act_precheck.parse_request_v2(merge_req(profile)))
+    assert isinstance(req, act_precheck_v2.MergeRequest)
+    ctx = act_precheck_v2.Context(ADMIN, profile, None, GIT, deps(), 0.0)
+    adapter = act_precheck_v2.Adapter("clear", X)
+    with pytest.raises(ValueError, match="premerge deps without an approved gh"):
+        act_precheck_v2._premerge_deps(req, ctx, adapter, [])

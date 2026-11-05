@@ -4331,6 +4331,13 @@ JUDGMENT = {
     ),
     "act_precheck_v2.answer": (
         r(
+            "invariant",
+            "act_precheck_v2.answer",
+            "except ValueError as exc",
+            f"{V2}::test_reader_invariant_is_named_unset",
+            '"invariant_violated: epoch numbers not contiguous from 1"',
+        ),
+        r(
             "deadline",
             "act_precheck_v2.answer",
             "except (DeadlineExceeded, DeadlineAlarm)",
@@ -4346,6 +4353,13 @@ JUDGMENT = {
         ),
     ),
     "act_precheck_v2._wire": (
+        r(
+            "shape",
+            "act_precheck_v2._wire",
+            "if problem is not None",
+            f"{V2}::test_shape_contract_enforced",
+            '"invariant_violated: source null with findings []"',
+        ),
         r(
             "verdict_budget",
             "act_precheck_v2._wire",
@@ -4388,6 +4402,31 @@ JUDGMENT = {
             "if findings:",
             f"{V2}::test_trust_op_rollback_is_finding_not_synthesised",
             '"perimeter_findings: history_unverifiable@df-trust"',
+        ),
+    ),
+    "act_precheck_v2._premerge_deps": (
+        r(
+            "approved_gh",
+            "act_precheck_v2._premerge_deps",
+            "if ctx.gh is None",
+            f"{V2}::test_premerge_deps_without_approved_gh_is_invariant",
+            "premerge deps without an approved gh",
+        ),
+    ),
+    "act_precheck_v2._shape_problem": (
+        r(
+            "findings_without_pair",
+            "act_precheck_v2._shape_problem",
+            "findings without a read pair",
+            f"{V2}::test_shape_contract_enforced",
+            '"findings without a read pair"',
+        ),
+        r(
+            "source_iff",
+            "act_precheck_v2._shape_problem",
+            "null_source != bool(kinds & SOURCE_FINDINGS)",
+            f"{V2}::test_shape_contract_enforced",
+            '"invariant_violated: source null with findings []"',
         ),
     ),
     "act_precheck_v2.Adapter.status": (
@@ -4558,6 +4597,13 @@ JUDGMENT = {
         ),
     ),
     "act_precheck_v2._envelopes": (
+        r(
+            "merge_commit",
+            "act_precheck_v2._envelopes",
+            "accepted.merge_commit != current.merge_commit",
+            f"{V2}::test_envelope_merge_commits_differ_refused",
+            "merge_commit_mismatch: delivery decision nnnnnnnnnnnn",
+        ),
         r(
             "set",
             "act_precheck_v2._envelopes",
@@ -4834,7 +4880,8 @@ NOT_JUDGMENT = {
     "act_precheck_v2.Adapter.__init__": _BUILD,
     "act_precheck_v2.Adapter.record_finding": "хранит находку, найденную проверкой `load_trust`; не суждение",
     "act_precheck_v2.Adapter.add": "хранит находки `trust_part`; не суждение",
-    "act_precheck_v2._premerge_deps": _BUILD,
+    "act_precheck_v2._id": _PC_FIELD,
+    "act_precheck_v2._unverified": _BUILD,
     "act_precheck_v2._args": _BUILD,
     "act_precheck_v2.surface_check": "фабрика проверки; суждение — `surface_check.check`",
 }

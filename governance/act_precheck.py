@@ -268,18 +268,15 @@ def serve(
     deadline = deps.now() + DEADLINE
     try:
         request = parse_request(stdin.read(MAX_REQUEST + 1))
-        wire = (
-            _serve_v2(request, admin_digest, home, complete_v2, gh, git, deps, deadline)
-            if isinstance(request, RequestV2)
-            else None
-        )
+        if isinstance(request, RequestV2):
+            wire = _serve_v2(
+                request, admin_digest, home, complete_v2, gh, git, deps, deadline
+            )
+            _emit(stdout, wire)
+            return 0
     except InvalidRequest as exc:
         print(f"df-precheck: invalid request: {exc}", file=sys.stderr)
         return EXIT_REQUEST
-    if not isinstance(request, PrecheckRequest):
-        assert wire is not None
-        _emit(stdout, wire)
-        return 0
     outcome, reason = _decide(request, home, git, deps, deadline)
     reason = reason.replace(request.token, "[token]")
     if len(reason) > MAX_REASON:

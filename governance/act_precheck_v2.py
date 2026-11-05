@@ -88,7 +88,6 @@ from governance.act_precheck import (
     _changes,
     _http_url,
     _matches,
-    _positive_int,
     _text,
 )
 from governance.act_projection import ProjectionError, self_hash_v
@@ -135,6 +134,12 @@ ALARM_SLACK = 2.0
 MIN_TIMER = 0.001
 HISTORY_TOKEN_REQUIRED = act_trust_pair.HISTORY_TOKEN_REQUIRED
 NO_APPROVED_GH = "history_token_unavailable: no approved gh for the history profile"
+#: `Trust.unverified` of `load_trust` (checks `approval-policy` only) as codes.
+UNVERIFIED_OF_TRUST: Mapping[str, str] = {
+    act_trust.REBASE_PREMISE: act_trust_pair.UNVERIFIED_REBASE["approval-policy"]
+}
+#: Findings with which the pair has no `source.env` descriptor (review I6).
+SOURCE_FINDINGS = frozenset({"source_env_invalid", "history_unverifiable"})
 
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _HOST = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?")
@@ -155,6 +160,14 @@ def validation_of(admin_digest: str) -> str:
 # --- the request ---------------------------------------------------------------------
 
 
+#: Upper bound (exclusive) of every int of the request: the echo stays bounded.
+MAX_INT = 2**63
+
+
+def _id(value: object) -> bool:
+    return type(value) is int and 0 < value < MAX_INT
+
+
 def _absolute_or_none(value: object) -> bool:
     return value is None or (isinstance(value, str) and value.startswith("/"))
 
@@ -172,10 +185,10 @@ Checks = dict[str, Callable[[object], bool]]
 
 _BINDING: Checks = {
     "host": _matches(_HOST),
-    "df_trust_repository_id": _positive_int,
+    "df_trust_repository_id": _id,
     "df_trust_full_name": _bytes_at_most(MAX_FULL_NAME_BYTES, _FULL_NAME),
     "branch": _bytes_at_most(MAX_BRANCH_BYTES, _BRANCH),
-    "approval_policy_repository_id": _positive_int,
+    "approval_policy_repository_id": _id,
     "history_gh_config_dir": _absolute_or_none,
 }
 _POLICY: Checks = {
@@ -185,7 +198,7 @@ _POLICY: Checks = {
 }
 _ACCEPTED: Checks = {
     "sha": _matches(_SHA),
-    "last_epoch": _positive_int,
+    "last_epoch": _id,
     "source_digest": _matches(_DIGEST),
     "validation": _text,
 }
@@ -195,7 +208,7 @@ _COMMON: Checks = {
     "op": lambda v: v in OPS,
     "origin_route": lambda v: v in ROUTE_KINDS,
     "ctx_id": _matches(_DIGEST),
-    "observation_id": _positive_int,
+    "observation_id": _id,
     "binding": lambda v: _object(v, _BINDING),
     "policy": lambda v: _object(v, _POLICY),
 }
@@ -208,9 +221,9 @@ _MERGE: Checks = {
     "trust_accepted": lambda v: _object(v, _ACCEPTED),
     "preliminary_state": lambda v: v == PRELIMINARY,
     "kind": lambda v: v in MERGE_KINDS,
-    "repository_id": _positive_int,
+    "repository_id": _id,
     "full_name": _matches(_FULL_NAME),
-    "pr": _positive_int,
+    "pr": _id,
     "head_sha": _matches(_SHA),
     "head_ref": _text,
     "base_ref": _matches(_BRANCH),
@@ -390,6 +403,8 @@ class Answer:
     part: Part | None = None
     ranges: object = None
     findings: tuple[Finding, ...] = ()
+    #: Unverified premises beyond the part's (`load_trust`'s `Trust.unverified`).
+    unverified: tuple[str, ...] = ()
 
 
 def answer(
@@ -416,6 +431,10 @@ def answer(
         got = Answer(UNSET, "deadline")
     except UnsupportedSize as exc:
         got = Answer(UNSUPPORTED, str(exc))
+    except ValueError as exc:
+        # A broken invariant of the readers (a contract slip, not the request):
+        # a named `unset` verdict instead of a traceback without one.
+        got = Answer(UNSET, f"invariant_violated: {exc}")
     return _wire(req, got, admin_digest)
 
 
@@ -445,7 +464,15 @@ class Context:
 def _alarm(deadline: float, now: Callable[[], float]) -> Iterator[None]:
     """Backstop of the internal deadline (rung 1): `DeadlineAlarm` is raised in
     the main thread `ALARM_SLACK` after `deadline` (REST reads have no deadline of
-    their own); the previous handler and timer are restored."""
+    their own), or earlier when a previous timer is shorter (it is not postponed);
+    the previous handler and timer are restored.
+
+    Only the main thread can take signals: `precheck serve` runs one request per
+    process in its main thread, so there it is always armed; elsewhere (an
+    embedding thread) it is a no-op and only the snapshot's own deadline holds.
+    Residue: an alarm that lands inside a `finally` (the `gh-call-*` directory of
+    `history_token_at`, a snapshot) can leave it behind; the next run's exclusive
+    lock clears snapshots (`act_precheck._locked`), call directories are empty."""
     if threading.current_thread() is not threading.main_thread():
         yield
         return
@@ -454,9 +481,11 @@ def _alarm(deadline: float, now: Callable[[], float]) -> Iterator[None]:
         raise DeadlineAlarm("precheck v2: deadline passed")
 
     started = now()
+    ours = max(deadline - started, 0.0) + ALARM_SLACK
+    before = signal.getitimer(signal.ITIMER_REAL)
     handler = signal.signal(signal.SIGALRM, fire)
     previous = signal.setitimer(
-        signal.ITIMER_REAL, max(deadline - started, 0.0) + ALARM_SLACK
+        signal.ITIMER_REAL, min(ours, before[0]) if before[0] > 0 else ours
     )
     try:
         yield
@@ -482,6 +511,9 @@ def _reason(text: str, req: Request) -> str:
 def _wire(req: Request, got: Answer, admin_digest: str) -> bytes:
     """The verdict bytes; a clipped reason goes whole (masked) to the diagnostics,
     which `fit_verdict` cuts to the budget left."""
+    problem = _shape_problem(got)
+    if problem is not None:
+        got = Answer(UNSET, f"invariant_violated: {problem}")
     whole = _masked(got.reason, req)
     diagnostics = "" if clip_detail(whole) == whole else f"reason: {whole}"
     try:
@@ -520,21 +552,52 @@ def _envelope(req: Request, got: Answer, admin_digest: str) -> dict[str, object]
         else dataclasses.asdict(part.source),
         "ranges": got.ranges,
         "policy": dataclasses.asdict(common.policy),
-        "unverified": [] if part is None else sorted(set(part.unverified)),
+        "unverified": _unverified(req, got),
         "version": PRECHECK_VERSION_V2,
         "admin_digest": admin_digest,
     }
     if isinstance(req, TrustRequest):
         env["snapshot_sha"] = req.head
         env["accepted_sha"] = None if req.accepted is None else req.accepted.sha
+        # Review D6: the publisher records the validation version verbatim.
+        env["validation"] = validation_of(admin_digest)
     else:
         env["repository_id"] = req.repository_id
         env["pr"] = req.pr
         env["head_sha"] = req.head_sha
         env["kind"] = req.kind
-        env["snapshot_sha"] = req.expected_snapshot_sha
+        # The snapshot the verdict is built on (X by construction: read by SHA);
+        # an echo only when nothing was read — `relation` says whether it was.
+        read = None if snap is None else snap.root.snapshot_sha
+        env["snapshot_sha"] = read or req.expected_snapshot_sha
         env["expected_snapshot_sha"] = req.expected_snapshot_sha
     return env
+
+
+def _unverified(req: Request, got: Answer) -> list[str]:
+    """The closed codes: the settings' and `load_trust`'s, and
+    `history_token_required` of an unkeyed binding whatever the outcome (O14)."""
+    codes = set(got.unverified)
+    if got.part is not None:
+        codes |= set(got.part.unverified)
+    if req.common.binding.history_gh_config_dir is None:
+        codes.add(HISTORY_TOKEN_REQUIRED)
+    return sorted(codes)
+
+
+def _shape_problem(got: Answer) -> str | None:
+    """The verdict contract by `relation` (review I6): read pair — `source` null
+    iff a source finding; no pair — no source, epoch, ranges or findings."""
+    part = got.part
+    if part is None:
+        return "findings without a read pair" if got.findings else None
+    kinds = {f.kind for f in (*part.findings, *got.findings)}
+    null_source = part.source is None
+    if null_source != bool(kinds & SOURCE_FINDINGS):
+        return (
+            f"source {'null' if null_source else 'set'} with findings {sorted(kinds)}"
+        )
+    return None
 
 
 # --- the trust snapshot check (op: trust, and the snapshot of op: merge) -------------
@@ -622,8 +685,11 @@ def policy_history_break(
     transport: Any, snap: act_trust.TrustSnapshot, p_sha: str
 ) -> tuple[Finding, ...] | Unavailable:
     """The policy-source history of every epoch of the journal on X: closed
-    `anchor…last_confirmed`, open `anchor…P` by SHA (spec §6.1, К). A broken form
-    — the finding `policy_history_break` (one per role); unread — `Unavailable`."""
+    `anchor…last_confirmed`, open `anchor…P` by SHA (spec §6.1, К). Every epoch
+    is read, as `load_ranges` does: a broken form — the finding
+    `policy_history_break` (one per role, the first epoch) — wins over another
+    epoch's gap; with no finding a gap is `Unavailable`."""
+    gap: Unavailable | None = None
     for epoch in snap.epochs:
         got = act_facts.history(
             transport, snap.source, epoch.anchor, epoch.last_confirmed, head=p_sha
@@ -631,9 +697,9 @@ def policy_history_break(
         if isinstance(got, act_facts.HistoryBreak):
             detail = clip_detail(f"epoch {epoch.epoch}: {got.reason}")
             return (Finding("policy_history_break", "approval-policy", detail),)
-        if isinstance(got, Unavailable):
-            return got
-    return ()
+        if isinstance(got, Unavailable) and gap is None:
+            gap = got
+    return () if gap is None else gap
 
 
 def _decided(part: Part, findings: tuple[Finding, ...], ranges: object) -> Answer:
@@ -698,7 +764,8 @@ def _merge(req: MergeRequest, ctx: Context) -> Answer:
         return Answer(REFUSE, NO_APPROVED_GH)
     adapter = Adapter(PRELIMINARY, req.expected_snapshot_sha)
     seen: list[Part] = []
-    deps = _premerge_deps(req, ctx, adapter, seen)
+    trusted: list[act_trust.Trust] = []
+    deps = _premerge_deps(req, ctx, adapter, seen, trusted)
     if req.kind == "candidate":
         code, reason = act_premerge_core.decide(_args(req), deps)
     else:
@@ -709,17 +776,33 @@ def _merge(req: MergeRequest, ctx: Context) -> Answer:
     if part is not None and part.snapshot is not None:
         p_sha = req.policy.p_sha
         ranges = dataclasses.asdict(range_descriptor(part.snapshot.epochs, p_sha))
+    # `load_trust`'s own unverified premise (`allow_rebase_merge` of the policy
+    # source, read again there) joins the settings' codes (carry 9, review M3).
+    extra = tuple(
+        UNVERIFIED_OF_TRUST.get(name, name) for t in trusted for name in t.unverified
+    )
     if findings:
-        return Answer(REFUSE, _findings_reason(findings), part, ranges, findings)
+        return Answer(REFUSE, _findings_reason(findings), part, ranges, findings, extra)
     outcome = {act_premerge_core.EXIT_OK: ALLOW, act_premerge_core.EXIT_REFUSED: REFUSE}
-    return Answer(outcome.get(code, UNSET), reason, part, ranges)
+    return Answer(outcome.get(code, UNSET), reason, part, ranges, (), extra)
 
 
 def _premerge_deps(
-    req: MergeRequest, ctx: Context, adapter: Adapter, seen: list[Part]
+    req: MergeRequest,
+    ctx: Context,
+    adapter: Adapter,
+    seen: list[Part],
+    trusted: list[act_trust.Trust] | None = None,
 ) -> act_premerge_core.PremergeDeps:
-    """`act_premerge_core` dependencies of the v2 path: approved `gh` only."""
-    assert ctx.gh is not None
+    """`act_premerge_core` dependencies of the v2 path: approved `gh` only.
+    `seen` gets the snapshot check, `trusted` the `Trust` of `load_trust`.
+
+    The settings are read twice on this path — by `trust_part` and again by
+    `load_trust` (`_rulesets`, `_rebase`, the history self-report): about six
+    requests, accepted (review M14) and counted by the Task 15 measurement of the
+    v2 `DEADLINE`."""
+    if ctx.gh is None:
+        raise ValueError("premerge deps without an approved gh")
     validation = validation_of(ctx.admin_digest)
 
     def snapshot(transport: Any, binding: act_trust.Binding) -> Any:
@@ -737,7 +820,8 @@ def _premerge_deps(
         adapter.add(part.findings)
         if adapter.findings:
             return Unavailable(_findings_reason(part.findings))
-        assert part.snapshot is not None  # a history fault is a finding
+        if part.snapshot is None:
+            return Unavailable("invariant_violated: no snapshot and no finding")
         return part.snapshot
 
     return act_premerge_core.PremergeDeps(
@@ -752,6 +836,7 @@ def _premerge_deps(
         policy_head=req.policy.p_sha,
         snapshot=snapshot,
         surface=surface_check(req) if req.kind == "candidate" else None,
+        on_trust=(trusted if trusted is not None else []).append,
     )
 
 
@@ -927,6 +1012,11 @@ def _envelopes(
     accepted: Accepted,
 ) -> tuple[int, str]:
     """The envelope commit form (`envelope_commit_defect`) on the whole PR."""
+    if accepted.merge_commit != current.merge_commit:
+        return act_premerge_core.EXIT_REFUSED, (
+            f"merge_commit_mismatch: delivery decision {accepted.merge_commit[:12]}"
+            f" != base history {current.merge_commit[:12]}"
+        )
     delivered = DeliveredRequest(
         accepted.merge_commit, current.head_sha, current.request
     )

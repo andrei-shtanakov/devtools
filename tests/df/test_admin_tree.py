@@ -1260,4 +1260,3 @@ def test_precheck_tree_is_authority_root() -> None:
     files = list(load_tree_list(ROOT).files())
     assert files
     assert [f for f in files if f not in authority_root.touched(files)] == []
-

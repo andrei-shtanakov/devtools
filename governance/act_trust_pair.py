@@ -158,7 +158,12 @@ def read_pair(
     if isinstance(epochs, Unavailable):
         return epochs
     if isinstance(epochs, HistoryFault):
-        return PairResult(relation, None, descriptor, (*findings, _of(epochs)))
+        # A link below H gone on the cold walk: the history is unverifiable and
+        # the pair carries no descriptor either (review I6: `source` is null iff
+        # `source_env_invalid` or `history_unverifiable`).
+        gone = epochs.kind == "history_unverifiable"
+        kept = None if gone else descriptor
+        return PairResult(relation, None, kept, (*findings, _of(epochs)))
     root = TrustRoot(
         binding.host, binding.df_trust_repository_id, binding.df_trust_branch, head
     )

@@ -77,6 +77,9 @@ class PremergeDeps:
     #: The trust snapshot reader (df precheck v2: the pair by SHA).
     snapshot: act_trust.SnapshotReader | None = None
     surface: Surface | None = None
+    #: Observer of the `Trust` the check decided on (df precheck v2: its
+    #: unverified premises go into the verdict).
+    on_trust: Callable[[act_trust.Trust], None] | None = None
 
 
 def request_of_branch(head_ref: str) -> tuple[str, str] | None:
@@ -183,6 +186,8 @@ def _trust(deps: PremergeDeps) -> act_trust.Trust:
             raise _Stop(EXIT_UNSET, f"нарушение периметра: {found[1]}{tail}")
     for name in trust.unverified:
         print(f"unverified premise: {name}", file=sys.stderr)
+    if deps.on_trust is not None:
+        deps.on_trust(trust)
     return trust
 
 

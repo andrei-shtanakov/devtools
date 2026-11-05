@@ -281,16 +281,16 @@ def test_cold_descendant_and_warm_read_each_object_once() -> None:
 
 
 def test_gone_ancestor_on_cold_descendant_path() -> None:
-    """M-2: the relation is proven by the A..H walk; the journal is not verified."""
+    """M-2: the relation is proven by the A..H walk; the journal is not verified.
+    Task 7 review I6: a gone link is `history_unverifiable`, so the pair carries
+    no `source.env` descriptor either (`source` null iff a source finding)."""
     routes = world(LINEAR)
     routes[f"repos/{DT}/commits/{C0}"] = (404, {"message": "Not Found"})
     got, _anon = pair(routes, base(C1), C2, v="admin-digest-2/rules-1")
     assert isinstance(got, act_trust_pair.PairResult)
     assert got.relation == "descendant"
     assert got.snapshot is None
-    assert got.source == act_trust_findings.source_descriptor(
-        parse_source(SOURCE_ENV), SOURCE_ENV.encode()
-    )
+    assert got.source is None
     assert [(f.kind, f.role) for f in got.findings] == [
         ("history_unverifiable", "df-trust")
     ]
