@@ -728,11 +728,15 @@ def test_observation_pins_a_record(lay: Layout) -> None:
 @pytest.mark.parametrize(
     "sql",
     [
-        "UPDATE trust_observations SET accepted_last_epoch = NULL "
-        "WHERE accepted_sha IS NOT NULL",
+        (
+            "UPDATE trust_observations SET accepted_last_epoch = NULL "
+            "WHERE accepted_sha IS NOT NULL"
+        ),
         "UPDATE trust_observations SET accepted_rules = 'x' WHERE accepted_sha IS NULL",
-        "UPDATE trust_observations SET accepted_last_epoch = 'three' "
-        "WHERE accepted_sha IS NOT NULL",
+        (
+            "UPDATE trust_observations SET accepted_last_epoch = 'three' "
+            "WHERE accepted_sha IS NOT NULL"
+        ),
     ],
 )
 def test_pinned_record_invariants(lay: Layout, sql: str) -> None:
