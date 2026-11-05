@@ -710,6 +710,10 @@ def _trust_op(req: TrustRequest, ctx: Context) -> Answer:
         if isinstance(broken, Irreproducible):
             return Answer(IRREPRODUCIBLE, broken.code, part, detail=broken.detail)
         if isinstance(broken, Unavailable):
+            # a finding of the pair or the settings wins over a transient gap
+            # of the policy history, as in `_merge` (paid review #704 P1)
+            if findings:
+                return _decided(part, findings, ranges)
             return Answer(UNSET, broken.reason, part)
         findings = (*findings, *broken)
     return _decided(part, findings, ranges)

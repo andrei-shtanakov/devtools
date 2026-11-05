@@ -1191,6 +1191,51 @@ def test_policy_objects_missing_irreproducible(
         assert verdict["relation"] == "descendant"
 
 
+def test_reeval_merge_keeps_findings_over_transient_policy_gap(
+    tmp_path: Path,
+    wire: _Wire,
+    gh: Path,
+    profile: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Paid review #704 P1: re-evaluating a `merge` observation, a settings
+    finding already established wins over a transient gap of the policy
+    history (`refuse` with the finding, I6 shape kept, ranges carried); a
+    permanent gap is still `irreproducible` (D-c); without a finding the
+    transient gap stays `unset`."""
+    wire.routes[f"repos/{AP}"] = (
+        200,
+        {"full_name": AP, "allow_rebase_merge": True, **_perms()},
+    )
+    payload = trust_req(
+        profile, origin_route="merge", trust_accepted=accepted(), trust_head=X
+    )
+    monkeypatch.setattr(
+        act_facts, "history", lambda *a, **k: Unavailable("transport: timed out")
+    )
+    verdict, _ = run(tmp_path / "home", payload, gh)
+    assert verdict["outcome"] == "refuse"
+    assert [(f["kind"], f["role"]) for f in verdict["findings"]] == [
+        ("rebase_allowed", "approval-policy")
+    ]
+    assert verdict["relation"] == "descendant" and verdict["source"] is not None
+    assert verdict["ranges"] is not None
+    monkeypatch.setattr(
+        act_facts, "history", lambda *a, **k: Unavailable("http: 404 repos/x/c/abc")
+    )
+    verdict, _ = run(tmp_path / "home", payload, gh)
+    assert verdict["outcome"] == act_precheck_v2.IRREPRODUCIBLE
+    wire.routes[f"repos/{AP}"] = (
+        200,
+        {"full_name": AP, "allow_rebase_merge": False, **_perms()},
+    )
+    monkeypatch.setattr(
+        act_facts, "history", lambda *a, **k: Unavailable("transport: timed out")
+    )
+    verdict, _ = run(tmp_path / "home", payload, gh)
+    assert verdict["outcome"] == "unset" and verdict["findings"] == []
+
+
 def test_policy_break_wins_over_missing_objects(
     tmp_path: Path, gh: Path, profile: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
