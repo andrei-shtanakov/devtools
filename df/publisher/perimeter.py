@@ -21,7 +21,10 @@ not touched. Every change is one transaction (`BEGIN IMMEDIATE`, bounded by
 its events is `pending` or `registered(E)` with `E >=` the root's last epoch.
 
 Schema 2 (stage 3a) adds the publisher's trust state -- `trust_heads`,
-`trust_observations` (written by `trust_state` only) and `meta.restored`. A
+`trust_observations` (written by `trust_state` only) and `meta.restored`.
+A schema-2 database created before the `accepted_*` columns were added
+(3a Task 10, development only, never released) fails the integrity check;
+the way out is `darkfactory perimeter restore --empty`. A
 schema-1 database of stage 2b is moved on only by `perimeter-init`
 (`migrate`, owner decision 7); an ordinary open names the migration.
 

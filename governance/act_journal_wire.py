@@ -230,6 +230,10 @@ class WireJournal:
                 argv,
                 input=json.dumps(data, sort_keys=True).encode("utf-8"),
                 capture_output=True,
+                # must cover one v2 evaluation of `perimeter-status` (the
+                # publisher evaluates at most the oldest unfinished observation
+                # per call, `trust_routes.PERIMETER_STATUS_EVALUATIONS`, each up
+                # to its `PRECHECK_WAIT`); Task 16 sets both from the measurement
                 timeout=60,
                 check=False,
             )

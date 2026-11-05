@@ -50,7 +50,10 @@ WRAPPER = "df-precheck"
 PRECHECK_ENV: Mapping[str, str] = {"PATH": "/usr/bin:/bin", "LANG": "C"}
 #: Bytes of a request and of a verdict.
 LIMIT = 64 << 10
-#: Seconds the publisher waits (rung 3); it never signals.
+#: Seconds the publisher waits (rung 3); it never signals. The consumer's
+#: call timeout of `perimeter-status` (`act_journal_wire`, 60 s) must cover
+#: one v2 evaluation (`trust_routes.PERIMETER_STATUS_EVALUATIONS`): Task 16
+#: sets this wait and that timeout together from the measurement.
 PRECHECK_WAIT = 200.0
 #: A failed exit this late is sudo's `command_timeout=180` (rung 2).
 SUDO_TIMEOUT_AFTER = 175.0

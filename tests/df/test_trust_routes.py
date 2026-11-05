@@ -1212,14 +1212,37 @@ def test_pin_policy_out_of_limits_typed(
 def test_evaluations_capped_per_call(
     world: World, tw: TrustWorld, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """M5: one call asks the checker at most `MAX_EVALUATIONS` times; the
-    rest stay unfinished (the root `unavailable` by I) for the next calls."""
+    """M5: one `trust-status` asks the checker at most
+    `TRUST_STATUS_EVALUATIONS` times; the rest stay unfinished (the root
+    `unavailable` by I) for the next calls."""
     heads = ["4" * 40, "5" * 40, "6" * 40, "7" * 40]
     opened = [_open_pair(world, "trust-status", None, h) for h in heads]
     tw.checker.answer = lambda req: wire(verdict(req, outcome="refuse",
                                                  findings=[RULESET]))  # fmt: skip
     resp = tstatus(world, capsys)
-    assert len(tw.checker.requests) == trust_routes.MAX_EVALUATIONS
+    cap = trust_routes.TRUST_STATUS_EVALUATIONS
+    assert len(tw.checker.requests) == cap == 3
     left = [o for o in opened if _outcome(world, o) == "open"]
-    assert left == opened[trust_routes.MAX_EVALUATIONS :]
+    assert left == opened[cap:]
     assert resp.result["state"] == "blocked"  # the registered findings
+
+
+def test_perimeter_status_one_evaluation_per_call(
+    world: World, tw: TrustWorld, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Re-review N1: `perimeter-status` runs the checker at most once per
+    call -- on the oldest unfinished observation -- so one v2 evaluation is
+    what the consumer's call timeout must cover; the rest wait for the next
+    calls, in the order of creation."""
+    accept(world.lay, S1, 2)
+    tw.sources.heads["main"] = S2
+    first = _open_pair(world, "trust-status", S1, S2)
+    second = _open_pair(world, "trust-status", S1, S3)
+    resp = status(world, capsys, S2)
+    assert trust_routes.PERIMETER_STATUS_EVALUATIONS == 1
+    assert [r["observation_id"] for r in tw.checker.requests] == [first]
+    assert _outcome(world, first) == "accepted"
+    assert _outcome(world, second) == "open"
+    assert resp.result["state"] == "unavailable"  # I: two still unfinished
+    resp = status(world, capsys, S2)
+    assert [r["observation_id"] for r in tw.checker.requests][1:] == [second]

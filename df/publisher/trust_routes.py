@@ -112,11 +112,20 @@ HOST = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?")
 PUBLISHER_USER = "df-publisher"
 NO_APPROVED_GH = "history_token_unavailable: no approved gh for the history profile"
 UNFINISHED = "trust_observation_unfinished"
-#: Checker runs one route call makes at most (review M5): each may take up
-#: to `precheck.PRECHECK_WAIT`, and `perimeter-status` precedes every
-#: decision of a consumer. The rest stay unfinished: `unavailable` by I,
-#: evaluated by the next calls in the order of creation.
-MAX_EVALUATIONS = 3
+#: Checker runs per call, by route (review M5, re-review N1): each may take
+#: up to `precheck.PRECHECK_WAIT`. The rest stay unfinished -- `unavailable`
+#: by I -- and are evaluated by the next calls in the order of creation.
+#: `perimeter-status` precedes every decision of a consumer and runs under
+#: the consumer's call timeout (`act_journal_wire`, 60 s): it evaluates only
+#: the oldest unfinished observation, so one v2 evaluation is what that
+#: timeout must cover (Task 16 sets both from the measurement). Root's
+#: `trust-status` has no such caller limit.
+PERIMETER_STATUS_EVALUATIONS = 1
+TRUST_STATUS_EVALUATIONS = 3
+EVALUATIONS: Mapping[Route, int] = {
+    "perimeter-status": PERIMETER_STATUS_EVALUATIONS,
+    "trust-status": TRUST_STATUS_EVALUATIONS,
+}
 NOT_ACCEPTED = "trust_head_not_accepted"
 #: The wire under the history transport; tests put a fake here.
 HISTORY_SEND: Transport | None = None
@@ -476,7 +485,7 @@ def observe(sess: Session, db: Db, route: Route, head: str) -> Evaluation | None
     """Open the route's observation (A, H) durably, register the publisher's
     own finding in it, then evaluate the root's unfinished observations in
     the order of creation -- this one included -- until one stays
-    `unresolved`, at most `MAX_EVALUATIONS`. The evaluation of this call's
+    `unresolved`, at most `EVALUATIONS[route]`. The evaluation of this call's
     observation, if reached."""
     own = _open(sess, db, route, head)
     epochs_of = sess.epochs_of()
@@ -486,7 +495,7 @@ def observe(sess: Session, db: Db, route: Route, head: str) -> Evaluation | None
     if all(obs.id != own.id for obs in queue):
         queue.append(own)  # completed by the own finding; the checker still asked
     mine: Evaluation | None = None
-    for obs in queue[:MAX_EVALUATIONS]:
+    for obs in queue[: EVALUATIONS[route]]:
         got = evaluate(sess, db, obs)
         if obs.id == own.id:
             mine = got
@@ -1133,20 +1142,22 @@ def check_ranges(
 
 __all__ = [
     "BRANCH",
+    "EVALUATIONS",
     "FULL_NAME",
     "HISTORY_TOKEN_REQUIRED",
     "HOST",
     "IRREPRODUCIBLE",
     "IRREPRODUCIBLE_REASONS",
     "MAX_BRANCH_BYTES",
-    "MAX_EVALUATIONS",
     "MAX_FULL_NAME_BYTES",
     "MAX_INT",
+    "PERIMETER_STATUS_EVALUATIONS",
     "PRECHECK_VERSION_V2",
     "REQUEST_SCHEMA_V2",
     "RULES_VERSION",
     "SOURCE_FINDINGS",
     "TREE_INCOMPLETE",
+    "TRUST_STATUS_EVALUATIONS",
     "UNVERIFIED",
     "VERDICT_LIMIT",
     "VERDICT_SCHEMA_V2",
