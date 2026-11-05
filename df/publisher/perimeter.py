@@ -20,6 +20,11 @@ not touched. Every change is one transaction (`BEGIN IMMEDIATE`, bounded by
 `busy_timeout`). The blocking rule: a root's decision is blocked while one of
 its events is `pending` or `registered(E)` with `E >=` the root's last epoch.
 
+Schema 2 (stage 3a) adds the publisher's trust state -- `trust_heads`,
+`trust_observations` (written by `trust_state` only) and `meta.restored`. A
+schema-1 database of stage 2b is moved on only by `perimeter-init`
+(`migrate`, owner decision 7); an ordinary open names the migration.
+
 A restored copy (`admission = restored_pending`) is not complete: once the
 epoch source answers for every known root, one transaction records a
 conservative `registered(E)` per root (source `db_restore`) and admits the
@@ -56,7 +61,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from df import fsutil
 from df.config import ConfigError
@@ -83,10 +88,32 @@ BARRIER_WAIT = 5.0
 #: (below it is silently ignored): the larger of the two.
 MIN_SQLITE = (3, 31, 0)
 SQLITE_VERSION: tuple[int, int, int] = sqlite3.sqlite_version_info
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
+#: The schema of stage 2b, which only `migrate` (`perimeter-init`) moves on.
+SCHEMA_VERSION_V1 = "1"
 STATES = ("pending", "registered")
 ADMISSIONS = ("ready", "restored_pending")
+#: `meta.restored`: set by a restore, never back to `false` (spec 6.1).
+RESTORED = ("false", "true")
 DB_RESTORE = "db_restore"
+#: The refusal of `restore` for a copy of a schema-1 database (decision 7(a):
+#: a 2b copy is not restorable on 3a).
+COPY_SCHEMA_1 = "copy: schema_1"
+COPY_SCHEMA_1_TEXT = (
+    "копия не принята: это база схемы 1 (этап 2b), а восстановить на этом "
+    "этапе можно только копию базы схемы 2; ничего не изменено. Выход: sudo "
+    "darkfactory perimeter restore --empty или --from <копия базы схемы 2>"
+)
+#: The reason of an ordinary open of a schema-1 database.
+MIGRATION_REQUIRED = "schema_migration_required: выполните darkfactory roles setup"
+MIGRATION_PRECONDITION_TEXT = (
+    "база периметра схемы 1 не переводится на схему 2: в ней уже есть события "
+    "или есть /etc/df/trust.toml; ничего не изменено, и повтор этого не "
+    "изменит. Выход — новая база: sudo darkfactory perimeter restore --empty "
+    "(события базы схемы 1 не переносятся, база допускается консервативно) "
+    "или --from <копия базы схемы 2>; затем sudo darkfactory roles setup "
+    "завершит остальные шаги"
+)
 LOST_TEXT = (
     "база периметра потеряна: есть отметка perimeter/created, нет "
     "perimeter/events.sqlite; заново она не создаётся — нужен человек: "
@@ -142,7 +169,8 @@ _LOCK_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 #: A root of trust: host, `df-trust` repository id, branch (spec 6.1).
 Root = tuple[str, int, str]
 
-SCHEMA: tuple[str, ...] = (
+#: The schema of stage 2b, kept verbatim: `migrate` recognises it.
+SCHEMA_V1: tuple[str, ...] = (
     "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
     (
         "CREATE TABLE events ("
@@ -182,8 +210,63 @@ SCHEMA: tuple[str, ...] = (
     ),
     "CREATE INDEX transitions_event ON transitions (event_id)",
 )
-#: Each counts the rows that break an invariant (spec 6.1).
-_INVARIANTS = (
+#: What schema 2 adds: the trust state of the publisher (spec 6.1, rev 11).
+SCHEMA_V2_ADDED: tuple[str, ...] = (
+    (
+        "CREATE TABLE trust_heads ("
+        "root_host TEXT NOT NULL, "
+        "root_repository_id INTEGER NOT NULL, "
+        "root_branch TEXT NOT NULL, "
+        "sha TEXT NOT NULL, "
+        "last_epoch INTEGER NOT NULL, "
+        "source_digest TEXT NOT NULL, "
+        "admin_digest TEXT NOT NULL, "
+        "rules TEXT NOT NULL, "
+        "binding_digest TEXT NOT NULL, "
+        "row_version INTEGER NOT NULL, "
+        "at TEXT NOT NULL, "
+        "finding_event_id INTEGER)"
+    ),
+    (
+        "CREATE UNIQUE INDEX trust_heads_root "
+        "ON trust_heads (root_host, root_repository_id, root_branch)"
+    ),
+    (
+        "CREATE TABLE trust_observations ("
+        "observation_id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "root_host TEXT NOT NULL, "
+        "root_repository_id INTEGER NOT NULL, "
+        "root_branch TEXT NOT NULL, "
+        "ctx_id TEXT NOT NULL, "
+        "route TEXT NOT NULL, "
+        "binding TEXT NOT NULL, "
+        "admin_digest TEXT NOT NULL, "
+        "rules TEXT NOT NULL, "
+        "accepted_sha TEXT, "
+        "row_version INTEGER NOT NULL, "
+        "head_sha TEXT NOT NULL, "
+        "policy_full_name TEXT, "
+        "policy_branch TEXT, "
+        "policy_sha TEXT, "
+        "ranges_digest TEXT, "
+        "created_at TEXT NOT NULL, "
+        "outcome TEXT NOT NULL, "
+        "event_ids TEXT NOT NULL, "
+        "completed_at TEXT)"
+    ),
+    (
+        "CREATE UNIQUE INDEX trust_observations_unfinished ON trust_observations "
+        "(root_host, root_repository_id, root_branch, ctx_id) "
+        "WHERE outcome IN ('open', 'unresolved')"
+    ),
+    (
+        "CREATE INDEX trust_observations_root ON trust_observations "
+        "(root_host, root_repository_id, root_branch, outcome)"
+    ),
+)
+SCHEMA: tuple[str, ...] = SCHEMA_V1 + SCHEMA_V2_ADDED
+#: Each counts the rows that break an invariant of schema 1 (spec 6.1).
+_INVARIANTS_V1 = (
     "SELECT count(*) FROM events WHERE state NOT IN ('pending', 'registered')",
     (
         "SELECT count(*) FROM events "
@@ -195,6 +278,45 @@ _INVARIANTS = (
         "WHERE event_id NOT IN (SELECT event_id FROM events)"
     ),
 )
+#: ... and of schema 2.
+_INVARIANTS = (
+    *_INVARIANTS_V1,
+    (
+        "SELECT count(*) FROM trust_observations WHERE outcome NOT IN ('open', "
+        "'unresolved', 'accepted', 'finding_registered', 'superseded', "
+        "'conservative')"
+    ),
+    (
+        "SELECT count(*) FROM trust_observations "
+        "WHERE route NOT IN ('perimeter-status', 'trust-status', 'merge')"
+    ),
+    # INTEGER affinity keeps text that is not a number: the reads `int()` it
+    ("SELECT count(*) FROM events WHERE typeof(root_repository_id) != 'integer'"),
+    (
+        "SELECT count(*) FROM trust_heads WHERE "
+        "typeof(root_repository_id) != 'integer' OR "
+        "typeof(last_epoch) != 'integer' OR typeof(row_version) != 'integer'"
+    ),
+    (
+        "SELECT count(*) FROM trust_observations WHERE "
+        "typeof(root_repository_id) != 'integer' OR "
+        "typeof(row_version) != 'integer'"
+    ),
+    "SELECT count(*) FROM trust_heads WHERE row_version < 1",
+    (
+        "SELECT count(*) FROM trust_heads WHERE finding_event_id IS NOT NULL "
+        "AND finding_event_id NOT IN (SELECT event_id FROM events)"
+    ),
+)
+#: The longest observation JSON column `_json` parses (bytes). A legitimate
+#: `event_ids` holds the ids of at most 16 findings (kind x role) and one
+#: conservative event -- a few hundred bytes; a `binding` holds two ids, the
+#: host, the full name (<= 140 B), the branch (<= 255 B) and the history
+#: profile path (<= PATH_MAX, 4096 B) -- under 5 KiB. 64 KiB is over ten times
+#: either and bounds the parse of a hostile row.
+MAX_JSON = 64 << 10
+#: The repository ids every observation's `binding` names.
+_BINDING_IDS = ("df_trust_repository_id", "approval_policy_repository_id")
 _ROOT_WHERE = "root_host = ? AND root_repository_id = ? AND root_branch = ?"
 _BLOCKING = (
     f"SELECT event_id FROM events WHERE {_ROOT_WHERE} AND "
@@ -310,16 +432,18 @@ def open_db(layout: Layout) -> Db:
     return Db(conn, fd)
 
 
-def create_db(layout: Layout) -> str:
-    """`perimeter-init` (as `df-publisher`): `created` or `present`.
+def create_db(layout: Layout) -> Literal["created", "migrated", "current"]:
+    """`perimeter-init` (as `df-publisher`): `created`, `migrated` or
+    `current`.
 
     Under `LOCK_EX`: only when neither the database nor the marker exists is
     the database built (a temporary file, renamed into place) and then the
     marker written. No database while the marker or root's
     `perimeter.created` exists is `Unavailable("lost")`; no database next to
     an `events.sqlite-journal` is `Unavailable("integrity")`: nothing is
-    created in either case. A database without the marker (a crash before
-    the marker) is verified and marked."""
+    created in either case. An existing database is checked and, if of
+    schema 1, migrated (`_migrate`); one without the marker (a crash before
+    the marker) is then marked (`created`, or `migrated`)."""
     _require_sqlite()
     base = layout.perimeter_dir
     _own_dir(base)
@@ -332,16 +456,128 @@ def create_db(layout: Layout) -> str:
         if not db and (marker or _lexists(layout.perimeter_created)):
             raise Unavailable("lost")
         if db and marker:
-            return "present"
+            return _migrate(layout)
         if not db and _lexists(base / JOURNAL):
             raise Unavailable("integrity")  # never build next to a foreign journal
-        if not db:
-            _build(base)
+        if db:
+            outcome = _migrate(layout)
+            _mark_created(base)
+            return "created" if outcome == "current" else outcome
+        _build(base)
         _open_verified(layout).close()
         _mark_created(base)
         return "created"
     finally:
         os.close(fd)
+
+
+def _no_step(_name: str) -> None:
+    """The default `RESTORE_STEP` and `MIGRATE_STEP`: nothing."""
+
+
+#: Called with `before-commit` (inside the transaction) and `committed` by
+#: `_migrate`; tests crash there (`os._exit`).
+MIGRATE_STEP: Callable[[str], None] = _no_step
+
+
+def migrate(layout: Layout) -> Literal["migrated", "current"]:
+    """The schema transition 1 -> 2 under the barrier's `LOCK_EX` (owner
+    decision 7, option (a): only `perimeter-init` runs it)."""
+    _require_sqlite()
+    fd = _open_lock(layout)
+    try:
+        _flock(fd, fcntl.LOCK_EX)
+        return _migrate(layout)
+    finally:
+        os.close(fd)
+
+
+def _migrate(layout: Layout) -> Literal["migrated", "current"]:
+    """Schema 2: verified in full, `current`. Schema 1: an admissible 2b
+    database (verified as 2b, no events, no `trust.toml`) is moved to 2 in
+    one transaction -- the tables of `SCHEMA_V2_ADDED`, `meta.restored` (a
+    known restore, `admission = restored_pending`, is `true`), then
+    `meta.schema`; `admission` and `transitions` are untouched. A schema-1
+    database that is not admissible is `migration_precondition`, any other
+    `integrity`: unchanged in both cases. The caller holds `LOCK_EX`."""
+    with _mapped():
+        conn = _connect(_db_path(layout))
+        try:
+            try:  # schema 2: this is the one full check of the open
+                _verify(conn)
+                return "current"
+            except Unavailable as exc:
+                if exc.reason != MIGRATION_REQUIRED:
+                    raise
+            _no_binding(layout)
+            with _write(conn):
+                if _checked_version(conn) != SCHEMA_VERSION_V1 or _count(conn):
+                    raise Unavailable("migration_precondition")
+                for sql in SCHEMA_V2_ADDED:
+                    conn.execute(sql)
+                known = admission(conn) == "restored_pending"
+                conn.execute(
+                    "INSERT INTO meta (key, value) VALUES ('restored', ?)",
+                    (RESTORED[known],),
+                )
+                conn.execute(
+                    "UPDATE meta SET value = ? WHERE key = 'schema'", (SCHEMA_VERSION,)
+                )
+                _no_binding(layout)  # again, right before the commit
+                MIGRATE_STEP("before-commit")
+            MIGRATE_STEP("committed")
+            _verify(conn)
+        finally:
+            conn.close()
+    return "migrated"
+
+
+def _no_binding(layout: Layout) -> None:
+    """The migration's precondition on `trust.toml`, fail-closed: only a
+    `FileNotFoundError` is "absent"; the file or any other error of its
+    probe is `migration_precondition`."""
+    try:
+        os.lstat(layout.etc / "trust.toml")
+    except FileNotFoundError:
+        return
+    except OSError:
+        pass
+    raise Unavailable("migration_precondition")
+
+
+def _checked_version(conn: sqlite3.Connection) -> str:
+    """`SCHEMA_VERSION` or `SCHEMA_VERSION_V1` of a database that passes
+    the integrity check and, for schema 1, the 2b checks of `meta` and the
+    invariants (schema 2 is `_verify`'s); else `integrity`."""
+    if conn.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
+        raise Unavailable("integrity")
+    version = _version_of(conn)
+    if version == SCHEMA_VERSION_V1:
+        if _meta(conn)["admission"] not in ADMISSIONS:
+            raise Unavailable("integrity")
+        if any(conn.execute(sql).fetchone()[0] for sql in _INVARIANTS_V1):
+            raise Unavailable("integrity")
+    return version
+
+
+def _version_of(conn: sqlite3.Connection) -> str:
+    """The version the tables and `meta` agree on; anything else (another
+    schema, `meta` of other keys or another version) is `integrity`."""
+    found = _schema(conn)
+    if found == _expected_schema(SCHEMA):
+        version, keys = SCHEMA_VERSION, {"schema", "admission", "restored"}
+    elif found == _expected_schema(SCHEMA_V1):
+        version, keys = SCHEMA_VERSION_V1, {"schema", "admission"}
+    else:
+        raise Unavailable("integrity")
+    meta = _meta(conn)
+    if meta.keys() != keys or meta["schema"] != version:
+        raise Unavailable("integrity")
+    return version
+
+
+def _meta(conn: sqlite3.Connection) -> dict[str, str]:
+    return {str(k): str(v) for k, v in conn.execute("SELECT key, value FROM meta")}
 
 
 def _mark_created(base: Path) -> None:
@@ -432,6 +668,12 @@ def _flock(fd: int, op: int, wait: float | None = None) -> None:
 
 def _open_verified(layout: Layout) -> sqlite3.Connection:
     """Connect to the existing database (the caller holds the barrier)."""
+    return _connect_verified(_db_path(layout))
+
+
+def _db_path(layout: Layout) -> Path:
+    """The existing database, a regular file; `restore.intent` present:
+    `restore_incomplete`."""
     base = layout.perimeter_dir
     if _lexists(base / RESTORE_INTENT):
         raise Unavailable("restore_incomplete")
@@ -444,7 +686,7 @@ def _open_verified(layout: Layout) -> sqlite3.Connection:
         raise _io(exc) from None
     if not stat.S_ISREG(st.st_mode):
         raise Unavailable("integrity")
-    return _connect_verified(path)
+    return path
 
 
 def _connect_verified(path: Path) -> sqlite3.Connection:
@@ -480,10 +722,10 @@ def _apply_pragmas(conn: sqlite3.Connection) -> None:
 
 
 @functools.cache
-def _expected_schema() -> frozenset[tuple[str, str, str]]:
+def _expected_schema(schema: tuple[str, ...]) -> frozenset[tuple[str, str, str]]:
     conn = sqlite3.connect(":memory:")
     try:
-        for sql in SCHEMA:
+        for sql in schema:
             conn.execute(sql)
         return _schema(conn)
     finally:
@@ -498,21 +740,59 @@ def _schema(conn: sqlite3.Connection) -> frozenset[tuple[str, str, str]]:
 
 
 def _verify(conn: sqlite3.Connection) -> None:
-    """Integrity, schema, meta, invariants and the volume, in one read."""
+    """Integrity, schema, meta, invariants and the volume, in one read. A
+    database of schema 1 is `MIGRATION_REQUIRED` (only `perimeter-init`
+    moves it on)."""
     with _transaction(conn, "BEGIN"):
         if conn.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
             raise Unavailable("integrity")
-        if _schema(conn) != _expected_schema():
-            raise Unavailable("integrity")
-        meta = dict(conn.execute("SELECT key, value FROM meta").fetchall())
-        if meta.keys() != {"schema", "admission"}:
-            raise Unavailable("integrity")
-        if meta["schema"] != SCHEMA_VERSION or meta["admission"] not in ADMISSIONS:
+        if _version_of(conn) == SCHEMA_VERSION_V1:
+            raise Unavailable(MIGRATION_REQUIRED)
+        meta = _meta(conn)
+        if meta["admission"] not in ADMISSIONS or meta["restored"] not in RESTORED:
             raise Unavailable("integrity")
         if any(conn.execute(sql).fetchone()[0] for sql in _INVARIANTS):
             raise Unavailable("integrity")
+        if not _observations_ok(conn):
+            raise Unavailable("integrity")
         if _count(conn) > MAX_EVENTS:
             raise Unavailable("too_many_events")
+
+
+def _observations_ok(conn: sqlite3.Connection) -> bool:
+    """The JSON of every observation row, checked in Python (SQLite's JSON
+    functions are not guaranteed below 3.38): `event_ids` a list of ids of
+    existing events, `binding` an object with integer repository ids."""
+    events = {row[0] for row in conn.execute("SELECT event_id FROM events")}
+    rows = conn.execute("SELECT event_ids, binding FROM trust_observations")
+    for raw_ids, raw_binding in rows:
+        ids, binding = _json(raw_ids), _json(raw_binding)
+        if not isinstance(ids, list) or not isinstance(binding, dict):
+            return False
+        if any(type(i) is not int or i not in events for i in ids):
+            return False
+        if any(type(binding.get(k)) is not int for k in _BINDING_IDS):
+            return False
+    return True
+
+
+def _json(raw: str) -> object:
+    """`raw` parsed; `None` when it is not JSON text of at most `MAX_JSON`
+    bytes, nests deeper than the parser's recursion allows, or names
+    NaN/Infinity. An int past the digit limit is a `ValueError` too."""
+    if not isinstance(raw, str):
+        return None
+    if len(raw.encode("utf-8", "surrogatepass")) > MAX_JSON:
+        return None
+    try:
+        return json.loads(raw, parse_constant=_no_constant)
+    except (RecursionError, ValueError):
+        return None
+
+
+def _no_constant(name: str) -> object:
+    """`parse_constant`: NaN, Infinity and -Infinity are not JSON."""
+    raise ValueError(f"JSON constant {name}")
 
 
 def _count(conn: sqlite3.Connection) -> int:
@@ -528,7 +808,7 @@ def _build(base: Path) -> None:
     fsutil.sync_dir(base)
 
 
-def _new_db(tmp: Path, admission: str) -> None:
+def _new_db(tmp: Path, admission: str, *, restored: bool = False) -> None:
     """The schema and `meta` in a fresh `tmp` (born `0600`), synced. A
     leftover of a crash is swept first."""
     _sweep(tmp)
@@ -542,7 +822,11 @@ def _new_db(tmp: Path, admission: str) -> None:
                     conn.execute(sql)
                 conn.executemany(
                     "INSERT INTO meta (key, value) VALUES (?, ?)",
-                    [("schema", SCHEMA_VERSION), ("admission", admission)],
+                    [
+                        ("schema", SCHEMA_VERSION),
+                        ("admission", admission),
+                        ("restored", RESTORED[restored]),
+                    ],
                 )
         finally:
             conn.close()
@@ -567,6 +851,13 @@ def _sync_file(path: Path) -> None:
 def _write(conn: sqlite3.Connection) -> contextlib.AbstractContextManager[None]:
     """One write transaction: committed on success, rolled back otherwise."""
     return _transaction(conn, "BEGIN IMMEDIATE")
+
+
+@contextlib.contextmanager
+def write(conn: sqlite3.Connection) -> Iterator[None]:
+    """`_write` with SQLite's errors as `Unavailable` (`_mapped`)."""
+    with _mapped(), _write(conn):
+        yield
 
 
 @contextlib.contextmanager
@@ -653,11 +944,32 @@ def admission(conn: sqlite3.Connection) -> str:
     return str(row[0])
 
 
+def restored(conn: sqlite3.Connection) -> bool:
+    """`meta.restored`: the database was put in place by a restore (from a
+    copy or empty), now or ever -- unlike `admission`, never cleared."""
+    row = conn.execute("SELECT value FROM meta WHERE key = 'restored'").fetchone()
+    return row is not None and str(row[0]) == "true"
+
+
+def mark_restored(conn: sqlite3.Connection) -> None:
+    """Set `meta.restored` (inside the caller's write transaction); nothing
+    ever sets it back."""
+    conn.execute("UPDATE meta SET value = 'true' WHERE key = 'restored'")
+
+
+def known_roots(conn: sqlite3.Connection, current: Root) -> list[Root]:
+    """Every root the database knows -- of `events`, `trust_heads` and
+    `trust_observations` -- and `current`, the binding's (spec 6.1)."""
+    found: set[Root] = {current}
+    for table in ("events", "trust_heads", "trust_observations"):
+        rows = conn.execute(
+            f"SELECT DISTINCT root_host, root_repository_id, root_branch FROM {table}"
+        ).fetchall()
+        found |= {(str(h), int(r), str(b)) for h, r, b in rows}
+    return sorted(found)
+
+
 # --- restore (Task 11r) ----------------------------------------------------------
-
-
-def _no_step(_name: str) -> None:
-    """The default `RESTORE_STEP`: nothing."""
 
 
 #: Called with the name of each step of `restore` once it is done; tests
@@ -721,9 +1033,11 @@ def restore(layout: Layout, copy: bytes | None, *, set_aside_old: bool = False) 
 
 
 def _stage(tmp: Path, copy: bytes | None) -> None:
-    """Step 1: the database to put in place, verified, `restored_pending`."""
+    """Step 1: the database to put in place, verified, `restored_pending`
+    and `restored` (one transaction: the flag is set before any admission
+    clears `restored_pending`)."""
     if copy is None:
-        _new_db(tmp, "restored_pending")
+        _new_db(tmp, "restored_pending", restored=True)
         return
     if len(copy) > MAX_COPY:
         raise Unavailable("copy: too_large")
@@ -739,12 +1053,15 @@ def _stage(tmp: Path, copy: bytes | None) -> None:
     try:
         conn = _connect_verified(tmp)
     except Unavailable as exc:
+        if exc.reason == MIGRATION_REQUIRED:
+            raise Unavailable(COPY_SCHEMA_1) from None
         raise Unavailable(f"copy: {exc.reason}") from None
     try:
         with _mapped(), _write(conn):
             conn.execute(
                 "UPDATE meta SET value = 'restored_pending' WHERE key = 'admission'"
             )
+            mark_restored(conn)
     finally:
         conn.close()
     _sync_file(tmp)
@@ -899,6 +1216,8 @@ def _move_aside(src: Path, dst: Path) -> None:
 
 def restore_text(reason: str) -> str:
     """The human's text of a refused `restore`."""
+    if reason == COPY_SCHEMA_1:
+        return COPY_SCHEMA_1_TEXT
     if reason.startswith("copy: "):
         return f"копия не принята ({reason.removeprefix('copy: ')}): ничего не изменено"
     return RESTORE_TEXTS.get(reason, f"perimeter restore: {reason}")
@@ -909,24 +1228,25 @@ def restore_text(reason: str) -> str:
 
 def admit(db: Db, epochs: EpochSource, current: Root) -> None:
     """A `restored_pending` database is admitted by `restore_conservative`
-    over every root of its events and the current binding's; until the
-    epochs of all are known it is `Unavailable("restore_pending")`."""
+    over every known root (`known_roots`); until the epochs of all are known
+    it is `Unavailable("restore_pending")`."""
     with _mapped():
         if admission(db.conn) == "ready":
             return
-        found = db.conn.execute(
-            "SELECT DISTINCT root_host, root_repository_id, root_branch FROM events"
-        ).fetchall()
-    roots = {(str(h), int(r), str(b)) for h, r, b in found} | {current}
-    restore_conservative(db.conn, sorted(roots), epochs)
+        roots = known_roots(db.conn, current)
+    restore_conservative(db.conn, roots, epochs)
 
 
 def restore_conservative(
     conn: sqlite3.Connection, roots: Sequence[Root], epochs: EpochSource
 ) -> None:
     """One transaction: a `registered(E)` event per root, `E` its last epoch
-    now (source `db_restore`), then `admission = ready`. An unknown epoch of
-    any root changes nothing: `Unavailable("restore_pending")`."""
+    now (source `db_restore`), the root's unfinished observations of the
+    copy completed by K at `E`, then `admission = ready` (`restored` stays).
+    An unknown epoch of any root changes nothing:
+    `Unavailable("restore_pending")`."""
+    from df.publisher import trust_state  # it builds on this module
+
     with _mapped(), _write(conn):
         if admission(conn) == "ready":
             return  # another process admitted it meanwhile
@@ -934,14 +1254,16 @@ def restore_conservative(
             head = epochs.head(root)
             if isinstance(head, Unavailable):
                 raise Unavailable("restore_pending")
-            _insert(
+            insert_event(
                 conn,
                 root,
                 key=f"{DB_RESTORE}:{uuid.uuid4().hex}",
-                head=head,
+                epoch=head.last_epoch,
+                provenance=_provenance(head),
                 detected_by=DB_RESTORE,
                 detail="conservative event of a restored database",
             )
+            trust_state.conclude_unfinished(conn, root, head.last_epoch)
         conn.execute("UPDATE meta SET value = 'ready' WHERE key = 'admission'")
 
 
@@ -961,19 +1283,25 @@ def _provenance(head: Snapshot | Unavailable) -> dict[str, object]:
     return {"snapshot_sha": head.sha, "unavailable": None}
 
 
-def _insert(
+def _epoch_of(head: Snapshot | Unavailable) -> int | None:
+    return None if isinstance(head, Unavailable) else head.last_epoch
+
+
+def insert_event(
     conn: sqlite3.Connection,
     root: Root,
     *,
     key: str,
-    head: Snapshot | Unavailable,
+    epoch: int | None,
+    provenance: dict[str, object],
     detected_by: str,
     detail: str,
     req: Request | None = None,
     sender: int | None = None,
     violated: tuple[str, int] | None = None,
 ) -> int:
-    pending = isinstance(head, Unavailable)
+    """One event row (inside the caller's write transaction): `pending`
+    without an epoch, else `registered(epoch)`."""
     stamp = now()
     fields = {} if req is None else req.fields
     cur = conn.execute(
@@ -993,9 +1321,9 @@ def _insert(
             detected_by,
             str(fields.get("observed_at", stamp)),
             stamp,
-            "pending" if pending else "registered",
-            None if isinstance(head, Unavailable) else head.last_epoch,
-            json.dumps(_provenance(head), sort_keys=True),
+            "pending" if epoch is None else "registered",
+            epoch,
+            json.dumps(provenance, sort_keys=True),
             detail,
         ),
     )
@@ -1031,11 +1359,12 @@ def record_violation(
         row = _by_key(conn, key)
         if row is None:
             head = epochs.head(root)
-            _insert(
+            insert_event(
                 conn,
                 root,
                 key=key,
-                head=head,
+                epoch=_epoch_of(head),
+                provenance=_provenance(head),
                 detected_by=f"sender:{sender}",
                 detail=str(req.fields["detail"]),
                 req=req,
@@ -1227,6 +1556,8 @@ def perimeter_status_op(ctx: Context) -> Response:
 
 __all__ = [
     "BUSY_TIMEOUT_MS",
+    "COPY_SCHEMA_1",
+    "COPY_SCHEMA_1_TEXT",
     "DB_NAME",
     "EPOCHS",
     "INTEGRITY_TEXT",
@@ -1236,12 +1567,16 @@ __all__ = [
     "MARKER",
     "MAX_COPY",
     "MAX_EVENTS",
+    "MIGRATE_STEP",
+    "MIGRATION_PRECONDITION_TEXT",
+    "MIGRATION_REQUIRED",
     "NO_BINDING",
     "RESTORE_DB",
     "RESTORE_INTENT",
     "RESTORE_STEP",
     "RESTORE_TEXTS",
     "RESTORE_WAIT",
+    "SCHEMA_VERSION",
     "SET_ASIDE",
     "Db",
     "EpochSource",
@@ -1251,6 +1586,10 @@ __all__ = [
     "admission",
     "admit",
     "create_db",
+    "insert_event",
+    "known_roots",
+    "mark_restored",
+    "migrate",
     "open_db",
     "perimeter_status",
     "perimeter_status_op",
@@ -1260,7 +1599,9 @@ __all__ = [
     "restore",
     "restore_conservative",
     "restore_text",
+    "restored",
     "root_of",
     "stats",
     "status_unavailable",
+    "write",
 ]

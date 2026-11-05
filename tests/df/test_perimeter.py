@@ -154,7 +154,7 @@ def test_create_db_makes_the_files(ready: Layout) -> None:
 def test_create_db_is_idempotent(ready: Layout) -> None:
     record_in(ready)
     before = digest(db_file(ready))
-    assert perimeter.create_db(ready) == "present"
+    assert perimeter.create_db(ready) == "current"
     assert digest(db_file(ready)) == before
 
 
@@ -252,7 +252,7 @@ def test_whole_directory_lost_is_lost(ready: Layout) -> None:
 def test_lock_missing_next_to_the_database(ready: Layout) -> None:
     (ready.perimeter_dir / perimeter.LOCK).unlink()
     assert unavailable(ready) == "lock_missing"
-    assert perimeter.create_db(ready) == "present"  # recreates the lock
+    assert perimeter.create_db(ready) == "current"  # recreates the lock
     assert unavailable_or_none(ready) is None
 
 

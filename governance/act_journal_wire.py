@@ -59,21 +59,91 @@ _LOCK_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 # где полный журнал. Совпадение констант и SQL держит
 # `tests/test_act_journal_wire.py` (сверка с `df/` и двойники на одном файле).
 MAX_EVENTS = 10_000
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
+RESTORED = ("false", "true")
 #: sha256 отсортированных строк `type\tname\tsql` из `sqlite_master` схемы издателя.
-SCHEMA_DIGEST = "d684c9a00188611d5f8ab2ba80f2b9633ec3e6dabd0a768b2a30c963e07f880f"
+SCHEMA_DIGEST = "012d109ababcd26fb8ddb5e1ee702491b294724bf2aeeafbb48e6cadd803cef3"
 _INVARIANTS = (
     "SELECT count(*) FROM events WHERE state NOT IN ('pending', 'registered')",
     (
-        "SELECT count(*) FROM events "
-        "WHERE state = 'registered' AND typeof(epoch) != 'integer'"
+        "SELECT count(*) FROM events WHERE state = 'registered' AND typeof(epoch) "
+        "!= 'integer'"
     ),
     "SELECT count(*) FROM events WHERE state = 'pending' AND epoch IS NOT NULL",
     (
-        "SELECT count(*) FROM transitions "
-        "WHERE event_id NOT IN (SELECT event_id FROM events)"
+        "SELECT count(*) FROM transitions WHERE event_id NOT IN (SELECT event_id "
+        "FROM events)"
+    ),
+    (
+        "SELECT count(*) FROM trust_observations WHERE outcome NOT IN ('open', "
+        "'unresolved', 'accepted', 'finding_registered', 'superseded', "
+        "'conservative')"
+    ),
+    (
+        "SELECT count(*) FROM trust_observations WHERE route NOT IN "
+        "('perimeter-status', 'trust-status', 'merge')"
+    ),
+    "SELECT count(*) FROM events WHERE typeof(root_repository_id) != 'integer'",
+    (
+        "SELECT count(*) FROM trust_heads WHERE typeof(root_repository_id) != "
+        "'integer' OR typeof(last_epoch) != 'integer' OR typeof(row_version) != "
+        "'integer'"
+    ),
+    (
+        "SELECT count(*) FROM trust_observations WHERE typeof(root_repository_id) "
+        "!= 'integer' OR typeof(row_version) != 'integer'"
+    ),
+    "SELECT count(*) FROM trust_heads WHERE row_version < 1",
+    (
+        "SELECT count(*) FROM trust_heads WHERE finding_event_id IS NOT NULL AND "
+        "finding_event_id NOT IN (SELECT event_id FROM events)"
     ),
 )
+#: The longest observation JSON column `_json` parses (bytes). A legitimate
+#: `event_ids` holds the ids of at most 16 findings (kind x role) and one
+#: conservative event -- a few hundred bytes; a `binding` holds two ids, the
+#: host, the full name (<= 140 B), the branch (<= 255 B) and the history
+#: profile path (<= PATH_MAX, 4096 B) -- under 5 KiB. 64 KiB is over ten times
+#: either and bounds the parse of a hostile row.
+MAX_JSON = 64 << 10
+#: The repository ids every observation's `binding` names.
+_BINDING_IDS = ("df_trust_repository_id", "approval_policy_repository_id")
+
+
+def _observations_ok(conn: sqlite3.Connection) -> bool:
+    """The JSON of every observation row, checked in Python (SQLite's JSON
+    functions are not guaranteed below 3.38): `event_ids` a list of ids of
+    existing events, `binding` an object with integer repository ids."""
+    events = {row[0] for row in conn.execute("SELECT event_id FROM events")}
+    rows = conn.execute("SELECT event_ids, binding FROM trust_observations")
+    for raw_ids, raw_binding in rows:
+        ids, binding = _json(raw_ids), _json(raw_binding)
+        if not isinstance(ids, list) or not isinstance(binding, dict):
+            return False
+        if any(type(i) is not int or i not in events for i in ids):
+            return False
+        if any(type(binding.get(k)) is not int for k in _BINDING_IDS):
+            return False
+    return True
+
+
+def _json(raw: str) -> object:
+    """`raw` parsed; `None` when it is not JSON text of at most `MAX_JSON`
+    bytes, nests deeper than the parser's recursion allows, or names
+    NaN/Infinity. An int past the digit limit is a `ValueError` too."""
+    if not isinstance(raw, str):
+        return None
+    if len(raw.encode("utf-8", "surrogatepass")) > MAX_JSON:
+        return None
+    try:
+        return json.loads(raw, parse_constant=_no_constant)
+    except (RecursionError, ValueError):
+        return None
+
+
+def _no_constant(name: str) -> object:
+    """`parse_constant`: NaN, Infinity and -Infinity are not JSON."""
+    raise ValueError(f"JSON constant {name}")
 
 
 def _now() -> str:
@@ -98,9 +168,13 @@ def _refusal(conn: sqlite3.Connection) -> str | None:
         if schema_digest(conn) != SCHEMA_DIGEST:
             return "integrity"
         meta = dict(conn.execute("SELECT key, value FROM meta").fetchall())
-        if meta.keys() != {"schema", "admission"} or meta["schema"] != SCHEMA_VERSION:
+        if meta.keys() != {"schema", "admission", "restored"}:
+            return "integrity"
+        if meta["schema"] != SCHEMA_VERSION or meta["restored"] not in RESTORED:
             return "integrity"
         if any(conn.execute(sql).fetchone()[0] for sql in _INVARIANTS):
+            return "integrity"
+        if not _observations_ok(conn):
             return "integrity"
         if conn.execute("SELECT count(*) FROM events").fetchone()[0] > MAX_EVENTS:
             return "too_many_events"
