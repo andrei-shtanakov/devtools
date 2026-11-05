@@ -267,27 +267,27 @@ BYPASS: dict[str, tuple[str, str]] = {
         '_invalidate(state, key, f"манифест в одобренном коммите не читается: {exc}")',
         "return None",
     ),
-    "act_premerge._approve_in_current_second:same_second": (
+    "act_premerge_core._approve_in_current_second:same_second": (
         "parse_ts(r.submitted_at) >= now",
         "False",
     ),
-    "act_premerge._boundary:stamp": (
+    "act_premerge_core._boundary:stamp": (
         'raise _Stop(EXIT_UNSET, f"метка события не разобрана: {exc}") from exc',
         'return parse_ts("2026-10-12T12:00:00Z")',
     ),
-    "act_premerge._manifest_text:utf8": (
+    "act_premerge_core._manifest_text:utf8": (
         'return Unavailable(f"{path}: не UTF-8")',
         'return ""',
     ),
-    "act_premerge._check:manifest_present": (
+    "act_premerge_core._check:manifest_present": (
         'raise _Stop(\n            EXIT_REFUSED, f"в {args.head[:12]} нет манифеста {ident.request_id}"\n        )',
         "return",
     ),
-    "act_premerge._trust:app_unknown": (
+    "act_premerge_core._trust:app_unknown": (
         'raise _Stop(EXIT_UNSET, f"установки App: {found.reason}")',
         "found = None",
     ),
-    "act_premerge.request_of_branch:form": (
+    "act_premerge_core.request_of_branch:form": (
         "    if match is None:\n        return None",
         '    if match is None:\n        match = re.fullmatch(pattern, "spec/ws-9-approve-9-9-9")',
     ),

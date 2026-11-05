@@ -56,6 +56,8 @@ MODULES = (
     "act_precheck",
     "act_node",
     "act_premerge",
+    # df этап 3a (Task 7, ревью D1): ядро предпроверки без CLI — его импортирует v2
+    "act_premerge_core",
     "act_app_token",
     "act_barrier",
     # df этап 3a (Task 3): общая поверхность D16 конвейера и издателя (O6)
@@ -2817,151 +2819,151 @@ JUDGMENT = {
         ),
     ),
     # --- act_premerge (Task 15)
-    "act_premerge.request_of_branch": (
+    "act_premerge_core.request_of_branch": (
         r(
             "form",
-            "act_premerge.request_of_branch",
+            "act_premerge_core.request_of_branch",
             "if match is None",
             f"{P}::test_request_of_branch",
             '"feat/x"',
         ),
     ),
-    "act_premerge._trust": (
+    "act_premerge_core._trust": (
         r(
             "binding",
-            "act_premerge._trust",
+            "act_premerge_core._trust",
             "deps.binding is None",
             f"{P}::test_no_binding_refused",
             '"без корня доверия"',
         ),
         r(
             "journal",
-            "act_premerge._trust",
+            "act_premerge_core._trust",
             "isinstance(deps.journal, Unavailable)",
             f"{P}::test_journal_unavailable_is_unset",
             '"журнал периметра: "',
         ),
         r(
             "app_unknown",
-            "act_premerge._trust",
+            "act_premerge_core._trust",
             "установки App: ",
             f"{P}::test_app_installations_unknown_is_unset",
             '"установки App: "',
         ),
         r(
             "app_violation",
-            "act_premerge._trust",
+            "act_premerge_core._trust",
             "if found is not None",
             f"{P}::test_app_installation_violation_recorded",
             "act_premerge.REGISTERED",
         ),
     ),
-    "act_premerge._live": (
+    "act_premerge_core._live": (
         r(
             "mode_unset",
-            "act_premerge._live",
+            "act_premerge_core._live",
             "isinstance(mode, Unavailable)",
             f"{P}::test_product_mode_gate[unset]",
             '"режим продукта: "',
         ),
         r(
             "not_review",
-            "act_premerge._live",
+            "act_premerge_core._live",
             'if mode != "review"',
             f"{P}::test_product_mode_gate[merge]",
             '"— не review"',
         ),
     ),
-    "act_premerge._check": (
+    "act_premerge_core._check": (
         r(
             "identity",
-            "act_premerge._check",
+            "act_premerge_core._check",
             "if refusal is not None",
             f"{P}::test_manifest_of_other_identity_refused[ws_id]",
             'f"манифест: {field}"',
         ),
         r(
             "manifest_present",
-            "act_premerge._check",
+            "act_premerge_core._check",
             "if text is None",
             f"{P}::test_no_manifest_refused",
             '"нет манифеста"',
         ),
         r(
             "surface",
-            "act_premerge._check",
+            "act_premerge_core._check",
             "if off_surface is not None",
             f"{V2}::test_candidate_foreign_file_refused",
             '"surface_violation: scripts/foreign.sh"',
         ),
         r(
             "merger",
-            "act_premerge._check",
+            "act_premerge_core._check",
             "not merger_allowed(policy, args.merger",
             f"{P}::test_merger_outside_allowlist_refused",
             '"не пройдёт D3"',
         ),
         r(
             "skew",
-            "act_premerge._check",
+            "act_premerge_core._check",
             "wait > MAX_WAIT",
             f"{P}::test_clock_skew_beyond_ten_seconds_unset",
             '"часы расходятся"',
         ),
         r(
             "reread",
-            "act_premerge._check",
+            "act_premerge_core._check",
             "again != facts or current2 != current",
             f"{P}::test_reread_sees_dismissal_unset",
             '"изменились за время ожидания"',
         ),
     ),
-    "act_premerge._act": (
+    "act_premerge_core._act": (
         r(
             "head_sha",
-            "act_premerge._act",
+            "act_premerge_core._act",
             "facts.head_sha != args.head",
             f"{P}::test_review_facts_head_differs_refused",
             '"≠ --head"',
         ),
         r(
             "act",
-            "act_premerge._act",
+            "act_premerge_core._act",
             "find_act(args.head, effective, policy) is None",
             f"{P}::test_no_approve_refused",
             '"нет approve человека"',
         ),
         r(
             "current_second",
-            "act_premerge._act",
+            "act_premerge_core._act",
             "_approve_in_current_second(facts, args.head, now)",
             f"{P}::test_approve_in_current_second_is_unset",
             '"в текущей секунде"',
         ),
     ),
     # approve этой же секунды — «не установлено», а не отказ (ревью PR #673)
-    "act_premerge._approve_in_current_second": (
+    "act_premerge_core._approve_in_current_second": (
         r(
             "same_second",
-            "act_premerge._approve_in_current_second",
+            "act_premerge_core._approve_in_current_second",
             "parse_ts(r.submitted_at) >= now",
             f"{P}::test_approve_in_current_second_is_unset",
             '"в текущей секунде"',
         ),
     ),
-    "act_premerge._boundary": (
+    "act_premerge_core._boundary": (
         r(
             "stamp",
-            "act_premerge._boundary",
+            "act_premerge_core._boundary",
             "except ValueError as exc",
             f"{P}::test_boundary_unparsed_stamp_is_unset",
             '"метка события не разобрана"',
         ),
     ),
-    "act_premerge._manifest_text": (
+    "act_premerge_core._manifest_text": (
         r(
             "utf8",
-            "act_premerge._manifest_text",
+            "act_premerge_core._manifest_text",
             "except UnicodeDecodeError",
             f"{P}::test_manifest_text_reads_head_bytes[not_utf8]",
             '"m.yaml: не UTF-8"',
@@ -4752,7 +4754,7 @@ NOT_JUDGMENT = {
     "act_node._merge_stop_pr.form": "замыкание проверки формы; суждение — `stop_pr_defect`",
     "act_node._remedy": _BUILD,
     "act_node.audit_completed": "аудит завершённых заявок; решения не меняет (приёмка №10)",
-    "act_premerge._Stop.__init__": _BUILD,
+    "act_premerge_core._Stop.__init__": _BUILD,
     "act_premerge._parser": _BUILD,
     "act_premerge.real_deps": _BUILD,
     "act_app_token._NoRedirect.redirect_request": "транспортная политика; отказа об объекте нет",
@@ -4809,7 +4811,7 @@ NOT_JUDGMENT = {
     "act_precheck._wall": _BUILD,
     "act_precheck._emit": _IO,
     "act_precheck._serve_v2": "выбор по `complete_v2` (его судит `precheck serve`, `df/cli._tree_complete`) и отложенный вызов программы v2; своей проверки нет",
-    "act_premerge.decide": "переводит `_Stop` проверки в код и причину; суждения — `_check`",
+    "act_premerge_core.decide": "переводит `_Stop` проверки в код и причину; суждения — `_check`",
     "act_trust.FindingSink.record_finding": "протокол журнала с видом находки; не суждение",
     "act_app_installations.app_installations": "фабрика проверки; суждение — `installations_refusal`",
     "act_app_installations.app_installations.check": "делегирует `act_app_token.installations_refusal`",

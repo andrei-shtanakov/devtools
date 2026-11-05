@@ -20,7 +20,7 @@ Two operations, both stateless (the checker keeps no state, writes nothing):
   snapshot X, else ``Unavailable(stale_snapshot)``; `record_finding` keeps the
   findings for the verdict, the publisher registers them), the explicit mode of
   the derived product credential (N3), the snapshot read as the pair (A, X) by
-  SHA; candidate — `act_premerge` with the merger of the request (N4) and the D16
+  SHA; candidate — `act_premerge_core` with the merger of the request (N4) and the D16
   surface of the whole PR (`act_surface`); finalize — the expected envelopes of
   the delivered request, `review_id` from the final delivery decision
   (`act_context.delivery_verdict(..., legacy=None)`, N7).
@@ -52,7 +52,7 @@ from governance import (
     act_context,
     act_facts,
     act_precheck,
-    act_premerge,
+    act_premerge_core,
     act_surface,
     act_trust,
     act_trust_pair,
@@ -697,7 +697,7 @@ def _merge(req: MergeRequest, ctx: Context) -> Answer:
     seen: list[Part] = []
     deps = _premerge_deps(req, ctx, adapter, seen)
     if req.kind == "candidate":
-        code, reason = act_premerge.decide(_args(req), deps)
+        code, reason = act_premerge_core.decide(_args(req), deps)
     else:
         code, reason = finalize(req, deps, ctx)
     part = seen[0] if seen else None
@@ -708,14 +708,14 @@ def _merge(req: MergeRequest, ctx: Context) -> Answer:
         ranges = dataclasses.asdict(range_descriptor(part.snapshot.epochs, p_sha))
     if findings:
         return Answer(REFUSE, _findings_reason(findings), part, ranges, findings)
-    outcome = {act_premerge.EXIT_OK: ALLOW, act_premerge.EXIT_REFUSED: REFUSE}
+    outcome = {act_premerge_core.EXIT_OK: ALLOW, act_premerge_core.EXIT_REFUSED: REFUSE}
     return Answer(outcome.get(code, UNSET), reason, part, ranges)
 
 
 def _premerge_deps(
     req: MergeRequest, ctx: Context, adapter: Adapter, seen: list[Part]
-) -> act_premerge.PremergeDeps:
-    """`act_premerge` dependencies of the v2 path: approved `gh` only."""
+) -> act_premerge_core.PremergeDeps:
+    """`act_premerge_core` dependencies of the v2 path: approved `gh` only."""
     assert ctx.gh is not None
     validation = validation_of(ctx.admin_digest)
 
@@ -737,7 +737,7 @@ def _premerge_deps(
         assert part.snapshot is not None  # a history fault is a finding
         return part.snapshot
 
-    return act_premerge.PremergeDeps(
+    return act_premerge_core.PremergeDeps(
         readers=act_trust.Readers(partial(act_trust.gh_get, gh=str(ctx.gh))),
         gh=ctx.deps.transport_for(req.token, req.api_base),
         binding=req.common.binding,
@@ -763,7 +763,7 @@ def _args(req: MergeRequest) -> argparse.Namespace:
     )
 
 
-def surface_check(req: MergeRequest) -> act_premerge.Surface:
+def surface_check(req: MergeRequest) -> act_premerge_core.Surface:
     """The D16 surface of the WHOLE PR (the diff to base the publisher computed):
     the manifest of the request changed by this PR, every path (both sides of a
     rename) inside `act_surface.surface_violations` of the bundle directory and the
@@ -797,7 +797,7 @@ def surface_check(req: MergeRequest) -> act_premerge.Surface:
 
 
 def finalize(
-    req: MergeRequest, deps: act_premerge.PremergeDeps, ctx: Context
+    req: MergeRequest, deps: act_premerge_core.PremergeDeps, ctx: Context
 ) -> tuple[int, str]:
     """A finalize PR: its branch names the candidate's request; the delivered
     request is found in the base history; its delivery decision gives the act
@@ -806,16 +806,16 @@ def finalize(
     try:
         target = _finalize_target(req.head_ref)
         if isinstance(target, str):
-            return act_premerge.EXIT_REFUSED, target
-        trust = act_premerge._trust(deps)
+            return act_premerge_core.EXIT_REFUSED, target
+        trust = act_premerge_core._trust(deps)
         with act_precheck._snapshot(
             req, ctx.home, ctx.git, ctx.deps, ctx.deadline
         ) as ops:
             return _finalize_in_history(req, deps, trust, ops, target)
-    except act_premerge._Stop as stop:
+    except act_premerge_core._Stop as stop:
         return stop.code, str(stop)
     except OPS_FAILURES as exc:
-        return act_premerge.EXIT_UNSET, f"read_failed: {exc}"
+        return act_premerge_core.EXIT_UNSET, f"read_failed: {exc}"
 
 
 def _finalize_target(head_ref: str) -> tuple[str, str] | str:
@@ -824,7 +824,7 @@ def _finalize_target(head_ref: str) -> tuple[str, str] | str:
     suffix = approval_branches.finalize_suffix()
     if not head_ref.endswith(suffix):
         return f"finalize_branch: {head_ref!r} has no finalize suffix"
-    found = act_premerge.request_of_branch(head_ref[: -len(suffix)])
+    found = act_premerge_core.request_of_branch(head_ref[: -len(suffix)])
     if found is None:
         return f"finalize_branch: {head_ref!r} is not a finalize branch"
     return found
@@ -832,7 +832,7 @@ def _finalize_target(head_ref: str) -> tuple[str, str] | str:
 
 def _finalize_in_history(
     req: MergeRequest,
-    deps: act_premerge.PremergeDeps,
+    deps: act_premerge_core.PremergeDeps,
     trust: act_trust.Trust,
     ops: SnapshotHistory,
     target: tuple[str, str],
@@ -840,23 +840,23 @@ def _finalize_in_history(
     ws_id, key = target
     history = load_history(ops, Scope(ws_id, req.full_name, ""), req.base_tip)
     if isinstance(history, Unavailable):
-        return act_premerge.EXIT_UNSET, f"history_unavailable: {history.reason}"
+        return act_premerge_core.EXIT_UNSET, f"history_unavailable: {history.reason}"
     found = [
         e
         for e in history
         if isinstance(e, DeliveredRequest) and e.request.request_id == key
     ]
     if len(found) != 1:
-        return act_premerge.EXIT_REFUSED, f"no_delivered_request: {ws_id}/{key}"
+        return act_premerge_core.EXIT_REFUSED, f"no_delivered_request: {ws_id}/{key}"
     current = found[0]
     stale = [
         n for n in current.request.nodes if node_history(history, n).current != current
     ]
     if stale:
-        return act_premerge.EXIT_REFUSED, f"request_not_current: nodes {stale}"
+        return act_premerge_core.EXIT_REFUSED, f"request_not_current: nodes {stale}"
     pr = pr_for_merge(ops, req.full_name, current.merge_commit)
     if isinstance(pr, Unavailable):
-        return act_premerge.EXIT_UNSET, f"candidate_pr: {pr.reason}"
+        return act_premerge_core.EXIT_UNSET, f"candidate_pr: {pr.reason}"
     accepted = _delivery(deps, trust, ops, req.full_name, pr, current)
     if isinstance(accepted, tuple):
         return accepted
@@ -864,7 +864,7 @@ def _finalize_in_history(
 
 
 def _delivery(
-    deps: act_premerge.PremergeDeps,
+    deps: act_premerge_core.PremergeDeps,
     trust: act_trust.Trust,
     ops: SnapshotHistory,
     product: str,
@@ -890,13 +890,13 @@ def _delivery(
     if isinstance(outcome, Accepted):
         return outcome
     if isinstance(outcome, Rejected):
-        return act_premerge.EXIT_REFUSED, (
+        return act_premerge_core.EXIT_REFUSED, (
             f"delivery_rejected: {outcome.code}: {outcome.detail}"
         )
     if isinstance(outcome, WaitingDelivery):
-        return act_premerge.EXIT_UNSET, f"delivery_waiting: candidate PR #{pr}"
+        return act_premerge_core.EXIT_UNSET, f"delivery_waiting: candidate PR #{pr}"
     why = getattr(outcome, "reason", type(outcome).__name__)
-    return act_premerge.EXIT_UNSET, f"delivery_unset: {why}"
+    return act_premerge_core.EXIT_UNSET, f"delivery_unset: {why}"
 
 
 def head_hashes(
@@ -936,14 +936,14 @@ def _envelopes(
     touched = {p for _s, p, _prev in req.changes}
     plain = all(s in _CHANGE_OK and prev is None for s, _p, prev in req.changes)
     if touched != set(expected) or not plain:
-        return act_premerge.EXIT_REFUSED, (
+        return act_premerge_core.EXIT_REFUSED, (
             f"envelope_set: the PR changes {sorted(touched)}, "
             f"expected exactly {sorted(expected)}"
         )
     for path, text in sorted(expected.items()):
         raw = ops.show_file_bytes("", req.head_sha, path)
         if raw is None:
-            return act_premerge.EXIT_UNSET, f"envelope_unreadable: {path}"
+            return act_premerge_core.EXIT_UNSET, f"envelope_unreadable: {path}"
         if raw != text.encode("utf-8"):
-            return act_premerge.EXIT_REFUSED, f"envelope_content: {path}"
-    return act_premerge.EXIT_OK, ""
+            return act_premerge_core.EXIT_REFUSED, f"envelope_content: {path}"
+    return act_premerge_core.EXIT_OK, ""

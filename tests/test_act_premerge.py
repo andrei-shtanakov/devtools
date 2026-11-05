@@ -14,7 +14,13 @@ pytest.importorskip("steward")
 
 from steward.approvalfacts import v3  # noqa: E402
 
-from governance import act_decision, act_facts, act_premerge, act_trust  # noqa: E402
+from governance import (  # noqa: E402
+    act_decision,
+    act_facts,
+    act_premerge,
+    act_premerge_core,
+    act_trust,
+)
 from governance.act_check import ActivationView  # noqa: E402
 from governance.act_decision import ReviewView  # noqa: E402
 from governance.act_epochs import Epoch  # noqa: E402
@@ -112,7 +118,9 @@ class World:
             lambda *a: {ACT: parse_ts(self.activation_at)},
         )
         monkeypatch.setattr(act_trust, "load_ranges", lambda *a: self.ranges())
-        monkeypatch.setattr(act_premerge, "_manifest_text", lambda *a: self.manifest)
+        monkeypatch.setattr(
+            act_premerge_core, "_manifest_text", lambda *a: self.manifest
+        )
         monkeypatch.setattr(act_facts, "open_review", lambda *a: self.next_facts())
         monkeypatch.setattr(
             act_facts,
@@ -223,8 +231,10 @@ def test_boundary_unparsed_stamp_is_unset() -> None:
     facts = SimpleNamespace(
         reviews=[SimpleNamespace(submitted_at="не-метка")], dismissals=[]
     )
-    with pytest.raises(act_premerge._Stop, match="метка события не разобрана") as got:
-        act_premerge._boundary(facts, [])
+    with pytest.raises(
+        act_premerge_core._Stop, match="метка события не разобрана"
+    ) as got:
+        act_premerge_core._boundary(facts, [])
     assert got.value.code == act_premerge.EXIT_UNSET
 
 
@@ -468,7 +478,7 @@ def test_non_candidate_branch_refused(world: World, capsys) -> None:
 def test_broken_branch_ssot_is_unset(world: World, monkeypatch, tmp_path, capsys):
     broken = tmp_path / "patterns.env"
     broken.write_text("APPROVAL_FINALIZE_SUFFIX=-final\n")
-    monkeypatch.setattr(act_premerge, "PATTERNS", broken)
+    monkeypatch.setattr(act_premerge_core, "PATTERNS", broken)
     assert world.run() == 2 and "APPROVAL_CANDIDATE_TEMPLATE" in capsys.readouterr().err
 
 
@@ -551,9 +561,9 @@ def test_manifest_text_reads_head_bytes(monkeypatch, raw, expected) -> None:
         seen.append((gh, repo, path, ref))
         return raw
 
-    monkeypatch.setattr(act_premerge, "contents_bytes", contents)
+    monkeypatch.setattr(act_premerge_core, "contents_bytes", contents)
     gh = object()
-    got = act_premerge._manifest_text(
+    got = act_premerge_core._manifest_text(
         act_premerge.PremergeDeps(
             readers=act_trust.Readers(lambda c, p: Fact(Outcome.FOUND, {}, "ok")),
             gh=gh, binding=BINDING, journal=Journal(), now=lambda: NOW,

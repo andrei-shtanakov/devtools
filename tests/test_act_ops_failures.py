@@ -211,7 +211,13 @@ def _direct_pr_facts() -> list[str]:
     """`ops.pr_facts(` вне `try`, ловящего OPS_FAILURES: в act_status, act_node,
     approve_node — только через `approval_facts.read_pr`/`an._pr_facts`."""
     bad = []
-    for name in ("act_status.py", "act_node.py", "approve_node.py", "act_premerge.py"):
+    for name in (
+        "act_status.py",
+        "act_node.py",
+        "approve_node.py",
+        "act_premerge.py",
+        "act_premerge_core.py",
+    ):
         tree = ast.parse((ROOT / "governance" / name).read_text(encoding="utf-8"))
         guarded: set[int] = set()
         for node in ast.walk(tree):

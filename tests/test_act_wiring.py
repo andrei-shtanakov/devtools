@@ -184,12 +184,12 @@ _ENTRIES = frozenset({"load_trust", "history_transport"})
 #: Боевые передачи швов: `load_trust` в свою фабрику и договор запуска df (спека B
 #: §3.10 rev 11) — программа проверяющего v2 передаёт `token_source` с утверждённым
 #: `gh` (`partial(history_token_at, gh=…, role_home=…)`) в фабрику и через
-#: `act_premerge._trust` в `load_trust`; `open_url` боевой код не передаёт.
+#: `act_premerge_core._trust` в `load_trust`; `open_url` боевой код не передаёт.
 _SEAM_PASS = frozenset(
     {
         ("governance/act_trust.py::load_trust", "history_transport"),
         ("governance/act_precheck_v2.py::_history", "history_transport"),
-        ("governance/act_premerge.py::_trust", "load_trust"),
+        ("governance/act_premerge_core.py::_trust", "load_trust"),
     }
 )
 

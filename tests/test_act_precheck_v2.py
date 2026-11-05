@@ -37,6 +37,7 @@ from governance import (  # noqa: E402
     act_precheck,
     act_precheck_v2,
     act_premerge,
+    act_premerge_core,
     act_trust,
     act_trust_findings,
 )
@@ -256,7 +257,7 @@ class Candidate:
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.approve_on = HEAD
         self.heads: list[str | None] = []
-        monkeypatch.setattr(act_premerge, "_manifest_text", lambda *a: manifest())
+        monkeypatch.setattr(act_premerge_core, "_manifest_text", lambda *a: manifest())
         monkeypatch.setattr(act_facts, "open_review", lambda *a: self.facts())
         monkeypatch.setattr(
             act_facts,
@@ -1019,6 +1020,7 @@ def test_act_precheck_top_imports_within_legacy_2b() -> None:
 
 
 JWT_OPS_DF = (
+    "governance.act_premerge",
     "governance.ops",
     "governance.runner",
     "governance.act_status",
@@ -1035,25 +1037,29 @@ def test_closure_excludes_jwt_ops_df() -> None:
     `jwt`, no `df`, no `ops`/`runner`/`act_status`/`act_node`/`edge_check`."""
     local, external = _closure("governance.act_precheck")
     assert "governance.act_precheck_v2" in local
-    assert "governance.act_premerge" in local
+    assert "governance.act_premerge_core" in local
     assert [m for m in JWT_OPS_DF if m in local] == []
     assert not any(m == "df" or m.startswith("df.") for m in local)
     assert "jwt" not in external
     assert sorted(external - set(sys.stdlib_module_names)) == ["steward", "yaml"]
 
 
-def test_premerge_app_mode_loaded_by_name_only() -> None:
-    """`act_premerge` reaches the App mode (`act_app_token`, `jwt`) only by the
-    module name: no import statement names it, so the precheck tree stays narrow."""
-    tree = ast.parse((ROOT / "governance/act_premerge.py").read_text("utf-8"))
-    imported = {
-        a.name if isinstance(n, ast.Import) else f"{n.module}.{a.name}"
-        for n in ast.walk(tree)
-        if isinstance(n, (ast.Import, ast.ImportFrom))
-        for a in n.names
-    }
-    assert not any("app_token" in m or "app_installations" in m for m in imported)
-    assert act_premerge.APP_INSTALLATIONS == "governance.act_app_installations"
+def test_premerge_cli_outside_closure_app_chain_static() -> None:
+    """Review D1: v2 imports the premerge core, never the CLI `act_premerge`, whose
+    App mode imports `act_app_installations` statically — so the merge-harness
+    tracer sees the App chain and the precheck closure never holds it."""
+    from tests.harness_trust import closure
+
+    local, _external = _closure("governance.act_precheck")
+    assert "governance.act_premerge_core" in local
+    assert "governance.act_premerge" not in local
+    files, problems, _third = closure(ROOT, "governance/act_premerge.py")
+    assert problems == []
+    assert {
+        "governance/act_premerge_core.py",
+        "governance/act_app_installations.py",
+        "governance/act_app_token.py",
+    } <= files
 
 
 # --- helpers ---------------------------------------------------------------------------
