@@ -41,13 +41,17 @@ hooks:
     # Объявлен явно, хотя дефолт spec-runner 4.4.0 тот же (config.py:
     # lint_blocking = True): гейт не должен зависеть от дефолта соседа (ревью #516).
     lint_blocking: true
-# strict валит попытку до гейтов, если задача тронула эти пути. Состав:
-# весь AUTHORITY_ROOT_PREFIXES (SSOT contracts/authority-root/v1/paths.env,
-# включая модули, которые исполняют merge-pr.sh/human-merge.sh; `roadmap.toml`
-# живёт только в зонтике — в devtools такого пути нет), весь
-# contracts/ и вендор-кит ревью; конфиг прогона; требования бандла (узлы
-# spec/ воркстрима). Сама tasks-спека не заморожена: её статусы пишет
-# исполнитель — её правку агентом ловит ревью PR.
+# strict валит попытку до гейтов, если задача тронула эти пути. Состав — НЕ
+# весь AUTHORITY_ROOT_PREFIXES (SSOT contracts/authority-root/v1/paths.env), а
+# явный перечень ниже: конфиг прогона и spec/.gitignore; .github, profiles, весь
+# contracts/; скрипты обвязки (merge-pr.sh, human-merge.sh, review-pr.sh,
+# attest-vendor.sh, ssot_env.sh, approval_branches.sh, governance/halt_gate.py);
+# вендор-кит ревью scripts/review; узлы spec/ двух воркстримов; защищённая
+# цепочка песочницы авторского агента. Прочие authority-root пути (в т. ч.
+# governance/act_*, df/, tests/df/, pyproject.toml, uv.lock) здесь не названы:
+# их охраняют merge-гард (merge-pr.sh) и ревью PR, а не harness_guard.
+# Сама tasks-спека не заморожена: её статусы пишет исполнитель — её правку
+# агентом ловит ревью PR.
 harness_guard: strict
 harness_files:
   - spec-runner.config.yaml

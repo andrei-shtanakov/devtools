@@ -520,7 +520,11 @@ def test_premerge_chain_has_no_df_and_no_projection() -> None:
 @pytest.mark.slow
 def test_premerge_runs_as_isolated_file(tmp_path: Path) -> None:
     """Боевая форма запуска настоящим `uv` (офлайн, из кэша): `--help` разбирается
-    после импорта всей цепочки, steward есть в окружении группы governance."""
+    после импорта всей цепочки CLI — с ядром `act_premerge_core` и App-цепочкой
+    (`act_app_installations` → `act_app_token` → `jwt`, статически после D1
+    Task 7) — и по правилу m-7 возвращает 3 («не мержить, не повторять») с
+    текстом usage; steward, `jwt` и App-модуль есть в окружении группы
+    governance."""
     env = {
         "PATH": os.environ["PATH"],
         "HOME": os.environ["HOME"],
@@ -535,13 +539,20 @@ def test_premerge_runs_as_isolated_file(tmp_path: Path) -> None:
         [*form, str(ROOT / "governance/act_premerge.py"), "--help"],
         cwd=ROOT, env=env, capture_output=True, text=True, check=False, timeout=600,
     )  # fmt: skip
-    assert done.returncode == 0, done.stderr
+    assert done.returncode == act_premerge.EXIT_REFUSED, done.stderr
     assert "usage: act_premerge" in done.stdout
+    code = (
+        f"import sys; sys.path.insert(0, {str(ROOT)!r}); "
+        "import steward.approvalfacts.v3, jwt; "
+        "import governance.act_app_installations as m; "
+        "import governance.act_premerge_core; print(m.__name__)"
+    )
     probe = subprocess.run(
-        [*form, "-c", "import steward.approvalfacts.v3"],
+        [*form, "-c", code],
         cwd=ROOT, env=env, capture_output=True, text=True, check=False, timeout=600,
     )  # fmt: skip
     assert probe.returncode == 0, probe.stderr
+    assert probe.stdout.strip() == "governance.act_app_installations"
 
 
 @pytest.mark.parametrize(
