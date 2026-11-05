@@ -974,10 +974,10 @@ JUDGMENT = {
             '"только публичные"',
         ),
     ),
-    "act_trust._chain": (
+    "act_trust._walk": (
         r(
             "commit_identity",
-            "act_trust._chain",
+            "act_trust._walk",
             'body.get("sha") != sha',
             f"{T}::test_commit_answer_for_other_sha_unavailable",
             "ответ не о том коммите",
@@ -1088,34 +1088,43 @@ JUDGMENT = {
         ),
     ),
     # самоотчёт переданных credentials и `profile:history` — один `_report` (Task 11c)
-    "act_trust._report": (
+    "act_trust._report_of": (
         r(
             "push_on_policy",
-            "act_trust._report",
+            "act_trust._report_of",
             "isinstance(verdict, Violation)",
             f"{T}::test_token_with_push_records_and_blocks",
             'startswith("env:GH_TOKEN на ")',
         ),
         r(
             "push_on_df_trust",
-            "act_trust._report",
+            "act_trust._report_of",
             "isinstance(verdict, Violation)",
             f"{T}::test_merge_profile_with_push_on_df_trust",
             'startswith("profile:merge на ")',
         ),
         r(
             "unreadable",
-            "act_trust._report",
-            "isinstance(verdict, Unavailable) and gap is None",
+            "act_trust._report_of",
+            "if isinstance(verdict, Unavailable):",
             f"{T}::test_self_report_404_is_unavailable_without_record",
             'startswith("самоотчёт profile:agent")',
         ),
         r(
             "history_push",
-            "act_trust._report",
+            "act_trust._report_of",
             "isinstance(verdict, Violation)",
             f"{T}::test_history_violation_wins_over_passed_credential_gap",
             'startswith(f"profile:history на {DT}: ")',
+        ),
+    ),
+    "act_trust._report": (
+        r(
+            "first_gap",
+            "act_trust._report",
+            "isinstance(found, Unavailable) and gap is None",
+            f"{T}::test_self_report_404_is_unavailable_without_record",
+            'startswith("самоотчёт profile:agent")',
         ),
     ),
     "act_trust._self_reports": (
@@ -1225,8 +1234,17 @@ JUDGMENT = {
     ),
     "act_trust._rulesets": (
         r(
-            "pull_request_rule",
+            "first_wins",
             "act_trust._rulesets",
+            "if found is not None",
+            f"{T}::test_ruleset_without_pull_request_is_violation",
+            '"нет правил"',
+        ),
+    ),
+    "act_trust._ruleset_of": (
+        r(
+            "pull_request_rule",
+            "act_trust._ruleset_of",
             "missing := sorted(REQUIRED_RULES - kinds)",
             f"{T}::test_ruleset_without_pull_request_is_violation",
             '"нет правил"',
@@ -4135,6 +4153,8 @@ NOT_JUDGMENT = {
     "act_trust._repo_path": _BUILD,
     "act_trust.credentials": "перечень того, что процесс держит; судит `_self_report`",
     "act_trust._roles": _BUILD,
+    "act_trust._chain": "делегирует `_walk` (место суждения)",
+    "act_trust._history_report_of": "делегирует `_report_of` транспортом решения (место суждения)",
     "act_trust._refusal": "переводит находку истории в отказ читателя ветки; судят `_chain`, `_journal_versions`, `_checked_epochs`, `_source_at`",
     "act_trust.load_anchor_times": "собирает времена якорей; недоступность — значение, судит `_epoch_at`",
     "act_journal._now": _BUILD,

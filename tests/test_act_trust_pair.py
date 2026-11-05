@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections import Counter
 
 import pytest
 
@@ -219,7 +220,7 @@ def test_journal_parse_and_transition_findings() -> None:
     broken = {C0: (None, J1), C1: (C0, "schema: nope\n")}
     got, _anon = pair(world(broken), None, C1)
     assert isinstance(got, act_trust_pair.PairResult)
-    assert [f.kind for f in got.findings] == ["journal_parse"]
+    assert len(got.findings) == 1
     assert got.findings[0].kind == "journal_parse"
     deleted = {C0: (None, J1), C1: (C0, None)}
     got, _anon = pair(world(deleted), base(C0), C1)
@@ -252,20 +253,93 @@ def test_pair_refuses_non_sha() -> None:
     assert anon.sent == []
 
 
+def _reads(anon: Anon, kind: str) -> Counter[str]:
+    return Counter(
+        p.rsplit("/", 1)[1] if kind == "commits" else p.rsplit("=", 1)[1]
+        for p in anon.sent
+        if p.startswith(f"repos/{DT}/{kind}")
+    )
+
+
+def test_cold_descendant_and_warm_read_each_object_once() -> None:
+    """M-1: the cold descendant walk goes on below A; the warm path reuses the
+    journal on A. Commit reads = one walk read + one per contents read there."""
+    _got, cold = pair(world(LINEAR), base(C1), C2, v="admin-digest-2/rules-1")
+    assert _reads(cold, "commits") == Counter({C0: 2, C1: 2, C2: 3})
+    assert _reads(cold, "contents/epochs.yaml") == Counter({C0: 1, C1: 1, C2: 1})
+    _got, warm = pair(world(LINEAR), base(C1), C2)
+    assert _reads(warm, "commits") == Counter({C1: 2, C2: 3})
+    assert _reads(warm, "contents/epochs.yaml") == Counter({C1: 1, C2: 1})
+
+
+def test_gone_ancestor_on_cold_descendant_path() -> None:
+    """M-2: the relation is proven by the A..H walk; the journal is not verified."""
+    routes = world(LINEAR)
+    routes[f"repos/{DT}/commits/{C0}"] = (404, {"message": "Not Found"})
+    got, _anon = pair(routes, base(C1), C2, v="admin-digest-2/rules-1")
+    assert isinstance(got, act_trust_pair.PairResult)
+    assert got.relation == "descendant"
+    assert got.snapshot is None
+    assert got.source == act_trust_findings.source_descriptor(
+        parse_source(SOURCE_ENV), SOURCE_ENV.encode()
+    )
+    assert [(f.kind, f.role) for f in got.findings] == [
+        ("history_unverifiable", "df-trust")
+    ]
+
+
+@pytest.mark.parametrize(
+    "repo_id,role", [("11", "df-trust"), ("22", "approval-policy")], ids=["dt", "ap"]
+)
+def test_pair_private_repo_is_not_public_finding(repo_id: str, role: str) -> None:
+    routes = world(LINEAR)
+    name = DT if role == "df-trust" else AP
+    routes[f"repositories/{repo_id}"] = (200, {"full_name": name, "private": True})
+    got, _anon = pair(routes, base(C1), C2)
+    assert isinstance(got, act_trust_pair.PairResult)
+    assert [(f.kind, f.role) for f in got.findings] == [("not_public", role)]
+    assert got.findings[0].detail == f"{name}: репо не публичный (private = true)"
+    # the read went on: the history is verified as usual
+    assert got.relation == "descendant" and got.snapshot is not None
+
+
+def test_pair_repository_404_stays_unavailable() -> None:
+    routes = world(LINEAR)
+    routes["repositories/22"] = (404, {"message": "Not Found"})
+    got, _anon = pair(routes, base(C1), C2)
+    assert isinstance(got, Unavailable)
+    assert got.reason.startswith("repositories/22: HTTP 404")
+
+
+def test_load_trust_still_refuses_private_repo() -> None:
+    """I-4: `not_public` is pair-side only; `_named` keeps refusing."""
+    routes = world(LINEAR)
+    routes["repositories/22"] = (200, {"full_name": AP, "private": True})
+    got = act_trust._named(Anon(routes), 22, AP)
+    assert isinstance(got, Unavailable)
+    assert "только публичные" in got.reason
+
+
 # --- settings --------------------------------------------------------------------
 
 
 def settings_routes(
-    *, rebase: dict[str, object] | None = None, push: bool = False
+    *,
+    rebase: dict[str, object] | None = None,
+    push: tuple[str, ...] = (),
+    rules: dict[str, list[str]] | None = None,
 ) -> dict:
     routes = world(LINEAR)
     rebase = rebase or {}
     for repo in (DT, AP):
+        kinds = (rules or {}).get(
+            repo, ["deletion", "non_fast_forward", "pull_request"]
+        )
         routes[f"repos/{repo}/rules/branches/main"] = (
             200,
-            [{"type": k} for k in ("deletion", "non_fast_forward", "pull_request")],
+            [{"type": k} for k in kinds],
         )
-        body: dict = {"full_name": repo, **_perms(push and repo == AP)}
+        body: dict = {"full_name": repo, **_perms(repo in push)}
         if repo in rebase:
             body["allow_rebase_merge"] = rebase[repo]
         routes[f"repos/{repo}"] = (200, body)
@@ -279,82 +353,126 @@ def snapshot(routes: dict) -> tuple[act_trust.TrustSnapshot, Anon]:
     return got.snapshot, anon
 
 
-def test_settings_clean_hidden_rebase_no_finding() -> None:
-    snap, anon = snapshot(settings_routes())
-    assert act_trust_pair.settings_findings(anon, snap, policy_branch="main") == ()
+def settings(routes: dict, *, branch: str = "main", keyed: bool = True):
+    snap, anon = snapshot(routes)
+    return act_trust_pair.settings_findings(
+        anon, snap, policy_branch=branch, keyed=keyed
+    )
+
+
+def test_settings_hidden_rebase_is_unverified_per_role() -> None:
+    got = settings(settings_routes(rebase={AP: False}))
+    assert got == act_trust_pair.Settings((), ("allow_rebase_merge@df-trust",))
+    got = settings(settings_routes(rebase={DT: False}))
+    assert got == act_trust_pair.Settings((), ("allow_rebase_merge@approval-policy",))
+    got = settings(settings_routes(rebase={DT: False, AP: False}))
+    assert got == act_trust_pair.Settings((), ())
+
+
+def test_unverified_codes_closed_set() -> None:
+    assert act_trust_pair.UNVERIFIED == {
+        "allow_rebase_merge@df-trust",
+        "allow_rebase_merge@approval-policy",
+        "history_token_required",
+    }
 
 
 def test_df_trust_rebase_allowed_finding() -> None:
-    snap, anon = snapshot(settings_routes(rebase={DT: True, AP: False}))
-    got = act_trust_pair.settings_findings(anon, snap, policy_branch="main")
-    assert got == (
+    got = settings(settings_routes(rebase={DT: True, AP: False}))
+    assert isinstance(got, act_trust_pair.Settings)
+    assert got.findings == (
         Finding("rebase_allowed", "df-trust", f"{DT}: allow_rebase_merge = true"),
     )
 
 
 def test_settings_checks_called_explicitly(monkeypatch: pytest.MonkeyPatch) -> None:
-    snap, anon = snapshot(settings_routes())
-    calls: list[tuple[str, ...]] = []
-    monkeypatch.setattr(
-        act_trust,
-        "_history_self_report",
-        lambda t, s: calls.append(("self_report",)),
-    )
-    monkeypatch.setattr(
-        act_trust, "_rulesets", lambda t, s: calls.append(("rulesets",))
-    )
-    monkeypatch.setattr(
-        act_trust,
-        "_rebase",
-        lambda t, s, role="approval-policy": calls.append(("rebase", role)),
-    )
-    assert act_trust_pair.settings_findings(anon, snap, policy_branch="main") == ()
+    snap, anon = snapshot(settings_routes(rebase={DT: False, AP: False}))
+    calls: list[tuple[str, str]] = []
+
+    def record(name: str):
+        return lambda t, s, role="approval-policy": calls.append((name, role))
+
+    monkeypatch.setattr(act_trust, "_history_report_of", record("self_report"))
+    monkeypatch.setattr(act_trust, "_ruleset_of", record("rulesets"))
+    monkeypatch.setattr(act_trust, "_rebase", record("rebase"))
+    got = act_trust_pair.settings_findings(anon, snap, policy_branch="main", keyed=True)
+    assert got == act_trust_pair.Settings((), ())
     assert calls == [
-        ("self_report",),
-        ("rulesets",),
-        ("rebase", "approval-policy"),
-        ("rebase", "df-trust"),
+        (name, role)
+        for name in ("self_report", "rulesets", "rebase")
+        for role in ("approval-policy", "df-trust")
     ]
 
 
 def test_runtime_source_branch_not_default_finding() -> None:
-    snap, anon = snapshot(settings_routes())
-    got = act_trust_pair.settings_findings(anon, snap, policy_branch="trunk")
-    assert [(f.kind, f.role) for f in got] == [
+    got = settings(settings_routes(rebase={DT: False, AP: False}), branch="trunk")
+    assert isinstance(got, act_trust_pair.Settings)
+    assert [(f.kind, f.role) for f in got.findings] == [
         ("policy_branch_mismatch", "approval-policy")
     ]
-    assert isinstance(got, tuple)
-    assert "default branch 'trunk'" in got[0].detail
+    assert "default branch 'trunk'" in got.findings[0].detail
 
 
-def test_settings_token_write_and_ruleset_findings() -> None:
-    routes = settings_routes(push=True)
-    routes[f"repos/{DT}/rules/branches/main"] = (200, [{"type": "deletion"}])
-    snap, anon = snapshot(routes)
-    got = act_trust_pair.settings_findings(anon, snap, policy_branch="main")
-    assert isinstance(got, tuple)
-    assert [(f.kind, f.role) for f in got] == [
+def test_settings_both_roles_reported() -> None:
+    """I-3: one `token_write` and one `ruleset_missing` per role."""
+    routes = settings_routes(
+        rebase={DT: False, AP: False},
+        push=(DT, AP),
+        rules={DT: ["deletion"], AP: ["deletion"]},
+    )
+    got = settings(routes)
+    assert isinstance(got, act_trust_pair.Settings)
+    assert [(f.kind, f.role) for f in got.findings] == [
         ("token_write", "approval-policy"),
+        ("token_write", "df-trust"),
+        ("ruleset_missing", "approval-policy"),
         ("ruleset_missing", "df-trust"),
     ]
 
 
-def test_settings_unreadable_is_unavailable_unless_finding() -> None:
-    routes = settings_routes()
+def test_settings_unreadable_first_repo_does_not_mask_second() -> None:
+    routes = settings_routes(rebase={DT: False, AP: False}, rules={DT: ["deletion"]})
     del routes[f"repos/{AP}/rules/branches/main"]
-    snap, anon = snapshot(routes)
-    got = act_trust_pair.settings_findings(anon, snap, policy_branch="main")
+    got = settings(routes)
+    assert isinstance(got, act_trust_pair.Settings)
+    assert [(f.kind, f.role) for f in got.findings] == [("ruleset_missing", "df-trust")]
+
+
+def test_settings_unreadable_is_unavailable_unless_finding() -> None:
+    routes = settings_routes(rebase={DT: False, AP: False})
+    del routes[f"repos/{AP}/rules/branches/main"]
+    got = settings(routes)
     assert isinstance(got, Unavailable)
-    got = act_trust_pair.settings_findings(anon, snap, policy_branch="trunk")
-    assert isinstance(got, tuple)
-    assert [f.kind for f in got] == ["policy_branch_mismatch"]
+    got = settings(routes, branch="trunk")
+    assert isinstance(got, act_trust_pair.Settings)
+    assert [f.kind for f in got.findings] == ["policy_branch_mismatch"]
 
 
-def test_settings_without_history_permissions_unavailable() -> None:
+def test_settings_keyed_unreadable_self_report_is_unavailable() -> None:
+    """O14: with a history key an unreadable self-report never falls back."""
     routes = settings_routes()
     for repo in (DT, AP):
-        routes[f"repos/{repo}"] = (200, {"full_name": repo})
-    snap, anon = snapshot(routes)
-    got = act_trust_pair.settings_findings(anon, snap, policy_branch="main")
+        routes[f"repos/{repo}"] = (
+            200,
+            {"full_name": repo, "allow_rebase_merge": False},
+        )
+    got = settings(routes)
     assert isinstance(got, Unavailable)
     assert got.reason.startswith("самоотчёт profile:history")
+
+
+def test_settings_unkeyed_anonymous_with_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """O14: without a history key the check runs anonymously, with the warning."""
+    routes = settings_routes()
+    for repo in (DT, AP):
+        routes[f"repos/{repo}"] = (
+            200,
+            {"full_name": repo, "allow_rebase_merge": False},
+        )
+    monkeypatch.setattr(
+        act_trust, "_history_report_of", lambda *a: pytest.fail("self-report called")
+    )
+    got = settings(routes, keyed=False)
+    assert got == act_trust_pair.Settings((), ("history_token_required",))
