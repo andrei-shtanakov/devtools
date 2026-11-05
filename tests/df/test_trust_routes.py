@@ -11,7 +11,8 @@ import json
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
-from typing import cast
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -40,6 +41,7 @@ from tests.df.trust_world import (
     accept,
     install,
     ranges_of,
+    source_descriptor,
     verdict,
     wire,
     write_trust,
@@ -139,14 +141,23 @@ def test_fast_path_source_digest_changed_goes_observation(
     world: World, tw: TrustWorld, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The raw digest of `source.env` on H differs from the recorded one: the
-    fast path is not taken -- an observation (A, A) and `op: trust`."""
+    fast path is not taken -- an observation (A, A) and `op: trust`. A
+    verdict repeating the recorded digest completes it (H = A: no write);
+    one with another digest for the same SHA is unbound (D-d)."""
     accept(world.lay, S1, 2, source_digest="0" * 64)
+    tw.checker.answer = lambda req: wire(verdict(req, source=source_descriptor()))
     resp = status(world, capsys)
     assert len(tw.checker.requests) == 1
     req = tw.checker.requests[0]
     assert (req["origin_route"], req["trust_head"]) == ("perimeter-status", S1)
+    assert observations(world)[-1] == ("perimeter-status", S1, S1, "unresolved")
+    assert resp.result["state"] == "unavailable"
+    recorded = source_descriptor("0" * 64)
+    tw.checker.answer = lambda req: wire(verdict(req, source=recorded))
+    resp = status(world, capsys)
     assert observations(world)[-1] == ("perimeter-status", S1, S1, "accepted")
-    assert resp.result["state"] == "clear" and resp.result["last_epoch"] == 1
+    assert resp.result["state"] == "clear" and resp.result["last_epoch"] == 2
+    assert head(world) == (S1, 2, 1)
 
 
 def test_fast_path_only_without_open_observations(
@@ -167,7 +178,7 @@ def test_fast_path_only_without_open_observations(
     resp = status(world, capsys)
     assert [r["trust_head"] for r in tw.checker.requests] == [S2]
     assert resp.result == perimeter_result(
-        "unavailable", trust_routes.UNFINISHED, None, None
+        "unavailable", f"{trust_routes.UNFINISHED}: 2", None, None
     ) | {"events": []}
     assert observations(world)[1:] == [
         ("trust-status", S1, S2, "unresolved"),
@@ -370,7 +381,7 @@ def test_trust_status_always_calls_checker(
     assert resp.result == {
         "root": {"host": "github.com", "repository_id": TRUST_ID, "branch": "main"},
         "snapshot_sha": S1,
-        "last_epoch": 1,
+        "last_epoch": 2,  # A's own: a re-check of A never rewrites it (D-d)
         "state": "clear",
         "reason": None,
         "unverified": ["history_token_required"],
@@ -395,7 +406,7 @@ def test_trust_status_h_eq_a_removed_ruleset_finding(
     ]
     assert events(world) == [("registered", 2, "trust:trust-status", "df-trust")]
     assert observations(world)[-1] == ("trust-status", S1, S1, "finding_registered")
-    assert head(world) == (S1, 2, 2)  # accepted with the finding's event
+    assert head(world) == (S1, 2, 1)  # A re-checked: the row is not written
     again = tstatus(world, capsys)  # the same pair: the same event
     assert again.result["state"] == "blocked" and len(events(world)) == 1
 
@@ -422,7 +433,7 @@ def test_root_validates_response_schema_and_root(
     resp = tstatus(world, capsys)
     line = request.emit(resp)
     got = request.parse_trust_status(line, ROOT)
-    assert (got.state, got.snapshot_sha, got.last_epoch) == ("clear", S1, 1)
+    assert (got.state, got.snapshot_sha, got.last_epoch) == ("clear", S1, 2)
     assert got.unverified == ("history_token_required",)
     with pytest.raises(BadResponse, match="root"):
         request.parse_trust_status(line, ("github.com", TRUST_ID, "next"))
@@ -434,6 +445,21 @@ def test_root_validates_response_schema_and_root(
         {**data, "result": {**data["result"], "snapshot_sha": None}},
         {**data, "result": {**data["result"], "findings": [{"kind": 1}]}},
         {**data, "outcome": "refused", "reason": "x"},
+        # M3: strict types in the root
+        {
+            **data,
+            "result": {
+                **data["result"],
+                "root": {**data["result"]["root"], "repository_id": 5.0},
+            },
+        },
+        {
+            **data,
+            "result": {
+                **data["result"],
+                "root": {**data["result"]["root"], "repository_id": True},
+            },
+        },
     ):
         with pytest.raises(BadResponse):
             request.parse_trust_status(json.dumps(broken), ROOT)
@@ -478,7 +504,7 @@ def test_verdict_outcome_mapping(
     if want == "unresolved":
         assert (resp.result["state"], resp.result["reason"]) == (
             "unavailable",
-            trust_routes.UNFINISHED,
+            f"{trust_routes.UNFINISHED}: 1",
         )
     else:
         assert resp.result["state"] == "blocked"
@@ -800,24 +826,80 @@ def test_check_ranges_rules() -> None:
 # --- admission of a restored database -------------------------------------------
 
 
+def _restored(world: World) -> None:
+    """Mark the world's database a restored copy (`restored_pending`)."""
+    conn = sqlite3.connect(world.lay.perimeter_dir / perimeter.DB_NAME)
+    conn.execute("UPDATE meta SET value = 'restored_pending' WHERE key = 'admission'")
+    conn.execute("UPDATE meta SET value = 'true' WHERE key = 'restored'")
+    conn.commit()
+    conn.close()
+
+
 def test_restored_copy_admitted_by_the_verified_head(
     world: World, tw: TrustWorld, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A `restored_pending` copy: the bound root's epoch is that of its
-    accepted head when the branch head equals it -- a conservative event
-    there, then admission (spec 6.1 «Восстановление базы»)."""
+    """A copy whose A is the branch head: the conservative event of the
+    restore is `registered` at A's epoch, and the copy is admitted."""
     accept(world.lay, S1, 4)
-    conn = sqlite3.connect(world.lay.perimeter_dir / perimeter.DB_NAME)
-    conn.execute("UPDATE meta SET value = 'restored_pending' WHERE key = 'admission'")
-    conn.commit()
-    conn.close()
-    tw.sources.heads["main"] = S2
-    resp = status(world, capsys, S2)
-    assert resp.result["reason"] == "restore_pending"  # A is not the head
-    tw.sources.heads["main"] = S1
+    _restored(world)
     resp = status(world, capsys)
     assert resp.result["state"] == "blocked"
     assert events(world) == [("registered", 4, "db_restore", None)]
+
+
+def test_restore_empty_admitted_pending_then_registered(
+    world: World, tw: TrustWorld, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D-b: an empty restore (no accepted head) is admitted at once with a
+    `pending` conservative event; the root is never `clear` before that
+    event is registered at the first verified epoch, then blocked by it."""
+    _restored(world)
+    seen: list[str] = []
+
+    def answer(req: dict[str, object]) -> bytes:
+        seen.append(str(db_rows(world, "SELECT state FROM events")))
+        return wire(verdict(req, last_epoch=3))
+
+    tw.checker.answer = answer
+    resp = status(world, capsys)
+    assert seen == ["[('pending',)]"]  # admitted before the checker ran
+    assert resp.result["state"] == "blocked"
+    assert events(world)[0] == ("registered", 3, "db_restore", None)
+    assert resp.result["last_epoch"] == 3
+
+
+def test_restore_moved_head_admitted_pending(
+    world: World, tw: TrustWorld, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D-b: the copy's A is no longer the branch head: `pending`, admitted;
+    the observation (A, H) proceeds and the event blocks at H's epoch."""
+    accept(world.lay, S1, 4)
+    _restored(world)
+    tw.sources.heads["main"] = S2
+    tw.checker.answer = lambda req: wire(verdict(req, last_epoch=5))
+    resp = status(world, capsys, S2)
+    assert events(world)[0][:3] == ("registered", 5, "db_restore")
+    assert resp.result["state"] == "blocked"
+
+
+def test_restore_copy_with_old_root_admitted(
+    world: World, tw: TrustWorld, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D-b: a copy that knows an old root (after `--rebind`): its event is
+    `pending` for good (the old root gets no runs), the bound root's is
+    registered, and the copy is admitted."""
+    old = replace(BINDING, df_trust_repository_id=9)
+    accept(world.lay, S1, 4, binding=old)
+    accept(world.lay, S1, 4)
+    _restored(world)
+    resp = status(world, capsys)
+    assert resp.result["state"] == "blocked"
+    rows = db_rows(
+        world,
+        "SELECT root_repository_id, state, epoch FROM events "
+        "WHERE detected_by = 'db_restore' ORDER BY root_repository_id",
+    )
+    assert rows == [(TRUST_ID, "registered", 4), (9, "pending", None)]
 
 
 # --- the frame wiring ------------------------------------------------------------
@@ -889,6 +971,8 @@ def test_binding_parameters_of_another_root(
     [
         # a wrong rules prefix, the publisher's admin digest
         ({"validation": f"df-trust-rules/2:{ADMIN}"}, "validation"),
+        # the right prefix, another digest in the suffix (review M7)
+        ({"validation": f"{RULES_VERSION}:sha256:" + "b" * 64}, "validation"),
         # another admin digest, its validation consistent with it
         (
             {
@@ -926,3 +1010,216 @@ def test_validation_pair_mismatch_unbound(
     assert reasons == [f"precheck_failed: binding_mismatch: {rule}"]
     assert observations(world)[-1] == ("perimeter-status", S1, S2, "unresolved")
     assert head(world) == (S1, 2, 1)
+
+
+# --- review round 1 --------------------------------------------------------------
+
+
+def _open_pair(world: World, route: str, accepted: str | None, head_sha: str) -> int:
+    """An unfinished observation of `route` (a lost answer), opened directly."""
+    with perimeter.open_db(world.lay) as db:
+        ctx = trust_state.ctx_id(
+            route,
+            BINDING,
+            ADMIN,
+            RULES_VERSION,
+            accepted,
+            head_sha,
+            None,  # type: ignore[arg-type]
+        )
+        obs = trust_state.open_observation(
+            db, ROOT, ctx, route=route, binding=BINDING, admin_digest=ADMIN,  # type: ignore[arg-type]
+            rules=RULES_VERSION, accepted=accepted, head=head_sha, policy=None,
+        )  # fmt: skip
+    return obs.id
+
+
+def _outcome(world: World, obs: int) -> str:
+    sql = f"SELECT outcome FROM trust_observations WHERE observation_id = {obs}"
+    return str(db_rows(world, sql)[0][0])
+
+
+@pytest.mark.parametrize("finding", [None, RULESET])
+def test_common_a_second_superseded_never_conservative(
+    world: World,
+    tw: TrustWorld,
+    capsys: pytest.CaptureFixture[str],
+    finding: Finding | None,
+) -> None:
+    """C1 / D-a: two unfinished observations with a common A. The first is
+    accepted (A moves); the second is still asked on its pinned A record,
+    its findings registered, and its CAS ends `superseded` (or
+    `finding_registered`) -- never K, no `conservative_completion`."""
+    accept(world.lay, S1, 2)
+    tw.sources.heads["main"] = S2
+    first = _open_pair(world, "perimeter-status", S1, S2)
+    second = _open_pair(world, "trust-status", S1, S2)
+
+    def answer(req: dict[str, object]) -> bytes:
+        sent = cast(dict[str, object], req["trust_accepted"])
+        assert (sent["sha"], sent["last_epoch"]) == (S1, 2)  # the pinned record
+        if req["observation_id"] == second and finding is not None:
+            return wire(
+                verdict(req, outcome="refuse", last_epoch=3, findings=[finding])
+            )
+        return wire(verdict(req, last_epoch=3))
+
+    tw.checker.answer = answer
+    tstatus(world, capsys)
+    assert _outcome(world, first) == "accepted"
+    want = "superseded" if finding is None else "finding_registered"
+    assert _outcome(world, second) == want
+    detected = [e[2] for e in events(world)]
+    assert "conservative_completion" not in detected
+    assert head(world) == (S2, 3, 2)
+
+
+def test_reaccept_same_sha_epoch_bound(
+    world: World, tw: TrustWorld, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D-d: re-checking A (H = A), the publisher knows A's epoch and digest;
+    a verdict with another epoch is unbound, A's row is never rewritten."""
+    accept(world.lay, S1, 2)
+    tw.checker.answer = lambda req: wire(verdict(req, last_epoch=5))
+    resp = tstatus(world, capsys)
+    assert observations(world)[-1][3] == "unresolved"
+    assert head(world) == (S1, 2, 1)
+    assert resp.result["state"] == "unavailable"
+
+
+def test_merge_reeval_at_x_eq_a_keeps_row_version(
+    world: World, tw: TrustWorld, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D-d / I4: a merge observation re-evaluated at X = A, and the call's
+    own (A, A), are accepted without a write: `row_version` unchanged, so no
+    sibling observation pinned at it is superseded."""
+    obs = _merge_obs(world, PolicyPin(POLICY_REPO, "main", P))
+    sibling = _open_pair(world, "perimeter-status", S1, S2)
+    tw.checker.answer = lambda req: (
+        wire(
+            verdict(
+                req,
+                outcome="unset",
+                reason="x",
+                relation=None,
+                last_epoch=None,
+                source=None,
+            )
+        )  # fmt: skip
+        if req["observation_id"] == sibling
+        else wire(verdict(req))
+    )
+    tstatus(world, capsys)
+    assert _merge_outcome(world, obs) == "accepted"
+    assert head(world) == (S1, 1, 1)
+    assert _outcome(world, sibling) == "unresolved"  # still pinned at version 1
+    with perimeter.open_db(world.lay) as db:
+        pending = trust_state.unfinished(db.conn, ROOT)
+    assert [o.row_version for o in pending] == [1, 1]  # the sibling and own
+
+
+def test_deleted_p_objects_conservative(
+    world: World, tw: TrustWorld, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D-c: re-evaluating a merge observation whose pinned P's objects are
+    gone -- the checker's typed `irreproducible` -- is K with the reason
+    named in the event, not an eternal `unresolved`."""
+    obs = _merge_obs(world, PolicyPin(POLICY_REPO, "main", P))
+    reason = "irreproducible: policy_objects_missing"
+    tw.checker.answer = lambda req: (
+        wire(verdict(req, outcome="irreproducible", reason=reason, ranges=None))
+        if req["origin_route"] == "merge"
+        else wire(verdict(req))
+    )
+    resp = tstatus(world, capsys)
+    assert _merge_outcome(world, obs) == "conservative"
+    found = db_rows(world, "SELECT detected_by, detail FROM events ORDER BY event_id")
+    assert found[0][0] == "conservative_completion" and reason in found[0][1]
+    assert resp.result["state"] == "blocked"
+
+
+def test_pin_mismatch_conservative(
+    world: World, tw: TrustWorld, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D-c: the policy pin and `source.env` at H disagree for good
+    (`irreproducible: policy_pin_mismatch`, no pair read): K."""
+    reason = "irreproducible: policy_pin_mismatch"
+    no_pair = {"relation": None, "last_epoch": None, "source": None}
+    tw.checker.answer = lambda req: wire(
+        verdict(req, outcome="irreproducible", reason=reason, **no_pair)
+    )
+    tstatus(world, capsys)
+    assert observations(world)[-1][3] == "conservative"
+
+
+def test_irreproducible_reason_closed(
+    world: World,
+    tw: TrustWorld,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reason outside the closed set is unbound: `unresolved`, not K."""
+    tw.checker.answer = lambda req: wire(
+        verdict(req, outcome="irreproducible", reason="irreproducible: other")
+    )
+    tstatus(world, capsys)
+    assert observations(world)[-1][3] == "unresolved"
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        {"kind": "ruleset_missing", "role": "df-trust", "detail": 5},
+        {"kind": "ruleset_missing", "role": "df-trust", "detail": ["x"]},
+        {"kind": 1, "role": "df-trust", "detail": "x"},
+    ],
+)
+def test_finding_fields_typed(
+    world: World,
+    tw: TrustWorld,
+    capsys: pytest.CaptureFixture[str],
+    row: dict[str, object],
+) -> None:
+    """M1: a finding's kind, role and detail are strings, or it is unbound."""
+    tw.checker.answer = lambda req: wire(
+        {**verdict(req, outcome="refuse", findings=[RULESET]), "findings": [row]}
+    )
+    tstatus(world, capsys)
+    assert observations(world)[-1][3] == "unresolved"
+    assert events(world) == []
+
+
+def test_pin_policy_out_of_limits_typed(
+    world: World, tw: TrustWorld, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M2: a default branch outside the limits is the typed
+    `unsupported_size: policy.branch` -- no placeholder P is ever read or
+    sent, the checker not asked, the observation completed by K."""
+    tw.sources.policy["default_branch"] = "-bad"
+    resp = tstatus(world, capsys)
+    assert tw.checker.requests == []
+    paths = [u for u, _h in tw.sources.calls]
+    assert not any("branches/-bad" in u for u in paths)
+    assert observations(world)[-1][3] == "conservative"
+    assert resp.result["state"] == "blocked"
+    ctx = SimpleNamespace(layout=world.lay, snapshot=world.snap)
+    sess = trust_routes.session(cast(Any, ctx), BINDING)
+    assert not isinstance(sess, Unavailable)
+    got = trust_routes.pin_policy(sess.transport, sess)
+    assert got == trust_routes.OutOfLimits("policy.branch")
+
+
+def test_evaluations_capped_per_call(
+    world: World, tw: TrustWorld, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M5: one call asks the checker at most `MAX_EVALUATIONS` times; the
+    rest stay unfinished (the root `unavailable` by I) for the next calls."""
+    heads = ["4" * 40, "5" * 40, "6" * 40, "7" * 40]
+    opened = [_open_pair(world, "trust-status", None, h) for h in heads]
+    tw.checker.answer = lambda req: wire(verdict(req, outcome="refuse",
+                                                 findings=[RULESET]))  # fmt: skip
+    resp = tstatus(world, capsys)
+    assert len(tw.checker.requests) == trust_routes.MAX_EVALUATIONS
+    left = [o for o in opened if _outcome(world, o) == "open"]
+    assert left == opened[trust_routes.MAX_EVALUATIONS :]
+    assert resp.result["state"] == "blocked"  # the registered findings

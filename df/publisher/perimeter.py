@@ -25,11 +25,11 @@ Schema 2 (stage 3a) adds the publisher's trust state -- `trust_heads`,
 schema-1 database of stage 2b is moved on only by `perimeter-init`
 (`migrate`, owner decision 7); an ordinary open names the migration.
 
-A restored copy (`admission = restored_pending`) is not complete: once the
-epoch source answers for every known root, one transaction records a
-conservative `registered(E)` per root (source `db_restore`) and admits the
-copy; until then it is `unavailable: restore_pending`. The epoch source of
-the perimeter routes is the accepted head of the trust state
+A restored copy (`admission = restored_pending`) is not complete: at its
+first use one transaction records a conservative event per known root
+(source `db_restore`) -- `registered(E)` at the root's verified epoch, or
+`pending` when there is none (review D-b) -- and admits the copy. The epoch
+source of the perimeter routes is the accepted head of the trust state
 (`trust_routes.AcceptedEpochs`); `record-violation` reads none (`DEFERRED`).
 `restore` (root's `darkfactory perimeter restore`, run as `df-publisher`;
 Task 11r) puts a copy, or an empty database, in place: always
@@ -245,6 +245,10 @@ SCHEMA_V2_ADDED: tuple[str, ...] = (
         "admin_digest TEXT NOT NULL, "
         "rules TEXT NOT NULL, "
         "accepted_sha TEXT, "
+        "accepted_last_epoch INTEGER, "
+        "accepted_source_digest TEXT, "
+        "accepted_rules TEXT, "
+        "accepted_admin_digest TEXT, "
         "row_version INTEGER NOT NULL, "
         "head_sha TEXT NOT NULL, "
         "policy_full_name TEXT, "
@@ -308,6 +312,19 @@ _INVARIANTS = (
     (
         "SELECT count(*) FROM trust_heads WHERE finding_event_id IS NOT NULL "
         "AND finding_event_id NOT IN (SELECT event_id FROM events)"
+    ),
+    # A's record pinned by an observation: all of it with A, none without
+    (
+        "SELECT count(*) FROM trust_observations WHERE accepted_sha IS NULL "
+        "AND (accepted_last_epoch IS NOT NULL OR accepted_source_digest IS "
+        "NOT NULL OR accepted_rules IS NOT NULL OR accepted_admin_digest IS "
+        "NOT NULL)"
+    ),
+    (
+        "SELECT count(*) FROM trust_observations WHERE accepted_sha IS NOT "
+        "NULL AND (typeof(accepted_last_epoch) != 'integer' OR "
+        "typeof(accepted_source_digest) != 'text' OR typeof(accepted_rules) "
+        "!= 'text' OR typeof(accepted_admin_digest) != 'text')"
     ),
 )
 #: The longest observation JSON column `_json` parses (bytes). A legitimate
@@ -1237,8 +1254,7 @@ def restore_text(reason: str) -> str:
 
 def admit(db: Db, epochs: EpochSource, current: Root) -> None:
     """A `restored_pending` database is admitted by `restore_conservative`
-    over every known root (`known_roots`); until the epochs of all are known
-    it is `Unavailable("restore_pending")`."""
+    over every known root (`known_roots`)."""
     with _mapped():
         if admission(db.conn) == "ready":
             return
@@ -1249,11 +1265,13 @@ def admit(db: Db, epochs: EpochSource, current: Root) -> None:
 def restore_conservative(
     conn: sqlite3.Connection, roots: Sequence[Root], epochs: EpochSource
 ) -> None:
-    """One transaction: a `registered(E)` event per root, `E` its last epoch
-    now (source `db_restore`), the root's unfinished observations of the
-    copy completed by K at `E`, then `admission = ready` (`restored` stays).
-    An unknown epoch of any root changes nothing:
-    `Unavailable("restore_pending")`."""
+    """One transaction: a conservative event per root (source `db_restore`)
+    -- `registered(E)`, `E` its verified last epoch now, or `pending` when
+    the root has no verified current head (review D-b: an empty restore, a
+    copy whose head moved, an old root; `pending` always blocks and the
+    route registers it at the first verified epoch) -- the root's
+    unfinished observations of the copy completed by K at the same epoch,
+    then `admission = ready` (`restored` stays). Every copy is admitted."""
     from df.publisher import trust_state  # it builds on this module
 
     with _mapped(), _write(conn):
@@ -1261,18 +1279,17 @@ def restore_conservative(
             return  # another process admitted it meanwhile
         for root in roots:
             head = epochs.head(root)
-            if isinstance(head, Unavailable):
-                raise Unavailable("restore_pending")
+            epoch = _epoch_of(head)
             insert_event(
                 conn,
                 root,
                 key=f"{DB_RESTORE}:{uuid.uuid4().hex}",
-                epoch=head.last_epoch,
+                epoch=epoch,
                 provenance=_provenance(head),
                 detected_by=DB_RESTORE,
                 detail="conservative event of a restored database",
             )
-            trust_state.conclude_unfinished(conn, root, head.last_epoch)
+            trust_state.conclude_unfinished(conn, root, epoch)
         conn.execute("UPDATE meta SET value = 'ready' WHERE key = 'admission'")
 
 
@@ -1392,7 +1409,13 @@ def record_app_installations(
     trust source (`(installation id, role, repository id)`, spec 6.1),
     `pending` (no remote head is read; `perimeter-status` registers it);
     `request_key` = (root, `app_installation`, installation, role), so a
-    repeat finds its event. One transaction; `Unavailable` if it fails."""
+    repeat finds its event. One transaction; `Unavailable` if it fails.
+
+    The key carries no epoch and no context (review M6): once the event is
+    `registered(E)` and the root moves past `E`, an installation still in
+    place makes no new event. What keeps it from mattering is the refusal:
+    `ops.self_check_first` refuses every PR operation while the installation
+    exists -- never rely on this event alone."""
     root = binding.root_id
     with open_db(layout) as db, _mapped(), _write(db.conn):
         for inst, role, repo in found:

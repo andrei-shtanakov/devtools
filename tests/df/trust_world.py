@@ -78,7 +78,7 @@ def verdict(
     *,
     outcome: str = "allow",
     relation: str | None = "descendant",
-    last_epoch: int | None = 1,
+    last_epoch: int | None | str = "default",
     source: Mapping[str, object] | None | str = "default",
     findings: Sequence[Finding] = (),
     ranges: object = "default",
@@ -92,6 +92,10 @@ def verdict(
     policy = req["policy"]
     assert isinstance(binding, dict) and isinstance(policy, dict)
     accepted = req["trust_accepted"]
+    if last_epoch == "default":  # A re-checked repeats A's epoch, else 1
+        same = accepted is not None and accepted["sha"] == req["trust_head"]  # type: ignore[index]
+        last_epoch = accepted["last_epoch"] if same else 1  # type: ignore[index]
+    assert last_epoch is None or isinstance(last_epoch, int)
     if unverified is None:
         keyed = binding["history_gh_config_dir"] is not None
         unverified = [] if keyed else ["history_token_required"]

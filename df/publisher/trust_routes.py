@@ -90,6 +90,13 @@ UNVERIFIED = frozenset(
 SOURCE_FINDINGS = frozenset({"source_env_invalid", "history_unverifiable"})
 RELATIONS = ("descendant", "not_descendant", "first")
 ALLOW, REFUSE, UNSET, UNSUPPORTED = "allow", "refuse", "unset", "unsupported_size"
+#: `act_precheck_v2.IRREPRODUCIBLE`: a permanent condition of a pinned input
+#: (review D-c), terminal by K; its reasons are the closed set below.
+IRREPRODUCIBLE = "irreproducible"
+IRREPRODUCIBLE_REASONS = frozenset(
+    {"irreproducible: policy_pin_mismatch", "irreproducible: policy_objects_missing"}
+)
+STATUSES = (ALLOW, REFUSE, UNSET, UNSUPPORTED, IRREPRODUCIBLE)
 #: `act_precheck._BRANCH`: a branch name git fetches as `refs/heads/<name>`.
 BRANCH = re.compile(
     r"(?![-./])(?!.*(?:\.\.|//|/\.|\.lock/|\.lock$))[A-Za-z0-9_./-]*[A-Za-z0-9_-]"
@@ -105,6 +112,11 @@ HOST = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?")
 PUBLISHER_USER = "df-publisher"
 NO_APPROVED_GH = "history_token_unavailable: no approved gh for the history profile"
 UNFINISHED = "trust_observation_unfinished"
+#: Checker runs one route call makes at most (review M5): each may take up
+#: to `precheck.PRECHECK_WAIT`, and `perimeter-status` precedes every
+#: decision of a consumer. The rest stay unfinished: `unavailable` by I,
+#: evaluated by the next calls in the order of creation.
+MAX_EVALUATIONS = 3
 NOT_ACCEPTED = "trust_head_not_accepted"
 #: The wire under the history transport; tests put a fake here.
 HISTORY_SEND: Transport | None = None
@@ -378,7 +390,8 @@ class RootState:
     head: str
     accepted: trust_state.Head | None
     events: list[int]
-    unfinished: bool
+    #: The first unfinished observation of the root, if any.
+    unfinished: int | None
 
     def fields(self) -> tuple[str, str | None, str | None, int | None]:
         """`(state, reason, snapshot_sha, last_epoch)` of the answer."""
@@ -386,8 +399,8 @@ class RootState:
         epoch = None if self.accepted is None else self.accepted.last_epoch
         if self.events:
             return "blocked", None, sha, epoch
-        if self.unfinished:
-            return "unavailable", UNFINISHED, None, None
+        if self.unfinished is not None:
+            return "unavailable", f"{UNFINISHED}: {self.unfinished}", None, None
         if self.accepted is None:
             return "unavailable", NOT_ACCEPTED, None, None
         return "clear", None, sha, epoch
@@ -413,15 +426,16 @@ def root_state(sess: Session, db: Db) -> RootState:
             perimeter.register_pending(conn, root, Snapshot(head, acc.last_epoch))
         last = None if acc is None else acc.last_epoch
         events = perimeter.blocking_events(conn, root, last)
-        open_ = bool(trust_state.unfinished(conn, root))
+        pending = trust_state.unfinished(conn, root)
+        open_ = pending[0].id if pending else None
     return RootState(head, acc if current else None, events, open_)
 
 
 class AcceptedEpochs:
     """The epoch source of `perimeter.admit` (a restored database): the bound
     root's last epoch is its accepted head's when the branch head, read
-    now, equals it and its check is current; any other root's is unknown
-    (the copy stays `restore_pending`)."""
+    now, equals it and its check is current; any other root's is unknown,
+    and its conservative event is `pending` (review D-b)."""
 
     def __init__(self, sess: Session, db: Db) -> None:
         self.sess = sess
@@ -462,7 +476,8 @@ def observe(sess: Session, db: Db, route: Route, head: str) -> Evaluation | None
     """Open the route's observation (A, H) durably, register the publisher's
     own finding in it, then evaluate the root's unfinished observations in
     the order of creation -- this one included -- until one stays
-    `unresolved`. The evaluation of this call's observation, if reached."""
+    `unresolved`, at most `MAX_EVALUATIONS`. The evaluation of this call's
+    observation, if reached."""
     own = _open(sess, db, route, head)
     epochs_of = sess.epochs_of()
     if sess.own is not None:
@@ -471,7 +486,7 @@ def observe(sess: Session, db: Db, route: Route, head: str) -> Evaluation | None
     if all(obs.id != own.id for obs in queue):
         queue.append(own)  # completed by the own finding; the checker still asked
     mine: Evaluation | None = None
-    for obs in queue:
+    for obs in queue[:MAX_EVALUATIONS]:
         got = evaluate(sess, db, obs)
         if obs.id == own.id:
             mine = got
@@ -510,18 +525,17 @@ def _open(sess: Session, db: Db, route: Route, head: str) -> Observation:
 
 def evaluate(sess: Session, db: Db, obs: Observation) -> Evaluation:
     """One observation through its life cycle (spec 6.1): K when its context
-    is no longer current or a pinned input is gone; `op: trust`; an unbound
-    or lost answer keeps it `unresolved`; a typed status by
-    `OUTCOME_OF_VERDICT`; otherwise its findings registered, then H
-    advanced when its journal is verified. K is applied before any write
-    that follows the checker if the binding changed meanwhile."""
+    is no longer current; `op: trust` on its pinned inputs (A's record
+    included: a row moved since is no loss, the CAS gives `superseded`); an
+    unbound or lost answer keeps it `unresolved`; a typed status by
+    `OUTCOME_OF_VERDICT` (K for `unsupported_size` and `irreproducible`);
+    otherwise its findings registered, then H advanced when its journal is
+    verified. K is applied before any write that follows the checker if the
+    binding changed meanwhile."""
     root, epochs_of = sess.root, sess.epochs_of()
     if trust_state.stale_context(obs, sess.binding, sess.admin_digest, RULES_VERSION):
         return Evaluation(_conservative(db, root, obs, epochs_of), None)
-    base = _base(db, obs)
-    if isinstance(base, Unavailable):
-        return Evaluation(_conservative(db, root, obs, epochs_of), None)
-    verdict = run_trust(sess, obs, base=base, db=db)
+    verdict = run_trust(sess, obs, base=_base(obs), db=db)
     if isinstance(verdict, Unavailable):
         return Evaluation(trust_state.unresolved(db, root, obs.id), None)
     if _binding_moved(sess):
@@ -530,7 +544,12 @@ def evaluate(sess: Session, db: Db, obs: Observation) -> Evaluation:
         if not _is_unfinished(db, obs):
             return Evaluation(trust_state.outcome_of(db.conn, obs.id), verdict)
         out = trust_state.apply_status(
-            db, root, obs.id, verdict.outcome, epochs_of=epochs_of
+            db,
+            root,
+            obs.id,
+            verdict.outcome,
+            epochs_of=epochs_of,
+            reason=verdict.reason,
         )
         return Evaluation(out, verdict)
     return Evaluation(_complete(sess, db, obs, verdict, epochs_of), verdict)
@@ -540,8 +559,10 @@ def _complete(
     sess: Session, db: Db, obs: Observation, verdict: Verdict, epochs_of: EpochOf
 ) -> Outcome:
     """A bound `allow`/`refuse`: the ranges digest pinned (`merge`), the
-    findings registered, then H advanced when its journal was verified. The
-    publisher's own finding is registered already (`observe`)."""
+    findings registered, then H advanced when its journal was verified --
+    H = A under the current check is accepted without a write (`keep`,
+    review D-d). The publisher's own finding is registered already
+    (`observe`)."""
     root = sess.root
     if verdict.ranges is not None:
         trust_state.pin_ranges(db, root, obs.id, verdict.ranges.digest)
@@ -559,25 +580,41 @@ def _complete(
             sess.head,
             last_epoch=verdict.last_epoch,
             source_digest=source.digest,
+            keep=same_head(sess, db, obs) is not None,
         )
     except Unavailable:
         return trust_state.unresolved(db, root, obs.id)
 
 
-def _base(db: Db, obs: Observation) -> AcceptedBase | None | Unavailable:
-    """The accepted record of A as the checker needs it; `Unavailable` when
-    A's row is no longer there (an input gone for good: K)."""
-    if obs.accepted is None:
+def _base(obs: Observation) -> AcceptedBase | None:
+    """A's record as the observation pinned it (review D-a): never read
+    from `trust_heads` again, so a row moved since is no lost input."""
+    pin = obs.pinned
+    if pin is None:
+        return None
+    return AcceptedBase(
+        pin.sha,
+        pin.last_epoch,
+        pin.source_digest,
+        validation(pin.rules, pin.admin_digest),
+    )
+
+
+def same_head(sess: Session, db: Db, obs: Observation) -> trust_state.Pinned | None:
+    """A's pinned record when the observation re-checks A itself (H = A or
+    X = A) and A's row is still that SHA under the current check: then the
+    verdict must repeat A's epoch and digest, and the acceptance writes
+    nothing (review D-d). `None` otherwise (a new head, or a cold re-check
+    of a changed check version, which refreshes the row)."""
+    pin = obs.pinned
+    if pin is None or obs.head != pin.sha:
         return None
     acc = trust_state.accepted_head(db.conn, obs.root)
-    if acc is None or acc.sha != obs.accepted:
-        return Unavailable("accepted_head_gone")
-    return AcceptedBase(
-        acc.sha,
-        acc.last_epoch,
-        acc.source_digest,
-        validation(acc.rules, acc.admin_digest),
-    )
+    if acc is None or acc.sha != pin.sha:
+        return None
+    if not trust_state.head_valid(acc, sess.binding, sess.admin_digest, RULES_VERSION):
+        return None
+    return pin
 
 
 def validation(rules: str, admin_digest: str) -> str:
@@ -649,10 +686,15 @@ def run_trust(
     malformed or unbound verdict is `Unavailable` (`precheck_failed: ...`).
     An input outside the checker's limits is the typed `unsupported_size:
     <field>` made here (review D3), without asking the checker."""
+    problem = binding_problem(sess.binding)
+    if problem is not None:
+        return Verdict(UNSUPPORTED, f"unsupported_size: {problem}")
     policy = obs.policy if obs.route == "merge" else pin_policy(sess.transport, sess)
     if isinstance(policy, Unavailable):
         return policy
-    problem = limits_problem(sess.binding, policy)
+    if isinstance(policy, OutOfLimits):
+        return Verdict(UNSUPPORTED, f"unsupported_size: {policy.field}")
+    problem = policy_problem(policy.full_name, policy.branch)
     if problem is not None:
         return Verdict(UNSUPPORTED, f"unsupported_size: {problem}")
     request = trust_request(sess, obs, base, policy)
@@ -673,13 +715,25 @@ def run_trust(
     if parsed is None:
         return Unavailable("precheck_failed: parse")
     stored = trust_state.ranges_digest(db.conn, obs.id)
-    return bind(parsed, request, obs=obs, sess=sess, stored_ranges=stored)
+    same = same_head(sess, db, obs)
+    return bind(parsed, request, obs=obs, sess=sess, stored_ranges=stored, same=same)
 
 
-def pin_policy(transport: Transport, sess: Session) -> PolicyPin | Unavailable:
+@dataclass(frozen=True)
+class OutOfLimits:
+    """Coordinates outside the checker's request limits (review D3, M2):
+    `field` names the first; no read is made with them."""
+
+    field: str
+
+
+def pin_policy(
+    transport: Transport, sess: Session
+) -> PolicyPin | OutOfLimits | Unavailable:
     """P by the binding's anchor (spec 6.1 «Закрепление P»):
     `GET /repositories/{approval_policy_repository_id}` gives the full name
-    and the default branch, the head of that branch is P."""
+    and the default branch, the head of that branch is P. Coordinates
+    outside the limits are `OutOfLimits`, never a placeholder P."""
     repo_id = sess.binding.approval_policy_repository_id
     body = history.read_repository(transport, repo_id)
     if isinstance(body, Unavailable):
@@ -689,10 +743,9 @@ def pin_policy(transport: Transport, sess: Session) -> PolicyPin | Unavailable:
         return Unavailable(f"repositories/{repo_id}: not the repository or no name")
     if not isinstance(branch, str) or not branch:
         return Unavailable(f"repositories/{repo_id}: no default branch")
-    if not (_name(name) and _branch(branch)):
-        # outside the checker's limits: `limits_problem` names the field; no
-        # read is made with such coordinates
-        return PolicyPin(name, branch, "0" * 40)
+    problem = policy_problem(name, branch)
+    if problem is not None:
+        return OutOfLimits(problem)
     p_sha = history.read_branch_head(transport, name, branch)
     if isinstance(p_sha, Unavailable):
         return p_sha
@@ -704,6 +757,11 @@ def limits_problem(binding: TrustBinding, policy: PolicyPin) -> str | None:
     names <= 140 bytes of the owner/name form, branches <= 255 bytes of the
     git branch form, ints `0 < v < 2**63`, the host's form. Its field name,
     or `None`."""
+    return binding_problem(binding) or policy_problem(policy.full_name, policy.branch)
+
+
+def binding_problem(binding: TrustBinding) -> str | None:
+    """`limits_problem` of the binding's fields."""
     checks = (
         ("binding.host", HOST.fullmatch(binding.host) is not None),
         ("binding.df_trust_repository_id", _id(binding.df_trust_repository_id)),
@@ -713,10 +771,17 @@ def limits_problem(binding: TrustBinding, policy: PolicyPin) -> str | None:
         ),
         ("binding.df_trust_full_name", _name(binding.df_trust_full_name)),
         ("binding.branch", _branch(binding.df_trust_branch)),
-        ("policy.full_name", _name(policy.full_name)),
-        ("policy.branch", _branch(policy.branch)),
     )
     return next((name for name, ok in checks if not ok), None)
+
+
+def policy_problem(full_name: str, branch: str) -> str | None:
+    """`limits_problem` of the policy source's coordinates."""
+    if not _name(full_name):
+        return "policy.full_name"
+    if not _branch(branch):
+        return "policy.branch"
+    return None
 
 
 def _id(value: int) -> bool:
@@ -806,10 +871,13 @@ def bind(
     obs: Observation,
     sess: Session,
     stored_ranges: str | None,
+    same: trust_state.Pinned | None = None,
 ) -> Verdict | Unavailable:
     """The parsed verdict checked against the request, the observation, the
     binding and the publisher; `Unavailable("precheck_failed:
-    binding_mismatch: <what>")` names the first rule it breaks."""
+    binding_mismatch: <what>")` names the first rule it breaks. `same`: A's
+    pinned record when the observation re-checks A (`same_head`) -- a
+    verified verdict must repeat its epoch and `source.env` digest."""
     try:
         _bind_common(data, request, sess)
         if data["outcome"] == TREE_INCOMPLETE:
@@ -817,6 +885,7 @@ def bind(
         _bind_trust(data, request, obs, sess)
         verdict = _verdict(data, obs.route)
         _check_contract(verdict, obs, sess, request, stored_ranges)
+        _check_same(verdict, same)
     except _Unbound as exc:
         return Unavailable(f"precheck_failed: binding_mismatch: {exc.what}")
     return verdict
@@ -864,7 +933,7 @@ def _bind_trust(
 def _verdict(data: Mapping[str, object], route: Route) -> Verdict:
     """The variable part of the verdict, each value of its form."""
     outcome = data["outcome"]
-    _need(outcome in (ALLOW, REFUSE, UNSET, UNSUPPORTED), "outcome")
+    _need(outcome in STATUSES, "outcome")
     relation = data["relation"]
     _need(relation is None or relation in RELATIONS, "relation")
     epoch = data["last_epoch"]
@@ -948,6 +1017,7 @@ def _findings(value: object, route: Route) -> tuple[Finding, ...]:
         _need(isinstance(row, dict) and set(row) == _FINDING_KEYS, "findings")
         assert isinstance(row, dict)
         try:
+            _need(all(isinstance(row[k], str) for k in _FINDING_KEYS), "findings")
             found.append(Finding(row["kind"], row["role"], row["detail"]))
         except (ValueError, TypeError):
             raise _Unbound("findings") from None
@@ -980,7 +1050,8 @@ def _check_contract(
     if verdict.relation is None:
         empty = (verdict.source, verdict.last_epoch, verdict.ranges) == (None,) * 3
         _need(empty and not verdict.findings, "shape: no pair")
-        _need(verdict.outcome in (UNSET, UNSUPPORTED, REFUSE), "shape: no pair")
+        no_pair = (UNSET, UNSUPPORTED, IRREPRODUCIBLE, REFUSE)
+        _need(verdict.outcome in no_pair, "shape: no pair")
     else:
         _need(
             (verdict.source is None) == bool(kinds & SOURCE_FINDINGS), "shape: source"
@@ -991,7 +1062,20 @@ def _check_contract(
         _need(bool(verdict.findings), "outcome: refuse")
     else:
         _need(not verdict.findings, f"outcome: {verdict.outcome}")
+    if verdict.outcome == IRREPRODUCIBLE:
+        _need(verdict.reason in IRREPRODUCIBLE_REASONS, "outcome: irreproducible")
     _check_ranges_of(verdict, obs, request, stored_ranges)
+
+
+def _check_same(verdict: Verdict, same: trust_state.Pinned | None) -> None:
+    """Re-checking A (review D-d): the publisher knows A's epoch and digest;
+    a verified verdict that says otherwise is unbound."""
+    if same is None or not verdict.verified:
+        return
+    _need(verdict.last_epoch == same.last_epoch, "last_epoch: accepted")
+    source = verdict.source
+    assert source is not None
+    _need(source.digest == same.source_digest, "source: accepted")
 
 
 def _check_ranges_of(
@@ -1052,7 +1136,10 @@ __all__ = [
     "FULL_NAME",
     "HISTORY_TOKEN_REQUIRED",
     "HOST",
+    "IRREPRODUCIBLE",
+    "IRREPRODUCIBLE_REASONS",
     "MAX_BRANCH_BYTES",
+    "MAX_EVALUATIONS",
     "MAX_FULL_NAME_BYTES",
     "MAX_INT",
     "PRECHECK_VERSION_V2",
@@ -1065,11 +1152,13 @@ __all__ = [
     "VERDICT_SCHEMA_V2",
     "AcceptedEpochs",
     "Evaluation",
+    "OutOfLimits",
     "RootState",
     "Session",
     "Verdict",
     "approved_gh",
     "bind",
+    "binding_problem",
     "canonical",
     "check_ranges",
     "evaluate",
@@ -1078,11 +1167,13 @@ __all__ = [
     "observe",
     "parse_verdict",
     "pin_policy",
+    "policy_problem",
     "range_digest",
     "root_state",
     "route_perimeter_status",
     "route_trust_status",
     "run_trust",
+    "same_head",
     "session",
     "trust_request",
     "trust_status_result",

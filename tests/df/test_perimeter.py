@@ -742,7 +742,6 @@ def test_restore_stale_copy_blocks(ready: Layout) -> None:
         old = TrustBinding("github.com", 8, "o/old", "release", 6, "public")
         perimeter.record_violation(db.conn, EXEC, req, "k-old", at(S1, 1), old)
     restored(ready)
-    assert status(ready, DOWN).result["reason"] == "restore_pending"
     resp = status(ready, at(S1, 1))
     assert state_of(resp) == "blocked"
     got = rows(
@@ -761,24 +760,26 @@ def test_restore_stale_copy_blocks(ready: Layout) -> None:
     assert state_of(status(ready, at(S2, 2))) == "clear"
 
 
-def test_restore_pending_without_epochs_unavailable(ready: Layout) -> None:
+def test_restore_without_epochs_admitted_pending(ready: Layout) -> None:
+    """D-b: no epoch of a root is known (an empty restore, a moved head, an
+    old root): the conservative event is `pending` and the copy is admitted
+    -- `pending` blocks always, the route registers it at the first
+    verified epoch; never `clear` before."""
     restored(ready)
     with perimeter.open_db(ready) as db:
-        with pytest.raises(Unavailable, match="restore_pending"):
-            perimeter.admit(db, DOWN, ROOT)
-        with pytest.raises(Unavailable, match="restore_pending"):
-            perimeter.admit(db, perimeter.NO_BINDING, ROOT)
-    assert rows(ready) == []
-    resp = status(ready, DOWN)
-    assert resp.result == {
-        "state": "unavailable",
-        "reason": "restore_pending",
-        "snapshot_sha": None,
-        "last_epoch": None,
-    }
+        perimeter.admit(db, DOWN, ROOT)
+        assert perimeter.admission(db.conn) == "ready"
+        perimeter.admit(db, perimeter.NO_BINDING, ROOT)  # admitted: a no-op
+    assert rows(ready) == [("pending", None)]
+    assert status(ready, DOWN).result["reason"] == "epochs_unavailable"
+    assert state_of(status(ready, at(S1, 1))) == "blocked"  # registered at 1
+    assert rows(ready) == [("registered", 1)]
+    assert state_of(status(ready, at(S2, 2))) == "clear"
 
 
-def test_restore_partly_known_epochs_change_nothing(ready: Layout) -> None:
+def test_restore_partly_known_epochs_pending_where_unknown(ready: Layout) -> None:
+    """D-b: one root's epoch known, another's not -- `registered(E)` and
+    `pending`, in the one admission transaction."""
     record_in(ready, epochs=at(S1, 1))
     _copy_row(ready, request_key="k-other", root_repository_id=8,
               root_branch="release")  # fmt: skip
@@ -786,10 +787,14 @@ def test_restore_partly_known_epochs_change_nothing(ready: Layout) -> None:
     epochs = at(S1, 1)
     epochs.heads[OTHER] = Unavailable("epochs_unavailable")
     with perimeter.open_db(ready) as db:
-        with pytest.raises(Unavailable, match="restore_pending"):
-            perimeter.admit(db, epochs, ROOT)
-        assert perimeter.admission(db.conn) == "restored_pending"
-    assert len(rows(ready)) == 2
+        perimeter.admit(db, epochs, ROOT)
+        assert perimeter.admission(db.conn) == "ready"
+    got = rows(
+        ready,
+        "SELECT root_repository_id, state, epoch FROM events "
+        "WHERE detected_by = 'db_restore' ORDER BY root_repository_id",
+    )
+    assert got == [(5, "registered", 1), (8, "pending", None)]
 
 
 class _CrashOnSecond:

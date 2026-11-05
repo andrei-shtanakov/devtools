@@ -428,9 +428,7 @@ def parse_trust_status(raw: bytes | str, root: tuple[str, int, str]) -> TrustSta
     data = dict(resp.result)
     if set(data) != TRUST_STATUS_KEYS:
         raise BadResponse(f"result keys must be {sorted(TRUST_STATUS_KEYS)}")
-    host, repo, branch = root
-    want = {"host": host, "repository_id": repo, "branch": branch}
-    if data["root"] != want:
+    if not _same_root(data["root"], root):
         raise BadResponse("result.root is not the binding's root")
     state, reason = data["state"], data["reason"]
     if state not in PERIMETER_STATES:
@@ -452,6 +450,16 @@ def parse_trust_status(raw: bytes | str, root: tuple[str, int, str]) -> TrustSta
         _codes(data["unverified"]),
         _finding_rows(data["findings"]),
     )
+
+
+def _same_root(value: object, root: tuple[str, int, str]) -> bool:
+    """`value` is exactly the root `root`, each field of its type (a `true`
+    or `5.0` is not the id 5)."""
+    if not isinstance(value, dict) or set(value) != {"host", "repository_id", "branch"}:
+        return False
+    host, repo, branch = value["host"], value["repository_id"], value["branch"]
+    typed = isinstance(host, str) and _is_int(repo) and isinstance(branch, str)
+    return typed and (host, repo, branch) == root
 
 
 def _codes(value: object) -> tuple[str, ...]:

@@ -110,7 +110,11 @@ def test_restore_from_copy_is_pending(ready: Layout, copy: bytes) -> None:
     assert perimeter.restore(ready, copy) == "restored"
     assert admission_of(ready) == "restored_pending"
     assert rows(ready) == PENDING  # the copy's one event, not the newer two
-    assert status(ready, DOWN).result["reason"] == "restore_pending"
+    # D-b: admitted at first use, no epoch known -- a `pending` event of the
+    # restore, never `restore_pending` for good
+    assert status(ready, DOWN).result["reason"] == "epochs_unavailable"
+    assert admission_of(ready) == "ready"
+    assert rows(ready) == [*PENDING, ("pending", None)]
     base = ready.perimeter_dir
     assert stat_mode(base / perimeter.DB_NAME) == 0o600
     assert not (base / perimeter.RESTORE_DB).exists()
@@ -136,7 +140,8 @@ def test_restore_empty_is_pending(ready: Layout, before: str) -> None:
     assert perimeter.restore(ready, None) == "restored"
     assert admission_of(ready) == "restored_pending"
     assert rows(ready) == []
-    assert status(ready, DOWN).result["reason"] == "restore_pending"
+    assert status(ready, DOWN).result["reason"] == "epochs_unavailable"
+    assert rows(ready) == [("pending", None)]  # D-b: admitted, `pending`
     never_clear(ready)
 
 
@@ -240,9 +245,9 @@ def test_restore_waits_for_open_connection(
     out = ctx.Queue()
     b = ctx.Process(target=_admission_child, args=(str(ready.root), out))
     b.start()
-    assert out.get(timeout=30) == "restore_pending"
+    assert out.get(timeout=30) == "epochs_unavailable"
     b.join(timeout=30)
-    assert rows(ready) == PENDING
+    assert rows(ready) == [*PENDING, ("pending", None)]  # admitted (D-b)
 
 
 def test_restore_timeout_changes_nothing(

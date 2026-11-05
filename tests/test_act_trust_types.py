@@ -211,6 +211,9 @@ def test_trust_routes_mirrors_checker_constants() -> None:
         act_precheck_v2.UNSUPPORTED,
     }
     assert {routes.ALLOW, routes.REFUSE, routes.UNSET, routes.UNSUPPORTED} == outcomes
+    assert routes.IRREPRODUCIBLE == act_precheck_v2.IRREPRODUCIBLE
+    assert routes.IRREPRODUCIBLE_REASONS == act_precheck_v2.IRREPRODUCIBLE_REASONS
+    assert set(routes.STATUSES) == {*outcomes, act_precheck_v2.IRREPRODUCIBLE}
 
 
 @dataclasses.dataclass(frozen=True)
