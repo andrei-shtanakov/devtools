@@ -426,6 +426,16 @@ def test_listed_module_resolving_to_another_file_named(tmp_path: Path) -> None:
     ]
 
 
+#: The exact run-as-a-file bootstrap tests (review M9): any other `if` naming
+#: `__package__` is not exempt.
+BOOTSTRAP_TESTS = frozenset(
+    {
+        "__package__ in (None, '')",
+        "__package__ in (None, '') and 'governance' not in sys.modules",
+    }
+)
+
+
 def _uses_file(module: str) -> bool:
     """The module names `__file__` outside its run-as-a-file bootstrap (`if
     __package__ in (None, "")`: the package directory, not a contract file)."""
@@ -435,7 +445,7 @@ def _uses_file(module: str) -> bool:
     boot = {
         id(n)
         for top in tree.body
-        if isinstance(top, ast.If) and "__package__" in ast.unparse(top.test)
+        if isinstance(top, ast.If) and ast.unparse(top.test) in BOOTSTRAP_TESTS
         for n in ast.walk(top)
     }
     return any(
@@ -447,11 +457,23 @@ def _uses_file(module: str) -> bool:
 #: Paths a module of the closure names but the precheck program never reads,
 #: with the reason (3a Task 7: `act_source` joined the closure with v2).
 NOT_READ_BY_PRECHECK = {
-    "contracts/approval-policy-source/v2/source.env": (
-        "act_source.load_source (the devtools file) -- `act_trust` never calls it "
-        "(tests/test_act_trust.py::test_load_source_not_called)"
-    ),
+    "contracts/approval-policy-source/v2/source.env": "load_source",
 }
+
+
+def test_not_read_by_precheck_is_never_called() -> None:
+    """Review M9: each exempt path's reader is called by no module of the
+    closure (AST), so the precheck never reads it."""
+    readers = set(NOT_READ_BY_PRECHECK.values())
+    listing = load_tree_list(ROOT)
+    calls = [
+        f"{rel}:{n.lineno}"
+        for rel in listing.module_files()
+        for n in ast.walk(ast.parse((ROOT / rel).read_text(encoding="utf-8")))
+        if isinstance(n, ast.Call)
+        and (getattr(n.func, "attr", None) or getattr(n.func, "id", None)) in readers
+    ]
+    assert calls == []
 
 
 def test_contract_files_cover_file_relative_reads() -> None:

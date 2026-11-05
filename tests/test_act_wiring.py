@@ -264,3 +264,29 @@ def test_no_production_caller_injects_seams() -> None:
         )
     }
     assert found == set()
+
+
+def test_premerge_deps_token_source_only_in_v2_launch() -> None:
+    """Review M8: `_SEAM_PASS` admits `act_premerge_core._trust` → `load_trust`;
+    the one production `PremergeDeps(token_source=...)` is the df launch contract
+    of the precheck v2, `ctx.token_source()` (the approved `gh`)."""
+    found = []
+    for path in sorted((ROOT / "governance").rglob("*.py")):
+        tree = ast.parse(path.read_text("utf-8"))
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(fn):
+                if not isinstance(node, ast.Call):
+                    continue
+                f = node.func
+                name = f.id if isinstance(f, ast.Name) else getattr(f, "attr", None)
+                if name != "PremergeDeps":
+                    continue
+                for kw in node.keywords:
+                    if kw.arg is None or kw.arg == "token_source":
+                        rel = path.relative_to(ROOT).as_posix()
+                        found.append((rel, fn.name, ast.unparse(kw.value)))
+    assert found == [
+        ("governance/act_precheck_v2.py", "_premerge_deps", "ctx.token_source()")
+    ]
