@@ -181,8 +181,17 @@ def test_wiring_site_decides_with_history_token(
 #: Швы ввода-вывода решения: внедряют только тесты (ревью Task 11c, Minor 6).
 _SEAMS = frozenset({"open_url", "token_source"})
 _ENTRIES = frozenset({"load_trust", "history_transport"})
-#: Единственная боевая передача швов — `load_trust` в свою фабрику.
-_SEAM_PASS = frozenset({("governance/act_trust.py::load_trust", "history_transport")})
+#: Боевые передачи швов: `load_trust` в свою фабрику и договор запуска df (спека B
+#: §3.10 rev 11) — программа проверяющего v2 передаёт `token_source` с утверждённым
+#: `gh` (`partial(history_token_at, gh=…, role_home=…)`) в фабрику и через
+#: `act_premerge_core._trust` в `load_trust`; `open_url` боевой код не передаёт.
+_SEAM_PASS = frozenset(
+    {
+        ("governance/act_trust.py::load_trust", "history_transport"),
+        ("governance/act_precheck_v2.py::_history", "history_transport"),
+        ("governance/act_premerge_core.py::_trust", "load_trust"),
+    }
+)
 
 
 def _seam_calls(rel: str, text: str) -> set[str]:
@@ -255,3 +264,29 @@ def test_no_production_caller_injects_seams() -> None:
         )
     }
     assert found == set()
+
+
+def test_premerge_deps_token_source_only_in_v2_launch() -> None:
+    """Review M8: `_SEAM_PASS` admits `act_premerge_core._trust` → `load_trust`;
+    the one production `PremergeDeps(token_source=...)` is the df launch contract
+    of the precheck v2, `ctx.token_source()` (the approved `gh`)."""
+    found = []
+    for path in sorted((ROOT / "governance").rglob("*.py")):
+        tree = ast.parse(path.read_text("utf-8"))
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(fn):
+                if not isinstance(node, ast.Call):
+                    continue
+                f = node.func
+                name = f.id if isinstance(f, ast.Name) else getattr(f, "attr", None)
+                if name != "PremergeDeps":
+                    continue
+                for kw in node.keywords:
+                    if kw.arg is None or kw.arg == "token_source":
+                        rel = path.relative_to(ROOT).as_posix()
+                        found.append((rel, fn.name, ast.unparse(kw.value)))
+    assert found == [
+        ("governance/act_precheck_v2.py", "_premerge_deps", "ctx.token_source()")
+    ]

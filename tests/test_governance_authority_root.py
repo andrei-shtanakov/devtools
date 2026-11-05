@@ -158,6 +158,9 @@ def test_prefixes_read_from_the_ssot_file() -> None:
         # мержит только человек.
         "df/",
         "tests/df/",
+        # Дерево предпроверки df вне `act_` (этап 3a, Task 7, ревью D4).
+        "governance/bundle_dag",
+        "governance/approval_branches",
     }
 
 

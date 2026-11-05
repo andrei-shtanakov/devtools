@@ -682,7 +682,7 @@ def test_runs_as_isolated_file_with_jwt_in_governance(tmp_path: Path, key) -> No
 
 
 def _app_world(monkeypatch, key, env: dict[str, str], visible: dict[int, list[int]]):
-    from governance import act_premerge, act_trust
+    from governance import act_app_installations, act_trust
     from tests.test_act_premerge import World
 
     world = World(monkeypatch)
@@ -691,7 +691,7 @@ def _app_world(monkeypatch, key, env: dict[str, str], visible: dict[int, list[in
         env, agent_dir=Path("/x/review"), merge_dir=Path("/x/merge")
     )
     world.perms = {"env:GH_TOKEN": {}}  # токен установки: `permissions` в ответе нет
-    world.installations = act_premerge.app_installations(
+    world.installations = act_app_installations.app_installations(
         1, key[0], http=Http(_installs([{"id": 9}]), visible)
     )
     return world

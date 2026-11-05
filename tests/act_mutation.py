@@ -267,27 +267,27 @@ BYPASS: dict[str, tuple[str, str]] = {
         '_invalidate(state, key, f"манифест в одобренном коммите не читается: {exc}")',
         "return None",
     ),
-    "act_premerge._approve_in_current_second:same_second": (
+    "act_premerge_core._approve_in_current_second:same_second": (
         "parse_ts(r.submitted_at) >= now",
         "False",
     ),
-    "act_premerge._boundary:stamp": (
+    "act_premerge_core._boundary:stamp": (
         'raise _Stop(EXIT_UNSET, f"метка события не разобрана: {exc}") from exc',
         'return parse_ts("2026-10-12T12:00:00Z")',
     ),
-    "act_premerge._manifest_text:utf8": (
+    "act_premerge_core._manifest_text:utf8": (
         'return Unavailable(f"{path}: не UTF-8")',
         'return ""',
     ),
-    "act_premerge._check:manifest_present": (
+    "act_premerge_core._check:manifest_present": (
         'raise _Stop(\n            EXIT_REFUSED, f"в {args.head[:12]} нет манифеста {ident.request_id}"\n        )',
         "return",
     ),
-    "act_premerge._trust:app_unknown": (
+    "act_premerge_core._trust:app_unknown": (
         'raise _Stop(EXIT_UNSET, f"установки App: {found.reason}")',
         "found = None",
     ),
-    "act_premerge.request_of_branch:form": (
+    "act_premerge_core.request_of_branch:form": (
         "    if match is None:\n        return None",
         '    if match is None:\n        match = re.fullmatch(pattern, "spec/ws-9-approve-9-9-9")',
     ),
@@ -440,7 +440,7 @@ BYPASS: dict[str, tuple[str, str]] = {
         '    except FileNotFoundError as exc:\n        return Unavailable(f"привязка {path}: {exc}")\n',
     ),
     "act_trust.load_ranges:history_violation": (
-        'return _register(journal, trust.snapshot, ("approval-policy", got.reason))',
+        'return _register(journal, trust.snapshot, found, "policy_history_break")',
         "got = ()",
     ),
     "act_trust.load_ranges:unknown_anchor": (
@@ -756,11 +756,74 @@ MANDATORY: dict[str, tuple[str, str, str, tuple[str, ...]]] = {
     ),
     "M4:credential_shapes_open": (
         "act_trust.load_trust",
-        "refused = _creds_refusal(creds) or _shared_profile_refusal(creds, binding)",
-        "refused = _shared_profile_refusal(creds, binding)",
+        "refused = _creds_refusal(held) or _shared_profile_refusal(held, binding)",
+        "refused = _shared_profile_refusal(held, binding)",
         (
             "tests/test_act_trust.py::test_caller_history_credential_refused_before_io",
             *_TRUST_SEAMS,
+        ),
+    ),
+    # df 3a Task 7, review D5 (M10): v2 checks whose mutants survived the first
+    # suite (I2–I4) and the adapter/override of `op: merge`.
+    "V2-1:adapter_any_snapshot": (
+        "act_precheck_v2.Adapter.status",
+        "snap.root.snapshot_sha != self.expected_sha",
+        "False",
+        ("tests/test_act_precheck_v2.py::test_stale_snapshot_adapter",),
+    ),
+    "V2-2:merge_findings_not_refused": (
+        "act_precheck_v2._merge",
+        "    if findings:\n        return Answer(REFUSE,",
+        "    if False:\n        return Answer(REFUSE,",
+        (
+            "tests/test_act_precheck_v2.py::test_merge_settings_finding_refuses_with_findings",
+            "tests/test_act_precheck_v2.py::test_merge_policy_break_found_by_load_ranges_is_finding",
+        ),
+    ),
+    "V2-3:surface_manifest_any_status": (
+        "act_precheck_v2.surface_check.check",
+        "p == own and s in _CHANGE_OK",
+        "p == own",
+        (
+            "tests/test_act_precheck_v2.py::test_candidate_removed_manifest_is_not_changed",
+        ),
+    ),
+    "V2-4:surface_previous_unchecked": (
+        "act_precheck_v2.surface_check.check",
+        "paths += [prev for _s, _p, prev in req.changes if prev is not None]",
+        "pass",
+        (
+            "tests/test_act_precheck_v2.py::test_candidate_rename_from_foreign_path_refused",
+        ),
+    ),
+    "V2-5:envelopes_renames_allowed": (
+        "act_precheck_v2._envelopes",
+        "touched != set(expected) or not plain",
+        "touched != set(expected)",
+        ("tests/test_act_precheck_v2.py::test_finalize_rename_onto_envelope_refused",),
+    ),
+    "V2-6:envelopes_bytes_unchecked": (
+        "act_precheck_v2._envelopes",
+        'raw != text.encode("utf-8")',
+        "False",
+        ("tests/test_act_precheck_v2.py::test_finalize_wrong_envelopes_refused",),
+    ),
+    "V2-7:pin_branch_ignored": (
+        "act_precheck_v2.trust_part",
+        "policy_branch=policy.branch",
+        "policy_branch=source.branch",
+        (
+            "tests/test_act_precheck_v2.py::test_c2_policy_branch_mismatch_refused[trust]",
+            "tests/test_act_precheck_v2.py::test_c2_policy_branch_mismatch_refused[merge]",
+        ),
+    ),
+    "V2-8:load_ranges_head_dropped": (
+        "act_trust.load_ranges",
+        "            head=trust.policy_head,\n",
+        "",
+        (
+            "tests/test_act_trust.py::test_load_ranges_reads_open_epoch_to_pinned_p",
+            "tests/test_act_precheck_v2.py::test_candidate_real_load_ranges_reads_to_pinned_p",
         ),
     ),
 }
@@ -952,7 +1015,9 @@ def main(argv: list[str] | None = None) -> int:
         "--verbose", action="store_true", help="хвост вывода двойника — в stderr"
     )
     p.add_argument(
-        "--mandatory", action="store_true", help="только мутации M1–M4 (Task 11c)"
+        "--mandatory",
+        action="store_true",
+        help="только обязательные мутации: M1–M4 (Task 11c), V2-* (df 3a Task 7)",
     )
     args = p.parse_args(argv)
     if args.merge:

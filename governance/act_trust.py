@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from itertools import pairwise
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, runtime_checkable
 from urllib.parse import quote
 
 from governance import act_facts
@@ -153,10 +153,14 @@ class TrustSnapshot:
 
 @dataclass(frozen=True)
 class Trust:
-    """Доверенный контекст решения; `unverified` — непроверенные предпосылки."""
+    """Доверенный контекст решения; `unverified` — непроверенные предпосылки;
+    `policy_head` — закреплённая издателем голова P `approval-policy` (спека B
+    §6.1, К): история открытой эпохи читается до неё по SHA; `None` — до
+    текущей головы ветки (поведение 2b)."""
 
     snapshot: TrustSnapshot
     unverified: tuple[str, ...]
+    policy_head: str | None = None
 
     @property
     def source(self) -> SourceV2:
@@ -207,6 +211,31 @@ class Journal(Protocol):
     ) -> Unavailable | None:
         """Зарегистрировать нарушение; номер эпохи назначает писатель."""
         ...
+
+
+@runtime_checkable
+class FindingSink(Protocol):
+    """Journal that keeps the finding kind (the `op: merge` adapter of the precheck
+    program v2, spec B §5.4): `_register` hands it the kind of the check that found
+    the violation instead of `Journal.record`."""
+
+    def record_finding(
+        self, snap: TrustSnapshot, kind: str, role: str, detail: str
+    ) -> Unavailable | None:
+        """Keep one finding; the publisher registers it."""
+        ...
+
+
+@dataclass(frozen=True)
+class KeyHolderCovered:
+    """Credential mode of a process that holds only a product token derived from
+    the App key, covered by the key holder's self-report of the App installations
+    in the same operation (spec B §6.1, N3): no credential of its own is
+    self-reported. An explicit mode, not a fictitious credential."""
+
+
+COVERED_BY_KEY_HOLDER = KeyHolderCovered()
+SnapshotReader = Callable[[Any, Binding], TrustSnapshot | Unavailable]
 
 
 @dataclass(frozen=True)
@@ -608,11 +637,13 @@ def transport_fact(transport: Any, cred: Credential, path: str) -> Fact[object]:
 # --- периметр -----------------------------------------------------------------------
 
 
-def gh_get(cred: Credential, path: str) -> Fact[object]:
+def gh_get(cred: Credential, path: str, *, gh: str = "gh") -> Fact[object]:
     """`gh api <path>` ИМЕННО этим credential на `github.com`: токены и хост
     окружения снимаются, чтобы профиль не подменился чужим токеном, а
     самоотчёт не ушёл на другой хост. `profile:history` сюда не ходит (Р-18):
-    его токен не уходит в окружение `gh`."""
+    его токен не уходит в окружение `gh`. `gh` — исполняемый файл: флот берёт
+    его из `PATH`, программа проверяющего df — утверждённый абсолютный путь
+    (`partial(gh_get, gh=...)`, договор запуска, спека B §3.10 rev 11)."""
     if cred.label == HISTORY_LABEL:
         return unavailable(
             f"gh api {path} ({HISTORY_LABEL}): самоотчёт токена истории — "
@@ -625,7 +656,7 @@ def gh_get(cred: Credential, path: str) -> Fact[object]:
         env["GH_CONFIG_DIR"] = str(cred.gh_config_dir)
     try:
         done = subprocess.run(
-            ["gh", "api", "--hostname", SUPPORTED_HOST, path],
+            [gh, "api", "--hostname", SUPPORTED_HOST, path],
             env=env,
             capture_output=True,
             text=True,
@@ -803,11 +834,16 @@ def _rebase(
 
 
 def _register(
-    journal: Journal, snap: TrustSnapshot, found: tuple[str, str]
+    journal: Journal, snap: TrustSnapshot, found: tuple[str, str], kind: str
 ) -> Unavailable:
-    """Обнаруженное нарушение — событие журнала периметра (§6.3), затем отказ."""
+    """Обнаруженное нарушение — событие журнала периметра (§6.3), затем отказ.
+    `kind` — вид находки проверки (спека B §6.1); его получает только журнал,
+    который его хранит (`FindingSink`)."""
     role, detail = found
-    failed = journal.record(snap, role, detail)
+    if isinstance(journal, FindingSink):
+        failed = journal.record_finding(snap, kind, role, detail)
+    else:
+        failed = journal.record(snap, role, detail)
     if failed is not None:
         return Unavailable(
             f"нарушение периметра ({detail}); регистрация: {failed.reason}"
@@ -816,10 +852,13 @@ def _register(
 
 
 def _snapshot_for_decision(
-    transport: Any, binding: Binding, journal: Journal
+    transport: Any,
+    binding: Binding,
+    journal: Journal,
+    read: SnapshotReader | None = None,
 ) -> TrustSnapshot | Unavailable:
     for _ in range(3):
-        snap = read_trust_snapshot(transport, binding)
+        snap = (read or read_trust_snapshot)(transport, binding)
         if isinstance(snap, Unavailable):
             return snap
         state = journal.status(snap)
@@ -852,9 +891,11 @@ def load_trust(
     binding: Binding,
     journal: Journal,
     *,
-    creds: Sequence[Credential],
+    creds: Sequence[Credential] | KeyHolderCovered,
     open_url: Callable[..., Any] | None = None,
     token_source: Callable[[Path], str | Unavailable] | None = None,
+    snapshot: SnapshotReader | None = None,
+    policy_head: str | None = None,
 ) -> Trust | Unavailable:
     """Обязательные проверки перед решением (п. 1–5 Task 12a), с ранним выходом,
     на транспорте, который строит сам (Task 11c, C6): снаружи внедряемы только
@@ -863,24 +904,37 @@ def load_trust(
 
     Журнал периметра обязателен у КАЖДОГО потребителя, включая предпроверку
     мержа (ревизия b1: `act_journal_wire`): блок, зарегистрированный другим
-    потребителем, учитывается, а обнаруженное здесь нарушение сохраняется."""
-    if not creds:
+    потребителем, учитывается, а обнаруженное здесь нарушение сохраняется.
+
+    `creds=COVERED_BY_KEY_HOLDER` — явный режим производного credential (N3):
+    своих credentials процесс не самоотчитывает, токен истории (при ключе) —
+    как всегда. `snapshot` — читатель снимка тем же транспортом решения
+    (проверяющий v2: пара по SHA, `act_trust_pair`); по умолчанию — голова
+    ветки. `policy_head` — закреплённая P (`Trust.policy_head`)."""
+    if isinstance(creds, KeyHolderCovered):
+        held: Sequence[Credential] = ()
+    elif not creds:
         return Unavailable("самоотчёт: процесс не назвал ни одного credential")
-    refused = _creds_refusal(creds) or _shared_profile_refusal(creds, binding)
+    else:
+        held = creds
+    refused = _creds_refusal(held) or _shared_profile_refusal(held, binding)
     if refused is not None:
         return refused
     transport = history_transport(binding, open_url=open_url, token_source=token_source)
     if isinstance(transport, Unavailable):
         return transport
-    snap = _snapshot_for_decision(transport, binding, journal)
+    snap = _snapshot_for_decision(transport, binding, journal, snapshot)
     if isinstance(snap, Unavailable):
         return snap
     keyed = binding.history_gh_config_dir is not None
     unverified: tuple[str, ...] = ()
-    for check in (
-        lambda: _self_reports(readers, creds, snap, transport if keyed else None),
-        lambda: _rulesets(transport, snap),
-        lambda: _rebase(transport, snap),
+    for kind, check in (
+        (
+            "token_write",
+            lambda: _self_reports(readers, held, snap, transport if keyed else None),
+        ),
+        ("ruleset_missing", lambda: _rulesets(transport, snap)),
+        ("rebase_allowed", lambda: _rebase(transport, snap)),
     ):
         found = check()
         if found == REBASE_PREMISE:
@@ -888,8 +942,8 @@ def load_trust(
         elif isinstance(found, Unavailable):
             return found
         elif isinstance(found, tuple):
-            return _register(journal, snap, found)
-    return Trust(snap, unverified)
+            return _register(journal, snap, found, kind)
+    return Trust(snap, unverified, policy_head)
 
 
 # --- якоря, диапазоны, наборы --------------------------------------------------------
@@ -965,9 +1019,16 @@ def load_ranges(
             continue
         if at > t:
             continue
-        got = act_facts.history(anon, trust.source, epoch.anchor, epoch.last_confirmed)
+        got = act_facts.history(
+            anon,
+            trust.source,
+            epoch.anchor,
+            epoch.last_confirmed,
+            head=trust.policy_head,
+        )
         if isinstance(got, act_facts.HistoryBreak):
-            return _register(journal, trust.snapshot, ("approval-policy", got.reason))
+            found = ("approval-policy", got.reason)
+            return _register(journal, trust.snapshot, found, "policy_history_break")
         if isinstance(got, Unavailable):
             ranges[epoch.epoch] = got
             continue

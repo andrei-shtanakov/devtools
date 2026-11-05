@@ -56,10 +56,19 @@ MODULES = (
     "act_precheck",
     "act_node",
     "act_premerge",
+    # df этап 3a (Task 7, ревью D1): ядро предпроверки без CLI — его импортирует v2
+    "act_premerge_core",
     "act_app_token",
     "act_barrier",
     # df этап 3a (Task 3): общая поверхность D16 конвейера и издателя (O6)
     "act_surface",
+    # df этап 3a (Tasks 4–7): типы доверия, пара df-trust по SHA, дескрипторы и
+    # бюджет вердикта, программа проверяющего v2, самоотчёт установок App
+    "act_trust_types",
+    "act_trust_findings",
+    "act_trust_pair",
+    "act_precheck_v2",
+    "act_app_installations",
 )
 #: Определения, которые часть B добавляет в существующие модули (полный перечень по
 #: листингам Tasks 11–16); изменённые существующие функции — в разделе ревизии плана.
@@ -234,6 +243,8 @@ RP, OB = "tests/test_act_repropose.py", "tests/test_act_ops_body.py"
 OF, WR = "tests/test_act_ops_failures.py", "tests/test_act_wave_runner.py"
 SF = "tests/test_act_surface.py"
 TP = "tests/test_act_trust_pair.py"
+TT, TF = "tests/test_act_trust_types.py", "tests/test_act_trust_findings.py"
+V2 = "tests/test_act_precheck_v2.py"
 ENVELOPE_FIELDS = (
     "node",
     "request_id",
@@ -567,6 +578,13 @@ JUDGMENT = {
     ),
     # --- act_precheck (этап 3a, Task 1): минимальный диспетчер v2
     "act_precheck.parse_request_v2": (
+        r(
+            "surrogates",
+            "act_precheck.parse_request_v2",
+            "except UnicodeEncodeError",
+            f"{V2}::test_lone_surrogates_request_exit_2_api_text_replaced",
+            '"request carries lone surrogates"',
+        ),
         r(
             "nonce",
             "act_precheck.parse_request_v2",
@@ -2801,144 +2819,151 @@ JUDGMENT = {
         ),
     ),
     # --- act_premerge (Task 15)
-    "act_premerge.request_of_branch": (
+    "act_premerge_core.request_of_branch": (
         r(
             "form",
-            "act_premerge.request_of_branch",
+            "act_premerge_core.request_of_branch",
             "if match is None",
             f"{P}::test_request_of_branch",
             '"feat/x"',
         ),
     ),
-    "act_premerge._trust": (
+    "act_premerge_core._trust": (
         r(
             "binding",
-            "act_premerge._trust",
+            "act_premerge_core._trust",
             "deps.binding is None",
             f"{P}::test_no_binding_refused",
             '"без корня доверия"',
         ),
         r(
             "journal",
-            "act_premerge._trust",
+            "act_premerge_core._trust",
             "isinstance(deps.journal, Unavailable)",
             f"{P}::test_journal_unavailable_is_unset",
             '"журнал периметра: "',
         ),
         r(
             "app_unknown",
-            "act_premerge._trust",
+            "act_premerge_core._trust",
             "установки App: ",
             f"{P}::test_app_installations_unknown_is_unset",
             '"установки App: "',
         ),
         r(
             "app_violation",
-            "act_premerge._trust",
+            "act_premerge_core._trust",
             "if found is not None",
             f"{P}::test_app_installation_violation_recorded",
             "act_premerge.REGISTERED",
         ),
     ),
-    "act_premerge._live": (
+    "act_premerge_core._live": (
         r(
             "mode_unset",
-            "act_premerge._live",
+            "act_premerge_core._live",
             "isinstance(mode, Unavailable)",
             f"{P}::test_product_mode_gate[unset]",
             '"режим продукта: "',
         ),
         r(
             "not_review",
-            "act_premerge._live",
+            "act_premerge_core._live",
             'if mode != "review"',
             f"{P}::test_product_mode_gate[merge]",
             '"— не review"',
         ),
     ),
-    "act_premerge._check": (
+    "act_premerge_core._check": (
         r(
             "identity",
-            "act_premerge._check",
+            "act_premerge_core._check",
             "if refusal is not None",
             f"{P}::test_manifest_of_other_identity_refused[ws_id]",
             'f"манифест: {field}"',
         ),
         r(
             "manifest_present",
-            "act_premerge._check",
+            "act_premerge_core._check",
             "if text is None",
             f"{P}::test_no_manifest_refused",
             '"нет манифеста"',
         ),
         r(
+            "surface",
+            "act_premerge_core._check",
+            "if off_surface is not None",
+            f"{V2}::test_candidate_foreign_file_refused",
+            '"surface_violation: scripts/foreign.sh"',
+        ),
+        r(
             "merger",
-            "act_premerge._check",
+            "act_premerge_core._check",
             "not merger_allowed(policy, args.merger",
             f"{P}::test_merger_outside_allowlist_refused",
             '"не пройдёт D3"',
         ),
         r(
             "skew",
-            "act_premerge._check",
+            "act_premerge_core._check",
             "wait > MAX_WAIT",
             f"{P}::test_clock_skew_beyond_ten_seconds_unset",
             '"часы расходятся"',
         ),
         r(
             "reread",
-            "act_premerge._check",
+            "act_premerge_core._check",
             "again != facts or current2 != current",
             f"{P}::test_reread_sees_dismissal_unset",
             '"изменились за время ожидания"',
         ),
     ),
-    "act_premerge._act": (
+    "act_premerge_core._act": (
         r(
             "head_sha",
-            "act_premerge._act",
+            "act_premerge_core._act",
             "facts.head_sha != args.head",
             f"{P}::test_review_facts_head_differs_refused",
             '"≠ --head"',
         ),
         r(
             "act",
-            "act_premerge._act",
+            "act_premerge_core._act",
             "find_act(args.head, effective, policy) is None",
             f"{P}::test_no_approve_refused",
             '"нет approve человека"',
         ),
         r(
             "current_second",
-            "act_premerge._act",
+            "act_premerge_core._act",
             "_approve_in_current_second(facts, args.head, now)",
             f"{P}::test_approve_in_current_second_is_unset",
             '"в текущей секунде"',
         ),
     ),
     # approve этой же секунды — «не установлено», а не отказ (ревью PR #673)
-    "act_premerge._approve_in_current_second": (
+    "act_premerge_core._approve_in_current_second": (
         r(
             "same_second",
-            "act_premerge._approve_in_current_second",
+            "act_premerge_core._approve_in_current_second",
             "parse_ts(r.submitted_at) >= now",
             f"{P}::test_approve_in_current_second_is_unset",
             '"в текущей секунде"',
         ),
     ),
-    "act_premerge._boundary": (
+    "act_premerge_core._boundary": (
         r(
             "stamp",
-            "act_premerge._boundary",
+            "act_premerge_core._boundary",
             "except ValueError as exc",
             f"{P}::test_boundary_unparsed_stamp_is_unset",
             '"метка события не разобрана"',
         ),
     ),
-    "act_premerge._manifest_text": (
+    "act_premerge_core._manifest_text": (
         r(
             "utf8",
-            "act_premerge._manifest_text",
+            "act_premerge_core._manifest_text",
             "except UnicodeDecodeError",
             f"{P}::test_manifest_text_reads_head_bytes[not_utf8]",
             '"m.yaml: не UTF-8"',
@@ -4084,6 +4109,523 @@ JUDGMENT = {
             '"факт не установлен"',
         ),
     ),
+    # --- df этап 3a (Tasks 4–6): типы доверия, дескрипторы и бюджет, пара по SHA
+    "act_trust_types.Finding.__post_init__": (
+        r(
+            "kind",
+            "act_trust_types.Finding.__post_init__",
+            "self.kind not in KINDS",
+            f"{TT}::test_finding_and_ranges_refusals_named",
+            '"unknown finding kind"',
+        ),
+        r(
+            "role",
+            "act_trust_types.Finding.__post_init__",
+            "self.role not in KINDS[self.kind]",
+            f"{TT}::test_finding_and_ranges_refusals_named",
+            '"not allowed for role"',
+        ),
+        r(
+            "detail",
+            "act_trust_types.Finding.__post_init__",
+            "detail_size(self.detail) > MAX_DETAIL_BYTES",
+            f"{TT}::test_finding_and_ranges_refusals_named",
+            '"detail over 512 bytes"',
+        ),
+    ),
+    "act_trust_types.RangeDescriptor.__post_init__": (
+        r(
+            "epochs",
+            "act_trust_types.RangeDescriptor.__post_init__",
+            "len(self.ranges) > MAX_EPOCHS",
+            f"{TT}::test_finding_and_ranges_refusals_named",
+            '"more than 64 epochs"',
+        ),
+    ),
+    "act_trust_findings.range_descriptor": (
+        r(
+            "epochs",
+            "act_trust_findings.range_descriptor",
+            'raise UnsupportedSize("epochs")',
+            f"{TF}::test_65_epochs_unsupported_size",
+            '"unsupported_size: epochs"',
+        ),
+        r(
+            "empty",
+            "act_trust_findings.range_descriptor",
+            'raise ValueError("no epochs")',
+            f"{TF}::test_range_descriptor_malformed_epochs",
+            '"no epochs"',
+        ),
+        r(
+            "contiguous",
+            "act_trust_findings.range_descriptor",
+            "list(range(1, len(epochs) + 1))",
+            f"{TF}::test_range_descriptor_malformed_epochs",
+            '"not contiguous"',
+        ),
+        r(
+            "open_before_last",
+            "act_trust_findings.range_descriptor",
+            "e.last_confirmed is None",
+            f"{TF}::test_range_descriptor_malformed_epochs",
+            '"open epoch 1"',
+        ),
+    ),
+    "act_trust_findings.source_descriptor": (
+        r(
+            "full_name",
+            "act_trust_findings.source_descriptor",
+            'raise UnsupportedSize("policy_full_name")',
+            f"{TF}::test_source_over_limit_unsupported_size",
+            '"policy_full_name"',
+        ),
+        r(
+            "branch",
+            "act_trust_findings.source_descriptor",
+            'raise UnsupportedSize("policy_branch")',
+            f"{TF}::test_source_over_limit_unsupported_size",
+            '"policy_branch"',
+        ),
+    ),
+    "act_trust_findings.fit_verdict": (
+        r(
+            "route",
+            "act_trust_findings.fit_verdict",
+            "route not in ROUTE_KINDS",
+            f"{TF}::test_kind_outside_route_rejected",
+            '"unknown origin_route"',
+        ),
+        r(
+            "reserved",
+            "act_trust_findings.fit_verdict",
+            "any(key in envelope for key in _RESERVED)",
+            f"{TF}::test_reserved_keys_rejected",
+            '"reserved"',
+        ),
+        r(
+            "budget",
+            "act_trust_findings.fit_verdict",
+            'raise UnsupportedSize("verdict")',
+            f"{TF}::test_envelope_over_budget_unsupported_size",
+            '"verdict"',
+        ),
+    ),
+    "act_trust_findings._finding_rows": (
+        r(
+            "route_kinds",
+            "act_trust_findings._finding_rows",
+            "f.kind not in allowed",
+            f"{TF}::test_kind_outside_route_rejected",
+            '"outside route"',
+        ),
+        r(
+            "one_per_kind_role",
+            "act_trust_findings._finding_rows",
+            "(f.kind, f.role) in rows",
+            f"{TF}::test_one_finding_per_kind_and_role",
+            '"duplicate finding"',
+        ),
+    ),
+    "act_trust_pair.read_pair": (
+        r(
+            "host",
+            "act_trust_pair.read_pair",
+            "binding.host != SUPPORTED_HOST",
+            f"{TP}::test_pair_unsupported_host_refused",
+            "\"привязка: хост 'gitlab.example' не поддерживается v1\"",
+        ),
+        r(
+            "sha",
+            "act_trust_pair.read_pair",
+            "not _SHA.fullmatch(head)",
+            f"{TP}::test_pair_refuses_non_sha",
+            '"пара df-trust: A и H — полные SHA"',
+        ),
+        r(
+            "not_descendant",
+            "act_trust_pair.read_pair",
+            'relation == "not_descendant" and base is not None',
+            f"{TP}::test_pair_rollback_is_not_descendant",
+            '"не потомок принятой"',
+        ),
+    ),
+    "act_trust_pair.settings_findings": (
+        r(
+            "unverified_rebase",
+            "act_trust_pair.settings_findings",
+            "found == REBASE_PREMISE",
+            f"{TP}::test_settings_hidden_rebase_is_unverified_per_role",
+            '"allow_rebase_merge@df-trust"',
+        ),
+        r(
+            "policy_branch",
+            "act_trust_pair.settings_findings",
+            "snap.source.branch != policy_branch",
+            f"{TP}::test_runtime_source_branch_not_default_finding",
+            "\"default branch 'trunk'\"",
+        ),
+        r(
+            "gap",
+            "act_trust_pair.settings_findings",
+            "gap is not None and not findings",
+            f"{TP}::test_settings_gap_without_finding_names_the_read",
+            '"repos/owner/approval-policy/rules/branches/main"',
+        ),
+    ),
+    "act_trust_pair._visible": (
+        r(
+            "identity",
+            "act_trust_pair._visible",
+            'body.get("full_name") != expected',
+            f"{TP}::test_pair_root_identity_checked",
+            '"привязка —"',
+        ),
+        r(
+            "not_public",
+            "act_trust_pair._visible",
+            "private is True",
+            f"{TP}::test_pair_private_repo_is_not_public_finding",
+            "репо не публичный (private = true)",
+        ),
+        r(
+            "visibility",
+            "act_trust_pair._visible",
+            "видимость не прочитана",
+            f"{TP}::test_pair_visibility_unread_is_unavailable",
+            '"owner/approval-policy: видимость не прочитана (None)"',
+        ),
+    ),
+    # --- df этап 3a (Task 7): программа проверяющего v2
+    "act_precheck_v2.parse": (
+        r(
+            "keys",
+            "act_precheck_v2.parse",
+            'f"keys: unexpected {extra}, missing {missing}"',
+            f"{V2}::test_v2_unknown_key_exit_2",
+            "\"keys: unexpected ['extra'], missing []\"",
+        ),
+        r(
+            "values",
+            "act_precheck_v2.parse",
+            'f"invalid values: {bad}"',
+            f"{V2}::test_v2_invalid_value_named_exit_2",
+            "\"invalid values: ['ctx_id']\"",
+        ),
+    ),
+    "act_precheck_v2._merge_request": (
+        r(
+            "route",
+            "act_precheck_v2._merge_request",
+            'common.origin_route != "merge"',
+            f"{V2}::test_merge_cross_fields_exit_2[route]",
+            '"cross-field: op merge needs origin_route merge"',
+        ),
+        r(
+            "accepted_is_x",
+            "act_precheck_v2._merge_request",
+            'accepted.sha != data["expected_snapshot_sha"]',
+            f"{V2}::test_merge_cross_fields_exit_2[accepted_not_x]",
+            '"cross-field: trust_accepted.sha != expected_snapshot_sha"',
+        ),
+    ),
+    "act_precheck_v2.answer": (
+        r(
+            "invariant",
+            "act_precheck_v2.answer",
+            "except ValueError as exc",
+            f"{V2}::test_reader_invariant_is_named_unset",
+            '"invariant_violated: epoch numbers not contiguous from 1"',
+        ),
+        r(
+            "deadline",
+            "act_precheck_v2.answer",
+            "except (DeadlineExceeded, DeadlineAlarm)",
+            f"{V2}::test_deadline_is_unset",
+            '"deadline"',
+        ),
+        r(
+            "unsupported_size",
+            "act_precheck_v2.answer",
+            "except UnsupportedSize as exc",
+            f"{V2}::test_unsupported_size_is_typed",
+            '"unsupported_size: epochs"',
+        ),
+    ),
+    "act_precheck_v2._wire": (
+        r(
+            "shape",
+            "act_precheck_v2._wire",
+            "if problem is not None",
+            f"{V2}::test_shape_contract_enforced",
+            '"invariant_violated: source null with findings []"',
+        ),
+        r(
+            "verdict_budget",
+            "act_precheck_v2._wire",
+            "except UnsupportedSize as exc",
+            f"{V2}::test_verdict_overflow_is_fixed_size",
+            '"unsupported_size: verdict"',
+        ),
+    ),
+    "act_precheck_v2._history": (
+        r(
+            "approved_gh",
+            "act_precheck_v2._history",
+            "return Unavailable(NO_APPROVED_GH)",
+            f"{V2}::test_keyed_binding_without_approved_gh_refused_not_path",
+            "NO_APPROVED_GH",
+        ),
+    ),
+    "act_precheck_v2.trust_part": (
+        r(
+            "policy_pin",
+            "act_precheck_v2.trust_part",
+            "policy.full_name != source.repo",
+            f"{V2}::test_policy_pin_of_other_repo_unset",
+            "\"policy pin 'owner/renamed' != source.env\"",
+        ),
+    ),
+    "act_precheck_v2.policy_history_break": (
+        r(
+            "policy_history_break",
+            "act_precheck_v2.policy_history_break",
+            "isinstance(got, act_facts.HistoryBreak)",
+            f"{V2}::test_reeval_merge_returns_policy_break",
+            '"policy_history_break"',
+        ),
+    ),
+    "act_precheck_v2._decided": (
+        r(
+            "findings_refuse",
+            "act_precheck_v2._decided",
+            "if findings:",
+            f"{V2}::test_trust_op_rollback_is_finding_not_synthesised",
+            '"perimeter_findings: history_unverifiable@df-trust"',
+        ),
+    ),
+    "act_precheck_v2._premerge_deps": (
+        r(
+            "approved_gh",
+            "act_precheck_v2._premerge_deps",
+            "if ctx.gh is None",
+            f"{V2}::test_premerge_deps_without_approved_gh_is_invariant",
+            "premerge deps without an approved gh",
+        ),
+    ),
+    "act_precheck_v2._shape_problem": (
+        r(
+            "findings_without_pair",
+            "act_precheck_v2._shape_problem",
+            "findings without a read pair",
+            f"{V2}::test_shape_contract_enforced",
+            '"findings without a read pair"',
+        ),
+        r(
+            "source_iff",
+            "act_precheck_v2._shape_problem",
+            "null_source != bool(kinds & SOURCE_FINDINGS)",
+            f"{V2}::test_shape_contract_enforced",
+            '"invariant_violated: source null with findings []"',
+        ),
+    ),
+    "act_precheck_v2.Adapter.status": (
+        r(
+            "stale_snapshot",
+            "act_precheck_v2.Adapter.status",
+            "snap.root.snapshot_sha != self.expected_sha",
+            f"{V2}::test_stale_snapshot_adapter",
+            '"stale_snapshot"',
+        ),
+    ),
+    "act_precheck_v2.Adapter.record": (
+        r(
+            "kindless",
+            "act_precheck_v2.Adapter.record",
+            "without kind",
+            f"{V2}::test_stale_snapshot_adapter",
+            '"journal adapter: a violation of df-trust without kind"',
+        ),
+    ),
+    "act_precheck_v2._merge": (
+        r(
+            "history_key",
+            "act_precheck_v2._merge",
+            "binding.history_gh_config_dir is None",
+            f"{V2}::test_merge_without_history_key_refused",
+            '"history_token_required: the binding has no key"',
+        ),
+        r(
+            "approved_gh",
+            "act_precheck_v2._merge",
+            "return Answer(REFUSE, NO_APPROVED_GH)",
+            f"{V2}::test_keyed_binding_without_approved_gh_refused_not_path",
+            "NO_APPROVED_GH",
+        ),
+        r(
+            "findings",
+            "act_precheck_v2._merge",
+            "if findings:",
+            f"{V2}::test_merge_settings_finding_refuses_with_findings",
+            '"ruleset_missing"',
+        ),
+    ),
+    "act_precheck_v2._premerge_deps.snapshot": (
+        r(
+            "findings_stop",
+            "act_precheck_v2._premerge_deps.snapshot",
+            "if adapter.findings:",
+            f"{V2}::test_merge_settings_finding_refuses_with_findings",
+            "candidate.heads == []",
+        ),
+    ),
+    "act_precheck_v2.surface_check.check": (
+        r(
+            "dag_variant",
+            "act_precheck_v2.surface_check.check",
+            "if dag is None",
+            f"{V2}::test_candidate_legacy_dag_variant_refused",
+            "\"surface_violation: dag variant 'legacy5' is not served in v1\"",
+        ),
+        r(
+            "own_manifest",
+            "act_precheck_v2.surface_check.check",
+            "is not changed by this PR",
+            f"{V2}::test_candidate_manifest_not_in_pr_refused",
+            '"is not changed by this PR"',
+        ),
+        r(
+            "surface",
+            "act_precheck_v2.surface_check.check",
+            'return ", ".join(bad) if bad else None',
+            f"{V2}::test_candidate_foreign_file_refused",
+            '"surface_violation: scripts/foreign.sh"',
+        ),
+    ),
+    "act_precheck_v2.finalize": (
+        r(
+            "read_failed",
+            "act_precheck_v2.finalize",
+            "except OPS_FAILURES as exc",
+            f"{V2}::test_finalize_read_failure_unset",
+            '"read_failed: disk"',
+        ),
+    ),
+    "act_precheck_v2._finalize_target": (
+        r(
+            "suffix",
+            "act_precheck_v2._finalize_target",
+            "has no finalize suffix",
+            f"{V2}::test_finalize_branch_of_unknown_request_refused",
+            "has no finalize suffix",
+        ),
+        r(
+            "form",
+            "act_precheck_v2._finalize_target",
+            "is not a finalize branch",
+            f"{V2}::test_finalize_not_a_finalize_branch_refused",
+            "\"finalize_branch: 'spec/ws-7-approve-x-final' is not a finalize branch\"",
+        ),
+    ),
+    "act_precheck_v2._finalize_in_history": (
+        r(
+            "history",
+            "act_precheck_v2._finalize_in_history",
+            'f"history_unavailable: {history.reason}"',
+            f"{V2}::test_finalize_history_unavailable_unset",
+            '"history_unavailable: first-parent"',
+        ),
+        r(
+            "delivered",
+            "act_precheck_v2._finalize_in_history",
+            "len(found) != 1",
+            f"{V2}::test_finalize_branch_of_unknown_request_refused",
+            '"no_delivered_request: ws-7/approve-3-1-1"',
+        ),
+        r(
+            "current",
+            "act_precheck_v2._finalize_in_history",
+            "if stale:",
+            f"{V2}::test_finalize_superseded_request_refused",
+            "\"request_not_current: nodes ['requirements']\"",
+        ),
+        r(
+            "candidate_pr",
+            "act_precheck_v2._finalize_in_history",
+            'f"candidate_pr: {pr.reason}"',
+            f"{V2}::test_finalize_candidate_pr_unreadable_unset",
+            '"candidate_pr: no PR"',
+        ),
+    ),
+    "act_precheck_v2._delivery": (
+        r(
+            "rejected",
+            "act_precheck_v2._delivery",
+            "isinstance(outcome, Rejected)",
+            f"{V2}::test_finalize_delivery_not_accepted[rejected]",
+            '"delivery_rejected: I_BYTES: x"',
+        ),
+        r(
+            "waiting",
+            "act_precheck_v2._delivery",
+            "isinstance(outcome, WaitingDelivery)",
+            f"{V2}::test_finalize_delivery_not_accepted[waiting]",
+            '"delivery_waiting: candidate PR #5"',
+        ),
+        r(
+            "unset",
+            "act_precheck_v2._delivery",
+            'f"delivery_unset: {why}"',
+            f"{V2}::test_finalize_delivery_not_accepted[unset]",
+            '"delivery_unset: facts down"',
+        ),
+    ),
+    "act_precheck_v2.head_hashes": (
+        r(
+            "unreadable",
+            "act_precheck_v2.head_hashes",
+            "does not read",
+            f"{V2}::test_head_hashes_refusals",
+            "does not read",
+        ),
+        r(
+            "projection",
+            "act_precheck_v2.head_hashes",
+            "except ProjectionError as exc",
+            f"{V2}::test_head_hashes_refusals",
+            '"маркер узла"',
+        ),
+    ),
+    "act_precheck_v2._envelopes": (
+        r(
+            "merge_commit",
+            "act_precheck_v2._envelopes",
+            "accepted.merge_commit != current.merge_commit",
+            f"{V2}::test_envelope_merge_commits_differ_refused",
+            "merge_commit_mismatch: delivery decision nnnnnnnnnnnn",
+        ),
+        r(
+            "set",
+            "act_precheck_v2._envelopes",
+            "touched != set(expected) or not plain",
+            f"{V2}::test_finalize_wrong_envelopes_refused",
+            '"envelope_set: the PR changes"',
+        ),
+        r(
+            "unreadable",
+            "act_precheck_v2._envelopes",
+            "if raw is None",
+            f"{V2}::test_envelope_unreadable_unset",
+            '"envelope_unreadable: workstreams/ws-7/approvals/requirements.yaml"',
+        ),
+        r(
+            "content",
+            "act_precheck_v2._envelopes",
+            'raw != text.encode("utf-8")',
+            f"{V2}::test_finalize_wrong_envelopes_refused",
+            '"envelope_content: workstreams/ws-7/approvals/requirements.yaml"',
+        ),
+    ),
 }
 
 
@@ -4137,7 +4679,7 @@ NOT_JUDGMENT = {
     "act_precheck._default_transport": _BUILD,
     "act_precheck.request_digest": _BUILD,
     "act_precheck.verdict": _BUILD,
-    "act_precheck.verdict_v2": "строит вердикт v2; исход по `complete_v2`, который судит `precheck serve` (`df/cli._tree_complete`)",
+    "act_precheck.verdict_v2": "строит вердикт `tree_incomplete`; исход по `complete_v2`, который судит `precheck serve` (`df/cli._tree_complete`)",
     "act_precheck._judge_stop": "передаёт отказ `_stop_target` и решение `_stop_in_history`; своей проверки нет",
     "act_precheck._snapshot": _IO,
     "act_precheck._remove": _IO,
@@ -4244,9 +4786,7 @@ NOT_JUDGMENT = {
     "act_node._merge_stop_pr.form": "замыкание проверки формы; суждение — `stop_pr_defect`",
     "act_node._remedy": _BUILD,
     "act_node.audit_completed": "аудит завершённых заявок; решения не меняет (приёмка №10)",
-    "act_premerge._Stop.__init__": _BUILD,
-    "act_premerge.app_installations": "фабрика проверки; суждение — `installations_refusal`",
-    "act_premerge.app_installations.check": "делегирует `act_app_token.installations_refusal`",
+    "act_premerge_core._Stop.__init__": _BUILD,
     "act_premerge._parser": _BUILD,
     "act_premerge.real_deps": _BUILD,
     "act_app_token._NoRedirect.redirect_request": "транспортная политика; отказа об объекте нет",
@@ -4287,6 +4827,63 @@ NOT_JUDGMENT = {
     "approve_node._review_debt": _BUILD,
     "approve_node._legacy_outcome": "вычисляет опубликованность снимка; делегирует `_legacy_verdict`",
     "runner._stop_on_refusal": "выбор стоп-статуса по уже вынесенному отказу `approve_node` (вынесено из `_finalize_wave`); не суждение",
+    # --- df этап 3a (Task 7): диспетчер v2, программа проверяющего v2, Tasks 4–6
+    **{
+        f"act_precheck.SnapshotRequest.{n}": "поле протокола запроса снимка; не суждение"
+        for n in (
+            "nonce",
+            "full_name",
+            "pr",
+            "base_ref",
+            "token",
+            "api_base",
+            "git_base",
+        )
+    },
+    "act_precheck._wall": _BUILD,
+    "act_precheck._emit": _IO,
+    "act_precheck._serve_v2": "выбор по `complete_v2` (его судит `precheck serve`, `df/cli._tree_complete`) и отложенный вызов программы v2; своей проверки нет",
+    "act_premerge_core.decide": "переводит `_Stop` проверки в код и причину; суждения — `_check`",
+    "act_trust.FindingSink.record_finding": "протокол журнала с видом находки; не суждение",
+    "act_app_installations.app_installations": "фабрика проверки; суждение — `installations_refusal`",
+    "act_app_installations.app_installations.check": "делегирует `act_app_token.installations_refusal`",
+    "act_trust_types.detail_size": _HELPER,
+    "act_trust_types.clip_detail": _HELPER,
+    "act_trust_findings.UnsupportedSize.__init__": _BUILD,
+    "act_trust_findings._canonical": _BUILD,
+    "act_trust_findings._plain": "сериализация dataclass для `_canonical`; иное значение — ошибка вызывающего (`TypeError`), не отказ",
+    "act_trust_findings._fit_text": _HELPER,
+    **{
+        f"act_trust_findings.EpochLike.{n}": "протокол эпохи журнала; не суждение"
+        for n in ("epoch", "anchor", "last_confirmed")
+    },
+    "act_trust_pair._checks": _BUILD,
+    "act_trust_pair._cold": "чтение цепочки и журнала; суждения — `act_trust._checked_epochs`",
+    "act_trust_pair._of": _BUILD,
+    "act_trust_pair._relation": _HELPER,
+    "act_trust_pair._warm": "выбор пути: `None` — холодный путь (база не описывает A), не отказ; суждения — `act_trust._checked_epochs`",
+    "act_precheck_v2.validation_of": _BUILD,
+    "act_precheck_v2._absolute_or_none": _PC_FIELD,
+    "act_precheck_v2._bytes_at_most": _PC_FIELD,
+    "act_precheck_v2._relative_dir": _PC_FIELD,
+    "act_precheck_v2._object": _PC_FIELD,
+    "act_precheck_v2._common": _BUILD,
+    "act_precheck_v2.MergeRequest.nonce": _BUILD,
+    "act_precheck_v2.Context.token_source": "строит источник токена по договору запуска; отсутствие `gh` судят `_history` и `_merge`",
+    "act_precheck_v2._alarm": "механизм срока (рубеж 1); исход `unset: deadline` выносит `answer`",
+    "act_precheck_v2._alarm.fire": "механизм срока (рубеж 1); исход `unset: deadline` выносит `answer`",
+    "act_precheck_v2._reason": _BUILD,
+    "act_precheck_v2._masked": _BUILD,
+    "act_precheck_v2._envelope": _BUILD,
+    "act_precheck_v2._trust_op": "передаёт исходы чтений и суждения `trust_part`, `policy_history_break`, `_decided`; своей проверки нет",
+    "act_precheck_v2._findings_reason": _BUILD,
+    "act_precheck_v2.Adapter.__init__": _BUILD,
+    "act_precheck_v2.Adapter.record_finding": "хранит находку, найденную проверкой `load_trust`; не суждение",
+    "act_precheck_v2.Adapter.add": "хранит находки `trust_part`; не суждение",
+    "act_precheck_v2._id": _PC_FIELD,
+    "act_precheck_v2._unverified": _BUILD,
+    "act_precheck_v2._args": _BUILD,
+    "act_precheck_v2.surface_check": "фабрика проверки; суждение — `surface_check.check`",
 }
 
 #: Ложные срабатывания детектора проверок-отказов: путь, похожий на отказ, отказом
@@ -4298,6 +4895,10 @@ GUARD_EXEMPT = {
     "act_barrier._pending": "`False` — файл без frontmatter не узел бандла (не отказ)",
     "act_journal_wire._json": (
         "`None` — не JSON; отказ решает проверка типа в `_observations_ok`"
+    ),
+    "act_trust_pair._warm": (
+        "`None` — холодный путь (база не описывает A), `Unavailable` — проброс "
+        "чтения; своего отказа нет"
     ),
 }
 

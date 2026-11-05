@@ -426,17 +426,61 @@ def test_listed_module_resolving_to_another_file_named(tmp_path: Path) -> None:
     ]
 
 
+#: The exact run-as-a-file bootstrap tests (review M9): any other `if` naming
+#: `__package__` is not exempt.
+BOOTSTRAP_TESTS = frozenset(
+    {
+        "__package__ in (None, '')",
+        "__package__ in (None, '') and 'governance' not in sys.modules",
+    }
+)
+
+
 def _uses_file(module: str) -> bool:
+    """The module names `__file__` outside its run-as-a-file bootstrap (`if
+    __package__ in (None, "")`: the package directory, not a contract file)."""
     listing = load_tree_list(ROOT)
     path = ROOT / listing.module_files()[listing.modules.index(module)]
     tree = ast.parse(path.read_text(encoding="utf-8"))
-    return any(isinstance(n, ast.Name) and n.id == "__file__" for n in ast.walk(tree))
+    boot = {
+        id(n)
+        for top in tree.body
+        if isinstance(top, ast.If) and ast.unparse(top.test) in BOOTSTRAP_TESTS
+        for n in ast.walk(top)
+    }
+    return any(
+        isinstance(n, ast.Name) and n.id == "__file__" and id(n) not in boot
+        for n in ast.walk(tree)
+    )
+
+
+#: Paths a module of the closure names but the precheck program never reads,
+#: with the reason (3a Task 7: `act_source` joined the closure with v2).
+NOT_READ_BY_PRECHECK = {
+    "contracts/approval-policy-source/v2/source.env": "load_source",
+}
+
+
+def test_not_read_by_precheck_is_never_called() -> None:
+    """Review M9: each exempt path's reader is called by no module of the
+    closure (AST), so the precheck never reads it."""
+    readers = set(NOT_READ_BY_PRECHECK.values())
+    listing = load_tree_list(ROOT)
+    calls = [
+        f"{rel}:{n.lineno}"
+        for rel in listing.module_files()
+        for n in ast.walk(ast.parse((ROOT / rel).read_text(encoding="utf-8")))
+        if isinstance(n, ast.Call)
+        and (getattr(n.func, "attr", None) or getattr(n.func, "id", None)) in readers
+    ]
+    assert calls == []
 
 
 def test_contract_files_cover_file_relative_reads() -> None:
     """Every module of the closure that names `__file__` resolves it to
-    paths outside `governance/`; those paths are exactly the list's
-    contract files, each a regular file of this tree."""
+    paths outside `governance/`; those paths, but the ones the precheck never
+    reads (`NOT_READ_BY_PRECHECK`), are exactly the list's contract files,
+    each a regular file of this tree."""
     users = [m for m in load_tree_list(ROOT).modules if _uses_file(m)]
     assert users  # positive control: approval_branches reads patterns.env
     found: set[str] = set()
@@ -452,7 +496,8 @@ def test_contract_files_cover_file_relative_reads() -> None:
         assert rels, f"{name}: names __file__ but no path outside governance/"
         found |= rels
     contracts = load_tree_list(ROOT).contract_files
-    assert sorted(found) == sorted(contracts)
+    assert set(NOT_READ_BY_PRECHECK) <= found
+    assert sorted(found - set(NOT_READ_BY_PRECHECK)) == sorted(contracts)
     assert all((ROOT / rel).is_file() for rel in contracts)
 
 
@@ -1226,3 +1271,14 @@ def test_expected_admin_digest_raises_only_tree_error(
         why = "act_time.py"
     with pytest.raises(TreeError, match=why):
         admin.expected_admin_digest(ref, layout=lay, git=SYSTEM_GIT)
+
+
+def test_precheck_tree_is_authority_root() -> None:
+    """Review D4: the privileged checker runs every module and contract file of
+    `df/precheck_tree.toml`; each is under `AUTHORITY_ROOT_PREFIXES`, so no file
+    of the tree is agent-mergeable."""
+    from governance import authority_root
+
+    files = list(load_tree_list(ROOT).files())
+    assert files
+    assert [f for f in files if f not in authority_root.touched(files)] == []
