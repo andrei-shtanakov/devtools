@@ -427,16 +427,38 @@ def test_listed_module_resolving_to_another_file_named(tmp_path: Path) -> None:
 
 
 def _uses_file(module: str) -> bool:
+    """The module names `__file__` outside its run-as-a-file bootstrap (`if
+    __package__ in (None, "")`: the package directory, not a contract file)."""
     listing = load_tree_list(ROOT)
     path = ROOT / listing.module_files()[listing.modules.index(module)]
     tree = ast.parse(path.read_text(encoding="utf-8"))
-    return any(isinstance(n, ast.Name) and n.id == "__file__" for n in ast.walk(tree))
+    boot = {
+        id(n)
+        for top in tree.body
+        if isinstance(top, ast.If) and "__package__" in ast.unparse(top.test)
+        for n in ast.walk(top)
+    }
+    return any(
+        isinstance(n, ast.Name) and n.id == "__file__" and id(n) not in boot
+        for n in ast.walk(tree)
+    )
+
+
+#: Paths a module of the closure names but the precheck program never reads,
+#: with the reason (3a Task 7: `act_source` joined the closure with v2).
+NOT_READ_BY_PRECHECK = {
+    "contracts/approval-policy-source/v2/source.env": (
+        "act_source.load_source (the devtools file) -- `act_trust` never calls it "
+        "(tests/test_act_trust.py::test_load_source_not_called)"
+    ),
+}
 
 
 def test_contract_files_cover_file_relative_reads() -> None:
     """Every module of the closure that names `__file__` resolves it to
-    paths outside `governance/`; those paths are exactly the list's
-    contract files, each a regular file of this tree."""
+    paths outside `governance/`; those paths, but the ones the precheck never
+    reads (`NOT_READ_BY_PRECHECK`), are exactly the list's contract files,
+    each a regular file of this tree."""
     users = [m for m in load_tree_list(ROOT).modules if _uses_file(m)]
     assert users  # positive control: approval_branches reads patterns.env
     found: set[str] = set()
@@ -452,7 +474,8 @@ def test_contract_files_cover_file_relative_reads() -> None:
         assert rels, f"{name}: names __file__ but no path outside governance/"
         found |= rels
     contracts = load_tree_list(ROOT).contract_files
-    assert sorted(found) == sorted(contracts)
+    assert set(NOT_READ_BY_PRECHECK) <= found
+    assert sorted(found - set(NOT_READ_BY_PRECHECK)) == sorted(contracts)
     assert all((ROOT / rel).is_file() for rel in contracts)
 
 

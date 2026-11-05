@@ -891,12 +891,13 @@ def _old_installer_tree(lay: Layout) -> Path:
     """The admin tree a 2b installer builds from a pin whose list grew past
     2b (spec 3.9 rev 11, the 2b -> 3a path): the real 2b files of this
     checkout (`LEGACY_2B`, all it copies outside `df/`), and in `df/` the
-    pin's list -- this checkout's plus a v2 module the tree lacks."""
+    pin's list -- this checkout's, which names the v2 program (3a Task 7),
+    plus it if a pin before Task 7 lacked it: modules the tree lacks."""
     tree = lay.admin_dir(RELEASE)
     for rel in admin_tree.LEGACY_2B.files():
         shutil.copyfile(admin_tree_root() / rel, tree / rel)
     grown = admin_tree.load_tree_list(admin_tree_root())
-    modules = json.dumps([*grown.modules, "governance.act_precheck_v2"])
+    modules = json.dumps(sorted({*grown.modules, "governance.act_precheck_v2"}))
     contracts = json.dumps(list(grown.contract_files))
     (tree / admin_tree.TREE_LIST).write_text(
         f'schema = "{admin_tree.TREE_SCHEMA}"\n'

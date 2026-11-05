@@ -9,12 +9,13 @@ does not parse or violates the schema gets exit code 2 and no verdict; the reaso
 goes to stderr without the token.
 
 Requests are dispatched by `schema` (stage 3a, spec 5.4 rev 11): v1 as below;
-`df/precheck-request/v2` gets a `df/precheck-verdict/v2` refusal -- `tree_incomplete`
-when the admin tree lacks files of its list (`complete_v2` false: `precheck serve`
-checked it before this module was imported), else `v2_unavailable` until the v2
-program lands. The module's own imports stay within the 2b closure, so a tree an
-older installer built still serves v1; the v2 program is imported only after the
-check.
+`df/precheck-request/v2` gets a `df/precheck-verdict/v2` -- the typed refusal
+`tree_incomplete` when the admin tree lacks files of its list (`complete_v2`
+false: `precheck serve` checked it before this module was imported), else the
+answer of the v2 program `act_precheck_v2` (`op: trust`, `op: merge`). The
+module's own top-level imports stay within the 2b closure (`LEGACY_2B`), so a
+tree an older installer built still serves v1; the v2 program is imported only
+after the check, by a deferred import.
 
 In 2b only kind `stop` is served (decision 2): the PR adds exactly one stop record
 (decision 11), its branch is the stop branch of that record (decision 6), the record
@@ -39,10 +40,11 @@ import re
 import shutil
 import sys
 import time
-from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import BinaryIO, TextIO
+from typing import BinaryIO, Protocol, TextIO
 
 from governance.act_envelope import (
     DeliveredStop,
@@ -70,12 +72,11 @@ REQUEST_SCHEMA_V2 = "df/precheck-request/v2"
 VERDICT_SCHEMA_V2 = "df/precheck-verdict/v2"
 PRECHECK_VERSION_V2 = "df-precheck/2"
 TREE_INCOMPLETE = "tree_incomplete"
-#: The v2 refusals of the minimal dispatcher (stage 3a Task 1; Task 7 serves v2).
+#: The v2 refusal of a tree without files of its list (stage 3a Task 1).
 REASON_TREE_INCOMPLETE = (
     "tree_incomplete: the admin tree was built by an installer older than its "
     "df/precheck_tree.toml; reinstall the release"
 )
-REASON_V2_UNAVAILABLE = "v2_unavailable: protocol v2 is not served yet"
 #: Kinds served by protocol v1; stage 3 adds kinds in v2 schemas, not here.
 KINDS = ("stop",)
 MAX_REQUEST = 64 << 10
@@ -181,19 +182,48 @@ class PrecheckRequest:
 
 @dataclass(frozen=True)
 class RequestV2:
-    """A `df/precheck-request/v2` as far as the minimal dispatcher reads it."""
+    """A `df/precheck-request/v2` as far as the dispatcher reads it: the nonce and
+    digest bind the verdict; `data` — the whole object, which the v2 program
+    parses strictly (`act_precheck_v2.parse`)."""
 
     nonce: str
     digest: str
+    data: Mapping[str, object] = field(repr=False)
+
+
+class SnapshotRequest(Protocol):
+    """What `_snapshot` reads of a request (v1 stop, v2 finalize)."""
+
+    @property
+    def nonce(self) -> str: ...
+    @property
+    def full_name(self) -> str: ...
+    @property
+    def pr(self) -> int: ...
+    @property
+    def base_ref(self) -> str: ...
+    @property
+    def token(self) -> str: ...
+    @property
+    def api_base(self) -> str: ...
+    @property
+    def git_base(self) -> str: ...
+
+
+def _wall() -> datetime:
+    return datetime.now(UTC).replace(microsecond=0)
 
 
 @dataclass(frozen=True)
 class PrecheckDeps:
-    """Seams for tests: REST transport, snapshot opener (`open_snapshot`), clock."""
+    """Seams for tests: REST transport, snapshot opener (`open_snapshot`), clock;
+    for v2 also the wall clock and `sleep` of the premerge check."""
 
     transport_for: Callable[[str, str], TokenTransport]
     snapshot_for: Callable[..., Path]
     now: Callable[[], float]
+    wall: Callable[[], datetime] = _wall
+    sleep: Callable[[float], None] = time.sleep
 
 
 @dataclass(frozen=True)
@@ -238,20 +268,67 @@ def serve(
     deadline = deps.now() + DEADLINE
     try:
         request = parse_request(stdin.read(MAX_REQUEST + 1))
+        wire = (
+            _serve_v2(request, admin_digest, home, complete_v2, gh, git, deps, deadline)
+            if isinstance(request, RequestV2)
+            else None
+        )
     except InvalidRequest as exc:
         print(f"df-precheck: invalid request: {exc}", file=sys.stderr)
         return EXIT_REQUEST
-    if isinstance(request, RequestV2):
-        answer = verdict_v2(request, admin_digest, complete_v2=complete_v2)
-    else:
-        outcome, reason = _decide(request, home, git, deps, deadline)
-        reason = reason.replace(request.token, "[token]")
-        if len(reason) > MAX_REASON:
-            reason = reason[:MAX_REASON] + TRUNCATED
-        answer = verdict(request, outcome, reason, admin_digest)
+    if not isinstance(request, PrecheckRequest):
+        assert wire is not None
+        _emit(stdout, wire)
+        return 0
+    outcome, reason = _decide(request, home, git, deps, deadline)
+    reason = reason.replace(request.token, "[token]")
+    if len(reason) > MAX_REASON:
+        reason = reason[:MAX_REASON] + TRUNCATED
+    answer = verdict(request, outcome, reason, admin_digest)
     stdout.write(json.dumps(answer) + "\n")
     stdout.flush()
     return 0
+
+
+def _serve_v2(
+    request: RequestV2,
+    admin_digest: str,
+    home: Path,
+    complete_v2: bool,
+    gh: Path | None,
+    git: Path,
+    deps: PrecheckDeps,
+    deadline: float,
+) -> bytes:
+    """The wire bytes of the v2 verdict: `tree_incomplete` without importing the v2
+    program, else its answer (`InvalidRequest` — exit 2, no verdict)."""
+    if not complete_v2:
+        return json.dumps(verdict_v2(request, admin_digest)).encode("utf-8")
+    # Spec 3.9 rev 11: the v2 program imports its closure after the tree check.
+    from governance import act_precheck_v2
+
+    return act_precheck_v2.answer(
+        request,
+        admin_digest=admin_digest,
+        home=home,
+        gh=gh,
+        git=git,
+        deps=deps,
+        deadline=deadline,
+    )
+
+
+def _emit(stdout: TextIO, wire: bytes) -> None:
+    """Exactly `wire` and a newline: through the binary buffer when the stream has
+    one (the command's stdout), else decoded (a test's `StringIO`)."""
+    buffer = getattr(stdout, "buffer", None)
+    stdout.flush()
+    if buffer is not None:
+        buffer.write(wire + b"\n")
+        buffer.flush()
+    else:
+        stdout.write(wire.decode("utf-8") + "\n")
+        stdout.flush()
 
 
 def parse_request(raw: bytes) -> PrecheckRequest | RequestV2:
@@ -287,29 +364,28 @@ def parse_request(raw: bytes) -> PrecheckRequest | RequestV2:
 
 
 def parse_request_v2(data: dict[str, object]) -> RequestV2:
-    """A `df/precheck-request/v2` object: until the v2 program (stage 3a Task 7)
-    only `nonce` is checked, the verdict binds it and `request_digest`."""
+    """A `df/precheck-request/v2` object as the dispatcher reads it: `nonce` is
+    checked (a `tree_incomplete` verdict binds it and `request_digest`); the rest
+    is the v2 program's (`act_precheck_v2.parse`)."""
     nonce = data.get("nonce")
     if not _matches(_NONCE)(nonce):
         raise InvalidRequest("invalid values: ['nonce']")
-    return RequestV2(str(nonce), request_digest(data))
+    try:
+        digest = request_digest(data)
+    except UnicodeEncodeError:
+        raise InvalidRequest("request carries lone surrogates") from None
+    return RequestV2(str(nonce), digest, data)
 
 
-def verdict_v2(
-    request: RequestV2, admin_digest: str, *, complete_v2: bool
-) -> dict[str, object]:
-    """The `df/precheck-verdict/v2` refusal of the minimal dispatcher."""
-    if complete_v2:
-        # Stage 3a Task 7: the v2 program is imported here, after the check.
-        outcome, reason = REFUSE, REASON_V2_UNAVAILABLE
-    else:
-        outcome, reason = TREE_INCOMPLETE, REASON_TREE_INCOMPLETE
+def verdict_v2(request: RequestV2, admin_digest: str) -> dict[str, object]:
+    """The `df/precheck-verdict/v2` refusal `tree_incomplete` of a tree without
+    files of its list: built without the v2 program, bound to the request."""
     return {
         "schema": VERDICT_SCHEMA_V2,
         "nonce": request.nonce,
         "request_digest": request.digest,
-        "outcome": outcome,
-        "reason": reason,
+        "outcome": TREE_INCOMPLETE,
+        "reason": REASON_TREE_INCOMPLETE,
         "version": PRECHECK_VERSION_V2,
         "admin_digest": admin_digest,
     }
@@ -445,7 +521,7 @@ def _stop_in_history(
 
 @contextlib.contextmanager
 def _snapshot(
-    request: PrecheckRequest,
+    request: SnapshotRequest,
     home: Path,
     git: Path,
     deps: PrecheckDeps,

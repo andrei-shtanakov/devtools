@@ -422,7 +422,7 @@ BYPASS: dict[str, tuple[str, str]] = {
         '    except FileNotFoundError as exc:\n        return Unavailable(f"привязка {path}: {exc}")\n',
     ),
     "act_trust.load_ranges:history_violation": (
-        'return _register(journal, trust.snapshot, ("approval-policy", got.reason))',
+        'return _register(journal, trust.snapshot, found, "policy_history_break")',
         "got = ()",
     ),
     "act_trust.load_ranges:unknown_anchor": (
@@ -738,8 +738,8 @@ MANDATORY: dict[str, tuple[str, str, str, tuple[str, ...]]] = {
     ),
     "M4:credential_shapes_open": (
         "act_trust.load_trust",
-        "refused = _creds_refusal(creds) or _shared_profile_refusal(creds, binding)",
-        "refused = _shared_profile_refusal(creds, binding)",
+        "refused = _creds_refusal(held) or _shared_profile_refusal(held, binding)",
+        "refused = _shared_profile_refusal(held, binding)",
         (
             "tests/test_act_trust.py::test_caller_history_credential_refused_before_io",
             *_TRUST_SEAMS,

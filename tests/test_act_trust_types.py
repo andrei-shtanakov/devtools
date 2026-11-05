@@ -151,3 +151,16 @@ def test_no_third_party_imports(module: str) -> None:
         cwd=ROOT,
     )
     assert out.stdout.strip() == "[]"
+
+
+def test_finding_and_ranges_refusals_named() -> None:
+    """Each invariant of the shared types refuses with its own reason (3a Task 7:
+    the identity table)."""
+    with pytest.raises(ValueError, match="unknown finding kind"):
+        gov.Finding("nope", "df-trust", "")
+    with pytest.raises(ValueError, match="not allowed for role"):
+        gov.Finding("policy_history_break", "df-trust", "")
+    with pytest.raises(ValueError, match="detail over 512 bytes"):
+        gov.Finding("token_write", "df-trust", "x" * 600)
+    with pytest.raises(ValueError, match="more than 64 epochs"):
+        gov.RangeDescriptor(((1, "a", "b"),) * 65, "d")

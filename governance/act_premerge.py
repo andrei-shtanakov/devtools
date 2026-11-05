@@ -13,6 +13,12 @@
 (`act_projection`) здесь не импортируется. Если правка их втянет, инвариант
 `tests/harness_trust.py` потребует внести их в authority-root и
 `_HARNESS_PREFIXES` (п. 8 заметок части A).
+
+The precheck program of df (protocol v2, `act_precheck_v2`; df stage 3a,
+Task 7) runs the same check through `decide` with the merger of its request
+(N4), the derived-credential mode (N3), the pinned P and the D16 surface; its
+import closure must not reach `jwt`, so the App mode of the CLI loads
+`act_app_installations` by name (`real_deps`).
 """
 
 from __future__ import annotations
@@ -37,6 +43,7 @@ if __package__ in (None, "") and "governance" not in sys.modules:
     _spec.loader.exec_module(_pkg)
 
 import argparse  # noqa: E402
+import importlib  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
 import time  # noqa: E402
@@ -51,7 +58,11 @@ from governance.act_check import ActivationView, live_policy_refusal  # noqa: E4
 from governance.act_decision import find_act, merger_allowed  # noqa: E402
 from governance.act_identity import RequestIdentity, manifest_refusal  # noqa: E402
 from governance.act_policy import PolicySet  # noqa: E402
-from governance.act_request import RequestError, parse_manifest  # noqa: E402
+from governance.act_request import (  # noqa: E402
+    NodeRequest,
+    RequestError,
+    parse_manifest,
+)
 from governance.act_time import Clock, Unavailable, parse_ts  # noqa: E402
 
 EXIT_OK, EXIT_UNSET, EXIT_REFUSED = 0, 2, 3
@@ -67,6 +78,10 @@ REGISTERED = " — событие записано в журнал периме�
 
 Installations = Callable[[act_trust.Binding], "act_trust.Found"]
 """Самоотчёт установок App у держателя ключа (Task 15a); `None` — режим профиля."""
+Surface = Callable[[RequestIdentity, NodeRequest], "str | None"]
+"""The D16 surface of the whole PR (df precheck v2): a refusal reason or `None`."""
+#: The module of the CLI's App mode, loaded by name (see the module docstring).
+APP_INSTALLATIONS = "governance.act_app_installations"
 
 
 class _Stop(Exception):
@@ -85,8 +100,15 @@ class PremergeDeps:
     journal: Any  # act_trust.Journal | Unavailable — по привязке
     now: Callable[[], datetime]
     sleep: Callable[[float], None]
-    creds: tuple[act_trust.Credential, ...]
+    creds: tuple[act_trust.Credential, ...] | act_trust.KeyHolderCovered
     installations: Installations | None = None
+    #: The history token by the df launch contract (the approved `gh`, §3.10).
+    token_source: Callable[[Path], str | Unavailable] | None = None
+    #: The pinned head P of `approval-policy` (df precheck v2, spec B §6.1).
+    policy_head: str | None = None
+    #: The trust snapshot reader (df precheck v2: the pair by SHA).
+    snapshot: act_trust.SnapshotReader | None = None
+    surface: Surface | None = None
 
 
 def request_of_branch(head_ref: str) -> tuple[str, str] | None:
@@ -173,7 +195,13 @@ def _trust(deps: PremergeDeps) -> act_trust.Trust:
     if isinstance(deps.journal, Unavailable):
         raise _Stop(EXIT_UNSET, f"журнал периметра: {deps.journal.reason}")
     trust = act_trust.load_trust(
-        deps.readers, deps.binding, deps.journal, creds=deps.creds
+        deps.readers,
+        deps.binding,
+        deps.journal,
+        creds=deps.creds,
+        token_source=deps.token_source,
+        snapshot=deps.snapshot,
+        policy_head=deps.policy_head,
     )
     if isinstance(trust, Unavailable):
         raise _Stop(EXIT_UNSET, trust.reason)
@@ -216,6 +244,9 @@ def _check(args: argparse.Namespace, deps: PremergeDeps) -> None:
     )
     if refusal is not None:
         raise _Stop(EXIT_REFUSED, refusal)
+    off_surface = None if deps.surface is None else deps.surface(ident, req)
+    if off_surface is not None:
+        raise _Stop(EXIT_REFUSED, f"surface_violation: {off_surface}")
     if not merger_allowed(policy, args.merger, args.merger_type):
         raise _Stop(EXIT_REFUSED, f"мержер {args.merger} не пройдёт D3")
     facts = _act(args, deps, policy)
@@ -271,25 +302,6 @@ def _approve_in_current_second(facts: Any, head: str, now: datetime) -> bool:
     return False
 
 
-def app_installations(app_id: int, key: Path, *, http: Any = None) -> Installations:
-    """Самоотчёт установок App у держателя ключа (§6.2; ревизия b1, B1-11).
-
-    Производный токен установки предпроверка не держит (`merge-pr.sh` запускает
-    её с `GH_TOKEN=""`), поэтому `_self_report` его не опрашивает; прочие
-    credentials процесса (`GITHUB_TOKEN`, профили) проверяются как обычно."""
-    from governance import act_app_token
-
-    def check(binding: act_trust.Binding) -> act_trust.Found:
-        repos = {
-            "approval-policy": binding.approval_policy_repository_id,
-            "df-trust": binding.df_trust_repository_id,
-        }
-        extra = {} if http is None else {"http": http}
-        return act_app_token.installations_refusal(app_id, key, repos, **extra)
-
-    return check
-
-
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="act_premerge")
     for name in ("--repo", "--head", "--head-ref", "--merge-profile", "--merger"):
@@ -331,7 +343,9 @@ def real_deps(
         installations=(
             None
             if args.app_id is None
-            else app_installations(args.app_id, args.app_key)
+            else importlib.import_module(APP_INSTALLATIONS).app_installations(
+                args.app_id, args.app_key
+            )
         ),
     )
 
@@ -350,12 +364,20 @@ def main(argv: Sequence[str] | None = None, deps: PremergeDeps | None = None) ->
         return EXIT_REFUSED
     if deps is None:
         deps = real_deps(args)
+    code, reason = decide(args, deps)
+    if code != EXIT_OK:
+        print(f"act_premerge: {reason}", file=sys.stderr)
+    return code
+
+
+def decide(args: argparse.Namespace, deps: PremergeDeps) -> tuple[int, str]:
+    """The check without printing: `(EXIT_OK, "")` or the exit code and reason
+    (`main`; the df precheck v2 maps 3 to `refuse`, 2 to `unset`)."""
     try:
         _check(args, deps)
     except _Stop as stop:
-        print(f"act_premerge: {stop}", file=sys.stderr)
-        return stop.code
-    return EXIT_OK
+        return stop.code, str(stop)
+    return EXIT_OK, ""
 
 
 if __name__ == "__main__":

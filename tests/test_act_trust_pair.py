@@ -506,3 +506,28 @@ def test_settings_keyed_binding_never_skips_self_report() -> None:
 def test_role_literals_equal() -> None:
     """N-2: `act_trust.Role` mirrors `act_trust_types.Role`."""
     assert get_args(act_trust.Role) == get_args(act_trust_types.Role)
+
+
+def test_pair_unsupported_host_refused() -> None:
+    anon = Anon(world(LINEAR))
+    other = replace(binding(), host="gitlab.example")
+    got = act_trust_pair.read_pair(anon, other, base(C1), C2, validation=V1)
+    assert isinstance(got, Unavailable)
+    assert got.reason == "привязка: хост 'gitlab.example' не поддерживается v1"
+    assert anon.sent == []
+
+
+def test_pair_visibility_unread_is_unavailable() -> None:
+    routes = world(LINEAR)
+    routes["repositories/22"] = (200, {"full_name": AP})
+    got, _anon = pair(routes, base(C1), C2)
+    assert isinstance(got, Unavailable)
+    assert got.reason == "owner/approval-policy: видимость не прочитана (None)"
+
+
+def test_settings_gap_without_finding_names_the_read() -> None:
+    routes = settings_routes(rebase={DT: False, AP: False})
+    del routes[f"repos/{AP}/rules/branches/main"]
+    got = settings(routes)
+    assert isinstance(got, Unavailable)
+    assert got.reason.startswith("repos/owner/approval-policy/rules/branches/main")

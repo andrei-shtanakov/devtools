@@ -181,8 +181,17 @@ def test_wiring_site_decides_with_history_token(
 #: Швы ввода-вывода решения: внедряют только тесты (ревью Task 11c, Minor 6).
 _SEAMS = frozenset({"open_url", "token_source"})
 _ENTRIES = frozenset({"load_trust", "history_transport"})
-#: Единственная боевая передача швов — `load_trust` в свою фабрику.
-_SEAM_PASS = frozenset({("governance/act_trust.py::load_trust", "history_transport")})
+#: Боевые передачи швов: `load_trust` в свою фабрику и договор запуска df (спека B
+#: §3.10 rev 11) — программа проверяющего v2 передаёт `token_source` с утверждённым
+#: `gh` (`partial(history_token_at, gh=…, role_home=…)`) в фабрику и через
+#: `act_premerge._trust` в `load_trust`; `open_url` боевой код не передаёт.
+_SEAM_PASS = frozenset(
+    {
+        ("governance/act_trust.py::load_trust", "history_transport"),
+        ("governance/act_precheck_v2.py::_history", "history_transport"),
+        ("governance/act_premerge.py::_trust", "load_trust"),
+    }
+)
 
 
 def _seam_calls(rel: str, text: str) -> set[str]:

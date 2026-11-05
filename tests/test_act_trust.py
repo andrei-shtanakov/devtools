@@ -772,7 +772,7 @@ def test_closed_epoch_break_registers_event(monkeypatch) -> None:
     monkeypatch.setattr(
         act_facts,
         "history",
-        lambda t, s, a, u: (
+        lambda t, s, a, u, head=None: (
             act_facts.HistoryBreak("commit_without_pr: x")
             if u
             else (act_facts.ActivationFact(1, a, parse_ts("2026-10-12T08:00:00Z"), {}),)
@@ -797,7 +797,9 @@ def test_closed_epoch_break_registers_event(monkeypatch) -> None:
 
 
 def test_unknown_anchor_time_makes_range_unavailable(monkeypatch) -> None:
-    monkeypatch.setattr(act_facts, "history", lambda t, s, a, u: pytest.fail("read"))
+    monkeypatch.setattr(
+        act_facts, "history", lambda t, s, a, u, head=None: pytest.fail("read")
+    )
     got = act_trust.load_ranges(
         _via(_trust((Epoch(1, BOOT),)), Anon({})),
         {BOOT: Unavailable("object_missing")},
@@ -936,7 +938,7 @@ def test_mode_needs_prior_epoch_unless_review() -> None:
 
 def test_history_read_failure_no_event(monkeypatch) -> None:
     monkeypatch.setattr(
-        act_facts, "history", lambda t, s, a, u: Unavailable("http: 403")
+        act_facts, "history", lambda t, s, a, u, head=None: Unavailable("http: 403")
     )
     journal = Journal()
     got = act_trust.load_ranges(
@@ -953,7 +955,7 @@ def test_policy_sets_after_t_not_loaded(monkeypatch) -> None:
         _activation(BOOT, "2026-10-12T08:00:00Z"),
         _activation("e" * 40, "2026-10-12T11:00:00Z"),
     )
-    monkeypatch.setattr(act_facts, "history", lambda t, s, a, u: acts)
+    monkeypatch.setattr(act_facts, "history", lambda t, s, a, u, head=None: acts)
     loaded: list[str] = []
     monkeypatch.setattr(
         act_trust,

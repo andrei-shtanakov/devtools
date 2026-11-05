@@ -591,16 +591,55 @@ def test_verdict_binds_request(tmp_path: Path) -> None:
     assert PRECHECK_VERSION == "df-precheck/1"
 
 
-# --- протокол v2: минимальный диспетчер (этап 3a, Task 1) ----------------------
+# --- протокол v2: диспетчер (этап 3a, Tasks 1, 7) --------------------------------
 
 
 def _req_v2(**over: object) -> dict[str, object]:
-    """Запрос `df/precheck-request/v2`: диспетчер до Task 7 читает только nonce."""
+    """A `df/precheck-request/v2` (`op: merge`, finalize) with a keyed binding."""
     base: dict[str, object] = {
         "schema": "df/precheck-request/v2",
         "nonce": NONCE,
         "op": "merge",
+        "origin_route": "merge",
+        "ctx_id": "c" * 64,
+        "observation_id": 3,
+        "binding": {
+            "host": "github.com",
+            "df_trust_repository_id": 11,
+            "df_trust_full_name": "owner/df-trust",
+            "branch": "main",
+            "approval_policy_repository_id": 22,
+            "history_gh_config_dir": "/etc/df/history-gh",
+        },
+        "policy": {
+            "full_name": "owner/approval-policy",
+            "branch": "main",
+            "p_sha": "f" * 40,
+        },
+        "expected_snapshot_sha": "1" * 40,
+        "trust_accepted": {
+            "sha": "1" * 40,
+            "last_epoch": 1,
+            "source_digest": "d" * 64,
+            "validation": "df-trust-rules/1:" + ADMIN,
+        },
+        "preliminary_state": "clear",
+        "kind": "finalize",
+        "repository_id": 42,
+        "full_name": SLUG,
+        "pr": 9,
+        "head_sha": "b" * 40,
+        "head_ref": f"spec/{WS}-approve-2-1-1-final",
+        "base_ref": "master",
+        "base_tip": "c" * 40,
+        "changes": [],
         "token": TOKEN,
+        "merger_login": "df-reviewer[bot]",
+        "merger_type": "Bot",
+        "bundle_dir": "workstreams/{ws}/spec",
+        "dag_variant": "full",
+        "api_base": API,
+        "git_base": "http://127.0.0.1:9",
     }
     return base | over
 
@@ -617,14 +656,75 @@ def _verdict_v2(payload: dict[str, object], outcome: str, reason: str) -> dict:
     }
 
 
-def test_v2_unavailable_until_task7(tmp_path: Path) -> None:
-    """Полное дерево: запрос v2 разобран по `schema` и отказан `v2_unavailable`
-    вердиктом v2, связанным с запросом; без сети и снимков; токена в нём нет."""
+def test_v1_stop_unchanged(tmp_path: Path) -> None:
+    """Stage 3a leaves protocol v1 as in 2b: a stop request gets the v1 verdict
+    with exactly the 2b keys, and serving it never imports the v2 program."""
+    code = (
+        "import io, json, sys, time\n"
+        "from pathlib import Path\n"
+        "from governance import act_precheck as p\n"
+        "out = io.StringIO()\n"
+        f"req = json.dumps({_req(changes=[])!r}).encode()\n"
+        "deps = p.PrecheckDeps(lambda t, a: None, lambda *a, **k: None, time.monotonic)\n"
+        f"home = Path({str(tmp_path)!r})\n"
+        "rc = p.serve(io.BytesIO(req), out, admin_digest='a' * 64, home=home,\n"
+        f"    complete_v2=True, gh=None, git=Path({str(GIT)!r}), deps=deps)\n"
+        "print(json.dumps([rc, json.loads(out.getvalue()),\n"
+        "    'governance.act_precheck_v2' in sys.modules]))\n"
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
+    )
+    rc, verdict, imported = json.loads(done.stdout)
+    assert rc == 0 and imported is False
+    assert sorted(verdict) == sorted(
+        [
+            "schema",
+            "nonce",
+            "request_digest",
+            "repository_id",
+            "pr",
+            "head_sha",
+            "kind",
+            "outcome",
+            "reason",
+            "version",
+            "admin_digest",
+        ]
+    )
+    assert (verdict["schema"], verdict["version"]) == (
+        "df/precheck-verdict/v1",
+        "df-precheck/1",
+    )
+    assert verdict["reason"] == "stop_changes: expected one change, got 0"
+
+
+@needs_steward
+def test_v2_served_when_complete(tmp_path: Path) -> None:
+    """Complete tree: the v2 request is answered by the v2 program — the full v2
+    verdict bound to it (here a keyed binding without an approved `gh`: refused
+    before any read, no snapshot); the token is not in it."""
     payload = _req_v2()
     code, verdict, text = _serve(tmp_path / "home", payload, _deps())
-    assert code == 0 and text.count("\n") == 1
-    assert verdict == _verdict_v2(
-        payload, "refuse", "v2_unavailable: protocol v2 is not served yet"
+    assert code == 0 and text.count("\n") == 1 and verdict is not None
+    assert (verdict["schema"], verdict["outcome"]) == (
+        "df/precheck-verdict/v2",
+        "refuse",
+    )
+    assert verdict["reason"].startswith("history_token_unavailable")
+    assert (verdict["nonce"], verdict["request_digest"]) == (
+        NONCE,
+        request_digest(payload),
+    )
+    assert (verdict["kind"], verdict["pr"], verdict["observation_id"]) == (
+        "finalize",
+        9,
+        3,
     )
     assert TOKEN not in text
     assert not (tmp_path / "home" / "precheck-snapshots").exists()

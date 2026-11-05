@@ -142,7 +142,7 @@ def test_loader_supplies_prior_epochs_for_merge_admission(monkeypatch) -> None:
     monkeypatch.setattr(
         act_facts,
         "history",
-        lambda t, s, a, u: (act_facts.ActivationFact(1, a, times[a], {}),),
+        lambda t, s, a, u, head=None: (act_facts.ActivationFact(1, a, times[a], {}),),
     )
     monkeypatch.setattr(
         act_trust,
