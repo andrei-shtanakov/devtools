@@ -763,6 +763,69 @@ MANDATORY: dict[str, tuple[str, str, str, tuple[str, ...]]] = {
             *_TRUST_SEAMS,
         ),
     ),
+    # df 3a Task 7, review D5 (M10): v2 checks whose mutants survived the first
+    # suite (I2–I4) and the adapter/override of `op: merge`.
+    "V2-1:adapter_any_snapshot": (
+        "act_precheck_v2.Adapter.status",
+        "snap.root.snapshot_sha != self.expected_sha",
+        "False",
+        ("tests/test_act_precheck_v2.py::test_stale_snapshot_adapter",),
+    ),
+    "V2-2:merge_findings_not_refused": (
+        "act_precheck_v2._merge",
+        "    if findings:\n        return Answer(REFUSE,",
+        "    if False:\n        return Answer(REFUSE,",
+        (
+            "tests/test_act_precheck_v2.py::test_merge_settings_finding_refuses_with_findings",
+            "tests/test_act_precheck_v2.py::test_merge_policy_break_found_by_load_ranges_is_finding",
+        ),
+    ),
+    "V2-3:surface_manifest_any_status": (
+        "act_precheck_v2.surface_check.check",
+        "p == own and s in _CHANGE_OK",
+        "p == own",
+        (
+            "tests/test_act_precheck_v2.py::test_candidate_removed_manifest_is_not_changed",
+        ),
+    ),
+    "V2-4:surface_previous_unchecked": (
+        "act_precheck_v2.surface_check.check",
+        "paths += [prev for _s, _p, prev in req.changes if prev is not None]",
+        "pass",
+        (
+            "tests/test_act_precheck_v2.py::test_candidate_rename_from_foreign_path_refused",
+        ),
+    ),
+    "V2-5:envelopes_renames_allowed": (
+        "act_precheck_v2._envelopes",
+        "touched != set(expected) or not plain",
+        "touched != set(expected)",
+        ("tests/test_act_precheck_v2.py::test_finalize_rename_onto_envelope_refused",),
+    ),
+    "V2-6:envelopes_bytes_unchecked": (
+        "act_precheck_v2._envelopes",
+        'raw != text.encode("utf-8")',
+        "False",
+        ("tests/test_act_precheck_v2.py::test_finalize_wrong_envelopes_refused",),
+    ),
+    "V2-7:pin_branch_ignored": (
+        "act_precheck_v2.trust_part",
+        "policy_branch=policy.branch",
+        "policy_branch=source.branch",
+        (
+            "tests/test_act_precheck_v2.py::test_c2_policy_branch_mismatch_refused[trust]",
+            "tests/test_act_precheck_v2.py::test_c2_policy_branch_mismatch_refused[merge]",
+        ),
+    ),
+    "V2-8:load_ranges_head_dropped": (
+        "act_trust.load_ranges",
+        "            head=trust.policy_head,\n",
+        "",
+        (
+            "tests/test_act_trust.py::test_load_ranges_reads_open_epoch_to_pinned_p",
+            "tests/test_act_precheck_v2.py::test_candidate_real_load_ranges_reads_to_pinned_p",
+        ),
+    ),
 }
 
 
@@ -952,7 +1015,9 @@ def main(argv: list[str] | None = None) -> int:
         "--verbose", action="store_true", help="хвост вывода двойника — в stderr"
     )
     p.add_argument(
-        "--mandatory", action="store_true", help="только мутации M1–M4 (Task 11c)"
+        "--mandatory",
+        action="store_true",
+        help="только обязательные мутации: M1–M4 (Task 11c), V2-* (df 3a Task 7)",
     )
     args = p.parse_args(argv)
     if args.merge:
