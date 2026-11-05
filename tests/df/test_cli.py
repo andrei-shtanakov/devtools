@@ -203,7 +203,7 @@ def test_cli_perimeter_init_creates_once(
     assert _perimeter_init(lay) == 0
     assert "perimeter-init: created" in capsys.readouterr().out
     assert _perimeter_init(lay) == 0
-    assert "perimeter-init: present" in capsys.readouterr().out
+    assert "perimeter-init: current" in capsys.readouterr().out
     (lay.perimeter_dir / perimeter.DB_NAME).unlink()
     assert _perimeter_init(lay) == 2
     assert perimeter.LOST_TEXT in capsys.readouterr().err
@@ -220,6 +220,52 @@ def test_cli_perimeter_init_orphan_journal_is_for_a_human(
     assert _perimeter_init(lay) == 2
     assert perimeter.INTEGRITY_TEXT in capsys.readouterr().err
     assert not (lay.perimeter_dir / perimeter.DB_NAME).exists()
+
+
+def test_cli_perimeter_init_migrates_schema_1(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A 2b database (schema 1, no events, no `trust.toml`): `migrated`;
+    one with events: the precondition's text, the file unchanged."""
+    from df.publisher import perimeter
+
+    lay = _perimeter_layout(tmp_path, os.geteuid())
+    _schema_1(lay, events=1)
+    before = (lay.perimeter_dir / perimeter.DB_NAME).read_bytes()
+    assert _perimeter_init(lay) == 2
+    assert perimeter.MIGRATION_PRECONDITION_TEXT in capsys.readouterr().err
+    assert (lay.perimeter_dir / perimeter.DB_NAME).read_bytes() == before
+    (lay.perimeter_dir / perimeter.DB_NAME).unlink()
+    _schema_1(lay, events=0)
+    assert _perimeter_init(lay) == 0
+    assert "perimeter-init: migrated" in capsys.readouterr().out
+    assert _perimeter_init(lay) == 0
+    assert "perimeter-init: current" in capsys.readouterr().out
+
+
+def _schema_1(lay: Layout, *, events: int) -> None:
+    import sqlite3
+
+    from df.publisher import perimeter
+
+    conn = sqlite3.connect(lay.perimeter_dir / perimeter.DB_NAME)
+    for sql in perimeter.SCHEMA_V1:
+        conn.execute(sql)
+    conn.executemany(
+        "INSERT INTO meta (key, value) VALUES (?, ?)",
+        [("schema", "1"), ("admission", "ready")],
+    )
+    for n in range(events):
+        conn.execute(
+            "INSERT INTO events (root_host, root_repository_id, root_branch, "
+            "request_key, detected_by, observed_at, registered_at, state, "
+            "provenance, detail) VALUES ('h', 5, 'main', ?, 'x', 't', 't', "
+            "'pending', '{}', 'd')",
+            (f"k{n}",),
+        )
+    conn.commit()
+    conn.close()
+    (lay.perimeter_dir / perimeter.MARKER).write_text("t\n")
 
 
 def test_cli_perimeter_init_only_as_the_publisher(

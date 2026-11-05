@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import pwd
+import sqlite3
 import stat
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,6 +22,7 @@ from df.config import (
     load_accounts,
 )
 from df.journal import StepFailed
+from df.paths import Layout
 from df.publisher import perimeter
 from df.roles import ROLE_USERS
 from df.stage2_config import dump_publisher, expected_publisher
@@ -143,7 +145,7 @@ def setup(
             return plat.RunResult(2, b"", exc.reason.encode(), True)
         finally:
             os.geteuid = real  # type: ignore[assignment]
-        return plat.RunResult(0, outcome.encode(), b"", True)
+        return plat.RunResult(0, f"perimeter-init: {outcome}\n".encode(), b"", True)
 
     monkeypatch.setattr(plat, "run_as", run_as)
     return Setup(fake, calls, sudoers_file, snapshot())
@@ -254,7 +256,7 @@ def test_roles_setup_rerun_on_2a_install(setup: Setup) -> None:
         ("roles", "done"),
         ("dirs", "skip"),
         ("publisher-config", "skip"),
-        ("perimeter-init", "skip"),
+        ("perimeter-init", "done"),
         ("libexec", "done"),
         ("sudoers", "done"),
         ("verify", "done"),
@@ -265,7 +267,7 @@ def test_roles_setup_rerun_on_2a_install(setup: Setup) -> None:
     python = libexec.admin_python_of(lay, setup.snap)
     assert libexec.wrapper_problems(lay, python) == []
     assert (lay.etc / "publisher.toml").read_bytes() == publisher
-    assert len(setup.calls.run_as) == 1
+    assert len(setup.calls.run_as) == 2  # the check of the existing database
 
 
 def test_idempotent(setup: Setup) -> None:
@@ -276,12 +278,14 @@ def test_idempotent(setup: Setup) -> None:
     assert setup.calls.ensure == 1
     assert len(setup.calls.installed) == 1
     new = setup.steps()[before:]
-    # verify has nothing to settle but always probes, once
+    # verify has nothing to settle but always probes, once; perimeter-init
+    # asks the publisher to check (or migrate) the database, once per run
     want = [(name, "skip") for name in roles_setup.STEP_NAMES[:-1]]
+    want[3:4] = [("perimeter-init", "start"), ("perimeter-init", "done")]
     assert new == [*want, ("verify", "start"), ("verify", "done")]
     assert len(setup.calls.policy) == 12
     assert not [e for e in setup.fake.events if e[0] in ("created", "chmod")]
-    assert len(setup.calls.run_as) == 1
+    assert len(setup.calls.run_as) == 2
 
 
 # --- perimeter-init ----------------------------------------------------------
@@ -348,6 +352,155 @@ def test_perimeter_init_never_recreates_a_lost_database(setup: Setup) -> None:
     assert setup.calls.run_as == []
     assert not (setup.lay.perimeter_dir / perimeter.DB_NAME).exists()
     assert ("libexec", "start") not in setup.steps()[-3:]
+
+
+def _schema_1(lay: Layout, admission: str = "ready") -> None:
+    """Replace the database with one as stage 2b left it (schema 1)."""
+    path = lay.perimeter_dir / perimeter.DB_NAME
+    path.unlink()
+    conn = sqlite3.connect(path, isolation_level=None)
+    try:
+        for sql in perimeter.SCHEMA_V1:
+            conn.execute(sql)
+        conn.executemany(
+            "INSERT INTO meta (key, value) VALUES (?, ?)",
+            [("schema", "1"), ("admission", admission)],
+        )
+    finally:
+        conn.close()
+
+
+def _schema(lay: Layout) -> str:
+    conn = sqlite3.connect(lay.perimeter_dir / perimeter.DB_NAME)
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
+    finally:
+        conn.close()
+    return str(row[0])
+
+
+def test_roles_setup_rerun_with_markers_migrates_v1(setup: Setup) -> None:
+    """A 2b host (schema 1, both markers): the rerun's `perimeter-init`
+    migrates the database; the next rerun finds it current."""
+    setup.run()
+    _schema_1(setup.lay)
+    with pytest.raises(perimeter.Unavailable, match="schema_migration_required"):
+        perimeter.open_db(setup.lay)
+    before = len(setup.steps())
+    setup.run()
+    assert ("perimeter-init", "done") in setup.steps()[before:]
+    assert _schema(setup.lay) == "2"
+    perimeter.open_db(setup.lay).close()
+
+
+@pytest.mark.parametrize("case", ["fresh", "v1", "v2", "rerun"])
+def test_roles_setup_completes_all_steps_fresh_v1_v2_and_rerun(
+    setup: Setup, case: str
+) -> None:
+    """Every case reaches `libexec`, `sudoers` and `verify`: a fresh host, a
+    2b database (v1), a 3a database (v2) and a second rerun."""
+    setup.run()
+    if case == "v1":
+        _schema_1(setup.lay)
+    runs = {"fresh": 0, "v1": 1, "v2": 1, "rerun": 2}[case]
+    for _ in range(runs):
+        setup.run()
+    before = 0 if case == "fresh" else -len(roles_setup.STEP_NAMES) - 2
+    last = dict(setup.steps()[before:])
+    for name in ("perimeter-init", "libexec", "sudoers", "verify"):
+        assert last[name] in ("done", "skip"), (name, last)
+    assert last["perimeter-init"] == "done"
+    assert last["verify"] == "done"
+    assert _schema(setup.lay) == "2"
+    perimeter.open_db(setup.lay).close()
+    assert len(setup.calls.run_as) == runs + 1  # once per run
+
+
+def test_roles_setup_lost_db_with_markers_refused(setup: Setup) -> None:
+    """No database while a marker exists: refused before the publisher is
+    asked; no step after `perimeter-init` runs."""
+    setup.run()
+    (setup.lay.perimeter_dir / perimeter.DB_NAME).unlink()
+    setup.calls.run_as.clear()
+    before = len(setup.steps())
+    with pytest.raises(StepFailed) as info:
+        setup.run()
+    assert info.value.step == "perimeter-init"
+    assert perimeter.LOST_TEXT in str(info.value)
+    assert setup.calls.run_as == []
+    assert [s for s, _e in setup.steps()[before:]][-1] == "perimeter-init"
+
+
+def test_roles_setup_unknown_schema_refusal_passed_through(setup: Setup) -> None:
+    """A schema the code does not know: the publisher refuses, the database
+    is not touched, and `roles setup` names the reason."""
+    setup.run()
+    path = setup.lay.perimeter_dir / perimeter.DB_NAME
+    conn = sqlite3.connect(path, isolation_level=None)
+    conn.execute("UPDATE meta SET value = '3' WHERE key = 'schema'")
+    conn.close()
+    data = path.read_bytes()
+    before = len(setup.steps())
+    with pytest.raises(StepFailed) as info:
+        setup.run()
+    assert info.value.step == "perimeter-init"
+    assert "integrity" in str(info.value)
+    assert path.read_bytes() == data
+    assert ("libexec", "start") not in setup.steps()[before:]
+
+
+def test_perimeter_init_needs_a_known_answer(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exit 0 without `created | migrated | current` is not a success."""
+
+    def odd(_user: str, _argv: list[str], **_kw: object) -> plat.RunResult:
+        return plat.RunResult(0, b"perimeter-init: present\n", b"", True)
+
+    monkeypatch.setattr(plat, "run_as", odd)
+    with pytest.raises(StepFailed) as info:
+        setup.run()
+    assert info.value.step == "perimeter-init"
+
+
+def test_perimeter_init_answer_ok_but_file_missing_names_it(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The publisher answers `current`, yet the marker is missing: the
+    postcondition still checks the files, and the refusal names the file
+    (the step's `why`)."""
+    setup.run()
+    marker = setup.lay.perimeter_dir / perimeter.MARKER
+    marker.unlink()
+
+    def answers(_user: str, _argv: list[str], **_kw: object) -> plat.RunResult:
+        return plat.RunResult(0, b"perimeter-init: current\n", b"", True)
+
+    monkeypatch.setattr(plat, "run_as", answers)
+    with pytest.raises(StepFailed) as info:
+        setup.run()
+    assert info.value.step == "perimeter-init"
+    assert "постусловие не выполнено" in str(info.value)
+    assert f"{marker}: нет файла" in str(info.value)
+
+
+def test_migration_precondition_is_not_a_retry(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The publisher refuses `migration_precondition`: `roles setup` passes
+    the text naming the exit and does not add «повторите roles setup» --
+    a repeat never helps."""
+    text = perimeter.MIGRATION_PRECONDITION_TEXT
+
+    def refuses(_user: str, _argv: list[str], **_kw: object) -> plat.RunResult:
+        return plat.RunResult(2, b"", f"darkfactory: {text}\n".encode(), True)
+
+    monkeypatch.setattr(plat, "run_as", refuses)
+    with pytest.raises(StepFailed) as info:
+        setup.run()
+    assert info.value.step == "perimeter-init"
+    assert text in str(info.value)
+    assert "повторите darkfactory roles setup" not in str(info.value)
 
 
 def test_perimeter_init_finishes_a_missing_marker(setup: Setup) -> None:

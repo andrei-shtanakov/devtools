@@ -902,7 +902,7 @@ def test_cli_restore_records_creation(rw: Restore, source: str) -> None:
     db_file(lay).unlink()
     assert unavailable(lay) == "lost"
     with pytest.raises(StepFailed) as info:
-        roles_setup._perimeter_ready(lay)  # noqa: SLF001
+        roles_setup._perimeter_lost(lay)  # noqa: SLF001
     assert perimeter.LOST_TEXT in str(info.value)
     with pytest.raises(Unavailable, match="lost"):
         perimeter.create_db(lay)
