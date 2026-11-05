@@ -99,6 +99,7 @@ from tests.df.root_world import (
     assert_committed,
     current_id,
     infra,
+    remove_group,
     remove_service_user,
     run,
     write_evidence,
@@ -960,6 +961,7 @@ def teardown_roles(layout: Layout) -> None:
         except FileNotFoundError:
             pass
     root_owned = [name for name in roles.ROLE_USERS if not reap_safely(name)]
+    remove_group(roles.HISTORY_GROUP)  # stage 3a: made by `roles setup`
     left = [name for name in roles.ROLE_USERS if _known(name)]
     if root_owned:
         infra(f"учётки с UID 0 после теста (удалены без reap): {root_owned}")
