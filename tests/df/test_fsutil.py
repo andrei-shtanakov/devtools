@@ -516,6 +516,16 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
     ("platform", "gh_version_problems", "tempfile.TemporaryDirectory", 1): (
         "the fresh HOME of `gh --version` (spec 3.10 rev 11), never under the layout"
     ),
+    ("publisher.history", "", "import shutil", 1): "history_token's call HOME",
+    ("publisher.history", "", "import tempfile", 1): "history_token's call HOME",
+    ("publisher.history", "history_token", "tempfile.mkdtemp", 1): (
+        "the fresh HOME of `gh auth token` (spec 3.10 rev 11) in the role's "
+        "home, scratch: removed in finally, never read back, never under the layout"
+    ),
+    ("publisher.history", "history_token", "shutil.rmtree", 1): (
+        "removes only its own call HOME made by mkdtemp in the same call; "
+        "a leftover is scratch the next call does not reuse"
+    ),
     ("platform", "_rmdir_empty", "os.rmdir", 1): "protocol cleanup_tree: tree",
     ("platform", "_quarantine", "os.rename", 1): (
         "protocol cleanup_tree: quarantine, then parent synced"
@@ -621,6 +631,11 @@ SUBPROCESS_CREATORS = {
     ),
     "cleaner find/chmod/rm (as df-build)": "protocol cleanup_tree: root syncs",
     "useradd / dscl (account)": "OS records, judged by verify_build_user",
+    "gh auth token (publisher history token, as df-publisher)": (
+        "its own HOME is a fresh mkdtemp under the role's home, removed after "
+        "the call; GH_CONFIG_DIR is the root-written profile, which gh only "
+        "reads; gh creates only .local/state/gh/device-id inside HOME"
+    ),
     "gh --version (cli set gh, root)": (
         "its own HOME (and GH_CONFIG_DIR) is a fresh TemporaryDirectory removed "
         "after the call; gh creates only .local/state/gh/device-id inside it"
@@ -708,7 +723,7 @@ SUBPROCESS_CREATORS = {
 PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
     ("fsutil", "_sysctl_boot_id", "subprocess.run", 1): ("sysctl (boot id)",),
     # run_command (root; setup-agent's and doctor's check-github, doctor's
-    # role check and test -r), run_as (df-build, df-publisher; with stdin for
+    # role check and test -r; df-publisher's gh auth token), run_as (df-build, df-publisher; with stdin for
     # perimeter restore), run_with_input (df-publisher; the roles, perimeter
     # client, setup-agent's and doctor's self-check, doctor's nested calls)
     ("platform", "_execute", "subprocess.Popen", 1): (
@@ -721,6 +736,7 @@ PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
         "useradd / dscl (account)",
         "probes: ps / pkill / sudo -l / getent / dscl -read / xcrun",
         "gh --version (cli set gh, root)",
+        "gh auth token (publisher history token, as df-publisher)",
         "darkfactory publisher perimeter-init (roles setup, as df-publisher)",
         "sudo df-publish perimeter-status (perimeter client)",
         "darkfactory publisher perimeter-restore (restore, as df-publisher)",

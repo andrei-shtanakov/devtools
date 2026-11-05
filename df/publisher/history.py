@@ -282,7 +282,7 @@ def _blob(
         return Unavailable(f"{where}: blob is not base64")
     try:
         raw = base64.b64decode(
-            str(body.get("content", "")).replace("\n", ""), validate=True
+            "".join(str(body.get("content", "")).splitlines()), validate=True
         )
     except (binascii.Error, ValueError):
         return Unavailable(f"{where}: blob is not base64")
