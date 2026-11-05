@@ -4047,6 +4047,7 @@ NOT_JUDGMENT = {
     "act_journal_wire._root_id": _BUILD,
     "act_journal_wire.schema_digest": "отпечаток схемы базы; сверяет `_refusal`",
     "act_journal_wire._json": "разбор JSON строки наблюдения; `None` — не JSON",
+    "act_journal_wire._no_constant": "`parse_constant`: NaN/Infinity — не JSON (`ValueError`)",
     "act_journal_wire.WireJournal.__init__": _BUILD,
     "act_journal_wire.DevStoreJournal.__init__": _BUILD,
     "act_status._rel": _BUILD,

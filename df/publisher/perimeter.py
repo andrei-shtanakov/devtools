@@ -292,6 +292,13 @@ _INVARIANTS = (
         "AND finding_event_id NOT IN (SELECT event_id FROM events)"
     ),
 )
+#: The longest observation JSON column `_json` parses (bytes). A legitimate
+#: `event_ids` holds the ids of at most 16 findings (kind x role) and one
+#: conservative event -- a few hundred bytes; a `binding` holds two ids, the
+#: host, the full name (<= 140 B), the branch (<= 255 B) and the history
+#: profile path (<= PATH_MAX, 4096 B) -- under 5 KiB. 64 KiB is over ten times
+#: either and bounds the parse of a hostile row.
+MAX_JSON = 64 << 10
 #: The repository ids every observation's `binding` names.
 _BINDING_IDS = ("df_trust_repository_id", "approval_policy_repository_id")
 _ROOT_WHERE = "root_host = ? AND root_repository_id = ? AND root_branch = ?"
@@ -757,11 +764,22 @@ def _observations_ok(conn: sqlite3.Connection) -> bool:
 
 
 def _json(raw: str) -> object:
-    """`raw` parsed; `None` when it is not JSON text (any type)."""
-    try:
-        return json.loads(raw)
-    except (TypeError, ValueError):
+    """`raw` parsed; `None` when it is not JSON text of at most `MAX_JSON`
+    bytes, nests deeper than the parser's recursion allows, or names
+    NaN/Infinity. An int past the digit limit is a `ValueError` too."""
+    if not isinstance(raw, str):
         return None
+    if len(raw.encode("utf-8", "surrogatepass")) > MAX_JSON:
+        return None
+    try:
+        return json.loads(raw, parse_constant=_no_constant)
+    except (RecursionError, ValueError):
+        return None
+
+
+def _no_constant(name: str) -> object:
+    """`parse_constant`: NaN, Infinity and -Infinity are not JSON."""
+    raise ValueError(f"JSON constant {name}")
 
 
 def _count(conn: sqlite3.Connection) -> int:

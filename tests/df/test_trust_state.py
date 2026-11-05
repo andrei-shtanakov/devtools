@@ -529,6 +529,28 @@ def test_invariants_use_no_sql_json_functions() -> None:
         "UPDATE trust_observations SET binding = '[]'",
         "UPDATE trust_observations SET binding = '{}'",
         "UPDATE trust_observations SET event_ids = 5",
+        "UPDATE trust_observations SET event_ids = '" + "[" * 100_000 + "'",
+        (
+            "UPDATE trust_observations SET event_ids = '"
+            + "[" * 100_000
+            + "]" * 100_000
+            + "'"
+        ),
+        "UPDATE trust_observations SET binding = '" + "[" * 100_000 + "'",
+        (
+            "UPDATE trust_observations SET event_ids = '"
+            + "[" * 30_000
+            + "]" * 30_000
+            + "'"
+        ),
+        "UPDATE trust_observations SET binding = '" + "[" * 60_000 + "'",
+        "UPDATE trust_observations SET event_ids = '[" + "1, " * 30_000 + "1]'",
+        "UPDATE trust_observations SET event_ids = '[NaN]'",
+        "UPDATE trust_observations SET event_ids = '[" + "9" * 5000 + "]'",
+        (
+            "UPDATE trust_observations SET binding = "
+            '\'{"df_trust_repository_id": Infinity, "approval_policy_repository_id": 6}\''
+        ),
         "UPDATE trust_observations SET event_ids = '[true]'",
         (
             "UPDATE trust_observations SET binding = "

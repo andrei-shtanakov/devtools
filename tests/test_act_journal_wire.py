@@ -294,13 +294,68 @@ def test_open_checks_are_the_publishers() -> None:
     import inspect
 
     assert act_journal_wire._BINDING_IDS == store._BINDING_IDS
-    for name in ("_observations_ok", "_json"):  # the same Python check
+    for name in ("_observations_ok", "_json", "_no_constant"):  # the same check
         mine = inspect.getsource(getattr(act_journal_wire, name))
         assert mine == inspect.getsource(getattr(store, name))
     conn = sqlite3.connect(":memory:")
     for sql in store.SCHEMA:
         conn.execute(sql)
     assert act_journal_wire.schema_digest(conn) == act_journal_wire.SCHEMA_DIGEST
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "[" * 100_000,
+        "[" * 100_000 + "]" * 100_000,
+        "[" * 30_000 + "]" * 30_000,  # under `MAX_JSON`: the parser's recursion
+        "[" * 60_000,
+        "[" + "1, " * 30_000 + "1]",  # over `MAX_JSON` bytes
+        "[NaN]",
+        '{"a": Infinity}',
+        "[-Infinity]",
+        "[" + "9" * 5000 + "]",
+        b"[1]",
+        5,
+        None,
+    ],
+    ids=[
+        "deep_open",
+        "deep_closed",
+        "deep_under_cap",
+        "deep_open_under_cap",
+        "oversized",
+        "nan",
+        "infinity",
+        "minus_infinity",
+        "huge_int",
+        "blob",
+        "integer",
+        "null",
+    ],
+)
+def test_hostile_json_is_not_json_in_both_copies(raw: object) -> None:
+    """Both copies' `_json` turn a hostile column into `None` (the row is
+    then `integrity`), never an exception: deep nesting, an oversized
+    value, NaN/Infinity, a huge int, a non-text value."""
+    from df.publisher import perimeter as store
+
+    for module in (store, act_journal_wire):
+        assert module._json(raw) is None  # type: ignore[arg-type]
+    if isinstance(raw, str) and raw.startswith("[[[") and len(raw) <= store.MAX_JSON:
+        with pytest.raises(RecursionError):  # the guard is what catches it
+            json.loads(raw)
+    assert act_journal_wire.MAX_JSON == store.MAX_JSON
+
+
+def test_legitimate_json_still_parses_in_both_copies() -> None:
+    from df.publisher import perimeter as store
+
+    for module in (store, act_journal_wire):
+        assert module._json("[1, 2]") == [1, 2]
+        assert module._json('{"df_trust_repository_id": 5}') == {
+            "df_trust_repository_id": 5
+        }
 
 
 def _sql(narrow: act_journal_wire.DevStoreJournal, *statements: str) -> None:
@@ -364,6 +419,11 @@ def _observation_binding(tmp_path, monkeypatch, full, narrow, head) -> None:
     _observation(full, narrow, "binding = '{}'")
 
 
+def _observation_deep(tmp_path, monkeypatch, full, narrow, head) -> None:
+    deep = "[" * 30_000 + "]" * 30_000  # under `MAX_JSON`: RecursionError
+    _observation(full, narrow, f"event_ids = '{deep}'")
+
+
 def _marker_link(tmp_path, monkeypatch, full, narrow, head) -> None:
     (narrow.base / "events.sqlite").unlink()
     (narrow.base / "created").unlink()
@@ -384,6 +444,7 @@ def _intent_link(tmp_path, monkeypatch, full, narrow, head) -> None:
         (_observation_type, "integrity"),
         (_observation_event, "integrity"),
         (_observation_binding, "integrity"),
+        (_observation_deep, "integrity"),
         (_intent_link, "restore_incomplete"),
         (_marker_link, "lost"),
     ],
@@ -395,6 +456,7 @@ def _intent_link(tmp_path, monkeypatch, full, narrow, head) -> None:
         "observation_type",
         "observation_event",
         "observation_binding",
+        "observation_deep",
         "intent_symlink",
         "marker_link",
     ],
