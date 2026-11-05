@@ -89,6 +89,26 @@ def test_documented_bootstrap_without_tar_refused_before_any_change(
     assert list(tmp_path.iterdir()) == []
 
 
+def test_init_with_gh_refused_naming_cli_set_after_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Stage 3a (paid review #697): `--cli gh=PATH` at `init` is a usage
+    error naming the real order -- `gh` (with its sha256) is set by
+    `darkfactory cli set gh PATH` after `darkfactory install` -- refused
+    before the lock creates anything."""
+    argv = [*documented_argv(), "--cli", "gh=/usr/local/libexec/darkfactory/bin/gh"]
+    with pytest.raises(cli.UsageError, match="после darkfactory install"):
+        cli._init_config(cli._parse(argv))  # noqa: SLF001
+    monkeypatch.setattr(cli, "ROOT_UID", os.geteuid())
+    lay = Layout(tmp_path / "root")
+    code = cli.main(argv, mode="bootstrap", read=None, lock_fd=None, layout=lay)
+    assert code == cli.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert "--cli gh: не задаётся при init" in err
+    assert "sudo darkfactory cli set gh PATH после darkfactory install" in err
+    assert list(tmp_path.iterdir()) == []
+
+
 # --- Task 4: roles setup and the service subcommands ------------------------
 
 SERVICE = [

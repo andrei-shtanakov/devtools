@@ -51,7 +51,8 @@ from governance.act_time import Unavailable
 from tests.df.conftest import stage1_out
 from tests.df.root_world import infra, write_evidence
 
-pytestmark = [pytest.mark.root, pytest.mark.stage2a]
+#: `network`: `_install_gh` downloads the release (deselected without egress).
+pytestmark = [pytest.mark.root, pytest.mark.stage2a, pytest.mark.network]
 
 GH_VERSION = plat.GH_PINNED_VERSION
 #: From `gh_2.102.1_checksums.txt` of the official release.

@@ -621,6 +621,10 @@ SUBPROCESS_CREATORS = {
     ),
     "cleaner find/chmod/rm (as df-build)": "protocol cleanup_tree: root syncs",
     "useradd / dscl (account)": "OS records, judged by verify_build_user",
+    "gh --version (cli set gh, root)": (
+        "its own HOME (and GH_CONFIG_DIR) is a fresh TemporaryDirectory removed "
+        "after the call; gh creates only .local/state/gh/device-id inside it"
+    ),
     "probes: ps / pkill / sudo -l / getent / dscl -read / xcrun": (
         "create nothing: reads, or a kill of df-build's processes"
     ),
@@ -716,6 +720,7 @@ PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
         "cleaner find/chmod/rm (as df-build)",
         "useradd / dscl (account)",
         "probes: ps / pkill / sudo -l / getent / dscl -read / xcrun",
+        "gh --version (cli set gh, root)",
         "darkfactory publisher perimeter-init (roles setup, as df-publisher)",
         "sudo df-publish perimeter-status (perimeter client)",
         "darkfactory publisher perimeter-restore (restore, as df-publisher)",
