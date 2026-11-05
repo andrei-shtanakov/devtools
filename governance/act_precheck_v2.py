@@ -644,8 +644,11 @@ def trust_part(
     `policy` — the coordinates the publisher resolved by id: its branch is the
     default branch С-2 compares with the `source.env` branch on H
     (`policy_branch_mismatch`). A pin naming another policy repository than
-    `source.env` on H is `Irreproducible(PIN_MISMATCH)`: H's `source.env` is
-    pinned by its SHA, so no re-evaluation of the pair can agree (D-c)."""
+    `source.env` on H (owner/name compared case-insensitively, as GitHub
+    does; `source.env` carries no repository id) is `Irreproducible(
+    PIN_MISMATCH)`: H's `source.env` is pinned by its SHA, so no
+    re-evaluation of the pair can agree (D-c) -- unless the pair already
+    found something: its findings win (re-review N2), the settings unread."""
     pair = act_trust_pair.read_pair(
         transport, binding, accepted, head, validation=validation
     )
@@ -654,7 +657,9 @@ def trust_part(
     if pair.snapshot is None:
         return Part(pair.relation, None, pair.source, pair.findings, ())
     source = pair.snapshot.source
-    if policy.full_name != source.repo:
+    if policy.full_name.casefold() != source.repo.casefold():
+        if pair.findings:
+            return Part(pair.relation, pair.snapshot, pair.source, pair.findings, ())
         return Irreproducible(
             PIN_MISMATCH,
             f"policy pin {policy.full_name!r} != source.env {source.repo!r} at H",
@@ -707,13 +712,14 @@ def _trust_op(req: TrustRequest, ctx: Context) -> Answer:
         p_sha = common.policy.p_sha
         ranges = dataclasses.asdict(range_descriptor(part.snapshot.epochs, p_sha))
         broken = policy_history_break(transport, part.snapshot, p_sha)
+        if isinstance(broken, Irreproducible | Unavailable) and findings:
+            # a finding of the pair or the settings wins over any gap of the
+            # policy history, transient (paid review #704 P1) or permanent
+            # (re-review N2), as in `_merge`
+            return _decided(part, findings, ranges)
         if isinstance(broken, Irreproducible):
             return Answer(IRREPRODUCIBLE, broken.code, part, detail=broken.detail)
         if isinstance(broken, Unavailable):
-            # a finding of the pair or the settings wins over a transient gap
-            # of the policy history, as in `_merge` (paid review #704 P1)
-            if findings:
-                return _decided(part, findings, ranges)
             return Answer(UNSET, broken.reason, part)
         findings = (*findings, *broken)
     return _decided(part, findings, ranges)

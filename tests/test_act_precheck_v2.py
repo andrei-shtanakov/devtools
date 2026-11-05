@@ -1200,9 +1200,9 @@ def test_reeval_merge_keeps_findings_over_transient_policy_gap(
 ) -> None:
     """Paid review #704 P1: re-evaluating a `merge` observation, a settings
     finding already established wins over a transient gap of the policy
-    history (`refuse` with the finding, I6 shape kept, ranges carried); a
-    permanent gap is still `irreproducible` (D-c); without a finding the
-    transient gap stays `unset`."""
+    history (`refuse` with the finding, I6 shape kept, ranges carried), and
+    over a permanent one (re-review N2); without a finding the transient gap
+    stays `unset`."""
     wire.routes[f"repos/{AP}"] = (
         200,
         {"full_name": AP, "allow_rebase_merge": True, **_perms()},
@@ -1224,7 +1224,11 @@ def test_reeval_merge_keeps_findings_over_transient_policy_gap(
         act_facts, "history", lambda *a, **k: Unavailable("http: 404 repos/x/c/abc")
     )
     verdict, _ = run(tmp_path / "home", payload, gh)
-    assert verdict["outcome"] == act_precheck_v2.IRREPRODUCIBLE
+    # re-review N2: the finding wins over a permanent gap too
+    assert verdict["outcome"] == "refuse"
+    assert [(f["kind"], f["role"]) for f in verdict["findings"]] == [
+        ("rebase_allowed", "approval-policy")
+    ]
     wire.routes[f"repos/{AP}"] = (
         200,
         {"full_name": AP, "allow_rebase_merge": False, **_perms()},
@@ -1234,6 +1238,34 @@ def test_reeval_merge_keeps_findings_over_transient_policy_gap(
     )
     verdict, _ = run(tmp_path / "home", payload, gh)
     assert verdict["outcome"] == "unset" and verdict["findings"] == []
+
+
+def test_pin_mismatch_keeps_pair_findings(
+    tmp_path: Path, wire: _Wire, gh: Path, profile: Path
+) -> None:
+    """Re-review N2: H is not a descendant of A and its `source.env` names
+    another policy repository than the pin -- the pair's `not_descendant`
+    is reported (`refuse`), not swallowed by `irreproducible`."""
+    policy = {"full_name": "owner/renamed", "branch": "main", "p_sha": P}
+    payload = trust_req(
+        profile, policy=policy, trust_accepted=accepted(X), trust_head=C0
+    )
+    verdict, _ = run(tmp_path / "home", payload, gh)
+    assert verdict["outcome"] == "refuse"
+    assert ("not_descendant", "df-trust") in [
+        (f["kind"], f["role"]) for f in verdict["findings"]
+    ]
+    assert verdict["relation"] == "not_descendant"
+
+
+def test_pin_compared_case_insensitively(
+    tmp_path: Path, wire: _Wire, gh: Path, profile: Path
+) -> None:
+    """Re-review N4: GitHub owner/name are case-insensitive -- a pin that
+    differs from `source.env` only in case is the same repository, no K."""
+    policy = {"full_name": AP.upper(), "branch": "main", "p_sha": P}
+    verdict, _ = run(tmp_path / "home", trust_req(profile, policy=policy), gh)
+    assert verdict["outcome"] == "allow"
 
 
 def test_policy_break_wins_over_missing_objects(

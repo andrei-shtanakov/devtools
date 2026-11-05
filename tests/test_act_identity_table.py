@@ -4381,7 +4381,7 @@ JUDGMENT = {
         r(
             "policy_pin",
             "act_precheck_v2.trust_part",
-            "policy.full_name != source.repo",
+            "policy.full_name.casefold() != source.repo.casefold()",
             f"{V2}::test_policy_pin_of_other_repo_irreproducible",
             "PIN_MISMATCH",
         ),
