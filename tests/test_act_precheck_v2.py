@@ -36,7 +36,6 @@ from governance import (  # noqa: E402
     act_facts,
     act_precheck,
     act_precheck_v2,
-    act_premerge,
     act_premerge_core,
     act_trust,
     act_trust_findings,
