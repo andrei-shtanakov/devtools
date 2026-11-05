@@ -336,7 +336,9 @@ def test_checklist_body_asks_review_v1_for_approve_not_merge() -> None:
     у заявки без маркера текст прежний (мерж человеком)."""
     from types import SimpleNamespace
 
-    state = SimpleNamespace(wave=1, run_id="r", bundle_dir="workstreams/w/spec")
+    state = SimpleNamespace(
+        wave=1, run_id="r", ws_id="w", bundle_dir="workstreams/w/spec"
+    )
     review = pub.checklist_body(state, "h" * 40, _wave_records(), "review/v1")  # type: ignore[arg-type]
     legacy = pub.checklist_body(state, "h" * 40, _wave_records())  # type: ignore[arg-type]
     assert "approve этого PR человеком из human_approvers" in review
