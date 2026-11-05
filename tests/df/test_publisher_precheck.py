@@ -12,6 +12,7 @@ import sys
 import time
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -561,10 +562,22 @@ def test_token_not_minted_for_bad_facts(stand: Stand) -> None:
     assert stand.fake.tokens == [] and not stand.capture.exists()
 
 
-def test_only_stop_is_asked(stand: Stand) -> None:
+def test_protocol_by_kind(stand: Stand) -> None:
+    """Stop is asked by v1 without an observation; candidate and finalize
+    only by v2 with the `merge` observation (Task 11); a brief by none.
+    A misuse is a `ValueError` before any token."""
+    obs = cast(Any, object())
     with pytest.raises(ValueError, match="candidate"):
         precheck.admin_precheck("candidate", stand.oc(), PR, FACTS)
+    with pytest.raises(ValueError, match="obs"):
+        precheck.admin_precheck("finalize", stand.oc(), PR, FACTS)
+    with pytest.raises(ValueError, match="obs"):
+        precheck.admin_precheck("stop", stand.oc(), PR, FACTS, obs=obs)
+    with pytest.raises(ValueError, match="brief"):
+        precheck.admin_precheck("brief", stand.oc(), PR, FACTS)
     assert stand.fake.tokens == []
+    assert precheck.KINDS == ("stop",)
+    assert precheck.V2_KINDS == ("candidate", "finalize")
 
 
 def test_request_over_the_limit_not_sent(stand: Stand) -> None:
