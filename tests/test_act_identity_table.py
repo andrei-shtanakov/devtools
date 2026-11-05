@@ -1106,7 +1106,7 @@ JUDGMENT = {
         r(
             "unreadable",
             "act_trust._report_of",
-            "if isinstance(verdict, Unavailable):",
+            "isinstance(verdict, Unavailable)",
             f"{T}::test_self_report_404_is_unavailable_without_record",
             'startswith("самоотчёт profile:agent")',
         ),

@@ -384,9 +384,27 @@ BYPASS: dict[str, tuple[str, str]] = {
         "    if len(found) != 1:",
         "    if not found:\n        found = [7]\n    if False:",
     ),
+    # df 3a Task 5: history refusals became `HistoryFault`; except-rows and the
+    # carrying `raw is None` need replacements, not `if False`
     "act_trust._checked_epochs:transition": (
-        'return Unavailable(f"недопустимый переход журнала: {exc}")',
+        "check_transition(prev, new)",
         "pass",
+    ),
+    "act_trust._journal_versions:journal_parse": (
+        'return HistoryFault("journal_parse", f"{repo}@{sha[:12]}: {exc}")',
+        "continue",
+    ),
+    "act_trust._source_at:parse": (
+        'return HistoryFault("source_env_invalid", f"{repo}@{head[:12]}: {exc}")',
+        'return raw, SourceV2(repo, "main", "0" * 40, frozenset({"bypass"}))',
+    ),
+    "act_trust._source_at:absent": (
+        "if raw is None:",
+        'if raw is None:\n        raw = b""\n    if False:',
+    ),
+    "act_trust._rebase:rebase_df_trust": (
+        "repo = dict(_roles(snap))[role]",
+        "repo = snap.source.repo",
     ),
     "act_trust._journal_versions:journal_deleted": ("if versions:", "if False:"),
     "act_trust._modes:unread_set": (
