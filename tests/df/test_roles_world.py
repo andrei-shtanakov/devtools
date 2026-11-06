@@ -378,6 +378,7 @@ def test_api_certs_and_server_pass_strict_verification(tmp_path: Path) -> None:
     sources = build_sources(tmp_path / "sources")
     certs = make_api_certs(tmp_path / "certs", Path(str(OPENSSL)))
     context = ssl.create_default_context(cafile=str(certs.ca))
+    assert not (certs.ca.parent / "ca.key").exists()  # only the leaf needed it
 
     def get(port: int, path: str, name: str = API_HOST) -> tuple[int, object]:
         with socket.create_connection(("127.0.0.1", port), timeout=10) as raw:

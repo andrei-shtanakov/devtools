@@ -317,11 +317,16 @@ def _write(
 ) -> tuple[int, object]:
     """`POST /graphql`, `POST .../pulls/<n>/reviews`, `PUT .../pulls/<n>/merge`."""
     sc = fake.scenario
+    found = next((i for i in sc.installations if i.id == ident), None)
+    if found is None:
+        return 404, {"message": "Not Found"}
     asked = json.loads(body) if body else {}
     if (method, path) == ("POST", "/graphql"):
-        return _graphql(sc, asked)
+        return _graphql(sc, asked, found)
     words = path.strip("/").split("/")
     if len(words) != 6 or words[0] != "repos" or words[3] != "pulls":
+        return 404, {"message": "Not Found"}
+    if not _visible(sc, path, found):  # the installation's repositories only
         return 404, {"message": "Not Found"}
     key = ("/".join(words[1:3]), int(words[4]) if words[4].isdigit() else -1)
     pull = sc.pulls.get(key)
@@ -377,13 +382,19 @@ def _merge(
 _PAGE = {"hasNextPage": False, "endCursor": None}
 
 
-def _graphql(sc: Scenario, asked: Mapping[str, object]) -> tuple[int, object]:
-    """Steward's review facts (`StewardV3Reviews`, `StewardV3Timeline`) of
-    `pulls` and `reviews`; any other query is an error."""
+def _graphql(
+    sc: Scenario, asked: Mapping[str, object], found: Installation
+) -> tuple[int, object]:
+    """Steward's review facts (`StewardV3Reviews`, `StewardV3Timeline`,
+    `StewardV3Delivery`, `StewardV3Blobs`) of `pulls` and `reviews`, of the
+    asking installation's repositories only; any other query is an error."""
     query = str(asked.get("query", ""))
     variables = asked.get("variables")
     if not isinstance(variables, dict):
         return 400, {"message": "no variables"}
+    owner, name = variables.get("owner"), variables.get("name")
+    if not _visible(sc, f"/repos/{owner}/{name}", found):
+        return 200, {"data": {"repository": None}}
     if query.startswith("query StewardV3Blobs"):
         return _blobs(sc, variables)
     key = (f"{variables.get('owner')}/{variables.get('name')}", variables.get("number"))

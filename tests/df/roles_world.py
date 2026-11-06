@@ -785,6 +785,9 @@ def require_clean_host() -> None:
     for path in (sudoers.SUDOERS_FILE, IOLOG_FILE, link, *owned_paths(PRODUCTION)):
         if os.path.lexists(path):
             infra(f"{path} уже есть")
+    adapted = API_MARKER.exists() or HOSTS_MARK.encode() in HOSTS_FILE.read_bytes()
+    if adapted:
+        infra(f"хост остался адаптирован под {API_HOST} ({API_MARKER}, {HOSTS_FILE})")
     leftover = [name for name in ACCOUNTS if _known(name)]
     if leftover or df_groups():
         infra(f"учётки или группы df-* от прошлого прогона: {leftover} {df_groups()}")
@@ -1059,6 +1062,9 @@ def install_sudoers_file(path: Path, text: str) -> None:
 API_HOST = "api.github.com"
 HOSTS_FILE = Path("/etc/hosts")
 HOSTS_MARK = "# df-acc: stage-3a root rows (removed by their teardown)"
+#: Present while the runner answers `API_HOST` itself; a leftover (a run
+#: killed with the adaptation active) fails the next world as infrastructure.
+API_MARKER = Path("/var/tmp/df-acc-api-impersonation")
 #: The path of the positive control of the impersonation.
 API_CONTROL = "df-acc-control"
 
@@ -1068,9 +1074,10 @@ prompt = no
 [dn]
 CN = df-acc test CA (stage 3a root rows)
 [v3_ca]
-basicConstraints = critical,CA:TRUE
+basicConstraints = critical,CA:TRUE,pathlen:0
 keyUsage = critical,keyCertSign,cRLSign
 subjectKeyIdentifier = hash
+nameConstraints = critical,permitted;DNS:api.github.com
 """
 _LEAF_CNF = f"""[v3_leaf]
 basicConstraints = critical,CA:FALSE
@@ -1111,10 +1118,15 @@ def make_api_certs(work: Path, openssl: Path = OPENSSL) -> ApiCerts:
         + ["-extfile", str(work / "leaf.cnf"), "-extensions", "v3_leaf"]
         + ["-out", str(leaf)],
     ]
-    for argv in steps:
-        check(_run([str(openssl), *argv], stdin=b"", env=BASE_ENV, cwd=work), argv[0])
-    for path in (ca_key, key):
-        os.chmod(path, 0o600)
+    old = os.umask(0o077)
+    try:
+        for argv in steps:
+            done = _run([str(openssl), *argv], stdin=b"", env=BASE_ENV, cwd=work)
+            check(done, argv[0])
+    finally:
+        os.umask(old)
+    ca_key.unlink()  # only the leaf needed it
+    csr.unlink()
     return ApiCerts(ca, leaf, key)
 
 
@@ -1128,7 +1140,8 @@ def _api_handler(rest: object) -> type[http.server.BaseHTTPRequestHandler]:
                 status, body = 200, {"control": API_CONTROL}
             else:
                 auth = self.headers.get("Authorization", "")
-                status, body = rest.answer(path, auth)  # type: ignore[attr-defined]
+                agent = self.headers.get("User-Agent", "")
+                status, body = rest.answer(path, auth, agent)  # type: ignore[attr-defined]
             data = json.dumps(body).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
@@ -1297,6 +1310,7 @@ def impersonate_api(rest: object, work: Path, python: Path) -> Iterator[ApiCerts
     if len({json.dumps(p, sort_keys=True) for p in paths.values()}) != 1:
         infra(f"роли читают разные хранилища доверия: {paths}")
     keys = Path(tempfile.mkdtemp(prefix="df-acc-api-", dir=work))
+    API_MARKER.write_text(f"{HOSTS_MARK}\nkeys {keys}\n")
     try:
         certs = make_api_certs(keys)
         with ExitStack() as stack:
@@ -1316,8 +1330,9 @@ def impersonate_api(rest: object, work: Path, python: Path) -> Iterator[ApiCerts
             yield certs
     finally:
         shutil.rmtree(keys, ignore_errors=True)
-        if keys.exists():
-            infra(f"{keys}: ключи не удалены")
+    if keys.exists():
+        infra(f"{keys}: ключи не удалены")
+    API_MARKER.unlink()  # restored and checked: no leftover
 
 
 def _probe(python: Path, user: str) -> dict[str, object]:

@@ -20,6 +20,7 @@ from __future__ import annotations
 import dataclasses
 import errno
 import grp
+import hashlib
 import json
 import os
 import shutil
@@ -29,6 +30,7 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -38,11 +40,12 @@ from df import install as install_mod
 from df import platform as plat
 from df.admin_tree import locked_pins
 from df.config import load_install
+from df.paths import Layout
 from df.publisher import perimeter, request
 from df.publisher.precheck import command as precheck_command
 from df.publisher.request import TrustStatus
 from df.roles import HISTORY_GROUP
-from df.setup_trust import EPOCHS_EXIT
+from df.setup_trust import EPOCHS_EXIT, explain
 from df.stage2_config import dump_publisher, parse_publisher
 from tests.df.candidate_world import Candidate, build_candidate, build_finalize
 from tests.df.conftest import stage1_out
@@ -63,6 +66,7 @@ from tests.df.roles_world import (
     PUBLISHER,
     SUDO,
     UV_DIR,
+    IoSession,
     RolesWorld,
     admin_python,
     as_operator,
@@ -90,7 +94,9 @@ from tests.df.root_world import (
 )
 from tests.df.test_root_gh_shared_profile import _install_gh
 from tests.df.trust_sources import (
+    CHECKER_AGENT,
     HISTORY_TOKEN,
+    PUBLISHER_AGENT,
     TrustSources,
     build_sources,
     new_trust_repo,
@@ -190,13 +196,23 @@ def setup_trust(
     rw: RolesWorld, sources: TrustSources, report: Path, *, rebind: bool = False
 ) -> dict[str, str]:
     """`setup-trust check` as the operator, then `sudo … setup-trust write`
-    of its report with the history token file; their outputs."""
+    of its report with the history token file; their outputs.
+
+    The real-entry leg of the impersonation's positive control (review
+    I2): each call must have reached the runner's `api.github.com` -- the
+    check (the operator's `darkfactory`) and the write's `trust-status`
+    (publisher → sudo → `df-precheck` → its entry, both readers). No
+    request at all from a call is infrastructure; any other outcome is the
+    row's own."""
     ids = ["--policy-repo-id", str(sources.policy.id)]
     ids += ["--trust-repo-id", str(sources.trust.id), "--trust-branch", "main"]
     flag = ["--rebind"] if rebind else []
     check = [str(rw.layout.launcher), "setup-trust", "check", *ids, *flag]
+    start = len(sources.rest.calls)
     done = as_operator([*check, "--out", str(report)], stdin=(PAT + "\n").encode())
     out = done.stdout.decode("utf-8", "replace")
+    if not sources.rest.reads(start, PUBLISHER_AGENT):
+        infra(f"setup-trust check не дошёл до api.github.com раннера: {shown(done)}")
     check_ok(done, "setup-trust check")
     digest = next(
         (line.rsplit(" ", 1)[1] for line in out.splitlines() if ", digest " in line),
@@ -209,10 +225,17 @@ def setup_trust(
     os.chmod(token, 0o600)
     write = ["setup-trust", "write", *ids, *flag, "--report", str(report)]
     write += ["--report-digest", str(digest), "--history-token-file", str(token)]
+    start = len(sources.rest.calls)
     try:
         written = rw.darkfactory(write)
     finally:
         token.unlink(missing_ok=True)
+    for agent in (PUBLISHER_AGENT, CHECKER_AGENT):
+        if not sources.rest.reads(start, agent):
+            infra(
+                f"trust-status записи не дошёл до api.github.com раннера ({agent}): "
+                f"{shown(written)}"
+            )
     text = written.stdout.decode("utf-8", "replace")
     if written.returncode != 0 or DONE_TEXT not in text:
         pytest.fail(f"setup-trust write: {shown(written)}")
@@ -291,99 +314,170 @@ def insert_event_as_publisher(uw: RolesWorld, db: Path) -> None:
         infra(f"событие от df-publisher: {shown(done)}")
 
 
-def test_root_trust_upgrade_2b_to_3a(acceptance_top: Path, control_url: str) -> None:
-    """Owner decision 7 (a): an install by the 2b code (`291cb30`), its
-    roles, an admissible schema-"1" `events.sqlite` (no events, no
-    `trust.toml`) -> the 2b installer installs a pin of this branch: the
-    stop is `allow`, the candidate is `tree_incomplete` before import ->
-    `roles setup` by the 3a code: the schema moves to "2", `transitions` and
-    `admission` kept, `df-history` made -> again: idempotent -> a 3a
-    install: a new `<id>`, the candidate reaches the v2 program. Apart: an
-    inadmissible 2b base (an event by `df-publisher`): `roles setup`
-    refuses `migration_precondition` and the base is byte-for-byte
-    unchanged (then the admissible base is put back)."""
+@dataclass(frozen=True)
+class UpgradePins:
+    """The 2b checkout and the served pins of the upgrade rows: the 2b code,
+    this branch, and this branch once more (another commit)."""
+
+    top: Path
+    src: Path
+    pin_2b: FixtureRepo
+    pin_3a: FixtureRepo
+    pin_3a_again: FixtureRepo
+
+
+@pytest.fixture(scope="module")
+def upgrade_pins(acceptance_top: Path) -> Iterator[UpgradePins]:
     top = acceptance_top / "upgrade"
     top.mkdir(mode=0o755)
     src = checkout_2b(top)
-    bare_2b, sha_2b = build_fixture_repo(
-        top,
-        paths_2b(src),
-        name="fixture-2b",
-        site=locked_pins((src / "uv.lock").read_bytes()),
-        source=src,
-    )
-    bare_3a, sha_3a = build_fixture_repo(
-        top, FIXTURE_FROM_CHECKOUT, name="fixture-3a", site=real_site_pins()
-    )
-    bare_3b, sha_3b = build_fixture_repo(
-        top,
-        FIXTURE_FROM_CHECKOUT,
-        name="fixture-3a-again",
-        site=real_site_pins(),
-        extra={"UPGRADE.md": "the second 3a install\n"},
-    )
+    site_2b = locked_pins((src / "uv.lock").read_bytes())
+    built = [
+        build_fixture_repo(
+            top, paths_2b(src), name="fixture-2b", site=site_2b, source=src
+        ),
+        build_fixture_repo(
+            top, FIXTURE_FROM_CHECKOUT, name="fixture-3a", site=real_site_pins()
+        ),
+        build_fixture_repo(
+            top,
+            FIXTURE_FROM_CHECKOUT,
+            name="fixture-3a-again",
+            site=real_site_pins(),
+            extra={"UPGRADE.md": "the second 3a install\n"},
+        ),
+    ]
+    with ExitStack() as stack:
+        pins = [
+            FixtureRepo(stack.enter_context(serve_repo(top, bare)), sha)
+            for bare, sha in built
+        ]
+        yield UpgradePins(top, src, *pins)
+
+
+@contextmanager
+def world_2b(
+    up: UpgradePins, control_url: str, name: str
+) -> Iterator[tuple[RolesWorld, str]]:
+    """A world installed by the 2b code (its roles, `setup-agent`, the
+    fake GitHub), then the 2b installer's install of this branch's pin;
+    the world (following `current`) and the first release id."""
+    with roles_world(
+        up.top, up.pin_2b, control_url, None, name=name, install=install_2b(up.src)
+    ) as uw:
+        first = uw.installed.release_id
+        yield uw, first
+
+
+def upgrade_to_3a_pin(uw: RolesWorld, up: UpgradePins, first: str) -> dict[str, object]:
+    """The 2b installer installs this branch's pin; the world follows it."""
+    pin = up.pin_3a
+    code = run_2b(up.src, uw.installed.world, ["install"], pin.url, pin.sha)
+    upgraded = current_id(uw.layout)
+    if code != 0 or upgraded in (None, first):
+        pytest.fail(f"установщик 2b не поставил пин этой ветки: {code} {upgraded}")
+    assert upgraded is not None
+    uw.installed = InstalledWorld(uw.installed.world, upgraded)
+    return {"code": code, "id": upgraded}
+
+
+def history_group() -> grp.struct_group | None:
+    try:
+        return grp.getgrnam(HISTORY_GROUP)
+    except KeyError:
+        return None
+
+
+def digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def host_state(lay: Layout, db: Path) -> dict[str, object]:
+    """What `roles setup` writes, for the idempotence check (review I4)."""
+    group = history_group()
+    return {
+        "events.sqlite": digest(db),
+        "groups.toml": lay.groups.read_text(),
+        "sudoers": digest(sudoers.SUDOERS_FILE),
+        "publisher.toml": (lay.etc / "publisher.toml").read_text(),
+        "libexec": {p.name: digest(p) for p in sorted(lay.libexec.iterdir())},
+        "df-history": None
+        if group is None
+        else {"gid": group.gr_gid, "members": sorted(group.gr_mem)},
+    }
+
+
+def journal_tail(lay: Layout, start: int) -> list[dict[str, object]]:
+    """The installer journal's lines from line `start` on."""
+    lines = lay.journal.read_text().splitlines()[start:]
+    return [json.loads(line) for line in lines if line.strip()]
+
+
+def journal_len(lay: Layout) -> int:
+    return len(lay.journal.read_text().splitlines())
+
+
+def test_root_trust_upgrade_2b_to_3a(
+    upgrade_pins: UpgradePins, control_url: str
+) -> None:
+    """Owner decision 7 (a): an install by the 2b code (`291cb30`), its
+    roles, an admissible schema-"1" `events.sqlite` (no events, no
+    `trust.toml`), no `df-history` -> the 2b installer installs a pin of
+    this branch: the stop is `allow`, the candidate is `tree_incomplete`
+    before import, still no `df-history` -> `roles setup` by the 3a code:
+    the schema moves to "2", `transitions` and `admission` kept,
+    `df-history` made -> again: idempotent (what roles setup writes is
+    unchanged, every step settled) -> a 3a install: a new `<id>`, the
+    candidate reaches the v2 program. The inadmissible base is the next
+    row, in its own world."""
+    up = upgrade_pins
     found: dict[str, object] = {"code_2b": CODE_2B}
     with ExitStack() as stack:
-        url_2b = stack.enter_context(serve_repo(top, bare_2b))
-        url_3a = stack.enter_context(serve_repo(top, bare_3a))
-        url_3b = stack.enter_context(serve_repo(top, bare_3b))
-        uw = stack.enter_context(
-            roles_world(
-                top, FixtureRepo(url_2b, sha_2b), control_url, None,
-                name="upgrade", install=install_2b(src),
-            )
-        )  # fmt: skip
+        uw, first_id = stack.enter_context(world_2b(up, control_url, "upgrade"))
         lay = uw.layout
         db = lay.perimeter_dir / "events.sqlite"
-        first_id = uw.installed.release_id
         found["2b"] = {"id": first_id, "schema": schema_of(db)}
         assert schema_of(db) == "1"
         assert db_rows(db, "SELECT count(*) FROM events") == [(0,)]
         assert not (lay.etc / "trust.toml").exists()
-        # the 2b installer installs a pin of this branch
-        code = run_2b(src, uw.installed.world, ["install"], url_3a, sha_3a)
-        upgraded = current_id(lay)
-        found["2b_installs_3a"] = {"code": code, "id": upgraded}
-        assert code == 0 and upgraded not in (None, first_id)
-        assert upgraded is not None
-        uw.installed = InstalledWorld(uw.installed.world, upgraded)
+        assert history_group() is None, "df-history уже есть после установки 2b"
+        found["2b_installs_3a"] = upgrade_to_3a_pin(uw, up, first_id)
         pw = stack.enter_context(precheck_world(uw))
         stop = pw.ask(pw.current)
         before_import = ask_v2(uw)
         found["before_import"] = {"stop": stop, "candidate": before_import}
         assert stop.get("refused", "?") is None, stop
         assert str(before_import["reason"]).startswith("tree_incomplete"), before_import
-        # apart: an inadmissible 2b base is refused and left as it is
-        admissible = db.read_bytes()
-        insert_event_as_publisher(uw, db)
-        planted = db.read_bytes()
-        refused = uw.darkfactory(["roles", "setup", "--operator", OPERATOR])
-        found["inadmissible"] = shown(refused)
-        assert refused.returncode != 0, shown(refused)
-        text = refused.stderr.decode("utf-8", "replace")
-        assert perimeter.MIGRATION_PRECONDITION_TEXT in text, shown(refused)
-        assert db.read_bytes() == planted
-        db.write_bytes(admissible)  # root puts the admissible base back
+        assert history_group() is None, "df-history до roles setup кодом 3a"
         # `roles setup` by the 3a code migrates the admissible base
         keep = {
             "transitions": db_rows(db, "SELECT * FROM transitions ORDER BY 1"),
             "admission": db_rows(db, "SELECT value FROM meta WHERE key = 'admission'"),
         }
+        found["kept"] = keep
         migrated = uw.darkfactory(["roles", "setup", "--operator", OPERATOR])
-        again = uw.darkfactory(["roles", "setup", "--operator", OPERATOR])
-        found["roles_setup_3a"] = [shown(migrated), shown(again)]
-        assert migrated.returncode == 0 and again.returncode == 0, found
+        found["migrated"] = shown(migrated)
+        assert migrated.returncode == 0, shown(migrated)
         assert schema_of(db) == "2"
+        assert len(keep["admission"]) == 1, keep
         assert {
             "transitions": db_rows(db, "SELECT * FROM transitions ORDER BY 1"),
             "admission": db_rows(db, "SELECT value FROM meta WHERE key = 'admission'"),
         } == keep
-        assert grp.getgrnam(HISTORY_GROUP).gr_name == HISTORY_GROUP
+        group = history_group()
+        assert group is not None and OPERATOR in group.gr_mem, group
+        # the repeat: `current`, nothing rewritten
+        state, start = host_state(lay, db), journal_len(lay)
+        again = uw.darkfactory(["roles", "setup", "--operator", OPERATOR])
+        steps = journal_tail(lay, start)
+        found["again"] = {"run": shown(again), "journal": steps}
+        assert again.returncode == 0, shown(again)
+        assert host_state(lay, db) == state
+        events = {str(e.get("event")) for e in steps}
+        assert steps and not events & {"failed", "stopped"}, steps
         # a 3a install: a new release, the candidate reaches the v2 program
         world = uw.installed.world
-        third = RootWorld(
-            lay, FixtureRepo(url_3b, sha_3b), world.uv, world.top, control_url
-        )
+        third = RootWorld(lay, up.pin_3a_again, world.uv, world.top, control_url)
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(install_mod, "_profile", lambda _cfg: third.profile())
             code = world.entry(["install"])
@@ -391,10 +485,38 @@ def test_root_trust_upgrade_2b_to_3a(acceptance_top: Path, control_url: str) -> 
         after_import = ask_v2(uw)
         found["3a_install"] = {"code": code, "id": final_id, "candidate": after_import}
         evidence("trust-upgrade.json", found)
+        upgraded = found["2b_installs_3a"]["id"]  # type: ignore[index]
         assert code == 0 and final_id not in (None, first_id, upgraded), found
         assert after_import["version"] == "df-precheck/2", after_import
         assert "history_token_required" in str(after_import["reason"]), after_import
     evidence("trust-upgrade.json", found)
+
+
+def test_root_trust_upgrade_inadmissible_2b_base(
+    upgrade_pins: UpgradePins, control_url: str
+) -> None:
+    """Apart (owner decision 7 (a)): a 2b install whose base holds an
+    event written by `df-publisher` itself; the 2b installer installs this
+    branch's pin; `roles setup` by the 3a code refuses
+    `migration_precondition` (its text names `restore --empty`) and the
+    base is byte-for-byte what it was."""
+    up = upgrade_pins
+    with world_2b(up, control_url, "upgrade-bad") as (uw, first_id):
+        db = uw.layout.perimeter_dir / "events.sqlite"
+        insert_event_as_publisher(uw, db)
+        planted = db.read_bytes()
+        upgraded = upgrade_to_3a_pin(uw, up, first_id)
+        refused = uw.darkfactory(["roles", "setup", "--operator", OPERATOR])
+        evidence(
+            "trust-upgrade-inadmissible.json",
+            {"2b_installs_3a": upgraded, "roles_setup": shown(refused)},
+        )
+        assert refused.returncode != 0, shown(refused)
+        text = refused.stderr.decode("utf-8", "replace")
+        assert perimeter.MIGRATION_PRECONDITION_TEXT in text, shown(refused)
+        assert "restore --empty" in text
+        assert db.read_bytes() == planted
+        assert schema_of(db) == "1"
 
 
 # ---------- before the binding ----------
@@ -506,10 +628,13 @@ def test_root_trust_op_trust_stateless(
     assert first.state == "clear"
     assert set(left) <= PRECHECK_LEFT, left
     assert set(listing(home)) <= PRECHECK_LEFT
-    # the checker read the sources in both calls (epochs journal by SHA)
-    reads = sources.rest.paths()
-    assert any("epochs.yaml" in p for p in reads[before:middle])
-    assert any("epochs.yaml" in p for p in reads[middle:])
+    # the checker itself read the sources in both calls (its own reader,
+    # told apart by `User-Agent`: the epochs journal by SHA)
+    checker = sources.rest.reads(before, CHECKER_AGENT)
+    late = sources.rest.reads(middle, CHECKER_AGENT)
+    early = checker[: len(checker) - len(late)]
+    assert any("epochs.yaml" in p for p in early), early
+    assert any("epochs.yaml" in p for p in late), late
 
 
 # ---------- the history profile ----------
@@ -586,37 +711,67 @@ def tree_texts(root: Path) -> dict[str, bytes]:
     }
 
 
+@dataclass
+class TokenWatch:
+    """What a watched call left: every `ps` command line, the sessions of
+    sudo's I/O log, and the ones holding the history token."""
+
+    commands: set[str] = field(default_factory=set)
+    sessions: list[IoSession] = field(default_factory=list)
+
+    def in_argv(self) -> list[str]:
+        return sorted(c for c in self.commands if HISTORY_TOKEN in c)
+
+    def in_log(self) -> list[str]:
+        needle = HISTORY_TOKEN.encode()
+        return [
+            str(s.path)
+            for s in self.sessions
+            if needle in s.meta.encode() or any(needle in b for b in s.streams.values())
+        ]
+
+
+@contextmanager
+def token_watch(rw: RolesWorld, name: str) -> Iterator[TokenWatch]:
+    """The block under global `log_input, log_output` (a test `sudoers.d`
+    file) and the `ps` sampler; the findings after it."""
+    iolog = rw.work / f"iolog-{name}"
+    install_sudoers_file(
+        IOLOG_FILE, f"Defaults log_input, log_output, iolog_dir={iolog}\n"
+    )
+    watch = TokenWatch()
+    try:
+        with Sampler() as sampler:
+            yield watch
+    finally:
+        os.unlink(IOLOG_FILE)
+    watch.commands = sampler.seen
+    watch.sessions = io_sessions(iolog)
+
+
 def test_root_trust_history_token_not_exposed(
     rw: RolesWorld, sources: TrustSources, bound: Path
 ) -> None:
     """With sudo's I/O log on for every command, a `trust-status` (the
     publisher's and the checker's history reads): the history token is in
-    no argv `ps` showed, in no stream or record of the I/O log, and in no
-    evidence (the installer's, the publisher's journal, this run's).
+    no argv `ps` showed, in no stream or record of the I/O log, in the
+    publisher's answer (its evidence included) and in no evidence (the
+    installer's, the publisher's journal, this run's). The log holds the
+    root's session of `df-publish` (its stdin: the request); the product's
+    own rules keep `df-publish`'s output and `df-precheck` out of the log,
+    so those streams cannot carry it here -- the row proves the rules hold.
     Controls: the token did go to the sources (`Authorization`), the
-    sampler saw the publisher's command, the log holds the request."""
-    iolog = rw.work / "iolog-trust"
-    install_sudoers_file(
-        IOLOG_FILE, f"Defaults log_input, log_output, iolog_dir={iolog}\n"
-    )
+    sampler saw the publisher's command, the log holds the request. The
+    plaintext moment, `setup-trust write`, is watched the same way in the
+    `--rebind` of the 65-epochs row."""
     rid = f"acc-trust-iolog-{os.getpid()}"
     data = json.dumps({"schema": request.REQUEST_SCHEMA, "request_id": rid})
     before = len(sources.rest.calls)
-    try:
-        with Sampler() as sampler:
-            raw = perimeter_client.sudo_call(
-                data.encode(), rw.layout, operation=request.TRUST_STATUS, timeout=720
-            )
-    finally:
-        os.unlink(IOLOG_FILE)
-    sessions = io_sessions(iolog)
+    with token_watch(rw, "trust") as watch:
+        raw = perimeter_client.sudo_call(
+            data.encode(), rw.layout, operation=request.TRUST_STATUS, timeout=720
+        )
     needle = HISTORY_TOKEN.encode()
-    in_argv = sorted(c for c in sampler.seen if HISTORY_TOKEN in c)
-    in_log = [
-        str(s.path)
-        for s in sessions
-        if needle in s.meta.encode() or any(needle in b for b in s.streams.values())
-    ]
     places = {
         "var": rw.layout.var,
         "evidence_out": stage1_out() or Path("/nonexistent"),
@@ -628,26 +783,26 @@ def test_root_trust_history_token_not_exposed(
         if needle in text and not path.startswith(str(rw.layout.history_gh))
     ]
     used = [p for p, auth in sources.rest.calls[before:] if HISTORY_TOKEN in auth]
-    publishes = [s for s in sessions if "df-publish" in s.meta]
-    evidence(
-        "trust-token-exposure.json",
-        {
-            "answer": raw.decode("utf-8", "replace")[-1000:],
-            "argv_with_token": len(in_argv),
-            "commands_seen": len(sampler.seen),
-            "sessions": [str(s.path) for s in sessions],
-            "log_with_token": in_log,
-            "evidence_with_token": in_evidence,
-            "reads_with_token": len(used),
-        },
-    )
+    publishes = [s for s in watch.sessions if "df-publish" in s.meta]
+    found = {
+        "answer": raw.decode("utf-8", "replace")[-1000:],
+        "answer_with_token": needle in raw,
+        "argv_with_token": len(watch.in_argv()),
+        "commands_seen": len(watch.commands),
+        "sessions": [str(s.path) for s in watch.sessions],
+        "log_with_token": watch.in_log(),
+        "evidence_with_token": in_evidence,
+        "reads_with_token": len(used),
+    }
+    evidence("trust-token-exposure.json", found)
     assert used, "контроль: токен истории не ушёл к источникам"
-    assert any("df-publish" in c for c in sampler.seen), (
+    assert any("df-publish" in c for c in watch.commands), (
         "контроль: ps не видел издателя"
     )
     assert found_in(publishes, rid, ("stdin",)), "контроль: запроса нет в I/O-журнале"
-    assert in_argv == []
-    assert in_log == []
+    assert needle not in raw
+    assert watch.in_argv() == []
+    assert watch.in_log() == []
     assert in_evidence == []
     assert sudoers.io_log_problems(rw.layout) == []
 
@@ -781,7 +936,11 @@ def test_root_trust_65_epochs_then_rebind(
     `df-trust` with a journal of one epoch, `setup-trust check --rebind` and
     `write --rebind`; the new root is not blocked by the old one's events
     (`clear`), a new run of it is answered, and a run of the old root gets
-    no operation over a PR (`root_mismatch`)."""
+    no operation over a PR (`root_mismatch`). The refusal carries the
+    stable key `unsupported_size: epochs`, which the human texts
+    (`setup_trust.explain`: `doctor`, `setup-trust`) turn into the exit.
+    The `--rebind` write -- the token in plaintext -- runs under the token
+    watch: the token is in no argv and no I/O-log session."""
     sources.add_epochs(65)
     assert trust_status(rw, sources).state == "clear"
     old_run = bound_run(rw, sources)
@@ -793,7 +952,8 @@ def test_root_trust_65_epochs_then_rebind(
         blocked = trust_status(rw, sources)
         report = rw.darkfactory(["doctor", "--product", str(PRODUCT_ID), "--json"])
         new = new_trust_repo(sources, 23, "df-fixture/df-trust-2")
-        lines = setup_trust(rw, sources, bound, rebind=True)
+        with token_watch(rw, "rebind") as watch:
+            lines = setup_trust(rw, sources, bound, rebind=True)
         fresh = trust_status(rw, sources)
         new_run = bound_run(rw, sources)
         answered = rw.publish(
@@ -824,10 +984,18 @@ def test_root_trust_65_epochs_then_rebind(
             "fresh": dataclasses.asdict(fresh),
             "new_run_status": dict(status.result),
             "old_run_merge": [stale.outcome, stale.reason],
+            "rebind_watch": {
+                "commands_seen": len(watch.commands),
+                "sessions": [str(s.path) for s in watch.sessions],
+                "argv_with_token": len(watch.in_argv()),
+                "log_with_token": watch.in_log(),
+            },
         },
     )
     assert refused.outcome == "refused", shown(done)
     assert "unsupported_size: epochs" in str(refused.reason), refused
+    assert EPOCHS_EXIT in explain(str(refused.reason)), refused
+    assert watch.sessions and watch.in_argv() == [] and watch.in_log() == []
     assert not merged_pull(rw, 23)["merged"]
     assert blocked.state == "blocked", blocked
     assert EPOCHS_EXIT in doctor_text, doctor_text[-2000:]

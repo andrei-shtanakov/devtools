@@ -168,6 +168,7 @@ def test_trust_status_two_epochs_clear(
     assert (resp.result["snapshot_sha"], resp.result["last_epoch"]) == (head, 2)
 
 
+@pytest.mark.slow  # ~1 min of git; the root row runs it in CI
 def test_trust_status_65_epochs_clear_without_ranges(
     world: World, sources: TrustSources, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -287,6 +288,7 @@ def test_finalize_merged_through_the_real_checker(
     assert fake.scenario.pulls[(FULL_NAME, pr)]["merged"]
 
 
+@pytest.mark.slow  # ~1 min of git; the root row runs it in CI
 def test_candidate_65_epochs_unsupported_then_blocked(
     merge_world: tuple[World, Candidate, FakeGitHub],
     sources: TrustSources,

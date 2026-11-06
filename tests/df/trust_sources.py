@@ -132,11 +132,12 @@ class SourceRepo:
         readable by SHA, as on GitHub)."""
         git(self.work, "update-ref", "refs/heads/main", sha)
 
-    def body(self) -> dict[str, object]:
+    def body(self, authenticated: bool = True) -> dict[str, object]:
         """`/repos/<full_name>` and `/repositories/<id>` of a reader with
-        read access only."""
+        read access only; an anonymous read gets no `permissions`, as on
+        GitHub."""
         owner, name = self.full_name.split("/")
-        return {
+        found: dict[str, object] = {
             "id": self.id,
             "name": name,
             "full_name": self.full_name,
@@ -145,14 +146,16 @@ class SourceRepo:
             "visibility": "private" if self.private else "public",
             "default_branch": self.default_branch,
             "allow_rebase_merge": self.allow_rebase_merge,
-            "permissions": {
+        }
+        if authenticated:
+            found["permissions"] = {
                 "admin": False,
                 "maintain": False,
                 "push": False,
                 "triage": False,
                 "pull": True,
-            },
-        }
+            }
+        return found
 
 
 @dataclass
@@ -161,24 +164,34 @@ class GitRest:
 
     repos: list[SourceRepo]
     calls: list[tuple[str, str]] = field(default_factory=list)
+    #: The `User-Agent` of each call (which reader asked), in step with `calls`.
+    agents: list[str] = field(default_factory=list)
     #: path -> status answered in place of the real answer.
     status: dict[str, int] = field(default_factory=dict)
     #: `/user`: the human checking the perimeter with a PAT.
     login: str = "df-fixture"
     lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def answer(self, path: str, auth: str) -> Reply:
-        """`(status, JSON body)` of `GET <path>` (relative, with its query)."""
+    def answer(self, path: str, auth: str, agent: str = "") -> Reply:
+        """`(status, JSON body)` of `GET <path>` (relative, with its query)
+        by the reader `agent` (its `User-Agent`)."""
         with self.lock:
             self.calls.append((path, auth))
+            self.agents.append(agent)
         if path in self.status:
             return self.status[path], {"message": "fixture status"}
         try:
-            return self._answer(path)
+            return self._answer(path, bool(auth))
         except OSError:
             return 404, {"message": "Not Found"}
 
-    def _answer(self, path: str) -> Reply:
+    def reads(self, start: int, agent: str) -> list[str]:
+        """The paths `agent` asked since call number `start`."""
+        with self.lock:
+            pairs = list(zip(self.calls, self.agents, strict=True))[start:]
+        return [path for (path, _a), who in pairs if who == agent]
+
+    def _answer(self, path: str, authenticated: bool) -> Reply:
         parts = urlsplit(path)
         words = [unquote(w) for w in parts.path.strip("/").split("/")]
         query = parse_qs(parts.query)
@@ -186,7 +199,9 @@ class GitRest:
             return 200, {"login": self.login, "plan": {"name": "pro"}}
         if words[:1] == ["repositories"] and len(words) == 2:
             repo = next((r for r in self.repos if str(r.id) == words[1]), None)
-            return (200, repo.body()) if repo else (404, {"message": "Not Found"})
+            if repo is None:
+                return 404, {"message": "Not Found"}
+            return 200, repo.body(authenticated)
         if words[:1] != ["repos"] or len(words) < 3:
             return 404, {"message": "Not Found"}
         repo = next(
@@ -194,6 +209,8 @@ class GitRest:
         )
         if repo is None:
             return 404, {"message": "Not Found"}
+        if len(words) == 3:
+            return 200, repo.body(authenticated)
         return _repo_answer(repo, words[3:], query)
 
     # --- the three ways to serve it ---
@@ -204,14 +221,16 @@ class GitRest:
         """The publisher's `Transport` (`df.publisher.github`)."""
         if method != "GET" or not url.startswith(API):
             return 404, {}, b'{"message": "Not Found"}'
-        status, answer = self.answer(url.removeprefix(API), _auth(headers))
+        path = url.removeprefix(API)
+        status, answer = self.answer(path, _auth(headers), _agent(headers))
         return status, {}, json.dumps(answer).encode("utf-8")
 
     def open_url(self, req: object, timeout: float) -> _Answer:
         """`urllib`'s `open` for `governance.act_anon.AnonTransport`."""
         url = str(getattr(req, "full_url", ""))
         headers = dict(getattr(req, "header_items")())
-        status, answer = self.answer(url.removeprefix(API), _auth(headers))
+        path = url.removeprefix(API)
+        status, answer = self.answer(path, _auth(headers), _agent(headers))
         return _Answer(status, json.dumps(answer).encode("utf-8"))
 
     def paths(self) -> list[str]:
@@ -222,6 +241,15 @@ class GitRest:
 
 def _auth(headers: Mapping[str, str]) -> str:
     return next((v for k, v in headers.items() if k.lower() == "authorization"), "")
+
+
+def _agent(headers: Mapping[str, str]) -> str:
+    return next((v for k, v in headers.items() if k.lower() == "user-agent"), "")
+
+
+#: The `User-Agent` of each reader of the trust sources.
+PUBLISHER_AGENT = "darkfactory-publisher"
+CHECKER_AGENT = "devtools-act-anon"
 
 
 def _repo_answer(
