@@ -398,3 +398,35 @@ def test_api_certs_and_server_pass_strict_verification(tmp_path: Path) -> None:
         assert body["full_name"] == sources.trust.full_name
         with pytest.raises(ssl.SSLCertVerificationError):
             get(ports[0], API_CONTROL, name="github.com")
+
+
+def test_api_marker_never_follows_or_overwrites(tmp_path: Path) -> None:
+    """Review N1: the marker is made `0600` with `O_EXCL | O_NOFOLLOW`; a
+    planted link (dangling too) or a leftover is never written through, is
+    seen by the leftover check, and is not removed as ours."""
+    import os
+    import stat
+
+    from _pytest.outcomes import Failed
+
+    from tests.df.roles_world import marker_left, remove_marker, write_marker
+
+    marker = tmp_path / "marker"
+    assert not marker_left(marker)
+    write_marker(marker, "adapted\n")
+    assert stat.S_IMODE(marker.lstat().st_mode) == 0o600
+    with pytest.raises(FileExistsError):
+        write_marker(marker, "again\n")
+    remove_marker(marker)
+    assert not marker_left(marker)
+
+    target = tmp_path / "target"
+    link = tmp_path / "link"
+    link.symlink_to(target)  # dangling
+    assert marker_left(link)
+    with pytest.raises(FileExistsError):
+        write_marker(link, "through the link\n")
+    assert not target.exists()
+    with pytest.raises(Failed):
+        remove_marker(link)
+    assert os.path.lexists(link)

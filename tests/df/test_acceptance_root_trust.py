@@ -230,12 +230,15 @@ def setup_trust(
         written = rw.darkfactory(write)
     finally:
         token.unlink(missing_ok=True)
-    for agent in (PUBLISHER_AGENT, CHECKER_AGENT):
-        if not sources.rest.reads(start, agent):
-            infra(
-                f"trust-status записи не дошёл до api.github.com раннера ({agent}): "
-                f"{shown(written)}"
-            )
+    if len(sources.rest.calls) == start:
+        infra(
+            f"trust-status записи не дошёл до api.github.com раннера: {shown(written)}"
+        )
+    missing = [
+        a for a in (PUBLISHER_AGENT, CHECKER_AGENT) if not sources.rest.reads(start, a)
+    ]
+    if missing:  # the runner answers: a reader that did not read is the product's
+        pytest.fail(f"trust-status записи: нет чтений {missing}: {shown(written)}")
     text = written.stdout.decode("utf-8", "replace")
     if written.returncode != 0 or DONE_TEXT not in text:
         pytest.fail(f"setup-trust write: {shown(written)}")
@@ -998,11 +1001,13 @@ def test_root_trust_65_epochs_then_rebind(
     )
     assert refused.outcome == "refused", shown(done)
     assert "unsupported_size: epochs" in str(refused.reason), refused
-    assert EPOCHS_EXIT in explain(str(refused.reason)), refused
+    assert EPOCHS_EXIT in explain("", str(refused.reason)), refused
     assert watch.sessions and watch.in_argv() == [] and watch.in_log() == []
     assert not merged_pull(rw, 23)["merged"]
     assert blocked.state == "blocked", blocked
-    assert EPOCHS_EXIT in doctor_text, doctor_text[-2000:]
+    # doctor's JSON is ASCII-escaped (Task 13 N-6): read it back as text
+    doctor_json = json.dumps(json.loads(doctor_text), ensure_ascii=False)
+    assert EPOCHS_EXIT in doctor_json, doctor_text[-2000:]
     assert (fresh.state, fresh.snapshot_sha) == ("clear", new.head()), fresh
     assert status.result["state"] == "clear", status
     assert (stale.outcome, stale.reason) == ("refused", "root_mismatch"), stale

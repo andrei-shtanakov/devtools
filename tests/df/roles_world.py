@@ -52,7 +52,9 @@ import re
 import shutil
 import socket
 import ssl
+import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import uuid
@@ -785,9 +787,10 @@ def require_clean_host() -> None:
     for path in (sudoers.SUDOERS_FILE, IOLOG_FILE, link, *owned_paths(PRODUCTION)):
         if os.path.lexists(path):
             infra(f"{path} уже есть")
-    adapted = API_MARKER.exists() or HOSTS_MARK.encode() in HOSTS_FILE.read_bytes()
+    marker = api_marker()
+    adapted = marker_left(marker) or HOSTS_MARK.encode() in HOSTS_FILE.read_bytes()
     if adapted:
-        infra(f"хост остался адаптирован под {API_HOST} ({API_MARKER}, {HOSTS_FILE})")
+        infra(f"хост остался адаптирован под {API_HOST} ({marker}, {HOSTS_FILE})")
     leftover = [name for name in ACCOUNTS if _known(name)]
     if leftover or df_groups():
         infra(f"учётки или группы df-* от прошлого прогона: {leftover} {df_groups()}")
@@ -1062,9 +1065,44 @@ def install_sudoers_file(path: Path, text: str) -> None:
 API_HOST = "api.github.com"
 HOSTS_FILE = Path("/etc/hosts")
 HOSTS_MARK = "# df-acc: stage-3a root rows (removed by their teardown)"
-#: Present while the runner answers `API_HOST` itself; a leftover (a run
-#: killed with the adaptation active) fails the next world as infrastructure.
-API_MARKER = Path("/var/tmp/df-acc-api-impersonation")
+#: Present while the runner answers `API_HOST` itself, and kept when the
+#: restore could not be verified (a run killed with the adaptation active,
+#: or a failed check): the next world fails as infrastructure. In root's
+#: own home (root-only, never world-writable), the file made with
+#: `O_EXCL | O_NOFOLLOW` (review N1).
+API_MARKER_NAME = ".df-acc-api-impersonation"
+
+
+def api_marker() -> Path:
+    """`<root's home>/API_MARKER_NAME`."""
+    return Path(pwd.getpwuid(0).pw_dir) / API_MARKER_NAME
+
+
+def write_marker(path: Path, text: str) -> None:
+    """Create `path` (`0600`, never following a link, never over an
+    existing name: a leftover or a planted link is `FileExistsError`)."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        os.write(fd, text.encode("utf-8"))
+    finally:
+        os.close(fd)
+
+
+def marker_left(path: Path) -> bool:
+    """Any name at `path`, a dangling link included (`lexists`)."""
+    return os.path.lexists(path)
+
+
+def remove_marker(path: Path) -> None:
+    """Remove the marker this run made: a regular file of this user, not
+    a link (else infrastructure, the name kept)."""
+    st = os.lstat(path)
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid():
+        infra(f"{path}: не наш маркер (режим {st.st_mode:o}, uid {st.st_uid})")
+    os.unlink(path)
+
+
 #: The path of the positive control of the impersonation.
 API_CONTROL = "df-acc-control"
 
@@ -1210,11 +1248,14 @@ def verify_paths(python: Path, user: str) -> dict[str, str | None]:
 
 
 @contextmanager
-def trusted_ca(ca: Path, paths: Mapping[str, str | None]) -> Iterator[str]:
+def trusted_ca(
+    ca: Path, paths: Mapping[str, str | None], problems: list[str]
+) -> Iterator[str]:
     """`ca` in the store the admin Python reports: appended to its CA file
     when that exists, else one `<hash>.<n>` file in its CA directory. The
-    store is restored at the end and checked byte for byte (a mismatch is
-    infrastructure); what was changed is yielded."""
+    store is restored on every path and checked byte for byte; a mismatch
+    goes to `problems` (review N2: never masks a failure in flight). What
+    was changed is yielded."""
     cafile, capath = paths.get("cafile"), paths.get("capath")
     if cafile and os.path.isfile(cafile):
         bundle = Path(cafile)
@@ -1224,8 +1265,8 @@ def trusted_ca(ca: Path, paths: Mapping[str, str | None]) -> Iterator[str]:
             yield str(bundle)
         finally:
             bundle.write_bytes(saved)
-        if bundle.read_bytes() != saved:
-            infra(f"{bundle}: не восстановлен побайтно")
+            if bundle.read_bytes() != saved:
+                problems.append(f"{bundle}: не восстановлен побайтно")
         return
     if not capath or not os.path.isdir(capath):
         infra(f"нет хранилища доверия: {dict(paths)}")
@@ -1235,7 +1276,7 @@ def trusted_ca(ca: Path, paths: Mapping[str, str | None]) -> Iterator[str]:
                stdin=b"", env=BASE_ENV, cwd=Path("/"))  # fmt: skip
     check(out, "openssl x509 -hash")
     name = out.stdout.decode().strip()
-    n = next(i for i in range(100) if not (directory / f"{name}.{i}").exists())
+    n = next(i for i in range(100) if not os.path.lexists(directory / f"{name}.{i}"))
     added = directory / f"{name}.{n}"
     shutil.copyfile(ca, added)
     os.chmod(added, 0o644)
@@ -1243,14 +1284,14 @@ def trusted_ca(ca: Path, paths: Mapping[str, str | None]) -> Iterator[str]:
         yield str(added)
     finally:
         added.unlink(missing_ok=True)
-    if sorted(os.listdir(directory)) != before:
-        infra(f"{directory}: не восстановлен")
+        if sorted(os.listdir(directory)) != before:
+            problems.append(f"{directory}: не восстановлен")
 
 
 @contextmanager
-def api_on_loopback() -> Iterator[None]:
-    """`API_HOST` resolved to the loopback (`/etc/hosts`); restored and
-    checked byte for byte."""
+def api_on_loopback(problems: list[str]) -> Iterator[None]:
+    """`API_HOST` resolved to the loopback (`/etc/hosts`); restored on
+    every path and checked byte for byte (a mismatch to `problems`)."""
     saved = HOSTS_FILE.read_bytes()
     lines = f"\n{HOSTS_MARK}\n127.0.0.1 {API_HOST}\n::1 {API_HOST}\n"
     try:
@@ -1260,8 +1301,8 @@ def api_on_loopback() -> Iterator[None]:
     finally:
         HOSTS_FILE.write_bytes(saved)
         _flush_resolver()
-    if HOSTS_FILE.read_bytes() != saved:
-        infra(f"{HOSTS_FILE}: не восстановлен побайтно")
+        if HOSTS_FILE.read_bytes() != saved:
+            problems.append(f"{HOSTS_FILE}: не восстановлен побайтно")
 
 
 def _flush_resolver() -> None:
@@ -1310,13 +1351,19 @@ def impersonate_api(rest: object, work: Path, python: Path) -> Iterator[ApiCerts
     if len({json.dumps(p, sort_keys=True) for p in paths.values()}) != 1:
         infra(f"роли читают разные хранилища доверия: {paths}")
     keys = Path(tempfile.mkdtemp(prefix="df-acc-api-", dir=work))
-    API_MARKER.write_text(f"{HOSTS_MARK}\nkeys {keys}\n")
+    marker = api_marker()
+    try:
+        write_marker(marker, f"{HOSTS_MARK}\nkeys {keys}\n")
+    except FileExistsError:
+        infra(f"{marker} уже есть: хост адаптирован прошлым прогоном")
+    problems: list[str] = []
     try:
         certs = make_api_certs(keys)
         with ExitStack() as stack:
             stack.enter_context(serve_api(rest, certs))
-            store = stack.enter_context(trusted_ca(certs.ca, paths["df-publisher"]))
-            stack.enter_context(api_on_loopback())
+            ca = trusted_ca(certs.ca, paths["df-publisher"], problems)
+            store = stack.enter_context(ca)
+            stack.enter_context(api_on_loopback(problems))
             seen = {user: _probe(python, user) for user in API_READERS}
             evidence(
                 "api-impersonation.json",
@@ -1329,10 +1376,17 @@ def impersonate_api(rest: object, work: Path, python: Path) -> Iterator[ApiCerts
                     infra(f"api.github.com не отвечает подделкой ({user}): {got}")
             yield certs
     finally:
+        # every path (review N2): the restore was checked by the contexts
+        # above; the keys go; the marker only when all of it held, so a
+        # leftover means exactly "restore not verified"
         shutil.rmtree(keys, ignore_errors=True)
-    if keys.exists():
-        infra(f"{keys}: ключи не удалены")
-    API_MARKER.unlink()  # restored and checked: no leftover
+        if os.path.lexists(keys):
+            problems.append(f"{keys}: ключи не удалены")
+        evidence("api-restore.json", {"problems": problems})
+        if not problems:
+            remove_marker(marker)
+        elif sys.exc_info()[0] is None:
+            infra("; ".join(problems))
 
 
 def _probe(python: Path, user: str) -> dict[str, object]:
