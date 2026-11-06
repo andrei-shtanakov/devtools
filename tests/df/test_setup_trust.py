@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from df import cli, journal, launcher_entry, setup_trust
+from df import cli, journal, launcher_entry, perimeter_client, setup_trust
 from df import platform as plat
 from df.journal import NeedsHuman, Stable, StepFailed
 from df.paths import Layout
@@ -440,7 +440,8 @@ def w(fake_layout: FakeLayout, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
 
     monkeypatch.setattr(os, "fchown", fchown)
 
-    def trust_status(_layout: Layout) -> bytes:
+    def trust_status(_layout: Layout, *, purpose: str) -> bytes:
+        assert purpose == setup_trust.STEP
         answer = world.status.pop(0)
         if isinstance(answer, Exception):
             raise answer
@@ -1173,3 +1174,25 @@ def test_system_mutation_guard_closed_forms() -> None:
     ):
         assert system_mutation(argv), argv
     assert not system_mutation(["/bin/sh", "-c", "echo pwd"])
+
+
+@pytest.mark.parametrize("purpose", [setup_trust.STEP, "doctor"])
+def test_trust_status_request_names_its_caller(
+    fake_layout: FakeLayout, monkeypatch: pytest.MonkeyPatch, purpose: str
+) -> None:
+    """Task 13 M-2: the request id names the caller (`setup-trust` by
+    default, `doctor` for its probe) in the publisher's journal."""
+    sent: list[tuple[bytes, str]] = []
+
+    def sudo_call(data: bytes, layout: Layout, **kw: object) -> bytes:
+        sent.append((data, str(kw["operation"])))
+        return status_line()
+
+    monkeypatch.setattr(perimeter_client, "sudo_call", sudo_call)
+    status = setup_trust.read_trust_status(
+        fake_layout.layout, ("github.com", TRUST_ID, "main"), purpose=purpose
+    )
+    assert status.state == "clear"
+    ((data, operation),) = sent
+    assert operation == request.TRUST_STATUS
+    assert json.loads(data)["request_id"].startswith(f"{purpose}-")

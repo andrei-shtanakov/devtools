@@ -1184,7 +1184,9 @@ def test_level1_reached_after_setup_trust_write(
     record = GroupRecord(HISTORY_GROUP, 4321, "ready", "t")
     fsutil.write_atomic(lay.groups, dump_groups({HISTORY_GROUP: record}))
     monkeypatch.setattr(plat, "group_gid", lambda name: 4321)
-    monkeypatch.setattr(setup_trust, "trust_status_call", lambda _l: status_line())
+    monkeypatch.setattr(
+        setup_trust, "trust_status_call", lambda _l, **_k: status_line()
+    )
     human = tmp_path / "human"
     human.mkdir()
     report = human / "report.json"
