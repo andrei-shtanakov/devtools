@@ -44,13 +44,16 @@ from __future__ import annotations
 
 import grp
 import gzip
+import http.server
 import json
 import os
 import pwd
 import re
 import shutil
 import socket
+import ssl
 import subprocess
+import threading
 import uuid
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
@@ -649,10 +652,17 @@ class RolesWorld:
             return []
         return [json.loads(line) for line in path.read_text().splitlines() if line]
 
-    def register_run(self, release: ReleaseEntry, *, root: bool = False) -> str:
+    def register_run(
+        self,
+        release: ReleaseEntry,
+        *,
+        root: bool = False,
+        root_id: tuple[str, int, str] | None = None,
+    ) -> str:
         """A fixture run record of `release` in `runs/` (root's, `0644`),
         through `run_start.register`; `root`: bound to the trust fixture's
-        root (`TRUST_ROOT`)."""
+        root (`TRUST_ROOT`), `root_id`: to that root (stage 3a)."""
+        bound = root_id if root_id is not None else TRUST_ROOT if root else None
         text = (self.layout.etc / "models.toml").read_text()
         pins = run_start.pins_from_data(
             self.layout, PRODUCT_ID, models.parse_models(text)
@@ -664,7 +674,7 @@ class RolesWorld:
             release.admin_digest,
             PRODUCT_ID,
             pins,
-            TRUST_ROOT if root else None,
+            bound,
             datetime.now(UTC).isoformat(),
             0,
         )
@@ -807,9 +817,15 @@ def check(done: subprocess.CompletedProcess[bytes], what: str) -> None:
 
 @contextmanager
 def roles_world(
-    top: Path, repo: FixtureRepo, control_url: str, keep: Path | None
+    top: Path,
+    repo: FixtureRepo,
+    control_url: str,
+    keep: Path | None,
+    *,
+    name: str = "roles",
 ) -> Iterator[RolesWorld]:
-    """The module's world (module doc); torn down whatever happens."""
+    """The module's world (module doc) with its work directory `<top>/<name>`
+    (one per module of a session); torn down whatever happens."""
     require_clean_host()
     layout = PRODUCTION
     with ExitStack() as stack:
@@ -818,7 +834,7 @@ def roles_world(
         world = RootWorld(layout, repo, approved_uv(), top, control_url)
         # the real `site/` of `real_site_pins`, fetched by the install
         installed = install_production(world)
-        work = top / "roles"
+        work = top / name
         work.mkdir(mode=0o755)
         os.chmod(work, 0o755)
         key, public = make_app_key(work)
@@ -1028,3 +1044,218 @@ def install_sudoers_file(path: Path, text: str) -> None:
         os.unlink(tmp)
         infra(f"visudo отверг {text!r}: {shown(done)}")
     os.rename(tmp, path)
+
+
+# ---------- stage 3a: `api.github.com` of the trust sources (Task 14) ----------
+
+#: The host every trust read of df goes to (`df.publisher.github.API`,
+#: `governance.act_anon.API`): fixed in the code, so the root world of the
+#: stage-3a rows makes the runner answer it itself -- a host adaptation of
+#: the disposable runner, like `/opt` and `/home` in the workflow.
+API_HOST = "api.github.com"
+HOSTS_FILE = Path("/etc/hosts")
+HOSTS_MARK = "# df-acc: stage-3a root rows (removed by their teardown)"
+#: The CA bundle the uv-installed admin Python reads on macOS
+#: (`ssl.get_default_verify_paths()`: `/private/etc/ssl/cert.pem`).
+MACOS_CA_BUNDLE = Path("/private/etc/ssl/cert.pem")
+#: Debian's local CA directory (`update-ca-certificates` links it into
+#: `/etc/ssl/certs`, the admin Python's `capath`).
+LINUX_CA_FILE = Path("/usr/local/share/ca-certificates/df-acc-test-ca.crt")
+UPDATE_CA = "/usr/sbin/update-ca-certificates"
+#: The path of the positive control of the impersonation.
+API_CONTROL = "df-acc-control"
+
+_CA_CNF = """[req]
+distinguished_name = dn
+prompt = no
+[dn]
+CN = df-acc test CA (stage 3a root rows)
+[v3_ca]
+basicConstraints = critical,CA:TRUE
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+"""
+_LEAF_CNF = f"""[v3_leaf]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature,keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = DNS:{API_HOST}
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid
+"""
+
+
+@dataclass(frozen=True)
+class ApiCerts:
+    """A throwaway CA and the `api.github.com` leaf it signed."""
+
+    ca: Path
+    leaf: Path
+    key: Path
+
+
+def make_api_certs(work: Path, openssl: Path = OPENSSL) -> ApiCerts:
+    """A fresh CA (two days) and its leaf for `API_HOST`, under `work`."""
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "ca.cnf").write_text(_CA_CNF)
+    (work / "leaf.cnf").write_text(_LEAF_CNF)
+    ca_key, ca = work / "ca.key", work / "ca.pem"
+    key, csr, leaf = work / "leaf.key", work / "leaf.csr", work / "leaf.pem"
+    gen = ["genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"]
+    steps = [
+        [*gen, "-out", str(ca_key)],
+        ["req", "-x509", "-new", "-key", str(ca_key), "-sha256", "-days", "2"]
+        + ["-config", str(work / "ca.cnf"), "-extensions", "v3_ca", "-out", str(ca)],
+        [*gen, "-out", str(key)],
+        ["req", "-new", "-key", str(key), "-subj", f"/CN={API_HOST}"]
+        + ["-out", str(csr)],
+        ["x509", "-req", "-in", str(csr), "-CA", str(ca), "-CAkey", str(ca_key)]
+        + ["-set_serial", "2", "-days", "2", "-sha256"]
+        + ["-extfile", str(work / "leaf.cnf"), "-extensions", "v3_leaf"]
+        + ["-out", str(leaf)],
+    ]
+    for argv in steps:
+        check(_run([str(openssl), *argv], stdin=b"", env=BASE_ENV, cwd=work), argv[0])
+    for path in (ca_key, key):
+        os.chmod(path, 0o600)
+    return ApiCerts(ca, leaf, key)
+
+
+def _api_handler(rest: object) -> type[http.server.BaseHTTPRequestHandler]:
+    """`GET` of the trust sources' REST answers (`trust_sources.GitRest`)."""
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - http.server's name
+            path = self.path.lstrip("/")
+            if path == API_CONTROL:
+                status, body = 200, {"control": API_CONTROL}
+            else:
+                auth = self.headers.get("Authorization", "")
+                status, body = rest.answer(path, auth)  # type: ignore[attr-defined]
+            data = json.dumps(body).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+            """Quiet."""
+
+    return Handler
+
+
+class _V6Server(http.server.ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+
+@contextmanager
+def serve_api(
+    rest: object, certs: ApiCerts, *, port: int = 443, v6: bool = True
+) -> Iterator[list[int]]:
+    """HTTPS with the leaf of `certs` on `127.0.0.1:<port>` (and `[::1]`
+    when the host has it); the ports bound."""
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certs.leaf, certs.key)
+    handler = _api_handler(rest)
+    servers: list[http.server.ThreadingHTTPServer] = [
+        http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
+    ]
+    if v6:
+        try:
+            servers.append(_V6Server(("::1", port), handler))
+        except OSError:
+            pass  # no IPv6 loopback: the name resolves to 127.0.0.1 only
+    for server in servers:
+        server.daemon_threads = True
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield [s.server_address[1] for s in servers]
+    finally:
+        for server in servers:
+            server.shutdown()
+            server.server_close()
+
+
+@contextmanager
+def trusted_ca(ca: Path) -> Iterator[None]:
+    """`ca` in the trust store of the admin Python; the store restored."""
+    if plat.detect_platform() == "macos-arm64":
+        saved = MACOS_CA_BUNDLE.read_bytes()
+        try:
+            MACOS_CA_BUNDLE.write_bytes(saved + b"\n" + ca.read_bytes())
+            yield
+        finally:
+            MACOS_CA_BUNDLE.write_bytes(saved)
+        return
+    shutil.copyfile(ca, LINUX_CA_FILE)
+    os.chmod(LINUX_CA_FILE, 0o644)
+    try:
+        run([UPDATE_CA])
+        yield
+    finally:
+        LINUX_CA_FILE.unlink(missing_ok=True)
+        run([UPDATE_CA, "--fresh"])
+
+
+@contextmanager
+def api_on_loopback() -> Iterator[None]:
+    """`API_HOST` resolved to the loopback (`/etc/hosts`); restored."""
+    saved = HOSTS_FILE.read_bytes()
+    lines = f"\n{HOSTS_MARK}\n127.0.0.1 {API_HOST}\n::1 {API_HOST}\n"
+    try:
+        HOSTS_FILE.write_bytes(saved + lines.encode("ascii"))
+        _flush_resolver()
+        yield
+    finally:
+        HOSTS_FILE.write_bytes(saved)
+        _flush_resolver()
+
+
+def _flush_resolver() -> None:
+    if plat.detect_platform() == "macos-arm64":
+        _run(["/usr/bin/dscacheutil", "-flushcache"], stdin=b"", env=BASE_ENV,
+             cwd=Path("/"))  # fmt: skip
+        _run(["/usr/bin/killall", "-HUP", "mDNSResponder"], stdin=b"",
+             env=BASE_ENV, cwd=Path("/"))  # fmt: skip
+
+
+#: The control: the admin Python, as a reader of the trust sources does,
+#: reads `API_CONTROL` over HTTPS with the default context.
+API_PROBE = """
+import json, ssl, sys, urllib.request
+url = "https://api.github.com/" + sys.argv[1]
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+try:
+    with opener.open(url, timeout=30) as resp:
+        print(json.dumps({"status": resp.status, "body": json.loads(resp.read())}))
+except Exception as exc:
+    print(json.dumps({"error": f"{type(exc).__name__}: {exc}",
+                      "paths": str(ssl.get_default_verify_paths())}))
+"""
+
+
+@contextmanager
+def impersonate_api(rest: object, work: Path, python: Path) -> Iterator[ApiCerts]:
+    """The runner answers `https://api.github.com/` itself (`rest`): a CA
+    trusted by the admin Python `python`, the name on the loopback, HTTPS
+    on port 443; the positive control (`API_PROBE`) must reach it, else
+    infrastructure. Everything restored at the end."""
+    if os.geteuid() != 0:
+        raise PermissionError("impersonate_api: root only (CI root world)")
+    certs = make_api_certs(work / "api-certs")
+    with ExitStack() as stack:
+        stack.enter_context(serve_api(rest, certs))
+        stack.enter_context(trusted_ca(certs.ca))
+        stack.enter_context(api_on_loopback())
+        done = _run([str(python), "-I", "-c", API_PROBE, API_CONTROL], stdin=b"",
+                    env=BASE_ENV, cwd=Path("/"))  # fmt: skip
+        try:
+            seen = json.loads(done.stdout)
+        except ValueError:
+            seen = {"raw": shown(done)}
+        evidence("api-impersonation.json", {"probe": seen})
+        if seen.get("status") != 200 or seen.get("body") != {"control": API_CONTROL}:
+            infra(f"api.github.com не отвечает подделкой: {seen}")
+        yield certs
