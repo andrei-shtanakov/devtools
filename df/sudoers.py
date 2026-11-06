@@ -351,6 +351,17 @@ def _grant_problems(
     return [f"sudo -l -U {name}: {p}" for p in problems]
 
 
+def runas_users(runas: str) -> frozenset[str]:
+    """The users a printed RunAs spec names: the part before `:` (the group
+    part after it does not change who runs), split on commas, trimmed --
+    `df-precheck`, `df-precheck : grp` and `root, df-precheck` all name
+    `df-precheck`. `ALL` stays `ALL`: an `(ALL)` rule is the host
+    administrator's (spec 4.5 (ii)) unless its command names `df-precheck`
+    (paid review #708)."""
+    users = runas.split(":", 1)[0]
+    return frozenset(u.strip() for u in users.split(",") if u.strip())
+
+
 def file_problems(layout: Layout, operator: str) -> list[str]:
     """The installed file is root's `FILE_MODE` text of `render(operator)`,
     and `visudo` accepts that text (the same bytes)."""
@@ -389,7 +400,7 @@ def operator_rights(layout: Layout, operator: str) -> OperatorRights:
     named = {
         g
         for g in have
-        if g.runas == PRECHECK_USER or g.command.split(" ")[0] == precheck
+        if PRECHECK_USER in runas_users(g.runas) or g.command.split(" ")[0] == precheck
     }
     ours += [
         f"sudo -l -U {operator}: правило на df-precheck {g}"

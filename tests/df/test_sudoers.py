@@ -901,3 +901,39 @@ def test_operator_unreadable_listing_fails_i(
     _sudo(monkeypatch, {OP: "garbage\n"})
     (problem,) = sudoers.operator_rights(ROOT, OP).ours
     assert problem.startswith(f"sudo -l -U {OP}: ")
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "(df-precheck : df-precheck) NOPASSWD: /bin/sh",
+        "(df-precheck:staff) NOPASSWD: /bin/sh",
+        "(root, df-precheck) NOPASSWD: /bin/sh",
+        "(ALL) NOPASSWD: /opt/df/libexec/df-precheck",
+    ],
+)
+def test_operator_runas_spec_on_precheck_fails_i(
+    installed: Path, monkeypatch: pytest.MonkeyPatch, rule: str
+) -> None:
+    """Paid review #708: the RunAs user part is matched -- a group after `:`,
+    a user list, or `ALL` with the `df-precheck` command name the rule; the
+    administrator's `(ALL) ALL` stays (ii)'s."""
+    listing = _fixture("sudo-l-linux-runner.txt") + f"    {rule}\n"
+    _sudo(monkeypatch, {OP: listing})
+    ours = sudoers.operator_rights(ROOT, OP).ours
+    assert any("правило на df-precheck" in p for p in ours), ours
+
+
+@pytest.mark.parametrize(
+    ("runas", "users"),
+    [
+        ("df-precheck", {"df-precheck"}),
+        ("df-precheck : df-precheck", {"df-precheck"}),
+        (" root ,df-precheck : wheel", {"root", "df-precheck"}),
+        ("ALL", {"ALL"}),
+        ("ALL : ALL", {"ALL"}),
+        (": staff", set()),
+    ],
+)
+def test_runas_users(runas: str, users: set[str]) -> None:
+    assert sudoers.runas_users(runas) == users

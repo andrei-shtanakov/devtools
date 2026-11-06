@@ -548,6 +548,10 @@ def test_root_validates_response_schema_and_root(
 # --- the verdict: outcomes and binding -------------------------------------------
 
 
+#: A bound reason for the statuses whose reason is a closed set.
+REASON_OF = {"unsupported_size": "unsupported_size: epochs"}
+
+
 @pytest.mark.parametrize(
     ("status_", "want"),
     [("tree_incomplete", "unresolved"), ("unset", "unresolved"),
@@ -576,7 +580,8 @@ def test_verdict_outcome_mapping(
             }
             return (json.dumps(data) + "\n").encode()
         no_pair = {"relation": None, "last_epoch": None, "source": None}
-        return wire(verdict(req, outcome=status_, reason=f"{status_}: x", **no_pair))
+        reason = REASON_OF.get(status_, f"{status_}: x")
+        return wire(verdict(req, outcome=status_, reason=reason, **no_pair))
 
     tw.checker.answer = answer
     resp = tstatus(world, capsys)
@@ -1244,6 +1249,46 @@ def test_irreproducible_reason_closed(
     )
     tstatus(world, capsys)
     assert observations(world)[-1][3] == "unresolved"
+
+
+@pytest.mark.parametrize("reason", ["", "unsupported_size: ", "unsupported_size: x"])
+def test_unsupported_size_reason_closed(
+    world: World,
+    tw: TrustWorld,
+    capsys: pytest.CaptureFixture[str],
+    reason: str,
+) -> None:
+    """Paid review #708: an `unsupported_size` verdict whose reason is empty
+    or names no field of the checker is unbound -- `unresolved`, no К event
+    without a named cause."""
+    no_pair = {"relation": None, "last_epoch": None, "source": None}
+    tw.checker.answer = lambda req: wire(
+        verdict(req, outcome="unsupported_size", reason=reason, **no_pair)
+    )
+    tstatus(world, capsys)
+    assert observations(world)[-1][3] == "unresolved"
+    assert db_rows(world, "SELECT event_id FROM events") == []
+
+
+def test_unsupported_reasons_pinned_to_the_checker() -> None:
+    """`UNSUPPORTED_REASONS` = every `UnsupportedSize("<field>")` the checker
+    raises (`governance/act_trust_findings.py`)."""
+    import ast
+
+    source = Path(__file__).parents[2] / "governance" / "act_trust_findings.py"
+    tree = ast.parse(source.read_text())
+    fields = {
+        node.args[0].value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "UnsupportedSize"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+    }
+    assert trust_routes.UNSUPPORTED_REASONS == {
+        f"unsupported_size: {f}" for f in fields
+    }
 
 
 @pytest.mark.parametrize(

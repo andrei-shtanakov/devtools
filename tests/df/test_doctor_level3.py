@@ -605,14 +605,15 @@ def test_listing_untyped_k_is_not_checked(l3: L3, reason: str) -> None:
     assert c.reason.endswith(doctor.EPOCHS_MAYBE)
 
 
-def test_listing_unnamed_k_is_a_note(l3: L3) -> None:
-    """N-7: a К without a reason (a changed context, a moved binding) is
-    never a size one: a note of `ok`, no epochs text."""
+def test_listing_unnamed_k_is_not_checked(l3: L3) -> None:
+    """Paid review #708: a К without a reason (e.g. a verdict bound before the
+    publisher refused an empty reason) never proves the size -- «не
+    проверено», the epochs exit only as a possibility, never `ok`."""
     l3.trust = listed(status_line("blocked"), [_row("conservative", None)])
     c = l3.checks()["trust.unsupported_size"]
-    assert c.status == "ok"
+    assert c.status == "не проверено"
     assert c.reason.startswith("К по другой причине: событие 1")
-    assert "unsupported_size: epochs" not in c.reason
+    assert c.reason.endswith(doctor.EPOCHS_MAYBE)
 
 
 @pytest.mark.parametrize("kind", ["record_violation", "finding", "unknown"])
