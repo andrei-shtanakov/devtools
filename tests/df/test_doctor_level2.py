@@ -273,8 +273,17 @@ def l2(fake_installed: World, tmp_path: Path) -> L2:
     mp.setattr(sudoers, "validate", lambda _t: [])
     mp.setattr(sudoers, "policy_problems", lambda *_a, **_k: [])
     mp.setattr(sudoers, "io_log_problems", lambda _l: [])
+    mp.setattr(sudoers, "read_listing", lambda name: operator_listing(w.lay, name))
     _seams(world, mp)
     return world
+
+
+def operator_listing(lay: Layout, name: str) -> sudoers.Listing:
+    """`sudo -l -U <operator>` as `roles setup --operator <name>` leaves it:
+    exactly the rules `render` gives that operator (the operator line, Task
+    13 of 3a)."""
+    grants = sudoers.expected_grants(lay, name)[name]
+    return sudoers.Listing((), (), grants, grants)
 
 
 def _seams(world: L2, mp: pytest.MonkeyPatch) -> None:
@@ -357,7 +366,7 @@ def test_level2_reached_on_a_green_set(
     assert out[:5] == [
         "уровень 1: достигнут",
         "уровень 2: достигнут",
-        "уровень 3: не проверено (этап 3)",
+        f"уровень 3: не достигнут — trust.binding: нарушено: {doctor.NO_BINDING}",
         "уровень 4: не проверено (этап 4)",
         "профиль: write",
     ]
@@ -378,7 +387,7 @@ def test_level2_json_carries_everything(
     assert [c["id"] for c in data["level2_checks"]] == LEVEL2_IDS
     assert data["perimeter"]["id"] == "perimeter.journal"
     assert (data["level3"], data["level4"]) == (
-        "not checked (stage 3)",
+        "not reached",
         "not checked (stage 4)",
     )
     machine = next(c for c in data["level2_checks"] if c["id"] == "github.machine_user")
@@ -542,7 +551,7 @@ def _listings(lay: Layout, edit: tuple[str, str] | None) -> dict[str, sudoers.Li
             text = text.replace(*edit)
         text = text.replace("/opt/df/", f"{lay.opt}/")
         found[name] = sudoers.parse_listing(name, text)
-    return found
+    return found | {OPERATOR: operator_listing(lay, OPERATOR)}
 
 
 PRECHECK_BINDING = (

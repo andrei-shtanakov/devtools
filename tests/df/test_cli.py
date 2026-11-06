@@ -1018,3 +1018,20 @@ def test_documented_setup_trust_sequence_parses() -> None:
     for argv, mode in zip(argvs, modes, strict=True):
         assert launcher_entry.mode_of(argv) == mode
         assert cli.parsed_mode(cli._parse(argv)) == mode  # noqa: SLF001
+
+
+def test_refusal_line_is_inert(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Task 13 round 3: a refusal may carry what GitHub, the publisher or a
+    role wrote; stderr gets one inert line."""
+    from df.journal import StepFailed
+
+    def refuse(*_a: object) -> int:
+        raise StepFailed("setup-trust", "login eve\n  ok\r\x1b[2K‮")
+
+    monkeypatch.setattr(cli, "_main", refuse)
+    assert cli.main(["doctor"], mode="reader", read=None, lock_fd=None) != 0
+    err = capsys.readouterr().err
+    assert err.count("\n") == 1 and not any(c in err for c in "\r\x1b‮")
+    assert "eve\\x0a  ok\\x0d\\x1b[2K\\u202e" in err

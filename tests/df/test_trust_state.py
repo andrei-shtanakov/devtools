@@ -985,3 +985,94 @@ def test_admit_merge_settle_head_unreadable_keeps_the_reason(lay: Layout) -> Non
     assert outcome(lay, found.id) == "finding_registered"
     assert outcome(lay, clean.id) == "unresolved"
     assert [(e[1], e[2]) for e in events(lay)] == [("pending", None)]
+
+
+# --- the blocking listing of trust-status (stage 3a Task 13, round 1b) -----------
+
+
+def _plant(
+    db: perimeter.Db, root: Root, detected_by: str, detail: str, key: str
+) -> None:
+    with perimeter.write(db.conn):
+        perimeter.insert_event(
+            db.conn, root, key=key, epoch=None, provenance={},
+            detected_by=detected_by, detail=detail,
+        )  # fmt: skip
+
+
+def test_blocking_listing_names_kind_root_and_k_cause(lay: Layout) -> None:
+    """Each blocking event with its root and kind: К carries its named cause
+    (`unsupported_size: epochs`), a finding its kind, a restore event of an
+    old root (R2, not bound) is listed under R2 -- the current root first."""
+    accept(lay, H1, 1)
+    with perimeter.open_db(lay) as db:
+        obs = observe(db, accepted=H1, head=H2)
+        trust_state.apply_status(
+            db, ROOT, obs.id, "unsupported_size", epochs_of=PENDING,
+            reason="unsupported_size: epochs",
+        )  # fmt: skip
+        _plant(db, R2, perimeter.DB_RESTORE, "conservative event of a restored "
+               "database", "db_restore:1")  # fmt: skip
+        other = observe(db, accepted=H1, head=H3)
+        trust_state.register_findings(db, ROOT, other.ctx, [RULESET], epochs_of=PENDING)
+        _plant(db, ROOT, "sender:71001", "pushed to main", "rv-1")
+        listed, omitted = trust_state.blocking_listing(db.conn, ROOT)
+    assert omitted == 0
+    rows = [(e.root, e.kind, e.state, e.epoch, e.reason) for e in listed]
+    assert rows == [
+        (ROOT, "conservative", "pending", None, "unsupported_size: epochs"),
+        (ROOT, "finding", "pending", None, "ruleset_missing: no ruleset"),
+        (ROOT, "record_violation", "pending", None, "pushed to main"),
+        (R2, "db_restore", "pending", None, None),
+    ]
+
+
+def test_blocking_listing_follows_each_roots_rule(lay: Layout) -> None:
+    """`registered(E)` below a root's accepted last epoch is not blocking;
+    a К event without a cause has none; the listing is capped."""
+    accept(lay, H1, 3)
+    with perimeter.open_db(lay) as db, perimeter.write(db.conn):
+        for i, epoch in enumerate((2, 3)):
+            perimeter.insert_event(
+                db.conn, ROOT, key=f"k{i}", epoch=epoch, provenance={},
+                detected_by=trust_state.CONSERVATIVE_SOURCE,
+                detail="conservative completion of an observation (K)",
+            )  # fmt: skip
+        listed, _ = trust_state.blocking_listing(db.conn, ROOT)
+        assert [(e.epoch, e.reason) for e in listed] == [(3, None)]
+        for i in range(trust_state.MAX_LISTED + 2):
+            perimeter.insert_event(
+                db.conn, R2, key=f"many{i}", epoch=None, provenance={},
+                detected_by="publisher:else", detail="x",
+            )  # fmt: skip
+        listed, omitted = trust_state.blocking_listing(db.conn, ROOT)
+    assert len(listed) == trust_state.MAX_LISTED and omitted == 3
+    assert listed[0].root == ROOT and listed[-1].kind == "unknown"
+
+
+def test_blocking_kinds_pinned() -> None:
+    from typing import get_args
+
+    from df.publisher import request
+
+    assert frozenset(get_args(trust_state.BlockingKind)) == request.BLOCKING_KINDS
+
+
+def test_restore_admission_keeps_the_size_cause(lay: Layout) -> None:
+    """Re-review N-2: after a restore, the first observation of a root writes
+    the admission К under its own key; a later К of the same ctx with
+    `unsupported_size: epochs` is its own event and keeps its cause."""
+    with perimeter.open_db(lay) as db:
+        with perimeter.write(db.conn):
+            perimeter.mark_restored(db.conn)
+        obs = observe(db, accepted=None, head=H1)
+        trust_state.apply_status(
+            db, ROOT, obs.id, "unsupported_size", epochs_of=PENDING,
+            reason="unsupported_size: epochs",
+        )  # fmt: skip
+        listed, _ = trust_state.blocking_listing(db.conn, ROOT)
+    reasons = [(e.kind, e.reason) for e in listed]
+    assert reasons == [
+        ("conservative", "root first seen after a restore of the database"),
+        ("conservative", "unsupported_size: epochs"),
+    ]

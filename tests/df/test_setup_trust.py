@@ -10,6 +10,7 @@ and real groups exist only in the CI root cells.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import hashlib
 import json
 import os
@@ -21,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from df import cli, journal, launcher_entry, setup_trust
+from df import cli, journal, launcher_entry, perimeter_client, setup_trust
 from df import platform as plat
 from df.journal import NeedsHuman, Stable, StepFailed
 from df.paths import Layout
@@ -440,7 +441,8 @@ def w(fake_layout: FakeLayout, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
 
     monkeypatch.setattr(os, "fchown", fchown)
 
-    def trust_status(_layout: Layout) -> bytes:
+    def trust_status(_layout: Layout, *, purpose: str) -> bytes:
+        assert purpose == setup_trust.STEP
         answer = world.status.pop(0)
         if isinstance(answer, Exception):
             raise answer
@@ -655,9 +657,11 @@ def test_rebind_full_check(w: W) -> None:
 
 
 def test_epochs_exhausted_text_names_exit() -> None:
-    """`unsupported_size: epochs` names the exit of spec 6.1 verbatim, in a
-    reason and in a finding."""
-    text = setup_trust.explain("unavailable: unsupported_size: epochs")
+    """`unsupported_size: epochs` names the exit of spec 6.1 verbatim, only
+    for a reason the publisher typed (re-review N-5): the answer's own
+    reason, a К event's cause -- never a finding's detail or a role's
+    record-violation."""
+    text = setup_trust.explain("unavailable: …", "unsupported_size: epochs")
     for part in (
         "новый репо df-trust с начальным журналом из одной эпохи",
         "setup-trust check --rebind",
@@ -666,14 +670,63 @@ def test_epochs_exhausted_text_names_exit() -> None:
         "прогоны прежнего корня операций над PR не получают",
     ):
         assert part in text
-    assert setup_trust.explain("unavailable: x") == "unavailable: x"
+    assert setup_trust.explain("unavailable: x", "x") == "unavailable: x"
+    assert setup_trust.explain("a unsupported_size: epochs", None) == (
+        "a unsupported_size: epochs"
+    )
+    assert setup_trust.explain("t", "why: unsupported_size: epochs") == "t"
     status = request.TrustStatus(
         None, None, "unavailable", "unsupported_size: epochs", (), ()
     )
     assert setup_trust.EPOCHS_EXIT in setup_trust.status_lines(status)[0]
     finding = {"kind": "k", "role": "df-trust", "detail": "unsupported_size: epochs"}
     status = request.TrustStatus(None, None, "blocked", None, (), (finding,))
-    assert setup_trust.EPOCHS_EXIT in setup_trust.status_lines(status)[-1]
+    assert setup_trust.EPOCHS_EXIT not in "".join(setup_trust.status_lines(status))
+
+
+@pytest.mark.parametrize("kind", ["record_violation", "finding", "unknown"])
+def test_role_text_never_names_the_epochs_exit(kind: str) -> None:
+    """Re-review N-5: a reason another party wrote, exactly `unsupported_size:
+    epochs`, never prints the exit; the publisher's К with that cause does."""
+    epochs = "unsupported_size: epochs"
+    forged = request.BlockingRow(ROOT_ID, 1, kind, "registered", 1, epochs)
+    status = request.TrustStatus(
+        None, None, "blocked", None, (), (), request.Blocking((forged,), 0)
+    )
+    assert setup_trust.EPOCHS_EXIT not in "".join(
+        setup_trust.status_lines(status, ROOT_ID)
+    )
+    genuine = dataclasses.replace(forged, kind="conservative")
+    status = dataclasses.replace(status, blocking=request.Blocking((genuine,), 0))
+    assert setup_trust.EPOCHS_EXIT in setup_trust.status_lines(status, ROOT_ID)[1]
+
+
+EVIL_NAME = "eve\n  СТОП нет\x1b[2K\u202eko"
+
+
+def test_check_report_names_are_inert() -> None:
+    """Round 3: names GitHub returns -- a collaborator's login, a deploy key's
+    title -- print as one inert line each in `setup-trust check`."""
+    fake = good_github()
+    base = f"repos/{TRUST}"
+    fake.answers[f"{base}/collaborators?affiliation=all&per_page=100"] = (
+        200,
+        [
+            {"login": "alice", "role_name": "admin"},
+            {"login": EVIL_NAME, "role_name": "admin"},
+        ],
+    )
+    fake.answers[f"{base}/keys?per_page=100"] = (
+        200,
+        [{"id": 9, "title": EVIL_NAME, "read_only": False}],
+    )
+    text = setup_trust.report_text(check(fake))
+    assert not any(c in text for c in "\r\x1b\u202e")
+    lines = text.splitlines()
+    assert not any(ln.startswith("  СТОП") for ln in lines)
+    trust_line = next(ln for ln in lines if ln.startswith("df-trust: запись"))
+    assert "eve\\x0a  СТОП нет\\x1b[2K\\u202eko" in trust_line
+    assert "deploy_key:9" in trust_line
 
 
 def test_trust_toml_round_trip() -> None:
@@ -1173,3 +1226,66 @@ def test_system_mutation_guard_closed_forms() -> None:
     ):
         assert system_mutation(argv), argv
     assert not system_mutation(["/bin/sh", "-c", "echo pwd"])
+
+
+@pytest.mark.parametrize("purpose", [setup_trust.STEP, "doctor"])
+def test_trust_status_request_names_its_caller(
+    fake_layout: FakeLayout, monkeypatch: pytest.MonkeyPatch, purpose: str
+) -> None:
+    """Task 13 M-2: the request id names the caller (`setup-trust` by
+    default, `doctor` for its probe) in the publisher's journal."""
+    sent: list[tuple[bytes, str]] = []
+
+    def sudo_call(data: bytes, layout: Layout, **kw: object) -> bytes:
+        sent.append((data, str(kw["operation"])))
+        return status_line()
+
+    monkeypatch.setattr(perimeter_client, "sudo_call", sudo_call)
+    status = setup_trust.read_trust_status(
+        fake_layout.layout, ("github.com", TRUST_ID, "main"), purpose=purpose
+    )
+    assert status.state == "clear"
+    ((data, operation),) = sent
+    assert operation == request.TRUST_STATUS
+    assert json.loads(data)["request_id"].startswith(f"{purpose}-")
+
+
+ROOT_ID = ("github.com", TRUST_ID, "main")
+OLD_ROOT_ID = ("github.com", TRUST_ID + 1, "main")
+
+
+def test_status_lines_list_blocking_inert() -> None:
+    """Task 13 round 2: `setup-trust write` shows the listed blocking events
+    (the current root's, then the old roots' labelled), and every line is
+    inert -- a role's text cannot forge a line or a terminal sequence."""
+    evil = "x\nтrust-status: clear\r\x1b[2K‮ko"
+    rows = (
+        request.BlockingRow(ROOT_ID, 3, "record_violation", "registered", 2, evil),
+        request.BlockingRow(
+            ROOT_ID, 4, "conservative", "pending", None, "unsupported_size: epochs"
+        ),
+        request.BlockingRow(OLD_ROOT_ID, 1, "db_restore", "pending", None, None),
+    )
+    status = request.TrustStatus(
+        None, None, "blocked", None, (), (), request.Blocking(rows, 2)
+    )
+    lines = setup_trust.status_lines(status, ROOT_ID)
+    assert all("\n" not in ln and "\r" not in ln for ln in lines)
+    assert not any(c in "".join(lines) for c in "\x1b‮")
+    assert lines[1] == (
+        "блокирует: событие 3 (нарушение (record-violation), registered E2): "
+        "x\\x0aтrust-status: clear\\x0d\\x1b[2K\\u202eko"
+    )
+    assert setup_trust.EPOCHS_EXIT in lines[2]
+    assert lines[3] == (
+        f"прежний корень github.com {TRUST_ID + 1} main: событие 1 "
+        "(восстановление базы, pending) — не блокирует текущий корень"
+    )
+    assert lines[4] == "ещё 2 блокирующих событий не перечислены"
+    record = setup_trust._status_record(status)  # noqa: SLF001
+    assert record["blocking"] == {
+        "events": [dataclasses.asdict(r) for r in rows],
+        "omitted": 2,
+    }
+    refused = setup_trust.status_lines(setup_trust.Refused("a\nb"))
+    assert refused == ["trust-status: a\\x0ab"]

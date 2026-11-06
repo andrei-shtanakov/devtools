@@ -20,11 +20,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from df import fsutil, platform, roles
+from df import fsutil, libexec, platform, roles
 from df.journal import StepFailed
 from df.paths import Layout
 
 SUDOERS_FILE = Path("/etc/sudoers.d/df")
+#: The mode of `SUDOERS_FILE` (root's, read-only).
+FILE_MODE = 0o440
 VISUDO = "/usr/sbin/visudo"
 _SUDO = "/usr/bin/sudo"
 STEP = "sudoers"
@@ -75,6 +77,14 @@ _BINDING = re.compile(r"Defaults([!>])(\S.*)")
 _ENTRY = re.compile(r'!?[a-z_]+(?:[+-]?=(?:"[^"]*"|[^\s",]*))?')
 _RULE_START = re.compile(r" {4}\(")
 _CONTINUATION = ", \\\n    "
+
+#: The operator's isolation result (spec 4.5 (ii), rev 11, O7): the host's
+#: administrator is outside the isolation promise, so it is never checked
+#: and never becomes PASS.
+OPERATOR_EXCEPTION = (
+    "принято исключение: оператор — администратор хоста, вне обещания изоляции "
+    "(спека §4.5 (ii))"
+)
 
 Lines = tuple[tuple[str, ...], ...]
 
@@ -327,11 +337,76 @@ def policy_problems(name: str, *, layout: Layout, operator: str) -> list[str]:
         have = read_listing(name).grants
     except ListingError as exc:
         return [f"sudo -l -U {name}: {exc}"]
-    want = expected[name]
+    return _grant_problems(name, have, expected[name], operator=operator)
+
+
+def _grant_problems(
+    name: str, have: frozenset[Grant], want: frozenset[Grant], *, operator: str
+) -> list[str]:
+    """`want` missing from `have`; for a role also what is beyond it (the
+    operator's other rules are not df's)."""
     extra = frozenset() if name == operator else have - want
     problems = [f"нет правила {g}" for g in sorted(want - have, key=str)]
     problems += [f"лишнее правило {g}" for g in sorted(extra, key=str)]
     return [f"sudo -l -U {name}: {p}" for p in problems]
+
+
+def runas_users(runas: str) -> frozenset[str]:
+    """The users a printed RunAs spec names: the part before `:` (the group
+    part after it does not change who runs), split on commas, trimmed --
+    `df-precheck`, `df-precheck : grp` and `root, df-precheck` all name
+    `df-precheck`. `ALL` stays `ALL`: an `(ALL)` rule is the host
+    administrator's (spec 4.5 (ii)) unless its command names `df-precheck`
+    (paid review #708)."""
+    users = runas.split(":", 1)[0]
+    return frozenset(u.strip() for u in users.split(",") if u.strip())
+
+
+def file_problems(layout: Layout, operator: str) -> list[str]:
+    """The installed file is root's `FILE_MODE` text of `render(operator)`,
+    and `visudo` accepts that text (the same bytes)."""
+    text = render(layout, operator)
+    problems = libexec.root_file_problems(SUDOERS_FILE, text, FILE_MODE)
+    return problems or [f"{SUDOERS_FILE}: {p}" for p in validate(text)]
+
+
+@dataclass(frozen=True)
+class OperatorRights:
+    """The operator's line of spec 4.5 (rev 11, O7): two results, never one.
+
+    `ours` -- (i): the problems of our file and of the operator's effective df
+    rules (empty: PASS). `isolation` -- (ii): always `OPERATOR_EXCEPTION`;
+    (i) never stands in for it."""
+
+    ours: tuple[str, ...]
+    isolation: str = OPERATOR_EXCEPTION
+
+
+def operator_rights(layout: Layout, operator: str) -> OperatorRights:
+    """(i) `/etc/sudoers.d/df` is root's `FILE_MODE` text of
+    `render(operator)` that `visudo` accepts, and `sudo -n -l -U <operator>`
+    lists every rule `render` gives the operator and none of its own on
+    `df-precheck` (spec 4.5: the operator has no rule for it) -- RunAs
+    `df-precheck` or its command by name; `(ALL) ALL` of the host's
+    administrator is (ii)'s, not a df rule. (ii) is never checked."""
+    ours = file_problems(layout, operator)
+    try:
+        have = read_listing(operator).grants
+    except ListingError as exc:
+        return OperatorRights((*ours, f"sudo -l -U {operator}: {exc}"))
+    want = expected_grants(layout, operator)[operator]
+    ours += _grant_problems(operator, have, want, operator=operator)
+    precheck = _command(layout, "df-precheck")
+    named = {
+        g
+        for g in have
+        if PRECHECK_USER in runas_users(g.runas) or g.command.split(" ")[0] == precheck
+    }
+    ours += [
+        f"sudo -l -U {operator}: правило на df-precheck {g}"
+        for g in sorted(named, key=str)
+    ]
+    return OperatorRights(tuple(ours))
 
 
 def io_log_problems(layout: Layout) -> list[str]:

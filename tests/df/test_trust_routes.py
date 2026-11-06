@@ -386,7 +386,77 @@ def test_trust_status_always_calls_checker(
         "reason": None,
         "unverified": ["history_token_required"],
         "findings": [],
+        "blocking": {"events": [], "omitted": 0},
     }
+
+
+def test_root_parses_the_blocking_listing(
+    world: World, tw: TrustWorld, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round 1b: `blocking` is optional (an older publisher's answer has no
+    key), null or `{events, omitted}` of exact rows; anything else is
+    `BadResponse`."""
+    accept(world.lay, S1, 2)
+    data = json.loads(request.emit(tstatus(world, capsys)))
+    assert request.parse_trust_status(json.dumps(data), ROOT).blocking == (
+        request.Blocking((), 0)
+    )
+    result = dict(data["result"])
+    del result["blocking"]
+    older = {**data, "result": result}
+    assert request.parse_trust_status(json.dumps(older), ROOT).blocking is None
+    nulled = {**data, "result": {**result, "blocking": None}}
+    assert request.parse_trust_status(json.dumps(nulled), ROOT).blocking is None
+    row = {
+        "root": {"host": "github.com", "repository_id": 9, "branch": "main"},
+        "event_id": 4,
+        "kind": "conservative",
+        "state": "pending",
+        "epoch": None,
+        "reason": "unsupported_size: epochs",
+    }
+    listed = {**data, "result": {**result, "blocking": {"events": [row], "omitted": 2}}}
+    got = request.parse_trust_status(json.dumps(listed), ROOT).blocking
+    assert got == request.Blocking(
+        (
+            request.BlockingRow(
+                ("github.com", 9, "main"),
+                4,
+                "conservative",
+                "pending",
+                None,
+                "unsupported_size: epochs",
+            ),
+        ),
+        2,
+    )
+    for bad in (
+        {"events": [], "omitted": -1},
+        {"events": [], "omitted": 0, "more": 1},
+        {"events": [{**row, "kind": "other"}], "omitted": 0},
+        {"events": [{**row, "state": "done"}], "omitted": 0},
+        {"events": [{**row, "event_id": True}], "omitted": 0},
+        {"events": [{**row, "epoch": 0}], "omitted": 0},
+        {"events": [{**row, "reason": 1}], "omitted": 0},
+        {"events": [{**row, "root": {"host": "github.com"}}], "omitted": 0},
+        {"events": [{**row, "extra": 1}], "omitted": 0},
+        # N-4: the state and the epoch agree; at most the publisher's cap;
+        # each event once
+        {"events": [{**row, "epoch": 3}], "omitted": 0},
+        {"events": [{**row, "state": "registered"}], "omitted": 0},
+        {
+            "events": [
+                {**row, "event_id": i + 1}
+                for i in range(request.MAX_BLOCKING_LISTED + 1)
+            ],
+            "omitted": 0,
+        },
+        {"events": [row, row], "omitted": 0},
+        [],
+    ):
+        broken = {**data, "result": {**result, "blocking": bad}}
+        with pytest.raises(BadResponse, match="blocking"):
+            request.parse_trust_status(json.dumps(broken), ROOT)
 
 
 def test_trust_status_h_eq_a_removed_ruleset_finding(
@@ -409,6 +479,16 @@ def test_trust_status_h_eq_a_removed_ruleset_finding(
     assert head(world) == (S1, 2, 1)  # A re-checked: the row is not written
     again = tstatus(world, capsys)  # the same pair: the same event
     assert again.result["state"] == "blocked" and len(events(world)) == 1
+    # round 1b: the blocking event is listed with its root, kind and reason
+    root = {"host": "github.com", "repository_id": TRUST_ID, "branch": "main"}
+    ((row,),) = [again.result["blocking"]["events"]]
+    assert {k: v for k, v in row.items() if k != "event_id"} == {
+        "root": root,
+        "kind": "finding",
+        "state": "registered",
+        "epoch": 2,
+        "reason": "ruleset_missing: no ruleset on main",
+    }
 
 
 def test_trust_status_without_binding(
@@ -468,6 +548,10 @@ def test_root_validates_response_schema_and_root(
 # --- the verdict: outcomes and binding -------------------------------------------
 
 
+#: A bound reason for the statuses whose reason is a closed set.
+REASON_OF = {"unsupported_size": "unsupported_size: epochs"}
+
+
 @pytest.mark.parametrize(
     ("status_", "want"),
     [("tree_incomplete", "unresolved"), ("unset", "unresolved"),
@@ -496,7 +580,8 @@ def test_verdict_outcome_mapping(
             }
             return (json.dumps(data) + "\n").encode()
         no_pair = {"relation": None, "last_epoch": None, "source": None}
-        return wire(verdict(req, outcome=status_, reason=f"{status_}: x", **no_pair))
+        reason = REASON_OF.get(status_, f"{status_}: x")
+        return wire(verdict(req, outcome=status_, reason=reason, **no_pair))
 
     tw.checker.answer = answer
     resp = tstatus(world, capsys)
@@ -1164,6 +1249,46 @@ def test_irreproducible_reason_closed(
     )
     tstatus(world, capsys)
     assert observations(world)[-1][3] == "unresolved"
+
+
+@pytest.mark.parametrize("reason", ["", "unsupported_size: ", "unsupported_size: x"])
+def test_unsupported_size_reason_closed(
+    world: World,
+    tw: TrustWorld,
+    capsys: pytest.CaptureFixture[str],
+    reason: str,
+) -> None:
+    """Paid review #708: an `unsupported_size` verdict whose reason is empty
+    or names no field of the checker is unbound -- `unresolved`, no К event
+    without a named cause."""
+    no_pair = {"relation": None, "last_epoch": None, "source": None}
+    tw.checker.answer = lambda req: wire(
+        verdict(req, outcome="unsupported_size", reason=reason, **no_pair)
+    )
+    tstatus(world, capsys)
+    assert observations(world)[-1][3] == "unresolved"
+    assert db_rows(world, "SELECT event_id FROM events") == []
+
+
+def test_unsupported_reasons_pinned_to_the_checker() -> None:
+    """`UNSUPPORTED_REASONS` = every `UnsupportedSize("<field>")` the checker
+    raises (`governance/act_trust_findings.py`)."""
+    import ast
+
+    source = Path(__file__).parents[2] / "governance" / "act_trust_findings.py"
+    tree = ast.parse(source.read_text())
+    fields = {
+        node.args[0].value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "UnsupportedSize"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+    }
+    assert trust_routes.UNSUPPORTED_REASONS == {
+        f"unsupported_size: {f}" for f in fields
+    }
 
 
 @pytest.mark.parametrize(

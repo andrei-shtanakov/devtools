@@ -688,10 +688,12 @@ SUBPROCESS_CREATORS = {
         "the publisher's own protocol (self-check reads the keys and the "
         "perimeter database, writes its journal); root keeps only stdout"
     ),
-    "sudo df-publish trust-status (setup-trust write; root)": (
+    "sudo df-publish trust-status (setup-trust write, doctor level 3; root)": (
         "the publisher's own protocol (trust-status opens an observation in "
-        "the perimeter database, asks df-precheck, writes its journal); root "
-        "keeps only stdout, parsed by parse_trust_status"
+        "the perimeter database, asks df-precheck -- whose precheck serve "
+        "reaps df-precheck processes older than REAP_AFTER --, may register a "
+        "finding and accept a new head, writes its journal); root keeps only "
+        "stdout, parsed by parse_trust_status; doctor lists these side effects"
     ),
     "sudo df-launch df-exec check-github (setup-agent machine-token, doctor)": (
         "launch exec of the role: GETs to GitHub with the token, creates "
@@ -741,8 +743,8 @@ PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
     # run_command (root; setup-agent's and doctor's check-github, doctor's
     # role check and test -r; roles setup's group; df-publisher's gh auth token), run_as (df-build, df-publisher; with stdin for
     # perimeter restore), run_with_input (df-publisher; the roles, perimeter
-    # client, setup-agent's and doctor's self-check, setup-trust's
-    # trust-status, doctor's nested calls)
+    # client, setup-agent's and doctor's self-check, setup-trust's and
+    # doctor's trust-status, doctor's nested calls)
     ("platform", "_execute", "subprocess.Popen", 1): (
         "openssl dgst -sign (publisher App JWT)",
         "uv python install (admin)",
@@ -759,7 +761,7 @@ PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
         "sudo df-publish perimeter-status (perimeter client)",
         "darkfactory publisher perimeter-restore (restore, as df-publisher)",
         "sudo df-publish self-check (setup-agent app-key, doctor; root)",
-        "sudo df-publish trust-status (setup-trust write; root)",
+        "sudo df-publish trust-status (setup-trust write, doctor level 3; root)",
         "sudo df-launch df-exec check-github (setup-agent machine-token, doctor)",
         "sudo df-launch <role> check (doctor roles.isolation, root)",
         "sudo -u df-exec test -r / -x (doctor roles.isolation, root)",

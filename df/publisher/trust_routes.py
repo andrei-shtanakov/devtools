@@ -97,6 +97,15 @@ IRREPRODUCIBLE = "irreproducible"
 IRREPRODUCIBLE_REASONS = frozenset(
     {"irreproducible: policy_pin_mismatch", "irreproducible: policy_objects_missing"}
 )
+#: The checker's `unsupported_size: <field>` reasons (the fields of
+#: `governance.act_trust_findings.UnsupportedSize`; a test pins the set):
+#: a verdict of that status with any other reason -- an empty one included
+#: -- is unbound, so every К of `unsupported_size` names its field (paid
+#: review #708).
+UNSUPPORTED_REASONS = frozenset(
+    f"unsupported_size: {field}"
+    for field in ("epochs", "policy_full_name", "policy_branch", "verdict")
+)
 STATUSES = (ALLOW, REFUSE, UNSET, UNSUPPORTED, IRREPRODUCIBLE)
 #: `act_precheck._BRANCH`: a branch name git fetches as `refs/heads/<name>`.
 BRANCH = re.compile(
@@ -324,7 +333,7 @@ def route_trust_status(ctx: Context) -> Response:
         with perimeter.open_db(ctx.layout) as db:
             perimeter.admit(db, AcceptedEpochs(sess, db), sess.root)
             mine = observe(sess, db, "trust-status", sess.head())
-            state = root_state(sess, db)
+            state = root_state(sess, db, listing=True)
     except Unavailable as exc:
         result = trust_status_result(binding, exc.reason, sess.warnings)
         return _warned(Response("done", None, result), sess)
@@ -343,8 +352,10 @@ def trust_status_result(
     state: RootState | None = None,
 ) -> dict[str, object]:
     """The `result` of `trust-status`: the root, the verified snapshot and
-    its last epoch, the state (and its reason), the unverified premises and
-    the findings (`df/publisher-response/v1`, no new top-level key)."""
+    its last epoch, the state (and its reason), the unverified premises,
+    the findings of this call and `blocking` -- the blocking events of every
+    known root (`trust_state.blocking_listing`; null when the database was
+    not read) -- (`df/publisher-response/v1`, no new top-level key)."""
     root = None
     if binding is not None:
         host, repo, branch = binding.root_id
@@ -359,7 +370,31 @@ def trust_status_result(
         "reason": why,
         "unverified": sorted(set(unverified)),
         "findings": [dataclasses.asdict(f) for f in findings],
+        "blocking": None if state is None else _blocking_result(state.listing),
     }
+
+
+def _blocking_result(
+    listing: tuple[Sequence[trust_state.BlockingEvent], int] | None,
+) -> dict[str, object] | None:
+    """`{"events": [...], "omitted": n}`: each event with its root."""
+    if listing is None:
+        return None
+    events, omitted = listing
+    rows = []
+    for e in events:
+        host, repo, branch = e.root
+        rows.append(
+            {
+                "root": {"host": host, "repository_id": repo, "branch": branch},
+                "event_id": e.event_id,
+                "kind": e.kind,
+                "state": e.state,
+                "epoch": e.epoch,
+                "reason": e.reason,
+            }
+        )
+    return {"events": rows, "omitted": omitted}
 
 
 def _warned(resp: Response, sess: Session) -> Response:
@@ -414,6 +449,8 @@ class RootState:
     events: list[int]
     #: The first unfinished observation of the root, if any.
     unfinished: int | None
+    #: The blocking events of every known root (`trust-status` only).
+    listing: tuple[list[trust_state.BlockingEvent], int] | None = None
 
     def fields(self) -> tuple[str, str | None, str | None, int | None]:
         """`(state, reason, snapshot_sha, last_epoch)` of the answer."""
@@ -428,10 +465,11 @@ class RootState:
         return "clear", None, sha, epoch
 
 
-def root_state(sess: Session, db: Db) -> RootState:
+def root_state(sess: Session, db: Db, *, listing: bool = False) -> RootState:
     """One write transaction: the head read with the lock held; when it is
     the accepted head and its check is current, every `pending` event is
-    registered at its last epoch; the blocking events and I computed."""
+    registered at its last epoch; the blocking events and I computed; with
+    `listing`, every known root's blocking events in the same transaction."""
     conn, root = db.conn, sess.root
     with perimeter.write(conn):
         head = sess.head()
@@ -450,7 +488,8 @@ def root_state(sess: Session, db: Db) -> RootState:
         events = perimeter.blocking_events(conn, root, last)
         pending = trust_state.unfinished(conn, root)
         open_ = pending[0].id if pending else None
-    return RootState(head, acc if current else None, events, open_)
+        listed = trust_state.blocking_listing(conn, root) if listing else None
+    return RootState(head, acc if current else None, events, open_, listed)
 
 
 class AcceptedEpochs:
@@ -1088,6 +1127,8 @@ def _check_contract(
         _need(not verdict.findings, f"outcome: {verdict.outcome}")
     if verdict.outcome == IRREPRODUCIBLE:
         _need(verdict.reason in IRREPRODUCIBLE_REASONS, "outcome: irreproducible")
+    if verdict.outcome == UNSUPPORTED:
+        _need(verdict.reason in UNSUPPORTED_REASONS, "outcome: unsupported_size")
     _check_ranges_of(verdict, obs, request, stored_ranges)
 
 
