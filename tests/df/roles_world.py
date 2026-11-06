@@ -44,15 +44,21 @@ from __future__ import annotations
 
 import grp
 import gzip
+import http.server
 import json
 import os
 import pwd
 import re
 import shutil
 import socket
+import ssl
+import stat
 import subprocess
+import sys
+import tempfile
+import threading
 import uuid
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -649,10 +655,17 @@ class RolesWorld:
             return []
         return [json.loads(line) for line in path.read_text().splitlines() if line]
 
-    def register_run(self, release: ReleaseEntry, *, root: bool = False) -> str:
+    def register_run(
+        self,
+        release: ReleaseEntry,
+        *,
+        root: bool = False,
+        root_id: tuple[str, int, str] | None = None,
+    ) -> str:
         """A fixture run record of `release` in `runs/` (root's, `0644`),
         through `run_start.register`; `root`: bound to the trust fixture's
-        root (`TRUST_ROOT`)."""
+        root (`TRUST_ROOT`), `root_id`: to that root (stage 3a)."""
+        bound = root_id if root_id is not None else TRUST_ROOT if root else None
         text = (self.layout.etc / "models.toml").read_text()
         pins = run_start.pins_from_data(
             self.layout, PRODUCT_ID, models.parse_models(text)
@@ -664,7 +677,7 @@ class RolesWorld:
             release.admin_digest,
             PRODUCT_ID,
             pins,
-            TRUST_ROOT if root else None,
+            bound,
             datetime.now(UTC).isoformat(),
             0,
         )
@@ -774,6 +787,10 @@ def require_clean_host() -> None:
     for path in (sudoers.SUDOERS_FILE, IOLOG_FILE, link, *owned_paths(PRODUCTION)):
         if os.path.lexists(path):
             infra(f"{path} уже есть")
+    marker = api_marker()
+    adapted = marker_left(marker) or HOSTS_MARK.encode() in HOSTS_FILE.read_bytes()
+    if adapted:
+        infra(f"хост остался адаптирован под {API_HOST} ({marker}, {HOSTS_FILE})")
     leftover = [name for name in ACCOUNTS if _known(name)]
     if leftover or df_groups():
         infra(f"учётки или группы df-* от прошлого прогона: {leftover} {df_groups()}")
@@ -807,9 +824,18 @@ def check(done: subprocess.CompletedProcess[bytes], what: str) -> None:
 
 @contextmanager
 def roles_world(
-    top: Path, repo: FixtureRepo, control_url: str, keep: Path | None
+    top: Path,
+    repo: FixtureRepo,
+    control_url: str,
+    keep: Path | None,
+    *,
+    name: str = "roles",
+    install: Callable[[RootWorld], InstalledWorld] | None = None,
 ) -> Iterator[RolesWorld]:
-    """The module's world (module doc); torn down whatever happens."""
+    """The module's world (module doc) with its work directory `<top>/<name>`
+    (one per module of a session), installed by `install` (default
+    `install_production`; the upgrade row installs with older code); torn
+    down whatever happens."""
     require_clean_host()
     layout = PRODUCTION
     with ExitStack() as stack:
@@ -817,8 +843,8 @@ def roles_world(
         stack.callback(teardown_roles, layout)
         world = RootWorld(layout, repo, approved_uv(), top, control_url)
         # the real `site/` of `real_site_pins`, fetched by the install
-        installed = install_production(world)
-        work = top / "roles"
+        installed = (install or install_production)(world)
+        work = top / name
         work.mkdir(mode=0o755)
         os.chmod(work, 0o755)
         key, public = make_app_key(work)
@@ -1028,3 +1054,402 @@ def install_sudoers_file(path: Path, text: str) -> None:
         os.unlink(tmp)
         infra(f"visudo отверг {text!r}: {shown(done)}")
     os.rename(tmp, path)
+
+
+# ---------- stage 3a: `api.github.com` of the trust sources (Task 14) ----------
+
+#: The host every trust read of df goes to (`df.publisher.github.API`,
+#: `governance.act_anon.API`): fixed in the code, so the root world of the
+#: stage-3a rows makes the runner answer it itself -- a host adaptation of
+#: the disposable runner, like `/opt` and `/home` in the workflow.
+API_HOST = "api.github.com"
+HOSTS_FILE = Path("/etc/hosts")
+HOSTS_MARK = "# df-acc: stage-3a root rows (removed by their teardown)"
+#: Present while the runner answers `API_HOST` itself, and kept when the
+#: restore could not be verified (a run killed with the adaptation active,
+#: or a failed check): the next world fails as infrastructure. In root's
+#: own home (root-only, never world-writable), the file made with
+#: `O_EXCL | O_NOFOLLOW` (review N1).
+API_MARKER_NAME = ".df-acc-api-impersonation"
+
+
+def api_marker() -> Path:
+    """`<root's home>/API_MARKER_NAME`."""
+    return Path(pwd.getpwuid(0).pw_dir) / API_MARKER_NAME
+
+
+def write_marker(path: Path, text: str) -> None:
+    """Create `path` (`0600`, never following a link, never over an
+    existing name: a leftover or a planted link is `FileExistsError`)."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        os.write(fd, text.encode("utf-8"))
+    finally:
+        os.close(fd)
+
+
+def marker_left(path: Path) -> bool:
+    """Any name at `path`, a dangling link included (`lexists`)."""
+    return os.path.lexists(path)
+
+
+def remove_marker(path: Path) -> None:
+    """Remove the marker this run made: a regular file of this user, not
+    a link (else infrastructure, the name kept)."""
+    st = os.lstat(path)
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid():
+        infra(f"{path}: не наш маркер (режим {st.st_mode:o}, uid {st.st_uid})")
+    os.unlink(path)
+
+
+#: The path of the positive control of the impersonation.
+API_CONTROL = "df-acc-control"
+
+_CA_CNF = """[req]
+distinguished_name = dn
+prompt = no
+[dn]
+CN = df-acc test CA (stage 3a root rows)
+[v3_ca]
+basicConstraints = critical,CA:TRUE,pathlen:0
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+nameConstraints = critical,permitted;DNS:api.github.com
+"""
+_LEAF_CNF = f"""[v3_leaf]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature,keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = DNS:{API_HOST}
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid
+"""
+
+
+@dataclass(frozen=True)
+class ApiCerts:
+    """A throwaway CA and the `api.github.com` leaf it signed."""
+
+    ca: Path
+    leaf: Path
+    key: Path
+
+
+def make_api_certs(work: Path, openssl: Path = OPENSSL) -> ApiCerts:
+    """A fresh CA (two days) and its leaf for `API_HOST`, under `work`."""
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "ca.cnf").write_text(_CA_CNF)
+    (work / "leaf.cnf").write_text(_LEAF_CNF)
+    ca_key, ca = work / "ca.key", work / "ca.pem"
+    key, csr, leaf = work / "leaf.key", work / "leaf.csr", work / "leaf.pem"
+    gen = ["genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"]
+    steps = [
+        [*gen, "-out", str(ca_key)],
+        ["req", "-x509", "-new", "-key", str(ca_key), "-sha256", "-days", "2"]
+        + ["-config", str(work / "ca.cnf"), "-extensions", "v3_ca", "-out", str(ca)],
+        [*gen, "-out", str(key)],
+        ["req", "-new", "-key", str(key), "-subj", f"/CN={API_HOST}"]
+        + ["-out", str(csr)],
+        ["x509", "-req", "-in", str(csr), "-CA", str(ca), "-CAkey", str(ca_key)]
+        + ["-set_serial", "2", "-days", "2", "-sha256"]
+        + ["-extfile", str(work / "leaf.cnf"), "-extensions", "v3_leaf"]
+        + ["-out", str(leaf)],
+    ]
+    old = os.umask(0o077)
+    try:
+        for argv in steps:
+            done = _run([str(openssl), *argv], stdin=b"", env=BASE_ENV, cwd=work)
+            check(done, argv[0])
+    finally:
+        os.umask(old)
+    ca_key.unlink()  # only the leaf needed it
+    csr.unlink()
+    return ApiCerts(ca, leaf, key)
+
+
+def _api_handler(rest: object) -> type[http.server.BaseHTTPRequestHandler]:
+    """`GET` of the trust sources' REST answers (`trust_sources.GitRest`)."""
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - http.server's name
+            path = self.path.lstrip("/")
+            try:
+                if path == API_CONTROL:
+                    status, body = 200, {"control": API_CONTROL}
+                else:
+                    auth = self.headers.get("Authorization", "")
+                    agent = self.headers.get("User-Agent", "")
+                    status, body = rest.answer(path, auth, agent)  # type: ignore[attr-defined]
+                data = json.dumps(body).encode("utf-8")
+            except Exception as exc:  # noqa: BLE001 - an answer, never a drop
+                status = 500
+                data = json.dumps(
+                    {"message": f"fixture: {type(exc).__name__}"}
+                ).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+            """Quiet."""
+
+    return Handler
+
+
+class _V6Server(http.server.ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+
+@contextmanager
+def serve_api(
+    rest: object, certs: ApiCerts, *, port: int = 443, v6: bool = True
+) -> Iterator[list[int]]:
+    """HTTPS with the leaf of `certs` on `127.0.0.1:<port>` (and `[::1]`
+    when the host has it); the ports bound."""
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certs.leaf, certs.key)
+    handler = _api_handler(rest)
+    servers: list[http.server.ThreadingHTTPServer] = [
+        http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
+    ]
+    if v6:
+        try:
+            servers.append(_V6Server(("::1", port), handler))
+        except OSError:
+            pass  # no IPv6 loopback: the name resolves to 127.0.0.1 only
+    for server in servers:
+        server.daemon_threads = True
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield [s.server_address[1] for s in servers]
+    finally:
+        for server in servers:
+            server.shutdown()
+            server.server_close()
+
+
+#: The trust store a Python reads (`ssl.get_default_verify_paths()`).
+VERIFY_PATHS = (
+    "import json, ssl; p = ssl.get_default_verify_paths(); "
+    "print(json.dumps({'cafile': p.cafile, 'capath': p.capath}))"
+)
+
+
+def verify_paths(python: Path, user: str) -> dict[str, str | None]:
+    """The CA file and directory `python` reads as `user` (`sudo -u`: the
+    environment scrubbed, as the chain runs it)."""
+    argv = [SUDO, "-n", "-u", user, str(python), "-I", "-c", VERIFY_PATHS]
+    done = _run(argv, stdin=b"", env=BASE_ENV, cwd=Path("/"))
+    try:
+        found = json.loads(done.stdout)
+    except ValueError:
+        found = None
+    if not isinstance(found, dict):
+        infra(f"пути доверия {python} от {user}: {shown(done)}")
+    return found  # type: ignore[return-value]
+
+
+@contextmanager
+def trusted_ca(
+    ca: Path, paths: Mapping[str, str | None], restores: Restores
+) -> Iterator[str]:
+    """`ca` in the store the admin Python reports: appended to its CA file
+    when that exists, else one `<hash>.<n>` file in its CA directory. The
+    store is restored on every path and checked byte for byte; a mismatch
+    goes to `problems` (review N2: never masks a failure in flight). What
+    was changed is yielded."""
+    cafile, capath = paths.get("cafile"), paths.get("capath")
+    if cafile and os.path.isfile(cafile):
+        bundle = Path(cafile)
+        saved = bundle.read_bytes()
+        restores.changed.add("store")
+        try:
+            bundle.write_bytes(saved + b"\n" + ca.read_bytes())
+            yield str(bundle)
+        finally:
+            restores.settle("store", lambda: _put_back(bundle, saved))
+        return
+    if not capath or not os.path.isdir(capath):
+        infra(f"нет хранилища доверия: {dict(paths)}")
+    directory = Path(str(capath))
+    before = sorted(os.listdir(directory))
+    out = _run([str(OPENSSL), "x509", "-hash", "-noout", "-in", str(ca)],
+               stdin=b"", env=BASE_ENV, cwd=Path("/"))  # fmt: skip
+    check(out, "openssl x509 -hash")
+    name = out.stdout.decode().strip()
+    n = next(i for i in range(100) if not os.path.lexists(directory / f"{name}.{i}"))
+    added = directory / f"{name}.{n}"
+    restores.changed.add("store")
+    try:
+        shutil.copyfile(ca, added)
+        os.chmod(added, 0o644)
+        yield str(added)
+    finally:
+
+        def put_back() -> bool:
+            added.unlink(missing_ok=True)
+            return sorted(os.listdir(directory)) == before
+
+        restores.settle("store", put_back)
+
+
+@contextmanager
+def api_on_loopback(restores: Restores) -> Iterator[None]:
+    """`API_HOST` resolved to the loopback (`/etc/hosts`); restored on
+    every path and checked byte for byte (`restores`)."""
+    saved = HOSTS_FILE.read_bytes()
+    lines = f"\n{HOSTS_MARK}\n127.0.0.1 {API_HOST}\n::1 {API_HOST}\n"
+    restores.changed.add("hosts")
+    try:
+        HOSTS_FILE.write_bytes(saved + lines.encode("ascii"))
+        _flush_resolver()
+        yield
+    finally:
+
+        def put_back() -> bool:
+            ok = _put_back(HOSTS_FILE, saved)
+            _flush_resolver()
+            return ok
+
+        restores.settle("hosts", put_back)
+
+
+@dataclass
+class Restores:
+    """What the adaptation changed and which restores a byte-for-byte check
+    confirmed (paid review #709: the marker goes only on `verified`, never
+    on "no complaint"); a failed or raising restore is in `problems`."""
+
+    changed: set[str] = field(default_factory=set)
+    verified: set[str] = field(default_factory=set)
+    problems: list[str] = field(default_factory=list)
+
+    def settle(self, name: str, put_back: Callable[[], bool]) -> None:
+        """Run a restore: verified when it returns `True`; a mismatch or any
+        exception is a problem (never raised: a failure in flight stays)."""
+        try:
+            ok = put_back()
+        except Exception as exc:  # noqa: BLE001 - recorded, the marker stays
+            self.problems.append(f"{name}: восстановление: {type(exc).__name__}: {exc}")
+            return
+        if ok:
+            self.verified.add(name)
+        else:
+            self.problems.append(f"{name}: не восстановлен побайтно")
+
+    def done(self) -> bool:
+        """Every change restored and confirmed, nothing failed."""
+        return not self.problems and self.changed <= self.verified
+
+
+def _put_back(path: Path, saved: bytes) -> bool:
+    path.write_bytes(saved)
+    return path.read_bytes() == saved
+
+
+def _flush_resolver() -> None:
+    if plat.detect_platform() == "macos-arm64":
+        _run(["/usr/bin/dscacheutil", "-flushcache"], stdin=b"", env=BASE_ENV,
+             cwd=Path("/"))  # fmt: skip
+        _run(["/usr/bin/killall", "-HUP", "mDNSResponder"], stdin=b"",
+             env=BASE_ENV, cwd=Path("/"))  # fmt: skip
+
+
+#: The control: the admin Python, as a reader of the trust sources does,
+#: reads `API_CONTROL` over HTTPS with the default context.
+API_PROBE = """
+import json, ssl, sys, urllib.request
+url = "https://api.github.com/" + sys.argv[1]
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+try:
+    with opener.open(url, timeout=30) as resp:
+        print(json.dumps({"status": resp.status, "body": json.loads(resp.read())}))
+except Exception as exc:
+    print(json.dumps({"error": f"{type(exc).__name__}: {exc}",
+                      "paths": str(ssl.get_default_verify_paths())}))
+"""
+
+
+#: The roles whose processes read the trust sources (the controls).
+API_READERS = ("df-publisher", "df-precheck")
+
+
+@contextmanager
+def impersonate_api(rest: object, work: Path, python: Path) -> Iterator[ApiCerts]:
+    """CI host adaptation of the 3a rows only (a fixture, never the job):
+    the runner answers `https://api.github.com/` itself (`rest`), since
+    df's trust reads are pinned to that host by design. A CA made here
+    (its keys in a temp directory of this run, never printed, removed at
+    the end) is put in the store the admin Python `python` reports
+    (`verify_paths`), the name on the loopback, HTTPS on port 443. Nothing
+    is passed through the environment (no `SSL_CERT_FILE`): the
+    env-scrubbed chain must trust it. The positive control comes first:
+    `python` as `df-publisher` and as `df-precheck` (`sudo -u`) reaches the
+    fake, else infrastructure. The store and `/etc/hosts` are restored and
+    checked byte for byte."""
+    if os.geteuid() != 0:
+        raise PermissionError("impersonate_api: root only (CI root world)")
+    paths = {user: verify_paths(python, user) for user in API_READERS}
+    if len({json.dumps(p, sort_keys=True) for p in paths.values()}) != 1:
+        infra(f"роли читают разные хранилища доверия: {paths}")
+    marker = api_marker()  # first: everything after it is covered below
+    try:
+        write_marker(marker, f"{HOSTS_MARK}\nkeys under {work}\n")
+    except FileExistsError:
+        infra(f"{marker} уже есть: хост адаптирован прошлым прогоном")
+    restores = Restores()
+    keys: Path | None = None
+    try:
+        keys = Path(tempfile.mkdtemp(prefix="df-acc-api-", dir=work))
+        certs = make_api_certs(keys)
+        with ExitStack() as stack:
+            stack.enter_context(serve_api(rest, certs))
+            ca = trusted_ca(certs.ca, paths["df-publisher"], restores)
+            store = stack.enter_context(ca)
+            stack.enter_context(api_on_loopback(restores))
+            seen = {user: _probe(python, user) for user in API_READERS}
+            evidence(
+                "api-impersonation.json",
+                {"verify_paths": paths, "store_changed": store, "probe": seen},
+            )
+            for user, got in seen.items():
+                if got.get("status") != 200 or got.get("body") != {
+                    "control": API_CONTROL
+                }:
+                    infra(f"api.github.com не отвечает подделкой ({user}): {got}")
+            yield certs
+    finally:
+        # every path (review N2): the restores were checked by the contexts
+        # above; the keys go; the marker only when every change is
+        # confirmed restored, so a leftover means "restore not verified"
+        if keys is not None:
+            shutil.rmtree(keys, ignore_errors=True)
+            if os.path.lexists(keys):
+                restores.problems.append(f"{keys}: ключи не удалены")
+        evidence(
+            "api-restore.json",
+            {
+                "changed": sorted(restores.changed),
+                "verified": sorted(restores.verified),
+                "problems": restores.problems,
+            },
+        )
+        if restores.done():
+            remove_marker(marker)
+        elif sys.exc_info()[0] is None:
+            infra("; ".join(restores.problems) or "восстановление не подтверждено")
+
+
+def _probe(python: Path, user: str) -> dict[str, object]:
+    """`API_PROBE` by `python` as `user` (`sudo -u`, env scrubbed)."""
+    argv = [SUDO, "-n", "-u", user, str(python), "-I", "-c", API_PROBE, API_CONTROL]
+    done = _run(argv, stdin=b"", env=BASE_ENV, cwd=Path("/"))
+    try:
+        found = json.loads(done.stdout)
+    except ValueError:
+        found = {"raw": shown(done)}
+    return found if isinstance(found, dict) else {"raw": found}
