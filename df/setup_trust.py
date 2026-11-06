@@ -1184,24 +1184,33 @@ def verify_after_write(layout: Layout) -> TrustStatus | Refused:
     if binding is None:
         return Refused("trust.toml нет")
     try:
-        raw = trust_status_call(layout)
+        return read_trust_status(layout, binding.root_id)
     except OSError as exc:
         return Refused(f"trust-status: нет ответа: {exc}")
-    lines = raw.decode("utf-8", "replace").splitlines()
-    if len(lines) != 1:
-        return Refused(f"trust-status: нет ответа ({len(lines)} строк)")
-    try:
-        return request.parse_trust_status(lines[0], binding.root_id)
     except BadResponse as exc:
         return Refused(f"trust-status: {exc}")
 
 
-def trust_status_call(layout: Layout) -> bytes:
+def read_trust_status(
+    layout: Layout, root: tuple[str, int, str], *, purpose: str = STEP
+) -> TrustStatus:
+    """Root's `trust-status` read once (`setup-trust write`, `doctor`): the
+    call, one response line, `request.parse_trust_status` against `root`.
+    No answer is `OSError`; anything else wrong is `BadResponse`."""
+    raw = trust_status_call(layout, purpose=purpose)
+    lines = raw.decode("utf-8", "replace").splitlines()
+    if len(lines) != 1:
+        raise BadResponse(f"нет ответа ({len(lines)} строк)")
+    return request.parse_trust_status(lines[0], root)
+
+
+def trust_status_call(layout: Layout, *, purpose: str = STEP) -> bytes:
     """`df-publish trust-status` from root (`sudo -n -u df-publisher`); its
-    stdout. The tests' seam."""
+    stdout. `purpose` names the caller in the request id (the publisher's
+    journal). The tests' seam."""
     payload = {
         "schema": request.REQUEST_SCHEMA,
-        "request_id": f"{STEP}-{uuid.uuid4().hex}",
+        "request_id": f"{purpose}-{uuid.uuid4().hex}",
     }
     data = json.dumps(payload, sort_keys=True).encode("utf-8")
     return perimeter_client.sudo_call(

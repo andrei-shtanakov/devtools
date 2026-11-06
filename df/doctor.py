@@ -61,7 +61,6 @@ from df import (
     precheck_reap,
     probe,
     roles,
-    roles_setup,
     setup_agent,
     setup_trust,
     stage2_config,
@@ -86,7 +85,12 @@ from df.paths import Layout
 from df.publisher import precheck, request, store
 from df.publisher.github import SelfCheckResult
 from df.publisher.perimeter import MAX_EVENTS, MIGRATION_REQUIRED, SCHEMA_VERSION
-from df.publisher.request import BadResponse, Response, TrustStatus
+from df.publisher.request import (
+    BadResponse,
+    BlockingRow,
+    Response,
+    TrustStatus,
+)
 from df.publisher.trust_routes import UNFINISHED, UNVERIFIED, binding_problem
 from df.release import RELEASE_JSON
 from df.roles import HISTORY_GROUP, history_members
@@ -830,12 +834,12 @@ def _sudoers(ctx: _Level2) -> str:
     and of `df-precheck` (stage 2b plan decision 5)."""
     operator = _operator(ctx)
     path = sudoers.SUDOERS_FILE
-    problems = _sudoers_text_problems(ctx.layout, operator)
+    problems = sudoers.file_problems(ctx.layout, operator)
     other = None
     if any(libexec.TEXT_MISMATCH in p for p in problems):
         other = _other_operator(ctx.layout, path, operator)
     if other is not None:  # judge the file as `other`'s, without the operator
-        problems = _sudoers_text_problems(ctx.layout, other)
+        problems = sudoers.file_problems(ctx.layout, other)
     names = (*roles.ROLE_USERS, plat.BUILD_USER)
     for name in names if other is not None else (*names, operator):
         problems += sudoers.policy_problems(
@@ -844,22 +848,10 @@ def _sudoers(ctx: _Level2) -> str:
     problems += sudoers.io_log_problems(ctx.layout)
     if other is None and not problems:
         return ""
-    note = (
-        f"файл установлен для оператора {other}, проверка для {operator} — "
-        f"укажите --operator {other}"
-    )
+    note = _other_operator_note(str(other), operator)
     if not problems:
         raise _Outcome(UNAVAILABLE, note)
     raise _broken([*problems, note] if other is not None else problems)
-
-
-def _sudoers_text_problems(layout: Layout, operator: str) -> list[str]:
-    """The installed file is root's `0440` text of `render(operator)`, and
-    `visudo` accepts that text (the same bytes)."""
-    text = sudoers.render(layout, operator)
-    path = sudoers.SUDOERS_FILE
-    problems = libexec.root_file_problems(path, text, roles_setup.SUDOERS_MODE)
-    return problems or [f"{path}: {p}" for p in sudoers.validate(text)]
 
 
 def _other_operator(layout: Layout, path: Path, operator: str) -> str | None:
@@ -908,11 +900,26 @@ def _operator(ctx: _Level2) -> str:
 
 
 def _operator_rights(ctx: _Level2) -> str:
-    """The operator's result (i) (spec 4.5, O7): `sudoers.operator_rights`."""
-    rights = sudoers.operator_rights(ctx.layout, _operator(ctx))
-    if rights.ours:
-        raise _broken(rights.ours)
-    return ""
+    """The operator's result (i) (spec 4.5, O7): `sudoers.operator_rights`.
+    A file installed for another operator (R13-10) is not judged for this
+    one: «данные недоступны» with `roles.sudoers`' hint."""
+    operator = _operator(ctx)
+    rights = sudoers.operator_rights(ctx.layout, operator)
+    if not rights.ours:
+        return ""
+    other = None
+    if any(libexec.TEXT_MISMATCH in p for p in rights.ours):
+        other = _other_operator(ctx.layout, sudoers.SUDOERS_FILE, operator)
+    if other is not None:
+        raise _Outcome(UNAVAILABLE, _other_operator_note(other, operator))
+    raise _broken(rights.ours)
+
+
+def _other_operator_note(other: str, operator: str) -> str:
+    return (
+        f"файл установлен для оператора {other}, проверка для {operator} — "
+        f"укажите --operator {other}"
+    )
 
 
 def _isolation_line() -> Check:
@@ -1542,11 +1549,17 @@ SIDE_EFFECT_TRUST = (
     "создаёт наблюдение, может зарегистрировать находку и принять новую голову "
     "корня"
 )
-#: A К event surfaces from `trust-status` as `blocked` with no reason and no
-#: finding (`trust_routes.RootState.fields`): its cause is not in the answer.
-CONSERVATIVE_BLOCK = (
-    "корень заблокирован консервативным событием, причина в ответе не названа "
-    "(unsupported_size, irreproducible, смена контекста или восстановление базы)"
+#: `blocked` with no finding of this call: `trust-status` carries only this
+#: call's findings while the state counts every blocking event of the root
+#: (`trust_routes.route_trust_status`), so the cause is not in the answer.
+UNNAMED_BLOCK = (
+    "корень заблокирован; причина в ответе trust-status не названа "
+    "(зарегистрированное событие, консервативное событие или восстановление базы)"
+)
+#: Spec 6.1 L2818: `doctor` lists the known roots; the publisher does not
+#: answer them yet (a field of `trust-status`, follow-up after #706).
+OTHER_ROOTS = (
+    "не проверено: события корней кроме текущего не перечислены (нет данных издателя)"
 )
 _UNSUPPORTED = "unsupported_size: "
 _NOT_REACHED3 = "уровень 3: не достигнут"
@@ -1721,7 +1734,12 @@ def _trust_status(ctx: _Level3) -> str:
     unknown = sorted(set(status.unverified) - UNVERIFIED)
     if unknown:
         raise _broken([f"неизвестная непроверенная предпосылка {c}" for c in unknown])
-    notes = [f"не проверено: {code}" for code in status.unverified]
+    root = _bound(ctx).root_id
+    mine, old = _events_of(status, root)
+    notes = [
+        *(f"не проверено: {code}" for code in status.unverified),
+        *_listing_notes(status, old),
+    ]
     if status.state == "clear":
         head = f"clear; снимок {status.snapshot_sha}, эпоха {status.last_epoch}"
         return "; ".join([head, *notes])
@@ -1730,12 +1748,73 @@ def _trust_status(ctx: _Level3) -> str:
             setup_trust.explain(f"находка {f['kind']} ({f['role']}): {f['detail']}")
             for f in status.findings
         ]
-        raise _broken(["blocked", *(found or [CONSERVATIVE_BLOCK]), *notes])
+        if status.blocking is not None:
+            listed = [setup_trust.explain(_event_text(e)) for e in mine]
+            raise _broken(["blocked", *(listed or found or [UNNAMED_BLOCK]), *notes])
+        raise _broken(["blocked", *(found or [UNNAMED_BLOCK]), *notes])
+    raise _Outcome(UNAVAILABLE, _unavailable_reason(status))
+
+
+#: How doctor names each kind of a listed blocking event.
+_KIND_TEXT = {
+    "finding": "находка",
+    "record_violation": "нарушение (record-violation)",
+    "app_installation": "установка App на источнике доверия",
+    "conservative": "консервативное событие (К)",
+    "db_restore": "восстановление базы",
+    "unknown": "событие неизвестного вида",
+}
+
+
+def _events_of(
+    status: TrustStatus, root: tuple[str, int, str]
+) -> tuple[list[BlockingRow], list[BlockingRow]]:
+    """The listed blocking events: the current root's and the old roots'."""
+    events = () if status.blocking is None else status.blocking.events
+    return (
+        [e for e in events if e.root == root],
+        [e for e in events if e.root != root],
+    )
+
+
+def _event_text(event: BlockingRow) -> str:
+    """`событие N (<kind>, <state>[ E]): <reason>`; a К without a cause
+    says so."""
+    when = event.state if event.epoch is None else f"{event.state} E{event.epoch}"
+    reason = event.reason
+    if reason is None:
+        reason = "причина не названа" if event.kind == "conservative" else ""
+    head = f"событие {event.event_id} ({_KIND_TEXT[event.kind]}, {when})"
+    return f"{head}: {reason}" if reason else head
+
+
+def _old_root_text(event: BlockingRow) -> str:
+    host, repo, branch = event.root
+    return (
+        f"прежний корень {host} {repo} {branch}: {_event_text(event)} — не "
+        "блокирует текущий корень"
+    )
+
+
+def _listing_notes(status: TrustStatus, old: Sequence[BlockingRow]) -> list[str]:
+    """The old roots' events (labelled), how many were not listed; without
+    the publisher's listing, the gap itself (`OTHER_ROOTS`)."""
+    if status.blocking is None:
+        return [OTHER_ROOTS]
+    notes = [_old_root_text(e) for e in old]
+    omitted = status.blocking.omitted
+    if omitted:
+        notes.append(f"не проверено: ещё {omitted} блокирующих событий не перечислены")
+    return notes
+
+
+def _unavailable_reason(status: TrustStatus) -> str:
+    """Why an `unavailable` answer is: an unfinished observation (matched by
+    the prefix `trust_observation_unfinished:`) or the publisher's reason."""
     reason = status.reason or "без причины"
     if reason.startswith(f"{UNFINISHED}:"):
-        text = f"наблюдение не завершено ({reason}): повторите doctor"
-        raise _Outcome(UNAVAILABLE, text)
-    raise _Outcome(UNAVAILABLE, setup_trust.explain(f"unavailable: {reason}"))
+        return f"наблюдение не завершено ({reason}): повторите doctor"
+    return setup_trust.explain(f"unavailable: {reason}")
 
 
 def _status(ctx: _Level3) -> TrustStatus:
@@ -1756,39 +1835,71 @@ def _ask_trust_status(ctx: _Level3, binding: TrustBinding) -> TrustStatus:
     «нарушено»."""
     ctx.asked = True
     try:
-        raw = setup_trust.trust_status_call(ctx.layout)
+        return setup_trust.read_trust_status(
+            ctx.layout, binding.root_id, purpose="doctor"
+        )
     except OSError as exc:
         raise _Outcome(NOT_CHECKED, f"trust-status: нет ответа: {exc}") from exc
-    lines = raw.decode("utf-8", "replace").splitlines()
-    if len(lines) != 1:
-        raise _Outcome(BROKEN, f"trust-status: нет ответа ({len(lines)} строк)")
-    try:
-        return request.parse_trust_status(lines[0], binding.root_id)
     except BadResponse as exc:
         raise _Outcome(BROKEN, f"trust-status: {exc}") from exc
 
 
 def _unsupported_size(ctx: _Level3) -> str:
-    """Spec 6.1 «Размер вердикта»: the field of an `unsupported_size`, named,
-    with the exit of `unsupported_size: epochs` (`setup_trust.explain`).
-    Root derives what it can itself -- its own binding's limits
-    (`binding_problem`, the publisher's first check) -- and reads the rest
-    from the answer's reason and findings. A К block names no cause
-    (`CONSERVATIVE_BLOCK`): then the field cannot be told and the exit of
-    `epochs` is shown as the one to take if the journal has more than 64
-    epochs (`setup_trust.EPOCHS_EXIT`)."""
+    """Spec 6.1 «Размер вердикта»: no `unsupported_size` -- `ok` only on a
+    `clear` root (spec 2.4: an unavailable fact is never green). Root
+    derives what it can itself: its own binding's limits (`binding_problem`,
+    the publisher's first check). A blocked root does not name its cause
+    (`UNNAMED_BLOCK`): «не проверено», with the exit of `unsupported_size:
+    epochs` as one possibility only; `unavailable` is «данные недоступны»
+    with `trust.status`'s reason."""
     problem = binding_problem(_bound(ctx))
     if problem is not None:
         raise _broken([f"{_UNSUPPORTED}{problem}"])
     status = _status(ctx)
-    texts = [status.reason or "", *(f["detail"] for f in status.findings)]
-    named = [t for t in texts if _UNSUPPORTED in t]
+    # Defensive: the publisher ends an `unsupported_size` verdict by К and
+    # names it in the К event's reason (`blocking`), not in this reason.
+    if status.reason is not None and _UNSUPPORTED in status.reason:
+        raise _broken([setup_trust.explain(status.reason)])
+    if status.state == "clear":
+        return ""
+    if status.state != "blocked":
+        raise _Outcome(UNAVAILABLE, _unavailable_reason(status))
+    if status.blocking is None:  # an answer without the listing
+        raise _Outcome(NOT_CHECKED, f"{UNNAMED_BLOCK}; {EPOCHS_MAYBE}")
+    return _size_of_listing(status, _bound(ctx).root_id)
+
+
+def _size_of_listing(status: TrustStatus, root: tuple[str, int, str]) -> str:
+    """A blocked root with the publisher's listing: a К event of the current
+    root naming `unsupported_size: <field>` is «нарушено» with that field
+    (the exit of `epochs` only then, `setup_trust.explain`). The publisher
+    always names a typed status in its К event (`trust_state.apply_status`
+    with the verdict's reason), so a К event without a cause is another К
+    (a changed context, a restore) -- a note of `ok`. Events not listed
+    are «не проверено». The old roots' events never count (labelled in
+    `trust.status`)."""
+    assert status.blocking is not None
+    mine, _old = _events_of(status, root)
+    k_events = [e for e in mine if e.kind == "conservative"]
+    named = [e for e in k_events if e.reason and _UNSUPPORTED in e.reason]
     if named:
-        raise _broken([setup_trust.explain(t) for t in named])
-    if status.state == "blocked" and not status.findings:
-        note = f"{CONSERVATIVE_BLOCK}; если журнал эпох длиннее 64: {setup_trust.EPOCHS_EXIT}"
-        raise _Outcome(NOT_CHECKED, note)
-    return ""
+        raise _broken([setup_trust.explain(_event_text(e)) for e in named])
+    if status.blocking.omitted:
+        omitted = status.blocking.omitted
+        raise _Outcome(NOT_CHECKED, f"ещё {omitted} блокирующих событий не перечислены")
+    others = [_event_text(e) for e in k_events]
+    return f"{_K_NOT_SIZE}: {'; '.join(others)}" if others else ""
+
+
+#: A К event without a named cause is not an `unsupported_size` one.
+_K_NOT_SIZE = "К без названной причины (не unsupported_size)"
+
+
+#: The exit of `unsupported_size: epochs`, offered only as one possible cause.
+EPOCHS_MAYBE = (
+    "размер не проверяем; если причина — unsupported_size: epochs (журнал эпох "
+    f"длиннее 64), выход: {setup_trust.EPOCHS_EXIT}"
+)
 
 
 def _perimeter_schema(ctx: _Level3) -> str:

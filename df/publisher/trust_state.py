@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal, Protocol, cast
 
-from df.publisher import perimeter
+from df.publisher import perimeter, request
 from df.publisher.perimeter import (
     Db,
     Root,
@@ -893,12 +893,118 @@ def current_epoch(
     return epoch
 
 
+# --- the blocking events, listed for root (trust-status `blocking`) ---------------
+
+
+#: The closed kinds of a listed blocking event, by its `detected_by`.
+BlockingKind = Literal[
+    "finding",
+    "record_violation",
+    "app_installation",
+    "conservative",
+    "db_restore",
+    "unknown",
+]
+#: The same set root parses by (`request.BLOCKING_KINDS`; a test pins both).
+BLOCKING_KINDS = request.BLOCKING_KINDS
+#: Events listed per answer (oldest first); the rest are only counted.
+MAX_LISTED = 32
+_K_DETAIL = "conservative completion of an observation (K)"
+
+
+@dataclass(frozen=True)
+class BlockingEvent:
+    """One blocking event of a known root, as `trust-status` lists it: the
+    root, the event, its kind, `pending` or `registered`, its epoch, and the
+    reason where there is one (a К event's named cause, a finding's kind and
+    detail, a record-violation's detail)."""
+
+    root: Root
+    event_id: int
+    kind: BlockingKind
+    state: Literal["pending", "registered"]
+    epoch: int | None
+    reason: str | None
+
+
+def blocking_listing(
+    conn: sqlite3.Connection, current: Root
+) -> tuple[list[BlockingEvent], int]:
+    """The blocking events of every known root (`known_roots`: `current`
+    and the old roots), by the blocking rule each root's own accepted head
+    gives (`perimeter.blocking_events`: `pending`, or `registered(E)` with
+    `E >= last_epoch`, any `registered` one without a head). At most
+    `MAX_LISTED` (the current root's first), and how many more there are.
+    A read only: the caller's transaction, if any."""
+    roots = sorted(known_roots(conn, current), key=lambda r: (r != current, r))
+    found: list[BlockingEvent] = []
+    for root in roots:
+        acc = accepted_head(conn, root)
+        last = None if acc is None else acc.last_epoch
+        rows = conn.execute(
+            "SELECT event_id, state, epoch, detected_by, detail, request_key "
+            f"FROM events WHERE {_ROOT} AND (state = 'pending' OR "
+            "(state = 'registered' AND (? IS NULL OR epoch >= ?))) "
+            "ORDER BY event_id",
+            (*root, last, last),
+        ).fetchall()
+        found += [_blocking(root, *row) for row in rows]
+    return found[:MAX_LISTED], max(0, len(found) - MAX_LISTED)
+
+
+def _blocking(
+    root: Root,
+    event_id: int,
+    state: str,
+    epoch: int | None,
+    detected_by: str,
+    detail: str,
+    key: str,
+) -> BlockingEvent:
+    kind, reason = _kind_of(str(detected_by), str(detail), str(key))
+    listed = "pending" if state == "pending" else "registered"
+    return BlockingEvent(root, int(event_id), kind, listed, epoch, reason)
+
+
+def _kind_of(
+    detected_by: str, detail: str, key: str
+) -> tuple[BlockingKind, str | None]:
+    """The kind and reason of an event by who detected it (the producers:
+    `perimeter.admit`, `record_violation`, `record_app_installations`,
+    `_register`, `_conclude`)."""
+    if detected_by == perimeter.DB_RESTORE:
+        return "db_restore", None
+    if detected_by == CONSERVATIVE_SOURCE:
+        cause = detail.removeprefix(_K_DETAIL).removeprefix(": ")
+        return "conservative", cause or None
+    if detected_by.startswith("sender:"):
+        return "record_violation", clip_detail(detail)
+    if detected_by == "publisher:app_installations":
+        return "app_installation", clip_detail(detail)
+    if detected_by.startswith("trust:"):
+        return "finding", clip_detail(f"{_finding_kind(key)}: {detail}")
+    return "unknown", None
+
+
+def _finding_kind(key: str) -> str:
+    """The finding's kind from its `request_key` (root, ctx, kind, role)."""
+    try:
+        parts = json.loads(key)
+    except ValueError:
+        return "?"
+    ok = isinstance(parts, list) and len(parts) == 6 and isinstance(parts[4], str)
+    return str(parts[4]) if ok else "?"
+
+
 __all__ = [
+    "BLOCKING_KINDS",
     "CONSERVATIVE_SOURCE",
+    "MAX_LISTED",
     "OUTCOME_OF_VERDICT",
     "PERIMETER_BLOCKED",
     "TRUST_STEP",
     "UNFINISHED",
+    "BlockingEvent",
     "EpochOf",
     "Head",
     "MergeVerdict",
@@ -911,6 +1017,7 @@ __all__ = [
     "apply_status",
     "binding_digest",
     "blocked",
+    "blocking_listing",
     "conclude_unfinished",
     "conservative",
     "ctx_id",

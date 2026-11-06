@@ -386,7 +386,65 @@ def test_trust_status_always_calls_checker(
         "reason": None,
         "unverified": ["history_token_required"],
         "findings": [],
+        "blocking": {"events": [], "omitted": 0},
     }
+
+
+def test_root_parses_the_blocking_listing(
+    world: World, tw: TrustWorld, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round 1b: `blocking` is optional (an older publisher's answer has no
+    key), null or `{events, omitted}` of exact rows; anything else is
+    `BadResponse`."""
+    accept(world.lay, S1, 2)
+    data = json.loads(request.emit(tstatus(world, capsys)))
+    assert request.parse_trust_status(json.dumps(data), ROOT).blocking == (
+        request.Blocking((), 0)
+    )
+    result = dict(data["result"])
+    del result["blocking"]
+    older = {**data, "result": result}
+    assert request.parse_trust_status(json.dumps(older), ROOT).blocking is None
+    nulled = {**data, "result": {**result, "blocking": None}}
+    assert request.parse_trust_status(json.dumps(nulled), ROOT).blocking is None
+    row = {
+        "root": {"host": "github.com", "repository_id": 9, "branch": "main"},
+        "event_id": 4,
+        "kind": "conservative",
+        "state": "pending",
+        "epoch": None,
+        "reason": "unsupported_size: epochs",
+    }
+    listed = {**data, "result": {**result, "blocking": {"events": [row], "omitted": 2}}}
+    got = request.parse_trust_status(json.dumps(listed), ROOT).blocking
+    assert got == request.Blocking(
+        (
+            request.BlockingRow(
+                ("github.com", 9, "main"),
+                4,
+                "conservative",
+                "pending",
+                None,
+                "unsupported_size: epochs",
+            ),
+        ),
+        2,
+    )
+    for bad in (
+        {"events": [], "omitted": -1},
+        {"events": [], "omitted": 0, "more": 1},
+        {"events": [{**row, "kind": "other"}], "omitted": 0},
+        {"events": [{**row, "state": "done"}], "omitted": 0},
+        {"events": [{**row, "event_id": True}], "omitted": 0},
+        {"events": [{**row, "epoch": 0}], "omitted": 0},
+        {"events": [{**row, "reason": 1}], "omitted": 0},
+        {"events": [{**row, "root": {"host": "github.com"}}], "omitted": 0},
+        {"events": [{**row, "extra": 1}], "omitted": 0},
+        [],
+    ):
+        broken = {**data, "result": {**result, "blocking": bad}}
+        with pytest.raises(BadResponse, match="blocking"):
+            request.parse_trust_status(json.dumps(broken), ROOT)
 
 
 def test_trust_status_h_eq_a_removed_ruleset_finding(
@@ -409,6 +467,16 @@ def test_trust_status_h_eq_a_removed_ruleset_finding(
     assert head(world) == (S1, 2, 1)  # A re-checked: the row is not written
     again = tstatus(world, capsys)  # the same pair: the same event
     assert again.result["state"] == "blocked" and len(events(world)) == 1
+    # round 1b: the blocking event is listed with its root, kind and reason
+    root = {"host": "github.com", "repository_id": TRUST_ID, "branch": "main"}
+    ((row,),) = [again.result["blocking"]["events"]]
+    assert {k: v for k, v in row.items() if k != "event_id"} == {
+        "root": root,
+        "kind": "finding",
+        "state": "registered",
+        "epoch": 2,
+        "reason": "ruleset_missing: no ruleset on main",
+    }
 
 
 def test_trust_status_without_binding(

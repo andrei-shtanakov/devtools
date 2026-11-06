@@ -405,6 +405,44 @@ TRUST_STATUS_KEYS = frozenset(
 )
 
 
+#: The optional key of `trust-status`'s result (Task 13 of 3a): an answer
+#: without it (an older publisher) is read as before.
+BLOCKING_KEY = "blocking"
+#: The closed kinds of a listed blocking event (`trust_state.BlockingKind`).
+BLOCKING_KINDS = frozenset(
+    {
+        "finding",
+        "record_violation",
+        "app_installation",
+        "conservative",
+        "db_restore",
+        "unknown",
+    }
+)
+_BLOCKING_ROW_KEYS = frozenset({"root", "event_id", "kind", "state", "epoch", "reason"})
+
+
+@dataclass(frozen=True)
+class BlockingRow:
+    """One listed blocking event: its root, id, kind, state, epoch, reason."""
+
+    root: tuple[str, int, str]
+    event_id: int
+    kind: str
+    state: str
+    epoch: int | None
+    reason: str | None
+
+
+@dataclass(frozen=True)
+class Blocking:
+    """The `blocking` of a `trust-status` answer: the listed events (every
+    known root's) and how many more were not listed."""
+
+    events: tuple[BlockingRow, ...]
+    omitted: int
+
+
 @dataclass(frozen=True)
 class TrustStatus:
     """Root's reading of a `trust-status` answer: values for output and
@@ -416,6 +454,9 @@ class TrustStatus:
     reason: str | None
     unverified: tuple[str, ...]
     findings: tuple[Mapping[str, str], ...]
+    #: `None`: the answer has no `blocking` (an older publisher) or it is
+    #: null (the database was not read).
+    blocking: Blocking | None = None
 
 
 def parse_trust_status(raw: bytes | str, root: tuple[str, int, str]) -> TrustStatus:
@@ -428,7 +469,7 @@ def parse_trust_status(raw: bytes | str, root: tuple[str, int, str]) -> TrustSta
     if resp.outcome != "done":
         raise BadResponse(f"outcome {resp.outcome!r}: {resp.reason}")
     data = dict(resp.result)
-    if set(data) != TRUST_STATUS_KEYS:
+    if set(data) - {BLOCKING_KEY} != TRUST_STATUS_KEYS:
         raise BadResponse(f"result keys must be {sorted(TRUST_STATUS_KEYS)}")
     # the publisher without a binding answers `no_binding` with no root
     unbound = data["root"] is None and (data["state"], data["reason"]) == (
@@ -456,6 +497,51 @@ def parse_trust_status(raw: bytes | str, root: tuple[str, int, str]) -> TrustSta
         reason,
         _codes(data["unverified"]),
         _finding_rows(data["findings"]),
+        _blocking(data.get(BLOCKING_KEY)),
+    )
+
+
+def _blocking(value: object) -> Blocking | None:
+    """`blocking`: null, or `{"events": [...], "omitted": n}` of exact
+    rows (a root of typed fields, a positive id, a closed kind, `pending`
+    or `registered`, a positive epoch or null, a string reason or null)."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"events", "omitted"}:
+        raise BadResponse("blocking must be null or {events, omitted}")
+    events, omitted = value["events"], value["omitted"]
+    if not isinstance(events, list) or not (_is_int(omitted) and omitted >= 0):
+        raise BadResponse("blocking: events must be a list, omitted >= 0")
+    return Blocking(tuple(_blocking_row(r) for r in events), int(omitted))
+
+
+def _blocking_row(row: object) -> BlockingRow:
+    if not isinstance(row, dict) or set(row) != _BLOCKING_ROW_KEYS:
+        raise BadResponse(f"blocking event keys must be {sorted(_BLOCKING_ROW_KEYS)}")
+    root = row["root"]
+    ok_root = isinstance(root, dict) and set(root) == {
+        "host",
+        "repository_id",
+        "branch",
+    }
+    if not ok_root:
+        raise BadResponse("blocking event root")
+    host, repo, branch = root["host"], root["repository_id"], root["branch"]
+    if not (isinstance(host, str) and _is_int(repo) and isinstance(branch, str)):
+        raise BadResponse("blocking event root")
+    event_id, kind, state = row["event_id"], row["kind"], row["state"]
+    epoch, reason = row["epoch"], row["reason"]
+    checks = (
+        _is_int(event_id) and event_id > 0,
+        kind in BLOCKING_KINDS,
+        state in ("pending", "registered"),
+        epoch is None or (_is_int(epoch) and epoch > 0),
+        reason is None or isinstance(reason, str),
+    )
+    if not all(checks):
+        raise BadResponse(f"blocking event {row.get('event_id')!r}")
+    return BlockingRow(
+        (host, int(repo), branch), int(event_id), kind, state, epoch, reason
     )
 
 
