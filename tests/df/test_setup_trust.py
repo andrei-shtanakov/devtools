@@ -1083,3 +1083,93 @@ def test_system_mutation_guard() -> None:
     if os.geteuid() != 0:
         with pytest.raises(ForbiddenMutation):
             plat.run_command(["/usr/sbin/groupadd", "df-guard-probe"])
+
+
+# --- cleanup round (re-review N-1..N-9) ---------------------------------------------
+
+
+def test_unexpected_list_shape_is_not_verified() -> None:
+    """N-2: a 200 whose body is not a list is «не проверено», never an empty
+    list that would pass the allowlist."""
+    fake = _with(good_github(), POLICY, "collaborators", {"login": "ai-prosto"})
+    report = check(fake)
+    assert "collaborators@approval-policy: не проверено (ответ не список)" in (
+        report.unverified
+    )
+    entry = report.facts["approval-policy"]["collaborators"]  # type: ignore[index]
+    assert entry["value"] is None
+
+
+def test_teams_by_owner_type() -> None:
+    """N-3: a `User`-owned repository has no teams: `n/a`, no read, no
+    premise; an `Organization` one keeps a 404 as a named premise."""
+    fake = good_github()
+    for repo_id, name in ((POLICY_ID, POLICY), (TRUST_ID, TRUST)):
+        fake.answers[f"repositories/{repo_id}"] = (
+            200,
+            _repo(repo_id, name, owner={"login": "Owner", "type": "User"}),
+        )
+        del fake.answers[f"repos/{name}/teams?per_page=100"]
+    report = check(fake)
+    assert not any(u.startswith("teams@") for u in report.unverified)
+    assert not any("teams" in path for path, _s in report.calls)
+    teams = report.facts["df-trust"]["teams"]  # type: ignore[index]
+    assert teams["status"] == "n/a"
+    fake.answers[f"repositories/{TRUST_ID}"] = (
+        200,
+        _repo(TRUST_ID, TRUST, owner={"login": "Owner", "type": "Organization"}),
+    )
+    report = check(fake)
+    assert "teams@df-trust: не проверено (HTTP 404)" in report.unverified
+
+
+def test_custom_role_is_a_named_premise() -> None:
+    """N-4: a role outside the standard set may grant more than its
+    `permissions` show: named, with its login."""
+    people = [
+        {"login": "alice", "role_name": "admin"},
+        {"login": "bot", "role_name": "rules-editor", "permissions": {"pull": True}},
+    ]
+    report = check(_with(good_github(), POLICY, "collaborators", people))
+    assert report.ok
+    premise = [u for u in report.unverified if "rules-editor" in u]
+    assert premise and "bot" in premise[0]
+
+
+def test_free_id_skips_recorded_ids(
+    fake_layout: FakeLayout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N-6: an id held by a recorded intent (account or group) is never
+    handed out again, even when the OS has no record of it."""
+    from df.config import Account, GroupRecord, dump_accounts, dump_groups
+
+    lay = fake_layout.layout
+    lay.install_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(plat.pwd, "getpwall", lambda: [])
+    monkeypatch.setattr(plat.grp, "getgrall", lambda: [])
+    platform = "linux-x86_64"
+    first = plat.ID_RANGE[platform][0]
+    assert plat._free_id(platform, "x", lay) == first  # noqa: SLF001
+    lay.groups.write_text(
+        dump_groups({"df-history": GroupRecord("df-history", first, "creating", "t")})
+    )
+    account = Account("df-exec", first + 1, first + 1, "creating", "t")
+    lay.accounts.write_text(dump_accounts({"df-exec": account}))
+    assert plat._free_id(platform, "x", lay) == first + 2  # noqa: SLF001
+
+
+def test_system_mutation_guard_closed_forms() -> None:
+    """N-7: the remaining forms, a shell's `-c` string included."""
+    from tests.df.conftest import system_mutation
+
+    for argv in (
+        ["/usr/bin/dscl", ".", "-passwd", "/Users/x", "p"],
+        ["/usr/sbin/sysadminctl", "-addUser", "x"],
+        ["/usr/bin/dsimport", "f", "/Local/Default", "M"],
+        ["/usr/sbin/chpasswd"],
+        ["/usr/sbin/pw", "groupadd", "x"],
+        ["/bin/sh", "-c", "useradd x && true"],
+        ["/bin/sh", "-c", "/usr/bin/dscl . -create /Groups/x"],
+    ):
+        assert system_mutation(argv), argv
+    assert not system_mutation(["/bin/sh", "-c", "echo pwd"])

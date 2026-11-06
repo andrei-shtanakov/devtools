@@ -612,8 +612,9 @@ def test_no_active_release_is_refused(setup: Setup) -> None:
 
 
 def test_roles_are_created_only_through_ensure_roles(setup: Setup) -> None:
-    """Task 1 carry (M4): `_free_id` ignores `creating` intents, so roles are
-    created one after another under the lock, only via `ensure_roles`."""
+    """Task 1 carry (M4): roles are created one after another under the
+    lock, only via `ensure_roles` (`_free_id` reads the records, which a
+    parallel creation would not see yet)."""
     setup.run()
     assert setup.calls.ensure == 1
 
@@ -869,7 +870,7 @@ def fake_groups(monkeypatch: pytest.MonkeyPatch) -> FakeGroups:
     monkeypatch.setattr(plat.grp, "getgrall", getgrall)
     monkeypatch.setattr(plat.pwd, "getpwall", getpwall)
     monkeypatch.setattr(plat, "run_command", run_command)
-    monkeypatch.setattr(plat, "_free_id", lambda _p, _n: 400)
+    monkeypatch.setattr(plat, "_free_id", lambda _p, _n, _l: 400)
     return fake
 
 

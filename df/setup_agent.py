@@ -215,10 +215,16 @@ def _install_token(layout: Layout, token: bytes) -> tuple[str, ...]:
     return tuple(warnings)
 
 
-def read_token(source: Path, *, step: str = STEP, flag: str = "--file") -> bytes:
-    """One token line of the file `source` (`read_source`), else a refusal
-    of `step` naming `flag`."""
-    data = read_source(source, TOKEN_CAP + 1, step=step, flag=flag)
+def read_token(
+    source: Path,
+    *,
+    step: str = STEP,
+    flag: str = "--file",
+    check: Callable[[os.stat_result], None] | None = None,
+) -> bytes:
+    """One token line of the file `source` (`read_source`, with `check`),
+    else a refusal of `step` naming `flag`."""
+    data = read_source(source, TOKEN_CAP + 1, step=step, flag=flag, check=check)
     token = data.removesuffix(b"\n")
     if _TOKEN.fullmatch(token) is None:  # its bounds are TOKEN_CAP's
         raise StepFailed(
@@ -381,11 +387,17 @@ def _judge(fd: int, path: Path, layout: Layout, owner: int | None) -> None:
 
 
 def read_source(
-    source: Path, cap: int, *, step: str = STEP, flag: str = "--file"
+    source: Path,
+    cap: int,
+    *,
+    step: str = STEP,
+    flag: str = "--file",
+    check: Callable[[os.stat_result], None] | None = None,
 ) -> bytes:
     """The source as data: absolute, a regular file read without following a
     final link, at most `cap` bytes. Never deleted. A refusal is `step`'s
-    and names `flag`."""
+    and names `flag`; `check` judges the opened descriptor
+    (`inputs.read_capped`)."""
     if not source.is_absolute():
         raise StepFailed(step, f"{flag} {str(source)!r}: путь не абсолютный")
     try:  # never open a device or a FIFO: refused before the open
@@ -395,7 +407,7 @@ def read_source(
     if not stat.S_ISREG(st.st_mode):
         raise StepFailed(step, f"{flag} {source}: не обычный файл")
     try:
-        return inputs.read_capped(source, cap)
+        return inputs.read_capped(source, cap, check=check)
     except TreeError as exc:
         raise StepFailed(step, f"{flag}: {exc}") from exc
 

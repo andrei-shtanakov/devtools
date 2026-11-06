@@ -676,7 +676,10 @@ sudo darkfactory setup-trust write --policy-repo-id <id approval-policy> --trust
 читает периметр обоих репо (коды ответов — в отчёте, 403/404 — «не проверено») и печатает
 digest отчёта и команду записи. Стоп — тариф без rulesets, `allow_rebase_merge = true`, ветка
 `source.env` не default branch `approval-policy` (С-2), нет обязательных правил ветки, приватный
-репо. `write` сверяет digest и аргументы с отчётом (отчёт старше часа не принимается; файл
+репо. Стоп и `perimeter_principal`: каждый коллаборатор с write/maintain/admin, команда с
+push и выше, deploy key с записью и bypass типа `Integration`/`DeployKey` обязан быть в
+`POLICY_ADMINS` (спека A §6.2 (а)); непроверенное (закрытый ответ, обрезанный список, bypass без
+логина, нестандартная роль) `check` печатает как «не проверено» — его подтверждает человек. `write` сверяет digest и аргументы с отчётом (отчёт старше часа не принимается; файл
 токена истории — ваш, `chmod 600`), пишет профиль токена истории
 `/etc/df/history-gh` (`root:df-history`, `0750`/`0640`; группу создаёт повтор
 `sudo darkfactory roles setup`; группа, созданная не darkfactory, — отказ; членство

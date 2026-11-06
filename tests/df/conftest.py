@@ -90,18 +90,23 @@ class ForbiddenMutation(BaseException):
 #: Commands that change OS accounts or groups; `dscl` only with these verbs.
 _MUTATORS = frozenset(
     {"dseditgroup", "groupadd", "groupdel", "groupmod", "gpasswd"}
-    | {"useradd", "userdel", "usermod"}
+    | {"useradd", "userdel", "usermod", "adduser", "deluser", "addgroup"}
+    | {"delgroup", "newusers", "chpasswd", "vipw", "vigr", "pw"}
+    | {"sysadminctl", "dsimport"}
 )
-_DSCL_MUTATING = frozenset({"-create", "-delete", "-append", "-merge", "-change"})
+_DSCL_MUTATING = frozenset(
+    {"-create", "-delete", "-append", "-merge", "-change", "-passwd"}
+)
 
 
 def system_mutation(argv: Sequence[str]) -> bool:
-    """Whether `argv` (or a command it wraps: `sudo`, `env`) changes OS
-    accounts or groups."""
-    names = [os.path.basename(str(a)) for a in argv]
+    """Whether `argv` (or a command it wraps: `sudo`, `env`, or a shell's
+    `-c` string, split on whitespace) changes OS accounts or groups."""
+    words = [w for a in argv for w in str(a).split()]
+    names = [os.path.basename(w) for w in words]
     if any(n in _MUTATORS for n in names):
         return True
-    return "dscl" in names and any(str(a) in _DSCL_MUTATING for a in argv)
+    return "dscl" in names and any(w in _DSCL_MUTATING for w in words)
 
 
 @pytest.fixture(autouse=True)

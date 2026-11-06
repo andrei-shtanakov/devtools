@@ -1225,11 +1225,21 @@ def _write_intent(
             raise StepFailed(
                 _step(name), f"каталог {path} существует, создан не darkfactory"
             )
-    uid = _free_id(platform, name)
+    uid = _free_id(platform, name, layout)
     created = datetime.now(UTC).isoformat(timespec="seconds")
     account = Account(name, uid, uid, "creating", created)
     fsutil.write_atomic(layout.accounts, dump_accounts({**accounts, name: account}))
     return account
+
+
+def recorded_ids(layout: Layout) -> set[int]:
+    """Every UID and GID of `accounts.toml` and `groups.toml`, whatever the
+    state (a `creating` intent holds its id)."""
+    accounts = load_accounts(layout.accounts).values()
+    groups = load_groups(layout.groups).values()
+    return (
+        {a.uid for a in accounts} | {a.gid for a in accounts} | {g.gid for g in groups}
+    )
 
 
 def _exists(path: Path) -> bool:
@@ -1244,9 +1254,12 @@ def _exists(path: Path) -> bool:
     return True
 
 
-def _free_id(platform: PlatformName, name: str) -> int:
-    """The lowest id of the range free both as a UID and as a GID."""
+def _free_id(platform: PlatformName, name: str, layout: Layout) -> int:
+    """The lowest id of the range free both as a UID and as a GID, and not
+    an id df already recorded (an account or group intent whose OS record
+    a crash left unmade)."""
     used = {p.pw_uid for p in pwd.getpwall()} | {g.gr_gid for g in grp.getgrall()}
+    used |= recorded_ids(layout)
     for n in ID_RANGE[platform]:
         if n not in used:
             return n
@@ -1413,7 +1426,7 @@ def _group_intent(
             f"группа {name} существует, но создана не darkfactory: удалите её",
         )
     created = datetime.now(UTC).isoformat(timespec="seconds")
-    record = GroupRecord(name, _free_id(platform, name), "creating", created)
+    record = GroupRecord(name, _free_id(platform, name, layout), "creating", created)
     fsutil.write_atomic(layout.groups, dump_groups({**groups, name: record}))
     return record
 

@@ -14,7 +14,7 @@ import re
 import shutil
 import stat
 import tarfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -354,17 +354,26 @@ def normalize_name(name: str) -> str:
     return _NAME_RUNS.sub("-", name).lower()
 
 
-def read_capped(path: Path, cap: int) -> bytes:
+def read_capped(
+    path: Path,
+    cap: int,
+    *,
+    check: Callable[[os.stat_result], None] | None = None,
+) -> bytes:
     """Read a regular file of at most `cap` bytes; never follow a link.
 
     The file is untrusted build output read by root: a link, a FIFO or a
     device is refused and an oversize file is not read past `cap + 1`.
+    `check` judges the opened descriptor's `fstat` before any byte is read
+    (its exception propagates).
     """
     try:
         fd = open_regular(path)
     except OSError as exc:
         raise TreeError(f"{path}: не открывается: {exc}") from exc
     try:
+        if check is not None:
+            check(os.fstat(fd))
         data = os.read(fd, cap + 1)
         while len(data) <= cap:
             chunk = os.read(fd, cap + 1 - len(data))

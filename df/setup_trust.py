@@ -107,8 +107,13 @@ PER_PAGE = 100
 WRITE_ROLES = frozenset({"admin", "maintain", "write"})
 WRITE_PERMS = ("admin", "maintain", "push")
 TEAM_WRITE = frozenset({"push", "maintain", "admin"})
+#: The standard repository roles; another `role_name` (a custom org role)
+#: may grant more than its `permissions` show: a named premise.
+STANDARD_ROLES = frozenset({"admin", "maintain", "write", "triage", "read"})
 #: Bypass actor types that are never a login of `POLICY_ADMINS`.
 LOGINLESS_BYPASS = frozenset({"Integration", "DeployKey"})
+#: Reads whose 200 answer must be a list (another shape: «не проверено»).
+LIST_READS = frozenset({"deploy_keys", "collaborators", "teams", "hooks"})
 SOURCE_KEYS = (
     "APPROVAL_POLICY_REPO",
     "APPROVAL_POLICY_BRANCH",
@@ -401,6 +406,8 @@ def check_perimeter(
 class _Repo:
     full_name: str
     default_branch: str
+    #: `owner.type`: `User`, `Organization`, or `None` when not read.
+    owner_type: str | None = None
 
 
 def _facts_of(facts: Mapping[str, object], role: str) -> dict[str, object]:
@@ -424,6 +431,9 @@ def _repository(
         r.stop("repository_unreadable", role, f"{path}: нет имени или default branch")
         return None
     private, rebase = body.get("private"), body.get("allow_rebase_merge")
+    owner = body.get("owner")
+    kind = owner.get("type") if isinstance(owner, dict) else None
+    owner_type = kind if isinstance(kind, str) else None
     facts[role] = {
         "repository": {
             "id": repo_id,
@@ -431,6 +441,7 @@ def _repository(
             "default_branch": branch,
             "private": private,
             "allow_rebase_merge": rebase,
+            "owner_type": owner_type,
         }
     }
     if private is True:
@@ -443,7 +454,7 @@ def _repository(
         r.unverified.append(f"allow_rebase_merge@{role}")
     elif rebase is not False:
         r.stop("rebase_allowed", role, f"{name}: allow_rebase_merge = {rebase!r}")
-    return _Repo(name, branch)
+    return _Repo(name, branch, owner_type)
 
 
 def _account(r: _Reader, facts: dict[str, object]) -> str | None:
@@ -563,21 +574,26 @@ def _settings(r: _Reader, role: str, repo: _Repo, branch: str) -> dict[str, obje
     pinned = quote(branch, safe="")
     found: dict[str, object] = {"rules": _rules(r, role, repo, branch)}
     found["rulesets"] = _rulesets(r, role, base)
+    page = f"per_page={PER_PAGE}"
     reads: tuple[tuple[str, str, Callable[[object], object]], ...] = (
         ("protection", f"{base}/branches/{pinned}/protection", _as_is),
-        ("deploy_keys", f"{base}/keys?per_page=100", _keys),
+        ("deploy_keys", f"{base}/keys?{page}", _keys),
         ("actions_permissions", f"{base}/actions/permissions", _as_is),
-        (
-            "collaborators",
-            f"{base}/collaborators?affiliation=all&per_page=100",
-            _people,
-        ),
-        ("teams", f"{base}/teams?per_page=100", _teams),
-        ("hooks", f"{base}/hooks?per_page=100", _hooks),
-        ("environments", f"{base}/environments?per_page=100", _environments),
+        ("collaborators", f"{base}/collaborators?affiliation=all&{page}", _people),
+        ("teams", f"{base}/teams?{page}", _teams),
+        ("hooks", f"{base}/hooks?{page}", _hooks),
+        ("environments", f"{base}/environments?{page}", _environments),
     )
     for name, path, shape in reads:
+        if name == "teams" and repo.owner_type == "User":
+            # a personal repository has no teams: nothing to read or confirm
+            found[name] = {"status": "n/a", "value": [], "truncated": False}
+            continue
         status, body = r.get(path)
+        if status == 200 and name in LIST_READS and not isinstance(body, list):
+            r.unverified.append(f"{name}@{role}: не проверено (ответ не список)")
+            found[name] = {"status": status, "value": None, "truncated": False}
+            continue
         if name == "protection" and status == 404 and _not_protected(body):
             found[name] = {"status": 404, "value": "not protected", "truncated": False}
             continue
@@ -629,7 +645,7 @@ def _rules(r: _Reader, role: str, repo: _Repo, branch: str) -> object:
 
 def _rulesets(r: _Reader, role: str, base: str) -> object:
     """Every ruleset with its `bypass_actors` (judged by `_principals`)."""
-    status, body = r.get(f"{base}/rulesets?includes_parents=true&per_page=100")
+    status, body = r.get(f"{base}/rulesets?includes_parents=true&per_page={PER_PAGE}")
     if _upgrade(status, body):
         tariff = Stop("tariff_without_rulesets", role, "")
         if not any((s.kind, s.role) == (tariff.kind, role) for s in r.stops):
@@ -679,10 +695,21 @@ def _principals(
     read-only, bypass actors of type `Integration`/`DeployKey` (never a
     login). One outside the allowlist is a stop (`perimeter_principal`); a
     bypass actor that maps to no login, or a missing `bypass_actors`, is a
-    named premise (the lists that were not read or were cut already are)."""
+    named premise (the lists that were not read or were cut already are).
+    Asymmetry by the controller's ruling: a team with push stops (its
+    members are not read), a `Team` bypass actor is only a premise (bypass
+    types that map to no login are premises); a `RepositoryRole` bypass of
+    the admin role adds nobody beyond the collaborators with admin, which
+    are judged here."""
     allowed = {a.casefold() for a in admins}
     principals: list[tuple[str, str | None]] = []
     for person in _value(found, "collaborators"):
+        if person.get("role") not in STANDARD_ROLES:
+            r.unverified.append(
+                f"collaborators@{role}: {person.get('login')} — роль "
+                f"{person.get('role')!r} не стандартная; права сверх permissions "
+                "подтверждает человек"
+            )
         if _writes(person):
             principals.append((f"collaborator:{person.get('login')}", _login(person)))
     for team in _value(found, "teams"):
@@ -1047,15 +1074,13 @@ def read_history_token(path: Path) -> str:
     human's own (`SUDO_UID`) or root's, private (no group or other bits) --
     never a file another local user could have planted."""
     flag = "--history-token-file"
-    try:
-        st = os.lstat(path)
-    except OSError:
-        st = None  # `read_token` names it
-    if st is not None:
-        owners = {plat.ROOT_UID}
-        sudo = os.environ.get("SUDO_UID", "")
-        if sudo.isascii() and sudo.isdigit():
-            owners.add(int(sudo))
+    owners = {plat.ROOT_UID}
+    sudo = os.environ.get("SUDO_UID", "")
+    if sudo.isascii() and sudo.isdigit():
+        owners.add(int(sudo))
+
+    def private(st: os.stat_result) -> None:
+        """Judged on the opened descriptor: no swap after the check."""
         owner, mode = fsutil.owner_uid(st), stat.S_IMODE(st.st_mode)
         if owner not in owners or mode & 0o077:
             raise StepFailed(
@@ -1064,7 +1089,9 @@ def read_history_token(path: Path) -> str:
                 "ваш файл (SUDO_UID) или root без прав группы и всех (chmod 600); "
                 "ничего не записано",
             )
-    return setup_agent.read_token(path, step=STEP, flag=flag).decode("ascii")
+
+    token = setup_agent.read_token(path, step=STEP, flag=flag, check=private)
+    return token.decode("ascii")
 
 
 def profile_files(token: str) -> dict[str, str]:

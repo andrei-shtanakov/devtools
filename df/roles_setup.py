@@ -4,8 +4,8 @@ A writer: the caller holds the writer lock for the whole run. The steps, in
 this order, each settled by its own check so that a repeat changes nothing:
 
 1. `roles`: `ensure_roles` -- the accounts are created one after another,
-   only here and only under the lock (`platform._free_id` ignores `creating`
-   intents, so two parallel creations could take the same id); then the
+   only here and only under the lock (`platform._free_id` skips recorded
+   ids, but two parallel creations could still take the same id); then the
    group `df-history` by intent (`groups.toml`) with exactly
    `df-publisher`, `df-precheck` and the operator (stage 3a; a repeat on a
    2b host creates it; a group of that name df did not make is refused);
