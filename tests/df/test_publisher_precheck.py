@@ -11,7 +11,9 @@ import subprocess
 import sys
 import time
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -25,6 +27,7 @@ from df.publisher.precheck import PrecheckResult, PrFacts
 from df.publisher.request import Refused, Response
 from df.stage2_config import dump_publisher, parse_publisher
 from governance import act_precheck
+from tests.df.launch_world import ADMIN as ENTRY_ADMIN
 from tests.df.publisher_world import SHA, World, raw_of
 from tests.df.test_publisher_ops import (
     PRODUCT,
@@ -42,7 +45,8 @@ TIP = "c" * 40
 STOP = "workstreams/ws/approvals/stops/n1-g2.yaml"
 FACTS = PrFacts(7, "stop/ws-n1-g2", "master", TIP, (("added", STOP, None),))
 PR = {"number": 12, "head": {"sha": SHA, "ref": "stop/ws-n1-g2"}}
-ADMIN = "sha256:" + "d" * 64
+#: The digest of the world's `current` record (the verdict must carry it).
+ADMIN = ENTRY_ADMIN
 
 #: The stand-in for the precheck: reads the request, keeps a copy, answers
 #: with a verdict bound to it, changed by `OVER` (`None` drops a key), then
@@ -136,6 +140,7 @@ class Stand:
             github.API,
             {7: PRODUCT},
             self.git_base,
+            admin_digest=ADMIN,
         )
 
     def call(self, facts: PrFacts = FACTS) -> PrecheckResult:
@@ -312,6 +317,21 @@ def test_other_bound_field_refused(
 ) -> None:
     stand.answer(**over)
     assert reason(stand.call()) == f"precheck_failed: {failure}"
+
+
+def test_stop_admin_digest_mismatch_refused(stand: Stand) -> None:
+    """Spec 5.4 p. 3 (rev 11), for v1 too: a verdict of another admin tree
+    than the publisher's `current` record is not bound -- and without a
+    record nothing binds."""
+    stand.answer(admin_digest="sha256:" + "b" * 64)
+    result = stand.call()
+    assert reason(result) == "precheck_failed: binding_mismatch"
+    assert result.admin_digest is None  # no verdict bound
+    stand.answer()
+    oc = replace(stand.oc(), admin_digest=None)
+    got = precheck.admin_precheck("stop", oc, PR, FACTS)
+    assert reason(got) == "precheck_failed: binding_mismatch"
+    assert reason(stand.call()) is None  # the record's digest binds
 
 
 # --- strict parsing -----------------------------------------------------------
@@ -561,10 +581,22 @@ def test_token_not_minted_for_bad_facts(stand: Stand) -> None:
     assert stand.fake.tokens == [] and not stand.capture.exists()
 
 
-def test_only_stop_is_asked(stand: Stand) -> None:
+def test_protocol_by_kind(stand: Stand) -> None:
+    """Stop is asked by v1 without an observation; candidate and finalize
+    only by v2 with the `merge` observation (Task 11); a brief by none.
+    A misuse is a `ValueError` before any token."""
+    obs = cast(Any, object())
     with pytest.raises(ValueError, match="candidate"):
         precheck.admin_precheck("candidate", stand.oc(), PR, FACTS)
+    with pytest.raises(ValueError, match="obs"):
+        precheck.admin_precheck("finalize", stand.oc(), PR, FACTS)
+    with pytest.raises(ValueError, match="obs"):
+        precheck.admin_precheck("stop", stand.oc(), PR, FACTS, obs=obs)
+    with pytest.raises(ValueError, match="brief"):
+        precheck.admin_precheck("brief", stand.oc(), PR, FACTS)
     assert stand.fake.tokens == []
+    assert precheck.KINDS == ("stop",)
+    assert precheck.V2_KINDS == ("candidate", "finalize")
 
 
 def test_request_over_the_limit_not_sent(stand: Stand) -> None:

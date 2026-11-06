@@ -57,6 +57,7 @@ from df.publisher.trust_types import (
     RangeDescriptor,
     Route,
     SourceDescriptor,
+    clip_detail,
     detail_size,
 )
 from df.stage2_config import TrustBinding, load_trust, no_constant, no_duplicates
@@ -163,6 +164,18 @@ _TRUST_KEYS = frozenset(
         "diagnostics",
     }
 )
+#: The envelope of `op: merge` (`act_precheck_v2._envelope`): the PR's
+#: bound fields and X instead of `op: trust`'s A and validation.
+MERGE_KEYS = (_TRUST_KEYS - {"accepted_sha", "validation"}) | {
+    "repository_id",
+    "pr",
+    "head_sha",
+    "kind",
+    "expected_snapshot_sha",
+}
+#: `op: merge` never answers `irreproducible` (the checker maps it to `unset`).
+MERGE_STATUSES = (ALLOW, REFUSE, UNSET, UNSUPPORTED)
+FINDINGS_REASON = "perimeter_findings: "
 _SOURCE_KEYS = frozenset(f.name for f in dataclasses.fields(SourceDescriptor))
 _FINDING_KEYS = frozenset({"kind", "role", "detail"})
 
@@ -543,12 +556,12 @@ def evaluate(sess: Session, db: Db, obs: Observation) -> Evaluation:
     binding changed meanwhile."""
     root, epochs_of = sess.root, sess.epochs_of()
     if trust_state.stale_context(obs, sess.binding, sess.admin_digest, RULES_VERSION):
-        return Evaluation(_conservative(db, root, obs, epochs_of), None)
+        return Evaluation(conservative_of(db, root, obs, epochs_of), None)
     verdict = run_trust(sess, obs, base=_base(obs), db=db)
     if isinstance(verdict, Unavailable):
         return Evaluation(trust_state.unresolved(db, root, obs.id), None)
-    if _binding_moved(sess):
-        return Evaluation(_conservative(db, root, obs, epochs_of), None)
+    if binding_moved(sess):
+        return Evaluation(conservative_of(db, root, obs, epochs_of), None)
     if verdict.outcome in OUTCOME_OF_VERDICT:
         if not _is_unfinished(db, obs):
             return Evaluation(trust_state.outcome_of(db.conn, obs.id), verdict)
@@ -633,7 +646,7 @@ def validation(rules: str, admin_digest: str) -> str:
     return f"{rules}:{admin_digest}"
 
 
-def _binding_moved(sess: Session) -> bool:
+def binding_moved(sess: Session) -> bool:
     """`trust.toml` now names another binding than this call read (K before
     the write, review M7); an unreadable file counts as moved."""
     try:
@@ -647,7 +660,9 @@ def _is_unfinished(db: Db, obs: Observation) -> bool:
     return any(o.id == obs.id for o in trust_state.unfinished(db.conn, obs.root))
 
 
-def _conservative(db: Db, root: Root, obs: Observation, epochs_of: EpochOf) -> Outcome:
+def conservative_of(
+    db: Db, root: Root, obs: Observation, epochs_of: EpochOf
+) -> Outcome:
     """K for `obs`, unless it is completed already (then its outcome stays)."""
     if not _is_unfinished(db, obs):
         return trust_state.outcome_of(db.conn, obs.id)
@@ -812,7 +827,6 @@ def trust_request(
 ) -> dict[str, object]:
     """`df/precheck-request/v2`, `op: trust`, of `obs` (every key of
     `act_precheck_v2._COMMON` and `_TRUST`; `policy` on every op, D2)."""
-    binding = sess.binding
     return {
         "schema": REQUEST_SCHEMA_V2,
         "nonce": secrets.token_hex(16),
@@ -820,17 +834,22 @@ def trust_request(
         "origin_route": obs.route,
         "ctx_id": obs.ctx,
         "observation_id": obs.id,
-        "binding": {
-            "host": binding.host,
-            "df_trust_repository_id": binding.df_trust_repository_id,
-            "df_trust_full_name": binding.df_trust_full_name,
-            "branch": binding.df_trust_branch,
-            "approval_policy_repository_id": binding.approval_policy_repository_id,
-            "history_gh_config_dir": binding.history_gh_config_dir,
-        },
+        "binding": binding_wire(sess.binding),
         "policy": dataclasses.asdict(policy),
         "trust_accepted": None if base is None else dataclasses.asdict(base),
         "trust_head": obs.head,
+    }
+
+
+def binding_wire(binding: TrustBinding) -> dict[str, object]:
+    """The binding as every v2 request carries it."""
+    return {
+        "host": binding.host,
+        "df_trust_repository_id": binding.df_trust_repository_id,
+        "df_trust_full_name": binding.df_trust_full_name,
+        "branch": binding.df_trust_branch,
+        "approval_policy_repository_id": binding.approval_policy_repository_id,
+        "history_gh_config_dir": binding.history_gh_config_dir,
     }
 
 
@@ -840,12 +859,14 @@ def canonical(value: object) -> bytes:
     return text.encode("utf-8")
 
 
-def parse_verdict(raw: bytes) -> Mapping[str, object] | None:
+def parse_verdict(
+    raw: bytes, keys: frozenset[str] = _TRUST_KEYS
+) -> Mapping[str, object] | None:
     """One v2 verdict object, or `None`. `tree_incomplete` is classified by
     its outcome first and only parsed (T10-1: its bytes are not canonical);
     any other verdict must be exactly the canonical bytes of its object and
-    one newline, at most `VERDICT_LIMIT` bytes, with exactly the keys of the
-    `op: trust` envelope."""
+    one newline, at most `VERDICT_LIMIT` bytes, with exactly `keys` (the
+    `op: trust` envelope; `MERGE_KEYS` for `op: merge`)."""
     try:
         data = json.loads(
             raw.decode("utf-8"),
@@ -858,7 +879,7 @@ def parse_verdict(raw: bytes) -> Mapping[str, object] | None:
         return None
     if data.get("outcome") == TREE_INCOMPLETE:
         return data if set(data) == _TREE_KEYS else None
-    if set(data) != _TRUST_KEYS or len(raw) > VERDICT_LIMIT + 1:
+    if set(data) != keys or len(raw) > VERDICT_LIMIT + 1:
         return None
     try:  # a lone surrogate (`\ud800`) parses, but has no UTF-8 form
         wire = canonical(data)
@@ -963,7 +984,8 @@ def _verdict(data: Mapping[str, object], route: Route) -> Verdict:
         ranges=_ranges(data["ranges"]),
         findings=_findings(data["findings"], route),
         unverified=_unverified(data["unverified"]),
-        validation=str(data["validation"]),
+        # `op: merge` carries no validation: X is A, whose pair the request sent
+        validation=None if "validation" not in data else str(data["validation"]),
     )
 
 
@@ -1057,18 +1079,7 @@ def _check_contract(
 ) -> None:
     """The rules that tie the fields together: O14, the shape by `relation`
     (review I6), the outcome and its findings, the ranges of `merge`."""
-    keyed_warning = HISTORY_TOKEN_REQUIRED in verdict.unverified
-    _need(keyed_warning != sess.keyed, "unverified: history_token_required")
-    kinds = {f.kind for f in verdict.findings}
-    if verdict.relation is None:
-        empty = (verdict.source, verdict.last_epoch, verdict.ranges) == (None,) * 3
-        _need(empty and not verdict.findings, "shape: no pair")
-        no_pair = (UNSET, UNSUPPORTED, IRREPRODUCIBLE, REFUSE)
-        _need(verdict.outcome in no_pair, "shape: no pair")
-    else:
-        _need(
-            (verdict.source is None) == bool(kinds & SOURCE_FINDINGS), "shape: source"
-        )
+    _check_shape(verdict, sess, (UNSET, UNSUPPORTED, IRREPRODUCIBLE, REFUSE))
     if verdict.outcome == ALLOW:
         _need(verdict.verified and not verdict.findings, "outcome: allow")
     elif verdict.outcome == REFUSE:
@@ -1078,6 +1089,24 @@ def _check_contract(
     if verdict.outcome == IRREPRODUCIBLE:
         _need(verdict.reason in IRREPRODUCIBLE_REASONS, "outcome: irreproducible")
     _check_ranges_of(verdict, obs, request, stored_ranges)
+
+
+def _check_shape(verdict: Verdict, sess: Session, no_pair: Sequence[str]) -> None:
+    """The rules both ops share: O14 both ways, and the shape by `relation`
+    (review I6) -- no pair read: no source, epoch, ranges or findings and an
+    outcome of `no_pair`; a read pair: `source` null exactly with a source
+    finding."""
+    keyed_warning = HISTORY_TOKEN_REQUIRED in verdict.unverified
+    _need(keyed_warning != sess.keyed, "unverified: history_token_required")
+    kinds = {f.kind for f in verdict.findings}
+    if verdict.relation is None:
+        empty = (verdict.source, verdict.last_epoch, verdict.ranges) == (None,) * 3
+        _need(empty and not verdict.findings, "shape: no pair")
+        _need(verdict.outcome in no_pair, "shape: no pair")
+    else:
+        _need(
+            (verdict.source is None) == bool(kinds & SOURCE_FINDINGS), "shape: source"
+        )
 
 
 def _check_same(verdict: Verdict, same: trust_state.Pinned | None) -> None:
@@ -1144,6 +1173,144 @@ def check_ranges(
     return stored_digest is None or desc.digest == stored_digest
 
 
+# --- op: merge (Task 11) ---------------------------------------------------------------
+
+#: `act_precheck_v2.PRELIMINARY`: the only root state a merge request
+#: carries (the publisher refuses `blocked`/`unavailable` before the call).
+PRELIMINARY = "clear"
+MERGER_TYPE = "Bot"
+
+
+@dataclass(frozen=True)
+class MergeTrust:
+    """What the v2 precheck of a candidate or finalize merge is bound to:
+    the session, the observation of the `merge` route (A = X, P pinned at
+    its creation), the App's bot as the merger, the bundle directory of the
+    PR's workstream, the ranges digest the observation pinned already
+    (`None`: none yet) and A's pinned record while its row is current
+    (`same_head`: a verified verdict repeats its epoch and digest, D-d)."""
+
+    sess: Session
+    obs: Observation
+    merger: str
+    bundle_dir: str
+    stored_ranges: str | None = None
+    same: trust_state.Pinned | None = None
+
+    @property
+    def snapshot(self) -> str:
+        """X: the accepted head the merge is checked against."""
+        return self.obs.head
+
+
+def merge_fields(trust: MergeTrust, dag_variant: str) -> dict[str, object]:
+    """The keys `op: merge` of `df/precheck-request/v2` adds to the PR's v1
+    request (`precheck._request`): the observation, the binding, P, X and
+    A's pinned record (`trust_accepted`, its validation rebuilt from the
+    stored pair, ruling R1), the preliminary state, the merger (the App's
+    bot, spec 5.4) and the product record's bundle source."""
+    obs = trust.obs
+    base = _base(obs)
+    if base is None or obs.policy is None or obs.accepted != obs.head:
+        raise ValueError("a merge observation pins A = X and P")
+    return {
+        "schema": REQUEST_SCHEMA_V2,
+        "op": "merge",
+        "origin_route": "merge",
+        "ctx_id": obs.ctx,
+        "observation_id": obs.id,
+        "binding": binding_wire(trust.sess.binding),
+        "policy": dataclasses.asdict(obs.policy),
+        "expected_snapshot_sha": obs.head,
+        "trust_accepted": dataclasses.asdict(base),
+        "preliminary_state": PRELIMINARY,
+        "merger_login": trust.merger,
+        "merger_type": MERGER_TYPE,
+        "bundle_dir": trust.bundle_dir,
+        "dag_variant": dag_variant,
+    }
+
+
+def bind_merge(
+    data: Mapping[str, object], request: Mapping[str, object], *, trust: MergeTrust
+) -> Verdict | Unavailable:
+    """The parsed `op: merge` verdict checked against the request (the PR:
+    `repository_id`, `pr`, `head_sha` C, `kind`), the observation, the
+    binding, the publisher (`admin_digest`), X (`snapshot_sha` =
+    `expected_snapshot_sha` = X: an echo; a read is `relation`) and its own
+    contract (`_check_merge_contract`); `Unavailable("precheck_failed:
+    binding_mismatch: <what>")` names the first rule it breaks."""
+    try:
+        _bind_common(data, request, trust.sess)
+        if data["outcome"] == TREE_INCOMPLETE:
+            return Verdict(TREE_INCOMPLETE, _text(data["reason"], "reason"))
+        _bind_merge(data, request, trust)
+        verdict = _verdict(data, "merge")
+        _check_merge_contract(verdict, trust, request)
+        _check_same(verdict, trust.same)
+    except _Unbound as exc:
+        return Unavailable(f"precheck_failed: binding_mismatch: {exc.what}")
+    return verdict
+
+
+def _bind_merge(
+    data: Mapping[str, object], request: Mapping[str, object], trust: MergeTrust
+) -> None:
+    host, repo, branch = trust.sess.root
+    root = {"host": host, "df_trust_repository_id": repo, "branch": branch}
+    bound = (
+        ("ctx_id", trust.obs.ctx),
+        ("observation_id", trust.obs.id),
+        ("op", "merge"),
+        ("origin_route", "merge"),
+        ("root", root),
+        ("policy", request["policy"]),
+        ("repository_id", request["repository_id"]),
+        ("pr", request["pr"]),
+        ("head_sha", request["head_sha"]),
+        ("kind", request["kind"]),
+        ("expected_snapshot_sha", trust.snapshot),
+        ("snapshot_sha", trust.snapshot),
+    )
+    for key, want in bound:
+        got = data[key]
+        _need(type(got) is type(want) and got == want, key)
+
+
+def _check_merge_contract(
+    verdict: Verdict, trust: MergeTrust, request: Mapping[str, object]
+) -> None:
+    """The contract of `op: merge` (review note 1): the shape by `relation`
+    and O14 as `op: trust`; `refuse` may come without findings
+    (`history_token_required`, an `act_premerge` refusal), with findings it
+    is `refuse` named by them; `ranges` are there exactly when the snapshot
+    X was verified (`last_epoch`), on any outcome, and pass `check_ranges`
+    against P and the observation's pinned digest."""
+    _need(verdict.outcome in MERGE_STATUSES, "outcome")
+    _check_shape(verdict, trust.sess, (UNSET, UNSUPPORTED, REFUSE))
+    if verdict.outcome == ALLOW:
+        _need(verdict.verified and not verdict.findings, "outcome: allow")
+    elif verdict.findings:
+        names = sorted({f"{f.kind}@{f.role}" for f in verdict.findings})
+        want = clip_detail(FINDINGS_REASON + ", ".join(names))
+        ok = verdict.outcome == REFUSE and verdict.reason == want
+        _need(ok, "outcome: findings")
+    if verdict.last_epoch is None:
+        _need(verdict.ranges is None, "ranges")
+        return
+    _need(verdict.ranges is not None, "ranges")
+    assert verdict.ranges is not None
+    policy = request["policy"]
+    assert isinstance(policy, dict)
+    ok = check_ranges(
+        verdict.ranges,
+        last_epoch=verdict.last_epoch,
+        p_sha=str(policy["p_sha"]),
+        stored_digest=trust.stored_ranges,
+    )
+    _need(ok, "ranges")
+
+
 __all__ = [
     "BRANCH",
     "EVALUATIONS",
@@ -1155,8 +1322,12 @@ __all__ = [
     "MAX_BRANCH_BYTES",
     "MAX_FULL_NAME_BYTES",
     "MAX_INT",
+    "MERGER_TYPE",
+    "MERGE_KEYS",
+    "MERGE_STATUSES",
     "PERIMETER_STATUS_EVALUATIONS",
     "PRECHECK_VERSION_V2",
+    "PRELIMINARY",
     "REQUEST_SCHEMA_V2",
     "RULES_VERSION",
     "SOURCE_FINDINGS",
@@ -1167,18 +1338,24 @@ __all__ = [
     "VERDICT_SCHEMA_V2",
     "AcceptedEpochs",
     "Evaluation",
+    "MergeTrust",
     "OutOfLimits",
     "RootState",
     "Session",
     "Verdict",
     "approved_gh",
     "bind",
+    "bind_merge",
+    "binding_moved",
     "binding_problem",
+    "binding_wire",
     "canonical",
     "check_ranges",
+    "conservative_of",
     "evaluate",
     "fast_path",
     "limits_problem",
+    "merge_fields",
     "observe",
     "parse_verdict",
     "pin_policy",

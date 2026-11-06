@@ -34,17 +34,19 @@ import sqlite3
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Literal, cast
+from typing import Literal, Protocol, cast
 
 from df.publisher import perimeter
 from df.publisher.perimeter import (
     Db,
     Root,
+    Snapshot,
     Unavailable,
     known_roots,
     mark_restored,
     restored,
 )
+from df.publisher.request import Refused
 from df.publisher.trust_types import (
     ROUTE_KINDS,
     Finding,
@@ -91,7 +93,7 @@ def _no_step(_name: str) -> None:
 
 #: Called inside each write transaction before its `COMMIT` with the
 #: operation's name: `observation`, `findings`, `advance`, `conservative`,
-#: `ranges`.
+#: `ranges`, `admission`.
 TRUST_STEP: Callable[[str], None] = _no_step
 
 
@@ -443,29 +445,42 @@ def register_findings(
         row = _of_ctx(conn, root, ctx, latest=True)
         if row is None:
             raise ValueError(f"no observation of {ctx}")
-        allowed = ROUTE_KINDS[row.obs.route]
-        if any(f.kind not in allowed for f in findings):
-            raise Unavailable("verdict_unbound")
         if not findings:
             return []
-        epoch = epochs_of(conn, root)
-        provenance = _provenance(row.obs.accepted, row.obs.head, ctx)
-        ids = [
-            _event(
-                conn,
-                root,
-                _key(root, ctx, f.kind, f.role),
-                epoch,
-                provenance,
-                f"trust:{row.obs.route}",
-                f.detail,
-                (f.role, _repository_of(row.binding, f.role)),
-            )  # fmt: skip
-            for f in findings
-        ]
-        if row.outcome in UNFINISHED:
-            _settle(conn, row.obs.id, "finding_registered", ids)
+        ids = _register(conn, row, findings, epochs_of(conn, root))
         TRUST_STEP("findings")
+    return ids
+
+
+def _register(
+    conn: sqlite3.Connection, row: _Row, findings: Sequence[Finding], epoch: int | None
+) -> list[int]:
+    """The events of `findings` in the caller's transaction, keyed by
+    (root, `ctx`, kind, role), at `epoch`; an unfinished observation is
+    completed `finding_registered`. A kind outside the route's is
+    `verdict_unbound`."""
+    obs = row.obs
+    allowed = ROUTE_KINDS[obs.route]
+    if any(f.kind not in allowed for f in findings):
+        raise Unavailable("verdict_unbound")
+    if not findings:
+        return []
+    provenance = _provenance(obs.accepted, obs.head, obs.ctx)
+    ids = [
+        _event(
+            conn,
+            obs.root,
+            _key(obs.root, obs.ctx, f.kind, f.role),
+            epoch,
+            provenance,
+            f"trust:{obs.route}",
+            f.detail,
+            (f.role, _repository_of(row.binding, f.role)),
+        )  # fmt: skip
+        for f in findings
+    ]
+    if row.outcome in UNFINISHED:
+        _settle(conn, obs.id, "finding_registered", ids)
     return ids
 
 
@@ -666,6 +681,139 @@ def _event(
     )
 
 
+# --- the final admission of `merge` ----------------------------------------------
+
+
+class MergeVerdict(Protocol):
+    """What the admission reads of a bound `op: merge` verdict
+    (`trust_routes.Verdict`)."""
+
+    @property
+    def outcome(self) -> str:
+        """The checker's outcome."""
+        ...
+
+    @property
+    def reason(self) -> str:
+        """Its reason."""
+        ...
+
+    @property
+    def findings(self) -> tuple[Finding, ...]:
+        """Its findings, one per (kind, role)."""
+        ...
+
+    @property
+    def verified(self) -> bool:
+        """The journal of X was read and verified."""
+        ...
+
+
+#: The refusal of the final admission (spec 6.1; named apart from
+#: `perimeter.admit`, the admission of a restored database).
+PERIMETER_BLOCKED = "perimeter_blocked"
+
+
+def admit_merge(
+    db: Db,
+    root: Root,
+    obs: int,
+    verdict: MergeVerdict,
+    *,
+    head_read: Callable[[], str],
+    binding: TrustBinding,
+    admin_digest: str,
+    rules: str,
+    admit: bool = True,
+) -> Refused | None:
+    """The final admission of a `merge` (spec 6.1 «Маршруты и наблюдения»):
+    one write transaction, the branch head read with the lock held.
+
+    (1) The own observation is completed by its bound verdict: with findings
+    `finding_registered`; verified without findings `accepted` when the
+    accepted row is still the one it pinned and the head is X, else
+    `superseded` -- the row is never written (X = A, review D-d); `unset`
+    and `tree_incomplete` keep it unfinished (`unresolved`, re-evaluated by
+    `op: trust`); `unsupported_size` is K. One completed by another route
+    meanwhile keeps its outcome. (2) Its findings are registered by the
+    registration rule under its `ctx_id` (the same keys, no new epoch).
+    (3) For `allow` (and `admit`): I applied anew -- the head = X = the
+    accepted row under the current check, the own observation `accepted`,
+    no other unfinished observation, no blocking event (`pending` events
+    registered first at the verified epoch); else `Refused(PERIMETER_BLOCKED)`.
+    Without the admission an unreadable head is no verified snapshot
+    (`None`, review M1); with it, `Unavailable`.
+    The caller writes `armed` and sends the `PUT` only after `None`, after
+    the `COMMIT`."""
+    conn = db.conn
+    with perimeter.write(conn):
+        row = _by_id(conn, root, obs)
+        head = _head_or_none(head_read, required=admit)
+        acc = accepted_head(conn, root)
+        current = acc is not None and head_valid(acc, binding, admin_digest, rules)
+        verified = None if acc is None or not current or head != acc.sha else acc
+        _complete_merge(conn, row, verdict, verified, head)
+        ok = verdict.outcome != "allow" or not admit
+        if not ok and verified is not None:
+            perimeter.register_pending(conn, root, Snapshot(head, verified.last_epoch))
+            ok = _admissible(conn, row.obs, verified)
+        TRUST_STEP("admission")
+    return None if ok else Refused(PERIMETER_BLOCKED)
+
+
+def _head_or_none(head_read: Callable[[], str], *, required: bool) -> str | None:
+    """The head read with the lock held; without the admission (review M1)
+    an unreadable one is `None`, as the registration rule reads it: the
+    findings `pending`, a clean verdict unresolved, the reason kept."""
+    try:
+        return head_read()
+    except Unavailable:
+        if required:
+            raise
+        return None
+
+
+def _complete_merge(
+    conn: sqlite3.Connection,
+    row: _Row,
+    verdict: MergeVerdict,
+    verified: Head | None,
+    head: str | None,
+) -> None:
+    """Steps (1) and (2) of `admit_merge`; `verified` is the accepted row
+    when the head read now is its SHA under the current check (`head` is
+    `None` when it could not be read: no CAS, the observation unfinished)."""
+    epoch = None if verified is None else verified.last_epoch
+    if verdict.findings:
+        _register(conn, row, verdict.findings, epoch)
+        return
+    if row.outcome not in UNFINISHED:
+        return
+    mapped = OUTCOME_OF_VERDICT.get(verdict.outcome)
+    if mapped == "conservative":
+        _conclude(conn, row, epoch, verdict.reason)
+    elif mapped is None and verdict.verified and head is not None:
+        obs = row.obs
+        same = (
+            verified is not None
+            and verified.row_version == obs.row_version
+            and verified.sha == obs.accepted == obs.head == head
+        )
+        _settle(conn, obs.id, "accepted" if same else "superseded", [])
+    elif row.outcome == "open":
+        _settle(conn, row.obs.id, "unresolved", [], done=False)
+
+
+def _admissible(conn: sqlite3.Connection, obs: Observation, verified: Head) -> bool:
+    """Step (3) of `admit_merge`: X is the accepted head read now, the own
+    observation accepted, nothing else unfinished, no blocking event."""
+    if verified.sha != obs.head or outcome_of(conn, obs.id) != "accepted":
+        return False
+    if any(o.id != obs.id for o in unfinished(conn, obs.root)):
+        return False
+    return not perimeter.blocking_events(conn, obs.root, verified.last_epoch)
+
+
 def ranges_digest(conn: sqlite3.Connection, obs: int) -> str | None:
     """The digest of the ranges descriptor the observation pinned at its
     first bound verdict (`merge` only), or `None`."""
@@ -748,14 +896,17 @@ def current_epoch(
 __all__ = [
     "CONSERVATIVE_SOURCE",
     "OUTCOME_OF_VERDICT",
+    "PERIMETER_BLOCKED",
     "TRUST_STEP",
     "UNFINISHED",
     "EpochOf",
     "Head",
+    "MergeVerdict",
     "Observation",
     "Outcome",
     "Pinned",
     "accepted_head",
+    "admit_merge",
     "advance_head",
     "apply_status",
     "binding_digest",
