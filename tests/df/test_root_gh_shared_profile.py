@@ -30,15 +30,11 @@ from __future__ import annotations
 
 import grp
 import hashlib
-import io
 import json
 import os
 import pwd
 import stat
 import subprocess
-import tarfile
-import urllib.request
-import zipfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -49,24 +45,15 @@ from df import platform as plat
 from governance import act_trust
 from governance.act_time import Unavailable
 from tests.df.conftest import stage1_out
+from tests.df.gh_release import GH_VERSION, install_gh
 from tests.df.root_world import infra, write_evidence
 
-#: `network`: `_install_gh` downloads the release (deselected without egress).
+#: `network`: `install_gh` downloads the release (deselected without egress).
 pytestmark = [pytest.mark.root, pytest.mark.stage2a, pytest.mark.network]
 
-GH_VERSION = plat.GH_PINNED_VERSION
-#: From `gh_2.102.1_checksums.txt` of the official release.
-GH_ASSETS = {
-    "macos-arm64": (
-        f"gh_{GH_VERSION}_macOS_arm64.zip",
-        "08bfef98b50c553df122bb34ee8dcf415cae7d3b108891488964a0df07aa2aeb",
-    ),
-    "linux-x86_64": (
-        f"gh_{GH_VERSION}_linux_amd64.tar.gz",
-        "77b9e297e94c50336823d0f84de7ef1be60cba704601fa0d98f129f47a94987b",
-    ),
-}
-GH_URL = f"https://github.com/cli/cli/releases/download/v{GH_VERSION}/"
+#: The name `tests/df/test_acceptance_root_trust.py` (Task 14) imports;
+#: the helper lives in `tests/df/gh_release.py`.
+_install_gh = install_gh
 HOST = "github.com"
 ACCOUNT = "df-history"
 FAKE = "gho_dfSharedProfileFakeToken000000000001"
@@ -108,7 +95,7 @@ def test_gh_shared_profile(acceptance_top: Path) -> None:
     """See the module docstring; every fact is recorded first."""
     platform = plat.detect_platform()
     facts: dict[str, object] = {"platform": platform}
-    gh = _install_gh(acceptance_top)
+    gh = install_gh(acceptance_top)
     facts["gh_version"] = _run([str(gh), "--version"]).stdout.strip()
     facts["help"] = _run([str(gh), "auth", "token", "--help"]).stdout
     facts["df_policy"] = plat.approved_cli_problems({"gh": gh}, platform)
@@ -257,33 +244,6 @@ def _judge_df(facts: dict[str, object]) -> None:
 
 
 # --- the world ------------------------------------------------------------
-
-
-def _install_gh(top: Path) -> Path:
-    """The pinned official `gh`, sha256-checked, as root `0755`."""
-    asset, digest = GH_ASSETS[plat.detect_platform()]
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    try:
-        with opener.open(GH_URL + asset, timeout=120) as resp:
-            data = resp.read()
-    except OSError as exc:
-        infra(f"загрузка {asset}: {exc}")
-    if hashlib.sha256(data).hexdigest() != digest:
-        infra(f"{asset}: sha256 не совпал")
-    member = f"{asset.removesuffix('.zip').removesuffix('.tar.gz')}/bin/gh"
-    if asset.endswith(".zip"):
-        binary = zipfile.ZipFile(io.BytesIO(data)).read(member)
-    else:
-        with tarfile.open(fileobj=io.BytesIO(data)) as tar:
-            extracted = tar.extractfile(member)
-            assert extracted is not None
-            binary = extracted.read()
-    bin_dir = top / "gh-bin"
-    bin_dir.mkdir(mode=0o755)
-    gh = bin_dir / "gh"
-    gh.write_bytes(binary)
-    os.chmod(gh, 0o755)
-    return gh
 
 
 def _profiles(top: Path) -> dict[str, Path]:
