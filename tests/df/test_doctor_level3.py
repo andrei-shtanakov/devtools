@@ -501,7 +501,9 @@ def test_operator_rights_of_another_operators_file_unavailable(l3: L3) -> None:
     c = rights["operator.rights"]
     assert (c.status, c.reason) == (
         "данные недоступны",
-        f"файл установлен для оператора {OPERATOR}, проверка для bob — "
-        f"укажите --operator {OPERATOR}",
+        (
+            f"файл установлен для оператора {OPERATOR}, проверка для bob — "
+            f"укажите --operator {OPERATOR}"
+        ),
     )
     assert rights["operator.isolation"].status == "не проверено"
