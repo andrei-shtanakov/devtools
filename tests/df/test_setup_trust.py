@@ -657,9 +657,11 @@ def test_rebind_full_check(w: W) -> None:
 
 
 def test_epochs_exhausted_text_names_exit() -> None:
-    """`unsupported_size: epochs` names the exit of spec 6.1 verbatim, in a
-    reason and in a finding."""
-    text = setup_trust.explain("unavailable: unsupported_size: epochs")
+    """`unsupported_size: epochs` names the exit of spec 6.1 verbatim, only
+    for a reason the publisher typed (re-review N-5): the answer's own
+    reason, a К event's cause -- never a finding's detail or a role's
+    record-violation."""
+    text = setup_trust.explain("unavailable: …", "unsupported_size: epochs")
     for part in (
         "новый репо df-trust с начальным журналом из одной эпохи",
         "setup-trust check --rebind",
@@ -668,14 +670,63 @@ def test_epochs_exhausted_text_names_exit() -> None:
         "прогоны прежнего корня операций над PR не получают",
     ):
         assert part in text
-    assert setup_trust.explain("unavailable: x") == "unavailable: x"
+    assert setup_trust.explain("unavailable: x", "x") == "unavailable: x"
+    assert setup_trust.explain("a unsupported_size: epochs", None) == (
+        "a unsupported_size: epochs"
+    )
+    assert setup_trust.explain("t", "why: unsupported_size: epochs") == "t"
     status = request.TrustStatus(
         None, None, "unavailable", "unsupported_size: epochs", (), ()
     )
     assert setup_trust.EPOCHS_EXIT in setup_trust.status_lines(status)[0]
     finding = {"kind": "k", "role": "df-trust", "detail": "unsupported_size: epochs"}
     status = request.TrustStatus(None, None, "blocked", None, (), (finding,))
-    assert setup_trust.EPOCHS_EXIT in setup_trust.status_lines(status)[-1]
+    assert setup_trust.EPOCHS_EXIT not in "".join(setup_trust.status_lines(status))
+
+
+@pytest.mark.parametrize("kind", ["record_violation", "finding", "unknown"])
+def test_role_text_never_names_the_epochs_exit(kind: str) -> None:
+    """Re-review N-5: a reason another party wrote, exactly `unsupported_size:
+    epochs`, never prints the exit; the publisher's К with that cause does."""
+    epochs = "unsupported_size: epochs"
+    forged = request.BlockingRow(ROOT_ID, 1, kind, "registered", 1, epochs)
+    status = request.TrustStatus(
+        None, None, "blocked", None, (), (), request.Blocking((forged,), 0)
+    )
+    assert setup_trust.EPOCHS_EXIT not in "".join(
+        setup_trust.status_lines(status, ROOT_ID)
+    )
+    genuine = dataclasses.replace(forged, kind="conservative")
+    status = dataclasses.replace(status, blocking=request.Blocking((genuine,), 0))
+    assert setup_trust.EPOCHS_EXIT in setup_trust.status_lines(status, ROOT_ID)[1]
+
+
+EVIL_NAME = "eve\n  СТОП нет\x1b[2K\u202eko"
+
+
+def test_check_report_names_are_inert() -> None:
+    """Round 3: names GitHub returns -- a collaborator's login, a deploy key's
+    title -- print as one inert line each in `setup-trust check`."""
+    fake = good_github()
+    base = f"repos/{TRUST}"
+    fake.answers[f"{base}/collaborators?affiliation=all&per_page=100"] = (
+        200,
+        [
+            {"login": "alice", "role_name": "admin"},
+            {"login": EVIL_NAME, "role_name": "admin"},
+        ],
+    )
+    fake.answers[f"{base}/keys?per_page=100"] = (
+        200,
+        [{"id": 9, "title": EVIL_NAME, "read_only": False}],
+    )
+    text = setup_trust.report_text(check(fake))
+    assert not any(c in text for c in "\r\x1b\u202e")
+    lines = text.splitlines()
+    assert not any(ln.startswith("  СТОП") for ln in lines)
+    trust_line = next(ln for ln in lines if ln.startswith("df-trust: запись"))
+    assert "eve\\x0a  СТОП нет\\x1b[2K\\u202eko" in trust_line
+    assert "deploy_key:9" in trust_line
 
 
 def test_trust_toml_round_trip() -> None:

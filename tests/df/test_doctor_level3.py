@@ -591,16 +591,66 @@ def test_listing_other_causes_never_offer_epochs(l3: L3) -> None:
 
 
 @pytest.mark.parametrize(
-    "reason", [None, "root first seen after a restore of the database"]
+    "reason",
+    ["root first seen after a restore of the database", "irreproducible: x"],
 )
-def test_listing_untyped_k_is_not_checked(l3: L3, reason: str | None) -> None:
-    """Re-review N-2: a К whose reason is no typed status does not prove the
-    size -- «не проверено», the epochs exit only as a possibility."""
+def test_listing_untyped_k_is_not_checked(l3: L3, reason: str) -> None:
+    """Re-review N-2/N-7: a К whose reason is not a typed status of the
+    closed set does not prove the size -- «не проверено», the epochs exit
+    only as a possibility."""
     l3.trust = listed(status_line("blocked"), [_row("conservative", reason)])
     c = l3.checks()["trust.unsupported_size"]
     assert c.status == "не проверено"
     assert c.reason.startswith("К по другой причине: событие 1")
     assert c.reason.endswith(doctor.EPOCHS_MAYBE)
+
+
+def test_listing_unnamed_k_is_a_note(l3: L3) -> None:
+    """N-7: a К without a reason (a changed context, a moved binding) is
+    never a size one: a note of `ok`, no epochs text."""
+    l3.trust = listed(status_line("blocked"), [_row("conservative", None)])
+    c = l3.checks()["trust.unsupported_size"]
+    assert c.status == "ok"
+    assert c.reason.startswith("К по другой причине: событие 1")
+    assert "unsupported_size: epochs" not in c.reason
+
+
+@pytest.mark.parametrize("kind", ["record_violation", "finding", "unknown"])
+def test_role_reason_never_names_the_epochs_exit(
+    l3: L3,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    """Re-review N-5: an event another party wrote with the reason exactly
+    `unsupported_size: epochs` never makes doctor print the exit (text or
+    JSON); `trust.unsupported_size` is not «нарушено»."""
+    l3.trust = listed(status_line("blocked"), [_row(kind, "unsupported_size: epochs")])
+    assert l3.checks()["trust.unsupported_size"].status == "ok"
+    monkeypatch.setenv("SUDO_USER", OPERATOR)
+    capsys.readouterr()
+    l3.l2.doctor([])
+    assert setup_trust.EPOCHS_EXIT not in capsys.readouterr().out
+    l3.l2.doctor(["--json"])
+    data = json.loads(capsys.readouterr().out)
+    assert setup_trust.EPOCHS_EXIT not in json.dumps(data, ensure_ascii=False)
+
+
+def test_json_escapes_c1_and_bidi(
+    l3: L3, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-review N-6: `--json` is ASCII: C1, DEL, U+2028 and U+202E a role
+    wrote come out as escapes, and parse back unchanged."""
+    evil = "a\x9b2K\x7f\u2028\u202eb"
+    l3.trust = listed(status_line("blocked"), [_row("record_violation", evil)])
+    monkeypatch.setenv("SUDO_USER", OPERATOR)
+    capsys.readouterr()
+    l3.l2.doctor(["--json"])
+    out = capsys.readouterr().out
+    assert out.isascii()
+    data = json.loads(out)
+    status = next(c for c in data["level3_checks"] if c["id"] == "trust.status")
+    assert any(evil in p for p in status["problems"])
 
 
 def test_role_text_cannot_forge_doctor_lines(

@@ -91,7 +91,12 @@ from df.publisher.request import (
     Response,
     TrustStatus,
 )
-from df.publisher.trust_routes import UNFINISHED, UNVERIFIED, binding_problem
+from df.publisher.trust_routes import (
+    IRREPRODUCIBLE_REASONS,
+    UNFINISHED,
+    UNVERIFIED,
+    binding_problem,
+)
 from df.release import RELEASE_JSON
 from df.roles import HISTORY_GROUP, history_members
 from df.shown import inert_lines
@@ -258,7 +263,7 @@ def _transitional(generation: int, as_json: bool, product: int | None) -> int:
         data: dict[str, object] = {"level1": "not reached", "state": "transitional"}
         if product is not None:
             data |= {"product": product, "level2": "not reached"}
-        print(json.dumps({**data, "generation": generation}, ensure_ascii=False))
+        print(json.dumps({**data, "generation": generation}, ensure_ascii=True))
     else:
         text = transitional_text(generation)
         print(f"{_NOT_REACHED} — install.transitional: {text}")
@@ -1746,11 +1751,10 @@ def _trust_status(ctx: _Level3) -> str:
         return "; ".join([head, *notes])
     if status.state == "blocked":
         found = [
-            setup_trust.explain(f"находка {f['kind']} ({f['role']}): {f['detail']}")
-            for f in status.findings
+            f"находка {f['kind']} ({f['role']}): {f['detail']}" for f in status.findings
         ]
         if status.blocking is not None:
-            listed = [setup_trust.explain(_event_text(e)) for e in mine]
+            listed = [setup_trust.explained_event(e) for e in mine]
             raise _broken(["blocked", *(listed or found or [UNNAMED_BLOCK]), *notes])
         raise _broken(["blocked", *(found or [UNNAMED_BLOCK]), *notes])
     raise _Outcome(UNAVAILABLE, _unavailable_reason(status))
@@ -1789,7 +1793,7 @@ def _unavailable_reason(status: TrustStatus) -> str:
     reason = status.reason or "без причины"
     if reason.startswith(f"{UNFINISHED}:"):
         return f"наблюдение не завершено ({reason}): повторите doctor"
-    return setup_trust.explain(f"unavailable: {reason}")
+    return setup_trust.explain(f"unavailable: {reason}", status.reason)
 
 
 def _status(ctx: _Level3) -> TrustStatus:
@@ -1834,7 +1838,7 @@ def _unsupported_size(ctx: _Level3) -> str:
     # Defensive: the publisher ends an `unsupported_size` verdict by К and
     # names it in the К event's reason (`blocking`), not in this reason.
     if status.reason is not None and _UNSUPPORTED in status.reason:
-        raise _broken([setup_trust.explain(status.reason)])
+        raise _broken([setup_trust.explain(status.reason, status.reason)])
     if status.state == "clear":
         return ""
     if status.state != "blocked":
@@ -1845,39 +1849,42 @@ def _unsupported_size(ctx: _Level3) -> str:
 
 
 def _size_of_listing(status: TrustStatus, root: tuple[str, int, str]) -> str:
-    """A blocked root with the publisher's listing: a К event of the current
-    root naming `unsupported_size: <field>` is «нарушено» with that field
-    (the exit of `epochs` only then, `setup_trust.explain`). A К event with
-    another typed status (`irreproducible: ...`) is a note of `ok`. A К
-    event whose reason is no typed status -- none, a changed context, the
-    restore admission -- does not prove the size: «не проверено» with the
-    exit of `epochs` as one possibility (a database written before the
-    restore event had its own key may have merged a size К into it, re-review
-    N-2). Events not listed are «не проверено». The old roots' events never
+    """A blocked root with the publisher's listing, by the current root's К
+    events:
+
+    - a reason starting `unsupported_size: ` -- «нарушено» with that field
+      (the exit of `epochs` only then, `setup_trust.explained_event`);
+    - a reason of `IRREPRODUCIBLE_REASONS`, or no reason (a changed context,
+      a moved binding: `trust_state.apply_status` always names a typed
+      status, so an unnamed К is never a size one) -- a note of `ok`;
+    - any other reason (the restore admission; a database written before it
+      had its own key may have merged a size К into it, re-review N-2) --
+      «не проверено», the exit of `epochs` as one possibility.
+
+    Events not listed are «не проверено». The old roots' events never
     count (labelled in `trust.status`)."""
     assert status.blocking is not None
     mine, _old = _events_of(status, root)
     k_events = [e for e in mine if e.kind == "conservative"]
     named = [e for e in k_events if e.reason and e.reason.startswith(_UNSUPPORTED)]
     if named:
-        raise _broken([setup_trust.explain(_event_text(e)) for e in named])
-    typed = [e for e in k_events if e.reason and e.reason.startswith(_TYPED)]
-    untyped = [e for e in k_events if e not in typed]
-    if untyped:
-        texts = "; ".join(_event_text(e) for e in untyped)
+        raise _broken([setup_trust.explained_event(e) for e in named])
+    known = [
+        e for e in k_events if e.reason is None or e.reason in IRREPRODUCIBLE_REASONS
+    ]
+    unknown = [e for e in k_events if e not in known]
+    if unknown:
+        texts = "; ".join(_event_text(e) for e in unknown)
         raise _Outcome(NOT_CHECKED, f"{_K_OTHER}: {texts}; {EPOCHS_MAYBE}")
     if status.blocking.omitted:
         omitted = status.blocking.omitted
         raise _Outcome(NOT_CHECKED, f"ещё {omitted} блокирующих событий не перечислены")
-    others = [_event_text(e) for e in typed]
+    others = [_event_text(e) for e in known]
     return f"{_K_OTHER}: {'; '.join(others)}" if others else ""
 
 
 #: A К event of another cause than `unsupported_size`.
 _K_OTHER = "К по другой причине"
-#: The typed statuses of the checker other than `unsupported_size` that end
-#: an observation by К (`trust_state.OUTCOME_OF_VERDICT`).
-_TYPED = ("irreproducible: ",)
 
 
 #: The exit of `unsupported_size: epochs`, offered only as one possible cause.
@@ -2088,7 +2095,9 @@ def _json_data(
 
 
 def _dumps(data: dict[str, object]) -> str:
-    return json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
+    """ASCII JSON (re-review N-6): C1, DEL, bidi and format characters a
+    role or GitHub wrote come out as `\\uNNNN` escapes, never raw."""
+    return json.dumps(data, ensure_ascii=True, indent=2, sort_keys=True)
 
 
 _NOT_REACHED2 = "уровень 2: не достигнут"

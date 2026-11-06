@@ -73,6 +73,7 @@ from df.manifest import ManifestError
 from df.paths import MACHINE_TOKEN, Layout, default_layout
 from df.publisher import main as publisher_main
 from df.publisher import perimeter
+from df.shown import inert
 from df.sources import UnsupportedLock
 from df.stage2_config import OPERATIONS
 from df.state import Mode, ReadResult, Snapshot
@@ -1304,4 +1305,6 @@ def _command(lay: Layout) -> Path:
 
 
 def _say(message: str) -> None:
-    print(f"darkfactory: {message}", file=sys.stderr)
+    """One `inert` stderr line: a refusal or instruction may carry what
+    GitHub, the publisher or a role wrote (Task 13 re-review N-1 class)."""
+    print(f"darkfactory: {inert(message)}", file=sys.stderr)
