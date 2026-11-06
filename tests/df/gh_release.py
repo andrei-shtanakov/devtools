@@ -3,7 +3,8 @@
 `install_gh` downloads the release asset of `GH_PINNED_VERSION` for this
 platform, checks its sha256 against the release's checksums and writes the
 binary as root `0755` under `<top>/gh-bin` (a trusted path for `cli set
-gh`). Used by `tests/df/test_root_gh_shared_profile.py` (CI root) and
+gh`). Used by `tests/df/test_root_gh_shared_profile.py` and (through its
+`_install_gh`) `tests/df/test_acceptance_root_trust.py` (CI root), and by
 `tests/df/live_trust_stand.py` (stage 3a live stand); never by an ordinary
 test.
 """

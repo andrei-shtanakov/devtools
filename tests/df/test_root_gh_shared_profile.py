@@ -51,6 +51,9 @@ from tests.df.root_world import infra, write_evidence
 #: `network`: `install_gh` downloads the release (deselected without egress).
 pytestmark = [pytest.mark.root, pytest.mark.stage2a, pytest.mark.network]
 
+#: The name `tests/df/test_acceptance_root_trust.py` (Task 14) imports;
+#: the helper lives in `tests/df/gh_release.py`.
+_install_gh = install_gh
 HOST = "github.com"
 ACCOUNT = "df-history"
 FAKE = "gho_dfSharedProfileFakeToken000000000001"
