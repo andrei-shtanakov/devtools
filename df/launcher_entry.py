@@ -73,6 +73,7 @@ WRITER_COMMANDS = (
     ("roles", "setup"),
     ("setup-agent",),
     ("perimeter", "restore"),
+    ("setup-trust", "write"),
 )
 #: Owner of root's objects; tests substitute their own uid.
 ROOT_UID = 0

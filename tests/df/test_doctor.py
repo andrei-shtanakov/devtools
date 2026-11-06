@@ -1120,8 +1120,14 @@ def test_unknown_etc_names_all_in_problems(fake_installed: World) -> None:
     assert c.reason.endswith("и ещё 2")
 
 
-def test_secrets_dir_is_not_an_unknown_etc_file(fake_installed: World) -> None:
-    secrets = fake_installed.lay.etc / "secrets"
+@pytest.mark.parametrize("name", ["secrets", "history-gh"])
+def test_secrets_dir_is_not_an_unknown_etc_file(
+    fake_installed: World, name: str
+) -> None:
+    """`secrets/` (2a) and `history-gh/` (3a, the history token profile):
+    directories the installer makes, only `lstat`-ed, never opened."""
+    assert name in doctor.etc_dirs(fake_installed.lay)
+    secrets = fake_installed.lay.etc / name
     secrets.mkdir(mode=0o700)
     (secrets / "token").write_text("never opened")
     os.chmod(secrets, 0o000)  # opening it would fail: it is only lstat-ed
@@ -1134,11 +1140,12 @@ def test_secrets_dir_is_not_an_unknown_etc_file(fake_installed: World) -> None:
     assert by_id(checks)["etc.schemas"].status == "ok"
 
 
+@pytest.mark.parametrize("name", ["secrets", "history-gh"])
 @pytest.mark.parametrize("kind", ["file", "symlink"])
 def test_non_directory_secrets_is_still_flagged(
-    fake_installed: World, kind: str
+    fake_installed: World, kind: str, name: str
 ) -> None:
-    path = fake_installed.lay.etc / "secrets"
+    path = fake_installed.lay.etc / name
     if kind == "file":
         path.write_text("x")
     else:
@@ -1147,7 +1154,60 @@ def test_non_directory_secrets_is_still_flagged(
         level1_checks(snap(fake_installed), fake_installed.lay, euid=os.geteuid())
     )
     assert c["etc.schemas"].status == "нарушено"
-    assert "secrets" in c["etc.schemas"].reason
+    assert name in c["etc.schemas"].reason
+
+
+def test_level1_reached_after_setup_trust_write(
+    fake_installed: World, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Paid review #707 (by class): everything `roles setup` and the real
+    `setup-trust write` leave -- `/etc/df/history-gh/`, `trust.toml`,
+    `groups.toml` under the install state, `evidence/` under `/var/lib/df`
+    -- keeps level 1 reached (`trust.toml` is «не проверено (этап 3)»)."""
+    from datetime import timedelta
+
+    from df import setup_trust
+    from df.config import GroupRecord, dump_groups
+    from df.roles import HISTORY_GROUP
+    from tests.df.test_setup_trust import (
+        HISTORY_TOKEN,
+        NOW,
+        POLICY_ID,
+        TRUST_ID,
+        check,
+        good_github,
+        status_line,
+    )
+
+    lay = fake_installed.lay
+    assert doctor.level1_reached(checks_of(fake_installed).values())
+    record = GroupRecord(HISTORY_GROUP, 4321, "ready", "t")
+    fsutil.write_atomic(lay.groups, dump_groups({HISTORY_GROUP: record}))
+    monkeypatch.setattr(plat, "group_gid", lambda name: 4321)
+    monkeypatch.setattr(setup_trust, "trust_status_call", lambda _l: status_line())
+    human = tmp_path / "human"
+    human.mkdir()
+    report = human / "report.json"
+    digest = setup_trust.save_report(check(good_github()), report)
+    token = human / "history-token"
+    token.write_text(HISTORY_TOKEN + "\n")
+    token.chmod(0o600)
+    setup_trust.run_write(
+        lay,
+        policy_repo=POLICY_ID,
+        trust_repo=TRUST_ID,
+        trust_branch="main",
+        report_path=report,
+        report_digest=digest,
+        token_file=token,
+        rebind=False,
+        now=lambda: NOW + timedelta(minutes=1),
+    )
+    assert lay.history_gh.is_dir() and list(lay.evidence_dir.iterdir())
+    checks = checks_of(fake_installed)
+    assert checks["etc.schemas"].status == "ok", checks["etc.schemas"].reason
+    assert checks["etc.trust.toml"].status == "не проверено"
+    assert doctor.level1_reached(checks.values())
 
 
 def test_publisher_write_is_a_live_write_for_doctor(

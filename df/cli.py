@@ -11,7 +11,9 @@ lock, settles and reads the snapshot itself. Subcommands: `init` and
 `df.doctor`); `cli set openssl|gh PATH` (stage 2a, Task 4a; `gh`: 3a); `perimeter
 restore --from PATH | --empty [--set-aside-old]` (stage 2a, Task 11r); `setup-agent app-key --app-id N
 --file PATH | machine-token --file PATH` (stage 2a, Task 12); `precheck serve`
-(stage 2b, Task 6: the wrapper `df-precheck` as the role `df-precheck`).
+(stage 2b, Task 6: the wrapper `df-precheck` as the role `df-precheck`);
+`setup-trust check` (the human, no root) and `setup-trust write` (root) (stage
+3a, Task 12, `df.setup_trust`).
 
 Exit codes (M7): 0 success; 2 a refusal or a configuration error, with the
 step named; 3 `NeedsHuman` (the instruction on stderr); 1 a program error
@@ -52,6 +54,7 @@ from df import (
     roles_setup,
     run_start,
     setup_agent,
+    setup_trust,
     state,
 )
 from df import platform as plat
@@ -249,14 +252,15 @@ def _check_call(
 
 def parsed_mode(args: argparse.Namespace) -> str:
     """The mode the parsed command needs: `writer` for `init`, `install`,
-    `models set`, `cli set`, `roles setup`, `setup-agent` and `perimeter
-    restore` (`WRITER_COMMANDS`), else `reader`."""
+    `models set`, `cli set`, `roles setup`, `setup-agent`, `perimeter
+    restore` and `setup-trust write` (`WRITER_COMMANDS`), else `reader`."""
     sub = (
         getattr(args, "models_command", None)
         or getattr(args, "roles_command", None)
         or getattr(args, "cli_command", None)
         or getattr(args, "perimeter_command", None)
         or getattr(args, "setup_command", None)
+        or getattr(args, "setup_trust_command", None)
     )
     words = (args.command,) if sub is None else (args.command, sub)
     writer = any(words[: len(cmd)] == cmd for cmd in launcher_entry.WRITER_COMMANDS)
@@ -310,6 +314,7 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     _add_cli(sub)
     _add_perimeter(sub)
     _add_setup_agent(sub)
+    _add_setup_trust(sub)
     _add_service(sub)
     doctor = sub.add_parser(
         "doctor", exit_on_error=False, add_help=False, allow_abbrev=False
@@ -388,6 +393,41 @@ def _add_setup_agent(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
     key.add_argument("--app-id", required=True, type=_app_id)
     key.add_argument("--file", required=True)
     words.add_parser("machine-token", **opts).add_argument("--file", required=True)
+
+
+def _add_setup_trust(sub: argparse._SubParsersAction) -> None:  # noqa: SLF001
+    """`setup-trust check (--templates | --policy-repo-id N --trust-repo-id N
+    --trust-branch B --out PATH) [--rebind]` (a reader: the human, no root)
+    and `setup-trust write --policy-repo-id N --trust-repo-id N --trust-branch
+    B --report PATH --report-digest D [--history-token-file PATH] [--rebind]`
+    (a writer). Ids are canonical decimals; their limits are the
+    publisher's (`setup_trust.binding_from`)."""
+    opts = {"exit_on_error": False, "add_help": False, "allow_abbrev": False}
+    group = sub.add_parser("setup-trust", **opts)
+    words = group.add_subparsers(
+        dest="setup_trust_command", required=True, parser_class=_Parser
+    )
+    check = words.add_parser("check", **opts)
+    write = words.add_parser("write", **opts)
+    check.add_argument("--templates", action="store_true")
+    check.add_argument("--out")
+    for phase in (check, write):
+        required = phase is write
+        phase.add_argument("--policy-repo-id", type=_repo_id, required=required)
+        phase.add_argument("--trust-repo-id", type=_repo_id, required=required)
+        phase.add_argument("--trust-branch", required=required)
+        phase.add_argument("--rebind", action="store_true")
+    write.add_argument("--report", required=True)
+    write.add_argument("--report-digest", required=True)
+    write.add_argument("--history-token-file")
+
+
+def _repo_id(text: str) -> int:
+    """A repository id as typed (`models.repository_id`)."""
+    try:
+        return models.repository_id(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{text!r}: нужно целое > 0") from exc
 
 
 def _app_id(text: str) -> int:
@@ -471,6 +511,8 @@ def _reader(args: argparse.Namespace, lay: Layout, read: ReadResult) -> int:
         return _precheck_serve(lay, read)
     if args.command == "doctor":
         return _doctor(args, lay, read)
+    if args.command == "setup-trust":
+        return _setup_trust_check(args)
     if isinstance(read, Transitional):
         raise Refusal(doctor.transitional_text(read.generation))
     snap = state.parse_snapshot(read.value, lay, mode="reader")
@@ -852,6 +894,8 @@ def _writer(
         return _perimeter_restore(args, lay, snap)
     if args.command == "setup-agent":
         return _setup_agent(args, lay, snap)
+    if args.command == "setup-trust":
+        return _setup_trust_write(args, lay, snap)
     requested = _requested(args, snap, pending)
     if mode == "bootstrap" and _healthy(lay, snap):
         raise Refusal(
@@ -872,6 +916,7 @@ def _roles_setup(args: argparse.Namespace, lay: Layout, snap: Snapshot) -> int:
     operator = _operator_of(args)
     roles_setup.run(lay, operator=operator, snap=snap)
     print(f"darkfactory: роли и обёртки настроены; оператор {operator}")
+    print(f"darkfactory: {roles_setup.next_login_note(operator)}")
     return EXIT_OK
 
 
@@ -1115,6 +1160,63 @@ def _setup_agent(args: argparse.Namespace, lay: Layout, snap: Snapshot) -> int:
         _say(f"предупреждение: {warning}")
     if check.failure is not None:
         raise NeedsHuman(_SETUP_FAILED + check.failure)
+    return EXIT_OK
+
+
+def _setup_trust_check(args: argparse.Namespace) -> int:
+    """`setup-trust check` (spec 6.2): the human, never root. The templates
+    first; with `--templates` nothing else. Otherwise the PAT (terminal or
+    stdin), the perimeter check, the report to `--out` and its digest; a
+    stop is exit 2 with the report still written (the draft evidence)."""
+    if os.geteuid() == ROOT_UID:
+        raise Refusal(setup_trust.CHECK_AS_ROOT)
+    given = (args.policy_repo_id, args.trust_repo_id, args.trust_branch, args.out)
+    if args.templates and (args.rebind or any(v is not None for v in given)):
+        raise UsageError("setup-trust check --templates: без других аргументов")
+    print(setup_trust.show_publishable(), end="")
+    if args.templates:
+        return EXIT_OK
+    if any(value is None for value in given):
+        raise UsageError(
+            "setup-trust check: нужны --policy-repo-id, --trust-repo-id, "
+            "--trust-branch и --out (или --templates)"
+        )
+    out = Path(args.out).absolute()
+    report, digest = setup_trust.run_check(
+        policy_repo=args.policy_repo_id,
+        trust_repo=args.trust_repo_id,
+        trust_branch=args.trust_branch,
+        out=out,
+        rebind=args.rebind,
+        token=setup_trust.read_pat(),
+    )
+    print(setup_trust.report_text(report), end="")
+    print(f"darkfactory: отчёт {out}, digest {digest}")
+    if not report.ok:
+        raise Refusal("setup-trust check: проверка периметра не пройдена (СТОП выше)")
+    print(f"darkfactory: дальше: {setup_trust.next_command(report, out, digest)}")
+    return EXIT_OK
+
+
+def _setup_trust_write(args: argparse.Namespace, lay: Layout, snap: Snapshot) -> int:
+    """`setup-trust write` (spec 6.2 item 5): root under the writer lock this
+    writer holds (`df.setup_trust.run_write`); an odd generation is closed
+    first, as by the other writers of `/etc/df`."""
+    _close_odd_generation(lay, snap)
+    lines = setup_trust.run_write(
+        lay,
+        policy_repo=args.policy_repo_id,
+        trust_repo=args.trust_repo_id,
+        trust_branch=args.trust_branch,
+        report_path=Path(args.report),
+        report_digest=args.report_digest,
+        token_file=None
+        if args.history_token_file is None
+        else Path(args.history_token_file),
+        rebind=args.rebind,
+    )
+    for line in lines:
+        print(f"darkfactory: {line}")
     return EXIT_OK
 
 

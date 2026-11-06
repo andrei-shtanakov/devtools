@@ -146,6 +146,19 @@ class Layout:
         return self.secrets_dir / f"app-{app_id}.pem"
 
     @property
+    def history_gh(self) -> Path:
+        """`/etc/df/history-gh`: the `gh` profile of the history token
+        (`root:df-history`, `0750`/`0640`; `setup-trust write` writes it,
+        `trust.toml` names it as `history_gh_config_dir`)."""
+        return self.etc / "history-gh"
+
+    @property
+    def evidence_dir(self) -> Path:
+        """`/var/lib/df/evidence`: root's records of perimeter checks
+        (`perimeter-<time>.json`, spec 6.2)."""
+        return self.var / "evidence"
+
+    @property
     def journal(self) -> Path:
         """Audit journal."""
         return self.install_dir / "journal.jsonl"
@@ -169,6 +182,11 @@ class Layout:
     def accounts(self) -> Path:
         """Service accounts."""
         return self.install_dir / "accounts.toml"
+
+    @property
+    def groups(self) -> Path:
+        """Groups df created by intent (`df-history`, stage 3a)."""
+        return self.install_dir / "groups.toml"
 
     @property
     def admin_home(self) -> Path:

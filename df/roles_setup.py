@@ -4,8 +4,11 @@ A writer: the caller holds the writer lock for the whole run. The steps, in
 this order, each settled by its own check so that a repeat changes nothing:
 
 1. `roles`: `ensure_roles` -- the accounts are created one after another,
-   only here and only under the lock (`platform._free_id` ignores `creating`
-   intents, so two parallel creations could take the same id);
+   only here and only under the lock (`platform._free_id` skips recorded
+   ids, but two parallel creations could still take the same id); then the
+   group `df-history` by intent (`groups.toml`) with exactly
+   `df-publisher`, `df-precheck` and the operator (stage 3a; a repeat on a
+   2b host creates it; a group of that name df did not make is refused);
 2. `dirs`: the stage-2 directories, born in their final owner and mode;
 3. `publisher-config`: `/etc/df/publisher.toml` from the accounts;
 4. `perimeter-init`: the perimeter database, created -- or an existing one
@@ -157,9 +160,9 @@ def _steps(layout: Layout, operator: str, python: Path) -> list[Step]:
     return [
         Step(
             "roles",
-            lambda: not _role_problems(layout),
-            lambda: _ensure_roles(layout),
-            lambda: _role_problems(layout),
+            lambda: not _role_problems(layout, operator),
+            lambda: _ensure_roles(layout, operator),
+            lambda: _role_problems(layout, operator),
         ),
         Step("dirs", lambda: _dirs_ready(layout), lambda: _make_dirs(layout)),
         Step(
@@ -196,16 +199,29 @@ def _steps(layout: Layout, operator: str, python: Path) -> list[Step]:
 # --- roles ---------------------------------------------------------------------
 
 
-def _ensure_roles(layout: Layout) -> None:
-    """The only creation of the roles; the caller holds the writer lock."""
+def _ensure_roles(layout: Layout, operator: str) -> None:
+    """The only creation of the roles, then the group `df-history` with
+    exactly its members (a 2b host gets it on a repeat); the caller holds
+    the writer lock."""
     roles.ensure_roles(layout)
+    plat.ensure_group(layout, roles.HISTORY_GROUP, roles.history_members(operator))
 
 
-def _role_problems(layout: Layout) -> list[str]:
+def next_login_note(operator: str) -> str:
+    """What the operator's new membership in `df-history` means for them."""
+    return (
+        f"{operator} — член группы {roles.HISTORY_GROUP}: в уже открытых сессиях "
+        "(Linux) членство действует только с нового входа; роли получают его "
+        "через sudo (initgroups)"
+    )
+
+
+def _role_problems(layout: Layout, operator: str) -> list[str]:
     problems: list[str] = []
     for name in roles.ROLE_USERS:
         problems += plat.verify_service_user(layout, name)
-    return problems
+    members = roles.history_members(operator)
+    return problems + plat.group_problems(layout, roles.HISTORY_GROUP, members)
 
 
 # --- directories ---------------------------------------------------------------

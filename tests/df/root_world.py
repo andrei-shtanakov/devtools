@@ -623,6 +623,26 @@ _DS_INVALIDATE = (
 )
 
 
+def remove_group(name: str) -> None:
+    """Delete the group `name` (an absent one is fine) and wait until the
+    lookups forget it (stage 3a: `df-history`, made by `roles setup`)."""
+    if plat.detect_platform() == "macos-arm64":
+        argvs = [["/usr/bin/dscl", ".", "-delete", f"/Groups/{name}"]]
+    else:
+        argvs = [["/usr/sbin/groupdel", name]]
+    for argv in argvs:
+        subprocess.run(
+            argv, capture_output=True, env=_SYSTEM_ENV, timeout=60, check=False
+        )
+    deadline = time.monotonic() + 30
+    while plat.group_gid(name) is not None:
+        if time.monotonic() > deadline:
+            infra(f"{name}: удалённая группа всё ещё видна")
+        if plat.detect_platform() == "macos-arm64":
+            _flush_ds_cache()
+        time.sleep(0.5)
+
+
 def _wait_forgotten(name: str) -> None:
     """Until the libc lookups forget `name` (the macOS directory cache kept a
     deleted user's home for the next world, CI run 40191801437)."""

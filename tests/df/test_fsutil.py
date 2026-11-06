@@ -562,6 +562,13 @@ FS_SITES: dict[tuple[str, str, str, int], str] = {
         "the same just-created directory, by descriptor (a Linux inherited "
         "S_ISGID); then sync_dir of itself and the parent"
     ),
+    ("setup_trust", "_settle_profile_dir", "os.fchown", 1): (
+        "the history profile directory make_dir made or found, opened "
+        "O_NOFOLLOW: only its group becomes df-history (owner stays root), "
+        "through the descriptor and only after fstat shows it root's at "
+        "exactly 0750 (anything else is refused, never changed); then "
+        "sync_dir of itself (make_dir synced the parent)"
+    ),
     ("sudoers", "_place", "os.rename", 1): (
         "protocol install: temp born 0440 by create_file, sync_file, visudo, "
         "rename, sync_dir(parent)"
@@ -631,6 +638,10 @@ SUBPROCESS_CREATORS = {
     ),
     "cleaner find/chmod/rm (as df-build)": "protocol cleanup_tree: root syncs",
     "useradd / dscl (account)": "OS records, judged by verify_build_user",
+    "groupadd / gpasswd / dscl (group df-history, roles setup)": (
+        "the OS record of one group and its exact member list, judged by "
+        "group_problems right after (roles setup's step roles)"
+    ),
     "gh auth token (publisher history token, as df-publisher)": (
         "its own HOME is a fresh mkdtemp under the role's home, removed after "
         "the call; GH_CONFIG_DIR is the root-written profile, which gh only "
@@ -676,6 +687,11 @@ SUBPROCESS_CREATORS = {
     "sudo df-publish self-check (setup-agent app-key, doctor; root)": (
         "the publisher's own protocol (self-check reads the keys and the "
         "perimeter database, writes its journal); root keeps only stdout"
+    ),
+    "sudo df-publish trust-status (setup-trust write; root)": (
+        "the publisher's own protocol (trust-status opens an observation in "
+        "the perimeter database, asks df-precheck, writes its journal); root "
+        "keeps only stdout, parsed by parse_trust_status"
     ),
     "sudo df-launch df-exec check-github (setup-agent machine-token, doctor)": (
         "launch exec of the role: GETs to GitHub with the token, creates "
@@ -723,9 +739,10 @@ SUBPROCESS_CREATORS = {
 PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
     ("fsutil", "_sysctl_boot_id", "subprocess.run", 1): ("sysctl (boot id)",),
     # run_command (root; setup-agent's and doctor's check-github, doctor's
-    # role check and test -r; df-publisher's gh auth token), run_as (df-build, df-publisher; with stdin for
+    # role check and test -r; roles setup's group; df-publisher's gh auth token), run_as (df-build, df-publisher; with stdin for
     # perimeter restore), run_with_input (df-publisher; the roles, perimeter
-    # client, setup-agent's and doctor's self-check, doctor's nested calls)
+    # client, setup-agent's and doctor's self-check, setup-trust's
+    # trust-status, doctor's nested calls)
     ("platform", "_execute", "subprocess.Popen", 1): (
         "openssl dgst -sign (publisher App JWT)",
         "uv python install (admin)",
@@ -734,6 +751,7 @@ PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
         "git init / fetch / cat-file (admin site cache, root)",
         "cleaner find/chmod/rm (as df-build)",
         "useradd / dscl (account)",
+        "groupadd / gpasswd / dscl (group df-history, roles setup)",
         "probes: ps / pkill / sudo -l / getent / dscl -read / xcrun",
         "gh --version (cli set gh, root)",
         "gh auth token (publisher history token, as df-publisher)",
@@ -741,6 +759,7 @@ PROCESS_SITES: dict[tuple[str, str, str, int], tuple[str, ...]] = {
         "sudo df-publish perimeter-status (perimeter client)",
         "darkfactory publisher perimeter-restore (restore, as df-publisher)",
         "sudo df-publish self-check (setup-agent app-key, doctor; root)",
+        "sudo df-publish trust-status (setup-trust write; root)",
         "sudo df-launch df-exec check-github (setup-agent machine-token, doctor)",
         "sudo df-launch <role> check (doctor roles.isolation, root)",
         "sudo -u df-exec test -r / -x (doctor roles.isolation, root)",

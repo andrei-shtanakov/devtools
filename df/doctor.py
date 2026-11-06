@@ -125,9 +125,6 @@ _STAGE1_FILES = frozenset(n for n in KNOWN_SCHEMAS if n not in STAGE_OF)
 _NO_WRITE_OTHERS = stat.S_IWGRP | stat.S_IWOTH
 _SPECIAL_BITS = stat.S_ISUID | stat.S_ISGID
 _SHOWN_PROBLEMS = 5
-#: Directories of `/etc/df` that are not files of a schema (stage 2a): judged
-#: by `lstat` alone -- a real directory -- and never opened.
-_ETC_DIRS = frozenset({"secrets"})
 
 
 @dataclass(frozen=True)
@@ -399,9 +396,18 @@ def _write_temp_of(name: str) -> str | None:
     return None if found is None else found["name"]
 
 
+def etc_dirs(layout: Layout) -> frozenset[str]:
+    """The directories of `/etc/df` the installer itself makes, which are not
+    files of a schema: `secrets/` (stage 2a, `setup-agent`) and `history-gh/`
+    (stage 3a, `setup-trust write`). Named by the layout, so a directory the
+    writers make cannot drift from what `etc.schemas` knows; judged by
+    `lstat` alone -- a real directory -- and never opened."""
+    return frozenset({layout.secrets_dir.name, layout.history_gh.name})
+
+
 def _is_etc_dir(layout: Layout, name: str) -> bool:
-    """A name of `_ETC_DIRS` that is a real directory (not a link, not a file)."""
-    if name not in _ETC_DIRS:
+    """A name of `etc_dirs` that is a real directory (not a link, not a file)."""
+    if name not in etc_dirs(layout):
         return False
     try:
         return stat.S_ISDIR(os.lstat(layout.etc / name).st_mode)

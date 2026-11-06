@@ -1115,6 +1115,50 @@ def test_entry_modes(
     assert len(rec.calls) == 2
 
 
+def test_setup_trust_write_takes_writer_lock_via_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rec: Recorder, as_root: None
+) -> None:
+    """Through the real entry: `setup-trust write` runs as a writer holding
+    the exclusive writer lock while `df.cli.main` runs; `setup-trust check`
+    is a reader and opens no lock."""
+    lay = world(tmp_path)
+    held: list[bool] = []
+
+    def probe() -> None:
+        fd = os.open(lay.lock, os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            held.append(False)
+        except BlockingIOError:
+            held.append(True)
+        finally:
+            os.close(fd)
+
+    rec.before = probe
+    write = ["setup-trust", "write", "--trust-branch", "main", "--rebind"]
+    assert run_in(lay, *write) == 7
+    assert rec.calls[-1]["mode"] == "writer"
+    assert isinstance(rec.calls[-1]["lock_fd"], int) and held == [True]
+    os.close(rec.calls[-1]["lock_fd"])
+    rec.calls[-1]["lock_fd"] = None
+    rec.before = None
+    opened: list[str] = []
+    real_open = os.open
+
+    def spy(path: Any, *args: Any, **kw: Any) -> int:
+        opened.append(os.fsdecode(path))
+        return real_open(path, *args, **kw)
+
+    monkeypatch.setattr(os, "open", spy)
+    assert run_in(lay, "setup-trust", "check", "--templates") == 7
+    monkeypatch.setattr(os, "open", real_open)
+    assert rec.calls[-1]["mode"] == "reader" and rec.calls[-1]["lock_fd"] is None
+    assert not any(os.path.basename(p) == "lock" for p in opened)
+    with writer_lock(lay):
+        assert run_in(lay, *write) == entry.EXIT_REFUSED
+    assert len(rec.calls) == 2
+
+
 def test_entry_writer_requires_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

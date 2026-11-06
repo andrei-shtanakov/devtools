@@ -47,6 +47,9 @@ class Calls:
     io_log: int = 0
     policy_result: dict[str, list[str]] = field(default_factory=dict)
     run_as: list[tuple[str, list[str]]] = field(default_factory=list)
+    #: The fake OS groups (name -> members) and each `ensure_group` call.
+    groups: dict[str, set[str]] = field(default_factory=dict)
+    ensured: list[tuple[str, tuple[str, ...]]] = field(default_factory=list)
 
 
 @dataclass
@@ -117,6 +120,21 @@ def setup(
         return [] if name in known else [f"нет записи {name}"]
 
     monkeypatch.setattr(plat, "verify_service_user", verify)
+
+    def ensure_group(_layout: Layout, name: str, members: tuple[str, ...]) -> None:
+        calls.ensured.append((name, tuple(members)))
+        calls.groups[name] = set(members)
+
+    def group_problems(
+        _layout: Layout, name: str, members: tuple[str, ...]
+    ) -> list[str]:
+        have = calls.groups.get(name)
+        if have is None:
+            return [f"группы {name} нет"]
+        return [] if have == set(members) else [f"группа {name}: {sorted(have)}"]
+
+    monkeypatch.setattr(plat, "ensure_group", ensure_group)
+    monkeypatch.setattr(plat, "group_problems", group_problems)
     monkeypatch.setattr(plat, "approved_cli_problems", lambda _cli, _plat: [])
     monkeypatch.setattr(plat, "trusted_path_problems", lambda _path: [])
     real_getpwnam = pwd.getpwnam
@@ -594,8 +612,9 @@ def test_no_active_release_is_refused(setup: Setup) -> None:
 
 
 def test_roles_are_created_only_through_ensure_roles(setup: Setup) -> None:
-    """Task 1 carry (M4): `_free_id` ignores `creating` intents, so roles are
-    created one after another under the lock, only via `ensure_roles`."""
+    """Task 1 carry (M4): roles are created one after another under the
+    lock, only via `ensure_roles` (`_free_id` reads the records, which a
+    parallel creation would not see yet)."""
     setup.run()
     assert setup.calls.ensure == 1
 
@@ -761,3 +780,237 @@ def test_odd_generation_close_waits_for_the_preconditions(setup: Setup) -> None:
     with pytest.raises(StepFailed):
         setup.run()
     assert journal.read_generation(setup.lay) == gen
+
+
+# --- stage 3a: the group `df-history` (spec 4.1 rev 11) ---------------------------
+
+HISTORY = {"df-publisher", "df-precheck", OPERATOR}
+
+
+def test_roles_setup_rerun_on_2b_creates_history_group(setup: Setup) -> None:
+    """A 2b host (roles, wrappers and sudoers in place, no `df-history`): a
+    repeat of `roles setup` creates the group with exactly its members in
+    step `roles` and changes nothing else; a further repeat is a no-op."""
+    setup.run()
+    assert setup.calls.groups == {roles.HISTORY_GROUP: HISTORY}
+    del setup.calls.groups[roles.HISTORY_GROUP]  # as a 2b release left it
+    installed = list(setup.calls.installed)
+    before = len(setup.steps())
+    setup.run()
+    second = setup.steps()[before:]
+    assert ("roles", "done") in second
+    assert setup.calls.groups == {roles.HISTORY_GROUP: HISTORY}
+    assert setup.calls.ensured[-1] == (
+        roles.HISTORY_GROUP,
+        ("df-publisher", "df-precheck", OPERATOR),
+    )
+    assert setup.calls.installed == installed  # sudoers untouched
+    ensured = len(setup.calls.ensured)
+    setup.run()
+    assert len(setup.calls.ensured) == ensured
+    assert ("roles", "skip") in setup.steps()
+
+
+@dataclass
+class FakeGroups:
+    """`grp`/`pwd` of a host with groups as given; commands are recorded and
+    applied to the fake records (`dscl -read`/`getent` read them back)."""
+
+    groups: dict[str, tuple[int, list[str]]]
+    primary: dict[str, int] = field(default_factory=dict)
+    commands: list[list[str]] = field(default_factory=list)
+
+
+@pytest.fixture()
+def fake_groups(monkeypatch: pytest.MonkeyPatch) -> FakeGroups:
+    import grp as grp_module
+
+    fake = FakeGroups({"staff": (20, [])})
+
+    def getgrnam(name: str) -> object:
+        if name not in fake.groups:
+            raise KeyError(name)
+        gid, members = fake.groups[name]
+        return grp_module.struct_group((name, "*", gid, list(members)))
+
+    def getgrall() -> list[object]:
+        return [getgrnam(n) for n in fake.groups]
+
+    def getpwall() -> list[object]:
+        return [
+            pwd.struct_passwd((n, "*", 9000 + i, gid, "", "/", "/bin/false"))
+            for i, (n, gid) in enumerate(fake.primary.items())
+        ]
+
+    def run_command(argv: list[str], **_kw: object) -> plat.RunResult:
+        fake.commands.append(list(argv))
+        if argv[:4] == ["/usr/bin/dscl", "-plist", ".", "-read"]:
+            name = argv[4].removeprefix("/Groups/")
+            if name not in fake.groups:
+                return plat.RunResult(56, b"eDSRecordNotFound", b"", True)
+            return plat.RunResult(0, b"", b"", True)
+        if argv[:2] == ["/usr/bin/getent", "group"]:
+            found = argv[2] in fake.groups
+            return plat.RunResult(0 if found else 2, b"", b"", True)
+        if argv[:3] == ["/usr/bin/dscl", ".", "-create"] and len(argv) > 5:
+            name = argv[3].removeprefix("/Groups/")
+            gid, members = fake.groups.get(name, (0, []))
+            if argv[4] == "PrimaryGroupID":
+                fake.groups[name] = (int(argv[5]), members)
+            if argv[4] == "GroupMembership":
+                fake.groups[name] = (gid, list(argv[5:]))
+        if argv[0] == "/usr/sbin/groupadd":
+            fake.groups[argv[-1]] = (int(argv[3]), [])
+        if argv[0] == "/usr/bin/gpasswd":
+            gid, _members = fake.groups[argv[-1]]
+            fake.groups[argv[-1]] = (gid, argv[2].split(","))
+        return plat.RunResult(0, b"", b"", True)
+
+    monkeypatch.setattr(plat.grp, "getgrnam", getgrnam)
+    monkeypatch.setattr(plat.grp, "getgrall", getgrall)
+    monkeypatch.setattr(plat.pwd, "getpwall", getpwall)
+    monkeypatch.setattr(plat, "run_command", run_command)
+    monkeypatch.setattr(plat, "_free_id", lambda _p, _n, _l: 400)
+    return fake
+
+
+MEMBERS = ("df-publisher", "df-precheck", OPERATOR)
+CREATE_LINUX = [
+    ["/usr/sbin/groupadd", "--system", "--gid", "400", roles.HISTORY_GROUP],
+    ["/usr/bin/gpasswd", "-M", "df-publisher,df-precheck,alice", roles.HISTORY_GROUP],
+]
+
+
+def _mutations(fake: FakeGroups) -> list[list[str]]:
+    return [c for c in fake.commands if "-read" not in c and "getent" not in c[0]]
+
+
+@pytest.mark.parametrize("platform", ["macos-arm64", "linux-x86_64"])
+def test_roles_setup_history_group_exact(
+    fake_layout: FakeLayout,
+    fake_groups: FakeGroups,
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+) -> None:
+    """The intent (`groups.toml`, `creating`) is written before the first
+    OS command; then the group, its exact members and `ready`. A repeat runs
+    only the member list (no creation) and adopts only our own group."""
+    from df.config import load_groups
+
+    monkeypatch.setattr(plat, "detect_platform", lambda: platform)
+    lay = fake_layout.layout
+    lay.install_dir.mkdir(parents=True)
+    seen: list[str | None] = []
+    real = plat.run_command
+
+    def spy(argv: list[str], **kw: object) -> plat.RunResult:
+        if "-read" not in argv and "getent" not in argv[0]:
+            record = load_groups(lay.groups).get(roles.HISTORY_GROUP)
+            seen.append(None if record is None else record.state)
+        return real(argv, **kw)
+
+    monkeypatch.setattr(plat, "run_command", spy)
+    name = roles.HISTORY_GROUP
+    assert plat.group_problems(lay, name, MEMBERS) == [
+        f"нет записи группы {name} в groups.toml"
+    ]
+    plat.ensure_group(lay, name, MEMBERS)
+    assert seen and set(seen) == {"creating"}  # the intent came first
+    record = load_groups(lay.groups)[name]
+    assert (record.gid, record.state) == (400, "ready")
+    assert plat.group_problems(lay, name, MEMBERS) == []
+    if platform == "linux-x86_64":
+        assert _mutations(fake_groups) == CREATE_LINUX
+    fake_groups.commands.clear()
+    fake_groups.groups[name] = (400, ["mallory"])
+    assert plat.group_problems(lay, name, MEMBERS) == [
+        f"группа {name}: лишние члены ['mallory']",
+        f"группа {name}: нет членов ['alice', 'df-precheck', 'df-publisher']",
+    ]
+    plat.ensure_group(lay, name, MEMBERS)  # our own group: the members only
+    assert len(_mutations(fake_groups)) == 1
+    assert plat.group_problems(lay, name, MEMBERS) == []
+
+
+def test_history_group_not_ours_refused(
+    fake_layout: FakeLayout, fake_groups: FakeGroups, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `df-history` df has no intent for is refused before any command and
+    nothing is recorded; a recorded gid another group has is refused too."""
+    from df.config import load_groups
+
+    monkeypatch.setattr(plat, "detect_platform", lambda: "linux-x86_64")
+    lay = fake_layout.layout
+    lay.install_dir.mkdir(parents=True)
+    name = roles.HISTORY_GROUP
+    fake_groups.groups[name] = (401, list(MEMBERS))
+    with pytest.raises(StepFailed, match="создана не darkfactory: удалите"):
+        plat.ensure_group(lay, name, MEMBERS)
+    assert _mutations(fake_groups) == [] and load_groups(lay.groups) == {}
+    assert plat.group_problems(lay, name, MEMBERS) == [
+        f"нет записи группы {name} в groups.toml"
+    ]
+    del fake_groups.groups[name]
+    plat.ensure_group(lay, name, MEMBERS)
+    fake_groups.groups[name] = (401, list(MEMBERS))  # replaced behind our back
+    with pytest.raises(StepFailed, match="gid 401, в намерении 400"):
+        plat.ensure_group(lay, name, MEMBERS)
+    fake_groups.groups[name] = (400, list(MEMBERS))
+    fake_groups.groups["other"] = (400, [])
+    assert any("не свой" in p for p in plat.group_problems(lay, name, MEMBERS))
+    fake_groups.primary["eve"] = 400
+    assert "лишние члены ['eve']" in "; ".join(plat.group_problems(lay, name, MEMBERS))
+
+
+def test_history_group_resumes_own_intent(
+    fake_layout: FakeLayout, fake_groups: FakeGroups, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash after the intent (and maybe after `groupadd`): the repeat
+    completes our own partial group with the recorded gid."""
+    from df.config import GroupRecord, dump_groups, load_groups
+
+    monkeypatch.setattr(plat, "detect_platform", lambda: "linux-x86_64")
+    lay = fake_layout.layout
+    lay.install_dir.mkdir(parents=True)
+    name = roles.HISTORY_GROUP
+    intent = GroupRecord(name, 400, "creating", "2026-11-06T00:00:00+00:00")
+    lay.groups.write_text(dump_groups({name: intent}))
+    fake_groups.groups[name] = (400, [])  # groupadd ran, gpasswd did not
+    plat.ensure_group(lay, name, MEMBERS)
+    assert _mutations(fake_groups) == CREATE_LINUX[1:]
+    assert load_groups(lay.groups)[name].state == "ready"
+
+
+def test_history_group_argv_per_platform() -> None:
+    """macOS: `dscl -create` of the record, its GID and the whole
+    `GroupMembership`; Linux: `groupadd --system --gid`, `gpasswd -M`."""
+    name = roles.HISTORY_GROUP
+    path = f"/Groups/{name}"
+    assert plat.group_argv("macos-arm64", name, MEMBERS, gid=401) == [
+        ["/usr/bin/dscl", ".", "-create", path],
+        ["/usr/bin/dscl", ".", "-create", path, "PrimaryGroupID", "401"],
+        ["/usr/bin/dscl", ".", "-create", path, "GroupMembership", *MEMBERS],
+    ]
+    assert plat.group_argv("linux-x86_64", name, MEMBERS, gid=None) == [
+        ["/usr/bin/gpasswd", "-M", ",".join(MEMBERS), name],
+    ]
+    assert roles.history_members(OPERATOR) == MEMBERS
+    assert "df-exec" not in MEMBERS and "df-review" not in MEMBERS
+
+
+def test_groups_record_round_trip(tmp_path: Path) -> None:
+    from df.config import ConfigError, GroupRecord, dump_groups, load_groups
+
+    rec = GroupRecord("df-history", 400, "ready", "t")
+    path = tmp_path / "groups.toml"
+    path.write_text(dump_groups({"df-history": rec}))
+    assert load_groups(path) == {"df-history": rec}
+    assert load_groups(tmp_path / "absent.toml") == {}
+    path.write_text(dump_groups({"df-history": rec}).replace("400", "true"))
+    with pytest.raises(ConfigError):
+        load_groups(path)
+
+
+def test_roles_setup_prints_next_login_note() -> None:
+    note = roles_setup.next_login_note(OPERATOR)
+    assert OPERATOR in note and "нового входа" in note and roles.HISTORY_GROUP in note

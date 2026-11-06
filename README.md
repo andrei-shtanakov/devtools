@@ -657,3 +657,33 @@ Root-приёмка §4.5 без строк мержа — CI `df-stage1`, job `
 `DF_STAND_INSTALLATION_ID`); сценарий — `tests/df/live_stand.py`. Стенд — личный приватный
 репо без ruleset (тариф Free): контроль «мерж полным токеном App — отказ состояния 405» даёт
 конфликтующий PR. Evidence — `docs/evidence/2026-10-30-df-stage2a-acceptance.md`.
+
+## Установка DarkFactory: этап 3a (доверие)
+
+Источник доверия подключает `darkfactory setup-trust` (спека §6.2) в две фазы. Проверка
+периметра — от человека **без** `sudo`, с временным fine-grained PAT только на чтение двух репо
+доверия (PAT читается с терминала без эха или из stdin, нигде не хранится); запись привязки —
+root:
+
+```sh
+darkfactory setup-trust check --templates
+darkfactory setup-trust check --policy-repo-id <id approval-policy> --trust-repo-id <id df-trust> --trust-branch main --out ~/setup-trust-report.json
+sudo darkfactory setup-trust write --policy-repo-id <id approval-policy> --trust-repo-id <id df-trust> --trust-branch main --report ~/setup-trust-report.json --report-digest <digest из check> --history-token-file <файл токена истории>
+```
+
+`check --templates` показывает публикуемое содержимое (`source.env`, `epochs.yaml`,
+`policy/*`) — точные байты, `<...>` заполняет человек; полный `check` показывает его тоже, затем
+читает периметр обоих репо (коды ответов — в отчёте, 403/404 — «не проверено») и печатает
+digest отчёта и команду записи. Стоп — тариф без rulesets, `allow_rebase_merge = true`, ветка
+`source.env` не default branch `approval-policy` (С-2), нет обязательных правил ветки, приватный
+репо. Стоп и `perimeter_principal`: каждый коллаборатор с write/maintain/admin, команда с
+push и выше, deploy key с записью и bypass типа `Integration`/`DeployKey` обязан быть в
+`POLICY_ADMINS` (спека A §6.2 (а)); непроверенное (закрытый ответ, обрезанный список, bypass без
+логина, нестандартная роль) `check` печатает как «не проверено» — его подтверждает человек. `write` сверяет digest и аргументы с отчётом (отчёт старше часа не принимается; файл
+токена истории — ваш, `chmod 600`), пишет профиль токена истории
+`/etc/df/history-gh` (`root:df-history`, `0750`/`0640`; группу создаёт повтор
+`sudo darkfactory roles setup`; группа, созданная не darkfactory, — отказ; членство
+оператора в уже открытых сессиях Linux действует с нового входа), затем `/etc/df/trust.toml`, затем спрашивает `trust-status`;
+evidence — `/var/lib/df/evidence/perimeter-<время>.json`. Без `--history-token-file` привязка
+не пишется (O14); `unavailable` после записи — «установка не завершена», код 3. Смена корня —
+обе фазы с `--rebind`. После приёмки PAT проверки отзывается.

@@ -38,6 +38,7 @@ STAGE_OF: Mapping[str, int] = {
 STATE_SCHEMAS: Mapping[str, str] = {
     "pending.toml": "df/pending/v1",
     "accounts.toml": "df/accounts/v1",
+    "groups.toml": "df/groups/v1",
     "accept/<id>.toml": "df/accept/v1",
     "runs/<id>.json": "df/run/v1",
 }
@@ -483,4 +484,71 @@ def dump_accounts(accounts: Mapping[str, Account]) -> str:
     data: dict[str, object] = {"schema": STATE_SCHEMAS["accounts.toml"]}
     if rows:
         data["account"] = rows
+    return dumps(data)
+
+
+# --- groups.toml ------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class GroupRecord:
+    """A group df creates by intent (stage 3a: `df-history`), as an account:
+    `creating` is written before the first OS command."""
+
+    name: str
+    gid: int
+    state: Literal["creating", "ready"]
+    created_at: str
+
+    def __post_init__(self) -> None:
+        _nonempty(self.name, "name")
+        _need(
+            isinstance(self.gid, int) and not isinstance(self.gid, bool),
+            "gid",
+            "must be an integer",
+        )
+        _need(self.gid > 0, "gid", "must be positive")
+        _need(
+            self.state in ("creating", "ready"),
+            "state",
+            "must be 'creating' or 'ready'",
+        )
+        _nonempty(self.created_at, "created_at")
+
+
+_GROUP_KEYS = {"name", "gid", "state", "created_at"}
+
+
+def load_groups(path: Path) -> dict[str, GroupRecord]:
+    """Read `groups.toml`; empty if the file does not exist."""
+    text = _read_optional(path)
+    if text is None:
+        return {}
+    data = _parse_toml(text, STATE_SCHEMAS["groups.toml"])
+    _check_keys(data, set(), {"group"}, "groups.toml")
+    rows = data.get("group", [])
+    _need(isinstance(rows, list), "group", "must be an array of tables")
+    assert isinstance(rows, list)
+    result: dict[str, GroupRecord] = {}
+    for row in rows:
+        _need(isinstance(row, dict), "group", "must be a table")
+        assert isinstance(row, dict)
+        _check_keys(row, _GROUP_KEYS, set(), "group")
+        for key in ("name", "state", "created_at"):
+            _need(isinstance(row[key], str), key, "must be a string")
+        rec = GroupRecord(row["name"], row["gid"], row["state"], row["created_at"])
+        _need(rec.name not in result, "group", f"duplicate name {rec.name!r}")
+        result[rec.name] = rec
+    return result
+
+
+def dump_groups(groups: Mapping[str, GroupRecord]) -> str:
+    """Render `groups.toml` sorted by name."""
+    rows = [
+        {"name": g.name, "gid": g.gid, "state": g.state, "created_at": g.created_at}
+        for _, g in sorted(groups.items())
+    ]
+    data: dict[str, object] = {"schema": STATE_SCHEMAS["groups.toml"]}
+    if rows:
+        data["group"] = rows
     return dumps(data)
