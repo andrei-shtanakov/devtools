@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import io
+import json
 import shutil
 from collections.abc import Iterator
 from pathlib import Path
@@ -311,3 +312,35 @@ def test_candidate_65_epochs_unsupported_then_blocked(
     (world.lay.etc / "trust.toml").write_text(rebound)
     fresh = trust_status(world, capsys).result
     assert (fresh["state"], fresh["root"]["repository_id"]) == ("clear", 23), fresh
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_candidate_v2_request_of_the_upgrade_row(
+    tmp_path: Path, complete: bool
+) -> None:
+    """The upgrade row's request is a valid v2 candidate: an incomplete
+    admin tree answers `tree_incomplete` without the v2 program, a complete
+    one answers from it by name (the keyless binding)."""
+    from tests.df.roles_world import FULL_NAME as NAME
+    from tests.df.roles_world import PRODUCT_ID
+    from tests.df.upgrade_world import candidate_v2_request
+
+    data = candidate_v2_request(Path("/"), NAME, PRODUCT_ID)
+    out = io.StringIO()
+    code = serve(
+        io.BytesIO(data),
+        out,
+        admin_digest=ADMIN,
+        home=tmp_path,
+        complete_v2=complete,
+        gh=None,
+        git=Path("/usr/bin/git"),
+        deps=DEFAULT_DEPS,
+    )
+    verdict = json.loads(out.getvalue())
+    assert code == 0 and verdict["schema"] == "df/precheck-verdict/v2", verdict
+    if complete:
+        assert verdict["version"] == "df-precheck/2", verdict
+        assert "history_token_required" in verdict["reason"], verdict
+    else:
+        assert verdict["reason"].startswith("tree_incomplete"), verdict

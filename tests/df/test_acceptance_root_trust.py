@@ -19,22 +19,29 @@ from __future__ import annotations
 
 import dataclasses
 import errno
+import grp
 import json
 import os
 import shutil
+import sqlite3
+import subprocess
 import threading
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 import pytest
 
 from df import doctor, perimeter_client, sudoers
+from df import install as install_mod
 from df import platform as plat
+from df.admin_tree import locked_pins
 from df.config import load_install
-from df.publisher import request
+from df.publisher import perimeter, request
+from df.publisher.precheck import command as precheck_command
 from df.publisher.request import TrustStatus
+from df.roles import HISTORY_GROUP
 from df.setup_trust import EPOCHS_EXIT
 from df.stage2_config import dump_publisher, parse_publisher
 from tests.df.candidate_world import Candidate, build_candidate, build_finalize
@@ -44,6 +51,7 @@ from tests.df.precheck_world import (
     TokenGitServer,
     precheck_world,
     processes,
+    spawn_as,
 )
 from tests.df.roles_world import (
     BASE_ENV,
@@ -58,6 +66,7 @@ from tests.df.roles_world import (
     RolesWorld,
     admin_python,
     as_operator,
+    as_user,
     evidence,
     found_in,
     impersonate_api,
@@ -72,7 +81,9 @@ from tests.df.roles_world import (
 )
 from tests.df.root_world import (
     FixtureRepo,
+    RootWorld,
     build_fixture_repo,
+    current_id,
     infra,
     serve_repo,
 )
@@ -82,6 +93,14 @@ from tests.df.trust_sources import (
     TrustSources,
     build_sources,
     new_trust_repo,
+)
+from tests.df.upgrade_world import (
+    CODE_2B,
+    candidate_v2_request,
+    checkout_2b,
+    install_2b,
+    paths_2b,
+    run_2b,
 )
 
 #: `network`: the pinned official `gh` is downloaded (`_install_gh`).
@@ -210,6 +229,169 @@ def trust_status(rw: RolesWorld, sources: TrustSources) -> TrustStatus:
     except request.BadResponse as exc:
         pytest.fail(f"trust-status: {exc}: {raw[-800:]!r}")
         raise
+
+
+# ---------- the 2b -> 3a upgrade (owner decision 7 (a)) ----------
+
+
+def db_rows(db: Path, sql: str) -> list[tuple[object, ...]]:
+    """Rows of `sql`, read by root without writing."""
+    conn = sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True)
+    try:
+        return conn.execute(sql).fetchall()
+    finally:
+        conn.close()
+
+
+def schema_of(db: Path) -> str:
+    return str(db_rows(db, "SELECT value FROM meta WHERE key = 'schema'")[0][0])
+
+
+def ask_v2(uw: RolesWorld) -> dict[str, object]:
+    """The candidate's v2 request through `sudo -u df-precheck` as the
+    publisher calls it (`precheck.command`), as `df-publisher`."""
+    data = candidate_v2_request(uw.layout, FULL_NAME, PRODUCT_ID)
+    proc = spawn_as(
+        PUBLISHER,
+        list(precheck_command(uw.layout)),
+        env=BASE_ENV,
+        stdin=subprocess.PIPE,
+    )
+    out, err = proc.communicate(data, timeout=300)
+    try:
+        found = json.loads(out)
+    except ValueError:
+        infra(f"df-precheck: {proc.returncode} {out[-400:]!r} {err[-400:]!r}")
+        raise
+    return found
+
+
+#: The schema-1 event `df-publisher` inserts into the inadmissible copy.
+EVENT_V1 = (
+    "INSERT INTO events (root_host, root_repository_id, root_branch, "
+    "request_key, request_id, run_id, sender, violated_role, "
+    "violated_repository_id, detected_by, observed_at, registered_at, state, "
+    "epoch, provenance, detail) VALUES ('github.com', 5, 'main', 'acc-upgrade', "
+    "NULL, NULL, NULL, NULL, NULL, 'df-trust', '2026-11-06T00:00:00Z', "
+    "'2026-11-06T00:00:00Z', 'pending', NULL, "
+    '\'{"snapshot_sha": null, "unavailable": "fixture"}\', \'fixture\')'
+)
+
+
+def insert_event_as_publisher(uw: RolesWorld, db: Path) -> None:
+    """One event written by `df-publisher` itself into its schema-1 base."""
+    python = str(admin_python(uw.layout))
+    script = (
+        "import sqlite3, sys\nc = sqlite3.connect(sys.argv[1])\n"
+        "c.execute(sys.argv[2])\nc.commit()\nc.close()\n"
+    )
+    done = as_user(PUBLISHER, [python, "-I", "-S", "-c", script, str(db), EVENT_V1])
+    if done.returncode != 0:
+        infra(f"событие от df-publisher: {shown(done)}")
+
+
+def test_root_trust_upgrade_2b_to_3a(acceptance_top: Path, control_url: str) -> None:
+    """Owner decision 7 (a): an install by the 2b code (`291cb30`), its
+    roles, an admissible schema-"1" `events.sqlite` (no events, no
+    `trust.toml`) -> the 2b installer installs a pin of this branch: the
+    stop is `allow`, the candidate is `tree_incomplete` before import ->
+    `roles setup` by the 3a code: the schema moves to "2", `transitions` and
+    `admission` kept, `df-history` made -> again: idempotent -> a 3a
+    install: a new `<id>`, the candidate reaches the v2 program. Apart: an
+    inadmissible 2b base (an event by `df-publisher`): `roles setup`
+    refuses `migration_precondition` and the base is byte-for-byte
+    unchanged (then the admissible base is put back)."""
+    top = acceptance_top / "upgrade"
+    top.mkdir(mode=0o755)
+    src = checkout_2b(top)
+    bare_2b, sha_2b = build_fixture_repo(
+        top,
+        paths_2b(src),
+        name="fixture-2b",
+        site=locked_pins((src / "uv.lock").read_bytes()),
+        source=src,
+    )
+    bare_3a, sha_3a = build_fixture_repo(
+        top, FIXTURE_FROM_CHECKOUT, name="fixture-3a", site=real_site_pins()
+    )
+    bare_3b, sha_3b = build_fixture_repo(
+        top,
+        FIXTURE_FROM_CHECKOUT,
+        name="fixture-3a-again",
+        site=real_site_pins(),
+        extra={"UPGRADE.md": "the second 3a install\n"},
+    )
+    found: dict[str, object] = {"code_2b": CODE_2B}
+    with ExitStack() as stack:
+        url_2b = stack.enter_context(serve_repo(top, bare_2b))
+        url_3a = stack.enter_context(serve_repo(top, bare_3a))
+        url_3b = stack.enter_context(serve_repo(top, bare_3b))
+        uw = stack.enter_context(
+            roles_world(
+                top, FixtureRepo(url_2b, sha_2b), control_url, None,
+                name="upgrade", install=install_2b(src),
+            )
+        )  # fmt: skip
+        lay = uw.layout
+        db = lay.perimeter_dir / "events.sqlite"
+        first_id = uw.installed.release_id
+        found["2b"] = {"id": first_id, "schema": schema_of(db)}
+        assert schema_of(db) == "1"
+        assert db_rows(db, "SELECT count(*) FROM events") == [(0,)]
+        assert not (lay.etc / "trust.toml").exists()
+        # the 2b installer installs a pin of this branch
+        code = run_2b(src, uw.installed.world, ["install"], url_3a, sha_3a)
+        upgraded = current_id(lay)
+        found["2b_installs_3a"] = {"code": code, "id": upgraded}
+        assert code == 0 and upgraded not in (None, first_id)
+        pw = stack.enter_context(precheck_world(uw))
+        stop = pw.ask(pw.current)
+        before_import = ask_v2(uw)
+        found["before_import"] = {"stop": stop, "candidate": before_import}
+        assert stop.get("refused", "?") is None, stop
+        assert str(before_import["reason"]).startswith("tree_incomplete"), before_import
+        # apart: an inadmissible 2b base is refused and left as it is
+        admissible = db.read_bytes()
+        insert_event_as_publisher(uw, db)
+        planted = db.read_bytes()
+        refused = uw.darkfactory(["roles", "setup", "--operator", OPERATOR])
+        found["inadmissible"] = shown(refused)
+        assert refused.returncode != 0, shown(refused)
+        text = refused.stderr.decode("utf-8", "replace")
+        assert perimeter.MIGRATION_PRECONDITION_TEXT in text, shown(refused)
+        assert db.read_bytes() == planted
+        db.write_bytes(admissible)  # root puts the admissible base back
+        # `roles setup` by the 3a code migrates the admissible base
+        keep = {
+            "transitions": db_rows(db, "SELECT * FROM transitions ORDER BY 1"),
+            "admission": db_rows(db, "SELECT value FROM meta WHERE key = 'admission'"),
+        }
+        migrated = uw.darkfactory(["roles", "setup", "--operator", OPERATOR])
+        again = uw.darkfactory(["roles", "setup", "--operator", OPERATOR])
+        found["roles_setup_3a"] = [shown(migrated), shown(again)]
+        assert migrated.returncode == 0 and again.returncode == 0, found
+        assert schema_of(db) == "2"
+        assert {
+            "transitions": db_rows(db, "SELECT * FROM transitions ORDER BY 1"),
+            "admission": db_rows(db, "SELECT value FROM meta WHERE key = 'admission'"),
+        } == keep
+        assert grp.getgrnam(HISTORY_GROUP).gr_name == HISTORY_GROUP
+        # a 3a install: a new release, the candidate reaches the v2 program
+        world = uw.installed.world
+        third = RootWorld(
+            lay, FixtureRepo(url_3b, sha_3b), world.uv, world.top, control_url
+        )
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(install_mod, "_profile", lambda _cfg: third.profile())
+            code = world.entry(["install"])
+        final_id = current_id(lay)
+        after_import = ask_v2(uw)
+        found["3a_install"] = {"code": code, "id": final_id, "candidate": after_import}
+        evidence("trust-upgrade.json", found)
+        assert code == 0 and final_id not in (None, first_id, upgraded), found
+        assert after_import["version"] == "df-precheck/2", after_import
+        assert "history_token_required" in str(after_import["reason"]), after_import
+    evidence("trust-upgrade.json", found)
 
 
 # ---------- before the binding ----------

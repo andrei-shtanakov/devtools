@@ -184,17 +184,23 @@ def build_fixture_repo(
     name: str = "fixture",
     *,
     site: SitePins | None = None,
+    source: Path = REPO_ROOT,
+    extra: Mapping[str, str] | None = None,
 ) -> tuple[Path, str]:
     """`<top>/<name>.git` (bare, root's) of the fixture project plus `paths`
-    of this checkout (directories or files, relative to its root), its
-    `uv.lock` with the `site/` pins `site` appended (default: the stand-in
-    sources `prime_on_install` primes; the build never reaches them)."""
+    of the checkout `source` (default this one; directories or files,
+    relative to its root) and the `extra` files, its `uv.lock` with the
+    `site/` pins `site` appended (default: the stand-in sources
+    `prime_on_install` primes; the build never reaches them)."""
     src = top / f"{name}-src"
-    shutil.copytree(FIXTURE_PROJECT, src, ignore=FIXTURE_IGNORE)
+    project = source / FIXTURE_PROJECT.relative_to(REPO_ROOT)
+    shutil.copytree(project, src, ignore=FIXTURE_IGNORE)
     with (src / "uv.lock").open("a") as lock:
         lock.write(lock_packages(site or site_world().pins()))
+    for rel, text in (extra or {}).items():
+        (src / rel).write_text(text)
     for relative in paths:
-        origin, target = REPO_ROOT / relative, src / relative
+        origin, target = source / relative, src / relative
         if origin.is_dir():
             shutil.copytree(origin, target, ignore=FIXTURE_IGNORE)
         else:

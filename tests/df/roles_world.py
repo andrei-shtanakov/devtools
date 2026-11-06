@@ -55,7 +55,7 @@ import ssl
 import subprocess
 import threading
 import uuid
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -823,9 +823,12 @@ def roles_world(
     keep: Path | None,
     *,
     name: str = "roles",
+    install: Callable[[RootWorld], InstalledWorld] | None = None,
 ) -> Iterator[RolesWorld]:
     """The module's world (module doc) with its work directory `<top>/<name>`
-    (one per module of a session); torn down whatever happens."""
+    (one per module of a session), installed by `install` (default
+    `install_production`; the upgrade row installs with older code); torn
+    down whatever happens."""
     require_clean_host()
     layout = PRODUCTION
     with ExitStack() as stack:
@@ -833,7 +836,7 @@ def roles_world(
         stack.callback(teardown_roles, layout)
         world = RootWorld(layout, repo, approved_uv(), top, control_url)
         # the real `site/` of `real_site_pins`, fetched by the install
-        installed = install_production(world)
+        installed = (install or install_production)(world)
         work = top / name
         work.mkdir(mode=0o755)
         os.chmod(work, 0o755)
