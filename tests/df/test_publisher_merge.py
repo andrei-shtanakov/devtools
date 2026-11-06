@@ -24,6 +24,7 @@ from df.publisher import (
     github,
     history,
     merge,
+    ops,
     perimeter,
     precheck,
     request,
@@ -2923,3 +2924,62 @@ def test_moved_base_still_bounded_after_repeats(
     resp = run(world, capsys)
     assert reason(resp) == ("refused", "base_unstable")
     _no_put(mgh)
+
+
+# --- targeted review of #706 --------------------------------------------------------
+
+
+def _unknown_after_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every admission fails transiently: each call ends `unknown`."""
+
+    def flaky(_run: merge.MergeRun) -> None:
+        raise github.GitHubUnavailable("transient")
+
+    monkeypatch.setattr(merge, "_admit", flaky)
+
+
+def test_repeat_refusal_keeps_the_x_of_the_phases(
+    world: World,
+    mgh: MergeGitHub,
+    v2: V2,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plain refusal on a repeat (the read token answered 403) carries the
+    intent's and the phases' evidence: `trust_root` keeps X."""
+    _unknown_after_check(monkeypatch)
+    assert reason(run(world, capsys)) == ("unknown", "github_unavailable")
+    real = ops.authorize
+
+    def denied(oc: ops.OpContext, permissions: Mapping[str, str]) -> object:
+        if permissions == ops.READ_PERMISSIONS:
+            raise Refused("github_403: denied")
+        return real(oc, permissions)
+
+    monkeypatch.setattr(ops, "authorize", denied)
+    resp = run(world, capsys)
+    assert resp.outcome == "unknown" and "github_403" in str(resp.reason)
+    assert resp.evidence["trust_root"] == {**IDENTITY, "snapshot_sha": S1}
+    assert resp.evidence["kind"] == "candidate"
+    _no_put(mgh)
+
+
+def test_repeat_checks_bounded_named_refusal(
+    world: World,
+    mgh: MergeGitHub,
+    v2: V2,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The repeats' own checks are bounded apart from the moved-base budget:
+    past `MAX_REPEAT_CHECKS` a verified, named `repeat_limit`, no `PUT` --
+    never a phase name the store refuses (`rechecked.<n>`, n <= 9999)."""
+    assert merge.MAX_REPEAT_CHECKS + merge.MAX_RECHECKS < 9999
+    monkeypatch.setattr(merge, "MAX_REPEAT_CHECKS", 2)
+    _unknown_after_check(monkeypatch)
+    for _ in range(3):  # the first call and two repeats
+        assert reason(run(world, capsys)) == ("unknown", "github_unavailable")
+    resp = run(world, capsys)
+    assert reason(resp) == ("refused", "repeat_limit")
+    _no_put(mgh)
+    assert all(o[-1] == "accepted" for o in merge_observations(world))

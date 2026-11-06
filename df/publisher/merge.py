@@ -120,6 +120,10 @@ _PUT_REFUSED = frozenset({401, 403, 404})
 #: `rechecked.<n>` marked `REPEAT` and spends none of them (paid review #706).
 MAX_RECHECKS = 5
 REPEAT = "repeat"
+#: Repeats of one request that check anew before it is refused
+#: `repeat_limit` (a new `request_id` goes on); generous, and with
+#: `MAX_RECHECKS` far below the store's `rechecked.<n>` ceiling (9999).
+MAX_REPEAT_CHECKS = 1000
 #: What a `done` found by observation (not by the `PUT`'s own 200) rests on.
 PREMISE = "app_merges_only_through_this_publisher"
 FACT_KEYS = ("head_repo_id", "head_ref", "base_ref", "base_tip", "changes_digest")
@@ -457,18 +461,22 @@ Phases = dict[str, Mapping[str, object]]
 def _decide(ctx: Context) -> Response:
     """Every refusal past the product's context names the root (spec 5.5:
     `TrustRoot` always), once the PR is routed also its kind; a refusal's
-    own evidence (past the intent: from the phases) wins."""
+    own evidence wins, and past the intent the phases' (`_state_evidence`,
+    X of the decisive check) are never overridden."""
     oc = ops.build_context(ctx)
     try:
         return _decide_for(ctx, oc)
     except Refused as exc:
-        raise _with_evidence(
-            exc, {"trust_root": trust_root(oc.binding, None)}
-        ) from None
+        base = {"trust_root": trust_root(oc.binding, None)}
+        raise _with_evidence(ctx, exc, base) from None
 
 
-def _with_evidence(exc: Refused, base: Mapping[str, object]) -> Refused:
-    """`exc` with `base` under its own evidence (its keys win)."""
+def _with_evidence(ctx: Context, exc: Refused, base: Mapping[str, object]) -> Refused:
+    """`exc` with `base` under its own evidence (its keys win) -- only before
+    any intent: past it the evidence comes from the intent and the phases
+    (targeted review of #706)."""
+    if ctx.intent is not None or ctx.intent_written:
+        return exc
     evidence = {**base, **exc.evidence}
     return Refused(
         exc.reason, verified_not_done=exc.verified_not_done, evidence=evidence
@@ -491,7 +499,7 @@ def _decide_for(ctx: Context, oc: OpContext) -> Response:
     try:
         return _decide_kind(ctx, oc, read, patterns, pr, facts, kind)
     except Refused as exc:
-        raise _with_evidence(exc, _base_evidence(kind, oc.binding)) from None
+        raise _with_evidence(ctx, exc, _base_evidence(kind, oc.binding)) from None
 
 
 def _decide_kind(
@@ -1144,6 +1152,7 @@ def _final_read(run: MergeRun, facts: Mapping[str, object], phases: Phases) -> N
     expected = _decisive(phases).get("base_tip")
     names = store.rechecks(phases)
     moved = sum(1 for name in names if not phases[name].get(REPEAT))
+    repeats = len(names) - moved
     for n in itertools.count(len(names) + 1):
         pr = _get_pr(run)
         _same_pr(run, pr, facts)
@@ -1152,8 +1161,11 @@ def _final_read(run: MergeRun, facts: Mapping[str, object], phases: Phases) -> N
             return
         repeat = tip == expected  # a repeat's own check: not a moved base
         moved += 0 if repeat else 1
+        repeats += 1 if repeat else 0
         if moved > MAX_RECHECKS:
             raise Refused("base_unstable")
+        if repeats > MAX_REPEAT_CHECKS:
+            raise Refused("repeat_limit")
         changes = pr_changes(run.oc, run.read, tip, run.head_sha)
         head_ref = str(facts["head_ref"])
         _same_kind(run, route(head_ref, changes, run.patterns))
