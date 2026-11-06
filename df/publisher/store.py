@@ -44,7 +44,8 @@ JOURNAL = "journal.jsonl"
 SUBDIRS = ("ids", "keys", "intents", "results", "owners")
 #: The phases of `merge` in their order; `rechecked.<n>` sit between
 #: `attested` and `armed` (plan decision 8).
-PHASES = ("attest", "attested", "armed", "put_answer")
+#: `checked` (stage 3a): a candidate's first check (it gets no attestation).
+PHASES = ("checked", "attest", "attested", "armed", "put_answer")
 RECHECKED = re.compile(r"rechecked\.([1-9][0-9]{0,3})", re.ASCII)
 #: What a replayed request gets back is a stored result; these four are
 #: computed (issued) anew at every call (spec 5.6; `trust-status`, 5.2).
@@ -392,7 +393,7 @@ def _phase_payload(path: Path, name: str) -> Mapping[str, object]:
 
 def last_phase(phases: Mapping[str, object]) -> str | None:
     """The latest phase of `phases` in the order of decision 8."""
-    order = [*PHASES[:2], *rechecks(phases), *PHASES[2:]]
+    order = [*PHASES[:3], *rechecks(phases), *PHASES[3:]]
     present = [name for name in order if name in phases]
     return present[-1] if present else None
 

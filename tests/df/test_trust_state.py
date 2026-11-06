@@ -9,7 +9,7 @@ import os
 import sqlite3
 import subprocess
 import sys
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -17,6 +17,7 @@ import pytest
 from df.paths import Layout
 from df.publisher import perimeter, trust_state
 from df.publisher.perimeter import Root, Unavailable
+from df.publisher.request import Refused
 from df.publisher.trust_state import Observation
 from df.publisher.trust_types import Finding, PolicyPin, Route
 from df.stage2_config import TrustBinding
@@ -751,3 +752,236 @@ def test_pinned_record_invariants(lay: Layout, sql: str) -> None:
     conn.close()
     with pytest.raises(Unavailable, match="integrity"):
         perimeter.open_db(lay).close()
+
+
+# --- the final admission of `merge` (Task 11) ---------------------------------------
+
+
+@dataclass(frozen=True)
+class MV:
+    """A bound `op: merge` verdict as the admission reads it."""
+
+    outcome: str = "allow"
+    reason: str = ""
+    findings: tuple[Finding, ...] = ()
+    verified: bool = True
+
+
+def merge_obs(db: perimeter.Db, x: str = H1, policy: PolicyPin = P1) -> Observation:
+    """The observation (A = X, X, P) of the `merge` route."""
+    return observe(db, route="merge", accepted=x, head=x, policy=policy)
+
+
+def admit(
+    lay: Layout, obs: int, verdict: MV, *, head: str = H1, admit: bool = True
+) -> object:
+    with perimeter.open_db(lay) as db:
+        return trust_state.admit_merge(
+            db, ROOT, obs, verdict, head_read=lambda: head, binding=BINDING,
+            admin_digest=ADMIN, rules=RULES, admit=admit,
+        )  # fmt: skip
+
+
+def heads(lay: Layout) -> list[tuple]:
+    conn = sqlite3.connect(lay.perimeter_dir / perimeter.DB_NAME)
+    try:
+        return conn.execute(
+            "SELECT sha, last_epoch, row_version FROM trust_heads"
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def test_admit_merge_clear_accepts_without_writing_the_row(lay: Layout) -> None:
+    accept(lay, H1, 2)
+    with perimeter.open_db(lay) as db:
+        obs = merge_obs(db)
+    assert admit(lay, obs.id, MV()) is None
+    assert outcome(lay, obs.id) == "accepted"
+    assert heads(lay) == [(H1, 2, 1)]  # X = A: no write, no bump (D-d)
+    assert events(lay) == [] and not is_blocked(lay)
+
+
+def test_admit_merge_other_unfinished_refused(lay: Layout) -> None:
+    accept(lay, H1, 2)
+    with perimeter.open_db(lay) as db:
+        obs = merge_obs(db)
+        observe(db, accepted=H1, head=H2)  # another route, unfinished
+    got = admit(lay, obs.id, MV())
+    assert isinstance(got, Refused) and got.reason == "perimeter_blocked"
+    assert outcome(lay, obs.id) == "accepted"  # (1) committed with the refusal
+
+
+def test_admit_merge_blocking_event_refused(lay: Layout) -> None:
+    accept(lay, H1, 2)
+    with perimeter.open_db(lay) as db:
+        obs = merge_obs(db)
+    perimeter.record_app_installations(lay, BINDING, [(77, "df-trust", 5)])
+    got = admit(lay, obs.id, MV())
+    assert isinstance(got, Refused) and got.reason == "perimeter_blocked"
+    # the pending event is registered at the verified epoch in the same step
+    assert [(e[1], e[2]) for e in events(lay)] == [("registered", 2)]
+
+
+def test_admit_merge_head_moved_superseded_refused(lay: Layout) -> None:
+    accept(lay, H1, 2)
+    with perimeter.open_db(lay) as db:
+        obs = merge_obs(db)
+    got = admit(lay, obs.id, MV(), head=H2)
+    assert isinstance(got, Refused) and got.reason == "perimeter_blocked"
+    assert outcome(lay, obs.id) == "superseded"
+    assert heads(lay) == [(H1, 2, 1)]
+
+
+def test_admit_merge_row_moved_superseded_refused(lay: Layout) -> None:
+    """A advanced by another route between the check and the admission:
+    the row is not the pinned one any more."""
+    accept(lay, H1, 2)
+    with perimeter.open_db(lay) as db:
+        obs = merge_obs(db)
+    accept(lay, H2, 3)
+    got = admit(lay, obs.id, MV(), head=H2)
+    assert isinstance(got, Refused) and got.reason == "perimeter_blocked"
+    assert outcome(lay, obs.id) == "superseded"
+
+
+def test_admit_merge_findings_registered_under_its_ctx(lay: Layout) -> None:
+    accept(lay, H1, 2)
+    with perimeter.open_db(lay) as db:
+        obs = merge_obs(db)
+    verdict = MV("refuse", "perimeter_findings: ...", (RULESET, POLICY_BREAK), True)
+    assert admit(lay, obs.id, verdict) is None  # not `allow`: no step (3)
+    assert outcome(lay, obs.id) == "finding_registered"
+    rows = events(lay)
+    assert [(r[1], r[2], r[3], r[4]) for r in rows] == [
+        ("registered", 2, "trust:merge", "df-trust"),
+        ("registered", 2, "trust:merge", "approval-policy"),
+    ]
+    # the same findings again (a re-evaluation of the same ctx): same events
+    with perimeter.open_db(lay) as db:
+        again = trust_state.register_findings(
+            db, ROOT, obs.ctx, [RULESET, POLICY_BREAK], epochs_at(H1)
+        )
+    assert again == [r[0] for r in rows] and is_blocked(lay)
+
+
+def test_admit_merge_unset_stays_unfinished_no_k(lay: Layout) -> None:
+    accept(lay, H1, 2)
+    with perimeter.open_db(lay) as db:
+        obs = merge_obs(db)
+    for status in ("unset", "tree_incomplete"):
+        assert admit(lay, obs.id, MV(status, "x", (), False)) is None
+        assert outcome(lay, obs.id) == "unresolved"
+    assert events(lay) == []
+
+
+def test_admit_merge_unsupported_size_is_k(lay: Layout) -> None:
+    accept(lay, H1, 2)
+    with perimeter.open_db(lay) as db:
+        obs = merge_obs(db)
+    verdict = MV("unsupported_size", "unsupported_size: verdict", (), False)
+    assert admit(lay, obs.id, verdict) is None
+    assert outcome(lay, obs.id) == "conservative"
+    assert [(e[1], e[2], e[3]) for e in events(lay)] == [
+        ("registered", 2, trust_state.CONSERVATIVE_SOURCE)
+    ]
+
+
+def test_admit_merge_own_completed_by_another_route_admitted(lay: Layout) -> None:
+    """Review note 4: a concurrent route evaluated the merge observation
+    first (`accepted`): the admission takes it as its own, not as another
+    unfinished one."""
+    accept(lay, H1, 2)
+    with perimeter.open_db(lay) as db:
+        obs = merge_obs(db)
+        out = trust_state.advance_head(
+            db, ROOT, obs.id, lambda: H1, last_epoch=2, source_digest="env", keep=True
+        )
+    assert out == "accepted"
+    assert admit(lay, obs.id, MV()) is None
+    assert heads(lay) == [(H1, 2, 1)]
+
+
+def test_admit_merge_own_found_by_another_route_refused(lay: Layout) -> None:
+    """Another route completed it with a finding: registered, blocking."""
+    accept(lay, H1, 2)
+    with perimeter.open_db(lay) as db:
+        obs = merge_obs(db)
+        trust_state.register_findings(db, ROOT, obs.ctx, [RULESET], epochs_at(H1))
+    got = admit(lay, obs.id, MV())
+    assert isinstance(got, Refused) and got.reason == "perimeter_blocked"
+
+
+def test_admit_merge_no_accepted_head_refused(lay: Layout) -> None:
+    with perimeter.open_db(lay) as db:
+        ctx = trust_state.ctx_id("merge", BINDING, ADMIN, RULES, None, H1, P1)
+        obs = trust_state.open_observation(
+            db, ROOT, ctx, route="merge", binding=BINDING, admin_digest=ADMIN,
+            rules=RULES, accepted=None, head=H1, policy=P1,
+        )  # fmt: skip
+    got = admit(lay, obs.id, MV())
+    assert isinstance(got, Refused) and got.reason == "perimeter_blocked"
+    assert outcome(lay, obs.id) == "superseded"
+
+
+def test_admit_merge_settle_only_never_admits(lay: Layout) -> None:
+    """`admit=False` (a verdict a new check replaces): (1) and (2) only."""
+    accept(lay, H1, 2)
+    with perimeter.open_db(lay) as db:
+        obs = merge_obs(db)
+        observe(db, accepted=H1, head=H2)
+    assert admit(lay, obs.id, MV(), admit=False) is None
+    assert outcome(lay, obs.id) == "accepted"
+
+
+def test_admit_merge_is_one_transaction(
+    lay: Layout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash before its `COMMIT` leaves nothing: the observation open, no
+    event."""
+    accept(lay, H1, 2)
+    with perimeter.open_db(lay) as db:
+        obs = merge_obs(db)
+
+    def crash(name: str) -> None:
+        if name == "admission":
+            raise RuntimeError("crash")
+
+    monkeypatch.setattr(trust_state, "TRUST_STEP", crash)
+    with pytest.raises(RuntimeError):
+        admit(lay, obs.id, MV("refuse", "perimeter_findings: x", (RULESET,), True))
+    assert outcome(lay, obs.id) == "open" and events(lay) == []
+
+
+def test_admit_merge_settle_head_unreadable_keeps_the_reason(lay: Layout) -> None:
+    """Review M1: without the admission an unreadable head is no verified
+    snapshot -- the findings registered `pending`, a clean verdict left
+    unresolved; with the admission it is `Unavailable`."""
+    accept(lay, H1, 2)
+
+    def gone() -> str:
+        raise Unavailable("github_unavailable")
+
+    with perimeter.open_db(lay) as db:
+        found = merge_obs(db)
+        clean = merge_obs(db, policy=P2)
+    verdict = MV("refuse", "perimeter_findings: x", (RULESET,), True)
+    with perimeter.open_db(lay) as db:
+        kw = {"head_read": gone, "binding": BINDING, "admin_digest": ADMIN}
+        assert (
+            trust_state.admit_merge(
+                db, ROOT, found.id, verdict, rules=RULES, admit=False, **kw
+            )  # fmt: skip
+            is None
+        )
+        assert (
+            trust_state.admit_merge(
+                db, ROOT, clean.id, MV(), rules=RULES, admit=False, **kw
+            )  # fmt: skip
+            is None
+        )
+        with pytest.raises(Unavailable):
+            trust_state.admit_merge(db, ROOT, clean.id, MV(), rules=RULES, **kw)
+    assert outcome(lay, found.id) == "finding_registered"
+    assert outcome(lay, clean.id) == "unresolved"
+    assert [(e[1], e[2]) for e in events(lay)] == [("pending", None)]

@@ -13,7 +13,15 @@ most `LIMIT` bytes (more is drained and dropped) and stops waiting after
 `DEADLINE` of 150 s, sudo's `command_timeout` of 180 s). A timeout, a non-zero
 exit, oversized or malformed output, or a verdict not bound to this very
 request (`nonce`, `request_digest`, `repository_id`, `pr`, `head_sha`, `kind`)
-is a refusal (requirement 3). The token is revoked in `finally`.
+or to the publisher (`admin_digest` = its `current` record's, spec 5.4 p. 3
+rev 11) is a refusal (requirement 3). The token is revoked in `finally`.
+
+Candidate and finalize (stage 3a, Task 11) go through protocol v2, `op:
+merge`, with the same command, wait and token: the request adds the
+observation of the `merge` route (A = X, P pinned), the binding, the merger
+and the bundle source (`trust_routes.merge_fields`); the verdict is parsed
+and bound by `trust_routes.bind_merge` (X, the PR, the observation, the
+root, `admin_digest`, the ranges up to P). Stop stays on v1.
 
 The request digest and the verdict schema repeat `governance.act_precheck`
 (the key holder does not import `governance`); tests hold them equal.
@@ -38,13 +46,16 @@ from df.publisher.request import Refused
 from df.roles import PRECHECK_USER
 from df.stage2_config import no_constant, no_duplicates
 
-if TYPE_CHECKING:  # `merge` imports this module
+if TYPE_CHECKING:  # `merge` and `trust_routes` import this module
     from df.publisher.merge import Change, Kind
+    from df.publisher.trust_routes import MergeTrust, Verdict
 
 REQUEST_SCHEMA = "df/precheck-request/v1"
 VERDICT_SCHEMA = "df/precheck-verdict/v1"
 #: Kinds protocol v1 serves (decision 2); stage 3 brings v2 schemas.
 KINDS: tuple[Kind, ...] = ("stop",)
+#: Kinds protocol v2 serves (`op: merge`, stage 3a Task 11).
+V2_KINDS: tuple[Kind, ...] = ("candidate", "finalize")
 SUDO = "/usr/bin/sudo"
 WRAPPER = "df-precheck"
 PRECHECK_ENV: Mapping[str, str] = {"PATH": "/usr/bin:/bin", "LANG": "C"}
@@ -117,6 +128,8 @@ class PrecheckResult:
     admin_digest: str | None
     request_digest: str | None
     revoke: str
+    #: The bound `op: merge` verdict (protocol v2; `None` otherwise).
+    verdict: Verdict | None = None
 
     def evidence(self) -> dict[str, object]:
         """The metadata of this check for the evidence of `merge`."""
@@ -134,27 +147,43 @@ def command(layout: Layout) -> tuple[str, ...]:
 
 
 def admin_precheck(
-    kind: Kind, oc: OpContext, pr: Mapping[str, object], facts: PrFacts
+    kind: Kind,
+    oc: OpContext,
+    pr: Mapping[str, object],
+    facts: PrFacts,
+    *,
+    obs: MergeTrust | None = None,
 ) -> PrecheckResult:
     """Ask the precheck about the PR `pr` (GitHub's object) of `kind` with
-    the publisher's own `facts`.
+    the publisher's own `facts`; candidate and finalize by protocol v2 with
+    `obs`, the observation of the `merge` route (C = the PR's head, X =
+    `obs.snapshot`), stop by v1 without it.
 
     A read token (`READ_PERMISSIONS`, the product only) goes into a request
     with a fresh nonce; the command runs supervised; the verdict is parsed
     strictly and checked against the request. `refuse` is `Refused(reason)`,
     `unset` `Refused("precheck_unset: ...")`, a protocol failure
-    `Refused("precheck_failed: <timeout|exit|oversize|parse|binding_mismatch>")`.
-    The token is revoked in `finally`. A token that cannot be minted raises
-    as `ops.authorize` does; a kind outside protocol v1 is a `ValueError`."""
-    if kind not in KINDS:
-        raise ValueError(f"precheck protocol v1 does not serve kind {kind!r}")
+    `Refused("precheck_failed: <timeout|exit|oversize|parse|binding_mismatch>")`
+    (v2: `binding_mismatch: <rule>`); v2 keeps the bound verdict in
+    `verdict` (the final admission completes the observation by it). The
+    token is revoked in `finally`. A token that cannot be minted raises as
+    `ops.authorize` does; a kind outside both protocols, or `obs` given for
+    one protocol and not the other, is a `ValueError`."""
+    if kind not in (*KINDS, *V2_KINDS):
+        raise ValueError(f"the precheck does not serve kind {kind!r}")
+    if (kind in V2_KINDS) != (obs is not None):
+        raise ValueError("protocol v2 (candidate, finalize) and only it needs obs")
     number, head_sha = _pr_number(pr), _pr_head_sha(pr)
     if facts.head_repo_id != oc.product.repository_id:
         raise Refused("head_repo_foreign")
     token = ops.authorize(oc, ops.READ_PERMISSIONS).value
+    bound: Verdict | None = None
     try:
         request = _request(kind, oc, number, head_sha, facts, token)
-        refused, verdict = _ask(oc.layout, request, token)
+        if obs is None:
+            refused, verdict = _ask(oc.layout, request, token, oc.admin_digest)
+        else:
+            refused, verdict, bound = _ask_v2(oc, request, token, obs)
     finally:
         revoke = _revoke(oc, token)
     if verdict is None:
@@ -165,6 +194,7 @@ def admin_precheck(
         str(verdict["admin_digest"]),
         str(verdict["request_digest"]),
         revoke,
+        bound,
     )
 
 
@@ -222,10 +252,14 @@ def request_digest(request: Mapping[str, object]) -> str:
 
 
 def _ask(
-    layout: Layout, request: Mapping[str, object], token: str
+    layout: Layout,
+    request: Mapping[str, object],
+    token: str,
+    admin_digest: str | None,
 ) -> tuple[Refused | None, Mapping[str, object] | None]:
-    """Run the command on `request`: the refusal (if any) and the bound
-    verdict (`None` unless one was bound)."""
+    """Run the command on `request`: the refusal (if any) and the verdict
+    bound to it and to the publisher's `admin_digest` (`None` unless one was
+    bound; no record of the publisher binds nothing)."""
     data = json.dumps(request, separators=(",", ":")).encode("utf-8")
     if len(data) > LIMIT:
         return Refused("precheck_request_too_large"), None
@@ -238,7 +272,7 @@ def _ask(
     verdict = parse_verdict(run.stdout)
     if verdict is None:
         return _failed("parse"), None
-    if not _bound(verdict, request):
+    if not _bound(verdict, request, admin_digest):
         return _failed("binding_mismatch"), None
     reason = _mask(str(verdict["reason"]), token)
     if verdict["outcome"] == REFUSE:
@@ -246,6 +280,39 @@ def _ask(
     if verdict["outcome"] == UNSET:
         return Refused(f"precheck_unset: {reason}"), verdict
     return None, verdict
+
+
+def _ask_v2(
+    oc: OpContext, v1: Mapping[str, object], token: str, obs: MergeTrust
+) -> tuple[Refused | None, Mapping[str, object] | None, Verdict | None]:
+    """`_ask` for `op: merge`: the v1 request of the PR with the v2 keys, the
+    verdict parsed and bound by `trust_routes` (`MERGE_KEYS`,
+    `bind_merge`): the refusal (if any), the parsed and the bound verdict
+    (`None` unless one was bound)."""
+    from df.publisher import trust_routes  # it builds on this module
+
+    request = {**v1, **trust_routes.merge_fields(obs, oc.product.dag_variant)}
+    data = json.dumps(request, separators=(",", ":")).encode("utf-8")
+    if len(data) > LIMIT:
+        return Refused("precheck_request_too_large"), None, None
+    run = platform.run_supervised(
+        command(oc.layout), data, limit=LIMIT, wait=PRECHECK_WAIT, env=PRECHECK_ENV
+    )
+    failure = classify(run)
+    if failure is not None:
+        return _failed(failure), None, None
+    parsed = trust_routes.parse_verdict(run.stdout, trust_routes.MERGE_KEYS)
+    if parsed is None:
+        return _failed("parse"), None, None
+    got = trust_routes.bind_merge(parsed, request, trust=obs)
+    if not isinstance(got, trust_routes.Verdict):
+        return Refused(got.reason), None, None
+    reason = _mask(got.reason, token)
+    if got.outcome == ALLOW:
+        return None, parsed, got
+    if got.outcome == UNSET:
+        return Refused(f"precheck_unset: {reason}"), parsed, got
+    return Refused(reason), parsed, got
 
 
 def _failed(what: str) -> Refused:
@@ -292,9 +359,16 @@ def parse_verdict(raw: bytes) -> Mapping[str, object] | None:
     return data
 
 
-def _bound(verdict: Mapping[str, object], request: Mapping[str, object]) -> bool:
-    """The verdict answers this request: its bound fields and digest."""
+def _bound(
+    verdict: Mapping[str, object],
+    request: Mapping[str, object],
+    admin_digest: str | None,
+) -> bool:
+    """The verdict answers this request (its bound fields and digest) from
+    the publisher's admin tree (`admin_digest`)."""
     if verdict["request_digest"] != request_digest(request):
+        return False
+    if admin_digest is None or verdict["admin_digest"] != admin_digest:
         return False
     return all(verdict[key] == request[key] for key in BOUND)
 
@@ -325,8 +399,10 @@ def _mask(text: str, token: str) -> str:
 
 
 __all__ = [
+    "KINDS",
     "LIMIT",
     "PRECHECK_WAIT",
+    "V2_KINDS",
     "PrFacts",
     "PrecheckResult",
     "admin_precheck",
