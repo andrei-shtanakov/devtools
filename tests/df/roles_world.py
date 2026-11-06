@@ -53,6 +53,7 @@ import shutil
 import socket
 import ssl
 import subprocess
+import tempfile
 import threading
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -1058,13 +1059,6 @@ def install_sudoers_file(path: Path, text: str) -> None:
 API_HOST = "api.github.com"
 HOSTS_FILE = Path("/etc/hosts")
 HOSTS_MARK = "# df-acc: stage-3a root rows (removed by their teardown)"
-#: The CA bundle the uv-installed admin Python reads on macOS
-#: (`ssl.get_default_verify_paths()`: `/private/etc/ssl/cert.pem`).
-MACOS_CA_BUNDLE = Path("/private/etc/ssl/cert.pem")
-#: Debian's local CA directory (`update-ca-certificates` links it into
-#: `/etc/ssl/certs`, the admin Python's `capath`).
-LINUX_CA_FILE = Path("/usr/local/share/ca-certificates/df-acc-test-ca.crt")
-UPDATE_CA = "/usr/sbin/update-ca-certificates"
 #: The path of the positive control of the impersonation.
 API_CONTROL = "df-acc-control"
 
@@ -1181,30 +1175,69 @@ def serve_api(
             server.server_close()
 
 
-@contextmanager
-def trusted_ca(ca: Path) -> Iterator[None]:
-    """`ca` in the trust store of the admin Python; the store restored."""
-    if plat.detect_platform() == "macos-arm64":
-        saved = MACOS_CA_BUNDLE.read_bytes()
-        try:
-            MACOS_CA_BUNDLE.write_bytes(saved + b"\n" + ca.read_bytes())
-            yield
-        finally:
-            MACOS_CA_BUNDLE.write_bytes(saved)
-        return
-    shutil.copyfile(ca, LINUX_CA_FILE)
-    os.chmod(LINUX_CA_FILE, 0o644)
+#: The trust store a Python reads (`ssl.get_default_verify_paths()`).
+VERIFY_PATHS = (
+    "import json, ssl; p = ssl.get_default_verify_paths(); "
+    "print(json.dumps({'cafile': p.cafile, 'capath': p.capath}))"
+)
+
+
+def verify_paths(python: Path, user: str) -> dict[str, str | None]:
+    """The CA file and directory `python` reads as `user` (`sudo -u`: the
+    environment scrubbed, as the chain runs it)."""
+    argv = [SUDO, "-n", "-u", user, str(python), "-I", "-c", VERIFY_PATHS]
+    done = _run(argv, stdin=b"", env=BASE_ENV, cwd=Path("/"))
     try:
-        run([UPDATE_CA])
-        yield
+        found = json.loads(done.stdout)
+    except ValueError:
+        found = None
+    if not isinstance(found, dict):
+        infra(f"пути доверия {python} от {user}: {shown(done)}")
+    return found  # type: ignore[return-value]
+
+
+@contextmanager
+def trusted_ca(ca: Path, paths: Mapping[str, str | None]) -> Iterator[str]:
+    """`ca` in the store the admin Python reports: appended to its CA file
+    when that exists, else one `<hash>.<n>` file in its CA directory. The
+    store is restored at the end and checked byte for byte (a mismatch is
+    infrastructure); what was changed is yielded."""
+    cafile, capath = paths.get("cafile"), paths.get("capath")
+    if cafile and os.path.isfile(cafile):
+        bundle = Path(cafile)
+        saved = bundle.read_bytes()
+        try:
+            bundle.write_bytes(saved + b"\n" + ca.read_bytes())
+            yield str(bundle)
+        finally:
+            bundle.write_bytes(saved)
+        if bundle.read_bytes() != saved:
+            infra(f"{bundle}: не восстановлен побайтно")
+        return
+    if not capath or not os.path.isdir(capath):
+        infra(f"нет хранилища доверия: {dict(paths)}")
+    directory = Path(str(capath))
+    before = sorted(os.listdir(directory))
+    out = _run([str(OPENSSL), "x509", "-hash", "-noout", "-in", str(ca)],
+               stdin=b"", env=BASE_ENV, cwd=Path("/"))  # fmt: skip
+    check(out, "openssl x509 -hash")
+    name = out.stdout.decode().strip()
+    n = next(i for i in range(100) if not (directory / f"{name}.{i}").exists())
+    added = directory / f"{name}.{n}"
+    shutil.copyfile(ca, added)
+    os.chmod(added, 0o644)
+    try:
+        yield str(added)
     finally:
-        LINUX_CA_FILE.unlink(missing_ok=True)
-        run([UPDATE_CA, "--fresh"])
+        added.unlink(missing_ok=True)
+    if sorted(os.listdir(directory)) != before:
+        infra(f"{directory}: не восстановлен")
 
 
 @contextmanager
 def api_on_loopback() -> Iterator[None]:
-    """`API_HOST` resolved to the loopback (`/etc/hosts`); restored."""
+    """`API_HOST` resolved to the loopback (`/etc/hosts`); restored and
+    checked byte for byte."""
     saved = HOSTS_FILE.read_bytes()
     lines = f"\n{HOSTS_MARK}\n127.0.0.1 {API_HOST}\n::1 {API_HOST}\n"
     try:
@@ -1214,6 +1247,8 @@ def api_on_loopback() -> Iterator[None]:
     finally:
         HOSTS_FILE.write_bytes(saved)
         _flush_resolver()
+    if HOSTS_FILE.read_bytes() != saved:
+        infra(f"{HOSTS_FILE}: не восстановлен побайтно")
 
 
 def _flush_resolver() -> None:
@@ -1239,26 +1274,58 @@ except Exception as exc:
 """
 
 
+#: The roles whose processes read the trust sources (the controls).
+API_READERS = ("df-publisher", "df-precheck")
+
+
 @contextmanager
 def impersonate_api(rest: object, work: Path, python: Path) -> Iterator[ApiCerts]:
-    """The runner answers `https://api.github.com/` itself (`rest`): a CA
-    trusted by the admin Python `python`, the name on the loopback, HTTPS
-    on port 443; the positive control (`API_PROBE`) must reach it, else
-    infrastructure. Everything restored at the end."""
+    """CI host adaptation of the 3a rows only (a fixture, never the job):
+    the runner answers `https://api.github.com/` itself (`rest`), since
+    df's trust reads are pinned to that host by design. A CA made here
+    (its keys in a temp directory of this run, never printed, removed at
+    the end) is put in the store the admin Python `python` reports
+    (`verify_paths`), the name on the loopback, HTTPS on port 443. Nothing
+    is passed through the environment (no `SSL_CERT_FILE`): the
+    env-scrubbed chain must trust it. The positive control comes first:
+    `python` as `df-publisher` and as `df-precheck` (`sudo -u`) reaches the
+    fake, else infrastructure. The store and `/etc/hosts` are restored and
+    checked byte for byte."""
     if os.geteuid() != 0:
         raise PermissionError("impersonate_api: root only (CI root world)")
-    certs = make_api_certs(work / "api-certs")
-    with ExitStack() as stack:
-        stack.enter_context(serve_api(rest, certs))
-        stack.enter_context(trusted_ca(certs.ca))
-        stack.enter_context(api_on_loopback())
-        done = _run([str(python), "-I", "-c", API_PROBE, API_CONTROL], stdin=b"",
-                    env=BASE_ENV, cwd=Path("/"))  # fmt: skip
-        try:
-            seen = json.loads(done.stdout)
-        except ValueError:
-            seen = {"raw": shown(done)}
-        evidence("api-impersonation.json", {"probe": seen})
-        if seen.get("status") != 200 or seen.get("body") != {"control": API_CONTROL}:
-            infra(f"api.github.com не отвечает подделкой: {seen}")
-        yield certs
+    paths = {user: verify_paths(python, user) for user in API_READERS}
+    if len({json.dumps(p, sort_keys=True) for p in paths.values()}) != 1:
+        infra(f"роли читают разные хранилища доверия: {paths}")
+    keys = Path(tempfile.mkdtemp(prefix="df-acc-api-", dir=work))
+    try:
+        certs = make_api_certs(keys)
+        with ExitStack() as stack:
+            stack.enter_context(serve_api(rest, certs))
+            store = stack.enter_context(trusted_ca(certs.ca, paths["df-publisher"]))
+            stack.enter_context(api_on_loopback())
+            seen = {user: _probe(python, user) for user in API_READERS}
+            evidence(
+                "api-impersonation.json",
+                {"verify_paths": paths, "store_changed": store, "probe": seen},
+            )
+            for user, got in seen.items():
+                if got.get("status") != 200 or got.get("body") != {
+                    "control": API_CONTROL
+                }:
+                    infra(f"api.github.com не отвечает подделкой ({user}): {got}")
+            yield certs
+    finally:
+        shutil.rmtree(keys, ignore_errors=True)
+        if keys.exists():
+            infra(f"{keys}: ключи не удалены")
+
+
+def _probe(python: Path, user: str) -> dict[str, object]:
+    """`API_PROBE` by `python` as `user` (`sudo -u`, env scrubbed)."""
+    argv = [SUDO, "-n", "-u", user, str(python), "-I", "-c", API_PROBE, API_CONTROL]
+    done = _run(argv, stdin=b"", env=BASE_ENV, cwd=Path("/"))
+    try:
+        found = json.loads(done.stdout)
+    except ValueError:
+        found = {"raw": shown(done)}
+    return found if isinstance(found, dict) else {"raw": found}
