@@ -507,3 +507,114 @@ def test_operator_rights_of_another_operators_file_unavailable(l3: L3) -> None:
         ),
     )
     assert rights["operator.isolation"].status == "не проверено"
+
+
+# --- round 1b: the publisher's listing of blocking events ---
+
+
+OLD_ROOT = ("github.com", TRUST_ID + 7, "main")
+
+
+def _row(
+    kind: str,
+    reason: str | None = None,
+    *,
+    root: tuple[str, int, str] = ("github.com", TRUST_ID, "main"),
+    event_id: int = 1,
+    state: str = "registered",
+    epoch: int | None = 1,
+) -> dict[str, object]:
+    host, repo, branch = root
+    return {
+        "root": {"host": host, "repository_id": repo, "branch": branch},
+        "event_id": event_id,
+        "kind": kind,
+        "state": state,
+        "epoch": epoch,
+        "reason": reason,
+    }
+
+
+def listed(line: bytes, rows: list[dict[str, object]], omitted: int = 0) -> bytes:
+    """`line` with the publisher's `blocking` listing."""
+    data = json.loads(line)
+    data["result"]["blocking"] = {"events": rows, "omitted": omitted}
+    return (json.dumps(data) + "\n").encode()
+
+
+def test_listing_names_the_k_cause_epochs(l3: L3) -> None:
+    """A К event naming `unsupported_size: epochs`: «нарушено» with the field
+    and `EPOCHS_EXIT` -- only because the event says so."""
+    l3.trust = listed(
+        status_line("blocked"),
+        [_row("conservative", "unsupported_size: epochs", state="pending", epoch=None)],
+    )
+    checks = l3.checks()
+    c = checks["trust.unsupported_size"]
+    assert c.status == "нарушено"
+    want = (
+        "событие 1 (консервативное событие (К), pending): unsupported_size: "
+        f"epochs — {setup_trust.EPOCHS_EXIT}"
+    )
+    assert c.problems == (want,)
+    status = checks["trust.status"]
+    assert status.problems[1] == c.problems[0]
+    assert doctor.OTHER_ROOTS not in status.problems
+
+
+def test_listing_other_causes_never_offer_epochs(l3: L3) -> None:
+    """A registered finding, a record-violation and a К without a cause:
+    named by kind in `trust.status`; `trust.unsupported_size` is `ok` (none
+    is a size event) and never shows the epochs exit."""
+    rows = [
+        _row("finding", "ruleset_missing: no ruleset", event_id=1),
+        _row("record_violation", "pushed to main", event_id=2),
+        _row("conservative", None, event_id=3),
+    ]
+    l3.trust = listed(status_line("blocked"), rows)
+    checks = l3.checks()
+    size = checks["trust.unsupported_size"]
+    assert size.status == "ok"
+    assert size.reason.startswith("К без названной причины")
+    assert setup_trust.EPOCHS_EXIT not in size.reason
+    problems = checks["trust.status"].problems
+    assert problems[1:4] == (
+        "событие 1 (находка, registered E1): ruleset_missing: no ruleset",
+        "событие 2 (нарушение (record-violation), registered E1): pushed to main",
+        "событие 3 (консервативное событие (К), registered E1): причина не названа",
+    )
+    assert all(setup_trust.EPOCHS_EXIT not in p for p in problems)
+
+
+def test_listing_labels_old_root_events(l3: L3) -> None:
+    """An old root's `pending` `db_restore` event is listed under its root,
+    labelled as not blocking the current root -- here a `clear` one."""
+    old = _row("db_restore", root=OLD_ROOT, event_id=9, state="pending", epoch=None)
+    l3.trust = listed(status_line(), [old])
+    checks = l3.checks()
+    c = checks["trust.status"]
+    assert c.status == "ok"
+    assert (
+        f"прежний корень github.com {TRUST_ID + 7} main: событие 9 "
+        "(восстановление базы, pending) — не блокирует текущий корень"
+    ) in c.reason
+    assert doctor.OTHER_ROOTS not in c.reason
+    assert checks["trust.unsupported_size"].status == "ok"
+    size_old = _row("conservative", "unsupported_size: epochs", root=OLD_ROOT)
+    l3.trust = listed(status_line(), [size_old])
+    assert l3.checks()["trust.unsupported_size"].status == "ok"
+
+
+def test_listing_omitted_is_not_checked(l3: L3) -> None:
+    l3.trust = listed(status_line("blocked"), [_row("finding", "x: y")], omitted=3)
+    checks = l3.checks()
+    assert checks["trust.unsupported_size"].status == "не проверено"
+    assert "ещё 3" in checks["trust.unsupported_size"].reason
+    assert any("ещё 3" in p for p in checks["trust.status"].problems)
+
+
+def test_listing_absent_keeps_unnamed_block(l3: L3) -> None:
+    """An answer without `blocking` (an older publisher) keeps I-2's text."""
+    l3.trust = status_line("blocked")
+    c = l3.checks()["trust.unsupported_size"]
+    assert c.reason == f"{doctor.UNNAMED_BLOCK}; {doctor.EPOCHS_MAYBE}"

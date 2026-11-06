@@ -85,7 +85,12 @@ from df.paths import Layout
 from df.publisher import precheck, request, store
 from df.publisher.github import SelfCheckResult
 from df.publisher.perimeter import MAX_EVENTS, MIGRATION_REQUIRED, SCHEMA_VERSION
-from df.publisher.request import BadResponse, Response, TrustStatus
+from df.publisher.request import (
+    BadResponse,
+    BlockingRow,
+    Response,
+    TrustStatus,
+)
 from df.publisher.trust_routes import UNFINISHED, UNVERIFIED, binding_problem
 from df.release import RELEASE_JSON
 from df.roles import HISTORY_GROUP, history_members
@@ -1729,7 +1734,12 @@ def _trust_status(ctx: _Level3) -> str:
     unknown = sorted(set(status.unverified) - UNVERIFIED)
     if unknown:
         raise _broken([f"неизвестная непроверенная предпосылка {c}" for c in unknown])
-    notes = [*(f"не проверено: {code}" for code in status.unverified), OTHER_ROOTS]
+    root = _bound(ctx).root_id
+    mine, old = _events_of(status, root)
+    notes = [
+        *(f"не проверено: {code}" for code in status.unverified),
+        *_listing_notes(status, old),
+    ]
     if status.state == "clear":
         head = f"clear; снимок {status.snapshot_sha}, эпоха {status.last_epoch}"
         return "; ".join([head, *notes])
@@ -1738,8 +1748,64 @@ def _trust_status(ctx: _Level3) -> str:
             setup_trust.explain(f"находка {f['kind']} ({f['role']}): {f['detail']}")
             for f in status.findings
         ]
+        if status.blocking is not None:
+            listed = [setup_trust.explain(_event_text(e)) for e in mine]
+            raise _broken(["blocked", *(listed or found or [UNNAMED_BLOCK]), *notes])
         raise _broken(["blocked", *(found or [UNNAMED_BLOCK]), *notes])
     raise _Outcome(UNAVAILABLE, _unavailable_reason(status))
+
+
+#: How doctor names each kind of a listed blocking event.
+_KIND_TEXT = {
+    "finding": "находка",
+    "record_violation": "нарушение (record-violation)",
+    "app_installation": "установка App на источнике доверия",
+    "conservative": "консервативное событие (К)",
+    "db_restore": "восстановление базы",
+    "unknown": "событие неизвестного вида",
+}
+
+
+def _events_of(
+    status: TrustStatus, root: tuple[str, int, str]
+) -> tuple[list[BlockingRow], list[BlockingRow]]:
+    """The listed blocking events: the current root's and the old roots'."""
+    events = () if status.blocking is None else status.blocking.events
+    return (
+        [e for e in events if e.root == root],
+        [e for e in events if e.root != root],
+    )
+
+
+def _event_text(event: BlockingRow) -> str:
+    """`событие N (<kind>, <state>[ E]): <reason>`; a К without a cause
+    says so."""
+    when = event.state if event.epoch is None else f"{event.state} E{event.epoch}"
+    reason = event.reason
+    if reason is None:
+        reason = "причина не названа" if event.kind == "conservative" else ""
+    head = f"событие {event.event_id} ({_KIND_TEXT[event.kind]}, {when})"
+    return f"{head}: {reason}" if reason else head
+
+
+def _old_root_text(event: BlockingRow) -> str:
+    host, repo, branch = event.root
+    return (
+        f"прежний корень {host} {repo} {branch}: {_event_text(event)} — не "
+        "блокирует текущий корень"
+    )
+
+
+def _listing_notes(status: TrustStatus, old: Sequence[BlockingRow]) -> list[str]:
+    """The old roots' events (labelled), how many were not listed; without
+    the publisher's listing, the gap itself (`OTHER_ROOTS`)."""
+    if status.blocking is None:
+        return [OTHER_ROOTS]
+    notes = [_old_root_text(e) for e in old]
+    omitted = status.blocking.omitted
+    if omitted:
+        notes.append(f"не проверено: ещё {omitted} блокирующих событий не перечислены")
+    return notes
 
 
 def _unavailable_reason(status: TrustStatus) -> str:
@@ -1790,15 +1856,43 @@ def _unsupported_size(ctx: _Level3) -> str:
     if problem is not None:
         raise _broken([f"{_UNSUPPORTED}{problem}"])
     status = _status(ctx)
-    # Defensive: today the publisher ends an `unsupported_size` verdict by К
-    # and never names it in the reason (follow-up: a publisher field).
+    # Defensive: the publisher ends an `unsupported_size` verdict by К and
+    # names it in the К event's reason (`blocking`), not in this reason.
     if status.reason is not None and _UNSUPPORTED in status.reason:
         raise _broken([setup_trust.explain(status.reason)])
     if status.state == "clear":
         return ""
-    if status.state == "blocked":
+    if status.state != "blocked":
+        raise _Outcome(UNAVAILABLE, _unavailable_reason(status))
+    if status.blocking is None:  # an answer without the listing
         raise _Outcome(NOT_CHECKED, f"{UNNAMED_BLOCK}; {EPOCHS_MAYBE}")
-    raise _Outcome(UNAVAILABLE, _unavailable_reason(status))
+    return _size_of_listing(status, _bound(ctx).root_id)
+
+
+def _size_of_listing(status: TrustStatus, root: tuple[str, int, str]) -> str:
+    """A blocked root with the publisher's listing: a К event of the current
+    root naming `unsupported_size: <field>` is «нарушено» with that field
+    (the exit of `epochs` only then, `setup_trust.explain`). The publisher
+    always names a typed status in its К event (`trust_state.apply_status`
+    with the verdict's reason), so a К event without a cause is another К
+    (a changed context, a restore) -- a note of `ok`. Events not listed
+    are «не проверено». The old roots' events never count (labelled in
+    `trust.status`)."""
+    assert status.blocking is not None
+    mine, _old = _events_of(status, root)
+    k_events = [e for e in mine if e.kind == "conservative"]
+    named = [e for e in k_events if e.reason and _UNSUPPORTED in e.reason]
+    if named:
+        raise _broken([setup_trust.explain(_event_text(e)) for e in named])
+    if status.blocking.omitted:
+        omitted = status.blocking.omitted
+        raise _Outcome(NOT_CHECKED, f"ещё {omitted} блокирующих событий не перечислены")
+    others = [_event_text(e) for e in k_events]
+    return f"{_K_NOT_SIZE}: {'; '.join(others)}" if others else ""
+
+
+#: A К event without a named cause is not an `unsupported_size` one.
+_K_NOT_SIZE = "К без названной причины (не unsupported_size)"
 
 
 #: The exit of `unsupported_size: epochs`, offered only as one possible cause.
