@@ -51,7 +51,7 @@ STEP_NAMES = (
 )
 PUBLISHER_MODE = 0o644
 CREATED_MODE = 0o644
-SUDOERS_MODE = 0o440
+SUDOERS_MODE = sudoers.FILE_MODE
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 #: Directory states `do()` settles: absent, a mode `make_dir` repairs, ours but
 #: still root's (a crash between `mkdir` and `fchown`).

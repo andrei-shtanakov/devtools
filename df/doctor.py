@@ -16,7 +16,15 @@ the real `sudo` (the seams `role_check`, `role_access`,
 `publisher_self_check` and `exec_check_github`) and judges their answers with
 the production parsers; `products.toml` is read live, like `publisher.toml`.
 The perimeter journal's line comes from the same `self-check` answer and is
-not a level-2 check.
+not a level-2 check; nor is the operator's line (spec 4.5, O7: (i)
+`sudoers.operator_rights`, (ii) never `ok`).
+
+Level 3 «доверие» (stage 3a, Task 13; spec 2.4 rev 11) is shown apart, gated
+as level 2: the binding, the history profile and `df-history`, root's
+`trust-status` (`setup_trust.trust_status_call`, judged by
+`request.parse_trust_status`), `unsupported_size` and the perimeter schema.
+It never changes level 1, level 2 or the exit; the side effects of the
+probes are listed (spec 8).
 
 Exit codes (R68): 0 — level 1 reached (with `--product`: level 2, R13-5);
 2 — not reached (a transitional state included); 1 — a program error
@@ -55,6 +63,7 @@ from df import (
     roles,
     roles_setup,
     setup_agent,
+    setup_trust,
     stage2_config,
     state,
     sudoers,
@@ -67,6 +76,7 @@ from df.config import (
     Account,
     ConfigError,
     load_accounts,
+    load_groups,
     read_optional,
 )
 from df.digest import TreeError
@@ -75,9 +85,12 @@ from df.launch import SUDO
 from df.paths import Layout
 from df.publisher import precheck, request, store
 from df.publisher.github import SelfCheckResult
-from df.publisher.perimeter import MAX_EVENTS
-from df.publisher.request import BadResponse, Response
+from df.publisher.perimeter import MAX_EVENTS, MIGRATION_REQUIRED, SCHEMA_VERSION
+from df.publisher.request import BadResponse, Response, TrustStatus
+from df.publisher.trust_routes import UNFINISHED, UNVERIFIED, binding_problem
 from df.release import RELEASE_JSON
+from df.roles import HISTORY_GROUP, history_members
+from df.stage2_config import TrustBinding, load_trust
 from df.state import ReadResult, Snapshot
 
 Status = Literal["ok", "нарушено", "не проверено", "данные недоступны"]
@@ -212,7 +225,7 @@ def doctor_main(
     `Transitional(g)`: only the transitional state, nothing of a snapshot is
     used. `Stable`: the snapshot as a reader parses it (`parse_snapshot`).
     Exit 0 when the level asked for is reached: 1 without `product`, 2 with
-    it (R13-5).
+    it (R13-5); level 3 is shown apart and never changes the exit.
     """
     if isinstance(read, Transitional):
         return _transitional(read.generation, as_json, product)
@@ -225,8 +238,11 @@ def doctor_main(
         print(render(checks, probes, notes))
         return EXIT_REACHED if level1_reached(checks) else EXIT_NOT_REACHED
     second = level2(snap, layout, product, euid=euid, operator=operator, level1=checks)
+    third = level3(
+        snap, layout, euid=euid, operator=operator, level1=checks, second=second
+    )
     render2 = render_json_product if as_json else render_text_product
-    print(render2(checks, second, probes, notes))
+    print(render2(checks, second, probes, notes, third))
     reached = level2_reached(checks, second.checks)
     return EXIT_REACHED if reached else EXIT_NOT_REACHED
 
@@ -662,6 +678,11 @@ LEVEL2_IDS = (
     "models.access",
 )
 PERIMETER_ID = "perimeter.journal"
+#: How the perimeter line's text begins when the publisher opened the
+#: database (`perimeter.schema` reads it: the schema is current).
+PERIMETER_EVENTS = "событий"
+OPERATOR_RIGHTS_ID = "operator.rights"
+OPERATOR_ISOLATION_ID = "operator.isolation"
 #: The run id of `publisher.answers`: never registered, so the publisher
 #: answers `refused: run_unknown` (r2 N3: «отвечает» needs no run).
 PROBE_RUN_ID = "doctor-probe"
@@ -717,6 +738,9 @@ class Level2:
     checks: list[Check]
     perimeter: Check
     profile: str | None
+    #: The operator's line (spec 4.5, O7): (i) `operator.rights`, (ii)
+    #: `operator.isolation` -- not level-2 checks, (ii) never `ok`.
+    rights: tuple[Check, ...] = ()
 
 
 @dataclass
@@ -753,14 +777,18 @@ def level2(
     ctx = _Level2(snap, layout, True, product=product, operator=operator)
     checks = [_run(i, check, ctx) for i, check in _LEVEL2]
     line = _run(PERIMETER_ID, _perimeter, ctx)
+    rights = (_run(OPERATOR_RIGHTS_ID, _operator_rights, ctx), _isolation_line())
     products = ctx.products
     entry = products.get(product) if isinstance(products, dict) else None
-    return Level2(product, checks, line, None if entry is None else entry.profile)
+    profile = None if entry is None else entry.profile
+    return Level2(product, checks, line, profile, rights)
 
 
 def _unasked(product: int, status: Status, reason: str) -> Level2:
     checks = [Check(i, status, reason, _now()) for i in LEVEL2_IDS]
-    return Level2(product, checks, Check(PERIMETER_ID, status, reason, _now()), None)
+    line = Check(PERIMETER_ID, status, reason, _now())
+    rights = (Check(OPERATOR_RIGHTS_ID, status, reason, _now()), _isolation_line())
+    return Level2(product, checks, line, None, rights)
 
 
 def level2_reached(level1: Sequence[Check], checks: Sequence[Check]) -> bool:
@@ -877,6 +905,19 @@ def _operator(ctx: _Level2) -> str:
     except ValueError as exc:
         raise _Outcome(UNAVAILABLE, f"оператор недопустим: {exc}") from exc
     return ctx.operator
+
+
+def _operator_rights(ctx: _Level2) -> str:
+    """The operator's result (i) (spec 4.5, O7): `sudoers.operator_rights`."""
+    rights = sudoers.operator_rights(ctx.layout, _operator(ctx))
+    if rights.ours:
+        raise _broken(rights.ours)
+    return ""
+
+
+def _isolation_line() -> Check:
+    """The operator's result (ii): never checked, never `ok` (O7)."""
+    return Check(OPERATOR_ISOLATION_ID, NOT_CHECKED, sudoers.OPERATOR_EXCEPTION, _now())
 
 
 def _libexec(ctx: _Level2) -> str:
@@ -1456,7 +1497,7 @@ def _perimeter(ctx: _Level2) -> str:
         )
         raise _Outcome(UNAVAILABLE, why)
     text = (
-        f"событий {stats.events}, база {stats.db_bytes // _MIB} МиБ, "
+        f"{PERIMETER_EVENTS} {stats.events}, база {stats.db_bytes // _MIB} МиБ, "
         f"свободно {stats.free_bytes // _MIB} МиБ"
     )
     limit = " ".join(f"{MAX_EVENTS:,}".split(","))
@@ -1472,6 +1513,313 @@ def _perimeter(ctx: _Level2) -> str:
     if stats.free_bytes < MIN_FREE:
         notes.append(f"предупреждение: свободно меньше {MIN_FREE // _MIB} МиБ")
     return "; ".join(notes)
+
+
+# ---------- level 3: trust, for product P (stage 3a, Task 13) ----------
+
+
+LEVEL3_IDS = (
+    "trust.binding",
+    "trust.history",
+    "trust.status",
+    "trust.unsupported_size",
+    "perimeter.schema",
+)
+NO_BINDING = "нет trust.toml: привязки нет, выполните darkfactory setup-trust"
+#: Spec 6.2 (O14): a binding without the history token key.
+NO_HISTORY_KEY = (
+    "привязка без ключа history_gh_config_dir: нет профиля токена истории (O14); "
+    "повторите sudo darkfactory setup-trust write с --history-token-file"
+)
+#: Spec 8 «Пробы с побочными эффектами» (rev 11): what the probes change.
+SIDE_EFFECT_PRECHECK = (
+    "publisher.precheck: настоящий precheck serve убирает остатки "
+    f"{roles.PRECHECK_USER} старше {int(precheck_reap.REAP_AFTER)} с"
+)
+SIDE_EFFECT_TRUST = (
+    "trust-status: настоящий precheck serve убирает остатки "
+    f"{roles.PRECHECK_USER} старше {int(precheck_reap.REAP_AFTER)} с; издатель "
+    "создаёт наблюдение, может зарегистрировать находку и принять новую голову "
+    "корня"
+)
+#: A К event surfaces from `trust-status` as `blocked` with no reason and no
+#: finding (`trust_routes.RootState.fields`): its cause is not in the answer.
+CONSERVATIVE_BLOCK = (
+    "корень заблокирован консервативным событием, причина в ответе не названа "
+    "(unsupported_size, irreproducible, смена контекста или восстановление базы)"
+)
+_UNSUPPORTED = "unsupported_size: "
+_NOT_REACHED3 = "уровень 3: не достигнут"
+
+
+@dataclass(frozen=True)
+class Level3:
+    """The trust checks of level 3 (spec 2.4 rev 11: shown apart, each with
+    its status) and the side effects of the probes that ran (spec 8)."""
+
+    checks: list[Check]
+    side_effects: tuple[str, ...]
+
+
+@dataclass
+class _Level3(_Context):
+    """What the level-3 checks of one run share: the operator, level 2's
+    perimeter line, the binding and the one `trust-status` answer."""
+
+    operator: str | None = None
+    perimeter: Check | None = None
+    binding: TrustBinding | _Outcome | None = None
+    status: TrustStatus | _Outcome | None = None
+    asked: bool = False
+
+
+def level3(
+    snap: Snapshot,
+    layout: Layout,
+    *,
+    euid: int,
+    operator: str | None,
+    level1: Sequence[Check],
+    second: Level2,
+) -> Level3:
+    """The trust checks for the product of `second` and the side effects of
+    the probes (level 2's `publisher.precheck`, this `trust-status`).
+    Gated as level 2 (root, level 1 reached): nothing is asked otherwise.
+    Never changes level 1 or 2."""
+    if euid != ROOT_UID:
+        return _unasked3(UNAVAILABLE, NEED_SUDO)
+    if not level1_reached(level1):
+        return _unasked3(NOT_CHECKED, _LEVEL1_FIRST)
+    ctx = _Level3(snap, layout, True, operator=operator, perimeter=second.perimeter)
+    checks = [_run(i, check, ctx) for i, check in _LEVEL3]
+    effects = [SIDE_EFFECT_PRECHECK, *([SIDE_EFFECT_TRUST] if ctx.asked else [])]
+    return Level3(checks, tuple(effects))
+
+
+def _unasked3(status: Status, reason: str) -> Level3:
+    return Level3([Check(i, status, reason, _now()) for i in LEVEL3_IDS], ())
+
+
+def _binding_check(ctx: _Level3) -> str:
+    """`trust.toml` reads and parses (live, like `publisher.toml`)."""
+    binding = _binding(ctx)
+    host, repo, branch = binding.root_id
+    return f"корень {host} {repo} {branch}; df-trust {binding.df_trust_full_name}"
+
+
+def _binding(ctx: _Level3) -> TrustBinding:
+    if ctx.binding is None:
+        ctx.binding = _read_binding(ctx)
+    if isinstance(ctx.binding, _Outcome):
+        raise ctx.binding
+    return ctx.binding
+
+
+def _read_binding(ctx: _Level3) -> TrustBinding | _Outcome:
+    """The binding root reads itself; unparsable during a live write is
+    withheld (`_writing`, as `etc.schemas` does for `publisher.toml`)."""
+    try:
+        binding = load_trust(ctx.layout.etc / "trust.toml")
+    except ConfigError as exc:
+        if _writing(ctx):
+            return _Outcome(UNAVAILABLE, _LIVE_WRITE)
+        return _Outcome(BROKEN, f"trust.toml: {exc}")
+    return _Outcome(BROKEN, NO_BINDING) if binding is None else binding
+
+
+def _bound(ctx: _Level3) -> TrustBinding:
+    """The binding for a check that needs it: «не проверено» without it."""
+    try:
+        return _binding(ctx)
+    except _Outcome as exc:
+        raise _Outcome(NOT_CHECKED, f"trust.binding: {exc.reason}") from exc
+
+
+def _history(ctx: _Level3) -> str:
+    """Spec 6.2 (O14) and 4.1 rev 11: the binding has the history key, at
+    `/etc/df/history-gh`; the profile is root's, group `df-history` by its
+    `groups.toml` record, `PROFILE_DIR_MODE`/`PROFILE_FILE_MODE`, no ACL
+    (judged by `lstat`, never opened); the group's members are exactly
+    `history_members(operator)`."""
+    binding = _bound(ctx)
+    if binding.history_gh_config_dir is None:
+        raise _Outcome(BROKEN, NO_HISTORY_KEY)
+    profile = ctx.layout.history_gh
+    if binding.history_gh_config_dir != str(profile):
+        raise _broken([f"history_gh_config_dir ≠ {profile}"])
+    gid = _history_gid(ctx.layout)
+    parts: list[_Part] = [(BROKEN, p) for p in _profile_problems(profile, gid)]
+    if ctx.operator is None:
+        parts.append((UNAVAILABLE, f"состав {HISTORY_GROUP}: {NO_OPERATOR}"))
+    else:
+        members = history_members(ctx.operator)
+        problems = plat.group_problems(ctx.layout, HISTORY_GROUP, members)
+        parts += [(BROKEN, p) for p in problems]
+    _judge(parts)
+    return f"профиль {profile}; состав {HISTORY_GROUP} точный"
+
+
+def _history_gid(layout: Layout) -> int | None:
+    """The GID `groups.toml` records for `df-history` (`None`: no record;
+    `group_problems` names it)."""
+    try:
+        record = load_groups(layout.groups).get(HISTORY_GROUP)
+    except ConfigError:
+        return None
+    return None if record is None else record.gid
+
+
+def _profile_problems(profile: Path, gid: int | None) -> list[str]:
+    """The history profile as `setup_trust.write_binding` leaves it: the
+    files of `profile_files` (names only; the token is never read)."""
+    try:
+        st = os.lstat(profile)
+    except FileNotFoundError:
+        return [f"нет {profile}"]
+    if not stat.S_ISDIR(st.st_mode):
+        return [f"{profile}: не каталог"]
+    problems = _profile_object(profile, st, gid, setup_trust.PROFILE_DIR_MODE)
+    names = set(os.listdir(profile))
+    wanted = setup_trust.profile_files("")
+    problems += [f"нет {profile / n}" for n in sorted(set(wanted) - names)]
+    for name in sorted(names):
+        path = profile / name
+        found = os.lstat(path)
+        if not stat.S_ISREG(found.st_mode):
+            problems.append(f"{path}: не обычный файл")
+            continue
+        problems += _profile_object(path, found, gid, setup_trust.PROFILE_FILE_MODE)
+    return problems
+
+
+def _profile_object(
+    path: Path, st: os.stat_result, gid: int | None, mode: int
+) -> list[str]:
+    problems: list[str] = []
+    owner = fsutil.owner_uid(st)
+    if owner != plat.ROOT_UID:
+        problems.append(f"{path}: владелец uid {owner}, не root")
+    if gid is not None and st.st_gid != gid:
+        problems.append(f"{path}: группа gid {st.st_gid}, {HISTORY_GROUP} — {gid}")
+    if stat.S_IMODE(st.st_mode) != mode:
+        problems.append(
+            f"{path}: права {stat.S_IMODE(st.st_mode):04o}, нужны {mode:04o}"
+        )
+    if acl.acl_present_path(path):
+        problems.append(f"{path}: есть ACL")
+    return problems
+
+
+def _trust_status(ctx: _Level3) -> str:
+    """Root's `trust-status` (spec 5.2), its schema and root checked by
+    `request.parse_trust_status`: `clear` is `ok` with the unverified
+    premises listed (the closed set of `trust_routes.UNVERIFIED`); `blocked`
+    is «нарушено» with its findings; an unfinished observation (matched by
+    the prefix `trust_observation_unfinished:`) or any other `unavailable`
+    is «данные недоступны»."""
+    status = _status(ctx)
+    unknown = sorted(set(status.unverified) - UNVERIFIED)
+    if unknown:
+        raise _broken([f"неизвестная непроверенная предпосылка {c}" for c in unknown])
+    notes = [f"не проверено: {code}" for code in status.unverified]
+    if status.state == "clear":
+        head = f"clear; снимок {status.snapshot_sha}, эпоха {status.last_epoch}"
+        return "; ".join([head, *notes])
+    if status.state == "blocked":
+        found = [
+            setup_trust.explain(f"находка {f['kind']} ({f['role']}): {f['detail']}")
+            for f in status.findings
+        ]
+        raise _broken(["blocked", *(found or [CONSERVATIVE_BLOCK]), *notes])
+    reason = status.reason or "без причины"
+    if reason.startswith(f"{UNFINISHED}:"):
+        text = f"наблюдение не завершено ({reason}): повторите doctor"
+        raise _Outcome(UNAVAILABLE, text)
+    raise _Outcome(UNAVAILABLE, setup_trust.explain(f"unavailable: {reason}"))
+
+
+def _status(ctx: _Level3) -> TrustStatus:
+    """The one `trust-status` of the run (asked only with a binding)."""
+    if ctx.status is None:
+        try:
+            ctx.status = _ask_trust_status(ctx, _bound(ctx))
+        except _Outcome as exc:
+            ctx.status = exc
+    if isinstance(ctx.status, _Outcome):
+        raise ctx.status
+    return ctx.status
+
+
+def _ask_trust_status(ctx: _Level3, binding: TrustBinding) -> TrustStatus:
+    """`setup_trust.trust_status_call` (its call timeout; Task 16 sets the v2
+    ones): no answer -- a timeout included -- is «не проверено», never
+    «нарушено»."""
+    ctx.asked = True
+    try:
+        raw = setup_trust.trust_status_call(ctx.layout)
+    except OSError as exc:
+        raise _Outcome(NOT_CHECKED, f"trust-status: нет ответа: {exc}") from exc
+    lines = raw.decode("utf-8", "replace").splitlines()
+    if len(lines) != 1:
+        raise _Outcome(BROKEN, f"trust-status: нет ответа ({len(lines)} строк)")
+    try:
+        return request.parse_trust_status(lines[0], binding.root_id)
+    except BadResponse as exc:
+        raise _Outcome(BROKEN, f"trust-status: {exc}") from exc
+
+
+def _unsupported_size(ctx: _Level3) -> str:
+    """Spec 6.1 «Размер вердикта»: the field of an `unsupported_size`, named,
+    with the exit of `unsupported_size: epochs` (`setup_trust.explain`).
+    Root derives what it can itself -- its own binding's limits
+    (`binding_problem`, the publisher's first check) -- and reads the rest
+    from the answer's reason and findings. A К block names no cause
+    (`CONSERVATIVE_BLOCK`): then the field cannot be told and the exit of
+    `epochs` is shown as the one to take if the journal has more than 64
+    epochs (`setup_trust.EPOCHS_EXIT`)."""
+    problem = binding_problem(_bound(ctx))
+    if problem is not None:
+        raise _broken([f"{_UNSUPPORTED}{problem}"])
+    status = _status(ctx)
+    texts = [status.reason or "", *(f["detail"] for f in status.findings)]
+    named = [t for t in texts if _UNSUPPORTED in t]
+    if named:
+        raise _broken([setup_trust.explain(t) for t in named])
+    if status.state == "blocked" and not status.findings:
+        note = f"{CONSERVATIVE_BLOCK}; если журнал эпох длиннее 64: {setup_trust.EPOCHS_EXIT}"
+        raise _Outcome(NOT_CHECKED, note)
+    return ""
+
+
+def _perimeter_schema(ctx: _Level3) -> str:
+    """The perimeter database's schema (Task 8): schema `"1"` is
+    «нарушено» with `MIGRATION_REQUIRED` (the publisher refuses to open it
+    but for `roles setup`'s migration). Read from level 2's perimeter line
+    (the `self-check` answer) and the `trust-status` reason; a database the
+    publisher opened is the current schema."""
+    line = ctx.perimeter
+    try:
+        reason = _status(ctx).reason or ""
+    except _Outcome as exc:
+        reason = exc.reason
+    if MIGRATION_REQUIRED in reason or (line and MIGRATION_REQUIRED in line.reason):
+        raise _Outcome(BROKEN, MIGRATION_REQUIRED)
+    if (
+        line is not None
+        and line.status in (OK, BROKEN)
+        and line.reason.startswith(PERIMETER_EVENTS)
+    ):
+        return f"схема {SCHEMA_VERSION}"
+    raise _Outcome(UNAVAILABLE, f"{PERIMETER_ID}: {line.reason if line else 'нет'}")
+
+
+_LEVEL3: tuple[tuple[str, Callable[[_Level3], str]], ...] = (
+    ("trust.binding", _binding_check),
+    ("trust.history", _history),
+    ("trust.status", _trust_status),
+    ("trust.unsupported_size", _unsupported_size),
+    ("perimeter.schema", _perimeter_schema),
+)
 
 
 # --- the external calls (the tests' seams) ---
@@ -1644,13 +1992,29 @@ def _dumps(data: dict[str, object]) -> str:
 
 
 _NOT_REACHED2 = "уровень 2: не достигнут"
-_LATER_LEVELS = (
-    "уровень 3: не проверено (этап 3)",
-    "уровень 4: не проверено (этап 4)",
-)
+_LEVEL4 = "уровень 4: не проверено (этап 4)"
+#: Stage 3a checks only the trust part of level 3 (spec 2.4): the protection
+#: plan, `ACT_MODE[P]` and the agents' rights are stage 3b's, so level 3 is
+#: never «достигнут» here.
+_LEVEL3_REST = "уровень 3: не проверено (этап 3b); проверки доверия: ok"
+_LEVEL3_HEADER = "уровень 3 (доверие, этап 3a; на уровни 1 и 2 не влияет):"
+_SIDE_EFFECTS = "побочные эффекты проб (спека §8):"
 
 
-def render_brief_product(checks: Sequence[Check], second: Level2) -> list[str]:
+def level3_brief(checks: Sequence[Check], second: Level2, third: Level3) -> str:
+    """Level 3's brief line: not reached below level 2, else the first
+    trust check that is not `ok`, else `_LEVEL3_REST`."""
+    first = next((c for c in third.checks if c.status != OK), None)
+    if not level2_reached(checks, second.checks):
+        return f"{_NOT_REACHED3} — уровень 2 не достигнут"
+    if first is not None:
+        return f"{_NOT_REACHED3} — {first.id}: {_verdict(first)}"
+    return _LEVEL3_REST
+
+
+def render_brief_product(
+    checks: Sequence[Check], second: Level2, third: Level3 | None = None
+) -> list[str]:
     """Level 1's brief line, then level 2: reached, else its first blocking
     check (or level 1); levels 3-4 and the profile (R13-5)."""
     first = next((c for c in second.checks if c.status != OK), None)
@@ -1661,7 +2025,12 @@ def render_brief_product(checks: Sequence[Check], second: Level2) -> list[str]:
     else:
         line = "уровень 2: достигнут"
     profile = second.profile or "неизвестен"
-    return [render_brief(checks), line, *_LATER_LEVELS, f"профиль: {profile}"]
+    level3_line = (
+        "уровень 3: не проверено (этап 3)"
+        if third is None
+        else level3_brief(checks, second, third)
+    )
+    return [render_brief(checks), line, level3_line, _LEVEL4, f"профиль: {profile}"]
 
 
 def render_text_product(
@@ -1669,12 +2038,20 @@ def render_text_product(
     second: Level2,
     roles: Sequence[RoleProbe],
     notes: Sequence[str] = (),
+    third: Level3 | None = None,
 ) -> str:
-    """The brief lines, every check of levels 1 and 2, the perimeter line, the
-    warnings and the models section."""
-    lines = render_brief_product(checks, second)
+    """The brief lines, every check of levels 1 and 2, the perimeter and
+    operator lines; level 3's checks apart and the side effects of the
+    probes; the warnings and the models section."""
+    lines = render_brief_product(checks, second, third)
     lines += [f"  {c.id}: {_verdict(c)}" for c in [*checks, *second.checks]]
-    lines.append(f"  {second.perimeter.id}: {_verdict(second.perimeter)}")
+    lines += [f"  {c.id}: {_verdict(c)}" for c in (second.perimeter, *second.rights)]
+    if third is not None:
+        lines.append(_LEVEL3_HEADER)
+        lines += [f"  {c.id}: {_verdict(c)}" for c in third.checks]
+        if third.side_effects:
+            lines.append(_SIDE_EFFECTS)
+            lines += [f"  {e}" for e in third.side_effects]
     lines += list(notes)
     lines.append("модели (уровень 2, на уровень 1 не влияют):")
     lines += [f"  {r.role}: {r.status}" for r in roles]
@@ -1686,9 +2063,11 @@ def render_json_product(
     second: Level2,
     probes: Sequence[RoleProbe],
     notes: Sequence[str] = (),
+    third: Level3 | None = None,
 ) -> str:
     """`render_json`'s keys and `product`, `profile`, `level2`,
-    `level2_checks`, `perimeter`, `level3`, `level4`."""
+    `level2_checks`, `perimeter`, `operator_rights`, `level3`,
+    `level3_checks`, `side_effects`, `level4`."""
     data = _json_data(checks, probes, notes)
     reached = level2_reached(checks, second.checks)
     data |= {
@@ -1697,10 +2076,22 @@ def render_json_product(
         "level2": "reached" if reached else "not reached",
         "level2_checks": [asdict(c) for c in second.checks],
         "perimeter": asdict(second.perimeter),
-        "level3": "not checked (stage 3)",
+        "operator_rights": [asdict(c) for c in second.rights],
+        "level3": "not checked (stage 3)"
+        if third is None
+        else _level3_state(checks, second, third),
+        "level3_checks": [] if third is None else [asdict(c) for c in third.checks],
+        "side_effects": [] if third is None else list(third.side_effects),
         "level4": "not checked (stage 4)",
     }
     return _dumps(data)
+
+
+def _level3_state(checks: Sequence[Check], second: Level2, third: Level3) -> str:
+    """`not reached`, or `not checked (stage 3b)` when the trust part holds."""
+    trust_ok = all(c.status == OK for c in third.checks)
+    held = level2_reached(checks, second.checks) and trust_ok
+    return "not checked (stage 3b)" if held else "not reached"
 
 
 def _verdict(check: Check) -> str:

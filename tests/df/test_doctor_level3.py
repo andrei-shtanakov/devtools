@@ -1,0 +1,465 @@
+"""Stage 3a, Task 13: `darkfactory doctor --product P`, level 3 «доверие»
+(spec 2.4 rev 11, 6.1, 6.2, 8) and the operator's line (spec 4.5, O7).
+
+The world is `test_doctor_level2`'s green level-2 world plus what `roles
+setup` and `setup-trust write` leave: `trust.toml` with the history key, the
+profile `/etc/df/history-gh` (root's, group `df-history` by its `groups.toml`
+record, `0750`/`0640`) and the group with exactly its members. `trust-status`
+is the seam `setup_trust.trust_status_call`, answering response lines of the
+publisher's shape (`test_setup_trust.status_line`), parsed by `doctor` with
+`request.parse_trust_status`. The group database is a seam too (`plat`,
+`grp.getgrall`): the tests never read or change the host's groups.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import grp
+import json
+import os
+from pathlib import Path
+
+import pytest
+
+from df import doctor, fsutil, setup_trust, sudoers
+from df import platform as plat
+from df.config import GroupRecord, dump_groups
+from df.doctor import Check, level1_checks
+from df.publisher.github import Installation, SelfCheckResult
+from df.publisher.perimeter import MIGRATION_REQUIRED
+from df.roles import HISTORY_GROUP, history_members
+from df.stage2_config import TrustBinding, dump_trust
+from tests.df.install_world import World
+from tests.df.test_doctor import by_id, snap
+from tests.df.test_doctor_level2 import (  # noqa: F401 (fixtures)
+    APP_ID,
+    INSTALLATION,
+    L2,
+    OPERATOR,
+    PRODUCT,
+    _boot,
+    answer,
+    fake_installed,
+    l2,
+    level2_of,
+)
+from tests.df.test_setup_trust import POLICY_ID, TRUST, TRUST_ID, status_line
+
+LEVEL3_IDS = [
+    "trust.binding",
+    "trust.history",
+    "trust.status",
+    "trust.unsupported_size",
+    "perimeter.schema",
+]
+UNFINISHED = "trust_observation_unfinished: 7"
+
+
+@dataclasses.dataclass
+class L3:
+    """Level 3 over the green level-2 world: `trust-status`'s next answer,
+    the group's members, and the calls of the seam."""
+
+    l2: L2
+    trust: bytes | Exception
+    members: frozenset[str]
+    gid: int
+    asked: list[str] = dataclasses.field(default_factory=list)
+
+    @property
+    def w(self) -> World:
+        return self.l2.w
+
+    def level3(self, operator: str | None = OPERATOR) -> doctor.Level3:
+        s = snap(self.w)
+        uid = os.geteuid()
+        level1 = level1_checks(s, self.w.lay, euid=uid)
+        second = level2_of(self.l2, operator=operator)
+        return doctor.level3(
+            s, self.w.lay, euid=uid, operator=operator, level1=level1, second=second
+        )
+
+    def checks(self, operator: str | None = OPERATOR) -> dict[str, Check]:
+        return by_id(self.level3(operator).checks)
+
+    def bind(self, *, history: bool = True, branch: str = "main") -> None:
+        lay = self.w.lay
+        binding = TrustBinding(
+            "github.com",
+            TRUST_ID,
+            TRUST,
+            branch,
+            POLICY_ID,
+            "public",
+            str(lay.history_gh) if history else None,
+        )
+        fsutil.write_atomic(lay.etc / "trust.toml", dump_trust(binding))
+
+
+def _profile(lay_dir: Path) -> int:
+    """The history profile as `setup_trust.write_binding` leaves it (names
+    from `profile_files`, modes from its constants); its real GID."""
+    lay_dir.mkdir()
+    lay_dir.chmod(setup_trust.PROFILE_DIR_MODE)
+    for name in setup_trust.profile_files("x"):
+        path = lay_dir / name
+        path.write_text("never read by doctor\n")
+        path.chmod(setup_trust.PROFILE_FILE_MODE)
+    return os.lstat(lay_dir).st_gid
+
+
+@pytest.fixture()
+def l3(request: pytest.FixtureRequest) -> L3:
+    """Level 2 green; the binding, profile and group are what `roles setup`
+    and `setup-trust write` leave; `trust-status` answers `clear`."""
+    green: L2 = request.getfixturevalue("l2")
+    lay, mp = green.lay, green.w.mp
+    gid = _profile(lay.history_gh)
+    world = L3(green, status_line(), frozenset(history_members(OPERATOR)), gid)
+    record = GroupRecord(HISTORY_GROUP, gid, "ready", "2026-11-05T00:00:00Z")
+    fsutil.write_atomic(lay.groups, dump_groups({HISTORY_GROUP: record}))
+    mp.setattr(plat, "group_gid", lambda name: world.gid)
+    mp.setattr(plat, "group_members", lambda name: world.members)
+    mp.setattr(grp, "getgrall", lambda: [])
+
+    def trust_status(_layout: object) -> bytes:
+        world.asked.append("trust-status")
+        if isinstance(world.trust, Exception):
+            raise world.trust
+        return world.trust
+
+    mp.setattr(setup_trust, "trust_status_call", trust_status)
+    world.bind()
+    return world
+
+
+def statuses(checks: dict[str, Check]) -> dict[str, str]:
+    return {k: c.status for k, c in checks.items()}
+
+
+# --- the positive control ---
+
+
+def test_level3_trust_part_green(
+    l3: L3, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Positive control: every trust check `ok`; stage 3a never says level 3
+    is reached (3b's part is not checked); level 1 stays reached with the
+    3a files present."""
+    checks = l3.checks()
+    assert list(checks) == LEVEL3_IDS
+    assert statuses(checks) == dict.fromkeys(LEVEL3_IDS, "ok"), checks
+    assert checks["trust.status"].reason.startswith("clear; снимок c")
+    assert checks["perimeter.schema"].reason == "схема 2"
+    assert l3.asked == ["trust-status"]
+    monkeypatch.setenv("SUDO_USER", OPERATOR)
+    capsys.readouterr()
+    assert l3.l2.doctor([]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[:4] == [
+        "уровень 1: достигнут",
+        "уровень 2: достигнут",
+        "уровень 3: не проверено (этап 3b); проверки доверия: ok",
+        "уровень 4: не проверено (этап 4)",
+    ]
+
+
+# --- shown apart (spec 2.4 rev 11) ---
+
+
+def test_level3_shown_separately_from_level(
+    l3: L3, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A broken level 3 changes neither level 1 nor level 2 nor the exit:
+    its checks are in their own block, never among level 2's."""
+    l3.trust = status_line("blocked", findings=[_finding("rebase_allowed")])
+    monkeypatch.setenv("SUDO_USER", OPERATOR)
+    capsys.readouterr()
+    assert l3.l2.doctor([]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[1] == "уровень 2: достигнут"
+    assert out[2].startswith("уровень 3: не достигнут — trust.status: нарушено")
+    header = out.index(doctor._LEVEL3_HEADER)  # noqa: SLF001
+    block = [line.split(":")[0].strip() for line in out[header + 1 :]][:5]
+    assert block == LEVEL3_IDS
+    above = [line.split(":")[0].strip() for line in out[:header]]
+    assert not set(LEVEL3_IDS) & set(above)
+    assert l3.l2.doctor(["--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["level2"] == "reached" and data["level3"] == "not reached"
+    assert [c["id"] for c in data["level3_checks"]] == LEVEL3_IDS
+    assert not {c["id"] for c in data["level2_checks"]} & set(LEVEL3_IDS)
+
+
+def test_level3_below_level2_names_it(l3: L3) -> None:
+    l3.l2.probe_current = False  # `models.access` not ok: level 2 not reached
+    second = level2_of(l3.l2)
+    s = snap(l3.w)
+    level1 = level1_checks(s, l3.w.lay, euid=os.geteuid())
+    third = l3.level3()
+    assert (
+        doctor.level3_brief(level1, second, third)
+        == "уровень 3: не достигнут — уровень 2 не достигнут"
+    )
+
+
+def test_level3_not_asked_without_root_or_level1(l3: L3) -> None:
+    s = snap(l3.w)
+    level1 = level1_checks(s, l3.w.lay, euid=os.geteuid())
+    second = level2_of(l3.l2)
+    other = os.geteuid() + 1
+    third = doctor.level3(
+        s, l3.w.lay, euid=other, operator=OPERATOR, level1=level1, second=second
+    )
+    assert {c.reason for c in third.checks} == {doctor.NEED_SUDO}
+    broken = [dataclasses.replace(level1[0], status="нарушено", reason="x")]
+    third = doctor.level3(
+        s, l3.w.lay, euid=os.geteuid(), operator=OPERATOR, level1=broken, second=second
+    )
+    assert {c.status for c in third.checks} == {"не проверено"}
+    assert third.side_effects == () and l3.asked == []
+
+
+# --- side effects (spec 8) ---
+
+
+def test_side_effects_listed(
+    l3: L3, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probes' side effects are in the output: `publisher.precheck`'s
+    reap and `trust-status`'s observation; without a binding `trust-status`
+    is not asked and not listed."""
+    assert l3.level3().side_effects == (
+        doctor.SIDE_EFFECT_PRECHECK,
+        doctor.SIDE_EFFECT_TRUST,
+    )
+    assert "старше 230 с" in doctor.SIDE_EFFECT_TRUST
+    monkeypatch.setenv("SUDO_USER", OPERATOR)
+    capsys.readouterr()
+    l3.l2.doctor([])
+    out = capsys.readouterr().out.splitlines()
+    i = out.index("побочные эффекты проб (спека §8):")
+    assert out[i + 1 : i + 3] == [
+        f"  {doctor.SIDE_EFFECT_PRECHECK}",
+        f"  {doctor.SIDE_EFFECT_TRUST}",
+    ]
+    (l3.w.lay.etc / "trust.toml").unlink()
+    l3.asked.clear()
+    third = l3.level3()
+    assert third.side_effects == (doctor.SIDE_EFFECT_PRECHECK,)
+    assert l3.asked == []
+    l3.l2.doctor(["--json"])
+    data = json.loads(capsys.readouterr().out)
+    assert data["side_effects"] == [doctor.SIDE_EFFECT_PRECHECK]
+
+
+# --- trust.binding and trust.history ---
+
+
+def test_no_binding_is_broken_and_asks_nothing(l3: L3) -> None:
+    (l3.w.lay.etc / "trust.toml").unlink()
+    checks = l3.checks()
+    assert checks["trust.binding"].status == "нарушено"
+    assert checks["trust.binding"].reason == doctor.NO_BINDING
+    for cid in ("trust.history", "trust.status", "trust.unsupported_size"):
+        assert checks[cid].status == "не проверено", cid
+        assert checks[cid].reason.startswith("trust.binding: "), cid
+    assert l3.asked == []
+
+
+def test_no_history_key_trust_history_broken(l3: L3) -> None:
+    """Spec 6.2 (O14): a binding written by hand without the key --
+    «нарушено» by name; `trust-status` still runs (anonymously)."""
+    l3.bind(history=False)
+    l3.trust = status_line()
+    checks = l3.checks()
+    assert checks["trust.history"].status == "нарушено"
+    assert checks["trust.history"].reason == doctor.NO_HISTORY_KEY
+    assert checks["trust.binding"].status == "ok"
+    assert l3.asked == ["trust-status"]
+
+
+def test_history_group_extra_member_broken(l3: L3) -> None:
+    """Spec 4.1 rev 11: the members are exactly `history_members`; an extra
+    one (here a model role) or a missing one is «нарушено»."""
+    l3.members = frozenset({*history_members(OPERATOR), "df-exec"})
+    c = l3.checks()["trust.history"]
+    assert c.status == "нарушено"
+    assert any("лишние члены ['df-exec']" in p for p in c.problems), c.problems
+    l3.members = frozenset({"df-publisher", "df-precheck"})
+    c = l3.checks()["trust.history"]
+    assert any(f"нет членов ['{OPERATOR}']" in p for p in c.problems), c.problems
+
+
+def test_history_gid_other_than_recorded_broken(l3: L3) -> None:
+    """The OS group's GID, and the profile's group, against the GID
+    `groups.toml` recorded by intent."""
+    l3.gid += 1
+    c = l3.checks()["trust.history"]
+    assert c.status == "нарушено"
+    assert c.problems == (
+        f"группа {HISTORY_GROUP}: gid {l3.gid}, записан {l3.gid - 1}",
+    )
+    record = GroupRecord(HISTORY_GROUP, l3.gid, "ready", "2026-11-05T00:00:00Z")
+    fsutil.write_atomic(l3.w.lay.groups, dump_groups({HISTORY_GROUP: record}))
+    c = l3.checks()["trust.history"]
+    profile = l3.w.lay.history_gh
+    assert f"{profile}: группа gid {l3.gid - 1}, {HISTORY_GROUP} — {l3.gid}" in (
+        c.problems
+    )
+
+
+def test_history_profile_modes(l3: L3) -> None:
+    hosts = l3.w.lay.history_gh / "hosts.yml"
+    hosts.chmod(0o644)
+    c = l3.checks()["trust.history"]
+    assert c.status == "нарушено"
+    assert c.problems == (f"{hosts}: права 0644, нужны 0640",)
+    hosts.unlink()
+    c = l3.checks()["trust.history"]
+    assert c.problems == (f"нет {hosts}",)
+
+
+def test_history_without_operator_unavailable(l3: L3) -> None:
+    c = l3.checks(operator=None)["trust.history"]
+    assert c.status == "данные недоступны"
+    assert doctor.NO_OPERATOR in c.reason
+
+
+# --- trust.status ---
+
+
+def test_trust_status_schema_checked(l3: L3) -> None:
+    """Root checks the answer's schema and that `result.root` is the binding
+    it read itself (`parse_trust_status`): another root, an extra key or not
+    one line is «нарушено»."""
+    l3.trust = status_line(root=("github.com", TRUST_ID + 1, "main"))
+    c = l3.checks()["trust.status"]
+    assert (c.status, c.reason) == (
+        "нарушено",
+        "trust-status: result.root is not the binding's root",
+    )
+    line = json.loads(status_line())
+    line["result"]["extra"] = 1
+    l3.trust = (json.dumps(line) + "\n").encode()
+    assert l3.checks()["trust.status"].status == "нарушено"
+    l3.trust = status_line() * 2
+    assert l3.checks()["trust.status"].reason == "trust-status: нет ответа (2 строк)"
+
+
+def test_trust_status_timeout_not_checked(l3: L3) -> None:
+    """Carry 10: no answer (a timeout included) is «не проверено»."""
+    l3.trust = OSError("trust-status: the call failed (code -9)")
+    c = l3.checks()["trust.status"]
+    assert c.status == "не проверено"
+    assert c.reason.startswith("trust-status: нет ответа")
+
+
+def test_trust_status_unfinished_matched_by_prefix(l3: L3) -> None:
+    l3.trust = status_line("unavailable", UNFINISHED)
+    c = l3.checks()["trust.status"]
+    assert c.status == "данные недоступны"
+    assert c.reason == f"наблюдение не завершено ({UNFINISHED}): повторите doctor"
+
+
+def test_trust_status_unverified_listed(l3: L3) -> None:
+    line = json.loads(status_line())
+    line["result"]["unverified"] = ["allow_rebase_merge@df-trust"]
+    l3.trust = (json.dumps(line) + "\n").encode()
+    c = l3.checks()["trust.status"]
+    assert c.status == "ok"
+    assert c.reason.endswith("; не проверено: allow_rebase_merge@df-trust")
+    line["result"]["unverified"] = ["something_else"]
+    l3.trust = (json.dumps(line) + "\n").encode()
+    assert l3.checks()["trust.status"].status == "нарушено"
+
+
+def _finding(kind: str, detail: str = "d") -> dict[str, str]:
+    return {"kind": kind, "role": "df-trust", "detail": detail}
+
+
+def test_trust_status_blocked_lists_findings(l3: L3) -> None:
+    l3.trust = status_line("blocked", findings=[_finding("ruleset_missing")])
+    c = l3.checks()["trust.status"]
+    assert c.status == "нарушено"
+    assert "находка ruleset_missing (df-trust): d" in c.problems
+
+
+# --- trust.unsupported_size (spec 6.1 «Размер вердикта») ---
+
+
+def test_unsupported_size_epochs_names_exit(l3: L3) -> None:
+    """A finding or reason that names `unsupported_size: epochs` gets the
+    exit verbatim (`setup_trust.EPOCHS_EXIT`)."""
+    l3.trust = status_line(
+        "blocked", findings=[_finding("x", "unsupported_size: epochs")]
+    )
+    c = l3.checks()["trust.unsupported_size"]
+    assert c.status == "нарушено"
+    assert c.problems == (f"unsupported_size: epochs — {setup_trust.EPOCHS_EXIT}",)
+
+
+def test_unsupported_size_of_a_k_block_derived(l3: L3) -> None:
+    """A К block has no reason and no finding: the field cannot be told, so
+    doctor says so and names the exit of `epochs` itself."""
+    l3.trust = status_line("blocked")
+    c = l3.checks()["trust.unsupported_size"]
+    assert c.status == "не проверено"
+    assert c.reason.startswith(doctor.CONSERVATIVE_BLOCK)
+    assert setup_trust.EPOCHS_EXIT in c.reason
+    assert l3.checks()["trust.status"].problems[1] == doctor.CONSERVATIVE_BLOCK
+
+
+def test_unsupported_size_of_root_binding(l3: L3) -> None:
+    """Root's own binding outside the publisher's limits (`binding_problem`,
+    a branch over 255 bytes): named without asking anyone else."""
+    l3.bind(branch="b" * 300)
+    l3.trust = status_line(root=("github.com", TRUST_ID, "b" * 300))
+    c = l3.checks()["trust.unsupported_size"]
+    assert c.status == "нарушено"
+    assert c.problems == ("unsupported_size: binding.branch",)
+
+
+# --- perimeter.schema ---
+
+
+def test_schema_v1_names_migration(l3: L3) -> None:
+    """Schema `"1"` (Task 8): «нарушено» with `MIGRATION_REQUIRED`, from the
+    `self-check` answer and from `trust-status` alike."""
+    inst = Installation(INSTALLATION, "acme", (PRODUCT,), {"contents": "write"})
+    problem = f"perimeter_unavailable: {MIGRATION_REQUIRED}"
+    result = SelfCheckResult((inst,), (problem,), None).to_json()
+    l3.l2.self_check = answer("done", None, result)
+    l3.trust = status_line("unavailable", MIGRATION_REQUIRED)
+    c = l3.checks()["perimeter.schema"]
+    assert (c.status, c.reason) == ("нарушено", MIGRATION_REQUIRED)
+    assert c.reason.endswith("выполните darkfactory roles setup")
+    (l3.w.lay.etc / "trust.toml").unlink()
+    c = l3.checks()["perimeter.schema"]
+    assert (c.status, c.reason) == ("нарушено", MIGRATION_REQUIRED)
+    assert APP_ID  # the product's App is not what this line judges
+
+
+# --- the operator's line (spec 4.5, O7) ---
+
+
+def test_operator_two_results_never_pass_ii(l3: L3) -> None:
+    """(i) `ok` on a green set, «нарушено» with a planted rule on
+    `df-precheck`; (ii) «не проверено, принято исключение» in both."""
+    rights = by_id(list(level2_of(l3.l2).rights))
+    assert list(rights) == ["operator.rights", "operator.isolation"]
+    assert rights["operator.rights"].status == "ok"
+    iso = rights["operator.isolation"]
+    assert (iso.status, iso.reason) == ("не проверено", sudoers.OPERATOR_EXCEPTION)
+    lay = l3.w.lay
+    have = sudoers.expected_grants(lay, OPERATOR)[OPERATOR]
+    planted = sudoers.Grant(
+        "df-precheck", sudoers.TAGS, str(lay.libexec / "df-precheck")
+    )
+    grants = have | {planted}
+    listing = sudoers.Listing((), (), grants, grants)
+    l3.w.mp.setattr(sudoers, "read_listing", lambda _n: listing)
+    rights = by_id(list(level2_of(l3.l2).rights))
+    assert rights["operator.rights"].status == "нарушено"
+    assert rights["operator.isolation"].status == "не проверено"
+    assert level2_of(l3.l2, euid=os.geteuid() + 1).rights[1].status == "не проверено"

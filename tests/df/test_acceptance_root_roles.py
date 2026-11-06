@@ -450,6 +450,17 @@ def test_doctor_level2(rw: RolesWorld) -> None:
     assert statuses["models.access"][0] == doctor.NOT_CHECKED
     assert report["level2"] == "not reached"
     assert done.returncode == doctor.EXIT_NOT_REACHED
+    # 3a Task 13: the operator's line on the real host -- (i) the file and
+    # `sudo -l -U runner` give exactly the df rules, (ii) never `ok` (O7);
+    # level 3 shown apart, the probes' side effects listed (spec 8).
+    rights = [(c["id"], c["status"]) for c in report["operator_rights"]]
+    assert rights == [
+        (doctor.OPERATOR_RIGHTS_ID, doctor.OK),
+        (doctor.OPERATOR_ISOLATION_ID, doctor.NOT_CHECKED),
+    ], report["operator_rights"]
+    assert [c["id"] for c in report["level3_checks"]] == list(doctor.LEVEL3_IDS)
+    assert report["level3"] == "not reached"
+    assert report["side_effects"][0] == doctor.SIDE_EFFECT_PRECHECK
 
 
 # ---------- rows 9-13: runs and releases ----------

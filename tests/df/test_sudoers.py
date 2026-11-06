@@ -846,3 +846,58 @@ def test_io_log_precheck_unverifiable(
 ) -> None:
     [problem] = _io_publisher(monkeypatch, old, new)
     assert problem.startswith(f"sudo -l -U df-publisher: {sudoers.UNVERIFIABLE}")
+
+
+# --- the operator's line (spec 4.5 rev 11, O7; stage 3a Task 13) ---------------
+
+
+@pytest.fixture()
+def installed(target: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """`/etc/sudoers.d/df` as `roles setup` leaves it for `OP` (the current
+    user plays root; `visudo` accepts it)."""
+    target.write_text(sudoers.render(ROOT, OP))
+    target.chmod(sudoers.FILE_MODE)
+    monkeypatch.setattr(plat, "ROOT_UID", os.getuid())
+    monkeypatch.setattr(sudoers, "validate", lambda _t: [])
+    return target
+
+
+@pytest.mark.parametrize("os_name", OSES)
+def test_operator_two_results_never_pass_ii(
+    installed: Path, monkeypatch: pytest.MonkeyPatch, os_name: str
+) -> None:
+    """(i) PASS over the CI capture of the operator (its `(ALL) ALL` is the
+    host administrator's, not a df rule); (ii) is the accepted exception
+    whatever (i) is -- and stays it when (i) fails."""
+    listing = _fixture(f"sudo-l-{os_name}-runner.txt")
+    _sudo(monkeypatch, {OP: listing})
+    rights = sudoers.operator_rights(ROOT, OP)
+    assert rights.ours == ()
+    assert rights.isolation == sudoers.OPERATOR_EXCEPTION
+    assert rights.isolation.startswith("принято исключение")
+    installed.chmod(0o640)  # (i) fails: a mode other than `FILE_MODE`
+    failed = sudoers.operator_rights(ROOT, OP)
+    assert failed.ours and failed.isolation == sudoers.OPERATOR_EXCEPTION
+
+
+def test_operator_rule_on_precheck_fails_i(
+    installed: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec 4.5: the operator has no rule on `df-precheck`; a missing
+    generated rule is named too."""
+    listing = _fixture("sudo-l-linux-runner.txt").replace(
+        "    (df-review) NOSETENV: NOPASSWD: /opt/df/libexec/df-launch df-review check",
+        "    (df-precheck) NOPASSWD: /opt/df/libexec/df-precheck",
+    )
+    _sudo(monkeypatch, {OP: listing})
+    ours = sudoers.operator_rights(ROOT, OP).ours
+    assert any("правило на df-precheck" in p for p in ours), ours
+    assert any("нет правила (df-review)" in p for p in ours), ours
+
+
+def test_operator_unreadable_listing_fails_i(
+    installed: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _sudo(monkeypatch, {OP: "garbage\n"})
+    (problem,) = sudoers.operator_rights(ROOT, OP).ours
+    assert problem.startswith(f"sudo -l -U {OP}: ")
