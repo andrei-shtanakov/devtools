@@ -1,0 +1,205 @@
+# df installer, stage-3a live trust stand (Task 15 of
+# docs/superpowers/plans/2026-11-04-df-installer-stage3a.md): the trust rows
+# of spec 10 (3a) on the stand repos of O8 -- the product df-roles-probe and
+# the empty public trust repos df-roles-probe-policy, df-roles-probe-trust --
+# with the cold path measurement Task 16 reads (cold-measure.json, its own
+# artifact per cell). Root exists only in these disposable runners. The
+# owner dispatches it on master; the environment df-stage3-live asks for the
+# owner's approval and admits master only, so the file cannot run from a PR.
+# The owner's steps first: H1-H6 of the plan (H2, the App's installation, is
+# checked again by the stand: exactly the product repo), H8 after every run
+# (every token and key revoked, the secrets deleted).
+# Cells run one at a time (max-parallel 1): both write the same stand and
+# the request count reads the history token's per-user quota.
+# Order of a cell, as df-stage2-live: host preparation -> install of the
+# checkout's df in `/` and the provenance check (no secret exists yet) ->
+# the secrets written to RUNNER_TEMP (0600) -> the rows
+# (tests/df/live_trust_stand.py, which checks provenance again before it
+# reads a secret) -> always: the measurement branch and the product stand
+# swept, evidence scanned for the secrets, the secrets, the history profile
+# and the installed copies removed, evidence uploaded.
+# Secrets (by name; values only through shell builtins into files):
+# DF_STAND_APP_KEY (H4, App 5285716), DF_STAND_MACHINE_TOKEN (H4,
+# betta-tester classic PAT), DF_STAND_HISTORY_TOKEN (H5, fine-grained
+# public read-only), DF_STAND_PERIMETER_PAT (H6, the owner's temporary
+# read-only PAT on the two trust repos), DF_STAND_TRUST_WRITE_TOKEN
+# (optional; write access to df-roles-probe-trust for the measurement branch
+# measure/<tag> only -- not among H4-H6: without it rows T5 and T6 are
+# not_verified). Variables: DF_STAND_REPO_ID, DF_STAND_APP_ID,
+# DF_STAND_INSTALLATION_ID, DF_STAND_POLICY_REPO_ID, DF_STAND_TRUST_REPO_ID,
+# DF_STAND_TRUST_BRANCH.
+# Actions pinned by full commit SHA, as df-stage1.yml.
+name: df-stage3-live
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: df-stage3-live
+  cancel-in-progress: false
+
+jobs:
+  live:
+    name: live (${{ matrix.os }})
+    if: github.ref == 'refs/heads/master'
+    environment: df-stage3-live
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - os: macos-15
+            arch: arm64
+            cell: macos
+          - os: ubuntu-24.04
+            arch: x86_64
+            cell: linux
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    steps:
+      - name: arch check
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: test "$(uname -m)" = "$EXPECTED_ARCH"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.23"
+      # R96, as in df-stage1: the installed world builds with the CLT shims.
+      - name: select CommandLineTools (R96)
+        if: runner.os == 'macOS'
+        run: |
+          clt=/Library/Developer/CommandLineTools
+          fail() { echo "::error title=select CommandLineTools (R96)::$1"; exit 1; }
+          test -d "$clt" || fail "$clt absent"
+          sudo -n xcode-select -s "$clt" || fail "xcode-select -s failed"
+          test "$(xcode-select -p)" = "$clt" || fail "selection did not stick"
+      - run: uv python install 3.12
+      # The governance group: steward and PyYAML, which the stand imports
+      # itself (`STAND_IMPORTS` of tests/df/live_trust_stand.py).
+      - run: uv sync --frozen --group governance
+      - name: verify CommandLineTools with df policy (R96)
+        if: runner.os == 'macOS'
+        run: >
+          PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -I -c "import sys;
+          sys.path.append('.'); from tests.df.ci_step0 import r96_main;
+          sys.exit(r96_main())"
+      # The same host adaptation as df-stage1's stage2a (owner decision
+      # 26.10, R14-13): /opt and /home without group/other write and ACL.
+      - name: configure /opt and /home as a supported host (owner 26.10)
+        run: |
+          mkdir -p "$RUNNER_TEMP/df-stage3-live"
+          record="$RUNNER_TEMP/df-stage3-live/opt-host.txt"
+          facts() {
+            ls -ld /opt /home
+            if [ "$RUNNER_OS" = Linux ]; then getfacl -p /opt /home; else ls -led /opt; fi
+          }
+          { echo "before:"; facts; } > "$record" 2>&1
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo -n chmod go-w /opt /home
+            sudo -n setfacl -b /opt /home
+          fi
+          { echo "after:"; facts; } >> "$record" 2>&1
+          cat "$record"
+      # No secret exists in this job yet: the provenance verdict comes first.
+      - name: install the checkout's df in / and check provenance
+        run: |
+          out="$RUNNER_TEMP/df-stage3-live"
+          sudo -n install -d -m 0700 "$RUNNER_TEMP/root-home"
+          sudo -n env "PATH=$PATH" "HOME=$RUNNER_TEMP/root-home" \
+            "UV_CACHE_DIR=$RUNNER_TEMP/uv-root" PYTHONDONTWRITEBYTECODE=1 \
+            "GITHUB_ACTIONS=$GITHUB_ACTIONS" "DF_STAGE1_OUT=$out" \
+            .venv/bin/python -m tests.df.live_trust_stand install \
+            --source-sha "$GITHUB_SHA" --out "$out"
+      # The evidence names the tokens' types only. The write token's file
+      # exists only when the secret is set.
+      - name: write the stand's secrets (RUNNER_TEMP, 0600)
+        env:
+          DF_STAND_APP_KEY: ${{ secrets.DF_STAND_APP_KEY }}
+          DF_STAND_MACHINE_TOKEN: ${{ secrets.DF_STAND_MACHINE_TOKEN }}
+          DF_STAND_HISTORY_TOKEN: ${{ secrets.DF_STAND_HISTORY_TOKEN }}
+          DF_STAND_PERIMETER_PAT: ${{ secrets.DF_STAND_PERIMETER_PAT }}
+          DF_STAND_TRUST_WRITE_TOKEN: ${{ secrets.DF_STAND_TRUST_WRITE_TOKEN }}
+        run: |
+          dir="$RUNNER_TEMP/df-stand-secrets"
+          umask 077
+          mkdir -m 0700 "$dir"
+          printf '%s\n' "$DF_STAND_APP_KEY" > "$dir/app-key.pem"
+          printf '%s\n' "$DF_STAND_MACHINE_TOKEN" > "$dir/machine-token"
+          printf '%s\n' "$DF_STAND_HISTORY_TOKEN" > "$dir/history-token"
+          printf '%s\n' "$DF_STAND_PERIMETER_PAT" > "$dir/perimeter-pat"
+          if [ -n "$DF_STAND_TRUST_WRITE_TOKEN" ]; then
+            printf '%s\n' "$DF_STAND_TRUST_WRITE_TOKEN" > "$dir/trust-write-token"
+          fi
+      - name: live trust stand rows
+        env:
+          DF_STAND_REPO_ID: ${{ vars.DF_STAND_REPO_ID }}
+          DF_STAND_APP_ID: ${{ vars.DF_STAND_APP_ID }}
+          DF_STAND_INSTALLATION_ID: ${{ vars.DF_STAND_INSTALLATION_ID }}
+          DF_STAND_POLICY_REPO_ID: ${{ vars.DF_STAND_POLICY_REPO_ID }}
+          DF_STAND_TRUST_REPO_ID: ${{ vars.DF_STAND_TRUST_REPO_ID }}
+          DF_STAND_TRUST_BRANCH: ${{ vars.DF_STAND_TRUST_BRANCH }}
+          CELL: ${{ matrix.cell }}
+        run: |
+          out="$RUNNER_TEMP/df-stage3-live"
+          sudo -n env "PATH=$PATH" "HOME=$RUNNER_TEMP/root-home" \
+            "UV_CACHE_DIR=$RUNNER_TEMP/uv-root" PYTHONDONTWRITEBYTECODE=1 \
+            "GITHUB_ACTIONS=$GITHUB_ACTIONS" "DF_STAGE1_OUT=$out" \
+            .venv/bin/python -m tests.df.live_trust_stand stand \
+            --source-sha "$GITHUB_SHA" --out "$out" \
+            --secrets "$RUNNER_TEMP/df-stand-secrets" \
+            --repo-id "$DF_STAND_REPO_ID" --app-id "$DF_STAND_APP_ID" \
+            --installation-id "$DF_STAND_INSTALLATION_ID" \
+            --policy-repo-id "$DF_STAND_POLICY_REPO_ID" \
+            --trust-repo-id "$DF_STAND_TRUST_REPO_ID" \
+            --trust-branch "$DF_STAND_TRUST_BRANCH" \
+            --tag "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$CELL"
+      # Before the upload: what a run cut short left is swept (the
+      # measurement branch, the product stand's PRs and branches; best
+      # effort), evidence holding a secret is deleted (the step is then red),
+      # the history profile, the installed copies and the secret files
+      # removed -- the files also by the shell, whatever the script did.
+      - name: wipe the stand's secrets
+        if: always()
+        env:
+          DF_STAND_REPO_ID: ${{ vars.DF_STAND_REPO_ID }}
+          DF_STAND_TRUST_REPO_ID: ${{ vars.DF_STAND_TRUST_REPO_ID }}
+          CELL: ${{ matrix.cell }}
+        run: |
+          dir="$RUNNER_TEMP/df-stand-secrets"
+          rc=0
+          if [ -x .venv/bin/python ]; then
+            set +e
+            sudo -n env "PATH=$PATH" "HOME=$RUNNER_TEMP/root-home" \
+              PYTHONDONTWRITEBYTECODE=1 "GITHUB_ACTIONS=$GITHUB_ACTIONS" \
+              .venv/bin/python -m tests.df.live_trust_stand wipe \
+              --out "$RUNNER_TEMP/df-stage3-live" --secrets "$dir" \
+              --repo-id "$DF_STAND_REPO_ID" \
+              --trust-repo-id "$DF_STAND_TRUST_REPO_ID" \
+              --tag "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$CELL"
+            rc=$?
+            set -e
+          fi
+          sudo -n rm -rf "$dir" /etc/df/history-gh
+          exit "$rc"
+      - name: return RUNNER_TEMP to the runner
+        if: always()
+        run: sudo -n chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: df-stage3-live-${{ matrix.os }}
+          path: ${{ runner.temp }}/df-stage3-live
+          if-no-files-found: warn
+      # Task 16's input: M = max over both cells of `m_seconds`.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: df-stage3-cold-measure-${{ matrix.cell }}
+          path: ${{ runner.temp }}/df-stage3-live/live/${{ matrix.cell }}/cold-measure.json
+          if-no-files-found: warn

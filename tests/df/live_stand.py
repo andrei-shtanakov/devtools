@@ -2191,9 +2191,12 @@ def stand_imports_problem(names: Sequence[str]) -> str | None:
     return None
 
 
-def set_up(rw: RolesWorld, args: StandArgs, secrets: StandSecrets) -> Stand:
+def set_up(
+    rw: RolesWorld, args: StandArgs, secrets: StandSecrets, *, private: bool = True
+) -> Stand:
     """Roles, the stand's product, the credentials, `self-check`, models and
-    the fixture run record."""
+    the fixture run record. `private`: the stand repo's expected visibility
+    (2a/2b: a private stand; 3a: the public `df-roles-probe`, O8)."""
     lay = rw.layout
     darkfactory = [SUDO, "-n", str(lay.launcher)]
     check(as_operator([*darkfactory, "cli", "set", "openssl", str(OPENSSL)]), "cli set")
@@ -2206,8 +2209,8 @@ def set_up(rw: RolesWorld, args: StandArgs, secrets: StandSecrets) -> Stand:
     if not isinstance(user, dict) or not isinstance(repo, dict):
         infra("GET /user или /repositories: не объект")
     assert isinstance(user, dict) and isinstance(repo, dict)
-    if repo.get("private") is not True:
-        infra(f"стенд {repo.get('full_name')} не приватный")
+    if repo.get("private") is not private:
+        infra(f"стенд {repo.get('full_name')}: private={repo.get('private')!r}")
     gh.full_name = str(repo["full_name"])
     # the header git carries the PAT in (row 5б's control push)
     guard_token(secrets.machine_token, str(user["login"]))
@@ -2290,9 +2293,9 @@ def self_check_clean(lay: Layout, args: StandArgs) -> dict[str, object]:
     return result
 
 
-def register_run(st: Stand) -> str:
+def register_run(st: Stand, root: tuple[str, int, str] | None = None) -> str:
     """A fixture run record of `current` for the stand's product (Task 14's
-    `register_run`, product = the stand)."""
+    `register_run`, product = the stand); `root`: the bound root (3a)."""
     lay = st.layout
     rid = current_id(lay)
     registry = parse_releases((lay.etc / "releases.toml").read_text())
@@ -2305,7 +2308,7 @@ def register_run(st: Stand) -> str:
         entry.admin_digest,
         st.args.repo_id,
         run_start.pins_from_data(lay, st.args.repo_id, cfg),
-        None,
+        root,
         datetime.now(UTC).isoformat(),
         0,
     )
