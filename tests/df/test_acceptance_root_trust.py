@@ -475,6 +475,10 @@ def test_root_trust_upgrade_2b_to_3a(
         assert host_state(lay, db) == state
         events = {str(e.get("event")) for e in steps}
         assert steps and not events & {"failed", "stopped"}, steps
+        # every writing step is settled (`skip`); the base is only asked
+        # again (`perimeter-init`: `current`, unchanged bytes above)
+        ran = {str(e["step"]) for e in steps if e.get("event") == "start"}
+        assert ran <= {"perimeter-init", "verify"}, steps
         # a 3a install: a new release, the candidate reaches the v2 program
         world = uw.installed.world
         third = RootWorld(lay, up.pin_3a_again, world.uv, world.top, control_url)
