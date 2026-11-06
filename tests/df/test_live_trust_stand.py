@@ -24,6 +24,7 @@ from typing import cast
 import pytest
 import yaml
 
+from df import setup_trust
 from df.paths import Layout
 from df.publisher import github, ops
 from df.publisher.github import GitHubRefused, GitHubUnavailable
@@ -31,7 +32,7 @@ from df.publisher.trust_routes import BRANCH, binding_problem
 from df.setup_trust import Refused
 from df.stage2_config import Product, TrustBinding
 from governance.act_epochs import Epoch, check_transition, parse_journal
-from tests.df import live_stand, live_trust_stand
+from tests.df import live_stand, live_trust_stand, test_setup_trust
 from tests.df.live_stand import SKIPPED, Stand, StandArgs, StandSecrets
 from tests.df.live_trust_stand import (
     MEASURE_SCHEMA,
@@ -588,42 +589,87 @@ def evidence(tmp_path: Path, name: str) -> Path:
     return tmp_path / "live" / live_stand.OS_DIR / name
 
 
+APPS = tuple(
+    f"{key}: установки сторонних App PAT не видит"
+    for key in live_trust_stand.ALWAYS_UNVERIFIED
+)
+
+
 @pytest.mark.parametrize(
-    ("calls", "problem"),
+    ("calls", "unverified", "problem"),
     [
-        ((), "нет"),
-        ((("repos/o/p", 200), ("repos/o/p/hooks", 403)), "403"),
-        ((("repos/o/p", 200), ("repos/o/p/keys", None)), "None"),
-        ((("repos/o/p", 200),), None),
+        ((), (), "нет"),
+        ((("repos/o/p", 200),), (), None),
+        ((("repos/o/p", 200),), APPS, None),
+        ((("repos/o/p/protection", 404),), APPS, None),
+        ((("repos/o/p", 200),), (*APPS, "hooks@df-trust: не проверено (403)"), "hooks"),
+        ((("repos/o/p", 200),), ("allow_rebase_merge@df-trust",), "rebase"),
+        ((("repos/o/p", 200),), ("apps@other: x",), "apps@other"),
     ],
 )
-def test_human_calls_problem(
-    calls: tuple[tuple[str, int | None], ...], problem: str | None
+def test_human_check_problem(
+    calls: tuple[tuple[str, int | None], ...],
+    unverified: tuple[str, ...],
+    problem: str | None,
 ) -> None:
-    got = live_trust_stand.human_calls_problem(calls)
+    """Fix round 2: the check's own `unverified` decides, not raw statuses
+    (a 404 «Branch not protected» under a ruleset is no gap); only the
+    closed `ALWAYS_UNVERIFIED` is exempt; no call at all is a gap."""
+    got = live_trust_stand.human_check_problem(calls, unverified)
     if problem is None:
         assert got is None
     else:
         assert got is not None and problem in got
 
 
-@pytest.mark.parametrize("calls", [(), (("repos/o/p", 200), ("repos/o/p/hooks", 404))])
-def test_request_table_row_is_not_verified_by_the_human_calls(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    calls: tuple[tuple[str, int | None], ...],
-) -> None:
-    """I1: every live request answers, but the human's check missed a call
-    (or made none): Т2 records its table, then is `not_verified`."""
-    st = fake_stand(tmp_path, calls=calls)
+def table_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, report: object
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Т2 over Т1's `report` (adopted as the stand does), every live
+    request answering; its result and its evidence."""
+    st = fake_stand(tmp_path)
+    live_trust_stand.adopt_report(
+        live_trust_stand.ctx_of(st), cast(setup_trust.PerimeterReport, report)
+    )
     monkeypatch.setattr(live_trust_stand, "table_facts", lambda st: FACTS)
     monkeypatch.setattr(live_trust_stand, "get", lambda t, path: (200, CLEAN))
     result = live_trust_stand.row_request_table(st)
-    assert result["status"] == NOT_VERIFIED
     recorded = json.loads(evidence(tmp_path, "t2-request-table.json").read_text())
-    assert recorded["human_not_200"] == [list(c) for c in calls if c[1] != 200]
-    ok = fake_stand(tmp_path, calls=(("repos/o/p", 200),))
-    assert "status" not in live_trust_stand.row_request_table(ok)
+    return result, recorded
+
+
+def test_request_table_passes_on_a_good_perimeter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A perimeter set up as spec 6.2 asks (`good_github`: rulesets only, so
+    `branches/<b>/protection` is 404) passes Т2."""
+    report = test_setup_trust.check(test_setup_trust.good_github())
+    assert report.ok and any(status == 404 for _, status in report.calls)
+    result, recorded = table_row(tmp_path, monkeypatch, report)
+    assert "status" not in result
+    assert recorded["human_gaps"] == []
+
+
+def test_request_table_is_not_verified_by_a_real_gap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The check's report names a premise it could not verify (hooks 403):
+    Т2 records its table, then is `not_verified`."""
+    fake = test_setup_trust.good_github()
+    fake.answers[f"repos/{test_setup_trust.TRUST}/hooks?per_page=100"] = (403, {})
+    report = test_setup_trust.check(fake)
+    result, recorded = table_row(tmp_path, monkeypatch, report)
+    assert result["status"] == NOT_VERIFIED
+    assert recorded["human_gaps"] and all("hooks" in g for g in recorded["human_gaps"])
+
+
+def test_request_table_is_not_verified_without_human_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    st = fake_stand(tmp_path)
+    monkeypatch.setattr(live_trust_stand, "table_facts", lambda st: FACTS)
+    monkeypatch.setattr(live_trust_stand, "get", lambda t, path: (200, CLEAN))
+    assert live_trust_stand.row_request_table(st)["status"] == NOT_VERIFIED
 
 
 def test_request_table_live_failure_fails(

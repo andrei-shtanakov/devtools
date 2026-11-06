@@ -56,8 +56,9 @@ trusted branch's rules hold `pull_request` and `non_fast_forward` (its
 ruleset still binds the branch; that no bypass actor pushes directly is
 H6a's confirmation, invisible to a token). Without the token, or with a
 probe that does not hold, Т5 is `not_verified` and Т6 is skipped: never a
-pass, and nothing is written. Т2 is `not_verified` when a call of the
-human's perimeter check was not `200` or there was none (spec 6.2: «не
+pass, and nothing is written. Т2 is `not_verified` when the human's
+perimeter check left a premise unverified (its report's `unverified`,
+outside the closed `ALWAYS_UNVERIFIED`) or made no call (spec 6.2: «не
 проверено», не «ок»). The ceiling of a measured pass is the checker's own
 `DEADLINE` (150 s, `governance.act_precheck`): a longer cold pass ends
 `unavailable`, Т5 fails with `m_seconds: null`, and Task 16 has no M until
@@ -747,6 +748,7 @@ class TrustContext:
     secrets: TrustSecrets
     binding: TrustBinding | None = None
     calls: tuple[tuple[str, int | None], ...] = ()
+    unverified: tuple[str, ...] = ()
     base: str = ""
     commits: list[str] = field(default_factory=list)
     steps: frozenset[int] = frozenset()
@@ -907,7 +909,8 @@ def perimeter_check(st: Stand) -> Path:
         report = setup_trust.parse_report(text.encode()) if text else None
     except (ValueError, TypeError) as exc:
         raise RowFailed(f"отчёт setup-trust check не разобран: {exc}") from None
-    ctx.calls = () if report is None else report.calls
+    if report is not None:
+        adopt_report(ctx, report)
     if done.returncode != 0 or report is None or not report.ok:
         stops = None if report is None else [asdict(s) for s in report.stops]
         raise RowFailed(f"setup-trust check: код {done.returncode}; стоп {stops}")
@@ -994,24 +997,57 @@ def row_request_table(st: Stand) -> dict[str, object]:
             entry["live"] = row.why_not_live
         rows.append(entry)
     calls = [[path, status] for path, status in ctx.calls]
-    unverified = [c for c in calls if c[1] != 200]
-    found = {"rows": rows, "human_calls": calls, "human_not_200": unverified}
+    found = {
+        "rows": rows,
+        "human_calls": calls,
+        "human_unverified": list(ctx.unverified),
+        "human_gaps": human_gaps(ctx.unverified),
+    }
     st.record("t2-request-table.json", found)
     bad = {str(r["key"]): r["problem"] for r in rows if r.get("problem")}
     expect(bad == {}, f"таблица запросов: {bad}")
-    problem = human_calls_problem(ctx.calls)
+    problem = human_check_problem(ctx.calls, ctx.unverified)
     if problem is not None:
         return not_verified(problem)
     return {"rows": len(rows), "human_calls": len(calls)}
 
 
-def human_calls_problem(calls: Sequence[tuple[str, int | None]]) -> str | None:
-    """Spec 6.2: a call of the human's check that was not `200` is «не
-    проверено», never «ок»; no call at all verified nothing."""
+#: The premises `setup_trust.check_perimeter` always leaves unverified by
+#: construction, by prefix (`<prefix>:`), each with its reason; a closed set.
+ALWAYS_UNVERIFIED: Mapping[str, str] = {
+    "apps@approval-policy": "спека 6.2: установки сторонних App PAT не видит — "
+    "разрешённая предпосылка, подтверждает человек в интерфейсе (H2)",
+    "apps@df-trust": "спека 6.2: установки сторонних App PAT не видит — "
+    "разрешённая предпосылка, подтверждает человек в интерфейсе (H2)",
+}
+
+
+def adopt_report(ctx: TrustContext, report: setup_trust.PerimeterReport) -> None:
+    """Т1's report as Т2 judges it: its calls and its unverified premises."""
+    ctx.calls = report.calls
+    ctx.unverified = report.unverified
+
+
+def human_gaps(unverified: Sequence[str]) -> list[str]:
+    """The unverified premises outside `ALWAYS_UNVERIFIED`."""
+    return [
+        u
+        for u in unverified
+        if not any(u.startswith(f"{key}:") for key in ALWAYS_UNVERIFIED)
+    ]
+
+
+def human_check_problem(
+    calls: Sequence[tuple[str, int | None]], unverified: Sequence[str]
+) -> str | None:
+    """Spec 6.2: what the human's check left unverified is «не проверено»,
+    never «ок». The check's own signal decides (`report.unverified`, filled
+    by `setup_trust` -- which also knows that a 404 «Branch not protected»
+    under a ruleset is normal); no call at all verified nothing."""
     if not calls:
         return "вызовов проверки периметра человеком нет"
-    missed = [[path, status] for path, status in calls if status != 200]
-    return f"вызовы человека не 200: {missed}" if missed else None
+    gaps = human_gaps(unverified)
+    return f"проверка человека не проверила: {gaps}" if gaps else None
 
 
 # ---------- Т3 trust-status, Т4 App on a trust repo ----------
