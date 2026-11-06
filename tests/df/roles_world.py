@@ -1174,13 +1174,19 @@ def _api_handler(rest: object) -> type[http.server.BaseHTTPRequestHandler]:
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - http.server's name
             path = self.path.lstrip("/")
-            if path == API_CONTROL:
-                status, body = 200, {"control": API_CONTROL}
-            else:
-                auth = self.headers.get("Authorization", "")
-                agent = self.headers.get("User-Agent", "")
-                status, body = rest.answer(path, auth, agent)  # type: ignore[attr-defined]
-            data = json.dumps(body).encode("utf-8")
+            try:
+                if path == API_CONTROL:
+                    status, body = 200, {"control": API_CONTROL}
+                else:
+                    auth = self.headers.get("Authorization", "")
+                    agent = self.headers.get("User-Agent", "")
+                    status, body = rest.answer(path, auth, agent)  # type: ignore[attr-defined]
+                data = json.dumps(body).encode("utf-8")
+            except Exception as exc:  # noqa: BLE001 - an answer, never a drop
+                status = 500
+                data = json.dumps(
+                    {"message": f"fixture: {type(exc).__name__}"}
+                ).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
@@ -1249,7 +1255,7 @@ def verify_paths(python: Path, user: str) -> dict[str, str | None]:
 
 @contextmanager
 def trusted_ca(
-    ca: Path, paths: Mapping[str, str | None], problems: list[str]
+    ca: Path, paths: Mapping[str, str | None], restores: Restores
 ) -> Iterator[str]:
     """`ca` in the store the admin Python reports: appended to its CA file
     when that exists, else one `<hash>.<n>` file in its CA directory. The
@@ -1260,13 +1266,12 @@ def trusted_ca(
     if cafile and os.path.isfile(cafile):
         bundle = Path(cafile)
         saved = bundle.read_bytes()
+        restores.changed.add("store")
         try:
             bundle.write_bytes(saved + b"\n" + ca.read_bytes())
             yield str(bundle)
         finally:
-            bundle.write_bytes(saved)
-            if bundle.read_bytes() != saved:
-                problems.append(f"{bundle}: не восстановлен побайтно")
+            restores.settle("store", lambda: _put_back(bundle, saved))
         return
     if not capath or not os.path.isdir(capath):
         infra(f"нет хранилища доверия: {dict(paths)}")
@@ -1278,31 +1283,72 @@ def trusted_ca(
     name = out.stdout.decode().strip()
     n = next(i for i in range(100) if not os.path.lexists(directory / f"{name}.{i}"))
     added = directory / f"{name}.{n}"
-    shutil.copyfile(ca, added)
-    os.chmod(added, 0o644)
+    restores.changed.add("store")
     try:
+        shutil.copyfile(ca, added)
+        os.chmod(added, 0o644)
         yield str(added)
     finally:
-        added.unlink(missing_ok=True)
-        if sorted(os.listdir(directory)) != before:
-            problems.append(f"{directory}: не восстановлен")
+
+        def put_back() -> bool:
+            added.unlink(missing_ok=True)
+            return sorted(os.listdir(directory)) == before
+
+        restores.settle("store", put_back)
 
 
 @contextmanager
-def api_on_loopback(problems: list[str]) -> Iterator[None]:
+def api_on_loopback(restores: Restores) -> Iterator[None]:
     """`API_HOST` resolved to the loopback (`/etc/hosts`); restored on
-    every path and checked byte for byte (a mismatch to `problems`)."""
+    every path and checked byte for byte (`restores`)."""
     saved = HOSTS_FILE.read_bytes()
     lines = f"\n{HOSTS_MARK}\n127.0.0.1 {API_HOST}\n::1 {API_HOST}\n"
+    restores.changed.add("hosts")
     try:
         HOSTS_FILE.write_bytes(saved + lines.encode("ascii"))
         _flush_resolver()
         yield
     finally:
-        HOSTS_FILE.write_bytes(saved)
-        _flush_resolver()
-        if HOSTS_FILE.read_bytes() != saved:
-            problems.append(f"{HOSTS_FILE}: не восстановлен побайтно")
+
+        def put_back() -> bool:
+            ok = _put_back(HOSTS_FILE, saved)
+            _flush_resolver()
+            return ok
+
+        restores.settle("hosts", put_back)
+
+
+@dataclass
+class Restores:
+    """What the adaptation changed and which restores a byte-for-byte check
+    confirmed (paid review #709: the marker goes only on `verified`, never
+    on "no complaint"); a failed or raising restore is in `problems`."""
+
+    changed: set[str] = field(default_factory=set)
+    verified: set[str] = field(default_factory=set)
+    problems: list[str] = field(default_factory=list)
+
+    def settle(self, name: str, put_back: Callable[[], bool]) -> None:
+        """Run a restore: verified when it returns `True`; a mismatch or any
+        exception is a problem (never raised: a failure in flight stays)."""
+        try:
+            ok = put_back()
+        except Exception as exc:  # noqa: BLE001 - recorded, the marker stays
+            self.problems.append(f"{name}: восстановление: {type(exc).__name__}: {exc}")
+            return
+        if ok:
+            self.verified.add(name)
+        else:
+            self.problems.append(f"{name}: не восстановлен побайтно")
+
+    def done(self) -> bool:
+        """Every change restored and confirmed, nothing failed."""
+        return not self.problems and self.changed <= self.verified
+
+
+def _put_back(path: Path, saved: bytes) -> bool:
+    path.write_bytes(saved)
+    return path.read_bytes() == saved
 
 
 def _flush_resolver() -> None:
@@ -1350,20 +1396,21 @@ def impersonate_api(rest: object, work: Path, python: Path) -> Iterator[ApiCerts
     paths = {user: verify_paths(python, user) for user in API_READERS}
     if len({json.dumps(p, sort_keys=True) for p in paths.values()}) != 1:
         infra(f"роли читают разные хранилища доверия: {paths}")
-    keys = Path(tempfile.mkdtemp(prefix="df-acc-api-", dir=work))
-    marker = api_marker()
+    marker = api_marker()  # first: everything after it is covered below
     try:
-        write_marker(marker, f"{HOSTS_MARK}\nkeys {keys}\n")
+        write_marker(marker, f"{HOSTS_MARK}\nkeys under {work}\n")
     except FileExistsError:
         infra(f"{marker} уже есть: хост адаптирован прошлым прогоном")
-    problems: list[str] = []
+    restores = Restores()
+    keys: Path | None = None
     try:
+        keys = Path(tempfile.mkdtemp(prefix="df-acc-api-", dir=work))
         certs = make_api_certs(keys)
         with ExitStack() as stack:
             stack.enter_context(serve_api(rest, certs))
-            ca = trusted_ca(certs.ca, paths["df-publisher"], problems)
+            ca = trusted_ca(certs.ca, paths["df-publisher"], restores)
             store = stack.enter_context(ca)
-            stack.enter_context(api_on_loopback(problems))
+            stack.enter_context(api_on_loopback(restores))
             seen = {user: _probe(python, user) for user in API_READERS}
             evidence(
                 "api-impersonation.json",
@@ -1376,17 +1423,25 @@ def impersonate_api(rest: object, work: Path, python: Path) -> Iterator[ApiCerts
                     infra(f"api.github.com не отвечает подделкой ({user}): {got}")
             yield certs
     finally:
-        # every path (review N2): the restore was checked by the contexts
-        # above; the keys go; the marker only when all of it held, so a
-        # leftover means exactly "restore not verified"
-        shutil.rmtree(keys, ignore_errors=True)
-        if os.path.lexists(keys):
-            problems.append(f"{keys}: ключи не удалены")
-        evidence("api-restore.json", {"problems": problems})
-        if not problems:
+        # every path (review N2): the restores were checked by the contexts
+        # above; the keys go; the marker only when every change is
+        # confirmed restored, so a leftover means "restore not verified"
+        if keys is not None:
+            shutil.rmtree(keys, ignore_errors=True)
+            if os.path.lexists(keys):
+                restores.problems.append(f"{keys}: ключи не удалены")
+        evidence(
+            "api-restore.json",
+            {
+                "changed": sorted(restores.changed),
+                "verified": sorted(restores.verified),
+                "problems": restores.problems,
+            },
+        )
+        if restores.done():
             remove_marker(marker)
         elif sys.exc_info()[0] is None:
-            infra("; ".join(problems))
+            infra("; ".join(restores.problems) or "восстановление не подтверждено")
 
 
 def _probe(python: Path, user: str) -> dict[str, object]:

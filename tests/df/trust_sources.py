@@ -182,8 +182,10 @@ class GitRest:
             return self.status[path], {"message": "fixture status"}
         try:
             return self._answer(path, bool(auth))
-        except OSError:
+        except OSError:  # no such object: what GitHub answers
             return 404, {"message": "Not Found"}
+        except subprocess.SubprocessError as exc:  # git failed: a status, not a drop
+            return 500, {"message": f"fixture: git: {type(exc).__name__}"}
 
     def reads(self, start: int, agent: str) -> list[str]:
         """The paths `agent` asked since call number `start`."""

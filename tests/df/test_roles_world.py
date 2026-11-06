@@ -430,3 +430,23 @@ def test_api_marker_never_follows_or_overwrites(tmp_path: Path) -> None:
     with pytest.raises(Failed):
         remove_marker(link)
     assert os.path.lexists(link)
+
+
+def test_restores_confirm_only_a_checked_put_back() -> None:
+    """Paid review #709: the marker goes only when every change is
+    confirmed restored; a mismatch or a raising restore keeps it."""
+    from tests.df.roles_world import Restores
+
+    def boom() -> bool:
+        raise OSError("read-only")
+
+    ok = Restores(changed={"store", "hosts"})
+    ok.settle("store", lambda: True)
+    assert not ok.done()  # hosts not confirmed yet
+    ok.settle("hosts", lambda: True)
+    assert ok.done()
+    bad = Restores(changed={"store", "hosts"})
+    bad.settle("store", boom)
+    bad.settle("hosts", lambda: False)
+    assert not bad.done() and len(bad.problems) == 2
+    assert "OSError" in bad.problems[0]

@@ -65,12 +65,12 @@ from df.paths import Layout
 pin = RepoPin("devtools", spec["url"], spec["sha"], ())
 profile = Profile(spec["profile"], spec["python"], (pin,))
 install._profile = lambda _cfg: profile
-lay = Layout(Path("/"))
+lay = Layout(Path(spec["root"]))
 argv = spec["argv"]
 if argv[0] == "init":
     code = cli.main(argv, mode="bootstrap", read=None, lock_fd=None, layout=lay)
 else:
-    paths = launcher_entry.EntryPaths("/")
+    paths = launcher_entry.EntryPaths(spec["root"])
     fd = launcher_entry.acquire(paths)
     try:
         snap = launcher_entry.take_snapshot(paths, "writer")
@@ -123,8 +123,10 @@ def paths_2b(src: Path) -> list[str]:
 
 
 def run_2b(src: Path, world: RootWorld, argv: list[str], url: str, sha: str) -> int:
-    """`darkfactory <argv>` by the 2b code with the pin `url@sha`."""
+    """`darkfactory <argv>` by the 2b code with the pin `url@sha`, in the
+    layout of `world` (its root: `/` for the production layout)."""
     spec = {
+        "root": str(world.layout.root),
         "src": str(src),
         "url": url,
         "sha": sha,
