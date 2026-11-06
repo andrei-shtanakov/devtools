@@ -97,6 +97,15 @@ IRREPRODUCIBLE = "irreproducible"
 IRREPRODUCIBLE_REASONS = frozenset(
     {"irreproducible: policy_pin_mismatch", "irreproducible: policy_objects_missing"}
 )
+#: The checker's `unsupported_size: <field>` reasons (the fields of
+#: `governance.act_trust_findings.UnsupportedSize`; a test pins the set):
+#: a verdict of that status with any other reason -- an empty one included
+#: -- is unbound, so every К of `unsupported_size` names its field (paid
+#: review #708).
+UNSUPPORTED_REASONS = frozenset(
+    f"unsupported_size: {field}"
+    for field in ("epochs", "policy_full_name", "policy_branch", "verdict")
+)
 STATUSES = (ALLOW, REFUSE, UNSET, UNSUPPORTED, IRREPRODUCIBLE)
 #: `act_precheck._BRANCH`: a branch name git fetches as `refs/heads/<name>`.
 BRANCH = re.compile(
@@ -1118,6 +1127,8 @@ def _check_contract(
         _need(not verdict.findings, f"outcome: {verdict.outcome}")
     if verdict.outcome == IRREPRODUCIBLE:
         _need(verdict.reason in IRREPRODUCIBLE_REASONS, "outcome: irreproducible")
+    if verdict.outcome == UNSUPPORTED:
+        _need(verdict.reason in UNSUPPORTED_REASONS, "outcome: unsupported_size")
     _check_ranges_of(verdict, obs, request, stored_ranges)
 
 

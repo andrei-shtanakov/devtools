@@ -1854,11 +1854,11 @@ def _size_of_listing(status: TrustStatus, root: tuple[str, int, str]) -> str:
 
     - a reason starting `unsupported_size: ` -- «нарушено» with that field
       (the exit of `epochs` only then, `setup_trust.explained_event`);
-    - a reason of `IRREPRODUCIBLE_REASONS`, or no reason (a changed context,
-      a moved binding: `trust_state.apply_status` always names a typed
-      status, so an unnamed К is never a size one) -- a note of `ok`;
-    - any other reason (the restore admission; a database written before it
-      had its own key may have merged a size К into it, re-review N-2) --
+    - a reason of `IRREPRODUCIBLE_REASONS` -- a note of `ok`;
+    - no reason, or any other reason (a changed context, the restore
+      admission; a database written before the restore event had its own
+      key may have merged a size К into it, re-review N-2; a verdict bound
+      before the publisher refused an empty reason, paid review #708) --
       «не проверено», the exit of `epochs` as one possibility.
 
     Events not listed are «не проверено». The old roots' events never
@@ -1869,9 +1869,7 @@ def _size_of_listing(status: TrustStatus, root: tuple[str, int, str]) -> str:
     named = [e for e in k_events if e.reason and e.reason.startswith(_UNSUPPORTED)]
     if named:
         raise _broken([setup_trust.explained_event(e) for e in named])
-    known = [
-        e for e in k_events if e.reason is None or e.reason in IRREPRODUCIBLE_REASONS
-    ]
+    known = [e for e in k_events if e.reason in IRREPRODUCIBLE_REASONS]
     unknown = [e for e in k_events if e not in known]
     if unknown:
         texts = "; ".join(_event_text(e) for e in unknown)
