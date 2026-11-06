@@ -81,6 +81,7 @@ from tests.df.roles_world import (
 )
 from tests.df.root_world import (
     FixtureRepo,
+    InstalledWorld,
     RootWorld,
     build_fixture_repo,
     current_id,
@@ -344,6 +345,8 @@ def test_root_trust_upgrade_2b_to_3a(acceptance_top: Path, control_url: str) -> 
         upgraded = current_id(lay)
         found["2b_installs_3a"] = {"code": code, "id": upgraded}
         assert code == 0 and upgraded not in (None, first_id)
+        assert upgraded is not None
+        uw.installed = InstalledWorld(uw.installed.world, upgraded)
         pw = stack.enter_context(precheck_world(uw))
         stop = pw.ask(pw.current)
         before_import = ask_v2(uw)
