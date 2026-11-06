@@ -419,6 +419,8 @@ BLOCKING_KINDS = frozenset(
         "unknown",
     }
 )
+#: The most events one answer lists (`trust_state.MAX_LISTED`).
+MAX_BLOCKING_LISTED = 32
 _BLOCKING_ROW_KEYS = frozenset({"root", "event_id", "kind", "state", "epoch", "reason"})
 
 
@@ -512,7 +514,12 @@ def _blocking(value: object) -> Blocking | None:
     events, omitted = value["events"], value["omitted"]
     if not isinstance(events, list) or not (_is_int(omitted) and omitted >= 0):
         raise BadResponse("blocking: events must be a list, omitted >= 0")
-    return Blocking(tuple(_blocking_row(r) for r in events), int(omitted))
+    if len(events) > MAX_BLOCKING_LISTED:
+        raise BadResponse(f"blocking: more than {MAX_BLOCKING_LISTED} events")
+    rows = tuple(_blocking_row(r) for r in events)
+    if len({r.event_id for r in rows}) != len(rows):
+        raise BadResponse("blocking: duplicate event_id")
+    return Blocking(rows, int(omitted))
 
 
 def _blocking_row(row: object) -> BlockingRow:
@@ -534,8 +541,9 @@ def _blocking_row(row: object) -> BlockingRow:
     checks = (
         _is_int(event_id) and event_id > 0,
         kind in BLOCKING_KINDS,
-        state in ("pending", "registered"),
-        epoch is None or (_is_int(epoch) and epoch > 0),
+        # `pending` has no epoch, `registered(E)` has one
+        (state, epoch is None) == ("pending", True)
+        or (state == "registered" and _is_int(epoch) and epoch > 0),
         reason is None or isinstance(reason, str),
     )
     if not all(checks):

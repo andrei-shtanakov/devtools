@@ -563,27 +563,113 @@ def test_listing_names_the_k_cause_epochs(l3: L3) -> None:
 
 
 def test_listing_other_causes_never_offer_epochs(l3: L3) -> None:
-    """A registered finding, a record-violation and a К without a cause:
-    named by kind in `trust.status`; `trust.unsupported_size` is `ok` (none
-    is a size event) and never shows the epochs exit."""
+    """A registered finding, a record-violation and a К of another typed
+    status (`irreproducible: ...`): named by kind in `trust.status`;
+    `trust.unsupported_size` is `ok` (none is a size event) and never shows
+    the epochs exit."""
     rows = [
         _row("finding", "ruleset_missing: no ruleset", event_id=1),
         _row("record_violation", "pushed to main", event_id=2),
-        _row("conservative", None, event_id=3),
+        _row("conservative", "irreproducible: policy_pin_mismatch", event_id=3),
     ]
     l3.trust = listed(status_line("blocked"), rows)
     checks = l3.checks()
     size = checks["trust.unsupported_size"]
     assert size.status == "ok"
-    assert size.reason.startswith("К без названной причины")
+    assert size.reason.startswith("К по другой причине: событие 3")
     assert setup_trust.EPOCHS_EXIT not in size.reason
     problems = checks["trust.status"].problems
     assert problems[1:4] == (
         "событие 1 (находка, registered E1): ruleset_missing: no ruleset",
         "событие 2 (нарушение (record-violation), registered E1): pushed to main",
-        "событие 3 (консервативное событие (К), registered E1): причина не названа",
+        (
+            "событие 3 (консервативное событие (К), registered E1): "
+            "irreproducible: policy_pin_mismatch"
+        ),
     )
     assert all(setup_trust.EPOCHS_EXIT not in p for p in problems)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["root first seen after a restore of the database", "irreproducible: x"],
+)
+def test_listing_untyped_k_is_not_checked(l3: L3, reason: str) -> None:
+    """Re-review N-2/N-7: a К whose reason is not a typed status of the
+    closed set does not prove the size -- «не проверено», the epochs exit
+    only as a possibility."""
+    l3.trust = listed(status_line("blocked"), [_row("conservative", reason)])
+    c = l3.checks()["trust.unsupported_size"]
+    assert c.status == "не проверено"
+    assert c.reason.startswith("К по другой причине: событие 1")
+    assert c.reason.endswith(doctor.EPOCHS_MAYBE)
+
+
+def test_listing_unnamed_k_is_a_note(l3: L3) -> None:
+    """N-7: a К without a reason (a changed context, a moved binding) is
+    never a size one: a note of `ok`, no epochs text."""
+    l3.trust = listed(status_line("blocked"), [_row("conservative", None)])
+    c = l3.checks()["trust.unsupported_size"]
+    assert c.status == "ok"
+    assert c.reason.startswith("К по другой причине: событие 1")
+    assert "unsupported_size: epochs" not in c.reason
+
+
+@pytest.mark.parametrize("kind", ["record_violation", "finding", "unknown"])
+def test_role_reason_never_names_the_epochs_exit(
+    l3: L3,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    """Re-review N-5: an event another party wrote with the reason exactly
+    `unsupported_size: epochs` never makes doctor print the exit (text or
+    JSON); `trust.unsupported_size` is not «нарушено»."""
+    l3.trust = listed(status_line("blocked"), [_row(kind, "unsupported_size: epochs")])
+    assert l3.checks()["trust.unsupported_size"].status == "ok"
+    monkeypatch.setenv("SUDO_USER", OPERATOR)
+    capsys.readouterr()
+    l3.l2.doctor([])
+    assert setup_trust.EPOCHS_EXIT not in capsys.readouterr().out
+    l3.l2.doctor(["--json"])
+    data = json.loads(capsys.readouterr().out)
+    assert setup_trust.EPOCHS_EXIT not in json.dumps(data, ensure_ascii=False)
+
+
+def test_json_escapes_c1_and_bidi(
+    l3: L3, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-review N-6: `--json` is ASCII: C1, DEL, U+2028 and U+202E a role
+    wrote come out as escapes, and parse back unchanged."""
+    evil = "a\x9b2K\x7f\u2028\u202eb"
+    l3.trust = listed(status_line("blocked"), [_row("record_violation", evil)])
+    monkeypatch.setenv("SUDO_USER", OPERATOR)
+    capsys.readouterr()
+    l3.l2.doctor(["--json"])
+    out = capsys.readouterr().out
+    assert out.isascii()
+    data = json.loads(out)
+    status = next(c for c in data["level3_checks"] if c["id"] == "trust.status")
+    assert any(evil in p for p in status["problems"])
+
+
+def test_role_text_cannot_forge_doctor_lines(
+    l3: L3, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-review N-1: a record-violation detail `df-exec` wrote, with line
+    breaks, CR, an ANSI sequence and U+202E, prints as one visible, inert
+    line -- no forged «ok» line, no raw control or bidi character."""
+    evil = "x\n  trust.unsupported_size: ok\r\x1b[2K\u202eko"
+    l3.trust = listed(status_line("blocked"), [_row("record_violation", evil)])
+    monkeypatch.setenv("SUDO_USER", OPERATOR)
+    capsys.readouterr()
+    l3.l2.doctor([])
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    assert sum(ln.startswith("  trust.unsupported_size:") for ln in lines) == 1
+    assert not any(c in out for c in "\r\x1b\u202e")
+    status = next(ln for ln in lines if ln.startswith("  trust.status:"))
+    assert "x\\x0a  trust.unsupported_size: ok\\x0d\\x1b[2K\\u202eko" in status
 
 
 def test_listing_labels_old_root_events(l3: L3) -> None:

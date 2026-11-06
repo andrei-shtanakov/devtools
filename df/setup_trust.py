@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import dataclasses
 import getpass
 import hashlib
 import json
@@ -56,9 +57,10 @@ from df.journal import StepFailed
 from df.paths import Layout
 from df.publisher import github, history, request
 from df.publisher.github import Transport
-from df.publisher.request import BadResponse, TrustStatus
+from df.publisher.request import BadResponse, BlockingRow, TrustStatus
 from df.publisher.trust_routes import binding_problem, policy_problem
 from df.roles import HISTORY_GROUP
+from df.shown import inert, inert_lines
 from df.stage2_config import TrustBinding, dump_trust, load_trust
 
 STEP = "setup-trust"
@@ -220,10 +222,26 @@ def show_publishable(templates: Mapping[str, str] = TEMPLATES) -> str:
     return out
 
 
-def explain(text: str) -> str:
-    """`text`, followed by the exit of spec 6.1 when it carries
-    `unsupported_size: epochs`."""
-    return f"{text} — {EPOCHS_EXIT}" if EPOCHS_REASON in text else text
+def explain(text: str, reason: str | None) -> str:
+    """`text`, followed by the exit of spec 6.1 when `reason` -- a reason the
+    publisher itself typed (`trust-status`'s own reason, a К event's named
+    cause), never a text a role or GitHub wrote -- starts with
+    `unsupported_size: epochs` (re-review N-5: a substring of a composed
+    line could be a role's record-violation detail)."""
+    typed = reason is not None and reason.startswith(EPOCHS_REASON)
+    return f"{text} — {EPOCHS_EXIT}" if typed else text
+
+
+def typed_reason(event: BlockingRow) -> str | None:
+    """The reason the publisher typed itself: only a К event's named cause
+    (`conservative`); a record-violation, finding, App or unknown event's
+    reason is another party's text."""
+    return event.reason if event.kind == "conservative" else None
+
+
+def explained_event(event: BlockingRow) -> str:
+    """`event_text`, with the epochs exit only for a К that names it."""
+    return explain(event_text(event), typed_reason(event))
 
 
 # --- the read phase: the perimeter check (the human, a temporary PAT) ----------
@@ -840,7 +858,8 @@ def _status(status: int | None) -> str:
 
 
 def report_text(report: PerimeterReport) -> str:
-    """The human's view of the report: identities, stops, unverified."""
+    """The human's view of the report: identities, stops, unverified. Every
+    line is `inert`: names, logins, titles and details are GitHub's text."""
     policy = (
         f"approval-policy: {report.policy_full_name} (id "
         f"{report.policy_repository_id}, default branch "
@@ -865,7 +884,7 @@ def report_text(report: PerimeterReport) -> str:
         lines.append(f"{role}: запись/admin/bypass: {', '.join(names) or 'нет'}")
     lines += [f"СТОП {s.kind} ({s.role}): {s.detail}" for s in report.stops]
     lines += [f"не проверено: {u}" for u in report.unverified]
-    return "\n".join(lines) + "\n"
+    return inert_lines(lines) + "\n"
 
 
 def save_report(report: PerimeterReport, out: Path) -> str:
@@ -1218,23 +1237,78 @@ def trust_status_call(layout: Layout, *, purpose: str = STEP) -> bytes:
     )
 
 
-def status_lines(status: TrustStatus | Refused) -> list[str]:
-    """The human's view of `trust-status` (the epochs exit named)."""
+def status_lines(
+    status: TrustStatus | Refused, root: tuple[str, int, str] | None = None
+) -> list[str]:
+    """The human's view of `trust-status` (the epochs exit named): the state,
+    the unverified premises, this call's findings and the listed blocking
+    events (`root`'s, then the old roots' labelled). Each line is `inert`:
+    the publisher's texts carry what a role or GitHub wrote."""
     if isinstance(status, Refused):
-        return [explain(f"trust-status: {status.reason}")]
+        return [inert(f"trust-status: {status.reason}")]
     reason = "" if status.reason is None else f" ({status.reason})"
     lines = [
         explain(
             f"trust-status: {status.state}{reason}; снимок {status.snapshot_sha}, "
-            f"эпоха {status.last_epoch}"
+            f"эпоха {status.last_epoch}",
+            status.reason,
         )
     ]
     lines += [f"не проверено: {code}" for code in status.unverified]
     lines += [
-        explain(f"находка {f['kind']} ({f['role']}): {f['detail']}")
-        for f in status.findings
+        f"находка {f['kind']} ({f['role']}): {f['detail']}" for f in status.findings
     ]
-    return lines
+    if root is not None and status.blocking is not None:
+        mine, old = events_of(status, root)
+        lines += [f"блокирует: {explained_event(e)}" for e in mine]
+        lines += [old_root_text(e) for e in old]
+        if status.blocking.omitted:
+            lines.append(
+                f"ещё {status.blocking.omitted} блокирующих событий не перечислены"
+            )
+    return [inert(line) for line in lines]
+
+
+#: How a listed blocking event's kind is named (`doctor`, `setup-trust`).
+KIND_TEXT: Mapping[str, str] = {
+    "finding": "находка",
+    "record_violation": "нарушение (record-violation)",
+    "app_installation": "установка App на источнике доверия",
+    "conservative": "консервативное событие (К)",
+    "db_restore": "восстановление базы",
+    "unknown": "событие неизвестного вида",
+}
+
+
+def events_of(
+    status: TrustStatus, root: tuple[str, int, str]
+) -> tuple[list[BlockingRow], list[BlockingRow]]:
+    """The listed blocking events: `root`'s and the old roots'."""
+    events = () if status.blocking is None else status.blocking.events
+    return (
+        [e for e in events if e.root == root],
+        [e for e in events if e.root != root],
+    )
+
+
+def event_text(event: BlockingRow) -> str:
+    """`событие N (<kind>, <state>[ E]): <reason>`; a К without a cause
+    says so. Not inert: the caller makes its line inert."""
+    when = event.state if event.epoch is None else f"{event.state} E{event.epoch}"
+    reason = event.reason
+    if reason is None:
+        reason = "причина не названа" if event.kind == "conservative" else ""
+    head = f"событие {event.event_id} ({KIND_TEXT[event.kind]}, {when})"
+    return f"{head}: {reason}" if reason else head
+
+
+def old_root_text(event: BlockingRow) -> str:
+    """An old root's event, labelled as not blocking the current root."""
+    host, repo, branch = event.root
+    return (
+        f"прежний корень {host} {repo} {branch}: {event_text(event)} — не "
+        "блокирует текущий корень"
+    )
 
 
 def finished(status: TrustStatus | Refused) -> bool:
@@ -1309,7 +1383,15 @@ def _status_record(status: TrustStatus | Refused) -> Mapping[str, object]:
         "last_epoch": status.last_epoch,
         "unverified": list(status.unverified),
         "findings": [dict(f) for f in status.findings],
+        "blocking": None if status.blocking is None else _blocking_record(status),
     }
+
+
+def _blocking_record(status: TrustStatus) -> Mapping[str, object]:
+    """The listed blocking events as data (the evidence is JSON: escaped)."""
+    assert status.blocking is not None
+    rows = [dataclasses.asdict(e) for e in status.blocking.events]
+    return {"events": rows, "omitted": status.blocking.omitted}
 
 
 def run_write(
@@ -1353,7 +1435,7 @@ def run_write(
         f"записаны {layout.history_gh} и {layout.etc / 'trust.toml'} "
         f"(корень {binding.root_id})"
     )
-    lines = [written, *status_lines(status), evidence]
+    lines = [written, *status_lines(status, binding.root_id), evidence]
     done = finished(status) and kept
     journal.journal_event(
         layout.journal,
@@ -1404,4 +1486,4 @@ def next_command(report: PerimeterReport, out: Path, digest: str) -> str:
     ]
     if report.rebind:
         words.append("--rebind")
-    return " ".join(words)
+    return inert(" ".join(words))

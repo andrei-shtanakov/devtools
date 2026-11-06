@@ -440,6 +440,18 @@ def test_root_parses_the_blocking_listing(
         {"events": [{**row, "reason": 1}], "omitted": 0},
         {"events": [{**row, "root": {"host": "github.com"}}], "omitted": 0},
         {"events": [{**row, "extra": 1}], "omitted": 0},
+        # N-4: the state and the epoch agree; at most the publisher's cap;
+        # each event once
+        {"events": [{**row, "epoch": 3}], "omitted": 0},
+        {"events": [{**row, "state": "registered"}], "omitted": 0},
+        {
+            "events": [
+                {**row, "event_id": i + 1}
+                for i in range(request.MAX_BLOCKING_LISTED + 1)
+            ],
+            "omitted": 0,
+        },
+        {"events": [row, row], "omitted": 0},
         [],
     ):
         broken = {**data, "result": {**result, "blocking": bad}}

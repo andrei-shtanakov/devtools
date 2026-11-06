@@ -1056,3 +1056,23 @@ def test_blocking_kinds_pinned() -> None:
     from df.publisher import request
 
     assert frozenset(get_args(trust_state.BlockingKind)) == request.BLOCKING_KINDS
+
+
+def test_restore_admission_keeps_the_size_cause(lay: Layout) -> None:
+    """Re-review N-2: after a restore, the first observation of a root writes
+    the admission К under its own key; a later К of the same ctx with
+    `unsupported_size: epochs` is its own event and keeps its cause."""
+    with perimeter.open_db(lay) as db:
+        with perimeter.write(db.conn):
+            perimeter.mark_restored(db.conn)
+        obs = observe(db, accepted=None, head=H1)
+        trust_state.apply_status(
+            db, ROOT, obs.id, "unsupported_size", epochs_of=PENDING,
+            reason="unsupported_size: epochs",
+        )  # fmt: skip
+        listed, _ = trust_state.blocking_listing(db.conn, ROOT)
+    reasons = [(e.kind, e.reason) for e in listed]
+    assert reasons == [
+        ("conservative", "root first seen after a restore of the database"),
+        ("conservative", "unsupported_size: epochs"),
+    ]
