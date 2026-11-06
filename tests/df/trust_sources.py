@@ -249,6 +249,13 @@ def _repo_answer(
     if head == "git" and tail[:1] == ["trees"] and len(tail) == 2:
         recursive = query.get("recursive") == ["1"]
         return 200, tree_body(repo.work, tail[1], recursive=recursive)
+    if head == "git" and tail[:2] == ["ref", "heads"] and len(tail) > 2:
+        name = "/".join(tail[2:])
+        sha = repo.head(name)
+        return 200, {"ref": f"refs/heads/{name}", "object": {"sha": sha}}
+    if head == "compare" and len(tail) == 1 and "..." in tail[0]:
+        base, _, top = tail[0].partition("...")
+        return 200, compare_body(repo.work, base, top)
     if head == "git" and tail[:1] == ["blobs"] and len(tail) == 2:
         return 200, blob_body(repo.work, tail[1])
     if head == "contents" and tail:
@@ -296,6 +303,32 @@ def _settings(repo: SourceRepo, head: str, tail: list[str]) -> Reply | None:
     if head == "environments" and not tail:
         return 200, {"total_count": 0, "environments": []}
     return None
+
+
+_STATUS = {"A": "added", "M": "modified", "D": "removed", "R": "renamed"}
+
+
+def compare_body(work: Path, base: str, top: str) -> dict[str, object]:
+    """`/compare/<base>...<top>`: the files of the diff from their merge base."""
+    if _kind(work, base) != "commit" or _kind(work, top) != "commit":
+        raise OSError("compare: no such commits")
+    files: list[dict[str, object]] = []
+    ahead = int(git(work, "rev-list", "--count", f"{base}..{top}").strip())
+    behind = int(git(work, "rev-list", "--count", f"{top}..{base}").strip())
+    status = {(0, 0): "identical"}.get((ahead, behind))
+    if status is None:
+        status = "ahead" if not behind else "behind" if not ahead else "diverged"
+    out = git(work, "diff", "--name-status", "-M", f"{base}...{top}")
+    for line in out.splitlines():
+        words = line.split("\t")
+        item: dict[str, object] = {
+            "status": _STATUS[words[0][0]],
+            "filename": words[-1],
+        }
+        if words[0].startswith("R"):
+            item["previous_filename"] = words[1]
+        files.append(item)
+    return {"status": status, "ahead_by": ahead, "behind_by": behind, "files": files}
 
 
 def _kind(work: Path, oid: str) -> str:
@@ -404,7 +437,7 @@ POLICY_FILES: Mapping[str, bytes] = {
         b"AUTHORIZED_MERGER_ACCOUNTS=df-fixture-app[bot]\n"
     ),
     "policy/modes.yaml": (
-        b"schema: approval-policy-modes/v1\nmodes:\n  df-fixture/product: merge\n"
+        b"schema: approval-policy-modes/v1\nmodes:\n  df-fixture/product: review\n"
     ),
     "policy/actors.yaml": (
         b"version: 1\nhuman_identities: [github:alice]\n"
@@ -492,6 +525,21 @@ def build_sources(root: Path) -> TrustSources:
     trust.commit(files, "C0")
     trust.commit({"README.md": b"df-trust\n"}, "X")
     return TrustSources(trust, policy, GitRest([trust, policy]), boot)
+
+
+def new_trust_repo(sources: TrustSources, repo_id: int, full_name: str) -> SourceRepo:
+    """A fresh `df-trust` (spec 6.1, the exit of 65 epochs): `source.env`
+    and a journal of one epoch, both on the policy's current activation;
+    served next to the others and made `sources.trust`."""
+    anchor = sources.policy.head()
+    root = sources.trust.work.parent
+    trust = SourceRepo.create(root, repo_id, full_name)
+    files = {"source.env": source_env(anchor), "epochs.yaml": epochs_yaml([anchor])}
+    trust.commit(files, "C0")
+    with sources.rest.lock:
+        sources.rest.repos.append(trust)
+    sources.trust = trust
+    return trust
 
 
 def history_profile(path: Path) -> Path:

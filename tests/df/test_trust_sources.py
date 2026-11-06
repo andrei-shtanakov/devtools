@@ -10,7 +10,10 @@ root becomes `clear` on the head of `df-trust`.
 
 from __future__ import annotations
 
+import dataclasses
 import io
+import shutil
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -18,22 +21,40 @@ import pytest
 pytest.importorskip("steward")
 
 from df import platform  # noqa: E402
-from df.publisher import trust_routes  # noqa: E402
+from df.config import InstallConfig  # noqa: E402
+from df.publisher import (
+    merge,  # noqa: E402
+    trust_routes,  # noqa: E402
+)
 from df.publisher.request import Response, perimeter_result  # noqa: E402
-from governance import act_anon  # noqa: E402
+from df.stage2_config import dump_publisher, parse_publisher  # noqa: E402
+from governance import (
+    act_anon,  # noqa: E402
+    approval_branches,  # noqa: E402
+)
 from governance.act_precheck import DEFAULT_DEPS, serve  # noqa: E402
+from tests.df.candidate_world import Candidate, build_candidate  # noqa: E402
 from tests.df.conftest import FakeLayout  # noqa: E402
-from tests.df.launch_world import ADMIN  # noqa: E402
+from tests.df.fake_github import FakeGitHub, serve_fake_github  # noqa: E402
+from tests.df.launch_world import (  # noqa: E402
+    ADMIN,  # noqa: E402
+    put_record,
+    record,
+)
 from tests.df.publisher_world import World, build_world, raw_of  # noqa: E402
+from tests.df.roles_world import FULL_NAME, OPENSSL  # noqa: E402
 
 PAT = "github_pat_dfFixturePatNotASecret0000000"
 from tests.df.trust_sources import (  # noqa: E402
+    API,
     HISTORY_TOKEN,
+    TRUST_REPO,
     GitRest,
     TrustSources,
     build_sources,
     fake_gh,
     history_profile,
+    new_trust_repo,
 )
 
 
@@ -63,7 +84,15 @@ def world(
     )
     monkeypatch.setattr(trust_routes, "approved_gh", lambda _s: gh)
     monkeypatch.setattr(trust_routes, "HISTORY_SEND", sources.rest.send)
-    monkeypatch.setattr(act_anon, "_default_open", lambda: sources.rest.open_url)
+    real = act_anon._default_open()
+
+    def open_url(req: object, timeout: float) -> object:
+        """`api.github.com` is the sources'; the product's loopback is real."""
+        if str(getattr(req, "full_url", "")).startswith(API):
+            return sources.rest.open_url(req, timeout)
+        return real(req, timeout=timeout)
+
+    monkeypatch.setattr(act_anon, "_default_open", lambda: open_url)
     home = tmp_path / "precheck-home"
     home.mkdir()
     monkeypatch.setattr(platform, "run_supervised", checker(home, gh))
@@ -148,3 +177,137 @@ def test_trust_status_65_epochs_clear_without_ranges(
     resp = trust_status(world, capsys)
     assert resp.result["state"] == "clear", resp.result
     assert (resp.result["snapshot_sha"], resp.result["last_epoch"]) == (head, 65)
+
+
+# ---------- the merge route: a candidate through the real checker ----------
+
+
+@pytest.fixture()
+def merge_world(
+    world: World, tmp_path: Path, sources: TrustSources
+) -> Iterator[tuple[World, Candidate, FakeGitHub]]:
+    """The publisher of product 1 against the product's fake GitHub (HTTP,
+    the App key, the installation) and its git server, a run of the bound
+    root, the release's `patterns.env`, and the open candidate PR."""
+    from tests.df.precheck_world import TokenGitServer
+    from tests.df.roles_world import (
+        APP_ID,
+        PRODUCT_ID,
+        make_app_key,
+        products_text,
+        scenario,
+    )
+
+    lay = world.lay
+    work = tmp_path / "product-side"
+    work.mkdir()
+    key, public = make_app_key(work)
+    with serve_fake_github(scenario(), public_key=public, openssl=OPENSSL) as fake:
+        cand = build_candidate(
+            work / "product", FULL_NAME, PRODUCT_ID, sources, fake.scenario
+        )
+        server = TokenGitServer(cand.repo.served_root, lambda t: t in fake.tokens)
+        try:
+            cfg = parse_publisher((lay.etc / "publisher.toml").read_text())
+            cfg = dataclasses.replace(cfg, api_base=fake.url, git_base=server.base)
+            (lay.etc / "publisher.toml").write_text(dump_publisher(cfg))
+            (lay.etc / "products.toml").write_text(products_text())
+            lay.secrets_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+            shutil.copyfile(key, lay.app_key(APP_ID))
+            cli = {n: Path(f"/bin/{n}") for n in ("git", "uv", "tar")}
+            cli["openssl"] = OPENSSL
+            install = InstallConfig("o/m", "a" * 40, "core", cli)
+            world.snap = dataclasses.replace(world.snap, install=install)
+            patterns = merge.patterns_path(lay, world.snap)
+            patterns.parent.mkdir(parents=True, exist_ok=True)
+            patterns.write_text(approval_branches.PATTERNS_PATH.read_text())
+            rec = dataclasses.replace(
+                record("run-cand", "rel-a"),
+                product=PRODUCT_ID,
+                root_id=("github.com", sources.trust.id, "main"),
+            )
+            put_record(world.fake, rec)
+            yield world, cand, fake
+        finally:
+            server.close()
+
+
+def merge_raw(cand: Candidate, rid: str = "req-cand-0001") -> bytes:
+    from tests.df.roles_world import PRODUCT_ID
+
+    return raw_of(
+        "merge",
+        request_id=rid,
+        run_id="run-cand",
+        repository_id=PRODUCT_ID,
+        pr=cand.pr,
+        head_sha=cand.head,
+    )
+
+
+def test_candidate_merged_through_the_real_checker(
+    merge_world: tuple[World, Candidate, FakeGitHub],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The positive candidate: the root `clear` at X (`trust-status`),
+    then `merge` -- the publisher's facts, the `merge` observation, the real
+    checker's v2 `allow`, the admission, the one `PUT`: `done`, merged."""
+    world, cand, fake = merge_world
+    assert trust_status(world, capsys).result["state"] == "clear"
+    _code, resp = world.run("merge", merge_raw(cand), capsys=capsys)
+    assert (resp.outcome, resp.reason) == ("done", None), resp
+    assert cand.merged and fake.scenario.pulls[(FULL_NAME, cand.pr)]["merged"]
+
+
+def test_finalize_merged_through_the_real_checker(
+    merge_world: tuple[World, Candidate, FakeGitHub],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """After the candidate: the finalize PR with exactly the envelope the
+    delivery decision implies -- the real checker's v2 `allow`, the App's
+    attestation, the one `PUT`: `done`, merged."""
+    from tests.df.candidate_world import build_finalize
+    from tests.df.roles_world import PRODUCT_ID
+
+    world, cand, fake = merge_world
+    assert trust_status(world, capsys).result["state"] == "clear"
+    assert world.run("merge", merge_raw(cand), capsys=capsys)[1].outcome == "done"
+    pr, head = build_finalize(cand, fake.scenario, PRODUCT_ID)
+    raw = raw_of(
+        "merge",
+        request_id="req-final-0001",
+        run_id="run-cand",
+        repository_id=PRODUCT_ID,
+        pr=pr,
+        head_sha=head,
+    )
+    _code, resp = world.run("merge", raw, capsys=capsys)
+    assert (resp.outcome, resp.reason) == ("done", None), resp
+    assert fake.scenario.pulls[(FULL_NAME, pr)]["merged"]
+
+
+def test_candidate_65_epochs_unsupported_then_blocked(
+    merge_world: tuple[World, Candidate, FakeGitHub],
+    sources: TrustSources,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """65 epochs: `trust-status` stays `clear` (no ranges), the candidate's
+    `op: merge` is `unsupported_size: epochs` -- K, the root `blocked`."""
+    world, cand, fake = merge_world
+    sources.add_epochs(65)
+    assert trust_status(world, capsys).result["state"] == "clear"
+    _code, resp = world.run("merge", merge_raw(cand), capsys=capsys)
+    after = trust_status(world, capsys).result
+    assert resp.outcome == "refused" and "unsupported_size: epochs" in str(resp.reason)
+    assert after["state"] == "blocked"
+    assert not fake.scenario.pulls[(FULL_NAME, cand.pr)]["merged"]
+    # the exit: a new `df-trust` of one epoch, bound in place of the old
+    new = new_trust_repo(sources, 23, "df-fixture/df-trust-2")
+    text = (world.lay.etc / "trust.toml").read_text()
+    old = f'df_trust_repository_id = 21\ndf_trust_full_name = "{TRUST_REPO}"'
+    rebound = text.replace(
+        old, f'df_trust_repository_id = 23\ndf_trust_full_name = "{new.full_name}"'
+    )
+    (world.lay.etc / "trust.toml").write_text(rebound)
+    fresh = trust_status(world, capsys).result
+    assert (fresh["state"], fresh["root"]["repository_id"]) == ("clear", 23), fresh

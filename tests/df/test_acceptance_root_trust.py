@@ -25,6 +25,7 @@ import shutil
 import threading
 import time
 from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -34,11 +35,20 @@ from df import platform as plat
 from df.config import load_install
 from df.publisher import request
 from df.publisher.request import TrustStatus
+from df.setup_trust import EPOCHS_EXIT
+from df.stage2_config import dump_publisher, parse_publisher
+from tests.df.candidate_world import Candidate, build_candidate, build_finalize
 from tests.df.conftest import stage1_out
-from tests.df.precheck_world import PrecheckWorld, precheck_world, processes
+from tests.df.precheck_world import (
+    PrecheckWorld,
+    TokenGitServer,
+    precheck_world,
+    processes,
+)
 from tests.df.roles_world import (
     BASE_ENV,
     FIXTURE_FROM_CHECKOUT,
+    FULL_NAME,
     IOLOG_FILE,
     OPERATOR,
     PRODUCT_ID,
@@ -53,9 +63,12 @@ from tests.df.roles_world import (
     impersonate_api,
     install_sudoers_file,
     io_sessions,
+    new_request_id,
     real_site_pins,
+    response_of,
     roles_world,
     shown,
+    write_etc,
 )
 from tests.df.root_world import (
     FixtureRepo,
@@ -68,6 +81,7 @@ from tests.df.trust_sources import (
     HISTORY_TOKEN,
     TrustSources,
     build_sources,
+    new_trust_repo,
 )
 
 #: `network`: the pinned official `gh` is downloaded (`_install_gh`).
@@ -477,3 +491,161 @@ def test_root_trust_operator_line(
         sudoers.OPERATOR_EXCEPTION,
     ), rights
     assert [c["id"] for c in report["level3_checks"]] == list(doctor.LEVEL3_IDS)
+
+
+# ---------- op: merge, candidate and finalize (protocol v2) ----------
+
+
+@contextmanager
+def open_candidate(
+    rw: RolesWorld, sources: TrustSources, name: str, pr: int
+) -> Iterator[Candidate]:
+    """A product repository with an open candidate PR `pr` (`build_candidate`)
+    behind its own git server; `publisher.toml`'s `git_base` points there
+    for the call (the precheck reads the product over it)."""
+    cand = build_candidate(
+        rw.work / name, FULL_NAME, PRODUCT_ID, sources, rw.fake.scenario, pr=pr
+    )
+    server = TokenGitServer(cand.repo.served_root, lambda t: t in rw.fake.tokens)
+    text = (rw.layout.etc / "publisher.toml").read_text()
+    cfg = dataclasses.replace(parse_publisher(text), git_base=server.base)
+    write_etc(rw.layout, "publisher.toml", dump_publisher(cfg))
+    try:
+        yield cand
+    finally:
+        write_etc(rw.layout, "publisher.toml", text)
+        server.close()
+
+
+def merge_request(run_id: str, pr: int, head: str, tag: str) -> bytes:
+    """A `merge` request of the product's PR."""
+    data = {
+        "schema": request.REQUEST_SCHEMA,
+        "request_id": new_request_id(tag),
+        "run_id": run_id,
+        "repository_id": PRODUCT_ID,
+        "pr": pr,
+        "head_sha": head,
+    }
+    return json.dumps(data, sort_keys=True).encode("utf-8")
+
+
+def bound_run(rw: RolesWorld, sources: TrustSources) -> str:
+    """A run of `current` bound to the current root."""
+    root = ("github.com", sources.trust.id, "main")
+    return rw.register_run(rw.current_entry(), root_id=root)
+
+
+def merged_pull(rw: RolesWorld, pr: int) -> dict[str, object]:
+    return rw.fake.scenario.pulls[(FULL_NAME, pr)]
+
+
+def test_root_trust_candidate_and_finalize_merged(
+    rw: RolesWorld, sources: TrustSources, bound: Path
+) -> None:
+    """The positive candidate and finalize through the whole chain: `df-exec`
+    → sudo → `df-publish merge` → the `merge` observation at the accepted X
+    → sudo → `df-precheck` → `act_precheck` v2 (`op: merge`: the policy
+    history to P, the review facts, the manifest, the delivery) → `allow`,
+    the admission, the one `PUT`. The candidate gets no attestation; the
+    finalize (exactly the envelope the delivery decision implies) gets the
+    App's attestation, then its `PUT`."""
+    assert trust_status(rw, sources).state == "clear"
+    run_id = bound_run(rw, sources)
+    sender = rw.uid("df-exec")
+    with open_candidate(rw, sources, "candidate", 21) as cand:
+        before = len(rw.fake.paths())
+        done = rw.publish(
+            "df-exec", "merge", merge_request(run_id, 21, cand.head, "cand")
+        )
+        first = response_of(done)
+        pr, head = build_finalize(cand, rw.fake.scenario, PRODUCT_ID)
+        final = rw.publish("df-exec", "merge", merge_request(run_id, pr, head, "final"))
+        second = response_of(final)
+        seen = rw.fake.paths()[before:]
+    evidence(
+        "trust-candidate-finalize.json",
+        {
+            "candidate": [first.outcome, first.reason, dict(first.evidence)],
+            "finalize": [second.outcome, second.reason, dict(second.evidence)],
+            "github": seen,
+        },
+    )
+    for resp, done_ in ((first, done), (second, final)):
+        assert (resp.outcome, resp.reason) == ("done", None), shown(done_)
+        assert resp.evidence.get("sender") == sender, resp.evidence
+    bot = f"{rw.fake.scenario.app_slug}[bot]"
+    for number in (21, pr):
+        pull = merged_pull(rw, number)
+        assert pull["merged"] is True and pull["merged_by"]["login"] == bot, pull
+    puts = [p for p in seen if p.startswith("PUT ")]
+    assert puts == [
+        f"PUT /repos/{FULL_NAME}/pulls/21/merge",
+        f"PUT /repos/{FULL_NAME}/pulls/{pr}/merge",
+    ]
+    posted = [p for p in seen if p.startswith("POST ") and p.endswith("/reviews")]
+    assert posted == [f"POST /repos/{FULL_NAME}/pulls/{pr}/reviews"]
+
+
+def test_root_trust_65_epochs_then_rebind(
+    rw: RolesWorld, sources: TrustSources, bound: Path
+) -> None:
+    """65 epochs: `trust-status` stays `clear` (it has no ranges), the
+    candidate's `op: merge` is `unsupported_size: epochs`, a conservative
+    event -- the root `blocked`, `doctor` names the exit. The exit: a new
+    `df-trust` with a journal of one epoch, `setup-trust check --rebind` and
+    `write --rebind`; the new root is not blocked by the old one's events
+    (`clear`), a new run of it is answered, and a run of the old root gets
+    no operation over a PR (`root_mismatch`)."""
+    sources.add_epochs(65)
+    assert trust_status(rw, sources).state == "clear"
+    old_run = bound_run(rw, sources)
+    with open_candidate(rw, sources, "candidate-65", 23) as cand:
+        done = rw.publish(
+            "df-exec", "merge", merge_request(old_run, 23, cand.head, "e65")
+        )
+        refused = response_of(done)
+        blocked = trust_status(rw, sources)
+        report = rw.darkfactory(["doctor", "--product", str(PRODUCT_ID), "--json"])
+        new = new_trust_repo(sources, 23, "df-fixture/df-trust-2")
+        lines = setup_trust(rw, sources, bound, rebind=True)
+        fresh = trust_status(rw, sources)
+        new_run = bound_run(rw, sources)
+        answered = rw.publish(
+            "df-exec",
+            "perimeter-status",
+            perimeter_client.payload(
+                new_run,
+                perimeter_client.RootId("github.com", new.id, "main"),
+                perimeter_client.TrustView(
+                    str(fresh.snapshot_sha), fresh.last_epoch or 0
+                ),
+                new_request_id("e65-new"),
+            ),
+        )
+        old = rw.publish(
+            "df-exec", "merge", merge_request(old_run, 23, cand.head, "e65-old")
+        )
+    doctor_text = report.stdout.decode("utf-8", "replace")
+    status = response_of(answered)
+    stale = response_of(old)
+    evidence(
+        "trust-65-epochs-rebind.json",
+        {
+            "merge": [refused.outcome, refused.reason],
+            "blocked": dataclasses.asdict(blocked),
+            "doctor": doctor_text[-6000:],
+            "rebind": lines,
+            "fresh": dataclasses.asdict(fresh),
+            "new_run_status": dict(status.result),
+            "old_run_merge": [stale.outcome, stale.reason],
+        },
+    )
+    assert refused.outcome == "refused", shown(done)
+    assert "unsupported_size: epochs" in str(refused.reason), refused
+    assert not merged_pull(rw, 23)["merged"]
+    assert blocked.state == "blocked", blocked
+    assert EPOCHS_EXIT in doctor_text, doctor_text[-2000:]
+    assert (fresh.state, fresh.snapshot_sha) == ("clear", new.head()), fresh
+    assert status.result["state"] == "clear", status
+    assert (stale.outcome, stale.reason) == ("refused", "root_mismatch"), stale
