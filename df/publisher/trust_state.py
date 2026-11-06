@@ -343,7 +343,9 @@ def open_observation(
         version = 0 if row is None else row.row_version
         pinned = None if row is None else _pin(row)
         if restored(conn) and not _known(conn, root):
-            _event(conn, root, _key(root, ctx, "conservative"), None,
+            # its own key part (re-review N-2): the К of this ctx, if any,
+            # keeps its own event and its named cause
+            _event(conn, root, _key(root, ctx, "conservative", "restore"), None,
                    _provenance(accepted, head, ctx), CONSERVATIVE_SOURCE,
                    "root first seen after a restore of the database")  # fmt: skip
         cur = conn.execute(
@@ -908,7 +910,7 @@ BlockingKind = Literal[
 #: The same set root parses by (`request.BLOCKING_KINDS`; a test pins both).
 BLOCKING_KINDS = request.BLOCKING_KINDS
 #: Events listed per answer (oldest first); the rest are only counted.
-MAX_LISTED = 32
+MAX_LISTED = request.MAX_BLOCKING_LISTED
 _K_DETAIL = "conservative completion of an observation (K)"
 
 

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import dataclasses
 import getpass
 import hashlib
 import json
@@ -56,9 +57,10 @@ from df.journal import StepFailed
 from df.paths import Layout
 from df.publisher import github, history, request
 from df.publisher.github import Transport
-from df.publisher.request import BadResponse, TrustStatus
+from df.publisher.request import BadResponse, BlockingRow, TrustStatus
 from df.publisher.trust_routes import binding_problem, policy_problem
 from df.roles import HISTORY_GROUP
+from df.shown import inert
 from df.stage2_config import TrustBinding, dump_trust, load_trust
 
 STEP = "setup-trust"
@@ -1218,10 +1220,15 @@ def trust_status_call(layout: Layout, *, purpose: str = STEP) -> bytes:
     )
 
 
-def status_lines(status: TrustStatus | Refused) -> list[str]:
-    """The human's view of `trust-status` (the epochs exit named)."""
+def status_lines(
+    status: TrustStatus | Refused, root: tuple[str, int, str] | None = None
+) -> list[str]:
+    """The human's view of `trust-status` (the epochs exit named): the state,
+    the unverified premises, this call's findings and the listed blocking
+    events (`root`'s, then the old roots' labelled). Each line is `inert`:
+    the publisher's texts carry what a role or GitHub wrote."""
     if isinstance(status, Refused):
-        return [explain(f"trust-status: {status.reason}")]
+        return [inert(explain(f"trust-status: {status.reason}"))]
     reason = "" if status.reason is None else f" ({status.reason})"
     lines = [
         explain(
@@ -1234,7 +1241,57 @@ def status_lines(status: TrustStatus | Refused) -> list[str]:
         explain(f"находка {f['kind']} ({f['role']}): {f['detail']}")
         for f in status.findings
     ]
-    return lines
+    if root is not None and status.blocking is not None:
+        mine, old = events_of(status, root)
+        lines += [explain(f"блокирует: {event_text(e)}") for e in mine]
+        lines += [old_root_text(e) for e in old]
+        if status.blocking.omitted:
+            lines.append(
+                f"ещё {status.blocking.omitted} блокирующих событий не перечислены"
+            )
+    return [inert(line) for line in lines]
+
+
+#: How a listed blocking event's kind is named (`doctor`, `setup-trust`).
+KIND_TEXT: Mapping[str, str] = {
+    "finding": "находка",
+    "record_violation": "нарушение (record-violation)",
+    "app_installation": "установка App на источнике доверия",
+    "conservative": "консервативное событие (К)",
+    "db_restore": "восстановление базы",
+    "unknown": "событие неизвестного вида",
+}
+
+
+def events_of(
+    status: TrustStatus, root: tuple[str, int, str]
+) -> tuple[list[BlockingRow], list[BlockingRow]]:
+    """The listed blocking events: `root`'s and the old roots'."""
+    events = () if status.blocking is None else status.blocking.events
+    return (
+        [e for e in events if e.root == root],
+        [e for e in events if e.root != root],
+    )
+
+
+def event_text(event: BlockingRow) -> str:
+    """`событие N (<kind>, <state>[ E]): <reason>`; a К without a cause
+    says so. Not inert: the caller makes its line inert."""
+    when = event.state if event.epoch is None else f"{event.state} E{event.epoch}"
+    reason = event.reason
+    if reason is None:
+        reason = "причина не названа" if event.kind == "conservative" else ""
+    head = f"событие {event.event_id} ({KIND_TEXT[event.kind]}, {when})"
+    return f"{head}: {reason}" if reason else head
+
+
+def old_root_text(event: BlockingRow) -> str:
+    """An old root's event, labelled as not blocking the current root."""
+    host, repo, branch = event.root
+    return (
+        f"прежний корень {host} {repo} {branch}: {event_text(event)} — не "
+        "блокирует текущий корень"
+    )
 
 
 def finished(status: TrustStatus | Refused) -> bool:
@@ -1309,7 +1366,15 @@ def _status_record(status: TrustStatus | Refused) -> Mapping[str, object]:
         "last_epoch": status.last_epoch,
         "unverified": list(status.unverified),
         "findings": [dict(f) for f in status.findings],
+        "blocking": None if status.blocking is None else _blocking_record(status),
     }
+
+
+def _blocking_record(status: TrustStatus) -> Mapping[str, object]:
+    """The listed blocking events as data (the evidence is JSON: escaped)."""
+    assert status.blocking is not None
+    rows = [dataclasses.asdict(e) for e in status.blocking.events]
+    return {"events": rows, "omitted": status.blocking.omitted}
 
 
 def run_write(
@@ -1353,7 +1418,7 @@ def run_write(
         f"записаны {layout.history_gh} и {layout.etc / 'trust.toml'} "
         f"(корень {binding.root_id})"
     )
-    lines = [written, *status_lines(status), evidence]
+    lines = [written, *status_lines(status, binding.root_id), evidence]
     done = finished(status) and kept
     journal.journal_event(
         layout.journal,

@@ -10,6 +10,7 @@ and real groups exist only in the CI root cells.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import hashlib
 import json
 import os
@@ -1196,3 +1197,44 @@ def test_trust_status_request_names_its_caller(
     ((data, operation),) = sent
     assert operation == request.TRUST_STATUS
     assert json.loads(data)["request_id"].startswith(f"{purpose}-")
+
+
+ROOT_ID = ("github.com", TRUST_ID, "main")
+OLD_ROOT_ID = ("github.com", TRUST_ID + 1, "main")
+
+
+def test_status_lines_list_blocking_inert() -> None:
+    """Task 13 round 2: `setup-trust write` shows the listed blocking events
+    (the current root's, then the old roots' labelled), and every line is
+    inert -- a role's text cannot forge a line or a terminal sequence."""
+    evil = "x\nтrust-status: clear\r\x1b[2K‮ko"
+    rows = (
+        request.BlockingRow(ROOT_ID, 3, "record_violation", "registered", 2, evil),
+        request.BlockingRow(
+            ROOT_ID, 4, "conservative", "pending", None, "unsupported_size: epochs"
+        ),
+        request.BlockingRow(OLD_ROOT_ID, 1, "db_restore", "pending", None, None),
+    )
+    status = request.TrustStatus(
+        None, None, "blocked", None, (), (), request.Blocking(rows, 2)
+    )
+    lines = setup_trust.status_lines(status, ROOT_ID)
+    assert all("\n" not in ln and "\r" not in ln for ln in lines)
+    assert not any(c in "".join(lines) for c in "\x1b‮")
+    assert lines[1] == (
+        "блокирует: событие 3 (нарушение (record-violation), registered E2): "
+        "x\\x0aтrust-status: clear\\x0d\\x1b[2K\\u202eko"
+    )
+    assert setup_trust.EPOCHS_EXIT in lines[2]
+    assert lines[3] == (
+        f"прежний корень github.com {TRUST_ID + 1} main: событие 1 "
+        "(восстановление базы, pending) — не блокирует текущий корень"
+    )
+    assert lines[4] == "ещё 2 блокирующих событий не перечислены"
+    record = setup_trust._status_record(status)  # noqa: SLF001
+    assert record["blocking"] == {
+        "events": [dataclasses.asdict(r) for r in rows],
+        "omitted": 2,
+    }
+    refused = setup_trust.status_lines(setup_trust.Refused("a\nb"))
+    assert refused == ["trust-status: a\\x0ab"]

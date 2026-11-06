@@ -94,6 +94,7 @@ from df.publisher.request import (
 from df.publisher.trust_routes import UNFINISHED, UNVERIFIED, binding_problem
 from df.release import RELEASE_JSON
 from df.roles import HISTORY_GROUP, history_members
+from df.shown import inert_lines
 from df.stage2_config import TrustBinding, load_trust
 from df.state import ReadResult, Snapshot
 
@@ -1755,45 +1756,19 @@ def _trust_status(ctx: _Level3) -> str:
     raise _Outcome(UNAVAILABLE, _unavailable_reason(status))
 
 
-#: How doctor names each kind of a listed blocking event.
-_KIND_TEXT = {
-    "finding": "находка",
-    "record_violation": "нарушение (record-violation)",
-    "app_installation": "установка App на источнике доверия",
-    "conservative": "консервативное событие (К)",
-    "db_restore": "восстановление базы",
-    "unknown": "событие неизвестного вида",
-}
-
-
 def _events_of(
     status: TrustStatus, root: tuple[str, int, str]
 ) -> tuple[list[BlockingRow], list[BlockingRow]]:
     """The listed blocking events: the current root's and the old roots'."""
-    events = () if status.blocking is None else status.blocking.events
-    return (
-        [e for e in events if e.root == root],
-        [e for e in events if e.root != root],
-    )
+    return setup_trust.events_of(status, root)
 
 
 def _event_text(event: BlockingRow) -> str:
-    """`событие N (<kind>, <state>[ E]): <reason>`; a К without a cause
-    says so."""
-    when = event.state if event.epoch is None else f"{event.state} E{event.epoch}"
-    reason = event.reason
-    if reason is None:
-        reason = "причина не названа" if event.kind == "conservative" else ""
-    head = f"событие {event.event_id} ({_KIND_TEXT[event.kind]}, {when})"
-    return f"{head}: {reason}" if reason else head
+    return setup_trust.event_text(event)
 
 
 def _old_root_text(event: BlockingRow) -> str:
-    host, repo, branch = event.root
-    return (
-        f"прежний корень {host} {repo} {branch}: {_event_text(event)} — не "
-        "блокирует текущий корень"
-    )
+    return setup_trust.old_root_text(event)
 
 
 def _listing_notes(status: TrustStatus, old: Sequence[BlockingRow]) -> list[str]:
@@ -1872,27 +1847,37 @@ def _unsupported_size(ctx: _Level3) -> str:
 def _size_of_listing(status: TrustStatus, root: tuple[str, int, str]) -> str:
     """A blocked root with the publisher's listing: a К event of the current
     root naming `unsupported_size: <field>` is «нарушено» with that field
-    (the exit of `epochs` only then, `setup_trust.explain`). The publisher
-    always names a typed status in its К event (`trust_state.apply_status`
-    with the verdict's reason), so a К event without a cause is another К
-    (a changed context, a restore) -- a note of `ok`. Events not listed
-    are «не проверено». The old roots' events never count (labelled in
-    `trust.status`)."""
+    (the exit of `epochs` only then, `setup_trust.explain`). A К event with
+    another typed status (`irreproducible: ...`) is a note of `ok`. A К
+    event whose reason is no typed status -- none, a changed context, the
+    restore admission -- does not prove the size: «не проверено» with the
+    exit of `epochs` as one possibility (a database written before the
+    restore event had its own key may have merged a size К into it, re-review
+    N-2). Events not listed are «не проверено». The old roots' events never
+    count (labelled in `trust.status`)."""
     assert status.blocking is not None
     mine, _old = _events_of(status, root)
     k_events = [e for e in mine if e.kind == "conservative"]
-    named = [e for e in k_events if e.reason and _UNSUPPORTED in e.reason]
+    named = [e for e in k_events if e.reason and e.reason.startswith(_UNSUPPORTED)]
     if named:
         raise _broken([setup_trust.explain(_event_text(e)) for e in named])
+    typed = [e for e in k_events if e.reason and e.reason.startswith(_TYPED)]
+    untyped = [e for e in k_events if e not in typed]
+    if untyped:
+        texts = "; ".join(_event_text(e) for e in untyped)
+        raise _Outcome(NOT_CHECKED, f"{_K_OTHER}: {texts}; {EPOCHS_MAYBE}")
     if status.blocking.omitted:
         omitted = status.blocking.omitted
         raise _Outcome(NOT_CHECKED, f"ещё {omitted} блокирующих событий не перечислены")
-    others = [_event_text(e) for e in k_events]
-    return f"{_K_NOT_SIZE}: {'; '.join(others)}" if others else ""
+    others = [_event_text(e) for e in typed]
+    return f"{_K_OTHER}: {'; '.join(others)}" if others else ""
 
 
-#: A К event without a named cause is not an `unsupported_size` one.
-_K_NOT_SIZE = "К без названной причины (не unsupported_size)"
+#: A К event of another cause than `unsupported_size`.
+_K_OTHER = "К по другой причине"
+#: The typed statuses of the checker other than `unsupported_size` that end
+#: an observation by К (`trust_state.OUTCOME_OF_VERDICT`).
+_TYPED = ("irreproducible: ",)
 
 
 #: The exit of `unsupported_size: epochs`, offered only as one possible cause.
@@ -2059,6 +2044,10 @@ def _models_of(snap: Snapshot) -> models.ModelsConfig | None:
 
 
 # ---------- rendering ----------
+#
+# Every text line is made inert (`df.shown`) as it is joined: reasons carry
+# what the publisher, a role or GitHub wrote (N-1 of the Task 13 re-review),
+# and one printed line must be exactly one line of what it says.
 
 
 def render_brief(checks: Sequence[Check]) -> str:
@@ -2077,7 +2066,7 @@ def render_text(
     lines += list(notes)
     lines.append("модели (уровень 2, на уровень 1 не влияют):")
     lines += [f"  {r.role}: {r.status}" for r in roles]
-    return "\n".join(lines)
+    return inert_lines(lines)
 
 
 def render_json(
@@ -2166,7 +2155,7 @@ def render_text_product(
     lines += list(notes)
     lines.append("модели (уровень 2, на уровень 1 не влияют):")
     lines += [f"  {r.role}: {r.status}" for r in roles]
-    return "\n".join(lines)
+    return inert_lines(lines)
 
 
 def render_json_product(
