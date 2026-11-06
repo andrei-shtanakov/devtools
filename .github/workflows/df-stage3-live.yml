@@ -22,7 +22,9 @@
 # DF_STAND_APP_KEY (H4, App 5285716), DF_STAND_MACHINE_TOKEN (H4,
 # betta-tester classic PAT), DF_STAND_HISTORY_TOKEN (H5, fine-grained
 # public read-only), DF_STAND_PERIMETER_PAT (H6, the owner's temporary
-# read-only PAT on the two trust repos), DF_STAND_TRUST_WRITE_TOKEN (the
+# read-only fine-grained PAT on the two trust repos: Administration,
+# Metadata, Webhooks, Environments read, and the account's Plan: read, spec
+# 6.2), DF_STAND_TRUST_WRITE_TOKEN (the
 # owner's fine-grained PAT, repository access only df-roles-probe-trust,
 # Contents: read/write, the shortest expiry, revoked after every run (H8);
 # the owner's step H6a, proposed, not among H4-H6. The script writes only
@@ -133,12 +135,19 @@ jobs:
           dir="$RUNNER_TEMP/df-stand-secrets"
           umask 077
           mkdir -m 0700 "$dir"
-          printf '%s\n' "$DF_STAND_APP_KEY" > "$dir/app-key.pem"
-          printf '%s\n' "$DF_STAND_MACHINE_TOKEN" > "$dir/machine-token"
-          printf '%s\n' "$DF_STAND_HISTORY_TOKEN" > "$dir/history-token"
-          printf '%s\n' "$DF_STAND_PERIMETER_PAT" > "$dir/perimeter-pat"
-          if [ -n "$DF_STAND_TRUST_WRITE_TOKEN" ]; then
-            printf '%s\n' "$DF_STAND_TRUST_WRITE_TOKEN" > "$dir/trust-write-token"
+          # Command substitution drops the trailing newlines of a pasted
+          # value; each file then ends in exactly one (as df-stage2-live).
+          key=$(printf '%s' "$DF_STAND_APP_KEY")
+          machine=$(printf '%s' "$DF_STAND_MACHINE_TOKEN")
+          hist=$(printf '%s' "$DF_STAND_HISTORY_TOKEN")
+          pat=$(printf '%s' "$DF_STAND_PERIMETER_PAT")
+          write=$(printf '%s' "$DF_STAND_TRUST_WRITE_TOKEN")
+          printf '%s\n' "$key" > "$dir/app-key.pem"
+          printf '%s\n' "$machine" > "$dir/machine-token"
+          printf '%s\n' "$hist" > "$dir/history-token"
+          printf '%s\n' "$pat" > "$dir/perimeter-pat"
+          if [ -n "$write" ]; then
+            printf '%s\n' "$write" > "$dir/trust-write-token"
           fi
       - name: live trust stand rows
         env:

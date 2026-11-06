@@ -22,7 +22,8 @@ the H2 check), the pinned `gh` approved by `cli set gh`, then the rows:
   --templates` shows `setup_trust.TEMPLATES` byte for byte; both trust
   repos' histories are an initial base (no PR) followed by merged PRs only;
   `setup-trust check` (the operator, the owner's temporary read-only PAT,
-  H6) has no stop; `sudo setup-trust write` (the history token, H5) ends
+  H6: Administration, Metadata, Webhooks, Environments read and Plan: read,
+  spec 6.2) has no stop; `sudo setup-trust write` (the history token, H5) ends
   `clear`; a run record of the bound root is registered (rows 10-12);
 - Т2 the request table of spec 6.1 (`REQUEST_TABLE`): every live request
   with its credential against the stand, its status and judgement;
