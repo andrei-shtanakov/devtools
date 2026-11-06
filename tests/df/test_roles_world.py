@@ -358,3 +358,95 @@ def test_install_production_does_not_prime_the_site_cache(
     monkeypatch.setattr(roles_world, "current_id", lambda _layout: "rid")
     roles_world.install_production(World())  # type: ignore[arg-type]
     assert seen == [True]
+
+
+# ---------- stage 3a: the impersonated `api.github.com` (Task 14) ----------
+
+
+@needs_openssl
+def test_api_certs_and_server_pass_strict_verification(tmp_path: Path) -> None:
+    """The leaf of `make_api_certs` verifies for `api.github.com` against its
+    CA under the default (strict on 3.13) context, and `serve_api` answers
+    the trust sources' REST and the control over it; another name fails."""
+    import json
+    import socket
+    import ssl
+
+    from tests.df.roles_world import API_CONTROL, API_HOST, make_api_certs, serve_api
+    from tests.df.trust_sources import build_sources
+
+    sources = build_sources(tmp_path / "sources")
+    certs = make_api_certs(tmp_path / "certs", Path(str(OPENSSL)))
+    context = ssl.create_default_context(cafile=str(certs.ca))
+    assert not (certs.ca.parent / "ca.key").exists()  # only the leaf needed it
+
+    def get(port: int, path: str, name: str = API_HOST) -> tuple[int, object]:
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as raw:
+            with context.wrap_socket(raw, server_hostname=name) as tls:
+                request = f"GET /{path} HTTP/1.1\r\nHost: {name}\r\nConnection: close"
+                tls.sendall((request + "\r\n\r\n").encode())
+                data = b""
+                while chunk := tls.recv(65536):
+                    data += chunk
+        head, _, body = data.partition(b"\r\n\r\n")
+        return int(head.split()[1]), json.loads(body)
+
+    with serve_api(sources.rest, certs, port=0, v6=False) as ports:
+        assert get(ports[0], API_CONTROL) == (200, {"control": API_CONTROL})
+        status, body = get(ports[0], f"repositories/{sources.trust.id}")
+        assert status == 200 and isinstance(body, dict)
+        assert body["full_name"] == sources.trust.full_name
+        with pytest.raises(ssl.SSLCertVerificationError):
+            get(ports[0], API_CONTROL, name="github.com")
+
+
+def test_api_marker_never_follows_or_overwrites(tmp_path: Path) -> None:
+    """Review N1: the marker is made `0600` with `O_EXCL | O_NOFOLLOW`; a
+    planted link (dangling too) or a leftover is never written through, is
+    seen by the leftover check, and is not removed as ours."""
+    import os
+    import stat
+
+    from _pytest.outcomes import Failed
+
+    from tests.df.roles_world import marker_left, remove_marker, write_marker
+
+    marker = tmp_path / "marker"
+    assert not marker_left(marker)
+    write_marker(marker, "adapted\n")
+    assert stat.S_IMODE(marker.lstat().st_mode) == 0o600
+    with pytest.raises(FileExistsError):
+        write_marker(marker, "again\n")
+    remove_marker(marker)
+    assert not marker_left(marker)
+
+    target = tmp_path / "target"
+    link = tmp_path / "link"
+    link.symlink_to(target)  # dangling
+    assert marker_left(link)
+    with pytest.raises(FileExistsError):
+        write_marker(link, "through the link\n")
+    assert not target.exists()
+    with pytest.raises(Failed):
+        remove_marker(link)
+    assert os.path.lexists(link)
+
+
+def test_restores_confirm_only_a_checked_put_back() -> None:
+    """Paid review #709: the marker goes only when every change is
+    confirmed restored; a mismatch or a raising restore keeps it."""
+    from tests.df.roles_world import Restores
+
+    def boom() -> bool:
+        raise OSError("read-only")
+
+    ok = Restores(changed={"store", "hosts"})
+    ok.settle("store", lambda: True)
+    assert not ok.done()  # hosts not confirmed yet
+    ok.settle("hosts", lambda: True)
+    assert ok.done()
+    bad = Restores(changed={"store", "hosts"})
+    bad.settle("store", boom)
+    bad.settle("hosts", lambda: False)
+    assert not bad.done() and len(bad.problems) == 2
+    assert "OSError" in bad.problems[0]
