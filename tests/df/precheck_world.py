@@ -329,7 +329,7 @@ products = load_products(lay.etc / "products.toml")
 product = products[spec["product"]]
 oc = OpContext(lay, product, lay.app_key(product.app_id), Path(spec["openssl"]),
                github.default_transport, time.time(), spec["api_base"], products,
-               spec["git_base"])
+               spec["git_base"], admin_digest=spec["admin_digest"])
 facts = precheck.PrFacts(spec["product"], spec["head_ref"], spec["base_ref"],
                          spec["base_tip"], tuple(tuple(c) for c in spec["changes"]))
 pr = {"number": spec["pr"], "head": {"sha": spec["head_sha"]}}
@@ -363,10 +363,13 @@ def driver_spec(
     api_base: str,
     git_base: str,
     openssl: Path,
+    admin_digest: str,
 ) -> dict[str, object]:
-    """The `argv[1]` of `DRIVER` for `ask`."""
+    """The `argv[1]` of `DRIVER` for `ask` (`admin_digest`: the publisher's
+    `current` record's, which the verdict must carry)."""
     return {
         "tree": str(tree),
+        "admin_digest": admin_digest,
         "product": product,
         "openssl": str(openssl),
         "api_base": api_base,
@@ -609,6 +612,7 @@ class PrecheckWorld:
             api_base=self.rw.fake.url,
             git_base=git_base or self.git.base,
             openssl=OPENSSL,
+            admin_digest=self.rw.current_entry().admin_digest,
         )
         python = str(admin_python(self.rw.layout))
         argv = [python, "-I", "-B", "-S", "-c", DRIVER, json.dumps(spec)]

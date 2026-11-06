@@ -11,6 +11,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import sqlite3
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
@@ -19,15 +20,37 @@ from pathlib import Path
 import pytest
 
 from df import doctor, fsutil, platform
-from df.publisher import github, merge, precheck, request, store
+from df.publisher import (
+    github,
+    history,
+    merge,
+    ops,
+    perimeter,
+    precheck,
+    request,
+    store,
+    trust_routes,
+    trust_state,
+)
 from df.publisher.merge import Kind
 from df.publisher.request import Refused, Response
-from governance import act_envelope, approval_branches
+from df.publisher.trust_types import Finding
+from df.stage2_config import TrustBinding, dump_products
+from governance import (
+    act_envelope,
+    act_precheck,
+    act_precheck_v2,
+    act_premerge_core,
+    approval_branches,
+)
+from tests.df import trust_world
+from tests.df.launch_world import ADMIN as ENTRY_ADMIN
 from tests.df.launch_world import entry, snapshot
 from tests.df.publisher_world import EXEC, RID, SHA, SHA_B, World, raw_of
 from tests.df.test_publisher_ops import (
     BOT,
     PR_URL,
+    PRODUCT,
     REPO,
     FakeGitHub,
     Reply,
@@ -43,16 +66,19 @@ STOP = "workstreams/ws/approvals/stops/n1-g2.yaml"
 FINAL = "spec/ws-approve-1-2-3-final"
 CAND = "spec/ws-approve-1-2-3"
 STOP_REF = "stop/ws-n1-g2"
-STAGE3 = ("refused", "kind_unavailable_until_stage3: candidate")
+#: A candidate PR goes past routing; without a `df-trust` binding it stops.
+NO_BINDING = ("refused", "no_binding")
 
 
+S1, S2, S3 = trust_world.S1, trust_world.S2, trust_world.S3
 TIP = "c" * 40
 TIP_2 = "d" * 40
 TIP_3 = "f" * 40
 COMMIT = "e" * 40
 COMPARE = f"/repos/{REPO}/compare/{TIP}...{SHA}"
 MERGE_URL = f"{PR_URL}/merge"
-ADMIN = "sha256:" + "d" * 64
+#: The verdict carries the digest of the publisher's `current` record.
+ADMIN = ENTRY_ADMIN
 WRITE = {"contents": "write", "pull_requests": "write"}
 
 
@@ -558,7 +584,7 @@ def test_merge_routes_through_the_release_tree(
 ) -> None:
     put_patterns(world, GOOD.replace("approve", "okay"))
     mgh.head_ref = "spec/ws-okay-1"
-    assert reason(run(world, capsys)) == STAGE3
+    assert reason(run(world, capsys)) == NO_BINDING
     mgh.head_ref = CAND  # a name of the real contract's form, not this tree's
     resp = run(world, capsys, request_id="req-00000002")
     assert reason(resp) == ("refused", "ambiguous_kind")
@@ -639,7 +665,7 @@ def test_compare_is_pinned_and_pulls_files_is_never_called(
     """The listing of the PR follows its live head (ABA); the compare of two
     fixed commits does not. Here `pulls/files` would show a stop file."""
     resp = run(world, capsys)
-    assert reason(resp) == STAGE3
+    assert reason(resp) == NO_BINDING
     gets = mgh.paths("GET")
     assert COMPARE in gets and mgh.file_gets == 1
     assert not any(p.endswith("/files") for p in gets)
@@ -666,7 +692,7 @@ def test_299_files_are_fine_300_are_too_many(
     world: World, mgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
 ) -> None:
     mgh.files = [{"filename": f"f{i}", "status": "added"} for i in range(299)]
-    assert reason(run(world, capsys)) == STAGE3
+    assert reason(run(world, capsys)) == NO_BINDING
     mgh.files = [{"filename": f"f{i}", "status": "added"} for i in range(300)]
     resp = run(world, capsys, request_id="req-00000002")
     assert reason(resp) == ("refused", "too_many_files")
@@ -893,20 +919,23 @@ def _no_mutation(mgh: MergeGitHub) -> None:
     assert not any(p.endswith("/reviews") for _, p, _ in mgh.calls)
 
 
-def test_candidate_finalize_refused_stage3(
+def test_candidate_finalize_without_binding_refused(
     world: World,
     mgh: MergeGitHub,
     checker: FakePrecheck,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """Stage 3a: candidate and finalize need the `df-trust` binding; without
+    one they are refused by name before the precheck, nothing written."""
     for i, (ref, files, kind) in enumerate(
         ((CAND, ["a.py"], "candidate"), (FINAL, [ENVELOPE], "finalize"))
     ):
         mgh.head_ref = ref
         mgh.files = [{"filename": f, "status": "modified"} for f in files]
         resp = run(world, capsys, request_id=f"req-{i:08d}")
-        assert reason(resp) == ("refused", f"kind_unavailable_until_stage3: {kind}")
+        assert reason(resp) == NO_BINDING
         assert resp.evidence["kind"] == kind
+        assert resp.evidence["trust_root"] == merge.TRUST_ROOT
     assert checker.requests == [] and world.files("intents") == []
     _no_mutation(mgh)
 
@@ -1016,7 +1045,7 @@ def phases(world: World) -> list[str]:
     """The phase names on disk, in the order of decision 8."""
     names = [n for n in world.files("intents") if n.count(".") > 1]
     found = {n.split(".", 1)[1].removesuffix(".json"): {} for n in names}
-    order = [*store.PHASES[:2], *store.rechecks(found), *store.PHASES[2:]]
+    order = [*store.PHASES[:3], *store.rechecks(found), *store.PHASES[3:]]
     return [n for n in order if n in found]
 
 
@@ -1959,3 +1988,998 @@ def test_readme_documents_unknown_procedure() -> None:
     for role in ("df-exec", "df-review", "df-publisher", "df-precheck"):
         assert f"`{role}`" in stage2.split("### ", 1)[0], role
     assert "/opt/df/libexec/df-precheck" in stage2
+
+
+# --- stage 3a: candidate and finalize with the final admission (Task 11) ----------
+
+HISTORY_TOKEN = "ghp_history0123456789"
+BUNDLE = "workstreams/ws/spec"
+IDENTITY = {"host": "github.com", "repository_id": 5, "branch": "main"}
+TrustAnswer = Callable[[dict[str, object]], "bytes | platform.SupervisedResult"]
+
+
+def merge_verdict(
+    req: Mapping[str, object],
+    *,
+    outcome: str = "allow",
+    relation: str | None = "descendant",
+    last_epoch: int | None | str = "default",
+    source: Mapping[str, object] | None | str = "default",
+    findings: tuple[Finding, ...] = (),
+    ranges: object = "default",
+    reason: str | None = None,
+    admin: str = ENTRY_ADMIN,
+    **over: object,
+) -> dict[str, object]:
+    """The `op: merge` verdict the checker would answer for `req`, built as
+    `act_precheck_v2._envelope` builds it: X re-checked repeats A's epoch
+    and `source.env` digest, the ranges end at P."""
+    binding, policy = req["binding"], req["policy"]
+    accepted = req["trust_accepted"]
+    assert isinstance(binding, dict) and isinstance(policy, dict)
+    assert isinstance(accepted, dict)
+    if last_epoch == "default":
+        last_epoch = None if relation is None else accepted["last_epoch"]
+    assert last_epoch is None or isinstance(last_epoch, int)
+    if source == "default":
+        digest = str(accepted["source_digest"])
+        source = None if relation is None else trust_world.source_descriptor(digest)
+    if ranges == "default":
+        p_sha = str(policy["p_sha"])
+        ranges = (
+            None if last_epoch is None else trust_world.ranges_of(last_epoch, p_sha)
+        )
+    if reason is None:
+        names = sorted(f"{f.kind}@{f.role}" for f in findings)
+        reason = "perimeter_findings: " + ", ".join(names) if findings else ""
+    rows = sorted(
+        ({"kind": f.kind, "role": f.role, "detail": f.detail} for f in findings),
+        key=lambda r: (r["kind"], r["role"]),
+    )
+    data: dict[str, object] = {
+        "schema": trust_routes.VERDICT_SCHEMA_V2,
+        "nonce": req["nonce"],
+        "request_digest": precheck.request_digest(req),
+        "ctx_id": req["ctx_id"],
+        "observation_id": req["observation_id"],
+        "op": "merge",
+        "origin_route": "merge",
+        "root": {
+            "host": binding["host"],
+            "df_trust_repository_id": binding["df_trust_repository_id"],
+            "branch": binding["branch"],
+        },
+        "outcome": outcome,
+        "reason": reason,
+        "relation": relation,
+        "last_epoch": last_epoch,
+        "source": source,
+        "ranges": ranges,
+        "policy": policy,
+        "unverified": [],
+        "version": trust_routes.PRECHECK_VERSION_V2,
+        "admin_digest": admin,
+        "repository_id": req["repository_id"],
+        "pr": req["pr"],
+        "head_sha": req["head_sha"],
+        "kind": req["kind"],
+        "snapshot_sha": req["expected_snapshot_sha"],
+        "expected_snapshot_sha": req["expected_snapshot_sha"],
+        "findings": rows,
+        "diagnostics": "",
+    }
+    return {**data, **over}
+
+
+class V2:
+    """The trust world of a keyed binding with A = S1 accepted at epoch 2:
+    `merge` answers `op: merge`, `trust` answers `op: trust`."""
+
+    def __init__(self, tw: trust_world.TrustWorld, binding: TrustBinding) -> None:
+        self.tw = tw
+        self.binding = binding
+        self.merge: TrustAnswer = lambda req: trust_world.wire(merge_verdict(req))
+        self.trust: TrustAnswer = lambda req: trust_world.wire(trust_world.verdict(req))
+        tw.checker.answer = lambda req: (
+            self.merge if req.get("op") == "merge" else self.trust
+        )(req)
+
+    def requests(self, op: str = "merge") -> list[dict[str, object]]:
+        return [r for r in self.tw.checker.requests if r.get("op") == op]
+
+
+def keyed_trust(
+    world: World, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> TrustBinding:
+    """`trust.toml` with a history key, the approved `gh` and the token."""
+    profile = tmp_path / "history-gh"
+    profile.mkdir()
+    trust_world.write_trust(world.lay, history=profile)
+    monkeypatch.setattr(trust_routes, "approved_gh", lambda _s: Path("/opt/gh"))
+    monkeypatch.setattr(history, "history_token", lambda *_a, **_k: HISTORY_TOKEN)
+    return replace(trust_world.BINDING, history_gh_config_dir=str(profile))
+
+
+@pytest.fixture()
+def v2(
+    world: World,
+    mgh: MergeGitHub,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> V2:
+    tw = trust_world.install(monkeypatch)
+    binding = keyed_trust(world, monkeypatch, tmp_path)
+    trust_world.accept(world.lay, S1, 2, binding=binding)
+    mgh.files = [{"filename": f"{BUNDLE}/n1.md", "status": "modified"}]
+    return V2(tw, binding)
+
+
+def db_rows(world: World, sql: str) -> list[tuple]:
+    conn = sqlite3.connect(world.lay.perimeter_dir / perimeter.DB_NAME)
+    try:
+        return conn.execute(sql).fetchall()
+    finally:
+        conn.close()
+
+
+def merge_observations(world: World) -> list[tuple]:
+    return db_rows(
+        world,
+        "SELECT observation_id, accepted_sha, head_sha, policy_sha, outcome "
+        "FROM trust_observations WHERE route = 'merge' ORDER BY observation_id",
+    )
+
+
+def trust_events(world: World) -> list[tuple]:
+    return db_rows(
+        world, "SELECT state, epoch, detected_by FROM events ORDER BY event_id"
+    )
+
+
+def heads(world: World) -> list[tuple]:
+    return db_rows(world, "SELECT sha, last_epoch, row_version FROM trust_heads")
+
+
+def status_of(world: World, capsys: pytest.CaptureFixture[str], n: int) -> Response:
+    raw = raw_of(
+        "perimeter-status", request_id=f"req-stat-{n:04d}", expected_snapshot_sha=S1
+    )
+    return world.run("perimeter-status", raw, capsys=capsys)[1]
+
+
+def _no_put(mgh: MergeGitHub) -> None:
+    assert mgh.puts == [] and not any(p.endswith("/merge") for p in mgh.paths("PUT"))
+
+
+def test_candidate_merged_after_admission(
+    world: World, mgh: MergeGitHub, v2: V2, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The whole route: `clear` at X = A, the observation (A, X, P) before
+    the call, the v2 request the real checker parses, the admission
+    (observation `accepted`, A's row untouched) before `armed` and the one
+    `PUT`; a candidate gets no attestation."""
+    seen: list[list[tuple]] = []
+    mgh.before_put = lambda: seen.append(merge_observations(world))
+    resp = run(world, capsys)
+    assert resp.outcome == "done", resp
+    (req,) = v2.requests()
+    assert (req["schema"], req["op"], req["origin_route"]) == (
+        trust_routes.REQUEST_SCHEMA_V2,
+        "merge",
+        "merge",
+    )
+    assert (req["kind"], req["head_sha"], req["expected_snapshot_sha"]) == (
+        "candidate",
+        SHA,
+        S1,
+    )
+    validation = trust_routes.validation(trust_routes.RULES_VERSION, ENTRY_ADMIN)
+    assert req["trust_accepted"] == {
+        "sha": S1,
+        "last_epoch": 2,
+        "source_digest": trust_world.SOURCE_DIGEST,
+        "validation": validation,
+    }
+    assert req["policy"] == {
+        "full_name": trust_world.POLICY_REPO,
+        "branch": "main",
+        "p_sha": trust_world.P,
+    }
+    assert (req["merger_login"], req["merger_type"]) == (BOT, "Bot")
+    assert (req["bundle_dir"], req["dag_variant"]) == (BUNDLE, "full")
+    assert req["preliminary_state"] == "clear"
+    assert req["changes"] == [["modified", f"{BUNDLE}/n1.md", None]]
+    # the real checker accepts the publisher's request as it is
+    act_precheck_v2.parse(
+        act_precheck.RequestV2(
+            str(req["nonce"]), precheck.request_digest(req), dict(req)
+        )
+    )
+    obs_id = int(str(req["observation_id"]))
+    assert seen == [[(obs_id, S1, S1, trust_world.P, "accepted")]]
+    assert mgh.armed_seen == [True]
+    assert mgh.puts == [{"merge_method": "squash", "sha": SHA}]
+    assert not any(p.endswith("/reviews") for p in mgh.paths("POST"))
+    assert heads(world) == [(S1, 2, 1)]  # X = A: never written (D-d)
+    assert trust_events(world) == []
+    evidence = resp.evidence
+    assert evidence["kind"] == "candidate"
+    assert evidence["trust_root"] == {**IDENTITY, "snapshot_sha": S1}
+    assert evidence["precheck"]["snapshot_sha"] == S1  # type: ignore[index]
+    assert evidence["precheck"]["version"] == "df-precheck/2"  # type: ignore[index]
+    names = set(world.files("intents"))
+    assert not any(n.endswith(".attest.json") for n in names)
+
+
+def test_finalize_attested_then_merged(
+    world: World, mgh: MergeGitHub, v2: V2, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Finalize: the same admission, and the App's attestation of the form
+    (marker `finalize`) before the `PUT`."""
+    mgh.head_ref, mgh.files = FINAL, [{"filename": ENVELOPE, "status": "modified"}]
+    resp = run(world, capsys)
+    assert resp.outcome == "done", resp
+    (req,) = v2.requests()
+    assert (req["kind"], req["head_ref"], req["bundle_dir"]) == (
+        "finalize",
+        FINAL,
+        BUNDLE,
+    )
+    (post,) = [d for m, p, d in mgh.calls if (m, p) == ("POST", f"{PR_URL}/reviews")]
+    assert isinstance(post, dict) and "attestation=finalize" in str(post["body"])
+    order = [p for m, p, _ in mgh.calls if m in ("POST", "PUT")]
+    order = [p for p in order if not p.endswith("/access_tokens")]
+    assert order == [f"{PR_URL}/reviews", MERGE_URL]
+    assert resp.evidence["attestation_review_id"] == 100
+    assert merge_observations(world)[0][-1] == "accepted"
+
+
+def test_block_registered_during_precheck_refused_no_put(
+    world: World, mgh: MergeGitHub, v2: V2, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A positive verdict is not the admission: an event registered while
+    the checker ran blocks it (`perimeter_blocked`), verified, no `PUT`."""
+
+    def answer(req: dict[str, object]) -> bytes:
+        perimeter.record_app_installations(world.lay, v2.binding, [(77, "df-trust", 5)])
+        return trust_world.wire(merge_verdict(req))
+
+    v2.merge = answer
+    resp = run(world, capsys)
+    assert reason(resp) == ("refused", "perimeter_blocked")
+    _no_put(mgh)
+    assert [e[0] for e in trust_events(world)] == ["registered"]
+
+
+def test_other_open_observation_positive_verdict_no_put(
+    world: World, mgh: MergeGitHub, v2: V2, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Another route's observation opened during the call keeps the root
+    from `clear`: the positive verdict is not admitted."""
+
+    def answer(req: dict[str, object]) -> bytes:
+        with perimeter.open_db(world.lay) as db:
+            ctx = trust_state.ctx_id(
+                "trust-status", v2.binding, ENTRY_ADMIN, trust_routes.RULES_VERSION,
+                S1, S2, None,
+            )  # fmt: skip
+            trust_state.open_observation(
+                db, v2.binding.root_id, ctx, route="trust-status", binding=v2.binding,
+                admin_digest=ENTRY_ADMIN, rules=trust_routes.RULES_VERSION,
+                accepted=S1, head=S2, policy=None,
+            )  # fmt: skip
+        return trust_world.wire(merge_verdict(req))
+
+    v2.merge = answer
+    resp = run(world, capsys)
+    assert reason(resp) == ("refused", "perimeter_blocked")
+    _no_put(mgh)
+    assert merge_observations(world)[0][-1] == "accepted"
+
+
+def test_head_moved_from_x_before_admission_no_put(
+    world: World, mgh: MergeGitHub, v2: V2, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The `df-trust` head moved past X after the verdict: the head read in
+    the admission transaction is not X -- superseded, no `PUT`."""
+
+    def answer(req: dict[str, object]) -> bytes:
+        v2.tw.sources.heads["main"] = S2
+        return trust_world.wire(merge_verdict(req))
+
+    v2.merge = answer
+    resp = run(world, capsys)
+    assert reason(resp) == ("refused", "perimeter_blocked")
+    _no_put(mgh)
+    assert merge_observations(world)[0][-1] == "superseded"
+    assert heads(world) == [(S1, 2, 1)]
+
+
+def test_precheck_timeout_no_root_stop(
+    world: World, mgh: MergeGitHub, v2: V2, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A lost answer is no loss (inputs pinned): the observation stays
+    unfinished, no K, no event; `perimeter-status` completes it by `op:
+    trust` and the root is `clear` again."""
+    v2.merge = lambda req: platform.SupervisedResult(None, None, b"", False, 200.0)
+    resp = run(world, capsys)
+    assert reason(resp) == ("refused", "precheck_failed: timeout")
+    _no_put(mgh)
+    assert merge_observations(world)[0][-1] == "unresolved"
+    assert trust_events(world) == []
+    first = status_of(world, capsys, 1)
+    assert first.result["state"] == "unavailable"  # type: ignore[index]
+    (again,) = v2.requests("trust")
+    assert (again["origin_route"], again["trust_head"]) == ("merge", S1)
+    assert merge_observations(world)[0][-1] == "accepted"
+    second = status_of(world, capsys, 2)
+    assert second.result["state"] == "clear", second  # type: ignore[index]
+    assert trust_events(world) == [] and heads(world) == [(S1, 2, 1)]
+
+
+def test_reevaluated_merge_observation_never_puts(
+    world: World, mgh: MergeGitHub, v2: V2, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`unset` leaves the merge observation unfinished; its re-evaluation by
+    `op: trust` completes it and never leads to a `PUT`; A's row is not
+    bumped (I4)."""
+    v2.merge = lambda req: trust_world.wire(
+        merge_verdict(req, outcome="unset", reason="delivery_waiting: candidate PR")
+    )
+    resp = run(world, capsys)
+    assert reason(resp) == (
+        "refused",
+        "precheck_unset: delivery_waiting: candidate PR",
+    )
+    assert merge_observations(world)[0][-1] == "unresolved"
+    status_of(world, capsys, 1)
+    assert merge_observations(world)[0][-1] == "accepted"
+    assert status_of(world, capsys, 2).result["state"] == "clear"  # type: ignore[index]
+    _no_put(mgh)
+    assert len(v2.requests()) == 1
+    assert heads(world) == [(S1, 2, 1)]
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("head_sha", SHA_B),  # C
+        ("snapshot_sha", S2),  # X
+        ("expected_snapshot_sha", S2),  # X's echo
+        ("pr", 13),
+        ("kind", "finalize"),
+        ("root", {"host": "github.com", "df_trust_repository_id": 9, "branch": "main"}),
+    ],
+)
+def test_substitution_c_x_pr_kind_root_each_unbound(
+    world: World,
+    mgh: MergeGitHub,
+    v2: V2,
+    capsys: pytest.CaptureFixture[str],
+    key: str,
+    value: object,
+) -> None:
+    """Each substitution alone leaves the verdict unbound: no `PUT`, the
+    observation unfinished (re-evaluated later), no event."""
+    v2.merge = lambda req: trust_world.wire(merge_verdict(req, **{key: value}))
+    resp = run(world, capsys)
+    assert reason(resp) == ("refused", f"precheck_failed: binding_mismatch: {key}")
+    _no_put(mgh)
+    assert merge_observations(world)[0][-1] == "unresolved"
+    assert trust_events(world) == []
+
+
+def _without_snapshot_sha(req: dict[str, object]) -> bytes:
+    data = merge_verdict(req)
+    del data["snapshot_sha"]
+    return trust_world.wire(data)
+
+
+@pytest.mark.parametrize(
+    ("answer", "why"),
+    [
+        (_without_snapshot_sha, "parse"),  # not the envelope
+        (
+            lambda req: trust_world.wire(merge_verdict(req, snapshot_sha=S3)),
+            "binding_mismatch: snapshot_sha",
+        ),
+    ],
+)
+def test_echo_x_correct_but_snapshot_sha_missing_or_other_refused(
+    world: World,
+    mgh: MergeGitHub,
+    v2: V2,
+    capsys: pytest.CaptureFixture[str],
+    answer: TrustAnswer,
+    why: str,
+) -> None:
+    """`expected_snapshot_sha` echoes X; the verdict's own `snapshot_sha`
+    absent or another SHA is no binding."""
+    v2.merge = answer
+    assert reason(run(world, capsys)) == ("refused", f"precheck_failed: {why}")
+    _no_put(mgh)
+    assert merge_observations(world)[0][-1] == "unresolved"
+
+
+@pytest.mark.parametrize(
+    "ranges",
+    [
+        trust_world.ranges_of(2, "e" * 40),  # correct rows, P other
+        trust_world.ranges_of(3, trust_world.P),  # P right, another epoch set
+        None,  # X verified, no ranges
+    ],
+)
+def test_ranges_correct_p_other_set_unbound_at_merge(
+    world: World,
+    mgh: MergeGitHub,
+    v2: V2,
+    capsys: pytest.CaptureFixture[str],
+    ranges: object,
+) -> None:
+    v2.merge = lambda req: trust_world.wire(merge_verdict(req, ranges=ranges))
+    resp = run(world, capsys)
+    assert reason(resp) == ("refused", "precheck_failed: binding_mismatch: ranges")
+    _no_put(mgh)
+    assert merge_observations(world)[0][-1] == "unresolved"
+
+
+def test_admin_digest_mismatch_refused(
+    world: World, mgh: MergeGitHub, v2: V2, capsys: pytest.CaptureFixture[str]
+) -> None:
+    other = "sha256:" + "b" * 64
+    v2.merge = lambda req: trust_world.wire(merge_verdict(req, admin=other))
+    resp = run(world, capsys)
+    assert reason(resp) == (
+        "refused",
+        "precheck_failed: binding_mismatch: admin_digest",
+    )
+    _no_put(mgh)
+
+
+def test_findings_registered_and_refused(
+    world: World, mgh: MergeGitHub, v2: V2, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The verdict's findings are registered by the publisher under the
+    observation's `ctx_id` at the verified epoch; the request is refused
+    by them."""
+    found = (Finding("policy_history_break", "approval-policy", "rewritten"),)
+    v2.merge = lambda req: trust_world.wire(
+        merge_verdict(req, outcome="refuse", findings=found)
+    )
+    resp = run(world, capsys)
+    assert reason(resp) == (
+        "refused",
+        "perimeter_findings: policy_history_break@approval-policy",
+    )
+    _no_put(mgh)
+    assert merge_observations(world)[0][-1] == "finding_registered"
+    assert trust_events(world) == [("registered", 2, "trust:merge")]
+
+
+def test_refuse_without_findings_completes_the_observation(
+    world: World, mgh: MergeGitHub, v2: V2, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Note 1: `op: merge` refuses without findings (`act_premerge`): X was
+    read clean, the observation is completed, the root stays `clear`."""
+    v2.merge = lambda req: trust_world.wire(
+        merge_verdict(req, outcome="refuse", reason="no human act on the head")
+    )
+    resp = run(world, capsys)
+    assert reason(resp) == ("refused", "no human act on the head")
+    assert merge_observations(world)[0][-1] == "accepted"
+    assert status_of(world, capsys, 1).result["state"] == "clear"  # type: ignore[index]
+
+
+def test_history_token_required(
+    world: World,
+    mgh: MergeGitHub,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """O14: a binding without a history key never merges candidate or
+    finalize -- refused by name before the checker and any observation."""
+    tw = trust_world.install(monkeypatch)
+    trust_world.write_trust(world.lay)
+    trust_world.accept(world.lay, S1, 2)
+    resp = run(world, capsys)
+    assert reason(resp) == ("refused", "history_token_required")
+    assert tw.checker.requests == [] and merge_observations(world) == []
+    _no_mutation(mgh)
+
+
+def test_no_accepted_head_refused_before_checker(
+    world: World, mgh: MergeGitHub, v2: V2, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Note 7: without an accepted head at the branch head the root is not
+    `clear`: refused before the checker, no merge observation."""
+    v2.tw.sources.heads["main"] = S2  # A = S1 is not the head any more
+    resp = run(world, capsys)
+    assert reason(resp) == (
+        "refused",
+        f"perimeter_unavailable: {trust_routes.NOT_ACCEPTED}",
+    )
+    assert v2.requests() == [] and merge_observations(world) == []
+
+
+def test_blocked_root_refused_before_checker(
+    world: World, mgh: MergeGitHub, v2: V2, capsys: pytest.CaptureFixture[str]
+) -> None:
+    perimeter.record_app_installations(world.lay, v2.binding, [(77, "df-trust", 5)])
+    resp = run(world, capsys)
+    assert reason(resp) == ("refused", "perimeter_blocked")
+    assert v2.requests() == [] and merge_observations(world) == []
+    # review M4: a refusal before the checker names the kind and the root
+    assert resp.evidence["kind"] == "candidate"
+    assert resp.evidence["trust_root"] == IDENTITY
+
+
+def test_bundle_dir_without_ws_refused(
+    world: World, mgh: MergeGitHub, v2: V2, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Task 3 M1: a template without `{ws}` would share one bundle
+    directory across workstreams -- refused by name."""
+    shared = replace(PRODUCT, bundle_dir="spec")
+    (world.lay.etc / "products.toml").write_text(dump_products({7: shared}))
+    assert reason(run(world, capsys)) == ("refused", "bundle_dir_without_ws")
+    assert v2.requests() == []
+
+
+def test_repeat_without_armed_checks_anew(
+    world: World,
+    mgh: MergeGitHub,
+    v2: V2,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crash between the admission's `COMMIT` and `armed`: no `PUT` was
+    sent; the repeat passes the precheck anew (a new observation, its own
+    admission) and sends the one `PUT`."""
+    admit = merge._admit
+
+    def crash(run_: merge.MergeRun) -> None:
+        admit(run_)
+        raise Crash
+
+    monkeypatch.setattr(merge, "_admit", crash)
+    with pytest.raises(Crash):
+        run(world, capsys)
+    _no_put(mgh)
+    monkeypatch.setattr(merge, "_admit", admit)
+    capsys.readouterr()
+    resp = run(world, capsys)
+    assert resp.outcome == "done", resp
+    first, second = v2.requests()
+    assert first["observation_id"] != second["observation_id"]
+    assert [o[-1] for o in merge_observations(world)] == ["accepted", "accepted"]
+    assert len(mgh.puts) == 1
+    phases = set(world.files("intents"))
+    assert any(n.endswith(".rechecked.1.json") for n in phases)
+
+
+def test_own_observation_completed_by_another_route_still_admitted(
+    world: World, mgh: MergeGitHub, v2: V2, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Note 4: a concurrent `perimeter-status` evaluates the merge
+    observation first; the admission takes the completed own observation."""
+
+    def answer(req: dict[str, object]) -> bytes:
+        status_of(world, capsys, 1)  # evaluates the oldest: this one
+        assert merge_observations(world)[0][-1] == "accepted"
+        status_of(world, capsys, 2)  # and then its own (A, A)
+        return trust_world.wire(merge_verdict(req))
+
+    v2.merge = answer
+    resp = run(world, capsys)
+    assert resp.outcome == "done", resp
+    assert len(mgh.puts) == 1
+
+
+def test_trust_root_identity_for_stop_with_binding(
+    world: World,
+    sgh: MergeGitHub,
+    checker: FakePrecheck,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Spec 5.5 rev 11: with a binding `TrustRoot` is its identity for every
+    kind, stop included (no snapshot is read for stop)."""
+    trust_world.write_trust(world.lay)
+    checker.outcome, checker.reason = "refuse", "stale_generation"
+    refused = run(world, capsys)
+    assert reason(refused) == ("refused", "stale_generation")
+    assert refused.evidence["trust_root"] == IDENTITY
+    checker.outcome, checker.reason = "allow", ""
+    resp = run(world, capsys, request_id="req-00000002")
+    assert resp.outcome == "done", resp
+    assert resp.evidence["trust_root"] == IDENTITY
+
+
+def test_stop_unchanged_v1(
+    world: World,
+    sgh: MergeGitHub,
+    checker: FakePrecheck,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Stop stays on protocol v1 with a keyed binding: the v1 request,
+    exactly its keys, no observation, no history token."""
+    keyed_trust(world, monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        history, "history_token", lambda *_a, **_k: pytest.fail("history read")
+    )
+    resp = run(world, capsys)
+    assert resp.outcome == "done", resp
+    (req,) = checker.requests
+    assert req["schema"] == precheck.REQUEST_SCHEMA
+    assert set(req) == set(act_precheck.REQUEST_KEYS)
+    assert req["kind"] == "stop"
+    assert merge_observations(world) == []
+    assert resp.evidence["precheck"]["version"] == "df-precheck/1"  # type: ignore[index]
+    assert "snapshot_sha" not in resp.evidence["precheck"]  # type: ignore[operator]
+
+
+def test_binding_changed_during_check_is_conservative(
+    world: World, mgh: MergeGitHub, v2: V2, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Task 8 M7: `trust.toml` names another binding after the check -- K
+    before any write of the verdict, refused, no `PUT`."""
+
+    def answer(req: dict[str, object]) -> bytes:
+        (world.lay.etc / "trust.toml").write_text("broken")
+        return trust_world.wire(merge_verdict(req))
+
+    v2.merge = answer
+    resp = run(world, capsys)
+    assert reason(resp) == ("refused", "perimeter_blocked")
+    _no_put(mgh)
+    assert merge_observations(world)[0][-1] == "conservative"
+    assert [e[2] for e in trust_events(world)] == [trust_state.CONSERVATIVE_SOURCE]
+
+
+@pytest.mark.parametrize(
+    ("ref", "kind", "ws"),
+    [
+        (CAND, "candidate", "ws"),
+        (FINAL, "finalize", "ws"),
+        ("spec/ws-7-approve-2-1-1", "candidate", "ws-7"),
+        ("spec/a-approve-b-approve-1-2-3", "candidate", "a-approve-b"),
+        ("spec/ws-approve-1-2", "candidate", None),  # not the release's arity
+        (CAND, "finalize", None),  # no finalize suffix
+    ],
+)
+def test_ws_of_branch(ref: str, kind: Kind, ws: str | None) -> None:
+    """The rule of `act_premerge_core.request_of_branch`: the shortest
+    `ws_id`, digits for the other placeholders (held equal to it)."""
+    assert merge.ws_of_branch(ref, kind, REAL) == ws
+    if kind == "candidate":
+        found = act_premerge_core.request_of_branch(ref)
+        assert (None if found is None else found[0]) == ws
+
+
+def test_bundle_dir_expanded_inside_the_product() -> None:
+    assert merge.bundle_dir("workstreams/{ws}/spec", "candidate", CAND, REAL) == (
+        "workstreams/ws/spec"
+    )
+    with pytest.raises(Refused) as info:
+        merge.bundle_dir("w/{ws}/spec", "candidate", "spec/..-approve-1-2-3", REAL)
+    assert info.value.reason == "bundle_dir_invalid"
+    with pytest.raises(Refused) as info:
+        merge.bundle_dir("w/{ws}", "candidate", "feat/x", REAL)
+    assert info.value.reason == "ambiguous_kind"
+
+
+# --- fix round 1 (review I1, M1-M3) -----------------------------------------------
+
+
+def test_finalize_listing_unavailable_then_repeat_done(
+    world: World, mgh: MergeGitHub, v2: V2, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """I1: an `unknown` past a positive verdict completes its observation
+    (no `PUT`); the repeat checks anew -- a second observation -- and sends
+    the one `PUT`."""
+    mgh.head_ref, mgh.files = FINAL, [{"filename": ENVELOPE, "status": "modified"}]
+    mgh.list_down = True
+    first = run(world, capsys)
+    assert reason(first) == ("unknown", "reconcile_unavailable")
+    _no_put(mgh)
+    assert [o[-1] for o in merge_observations(world)] == ["accepted"]
+    mgh.list_down = False
+    resp = run(world, capsys)
+    assert resp.outcome == "done", resp
+    assert len(mgh.puts) == 1
+    assert [o[-1] for o in merge_observations(world)] == ["accepted", "accepted"]
+    assert len(v2.requests()) == 2
+
+
+def test_candidate_pr_busy_at_own_pr_settles_the_observation(
+    world: World,
+    mgh: MergeGitHub,
+    v2: V2,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """I1: the PR is lost to another request at `own_pr` after the check:
+    a verified `pr_busy`, the observation completed, the root `clear`."""
+    monkeypatch.setattr(store, "own_pr", lambda *_a: False)
+    resp = run(world, capsys)
+    assert reason(resp) == ("refused", "pr_busy")
+    _no_put(mgh)
+    assert [o[-1] for o in merge_observations(world)] == ["accepted"]
+    assert status_of(world, capsys, 1).result["state"] == "clear"  # type: ignore[index]
+
+
+def test_head_unreadable_at_admission_no_put(
+    world: World, mgh: MergeGitHub, v2: V2, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The branch head cannot be read in the admission: refused, no `PUT`;
+    the settlement cannot CAS either, so the observation stays unfinished
+    (re-evaluated later), no event."""
+
+    def answer(req: dict[str, object]) -> bytes:
+        v2.tw.sources.status[f"repos/{trust_world.TRUST_REPO}/branches/main"] = 502
+        return trust_world.wire(merge_verdict(req))
+
+    v2.merge = answer
+    resp = run(world, capsys)
+    assert resp.outcome == "refused"
+    assert str(resp.reason).startswith("perimeter_unavailable: ")
+    _no_put(mgh)
+    assert [o[-1] for o in merge_observations(world)] == ["unresolved"]
+    assert trust_events(world) == []
+
+
+def test_own_self_report_finding_registered_on_merge(
+    world: World, mgh: MergeGitHub, v2: V2, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M2: the publisher's own history-token finding (`token_write`) is
+    registered in the merge observation, as `observe` does, and the merge
+    is refused before the checker."""
+    v2.tw.sources.permissions[trust_world.POLICY_ID] = {
+        "push": True,
+        "maintain": False,
+        "admin": False,
+    }
+    resp = run(world, capsys)
+    assert reason(resp) == ("refused", "perimeter_blocked")
+    assert v2.requests() == []
+    assert [o[-1] for o in merge_observations(world)] == ["finding_registered"]
+    assert trust_events(world) == [("registered", 2, "trust:merge")]
+
+
+def test_trust_root_x_of_the_decisive_check() -> None:
+    """M3: `trust_root.snapshot_sha` is X of the check that decides."""
+    base = {"kind": "candidate", "trust_root": {**IDENTITY, "snapshot_sha": S1}}
+    phases = {
+        "checked": {"precheck": {"base_tip": TIP, "snapshot_sha": S1}},
+        "rechecked.1": {"precheck": {"base_tip": TIP_2, "snapshot_sha": S2}},
+    }
+    evidence = merge._evidence_of(base, phases)
+    assert evidence["trust_root"] == {**IDENTITY, "snapshot_sha": S2}
+    assert evidence["precheck_initial"] == phases["checked"]["precheck"]
+    stop = {"kind": "stop", "trust_root": IDENTITY}
+    attest = {"attest": {"precheck": {"base_tip": TIP}}}
+    assert merge._evidence_of(stop, attest)["trust_root"] == IDENTITY
+
+
+# --- fix round 2 (re-review R1-I1) --------------------------------------------------
+
+
+def test_binding_moved_before_settlement_is_conservative(
+    world: World, mgh: MergeGitHub, v2: V2, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R1-I1: a finalize `allow`, `trust.toml` rewritten during the
+    attestation (`--rebind` of the same triple, other parameters), the
+    listing unavailable: the `unknown` call settles its observation by K,
+    not `accepted`; no `PUT`."""
+    mgh.head_ref, mgh.files = FINAL, [{"filename": ENVELOPE, "status": "modified"}]
+    mgh.list_down = True
+
+    def rebind() -> None:
+        text = (world.lay.etc / "trust.toml").read_text()
+        (world.lay.etc / "trust.toml").write_text(
+            text.replace(
+                "approval_policy_repository_id = 6",
+                "approval_policy_repository_id = 66",
+            )
+        )
+
+    mgh.after_post = rebind
+    resp = run(world, capsys)
+    assert reason(resp) == ("unknown", "reconcile_unavailable")
+    _no_put(mgh)
+    assert [o[-1] for o in merge_observations(world)] == ["conservative"]
+    assert [e[2] for e in trust_events(world)] == [trust_state.CONSERVATIVE_SOURCE]
+
+
+# --- paid review #706 ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("case", "why", "kind"),
+    [
+        ("history_key", "history_token_required", "candidate"),
+        ("bundle", "bundle_dir_without_ws", "candidate"),
+        ("busy", "pr_busy", "candidate"),
+        ("patterns", "patterns_unavailable", None),
+        ("files", "too_many_files", None),
+        ("closed", "pr_state", None),
+        ("fork", "head_repo_foreign", None),
+        ("route", "ambiguous_kind", None),
+        ("brief", "brief_precheck_unavailable", "brief"),
+    ],
+)
+def test_pre_intent_refusals_carry_kind_and_root(
+    world: World,
+    mgh: MergeGitHub,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    case: str,
+    why: str,
+    kind: str | None,
+) -> None:
+    """Spec 5.5: every refusal of `merge` names `TrustRoot` (the binding's
+    identity), and its kind once the PR is routed -- by class, before the
+    intent too."""
+    trust_world.install(monkeypatch)
+    if case == "history_key":
+        trust_world.write_trust(world.lay)
+    else:
+        keyed_trust(world, monkeypatch, tmp_path)
+    mgh.files = [{"filename": f"{BUNDLE}/n1.md", "status": "modified"}]
+    if case == "bundle":
+        shared = replace(PRODUCT, bundle_dir="spec")
+        (world.lay.etc / "products.toml").write_text(dump_products({7: shared}))
+    if case == "busy":
+        monkeypatch.setattr(store, "pr_busy", lambda *_a: True)
+    if case == "patterns":
+        put_patterns(world, None)
+    if case == "files":
+        mgh.files = [{"filename": f"f{i}", "status": "added"} for i in range(300)]
+    if case == "closed":
+        mgh.pr_state = "closed"
+    if case == "fork":
+        mgh.head_repo = 8
+    if case == "route":
+        mgh.head_ref = "feat/x"
+    if case == "brief":
+        mgh.head_ref = "brief/x"
+    resp = run(world, capsys)
+    assert reason(resp) == ("refused", why)
+    assert resp.evidence["trust_root"] == IDENTITY
+    assert resp.evidence.get("kind") == kind
+    assert world.files("intents") == []
+
+
+def test_no_binding_refusal_root_unavailable(
+    world: World, mgh: MergeGitHub, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Without a binding `TrustRoot` says so: `{"unavailable": "no_binding"}`."""
+    mgh.head_ref = "feat/x"
+    resp = run(world, capsys)
+    assert reason(resp) == ("refused", "ambiguous_kind")
+    assert resp.evidence["trust_root"] == merge.TRUST_ROOT
+
+
+def test_repeats_beyond_max_rechecks_end_done(
+    world: World,
+    mgh: MergeGitHub,
+    v2: V2,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Paid review #706: a repeat's own check is no moved base -- more
+    repeats than `MAX_RECHECKS` of an `unknown` past the check still end
+    `done` with the one `PUT`; each repeat checks anew."""
+    admit = merge._admit
+    left = [merge.MAX_RECHECKS + 2]  # the first call and 6 repeats fail
+
+    def flaky(run_: merge.MergeRun) -> None:
+        if left[0] > 0:
+            left[0] -= 1
+            raise github.GitHubUnavailable("transient")
+        admit(run_)
+
+    monkeypatch.setattr(merge, "_admit", flaky)
+    for _ in range(merge.MAX_RECHECKS + 2):
+        assert reason(run(world, capsys)) == ("unknown", "github_unavailable")
+        _no_put(mgh)
+    resp = run(world, capsys)
+    assert resp.outcome == "done", resp
+    assert len(mgh.puts) == 1
+    rechecks = [
+        n for n in world.files("intents") if ".rechecked." in n and n.endswith(".json")
+    ]
+    assert len(rechecks) == merge.MAX_RECHECKS + 2
+    assert all(o[-1] == "accepted" for o in merge_observations(world))
+    assert len(merge_observations(world)) == merge.MAX_RECHECKS + 3
+
+
+def test_moved_base_still_bounded_after_repeats(
+    world: World,
+    mgh: MergeGitHub,
+    v2: V2,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The budget still holds for a base that keeps moving, after repeats
+    spent their own checks: more than `MAX_RECHECKS` moves is a verified
+    `base_unstable`, no `PUT`."""
+    same = tuple((s, f, None) for s, f in (("modified", f"{BUNDLE}/n1.md"),))
+    monkeypatch.setattr(merge, "pr_changes", lambda *_a: same)
+    admit = merge._admit
+    left = [2]  # the first call and one repeat end `unknown`
+
+    def flaky(run_: merge.MergeRun) -> None:
+        if left[0] > 0:
+            left[0] -= 1
+            raise github.GitHubUnavailable("transient")
+        admit(run_)
+
+    monkeypatch.setattr(merge, "_admit", flaky)
+    for _ in range(2):
+        assert reason(run(world, capsys)) == ("unknown", "github_unavailable")
+    moves = [f"{i:x}" * 40 for i in range(1, merge.MAX_RECHECKS + 3)]
+    mgh.tips = [TIP, *moves]  # the repeat's own check, then the base moves
+    resp = run(world, capsys)
+    assert reason(resp) == ("refused", "base_unstable")
+    _no_put(mgh)
+
+
+# --- targeted review of #706 --------------------------------------------------------
+
+
+def _unknown_after_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every admission fails transiently: each call ends `unknown`."""
+
+    def flaky(_run: merge.MergeRun) -> None:
+        raise github.GitHubUnavailable("transient")
+
+    monkeypatch.setattr(merge, "_admit", flaky)
+
+
+def test_repeat_refusal_keeps_the_x_of_the_phases(
+    world: World,
+    mgh: MergeGitHub,
+    v2: V2,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plain refusal on a repeat (the read token answered 403) carries the
+    intent's and the phases' evidence: `trust_root` keeps X."""
+    _unknown_after_check(monkeypatch)
+    assert reason(run(world, capsys)) == ("unknown", "github_unavailable")
+    real = ops.authorize
+
+    def denied(oc: ops.OpContext, permissions: Mapping[str, str]) -> object:
+        if permissions == ops.READ_PERMISSIONS:
+            raise Refused("github_403: denied")
+        return real(oc, permissions)
+
+    monkeypatch.setattr(ops, "authorize", denied)
+    resp = run(world, capsys)
+    assert resp.outcome == "unknown" and "github_403" in str(resp.reason)
+    assert resp.evidence["trust_root"] == {**IDENTITY, "snapshot_sha": S1}
+    assert resp.evidence["kind"] == "candidate"
+    _no_put(mgh)
+
+
+def test_repeat_checks_bounded_named_refusal(
+    world: World,
+    mgh: MergeGitHub,
+    v2: V2,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The repeats' own checks are bounded apart from the moved-base budget:
+    past `MAX_REPEAT_CHECKS` a verified, named `repeat_limit`, no `PUT` --
+    never a phase name the store refuses (`rechecked.<n>`, n <= 9999)."""
+    assert merge.MAX_REPEAT_CHECKS + merge.MAX_RECHECKS < 9999
+    monkeypatch.setattr(merge, "MAX_REPEAT_CHECKS", 2)
+    _unknown_after_check(monkeypatch)
+    for _ in range(3):  # the first call and two repeats
+        assert reason(run(world, capsys)) == ("unknown", "github_unavailable")
+    resp = run(world, capsys)
+    assert reason(resp) == ("refused", "repeat_limit")
+    _no_put(mgh)
+    assert all(o[-1] == "accepted" for o in merge_observations(world))
