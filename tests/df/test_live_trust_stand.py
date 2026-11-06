@@ -12,15 +12,21 @@ module too).
 
 from __future__ import annotations
 
+import ast
 import json
 import re
+import subprocess
 from dataclasses import fields, replace
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import yaml
 
-from df.publisher import ops
+from df.paths import Layout
+from df.publisher import github, ops
+from df.publisher.github import GitHubRefused, GitHubUnavailable
 from df.publisher.trust_routes import BRANCH, binding_problem
 from df.setup_trust import Refused
 from df.stage2_config import Product, TrustBinding
@@ -284,6 +290,18 @@ def test_measure_record_round_trip() -> None:
     assert live_trust_stand.parse_measure(record.to_json()) == record
 
 
+def test_measure_names_what_it_measured() -> None:
+    """M4: the route, the kind of cold pass and the approximations are in
+    every record; a record without them does not parse."""
+    record = replace(measure(), notes=live_trust_stand.MEASURE_NOTES)
+    data = json.loads(record.to_json())
+    assert (data["route"], data["cold"]) == ("trust-status", "new_root")
+    assert "150" in data["notes"] and "admin_digest" in data["notes"]
+    del data["cold"]
+    with pytest.raises(ValueError):
+        live_trust_stand.parse_measure(json.dumps(data))
+
+
 def test_measure_m_is_the_conservative_bound() -> None:
     """M is the whole `trust-status` call: it contains `op: trust`."""
     assert measure().m_seconds == 44.9
@@ -408,6 +426,33 @@ def test_row_dependencies_name_existing_earlier_rows() -> None:
     assert live_trust_stand.CLEANUP.id not in seen
 
 
+@pytest.mark.parametrize("row_id", [row.id for row in live_trust_stand.ROWS])
+def test_not_verified_of_any_row_is_never_a_pass(row_id: str) -> None:
+    """Whichever row says `not_verified`: it is not `pass`, every row that
+    needs it is skipped, and the run is not green."""
+    rows = tuple(
+        live_stand.Row(
+            r.id,
+            r.title,
+            (lambda st: live_trust_stand.not_verified("нет"))
+            if r.id == row_id
+            else (lambda st: {}),
+            r.needs,
+        )
+        for r in live_trust_stand.ROWS
+    )
+    cleanup = live_stand.Row("9", "c", lambda st: {})
+    results = live_stand.run_rows(Stand.__new__(Stand), rows=rows, cleanup=cleanup)
+    by_id = {r.id: results[r.name]["status"] for r in rows}
+    assert by_id[row_id] == NOT_VERIFIED
+    for r in rows:
+        if row_id in r.needs:
+            assert str(by_id[r.id]).startswith(SKIPPED)
+    assert live_stand.verdict(results, expected=len(rows) + 1) == (
+        live_stand.EXIT_FAILED
+    )
+
+
 def test_not_verified_is_never_a_pass() -> None:
     """A row without its credential says so, is not `pass`, and its
     dependents are skipped; the run is not green (spec 10)."""
@@ -510,3 +555,300 @@ def test_workflow_runs_the_three_phases() -> None:
     for phase in ("install", "stand", "wipe"):
         assert f"-m tests.df.live_trust_stand {phase}" in text
     assert "uv sync --frozen --group governance" in text
+
+
+# ---------- fix round 1: I1, I2, M1, M2, M5, M6 ----------
+
+HISTORY = "github_pat_" + "h" * 40
+WRITE = "github_pat_" + "w" * 40
+CLEAN = {"permissions": {"admin": False, "maintain": False, "push": False}}
+REAL = TrustBinding("github.com", 11, FACTS["trust"], "main", 22, "public")
+
+
+def fake_stand(tmp_path: Path, **ctx: object) -> TrustStand:
+    """A `TrustStand` whose evidence goes under `tmp_path` (no world)."""
+    a = replace(args(), out=tmp_path)
+    base = Stand(
+        RolesWorld.__new__(RolesWorld),
+        a.stand_args(),
+        StandSecrets(Path("/k"), Path("/t"), "ghp_" + "m" * 36),
+        live_stand.MachineGitHub("x"),
+        Product(33, "owner/df-roles-probe", "write", 1, 2, "bot", "/var/empty"),
+        "main",
+        "app[bot]",
+    )
+    secrets = TrustSecrets(Path("/h"), HISTORY, "p" * 20, WRITE)
+    context = TrustContext(a, secrets, binding=REAL)
+    for key, value in ctx.items():
+        setattr(context, key, value)
+    return live_trust_stand.trust_stand(base, context)
+
+
+def evidence(tmp_path: Path, name: str) -> Path:
+    return tmp_path / "live" / live_stand.OS_DIR / name
+
+
+@pytest.mark.parametrize(
+    ("calls", "problem"),
+    [
+        ((), "нет"),
+        ((("repos/o/p", 200), ("repos/o/p/hooks", 403)), "403"),
+        ((("repos/o/p", 200), ("repos/o/p/keys", None)), "None"),
+        ((("repos/o/p", 200),), None),
+    ],
+)
+def test_human_calls_problem(
+    calls: tuple[tuple[str, int | None], ...], problem: str | None
+) -> None:
+    got = live_trust_stand.human_calls_problem(calls)
+    if problem is None:
+        assert got is None
+    else:
+        assert got is not None and problem in got
+
+
+@pytest.mark.parametrize("calls", [(), (("repos/o/p", 200), ("repos/o/p/hooks", 404))])
+def test_request_table_row_is_not_verified_by_the_human_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    calls: tuple[tuple[str, int | None], ...],
+) -> None:
+    """I1: every live request answers, but the human's check missed a call
+    (or made none): Т2 records its table, then is `not_verified`."""
+    st = fake_stand(tmp_path, calls=calls)
+    monkeypatch.setattr(live_trust_stand, "table_facts", lambda st: FACTS)
+    monkeypatch.setattr(live_trust_stand, "get", lambda t, path: (200, CLEAN))
+    result = live_trust_stand.row_request_table(st)
+    assert result["status"] == NOT_VERIFIED
+    recorded = json.loads(evidence(tmp_path, "t2-request-table.json").read_text())
+    assert recorded["human_not_200"] == [list(c) for c in calls if c[1] != 200]
+    ok = fake_stand(tmp_path, calls=(("repos/o/p", 200),))
+    assert "status" not in live_trust_stand.row_request_table(ok)
+
+
+def test_request_table_live_failure_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    st = fake_stand(tmp_path, calls=(("repos/o/p", 200),))
+    monkeypatch.setattr(live_trust_stand, "table_facts", lambda st: FACTS)
+    monkeypatch.setattr(live_trust_stand, "get", lambda t, path: (404, None))
+    with pytest.raises(live_stand.RowFailed, match="таблица запросов"):
+        live_trust_stand.row_request_table(st)
+
+
+RULES_OK = [{"type": "pull_request"}, {"type": "non_fast_forward"}, {"type": "x"}]
+
+
+@pytest.mark.parametrize(
+    ("policy", "rules", "count"),
+    [
+        ((200, CLEAN), (200, RULES_OK), 0),
+        ((200, {"permissions": {"push": True}}), (200, RULES_OK), 1),
+        ((200, {}), (200, RULES_OK), 1),
+        ((404, None), (200, RULES_OK), 1),
+        ((200, CLEAN), (200, [{"type": "pull_request"}]), 1),
+        ((200, CLEAN), (403, None), 1),
+        ((200, {"permissions": {"push": True}}), (200, []), 2),
+    ],
+)
+def test_scope_problems(
+    policy: tuple[int | None, object], rules: tuple[int | None, object], count: int
+) -> None:
+    """I2: the write token reaches `approval-policy` without push (its
+    repository selection), and the trusted branch is PR-only and without
+    force-push."""
+    assert len(live_trust_stand.scope_problems(policy, rules)) == count
+
+
+def test_cold_measure_writes_nothing_without_its_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I2: a scope probe that does not hold is `not_verified`, recorded,
+    and no write is made."""
+    st = fake_stand(tmp_path)
+    monkeypatch.setattr(live_trust_stand, "get", lambda t, path: (200, CLEAN))
+
+    def no_write(*args: object, **kwargs: object) -> object:
+        raise AssertionError("a write was made")
+
+    monkeypatch.setattr(github, "call", no_write)
+    monkeypatch.setattr(live_trust_stand, "build_measure", no_write)
+    result = live_trust_stand.row_cold_measure(st)
+    assert result["status"] == NOT_VERIFIED
+    scope = json.loads(evidence(tmp_path, "t5-write-scope.json").read_text())
+    assert scope["problems"] and not live_trust_stand.ctx_of(st).created
+
+
+def test_cold_measure_without_the_token(tmp_path: Path) -> None:
+    st = fake_stand(tmp_path)
+    ctx = live_trust_stand.ctx_of(st)
+    ctx.secrets = replace(ctx.secrets, write_token=None)
+    assert live_trust_stand.row_cold_measure(st)["status"] == NOT_VERIFIED
+
+
+ND = ("not_descendant", "df-trust")
+RM = ("ruleset_missing", "df-trust")
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "ok"),
+    [
+        ({RM}, {RM, ND}, True),
+        ({RM}, {RM}, False),
+        ({RM, ND}, {RM, ND}, False),
+        (set(), {("not_descendant", "approval-policy")}, False),
+    ],
+)
+def test_rewritten_needs_a_new_not_descendant(
+    before: set[tuple[str, str]], after: set[tuple[str, str]], ok: bool
+) -> None:
+    """M5: the real check of Т6 (Т5's `ruleset_missing` makes «not clear»
+    vacuous)."""
+    got = live_trust_stand.rewritten_problem(frozenset(before), frozenset(after))
+    assert (got is None) is ok
+
+
+def test_kinds_of() -> None:
+    findings = ({"kind": "a", "role": "b", "detail": "x"},)
+    assert live_trust_stand.kinds_of(findings) == {("a", "b")}
+
+
+def fake_call(seen: list[tuple[str, str]], fail: Exception | None = None) -> object:
+    def call(method: str, path: str, token: str, body: object = None) -> object:
+        assert token == WRITE
+        seen.append((method, path))
+        if fail is not None:
+            raise fail
+        return 204, None
+
+    return call
+
+
+@pytest.mark.parametrize(("status", "left"), [(404, False), (200, True)])
+def test_drop_measure_deletes_and_reads_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int, left: bool
+) -> None:
+    """M6: the measurement branch is deleted, then read back absent."""
+    st = fake_stand(tmp_path, created=True)
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(github, "call", fake_call(seen))
+    monkeypatch.setattr(live_trust_stand, "get", lambda t, path: (status, None))
+    got = live_trust_stand.drop_measure(st)
+    assert seen == [
+        ("DELETE", f"/repos/{FACTS['trust']}/git/refs/heads/measure/1-1-linux")
+    ]
+    assert got["left"] is left
+
+
+def test_drop_measure_refused_is_left(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    st = fake_stand(tmp_path, created=True)
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(github, "call", fake_call(seen, GitHubRefused("no", 403)))
+    got = live_trust_stand.drop_measure(st)
+    assert got == {"created": True, "left": True, "problem": "GitHubRefused"}
+
+
+def test_drop_measure_without_a_branch_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    st = fake_stand(tmp_path, binding=None)
+    monkeypatch.setattr(github, "call", fake_call([], AssertionError("write")))
+    assert live_trust_stand.drop_measure(st) == {"created": False, "left": False}
+
+
+@pytest.mark.parametrize(
+    ("fail", "word"),
+    [
+        (None, "удалена"),
+        (GitHubRefused("Reference does not exist", 422), "нет ветки"),
+        (GitHubRefused("Not Found", 404), "нет ветки"),
+        (GitHubRefused("Forbidden", 403), "не удалось: 403"),
+        (GitHubUnavailable("down"), "не удалось: GitHubUnavailable"),
+    ],
+)
+def test_sweep_measure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fail: Exception | None,
+    word: str,
+) -> None:
+    """M6: the always-run sweep of `wipe`: one word, never exception text."""
+    token = tmp_path / live_trust_stand.WRITE_FILE
+    token.write_text(WRITE + "\n")
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(github, "call", fake_call(seen, fail))
+    monkeypatch.setattr(
+        live_trust_stand, "repo_facts", lambda t, i: (FACTS["trust"], "main")
+    )
+    assert live_trust_stand.sweep_measure(token, 11, "1-1-linux") == word
+    assert seen == [
+        ("DELETE", f"/repos/{FACTS['trust']}/git/refs/heads/measure/1-1-linux")
+    ]
+
+
+def test_empty_secret_is_named(tmp_path: Path) -> None:
+    """M1: an unset required secret is a named infrastructure failure."""
+    (tmp_path / live_trust_stand.HISTORY_FILE).write_text("\n")
+    (tmp_path / live_trust_stand.PAT_FILE).write_text("github_pat_" + "p" * 40)
+    with pytest.raises(pytest.fail.Exception, match="history-token пуст"):
+        live_trust_stand.read_trust_secrets(tmp_path)
+
+
+class _Stop(Exception):
+    pass
+
+
+@pytest.mark.parametrize(
+    ("private", "public", "refused"),
+    [
+        (True, False, False),
+        (True, True, True),
+        (False, False, True),
+        (False, True, False),
+    ],
+)
+def test_2b_set_up_checks_the_stand_visibility(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    private: bool,
+    public: bool,
+    refused: bool,
+) -> None:
+    """M6: `set_up` refuses a stand of the other visibility; the default is
+    2b's private stand."""
+    ran = subprocess.CompletedProcess(["x"], 0, b"", b"")
+    monkeypatch.setattr(live_stand, "as_operator", lambda argv, **kw: ran)
+    monkeypatch.setattr(live_stand, "check", lambda done, what: None)
+
+    def call(self: object, method: str, path: str, body: object = None) -> object:
+        if path == "/user":
+            return {"login": "betta-tester"}
+        return {"private": not public, "full_name": "owner/df-roles-probe"}
+
+    def stop(*args: object, **kwargs: object) -> None:
+        raise _Stop
+
+    monkeypatch.setattr(live_stand.MachineGitHub, "call", call)
+    monkeypatch.setattr(live_stand, "write_etc", stop)
+    rw = cast(RolesWorld, SimpleNamespace(layout=Layout(tmp_path)))
+    secrets = StandSecrets(Path("/k"), Path("/t"), "ghp_" + "m" * 36)
+    kwargs = {} if private else {"private": False}
+    expected = pytest.fail.Exception if refused else _Stop
+    with pytest.raises(expected):
+        live_stand.set_up(rw, args().stand_args(), secrets, **kwargs)
+
+
+def test_governance_and_test_modules_load_lazily() -> None:
+    """M2, M3: the stand's module imports neither the governance group nor a
+    test module at its top, so `STAND_IMPORTS` can name a missing one."""
+    tree = ast.parse(Path(live_trust_stand.__file__).read_text())
+    top = [
+        node.module
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.module
+    ]
+    assert not [m for m in top if m.startswith("governance")]
+    assert not [m for m in top if m.split(".")[-1].startswith("test_")]
+    assert "governance.act_epochs" in live_trust_stand.STAND_IMPORTS

@@ -22,10 +22,14 @@
 # DF_STAND_APP_KEY (H4, App 5285716), DF_STAND_MACHINE_TOKEN (H4,
 # betta-tester classic PAT), DF_STAND_HISTORY_TOKEN (H5, fine-grained
 # public read-only), DF_STAND_PERIMETER_PAT (H6, the owner's temporary
-# read-only PAT on the two trust repos), DF_STAND_TRUST_WRITE_TOKEN
-# (optional; write access to df-roles-probe-trust for the measurement branch
-# measure/<tag> only -- not among H4-H6: without it rows T5 and T6 are
-# not_verified). Variables: DF_STAND_REPO_ID, DF_STAND_APP_ID,
+# read-only PAT on the two trust repos), DF_STAND_TRUST_WRITE_TOKEN (the
+# owner's fine-grained PAT, repository access only df-roles-probe-trust,
+# Contents: read/write, the shortest expiry, revoked after every run (H8);
+# the owner's step H6a, proposed, not among H4-H6. The script writes only
+# measure/<tag> and first probes the token's scope: push false on
+# df-roles-probe-policy, the trusted branch PR-only without force-push.
+# Without the token, or with a failed probe, rows T5 and T6 are
+# not_verified and nothing is written). Variables: DF_STAND_REPO_ID, DF_STAND_APP_ID,
 # DF_STAND_INSTALLATION_ID, DF_STAND_POLICY_REPO_ID, DF_STAND_TRUST_REPO_ID,
 # DF_STAND_TRUST_BRANCH.
 # Actions pinned by full commit SHA, as df-stage1.yml.

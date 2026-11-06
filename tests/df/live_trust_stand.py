@@ -46,9 +46,22 @@ the H2 check), the pinned `gh` approved by `cli set gh`, then the rows:
 - 9 the cleanup: the 2b row 9 and the deletion of `measure/<tag>`.
 
 Rows Т5 and Т6 write one ref, `refs/heads/measure/<tag>` (`ref_path`),
-with a token of write access to `df-roles-probe-trust`
-(`DF_STAND_TRUST_WRITE_TOKEN`, not among H4-H6: without it both rows are
-`not_verified`, never a pass). A row's status is `pass`, `fail`,
+with `DF_STAND_TRUST_WRITE_TOKEN`: the owner's fine-grained PAT, repository
+access only `df-roles-probe-trust`, Contents: read/write, the shortest
+expiry, revoked after every run (H8); the owner's step H6a, proposed, not
+among H4-H6. The forge cannot limit it to one ref, so before any write Т5
+probes its scope (`scope_problems`, recorded): the token self-reports
+`push: false` on `df-roles-probe-policy` (the repository selection), and the
+trusted branch's rules hold `pull_request` and `non_fast_forward` (its
+ruleset still binds the branch; that no bypass actor pushes directly is
+H6a's confirmation, invisible to a token). Without the token, or with a
+probe that does not hold, Т5 is `not_verified` and Т6 is skipped: never a
+pass, and nothing is written. Т2 is `not_verified` when a call of the
+human's perimeter check was not `200` or there was none (spec 6.2: «не
+проверено», не «ок»). The ceiling of a measured pass is the checker's own
+`DEADLINE` (150 s, `governance.act_precheck`): a longer cold pass ends
+`unavailable`, Т5 fails with `m_seconds: null`, and Task 16 has no M until
+the owner chooses the fallback (`MEASURE_NOTES`). A row's status is `pass`, `fail`,
 `инфраструктура`, `not_verified` or skipped; the run is green only when
 every row passed. Exit codes as the 2b stand. No pytest test runs a phase or
 reads `DF_STAND_*`; `tests/df/test_live_trust_stand.py` tests the helpers.
@@ -74,7 +87,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from urllib.parse import quote
 
 import pytest
@@ -86,9 +99,9 @@ from df.publisher.request import TrustStatus
 from df.roles import PRECHECK_USER
 from df.setup_trust import Refused
 from df.stage2_config import Product, TrustBinding, dump_trust, load_trust
-from governance.act_epochs import Epoch, parse_journal
 from tests.df import live_stand
 from tests.df.fake_github import FakeGitHub
+from tests.df.gh_release import install_gh
 from tests.df.live_stand import (
     EXIT_INFRA,
     GUARD,
@@ -128,7 +141,9 @@ from tests.df.root_world import (
     current_id,
     infra,
 )
-from tests.df.test_root_gh_shared_profile import _install_gh as install_gh
+
+if TYPE_CHECKING:
+    from governance.act_epochs import Epoch
 
 HISTORY_FILE = "history-token"
 PAT_FILE = "perimeter-pat"
@@ -141,6 +156,15 @@ JOURNAL_CHANGES = 5
 MEASURE_PREFIX = "measure/"
 MEASURE_FILE = "cold-measure.json"
 MEASURE_SCHEMA = "df/stage3-cold-measure/v1"
+#: What the measured pass is and is not (named in every record).
+MEASURE_NOTES = (
+    "маршрут trust-status (op: trust без истории политики по эпохам: маршрут "
+    "merge её добавляет, его покрывает запас 2× DEADLINE_v2); холодный путь "
+    "нового корня, а не смены admin_digest (тот же полный проход §6.1); якоря "
+    "новых эпох — SHA df-trust, не коммиты активации approval-policy; потолок "
+    "прохода — DEADLINE проверяющего 150 с: дольше — unavailable, m_seconds "
+    "null, запасной вариант выбирает владелец"
+)
 #: Seconds between the write calls that create content (GitHub's secondary
 #: rate limit on content creation).
 WRITE_PERIOD = 1.0
@@ -398,6 +422,8 @@ def journal_steps(links: int, changes: int) -> frozenset[int]:
 def next_journal(epochs: Sequence[Epoch], anchor: str, at: str) -> tuple[Epoch, ...]:
     """The one allowed transition (`act_epochs.check_transition`): close the
     last open epoch at `anchor`, add the next one anchored there."""
+    from governance.act_epochs import Epoch  # the governance group, lazily
+
     closed = replace(
         epochs[-1],
         last_confirmed=anchor,
@@ -535,6 +561,9 @@ class ColdMeasure:
     trust_status_seconds: float
     requests: int | None
     measured_at: str
+    route: str = "trust-status"
+    cold: str = "new_root"
+    notes: str = ""
 
     @property
     def m_seconds(self) -> float | None:
@@ -566,6 +595,9 @@ _MEASURE_TYPES: Mapping[str, tuple[type, ...]] = {
     "trust_status_seconds": (float, int),
     "requests": (int, type(None)),
     "measured_at": (str,),
+    "route": (str,),
+    "cold": (str,),
+    "notes": (str,),
 }
 
 
@@ -659,6 +691,8 @@ def _secret(path: Path) -> str:
     except OSError as exc:
         infra(f"секрет {path.name}: {type(exc).__name__}")
         raise
+    if not value:
+        infra(f"секрет {path.name} пуст")
     GUARD.add(value)
     return value
 
@@ -718,6 +752,8 @@ class TrustContext:
     steps: frozenset[int] = frozenset()
     created: bool = False
     admin_digest: str = ""
+    t5_findings: frozenset[tuple[str | None, str | None]] = frozenset()
+    t5_requests: int | None = None
 
     @property
     def history(self) -> Transport:
@@ -963,7 +999,19 @@ def row_request_table(st: Stand) -> dict[str, object]:
     st.record("t2-request-table.json", found)
     bad = {str(r["key"]): r["problem"] for r in rows if r.get("problem")}
     expect(bad == {}, f"таблица запросов: {bad}")
+    problem = human_calls_problem(ctx.calls)
+    if problem is not None:
+        return not_verified(problem)
     return {"rows": len(rows), "human_calls": len(calls)}
+
+
+def human_calls_problem(calls: Sequence[tuple[str, int | None]]) -> str | None:
+    """Spec 6.2: a call of the human's check that was not `200` is «не
+    проверено», never «ок»; no call at all verified nothing."""
+    if not calls:
+        return "вызовов проверки периметра человеком нет"
+    missed = [[path, status] for path, status in calls if status != 200]
+    return f"вызовы человека не 200: {missed}" if missed else None
 
 
 # ---------- Т3 trust-status, Т4 App on a trust repo ----------
@@ -1050,12 +1098,12 @@ class TrustWriter:
     ref `measure/<tag>` (`ref_path`)."""
 
     def __init__(self, token: str, full_name: str, tag: str) -> None:
-        self._token = token
+        self.token = token
         self.full_name = full_name
         self.tag = tag
 
     def call(self, method: str, path: str, body: object | None = None) -> object:
-        return github.call(method, path, self._token, body)[1]
+        return github.call(method, path, self.token, body)[1]
 
     def obj(self, kind: str, body: object) -> str:
         """`POST /git/<kind>`; the new object's sha."""
@@ -1096,6 +1144,8 @@ def tree_of(transport: Transport, full_name: str, sha: str) -> str:
 
 
 def journal_at(transport: Transport, full_name: str, sha: str) -> tuple[Epoch, ...]:
+    from governance.act_epochs import parse_journal  # the governance group
+
     status, body = get(transport, f"repos/{full_name}/contents/epochs.yaml?ref={sha}")
     content = body.get("content") if isinstance(body, dict) else None
     if status != 200 or not isinstance(content, str):
@@ -1143,6 +1193,53 @@ def wait_ref(st: Stand, full_name: str, branch: str, sha: str) -> None:
         time.sleep(POLL)
 
 
+REQUIRED_TRUSTED_RULES = frozenset({"pull_request", "non_fast_forward"})
+
+
+def scope_problems(
+    policy: tuple[int | None, object], rules: tuple[int | None, object]
+) -> list[str]:
+    """The write token's scope (module doc): `(status, body)` of its own
+    `GET /repositories/{policy_id}` and of the trusted branch's rules."""
+    problems: list[str] = []
+    status, body = policy
+    perms = body.get("permissions") if isinstance(body, dict) else None
+    push = perms.get("push") if isinstance(perms, dict) else None
+    if status != 200 or push is not False:
+        problems.append(f"токен записи: approval-policy push={push!r} (HTTP {status})")
+    status, body = rules
+    types = (
+        {r.get("type") for r in body if isinstance(r, dict)}
+        if isinstance(body, list)
+        else set()
+    )
+    missing = sorted(REQUIRED_TRUSTED_RULES - types)
+    if status != 200 or missing:
+        problems.append(f"доверенная ветка: нет правил {missing} (HTTP {status})")
+    return problems
+
+
+def write_scope(st: Stand, w: TrustWriter) -> list[str]:
+    """`scope_problems` read live, recorded before any write."""
+    ctx = ctx_of(st)
+    b = ctx.bound()
+    token = history.history_transport(w.token)
+    policy = get(token, f"repositories/{ctx.args.policy_repo_id}")
+    branch = quote(b.df_trust_branch, safe="")
+    rules = get(ctx.history, f"repos/{b.df_trust_full_name}/rules/branches/{branch}")
+    problems = scope_problems(policy, rules)
+    st.record(
+        "t5-write-scope.json",
+        {
+            "policy_status": policy[0],
+            "rules_status": rules[0],
+            "rules": rules[1],
+            "problems": problems,
+        },
+    )
+    return problems
+
+
 def row_cold_measure(st: Stand) -> dict[str, object]:
     """Т5 (module doc): the pass completes when `trust-status` answers with
     the tip as its snapshot and the journal's last epoch; its findings
@@ -1151,6 +1248,9 @@ def row_cold_measure(st: Stand) -> dict[str, object]:
     w = writer_of(st)
     if w is None:
         return not_verified(f"нет {WRITE_FILE}: ветку-замер записать нечем")
+    scope = write_scope(st, w)
+    if scope:
+        return not_verified(f"область токена записи не доказана: {scope}")
     tip, last = build_measure(st, w)
     branch = measure_branch(ctx.args.tag)
     wait_ref(st, w.full_name, branch, tip)
@@ -1182,15 +1282,20 @@ def row_cold_measure(st: Stand) -> dict[str, object]:
         trust_status_seconds=t.seconds,
         requests=t.requests,
         measured_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        notes=MEASURE_NOTES,
     )
+    ctx.t5_findings = kinds_of(result.findings)
+    ctx.t5_requests = t.requests
     st.record(MEASURE_FILE, result.to_json())
     expect(completed, f"холодный проход не завершён: {status}")
     return {"m_seconds": result.m_seconds, "requests": t.requests}
 
 
 def row_rewritten(st: Stand) -> dict[str, object]:
-    """Т6 (module doc): `not_descendant` on the rewound snapshot, read by a
-    cold pass (when the count is known: at least the target's links)."""
+    """Т6 (module doc): `not_descendant@df-trust` on the rewound snapshot, a
+    finding Т5 did not have (Т5's `ruleset_missing` already keeps the root
+    from `clear`). The request counts of both passes are evidence only: an
+    upper bound proves no lower one."""
     ctx = ctx_of(st)
     w = writer_of(st)
     if w is None:
@@ -1208,20 +1313,38 @@ def row_rewritten(st: Stand) -> dict[str, object]:
         "seconds": t.seconds,
         "op_trust_seconds": t.op_trust,
         "requests": t.requests,
+        "t5_requests": ctx.t5_requests,
         **status_record(t.status),
     }
     st.record("t6-rewritten.json", found)
     expect(isinstance(t.status, TrustStatus), f"trust-status: {found}")
     assert isinstance(t.status, TrustStatus)
-    kinds = {(f.get("kind"), f.get("role")) for f in t.status.findings}
-    expect(("not_descendant", "df-trust") in kinds, f"нет not_descendant: {found}")
+    problem = rewritten_problem(ctx.t5_findings, kinds_of(t.status.findings))
+    expect(problem is None, f"{problem}: {found}")
     expect(t.status.snapshot_sha == target, f"снимок не {target}: {found}")
-    expect(t.status.state != "clear", f"clear при переписанной истории: {found}")
-    expect(
-        t.requests is None or t.requests >= links,
-        f"запросов {t.requests} < {links} звеньев: проход не холодный",
-    )
     return {"finding": "not_descendant", "requests": t.requests}
+
+
+NOT_DESCENDANT = ("not_descendant", "df-trust")
+
+
+def kinds_of(
+    findings: Sequence[Mapping[str, str]],
+) -> frozenset[tuple[str | None, str | None]]:
+    """`(kind, role)` of each finding."""
+    return frozenset((f.get("kind"), f.get("role")) for f in findings)
+
+
+def rewritten_problem(
+    before: frozenset[tuple[str | None, str | None]],
+    after: frozenset[tuple[str | None, str | None]],
+) -> str | None:
+    """Т6's verdict: `not_descendant@df-trust` now, and not already at Т5."""
+    if NOT_DESCENDANT not in after:
+        return "нет not_descendant@df-trust"
+    if NOT_DESCENDANT in before:
+        return "not_descendant@df-trust был уже на Т5: не новая находка"
+    return None
 
 
 def drop_measure(st: Stand) -> dict[str, object]:
@@ -1302,7 +1425,11 @@ def stand_phase(args: TrustArgs) -> int:
                 "provenance": prov.to_json(),
                 "token_type": secrets.token_type,
                 "write_token": trust.write_token is not None,
-                "run_record": {"run_id": st.run_id, "fixture": True},
+                "run_record": {
+                    "run_id": st.run_id,
+                    "root": None if ctx.binding is None else list(ctx.binding.root_id),
+                    "fixture": True,
+                },
                 "rows": results,
                 "tokens_revoked": revoked,
             }
