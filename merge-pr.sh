@@ -565,8 +565,21 @@ case "$live_tip" in
 esac
 # --- Доверенный чекаут обвязки под --authority-override (часть 2) -----------
 # HEAD `$script_dir` обязан быть предком живой верхушки базы: обвязка — версия,
-# уже влитая в базу, а не голова проверяемого PR.
+# уже влитая в базу, а не голова проверяемого PR. База PR выбирается автором
+# PR, поэтому якорь — только ветка по умолчанию репозитория: PR в любую
+# другую ветку (стек, ветка автора) флагом не мержится.
 if [ -n "$authority_override" ]; then
+    if ! _default_branch=$(gh_a api "repos/$slug" --jq '.default_branch' 2>&1); then
+        die 2 "--authority-override: ветка по умолчанию $slug не прочитана \
+($_default_branch) — обход не выполняется"
+    fi
+    case "$_default_branch" in
+        ""|null) die 2 "--authority-override: ветка по умолчанию $slug не \
+получена ('$_default_branch') — обход не выполняется" ;;
+    esac
+    [ "$base_ref" = "$_default_branch" ] || die 2 "--authority-override: база \
+PR '$base_ref' — не ветка по умолчанию '$_default_branch'; обход только для PR \
+в ветку по умолчанию"
     if ! git -C "$script_dir" cat-file -e "$live_tip^{commit}" 2>/dev/null; then
         die 2 "--authority-override: верхушки базы $live_tip нет в чекауте \
 обвязки $script_dir — сделайте git fetch и повторите"
