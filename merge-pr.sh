@@ -38,6 +38,9 @@
 #      человеку». `accept-pr` свой такой гард имеет, но он стоит в контуре,
 #      а обвязка объявлена ЕДИНСТВЕННЫМ путём агентского мержа: без этой
 #      проверки второе утверждение отменяло бы первое на ручном вызове.
+#      ВРЕМЕННО (дизайн darkfactory-config §5.8, D9): оператор вправе снять
+#      ТОЛЬКО этот гвард флагом `--authority-override '<причина>'` — тогда
+#      дифф сверяется с харнесс-путями, и любое совпадение — отказ (D10).
 # Раньше от автомержа candidate/finalize удерживал draft-статус; его сняли,
 # потому что draft нельзя смержить, а мерж здесь — предмет.
 #
@@ -87,7 +90,10 @@
 #     подменённый шаблон меняет глоб, не исполнив ни строчки чужого кода;
 #   * contracts/authority-root/v1/paths.env — перечень защищённых путей;
 #     он и сам authority-root, так что гвард 4 стережёт его собою;
-# Все они перечислены в `_HARNESS_PREFIXES` (governance/accept_pr.py): PR,
+#   * contracts/harness-paths/v1/paths.env — перечень харнесс-путей
+#     (под `--authority-override`); он и в authority-root, и в себе самом;
+# Все они перечислены в `_HARNESS_PREFIXES` (SSOT
+# contracts/harness-paths/v1/paths.env, его читает governance/accept_pr.py): PR,
 # который их трогает, до мержа не доходит вовсе — ни ревью, ни мерж
 # агентом. НЕ приходят из дерева: `.git/config` (origin-URL, откуда
 # выводится slug — не часть worktree), бинарь `gh` (PATH оператора),
@@ -125,7 +131,8 @@ set -eu
 usage() {
     echo "usage: merge-pr.sh <repo> <pr-number>" \
         "[--squash|--merge|--rebase] [--delete-branch]" \
-        "[--expect-head <sha>] [--expect-base <sha>] [--dry-run]" >&2
+        "[--expect-head <sha>] [--expect-base <sha>] [--dry-run]" \
+        "[--authority-override <причина>]" >&2
     echo "  <repo> — имя каталога репо во флоте (например dispatcher)" >&2
     echo "  стратегия — только из этого списка, дефолт --squash;" >&2
     echo "    свободного passthrough в gh нет по построению" >&2
@@ -135,6 +142,9 @@ usage() {
     echo "  --expect-base — база, ОТ КОТОРОЙ вынесен вердикт; расхождение" >&2
     echo "    с живой верхушкой origin/<base> — отказ (см. шапку скрипта)" >&2
     echo "  --dry-run — показать разрешённую команду мержа, не выполняя" >&2
+    echo "  --authority-override — ВРЕМЕННО (D9), только оператору вручную:" >&2
+    echo "    снять гвард authority-root с названной причиной (журнал и" >&2
+    echo "    комментарий PR); харнесс-пути не снимаются (D10)" >&2
     echo "  --print-globs — показать выведённые формы веток и выйти" >&2
 }
 
@@ -229,6 +239,7 @@ dry_run=0
 print_globs=0
 expect_head=""
 expect_base=""
+authority_override=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --squash|--merge|--rebase)
@@ -246,6 +257,21 @@ $strategy и $1"
             [ -n "$2" ] || die 2 "--expect-base передан пустым — вызывающий \
 собирался пинить базу и не смог; пустая строка не «пина нет»"
             expect_base="$2"; shift 2 ;;
+        --authority-override)
+            # ВРЕМЕННЫЙ флаг работы darkfactory-config (§5.8, D9: последний PR
+            # работы его удаляет). Только оператору вручную: `Ops.merge` и
+            # раннер его не передают. Причина обязательна и не пробелы —
+            # обход гварда обязан быть назван (приём --budget-override
+            # review-pr.sh); причина «-…» отвергается: забытая причина съела
+            # бы следующий флаг.
+            [ $# -ge 2 ] || die 2 "--authority-override требует причину"
+            [ -n "$(printf '%s' "$2" | tr -d '[:space:]')" ] \
+                || die 2 "--authority-override требует непустую причину"
+            case "$2" in
+                -*) die 2 "--authority-override: причина не может начинаться \
+с '-' (похоже на флаг: '$2')" ;;
+            esac
+            authority_override="$2"; shift 2 ;;
         --dry-run) dry_run=1; shift ;;
         --print-globs) print_globs=1; shift ;;
         -*) usage; exit 2 ;;
@@ -286,6 +312,15 @@ AUTHORITY_PATHS="${AUTHORITY_PATHS:-\
 $script_dir/contracts/authority-root/v1/paths.env}"
 authority_prefixes=$(ssot_key "$AUTHORITY_PATHS" \
     AUTHORITY_ROOT_PREFIXES "SSOT authority-root путей") || exit $?
+# Харнесс-пути — тот же SSOT, что `_HARNESS_PREFIXES` accept_pr; нужны только
+# под --authority-override (гвард 4 без флага — как был).
+HARNESS_PATHS="${HARNESS_PATHS:-\
+$script_dir/contracts/harness-paths/v1/paths.env}"
+harness_prefixes=""
+if [ -n "$authority_override" ]; then
+    harness_prefixes=$(ssot_key "$HARNESS_PATHS" \
+        HARNESS_PREFIXES "SSOT харнесс-путей") || exit $?
+fi
 
 if [ "$print_globs" -eq 1 ]; then
     # Отладочный зонд для тестов (приём --print-review-cmd из review-pr.sh):
@@ -639,16 +674,37 @@ set -f
 set -- $compare_files
 set +f
 IFS="$_saved_ifs"
+# Под --authority-override (§5.8): сначала харнесс-пути по ВСЕМУ диффу —
+# флаг их не снимает (D10), иначе прямой вызов с флагом обошёл бы гвард,
+# который сегодня держит только `accept-pr`. Затем authority-root совпадения
+# не отказывают, а собираются: они названы в журнале и комментарии PR.
+overridden=""
+for _file in "$@"; do
+    for _prefix in $harness_prefixes; do
+        case "$_file" in
+            "$_prefix"*)
+                die 3 "PR ${slug}#${pr}: дифф трогает харнесс-путь '$_file' — \
+--authority-override его не снимает: такие PR мержит владелец (D10)." ;;
+        esac
+    done
+done
 for _file in "$@"; do
     for _prefix in $authority_prefixes; do
         case "$_file" in
             "$_prefix"*)
-                die 3 "PR ${slug}#${pr}: дифф трогает authority-root путь \
+                [ -n "$authority_override" ] || die 3 "PR ${slug}#${pr}: \
+дифф трогает authority-root путь \
 '$_file' (ADR-ECO-004 I2) — такие изменения мержит только человек, \
-независимо от зелени проверок и вердикта ревью." ;;
+независимо от зелени проверок и вердикта ревью."
+                overridden="$overridden $_file"
+                break ;;
         esac
     done
 done
+if [ -n "$authority_override" ]; then
+    echo "ОБХОД гварда 4 (--authority-override, D9): причина: \
+$authority_override; authority-root пути:${overridden:- (нет)}" >&2
+fi
 
 # --- Пины вызывающего: голова и база ---------------------------------------
 # Вызывающий, который уже вынес вердикт (ревью, гард путей), знает, ОТ ЧЕГО
@@ -749,6 +805,18 @@ if [ "$dry_run" -eq 1 ]; then
     echo "гварды пройдены: ветка '$head_ref', голова $head_oid, \
 $head_note, $base_note, от $login"
     exit 0
+fi
+# След обхода — комментарием в PR ДО мержа: обход без следа не выполняется
+# (не записан — мержа нет). Тем же gh_a, что и мерж.
+if [ -n "$authority_override" ]; then
+    _override_body="merge-pr.sh: гвард authority-root снят оператором \
+(--authority-override, временно, D9). Причина: $authority_override. \
+Пути:${overridden:- (нет)}. Голова: $head_oid."
+    if ! comment_err=$(gh_a pr comment "$pr" --repo "$slug" \
+        --body "$_override_body" 2>&1); then
+        die 2 "PR ${slug}#${pr}: комментарий об обходе не записан \
+($comment_err) — обход без следа не выполняется, мерж не выполняется"
+    fi
 fi
 if ! merge_err=$(gh_a "$@" 2>&1); then
     echo "$merge_err" >&2

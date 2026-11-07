@@ -28,6 +28,9 @@ def test_prefixes_read_from_the_ssot_file() -> None:
         # authority-акт, иначе агент вынес бы путь из-под защиты и следом
         # смержил правку в нём.
         "contracts/authority-root/",
+        # SSOT харнесс-путей: merge-pr.sh читает его из дерева под
+        # --authority-override (дизайн darkfactory-config §5.8, D10).
+        "contracts/harness-paths/",
         # Входы гвардов мержа — по той же причине: PR, меняющий шаблон
         # имён или сам скрипт, обезоруживает обвязку, и агентский мерж
         # такого PR открыл бы дорогу следующему уже без гварда.

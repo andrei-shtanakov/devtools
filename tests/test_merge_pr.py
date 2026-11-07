@@ -1001,6 +1001,182 @@ def test_authority_prefix_match_is_literal(fleet: Fleet) -> None:
     assert len(fleet.merge_calls()) == 1
 
 
+# --- --authority-override: временный обход гварда 4 (дизайн §5.8, D9/D10) ---
+
+HARNESS_SSOT = (
+    Path(__file__).resolve().parent.parent
+    / "contracts"
+    / "harness-paths"
+    / "v1"
+    / "paths.env"
+)
+
+
+def _harness_prefixes() -> list[str]:
+    from governance import ssot_env
+
+    return ssot_env.read_key(HARNESS_SSOT, "HARNESS_PREFIXES", "x").split()
+
+
+def _comment_calls(fleet: Fleet) -> list[str]:
+    return [ln for ln in fleet.calls() if " gh pr comment " in ln]
+
+
+@pytest.mark.parametrize("reason", ["", "   ", "--dry-run"])
+def test_authority_override_requires_reason(fleet: Fleet, reason: str) -> None:
+    """Причина обязательна и непуста; флаг вместо причины — тоже отказ
+    (забытая причина не съедает следующий флаг, как у --budget-override)."""
+    res = fleet.run("--authority-override", reason, GH_STUB_FILES="profiles/a.yaml")
+    assert res.returncode == 2, res.stderr
+    assert "--authority-override" in res.stderr
+    assert fleet.merge_calls() == []
+    assert _comment_calls(fleet) == []
+
+
+def test_authority_override_without_argument_is_2(fleet: Fleet) -> None:
+    res = subprocess.run(
+        ["sh", str(SCRIPT), "demo", "7", "--authority-override"],
+        env=fleet.env(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 2, res.stderr
+    assert fleet.merge_calls() == []
+
+
+def test_authority_override_lifts_guard4(fleet: Fleet) -> None:
+    reason = "darkfactory-config Task 3: контракт acceptance-targets"
+    res = fleet.run(
+        "--authority-override",
+        reason,
+        GH_STUB_FILES="lib/x.ex\ncontracts/acceptance-targets/x.toml",
+    )
+    assert res.returncode == 0, res.stderr
+    assert len(fleet.merge_calls()) == 1
+    assert reason in res.stderr
+    assert "contracts/acceptance-targets/x.toml" in res.stderr
+    comments = _comment_calls(fleet)
+    assert len(comments) == 1
+    assert reason in comments[0]
+    assert "andrei-shtanakov/demo" in comments[0]
+    # Комментарий — от агентского профиля, тем же gh_a, что и мерж.
+    assert f"GH_CONFIG_DIR={fleet.profile_dir} gh pr comment 7" in comments[0]
+    # Комментарий — до мержа: обход без следа в PR не выполняется.
+    calls = fleet.calls()
+    assert calls.index(comments[0]) < calls.index(fleet.merge_calls()[0])
+
+
+def test_authority_override_comment_failure_does_not_merge(fleet: Fleet) -> None:
+    """След обхода в PR обязателен: не записан — мержа нет (fail-closed)."""
+    stub = fleet.stub_bin / "gh"
+    stub.write_text(
+        GH_STUB.replace(
+            'case "$*" in\n',
+            'case "$*" in\n  *"pr comment"*) echo "HTTP 502" >&2; exit 1 ;;\n',
+            1,
+        )
+    )
+    res = fleet.run(
+        "--authority-override",
+        "причина",
+        GH_STUB_FILES="contracts/acceptance-targets/x.toml",
+    )
+    assert res.returncode == 2, res.stderr
+    assert fleet.merge_calls() == []
+
+
+def test_authority_override_dry_run_posts_nothing(fleet: Fleet) -> None:
+    res = fleet.run(
+        "--authority-override",
+        "причина",
+        "--dry-run",
+        GH_STUB_FILES="contracts/acceptance-targets/x.toml",
+    )
+    assert res.returncode == 0, res.stderr
+    assert "причина" in res.stderr
+    assert fleet.merge_calls() == []
+    assert _comment_calls(fleet) == []
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "merge-pr.sh",
+        "contracts/harness-paths/v1/paths.env",
+        "governance/ssot_env.py",
+        "scripts/review/local.sh",
+    ],
+)
+def test_authority_override_refuses_harness_path(fleet: Fleet, path: str) -> None:
+    """D10: харнесс-пути флаг не обходит — такие PR мержит владелец."""
+    res = fleet.run(
+        "--authority-override",
+        "причина",
+        GH_STUB_FILES=f"lib/x.ex\n{path}",
+    )
+    assert res.returncode == 3, res.stderr
+    assert "харнесс-путь" in res.stderr
+    assert path in res.stderr
+    assert "мержит владелец (D10)" in res.stderr
+    assert fleet.merge_calls() == []
+    assert _comment_calls(fleet) == []
+
+
+def test_authority_override_refuses_every_harness_prefix(fleet: Fleet) -> None:
+    """Каждый префикс SSOT-файла держит отказ — перечень читается, а не
+    повторяется литералами в скрипте."""
+    prefixes = _harness_prefixes()
+    assert prefixes
+    for prefix in prefixes:
+        path = f"{prefix}x" if prefix.endswith("/") else prefix
+        res = fleet.run(
+            "--authority-override", "причина", GH_STUB_FILES=f"lib/x.ex\n{path}"
+        )
+        assert res.returncode == 3, (prefix, res.stderr)
+        assert "мержит владелец (D10)" in res.stderr, prefix
+    assert fleet.merge_calls() == []
+
+
+def test_authority_override_missing_harness_ssot_does_not_merge(
+    fleet: Fleet,
+) -> None:
+    res = fleet.run(
+        "--authority-override",
+        "причина",
+        HARNESS_PATHS="/no/such/paths.env",
+        GH_STUB_FILES="contracts/acceptance-targets/x.toml",
+    )
+    assert res.returncode == 2, res.stderr
+    assert fleet.merge_calls() == []
+
+
+def test_authority_override_keeps_human_merge_label(fleet: Fleet) -> None:
+    """Только гвард 4: `human-merge-required` флаг не снимает."""
+    res = fleet.run(
+        "--authority-override",
+        "причина",
+        GH_STUB_LABELS="human-merge-required",
+        GH_STUB_FILES="contracts/acceptance-targets/x.toml",
+    )
+    assert res.returncode == 3, res.stderr
+    assert fleet.merge_calls() == []
+
+
+def test_guard4_unchanged_without_flag(fleet: Fleet) -> None:
+    res = fleet.run(GH_STUB_FILES="contracts/acceptance-targets/x.toml")
+    assert res.returncode == 3, res.stderr
+    assert "authority-root" in res.stderr
+    assert fleet.merge_calls() == []
+    assert _comment_calls(fleet) == []
+
+
+def test_ops_merge_never_passes_authority_override() -> None:
+    """Флаг — только оператору вручную: контур его не передаёт (§5.8)."""
+    ops_src = (SCRIPT.parent / "governance" / "ops.py").read_text(encoding="utf-8")
+    assert "authority-override" not in ops_src
+
+
 def test_diff_is_taken_between_two_pinned_shas(fleet: Fleet) -> None:
     """Состав диффа считается между базой и ПРОВЕРЕННОЙ головой.
 
@@ -1273,6 +1449,8 @@ def test_shell_reads_authority_ssot_and_hardcodes_nothing() -> None:
     own = {
         "contracts/authority-root/",  # SSOT, который скрипт читает
         "contracts/approval-branches/",  # SSOT имён, который он читает
+        # SSOT харнесс-путей, который он читает под --authority-override (§5.8).
+        "contracts/harness-paths/",
         "merge-pr.sh",  # он сам: usage, шапка, диагностика
         # Подключаемые модули — собственные входы обвязки (`. "$script_dir/…"`),
         # сами authority-root и харнесс-пути (blocker ревью PR #344).
