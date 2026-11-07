@@ -180,13 +180,13 @@ def test_no_owner_literals(rel: str) -> None:
 
 
 def test_act_premerge_config_failure_refuses(monkeypatch, tmp_path, capsys) -> None:
-    """Нет профиля в окружении и конфиг не читается — отказ 3 с именем файла,
-    не трассировка (повтор без правки конфига не лечит)."""
+    """Нет профиля в окружении и конфиг не читается — код 2 (конфигурация, как
+    у скриптов) с именем файла, не трассировка и не отказ предпроверки 3."""
     pytest.importorskip("steward")
     from governance import act_premerge
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "нет"))
     argv = ["--repo", "o/p", "--pr", "7", "--head-ref", "b", "--head", "h"]
     argv += ["--merge-profile", "/x/m", "--merger", "a", "--merger-type", "User"]
-    assert act_premerge.main(argv) == act_premerge.EXIT_REFUSED
+    assert act_premerge.main(argv) == act_premerge.EXIT_UNSET == 2
     assert "config.toml" in capsys.readouterr().err

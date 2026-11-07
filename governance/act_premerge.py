@@ -147,11 +147,12 @@ def main(argv: Sequence[str] | None = None, deps: PremergeDeps | None = None) ->
         try:
             deps = real_deps(args)
         except df_config.ConfigError as exc:
-            # Конфиг установки битый: повтор без правки конфига не лечит — 3
-            # (как argparse выше). Обычно до этого отбивает merge-pr.sh кодом 2:
-            # он сам читает конфиг и передаёт профиль окружением.
+            # Конфиг установки битый — тот же код 2 (конфигурация), что у
+            # скриптов, а не 3 («предпроверка отказала»). merge-pr.sh передаёт
+            # профиль мержа аргументом `--merge-profile` и REVIEW_GH_CONFIG_DIR
+            # не экспортирует: профиль агента здесь — env, иначе конфиг.
             print(f"act_premerge: {exc}", file=sys.stderr)
-            return EXIT_REFUSED
+            return EXIT_UNSET
     code, reason = decide(args, deps)
     if code != EXIT_OK:
         print(f"act_premerge: {reason}", file=sys.stderr)

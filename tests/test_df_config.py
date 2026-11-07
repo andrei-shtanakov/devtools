@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -273,6 +274,17 @@ def test_strict_same_gh_dir_for_both_accounts_refused(tmp_path: Path) -> None:
     assert "accounts.agent_gh_config_dir" in msg
     cfg = _load_text(tmp_path, text.replace('mode = "strict"', 'mode = "test"'))
     assert cfg.accounts.human_gh_config_dir == cfg.accounts.agent_gh_config_dir
+
+
+def test_strict_same_login_for_both_accounts_refused(tmp_path: Path) -> None:
+    """Одна учётка на обе роли стёрла бы различитель merged_by agent/human;
+    в test — допустимо (§5.3 п.1)."""
+    text = re.sub(r'(?m)^agent = ".*"$', 'agent = "same-login"', STRICT)
+    text = re.sub(r'(?m)^human = ".*"$', 'human = "same-login"', text)
+    msg = _refused(tmp_path, text)
+    assert "accounts.agent" in msg and "accounts.human" in msg
+    cfg = _load_text(tmp_path, text.replace('mode = "strict"', 'mode = "test"'))
+    assert cfg.accounts.agent == cfg.accounts.human == "same-login"
 
 
 def test_secret_dirs_single_source() -> None:

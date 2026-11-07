@@ -181,6 +181,13 @@ class _Parser:
                 "в strict совпадает с accounts.agent_gh_config_dir — "
                 "у человека и агента профили gh обязаны различаться",
             )
+        if strict and accounts.agent == accounts.human:
+            # Одна учётка на обе роли стёрла бы тот же различитель merged_by.
+            raise self.fail(
+                "accounts.agent",
+                "в strict совпадает с accounts.human — "
+                "учётки человека и агента обязаны различаться",
+            )
         harness = self.table(data, "harness")
         app = self.table(data, "app") if "app" in data else None
         return DfConfig(
