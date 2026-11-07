@@ -860,3 +860,30 @@ def test_root_review_pr_sh_is_harness_too(capsys) -> None:
     assert not any(c[0] in ("merge", "review") for c in ops.calls)
     assert ("restore", "master") in ops.calls
     assert "harness" in capsys.readouterr().out
+
+
+def test_harness_prefixes_from_ssot() -> None:
+    """Перечень харнесс-путей — SSOT `contracts/harness-paths/v1/paths.env`.
+
+    Его же читает `merge-pr.sh` под `--authority-override` (дизайн
+    darkfactory-config §5.8, D10): второе определение в shell разошлось бы с
+    кортежем молча. Атрибут `_HARNESS_PREFIXES` сохранён — его читает
+    `tests/harness_trust.py`.
+    """
+    from pathlib import Path
+
+    from governance import ssot_env
+
+    ssot = (
+        Path(accept_pr.__file__).resolve().parent.parent
+        / "contracts"
+        / "harness-paths"
+        / "v1"
+        / "paths.env"
+    )
+    parsed = tuple(ssot_env.read_key(ssot, "HARNESS_PREFIXES", "x").split())
+    assert accept_pr._HARNESS_PREFIXES == parsed
+    assert isinstance(accept_pr._HARNESS_PREFIXES, tuple)
+    # Файл, который читает merge-pr.sh, защищён сам собою (тот же класс, что
+    # contracts/authority-root/).
+    assert "contracts/harness-paths/" in parsed
