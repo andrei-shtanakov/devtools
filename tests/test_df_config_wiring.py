@@ -79,11 +79,56 @@ def test_policy_source_test_mode_without_policy_table_is_ssot(
 
 
 def test_policy_source_config_failure_is_runtime_error(monkeypatch, tmp_path):
-    """Битый конфиг — тот же RuntimeError, что и битый SSOT-файл: вызывающие
-    ловят его, ConfigError ушёл бы мимо."""
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "нет"))
+    """Конфиг есть, но битый — тот же RuntimeError, что и битый SSOT-файл:
+    вызывающие ловят его, ConfigError ушёл бы мимо."""
+    path = tmp_path / "darkfactory" / "config.toml"
+    path.parent.mkdir(parents=True)
+    path.write_text("schema = 1\n", encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     with pytest.raises(RuntimeError, match="config.toml"):
         policy_rule.policy_source()
+
+
+@pytest.mark.no_df_config
+def test_policy_source_without_config_file_is_ssot() -> None:
+    """Файла конфига нет (раннер CI) — нет и `[policy]`: источник — SSOT (F1)."""
+    assert policy_rule.policy_source() == SSOT
+
+
+@pytest.mark.no_df_config
+def test_agent_identity_helpers_env_first_then_config(monkeypatch, tmp_path) -> None:
+    """`df_config.agent_login`/`agent_gh_config_dir`: env, иначе конфиг (F4)."""
+    from governance import df_config
+
+    with pytest.raises(df_config.ConfigError):
+        df_config.agent_login()
+    with pytest.raises(df_config.ConfigError):
+        df_config.agent_gh_config_dir()
+    env = {"REVIEW_LOGIN": "bot-e", "REVIEW_GH_CONFIG_DIR": "/x/r"}
+    assert df_config.agent_login(env) == "bot-e"
+    assert df_config.agent_gh_config_dir(env) == Path("/x/r")
+    _use_config(monkeypatch, tmp_path, agent="bot-c", agent_gh_config_dir=tmp_path)
+    assert df_config.agent_login() == "bot-c"
+    assert df_config.agent_gh_config_dir() == tmp_path
+    empty = {"REVIEW_LOGIN": "", "REVIEW_GH_CONFIG_DIR": "", **write_config(tmp_path)}
+    assert df_config.agent_login(empty) == "ai-prosto"
+
+
+@pytest.mark.no_df_config
+def test_act_status_without_config_is_named_refusal(tmp_path: Path) -> None:
+    """Нет профиля в env и нет конфига — `live_policy` даёт названный отказ, а
+    не трассировку из `real_deps` (F3)."""
+    pytest.importorskip("steward")
+    from governance import act_status
+    from governance.act_time import Unavailable
+
+    state = SimpleNamespace(
+        repo_slug="o/p", ws_id="w", target_dir=str(tmp_path), run_id="r"
+    )
+    deps = act_status.real_deps(state)  # type: ignore[arg-type]
+    live = act_status.live_policy(state, deps)  # type: ignore[arg-type]
+    assert isinstance(live, Unavailable)
+    assert live.reason.startswith("конфиг DarkFactory: ")
 
 
 def _premerge_creds(env: dict[str, str]) -> list[tuple[str, Path | None]]:

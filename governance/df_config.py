@@ -110,6 +110,22 @@ def load(env: Mapping[str, str] = os.environ) -> DfConfig:
     return _Parser(path).parse(data)
 
 
+def agent_gh_config_dir(env: Mapping[str, str] | None = None) -> Path:
+    """Профиль gh агента: env `REVIEW_GH_CONFIG_DIR`, иначе
+    `accounts.agent_gh_config_dir` (порядок `review-pr.sh`; одно правило для
+    `ops` и `act_*`). Пустое значение env — как отсутствие."""
+    env = os.environ if env is None else env
+    raw = env.get("REVIEW_GH_CONFIG_DIR")
+    return Path(raw) if raw else load(env).accounts.agent_gh_config_dir
+
+
+def agent_login(env: Mapping[str, str] | None = None) -> str:
+    """Учётка агента: env `REVIEW_LOGIN`, иначе `accounts.agent` (порядок
+    `review-pr.sh`). Пустое значение env — как отсутствие."""
+    env = os.environ if env is None else env
+    return env.get("REVIEW_LOGIN") or load(env).accounts.agent
+
+
 def _read(path: Path) -> dict[str, object]:
     try:
         text = path.read_text(encoding="utf-8")

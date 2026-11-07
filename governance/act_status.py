@@ -101,7 +101,8 @@ class Deps:
     gh: Any
     now: Any  # () -> datetime
     sleep: Any  # (float) -> None
-    settings: ActSettings | Unavailable | None  # Unavailable — act.toml не читается
+    #: Unavailable — не читаются act.toml или config.toml установки
+    settings: ActSettings | Unavailable | None
 
 
 def real_deps(state: RunState, env: Mapping[str, str] | None = None) -> Deps:
@@ -111,11 +112,21 @@ def real_deps(state: RunState, env: Mapping[str, str] | None = None) -> Deps:
     DarkFactory (`df_config`)."""
     env = dict(os.environ) if env is None else env
     home = Path.home()
-    agent = (
-        Path(env["REVIEW_GH_CONFIG_DIR"])
-        if env.get("REVIEW_GH_CONFIG_DIR")
-        else df_config.load(env).accounts.agent_gh_config_dir
-    )
+    try:
+        agent = df_config.agent_gh_config_dir(env)
+    except df_config.ConfigError as exc:
+        # Названный отказ конфигурации тем же каналом, что битый act.toml:
+        # `live_policy` отказывает первым, до транспорта (творить нечем).
+        return Deps(
+            readers=act_trust.default_readers(),
+            binding=None,
+            journal=None,
+            creds=(),
+            gh=None,
+            now=lambda: datetime.now(UTC).replace(microsecond=0),
+            sleep=time.sleep,
+            settings=Unavailable(f"конфиг DarkFactory: {exc}"),
+        )
     merge = Path(env["MERGE_GH_CONFIG_DIR"]) if env.get("MERGE_GH_CONFIG_DIR") else None
     state_home = Path(env.get("XDG_STATE_HOME") or home / ".local" / "state")
 

@@ -884,6 +884,7 @@ def run_probe(
     стенд и внешние образцы в `<call>` (агенту не пишется), приманку
     `~/.config/ai-prosto/.sandbox-bait`. Следы убираются при любом исходе.
     """
+    probes = keychain_probes()  # до побочных эффектов: ConfigError — без следов
     safe_io.ensure_dirs(targets.target_dir, targets.bundle_dir)
     safe_io.publish(call.root, "profile.sb", profile.encode())
     profile_path = call.root / "profile.sb"
@@ -892,7 +893,6 @@ def run_probe(
         f"dev.devtools.sandbox-probe.{uuid.uuid4().hex}",
     )
     bait = targets.home / BAIT
-    probes = keychain_probes()
     canary = f"{KEYCHAIN_CANARY}-{uuid.uuid4().hex}"
     app_id = labels[0] + ".app"
     sentinels: dict[str, str] = {}

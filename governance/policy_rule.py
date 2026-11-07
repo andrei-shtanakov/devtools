@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from governance import df_config, ssot_env
@@ -42,13 +43,16 @@ def policy_source() -> tuple[str, str, str]:
     Режим конфига доверие не выбирает: источник — всегда SSOT под
     authority-root. `[policy]` конфига DarkFactory (`df_config`, читается при
     каждом вызове), если задан, обязан совпасть с SSOT — расхождение есть
-    отказ, а не выбор стороны. Битый конфиг или SSOT — тот же RuntimeError,
-    что ловят вызывающие."""
+    отказ, а не выбор стороны. Файла конфига нет — сверять нечего (гейт CI).
+    Конфиг есть, но битый, или битый SSOT — тот же RuntimeError, что ловят
+    вызывающие."""
+    ssot = _ssot_source()
+    if not df_config.config_path(os.environ).exists():
+        return ssot  # конфига нет — нет и `[policy]`, сверять нечего
     try:
         cfg = df_config.load()
     except df_config.ConfigError as exc:
         raise RuntimeError(f"источник политики подписи: {exc}") from exc
-    ssot = _ssot_source()
     if cfg.policy is not None:
         configured = (cfg.policy.repo, cfg.policy.ref, cfg.policy.path)
         if configured != ssot:

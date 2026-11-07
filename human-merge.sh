@@ -125,22 +125,31 @@ slug="${slug%.git}"
 # Координаты — SSOT contracts/approval-policy-source/v1/source.env под
 # authority-root, в любом режиме: конфиг домашнего каталога источник не
 # перенаправляет. `[policy]` конфига DarkFactory, если задан, обязан совпасть
-# (иначе отказ 2); в test его может не быть — тогда сверять нечего (в strict
-# отсутствие отбивает сам загрузчик). Правило — как в governance/policy_rule.py.
+# (иначе отказ 2); в test его может не быть, как и самого файла конфига, —
+# тогда сверять нечего (в strict отсутствие `[policy]` отбивает загрузчик).
+# Правило — как в governance/policy_rule.py.
 src="$script_dir/contracts/approval-policy-source/v1/source.env"
 p_repo=$(ssot_key "$src" APPROVAL_POLICY_REPO "SSOT источника политики") || exit $?
 p_ref=$(ssot_key "$src" APPROVAL_POLICY_REF "SSOT источника политики") || exit $?
 p_path=$(ssot_key "$src" APPROVAL_POLICY_PATH "SSOT источника политики") || exit $?
-df_mode=$(df_cfg mode) || exit $?
-if [ "$df_mode" = "test" ] && ! df_cfg policy.repo >/dev/null 2>&1; then
-    :
-else
-    c_repo=$(df_cfg policy.repo) || exit $?
-    c_ref=$(df_cfg policy.ref) || exit $?
-    c_path=$(df_cfg policy.path) || exit $?
-    [ "$c_repo|$c_ref|$c_path" = "$p_repo|$p_ref|$p_path" ] || die 2 "config \
+# Файла конфига нет — нет и `[policy]`, сверять нечего (путь — правило
+# `act_settings.config_home`: только абсолютный XDG_CONFIG_HOME, иначе ~/.config).
+case "${XDG_CONFIG_HOME:-}" in
+    /*) df_conf_file="$XDG_CONFIG_HOME/darkfactory/config.toml" ;;
+    *)  df_conf_file="$HOME/.config/darkfactory/config.toml" ;;
+esac
+if [ -e "$df_conf_file" ]; then
+    df_mode=$(df_cfg mode) || exit $?
+    if [ "$df_mode" = "test" ] && ! df_cfg policy.repo >/dev/null 2>&1; then
+        :
+    else
+        c_repo=$(df_cfg policy.repo) || exit $?
+        c_ref=$(df_cfg policy.ref) || exit $?
+        c_path=$(df_cfg policy.path) || exit $?
+        [ "$c_repo|$c_ref|$c_path" = "$p_repo|$p_ref|$p_path" ] || die 2 "config \
 [policy] расходится с authority-root SSOT: конфиг $c_repo@$c_ref:$c_path, \
 $src $p_repo@$p_ref:$p_path"
+    fi
 fi
 p_owner="${p_repo%%/*}"; p_name="${p_repo#*/}"
 

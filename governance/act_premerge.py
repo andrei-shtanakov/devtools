@@ -103,11 +103,7 @@ def real_deps(
     конфига DarkFactory (`df_config`); битый конфиг — `ConfigError`."""
     env = dict(os.environ) if env is None else env
     home = Path.home()
-    agent = (
-        Path(env["REVIEW_GH_CONFIG_DIR"])
-        if env.get("REVIEW_GH_CONFIG_DIR")
-        else df_config.load(env).accounts.agent_gh_config_dir
-    )
+    agent = df_config.agent_gh_config_dir(env)
     binding = act_trust.load_binding()
     journal: Any = Unavailable("нет привязки")
     if isinstance(binding, act_trust.Binding):
@@ -151,7 +147,9 @@ def main(argv: Sequence[str] | None = None, deps: PremergeDeps | None = None) ->
         try:
             deps = real_deps(args)
         except df_config.ConfigError as exc:
-            # Конфиг установки битый: повтор без правки конфига не лечит — 3.
+            # Конфиг установки битый: повтор без правки конфига не лечит — 3
+            # (как argparse выше). Обычно до этого отбивает merge-pr.sh кодом 2:
+            # он сам читает конфиг и передаёт профиль окружением.
             print(f"act_premerge: {exc}", file=sys.stderr)
             return EXIT_REFUSED
     code, reason = decide(args, deps)

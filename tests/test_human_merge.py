@@ -187,6 +187,21 @@ def test_strict_config_policy_cannot_redirect_source(fleet: Fleet) -> None:
     assert fleet.calls() == []
 
 
+def test_no_config_file_skips_policy_cross_check(fleet: Fleet) -> None:
+    """Файла конфига нет, профили — env: сверять `[policy]` не с чем, источник —
+    SSOT source.env (F1)."""
+    (fleet.xdg / "darkfactory" / "config.toml").unlink()
+    res = fleet.run(
+        HUMAN_GH_CONFIG_DIR=str(fleet.human_profile),
+        REVIEW_GH_CONFIG_DIR=str(fleet.agent_profile),
+    )
+    assert res.returncode == 0, res.stderr
+    graphql = [ln for ln in fleet.calls() if "api graphql" in ln]
+    assert graphql and all(
+        "-F o=andrei-shtanakov -F n=approval-policy " in ln for ln in graphql
+    ), graphql
+
+
 def test_agent_profile_from_config_is_refused(fleet: Fleet) -> None:
     """Профиль человека, совпавший с агентским из конфига, — отказ до сети."""
     res = fleet.run(HUMAN_GH_CONFIG_DIR=str(fleet.agent_profile))
