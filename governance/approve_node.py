@@ -48,7 +48,7 @@ from typing import TYPE_CHECKING, Any
 
 from governance import approval_facts as af
 from governance import approval_ledger as al
-from governance import brief_input, bundle_dag, bundle_inputs, pr_checks
+from governance import brief_input, bundle_dag, bundle_inputs, df_config, pr_checks
 from governance import node_approval as na
 from governance.act_check import LegacyAccepted
 from governance.act_decision import Rejected
@@ -76,7 +76,8 @@ def finalize_merge_policy(target_dir: str) -> tuple[str, str]:
     репо (`Мерж: человек` в CLAUDE.md цели); объявление прогона
     `merge_authority` сюда НЕ входит — оно про мержи результата прогона
     (S7), и `make spec-loop` объявляет `human` жёстко. Safety — срез
-    steward-политики: агентский мерж разрешён и ai-prosto — агент; любой
+    steward-политики: агентский мерж разрешён и учётка агента (env
+    `REVIEW_LOGIN`, иначе `accounts.agent` конфига) — агент; любой
     `unknown` читается как human (fail-closed). Ревью-вердикт не
     требуется: конверт — три поля, и приёмка заявки сверяет их байт в байт.
     """
@@ -87,7 +88,8 @@ def finalize_merge_policy(target_dir: str) -> tuple[str, str]:
     if safety.agent_merge_allowed is not True:
         return "human", "safety steward: агентский мерж не разрешён/unknown"
     if safety.actor_class != "agent":
-        return "human", f"safety steward: ai-prosto — {safety.actor_class}"
+        actor = df_config.agent_login()  # тот же актор, что у load_safety()
+        return "human", f"safety steward: {actor} — {safety.actor_class}"
     return "agent", "ADR-ECO-011 D5: finalize мержит агент"
 
 

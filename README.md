@@ -328,6 +328,8 @@ remediation-issue у уже помеченного родителя). Повто
   `[policy]` конфига, если задан, обязан с ним совпасть.
 - Приоритет: переменные окружения (`REVIEW_LOGIN`, `REVIEW_GH_CONFIG_DIR`, ...)
   перекрывают конфиг.
+- `human-merge.sh` мержит всегда от `accounts.human_gh_config_dir` (его перекрывает
+  `HUMAN_GH_CONFIG_DIR`); выставленный `GH_CONFIG_DIR` оператора не учитывается.
 - Установка на хост (действие владельца, до мержа PR с чтением конфига):
   `mkdir -p ~/.config/darkfactory && cp templates/darkfactory/config.strict.example.toml ~/.config/darkfactory/config.toml`,
   проверка: `python3 -I governance/df_config.py get accounts.agent` печатает `ai-prosto`.
