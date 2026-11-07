@@ -127,5 +127,9 @@ module = "governance/act_app_token.py"
 reason = "загрузка пакета через `importlib.util` вне `sys.path` — приём `act_premerge` (Task 15a, личность App, запуск файлом из merge-pr.sh; сам authority-root)"
 
 [[dynamic_import]]
+module = "governance/df_config.py"
+reason = "загрузка пакета через `importlib.util` вне `sys.path` — приём `brief_merge_check` (загрузчик конфига DarkFactory, запуск файлом `python3 -I` из df_config.sh; сам authority-root)"
+
+[[dynamic_import]]
 module = "governance/discovery_approval.py"
 reason = "`exec(compile(...))` вендор-копии contracts/discovery-approval/v1/ с пином sha256; вне триггеров правила, записано для видимости (сам authority-root)"

@@ -43,7 +43,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SPAWN_SITES = Path("contracts/author-sandbox/v1/spawn-sites.toml")
 
 #: Модули ЗЦ — освобождены от правил 2–3 (они и есть граница).
-ZC_MODULES = ("safe_io", "sandbox", "author_launch")
+ZC_MODULES = ("safe_io", "sandbox", "author_launch", "secret_dirs")
 #: Прочие пути ЗЦ, которые этот тест обязан видеть под защитой (правило 5).
 ZC_FILES = (
     "tests/test_author_sandbox_invariant.py",

@@ -1,0 +1,289 @@
+"""Конфиг DarkFactory: `$XDG_CONFIG_HOME/darkfactory/config.toml` (дизайн §5.1).
+
+Источник учёток, профилей gh, источника политики и корня воркспейса вместо
+зашитых в коде значений владельца. Умолчаний и fallback нет: нет файла, нет
+ключа, неверный тип, неизвестный ключ или `mode`, ключ, обязательный для
+режима, отсутствует — `ConfigError` с названием файла и ключа.
+
+Режимы: `strict` — `[policy]` обязателен, каталоги профилей gh — только из
+перечня, закрытого песочницей авторинга (`governance/secret_dirs.py`); `test` —
+`[policy]` необязателен, ограничения на каталоги нет.
+
+Модуль исполняется скриптами мержа (`df_config.sh` → `python3 -I <этот файл>
+get <ключ>`), поэтому он и его импорты (только stdlib, `act_settings`,
+`secret_dirs`) — под authority-root и харнесс-гвардом; цепочку сверяет
+`tests/harness_trust.py`. `-I` убирает каталог скрипта из `sys.path`: пакет
+`governance` загружается явно по пути (приём `brief_merge_check`). Файл
+читается при каждом `load()`, кэша на импорте нет.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+if __package__ in (None, "") and "governance" not in sys.modules:
+    # Исполнение файлом под `python -I`: пакет — явно по пути, без дерева в
+    # sys.path (подмодули `governance.*` ищутся только в каталоге пакета).
+    import importlib.util
+
+    _pkg_dir = Path(__file__).resolve().parent
+    _spec = importlib.util.spec_from_file_location(
+        "governance",
+        _pkg_dir / "__init__.py",
+        submodule_search_locations=[str(_pkg_dir)],
+    )
+    assert _spec is not None and _spec.loader is not None
+    _pkg = importlib.util.module_from_spec(_spec)
+    sys.modules["governance"] = _pkg
+    _spec.loader.exec_module(_pkg)
+
+import os  # noqa: E402
+import tomllib  # noqa: E402
+from collections.abc import Callable, Mapping  # noqa: E402
+from dataclasses import dataclass  # noqa: E402
+from typing import Literal  # noqa: E402
+
+from governance.act_settings import config_home  # noqa: E402
+from governance.secret_dirs import SECRET_DIRS  # noqa: E402
+
+SCHEMA = "darkfactory-config/v1"
+MODES = ("strict", "test")
+
+_TOP = {"schema", "mode", "accounts", "policy", "workspace", "harness", "app"}
+_TABLES = {
+    "accounts": ("human", "agent", "human_gh_config_dir", "agent_gh_config_dir"),
+    "policy": ("repo", "ref", "path"),
+    "workspace": ("root",),
+    "harness": ("author", "model"),
+    "app": ("id", "key_file"),
+}
+_GH_DIR_KEYS = ("human_gh_config_dir", "agent_gh_config_dir")
+
+
+class ConfigError(Exception):
+    """Конфиг не читается или не проходит проверку — отказ конфигурации."""
+
+
+@dataclass(frozen=True)
+class Accounts:
+    """Учётки человека и агента и каталоги их профилей gh."""
+
+    human: str
+    agent: str
+    human_gh_config_dir: Path
+    agent_gh_config_dir: Path
+
+
+@dataclass(frozen=True)
+class PolicySource:
+    """Координаты политики утверждающих: репо, ref и путь файла в нём."""
+
+    repo: str
+    ref: str
+    path: str
+
+
+@dataclass(frozen=True)
+class DfConfig:
+    """Разобранный и проверенный конфиг DarkFactory."""
+
+    mode: Literal["strict", "test"]
+    accounts: Accounts
+    policy: PolicySource | None
+    workspace_root: Path
+    author_harness: str
+    author_model: str
+    app_id: int | None
+    app_key_file: Path | None
+
+
+def config_path(env: Mapping[str, str]) -> Path:
+    """Путь конфига: `<config_home>/darkfactory/config.toml` (`act_settings`)."""
+    return config_home(env) / "darkfactory" / "config.toml"
+
+
+def load(env: Mapping[str, str] = os.environ) -> DfConfig:
+    """Прочитать и проверить конфиг; любой дефект — `ConfigError`."""
+    path = config_path(env)
+    data = _read(path)
+    return _Parser(path).parse(data)
+
+
+def _read(path: Path) -> dict[str, object]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise ConfigError(f"{path}: файла нет — конфиг DarkFactory обязателен") from exc
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ConfigError(f"{path}: не читается ({exc})") from exc
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"{path}: не разбирается как TOML ({exc})") from exc
+
+
+class _Parser:
+    """Проверка разобранного TOML; каждое сообщение называет файл и ключ."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def fail(self, key: str, why: str) -> ConfigError:
+        return ConfigError(f"{self.path}: {key} — {why}")
+
+    def parse(self, data: dict[str, object]) -> DfConfig:
+        self.unknown(data, _TOP, "")
+        schema = self.string(data, "schema", "schema")
+        if schema != SCHEMA:
+            raise self.fail("schema", f"ожидается {SCHEMA!r}, а не {schema!r}")
+        mode = self.string(data, "mode", "mode")
+        if mode not in MODES:
+            raise self.fail("mode", f"неизвестный режим {mode!r}; {'|'.join(MODES)}")
+        strict = mode == "strict"
+        acc = self.table(data, "accounts")
+        accounts = Accounts(
+            human=self.string(acc, "human", "accounts.human"),
+            agent=self.string(acc, "agent", "accounts.agent"),
+            human_gh_config_dir=self.gh_dir(acc, "human_gh_config_dir", strict),
+            agent_gh_config_dir=self.gh_dir(acc, "agent_gh_config_dir", strict),
+        )
+        harness = self.table(data, "harness")
+        app = self.table(data, "app") if "app" in data else None
+        return DfConfig(
+            mode="strict" if strict else "test",
+            accounts=accounts,
+            policy=self.policy(data, strict),
+            workspace_root=self.path_value(
+                self.table(data, "workspace"), "root", "workspace.root"
+            ),
+            author_harness=self.string(harness, "author", "harness.author"),
+            author_model=self.string(harness, "model", "harness.model"),
+            app_id=None if app is None else self.integer(app, "id", "app.id"),
+            app_key_file=None
+            if app is None
+            else self.path_value(app, "key_file", "app.key_file"),
+        )
+
+    def policy(self, data: dict[str, object], strict: bool) -> PolicySource | None:
+        if "policy" not in data:
+            if strict:
+                raise self.fail("policy", "таблица обязательна в режиме strict")
+            return None
+        pol = self.table(data, "policy")
+        return PolicySource(
+            repo=self.string(pol, "repo", "policy.repo"),
+            ref=self.string(pol, "ref", "policy.ref"),
+            path=self.string(pol, "path", "policy.path"),
+        )
+
+    def unknown(self, data: Mapping[str, object], known: set[str], where: str) -> None:
+        for key in sorted(set(data) - known):
+            raise ConfigError(f"{self.path}: неизвестный ключ {where}{key}")
+
+    def table(self, data: dict[str, object], name: str) -> dict[str, object]:
+        if name not in data:
+            raise self.fail(name, "таблица обязательна")
+        value = data[name]
+        if not isinstance(value, dict):
+            raise self.fail(name, "ожидается таблица")
+        self.unknown(value, set(_TABLES[name]), f"{name}.")
+        return value
+
+    def raw(self, data: Mapping[str, object], key: str, dotted: str) -> object:
+        if key not in data:
+            raise self.fail(dotted, "ключ обязателен")
+        return data[key]
+
+    def string(self, data: Mapping[str, object], key: str, dotted: str) -> str:
+        value = self.raw(data, key, dotted)
+        if not isinstance(value, str) or not value:
+            raise self.fail(dotted, "ожидается непустая строка")
+        return value
+
+    def integer(self, data: Mapping[str, object], key: str, dotted: str) -> int:
+        value = self.raw(data, key, dotted)
+        if type(value) is not int:
+            raise self.fail(dotted, "ожидается целое число")
+        return value
+
+    def path_value(self, data: Mapping[str, object], key: str, dotted: str) -> Path:
+        raw = self.string(data, key, dotted)
+        path = _expand(raw)
+        if not path.is_absolute():
+            raise self.fail(dotted, f"путь {raw!r} не абсолютный (после `~/`)")
+        return path
+
+    def gh_dir(self, acc: Mapping[str, object], key: str, strict: bool) -> Path:
+        dotted = f"accounts.{key}"
+        path = self.path_value(acc, key, dotted)
+        allowed = [Path.home() / rel for rel in SECRET_DIRS]
+        if strict and path not in allowed:
+            names = ", ".join(f"~/{rel}" for rel in SECRET_DIRS)
+            raise self.fail(
+                dotted,
+                f"в strict — только каталог, закрытый песочницей ({names})",
+            )
+        return path
+
+
+def _expand(raw: str) -> Path:
+    """Ведущее `~/` (или `~`) — домашний каталог; прочее — как есть."""
+    if raw == "~":
+        return Path.home()
+    if raw.startswith("~/"):
+        return Path.home() / raw[2:]
+    return Path(raw)
+
+
+def _policy_field(name: str) -> Callable[[DfConfig], str]:
+    def get(cfg: DfConfig) -> str:
+        if cfg.policy is None:
+            raise ConfigError(f"policy.{name} — таблица [policy] не задана")
+        return str(getattr(cfg.policy, name))
+
+    return get
+
+
+_GETTERS: dict[str, Callable[[DfConfig], str]] = {
+    "mode": lambda c: c.mode,
+    "accounts.human": lambda c: c.accounts.human,
+    "accounts.agent": lambda c: c.accounts.agent,
+    "accounts.human_gh_config_dir": lambda c: str(c.accounts.human_gh_config_dir),
+    "accounts.agent_gh_config_dir": lambda c: str(c.accounts.agent_gh_config_dir),
+    "policy.repo": _policy_field("repo"),
+    "policy.ref": _policy_field("ref"),
+    "policy.path": _policy_field("path"),
+    "workspace.root": lambda c: str(c.workspace_root),
+}
+
+
+def get_value(cfg: DfConfig, key: str) -> str:
+    """Значение ключа CLI (`mode`, `accounts.*`, `policy.*`, `workspace.root`)."""
+    getter = _GETTERS.get(key)
+    if getter is None:
+        raise ConfigError(f"{key} — неизвестный ключ CLI; {', '.join(_GETTERS)}")
+    return getter(cfg)
+
+
+def main(argv: list[str], env: Mapping[str, str] = os.environ) -> int:
+    """`get <ключ>` → значение в stdout, 0; ошибка → stderr, 2."""
+    if len(argv) != 2 or argv[0] != "get":
+        print("использование: df_config.py get <ключ>", file=sys.stderr)
+        return 2
+    try:
+        cfg = load(env)
+    except ConfigError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    try:
+        value = get_value(cfg, argv[1])
+    except ConfigError as exc:
+        print(f"{config_path(env)}: {exc}", file=sys.stderr)
+        return 2
+    print(value)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

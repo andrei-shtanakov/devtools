@@ -136,6 +136,9 @@ def test_prefixes_read_from_the_ssot_file() -> None:
         "governance/safe_io",
         "governance/sandbox",
         "governance/author_launch",
+        # Перечень каталогов учёток, закрытых песочницей (единый источник для
+        # песочницы и загрузчика конфига DarkFactory) — модуль ЗЦ.
+        "governance/secret_dirs",
         "tests/test_governance_safe_io",
         "tests/test_governance_sandbox",
         "tests/test_author_sandbox_invariant",
@@ -164,6 +167,10 @@ def test_prefixes_read_from_the_ssot_file() -> None:
         # Дерево предпроверки df вне `act_` (этап 3a, Task 7, ревью D4).
         "governance/bundle_dag",
         "governance/approval_branches",
+        # Загрузчик конфига DarkFactory (дизайн darkfactory-config §5.1, R2):
+        # его исполняют merge-pr.sh/human-merge.sh — харнесс и authority-root.
+        "governance/df_config",
+        "df_config.sh",
     }
 
 
@@ -429,6 +436,10 @@ def test_criteria_close_stays_agent_mergeable() -> None:
 _AUTHOR_SANDBOX_CHAIN = {
     "governance/safe_io": ("governance/safe_io.py", "governance/safe_io"),
     "governance/sandbox": ("governance/sandbox.py", "governance/sandbox"),
+    "governance/secret_dirs": (
+        "governance/secret_dirs.py",
+        "governance/secret_dirs",
+    ),
     "governance/author_launch": (
         "governance/author_launch.py",
         "governance/author_launch",

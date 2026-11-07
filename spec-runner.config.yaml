@@ -78,6 +78,8 @@ harness_files:
   - governance/safe_io
   - governance/sandbox.py
   - governance/sandbox
+  - governance/secret_dirs.py
+  - governance/secret_dirs
   - governance/author_launch.py
   - governance/author_launch
   - tests/test_governance_safe_io.py

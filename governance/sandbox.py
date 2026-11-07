@@ -40,10 +40,12 @@ from typing import Any
 
 from governance import safe_io
 
+#: Каталоги учётных данных оператора, закрытые на чтение (§3); единый источник —
+#: `governance/secret_dirs.py` (его читает и загрузчик конфига DarkFactory).
+from governance.secret_dirs import SECRET_DIRS
+
 #: Подкаталоги вызова — единственные разрешённые агенту корни записи (§11).
 CALL_SUBDIRS = ("stage", "tmp", "claude-config")
-#: Каталоги учётных данных оператора, закрытые на чтение (§3).
-SECRET_DIRS = (".config/review", ".config/gh", ".config/ai-prosto", ".ssh")
 
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
