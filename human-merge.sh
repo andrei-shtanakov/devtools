@@ -4,15 +4,16 @@
 # Человеческий акт (candidate-PR §I12 — всегда; финализирующий и любой PR
 # по human-политике — лейбл `human-merge-required`) не обязан совершаться в
 # браузере: цель DarkFactory — мерж по команде, а не по клику. Команда
-# исполняет мерж ОТ УЧЁТКИ ЧЕЛОВЕКА — профилем оператора (`gh` по
-# умолчанию, либо HUMAN_GH_CONFIG_DIR), НИКОГДА не ~/.config/review:
+# исполняет мерж ОТ УЧЁТКИ ЧЕЛОВЕКА — профилем оператора (HUMAN_GH_CONFIG_DIR,
+# иначе `accounts.human_gh_config_dir` конфига DarkFactory), НИКОГДА не
+# агентским профилем:
 # агентский профиль записал бы человеческий акт агентским, и подпись §I12
 # (merged_by ∈ allowlist) не сложилась бы. Это зеркало merge-pr.sh: тот
 # сверяет, что мержит ai-prosto, этот — что мержит человек из allowlist.
 #
 # Fail-closed: логин обязан входить в политику подписи — файл
-# `policy/approvers.env` репозитория approval-policy (координаты — SSOT
-# contracts/approval-policy-source/v1/source.env), прочитанный по SHA из тела
+# `policy/approvers.env` репозитория approval-policy (координаты — `[policy]`
+# конфига DarkFactory, `policy.repo/ref/path`), прочитанный по SHA из тела
 # candidate-PR (`policy: <repo>@<sha>`; у finalize и прочих PR человеческого
 # мержа пина нет — судится актуальная версия); у candidate актуальная версия обязана совпасть с пином —
 # иначе мерж не создаст подписи и человеческий акт сгорел бы (спека
@@ -48,7 +49,8 @@ usage() {
     echo "usage: human-merge.sh <repo> <pr-number> [--expect-head <sha>]" \
         "[--merge|--squash] [--dry-run]" >&2
     echo "  <repo> — имя каталога репо во флоте; мерж от учётки ОПЕРАТОРА" >&2
-    echo "  (HUMAN_GH_CONFIG_DIR — иной профиль gh; ~/.config/review — отказ)" >&2
+    echo "  (HUMAN_GH_CONFIG_DIR, иначе accounts.human_gh_config_dir конфига" >&2
+    echo "  DarkFactory; агентский профиль — отказ)" >&2
     echo "  логин обязан входить в политику approval-policy (версия — пин из тела PR)" >&2
     echo "  переменная AUTHORIZED_APPROVER_ACCOUNTS больше не читается — выставленная даёт отказ" >&2
     echo "  защиту ветки НЕ обходит (--admin нет): под ruleset'ом с обязательным" >&2
@@ -59,6 +61,7 @@ die() { _code="$1"; shift; echo "$*" >&2; exit "$_code"; }
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
 . "$script_dir/ssot_env.sh"
+. "$script_dir/df_config.sh"
 . "$script_dir/approval_branches.sh"
 FLEET_ROOT="${FLEET_ROOT:-$(dirname "$script_dir")}"
 APPROVAL_PATTERNS="${APPROVAL_PATTERNS:-\
@@ -80,22 +83,25 @@ while [ $# -gt 0 ]; do
 done
 case "$pr" in *[!0-9]*|"") die 2 "номер PR должен быть числом: '$pr'" ;; esac
 
-# Профиль человека: явный HUMAN_GH_CONFIG_DIR либо дефолтный gh оператора.
-# Агентский профиль (`~/.config/review`, он же MERGE_GH_CONFIG_DIR у
-# merge-pr.sh) здесь отказ по построению — сверка логина ниже его не
-# пропустит, но названный явно он отбивается раньше и понятнее.
+# Профиль человека: HUMAN_GH_CONFIG_DIR, иначе `accounts.human_gh_config_dir`
+# конфига DarkFactory (df_config.sh; отказ конфига — код 2). Агентский профиль
+# (тот же порядок, что у merge-pr.sh: MERGE_GH_CONFIG_DIR, REVIEW_GH_CONFIG_DIR,
+# `accounts.agent_gh_config_dir`) здесь отказ по построению — сверка логина
+# ниже его не пропустит, но названный явно он отбивается раньше и понятнее.
 human_profile="${HUMAN_GH_CONFIG_DIR:-}"
-agent_profile="${MERGE_GH_CONFIG_DIR:-$HOME/.config/review}"
-if [ -n "$human_profile" ] && [ "$human_profile" = "$agent_profile" ]; then
-    die 2 "HUMAN_GH_CONFIG_DIR указывает на агентский профиль ($agent_profile) — \
+if [ -z "$human_profile" ]; then
+    human_profile=$(df_cfg accounts.human_gh_config_dir) || exit $?
+fi
+agent_profile="${MERGE_GH_CONFIG_DIR:-${REVIEW_GH_CONFIG_DIR:-}}"
+if [ -z "$agent_profile" ]; then
+    agent_profile=$(df_cfg accounts.agent_gh_config_dir) || exit $?
+fi
+if [ "$human_profile" = "$agent_profile" ]; then
+    die 2 "профиль человека указывает на агентский профиль ($agent_profile) — \
 человеческий мерж от учётки агента невозможен"
 fi
 gh_h() {
-    if [ -n "$human_profile" ]; then
-        GH_CONFIG_DIR="$human_profile" gh "$@"
-    else
-        gh "$@"
-    fi
+    GH_CONFIG_DIR="$human_profile" gh "$@"
 }
 
 repo_dir="$FLEET_ROOT/$repo"
@@ -115,10 +121,11 @@ slug="${slug%.git}"
 # больше не источник: выставленная — отказ, чтобы старое правило не
 # исполнялось молча не так, как задумано.
 [ -z "${AUTHORIZED_APPROVER_ACCOUNTS+x}" ] || die 3 "AUTHORIZED_APPROVER_ACCOUNTS выставлена, но переменная больше не источник политики — источник репозиторий approval-policy; снимите её"
-src="$script_dir/contracts/approval-policy-source/v1/source.env"
-p_repo=$(ssot_key "$src" APPROVAL_POLICY_REPO "SSOT источника политики") || exit $?
-p_ref=$(ssot_key "$src" APPROVAL_POLICY_REF "SSOT источника политики") || exit $?
-p_path=$(ssot_key "$src" APPROVAL_POLICY_PATH "SSOT источника политики") || exit $?
+# Координаты — `[policy]` конфига DarkFactory (не contracts/approval-policy-
+# source/v1/source.env, который devtools больше не читает).
+p_repo=$(df_cfg policy.repo) || exit $?
+p_ref=$(df_cfg policy.ref) || exit $?
+p_path=$(df_cfg policy.path) || exit $?
 p_owner="${p_repo%%/*}"; p_name="${p_repo#*/}"
 
 login=$(gh_h api user --jq .login 2>&1) || die 2 "профиль оператора не отвечает: $login"
@@ -167,20 +174,12 @@ brief_check_failed() {
 brief_pin=""
 case "$head_ref" in
     brief/*)
-        if [ -n "$human_profile" ]; then
-            brief_pin=$(cd "$script_dir" && GH_CONFIG_DIR="$human_profile" \
-                UV_PROJECT_ENVIRONMENT="$brief_check_env" \
-                uv run --frozen --exact --no-config --no-env-file \
-                python -I "$script_dir/governance/brief_merge_check.py" \
-                --repo "$slug" --pr "$pr" --head "$head_oid") \
-                || brief_check_failed $?
-        else
-            brief_pin=$(cd "$script_dir" && UV_PROJECT_ENVIRONMENT="$brief_check_env" \
-                uv run --frozen --exact --no-config --no-env-file \
-                python -I "$script_dir/governance/brief_merge_check.py" \
-                --repo "$slug" --pr "$pr" --head "$head_oid") \
-                || brief_check_failed $?
-        fi
+        brief_pin=$(cd "$script_dir" && GH_CONFIG_DIR="$human_profile" \
+            UV_PROJECT_ENVIRONMENT="$brief_check_env" \
+            uv run --frozen --exact --no-config --no-env-file \
+            python -I "$script_dir/governance/brief_merge_check.py" \
+            --repo "$slug" --pr "$pr" --head "$head_oid") \
+            || brief_check_failed $?
         brief_pin=$(printf '%s\n' "$brief_pin" | tail -n 1)
         case "$brief_pin" in
             *[!0-9a-f]*|"") die 2 "brief-PR ${slug}#${pr}: проверяльщик не вернул пин политики" ;;

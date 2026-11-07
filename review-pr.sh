@@ -9,7 +9,7 @@
 # Эта обвязка добавляет только выбор диапазона PR и публикацию.
 #
 # Публикация — единственное место, где используется отдельный профиль gh
-# (GH_CONFIG_DIR, по умолчанию ~/.config/review, аккаунт ai-prosto):
+# (GH_CONFIG_DIR и аккаунт — accounts.agent* конфига DarkFactory):
 # ревью «мнение» (вариант (а) дизайна) — approve/request-changes видны в PR,
 # но формально мерж не блокируют; авторитетом ревью станет отдельным решением.
 #
@@ -86,12 +86,11 @@ die() {
     exit "$_code"
 }
 
-# Профиль публикации. REVIEW_LOGIN сверяется с фактическим логином профиля:
-# опечатка в GH_CONFIG_DIR молча постила бы ревью от ОСНОВНОГО аккаунта —
-# «независимое ревью» от самого автора PR. Отказ дешевле такого конфуза.
-REVIEW_GH_CONFIG_DIR="${REVIEW_GH_CONFIG_DIR:-$HOME/.config/review}"
-REVIEW_LOGIN="${REVIEW_LOGIN:-ai-prosto}"
-
+# Профиль публикации (REVIEW_GH_CONFIG_DIR/REVIEW_LOGIN — env, иначе конфиг
+# DarkFactory; выставляются перед preflight ниже). REVIEW_LOGIN сверяется с
+# фактическим логином профиля: опечатка в GH_CONFIG_DIR молча постила бы
+# ревью от ОСНОВНОГО аккаунта — «независимое ревью» от самого автора PR.
+# Отказ дешевле такого конфуза.
 gh_r() {
     GH_CONFIG_DIR="$REVIEW_GH_CONFIG_DIR" gh "$@"
 }
@@ -101,6 +100,7 @@ gh_r() {
 # WORKSPACE в Makefile).
 script_dir=$(cd "$(dirname "$0")" && pwd)
 FLEET_ROOT="${FLEET_ROOT:-$(dirname "$script_dir")}"
+. "$script_dir/df_config.sh"
 
 repo=""
 pr=""
@@ -345,6 +345,15 @@ case "$slug" in
     */*) : ;;
     *) die 2 "не удалось разобрать owner/name из origin '$origin_url'" ;;
 esac
+
+# Профиль публикации — env, иначе конфиг DarkFactory (`accounts.agent*`,
+# df_config.sh); зашитых умолчаний нет, отказ конфига — код 2.
+if [ -z "${REVIEW_GH_CONFIG_DIR:-}" ]; then
+    REVIEW_GH_CONFIG_DIR=$(df_cfg accounts.agent_gh_config_dir) || exit $?
+fi
+if [ -z "${REVIEW_LOGIN:-}" ]; then
+    REVIEW_LOGIN=$(df_cfg accounts.agent) || exit $?
+fi
 
 # Preflight профиля — ДО любых обращений к PR: протухший токен должен
 # называться сразу, а не после платного прогона ревьюера.

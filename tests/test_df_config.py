@@ -229,6 +229,11 @@ def test_strict_gh_dir_every_secret_dir_accepted(tmp_path: Path, rel: str) -> No
     text = STRICT.replace(
         'agent_gh_config_dir = "~/.config/review"', f'agent_gh_config_dir = "~/{rel}"'
     )
+    if rel == ".config/gh":  # человеку — иной профиль: совпадение в strict отказ
+        text = text.replace(
+            'human_gh_config_dir = "~/.config/gh"',
+            'human_gh_config_dir = "~/.config/review"',
+        )
     assert _load_text(tmp_path, text).accounts.agent_gh_config_dir == (
         Path.home() / rel
     )
@@ -242,6 +247,32 @@ def test_tilde_expanded_relative_refused(tmp_path: Path) -> None:
     assert "workspace.root" in _refused(tmp_path, text)
     text = STRICT.replace('root = "~/labs/all_ai_orchestrators"', 'root = "~user/x"')
     assert "workspace.root" in _refused(tmp_path, text)
+
+
+@pytest.mark.parametrize("key", ["workspace.root", "accounts.agent_gh_config_dir"])
+def test_tilde_double_slash_refused(tmp_path: Path, key: str) -> None:
+    """`~//x` дал бы `/x` (Path.home() / "/x") — корень вместо домашнего каталога."""
+    old = {
+        "workspace.root": 'root = "~/labs/all_ai_orchestrators"',
+        "accounts.agent_gh_config_dir": 'agent_gh_config_dir = "~/.config/review"',
+    }[key]
+    name = key.split(".")[-1]
+    text = STRICT.replace(old, f'{name} = "~//etc/gh"')
+    assert key in _refused(tmp_path, text)
+    assert key in _refused(tmp_path, text.replace('mode = "strict"', 'mode = "test"'))
+
+
+def test_strict_same_gh_dir_for_both_accounts_refused(tmp_path: Path) -> None:
+    """Один профиль на обе учётки стёр бы различитель merged_by agent/human."""
+    text = STRICT.replace(
+        'human_gh_config_dir = "~/.config/gh"',
+        'human_gh_config_dir = "~/.config/review"',
+    )
+    msg = _refused(tmp_path, text)
+    assert "accounts.human_gh_config_dir" in msg
+    assert "accounts.agent_gh_config_dir" in msg
+    cfg = _load_text(tmp_path, text.replace('mode = "strict"', 'mode = "test"'))
+    assert cfg.accounts.human_gh_config_dir == cfg.accounts.agent_gh_config_dir
 
 
 def test_secret_dirs_single_source() -> None:

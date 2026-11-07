@@ -40,8 +40,16 @@ SAFE_COMMANDS = frozenset(
         "die", "usage", "gh_a", "gh_h", "approval_globs", "ssot_key",
         "approval_template_glob",
         "brief_check_failed", "has_label", "revoke_app_token", "github_slug",
+        # доступ к конфигу DarkFactory: тело — в df_config.sh, а запуск
+        # `python3 -I "$script_dir/governance/df_config.py"` в нём — распознанная
+        # форма, его цепочка импортов сверяется как у любого входа
+        "df_cfg",
     }
 )  # fmt: skip
+#: Функции из `SAFE_COMMANDS`, чьё тело живёт в подключаемом файле: вызов
+#: честен, только если ЭТОТ скрипт подключил файл выше по тексту — иначе тело
+#: (и то, что оно исполняет) в проверяемую цепочку не попало бы.
+SOURCED_FUNCTIONS = {"df_cfg": "df_config.sh"}
 #: `trap` (Task 9, п. 9d) — только снятие `-`, функция скрипта из `SAFE_COMMANDS`
 #: или `'exit N'`: строка-обработчик иной формы исполнялась бы непроверенной.
 _TRAP = re.compile(
@@ -235,6 +243,14 @@ def _scan(root: Path, script: str, seen: set[str]) -> tuple[list[Launch], list[s
                 problems.append(f"{script}: нераспознанный запуск: {segment}")
         elif word not in SAFE_COMMANDS:
             problems.append(f"{script}: нераспознанный запуск: {segment}")
+        elif word in SOURCED_FUNCTIONS and not any(
+            x.script == script and x.kind == "source" and x.path == defn
+            for x in found
+            for defn in (SOURCED_FUNCTIONS[word],)
+        ):
+            problems.append(
+                f"{script}: {word} без подключения {SOURCED_FUNCTIONS[word]}: {segment}"
+            )
     problems += _raw_check(script, text, [x for x in found if x.script == script])
     return found, problems
 

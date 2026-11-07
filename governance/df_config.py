@@ -148,6 +148,13 @@ class _Parser:
             human_gh_config_dir=self.gh_dir(acc, "human_gh_config_dir", strict),
             agent_gh_config_dir=self.gh_dir(acc, "agent_gh_config_dir", strict),
         )
+        if strict and accounts.human_gh_config_dir == accounts.agent_gh_config_dir:
+            # Один профиль на обе учётки стёр бы различитель merged_by agent/human.
+            raise self.fail(
+                "accounts.human_gh_config_dir",
+                "в strict совпадает с accounts.agent_gh_config_dir — "
+                "у человека и агента профили gh обязаны различаться",
+            )
         harness = self.table(data, "harness")
         app = self.table(data, "app") if "app" in data else None
         return DfConfig(
@@ -209,6 +216,9 @@ class _Parser:
 
     def path_value(self, data: Mapping[str, object], key: str, dotted: str) -> Path:
         raw = self.string(data, key, dotted)
+        if raw.startswith("~/") and raw[2:].startswith("/"):
+            # `Path.home() / "/x"` — это `/x`: корень вместо домашнего каталога.
+            raise self.fail(dotted, f"путь {raw!r}: после `~/` лишний `/`")
         path = _expand(raw)
         if not path.is_absolute():
             raise self.fail(dotted, f"путь {raw!r} не абсолютный (после `~/`)")

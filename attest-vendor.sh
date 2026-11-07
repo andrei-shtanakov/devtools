@@ -88,10 +88,8 @@ die() {
     exit "$_code"
 }
 
-# Профиль публикации — тот же, что у review-pr.sh.
-REVIEW_GH_CONFIG_DIR="${REVIEW_GH_CONFIG_DIR:-$HOME/.config/review}"
-REVIEW_LOGIN="${REVIEW_LOGIN:-ai-prosto}"
-
+# Профиль публикации — тот же, что у review-pr.sh (выставляется перед
+# preflight профиля ниже).
 gh_r() {
     GH_CONFIG_DIR="$REVIEW_GH_CONFIG_DIR" gh "$@"
 }
@@ -101,6 +99,7 @@ gh_r() {
 # Доверенная ветка steward, против которой проверяется ancestry (I1).
 script_dir=$(cd "$(dirname "$0")" && pwd)
 FLEET_ROOT="${FLEET_ROOT:-$(dirname "$script_dir")}"
+. "$script_dir/df_config.sh"
 STEWARD_TRUSTED_REF="${STEWARD_TRUSTED_REF:-origin/master}"
 MARKER_NAME="ai-prosto-vendor-attestation"
 # Хвостовой \r (чекаут с autocrlf) срезается везде, где читаются строки
@@ -159,6 +158,15 @@ case "$slug" in
     */*) : ;;
     *) die 2 "не удалось разобрать owner/name из origin '$origin_url'" ;;
 esac
+
+# Профиль публикации — env, иначе конфиг DarkFactory (`accounts.agent*`,
+# df_config.sh); зашитых умолчаний нет, отказ конфига — код 2.
+if [ -z "${REVIEW_GH_CONFIG_DIR:-}" ]; then
+    REVIEW_GH_CONFIG_DIR=$(df_cfg accounts.agent_gh_config_dir) || exit $?
+fi
+if [ -z "${REVIEW_LOGIN:-}" ]; then
+    REVIEW_LOGIN=$(df_cfg accounts.agent) || exit $?
+fi
 
 # Preflight профиля — ДО любых обращений к PR.
 [ -d "$REVIEW_GH_CONFIG_DIR" ] || die 2 "профиля аттестатора нет: \
