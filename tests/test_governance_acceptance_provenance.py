@@ -122,6 +122,19 @@ def test_test_only_agent_merge_is_green(tmp_path):
     assert _check(repo, stamp, FakeForge(merge, "ai-prosto")) == []
 
 
+def test_agent_login_from_config(tmp_path, monkeypatch):
+    """Учётка агента предиката — `accounts.agent` конфига, не литерал."""
+    from tests.df_config_fixture import write_config
+
+    assert ap.agent_login() == "ai-prosto"  # автофикстура conftest
+    repo, merge, stamp = _signed(tmp_path / "w", human=False)
+    env = write_config(tmp_path / "cfg", agent="bot-x")
+    monkeypatch.setenv("XDG_CONFIG_HOME", env["XDG_CONFIG_HOME"])
+    assert ap.agent_login() == "bot-x"
+    assert _check(repo, stamp, FakeForge(merge, "bot-x")) == []
+    assert _check(repo, stamp, FakeForge(merge, "ai-prosto"))
+
+
 def test_agent_merge_with_human_criterion_is_red(tmp_path):
     repo, merge, stamp = _signed(tmp_path)
     assert _check(repo, stamp, FakeForge(merge, "ai-prosto"))

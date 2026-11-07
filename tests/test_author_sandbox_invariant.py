@@ -42,8 +42,17 @@ from governance import authority_root
 ROOT = Path(__file__).resolve().parents[1]
 SPAWN_SITES = Path("contracts/author-sandbox/v1/spawn-sites.toml")
 
-#: Модули ЗЦ — освобождены от правил 2–3 (они и есть граница).
-ZC_MODULES = ("safe_io", "sandbox", "author_launch", "secret_dirs")
+#: Модули ЗЦ — освобождены от правил 2–3 (они и есть граница). `df_config` и
+#: его `act_settings` — с плана 1 darkfactory-config (Task 4): учётки проб
+#: связки `sandbox` берёт из конфига, а не из констант.
+ZC_MODULES = (
+    "safe_io",
+    "sandbox",
+    "author_launch",
+    "secret_dirs",
+    "df_config",
+    "act_settings",
+)
 #: Прочие пути ЗЦ, которые этот тест обязан видеть под защитой (правило 5).
 ZC_FILES = (
     "tests/test_author_sandbox_invariant.py",

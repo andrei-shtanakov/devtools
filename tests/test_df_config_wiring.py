@@ -24,6 +24,10 @@ NO_OWNER_LITERALS = (
     "governance/policy_rule.py",
     "governance/act_premerge.py",
     "governance/act_status.py",
+    "governance/ops.py",
+    "governance/acceptance_provenance.py",
+    "governance/policy_sources.py",
+    "governance/sandbox.py",
 )
 _OWNER_LITERAL = re.compile(r"""["'](ai-prosto|andrei-shtanakov)["']""")
 

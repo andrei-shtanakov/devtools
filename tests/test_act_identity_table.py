@@ -2168,7 +2168,7 @@ JUDGMENT = {
         r(
             "runner_profile",
             "ops.RealOps._snapshot_env",
-            'os.environ.get("REVIEW_GH_CONFIG_DIR")',
+            "profile = review_gh_config_dir()",
             f"{S}::test_production_snapshot_command_is_isolated",
             '"0", str(profile)',
         ),

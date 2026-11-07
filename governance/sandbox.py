@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from governance import safe_io
+from governance import df_config, safe_io
 
 #: Каталоги учётных данных оператора, закрытые на чтение (§3); единый источник —
 #: `governance/secret_dirs.py` (его читает и загрузчик конфига DarkFactory).
@@ -401,13 +401,28 @@ PROBE_STEP_TIMEOUT = 5.0
 #: Apple Events под профилем не отвечают (F21) — ждём столько и пишем
 #: «нет ответа», а не «доставка закрыта» (§17 п.7).
 APPLE_EVENTS_TIMEOUT = 3.0
-#: Четыре пробы связки (§4 п.3): по учёткам, общий поиск, учётка модели.
-KEYCHAIN_PROBES = (
-    ("-s", "gh:github.com", "-a", "ai-prosto"),
-    ("-s", "gh:github.com", "-a", "andrei-shtanakov"),
+#: Пробы связки помимо учёток (§4 п.3): общий поиск, учётка модели.
+_KEYCHAIN_SHARED = (
     ("-s", "gh:github.com"),
     ("-s", "Claude Code-credentials"),
 )
+
+
+def keychain_probes() -> tuple[tuple[str, ...], ...]:
+    """Пробы связки (§4 п.3): по учётке агента и человека из конфига
+    DarkFactory (`df_config`, без повторов), затем общий поиск и учётка
+    модели. Конфиг читается при вызове."""
+    acc = df_config.load().accounts
+    logins = dict.fromkeys((acc.agent, acc.human))
+    by_login = tuple(("-s", "gh:github.com", "-a", login) for login in logins)
+    return (*by_login, *_KEYCHAIN_SHARED)
+
+
+def probe_items(probes: Sequence[Sequence[str]]) -> frozenset[str]:
+    """Пункты пробы для набора проб связки `probes` (их число — от конфига)."""
+    return PROBE_ITEMS | {f"keychain:{i}" for i in range(len(probes))}
+
+
 BAIT = Path(".config/ai-prosto/.sandbox-bait")
 #: Канарейка связки: элемент, который раннер кладёт вне песочницы перед
 #: пробой и снимает после. Ненулевой `security` по именам §4 п.3 не отличает
@@ -691,8 +706,9 @@ def _sentinels(targets: ProbeTargets, stand: Mapping[str, str]) -> dict[str, str
     return {" = ".join(names): str(Path(p) / tag) for p, names in by_path.items()}
 
 
-#: Пункты скрипта пробы помимо часовых; исход обязан быть у каждого —
-#: пропавший пункт (а не только удавшийся) — отказ.
+#: Пункты скрипта пробы помимо часовых и проб связки по номерам
+#: (`probe_items`); исход обязан быть у каждого — пропавший пункт (а не только
+#: удавшийся) — отказ.
 PROBE_ITEMS = frozenset(
     {
         "stand:unlink-gitfile",
@@ -712,7 +728,6 @@ PROBE_ITEMS = frozenset(
         "tty:open",
         "allow:stage",
         "allow:tmp",
-        *(f"keychain:{i}" for i in range(len(KEYCHAIN_PROBES))),
         "keychain:canary",
         "launchd:submit",
         "launchd:bootstrap",
@@ -877,6 +892,7 @@ def run_probe(
         f"dev.devtools.sandbox-probe.{uuid.uuid4().hex}",
     )
     bait = targets.home / BAIT
+    probes = keychain_probes()
     canary = f"{KEYCHAIN_CANARY}-{uuid.uuid4().hex}"
     app_id = labels[0] + ".app"
     sentinels: dict[str, str] = {}
@@ -904,7 +920,7 @@ def run_probe(
             "stage": str(call.stage),
             "tmp": str(call.tmp),
             "bait": str(bait),
-            "keychain": [list(a) for a in KEYCHAIN_PROBES],
+            "keychain": [list(a) for a in probes],
             "keychain_canary": canary,
             "step_timeout": PROBE_STEP_TIMEOUT,
             "effects": str(effects),
@@ -946,7 +962,7 @@ def run_probe(
             if not (call.root / n).is_file()
             or (call.root / n).read_bytes() != b"outside\n"
         ]
-        expected = PROBE_ITEMS | {f"sentinel:{name}" for name in sentinels}
+        expected = probe_items(probes) | {f"sentinel:{n}" for n in sentinels}
         result = _evaluate(out, expected, _env_mismatch(env_code, env_raw, env), seen)
         if outside_changed:
             result = ProbeResult(

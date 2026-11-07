@@ -727,8 +727,36 @@ def test_macos_major_reads_sw_vers() -> None:
 # --- оценка исходов пробы (§15, TASK-004) — переносимо ---------------------
 
 
+def _items() -> frozenset[str]:
+    return sandbox.probe_items(sandbox.keychain_probes())
+
+
+def test_keychain_probes_from_config_accounts(monkeypatch, tmp_path) -> None:
+    """Пробы связки — по учёткам `accounts.agent`/`accounts.human` конфига
+    DarkFactory, без повторов; общий поиск и учётка модели — всегда."""
+    from tests.df_config_fixture import write_config
+
+    shared = [("-s", "gh:github.com"), ("-s", "Claude Code-credentials")]
+    env = write_config(tmp_path / "a", agent="bot-x", human="human-y")
+    monkeypatch.setenv("XDG_CONFIG_HOME", env["XDG_CONFIG_HOME"])
+    assert list(sandbox.keychain_probes()) == [
+        ("-s", "gh:github.com", "-a", "bot-x"),
+        ("-s", "gh:github.com", "-a", "human-y"),
+        *shared,
+    ]
+    env = write_config(tmp_path / "b", agent="same", human="same")
+    monkeypatch.setenv("XDG_CONFIG_HOME", env["XDG_CONFIG_HOME"])
+    probes = sandbox.keychain_probes()
+    assert list(probes) == [("-s", "gh:github.com", "-a", "same"), *shared]
+    assert sandbox.probe_items(probes) - sandbox.PROBE_ITEMS == {
+        "keychain:0",
+        "keychain:1",
+        "keychain:2",
+    }
+
+
 def _all_denied() -> dict[str, str]:
-    out = {name: "EPERM" for name in sandbox.PROBE_ITEMS}
+    out = {name: "EPERM" for name in _items()}
     out.update({"allow:stage": "ok", "allow:tmp": "ok", "tty:open": "ENXIO"})
     out.update({f"keychain:{i}": "rc=44" for i in range(4)})
     out["keychain:canary"] = "rc=44"
@@ -744,9 +772,7 @@ def _all_denied() -> dict[str, str]:
 
 
 def _eval(**override: str) -> sandbox.ProbeResult:
-    return sandbox._evaluate(
-        {**_all_denied(), **override}, sandbox.PROBE_ITEMS, None, ()
-    )
+    return sandbox._evaluate({**_all_denied(), **override}, _items(), None, ())
 
 
 def test_evaluate_all_denied_is_ok_with_apple_events_note() -> None:
@@ -790,7 +816,7 @@ def test_evaluate_missing_item_env_and_effects() -> None:
     del out["read:bait"]
     result = sandbox._evaluate(
         out,
-        sandbox.PROBE_ITEMS,
+        _items(),
         "env: лишние ['GH_TOKEN'], недостающие []",
         ("submit",),
     )
@@ -818,7 +844,7 @@ def test_env_mismatch_is_exact_set_equality() -> None:
 def test_probe_inner_timeouts_fit_outer_budget() -> None:
     # сумма внутренних потолков меньше внешнего: отказ называется пунктом
     calls = len(re.findall(r"(?<![\w.])run\(", sandbox.PROBE_SCRIPT)) - 1  # def
-    steps = calls + len(sandbox.KEYCHAIN_PROBES) - 1  # цикл связки — один вызов
+    steps = calls + len(sandbox.keychain_probes()) - 1  # цикл связки — один вызов
     assert steps == 10
     inner = (steps - 1) * sandbox.PROBE_STEP_TIMEOUT + sandbox.APPLE_EVENTS_TIMEOUT
     assert inner + 10 < sandbox.PROBE_TIMEOUT

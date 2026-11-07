@@ -829,10 +829,12 @@ def test_agent_login_env_overrides_config(fleet: Fleet) -> None:
     """AGENT_LOGIN, затем REVIEW_LOGIN окружения — сильнее конфига."""
     write_config(fleet.xdg, agent="bot-x", agent_gh_config_dir=fleet.profile_dir)
     res = fleet.run(GH_STUB_HEADREF="feat/ordinary", REVIEW_LOGIN="bot-y")
+    assert res.returncode == 2
     assert "ожидался 'bot-y'" in res.stderr
     res = fleet.run(
         GH_STUB_HEADREF="feat/ordinary", REVIEW_LOGIN="bot-y", AGENT_LOGIN="bot-z"
     )
+    assert res.returncode == 2
     assert "ожидался 'bot-z'" in res.stderr
 
 
