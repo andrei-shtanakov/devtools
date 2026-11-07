@@ -41,6 +41,16 @@
 #      ВРЕМЕННО (дизайн darkfactory-config §5.8, D9): оператор вправе снять
 #      ТОЛЬКО этот гвард флагом `--authority-override '<причина>'` — тогда
 #      дифф сверяется с харнесс-путями, и любое совпадение — отказ (D10).
+#      Граница доверия — честно: под флагом перечень харнесс-путей читается
+#      из `$script_dir`, то есть защищает лишь тогда, когда merge-pr.sh
+#      запущен из ДОВЕРЕННОГО чекаута, а не из чекаута проверяемого PR (PR,
+#      правящий перечень, правил бы и то, чем его проверяют). Случай
+#      самоссылки закрывает жёсткий пол, вшитый в скрипт и не зависящий от
+#      SSOT: `.github/`, `profiles/` (ядро ADR-ECO-004 I2), сам гвард
+#      (`merge-pr.sh`, `human-merge.sh`) и оба его перечня
+#      (`contracts/harness-paths/`, `contracts/authority-root/`) под флагом
+#      отказываются всегда; перечень без `merge-pr.sh` или
+#      `contracts/harness-paths/` — битый, отказ кодом 2.
 # Раньше от автомержа candidate/finalize удерживал draft-статус; его сняли,
 # потому что draft нельзя смержить, а мерж здесь — предмет.
 #
@@ -144,7 +154,11 @@ usage() {
     echo "  --dry-run — показать разрешённую команду мержа, не выполняя" >&2
     echo "  --authority-override — ВРЕМЕННО (D9), только оператору вручную:" >&2
     echo "    снять гвард authority-root с названной причиной (журнал и" >&2
-    echo "    комментарий PR); харнесс-пути не снимаются (D10)" >&2
+    echo "    комментарий PR). НЕ снимает: харнесс-пути (в т.ч." >&2
+    echo "    scripts/review/) и жёсткий пол (.github/, profiles/," >&2
+    echo "    merge-pr.sh, human-merge.sh, contracts/harness-paths/," >&2
+    echo "    contracts/authority-root/) — отказ кодом 3 (D10); без" >&2
+    echo "    authority-root путей в диффе флаг — отказ кодом 2" >&2
     echo "  --print-globs — показать выведённые формы веток и выйти" >&2
 }
 
@@ -270,6 +284,11 @@ $strategy и $1"
             case "$2" in
                 -*) die 2 "--authority-override: причина не может начинаться \
 с '-' (похоже на флаг: '$2')" ;;
+                # Причина уходит в тело комментария PR: `<!--` открыл бы там
+                # скрытый блок (подделку маркера) — тот же страж, что у
+                # attest-vendor.sh перед публикацией.
+                *'<!--'*) die 2 "--authority-override: причина не может \
+содержать '<!--'" ;;
             esac
             authority_override="$2"; shift 2 ;;
         --dry-run) dry_run=1; shift ;;
@@ -317,9 +336,23 @@ authority_prefixes=$(ssot_key "$AUTHORITY_PATHS" \
 HARNESS_PATHS="${HARNESS_PATHS:-\
 $script_dir/contracts/harness-paths/v1/paths.env}"
 harness_prefixes=""
+# Жёсткий пол под --authority-override — вшит, от SSOT НЕ зависит (перечень
+# читается из `$script_dir` и мог прийти из проверяемого PR): ядро
+# ADR-ECO-004 I2 и сам гвард с обоими его перечнями.
+AUTHORITY_OVERRIDE_FLOOR=".github/ profiles/ merge-pr.sh human-merge.sh \
+contracts/harness-paths/ contracts/authority-root/"
 if [ -n "$authority_override" ]; then
     harness_prefixes=$(ssot_key "$HARNESS_PATHS" \
         HARNESS_PREFIXES "SSOT харнесс-путей") || exit $?
+    # Перечень, не накрывающий себя и скрипт, — битый: отказ, а не доверие.
+    for _required in merge-pr.sh contracts/harness-paths/; do
+        case " $harness_prefixes " in
+            *" $_required "*) : ;;
+            *) die 2 "в $HARNESS_PATHS нет '$_required' в HARNESS_PREFIXES — \
+перечень харнесс-путей битый (не защищает себя или merge-pr.sh); \
+--authority-override не выполняется" ;;
+        esac
+    done
 fi
 
 if [ "$print_globs" -eq 1 ]; then
@@ -680,6 +713,15 @@ IFS="$_saved_ifs"
 # не отказывают, а собираются: они названы в журнале и комментарии PR.
 overridden=""
 for _file in "$@"; do
+    [ -n "$authority_override" ] || break
+    for _prefix in $AUTHORITY_OVERRIDE_FLOOR; do
+        case "$_file" in
+            "$_prefix"*)
+                die 3 "PR ${slug}#${pr}: дифф трогает путь жёсткого пола \
+'$_file' (ядро ADR-ECO-004 I2 либо сам гвард) — --authority-override его не \
+снимает: такие PR мержит владелец (D10)." ;;
+        esac
+    done
     for _prefix in $harness_prefixes; do
         case "$_file" in
             "$_prefix"*)
@@ -701,9 +743,14 @@ for _file in "$@"; do
         esac
     done
 done
+if [ -n "$authority_override" ] && [ -z "$overridden" ]; then
+    die 2 "PR ${slug}#${pr}: --authority-override задан, но authority-root \
+путей в диффе нет — флаг не нужен; уберите его (обход без предмета не \
+выполняется и не записывается)"
+fi
 if [ -n "$authority_override" ]; then
     echo "ОБХОД гварда 4 (--authority-override, D9): причина: \
-$authority_override; authority-root пути:${overridden:- (нет)}" >&2
+$authority_override; authority-root пути:$overridden" >&2
 fi
 
 # --- Пины вызывающего: голова и база ---------------------------------------
@@ -811,7 +858,7 @@ fi
 if [ -n "$authority_override" ]; then
     _override_body="merge-pr.sh: гвард authority-root снят оператором \
 (--authority-override, временно, D9). Причина: $authority_override. \
-Пути:${overridden:- (нет)}. Голова: $head_oid."
+Пути:$overridden. Голова: $head_oid."
     if ! comment_err=$(gh_a pr comment "$pr" --repo "$slug" \
         --body "$_override_body" 2>&1); then
         die 2 "PR ${slug}#${pr}: комментарий об обходе не записан \

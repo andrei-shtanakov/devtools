@@ -1022,7 +1022,7 @@ def _comment_calls(fleet: Fleet) -> list[str]:
     return [ln for ln in fleet.calls() if " gh pr comment " in ln]
 
 
-@pytest.mark.parametrize("reason", ["", "   ", "--dry-run"])
+@pytest.mark.parametrize("reason", ["", "   ", "--dry-run", "ok <!-- marker -->"])
 def test_authority_override_requires_reason(fleet: Fleet, reason: str) -> None:
     """Причина обязательна и непуста; флаг вместо причины — тоже отказ
     (забытая причина не съедает следующий флаг, как у --budget-override)."""
@@ -1102,8 +1102,8 @@ def test_authority_override_dry_run_posts_nothing(fleet: Fleet) -> None:
 @pytest.mark.parametrize(
     "path",
     [
-        "merge-pr.sh",
-        "contracts/harness-paths/v1/paths.env",
+        # Харнесс-пути вне жёсткого пола (пол — отдельный тест ниже).
+        "review-pr.sh",
         "governance/ssot_env.py",
         "scripts/review/local.sh",
     ],
@@ -1119,6 +1119,81 @@ def test_authority_override_refuses_harness_path(fleet: Fleet, path: str) -> Non
     assert "харнесс-путь" in res.stderr
     assert path in res.stderr
     assert "мержит владелец (D10)" in res.stderr
+    assert fleet.merge_calls() == []
+    assert _comment_calls(fleet) == []
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".github/workflows/ci.yml",
+        "profiles/x.yaml",
+        "merge-pr.sh",
+        "human-merge.sh",
+        "contracts/harness-paths/v1/paths.env",
+        "contracts/authority-root/v1/paths.env",
+    ],
+)
+def test_authority_override_refuses_hard_floor(fleet: Fleet, path: str) -> None:
+    """Жёсткий пол: ядро I2 и сам гвард флаг не снимает никогда — даже когда
+    в диффе ничего больше нет."""
+    res = fleet.run("--authority-override", "причина", GH_STUB_FILES=path)
+    assert res.returncode == 3, res.stderr
+    assert path in res.stderr
+    assert "мержит владелец (D10)" in res.stderr
+    assert fleet.merge_calls() == []
+    assert _comment_calls(fleet) == []
+
+
+def _weak_ssot(fleet: Fleet, prefixes: str) -> Path:
+    weak = fleet.tmp / "weak-paths.env"
+    weak.write_text(f"# подменённый перечень\nHARNESS_PREFIXES={prefixes}\n")
+    return weak
+
+
+@pytest.mark.parametrize("dropped", ["merge-pr.sh", "contracts/harness-paths/"])
+def test_authority_override_ssot_without_self_is_refused(
+    fleet: Fleet, dropped: str
+) -> None:
+    """Перечень, не накрывающий себя или merge-pr.sh, — битый: код 2."""
+    kept = " ".join(
+        p
+        for p in ("merge-pr.sh", "contracts/harness-paths/", "review-pr.sh")
+        if p != dropped
+    )
+    res = fleet.run(
+        "--authority-override",
+        "причина",
+        HARNESS_PATHS=str(_weak_ssot(fleet, kept)),
+        GH_STUB_FILES="merge-pr.sh",
+    )
+    assert res.returncode == 2, res.stderr
+    assert dropped in res.stderr
+    assert fleet.merge_calls() == []
+    assert _comment_calls(fleet) == []
+
+
+@pytest.mark.parametrize(
+    "path", [".github/workflows/ci.yml", "human-merge.sh", "profiles/x.yaml"]
+)
+def test_hard_floor_holds_with_minimal_ssot(fleet: Fleet, path: str) -> None:
+    """Пол не зависит от SSOT: перечень из двух обязательных входов, без
+    `.github/` и прочего, всё равно не пускает путь пола."""
+    res = fleet.run(
+        "--authority-override",
+        "причина",
+        HARNESS_PATHS=str(_weak_ssot(fleet, "merge-pr.sh contracts/harness-paths/")),
+        GH_STUB_FILES=path,
+    )
+    assert res.returncode == 3, res.stderr
+    assert fleet.merge_calls() == []
+
+
+def test_authority_override_without_authority_paths_is_2(fleet: Fleet) -> None:
+    """Флаг без предмета — отказ кодом 2, комментарий не пишется."""
+    res = fleet.run("--authority-override", "причина", GH_STUB_FILES="lib/x.ex")
+    assert res.returncode == 2, res.stderr
+    assert "флаг не нужен" in res.stderr
     assert fleet.merge_calls() == []
     assert _comment_calls(fleet) == []
 
@@ -1451,6 +1526,11 @@ def test_shell_reads_authority_ssot_and_hardcodes_nothing() -> None:
         "contracts/approval-branches/",  # SSOT имён, который он читает
         # SSOT харнесс-путей, который он читает под --authority-override (§5.8).
         "contracts/harness-paths/",
+        # Жёсткий пол под --authority-override (`AUTHORITY_OVERRIDE_FLOOR`):
+        # вшит намеренно, чтобы не зависеть от SSOT, читаемого из дерева PR.
+        ".github/",
+        "profiles/",
+        "human-merge.sh",
         "merge-pr.sh",  # он сам: usage, шапка, диагностика
         # Подключаемые модули — собственные входы обвязки (`. "$script_dir/…"`),
         # сами authority-root и харнесс-пути (blocker ревью PR #344).
