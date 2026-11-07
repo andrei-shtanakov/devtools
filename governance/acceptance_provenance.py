@@ -23,13 +23,14 @@ from governance.frontmatter import split_frontmatter
 
 
 def agent_login() -> str:
-    """Учётка агента — `accounts.agent` конфига DarkFactory (`df_config`).
+    """Учётка агента — env `REVIEW_LOGIN`, иначе `accounts.agent` конфига
+    DarkFactory (`df_config.agent_login`; гейт CI без конфига задаёт env).
 
     Не из `ops.py`: модуль и всё, что решает правило гейта, — под
     authority-root (решение владельца 2026-10-02); `ops.py` туда не входит, и
     источник в нём ослаблялся бы агентским PR. Конфиг читается при каждом
     вызове."""
-    return df_config.load().accounts.agent
+    return df_config.agent_login()
 
 
 CLOSURE_NAME = "90-acceptance-closure.md"
@@ -202,7 +203,6 @@ def stamp_findings(
     `agent` — учётка агента, по умолчанию `agent_login()` (конфиг); предикат
     `criteria_close` берёт её из профиля (`ops.agent_login()`). Разойтись они
     могут только в ложный красный, не в зелёный (ревью круга 4 R4-m7)."""
-    agent = agent_login() if agent is None else agent
     rel = f"{spec_dir}/{CLOSURE_NAME}"
     try:
         meta, _ = split_frontmatter(text)
@@ -253,6 +253,13 @@ def stamp_findings(
     need = human_needed(repo, spec_dir, pmeta.get("bundle_pin"))
     if need is None:
         return ["граф бандла на пине не прочитан"]
+    if agent is None:
+        # Лениво — только здесь, где учётка агента сравнивается: битый или
+        # отсутствующий конфиг — названная находка, не трассировка гейта.
+        try:
+            agent = agent_login()
+        except df_config.ConfigError as exc:
+            return [f"конфиг DarkFactory: {exc}"]
     by = facts.get("mergedBy")
     login = by.get("login") if isinstance(by, dict) else None
     if not isinstance(login, str) or not login:

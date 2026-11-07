@@ -168,10 +168,7 @@ def review_gh_config_dir() -> Path:
     `REVIEW_GH_CONFIG_DIR`, иначе `accounts.agent_gh_config_dir` конфига
     DarkFactory — тот же порядок, что у `review-pr.sh`. Конфиг читается при
     каждом вызове; битый — `df_config.ConfigError`."""
-    env = os.environ.get("REVIEW_GH_CONFIG_DIR")
-    if env:
-        return Path(env)
-    return df_config.load().accounts.agent_gh_config_dir
+    return df_config.agent_gh_config_dir()
 
 
 def review_login() -> str:
@@ -182,7 +179,7 @@ def review_login() -> str:
     (чьё ревью искать), и вызывающему — чтобы отличить ревью
     ревью-контура от человеческого. Два хардкода разъехались бы молча.
     """
-    return os.environ.get("REVIEW_LOGIN") or df_config.load().accounts.agent
+    return df_config.agent_login()
 
 
 class Ops(Protocol):
