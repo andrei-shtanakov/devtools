@@ -1,0 +1,26 @@
+# Пример конфига DarkFactory (режим strict) со значениями владельца.
+# Копировать в $XDG_CONFIG_HOME/darkfactory/config.toml (по умолчанию
+# ~/.config/darkfactory/config.toml). Код шаблон не читает: это образец.
+schema = "darkfactory-config/v1"
+mode = "strict"
+
+[accounts]
+human = "andrei-shtanakov"
+agent = "ai-prosto"
+# В strict — только каталоги из governance/secret_dirs.py, и они различаются.
+human_gh_config_dir = "~/.config/gh"
+agent_gh_config_dir = "~/.config/review"
+
+# Обязателен в strict; обязан совпасть с
+# contracts/approval-policy-source/v1/source.env (авторитетен он).
+[policy]
+repo = "andrei-shtanakov/approval-policy"
+ref = "main"
+path = "policy/approvers.env"
+
+[workspace]
+root = "~/labs/all_ai_orchestrators"
+
+[harness]
+author = "claude"
+model = "claude-opus-5"
