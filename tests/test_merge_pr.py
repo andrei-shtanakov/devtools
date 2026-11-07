@@ -98,7 +98,9 @@ case "$*" in
     # Тело ответа — настоящий JSON, и переданный --jq применяется НАСТОЯЩИМ
     # jq: иначе `.files[]` и `.files[]?` неотличимы, и fail-closed на
     # ответе без ключа `files` нечем проверить.
-    if [ -n "${GH_STUB_COMPARE_NO_FILES:-}" ]; then
+    if [ -n "${GH_STUB_COMPARE_BODY:-}" ]; then
+      body="$GH_STUB_COMPARE_BODY"
+    elif [ -n "${GH_STUB_COMPARE_NO_FILES:-}" ]; then
       body='{"status":"ahead"}'
     else
       body=$(printf '%s\\n' "${GH_STUB_FILES-lib/x.ex}" \
@@ -202,6 +204,10 @@ class Fleet:
             capture_output=True,
         )
 
+        #: Скрипт под проверкой и база стаба; `make_trusted` подменяет оба.
+        self.script = SCRIPT
+        self.base = BASE_SHA
+
         self.stub_bin.mkdir()
         gh = self.stub_bin / "gh"
         gh.write_text(GH_STUB)
@@ -228,7 +234,7 @@ class Fleet:
             GH_STUB_LOG=str(self.gh_log),
             XDG_CONFIG_HOME=str(self.xdg),
             GH_STUB_DEFAULT_OID=HEAD_SHA,
-            GH_STUB_DEFAULT_BASE=BASE_SHA,
+            GH_STUB_DEFAULT_BASE=self.base,
         )
         env.update(extra)
         return env
@@ -237,13 +243,53 @@ class Fleet:
         self, *args: str, cwd: Path | None = None, **env_extra: str
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["sh", str(SCRIPT), "demo", "7", *args],
+            ["sh", str(self.script), "demo", "7", *args],
             cwd=cwd,
             env=self.env(**env_extra),
             capture_output=True,
             text=True,
             check=False,  # код выхода — предмет проверки самих тестов
         )
+
+    def make_trusted(self, origin: str = "git@github.com:andrei-shtanakov/demo.git"):
+        """Доверенный чекаут обвязки для --authority-override: копия входов
+        скрипта в отдельном git-репо, чистое дерево, HEAD = верхушка базы."""
+        self.harness = self.tmp / "harness"
+        for rel in TRUSTED_INPUTS:
+            src = SCRIPT.parent / rel
+            dst = self.harness / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if src.is_dir():
+                shutil.copytree(src, dst)
+            else:
+                shutil.copy2(src, dst)
+        (self.harness / ".gitignore").write_text("__pycache__/\n")
+        self._git("init", "-q", "-b", "master")
+        self._git("remote", "add", "origin", origin)
+        self.commit_harness("trusted")
+        self.script = self.harness / "merge-pr.sh"
+        self.base = self._git("rev-parse", "HEAD")
+        return self
+
+    def _git(self, *args: str) -> str:
+        res = subprocess.run(
+            ["git", "-C", str(self.harness), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "GIT_AUTHOR_NAME": "t",
+                "GIT_AUTHOR_EMAIL": "t@t",
+                "GIT_COMMITTER_NAME": "t",
+                "GIT_COMMITTER_EMAIL": "t@t",
+            },
+        )
+        return res.stdout.strip()
+
+    def commit_harness(self, msg: str) -> None:
+        self._git("add", "-A")
+        self._git("commit", "-q", "--allow-empty", "-m", msg)
 
     def gh_calls(self) -> str:
         return self.gh_log.read_text() if self.gh_log.exists() else ""
@@ -266,6 +312,25 @@ class Fleet:
 @pytest.fixture()
 def fleet(tmp_path: Path) -> Fleet:
     return Fleet(tmp_path)
+
+
+#: Входы, которые merge-pr.sh подключает, читает и исполняет из `$script_dir`
+#: на пути обычного PR (без candidate-веток и App-режима).
+TRUSTED_INPUTS = (
+    "merge-pr.sh",
+    "ssot_env.sh",
+    "approval_branches.sh",
+    "contracts/approval-branches",
+    "contracts/authority-root",
+    "contracts/harness-paths",
+    "governance/halt_gate.py",
+)
+
+
+@pytest.fixture()
+def tfleet(tmp_path: Path) -> Fleet:
+    """Флот, где обвязка запущена из доверенного чекаута (под флагом)."""
+    return Fleet(tmp_path).make_trusted()
 
 
 # --- обычный PR: ровно ожидаемая команда мержа ------------------------------
@@ -1023,53 +1088,53 @@ def _comment_calls(fleet: Fleet) -> list[str]:
 
 
 @pytest.mark.parametrize("reason", ["", "   ", "--dry-run", "ok <!-- marker -->"])
-def test_authority_override_requires_reason(fleet: Fleet, reason: str) -> None:
+def test_authority_override_requires_reason(tfleet: Fleet, reason: str) -> None:
     """Причина обязательна и непуста; флаг вместо причины — тоже отказ
     (забытая причина не съедает следующий флаг, как у --budget-override)."""
-    res = fleet.run("--authority-override", reason, GH_STUB_FILES="profiles/a.yaml")
+    res = tfleet.run("--authority-override", reason, GH_STUB_FILES="profiles/a.yaml")
     assert res.returncode == 2, res.stderr
     assert "--authority-override" in res.stderr
-    assert fleet.merge_calls() == []
-    assert _comment_calls(fleet) == []
+    assert tfleet.merge_calls() == []
+    assert _comment_calls(tfleet) == []
 
 
-def test_authority_override_without_argument_is_2(fleet: Fleet) -> None:
+def test_authority_override_without_argument_is_2(tfleet: Fleet) -> None:
     res = subprocess.run(
         ["sh", str(SCRIPT), "demo", "7", "--authority-override"],
-        env=fleet.env(),
+        env=tfleet.env(),
         capture_output=True,
         text=True,
         check=False,
     )
     assert res.returncode == 2, res.stderr
-    assert fleet.merge_calls() == []
+    assert tfleet.merge_calls() == []
 
 
-def test_authority_override_lifts_guard4(fleet: Fleet) -> None:
+def test_authority_override_lifts_guard4(tfleet: Fleet) -> None:
     reason = "darkfactory-config Task 3: контракт acceptance-targets"
-    res = fleet.run(
+    res = tfleet.run(
         "--authority-override",
         reason,
         GH_STUB_FILES="lib/x.ex\ncontracts/acceptance-targets/x.toml",
     )
     assert res.returncode == 0, res.stderr
-    assert len(fleet.merge_calls()) == 1
+    assert len(tfleet.merge_calls()) == 1
     assert reason in res.stderr
     assert "contracts/acceptance-targets/x.toml" in res.stderr
-    comments = _comment_calls(fleet)
+    comments = _comment_calls(tfleet)
     assert len(comments) == 1
     assert reason in comments[0]
     assert "andrei-shtanakov/demo" in comments[0]
     # Комментарий — от агентского профиля, тем же gh_a, что и мерж.
-    assert f"GH_CONFIG_DIR={fleet.profile_dir} gh pr comment 7" in comments[0]
+    assert f"GH_CONFIG_DIR={tfleet.profile_dir} gh pr comment 7" in comments[0]
     # Комментарий — до мержа: обход без следа в PR не выполняется.
-    calls = fleet.calls()
-    assert calls.index(comments[0]) < calls.index(fleet.merge_calls()[0])
+    calls = tfleet.calls()
+    assert calls.index(comments[0]) < calls.index(tfleet.merge_calls()[0])
 
 
-def test_authority_override_comment_failure_does_not_merge(fleet: Fleet) -> None:
+def test_authority_override_comment_failure_does_not_merge(tfleet: Fleet) -> None:
     """След обхода в PR обязателен: не записан — мержа нет (fail-closed)."""
-    stub = fleet.stub_bin / "gh"
+    stub = tfleet.stub_bin / "gh"
     stub.write_text(
         GH_STUB.replace(
             'case "$*" in\n',
@@ -1077,17 +1142,17 @@ def test_authority_override_comment_failure_does_not_merge(fleet: Fleet) -> None
             1,
         )
     )
-    res = fleet.run(
+    res = tfleet.run(
         "--authority-override",
         "причина",
         GH_STUB_FILES="contracts/acceptance-targets/x.toml",
     )
     assert res.returncode == 2, res.stderr
-    assert fleet.merge_calls() == []
+    assert tfleet.merge_calls() == []
 
 
-def test_authority_override_dry_run_posts_nothing(fleet: Fleet) -> None:
-    res = fleet.run(
+def test_authority_override_dry_run_posts_nothing(tfleet: Fleet) -> None:
+    res = tfleet.run(
         "--authority-override",
         "причина",
         "--dry-run",
@@ -1095,8 +1160,8 @@ def test_authority_override_dry_run_posts_nothing(fleet: Fleet) -> None:
     )
     assert res.returncode == 0, res.stderr
     assert "причина" in res.stderr
-    assert fleet.merge_calls() == []
-    assert _comment_calls(fleet) == []
+    assert tfleet.merge_calls() == []
+    assert _comment_calls(tfleet) == []
 
 
 @pytest.mark.parametrize(
@@ -1108,9 +1173,9 @@ def test_authority_override_dry_run_posts_nothing(fleet: Fleet) -> None:
         "scripts/review/local.sh",
     ],
 )
-def test_authority_override_refuses_harness_path(fleet: Fleet, path: str) -> None:
+def test_authority_override_refuses_harness_path(tfleet: Fleet, path: str) -> None:
     """D10: харнесс-пути флаг не обходит — такие PR мержит владелец."""
-    res = fleet.run(
+    res = tfleet.run(
         "--authority-override",
         "причина",
         GH_STUB_FILES=f"lib/x.ex\n{path}",
@@ -1119,8 +1184,8 @@ def test_authority_override_refuses_harness_path(fleet: Fleet, path: str) -> Non
     assert "харнесс-путь" in res.stderr
     assert path in res.stderr
     assert "мержит владелец (D10)" in res.stderr
-    assert fleet.merge_calls() == []
-    assert _comment_calls(fleet) == []
+    assert tfleet.merge_calls() == []
+    assert _comment_calls(tfleet) == []
 
 
 @pytest.mark.parametrize(
@@ -1134,26 +1199,26 @@ def test_authority_override_refuses_harness_path(fleet: Fleet, path: str) -> Non
         "contracts/authority-root/v1/paths.env",
     ],
 )
-def test_authority_override_refuses_hard_floor(fleet: Fleet, path: str) -> None:
+def test_authority_override_refuses_hard_floor(tfleet: Fleet, path: str) -> None:
     """Жёсткий пол: ядро I2 и сам гвард флаг не снимает никогда — даже когда
     в диффе ничего больше нет."""
-    res = fleet.run("--authority-override", "причина", GH_STUB_FILES=path)
+    res = tfleet.run("--authority-override", "причина", GH_STUB_FILES=path)
     assert res.returncode == 3, res.stderr
     assert path in res.stderr
     assert "мержит владелец (D10)" in res.stderr
-    assert fleet.merge_calls() == []
-    assert _comment_calls(fleet) == []
+    assert tfleet.merge_calls() == []
+    assert _comment_calls(tfleet) == []
 
 
-def _weak_ssot(fleet: Fleet, prefixes: str) -> Path:
-    weak = fleet.tmp / "weak-paths.env"
+def _weak_ssot(tfleet: Fleet, prefixes: str) -> Path:
+    weak = tfleet.tmp / "weak-paths.env"
     weak.write_text(f"# подменённый перечень\nHARNESS_PREFIXES={prefixes}\n")
     return weak
 
 
 @pytest.mark.parametrize("dropped", ["merge-pr.sh", "contracts/harness-paths/"])
 def test_authority_override_ssot_without_self_is_refused(
-    fleet: Fleet, dropped: str
+    tfleet: Fleet, dropped: str
 ) -> None:
     """Перечень, не накрывающий себя или merge-pr.sh, — битый: код 2."""
     kept = " ".join(
@@ -1161,81 +1226,191 @@ def test_authority_override_ssot_without_self_is_refused(
         for p in ("merge-pr.sh", "contracts/harness-paths/", "review-pr.sh")
         if p != dropped
     )
-    res = fleet.run(
+    res = tfleet.run(
         "--authority-override",
         "причина",
-        HARNESS_PATHS=str(_weak_ssot(fleet, kept)),
+        HARNESS_PATHS=str(_weak_ssot(tfleet, kept)),
         GH_STUB_FILES="merge-pr.sh",
     )
     assert res.returncode == 2, res.stderr
     assert dropped in res.stderr
-    assert fleet.merge_calls() == []
-    assert _comment_calls(fleet) == []
+    assert tfleet.merge_calls() == []
+    assert _comment_calls(tfleet) == []
 
 
 @pytest.mark.parametrize(
     "path", [".github/workflows/ci.yml", "human-merge.sh", "profiles/x.yaml"]
 )
-def test_hard_floor_holds_with_minimal_ssot(fleet: Fleet, path: str) -> None:
+def test_hard_floor_holds_with_minimal_ssot(tfleet: Fleet, path: str) -> None:
     """Пол не зависит от SSOT: перечень из двух обязательных входов, без
     `.github/` и прочего, всё равно не пускает путь пола."""
-    res = fleet.run(
+    res = tfleet.run(
         "--authority-override",
         "причина",
-        HARNESS_PATHS=str(_weak_ssot(fleet, "merge-pr.sh contracts/harness-paths/")),
+        HARNESS_PATHS=str(_weak_ssot(tfleet, "merge-pr.sh contracts/harness-paths/")),
         GH_STUB_FILES=path,
     )
     assert res.returncode == 3, res.stderr
-    assert fleet.merge_calls() == []
+    assert tfleet.merge_calls() == []
 
 
-def test_authority_override_without_authority_paths_is_2(fleet: Fleet) -> None:
+def test_authority_override_without_authority_paths_is_2(tfleet: Fleet) -> None:
     """Флаг без предмета — отказ кодом 2, комментарий не пишется."""
-    res = fleet.run("--authority-override", "причина", GH_STUB_FILES="lib/x.ex")
+    res = tfleet.run("--authority-override", "причина", GH_STUB_FILES="lib/x.ex")
     assert res.returncode == 2, res.stderr
     assert "флаг не нужен" in res.stderr
-    assert fleet.merge_calls() == []
-    assert _comment_calls(fleet) == []
+    assert tfleet.merge_calls() == []
+    assert _comment_calls(tfleet) == []
 
 
-def test_authority_override_refuses_every_harness_prefix(fleet: Fleet) -> None:
+def test_authority_override_refuses_every_harness_prefix(tfleet: Fleet) -> None:
     """Каждый префикс SSOT-файла держит отказ — перечень читается, а не
     повторяется литералами в скрипте."""
     prefixes = _harness_prefixes()
     assert prefixes
     for prefix in prefixes:
         path = f"{prefix}x" if prefix.endswith("/") else prefix
-        res = fleet.run(
+        res = tfleet.run(
             "--authority-override", "причина", GH_STUB_FILES=f"lib/x.ex\n{path}"
         )
         assert res.returncode == 3, (prefix, res.stderr)
         assert "мержит владелец (D10)" in res.stderr, prefix
-    assert fleet.merge_calls() == []
+    assert tfleet.merge_calls() == []
 
 
 def test_authority_override_missing_harness_ssot_does_not_merge(
-    fleet: Fleet,
+    tfleet: Fleet,
 ) -> None:
-    res = fleet.run(
+    res = tfleet.run(
         "--authority-override",
         "причина",
         HARNESS_PATHS="/no/such/paths.env",
         GH_STUB_FILES="contracts/acceptance-targets/x.toml",
     )
     assert res.returncode == 2, res.stderr
-    assert fleet.merge_calls() == []
+    assert tfleet.merge_calls() == []
 
 
-def test_authority_override_keeps_human_merge_label(fleet: Fleet) -> None:
+def test_authority_override_keeps_human_merge_label(tfleet: Fleet) -> None:
     """Только гвард 4: `human-merge-required` флаг не снимает."""
-    res = fleet.run(
+    res = tfleet.run(
         "--authority-override",
         "причина",
         GH_STUB_LABELS="human-merge-required",
         GH_STUB_FILES="contracts/acceptance-targets/x.toml",
     )
     assert res.returncode == 3, res.stderr
+    assert tfleet.merge_calls() == []
+
+
+def test_authority_override_untrusted_head_is_2(tfleet: Fleet) -> None:
+    """HEAD обвязки — не предок верхушки базы (не влитая версия): отказ 2."""
+    # Голова PR: правка входа, который скрипт исполняет из дерева.
+    with (tfleet.harness / "governance" / "halt_gate.py").open("a") as fh:
+        fh.write("# подмена из PR\n")
+    tfleet.commit_harness("untrusted head")
+    res = tfleet.run(
+        "--authority-override",
+        "причина",
+        GH_STUB_FILES="contracts/acceptance-targets/x.toml",
+    )
+    assert res.returncode == 2, res.stderr
+    assert "не предок" in res.stderr
+    assert tfleet.merge_calls() == []
+    assert _comment_calls(tfleet) == []
+
+
+@pytest.mark.parametrize("change", ["untracked", "modified"])
+def test_authority_override_dirty_tree_is_2(tfleet: Fleet, change: str) -> None:
+    if change == "untracked":
+        (tfleet.harness / "governance" / "sitecustomize.py").write_text("x = 1\n")
+    else:
+        with (tfleet.harness / "approval_branches.sh").open("a") as fh:
+            fh.write("# правка\n")
+    res = tfleet.run(
+        "--authority-override",
+        "причина",
+        GH_STUB_FILES="contracts/acceptance-targets/x.toml",
+    )
+    assert res.returncode == 2, res.stderr
+    assert "не чистое" in res.stderr
+    assert tfleet.merge_calls() == []
+    # Чистота проверяется ДО исполнения стоп-крана из этого дерева.
+    assert not any("rulesets" in ln for ln in tfleet.calls())
+
+
+def test_authority_override_live_tip_missing_locally_is_2(tfleet: Fleet) -> None:
+    res = tfleet.run(
+        "--authority-override",
+        "причина",
+        GH_STUB_LIVE_TIP=BASE_SHA,
+        GH_STUB_FILES="contracts/acceptance-targets/x.toml",
+    )
+    assert res.returncode == 2, res.stderr
+    assert "git fetch" in res.stderr
+    assert tfleet.merge_calls() == []
+
+
+def test_authority_override_other_repo_is_2(tmp_path: Path) -> None:
+    """Верхушка базы — чужого репо: доверенность обвязки ей не установить."""
+    fleet = Fleet(tmp_path).make_trusted(
+        origin="git@github.com:andrei-shtanakov/devtools.git"
+    )
+    res = fleet.run(
+        "--authority-override",
+        "причина",
+        GH_STUB_FILES="contracts/acceptance-targets/x.toml",
+    )
+    assert res.returncode == 2, res.stderr
+    assert "только к PR в репо самой обвязки" in res.stderr
     assert fleet.merge_calls() == []
+
+
+def test_trusted_checkout_is_not_required_without_flag(fleet: Fleet) -> None:
+    """Без флага проверка доверенности не выполняется — поведение прежнее."""
+    res = fleet.run(GH_STUB_FILES="lib/x.ex")
+    assert res.returncode == 0, res.stderr
+
+
+def _renamed(*pairs: tuple[str, str]) -> str:
+    import json
+
+    files = [{"filename": new, "previous_filename": old} for old, new in pairs]
+    return json.dumps({"files": files})
+
+
+def test_authority_override_rename_of_harness_file_is_refused(
+    tfleet: Fleet,
+) -> None:
+    """Перенос merge-pr.sh под новое имя — тоже правка харнесс-пути."""
+    res = tfleet.run(
+        "--authority-override",
+        "причина",
+        GH_STUB_COMPARE_BODY=_renamed(("merge-pr.sh", "tools/m.sh")),
+    )
+    assert res.returncode == 3, res.stderr
+    assert "merge-pr.sh" in res.stderr
+    assert tfleet.merge_calls() == []
+
+
+def test_rename_out_of_authority_root_is_refused_without_flag(fleet: Fleet) -> None:
+    """Гвард 4 без флага видит и старое имя переименования."""
+    res = fleet.run(
+        GH_STUB_COMPARE_BODY=_renamed(
+            ("contracts/acceptance-targets/x.toml", "lib/x.toml")
+        ),
+    )
+    assert res.returncode == 3, res.stderr
+    assert "contracts/acceptance-targets/x.toml" in res.stderr
+    assert fleet.merge_calls() == []
+
+
+def test_file_cap_counts_entries_not_names(fleet: Fleet) -> None:
+    """299 переименований = 598 имён, но 299 записей compare: порог не задет."""
+    pairs = [(f"lib/old{i}.ex", f"lib/new{i}.ex") for i in range(299)]
+    res = fleet.run(GH_STUB_COMPARE_BODY=_renamed(*pairs))
+    assert res.returncode == 0, res.stderr
+    assert len(fleet.merge_calls()) == 1
 
 
 def test_guard4_unchanged_without_flag(fleet: Fleet) -> None:

@@ -51,6 +51,22 @@
 #      (`contracts/harness-paths/`, `contracts/authority-root/`) под флагом
 #      отказываются всегда; перечень без `merge-pr.sh` или
 #      `contracts/harness-paths/` — битый, отказ кодом 2.
+#      Пол не покрывает остальные входы, которые скрипт подключает и
+#      исполняет из `$script_dir` (ssot_env.sh, approval_branches.sh,
+#      contracts/approval-branches/, governance/halt_gate.py, …), и расти до
+#      них не будет: под флагом обвязка требует ДОВЕРЕННЫЙ чекаут —
+#      рабочее дерево `$script_dir` чистое (`git status --porcelain` пуст,
+#      проверка до исполнения стоп-крана) и его HEAD — предок живой верхушки
+#      базы (`merge-base --is-ancestor`; объекта верхушки нет локально —
+#      отказ с просьбой сделать fetch). Верхушка — та же `$live_tip`, что у
+#      compare, поэтому флаг применим лишь к PR в репо самой обвязки (slug
+#      origin `$script_dir`); иначе — отказ кодом 2. Всё это — отказ кодом 2.
+#      Честный остаток: подключённые выше по скрипту файлы
+#      (ssot_env.sh, approval_branches.sh) исполняются ДО проверки; запуск
+#      обвязки из недоверенного чекаута скомпрометирован независимо от флага,
+#      проверка лишь не даёт флагу им воспользоваться.
+#      Переименования: compare читает и `previous_filename`, так что все
+#      проверки гварда 4 (с флагом и без) видят и старое, и новое имя.
 # Раньше от автомержа candidate/finalize удерживал draft-статус; его сняли,
 # потому что draft нельзя смержить, а мерж здесь — предмет.
 #
@@ -237,6 +253,23 @@ revoke_app_token() {
     exit "$_rc"
 }
 
+# owner/name из сырого GitHub-origin (печатает slug; иначе `die 2`). Вызывать
+# как `v=$(github_slug …) || exit $?` — `die` в подстановке убивает подшелл.
+github_slug() {
+    case "$1" in
+        git@github.com:*)        _slug="${1#git@github.com:}" ;;
+        https://github.com/*)    _slug="${1#https://github.com/}" ;;
+        ssh://git@github.com/*)  _slug="${1#ssh://git@github.com/}" ;;
+        *) die 2 "origin '$1' не похож на GitHub — slug не вывести" ;;
+    esac
+    _slug="${_slug%.git}"
+    case "$_slug" in
+        */*) : ;;
+        *) die 2 "не удалось разобрать owner/name из origin '$1'" ;;
+    esac
+    printf '%s\n' "$_slug"
+}
+
 script_dir=$(cd "$(dirname "$0")" && pwd)
 . "$script_dir/ssot_env.sh"
 . "$script_dir/approval_branches.sh"
@@ -374,17 +407,30 @@ repo_dir="$FLEET_ROOT/$repo"
 if ! origin_url=$(git -C "$repo_dir" config --get remote.origin.url); then
     die 2 "у '$repo' не настроен remote origin"
 fi
-case "$origin_url" in
-    git@github.com:*)        slug="${origin_url#git@github.com:}" ;;
-    https://github.com/*)    slug="${origin_url#https://github.com/}" ;;
-    ssh://git@github.com/*)  slug="${origin_url#ssh://git@github.com/}" ;;
-    *) die 2 "origin '$origin_url' не похож на GitHub — slug не вывести" ;;
-esac
-slug="${slug%.git}"
-case "$slug" in
-    */*) : ;;
-    *) die 2 "не удалось разобрать owner/name из origin '$origin_url'" ;;
-esac
+slug=$(github_slug "$origin_url") || exit $?
+
+# --- Доверенный чекаут обвязки под --authority-override (часть 1) -----------
+# Флаг снимает гвард, значит и проверять его обязана доверенная версия
+# скрипта: дерево `$script_dir` чистое и обвязка мержит PR своего же репо
+# (предок-проверка HEAD — ниже, когда прочитана живая верхушка базы). Чистота
+# — ДО исполнения стоп-крана из этого дерева. Без флага — не проверяется.
+if [ -n "$authority_override" ]; then
+    if ! _harness_url=$(git -C "$script_dir" config --get remote.origin.url); then
+        die 2 "--authority-override: у чекаута обвязки $script_dir нет origin — \
+доверенность чекаута не установить"
+    fi
+    harness_slug=$(github_slug "$_harness_url") || exit $?
+    [ "$harness_slug" = "$slug" ] || die 2 "--authority-override применим \
+только к PR в репо самой обвязки ($harness_slug), а не в $slug: доверенность \
+чекаута сверяется с верхушкой базы этого репо"
+    if ! _dirty=$(git -C "$script_dir" status --porcelain 2>&1); then
+        die 2 "--authority-override: состояние чекаута обвязки $script_dir не \
+прочитано ($_dirty)"
+    fi
+    [ -z "$_dirty" ] || die 2 "--authority-override: рабочее дерево обвязки \
+$script_dir не чистое — недоверенный чекаут, обход не выполняется:
+$_dirty"
+fi
 
 # --- Профиль ---------------------------------------------------------------
 # Preflight ДО чтения PR: не тот профиль — мержить нельзя ничего, и узнать
@@ -505,6 +551,23 @@ case "$live_tip" in
     ""|null) die 2 "верхушка базы origin/$base_ref для ${slug}#${pr} не \
 получена ('$live_tip') — мерж не выполняется" ;;
 esac
+# --- Доверенный чекаут обвязки под --authority-override (часть 2) -----------
+# HEAD `$script_dir` обязан быть предком живой верхушки базы: обвязка — версия,
+# уже влитая в базу, а не голова проверяемого PR.
+if [ -n "$authority_override" ]; then
+    if ! git -C "$script_dir" cat-file -e "$live_tip^{commit}" 2>/dev/null; then
+        die 2 "--authority-override: верхушки базы $live_tip нет в чекауте \
+обвязки $script_dir — сделайте git fetch и повторите"
+    fi
+    if ! _harness_head=$(git -C "$script_dir" rev-parse HEAD 2>&1); then
+        die 2 "--authority-override: HEAD чекаута обвязки не прочитан \
+($_harness_head)"
+    fi
+    git -C "$script_dir" merge-base --is-ancestor "$_harness_head" "$live_tip" \
+        || die 2 "--authority-override: HEAD обвязки $_harness_head не предок \
+верхушки базы $live_tip — чекаут не доверенный (не влитая версия), обход не \
+выполняется"
+fi
 # Голова обязана быть похожа на sha: мержим ПРОВЕРЕННЫЙ oid, и подсунуть
 # в --match-head-commit неразобранный мусор значило бы проверить не то.
 case "$head_oid" in
@@ -678,7 +741,8 @@ fi
 # ложных отказов это не добавляет.
 if ! compare_files=$(gh_a api \
     "repos/$slug/compare/$live_tip...$head_oid" \
-    --jq '.files[].filename' 2>&1); then
+    --jq '(.files | length), (.files[] | .filename, (.previous_filename // empty))' \
+    2>&1); then
     die 2 "не удалось получить дифф ${live_tip}...${head_oid} для \
 ${slug}#${pr}: $compare_files — состав диффа неизвестен, мерж не выполняется"
 fi
@@ -688,8 +752,16 @@ fi
 # факт двери не открывает (ревью #183, круг 6). Отказ честно называет причину:
 # не «есть authority-root путь», а «состав диффа не подтверждён полностью».
 # Дифф на 300+ файлов человеку и так стоит посмотреть глазами.
+# Первая строка ответа — число ЗАПИСЕЙ compare (порог считается по ним), далее
+# имена: `filename` и у переименований `previous_filename` — проверяются оба
+# (иначе перенос защищённого файла под новое имя гвард бы не увидел).
 COMPARE_FILE_CAP=300
-compare_count=$(printf '%s' "$compare_files" | grep -c '' || true)
+compare_count=$(printf '%s\n' "$compare_files" | sed -n '1p')
+case "$compare_count" in
+    ""|*[!0-9]*) die 2 "ответ compare для ${slug}#${pr} не разобран \
+('$compare_count' вместо числа файлов) — мерж не выполняется" ;;
+esac
+compare_files=$(printf '%s\n' "$compare_files" | sed '1d')
 if [ "$compare_count" -ge "$COMPARE_FILE_CAP" ]; then
     die 3 "PR ${slug}#${pr}: в диффе $compare_count файлов — форджа режет \
 список на $COMPARE_FILE_CAP и не сообщает об усечении, поэтому состав диффа \
