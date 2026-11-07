@@ -331,7 +331,7 @@ remediation-issue у уже помеченного родителя). Повто
 - Установка на хост (действие владельца, до мержа PR с чтением конфига):
   `mkdir -p ~/.config/darkfactory && cp templates/darkfactory/config.strict.example.toml ~/.config/darkfactory/config.toml`,
   проверка: `python3 -I governance/df_config.py get accounts.agent` печатает `ai-prosto`.
-  Хост без конфига останавливается на «нет конфига». Страж
+  Скрипты, читающие учётки из конфига (`review-pr.sh`, `df_cfg`), без файла останавливаются на «нет конфига»; источник политики конфига не требует. Системный `python3` хоста должен быть ≥ 3.11 (иначе отказ с названием версии). Страж
   `tests/test_no_owner_identities.py` не даёт вернуть литералы в код.
 
 ## Установка DarkFactory: этап 1

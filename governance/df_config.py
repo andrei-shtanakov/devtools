@@ -38,6 +38,16 @@ if __package__ in (None, "") and "governance" not in sys.modules:
     sys.modules["governance"] = _pkg
     _spec.loader.exec_module(_pkg)
 
+if sys.version_info < (3, 11):  # noqa: UP036 — запуск системным python3
+    # `tomllib` — с 3.11; на старом `python3` (macOS: 3.9) — именованный отказ.
+    _ver = f"{sys.version_info[0]}.{sys.version_info[1]}"
+    print(
+        f"df_config: нужен Python ≥ 3.11 (сейчас {_ver}); "
+        "установите python3 ≥ 3.11 или uv",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
 import os  # noqa: E402
 import tomllib  # noqa: E402
 from collections.abc import Callable, Mapping  # noqa: E402
