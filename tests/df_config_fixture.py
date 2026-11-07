@@ -29,13 +29,14 @@ def write_config(
     policy_repo: str = "andrei-shtanakov/approval-policy",
     policy_ref: str = "main",
     policy_path: str = "policy/approvers.env",
+    mode: str = "test",
 ) -> dict[str, str]:
-    """Записать конфиг режима `test` в `xdg`; вернуть env с `XDG_CONFIG_HOME`."""
+    """Записать конфиг режима `mode` в `xdg`; вернуть env с `XDG_CONFIG_HOME`."""
     agent_dir = agent_gh_config_dir or xdg / "gh-agent"
     human_dir = human_gh_config_dir or xdg / "gh-human"
     text = f"""\
 schema = "darkfactory-config/v1"
-mode = "test"
+mode = "{mode}"
 
 [accounts]
 human = "{human}"

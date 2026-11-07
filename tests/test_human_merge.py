@@ -148,15 +148,43 @@ def test_merges_from_operator_profile_with_head_pin(fleet: Fleet) -> None:
     assert f"от {HUMAN}" in res.stdout
 
 
-def test_human_merge_policy_from_config(fleet: Fleet) -> None:
-    """Источник политики — `[policy]` конфига, не contracts/…/source.env."""
+def test_test_mode_config_policy_cannot_redirect_source(fleet: Fleet) -> None:
+    """test: `[policy]` конфига ≠ SSOT source.env — тоже отказ 2 до сети:
+    режим конфига доверие к источнику не выбирает."""
     write_config(fleet.xdg, policy_repo="o/p", policy_ref="rel", policy_path="x.env")
     res = fleet.run()
+    assert res.returncode == 2
+    assert "расходится с authority-root SSOT" in res.stderr
+    assert fleet.calls() == []
+
+
+#: strict: профили gh — из перечня песочницы; человек — явным env.
+_STRICT_DIRS = {
+    "agent_gh_config_dir": Path("~/.config/review"),
+    "human_gh_config_dir": Path("~/.config/gh"),
+}
+
+
+def test_strict_policy_from_authority_root_ssot(fleet: Fleet) -> None:
+    """strict: координаты — SSOT source.env; совпавший `[policy]` пропускается."""
+    write_config(fleet.xdg, mode="strict", **_STRICT_DIRS)
+    res = fleet.run(HUMAN_GH_CONFIG_DIR=str(fleet.human_profile))
     assert res.returncode == 0, res.stderr
     graphql = [ln for ln in fleet.calls() if "api graphql" in ln]
-    assert graphql and all("-F o=o -F n=p " in ln for ln in graphql), graphql
-    assert "-F q=refs/heads/rel -F p=x.env" in graphql[0]
-    assert all("p=x.env" in ln for ln in graphql)
+    assert graphql and all(
+        "-F o=andrei-shtanakov -F n=approval-policy " in ln for ln in graphql
+    ), graphql
+    assert "-F q=refs/heads/main -F p=policy/approvers.env" in graphql[0]
+
+
+def test_strict_config_policy_cannot_redirect_source(fleet: Fleet) -> None:
+    """strict: `[policy]` конфига ≠ SSOT — отказ 2 до сети, без мержа."""
+    write_config(fleet.xdg, mode="strict", policy_repo="o/p", **_STRICT_DIRS)
+    res = fleet.run(HUMAN_GH_CONFIG_DIR=str(fleet.human_profile))
+    assert res.returncode == 2
+    assert "расходится с authority-root SSOT" in res.stderr
+    assert "o/p@main" in res.stderr
+    assert fleet.calls() == []
 
 
 def test_agent_profile_from_config_is_refused(fleet: Fleet) -> None:
@@ -176,16 +204,18 @@ def test_no_config_exit2(fleet: Fleet, tmp_path: Path) -> None:
     assert fleet.calls() == []
 
 
-def test_no_policy_table_exit2(fleet: Fleet) -> None:
-    """Конфиг `test` без `[policy]` — отказ кодом 2 с именем ключа, без мержа."""
+def test_test_mode_without_policy_table_uses_ssot(fleet: Fleet) -> None:
+    """test без `[policy]` — сверять нечего: координаты из SSOT source.env."""
     path = fleet.xdg / "darkfactory" / "config.toml"
     text = path.read_text(encoding="utf-8")
     head, _, tail = text.partition("[policy]")
     path.write_text(head + tail.split("\n\n", 1)[1], encoding="utf-8")
     res = fleet.run()
-    assert res.returncode == 2
-    assert "policy.repo" in res.stderr
-    assert fleet.merge_calls() == []
+    assert res.returncode == 0, res.stderr
+    graphql = [ln for ln in fleet.calls() if "api graphql" in ln]
+    assert graphql and all(
+        "-F o=andrei-shtanakov -F n=approval-policy " in ln for ln in graphql
+    ), graphql
 
 
 def test_explicit_human_profile_is_passed_through(fleet: Fleet, tmp_path: Path) -> None:

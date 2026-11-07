@@ -12,8 +12,9 @@
 # сверяет, что мержит ai-prosto, этот — что мержит человек из allowlist.
 #
 # Fail-closed: логин обязан входить в политику подписи — файл
-# `policy/approvers.env` репозитория approval-policy (координаты — `[policy]`
-# конфига DarkFactory, `policy.repo/ref/path`), прочитанный по SHA из тела
+# `policy/approvers.env` репозитория approval-policy (координаты — SSOT
+# contracts/approval-policy-source/v1/source.env; `[policy]` конфига
+# DarkFactory, если задан, обязан совпасть), прочитанный по SHA из тела
 # candidate-PR (`policy: <repo>@<sha>`; у finalize и прочих PR человеческого
 # мержа пина нет — судится актуальная версия); у candidate актуальная версия обязана совпасть с пином —
 # иначе мерж не создаст подписи и человеческий акт сгорел бы (спека
@@ -121,11 +122,26 @@ slug="${slug%.git}"
 # больше не источник: выставленная — отказ, чтобы старое правило не
 # исполнялось молча не так, как задумано.
 [ -z "${AUTHORIZED_APPROVER_ACCOUNTS+x}" ] || die 3 "AUTHORIZED_APPROVER_ACCOUNTS выставлена, но переменная больше не источник политики — источник репозиторий approval-policy; снимите её"
-# Координаты — `[policy]` конфига DarkFactory (не contracts/approval-policy-
-# source/v1/source.env, который devtools больше не читает).
-p_repo=$(df_cfg policy.repo) || exit $?
-p_ref=$(df_cfg policy.ref) || exit $?
-p_path=$(df_cfg policy.path) || exit $?
+# Координаты — SSOT contracts/approval-policy-source/v1/source.env под
+# authority-root, в любом режиме: конфиг домашнего каталога источник не
+# перенаправляет. `[policy]` конфига DarkFactory, если задан, обязан совпасть
+# (иначе отказ 2); в test его может не быть — тогда сверять нечего (в strict
+# отсутствие отбивает сам загрузчик). Правило — как в governance/policy_rule.py.
+src="$script_dir/contracts/approval-policy-source/v1/source.env"
+p_repo=$(ssot_key "$src" APPROVAL_POLICY_REPO "SSOT источника политики") || exit $?
+p_ref=$(ssot_key "$src" APPROVAL_POLICY_REF "SSOT источника политики") || exit $?
+p_path=$(ssot_key "$src" APPROVAL_POLICY_PATH "SSOT источника политики") || exit $?
+df_mode=$(df_cfg mode) || exit $?
+if [ "$df_mode" = "test" ] && ! df_cfg policy.repo >/dev/null 2>&1; then
+    :
+else
+    c_repo=$(df_cfg policy.repo) || exit $?
+    c_ref=$(df_cfg policy.ref) || exit $?
+    c_path=$(df_cfg policy.path) || exit $?
+    [ "$c_repo|$c_ref|$c_path" = "$p_repo|$p_ref|$p_path" ] || die 2 "config \
+[policy] расходится с authority-root SSOT: конфиг $c_repo@$c_ref:$c_path, \
+$src $p_repo@$p_ref:$p_path"
+fi
 p_owner="${p_repo%%/*}"; p_name="${p_repo#*/}"
 
 login=$(gh_h api user --jq .login 2>&1) || die 2 "профиль оператора не отвечает: $login"

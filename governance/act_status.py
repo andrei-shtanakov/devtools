@@ -28,6 +28,7 @@ from governance import (
     approval_branches,
     bundle_dag,
     bundle_inputs,
+    df_config,
 )
 from governance import approval_ledger as al
 from governance import node_approval as na
@@ -105,10 +106,16 @@ class Deps:
 
 def real_deps(state: RunState, env: Mapping[str, str] | None = None) -> Deps:
     """Боевые зависимости: привязка, самоотчёт `gh`, журнал (Р-5); транспорт
-    источников доверия строит `load_trust` (Task 11c)."""
+    источников доверия строит `load_trust` (Task 11c). Профиль агента —
+    `REVIEW_GH_CONFIG_DIR`, иначе `accounts.agent_gh_config_dir` конфига
+    DarkFactory (`df_config`)."""
     env = dict(os.environ) if env is None else env
     home = Path.home()
-    agent = Path(env.get("REVIEW_GH_CONFIG_DIR") or home / ".config" / "review")
+    agent = (
+        Path(env["REVIEW_GH_CONFIG_DIR"])
+        if env.get("REVIEW_GH_CONFIG_DIR")
+        else df_config.load(env).accounts.agent_gh_config_dir
+    )
     merge = Path(env["MERGE_GH_CONFIG_DIR"]) if env.get("MERGE_GH_CONFIG_DIR") else None
     state_home = Path(env.get("XDG_STATE_HOME") or home / ".local" / "state")
 
