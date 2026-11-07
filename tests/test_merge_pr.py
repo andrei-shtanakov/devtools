@@ -39,6 +39,13 @@ GH_STUB = """#!/usr/bin/env bash
 echo "${GH_TOKEN:+GH_TOKEN=$GH_TOKEN }GH_CONFIG_DIR=${GH_CONFIG_DIR:-} gh $*" \\
   >> "$GH_STUB_LOG"
 case "$*" in
+  *".default_branch"*)
+    # Ветка по умолчанию — якорь доверия `--authority-override`.
+    if [ -n "${GH_STUB_DEFAULT_BRANCH_FAIL:-}" ]; then
+      echo "gh: HTTP 502" >&2
+      exit 1
+    fi
+    printf '%s\\n' "${GH_STUB_DEFAULT_BRANCH-master}" ;;
   *"rulesets?"*)
     # Стоп-кран (D2): листинг наборов правил, как его печатает `--jq` —
     # строка JSON на набор. По умолчанию — не взведено (`missing` →
@@ -1130,6 +1137,40 @@ def test_authority_override_lifts_guard4(tfleet: Fleet) -> None:
     # Комментарий — до мержа: обход без следа в PR не выполняется.
     calls = tfleet.calls()
     assert calls.index(comments[0]) < calls.index(tfleet.merge_calls()[0])
+
+
+def test_authority_override_refuses_non_default_base(tfleet: Fleet) -> None:
+    """База PR выбирается автором PR: якорь доверия — только ветка по
+    умолчанию. PR в другую ветку (стек, ветка автора) — отказ до мержа."""
+    res = tfleet.run(
+        "--authority-override",
+        "причина",
+        GH_STUB_BASEREF="feat/stack-base",
+        GH_STUB_FILES="contracts/acceptance-targets/x.toml",
+    )
+    assert res.returncode == 2, res.stderr
+    assert "не ветка по умолчанию" in res.stderr
+    assert tfleet.merge_calls() == []
+    assert _comment_calls(tfleet) == []
+
+
+def test_authority_override_default_branch_unreadable_is_2(tfleet: Fleet) -> None:
+    res = tfleet.run(
+        "--authority-override",
+        "причина",
+        GH_STUB_DEFAULT_BRANCH_FAIL="1",
+        GH_STUB_FILES="contracts/acceptance-targets/x.toml",
+    )
+    assert res.returncode == 2, res.stderr
+    assert "ветка по умолчанию" in res.stderr
+    assert tfleet.merge_calls() == []
+
+
+def test_non_default_base_without_flag_is_unaffected(tfleet: Fleet) -> None:
+    """Без флага ветка по умолчанию не читается и не проверяется."""
+    res = tfleet.run(GH_STUB_BASEREF="feat/stack-base", GH_STUB_FILES="lib/x.ex")
+    assert res.returncode == 0, res.stderr
+    assert not any(".default_branch" in c for c in tfleet.calls())
 
 
 def test_authority_override_comment_failure_does_not_merge(tfleet: Fleet) -> None:
