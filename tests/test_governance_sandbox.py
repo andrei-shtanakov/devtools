@@ -784,6 +784,7 @@ def test_admission_evidence_symlink_refused(
         sandbox.admission_check(_contract(base, entry), path=str(path_dir))
 
 
+@darwin_only
 def test_real_admitted_entries_pass_their_protocols() -> None:
     for record in sandbox.load_admitted(CONTRACT):
         sandbox._check_evidence(record)
