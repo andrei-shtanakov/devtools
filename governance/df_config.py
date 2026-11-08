@@ -6,37 +6,20 @@
 режима, отсутствует — `ConfigError` с названием файла и ключа.
 
 Режимы: `strict` — `[policy]` обязателен, каталоги профилей gh — только из
-перечня, закрытого песочницей авторинга (`governance/secret_dirs.py`); `test` —
+перечня `STRICT_GH_DIRS` (равенство с перечнем песочницы авторинга,
+`governance/secret_dirs.py`, закрепляет тест); `test` —
 `[policy]` необязателен, ограничения на каталоги нет.
 
 Модуль исполняется скриптами мержа (`df_config.sh` → `python3 -I <этот файл>
-get <ключ>`), поэтому он и его импорты (только stdlib, `act_settings`,
-`secret_dirs`) — под authority-root и харнесс-гвардом; цепочку сверяет
-`tests/harness_trust.py`. `-I` убирает каталог скрипта из `sys.path`: пакет
-`governance` загружается явно по пути (приём `brief_merge_check`). Файл
-читается при каждом `load()`, кэша на импорте нет.
+get <ключ>`), поэтому он под authority-root и харнесс-гвардом. Импорты только
+stdlib: файл вендорится дословно (discovery) и запускается под `-I` без пакета
+`governance`. Файл читается при каждом `load()`, кэша на импорте нет.
 """
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
-
-if __package__ in (None, "") and "governance" not in sys.modules:
-    # Исполнение файлом под `python -I`: пакет — явно по пути, без дерева в
-    # sys.path (подмодули `governance.*` ищутся только в каталоге пакета).
-    import importlib.util
-
-    _pkg_dir = Path(__file__).resolve().parent
-    _spec = importlib.util.spec_from_file_location(
-        "governance",
-        _pkg_dir / "__init__.py",
-        submodule_search_locations=[str(_pkg_dir)],
-    )
-    assert _spec is not None and _spec.loader is not None
-    _pkg = importlib.util.module_from_spec(_spec)
-    sys.modules["governance"] = _pkg
-    _spec.loader.exec_module(_pkg)
 
 if sys.version_info < (3, 11):  # noqa: UP036 — запуск системным python3
     # `tomllib` — с 3.11; на старом `python3` (macOS: 3.9) — именованный отказ.
@@ -49,15 +32,25 @@ if sys.version_info < (3, 11):  # noqa: UP036 — запуск системны�
     raise SystemExit(2)
 
 import os  # noqa: E402
+import re  # noqa: E402
 import tomllib  # noqa: E402
 from collections.abc import Callable, Mapping  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
 from typing import Literal  # noqa: E402
 
-from governance.act_settings import config_home  # noqa: E402
-from governance.secret_dirs import SECRET_DIRS  # noqa: E402
-
 SCHEMA = "darkfactory-config/v1"
+#: Каталоги профилей gh (относительно `~`), допустимые в strict.
+STRICT_GH_DIRS: tuple[str, ...] = (
+    ".config/review",
+    ".config/gh",
+    ".config/ai-prosto",
+    ".ssh",
+)
+#: Что в режиме test реально выключено (дописывают следующие срезы).
+TEST_RELAXATIONS: tuple[str, ...] = (
+    "репо политики утверждения не используется: утверждающий — accounts.human",
+)
+_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}")
 MODES = ("strict", "test")
 
 _TOP = {"schema", "mode", "accounts", "policy", "workspace", "harness", "app"}
@@ -108,8 +101,25 @@ class DfConfig:
     app_key_file: Path | None
 
 
+def config_home(env: Mapping[str, str]) -> Path:
+    """`$XDG_CONFIG_HOME` (только абсолютный, как требует XDG), иначе `~/.config`.
+
+    То же правило обязана применять discovery для `act.toml` (M2, заметки
+    части A п. 11) — расхождение дало бы draining только у одного из двух.
+    """
+    raw = env.get("XDG_CONFIG_HOME", "")
+    return Path(raw) if raw and Path(raw).is_absolute() else Path.home() / ".config"
+
+
+def test_banner(cfg: DfConfig) -> str | None:
+    """Баннер режима test (что выключено); в strict — `None`."""
+    if cfg.mode == "strict":
+        return None
+    return "режим test: выключено — " + "; ".join(TEST_RELAXATIONS)
+
+
 def config_path(env: Mapping[str, str]) -> Path:
-    """Путь конфига: `<config_home>/darkfactory/config.toml` (`act_settings`)."""
+    """Путь конфига: `<config_home>/darkfactory/config.toml` (`config_home`)."""
     return config_home(env) / "darkfactory" / "config.toml"
 
 
@@ -193,8 +203,8 @@ class _Parser:
         strict = mode == "strict"
         acc = self.table(data, "accounts")
         accounts = Accounts(
-            human=self.string(acc, "human", "accounts.human"),
-            agent=self.string(acc, "agent", "accounts.agent"),
+            human=self.login(acc, "human"),
+            agent=self.login(acc, "agent"),
             human_gh_config_dir=self.gh_dir(acc, "human_gh_config_dir", strict),
             agent_gh_config_dir=self.gh_dir(acc, "agent_gh_config_dir", strict),
         )
@@ -265,6 +275,13 @@ class _Parser:
             raise self.fail(dotted, "ожидается непустая строка")
         return value
 
+    def login(self, data: Mapping[str, object], key: str) -> str:
+        dotted = f"accounts.{key}"
+        value = self.string(data, key, dotted)
+        if not _LOGIN.fullmatch(value):
+            raise self.fail(dotted, f"{value!r} — не один логин GitHub")
+        return value
+
     def integer(self, data: Mapping[str, object], key: str, dotted: str) -> int:
         value = self.raw(data, key, dotted)
         if type(value) is not int:
@@ -284,9 +301,9 @@ class _Parser:
     def gh_dir(self, acc: Mapping[str, object], key: str, strict: bool) -> Path:
         dotted = f"accounts.{key}"
         path = self.path_value(acc, key, dotted)
-        allowed = [Path.home() / rel for rel in SECRET_DIRS]
+        allowed = [Path.home() / rel for rel in STRICT_GH_DIRS]
         if strict and path not in allowed:
-            names = ", ".join(f"~/{rel}" for rel in SECRET_DIRS)
+            names = ", ".join(f"~/{rel}" for rel in STRICT_GH_DIRS)
             raise self.fail(
                 dotted,
                 f"в strict — только каталог, закрытый песочницей ({names})",
@@ -322,6 +339,8 @@ _GETTERS: dict[str, Callable[[DfConfig], str]] = {
     "policy.ref": _policy_field("ref"),
     "policy.path": _policy_field("path"),
     "workspace.root": lambda c: str(c.workspace_root),
+    "harness.author": lambda c: c.author_harness,
+    "harness.model": lambda c: c.author_model,
 }
 
 
