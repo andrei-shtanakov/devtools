@@ -29,7 +29,8 @@ spec-runner, завершив цикл, открывает integration-PR и о�
 CLI: ``python -m governance.accept_pr --repo kapelle --pr 59``
 (``make accept-pr ARGS='--repo kapelle --pr 59'``); ``--owner``
 необязателен: по умолчанию владелец берётся из origin локального чекаута цели.
-Полный цикл «sync + повторный run до remaining=0» — вариант (в), сюда намеренно не входит.
+Полный цикл «sync + повторный run до remaining=0» — вариант (в), сюда
+намеренно не входит.
 """
 
 from __future__ import annotations
@@ -429,7 +430,7 @@ def main(argv: list[str] | None = None) -> int:
                 "владельца не определить, укажите --owner"
             )
             return 2
-        repo_slug = checkout_slug
+        repo_slug = f"{checkout_slug.split('/')[0]}/{args.repo}".lower()
     else:
         repo_slug = f"{args.owner}/{args.repo}".lower()
     if checkout_slug != repo_slug:

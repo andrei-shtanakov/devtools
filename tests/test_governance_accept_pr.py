@@ -936,3 +936,12 @@ def test_accept_pr_explicit_owner_mismatch_is_2(monkeypatch, capsys) -> None:
     _origin_stub(monkeypatch, "git@github.com:alice/kapelle.git\n")
     rc = accept_pr.main(["--repo", "kapelle", "--pr", "1", "--owner", "bob"])
     assert rc == 2 and "один репозиторий" in capsys.readouterr().out
+
+
+def test_accept_pr_origin_repo_name_mismatch_is_2(monkeypatch, capsys) -> None:
+    """Без `--owner` берётся только владелец: `../kapelle` с origin
+    `alice/other` — стоп, мерж не вызывается."""
+    seen = _origin_stub(monkeypatch, "git@github.com:alice/other.git\n")
+    assert accept_pr.main(["--repo", "kapelle", "--pr", "1"]) == 2
+    assert "один репозиторий" in capsys.readouterr().out
+    assert seen == []
