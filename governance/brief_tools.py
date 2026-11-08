@@ -25,6 +25,7 @@ from governance import (
     approval_request,
     brief_input,
     brief_provenance,
+    df_config,
     discovery_approval,
     policy_rule,
 )
@@ -456,6 +457,8 @@ def main(argv: list[str] | None = None) -> int:
             propose(args.run, ops)
             return 0
         if args.command == "approve":
+            # Сосед discovery — до записи любого файла прогона.
+            df_config.workspace_dir("discovery")
             approve(args.run, args.pr, ops)
             return 0
     except rl.LockBusy as exc:
@@ -464,6 +467,9 @@ def main(argv: list[str] | None = None) -> int:
     except BriefToolError as exc:
         print(f"brief-tools: {exc}", file=sys.stderr)
         return 2 if exc.retry else 1
+    except df_config.ConfigError as exc:
+        print(f"brief-tools: конфиг DarkFactory: {exc}", file=sys.stderr)
+        return 2
     return 1
 
 

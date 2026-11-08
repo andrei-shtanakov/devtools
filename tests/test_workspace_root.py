@@ -199,6 +199,7 @@ def test_script_without_config_refuses(script, tmp_path) -> None:
     done = _run(script, {"XDG_CONFIG_HOME": str(tmp_path / "empty")}, tmp_path)
     assert done.returncode == 2
     assert "конфиг DarkFactory" in done.stderr and "config.toml" in done.stderr
+    assert done.stderr.count("конфиг DarkFactory") == 1, done.stderr
 
 
 @pytest.mark.no_df_config
@@ -244,3 +245,49 @@ def test_no_sibling_lookup_via_devtools_parent() -> None:
     for script in SCRIPTS:
         text = (ROOT / script).read_text()
         assert 'dirname "$script_dir"' not in text, script
+
+
+def test_runner_main_names_config_error(tmp_path, monkeypatch, capsys) -> None:
+    from governance import runner
+
+    def boom(_argv):
+        raise df_config.ConfigError("workspace.root=/w: нет каталога discovery")
+
+    monkeypatch.setattr(runner, "_main", boom)
+    assert runner.main(["resume", "--run-id", "r"]) == 2
+    err = capsys.readouterr().err
+    assert "runner: конфиг DarkFactory: workspace.root=/w" in err
+    assert "Traceback" not in err
+
+
+def test_brief_tools_approve_missing_discovery_publishes_nothing(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from governance import brief_tools
+
+    _cfg(tmp_path, monkeypatch, tmp_path / "ws")
+    (tmp_path / "ws").mkdir()
+    target = tmp_path / "customer-brief.md"
+
+    def approve(*_a, **_k):
+        target.write_text("опубликовано")
+
+    monkeypatch.setattr(brief_tools, "approve", approve)
+    assert brief_tools.main(["approve", "--run", "r", "--pr", "1"]) == 2
+    err = capsys.readouterr().err
+    assert "brief-tools: конфиг DarkFactory: workspace.root=" in err
+    assert "нет каталога discovery" in err and "Traceback" not in err
+    assert not target.exists()
+
+
+def test_brief_tools_main_names_config_error_from_ops(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from governance import brief_tools
+
+    def boom(*_a, **_k):
+        raise df_config.ConfigError("x")
+
+    monkeypatch.setattr(brief_tools, "propose", boom)
+    assert brief_tools.main(["propose", "--run", "r"]) == 2
+    assert "brief-tools: конфиг DarkFactory: x" in capsys.readouterr().err

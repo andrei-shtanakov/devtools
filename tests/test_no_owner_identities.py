@@ -26,45 +26,57 @@ EXCLUDED_PREFIXES = {
     "contracts/steward-actor-policy/": "вендоренный контракт steward",
     "templates/": "образцы конфига; код их не читает",
 }
-#: Файлы-исключения: путь -> (литерал, который файл обязан ещё содержать; причина).
-EXCLUDED_FILES = {
-    "governance/author_launch.py": (
-        '"ai-prosto"',
+#: Файлы-исключения: путь -> [(литерал; причина)]. Освобождены только строки с
+#: литералом, прочие строки файла проверяются; литерал обязан быть в файле.
+EXCLUDED_FILES: dict[str, list[tuple[str, str]]] = {
+    "governance/author_launch.py": [
         (
-            "компонент пути ~/.config/ai-prosto/harness.env (каталог операторских "
-            "настроек), не учётка"
-        ),
-    ),
-    "issue_console.py": (
-        '"ai-prosto"',
+            '"ai-prosto"',
+            (
+                "компонент пути ~/.config/ai-prosto/harness.env (каталог "
+                "операторских настроек), не учётка"
+            ),
+        )
+    ],
+    "issue_console.py": [
         (
-            "DEFAULT_INTERNAL — набор «своих» авторов консоли issue; файл "
-            "неприкосновенен (правило репо: devtools-issue-console-untouchable)"
+            '"ai-prosto"',
+            (
+                "DEFAULT_INTERNAL — набор «своих» авторов консоли issue; файл "
+                "неприкосновенен (правило репо: devtools-issue-console-untouchable)"
+            ),
         ),
-    ),
-    "inbox.py": (
-        '"andrei-shtanakov"',
-        "DEFAULT_OWNER — инструмент флота инстанса владельца, не конвейер",
-    ),
-    "r16_runner.py": (
-        "andrei-shtanakov/prograph-vault",
-        "задача VPS владельца (R16), не конвейер",
-    ),
-    "tools/check_discovery_vendor.py": (
-        "andrei-shtanakov/discovery-toolkit",
-        "апстрим вендоринга владельца",
-    ),
-    "tools/check_discovery_approval_vendor.py": (
-        "andrei-shtanakov/discovery",
-        "апстрим вендоринга владельца",
-    ),
-    "tools/gen_discovery_approval_fixture.py": (
-        "andrei-shtanakov/approval-policy",
         (
-            "TODO plan 2 (darkfactory-config): данные фикстуры discovery "
-            "(HUMAN/POLICY_REPO); замена требует решения по дизайну"
+            '"andrei-shtanakov"',
+            "ISSUE_CONSOLE_OWNER по умолчанию; файл неприкосновенен",
         ),
-    ),
+    ],
+    "inbox.py": [
+        (
+            '"andrei-shtanakov"',
+            "DEFAULT_OWNER — инструмент флота инстанса владельца, не конвейер",
+        )
+    ],
+    "r16_runner.py": [
+        ("andrei-shtanakov/prograph-vault", "задача VPS владельца (R16), не конвейер"),
+        ("the ai-prosto profile", "докстринги инструмента R16 владельца"),
+    ],
+    "tools/check_discovery_vendor.py": [
+        ("andrei-shtanakov/discovery-toolkit", "апстрим вендоринга владельца")
+    ],
+    "tools/check_discovery_approval_vendor.py": [
+        ("andrei-shtanakov/discovery", "апстрим вендоринга владельца")
+    ],
+    "tools/gen_discovery_approval_fixture.py": [
+        (
+            "andrei-shtanakov/approval-policy",
+            (
+                "TODO plan 3 (darkfactory-config): данные фикстуры discovery "
+                "(HUMAN/POLICY_REPO); замена требует решения по дизайну"
+            ),
+        ),
+        ('HUMAN = "andrei-shtanakov"', "то же: данные фикстуры discovery"),
+    ],
 }
 LITERAL = re.compile(
     r"""["']ai-prosto["']"""
@@ -86,10 +98,13 @@ def _tracked() -> list[str]:
 def test_no_owner_identity_literals_in_code() -> None:
     offenders = []
     for rel in _tracked():
-        if rel.startswith(tuple(EXCLUDED_PREFIXES)) or rel in EXCLUDED_FILES:
+        if rel.startswith(tuple(EXCLUDED_PREFIXES)):
             continue
+        needles = [n for n, _ in EXCLUDED_FILES.get(rel, [])]
         text = (ROOT / rel).read_text(encoding="utf-8", errors="replace")
         for no, line in enumerate(text.splitlines(), 1):
+            if any(n in line for n in needles):
+                continue
             if LITERAL.search(line):
                 offenders.append(f"{rel}:{no}: {line.strip()}")
     assert not offenders, "зашитые учётки владельца:\n" + "\n".join(offenders)
@@ -97,9 +112,10 @@ def test_no_owner_identity_literals_in_code() -> None:
 
 def test_exclusions_are_alive() -> None:
     """Исключение, чей литерал ушёл из файла, — мусор: убрать из перечня."""
-    for rel, (needle, _reason) in EXCLUDED_FILES.items():
+    for rel, entries in EXCLUDED_FILES.items():
         text = (ROOT / rel).read_text(encoding="utf-8")
-        assert needle in text, f"исключение {rel}: литерала {needle} больше нет"
+        for needle, _reason in entries:
+            assert needle in text, f"исключение {rel}: литерала {needle} больше нет"
 
 
 def test_example_config_prints_agent(tmp_path: Path) -> None:

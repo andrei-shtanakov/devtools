@@ -402,7 +402,7 @@ def main(argv: list[str] | None = None) -> int:
     """CLI-обвязка; вся политика — в `accept()` (тестируется стабом Ops).
 
     Гард владельца (приёмка PR #109, круг 3): `review` работает через
-    ЛОКАЛЬНЫЙ чекаут `../<repo>` (так устроен review-pr.sh), а `merge` — по
+    ЛОКАЛЬНЫЙ чекаут `<workspace.root>/<repo>` (так устроен review-pr.sh), а `merge` — по
     слагу `--owner/--repo`; расхождение означало бы «отревьюили один репо,
     смержили другой». Origin чекаута обязан совпасть со слагом.
     """
@@ -426,7 +426,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.owner is None:
         if checkout_slug is None:
             print(
-                f"accept-pr: у чекаута ../{args.repo} нет разбираемого origin — "
+                f"accept-pr: у чекаута {target_dir} нет разбираемого origin — "
                 "владельца не определить, укажите --owner"
             )
             return 2
@@ -435,7 +435,7 @@ def main(argv: list[str] | None = None) -> int:
         repo_slug = f"{args.owner}/{args.repo}".lower()
     if checkout_slug != repo_slug:
         print(
-            f"accept-pr: origin локального чекаута ../{args.repo} = "
+            f"accept-pr: origin локального чекаута {target_dir} = "
             f"{checkout_slug!r}, а мерж адресован {repo_slug!r} — стоп "
             "(ревью и мерж обязаны смотреть в один репозиторий)"
         )

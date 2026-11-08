@@ -45,6 +45,7 @@ from governance import (
     criteria_graph,
     decomposition_guard,
     design_guard,
+    df_config,
     halt_gate,
 )
 from governance import approval_ledger as al
@@ -4368,6 +4369,9 @@ def main(argv: list[str] | None = None) -> int:
         # Коды — как у merge-pr.sh: 6 стоп действует, 2 стоп не прочитан.
         print(err, file=sys.stderr)
         return err.exit_code
+    except df_config.ConfigError as exc:
+        print(f"runner: конфиг DarkFactory: {exc}", file=sys.stderr)
+        return 2
 
 
 def _main(argv: list[str] | None = None) -> int:
