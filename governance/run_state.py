@@ -23,6 +23,8 @@ import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from governance import df_config
+
 # Якорь через __file__ (как DEVTOOLS_ROOT в ops.py), не CWD-относительный
 # путь: CWD-относительная версия резолвилась в `devtools/devtools/out/…`,
 # когда процесс запускался из корня devtools (финальное ревью F-3), и делала
@@ -136,6 +138,39 @@ class RunState:
     # None — прогон без оракула (схема 1); старые run.json читаются по дефолту.
     code: str | None = None
     plan_item: str | None = None
+    # Режим конфига DarkFactory на момент старта прогона (plan 3a). Старые
+    # run.json без поля читаются как strict — прежнее поведение.
+    mode: str = "strict"
+
+
+class ModeMismatchError(Exception):
+    """Режим конфига не совпадает с режимом прогона (отказ действующего входа)."""
+
+
+def validate_mode(mode: str) -> None:
+    """Валидирует режим прогона: только `strict`/`test`."""
+    if mode not in df_config.MODES:
+        raise ValueError(
+            f"mode={mode!r} невалиден: допустимо {' или '.join(df_config.MODES)}"
+        )
+
+
+def mode_refusal(state: RunState) -> str | None:
+    """Причина отказа, если режим конфига ≠ режиму прогона; иначе `None`."""
+    cfg_mode = df_config.load().mode
+    if cfg_mode == state.mode:
+        return None
+    return (
+        f"конфиг DarkFactory: режим конфига {cfg_mode} ≠ режиму прогона "
+        f"{state.mode} ({state.run_id}) — начните новый прогон"
+    )
+
+
+def require_mode(state: RunState) -> None:
+    """Бросает `ModeMismatchError`, если режим конфига ≠ режиму прогона."""
+    refusal = mode_refusal(state)
+    if refusal is not None:
+        raise ModeMismatchError(refusal)
 
 
 _ALLOWED_AUTHORING = ("legacy", "waves")
@@ -195,8 +230,10 @@ def new_run(
     authoring: str = "legacy",
     code: str | None = None,
     plan_item: str | None = None,
+    mode: str = "strict",
 ) -> RunState:
     """Новый прогон (S0). `run_id` подаётся снаружи (вызывающая сторона)."""
+    validate_mode(mode)
     validate_merge_authority(merge_authority)
     validate_author_backend(author_backend)
     validate_authoring(authoring)
@@ -225,6 +262,7 @@ def new_run(
         wave=1 if authoring == "waves" else 0,
         code=code,
         plan_item=plan_item,
+        mode=mode,
     )
 
 

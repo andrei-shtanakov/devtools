@@ -1382,6 +1382,10 @@ def run(run_id: str, ops: Ops, *, product_sha: str | None = None) -> int:
 def _run(run_id: str, ops: Ops, product_sha: str | None) -> int:
     """Тело `run`; исключения превращает в отказ шага обёртка."""
     state = run_state.load(run_id)
+    refusal = run_state.mode_refusal(state)
+    if refusal is not None:
+        print(f"criteria-close: {refusal}")
+        return 2
     if state.status != "completed":
         print(
             f"criteria-close: прогон {run_id} в статусе {state.status!r}, нужен completed"

@@ -10941,3 +10941,138 @@ def test_stale_clone_remote_stop_end_to_end(
     rs.save(state)
     review_live(monkeypatch)
     assert outcome(state, git_ops, monkeypatch) == "no_success"
+
+
+# --- Режим конфига в журнале прогона (plan 3a, Task 2) ---------------------
+
+
+def _set_cfg_mode(mode: str) -> None:
+    from tests.df_config_fixture import write_config
+
+    strict_dirs = (
+        {
+            "agent_gh_config_dir": Path("~/.config/review"),
+            "human_gh_config_dir": Path("~/.config/gh"),
+        }
+        if mode == "strict"
+        else {}
+    )
+    write_config(
+        Path(os.environ["XDG_CONFIG_HOME"]),
+        mode=mode,
+        human="alice",
+        agent="bob",
+        workspace_root=Path(__file__).resolve().parent.parent.parent,
+        **strict_dirs,
+    )
+
+
+def _mode_run(tmp_path: Path, run_id: str, run_mode: str, status: str):
+    ops = FakeOps()
+    state = _wave_run_at_s8(tmp_path, run_id, ops, mode=run_mode)
+    state.status = status
+    rs.save(state)
+    return state
+
+
+def test_start_records_config_mode(tmp_path: Path, runs_root) -> None:
+    _set_cfg_mode("test")
+    ops = FakeOps(discovery=[("start", _reply(20))])
+    state = locked_runner.start(
+        **_start_kwargs(tmp_path, "r-mode-1", ops), interview_spec=_need_spec()
+    )
+    assert state.mode == "test"
+    on_disk = json.loads((rs.run_dir("r-mode-1") / "run.json").read_text("utf-8"))
+    assert on_disk["mode"] == "test"
+
+
+def _call_entry(entry: str, run_id: str, ops: FakeOps):
+    if entry == "resume":
+        return locked_runner.resume(run_id, ops)
+    if entry == "advance":
+        return locked_runner.advance(rs.load(run_id), ops)
+    if entry == "reopen":
+        return locked_runner.reopen(run_id, "charter", ops, manual=True)
+    if entry == "attach":
+        return locked_runner.attach_session(run_id, "s-9", ops)
+    return locked_runner.verify(run_id, ops, f"{run_id}-child")
+
+
+@pytest.mark.parametrize("run_mode,cfg_mode", [("strict", "test"), ("test", "strict")])
+@pytest.mark.parametrize("entry", ["resume", "advance", "reopen", "attach", "verify"])
+def test_entry_refuses_mode_mismatch(
+    tmp_path: Path, runs_root, run_mode: str, cfg_mode: str, entry: str
+) -> None:
+    status = "merged_unverified" if entry == "verify" else "running"
+    run_id = f"r-mm-{entry}"
+    _mode_run(tmp_path, run_id, run_mode, status)
+    _set_cfg_mode(cfg_mode)
+    path = rs.run_dir(run_id) / "run.json"
+    before = path.read_bytes()
+    ops = FakeOps()
+
+    with pytest.raises(rs.ModeMismatchError) as exc:
+        _call_entry(entry, run_id, ops)
+
+    assert str(exc.value) == (
+        f"конфиг DarkFactory: режим конфига {cfg_mode} ≠ режиму прогона "
+        f"{run_mode} ({run_id}) — начните новый прогон"
+    )
+    assert path.read_bytes() == before
+    assert ops.calls == []
+    assert sorted(p.name for p in runs_root.iterdir()) == [run_id]
+
+
+def test_cli_resume_mode_mismatch_exits_2(
+    tmp_path: Path, runs_root, monkeypatch, capsys
+) -> None:
+    _mode_run(tmp_path, "r-mm-cli", "strict", "running")
+    _set_cfg_mode("test")
+    ops = FakeOps()
+    monkeypatch.setattr(runner, "RealOps", lambda: ops)
+
+    assert runner.main(["resume", "--run-id", "r-mm-cli"]) == 2
+    err = capsys.readouterr().err
+    assert "режим конфига test ≠ режиму прогона strict (r-mm-cli)" in err
+    assert ops.calls == []
+
+
+def test_status_ignores_mode_mismatch(tmp_path: Path, runs_root, capsys) -> None:
+    _mode_run(tmp_path, "r-mm-status", "strict", "running")
+    _set_cfg_mode("test")
+    assert runner.main(["status", "--run-id", "r-mm-status"]) == 0
+
+
+def test_resume_same_mode_proceeds(tmp_path: Path, runs_root) -> None:
+    ops = FakeOps(discovery=[("start", _reply(20))])
+    locked_runner.start(
+        **_start_kwargs(tmp_path, "r-same", ops), interview_spec=_need_spec()
+    )
+    _set_cfg_mode("strict")
+    ops.discovery = [("status", _reply(20))]
+    state = locked_runner.resume("r-same", ops)
+    assert state.mode == "strict"
+
+
+def test_verify_child_inherits_parent_mode(tmp_path: Path, runs_root) -> None:
+    ops = FakeOps(review_exit=0, facts=GREEN_PR_FACTS, files=GREEN_BUNDLE_FILES)
+    _mode_run(tmp_path, "r-mm-par", "test", "merged_unverified")
+    _set_cfg_mode("test")
+    child = locked_runner.verify("r-mm-par", ops, "r-mm-par-child")
+    assert child.mode == "test"
+    assert rs.load("r-mm-par-child").mode == "test"
+
+
+@pytest.mark.parametrize("mode,shown", [("test", True), ("strict", False)])
+def test_banner_printed_on_start_and_resume_in_test(
+    tmp_path: Path, runs_root, capsys, mode: str, shown: bool
+) -> None:
+    _set_cfg_mode(mode)
+    ops = FakeOps(discovery=[("start", _reply(20))])
+    locked_runner.start(
+        **_start_kwargs(tmp_path, "r-ban", ops), interview_spec=_need_spec()
+    )
+    assert ("режим test:" in capsys.readouterr().err) is shown
+    ops.discovery = [("status", _reply(20))]
+    locked_runner.resume("r-ban", ops)
+    assert ("режим test:" in capsys.readouterr().err) is shown

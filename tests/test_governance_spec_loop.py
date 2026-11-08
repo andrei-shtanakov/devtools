@@ -2462,3 +2462,23 @@ def test_engineer_stop_without_session_is_not_an_orphan(  # Task 9
         _engineer_args("--traces-to", _operator(tmp_path), "--approval-pr", "7")
     )
     assert [c[0] for c in env.calls] == ["resume"]
+
+
+def test_repeat_refuses_when_run_mode_differs_from_config(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    """Прогон режима test при strict-конфиге: код 2, resume не зван."""
+    state = _mk_run(
+        "fleet-inbox-20260901-abc123",
+        "Fleet Inbox",
+        ws_id="fleet-inbox-20260901",
+        status="waiting_human_merge",
+        target_dir=str(tmp_path / "alpha"),
+    )
+    state.mode = "test"
+    rs.save(state)
+    env = _LoopEnv(monkeypatch, tmp_path, resume_result=state)
+    rc = spec_loop.main(["--subject", "Fleet Inbox", "--repo", "alpha"])
+    assert rc == 2
+    assert env.calls == []
+    assert "режим конфига strict ≠ режиму прогона test" in capsys.readouterr().out

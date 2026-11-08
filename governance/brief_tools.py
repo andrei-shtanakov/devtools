@@ -295,6 +295,7 @@ def propose(run_id: str, ops) -> int:
     """§11.3: brief-PR из `brief_ready`; повтор восстанавливается по форджу."""
     with rl.run_lock(run_id):
         state = rs.load(run_id)
+        rs.require_mode(state)
         data, brief_text = _ready_brief(state)
         dir_ = proposal_dir(state)
         branch = brief_branch(state.ws_id)
@@ -345,6 +346,7 @@ def approve(run_id: str, pr: int, ops) -> Path:
     """
     with rl.run_lock(run_id) as lock:
         state = rs.load(run_id)
+        rs.require_mode(state)
         act = brief_provenance.read_act(ops, state.repo_slug, pr)
         if isinstance(act, brief_provenance.Refusal):
             raise BriefToolError(act.detail, retry=act.retry)
@@ -469,6 +471,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2 if exc.retry else 1
     except df_config.ConfigError as exc:
         print(f"brief-tools: конфиг DarkFactory: {exc}", file=sys.stderr)
+        return 2
+    except rs.ModeMismatchError as exc:
+        print(f"brief-tools: {exc}", file=sys.stderr)
         return 2
     return 1
 

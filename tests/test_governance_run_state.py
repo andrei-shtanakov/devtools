@@ -198,3 +198,20 @@ def test_waves_authoring_is_persisted(tmp_path: Path, runs_root) -> None:
 def test_unknown_authoring_is_refused() -> None:
     with pytest.raises(ValueError, match="authoring"):
         rs.validate_authoring("chunks")
+
+
+def test_run_json_without_mode_loads_strict(runs_root) -> None:
+    state = _mk(runs_root)
+    path = rs.run_dir(state.run_id) / "run.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload.pop("mode")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert rs.load(state.run_id).mode == "strict"
+
+
+def test_validate_mode_rejects_unknown() -> None:
+    rs.validate_mode("strict")
+    rs.validate_mode("test")
+    with pytest.raises(ValueError, match="mode="):
+        rs.validate_mode("lax")

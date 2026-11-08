@@ -940,3 +940,42 @@ def test_unreadable_label_after_create_failure_keeps_original_diagnosis(
     assert exc.value.retry
     assert "PR не создан (HTTP 502)" in str(exc.value)
     assert "ветка уже на форджe" in str(exc.value)
+
+
+# --- Режим конфига ≠ режиму прогона (plan 3a, Task 2) ---------------------
+
+
+def _mismatch_world(tmp_path, runs_root, monkeypatch) -> tuple[ToolOps, bytes]:
+    _brief_ready_run(tmp_path)
+    state = rs.load(RUN_ID)
+    state.mode = "test"  # конфиг (conftest) — strict
+    rs.save(state)
+    ops = _ops(monkeypatch, with_pr=True)
+    return ops, (rs.run_dir(RUN_ID) / "run.json").read_bytes()
+
+
+@pytest.mark.parametrize("command", ["propose", "approve"])
+def test_brief_tools_refuse_mode_mismatch(
+    tmp_path, runs_root, monkeypatch, command
+) -> None:
+    ops, before = _mismatch_world(tmp_path, runs_root, monkeypatch)
+
+    with pytest.raises(rs.ModeMismatchError, match="режим конфига strict ≠"):
+        if command == "propose":
+            bt.propose(RUN_ID, ops)
+        else:
+            bt.approve(RUN_ID, 1, ops)
+
+    assert (rs.run_dir(RUN_ID) / "run.json").read_bytes() == before
+    assert not _signed_path().exists()
+    assert ops.calls == []
+
+
+def test_brief_tools_main_maps_mode_mismatch_to_2(
+    tmp_path, runs_root, monkeypatch, capsys
+) -> None:
+    ops, _ = _mismatch_world(tmp_path, runs_root, monkeypatch)
+    monkeypatch.setattr("governance.ops.RealOps", lambda: ops)
+
+    assert bt.main(["propose", "--run", RUN_ID]) == 2
+    assert "режим конфига strict ≠ режиму прогона test" in capsys.readouterr().err
