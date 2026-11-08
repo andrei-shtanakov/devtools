@@ -338,8 +338,6 @@ TRUSTED_INPUTS = (
     "df_config.sh",
     "governance/__init__.py",
     "governance/df_config.py",
-    "governance/act_settings.py",
-    "governance/secret_dirs.py",
 )
 
 

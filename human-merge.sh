@@ -135,18 +135,19 @@ slug="${slug%.git}"
 # больше не источник: выставленная — отказ, чтобы старое правило не
 # исполнялось молча не так, как задумано.
 [ -z "${AUTHORIZED_APPROVER_ACCOUNTS+x}" ] || die 3 "AUTHORIZED_APPROVER_ACCOUNTS выставлена, но переменная больше не источник политики — источник репозиторий approval-policy; снимите её"
-# Координаты — SSOT contracts/approval-policy-source/v1/source.env под
-# authority-root, в любом режиме: конфиг домашнего каталога источник не
-# перенаправляет. `[policy]` конфига DarkFactory, если задан, обязан совпасть
-# (иначе отказ 2); в test его может не быть, как и самого файла конфига, —
-# тогда сверять нечего (в strict отсутствие `[policy]` отбивает загрузчик).
+# strict: координаты — SSOT contracts/approval-policy-source/v1/source.env под
+# authority-root; конфиг домашнего каталога источник не перенаправляет, а
+# `[policy]` конфига обязан с SSOT совпасть (иначе отказ 2; отсутствие
+# `[policy]` в strict отбивает загрузчик). test: репо политики нет, `[policy]`
+# не используется и не сверяется, approver = `accounts.human`.
 # Правило — как в governance/policy_rule.py.
 src="$script_dir/contracts/approval-policy-source/v1/source.env"
 p_repo=$(ssot_key "$src" APPROVAL_POLICY_REPO "SSOT источника политики") || exit $?
 p_ref=$(ssot_key "$src" APPROVAL_POLICY_REF "SSOT источника политики") || exit $?
 p_path=$(ssot_key "$src" APPROVAL_POLICY_PATH "SSOT источника политики") || exit $?
 # Файла конфига нет — нет и `[policy]`, сверять нечего (путь — правило
-# `act_settings.config_home`: только абсолютный XDG_CONFIG_HOME, иначе ~/.config).
+# `config_home` из governance/df_config.py (act_settings его реэкспортирует):
+# только абсолютный XDG_CONFIG_HOME, иначе ~/.config).
 if [ -e "$df_conf_file" ] || [ -L "$df_conf_file" ]; then
     if [ "$df_mode" = "test" ]; then
         : # test: `[policy]` не используется и не сверяется (репо политики нет)
