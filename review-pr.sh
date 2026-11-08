@@ -95,11 +95,9 @@ gh_r() {
     GH_CONFIG_DIR="$REVIEW_GH_CONFIG_DIR" gh "$@"
 }
 
-# Корень флота — родитель devtools/, где лежит этот скрипт; FLEET_ROOT —
-# явный оверрайд для тестов и ephemeral-workspace (та же логика, что
-# WORKSPACE в Makefile).
+# Корень флота — `workspace.root` конфига DarkFactory; FLEET_ROOT — явный
+# оверрайд для тестов и ephemeral-workspace.
 script_dir=$(cd "$(dirname "$0")" && pwd)
-FLEET_ROOT="${FLEET_ROOT:-$(dirname "$script_dir")}"
 . "$script_dir/df_config.sh"
 
 repo=""
@@ -294,6 +292,7 @@ claude требует кит steward >= a2d7e71 — ре-вендорьте (в�
     esac
     reviewer_label="${REVIEW_CMD:-codex exec}"
 }
+if [ -z "${FLEET_ROOT:-}" ]; then FLEET_ROOT=$(df_cfg workspace.root) || exit $?; fi
 if [ "$print_review_cmd" -eq 1 ]; then
     # Отладочный зонд для тестов: показать разрешённую команду и выйти,
     # не трогая GitHub. Кит — из чекаута репо, если он есть (feature-detect

@@ -13,7 +13,7 @@
 # внешняя конфигурация, не код обвязки.
 #
 # Зачем: по ADR-ECO-011 («DarkFactory») агент мержит сам, от профиля
-# ai-prosto. Пока мерж был голым вызовом — `gh pr merge` руками у оператора,
+# учётки агента. Пока мерж был голым вызовом — `gh pr merge` руками у оператора,
 # `gh api -X PUT …/merge` из `Ops.merge` — не существовало места, куда
 # поставить проверку и накрыть её тестом, а живых путей было три. Теперь
 # путь один: и оператор, и `accept-pr`, и S7 раннера мержат отсюда
@@ -268,7 +268,6 @@ script_dir=$(cd "$(dirname "$0")" && pwd)
 . "$script_dir/df_config.sh"
 . "$script_dir/approval_branches.sh"
 
-FLEET_ROOT="${FLEET_ROOT:-$(dirname "$script_dir")}"
 APPROVAL_PATTERNS="${APPROVAL_PATTERNS:-\
 $script_dir/contracts/approval-branches/v1/patterns.env}"
 
@@ -392,7 +391,22 @@ if [ "$print_globs" -eq 1 ]; then
     exit 0
 fi
 
+# --- Чистота чекаута обвязки под --authority-override ----------------------
+# ДО любого исполнения кода обвязки из этого дерева (`df_cfg` ниже запускает
+# governance/df_config.py): зависит только от `$script_dir`.
+if [ -n "$authority_override" ]; then
+    if ! _dirty=$(git -C "$script_dir" status --porcelain 2>&1); then
+        die 2 "--authority-override: состояние чекаута обвязки $script_dir не \
+прочитано ($_dirty)"
+    fi
+    [ -z "$_dirty" ] || die 2 "--authority-override: рабочее дерево обвязки \
+$script_dir не чистое — недоверенный чекаут, обход не выполняется:
+$_dirty"
+fi
+
 # --- Репо и slug -----------------------------------------------------------
+# Корень флота — `workspace.root` конфига (после проверки чистоты выше).
+if [ -z "${FLEET_ROOT:-}" ]; then FLEET_ROOT=$(df_cfg workspace.root) || exit $?; fi
 repo_dir="$FLEET_ROOT/$repo"
 [ -d "$repo_dir" ] || die 2 "репо '$repo' не найдено в $FLEET_ROOT"
 # Slug — из СЫРОГО remote.origin.url (git config, не `remote get-url`):
@@ -407,7 +421,8 @@ slug=$(github_slug "$origin_url") || exit $?
 # Флаг снимает гвард, значит и проверять его обязана доверенная версия
 # скрипта: дерево `$script_dir` чистое и обвязка мержит PR своего же репо
 # (предок-проверка HEAD — ниже, когда прочитана живая верхушка базы). Чистота
-# — ДО исполнения стоп-крана из этого дерева. Без флага — не проверяется.
+# дерева уже проверена выше (до `df_cfg` и до стоп-крана); здесь — origin.
+# Без флага — не проверяется.
 if [ -n "$authority_override" ]; then
     if ! _harness_url=$(git -C "$script_dir" config --get remote.origin.url); then
         die 2 "--authority-override: у чекаута обвязки $script_dir нет origin — \
@@ -417,13 +432,6 @@ if [ -n "$authority_override" ]; then
     [ "$harness_slug" = "$slug" ] || die 2 "--authority-override применим \
 только к PR в репо самой обвязки ($harness_slug), а не в $slug: доверенность \
 чекаута сверяется с верхушкой базы этого репо"
-    if ! _dirty=$(git -C "$script_dir" status --porcelain 2>&1); then
-        die 2 "--authority-override: состояние чекаута обвязки $script_dir не \
-прочитано ($_dirty)"
-    fi
-    [ -z "$_dirty" ] || die 2 "--authority-override: рабочее дерево обвязки \
-$script_dir не чистое — недоверенный чекаут, обход не выполняется:
-$_dirty"
 fi
 
 # --- Профиль ---------------------------------------------------------------
@@ -458,7 +466,12 @@ if [ -n "${MERGE_APP_ID:-}" ] || [ -n "${MERGE_APP_KEY:-}" ]; then
     app_mode=1
     # Ключ — только из каталога ключей App установки, обычный читаемый файл;
     # `..` в пути — отказ (выход за каталог). Иное — 2, не откат на профиль.
-    _apps_dir="${XDG_CONFIG_HOME:-$HOME/.config}/darkfactory/apps/"
+    # Правило каталога конфига — как `act_settings.config_home`: только
+    # абсолютный XDG_CONFIG_HOME, иначе ~/.config.
+    case "${XDG_CONFIG_HOME:-}" in
+        /*) _apps_dir="$XDG_CONFIG_HOME/darkfactory/apps/" ;;
+        *)  _apps_dir="$HOME/.config/darkfactory/apps/" ;;
+    esac
     case "$MERGE_APP_KEY" in
         */../*|*/..) die 2 "App-режим: MERGE_APP_KEY содержит '..' — \
 $MERGE_APP_KEY" ;;

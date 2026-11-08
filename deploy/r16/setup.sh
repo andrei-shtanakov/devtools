@@ -63,5 +63,5 @@ fi
 echo "== systemd units (installed, timer left off) =="
 cp "$HERE/r16-kb-freshness.service" "$HERE/r16-kb-freshness.timer" "$UNIT_DIR"/
 systemctl daemon-reload
-echo ">>> gh profile: put ai-prosto's hosts.yml into $R16_HOME/gh (0600, r16:r16)"
+echo ">>> gh profile: put the agent account's hosts.yml into $R16_HOME/gh (0600, r16:r16)"
 echo ">>> then follow deploy/r16/README.md: dry-run, handover steps 2-4"

@@ -3917,3 +3917,14 @@ def test_suite_ignores_real_install_settings(
     outcome = approve(world, "charter")
     assert outcome.request is not None
     assert world.state.ops[outcome.request].get("act") is None
+
+
+def test_finalize_merge_policy_config_error_named(tmp_path: Path, monkeypatch) -> None:
+    """Битый конфиг: именованный отказ (человеку), без трейсбэка."""
+    cfg = tmp_path / "cfg" / "darkfactory" / "config.toml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text("schema = 1\n", encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.delenv("REVIEW_LOGIN", raising=False)
+    who, why = an.finalize_merge_policy(str(tmp_path))
+    assert who == "human" and why.startswith("конфиг DarkFactory: ")

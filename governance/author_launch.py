@@ -450,7 +450,7 @@ def _preflight(call: AuthorCall, contract: Path) -> _Ready | str:
 
 def _probe_targets(ready: _Ready) -> sandbox.ProbeTargets:
     """Что проба обязана не суметь записать (§10 п.3, §15)."""
-    extra = [DEVTOOLS_ROOT.parent / "disputatio" / ".venv"]
+    extra = [df_config.workspace_root() / "disputatio" / ".venv"]
     if ready.target == DEVTOOLS_ROOT:
         extra.append(DEVTOOLS_ROOT / "governance")
     return sandbox.ProbeTargets(

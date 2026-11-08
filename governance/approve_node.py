@@ -84,7 +84,10 @@ def finalize_merge_policy(target_dir: str) -> tuple[str, str]:
     authority = build_authority(Path(target_dir), None)
     if authority.effective() != "agent":
         return "human", "политика authority (экосистема/репо) — человек"
-    safety = load_safety()
+    try:
+        safety = load_safety()
+    except df_config.ConfigError as exc:
+        return "human", f"конфиг DarkFactory: {exc}"
     if safety.agent_merge_allowed is not True:
         return "human", "safety steward: агентский мерж не разрешён/unknown"
     if safety.actor_class != "agent":

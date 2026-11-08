@@ -649,6 +649,8 @@ def test_busy_run_exits_1_before_reading_state(  # T37 (brief-propose/brief-appr
         raise AssertionError("run.json прочитан при занятой блокировке")
 
     monkeypatch.setattr(rs, "load", no_load)
+    # Соседа discovery в тесте нет; предмет теста — блокировка, не раскладка.
+    monkeypatch.setattr(bt.df_config, "workspace_dir", lambda name: tmp_path)
     argv = [command, "--run", RUN_ID] + (["--pr", "7"] if command == "approve" else [])
     with run_lock.run_lock(RUN_ID):
         assert bt.main(argv) == 1

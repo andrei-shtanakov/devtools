@@ -502,3 +502,18 @@ def test_brief_pr_head_race_then_recheck_of_new_head(fleet: Fleet) -> None:  # T
     assert second.returncode == 0, second.stderr
     assert f"--head {new_head}" in _uv_calls(fleet)[-1]
     assert f"sha={new_head}" in fleet.merge_calls()[-1]
+
+
+def test_dangling_config_symlink_fails_closed(fleet: Fleet) -> None:
+    """Висячая симлинка на месте конфига — не «файла нет»: отказ, сверка не
+    пропускается молча."""
+    conf = fleet.xdg / "darkfactory" / "config.toml"
+    conf.unlink()
+    conf.symlink_to(fleet.xdg / "nowhere.toml")
+    res = fleet.run(
+        HUMAN_GH_CONFIG_DIR=str(fleet.human_profile),
+        REVIEW_GH_CONFIG_DIR=str(fleet.agent_profile),
+    )
+    assert res.returncode != 0, res.stderr
+    assert "config.toml" in res.stderr, res.stderr
+    assert fleet.calls() == []

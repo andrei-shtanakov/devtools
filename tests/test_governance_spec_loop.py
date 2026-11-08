@@ -237,7 +237,7 @@ def test_broken_fleet_manifest_never_falls_back(manifest) -> None:
 @pytest.mark.parametrize("repo", ["../polygon", "/abs/polygon", "a/b", ".hidden"])
 @pytest.mark.parametrize("targets", [TARGETS, None], ids=["with-list", "fleet-only"])
 def test_target_must_be_one_dir_component(repo, targets) -> None:
-    """И флот, и список приёмки: `WORKSPACE_ROOT / repo` не выходит из workspace
+    """И флот, и список приёмки: `workspace_root() / repo` не выходит из workspace
     (даже если такой git_dir записан в файле состава)."""
     manifest = (
         MANIFEST
@@ -322,10 +322,68 @@ def test_manifest_unreadable_is_refused_without_fallback(
     runs_root, tmp_path, monkeypatch, capsys
 ) -> None:
     env = _LoopEnv(monkeypatch, tmp_path)
-    monkeypatch.setattr(spec_loop, "MANIFEST_PATH", tmp_path / "missing.toml")
+    monkeypatch.setattr(spec_loop, "manifest_path", lambda: tmp_path / "missing.toml")
     rc = spec_loop.main(["--subject", "s", "--repo", "polygon"])
     assert rc == 1 and env.calls == []
     assert "манифест флота" in capsys.readouterr().out
+
+
+def _config_root(tmp_path: Path, monkeypatch, ws: Path) -> None:
+    """Реальный конфиг DarkFactory с `workspace.root = ws`."""
+    from governance import df_config
+    from tests.df_config_fixture import write_config
+
+    env = write_config(tmp_path / "xdg-ws", mode="test", workspace_root=ws)
+    monkeypatch.setenv("XDG_CONFIG_HOME", env["XDG_CONFIG_HOME"])
+    monkeypatch.setattr(spec_loop, "workspace_root", df_config.workspace_root)
+
+
+def test_default_target_is_workspace_root_repo(
+    runs_root, tmp_path, monkeypatch
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    ws = tmp_path / "separate-ws"
+    (ws / "alpha").mkdir(parents=True)
+    _config_root(tmp_path, monkeypatch, ws)
+    seen: list[str] = []
+
+    def origin(d):
+        seen.append(d)
+        return "git@github.com:owner/alpha.git"
+
+    monkeypatch.setattr(spec_loop, "_origin_url", origin)
+    spec_loop.main(["--subject", "s", "--repo", "alpha"])
+    assert seen[0] == str(ws / "alpha")
+    assert env.calls and env.calls[0][1]["target_dir"] == str(ws / "alpha")
+
+
+def test_default_target_missing_dir_refuses_before_git(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    ws = tmp_path / "separate-ws"
+    ws.mkdir()
+    _config_root(tmp_path, monkeypatch, ws)
+
+    def origin(_d):
+        raise AssertionError("git вызван до проверки каталога")
+
+    monkeypatch.setattr(spec_loop, "_origin_url", origin)
+    rc = spec_loop.main(["--subject", "s", "--repo", "alpha"])
+    out = capsys.readouterr().out
+    assert rc == 2 and env.calls == []
+    assert f"конфиг DarkFactory: workspace.root={ws}: нет каталога alpha" in out
+
+
+@pytest.mark.no_df_config
+def test_config_failure_is_rc_2(runs_root, tmp_path, monkeypatch, capsys) -> None:
+    _LoopEnv(monkeypatch, tmp_path)
+    from governance import df_config
+
+    monkeypatch.setattr(spec_loop, "workspace_root", df_config.workspace_root)
+    rc = spec_loop.main(["--subject", "s", "--repo", "alpha"])
+    assert rc == 2
+    assert "spec-loop: конфиг DarkFactory" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("origin_ok", [True, False])
@@ -649,9 +707,11 @@ class _LoopEnv:
         target = tmp_path / "alpha"
         (target / ".git").mkdir(parents=True)
         self.target = target
-        monkeypatch.setattr(spec_loop, "MANIFEST_PATH", tmp_path / "manifest.toml")
+        monkeypatch.setattr(
+            spec_loop, "manifest_path", lambda: tmp_path / "manifest.toml"
+        )
         (tmp_path / "manifest.toml").write_text(MANIFEST, encoding="utf-8")
-        monkeypatch.setattr(spec_loop, "WORKSPACE_ROOT", tmp_path)
+        monkeypatch.setattr(spec_loop, "workspace_root", lambda: tmp_path)
         monkeypatch.setattr(
             spec_loop, "_origin_url", lambda d: "git@github.com:owner/alpha.git"
         )
@@ -1543,8 +1603,8 @@ def _wave_recovery_env(tmp_path, monkeypatch, ops):
     target = tmp_path / "alpha"
     (target / ".git").mkdir(parents=True)
     (tmp_path / "manifest.toml").write_text(MANIFEST, encoding="utf-8")
-    monkeypatch.setattr(spec_loop, "MANIFEST_PATH", tmp_path / "manifest.toml")
-    monkeypatch.setattr(spec_loop, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(spec_loop, "manifest_path", lambda: tmp_path / "manifest.toml")
+    monkeypatch.setattr(spec_loop, "workspace_root", lambda: tmp_path)
     monkeypatch.setattr(
         spec_loop, "_origin_url", lambda _d: "git@github.com:owner/alpha.git"
     )

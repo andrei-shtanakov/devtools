@@ -357,6 +357,58 @@ def _file_sha256(real: str) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+#: Корень devtools, от которого читается протокол допуска (`evidence`).
+EVIDENCE_BASE = Path(__file__).resolve().parent.parent
+EVIDENCE_PREFIX = ("docs", "evidence")
+EVIDENCE_READ_LIMIT = 1 << 20
+#: Строки протокола допуска: их пишет `render_admit_protocol`, их же требует
+#: `admission_check` (общие константы, не копии).
+VERDICT_PASSED = "ПРОШЛО — запись допуска предложена"
+VERDICT_FAILED = "НЕ ПРОШЛО"
+FAILURES_HEADING = "## Отказы"
+
+
+def verdict_line(verdict: str) -> str:
+    """Строка итога протокола допуска."""
+    return f"**Итог: {verdict}.**"
+
+
+def _evidence_rel(record: Admission) -> PurePosixPath:
+    rel = PurePosixPath(record.evidence)
+    if (
+        rel.is_absolute()
+        or ".." in rel.parts
+        or rel.parts[:2] != EVIDENCE_PREFIX
+        or len(rel.parts) < 3
+    ):
+        raise _not_admitted(f"{record.evidence}: ждали путь под docs/evidence/")
+    return rel
+
+
+def _check_evidence(record: Admission) -> None:
+    """Протокол записи есть, итог «ПРОШЛО», отказов нет, блок записи дословный.
+
+    Протокол печатает оба хэша и при провале пробы, поэтому одних хэшей мало.
+    """
+    rel = _evidence_rel(record)
+    try:
+        data = safe_io.read_regular(
+            EVIDENCE_BASE, rel, limit=EVIDENCE_READ_LIMIT, timeout=10.0
+        )
+        text = data.decode("utf-8")
+    except (safe_io.SafeIOError, UnicodeDecodeError) as exc:
+        raise _not_admitted(f"протокол {record.evidence}: {exc}") from exc
+    lines = text.splitlines()
+    if lines.count(verdict_line(VERDICT_PASSED)) != 1:
+        raise _not_admitted(f"протокол {record.evidence}: нет единственного итога")
+    if verdict_line(VERDICT_FAILED) in lines:
+        raise _not_admitted(f"протокол {record.evidence}: есть итог «НЕ ПРОШЛО»")
+    if FAILURES_HEADING in lines:
+        raise _not_admitted(f"протокол {record.evidence}: есть раздел отказов")
+    if admission_record(record) not in text:
+        raise _not_admitted(f"протокол {record.evidence}: запись не совпала")
+
+
 def admission_check(
     contract_path: Path, *, harness: str = "claude", path: str | None = None
 ) -> Admission:
@@ -385,6 +437,7 @@ def admission_check(
     for record in same_path:
         wrong = [k for k, v in actual.items() if getattr(record, k) != v]
         if not wrong:
+            _check_evidence(record)
             return record
         misses.append(f"{record.version}: не совпали {', '.join(wrong)}")
     raise _not_admitted(f"{harness} {real} — " + "; ".join(misses))
@@ -1157,7 +1210,7 @@ def render_admit_protocol(
     notes: Sequence[str] = (),
 ) -> str:
     """Протокол допуска для `docs/evidence/` — факты, не пересказ модели."""
-    verdict = "ПРОШЛО — запись допуска предложена" if not failures else "НЕ ПРОШЛО"
+    verdict = VERDICT_PASSED if not failures else VERDICT_FAILED
     rows = "\n".join(
         f"| {c.tool} | `{_key(c)[:80]}` | {c.is_error} | `{c.content.strip()[:80]}` |"
         for c in calls
@@ -1179,7 +1232,7 @@ def render_admit_protocol(
         f"- проба §15: {'зелёная' if probe.ok else 'красная'}"
         + "".join(f"\n  - {item}" for item in (*probe.failures, *probe.notes)),
         "",
-        f"**Итог: {verdict}.**",
+        verdict_line(verdict),
         "",
         "## Сырые `tool_result` (stream-json)",
         "",
@@ -1191,7 +1244,7 @@ def render_admit_protocol(
     if notes:
         lines += ["## Примечания", "", *(f"- {n}" for n in notes), ""]
     if failures:
-        lines += ["## Отказы", "", *(f"- {f}" for f in failures), ""]
+        lines += [FAILURES_HEADING, "", *(f"- {f}" for f in failures), ""]
     else:
         lines += [
             "## Запись допуска (вносит оператор, шаг H2)",

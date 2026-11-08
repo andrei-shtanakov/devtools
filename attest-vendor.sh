@@ -48,14 +48,14 @@
 #     вывод чужого (даже апстримного) кода в тело не копируется, только в
 #     stderr для оператора; страж перед публикацией отказывает, если в
 #     теле оказалась хоть одна лишняя `<!--`-последовательность;
-#   - доставленный CHANGES_REQUESTED от ai-prosto на этом PR не гасится
+#   - доставленный CHANGES_REQUESTED от учётки агента на этом PR не гасится
 #     синтетическим approve; повтор на той же голове идемпотентен (дедуп).
 #
 # Материализация головы PR и профиль публикации — тем же приёмом, что у
 # review-pr.sh: служебный ref (свой — refs/attest/pr-<N>, не общий с
 # review-pr.sh) + временный detached worktree, рабочее дерево целевого репо
 # не трогается; публикация — под отдельным профилем gh (GH_CONFIG_DIR,
-# аккаунт ai-prosto), логин сверяется перед публикацией.
+# аккаунт агента), логин сверяется перед публикацией.
 #
 # Коды выхода:
 #   0 — сверка чиста, аттестация опубликована (или dry-run, или уже была
@@ -94,11 +94,10 @@ gh_r() {
     GH_CONFIG_DIR="$REVIEW_GH_CONFIG_DIR" gh "$@"
 }
 
-# Корень флота — родитель devtools/; FLEET_ROOT — оверрайд для тестов.
+# Корень флота — `workspace.root` конфига; FLEET_ROOT — оверрайд для тестов.
 # Апстрим steward — сосед по флоту; STEWARD_DIR — отдельный оверрайд.
 # Доверенная ветка steward, против которой проверяется ancestry (I1).
 script_dir=$(cd "$(dirname "$0")" && pwd)
-FLEET_ROOT="${FLEET_ROOT:-$(dirname "$script_dir")}"
 . "$script_dir/df_config.sh"
 STEWARD_TRUSTED_REF="${STEWARD_TRUSTED_REF:-origin/master}"
 MARKER_NAME="ai-prosto-vendor-attestation"
@@ -130,6 +129,7 @@ case "$pr" in
     *[!0-9]*|"") die 2 "номер PR должен быть числом, получено: '$pr'" ;;
 esac
 
+if [ -z "${FLEET_ROOT:-}" ]; then FLEET_ROOT=$(df_cfg workspace.root) || exit $?; fi
 repo_dir="$FLEET_ROOT/$repo"
 [ -d "$repo_dir" ] || die 2 "репо '$repo' не найдено в $FLEET_ROOT"
 repo_dir=$(cd "$repo_dir" && pwd)

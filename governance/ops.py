@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -1743,7 +1744,11 @@ class RealOps(BriefFactsMixin):
         конфигурации, а не из кода. Профиля нет — None без вызова `gh`
         (иначе `gh` ответил бы логином основного профиля).
         """
-        profile = review_gh_config_dir()
+        try:
+            profile = review_gh_config_dir()
+        except df_config.ConfigError as exc:
+            print(f"конфиг DarkFactory: {exc}", file=sys.stderr)
+            return None
         if not profile.is_dir():
             return None
         return _gh_user_login({**os.environ, "GH_CONFIG_DIR": str(profile)})
@@ -2036,7 +2041,7 @@ class RealOps(BriefFactsMixin):
         намеренный обход.
 
         Раньше здесь стоял прямой `gh api -X PUT …/merge` от профиля
-        ai-prosto. Он ходил мимо гвардов обвязки, и утверждение CLAUDE.md
+        учётки агента. Он ходил мимо гвардов обвязки, и утверждение CLAUDE.md
         «агентский мерж только через merge-pr.sh» было ложным ровно на два
         живых пути — `accept-pr` и S7 раннера (оба вызывают этот метод).
         Дублировать гварды в питоне значило бы завести второе место одного
@@ -2130,7 +2135,7 @@ class RealOps(BriefFactsMixin):
             "run",
             "--frozen",
             "--project",
-            str(DEVTOOLS_ROOT.parent / "discovery"),
+            str(df_config.workspace_dir("discovery")),
             "discovery",
             *args,
         ]

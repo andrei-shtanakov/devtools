@@ -9,7 +9,7 @@
 # агентским профилем:
 # агентский профиль записал бы человеческий акт агентским, и подпись §I12
 # (merged_by ∈ allowlist) не сложилась бы. Это зеркало merge-pr.sh: тот
-# сверяет, что мержит ai-prosto, этот — что мержит человек из allowlist.
+# сверяет, что мержит учётка агента, этот — что мержит человек из allowlist.
 #
 # Fail-closed: логин обязан входить в политику подписи — файл
 # `policy/approvers.env` репозитория approval-policy (координаты — SSOT
@@ -31,7 +31,7 @@
 # защита и является. Под ruleset'ом, требующим одобряющего ревью, мерж
 # пройдёт ТОЛЬКО если ревью на PR есть. В волновом режиме (дефолт с
 # 2026-09-23, S13) оно есть всегда: candidate несёт одобряющее ревью
-# edge-check от ai-prosto, и за две живые приёмки `--admin` не понадобился
+# edge-check от учётки агента, и за две живые приёмки `--admin` не понадобился
 # ни разу. В прежнем пути (§I12 одним бандл-PR) у candidate одобряющего
 # ревью нет — там команда упрётся в 405, и это НЕ дефект команды: акт
 # совершается либо после публикации ревью, либо руками оператора в
@@ -64,7 +64,6 @@ script_dir=$(cd "$(dirname "$0")" && pwd)
 . "$script_dir/ssot_env.sh"
 . "$script_dir/df_config.sh"
 . "$script_dir/approval_branches.sh"
-FLEET_ROOT="${FLEET_ROOT:-$(dirname "$script_dir")}"
 APPROVAL_PATTERNS="${APPROVAL_PATTERNS:-\
 $script_dir/contracts/approval-branches/v1/patterns.env}"
 
@@ -105,6 +104,7 @@ gh_h() {
     GH_CONFIG_DIR="$human_profile" gh "$@"
 }
 
+if [ -z "${FLEET_ROOT:-}" ]; then FLEET_ROOT=$(df_cfg workspace.root) || exit $?; fi
 repo_dir="$FLEET_ROOT/$repo"
 [ -d "$repo_dir" ] || die 2 "репо '$repo' не найдено в $FLEET_ROOT"
 origin_url=$(git -C "$repo_dir" config --get remote.origin.url) \
@@ -138,7 +138,7 @@ case "${XDG_CONFIG_HOME:-}" in
     /*) df_conf_file="$XDG_CONFIG_HOME/darkfactory/config.toml" ;;
     *)  df_conf_file="$HOME/.config/darkfactory/config.toml" ;;
 esac
-if [ -e "$df_conf_file" ]; then
+if [ -e "$df_conf_file" ] || [ -L "$df_conf_file" ]; then
     df_mode=$(df_cfg mode) || exit $?
     if [ "$df_mode" = "test" ] && ! df_cfg policy.repo >/dev/null 2>&1; then
         :

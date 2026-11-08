@@ -23,13 +23,14 @@ spec-runner, завершив цикл, открывает integration-PR и о�
    и глазами» — не ритуал); любой красный → стоп без мержа;
 3. гарды перед агентским мержем: authority-root пути (`.github/`,
    `profiles/`) — всегда человеку (ADR-ECO-004 I2); немержабельный PR — стоп;
-4. мерж от ai-prosto (`Ops.merge`, PUT с пином head), затем подсказка
+4. мерж от учётки агента (`Ops.merge`, PUT с пином head), затем подсказка
    `spec-runner sync`.
 
 CLI: ``python -m governance.accept_pr --repo kapelle --pr 59``
-(``make accept-pr ARGS='--repo kapelle --pr 59'``); ``--owner`` — дефолт
-andrei-shtanakov. Полный цикл «sync + повторный run до remaining=0» —
-вариант (в), сюда намеренно не входит.
+(``make accept-pr ARGS='--repo kapelle --pr 59'``); ``--owner``
+необязателен: по умолчанию владелец берётся из origin локального чекаута цели.
+Полный цикл «sync + повторный run до remaining=0» — вариант (в), сюда
+намеренно не входит.
 """
 
 from __future__ import annotations
@@ -41,10 +42,9 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from governance import authority_root, ssot_env
+from governance import authority_root, df_config, ssot_env
 from governance.facts import Outcome
 from governance.ops import (
-    DEVTOOLS_ROOT,
     REVIEW_BARRIER_EXIT,
     REVIEW_BARRIER_STOP,
     Ops,
@@ -402,17 +402,20 @@ def main(argv: list[str] | None = None) -> int:
     """CLI-обвязка; вся политика — в `accept()` (тестируется стабом Ops).
 
     Гард владельца (приёмка PR #109, круг 3): `review` работает через
-    ЛОКАЛЬНЫЙ чекаут `../<repo>` (так устроен review-pr.sh), а `merge` — по
+    ЛОКАЛЬНЫЙ чекаут `<workspace.root>/<repo>` (так устроен review-pr.sh), а `merge` — по
     слагу `--owner/--repo`; расхождение означало бы «отревьюили один репо,
     смержили другой». Origin чекаута обязан совпасть со слагом.
     """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, help="имя репо (kapelle)")
     parser.add_argument("--pr", required=True, type=int)
-    parser.add_argument("--owner", default="andrei-shtanakov")
+    parser.add_argument("--owner", default=None, help="владелец (иначе из origin)")
     args = parser.parse_args(argv)
-    repo_slug = f"{args.owner}/{args.repo}".lower()
-    target_dir = str(DEVTOOLS_ROOT.parent / args.repo)
+    try:
+        target_dir = str(df_config.workspace_dir(args.repo))
+    except df_config.ConfigError as exc:
+        print(f"accept-pr: конфиг DarkFactory: {exc}")
+        return 2
     origin = subprocess.run(
         ["git", "-C", target_dir, "remote", "get-url", "origin"],
         capture_output=True,
@@ -420,9 +423,19 @@ def main(argv: list[str] | None = None) -> int:
         check=False,
     )
     checkout_slug = _origin_slug(origin.stdout) if origin.returncode == 0 else None
+    if args.owner is None:
+        if checkout_slug is None:
+            print(
+                f"accept-pr: у чекаута {target_dir} нет разбираемого origin — "
+                "владельца не определить, укажите --owner"
+            )
+            return 2
+        repo_slug = f"{checkout_slug.split('/')[0]}/{args.repo}".lower()
+    else:
+        repo_slug = f"{args.owner}/{args.repo}".lower()
     if checkout_slug != repo_slug:
         print(
-            f"accept-pr: origin локального чекаута ../{args.repo} = "
+            f"accept-pr: origin локального чекаута {target_dir} = "
             f"{checkout_slug!r}, а мерж адресован {repo_slug!r} — стоп "
             "(ревью и мерж обязаны смотреть в один репозиторий)"
         )
