@@ -38,3 +38,12 @@ sha256 = "c9b5341637becbd423ddffc5b254afb645682a3868cb708bbc6cc0e7bb419937"
 macos_major = 26
 profile_sha256 = "f8e135803c4b3de4872908ea285307f0fceca060fab62712277acf260ca8dd37"
 evidence = "docs/evidence/2026-10-12-author-sandbox-admit-2.1.296.md"
+
+[[admitted]]
+harness = "claude"
+version = "2.1.319"
+realpath = "/Users/Andrei_Shtanakov/.local/share/claude/versions/2.1.319"
+sha256 = "1f53587e92dee8e089fa349188a4cda64fa34ace6e7b0ca2ee278ddaa3cc2ebd"
+macos_major = 26
+profile_sha256 = "f8e135803c4b3de4872908ea285307f0fceca060fab62712277acf260ca8dd37"
+evidence = "docs/evidence/2026-11-08-author-sandbox-admit-2.1.319.md"
