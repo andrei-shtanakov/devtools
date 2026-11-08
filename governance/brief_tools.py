@@ -144,6 +144,8 @@ def _matches(
     repo, ref, path = policy_rule.policy_source()
     version = _fact(ops.policy_version_fact_at(repo, ref, path, req.policy_sha), "пин")
     if version.value is not True:
+        if (repo, ref, path) == policy_rule.TEST_POLICY_SOURCE:
+            raise BriefToolError(policy_rule.TEST_APPROVER_CHANGED)
         raise BriefToolError(f"пин предложения {req.policy_sha} — не версия политики")
     return req.policy_sha
 

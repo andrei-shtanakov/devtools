@@ -299,3 +299,80 @@ def test_comment_with_deleted_author_is_found_unknown(monkeypatch) -> None:
 def test_merge_fields_of_wrong_type_are_unavailable(monkeypatch, over) -> None:
     _gh(monkeypatch, [(0, _page([_file("a")], **over))])
     assert RealOps().brief_pr_fact(REPO, 7).outcome is Outcome.UNAVAILABLE
+
+
+# --- синтетическая политика test (план 3a, Task 3) ---
+
+
+def _test_config(monkeypatch, tmp_path, *, mode: str = "test") -> None:
+    from pathlib import Path
+
+    from tests.df_config_fixture import write_config
+
+    strict = {
+        "human": "bob",
+        "agent_gh_config_dir": Path("~/.config/review"),
+        "human_gh_config_dir": Path("~/.config/gh"),
+    }
+    extra = strict if mode == "strict" else {"human": "alice"}
+    env = write_config(tmp_path, mode=mode, agent="alice", **extra)
+    monkeypatch.setenv("XDG_CONFIG_HOME", env["XDG_CONFIG_HOME"])
+
+
+def _no_gh(monkeypatch) -> None:
+    def boom(argv, **kwargs):
+        raise AssertionError(f"вызов gh для синтетической политики: {argv}")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+
+
+@pytest.mark.parametrize("facts", ["real_ops", "merge_check"])
+def test_brief_facts_test_coords_never_call_gh(monkeypatch, tmp_path, facts) -> None:
+    """Версия, `…_at` и состав для координат test — из конфига, без `gh`; и у
+    RealOps, и у проверяльщика human-merge (один миксин)."""
+    from governance import brief_merge_check, policy_rule
+
+    _test_config(monkeypatch, tmp_path)
+    _no_gh(monkeypatch)
+    ops = RealOps() if facts == "real_ops" else brief_merge_check.GhFacts()
+    policy = policy_rule.test_policy()
+    assert policy is not None
+    repo, ref, path = policy_rule.TEST_POLICY_SOURCE
+    version = ops.policy_version_fact(repo, ref, path)
+    assert (version.outcome, version.value) == (Outcome.FOUND, policy.sha)
+    at = ops.policy_version_fact_at(repo, ref, path, policy.sha)
+    assert (at.outcome, at.value) == (Outcome.FOUND, True)
+    content = ops.repo_file_fact(repo, policy.sha, path)
+    assert (content.outcome, content.value) == (Outcome.FOUND, policy.content)
+
+
+def test_brief_facts_test_coords_other_sha_absent(monkeypatch, tmp_path) -> None:
+    """Истории нет: другой sha — не версия и без состава."""
+    from governance import policy_rule
+
+    _test_config(monkeypatch, tmp_path)
+    _no_gh(monkeypatch)
+    repo, ref, path = policy_rule.TEST_POLICY_SOURCE
+    at = RealOps().policy_version_fact_at(repo, ref, path, SHA)
+    assert (at.outcome, at.value) == (Outcome.FOUND, False)
+    assert RealOps().repo_file_fact(repo, SHA, path).outcome is Outcome.ABSENT
+
+
+def test_brief_facts_test_coords_outside_test_mode_absent(monkeypatch, tmp_path):
+    """Координаты test при strict-конфиге — синтетической политики нет, без `gh`."""
+    from governance import policy_rule
+
+    _test_config(monkeypatch, tmp_path, mode="strict")
+    _no_gh(monkeypatch)
+    repo, ref, path = policy_rule.TEST_POLICY_SOURCE
+    assert RealOps().policy_version_fact(repo, ref, path).outcome is Outcome.ABSENT
+    at = RealOps().policy_version_fact_at(repo, ref, path, SHA)
+    assert (at.outcome, at.value) == (Outcome.FOUND, False)
+
+
+def test_brief_facts_other_coords_still_call_gh(monkeypatch, tmp_path) -> None:
+    """Прочие координаты в test — как сегодня, через `gh`."""
+    _test_config(monkeypatch, tmp_path)
+    calls = _gh(monkeypatch, [(0, {"data": {"repository": {"ref": None}}})])
+    fact = RealOps().policy_version_fact("o/policy", "main", "p.env")
+    assert fact.outcome is Outcome.ABSENT and calls

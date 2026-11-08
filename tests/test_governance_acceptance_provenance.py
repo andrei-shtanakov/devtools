@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -128,7 +129,15 @@ def test_agent_login_from_config(tmp_path, monkeypatch):
 
     assert ap.agent_login() == "ai-prosto"  # автофикстура conftest
     repo, merge, stamp = _signed(tmp_path / "w", human=False)
-    env = write_config(tmp_path / "cfg", agent="bot-x")
+    # strict: в test источник политики синтетический (план 3a), а
+    # acceptance_provenance его ещё не читает — это план 3c.
+    env = write_config(
+        tmp_path / "cfg",
+        agent="bot-x",
+        mode="strict",
+        agent_gh_config_dir=Path("~/.config/review"),
+        human_gh_config_dir=Path("~/.config/gh"),
+    )
     monkeypatch.setenv("XDG_CONFIG_HOME", env["XDG_CONFIG_HOME"])
     assert ap.agent_login() == "bot-x"
     assert _check(repo, stamp, FakeForge(merge, "bot-x")) == []

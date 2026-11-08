@@ -107,6 +107,10 @@ def _version_refusal(ops, sha: str) -> Refusal | None:
     if fact.outcome is Outcome.UNAVAILABLE:
         return _unavailable(fact.detail)
     if fact.value is not True:
+        if (repo, ref, path) == policy_rule.TEST_POLICY_SOURCE:
+            # Истории у синтетической политики нет: пин ≠ текущей значит
+            # «accounts.human сменили после предложения» (план 3a).
+            return Refusal("test_approver_changed", policy_rule.TEST_APPROVER_CHANGED)
         return Refusal("not_policy_version", f"{sha} — не версия {repo}:{path}@{ref}")
     return None
 
