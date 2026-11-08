@@ -18,13 +18,20 @@ import subprocess
 from pathlib import Path
 from typing import Protocol
 
-from governance import criteria_accept, criteria_graph, policy_rule
+from governance import criteria_accept, criteria_graph, df_config, policy_rule
 from governance.frontmatter import split_frontmatter
 
-#: Учётка агента. Здесь, а не из `ops.py`: модуль и всё, что решает правило
-#: гейта, — под authority-root (решение владельца 2026-10-02); `ops.py` туда
-#: не входит, и константа в нём ослаблялась бы агентским PR.
-AGENT_LOGIN = "ai-prosto"
+
+def agent_login() -> str:
+    """Учётка агента — env `REVIEW_LOGIN`, иначе `accounts.agent` конфига
+    DarkFactory (`df_config.agent_login`; гейт CI без конфига задаёт env).
+
+    Не из `ops.py`: модуль и всё, что решает правило гейта, — под
+    authority-root (решение владельца 2026-10-02); `ops.py` туда не входит, и
+    источник в нём ослаблялся бы агентским PR. Конфиг читается при каждом
+    вызове."""
+    return df_config.agent_login()
+
 
 CLOSURE_NAME = "90-acceptance-closure.md"
 _NODES = ("10-requirements.md", "15-behaviour-spec.md", "25-acceptance.md")
@@ -189,11 +196,11 @@ def stamp_findings(
     *,
     slug: str | None,
     forge: Forge | None,
-    agent: str = AGENT_LOGIN,
+    agent: str | None = None,
 ) -> list[str]:
     """Пусто — штамп доказан актом, связанным с этим закрытием.
 
-    `agent` — константа учётки агента (`AGENT_LOGIN`); предикат
+    `agent` — учётка агента, по умолчанию `agent_login()` (конфиг); предикат
     `criteria_close` берёт её из профиля (`ops.agent_login()`). Разойтись они
     могут только в ложный красный, не в зелёный (ревью круга 4 R4-m7)."""
     rel = f"{spec_dir}/{CLOSURE_NAME}"
@@ -246,6 +253,13 @@ def stamp_findings(
     need = human_needed(repo, spec_dir, pmeta.get("bundle_pin"))
     if need is None:
         return ["граф бандла на пине не прочитан"]
+    if agent is None:
+        # Лениво — только здесь, где учётка агента сравнивается: битый или
+        # отсутствующий конфиг — названная находка, не трассировка гейта.
+        try:
+            agent = agent_login()
+        except df_config.ConfigError as exc:
+            return [f"конфиг DarkFactory: {exc}"]
     by = facts.get("mergedBy")
     login = by.get("login") if isinstance(by, dict) else None
     if not isinstance(login, str) or not login:

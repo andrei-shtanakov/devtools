@@ -31,6 +31,7 @@ EXPECTED_CHAIN = [
     "contracts/discovery-approval/v1/gate_check.py",
     "contracts/discovery-approval/v1/hashing.py",
     "contracts/harness-paths/v1/paths.env",
+    "df_config.sh",
     "governance/__init__.py",
     "governance/act_admission.py",
     "governance/act_anon.py",
@@ -47,16 +48,19 @@ EXPECTED_CHAIN = [
     "governance/act_premerge.py",
     "governance/act_premerge_core.py",
     "governance/act_request.py",
+    "governance/act_settings.py",
     "governance/act_source.py",
     "governance/act_time.py",
     "governance/act_trust.py",
     "governance/approval_request.py",
     "governance/brief_facts.py",
     "governance/brief_merge_check.py",
+    "governance/df_config.py",
     "governance/discovery_approval.py",
     "governance/facts.py",
     "governance/halt_gate.py",
     "governance/policy_rule.py",
+    "governance/secret_dirs.py",
     "governance/ssot_env.py",
     "pyproject.toml",
     "ssot_env.sh",
@@ -79,7 +83,9 @@ def test_trust_chain_is_what_we_think() -> None:
     assert {(x.kind, x.path) for x in found} == {
         ("source", "ssot_env.sh"),
         ("source", "approval_branches.sh"),
+        ("source", "df_config.sh"),
         ("py-stdlib", "governance/halt_gate.py"),
+        ("py-stdlib", "governance/df_config.py"),
         ("py-uv", "governance/brief_merge_check.py"),
         ("py-uv", "governance/act_premerge.py"),
         ("py-uv", "governance/act_app_token.py"),
@@ -280,6 +286,34 @@ def test_launch_inside_sourced_shell_file_fails(tmp_path: Path) -> None:
     (root / "helper.sh").write_text('python3 "$script_dir/governance/entry.py"\n')
     found = ht.violations(root, (*ALL, "helper.sh"), (*ALL, "helper.sh"))
     assert any(v.startswith("helper.sh: нераспознанный запуск") for v in found), found
+
+
+_DF_CONFIG_SH = (
+    'df_cfg() {\n    python3 -I "$script_dir/governance/entry.py" get "$1"\n}\n'
+)
+
+
+def test_df_cfg_body_and_its_entry_are_in_the_chain(tmp_path: Path) -> None:
+    """`df_cfg` — безопасная команда лишь потому, что подключён df_config.sh:
+    тело разбирается, а его `python3 -I` — вход со своей цепочкой импортов."""
+    launch = '. "$script_dir/df_config.sh"\nv=$(df_cfg accounts.agent) || exit $?\n'
+    root = _repo(tmp_path, launch)
+    (root / "df_config.sh").write_text(_DF_CONFIG_SH)
+    guarded = (*ALL, "df_config.sh")
+    assert ht.violations(root, guarded, guarded) == []
+    required = ht.required_paths(root)
+    assert {"df_config.sh", "governance/entry.py", "governance/b.py"} <= required
+    # Тело, исполняющее код в обход распознанной формы, — нарушение.
+    (root / "df_config.sh").write_text('df_cfg() {\n    sh "$script_dir/x.sh"\n}\n')
+    found = ht.violations(root, guarded, guarded)
+    assert any(v.startswith("df_config.sh: нераспознанный запуск") for v in found)
+
+
+def test_df_cfg_without_sourcing_df_config_sh_fails(tmp_path: Path) -> None:
+    """Вызов без подключения тела в ЭТОМ скрипте — тело вне проверки."""
+    root = _repo(tmp_path, "v=$(df_cfg accounts.agent) || exit $?\n")
+    found = ht.violations(root, ALL, ALL)
+    assert any("df_cfg без подключения df_config.sh" in v for v in found), found
 
 
 def test_case_patterns_and_function_definitions_are_not_launches(

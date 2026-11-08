@@ -122,6 +122,46 @@ def _act_isolation(
     monkeypatch.setattr(act_status, "mode_probe", lambda state, deps=None: pre)
 
 
+#: Каталоги профилей gh владельца — из перечня песочницы (strict, §5.1);
+#: `~/` раскрывает загрузчик при чтении, подменённый тестом HOME не ломает его.
+_STRICT_GH_DIRS = {
+    "agent_gh_config_dir": Path("~/.config/review"),
+    "human_gh_config_dir": Path("~/.config/gh"),
+}
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "no_df_config: без конфига DarkFactory (окружение раннера CI, F7)",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _df_config(
+    _act_isolation: None,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """Конфиг DarkFactory (`$XDG_CONFIG_HOME/darkfactory/config.toml`, план 1
+    darkfactory-config, Task 4): strict с нынешними значениями владельца — они
+    живут в данных теста (`tests/df_config_fixture.py`), не в коде. Переменные
+    оператора, перекрывшие бы конфиг, сняты; тест со своим конфигом пишет его
+    в свой каталог и выставляет `XDG_CONFIG_HOME` сам. Маркер `no_df_config` —
+    конфига нет вовсе (окружение раннера CI)."""
+    from tests.df_config_fixture import ENV_OVERRIDES, write_config
+
+    for name in ENV_OVERRIDES:
+        monkeypatch.delenv(name, raising=False)
+    if request.node.get_closest_marker("no_df_config"):
+        # Пустой `XDG_CONFIG_HOME`: файла конфига нет, как на раннере CI.
+        empty = tmp_path_factory.mktemp("no-df-config")
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(empty))
+        return
+    write_config(Path(os.environ["XDG_CONFIG_HOME"]), mode="strict", **_STRICT_GH_DIRS)
+
+
 #: Хосты, на которые настоящий opener `act_anon` ходит в тестах (loopback-стенды).
 _LOOPBACK = frozenset({"127.0.0.1", "::1", "localhost"})
 NETWORK_REFUSED = "тест обратился в сеть мимо шва open_url"

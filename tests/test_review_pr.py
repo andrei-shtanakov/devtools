@@ -29,6 +29,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.df_config_fixture import ENV_OVERRIDES, write_config
+
 SCRIPT = Path(__file__).resolve().parent.parent / "review-pr.sh"
 
 GH_STUB = """#!/usr/bin/env bash
@@ -176,6 +178,9 @@ class Fleet:
         self.body_out = tmp_path / "posted-body.md"
         self.profile_dir = tmp_path / "gh-profile"
         self.profile_dir.mkdir()
+        # Учётка агента — из конфига DarkFactory (в скрипте умолчаний нет).
+        self.xdg = tmp_path / "xdg"
+        self.config_env = write_config(self.xdg, agent_gh_config_dir=self.profile_dir)
 
         subprocess.run(
             ["git", "init", "--bare", "-b", "master", str(self.origin)],
@@ -236,6 +241,9 @@ class Fleet:
 
     def env(self, **extra: str) -> dict[str, str]:
         env = os.environ.copy()
+        for key in ENV_OVERRIDES:
+            env.pop(key, None)
+        env.update(self.config_env)
         env.update(
             PATH=f"{self.stub_bin}:{env['PATH']}",
             FLEET_ROOT=str(self.fleet_root),
@@ -335,6 +343,44 @@ def test_missing_profile_dir(fleet: Fleet) -> None:
     res = fleet.run("demo", "7", REVIEW_GH_CONFIG_DIR=str(fleet.tmp / "nope"))
     assert res.returncode == 2
     assert "gh auth login" in res.stderr
+
+
+def test_review_login_from_config(fleet: Fleet) -> None:
+    """Без env логин профиля сверяется с `accounts.agent` конфига."""
+    write_config(fleet.xdg, agent="bot-x", agent_gh_config_dir=fleet.profile_dir)
+    res = fleet.run("demo", "7", "--dry-run")
+    assert res.returncode == 2
+    assert "ожидался 'bot-x'" in res.stderr
+    res = fleet.run("demo", "7", "--dry-run", GH_STUB_LOGIN="bot-x")
+    assert "ожидался" not in res.stderr, res.stderr
+
+
+def test_review_profile_from_config(fleet: Fleet) -> None:
+    """Без env каталог профиля — `accounts.agent_gh_config_dir` конфига."""
+    res = fleet.run("demo", "7", "--dry-run", REVIEW_GH_CONFIG_DIR="")
+    assert "профиля ревьюера нет" not in res.stderr, res.stderr
+    assert f"GH_CONFIG_DIR={fleet.profile_dir} " in fleet.gh_calls()
+    write_config(fleet.xdg, agent_gh_config_dir=fleet.tmp / "nope")
+    res = fleet.run("demo", "7", REVIEW_GH_CONFIG_DIR="")
+    assert res.returncode == 2
+    assert str(fleet.tmp / "nope") in res.stderr
+
+
+def test_env_overrides_config(fleet: Fleet) -> None:
+    """REVIEW_LOGIN окружения сильнее конфига (`bot-x`)."""
+    write_config(fleet.xdg, agent="bot-x", agent_gh_config_dir=fleet.profile_dir)
+    res = fleet.run("demo", "7", "--dry-run", REVIEW_LOGIN="bot-y")
+    assert res.returncode == 2
+    assert "ожидался 'bot-y'" in res.stderr
+
+
+def test_no_config_exit2(fleet: Fleet) -> None:
+    """Без env и без конфига — код 2, сообщение называет путь конфига."""
+    empty = fleet.tmp / "empty-xdg"
+    res = fleet.run("demo", "7", XDG_CONFIG_HOME=str(empty))
+    assert res.returncode == 2
+    assert str(empty / "darkfactory" / "config.toml") in res.stderr
+    assert "pr review" not in fleet.gh_calls()
 
 
 def test_wrong_login_refuses(fleet: Fleet) -> None:

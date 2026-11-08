@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.df_config_fixture import ENV_OVERRIDES, write_config
+
 SCRIPT = Path(__file__).resolve().parent.parent / "human-merge.sh"
 HEAD_SHA = "0123456789abcdef0123456789abcdef01234567"
 HUMAN = "andrei-shtanakov"
@@ -64,6 +66,11 @@ class Fleet:
         self.repo = self.fleet_root / "demo"
         self.stub_bin = tmp_path / "bin"
         self.gh_log = tmp_path / "gh.log"
+        # Профили и источник политики — из конфига DarkFactory (умолчаний нет).
+        self.xdg = tmp_path / "xdg"
+        self.human_profile = self.xdg / "gh-human"
+        self.agent_profile = self.xdg / "gh-agent"
+        write_config(self.xdg)
         self.repo.mkdir(parents=True)
         subprocess.run(
             ["git", "init", "-q", "-b", "master", str(self.repo)],
@@ -93,9 +100,10 @@ class Fleet:
 
     def env(self, **extra: str) -> dict[str, str]:
         env = os.environ.copy()
-        for key in ("GH_CONFIG_DIR", "HUMAN_GH_CONFIG_DIR", "MERGE_GH_CONFIG_DIR"):
+        for key in ("GH_CONFIG_DIR", *ENV_OVERRIDES):
             env.pop(key, None)
         env.update(
+            XDG_CONFIG_HOME=str(self.xdg),
             PATH=f"{self.stub_bin}:{env['PATH']}",
             FLEET_ROOT=str(self.fleet_root),
             GH_STUB_LOG=str(self.gh_log),
@@ -126,17 +134,103 @@ def fleet(tmp_path: Path) -> Fleet:
 
 
 def test_merges_from_operator_profile_with_head_pin(fleet: Fleet) -> None:
-    """Ровно один вызов мержа: merge-коммит, пин головы, БЕЗ GH_CONFIG_DIR —
-    профиль оператора, не агентский."""
+    """Ровно один вызов мержа: merge-коммит, пин головы, профиль человека из
+    конфига (`accounts.human_gh_config_dir`), не агентский."""
     res = fleet.run()
     assert res.returncode == 0, res.stderr
     assert fleet.merge_calls() == [
         (
-            "GH_CONFIG_DIR= gh api -X PUT repos/andrei-shtanakov/demo/pulls/7/merge "
+            f"GH_CONFIG_DIR={fleet.human_profile} gh api -X PUT "
+            "repos/andrei-shtanakov/demo/pulls/7/merge "
             f"-f merge_method=merge -f sha={HEAD_SHA}"
         )
     ]
     assert f"от {HUMAN}" in res.stdout
+
+
+def test_test_mode_config_policy_cannot_redirect_source(fleet: Fleet) -> None:
+    """test: `[policy]` конфига ≠ SSOT source.env — тоже отказ 2 до сети:
+    режим конфига доверие к источнику не выбирает."""
+    write_config(fleet.xdg, policy_repo="o/p", policy_ref="rel", policy_path="x.env")
+    res = fleet.run()
+    assert res.returncode == 2
+    assert "расходится с authority-root SSOT" in res.stderr
+    assert fleet.calls() == []
+
+
+#: strict: профили gh — из перечня песочницы; человек — явным env.
+_STRICT_DIRS = {
+    "agent_gh_config_dir": Path("~/.config/review"),
+    "human_gh_config_dir": Path("~/.config/gh"),
+}
+
+
+def test_strict_policy_from_authority_root_ssot(fleet: Fleet) -> None:
+    """strict: координаты — SSOT source.env; совпавший `[policy]` пропускается."""
+    write_config(fleet.xdg, mode="strict", **_STRICT_DIRS)
+    res = fleet.run(HUMAN_GH_CONFIG_DIR=str(fleet.human_profile))
+    assert res.returncode == 0, res.stderr
+    graphql = [ln for ln in fleet.calls() if "api graphql" in ln]
+    assert graphql and all(
+        "-F o=andrei-shtanakov -F n=approval-policy " in ln for ln in graphql
+    ), graphql
+    assert "-F q=refs/heads/main -F p=policy/approvers.env" in graphql[0]
+
+
+def test_strict_config_policy_cannot_redirect_source(fleet: Fleet) -> None:
+    """strict: `[policy]` конфига ≠ SSOT — отказ 2 до сети, без мержа."""
+    write_config(fleet.xdg, mode="strict", policy_repo="o/p", **_STRICT_DIRS)
+    res = fleet.run(HUMAN_GH_CONFIG_DIR=str(fleet.human_profile))
+    assert res.returncode == 2
+    assert "расходится с authority-root SSOT" in res.stderr
+    assert "o/p@main" in res.stderr
+    assert fleet.calls() == []
+
+
+def test_no_config_file_skips_policy_cross_check(fleet: Fleet) -> None:
+    """Файла конфига нет, профили — env: сверять `[policy]` не с чем, источник —
+    SSOT source.env (F1)."""
+    (fleet.xdg / "darkfactory" / "config.toml").unlink()
+    res = fleet.run(
+        HUMAN_GH_CONFIG_DIR=str(fleet.human_profile),
+        REVIEW_GH_CONFIG_DIR=str(fleet.agent_profile),
+    )
+    assert res.returncode == 0, res.stderr
+    graphql = [ln for ln in fleet.calls() if "api graphql" in ln]
+    assert graphql and all(
+        "-F o=andrei-shtanakov -F n=approval-policy " in ln for ln in graphql
+    ), graphql
+
+
+def test_agent_profile_from_config_is_refused(fleet: Fleet) -> None:
+    """Профиль человека, совпавший с агентским из конфига, — отказ до сети."""
+    res = fleet.run(HUMAN_GH_CONFIG_DIR=str(fleet.agent_profile))
+    assert res.returncode == 2, res.stderr
+    assert "агентский профиль" in res.stderr
+    assert fleet.calls() == []
+
+
+def test_no_config_exit2(fleet: Fleet, tmp_path: Path) -> None:
+    """Без env и без конфига — код 2, сообщение называет путь конфига."""
+    empty = tmp_path / "empty-xdg"
+    res = fleet.run(XDG_CONFIG_HOME=str(empty))
+    assert res.returncode == 2
+    assert str(empty / "darkfactory" / "config.toml") in res.stderr
+    assert fleet.calls() == []
+
+
+def test_test_mode_without_policy_table_uses_ssot(fleet: Fleet) -> None:
+    """test без `[policy]` — сверять нечего: координаты из SSOT source.env."""
+    path = fleet.xdg / "darkfactory" / "config.toml"
+    text = path.read_text(encoding="utf-8")
+    head, _, tail = text.partition("[policy]")
+    path.write_text(head + tail.split("\n\n", 1)[1], encoding="utf-8")
+    res = fleet.run()
+    assert res.returncode == 0, res.stderr
+    graphql = [ln for ln in fleet.calls() if "api graphql" in ln]
+    assert graphql and all(
+        "-F o=andrei-shtanakov -F n=approval-policy " in ln for ln in graphql
+    ), graphql
 
 
 def test_explicit_human_profile_is_passed_through(fleet: Fleet, tmp_path: Path) -> None:

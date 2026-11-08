@@ -3,14 +3,16 @@
 Вынесено из `approval_facts` (ревью круга 6 M6-1): тот на уровне модуля
 импортирует `ops`/`facts`, и гейт, читая политику через него, исполнял бы
 незащищённый код. Здесь — только то, что решает доверие: координаты
-источника из SSOT под authority-root и разбор состава.
+источника (SSOT под authority-root; `[policy]` конфига DarkFactory обязан с
+ним совпасть) и разбор состава.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
-from governance import ssot_env
+from governance import df_config, ssot_env
 
 #: Ключ политики в `policy/approvers.env` репозитория `approval-policy` — И имя
 #: переменной окружения, выставление которой теперь есть ОТКАЗ (спека
@@ -21,8 +23,11 @@ from governance import ssot_env
 #: здесь не читается: отказ S7 — `approval_facts.env_override_refusal`.
 APPROVER_ALLOWLIST_ENV = "AUTHORIZED_APPROVER_ACCOUNTS"
 
+
 #: Координаты источника политики — SSOT под authority-root (S8): константу
-#: в модуле агент перенаправил бы своим PR под агентским мержем.
+#: в модуле агент перенаправил бы своим PR под агентским мержем. Единственный
+#: источник в любом режиме: `[policy]` конфига DarkFactory (домашний каталог,
+#: `XDG_CONFIG_HOME` вызывающего) его не перенаправляет, а обязан совпасть.
 POLICY_SOURCE_FILE = (
     Path(__file__).resolve().parent.parent
     / "contracts"
@@ -33,7 +38,33 @@ POLICY_SOURCE_FILE = (
 
 
 def policy_source() -> tuple[str, str, str]:
-    """(repo, ref, path) из SSOT под authority-root; RuntimeError на битом файле."""
+    """(repo, ref, path) из SSOT `POLICY_SOURCE_FILE`; RuntimeError на отказе.
+
+    Режим конфига доверие не выбирает: источник — всегда SSOT под
+    authority-root. `[policy]` конфига DarkFactory (`df_config`, читается при
+    каждом вызове), если задан, обязан совпасть с SSOT — расхождение есть
+    отказ, а не выбор стороны. Файла конфига нет — сверять нечего (гейт CI).
+    Конфиг есть, но битый, или битый SSOT — тот же RuntimeError, что ловят
+    вызывающие."""
+    ssot = _ssot_source()
+    if not df_config.config_path(os.environ).exists():
+        return ssot  # конфига нет — нет и `[policy]`, сверять нечего
+    try:
+        cfg = df_config.load()
+    except df_config.ConfigError as exc:
+        raise RuntimeError(f"источник политики подписи: {exc}") from exc
+    if cfg.policy is not None:
+        configured = (cfg.policy.repo, cfg.policy.ref, cfg.policy.path)
+        if configured != ssot:
+            raise RuntimeError(
+                f"источник политики подписи: config [policy] расходится с "
+                f"authority-root SSOT: конфиг {configured}, "
+                f"{POLICY_SOURCE_FILE} {ssot}"
+            )
+    return ssot
+
+
+def _ssot_source() -> tuple[str, str, str]:
     what = "SSOT источника политики подписи"
     return (
         ssot_env.read_key(POLICY_SOURCE_FILE, "APPROVAL_POLICY_REPO", what),

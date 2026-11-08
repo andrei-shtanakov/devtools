@@ -122,6 +122,49 @@ def test_test_only_agent_merge_is_green(tmp_path):
     assert _check(repo, stamp, FakeForge(merge, "ai-prosto")) == []
 
 
+def test_agent_login_from_config(tmp_path, monkeypatch):
+    """Учётка агента предиката — `accounts.agent` конфига, не литерал."""
+    from tests.df_config_fixture import write_config
+
+    assert ap.agent_login() == "ai-prosto"  # автофикстура conftest
+    repo, merge, stamp = _signed(tmp_path / "w", human=False)
+    env = write_config(tmp_path / "cfg", agent="bot-x")
+    monkeypatch.setenv("XDG_CONFIG_HOME", env["XDG_CONFIG_HOME"])
+    assert ap.agent_login() == "bot-x"
+    assert _check(repo, stamp, FakeForge(merge, "bot-x")) == []
+    assert _check(repo, stamp, FakeForge(merge, "ai-prosto"))
+
+
+def _gated(tmp_path):
+    """Принятый штамп агентского мержа (только тест-критерии) под `[x]` пункта."""
+    repo, merge, _stamp = _signed(tmp_path, human=False)
+    charter = "---\nschema: 2\ncode: ENC\nplan_item: todo://r/oracle\n---\n"
+    (repo / SPEC / "00-charter.md").write_text(charter)
+    (repo / "TODO.md").write_text("- [x] пункт @id:oracle\n")
+    return repo, FakeForge(merge, "ai-prosto")
+
+
+@pytest.mark.no_df_config
+def test_closure_gate_without_config_uses_env_agent(tmp_path, monkeypatch):
+    """Раннер CI: конфига нет, учётка агента — env `REVIEW_LOGIN` (ci.yml)."""
+    from governance import closure_gate
+
+    repo, forge = _gated(tmp_path)
+    monkeypatch.setenv("REVIEW_LOGIN", "ai-prosto")
+    errors, _ = closure_gate.gate_findings(repo, slug="o/r", forge=forge)
+    assert errors == []
+
+
+@pytest.mark.no_df_config
+def test_closure_gate_without_config_or_env_is_named_finding(tmp_path):
+    """Ни конфига, ни env — названная находка гейта, не трассировка (F1)."""
+    from governance import closure_gate
+
+    repo, forge = _gated(tmp_path)
+    errors, _ = closure_gate.gate_findings(repo, slug="o/r", forge=forge)
+    assert len(errors) == 1 and "конфиг DarkFactory: " in errors[0], errors
+
+
 def test_agent_merge_with_human_criterion_is_red(tmp_path):
     repo, merge, stamp = _signed(tmp_path)
     assert _check(repo, stamp, FakeForge(merge, "ai-prosto"))

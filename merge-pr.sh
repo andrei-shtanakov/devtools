@@ -62,7 +62,9 @@
 #      compare, поэтому флаг применим лишь к PR в репо самой обвязки (slug
 #      origin `$script_dir`); иначе — отказ кодом 2. Всё это — отказ кодом 2.
 #      Честный остаток: подключённые выше по скрипту файлы
-#      (ssot_env.sh, approval_branches.sh) исполняются ДО проверки; запуск
+#      (ssot_env.sh, approval_branches.sh, df_config.sh — последний лишь
+#      определяет функцию; governance/df_config.py исполняется уже ПОСЛЕ
+#      проверки чистоты) исполняются ДО проверки; запуск
 #      обвязки из недоверенного чекаута скомпрометирован независимо от флага,
 #      проверка лишь не даёт флагу им воспользоваться.
 #      Переименования: compare читает и `previous_filename`, так что все
@@ -198,15 +200,6 @@ has_label() {
     return 1
 }
 
-# Профиль мержа — тот же, что у публикации ревью (review-pr.sh): мерж от
-# ОСНОВНОГО аккаунта записал бы агентский мерж человеческим, обнулив
-# `merged_by` — наблюдаемый различитель agent/human.
-# Логин сверяется с фактическим: опечатка в GH_CONFIG_DIR не должна
-# оборачиваться мержем не от того, от кого сказано.
-_default_profile="${REVIEW_GH_CONFIG_DIR:-$HOME/.config/review}"
-MERGE_GH_CONFIG_DIR="${MERGE_GH_CONFIG_DIR:-$_default_profile}"
-AGENT_LOGIN="${AGENT_LOGIN:-${REVIEW_LOGIN:-ai-prosto}}"
-
 #: Лейбл-рубильник «этот PR мержит человек».
 HUMAN_MERGE_LABEL="human-merge-required"
 #: Лейбл candidate-PR «акт — approve человека, доставляет агент» (review/v1).
@@ -272,6 +265,7 @@ github_slug() {
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
 . "$script_dir/ssot_env.sh"
+. "$script_dir/df_config.sh"
 . "$script_dir/approval_branches.sh"
 
 FLEET_ROOT="${FLEET_ROOT:-$(dirname "$script_dir")}"
@@ -433,6 +427,24 @@ $_dirty"
 fi
 
 # --- Профиль ---------------------------------------------------------------
+# Профиль мержа — тот же, что у публикации ревью (review-pr.sh): мерж от
+# ОСНОВНОГО аккаунта записал бы агентский мерж человеческим, обнулив
+# `merged_by` — наблюдаемый различитель agent/human.
+# Логин сверяется с фактическим: опечатка в GH_CONFIG_DIR не должна
+# оборачиваться мержем не от того, от кого сказано.
+# Порядок: env (MERGE_GH_CONFIG_DIR, затем REVIEW_GH_CONFIG_DIR; AGENT_LOGIN,
+# затем REVIEW_LOGIN), иначе конфиг DarkFactory (`accounts.agent*`,
+# df_config.sh); зашитых умолчаний нет, отказ конфига — код 2. Читается
+# здесь, после проверки чистоты чекаута под --authority-override.
+MERGE_GH_CONFIG_DIR="${MERGE_GH_CONFIG_DIR:-${REVIEW_GH_CONFIG_DIR:-}}"
+if [ -z "$MERGE_GH_CONFIG_DIR" ]; then
+    MERGE_GH_CONFIG_DIR=$(df_cfg accounts.agent_gh_config_dir) || exit $?
+fi
+AGENT_LOGIN="${AGENT_LOGIN:-${REVIEW_LOGIN:-}}"
+if [ -z "$AGENT_LOGIN" ]; then
+    AGENT_LOGIN=$(df_cfg accounts.agent) || exit $?
+fi
+#
 # Preflight ДО чтения PR: не тот профиль — мержить нельзя ничего, и узнать
 # об этом надо раньше, чем что-либо решено про сам PR.
 #

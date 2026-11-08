@@ -28,6 +28,7 @@ from governance import (
     approval_branches,
     bundle_dag,
     bundle_inputs,
+    df_config,
 )
 from governance import approval_ledger as al
 from governance import node_approval as na
@@ -100,15 +101,32 @@ class Deps:
     gh: Any
     now: Any  # () -> datetime
     sleep: Any  # (float) -> None
-    settings: ActSettings | Unavailable | None  # Unavailable — act.toml не читается
+    #: Unavailable — не читаются act.toml или config.toml установки
+    settings: ActSettings | Unavailable | None
 
 
 def real_deps(state: RunState, env: Mapping[str, str] | None = None) -> Deps:
     """Боевые зависимости: привязка, самоотчёт `gh`, журнал (Р-5); транспорт
-    источников доверия строит `load_trust` (Task 11c)."""
+    источников доверия строит `load_trust` (Task 11c). Профиль агента —
+    `REVIEW_GH_CONFIG_DIR`, иначе `accounts.agent_gh_config_dir` конфига
+    DarkFactory (`df_config`)."""
     env = dict(os.environ) if env is None else env
     home = Path.home()
-    agent = Path(env.get("REVIEW_GH_CONFIG_DIR") or home / ".config" / "review")
+    try:
+        agent = df_config.agent_gh_config_dir(env)
+    except df_config.ConfigError as exc:
+        # Названный отказ конфигурации тем же каналом, что битый act.toml:
+        # `live_policy` отказывает первым, до транспорта (творить нечем).
+        return Deps(
+            readers=act_trust.default_readers(),
+            binding=None,
+            journal=None,
+            creds=(),
+            gh=None,
+            now=lambda: datetime.now(UTC).replace(microsecond=0),
+            sleep=time.sleep,
+            settings=Unavailable(f"конфиг DarkFactory: {exc}"),
+        )
     merge = Path(env["MERGE_GH_CONFIG_DIR"]) if env.get("MERGE_GH_CONFIG_DIR") else None
     state_home = Path(env.get("XDG_STATE_HOME") or home / ".local" / "state")
 

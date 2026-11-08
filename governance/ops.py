@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Protocol, cast
 from urllib.parse import quote
 
-from governance import author_launch
+from governance import author_launch, df_config
 from governance import interview as _interview
 from governance.act_git_rows import (
     FIRST_PARENT_LOG,
@@ -44,7 +44,6 @@ from governance.decomposition_guard import DELIVERABLE_KINDS
 from governance.facts import Fact, Outcome, unavailable
 
 DEVTOOLS_ROOT = Path(__file__).resolve().parent.parent
-REVIEW_GH_CONFIG_DIR = Path.home() / ".config" / "review"
 
 _PR_URL_RE = re.compile(r"/pull/(\d+)")
 _ISSUE_URL_RE = re.compile(r"/issues/(\d+)")
@@ -127,9 +126,6 @@ _PR_CLOSURE_QUERY = (
     "... on HeadRefDeletedEvent{actor{login} createdAt}}}}}}"
 )
 
-#: Логин ревью-контура по умолчанию — канон `review-pr.sh:66`.
-REVIEW_LOGIN_DEFAULT = "ai-prosto"
-
 #: Потолок `spec-runner verify --criteria`, с (#481 M-14). Измерение гоняет
 #: селекторы в двух прогонах (спека оракула §4.3); час — запас на крупный
 #: набор и медленную машину, а не оценка. Цель — превратить зависание в
@@ -167,14 +163,23 @@ REVIEW_BARRIER_STOP = (
 )
 
 
+def review_gh_config_dir() -> Path:
+    """Профиль gh агента (ревью-контур, мерж, закрытие PR): env
+    `REVIEW_GH_CONFIG_DIR`, иначе `accounts.agent_gh_config_dir` конфига
+    DarkFactory — тот же порядок, что у `review-pr.sh`. Конфиг читается при
+    каждом вызове; битый — `df_config.ConfigError`."""
+    return df_config.agent_gh_config_dir()
+
+
 def review_login() -> str:
-    """Учётка, от которой публикуется ревью флота (env `REVIEW_LOGIN`).
+    """Учётка, от которой публикуется ревью флота: env `REVIEW_LOGIN`, иначе
+    `accounts.agent` конфига DarkFactory (порядок `review-pr.sh`).
 
     Одно определение на весь слой: логин нужен и `latest_review_body`
     (чьё ревью искать), и вызывающему — чтобы отличить ревью
     ревью-контура от человеческого. Два хардкода разъехались бы молча.
     """
-    return os.environ.get("REVIEW_LOGIN", REVIEW_LOGIN_DEFAULT)
+    return df_config.agent_login()
 
 
 class Ops(Protocol):
@@ -1619,8 +1624,8 @@ class RealOps(BriefFactsMixin):
     def latest_review_body(self, repo_slug: str, pr: int) -> str | None:
         """Тело НОВЕЙШЕГО ревью $REVIEW_LOGIN на PR; нет/сбой -> None.
 
-        Личность ревьюера — env `REVIEW_LOGIN` с дефолтом ai-prosto (канон —
-        `review-pr.sh:66`; запаркованный minor приёмки PR #102): хардкод
+        Личность ревьюера — `review_login()` (env `REVIEW_LOGIN`, иначе
+        конфиг DarkFactory; запаркованный minor приёмки PR #102): хардкод
         расходился бы с конфигурируемым каноном молча — публикация ушла бы
         под новый логин, поиск тела остался бы на старом, и авто-опровержение
         беззвучно умерло бы. None читается вызывающим как «опровергать
@@ -1733,12 +1738,12 @@ class RealOps(BriefFactsMixin):
     def agent_login(self) -> str | None:
         """Учётка агента — `gh api user` под его профилем; None — не узнать.
 
-        Профиль — `REVIEW_GH_CONFIG_DIR` (по умолчанию `~/.config/review`),
+        Профиль — `review_gh_config_dir()` (env, иначе конфиг DarkFactory),
         тот же источник, что у `merge-pr.sh`: учётка агента берётся из
         конфигурации, а не из кода. Профиля нет — None без вызова `gh`
         (иначе `gh` ответил бы логином основного профиля).
         """
-        profile = Path(os.environ.get("REVIEW_GH_CONFIG_DIR") or REVIEW_GH_CONFIG_DIR)
+        profile = review_gh_config_dir()
         if not profile.is_dir():
             return None
         return _gh_user_login({**os.environ, "GH_CONFIG_DIR": str(profile)})
@@ -1850,7 +1855,7 @@ class RealOps(BriefFactsMixin):
         """
         if f"<!-- {marker} " not in body:
             raise ValueError(f"тело ревью без маркера {marker!r}")
-        env = {**os.environ, "GH_CONFIG_DIR": str(REVIEW_GH_CONFIG_DIR)}
+        env = {**os.environ, "GH_CONFIG_DIR": str(review_gh_config_dir())}
         done = subprocess.run(
             [
                 "gh",
@@ -1871,7 +1876,7 @@ class RealOps(BriefFactsMixin):
         return done.returncode == 0
 
     def close_pr(self, repo_slug: str, pr: int, comment: str) -> bool:
-        """`gh pr close --comment` под профилем ai-prosto; rc0->True.
+        """`gh pr close --comment` под профилем агента; rc0->True.
 
         Профиль тот же, что у `merge`, и по той же причине (ADR-ECO-011
         D3): закрытие PR — действие агента, и оно обязано быть записано
@@ -1882,7 +1887,7 @@ class RealOps(BriefFactsMixin):
         чужого предложения без объяснения — то же вмешательство, от
         которого замена защищается сама.
         """
-        env = {**os.environ, "GH_CONFIG_DIR": str(REVIEW_GH_CONFIG_DIR)}
+        env = {**os.environ, "GH_CONFIG_DIR": str(review_gh_config_dir())}
         done = subprocess.run(
             ["gh", "pr", "close", str(pr), "-R", repo_slug, "--comment", comment],
             env=env,
@@ -1995,7 +2000,7 @@ class RealOps(BriefFactsMixin):
         блокирует каскад: его уникальная ветка — только неубранный мусор.
         Коммиты и сам PR остаются: удаляется живая ветка, не история.
         """
-        env = {**os.environ, "GH_CONFIG_DIR": str(REVIEW_GH_CONFIG_DIR)}
+        env = {**os.environ, "GH_CONFIG_DIR": str(review_gh_config_dir())}
         done = subprocess.run(
             ["gh", "api", "-X", "DELETE", f"repos/{repo_slug}/git/refs/heads/{branch}"],
             env=env,
@@ -2669,10 +2674,10 @@ class RealOps(BriefFactsMixin):
         allowlist, конфигурации system/global нет, интерактивных запросов нет;
         `HOME` и `XDG_CONFIG_HOME` — пустой каталог снимка (ни `~/.netrc`, ни
         `~/.gitconfig`, ни чужой `gh` настоящего HOME); `gh` — профиль
-        runner'а (`REVIEW_GH_CONFIG_DIR`, как прочие вызовы `gh` агента),
+        runner'а (`review_gh_config_dir()`, как прочие вызовы `gh` агента),
         абсолютный путь разрешён ДО подмены HOME."""
         env = {k: os.environ[k] for k in _SNAPSHOT_ENV_KEEP if k in os.environ}
-        profile = Path(os.environ.get("REVIEW_GH_CONFIG_DIR") or REVIEW_GH_CONFIG_DIR)
+        profile = review_gh_config_dir()
         env.update(
             GIT_CONFIG_NOSYSTEM="1",
             GIT_CONFIG_GLOBAL=os.devnull,

@@ -496,8 +496,8 @@ BYPASS: dict[str, tuple[str, str]] = {
         "str(profile)",
     ),
     "ops.RealOps._snapshot_env:runner_profile": (
-        'os.environ.get("REVIEW_GH_CONFIG_DIR") or REVIEW_GH_CONFIG_DIR',
-        "REVIEW_GH_CONFIG_DIR",
+        "profile = review_gh_config_dir()",
+        "profile = df_config.load().accounts.agent_gh_config_dir",
     ),
     "ops.RealOps._snapshot_git:helper_reset": (
         '                "-c",\n                "credential.helper=",\n',

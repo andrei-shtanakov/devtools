@@ -22,6 +22,7 @@ from pathlib import Path
 
 import yaml
 
+from governance import df_config
 from governance.merge_gate import Authority, Safety
 
 CONTRACT_DIR = (
@@ -30,8 +31,14 @@ CONTRACT_DIR = (
 _HUMAN_LINE = re.compile(r"(?m)^\s*[-*]?\s*Мерж:\s*человек\b")
 
 
-def load_safety(actor: str = "ai-prosto") -> Safety:
-    """Срез steward-политики из вендоренной копии; сбой = unknown."""
+def load_safety(actor: str | None = None) -> Safety:
+    """Срез steward-политики из вендоренной копии; сбой = unknown.
+
+    `actor` по умолчанию — `df_config.agent_login()`: env `REVIEW_LOGIN`, иначе
+    `accounts.agent` конфига (тот же порядок, что у merge-pr.sh; битый конфиг —
+    `ConfigError`, не unknown)."""
+    if actor is None:
+        actor = df_config.agent_login()
     policy = CONTRACT_DIR / "approval-policy.yaml"
     pin = CONTRACT_DIR / "PIN"
     try:

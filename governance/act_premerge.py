@@ -3,7 +3,7 @@
 Этот файл ИСПОЛНЯЕТ `merge-pr.sh` — файлом, в своём окружении:
 `uv run --frozen --exact --group governance --no-config --no-env-file python -I
 <этот файл> …` (форму распознаёт `tests/harness_trust.py`). Цепочка импортов —
-только защищённые `governance/act_*`, `facts`, `ssot_env`; журнал периметра —
+только защищённые `governance/act_*`, `facts`, `ssot_env`, `df_config`; журнал периметра —
 узкий клиент `act_journal_wire` (без `df/`, ревизия b1): уже зарегистрированный
 блок останавливает мерж, обнаруженное здесь нарушение регистрируется. Коды:
 0 — мерж разрешён (граница секунды выдержана), 3 — отказ, 2 — не установлено.
@@ -53,6 +53,7 @@ from governance import (  # noqa: E402
     act_facts,
     act_journal_wire,
     act_trust,
+    df_config,
 )
 from governance.act_premerge_core import (  # noqa: E402
     EXIT_OK,
@@ -97,10 +98,12 @@ def real_deps(
     args: argparse.Namespace, env: Mapping[str, str] | None = None
 ) -> PremergeDeps:
     """Боевые чтения: GraphQL под профилем агента, привязка, журнал периметра,
-    самоотчёт `gh`; транспорт источников доверия строит `load_trust` (Task 11c)."""
+    самоотчёт `gh`; транспорт источников доверия строит `load_trust` (Task 11c).
+    Профиль агента — `REVIEW_GH_CONFIG_DIR`, иначе `accounts.agent_gh_config_dir`
+    конфига DarkFactory (`df_config`); битый конфиг — `ConfigError`."""
     env = dict(os.environ) if env is None else env
     home = Path.home()
-    agent = Path(env.get("REVIEW_GH_CONFIG_DIR") or home / ".config" / "review")
+    agent = df_config.agent_gh_config_dir(env)
     binding = act_trust.load_binding()
     journal: Any = Unavailable("нет привязки")
     if isinstance(binding, act_trust.Binding):
@@ -141,7 +144,15 @@ def main(argv: Sequence[str] | None = None, deps: PremergeDeps | None = None) ->
         # версий обвязки повтор не лечит (интеграционное ревью части B, m-7).
         return EXIT_REFUSED
     if deps is None:
-        deps = real_deps(args)
+        try:
+            deps = real_deps(args)
+        except df_config.ConfigError as exc:
+            # Конфиг установки битый — тот же код 2 (конфигурация), что у
+            # скриптов, а не 3 («предпроверка отказала»). merge-pr.sh передаёт
+            # профиль мержа аргументом `--merge-profile` и REVIEW_GH_CONFIG_DIR
+            # не экспортирует: профиль агента здесь — env, иначе конфиг.
+            print(f"act_premerge: {exc}", file=sys.stderr)
+            return EXIT_UNSET
     code, reason = decide(args, deps)
     if code != EXIT_OK:
         print(f"act_premerge: {reason}", file=sys.stderr)

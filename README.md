@@ -310,6 +310,32 @@ remediation-issue у уже помеченного родителя). Повто
 Скилл `skills/fleet-check/` (установка: скопировать в `.claude/skills/`)
 ведёт полный цикл: снапшот → отчёт → PR в `prograph-vault/derived/fleet/`.
 
+## Конфиг DarkFactory (`config.toml`)
+
+Учётки, профили gh и источник политики берутся из
+`$XDG_CONFIG_HOME/darkfactory/config.toml` (по умолчанию
+`~/.config/darkfactory/config.toml`); зашитых в код значений и fallback нет:
+нет файла или ключа — отказ с названием файла и ключа. Образец со значениями
+владельца — `templates/darkfactory/config.strict.example.toml` (код его не читает).
+
+- Ключи: `schema = "darkfactory-config/v1"`, `mode`, `[accounts]` (`human`, `agent`,
+  `human_gh_config_dir`, `agent_gh_config_dir`), `[policy]` (`repo`, `ref`, `path`),
+  `[workspace] root`, `[harness]` (`author`, `model`), опционально `[app]`.
+- Режимы: `strict` — `[policy]` обязателен, каталоги профилей gh только из перечня
+  `governance/secret_dirs.py`, профили человека и агента различаются; `test` —
+  `[policy]` необязателен, ограничений на каталоги нет.
+- Источник политики всегда `contracts/approval-policy-source/v1/source.env`;
+  `[policy]` конфига, если задан, обязан с ним совпасть.
+- Приоритет: переменные окружения (`REVIEW_LOGIN`, `REVIEW_GH_CONFIG_DIR`, ...)
+  перекрывают конфиг.
+- `human-merge.sh` мержит всегда от `accounts.human_gh_config_dir` (его перекрывает
+  `HUMAN_GH_CONFIG_DIR`); выставленный `GH_CONFIG_DIR` оператора не учитывается.
+- Установка на хост (действие владельца, до мержа PR с чтением конфига):
+  `mkdir -p ~/.config/darkfactory && cp templates/darkfactory/config.strict.example.toml ~/.config/darkfactory/config.toml`,
+  проверка: `python3 -I governance/df_config.py get accounts.agent` печатает `ai-prosto`.
+  Скрипты, читающие учётки из конфига (`review-pr.sh`, `df_cfg`), без файла останавливаются на «нет конфига»; источник политики конфига не требует. Системный `python3` хоста должен быть ≥ 3.11 (иначе отказ с названием версии). Страж
+  `tests/test_no_owner_identities.py` не даёт вернуть литералы в код.
+
 ## Установка DarkFactory: этап 1
 
 Пакет `df/` (спека `docs/superpowers/specs/2026-10-13-df-installer-design.md` §3, план

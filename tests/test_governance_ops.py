@@ -19,6 +19,7 @@ import governance.ops as ops_mod
 from governance.author_launch import AuthorCall, LaunchOutcome
 from governance.facts import Outcome
 from governance.ops import RealOps
+from tests.df_config_fixture import write_config
 
 REPO_SLUG = "andrei-shtanakov/devtools"
 _EXPECTED_REMOTE_BRANCH_HEAD_QUERY = (
@@ -48,6 +49,9 @@ def _install_fake_run(monkeypatch, *, returncode=0, stdout="", stderr=""):
 
     monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
     return calls
+
+
+XDG = "XDG_CONFIG_HOME"
 
 
 # --- Кейс 1: merge -----------------------------------------------------
@@ -1942,12 +1946,37 @@ def test_delete_remote_branch_missing_branch_is_false_not_raise(monkeypatch):
     assert RealOps().delete_remote_branch(REPO_SLUG, "spec/x") is False
 
 
-def test_review_login_follows_env_with_ai_prosto_default(monkeypatch):
-    """Одно определение «кто наш бот» на весь слой."""
+def test_review_login_follows_env_then_config(monkeypatch, tmp_path):
+    """Одно определение «кто наш бот» на весь слой: env `REVIEW_LOGIN`, иначе
+    `accounts.agent` конфига DarkFactory (литерала в коде нет)."""
     monkeypatch.delenv("REVIEW_LOGIN", raising=False)
-    assert ops_mod.review_login() == "ai-prosto"
+    assert ops_mod.review_login() == "ai-prosto"  # автофикстура conftest
+    monkeypatch.setenv("XDG_CONFIG_HOME", write_config(tmp_path, agent="bot-x")[XDG])
+    assert ops_mod.review_login() == "bot-x"
     monkeypatch.setenv("REVIEW_LOGIN", "other-bot")
     assert ops_mod.review_login() == "other-bot"
+
+
+def test_review_gh_config_dir_follows_env_then_config(monkeypatch, tmp_path):
+    monkeypatch.delenv("REVIEW_GH_CONFIG_DIR", raising=False)
+    env = write_config(tmp_path, agent_gh_config_dir=tmp_path / "bot")
+    monkeypatch.setenv("XDG_CONFIG_HOME", env[XDG])
+    assert ops_mod.review_gh_config_dir() == tmp_path / "bot"
+    monkeypatch.setenv("REVIEW_GH_CONFIG_DIR", "/tmp/x")
+    assert ops_mod.review_gh_config_dir() == Path("/tmp/x")
+
+
+def test_ops_review_dir_honours_env_everywhere(monkeypatch):
+    """Регрессия: `publish_review`, `close_pr`, `delete_remote_branch` брали
+    константу `~/.config/review` мимо `REVIEW_GH_CONFIG_DIR`."""
+    monkeypatch.setenv("REVIEW_GH_CONFIG_DIR", "/tmp/x")
+    calls = _install_fake_run(monkeypatch, returncode=0)
+    ops = RealOps()
+    body = "<!-- m x -->"
+    assert ops.publish_review("o/r", 7, event="COMMENT", body=body, marker="m")
+    assert ops.close_pr("o/r", 7, "причина")
+    assert ops.delete_remote_branch("o/r", "b")
+    assert [c.kwargs["env"]["GH_CONFIG_DIR"] for c in calls] == ["/tmp/x"] * 3
 
 
 def test_delete_local_branch_force_deletes_in_the_clone(monkeypatch):

@@ -53,6 +53,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.df_config_fixture import ENV_OVERRIDES, write_config
+
 SCRIPT = Path(__file__).resolve().parent.parent / "attest-vendor.sh"
 
 pytestmark = pytest.mark.skipif(
@@ -230,6 +232,9 @@ class Fleet:
         self.body_out = tmp_path / "posted-body.md"
         self.profile_dir = tmp_path / "gh-profile"
         self.profile_dir.mkdir()
+        # Учётка аттестатора — из конфига DarkFactory (в скрипте умолчаний нет).
+        self.xdg = tmp_path / "xdg"
+        write_config(self.xdg, agent_gh_config_dir=self.profile_dir)
         self.fleet_root.mkdir()
 
         for origin in (self.demo_origin, self.steward_origin):
@@ -342,7 +347,10 @@ class Fleet:
 
     def env(self, **extra: str) -> dict[str, str]:
         env = os.environ.copy()
+        for key in ENV_OVERRIDES:
+            env.pop(key, None)
         env.update(
+            XDG_CONFIG_HOME=str(self.xdg),
             PATH=f"{self.stub_bin}:{env['PATH']}",
             FLEET_ROOT=str(self.fleet_root),
             REVIEW_GH_CONFIG_DIR=str(self.profile_dir),
@@ -413,6 +421,23 @@ def test_missing_profile_dir(fleet: Fleet) -> None:
     res = fleet.run("demo", "7", REVIEW_GH_CONFIG_DIR=str(fleet.tmp / "nope"))
     assert res.returncode == 2
     assert "gh auth login" in res.stderr
+
+
+def test_attest_login_from_config(fleet: Fleet) -> None:
+    """Без env логин аттестатора — `accounts.agent` конфига."""
+    write_config(fleet.xdg, agent="bot-x", agent_gh_config_dir=fleet.profile_dir)
+    res = fleet.run("demo", "7", "--dry-run")
+    assert res.returncode == 2
+    assert "ожидался 'bot-x'" in res.stderr
+
+
+def test_attest_no_config_exit2(fleet: Fleet) -> None:
+    """Без env и без конфига — код 2, сообщение называет путь конфига."""
+    empty = fleet.tmp / "empty-xdg"
+    res = fleet.run("demo", "7", XDG_CONFIG_HOME=str(empty))
+    assert res.returncode == 2
+    assert str(empty / "darkfactory" / "config.toml") in res.stderr
+    assert "pr review" not in fleet.gh_calls()
 
 
 def test_wrong_login_refuses(fleet: Fleet) -> None:

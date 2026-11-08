@@ -26,6 +26,26 @@ def test_safety_from_vendored_copy() -> None:
     assert s.actor_class == "agent"
 
 
+def test_load_safety_actor_from_config(monkeypatch, tmp_path: Path) -> None:
+    """Без аргумента классифицируется `accounts.agent` конфига DarkFactory."""
+    from tests.df_config_fixture import write_config
+
+    assert load_safety().actor_class == "agent"  # автофикстура: учётка агента
+    env = write_config(tmp_path, agent="stranger-bot")
+    monkeypatch.setenv("XDG_CONFIG_HOME", env["XDG_CONFIG_HOME"])
+    assert load_safety().actor_class == load_safety("stranger-bot").actor_class
+    assert load_safety().actor_class != "agent"
+
+
+def test_load_safety_actor_env_first(monkeypatch) -> None:
+    """`REVIEW_LOGIN` сильнее конфига — как у merge-pr.sh (M1)."""
+    monkeypatch.setenv("REVIEW_LOGIN", "stranger-bot")
+    assert load_safety().actor_class == load_safety("stranger-bot").actor_class
+    assert load_safety().actor_class != "agent"  # конфиг conftest — агент
+    monkeypatch.delenv("REVIEW_LOGIN")
+    assert load_safety().actor_class == "agent"
+
+
 def test_safety_integrity_mismatch_is_unknown(tmp_path: Path, monkeypatch) -> None:
     bad = tmp_path / "v1"
     bad.mkdir()

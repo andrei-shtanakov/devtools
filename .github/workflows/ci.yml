@@ -87,6 +87,10 @@ jobs:
       - name: closure_gate
         env:
           GH_TOKEN: ${{ github.token }}
+          # Учётка агента для предиката штампа (`df_config.agent_login`: env,
+          # иначе config.toml, которого на раннере нет). Значение инстанса
+          # владельца; у коллег — своя учётка агента.
+          REVIEW_LOGIN: ai-prosto
         run: >
           uv run --no-config --isolated --no-project --python 3.12
           --with pyyaml==6.0.3

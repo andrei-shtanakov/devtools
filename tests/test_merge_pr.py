@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 
 from governance import approval_branches, authority_root
+from tests.df_config_fixture import ENV_OVERRIDES, write_config
 
 SCRIPT = Path(__file__).resolve().parent.parent / "merge-pr.sh"
 
@@ -190,6 +191,8 @@ class Fleet:
         self.app_key = self.xdg / "darkfactory" / "apps" / "df-reviewer.pem"
         self.app_key.parent.mkdir(parents=True)
         self.app_key.write_text("тестовый ключ: содержимое обвязка не читает\n")
+        # Учётка агента — из конфига DarkFactory (в скрипте умолчаний нет).
+        write_config(self.xdg, agent_gh_config_dir=self.profile_dir)
 
         self.repo.mkdir(parents=True)
         subprocess.run(
@@ -232,6 +235,7 @@ class Fleet:
             "GH_CONFIG_DIR",
             "MERGE_APP_ID",
             "MERGE_APP_KEY",
+            *ENV_OVERRIDES,
         ):
             env.pop(var, None)
         env.update(
@@ -331,6 +335,11 @@ TRUSTED_INPUTS = (
     "contracts/authority-root",
     "contracts/harness-paths",
     "governance/halt_gate.py",
+    "df_config.sh",
+    "governance/__init__.py",
+    "governance/df_config.py",
+    "governance/act_settings.py",
+    "governance/secret_dirs.py",
 )
 
 
@@ -811,6 +820,49 @@ def test_merge_goes_from_agent_profile(fleet: Fleet) -> None:
     res = fleet.run(GH_STUB_HEADREF="feat/ordinary")
     assert res.returncode == 0, res.stderr
     assert fleet.merge_calls()[0].startswith(f"GH_CONFIG_DIR={fleet.profile_dir} ")
+
+
+def test_agent_login_from_config(fleet: Fleet) -> None:
+    """Без env логин агента — `accounts.agent` конфига."""
+    write_config(fleet.xdg, agent="bot-x", agent_gh_config_dir=fleet.profile_dir)
+    res = fleet.run(GH_STUB_HEADREF="feat/ordinary")
+    assert res.returncode == 2
+    assert "ожидался 'bot-x'" in res.stderr
+    res = fleet.run(GH_STUB_HEADREF="feat/ordinary", GH_STUB_LOGIN="bot-x")
+    assert res.returncode == 0, res.stderr
+
+
+def test_agent_login_env_overrides_config(fleet: Fleet) -> None:
+    """AGENT_LOGIN, затем REVIEW_LOGIN окружения — сильнее конфига."""
+    write_config(fleet.xdg, agent="bot-x", agent_gh_config_dir=fleet.profile_dir)
+    res = fleet.run(GH_STUB_HEADREF="feat/ordinary", REVIEW_LOGIN="bot-y")
+    assert res.returncode == 2
+    assert "ожидался 'bot-y'" in res.stderr
+    res = fleet.run(
+        GH_STUB_HEADREF="feat/ordinary", REVIEW_LOGIN="bot-y", AGENT_LOGIN="bot-z"
+    )
+    assert res.returncode == 2
+    assert "ожидался 'bot-z'" in res.stderr
+
+
+def test_merge_profile_from_config_and_review_env(fleet: Fleet) -> None:
+    """MERGE_GH_CONFIG_DIR, иначе REVIEW_GH_CONFIG_DIR, иначе конфиг."""
+    res = fleet.run(GH_STUB_HEADREF="feat/ordinary", MERGE_GH_CONFIG_DIR="")
+    assert res.returncode == 0, res.stderr
+    assert fleet.merge_calls()[0].startswith(f"GH_CONFIG_DIR={fleet.profile_dir} ")
+    other = fleet.tmp / "review-env"
+    res = fleet.run(MERGE_GH_CONFIG_DIR="", REVIEW_GH_CONFIG_DIR=str(other))
+    assert res.returncode == 2
+    assert f"профиля агента нет: {other}" in res.stderr
+
+
+def test_no_config_exit2(fleet: Fleet) -> None:
+    """Без env и без конфига — код 2, сообщение называет путь конфига."""
+    empty = fleet.tmp / "empty-xdg"
+    res = fleet.run(GH_STUB_HEADREF="feat/ordinary", XDG_CONFIG_HOME=str(empty))
+    assert res.returncode == 2
+    assert str(empty / "darkfactory" / "config.toml") in res.stderr
+    assert fleet.calls() == []
 
 
 # --- голова уехала после проверки ------------------------------------------
@@ -1752,6 +1804,7 @@ def test_shell_reads_authority_ssot_and_hardcodes_nothing() -> None:
         # сами authority-root и харнесс-пути (blocker ревью PR #344).
         "ssot_env.sh",
         "approval_branches.sh",
+        "df_config.sh",  # доступ к конфигу DarkFactory (учётка и профиль агента)
         # Исполняемый вход стоп-крана (`python3 -I "$script_dir/…"`).
         "governance/halt_gate.py",
         # Исполняемый вход предпроверки акта review/v1 (Task 15): префикс
@@ -2219,6 +2272,7 @@ def test_app_key_dir_defaults_to_home_config(fleet: Fleet) -> None:
     key = home / ".config" / "darkfactory" / "apps" / "k.pem"
     key.parent.mkdir(parents=True)
     key.write_text("k\n")
+    write_config(home / ".config", agent_gh_config_dir=fleet.profile_dir)
     env = fleet.env(**_app_candidate(fleet, MERGE_APP_KEY=str(key), HOME=str(home)))
     env.pop("XDG_CONFIG_HOME")
     res = subprocess.run(

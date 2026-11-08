@@ -78,6 +78,14 @@ harness_files:
   - governance/safe_io
   - governance/sandbox.py
   - governance/sandbox
+  - governance/secret_dirs.py
+  - governance/secret_dirs
+  # загрузчик конфига DarkFactory и его импорт — в ЗЦ: учётки проб связки
+  # `sandbox` (план 1 darkfactory-config, Task 4)
+  - governance/df_config.py
+  - governance/df_config
+  - governance/act_settings.py
+  - governance/act_settings
   - governance/author_launch.py
   - governance/author_launch
   - tests/test_governance_safe_io.py

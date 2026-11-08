@@ -37,7 +37,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from governance import safe_io, sandbox
+from governance import df_config, safe_io, sandbox
 
 DEVTOOLS_ROOT = Path(__file__).resolve().parent.parent
 #: Контракт допуска исполняемых файлов харнесса (§14; запись — шаг H2).
@@ -671,7 +671,10 @@ def _launch_in(
     except sandbox.SandboxError as exc:
         return _refuse(f"профиль: {exc}")
     env = call_env(cdir, ready.token)
-    probe = sandbox.run_probe(cdir, profile, env, _probe_targets(ready))
+    try:
+        probe = sandbox.run_probe(cdir, profile, env, _probe_targets(ready))
+    except df_config.ConfigError as exc:
+        return _refuse(f"конфиг DarkFactory: {exc}")
     if not probe.ok:
         return _refuse("проба песочницы не прошла: " + "; ".join(probe.failures))
     safe_io.publish(

@@ -3081,7 +3081,9 @@ def test_finalize_merge_policy_axes(tmp_path: Path, monkeypatch) -> None:
         "load_safety",
         lambda: mg.Safety(agent_merge_allowed=True, actor_class="human"),
     )
-    assert an.finalize_merge_policy(str(tmp_path))[0] == "human"
+    monkeypatch.setenv("REVIEW_LOGIN", "bot-q")
+    who, why = an.finalize_merge_policy(str(tmp_path))
+    assert (who, why) == ("human", "safety steward: bot-q — human")  # не литерал
     monkeypatch.undo()
     (tmp_path / "CLAUDE.md").write_text("Мерж: человек\n", encoding="utf-8")
     who, why = an.finalize_merge_policy(str(tmp_path))

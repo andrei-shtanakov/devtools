@@ -707,7 +707,11 @@ def test_real_deps_app_mode_wires_installations(monkeypatch, tmp_path) -> None:
     args = argparse.Namespace(
         merge_profile="/x/merge", repo=SLUG, pr=7, app_id=5, app_key=Path("/k.pem")
     )
-    deps = act_premerge.real_deps(args, env={"XDG_STATE_HOME": str(tmp_path)})
+    env = {
+        "XDG_STATE_HOME": str(tmp_path),
+        "XDG_CONFIG_HOME": os.environ["XDG_CONFIG_HOME"],  # конфиг conftest
+    }
+    deps = act_premerge.real_deps(args, env=env)
     assert deps.installations is not None
     assert deps.installations(BINDING) is None
     assert seen == [(5, Path("/k.pem"), {"approval-policy": 22, "df-trust": 11}, {})]

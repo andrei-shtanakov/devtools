@@ -727,10 +727,40 @@ def test_macos_major_reads_sw_vers() -> None:
 # --- оценка исходов пробы (§15, TASK-004) — переносимо ---------------------
 
 
+def _items() -> frozenset[str]:
+    return sandbox.probe_items(sandbox.keychain_probes())
+
+
+def test_keychain_probes_from_config_accounts(monkeypatch, tmp_path) -> None:
+    """Пробы связки — по учёткам `accounts.agent`/`accounts.human` конфига
+    DarkFactory, без повторов; общий поиск и учётка модели — всегда."""
+    from tests.df_config_fixture import write_config
+
+    shared = [("-s", "gh:github.com"), ("-s", "Claude Code-credentials")]
+    env = write_config(tmp_path / "a", agent="bot-x", human="human-y")
+    monkeypatch.setenv("XDG_CONFIG_HOME", env["XDG_CONFIG_HOME"])
+    assert list(sandbox.keychain_probes()) == [
+        ("-s", "gh:github.com", "-a", "bot-x"),
+        ("-s", "gh:github.com", "-a", "human-y"),
+        *shared,
+    ]
+    env = write_config(tmp_path / "b", agent="same", human="same")
+    monkeypatch.setenv("XDG_CONFIG_HOME", env["XDG_CONFIG_HOME"])
+    probes = sandbox.keychain_probes()
+    assert list(probes) == [("-s", "gh:github.com", "-a", "same"), *shared]
+    assert sandbox.probe_items(probes) - sandbox.PROBE_ITEMS == {
+        "keychain:0",
+        "keychain:1",
+        "keychain:2",
+    }
+
+
 def _all_denied() -> dict[str, str]:
-    out = {name: "EPERM" for name in sandbox.PROBE_ITEMS}
+    out = {name: "EPERM" for name in _items()}
     out.update({"allow:stage": "ok", "allow:tmp": "ok", "tty:open": "ENXIO"})
-    out.update({f"keychain:{i}": "rc=44" for i in range(4)})
+    out.update(
+        {f"keychain:{i}": "rc=44" for i in range(len(sandbox.keychain_probes()))}
+    )
     out["keychain:canary"] = "rc=44"
     out.update(
         {
@@ -744,9 +774,7 @@ def _all_denied() -> dict[str, str]:
 
 
 def _eval(**override: str) -> sandbox.ProbeResult:
-    return sandbox._evaluate(
-        {**_all_denied(), **override}, sandbox.PROBE_ITEMS, None, ()
-    )
+    return sandbox._evaluate({**_all_denied(), **override}, _items(), None, ())
 
 
 def test_evaluate_all_denied_is_ok_with_apple_events_note() -> None:
@@ -790,7 +818,7 @@ def test_evaluate_missing_item_env_and_effects() -> None:
     del out["read:bait"]
     result = sandbox._evaluate(
         out,
-        sandbox.PROBE_ITEMS,
+        _items(),
         "env: лишние ['GH_TOKEN'], недостающие []",
         ("submit",),
     )
@@ -818,7 +846,9 @@ def test_env_mismatch_is_exact_set_equality() -> None:
 def test_probe_inner_timeouts_fit_outer_budget() -> None:
     # сумма внутренних потолков меньше внешнего: отказ называется пунктом
     calls = len(re.findall(r"(?<![\w.])run\(", sandbox.PROBE_SCRIPT)) - 1  # def
-    steps = calls + len(sandbox.KEYCHAIN_PROBES) - 1  # цикл связки — один вызов
+    # допущение набора: две разные учётки конфига conftest → четыре пробы связки
+    assert len(sandbox.keychain_probes()) == 4
+    steps = calls + len(sandbox.keychain_probes()) - 1  # цикл связки — один вызов
     assert steps == 10
     inner = (steps - 1) * sandbox.PROBE_STEP_TIMEOUT + sandbox.APPLE_EVENTS_TIMEOUT
     assert inner + 10 < sandbox.PROBE_TIMEOUT
@@ -920,6 +950,34 @@ def test_launch_refuses_non_claude_harness_verbatim(launch, monkeypatch, source)
         "поддерживается claude (`AUTHOR_HARNESS=claude`)"
     )
     _refused_before_call_dir(launch, outcome, "codex")
+
+
+@pytest.mark.no_df_config
+def test_run_probe_config_failure_before_side_effects(tmp_path: Path) -> None:
+    """Пробы связки — из конфига, и до любого побочного эффекта: конфига нет —
+    `ConfigError`, ни каталогов бандла, ни `profile.sb` (F2)."""
+    from governance import df_config
+
+    call = SimpleNamespace(root=tmp_path / "call")
+    targets = SimpleNamespace(target_dir=tmp_path / "t", bundle_dir=tmp_path / "b")
+    with pytest.raises(df_config.ConfigError, match="config.toml"):
+        sandbox.run_probe(call, "(version 1)", {}, targets)  # type: ignore[arg-type]
+    assert list(tmp_path.iterdir()) == []
+
+
+@darwin_only
+def test_launch_config_failure_is_named_refusal(launch, monkeypatch) -> None:
+    """`ConfigError` пробы — названный отказ границы до платного вызова (F2)."""
+    from governance import df_config
+
+    def probe(*args: object, **kw: object) -> sandbox.ProbeResult:
+        raise df_config.ConfigError("/x/config.toml: файла нет")
+
+    monkeypatch.setattr(sandbox, "run_probe", probe)
+    outcome = _launch(launch)
+    assert outcome.code == author_launch.REFUSED
+    assert outcome.reason == "конфиг DarkFactory: /x/config.toml: файла нет"
+    assert launch.spawned == []
 
 
 def test_launch_checks_harness_before_admission(launch, monkeypatch):

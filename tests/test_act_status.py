@@ -38,6 +38,7 @@ from governance.act_request import (  # noqa: E402
 from governance.act_time import Ambiguous, Unavailable  # noqa: E402
 from governance.facts import Fact, Outcome  # noqa: E402
 from governance.ops import RealOps  # noqa: E402
+from tests.df_config_fixture import write_config  # noqa: E402
 from tests.test_act_context import NoEvents  # noqa: E402
 
 WS = "ws-7"
@@ -1656,7 +1657,7 @@ def test_decider_legacy_empty_paths_through_real_facts_read() -> None:
 def bad_settings(tmp_path: Path, monkeypatch) -> None:
     """`act.toml` с неизвестным ключом; `mode_probe` — настоящий (`real_deps`)."""
     cfg = tmp_path / "cfg"
-    (cfg / "darkfactory").mkdir(parents=True)
+    write_config(cfg)  # конфиг DarkFactory исправен — битый только act.toml
     (cfg / "darkfactory" / "act.toml").write_text("review_v1 = true\nlol = 1\n")
     monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg))
     monkeypatch.setattr(
