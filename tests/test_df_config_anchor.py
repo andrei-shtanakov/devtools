@@ -137,3 +137,67 @@ def test_cli_real_interpreter_refuses_redirected_test_mode(tmp_path: Path) -> No
     )
     assert (done.returncode, done.stdout) == (2, ""), done.stderr
     assert "режим test принимается только из" in done.stderr
+
+
+def test_swap_after_read_follows_the_read_file(
+    home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """TOCTOU (ревью раунда 1): прочитан поддельный файл, затем — до сверки —
+    он подменён симлинкой на канон. Решение — по прочитанному файлу: отказ."""
+    _place(home / ".config", "strict")
+    env = _place(tmp_path / "forged", "test")
+    forged = tmp_path / "forged" / "darkfactory" / "config.toml"
+    canonical = home / ".config" / "darkfactory" / "config.toml"
+    parse = df_config._Parser.parse
+
+    def parse_then_swap(self: df_config._Parser, data: dict[str, object]):
+        forged.unlink()
+        forged.symlink_to(canonical)
+        return parse(self, data)
+
+    monkeypatch.setattr(df_config._Parser, "parse", parse_then_swap)
+    with pytest.raises(ConfigError, match="режим test принимается только из"):
+        df_config.load(env)
+    assert os.path.realpath(forged) == os.path.realpath(canonical)
+
+
+def test_canonical_symlink_to_file_outside_home_loads(
+    home: Path, tmp_path: Path
+) -> None:
+    """Канон — симлинка на файл вне дома (выбор человека): загружается."""
+    _place(tmp_path / "store", "test")
+    canonical = home / ".config" / "darkfactory" / "config.toml"
+    canonical.parent.mkdir(parents=True)
+    canonical.symlink_to(tmp_path / "store" / "darkfactory" / "config.toml")
+    assert df_config.load({"XDG_CONFIG_HOME": str(home / ".config")}).mode == "test"
+
+
+def test_missing_canonical_refuses_test_mode(home: Path) -> None:
+    """Канона нет вовсе — режим test не принимается ни откуда."""
+    env = _place(home / "elsewhere", "test")
+    with pytest.raises(ConfigError, match="режим test принимается только из"):
+        df_config.load(env)
+
+
+def test_no_passwd_entry_is_config_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def no_entry() -> Path:
+        raise KeyError("getpwuid(): uid not found")
+
+    monkeypatch.setattr(df_config, "_real_home", no_entry)
+    env = _place(tmp_path / "x", "test")
+    with pytest.raises(ConfigError, match="mode — режим test: нет записи учётки"):
+        df_config.load(env)
+    assert df_config.load(_place(tmp_path / "y", "strict")).mode == "strict"
+
+
+def test_relative_pw_dir_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Пустой/относительный `pw_dir` не резолвится от cwd в «канон»."""
+    monkeypatch.setattr(df_config, "_real_home", lambda: Path(""))
+    monkeypatch.chdir(tmp_path)
+    env = _place(tmp_path / ".config", "test")
+    with pytest.raises(ConfigError, match="не абсолютный"):
+        df_config.load(env)
