@@ -2678,3 +2678,19 @@ def test_charter_codes_elsewhere_unavailable_fact_raises(
     _gh_listing(monkeypatch, heads, returncode=rc)
     with pytest.raises(RuntimeError, match=needle):
         RealOps().charter_codes_elsewhere(str(target), REPO_SLUG, "master", "WS-OWN")
+
+
+def test_ops_agent_login_config_error_is_none_with_reason(
+    monkeypatch, tmp_path, capsys
+):
+    """Битый конфиг: None («не установлено») и причина в stderr."""
+    path = tmp_path / "darkfactory" / "config.toml"
+    path.parent.mkdir(parents=True)
+    path.write_text("schema = 1\n", encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("REVIEW_GH_CONFIG_DIR", raising=False)
+    calls = _install_fake_run(monkeypatch, stdout="ai-prosto\n")
+
+    assert RealOps().agent_login() is None
+    assert capsys.readouterr().err.startswith("конфиг DarkFactory: ")
+    assert calls == []

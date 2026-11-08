@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -1743,7 +1744,11 @@ class RealOps(BriefFactsMixin):
         конфигурации, а не из кода. Профиля нет — None без вызова `gh`
         (иначе `gh` ответил бы логином основного профиля).
         """
-        profile = review_gh_config_dir()
+        try:
+            profile = review_gh_config_dir()
+        except df_config.ConfigError as exc:
+            print(f"конфиг DarkFactory: {exc}", file=sys.stderr)
+            return None
         if not profile.is_dir():
             return None
         return _gh_user_login({**os.environ, "GH_CONFIG_DIR": str(profile)})

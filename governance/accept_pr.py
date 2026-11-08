@@ -27,9 +27,9 @@ spec-runner, завершив цикл, открывает integration-PR и о�
    `spec-runner sync`.
 
 CLI: ``python -m governance.accept_pr --repo kapelle --pr 59``
-(``make accept-pr ARGS='--repo kapelle --pr 59'``); ``--owner`` — дефолт
-andrei-shtanakov. Полный цикл «sync + повторный run до remaining=0» —
-вариант (в), сюда намеренно не входит.
+(``make accept-pr ARGS='--repo kapelle --pr 59'``); ``--owner``
+необязателен: по умолчанию владелец берётся из origin локального чекаута цели.
+Полный цикл «sync + повторный run до remaining=0» — вариант (в), сюда намеренно не входит.
 """
 
 from __future__ import annotations
@@ -408,9 +408,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, help="имя репо (kapelle)")
     parser.add_argument("--pr", required=True, type=int)
-    parser.add_argument("--owner", default="andrei-shtanakov")
+    parser.add_argument("--owner", default=None, help="владелец (иначе из origin)")
     args = parser.parse_args(argv)
-    repo_slug = f"{args.owner}/{args.repo}".lower()
     try:
         target_dir = str(df_config.workspace_dir(args.repo))
     except df_config.ConfigError as exc:
@@ -423,6 +422,16 @@ def main(argv: list[str] | None = None) -> int:
         check=False,
     )
     checkout_slug = _origin_slug(origin.stdout) if origin.returncode == 0 else None
+    if args.owner is None:
+        if checkout_slug is None:
+            print(
+                f"accept-pr: у чекаута ../{args.repo} нет разбираемого origin — "
+                "владельца не определить, укажите --owner"
+            )
+            return 2
+        repo_slug = checkout_slug
+    else:
+        repo_slug = f"{args.owner}/{args.repo}".lower()
     if checkout_slug != repo_slug:
         print(
             f"accept-pr: origin локального чекаута ../{args.repo} = "

@@ -818,7 +818,9 @@ def test_main_refuses_owner_checkout_mismatch(monkeypatch, capsys) -> None:
         )
 
     monkeypatch.setattr(accept_pr.subprocess, "run", fake_run)
-    rc = accept_pr.main(["--repo", "kapelle", "--pr", "1"])
+    rc = accept_pr.main(
+        ["--repo", "kapelle", "--pr", "1", "--owner", "andrei-shtanakov"]
+    )
     assert rc == 2
     assert "один репозиторий" in capsys.readouterr().out
 
@@ -891,3 +893,46 @@ def test_harness_prefixes_from_ssot() -> None:
     # Файл, который читает merge-pr.sh, защищён сам собою (тот же класс, что
     # contracts/authority-root/).
     assert "contracts/harness-paths/" in parsed
+
+
+def _origin_stub(monkeypatch, stdout: str, returncode: int = 0) -> list:
+    import types
+
+    from governance import df_config
+
+    monkeypatch.setattr(df_config, "workspace_dir", lambda name, env=None: "/x")
+    monkeypatch.setattr(
+        accept_pr.subprocess,
+        "run",
+        lambda argv, **kw: types.SimpleNamespace(
+            returncode=returncode, stdout=stdout, stderr=""
+        ),
+    )
+    seen: list = []
+    monkeypatch.setattr(accept_pr, "accept", lambda *a, **k: seen.append(a[1]) or 0)
+    monkeypatch.setattr(accept_pr, "RealOps", lambda: None)
+    return seen
+
+
+def test_accept_pr_owner_defaults_to_checkout_origin(monkeypatch) -> None:
+    seen = _origin_stub(monkeypatch, "git@github.com:alice/kapelle.git\n")
+    assert accept_pr.main(["--repo", "kapelle", "--pr", "1"]) == 0
+    assert seen == ["alice/kapelle"]
+
+
+def test_accept_pr_without_origin_and_owner_is_2(monkeypatch, capsys) -> None:
+    _origin_stub(monkeypatch, "", returncode=1)
+    assert accept_pr.main(["--repo", "kapelle", "--pr", "1"]) == 2
+    assert "--owner" in capsys.readouterr().out
+
+
+def test_accept_pr_unparsable_origin_without_owner_is_2(monkeypatch, capsys) -> None:
+    _origin_stub(monkeypatch, "не-url\n")
+    assert accept_pr.main(["--repo", "kapelle", "--pr", "1"]) == 2
+    assert "--owner" in capsys.readouterr().out
+
+
+def test_accept_pr_explicit_owner_mismatch_is_2(monkeypatch, capsys) -> None:
+    _origin_stub(monkeypatch, "git@github.com:alice/kapelle.git\n")
+    rc = accept_pr.main(["--repo", "kapelle", "--pr", "1", "--owner", "bob"])
+    assert rc == 2 and "один репозиторий" in capsys.readouterr().out
