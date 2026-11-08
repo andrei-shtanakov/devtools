@@ -28,7 +28,11 @@ from pathlib import Path
 import pytest
 
 from governance import approval_branches, authority_root
-from tests.df_config_fixture import ENV_OVERRIDES, write_config
+from tests.df_config_fixture import (
+    ENV_OVERRIDES,
+    anchor_test_config,
+    write_config,
+)
 
 SCRIPT = Path(__file__).resolve().parent.parent / "merge-pr.sh"
 
@@ -2304,6 +2308,7 @@ def test_app_key_dir_defaults_to_home_config(fleet: Fleet) -> None:
     )  # fmt: skip
     assert res.returncode == 0, res.stderr
     # Тот же ключ при XDG_CONFIG_HOME, указывающем в другое место, — вне каталога.
+    anchor_test_config(fleet.xdg)  # канон режима test — снова конфиг флота
     res = fleet.run(**_app_candidate(fleet, MERGE_APP_KEY=str(key)))
     assert res.returncode == 2 and "вне" in res.stderr
 

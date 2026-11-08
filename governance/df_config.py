@@ -10,6 +10,17 @@
 `governance/secret_dirs.py`, закрепляет тест); `test` —
 `[policy]` необязателен, ограничения на каталоги нет.
 
+Якорь режима test: `mode = "test"` принимается ТОЛЬКО из канонического
+конфига пользователя `<pw_dir>/.config/darkfactory/config.toml`, где
+`pw_dir` — домашний каталог учётки из базы `pwd` (не `HOME`, не
+`XDG_CONFIG_HOME`; сравнение по `realpath`). Путь чтения следует
+`XDG_CONFIG_HOME`, и без якоря любой процесс подсунул бы поддельный конфиг
+test с `accounts.human = <любой логин>` — синтетическая политика приняла бы
+его утверждающим без человека (та же ручка «env подменяет утверждающих», что
+закрывает отказ `AUTHORIZED_APPROVER_ACCOUNTS`). strict из перенаправленного
+пути работает как прежде: его доверие от пути конфига не зависит (источник
+политики — SSOT).
+
 Модуль исполняется скриптами мержа (`df_config.sh` → `python3 -I <этот файл>
 get <ключ>`), поэтому он под authority-root и харнесс-гвардом. Импорты только
 stdlib: файл вендорится дословно (discovery) и запускается под `-I` без пакета
@@ -32,6 +43,7 @@ if sys.version_info < (3, 11):  # noqa: UP036 — запуск системны�
     raise SystemExit(2)
 
 import os  # noqa: E402
+import pwd  # noqa: E402
 import re  # noqa: E402
 import tomllib  # noqa: E402
 from collections.abc import Callable, Mapping  # noqa: E402
@@ -47,6 +59,7 @@ STRICT_GH_DIRS: tuple[str, ...] = (
     ".ssh",
 )
 #: Что в режиме test реально выключено (дописывают следующие срезы).
+#: Сам режим test принимается только из `canonical_config_path()` (якорь).
 TEST_RELAXATIONS: tuple[str, ...] = (
     "репо политики утверждения не используется: утверждающий — accounts.human",
 )
@@ -123,11 +136,34 @@ def config_path(env: Mapping[str, str]) -> Path:
     return config_home(env) / "darkfactory" / "config.toml"
 
 
+def canonical_config_path() -> Path:
+    """Канонический конфиг учётки: `<pw_dir>/.config/darkfactory/config.toml`.
+
+    Только отсюда принимается `mode = "test"` (якорь, см. docstring модуля)."""
+    return _real_home() / ".config" / "darkfactory" / "config.toml"
+
+
+def _real_home() -> Path:
+    """Домашний каталог учётки процесса из базы `pwd` — не `HOME`."""
+    return Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
 def load(env: Mapping[str, str] = os.environ) -> DfConfig:
-    """Прочитать и проверить конфиг; любой дефект — `ConfigError`."""
+    """Прочитать и проверить конфиг; любой дефект — `ConfigError`.
+
+    `mode = "test"` не из `canonical_config_path()` — `ConfigError` (якорь)."""
     path = config_path(env)
     data = _read(path)
-    return _Parser(path).parse(data)
+    cfg = _Parser(path).parse(data)
+    if cfg.mode == "test":
+        canonical = canonical_config_path()
+        if os.path.realpath(path) != os.path.realpath(canonical):
+            raise _Parser(path).fail(
+                "mode",
+                f"режим test принимается только из {canonical}; конфиг "
+                f"прочитан из {path} (перенаправление XDG_CONFIG_HOME/HOME)",
+            )
+    return cfg
 
 
 def workspace_root(env: Mapping[str, str] | None = None) -> Path:

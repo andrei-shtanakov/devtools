@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from governance import accept_pr, author_launch, df_config, ops, spec_loop
-from tests.df_config_fixture import write_config
+from tests.df_config_fixture import REAL_HOME_ENV, write_config
 
 ROOT = Path(__file__).resolve().parent.parent
 GH_STUB = '#!/bin/sh\necho "gh $*" >> "$GH_STUB_LOG"\nexit 1\n'
@@ -161,6 +161,8 @@ def _run(
         "PATH": f"{bindir}:{os.environ['PATH']}",
         "HOME": str(tmp_path),
         "GH_STUB_LOG": str(tmp_path / "gh.log"),
+        # Якорь режима test для `python3 -I df_config.py` (шим в PATH выше).
+        REAL_HOME_ENV: os.environ[REAL_HOME_ENV],
         **env,
     }
     return subprocess.run(

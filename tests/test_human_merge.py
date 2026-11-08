@@ -602,3 +602,14 @@ def test_test_mode_brief_pr_runs_checker_without_policy_read(fleet: Fleet) -> No
     assert res.returncode == 0, res.stderr
     assert len(_uv_calls(fleet)) == 1
     assert fleet.merge_calls() and _no_policy_read(fleet)
+
+
+def test_redirected_test_config_refused_without_test_anchor(fleet: Fleet) -> None:
+    """Якорь (discovery#67): без тестового шима (`DF_TEST_REAL_HOME` пуст)
+    настоящий `python3 -I` видит конфиг test из перенаправленного XDG — отказ 2
+    до сети и без мержа."""
+    _one_account(fleet)
+    res = fleet.run(GH_STUB_LOGIN="alice", DF_TEST_REAL_HOME="")
+    assert res.returncode == 2, res.stderr
+    assert "режим test принимается только из" in res.stderr
+    assert fleet.merge_calls() == []

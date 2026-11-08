@@ -1,0 +1,25 @@
+#!/bin/sh
+# ТОЛЬКО ДЛЯ ТЕСТОВ (tests/df_config_fixture.py, якорь режима test).
+# Скрипты зовут `python3 -I governance/df_config.py get <ключ>`; канон конфига
+# — `<pw_dir>/.config/darkfactory/config.toml` из базы `pwd`. Этот `python3`
+# стоит первым в PATH дочернего процесса теста и, если задан
+# DF_TEST_REAL_HOME, исполняет `-I <скрипт>.py …` через boot.py, который
+# подменяет `pw_dir` на временный дом теста. Любой иной вызов (или пустой
+# DF_TEST_REAL_HOME) — настоящий python3 с теми же аргументами.
+# Якорь не ослабляет: чтобы так сделать в бою, нужно подложить исполняемый
+# файл в PATH (уже исполнение кода от имени учётки), а не выставить ключ.
+shim_dir=$(cd "$(dirname "$0")" && pwd)
+real=$(
+    IFS=:
+    for d in $PATH; do
+        [ "$d" = "$shim_dir" ] && continue
+        [ -x "$d/python3" ] && { printf '%s\n' "$d/python3"; break; }
+    done
+)
+[ -n "$real" ] || { echo "df_real_home_shim: нет python3 в PATH" >&2; exit 127; }
+if [ -n "${DF_TEST_REAL_HOME:-}" ] && [ "${1:-}" = "-I" ]; then
+    case "${2:-}" in
+        *.py) exec "$real" -I "$shim_dir/boot.py" "$@" ;;
+    esac
+fi
+exec "$real" "$@"

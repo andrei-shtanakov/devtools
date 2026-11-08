@@ -16,6 +16,7 @@ import pytest
 
 from governance import act_settings, df_config, sandbox, secret_dirs
 from governance.df_config import ConfigError
+from tests.df_config_fixture import anchor_test_config
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -51,6 +52,7 @@ def _write(home: Path, text: str) -> dict[str, str]:
     path = home / "darkfactory" / "config.toml"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+    anchor_test_config(home)  # режим test — из канонического пути (якорь)
     return {"XDG_CONFIG_HOME": str(home)}
 
 
