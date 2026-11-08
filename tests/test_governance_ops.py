@@ -19,7 +19,20 @@ import governance.ops as ops_mod
 from governance.author_launch import AuthorCall, LaunchOutcome
 from governance.facts import Outcome
 from governance.ops import RealOps
+from tests.conftest import _STRICT_GH_DIRS
 from tests.df_config_fixture import write_config
+
+
+@pytest.fixture(autouse=True)
+def discovery_ws(_df_config, tmp_path_factory, monkeypatch) -> Path:
+    """workspace.root конфига с каталогом `discovery` (соседа в тестах нет)."""
+    ws = tmp_path_factory.mktemp("ws")
+    (ws / "discovery").mkdir()
+    xdg = tmp_path_factory.mktemp("xdg-ws")
+    env = write_config(xdg, mode="strict", workspace_root=ws, **_STRICT_GH_DIRS)
+    monkeypatch.setenv("XDG_CONFIG_HOME", env["XDG_CONFIG_HOME"])
+    return ws
+
 
 REPO_SLUG = "andrei-shtanakov/devtools"
 _EXPECTED_REMOTE_BRANCH_HEAD_QUERY = (
@@ -2113,7 +2126,7 @@ def _capture(monkeypatch, returncode=20, stdout=None):
     return seen
 
 
-def test_discovery_start_argv_and_boundary(monkeypatch, tmp_path):
+def test_discovery_start_argv_and_boundary(monkeypatch, tmp_path, discovery_ws):
     seen = _capture(monkeypatch)
     reply = RealOps().discovery_start("customer", "o/alpha", None, None, str(tmp_path))
     argv = seen[0]["argv"]
@@ -2122,7 +2135,7 @@ def test_discovery_start_argv_and_boundary(monkeypatch, tmp_path):
         "run",
         "--frozen",
         "--project",
-        str(ops_mod.DEVTOOLS_ROOT.parent / "discovery"),
+        str(discovery_ws / "discovery"),
     ]
     assert argv[5:] == [
         "discovery",

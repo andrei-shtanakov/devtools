@@ -70,6 +70,7 @@ from governance import (
     brief_provenance,
     bundle_dag,
     charter_guard,
+    df_config,
     halt_gate,
     run_lock,
     runner,
@@ -81,10 +82,17 @@ from governance import run_state as rs
 from governance.ops import DEVTOOLS_ROOT, RealOps
 from governance.stale_adapter import blob_sha1_bytes
 
-WORKSPACE_ROOT = DEVTOOLS_ROOT.parent
-MANIFEST_PATH = (
-    WORKSPACE_ROOT / "ai-orchestrators-workspace" / "workspace-manifest.toml"
-)
+
+def workspace_root() -> Path:
+    """Корень workspace из конфига DarkFactory (`workspace.root`); лениво."""
+    return df_config.workspace_root()
+
+
+def manifest_path() -> Path:
+    """Манифест флота: `<workspace.root>/ai-orchestrators-workspace/...`."""
+    return workspace_root() / "ai-orchestrators-workspace" / "workspace-manifest.toml"
+
+
 #: Цели живой приёмки вне флота (см. сам файл): только при отсутствии репо в
 #: манифесте флота.
 ACCEPTANCE_TARGETS_PATH = (
@@ -211,7 +219,7 @@ class RepoEntry:
     """Репо из workspace-манифеста (или списка приёмки): каталог + slug.
 
     `source` — откуда цель: `fleet` (манифест) или `acceptance` (список целей
-    приёмки devtools); каталог в обоих случаях — `WORKSPACE_ROOT / repo`.
+    приёмки devtools); каталог в обоих случаях — `workspace_root() / repo`.
     """
 
     repo: str
@@ -230,7 +238,7 @@ def resolve_repo_entry(
     список приёмки не подменяет сломанный SSOT флота. `targets_text=None` —
     списка нет.
     """
-    entry = _manifest_lookup(manifest_text, repo, MANIFEST_PATH)
+    entry = _manifest_lookup(manifest_text, repo, manifest_path())
     if entry is not None:
         return entry
     if targets_text is not None:
@@ -238,7 +246,7 @@ def resolve_repo_entry(
         if found is not None:
             return replace(found, source="acceptance")
     raise SpecLoopError(
-        f"репо {repo!r} нет ни в манифесте флота {MANIFEST_PATH}, ни в списке "
+        f"репо {repo!r} нет ни в манифесте флота {manifest_path()}, ни в списке "
         f"целей приёмки {ACCEPTANCE_TARGETS_PATH} — кнопка работает только по "
         "SSOT"
     )
@@ -253,7 +261,7 @@ def _acceptance_origin_hint(entry: RepoEntry, state: rs.RunState | None) -> str:
         return ""
     return (
         f"; ожидание взято из списка целей приёмки {ACCEPTANCE_TARGETS_PATH}, "
-        f"потому что репо {entry.repo!r} нет в манифесте флота {MANIFEST_PATH}"
+        f"потому что репо {entry.repo!r} нет в манифесте флота {manifest_path()}"
         " — если это репо флота, манифест мог устареть: обновите его клон "
         "(git pull) и повторите"
     )
@@ -264,10 +272,10 @@ def _manifest_lookup(text: str, repo: str, path: Path) -> RepoEntry | None:
 
     Несколько секций могут делить один git_dir (umbrella-дистрибутивы) — это
     один репо, если repo_url совпадает. Не TOML, неоднозначный git_dir,
-    `repo` не одним именем каталога (`WORKSPACE_ROOT / repo` вышел бы из
+    `repo` не одним именем каталога (`workspace_root() / repo` вышел бы из
     workspace) — отказ; проверка здесь, поэтому покрывает и флот, и список.
     """
-    try:  # и флот, и список приёмки: цель — одно имя каталога в WORKSPACE_ROOT
+    try:  # и флот, и список приёмки: цель — одно имя каталога в workspace_root()
         rs.validate_id_component(repo, label="repo")
     except ValueError as exc:
         raise SpecLoopError(str(exc)) from exc
@@ -1135,7 +1143,7 @@ def main(argv: list[str] | None = None) -> int:
         # чтения файла брифа (иначе несуществующий путь отказал бы чтением
         # файла, а не preflight-правилом).
         entry = resolve_repo_entry(
-            _read_ssot(MANIFEST_PATH, "манифест флота"),
+            _read_ssot(manifest_path(), "манифест флота"),
             args.repo,
             _read_targets(),
         )
@@ -1209,7 +1217,8 @@ def main(argv: list[str] | None = None) -> int:
         target_dir = (
             state.target_dir
             if state is not None
-            else args.target_dir or str(WORKSPACE_ROOT / entry.repo)
+            else args.target_dir
+            or str(df_config.require_dir(workspace_root(), entry.repo))
         )
         self_check_slug = state.repo_slug if state is not None else entry.repo_slug
         origin_slug = repo_slug_from_url(_origin_url(target_dir))
@@ -1436,6 +1445,9 @@ def main(argv: list[str] | None = None) -> int:
         return _report_state(started)
     except (SpecLoopError, brief_input.BriefInputError, FileNotFoundError) as exc:
         print(f"spec-loop: {exc}")
+        return 1
+    except df_config.ConfigError as exc:
+        print(f"spec-loop: конфиг DarkFactory: {exc}")
         return 1
     except run_lock.LockBusy as exc:
         print(f"spec-loop: {exc}")

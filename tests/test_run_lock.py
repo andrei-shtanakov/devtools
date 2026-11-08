@@ -146,7 +146,7 @@ def test_second_entry_exits_before_reading_state(  # T37, Review Focus
             "E", (), {"repo_slug": "owner/alpha", "repo": "alpha", "source": "fleet"}
         )(),
     )
-    monkeypatch.setattr(spec_loop, "MANIFEST_PATH", tmp_path / "m.toml")
+    monkeypatch.setattr(spec_loop, "manifest_path", lambda: tmp_path / "m.toml")
     (tmp_path / "m.toml").write_text("", encoding="utf-8")
     with run_lock.run_lock(run_id):
         code = spec_loop.main(["--subject", state.subject, "--repo", "alpha"])
@@ -188,7 +188,7 @@ def test_state_is_reread_under_lock(tmp_path, runs_root, monkeypatch) -> None:  
             "E", (), {"repo_slug": "owner/alpha", "repo": "alpha", "source": "fleet"}
         )(),
     )
-    monkeypatch.setattr(spec_loop, "MANIFEST_PATH", tmp_path / "m.toml")
+    monkeypatch.setattr(spec_loop, "manifest_path", lambda: tmp_path / "m.toml")
     (tmp_path / "m.toml").write_text("", encoding="utf-8")
     monkeypatch.setattr(
         spec_loop, "_origin_url", lambda d: "git@github.com:owner/alpha.git"

@@ -322,7 +322,7 @@ def test_manifest_unreadable_is_refused_without_fallback(
     runs_root, tmp_path, monkeypatch, capsys
 ) -> None:
     env = _LoopEnv(monkeypatch, tmp_path)
-    monkeypatch.setattr(spec_loop, "MANIFEST_PATH", tmp_path / "missing.toml")
+    monkeypatch.setattr(spec_loop, "manifest_path", lambda: tmp_path / "missing.toml")
     rc = spec_loop.main(["--subject", "s", "--repo", "polygon"])
     assert rc == 1 and env.calls == []
     assert "манифест флота" in capsys.readouterr().out
@@ -649,9 +649,11 @@ class _LoopEnv:
         target = tmp_path / "alpha"
         (target / ".git").mkdir(parents=True)
         self.target = target
-        monkeypatch.setattr(spec_loop, "MANIFEST_PATH", tmp_path / "manifest.toml")
+        monkeypatch.setattr(
+            spec_loop, "manifest_path", lambda: tmp_path / "manifest.toml"
+        )
         (tmp_path / "manifest.toml").write_text(MANIFEST, encoding="utf-8")
-        monkeypatch.setattr(spec_loop, "WORKSPACE_ROOT", tmp_path)
+        monkeypatch.setattr(spec_loop, "workspace_root", lambda: tmp_path)
         monkeypatch.setattr(
             spec_loop, "_origin_url", lambda d: "git@github.com:owner/alpha.git"
         )
@@ -1543,8 +1545,8 @@ def _wave_recovery_env(tmp_path, monkeypatch, ops):
     target = tmp_path / "alpha"
     (target / ".git").mkdir(parents=True)
     (tmp_path / "manifest.toml").write_text(MANIFEST, encoding="utf-8")
-    monkeypatch.setattr(spec_loop, "MANIFEST_PATH", tmp_path / "manifest.toml")
-    monkeypatch.setattr(spec_loop, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(spec_loop, "manifest_path", lambda: tmp_path / "manifest.toml")
+    monkeypatch.setattr(spec_loop, "workspace_root", lambda: tmp_path)
     monkeypatch.setattr(
         spec_loop, "_origin_url", lambda _d: "git@github.com:owner/alpha.git"
     )

@@ -806,6 +806,10 @@ def test_origin_slug_parses_ssh_and_https() -> None:
 def test_main_refuses_owner_checkout_mismatch(monkeypatch, capsys) -> None:
     import types
 
+    from governance import df_config
+
+    monkeypatch.setattr(df_config, "workspace_dir", lambda name, env=None: "/x")
+
     def fake_run(argv, **kwargs):
         return types.SimpleNamespace(
             returncode=0,

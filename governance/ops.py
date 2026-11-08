@@ -2130,7 +2130,7 @@ class RealOps(BriefFactsMixin):
             "run",
             "--frozen",
             "--project",
-            str(DEVTOOLS_ROOT.parent / "discovery"),
+            str(df_config.workspace_dir("discovery")),
             "discovery",
             *args,
         ]

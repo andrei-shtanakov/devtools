@@ -41,10 +41,9 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from governance import authority_root, ssot_env
+from governance import authority_root, df_config, ssot_env
 from governance.facts import Outcome
 from governance.ops import (
-    DEVTOOLS_ROOT,
     REVIEW_BARRIER_EXIT,
     REVIEW_BARRIER_STOP,
     Ops,
@@ -412,7 +411,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--owner", default="andrei-shtanakov")
     args = parser.parse_args(argv)
     repo_slug = f"{args.owner}/{args.repo}".lower()
-    target_dir = str(DEVTOOLS_ROOT.parent / args.repo)
+    try:
+        target_dir = str(df_config.workspace_dir(args.repo))
+    except df_config.ConfigError as exc:
+        print(f"accept-pr: конфиг DarkFactory: {exc}")
+        return 2
     origin = subprocess.run(
         ["git", "-C", target_dir, "remote", "get-url", "origin"],
         capture_output=True,
