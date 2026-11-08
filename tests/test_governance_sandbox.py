@@ -18,6 +18,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
@@ -510,6 +511,33 @@ def _contract(base: Path, *entries: dict[str, object]) -> Path:
     return path
 
 
+def _protocol(
+    base: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entry: dict[str, object],
+    *,
+    failures: Sequence[str] = (),
+    **record_override: object,
+) -> Path:
+    """Протокол допуска записи `entry` в `base/docs/evidence`; корень — `base`."""
+    rendered = {**entry, **record_override}
+    admission = sandbox.Admission(
+        **{**rendered, "realpath": Path(str(rendered["realpath"]))}  # type: ignore[arg-type]
+    )
+    text = sandbox.render_admit_protocol(
+        admission,
+        date="2026-11-08",
+        probe=sandbox.ProbeResult((), ()),
+        failures=failures,
+        calls=(),
+    )
+    target = base / str(entry["evidence"])
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, "utf-8")
+    monkeypatch.setattr(sandbox, "EVIDENCE_BASE", base)
+    return target
+
+
 @pytest.fixture
 def macos_26(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sandbox, "_macos_major", lambda: 26)
@@ -640,13 +668,109 @@ def test_admission_admits_exact_file_without_running_it(
             ["/usr/bin/sw_vers", "-productVersion"], capture_output=True, text=True
         ).stdout.split(".")[0]
     )
-    admission = sandbox.admission_check(
-        _contract(base, _entry(real, macos_major=major)), path=str(path_dir)
-    )
+    entry = _entry(real, macos_major=major)
+    _protocol(base, monkeypatch, entry)
+    admission = sandbox.admission_check(_contract(base, entry), path=str(path_dir))
     assert admission.realpath == real
     assert admission.version == "9.9.9"
     assert not marker.exists()
     assert argvs == [["/usr/bin/sw_vers", "-productVersion"]]
+
+
+@darwin_only
+def test_admission_requires_evidence_file(
+    base: Path,
+    harness: tuple[Path, Path, Path],
+    macos_26: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path_dir, real, _ = harness
+    monkeypatch.setattr(sandbox, "EVIDENCE_BASE", base)
+    with pytest.raises(SandboxError, match="не проверен под песочницей") as err:
+        sandbox.admission_check(_contract(base, _entry(real)), path=str(path_dir))
+    assert "docs/evidence/x.md" in str(err.value)
+
+
+@darwin_only
+def test_admission_evidence_failed_protocol_refused(
+    base: Path,
+    harness: tuple[Path, Path, Path],
+    macos_26: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # генератор пишет верные хеши и при провале: одних хешей мало
+    path_dir, real, _ = harness
+    entry = _entry(real)
+    target = _protocol(base, monkeypatch, entry, failures=["проба красная"])
+    assert entry["sha256"] in target.read_text("utf-8")
+    with pytest.raises(SandboxError, match="не проверен под песочницей"):
+        sandbox.admission_check(_contract(base, entry), path=str(path_dir))
+
+
+@darwin_only
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"realpath": "/opt/other"},
+        {"version": "1.0.0"},
+        {"sha256": "1" * 64},
+        {"profile_sha256": "2" * 64},
+    ],
+)
+def test_admission_evidence_record_mismatch_refused(
+    base: Path,
+    harness: tuple[Path, Path, Path],
+    macos_26: None,
+    monkeypatch: pytest.MonkeyPatch,
+    override: dict[str, object],
+) -> None:
+    path_dir, real, _ = harness
+    entry = _entry(real)
+    _protocol(base, monkeypatch, entry, **override)
+    with pytest.raises(SandboxError, match="запись не совпала"):
+        sandbox.admission_check(_contract(base, entry), path=str(path_dir))
+
+
+@darwin_only
+@pytest.mark.parametrize(
+    "evidence", ["../x.md", "/etc/passwd", "docs/other/x.md", "docs/evidence/../x.md"]
+)
+def test_admission_evidence_outside_docs_evidence_refused(
+    base: Path,
+    harness: tuple[Path, Path, Path],
+    macos_26: None,
+    monkeypatch: pytest.MonkeyPatch,
+    evidence: str,
+) -> None:
+    path_dir, real, _ = harness
+    monkeypatch.setattr(sandbox, "EVIDENCE_BASE", base)
+    (base / "x.md").write_text("x")
+    with pytest.raises(SandboxError, match="под docs/evidence"):
+        sandbox.admission_check(
+            _contract(base, _entry(real, evidence=evidence)), path=str(path_dir)
+        )
+
+
+@darwin_only
+def test_admission_evidence_symlink_refused(
+    base: Path,
+    harness: tuple[Path, Path, Path],
+    macos_26: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path_dir, real, _ = harness
+    entry = _entry(real)
+    target = _protocol(base, monkeypatch, entry)
+    moved = base / "moved.md"
+    target.rename(moved)
+    target.symlink_to(moved)
+    with pytest.raises(SandboxError, match="не проверен под песочницей"):
+        sandbox.admission_check(_contract(base, entry), path=str(path_dir))
+
+
+def test_real_admitted_entries_pass_their_protocols() -> None:
+    for record in sandbox.load_admitted(CONTRACT):
+        sandbox._check_evidence(record)
 
 
 @darwin_only
@@ -681,14 +805,18 @@ def test_admission_refuses_changed_content_of_admitted_path(
 
 @darwin_only
 def test_admission_picks_matching_record_among_several(
-    base: Path, harness: tuple[Path, Path, Path], macos_26: None
+    base: Path,
+    harness: tuple[Path, Path, Path],
+    macos_26: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path_dir, real, _ = harness
-    contract = _contract(
-        base,
+    entries = [
         _entry(real, version="1.0.0", macos_major=25),
         _entry(real, version="2.0.0"),
-    )
+    ]
+    _protocol(base, monkeypatch, entries[1])
+    contract = _contract(base, *entries)
     assert sandbox.admission_check(contract, path=str(path_dir)).version == "2.0.0"
 
 
