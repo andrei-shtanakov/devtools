@@ -164,7 +164,7 @@ def _read(path: Path) -> dict[str, object]:
     except FileNotFoundError as exc:
         if path.is_symlink():
             raise ConfigError(f"{path}: висячая симлинка — конфиг не читается") from exc
-        raise ConfigError(f"{path}: файла нет — конфиг DarkFactory обязателен") from exc
+        raise ConfigError(f"{path}: файла нет — конфиг обязателен") from exc
     except (OSError, UnicodeDecodeError) as exc:
         raise ConfigError(f"{path}: не читается ({exc})") from exc
     try:
@@ -341,12 +341,12 @@ def main(argv: list[str], env: Mapping[str, str] = os.environ) -> int:
     try:
         cfg = load(env)
     except ConfigError as exc:
-        print(exc, file=sys.stderr)
+        print(f"конфиг DarkFactory: {exc}", file=sys.stderr)
         return 2
     try:
         value = get_value(cfg, argv[1])
     except ConfigError as exc:
-        print(f"{config_path(env)}: {exc}", file=sys.stderr)
+        print(f"конфиг DarkFactory: {config_path(env)}: {exc}", file=sys.stderr)
         return 2
     print(value)
     return 0
