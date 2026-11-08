@@ -515,4 +515,5 @@ def test_dangling_config_symlink_fails_closed(fleet: Fleet) -> None:
         REVIEW_GH_CONFIG_DIR=str(fleet.agent_profile),
     )
     assert res.returncode != 0, res.stderr
+    assert "config.toml" in res.stderr, res.stderr
     assert fleet.calls() == []
