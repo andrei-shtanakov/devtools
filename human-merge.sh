@@ -138,7 +138,7 @@ case "${XDG_CONFIG_HOME:-}" in
     /*) df_conf_file="$XDG_CONFIG_HOME/darkfactory/config.toml" ;;
     *)  df_conf_file="$HOME/.config/darkfactory/config.toml" ;;
 esac
-if [ -e "$df_conf_file" ]; then
+if [ -e "$df_conf_file" ] || [ -L "$df_conf_file" ]; then
     df_mode=$(df_cfg mode) || exit $?
     if [ "$df_mode" = "test" ] && ! df_cfg policy.repo >/dev/null 2>&1; then
         :

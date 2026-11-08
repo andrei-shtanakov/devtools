@@ -2453,3 +2453,20 @@ def test_token_revoked_on_sigterm(fleet: Fleet) -> None:
     _no_secret(res)
     assert len(_revokes(fleet)) == 1 and fleet.merge_calls() == []
     assert _stdin_lines(fleet) == [f"uv-stdin [{APP_TOKEN}]"]
+
+
+def test_app_key_dir_relative_xdg_ignored(fleet: Fleet) -> None:
+    """Относительный `XDG_CONFIG_HOME` игнорируется (как у конфига):
+    каталог ключей — `$HOME/.config/darkfactory/apps/`."""
+    home = fleet.tmp / "home"
+    key = home / ".config" / "darkfactory" / "apps" / "k.pem"
+    key.parent.mkdir(parents=True)
+    key.write_text("k\n")
+    write_config(home / ".config", agent_gh_config_dir=fleet.profile_dir)
+    env = fleet.env(**_app_candidate(fleet, MERGE_APP_KEY=str(key), HOME=str(home)))
+    env["XDG_CONFIG_HOME"] = "rel"
+    res = subprocess.run(
+        ["sh", str(SCRIPT), "demo", "7"], env=env, capture_output=True, text=True,
+        check=False,
+    )  # fmt: skip
+    assert res.returncode == 0, res.stderr

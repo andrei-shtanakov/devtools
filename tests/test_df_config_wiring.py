@@ -190,3 +190,13 @@ def test_act_premerge_config_failure_refuses(monkeypatch, tmp_path, capsys) -> N
     argv += ["--merge-profile", "/x/m", "--merger", "a", "--merger-type", "User"]
     assert act_premerge.main(argv) == act_premerge.EXIT_UNSET == 2
     assert "config.toml" in capsys.readouterr().err
+
+
+def test_policy_source_dangling_symlink_fails_closed(monkeypatch, tmp_path) -> None:
+    """Висячая симлинка на месте конфига — не «файла нет»: отказ, а не пропуск."""
+    path = tmp_path / "darkfactory" / "config.toml"
+    path.parent.mkdir(parents=True)
+    path.symlink_to(tmp_path / "nowhere.toml")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    with pytest.raises(RuntimeError, match="config.toml"):
+        policy_rule.policy_source()

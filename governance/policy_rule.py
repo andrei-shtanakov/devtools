@@ -43,11 +43,11 @@ def policy_source() -> tuple[str, str, str]:
     Режим конфига доверие не выбирает: источник — всегда SSOT под
     authority-root. `[policy]` конфига DarkFactory (`df_config`, читается при
     каждом вызове), если задан, обязан совпасть с SSOT — расхождение есть
-    отказ, а не выбор стороны. Файла конфига нет — сверять нечего (гейт CI).
+    отказ, а не выбор стороны. Файла конфига нет (даже висячей ссылки) — сверять нечего (гейт CI).
     Конфиг есть, но битый, или битый SSOT — тот же RuntimeError, что ловят
     вызывающие."""
     ssot = _ssot_source()
-    if not df_config.config_path(os.environ).exists():
+    if not os.path.lexists(df_config.config_path(os.environ)):
         return ssot  # конфига нет — нет и `[policy]`, сверять нечего
     try:
         cfg = df_config.load()

@@ -465,7 +465,12 @@ if [ -n "${MERGE_APP_ID:-}" ] || [ -n "${MERGE_APP_KEY:-}" ]; then
     app_mode=1
     # Ключ — только из каталога ключей App установки, обычный читаемый файл;
     # `..` в пути — отказ (выход за каталог). Иное — 2, не откат на профиль.
-    _apps_dir="${XDG_CONFIG_HOME:-$HOME/.config}/darkfactory/apps/"
+    # Правило каталога конфига — как `act_settings.config_home`: только
+    # абсолютный XDG_CONFIG_HOME, иначе ~/.config.
+    case "${XDG_CONFIG_HOME:-}" in
+        /*) _apps_dir="$XDG_CONFIG_HOME/darkfactory/apps/" ;;
+        *)  _apps_dir="$HOME/.config/darkfactory/apps/" ;;
+    esac
     case "$MERGE_APP_KEY" in
         */../*|*/..) die 2 "App-режим: MERGE_APP_KEY содержит '..' — \
 $MERGE_APP_KEY" ;;
