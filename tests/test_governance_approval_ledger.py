@@ -24,6 +24,7 @@ WS_ID = "WS-T1"
 def state(tmp_path: Path, monkeypatch) -> rs.RunState:
     monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path)
     s = rs.new_run(
+        mode="strict",
         subject="одобрение узлов",
         repo="alpha",
         repo_slug="owner/alpha",

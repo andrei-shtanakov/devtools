@@ -8,6 +8,7 @@ deliver_for_run подменяются, проверяется ТОЛЬКО де
 
 from __future__ import annotations
 
+import os
 import subprocess
 from datetime import date
 from pathlib import Path
@@ -434,6 +435,7 @@ def test_target_dir_does_not_widen_the_target_set(
 
 def _mk_run(run_id: str, subject: str, repo: str = "alpha", **kw) -> rs.RunState:
     state = rs.new_run(
+        mode="strict",
         subject=subject,
         repo=repo,
         repo_slug="owner/alpha",
@@ -734,6 +736,7 @@ class _LoopEnv:
             else None
         )
         state = rs.new_run(
+            mode="strict",
             subject=kwargs["subject"],
             repo=kwargs["repo"],
             repo_slug=kwargs["repo_slug"],
@@ -1124,6 +1127,7 @@ def _make_need_run(
     stakeholder="product owner",
 ):
     st = rs.new_run(
+        mode="strict",
         subject="Fleet Inbox",
         repo="alpha",
         repo_slug="owner/alpha",
@@ -2220,6 +2224,7 @@ def test_engineer_repeat_with_other_approval_pr_refuses(
 ) -> None:
     env = _LoopEnv(monkeypatch, tmp_path)
     st = rs.new_run(
+        mode="strict",
         subject="Fleet Inbox",
         repo="alpha",
         repo_slug="owner/alpha",
@@ -2438,6 +2443,7 @@ def test_engineer_stop_without_session_is_not_an_orphan(  # Task 9
     у engineer `session_id` ещё пуст, но это не сирота — повтор идёт в resume."""
     env = _LoopEnv(monkeypatch, tmp_path)
     st = rs.new_run(
+        mode="strict",
         subject="Fleet Inbox",
         repo="alpha",
         repo_slug="owner/alpha",
@@ -2482,3 +2488,48 @@ def test_repeat_refuses_when_run_mode_differs_from_config(
     assert rc == 2
     assert env.calls == []
     assert "режим конфига strict ≠ режиму прогона test" in capsys.readouterr().out
+
+
+def test_wave_recovery_records_config_mode(runs_root, tmp_path) -> None:
+    """Восстановленный леджер несёт режим конфига (test), не умолчание."""
+    from governance import approval_branches
+    from tests.df_config_fixture import write_config
+
+    write_config(
+        Path(os.environ["XDG_CONFIG_HOME"]),
+        mode="test",
+        human="alice",
+        agent="bob",
+        workspace_root=tmp_path,
+    )
+    ws = "fleet-inbox-20260901"
+    cand = approval_branches.candidate_template().format(
+        ws_id=ws, wave=1, step=0, attempt=1
+    )
+    final = cand + approval_branches.finalize_suffix()
+    prs = [
+        {"number": 10, "head": {"ref": cand}, "body": "run-id: r-rec-1"},
+        {"number": 11, "head": {"ref": final}, "body": ""},
+    ]
+
+    class _Ops:
+        def prs_by_head_prefix(self, repo_slug, prefix):
+            return prs
+
+        def pr_facts(self, repo_slug, number):
+            return {"state": "MERGED", "baseRefName": "master"}
+
+    state = spec_loop.recover_wave_run_from_github(
+        subject="Fleet Inbox",
+        repo="alpha",
+        repo_slug="owner/alpha",
+        target_dir=str(tmp_path),
+        profile="profiles/team-exp.yaml",
+        author_backend="codex",
+        requested_ws_id=None,
+        requested_bundle_dir=None,
+        ops=_Ops(),
+        acquire=lambda run_id: None,
+    )
+    assert state is not None and state.mode == "test"
+    assert rs.load("r-rec-1").mode == "test"

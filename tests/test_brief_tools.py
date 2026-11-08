@@ -162,6 +162,7 @@ def _brief_ready_run(
     target = tmp_path / "target"
     target.mkdir(exist_ok=True)
     state = rs.new_run(
+        mode="strict",
         subject="s",
         repo="alpha",
         repo_slug=REPO,

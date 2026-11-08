@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -249,6 +250,7 @@ def _env(
     if dirty:
         (target / "pkg/m.py").write_text("def f():\n    return 2\n")
     state = rs.new_run(
+        mode="strict",
         subject="s",
         repo="alpha",
         repo_slug="owner/alpha",
@@ -2049,3 +2051,12 @@ def test_off_protocol_verify_exit_names_diagnostic(tmp_path, monkeypatch, capsys
     assert cc.run("run-1", _ops((1, "Traceback: boom"))) == 2
     out = capsys.readouterr().out
     assert "вне 0/2/3" in out and "Traceback: boom" in out
+
+
+def test_broken_config_is_exit_2_not_traceback(tmp_path, monkeypatch, capsys):
+    _env(tmp_path, monkeypatch)
+    cfg = Path(os.environ["XDG_CONFIG_HOME"]) / "darkfactory" / "config.toml"
+    cfg.write_text("mode = [\n", encoding="utf-8")
+
+    assert cc.run("run-1", _ops()) == 2
+    assert "criteria-close: конфиг DarkFactory: " in capsys.readouterr().out

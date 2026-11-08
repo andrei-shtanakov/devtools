@@ -750,6 +750,7 @@ def test_cli_refuses_not_completed_run(tmp_path: Path, monkeypatch, capsys) -> N
 
     monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
     state = rs.new_run(
+        mode="strict",
         subject="s",
         repo="alpha",
         repo_slug="owner/alpha",
@@ -1364,6 +1365,7 @@ def _approve_state(target: Path, monkeypatch):
 
     monkeypatch.setattr(rs, "RUNS_ROOT", target.parent / "runs")
     state = rs.new_run(
+        mode="strict",
         subject="s",
         repo="alpha",
         repo_slug="owner/alpha",
@@ -3339,6 +3341,7 @@ def _recon_state(tmp_path: Path, monkeypatch, **kw):
         encoding="utf-8",
     )
     state = rs.new_run(
+        mode="strict",
         subject="s",
         repo="alpha",
         repo_slug="owner/alpha",
@@ -13044,3 +13047,28 @@ def test_stored_success_requires_admission(
         RuntimeError, match="допуск review/v1 не подтверждён — узел requirements"
     ):
         _STORED_SUCCESS[site](tmp_path, monkeypatch, capsys)
+
+
+def test_cli_broken_config_is_exit_2_not_traceback(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from governance import run_state as rs
+
+    monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
+    state = rs.new_run(
+        mode="strict",
+        subject="s",
+        repo="alpha",
+        repo_slug="owner/alpha",
+        ws_id="WS-alpha-7",
+        target_dir=str(tmp_path),
+        bundle_dir="workstreams/WS-alpha-7/spec",
+        profile="profiles/team-exp.yaml",
+        run_id="r-bridge-cfg",
+    )
+    rs.save(state)
+    cfg = Path(os.environ["XDG_CONFIG_HOME"]) / "darkfactory" / "config.toml"
+    cfg.write_text("mode = [\n", encoding="utf-8")
+
+    assert task_bridge.main(["--run-id", "r-bridge-cfg"]) == 2
+    assert "task_bridge: конфиг DarkFactory: " in capsys.readouterr().out

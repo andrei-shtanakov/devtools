@@ -32,7 +32,7 @@ class _Commit:
 
 
 def _state() -> Any:
-    return new_run("s", "r", "o/r", WS, "/t", BUNDLE, "default", "run-1")
+    return new_run("s", "r", "o/r", WS, "/t", BUNDLE, "default", "run-1", mode="strict")
 
 
 CASES = [

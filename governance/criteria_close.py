@@ -36,6 +36,7 @@ from governance import (
     criteria_contract,
     criteria_graph,
     criteria_product,
+    df_config,
     run_state,
     runner,
     spec_runner_contract,
@@ -1382,7 +1383,11 @@ def run(run_id: str, ops: Ops, *, product_sha: str | None = None) -> int:
 def _run(run_id: str, ops: Ops, product_sha: str | None) -> int:
     """Тело `run`; исключения превращает в отказ шага обёртка."""
     state = run_state.load(run_id)
-    refusal = run_state.mode_refusal(state)
+    try:
+        refusal = run_state.mode_refusal(state)
+    except df_config.ConfigError as exc:
+        print(f"criteria-close: конфиг DarkFactory: {exc}")
+        return 2
     if refusal is not None:
         print(f"criteria-close: {refusal}")
         return 2

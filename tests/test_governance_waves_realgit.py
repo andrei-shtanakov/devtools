@@ -44,6 +44,7 @@ def test_code_run_commits_on_fresh_base_of_wave2(tmp_path, monkeypatch):
     _git(target, "push", "-q", "origin", "master")
     monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
     state = rs.new_run(
+        mode="strict",
         subject="s",
         repo="alpha",
         repo_slug="owner/alpha",

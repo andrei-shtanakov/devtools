@@ -37,7 +37,7 @@ def _mk(run_id: str, **overrides) -> rs.RunState:
         "run_id": run_id,
     }
     kwargs.update(overrides)
-    s = rs.new_run(**kwargs)
+    s = rs.new_run(**{"mode": "strict", **kwargs})
     rs.save(s)
     return s
 
@@ -292,6 +292,7 @@ def test_detail_to_json_roundtrips(runs_root) -> None:
 
 def test_wave_run_pipeline_keys_and_step(runs_root) -> None:
     s = rs.new_run(
+        mode="strict",
         subject="s",
         repo="alpha",
         repo_slug="o/alpha",

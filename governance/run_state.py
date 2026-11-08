@@ -230,7 +230,8 @@ def new_run(
     authoring: str = "legacy",
     code: str | None = None,
     plan_item: str | None = None,
-    mode: str = "strict",
+    *,
+    mode: str,
 ) -> RunState:
     """Новый прогон (S0). `run_id` подаётся снаружи (вызывающая сторона)."""
     validate_mode(mode)

@@ -1522,6 +1522,7 @@ def test_brief_materialization_refuses_changed_durable_intake(
 ) -> None:
     source = _brief_source(tmp_path)
     state = rs.new_run(
+        mode="strict",
         authoring="waves",
         subject="brief",
         repo="alpha",
@@ -2010,7 +2011,7 @@ def _wave_run_at_s8(
         "authoring": "waves",
     }
     kwargs.update(over)
-    state = rs.new_run(**kwargs)
+    state = rs.new_run(**{"mode": "strict", **kwargs})
     state.wave = 5
     state.status = "running"
     state.branch = f"spec/{state.ws_id}-behaviour-w5"
@@ -2198,6 +2199,7 @@ def test_resume_after_death_between_create_issue_and_op_complete_reuses_issue(
     # started (write-ahead отработал), а сам issue РЕАЛЬНО создан (эффект
     # состоялся), но op_complete не успел записаться.
     state = rs.new_run(
+        mode="strict",
         authoring="waves",
         subject=kwargs["subject"],
         repo=kwargs["repo"],
@@ -2544,6 +2546,7 @@ def test_verify_refuses_when_child_is_running(
     # Валидный, но ещё не терминальный потомок (S8 в процессе).
     child_id = f"{parent_id}-v1"
     child_state = rs.new_run(
+        mode="strict",
         authoring="waves",
         subject=parent.subject,
         repo=parent.repo,
@@ -2665,6 +2668,7 @@ def test_cli_status_prints_run_state(
     """
     run_id = "r-cli-status"
     state = rs.new_run(
+        mode="strict",
         authoring="waves",
         subject="тестовый функционал",
         repo="alpha",
@@ -2990,6 +2994,7 @@ def test_gate_seam_required_absent_blocks_without_mock(
                 charter_text, encoding="utf-8"
             )
         state = rs.new_run(
+            mode="strict",
             subject="s",
             repo="alpha",
             repo_slug="owner/alpha",
@@ -3421,6 +3426,7 @@ def test_resume_completes_when_gate_authoritative_done_but_status_stuck_running(
     run_id = "r-s8-stuck-ok"
     kwargs = _agent_merge_kwargs(tmp_path, run_id, ops)
     state = rs.new_run(
+        mode="strict",
         authoring="waves",
         subject=kwargs["subject"],
         repo=kwargs["repo"],
@@ -3461,6 +3467,7 @@ def test_resume_completes_fail_path_when_status_stuck_running_after_gate_fail(
     run_id = "r-s8-stuck-fail"
     kwargs = _agent_merge_kwargs(tmp_path, run_id, ops)
     state = rs.new_run(
+        mode="strict",
         authoring="waves",
         subject=kwargs["subject"],
         repo=kwargs["repo"],
@@ -3510,6 +3517,7 @@ def test_sync_default_always_rechecked_even_if_already_completed(
     run_id = "r-s8-resync"
     kwargs = _agent_merge_kwargs(tmp_path, run_id, ops)
     state = rs.new_run(
+        mode="strict",
         authoring="waves",
         subject=kwargs["subject"],
         repo=kwargs["repo"],
@@ -3558,6 +3566,7 @@ def test_resume_rebuilds_missing_s8_findings_from_op_output(
     run_id = "r-s8-findings-missing"
     kwargs = _agent_merge_kwargs(tmp_path, run_id, ops)
     state = rs.new_run(
+        mode="strict",
         authoring="waves",
         subject=kwargs["subject"],
         repo=kwargs["repo"],
@@ -4172,6 +4181,7 @@ def test_disp_backend_author_disp_failure_stops_author(
 def test_new_run_rejects_unknown_author_backend() -> None:
     with pytest.raises(ValueError):
         rs.new_run(
+            mode="strict",
             authoring="waves",
             subject="s",
             repo="alpha",
@@ -4582,6 +4592,7 @@ def test_gate_stops_when_design_node_missing_from_bundle(
         _DEFAULT_BEHAVIOUR_BODY, encoding="utf-8"
     )
     state = rs.new_run(
+        mode="strict",
         authoring="waves",
         subject="s",
         repo="alpha",
@@ -5512,6 +5523,7 @@ def test_gate_stops_when_decomposition_missing_from_bundle(
         encoding="utf-8",
     )
     state = rs.new_run(
+        mode="strict",
         authoring="waves",
         subject="s",
         repo="alpha",
@@ -5982,6 +5994,7 @@ def test_gate_stops_when_acceptance_missing_from_bundle(
         encoding="utf-8",
     )
     state = rs.new_run(
+        mode="strict",
         authoring="waves",
         subject="s",
         repo="alpha",
@@ -7724,6 +7737,7 @@ def test_completed_wave_run_deletes_its_authoring_branches(
         s8_exit=0,
     )
     state = rs.new_run(
+        mode="strict",
         subject="brief",
         repo="alpha",
         repo_slug="owner/alpha",
@@ -7765,6 +7779,7 @@ def test_cleanup_covers_reopened_wave_branches(
         s8_exit=0,
     )
     state = rs.new_run(
+        mode="strict",
         subject="brief",
         repo="alpha",
         repo_slug="owner/alpha",
@@ -7809,6 +7824,7 @@ def test_unconfirmed_branch_deletion_is_spoken(
         delete_branch_ok=False,
     )
     state = rs.new_run(
+        mode="strict",
         subject="brief",
         repo="alpha",
         repo_slug="owner/alpha",
@@ -7843,6 +7859,7 @@ def test_legacy_run_deletes_nothing_on_completion(
         s8_exit=0,
     )
     state = rs.new_run(
+        mode="strict",
         authoring=_LEGACY_HISTORY,
         subject="brief",
         repo="alpha",
@@ -8221,6 +8238,7 @@ def test_reopen_refuses_legacy_runs_and_finished_waves(
     # леджеры в `out/governance-runs` выглядят ровно так — файл, оставшийся
     # от сессии, которой больше нет.
     state = rs.new_run(
+        mode="strict",
         subject="s",
         repo="alpha",
         repo_slug="owner/alpha",
@@ -8304,6 +8322,7 @@ def _saved_legacy_run(run_id: str, status: str = "stopped_review") -> rs.RunStat
     `run.json`, оставшийся от сессии, которой больше нет.
     """
     state = rs.new_run(
+        mode="strict",
         subject="тест",
         repo="alpha",
         repo_slug="owner/alpha",

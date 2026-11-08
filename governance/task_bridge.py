@@ -32,6 +32,7 @@ from governance import (
     criteria_contract,
     decomposition_guard,
     design_guard,
+    df_config,
 )
 from governance.act_envelope import envelope_path
 from governance.approve_node import (
@@ -5093,7 +5094,11 @@ def main(argv: list[str] | None = None) -> int:
             "--replace-revision: без перехода причину некуда записать"
         )
     state = load(args.run_id)
-    refusal = mode_refusal(state)
+    try:
+        refusal = mode_refusal(state)
+    except df_config.ConfigError as exc:
+        print(f"task_bridge: конфиг DarkFactory: {exc}")
+        return 2
     if refusal is not None:
         print(f"task_bridge: {refusal}")
         return 2

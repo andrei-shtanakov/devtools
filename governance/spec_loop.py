@@ -662,6 +662,7 @@ def recover_wave_run_from_github(
         merge_authority="human",
         author_backend=author_backend,
         authoring="waves",
+        mode=df_config.load().mode,
     )
     state.wave = last_step + 1
     state.base_ref = base_ref
