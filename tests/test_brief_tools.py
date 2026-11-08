@@ -818,6 +818,28 @@ def test_check_merge_refusals(open_pr, spoil) -> None:  # T50 (каждый — 
         bmc.check_merge(REPO, 7, HEAD, open_pr)
 
 
+def test_check_merge_stale_pin_in_test_mode_names_approver_change(
+    open_pr, monkeypatch
+) -> None:
+    """test: устаревший пин — именованный отказ `TEST_APPROVER_CHANGED`
+    (тот же текст, что у brief_provenance), не общая формулировка."""
+    from governance import policy_rule
+
+    repo, ref, path = policy_rule.TEST_POLICY_SOURCE
+    monkeypatch.setattr(bmc.policy_rule, "policy_source", lambda: (repo, ref, path))
+    open_pr.files[(HEAD, f"{DIR}/{ar.FILE_NAME}")] = ar.render(
+        request(policy_repo=repo, policy_ref=ref, policy_path=path)
+    )
+    monkeypatch.setattr(
+        open_pr,
+        "policy_version_fact",
+        lambda *_: Fact(Outcome.FOUND, C1, "test"),
+    )
+    with pytest.raises(bmc.MergeRefused) as exc:
+        bmc.check_merge(REPO, 7, HEAD, open_pr)
+    assert str(exc.value) == policy_rule.TEST_APPROVER_CHANGED
+
+
 @pytest.mark.parametrize(("case", "mutate", "_m"), DEFECTS, ids=[d[0] for d in DEFECTS])
 def test_check_merge_ambiguous_request(open_pr, case, mutate, _m) -> None:  # T21b
     open_pr.files[(HEAD, f"{DIR}/{ar.FILE_NAME}")] = mutate(ar.render(request()))
