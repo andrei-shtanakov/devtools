@@ -120,6 +120,28 @@ def load(env: Mapping[str, str] = os.environ) -> DfConfig:
     return _Parser(path).parse(data)
 
 
+def workspace_root(env: Mapping[str, str] | None = None) -> Path:
+    """Корень workspace (`workspace.root`): единственный источник раскладки
+    соседних репо. Конфиг обязателен — нет файла или он битый: `ConfigError`."""
+    env = os.environ if env is None else env
+    return load(env).workspace_root
+
+
+def workspace_dir(name: str, env: Mapping[str, str] | None = None) -> Path:
+    """`<workspace.root>/<name>`; нет каталога — `ConfigError` с названным
+    путём (до любого subprocess). Префикс «конфиг DarkFactory: » ставит
+    вызывающий."""
+    return require_dir(workspace_root(env), name)
+
+
+def require_dir(root: Path, name: str) -> Path:
+    """`root/name`, если это каталог; иначе `ConfigError` с названным путём."""
+    path = root / name
+    if not path.is_dir():
+        raise ConfigError(f"workspace.root={root}: нет каталога {name}")
+    return path
+
+
 def agent_gh_config_dir(env: Mapping[str, str] | None = None) -> Path:
     """Профиль gh агента: env `REVIEW_GH_CONFIG_DIR`, иначе
     `accounts.agent_gh_config_dir` (порядок `review-pr.sh`; одно правило для
@@ -140,6 +162,8 @@ def _read(path: Path) -> dict[str, object]:
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError as exc:
+        if path.is_symlink():
+            raise ConfigError(f"{path}: висячая симлинка — конфиг не читается") from exc
         raise ConfigError(f"{path}: файла нет — конфиг DarkFactory обязателен") from exc
     except (OSError, UnicodeDecodeError) as exc:
         raise ConfigError(f"{path}: не читается ({exc})") from exc

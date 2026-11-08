@@ -159,7 +159,13 @@ def _df_config(
         empty = tmp_path_factory.mktemp("no-df-config")
         monkeypatch.setenv("XDG_CONFIG_HOME", str(empty))
         return
-    write_config(Path(os.environ["XDG_CONFIG_HOME"]), mode="strict", **_STRICT_GH_DIRS)
+    # Раскладка тестов — прежняя: соседи devtools лежат рядом с ним.
+    write_config(
+        Path(os.environ["XDG_CONFIG_HOME"]),
+        mode="strict",
+        workspace_root=Path(__file__).resolve().parent.parent.parent,
+        **_STRICT_GH_DIRS,
+    )
 
 
 #: Хосты, на которые настоящий opener `act_anon` ходит в тестах (loopback-стенды).

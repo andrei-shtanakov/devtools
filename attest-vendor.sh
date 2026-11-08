@@ -94,12 +94,12 @@ gh_r() {
     GH_CONFIG_DIR="$REVIEW_GH_CONFIG_DIR" gh "$@"
 }
 
-# Корень флота — родитель devtools/; FLEET_ROOT — оверрайд для тестов.
+# Корень флота — `workspace.root` конфига; FLEET_ROOT — оверрайд для тестов.
 # Апстрим steward — сосед по флоту; STEWARD_DIR — отдельный оверрайд.
 # Доверенная ветка steward, против которой проверяется ancestry (I1).
 script_dir=$(cd "$(dirname "$0")" && pwd)
-FLEET_ROOT="${FLEET_ROOT:-$(dirname "$script_dir")}"
 . "$script_dir/df_config.sh"
+if [ -z "${FLEET_ROOT:-}" ]; then FLEET_ROOT=$(df_cfg workspace.root) || exit $?; fi
 STEWARD_TRUSTED_REF="${STEWARD_TRUSTED_REF:-origin/master}"
 MARKER_NAME="ai-prosto-vendor-attestation"
 # Хвостовой \r (чекаут с autocrlf) срезается везде, где читаются строки

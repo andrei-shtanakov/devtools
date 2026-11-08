@@ -30,6 +30,7 @@ def write_config(
     policy_ref: str = "main",
     policy_path: str = "policy/approvers.env",
     mode: str = "test",
+    workspace_root: Path | None = None,
 ) -> dict[str, str]:
     """Записать конфиг режима `mode` в `xdg`; вернуть env с `XDG_CONFIG_HOME`."""
     agent_dir = agent_gh_config_dir or xdg / "gh-agent"
@@ -50,7 +51,7 @@ ref = "{policy_ref}"
 path = "{policy_path}"
 
 [workspace]
-root = "{xdg / "workspace"}"
+root = "{workspace_root or xdg / "workspace"}"
 
 [harness]
 author = "claude"

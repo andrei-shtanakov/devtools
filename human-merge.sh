@@ -64,7 +64,7 @@ script_dir=$(cd "$(dirname "$0")" && pwd)
 . "$script_dir/ssot_env.sh"
 . "$script_dir/df_config.sh"
 . "$script_dir/approval_branches.sh"
-FLEET_ROOT="${FLEET_ROOT:-$(dirname "$script_dir")}"
+if [ -z "${FLEET_ROOT:-}" ]; then FLEET_ROOT=$(df_cfg workspace.root) || exit $?; fi
 APPROVAL_PATTERNS="${APPROVAL_PATTERNS:-\
 $script_dir/contracts/approval-branches/v1/patterns.env}"
 
