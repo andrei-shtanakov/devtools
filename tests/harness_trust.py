@@ -39,7 +39,7 @@ SAFE_COMMANDS = frozenset(
         # (их тела проверяются тем же разбором)
         "die", "usage", "gh_a", "gh_h", "approval_globs", "ssot_key",
         "approval_template_glob",
-        "brief_check_failed", "has_label", "revoke_app_token",
+        "brief_check_failed", "has_label", "revoke_app_token", "github_slug",
     }
 )  # fmt: skip
 #: `trap` (Task 9, п. 9d) — только снятие `-`, функция скрипта из `SAFE_COMMANDS`

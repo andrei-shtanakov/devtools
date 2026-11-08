@@ -39,8 +39,9 @@ import re
 import subprocess
 import time
 from collections.abc import Callable
+from pathlib import Path
 
-from governance import authority_root
+from governance import authority_root, ssot_env
 from governance.facts import Outcome
 from governance.ops import (
     DEVTOOLS_ROOT,
@@ -50,101 +51,31 @@ from governance.ops import (
     RealOps,
 )
 
-# Исполняемый ревью-harness целевого репо: review-pr.sh запускает
-# scripts/review/local.sh из локального дерева, которое материализация
-# переключает на head PR (приёмка PR #113, blocker) — PR, правящий эти
-# пути, не ревьюится агентом вовсе (гард по локальному диффу head0).
-# Корневой review-pr.sh — тоже harness (круг 6): для PR в сам devtools
-# target_dir совпадает с DEVTOOLS_ROOT, и Ops.review исполнил бы версию
-# скрипта из недоверенного PR. (scripts/harness/ — переходник claude-review
-# — снят после волны devtools#228: адаптер живёт в самом ките,
-# scripts/review/harness-claude, и накрыт префиксом scripts/review/.)
+# Харнесс-пути — входы обвязки ревью и мержа, исполняемые или читаемые из
+# дерева проверяемого PR: PR, который их трогает, не ревьюится агентом вовсе
+# (гард по локальному диффу head0). Перечень и пояснения к каждому входу —
+# в SSOT `contracts/harness-paths/v1/paths.env`: его же читает `merge-pr.sh`
+# под `--authority-override` (дизайн darkfactory-config §5.8, D10), и второе
+# определение в shell разошлось бы с кортежем молча.
 #
-# merge-pr.sh — ровно тот же случай и тем же путём (ревью #183, круг 3):
-# `Ops.merge` исполняет `DEVTOOLS_ROOT/merge-pr.sh`, а дерево к этому
-# моменту стоит на head PR (восстановление ветки — в `finally` ПОСЛЕ
-# мержа). PR, правящий гвард агентского мержа, заставил бы контур
-# исполнить собственную правку — гварды обходились бы содержимым
-# проверяемого патча. Инструмент безопасности обязан стоять под той же
-# защитой, что остальной харнесс.
-#
-# contracts/approval-branches/ — не исполняемое, но ЧИТАЕМОЕ обвязкой из
-# того же дерева: merge-pr.sh берёт шаблон имён из
-# `$script_dir/contracts/approval-branches/v1/patterns.env`. Подменённый
-# шаблон меняет глоб, и гвард перестаёт ловить нужные ветки, не исполнив
-# ни строчки чужого кода. Для гварда «прочитано из PR» опаснее, чем
-# «исполнено»: тише.
-# Соотношение с authority-root (devtools#273): каждый вход отсюда обязан
-# быть и там — приёмку держит этот перечень, мерж держит authority-root, и
-# одной стадии мало (канон — `contracts/authority-root/v1/paths.env`, ревью
-# #183 круг 9). Единственное исключение — `scripts/review/`: у вендор-копии
-# кита свой детерминированный гейт (`attest-vendor.sh`). Проверяется
-# множествами в `test_every_harness_input_is_authority_root_but_the_kit`:
-# до неё перечни разошлись молча, потому что каждый был закреплён
-# литералами в своём тесте.
-_HARNESS_PREFIXES = (
-    "scripts/review/",
-    "review-pr.sh",
-    "merge-pr.sh",
-    # Триггер человеческого мержа (ADR-ECO-011 D6): сверяет, что мержит
-    # человек из allowlist, — та же категория гварда, что merge-pr.sh.
-    "human-merge.sh",
-    # Подключаемые модули обвязки: разбор SSOT и формы веток одобрения. Код,
-    # который исполняют merge-pr.sh и human-merge.sh, защищён наравне с ними
-    # (blocker ревью PR #344: вынесенная функция вышла бы из-под гварда).
-    "ssot_env.sh",
-    "approval_branches.sh",
-    "contracts/approval-branches/",
-    # Перечень authority-root путей обвязка тоже читает из дерева.
-    # Он и сам authority-root (см. SSOT-файл), но защиты разные по стадии:
-    # здесь PR не доходит даже до ревью, там — до мержа.
-    "contracts/authority-root/",
-    # Правило области ревью (devtools#271). Тот же класс, что
-    # approval-branches: не исполняется, но читается обвязкой из дерева —
-    # `review-pr.sh` классифицирует по нему PR и с devtools#270 отдаёт его
-    # же киту через REVIEW_SCOPE_RULES. PR, расширивший `PROSE` на
-    # собственные пути, сделал бы свой диф прозой: ранняя ветка публикует
-    # scope-аттестацию и модель не зовёт — правка, отключившая ревью, сама
-    # ревью не прошла бы. Само правило `merge-pr.sh` и формулирует:
-    # «добавляя чтение чего-либо из $script_dir, проверьте, что путь накрыт
-    # _HARNESS_PREFIXES»; на devtools#270 чтение добавили, а проверку — нет.
-    "contracts/review-scope/",
-    # Стоп-кран (D2): merge-pr.sh ИСПОЛНЯЕТ этот файл из дерева
-    # (`python3 -I`), то есть под агентским токеном на голове PR. PR,
-    # заменивший его на «всегда пускать», обезоружил бы стоп-кран и сам
-    # прошёл бы под ним (blocker ревью devtools#531).
-    "governance/halt_gate.py",
-    # Проверка brief-PR (ревью #573, решение владельца 2026-10-09):
-    # human-merge.sh ИСПОЛНЯЕТ brief_merge_check с полномочиями человека —
-    # он, вся цепочка его локальных импортов и конфигурация зависимостей
-    # (`uv run --frozen --exact`). Перечень сверяет tests/harness_trust.py.
-    "governance/brief_merge_check",
-    "governance/brief_facts",
-    "governance/facts",
-    "governance/approval_request",
-    "governance/discovery_approval",
-    "governance/policy_rule",
-    "governance/ssot_env",
-    "governance/__init__",
-    "contracts/discovery-approval/",
-    "contracts/approval-policy-source/",
-    # Акт утверждения review/v1 — проверяльщик исполняется в обвязке мержа
-    # (`act_premerge`), та же категория, что `brief_merge_check`.
-    "governance/act_",
-    # Тесты ядра акта — защищённая цепочка, как у песочницы авторского
-    # агента: агентская правка теста ослабила бы проверку ядра.
-    "tests/test_act_",
-    "tests/act_cases",
-    # Мутационный проход по реестру акта — доказательство его приёмки (Task 16).
-    "tests/act_mutation",
-    # Векторы сбора approval-facts v3 — данные тестов ядра акта; их подмена
-    # ослабила бы проверку так же, как правка самих тестов (Р-12).
-    "contracts/approval-facts/",
-    # Шаблон CI корня доверия df-trust: его копирует установка.
-    "templates/df-trust/",
-    "pyproject.toml",
-    "uv.lock",
+# Читается ПРИ ИМПОРТЕ и намеренно: модуль импортирован до материализации
+# head PR, а для PR в сам devtools материализуется ровно это дерево — ленивое
+# чтение взяло бы перечень из проверяемого патча. Битый файл — исключение при
+# импорте (fail-closed `ssot_env.read_key`), а не пустой перечень.
+# Имя атрибута сохранено: его читает `tests/harness_trust.py`.
+HARNESS_PATHS_FILE = (
+    Path(__file__).resolve().parent.parent
+    / "contracts"
+    / "harness-paths"
+    / "v1"
+    / "paths.env"
 )
+_HARNESS_PREFIXES: tuple[str, ...] = tuple(
+    ssot_env.read_key(
+        HARNESS_PATHS_FILE, "HARNESS_PREFIXES", "SSOT харнесс-путей"
+    ).split()
+)
+
 _PENDING = {"PENDING", "IN_PROGRESS", "QUEUED", "WAITING", "REQUESTED", ""}
 _GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 
