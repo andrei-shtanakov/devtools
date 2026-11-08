@@ -965,6 +965,7 @@ def test_run_probe_config_failure_before_side_effects(tmp_path: Path) -> None:
     assert list(tmp_path.iterdir()) == []
 
 
+@darwin_only
 def test_launch_config_failure_is_named_refusal(launch, monkeypatch) -> None:
     """`ConfigError` пробы — названный отказ границы до платного вызова (F2)."""
     from governance import df_config
