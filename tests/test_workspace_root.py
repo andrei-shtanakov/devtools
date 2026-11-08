@@ -9,10 +9,11 @@ import os
 import stat
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from governance import accept_pr, df_config, ops, spec_loop
+from governance import accept_pr, author_launch, df_config, ops, spec_loop
 from tests.df_config_fixture import write_config
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -56,15 +57,45 @@ def test_workspace_root_dangling_symlink_raises(tmp_path, monkeypatch) -> None:
 
 def test_owner_layout_unchanged(tmp_path, monkeypatch) -> None:
     home = tmp_path / "home"
-    (home / "labs/all_ai_orchestrators/discovery").mkdir(parents=True)
+    base = home / "labs/all_ai_orchestrators"
+    for name in ("discovery", "kapelle", "disputatio/.venv"):
+        (base / name).mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
     example = ROOT / "templates/darkfactory/config.strict.example.toml"
     xdg = tmp_path / "xdg"
     (xdg / "darkfactory").mkdir(parents=True)
     (xdg / "darkfactory/config.toml").write_text(example.read_text())
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
-    expected = home / "labs/all_ai_orchestrators/discovery"
-    assert df_config.workspace_dir("discovery") == expected
+    assert df_config.workspace_dir("discovery") == base / "discovery"
+    assert spec_loop.workspace_root() / "kapelle" == base / "kapelle"
+    ready = SimpleNamespace(
+        target=tmp_path / "t",
+        bundle=tmp_path,
+        git_dir=tmp_path,
+        common_dir=tmp_path,
+        run_dir=tmp_path,
+    )
+    targets = author_launch._probe_targets(ready)  # noqa: SLF001
+    assert base / "disputatio/.venv" in targets.extra
+    # Значение, которое четыре скрипта читают через df_cfg.
+    cli = subprocess.run(
+        [
+            "python3",
+            "-I",
+            str(ROOT / "governance/df_config.py"),
+            "get",
+            "workspace.root",
+        ],
+        env={
+            "XDG_CONFIG_HOME": str(xdg),
+            "HOME": str(home),
+            "PATH": os.environ["PATH"],
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert cli.stdout.strip() == str(base), cli.stderr
 
 
 def test_workspace_dir_missing_names_path(tmp_path, monkeypatch) -> None:
@@ -167,7 +198,7 @@ def test_script_fleet_root_env_beats_config(script, tmp_path, monkeypatch) -> No
 def test_script_without_config_refuses(script, tmp_path) -> None:
     done = _run(script, {"XDG_CONFIG_HOME": str(tmp_path / "empty")}, tmp_path)
     assert done.returncode == 2
-    assert "darkfactory" in done.stderr and "config.toml" in done.stderr
+    assert "конфиг DarkFactory" in done.stderr and "config.toml" in done.stderr
 
 
 @pytest.mark.no_df_config
@@ -187,3 +218,29 @@ def test_author_launch_probe_config_error_is_named_refusal(monkeypatch) -> None:
         SimpleNamespace(), SimpleNamespace(token="t"), SimpleNamespace(), str, None
     )
     assert "конфиг DarkFactory" in str(out)
+
+
+def test_accept_pr_target_dir_is_workspace_repo(tmp_path, monkeypatch) -> None:
+    ws = tmp_path / "separate-ws"
+    (ws / "kapelle").mkdir(parents=True)
+    _cfg(tmp_path, monkeypatch, ws)
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **_kw):
+        seen.append(argv)
+        return SimpleNamespace(returncode=1, stdout="", stderr="")
+
+    monkeypatch.setattr(accept_pr.subprocess, "run", fake_run)
+    rc = accept_pr.main(["--repo", "kapelle", "--pr", "1"])
+    assert rc == 2
+    assert seen[0][:3] == ["git", "-C", str(ws / "kapelle")]
+
+
+def test_no_sibling_lookup_via_devtools_parent() -> None:
+    """Раскладка — только из конфига: ни `DEVTOOLS_ROOT.parent` в governance/,
+    ни `dirname "$script_dir"` как умолчание FLEET_ROOT в скриптах."""
+    for path in (ROOT / "governance").rglob("*.py"):
+        assert "DEVTOOLS_ROOT.parent" not in path.read_text(), path
+    for script in SCRIPTS:
+        text = (ROOT / script).read_text()
+        assert 'dirname "$script_dir"' not in text, script

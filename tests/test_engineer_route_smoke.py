@@ -3,7 +3,7 @@
 Запуск: DEVTOOLS_DISCOVERY_SMOKE=1 uv run --frozen --group governance pytest -q
 tests/test_engineer_route_smoke.py
 Без переменной — skip: обычный pytest от соседа не зависит. Сосед берётся
-там же, где его берёт `RealOps` (`<devtools>/../discovery`).
+там же, где его берёт `RealOps` (`workspace.root/discovery`).
 
 - T51: подписанный бриф → `start --upstream --session-id` → банк вопросов →
   `brief`: итоговый бриф ссылается ровно на `upstream.md`.
@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from governance import brief_input, run_lock
+from governance import brief_input, df_config, run_lock
 from governance import interview as iv
 from governance import run_state as rs
 from governance.ops import DEVTOOLS_ROOT, RealOps
@@ -145,7 +145,7 @@ def test_lock_lives_while_real_discovery_lives(
             _HOLDER,
             str(runs),
             str(read_fd),
-            str(DEVTOOLS_ROOT.parent / "discovery"),
+            str(df_config.workspace_root() / "discovery"),
             session,
         ],
         pass_fds=(read_fd,),
@@ -196,7 +196,7 @@ def test_concurrent_start_same_id_is_exclusive(
 ) -> None:  # T52
     home = tmp_path / "home"
     monkeypatch.setenv("DISCOVERY_HOME", str(home))
-    project = str(DEVTOOLS_ROOT.parent / "discovery")
+    project = str(df_config.workspace_root() / "discovery")
     procs = []
     for name in ("a", "b"):
         upstream = tmp_path / name / "upstream.md"

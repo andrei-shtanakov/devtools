@@ -1432,6 +1432,31 @@ def test_authority_override_dirty_tree_is_2(tfleet: Fleet, change: str) -> None:
     assert not any("rulesets" in ln for ln in tfleet.calls())
 
 
+def test_dirty_tree_df_config_never_runs_before_cleanliness_check(
+    tfleet: Fleet,
+) -> None:
+    """Порядок доверия плана 1: корень флота читается через `df_cfg`
+    (исполняет governance/df_config.py из дерева обвязки) ТОЛЬКО после проверки
+    чистоты этого дерева под --authority-override."""
+    marker = tfleet.tmp / "df-config-ran"
+    cfg = tfleet.harness / "governance" / "df_config.py"
+    text = cfg.read_text()
+    anchor = "from __future__ import annotations\n"
+    assert anchor in text
+    cfg.write_text(
+        text.replace(anchor, anchor + f"open({str(marker)!r}, 'w').close()\n", 1)
+    )
+    res = tfleet.run(
+        "--authority-override",
+        "причина",
+        FLEET_ROOT="",
+        GH_STUB_FILES="contracts/acceptance-targets/x.toml",
+    )
+    assert res.returncode == 2, res.stderr
+    assert "не чистое" in res.stderr
+    assert not marker.exists()
+
+
 def test_authority_override_live_tip_missing_locally_is_2(tfleet: Fleet) -> None:
     res = tfleet.run(
         "--authority-override",

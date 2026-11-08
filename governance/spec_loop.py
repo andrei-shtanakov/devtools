@@ -1448,7 +1448,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     except df_config.ConfigError as exc:
         print(f"spec-loop: конфиг DarkFactory: {exc}")
-        return 1
+        return 2
     except run_lock.LockBusy as exc:
         print(f"spec-loop: {exc}")
         return 1
