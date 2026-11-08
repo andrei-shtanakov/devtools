@@ -3,15 +3,20 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** в `mode = "test"` бриф утверждается одной учёткой GitHub: утверждающий —
-`accounts.human` конфига, репо политики не нужен; режим записан в журнал прогона, `resume`
-при смене режима отказывает; discovery читает тот же конфиг через вендоренную пиненую копию
-загрузчика.
+`accounts.human` конфига, репо политики не нужен; режим записан в журнал прогона, любой
+действующий вход при смене режима отказывает; discovery читает тот же конфиг через
+вендоренную пиненую копию загрузчика.
+
+**Результат точно (ревью codex 354de7d):** подписанный бриф на **подготовленном** репо, правила
+целевой ветки которого не требуют чужого review. Произвольный репо коллеги и полный
+автоматический проход — планы 3b/3c/4. «Без сети» — только чтение политики; факты PR
+(мерж, мержер, файлы) по-прежнему проверяются через GitHub.
 
 **Architecture:** одна точка — «синтетическая политика test»: в `test` `policy_rule.policy_source()`
 возвращает служебные координаты, а слой фактов (`brief_facts`) отвечает на них версией и
-составом из конфига (`AUTHORIZED_APPROVER_ACCOUNTS=<accounts.human>`), не ходя в сеть. Вся
-машинерия брифа (пин в заявке, `read_act`, `check_policy`, переподтверждение, `human-merge.sh`)
-работает без ветвлений. `strict` не меняется ни в одной строке поведения.
+составом из конфига (`AUTHORIZED_APPROVER_ACCOUNTS=<accounts.human>`), не ходя в сеть за
+политикой. Машинерия брифа (пин в заявке, `read_act`, `check_policy`, `human-merge.sh`)
+работает без ветвлений; единственная test-ветка — понятный отказ при смене утверждающего. `strict` не меняется ни в одной строке поведения.
 
 **Tech Stack:** Python 3.12 (uv), POSIX sh, pytest; discovery — Python 3.12, uv.
 
@@ -40,9 +45,19 @@ discovery, §5.3 п.2 «утверждающий — из конфига», §5.
 - **Политика test — синтетическая, а не ветвление по местам.** Координаты
   `("darkfactory-config", "test", "accounts.human")`; содержимое
   `AUTHORIZED_APPROVER_ACCOUNTS=<accounts.human>\n`; версия — первые 40 hex sha256 содержимого
-  (идентификатор версии, не защита: конфиг — данные человека). Смена `accounts.human` посреди
-  прогона = новая версия → штатный отказ `upstream_policy_drift` с переподтверждением, а не
-  тихое принятие.
+  (идентификатор версии, не защита: конфиг — данные человека). Синтетический источник знает
+  только текущую версию, истории нет.
+- **Смена утверждающего в test (ревью codex 354de7d, п.2):** контракт — «сменил утверждающего
+  — сделай новое предложение брифа (`brief-propose`), при необходимости новый прогон».
+  Старый пин после смены неизвестен; вместо безликого `not_policy_version` — именованный отказ
+  `test_approver_changed`: «утверждающий в конфиге сменился после предложения брифа — сделайте
+  новое предложение (brief-propose), при необходимости новый прогон». Переподтверждения
+  комментарием и истории версий в test нет.
+- **Один логин — одно правило в обоих репо (ревью codex 354de7d, п.3):** загрузчик проверяет
+  `accounts.human` и `accounts.agent` как один логин GitHub
+  (`^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$`) в обоих режимах; `"alice,bob"`,
+  пробелы, пустая строка → `ConfigError` с ключом. discovery получает то же правило с
+  дословной копией загрузчика; совместный локальный тест devtools → discovery — Task 8.
 - **В `test` `[policy]` конфига не используется и не сверяется с SSOT** (репо политики не нужен,
   §5.3 п.2). Запрет env `AUTHORIZED_APPROVER_ACCOUNTS` остаётся в обоих режимах.
 - **Загрузчик самодостаточен (только stdlib)**, чтобы discovery вендорила его дословно:
@@ -51,9 +66,13 @@ discovery, §5.3 п.2 «утверждающий — из конфига», §5.
   закрепляет тест; блок загрузки пакета по пути уходит.
 - **discovery без файла конфига ведёт себя как сегодня** (как `policy_rule` devtools:
   `lexists` нет → strict по SSOT); битый конфиг или висячая ссылка → `PolicyRefused`.
-- **Режим прогона:** `RunState.mode` с умолчанием `"strict"` (старые `run.json` — strict);
-  проверка на `resume`, `advance`, `reopen` (через `spec_loop._dispatch` — тоже); `verify` и
-  `status` только читают — без проверки.
+- **Режим прогона:** `RunState.mode` с умолчанием `"strict"` (старые `run.json` — strict).
+  Проверка — на **каждом действующем входе** до любых действий (ревью codex 354de7d, п.1):
+  `runner.resume`, `advance`, `reopen`, `verify` (создаёт дочерний прогон, S8, issue — не
+  read-only), `spec_loop._dispatch`, `brief_tools propose` и `approve` (грузят прогон сами,
+  мимо `resume`). Дочерний прогон `verify` наследует режим родителя. Без проверки — только
+  `status`. Исполнитель грепом `rs.load(`/`run_state.load(` по `governance/` сверяет, что
+  других действующих входов нет, и перечисляет их в отчёте.
 - **Баннер:** `df_config.TEST_RELAXATIONS` — кортеж того, что реально выключено; в 3a — одна
   строка про политику; 3b/3c дописывают свои. Баннер не обещает несделанного.
 - **TODO plan 3 у фикстуры:** логины в `gen_discovery_approval_fixture.py` — данные подписанной
@@ -83,7 +102,7 @@ discovery, §5.3 п.2 «утверждающий — из конфига», §5.
    отказ, код 2, прогон не продвигается.
 3. `test` с заданным `[policy]`, расходящимся с SSOT — не отказ (не используется).
 4. `test`: `accounts.human` сменили после `brief-propose` — `brief-approve` отказывает
-   `upstream_policy_drift`, а не подписывает.
+   `test_approver_changed` с советом нового предложения, а не подписывает.
 5. discovery: висячая симлинка `config.toml` — отказ, не «конфига нет».
 
 ---
@@ -111,6 +130,10 @@ discovery, §5.3 п.2 «утверждающий — из конфига», §5.
   - `test_get_harness_keys`: CLI `get harness.author` → `claude`, `get harness.model` → модель
     из конфига.
   - `test_banner_none_in_strict`, `test_banner_lists_relaxations_in_test`.
+  - `test_login_must_be_single_github_login` (параметризовать: `"alice,bob"`, `"alice bob"`,
+    `" alice"`, `""`, `"-alice"`, `"alice-"`, `"a--b"`, 40 символов; для `accounts.human` и
+    `accounts.agent`, в обоих режимах) → `ConfigError` с ключом; `"ai-prosto"`,
+    `"andrei-shtanakov"`, `"a1-b2"`, 39 символов — проходят.
   - CLI `python3 -I governance/df_config.py get mode` из чужого cwd — работает (без загрузки
     пакета по пути).
 - [ ] **Step 2:** FAIL.
@@ -126,7 +149,8 @@ discovery, §5.3 п.2 «утверждающий — из конфига», §5.
 
 **Files:**
 - Modify: `governance/run_state.py` (`RunState`, `new_run`, валидатор), `governance/runner.py`
-  (`start`, `resume`, `advance`, `reopen`), `governance/spec_loop.py` (баннер на старте)
+  (`start`, `resume`, `advance`, `reopen`, `verify` + дочерний прогон), `governance/spec_loop.py`
+  (баннер на старте, `_dispatch`), `governance/brief_tools.py` (`propose`, `approve`)
 - Test: `tests/test_governance_run_state.py`, `tests/test_governance_runner.py`
 
 **Interfaces:**
@@ -140,7 +164,9 @@ discovery, §5.3 п.2 «утверждающий — из конфига», §5.
   - `test_run_json_without_mode_loads_strict` (старый `run.json` без поля).
   - `test_start_records_config_mode` (`test`-конфиг → `run.json["mode"] == "test"`).
   - `test_resume_refuses_mode_mismatch` (параметризовать strict→test и test→strict;
-    также `advance`, `reopen`): код 2, текст отказа, `run.json` не изменён.
+    также `advance`, `reopen`, `verify`, `brief_tools propose`, `brief_tools approve`): код 2,
+    текст отказа, `run.json` не изменён, побочных действий нет (фейковые ops не вызваны).
+  - `test_verify_child_inherits_parent_mode`.
   - `test_resume_same_mode_proceeds`.
   - `test_banner_printed_on_start_and_resume_in_test` (stderr содержит `режим test:`), в strict
     — не печатается.
@@ -177,9 +203,11 @@ discovery, §5.3 п.2 «утверждающий — из конфига», §5.
     `human = agent = "alice"` → `propose` пинит sha синтетической политики → PR смержен
     `alice` → `approve` проходит `read_act` + `check_policy`; смержен `bob` →
     `merger_not_in_act_policy`; `accounts.human` сменён на `carol` после `propose` →
-    `upstream_policy_drift` (Review Focus 4).
+    `test_approver_changed` с текстом решения (Review Focus 4) — и в `brief_provenance.read_act`,
+    и в проверке пина `brief_tools approve`.
 - [ ] **Step 2:** FAIL.
-- [ ] **Step 3:** реализовать. `approval_facts.policy_snapshot` не трогать — он читает через те
+- [ ] **Step 3:** реализовать; отказ `test_approver_changed` — только для координат
+  `TEST_POLICY_SOURCE` при пине ≠ текущей версии. `approval_facts.policy_snapshot` не трогать — он читает через те
   же факты. `acceptance_provenance` (свои `policy_file`/`policy_on_ref`) — вне 3a (план 3c).
 - [ ] **Step 4:** PASS; плюс `tests/test_governance_approval_facts.py`, `tests/test_brief_*.py`,
   `tests/test_human_merge*.py`, `tests/test_harness_trust.py`.
@@ -278,3 +306,28 @@ discovery, §5.3 п.2 «утверждающий — из конфига», §5.
 
 `feat/df-config-vendor`: Tasks 6–7. По `discovery/CLAUDE.md` — мерж агентом после ревью
 (`authority-guard: false`); ревью — терминальное, бюджет 1 полный + 1 адресный.
+
+---
+
+### Task 8: совместный локальный тест devtools → discovery (devtools, после мержа PR 2)
+
+**Files:**
+- Create: `tests/test_discovery_test_mode_local.py`
+
+- [ ] **Step 1:** тест пропускается (`skip` с причиной), если нет `workspace_dir("discovery")`
+  или в нём нет `src/discovery/darkfactory/df_config.py` (CI без соседей). Иначе:
+  - байты вендоренной копии == `governance/df_config.py` (тот же пин);
+  - `test`-конфиг `human = agent = "alice"`: devtools `policy_rule.test_policy()` даёт состав
+    `{alice}`; в venv discovery (`uv run --frozen --project <discovery> python -I -c …`,
+    `cli.build_forge` подменён фейковым форджем, как в `tools/gen_discovery_approval_fixture.py`)
+    `discovery approve` с мержером `alice` подписывает, с `bob` — `APPROVER_NOT_AUTHORIZED`;
+  - конфиг `human = "alice,bob"`: и devtools `df_config.load()`, и discovery `allowlist` —
+    отказ «конфиг DarkFactory: … accounts.human».
+- [ ] **Step 2:** прогнать локально (в основном чекауте с соседом discovery) — PASS; в отчёте
+  — вывод прогона.
+- [ ] **Step 3:** commit `test: local devtools→discovery test-mode parity`.
+
+## PR 3 (devtools)
+
+`test/df-config-3a-parity`: Task 8 (только `tests/`). Мерж агентом после ревью.
+
