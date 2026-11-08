@@ -10,6 +10,21 @@
 `governance/secret_dirs.py`, закрепляет тест); `test` —
 `[policy]` необязателен, ограничения на каталоги нет.
 
+Якорь режима test: `mode = "test"` принимается ТОЛЬКО из канонического
+конфига пользователя `<pw_dir>/.config/darkfactory/config.toml`, где
+`pw_dir` — домашний каталог учётки из базы `pwd` (не `HOME`, не
+`XDG_CONFIG_HOME`). Сверяется тождество файла, РЕАЛЬНО прочитанного:
+`(st_dev, st_ino)` из `fstat` его дескриптора против `os.stat` канона
+(симлинки канона разрешаются; канона нет — отказ), а не пути после чтения —
+иначе подмена файла ↔ симлинки на канон между чтением и сверкой (TOCTOU)
+прошла бы. Путь чтения следует
+`XDG_CONFIG_HOME`, и без якоря любой процесс подсунул бы поддельный конфиг
+test с `accounts.human = <любой логин>` — синтетическая политика приняла бы
+его утверждающим без человека (та же ручка «env подменяет утверждающих», что
+закрывает отказ `AUTHORIZED_APPROVER_ACCOUNTS`). strict из перенаправленного
+пути работает как прежде: его доверие от пути конфига не зависит (источник
+политики — SSOT).
+
 Модуль исполняется скриптами мержа (`df_config.sh` → `python3 -I <этот файл>
 get <ключ>`), поэтому он под authority-root и харнесс-гвардом. Импорты только
 stdlib: файл вендорится дословно (discovery) и запускается под `-I` без пакета
@@ -32,6 +47,7 @@ if sys.version_info < (3, 11):  # noqa: UP036 — запуск системны�
     raise SystemExit(2)
 
 import os  # noqa: E402
+import pwd  # noqa: E402
 import re  # noqa: E402
 import tomllib  # noqa: E402
 from collections.abc import Callable, Mapping  # noqa: E402
@@ -47,6 +63,7 @@ STRICT_GH_DIRS: tuple[str, ...] = (
     ".ssh",
 )
 #: Что в режиме test реально выключено (дописывают следующие срезы).
+#: Сам режим test принимается только из `canonical_config_path()` (якорь).
 TEST_RELAXATIONS: tuple[str, ...] = (
     "репо политики утверждения не используется: утверждающий — accounts.human",
 )
@@ -123,11 +140,58 @@ def config_path(env: Mapping[str, str]) -> Path:
     return config_home(env) / "darkfactory" / "config.toml"
 
 
+def canonical_config_path() -> Path:
+    """Канонический конфиг учётки: `<pw_dir>/.config/darkfactory/config.toml`.
+
+    Только отсюда принимается `mode = "test"` (якорь, см. docstring модуля).
+    Нет записи учётки в `pwd` или `pw_dir` не абсолютный — `ConfigError`."""
+    try:
+        home = _real_home()
+    except KeyError as exc:
+        raise ConfigError(f"нет записи учётки uid={os.getuid()} в pwd") from exc
+    if not home.is_absolute():
+        raise ConfigError(f"домашний каталог учётки (pwd) не абсолютный: {home!r}")
+    return home / ".config" / "darkfactory" / "config.toml"
+
+
+def _real_home() -> Path:
+    """Домашний каталог учётки процесса из базы `pwd` — не `HOME`."""
+    return Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
 def load(env: Mapping[str, str] = os.environ) -> DfConfig:
-    """Прочитать и проверить конфиг; любой дефект — `ConfigError`."""
+    """Прочитать и проверить конфиг; любой дефект — `ConfigError`.
+
+    `mode = "test"` не из `canonical_config_path()` — `ConfigError` (якорь)."""
     path = config_path(env)
-    data = _read(path)
-    return _Parser(path).parse(data)
+    data, read_stat = _read(path)
+    parser = _Parser(path)
+    cfg = parser.parse(data)
+    if cfg.mode == "test":
+        _require_canonical(parser, path, read_stat)
+    return cfg
+
+
+def _require_canonical(parser: _Parser, path: Path, read: os.stat_result) -> None:
+    """Якорь test: ПРОЧИТАННЫЙ файл (fstat его дескриптора) — тот же inode, что
+    канонический. Сверка по пути после чтения оставляла бы гонку подмены
+    файла ↔ симлинки на канон в перенаправленном каталоге (TOCTOU)."""
+    try:
+        canonical = canonical_config_path()
+    except ConfigError as exc:
+        raise parser.fail("mode", f"режим test: {exc}") from exc
+    try:
+        want = os.stat(canonical)
+    except OSError:
+        same = False
+    else:
+        same = (read.st_dev, read.st_ino) == (want.st_dev, want.st_ino)
+    if not same:
+        raise parser.fail(
+            "mode",
+            f"режим test принимается только из {canonical}; конфиг "
+            f"прочитан из {path} (перенаправление XDG_CONFIG_HOME/HOME)",
+        )
 
 
 def workspace_root(env: Mapping[str, str] | None = None) -> Path:
@@ -168,9 +232,12 @@ def agent_login(env: Mapping[str, str] | None = None) -> str:
     return env.get("REVIEW_LOGIN") or load(env).accounts.agent
 
 
-def _read(path: Path) -> dict[str, object]:
+def _read(path: Path) -> tuple[dict[str, object], os.stat_result]:
+    """TOML конфига и `fstat` дескриптора, с которого он прочитан (якорь)."""
     try:
-        text = path.read_text(encoding="utf-8")
+        with open(path, "rb") as fh:
+            read_stat = os.fstat(fh.fileno())
+            text = fh.read().decode("utf-8")
     except FileNotFoundError as exc:
         if path.is_symlink():
             raise ConfigError(f"{path}: висячая симлинка — конфиг не читается") from exc
@@ -178,7 +245,7 @@ def _read(path: Path) -> dict[str, object]:
     except (OSError, UnicodeDecodeError) as exc:
         raise ConfigError(f"{path}: не читается ({exc})") from exc
     try:
-        return tomllib.loads(text)
+        return tomllib.loads(text), read_stat
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{path}: не разбирается как TOML ({exc})") from exc
 

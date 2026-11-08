@@ -102,3 +102,16 @@ def test_env_allowlist_still_refused_in_test_mode(monkeypatch, tmp_path) -> None
     snapshot = approval_facts.policy_snapshot(object(), pinned_sha=None)  # type: ignore[arg-type]
     assert snapshot.outcome is Outcome.FORBIDDEN
     assert policy_rule.APPROVER_ALLOWLIST_ENV in snapshot.detail
+
+
+def test_redirected_test_config_gives_no_synthetic_policy(
+    monkeypatch, tmp_path
+) -> None:
+    """Якорь (discovery#67): конфиг test не из канонического пути — отказ
+    конфигурации, синтетической политики нет (тестовый якорь снят)."""
+    _use_config(monkeypatch, tmp_path, human="human-y", agent="bot-x")
+    monkeypatch.setattr(policy_rule.df_config, "_real_home", lambda: tmp_path / "pw")
+    with pytest.raises(RuntimeError, match="режим test принимается только из"):
+        policy_rule.test_policy()
+    with pytest.raises(RuntimeError, match="режим test принимается только из"):
+        policy_rule.policy_source()

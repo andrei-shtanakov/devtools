@@ -150,10 +150,16 @@ def _df_config(
     оператора, перекрывшие бы конфиг, сняты; тест со своим конфигом пишет его
     в свой каталог и выставляет `XDG_CONFIG_HOME` сам. Маркер `no_df_config` —
     конфига нет вовсе (окружение раннера CI)."""
-    from tests.df_config_fixture import ENV_OVERRIDES, write_config
+    from tests.df_config_fixture import (
+        ENV_OVERRIDES,
+        use_test_real_home,
+        write_config,
+    )
 
     for name in ENV_OVERRIDES:
         monkeypatch.delenv(name, raising=False)
+    # Якорь режима test: `pw_dir` учётки — временный дом теста.
+    use_test_real_home(monkeypatch, tmp_path_factory.mktemp("df-real-home"))
     if request.node.get_closest_marker("no_df_config"):
         # Пустой `XDG_CONFIG_HOME`: файла конфига нет, как на раннере CI.
         empty = tmp_path_factory.mktemp("no-df-config")
