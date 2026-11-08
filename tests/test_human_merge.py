@@ -162,14 +162,13 @@ def test_merges_from_operator_profile_with_head_pin(fleet: Fleet) -> None:
     assert f"от {HUMAN}" in res.stdout
 
 
-def test_test_mode_config_policy_cannot_redirect_source(fleet: Fleet) -> None:
-    """test: `[policy]` конфига ≠ SSOT source.env — тоже отказ 2 до сети:
-    режим конфига доверие к источнику не выбирает."""
+def test_test_mode_config_policy_is_ignored(fleet: Fleet) -> None:
+    """test: `[policy]` ≠ SSOT не сверяется и не читается — мерж, без сети
+    политики."""
     write_config(fleet.xdg, policy_repo="o/p", policy_ref="rel", policy_path="x.env")
     res = fleet.run()
-    assert res.returncode == 2
-    assert "расходится с authority-root SSOT" in res.stderr
-    assert fleet.calls() == []
+    assert res.returncode == 0, res.stderr
+    assert not [ln for ln in fleet.calls() if "api graphql" in ln]
 
 
 def test_strict_policy_from_authority_root_ssot(fleet: Fleet) -> None:
@@ -210,12 +209,11 @@ def test_no_config_file_skips_policy_cross_check(fleet: Fleet) -> None:
 
 
 def test_agent_profile_from_config_is_refused(fleet: Fleet) -> None:
-    """Профиль человека, совпавший с агентским из конфига, — отказ до сети."""
+    """strict: профиль человека, совпавший с агентским ИЗ КОНФИГА
+    (`accounts.agent_gh_config_dir`, env агента не задан), — отказ до сети."""
     fleet.strict()
-    res = fleet.run(
-        HUMAN_GH_CONFIG_DIR=str(fleet.agent_profile),
-        MERGE_GH_CONFIG_DIR=str(fleet.agent_profile),
-    )
+    agent_dir = Path.home() / ".config" / "review"
+    res = fleet.run(HUMAN_GH_CONFIG_DIR=str(agent_dir))
     assert res.returncode == 2, res.stderr
     assert "агентский профиль" in res.stderr
     assert fleet.calls() == []
@@ -230,7 +228,7 @@ def test_no_config_exit2(fleet: Fleet, tmp_path: Path) -> None:
     assert fleet.calls() == []
 
 
-def test_test_mode_without_policy_table_uses_ssot(fleet: Fleet) -> None:
+def test_test_mode_without_policy_table_reads_no_policy_repo(fleet: Fleet) -> None:
     """test без `[policy]` — сверять нечего; репо политики не читается."""
     path = fleet.xdg / "darkfactory" / "config.toml"
     text = path.read_text(encoding="utf-8")

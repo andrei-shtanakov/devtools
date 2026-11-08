@@ -14,7 +14,9 @@
 # Fail-closed: логин обязан входить в политику подписи — файл
 # `policy/approvers.env` репозитория approval-policy (координаты — SSOT
 # contracts/approval-policy-source/v1/source.env; `[policy]` конфига
-# DarkFactory, если задан, обязан совпасть), прочитанный по SHA из тела
+# DarkFactory, если задан, обязан совпасть; в `mode = "test"` репо политики
+# нет: логин обязан равняться `accounts.human`, `[policy]` не читается),
+# прочитанный по SHA из тела
 # candidate-PR (`policy: <repo>@<sha>`; у finalize и прочих PR человеческого
 # мержа пина нет — судится актуальная версия); у candidate актуальная версия обязана совпасть с пином —
 # иначе мерж не создаст подписи и человеческий акт сгорел бы (спека
@@ -52,7 +54,8 @@ usage() {
     echo "  <repo> — имя каталога репо во флоте; мерж от учётки ОПЕРАТОРА" >&2
     echo "  (HUMAN_GH_CONFIG_DIR, иначе accounts.human_gh_config_dir конфига" >&2
     echo "  DarkFactory; агентский профиль — отказ)" >&2
-    echo "  логин обязан входить в политику approval-policy (версия — пин из тела PR)" >&2
+    echo "  логин обязан входить в политику approval-policy (версия — пин из тела PR);" >&2
+    echo "  в mode=test репо политики нет: логин обязан равняться accounts.human" >&2
     echo "  переменная AUTHORIZED_APPROVER_ACCOUNTS больше не читается — выставленная даёт отказ" >&2
     echo "  защиту ветки НЕ обходит (--admin нет): под ruleset'ом с обязательным" >&2
     echo "  ревью мерж пройдёт только при наличии ревью на PR (devtools#277)" >&2
@@ -145,8 +148,8 @@ p_path=$(ssot_key "$src" APPROVAL_POLICY_PATH "SSOT источника поли�
 # Файла конфига нет — нет и `[policy]`, сверять нечего (путь — правило
 # `act_settings.config_home`: только абсолютный XDG_CONFIG_HOME, иначе ~/.config).
 if [ -e "$df_conf_file" ] || [ -L "$df_conf_file" ]; then
-    if [ "$df_mode" = "test" ] && ! df_cfg policy.repo >/dev/null 2>&1; then
-        :
+    if [ "$df_mode" = "test" ]; then
+        : # test: `[policy]` не используется и не сверяется (репо политики нет)
     else
         c_repo=$(df_cfg policy.repo) || exit $?
         c_ref=$(df_cfg policy.ref) || exit $?
