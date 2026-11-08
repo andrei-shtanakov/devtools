@@ -268,7 +268,6 @@ script_dir=$(cd "$(dirname "$0")" && pwd)
 . "$script_dir/df_config.sh"
 . "$script_dir/approval_branches.sh"
 
-if [ -z "${FLEET_ROOT:-}" ]; then FLEET_ROOT=$(df_cfg workspace.root) || exit $?; fi
 APPROVAL_PATTERNS="${APPROVAL_PATTERNS:-\
 $script_dir/contracts/approval-branches/v1/patterns.env}"
 
@@ -392,7 +391,22 @@ if [ "$print_globs" -eq 1 ]; then
     exit 0
 fi
 
+# --- Чистота чекаута обвязки под --authority-override ----------------------
+# ДО любого исполнения кода обвязки из этого дерева (`df_cfg` ниже запускает
+# governance/df_config.py): зависит только от `$script_dir`.
+if [ -n "$authority_override" ]; then
+    if ! _dirty=$(git -C "$script_dir" status --porcelain 2>&1); then
+        die 2 "--authority-override: состояние чекаута обвязки $script_dir не \
+прочитано ($_dirty)"
+    fi
+    [ -z "$_dirty" ] || die 2 "--authority-override: рабочее дерево обвязки \
+$script_dir не чистое — недоверенный чекаут, обход не выполняется:
+$_dirty"
+fi
+
 # --- Репо и slug -----------------------------------------------------------
+# Корень флота — `workspace.root` конфига (после проверки чистоты выше).
+if [ -z "${FLEET_ROOT:-}" ]; then FLEET_ROOT=$(df_cfg workspace.root) || exit $?; fi
 repo_dir="$FLEET_ROOT/$repo"
 [ -d "$repo_dir" ] || die 2 "репо '$repo' не найдено в $FLEET_ROOT"
 # Slug — из СЫРОГО remote.origin.url (git config, не `remote get-url`):
@@ -417,13 +431,6 @@ if [ -n "$authority_override" ]; then
     [ "$harness_slug" = "$slug" ] || die 2 "--authority-override применим \
 только к PR в репо самой обвязки ($harness_slug), а не в $slug: доверенность \
 чекаута сверяется с верхушкой базы этого репо"
-    if ! _dirty=$(git -C "$script_dir" status --porcelain 2>&1); then
-        die 2 "--authority-override: состояние чекаута обвязки $script_dir не \
-прочитано ($_dirty)"
-    fi
-    [ -z "$_dirty" ] || die 2 "--authority-override: рабочее дерево обвязки \
-$script_dir не чистое — недоверенный чекаут, обход не выполняется:
-$_dirty"
 fi
 
 # --- Профиль ---------------------------------------------------------------

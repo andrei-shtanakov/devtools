@@ -64,7 +64,6 @@ script_dir=$(cd "$(dirname "$0")" && pwd)
 . "$script_dir/ssot_env.sh"
 . "$script_dir/df_config.sh"
 . "$script_dir/approval_branches.sh"
-if [ -z "${FLEET_ROOT:-}" ]; then FLEET_ROOT=$(df_cfg workspace.root) || exit $?; fi
 APPROVAL_PATTERNS="${APPROVAL_PATTERNS:-\
 $script_dir/contracts/approval-branches/v1/patterns.env}"
 
@@ -105,6 +104,7 @@ gh_h() {
     GH_CONFIG_DIR="$human_profile" gh "$@"
 }
 
+if [ -z "${FLEET_ROOT:-}" ]; then FLEET_ROOT=$(df_cfg workspace.root) || exit $?; fi
 repo_dir="$FLEET_ROOT/$repo"
 [ -d "$repo_dir" ] || die 2 "репо '$repo' не найдено в $FLEET_ROOT"
 origin_url=$(git -C "$repo_dir" config --get remote.origin.url) \

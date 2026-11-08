@@ -99,7 +99,6 @@ gh_r() {
 # Доверенная ветка steward, против которой проверяется ancestry (I1).
 script_dir=$(cd "$(dirname "$0")" && pwd)
 . "$script_dir/df_config.sh"
-if [ -z "${FLEET_ROOT:-}" ]; then FLEET_ROOT=$(df_cfg workspace.root) || exit $?; fi
 STEWARD_TRUSTED_REF="${STEWARD_TRUSTED_REF:-origin/master}"
 MARKER_NAME="ai-prosto-vendor-attestation"
 # Хвостовой \r (чекаут с autocrlf) срезается везде, где читаются строки
@@ -130,6 +129,7 @@ case "$pr" in
     *[!0-9]*|"") die 2 "номер PR должен быть числом, получено: '$pr'" ;;
 esac
 
+if [ -z "${FLEET_ROOT:-}" ]; then FLEET_ROOT=$(df_cfg workspace.root) || exit $?; fi
 repo_dir="$FLEET_ROOT/$repo"
 [ -d "$repo_dir" ] || die 2 "репо '$repo' не найдено в $FLEET_ROOT"
 repo_dir=$(cd "$repo_dir" && pwd)

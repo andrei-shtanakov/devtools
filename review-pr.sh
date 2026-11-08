@@ -99,7 +99,6 @@ gh_r() {
 # оверрайд для тестов и ephemeral-workspace.
 script_dir=$(cd "$(dirname "$0")" && pwd)
 . "$script_dir/df_config.sh"
-if [ -z "${FLEET_ROOT:-}" ]; then FLEET_ROOT=$(df_cfg workspace.root) || exit $?; fi
 
 repo=""
 pr=""
@@ -293,6 +292,7 @@ claude требует кит steward >= a2d7e71 — ре-вендорьте (в�
     esac
     reviewer_label="${REVIEW_CMD:-codex exec}"
 }
+if [ -z "${FLEET_ROOT:-}" ]; then FLEET_ROOT=$(df_cfg workspace.root) || exit $?; fi
 if [ "$print_review_cmd" -eq 1 ]; then
     # Отладочный зонд для тестов: показать разрешённую команду и выйти,
     # не трогая GitHub. Кит — из чекаута репо, если он есть (feature-detect
