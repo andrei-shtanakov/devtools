@@ -88,6 +88,16 @@ case "$pr" in *[!0-9]*|"") die 2 "номер PR должен быть число
 # (тот же порядок, что у merge-pr.sh: MERGE_GH_CONFIG_DIR, REVIEW_GH_CONFIG_DIR,
 # `accounts.agent_gh_config_dir`) здесь отказ по построению — сверка логина
 # ниже его не пропустит, но названный явно он отбивается раньше и понятнее.
+# Режим конфига (`mode`): в `test` одна учётка на обе роли (утверждающий —
+# `accounts.human`, репо политики нет); без файла конфига — путь strict.
+case "${XDG_CONFIG_HOME:-}" in
+    /*) df_conf_file="$XDG_CONFIG_HOME/darkfactory/config.toml" ;;
+    *)  df_conf_file="$HOME/.config/darkfactory/config.toml" ;;
+esac
+df_mode=strict
+if [ -e "$df_conf_file" ] || [ -L "$df_conf_file" ]; then
+    df_mode=$(df_cfg mode) || exit $?
+fi
 human_profile="${HUMAN_GH_CONFIG_DIR:-}"
 if [ -z "$human_profile" ]; then
     human_profile=$(df_cfg accounts.human_gh_config_dir) || exit $?
@@ -96,7 +106,7 @@ agent_profile="${MERGE_GH_CONFIG_DIR:-${REVIEW_GH_CONFIG_DIR:-}}"
 if [ -z "$agent_profile" ]; then
     agent_profile=$(df_cfg accounts.agent_gh_config_dir) || exit $?
 fi
-if [ "$human_profile" = "$agent_profile" ]; then
+if [ "$df_mode" != "test" ] && [ "$human_profile" = "$agent_profile" ]; then
     die 2 "профиль человека указывает на агентский профиль ($agent_profile) — \
 человеческий мерж от учётки агента невозможен"
 fi
@@ -134,12 +144,7 @@ p_ref=$(ssot_key "$src" APPROVAL_POLICY_REF "SSOT источника полит�
 p_path=$(ssot_key "$src" APPROVAL_POLICY_PATH "SSOT источника политики") || exit $?
 # Файла конфига нет — нет и `[policy]`, сверять нечего (путь — правило
 # `act_settings.config_home`: только абсолютный XDG_CONFIG_HOME, иначе ~/.config).
-case "${XDG_CONFIG_HOME:-}" in
-    /*) df_conf_file="$XDG_CONFIG_HOME/darkfactory/config.toml" ;;
-    *)  df_conf_file="$HOME/.config/darkfactory/config.toml" ;;
-esac
 if [ -e "$df_conf_file" ] || [ -L "$df_conf_file" ]; then
-    df_mode=$(df_cfg mode) || exit $?
     if [ "$df_mode" = "test" ] && ! df_cfg policy.repo >/dev/null 2>&1; then
         :
     else
@@ -219,6 +224,13 @@ esac
 # другого PR человеческого мержа (finalize-PR под «Мерж: человек», лейбл
 # human-merge-required) пина нет и быть не должно — судится актуальная
 # версия.
+# test: репо политики нет — утверждающий один, `accounts.human` (логин профиля
+# обязан совпасть); пин и версия политики не читаются. Ниже, до `fi` после
+# проверки allowlist, — путь strict без изменений (не переотступлен).
+if [ "$df_mode" = "test" ]; then
+    human_account=$(df_cfg accounts.human) || exit $?
+    [ "$login" = "$human_account" ] || die 3 "логин '$login' — не accounts.human ('$human_account'): подписать от этого профиля нельзя"
+else
 _globs=$(approval_globs "$APPROVAL_PATTERNS") || exit $?
 candidate_glob=$(printf '%s\n' "$_globs" | sed -n '1p')
 finalize_glob=$(printf '%s\n' "$_globs" | sed -n '2p')
@@ -261,6 +273,7 @@ for _acc in $allow; do
 done
 IFS="$_saved_ifs"
 [ "$_ok" -eq 1 ] || die 3 "логин '$login' не входит в политику $p_repo@$version ($allow)"
+fi
 if [ -n "$expect_head" ] && [ "$expect_head" != "$head_oid" ]; then
     die 2 "PR ${slug}#${pr}: голова $head_oid, вызывающий ждал $expect_head — перепроверьте"
 fi
