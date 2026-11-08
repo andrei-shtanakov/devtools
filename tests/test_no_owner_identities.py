@@ -3,8 +3,9 @@
 Учётки, профили gh и источник политики берутся из `config.toml`; литералы
 `"ai-prosto"` / `'ai-prosto'` и `andrei-shtanakov/approval-policy` в
 не-тестовом коде запрещены, кроме явного перечня исключений ниже.
-Охват намеренно узкий: ловятся только кавычечные формы; безкавычечные
-shell-формы и логин человека не проверяются (TODO plan 2).
+Ловятся также логин человека `andrei-shtanakov` и безкавычечный
+`ai-prosto` (комментарии и докстринги тоже) — кроме протокольных маркеров
+`ai-prosto-<слово>` и компонентов путей `.config/ai-prosto`.
 """
 
 from __future__ import annotations
@@ -37,10 +38,25 @@ EXCLUDED_FILES = {
     "issue_console.py": (
         '"ai-prosto"',
         (
-            "TODO plan 2 (darkfactory-config): DEFAULT_INTERNAL — набор «своих» "
-            "авторов консоли issue; файл не править "
-            "(память: devtools-issue-console-untouchable)"
+            "DEFAULT_INTERNAL — набор «своих» авторов консоли issue; файл "
+            "неприкосновенен (правило репо: devtools-issue-console-untouchable)"
         ),
+    ),
+    "inbox.py": (
+        '"andrei-shtanakov"',
+        "DEFAULT_OWNER — инструмент флота инстанса владельца, не конвейер",
+    ),
+    "r16_runner.py": (
+        "andrei-shtanakov/prograph-vault",
+        "задача VPS владельца (R16), не конвейер",
+    ),
+    "tools/check_discovery_vendor.py": (
+        "andrei-shtanakov/discovery-toolkit",
+        "апстрим вендоринга владельца",
+    ),
+    "tools/check_discovery_approval_vendor.py": (
+        "andrei-shtanakov/discovery",
+        "апстрим вендоринга владельца",
     ),
     "tools/gen_discovery_approval_fixture.py": (
         "andrei-shtanakov/approval-policy",
@@ -50,7 +66,11 @@ EXCLUDED_FILES = {
         ),
     ),
 }
-LITERAL = re.compile(r"""["']ai-prosto["']|andrei-shtanakov/approval-policy""")
+LITERAL = re.compile(
+    r"""["']ai-prosto["']"""
+    r"""|(?<![\w./~-])ai-prosto(?![\w-])"""
+    r"""|andrei-shtanakov"""
+)
 
 
 def _tracked() -> list[str]:

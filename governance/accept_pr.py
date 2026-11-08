@@ -23,7 +23,7 @@ spec-runner, завершив цикл, открывает integration-PR и о�
    и глазами» — не ритуал); любой красный → стоп без мержа;
 3. гарды перед агентским мержем: authority-root пути (`.github/`,
    `profiles/`) — всегда человеку (ADR-ECO-004 I2); немержабельный PR — стоп;
-4. мерж от ai-prosto (`Ops.merge`, PUT с пином head), затем подсказка
+4. мерж от учётки агента (`Ops.merge`, PUT с пином head), затем подсказка
    `spec-runner sync`.
 
 CLI: ``python -m governance.accept_pr --repo kapelle --pr 59``
