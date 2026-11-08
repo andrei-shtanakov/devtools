@@ -596,6 +596,7 @@ class Live:
         from governance import author_launch
 
         self.base = base
+        self.monkeypatch = monkeypatch
         self.target = base / "target"
         _git("init", "-q", self.target)
         self.run_dir = base / "runs" / "r1"
@@ -620,14 +621,30 @@ class Live:
         real = os.path.realpath(script)
         import hashlib
 
+        admission = sandbox.Admission(
+            "claude",
+            "fake",
+            Path(real),
+            hashlib.sha256(Path(real).read_bytes()).hexdigest(),
+            sandbox._macos_major(),
+            sandbox.profile_template_sha256(),
+            "docs/evidence/test.md",
+        )
+        protocol = self.base / admission.evidence
+        protocol.parent.mkdir(parents=True, exist_ok=True)
+        protocol.write_text(
+            sandbox.render_admit_protocol(
+                admission,
+                date="2026-11-08",
+                probe=sandbox.ProbeResult((), ()),
+                failures=(),
+                calls=(),
+            ),
+            encoding="utf-8",
+        )
+        self.monkeypatch.setattr(sandbox, "EVIDENCE_BASE", self.base)
         self.contract.write_text(
-            "schema = 1\n\n[[admitted]]\n"
-            'harness = "claude"\nversion = "fake"\n'
-            f'realpath = "{real}"\n'
-            f'sha256 = "{hashlib.sha256(Path(real).read_bytes()).hexdigest()}"\n'
-            f"macos_major = {sandbox._macos_major()}\n"
-            f'profile_sha256 = "{sandbox.profile_template_sha256()}"\n'
-            'evidence = "test"\n',
+            "schema = 1\n\n" + sandbox.admission_record(admission),
             encoding="utf-8",
         )
 

@@ -398,9 +398,12 @@ def _check_evidence(record: Admission) -> None:
         text = data.decode("utf-8")
     except (safe_io.SafeIOError, UnicodeDecodeError) as exc:
         raise _not_admitted(f"протокол {record.evidence}: {exc}") from exc
-    if verdict_line(VERDICT_PASSED) not in text.splitlines():
-        raise _not_admitted(f"протокол {record.evidence}: нет итога «ПРОШЛО»")
-    if FAILURES_HEADING in text.splitlines():
+    lines = text.splitlines()
+    if lines.count(verdict_line(VERDICT_PASSED)) != 1:
+        raise _not_admitted(f"протокол {record.evidence}: нет единственного итога")
+    if verdict_line(VERDICT_FAILED) in lines:
+        raise _not_admitted(f"протокол {record.evidence}: есть итог «НЕ ПРОШЛО»")
+    if FAILURES_HEADING in lines:
         raise _not_admitted(f"протокол {record.evidence}: есть раздел отказов")
     if admission_record(record) not in text:
         raise _not_admitted(f"протокол {record.evidence}: запись не совпала")

@@ -752,6 +752,22 @@ def test_admission_evidence_outside_docs_evidence_refused(
 
 
 @darwin_only
+def test_admission_evidence_with_both_verdicts_refused(
+    base: Path,
+    harness: tuple[Path, Path, Path],
+    macos_26: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path_dir, real, _ = harness
+    entry = _entry(real)
+    target = _protocol(base, monkeypatch, entry)
+    both = sandbox.verdict_line(sandbox.VERDICT_FAILED)
+    target.write_text(target.read_text("utf-8") + both + "\n", "utf-8")
+    with pytest.raises(SandboxError, match="НЕ ПРОШЛО"):
+        sandbox.admission_check(_contract(base, entry), path=str(path_dir))
+
+
+@darwin_only
 def test_admission_evidence_symlink_refused(
     base: Path,
     harness: tuple[Path, Path, Path],
