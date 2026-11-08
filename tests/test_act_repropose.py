@@ -914,6 +914,7 @@ def _completed_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
     state = rs.new_run(
+        mode="strict",
         subject="s",
         repo="alpha",
         repo_slug="owner/alpha",

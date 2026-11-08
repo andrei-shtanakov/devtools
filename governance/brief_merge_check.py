@@ -139,6 +139,8 @@ def check_merge(repo: str, pr: int, head: str, facts) -> str:
             f"актуальная версия политики не установлена: {current.detail}"
         )
     if req.policy_sha != current.value:
+        if source == policy_rule.TEST_POLICY_SOURCE:
+            raise MergeRefused(policy_rule.TEST_APPROVER_CHANGED)
         raise MergeRefused(
             f"политика сменилась после предложения (пин {req.policy_sha}, "
             f"актуальная {current.value}) — мерж не создал бы годного акта; --repropose"

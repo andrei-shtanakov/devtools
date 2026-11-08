@@ -74,6 +74,7 @@ from governance.policy_sources import (
     wave_profile_dir,
 )
 from governance.run_state import (
+    ModeMismatchError,
     RunState,
     all_run_ids,
     load,
@@ -81,12 +82,16 @@ from governance.run_state import (
     op_complete,
     op_start,
     op_status,
+    require_mode,
     run_dir,
     save,
     validate_author_backend,
     validate_authoring,
     validate_id_component,
     validate_merge_authority,
+)
+from governance.run_state import (
+    mode_refusal as mode_refusal,
 )
 from governance.spec_runner_contract import target_selector_policy
 from governance.stale_adapter import blob_sha1, blob_sha1_bytes
@@ -374,6 +379,8 @@ def start(
     `run_id`.
     """
     rl.require(lock, run_id)
+    cfg = df_config.load()
+    _print_test_banner(cfg)
     validate_merge_authority(merge_authority)
     validate_author_backend(author_backend)
     _check_author_config(target_dir, bundle_dir, author_backend)
@@ -439,11 +446,19 @@ def start(
         authoring=authoring,
         code=code,
         plan_item=plan_item,
+        mode=cfg.mode,
     )
     if engineer_intake is not None:
         _write_engineer_upstream(state, engineer_intake)
     save(state)
     return advance(state, ops, lock=lock)
+
+
+def _print_test_banner(cfg: df_config.DfConfig) -> None:
+    """Баннер режима test в stderr; в strict ничего не печатает."""
+    banner = df_config.test_banner(cfg)
+    if banner is not None:
+        print(banner, file=sys.stderr)
 
 
 def _write_engineer_upstream(state: RunState, intake: iv.EngineerIntake) -> None:
@@ -503,6 +518,7 @@ def advance(state: RunState, ops: Ops, *, lock: rl.RunLock) -> RunState:
     бы в общий шаговый цикл и переигрывал их вхолостую на смерженном PR.
     """
     rl.require(lock, state.run_id)
+    require_mode(state)
     if state.status == "merged_unverified":
         raise ValueError(
             f"run {state.run_id!r} — merged_unverified навсегда; создайте "
@@ -947,6 +963,8 @@ def resume(run_id: str, ops: Ops, *, lock: rl.RunLock) -> RunState:
     """
     rl.require(lock, run_id)
     state = load(run_id)
+    require_mode(state)
+    _print_test_banner(df_config.load())
     if state.status == "brief_ready":
         # Терминальный (§11.2): ни шагов, ни соседа, ни записей.
         return state
@@ -1276,6 +1294,7 @@ def reopen(
     """
     rl.require(lock, run_id)
     state = load(run_id)
+    require_mode(state)
     if _is_legacy_ledger(state):
         raise ValueError("--reopen — только для прогона с authoring=waves")
     dag = _wave_dag()
@@ -1578,6 +1597,7 @@ def verify(
     """
     rl.require(lock, parent_run_id)
     parent = load(parent_run_id)
+    require_mode(parent)
     if parent.status != "merged_unverified":
         raise ValueError(
             f"verify: parent-run {parent_run_id!r} не merged_unverified "
@@ -1655,6 +1675,7 @@ def _verify_child(
         # авторство» разные вещи, и консоль по этому полю строит перечень
         # шагов волн, которых у потомка нет.
         authoring=parent.authoring,
+        mode=parent.mode,
     )
     child.remediated_by = parent_run_id
     child.branch = parent.branch
@@ -2072,6 +2093,7 @@ def attach_session(
     """
     rl.require(lock, run_id)
     state = load(run_id)
+    require_mode(state)
     if state.interview is None:
         raise ValueError("у прогона нет стадии Need")
     if state.interview.get("frame") == "engineer":
@@ -4371,6 +4393,9 @@ def main(argv: list[str] | None = None) -> int:
         return err.exit_code
     except df_config.ConfigError as exc:
         print(f"runner: конфиг DarkFactory: {exc}", file=sys.stderr)
+        return 2
+    except ModeMismatchError as exc:
+        print(f"runner: {exc}", file=sys.stderr)
         return 2
 
 

@@ -417,6 +417,7 @@ def _make_world(
 
     forge = Forge(origin=origin, merger=human)
     state = rs.new_run(
+        mode="strict",
         subject="одобрение узлов",
         repo="alpha",
         repo_slug=SLUG,

@@ -27,6 +27,7 @@ class ShowOps:
 
 def _state(tmp_path: Path, *, brief=None) -> rs.RunState:
     return rs.new_run(
+        mode="strict",
         subject="s",
         repo="alpha",
         repo_slug="owner/alpha",

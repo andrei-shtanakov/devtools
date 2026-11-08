@@ -53,29 +53,17 @@ def test_policy_source_is_the_authority_root_ssot() -> None:
     assert all(f"={v}\n" in text for v in SSOT)
 
 
-@pytest.mark.parametrize("mode", [{}, _STRICT], ids=["test", "strict"])
-def test_config_policy_cannot_redirect_source(monkeypatch, tmp_path, mode) -> None:
-    """В любом режиме `[policy]` конфига, расходящийся с SSOT, — отказ с
-    обоими значениями, а не перенаправление: конфиг не выбирает доверие."""
-    _use_config(monkeypatch, tmp_path, policy_repo="evil/policy", **mode)
+def test_config_policy_cannot_redirect_source(monkeypatch, tmp_path) -> None:
+    """strict: `[policy]` конфига, расходящийся с SSOT, — отказ с обоими
+    значениями, а не перенаправление: конфиг не выбирает доверие. (В test
+    `[policy]` не используется — `tests/test_policy_rule_source.py`.)"""
+    _use_config(monkeypatch, tmp_path, policy_repo="evil/policy", **_STRICT)
     with pytest.raises(RuntimeError, match="расходится с authority-root SSOT") as e:
         policy_rule.policy_source()
     assert "evil/policy" in str(e.value) and SSOT[0] in str(e.value)
-    _use_config(monkeypatch, tmp_path, policy_ref="other", **mode)
+    _use_config(monkeypatch, tmp_path, policy_ref="other", **_STRICT)
     with pytest.raises(RuntimeError, match="расходится"):
         policy_rule.policy_source()
-
-
-def test_policy_source_test_mode_without_policy_table_is_ssot(
-    monkeypatch, tmp_path
-) -> None:
-    """`test` без `[policy]` — сверять нечего: источник всё равно SSOT."""
-    _use_config(monkeypatch, tmp_path)
-    path = tmp_path / "darkfactory" / "config.toml"
-    text = path.read_text(encoding="utf-8")
-    path.write_text(re.sub(r"\[policy\]\n(.+\n){3}", "", text), encoding="utf-8")
-    assert "[policy]" not in path.read_text(encoding="utf-8")
-    assert policy_rule.policy_source() == SSOT
 
 
 def test_policy_source_config_failure_is_runtime_error(monkeypatch, tmp_path):

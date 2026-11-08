@@ -63,6 +63,36 @@ class _Forge:
         return POLICY_SHA
 
 
+def fixture_config_toml(root: Path) -> str:
+    """Strict-конфиг DarkFactory для `approve` (дизайн §5.1, как шаблон devtools).
+
+    Строкой здесь: генератор исполняется в venv discovery, где тесты devtools
+    не импортируются. Путь `root` кодируется как TOML-строка через JSON.
+    """
+    return (
+        'schema = "darkfactory-config/v1"\n'
+        'mode = "strict"\n'
+        "\n"
+        "[accounts]\n"
+        f'human = "{HUMAN}"\n'
+        'agent = "fixture-agent"\n'
+        'human_gh_config_dir = "~/.config/gh"\n'
+        'agent_gh_config_dir = "~/.config/review"\n'
+        "\n"
+        "[policy]\n"
+        f'repo = "{POLICY_REPO}"\n'
+        'ref = "main"\n'
+        'path = "policy/approvers.env"\n'
+        "\n"
+        "[workspace]\n"
+        f"root = {json.dumps(str(root))}\n"
+        "\n"
+        "[harness]\n"
+        'author = "claude"\n'
+        'model = "claude-opus-5"\n'
+    )
+
+
 def main() -> int:
     fixtures, pinned = Path(sys.argv[1]), sys.argv[2]
     head = subprocess.run(
@@ -79,6 +109,12 @@ def main() -> int:
         brief = Path(tmp) / BRIEF_PATH
         brief.parent.mkdir(parents=True)
         brief.write_text(draft, encoding="utf-8")
+        config_home = Path(tmp) / "xdg"
+        (config_home / "darkfactory").mkdir(parents=True)
+        (config_home / "darkfactory" / "config.toml").write_text(
+            fixture_config_toml(Path(tmp)), encoding="utf-8"
+        )
+        os.environ["XDG_CONFIG_HOME"] = str(config_home)
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = cli.main(

@@ -7,8 +7,12 @@
 
 Методы — миксин `BriefFactsMixin` к `RealOps` и к узкому проверяльщику
 brief-PR `brief_merge_check` (его исполняет `human-merge.sh`): модуль
-самодостаточен — только `subprocess` (`gh`) и `facts`, без `ops.py`.
-Поэтому он под authority-root и харнесс-гвардом (ревью #573).
+самодостаточен — только `subprocess` (`gh`), `facts` и `policy_rule`, без
+`ops.py`. Поэтому он под authority-root и харнесс-гвардом (ревью #573).
+
+Синтетическая политика `mode = "test"` (план 3a) — шов здесь, в одном месте
+для RealOps и проверяльщика: на координаты `policy_rule.TEST_POLICY_SOURCE`
+факты политики отвечают из конфига (`synthetic_*`), не вызывая `gh`.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any
 
+from governance import policy_rule
 from governance.facts import Fact, Outcome, unavailable
 
 PR_STATES = ("OPEN", "CLOSED", "MERGED")
@@ -112,6 +117,70 @@ _REPO_FILE_QUERY = (
 )
 
 
+def _test_policy(ref: str, path: str) -> policy_rule.TestPolicy | Fact | None:
+    """Текущая синтетическая политика для `ref`/`path` координат test.
+
+    None — ref/path не те или режим не test (политики нет); Fact —
+    конфиг не читается (UNAVAILABLE: поправьте конфиг и повторите)."""
+    _, test_ref, test_path = policy_rule.TEST_POLICY_SOURCE
+    if (ref, path) != (test_ref, test_path):
+        return None
+    try:
+        return policy_rule.test_policy()
+    except RuntimeError as exc:
+        return unavailable(f"синтетическая политика test: {exc}")
+
+
+def _is_test_repo(repo_slug: str) -> bool:
+    return repo_slug == policy_rule.TEST_POLICY_SOURCE[0]
+
+
+_NO_TEST_POLICY = "синтетической политики test нет (режим не test)"
+
+
+def synthetic_version_fact(repo_slug: str, ref: str, path: str) -> Fact[str] | None:
+    """Версия синтетической политики; None — координаты не test (иди в gh)."""
+    if not _is_test_repo(repo_slug):
+        return None
+    policy = _test_policy(ref, path)
+    if isinstance(policy, Fact):
+        return policy
+    if policy is None:
+        return Fact(Outcome.ABSENT, None, _NO_TEST_POLICY)
+    return Fact(Outcome.FOUND, policy.sha, f"синтетическая политика test {policy.sha}")
+
+
+def synthetic_version_at_fact(
+    repo_slug: str, ref: str, path: str, sha: str
+) -> Fact[bool] | None:
+    """`sha` — версия синтетической политики, только если он текущий (истории
+    нет); None — координаты не test."""
+    if not _is_test_repo(repo_slug):
+        return None
+    policy = _test_policy(ref, path)
+    if isinstance(policy, Fact):
+        return policy
+    current = policy is not None and policy.sha == sha
+    return Fact(
+        Outcome.FOUND,
+        current,
+        f"{sha} {'—' if current else 'не'} текущая синтетическая политика test",
+    )
+
+
+def synthetic_file_fact(repo_slug: str, sha: str, path: str) -> Fact[str] | None:
+    """Состав синтетической политики версии `sha`; иная версия — ABSENT;
+    None — координаты не test."""
+    if not _is_test_repo(repo_slug):
+        return None
+    policy = _test_policy(policy_rule.TEST_POLICY_SOURCE[1], path)
+    if isinstance(policy, Fact):
+        return policy
+    if policy is None or policy.sha != sha:
+        return Fact(Outcome.ABSENT, None, f"синтетической политики test {sha} нет")
+    return Fact(Outcome.FOUND, policy.content, f"синтетическая политика test {sha}")
+
+
 def _only_not_found(payload: dict, at: tuple[str, ...]) -> bool:
     """Все ошибки ответа — `NOT_FOUND` ровно по `at`, а значение там — null."""
     errors = payload.get("errors")
@@ -177,6 +246,9 @@ class BriefFactsMixin:
         никогда не было (ABSENT); коммит удаления файла история включает —
         отсутствие тогда ловит `repo_file_fact`. Любая иная форма — UNAVAILABLE.
         """
+        synthetic = synthetic_version_fact(repo_slug, branch, path)
+        if synthetic is not None:
+            return synthetic
         owner, name = repo_slug.split("/", 1)
         repository = self._graphql_repository(
             _POLICY_VERSION_QUERY,
@@ -210,6 +282,9 @@ class BriefFactsMixin:
 
     def repo_file_fact(self, repo_slug: str, sha: str, path: str) -> Fact[str]:
         """Текст `path` в коммите `sha`: FOUND / ABSENT / UNAVAILABLE."""
+        synthetic = synthetic_file_fact(repo_slug, sha, path)
+        if synthetic is not None:
+            return synthetic
         owner, name = repo_slug.split("/", 1)
         repository = self._graphql_repository(
             _REPO_FILE_QUERY,
@@ -417,6 +492,9 @@ class BriefFactsMixin:
         «Менял `path`»: последний коммит, тронувший `path`, в истории от `sha`
         включительно — сам `sha`.
         """
+        synthetic = synthetic_version_at_fact(repo_slug, ref, path, sha)
+        if synthetic is not None:
+            return synthetic
         out = _gh(
             ["api", f"repos/{repo_slug}/compare/{sha}...{ref}", "--jq", ".status"]
         )

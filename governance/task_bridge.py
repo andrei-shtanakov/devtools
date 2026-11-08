@@ -32,6 +32,7 @@ from governance import (
     criteria_contract,
     decomposition_guard,
     design_guard,
+    df_config,
 )
 from governance.act_envelope import envelope_path
 from governance.approve_node import (
@@ -75,6 +76,7 @@ from governance.policy_sources import PREFLIGHT_PROCEDURE_HINT, target_profile_d
 from governance.run_state import (
     RunState,
     load,
+    mode_refusal,
     op_complete,
     op_start,
     run_dir,
@@ -5092,6 +5094,14 @@ def main(argv: list[str] | None = None) -> int:
             "--replace-revision: без перехода причину некуда записать"
         )
     state = load(args.run_id)
+    try:
+        refusal = mode_refusal(state)
+    except df_config.ConfigError as exc:
+        print(f"task_bridge: конфиг DarkFactory: {exc}")
+        return 2
+    if refusal is not None:
+        print(f"task_bridge: {refusal}")
+        return 2
     # Мост работает только над ВМЕРЖЕННЫМ и верифицированным бандлом
     # (приёмка PR #96, major): completed — единственный статус, в котором
     # S8 подтвердил бандл на дефолтной ветке. merged_unverified — мерж без

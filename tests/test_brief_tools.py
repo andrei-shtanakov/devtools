@@ -157,11 +157,15 @@ def runs_root(tmp_path, monkeypatch) -> Path:
 
 
 def _brief_ready_run(
-    tmp_path: Path, status: str = "brief_ready", text: str = DRAFT
+    tmp_path: Path,
+    status: str = "brief_ready",
+    text: str = DRAFT,
+    mode: str = "strict",
 ) -> None:
     target = tmp_path / "target"
     target.mkdir(exist_ok=True)
     state = rs.new_run(
+        mode=mode,
         subject="s",
         repo="alpha",
         repo_slug=REPO,
@@ -814,6 +818,28 @@ def test_check_merge_refusals(open_pr, spoil) -> None:  # T50 (каждый — 
         bmc.check_merge(REPO, 7, HEAD, open_pr)
 
 
+def test_check_merge_stale_pin_in_test_mode_names_approver_change(
+    open_pr, monkeypatch
+) -> None:
+    """test: устаревший пин — именованный отказ `TEST_APPROVER_CHANGED`
+    (тот же текст, что у brief_provenance), не общая формулировка."""
+    from governance import policy_rule
+
+    repo, ref, path = policy_rule.TEST_POLICY_SOURCE
+    monkeypatch.setattr(bmc.policy_rule, "policy_source", lambda: (repo, ref, path))
+    open_pr.files[(HEAD, f"{DIR}/{ar.FILE_NAME}")] = ar.render(
+        request(policy_repo=repo, policy_ref=ref, policy_path=path)
+    )
+    monkeypatch.setattr(
+        open_pr,
+        "policy_version_fact",
+        lambda *_: Fact(Outcome.FOUND, C1, "test"),
+    )
+    with pytest.raises(bmc.MergeRefused) as exc:
+        bmc.check_merge(REPO, 7, HEAD, open_pr)
+    assert str(exc.value) == policy_rule.TEST_APPROVER_CHANGED
+
+
 @pytest.mark.parametrize(("case", "mutate", "_m"), DEFECTS, ids=[d[0] for d in DEFECTS])
 def test_check_merge_ambiguous_request(open_pr, case, mutate, _m) -> None:  # T21b
     open_pr.files[(HEAD, f"{DIR}/{ar.FILE_NAME}")] = mutate(ar.render(request()))
@@ -940,3 +966,139 @@ def test_unreadable_label_after_create_failure_keeps_original_diagnosis(
     assert exc.value.retry
     assert "PR не создан (HTTP 502)" in str(exc.value)
     assert "ветка уже на форджe" in str(exc.value)
+
+
+# --- Режим конфига ≠ режиму прогона (plan 3a, Task 2) ---------------------
+
+
+def _mismatch_world(tmp_path, runs_root, monkeypatch) -> tuple[ToolOps, bytes]:
+    _brief_ready_run(tmp_path)
+    state = rs.load(RUN_ID)
+    state.mode = "test"  # конфиг (conftest) — strict
+    rs.save(state)
+    ops = _ops(monkeypatch, with_pr=True)
+    return ops, (rs.run_dir(RUN_ID) / "run.json").read_bytes()
+
+
+@pytest.mark.parametrize("command", ["propose", "approve"])
+def test_brief_tools_refuse_mode_mismatch(
+    tmp_path, runs_root, monkeypatch, command
+) -> None:
+    ops, before = _mismatch_world(tmp_path, runs_root, monkeypatch)
+
+    with pytest.raises(rs.ModeMismatchError, match="режим конфига strict ≠"):
+        if command == "propose":
+            bt.propose(RUN_ID, ops)
+        else:
+            bt.approve(RUN_ID, 1, ops)
+
+    assert (rs.run_dir(RUN_ID) / "run.json").read_bytes() == before
+    assert not _signed_path().exists()
+    assert ops.calls == []
+
+
+def test_brief_tools_main_maps_mode_mismatch_to_2(
+    tmp_path, runs_root, monkeypatch, capsys
+) -> None:
+    ops, _ = _mismatch_world(tmp_path, runs_root, monkeypatch)
+    monkeypatch.setattr("governance.ops.RealOps", lambda: ops)
+
+    assert bt.main(["propose", "--run", RUN_ID]) == 2
+    assert "режим конфига strict ≠ режиму прогона test" in capsys.readouterr().err
+
+
+# --- синтетическая политика test (план 3a, Task 3) ---
+
+from governance import brief_provenance as bp  # noqa: E402
+from governance import policy_rule  # noqa: E402
+from tests.df_config_fixture import write_config  # noqa: E402
+from tests.forge_fake import MERGED_AT  # noqa: E402
+
+_ALICE_SIGNED = SIGNED.replace("approver: andrei-shtanakov", "approver: alice")
+
+
+def _test_mode(monkeypatch, tmp_path: Path, human: str) -> None:
+    env = write_config(tmp_path / "xdg", human=human, agent="alice")
+    monkeypatch.setenv("XDG_CONFIG_HOME", env["XDG_CONFIG_HOME"])
+
+
+@pytest.fixture()
+def test_mode_proposed(tmp_path, runs_root, monkeypatch) -> ToolOps:
+    """test, `human = agent = alice`: `propose` создал brief-PR #42."""
+    _test_mode(monkeypatch, tmp_path, "alice")
+    _brief_ready_run(tmp_path, mode="test")
+    ops = _ops(monkeypatch)
+    assert bt.propose(RUN_ID, ops) == 42
+    return ops
+
+
+def _merge(ops: ToolOps, by: str) -> None:
+    ops.prs[42] = replace(
+        ops.prs[42],
+        state="MERGED",
+        merged_by=by,
+        merged_at=MERGED_AT,
+        merge_commit=HEAD,
+    )
+
+
+def test_test_mode_propose_pins_synthetic_policy(test_mode_proposed) -> None:
+    policy = policy_rule.test_policy()
+    assert policy is not None
+    written = ar.parse(test_mode_proposed.files[(HEAD, f"{DIR}/{ar.FILE_NAME}")])
+    coords = (written.policy_repo, written.policy_ref, written.policy_path)
+    assert coords == policy_rule.TEST_POLICY_SOURCE
+    assert written.policy_sha == policy.sha
+
+
+def test_test_mode_merge_by_human_approves(test_mode_proposed) -> None:
+    ops = test_mode_proposed
+    _merge(ops, "alice")
+    act = bp.read_act(ops, REPO, 42)
+    assert isinstance(act, bp.Act), act
+    assert isinstance(bp.check_policy(ops, act), bp.PolicyOk)
+    ops.approve_reply = (0, _ALICE_SIGNED, "")
+    assert bt.approve(RUN_ID, 42, ops) == _signed_path()
+
+
+def test_test_mode_merge_by_other_refuses(test_mode_proposed) -> None:
+    ops = test_mode_proposed
+    _merge(ops, "bob")
+    act = bp.read_act(ops, REPO, 42)
+    assert isinstance(act, bp.Refusal)
+    assert act.reason == "merger_not_in_act_policy"
+    with pytest.raises(bt.BriefToolError, match="bob"):
+        bt.approve(RUN_ID, 42, ops)
+    assert ops.approve_calls == 0
+
+
+def test_test_mode_approver_changed_after_propose(
+    test_mode_proposed, tmp_path, monkeypatch
+) -> None:
+    """Review Focus 4: сменили `accounts.human` после propose — названный отказ."""
+    ops = test_mode_proposed
+    _test_mode(monkeypatch, tmp_path, "carol")
+    _merge(ops, "alice")
+    act = bp.read_act(ops, REPO, 42)
+    assert isinstance(act, bp.Refusal)
+    assert act.reason == "test_approver_changed" and not act.retry
+    assert act.detail == policy_rule.TEST_APPROVER_CHANGED
+    assert policy_rule.TEST_APPROVER_CHANGED == (
+        "утверждающий в конфиге сменился после предложения брифа — сделайте "
+        "новое предложение (brief-propose), при необходимости новый прогон"
+    )
+    with pytest.raises(bt.BriefToolError) as exc:
+        bt.approve(RUN_ID, 42, ops)
+    assert str(exc.value) == policy_rule.TEST_APPROVER_CHANGED
+    assert ops.approve_calls == 0
+
+
+def test_test_mode_approver_changed_pin_check(
+    test_mode_proposed, tmp_path, monkeypatch
+) -> None:
+    """Проверка пина найденного предложения — тот же названный отказ."""
+    ops = test_mode_proposed
+    _test_mode(monkeypatch, tmp_path, "carol")
+    with pytest.raises(bt.BriefToolError) as exc:
+        bt.propose(RUN_ID, ops)
+    assert str(exc.value) == policy_rule.TEST_APPROVER_CHANGED

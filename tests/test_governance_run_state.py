@@ -18,6 +18,7 @@ def runs_root(tmp_path: Path, monkeypatch):
 
 def _mk(runs_root) -> rs.RunState:
     s = rs.new_run(
+        mode="strict",
         subject="тестовый функционал",
         repo="alpha",
         repo_slug="owner/alpha",
@@ -47,6 +48,7 @@ def test_roundtrip_brief_descriptor_without_machine_paths(runs_root) -> None:
         "source_blobs": {"discovery-brief": "a" * 40},
     }
     state = rs.new_run(
+        mode="strict",
         subject="brief input",
         repo="alpha",
         repo_slug="owner/alpha",
@@ -101,6 +103,7 @@ def test_atomic_no_partial_file(runs_root) -> None:
 def test_run_override_only_tightens(runs_root) -> None:
     with pytest.raises(ValueError):
         rs.new_run(
+            mode="strict",
             subject="s",
             repo="a",
             repo_slug="o/a",
@@ -142,6 +145,7 @@ def test_validate_id_component_accepts_and_rejects(runs_root) -> None:
 
 def test_new_run_carries_interview_state_and_old_ledgers_load(runs_root) -> None:
     st = rs.new_run(
+        mode="strict",
         subject="s",
         repo="alpha",
         repo_slug="o/alpha",
@@ -164,6 +168,7 @@ def test_new_run_carries_interview_state_and_old_ledgers_load(runs_root) -> None
 
 def test_run_state_defaults_to_legacy_authoring(tmp_path: Path, runs_root) -> None:
     state = rs.new_run(
+        mode="strict",
         subject="s",
         repo="r",
         repo_slug="o/r",
@@ -180,6 +185,7 @@ def test_run_state_defaults_to_legacy_authoring(tmp_path: Path, runs_root) -> No
 
 def test_waves_authoring_is_persisted(tmp_path: Path, runs_root) -> None:
     state = rs.new_run(
+        mode="strict",
         subject="s",
         repo="r",
         repo_slug="o/r",
@@ -198,3 +204,20 @@ def test_waves_authoring_is_persisted(tmp_path: Path, runs_root) -> None:
 def test_unknown_authoring_is_refused() -> None:
     with pytest.raises(ValueError, match="authoring"):
         rs.validate_authoring("chunks")
+
+
+def test_run_json_without_mode_loads_strict(runs_root) -> None:
+    state = _mk(runs_root)
+    path = rs.run_dir(state.run_id) / "run.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload.pop("mode")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert rs.load(state.run_id).mode == "strict"
+
+
+def test_validate_mode_rejects_unknown() -> None:
+    rs.validate_mode("strict")
+    rs.validate_mode("test")
+    with pytest.raises(ValueError, match="mode="):
+        rs.validate_mode("lax")

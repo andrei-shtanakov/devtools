@@ -140,6 +140,7 @@ def _state(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
     state = rs.new_run(
+        mode="strict",
         subject="s",
         repo="r",
         repo_slug="o/r",

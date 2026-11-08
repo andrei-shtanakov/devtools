@@ -662,6 +662,7 @@ def recover_wave_run_from_github(
         merge_authority="human",
         author_backend=author_backend,
         authoring="waves",
+        mode=df_config.load().mode,
     )
     state.wave = last_step + 1
     state.base_ref = base_ref
@@ -986,6 +987,7 @@ def _brief_ready(state: rs.RunState) -> int:
 
 def _dispatch(state: rs.RunState, ops, lock: run_lock.RunLock) -> int:
     """Действие по фактическому статусу найденного прогона."""
+    rs.require_mode(state)
     if state.status == "brief_ready":
         return _brief_ready(state)
     if state.status in WAVE_PAUSES:
@@ -1448,6 +1450,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     except df_config.ConfigError as exc:
         print(f"spec-loop: конфиг DarkFactory: {exc}")
+        return 2
+    except rs.ModeMismatchError as exc:
+        print(f"spec-loop: {exc}")
         return 2
     except run_lock.LockBusy as exc:
         print(f"spec-loop: {exc}")

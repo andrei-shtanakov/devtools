@@ -71,8 +71,8 @@ EXCLUDED_FILES: dict[str, list[tuple[str, str]]] = {
         (
             "andrei-shtanakov/approval-policy",
             (
-                "TODO plan 3 (darkfactory-config): данные фикстуры discovery "
-                "(HUMAN/POLICY_REPO); замена требует решения по дизайну"
+                "данные подписанной фикстуры (байты подписаны настоящим discovery "
+                "на пине), не учётки конвейера"
             ),
         ),
         ('HUMAN = "andrei-shtanakov"', "то же: данные фикстуры discovery"),

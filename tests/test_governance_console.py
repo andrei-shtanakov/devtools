@@ -53,7 +53,7 @@ def _mk(run_id: str, **overrides) -> rs.RunState:
         "run_id": run_id,
     }
     kwargs.update(overrides)
-    s = rs.new_run(**kwargs)
+    s = rs.new_run(**{"mode": "strict", **kwargs})
     rs.save(s)
     return s
 

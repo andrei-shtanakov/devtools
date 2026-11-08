@@ -110,7 +110,6 @@ EXISTING_ADDITIONS = {
     "act_decision": ("find_act", "merger_allowed"),
     "act_envelope": ("expected_envelope", "node_history"),
     "task_bridge": ("_admission_refusal", "_require_admission"),
-    "act_settings": ("config_home",),
     "approve_node": (
         "_legacy_outcome",
         "_legacy_verdict",
@@ -4832,7 +4831,6 @@ NOT_JUDGMENT = {
     "act_decision.find_act": "делегирует `_act` (часть A); `None` — нет акта, судит вызывающий",
     "act_decision.merger_allowed": "делегирует `_merger_ok` (часть A)",
     "act_envelope.expected_envelope": _BUILD,
-    "act_settings.config_home": "правило пути XDG; относительный путь — откат на дефолт, не отказ",
     "approve_node._review_debt": _BUILD,
     "approve_node._legacy_outcome": "вычисляет опубликованность снимка; делегирует `_legacy_verdict`",
     "runner._stop_on_refusal": "выбор стоп-статуса по уже вынесенному отказу `approve_node` (вынесено из `_finalize_wave`); не суждение",

@@ -12,6 +12,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from governance import approval_request as ar
+from governance import brief_facts
 from governance import discovery_approval as da
 from governance.brief_facts import BriefPrFacts, DefaultBranch, PrComment
 from governance.facts import Fact, Outcome, unavailable
@@ -77,7 +78,11 @@ class FakeForge:
             return unavailable("comments")
         return Fact(Outcome.FOUND, list(self.comments.get(pr, [])), "comments")
 
+    # Синтетическая политика test (план 3a) — тем же швом, что у RealOps.
     def repo_file_fact(self, repo_slug: str, sha: str, path: str) -> Fact[str]:
+        synthetic = brief_facts.synthetic_file_fact(repo_slug, sha, path)
+        if synthetic is not None:
+            return synthetic
         if self._down("file"):
             return unavailable("file")
         text = self.files.get((sha, path))
@@ -86,6 +91,9 @@ class FakeForge:
         return Fact(Outcome.FOUND, text, "file")
 
     def policy_version_fact(self, repo_slug: str, branch: str, path: str) -> Fact[str]:
+        synthetic = brief_facts.synthetic_version_fact(repo_slug, branch, path)
+        if synthetic is not None:
+            return synthetic
         if self._down("policy"):
             return unavailable("policy")
         return Fact(Outcome.FOUND, self.policy_head, "head")
@@ -93,6 +101,9 @@ class FakeForge:
     def policy_version_fact_at(
         self, repo_slug: str, ref: str, path: str, sha: str
     ) -> Fact[bool]:
+        synthetic = brief_facts.synthetic_version_at_fact(repo_slug, ref, path, sha)
+        if synthetic is not None:
+            return synthetic
         if self._down("history"):
             return unavailable("history")
         return Fact(Outcome.FOUND, self.policy_versions.get(sha, False), "history")

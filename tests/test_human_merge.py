@@ -60,6 +60,13 @@ exit "${UV_STUB_EXIT:-0}"
 """
 
 
+#: strict: профили gh — из перечня песочницы; человек — явным env.
+_STRICT_DIRS = {
+    "agent_gh_config_dir": Path("~/.config/review"),
+    "human_gh_config_dir": Path("~/.config/gh"),
+}
+
+
 class Fleet:
     def __init__(self, tmp_path: Path) -> None:
         self.fleet_root = tmp_path / "fleet"
@@ -71,6 +78,7 @@ class Fleet:
         self.human_profile = self.xdg / "gh-human"
         self.agent_profile = self.xdg / "gh-agent"
         write_config(self.xdg)
+        self.default_env: dict[str, str] = {}
         self.repo.mkdir(parents=True)
         subprocess.run(
             ["git", "init", "-q", "-b", "master", str(self.repo)],
@@ -98,6 +106,11 @@ class Fleet:
         uv.write_text(UV_STUB)
         uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
 
+    def strict(self) -> None:
+        """Режим strict: профили — из перечня песочницы, человек — явным env."""
+        write_config(self.xdg, mode="strict", **_STRICT_DIRS)
+        self.default_env = {"HUMAN_GH_CONFIG_DIR": str(self.human_profile)}
+
     def env(self, **extra: str) -> dict[str, str]:
         env = os.environ.copy()
         for key in ("GH_CONFIG_DIR", *ENV_OVERRIDES):
@@ -109,6 +122,7 @@ class Fleet:
             GH_STUB_LOG=str(self.gh_log),
             GH_STUB_DEFAULT_OID=HEAD_SHA,
         )
+        env.update(self.default_env)
         env.update(extra)
         return env
 
@@ -148,21 +162,13 @@ def test_merges_from_operator_profile_with_head_pin(fleet: Fleet) -> None:
     assert f"от {HUMAN}" in res.stdout
 
 
-def test_test_mode_config_policy_cannot_redirect_source(fleet: Fleet) -> None:
-    """test: `[policy]` конфига ≠ SSOT source.env — тоже отказ 2 до сети:
-    режим конфига доверие к источнику не выбирает."""
+def test_test_mode_config_policy_is_ignored(fleet: Fleet) -> None:
+    """test: `[policy]` ≠ SSOT не сверяется и не читается — мерж, без сети
+    политики."""
     write_config(fleet.xdg, policy_repo="o/p", policy_ref="rel", policy_path="x.env")
     res = fleet.run()
-    assert res.returncode == 2
-    assert "расходится с authority-root SSOT" in res.stderr
-    assert fleet.calls() == []
-
-
-#: strict: профили gh — из перечня песочницы; человек — явным env.
-_STRICT_DIRS = {
-    "agent_gh_config_dir": Path("~/.config/review"),
-    "human_gh_config_dir": Path("~/.config/gh"),
-}
+    assert res.returncode == 0, res.stderr
+    assert not [ln for ln in fleet.calls() if "api graphql" in ln]
 
 
 def test_strict_policy_from_authority_root_ssot(fleet: Fleet) -> None:
@@ -203,8 +209,11 @@ def test_no_config_file_skips_policy_cross_check(fleet: Fleet) -> None:
 
 
 def test_agent_profile_from_config_is_refused(fleet: Fleet) -> None:
-    """Профиль человека, совпавший с агентским из конфига, — отказ до сети."""
-    res = fleet.run(HUMAN_GH_CONFIG_DIR=str(fleet.agent_profile))
+    """strict: профиль человека, совпавший с агентским ИЗ КОНФИГА
+    (`accounts.agent_gh_config_dir`, env агента не задан), — отказ до сети."""
+    fleet.strict()
+    agent_dir = Path.home() / ".config" / "review"
+    res = fleet.run(HUMAN_GH_CONFIG_DIR=str(agent_dir))
     assert res.returncode == 2, res.stderr
     assert "агентский профиль" in res.stderr
     assert fleet.calls() == []
@@ -219,18 +228,15 @@ def test_no_config_exit2(fleet: Fleet, tmp_path: Path) -> None:
     assert fleet.calls() == []
 
 
-def test_test_mode_without_policy_table_uses_ssot(fleet: Fleet) -> None:
-    """test без `[policy]` — сверять нечего: координаты из SSOT source.env."""
+def test_test_mode_without_policy_table_reads_no_policy_repo(fleet: Fleet) -> None:
+    """test без `[policy]` — сверять нечего; репо политики не читается."""
     path = fleet.xdg / "darkfactory" / "config.toml"
     text = path.read_text(encoding="utf-8")
     head, _, tail = text.partition("[policy]")
     path.write_text(head + tail.split("\n\n", 1)[1], encoding="utf-8")
     res = fleet.run()
     assert res.returncode == 0, res.stderr
-    graphql = [ln for ln in fleet.calls() if "api graphql" in ln]
-    assert graphql and all(
-        "-F o=andrei-shtanakov -F n=approval-policy " in ln for ln in graphql
-    ), graphql
+    assert not [ln for ln in fleet.calls() if "api graphql" in ln]
 
 
 def test_explicit_human_profile_is_passed_through(fleet: Fleet, tmp_path: Path) -> None:
@@ -251,6 +257,7 @@ def test_agent_profile_named_explicitly_is_refused(
     fleet: Fleet, tmp_path: Path
 ) -> None:
     """Профиль агента человеческим актом быть не может — отказ до сети."""
+    fleet.strict()
     agent = tmp_path / "review"
     res = fleet.run(HUMAN_GH_CONFIG_DIR=str(agent), MERGE_GH_CONFIG_DIR=str(agent))
     assert res.returncode == 2, res.stderr
@@ -259,6 +266,7 @@ def test_agent_profile_named_explicitly_is_refused(
 
 
 def test_login_outside_policy_is_refused(fleet: Fleet) -> None:
+    fleet.strict()
     res = fleet.run(GH_STUB_POLICY_ACCOUNTS="someone-else")
     assert res.returncode == 3, res.stderr
     assert "approval-policy" in res.stderr
@@ -266,6 +274,7 @@ def test_login_outside_policy_is_refused(fleet: Fleet) -> None:
 
 
 def test_policy_list_is_comma_separated_with_spaces(fleet: Fleet) -> None:
+    fleet.strict()
     res = fleet.run(GH_STUB_POLICY_ACCOUNTS=f"someone, {HUMAN} ,other")
     assert res.returncode == 0, res.stderr
 
@@ -273,6 +282,7 @@ def test_policy_list_is_comma_separated_with_spaces(fleet: Fleet) -> None:
 def test_policy_changed_after_candidate_is_refused_before_merge(fleet: Fleet) -> None:
     """Смена версии политики после candidate не сжигает человеческий акт:
     отказ до мержа (спека approval-policy §4.5)."""
+    fleet.strict()
     res = fleet.run(GH_STUB_POLICY_SHA="b" * 40)
     assert res.returncode == 3, res.stderr
     assert "сменилась" in res.stderr
@@ -280,6 +290,7 @@ def test_policy_changed_after_candidate_is_refused_before_merge(fleet: Fleet) ->
 
 
 def test_body_without_policy_line_is_refused(fleet: Fleet) -> None:
+    fleet.strict()
     res = fleet.run(GH_STUB_BODY="без пина")
     assert res.returncode == 2, res.stderr
     assert "policy:" in res.stderr
@@ -288,6 +299,7 @@ def test_body_without_policy_line_is_refused(fleet: Fleet) -> None:
 def test_finalize_pr_without_pin_is_judged_by_current_version(fleet: Fleet) -> None:
     """Finalize-PR под «Мерж: человек» пина не несёт — и не обязан: логин
     судится по актуальной версии политики (major ревью PR #344)."""
+    fleet.strict()
     res = fleet.run(
         GH_STUB_HEADREF="spec/WS-T1-approve-1-0-1-final", GH_STUB_BODY="без пина"
     )
@@ -476,6 +488,7 @@ def test_candidate_and_other_prs_do_not_call_the_brief_check(
 def test_brief_pr_policy_moved_after_check_refuses(fleet: Fleet) -> None:  # B1
     """Пин, проверенный вместе с заявкой (UV_STUB_PIN), ≠ актуальной версии,
     прочитанной shell позже: мерж не выполняется."""
+    fleet.strict()
     res = fleet.run(GH_STUB_HEADREF="brief/WS-1", GH_STUB_POLICY_SHA="b" * 40)
     assert res.returncode == 3
     assert fleet.merge_calls() == []
@@ -483,6 +496,7 @@ def test_brief_pr_policy_moved_after_check_refuses(fleet: Fleet) -> None:  # B1
 
 
 def test_brief_pr_merger_is_authorized_by_the_checked_pin(fleet: Fleet) -> None:  # B1
+    fleet.strict()
     res = fleet.run(GH_STUB_HEADREF="brief/WS-1")
     assert res.returncode == 0, res.stderr
     reads = [c for c in fleet.calls() if "api graphql" in c and "s=" in c]
@@ -517,3 +531,74 @@ def test_dangling_config_symlink_fails_closed(fleet: Fleet) -> None:
     assert res.returncode != 0, res.stderr
     assert "config.toml" in res.stderr, res.stderr
     assert fleet.calls() == []
+
+
+# --- test: одна учётка (approver = accounts.human), репо политики не читается ---
+
+
+def _one_account(fleet: Fleet, *, mode: str = "test") -> None:
+    """Обе роли — одна учётка и один профиль gh."""
+    write_config(
+        fleet.xdg,
+        mode=mode,
+        human="alice",
+        agent="alice",
+        human_gh_config_dir=fleet.human_profile,
+        agent_gh_config_dir=fleet.human_profile,
+    )
+
+
+def _no_policy_read(fleet: Fleet) -> bool:
+    return not any("api graphql" in c for c in fleet.calls())
+
+
+def test_test_mode_one_profile_merges_as_accounts_human(fleet: Fleet) -> None:
+    _one_account(fleet)
+    res = fleet.run(GH_STUB_LOGIN="alice")
+    assert res.returncode == 0, res.stderr
+    assert len(fleet.merge_calls()) == 1 and "от alice" in res.stdout
+    assert _no_policy_read(fleet)
+
+
+def test_test_mode_foreign_login_is_refused(fleet: Fleet) -> None:
+    _one_account(fleet)
+    res = fleet.run(GH_STUB_LOGIN="bob")
+    assert res.returncode == 3
+    assert "не accounts.human" in res.stderr
+    assert fleet.merge_calls() == [] and _no_policy_read(fleet)
+
+
+def test_strict_same_profile_is_still_refused(fleet: Fleet) -> None:
+    fleet.strict()
+    same = str(fleet.human_profile)
+    res = fleet.run(MERGE_GH_CONFIG_DIR=same, GH_STUB_LOGIN="alice")
+    assert res.returncode == 2
+    assert "агентский профиль" in res.stderr
+    assert fleet.calls() == []
+
+
+@pytest.mark.parametrize("mode", ["test", "strict"])
+def test_authorized_approver_env_is_refused_in_both_modes(
+    fleet: Fleet, mode: str
+) -> None:
+    if mode == "strict":
+        fleet.strict()
+    else:
+        _one_account(fleet)
+    res = fleet.run(
+        AUTHORIZED_APPROVER_ACCOUNTS="alice",
+        HUMAN_GH_CONFIG_DIR=str(fleet.human_profile),
+    )
+    assert res.returncode == 3
+    assert "AUTHORIZED_APPROVER_ACCOUNTS выставлена" in res.stderr
+    assert fleet.merge_calls() == []
+
+
+def test_test_mode_brief_pr_runs_checker_without_policy_read(fleet: Fleet) -> None:
+    _one_account(fleet)
+    res = fleet.run(
+        GH_STUB_LOGIN="alice", GH_STUB_HEADREF="brief/WS-1", GH_STUB_BODY=""
+    )
+    assert res.returncode == 0, res.stderr
+    assert len(_uv_calls(fleet)) == 1
+    assert fleet.merge_calls() and _no_policy_read(fleet)

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from governance import df_config, sandbox, secret_dirs
+from governance import act_settings, df_config, sandbox, secret_dirs
 from governance.df_config import ConfigError
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -287,8 +287,8 @@ def test_strict_same_login_for_both_accounts_refused(tmp_path: Path) -> None:
     assert cfg.accounts.agent == cfg.accounts.human == "same-login"
 
 
-def test_secret_dirs_single_source() -> None:
-    """Один перечень: песочница и загрузчик держат тот же объект."""
+def test_strict_gh_dirs_match_sandbox() -> None:
+    """Перечень strict в загрузчике равен перечню, закрытому песочницей."""
     assert secret_dirs.SECRET_DIRS == (
         ".config/review",
         ".config/gh",
@@ -296,21 +296,26 @@ def test_secret_dirs_single_source() -> None:
         ".ssh",
     )
     assert sandbox.SECRET_DIRS is secret_dirs.SECRET_DIRS
-    assert df_config.SECRET_DIRS is secret_dirs.SECRET_DIRS
+    assert df_config.STRICT_GH_DIRS == secret_dirs.SECRET_DIRS
+
+
+def test_act_settings_config_home_is_df_config() -> None:
+    assert act_settings.config_home is df_config.config_home
 
 
 def test_no_owner_fallback() -> None:
     text = (ROOT / "governance" / "df_config.py").read_text(encoding="utf-8")
+    # Каталог профиля gh в перечне strict — путь, а не учётка.
+    text = text.replace(".config/ai-prosto", "")
     assert "ai-prosto" not in text
     assert "andrei-shtanakov" not in text
 
 
-def test_module_imports_only_stdlib_and_allowed() -> None:
-    """Импорты загрузчика: stdlib, `act_settings`, `secret_dirs` — без sandbox/ops."""
+def test_df_config_imports_stdlib_only() -> None:
+    """Загрузчик вендорится дословно: ни одного импорта `governance.*`."""
     import ast
 
     tree = ast.parse((ROOT / "governance" / "df_config.py").read_text("utf-8"))
-    allowed = {"governance.act_settings", "governance.secret_dirs"}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             mods = [a.name for a in node.names]
@@ -320,11 +325,7 @@ def test_module_imports_only_stdlib_and_allowed() -> None:
             continue
         for mod in mods:
             top = mod.split(".")[0]
-            assert (
-                top in sys.stdlib_module_names
-                or top == "__future__"
-                or (mod in allowed)
-            ), mod
+            assert top in sys.stdlib_module_names or top == "__future__", mod
 
 
 def test_import_without_config(tmp_path: Path) -> None:
@@ -365,8 +366,8 @@ def test_get_value(tmp_path: Path, key: str, expected: str) -> None:
 
 
 def test_get_value_unknown_key(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError, match="harness.author"):
-        df_config.get_value(_load_text(tmp_path, STRICT), "harness.author")
+    with pytest.raises(ConfigError, match="harness.nope"):
+        df_config.get_value(_load_text(tmp_path, STRICT), "harness.nope")
 
 
 def test_get_value_policy_absent_in_test(tmp_path: Path) -> None:
@@ -439,3 +440,63 @@ def test_df_cfg_sh_without_script_dir(tmp_path: Path) -> None:
     )
     assert done.returncode == 2 and done.stdout == ""
     assert "script_dir" in done.stderr
+
+
+def test_get_harness_keys(tmp_path: Path) -> None:
+    env = _write(tmp_path, STRICT)
+    assert _cli(env, "get", "harness.author").stdout == "claude\n"
+    assert _cli(env, "get", "harness.model").stdout == "claude-opus-5\n"
+
+
+def test_cli_get_mode_from_foreign_cwd(tmp_path: Path) -> None:
+    env = _write(tmp_path, STRICT)
+    done = _cli(env, "get", "mode")
+    assert (done.returncode, done.stdout) == (0, "strict\n"), done.stderr
+
+
+def test_banner_none_in_strict(tmp_path: Path) -> None:
+    assert df_config.test_banner(_load_text(tmp_path, STRICT)) is None
+
+
+def test_banner_lists_relaxations_in_test(tmp_path: Path) -> None:
+    cfg = _load_text(tmp_path, STRICT.replace('mode = "strict"', 'mode = "test"'))
+    assert df_config.TEST_RELAXATIONS == (
+        "репо политики утверждения не используется: утверждающий — accounts.human",
+    )
+    assert df_config.test_banner(cfg) == (
+        "режим test: выключено — " + "; ".join(df_config.TEST_RELAXATIONS)
+    )
+
+
+BAD_LOGINS = [
+    "alice,bob",
+    "alice bob",
+    " alice",
+    "",
+    "-alice",
+    "alice-",
+    "a--b",
+    "a" * 40,
+]
+
+
+@pytest.mark.parametrize("mode", ["strict", "test"])
+@pytest.mark.parametrize("key", ["human", "agent"])
+@pytest.mark.parametrize("login", BAD_LOGINS)
+def test_login_must_be_single_github_login(
+    tmp_path: Path, mode: str, key: str, login: str
+) -> None:
+    other = {"human": "agent", "agent": "human"}[key]
+    text = STRICT.replace('mode = "strict"', f'mode = "{mode}"')
+    text = re.sub(rf'^{key} = ".*"$', f'{key} = "{login}"', text, flags=re.MULTILINE)
+    text = re.sub(rf'^{other} = ".*"$', f'{other} = "bob"', text, flags=re.MULTILINE)
+    assert f"accounts.{key}" in _refused(tmp_path, text)
+
+
+@pytest.mark.parametrize("mode", ["strict", "test"])
+@pytest.mark.parametrize("login", ["ai-prosto", "andrei-shtanakov", "a1-b2", "a" * 39])
+def test_valid_logins_pass(tmp_path: Path, mode: str, login: str) -> None:
+    text = STRICT.replace('mode = "strict"', f'mode = "{mode}"')
+    text = re.sub(r'^human = ".*"$', f'human = "{login}"', text, flags=re.MULTILINE)
+    text = re.sub(r'^agent = ".*"$', 'agent = "bob"', text, flags=re.MULTILINE)
+    assert _load_text(tmp_path, text).accounts.human == login
