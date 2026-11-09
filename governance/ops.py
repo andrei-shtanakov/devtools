@@ -291,6 +291,10 @@ class Ops(Protocol):
 
     def close_pr(self, repo_slug: str, pr: int, comment: str) -> bool: ...
 
+    def mark_ready(self, repo_slug: str, pr: int) -> bool: ...
+
+    def spec_runner(self, target_dir: str, args: list[str]) -> int: ...
+
     def remote_branch_head_fact(self, repo_slug: str, branch: str) -> Fact[str]: ...
 
     def local_branch_head_fact(self, target_dir: str, branch: str) -> Fact[str]: ...
@@ -2170,6 +2174,22 @@ class RealOps(BriefFactsMixin):
         ]
         return subprocess.run(
             argv, cwd=DEVTOOLS_ROOT, check=False, **_env_kwargs(extra)
+        ).returncode
+
+    def mark_ready(self, repo_slug: str, pr: int) -> bool:
+        """`gh pr ready` (draft → ready); `True` при коде 0."""
+        done = subprocess.run(
+            ["gh", "pr", "ready", str(pr), "-R", repo_slug],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return done.returncode == 0
+
+    def spec_runner(self, target_dir: str, args: list[str]) -> int:
+        """`spec-runner <args>` в `target_dir`; код возврата как есть."""
+        return subprocess.run(
+            ["spec-runner", *args], cwd=target_dir, check=False
         ).returncode
 
     def comment(self, repo_slug: str, pr: int, body: str) -> None:

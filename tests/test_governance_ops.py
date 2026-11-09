@@ -2856,3 +2856,22 @@ def test_merge_inside_root_has_no_env_override(monkeypatch, tmp_path):
     RealOps().merge("proj", 3, "abc", target_dir=str(ws / "proj"))
 
     assert "env" not in calls[0].kwargs
+
+
+def test_mark_ready_argv(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=0)
+    assert RealOps().mark_ready("o/r", 7) is True
+    assert calls[0].argv == ["gh", "pr", "ready", "7", "-R", "o/r"]
+
+
+def test_mark_ready_false_on_nonzero(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=1)
+    assert RealOps().mark_ready("o/r", 7) is False
+
+
+def test_spec_runner_argv_and_cwd(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=3)
+    rc = RealOps().spec_runner("/t", ["spec", "approve", "tasks"])
+    assert rc == 3
+    assert calls[0].argv == ["spec-runner", "spec", "approve", "tasks"]
+    assert calls[0].kwargs["cwd"] == "/t"
