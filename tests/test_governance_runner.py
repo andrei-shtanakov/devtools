@@ -11095,3 +11095,91 @@ def test_banner_printed_on_start_and_resume_in_test(
     ops.discovery = [("status", _reply(20))]
     locked_runner.resume("r-ban", ops)
     assert ("режим test:" in capsys.readouterr().err) is shown
+
+
+# --- План 3c-2, Task 1: вердикты в журнале прогона -------------------------
+
+WAVE_HEAD = "c0ffee" * 6 + "abcd"
+FINALIZE_HEAD = "e" * 40
+
+
+def test_test_mode_candidate_records_edge_verdict_with_head(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    _set_cfg_mode("test")
+    ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
+    _fake_wave_adapters(monkeypatch, ops)
+    record = {
+        "verdict": "PASS",
+        "subject": [{"path": "00-charter.md", "sha256": "s1"}],
+        "bases": [],
+    }
+    monkeypatch.setattr(
+        runner.edge_coordinator,
+        "load_level_records",
+        lambda run_dir, wave: {("charter", "brief"): record},
+    )
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-3c2-edge", ops))
+    assert state.mode == "test" and state.status == "waiting_human_merge"
+    assert rs.load("r-3c2-edge").ops["candidate-1"]["edge_verdict"] == {
+        "head": WAVE_HEAD,
+        "verdict": "PASS",
+        "inputs": {"charter--brief": ["s1"]},
+    }
+
+
+def test_test_mode_edge_fail_stops_review_without_candidate(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    _set_cfg_mode("test")
+    ops = FakeOps(
+        facts={"state": "OPEN", "baseRefName": "master"},
+        edge_results={"charter": "FAIL"},
+    )
+    journal = _fake_wave_adapters(monkeypatch, ops)
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-3c2-fail", ops))
+    assert state.status == "stopped_review"
+    assert "candidate-1" not in state.ops and journal == []
+    assert not any(c[0] == "publish_review" for c in ops.calls)
+
+
+def test_test_mode_finalize_records_head_and_resume_reuses_it(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    _set_cfg_mode("test")
+    ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
+    _waiting_wave1(tmp_path, monkeypatch, ops, "r-3c2-fin")
+    # Второй approve-node (агентский мерж) не довёл — пауза после аттестации.
+    calls = _fake_approve_node(monkeypatch, ops, merge_on_call=3)
+    ops.facts = {
+        "state": "MERGED",
+        "baseRefName": "master",
+        "headRefOid": FINALIZE_HEAD,
+    }
+    paused = locked_runner.resume("r-3c2-fin", ops)
+    assert paused.status == "waiting_human_merge" and paused.wave == 1
+    assert paused.ops["finalize-1"] == {
+        "status": "completed",
+        "finalize_pr": 801,
+        "review_exit": 0,
+        "head": FINALIZE_HEAD,
+    }
+    resumed = locked_runner.resume("r-3c2-fin", ops)
+    assert calls == ["charter", "charter", "charter"]
+    assert len([c for c in ops.calls if c[0] == "review"]) == 1, "без повтора"
+    assert resumed.wave == 2
+
+
+def test_test_mode_finalize_unreadable_head_stops_without_review(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    _set_cfg_mode("test")
+    ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
+    _waiting_wave1(tmp_path, monkeypatch, ops, "r-3c2-nohead")
+    _fake_approve_node(monkeypatch, ops)
+    ops.facts = {"state": "MERGED", "baseRefName": "master"}
+    stopped = locked_runner.resume("r-3c2-nohead", ops)
+    assert stopped.status == "stopped_review"
+    assert not any(c[0] == "review" for c in ops.calls)
+    reason = (rs.run_dir("r-3c2-nohead") / "stop-reason.txt").read_text()
+    assert "#801" in reason and "голова" in reason

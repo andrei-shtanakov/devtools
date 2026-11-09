@@ -1207,6 +1207,35 @@ def _stop_on_refusal(
         )
 
 
+def _finalize_head(state: RunState, ops: Ops, pr: int) -> dict[str, str] | None:
+    """Голова finalize-PR для записи аттестации (`test`); `None` — стоп.
+
+    В `test` аттестация — `COMMENTED`-обзор той же учётки, и мерж (Task 2)
+    принимает её только на записанной голове. Голова читается ДО
+    `ops.review`: сдвиг между чтением и ревью даёт расхождение с текущей
+    головой — отказ, а не ложный успех. `strict` — без записи и без вызова
+    форджи (`{}`).
+    """
+    if state.mode != "test":
+        return {}
+    try:
+        head = an.pr_head(state, ops, pr)
+    except RuntimeError as exc:
+        head, detail = None, f" — {exc}"
+    else:
+        detail = ""
+    if head is not None:
+        return {"head": head}
+    _stop_with_comment(
+        state,
+        ops,
+        "stopped_review",
+        f"волна {state.wave}: голова finalize-PR #{pr} не установлена{detail} "
+        "— аттестация не запрошена, повторите resume",
+    )
+    return None
+
+
 def _finalize_wave(
     state: RunState, ops: Ops, request: str, *, lock: rl.RunLock
 ) -> RunState:
@@ -1245,8 +1274,11 @@ def _finalize_wave(
         return state
     if op_status(state, att_key) != "completed":
         _ensure_started(state, att_key)
+        attested = _finalize_head(state, ops, finalize_pr)
+        if attested is None:
+            return state
         rc = ops.review(state.repo, finalize_pr)
-        op_complete(state, att_key, finalize_pr=finalize_pr, review_exit=rc)
+        op_complete(state, att_key, finalize_pr=finalize_pr, review_exit=rc, **attested)
         if rc != 0:
             _wave_pause(
                 state,
@@ -4028,6 +4060,7 @@ def _step_candidate(state: RunState, ops: Ops) -> bool:
         candidate_pr=pr,
         source_sha=state.ops[key].get("source_sha"),
         reapprove=bool(state.ops[key].get("reapprove", False)),
+        edge_verdict=edge_publish.edge_verdict(state.ops[request]["head_sha"], records),
     )
     head = (
         f"Волна {state.wave}/{bundle_dag.wave_count(_wave_dag())} прогона "
