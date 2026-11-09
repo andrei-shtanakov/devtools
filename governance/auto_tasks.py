@@ -10,13 +10,15 @@ write-ahead: повтор `make spec-loop` продолжает с места о
 
 from __future__ import annotations
 
+import subprocess
+
 from governance import accept_pr
 from governance import approve_node as an
 from governance import run_state as rs
 from governance import task_bridge as tb
 from governance.ops import Ops
 from governance.review_verdict import positive_on, record_review
-from governance.run_state import RunState, op_complete, op_start, op_status
+from governance.run_state import RunState, op_complete, op_start, op_status, save
 
 TASKS_SKIP_TEST = "утверждение задач человеком не требуется (test)"
 
@@ -61,10 +63,15 @@ def _read_facts(ops: Ops, state: RunState, pr: int) -> dict | None:
     except Exception as exc:  # noqa: BLE001 - любая ошибка форджи = стоп
         _stop(f"факты PR #{pr} не прочитаны: {exc}")
         return None
-    return facts if isinstance(facts, dict) else None
+    if not isinstance(facts, dict):
+        _stop(f"факты PR #{pr} не прочитаны: ответ форджи не объект")
+        return None
+    return facts
 
 
-def _checks_refusal(state: RunState, ops: Ops, pr: int, head: str, kind: str):
+def _checks_refusal(
+    state: RunState, ops: Ops, pr: int, head: str, kind: str
+) -> str | None:
     """Причина отказа ожидания проверок либо `None` (зелёные)."""
     try:
         refusal = an._await_required_checks(state, ops, pr, head, kind=kind)
@@ -95,6 +102,8 @@ def _merge_spec_pr(state: RunState, ops: Ops, key: str, pr: int, kind: str) -> b
         return True
     if pr_state == "CLOSED":
         return _stop(f"{kind} #{pr} закрыт без мержа — решите вручную")
+    if not head:
+        return _stop(f"{kind} #{pr}: голова PR (headRefOid) не установлена")
     # Write-ahead: отметка пропуска — до эффектов.
     op_start(state, key, pr=pr, head=head, tasks_skip=TASKS_SKIP_TEST)
     if facts.get("isDraft") and not ops.mark_ready(state.repo_slug, pr):
@@ -132,6 +141,11 @@ def _approve_tasks(state: RunState, ops: Ops) -> bool:
             return _stop(f"spec approve tasks вернул {rc}")
     try:
         approve_pr = tb.deliver_approve(state, ops)
+    except subprocess.CalledProcessError as exc:
+        return _stop(
+            f"доставка approve-PR: git вернул {exc.returncode} — штамп в "
+            "рабочем дереве сохранён, повторите"
+        )
     except RuntimeError as exc:
         return _stop(f"доставка approve-PR: {exc}")
     _complete(state, key, pr=approve_pr)
@@ -162,7 +176,13 @@ def _run_args(state: RunState) -> list[str]:
 
 
 def _spec_run(state: RunState, ops: Ops) -> int | None:
-    """`spec-runner run … --integration-pr`; номер нового PR либо `None` (стоп)."""
+    """`spec-runner run … --integration-pr`; номер нового PR либо `None` (стоп).
+
+    PR берётся только после НАБЛЮДЁННОГО кода 0. Возобновление начатой
+    операции (падение либо записанный ненулевой код) перезапускает раннер:
+    уже открытые `spec-runner/run-*` PR (частичные) уходят в `before` и
+    не принимаются.
+    """
     key = "spec-run"
     if not _mode_gate(state):
         return None
@@ -171,23 +191,18 @@ def _spec_run(state: RunState, ops: Ops) -> int | None:
     current = _open_run_prs(state, ops)
     if current is None:
         return None
-    if key in state.ops:
-        before = list(state.ops[key].get("before", []))
-    else:
-        before = current
-        op_start(state, key, before=before)
-    new = [n for n in current if n not in before]
-    rc = 0
-    # Возобновление: PR уже создан запуском до падения — не перезапускаем.
-    if not new:
-        rc = ops.spec_runner(state.target_dir, _run_args(state))
-        if rc != 0:
-            _stop(f"spec-runner run вернул {rc}")
-            return None
-        current = _open_run_prs(state, ops)
-        if current is None:
-            return None
-        new = [n for n in current if n not in before]
+    previous = state.ops.get(key)
+    before = current
+    if previous is not None:
+        before = sorted(set(previous.get("before", [])) | set(current))
+    op_start(state, key, before=before)
+    rc = ops.spec_runner(state.target_dir, _run_args(state))
+    if rc != 0:
+        return _record_run_failure(state, ops, key, rc, before)
+    after = _open_run_prs(state, ops)
+    if after is None:
+        return None
+    new = [n for n in after if n not in before]
     if len(new) != 1:
         _stop(
             f"spec-runner run: ожидался один новый integration-PR, "
@@ -198,6 +213,26 @@ def _spec_run(state: RunState, ops: Ops) -> int | None:
         return None
     _complete(state, key, pr=new[0], exit=rc)
     return new[0]
+
+
+def _record_run_failure(
+    state: RunState, ops: Ops, key: str, rc: int, before: list[int]
+) -> None:
+    """Ненулевой код `spec-runner run`: `exit`/`failed_prs` в запись, стоп."""
+    state.ops[key]["exit"] = rc
+    save(state)
+    after = _open_run_prs(state, ops)
+    if after is None:
+        return None
+    failed = [n for n in after if n not in before]
+    state.ops[key]["failed_prs"] = failed
+    save(state)
+    partial = ", ".join(f"#{n}" for n in failed) or "нет"
+    _stop(
+        f"spec-runner run вернул {rc}; частичные integration-PR: {partial} "
+        "— не принимаются; разберите и повторите (повтор перезапустит раннер)"
+    )
+    return None
 
 
 def _accept_code(state: RunState, ops: Ops, pr: int) -> int:

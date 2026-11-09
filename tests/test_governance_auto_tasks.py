@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from governance import auto_tasks
+from governance import auto_tasks, spec_loop
 from governance import run_state as rs
 from governance.auto_tasks import TASKS_SKIP_TEST, run_chain
 
@@ -324,24 +325,94 @@ def test_spec_run_no_new_pr_stop(state, capsys):
     assert "PR" in capsys.readouterr().out
 
 
+def _failing_run(ops: _ChainOps, rc: int, partial: int) -> None:
+    """spec-runner финализирует integration-PR и при упавшем прогоне."""
+    orig = ops.spec_runner
+    ops.run_pr = None
+
+    def run(target_dir, args):
+        orig(target_dir, args)
+        if args[0] == "run":
+            ops.prs.append(_run_pr(partial))
+            return rc
+        return 0
+
+    ops.spec_runner = run
+
+
 def test_spec_run_nonzero_exit_stop(state, capsys):
     ops = _ops()
-    ops.spec_rc = 2
+    ops.prs = [_run_pr(5)]
+    _failing_run(ops, 2, 7)
     assert auto_tasks._spec_run(state, ops) is None
-    assert "2" in capsys.readouterr().out
-    assert [c for c in ops.calls if c[0] == "prs"] == [
-        ("prs", "o/alpha", "spec-runner/run-")
-    ]
+    out = capsys.readouterr().out
+    assert out.startswith("spec-loop (test):")
+    assert "вернул 2" in out and "#7" in out
 
 
-def test_spec_run_resume_with_pr_does_not_rerun(state):
+def test_spec_run_nonzero_exit_keeps_op_started(state):
+    ops = _ops()
+    ops.prs = [_run_pr(5)]
+    _failing_run(ops, 2, 7)
+    auto_tasks._spec_run(state, ops)
+    assert rs.load(state.run_id).ops["spec-run"] == {
+        "status": "started",
+        "before": [5],
+        "exit": 2,
+        "failed_prs": [7],
+    }
+
+
+def test_spec_run_resume_reruns_and_ignores_old_pr(state):
+    rs.op_start(state, "spec-run", before=[5], exit=2, failed_prs=[7])
+    ops = _ops()
+    ops.prs = [_run_pr(5), _run_pr(7)]
+    assert auto_tasks._spec_run(state, ops) == 9
+    assert _run_calls(ops) == [("spec_runner", state.target_dir, RUN_ARGS)]
+    assert state.ops["spec-run"] == {
+        "status": "completed",
+        "before": [5, 7],
+        "pr": 9,
+        "exit": 0,
+    }
+
+
+def test_spec_run_resume_after_crash_does_not_take_pr(state):
+    """Падение контроллера: PR без наблюдённого кода 0 не принимается."""
     rs.op_start(state, "spec-run", before=[5])
     ops = _ops()
-    ops.prs = [_run_pr(5), _run_pr(9)]
+    ops.prs = [_run_pr(5), _run_pr(7)]
+    ops.run_pr = None
+    assert auto_tasks._spec_run(state, ops) is None
+    assert len(_run_calls(ops)) == 1
+    assert state.ops["spec-run"]["status"] == "started"
+    assert state.ops["spec-run"]["before"] == [5, 7]
+
+
+def test_spec_run_failed_resume_never_reaches_code_accept(state, bridge, capsys):
+    ops = _accepting_ops()
+    _failing_run(ops, 1, 7)
+    assert run_chain(state, ops, T) == 1
+    assert run_chain(state, ops, T) == 1
+    assert "code-accept" not in state.ops
+    assert _reviews(ops) == []
+    assert state.ops["spec-run"]["exit"] == 1
+    assert state.ops["spec-run"]["status"] == "started"
+
+
+def test_spec_run_write_ahead_before_runner(state):
+    ops = _ops()
+    ops.prs = [_run_pr(5)]
+    seen: list[dict] = []
+    orig = ops.spec_runner
+
+    def run(target_dir, args):
+        seen.append(rs.load(state.run_id).ops.get("spec-run"))
+        return orig(target_dir, args)
+
+    ops.spec_runner = run
     assert auto_tasks._spec_run(state, ops) == 9
-    assert _run_calls(ops) == []
-    assert state.ops["spec-run"]["status"] == "completed"
-    assert state.ops["spec-run"]["pr"] == 9
+    assert seen == [{"status": "started", "before": [5]}]
 
 
 def test_spec_run_completed_is_noop(state):
@@ -471,3 +542,85 @@ def test_code_accept_strict_makes_no_calls(state):
     ops = _accepting_ops()
     assert auto_tasks._accept_code(state, ops, 9) == 1
     assert ops.calls == []
+
+
+def _request_changes(head: str) -> str:
+    return f"t\n<!-- codex-terminal-review head={head} verdict=request-changes -->\n"
+
+
+def test_code_accept_request_changes_records_nothing_and_rereviews(state):
+    ops = _accepting_ops()
+    ops.latest_review_body = lambda slug, pr: _request_changes(H0)
+    assert auto_tasks._accept_code(state, ops, 9) == 1
+    rec = state.ops["code-accept"]
+    assert rec["status"] == "started"
+    assert "verdict" not in rec and "result" not in rec
+    again = _accepting_ops()
+    assert auto_tasks._accept_code(state, again, 9) == 0
+    assert len(_reviews(again)) == 1
+    assert state.ops["code-accept"]["status"] == "completed"
+
+
+def test_non_dict_facts_named_stop(state, bridge, capsys):
+    ops = _ops()
+    ops.facts[T] = ["not", "a", "dict"]
+    assert run_chain(state, ops, T) == 1
+    out = capsys.readouterr().out
+    assert out.startswith("spec-loop (test):") and f"#{T}" in out
+    assert ops.calls == []
+
+
+def test_empty_head_stops_before_checks_and_merge(state, bridge, monkeypatch, capsys):
+    def no_wait(*a, **k):
+        raise AssertionError("ожидание проверок без головы")
+
+    monkeypatch.setattr(auto_tasks.an, "_await_required_checks", no_wait)
+    ops = _ops()
+    ops.facts[T] = {**_facts(T, draft=True), "headRefOid": ""}
+    assert run_chain(state, ops, T) == 1
+    out = capsys.readouterr().out
+    assert out.startswith("spec-loop (test):") and "headRefOid" in out
+    assert "human_merge" not in ops.names()
+    assert "mark_ready" not in ops.names()
+
+
+def _tasks_merged(state) -> None:
+    rs.op_start(state, "tasks-deliver")
+    rs.op_complete(state, "tasks-deliver", pr=T)
+    rs.op_start(state, "tasks-merge", pr=T, head=HEAD[T], tasks_skip=TASKS_SKIP_TEST)
+    rs.op_complete(state, "tasks-merge", pr=T, head=HEAD[T], tasks_skip=TASKS_SKIP_TEST)
+
+
+def test_resume_with_uncommitted_stamp_skips_delivery(state, bridge, monkeypatch):
+    """Стоп после `spec approve`: штамп в дереве базы, tasks-merge завершён."""
+    _tasks_merged(state)
+    rs.op_start(state, "tasks-approve")
+    bridge["ok"] = True
+    delivered: list[int] = []
+
+    def no_deliver(st, ops):
+        raise AssertionError("deliver_for_run после мержа tasks-PR")
+
+    monkeypatch.setattr(spec_loop.task_bridge, "deliver_for_run", no_deliver)
+    monkeypatch.setattr(
+        auto_tasks.tb, "deliver_approve", lambda st, ops: delivered.append(A) or A
+    )
+    ops = _accepting_ops()
+    assert spec_loop._deliver_phase(state, ops) == 0
+    assert delivered == [A]
+    assert [c for c in ops.calls if c[0] == "spec_runner" and c[2][0] != "run"] == []
+    assert state.ops["tasks-approve"]["status"] == "completed"
+
+
+def test_deliver_approve_git_error_is_named_stop(state, bridge, monkeypatch, capsys):
+    _tasks_merged(state)
+
+    def git_fails(st, ops):
+        raise subprocess.CalledProcessError(1, ["git", "commit"])
+
+    monkeypatch.setattr(auto_tasks.tb, "deliver_approve", git_fails)
+    ops = _accepting_ops()
+    assert run_chain(state, ops, T) == 1
+    out = capsys.readouterr().out
+    assert out.startswith("spec-loop (test):") and "approve-PR" in out
+    assert state.ops["tasks-approve"]["status"] == "started"
