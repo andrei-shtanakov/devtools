@@ -416,6 +416,148 @@ def test_acceptance_target_keeps_origin_check(
         assert "манифест мог устареть" in out
 
 
+# --- цель из списка пользователя (режим test, план 3b) ----------------------
+
+USER_URL = "git@github.com:colleague/mine.git"
+
+
+def _user_mode(tmp_path: Path, monkeypatch, mode: str, targets: str | None) -> Path:
+    """Конфиг `mode` (якорь test) и `targets.toml` рядом; вернуть чекаут `mine`."""
+    from governance import user_targets
+    from tests.df_config_fixture import write_config
+
+    xdg = tmp_path / "xdg-user"
+    gh = (
+        {
+            "agent_gh_config_dir": Path("~/.config/review"),
+            "human_gh_config_dir": Path("~/.config/gh"),
+        }
+        if mode == "strict"
+        else {}
+    )
+    env = write_config(xdg, mode=mode, workspace_root=tmp_path / "ws-empty", **gh)
+    monkeypatch.setenv("XDG_CONFIG_HOME", env["XDG_CONFIG_HOME"])
+    checkout = tmp_path / "mine-checkout"
+    (checkout / ".git").mkdir(parents=True)
+    if targets is not None:
+        file = user_targets.targets_path()
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(targets.replace("@PATH@", str(checkout)), encoding="utf-8")
+    return checkout
+
+
+USER_TARGETS = f"""\
+schema = "darkfactory-targets/v1"
+
+[targets."mine"]
+path = "@PATH@"
+repo_url = "{USER_URL}"
+"""
+
+
+def test_test_mode_user_target_used_without_manifest(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    (tmp_path / "manifest.toml").unlink()
+    checkout = _user_mode(tmp_path, monkeypatch, "test", USER_TARGETS)
+    monkeypatch.setattr(spec_loop, "_origin_url", lambda d: USER_URL)
+    rc = spec_loop.main(["--subject", "s", "--repo", "mine"])
+    out = capsys.readouterr().out
+    assert rc == 0 and env.calls[0][0] == "start"
+    assert env.calls[0][1]["target_dir"] == str(checkout)
+    assert env.calls[0][1]["repo_slug"] == "colleague/mine"
+    assert "цель colleague/mine — из списка целей пользователя" in out
+
+
+def test_manifest_wins_over_user_target(runs_root, tmp_path, monkeypatch) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    _user_mode(
+        tmp_path,
+        monkeypatch,
+        "test",
+        USER_TARGETS.replace('"mine"', '"alpha"').replace(
+            USER_URL, "git@github.com:x/y.git"
+        ),
+    )
+    rc = spec_loop.main(["--subject", "s", "--repo", "alpha"])
+    assert rc == 0
+    assert env.calls[0][1]["repo_slug"] == "owner/alpha"
+    assert env.calls[0][1]["target_dir"] == str(tmp_path / "alpha")
+
+
+def test_strict_ignores_user_targets(runs_root, tmp_path, monkeypatch, capsys) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    monkeypatch.setattr(spec_loop, "ACCEPTANCE_TARGETS_PATH", tmp_path / "none.toml")
+    _user_mode(tmp_path, monkeypatch, "strict", "это [не toml")
+    rc = spec_loop.main(["--subject", "s", "--repo", "mine"])
+    assert rc == 1 and env.calls == []
+    out = capsys.readouterr().out
+    assert "нет ни в манифесте" in out and "targets.toml" not in out
+
+
+def test_strict_missing_manifest_still_refused(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    (tmp_path / "manifest.toml").unlink()
+    _user_mode(tmp_path, monkeypatch, "strict", USER_TARGETS)
+    rc = spec_loop.main(["--subject", "s", "--repo", "mine"])
+    assert rc == 1 and env.calls == []
+    assert "манифест флота" in capsys.readouterr().out
+
+
+def test_user_target_origin_mismatch_named(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    (tmp_path / "manifest.toml").unlink()
+    _user_mode(tmp_path, monkeypatch, "test", USER_TARGETS)
+    monkeypatch.setattr(
+        spec_loop, "_origin_url", lambda d: "git@github.com:attacker/mine.git"
+    )
+    rc = spec_loop.main(["--subject", "s", "--repo", "mine"])
+    out = capsys.readouterr().out
+    assert rc == 1 and env.calls == []
+    assert "расхождение origin" in out and "targets.toml" in out
+
+
+def test_broken_config_is_rc_2(runs_root, tmp_path, monkeypatch, capsys) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    _user_mode(tmp_path, monkeypatch, "test", None)
+    from governance import df_config
+
+    df_config.canonical_config_path().write_text("это [не toml", encoding="utf-8")
+    rc = spec_loop.main(["--subject", "s", "--repo", "alpha"])
+    assert rc == 2 and env.calls == []
+    assert "конфиг DarkFactory: " in capsys.readouterr().out
+
+
+def test_broken_user_targets_ignored_when_manifest_resolves(
+    runs_root, tmp_path, monkeypatch
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    _user_mode(tmp_path, monkeypatch, "test", "это [не toml")
+    rc = spec_loop.main(["--subject", "s", "--repo", "alpha"])
+    assert rc == 0
+    assert env.calls[0][1]["repo_slug"] == "owner/alpha"
+
+
+def test_test_mode_unknown_repo_names_registration(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    (tmp_path / "manifest.toml").unlink()
+    monkeypatch.setattr(spec_loop, "ACCEPTANCE_TARGETS_PATH", tmp_path / "none.toml")
+    _user_mode(tmp_path, monkeypatch, "test", USER_TARGETS)
+    rc = spec_loop.main(["--subject", "s", "--repo", "ghost"])
+    out = capsys.readouterr().out
+    assert rc == 1 and env.calls == []
+    assert "нет ни в манифесте" in out
+    assert "targets.toml" in out
+    assert "python -m governance.user_targets add" in out
+
+
 def test_target_dir_does_not_widen_the_target_set(
     runs_root, tmp_path, monkeypatch, capsys
 ) -> None:

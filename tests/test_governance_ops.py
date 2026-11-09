@@ -2694,3 +2694,44 @@ def test_ops_agent_login_config_error_is_none_with_reason(
     assert RealOps().agent_login() is None
     assert capsys.readouterr().err.startswith("конфиг DarkFactory: ")
     assert calls == []
+
+
+def _edge_model_config(tmp_path: Path, monkeypatch, harness: str, mode: str) -> None:
+    from tests.df_config_fixture import use_test_real_home
+
+    home = tmp_path / "real-home"
+    home.mkdir(exist_ok=True)
+    use_test_real_home(monkeypatch, home)
+    xdg = tmp_path / f"xdg-{harness}-{mode}"
+    env = write_config(xdg, mode=mode, **_STRICT_GH_DIRS)
+    path = xdg / "darkfactory" / "config.toml"
+    text = path.read_text(encoding="utf-8").replace("test-model", "m-x")
+    path.write_text(text.replace('author = "claude"', f'author = "{harness}"'), "utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", env["XDG_CONFIG_HOME"])
+
+
+def test_edge_check_model_from_config_in_test(tmp_path, monkeypatch):
+    from governance.edge_check import coordinator
+
+    _edge_model_config(tmp_path, monkeypatch, "claude", "test")
+    assert ops_mod.edge_check_model() == "m-x"
+    _edge_model_config(tmp_path, monkeypatch, "codex", "test")
+    assert ops_mod.edge_check_model() == coordinator.DEFAULT_MODEL
+    _edge_model_config(tmp_path, monkeypatch, "claude", "strict")
+    assert ops_mod.edge_check_model() == coordinator.DEFAULT_MODEL
+
+
+def test_edge_check_level_passes_the_configured_model(tmp_path, monkeypatch):
+    from governance.edge_check import coordinator
+
+    seen: dict[str, object] = {}
+
+    def fake(*args: object, **kwargs: object) -> str:
+        seen.update(kwargs)
+        return "ok"
+
+    monkeypatch.setattr(coordinator, "run_level", fake)
+    monkeypatch.setattr(ops_mod, "edge_check_model", lambda: "m-y")
+    ops = RealOps.__new__(RealOps)
+    assert ops.edge_check_level(None, tmp_path, 1, tmp_path) == "ok"
+    assert seen["model"] == "m-y"

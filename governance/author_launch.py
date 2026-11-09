@@ -13,6 +13,13 @@
 тем же профилем и env; затем запуск и перенос. Любой отказ — исход с
 причиной, агент не запущен; флага, переменной или режима обхода нет.
 
+Единственное закреплённое исключение — `mode = "test"`, принимаемый только из
+канонического конфига `<pw_dir>/.config/darkfactory/config.toml`: тогда автор
+идёт как обычный пользовательский процесс `claude` — без `sandbox-exec`,
+допуска и токена связки ключей (шаги ОС, песочницы, вложенности, допуска,
+токена, профиля и пробы пропускаются), но всё равно через `launch_author`
+(каталог вызова, транскрипт, перенос единственного файла).
+
 Граница гарантий (§19 п.3): обязательная гарантия v1 — против авторского
 агента во время вызова и его потомков. От намеренного обхода границы через
 незащищённый код раннера модуль не защищает — это остаточный риск ревью PR.
@@ -40,6 +47,11 @@ from pathlib import Path, PurePosixPath
 from governance import df_config, safe_io, sandbox
 
 DEVTOOLS_ROOT = Path(__file__).resolve().parent.parent
+#: Отказ не-claude харнесса авторинга в режиме test (без песочницы).
+PLAIN_HARNESS_REFUSAL = (
+    'режим test: авторинг поддерживает только harness.author = "claude" '
+    "(сейчас {harness!r})"
+)
 #: Контракт допуска исполняемых файлов харнесса (§14; запись — шаг H2).
 ADMITTED_CONTRACT = (
     DEVTOOLS_ROOT / "contracts" / "author-sandbox" / "v1" / "admitted.toml"
@@ -90,20 +102,36 @@ def harness_env_values() -> dict[str, str]:
     return values
 
 
+def config_mode() -> str:
+    """Режим конфига DarkFactory: `strict`, если файла нет, иначе `load().mode`.
+
+    Файл есть, но дефектен — `df_config.ConfigError` пробрасывается."""
+    if not os.path.lexists(df_config.config_path(os.environ)):
+        return "strict"
+    return df_config.load().mode
+
+
 def harness_for(prefix: str) -> tuple[str, str]:
     """(harness, model) слоя `<prefix>_HARNESS`/`<prefix>_MODEL`.
 
-    env > harness.env > вшитый codex; модель привязана к слою, из которого
-    пришёл харнесс (env-харнесс НЕ наследует модель файла).
+    strict: env > harness.env > вшитый codex. test: env > `[harness]` конфига
+    (harness.env не читается). Модель привязана к слою, из которого пришёл
+    харнесс (env-харнесс НЕ наследует модель файла/конфига). В test env
+    `<P>_MODEL` перекрывает `[harness].model` и когда харнесс взят из конфига
+    — тот же порядок, что в strict (модель env над моделью файла).
     """
-    cfg = harness_env_values()
     env_harness = os.environ.get(f"{prefix}_HARNESS", "")
-    harness = env_harness or cfg.get(f"{prefix}_HARNESS", "") or "codex"
+    env_model = os.environ.get(f"{prefix}_MODEL", "")
+    if config_mode() == "test":
+        if env_harness:
+            return env_harness, env_model
+        cfg = df_config.load()
+        return cfg.author_harness, env_model or cfg.author_model
+    file_cfg = harness_env_values()
+    harness = env_harness or file_cfg.get(f"{prefix}_HARNESS", "") or "codex"
     if env_harness:
-        model = os.environ.get(f"{prefix}_MODEL", "")
-    else:
-        model = os.environ.get(f"{prefix}_MODEL", "") or cfg.get(f"{prefix}_MODEL", "")
-    return harness, model
+        return harness, env_model
+    return harness, env_model or file_cfg.get(f"{prefix}_MODEL", "")
 
 
 def harness_refusal(harness: str) -> str:
@@ -205,6 +233,21 @@ def call_env(call: sandbox.CallDir, token: str) -> dict[str, str]:
         # операторский CA (корпоративный прокси) сильнее; системный набор —
         # умолчание при закрытой связке ключей (§8/S2)
         "SSL_CERT_FILE": os.environ.get("SSL_CERT_FILE") or SSL_CERT_FILE,
+    }
+
+
+def plain_env(call: sandbox.CallDir) -> dict[str, str]:
+    """env вызова без песочницы (режим test): allowlist + корни каталога вызова.
+
+    Allowlist (`agent_env()`) пропускает собственное окружение учётных данных
+    claude пользователя (например `CLAUDE_CODE_OAUTH_TOKEN`, если он выставлен):
+    режим test использует собственный вход пользователя. Не добавляется токен
+    связки ключей и изолированный `CLAUDE_CONFIG_DIR`."""
+    return {
+        **agent_env(),
+        "TMPDIR": str(call.tmp),
+        "CLAUDE_CODE_TMPDIR": str(call.tmp),
+        "TMPPREFIX": f"{call.tmp}/zsh",
     }
 
 
@@ -343,7 +386,10 @@ def check_config(target_dir: str, bundle_dir: str, author_backend: str) -> str |
     «харнесс = claude» здесь НЕ проверяются — конвейер без запуска агента
     работает при любой допустимой конфигурации; полный допуск — на границе.
     """
-    harness, _ = harness_for("AUTHOR")
+    try:
+        harness, _ = harness_for("AUTHOR")
+    except df_config.ConfigError as exc:
+        return f"конфиг DarkFactory: {exc}"
     if harness not in KNOWN_HARNESSES:
         return f"неизвестный AUTHOR_HARNESS: {harness!r} ({'|'.join(KNOWN_HARNESSES)})"
     if author_backend not in KNOWN_BACKENDS:
@@ -403,28 +449,61 @@ class _Ready:
     git_dir: Path
     common_dir: Path
     run_dir: Path
+    plain: bool = False
 
 
 def _preflight(call: AuthorCall, contract: Path) -> _Ready | str:
-    """Проверки §13 до каталога вызова; строка — причина отказа."""
-    if _os_name() != "darwin":
-        return "песочница авторинга поддерживается только на macOS"
-    if not _has_sandbox_exec():
-        return f"нет {sandbox.SANDBOX_EXEC}: песочница авторинга недоступна"
-    nested = _nested_sandbox()
-    if nested is not None:
-        return nested
+    """Проверки §13 до каталога вызова; строка — причина отказа.
+
+    Режим test — обычный запуск claude без песочницы (`_plain_binary`)."""
+    try:
+        plain = config_mode() == "test"
+        if plain:
+            binary, model, token = _plain_binary()
+        else:
+            binary, model, token = _sandbox_binary(contract)
+    except df_config.ConfigError as exc:
+        return f"конфиг DarkFactory: {exc}"
+    except (sandbox.SandboxError, AgentIsolationError, _Refusal) as exc:
+        return str(exc)
+    return _bundle_ready(call, binary, model, token, plain)
+
+
+class _Refusal(Exception):
+    """Причина отказа предпроверки (текст — для исхода)."""
+
+
+def _plain_binary() -> tuple[str, str, str]:
+    """(binary, model, token) режима test: claude из PATH, токена нет."""
     harness, model = harness_for("AUTHOR")
     if harness != SUPPORTED_HARNESS:
-        return harness_refusal(harness)
-    try:
-        admission = sandbox.admission_check(contract, harness=harness)
-    except sandbox.SandboxError as exc:
-        return str(exc)
-    try:
-        token = author_claude_token()
-    except AgentIsolationError as exc:
-        return str(exc)
+        raise _Refusal(PLAIN_HARNESS_REFUSAL.format(harness=harness))
+    found = shutil.which(SUPPORTED_HARNESS)
+    if found is None:
+        raise _Refusal("claude не найден в PATH")
+    return os.path.realpath(found), model, ""
+
+
+def _sandbox_binary(contract: Path) -> tuple[str, str, str]:
+    """(binary, model, token) режима strict: ОС, песочница, допуск, связка."""
+    if _os_name() != "darwin":
+        raise _Refusal("песочница авторинга поддерживается только на macOS")
+    if not _has_sandbox_exec():
+        raise _Refusal(f"нет {sandbox.SANDBOX_EXEC}: песочница авторинга недоступна")
+    nested = _nested_sandbox()
+    if nested is not None:
+        raise _Refusal(nested)
+    harness, model = harness_for("AUTHOR")
+    if harness != SUPPORTED_HARNESS:
+        raise _Refusal(harness_refusal(harness))
+    admission = sandbox.admission_check(contract, harness=harness)
+    return str(admission.realpath), model, author_claude_token()
+
+
+def _bundle_ready(
+    call: AuthorCall, binary: str, model: str, token: str, plain: bool
+) -> _Ready | str:
+    """Общие проверки run_dir, git-каталогов цели и `bundle_dir`."""
     run_dir = Path(call.run_dir)
     if not run_dir.is_absolute() or os.path.realpath(run_dir) != str(run_dir):
         return f"run_dir {call.run_dir!r} не канонический (realpath)"
@@ -437,14 +516,7 @@ def _preflight(call: AuthorCall, contract: Path) -> _Ready | str:
     except (sandbox.SandboxError, safe_io.SafeIOError) as exc:
         return str(exc)
     return _Ready(
-        str(admission.realpath),
-        model,
-        token,
-        target,
-        bundle,
-        git_dir,
-        common_dir,
-        run_dir,
+        binary, model, token, target, bundle, git_dir, common_dir, run_dir, plain
     )
 
 
@@ -612,6 +684,10 @@ def launch_author(
 ) -> LaunchOutcome:
     """Авторский вызов claude под песочницей §12 — или отказ с причиной.
 
+    Исключение — `mode = "test"` из канонического конфига: обычный процесс
+    `claude` без `sandbox-exec`, допуска и токена связки, но через эту же
+    функцию (каталог вызова, транскрипт, перенос единственного файла).
+
     `make_prompt(output_path)` получает абсолютный `<call>/stage/<file>` —
     единственное место записи агента. При отказе до пробы каталог вызова не
     создаётся; созданный каталог удаляется до возврата при любом исходе.
@@ -659,13 +735,13 @@ def _remove_empty(created: list[Path]) -> None:
             return
 
 
-def _launch_in(
+def _sandbox_setup(
     cdir: sandbox.CallDir,
     ready: _Ready,
     call: AuthorCall,
     make_prompt: Callable[[str], str],
-    timeout: float | None,
-) -> LaunchOutcome:
+) -> tuple[list[str], dict[str, str]] | LaunchOutcome:
+    """Профиль, проба и settings.json (strict); (argv, env) или отказ."""
     try:
         profile = sandbox.render_profile(cdir, home=Path.home())
     except sandbox.SandboxError as exc:
@@ -687,6 +763,25 @@ def _launch_in(
         str(cdir.root / "profile.sb"),
         *author_argv(ready.binary, ready.model, prompt),
     ]
+    return argv, env
+
+
+def _launch_in(
+    cdir: sandbox.CallDir,
+    ready: _Ready,
+    call: AuthorCall,
+    make_prompt: Callable[[str], str],
+    timeout: float | None,
+) -> LaunchOutcome:
+    if ready.plain:
+        prompt = make_prompt(str(cdir.stage / call.filename))
+        argv = author_argv(ready.binary, ready.model, prompt)
+        env = plain_env(cdir)
+    else:
+        sandboxed = _sandbox_setup(cdir, ready, call, make_prompt)
+        if isinstance(sandboxed, LaunchOutcome):
+            return sandboxed
+        argv, env = sandboxed
     started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     run = _run_agent(
         argv,
