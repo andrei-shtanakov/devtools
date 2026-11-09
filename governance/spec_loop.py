@@ -66,6 +66,7 @@ from pathlib import Path
 
 from governance import (
     approval_branches,
+    auto_tasks,
     brief_input,
     brief_provenance,
     bundle_dag,
@@ -950,6 +951,8 @@ _APPROVE_HINT = (
 
 def _deliver_phase(state: rs.RunState, ops) -> int:
     """status == completed: идемпотентная доставка tasks-спеки мостом."""
+    if state.mode == "test" and rs.op_status(state, "tasks-merge") == "completed":
+        return _resume_test_chain(state, ops)
     try:
         pr = task_bridge.deliver_for_run(state, ops)
     except RuntimeError as exc:
@@ -963,12 +966,32 @@ def _deliver_phase(state: rs.RunState, ops) -> int:
             print(_APPROVE_NODE_HINT.format(run_id=state.run_id))
         return 1
     print(f"tasks-спека доставлена: PR #{pr} ({state.repo_slug})")
+    if state.mode == "test":
+        return auto_tasks.run_chain(state, ops, pr)
     print(
         _APPROVE_HINT.format(
             run_id=state.run_id, approve=task_bridge.approve_command(state.ws_id)
         )
     )
     return 0
+
+
+def _resume_test_chain(state: rs.RunState, ops) -> int:
+    """test, tasks-PR уже вмержен: цепочка без повторной доставки.
+
+    `deliver_for_run` после мержа tasks-PR не зовётся: её гард грязного
+    дерева и pull ломали бы возобновление `tasks-approve` (штамп approve
+    живёт в рабочем дереве незакоммиченным). Гейт допуска и pull она уже
+    прошла на первом заходе.
+    """
+    pr = (state.ops.get("tasks-deliver") or {}).get("pr")
+    if pr is None:
+        print(
+            "spec-loop (test): tasks-merge завершён, но в записи tasks-deliver "
+            "нет номера PR — леджер неполон, разберите run.json вручную"
+        )
+        return 1
+    return auto_tasks.run_chain(state, ops, pr)
 
 
 def _report_interview_stop(state: rs.RunState) -> int:

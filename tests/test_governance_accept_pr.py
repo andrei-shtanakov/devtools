@@ -31,6 +31,8 @@ class _Ops:
     live_tip: str | None = "base000"
     #: Установленное отсутствие ветки базы (Outcome.ABSENT) — не «не двигалась».
     live_tip_absent: bool = False
+    review_body: str | None = None
+    review_target_dir: str | None = None
     calls: list[tuple] = field(default_factory=list)
     merge_args: tuple | None = None
 
@@ -55,9 +57,14 @@ class _Ops:
         self.calls.append(("changed_paths", base_branch))
         return (self.base_oid, self.files)
 
-    def review(self, repo: str, pr: int) -> int:
+    def review(self, repo: str, pr: int, *, target_dir: str | None = None) -> int:
         self.calls.append(("review", repo, pr))
+        self.review_target_dir = target_dir
         return self.review_exit
+
+    def latest_review_body(self, repo_slug: str, pr: int) -> str | None:
+        self.calls.append(("latest_review_body", repo_slug, pr))
+        return self.review_body
 
     def pr_facts(self, repo_slug: str, pr: int) -> dict:
         self.calls.append(("pr_facts",))
@@ -953,3 +960,121 @@ def test_accept_pr_origin_repo_name_mismatch_is_2(monkeypatch, capsys) -> None:
     assert accept_pr.main(["--repo", "kapelle", "--pr", "1"]) == 2
     assert "один репозиторий" in capsys.readouterr().out
     assert seen == []
+
+
+HEAD0 = "cafe" * 10
+
+
+def _marker(head: str = HEAD0, verdict: str = "approve") -> str:
+    return f"текст\n<!-- codex-terminal-review head={head} verdict={verdict} -->\n"
+
+
+class _Rec:
+    def __init__(self, positive: bool = False) -> None:
+        self.positive = positive
+        self.verdicts: list = []
+        self.results: list[dict] = []
+
+    def no_merge(self) -> accept_pr.NoMergeAccept:
+        return accept_pr.NoMergeAccept(
+            known_positive=lambda _h: self.positive,
+            record_verdict=self.verdicts.append,
+            record_result=self.results.append,
+        )
+
+
+def _accept_test(ops: _Ops, rec: _Rec) -> int:
+    return accept_pr.accept(
+        "r", "o/r", 7, ops, "/tmp/r", sleep=_no_sleep, test=rec.no_merge()
+    )
+
+
+def _merged(ops: _Ops) -> bool:
+    return any(c[0] == "merge" for c in ops.calls)
+
+
+def test_test_accept_stops_before_merge(capsys) -> None:
+    ops = _Ops(facts_seq=[_facts()], review_body=_marker())
+    rec = _Rec()
+    assert _accept_test(ops, rec) == 0
+    assert not _merged(ops)
+    url = "https://github.com/o/r/pull/7"
+    assert rec.results == [
+        {"pr": 7, "url": url, "head": HEAD0, "checks": "green", "merged": False}
+    ]
+    assert rec.verdicts and rec.verdicts[0].head == HEAD0
+    assert ops.review_target_dir == "/tmp/r"
+    out = capsys.readouterr().out
+    assert accept_pr.ACCEPT_NO_MERGE_TEST in out and url in out
+
+
+def test_test_accept_request_changes_marker_stops(capsys) -> None:
+    ops = _Ops(facts_seq=[_facts()], review_body=_marker(verdict="request-changes"))
+    rec = _Rec()
+    assert _accept_test(ops, rec) == 1
+    assert rec.results == [] and rec.verdicts == []
+
+
+def test_test_accept_marker_on_other_head_stops() -> None:
+    ops = _Ops(facts_seq=[_facts()], review_body=_marker(head="b" * 40))
+    rec = _Rec()
+    assert _accept_test(ops, rec) == 1
+    assert rec.results == []
+
+
+def test_test_accept_no_marker_stops() -> None:
+    ops = _Ops(facts_seq=[_facts()], review_body="просто текст")
+    rec = _Rec()
+    assert _accept_test(ops, rec) == 1
+    assert rec.results == []
+
+
+def test_test_accept_known_verdict_skips_review() -> None:
+    ops = _Ops(facts_seq=[_facts()])
+    rec = _Rec(positive=True)
+    assert _accept_test(ops, rec) == 0
+    assert not any(c[0] == "review" for c in ops.calls)
+    assert not _merged(ops)
+    assert len(rec.results) == 1
+
+
+def test_test_accept_red_checks_stop() -> None:
+    red = _facts(statusCheckRollup=[{"conclusion": "FAILURE"}])
+    ops = _Ops(facts_seq=[red], review_body=_marker())
+    rec = _Rec()
+    assert _accept_test(ops, rec) == 1
+    assert rec.results == []
+
+
+def test_strict_accept_unchanged_merges() -> None:
+    ops = _Ops(facts_seq=[_facts()])
+    rc = accept_pr.accept("r", "o/r", 7, ops, "/tmp/r", sleep=_no_sleep)
+    assert rc == 0 and _merged(ops)
+    assert ops.review_target_dir is None
+    assert not any(c[0] == "latest_review_body" for c in ops.calls)
+
+
+def test_main_test_mode_target_from_user_targets(monkeypatch, tmp_path) -> None:
+    from governance import user_targets
+
+    target = user_targets.UserTarget("r", tmp_path / "r", "git@github.com:o/r.git")
+    monkeypatch.setattr(accept_pr, "_config_mode", lambda: "test")
+    monkeypatch.setattr(user_targets, "lookup", lambda repo: target)
+    monkeypatch.setattr(
+        accept_pr.subprocess,
+        "run",
+        lambda *a, **k: type(
+            "P", (), {"returncode": 0, "stdout": "git@github.com:o/r.git"}
+        )(),
+    )
+    monkeypatch.setattr(accept_pr, "RealOps", lambda: None)
+    seen: dict = {}
+
+    def fake_accept(*args, **kwargs):
+        seen["args"], seen["kwargs"] = args, kwargs
+        return 0
+
+    monkeypatch.setattr(accept_pr, "accept", fake_accept)
+    assert accept_pr.main(["--repo", "r", "--pr", "7"]) == 0
+    assert seen["args"][4] == str(tmp_path / "r")
+    assert seen["kwargs"]["test"] is not None

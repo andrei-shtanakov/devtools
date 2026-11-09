@@ -2675,3 +2675,78 @@ def test_wave_recovery_records_config_mode(runs_root, tmp_path) -> None:
     )
     assert state is not None and state.mode == "test"
     assert rs.load("r-rec-1").mode == "test"
+
+
+def _deliver_state(mode: str) -> rs.RunState:
+    return rs.new_run(
+        mode=mode,
+        subject="S",
+        repo="alpha",
+        repo_slug="owner/alpha",
+        ws_id="WS-1",
+        target_dir="/x",
+        bundle_dir="workstreams/WS-1/spec",
+        profile="profiles/team-exp.yaml",
+        run_id="r-dp",
+    )
+
+
+def test_deliver_phase_test_mode_runs_chain(runs_root, monkeypatch, capsys) -> None:
+    state = _deliver_state("test")
+    seen: list[tuple] = []
+    monkeypatch.setattr(spec_loop.task_bridge, "deliver_for_run", lambda s, o: 11)
+    monkeypatch.setattr(
+        spec_loop.auto_tasks,
+        "run_chain",
+        lambda s, o, pr: seen.append((s, o, pr)) or 0,
+    )
+    ops = object()
+    assert spec_loop._deliver_phase(state, ops) == 0
+    assert seen == [(state, ops, 11)]
+    out = capsys.readouterr().out
+    assert "PR #11" in out and "approve" not in out
+
+
+def test_deliver_phase_strict_unchanged(runs_root, monkeypatch, capsys) -> None:
+    state = _deliver_state("strict")
+    monkeypatch.setattr(spec_loop.task_bridge, "deliver_for_run", lambda s, o: 11)
+
+    def boom(*a):
+        raise AssertionError("run_chain must not run in strict")
+
+    monkeypatch.setattr(spec_loop.auto_tasks, "run_chain", boom)
+    assert spec_loop._deliver_phase(state, object()) == 0
+    assert "следующая человеческая граница" in capsys.readouterr().out
+
+
+def test_deliver_phase_test_resume_skips_delivery(runs_root, monkeypatch) -> None:
+    """tasks-merge завершён: PR из записи tasks-deliver, без deliver_for_run."""
+    state = _deliver_state("test")
+    rs.op_complete(state, "tasks-deliver", pr=11)
+    rs.op_complete(state, "tasks-merge", pr=11)
+    seen: list[int] = []
+
+    def no_deliver(s, o):
+        raise AssertionError("deliver_for_run после мержа tasks-PR")
+
+    monkeypatch.setattr(spec_loop.task_bridge, "deliver_for_run", no_deliver)
+    monkeypatch.setattr(
+        spec_loop.auto_tasks, "run_chain", lambda s, o, pr: seen.append(pr) or 0
+    )
+    assert spec_loop._deliver_phase(state, object()) == 0
+    assert seen == [11]
+
+
+def test_deliver_phase_test_resume_without_record_stops(
+    runs_root, monkeypatch, capsys
+) -> None:
+    state = _deliver_state("test")
+    rs.op_complete(state, "tasks-merge", pr=11)
+
+    def boom(*a):
+        raise AssertionError("не должен вызываться")
+
+    monkeypatch.setattr(spec_loop.task_bridge, "deliver_for_run", boom)
+    monkeypatch.setattr(spec_loop.auto_tasks, "run_chain", boom)
+    assert spec_loop._deliver_phase(state, object()) == 1
+    assert "spec-loop (test): tasks-merge завершён" in capsys.readouterr().out

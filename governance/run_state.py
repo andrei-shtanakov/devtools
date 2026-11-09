@@ -296,7 +296,9 @@ def save(state: RunState) -> None:
 def load(run_id: str) -> RunState:
     """Читает `run.json` и восстанавливает `RunState`."""
     raw = (run_dir(run_id) / "run.json").read_text(encoding="utf-8")
-    return RunState(**json.loads(raw))
+    state = RunState(**json.loads(raw))
+    validate_mode(state.mode)
+    return state
 
 
 def all_run_ids() -> list[str]:

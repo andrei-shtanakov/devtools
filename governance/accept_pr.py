@@ -36,13 +36,15 @@ CLI: ``python -m governance.accept_pr --repo kapelle --pr 59``
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
-from governance import authority_root, df_config, ssot_env
+from governance import authority_root, df_config, ssot_env, user_targets
 from governance.facts import Outcome
 from governance.ops import (
     REVIEW_BARRIER_EXIT,
@@ -50,6 +52,7 @@ from governance.ops import (
     Ops,
     RealOps,
 )
+from governance.review_verdict import ReviewVerdict, parse_marker
 
 # Харнесс-пути — входы обвязки ревью и мержа, исполняемые или читаемые из
 # дерева проверяемого PR: PR, который их трогает, не ревьюится агентом вовсе
@@ -84,6 +87,18 @@ _POLL_LIMIT = 40
 _POLL_SECONDS = 30
 
 
+ACCEPT_NO_MERGE_TEST = "мерж PR с кодом — за вами (test)"
+
+
+@dataclass(frozen=True)
+class NoMergeAccept:
+    """Режим `test`: приёмка без мержа, вердикт и итог уходят в журнал."""
+
+    known_positive: Callable[[str], bool]
+    record_verdict: Callable[[ReviewVerdict], None]
+    record_result: Callable[[dict], None]
+
+
 def _checks_state(pr_facts: dict) -> str:
     """`green` | `red` | `pending` по statusCheckRollup (fail-closed).
 
@@ -111,8 +126,11 @@ def accept(
     target_dir: str,
     sleep: Callable[[float], None] = time.sleep,
     poll_limit: int = _POLL_LIMIT,
+    test: NoMergeAccept | None = None,
 ) -> int:
     """Ритуал приёмки; коды: 0 смержено, 1 стоп (причина на stdout).
+
+    С `test` (режим test) мержа нет: 0 значит «PR проверен, не вмержен».
 
     Порядок «ревью до ожидания чеков» намеренный: находки дороже минут CI,
     и красное ревью не должно ждать зелёного rollup, чтобы быть увиденным.
@@ -177,12 +195,66 @@ def accept(
             base_branch,
             sleep,
             poll_limit,
+            test,
         )
     except RuntimeError as exc:
         print(f"accept-pr: {exc} — стоп")
         return 1
     finally:
         ops.ensure_branch(target_dir, branch0)
+
+
+def _review_step(
+    repo: str,
+    repo_slug: str,
+    pr: int,
+    ops: Ops,
+    head0: str,
+    target_dir: str,
+    test: NoMergeAccept | None,
+) -> bool:
+    """Терминальное ревью; `True` — стоп (причина напечатана)."""
+    if test is None:
+        review_exit = ops.review(repo, pr)
+    else:
+        review_exit = ops.review(repo, pr, target_dir=target_dir)
+    if review_exit == REVIEW_BARRIER_EXIT:
+        # Барьер, а не находки (devtools#258). Общий совет ниже здесь
+        # принципиально не работает: журнал бюджета ключуется по `slug#pr`,
+        # поэтому фикс-коммиты новую голову дают, а круг — нет, и повтор
+        # без override отказал бы снова.
+        print(f"accept-pr: {REVIEW_BARRIER_STOP}")
+        return True
+    if review_exit != 0:
+        print(
+            f"accept-pr: терминальное ревью вернуло {review_exit} — стоп; "
+            "отработайте находки (фикс-коммиты на ветку PR) и повторите"
+        )
+        return True
+    if test is None:
+        return False
+    return _record_marker_verdict(repo_slug, pr, ops, head0, test)
+
+
+def _record_marker_verdict(
+    repo_slug: str, pr: int, ops: Ops, head0: str, test: NoMergeAccept
+) -> bool:
+    """Вердикт из маркера ревью (test): нужен `approve` на head0."""
+    verdict = parse_marker(ops.latest_review_body(repo_slug, pr))
+    if verdict is None:
+        print("accept-pr: в ревью нет маркера вердикта (verdict=) — стоп")
+        return True
+    if verdict.head != head0:
+        print(
+            f"accept-pr: вердикт вынесен по {verdict.head[:7]}, голова PR "
+            f"{head0[:7]} — стоп"
+        )
+        return True
+    if verdict.verdict != "approve":
+        print(f"accept-pr: вердикт ревью {verdict.verdict} (не approve) — стоп")
+        return True
+    test.record_verdict(verdict)
+    return False
 
 
 def _accept_on_head(
@@ -195,6 +267,7 @@ def _accept_on_head(
     base_branch: str,
     sleep: Callable[[float], None],
     poll_limit: int,
+    test: NoMergeAccept | None = None,
 ) -> int:
     """Ревью → чеки → гарды → мерж; чекаут цели уже стоит на head0."""
     # Гард путей по МАТЕРИАЛИЗОВАННОМУ head0, до исполнения harness
@@ -231,20 +304,10 @@ def _accept_on_head(
             "человеком (ADR-ECO-004 I2)"
         )
         return 1
-    review_exit = ops.review(repo, pr)
-    if review_exit == REVIEW_BARRIER_EXIT:
-        # Барьер, а не находки (devtools#258). Общий совет ниже здесь
-        # принципиально не работает: журнал бюджета ключуется по `slug#pr`,
-        # поэтому фикс-коммиты новую голову дают, а круг — нет, и повтор
-        # без override отказал бы снова.
-        print(f"accept-pr: {REVIEW_BARRIER_STOP}")
-        return 1
-    if review_exit != 0:
-        print(
-            f"accept-pr: терминальное ревью вернуло {review_exit} — стоп; "
-            "отработайте находки (фикс-коммиты на ветку PR) и повторите"
-        )
-        return 1
+    if test is None or not test.known_positive(head0):
+        stopped = _review_step(repo, repo_slug, pr, ops, head0, target_dir, test)
+        if stopped:
+            return 1
 
     facts = ops.pr_facts(repo_slug, pr)
     polls = 0
@@ -294,6 +357,8 @@ def _accept_on_head(
         )
         return 1
     head = head0
+    if test is not None:
+        return _finish_no_merge(repo_slug, pr, head, test)
     # Пин базы по OID, а не по имени (ревью PR #183, major): сверка
     # `baseRefName` выше ловит РЕТАРГЕТ, но не движение самой базы —
     # `origin/master` мог уехать вперёд между вердиктом и мержем, и агент
@@ -392,10 +457,38 @@ def _accept_on_head(
     return 0
 
 
+def _finish_no_merge(repo_slug: str, pr: int, head: str, test: NoMergeAccept) -> int:
+    """Test: вместо мержа — итог проверки в журнал и строка оператору."""
+    url = f"https://github.com/{repo_slug}/pull/{pr}"
+    test.record_result(
+        {"pr": pr, "url": url, "head": head, "checks": "green", "merged": False}
+    )
+    print(
+        f"accept-pr (test): {url} — голова {head[:7]} проверена, проверки "
+        f"зелёные; {ACCEPT_NO_MERGE_TEST}"
+    )
+    return 0
+
+
 def _origin_slug(url: str) -> str | None:
     """`owner/name` из origin-URL (ssh/https, .git-суффикс опционален)."""
     match = re.search(r"[:/]([^/:]+)/([^/]+?)(?:\.git)?/?$", url.strip())
     return f"{match.group(1)}/{match.group(2)}".lower() if match else None
+
+
+def _config_mode() -> str:
+    """Режим конфига: нет файла — `strict`; битый — `ConfigError`."""
+    if not os.path.lexists(df_config.config_path(os.environ)):
+        return "strict"
+    return df_config.load().mode
+
+
+def _target_dir(repo: str, test_mode: bool) -> str | None:
+    """Каталог цели: в test — из списка целей (None — не зарегистрирована)."""
+    if not test_mode:
+        return str(df_config.workspace_dir(repo))
+    target = user_targets.lookup(repo)
+    return None if target is None else str(target.path)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -412,9 +505,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--owner", default=None, help="владелец (иначе из origin)")
     args = parser.parse_args(argv)
     try:
-        target_dir = str(df_config.workspace_dir(args.repo))
+        test_mode = _config_mode() == "test"
+        target_dir = _target_dir(args.repo, test_mode)
     except df_config.ConfigError as exc:
         print(f"accept-pr: конфиг DarkFactory: {exc}")
+        return 2
+    except user_targets.TargetsError as exc:
+        print(f"accept-pr: {exc}")
+        return 2
+    if target_dir is None:
+        print(
+            f"accept-pr: репо {args.repo} нет в списке целей "
+            f"{user_targets.targets_path()} — зарегистрируйте чекаут: "
+            "python -m governance.user_targets add <каталог>"
+        )
         return 2
     origin = subprocess.run(
         ["git", "-C", target_dir, "remote", "get-url", "origin"],
@@ -440,7 +544,12 @@ def main(argv: list[str] | None = None) -> int:
             "(ревью и мерж обязаны смотреть в один репозиторий)"
         )
         return 2
-    return accept(args.repo, repo_slug, args.pr, RealOps(), target_dir)
+    test = (
+        NoMergeAccept(lambda _h: False, lambda _v: None, lambda _r: None)
+        if test_mode
+        else None
+    )
+    return accept(args.repo, repo_slug, args.pr, RealOps(), target_dir, test=test)
 
 
 if __name__ == "__main__":
