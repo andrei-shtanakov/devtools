@@ -142,7 +142,7 @@ def test_second_entry_exits_before_reading_state(  # T37, Review Focus
     monkeypatch.setattr(
         spec_loop,
         "resolve_repo_entry",
-        lambda text, repo, targets: type(
+        lambda text, repo, targets, *, user=None: type(
             "E", (), {"repo_slug": "owner/alpha", "repo": "alpha", "source": "fleet"}
         )(),
     )
@@ -184,7 +184,7 @@ def test_state_is_reread_under_lock(tmp_path, runs_root, monkeypatch) -> None:  
     monkeypatch.setattr(
         spec_loop,
         "resolve_repo_entry",
-        lambda text, repo, targets: type(
+        lambda text, repo, targets, *, user=None: type(
             "E", (), {"repo_slug": "owner/alpha", "repo": "alpha", "source": "fleet"}
         )(),
     )

@@ -163,3 +163,29 @@ def test_register_non_ascii_path_roundtrip(home: Path, tmp_path: Path) -> None:
     d = _checkout(parent)
     t = ut.register(d)
     assert ut.load()["my-repo"].path == t.path == d.resolve()
+
+
+def test_stale_entry_is_per_entry(
+    home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    good = _checkout(tmp_path, "good")
+    gone = tmp_path / "gone"
+    _write(
+        home,
+        f'schema = "{ut.SCHEMA}"\n'
+        f'[targets.good]\npath = "{good.resolve()}"\nrepo_url = "{URL}"\n'
+        f'[targets.stale]\npath = "{gone}"\nrepo_url = "{URL}"\n',
+    )
+    assert set(ut.load()) == {"good", "stale"}
+    assert ut.lookup("good") is not None
+    assert ut.lookup("other") is None
+    with pytest.raises(ut.TargetsError) as exc:
+        ut.lookup("stale")
+    msg = str(exc.value)
+    assert str(ut.targets_path()) in msg and "stale" in msg and "уберите запись" in msg
+    assert ut.main(["list"]) == 0
+    out = capsys.readouterr().out
+    assert "(нет каталога)" in out and "good" in out
+    fresh = _checkout(tmp_path, "fresh")
+    assert ut.register(fresh).repo == "fresh"
+    assert set(ut.load()) == {"good", "stale", "fresh"}

@@ -79,8 +79,6 @@ def _parse_entry(file: Path, repo: str, raw: object) -> UserTarget:
     path = Path(raw["path"])
     if not path.is_absolute():
         raise TargetsError(f"{where}: path {raw['path']!r} не абсолютный")
-    if not path.is_dir():
-        raise TargetsError(f"{where}: path {raw['path']!r} — не каталог")
     slug_from_url(raw["repo_url"])  # форма URL; TargetsError без контекста
     return UserTarget(repo=repo, path=path, repo_url=raw["repo_url"])
 
@@ -102,7 +100,11 @@ def _read(file: Path) -> dict[str, UserTarget]:
 
 
 def load() -> dict[str, UserTarget]:
-    """Все цели списка (порядок файла); нет файла — пусто."""
+    """Все цели списка (порядок файла); нет файла — пусто.
+
+    Синтаксис и форма проверяются у каждой записи; существование каталога —
+    нет (устаревшая запись не должна ломать остальные): см. `lookup`.
+    """
     try:
         file = targets_path()
     except df_config.ConfigError as exc:
@@ -113,8 +115,15 @@ def load() -> dict[str, UserTarget]:
 
 
 def lookup(repo: str) -> UserTarget | None:
-    """Цель по имени репо или None."""
-    return load().get(repo)
+    """Цель по имени репо или None; каталог запрошенной записи обязан быть."""
+    target = load().get(repo)
+    if target is not None and not target.path.is_dir():
+        raise TargetsError(
+            f"{targets_path()}: [targets.{repo}] path {str(target.path)!r} — "
+            f"не каталог; уберите запись {repo} из {targets_path()} "
+            "или верните каталог"
+        )
+    return target
 
 
 def _git_out(target_dir: Path, *args: str) -> str:
@@ -198,7 +207,8 @@ def main(argv: list[str]) -> int:
             return 0
         if argv == ["list"]:
             for t in load().values():
-                print(t.repo, t.path, t.repo_url)
+                mark = "" if t.path.is_dir() else " (нет каталога)"
+                print(t.repo, t.path, t.repo_url + mark)
             return 0
     except TargetsError as exc:
         print(str(exc), file=sys.stderr)

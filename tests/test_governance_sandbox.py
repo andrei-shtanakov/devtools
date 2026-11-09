@@ -1983,6 +1983,7 @@ def plain(launch, tmp_path, monkeypatch) -> SimpleNamespace:
     return launch
 
 
+@darwin_only
 def test_test_mode_launches_without_sandbox(plain, monkeypatch):
     seen = _agent_writes_plain(plain, monkeypatch)
     assert _launch(plain) == author_launch.LaunchOutcome(0)
@@ -2012,7 +2013,11 @@ def _agent_writes_plain(plain, monkeypatch) -> dict:
     return seen
 
 
+@darwin_only
 def test_test_mode_runs_off_darwin(plain, monkeypatch):
+    # Под darwin_only смысл частичный: каталог вызова создаётся через
+    # O_NOFOLLOW_ANY (только macOS). Суть теста — `_os_name` в режиме test
+    # не опрашивается, запуск идёт и при «не darwin».
     monkeypatch.setattr(author_launch, "_os_name", lambda: "linux")
     monkeypatch.setattr(author_launch, "_has_sandbox_exec", lambda: False)
     seen = _agent_writes_plain(plain, monkeypatch)
