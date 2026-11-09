@@ -232,15 +232,15 @@ def resolve_repo_entry(
     repo: str,
     targets_text: str | None,
     *,
-    user: user_targets.UserTarget | None = None,
+    user: Callable[[], user_targets.UserTarget | None] | None = None,
 ) -> RepoEntry:
     """Цель `spec-loop`: манифест флота, а при ОТСУТСТВИИ репо в нём — список
     целей приёмки devtools (решение владельца 2026-10-09).
 
     Ошибка манифеста (не TOML, неоднозначный git_dir) — отказ без fallback:
     список приёмки не подменяет сломанный SSOT флота. `targets_text=None` —
-    списка нет. `user` — цель из списка пользователя (только режим test),
-    проверяется последней.
+    списка нет. `user` — ленивый поиск в списке пользователя (только режим
+    test): вызывается лишь после промаха манифеста и списка приёмки.
     """
     entry = _manifest_lookup(manifest_text, repo, manifest_path())
     if entry is not None:
@@ -249,13 +249,14 @@ def resolve_repo_entry(
         found = _manifest_lookup(targets_text, repo, ACCEPTANCE_TARGETS_PATH)
         if found is not None:
             return replace(found, source="acceptance")
-    if user is not None:
+    found_user = user() if user is not None else None
+    if found_user is not None:
         return RepoEntry(
             repo=repo,
-            repo_slug=repo_slug_from_url(user.repo_url),
-            repo_url=user.repo_url,
+            repo_slug=repo_slug_from_url(found_user.repo_url),
+            repo_url=found_user.repo_url,
             source="user",
-            path=user.path,
+            path=found_user.path,
         )
     raise SpecLoopError(
         f"репо {repo!r} нет ни в манифесте флота {manifest_path()}, ни в списке "
@@ -275,15 +276,13 @@ def _user_registration_hint() -> str:
 
 
 def _config_mode() -> str:
-    """Режим конфига: нет файла — `strict`; дефектный конфиг — отказ.
+    """Режим конфига: нет файла — `strict`; `ConfigError` пробрасывается
+    (main печатает «конфиг DarkFactory: …», rc 2).
 
     Не `author_launch.config_mode`: тот — защищённая граница авторинга."""
-    try:
-        if not os.path.lexists(df_config.config_path(os.environ)):
-            return "strict"
-        return df_config.load().mode
-    except df_config.ConfigError as exc:
-        raise SpecLoopError(f"конфиг DarkFactory: {exc}") from exc
+    if not os.path.lexists(df_config.config_path(os.environ)):
+        return "strict"
+    return df_config.load().mode
 
 
 def _user_target(repo: str) -> user_targets.UserTarget | None:
@@ -1214,7 +1213,7 @@ def main(argv: list[str] | None = None) -> int:
             _read_manifest(),
             args.repo,
             _read_targets(),
-            user=_user_target(args.repo),
+            user=lambda: _user_target(args.repo),
         )
         if entry.source == "acceptance":
             print(f"spec-loop: цель {entry.repo_slug} — из списка целей приёмки")

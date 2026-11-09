@@ -522,6 +522,27 @@ def test_user_target_origin_mismatch_named(
     assert "расхождение origin" in out and "targets.toml" in out
 
 
+def test_broken_config_is_rc_2(runs_root, tmp_path, monkeypatch, capsys) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    _user_mode(tmp_path, monkeypatch, "test", None)
+    from governance import df_config
+
+    df_config.canonical_config_path().write_text("это [не toml", encoding="utf-8")
+    rc = spec_loop.main(["--subject", "s", "--repo", "alpha"])
+    assert rc == 2 and env.calls == []
+    assert "конфиг DarkFactory: " in capsys.readouterr().out
+
+
+def test_broken_user_targets_ignored_when_manifest_resolves(
+    runs_root, tmp_path, monkeypatch
+) -> None:
+    env = _LoopEnv(monkeypatch, tmp_path)
+    _user_mode(tmp_path, monkeypatch, "test", "это [не toml")
+    rc = spec_loop.main(["--subject", "s", "--repo", "alpha"])
+    assert rc == 0
+    assert env.calls[0][1]["repo_slug"] == "owner/alpha"
+
+
 def test_test_mode_unknown_repo_names_registration(
     runs_root, tmp_path, monkeypatch, capsys
 ) -> None:
