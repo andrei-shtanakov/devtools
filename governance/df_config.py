@@ -428,7 +428,14 @@ def get_value(cfg: DfConfig, key: str) -> str:
 
 
 def main(argv: list[str], env: Mapping[str, str] = os.environ) -> int:
-    """`get <ключ>` → значение в stdout, 0; ошибка → stderr, 2."""
+    """`get <ключ>` → значение в stdout, 0; ошибка → stderr, 2.
+
+    `mode-or-strict` — режим; файла конфига нет (`lexists` ложно) → `strict`."""
+    if argv == ["mode-or-strict"]:
+        if not os.path.lexists(config_path(env)):
+            print("strict")
+            return 0
+        argv = ["get", "mode"]
     if len(argv) != 2 or argv[0] != "get":
         print("использование: df_config.py get <ключ>", file=sys.stderr)
         return 2

@@ -14,3 +14,13 @@ df_cfg() {
     fi
     python3 -I "$script_dir/governance/df_config.py" get "$1"
 }
+
+# Режим конфига: файла нет — `strict` (поведение «до конфига»), иначе режим из
+# файла; дефект файла — код 2. Тот же вызов `v=$(df_cfg_mode) || exit $?`.
+df_cfg_mode() {
+    if [ -z "${script_dir:-}" ]; then
+        echo "df_cfg_mode: script_dir не задан — подключать из скрипта devtools" >&2
+        return 2
+    fi
+    python3 -I "$script_dir/governance/df_config.py" mode-or-strict
+}

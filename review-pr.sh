@@ -199,7 +199,7 @@ cfg_model=""
 # владельца, у коллеги его нет); strict — прежний порядок без изменений.
 df_mode=""
 if [ -z "$opt_harness" ] && [ -z "${REVIEW_HARNESS:-}" ]; then
-    df_mode=$(df_cfg mode) || exit $?
+    df_mode=$(df_cfg_mode) || exit $?
 fi
 reviewer_from_config=0
 if [ "$df_mode" != "test" ] && [ -f "$harness_env_file" ]; then

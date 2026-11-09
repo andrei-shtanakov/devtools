@@ -1379,6 +1379,26 @@ def test_strict_reviewer_unchanged(fleet: Fleet, tmp_path: Path) -> None:
     assert "REVIEW_HARNESS=codex" in lines
 
 
+def test_no_config_file_keeps_strict_harness_selection(
+    fleet: Fleet, tmp_path: Path
+) -> None:
+    """Без файла конфига (env-only запуск) харнесс — как до конфига:
+    harness.env > codex; `df_cfg mode` не роняет прогон кодом 2."""
+    empty = tmp_path / "empty-xdg"
+    env_file = tmp_path / "harness.env"
+    env_file.write_text("REVIEW_HARNESS=claude\n")
+    extra = {
+        "XDG_CONFIG_HOME": str(empty),
+        "REVIEW_LOGIN": "ai-prosto",
+    }
+    lines = _kit_env_lines(
+        fleet, tmp_path, AI_PROSTO_HARNESS_ENV=str(env_file), **extra
+    )
+    assert "REVIEW_HARNESS=claude" in lines
+    assert "ревьюер из [harness]" not in fleet.body_out.read_text()
+    assert "REVIEW_HARNESS=codex" in _kit_env_lines(fleet, tmp_path, **extra)
+
+
 def test_old_kit_full_run_with_claude_is_refused_before_review(fleet: Fleet) -> None:
     """Копия кита без харнесс-слоя (стаб без литерала) + claude: отказ до
     прогона и до публикации — переходник снят волной devtools#228."""
