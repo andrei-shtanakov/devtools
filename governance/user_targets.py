@@ -136,14 +136,19 @@ def _git_out(target_dir: Path, *args: str) -> str:
     return out
 
 
+def _q(value: str) -> str:
+    """TOML basic string (JSON-квотирование, UTF-8 без \\u-суррогатов)."""
+    return json.dumps(value, ensure_ascii=False)
+
+
 def _render(entries: list[UserTarget]) -> str:
-    lines = [f"schema = {json.dumps(SCHEMA)}"]
+    lines = [f"schema = {_q(SCHEMA)}"]
     for t in entries:
         lines += [
             "",
-            f"[targets.{t.repo}]",
-            f"path = {json.dumps(str(t.path))}",
-            f"repo_url = {json.dumps(t.repo_url)}",
+            f"[targets.{_q(t.repo)}]",
+            f"path = {_q(str(t.path))}",
+            f"repo_url = {_q(t.repo_url)}",
         ]
     return "\n".join(lines) + "\n"
 

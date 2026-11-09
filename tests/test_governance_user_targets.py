@@ -149,3 +149,17 @@ def test_cli_add_and_list(
     assert "my-repo" in capsys.readouterr().out
     assert ut.main(["add", str(tmp_path / "nope")]) == 2
     assert "nope" in capsys.readouterr().err
+
+
+def test_register_dotted_repo_name_roundtrip(home: Path, tmp_path: Path) -> None:
+    d = _checkout(tmp_path, "foo.js", "git@github.com:me/foo.js.git")
+    ut.register(d)
+    assert list(ut.load()) == ["foo.js"]
+
+
+def test_register_non_ascii_path_roundtrip(home: Path, tmp_path: Path) -> None:
+    parent = tmp_path / "проект-\U0001f600"
+    parent.mkdir()
+    d = _checkout(parent)
+    t = ut.register(d)
+    assert ut.load()["my-repo"].path == t.path == d.resolve()
