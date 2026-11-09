@@ -66,6 +66,14 @@ STRICT_GH_DIRS: tuple[str, ...] = (
 #: Сам режим test принимается только из `canonical_config_path()` (якорь).
 TEST_RELAXATIONS: tuple[str, ...] = (
     "репо политики утверждения не используется: утверждающий — accounts.human",
+    (
+        "песочница авторинга: claude запускается обычным процессом"
+        " пользователя (нет sandbox-exec, допуска и связки ключей)"
+    ),
+    (
+        "белый список целей: цель — из targets.toml рядом с конфигом,"
+        " манифест флота необязателен"
+    ),
 )
 _LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}")
 MODES = ("strict", "test")
@@ -420,7 +428,14 @@ def get_value(cfg: DfConfig, key: str) -> str:
 
 
 def main(argv: list[str], env: Mapping[str, str] = os.environ) -> int:
-    """`get <ключ>` → значение в stdout, 0; ошибка → stderr, 2."""
+    """`get <ключ>` → значение в stdout, 0; ошибка → stderr, 2.
+
+    `mode-or-strict` — режим; файла конфига нет (`lexists` ложно) → `strict`."""
+    if argv == ["mode-or-strict"]:
+        if not os.path.lexists(config_path(env)):
+            print("strict")
+            return 0
+        argv = ["get", "mode"]
     if len(argv) != 2 or argv[0] != "get":
         print("использование: df_config.py get <ключ>", file=sys.stderr)
         return 2

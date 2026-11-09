@@ -464,6 +464,14 @@ def test_banner_lists_relaxations_in_test(tmp_path: Path) -> None:
     cfg = _load_text(tmp_path, STRICT.replace('mode = "strict"', 'mode = "test"'))
     assert df_config.TEST_RELAXATIONS == (
         "репо политики утверждения не используется: утверждающий — accounts.human",
+        (
+            "песочница авторинга: claude запускается обычным процессом"
+            " пользователя (нет sandbox-exec, допуска и связки ключей)"
+        ),
+        (
+            "белый список целей: цель — из targets.toml рядом с конфигом,"
+            " манифест флота необязателен"
+        ),
     )
     assert df_config.test_banner(cfg) == (
         "режим test: выключено — " + "; ".join(df_config.TEST_RELAXATIONS)
@@ -502,3 +510,25 @@ def test_valid_logins_pass(tmp_path: Path, mode: str, login: str) -> None:
     text = re.sub(r'^human = ".*"$', f'human = "{login}"', text, flags=re.MULTILINE)
     text = re.sub(r'^agent = ".*"$', 'agent = "bob"', text, flags=re.MULTILINE)
     assert _load_text(tmp_path, text).accounts.human == login
+
+
+def test_cli_mode_or_strict_without_file(tmp_path: Path) -> None:
+    done = _cli({"XDG_CONFIG_HOME": str(tmp_path)}, "mode-or-strict")
+    assert (done.returncode, done.stdout) == (0, "strict\n"), done.stderr
+
+
+def test_cli_mode_or_strict_broken_file(tmp_path: Path) -> None:
+    cfg = tmp_path / "darkfactory" / "config.toml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text("mode = [", encoding="utf-8")
+    done = _cli({"XDG_CONFIG_HOME": str(tmp_path)}, "mode-or-strict")
+    assert done.returncode == 2 and done.stdout == ""
+    assert "конфиг DarkFactory:" in done.stderr
+
+
+def test_cli_mode_or_strict_reads_mode(tmp_path: Path) -> None:
+    cfg = tmp_path / "darkfactory" / "config.toml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text(STRICT, encoding="utf-8")
+    done = _cli({"XDG_CONFIG_HOME": str(tmp_path)}, "mode-or-strict")
+    assert (done.returncode, done.stdout) == (0, "strict\n"), done.stderr

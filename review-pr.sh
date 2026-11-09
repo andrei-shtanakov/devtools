@@ -194,7 +194,15 @@ fi
 harness_env_file="${AI_PROSTO_HARNESS_ENV:-$HOME/.config/ai-prosto/harness.env}"
 cfg_harness=""
 cfg_model=""
-if [ -f "$harness_env_file" ]; then
+# Режим читаем, только когда харнесс не задан флагом/env: иначе выбор от него
+# не зависит. test: `[harness]` конфига вместо harness.env (файл машины
+# владельца, у коллеги его нет); strict — прежний порядок без изменений.
+df_mode=""
+if [ -z "$opt_harness" ] && [ -z "${REVIEW_HARNESS:-}" ]; then
+    df_mode=$(df_cfg_mode) || exit $?
+fi
+reviewer_from_config=0
+if [ "$df_mode" != "test" ] && [ -f "$harness_env_file" ]; then
     # Толерантность к привычной env-файловой записи (боевое claude-ревью
     # PR #121, круг 2): `export KEY=value` и ведущие пробелы принимаются —
     # иначе строка молча не матчилась бы и прогон тихо уходил на codex,
@@ -216,6 +224,11 @@ if [ -n "$opt_harness" ]; then
 elif [ -n "${REVIEW_HARNESS:-}" ]; then
     harness="$REVIEW_HARNESS"
     model="${opt_model:-${REVIEW_MODEL:-}}"
+elif [ "$df_mode" = "test" ]; then
+    reviewer_from_config=1
+    harness=$(df_cfg harness.author) || exit $?
+    model="${opt_model:-${REVIEW_MODEL:-}}"
+    if [ -z "$model" ]; then model=$(df_cfg harness.model) || exit $?; fi
 else
     harness="${cfg_harness:-codex}"
     model="${opt_model:-${REVIEW_MODEL:-${cfg_model:-}}}"
@@ -1434,6 +1447,9 @@ fi
     echo "- PR: ${slug}#${pr}, проревьюирован head \`$head_sha\`"
     echo "- ревьюер: \`$reviewer_label\` через review-kit репо;" \
         "публикация: $REVIEW_LOGIN"
+    if [ "$reviewer_from_config" -eq 1 ]; then
+        echo "- ревьюер из [harness] конфига (режим test)"
+    fi
     if [ "$targeted" -eq 1 ]; then
         # Дефект 4 вырезанной реализации: approve из адресного прогона
         # выглядит как полное ревью головы — так его читает и человек, и
