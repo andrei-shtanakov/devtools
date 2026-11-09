@@ -1252,14 +1252,23 @@ def _auto_merge_candidate(state: RunState, ops: Ops, request: str, pr: int) -> b
     # оставляет её в журнале (аудит), отказ мержа её не снимает.
     state.ops[request]["act_skip"] = ACT_SKIP_TEST
     save(state)
-    refusal = an._await_required_checks(state, ops, pr, str(head), kind="candidate-PR")
-    if refusal is not None:
+    try:
+        refusal = an._await_required_checks(
+            state, ops, pr, str(head), kind="candidate-PR"
+        )
+    except RuntimeError as exc:
+        refusal_text = (
+            f"факты candidate-PR #{pr} не установлены: {exc} — повторите resume"
+        )
+    else:
+        refusal_text = refusal.reason if refusal is not None else None
+    if refusal_text is not None:
         _stop_with_comment(
             state,
             ops,
             "stopped_merge_refused",
             f"волна {state.wave}: candidate-PR #{pr} заявки {request} не "
-            f"вмержен — {refusal.reason}",
+            f"вмержен — {refusal_text}",
         )
         return False
     rc = ops.human_merge(state.repo, pr, str(head), target_dir=state.target_dir)

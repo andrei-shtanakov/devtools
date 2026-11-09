@@ -11462,6 +11462,19 @@ def test_test_mode_candidate_waits_checks_before_merge(
     assert "ci" in reason and "#777" in reason
 
 
+def test_test_mode_candidate_unreadable_facts_stop_without_merge(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    _set_cfg_mode("test")
+    ops = _test_mode_ops()
+    ops.pr_facts = lambda repo_slug, pr: {}  # type: ignore[method-assign]
+    state = _refused_wave1(tmp_path, monkeypatch, ops, "r-3c3-nofacts")
+    assert state.status == "stopped_merge_refused"
+    assert not any(c[0] == "human_merge" for c in ops.calls)
+    reason = (rs.run_dir("r-3c3-nofacts") / "stop-reason.txt").read_text()
+    assert "факты candidate-PR #777 не установлены" in reason
+
+
 def test_test_mode_candidate_merges_after_green_checks(
     tmp_path: Path, runs_root, monkeypatch
 ) -> None:
