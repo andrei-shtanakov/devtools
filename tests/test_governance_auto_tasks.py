@@ -112,7 +112,7 @@ def bridge(monkeypatch):
 
 
 def _ops(**kw) -> _ChainOps:
-    return _ChainOps({T: _facts(T, draft=True), A: _facts(A), **kw})
+    return _AcceptOps({T: _facts(T, draft=True), A: _facts(A), **kw})
 
 
 def test_tasks_pr_ready_checks_merge_then_pull(state, bridge):
@@ -368,7 +368,106 @@ def test_spec_run_strict_makes_no_calls(state):
     assert ops.calls == []
 
 
-def test_chain_runs_spec_run_last(state, bridge):
-    ops = _ops()
+def test_chain_runs_spec_run_then_code_accept(state, bridge):
+    ops = _accepting_ops()
     assert run_chain(state, ops, T) == 0
     assert state.ops["spec-run"]["pr"] == 9
+    assert state.ops["code-accept"]["status"] == "completed"
+
+
+URL = "https://github.com/o/alpha/pull/9"
+H0, H1 = "c" * 40, "d" * 40
+
+
+def _marker(head: str) -> str:
+    return f"t\n<!-- codex-terminal-review head={head} verdict=approve -->\n"
+
+
+class _AcceptOps(_ChainOps):
+    def __init__(self, facts, head: str = H0) -> None:
+        super().__init__(facts)
+        self.head = head
+        self.facts[9] = self._pr9()
+
+    def _pr9(self) -> dict:
+        return {
+            "state": "OPEN",
+            "headRefOid": self.head,
+            "baseRefName": "main",
+            "mergeable": "MERGEABLE",
+            "statusCheckRollup": GREEN,
+        }
+
+    def set_head(self, head: str) -> None:
+        self.head = head
+        self.facts[9] = self._pr9()
+
+    def is_dirty(self, d):
+        return False
+
+    def current_branch(self, d):
+        return "main"
+
+    def materialize_pr_head(self, d, pr, sha):
+        return sha
+
+    def ensure_branch(self, d, b):
+        pass
+
+    def changed_paths(self, d, base):
+        return ("base0", ["lib/x.ex"])
+
+    def review(self, repo, pr, *, target_dir=None):
+        self.calls.append(("review", repo, pr, target_dir))
+        return 0
+
+    def latest_review_body(self, slug, pr):
+        return _marker(self.head)
+
+    def merge(self, *a, **k):
+        raise AssertionError("мерж в test запрещён")
+
+
+def _accepting_ops(head: str = H0) -> _AcceptOps:
+    return _AcceptOps({T: _facts(T, draft=True), A: _facts(A)}, head)
+
+
+def _reviews(ops) -> list:
+    return [c for c in ops.calls if c[0] == "review"]
+
+
+def test_code_accept_records_verdict_and_result(state):
+    ops = _accepting_ops()
+    assert auto_tasks._accept_code(state, ops, 9) == 0
+    rec = state.ops["code-accept"]
+    assert rec["status"] == "completed"
+    assert rec["verdict"]["head"] == H0
+    assert rec["result"]["url"] == URL
+    assert rec["result"]["merged"] is False
+    assert _reviews(ops) == [("review", "alpha", 9, state.target_dir)]
+
+
+def test_code_accept_same_head_no_paid_call(state, capsys):
+    auto_tasks._accept_code(state, _accepting_ops(), 9)
+    capsys.readouterr()
+    ops = _accepting_ops()
+    assert auto_tasks._accept_code(state, ops, 9) == 0
+    assert _reviews(ops) == []
+    assert URL in capsys.readouterr().out
+
+
+def test_code_accept_new_head_reviews_again(state):
+    auto_tasks._accept_code(state, _accepting_ops(H0), 9)
+    ops = _accepting_ops(H1)
+    assert auto_tasks._accept_code(state, ops, 9) == 0
+    assert len(_reviews(ops)) == 1
+    rec = state.ops["code-accept"]
+    assert rec["result"]["head"] == H1 and rec["verdict"]["head"] == H1
+    assert rec["prev"]["head"] == H0
+
+
+def test_code_accept_strict_makes_no_calls(state):
+    state.mode = "strict"
+    ops = _accepting_ops()
+    assert auto_tasks._accept_code(state, ops, 9) == 1
+    assert ops.calls == []

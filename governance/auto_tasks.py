@@ -10,10 +10,12 @@ write-ahead: повтор `make spec-loop` продолжает с места о
 
 from __future__ import annotations
 
+from governance import accept_pr
 from governance import approve_node as an
 from governance import run_state as rs
 from governance import task_bridge as tb
 from governance.ops import Ops
+from governance.review_verdict import positive_on, record_review
 from governance.run_state import RunState, op_complete, op_start, op_status
 
 TASKS_SKIP_TEST = "утверждение задач человеком не требуется (test)"
@@ -198,8 +200,40 @@ def _spec_run(state: RunState, ops: Ops) -> int | None:
     return new[0]
 
 
+def _accept_code(state: RunState, ops: Ops, pr: int) -> int:
+    """Приёмка integration-PR без мержа (`code-accept`): 0 — проверен."""
+    key = "code-accept"
+    if not _mode_gate(state):
+        return 1
+    facts = _read_facts(ops, state, pr)
+    if facts is None:
+        return 1
+    head = str(facts.get("headRefOid") or "")
+    record = state.ops.get(key)
+    if record is None:
+        op_start(state, key, pr=pr)
+    elif record.get("status") == "completed":
+        result = record.get("result") or {}
+        if result.get("head") == head:
+            print(
+                f"spec-loop (test): {result.get('url')} — голова {head[:7]} "
+                f"проверена; {accept_pr.ACCEPT_NO_MERGE_TEST}"
+            )
+            return 0
+        # Новая голова: прежний итог — в `prev`, вердикт не переносится.
+        op_start(state, key, pr=pr, prev=result)
+    test = accept_pr.NoMergeAccept(
+        known_positive=lambda h: positive_on(state, key, h),
+        record_verdict=lambda v: record_review(state, key, v),
+        record_result=lambda r: _complete(state, key, result=r),
+    )
+    return accept_pr.accept(
+        state.repo, state.repo_slug, pr, ops, state.target_dir, test=test
+    )
+
+
 def run_chain(state: RunState, ops: Ops, tasks_pr: int) -> int:
-    """Цепочка до approve-PR включительно: 0 — код можно проверять, 1 — стоп."""
+    """Цепочка до приёмки integration-PR: 0 — код проверен (не вмержен), 1 — стоп."""
     if not _mode_gate(state):
         return 1
     if not _merge_spec_pr(state, ops, "tasks-merge", tasks_pr, "tasks-PR"):
@@ -209,6 +243,7 @@ def run_chain(state: RunState, ops: Ops, tasks_pr: int) -> int:
     approve_pr = state.ops["tasks-approve"]["pr"]
     if not _merge_spec_pr(state, ops, "approve-merge", approve_pr, "approve-PR"):
         return 1
-    if _spec_run(state, ops) is None:
+    run_pr = _spec_run(state, ops)
+    if run_pr is None:
         return 1
-    return 0
+    return _accept_code(state, ops, run_pr)
