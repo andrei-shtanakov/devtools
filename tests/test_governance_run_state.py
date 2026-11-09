@@ -221,3 +221,13 @@ def test_validate_mode_rejects_unknown() -> None:
     rs.validate_mode("test")
     with pytest.raises(ValueError, match="mode="):
         rs.validate_mode("lax")
+
+
+def test_load_rejects_unknown_mode(runs_root) -> None:
+    _mk(runs_root)
+    path = runs_root / "r-0001" / "run.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["mode"] = "fast"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="fast"):
+        rs.load("r-0001")

@@ -148,6 +148,9 @@ class FakeOps:
     merge_code: int = 4
     #: Код `human-merge.sh` (мерж candidate в `test`, план 3c-2).
     human_merge_code: int = 0
+    #: Rollup проверок candidate-PR #777 (`test`, план 3c-3): `None` — факты
+    #: как есть; список — наложение вместе с головой волны (`WAVE_HEAD`).
+    candidate_rollup: list[dict[str, str]] | None = None
     human_merge_dirs: list[str | None] = field(default_factory=list)
     head: str = "deadbeef"
     s8_exit: int = 0
@@ -315,6 +318,12 @@ class FakeOps:
 
     def pr_facts(self, repo_slug: str, pr: int) -> dict:
         self.calls.append(("pr_facts", pr))
+        if pr == 777 and self.candidate_rollup is not None:
+            return {
+                **self.facts,
+                "headRefOid": WAVE_HEAD,
+                "statusCheckRollup": self.candidate_rollup,
+            }
         return self.facts
 
     def pr_closure(self, repo_slug: str, pr: int) -> dict | None:
@@ -11269,6 +11278,7 @@ def _fake_approve_node_waves(monkeypatch, ops: FakeOps) -> list[tuple[int, str]]
 
 def _test_mode_ops(**over: Any) -> FakeOps:
     facts = {"state": "OPEN", "baseRefName": "master", "headRefOid": FINALIZE_HEAD}
+    over.setdefault("candidate_rollup", [{"name": "ci", "conclusion": "SUCCESS"}])
     return FakeOps(facts=facts, **over)
 
 
@@ -11438,6 +11448,55 @@ def test_test_mode_finalize_reattests_when_head_moved(
     assert resumed.ops["finalize-1"]["prev"] == {"head": "a" * 40, "review_exit": 0}
     assert resumed.ops[key]["status"] == al.STATUS_COMPLETED
     assert resumed.wave == 2
+
+
+def test_test_mode_candidate_waits_checks_before_merge(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    _set_cfg_mode("test")
+    ops = _test_mode_ops(candidate_rollup=[{"name": "ci", "conclusion": "FAILURE"}])
+    state = _refused_wave1(tmp_path, monkeypatch, ops, "r-3c3-red")
+    assert state.status == "stopped_merge_refused"
+    assert not any(c[0] == "human_merge" for c in ops.calls)
+    reason = (rs.run_dir("r-3c3-red") / "stop-reason.txt").read_text()
+    assert "ci" in reason and "#777" in reason
+
+
+def test_test_mode_candidate_merges_after_green_checks(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    _set_cfg_mode("test")
+    ops = _test_mode_ops(candidate_rollup=[{"name": "ci", "conclusion": "SUCCESS"}])
+    _fake_wave_adapters(monkeypatch, ops)
+    _edge_pass(monkeypatch)
+    _fake_approve_node_waves(monkeypatch, ops)
+    locked_runner.start(**_waves_kwargs(tmp_path, "r-3c3-green", ops))
+    merges = [c for c in ops.calls if c[0] == "human_merge"]
+    assert merges and set(merges) == {("human_merge", 777, WAVE_HEAD)}
+
+
+def test_reattest_keeps_prev_when_head_unreadable(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    _set_cfg_mode("test")
+    ops = _test_mode_ops(human_merge_code=3)
+    state = _refused_wave1(tmp_path, monkeypatch, ops, "r-3c3-prev")
+    state.ops["finalize-1"] = {
+        "status": "completed",
+        "finalize_pr": 801,
+        "review_exit": 0,
+        "head": "a" * 40,
+    }
+    old = state.ops.pop("finalize-1")
+
+    def boom(state_, ops_, pr):
+        raise RuntimeError("форджа недоступна")
+
+    monkeypatch.setattr(runner.an, "pr_head", boom)
+    prev = {"head": old["head"], "review_exit": old["review_exit"]}
+    assert not runner._attest_finalize(state, ops, "finalize-1", 801, prev=prev)
+    assert state.ops["finalize-1"]["prev"] == {"head": "a" * 40, "review_exit": 0}
+    assert rs.load("r-3c3-prev").ops["finalize-1"]["prev"] == prev
 
 
 def test_test_mode_without_recorded_edge_pass_does_not_merge(

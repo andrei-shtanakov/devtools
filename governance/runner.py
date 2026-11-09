@@ -1252,6 +1252,16 @@ def _auto_merge_candidate(state: RunState, ops: Ops, request: str, pr: int) -> b
     # оставляет её в журнале (аудит), отказ мержа её не снимает.
     state.ops[request]["act_skip"] = ACT_SKIP_TEST
     save(state)
+    refusal = an._await_required_checks(state, ops, pr, str(head), kind="candidate-PR")
+    if refusal is not None:
+        _stop_with_comment(
+            state,
+            ops,
+            "stopped_merge_refused",
+            f"волна {state.wave}: candidate-PR #{pr} заявки {request} не "
+            f"вмержен — {refusal.reason}",
+        )
+        return False
     rc = ops.human_merge(state.repo, pr, str(head), target_dir=state.target_dir)
     if rc != 0:
         _stop_with_comment(
@@ -1307,7 +1317,7 @@ def _attest_finalize(
     `prev` — прежняя запись при переаттестации (голова, код), сохраняется."""
     if op_status(state, att_key) == "completed":
         return True
-    _ensure_started(state, att_key)
+    _ensure_started(state, att_key, **({"prev": prev} if prev is not None else {}))
     attested = _finalize_head(state, ops, pr)
     if attested is None:
         return False
@@ -1929,10 +1939,12 @@ def facts_from(
     )
 
 
-def _ensure_started(state: RunState, key: str) -> None:
-    """`op_start`, если операция ещё `new`; `started`/`completed` не трогает."""
+def _ensure_started(state: RunState, key: str, **fields: object) -> None:
+    """`op_start`, если операция ещё `new`; `started`/`completed` не трогает.
+
+    `fields` уходят в запись write-ahead (см. `op_start`)."""
     if op_status(state, key) == "new":
-        op_start(state, key)
+        op_start(state, key, **fields)
 
 
 def _stop_with_comment(state: RunState, ops: Ops, status: str, body: str) -> None:
