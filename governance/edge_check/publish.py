@@ -94,6 +94,26 @@ def level_verdict(records: dict[tuple[str, str], dict]) -> str:
     return "FAIL" if "FAIL" in verdicts else "PASS"
 
 
+def edge_verdict(head: str, records: dict[tuple[str, str], dict]) -> dict:
+    """Запись вердикта edge-check для операции candidate (план 3c-2).
+
+    Голова candidate-PR, вердикт уровня и хэши входа по ребру (subject и
+    основания из записей прогона) — то, на чём автоматический шаг `test`
+    сверяет, что положительный вердикт относится к этим байтам.
+    """
+    return {
+        "head": head,
+        "verdict": level_verdict(records),
+        "inputs": {
+            f"{node}--{edge}": sorted(
+                str(f.get("sha256", ""))
+                for f in [*record.get("subject", []), *record.get("bases", [])]
+            )
+            for (node, edge), record in sorted(records.items())
+        },
+    }
+
+
 def checklist_body(
     state: RunState,
     head: str,
@@ -224,13 +244,18 @@ def publish_wave(
     effective = _effective_reviews(reviews)
     if "CHANGES_REQUESTED" in effective.values():
         return CODE_CHANGES
+    # `test`: одна учётка — автор и ревьюер, GitHub не даёт одобрить свой
+    # PR, и edge-check едет комментарием; дедуп — по маркеру этой головы
+    # при `COMMENTED`. Неизвестный режим — strict (план 3c-2).
+    test = state.mode == "test"
+    event, published = ("COMMENT", "COMMENTED") if test else ("APPROVE", "APPROVED")
     marker_line = f"<!-- {EDGE_MARKER} head={head} -->"
     latest = ops.latest_review_body(state.repo_slug, pr) or ""
-    if marker_line in latest and effective.get(review_login()) == "APPROVED":
+    if marker_line in latest and effective.get(review_login()) == published:
         return CODE_OK
     body = checklist_body(state, head, records, op.get("act"))
     if not ops.publish_review(
-        state.repo_slug, pr, event="APPROVE", body=body, marker=EDGE_MARKER
+        state.repo_slug, pr, event=event, body=body, marker=EDGE_MARKER
     ):
         return CODE_UNRESOLVED
     return CODE_OK

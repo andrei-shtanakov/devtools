@@ -43,6 +43,12 @@ reason = "`merge-pr.sh` — единственный путь агентског
 
 [[site]]
 module = "governance/ops.py"
+function = "human_merge"
+count = 1
+reason = "`human-merge.sh --expect-head` — мерж candidate раннером в mode = \"test\" (сам authority-root)"
+
+[[site]]
+module = "governance/ops.py"
 function = "_discovery"
 count = 1
 reason = "discovery CLI соседа через `uv run --frozen --project` (стадия Need)"

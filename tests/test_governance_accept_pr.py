@@ -82,7 +82,15 @@ class _Ops:
             return facts.unavailable(f"head origin/{branch}: стенд")
         return facts.Fact(facts.Outcome.FOUND, self.live_tip)
 
-    def merge(self, repo_name: str, pr: int, sha: str, base: str | None = None) -> int:
+    def merge(
+        self,
+        repo_name: str,
+        pr: int,
+        sha: str,
+        base: str | None = None,
+        *,
+        target_dir: str | None = None,
+    ) -> int:
         self.calls.append(("merge", pr, sha))
         self.merge_args = (repo_name, pr, sha, base)
         return 0 if self.merge_ok else self.merge_code

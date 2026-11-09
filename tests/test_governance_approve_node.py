@@ -283,7 +283,7 @@ class Ops(RealOps):
             return None
         return list(self.forge.reviews.get(pr, self.forge.default_reviews))
 
-    def review(self, repo_name: str, pr: int) -> int:
+    def review(self, repo_name: str, pr: int, *, target_dir: str | None = None) -> int:
         """`review-pr.sh` стенда: код из форджи, без прибора; на 0 —
         scope-аттестация опубликована (одобряющее ревью AGENT)."""
         self.forge.review_calls.append(pr)
@@ -313,7 +313,15 @@ class Ops(RealOps):
         ]
         return bodies[-1] if bodies else None
 
-    def merge(self, repo_name: str, pr: int, sha: str, base: str | None = None) -> int:
+    def merge(
+        self,
+        repo_name: str,
+        pr: int,
+        sha: str,
+        base: str | None = None,
+        *,
+        target_dir: str | None = None,
+    ) -> int:
         """Агентский мерж — зеркало гвардов `merge-pr.sh`, не сети.
 
         Лейбл `human-merge-required` и уехавшая голова отказывают так же,
@@ -3091,6 +3099,99 @@ def test_finalize_merge_policy_axes(tmp_path: Path, monkeypatch) -> None:
     assert (who, "authority" in why) == ("human", True)
 
 
+def test_finalize_merge_policy_test_mode_skips_actor_class(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """План 3c-2: в `test` пропускается только сравнение класса актора —
+    пропуск назван дословно; стоп-кран `agent_merge_allowed` и ось
+    Authority (`Мерж: человек`) остаются; strict — прежний."""
+    assert an.ACTOR_SKIP_TEST == "класс актора не применяется (test)"
+    for actor in ("unknown", "human", "agent"):
+        monkeypatch.setattr(
+            an,
+            "load_safety",
+            lambda actor=actor: mg.Safety(agent_merge_allowed=True, actor_class=actor),
+        )
+        assert an.finalize_merge_policy(str(tmp_path), mode="test") == (
+            "agent",
+            an.ACTOR_SKIP_TEST,
+        ), actor
+    monkeypatch.setattr(
+        an,
+        "load_safety",
+        lambda: mg.Safety(agent_merge_allowed=False, actor_class="agent"),
+    )
+    who, why = an.finalize_merge_policy(str(tmp_path), mode="test")
+    assert (who, "safety" in why) == ("human", True), "стоп-кран в силе"
+    monkeypatch.setattr(
+        an,
+        "load_safety",
+        lambda: mg.Safety(agent_merge_allowed=True, actor_class="agent"),
+    )
+    (tmp_path / "CLAUDE.md").write_text("Мерж: человек\n", encoding="utf-8")
+    who, why = an.finalize_merge_policy(str(tmp_path), mode="test")
+    assert (who, "authority" in why) == ("human", True)
+    monkeypatch.setattr(
+        an,
+        "load_safety",
+        lambda: mg.Safety(agent_merge_allowed=True, actor_class="human"),
+    )
+    (tmp_path / "CLAUDE.md").unlink()
+    assert an.finalize_merge_policy(str(tmp_path))[0] == "human", "strict прежний"
+
+
+class _HeadOps:
+    """Факты finalize-PR: только голова; ревью форджи в `test` не читаются."""
+
+    def __init__(self, head: str) -> None:
+        self.head = head
+
+    def pr_facts(self, repo_slug: str, pr: int) -> dict:
+        return {"state": "OPEN", "headRefOid": self.head}
+
+    def pr_reviews(self, repo_slug: str, pr: int) -> list[dict] | None:
+        raise AssertionError("в test одобрение форджи не читается")
+
+
+def _test_state(att: dict | None, mode: str = "test") -> object:
+    from types import SimpleNamespace
+
+    ops = {"finalize-1": {"status": "completed", **att}} if att else {}
+    return SimpleNamespace(mode=mode, repo_slug="o/r", ops=ops)
+
+
+def test_missing_approving_review_test_mode_reads_journal_attestation() -> None:
+    head = "e" * 40
+    ok = _test_state({"finalize_pr": 801, "review_exit": 0, "head": head})
+    assert an._missing_approving_review(ok, _HeadOps(head), 801) is None  # type: ignore[arg-type]
+
+    old = _test_state({"finalize_pr": 801, "review_exit": 0, "head": "a" * 40})
+    refusal = an._missing_approving_review(old, _HeadOps(head), 801)  # type: ignore[arg-type]
+    assert refusal is not None and "голов" in refusal and head[:8] in refusal
+
+    failed = _test_state({"finalize_pr": 801, "review_exit": 6, "head": head})
+    refusal = an._missing_approving_review(failed, _HeadOps(head), 801)  # type: ignore[arg-type]
+    assert refusal is not None and "6" in refusal
+
+    none = _test_state(None)
+    refusal = an._missing_approving_review(none, _HeadOps(head), 801)  # type: ignore[arg-type]
+    assert refusal is not None and "аттестац" in refusal
+
+
+def test_missing_approving_review_strict_ignores_journal() -> None:
+    """strict: запись журнала одобрением не считается — читается форджа."""
+
+    class Ops(_HeadOps):
+        def pr_reviews(self, repo_slug: str, pr: int) -> list[dict] | None:
+            return []
+
+    head = "e" * 40
+    state = _test_state(
+        {"finalize_pr": 801, "review_exit": 0, "head": head}, mode="strict"
+    )
+    assert an._missing_approving_review(state, Ops(head), 801) is not None  # type: ignore[arg-type]
+
+
 def test_malformed_envelope_is_not_merged_by_agent(world: World, monkeypatch) -> None:
     """Подсадка: конверт, тронувший тело узла, агент НЕ мержит — гейт формы
     дифа стоит до `ops.merge`, PR остаётся человеку, заявка жива."""
@@ -3929,3 +4030,44 @@ def test_finalize_merge_policy_config_error_named(tmp_path: Path, monkeypatch) -
     monkeypatch.delenv("REVIEW_LOGIN", raising=False)
     who, why = an.finalize_merge_policy(str(tmp_path))
     assert who == "human" and why.startswith("конфиг DarkFactory: ")
+    who, why = an.finalize_merge_policy(str(tmp_path), mode="test")
+    assert who == "human" and why.startswith("конфиг DarkFactory: ")
+
+
+# --- target_dir доходит до ops.merge только в test-прогоне (план 3c-2) -------
+
+
+class _MergeSpyOps:
+    """Минимум `Ops` для `_try_agent_merge` с подменёнными гейтами."""
+
+    def __init__(self) -> None:
+        self.merge_kwargs: list[dict] = []
+
+    def rev_parse(self, target_dir: str, ref: str) -> str:
+        return "a" * 40
+
+    def merge(self, repo_name, pr, sha, base=None, **kwargs) -> int:
+        self.merge_kwargs.append(kwargs)
+        return 0
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [("strict", {}), ("test", {"target_dir": "/elsewhere/repo"})],
+)
+def test_try_agent_merge_passes_target_dir_only_in_test(
+    monkeypatch, mode: str, expected: dict
+) -> None:
+    """strict-вызов `ops.merge` без нового kwarg (стенды act-тестов его не
+    принимают); test — с `target_dir` цели."""
+    monkeypatch.setattr(an, "_missing_approving_review", lambda *a, **k: None)
+    monkeypatch.setattr(an, "_await_required_checks", lambda *a, **k: None)
+    state = type(
+        "S", (), {"mode": mode, "target_dir": "/elsewhere/repo", "repo": "repo"}
+    )()
+    ops = _MergeSpyOps()
+
+    result = an._try_agent_merge(state, ops, (), {}, [], 5, "a" * 40, form=lambda: None)
+
+    assert result is None
+    assert ops.merge_kwargs == [expected]
