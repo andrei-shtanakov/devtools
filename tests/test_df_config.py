@@ -472,6 +472,14 @@ def test_banner_lists_relaxations_in_test(tmp_path: Path) -> None:
             "белый список целей: цель — из targets.toml рядом с конфигом,"
             " манифест флота необязателен"
         ),
+        (
+            "одобрение ревью: вердикт публикуется комментарием"
+            " (GitHub не даёт одобрить свой PR), вердикт обязателен"
+        ),
+        (
+            "корень доверия df (/etc/df/trust.toml) не используется:"
+            " акт — по мержу (режим до миграции)"
+        ),
     )
     assert df_config.test_banner(cfg) == (
         "режим test: выключено — " + "; ".join(df_config.TEST_RELAXATIONS)
