@@ -146,6 +146,8 @@ class FakeOps:
     merge_ok: bool = True
     # Код отказа обвязки: 4 — форджа отклонила, 3 — гвард.
     merge_code: int = 4
+    #: Код `human-merge.sh` (мерж candidate в `test`, план 3c-2).
+    human_merge_code: int = 0
     head: str = "deadbeef"
     s8_exit: int = 0
     s8_output: str = ""
@@ -333,6 +335,16 @@ class FakeOps:
         if self.merge_ok:
             self.merged.append((pr, sha))
         return 0 if self.merge_ok else self.merge_code
+
+    def human_merge(
+        self, repo_name: str, pr: int, sha: str, *, target_dir: str | None = None
+    ) -> int:
+        """`human-merge.sh` стенда (план 3c-2): код из `human_merge_code`;
+        на 0 candidate-PR становится MERGED."""
+        self.calls.append(("human_merge", pr, sha))
+        if self.human_merge_code == 0:
+            self.facts = {**self.facts, "state": "MERGED"}
+        return self.human_merge_code
 
     def comment(self, repo_slug: str, pr: int, body: str) -> None:
         self.calls.append(("comment", pr, body))
@@ -11119,8 +11131,9 @@ def test_test_mode_candidate_records_edge_verdict_with_head(
         "load_level_records",
         lambda run_dir, wave: {("charter", "brief"): record},
     )
+    ops.human_merge_code = 3  # мерж отказан — проверяется только запись
     state = locked_runner.start(**_waves_kwargs(tmp_path, "r-3c2-edge", ops))
-    assert state.mode == "test" and state.status == "waiting_human_merge"
+    assert state.mode == "test" and state.status == "stopped_merge_refused"
     assert rs.load("r-3c2-edge").ops["candidate-1"]["edge_verdict"] == {
         "head": WAVE_HEAD,
         "verdict": "PASS",
@@ -11147,8 +11160,8 @@ def test_test_mode_finalize_records_head_and_resume_reuses_it(
     tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     _set_cfg_mode("test")
-    ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
-    _waiting_wave1(tmp_path, monkeypatch, ops, "r-3c2-fin")
+    ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"}, human_merge_code=3)
+    _refused_wave1(tmp_path, monkeypatch, ops, "r-3c2-fin")
     # Второй approve-node (агентский мерж) не довёл — пауза после аттестации.
     calls = _fake_approve_node(monkeypatch, ops, merge_on_call=3)
     ops.facts = {
@@ -11163,6 +11176,7 @@ def test_test_mode_finalize_records_head_and_resume_reuses_it(
         "finalize_pr": 801,
         "review_exit": 0,
         "head": FINALIZE_HEAD,
+        "actor_skip": "test",
     }
     resumed = locked_runner.resume("r-3c2-fin", ops)
     assert calls == ["charter", "charter", "charter"]
@@ -11174,8 +11188,8 @@ def test_test_mode_finalize_unreadable_head_stops_without_review(
     tmp_path: Path, runs_root, monkeypatch
 ) -> None:
     _set_cfg_mode("test")
-    ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
-    _waiting_wave1(tmp_path, monkeypatch, ops, "r-3c2-nohead")
+    ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"}, human_merge_code=3)
+    _refused_wave1(tmp_path, monkeypatch, ops, "r-3c2-nohead")
     _fake_approve_node(monkeypatch, ops)
     ops.facts = {"state": "MERGED", "baseRefName": "master"}
     stopped = locked_runner.resume("r-3c2-nohead", ops)
@@ -11183,3 +11197,244 @@ def test_test_mode_finalize_unreadable_head_stops_without_review(
     assert not any(c[0] == "review" for c in ops.calls)
     reason = (rs.run_dir("r-3c2-nohead") / "stop-reason.txt").read_text()
     assert "#801" in reason and "голова" in reason
+
+
+# --- План 3c-2, Task 2: мерж candidate раннером в `test` --------------------
+
+
+def _edge_pass(monkeypatch) -> None:
+    """Записи edge-check уровня — PASS (стенд адаптеров их не пишет)."""
+    record = {"verdict": "PASS", "subject": [], "bases": []}
+    monkeypatch.setattr(
+        runner.edge_coordinator,
+        "load_level_records",
+        lambda run_dir, wave: {("node", "edge"): record},
+    )
+
+
+def _refused_wave1(tmp_path, monkeypatch, ops: FakeOps, run_id: str):
+    """`test`: мерж candidate отказан (`human_merge_code` ≠ 0) — прогон стоит
+    на волне 1, candidate открыт; дальше тест ведёт его сам."""
+    _fake_wave_adapters(monkeypatch, ops)
+    _edge_pass(monkeypatch)
+    state = locked_runner.start(**_waves_kwargs(tmp_path, run_id, ops))
+    assert state.status == "stopped_merge_refused" and state.wave == 1
+    return state
+
+
+def _fake_approve_node_waves(monkeypatch, ops: FakeOps) -> list[tuple[int, str]]:
+    """approve_node стенда по заявке: первый вызов — факт мержа candidate и
+    finalize-PR, второй — заявка `completed` и узлы волны approved в base."""
+    from governance import approval_ledger as al
+
+    calls: list[tuple[int, str]] = []
+    seen: dict[str, int] = {}
+
+    def approve(state, ops_, node, *, legacy_bundle=None):
+        calls.append((state.wave, node))
+        ops.calls.append(("approve_node", node))
+        key = state.ops[f"candidate-{state.wave}"]["request"]
+        op = state.ops[key]
+        seen[key] = seen.get(key, 0) + 1
+        if seen[key] == 1:
+            op.update(
+                merged_by="alice",
+                merged_at="t",
+                merge_commit="m" * 40,
+                authorization={"login": "alice", "policy": "p"},
+            )
+            al.record_finalize_pr(state, key, 800 + state.wave)
+        else:
+            al.record_finalize_merge_commit(state, key, f"f{state.wave:039d}")
+            al.complete_request(state, key)
+            for wave_node in _WAVE_NODES[state.wave]:
+                path = f"{BUNDLE_DIR}/{_NODE_FILE[wave_node]}"
+                ops.base_files[path] = _approved(wave_node)
+        rs.save(state)
+        return runner.an.ApprovalOutcome("ok", request=key)
+
+    monkeypatch.setattr(runner.an, "approve_node", approve)
+    return calls
+
+
+def _test_mode_ops(**over: Any) -> FakeOps:
+    facts = {"state": "OPEN", "baseRefName": "master", "headRefOid": FINALIZE_HEAD}
+    return FakeOps(facts=facts, **over)
+
+
+def test_test_mode_candidate_is_merged_by_runner_then_finalized(
+    tmp_path: Path, runs_root, monkeypatch, capsys
+) -> None:
+    _set_cfg_mode("test")
+    ops = _test_mode_ops()
+    _fake_wave_adapters(monkeypatch, ops)
+    _edge_pass(monkeypatch)
+    calls = _fake_approve_node_waves(monkeypatch, ops)
+
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-3c2-auto", ops))
+
+    assert runner.ACT_SKIP_TEST == "акт человека не требуется (test)"
+    names = [c[0] for c in ops.calls]
+    first = names.index("human_merge")
+    assert ops.calls[first] == ("human_merge", 777, WAVE_HEAD), "пин головы candidate"
+    assert names.index("publish_wave") < first < names.index("approve_node")
+    request = state.ops["candidate-1"]["request"]
+    assert state.ops[request]["act_skip"] == "test"
+    out = capsys.readouterr().out
+    assert runner.ACT_SKIP_TEST in out
+    assert f"finalize — {runner.an.ACTOR_SKIP_TEST}" in out
+    assert state.ops["finalize-1"] == {
+        "status": "completed",
+        "finalize_pr": 801,
+        "review_exit": 0,
+        "head": FINALIZE_HEAD,
+        "actor_skip": "test",
+    }
+    assert calls[:2] == [(1, "charter"), (1, "charter")]
+    assert state.wave > 1, "следующая волна в том же вызове"
+
+
+def test_test_mode_waves_run_to_completion_without_a_human(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    """Сквозной `test` W1→W5: каждый candidate мержит раннер, finalize —
+    агент; прогон доходит до `completed`, ни разу не встав на человека."""
+    _set_cfg_mode("test")
+    ops = _test_mode_ops()
+    _fake_wave_adapters(monkeypatch, ops)
+    _edge_pass(monkeypatch)
+    _fake_approve_node_waves(monkeypatch, ops)
+    statuses: list[str] = []
+    real_save = runner.save
+
+    def spy_save(state):
+        statuses.append(state.status)
+        real_save(state)
+
+    monkeypatch.setattr(runner, "save", spy_save)
+
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-3c2-e2e", ops))
+
+    assert state.status == "completed" and state.wave == 5
+    assert not [s for s in statuses if s.startswith("waiting_human")], statuses
+    merges = [c for c in ops.calls if c[0] == "human_merge"]
+    assert merges == [("human_merge", 777, WAVE_HEAD)] * 5
+    for wave in range(1, 6):
+        request = state.ops[f"candidate-{wave}"]["request"]
+        assert state.ops[request]["act_skip"] == "test"
+        assert state.ops[f"finalize-{wave}"]["review_exit"] == 0
+        assert state.ops[f"finalize-{wave}"]["actor_skip"] == "test"
+    assert not any("ждёт человеческого мержа" in c for c in ops.comments)
+    assert rs.load("r-3c2-e2e").status == "completed"
+
+
+def test_test_mode_merge_refused_stops_before_finalize(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    """Голова уехала — `human-merge.sh` отказал (3): стоп с кодом и командой
+    повтора; finalize не начат. Повтор `resume` мержит снова."""
+    _set_cfg_mode("test")
+    ops = _test_mode_ops(human_merge_code=3)
+    calls = _fake_approve_node_waves(monkeypatch, ops)
+    state = _refused_wave1(tmp_path, monkeypatch, ops, "r-3c2-refused")
+
+    assert calls == [] and "finalize-1" not in state.ops
+    request = state.ops["candidate-1"]["request"]
+    assert "act_skip" not in state.ops[request]
+    reason = (rs.run_dir("r-3c2-refused") / "stop-reason.txt").read_text()
+    assert "human-merge.sh" in reason and "3" in reason and "resume" in reason
+    assert "#777" in reason
+
+    ops.human_merge_code = 0
+    resumed = locked_runner.resume("r-3c2-refused", ops)
+    merges = [c for c in ops.calls if c[0] == "human_merge"]
+    assert merges[:2] == [("human_merge", 777, WAVE_HEAD)] * 2, "повтор той же головы"
+    assert resumed.ops[request]["act_skip"] == "test"
+    assert resumed.ops["finalize-1"]["status"] == "completed"
+    assert resumed.wave > 1
+
+
+def test_strict_candidate_pauses_and_never_auto_merges(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    ops = _test_mode_ops()
+    _fake_wave_adapters(monkeypatch, ops)
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-3c2-strict", ops))
+    assert state.mode == "strict" and state.status == "waiting_human_merge"
+    assert not any(c[0] == "human_merge" for c in ops.calls)
+    request = state.ops["candidate-1"]["request"]
+    assert "act_skip" not in state.ops[request]
+    again = locked_runner.resume("r-3c2-strict", ops)
+    assert again.status == "waiting_human_merge"
+    assert not any(c[0] == "human_merge" for c in ops.calls)
+
+
+def test_test_mode_finalize_reattests_when_head_moved(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    """Записанная аттестация finalize-PR на старой голове: resume
+    переаттестует текущую голову (однократно) и мержит, а не стоит."""
+    from governance import approval_ledger as al
+
+    _set_cfg_mode("test")
+    ops = _test_mode_ops(human_merge_code=3)
+    state = _refused_wave1(tmp_path, monkeypatch, ops, "r-3c2-moved")
+    key = state.ops["candidate-1"]["request"]
+    heads_at_review: list[str] = []
+
+    def approve(state, ops_, node, *, legacy_bundle=None):
+        op = state.ops[key]
+        if not op.get("merged_by"):
+            op.update(
+                merged_by="alice",
+                merged_at="t",
+                merge_commit="m" * 40,
+                authorization={"login": "alice", "policy": "p"},
+            )
+            al.record_finalize_pr(state, key, 801)
+        att = state.ops.get("finalize-1") or {}
+        if att.get("status") == "completed" and att.get("head") == FINALIZE_HEAD:
+            al.record_finalize_merge_commit(state, key, "f" * 40)
+            al.complete_request(state, key)
+        rs.save(state)
+        return runner.an.ApprovalOutcome("ok", request=key)
+
+    real_review = ops.review
+
+    def review(repo_name: str, pr: int) -> int:
+        heads_at_review.append(ops.facts["headRefOid"])
+        return real_review(repo_name, pr)
+
+    monkeypatch.setattr(runner.an, "approve_node", approve)
+    monkeypatch.setattr(ops, "review", review)
+    state.ops["finalize-1"] = {
+        "status": "completed",
+        "finalize_pr": 801,
+        "review_exit": 0,
+        "head": "a" * 40,
+    }
+    rs.save(state)
+    ops.facts = {**ops.facts, "state": "MERGED"}
+    ops.base_files = {f"{BUNDLE_DIR}/00-charter.md": _approved("charter")}
+
+    resumed = locked_runner.resume("r-3c2-moved", ops)
+
+    assert heads_at_review == [FINALIZE_HEAD], "одна переаттестация текущей головы"
+    assert resumed.ops["finalize-1"]["head"] == FINALIZE_HEAD
+    assert resumed.ops[key]["status"] == al.STATUS_COMPLETED
+    assert resumed.wave == 2
+
+
+def test_test_mode_without_recorded_edge_pass_does_not_merge(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    """Edge-вердикт уровня не PASS (записей нет — ERROR): раннер не мержит,
+    стоп с названной причиной."""
+    _set_cfg_mode("test")
+    ops = _test_mode_ops()
+    _fake_wave_adapters(monkeypatch, ops)
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-3c2-noedge", ops))
+    assert state.status == "stopped_review"
+    assert not any(c[0] == "human_merge" for c in ops.calls)
+    reason = (rs.run_dir("r-3c2-noedge") / "stop-reason.txt").read_text()
+    assert "edge-вердикт" in reason and "PASS" in reason

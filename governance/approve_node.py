@@ -68,7 +68,11 @@ if TYPE_CHECKING:
     from governance.act_node import Creation
 
 
-def finalize_merge_policy(target_dir: str) -> tuple[str, str]:
+#: Именованный пропуск оси Safety на finalize в `mode = "test"` (план 3c-2).
+ACTOR_SKIP_TEST = "класс актора не применяется (test)"
+
+
+def finalize_merge_policy(target_dir: str, *, mode: str = "strict") -> tuple[str, str]:
     """Кто мержит финализирующий PR: `agent` по умолчанию, `human` по
     настройке (ADR-ECO-011 D5).
 
@@ -80,10 +84,16 @@ def finalize_merge_policy(target_dir: str) -> tuple[str, str]:
     `REVIEW_LOGIN`, иначе `accounts.agent` конфига) — агент; любой
     `unknown` читается как human (fail-closed). Ревью-вердикт не
     требуется: конверт — три поля, и приёмка заявки сверяет их байт в байт.
+
+    `mode = "test"` (план 3c-2): одна учётка — и агент, и человек, класс
+    актора смысла не несёт; после оси Authority — `("agent",
+    ACTOR_SKIP_TEST)` без чтения Safety. Иное значение — `strict`.
     """
     authority = build_authority(Path(target_dir), None)
     if authority.effective() != "agent":
         return "human", "политика authority (экосистема/репо) — человек"
+    if mode == "test":
+        return "agent", ACTOR_SKIP_TEST
     try:
         safety = load_safety()
     except df_config.ConfigError as exc:
@@ -2381,7 +2391,10 @@ def _reconcile_finalize(
         # транзиентном UNKNOWN форджи или сети. Гейт формы и пин головы
         # делают повтор безопасным; лейбл человеку обвязка чтит сама.
         head = op.get("finalize_head_sha")
-        if head is not None and finalize_merge_policy(state.target_dir)[0] == "agent":
+        if (
+            head is not None
+            and finalize_merge_policy(state.target_dir, mode=state.mode)[0] == "agent"
+        ):
             reason = _try_agent_merge(
                 state, ops, dag, op, list(op["nodes"]), pr, str(head)
             )
@@ -2682,7 +2695,7 @@ def _publish_envelope(
     # ADR-ECO-011 D5: финализирующий PR подписи не создаёт — по умолчанию
     # его мержит агент в этом же вызове; лейбл «человеку» — только по
     # human-политике (тогда обвязка отказывает по лейблу, как раньше).
-    who, why = finalize_merge_policy(state.target_dir)
+    who, why = finalize_merge_policy(state.target_dir, mode=state.mode)
     finalize_head = str(state.ops[key]["finalize_head_sha"])
     pr = _adopt_or_create_pr(
         state,
@@ -2813,6 +2826,8 @@ def _missing_approving_review(
     любого, у кого есть доступ, и требовать именно учётку контура значило
     бы отказывать там, где форджа пропускает.
     """
+    if state.mode == "test":
+        return _missing_journal_attestation(state, ops, pr, kind=kind, retry=retry)
     reviews = ops.pr_reviews(state.repo_slug, pr)
     if reviews is None:
         return (
@@ -2835,6 +2850,47 @@ def _missing_approving_review(
         "PR, подтверждённого как prose-only, она публикуется без вызова "
         f"модели), затем повторите {retry or 'тот же вызов `--approve-node`'}"
     )
+
+
+def _missing_journal_attestation(
+    state: RunState, ops: Ops, pr: int, *, kind: str, retry: str | None
+) -> str | None:
+    """`test` (план 3c-2): одобрение — успешная scope-аттестация PR в журнале.
+
+    Одна учётка не может одобрить свой PR, и аттестация в `test` —
+    `COMMENTED`-обзор, а не `APPROVED`. Поэтому вместо ревью форджи
+    читается последняя запись журнала с `finalize_pr == pr` и
+    `review_exit`: None — `review_exit == 0` на текущей голове PR; иначе
+    отказ с названной причиной (нет записи, ненулевой код, другая голова).
+    """
+    attested = [
+        op
+        for op in state.ops.values()
+        if isinstance(op, dict) and op.get("finalize_pr") == pr and "review_exit" in op
+    ]
+    again = retry or "тот же вызов `--approve-node`"
+    if not attested:
+        return (
+            f"агентский мерж НЕ выполнен — в журнале нет scope-аттестации "
+            f"{kind} #{pr} (режим test). Процедура: аттестация "
+            f"(`review-pr.sh {pr}`), затем повторите {again}"
+        )
+    record = attested[-1]
+    if record["review_exit"] != 0:
+        return (
+            f"агентский мерж НЕ выполнен — scope-аттестация {kind} #{pr} в "
+            f"журнале неуспешна (review-pr.sh вернул {record['review_exit']}, "
+            "режим test)"
+        )
+    head = pr_head(state, ops, pr)
+    if record.get("head") != head:
+        return (
+            f"агентский мерж НЕ выполнен — scope-аттестация {kind} #{pr} "
+            f"записана на голове {str(record.get('head'))[:8]}, а голова PR "
+            f"{str(head)[:8]} (режим test). Процедура: переаттестуйте текущую "
+            f"голову, затем повторите {again}"
+        )
+    return None
 
 
 def _try_agent_merge(

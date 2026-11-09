@@ -277,6 +277,10 @@ class Ops(Protocol):
         self, repo_name: str, pr: int, sha: str, base: str | None = None
     ) -> int: ...
 
+    def human_merge(
+        self, repo_name: str, pr: int, sha: str, *, target_dir: str | None = None
+    ) -> int: ...
+
     def close_pr(self, repo_slug: str, pr: int, comment: str) -> bool: ...
 
     def remote_branch_head_fact(self, repo_slug: str, branch: str) -> Fact[str]: ...
@@ -2092,6 +2096,27 @@ class RealOps(BriefFactsMixin):
         # поверх отказа гварда и предлагал повтор, который упирался в тот же
         # гвард (ревью #183, круг 7).
         return done.returncode
+
+    def human_merge(
+        self, repo_name: str, pr: int, sha: str, *, target_dir: str | None = None
+    ) -> int:
+        """Мерж candidate-PR раннером в `mode = "test"` (план 3c-2).
+
+        `sh human-merge.sh <repo> <pr> --expect-head <sha>` из корня devtools:
+        мержит профиль человека конфига (`accounts.human`), пин головы —
+        голова candidate, на которой записан edge-вердикт; уехавшая голова —
+        отказ обвязки. Код возврата — как есть (0 — вмержен). `target_dir`
+        принят для единообразия с `review`/`merge` (FLEET_ROOT — Task 3).
+        """
+        argv = [
+            "sh",
+            str(DEVTOOLS_ROOT / "human-merge.sh"),
+            repo_name,
+            str(pr),
+            "--expect-head",
+            sha,
+        ]
+        return subprocess.run(argv, cwd=DEVTOOLS_ROOT, check=False).returncode
 
     def comment(self, repo_slug: str, pr: int, body: str) -> None:
         """gh pr comment."""

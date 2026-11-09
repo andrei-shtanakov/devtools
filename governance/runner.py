@@ -529,6 +529,7 @@ def advance(state: RunState, ops: Ops, *, lock: rl.RunLock) -> RunState:
         return state
     _check_author_config(state.target_dir, state.bundle_dir, state.author_backend)
     token = _LOCK_FD.set(lock.fd)
+    lock_token = _RUN_LOCK.set(lock)
     try:
         for step in _STEPS:
             if state.status != "running":
@@ -536,6 +537,7 @@ def advance(state: RunState, ops: Ops, *, lock: rl.RunLock) -> RunState:
             if not step(state, ops):
                 break
     finally:
+        _RUN_LOCK.reset(lock_token)
         _LOCK_FD.reset(token)
     return state
 
@@ -545,6 +547,14 @@ def advance(state: RunState, ops: Ops, *, lock: rl.RunLock) -> RunState:
 _LOCK_FD: contextvars.ContextVar[int | None] = contextvars.ContextVar(
     "_LOCK_FD", default=None
 )
+#: Лок текущего `advance`: шаг candidate в `test` продолжает finalize волны
+#: в том же вызове и под тем же локом (план 3c-2), не меняя сигнатур шагов.
+_RUN_LOCK: contextvars.ContextVar[rl.RunLock | None] = contextvars.ContextVar(
+    "_RUN_LOCK", default=None
+)
+
+#: Именованный пропуск акта человека: в `test` candidate мержит раннер.
+ACT_SKIP_TEST = "акт человека не требуется (test)"
 
 
 # --- Волновой режим (спека sequential-node-approval, S9/S10/S13) ----------
@@ -1114,7 +1124,11 @@ def _resume_wave(state: RunState, ops: Ops, *, lock: rl.RunLock) -> RunState | N
             return state
         if facts.get("state") == "OPEN" and op.get("act") == ACT_REVIEW_V1:
             return _deliver_review_candidate(state, ops, request, pr)
-        if facts.get("state") == "OPEN":
+        if facts.get("state") == "OPEN" and state.mode == "test":
+            # Повтор мержа после `stopped_merge_refused`; вмержен — finalize.
+            if not _auto_merge_candidate(state, ops, request, pr):
+                return state
+        elif facts.get("state") == "OPEN":
             print(
                 f"resume: волна {state.wave} — candidate-PR #{pr} открыт, "
                 "ждём человеческого мержа"
@@ -1207,6 +1221,50 @@ def _stop_on_refusal(
         )
 
 
+def _auto_merge_candidate(state: RunState, ops: Ops, request: str, pr: int) -> bool:
+    """`test` (план 3c-2): раннер мержит candidate сам; `True` — вмержен.
+
+    Мерж — только при записанном edge-вердикте `PASS` на голове candidate
+    (`edge_verdict` операции candidate == `head_sha` заявки), через
+    `human-merge.sh` с пином этой головы. Код ≠ 0 (голова уехала, гвард) —
+    `stopped_merge_refused` с кодом и командой повтора; finalize не
+    начинается. Успех: `act_skip = "test"` в операции заявки и
+    `ACT_SKIP_TEST` в выводе.
+    """
+    head = state.ops[request].get("head_sha")
+    verdict = state.ops.get(wave_key(state, "candidate"), {}).get("edge_verdict")
+    if (
+        not isinstance(verdict, dict)
+        or verdict.get("verdict") != "PASS"
+        or not head
+        or verdict.get("head") != head
+    ):
+        _stop_with_comment(
+            state,
+            ops,
+            "stopped_review",
+            f"волна {state.wave}: candidate-PR #{pr} заявки {request} не "
+            "вмержен — нет записанного edge-вердикта PASS на голове "
+            f"{str(head)[:8]} (режим test)",
+        )
+        return False
+    rc = ops.human_merge(state.repo, pr, str(head), target_dir=state.target_dir)
+    if rc != 0:
+        _stop_with_comment(
+            state,
+            ops,
+            "stopped_merge_refused",
+            f"волна {state.wave}: candidate-PR #{pr} заявки {request} не "
+            f"вмержен — human-merge.sh вернул {rc} (--expect-head "
+            f"{str(head)[:8]}). Повтор: resume --run-id {state.run_id}",
+        )
+        return False
+    state.ops[request]["act_skip"] = "test"
+    save(state)
+    print(f"волна {state.wave}: candidate-PR #{pr} вмержен раннером — {ACT_SKIP_TEST}")
+    return True
+
+
 def _finalize_head(state: RunState, ops: Ops, pr: int) -> dict[str, str] | None:
     """Голова finalize-PR для записи аттестации (`test`); `None` — стоп.
 
@@ -1234,6 +1292,70 @@ def _finalize_head(state: RunState, ops: Ops, pr: int) -> dict[str, str] | None:
         "— аттестация не запрошена, повторите resume",
     )
     return None
+
+
+def _attest_finalize(state: RunState, ops: Ops, att_key: str, pr: int) -> bool:
+    """Scope-аттестация finalize-PR (идемпотентно по `att_key`); `False` —
+    прогон встал (голова не прочитана либо `review-pr.sh` ≠ 0 — человеку)."""
+    if op_status(state, att_key) == "completed":
+        return True
+    _ensure_started(state, att_key)
+    attested = _finalize_head(state, ops, pr)
+    if attested is None:
+        return False
+    rc = ops.review(state.repo, pr)
+    op_complete(
+        state,
+        att_key,
+        finalize_pr=pr,
+        review_exit=rc,
+        **attested,
+        **_actor_skip(state),
+    )
+    if rc != 0:
+        _wave_pause(
+            state,
+            ops,
+            pr,
+            f"Волна {state.wave}: finalize-PR #{pr} остаётся "
+            f"человеку — review-pr.sh вернул {rc} (аттестация не "
+            "опубликована). После мержа — resume.",
+        )
+        return False
+    return True
+
+
+def _actor_skip(state: RunState) -> dict[str, str]:
+    """`test`: пропуск оси Safety на finalize — в журнал и в вывод.
+
+    Решение принимает `an.finalize_merge_policy` (ось Authority в силе:
+    `Мерж: человек` пропуска не даёт); здесь оно лишь названо дословно
+    (`an.ACTOR_SKIP_TEST`) полем аттестации `actor_skip = "test"`.
+    `strict` — `{}`, политика не читается.
+    """
+    if state.mode != "test":
+        return {}
+    if an.finalize_merge_policy(state.target_dir, mode="test")[1] != (
+        an.ACTOR_SKIP_TEST
+    ):
+        return {}
+    print(f"волна {state.wave}: finalize — {an.ACTOR_SKIP_TEST}")
+    return {"actor_skip": "test"}
+
+
+def _attested_head_moved(state: RunState, ops: Ops, att_key: str, pr: int) -> bool:
+    """`test`: записанная голова аттестации ≠ текущей голове finalize-PR.
+
+    Факт головы не прочитан — `False` (переаттестации нет, пауза с
+    причиной из approve-node); `strict` — всегда `False`, без вызова форджи.
+    """
+    if state.mode != "test":
+        return False
+    try:
+        head = an.pr_head(state, ops, pr)
+    except RuntimeError:
+        return False
+    return head is not None and state.ops.get(att_key, {}).get("head") != head
 
 
 def _finalize_wave(
@@ -1272,28 +1394,23 @@ def _finalize_wave(
             state.status = "waiting_human_merge"
             save(state)
         return state
-    if op_status(state, att_key) != "completed":
-        _ensure_started(state, att_key)
-        attested = _finalize_head(state, ops, finalize_pr)
-        if attested is None:
-            return state
-        rc = ops.review(state.repo, finalize_pr)
-        op_complete(state, att_key, finalize_pr=finalize_pr, review_exit=rc, **attested)
-        if rc != 0:
-            _wave_pause(
-                state,
-                ops,
-                finalize_pr,
-                f"Волна {state.wave}: finalize-PR #{finalize_pr} остаётся "
-                f"человеку — review-pr.sh вернул {rc} (аттестация не "
-                "опубликована). После мержа — resume.",
-            )
-            return state
+    if not _attest_finalize(state, ops, att_key, finalize_pr):
+        return state
     if not _approve():
         return state
     op = state.ops[request]
     if op["status"] == al.STATUS_COMPLETED:
         return _next_wave(state, ops, lock=lock)
+    if _attested_head_moved(state, ops, att_key, finalize_pr):
+        # `test`: аттестация на старой голове — одна переаттестация текущей
+        # головы за resume; отказ после неё — пауза ниже, как прежде.
+        state.ops.pop(att_key, None)
+        if not _attest_finalize(state, ops, att_key, finalize_pr):
+            return state
+        if not _approve():
+            return state
+        if state.ops[request]["status"] == al.STATUS_COMPLETED:
+            return _next_wave(state, ops, lock=lock)
     _wave_pause(
         state,
         ops,
@@ -4078,6 +4195,15 @@ def _step_candidate(state: RunState, ops: Ops) -> bool:
             "следующая волна.",
             status="waiting_human_approval",
         )
+        return False
+    if state.mode == "test":
+        # План 3c-2: акт человека пропущен (назван), candidate мержит раннер,
+        # дальше — путь resume для вмерженного candidate, тот же вызов и лок.
+        lock = _RUN_LOCK.get()
+        if lock is None:
+            raise RuntimeError("шаг candidate вне advance: лок прогона не задан")
+        if _auto_merge_candidate(state, ops, request, pr):
+            _finalize_wave(state, ops, request, lock=lock)
         return False
     _wave_pause(
         state,

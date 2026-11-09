@@ -3091,6 +3091,86 @@ def test_finalize_merge_policy_axes(tmp_path: Path, monkeypatch) -> None:
     assert (who, "authority" in why) == ("human", True)
 
 
+def test_finalize_merge_policy_test_mode_skips_actor_class(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """План 3c-2: в `test` ось Safety (класс актора) не читается — пропуск
+    назван дословно; ось Authority (`Мерж: человек`) остаётся; strict —
+    прежний."""
+
+    def no_safety() -> mg.Safety:
+        raise AssertionError("Safety в test не читается")
+
+    monkeypatch.setattr(an, "load_safety", no_safety)
+    assert an.finalize_merge_policy(str(tmp_path), mode="test") == (
+        "agent",
+        an.ACTOR_SKIP_TEST,
+    )
+    assert an.ACTOR_SKIP_TEST == "класс актора не применяется (test)"
+    (tmp_path / "CLAUDE.md").write_text("Мерж: человек\n", encoding="utf-8")
+    who, why = an.finalize_merge_policy(str(tmp_path), mode="test")
+    assert (who, "authority" in why) == ("human", True)
+    monkeypatch.setattr(
+        an,
+        "load_safety",
+        lambda: mg.Safety(agent_merge_allowed=True, actor_class="human"),
+    )
+    (tmp_path / "CLAUDE.md").unlink()
+    assert an.finalize_merge_policy(str(tmp_path))[0] == "human", "strict прежний"
+
+
+class _HeadOps:
+    """Факты finalize-PR: только голова; ревью форджи в `test` не читаются."""
+
+    def __init__(self, head: str) -> None:
+        self.head = head
+
+    def pr_facts(self, repo_slug: str, pr: int) -> dict:
+        return {"state": "OPEN", "headRefOid": self.head}
+
+    def pr_reviews(self, repo_slug: str, pr: int) -> list[dict] | None:
+        raise AssertionError("в test одобрение форджи не читается")
+
+
+def _test_state(att: dict | None, mode: str = "test") -> object:
+    from types import SimpleNamespace
+
+    ops = {"finalize-1": {"status": "completed", **att}} if att else {}
+    return SimpleNamespace(mode=mode, repo_slug="o/r", ops=ops)
+
+
+def test_missing_approving_review_test_mode_reads_journal_attestation() -> None:
+    head = "e" * 40
+    ok = _test_state({"finalize_pr": 801, "review_exit": 0, "head": head})
+    assert an._missing_approving_review(ok, _HeadOps(head), 801) is None  # type: ignore[arg-type]
+
+    old = _test_state({"finalize_pr": 801, "review_exit": 0, "head": "a" * 40})
+    refusal = an._missing_approving_review(old, _HeadOps(head), 801)  # type: ignore[arg-type]
+    assert refusal is not None and "голов" in refusal and head[:8] in refusal
+
+    failed = _test_state({"finalize_pr": 801, "review_exit": 6, "head": head})
+    refusal = an._missing_approving_review(failed, _HeadOps(head), 801)  # type: ignore[arg-type]
+    assert refusal is not None and "6" in refusal
+
+    none = _test_state(None)
+    refusal = an._missing_approving_review(none, _HeadOps(head), 801)  # type: ignore[arg-type]
+    assert refusal is not None and "аттестац" in refusal
+
+
+def test_missing_approving_review_strict_ignores_journal() -> None:
+    """strict: запись журнала одобрением не считается — читается форджа."""
+
+    class Ops(_HeadOps):
+        def pr_reviews(self, repo_slug: str, pr: int) -> list[dict] | None:
+            return []
+
+    head = "e" * 40
+    state = _test_state(
+        {"finalize_pr": 801, "review_exit": 0, "head": head}, mode="strict"
+    )
+    assert an._missing_approving_review(state, Ops(head), 801) is not None  # type: ignore[arg-type]
+
+
 def test_malformed_envelope_is_not_merged_by_agent(world: World, monkeypatch) -> None:
     """Подсадка: конверт, тронувший тело узла, агент НЕ мержит — гейт формы
     дифа стоит до `ops.merge`, PR остаётся человеку, заявка жива."""

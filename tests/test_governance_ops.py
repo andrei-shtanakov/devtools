@@ -126,6 +126,28 @@ def test_merge_returns_the_code_and_never_raises(monkeypatch, rc):
     assert result == rc
 
 
+@pytest.mark.parametrize("rc", [0, 3])
+def test_human_merge_runs_the_wrapper_with_head_pin(monkeypatch, rc):
+    """План 3c-2: мерж candidate в `test` — `human-merge.sh` с пином головы
+    из корня devtools; код обвязки возвращается как есть."""
+    calls = _install_fake_run(monkeypatch, returncode=rc)
+
+    result = RealOps().human_merge("devtools", 42, "deadbeef")
+
+    assert result == rc
+    assert [c.argv for c in calls] == [
+        [
+            "sh",
+            str(ops_mod.DEVTOOLS_ROOT / "human-merge.sh"),
+            "devtools",
+            "42",
+            "--expect-head",
+            "deadbeef",
+        ]
+    ]
+    assert calls[0].kwargs["cwd"] == ops_mod.DEVTOOLS_ROOT
+
+
 # --- Кейс 2: review ------------------------------------------------------
 
 
