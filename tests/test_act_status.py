@@ -1795,18 +1795,70 @@ def test_s8_provider_reads_inputs_from_base(tmp_path: Path, monkeypatch) -> None
     assert not s4["behaviour-spec"].startswith("unavailable:")
 
 
-def test_mode_probe_test_run_is_pre_migration(monkeypatch) -> None:
-    """Прогон `test` без привязки корня доверия — синтетический «до миграции»;
-    зависимости (`real_deps`) не строятся."""
+def _mode_state(mode: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        mode=mode, repo_slug="o/p", run_id="r", base_ref=None, target_dir=None
+    )
+
+
+def _test_config(tmp_path, monkeypatch, mode: str) -> None:
+    from tests.df_config_fixture import write_config
+
+    env = write_config(tmp_path / "xdg", mode=mode)
+    monkeypatch.setenv("XDG_CONFIG_HOME", env["XDG_CONFIG_HOME"])
+
+
+def test_mode_probe_test_run_is_pre_migration(tmp_path, monkeypatch) -> None:
+    """Прогон `test` + конфиг `test`, без привязки корня доверия, — синтетический
+    «до миграции»; зависимости (`real_deps`) не строятся."""
 
     def boom(state, env=None):
         raise AssertionError("real_deps не должен вызываться")
 
     monkeypatch.setattr(act_status, "real_deps", boom)
-    state = SimpleNamespace(mode="test", repo_slug="o/p", run_id="r")
-    got = _REAL_MODE_PROBE(state)
+    _test_config(tmp_path, monkeypatch, "test")
+    got = _REAL_MODE_PROBE(_mode_state("test"))
     assert got is act_status.TEST_LIVE_POLICY
     assert got.mode == act_trust.PRE_MIGRATION
+
+
+def test_mode_probe_test_run_strict_config_unavailable() -> None:
+    """Правленый run.json: прогон test при strict-конфиге синтетики не получает."""
+    got = _REAL_MODE_PROBE(_mode_state("test"))
+    assert isinstance(got, Unavailable)
+    assert "режим прогона test ≠ режиму конфига" in got.reason
+
+
+def test_mode_probe_test_run_no_config_unavailable(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty"))
+    got = _REAL_MODE_PROBE(_mode_state("test"))
+    assert isinstance(got, Unavailable)
+    assert "≠ режиму конфига" in got.reason
+
+
+def test_mode_probe_test_run_broken_config_unavailable(tmp_path, monkeypatch) -> None:
+    cfg = tmp_path / "darkfactory" / "config.toml"
+    cfg.parent.mkdir()
+    cfg.write_text("не toml [", encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    got = _REAL_MODE_PROBE(_mode_state("test"))
+    assert isinstance(got, Unavailable)
+    assert got.reason.startswith("конфиг DarkFactory: ")
+
+
+def test_mode_probe_strict_run_test_config_uses_live_policy(
+    tmp_path, monkeypatch
+) -> None:
+    """Прогон strict при test-конфиге — обычный путь: без привязки Unavailable."""
+    _test_config(tmp_path, monkeypatch, "test")
+    got = _REAL_MODE_PROBE(_mode_state("strict"))
+    assert isinstance(got, Unavailable)
+    assert "нет привязки корня доверия" in got.reason
+
+
+def test_mode_probe_unknown_run_mode_unavailable() -> None:
+    got = _REAL_MODE_PROBE(_mode_state("bogus"))
+    assert isinstance(got, Unavailable) and "'bogus'" in got.reason
 
 
 def test_mode_probe_strict_run_without_binding_unavailable() -> None:

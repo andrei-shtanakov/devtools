@@ -894,12 +894,33 @@ TEST_LIVE_POLICY = LivePolicy(act_trust.PRE_MIGRATION, None, None, None, None)
 
 def mode_probe(state: RunState, deps: Deps | None = None) -> LivePolicy | Unavailable:
     """Единая точка «режим продукта сейчас» для путей вне `act_*` (гейты, DAG,
-    создание). Прогон `test` — `TEST_LIVE_POLICY` без чтения привязки.
+    создание). Прогон `test` — `TEST_LIVE_POLICY` без чтения привязки, но только
+    когда и текущий якорный конфиг в режиме `test` (правленый `run.json` в
+    strict-установке корень доверия не обходит).
 
     Тесты вне `act_*` подменяют её на `PRE_MIGRATION` (`tests/conftest.py`)."""
-    if getattr(state, "mode", "strict") == "test":
-        return TEST_LIVE_POLICY
-    return live_policy(state, deps or real_deps(state))
+    mode = getattr(state, "mode", "strict")
+    if mode == "strict":
+        return live_policy(state, deps or real_deps(state))
+    if mode != "test":
+        return Unavailable(f"режим прогона {mode!r} неизвестен (strict|test)")
+    return _test_run_policy()
+
+
+def _test_run_policy() -> LivePolicy | Unavailable:
+    """`TEST_LIVE_POLICY`, если конфиг в режиме `test`; иначе `Unavailable`."""
+    try:
+        cfg_mode = df_config.load().mode if _config_exists() else "strict"
+    except df_config.ConfigError as exc:
+        return Unavailable(f"конфиг DarkFactory: {exc}")
+    if cfg_mode != "test":
+        return Unavailable("режим прогона test ≠ режиму конфига — начните новый прогон")
+    return TEST_LIVE_POLICY
+
+
+def _config_exists() -> bool:
+    """Есть ли файл конфига DarkFactory (нет файла — strict)."""
+    return os.path.lexists(df_config.config_path(os.environ))
 
 
 @contextmanager
