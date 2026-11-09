@@ -75,6 +75,7 @@ from governance import (
     run_lock,
     runner,
     task_bridge,
+    user_targets,
 )
 from governance import approval_ledger as al
 from governance import interview as iv
@@ -204,14 +205,10 @@ def ws_id_for(subject: str, today: date) -> str:
 
 def repo_slug_from_url(url: str) -> str:
     """`owner/name` из remote-URL (формы git@ / https / ssh)."""
-    for prefix in (
-        "git@github.com:",
-        "https://github.com/",
-        "ssh://git@github.com/",
-    ):
-        if url.startswith(prefix):
-            return url.removeprefix(prefix).removesuffix(".git")
-    raise SpecLoopError(f"неизвестная форма remote-URL: {url!r}")
+    try:
+        return user_targets.slug_from_url(url)
+    except user_targets.TargetsError as exc:
+        raise SpecLoopError(str(exc)) from exc
 
 
 @dataclass(frozen=True)
