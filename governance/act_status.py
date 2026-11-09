@@ -887,11 +887,18 @@ def live_policy(state: RunState, deps: Deps) -> LivePolicy | Unavailable:
     return LivePolicy(mode, trust, journal, current, policy)
 
 
+#: Синтетический режим акта прогона `test`: на машине коллеги нет корня доверия
+#: `/etc/df/trust.toml`, акт — прежний «до миграции» (мерж = акт).
+TEST_LIVE_POLICY = LivePolicy(act_trust.PRE_MIGRATION, None, None, None, None)
+
+
 def mode_probe(state: RunState, deps: Deps | None = None) -> LivePolicy | Unavailable:
     """Единая точка «режим продукта сейчас» для путей вне `act_*` (гейты, DAG,
-    создание).
+    создание). Прогон `test` — `TEST_LIVE_POLICY` без чтения привязки.
 
     Тесты вне `act_*` подменяют её на `PRE_MIGRATION` (`tests/conftest.py`)."""
+    if getattr(state, "mode", "strict") == "test":
+        return TEST_LIVE_POLICY
     return live_policy(state, deps or real_deps(state))
 
 
