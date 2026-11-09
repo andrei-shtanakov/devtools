@@ -496,7 +496,7 @@ publish() {
     [ "$df_mode" != "test" ] || _pub_flag="comment"
     if ! gh_r pr review "$pr" --repo "$slug" "--$_pub_flag" \
         --body-file "$work/body.md"; then
-        die 2 "прогон завершён (--$1), но публикация ревью не удалась."
+        die 2 "прогон завершён (--$_pub_flag), но публикация ревью не удалась."
     fi
     if [ "$_pub_flag" = "$1" ]; then
         echo "опубликовано: --$1 на ${slug}#${pr} (head $head_sha) от $login"
@@ -581,9 +581,10 @@ try_use_verdict_file() {
         approve:0|request-changes:1) : ;;
         *) valid=0 ;;
     esac
-    # test: тело обязано нести маркер с `verdict=` — файл из strict-прогона
-    # опубликовался бы комментарием, который не читается как вердикт.
-    if [ "$df_mode" = "test" ] && [ "$valid" -eq 1 ]; then
+    # Тело обязано нести маркер ТЕКУЩЕГО режима строкой целиком: файл из
+    # strict-прогона в test опубликовался бы комментарием, который не читается
+    # как вердикт; файл из test в strict понёс бы `verdict=` в `--approve`.
+    if [ "$valid" -eq 1 ]; then
         grep -qxF -- "$(verdict_marker "$head_sha" "$fp" "$v_action")" \
             "$work/imported-body.md" || valid=0
     fi
