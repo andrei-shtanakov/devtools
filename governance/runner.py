@@ -1311,7 +1311,9 @@ def _attest_finalize(
     attested = _finalize_head(state, ops, pr)
     if attested is None:
         return False
-    rc = ops.review(state.repo, pr, target_dir=state.target_dir)
+    # `target_dir` — только в test-прогоне: strict-вызов без нового kwarg.
+    extra = {"target_dir": state.target_dir} if state.mode == "test" else {}
+    rc = ops.review(state.repo, pr, **extra)
     op_complete(
         state,
         att_key,

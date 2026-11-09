@@ -4032,3 +4032,42 @@ def test_finalize_merge_policy_config_error_named(tmp_path: Path, monkeypatch) -
     assert who == "human" and why.startswith("конфиг DarkFactory: ")
     who, why = an.finalize_merge_policy(str(tmp_path), mode="test")
     assert who == "human" and why.startswith("конфиг DarkFactory: ")
+
+
+# --- target_dir доходит до ops.merge только в test-прогоне (план 3c-2) -------
+
+
+class _MergeSpyOps:
+    """Минимум `Ops` для `_try_agent_merge` с подменёнными гейтами."""
+
+    def __init__(self) -> None:
+        self.merge_kwargs: list[dict] = []
+
+    def rev_parse(self, target_dir: str, ref: str) -> str:
+        return "a" * 40
+
+    def merge(self, repo_name, pr, sha, base=None, **kwargs) -> int:
+        self.merge_kwargs.append(kwargs)
+        return 0
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [("strict", {}), ("test", {"target_dir": "/elsewhere/repo"})],
+)
+def test_try_agent_merge_passes_target_dir_only_in_test(
+    monkeypatch, mode: str, expected: dict
+) -> None:
+    """strict-вызов `ops.merge` без нового kwarg (стенды act-тестов его не
+    принимают); test — с `target_dir` цели."""
+    monkeypatch.setattr(an, "_missing_approving_review", lambda *a, **k: None)
+    monkeypatch.setattr(an, "_await_required_checks", lambda *a, **k: None)
+    state = type(
+        "S", (), {"mode": mode, "target_dir": "/elsewhere/repo", "repo": "repo"}
+    )()
+    ops = _MergeSpyOps()
+
+    result = an._try_agent_merge(state, ops, (), {}, [], 5, "a" * 40, form=lambda: None)
+
+    assert result is None
+    assert ops.merge_kwargs == [expected]
