@@ -464,6 +464,14 @@ def test_banner_lists_relaxations_in_test(tmp_path: Path) -> None:
     cfg = _load_text(tmp_path, STRICT.replace('mode = "strict"', 'mode = "test"'))
     assert df_config.TEST_RELAXATIONS == (
         "репо политики утверждения не используется: утверждающий — accounts.human",
+        (
+            "песочница авторинга: claude запускается обычным процессом"
+            " пользователя (нет sandbox-exec, допуска и связки ключей)"
+        ),
+        (
+            "белый список целей: цель — из targets.toml рядом с конфигом,"
+            " манифест флота необязателен"
+        ),
     )
     assert df_config.test_banner(cfg) == (
         "режим test: выключено — " + "; ".join(df_config.TEST_RELAXATIONS)

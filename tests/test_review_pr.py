@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.df_config_fixture import ENV_OVERRIDES, write_config
+from tests.df_config_fixture import ENV_OVERRIDES, use_test_real_home, write_config
 
 SCRIPT = Path(__file__).resolve().parent.parent / "review-pr.sh"
 
@@ -176,11 +176,19 @@ class Fleet:
         self.gh_log = tmp_path / "gh.log"
         self.local_log = tmp_path / "local-sh.log"
         self.body_out = tmp_path / "posted-body.md"
-        self.profile_dir = tmp_path / "gh-profile"
-        self.profile_dir.mkdir()
+        # strict допускает лишь профили из перечня песочницы под `~` —
+        # HOME фикстуры указывает на каталог теста.
+        self.home = tmp_path / "home"
+        self.profile_dir = self.home / ".config" / "review"
+        self.profile_dir.mkdir(parents=True)
         # Учётка агента — из конфига DarkFactory (в скрипте умолчаний нет).
         self.xdg = tmp_path / "xdg"
-        self.config_env = write_config(self.xdg, agent_gh_config_dir=self.profile_dir)
+        self.config_env = write_config(
+            self.xdg,
+            agent_gh_config_dir=self.profile_dir,
+            human_gh_config_dir=self.home / ".config" / "gh",
+            mode="strict",
+        )
 
         subprocess.run(
             ["git", "init", "--bare", "-b", "master", str(self.origin)],
@@ -245,6 +253,7 @@ class Fleet:
             env.pop(key, None)
         env.update(self.config_env)
         env.update(
+            HOME=str(self.home),
             PATH=f"{self.stub_bin}:{env['PATH']}",
             FLEET_ROOT=str(self.fleet_root),
             REVIEW_GH_CONFIG_DIR=str(self.profile_dir),
@@ -347,7 +356,13 @@ def test_missing_profile_dir(fleet: Fleet) -> None:
 
 def test_review_login_from_config(fleet: Fleet) -> None:
     """Без env логин профиля сверяется с `accounts.agent` конфига."""
-    write_config(fleet.xdg, agent="bot-x", agent_gh_config_dir=fleet.profile_dir)
+    write_config(
+        fleet.xdg,
+        agent="bot-x",
+        agent_gh_config_dir=fleet.profile_dir,
+        human_gh_config_dir=fleet.home / ".config" / "gh",
+        mode="strict",
+    )
     res = fleet.run("demo", "7", "--dry-run")
     assert res.returncode == 2
     assert "ожидался 'bot-x'" in res.stderr
@@ -360,15 +375,27 @@ def test_review_profile_from_config(fleet: Fleet) -> None:
     res = fleet.run("demo", "7", "--dry-run", REVIEW_GH_CONFIG_DIR="")
     assert "профиля ревьюера нет" not in res.stderr, res.stderr
     assert f"GH_CONFIG_DIR={fleet.profile_dir} " in fleet.gh_calls()
-    write_config(fleet.xdg, agent_gh_config_dir=fleet.tmp / "nope")
+    nope = fleet.home / ".config" / "ai-prosto"
+    write_config(
+        fleet.xdg,
+        agent_gh_config_dir=nope,
+        human_gh_config_dir=fleet.home / ".config" / "gh",
+        mode="strict",
+    )
     res = fleet.run("demo", "7", REVIEW_GH_CONFIG_DIR="")
     assert res.returncode == 2
-    assert str(fleet.tmp / "nope") in res.stderr
+    assert str(nope) in res.stderr
 
 
 def test_env_overrides_config(fleet: Fleet) -> None:
     """REVIEW_LOGIN окружения сильнее конфига (`bot-x`)."""
-    write_config(fleet.xdg, agent="bot-x", agent_gh_config_dir=fleet.profile_dir)
+    write_config(
+        fleet.xdg,
+        agent="bot-x",
+        agent_gh_config_dir=fleet.profile_dir,
+        human_gh_config_dir=fleet.home / ".config" / "gh",
+        mode="strict",
+    )
     res = fleet.run("demo", "7", "--dry-run", REVIEW_LOGIN="bot-y")
     assert res.returncode == 2
     assert "ожидался 'bot-y'" in res.stderr
@@ -1264,6 +1291,92 @@ def test_new_kit_full_run_labels_reviewer_from_kit(
     assert not any(
         "scripts/harness" in line for line in env_lines if line.startswith("PATH=")
     )
+
+
+def _test_mode_fleet(
+    fleet: Fleet, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Перевести фикстуру на анкерный конфиг test (`claude`/`test-model`)."""
+    home = tmp_path / "realhome"
+    home.mkdir()
+    use_test_real_home(monkeypatch, home)
+    fleet.config_env = write_config(
+        fleet.xdg,
+        agent_gh_config_dir=fleet.profile_dir,
+        mode="test",
+        workspace_root=fleet.fleet_root,
+    )
+
+
+def _kit_env_lines(fleet: Fleet, tmp_path: Path, *args: str, **env: str) -> list[str]:
+    from tests.test_claude_review_harness import NEW_KIT_STUB
+
+    fleet.write_kit(NEW_KIT_STUB)
+    kit_log = tmp_path / "kit.log"
+    res = fleet.run(
+        "demo",
+        "7",
+        "--budget-override",
+        "тест слоёв",
+        *args,
+        HARNESS_KIT_LOG=str(kit_log),
+        **env,
+    )
+    assert res.returncode == 0, res.stderr
+    return kit_log.read_text().splitlines()
+
+
+def test_test_mode_reviewer_from_config(
+    fleet: Fleet, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """test: ревьюер — `[harness]` конфига; harness.env (codex) не читается."""
+    _test_mode_fleet(fleet, monkeypatch, tmp_path)
+    env_file = tmp_path / "harness.env"
+    env_file.write_text("REVIEW_HARNESS=codex\nREVIEW_MODEL=gpt-x\n")
+    lines = _kit_env_lines(fleet, tmp_path, AI_PROSTO_HARNESS_ENV=str(env_file))
+    assert "REVIEW_HARNESS=claude" in lines
+    assert "REVIEW_MODEL=test-model" in lines
+    assert "ревьюер из [harness] конфига (режим test)" in fleet.body_out.read_text()
+
+
+def test_test_mode_flag_overrides_config(
+    fleet: Fleet, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Флаг перекрывает конфиг; модель конфига за ним не тянется."""
+    _test_mode_fleet(fleet, monkeypatch, tmp_path)
+    lines = _kit_env_lines(fleet, tmp_path, "--harness", "codex")
+    assert "REVIEW_HARNESS=codex" in lines
+    assert "REVIEW_MODEL=<unset>" in lines
+    assert "ревьюер из [harness]" not in fleet.body_out.read_text()
+
+
+def test_test_mode_env_layer_and_model_layering(
+    fleet: Fleet, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Env-харнесс перекрывает конфиг; в слое конфига `--model` > env-модель."""
+    _test_mode_fleet(fleet, monkeypatch, tmp_path)
+    lines = _kit_env_lines(
+        fleet, tmp_path, REVIEW_HARNESS="codex", REVIEW_MODEL="m-env"
+    )
+    assert "REVIEW_HARNESS=codex" in lines
+    assert "REVIEW_MODEL=m-env" in lines
+    lines = _kit_env_lines(fleet, tmp_path, REVIEW_MODEL="m-env")
+    assert "REVIEW_HARNESS=claude" in lines
+    assert "REVIEW_MODEL=m-env" in lines
+    lines = _kit_env_lines(fleet, tmp_path, "--model", "m-flag", REVIEW_MODEL="m-env")
+    assert "REVIEW_MODEL=m-flag" in lines
+
+
+def test_strict_reviewer_unchanged(fleet: Fleet, tmp_path: Path) -> None:
+    """strict: `[harness]` игнорируется; harness.env claude — из файла."""
+    env_file = tmp_path / "harness.env"
+    env_file.write_text("REVIEW_HARNESS=claude\n")
+    lines = _kit_env_lines(fleet, tmp_path, AI_PROSTO_HARNESS_ENV=str(env_file))
+    assert "REVIEW_HARNESS=claude" in lines
+    assert "REVIEW_MODEL=<unset>" in lines
+    assert "ревьюер из [harness]" not in fleet.body_out.read_text()
+    lines = _kit_env_lines(fleet, tmp_path)
+    assert "REVIEW_HARNESS=codex" in lines
 
 
 def test_old_kit_full_run_with_claude_is_refused_before_review(fleet: Fleet) -> None:
