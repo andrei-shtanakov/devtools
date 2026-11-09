@@ -1960,3 +1960,105 @@ def test_admit_without_candidate_version_is_refused(admit_doubles, capsys):
     assert "--version" in admit_doubles.spawned[0]
     err = capsys.readouterr().err
     assert "версия кандидата под профилем не получена" in err
+
+
+# --- авторинг без песочницы в режиме test (план 3b, Task 2) ------------------
+
+
+@pytest.fixture
+def plain(launch, tmp_path, monkeypatch) -> SimpleNamespace:
+    """`launch` + конфиг режима test; все песочные шаги — ловушки."""
+    _test_mode(tmp_path, monkeypatch)
+    monkeypatch.delenv("AUTHOR_HARNESS", raising=False)
+    monkeypatch.setattr(author_launch.shutil, "which", lambda name: "/opt/c/claude")
+
+    def trap(*args: object, **kw: object) -> object:
+        raise AssertionError("шаг песочницы вызван в режиме test")
+
+    monkeypatch.setattr(sandbox, "admission_check", trap)
+    monkeypatch.setattr(sandbox, "run_probe", trap)
+    monkeypatch.setattr(sandbox, "render_profile", trap)
+    monkeypatch.setattr(author_launch, "author_claude_token", trap)
+    monkeypatch.setattr(author_launch, "_nested_sandbox", trap)
+    return launch
+
+
+def test_test_mode_launches_without_sandbox(plain, monkeypatch):
+    seen = _agent_writes_plain(plain, monkeypatch)
+    assert _launch(plain) == author_launch.LaunchOutcome(0)
+    argv, env, cwd = seen["call"]
+    assert argv[0] == os.path.realpath("/opt/c/claude")
+    assert sandbox.SANDBOX_EXEC not in argv and "-f" not in argv[:3]
+    assert argv[argv.index("--model") + 1] == "m-x"
+    assert "CLAUDE_CONFIG_DIR" not in env
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+    assert env["TMPDIR"] == env["CLAUDE_CODE_TMPDIR"]
+    assert env["TMPPREFIX"] == f"{env['TMPDIR']}/zsh"
+    assert cwd == plain.target
+    assert (plain.target / "ws/spec/10-requirements.md").read_bytes() == b"node\n"
+    assert list((plain.calls / "r1").iterdir()) == []
+
+
+def _agent_writes_plain(plain, monkeypatch) -> dict:
+    seen: dict = {}
+
+    def agent(argv, *, env, cwd, timeout):
+        seen["call"] = (argv, dict(env), cwd)
+        stage = Path(env["TMPDIR"]).parent / "stage"
+        (stage / "10-requirements.md").write_bytes(b"node\n")
+        return author_launch.AgentRun(0)
+
+    monkeypatch.setattr(author_launch, "_run_agent", agent)
+    return seen
+
+
+def test_test_mode_runs_off_darwin(plain, monkeypatch):
+    monkeypatch.setattr(author_launch, "_os_name", lambda: "linux")
+    monkeypatch.setattr(author_launch, "_has_sandbox_exec", lambda: False)
+    seen = _agent_writes_plain(plain, monkeypatch)
+    assert _launch(plain).ok
+    assert "call" in seen
+
+
+def test_test_mode_non_claude_refused(plain, tmp_path, monkeypatch):
+    path = tmp_path / "xdg-test" / "darkfactory" / "config.toml"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            'author = "claude"', 'author = "codex"'
+        ),
+        encoding="utf-8",
+    )
+    outcome = _launch(plain)
+    assert outcome.reason == author_launch.PLAIN_HARNESS_REFUSAL.format(harness="codex")
+    assert "harness.author" in outcome.reason
+    _refused_before_call_dir(plain, outcome, "codex")
+
+
+def test_test_mode_claude_missing_refused(plain, monkeypatch):
+    monkeypatch.setattr(author_launch.shutil, "which", lambda name: None)
+    outcome = _launch(plain)
+    _refused_before_call_dir(plain, outcome, "claude не найден в PATH")
+
+
+def test_test_mode_bad_bundle_still_refused(plain):
+    bad = dataclasses.replace(plain.call, bundle_dir="../x")
+    outcome = author_launch.launch_author(bad, lambda out: out)
+    assert outcome.code == author_launch.REFUSED
+    assert not plain.calls.exists()
+
+
+def test_strict_still_requires_sandbox(launch, monkeypatch):
+    monkeypatch.setattr(author_launch, "_os_name", lambda: "linux")
+    _refused_before_call_dir(launch, _launch(launch), "только на macOS")
+
+
+def test_launch_broken_config_is_named_refusal(launch, tmp_path, monkeypatch):
+    """`ConfigError` из `config_mode()` на границе — отказ, не исключение."""
+    xdg = tmp_path / "xdg-broken"
+    (xdg / "darkfactory").mkdir(parents=True)
+    (xdg / "darkfactory" / "config.toml").write_text("not = [valid", "utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    outcome = _launch(launch)
+    assert outcome.code == author_launch.REFUSED
+    assert outcome.reason.startswith("конфиг DarkFactory: ")
+    _refused_before_call_dir(launch, outcome, "конфиг DarkFactory")

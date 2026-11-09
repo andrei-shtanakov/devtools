@@ -217,8 +217,13 @@ def test_author_launch_probe_config_error_is_named_refusal(monkeypatch) -> None:
         raise AssertionError("платный вызов до проверки конфига")
 
     monkeypatch.setattr(author_launch, "_run_agent", paid)
+    ready = SimpleNamespace(token="t", plain=False)
     out = author_launch._launch_in(  # noqa: SLF001
-        SimpleNamespace(), SimpleNamespace(token="t"), SimpleNamespace(), str, None
+        SimpleNamespace(),
+        ready,
+        SimpleNamespace(),
+        str,
+        None,  # type: ignore[arg-type]
     )
     assert "конфиг DarkFactory" in str(out)
 

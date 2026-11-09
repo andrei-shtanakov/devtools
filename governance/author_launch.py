@@ -40,6 +40,11 @@ from pathlib import Path, PurePosixPath
 from governance import df_config, safe_io, sandbox
 
 DEVTOOLS_ROOT = Path(__file__).resolve().parent.parent
+#: Отказ не-claude харнесса авторинга в режиме test (без песочницы).
+PLAIN_HARNESS_REFUSAL = (
+    'режим test: авторинг поддерживает только harness.author = "claude" '
+    "(сейчас {harness!r})"
+)
 #: Контракт допуска исполняемых файлов харнесса (§14; запись — шаг H2).
 ADMITTED_CONTRACT = (
     DEVTOOLS_ROOT / "contracts" / "author-sandbox" / "v1" / "admitted.toml"
@@ -219,6 +224,19 @@ def call_env(call: sandbox.CallDir, token: str) -> dict[str, str]:
         # операторский CA (корпоративный прокси) сильнее; системный набор —
         # умолчание при закрытой связке ключей (§8/S2)
         "SSL_CERT_FILE": os.environ.get("SSL_CERT_FILE") or SSL_CERT_FILE,
+    }
+
+
+def plain_env(call: sandbox.CallDir) -> dict[str, str]:
+    """env вызова без песочницы (режим test): allowlist + корни каталога вызова.
+
+    Без `CLAUDE_CONFIG_DIR` и `CLAUDE_CODE_OAUTH_TOKEN`: вход claude — собственный
+    пользователя."""
+    return {
+        **agent_env(),
+        "TMPDIR": str(call.tmp),
+        "CLAUDE_CODE_TMPDIR": str(call.tmp),
+        "TMPPREFIX": f"{call.tmp}/zsh",
     }
 
 
@@ -420,28 +438,61 @@ class _Ready:
     git_dir: Path
     common_dir: Path
     run_dir: Path
+    plain: bool = False
 
 
 def _preflight(call: AuthorCall, contract: Path) -> _Ready | str:
-    """Проверки §13 до каталога вызова; строка — причина отказа."""
-    if _os_name() != "darwin":
-        return "песочница авторинга поддерживается только на macOS"
-    if not _has_sandbox_exec():
-        return f"нет {sandbox.SANDBOX_EXEC}: песочница авторинга недоступна"
-    nested = _nested_sandbox()
-    if nested is not None:
-        return nested
+    """Проверки §13 до каталога вызова; строка — причина отказа.
+
+    Режим test — обычный запуск claude без песочницы (`_plain_binary`)."""
+    try:
+        plain = config_mode() == "test"
+        if plain:
+            binary, model, token = _plain_binary()
+        else:
+            binary, model, token = _sandbox_binary(contract)
+    except df_config.ConfigError as exc:
+        return f"конфиг DarkFactory: {exc}"
+    except (sandbox.SandboxError, AgentIsolationError, _Refusal) as exc:
+        return str(exc)
+    return _bundle_ready(call, binary, model, token, plain)
+
+
+class _Refusal(Exception):
+    """Причина отказа предпроверки (текст — для исхода)."""
+
+
+def _plain_binary() -> tuple[str, str, str]:
+    """(binary, model, token) режима test: claude из PATH, токена нет."""
     harness, model = harness_for("AUTHOR")
     if harness != SUPPORTED_HARNESS:
-        return harness_refusal(harness)
-    try:
-        admission = sandbox.admission_check(contract, harness=harness)
-    except sandbox.SandboxError as exc:
-        return str(exc)
-    try:
-        token = author_claude_token()
-    except AgentIsolationError as exc:
-        return str(exc)
+        raise _Refusal(PLAIN_HARNESS_REFUSAL.format(harness=harness))
+    found = shutil.which(SUPPORTED_HARNESS)
+    if found is None:
+        raise _Refusal("claude не найден в PATH")
+    return os.path.realpath(found), model, ""
+
+
+def _sandbox_binary(contract: Path) -> tuple[str, str, str]:
+    """(binary, model, token) режима strict: ОС, песочница, допуск, связка."""
+    if _os_name() != "darwin":
+        raise _Refusal("песочница авторинга поддерживается только на macOS")
+    if not _has_sandbox_exec():
+        raise _Refusal(f"нет {sandbox.SANDBOX_EXEC}: песочница авторинга недоступна")
+    nested = _nested_sandbox()
+    if nested is not None:
+        raise _Refusal(nested)
+    harness, model = harness_for("AUTHOR")
+    if harness != SUPPORTED_HARNESS:
+        raise _Refusal(harness_refusal(harness))
+    admission = sandbox.admission_check(contract, harness=harness)
+    return str(admission.realpath), model, author_claude_token()
+
+
+def _bundle_ready(
+    call: AuthorCall, binary: str, model: str, token: str, plain: bool
+) -> _Ready | str:
+    """Общие проверки run_dir, git-каталогов цели и `bundle_dir`."""
     run_dir = Path(call.run_dir)
     if not run_dir.is_absolute() or os.path.realpath(run_dir) != str(run_dir):
         return f"run_dir {call.run_dir!r} не канонический (realpath)"
@@ -454,14 +505,7 @@ def _preflight(call: AuthorCall, contract: Path) -> _Ready | str:
     except (sandbox.SandboxError, safe_io.SafeIOError) as exc:
         return str(exc)
     return _Ready(
-        str(admission.realpath),
-        model,
-        token,
-        target,
-        bundle,
-        git_dir,
-        common_dir,
-        run_dir,
+        binary, model, token, target, bundle, git_dir, common_dir, run_dir, plain
     )
 
 
@@ -676,13 +720,13 @@ def _remove_empty(created: list[Path]) -> None:
             return
 
 
-def _launch_in(
+def _sandbox_setup(
     cdir: sandbox.CallDir,
     ready: _Ready,
     call: AuthorCall,
     make_prompt: Callable[[str], str],
-    timeout: float | None,
-) -> LaunchOutcome:
+) -> tuple[list[str], dict[str, str]] | LaunchOutcome:
+    """Профиль, проба и settings.json (strict); (argv, env) или отказ."""
     try:
         profile = sandbox.render_profile(cdir, home=Path.home())
     except sandbox.SandboxError as exc:
@@ -704,6 +748,25 @@ def _launch_in(
         str(cdir.root / "profile.sb"),
         *author_argv(ready.binary, ready.model, prompt),
     ]
+    return argv, env
+
+
+def _launch_in(
+    cdir: sandbox.CallDir,
+    ready: _Ready,
+    call: AuthorCall,
+    make_prompt: Callable[[str], str],
+    timeout: float | None,
+) -> LaunchOutcome:
+    if ready.plain:
+        prompt = make_prompt(str(cdir.stage / call.filename))
+        argv = author_argv(ready.binary, ready.model, prompt)
+        env = plain_env(cdir)
+    else:
+        sandboxed = _sandbox_setup(cdir, ready, call, make_prompt)
+        if isinstance(sandboxed, LaunchOutcome):
+            return sandboxed
+        argv, env = sandboxed
     started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     run = _run_agent(
         argv,
