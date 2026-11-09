@@ -147,7 +147,7 @@ def test_ops_discovery_missing_dir_refuses_before_subprocess(
 
 def test_accept_pr_target_dir_missing(tmp_path, monkeypatch, capsys) -> None:
     # strict: цель — `<workspace.root>/<repo>`; test берёт её из targets.toml
-    # (покрыто tests/test_accept_pr.py).
+    # (покрыто tests/test_governance_accept_pr.py).
     _cfg(tmp_path, monkeypatch, tmp_path / "ws", mode="strict")
     rc = accept_pr.main(["--repo", "kapelle", "--pr", "1"])
     out = capsys.readouterr().out

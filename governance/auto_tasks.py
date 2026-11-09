@@ -178,10 +178,13 @@ def _run_args(state: RunState) -> list[str]:
 def _spec_run(state: RunState, ops: Ops) -> int | None:
     """`spec-runner run … --integration-pr`; номер нового PR либо `None` (стоп).
 
-    PR берётся только после НАБЛЮДЁННОГО кода 0. Возобновление начатой
-    операции (падение либо записанный ненулевой код) перезапускает раннер:
-    уже открытые `spec-runner/run-*` PR (частичные) уходят в `before` и
-    не принимаются.
+    PR берётся только после НАБЛЮДЁННОГО кода 0, который пишется в запись
+    ДО чтения списка PR. Возобновление начатой операции:
+    - `exit = 0` записан — новый PR подхватывается без второго запуска;
+    - исход не наблюдён (падение) и новый PR открыт — стоп: PR мог быть
+      частичным, его закрывает человек;
+    - иначе (ненулевой код либо нового PR нет) — раннер перезапускается,
+      открытые `spec-runner/run-*` PR уходят в `before` и не принимаются.
     """
     key = "spec-run"
     if not _mode_gate(state):
@@ -194,25 +197,48 @@ def _spec_run(state: RunState, ops: Ops) -> int | None:
     previous = state.ops.get(key)
     before = current
     if previous is not None:
-        before = sorted(set(previous.get("before", [])) | set(current))
+        old = list(previous.get("before", []))
+        pending = [n for n in current if n not in old]
+        if pending and previous.get("exit") == 0:
+            return _take_new_pr(state, key, pending)
+        if pending and "exit" not in previous:
+            partial = ", ".join(f"#{n}" for n in pending)
+            _stop(
+                f"исход spec-runner run не наблюдён, открыт integration-PR "
+                f"{partial} — он может быть частичным и не принимается; "
+                "закройте его и повторите (повтор перезапустит раннер)"
+            )
+            return None
+        before = sorted(set(old) | set(current))
     op_start(state, key, before=before)
     rc = ops.spec_runner(state.target_dir, _run_args(state))
     if rc != 0:
         return _record_run_failure(state, ops, key, rc, before)
+    # Write-ahead наблюдённого успеха: повтор подхватит PR без перезапуска.
+    state.ops[key]["exit"] = 0
+    save(state)
     after = _open_run_prs(state, ops)
     if after is None:
         return None
-    new = [n for n in after if n not in before]
-    if len(new) != 1:
+    return _take_new_pr(state, key, [n for n in after if n not in before])
+
+
+def _take_new_pr(state: RunState, key: str, new: list[int]) -> int | None:
+    """Ровно один новый PR после кода 0 — операция завершена; иначе стоп."""
+    if len(new) == 1:
+        _complete(state, key, pr=new[0], exit=0)
+        return new[0]
+    if new:
         _stop(
             f"spec-runner run: ожидался один новый integration-PR, "
-            f"найдено {len(new)}: {new}"
-            if new
-            else "spec-runner run: новый integration-PR не найден"
+            f"найдено {len(new)}: {new} — закройте лишние и повторите"
         )
-        return None
-    _complete(state, key, pr=new[0], exit=rc)
-    return new[0]
+    else:
+        _stop(
+            "spec-runner run: новый integration-PR не найден — "
+            "повтор перезапустит раннер"
+        )
+    return None
 
 
 def _record_run_failure(

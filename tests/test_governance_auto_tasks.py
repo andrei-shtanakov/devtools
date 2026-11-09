@@ -377,16 +377,74 @@ def test_spec_run_resume_reruns_and_ignores_old_pr(state):
     }
 
 
-def test_spec_run_resume_after_crash_does_not_take_pr(state):
-    """Падение контроллера: PR без наблюдённого кода 0 не принимается."""
+def test_spec_run_resume_after_crash_does_not_take_pr(state, capsys):
+    """Падение контроллера: PR без наблюдённого кода 0 не принимается и
+    раннер не перезапускается, пока PR открыт — его закрывает человек."""
     rs.op_start(state, "spec-run", before=[5])
     ops = _ops()
     ops.prs = [_run_pr(5), _run_pr(7)]
-    ops.run_pr = None
     assert auto_tasks._spec_run(state, ops) is None
+    out = capsys.readouterr().out
+    assert out.startswith("spec-loop (test):") and "#7" in out
+    assert "не наблюдён" in out and "закройте" in out
+    assert _run_calls(ops) == []
+    assert state.ops["spec-run"] == {"status": "started", "before": [5]}
+
+
+def test_spec_run_resume_after_crash_without_pr_reruns(state):
+    rs.op_start(state, "spec-run", before=[5])
+    ops = _ops()
+    ops.prs = [_run_pr(5)]
+    assert auto_tasks._spec_run(state, ops) == 9
     assert len(_run_calls(ops)) == 1
-    assert state.ops["spec-run"]["status"] == "started"
-    assert state.ops["spec-run"]["before"] == [5, 7]
+
+
+def test_spec_run_exit_zero_written_before_pr_read(state):
+    """Сбой форджи ПОСЛЕ успешного прогона: `exit = 0` уже в записи,
+    повтор подхватывает PR без второго `spec-runner run` (ревью #722)."""
+    ops = _ops()
+    ops.prs = [_run_pr(5)]
+    orig = ops.spec_runner
+
+    def run_then_forge_down(target_dir, args):
+        rc = orig(target_dir, args)
+        ops.prs_exc = RuntimeError("gh down")
+        return rc
+
+    ops.spec_runner = run_then_forge_down
+    assert auto_tasks._spec_run(state, ops) is None
+    assert rs.load(state.run_id).ops["spec-run"] == {
+        "status": "started",
+        "before": [5],
+        "exit": 0,
+    }
+    ops.prs_exc = None
+    ops.spec_runner = orig
+    assert auto_tasks._spec_run(state, ops) == 9
+    assert len(_run_calls(ops)) == 1
+    assert state.ops["spec-run"] == {
+        "status": "completed",
+        "before": [5],
+        "pr": 9,
+        "exit": 0,
+    }
+
+
+def test_spec_run_resume_exit_zero_two_prs_stops_without_rerun(state, capsys):
+    rs.op_start(state, "spec-run", before=[5], exit=0)
+    ops = _ops()
+    ops.prs = [_run_pr(5), _run_pr(7), _run_pr(8)]
+    assert auto_tasks._spec_run(state, ops) is None
+    assert "закройте лишние" in capsys.readouterr().out
+    assert _run_calls(ops) == []
+
+
+def test_spec_run_resume_exit_zero_no_pr_reruns(state):
+    rs.op_start(state, "spec-run", before=[5], exit=0)
+    ops = _ops()
+    ops.prs = [_run_pr(5)]
+    assert auto_tasks._spec_run(state, ops) == 9
+    assert len(_run_calls(ops)) == 1
 
 
 def test_spec_run_failed_resume_never_reaches_code_accept(state, bridge, capsys):
