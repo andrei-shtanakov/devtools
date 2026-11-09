@@ -1061,3 +1061,52 @@ def test_review_preview_per_pr_exception_is_a_gap() -> None:
     assert got.gaps[0].startswith(
         "owner/p#5: факты PR не установлены — CalledProcessError"
     )
+
+
+def test_act_barrier_refuses_in_test_mode(tmp_path, monkeypatch, capsys) -> None:
+    """Конфиг режима test: отказ 2 до чтения активации (`live_policy`)."""
+    from governance import act_status
+    from tests.df_config_fixture import write_config
+
+    env = write_config(tmp_path / "xdg", mode="test")
+    monkeypatch.setenv("XDG_CONFIG_HOME", env["XDG_CONFIG_HOME"])
+    called: list[object] = []
+    monkeypatch.setattr(
+        act_status, "live_policy", lambda *a, **k: called.append(a) or None
+    )
+    assert act_barrier.main(["--product", P]) == 2
+    assert act_barrier.TEST_MODE_REFUSAL in capsys.readouterr().err
+    assert called == []
+
+
+def test_act_barrier_broken_config_refuses(tmp_path, monkeypatch, capsys) -> None:
+    """Битый конфиг — отказ 2 с причиной, а не «неполно»."""
+    cfg = tmp_path / "darkfactory" / "config.toml"
+    cfg.parent.mkdir()
+    cfg.write_text("это не toml [", encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    assert act_barrier.main(["--product", P]) == 2
+    assert "конфиг DarkFactory:" in capsys.readouterr().err
+
+
+def test_invalidate_skips_test_runs(monkeypatch) -> None:
+    """Прогон `test` с тем же `(repo_slug, ws_id)` инвалидация `strict` не трогает."""
+    from types import SimpleNamespace
+
+    from governance import approval_ledger as al
+
+    def st(mode: str) -> SimpleNamespace:
+        live = {"approve-2-1-1": {"status": al.STATUS_STARTED}}
+        return SimpleNamespace(repo_slug=P, ws_id="ws-7", mode=mode, ops=live)
+
+    states = {"rs": st("strict"), "rt": st("test")}
+    hit: list[str] = []
+    monkeypatch.setattr(rs, "all_run_ids", lambda: list(states))
+    monkeypatch.setattr(rs, "load", lambda run_id: states[run_id])
+    monkeypatch.setattr(
+        al, "invalidate_request", lambda state, key, reason: hit.append(state.mode)
+    )
+    act_barrier.invalidate(
+        P, Ops([pr(5, CAND, "OPEN")]), 5, humans=frozenset({"alice"}), caller="alice"
+    )
+    assert hit == ["strict"]

@@ -234,6 +234,13 @@ esac
 if [ "$df_mode" = "test" ]; then
     human_account=$(df_cfg accounts.human) || exit $?
     [ "$login" = "$human_account" ] || die 3 "логин '$login' — не accounts.human ('$human_account'): подписать от этого профиля нельзя"
+    case "$head_ref" in
+        brief/*)
+            # Версия синтетической политики = функция accounts.human: если
+            # утверждающий сменился после проверки brief-PR — акт не сойдётся.
+            current=$(df_cfg test.approver_version) || exit $?
+            [ "$current" = "$brief_pin" ] || die 3 "утверждающий в конфиге сменился после проверки brief-PR (пин $brief_pin, актуальная $current) — мерж не создаст годного акта" ;;
+    esac
 else
 _globs=$(approval_globs "$APPROVAL_PATTERNS") || exit $?
 candidate_glob=$(printf '%s\n' "$_globs" | sed -n '1p')

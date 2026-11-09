@@ -46,6 +46,7 @@ if sys.version_info < (3, 11):  # noqa: UP036 — запуск системны�
     )
     raise SystemExit(2)
 
+import hashlib  # noqa: E402
 import os  # noqa: E402
 import pwd  # noqa: E402
 import re  # noqa: E402
@@ -73,6 +74,14 @@ TEST_RELAXATIONS: tuple[str, ...] = (
     (
         "белый список целей: цель — из targets.toml рядом с конфигом,"
         " манифест флота необязателен"
+    ),
+    (
+        "одобрение ревью: вердикт публикуется комментарием"
+        " (GitHub не даёт одобрить свой PR), вердикт обязателен"
+    ),
+    (
+        "корень доверия df (/etc/df/trust.toml) не используется:"
+        " акт — по мержу (режим до миграции)"
     ),
 )
 _LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}")
@@ -404,6 +413,27 @@ def _policy_field(name: str) -> Callable[[DfConfig], str]:
     return get
 
 
+def test_approver_version(human: str) -> str:
+    """Версия синтетической политики test: sha256 строки
+    `AUTHORIZED_APPROVER_ACCOUNTS=<human>\\n`, первые 40 hex.
+
+    Единственное определение: `policy_rule.test_policy` и `human-merge.sh`
+    (ключ CLI `test.approver_version`) берут версию отсюда. Литерал ключа
+    дублирует `policy_rule.APPROVER_ALLOWLIST_ENV` (df_config — stdlib-only);
+    тест следит за совпадением."""
+    content = f"AUTHORIZED_APPROVER_ACCOUNTS={human}\n"
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:40]
+
+
+test_approver_version.__test__ = False  # type: ignore[attr-defined]
+
+
+def _approver_version(cfg: DfConfig) -> str:
+    if cfg.mode != "test":
+        raise ConfigError("test.approver_version — ключ только для режима test")
+    return test_approver_version(cfg.accounts.human)
+
+
 _GETTERS: dict[str, Callable[[DfConfig], str]] = {
     "mode": lambda c: c.mode,
     "accounts.human": lambda c: c.accounts.human,
@@ -416,6 +446,7 @@ _GETTERS: dict[str, Callable[[DfConfig], str]] = {
     "workspace.root": lambda c: str(c.workspace_root),
     "harness.author": lambda c: c.author_harness,
     "harness.model": lambda c: c.author_model,
+    "test.approver_version": _approver_version,
 }
 
 
@@ -437,7 +468,9 @@ def main(argv: list[str], env: Mapping[str, str] = os.environ) -> int:
             return 0
         argv = ["get", "mode"]
     if len(argv) != 2 or argv[0] != "get":
-        print("использование: df_config.py get <ключ>", file=sys.stderr)
+        print(
+            "использование: df_config.py get <ключ> | mode-or-strict", file=sys.stderr
+        )
         return 2
     try:
         cfg = load(env)

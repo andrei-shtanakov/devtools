@@ -472,6 +472,14 @@ def test_banner_lists_relaxations_in_test(tmp_path: Path) -> None:
             "белый список целей: цель — из targets.toml рядом с конфигом,"
             " манифест флота необязателен"
         ),
+        (
+            "одобрение ревью: вердикт публикуется комментарием"
+            " (GitHub не даёт одобрить свой PR), вердикт обязателен"
+        ),
+        (
+            "корень доверия df (/etc/df/trust.toml) не используется:"
+            " акт — по мержу (режим до миграции)"
+        ),
     )
     assert df_config.test_banner(cfg) == (
         "режим test: выключено — " + "; ".join(df_config.TEST_RELAXATIONS)
@@ -532,3 +540,46 @@ def test_cli_mode_or_strict_reads_mode(tmp_path: Path) -> None:
     cfg.write_text(STRICT, encoding="utf-8")
     done = _cli({"XDG_CONFIG_HOME": str(tmp_path)}, "mode-or-strict")
     assert (done.returncode, done.stdout) == (0, "strict\n"), done.stderr
+
+
+def test_test_approver_version_value() -> None:
+    import hashlib
+
+    assert (
+        df_config.test_approver_version("alice")
+        == hashlib.sha256(b"AUTHORIZED_APPROVER_ACCOUNTS=alice\n").hexdigest()[:40]
+    )
+
+
+def test_policy_rule_sha_unchanged(tmp_path: Path) -> None:
+    """sha test_policy — прежнее значение (литерал посчитан до рефакторинга)
+    и строка ключа совпадает с `policy_rule.APPROVER_ALLOWLIST_ENV`."""
+    import hashlib
+
+    from governance import policy_rule
+
+    assert f"{policy_rule.APPROVER_ALLOWLIST_ENV}=alice\n" == (
+        "AUTHORIZED_APPROVER_ACCOUNTS=alice\n"
+    )
+    text = _drop_table(STRICT, "policy").replace('mode = "strict"', 'mode = "test"')
+    cfg = _load_text(tmp_path, text.replace("andrei-shtanakov", "alice"))
+    assert cfg.accounts.human == "alice"
+    legacy = hashlib.sha256(b"AUTHORIZED_APPROVER_ACCOUNTS=alice\n").hexdigest()[:40]
+    assert df_config.test_approver_version(cfg.accounts.human) == legacy
+    assert df_config.get_value(cfg, "test.approver_version") == legacy
+
+
+def test_get_test_approver_version_strict_refused(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="только для режима test"):
+        df_config.get_value(_load_text(tmp_path, STRICT), "test.approver_version")
+
+
+def test_cli_test_approver_version_strict_refused(tmp_path: Path) -> None:
+    env = _write(tmp_path, STRICT)
+    res = _cli(env, "get", "test.approver_version")
+    assert res.returncode == 2 and "только для режима test" in res.stderr
+
+
+def test_cli_usage_lists_mode_or_strict() -> None:
+    res = _cli({}, "bogus")
+    assert res.returncode == 2 and "mode-or-strict" in res.stderr

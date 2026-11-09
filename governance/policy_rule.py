@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -74,7 +73,7 @@ def test_policy() -> TestPolicy | None:
     if cfg is None or cfg.mode != "test":
         return None
     content = f"{APPROVER_ALLOWLIST_ENV}={cfg.accounts.human}\n"
-    sha = hashlib.sha256(content.encode("utf-8")).hexdigest()[:40]
+    sha = df_config.test_approver_version(cfg.accounts.human)
     return TestPolicy(sha=sha, content=content)
 
 

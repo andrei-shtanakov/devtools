@@ -515,6 +515,47 @@ def test_found_pr_with_foreign_policy_coordinates_refuses(  # T48 (поля ref/
         bt.propose(RUN_ID, ops)
 
 
+def _real_test_world(open_pr, human: str) -> None:
+    """Настоящий якорный test-конфиг; заявка на пин `human` (без подмен)."""
+    import os
+
+    from governance import df_config, policy_rule
+    from tests.df_config_fixture import write_config
+
+    write_config(Path(os.environ["XDG_CONFIG_HOME"]), human=human, mode="test")
+    repo, ref, path = policy_rule.TEST_POLICY_SOURCE
+    open_pr.files[(HEAD, f"{DIR}/{ar.FILE_NAME}")] = ar.render(
+        request(
+            policy_repo=repo,
+            policy_ref=ref,
+            policy_path=path,
+            policy_sha=df_config.test_approver_version("alice"),
+        )
+    )
+
+
+def test_check_merge_real_test_config_accepts(open_pr) -> None:
+    from governance import df_config
+
+    _real_test_world(open_pr, "alice")
+    assert bmc.check_merge(REPO, 7, HEAD, open_pr) == df_config.test_approver_version(
+        "alice"
+    )
+
+
+def test_check_merge_real_test_config_after_approver_change_refused(open_pr) -> None:
+    import os
+
+    from governance import policy_rule
+    from tests.df_config_fixture import write_config
+
+    _real_test_world(open_pr, "alice")
+    write_config(Path(os.environ["XDG_CONFIG_HOME"]), human="bob", mode="test")
+    with pytest.raises(bmc.MergeRefused) as exc:
+        bmc.check_merge(REPO, 7, HEAD, open_pr)
+    assert str(exc.value) == policy_rule.TEST_APPROVER_CHANGED
+
+
 @pytest.mark.parametrize(("case", "mutate", "_m"), DEFECTS, ids=[d[0] for d in DEFECTS])
 def test_found_pr_with_ambiguous_request_refuses(  # T21b через propose
     tmp_path, runs_root, monkeypatch, case, mutate, _m

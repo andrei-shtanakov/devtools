@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
-from governance import act_status
+from governance import act_status, df_config
 from governance import approval_branches as ab
 from governance import approval_ledger as al
 from governance import run_state as rs
@@ -439,6 +439,23 @@ def live_review_requests(ops_by_product: Mapping[str, Any]) -> BarrierReport:
     return BarrierReport(tuple(items), not gaps, tuple(gaps))
 
 
+#: Отказ `act_barrier` в режиме `test` (миграции акта там нет).
+TEST_MODE_REFUSAL = "режим test: миграция акта не применяется"
+
+
+def _config_refusal() -> str | None:
+    """Причина отказа по режиму конфига DarkFactory или `None` (strict).
+
+    Нет файла конфига — strict; битый конфиг и режим `test` — отказ."""
+    if not os.path.lexists(df_config.config_path(os.environ)):
+        return None
+    try:
+        cfg = df_config.load()
+    except df_config.ConfigError as exc:
+        return f"конфиг DarkFactory: {exc}"
+    return TEST_MODE_REFUSAL if cfg.mode == "test" else None
+
+
 def invalidate(
     product: str, ops: Any, pr: int, *, humans: frozenset[str], caller: str
 ) -> str:
@@ -461,6 +478,8 @@ def invalidate(
             state = rs.load(run_id)
         except (OSError, ValueError, TypeError):
             continue  # нечитаемый леджер называет следующий отчёт (`_local_items`)
+        if getattr(state, "mode", "strict") == "test":
+            continue  # прогон test миграции акта не знает
         if (state.repo_slug, state.ws_id) != (ident.product, ident.ws_id):
             continue  # тот же ключ в другом воркстриме — другая заявка (B1-14)
         op = state.ops.get(ident.request_id)
@@ -513,6 +532,10 @@ def _main(argv: Sequence[str] | None) -> int:
     p.add_argument("--invalidate", type=int)
     p.add_argument("--json", action="store_true")
     args = p.parse_args(argv)
+    refusal = _config_refusal()
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
+        return EXIT_REFUSED
     ops = RealOps()
     probe = SimpleNamespace(repo_slug=args.product, run_id="act-barrier", base_ref=None)
     live = act_status.live_policy(probe, act_status.real_deps(probe))  # type: ignore[arg-type]

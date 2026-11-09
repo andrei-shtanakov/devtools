@@ -72,6 +72,8 @@ usage() {
     echo "  --budget-override <причина> — превысить бюджет платных прогонов" >&2
     echo "  --harness/--model — ревьюер; порядок: флаг > env REVIEW_HARNESS/" >&2
     echo "    REVIEW_MODEL > ~/.config/ai-prosto/harness.env > codex (историч.)" >&2
+    echo "  в режиме test конфига DarkFactory вместо harness.env — слой [harness]" >&2
+    echo "    конфига; вердикт публикуется комментарием с verdict= в маркере" >&2
     echo "  внешний REVIEW_CMD побеждает всё, кроме явных флагов" >&2
     echo "  --max-diff-bytes/--max-diff-files — явно поднять потолки дифа кита" >&2
     echo "    (флаг > env REVIEW_MAX_DIFF_BYTES/REVIEW_MAX_DIFF_FILES); уходят в" >&2
@@ -194,13 +196,12 @@ fi
 harness_env_file="${AI_PROSTO_HARNESS_ENV:-$HOME/.config/ai-prosto/harness.env}"
 cfg_harness=""
 cfg_model=""
-# Режим читаем, только когда харнесс не задан флагом/env: иначе выбор от него
-# не зависит. test: `[harness]` конфига вместо harness.env (файл машины
-# владельца, у коллеги его нет); strict — прежний порядок без изменений.
-df_mode=""
-if [ -z "$opt_harness" ] && [ -z "${REVIEW_HARNESS:-}" ]; then
-    df_mode=$(df_cfg_mode) || exit $?
-fi
+# Режим читается всегда и один раз: от него зависят и выбор ревьюера, и
+# способ публикации вердикта. test: `[harness]` конфига вместо harness.env
+# (файл машины владельца, у коллеги его нет), вердикт — комментарием (одна
+# учётка автор и ревьюер, GitHub не даёт одобрить свой PR); strict — прежний
+# порядок и прежние `--approve`/`--request-changes` без изменений.
+df_mode=$(df_cfg_mode) || exit $?
 reviewer_from_config=0
 if [ "$df_mode" != "test" ] && [ -f "$harness_env_file" ]; then
     # Толерантность к привычной env-файловой записи (боевое claude-ревью
@@ -485,14 +486,35 @@ check_head_current() {
 $head_sha, сейчас $cur_oid — перегоните ревью."
 }
 
-# Публикация вердикта. $1 — действие.
+# Публикация вердикта. $1 — действие. В test учётка агента — и автор PR, а
+# GitHub отвечает 422 на `--approve`/`--request-changes` своего PR: вердикт
+# уходит `--comment`, само действие несёт поле `verdict=` маркера (его читают
+# STRICT_MARKER_JQ и lr_delivered_state ниже). Код выхода — прежний.
 publish() {
     check_head_current
-    if ! gh_r pr review "$pr" --repo "$slug" "--$1" \
+    _pub_flag="$1"
+    [ "$df_mode" != "test" ] || _pub_flag="comment"
+    if ! gh_r pr review "$pr" --repo "$slug" "--$_pub_flag" \
         --body-file "$work/body.md"; then
-        die 2 "прогон завершён (--$1), но публикация ревью не удалась."
+        die 2 "прогон завершён (--$_pub_flag), но публикация ревью не удалась."
     fi
-    echo "опубликовано: --$1 на ${slug}#${pr} (head $head_sha) от $login"
+    if [ "$_pub_flag" = "$1" ]; then
+        echo "опубликовано: --$1 на ${slug}#${pr} (head $head_sha) от $login"
+    else
+        echo "опубликовано: --comment (вердикт $1, режим test) на" \
+            "${slug}#${pr} (head $head_sha) от $login"
+    fi
+}
+
+# Маркер вердикта. $1 — head, $2 — fp (пусто у старого кита), $3 — действие.
+# strict — байт в байт прежний `<!-- codex-terminal-review head=… fp=… -->`;
+# test дописывает ` verdict=<действие>`: у COMMENTED-обзора состояние
+# вердикта не несёт, и без поля его не прочитать.
+verdict_marker() {
+    _vm="<!-- codex-terminal-review head=$1"
+    [ -z "$2" ] || _vm="$_vm fp=$2"
+    [ "$df_mode" != "test" ] || _vm="$_vm verdict=$3"
+    printf '%s -->\n' "$_vm"
 }
 
 # Вердикт-файл — явный одноразовый канал между dry-run и боевым прогоном,
@@ -559,6 +581,13 @@ try_use_verdict_file() {
         approve:0|request-changes:1) : ;;
         *) valid=0 ;;
     esac
+    # Тело обязано нести маркер ТЕКУЩЕГО режима строкой целиком: файл из
+    # strict-прогона в test опубликовался бы комментарием, который не читается
+    # как вердикт; файл из test в strict понёс бы `verdict=` в `--approve`.
+    if [ "$valid" -eq 1 ]; then
+        grep -qxF -- "$(verdict_marker "$head_sha" "$fp" "$v_action")" \
+            "$work/imported-body.md" || valid=0
+    fi
     if [ "$valid" -ne 1 ]; then
         echo "ЗАМЕТКА: verdict-файл повреждён, несовместим или не совпал" \
             "по repo/pr/head/fp — идёт полный прогон." >&2
@@ -768,8 +797,15 @@ lr_known=0
 # копии расходились бы (дубль нашёл selfcheck --judge, 2026-09-28). Кандидат —
 # ПОСЛЕДНЕЕ ревью $login с префиксом маркера; валиден только если маркер ровно
 # один, в полном формате head/fp и состояние APPROVED или CHANGES_REQUESTED.
+# Режим test ($mode, план 3c-1): вердикт публикуется комментарием, поэтому
+# COMMENTED с полем `verdict=approve|request-changes` в маркере читается как
+# APPROVED/CHANGES_REQUESTED; поле допустимо только у COMMENTED, без поля
+# COMMENTED — по-прежнему не вердикт. Поле (ровно одно, в полном маркере)
+# снимается, и дальше работает тот же строгий match, что и в strict. В strict
+# поле не снимается: маркер с `verdict=` — miss, COMMENTED — miss, как раньше.
 # Вывод: "STATE HEAD FP" | "none none none" | "miss miss miss".
-# \$login, \$r, \$n, \$ms — переменные jq, не shell: кавычки одинарные намеренно.
+# \$login, \$mode, \$r, \$n, \$ms, \$vre, \$vm, \$v, \$st — переменные jq, не
+# shell: кавычки одинарные намеренно.
 # shellcheck disable=SC2016
 STRICT_MARKER_JQ='([ .[][]
    | select(.user.login == $login)
@@ -778,12 +814,44 @@ STRICT_MARKER_JQ='([ .[][]
     | if $r == null then "none none none"
       else
         (($r.body // "") | [scan("<!-- codex-terminal-review ")] | length) as $n
-        | (($r.body // "") | [match("<!-- codex-terminal-review head=([0-9a-f]{40}) fp=([0-9a-f]{64}) -->")]) as $ms
-        | if $n == 1 and ($ms | length) == 1
-             and ($r.state == "APPROVED" or $r.state == "CHANGES_REQUESTED")
-          then $r.state + " " + $ms[0].captures[0].string + " " + $ms[0].captures[1].string
+        | (if $mode == "test" then "(?<m><!-- codex-terminal-review head=[0-9a-f]{40} fp=[0-9a-f]{64}) verdict=(?<v>approve|request-changes) -->"
+           else null end) as $vre
+        | (if $vre == null then [] else [($r.body // "") | match($vre)] end) as $vm
+        | (if ($vm | length) == 1
+           then ($vm[0].captures | map(select(.name == "v")) | .[0].string)
+           else null end) as $v
+        | (($r.body // "")
+           | if $v == null then . else sub($vre; "\(.m) -->") end
+           | [match("<!-- codex-terminal-review head=([0-9a-f]{40}) fp=([0-9a-f]{64}) -->")]) as $ms
+        | (if $v == null then
+             (if $r.state == "APPROVED" or $r.state == "CHANGES_REQUESTED"
+              then $r.state else null end)
+           elif $r.state == "COMMENTED" then
+             (if $v == "approve" then "APPROVED" else "CHANGES_REQUESTED" end)
+           else null end) as $st
+        | if $n == 1 and ($ms | length) == 1 and $st != null
+          then $st + " " + $ms[0].captures[0].string + " " + $ms[0].captures[1].string
           else "miss miss miss" end
       end'
+# Безмаркерный разбор (lr_delivered_state): последнее доставленное ревью
+# $REVIEW_LOGIN в состоянии APPROVED/CHANGES_REQUESTED. В test к ним
+# добавляется COMMENTED с полем `verdict=` в маркере протокола (вердикт
+# комментарием): ровно один маркер с `verdict=approve` — APPROVED, иначе
+# (`request-changes` или неоднозначное тело) — CHANGES_REQUESTED, fail-closed
+# для guard'а, которому важен только красный. В strict COMMENTED не вердикт.
+# shellcheck disable=SC2016
+DELIVERED_STATE_JQ='([ .[][]
+   | select(.user.login == $login)
+   | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED"
+       or ($mode == "test" and .state == "COMMENTED"
+           and ((.body // "") | test("<!-- codex-terminal-review [^>]* verdict=(approve|request-changes) -->"))))
+ ] | last) as $r
+| if $r == null then "none"
+  elif $r.state != "COMMENTED" then $r.state
+  elif ((($r.body // "") | [scan("<!-- codex-terminal-review ")] | length) == 1
+        and (($r.body // "") | test("<!-- codex-terminal-review [^>]* verdict=approve -->")))
+  then "APPROVED"
+  else "CHANGES_REQUESTED" end'
 lr_json=""
 lr_fetch_ok=0
 # Запрос идёт на КАЖДОМ прогоне, а не только при дедупе: stop rule обязан знать
@@ -802,14 +870,12 @@ if command -v jq >/dev/null 2>&1; then
         2> "$work/lastreview.err"); then
         lr_fetch_ok=1
         if lr_line=$(printf '%s' "$lr_json" \
-            | jq -rs --arg login "$REVIEW_LOGIN" "$STRICT_MARKER_JQ" \
+            | jq -rs --arg login "$REVIEW_LOGIN" --arg mode "$df_mode" \
+            "$STRICT_MARKER_JQ" \
             2> "$work/lastreview.err") \
             && lr_delivered_state=$(printf '%s' "$lr_json" | jq -rs \
-            '([ .[][]
-               | select(.user.login == "'"$REVIEW_LOGIN"'")
-               | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")
-             ] | last) as $r
-            | if $r == null then "none" else $r.state end' \
+            --arg login "$REVIEW_LOGIN" --arg mode "$df_mode" \
+            "$DELIVERED_STATE_JQ" \
             2> "$work/lastreview.err"); then
             # shellcheck disable=SC2034 — читается только lr_fp: его
             # потребителя пока нет. lr_head читает блок «База ревью»
@@ -1299,7 +1365,8 @@ if [ -n "$fp" ] && [ "$fresh" -eq 0 ]; then
     # miss, поиск назад НЕ ведётся. Не-кандидаты (scope-аттестации, любые ревью
     # $REVIEW_LOGIN без префикса) на результат не влияют.
     elif ! candidate=$(printf '%s' "$lr_json" \
-        | jq -rs --arg login "$REVIEW_LOGIN" "$STRICT_MARKER_JQ" \
+        | jq -rs --arg login "$REVIEW_LOGIN" --arg mode "$df_mode" \
+            "$STRICT_MARKER_JQ" \
         2> "$work/reviews.err"); then
         cat "$work/reviews.err" >&2
         echo "ЗАМЕТКА: прошлые ревью не распарсились (jq) — дедуп пропущен," \
@@ -1335,7 +1402,7 @@ if [ -n "$inh_state" ]; then
                     "отпечаток входа совпал — codex не вызывался"
                 echo "- публикация: $REVIEW_LOGIN"
                 echo
-                echo "<!-- codex-terminal-review head=$head_sha fp=$fp -->"
+                verdict_marker "$head_sha" "$fp" "$action"
             } > "$work/body.md"
             write_verdict_file
             echo "=== dry-run: действие --$action (унаследовано)," \
@@ -1358,7 +1425,7 @@ if [ -n "$inh_state" ]; then
             "отпечаток входа совпал — codex не вызывался"
         echo "- публикация: $REVIEW_LOGIN"
         echo
-        echo "<!-- codex-terminal-review head=$head_sha fp=$fp -->"
+        verdict_marker "$head_sha" "$fp" "$action"
     } > "$work/body.md"
     if [ "$dry_run" -eq 1 ]; then
         write_verdict_file
@@ -1436,18 +1503,15 @@ esac
 
 # Маркер аддитивный: с отпечатком, когда кит его умеет, — из него будущие
 # прогоны наследуют вердикт; без fp (старый кит) наследование невозможно.
-if [ -n "$fp" ]; then
-    marker="<!-- codex-terminal-review head=$head_sha fp=$fp -->"
-else
-    marker="<!-- codex-terminal-review head=$head_sha -->"
-fi
+# В test к маркеру добавляется `verdict=` (см. verdict_marker).
+marker=$(verdict_marker "$head_sha" "$fp" "$action")
 {
     echo "## Codex CLI review — терминальный прогон"
     echo
     echo "- PR: ${slug}#${pr}, проревьюирован head \`$head_sha\`"
     echo "- ревьюер: \`$reviewer_label\` через review-kit репо;" \
         "публикация: $REVIEW_LOGIN"
-    if [ "$reviewer_from_config" -eq 1 ]; then
+    if [ "$reviewer_from_config" -eq 1 ] && [ "$external_review_cmd" -eq 0 ]; then
         echo "- ревьюер из [harness] конфига (режим test)"
     fi
     if [ "$targeted" -eq 1 ]; then

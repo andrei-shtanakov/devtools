@@ -414,7 +414,10 @@ def _uv_calls(fleet: Fleet) -> list[str]:
 def test_brief_pr_is_checked_by_head_then_merged_with_same_sha(fleet: Fleet) -> None:
     # Подложенное вызывающим окружение проверки не наследуется (ревью #573).
     res = fleet.run(
-        GH_STUB_HEADREF="brief/WS-1", GH_STUB_BODY="", UV_PROJECT_ENVIRONMENT="/evil"
+        GH_STUB_HEADREF="brief/WS-1",
+        GH_STUB_BODY="",
+        UV_PROJECT_ENVIRONMENT="/evil",
+        UV_STUB_PIN=_brief_pin(HUMAN),
     )
     assert res.returncode == 0, res.stderr
     (uv,) = _uv_calls(fleet)
@@ -470,7 +473,11 @@ def test_brief_pr_refusal_stops_before_merge(
 def test_brief_pr_check_runs_under_human_profile(fleet: Fleet, tmp_path: Path) -> None:
     profile = tmp_path / "gh-human"
     profile.mkdir()
-    res = fleet.run(GH_STUB_HEADREF="brief/WS-1", HUMAN_GH_CONFIG_DIR=str(profile))
+    res = fleet.run(
+        GH_STUB_HEADREF="brief/WS-1",
+        HUMAN_GH_CONFIG_DIR=str(profile),
+        UV_STUB_PIN=_brief_pin(HUMAN),
+    )
     assert res.returncode == 0, res.stderr
     (uv,) = _uv_calls(fleet)
     assert f"GH_CONFIG_DIR={profile} UV_PROJECT_ENVIRONMENT=" in uv
@@ -509,10 +516,15 @@ def test_brief_pr_without_pin_from_checker_refuses(fleet: Fleet) -> None:
 
 
 def test_brief_pr_head_race_then_recheck_of_new_head(fleet: Fleet) -> None:  # T50
-    first = fleet.run(GH_STUB_HEADREF="brief/WS-1", GH_STUB_MERGE_FAIL="1")
+    pin = _brief_pin(HUMAN)
+    first = fleet.run(
+        GH_STUB_HEADREF="brief/WS-1", GH_STUB_MERGE_FAIL="1", UV_STUB_PIN=pin
+    )
     assert first.returncode == 4  # форджа отклонила: голова сменилась после проверки
     new_head = "1" * 40
-    second = fleet.run(GH_STUB_HEADREF="brief/WS-1", GH_STUB_HEADOID=new_head)
+    second = fleet.run(
+        GH_STUB_HEADREF="brief/WS-1", GH_STUB_HEADOID=new_head, UV_STUB_PIN=pin
+    )
     assert second.returncode == 0, second.stderr
     assert f"--head {new_head}" in _uv_calls(fleet)[-1]
     assert f"sha={new_head}" in fleet.merge_calls()[-1]
@@ -597,7 +609,10 @@ def test_authorized_approver_env_is_refused_in_both_modes(
 def test_test_mode_brief_pr_runs_checker_without_policy_read(fleet: Fleet) -> None:
     _one_account(fleet)
     res = fleet.run(
-        GH_STUB_LOGIN="alice", GH_STUB_HEADREF="brief/WS-1", GH_STUB_BODY=""
+        GH_STUB_LOGIN="alice",
+        GH_STUB_HEADREF="brief/WS-1",
+        GH_STUB_BODY="",
+        UV_STUB_PIN=_brief_pin("alice"),
     )
     assert res.returncode == 0, res.stderr
     assert len(_uv_calls(fleet)) == 1
@@ -613,3 +628,39 @@ def test_redirected_test_config_refused_without_test_anchor(fleet: Fleet) -> Non
     assert res.returncode == 2, res.stderr
     assert "режим test принимается только из" in res.stderr
     assert fleet.merge_calls() == []
+
+
+def _brief_pin(human: str) -> str:
+    from governance import df_config
+
+    return df_config.test_approver_version(human)
+
+
+def _test_brief(fleet: Fleet, pin_of: str) -> subprocess.CompletedProcess[str]:
+    write_config(
+        fleet.xdg,
+        mode="test",
+        human="bob",
+        agent="bob",
+        human_gh_config_dir=fleet.human_profile,
+        agent_gh_config_dir=fleet.human_profile,
+    )
+    return fleet.run(
+        GH_STUB_LOGIN="bob",
+        GH_STUB_HEADREF="brief/WS-1",
+        GH_STUB_BODY="",
+        UV_STUB_PIN=_brief_pin(pin_of),
+    )
+
+
+def test_human_merge_test_brief_pin_rechecked(fleet: Fleet) -> None:
+    res = _test_brief(fleet, "alice")
+    assert res.returncode == 3
+    assert "утверждающий в конфиге сменился" in res.stderr
+    assert fleet.merge_calls() == []
+
+
+def test_human_merge_test_brief_pin_matches_merges(fleet: Fleet) -> None:
+    res = _test_brief(fleet, "bob")
+    assert res.returncode == 0, res.stderr
+    assert len(fleet.merge_calls()) == 1

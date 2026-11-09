@@ -2365,6 +2365,31 @@ JUDGMENT = {
             '"нет привязки корня доверия"',
         ),
     ),
+    "act_status.mode_probe": (
+        r(
+            "unknown_run_mode",
+            "act_status.mode_probe",
+            'mode != "test"',
+            f"{S}::test_mode_probe_unknown_run_mode_unavailable",
+            "\"'bogus'\"",
+        ),
+    ),
+    "act_status._test_run_policy": (
+        r(
+            "broken_config",
+            "act_status._test_run_policy",
+            "except df_config.ConfigError",
+            f"{S}::test_mode_probe_test_run_broken_config_unavailable",
+            '"конфиг DarkFactory: "',
+        ),
+        r(
+            "config_not_test",
+            "act_status._test_run_policy",
+            'cfg_mode != "test"',
+            f"{S}::test_mode_probe_test_run_strict_config_unavailable",
+            '"режим прогона test ≠ режиму конфига"',
+        ),
+    ),
     "act_status.gate_run": (
         r(
             "legacy_mode",
@@ -3176,6 +3201,22 @@ JUDGMENT = {
             "isinstance(live, Unavailable)",
             f"{B}::test_cli_unavailable_activation_is_incomplete",
             '"текущая активация — нет привязки"',
+        ),
+    ),
+    "act_barrier._config_refusal": (
+        r(
+            "broken_config",
+            "act_barrier._config_refusal",
+            "except df_config.ConfigError",
+            f"{B}::test_act_barrier_broken_config_refuses",
+            '"конфиг DarkFactory:"',
+        ),
+        r(
+            "test_mode",
+            "act_barrier._config_refusal",
+            'cfg.mode == "test"',
+            f"{B}::test_act_barrier_refuses_in_test_mode",
+            "act_barrier.TEST_MODE_REFUSAL",
         ),
     ),
     "act_barrier._identity": (
@@ -4776,7 +4817,7 @@ NOT_JUDGMENT = {
     "act_status._blobs": "фабрика читателя (`_blobs.read` — место суждения)",
     "act_status._statuses": _BUILD,
     "act_status.statuses_at_base": _BUILD,
-    "act_status.mode_probe": "точка подмены для тестов вне act_*; суждение — `live_policy`",
+    "act_status._config_exists": _IO,
     "act_status._gate_statuses": "собирает статусы для провайдера; суждения — `Statuses`",
     "act_status._gate_statuses.base_text": _IO,
     "act_status._gate_statuses.worktree_text": _IO,
