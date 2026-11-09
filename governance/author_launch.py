@@ -90,20 +90,34 @@ def harness_env_values() -> dict[str, str]:
     return values
 
 
+def config_mode() -> str:
+    """Режим конфига DarkFactory: `strict`, если файла нет, иначе `load().mode`.
+
+    Файл есть, но дефектен — `df_config.ConfigError` пробрасывается."""
+    if not os.path.lexists(df_config.config_path(os.environ)):
+        return "strict"
+    return df_config.load().mode
+
+
 def harness_for(prefix: str) -> tuple[str, str]:
     """(harness, model) слоя `<prefix>_HARNESS`/`<prefix>_MODEL`.
 
-    env > harness.env > вшитый codex; модель привязана к слою, из которого
-    пришёл харнесс (env-харнесс НЕ наследует модель файла).
+    strict: env > harness.env > вшитый codex. test: env > `[harness]` конфига
+    (harness.env не читается). Модель привязана к слою, из которого пришёл
+    харнесс (env-харнесс НЕ наследует модель файла/конфига).
     """
-    cfg = harness_env_values()
     env_harness = os.environ.get(f"{prefix}_HARNESS", "")
-    harness = env_harness or cfg.get(f"{prefix}_HARNESS", "") or "codex"
+    env_model = os.environ.get(f"{prefix}_MODEL", "")
+    if config_mode() == "test":
+        if env_harness:
+            return env_harness, env_model
+        cfg = df_config.load()
+        return cfg.author_harness, env_model or cfg.author_model
+    file_cfg = harness_env_values()
+    harness = env_harness or file_cfg.get(f"{prefix}_HARNESS", "") or "codex"
     if env_harness:
-        model = os.environ.get(f"{prefix}_MODEL", "")
-    else:
-        model = os.environ.get(f"{prefix}_MODEL", "") or cfg.get(f"{prefix}_MODEL", "")
-    return harness, model
+        return harness, env_model
+    return harness, env_model or file_cfg.get(f"{prefix}_MODEL", "")
 
 
 def harness_refusal(harness: str) -> str:
@@ -343,7 +357,10 @@ def check_config(target_dir: str, bundle_dir: str, author_backend: str) -> str |
     «харнесс = claude» здесь НЕ проверяются — конвейер без запуска агента
     работает при любой допустимой конфигурации; полный допуск — на границе.
     """
-    harness, _ = harness_for("AUTHOR")
+    try:
+        harness, _ = harness_for("AUTHOR")
+    except df_config.ConfigError as exc:
+        return f"конфиг DarkFactory: {exc}"
     if harness not in KNOWN_HARNESSES:
         return f"неизвестный AUTHOR_HARNESS: {harness!r} ({'|'.join(KNOWN_HARNESSES)})"
     if author_backend not in KNOWN_BACKENDS:

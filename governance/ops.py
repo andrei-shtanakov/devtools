@@ -576,6 +576,21 @@ def _gh_user_login(env: dict[str, str] | None) -> str | None:
 _DISP_ADAPTERS = {"claude": "claude_code", "codex": "codex"}
 
 
+def edge_check_model() -> str:
+    """Модель ревьюера edge-check: в test — `[harness].model` при claude.
+
+    Edge-check всегда claude; иначе (strict, нет файла, `[harness].author` не
+    claude) — прежний `coordinator.DEFAULT_MODEL`."""
+    from governance.edge_check.coordinator import DEFAULT_MODEL
+
+    if author_launch.config_mode() != "test":
+        return DEFAULT_MODEL
+    cfg = df_config.load()
+    if cfg.author_harness != "claude" or not cfg.author_model:
+        return DEFAULT_MODEL
+    return cfg.author_model
+
+
 def disp_agent(role: str) -> tuple[str, str]:
     """(adapter, model) для `[agents.<role>]` конфига пайплайна disputatio.
 
@@ -586,7 +601,10 @@ def disp_agent(role: str) -> tuple[str, str]:
     codex его нет — без модели отказ, а не выдуманное имя.
     """
     prefix = {"author": "AUTHOR", "reviewer": "REVIEW"}[role]
-    harness, model = author_launch.harness_for(prefix)
+    try:
+        harness, model = author_launch.harness_for(prefix)
+    except df_config.ConfigError as exc:
+        raise ValueError(f"конфиг DarkFactory: {exc}") from exc
     if harness not in _DISP_ADAPTERS:
         raise ValueError(f"неизвестный {prefix}_HARNESS: {harness!r} (claude|codex)")
     if not model:
@@ -2417,7 +2435,14 @@ class RealOps(BriefFactsMixin):
         """
         from governance.edge_check.coordinator import run_level
 
-        return run_level(state, self, run_dir, wave, profile_path)  # type: ignore[arg-type]
+        return run_level(
+            state,  # type: ignore[arg-type]
+            self,  # type: ignore[arg-type]
+            run_dir,
+            wave,
+            profile_path,
+            model=edge_check_model(),
+        )
 
     def create_issue(self, repo_slug: str, title: str, body: str) -> int:
         """gh issue create -R <slug> --label inbox; номер из URL stdout."""

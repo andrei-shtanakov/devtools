@@ -1462,6 +1462,62 @@ def test_harness_resolver_layers(base, monkeypatch, cfg, env, expected):
     assert author_launch.harness_for("AUTHOR") == expected
 
 
+def _test_mode(tmp_path: Path, monkeypatch) -> None:
+    """Конфиг режима test (`[harness]` claude/m-x) + ловушка в harness.env."""
+    from tests.df_config_fixture import use_test_real_home, write_config
+
+    home = tmp_path / "real-home"
+    home.mkdir()
+    use_test_real_home(monkeypatch, home)
+    xdg = tmp_path / "xdg-test"
+    env = write_config(xdg, mode="test")
+    text = (xdg / "darkfactory" / "config.toml").read_text(encoding="utf-8")
+    (xdg / "darkfactory" / "config.toml").write_text(
+        text.replace("test-model", "m-x"), encoding="utf-8"
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", env["XDG_CONFIG_HOME"])
+    _harness_cfg(tmp_path, monkeypatch, "AUTHOR_HARNESS=codex\n")
+    for name in ("REVIEW_HARNESS", "REVIEW_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_harness_for_test_mode_reads_config(tmp_path, monkeypatch):
+    _test_mode(tmp_path, monkeypatch)
+    assert author_launch.harness_for("AUTHOR") == ("claude", "m-x")
+    assert author_launch.harness_for("REVIEW") == ("claude", "m-x")
+
+
+def test_harness_for_test_env_overrides_without_model(tmp_path, monkeypatch):
+    _test_mode(tmp_path, monkeypatch)
+    monkeypatch.setenv("AUTHOR_HARNESS", "codex")
+    assert author_launch.harness_for("AUTHOR") == ("codex", "")
+    monkeypatch.setenv("AUTHOR_MODEL", "m-env")
+    assert author_launch.harness_for("AUTHOR") == ("codex", "m-env")
+
+
+def test_harness_for_strict_unchanged(base, monkeypatch):
+    _harness_cfg(base, monkeypatch, "AUTHOR_HARNESS=claude\nAUTHOR_MODEL=m1\n")
+    assert author_launch.config_mode() == "strict"
+    assert author_launch.harness_for("AUTHOR") == ("claude", "m1")
+
+
+@pytest.mark.no_df_config
+def test_harness_for_no_config_is_strict(base, monkeypatch):
+    _harness_cfg(base, monkeypatch, None)
+    assert author_launch.config_mode() == "strict"
+    assert author_launch.harness_for("AUTHOR") == ("codex", "")
+
+
+def test_check_config_broken_config_named(base, tmp_path, monkeypatch):
+    xdg = tmp_path / "xdg-broken"
+    (xdg / "darkfactory").mkdir(parents=True)
+    (xdg / "darkfactory" / "config.toml").write_text("not = [valid", "utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    err = author_launch.check_config(str(base), ".bundle", "codex")
+    assert err is not None
+    assert err.startswith("конфиг DarkFactory: ")
+
+
 def test_author_argv_runs_admitted_binary_with_pinned_flags():
     argv = author_launch.author_argv("/opt/claude", "", "PROMPT")
     assert argv == [
