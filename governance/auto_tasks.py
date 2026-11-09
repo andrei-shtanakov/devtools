@@ -136,6 +136,68 @@ def _approve_tasks(state: RunState, ops: Ops) -> bool:
     return True
 
 
+RUN_BRANCH_PREFIX = "spec-runner/run-"
+
+
+def _open_run_prs(state: RunState, ops: Ops) -> list[int] | None:
+    """Номера OPEN integration-PR раннера; `None` — форджа недоступна (стоп)."""
+    try:
+        prs = ops.prs_by_head_prefix(state.repo_slug, RUN_BRANCH_PREFIX)
+    except RuntimeError as exc:
+        _stop(f"список PR {RUN_BRANCH_PREFIX}* не прочитан: {exc}")
+        return None
+    return sorted(int(p["number"]) for p in prs if p.get("state") == "OPEN")
+
+
+def _run_args(state: RunState) -> list[str]:
+    return [
+        "run",
+        "--all",
+        "--strict",
+        f"--spec-prefix={state.ws_id}-",
+        "--integration-pr",
+    ]
+
+
+def _spec_run(state: RunState, ops: Ops) -> int | None:
+    """`spec-runner run … --integration-pr`; номер нового PR либо `None` (стоп)."""
+    key = "spec-run"
+    if not _mode_gate(state):
+        return None
+    if op_status(state, key) == "completed":
+        return state.ops[key]["pr"]
+    current = _open_run_prs(state, ops)
+    if current is None:
+        return None
+    if key in state.ops:
+        before = list(state.ops[key].get("before", []))
+    else:
+        before = current
+        op_start(state, key, before=before)
+    new = [n for n in current if n not in before]
+    rc = 0
+    # Возобновление: PR уже создан запуском до падения — не перезапускаем.
+    if not new:
+        rc = ops.spec_runner(state.target_dir, _run_args(state))
+        if rc != 0:
+            _stop(f"spec-runner run вернул {rc}")
+            return None
+        current = _open_run_prs(state, ops)
+        if current is None:
+            return None
+        new = [n for n in current if n not in before]
+    if len(new) != 1:
+        _stop(
+            f"spec-runner run: ожидался один новый integration-PR, "
+            f"найдено {len(new)}: {new}"
+            if new
+            else "spec-runner run: новый integration-PR не найден"
+        )
+        return None
+    _complete(state, key, pr=new[0], exit=rc)
+    return new[0]
+
+
 def run_chain(state: RunState, ops: Ops, tasks_pr: int) -> int:
     """Цепочка до approve-PR включительно: 0 — код можно проверять, 1 — стоп."""
     if not _mode_gate(state):
@@ -147,5 +209,6 @@ def run_chain(state: RunState, ops: Ops, tasks_pr: int) -> int:
     approve_pr = state.ops["tasks-approve"]["pr"]
     if not _merge_spec_pr(state, ops, "approve-merge", approve_pr, "approve-PR"):
         return 1
-    # Шов для Task 3: здесь добавляется шаг `spec-run`.
+    if _spec_run(state, ops) is None:
+        return 1
     return 0

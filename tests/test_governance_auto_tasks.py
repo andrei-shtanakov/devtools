@@ -24,6 +24,14 @@ def _facts(pr: int, *, state="OPEN", draft=False, rollup=None) -> dict:
     }
 
 
+def _run_pr(number: int, state: str = "OPEN") -> dict:
+    return {
+        "number": number,
+        "headRefName": f"spec-runner/run-{number}",
+        "state": state,
+    }
+
+
 class _ChainOps:
     def __init__(self, facts: dict[int, dict]) -> None:
         self.facts = facts
@@ -32,6 +40,9 @@ class _ChainOps:
         self.merge_exc: Exception | None = None
         self.spec_rc = 0
         self.ready_ok = True
+        self.prs: list[dict] = []
+        self.run_pr: int | None = 9
+        self.prs_exc: Exception | None = None
 
     def pr_facts(self, slug: str, pr: int) -> dict:
         return self.facts[pr]
@@ -51,7 +62,15 @@ class _ChainOps:
 
     def spec_runner(self, target_dir: str, args: list[str]) -> int:
         self.calls.append(("spec_runner", target_dir, args))
+        if args[0] == "run" and self.spec_rc == 0 and self.run_pr is not None:
+            self.prs.append(_run_pr(self.run_pr))
         return self.spec_rc
+
+    def prs_by_head_prefix(self, slug: str, prefix: str) -> list[dict]:
+        self.calls.append(("prs", slug, prefix))
+        if self.prs_exc is not None:
+            raise self.prs_exc
+        return [p for p in self.prs if p["headRefName"].startswith(prefix)]
 
     def names(self) -> list[str]:
         return [c[0] for c in self.calls]
@@ -160,7 +179,7 @@ def test_spec_approve_runs_only_when_not_approved(state, bridge):
         "--spec-prefix",
         "WS-1-",
     ]
-    calls = [c for c in ops.calls if c[0] == "spec_runner"]
+    calls = [c for c in ops.calls if c[0] == "spec_runner" and c[2][0] != "run"]
     assert len(calls) == 1
     assert calls[0][1] == state.target_dir
     assert calls[0][2][:3] == expected[:3]
@@ -172,7 +191,9 @@ def test_spec_approve_skipped_when_already_approved(state, bridge):
     bridge["ok"] = True
     ops = _ops()
     assert run_chain(state, ops, T) == 0
-    assert "spec_runner" not in ops.names()
+    assert _run_calls(ops) and len(
+        [c for c in ops.calls if c[0] == "spec_runner"]
+    ) == len(_run_calls(ops))
 
 
 def test_approve_pr_merged_with_same_gate(state, bridge):
@@ -257,3 +278,97 @@ def test_config_mode_mismatch_stops(state, bridge, monkeypatch):
     ops = _ops()
     assert run_chain(state, ops, T) == 1
     assert ops.calls == []
+
+
+RUN_ARGS = ["run", "--all", "--strict", "--spec-prefix=WS-1-", "--integration-pr"]
+
+
+def _run_calls(ops: _ChainOps) -> list[tuple]:
+    return [c for c in ops.calls if c[0] == "spec_runner" and c[2][0] == "run"]
+
+
+def test_spec_run_argv_and_new_pr_found(state):
+    ops = _ops()
+    ops.prs = [_run_pr(5)]
+    assert auto_tasks._spec_run(state, ops) == 9
+    assert _run_calls(ops) == [("spec_runner", state.target_dir, RUN_ARGS)]
+    assert state.ops["spec-run"] == {
+        "status": "completed",
+        "before": [5],
+        "pr": 9,
+        "exit": 0,
+    }
+
+
+def test_spec_run_two_new_prs_stop(state, capsys):
+    ops = _ops()
+    ops.prs = [_run_pr(5)]
+    orig = ops.spec_runner
+
+    def two(target_dir, args):
+        rc = orig(target_dir, args)
+        ops.prs.append(_run_pr(10))
+        return rc
+
+    ops.spec_runner = two
+    assert auto_tasks._spec_run(state, ops) is None
+    out = capsys.readouterr().out
+    assert "9" in out and "10" in out
+    assert state.ops["spec-run"]["status"] == "started"
+
+
+def test_spec_run_no_new_pr_stop(state, capsys):
+    ops = _ops()
+    ops.run_pr = None
+    assert auto_tasks._spec_run(state, ops) is None
+    assert "PR" in capsys.readouterr().out
+
+
+def test_spec_run_nonzero_exit_stop(state, capsys):
+    ops = _ops()
+    ops.spec_rc = 2
+    assert auto_tasks._spec_run(state, ops) is None
+    assert "2" in capsys.readouterr().out
+    assert [c for c in ops.calls if c[0] == "prs"] == [
+        ("prs", "o/alpha", "spec-runner/run-")
+    ]
+
+
+def test_spec_run_resume_with_pr_does_not_rerun(state):
+    rs.op_start(state, "spec-run", before=[5])
+    ops = _ops()
+    ops.prs = [_run_pr(5), _run_pr(9)]
+    assert auto_tasks._spec_run(state, ops) == 9
+    assert _run_calls(ops) == []
+    assert state.ops["spec-run"]["status"] == "completed"
+    assert state.ops["spec-run"]["pr"] == 9
+
+
+def test_spec_run_completed_is_noop(state):
+    rs.op_start(state, "spec-run", before=[])
+    rs.op_complete(state, "spec-run", before=[], pr=9, exit=0)
+    ops = _ops()
+    assert auto_tasks._spec_run(state, ops) == 9
+    assert ops.calls == []
+
+
+def test_spec_run_forge_error_is_named_stop(state, capsys):
+    ops = _ops()
+    ops.prs_exc = RuntimeError("gh down")
+    assert auto_tasks._spec_run(state, ops) is None
+    out = capsys.readouterr().out
+    assert out.startswith("spec-loop (test):") and "gh down" in out
+    assert _run_calls(ops) == []
+
+
+def test_spec_run_strict_makes_no_calls(state):
+    state.mode = "strict"
+    ops = _ops()
+    assert auto_tasks._spec_run(state, ops) is None
+    assert ops.calls == []
+
+
+def test_chain_runs_spec_run_last(state, bridge):
+    ops = _ops()
+    assert run_chain(state, ops, T) == 0
+    assert state.ops["spec-run"]["pr"] == 9

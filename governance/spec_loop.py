@@ -66,6 +66,7 @@ from pathlib import Path
 
 from governance import (
     approval_branches,
+    auto_tasks,
     brief_input,
     brief_provenance,
     bundle_dag,
@@ -963,6 +964,8 @@ def _deliver_phase(state: rs.RunState, ops) -> int:
             print(_APPROVE_NODE_HINT.format(run_id=state.run_id))
         return 1
     print(f"tasks-спека доставлена: PR #{pr} ({state.repo_slug})")
+    if state.mode == "test":
+        return auto_tasks.run_chain(state, ops, pr)
     print(
         _APPROVE_HINT.format(
             run_id=state.run_id, approve=task_bridge.approve_command(state.ws_id)
