@@ -148,6 +148,7 @@ class FakeOps:
     merge_code: int = 4
     #: Код `human-merge.sh` (мерж candidate в `test`, план 3c-2).
     human_merge_code: int = 0
+    human_merge_dirs: list[str | None] = field(default_factory=list)
     head: str = "deadbeef"
     s8_exit: int = 0
     s8_output: str = ""
@@ -342,6 +343,7 @@ class FakeOps:
         """`human-merge.sh` стенда (план 3c-2): код из `human_merge_code`;
         на 0 candidate-PR становится MERGED."""
         self.calls.append(("human_merge", pr, sha))
+        self.human_merge_dirs.append(target_dir)
         if self.human_merge_code == 0:
             self.facts = {**self.facts, "state": "MERGED"}
         return self.human_merge_code
@@ -11176,7 +11178,7 @@ def test_test_mode_finalize_records_head_and_resume_reuses_it(
         "finalize_pr": 801,
         "review_exit": 0,
         "head": FINALIZE_HEAD,
-        "actor_skip": "test",
+        "actor_skip": runner.an.ACTOR_SKIP_TEST,
     }
     resumed = locked_runner.resume("r-3c2-fin", ops)
     assert calls == ["charter", "charter", "charter"]
@@ -11279,7 +11281,9 @@ def test_test_mode_candidate_is_merged_by_runner_then_finalized(
     assert ops.calls[first] == ("human_merge", 777, WAVE_HEAD), "пин головы candidate"
     assert names.index("publish_wave") < first < names.index("approve_node")
     request = state.ops["candidate-1"]["request"]
-    assert state.ops[request]["act_skip"] == "test"
+    assert state.ops[request]["act_skip"] == runner.ACT_SKIP_TEST
+    assert runner.ACT_SKIP_TEST == "акт человека не требуется (test)"
+    assert ops.human_merge_dirs[0] == state.target_dir, "цель передана обвязке"
     out = capsys.readouterr().out
     assert runner.ACT_SKIP_TEST in out
     assert f"finalize — {runner.an.ACTOR_SKIP_TEST}" in out
@@ -11288,7 +11292,7 @@ def test_test_mode_candidate_is_merged_by_runner_then_finalized(
         "finalize_pr": 801,
         "review_exit": 0,
         "head": FINALIZE_HEAD,
-        "actor_skip": "test",
+        "actor_skip": runner.an.ACTOR_SKIP_TEST,
     }
     assert calls[:2] == [(1, "charter"), (1, "charter")]
     assert state.wave > 1, "следующая волна в том же вызове"
@@ -11321,9 +11325,9 @@ def test_test_mode_waves_run_to_completion_without_a_human(
     assert merges == [("human_merge", 777, WAVE_HEAD)] * 5
     for wave in range(1, 6):
         request = state.ops[f"candidate-{wave}"]["request"]
-        assert state.ops[request]["act_skip"] == "test"
+        assert state.ops[request]["act_skip"] == runner.ACT_SKIP_TEST
         assert state.ops[f"finalize-{wave}"]["review_exit"] == 0
-        assert state.ops[f"finalize-{wave}"]["actor_skip"] == "test"
+        assert state.ops[f"finalize-{wave}"]["actor_skip"] == runner.an.ACTOR_SKIP_TEST
     assert not any("ждёт человеческого мержа" in c for c in ops.comments)
     assert rs.load("r-3c2-e2e").status == "completed"
 
@@ -11340,16 +11344,18 @@ def test_test_mode_merge_refused_stops_before_finalize(
 
     assert calls == [] and "finalize-1" not in state.ops
     request = state.ops["candidate-1"]["request"]
-    assert "act_skip" not in state.ops[request]
+    # Write-ahead: отметка пропуска стоит ДО вызова обвязки (аудит падения).
+    assert state.ops[request]["act_skip"] == runner.ACT_SKIP_TEST
     reason = (rs.run_dir("r-3c2-refused") / "stop-reason.txt").read_text()
-    assert "human-merge.sh" in reason and "3" in reason and "resume" in reason
-    assert "#777" in reason
+    assert "human-merge.sh вернул 3" in reason and "#777" in reason
+    assert "той же" in reason and "resume" in reason, "resume — только та же голова"
+    assert "--reopen" in reason, "уехавшая голова — новый candidate"
 
     ops.human_merge_code = 0
     resumed = locked_runner.resume("r-3c2-refused", ops)
     merges = [c for c in ops.calls if c[0] == "human_merge"]
     assert merges[:2] == [("human_merge", 777, WAVE_HEAD)] * 2, "повтор той же головы"
-    assert resumed.ops[request]["act_skip"] == "test"
+    assert resumed.ops[request]["act_skip"] == runner.ACT_SKIP_TEST
     assert resumed.ops["finalize-1"]["status"] == "completed"
     assert resumed.wave > 1
 
@@ -11421,6 +11427,7 @@ def test_test_mode_finalize_reattests_when_head_moved(
 
     assert heads_at_review == [FINALIZE_HEAD], "одна переаттестация текущей головы"
     assert resumed.ops["finalize-1"]["head"] == FINALIZE_HEAD
+    assert resumed.ops["finalize-1"]["prev"] == {"head": "a" * 40, "review_exit": 0}
     assert resumed.ops[key]["status"] == al.STATUS_COMPLETED
     assert resumed.wave == 2
 

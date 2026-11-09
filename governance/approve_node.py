@@ -86,20 +86,21 @@ def finalize_merge_policy(target_dir: str, *, mode: str = "strict") -> tuple[str
     требуется: конверт — три поля, и приёмка заявки сверяет их байт в байт.
 
     `mode = "test"` (план 3c-2): одна учётка — и агент, и человек, класс
-    актора смысла не несёт; после оси Authority — `("agent",
-    ACTOR_SKIP_TEST)` без чтения Safety. Иное значение — `strict`.
+    актора смысла не несёт — пропускается ТОЛЬКО сравнение `actor_class`
+    (`("agent", ACTOR_SKIP_TEST)`); Authority, читаемость конфига и
+    стоп-кран `agent_merge_allowed` в силе. Иное значение — `strict`.
     """
     authority = build_authority(Path(target_dir), None)
     if authority.effective() != "agent":
         return "human", "политика authority (экосистема/репо) — человек"
-    if mode == "test":
-        return "agent", ACTOR_SKIP_TEST
     try:
         safety = load_safety()
     except df_config.ConfigError as exc:
         return "human", f"конфиг DarkFactory: {exc}"
     if safety.agent_merge_allowed is not True:
         return "human", "safety steward: агентский мерж не разрешён/unknown"
+    if mode == "test":
+        return "agent", ACTOR_SKIP_TEST
     if safety.actor_class != "agent":
         actor = df_config.agent_login()  # тот же актор, что у load_safety()
         return "human", f"safety steward: {actor} — {safety.actor_class}"

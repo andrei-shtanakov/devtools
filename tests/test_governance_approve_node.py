@@ -3094,19 +3094,32 @@ def test_finalize_merge_policy_axes(tmp_path: Path, monkeypatch) -> None:
 def test_finalize_merge_policy_test_mode_skips_actor_class(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """План 3c-2: в `test` ось Safety (класс актора) не читается — пропуск
-    назван дословно; ось Authority (`Мерж: человек`) остаётся; strict —
-    прежний."""
-
-    def no_safety() -> mg.Safety:
-        raise AssertionError("Safety в test не читается")
-
-    monkeypatch.setattr(an, "load_safety", no_safety)
-    assert an.finalize_merge_policy(str(tmp_path), mode="test") == (
-        "agent",
-        an.ACTOR_SKIP_TEST,
-    )
+    """План 3c-2: в `test` пропускается только сравнение класса актора —
+    пропуск назван дословно; стоп-кран `agent_merge_allowed` и ось
+    Authority (`Мерж: человек`) остаются; strict — прежний."""
     assert an.ACTOR_SKIP_TEST == "класс актора не применяется (test)"
+    for actor in ("unknown", "human", "agent"):
+        monkeypatch.setattr(
+            an,
+            "load_safety",
+            lambda actor=actor: mg.Safety(agent_merge_allowed=True, actor_class=actor),
+        )
+        assert an.finalize_merge_policy(str(tmp_path), mode="test") == (
+            "agent",
+            an.ACTOR_SKIP_TEST,
+        ), actor
+    monkeypatch.setattr(
+        an,
+        "load_safety",
+        lambda: mg.Safety(agent_merge_allowed=False, actor_class="agent"),
+    )
+    who, why = an.finalize_merge_policy(str(tmp_path), mode="test")
+    assert (who, "safety" in why) == ("human", True), "стоп-кран в силе"
+    monkeypatch.setattr(
+        an,
+        "load_safety",
+        lambda: mg.Safety(agent_merge_allowed=True, actor_class="agent"),
+    )
     (tmp_path / "CLAUDE.md").write_text("Мерж: человек\n", encoding="utf-8")
     who, why = an.finalize_merge_policy(str(tmp_path), mode="test")
     assert (who, "authority" in why) == ("human", True)
@@ -4008,4 +4021,6 @@ def test_finalize_merge_policy_config_error_named(tmp_path: Path, monkeypatch) -
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
     monkeypatch.delenv("REVIEW_LOGIN", raising=False)
     who, why = an.finalize_merge_policy(str(tmp_path))
+    assert who == "human" and why.startswith("конфиг DarkFactory: ")
+    who, why = an.finalize_merge_policy(str(tmp_path), mode="test")
     assert who == "human" and why.startswith("конфиг DarkFactory: ")

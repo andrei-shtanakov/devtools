@@ -1228,8 +1228,8 @@ def _auto_merge_candidate(state: RunState, ops: Ops, request: str, pr: int) -> b
     (`edge_verdict` операции candidate == `head_sha` заявки), через
     `human-merge.sh` с пином этой головы. Код ≠ 0 (голова уехала, гвард) —
     `stopped_merge_refused` с кодом и командой повтора; finalize не
-    начинается. Успех: `act_skip = "test"` в операции заявки и
-    `ACT_SKIP_TEST` в выводе.
+    начинается. `act_skip = ACT_SKIP_TEST` пишется в операцию заявки
+    write-ahead, до вызова обвязки; успех — та же фраза в выводе.
     """
     head = state.ops[request].get("head_sha")
     verdict = state.ops.get(wave_key(state, "candidate"), {}).get("edge_verdict")
@@ -1248,6 +1248,10 @@ def _auto_merge_candidate(state: RunState, ops: Ops, request: str, pr: int) -> b
             f"{str(head)[:8]} (режим test)",
         )
         return False
+    # Write-ahead: отметка пропуска — до мержа; падение после мержа
+    # оставляет её в журнале (аудит), отказ мержа её не снимает.
+    state.ops[request]["act_skip"] = ACT_SKIP_TEST
+    save(state)
     rc = ops.human_merge(state.repo, pr, str(head), target_dir=state.target_dir)
     if rc != 0:
         _stop_with_comment(
@@ -1256,11 +1260,12 @@ def _auto_merge_candidate(state: RunState, ops: Ops, request: str, pr: int) -> b
             "stopped_merge_refused",
             f"волна {state.wave}: candidate-PR #{pr} заявки {request} не "
             f"вмержен — human-merge.sh вернул {rc} (--expect-head "
-            f"{str(head)[:8]}). Повтор: resume --run-id {state.run_id}",
+            f"{str(head)[:8]}). resume повторяет мерж только той же "
+            f"пинованной головы ({state.run_id}); если голова candidate "
+            "уехала (чужой push) — новый candidate через --reopen <node> "
+            "волны либо разбор PR вручную",
         )
         return False
-    state.ops[request]["act_skip"] = "test"
-    save(state)
     print(f"волна {state.wave}: candidate-PR #{pr} вмержен раннером — {ACT_SKIP_TEST}")
     return True
 
@@ -1294,9 +1299,12 @@ def _finalize_head(state: RunState, ops: Ops, pr: int) -> dict[str, str] | None:
     return None
 
 
-def _attest_finalize(state: RunState, ops: Ops, att_key: str, pr: int) -> bool:
+def _attest_finalize(
+    state: RunState, ops: Ops, att_key: str, pr: int, *, prev: dict | None = None
+) -> bool:
     """Scope-аттестация finalize-PR (идемпотентно по `att_key`); `False` —
-    прогон встал (голова не прочитана либо `review-pr.sh` ≠ 0 — человеку)."""
+    прогон встал (голова не прочитана либо `review-pr.sh` ≠ 0 — человеку).
+    `prev` — прежняя запись при переаттестации (голова, код), сохраняется."""
     if op_status(state, att_key) == "completed":
         return True
     _ensure_started(state, att_key)
@@ -1311,6 +1319,7 @@ def _attest_finalize(state: RunState, ops: Ops, att_key: str, pr: int) -> bool:
         review_exit=rc,
         **attested,
         **_actor_skip(state),
+        **({"prev": prev} if prev is not None else {}),
     )
     if rc != 0:
         _wave_pause(
@@ -1330,7 +1339,7 @@ def _actor_skip(state: RunState) -> dict[str, str]:
 
     Решение принимает `an.finalize_merge_policy` (ось Authority в силе:
     `Мерж: человек` пропуска не даёт); здесь оно лишь названо дословно
-    (`an.ACTOR_SKIP_TEST`) полем аттестации `actor_skip = "test"`.
+    (`an.ACTOR_SKIP_TEST`) полем аттестации `actor_skip`.
     `strict` — `{}`, политика не читается.
     """
     if state.mode != "test":
@@ -1340,7 +1349,7 @@ def _actor_skip(state: RunState) -> dict[str, str]:
     ):
         return {}
     print(f"волна {state.wave}: finalize — {an.ACTOR_SKIP_TEST}")
-    return {"actor_skip": "test"}
+    return {"actor_skip": an.ACTOR_SKIP_TEST}
 
 
 def _attested_head_moved(state: RunState, ops: Ops, att_key: str, pr: int) -> bool:
@@ -1404,8 +1413,9 @@ def _finalize_wave(
     if _attested_head_moved(state, ops, att_key, finalize_pr):
         # `test`: аттестация на старой голове — одна переаттестация текущей
         # головы за resume; отказ после неё — пауза ниже, как прежде.
-        state.ops.pop(att_key, None)
-        if not _attest_finalize(state, ops, att_key, finalize_pr):
+        old = state.ops.pop(att_key, {})
+        prev = {"head": old.get("head"), "review_exit": old.get("review_exit")}
+        if not _attest_finalize(state, ops, att_key, finalize_pr, prev=prev):
             return state
         if not _approve():
             return state
