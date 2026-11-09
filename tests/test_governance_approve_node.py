@@ -283,7 +283,7 @@ class Ops(RealOps):
             return None
         return list(self.forge.reviews.get(pr, self.forge.default_reviews))
 
-    def review(self, repo_name: str, pr: int) -> int:
+    def review(self, repo_name: str, pr: int, *, target_dir: str | None = None) -> int:
         """`review-pr.sh` стенда: код из форджи, без прибора; на 0 —
         scope-аттестация опубликована (одобряющее ревью AGENT)."""
         self.forge.review_calls.append(pr)
@@ -313,7 +313,15 @@ class Ops(RealOps):
         ]
         return bodies[-1] if bodies else None
 
-    def merge(self, repo_name: str, pr: int, sha: str, base: str | None = None) -> int:
+    def merge(
+        self,
+        repo_name: str,
+        pr: int,
+        sha: str,
+        base: str | None = None,
+        *,
+        target_dir: str | None = None,
+    ) -> int:
         """Агентский мерж — зеркало гвардов `merge-pr.sh`, не сети.
 
         Лейбл `human-merge-required` и уехавшая голова отказывают так же,

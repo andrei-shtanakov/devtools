@@ -2757,3 +2757,102 @@ def test_edge_check_level_passes_the_configured_model(tmp_path, monkeypatch):
     ops = RealOps.__new__(RealOps)
     assert ops.edge_check_level(None, tmp_path, 1, tmp_path) == "ok"
     assert seen["model"] == "m-y"
+
+
+# --- FLEET_ROOT для целей вне workspace.root (план 3c-2, Task 3) -------------
+
+
+def _workspace(monkeypatch, tmp_path):
+    """Подменяет корень workspace каталогом теста."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    monkeypatch.setattr(ops_mod.df_config, "workspace_root", lambda *a, **k: ws)
+    return ws
+
+
+def test_script_target_none_and_inside_root_keep_repo_name(monkeypatch, tmp_path):
+    ws = _workspace(monkeypatch, tmp_path)
+    (ws / "proj").mkdir()
+
+    assert ops_mod.script_target("proj", None) == ("proj", {})
+    assert ops_mod.script_target("proj", str(ws / "proj")) == ("proj", {})
+
+
+def test_script_target_outside_root_overrides_fleet_root(monkeypatch, tmp_path):
+    _workspace(monkeypatch, tmp_path)
+    outside = tmp_path / "elsewhere" / "myrepo"
+    outside.mkdir(parents=True)
+
+    name, env = ops_mod.script_target("myrepo", str(outside))
+
+    assert name == "myrepo"
+    assert env == {"FLEET_ROOT": str((tmp_path / "elsewhere").resolve())}
+
+
+def test_script_target_same_name_in_other_dir_is_outside(monkeypatch, tmp_path):
+    """Тот же `<repo>`, но чекаут не в `<root>/<repo>` — это «вне»."""
+    ws = _workspace(monkeypatch, tmp_path)
+    other = ws / "nested" / "proj"
+    other.mkdir(parents=True)
+
+    name, env = ops_mod.script_target("proj", str(other))
+
+    assert name == "proj"
+    assert env == {"FLEET_ROOT": str((ws / "nested").resolve())}
+
+
+def test_script_target_uses_directory_name_not_repo_name(monkeypatch, tmp_path):
+    _workspace(monkeypatch, tmp_path)
+    outside = tmp_path / "x" / "checkout-dir"
+    outside.mkdir(parents=True)
+
+    assert ops_mod.script_target("slug", str(outside))[0] == "checkout-dir"
+
+
+def test_review_outside_root_sets_fleet_root_and_dir_name(monkeypatch, tmp_path):
+    _workspace(monkeypatch, tmp_path)
+    outside = tmp_path / "elsewhere" / "myrepo"
+    outside.mkdir(parents=True)
+    monkeypatch.setenv("KEEP_ME", "1")
+    calls = _install_fake_run(monkeypatch, returncode=0)
+
+    RealOps().review("myrepo", 7, target_dir=str(outside))
+
+    assert calls[0].argv[2:] == ["myrepo", "7"]
+    env = calls[0].kwargs["env"]
+    assert env["FLEET_ROOT"] == str((tmp_path / "elsewhere").resolve())
+    assert env["KEEP_ME"] == "1"
+
+
+def test_review_without_target_dir_has_no_env_override(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=0)
+
+    RealOps().review("devtools", 7)
+
+    assert "env" not in calls[0].kwargs
+
+
+def test_merge_and_human_merge_outside_root_set_fleet_root(monkeypatch, tmp_path):
+    _workspace(monkeypatch, tmp_path)
+    outside = tmp_path / "elsewhere" / "myrepo"
+    outside.mkdir(parents=True)
+    calls = _install_fake_run(monkeypatch, returncode=0)
+    ops = RealOps()
+
+    ops.merge("slug", 3, "abc", target_dir=str(outside))
+    ops.human_merge("slug", 3, "abc", target_dir=str(outside))
+
+    root = str((tmp_path / "elsewhere").resolve())
+    for call in calls:
+        assert call.argv[2:4] == ["myrepo", "3"]
+        assert call.kwargs["env"]["FLEET_ROOT"] == root
+
+
+def test_merge_inside_root_has_no_env_override(monkeypatch, tmp_path):
+    ws = _workspace(monkeypatch, tmp_path)
+    (ws / "proj").mkdir()
+    calls = _install_fake_run(monkeypatch, returncode=0)
+
+    RealOps().merge("proj", 3, "abc", target_dir=str(ws / "proj"))
+
+    assert "env" not in calls[0].kwargs

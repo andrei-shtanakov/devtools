@@ -2961,7 +2961,7 @@ def _try_agent_merge(
                 return MergeRefusal(
                     f"агентский мерж НЕ выполнен — {late}", human_merge_helps=True
                 )
-        code = ops.merge(state.repo, pr, head, base)
+        code = ops.merge(state.repo, pr, head, base, target_dir=state.target_dir)
         if code == 0:
             return None
         if code not in _TRANSIENT_MERGE_CODES or attempt == _MERGE_ATTEMPTS - 1:

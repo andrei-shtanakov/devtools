@@ -303,7 +303,7 @@ class FakeOps:
         self.existing_prs[branch] = number
         return number
 
-    def review(self, repo_name: str, pr: int) -> int:
+    def review(self, repo_name: str, pr: int, *, target_dir: str | None = None) -> int:
         self.calls.append(("review", pr))
         return self.review_exit
 
@@ -330,7 +330,15 @@ class FakeOps:
         self.calls.append(("unresolved_threads", pr))
         return self.threads
 
-    def merge(self, repo_name: str, pr: int, sha: str, base: str | None = None) -> int:
+    def merge(
+        self,
+        repo_name: str,
+        pr: int,
+        sha: str,
+        base: str | None = None,
+        *,
+        target_dir: str | None = None,
+    ) -> int:
         self.calls.append(("merge", pr, sha))
         self.merge_targets.append(repo_name)
         if self.merge_ok:
@@ -11407,9 +11415,9 @@ def test_test_mode_finalize_reattests_when_head_moved(
 
     real_review = ops.review
 
-    def review(repo_name: str, pr: int) -> int:
+    def review(repo_name: str, pr: int, **kw) -> int:
         heads_at_review.append(ops.facts["headRefOid"])
-        return real_review(repo_name, pr)
+        return real_review(repo_name, pr, **kw)
 
     monkeypatch.setattr(runner.an, "approve_node", approve)
     monkeypatch.setattr(ops, "review", review)

@@ -251,7 +251,9 @@ class Ops(Protocol):
         self, target_dir: str, repo_slug: str, base_ref: str, own_ws: str
     ) -> dict[str, str]: ...
 
-    def review(self, repo_name: str, pr: int) -> int: ...
+    def review(
+        self, repo_name: str, pr: int, *, target_dir: str | None = None
+    ) -> int: ...
 
     def latest_review_body(self, repo_slug: str, pr: int) -> str | None: ...
 
@@ -274,7 +276,13 @@ class Ops(Protocol):
     ) -> bool: ...
 
     def merge(
-        self, repo_name: str, pr: int, sha: str, base: str | None = None
+        self,
+        repo_name: str,
+        pr: int,
+        sha: str,
+        base: str | None = None,
+        *,
+        target_dir: str | None = None,
     ) -> int: ...
 
     def human_merge(
@@ -965,6 +973,33 @@ def _act_args(act_mode: str, node_status: str | None) -> list[str]:
     return args
 
 
+def script_target(repo_name: str, target_dir: str | None) -> tuple[str, dict[str, str]]:
+    """`(имя для скрипта, доп. env)` для review/merge/human-merge.
+
+    Скрипты ищут чекаут как `$FLEET_ROOT/<repo>`, `FLEET_ROOT` по умолчанию —
+    `workspace.root`. «Внутри» — `Path(target_dir).resolve()` равен
+    `workspace.root.resolve() / repo_name`: имя репо остаётся, env пуст.
+    `target_dir` None — то же самое (strict-путь не меняется). Иначе (цель из
+    `targets.toml` где угодно, либо конфиг не читается — скрипту всё равно
+    нужен явный корень) — имя каталога цели и `FLEET_ROOT=<его родитель>`.
+    """
+    if target_dir is None:
+        return repo_name, {}
+    target = Path(target_dir)
+    try:
+        inside = target.resolve() == (df_config.workspace_root().resolve() / repo_name)
+    except df_config.ConfigError:
+        inside = False
+    if inside:
+        return repo_name, {}
+    return target.name, {"FLEET_ROOT": str(target.parent)}
+
+
+def _env_kwargs(extra: dict[str, str]) -> dict[str, dict[str, str]]:
+    """`env=` для subprocess.run: текущее окружение + `extra`; пусто — ничего."""
+    return {"env": {**os.environ, **extra}} if extra else {}
+
+
 class RealOps(BriefFactsMixin):
     """RealOps: точные команды внешних эффектов (спека §5/§8)."""
 
@@ -1635,12 +1670,17 @@ class RealOps(BriefFactsMixin):
             target_dir, repo_slug, branch, title, body, label, draft=True
         )
 
-    def review(self, repo_name: str, pr: int) -> int:
-        """Прогон review-pr.sh из корня devtools; возврат = returncode как есть."""
+    def review(self, repo_name: str, pr: int, *, target_dir: str | None = None) -> int:
+        """Прогон review-pr.sh из корня devtools; возврат = returncode как есть.
+
+        `target_dir` вне `workspace.root` — см. `script_target` (FLEET_ROOT).
+        """
+        name, extra = script_target(repo_name, target_dir)
         done = subprocess.run(
-            ["sh", str(DEVTOOLS_ROOT / "review-pr.sh"), repo_name, str(pr)],
+            ["sh", str(DEVTOOLS_ROOT / "review-pr.sh"), name, str(pr)],
             cwd=DEVTOOLS_ROOT,
             check=False,
+            **_env_kwargs(extra),
         )
         return done.returncode
 
@@ -2054,7 +2094,15 @@ class RealOps(BriefFactsMixin):
         )
         return done.returncode == 0
 
-    def merge(self, repo_name: str, pr: int, sha: str, base: str | None = None) -> int:
+    def merge(
+        self,
+        repo_name: str,
+        pr: int,
+        sha: str,
+        base: str | None = None,
+        *,
+        target_dir: str | None = None,
+    ) -> int:
         """Мерж через `merge-pr.sh` — единственный путь агентского мержа.
 
         Единственный — как правило и defense-in-depth, не как security
@@ -2078,10 +2126,11 @@ class RealOps(BriefFactsMixin):
         Профиль обвязка выставляет и сверяет сама, поэтому GH_CONFIG_DIR
         здесь больше не собирается: сверка логина живёт в одном месте.
         """
+        name, extra = script_target(repo_name, target_dir)
         argv = [
             "sh",
             str(DEVTOOLS_ROOT / "merge-pr.sh"),
-            repo_name,
+            name,
             str(pr),
             "--merge",
             "--expect-head",
@@ -2089,7 +2138,9 @@ class RealOps(BriefFactsMixin):
         ]
         if base:
             argv += ["--expect-base", base]
-        done = subprocess.run(argv, cwd=DEVTOOLS_ROOT, check=False)
+        done = subprocess.run(
+            argv, cwd=DEVTOOLS_ROOT, check=False, **_env_kwargs(extra)
+        )
         # КОД, а не bool: у обвязки коды разведены по смыслу (3 — гвард,
         # PR остаётся человеку; 4 — форджа отклонила), и вызывающий обязан
         # их различать. Схлопнув в bool, `accept-pr` объявлял «база уехала»
@@ -2106,17 +2157,20 @@ class RealOps(BriefFactsMixin):
         мержит профиль человека конфига (`accounts.human`), пин головы —
         голова candidate, на которой записан edge-вердикт; уехавшая голова —
         отказ обвязки. Код возврата — как есть (0 — вмержен). `target_dir`
-        принят для единообразия с `review`/`merge` (FLEET_ROOT — Task 3).
+        вне `workspace.root` — см. `script_target` (FLEET_ROOT).
         """
+        name, extra = script_target(repo_name, target_dir)
         argv = [
             "sh",
             str(DEVTOOLS_ROOT / "human-merge.sh"),
-            repo_name,
+            name,
             str(pr),
             "--expect-head",
             sha,
         ]
-        return subprocess.run(argv, cwd=DEVTOOLS_ROOT, check=False).returncode
+        return subprocess.run(
+            argv, cwd=DEVTOOLS_ROOT, check=False, **_env_kwargs(extra)
+        ).returncode
 
     def comment(self, repo_slug: str, pr: int, body: str) -> None:
         """gh pr comment."""

@@ -1311,7 +1311,7 @@ def _attest_finalize(
     attested = _finalize_head(state, ops, pr)
     if attested is None:
         return False
-    rc = ops.review(state.repo, pr)
+    rc = ops.review(state.repo, pr, target_dir=state.target_dir)
     op_complete(
         state,
         att_key,
