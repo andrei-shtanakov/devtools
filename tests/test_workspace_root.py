@@ -21,9 +21,20 @@ GH_STUB = '#!/bin/sh\necho "gh $*" >> "$GH_STUB_LOG"\nexit 1\n'
 SCRIPTS = ["review-pr.sh", "merge-pr.sh", "human-merge.sh", "attest-vendor.sh"]
 
 
-def _cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ws: Path) -> dict[str, str]:
+def _cfg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ws: Path, mode: str = "test"
+) -> dict[str, str]:
     xdg = tmp_path / "xdg"
-    env = write_config(xdg, mode="test", workspace_root=ws)
+    # strict пускает только каталоги gh, закрытые песочницей.
+    gh = (
+        {
+            "agent_gh_config_dir": Path("~/.config/review"),
+            "human_gh_config_dir": Path("~/.config/gh"),
+        }
+        if mode == "strict"
+        else {}
+    )
+    env = write_config(xdg, mode=mode, workspace_root=ws, **gh)
     monkeypatch.setenv("XDG_CONFIG_HOME", env["XDG_CONFIG_HOME"])
     return env
 
@@ -135,7 +146,9 @@ def test_ops_discovery_missing_dir_refuses_before_subprocess(
 
 
 def test_accept_pr_target_dir_missing(tmp_path, monkeypatch, capsys) -> None:
-    _cfg(tmp_path, monkeypatch, tmp_path / "ws")
+    # strict: цель — `<workspace.root>/<repo>`; test берёт её из targets.toml
+    # (покрыто tests/test_accept_pr.py).
+    _cfg(tmp_path, monkeypatch, tmp_path / "ws", mode="strict")
     rc = accept_pr.main(["--repo", "kapelle", "--pr", "1"])
     out = capsys.readouterr().out
     assert rc == 2 and "конфиг DarkFactory" in out and "нет каталога kapelle" in out
@@ -231,7 +244,7 @@ def test_author_launch_probe_config_error_is_named_refusal(monkeypatch) -> None:
 def test_accept_pr_target_dir_is_workspace_repo(tmp_path, monkeypatch) -> None:
     ws = tmp_path / "separate-ws"
     (ws / "kapelle").mkdir(parents=True)
-    _cfg(tmp_path, monkeypatch, ws)
+    _cfg(tmp_path, monkeypatch, ws, mode="strict")
     seen: list[list[str]] = []
 
     def fake_run(argv, **_kw):
