@@ -71,6 +71,7 @@ def state(tmp_path: Path, monkeypatch):
         profile="profiles/team-exp.yaml",
         run_id="r-auto",
     )
+    monkeypatch.setattr(rs, "mode_refusal", lambda _st: None)
     st.status = "completed"
     st.base_ref = "main"
     rs.save(st)
@@ -207,3 +208,52 @@ def test_merge_nonzero_rc_stops(state, bridge, capsys):
     assert run_chain(state, ops, T) == 1
     assert "4" in capsys.readouterr().out
     assert state.ops["tasks-merge"]["status"] == "started"
+
+
+def test_skip_constant_matches_literal():
+    assert TASKS_SKIP_TEST == "утверждение задач человеком не требуется (test)"
+
+
+def test_merged_after_crash_keeps_skip_and_pulls(state, bridge):
+    rs.op_start(state, "tasks-merge", pr=T, head=HEAD[T], tasks_skip=TASKS_SKIP_TEST)
+    ops = _ops()
+    ops.facts[T] = _facts(T, state="MERGED")
+    assert run_chain(state, ops, T) == 0
+    assert ("pull", state.target_dir, "main") in ops.calls
+    assert ops.calls.index(("pull", state.target_dir, "main")) == 0
+    assert state.ops["tasks-merge"] == {
+        "status": "completed",
+        "pr": T,
+        "head": HEAD[T],
+        "tasks_skip": TASKS_SKIP_TEST,
+    }
+
+
+def test_pull_error_is_named_stop(state, bridge, capsys):
+    ops = _ops()
+
+    def boom(target_dir, branch):
+        raise RuntimeError("dirty tree")
+
+    ops.checkout_and_pull = boom
+    assert run_chain(state, ops, T) == 1
+    out = capsys.readouterr().out
+    assert out.startswith("spec-loop (test):") and "dirty tree" in out
+    assert state.ops["tasks-merge"]["status"] == "started"
+
+
+def test_strict_state_makes_no_calls(state, bridge, capsys):
+    state.mode = "strict"
+    ops = _ops()
+    assert run_chain(state, ops, T) == 1
+    assert ops.calls == []
+    assert "spec-loop (test):" in capsys.readouterr().out
+    assert auto_tasks._merge_spec_pr(state, ops, "tasks-merge", T, "tasks-PR") is False
+    assert ops.calls == []
+
+
+def test_config_mode_mismatch_stops(state, bridge, monkeypatch):
+    monkeypatch.setattr(rs, "mode_refusal", lambda _st: "режим конфига strict")
+    ops = _ops()
+    assert run_chain(state, ops, T) == 1
+    assert ops.calls == []

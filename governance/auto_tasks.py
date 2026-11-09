@@ -11,14 +11,12 @@ write-ahead: повтор `make spec-loop` продолжает с места о
 from __future__ import annotations
 
 from governance import approve_node as an
+from governance import run_state as rs
 from governance import task_bridge as tb
 from governance.ops import Ops
 from governance.run_state import RunState, op_complete, op_start, op_status
 
-TASKS_SKIP_TEST = (
-    "режим test: tasks-спека утверждается раннером, человеческий approve "
-    "пропущен по конфигурации"
-)
+TASKS_SKIP_TEST = "утверждение задач человеком не требуется (test)"
 
 
 def _stop(reason: str) -> bool:
@@ -35,6 +33,24 @@ def _complete(state: RunState, key: str, **extra: object) -> None:
     """
     kept = {k: v for k, v in state.ops.get(key, {}).items() if k != "status"}
     op_complete(state, key, **{**kept, **extra})
+
+
+def _mode_gate(state: RunState) -> bool:
+    """Defense in depth: цепочка работает только в `test` при живом конфиге."""
+    if state.mode != "test":
+        return _stop(f"цепочка только для режима test, прогон {state.mode}")
+    refusal = rs.mode_refusal(state)
+    if refusal is not None:
+        return _stop(refusal)
+    return True
+
+
+def _pull(state: RunState, ops: Ops) -> bool:
+    try:
+        ops.checkout_and_pull(state.target_dir, state.base_ref or "master")
+    except RuntimeError as exc:
+        return _stop(f"checkout/pull {state.target_dir} не удался: {exc}")
+    return True
 
 
 def _read_facts(ops: Ops, state: RunState, pr: int) -> dict | None:
@@ -57,6 +73,8 @@ def _checks_refusal(state: RunState, ops: Ops, pr: int, head: str, kind: str):
 
 def _merge_spec_pr(state: RunState, ops: Ops, key: str, pr: int, kind: str) -> bool:
     """Ready → проверки → `human-merge.sh` → pull; `False` — стоп."""
+    if not _mode_gate(state):
+        return False
     if op_status(state, key) == "completed":
         return True
     facts = _read_facts(ops, state, pr)
@@ -65,7 +83,12 @@ def _merge_spec_pr(state: RunState, ops: Ops, key: str, pr: int, kind: str) -> b
     head = str(facts.get("headRefOid") or "")
     pr_state = facts.get("state")
     if pr_state == "MERGED":
-        op_start(state, key, pr=pr, head=head)
+        # Возобновление после падения между мержем и завершением: запись
+        # (с `tasks_skip`) сохраняется, база подтягивается до продолжения.
+        if key not in state.ops:
+            op_start(state, key, pr=pr, head=head)
+        if not _pull(state, ops):
+            return False
         _complete(state, key)
         return True
     if pr_state == "CLOSED":
@@ -83,7 +106,8 @@ def _merge_spec_pr(state: RunState, ops: Ops, key: str, pr: int, kind: str) -> b
             f"{kind} #{pr} не вмержен — human-merge.sh вернул {rc} "
             f"(--expect-head {head[:8]})"
         )
-    ops.checkout_and_pull(state.target_dir, state.base_ref or "master")
+    if not _pull(state, ops):
+        return False
     _complete(state, key)
     print(f"{kind} #{pr} вмержен — {TASKS_SKIP_TEST}")
     return True
@@ -92,6 +116,8 @@ def _merge_spec_pr(state: RunState, ops: Ops, key: str, pr: int, kind: str) -> b
 def _approve_tasks(state: RunState, ops: Ops) -> bool:
     """`spec approve tasks`, если штампа нет; затем approve-PR (`tasks-approve`)."""
     key = "tasks-approve"
+    if not _mode_gate(state):
+        return False
     if op_status(state, key) == "completed":
         return True
     op_start(state, key)
@@ -112,6 +138,8 @@ def _approve_tasks(state: RunState, ops: Ops) -> bool:
 
 def run_chain(state: RunState, ops: Ops, tasks_pr: int) -> int:
     """Цепочка до approve-PR включительно: 0 — код можно проверять, 1 — стоп."""
+    if not _mode_gate(state):
+        return 1
     if not _merge_spec_pr(state, ops, "tasks-merge", tasks_pr, "tasks-PR"):
         return 1
     if not _approve_tasks(state, ops):
