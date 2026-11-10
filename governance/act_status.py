@@ -910,17 +910,12 @@ def mode_probe(state: RunState, deps: Deps | None = None) -> LivePolicy | Unavai
 def _test_run_policy() -> LivePolicy | Unavailable:
     """`TEST_LIVE_POLICY`, если конфиг в режиме `test`; иначе `Unavailable`."""
     try:
-        cfg_mode = df_config.load().mode if _config_exists() else "strict"
+        cfg_mode = df_config.mode_or_strict()
     except df_config.ConfigError as exc:
         return Unavailable(f"конфиг DarkFactory: {exc}")
     if cfg_mode != "test":
         return Unavailable("режим прогона test ≠ режиму конфига — начните новый прогон")
     return TEST_LIVE_POLICY
-
-
-def _config_exists() -> bool:
-    """Есть ли файл конфига DarkFactory (нет файла — strict)."""
-    return os.path.lexists(df_config.config_path(os.environ))
 
 
 @contextmanager

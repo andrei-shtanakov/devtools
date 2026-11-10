@@ -509,18 +509,42 @@ def test_banner_names_every_test_skip() -> None:
         assert any(line.startswith(text) for line in df_config.TEST_RELAXATIONS), const
 
 
-def test_banner_skip_constants_are_complete() -> None:
-    import re
+def _module_skip_constants(source: str) -> set[str]:
+    """Имена `*_TEST`, присвоенные на уровне модуля, в любой форме значения."""
+    import ast
 
-    found = set()
-    for path in (Path(__file__).resolve().parents[1] / "governance").glob("*.py"):
-        found |= set(
-            re.findall(
-                r'^([A-Z_]+_TEST) = "',
-                path.read_text(encoding="utf-8"),
-                re.MULTILINE,
-            )
-        )
+    names: set[str] = set()
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        names |= {
+            t.id
+            for t in targets
+            if isinstance(t, ast.Name) and t.id.isupper() and t.id.endswith("_TEST")
+        }
+    return names
+
+
+def test_skip_constant_scan_sees_every_form() -> None:
+    source = (
+        'A_TEST = "x"\n'
+        'B_TEST = (\n    "long"\n)\n'
+        'C_TEST: str = "y"\n'
+        "def f():\n    LOCAL_TEST = 1\n"
+        'lower_test = "z"\n'
+    )
+    assert _module_skip_constants(source) == {"A_TEST", "B_TEST", "C_TEST"}
+
+
+def test_banner_skip_constants_are_complete() -> None:
+    root = Path(__file__).resolve().parents[1] / "governance"
+    found: set[str] = set()
+    for path in root.rglob("*.py"):
+        found |= _module_skip_constants(path.read_text(encoding="utf-8"))
     assert found == {const for _, const in SKIP_CONSTANTS}
 
 
@@ -608,12 +632,10 @@ def test_mode_or_strict_broken_raises(tmp_path: Path) -> None:
 def test_no_strict_rule_copies() -> None:
     """Правило «нет файла = strict» живёт только в `df_config.mode_or_strict`.
 
-    `policy_rule.py` — другая форма (возвращает конфиг/`None`, а не режим).
-    `act_status._test_run_policy` — известная копия правила: она под реестром
-    act identity (строка `_config_exists`), перевод на `mode_or_strict` —
-    отдельная правка с перепривязкой строки реестра."""
+    `policy_rule.py` — другая форма (возвращает конфиг/`None`, а не режим),
+    поэтому ему `lexists(df_config.config_path(` разрешён."""
     root = Path(__file__).resolve().parent.parent
-    allowed = {"act_status.py", "policy_rule.py"}
+    allowed = {"policy_rule.py"}
     needle = "lexists(df_config.config_path("
     found = {
         p.name

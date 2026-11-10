@@ -5036,7 +5036,6 @@ NOT_JUDGMENT = {
     "act_status._blobs": "фабрика читателя (`_blobs.read` — место суждения)",
     "act_status._statuses": _BUILD,
     "act_status.statuses_at_base": _BUILD,
-    "act_status._config_exists": _IO,
     "act_status._gate_statuses": "собирает статусы для провайдера; суждения — `Statuses`",
     "act_status._gate_statuses.base_text": _IO,
     "act_status._gate_statuses.worktree_text": _IO,
