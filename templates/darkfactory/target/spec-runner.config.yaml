@@ -1,0 +1,15 @@
+# DarkFactory (режим test): конфиг spec-runner для вашего репо.
+claude_command: "claude"
+claude_model: "sonnet"
+skip_permissions: true
+review_command: "claude"
+review_model: "sonnet"
+integration_pr: true
+spec_governance: strict
+execution_mode: standard
+review_policy: required
+
+# Впишите команды тестов/линта вашего проекта (раскомментируйте и поправьте):
+# commands:
+#   test: "<команда тестов>"
+#   lint: "<команда линта>"

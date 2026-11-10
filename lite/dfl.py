@@ -17,6 +17,7 @@ from governance import brief_tools as bt
 from governance import df_config, spec_loop, user_targets
 from governance import run_state as rs
 from governance.facts import Outcome
+from lite.init_repo import DEVTOOLS, init_repo, real_gh
 
 ENGINEER_SUFFIX = bt.ENGINEER_SUFFIX
 NEW_RUN_HINT = "первый запуск: dfl run --subject '<тема>'"
@@ -27,7 +28,7 @@ class DflError(Exception):
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI: `--cwd <dir> run [--subject S] [--stakeholder R]` | `status`."""
+    """CLI: `--cwd <dir> run [--subject S] [--stakeholder R]` | `status` | `init-repo`."""
     parser = argparse.ArgumentParser(prog="dfl")
     parser.add_argument("--cwd", required=True, help="каталог репо цели")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -35,12 +36,15 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--subject", help="тема нового прогона")
     p_run.add_argument("--stakeholder", default="customer")
     sub.add_parser("status", help="прогоны репо и что дальше")
+    sub.add_parser("init-repo", help="PR с шаблонами DarkFactory в репо")
     args = parser.parse_args(argv)
     cwd = Path(args.cwd)
     try:
         _require_test_mode()
         if args.command == "status":
             return status(cwd)
+        if args.command == "init-repo":
+            return init_repo(cwd, DEVTOOLS, real_gh)
         return run(cwd, args.subject, args.stakeholder)
     except (DflError, df_config.ConfigError, user_targets.TargetsError) as exc:
         print(f"dfl: {exc}", file=sys.stderr)
