@@ -608,8 +608,10 @@ def test_mode_or_strict_broken_raises(tmp_path: Path) -> None:
 def test_no_strict_rule_copies() -> None:
     """Правило «нет файла = strict» живёт только в `df_config.mode_or_strict`.
 
-    `act_status.py` и `policy_rule.py` — другая форма (возвращают конфиг/`None`,
-    а не режим), поэтому им `lexists(df_config.config_path(` разрешён."""
+    `policy_rule.py` — другая форма (возвращает конфиг/`None`, а не режим).
+    `act_status._test_run_policy` — известная копия правила: она под реестром
+    act identity (строка `_config_exists`), перевод на `mode_or_strict` —
+    отдельная правка с перепривязкой строки реестра."""
     root = Path(__file__).resolve().parent.parent
     allowed = {"act_status.py", "policy_rule.py"}
     needle = "lexists(df_config.config_path("

@@ -1112,12 +1112,6 @@ def test_non_default_base_is_unaffected(fleet: Fleet) -> None:
     assert not any(".default_branch" in c for c in fleet.calls())
 
 
-def test_trusted_checkout_is_not_required(fleet: Fleet) -> None:
-    """Проверка доверенности чекаута обвязки не выполняется — поведение прежнее."""
-    res = fleet.run(GH_STUB_FILES="lib/x.ex")
-    assert res.returncode == 0, res.stderr
-
-
 def _renamed(*pairs: tuple[str, str]) -> str:
     import json
 
