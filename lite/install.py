@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -20,12 +21,14 @@ from pathlib import Path
 
 from governance import df_config
 from governance import run_state as rs
+from lite.pipeline import chain_open
 
 HERE = Path(__file__).resolve().parent
 COMPONENTS = HERE / "components.toml"
 TEMPLATE = HERE.parent / "templates" / "darkfactory" / "config.test.example.toml"
 SCHEMA = "darkfactory-components/v1"
 TERMINAL = ("completed", "merged_unverified", "brief_ready")
+NET_HINT = "проверьте сеть и доступ к репо, затем повторите install.sh"
 LAUNCHER = """\
 #!/bin/sh
 # DarkFactory (режим test) — создано install.sh; повторный install.sh перепишет.
@@ -69,28 +72,45 @@ def load_components(path: Path = COMPONENTS) -> list[Component]:
 
 
 def active_runs(runs_root: Path) -> list[str]:
-    """run_id прогонов, не дошедших до терминального статуса (или нечитаемых)."""
+    """run_id незаконченных прогонов (или нечитаемых).
+
+    Незакончен — статус не терминальный, либо test-engineer прогон
+    `completed`, чья цепочка после прогона ещё не дошла до code-accept."""
     if not runs_root.is_dir():
         return []
     active = []
     for run_json in sorted(runs_root.glob("*/run.json")):
         try:
-            status = json.loads(run_json.read_text(encoding="utf-8"))["status"]
-        except (OSError, ValueError, KeyError, TypeError):
-            active.append(run_json.parent.name)
-            continue
-        if status not in TERMINAL:
-            active.append(run_json.parent.name)
+            data = json.loads(run_json.read_text(encoding="utf-8"))
+            if not _run_active(data):
+                continue
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            pass
+        active.append(run_json.parent.name)
     return active
 
 
+def _run_active(data: dict) -> bool:
+    status = data["status"]
+    if status not in TERMINAL:
+        return True
+    frame = (data.get("interview") or {}).get("frame")
+    return chain_open(data.get("mode"), frame, status, data.get("ops") or {})
+
+
 def _git(run: Runner, directory: Path, *args: str, check: bool = True):
-    return run(
-        ["git", "-C", str(directory), *args],
-        check=check,
-        capture_output=True,
-        text=True,
-    )
+    """git в `directory`; сбой при `check` — InstallError со stderr git."""
+    cmd = ["git", "-C", str(directory), *args]
+    try:
+        return run(cmd, check=check, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        raise InstallError(_git_failure(args[0], directory, exc)) from exc
+
+
+def _git_failure(verb: str, directory: Path, exc: subprocess.CalledProcessError) -> str:
+    stderr = (exc.stderr or "").strip() if isinstance(exc.stderr, str) else ""
+    detail = f": {stderr}" if stderr else f" (код {exc.returncode})"
+    return f"git {verb} в {directory} не удался{detail} — {NET_HINT}"
 
 
 def _check_existing(directory: Path, comp: Component, run: Runner) -> None:
@@ -120,16 +140,36 @@ def _install_deps(directory: Path, comp: Component, run: Runner) -> None:
     run(cmd, check=True, cwd=directory)
 
 
+def check_components(
+    root: Path, comps: list[Component], run: Runner = subprocess.run
+) -> None:
+    """Проверить ВСЕ существующие клоны до любого fetch/checkout (отказ без эффектов)."""
+    for comp in comps:
+        directory = root / comp.name
+        if directory.exists():
+            _check_existing(directory, comp, run)
+
+
 def sync_component(root: Path, comp: Component, run: Runner = subprocess.run) -> None:
     """Привести `root/<name>` к закреплённому коммиту и поставить зависимости."""
     directory = root / comp.name
     if directory.exists():
         _check_existing(directory, comp, run)
         _git(run, directory, "fetch", "origin")
+        _git(run, directory, "checkout", "--detach", comp.sha)
     else:
-        run(["git", "clone", comp.url, str(directory)], check=True)
-    _git(run, directory, "checkout", "--detach", comp.sha)
+        _fresh_clone(directory, comp, run)
     _install_deps(directory, comp, run)
+
+
+def _fresh_clone(directory: Path, comp: Component, run: Runner) -> None:
+    """Клон на пин; любой сбой удаляет свежий каталог (иначе вечный отказ)."""
+    try:
+        _git(run, directory.parent, "clone", comp.url, str(directory))
+        _git(run, directory, "checkout", "--detach", comp.sha)
+    except InstallError:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
 
 
 def write_config(login: str, root: Path, path: Path, template: Path = TEMPLATE) -> bool:
@@ -171,8 +211,17 @@ def _resolve_login(args: argparse.Namespace, run: Runner) -> str:
     hint = _login_hint(run)
     if args.yes and hint:
         return hint
+    if args.yes:
+        raise InstallError(
+            "--yes: логин GitHub не узнать (gh не вошёл) — укажите --login <логин>"
+        )
     prompt = f"Логин GitHub [{hint}]: " if hint else "Логин GitHub: "
-    login = input(prompt).strip() or hint
+    try:
+        login = input(prompt).strip() or hint
+    except EOFError as exc:
+        raise InstallError(
+            "логин GitHub не спросить: ввод не из терминала — укажите --login <логин>"
+        ) from exc
     if not login:
         raise InstallError("не указан логин GitHub (--login)")
     return login
@@ -217,14 +266,31 @@ def main(
             "Есть незавершённые прогоны DarkFactory: " + ", ".join(active),
             file=sys.stderr,
         )
-        print("Завершите их и повторите установку.", file=sys.stderr)
+        print(
+            "Компоненты посреди прогона не обновляются. В каталоге репо каждого "
+            "прогона: dfl status покажет, что дальше; закончите его (dfl run) "
+            "или бросьте (dfl abandon) — и повторите установку.",
+            file=sys.stderr,
+        )
         return 2
     dt = HERE.parent if devtools is None else devtools
     try:
         return _install(args, run, dt, components, config_path, bin_dir)
-    except (InstallError, df_config.ConfigError, subprocess.CalledProcessError) as exc:
+    except (InstallError, df_config.ConfigError) as exc:
         print(f"Ошибка установки: {exc}", file=sys.stderr)
         return 1
+    except subprocess.CalledProcessError as exc:
+        print(
+            f"Ошибка установки: {_cmd_text(exc)} завершилась с кодом "
+            f"{exc.returncode} (вывод выше) — исправьте причину и повторите install.sh",
+            file=sys.stderr,
+        )
+        return 1
+
+
+def _cmd_text(exc: subprocess.CalledProcessError) -> str:
+    cmd = exc.cmd
+    return " ".join(cmd) if isinstance(cmd, list) else str(cmd)
 
 
 def _install(
@@ -236,7 +302,9 @@ def _install(
     bin_dir: Path | None,
 ) -> int:
     root = devtools.parent
-    for comp in load_components(components):
+    comps = load_components(components)
+    check_components(root, comps, run)
+    for comp in comps:
         print(f"Компонент {comp.name} @ {comp.sha[:12]}")
         sync_component(root, comp, run)
     cfg = df_config.canonical_config_path() if config_path is None else config_path

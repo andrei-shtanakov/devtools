@@ -68,6 +68,9 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Env:
         monkeypatch.setenv(key, value)
     monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
     (tmp_path / "target").mkdir()
+    for rel in dfl.INIT_FILES:
+        (tmp_path / "target" / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "target" / rel).write_text("x", encoding="utf-8")
     e = Env(tmp_path)
 
     def register(target_dir: Path) -> user_targets.UserTarget:
@@ -138,7 +141,10 @@ def _no_effects(env: Env) -> bool:
 def test_refuses_strict_config(env: Env, capsys) -> None:
     write_config(env.tmp / "xdg", mode="strict", **_STRICT_GH_DIRS)
     assert env.run("run", "--subject", "s") == 2
-    assert "только в режиме test" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "только в режиме test" in err
+    assert 'поставьте mode = "test" в' in err and "config.toml" in err
+    assert "переустановите" not in err
     assert _no_effects(env) and env.registered == 0
 
 
@@ -405,3 +411,204 @@ def test_unreadable_ledger_listed_in_status(env: Env, monkeypatch, capsys) -> No
     assert env.run("status") == 0
     out = capsys.readouterr().out
     assert "WS-1-a  не читается" in out and "WS-2-a" in out
+
+
+# --- финальное ревью: C1 (dfl answer), I1 (abandon), I2 (цепочка), I3 (init) ---
+
+
+@dataclass
+class Discovery:
+    """Подмена `_discovery_answer`: журнал вызовов и код ответа."""
+
+    code: int = 20
+    calls: list[tuple[str, str, Path, Path]] = field(default_factory=list)
+
+    def __call__(
+        self, session_id: str, role: str, file: Path, cwd: Path
+    ) -> iv.DiscoveryReply:
+        self.calls.append((session_id, role, file, cwd))
+        reason = "payload missing text" if self.code in (1, 2) else ""
+        envelope = {"operation": {"status": "ok", "reason": reason}}
+        return iv.DiscoveryReply(self.code, envelope, "")
+
+
+def _waiting(run_id: str, ws_id: str, frame: str) -> rs.RunState:
+    state = _run(run_id, ws_id, frame, "waiting_interview")
+    assert state.interview is not None
+    state.interview["session_id"] = f"sess-{run_id}"
+    rs.save(state)
+    return state
+
+
+def _answer_file(env: Env) -> Path:
+    path = env.tmp / "target" / "answer.yaml"
+    path.write_text("text: да\n", encoding="utf-8")
+    return path
+
+
+def test_answer_runs_discovery_then_continues(env: Env, monkeypatch, capsys) -> None:
+    _waiting("WS-1-a", "WS-1", "customer")
+    _answer_file(env)
+    disc = Discovery()
+    monkeypatch.setattr(dfl, "_discovery_answer", disc)
+    assert env.run("answer", "--file", "answer.yaml") == 0
+    sid, role, file, cwd = disc.calls[0]
+    assert (sid, role) == ("sess-WS-1-a", "customer")
+    assert file == (env.tmp / "target" / "answer.yaml").resolve()
+    assert cwd == rs.run_dir("WS-1-a")
+    assert env.spec_calls == [
+        ["--subject", "тема", "--repo", REPO, "--run-id", "WS-1-a"]
+    ]
+    out = capsys.readouterr().out
+    assert "ответьте: dfl answer --file answer.yaml" in out and "text:" in out
+
+
+def test_answer_targets_engineer_run(env: Env, monkeypatch) -> None:
+    _run("WS-1-a", "WS-1", "customer", "brief_ready")
+    _waiting("WS-1-eng-b", "WS-1-eng", "engineer")
+    _answer_file(env)
+    disc = Discovery()
+    monkeypatch.setattr(dfl, "_discovery_answer", disc)
+    assert env.run("answer", "--file", "answer.yaml") == 0
+    assert disc.calls[0][0] == "sess-WS-1-eng-b"
+    assert env.spec_calls[0][-1] == "WS-1-eng-b"
+
+
+def test_answer_refused_by_discovery_names_file(env: Env, monkeypatch, capsys) -> None:
+    _waiting("WS-1-a", "WS-1", "customer")
+    _answer_file(env)
+    monkeypatch.setattr(dfl, "_discovery_answer", Discovery(code=1))
+    assert env.run("answer", "--file", "answer.yaml") == 2
+    err = capsys.readouterr().err
+    assert "payload missing text" in err and "повторите dfl answer" in err
+    assert _no_effects(env)
+
+
+def test_answer_when_not_waiting_refused(env: Env, monkeypatch, capsys) -> None:
+    _run("WS-1-a", "WS-1", "customer", "running")
+    _answer_file(env)
+    monkeypatch.setattr(dfl, "_discovery_answer", lambda *a: pytest.fail("вызов"))
+    assert env.run("answer", "--file", "answer.yaml") == 2
+    assert "не ждёт ответа" in capsys.readouterr().err
+    assert _no_effects(env)
+
+
+def test_answer_missing_file_shows_format(env: Env, monkeypatch, capsys) -> None:
+    _waiting("WS-1-a", "WS-1", "customer")
+    monkeypatch.setattr(dfl, "_discovery_answer", lambda *a: pytest.fail("вызов"))
+    assert env.run("answer", "--file", "nope.yaml") == 2
+    err = capsys.readouterr().err
+    assert "нет файла ответа" in err and "text:" in err
+
+
+def test_discovery_answer_invocation(env: Env, monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_run(argv: list[str], **kw: object):
+        seen["argv"], seen["cwd"] = argv, kw.get("cwd")
+        return dfl.subprocess.CompletedProcess(argv, 1, "", "boom")
+
+    disc_dir = env.tmp / "discovery"
+    monkeypatch.setattr(dfl.df_config, "workspace_dir", lambda name: disc_dir)
+    monkeypatch.setattr(dfl.subprocess, "run", fake_run)
+    reply = dfl._discovery_answer("s1", "customer", Path("/a.yaml"), Path("/rd"))
+    assert seen["argv"] == [
+        "uv", "run", "--frozen", "--project", str(disc_dir), "discovery",
+        "answer", "--session", "s1", "--role", "customer", "--file", "/a.yaml",
+    ]  # fmt: skip
+    assert seen["cwd"] == Path("/rd") and reply.code == 1
+
+
+def test_waiting_run_prints_dfl_answer_hint(env: Env, monkeypatch, capsys) -> None:
+    def spec_main(argv: list[str]) -> int:
+        _waiting("WS-1-a", "WS-1", "customer")
+        return 0
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+    assert env.run("run", "--subject", "тема") == 0
+    out = capsys.readouterr().out
+    assert "прогон WS-1-a ждёт ответа" in out
+    assert "ответьте: dfl answer --file answer.yaml" in out
+
+
+def test_status_waiting_hint(env: Env, monkeypatch, capsys) -> None:
+    _status_target(env, monkeypatch)
+    _waiting("WS-1-a", "WS-1", "customer")
+    assert env.run("status") == 0
+    assert "дальше: ответьте: dfl answer --file answer.yaml" in capsys.readouterr().out
+
+
+def test_abandon_moves_pipeline_runs(env: Env, capsys) -> None:
+    _run("WS-1-a", "WS-1", "customer", "brief_ready")
+    _run("WS-1-eng-b", "WS-1-eng", "engineer", "stopped_gate")
+    _run("WS-9-a", "WS-9", "customer", "running", repo="beta")
+    assert env.run("abandon") == 0
+    assert rs.all_run_ids() == ["WS-9-a"]
+    moved = list((rs.RUNS_ROOT.parent / "governance-runs-abandoned").glob("*/*"))
+    assert sorted(p.name for p in moved) == ["WS-1-a", "WS-1-eng-b"]
+    assert all((p / "run.json").is_file() for p in moved)
+    out = capsys.readouterr().out
+    assert "брошен: WS-1-a" in out and "закройте их сами" in out
+    assert _no_effects(env)
+    assert env.run("run", "--subject", "новая") == 0  # новая тема снова можно
+
+
+def test_abandon_nothing_refused(env: Env, capsys) -> None:
+    assert env.run("abandon") == 2
+    assert "незаконченного прогона нет" in capsys.readouterr().err
+
+
+def test_abandon_busy_run_refused(env: Env, capsys) -> None:
+    from governance import run_lock
+
+    _run("WS-1-a", "WS-1", "customer", "running")
+    with run_lock.run_lock("WS-1-a"):
+        assert env.run("abandon") == 2
+    assert "исполняется другим процессом" in capsys.readouterr().err
+    assert rs.all_run_ids() == ["WS-1-a"]
+
+
+def test_new_subject_refusal_names_abandon(env: Env, capsys) -> None:
+    _run("WS-1-a", "WS-1", "customer", "running", subject="t1")
+    assert env.run("run", "--subject", "другая") == 2
+    assert "dfl abandon" in capsys.readouterr().err
+
+
+def test_closed_brief_pr_names_abandon(env: Env, capsys) -> None:
+    _run("WS-1-a", "WS-1", "customer", "brief_ready")
+    env.forge.branches["brief/WS-1"] = [5]
+    env.forge.states[5] = "CLOSED"
+    assert env.run("run") == 2
+    err = capsys.readouterr().err
+    assert "закрыт без мержа" in err and "dfl abandon" in err
+    assert "--repropose" not in err
+    assert _no_effects(env)
+
+
+def test_completed_engineer_with_stopped_chain(env: Env, monkeypatch, capsys) -> None:
+    _status_target(env, monkeypatch)
+    _run("WS-1-a", "WS-1", "customer", "brief_ready")
+    _run("WS-1-eng-b", "WS-1-eng", "engineer", "completed")
+    assert env.run("status") == 0
+    assert "конвейер после прогона остановился" in capsys.readouterr().out
+    assert env.run("run") == 0
+    assert env.spec_calls == [
+        ["--subject", "тема", "--repo", REPO, "--run-id", "WS-1-eng-b"]
+    ]
+    assert env.run("run", "--subject", "другая") == 2  # конвейер не закончен
+
+
+def test_new_pipeline_requires_init_files(env: Env, capsys) -> None:
+    (env.tmp / "target" / "scripts" / "review" / "local.sh").unlink()
+    assert env.run("run", "--subject", "s") == 2
+    err = capsys.readouterr().err
+    assert "scripts/review/local.sh" in err
+    assert "dfl init-repo, смержите его PR и git pull" in err
+    assert _no_effects(env)
+
+
+def test_resume_does_not_require_init_files(env: Env) -> None:
+    (env.tmp / "target" / "spec-runner.config.yaml").unlink()
+    _run("WS-1-a", "WS-1", "customer", "running")
+    assert env.run("run") == 0
+    assert env.spec_calls

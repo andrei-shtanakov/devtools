@@ -333,3 +333,132 @@ def test_existing_strict_config_warns(tmp_path: Path, remote: Remote, capsys) ->
 def test_install_sh_syntax() -> None:
     res = subprocess.run(["sh", "-n", str(ROOT / "install.sh")], check=False)
     assert res.returncode == 0
+
+
+# --- финальное ревью: I2 и обязательные мелочи ---
+
+
+def _write_json(runs: Path, run_id: str, data: dict) -> None:
+    (runs / run_id).mkdir(parents=True)
+    (runs / run_id / "run.json").write_text(json.dumps(data))
+
+
+def test_completed_test_engineer_without_accept_is_active(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    eng = {"status": "completed", "mode": "test", "interview": {"frame": "engineer"}}
+    _write_json(runs, "open", {**eng, "ops": {}})
+    accepted = {"code-accept": {"status": "completed", "result": {"url": "u"}}}
+    _write_json(runs, "done", {**eng, "ops": accepted})
+    _write_json(runs, "strict", {**eng, "mode": "strict", "ops": {}})
+    _write_json(runs, "cust", {"status": "completed", "mode": "test", "ops": {}})
+    assert install.active_runs(runs) == ["open"]
+
+
+def test_active_run_refusal_names_abandon(tmp_path: Path, capsys) -> None:
+    runs = tmp_path / "runs"
+    write_run(runs, "r1", "running")
+    assert install.main(["--login", "x"], runs_root=runs, run=Recorder()) == 2
+    err = capsys.readouterr().err
+    assert "dfl abandon" in err and "Завершите их" not in err
+
+
+def test_all_existing_clones_checked_before_any_effect(
+    tmp_path: Path, root: Path
+) -> None:
+    good, bad = Remote(tmp_path, "good"), Remote(tmp_path, "bad")
+    sha_good, sha_bad = good.commit("one"), bad.commit("one")
+    install.sync_component(root, comp(good, sha_good, name="good"), Recorder())
+    install.sync_component(root, comp(bad, sha_bad, name="bad"), Recorder())
+    (root / "bad" / "f.txt").write_text("local edit")
+    new_good = good.commit("two")
+    comps = tmp_path / "components.toml"
+    comps.write_text(
+        'schema = "darkfactory-components/v1"\n'
+        f'[repos.good]\nurl = "{good.url}"\nsha = "{new_good}"\n'
+        f'[repos.bad]\nurl = "{bad.url}"\nsha = "{sha_bad}"\n'
+    )
+    rec = Recorder()
+    code = install.main(
+        ["--login", "x"],
+        runs_root=tmp_path / "runs",
+        devtools=root / "devtools",
+        components=comps,
+        config_path=tmp_path / "cfg.toml",
+        bin_dir=tmp_path / "bin",
+        run=rec,
+    )
+    assert code == 1
+    assert not rec.verbs("fetch") and not rec.verbs("checkout")
+    assert git("rev-parse", "HEAD", cwd=root / "good") == sha_good
+
+
+def _no_login(cmd: list[str], **kw: object) -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(cmd, 1, "", "not logged in")
+
+
+def test_yes_without_gh_login_names_login_flag() -> None:
+    args = install._parse(["--yes"])
+    with pytest.raises(install.InstallError, match="--login"):
+        install._resolve_login(args, _no_login)
+
+
+def test_non_tty_stdin_names_login_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    def eof(prompt: str) -> str:
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", eof)
+    with pytest.raises(install.InstallError, match="--login"):
+        install._resolve_login(install._parse([]), _no_login)
+
+
+def test_failed_fetch_shows_git_stderr_and_next_step(
+    remote: Remote, root: Path
+) -> None:
+    sha = remote.commit("one")
+    install.sync_component(root, comp(remote, sha), Recorder())
+    git("remote", "set-url", "origin", "file:///nonexistent/x.git", cwd=root / "comp")
+    broken = install.Component("comp", "file:///nonexistent/x.git", sha, False)
+    with pytest.raises(install.InstallError) as err:
+        install.sync_component(root, broken, Recorder())
+    text = str(err.value)
+    assert "git fetch" in text and "nonexistent" in text
+    assert "проверьте сеть" in text and "повторите install.sh" in text
+
+
+def test_failed_fresh_checkout_removes_clone(remote: Remote, root: Path) -> None:
+    remote.commit("one")
+    missing = "f" * 40
+    with pytest.raises(install.InstallError, match="git checkout"):
+        install.sync_component(root, comp(remote, missing), Recorder())
+    assert not (root / "comp").exists()
+    sha = git("rev-parse", "HEAD", cwd=remote.work)
+    install.sync_component(root, comp(remote, sha), Recorder())  # повтор проходит
+    assert git("rev-parse", "HEAD", cwd=root / "comp") == sha
+
+
+def test_failed_clone_named(tmp_path: Path, root: Path) -> None:
+    bad = install.Component("comp", "file:///nonexistent/x.git", "a" * 40, False)
+    with pytest.raises(install.InstallError, match="(?s)git clone .*проверьте сеть"):
+        install.sync_component(root, bad, Recorder())
+    assert not (root / "comp").exists()
+
+
+def test_failed_uv_named_without_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    def boom(root: Path, comps: list, run: object) -> None:
+        raise subprocess.CalledProcessError(1, ["uv", "sync"])
+
+    monkeypatch.setattr(install, "check_components", boom)
+    comps = tmp_path / "components.toml"
+    comps.write_text('schema = "darkfactory-components/v1"\n')
+    code = install.main(
+        ["--login", "x"],
+        runs_root=tmp_path / "runs",
+        devtools=tmp_path / "dt",
+        components=comps,
+        run=Recorder(),
+    )
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "uv sync завершилась с кодом 1" in err and "повторите install.sh" in err

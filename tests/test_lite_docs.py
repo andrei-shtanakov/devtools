@@ -45,5 +45,31 @@ def test_doc_has_commands_and_honest_sections() -> None:
         assert needle in text, needle
 
 
+def test_doc_answer_loop_abandon_and_stops() -> None:
+    text = _doc()
+    for needle in (
+        "## Интервью: как отвечать",
+        "dfl answer --file answer.yaml",
+        "text: |",
+        "## Бросить конвейер: `dfl abandon`",
+        "dfl abandon",
+        "governance-runs-abandoned",
+        "конвейер после прогона остановился",
+        "сначала dfl init-repo, смержите его",
+        'поставьте `mode = "test"` в `~/.config/darkfactory/config.toml`',
+    ):
+        assert needle in text, needle
+    assert "Завершите их" not in text
+    assert "переустановите" not in text
+
+
 def test_readme_links_doc() -> None:
     assert LINK in (ROOT / "README.md").read_text(encoding="utf-8")
+
+
+def test_doc_quotes_dfl_hints_verbatim() -> None:
+    from lite import dfl, pipeline
+
+    flat = " ".join(_doc().split())
+    for hint in (dfl.ANSWER_HINT, pipeline.CHAIN_STOPPED_HINT):
+        assert " ".join(hint.split()) in flat, hint
