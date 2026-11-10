@@ -1079,14 +1079,21 @@ def test_act_barrier_refuses_in_test_mode(tmp_path, monkeypatch, capsys) -> None
     assert called == []
 
 
-def test_act_barrier_broken_config_refuses(tmp_path, monkeypatch, capsys) -> None:
-    """Битый конфиг — отказ 2 с причиной, а не «неполно»."""
+def test_act_barrier_broken_config_is_incomplete(tmp_path, monkeypatch, capsys) -> None:
+    """Битый конфиг — сбой чтения (3), не отказ; активацию не читаем."""
+    from governance import act_status
+
     cfg = tmp_path / "darkfactory" / "config.toml"
     cfg.parent.mkdir()
     cfg.write_text("это не toml [", encoding="utf-8")
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-    assert act_barrier.main(["--product", P]) == 2
+    called: list[object] = []
+    monkeypatch.setattr(
+        act_status, "live_policy", lambda *a, **k: called.append(a) or None
+    )
+    assert act_barrier.main(["--product", P]) == 3
     assert "конфиг DarkFactory:" in capsys.readouterr().err
+    assert called == []
 
 
 def test_invalidate_skips_test_runs(monkeypatch) -> None:

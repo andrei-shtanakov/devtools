@@ -1814,10 +1814,23 @@ def test_test_mode_scope_attestation_is_comment(
     assert _kit_calls(f) == []
     calls = f.gh_calls()
     assert "--comment" in calls and "--approve" not in calls
+    assert (
+        "опубликовано: --comment (scope-аттестация prose-only, режим test)"
+        in res.stdout
+    )
+    assert "вердикт approve" not in res.stdout
     body = f.body_out.read_text()
     assert body.splitlines()[-1] == (
         f"<!-- ai-prosto-scope-review version=1 kind=prose-only head={f.head_sha} -->"
     )
+
+
+@needs_jq
+def test_strict_scope_attestation_stdout_unchanged(fleet: Fleet) -> None:
+    _seed_files(fleet, "docs/guide.md", "TODO.md")
+    res = fleet.run("demo", "7")
+    assert res.returncode == 0, res.stderr
+    assert "опубликовано: --approve на andrei-shtanakov/demo#7 (head" in res.stdout
 
 
 def test_header_no_config_line_with_external_review_cmd(
