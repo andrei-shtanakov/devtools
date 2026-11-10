@@ -3203,18 +3203,18 @@ JUDGMENT = {
             '"текущая активация — нет привязки"',
         ),
     ),
-    "act_barrier._config_refusal": (
+    "act_barrier._config_exit": (
         r(
             "broken_config",
-            "act_barrier._config_refusal",
+            "act_barrier._config_exit",
             "except df_config.ConfigError",
-            f"{B}::test_act_barrier_broken_config_refuses",
+            f"{B}::test_act_barrier_broken_config_is_incomplete",
             '"конфиг DarkFactory:"',
         ),
         r(
             "test_mode",
-            "act_barrier._config_refusal",
-            'cfg.mode == "test"',
+            "act_barrier._config_exit",
+            'mode != "test"',
             f"{B}::test_act_barrier_refuses_in_test_mode",
             "act_barrier.TEST_MODE_REFUSAL",
         ),
