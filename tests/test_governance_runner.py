@@ -151,6 +151,8 @@ class FakeOps:
     #: Rollup проверок candidate-PR #777 (`test`, план 3c-3): `None` — факты
     #: как есть; список — наложение вместе с головой волны (`WAVE_HEAD`).
     candidate_rollup: list[dict[str, str]] | None = None
+    #: `.github/workflows` на голове (`workflow_files`); по умолчанию CI есть.
+    workflows: list[str] | None = field(default_factory=lambda: ["ci.yml"])
     human_merge_dirs: list[str | None] = field(default_factory=list)
     head: str = "deadbeef"
     s8_exit: int = 0
@@ -315,6 +317,9 @@ class FakeOps:
     ) -> dict[str, str]:
         self.calls.append(("charter_codes_elsewhere", base_ref, own_ws))
         return dict(self.codes_elsewhere)
+
+    def workflow_files(self, repo_slug: str, ref: str) -> list[str] | None:
+        return self.workflows
 
     def pr_facts(self, repo_slug: str, pr: int) -> dict:
         self.calls.append(("pr_facts", pr))
@@ -11486,6 +11491,21 @@ def test_test_mode_candidate_merges_after_green_checks(
     locked_runner.start(**_waves_kwargs(tmp_path, "r-3c3-green", ops))
     merges = [c for c in ops.calls if c[0] == "human_merge"]
     assert merges and set(merges) == {("human_merge", 777, WAVE_HEAD)}
+
+
+def test_candidate_no_checks_skip_recorded(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    _set_cfg_mode("test")
+    monkeypatch.setattr(runner.an, "_SLEEP", lambda _s: None)
+    ops = _test_mode_ops(candidate_rollup=[], workflows=[])
+    _fake_wave_adapters(monkeypatch, ops)
+    _edge_pass(monkeypatch)
+    _fake_approve_node_waves(monkeypatch, ops)
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-p4-nochecks", ops))
+    request = state.ops["candidate-1"]["request"]
+    assert state.ops[request]["checks_skip"] == runner.NO_CHECKS_TEST
+    assert any(c[0] == "human_merge" for c in ops.calls)
 
 
 def test_reattest_keeps_prev_when_head_unreadable(

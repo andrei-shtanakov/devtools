@@ -10,6 +10,7 @@ import pytest
 from governance import auto_tasks, spec_loop
 from governance import run_state as rs
 from governance.auto_tasks import TASKS_SKIP_TEST, run_chain
+from governance.pr_checks import NO_CHECKS_TEST
 
 T, A = 11, 12
 HEAD = {T: "t" * 40, A: "a" * 40}
@@ -44,9 +45,14 @@ class _ChainOps:
         self.prs: list[dict] = []
         self.run_pr: int | None = 9
         self.prs_exc: Exception | None = None
+        self.workflows: list[str] | None = ["ci.yml"]
 
     def pr_facts(self, slug: str, pr: int) -> dict:
         return self.facts[pr]
+
+    def workflow_files(self, slug: str, ref: str) -> list[str] | None:
+        self.calls.append(("workflow_files", slug, ref))
+        return self.workflows
 
     def mark_ready(self, slug: str, pr: int) -> bool:
         self.calls.append(("mark_ready", slug, pr))
@@ -130,6 +136,28 @@ def test_tasks_pr_ready_checks_merge_then_pull(state, bridge):
         "head": HEAD[T],
         "tasks_skip": TASKS_SKIP_TEST,
     }
+
+
+def test_tasks_merge_no_checks_skip_recorded(state, bridge, monkeypatch):
+    monkeypatch.setattr(auto_tasks.an, "_SLEEP", lambda _s: None)
+    ops = _ops()
+    ops.facts[T] = _facts(T, draft=True, rollup=[])
+    ops.facts[T]["statusCheckRollup"] = []
+    ops.workflows = []
+    assert run_chain(state, ops, T) == 0
+    op = state.ops["tasks-merge"]
+    assert op["status"] == "completed"
+    assert op["checks_skip"] == NO_CHECKS_TEST
+    assert "human_merge" in ops.names()
+
+
+def test_tasks_merge_no_checks_with_workflows_stops(state, bridge, monkeypatch):
+    monkeypatch.setattr(auto_tasks.an, "_SLEEP", lambda _s: None)
+    ops = _ops()
+    ops.facts[T] = {**_facts(T, draft=True), "statusCheckRollup": []}
+    assert run_chain(state, ops, T) == 1
+    assert "human_merge" not in ops.names()
+    assert "checks_skip" not in state.ops["tasks-merge"]
 
 
 def test_tasks_skip_written_before_merge(state, bridge):

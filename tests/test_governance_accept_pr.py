@@ -9,6 +9,7 @@ import pytest
 
 from governance import accept_pr, facts
 from governance import ops as ops_mod
+from governance.pr_checks import NO_CHECKS_TEST
 
 
 @dataclass
@@ -32,6 +33,7 @@ class _Ops:
     #: Установленное отсутствие ветки базы (Outcome.ABSENT) — не «не двигалась».
     live_tip_absent: bool = False
     review_body: str | None = None
+    workflows: list[str] | None = field(default_factory=lambda: ["ci.yml"])
     review_target_dir: str | None = None
     calls: list[tuple] = field(default_factory=list)
     merge_args: tuple | None = None
@@ -65,6 +67,10 @@ class _Ops:
     def latest_review_body(self, repo_slug: str, pr: int) -> str | None:
         self.calls.append(("latest_review_body", repo_slug, pr))
         return self.review_body
+
+    def workflow_files(self, repo_slug: str, ref: str) -> list[str] | None:
+        self.calls.append(("workflow_files", ref))
+        return self.workflows
 
     def pr_facts(self, repo_slug: str, pr: int) -> dict:
         self.calls.append(("pr_facts",))
@@ -1006,6 +1012,34 @@ def test_test_accept_stops_before_merge(capsys) -> None:
     assert ops.review_target_dir == "/tmp/r"
     out = capsys.readouterr().out
     assert accept_pr.ACCEPT_NO_MERGE_TEST in out and url in out
+
+
+def _empty_facts() -> dict:
+    return _facts(statusCheckRollup=[])
+
+
+def test_no_merge_accept_no_checks_records_skip(capsys) -> None:
+    ops = _Ops(facts_seq=[_empty_facts()], review_body=_marker(), workflows=[])
+    rec = _Rec()
+    assert _accept_test(ops, rec) == 0
+    assert rec.results[0]["checks"] == NO_CHECKS_TEST
+    assert NO_CHECKS_TEST in capsys.readouterr().out
+    assert [c for c in ops.calls if c[0] == "workflow_files"] == [
+        ("workflow_files", HEAD0)
+    ]
+
+
+def test_test_accept_empty_rollup_with_workflows_still_stops() -> None:
+    ops = _Ops(facts_seq=[_empty_facts()], review_body=_marker())
+    rec = _Rec()
+    assert _accept_test(ops, rec) == 1
+    assert rec.results == []
+
+
+def test_strict_accept_empty_rollup_still_stops() -> None:
+    ops = _Ops(facts_seq=[_empty_facts()], review_body=_marker(), workflows=[])
+    assert accept_pr.accept("r", "o/r", 7, ops, "/tmp/r", sleep=_no_sleep) == 1
+    assert not any(c[0] == "workflow_files" for c in ops.calls)
 
 
 def test_test_accept_request_changes_marker_stops(capsys) -> None:

@@ -2875,3 +2875,44 @@ def test_spec_runner_argv_and_cwd(monkeypatch):
     assert rc == 3
     assert calls[0].argv == ["spec-runner", "spec", "approve", "tasks"]
     assert calls[0].kwargs["cwd"] == "/t"
+
+
+def _workflow_run(monkeypatch, *, returncode=0, stdout="", stderr=""):
+    calls = _install_fake_run(
+        monkeypatch, returncode=returncode, stdout=stdout, stderr=stderr
+    )
+    return RealOps().workflow_files(REPO_SLUG, "abc123"), calls
+
+
+def test_workflow_files_404_is_empty(monkeypatch):
+    got, calls = _workflow_run(
+        monkeypatch, returncode=1, stderr="gh: Not Found (HTTP 404)"
+    )
+    assert got == []
+    assert calls[0].argv[:2] == ["gh", "api"]
+    assert calls[0].argv[2] == (
+        f"repos/{REPO_SLUG}/contents/.github/workflows?ref=abc123"
+    )
+
+
+def test_workflow_files_lists_yaml_only(monkeypatch):
+    body = json.dumps(
+        [
+            {"name": "ci.yml", "type": "file"},
+            {"name": "a.yaml", "type": "file"},
+            {"name": "README.md", "type": "file"},
+            {"name": "sub.yml", "type": "dir"},
+        ]
+    )
+    got, _ = _workflow_run(monkeypatch, stdout=body)
+    assert got == ["ci.yml", "a.yaml"]
+
+
+def test_workflow_files_other_error_is_none(monkeypatch):
+    got, _ = _workflow_run(monkeypatch, returncode=1, stderr="HTTP 403: Forbidden")
+    assert got is None
+
+
+def test_workflow_files_non_list_is_none(monkeypatch):
+    got, _ = _workflow_run(monkeypatch, stdout='{"message": "x"}')
+    assert got is None

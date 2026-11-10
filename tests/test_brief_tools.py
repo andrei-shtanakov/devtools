@@ -602,6 +602,22 @@ def test_approve_success_prints_engineer_command(approve_env, capsys) -> None:  
     assert "--frame engineer" in out and "--approval-pr 7" in out and "--new-run" in out
 
 
+def test_engineer_command_built_from_args(approve_env) -> None:
+    state = rs.load(RUN_ID)
+    path = _signed_path()
+    args = bt.engineer_args(state, 7, "po")
+    assert args == [
+        "--subject", "s", "--repo", "alpha", "--need", "--frame", "engineer",
+        "--new-run", "--ws-id", "WS-1-eng", "--stakeholder", "po",
+        "--traces-to", str(path), "--approval-pr", "7",
+    ]  # fmt: skip
+    assert bt._engineer_command(state, 7) == (
+        "make spec-loop SUBJECT='s' REPO=alpha ARGS='--need --frame engineer "
+        "--new-run --ws-id WS-1-eng --stakeholder <role> --traces-to "
+        f"{path} --approval-pr 7'"
+    )
+
+
 @pytest.mark.parametrize(
     ("reply", "phrase"),
     [

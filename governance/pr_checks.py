@@ -11,6 +11,17 @@ from __future__ import annotations
 _PENDING = {"PENDING", "IN_PROGRESS", "QUEUED", "WAITING", "REQUESTED", ""}
 _GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 
+#: Именованный пропуск режима `test`: у репо нет ни проверок, ни workflow'ов.
+NO_CHECKS_TEST = "проверок нет (test)"
+
+
+def no_checks(pr_facts: dict, workflows: list[str] | None) -> bool:
+    """`True` ⇔ rollup пуст и `.github/workflows` прочитан и пуст (`[]`).
+
+    `None` (не прочитано) — не «нет проверок»: fail-closed.
+    """
+    return not (pr_facts.get("statusCheckRollup") or []) and workflows == []
+
 
 def _states(pr_facts: dict) -> list[tuple[str, str]]:
     """`(имя, состояние)` по каждой записи rollup; состояние — в верхнем."""

@@ -1,0 +1,10 @@
+schema = "darkfactory-components/v1"
+
+[repos.discovery]
+url = "https://github.com/andrei-shtanakov/discovery.git"
+sha = "c7961b9e13c290d30cadd2ceea946768a041de90"
+
+[repos.spec-runner]
+url = "https://github.com/andrei-shtanakov/spec-runner.git"
+sha = "d586fbb683158922bfd20091b6d4ed58f4583bfa"
+tool = true

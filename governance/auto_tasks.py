@@ -17,6 +17,7 @@ from governance import approve_node as an
 from governance import run_state as rs
 from governance import task_bridge as tb
 from governance.ops import Ops
+from governance.pr_checks import NO_CHECKS_TEST
 from governance.review_verdict import positive_on, record_review
 from governance.run_state import RunState, op_complete, op_start, op_status, save
 
@@ -70,11 +71,21 @@ def _read_facts(ops: Ops, state: RunState, pr: int) -> dict | None:
 
 
 def _checks_refusal(
-    state: RunState, ops: Ops, pr: int, head: str, kind: str
+    state: RunState, ops: Ops, pr: int, head: str, kind: str, key: str
 ) -> str | None:
-    """Причина отказа ожидания проверок либо `None` (зелёные)."""
+    """Причина отказа ожидания проверок либо `None` (зелёные или пропуск).
+
+    Именованный пропуск «проверок нет (test)» пишется в операцию `key`.
+    """
+
+    def record_skip(_reason: str) -> None:
+        state.ops[key]["checks_skip"] = NO_CHECKS_TEST
+        save(state)
+
     try:
-        refusal = an._await_required_checks(state, ops, pr, head, kind=kind)
+        refusal = an._await_required_checks(
+            state, ops, pr, head, kind=kind, on_no_checks=record_skip
+        )
     except RuntimeError as exc:
         return f"факты {kind} #{pr} не установлены: {exc} — повторите"
     return refusal.reason if refusal is not None else None
@@ -108,7 +119,7 @@ def _merge_spec_pr(state: RunState, ops: Ops, key: str, pr: int, kind: str) -> b
     op_start(state, key, pr=pr, head=head, tasks_skip=TASKS_SKIP_TEST)
     if facts.get("isDraft") and not ops.mark_ready(state.repo_slug, pr):
         return _stop(f"{kind} #{pr}: gh pr ready не удался")
-    reason = _checks_refusal(state, ops, pr, head, kind)
+    reason = _checks_refusal(state, ops, pr, head, kind, key)
     if reason is not None:
         return _stop(f"{kind} #{pr} не вмержен — {reason}")
     rc = ops.human_merge(state.repo, pr, head, target_dir=state.target_dir)

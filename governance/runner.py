@@ -73,6 +73,7 @@ from governance.policy_sources import (
     verify_wave_profile_dir,
     wave_profile_dir,
 )
+from governance.pr_checks import NO_CHECKS_TEST
 from governance.run_state import (
     ModeMismatchError,
     RunState,
@@ -1252,9 +1253,19 @@ def _auto_merge_candidate(state: RunState, ops: Ops, request: str, pr: int) -> b
     # оставляет её в журнале (аудит), отказ мержа её не снимает.
     state.ops[request]["act_skip"] = ACT_SKIP_TEST
     save(state)
+
+    def record_skip(_reason: str) -> None:
+        state.ops[request]["checks_skip"] = NO_CHECKS_TEST
+        save(state)
+
     try:
         refusal = an._await_required_checks(
-            state, ops, pr, str(head), kind="candidate-PR"
+            state,
+            ops,
+            pr,
+            str(head),
+            kind="candidate-PR",
+            on_no_checks=record_skip,
         )
     except RuntimeError as exc:
         refusal_text = (

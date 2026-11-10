@@ -261,6 +261,8 @@ class Ops(Protocol):
 
     def pr_facts(self, repo_slug: str, pr: int) -> dict: ...
 
+    def workflow_files(self, repo_slug: str, ref: str) -> list[str] | None: ...
+
     def pr_closure(self, repo_slug: str, pr: int) -> dict | None: ...
 
     def agent_login(self) -> str | None: ...
@@ -1755,6 +1757,38 @@ class RealOps(BriefFactsMixin):
             check=True,
         )
         return json.loads(done.stdout)
+
+    def workflow_files(self, repo_slug: str, ref: str) -> list[str] | None:
+        """Имена `*.yml`/`*.yaml` в `.github/workflows` на `ref`.
+
+        HTTP 404 — `[]` (каталога нет); любая иная ошибка или не-список —
+        `None` (не установлено: вызывающий обязан читать как fail-closed).
+        """
+        done = subprocess.run(
+            [
+                "gh",
+                "api",
+                f"repos/{repo_slug}/contents/.github/workflows?ref={ref}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if done.returncode != 0:
+            return [] if "HTTP 404" in done.stderr else None
+        try:
+            entries = json.loads(done.stdout)
+        except ValueError:
+            return None
+        if not isinstance(entries, list):
+            return None
+        return [
+            str(e["name"])
+            for e in entries
+            if isinstance(e, dict)
+            and e.get("type") == "file"
+            and str(e.get("name", "")).endswith((".yml", ".yaml"))
+        ]
 
     def pr_body_fact(self, repo_slug: str, pr: int) -> Fact[str]:
         """Тело PR (зеркало манифеста `review/v1`): FOUND / UNAVAILABLE."""

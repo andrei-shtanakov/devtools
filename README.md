@@ -310,6 +310,12 @@ remediation-issue у уже помеченного родителя). Повто
 Скилл `skills/fleet-check/` (установка: скопировать в `.claude/skills/`)
 ведёт полный цикл: снапшот → отчёт → PR в `prograph-vault/derived/fleet/`.
 
+## DarkFactory для коллег
+
+Лёгкая установка режима test на свой Mac и репо: `sh install.sh`, затем
+`dfl init-repo` и `dfl run`. Пошаговая памятка, в том числе что в test
+выключено: [docs/darkfactory-for-colleagues.md](docs/darkfactory-for-colleagues.md).
+
 ## Конфиг DarkFactory (`config.toml`)
 
 Учётки, профили gh и источник политики берутся из

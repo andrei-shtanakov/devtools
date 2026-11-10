@@ -1,0 +1,20 @@
+# Конфиг DarkFactory в режиме test — для лёгкой установки (install.sh).
+# Режим test: одна учётка и автор, и ревьюер, и человек; политика подписи
+# (репозиторий approval-policy) не используется, песочница авторского вызова
+# (sandbox-exec) выключена, ревью публикуется комментарием, а не approve.
+# Режим принимается только из ~/.config/darkfactory/config.toml.
+schema = "darkfactory-config/v1"
+mode = "test"
+
+[accounts]
+human = "{login}"
+agent = "{login}"
+human_gh_config_dir = "~/.config/gh"
+agent_gh_config_dir = "~/.config/gh"
+
+[workspace]
+root = "{root}"
+
+[harness]
+author = "claude"
+model = "claude-opus-5"

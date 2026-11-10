@@ -4071,3 +4071,92 @@ def test_try_agent_merge_passes_target_dir_only_in_test(
 
     assert result is None
     assert ops.merge_kwargs == [expected]
+
+
+class _ChecksOps:
+    """Последовательность rollup'ов и `workflow_files` для ожидания проверок."""
+
+    def __init__(self, rollups, workflows, heads=None) -> None:
+        self.rollups = list(rollups)
+        self.workflows = workflows
+        self.heads = list(heads or [])
+        self.reads = 0
+        self.workflow_calls: list[tuple[str, str]] = []
+
+    def pr_facts(self, repo_slug: str, pr: int) -> dict:
+        self.reads += 1
+        rollup = self.rollups.pop(0) if len(self.rollups) > 1 else self.rollups[0]
+        head = self.heads.pop(0) if self.heads else "h" * 40
+        return {"headRefOid": head, "statusCheckRollup": rollup}
+
+    def workflow_files(self, repo_slug: str, ref: str) -> list[str] | None:
+        self.workflow_calls.append((repo_slug, ref))
+        return self.workflows
+
+
+def _wait_checks(monkeypatch, ops, *, mode="test", callback=True):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(an, "_SLEEP", lambda _s: None)
+    monkeypatch.setattr(rs, "mode_refusal", lambda _st: None)
+    state = SimpleNamespace(mode=mode, repo_slug="o/r")
+    skips: list[str] = []
+    refusal = an._await_required_checks(
+        state,
+        ops,
+        5,
+        "h" * 40,
+        on_no_checks=skips.append if callback else None,
+    )
+    return refusal, skips
+
+
+def test_no_checks_skip_in_test_after_grace(monkeypatch) -> None:
+    ops = _ChecksOps([[]], [])
+    refusal, skips = _wait_checks(monkeypatch, ops)
+    assert refusal is None
+    assert len(skips) == 1
+    assert "проверок нет (test)" in skips[0] and "#5" in skips[0]
+    assert ops.reads == an._NO_CHECKS_GRACE_POLLS
+    assert len(ops.workflow_calls) == 1
+
+
+def test_no_checks_not_skipped_with_workflows(monkeypatch) -> None:
+    ops = _ChecksOps([[]], ["ci.yml"])
+    refusal, skips = _wait_checks(monkeypatch, ops)
+    assert refusal is not None and refusal.retry is True
+    assert skips == [] and len(ops.workflow_calls) == 1
+
+
+def test_no_checks_unreadable_workflows_fail_closed(monkeypatch) -> None:
+    refusal, skips = _wait_checks(monkeypatch, _ChecksOps([[]], None))
+    assert refusal is not None and refusal.retry is True and skips == []
+
+
+def test_no_checks_strict_never_skips(monkeypatch) -> None:
+    ops = _ChecksOps([[]], [])
+    refusal, skips = _wait_checks(monkeypatch, ops, mode="strict")
+    assert refusal is not None and refusal.retry is True
+    assert skips == [] and ops.workflow_calls == []
+
+
+def test_no_checks_without_callback_never_skips(monkeypatch) -> None:
+    ops = _ChecksOps([[]], [])
+    refusal, _ = _wait_checks(monkeypatch, ops, callback=False)
+    assert refusal is not None and refusal.retry is True
+    assert ops.workflow_calls == []
+
+
+def test_late_check_within_grace_not_skipped(monkeypatch) -> None:
+    pending = [{"name": "ci", "status": "PENDING"}]
+    green = [{"name": "ci", "conclusion": "SUCCESS"}]
+    ops = _ChecksOps([[], [], pending, green], [])
+    refusal, skips = _wait_checks(monkeypatch, ops)
+    assert refusal is None and skips == [] and ops.workflow_calls == []
+
+
+def test_head_moved_still_refused_before_skip(monkeypatch) -> None:
+    ops = _ChecksOps([[]], [], heads=["h" * 40, "x" * 40])
+    refusal, skips = _wait_checks(monkeypatch, ops)
+    assert refusal is not None and "уехала" in refusal.reason
+    assert skips == [] and ops.workflow_calls == []
