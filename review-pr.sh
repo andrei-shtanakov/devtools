@@ -490,6 +490,8 @@ $head_sha, сейчас $cur_oid — перегоните ревью."
 # GitHub отвечает 422 на `--approve`/`--request-changes` своего PR: вердикт
 # уходит `--comment`, само действие несёт поле `verdict=` маркера (его читают
 # STRICT_MARKER_JQ и lr_delivered_state ниже). Код выхода — прежний.
+# $2 — необязательное название публикуемого в test-строке (умолчание
+# «вердикт $1»): scope-аттестация не вердикт и так себя и называет.
 publish() {
     check_head_current
     _pub_flag="$1"
@@ -501,7 +503,7 @@ publish() {
     if [ "$_pub_flag" = "$1" ]; then
         echo "опубликовано: --$1 на ${slug}#${pr} (head $head_sha) от $login"
     else
-        echo "опубликовано: --comment (вердикт $1, режим test) на" \
+        echo "опубликовано: --comment (${2:-вердикт $1}, режим test) на" \
             "${slug}#${pr} (head $head_sha) от $login"
     fi
 }
@@ -1178,7 +1180,7 @@ publish_scope_attestation() {
         cat "$work/body.md"
         exit 0
     fi
-    publish approve
+    publish approve "scope-аттестация $_psa_kind"
     exit 0
 }
 

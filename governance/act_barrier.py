@@ -443,17 +443,20 @@ def live_review_requests(ops_by_product: Mapping[str, Any]) -> BarrierReport:
 TEST_MODE_REFUSAL = "режим test: миграция акта не применяется"
 
 
-def _config_refusal() -> str | None:
-    """Причина отказа по режиму конфига DarkFactory или `None` (strict).
+def _config_exit() -> int | None:
+    """Код выхода по режиму конфига DarkFactory или `None` (strict).
 
-    Нет файла конфига — strict; битый конфиг и режим `test` — отказ."""
-    if not os.path.lexists(df_config.config_path(os.environ)):
-        return None
+    Нет файла конфига — strict; режим `test` — отказ (2); битый конфиг —
+    сбой чтения (3), `live_policy` не зовётся ни в одном из двух случаев."""
     try:
-        cfg = df_config.load()
+        mode = df_config.mode_or_strict()
     except df_config.ConfigError as exc:
-        return f"конфиг DarkFactory: {exc}"
-    return TEST_MODE_REFUSAL if cfg.mode == "test" else None
+        print(f"конфиг DarkFactory: {exc}", file=sys.stderr)
+        return EXIT_INCOMPLETE
+    if mode != "test":
+        return None
+    print(TEST_MODE_REFUSAL, file=sys.stderr)
+    return EXIT_REFUSED
 
 
 def invalidate(
@@ -532,10 +535,9 @@ def _main(argv: Sequence[str] | None) -> int:
     p.add_argument("--invalidate", type=int)
     p.add_argument("--json", action="store_true")
     args = p.parse_args(argv)
-    refusal = _config_refusal()
-    if refusal is not None:
-        print(refusal, file=sys.stderr)
-        return EXIT_REFUSED
+    config_exit = _config_exit()
+    if config_exit is not None:
+        return config_exit
     ops = RealOps()
     probe = SimpleNamespace(repo_slug=args.product, run_id="act-barrier", base_ref=None)
     live = act_status.live_policy(probe, act_status.real_deps(probe))  # type: ignore[arg-type]

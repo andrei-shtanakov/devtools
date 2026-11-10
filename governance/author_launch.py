@@ -106,9 +106,7 @@ def config_mode() -> str:
     """Режим конфига DarkFactory: `strict`, если файла нет, иначе `load().mode`.
 
     Файл есть, но дефектен — `df_config.ConfigError` пробрасывается."""
-    if not os.path.lexists(df_config.config_path(os.environ)):
-        return "strict"
-    return df_config.load().mode
+    return df_config.mode_or_strict()
 
 
 def harness_for(prefix: str) -> tuple[str, str]:

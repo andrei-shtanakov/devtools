@@ -16,7 +16,7 @@ import pytest
 
 from governance import act_settings, df_config, sandbox, secret_dirs
 from governance.df_config import ConfigError
-from tests.df_config_fixture import anchor_test_config
+from tests.df_config_fixture import anchor_test_config, write_config
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -480,10 +480,48 @@ def test_banner_lists_relaxations_in_test(tmp_path: Path) -> None:
             "корень доверия df (/etc/df/trust.toml) не используется:"
             " акт — по мержу (режим до миграции)"
         ),
+        "акт человека не требуется (test): candidate-PR мержит раннер после зелёных проверок",
+        "класс актора не применяется (test): finalize не сверяет класс актора; kill switch действует",
+        "утверждение задач человеком не требуется (test): tasks-PR, spec approve и approve-PR проводит раннер",
+        "мерж PR с кодом — за вами (test): приёмка проверяет PR с кодом, но не мержит его",
+        "проверок нет (test): у PR нет .github/workflows и чеков — CI не ждём; чеки CI вне GitHub Actions, пришедшие позже 2 минут, не учитываются",
+        "одна учётка GitHub: accounts.human может совпадать с accounts.agent",
     )
     assert df_config.test_banner(cfg) == (
         "режим test: выключено — " + "; ".join(df_config.TEST_RELAXATIONS)
     )
+
+
+SKIP_CONSTANTS = (
+    ("runner", "ACT_SKIP_TEST"),
+    ("approve_node", "ACTOR_SKIP_TEST"),
+    ("auto_tasks", "TASKS_SKIP_TEST"),
+    ("accept_pr", "ACCEPT_NO_MERGE_TEST"),
+    ("pr_checks", "NO_CHECKS_TEST"),
+)
+
+
+def test_banner_names_every_test_skip() -> None:
+    import importlib
+
+    for module, const in SKIP_CONSTANTS:
+        text = getattr(importlib.import_module(f"governance.{module}"), const)
+        assert any(line.startswith(text) for line in df_config.TEST_RELAXATIONS), const
+
+
+def test_banner_skip_constants_are_complete() -> None:
+    import re
+
+    found = set()
+    for path in (Path(__file__).resolve().parents[1] / "governance").glob("*.py"):
+        found |= set(
+            re.findall(
+                r'^([A-Z_]+_TEST) = "',
+                path.read_text(encoding="utf-8"),
+                re.MULTILINE,
+            )
+        )
+    assert found == {const for _, const in SKIP_CONSTANTS}
 
 
 BAD_LOGINS = [
@@ -540,6 +578,50 @@ def test_cli_mode_or_strict_reads_mode(tmp_path: Path) -> None:
     cfg.write_text(STRICT, encoding="utf-8")
     done = _cli({"XDG_CONFIG_HOME": str(tmp_path)}, "mode-or-strict")
     assert (done.returncode, done.stdout) == (0, "strict\n"), done.stderr
+
+
+def test_mode_or_strict_no_file(tmp_path: Path) -> None:
+    assert df_config.mode_or_strict({"XDG_CONFIG_HOME": str(tmp_path)}) == "strict"
+
+
+def test_mode_or_strict_reads_test(tmp_path: Path) -> None:
+    env = write_config(tmp_path, mode="test")
+    assert df_config.mode_or_strict(env) == "test"
+
+
+def test_mode_or_strict_dangling_symlink_raises(tmp_path: Path) -> None:
+    cfg = tmp_path / "darkfactory" / "config.toml"
+    cfg.parent.mkdir(parents=True)
+    cfg.symlink_to(tmp_path / "nowhere.toml")
+    with pytest.raises(df_config.ConfigError):
+        df_config.mode_or_strict({"XDG_CONFIG_HOME": str(tmp_path)})
+
+
+def test_mode_or_strict_broken_raises(tmp_path: Path) -> None:
+    cfg = tmp_path / "darkfactory" / "config.toml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text("это не toml [", encoding="utf-8")
+    with pytest.raises(df_config.ConfigError):
+        df_config.mode_or_strict({"XDG_CONFIG_HOME": str(tmp_path)})
+
+
+def test_no_strict_rule_copies() -> None:
+    """Правило «нет файла = strict» живёт только в `df_config.mode_or_strict`.
+
+    `policy_rule.py` — другая форма (возвращает конфиг/`None`, а не режим).
+    `act_status._test_run_policy` — известная копия правила: она под реестром
+    act identity (строка `_config_exists`), перевод на `mode_or_strict` —
+    отдельная правка с перепривязкой строки реестра."""
+    root = Path(__file__).resolve().parent.parent
+    allowed = {"act_status.py", "policy_rule.py"}
+    needle = "lexists(df_config.config_path("
+    found = {
+        p.name
+        for pattern in ("governance/*.py", "lite/*.py")
+        for p in root.glob(pattern)
+        if needle in p.read_text(encoding="utf-8")
+    }
+    assert found <= allowed, sorted(found - allowed)
 
 
 def test_test_approver_version_value() -> None:

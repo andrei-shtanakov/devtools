@@ -73,3 +73,9 @@ def test_doc_quotes_dfl_hints_verbatim() -> None:
     flat = " ".join(_doc().split())
     for hint in (dfl.ANSWER_HINT, pipeline.CHAIN_STOPPED_HINT):
         assert " ".join(hint.split()) in flat, hint
+
+
+def test_doc_names_non_actions_ci_limit() -> None:
+    text = _doc()
+    for needle in ("GitHub Actions", "2 минут"):
+        assert needle in text, needle

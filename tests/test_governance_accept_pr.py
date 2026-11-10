@@ -892,9 +892,8 @@ def test_root_review_pr_sh_is_harness_too(capsys) -> None:
 def test_harness_prefixes_from_ssot() -> None:
     """Перечень харнесс-путей — SSOT `contracts/harness-paths/v1/paths.env`.
 
-    Его же читает `merge-pr.sh` под `--authority-override` (дизайн
-    darkfactory-config §5.8, D10): второе определение в shell разошлось бы с
-    кортежем молча. Атрибут `_HARNESS_PREFIXES` сохранён — его читает
+    SSOT харнесс-путей читает `accept_pr` (дизайн darkfactory-config §5.8,
+    D10). Атрибут `_HARNESS_PREFIXES` сохранён — его читает
     `tests/harness_trust.py`.
     """
     from pathlib import Path
@@ -1089,10 +1088,10 @@ def test_strict_accept_unchanged_merges() -> None:
 
 
 def test_main_test_mode_target_from_user_targets(monkeypatch, tmp_path) -> None:
-    from governance import user_targets
+    from governance import df_config, user_targets
 
     target = user_targets.UserTarget("r", tmp_path / "r", "git@github.com:o/r.git")
-    monkeypatch.setattr(accept_pr, "_config_mode", lambda: "test")
+    monkeypatch.setattr(df_config, "mode_or_strict", lambda *a, **k: "test")
     monkeypatch.setattr(user_targets, "lookup", lambda repo: target)
     monkeypatch.setattr(
         accept_pr.subprocess,

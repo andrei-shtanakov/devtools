@@ -83,6 +83,12 @@ TEST_RELAXATIONS: tuple[str, ...] = (
         "корень доверия df (/etc/df/trust.toml) не используется:"
         " акт — по мержу (режим до миграции)"
     ),
+    "акт человека не требуется (test): candidate-PR мержит раннер после зелёных проверок",
+    "класс актора не применяется (test): finalize не сверяет класс актора; kill switch действует",
+    "утверждение задач человеком не требуется (test): tasks-PR, spec approve и approve-PR проводит раннер",
+    "мерж PR с кодом — за вами (test): приёмка проверяет PR с кодом, но не мержит его",
+    "проверок нет (test): у PR нет .github/workflows и чеков — CI не ждём; чеки CI вне GitHub Actions, пришедшие позже 2 минут, не учитываются",
+    "одна учётка GitHub: accounts.human может совпадать с accounts.agent",
 )
 _LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}")
 MODES = ("strict", "test")
@@ -209,6 +215,16 @@ def _require_canonical(parser: _Parser, path: Path, read: os.stat_result) -> Non
             f"режим test принимается только из {canonical}; конфиг "
             f"прочитан из {path} (перенаправление XDG_CONFIG_HOME/HOME)",
         )
+
+
+def mode_or_strict(env: Mapping[str, str] = os.environ) -> Literal["strict", "test"]:
+    """Режим конфига: файла нет (`lexists` ложно, висячая ссылка — «есть») —
+    `strict`; иначе `load(env).mode`. Битый конфиг — `ConfigError`.
+
+    Единственное правило «нет файла = strict»."""
+    if not os.path.lexists(config_path(env)):
+        return "strict"
+    return load(env).mode
 
 
 def workspace_root(env: Mapping[str, str] | None = None) -> Path:
@@ -463,10 +479,12 @@ def main(argv: list[str], env: Mapping[str, str] = os.environ) -> int:
 
     `mode-or-strict` — режим; файла конфига нет (`lexists` ложно) → `strict`."""
     if argv == ["mode-or-strict"]:
-        if not os.path.lexists(config_path(env)):
-            print("strict")
-            return 0
-        argv = ["get", "mode"]
+        try:
+            print(mode_or_strict(env))
+        except ConfigError as exc:
+            print(f"конфиг DarkFactory: {exc}", file=sys.stderr)
+            return 2
+        return 0
     if len(argv) != 2 or argv[0] != "get":
         print(
             "использование: df_config.py get <ключ> | mode-or-strict", file=sys.stderr

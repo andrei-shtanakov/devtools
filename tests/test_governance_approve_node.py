@@ -3178,6 +3178,23 @@ def test_missing_approving_review_test_mode_reads_journal_attestation() -> None:
     assert refusal is not None and "аттестац" in refusal
 
 
+def test_journal_attestation_refusals_named() -> None:
+    """`test`: каждый отказ журнальной аттестации назван своей причиной."""
+    head = "e" * 40
+    none = _test_state(None)
+    no_record = an._missing_approving_review(none, _HeadOps(head), 801)  # type: ignore[arg-type]
+    assert no_record is not None and "в журнале нет scope-аттестации" in no_record
+
+    failed = _test_state({"finalize_pr": 801, "review_exit": 6, "head": head})
+    exit_nonzero = an._missing_approving_review(failed, _HeadOps(head), 801)  # type: ignore[arg-type]
+    assert exit_nonzero is not None
+    assert "журнале неуспешна (review-pr.sh вернул 6" in exit_nonzero
+
+    old = _test_state({"finalize_pr": 801, "review_exit": 0, "head": "a" * 40})
+    moved = an._missing_approving_review(old, _HeadOps(head), 801)  # type: ignore[arg-type]
+    assert moved is not None and "записана на голове" in moved
+
+
 def test_missing_approving_review_strict_ignores_journal() -> None:
     """strict: запись журнала одобрением не считается — читается форджа."""
 
