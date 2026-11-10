@@ -45,6 +45,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from governance import authority_root, df_config, ssot_env, user_targets
+from governance.approve_node import _NO_CHECKS_GRACE_POLLS
 from governance.facts import Outcome
 from governance.ops import (
     REVIEW_BARRIER_EXIT,
@@ -52,6 +53,7 @@ from governance.ops import (
     Ops,
     RealOps,
 )
+from governance.pr_checks import NO_CHECKS_TEST, no_checks
 from governance.review_verdict import ReviewVerdict, parse_marker
 
 # Харнесс-пути — входы обвязки ревью и мержа, исполняемые или читаемые из
@@ -311,13 +313,14 @@ def _accept_on_head(
 
     facts = ops.pr_facts(repo_slug, pr)
     polls = 0
+    empty_polls = 0
+    no_ci = False
     # UNKNOWN-mergeability тоже ждём (приёмка PR #109, круг 2): GitHub
     # вычисляет её асинхронно, и «не CONFLICTING» не значит «можно» —
     # fail-closed, мерж только на явном MERGEABLE.
-    while _checks_state(facts) == "pending" or facts.get("mergeable") not in (
-        "MERGEABLE",
-        "CONFLICTING",
-    ):
+    while (_checks_state(facts) == "pending" and not no_ci) or facts.get(
+        "mergeable"
+    ) not in ("MERGEABLE", "CONFLICTING"):
         polls += 1
         if polls > poll_limit:
             print(
@@ -327,6 +330,9 @@ def _accept_on_head(
             return 1
         sleep(_POLL_SECONDS)
         facts = ops.pr_facts(repo_slug, pr)
+        empty_polls = empty_polls + 1 if not facts.get("statusCheckRollup") else 0
+        if test is not None and not no_ci and empty_polls == _NO_CHECKS_GRACE_POLLS:
+            no_ci = no_checks(facts, ops.workflow_files(repo_slug, head0))
     if _checks_state(facts) == "red":
         print("accept-pr: красные чеки — мержа не будет (урок kapelle#57)")
         return 1
@@ -358,7 +364,7 @@ def _accept_on_head(
         return 1
     head = head0
     if test is not None:
-        return _finish_no_merge(repo_slug, pr, head, test)
+        return _finish_no_merge(repo_slug, pr, head, test, no_ci)
     # Пин базы по OID, а не по имени (ревью PR #183, major): сверка
     # `baseRefName` выше ловит РЕТАРГЕТ, но не движение самой базы —
     # `origin/master` мог уехать вперёд между вердиктом и мержем, и агент
@@ -457,15 +463,19 @@ def _accept_on_head(
     return 0
 
 
-def _finish_no_merge(repo_slug: str, pr: int, head: str, test: NoMergeAccept) -> int:
+def _finish_no_merge(
+    repo_slug: str, pr: int, head: str, test: NoMergeAccept, no_ci: bool = False
+) -> int:
     """Test: вместо мержа — итог проверки в журнал и строка оператору."""
     url = f"https://github.com/{repo_slug}/pull/{pr}"
+    checks = NO_CHECKS_TEST if no_ci else "green"
     test.record_result(
-        {"pr": pr, "url": url, "head": head, "checks": "green", "merged": False}
+        {"pr": pr, "url": url, "head": head, "checks": checks, "merged": False}
     )
+    shown = NO_CHECKS_TEST if no_ci else "проверки зелёные"
     print(
-        f"accept-pr (test): {url} — голова {head[:7]} проверена, проверки "
-        f"зелёные; {ACCEPT_NO_MERGE_TEST}"
+        f"accept-pr (test): {url} — голова {head[:7]} проверена, {shown}; "
+        f"{ACCEPT_NO_MERGE_TEST}"
     )
     return 0
 

@@ -50,6 +50,7 @@ from governance import approval_facts as af
 from governance import approval_ledger as al
 from governance import brief_input, bundle_dag, bundle_inputs, df_config, pr_checks
 from governance import node_approval as na
+from governance import run_state as rs
 from governance.act_check import LegacyAccepted
 from governance.act_decision import Rejected
 from governance.act_envelope import DeliveredRequest, current_event
@@ -2773,6 +2774,8 @@ _SLEEP = time.sleep
 #: опрос раз в `_CHECKS_POLL_SECONDS`, не более `_CHECKS_POLL_LIMIT` раз.
 _CHECKS_POLL_LIMIT = 40
 _CHECKS_POLL_SECONDS = 30.0
+#: Опросов подряд с пустым rollup до чтения `.github/workflows` (test).
+_NO_CHECKS_GRACE_POLLS = 4
 
 
 @dataclass(frozen=True)
@@ -2977,7 +2980,13 @@ def _try_agent_merge(
 
 
 def _await_required_checks(
-    state: RunState, ops: Ops, pr: int, head: str, *, kind: str = "finalize-PR"
+    state: RunState,
+    ops: Ops,
+    pr: int,
+    head: str,
+    *,
+    kind: str = "finalize-PR",
+    on_no_checks: Callable[[str], None] | None = None,
 ) -> MergeRefusal | None:
     """Ждёт обязательные проверки PR'а; `None` — можно мержить.
 
@@ -2992,7 +3001,18 @@ def _await_required_checks(
     чужих байтов; `human_merge_helps=False` у всех трёх исходов: красные
     проверки и уехавшую голову человеческий мерж не лечит, а незавершённые
     лечит время и повторный вызов.
+
+    Именованный пропуск (только `test` и только с `on_no_checks`): после
+    `_NO_CHECKS_GRACE_POLLS` опросов подряд с пустым rollup один раз
+    читается `.github/workflows` на голове; пусто — репо без CI, колбэк
+    записывает причину, возврат `None`. Нечитаемое — не пропуск.
     """
+    can_skip = (
+        on_no_checks is not None
+        and state.mode == "test"
+        and rs.mode_refusal(state) is None
+    )
+    empty_polls = 0
     for _ in range(_CHECKS_POLL_LIMIT):
         facts = _pr_facts(state, ops, pr)
         actual = facts.get("headRefOid")
@@ -3004,6 +3024,17 @@ def _await_required_checks(
                 human_merge_helps=False,
             )
         verdict = pr_checks.checks_state(facts)
+        empty_polls = empty_polls + 1 if not facts.get("statusCheckRollup") else 0
+        if can_skip and on_no_checks and empty_polls == _NO_CHECKS_GRACE_POLLS:
+            workflows = ops.workflow_files(state.repo_slug, head)
+            if pr_checks.no_checks(facts, workflows):
+                reason = (
+                    f"{pr_checks.NO_CHECKS_TEST}: у {kind} #{pr} нет проверок и "
+                    f"нет .github/workflows на {head[:8]}"
+                )
+                print(reason)
+                on_no_checks(reason)
+                return None
         if verdict == "green":
             return None
         if verdict == "red":
