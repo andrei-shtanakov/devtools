@@ -83,6 +83,12 @@ TEST_RELAXATIONS: tuple[str, ...] = (
         "корень доверия df (/etc/df/trust.toml) не используется:"
         " акт — по мержу (режим до миграции)"
     ),
+    "акт человека не требуется (test): candidate-PR мержит раннер после зелёных проверок",
+    "класс актора не применяется (test): finalize не сверяет класс актора; kill switch действует",
+    "утверждение задач человеком не требуется (test): tasks-PR, spec approve и approve-PR проводит раннер",
+    "мерж PR с кодом — за вами (test): приёмка проверяет PR с кодом, но не мержит его",
+    "проверок нет (test): у PR нет .github/workflows и чеков — CI не ждём; чеки CI вне GitHub Actions, пришедшие позже 2 минут, не учитываются",
+    "одна учётка GitHub: accounts.human может совпадать с accounts.agent",
 )
 _LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}")
 MODES = ("strict", "test")

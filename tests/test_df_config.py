@@ -480,10 +480,48 @@ def test_banner_lists_relaxations_in_test(tmp_path: Path) -> None:
             "корень доверия df (/etc/df/trust.toml) не используется:"
             " акт — по мержу (режим до миграции)"
         ),
+        "акт человека не требуется (test): candidate-PR мержит раннер после зелёных проверок",
+        "класс актора не применяется (test): finalize не сверяет класс актора; kill switch действует",
+        "утверждение задач человеком не требуется (test): tasks-PR, spec approve и approve-PR проводит раннер",
+        "мерж PR с кодом — за вами (test): приёмка проверяет PR с кодом, но не мержит его",
+        "проверок нет (test): у PR нет .github/workflows и чеков — CI не ждём; чеки CI вне GitHub Actions, пришедшие позже 2 минут, не учитываются",
+        "одна учётка GitHub: accounts.human может совпадать с accounts.agent",
     )
     assert df_config.test_banner(cfg) == (
         "режим test: выключено — " + "; ".join(df_config.TEST_RELAXATIONS)
     )
+
+
+SKIP_CONSTANTS = (
+    ("runner", "ACT_SKIP_TEST"),
+    ("approve_node", "ACTOR_SKIP_TEST"),
+    ("auto_tasks", "TASKS_SKIP_TEST"),
+    ("accept_pr", "ACCEPT_NO_MERGE_TEST"),
+    ("pr_checks", "NO_CHECKS_TEST"),
+)
+
+
+def test_banner_names_every_test_skip() -> None:
+    import importlib
+
+    for module, const in SKIP_CONSTANTS:
+        text = getattr(importlib.import_module(f"governance.{module}"), const)
+        assert any(line.startswith(text) for line in df_config.TEST_RELAXATIONS), const
+
+
+def test_banner_skip_constants_are_complete() -> None:
+    import re
+
+    found = set()
+    for path in (Path(__file__).resolve().parents[1] / "governance").glob("*.py"):
+        found |= set(
+            re.findall(
+                r'^([A-Z_]+_TEST) = "',
+                path.read_text(encoding="utf-8"),
+                re.MULTILINE,
+            )
+        )
+    assert found == {const for _, const in SKIP_CONSTANTS}
 
 
 BAD_LOGINS = [
