@@ -187,7 +187,7 @@ MODIFIED_EXISTING = {
     "approve_node._policy_ref": "текст пина `review/v1`; не суждение",
     "approve_node._publish_candidate": "метка и сообщение `review/v1`; проверок нет",
     "approve_node._candidate_body": "тело candidate `review/v1`; не суждение",
-    "approve_node._missing_approving_review": "параметры `kind`/`retry` текста отказа; проверки прежние",
+    "approve_node._missing_approving_review": "параметры `kind`/`retry` текста отказа; в `test` (3c-2) делегирует `_missing_journal_attestation` (место суждения); strict-проверки прежние",
     "runner.resume": "зовёт аудит `act_node.audit_completed`; решения не меняет",
     "runner.reopen": "делегирует `act_node.reopen` (место суждения); своей проверки нет",
     "task_bridge.deliver_for_run._capture_anchor": "пробрасывает `ws_id`; не суждение",
@@ -195,16 +195,44 @@ MODIFIED_EXISTING = {
     # интеграционное ревью части B (I-1–I-3, m-2)
     # df этап 3a (Task 3): проверки поверхности вынесены в `act_surface` (O6)
     "edge_check/publish.surface_violations": "делегирует `act_surface.surface_violations` (место суждения); своя проверка — прежний `_unresolved` состава коммита",
-    "runner._resume_wave": ("review_delivery", "pr_facts_failure"),
-    "runner._step_candidate": "пауза `review/v1` — `waiting_human_approval` и текст об approve; проверки-отказа нет",
-    "runner._finalize_wave": "стоп по отказу вынесен в `_stop_on_refusal` без изменений текста",
+    # 3c-2: `OPEN` + `test` → повтор автомержа; его отказы — в `_auto_merge_candidate`
+    "runner._resume_wave": ("review_delivery", "pr_facts_failure", "test_auto_merge"),
+    # пауза `review/v1` — без проверки-отказа; 3c-2: `test` → `_auto_merge_candidate`
+    # (место суждения) и отказ вне `advance` (лок прогона не задан)
+    "runner._step_candidate": ("test_auto_merge", "lock_unset"),
+    # стоп по отказу — `_stop_on_refusal` без изменений текста; 3c-2: переаттестация
+    # при сдвиге головы, отказы — в `_attest_finalize`/`_attested_head_moved`
+    "runner._finalize_wave": ("reattest",),
     "runner._wave_pause": "параметр статуса паузы; не суждение",
     "approve_node._ensure_finalize_identity": ("find_pr_failure",),
+    # план 4: `on_no_checks` — именованный пропуск `NO_CHECKS_TEST` (только `test`, только
+    # с колбэком, нечитаемые workflows — не пропуск); возврат `None` = «можно мержить»,
+    # не отказ; «CI нет» решает `pr_checks.no_checks` — новой проверки-отказа здесь нет
     "approve_node._await_required_checks": ("pr_facts_failure",),
     "approve_node._carried_text": "сверка байтов заявки — хешем `_content_hash` её акта (m-2); проверка прежняя",
     "approve_node._verify_nodes_in_base": "self-hash в base — `_content_hash` акта заявки (m-2); проверка прежняя",
     "edge_check/publish.publish_wave": "коммит evidence — через `an._commit_paths` (I-3), акт заявки — в текст ревью (N-2); проверки прежние",
     "edge_check/publish.checklist_body": "текст одобряющего ревью по акту заявки (N-2); не суждение",
+    # --- df 3c-1…план 4: test-ветки. Новые функции — не определения части B, поэтому
+    # по ключам `<функция>#<проверка>`, как изменённые (отказ — с двойником)
+    "approve_node.finalize_merge_policy": '3c-2: `mode="test"` → именованный пропуск `ACTOR_SKIP_TEST` после осей Authority/Safety-стоп-крана; пропуск — не отказ; отказы прежние',
+    "approve_node._missing_journal_attestation": (
+        "no_record",
+        "exit_nonzero",
+        "head_moved",
+    ),
+    "runner._auto_merge_candidate": (
+        "edge_pass",
+        "edge_head",
+        "facts_unresolved",
+        "checks_refusal",
+        "merge_refused",
+    ),
+    # `attested is None` — стоп уже записан `_finalize_head` (место суждения ниже)
+    "runner._attest_finalize": ("review_exit",),
+    "runner._finalize_head": ("head_unresolved",),
+    "runner._attested_head_moved": ("strict_no_forge", "head_unread", "head_moved"),
+    "runner._actor_skip": "3c-2: называет пропуск `ACTOR_SKIP_TEST` полем `actor_skip`; решение — `finalize_merge_policy`; не суждение",
     "edge_check/publish.evidence_dir": "каталог evidence — из `ws_id` через `act_surface.evidence_dir`, не из `bundle_dir` (df 3a); не суждение",
 }
 
@@ -215,6 +243,7 @@ S, N, L = (
 )
 E, TB = "tests/test_act_envelope.py", "tests/test_governance_task_bridge.py"
 RN = "tests/test_governance_runner.py"
+AN = "tests/test_governance_approve_node.py"
 P, B, C = (
     "tests/test_act_premerge.py",
     "tests/test_act_barrier.py",
@@ -4147,6 +4176,160 @@ JUDGMENT = {
             "facts = _pr_facts(state, ops, pr)",
             f"{OF}::test_await_checks_pr_facts_failure_unresolved[CalledProcessError]",
             '"факт не установлен"',
+        ),
+    ),
+    # --- df 3c-1…план 4: test-ветки раннера и approve_node
+    "runner._resume_wave#test_auto_merge": (
+        r(
+            "test_auto_merge",
+            "runner._resume_wave",
+            'facts.get("state") == "OPEN" and state.mode == "test"',
+            f"{RN}::test_test_mode_merge_refused_stops_before_finalize",
+            '"completed"',
+        ),
+    ),
+    "runner._step_candidate#test_auto_merge": (
+        r(
+            "test_auto_merge",
+            "runner._step_candidate",
+            'if state.mode == "test":',
+            f"{RN}::test_test_mode_waves_run_to_completion_without_a_human",
+            "runner.ACT_SKIP_TEST",
+        ),
+    ),
+    "runner._step_candidate#lock_unset": (
+        r(
+            "lock_unset",
+            "runner._step_candidate",
+            "if lock is None:",
+            f"{RN}::test_test_mode_candidate_outside_advance_refuses",
+            '"лок прогона не задан"',
+        ),
+    ),
+    "runner._finalize_wave#reattest": (
+        r(
+            "reattest",
+            "runner._finalize_wave",
+            "if _attested_head_moved(state, ops, att_key, finalize_pr):",
+            f"{RN}::test_test_mode_finalize_reattests_when_head_moved",
+            '"prev"',
+        ),
+    ),
+    "runner._auto_merge_candidate#edge_pass": (
+        r(
+            "edge_pass",
+            "runner._auto_merge_candidate",
+            'verdict.get("verdict") != "PASS"',
+            f"{RN}::test_test_mode_without_recorded_edge_pass_does_not_merge",
+            '"edge-вердикт"',
+        ),
+    ),
+    "runner._auto_merge_candidate#edge_head": (
+        r(
+            "edge_head",
+            "runner._auto_merge_candidate",
+            'verdict.get("head") != head',
+            f"{RN}::test_test_mode_edge_pass_on_other_head_does_not_merge",
+            '"нет записанного edge-вердикта PASS на голове"',
+        ),
+    ),
+    "runner._auto_merge_candidate#facts_unresolved": (
+        r(
+            "facts_unresolved",
+            "runner._auto_merge_candidate",
+            "except RuntimeError as exc:",
+            f"{RN}::test_test_mode_candidate_unreadable_facts_stop_without_merge",
+            '"факты candidate-PR #777 не установлены"',
+        ),
+    ),
+    "runner._auto_merge_candidate#checks_refusal": (
+        r(
+            "checks_refusal",
+            "runner._auto_merge_candidate",
+            "if refusal_text is not None:",
+            f"{RN}::test_test_mode_candidate_waits_checks_before_merge",
+            '"красные"',
+        ),
+    ),
+    "runner._auto_merge_candidate#merge_refused": (
+        r(
+            "merge_refused",
+            "runner._auto_merge_candidate",
+            "if rc != 0:",
+            f"{RN}::test_test_mode_merge_refused_stops_before_finalize",
+            '"human-merge.sh вернул 3"',
+        ),
+    ),
+    "runner._attest_finalize#review_exit": (
+        r(
+            "review_exit",
+            "runner._attest_finalize",
+            "if rc != 0:",
+            f"{RN}::test_waves_resume_leaves_finalize_to_human_when_attestation_fails",
+            '"finalize-PR #801 остаётся человеку"',
+        ),
+    ),
+    "runner._finalize_head#head_unresolved": (
+        r(
+            "head_unresolved",
+            "runner._finalize_head",
+            "if head is not None:",
+            f"{RN}::test_test_mode_finalize_unreadable_head_stops_without_review",
+            '"аттестация не запрошена"',
+        ),
+    ),
+    "runner._attested_head_moved#strict_no_forge": (
+        r(
+            "strict_no_forge",
+            "runner._attested_head_moved",
+            'if state.mode != "test":',
+            f"{RN}::test_attested_head_moved_strict_reads_no_forge",
+            "is False",
+        ),
+    ),
+    "runner._attested_head_moved#head_unread": (
+        r(
+            "head_unread",
+            "runner._attested_head_moved",
+            "except RuntimeError:",
+            f"{RN}::test_attested_head_moved_unreadable_head_is_not_moved",
+            "is False",
+        ),
+    ),
+    "runner._attested_head_moved#head_moved": (
+        r(
+            "head_moved",
+            "runner._attested_head_moved",
+            'state.ops.get(att_key, {}).get("head") != head',
+            f"{RN}::test_test_mode_finalize_reattests_when_head_moved",
+            '"prev"',
+        ),
+    ),
+    "approve_node._missing_journal_attestation#no_record": (
+        r(
+            "no_record",
+            "approve_node._missing_journal_attestation",
+            "if not attested:",
+            f"{AN}::test_journal_attestation_refusals_named",
+            '"в журнале нет scope-аттестации"',
+        ),
+    ),
+    "approve_node._missing_journal_attestation#exit_nonzero": (
+        r(
+            "exit_nonzero",
+            "approve_node._missing_journal_attestation",
+            'if record["review_exit"] != 0:',
+            f"{AN}::test_journal_attestation_refusals_named",
+            '"журнале неуспешна (review-pr.sh вернул 6"',
+        ),
+    ),
+    "approve_node._missing_journal_attestation#head_moved": (
+        r(
+            "head_moved",
+            "approve_node._missing_journal_attestation",
+            'if record.get("head") != head:',
+            f"{AN}::test_journal_attestation_refusals_named",
+            '"записана на голове"',
         ),
     ),
     # --- df этап 3a (Tasks 4–6): типы доверия, дескрипторы и бюджет, пара по SHA

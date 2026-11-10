@@ -11221,6 +11221,7 @@ def test_test_mode_finalize_unreadable_head_stops_without_review(
     assert not any(c[0] == "review" for c in ops.calls)
     reason = (rs.run_dir("r-3c2-nohead") / "stop-reason.txt").read_text()
     assert "#801" in reason and "голова" in reason
+    assert "аттестация не запрошена" in reason
 
 
 # --- План 3c-2, Task 2: мерж candidate раннером в `test` --------------------
@@ -11460,11 +11461,13 @@ def test_test_mode_candidate_waits_checks_before_merge(
 ) -> None:
     _set_cfg_mode("test")
     ops = _test_mode_ops(candidate_rollup=[{"name": "ci", "conclusion": "FAILURE"}])
+    _fake_approve_node_waves(monkeypatch, ops)  # обход проверки — до утверждения
     state = _refused_wave1(tmp_path, monkeypatch, ops, "r-3c3-red")
     assert state.status == "stopped_merge_refused"
     assert not any(c[0] == "human_merge" for c in ops.calls)
     reason = (rs.run_dir("r-3c3-red") / "stop-reason.txt").read_text()
     assert "ci" in reason and "#777" in reason
+    assert "красные" in reason
 
 
 def test_test_mode_candidate_unreadable_facts_stop_without_merge(
@@ -11540,8 +11543,93 @@ def test_test_mode_without_recorded_edge_pass_does_not_merge(
     _set_cfg_mode("test")
     ops = _test_mode_ops()
     _fake_wave_adapters(monkeypatch, ops)
+    _fake_approve_node_waves(monkeypatch, ops)  # обход проверки — до утверждения
     state = locked_runner.start(**_waves_kwargs(tmp_path, "r-3c2-noedge", ops))
     assert state.status == "stopped_review"
     assert not any(c[0] == "human_merge" for c in ops.calls)
     reason = (rs.run_dir("r-3c2-noedge") / "stop-reason.txt").read_text()
     assert "edge-вердикт" in reason and "PASS" in reason
+
+
+# --- План 3c-H, Task 4: двойники реестра идентичности для test-веток ----------
+
+
+def test_test_mode_edge_pass_on_other_head_does_not_merge(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    """Edge-вердикт PASS, но записан на чужой голове: раннер не мержит."""
+    _set_cfg_mode("test")
+    ops = _test_mode_ops()
+    _fake_wave_adapters(monkeypatch, ops)
+    _edge_pass(monkeypatch)
+    monkeypatch.setattr(
+        runner.edge_publish,
+        "edge_verdict",
+        lambda head, records: {"head": "b" * 40, "verdict": "PASS", "inputs": {}},
+    )
+    _fake_approve_node_waves(monkeypatch, ops)  # обход проверки — до утверждения
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-3ch-edgehead", ops))
+    assert state.status == "stopped_review"
+    assert not any(c[0] == "human_merge" for c in ops.calls)
+    reason = (rs.run_dir("r-3ch-edgehead") / "stop-reason.txt").read_text()
+    assert "нет записанного edge-вердикта PASS на голове" in reason
+
+
+class _NoRunLock:
+    """`_RUN_LOCK` без значения: шаг candidate вызван вне `advance`."""
+
+    def set(self, _lock: object) -> object:
+        return None
+
+    def reset(self, _token: object) -> None:
+        return None
+
+    def get(self) -> None:
+        return None
+
+
+def test_test_mode_candidate_outside_advance_refuses(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    """`test`: без лока прогона шаг candidate не мержит и не финализирует."""
+    _set_cfg_mode("test")
+    ops = _test_mode_ops()
+    _fake_wave_adapters(monkeypatch, ops)
+    _edge_pass(monkeypatch)
+    _fake_approve_node_waves(monkeypatch, ops)  # обход проверки — до утверждения
+    monkeypatch.setattr(runner, "_RUN_LOCK", _NoRunLock())
+    # TypeError — `rl.require` ниже по пути: обход проверки падает на утверждении
+    with pytest.raises((RuntimeError, TypeError)) as exc:
+        locked_runner.start(**_waves_kwargs(tmp_path, "r-3ch-nolock", ops))
+    assert not any(c[0] == "human_merge" for c in ops.calls)
+    assert "лок прогона не задан" in str(exc.value)
+
+
+def _head_state(mode: str) -> SimpleNamespace:
+    att = {"status": "completed", "finalize_pr": 801, "head": "a" * 40}
+    return SimpleNamespace(mode=mode, ops={"finalize-1": att})
+
+
+def test_attested_head_moved_strict_reads_no_forge(monkeypatch) -> None:
+    """strict: всегда `False` и без вызова форджи (голова «уехала» не читается)."""
+    reads: list[int] = []
+
+    def head(state, ops, pr):
+        reads.append(pr)
+        return "b" * 40
+
+    monkeypatch.setattr(runner.an, "pr_head", head)
+    moved = runner._attested_head_moved(_head_state("strict"), None, "finalize-1", 801)  # type: ignore[arg-type]
+    assert moved is False
+    assert reads == []
+
+
+def test_attested_head_moved_unreadable_head_is_not_moved(monkeypatch) -> None:
+    """`test`: голова не прочитана — не «сдвиг» (переаттестации нет, пауза)."""
+
+    def boom(state, ops, pr):
+        raise RuntimeError("форджа недоступна")
+
+    monkeypatch.setattr(runner.an, "pr_head", boom)
+    moved = runner._attested_head_moved(_head_state("test"), None, "finalize-1", 801)  # type: ignore[arg-type]
+    assert moved is False
