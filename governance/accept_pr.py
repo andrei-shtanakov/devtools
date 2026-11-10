@@ -36,7 +36,6 @@ CLI: ``python -m governance.accept_pr --repo kapelle --pr 59``
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import subprocess
 import time
@@ -486,13 +485,6 @@ def _origin_slug(url: str) -> str | None:
     return f"{match.group(1)}/{match.group(2)}".lower() if match else None
 
 
-def _config_mode() -> str:
-    """Режим конфига: нет файла — `strict`; битый — `ConfigError`."""
-    if not os.path.lexists(df_config.config_path(os.environ)):
-        return "strict"
-    return df_config.load().mode
-
-
 def _target_dir(repo: str, test_mode: bool) -> str | None:
     """Каталог цели: в test — из списка целей (None — не зарегистрирована)."""
     if not test_mode:
@@ -515,7 +507,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--owner", default=None, help="владелец (иначе из origin)")
     args = parser.parse_args(argv)
     try:
-        test_mode = _config_mode() == "test"
+        test_mode = df_config.mode_or_strict() == "test"
         target_dir = _target_dir(args.repo, test_mode)
     except df_config.ConfigError as exc:
         print(f"accept-pr: конфиг DarkFactory: {exc}")

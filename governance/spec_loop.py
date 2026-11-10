@@ -268,7 +268,7 @@ def resolve_repo_entry(
 
 def _user_registration_hint() -> str:
     """В режиме test отказ называет список целей и команду регистрации."""
-    if _config_mode() != "test":
+    if df_config.mode_or_strict() != "test":
         return ""
     return (
         f"; в режиме test цель берётся и из {user_targets.targets_path()} — "
@@ -276,19 +276,9 @@ def _user_registration_hint() -> str:
     )
 
 
-def _config_mode() -> str:
-    """Режим конфига: нет файла — `strict`; `ConfigError` пробрасывается
-    (main печатает «конфиг DarkFactory: …», rc 2).
-
-    Не `author_launch.config_mode`: тот — защищённая граница авторинга."""
-    if not os.path.lexists(df_config.config_path(os.environ)):
-        return "strict"
-    return df_config.load().mode
-
-
 def _user_target(repo: str) -> user_targets.UserTarget | None:
     """Цель списка пользователя; вне режима test список не читается."""
-    if _config_mode() != "test":
+    if df_config.mode_or_strict() != "test":
         return None
     try:
         return user_targets.lookup(repo)
@@ -358,7 +348,7 @@ def _read_manifest() -> str:
     """Манифест флота. В test отсутствие файла — пустой манифест (он там
     необязателен); иная ошибка чтения, как и в strict, — отказ."""
     path = manifest_path()
-    if _config_mode() == "test" and not os.path.lexists(path):
+    if df_config.mode_or_strict() == "test" and not os.path.lexists(path):
         return ""
     return _read_ssot(path, "манифест флота")
 

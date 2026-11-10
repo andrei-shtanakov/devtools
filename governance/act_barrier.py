@@ -447,13 +447,11 @@ def _config_refusal() -> str | None:
     """Причина отказа по режиму конфига DarkFactory или `None` (strict).
 
     Нет файла конфига — strict; битый конфиг и режим `test` — отказ."""
-    if not os.path.lexists(df_config.config_path(os.environ)):
-        return None
     try:
-        cfg = df_config.load()
+        mode = df_config.mode_or_strict()
     except df_config.ConfigError as exc:
         return f"конфиг DarkFactory: {exc}"
-    return TEST_MODE_REFUSAL if cfg.mode == "test" else None
+    return TEST_MODE_REFUSAL if mode == "test" else None
 
 
 def invalidate(

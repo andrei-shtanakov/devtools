@@ -16,7 +16,7 @@ import pytest
 
 from governance import act_settings, df_config, sandbox, secret_dirs
 from governance.df_config import ConfigError
-from tests.df_config_fixture import anchor_test_config
+from tests.df_config_fixture import anchor_test_config, write_config
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -540,6 +540,48 @@ def test_cli_mode_or_strict_reads_mode(tmp_path: Path) -> None:
     cfg.write_text(STRICT, encoding="utf-8")
     done = _cli({"XDG_CONFIG_HOME": str(tmp_path)}, "mode-or-strict")
     assert (done.returncode, done.stdout) == (0, "strict\n"), done.stderr
+
+
+def test_mode_or_strict_no_file(tmp_path: Path) -> None:
+    assert df_config.mode_or_strict({"XDG_CONFIG_HOME": str(tmp_path)}) == "strict"
+
+
+def test_mode_or_strict_reads_test(tmp_path: Path) -> None:
+    env = write_config(tmp_path, mode="test")
+    assert df_config.mode_or_strict(env) == "test"
+
+
+def test_mode_or_strict_dangling_symlink_raises(tmp_path: Path) -> None:
+    cfg = tmp_path / "darkfactory" / "config.toml"
+    cfg.parent.mkdir(parents=True)
+    cfg.symlink_to(tmp_path / "nowhere.toml")
+    with pytest.raises(df_config.ConfigError):
+        df_config.mode_or_strict({"XDG_CONFIG_HOME": str(tmp_path)})
+
+
+def test_mode_or_strict_broken_raises(tmp_path: Path) -> None:
+    cfg = tmp_path / "darkfactory" / "config.toml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text("это не toml [", encoding="utf-8")
+    with pytest.raises(df_config.ConfigError):
+        df_config.mode_or_strict({"XDG_CONFIG_HOME": str(tmp_path)})
+
+
+def test_no_strict_rule_copies() -> None:
+    """Правило «нет файла = strict» живёт только в `df_config.mode_or_strict`.
+
+    `act_status.py` и `policy_rule.py` — другая форма (возвращают конфиг/`None`,
+    а не режим), поэтому им `lexists(df_config.config_path(` разрешён."""
+    root = Path(__file__).resolve().parent.parent
+    allowed = {"act_status.py", "policy_rule.py"}
+    needle = "lexists(df_config.config_path("
+    found = {
+        p.name
+        for pattern in ("governance/*.py", "lite/*.py")
+        for p in root.glob(pattern)
+        if needle in p.read_text(encoding="utf-8")
+    }
+    assert found <= allowed, sorted(found - allowed)
 
 
 def test_test_approver_version_value() -> None:

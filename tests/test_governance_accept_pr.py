@@ -1089,10 +1089,10 @@ def test_strict_accept_unchanged_merges() -> None:
 
 
 def test_main_test_mode_target_from_user_targets(monkeypatch, tmp_path) -> None:
-    from governance import user_targets
+    from governance import df_config, user_targets
 
     target = user_targets.UserTarget("r", tmp_path / "r", "git@github.com:o/r.git")
-    monkeypatch.setattr(accept_pr, "_config_mode", lambda: "test")
+    monkeypatch.setattr(df_config, "mode_or_strict", lambda *a, **k: "test")
     monkeypatch.setattr(user_targets, "lookup", lambda repo: target)
     monkeypatch.setattr(
         accept_pr.subprocess,
