@@ -38,6 +38,8 @@ from governance.stale_adapter import blob_sha1_bytes
 
 LABEL = "human-merge-required"
 APPROVED_REL = "brief-approval/customer-brief.md"
+#: Суффикс ws_id engineer-прогона от customer-прогона.
+ENGINEER_SUFFIX = "-eng"
 
 
 class BriefToolError(RuntimeError):
@@ -331,12 +333,20 @@ def _policy_or_fail(ops, act: brief_provenance.Act) -> str:
     return got.current
 
 
-def _engineer_command(state: rs.RunState, pr: int, path: Path) -> str:
-    return (
-        f"make spec-loop SUBJECT='{state.subject}' REPO={state.repo} ARGS='--need "
-        f"--frame engineer --new-run --ws-id {state.ws_id}-eng --stakeholder "
-        f"<role> --traces-to {path} --approval-pr {pr}'"
-    )
+def engineer_args(state: rs.RunState, pr: int, stakeholder: str) -> list[str]:
+    """argv `spec_loop.main` для engineer-прогона по подписанному брифу."""
+    return [
+        "--subject", state.subject, "--repo", state.repo, "--need",
+        "--frame", "engineer", "--new-run",
+        "--ws-id", f"{state.ws_id}{ENGINEER_SUFFIX}", "--stakeholder", stakeholder,
+        "--traces-to", str(rs.run_dir(state.run_id) / APPROVED_REL),
+        "--approval-pr", str(pr),
+    ]  # fmt: skip
+
+
+def _engineer_command(state: rs.RunState, pr: int) -> str:
+    rest = " ".join(engineer_args(state, pr, "<role>")[4:])
+    return f"make spec-loop SUBJECT='{state.subject}' REPO={state.repo} ARGS='{rest}'"
 
 
 def approve(run_id: str, pr: int, ops) -> Path:
@@ -398,7 +408,7 @@ def approve(run_id: str, pr: int, ops) -> Path:
             )
         _judge_approve(reply, target, act)
         print("подписано; следующий шаг:")
-        print("  " + _engineer_command(state, pr, target))
+        print("  " + _engineer_command(state, pr))
         return target
 
 
