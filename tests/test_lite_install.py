@@ -335,6 +335,38 @@ def test_install_sh_syntax() -> None:
     assert res.returncode == 0
 
 
+def _install_sh_on(tmp_path: Path, system: str) -> subprocess.CompletedProcess[str]:
+    """install.sh с подменённым `uname -s`; git/gh/uv/claude в PATH нет."""
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    uname = stub / "uname"
+    uname.write_text(f"#!/bin/sh\necho {system}\n", encoding="utf-8")
+    uname.chmod(0o755)
+    return subprocess.run(
+        ["/bin/sh", str(ROOT / "install.sh")],
+        env={"PATH": f"{stub}:/bin", "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+def test_install_sh_accepts_macos_and_linux(tmp_path: Path, system: str) -> None:
+    """ОС пропущена — дальше проверка программ, а не отказ по ОС."""
+    res = _install_sh_on(tmp_path, system)
+    assert res.returncode == 1
+    assert "не найдены программы" in res.stderr
+    assert "поддерживается только" not in res.stderr
+
+
+def test_install_sh_refuses_other_os(tmp_path: Path) -> None:
+    res = _install_sh_on(tmp_path, "FreeBSD")
+    assert res.returncode == 1
+    assert "поддерживаются только macOS и Linux" in res.stderr
+    assert "FreeBSD" in res.stderr
+
+
 # --- финальное ревью: I2 и обязательные мелочи ---
 
 

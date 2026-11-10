@@ -41,6 +41,8 @@ def test_doc_has_commands_and_honest_sections() -> None:
         "проверок нет (test)",
         "песочниц",
         "criteria-close",
+        "macOS или Linux",
+        "Linux — только режим",
     ):
         assert needle in text, needle
 

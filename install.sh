@@ -1,11 +1,17 @@
 #!/bin/sh
-# Установка DarkFactory (лёгкий режим test) без sudo: macOS.
+# Установка DarkFactory (лёгкий режим test) без sudo: macOS или Linux.
+# Режим strict (песочница авторинга sandbox-exec, связка ключей) — только
+# macOS; dfl и так работает лишь в режиме test.
 set -eu
 
-if [ "$(uname -s)" != "Darwin" ]; then
-    echo "install.sh: поддерживается только macOS (Darwin)" >&2
-    exit 1
-fi
+os="$(uname -s)"
+case "$os" in
+    Darwin | Linux) ;;
+    *)
+        echo "install.sh: поддерживаются только macOS и Linux (у вас: $os)" >&2
+        exit 1
+        ;;
+esac
 
 missing=""
 for tool in git gh uv claude; do

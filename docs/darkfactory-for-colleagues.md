@@ -1,6 +1,6 @@
 # DarkFactory для коллег
 
-Памятка для разработчика, который ставит DarkFactory на свой Mac и гоняет его
+Памятка для разработчика, который ставит DarkFactory на свой Mac или Linux и гоняет его
 на своём репо. Экосистему знать не нужно.
 
 ## Что получится
@@ -19,7 +19,10 @@
 
 ## Что нужно
 
-- macOS (на другой ОС `install.sh` откажет);
+- macOS или Linux (на другой ОС `install.sh` откажет). Linux — только режим
+  `test` (его и пишет установщик): режим `strict` требует песочницы
+  `sandbox-exec` и связки ключей macOS. Linux пока проверен чтением кода, а не
+  живым прогоном — о шероховатостях сообщайте;
 - `git`, `gh` (залогинен: `gh auth login`), `uv`, `claude` (залогинен);
 - одна учётка GitHub: она и автор, и ревьюер, и человек (см. «Что выключено»);
 - sudo не нужен.
@@ -31,7 +34,7 @@ git clone https://github.com/andrei-shtanakov/devtools ~/darkfactory/devtools \
   && sh ~/darkfactory/devtools/install.sh
 ```
 
-`install.sh` проверяет macOS, наличие `git`, `gh`, `uv`, `claude` и вход в `gh`,
+`install.sh` проверяет ОС (macOS или Linux), наличие `git`, `gh`, `uv`, `claude` и вход в `gh`,
 затем ставит окружение devtools (`uv sync --frozen`) и запускает установщик.
 Установщик клонирует рядом с devtools (в `~/darkfactory/`) закреплённые на
 конкретный коммит репо из `lite/components.toml`:
