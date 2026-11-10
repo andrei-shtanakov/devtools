@@ -38,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     cwd = Path(args.cwd)
     try:
+        _require_test_mode()
         if args.command == "status":
             return status(cwd)
         return run(cwd, args.subject, args.stakeholder)
@@ -46,8 +47,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
 
-def run(cwd: Path, subject: str | None, role: str) -> int:
-    """Один шаг конвейера для репо в `cwd`; код шага или 0/2 самого `dfl`."""
+def _require_test_mode() -> None:
+    """Конфиг обязан быть в режиме test (иначе отказ); печать баннера."""
     cfg = df_config.load()
     if cfg.mode != "test":
         raise DflError(
@@ -55,8 +56,18 @@ def run(cwd: Path, subject: str | None, role: str) -> int:
             " — переустановите install.sh или работайте через make"
         )
     print(df_config.test_banner(cfg))
+
+
+def run(cwd: Path, subject: str | None, role: str) -> int:
+    """Один шаг конвейера для репо в `cwd`; код шага или 0/2 самого `dfl`."""
     repo = user_targets.register(cwd).repo
-    runs = _repo_runs(repo)
+    runs, broken = _repo_runs(repo)
+    if broken:
+        dirs = ", ".join(str(rs.run_dir(b)) for b in broken)
+        raise DflError(
+            f"журнал прогона не читается: {dirs} — по нему не понять, закончен "
+            "ли конвейер; почините или уберите каталог(и) и повторите dfl run"
+        )
     cust = _select_customer(runs, subject)
     if cust is None:
         return spec_loop.main(
@@ -73,17 +84,21 @@ def run(cwd: Path, subject: str | None, role: str) -> int:
     return _brief_step(cust, role)
 
 
-def _repo_runs(repo: str) -> list[rs.RunState]:
-    """Читаемые прогоны репо в порядке `run_id` (битые леджеры пропущены)."""
-    out = []
+def _repo_runs(repo: str) -> tuple[list[rs.RunState], list[str]]:
+    """Прогоны репо в порядке `run_id` и `run_id` нечитаемых журналов.
+
+    Чей нечитаемый журнал — неизвестно, поэтому он возвращается всегда:
+    вызывающий не вправе молча его пропустить (fail closed)."""
+    out, broken = [], []
     for run_id in rs.all_run_ids():
         try:
             state = rs.load(run_id)
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError, KeyError):
+            broken.append(run_id)
             continue
         if state.repo == repo:
             out.append(state)
-    return out
+    return out, broken
 
 
 def _frame(state: rs.RunState) -> str | None:
@@ -96,11 +111,12 @@ def _engineer_of(cust: rs.RunState, runs: list[rs.RunState]) -> rs.RunState | No
 
 
 def _accepted_url(state: rs.RunState) -> str | None:
-    """URL проверенного PR с кодом, если `code-accept` завершён."""
+    """URL проверенного PR с кодом, если `code-accept` завершён с URL."""
     record = state.ops.get("code-accept") or {}
     if record.get("status") != "completed":
         return None
-    return str((record.get("result") or {}).get("url", ""))
+    url = (record.get("result") or {}).get("url")
+    return str(url) if url else None
 
 
 def _finished(cust: rs.RunState, runs: list[rs.RunState]) -> bool:
@@ -194,7 +210,9 @@ def _forge():
 def status(cwd: Path) -> int:
     """Прогоны репо из журнала и следующий шаг; форджа и эффектов нет."""
     repo = _registered_repo(cwd)
-    runs = _repo_runs(repo)
+    runs, broken = _repo_runs(repo)
+    for run_id in broken:
+        print(f"{run_id}  не читается: {rs.run_dir(run_id)}/run.json")
     for state in runs:
         line = f"{state.run_id}  {_frame(state) or '-'}  {state.status}"
         hint = _next_hint(state, runs)

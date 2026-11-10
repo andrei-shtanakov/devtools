@@ -333,3 +333,75 @@ def test_status_unregistered_repo_refused(env: Env, monkeypatch, capsys) -> None
     monkeypatch.setattr(user_targets, "load", lambda: {})
     assert env.run("status") == 2
     assert "dfl run" in capsys.readouterr().err
+
+
+# --- раунд ревью 1 ---
+
+
+def _status_target(env: Env, monkeypatch) -> None:
+    target = env.tmp / "target"
+    monkeypatch.setattr(
+        user_targets,
+        "load",
+        lambda: {REPO: user_targets.UserTarget(REPO, target.resolve(), URL)},
+    )
+
+
+def test_status_refuses_strict_config(env: Env, monkeypatch, capsys) -> None:
+    _status_target(env, monkeypatch)
+    _run("WS-1-a", "WS-1", "customer", "running")
+    write_config(env.tmp / "xdg", mode="strict", **_STRICT_GH_DIRS)
+    assert env.run("status") == 2
+    out, err = capsys.readouterr()
+    assert "только в режиме test" in err and "WS-1-a" not in out
+
+
+def test_code_accept_without_url_is_not_finished(env: Env, capsys) -> None:
+    _run("WS-1-a", "WS-1", "customer", "brief_ready")
+    eng = _run("WS-1-eng-b", "WS-1-eng", "engineer", "running")
+    eng.ops["code-accept"] = {"status": "completed", "result": {}}
+    rs.save(eng)
+    assert env.run("run") == 0
+    assert env.spec_calls == [
+        ["--subject", "тема", "--repo", REPO, "--run-id", "WS-1-eng-b"]
+    ]
+    assert "PR с кодом проверен" not in capsys.readouterr().out
+
+
+def test_approve_failure_stops_before_engineer(env: Env, monkeypatch) -> None:
+    _run("WS-1-a", "WS-1", "customer", "brief_ready")
+    env.forge.branches["brief/WS-1"] = [5]
+    env.forge.states[5] = "MERGED"
+    calls: list[list[str]] = []
+
+    def brief_main(argv: list[str]) -> int:
+        calls.append(list(argv))
+        return 1 if argv[0] == "approve" else 0
+
+    monkeypatch.setattr(bt, "main", brief_main)
+    assert env.run("run") == 1
+    assert [c[0] for c in calls] == ["propose", "approve"]
+    assert not env.spec_calls
+
+
+def _broken(run_id: str) -> None:
+    path = rs.run_dir(run_id) / "run.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json", encoding="utf-8")
+
+
+def test_unreadable_ledger_refuses_run(env: Env, capsys) -> None:
+    _broken("WS-1-a")
+    assert env.run("run", "--subject", "новая") == 2
+    err = capsys.readouterr().err
+    assert "не читается" in err and str(rs.run_dir("WS-1-a")) in err
+    assert _no_effects(env)
+
+
+def test_unreadable_ledger_listed_in_status(env: Env, monkeypatch, capsys) -> None:
+    _status_target(env, monkeypatch)
+    _broken("WS-1-a")
+    _run("WS-2-a", "WS-2", "customer", "running")
+    assert env.run("status") == 0
+    out = capsys.readouterr().out
+    assert "WS-1-a  не читается" in out and "WS-2-a" in out
