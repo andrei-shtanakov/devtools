@@ -30,7 +30,6 @@ EXPECTED_CHAIN = [
     "contracts/discovery-approval/v1/approval.py",
     "contracts/discovery-approval/v1/gate_check.py",
     "contracts/discovery-approval/v1/hashing.py",
-    "contracts/harness-paths/v1/paths.env",
     "df_config.sh",
     "governance/__init__.py",
     "governance/act_admission.py",

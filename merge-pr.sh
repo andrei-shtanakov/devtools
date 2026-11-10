@@ -38,37 +38,8 @@
 #      человеку». `accept-pr` свой такой гард имеет, но он стоит в контуре,
 #      а обвязка объявлена ЕДИНСТВЕННЫМ путём агентского мержа: без этой
 #      проверки второе утверждение отменяло бы первое на ручном вызове.
-#      ВРЕМЕННО (дизайн darkfactory-config §5.8, D9): оператор вправе снять
-#      ТОЛЬКО этот гвард флагом `--authority-override '<причина>'` — тогда
-#      дифф сверяется с харнесс-путями, и любое совпадение — отказ (D10).
-#      Граница доверия — честно: под флагом перечень харнесс-путей читается
-#      из `$script_dir`, то есть защищает лишь тогда, когда merge-pr.sh
-#      запущен из ДОВЕРЕННОГО чекаута, а не из чекаута проверяемого PR (PR,
-#      правящий перечень, правил бы и то, чем его проверяют). Случай
-#      самоссылки закрывает жёсткий пол, вшитый в скрипт и не зависящий от
-#      SSOT: `.github/`, `profiles/` (ядро ADR-ECO-004 I2), сам гвард
-#      (`merge-pr.sh`, `human-merge.sh`) и оба его перечня
-#      (`contracts/harness-paths/`, `contracts/authority-root/`) под флагом
-#      отказываются всегда; перечень без `merge-pr.sh` или
-#      `contracts/harness-paths/` — битый, отказ кодом 2.
-#      Пол не покрывает остальные входы, которые скрипт подключает и
-#      исполняет из `$script_dir` (ssot_env.sh, approval_branches.sh,
-#      contracts/approval-branches/, governance/halt_gate.py, …), и расти до
-#      них не будет: под флагом обвязка требует ДОВЕРЕННЫЙ чекаут —
-#      рабочее дерево `$script_dir` чистое (`git status --porcelain` пуст,
-#      проверка до исполнения стоп-крана) и его HEAD — предок живой верхушки
-#      базы (`merge-base --is-ancestor`; объекта верхушки нет локально —
-#      отказ с просьбой сделать fetch). Верхушка — та же `$live_tip`, что у
-#      compare, поэтому флаг применим лишь к PR в репо самой обвязки (slug
-#      origin `$script_dir`); иначе — отказ кодом 2. Всё это — отказ кодом 2.
-#      Честный остаток: подключённые выше по скрипту файлы
-#      (ssot_env.sh, approval_branches.sh, df_config.sh — последний лишь
-#      определяет функцию; governance/df_config.py исполняется уже ПОСЛЕ
-#      проверки чистоты) исполняются ДО проверки; запуск
-#      обвязки из недоверенного чекаута скомпрометирован независимо от флага,
-#      проверка лишь не даёт флагу им воспользоваться.
 #      Переименования: compare читает и `previous_filename`, так что все
-#      проверки гварда 4 (с флагом и без) видят и старое, и новое имя.
+#      проверки гварда 4 видят и старое, и новое имя.
 # Раньше от автомержа candidate/finalize удерживал draft-статус; его сняли,
 # потому что draft нельзя смержить, а мерж здесь — предмет.
 #
@@ -118,8 +89,6 @@
 #     подменённый шаблон меняет глоб, не исполнив ни строчки чужого кода;
 #   * contracts/authority-root/v1/paths.env — перечень защищённых путей;
 #     он и сам authority-root, так что гвард 4 стережёт его собою;
-#   * contracts/harness-paths/v1/paths.env — перечень харнесс-путей
-#     (под `--authority-override`); он и в authority-root, и в себе самом;
 # Все они перечислены в `_HARNESS_PREFIXES` (SSOT
 # contracts/harness-paths/v1/paths.env, его читает governance/accept_pr.py): PR,
 # который их трогает, до мержа не доходит вовсе — ни ревью, ни мерж
@@ -159,8 +128,7 @@ set -eu
 usage() {
     echo "usage: merge-pr.sh <repo> <pr-number>" \
         "[--squash|--merge|--rebase] [--delete-branch]" \
-        "[--expect-head <sha>] [--expect-base <sha>] [--dry-run]" \
-        "[--authority-override <причина>]" >&2
+        "[--expect-head <sha>] [--expect-base <sha>] [--dry-run]" >&2
     echo "  <repo> — имя каталога репо во флоте (например dispatcher)" >&2
     echo "  стратегия — только из этого списка, дефолт --squash;" >&2
     echo "    свободного passthrough в gh нет по построению" >&2
@@ -170,13 +138,6 @@ usage() {
     echo "  --expect-base — база, ОТ КОТОРОЙ вынесен вердикт; расхождение" >&2
     echo "    с живой верхушкой origin/<base> — отказ (см. шапку скрипта)" >&2
     echo "  --dry-run — показать разрешённую команду мержа, не выполняя" >&2
-    echo "  --authority-override — ВРЕМЕННО (D9), только оператору вручную:" >&2
-    echo "    снять гвард authority-root с названной причиной (журнал и" >&2
-    echo "    комментарий PR). НЕ снимает: харнесс-пути (в т.ч." >&2
-    echo "    scripts/review/) и жёсткий пол (.github/, profiles/," >&2
-    echo "    merge-pr.sh, human-merge.sh, contracts/harness-paths/," >&2
-    echo "    contracts/authority-root/) — отказ кодом 3 (D10); без" >&2
-    echo "    authority-root путей в диффе флаг — отказ кодом 2" >&2
     echo "  --print-globs — показать выведённые формы веток и выйти" >&2
 }
 
@@ -279,7 +240,6 @@ dry_run=0
 print_globs=0
 expect_head=""
 expect_base=""
-authority_override=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --squash|--merge|--rebase)
@@ -297,26 +257,6 @@ $strategy и $1"
             [ -n "$2" ] || die 2 "--expect-base передан пустым — вызывающий \
 собирался пинить базу и не смог; пустая строка не «пина нет»"
             expect_base="$2"; shift 2 ;;
-        --authority-override)
-            # ВРЕМЕННЫЙ флаг работы darkfactory-config (§5.8, D9: последний PR
-            # работы его удаляет). Только оператору вручную: `Ops.merge` и
-            # раннер его не передают. Причина обязательна и не пробелы —
-            # обход гварда обязан быть назван (приём --budget-override
-            # review-pr.sh); причина «-…» отвергается: забытая причина съела
-            # бы следующий флаг.
-            [ $# -ge 2 ] || die 2 "--authority-override требует причину"
-            [ -n "$(printf '%s' "$2" | tr -d '[:space:]')" ] \
-                || die 2 "--authority-override требует непустую причину"
-            case "$2" in
-                -*) die 2 "--authority-override: причина не может начинаться \
-с '-' (похоже на флаг: '$2')" ;;
-                # Причина уходит в тело комментария PR: `<!--` открыл бы там
-                # скрытый блок (подделку маркера) — тот же страж, что у
-                # attest-vendor.sh перед публикацией.
-                *'<!--'*) die 2 "--authority-override: причина не может \
-содержать '<!--'" ;;
-            esac
-            authority_override="$2"; shift 2 ;;
         --dry-run) dry_run=1; shift ;;
         --print-globs) print_globs=1; shift ;;
         -*) usage; exit 2 ;;
@@ -357,29 +297,6 @@ AUTHORITY_PATHS="${AUTHORITY_PATHS:-\
 $script_dir/contracts/authority-root/v1/paths.env}"
 authority_prefixes=$(ssot_key "$AUTHORITY_PATHS" \
     AUTHORITY_ROOT_PREFIXES "SSOT authority-root путей") || exit $?
-# Харнесс-пути — тот же SSOT, что `_HARNESS_PREFIXES` accept_pr; нужны только
-# под --authority-override (гвард 4 без флага — как был).
-HARNESS_PATHS="${HARNESS_PATHS:-\
-$script_dir/contracts/harness-paths/v1/paths.env}"
-harness_prefixes=""
-# Жёсткий пол под --authority-override — вшит, от SSOT НЕ зависит (перечень
-# читается из `$script_dir` и мог прийти из проверяемого PR): ядро
-# ADR-ECO-004 I2 и сам гвард с обоими его перечнями.
-AUTHORITY_OVERRIDE_FLOOR=".github/ profiles/ merge-pr.sh human-merge.sh \
-contracts/harness-paths/ contracts/authority-root/"
-if [ -n "$authority_override" ]; then
-    harness_prefixes=$(ssot_key "$HARNESS_PATHS" \
-        HARNESS_PREFIXES "SSOT харнесс-путей") || exit $?
-    # Перечень, не накрывающий себя и скрипт, — битый: отказ, а не доверие.
-    for _required in merge-pr.sh contracts/harness-paths/; do
-        case " $harness_prefixes " in
-            *" $_required "*) : ;;
-            *) die 2 "в $HARNESS_PATHS нет '$_required' в HARNESS_PREFIXES — \
-перечень харнесс-путей битый (не защищает себя или merge-pr.sh); \
---authority-override не выполняется" ;;
-        esac
-    done
-fi
 
 if [ "$print_globs" -eq 1 ]; then
     # Отладочный зонд для тестов (приём --print-review-cmd из review-pr.sh):
@@ -391,21 +308,8 @@ if [ "$print_globs" -eq 1 ]; then
     exit 0
 fi
 
-# --- Чистота чекаута обвязки под --authority-override ----------------------
-# ДО любого исполнения кода обвязки из этого дерева (`df_cfg` ниже запускает
-# governance/df_config.py): зависит только от `$script_dir`.
-if [ -n "$authority_override" ]; then
-    if ! _dirty=$(git -C "$script_dir" status --porcelain 2>&1); then
-        die 2 "--authority-override: состояние чекаута обвязки $script_dir не \
-прочитано ($_dirty)"
-    fi
-    [ -z "$_dirty" ] || die 2 "--authority-override: рабочее дерево обвязки \
-$script_dir не чистое — недоверенный чекаут, обход не выполняется:
-$_dirty"
-fi
-
 # --- Репо и slug -----------------------------------------------------------
-# Корень флота — `workspace.root` конфига (после проверки чистоты выше).
+# Корень флота — `workspace.root` конфига.
 if [ -z "${FLEET_ROOT:-}" ]; then FLEET_ROOT=$(df_cfg workspace.root) || exit $?; fi
 repo_dir="$FLEET_ROOT/$repo"
 [ -d "$repo_dir" ] || die 2 "репо '$repo' не найдено в $FLEET_ROOT"
@@ -417,23 +321,6 @@ if ! origin_url=$(git -C "$repo_dir" config --get remote.origin.url); then
 fi
 slug=$(github_slug "$origin_url") || exit $?
 
-# --- Доверенный чекаут обвязки под --authority-override (часть 1) -----------
-# Флаг снимает гвард, значит и проверять его обязана доверенная версия
-# скрипта: дерево `$script_dir` чистое и обвязка мержит PR своего же репо
-# (предок-проверка HEAD — ниже, когда прочитана живая верхушка базы). Чистота
-# дерева уже проверена выше (до `df_cfg` и до стоп-крана); здесь — origin.
-# Без флага — не проверяется.
-if [ -n "$authority_override" ]; then
-    if ! _harness_url=$(git -C "$script_dir" config --get remote.origin.url); then
-        die 2 "--authority-override: у чекаута обвязки $script_dir нет origin — \
-доверенность чекаута не установить"
-    fi
-    harness_slug=$(github_slug "$_harness_url") || exit $?
-    [ "$harness_slug" = "$slug" ] || die 2 "--authority-override применим \
-только к PR в репо самой обвязки ($harness_slug), а не в $slug: доверенность \
-чекаута сверяется с верхушкой базы этого репо"
-fi
-
 # --- Профиль ---------------------------------------------------------------
 # Профиль мержа — тот же, что у публикации ревью (review-pr.sh): мерж от
 # ОСНОВНОГО аккаунта записал бы агентский мерж человеческим, обнулив
@@ -442,8 +329,7 @@ fi
 # оборачиваться мержем не от того, от кого сказано.
 # Порядок: env (MERGE_GH_CONFIG_DIR, затем REVIEW_GH_CONFIG_DIR; AGENT_LOGIN,
 # затем REVIEW_LOGIN), иначе конфиг DarkFactory (`accounts.agent*`,
-# df_config.sh); зашитых умолчаний нет, отказ конфига — код 2. Читается
-# здесь, после проверки чистоты чекаута под --authority-override.
+# df_config.sh); зашитых умолчаний нет, отказ конфига — код 2.
 MERGE_GH_CONFIG_DIR="${MERGE_GH_CONFIG_DIR:-${REVIEW_GH_CONFIG_DIR:-}}"
 if [ -z "$MERGE_GH_CONFIG_DIR" ]; then
     MERGE_GH_CONFIG_DIR=$(df_cfg accounts.agent_gh_config_dir) || exit $?
@@ -576,36 +462,6 @@ case "$live_tip" in
     ""|null) die 2 "верхушка базы origin/$base_ref для ${slug}#${pr} не \
 получена ('$live_tip') — мерж не выполняется" ;;
 esac
-# --- Доверенный чекаут обвязки под --authority-override (часть 2) -----------
-# HEAD `$script_dir` обязан быть предком живой верхушки базы: обвязка — версия,
-# уже влитая в базу, а не голова проверяемого PR. База PR выбирается автором
-# PR, поэтому якорь — только ветка по умолчанию репозитория: PR в любую
-# другую ветку (стек, ветка автора) флагом не мержится.
-if [ -n "$authority_override" ]; then
-    if ! _default_branch=$(gh_a api "repos/$slug" --jq '.default_branch' 2>&1); then
-        die 2 "--authority-override: ветка по умолчанию $slug не прочитана \
-($_default_branch) — обход не выполняется"
-    fi
-    case "$_default_branch" in
-        ""|null) die 2 "--authority-override: ветка по умолчанию $slug не \
-получена ('$_default_branch') — обход не выполняется" ;;
-    esac
-    [ "$base_ref" = "$_default_branch" ] || die 2 "--authority-override: база \
-PR '$base_ref' — не ветка по умолчанию '$_default_branch'; обход только для PR \
-в ветку по умолчанию"
-    if ! git -C "$script_dir" cat-file -e "$live_tip^{commit}" 2>/dev/null; then
-        die 2 "--authority-override: верхушки базы $live_tip нет в чекауте \
-обвязки $script_dir — сделайте git fetch и повторите"
-    fi
-    if ! _harness_head=$(git -C "$script_dir" rev-parse HEAD 2>&1); then
-        die 2 "--authority-override: HEAD чекаута обвязки не прочитан \
-($_harness_head)"
-    fi
-    git -C "$script_dir" merge-base --is-ancestor "$_harness_head" "$live_tip" \
-        || die 2 "--authority-override: HEAD обвязки $_harness_head не предок \
-верхушки базы $live_tip — чекаут не доверенный (не влитая версия), обход не \
-выполняется"
-fi
 # Голова обязана быть похожа на sha: мержим ПРОВЕРЕННЫЙ oid, и подсунуть
 # в --match-head-commit неразобранный мусор значило бы проверить не то.
 case "$head_oid" in
@@ -817,51 +673,16 @@ set -f
 set -- $compare_files
 set +f
 IFS="$_saved_ifs"
-# Под --authority-override (§5.8): сначала харнесс-пути по ВСЕМУ диффу —
-# флаг их не снимает (D10), иначе прямой вызов с флагом обошёл бы гвард,
-# который сегодня держит только `accept-pr`. Затем authority-root совпадения
-# не отказывают, а собираются: они названы в журнале и комментарии PR.
-overridden=""
-for _file in "$@"; do
-    [ -n "$authority_override" ] || break
-    for _prefix in $AUTHORITY_OVERRIDE_FLOOR; do
-        case "$_file" in
-            "$_prefix"*)
-                die 3 "PR ${slug}#${pr}: дифф трогает путь жёсткого пола \
-'$_file' (ядро ADR-ECO-004 I2 либо сам гвард) — --authority-override его не \
-снимает: такие PR мержит владелец (D10)." ;;
-        esac
-    done
-    for _prefix in $harness_prefixes; do
-        case "$_file" in
-            "$_prefix"*)
-                die 3 "PR ${slug}#${pr}: дифф трогает харнесс-путь '$_file' — \
---authority-override его не снимает: такие PR мержит владелец (D10)." ;;
-        esac
-    done
-done
 for _file in "$@"; do
     for _prefix in $authority_prefixes; do
         case "$_file" in
             "$_prefix"*)
-                [ -n "$authority_override" ] || die 3 "PR ${slug}#${pr}: \
-дифф трогает authority-root путь \
+                die 3 "PR ${slug}#${pr}: дифф трогает authority-root путь \
 '$_file' (ADR-ECO-004 I2) — такие изменения мержит только человек, \
-независимо от зелени проверок и вердикта ревью."
-                overridden="$overridden $_file"
-                break ;;
+независимо от зелени проверок и вердикта ревью." ;;
         esac
     done
 done
-if [ -n "$authority_override" ] && [ -z "$overridden" ]; then
-    die 2 "PR ${slug}#${pr}: --authority-override задан, но authority-root \
-путей в диффе нет — флаг не нужен; уберите его (обход без предмета не \
-выполняется и не записывается)"
-fi
-if [ -n "$authority_override" ]; then
-    echo "ОБХОД гварда 4 (--authority-override, D9): причина: \
-$authority_override; authority-root пути:$overridden" >&2
-fi
 
 # --- Пины вызывающего: голова и база ---------------------------------------
 # Вызывающий, который уже вынес вердикт (ревью, гард путей), знает, ОТ ЧЕГО
@@ -962,18 +783,6 @@ if [ "$dry_run" -eq 1 ]; then
     echo "гварды пройдены: ветка '$head_ref', голова $head_oid, \
 $head_note, $base_note, от $login"
     exit 0
-fi
-# След обхода — комментарием в PR ДО мержа: обход без следа не выполняется
-# (не записан — мержа нет). Тем же gh_a, что и мерж.
-if [ -n "$authority_override" ]; then
-    _override_body="merge-pr.sh: гвард authority-root снят оператором \
-(--authority-override, временно, D9). Причина: $authority_override. \
-Пути:$overridden. Голова: $head_oid."
-    if ! comment_err=$(gh_a pr comment "$pr" --repo "$slug" \
-        --body "$_override_body" 2>&1); then
-        die 2 "PR ${slug}#${pr}: комментарий об обходе не записан \
-($comment_err) — обход без следа не выполняется, мерж не выполняется"
-    fi
 fi
 if ! merge_err=$(gh_a "$@" 2>&1); then
     echo "$merge_err" >&2

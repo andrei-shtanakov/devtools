@@ -58,9 +58,8 @@ from governance.review_verdict import ReviewVerdict, parse_marker
 # Харнесс-пути — входы обвязки ревью и мержа, исполняемые или читаемые из
 # дерева проверяемого PR: PR, который их трогает, не ревьюится агентом вовсе
 # (гард по локальному диффу head0). Перечень и пояснения к каждому входу —
-# в SSOT `contracts/harness-paths/v1/paths.env`: его же читает `merge-pr.sh`
-# под `--authority-override` (дизайн darkfactory-config §5.8, D10), и второе
-# определение в shell разошлось бы с кортежем молча.
+# в SSOT `contracts/harness-paths/v1/paths.env` (дизайн darkfactory-config
+# §5.8, D10); его читает этот модуль и сверяет `tests/harness_trust.py`.
 #
 # Читается ПРИ ИМПОРТЕ и намеренно: модуль импортирован до материализации
 # head PR, а для PR в сам devtools материализуется ровно это дерево — ленивое

@@ -892,9 +892,8 @@ def test_root_review_pr_sh_is_harness_too(capsys) -> None:
 def test_harness_prefixes_from_ssot() -> None:
     """Перечень харнесс-путей — SSOT `contracts/harness-paths/v1/paths.env`.
 
-    Его же читает `merge-pr.sh` под `--authority-override` (дизайн
-    darkfactory-config §5.8, D10): второе определение в shell разошлось бы с
-    кортежем молча. Атрибут `_HARNESS_PREFIXES` сохранён — его читает
+    SSOT харнесс-путей читает `accept_pr` (дизайн darkfactory-config §5.8,
+    D10). Атрибут `_HARNESS_PREFIXES` сохранён — его читает
     `tests/harness_trust.py`.
     """
     from pathlib import Path
