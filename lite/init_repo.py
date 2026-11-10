@@ -20,7 +20,7 @@ from lite.install import Runner
 
 INIT_BRANCH = "darkfactory/init-repo"
 COMMIT_MESSAGE = "DarkFactory: подготовка репо (dfl init-repo)"
-README_URL = "https://github.com/andrei-shtanakov/devtools/blob/master/README.md"
+COLLEAGUE_DOC = "docs/darkfactory-for-colleagues.md"
 LABEL_COLOR = "b60205"
 LABEL_DESCRIPTION = "PR мержит человек, не агент"
 _SPEC_RUNNER = (
@@ -96,13 +96,14 @@ def _rules_refusal(slug: str, branch: str, gh: Gh) -> str | None:
         pages = _json_values(done.stdout or "")
         rules = [r for page in pages for r in page]  # type: ignore[union-attr]
         for rule in rules:
-            count = (rule.get("parameters") or {}).get(
-                "required_approving_review_count", 0
-            )
-            if rule.get("type") == "pull_request" and count > 0:
+            params = rule.get("parameters") or {}
+            count = params.get("required_approving_review_count", 0)
+            owners = bool(params.get("require_code_owner_review"))
+            if rule.get("type") == "pull_request" and (count > 0 or owners):
                 return (
                     f"ruleset ветки {branch} содержит правило pull_request "
-                    f"(обязательных ревью: {count}); dfl чужую защиту не меняет — "
+                    f"(обязательных ревью: {count}, ревью владельцев кода: "
+                    f"{owners}); dfl чужую защиту не меняет — "
                     "снимите требование ревью сами или смержите PR вручную позже"
                 )
     except (ValueError, TypeError, AttributeError) as exc:
@@ -123,14 +124,15 @@ def _protection_refusal(slug: str, branch: str, gh: Gh) -> str | None:
         return _unread("защита ветки", done)
     try:
         body = json.loads(done.stdout or "{}")
-        count = (body.get("required_pull_request_reviews") or {}).get(
-            "required_approving_review_count", 0
-        )
+        reviews = body.get("required_pull_request_reviews") or {}
+        count = reviews.get("required_approving_review_count", 0)
+        owners = bool(reviews.get("require_code_owner_reviews"))
     except (ValueError, TypeError, AttributeError) as exc:
         return _unread("защита ветки: ответ не разобран", _fake(exc))
-    if count > 0:
+    if count > 0 or owners:
         return (
-            f"защита ветки {branch} требует ревью (обязательных: {count}); "
+            f"защита ветки {branch} требует ревью (обязательных: {count}, "
+            f"ревью владельцев кода: {owners}); "
             "dfl чужую защиту не меняет — снимите требование сами"
         )
     return None
@@ -190,15 +192,54 @@ def _preflight(run: Runner, repo: Path) -> tuple[str, str]:
         raise InitError(f"{exc} — нужен origin на GitHub") from exc
 
 
+def _parse(done: subprocess.CompletedProcess, what: str) -> object:
+    """JSON ответа `gh`; неразобранный ответ — отказ, а не traceback."""
+    try:
+        return json.loads(done.stdout or "[]")
+    except ValueError as exc:
+        raise InitError(
+            f"ответ gh ({what}) не разобран: {exc} — повторите dfl init-repo"
+        ) from exc
+
+
+def _gh_login(gh: Gh) -> str:
+    done = gh(["api", "user", "-q", ".login"])
+    login = (done.stdout or "").strip()
+    if done.returncode != 0 or not login:
+        raise InitError(
+            "не удалось узнать вашу учётку GitHub (gh api user) — "
+            "проверьте gh auth status и повторите"
+        )
+    return login
+
+
+def _is_mine(pr: dict, login: str) -> bool:
+    author = pr.get("author") or {}
+    return pr.get("isCrossRepository") is False and author.get("login") == login
+
+
 def _open_pr_url(slug: str, gh: Gh) -> str | None:
+    """URL своего открытого PR из `INIT_BRANCH`; чужой PR с этой веткой — отказ."""
     done = gh(
         ["pr", "list", "--repo", slug, "--head", INIT_BRANCH, "--state", "open",
-         "--json", "url"]
+         "--json", "url,isCrossRepository,author,headRepositoryOwner"]
     )  # fmt: skip
     if done.returncode != 0:
         raise InitError(_unread("список PR", done).replace("правила ветки", "PR"))
-    prs = json.loads(done.stdout or "[]")
-    return str(prs[0]["url"]) if prs else None
+    prs = _parse(done, "pr list")
+    if not isinstance(prs, list):
+        raise InitError("ответ gh (pr list) не список — повторите dfl init-repo")
+    if not prs:
+        return None
+    login = _gh_login(gh)
+    foreign = [str(p.get("url")) for p in prs if not _is_mine(p, login)]
+    if foreign:
+        raise InitError(
+            f"открытые PR с веткой {INIT_BRANCH} не ваши: {', '.join(foreign)} — "
+            "это не PR подготовки (форк или чужой автор); проверьте их, "
+            "закройте и повторите dfl init-repo"
+        )
+    return str(prs[0]["url"])
 
 
 def _copy_files(repo: Path, devtools: Path) -> None:
@@ -209,45 +250,79 @@ def _copy_files(repo: Path, devtools: Path) -> None:
         dst.chmod(0o755 if src.stat().st_mode & 0o111 else 0o644)
 
 
-def _pr_body() -> str:
+def _doc_link(run: Runner, devtools: Path) -> str:
+    """Ссылка на памятку коллеги по origin devtools; без origin — путь в репо."""
+    done = run(
+        ["git", "config", "--get", "remote.origin.url"],
+        cwd=devtools, capture_output=True, text=True, check=False,
+    )  # fmt: skip
+    try:
+        slug = user_targets.slug_from_url((done.stdout or "").strip())
+    except user_targets.TargetsError:
+        return f"{COLLEAGUE_DOC} в репо devtools"
+    return f"https://github.com/{slug}/blob/master/{COLLEAGUE_DOC}"
+
+
+def _pr_body(link: str) -> str:
     files = "\n".join(f"- `{dst}`" for _, dst in TEMPLATE_FILES)
     return (
         "Подготовка репо к конвейеру DarkFactory (`dfl init-repo`).\n\n"
         f"Добавляемые файлы:\n{files}\n\n"
         "Этот PR мержите вы — агент его не мержит.\n"
-        f"Дальше: {README_URL}\n"
+        f"Дальше: {link}\n"
     )
 
 
-def _ensure_label(slug: str, gh: Gh) -> None:
-    done = gh(["label", "list", "--repo", slug, "--limit", "200", "--json", "name"])
+def _label_exists(slug: str, gh: Gh) -> bool:
+    done = gh(
+        ["label", "list", "--repo", slug, "--search", LABEL, "--limit", "100",
+         "--json", "name"]
+    )  # fmt: skip
     if done.returncode != 0:
         raise InitError(_unread("метки", done).replace("правила ветки", "метки"))
-    if LABEL in {item["name"] for item in json.loads(done.stdout or "[]")}:
+    items = _parse(done, "label list")
+    if not isinstance(items, list):
+        raise InitError("ответ gh (label list) не список — повторите dfl init-repo")
+    return LABEL in {i.get("name") for i in items if isinstance(i, dict)}
+
+
+def _ensure_label(slug: str, gh: Gh) -> None:
+    """Метка есть в репо (создать, если нет); существующая не трогается."""
+    if _label_exists(slug, gh):
         return
     created = gh(
         ["label", "create", LABEL, "--repo", slug, "--color", LABEL_COLOR,
          "--description", LABEL_DESCRIPTION]
     )  # fmt: skip
-    if created.returncode != 0:
+    text = f"{created.stderr}\n{created.stdout}"
+    if created.returncode != 0 and "already exists" not in text:
         raise InitError(f"метка {LABEL} не создана: {created.stderr.strip()}")
 
 
-def _open_pr(slug: str, base: str, gh: Gh) -> str:
+def _label_pr(slug: str, url: str, gh: Gh) -> None:
+    """Метка в репо и на PR подготовки; идемпотентно, на каждом запуске."""
+    _ensure_label(slug, gh)
+    done = gh(["pr", "edit", url, "--repo", slug, "--add-label", LABEL])
+    if done.returncode != 0:
+        raise InitError(
+            f"метка не поставлена на {url}: {done.stderr.strip()} — "
+            "повторите dfl init-repo"
+        )
+
+
+def _open_pr(slug: str, base: str, gh: Gh, link: str) -> str:
     done = gh(
         ["pr", "create", "--repo", slug, "--base", base, "--head", INIT_BRANCH,
-         "--title", COMMIT_MESSAGE, "--body", _pr_body()]
+         "--title", COMMIT_MESSAGE, "--body", _pr_body(link)]
     )  # fmt: skip
     if done.returncode != 0:
         raise InitError(
             f"PR не создан: {(done.stderr or '').strip()} — ветка {INIT_BRANCH} "
-            "уже на origin; создайте PR вручную"
+            "уже на origin; создайте PR вручную или удалите ветки "
+            f"(git branch -D {INIT_BRANCH}; git push origin --delete {INIT_BRANCH})"
         )
     url = (done.stdout or "").strip()
-    _ensure_label(slug, gh)
-    labeled = gh(["pr", "edit", url, "--repo", slug, "--add-label", LABEL])
-    if labeled.returncode != 0:
-        raise InitError(f"метка не поставлена на {url}: {labeled.stderr.strip()}")
+    _label_pr(slug, url, gh)
     return url
 
 
@@ -260,16 +335,26 @@ def _publish(
         _git(run, repo, "add", "--", *(dst for _, dst in TEMPLATE_FILES))
         _git(run, repo, "commit", "-m", COMMIT_MESSAGE)
         _git(run, repo, "push", "-u", "origin", INIT_BRANCH)
-        return _open_pr(slug, base, gh)
+        return _open_pr(slug, base, gh, _doc_link(run, devtools))
     finally:
         _git(run, repo, "switch", base)
 
 
-def _plan(repo: Path, slug: str, base: str, gh: Gh) -> str | None:
+def _leftover_check(run: Runner, repo: Path) -> None:
+    if _git(run, repo, "branch", "--list", INIT_BRANCH):
+        raise InitError(
+            f"локальная ветка {INIT_BRANCH} осталась от прерванного запуска, а PR "
+            f"нет — удалите: git branch -D {INIT_BRANCH} (и, если она уже на origin, "
+            f"git push origin --delete {INIT_BRANCH}), затем повторите"
+        )
+
+
+def _plan(run: Runner, repo: Path, slug: str, base: str, gh: Gh) -> str | None:
     """URL уже открытого PR; иначе `None`. Отказ — `InitError`."""
     url = _open_pr_url(slug, gh)
     if url is not None:
         return url
+    _leftover_check(run, repo)
     refusal = review_rules_refusal(slug, base, gh)
     if refusal is not None:
         raise InitError(refusal)
@@ -287,8 +372,9 @@ def init_repo(repo: Path, devtools: Path, gh: Gh, run: Runner = subprocess.run) 
     """Открыть PR с шаблонами DarkFactory в `repo`; 0, либо 2 с причиной."""
     try:
         slug, base = _preflight(run, repo)
-        existing = _plan(repo, slug, base, gh)
+        existing = _plan(run, repo, slug, base, gh)
         if existing is not None:
+            _label_pr(slug, existing, gh)
             print(f"PR подготовки уже открыт: {existing} — смержите его сами")
             return 0
         url = _publish(repo, devtools, slug, base, gh, run)

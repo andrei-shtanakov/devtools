@@ -42,6 +42,7 @@ class FakeGh:
         self.calls: list[list[str]] = []
         self.answers: dict[tuple[str, str], subprocess.CompletedProcess] = {
             ("pr", "list"): _done("[]"),
+            ("api", "user"): _done("alice\n"),
             ("api", "--paginate"): _done("[]"),
             ("api", f"repos/{SLUG}/branches/main/protection"): _done(
                 '{"message":"Branch not protected"}',
@@ -60,6 +61,15 @@ class FakeGh:
 
     def called(self, *prefix: str) -> list[list[str]]:
         return [c for c in self.calls if c[: len(prefix)] == list(prefix)]
+
+
+def _pr(author: str = "alice", cross: bool = False, url: str = PR_URL) -> dict:
+    return {
+        "url": url,
+        "isCrossRepository": cross,
+        "author": {"login": author},
+        "headRepositoryOwner": {"login": author},
+    }
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -226,7 +236,7 @@ def test_label_kept_when_present(work: Path) -> None:
 
 def test_existing_init_pr_is_reported(work: Path, capsys) -> None:
     gh = FakeGh()
-    gh.answers[("pr", "list")] = _done(json.dumps([{"url": PR_URL}]))
+    gh.answers[("pr", "list")] = _done(json.dumps([_pr()]))
     assert ir.init_repo(work, DEVTOOLS, gh) == 0
     assert PR_URL in capsys.readouterr().out
     assert gh.called("pr", "create") == []
@@ -316,3 +326,121 @@ def test_dfl_init_repo_subcommand(
     monkeypatch.setattr(dfl, "init_repo", fake)
     assert dfl.main(["--cwd", str(tmp_path), "init-repo"]) == 0
     assert seen == [tmp_path]
+
+
+# --- fix round 1 --------------------------------------------------------
+
+
+def test_existing_pr_run_ensures_label(work: Path) -> None:
+    gh = FakeGh()
+    gh.answers[("pr", "list")] = _done(json.dumps([_pr()]))
+    assert ir.init_repo(work, DEVTOOLS, gh) == 0
+    assert [c[2] for c in gh.called("label", "create")] == [bt.LABEL]
+    assert gh.called("pr", "edit")[0][-1] == bt.LABEL
+
+
+def test_label_failure_then_rerun_labels(work: Path) -> None:
+    gh = FakeGh()
+    gh.answers[("pr", "edit")] = _done("", "boom", 1)
+    assert ir.init_repo(work, DEVTOOLS, gh) == 2
+    gh.answers[("pr", "list")] = _done(json.dumps([_pr()]))
+    gh.answers[("pr", "edit")] = _done()
+    assert ir.init_repo(work, DEVTOOLS, gh) == 0
+    assert len(gh.called("pr", "edit")) == 2
+
+
+def test_leftover_branch_refused_with_cleanup(work: Path, capsys) -> None:
+    gh = FakeGh()
+    gh.answers[("pr", "create")] = _done("", "HTTP 500", 1)
+    assert ir.init_repo(work, DEVTOOLS, gh) == 2
+    assert _git(work, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+    capsys.readouterr()
+    assert ir.init_repo(work, DEVTOOLS, FakeGh()) == 2
+    err = capsys.readouterr().err
+    assert f"git branch -D {ir.INIT_BRANCH}" in err
+    assert f"git push origin --delete {ir.INIT_BRANCH}" in err
+
+
+def test_fork_pr_refused(work: Path, capsys) -> None:
+    gh = FakeGh()
+    fork = _pr(author="alice", cross=True, url="https://x/fork/1")
+    gh.answers[("pr", "list")] = _done(json.dumps([fork]))
+    assert ir.init_repo(work, DEVTOOLS, gh) == 2
+    err = capsys.readouterr().err
+    assert "https://x/fork/1" in err and "не ваши" in err
+    assert gh.called("pr", "edit") == []
+
+
+def test_other_author_pr_refused(work: Path, capsys) -> None:
+    gh = FakeGh()
+    gh.answers[("pr", "list")] = _done(json.dumps([_pr(author="mallory")]))
+    assert ir.init_repo(work, DEVTOOLS, gh) == 2
+    assert "не ваши" in capsys.readouterr().err
+    assert gh.called("pr", "create") == []
+
+
+def test_own_pr_accepted(work: Path, capsys) -> None:
+    gh = FakeGh()
+    gh.answers[("pr", "list")] = _done(json.dumps([_pr()]))
+    assert ir.init_repo(work, DEVTOOLS, gh) == 0
+    assert PR_URL in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("key", [("pr", "list"), ("label", "list")])
+def test_garbage_json_is_refusal_not_traceback(work: Path, key, capsys) -> None:
+    gh = FakeGh()
+    gh.answers[key] = _done("<html>nope")
+    assert ir.init_repo(work, DEVTOOLS, gh) == 2
+    assert "не разобран" in capsys.readouterr().err
+
+
+def test_label_exists_beyond_search_window(work: Path) -> None:
+    gh = FakeGh()
+    gh.answers[("label", "list")] = _done(json.dumps([{"name": "other"}]))
+    gh.answers[("label", "create")] = _done("", "label already exists", 1)
+    assert ir.init_repo(work, DEVTOOLS, gh) == 0
+    assert gh.called("pr", "edit")
+
+
+def test_label_search_is_exact_match(work: Path) -> None:
+    gh = FakeGh()
+    gh.answers[("label", "list")] = _done(json.dumps([{"name": bt.LABEL + "-x"}]))
+    ir.init_repo(work, DEVTOOLS, gh)
+    assert gh.called("label", "create")
+    assert "--search" in gh.called("label", "list")[0]
+
+
+def test_ruleset_code_owner_review_refused() -> None:
+    gh = FakeGh()
+    rule = [
+        {
+            "type": "pull_request",
+            "parameters": {
+                "required_approving_review_count": 0,
+                "require_code_owner_review": True,
+            },
+        }
+    ]
+    gh.answers[("api", "--paginate")] = _done(json.dumps(rule))
+    assert ir.review_rules_refusal(SLUG, "main", gh) is not None
+
+
+def test_protection_code_owner_review_refused() -> None:
+    gh = FakeGh()
+    body = {
+        "required_pull_request_reviews": {
+            "required_approving_review_count": 0,
+            "require_code_owner_reviews": True,
+        }
+    }
+    gh.answers[("api", f"repos/{SLUG}/branches/main/protection")] = _done(
+        json.dumps(body)
+    )
+    assert ir.review_rules_refusal(SLUG, "main", gh) is not None
+
+
+def test_pr_body_links_colleague_doc(work: Path) -> None:
+    gh = FakeGh()
+    ir.init_repo(work, DEVTOOLS, gh)
+    create = gh.called("pr", "create")[0]
+    assert "docs/darkfactory-for-colleagues.md" in create[create.index("--body") + 1]
