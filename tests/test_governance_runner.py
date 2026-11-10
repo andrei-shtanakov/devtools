@@ -11461,9 +11461,10 @@ def test_test_mode_candidate_waits_checks_before_merge(
 ) -> None:
     _set_cfg_mode("test")
     ops = _test_mode_ops(candidate_rollup=[{"name": "ci", "conclusion": "FAILURE"}])
-    _fake_approve_node_waves(monkeypatch, ops)  # обход проверки — до утверждения
+    calls = _fake_approve_node_waves(monkeypatch, ops)  # обход — до утверждения
     state = _refused_wave1(tmp_path, monkeypatch, ops, "r-3c3-red")
     assert state.status == "stopped_merge_refused"
+    assert calls == []
     assert not any(c[0] == "human_merge" for c in ops.calls)
     reason = (rs.run_dir("r-3c3-red") / "stop-reason.txt").read_text()
     assert "ci" in reason and "#777" in reason
@@ -11543,9 +11544,10 @@ def test_test_mode_without_recorded_edge_pass_does_not_merge(
     _set_cfg_mode("test")
     ops = _test_mode_ops()
     _fake_wave_adapters(monkeypatch, ops)
-    _fake_approve_node_waves(monkeypatch, ops)  # обход проверки — до утверждения
+    calls = _fake_approve_node_waves(monkeypatch, ops)  # обход — до утверждения
     state = locked_runner.start(**_waves_kwargs(tmp_path, "r-3c2-noedge", ops))
     assert state.status == "stopped_review"
+    assert calls == []
     assert not any(c[0] == "human_merge" for c in ops.calls)
     reason = (rs.run_dir("r-3c2-noedge") / "stop-reason.txt").read_text()
     assert "edge-вердикт" in reason and "PASS" in reason
@@ -11567,9 +11569,10 @@ def test_test_mode_edge_pass_on_other_head_does_not_merge(
         "edge_verdict",
         lambda head, records: {"head": "b" * 40, "verdict": "PASS", "inputs": {}},
     )
-    _fake_approve_node_waves(monkeypatch, ops)  # обход проверки — до утверждения
+    calls = _fake_approve_node_waves(monkeypatch, ops)  # обход — до утверждения
     state = locked_runner.start(**_waves_kwargs(tmp_path, "r-3ch-edgehead", ops))
     assert state.status == "stopped_review"
+    assert calls == []
     assert not any(c[0] == "human_merge" for c in ops.calls)
     reason = (rs.run_dir("r-3ch-edgehead") / "stop-reason.txt").read_text()
     assert "нет записанного edge-вердикта PASS на голове" in reason
@@ -11631,5 +11634,64 @@ def test_attested_head_moved_unreadable_head_is_not_moved(monkeypatch) -> None:
         raise RuntimeError("форджа недоступна")
 
     monkeypatch.setattr(runner.an, "pr_head", boom)
+    moved = runner._attested_head_moved(_head_state("test"), None, "finalize-1", 801)  # type: ignore[arg-type]
+    assert moved is False
+
+
+def _resume_with_edge_record(
+    tmp_path: Path, monkeypatch, run_id: str, *, head: object, verdict: object
+) -> tuple[Any, list, FakeOps]:
+    """`test`: мерж candidate отказан; журнал правится (голова заявки, edge-вердикт
+    candidate), затем resume повторяет автомерж над этой записью."""
+    _set_cfg_mode("test")
+    ops = _test_mode_ops(human_merge_code=3)
+    calls = _fake_approve_node_waves(monkeypatch, ops)  # обход — до утверждения
+    state = _refused_wave1(tmp_path, monkeypatch, ops, run_id)
+    request = state.ops["candidate-1"]["request"]
+    state.ops[request]["head_sha"] = head
+    if verdict is None:
+        state.ops["candidate-1"].pop("edge_verdict", None)
+    else:
+        state.ops["candidate-1"]["edge_verdict"] = verdict
+    rs.save(state)
+    ops.human_merge_code = 0
+    return locked_runner.resume(run_id, ops), calls, ops
+
+
+def test_test_mode_edge_pass_without_request_head_does_not_merge(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    """Голова заявки не записана: PASS «на голове None» мержем не считается."""
+    resumed, calls, ops = _resume_with_edge_record(
+        tmp_path,
+        monkeypatch,
+        "r-3ch-nohead",
+        head=None,
+        verdict={"verdict": "PASS", "head": None, "inputs": {}},
+    )
+    assert resumed.status == "stopped_review"
+    assert len([c for c in ops.calls if c[0] == "human_merge"]) == 1, "только отказ"
+    assert calls == []
+    reason = (rs.run_dir("r-3ch-nohead") / "stop-reason.txt").read_text()
+    assert "нет записанного edge-вердикта PASS на голове None" in reason
+
+
+def test_test_mode_unrecorded_edge_verdict_does_not_merge(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    """Операция candidate без `edge_verdict` (журнал до 3c): отказ, а не мерж."""
+    resumed, calls, ops = _resume_with_edge_record(
+        tmp_path, monkeypatch, "r-3ch-noverdict", head=WAVE_HEAD, verdict=None
+    )
+    assert resumed.status == "stopped_review"
+    assert len([c for c in ops.calls if c[0] == "human_merge"]) == 1, "только отказ"
+    assert calls == []
+    reason = (rs.run_dir("r-3ch-noverdict") / "stop-reason.txt").read_text()
+    assert "нет записанного edge-вердикта PASS" in reason
+
+
+def test_attested_head_moved_absent_head_is_not_moved(monkeypatch) -> None:
+    """`test`: `pr_head` → None — не «сдвиг» (переаттестации нет, пауза)."""
+    monkeypatch.setattr(runner.an, "pr_head", lambda state, ops, pr: None)
     moved = runner._attested_head_moved(_head_state("test"), None, "finalize-1", 801)  # type: ignore[arg-type]
     assert moved is False

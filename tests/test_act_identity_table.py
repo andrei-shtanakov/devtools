@@ -221,8 +221,12 @@ MODIFIED_EXISTING = {
         "exit_nonzero",
         "head_moved",
     ),
+    # `edge_unrecorded`: голый обход падает `AttributeError` (fail-closed без имени);
+    # мутация — «нет записи ≡ PASS на голове», двойник падает на утверждении
     "runner._auto_merge_candidate": (
+        "edge_unrecorded",
         "edge_pass",
+        "edge_head_unset",
         "edge_head",
         "facts_unresolved",
         "checks_refusal",
@@ -231,7 +235,12 @@ MODIFIED_EXISTING = {
     # `attested is None` — стоп уже записан `_finalize_head` (место суждения ниже)
     "runner._attest_finalize": ("review_exit",),
     "runner._finalize_head": ("head_unresolved",),
-    "runner._attested_head_moved": ("strict_no_forge", "head_unread", "head_moved"),
+    "runner._attested_head_moved": (
+        "strict_no_forge",
+        "head_unread",
+        "head_none",
+        "head_moved",
+    ),
     "runner._actor_skip": "3c-2: называет пропуск `ACTOR_SKIP_TEST` полем `actor_skip`; решение — `finalize_merge_policy`; не суждение",
     "edge_check/publish.evidence_dir": "каталог evidence — из `ws_id` через `act_surface.evidence_dir`, не из `bundle_dir` (df 3a); не суждение",
 }
@@ -4224,6 +4233,24 @@ JUDGMENT = {
             '"edge-вердикт"',
         ),
     ),
+    "runner._auto_merge_candidate#edge_unrecorded": (
+        r(
+            "edge_unrecorded",
+            "runner._auto_merge_candidate",
+            "not isinstance(verdict, dict)",
+            f"{RN}::test_test_mode_unrecorded_edge_verdict_does_not_merge",
+            '"нет записанного edge-вердикта PASS"',
+        ),
+    ),
+    "runner._auto_merge_candidate#edge_head_unset": (
+        r(
+            "edge_head_unset",
+            "runner._auto_merge_candidate",
+            "or not head",
+            f"{RN}::test_test_mode_edge_pass_without_request_head_does_not_merge",
+            '"нет записанного edge-вердикта PASS на голове None"',
+        ),
+    ),
     "runner._auto_merge_candidate#edge_head": (
         r(
             "edge_head",
@@ -4293,6 +4320,15 @@ JUDGMENT = {
             "runner._attested_head_moved",
             "except RuntimeError:",
             f"{RN}::test_attested_head_moved_unreadable_head_is_not_moved",
+            "is False",
+        ),
+    ),
+    "runner._attested_head_moved#head_none": (
+        r(
+            "head_none",
+            "runner._attested_head_moved",
+            "head is not None and",
+            f"{RN}::test_attested_head_moved_absent_head_is_not_moved",
             "is False",
         ),
     ),
