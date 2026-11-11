@@ -4497,6 +4497,79 @@ def test_gate_prospective_pins_limited_to_wave_scope(
     assert state.ops["gate-candidate-1"]["status"] == "completed"
 
 
+def _real_candidate_gate(
+    ops: FakeOps,
+    target_dir: str,
+    bundle_dir: str,
+    profile: str,
+    act_mode: str,
+    node_status: str | None,
+) -> tuple[int, str]:
+    """Настоящий `gate-check --candidate` steward вместо ответа фейка."""
+    from governance.ops import RealOps
+
+    ops.calls.append(("gate_check_candidate", bundle_dir))
+    return RealOps().gate_check_candidate(
+        target_dir, bundle_dir, profile, act_mode=act_mode, node_status=node_status
+    )
+
+
+def _require_gate_cli() -> None:
+    from governance.ops import DEVTOOLS_ROOT
+
+    if not (DEVTOOLS_ROOT / ".venv" / "bin" / "gate-check").exists():
+        pytest.skip("gate-check CLI недоступен (uv sync без группы governance)")
+
+
+def _real_roles(kwargs: dict) -> None:
+    roles = Path(kwargs["target_dir"]) / "profiles/roles.yaml"
+    roles.write_text(
+        (Path(__file__).parents[1] / "profiles/roles.yaml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+
+def test_real_gate_w1_ignores_stale_pin_of_upper_node(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    """Находка 16 на НАСТОЯЩЕМ гейте steward: после `--reopen charter` в
+    worktree лежит requirements с пином старого charter. W1 обязана пройти
+    и локальную prospective-сверку, и `gate-check --candidate` — фейк гейта
+    прятал, что контракт гейта здесь вообще проверяется."""
+    _require_gate_cli()
+
+    class UpperStaleRealGate(_DtSmokeOps):
+        def author(self, call, kind: str, subject: str, brief_context=None) -> int:
+            rc = _DtSmokeOps.author(self, call, kind, subject)
+            if kind == "charter":
+                (
+                    Path(call.target_dir) / call.bundle_dir / "10-requirements.md"
+                ).write_text(
+                    _dt_smoke_requirements_body("a" * 40).replace(
+                        "status: draft", "status: stale"
+                    ),
+                    encoding="utf-8",
+                )
+            return rc
+
+        def gate_check_candidate(
+            self, target_dir, bundle_dir, profile, *, act_mode, node_status=None
+        ):
+            return _real_candidate_gate(
+                self, target_dir, bundle_dir, profile, act_mode, node_status
+            )
+
+    ops = UpperStaleRealGate(facts=GREEN_PR_FACTS)
+    kwargs = _waves_kwargs(tmp_path, "r-upper-stale-real", ops)
+    _real_roles(kwargs)
+    _fake_wave_adapters(monkeypatch, ops)
+    state = locked_runner.start(**kwargs)
+    findings = rs.run_dir(state.run_id) / "gate-findings.txt"
+    assert state.status != "stopped_gate", findings.read_text(encoding="utf-8")
+    assert ("gate_check_candidate", BUNDLE_DIR) in ops.calls, "гейт звался"
+    assert state.ops["gate-candidate-1"]["status"] == "completed"
+
+
 def test_gate_inline_upstream_hashes_form_passes(
     tmp_path: Path, runs_root, monkeypatch
 ) -> None:
@@ -8260,6 +8333,54 @@ def test_reapprove_wave_ignores_old_pins_of_its_level(
     resumed = locked_runner.resume("r-reapp-pin", ops)
     assert resumed.wave == 3 and resumed.ops["branch-3"]["mode"] == "reapprove"
     assert resumed.status != "stopped_gate"
+
+
+def test_real_gate_reapprove_wave_accepts_old_pin_of_its_level(
+    tmp_path: Path,
+    runs_root,
+    monkeypatch,
+) -> None:
+    """Находка 17 на НАСТОЯЩЕМ гейте steward: reapprove-волна W3 видит
+    behaviour-spec из base со `status: stale` и пином старого requirements.
+    И локальная сверка, и `gate-check --candidate` обязаны её пропустить —
+    свежий пин ставит штамп candidate."""
+    _require_gate_cli()
+
+    class RealGateOps(_DtSmokeOps):
+        def gate_check_candidate(
+            self, target_dir, bundle_dir, profile, *, act_mode, node_status=None
+        ):
+            return _real_candidate_gate(
+                self, target_dir, bundle_dir, profile, act_mode, node_status
+            )
+
+    ops = RealGateOps(facts={"state": "MERGED", "baseRefName": "master"})
+    kwargs = _waves_kwargs(tmp_path, "r-reapp-pin-real", ops)
+    _real_roles(kwargs)
+    _fake_wave_adapters(monkeypatch, ops)
+    _fake_approve_node_full(monkeypatch, ops)
+    state = locked_runner.start(**kwargs)
+    from governance import approval_ledger as al
+
+    al.complete_request(state, state.ops["candidate-1"]["request"])
+    state.wave = 2
+    state.ops["candidate-2"] = dict(state.ops["candidate-1"])
+    rs.save(state)
+    bundle = Path(state.target_dir) / BUNDLE_DIR
+    charter_pin = blob_sha1((bundle / "00-charter.md").read_text(encoding="utf-8"))
+    (bundle / "10-requirements.md").write_text(
+        _dt_smoke_requirements_body(charter_pin), encoding="utf-8"
+    )
+    stale = _dt_smoke_behaviour_body("a" * 40).replace("status: draft", "status: stale")
+    (bundle / "15-behaviour-spec.md").write_text(stale, encoding="utf-8")
+    base = _all_approved()
+    base[f"{BUNDLE_DIR}/15-behaviour-spec.md"] = stale
+    ops.base_files = base
+    resumed = locked_runner.resume("r-reapp-pin-real", ops)
+    findings = rs.run_dir(resumed.run_id) / "gate-findings.txt"
+    assert resumed.wave == 3 and resumed.ops["branch-3"]["mode"] == "reapprove"
+    assert resumed.status != "stopped_gate", findings.read_text(encoding="utf-8")
+    assert resumed.ops["gate-candidate-3"]["status"] == "completed"
 
 
 def test_stale_level_is_reapproved_over_base_without_authoring(
