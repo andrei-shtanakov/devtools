@@ -9545,8 +9545,40 @@ _MARKET = {"mk": {"source": {"source": "github", "repo": "o/mk"}}}
             ),
             True,
         ),
+        # `..` лексически внутри кэша, по факту — вне (security review)
+        (
+            lambda h: _registry(
+                h,
+                {
+                    "p@mk": _plugin(
+                        h,
+                        "1.0",
+                        "A",
+                        installPath=str(h / ".claude/plugins/cache/../../../evil"),
+                    )
+                },
+                _MARKET,
+            ),
+            True,
+        ),
+        # ссылка в кэше, ведущая наружу
+        (
+            lambda h: (
+                (h / ".claude/plugins/cache/mk/p").mkdir(parents=True, exist_ok=True)
+                or (h / ".claude/plugins/cache/mk/p/2.0").symlink_to(h.parent)
+                or _registry(h, {"p@mk": _plugin(h, "2.0", "A")}, _MARKET)
+            ),
+            True,
+        ),
     ],
-    ids=["cli-autoupdate", "new-plugin", "path-outside-cache", "new-source"],
+    ids=[
+        "cli-autoupdate",
+        "new-plugin",
+        "path-outside-cache",
+        "new-source",
+        "dotdot-escape",
+        "symlink-escape",
+    ],
 )
 def test_config_surface_plugin_registry_projection(
     tmp_path, runs_root, monkeypatch, change, stops

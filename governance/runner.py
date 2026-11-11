@@ -3331,6 +3331,17 @@ def _plugin_registry_digest(claude_home: Path, name: str) -> str:
     return hashlib.sha256(json.dumps(projected, sort_keys=True).encode()).hexdigest()
 
 
+def _in_cache(raw: object, cache: Path) -> bool:
+    """Код плагина в кэше: без `..` и после разрешения ссылок (security
+    review: лексическое сравнение пропускало `cache/../../evil`)."""
+    if not isinstance(raw, str) or not raw or ".." in Path(raw).parts:
+        return False
+    try:
+        return Path(raw).resolve().is_relative_to(cache)
+    except OSError:
+        return False
+
+
 def _project_registry(claude_home: Path, name: str, data: object) -> object | None:
     """Смысловая часть реестра; `None` — форма не распознана (байты целиком)."""
     if not isinstance(data, dict):
@@ -3345,7 +3356,7 @@ def _project_registry(claude_home: Path, name: str, data: object) -> object | No
     plugins = data.get("plugins")
     if not isinstance(plugins, dict):
         return None
-    cache = claude_home / "plugins" / "cache"
+    cache = (claude_home / "plugins" / "cache").resolve()
     out: dict[str, list[list[object]]] = {}
     for plugin, entries in plugins.items():
         if not isinstance(entries, list) or not all(
@@ -3358,7 +3369,7 @@ def _project_registry(claude_home: Path, name: str, data: object) -> object | No
                 e.get("projectPath"),
                 # путь в кэше — смена версии автообновлением; вне — подсадка
                 None
-                if Path(str(e.get("installPath", ""))).is_relative_to(cache)
+                if _in_cache(e.get("installPath"), cache)
                 else e.get("installPath"),
             ]
             for e in entries
