@@ -3,8 +3,8 @@
 Дизайн `docs/superpowers/specs/2026-09-29-author-agent-sandbox-design.md`
 §11, §12, §14; сценарии §16 Z6, Z7, Z16. Генератор профиля — чистая функция, его
 тесты переносимые; создание каталога вызова идёт через `safe_io`
-(`O_NOFOLLOW_ANY`) и проверяется только на macOS. Поведение профиля под
-настоящим `sandbox-exec` — TASK-004 (`tests/test_governance_sandbox_live.py`).
+(`O_NOFOLLOW_ANY` или пошаговый обход) и проверяется на любой ОС. Поведение
+профиля под настоящим `sandbox-exec` — TASK-004 (`tests/test_governance_sandbox_live.py`).
 """
 
 from __future__ import annotations
@@ -24,15 +24,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from governance import author_launch, sandbox
+from governance import author_launch, safe_io, sandbox
 from governance.author_launch import TRANSCRIPTS
 from governance.sandbox import CallDir, ForbiddenRoots, SandboxError
 
 DEVTOOLS_ROOT = Path(__file__).resolve().parents[1]
 
 darwin_only = pytest.mark.skipif(
-    not hasattr(os, "O_NOFOLLOW_ANY"),
-    reason="каталог вызова создаётся через O_NOFOLLOW_ANY — только Darwin (macOS)",
+    sys.platform != "darwin" or not os.path.exists("/usr/bin/sandbox-exec"),
+    reason="нужен macOS: /usr/bin/sandbox-exec (допуск и проба), sw_vers",
 )
 
 
@@ -297,7 +297,6 @@ def test_target_git_dirs_refuses_non_repo(base: Path) -> None:
 # --- macOS: создание каталога вызова (Z6, Z7) --------------------------------
 
 
-@darwin_only
 def test_create_call_dir_makes_fresh_empty_subdirs(base: Path) -> None:
     calls = base / "calls"
     calls.mkdir()
@@ -308,7 +307,6 @@ def test_create_call_dir_makes_fresh_empty_subdirs(base: Path) -> None:
         assert sub.is_dir() and not any(sub.iterdir())
 
 
-@darwin_only
 def test_create_call_dir_ids_are_unique(base: Path) -> None:
     calls = base / "calls"
     calls.mkdir()
@@ -317,7 +315,6 @@ def test_create_call_dir_ids_are_unique(base: Path) -> None:
     assert a.root != b.root
 
 
-@darwin_only
 @pytest.mark.parametrize("planted", [False, True])
 def test_create_call_dir_refuses_existing_call(base: Path, planted: bool) -> None:
     # Z6: существующий <call> — отказ на нём самом (и пустом), содержимое цело
@@ -333,7 +330,6 @@ def test_create_call_dir_refuses_existing_call(base: Path, planted: bool) -> Non
         assert (calls / "run-1" / "c1" / "stage" / "planted").read_text() == "x"
 
 
-@darwin_only
 def test_create_call_dir_refuses_symlinked_run_dir(base: Path) -> None:
     calls = base / "calls"
     calls.mkdir()
@@ -344,7 +340,6 @@ def test_create_call_dir_refuses_symlinked_run_dir(base: Path) -> None:
     assert not any((base / "elsewhere").iterdir())
 
 
-@darwin_only
 def test_create_call_dir_refuses_non_canonical_calls(base: Path) -> None:
     (base / "real").mkdir()
     (base / "alias").symlink_to(base / "real")
@@ -363,7 +358,6 @@ def test_create_call_dir_refuses_bad_ids(base: Path, bad: str) -> None:
     assert not any(base.iterdir())
 
 
-@darwin_only
 @pytest.mark.parametrize(
     "where",
     ["ancestor", "same", "descendant", "case-variant"],
@@ -388,7 +382,6 @@ def test_create_call_dir_refuses_overlap_before_creating(
     assert not any(calls.iterdir())
 
 
-@darwin_only
 def test_create_call_dir_overlap_through_symlinked_forbidden(base: Path) -> None:
     # запретный корень сравнивается по realpath
     calls = base / "calls"
@@ -400,7 +393,6 @@ def test_create_call_dir_overlap_through_symlinked_forbidden(base: Path) -> None
         )
 
 
-@darwin_only
 def test_create_call_dir_disjoint_siblings_pass(base: Path) -> None:
     calls = base / "calls"
     calls.mkdir()
@@ -412,7 +404,6 @@ def test_create_call_dir_disjoint_siblings_pass(base: Path) -> None:
     assert call.stage.is_dir()
 
 
-@darwin_only
 def test_create_call_dir_for_devtools_itself_as_target(base: Path) -> None:
     # цель — сам devtools: корень вызовов вне чекаута — проверка проходит
     calls = sandbox.calls_root({"XDG_STATE_HOME": str(base / "state")})
@@ -427,7 +418,6 @@ def test_create_call_dir_for_devtools_itself_as_target(base: Path) -> None:
     assert call.stage.is_dir()
 
 
-@darwin_only
 def test_create_call_dir_refuses_calls_root_inside_target(base: Path) -> None:
     # XDG_STATE_HOME внутри цели: каталог вызова попал бы в дерево цели
     target = _repo(base / "target")
@@ -441,7 +431,6 @@ def test_create_call_dir_refuses_calls_root_inside_target(base: Path) -> None:
     assert not (target / "state").exists()
 
 
-@darwin_only
 def test_create_call_dir_refuses_calls_inside_worktree_common_dir(
     base: Path,
 ) -> None:
@@ -677,7 +666,6 @@ def test_admission_admits_exact_file_without_running_it(
     assert argvs == [["/usr/bin/sw_vers", "-productVersion"]]
 
 
-@darwin_only
 def test_admission_requires_evidence_file(
     base: Path,
     harness: tuple[Path, Path, Path],
@@ -691,7 +679,6 @@ def test_admission_requires_evidence_file(
     assert "docs/evidence/x.md" in str(err.value)
 
 
-@darwin_only
 def test_admission_evidence_failed_protocol_refused(
     base: Path,
     harness: tuple[Path, Path, Path],
@@ -707,7 +694,6 @@ def test_admission_evidence_failed_protocol_refused(
         sandbox.admission_check(_contract(base, entry), path=str(path_dir))
 
 
-@darwin_only
 @pytest.mark.parametrize(
     "override",
     [
@@ -731,7 +717,6 @@ def test_admission_evidence_record_mismatch_refused(
         sandbox.admission_check(_contract(base, entry), path=str(path_dir))
 
 
-@darwin_only
 @pytest.mark.parametrize(
     "evidence", ["../x.md", "/etc/passwd", "docs/other/x.md", "docs/evidence/../x.md"]
 )
@@ -751,7 +736,6 @@ def test_admission_evidence_outside_docs_evidence_refused(
         )
 
 
-@darwin_only
 def test_admission_evidence_with_both_verdicts_refused(
     base: Path,
     harness: tuple[Path, Path, Path],
@@ -767,7 +751,6 @@ def test_admission_evidence_with_both_verdicts_refused(
         sandbox.admission_check(_contract(base, entry), path=str(path_dir))
 
 
-@darwin_only
 def test_admission_evidence_symlink_refused(
     base: Path,
     harness: tuple[Path, Path, Path],
@@ -784,13 +767,11 @@ def test_admission_evidence_symlink_refused(
         sandbox.admission_check(_contract(base, entry), path=str(path_dir))
 
 
-@darwin_only
 def test_real_admitted_entries_pass_their_protocols() -> None:
     for record in sandbox.load_admitted(CONTRACT):
         sandbox._check_evidence(record)
 
 
-@darwin_only
 @pytest.mark.parametrize("field", ["sha256", "macos_major", "profile_sha256"])
 def test_admission_refuses_mismatch_naming_field(
     base: Path, harness: tuple[Path, Path, Path], macos_26: None, field: str
@@ -807,7 +788,6 @@ def test_admission_refuses_mismatch_naming_field(
     assert not marker.exists()
 
 
-@darwin_only
 def test_admission_refuses_changed_content_of_admitted_path(
     base: Path, harness: tuple[Path, Path, Path], macos_26: None
 ) -> None:
@@ -820,7 +800,6 @@ def test_admission_refuses_changed_content_of_admitted_path(
     assert not marker.exists()
 
 
-@darwin_only
 def test_admission_picks_matching_record_among_several(
     base: Path,
     harness: tuple[Path, Path, Path],
@@ -837,7 +816,6 @@ def test_admission_picks_matching_record_among_several(
     assert sandbox.admission_check(contract, path=str(path_dir)).version == "2.0.0"
 
 
-@darwin_only
 def test_admission_refuses_hardlinked_candidate(
     base: Path, harness: tuple[Path, Path, Path], macos_26: None
 ) -> None:
@@ -1002,8 +980,8 @@ def test_probe_inner_timeouts_fit_outer_budget() -> None:
 # --- граница запуска авторского агента (TASK-005, §11–§15, §19 п.1) ----------
 #
 # Переносимые двойники Darwin-условий (ОС, `sandbox-exec`, вложенность) и
-# допуска; настоящие Darwin-условия — тесты с `darwin_only` ниже и живые в
-# `tests/test_governance_sandbox_live.py`.
+# допуска; настоящие Darwin-условия — живые тесты в
+# `tests/test_governance_sandbox_live.py` (им нужен `sandbox-exec`).
 
 _ADMISSION = sandbox.Admission(
     "claude", "2.1.296", Path("/opt/claude/bin/claude"), "0" * 64, 26, "0" * 64, "e"
@@ -1110,7 +1088,6 @@ def test_run_probe_config_failure_before_side_effects(tmp_path: Path) -> None:
     assert list(tmp_path.iterdir()) == []
 
 
-@darwin_only
 def test_launch_config_failure_is_named_refusal(launch, monkeypatch) -> None:
     """`ConfigError` пробы — названный отказ границы до платного вызова (F2)."""
     from governance import df_config
@@ -1186,7 +1163,6 @@ def _never(what: str):
     return boom
 
 
-@darwin_only
 def test_launch_probe_failure_creates_and_removes_call_dir(launch):
     """Отказ пробы: каталог вызова создан ДЛЯ пробы и удалён до возврата;
     агент не запущен, бандл не тронут."""
@@ -1202,7 +1178,6 @@ def test_launch_probe_failure_creates_and_removes_call_dir(launch):
     assert not (launch.target / "ws").exists()
 
 
-@darwin_only
 def test_launch_probe_and_agent_share_profile_env_and_call_dir(launch):
     outcome = _launch(launch)
     assert outcome.code == author_launch.REFUSED, "агент-шпион файла не пишет"
@@ -1240,7 +1215,6 @@ def _agent_writes(launch, monkeypatch, files: dict[str, bytes], code: int = 0):
     return seen
 
 
-@darwin_only
 def test_launch_transfers_the_node_file_into_the_bundle(launch, monkeypatch):
     """N6: бандла и его родителей нет — файл перенесён безопасной записью;
     claude-config несёт свой settings.json; каталог вызова удалён."""
@@ -1253,7 +1227,6 @@ def test_launch_transfers_the_node_file_into_the_bundle(launch, monkeypatch):
     assert list((launch.calls / "r1").iterdir()) == []
 
 
-@darwin_only
 def test_launch_extra_in_stage_is_quarantine_list_without_transfer(launch, monkeypatch):
     _agent_writes(
         launch,
@@ -1266,7 +1239,6 @@ def test_launch_extra_in_stage_is_quarantine_list_without_transfer(launch, monke
     assert not (launch.target / "ws/spec/10-requirements.md").exists()
 
 
-@darwin_only
 @pytest.mark.parametrize(
     ("code", "files", "text"),
     [
@@ -1285,7 +1257,6 @@ def test_launch_failed_call_does_not_transfer(launch, monkeypatch, code, files, 
     assert not (launch.target / "ws/spec/10-requirements.md").exists()
 
 
-@darwin_only
 def test_two_runs_on_one_target_keep_their_own_call_dirs_and_sentinels(
     launch, monkeypatch
 ):
@@ -1704,7 +1675,6 @@ def _transcripts(run_dir: Path) -> list[Path]:
     return sorted((run_dir / author_launch.TRANSCRIPTS).iterdir())
 
 
-@darwin_only
 def test_launch_saves_transcript_per_attempt(launch, monkeypatch):
     """Каждая попытка — новый каталог в `run_dir` (вне записи агента), прежний
     не перезаписан; meta называет код, объём, полноту."""
@@ -1732,7 +1702,6 @@ def test_launch_saves_transcript_per_attempt(launch, monkeypatch):
     assert meta["truncated"] is True and meta["complete"] is False
 
 
-@darwin_only
 def test_launch_refuses_transfer_when_transcript_unsaved(launch, monkeypatch):
     """Ошибка записи транскрипта — явный отказ: файл узла не переносится."""
     _agent_writes(launch, monkeypatch, {"10-requirements.md": b"node\n"})
@@ -1983,7 +1952,6 @@ def plain(launch, tmp_path, monkeypatch) -> SimpleNamespace:
     return launch
 
 
-@darwin_only
 def test_test_mode_launches_without_sandbox(plain, monkeypatch):
     seen = _agent_writes_plain(plain, monkeypatch)
     assert _launch(plain) == author_launch.LaunchOutcome(0)
@@ -2013,16 +1981,51 @@ def _agent_writes_plain(plain, monkeypatch) -> dict:
     return seen
 
 
-@darwin_only
 def test_test_mode_runs_off_darwin(plain, monkeypatch):
-    # Под darwin_only смысл частичный: каталог вызова создаётся через
-    # O_NOFOLLOW_ANY (только macOS). Суть теста — `_os_name` в режиме test
-    # не опрашивается, запуск идёт и при «не darwin».
+    # Суть теста — `_os_name` в режиме test не опрашивается, запуск идёт и
+    # при «не darwin».
     monkeypatch.setattr(author_launch, "_os_name", lambda: "linux")
     monkeypatch.setattr(author_launch, "_has_sandbox_exec", lambda: False)
     seen = _agent_writes_plain(plain, monkeypatch)
     assert _launch(plain).ok
     assert "call" in seen
+
+
+def test_test_mode_walk_publishes_node(plain, monkeypatch):
+    """Обход вместо O_NOFOLLOW_ANY: каталог вызова создан, узел перенесён."""
+    monkeypatch.setattr(safe_io, "NOFOLLOW_ANY", None)
+    monkeypatch.setattr(author_launch, "_os_name", lambda: "linux")
+    seen = _agent_writes_plain(plain, monkeypatch)
+    out = _launch(plain)
+    assert out.ok, out
+    assert "call" in seen
+    node = plain.target / "ws/spec/10-requirements.md"
+    assert node.read_bytes() == b"node\n"
+
+
+def test_test_mode_through_symlinked_home(plain, tmp_path, monkeypatch):
+    """HOME/XDG за ссылкой (Silverblue): вызывающие канонизируют корни."""
+    monkeypatch.setattr(safe_io, "NOFOLLOW_ANY", None)
+    real_state = Path(os.path.realpath(tmp_path)) / "real-state"
+    real_state.mkdir()
+    (tmp_path / "state-link").symlink_to(real_state)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state-link"))
+    _agent_writes_plain(plain, monkeypatch)
+    out = _launch(plain)
+    assert out.ok, out
+    assert (plain.target / "ws/spec/10-requirements.md").read_bytes() == b"node\n"
+    assert any(real_state.rglob("*"))
+
+
+def test_strict_off_darwin_refuses_before_call_dir(launch, monkeypatch):
+    """strict вне macOS: отказ до каталога вызова и запуска агента."""
+    monkeypatch.setattr(author_launch, "_os_name", lambda: "linux")
+    out = _launch(launch)
+    assert not out.ok
+    assert "только на macOS" in out.reason
+    assert launch.spawned == []
+    assert not sandbox.calls_root().exists()
+    assert not launch.calls.exists()
 
 
 def test_test_mode_non_claude_refused(plain, tmp_path, monkeypatch):

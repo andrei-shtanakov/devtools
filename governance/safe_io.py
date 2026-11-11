@@ -7,8 +7,9 @@
 - Корень канонизирует вызывающий (`os.path.realpath`) ОДИН раз; каждое
   открытие идёт с `O_NOFOLLOW_ANY` — ядро Darwin отказывает на ссылке в
   ЛЮБОМ компоненте пути одним вызовом, без гонки «проверил компонент →
-  подменили». Неканонический корень (`/var/…` → `/private/var/…`) поэтому
-  тоже отказ.
+  подменили»; на ОС без флага — покомпонентный обход от `/` или
+  закреплённого `dir_fd` с `O_NOFOLLOW` на каждом шаге; гарантия та же.
+  Неканонический корень (`/var/…` → `/private/var/…`) поэтому тоже отказ.
 - Чтение: `O_NONBLOCK` (FIFO не вешает открытие), `fstat` открытого
   дескриптора — только обычный файл с `st_nlink == 1`, не больше
   `limit + 1` байт и с ограничением времени.
@@ -33,8 +34,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-#: Флаг ядра Darwin; на другой ОС его нет — любой вызов отказывает.
+#: Флаг ядра Darwin; на другой ОС его нет — `_open` идёт покомпонентным обходом.
 NOFOLLOW_ANY: int | None = getattr(os, "O_NOFOLLOW_ANY", None)
+#: Промежуточные шаги обхода: `O_PATH` (Linux) не требует права чтения —
+#: каталог только с правом входа (0711) проходится, как с `O_NOFOLLOW_ANY`.
+_WALK_DIR_FLAGS = getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY
 
 _CHUNK = 65536
 #: Режим опубликованного файла узла — не зависит от umask раннера.
@@ -72,14 +76,6 @@ class Entry:
     kind: str  # "dir" | "file" | "symlink" | "other"
 
 
-def _flag() -> int:
-    if NOFOLLOW_ANY is None:
-        raise SafeIOError(
-            "безопасный ввод-вывод песочницы — только macOS (нет O_NOFOLLOW_ANY)"
-        )
-    return NOFOLLOW_ANY
-
-
 def _parts(rel: str | PurePosixPath) -> tuple[str, ...]:
     """Компоненты относительного пути; `.`, `..`, пустые и абсолютные — отказ."""
     text = str(rel)
@@ -105,16 +101,68 @@ def _open(
     any_component: bool = True,
     mode: int = 0o777,
 ) -> int:
-    """`os.open` с `O_NOFOLLOW_ANY`; `any_component=False` — для создания
+    """`os.open` без ссылок в пути: `O_NOFOLLOW_ANY` или покомпонентный обход
+    (`_open_walk`), если флага нет. `any_component=False` — для создания
     одного имени в закреплённом каталоге (`O_NOFOLLOW_ANY` с `O_CREAT` ядро
     отвергает `EINVAL`, а единственный компонент закрывает `O_NOFOLLOW`)."""
-    extra = _flag() if any_component else 0
     try:
-        return os.open(path, flags | extra, mode, dir_fd=dir_fd)
+        if not any_component:
+            return os.open(path, flags, mode, dir_fd=dir_fd)
+        if NOFOLLOW_ANY is None:
+            return _open_walk(path, flags, dir_fd, mode)
+        return os.open(path, flags | NOFOLLOW_ANY, mode, dir_fd=dir_fd)
     except OSError as exc:
         if exc.errno == errno.ELOOP:
             raise SafeIOError(f"{path!r}: ссылка в пути") from exc
         raise SafeIOError(f"{path!r}: {exc.strerror}") from exc
+
+
+def _step(fd: int, name: str, flags: int, mode: int) -> int:
+    """`openat(fd, name, flags | O_NOFOLLOW)`; ссылка → `OSError(ELOOP)`.
+
+    Ядро Linux на ссылке с `O_DIRECTORY` даёт `ENOTDIR`, без него — `ELOOP`;
+    `fstatat` без следования выбирает только текст отказа, не решение.
+    """
+    try:
+        return os.open(name, flags | os.O_NOFOLLOW, mode, dir_fd=fd)
+    except OSError as exc:
+        if exc.errno not in (errno.ENOTDIR, errno.ELOOP):
+            raise
+        try:
+            is_link = stat.S_ISLNK(
+                os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode
+            )
+        except OSError:
+            raise exc from None
+        if is_link:
+            raise OSError(errno.ELOOP, os.strerror(errno.ELOOP), name) from exc
+        raise
+
+
+def _open_walk(path: str, flags: int, dir_fd: int | None, mode: int) -> int:
+    """Покомпонентное открытие от `/` или закреплённого `dir_fd`: на каждом
+    шаге `O_NOFOLLOW`, ссылка в любом компоненте — отказ (как `O_NOFOLLOW_ANY`)."""
+    comps = path.split("/")
+    absolute = path.startswith("/")
+    if absolute:
+        comps = comps[1:]
+    if not comps or any(c in ("", ".", "..") for c in comps):
+        raise SafeIOError(f"{path!r}: путь с пустым, `.` или `..` компонентом")
+    if absolute:
+        fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    elif dir_fd is None:
+        raise SafeIOError(f"{path!r}: относительный путь без dir_fd")
+    else:
+        fd = dir_fd
+    try:
+        for comp in comps[:-1]:
+            prev, fd = fd, _step(fd, comp, _WALK_DIR_FLAGS, 0)
+            if prev != dir_fd:
+                os.close(prev)  # fd уже новый: сбой close не теряет и не дублирует
+        return _step(fd, comps[-1], flags, mode)
+    finally:
+        if fd != dir_fd:
+            os.close(fd)
 
 
 @_guarded

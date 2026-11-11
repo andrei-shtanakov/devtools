@@ -1,10 +1,9 @@
 """Безопасный ввод-вывод раннера (песочница авторского агента, TASK-001).
 
 Дизайн `docs/superpowers/specs/2026-09-29-author-agent-sandbox-design.md`
-§15, F27; сценарии §16 Z11, Z14, Z15. Поведение ядра Darwin
-(`O_NOFOLLOW_ANY`) проверяется только на macOS — на другой ОС тесты с
-маркером `darwin_only` пропускаются с названной причиной; переносимые тесты
-(контракт `bundle_dir`, отказ «только macOS») идут везде.
+§15, F27; сценарии §16 Z11, Z14, Z15. Каждый тест идёт на обеих
+реализациях: `nofollow_any` (ядро Darwin; на другой ОС пропускается) и
+`walk` (покомпонентный обход; выполняется на любой ОС).
 """
 
 from __future__ import annotations
@@ -19,10 +18,16 @@ import pytest
 
 from governance import safe_io
 
-darwin_only = pytest.mark.skipif(
-    not hasattr(os, "O_NOFOLLOW_ANY"),
-    reason="O_NOFOLLOW_ANY есть только в ядре Darwin (macOS)",
-)
+
+@pytest.fixture(autouse=True, params=["nofollow_any", "walk"])
+def impl(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Реализация `_open`: ядерный `O_NOFOLLOW_ANY` или покомпонентный обход."""
+    if request.param == "nofollow_any":
+        if not hasattr(os, "O_NOFOLLOW_ANY"):
+            pytest.skip("O_NOFOLLOW_ANY есть только в ядре Darwin (macOS)")
+    else:
+        monkeypatch.setattr(safe_io, "NOFOLLOW_ANY", None)
+    return str(request.param)
 
 
 @pytest.fixture
@@ -101,25 +106,80 @@ def test_bundle_dir_rejects_symlinked_target_root(tmp_path: Path) -> None:
         safe_io.validate_bundle_dir(link, "bundle", git_dirs=())
 
 
-def test_without_nofollow_any_every_call_refuses(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_walk_every_call_works(root: Path, impl: str) -> None:
+    (root / "f").write_bytes(b"x")
+    assert safe_io.read_regular(root, "f", limit=10) == b"x"
+    assert [e.path for e in safe_io.list_tree(root, ".")] == ["f"]
+    safe_io.ensure_dirs(root, "a/b")
+    safe_io.create_dir(root, "c")
+    safe_io.publish(root, "a/b/g", b"y")
+    assert (root / "a" / "b" / "g").read_bytes() == b"y"
+
+
+def test_symlinked_ancestor_of_root_refuses(tmp_path: Path, impl: str) -> None:
+    real = Path(os.path.realpath(tmp_path))
+    (real / "home" / "u").mkdir(parents=True)
+    (real / "home" / "u" / "f").write_bytes(b"x")
+    (real / "link").symlink_to(real / "home")
+    with pytest.raises(safe_io.SafeIOError, match="ссылка в пути"):
+        safe_io.read_regular(real / "link" / "u", "f", limit=10)
+    with pytest.raises(safe_io.SafeIOError, match="ссылка в пути"):
+        safe_io.ensure_dirs(real / "link" / "u", "d")
+    assert not (real / "home" / "u" / "d").exists()
+
+
+def test_dangling_symlink_mid_path_refuses_as_link(root: Path, impl: str) -> None:
+    (root / "gone").symlink_to(root / "nowhere")
+    with pytest.raises(safe_io.SafeIOError, match="ссылка в пути"):
+        safe_io.publish(root, "gone/f", b"x")
+    with pytest.raises(safe_io.SafeIOError, match="ссылка в пути"):
+        safe_io.list_tree(root, "gone")
+
+
+def test_walk_refuses_dotdot_in_root(
+    root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # `Path` сам схлопывает `.` и `//`; `..` он сохраняет — его и проверяем
     monkeypatch.setattr(safe_io, "NOFOLLOW_ANY", None)
-    for call in (
-        lambda: safe_io.read_regular(tmp_path, "f", limit=10),
-        lambda: safe_io.list_tree(tmp_path, "."),
-        lambda: safe_io.ensure_dirs(tmp_path, "a"),
-        lambda: safe_io.create_dir(tmp_path, "a"),
-        lambda: safe_io.publish(tmp_path, "a/f", b"x"),
-    ):
-        with pytest.raises(safe_io.SafeIOError, match="только macOS"):
-            call()
+    (root / "a").mkdir()
+    with pytest.raises(safe_io.SafeIOError, match="компонент"):
+        safe_io.ensure_dirs(root / "a" / ".." / "a", "x")
+    assert not (root / "a" / "x").exists()
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "O_PATH") or os.geteuid() == 0,
+    reason="O_PATH (Linux) и непривилегированный пользователь",
+)
+def test_walk_passes_execute_only_ancestor(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Предок с правом входа без чтения (0711) не мешает обходу."""
+    monkeypatch.setattr(safe_io, "NOFOLLOW_ANY", None)
+    (root / "x" / "in").mkdir(parents=True)
+    (root / "x" / "in" / "f").write_bytes(b"ok")
+    (root / "x").chmod(0o111)
+    try:
+        assert safe_io.read_regular(root / "x" / "in", "f", limit=10) == b"ok"
+        safe_io.publish(root / "x" / "in", "g", b"y")
+    finally:
+        (root / "x").chmod(0o755)
+    assert (root / "x" / "in" / "g").read_bytes() == b"y"
+
+
+def test_refusal_does_not_leak_descriptors(root: Path, impl: str) -> None:
+    (root / "a").mkdir()
+    (root / "a" / "link").symlink_to(root)
+    before = len(os.listdir("/dev/fd"))
+    for _ in range(20):
+        with pytest.raises(safe_io.SafeIOError):
+            safe_io.read_regular(root, "a/link/x", limit=10)
+    assert len(os.listdir("/dev/fd")) == before
 
 
 # --- macOS: канонизация -----------------------------------------------------
 
 
-@darwin_only
 def test_non_canonical_root_refuses(root: Path, tmp_path: Path) -> None:
     """Корень со ссылкой в пути (как `/var` → `/private/var`) — отказ:
     канонизирует вызывающий, модуль ссылок не раскрывает."""
@@ -136,14 +196,12 @@ def test_non_canonical_root_refuses(root: Path, tmp_path: Path) -> None:
 # --- macOS: источник (Z11) ---------------------------------------------------
 
 
-@darwin_only
 def test_read_regular_returns_bytes(root: Path) -> None:
     (root / "a").mkdir()
     (root / "a" / "f.md").write_bytes(b"node")
     assert safe_io.read_regular(root, "a/f.md", limit=100) == b"node"
 
 
-@darwin_only
 def test_read_refuses_symlink_leaf(root: Path, tmp_path: Path) -> None:
     secret = tmp_path / "secret"
     secret.write_bytes(b"token")
@@ -152,7 +210,6 @@ def test_read_refuses_symlink_leaf(root: Path, tmp_path: Path) -> None:
         safe_io.read_regular(root, "f.md", limit=100)
 
 
-@darwin_only
 def test_read_refuses_symlinked_parent(root: Path, tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -162,7 +219,6 @@ def test_read_refuses_symlinked_parent(root: Path, tmp_path: Path) -> None:
         safe_io.read_regular(root, "a/f.md", limit=100)
 
 
-@darwin_only
 def test_read_refuses_hardlink(root: Path, tmp_path: Path) -> None:
     twin = tmp_path / "twin"
     twin.write_bytes(b"x")
@@ -171,7 +227,6 @@ def test_read_refuses_hardlink(root: Path, tmp_path: Path) -> None:
         safe_io.read_regular(root, "f.md", limit=100)
 
 
-@darwin_only
 def test_read_refuses_fifo_without_hanging(root: Path) -> None:
     os.mkfifo(root / "f.md")
     result: list[BaseException | bytes] = []
@@ -189,7 +244,6 @@ def test_read_refuses_fifo_without_hanging(root: Path) -> None:
     assert isinstance(result[0], safe_io.SafeIOError)
 
 
-@darwin_only
 def test_read_refuses_over_limit(root: Path) -> None:
     (root / "f.md").write_bytes(b"x" * 11)
     assert safe_io.read_regular(root, "f.md", limit=11) == b"x" * 11
@@ -197,7 +251,6 @@ def test_read_refuses_over_limit(root: Path) -> None:
         safe_io.read_regular(root, "f.md", limit=10)
 
 
-@darwin_only
 def test_read_bounds_bytes_of_growing_file(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -219,7 +272,6 @@ def test_read_bounds_bytes_of_growing_file(
     assert sum(reads) <= 17
 
 
-@darwin_only
 def test_read_timeout(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (root / "f.md").write_bytes(b"x" * 100)
     real_read = os.read
@@ -236,7 +288,6 @@ def test_read_timeout(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 # --- macOS: обход без следования ссылкам -------------------------------------
 
 
-@darwin_only
 def test_list_tree_reports_links_without_following(root: Path, tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -257,14 +308,12 @@ def test_list_tree_reports_links_without_following(root: Path, tmp_path: Path) -
 # --- macOS: назначение (Z14) -------------------------------------------------
 
 
-@darwin_only
 def test_publish_creates_parents_and_file(root: Path) -> None:
     safe_io.publish(root, "ws/x/spec/00-charter.md", b"charter")
     assert (root / "ws/x/spec/00-charter.md").read_bytes() == b"charter"
     assert not [p for p in (root / "ws/x/spec").iterdir() if p.name.startswith(".")]
 
 
-@darwin_only
 def test_publish_over_dangling_symlink_does_not_create_target(
     root: Path, tmp_path: Path
 ) -> None:
@@ -281,7 +330,6 @@ def test_publish_over_dangling_symlink_does_not_create_target(
     assert _snapshot(tmp_path / "target") == outside_before
 
 
-@darwin_only
 def test_publish_over_hardlink_leaves_twin_untouched(
     root: Path, tmp_path: Path
 ) -> None:
@@ -297,7 +345,6 @@ def test_publish_over_hardlink_leaves_twin_untouched(
     assert twin.read_bytes() == b"orig"
 
 
-@darwin_only
 def test_publish_refuses_symlinked_parent(root: Path, tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -308,7 +355,6 @@ def test_publish_refuses_symlinked_parent(root: Path, tmp_path: Path) -> None:
     assert _snapshot(outside) == before
 
 
-@darwin_only
 def test_publish_refuses_directory_leaf(root: Path) -> None:
     (root / "spec" / "00-charter.md").mkdir(parents=True)
     with pytest.raises(safe_io.SafeIOError, match="каталог"):
@@ -316,7 +362,6 @@ def test_publish_refuses_directory_leaf(root: Path) -> None:
     assert sorted(p.name for p in (root / "spec").iterdir()) == ["00-charter.md"]
 
 
-@darwin_only
 def test_ensure_dirs_refuses_symlink_component(root: Path, tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -326,7 +371,6 @@ def test_ensure_dirs_refuses_symlink_component(root: Path, tmp_path: Path) -> No
     assert list(outside.iterdir()) == []
 
 
-@darwin_only
 def test_failed_publish_changes_nothing_outside_root(
     root: Path, tmp_path: Path
 ) -> None:
@@ -344,7 +388,6 @@ def test_failed_publish_changes_nothing_outside_root(
 # --- ревью #597: режим, регистр, канонизация, контракт ошибок --------------
 
 
-@darwin_only
 @pytest.mark.parametrize("umask", [0, 0o077])
 def test_publish_mode_is_0644_regardless_of_umask(root: Path, umask: int) -> None:
     old = os.umask(umask)
@@ -402,7 +445,6 @@ def test_bundle_dir_overlaps_gitdir_named_in_other_case(tmp_path: Path) -> None:
         safe_io.validate_bundle_dir(base, "meta/bundle", git_dirs=(gitdir_alias,))
 
 
-@darwin_only
 def test_list_tree_race_raises_safe_io_error(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -418,7 +460,6 @@ def test_list_tree_race_raises_safe_io_error(
         safe_io.list_tree(root, ".")
 
 
-@darwin_only
 def test_publish_write_failure_is_safe_io_error_and_cleans_tmp(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -434,13 +475,11 @@ def test_publish_write_failure_is_safe_io_error_and_cleans_tmp(
 # --- create_dir: новый каталог, существующее имя — отказ (TASK-002) ---------
 
 
-@darwin_only
 def test_create_dir_makes_new_dir_with_parents(root: Path) -> None:
     safe_io.create_dir(root, "a/b/c")
     assert (root / "a" / "b" / "c").is_dir()
 
 
-@darwin_only
 @pytest.mark.parametrize("kind", ["dir", "file", "symlink"])
 def test_create_dir_refuses_existing_name(root: Path, kind: str) -> None:
     leaf = root / "c"
@@ -455,7 +494,6 @@ def test_create_dir_refuses_existing_name(root: Path, kind: str) -> None:
     assert not (root / "nowhere").exists()
 
 
-@darwin_only
 def test_create_dir_refuses_symlinked_parent(root: Path, tmp_path: Path) -> None:
     outside = Path(os.path.realpath(tmp_path)) / "outside"
     outside.mkdir()
