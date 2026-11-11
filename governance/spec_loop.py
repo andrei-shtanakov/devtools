@@ -1105,14 +1105,36 @@ def _dispatch(state: rs.RunState, ops, lock: run_lock.RunLock) -> int:
         # `running` под НАШИМ замком = процесс оборван; `stopped_*` —
         # `runner.resume` сам сверяет и сбрасывает шаг стопа. В strict
         # остаётся «без скрытых ретраев» — продолжение руками.
+        reason = _stop_reason(state)
+        if runner.CONFIG_SURFACE_STOP in reason:
+            # Стоп трипвайра: следующий снимок «до» уже включит подсадку,
+            # повтор кнопки снял бы стоп молча (ревью #729). Только руками.
+            print(
+                f"spec-loop (test): прогон {state.run_id!r} остановлен "
+                f"трипвайром — сам не продолжаю.\n{reason}\nПроверьте названные "
+                "файлы; продолжить после проверки: make -C "
+                f"{shlex.quote(str(DEVTOOLS_ROOT))} behaviour-run "
+                f"ARGS='resume --run-id {state.run_id}'"
+            )
+            return 1
         print(
             f"spec-loop (test): прогон {state.run_id!r} в статусе "
             f"{state.status!r} (оборван или остановлен) — продолжаю"
         )
+        if reason:
+            print(f"причина прошлой остановки: {reason}")
         return _after_resume(runner.resume(state.run_id, ops, lock=lock), ops)
     if state.status == "completed":
         return _deliver_phase(state, ops)
     return _report_state(state)
+
+
+def _stop_reason(state: rs.RunState) -> str:
+    """Текст `stop-reason.txt` прогона (пусто — файла нет)."""
+    path = rs.run_dir(state.run_id) / "stop-reason.txt"
+    if not state.status.startswith("stopped_") or not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8").strip()
 
 
 def _test_resumable(status: str) -> bool:

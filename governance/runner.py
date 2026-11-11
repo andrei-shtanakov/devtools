@@ -2533,18 +2533,21 @@ def _resolve_base_ref(state: RunState, ops: Ops) -> str:
     До первого PR `base_ref` пуст, и прежний литерал `master` ломал цели
     с `main` (живой прогон на Linux, 2026-11-11: `git switch master` rc=128).
     Установленная ветка записывается в леджер — последующие шаги читают её
-    из `state.base_ref`. Факт не установлен — прежнее умолчание, вслух.
+    из `state.base_ref`. Факт не установлен — прежнее умолчание, вслух, и оно
+    тоже записывается: одно решение на прогон, иначе волны одного прогона
+    разъехались бы по разным базам после транзиентного сбоя (ревью #729).
     """
     if state.base_ref:
         return state.base_ref
     fact = ops.default_branch_fact(state.repo_slug)
-    if not fact.established or fact.value is None:
+    if fact.established and fact.value is not None:
+        state.base_ref = fact.value.name
+    else:
         print(
             f"_step_branch: ветка по умолчанию не установлена ({fact.detail}) — "
-            "база master"
+            "база master, закреплена на весь прогон"
         )
-        return "master"
-    state.base_ref = fact.value.name
+        state.base_ref = "master"
     save(state)
     return state.base_ref
 
@@ -3243,14 +3246,21 @@ _CLAUDE_WATCH_FILES = (
     "plugins/blocklist.json",
 )
 _CLAUDE_WATCH_DIRS = ("hooks", "skills", "commands", "agents")
+#: Начало причины стопа трипвайра конфиг-поверхности: по нему кнопка в test
+#: отличает этот стоп от прочих и не продолжает его сама (ревью #729).
+CONFIG_SURFACE_STOP = "конфиг-поверхность изменена"
 #: Синхронизация скиллов учётки claude.ai: CLI при каждом старте пишет в
 #: `skills/synced/` служебные файлы (`.last-complete-round`, `.bucket-*`) —
 #: живой прогон на Linux 11.11, claude 2.1.322: стоп на каждом вызове
-#: автора без песочницы. Не наблюдается ТОЛЬКО служебное (сегмент пути под
-#: `synced/` с точки); содержимое скиллов наблюдается — подсадка туда
-#: загрузилась бы в сессиях оператора. Цена: обновление скиллов учётки
-#: само по себе даёт один стоп, его снимает повтор кнопки.
+#: автора без песочницы. Не наблюдаются ТОЛЬКО два служебных имени на своих
+#: местах (замер на сервере: оба — файлы-маркеры): `synced/.bucket-<id>` и
+#: `synced/<acc>/.last-complete-round`. Всё прочее под `synced/`, в том числе
+#: что-либо ВНУТРИ каталога с точкой, наблюдается — подсадка скилла туда
+#: загрузилась бы в сессиях оператора (ревью #729). Цена: обновление скиллов
+#: учётки само по себе даёт один стоп, его снимает повтор кнопки.
 _CLAUDE_SYNCED = "skills/synced"
+_SYNCED_ROUND_MARK = ".last-complete-round"
+_SYNCED_BUCKET_PREFIX = ".bucket-"
 
 
 def _cli_bookkeeping(path: Path, claude_home: Path) -> bool:
@@ -3258,7 +3268,14 @@ def _cli_bookkeeping(path: Path, claude_home: Path) -> bool:
     synced = claude_home / _CLAUDE_SYNCED
     if not path.is_relative_to(synced):
         return False
-    return any(part.startswith(".") for part in path.relative_to(synced).parts)
+    parts = path.relative_to(synced).parts
+    if len(parts) == 1:
+        return parts[0].startswith(_SYNCED_BUCKET_PREFIX)
+    return (
+        len(parts) == 2
+        and not parts[0].startswith(".")
+        and parts[1] == _SYNCED_ROUND_MARK
+    )
 
 
 #: В репо, где работает агент: хук, исполняемый в сессии или при коммите.
@@ -3566,7 +3583,7 @@ def _guard_edge_results(
         )
     if config_changed:
         findings.append(
-            "конфиг-поверхность изменена во время вызова авторского агента "
+            f"{CONFIG_SURFACE_STOP} во время вызова авторского агента "
             f"(дизайн песочницы §9): {', '.join(config_changed)}. НЕ "
             "откатывается автоматически — это файлы оператора: проверьте их до "
             "следующей интерактивной сессии и следующего коммита."

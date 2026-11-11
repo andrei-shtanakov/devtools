@@ -2819,3 +2819,51 @@ def test_test_mode_stop_after_resume_hints_dfl_run(
     out = capsys.readouterr().out
     assert rc == 1
     assert "dfl run" in out and "behaviour-run" not in out
+
+
+def _test_mode_stopped(tmp_path: Path, reason: str) -> rs.RunState:
+    from tests.df_config_fixture import write_config
+
+    write_config(
+        Path(os.environ["XDG_CONFIG_HOME"]),
+        mode="test",
+        human="alice",
+        agent="alice",
+        workspace_root=tmp_path,
+    )
+    state = _mk_run(
+        "r-trip", "S", status="stopped_author", target_dir=str(tmp_path / "alpha")
+    )
+    state.mode = "test"
+    rs.save(state)
+    (rs.run_dir("r-trip") / "stop-reason.txt").write_text(reason, encoding="utf-8")
+    return state
+
+
+def test_test_mode_does_not_resume_config_surface_stop(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    """Ревью #729: следующий снимок «до» включил бы подсадку — повтор кнопки
+    снял бы стоп трипвайра молча. Кнопка называет причину и не продолжает."""
+    _test_mode_stopped(
+        tmp_path,
+        f"{runner.CONFIG_SURFACE_STOP} во время вызова: /h/.claude/hooks/x.sh",
+    )
+    env = _LoopEnv(monkeypatch, tmp_path)
+    rc = spec_loop.main(["--subject", "S", "--repo", "alpha"])
+    out = capsys.readouterr().out
+    assert rc == 1 and env.calls == []
+    assert "/h/.claude/hooks/x.sh" in out and "resume --run-id r-trip" in out
+
+
+def test_test_mode_resume_prints_previous_stop_reason(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    _test_mode_stopped(tmp_path, "error EDGE-CHECK(x): R4 minor: y")
+    after = rs.load("r-trip")
+    after.status = "waiting_interview"
+    env = _LoopEnv(monkeypatch, tmp_path, resume_result=after)
+    assert spec_loop.main(["--subject", "S", "--repo", "alpha"]) == 0
+    assert [c[0] for c in env.calls] == ["resume"]
+    out = capsys.readouterr().out
+    assert "причина прошлой остановки: error EDGE-CHECK(x): R4 minor: y" in out

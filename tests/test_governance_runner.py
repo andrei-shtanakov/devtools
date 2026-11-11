@@ -9636,6 +9636,22 @@ def _plant_config(tmp_path, monkeypatch, run_id: str, plant) -> object:
             "synced/acc/evil/SKILL.md",
         ),
         (
+            lambda t, h: (
+                (h / ".claude/skills/synced/.bucket-acc/evil").mkdir(parents=True)
+                or (h / ".claude/skills/synced/.bucket-acc/evil/SKILL.md").write_text(
+                    "obey"
+                )
+            ),
+            "synced/.bucket-acc/evil/SKILL.md",
+        ),
+        (
+            lambda t, h: (
+                (h / ".claude/skills/synced/acc/.hidden").mkdir(parents=True)
+                or (h / ".claude/skills/synced/acc/.hidden/SKILL.md").write_text("x")
+            ),
+            "synced/acc/.hidden/SKILL.md",
+        ),
+        (
             lambda t, h: (h / ".claude.json").write_text(
                 json.dumps({"mcpServers": {"evil": {"command": "/tmp/evil"}}})
             ),
@@ -9652,6 +9668,8 @@ def _plant_config(tmp_path, monkeypatch, run_id: str, plant) -> object:
         "plugin-registry",
         "user-skill",
         "synced-skill-content",
+        "synced-dot-dir-skill",
+        "synced-hidden-subdir",
         "user-mcp",
     ],
 )
@@ -9686,8 +9704,7 @@ def test_config_surface_ignores_claude_state_dirs(tmp_path, runs_root, monkeypat
         # старте (живой прогон на Linux 11.11, claude 2.1.322) — не наблюдаются
         (h / ".claude/skills/synced/acc").mkdir(parents=True)
         (h / ".claude/skills/synced/acc/.last-complete-round").write_text("1")
-        (h / ".claude/skills/synced/.bucket-acc/pdf").mkdir(parents=True)
-        (h / ".claude/skills/synced/.bucket-acc/pdf/SKILL.md").write_text("x")
+        (h / ".claude/skills/synced/.bucket-acc").write_text("")
         # ~/.claude.json сессии пишут постоянно; наблюдаются только mcpServers
         (h / ".claude.json").write_text(json.dumps({"numStartups": 42}))
 
@@ -12091,11 +12108,14 @@ def test_resolve_base_ref_keeps_known_base(tmp_path: Path, runs_root) -> None:
 def test_resolve_base_ref_unavailable_falls_back(
     tmp_path: Path, runs_root, capsys
 ) -> None:
-    """Факт не установлен — прежнее умолчание `master`, вслух и без записи."""
+    """Факт не установлен — прежнее умолчание `master`, вслух, и закреплено
+    в леджере: следующая волна не переедет на другую базу (ревью #729)."""
     from governance import runner
 
     state, ops = _wave_state(tmp_path, "r-base-down", wave=1)
     state.base_ref = None
     assert runner._resolve_base_ref(state, ops) == "master"
-    assert state.base_ref is None
+    assert rs.load("r-base-down").base_ref == "master"
+    ops.forge = consistent_world()
+    assert runner._resolve_base_ref(state, ops) == "master", "решение одно"
     assert "ветка по умолчанию не установлена" in capsys.readouterr().out
