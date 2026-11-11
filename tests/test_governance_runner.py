@@ -4467,34 +4467,50 @@ def test_gate_stale_draft_pin_stops_locally(
     assert f"candidate-{state.wave}" not in state.ops
 
 
+_UPPER_STALE_REQ = (
+    "---\n"
+    "spec_stage: requirements\n"
+    "status: stale\n"
+    "traces_to:\n  - charter\n"
+    "upstream_hashes:\n"
+    '  charter: "' + "a" * 40 + '"\n'
+    "---\n"
+    "#### FR-01: x\n"
+)
+
+
 def test_gate_prospective_pins_limited_to_wave_scope(
     tmp_path: Path, runs_root, monkeypatch
 ) -> None:
-    """Пины узлов выше текущей волны не проверяются: после `--reopen charter`
-    requirements в worktree держит пин старого charter, и его переодобряет
-    волна 2 — стоп W1 на нём был бы тупиком (живой прогон на Linux 11.11)."""
+    """Пины узла выше волны, совпадающего с base, не сверяются: после
+    `--reopen charter` requirements держит пин старого charter, его
+    переодобряет волна 2 — стоп W1 был бы тупиком (живой прогон на Linux
+    11.11). Тот же узел, которого нет в base (подсадка автора W1), сверяется
+    как прежде (ревью #729, круг 2)."""
 
     class UpperStaleOps(FakeOps):
+        from_base = True
+
         def author(self, call, kind: str, subject: str, brief_context=None) -> int:
             rc = super().author(call, kind, subject, brief_context=brief_context)
             if kind == "charter":
-                path = Path(call.target_dir) / call.bundle_dir / "10-requirements.md"
-                path.write_text(
-                    "---\n"
-                    "spec_stage: requirements\n"
-                    "status: stale\n"
-                    "traces_to:\n  - charter\n"
-                    "upstream_hashes:\n"
-                    '  charter: "' + "a" * 40 + '"\n'
-                    "---\n"
-                    "#### FR-01: x\n"
-                )
+                rel = f"{call.bundle_dir}/10-requirements.md"
+                (Path(call.target_dir) / rel).write_text(_UPPER_STALE_REQ)
+                if self.from_base:
+                    self.base_files[rel] = _UPPER_STALE_REQ
             return rc
 
     ops = UpperStaleOps(facts=GREEN_PR_FACTS)
     state = _drive_waves_to(tmp_path, "r-upper-stale", ops, monkeypatch, 1)
     assert state.status != "stopped_gate"
     assert state.ops["gate-candidate-1"]["status"] == "completed"
+
+    planted = UpperStaleOps(facts=GREEN_PR_FACTS)
+    planted.from_base = False
+    state = _drive_waves_to(tmp_path, "r-upper-plant", planted, monkeypatch, 1)
+    findings = (runner.run_dir("r-upper-plant") / "gate-findings.txt").read_text()
+    assert state.status == "stopped_gate", "узел выше волны, которого нет в base"
+    assert "GC-STALE" in findings and "10-requirements.md" in findings
 
 
 def _real_candidate_gate(
@@ -4542,14 +4558,12 @@ def test_real_gate_w1_ignores_stale_pin_of_upper_node(
         def author(self, call, kind: str, subject: str, brief_context=None) -> int:
             rc = _DtSmokeOps.author(self, call, kind, subject)
             if kind == "charter":
-                (
-                    Path(call.target_dir) / call.bundle_dir / "10-requirements.md"
-                ).write_text(
-                    _dt_smoke_requirements_body("a" * 40).replace(
-                        "status: draft", "status: stale"
-                    ),
-                    encoding="utf-8",
+                text = _dt_smoke_requirements_body("a" * 40).replace(
+                    "status: draft", "status: stale"
                 )
+                rel = f"{call.bundle_dir}/10-requirements.md"
+                (Path(call.target_dir) / rel).write_text(text, encoding="utf-8")
+                self.base_files[rel] = text  # каскад reopen: байты из base
             return rc
 
         def gate_check_candidate(
@@ -9738,6 +9752,21 @@ _MARKET = {"mk": {"source": {"source": "github", "repo": "o/mk"}}}
 
 
 @pytest.mark.parametrize(
+    "data",
+    [
+        {"marketplaces": {"mk": {"source": "x"}}},
+        {"mk": {"installLocation": "/x"}},
+        {"mk": "github:o/mk"},
+    ],
+    ids=["wrapped", "no-source", "not-a-dict"],
+)
+def test_marketplaces_unknown_shape_is_watched_as_bytes(tmp_path, data) -> None:
+    """Нераспознанная форма `known_marketplaces.json` — `None` (наблюдаются
+    байты), а не константа, слепая к новому источнику (ревью #729)."""
+    assert runner._project_registry(tmp_path, "known_marketplaces.json", data) is None
+
+
+@pytest.mark.parametrize(
     ("change", "stops"),
     [
         # автообновление CLI (живой прогон на Linux 11.11): метки времени,
@@ -12108,14 +12137,15 @@ def test_resolve_base_ref_keeps_known_base(tmp_path: Path, runs_root) -> None:
 def test_resolve_base_ref_unavailable_falls_back(
     tmp_path: Path, runs_root, capsys
 ) -> None:
-    """Факт не установлен — прежнее умолчание `master`, вслух, и закреплено
-    в леджере: следующая волна не переедет на другую базу (ревью #729)."""
+    """Факт не установлен — прежнее умолчание `master`, вслух и БЕЗ записи:
+    следующий заход переспрашивает фордж (ревью #729, круг 2 — угадка в
+    леджере навсегда закрепила бы несуществующую базу)."""
     from governance import runner
 
     state, ops = _wave_state(tmp_path, "r-base-down", wave=1)
     state.base_ref = None
     assert runner._resolve_base_ref(state, ops) == "master"
-    assert rs.load("r-base-down").base_ref == "master"
+    assert state.base_ref is None
     ops.forge = consistent_world()
-    assert runner._resolve_base_ref(state, ops) == "master", "решение одно"
+    assert runner._resolve_base_ref(state, ops) == "main", "фордж переспрошен"
     assert "ветка по умолчанию не установлена" in capsys.readouterr().out

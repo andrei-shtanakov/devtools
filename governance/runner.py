@@ -2533,21 +2533,20 @@ def _resolve_base_ref(state: RunState, ops: Ops) -> str:
     До первого PR `base_ref` пуст, и прежний литерал `master` ломал цели
     с `main` (живой прогон на Linux, 2026-11-11: `git switch master` rc=128).
     Установленная ветка записывается в леджер — последующие шаги читают её
-    из `state.base_ref`. Факт не установлен — прежнее умолчание, вслух, и оно
-    тоже записывается: одно решение на прогон, иначе волны одного прогона
-    разъехались бы по разным базам после транзиентного сбоя (ревью #729).
+    из `state.base_ref`. Факт не установлен — прежнее умолчание вслух и БЕЗ
+    записи: угадка в леджере навсегда закрепила бы несуществующую базу после
+    транзиентного сбоя (ревью #729, круг 2); следующий заход переспросит фордж.
     """
     if state.base_ref:
         return state.base_ref
     fact = ops.default_branch_fact(state.repo_slug)
-    if fact.established and fact.value is not None:
-        state.base_ref = fact.value.name
-    else:
+    if not fact.established or fact.value is None:
         print(
             f"_step_branch: ветка по умолчанию не установлена ({fact.detail}) — "
-            "база master, закреплена на весь прогон"
+            "база master (не закрепляется)"
         )
-        state.base_ref = "master"
+        return "master"
+    state.base_ref = fact.value.name
     save(state)
     return state.base_ref
 
@@ -3386,7 +3385,9 @@ def _project_registry(claude_home: Path, name: str, data: object) -> object | No
     if not isinstance(data, dict):
         return None
     if name == "known_marketplaces.json":
-        if not all(isinstance(v, dict) for v in data.values()):
+        if not all(isinstance(v, dict) and "source" in v for v in data.values()):
+            # Форма замерена (claude 2.1.322): плоская, у каждой записи
+            # `source`. Иное — не распознано, наблюдаются байты (ревью #729).
             return None
         return {
             market: [entry.get("source"), entry.get("installLocation")]
@@ -3595,6 +3596,14 @@ def _guard_edge_results(
         f"{' '.join(findings)} {outcome}; resume авторит узел заново.{suspect.hint}",
     )
     return None
+
+
+def _same_as_base(state: RunState, ops: Ops, fname: str, path: Path) -> bool:
+    """Файл узла в worktree совпадает с base волны (нет в base — не совпадает)."""
+    base = ops.show_file(
+        state.target_dir, state.base_ref or "master", f"{state.bundle_dir}/{fname}"
+    )
+    return base is not None and base == path.read_text(encoding="utf-8")
 
 
 def _step_commit(state: RunState, ops: Ops) -> bool:
@@ -3885,10 +3894,16 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
             # candidate из `upstream_pins`. Сверка здесь — тупик (живой
             # прогон на Linux 11.11, W2 после переоткрытия charter).
             continue
-        if in_scope is not None and bundle_dag.node_id(fname) not in in_scope:
-            # Узел выше волны: его пины сверит его волна. После `--reopen`
-            # нижнего узла он держит пин старых байтов до переодобрения —
-            # стоп здесь был бы тупиком (живой прогон на Linux 11.11).
+        if (
+            in_scope is not None
+            and bundle_dag.node_id(fname) not in in_scope
+            and _same_as_base(state, ops, fname, path)
+        ):
+            # Узел выше волны, байт в байт как в base: каскад `--reopen`
+            # нижнего узла, пин старых байтов до его переодобрения — стоп
+            # здесь был бы тупиком (живой прогон на Linux 11.11). Узел,
+            # появившийся или изменённый в этой волне (подсадка автора),
+            # сверяется как прежде (ревью #729, круг 2).
             continue
         front = _frontmatter(path.read_text(encoding="utf-8"))
         declares = re.search(
