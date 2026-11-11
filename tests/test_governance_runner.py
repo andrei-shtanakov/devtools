@@ -4489,15 +4489,15 @@ def test_gate_prospective_pins_limited_to_wave_scope(
     как прежде (ревью #729, круг 2)."""
 
     class UpperStaleOps(FakeOps):
-        from_base = True
+        base_text: str | None = _UPPER_STALE_REQ
 
         def author(self, call, kind: str, subject: str, brief_context=None) -> int:
             rc = super().author(call, kind, subject, brief_context=brief_context)
             if kind == "charter":
                 rel = f"{call.bundle_dir}/10-requirements.md"
                 (Path(call.target_dir) / rel).write_text(_UPPER_STALE_REQ)
-                if self.from_base:
-                    self.base_files[rel] = _UPPER_STALE_REQ
+                if self.base_text is not None:
+                    self.base_files[rel] = self.base_text
             return rc
 
     ops = UpperStaleOps(facts=GREEN_PR_FACTS)
@@ -4505,12 +4505,30 @@ def test_gate_prospective_pins_limited_to_wave_scope(
     assert state.status != "stopped_gate"
     assert state.ops["gate-candidate-1"]["status"] == "completed"
 
-    planted = UpperStaleOps(facts=GREEN_PR_FACTS)
-    planted.from_base = False
-    state = _drive_waves_to(tmp_path, "r-upper-plant", planted, monkeypatch, 1)
-    findings = (runner.run_dir("r-upper-plant") / "gate-findings.txt").read_text()
-    assert state.status == "stopped_gate", "узел выше волны, которого нет в base"
-    assert "GC-STALE" in findings and "10-requirements.md" in findings
+    # След каскада: в base узел `approved`, в worktree раннер уже пометил его
+    # `stale` (снимок заявки S7 до мержа candidate) — повторный гейт на
+    # resume не стопит (ревью #729, круг 3).
+    cascade = UpperStaleOps(facts=GREEN_PR_FACTS)
+    cascade.base_text = _UPPER_STALE_REQ.replace("status: stale", "status: approved")
+    state = _drive_waves_to(tmp_path, "r-upper-cascade", cascade, monkeypatch, 1)
+    assert state.status != "stopped_gate", "status: stale — штатный след каскада"
+
+    for run_id, base_text, why in (
+        ("r-upper-plant", None, "узел выше волны, которого нет в base"),
+        (
+            "r-upper-repin",
+            _UPPER_STALE_REQ.replace("status: stale", "status: approved").replace(
+                "a" * 40, "b" * 40
+            ),
+            "кроме status, изменён пин",
+        ),
+    ):
+        planted = UpperStaleOps(facts=GREEN_PR_FACTS)
+        planted.base_text = base_text
+        state = _drive_waves_to(tmp_path, run_id, planted, monkeypatch, 1)
+        findings = (runner.run_dir(run_id) / "gate-findings.txt").read_text()
+        assert state.status == "stopped_gate", why
+        assert "GC-STALE" in findings and "10-requirements.md" in findings
 
 
 def _real_candidate_gate(

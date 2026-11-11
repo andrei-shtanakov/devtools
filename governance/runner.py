@@ -51,6 +51,7 @@ from governance import (
 from governance import approval_ledger as al
 from governance import approve_node as an
 from governance import interview as iv
+from governance import node_approval as na
 from governance import run_lock as rl
 from governance.act_request import ACT_REVIEW_V1
 from governance.act_time import OPS_FAILURES
@@ -3599,11 +3600,34 @@ def _guard_edge_results(
 
 
 def _same_as_base(state: RunState, ops: Ops, fname: str, path: Path) -> bool:
-    """Файл узла в worktree совпадает с base волны (нет в base — не совпадает)."""
+    """Узел в worktree совпадает с base волны с точностью до следа каскада.
+
+    Единственная допустимая разница — `status: stale`: её пишет сам раннер
+    (`an._cascade_stale` в снимке заявки S7) до мержа candidate, и повторный
+    гейт на resume видел бы её как подсадку (ревью #729, круг 3). Прочие
+    ключи frontmatter и тело обязаны совпасть; нет в base или не
+    разбирается — не совпадает (узел сверяется по пинам).
+    """
     base = ops.show_file(
         state.target_dir, state.base_ref or "master", f"{state.bundle_dir}/{fname}"
     )
-    return base is not None and base == path.read_text(encoding="utf-8")
+    if base is None:
+        return False
+    text = path.read_text(encoding="utf-8")
+    if base == text:
+        return True
+    try:
+        meta, body = split_frontmatter(text)
+        base_meta, base_body = split_frontmatter(base)
+    except ValueError:
+        return False
+    if meta.get("status") != na.STATUS_STALE or body != base_body:
+        return False
+    return _without_status(meta) == _without_status(base_meta)
+
+
+def _without_status(meta: dict) -> dict:
+    return {k: v for k, v in meta.items() if k != "status"}
 
 
 def _step_commit(state: RunState, ops: Ops) -> bool:
