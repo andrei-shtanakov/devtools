@@ -60,7 +60,7 @@ from governance.edge_check import coordinator as edge_coordinator
 from governance.edge_check import publish as edge_publish
 from governance.edge_check.rules import EdgeCheckError
 from governance.facts import Outcome
-from governance.frontmatter import split_frontmatter
+from governance.frontmatter import split_frontmatter, update_frontmatter
 from governance.merge_gate import PrFacts
 from governance.ops import (
     _AUTHOR_DSL,
@@ -3604,9 +3604,11 @@ def _same_as_base(state: RunState, ops: Ops, fname: str, path: Path) -> bool:
 
     Единственная допустимая разница — `status: stale`: её пишет сам раннер
     (`an._cascade_stale` в снимке заявки S7) до мержа candidate, и повторный
-    гейт на resume видел бы её как подсадку (ревью #729, круг 3). Прочие
-    ключи frontmatter и тело обязаны совпасть; нет в base или не
-    разбирается — не совпадает (узел сверяется по пинам).
+    гейт на resume видел бы её как подсадку (ревью #729, круг 3). Сравнение
+    побайтное с тем, что записал бы каскад над base (тот же
+    `update_frontmatter`), а не по разобранным словарям: разбор сглаживает
+    различия, которые читатель ниже по течению может видеть иначе. Нет в
+    base или не разбирается — не совпадает (узел сверяется по пинам).
     """
     base = ops.show_file(
         state.target_dir, state.base_ref or "master", f"{state.bundle_dir}/{fname}"
@@ -3617,17 +3619,9 @@ def _same_as_base(state: RunState, ops: Ops, fname: str, path: Path) -> bool:
     if base == text:
         return True
     try:
-        meta, body = split_frontmatter(text)
-        base_meta, base_body = split_frontmatter(base)
+        return text == update_frontmatter(base, {"status": na.STATUS_STALE})
     except ValueError:
         return False
-    if meta.get("status") != na.STATUS_STALE or body != base_body:
-        return False
-    return _without_status(meta) == _without_status(base_meta)
-
-
-def _without_status(meta: dict) -> dict:
-    return {k: v for k, v in meta.items() if k != "status"}
 
 
 def _step_commit(state: RunState, ops: Ops) -> bool:

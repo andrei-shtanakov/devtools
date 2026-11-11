@@ -4522,12 +4522,19 @@ def test_gate_prospective_pins_limited_to_wave_scope(
             ),
             "кроме status, изменён пин",
         ),
+        (
+            "r-upper-bytes",
+            _UPPER_STALE_REQ.replace("status: stale", "status: approved").replace(
+                "traces_to:", "# note\ntraces_to:"
+            ),
+            "разбор равен, байты нет: сравнение побайтное",
+        ),
     ):
         planted = UpperStaleOps(facts=GREEN_PR_FACTS)
         planted.base_text = base_text
         state = _drive_waves_to(tmp_path, run_id, planted, monkeypatch, 1)
-        findings = (runner.run_dir(run_id) / "gate-findings.txt").read_text()
         assert state.status == "stopped_gate", why
+        findings = (runner.run_dir(run_id) / "gate-findings.txt").read_text()
         assert "GC-STALE" in findings and "10-requirements.md" in findings
 
 
