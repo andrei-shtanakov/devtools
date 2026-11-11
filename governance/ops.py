@@ -944,10 +944,14 @@ def author_prompt(
             f"The requirements source is {bundle_dir}/{requirements_source}."
         )
         if kind == "charter":
+            edges = "".join(f"\n  - {name}" for name in blobs)
             source_guidance += (
                 " Declare every discovery source as a direct traces_to "
                 "edge and pin it in upstream_hashes using the supplied "
-                "git blob pins."
+                "git blob pins. In the frontmatter, traces_to lists the "
+                "edge names, not file paths, exactly as follows:"
+                f"\ntraces_to:{edges}\nand upstream_hashes maps each of "
+                "these names to its pin."
             )
     return (
         f"kind={kind} subject={subject!r} bundle_dir={bundle_dir}\n"

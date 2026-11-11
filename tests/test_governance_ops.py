@@ -727,6 +727,10 @@ def test_author_prompt_adds_brief_context_only_to_charter_and_requirements():
         assert "Source IDs are immutable" in prompt
     assert "direct traces_to edge" in charter
     assert "direct traces_to edge" not in requirements
+    # Живой прогон на Linux 11.11: агент писал в traces_to пути файлов, а
+    # гейт ждёт имена рёбер — промпт называет их дословно.
+    assert "- discovery-brief" in charter
+    assert "not file paths" in charter
     assert "Discovery source layer" not in behaviour
 
 
