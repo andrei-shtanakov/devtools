@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10643,13 +10644,10 @@ def test_common_entries_refuse_unrecognised_config_before_side_effects(
     assert not rs.run_dir("r-cfg").exists()
 
 
-_darwin_only = pytest.mark.skipif(
-    not hasattr(os, "O_NOFOLLOW_ANY"),
-    reason="настоящий допуск и каталог вызова — O_NOFOLLOW_ANY, только Darwin",
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not os.path.exists("/usr/bin/sandbox-exec"),
+    reason="настоящий допуск: macOS с /usr/bin/sandbox-exec и sw_vers",
 )
-
-
-@_darwin_only
 def test_boundary_refuses_mismatched_admission_through_runner(
     tmp_path: Path, runs_root, monkeypatch, boundary
 ) -> None:
@@ -10676,7 +10674,6 @@ def test_boundary_refuses_mismatched_admission_through_runner(
     _assert_refused_at_boundary(state, ops, boundary, "не совпали sha256")
 
 
-@_darwin_only
 def test_boundary_probe_failure_through_runner_removes_call_dir(
     tmp_path: Path, runs_root, monkeypatch, boundary
 ) -> None:
