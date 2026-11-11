@@ -3857,6 +3857,17 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         path = Path(state.target_dir) / state.bundle_dir / fname
         if not path.exists():
             continue
+        if (
+            in_scope is not None
+            and _wave_mode(state) == "reapprove"
+            and bundle_dag.levels(_wave_dag())[bundle_dag.node_id(fname)]
+            == _wave_level(state)
+        ):
+            # reapprove (§3.4): байты узла уровня — из base, с пином старого
+            # upstream (каскад после `--reopen`); свежие пины ставит штамп
+            # candidate из `upstream_pins`. Сверка здесь — тупик (живой
+            # прогон на Linux 11.11, W2 после переоткрытия charter).
+            continue
         if in_scope is not None and bundle_dag.node_id(fname) not in in_scope:
             # Узел выше волны: его пины сверит его волна. После `--reopen`
             # нижнего узла он держит пин старых байтов до переодобрения —

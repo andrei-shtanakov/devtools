@@ -8227,6 +8227,41 @@ def test_reopen_resets_authoring_of_upper_nodes_absent_from_base(
     assert stopped.ops["author-requirements"]["status"] == "completed"
 
 
+def test_reapprove_wave_ignores_old_pins_of_its_level(
+    tmp_path: Path,
+    runs_root,
+    monkeypatch,
+) -> None:
+    """reapprove: узел уровня волны — байты base с пином СТАРОГО upstream
+    (каскад после `--reopen`); свежие пины ставит штамп candidate
+    (`upstream_pins`), поэтому prospective-сверка пина здесь — тупик (живой
+    прогон на Linux 11.11: W2 после переоткрытия charter)."""
+    ops = FakeOps(facts={"state": "MERGED", "baseRefName": "master"})
+    _fake_wave_adapters(monkeypatch, ops)
+    _fake_approve_node_full(monkeypatch, ops)
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-reapp-pin", ops))
+    from governance import approval_ledger as al
+
+    al.complete_request(state, state.ops["candidate-1"]["request"])
+    state.wave = 2
+    state.ops["candidate-2"] = dict(state.ops["candidate-1"])
+    rs.save(state)
+    base = _all_approved()
+    base[f"{BUNDLE_DIR}/15-behaviour-spec.md"] = _approved("behaviour-spec").replace(
+        "approved", "stale"
+    )
+    ops.base_files = base
+    (Path(state.target_dir) / BUNDLE_DIR / "15-behaviour-spec.md").write_text(
+        "---\nspec_stage: behaviour-spec\nstatus: stale\n"
+        "traces_to:\n  - requirements\nupstream_hashes:\n"
+        '  requirements: "' + "a" * 40 + '"\n---\n#### BEH-01: x\n',
+        encoding="utf-8",
+    )
+    resumed = locked_runner.resume("r-reapp-pin", ops)
+    assert resumed.wave == 3 and resumed.ops["branch-3"]["mode"] == "reapprove"
+    assert resumed.status != "stopped_gate"
+
+
 def test_stale_level_is_reapproved_over_base_without_authoring(
     tmp_path: Path,
     runs_root,
