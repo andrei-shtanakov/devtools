@@ -1564,24 +1564,24 @@ class RealOps(BriefFactsMixin):
     def edit_pr(
         self, target_dir: str, repo_slug: str, pr: int, title: str, body: str
     ) -> None:
-        """`gh pr edit <pr> --title --body -R <slug>`; сбой — RuntimeError.
+        """`PATCH repos/<slug>/pulls/<pr>` (title, body); сбой — RuntimeError.
 
         devtools#539: текст candidate-PR обязан следовать за составом
         заявки — мерж этого PR и есть акт одобрения узлов, которые он
-        объявляет.
+        объявляет. REST, а не `gh pr edit`: тот в gh 2.70 падает на снятых
+        Projects (classic).
         """
         done = subprocess.run(
             [
                 "gh",
-                "pr",
-                "edit",
-                str(pr),
-                "-R",
-                repo_slug,
-                "--title",
-                title,
-                "--body",
-                body,
+                "api",
+                "-X",
+                "PATCH",
+                f"repos/{repo_slug}/pulls/{pr}",
+                "-f",
+                f"title={title}",
+                "-f",
+                f"body={body}",
             ],
             cwd=target_dir,
             capture_output=True,
@@ -1590,7 +1590,8 @@ class RealOps(BriefFactsMixin):
         )
         if done.returncode != 0:
             raise RuntimeError(
-                f"edit_pr: gh pr edit {pr} rc={done.returncode}: {done.stderr.strip()}"
+                f"edit_pr: gh api PATCH pulls/{pr} rc={done.returncode}: "
+                f"{done.stderr.strip()}"
             )
 
     def create_pr(

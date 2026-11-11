@@ -2916,3 +2916,28 @@ def test_workflow_files_other_error_is_none(monkeypatch):
 def test_workflow_files_non_list_is_none(monkeypatch):
     got, _ = _workflow_run(monkeypatch, stdout='{"message": "x"}')
     assert got is None
+
+
+def test_edit_pr_uses_rest_patch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """REST, не `gh pr edit`: тот в gh 2.70 падает на снятых Projects (classic)."""
+    seen: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "{}", "")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+    RealOps().edit_pr("/t", "o/r", 7, "T", "@B")
+    assert seen == [
+        ["gh", "api", "-X", "PATCH", "repos/o/r/pulls/7", "-f", "title=T",
+         "-f", "body=@B"]
+    ]  # fmt: skip
+
+
+def test_edit_pr_failure_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(argv, 1, "", "boom")
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="PATCH pulls/7 rc=1: boom"):
+        RealOps().edit_pr("/t", "o/r", 7, "T", "B")

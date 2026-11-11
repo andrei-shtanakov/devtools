@@ -302,7 +302,13 @@ def _ensure_label(slug: str, gh: Gh) -> None:
 def _label_pr(slug: str, url: str, gh: Gh) -> None:
     """Метка в репо и на PR подготовки; идемпотентно, на каждом запуске."""
     _ensure_label(slug, gh)
-    done = gh(["pr", "edit", url, "--repo", slug, "--add-label", LABEL])
+    number = url.rstrip("/").rsplit("/", 1)[-1]
+    if not number.isdigit():
+        raise InitError(f"номер PR не разобран из {url} — повторите dfl init-repo")
+    # REST, а не `gh pr edit`: тот в gh 2.70 падает на снятых Projects (classic).
+    done = gh(
+        ["api", f"repos/{slug}/issues/{number}/labels", "-f", f"labels[]={LABEL}"]
+    )
     if done.returncode != 0:
         raise InitError(
             f"метка не поставлена на {url}: {done.stderr.strip()} — "
