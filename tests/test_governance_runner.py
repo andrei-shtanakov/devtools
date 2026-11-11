@@ -9561,6 +9561,16 @@ _MARKET = {"mk": {"source": {"source": "github", "repo": "o/mk"}}}
             ),
             True,
         ),
+        # CLI доставил плагин, который оператор включил в settings.json
+        # (живой прогон на Linux 11.11: superpowers при старте вызова)
+        (
+            lambda h: _registry(
+                h,
+                {"p@mk": _plugin(h, "1.0", "A"), "on@mk": _plugin(h, "1.0", "A")},
+                _MARKET,
+            ),
+            False,
+        ),
         # ссылка в кэше, ведущая наружу
         (
             lambda h: (
@@ -9577,6 +9587,7 @@ _MARKET = {"mk": {"source": {"source": "github", "repo": "o/mk"}}}
         "path-outside-cache",
         "new-source",
         "dotdot-escape",
+        "enabled-by-operator",
         "symlink-escape",
     ],
 )
@@ -9587,6 +9598,9 @@ def test_config_surface_plugin_registry_projection(
     а не байтами: автообновление CLI переписывает служебные поля."""
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)
+    (home / ".claude/settings.json").write_text(
+        json.dumps({"enabledPlugins": {"on@mk": True, "evil@mk": False}})
+    )
     _registry(home, {"p@mk": _plugin(home, "1.0", "A")}, _MARKET)
     monkeypatch.setattr(runner, "_claude_home", lambda: home / ".claude")
 

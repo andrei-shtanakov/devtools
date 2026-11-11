@@ -3331,6 +3331,20 @@ def _plugin_registry_digest(claude_home: Path, name: str) -> str:
     return hashlib.sha256(json.dumps(projected, sort_keys=True).encode()).hexdigest()
 
 
+def _enabled_plugins(claude_home: Path) -> set[str]:
+    """Плагины, включённые оператором (`enabledPlugins: true`) в settings*.json."""
+    out: set[str] = set()
+    for name in ("settings.json", "settings.local.json"):
+        try:
+            data = json.loads((claude_home / name).read_text(encoding="utf-8"))
+            flags = data.get("enabledPlugins") or {}
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(flags, dict):
+            out |= {str(k) for k, v in flags.items() if v is True}
+    return out
+
+
 def _in_cache(raw: object, cache: Path) -> bool:
     """Код плагина в кэше: без `..` и после разрешения ссылок (security
     review: лексическое сравнение пропускало `cache/../../evil`)."""
@@ -3357,12 +3371,21 @@ def _project_registry(claude_home: Path, name: str, data: object) -> object | No
     if not isinstance(plugins, dict):
         return None
     cache = (claude_home / "plugins" / "cache").resolve()
+    enabled = _enabled_plugins(claude_home)
     out: dict[str, list[list[object]]] = {}
     for plugin, entries in plugins.items():
         if not isinstance(entries, list) or not all(
             isinstance(e, dict) for e in entries
         ):
             return None
+        if plugin in enabled and all(
+            _in_cache(e.get("installPath"), cache) for e in entries
+        ):
+            # CLI доставляет плагин, включённый оператором в settings.json
+            # (живой прогон на Linux 11.11: superpowers при старте вызова);
+            # сам settings.json наблюдается байтами — включить плагин агент
+            # незаметно не может.
+            continue
         out[plugin] = [
             [
                 e.get("scope"),
