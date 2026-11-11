@@ -9482,6 +9482,93 @@ def test_config_surface_ignores_claude_state_dirs(tmp_path, runs_root, monkeypat
     assert state.status != "stopped_author"
 
 
+def _registry(home: Path, plugins: dict, marketplaces: dict) -> None:
+    root = home / ".claude/plugins"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "installed_plugins.json").write_text(
+        json.dumps({"version": 2, "plugins": plugins})
+    )
+    (root / "known_marketplaces.json").write_text(json.dumps(marketplaces))
+
+
+def _plugin(home: Path, version: str, stamp: str, **extra) -> list[dict]:
+    path = home / f".claude/plugins/cache/mk/p/{version}"
+    entry = {
+        "scope": "user",
+        "installPath": str(path),
+        "version": version,
+        "installedAt": "2026-09-05T00:00:00Z",
+        "lastUpdated": stamp,
+        "gitCommitSha": stamp,
+    }
+    return [{**entry, **extra}]
+
+
+_MARKET = {"mk": {"source": {"source": "github", "repo": "o/mk"}}}
+
+
+@pytest.mark.parametrize(
+    ("change", "stops"),
+    [
+        # автообновление CLI (живой прогон на Linux 11.11): метки времени,
+        # коммит и версия внутри кэша — не подсадка
+        (
+            lambda h: _registry(
+                h,
+                {"p@mk": _plugin(h, "1.1", "B")},
+                {"mk": {**_MARKET["mk"], "lastUpdated": "B"}},
+            ),
+            False,
+        ),
+        # новый плагин — подсадка
+        (
+            lambda h: _registry(
+                h,
+                {"p@mk": _plugin(h, "1.0", "A"), "evil@mk": _plugin(h, "1.0", "A")},
+                _MARKET,
+            ),
+            True,
+        ),
+        # код плагина вне кэша — подсадка
+        (
+            lambda h: _registry(
+                h, {"p@mk": _plugin(h, "1.0", "A", installPath="/tmp/evil")}, _MARKET
+            ),
+            True,
+        ),
+        # новый источник маркетплейса — подсадка
+        (
+            lambda h: _registry(
+                h,
+                {"p@mk": _plugin(h, "1.0", "A")},
+                {"mk": {"source": {"source": "github", "repo": "evil/mk"}}},
+            ),
+            True,
+        ),
+    ],
+    ids=["cli-autoupdate", "new-plugin", "path-outside-cache", "new-source"],
+)
+def test_config_surface_plugin_registry_projection(
+    tmp_path, runs_root, monkeypatch, change, stops
+):
+    """Реестр плагинов наблюдается по смыслу (что установлено и откуда),
+    а не байтами: автообновление CLI переписывает служебные поля."""
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    _registry(home, {"p@mk": _plugin(home, "1.0", "A")}, _MARKET)
+    monkeypatch.setattr(runner, "_claude_home", lambda: home / ".claude")
+
+    class _Change(FakeOps):
+        def author(self, call, kind, subject, brief_context=None):
+            rc = super().author(call, kind, subject, brief_context=brief_context)
+            if kind == "charter":
+                change(home)
+            return rc
+
+    state = _drive_waves_to(tmp_path, "r-cfg-reg", _Change(), monkeypatch, 1)
+    assert (state.status == "stopped_author") is stops
+
+
 def test_config_surface_watches_scripts_that_hooks_reference(
     tmp_path, runs_root, monkeypatch
 ):

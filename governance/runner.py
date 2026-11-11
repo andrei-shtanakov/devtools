@@ -3231,8 +3231,6 @@ _CLAUDE_WATCH_FILES = (
     # marketplaces/, data/, synced/ пишут живые сессии (ревью #489). Подмена
     # кода УЖЕ установленного плагина в cache/ не наблюдается — закроет
     # песочница (§9).
-    "plugins/installed_plugins.json",
-    "plugins/known_marketplaces.json",
     "plugins/config.json",
     "plugins/blocklist.json",
 )
@@ -3309,6 +3307,65 @@ def _mcp_servers_digest(path: Path) -> str:
     return hashlib.sha256(json.dumps(servers, sort_keys=True).encode()).hexdigest()
 
 
+#: Реестр плагинов наблюдается проекцией, а не байтами: CLI при
+#: автообновлении маркетплейса переписывает `lastUpdated`/`gitCommitSha`/
+#: `version` (живой прогон на Linux 11.11, claude 2.1.322: стоп вызова
+#: автора). Смысл реестра — какие плагины установлены, откуда и где их код:
+#: новый плагин, новый источник или код вне `plugins/cache/` видны.
+_PLUGIN_REGISTRY = ("installed_plugins.json", "known_marketplaces.json")
+
+
+def _plugin_registry_digest(claude_home: Path, name: str) -> str:
+    """sha256 проекции реестра плагинов; `absent`; `raw:<sha>` — иная форма."""
+    path = claude_home / "plugins" / name
+    if not path.exists():
+        return "absent"
+    try:
+        raw = path.read_bytes()
+        data = json.loads(raw)
+    except (OSError, ValueError):
+        return "unreadable"
+    projected = _project_registry(claude_home, name, data)
+    if projected is None:
+        return "raw:" + hashlib.sha256(raw).hexdigest()
+    return hashlib.sha256(json.dumps(projected, sort_keys=True).encode()).hexdigest()
+
+
+def _project_registry(claude_home: Path, name: str, data: object) -> object | None:
+    """Смысловая часть реестра; `None` — форма не распознана (байты целиком)."""
+    if not isinstance(data, dict):
+        return None
+    if name == "known_marketplaces.json":
+        if not all(isinstance(v, dict) for v in data.values()):
+            return None
+        return {
+            market: [entry.get("source"), entry.get("installLocation")]
+            for market, entry in data.items()
+        }
+    plugins = data.get("plugins")
+    if not isinstance(plugins, dict):
+        return None
+    cache = claude_home / "plugins" / "cache"
+    out: dict[str, list[list[object]]] = {}
+    for plugin, entries in plugins.items():
+        if not isinstance(entries, list) or not all(
+            isinstance(e, dict) for e in entries
+        ):
+            return None
+        out[plugin] = [
+            [
+                e.get("scope"),
+                e.get("projectPath"),
+                # путь в кэше — смена версии автообновлением; вне — подсадка
+                None
+                if Path(str(e.get("installPath", ""))).is_relative_to(cache)
+                else e.get("installPath"),
+            ]
+            for e in entries
+        ]
+    return out
+
+
 def _claude_home() -> Path:
     """~/.claude оператора — точка подмены для тестов (герметичность)."""
     return Path.home() / ".claude"
@@ -3330,6 +3387,12 @@ def _config_surface_snapshot(state: RunState) -> dict[str, str]:
         "~/.claude.json#mcpServers": _mcp_servers_digest(
             claude_home.parent / ".claude.json"
         ),
+        **{
+            str(claude_home / "plugins" / name): _plugin_registry_digest(
+                claude_home, name
+            )
+            for name in _PLUGIN_REGISTRY
+        },
     }
     for root in roots:
         files = sorted(root.rglob("*")) if root.is_dir() else [root]
