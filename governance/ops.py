@@ -655,7 +655,10 @@ _KINDS_LIST = ", ".join(f"`{_kind}`" for _kind in DELIVERABLE_KINDS)
 _AUTHOR_DSL = {
     "charter": (
         "YAML frontmatter (required): spec_stage: charter, status: draft, "
-        "owner_role: product. Every item that carries an id — goals G-NN, "
+        "owner_role: product. The `schema` key, if written, is the charter "
+        "grammar version: `schema: 1` — never `schema: charter` and no "
+        "`schema_version` (do not copy the discovery files' header). "
+        "Every item that carries an id — goals G-NN, "
         "personas P-NN, jobs J-NN, functional FR-NN, non-functional "
         "NFR-NN, constraints CON-NN, success metrics M-NN, out-of-scope "
         "OUT-NN, risks RK-NN, open questions Q-NN — MUST be DEFINED "

@@ -731,6 +731,9 @@ def test_author_prompt_adds_brief_context_only_to_charter_and_requirements():
     # гейт ждёт имена рёбер — промпт называет их дословно.
     assert "- discovery-brief" in charter
     assert "not file paths" in charter
+    # Живой прогон на Linux 11.11: агент скопировал шапку discovery
+    # (`schema: charter`), steward на границе приёмки (W4) — GC-META error.
+    assert "`schema: 1`" in charter and "never `schema: charter`" in charter
     assert "Discovery source layer" not in behaviour
 
 
