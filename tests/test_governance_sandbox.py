@@ -24,7 +24,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from governance import author_launch, sandbox
+from governance import author_launch, safe_io, sandbox
 from governance.author_launch import TRANSCRIPTS
 from governance.sandbox import CallDir, ForbiddenRoots, SandboxError
 
@@ -1989,6 +1989,43 @@ def test_test_mode_runs_off_darwin(plain, monkeypatch):
     seen = _agent_writes_plain(plain, monkeypatch)
     assert _launch(plain).ok
     assert "call" in seen
+
+
+def test_test_mode_walk_publishes_node(plain, monkeypatch):
+    """Обход вместо O_NOFOLLOW_ANY: каталог вызова создан, узел перенесён."""
+    monkeypatch.setattr(safe_io, "NOFOLLOW_ANY", None)
+    monkeypatch.setattr(author_launch, "_os_name", lambda: "linux")
+    seen = _agent_writes_plain(plain, monkeypatch)
+    out = _launch(plain)
+    assert out.ok, out
+    assert "call" in seen
+    node = plain.target / "ws/spec/10-requirements.md"
+    assert node.read_bytes() == b"node\n"
+
+
+def test_test_mode_through_symlinked_home(plain, tmp_path, monkeypatch):
+    """HOME/XDG за ссылкой (Silverblue): вызывающие канонизируют корни."""
+    monkeypatch.setattr(safe_io, "NOFOLLOW_ANY", None)
+    real_state = Path(os.path.realpath(tmp_path)) / "real-state"
+    real_state.mkdir()
+    (tmp_path / "state-link").symlink_to(real_state)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state-link"))
+    _agent_writes_plain(plain, monkeypatch)
+    out = _launch(plain)
+    assert out.ok, out
+    assert (plain.target / "ws/spec/10-requirements.md").read_bytes() == b"node\n"
+    assert any(real_state.rglob("*"))
+
+
+def test_strict_off_darwin_refuses_before_call_dir(launch, monkeypatch):
+    """strict вне macOS: отказ до каталога вызова и запуска агента."""
+    monkeypatch.setattr(author_launch, "_os_name", lambda: "linux")
+    out = _launch(launch)
+    assert not out.ok
+    assert "только на macOS" in out.reason
+    assert launch.spawned == []
+    assert not sandbox.calls_root().exists()
+    assert not launch.calls.exists()
 
 
 def test_test_mode_non_claude_refused(plain, tmp_path, monkeypatch):
