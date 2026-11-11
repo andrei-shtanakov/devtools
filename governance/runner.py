@@ -3232,12 +3232,24 @@ _CLAUDE_WATCH_FILES = (
     "plugins/blocklist.json",
 )
 _CLAUDE_WATCH_DIRS = ("hooks", "skills", "commands", "agents")
-#: Внутри наблюдаемых каталогов — то, что пишет сам CLI, а не оператор:
-#: `skills/synced/` — синхронизация скиллов учётки claude.ai при каждом
-#: старте (живой прогон на Linux 11.11, claude 2.1.322: стоп на каждом
-#: вызове автора). Тот же класс, что plugins/synced/ выше; подсадка скилла
-#: именно сюда не наблюдается — закроет песочница (§9).
-_CLAUDE_UNWATCHED = ("skills/synced",)
+#: Синхронизация скиллов учётки claude.ai: CLI при каждом старте пишет в
+#: `skills/synced/` служебные файлы (`.last-complete-round`, `.bucket-*`) —
+#: живой прогон на Linux 11.11, claude 2.1.322: стоп на каждом вызове
+#: автора без песочницы. Не наблюдается ТОЛЬКО служебное (сегмент пути под
+#: `synced/` с точки); содержимое скиллов наблюдается — подсадка туда
+#: загрузилась бы в сессиях оператора. Цена: обновление скиллов учётки
+#: само по себе даёт один стоп, его снимает повтор кнопки.
+_CLAUDE_SYNCED = "skills/synced"
+
+
+def _cli_bookkeeping(path: Path, claude_home: Path) -> bool:
+    """Служебный файл синхронизации скиллов (см. `_CLAUDE_SYNCED`)."""
+    synced = claude_home / _CLAUDE_SYNCED
+    if not path.is_relative_to(synced):
+        return False
+    return any(part.startswith(".") for part in path.relative_to(synced).parts)
+
+
 #: В репо, где работает агент: хук, исполняемый в сессии или при коммите.
 #: Остальные репо воркспейса вне наблюдения до песочницы (§9).
 _REPO_WATCH = (".claude", ".mcp.json", ".git/hooks")
@@ -3314,13 +3326,10 @@ def _config_surface_snapshot(state: RunState) -> dict[str, str]:
             claude_home.parent / ".claude.json"
         ),
     }
-    skipped = [claude_home / rel for rel in _CLAUDE_UNWATCHED]
     for root in roots:
         files = sorted(root.rglob("*")) if root.is_dir() else [root]
         present = [
-            f
-            for f in files
-            if f.is_file() and not any(f.is_relative_to(d) for d in skipped)
+            f for f in files if f.is_file() and not _cli_bookkeeping(f, claude_home)
         ]
         if not present:
             # Пустой каталог (или только неотслеживаемое) подсадить ничего

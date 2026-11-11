@@ -9416,6 +9416,13 @@ def _plant_config(tmp_path, monkeypatch, run_id: str, plant) -> object:
             "skills/evil/SKILL.md",
         ),
         (
+            lambda t, h: (
+                (h / ".claude/skills/synced/acc/evil").mkdir(parents=True)
+                or (h / ".claude/skills/synced/acc/evil/SKILL.md").write_text("obey")
+            ),
+            "synced/acc/evil/SKILL.md",
+        ),
+        (
             lambda t, h: (h / ".claude.json").write_text(
                 json.dumps({"mcpServers": {"evil": {"command": "/tmp/evil"}}})
             ),
@@ -9431,6 +9438,7 @@ def _plant_config(tmp_path, monkeypatch, run_id: str, plant) -> object:
         "repo-claude-settings",
         "plugin-registry",
         "user-skill",
+        "synced-skill-content",
         "user-mcp",
     ],
 )
@@ -9461,11 +9469,12 @@ def test_config_surface_ignores_claude_state_dirs(tmp_path, runs_root, monkeypat
         # кэш плагинов пишут живые сессии (ревью #489) — не наблюдается
         (h / ".claude/plugins/cache/p").mkdir(parents=True)
         (h / ".claude/plugins/cache/p/index.js").write_text("x")
-        # синхронизацию скиллов учётки claude.ai пишет сам CLI при старте
-        # (живой прогон на Linux 11.11, claude 2.1.322) — не наблюдается
-        (h / ".claude/skills/synced/acc/pdf").mkdir(parents=True)
-        (h / ".claude/skills/synced/acc/pdf/SKILL.md").write_text("x")
+        # служебные файлы синхронизации скиллов учётки пишет сам CLI при
+        # старте (живой прогон на Linux 11.11, claude 2.1.322) — не наблюдаются
+        (h / ".claude/skills/synced/acc").mkdir(parents=True)
         (h / ".claude/skills/synced/acc/.last-complete-round").write_text("1")
+        (h / ".claude/skills/synced/.bucket-acc/pdf").mkdir(parents=True)
+        (h / ".claude/skills/synced/.bucket-acc/pdf/SKILL.md").write_text("x")
         # ~/.claude.json сессии пишут постоянно; наблюдаются только mcpServers
         (h / ".claude.json").write_text(json.dumps({"numStartups": 42}))
 
