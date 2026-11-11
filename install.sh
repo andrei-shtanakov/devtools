@@ -1,14 +1,17 @@
 #!/bin/sh
-# Установка DarkFactory (лёгкий режим test) без sudo: macOS.
+# Установка DarkFactory (лёгкий режим test) без sudo: macOS или Linux.
 set -eu
 
-if [ "$(uname -s)" != "Darwin" ]; then
-    echo "install.sh: поддерживается только macOS (Darwin)" >&2
-    exit 1
-fi
+case "$(uname -s)" in
+    Darwin | Linux) ;;
+    *)
+        echo "install.sh: поддерживается только macOS (Darwin) и Linux" >&2
+        exit 1
+        ;;
+esac
 
 missing=""
-for tool in git gh uv claude; do
+for tool in git gh uv claude make jq; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         missing="$missing $tool"
     fi
