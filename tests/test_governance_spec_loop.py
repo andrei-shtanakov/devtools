@@ -2752,8 +2752,9 @@ def test_deliver_phase_test_resume_without_record_stops(
     assert "spec-loop (test): tasks-merge завершён" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("status", ["running", "stopped_author", "stopped_gate"])
 def test_test_mode_resumes_crashed_running_run(
-    runs_root, tmp_path, monkeypatch, capsys
+    runs_root, tmp_path, monkeypatch, capsys, status
 ) -> None:
     """test: `running` под нашим замком = процесс оборван — кнопка продолжает.
 
@@ -2769,9 +2770,7 @@ def test_test_mode_resumes_crashed_running_run(
         agent="alice",
         workspace_root=tmp_path,
     )
-    state = _mk_run(
-        "r-crash", "S", status="running", target_dir=str(tmp_path / "alpha")
-    )
+    state = _mk_run("r-crash", "S", status=status, target_dir=str(tmp_path / "alpha"))
     state.mode = "test"
     rs.save(state)
     after = rs.load("r-crash")
@@ -2780,7 +2779,7 @@ def test_test_mode_resumes_crashed_running_run(
     rc = spec_loop.main(["--subject", "S", "--repo", "alpha"])
     assert rc == 0
     assert [c[0] for c in env.calls] == ["resume"]
-    assert "оборван" in capsys.readouterr().out
+    assert "продолжаю" in capsys.readouterr().out
 
 
 def test_strict_running_run_is_not_resumed_silently(

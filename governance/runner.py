@@ -3232,6 +3232,12 @@ _CLAUDE_WATCH_FILES = (
     "plugins/blocklist.json",
 )
 _CLAUDE_WATCH_DIRS = ("hooks", "skills", "commands", "agents")
+#: Внутри наблюдаемых каталогов — то, что пишет сам CLI, а не оператор:
+#: `skills/synced/` — синхронизация скиллов учётки claude.ai при каждом
+#: старте (живой прогон на Linux 11.11, claude 2.1.322: стоп на каждом
+#: вызове автора). Тот же класс, что plugins/synced/ выше; подсадка скилла
+#: именно сюда не наблюдается — закроет песочница (§9).
+_CLAUDE_UNWATCHED = ("skills/synced",)
 #: В репо, где работает агент: хук, исполняемый в сессии или при коммите.
 #: Остальные репо воркспейса вне наблюдения до песочницы (§9).
 _REPO_WATCH = (".claude", ".mcp.json", ".git/hooks")
@@ -3308,10 +3314,17 @@ def _config_surface_snapshot(state: RunState) -> dict[str, str]:
             claude_home.parent / ".claude.json"
         ),
     }
+    skipped = [claude_home / rel for rel in _CLAUDE_UNWATCHED]
     for root in roots:
         files = sorted(root.rglob("*")) if root.is_dir() else [root]
-        present = [f for f in files if f.is_file()]
-        if not present and not root.exists():
+        present = [
+            f
+            for f in files
+            if f.is_file() and not any(f.is_relative_to(d) for d in skipped)
+        ]
+        if not present:
+            # Пустой каталог (или только неотслеживаемое) подсадить ничего
+            # не может — то же состояние, что отсутствие корня.
             snapshot[str(root)] = "absent"
         for path in present:
             try:

@@ -1089,19 +1089,28 @@ def _dispatch(state: rs.RunState, ops, lock: run_lock.RunLock) -> int:
             # дошёл ли вызов до runner.
             return _report_interview_stop(state)
         return _after_resume(runner.resume(state.run_id, ops, lock=lock), ops)
-    if state.status == "running" and state.mode == "test":
-        # Замок прогона держим МЫ, значит процесс, оставивший `running`,
-        # мёртв: в test кнопка продолжает его сама — у `dfl` нет
-        # `make behaviour-run resume` (живой прогон на Linux 11.11). В
-        # strict остаётся «без скрытых ретраев» — продолжение руками.
+    if state.mode == "test" and _test_resumable(state.status):
+        # У `dfl` нет `make behaviour-run resume` (живой прогон на Linux
+        # 11.11): в test повторный запуск кнопки — явное продолжение.
+        # `running` под НАШИМ замком = процесс оборван; `stopped_*` —
+        # `runner.resume` сам сверяет и сбрасывает шаг стопа. В strict
+        # остаётся «без скрытых ретраев» — продолжение руками.
         print(
-            f"spec-loop (test): прогон {state.run_id!r} оборван (статус "
-            "running, замок свободен) — продолжаю"
+            f"spec-loop (test): прогон {state.run_id!r} в статусе "
+            f"{state.status!r} (оборван или остановлен) — продолжаю"
         )
         return _after_resume(runner.resume(state.run_id, ops, lock=lock), ops)
     if state.status == "completed":
         return _deliver_phase(state, ops)
     return _report_state(state)
+
+
+def _test_resumable(status: str) -> bool:
+    """test: статусы, которые повтор кнопки продолжает через `runner.resume`.
+
+    `merged_unverified` терминален (resume отказывает), `brief_ready`,
+    паузы волны и интервью разобраны в `_dispatch` раньше."""
+    return status == "running" or status.startswith("stopped_")
 
 
 def _after_resume(after: rs.RunState, ops) -> int:
