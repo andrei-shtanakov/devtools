@@ -119,7 +119,7 @@ Source: docs/superpowers/specs/2026-09-29-author-agent-sandbox-design.md §15, F
 
 **Checklist:**
 - [ ] корень канонизируется `realpath` один раз; все открытия — с `os.O_NOFOLLOW_ANY` (ссылка в любом компоненте — отказ); неканонизированный путь (`/var/…`) отказывает — тест фиксирует это как поведение
-- [ ] на ОС без `O_NOFOLLOW_ANY` модуль импортируется, а любой вызов отказывает понятной ошибкой «только macOS» (переносимый тест)
+- [ ] ~~на ОС без `O_NOFOLLOW_ANY` модуль импортируется, а любой вызов отказывает понятной ошибкой «только macOS» (переносимый тест)~~ — **заменено** devtools#727 (2026-11-11): на ОС без `O_NOFOLLOW_ANY` (Linux) та же гарантия даётся покомпонентным обходом от `/` с `O_NOFOLLOW` (промежуточные — `O_PATH`); тесты обеих веток на любой машине. Дизайн — `docs/superpowers/specs/2026-11-11-darkfactory-linux-test-design.md`
 - [ ] `read_regular(root, rel, limit, timeout)`: `O_RDONLY|O_NONBLOCK|O_NOFOLLOW_ANY`, `fstat` открытого дескриптора — только обычный файл с `st_nlink == 1`; читается не более `limit + 1` байт с ограничением времени; больше `limit` — отказ
 - [ ] `list_tree(root, rel)` без следования ссылкам: ссылка и спецфайл — в перечне как есть, не раскрываются
 - [ ] `ensure_dirs(root, rel)` и `publish(root, rel, data)`: родители — цепочкой дескрипторов (`O_DIRECTORY|O_NOFOLLOW_ANY`, `mkdir(…, dir_fd=)`); временный файл `O_CREAT|O_EXCL|O_NOFOLLOW` в закреплённом каталоге; `rename(…, src_dir_fd, dst_dir_fd)` поверх конечного имени; конечное имя — каталог — отказ
