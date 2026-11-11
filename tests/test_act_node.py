@@ -1458,8 +1458,8 @@ def test_reopen_stop_pr_retargeted_during_checks_wait_not_merged(
     stop_pr = _foreign_stop_pr(world, {stop_path(WS_ID, "charter", 1): _OWN_STOP})
     real_wait = an._await_required_checks
 
-    def retarget_while_waiting(state, ops, pr, head):
-        got = real_wait(state, ops, pr, head)
+    def retarget_while_waiting(state, ops, pr, head, **kw):
+        got = real_wait(state, ops, pr, head, **kw)
         world.forge.prs[stop_pr]["base"] = "release-x"
         return got
 
