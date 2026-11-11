@@ -983,6 +983,7 @@ def test_probe_inner_timeouts_fit_outer_budget() -> None:
 # допуска; настоящие Darwin-условия — живые тесты в
 # `tests/test_governance_sandbox_live.py` (им нужен `sandbox-exec`).
 
+_REAL_ADMISSION_CHECK = sandbox.admission_check
 _ADMISSION = sandbox.Admission(
     "claude", "2.1.296", Path("/opt/claude/bin/claude"), "0" * 64, 26, "0" * 64, "e"
 )
@@ -1113,15 +1114,13 @@ def test_launch_checks_harness_before_admission(launch, monkeypatch):
 
 def test_launch_refuses_empty_admission_contract(launch, monkeypatch):
     """Штатное состояние до шага H2: допуск пуст — отказ для claude тоже."""
-    monkeypatch.undo()  # настоящий admission_check, остальные двойники заново
+    # Настоящий admission_check. Не `monkeypatch.undo()`: он снял бы и
+    # изоляцию conftest (XDG_CONFIG_HOME, якорь pw_dir) — тест читал бы
+    # настоящий конфиг машины, и на машине с `mode = "test"` позеленел бы
+    # без проверки допуска (живой прогон на Linux 11.11).
+    monkeypatch.setattr(sandbox, "admission_check", _REAL_ADMISSION_CHECK)
     contract = launch.base / "admitted.toml"
     contract.write_text("schema = 1\n", encoding="utf-8")
-    monkeypatch.setenv("AUTHOR_HARNESS", "claude")
-    monkeypatch.setenv("AI_PROSTO_HARNESS_ENV", str(launch.base / "none"))
-    monkeypatch.setenv("XDG_STATE_HOME", str(launch.base / "xdg"))
-    monkeypatch.setattr(author_launch, "_os_name", lambda: "darwin")
-    monkeypatch.setattr(author_launch, "_has_sandbox_exec", lambda: True)
-    monkeypatch.setattr(author_launch, "_nested_sandbox", lambda: None)
     monkeypatch.setattr(sandbox, "run_probe", _never("проба"))
     monkeypatch.setattr(author_launch, "_run_agent", _never("агент"))
     outcome = _launch(launch, contract=contract)
