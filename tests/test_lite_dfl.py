@@ -422,11 +422,20 @@ class Discovery:
 
     code: int = 20
     calls: list[tuple[str, str, Path, Path]] = field(default_factory=list)
+    flags: list[tuple[str | None, bool]] = field(default_factory=list)
 
     def __call__(
-        self, session_id: str, role: str, file: Path, cwd: Path
+        self,
+        session_id: str,
+        role: str,
+        file: Path,
+        cwd: Path,
+        *,
+        question: str | None = None,
+        supersede: bool = False,
     ) -> iv.DiscoveryReply:
         self.calls.append((session_id, role, file, cwd))
+        self.flags.append((question, supersede))
         reason = "payload missing text" if self.code in (1, 2) else ""
         envelope = {"operation": {"status": "ok", "reason": reason}}
         return iv.DiscoveryReply(self.code, envelope, "")
@@ -461,6 +470,31 @@ def test_answer_runs_discovery_then_continues(env: Env, monkeypatch, capsys) -> 
     ]
     out = capsys.readouterr().out
     assert "ответьте: dfl answer --file answer.yaml" in out and "text:" in out
+    assert "entries:" in out and "--supersede" in out
+    assert disc.flags == [(None, False)]
+
+
+def test_answer_supersede_passes_question(env: Env, monkeypatch) -> None:
+    """Находка живого прогона 11.11: поправить данный ответ можно только
+    `discovery answer --question --supersede`, который dfl запрещает звать."""
+    _waiting("WS-1-a", "WS-1", "customer")
+    _answer_file(env)
+    disc = Discovery()
+    monkeypatch.setattr(dfl, "_discovery_answer", disc)
+    argv = ("answer", "--file", "answer.yaml", "--question", "q-3", "--supersede")
+    assert env.run(*argv) == 0
+    assert disc.flags == [("q-3", True)]
+
+
+def test_answer_supersede_without_question_refused(
+    env: Env, monkeypatch, capsys
+) -> None:
+    _waiting("WS-1-a", "WS-1", "customer")
+    _answer_file(env)
+    monkeypatch.setattr(dfl, "_discovery_answer", lambda *a, **k: pytest.fail("вызов"))
+    assert env.run("answer", "--file", "answer.yaml", "--supersede") == 2
+    assert "--supersede требует --question" in capsys.readouterr().err
+    assert _no_effects(env)
 
 
 def test_answer_targets_engineer_run(env: Env, monkeypatch) -> None:
@@ -498,7 +532,7 @@ def test_answer_missing_file_shows_format(env: Env, monkeypatch, capsys) -> None
     monkeypatch.setattr(dfl, "_discovery_answer", lambda *a: pytest.fail("вызов"))
     assert env.run("answer", "--file", "nope.yaml") == 2
     err = capsys.readouterr().err
-    assert "нет файла ответа" in err and "text:" in err
+    assert "нет файла ответа" in err and "text:" in err and "entries:" in err
 
 
 def test_discovery_answer_invocation(env: Env, monkeypatch) -> None:
@@ -517,6 +551,10 @@ def test_discovery_answer_invocation(env: Env, monkeypatch) -> None:
         "answer", "--session", "s1", "--role", "customer", "--file", "/a.yaml",
     ]  # fmt: skip
     assert seen["cwd"] == Path("/rd") and reply.code == 1
+    dfl._discovery_answer(
+        "s1", "customer", Path("/a.yaml"), Path("/rd"), question="q-2", supersede=True
+    )
+    assert seen["argv"][-3:] == ["--question", "q-2", "--supersede"]
 
 
 def test_waiting_run_prints_dfl_answer_hint(env: Env, monkeypatch, capsys) -> None:
