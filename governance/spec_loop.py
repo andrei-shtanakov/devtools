@@ -1029,6 +1029,16 @@ def _report_state(state: rs.RunState) -> int:
     осталась про два), и устареет снова. Продолжаемость решает `_dispatch`,
     сюда попадает то, что он не взял.
     """
+    if state.mode == "test" and _test_resumable(state.status):
+        # В test повтор кнопки продолжает этот статус (`_dispatch`) — звать
+        # `make behaviour-run` незачем, у `dfl` его и нет.
+        print(
+            f"spec-loop (test): прогон {state.run_id!r} остановлен "
+            f"({state.status!r}); findings: out/governance-runs/"
+            f"{state.run_id}/ — после правки повторите dfl run (или make "
+            "spec-loop)"
+        )
+        return 1
     print(
         f"spec-loop: прогон {state.run_id!r} в статусе {state.status!r} — "
         "кнопка его не продолжает; без скрытых ретраев."

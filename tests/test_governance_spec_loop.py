@@ -2792,3 +2792,30 @@ def test_strict_running_run_is_not_resumed_silently(
     assert rc == 1
     assert env.calls == []
     assert "behaviour-run" in capsys.readouterr().out
+
+
+def test_test_mode_stop_after_resume_hints_dfl_run(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    """test: стоп после продолжения зовёт повтор dfl run, не make behaviour-run."""
+    from tests.df_config_fixture import write_config
+
+    write_config(
+        Path(os.environ["XDG_CONFIG_HOME"]),
+        mode="test",
+        human="alice",
+        agent="alice",
+        workspace_root=tmp_path,
+    )
+    state = _mk_run(
+        "r-stop", "S", status="stopped_author", target_dir=str(tmp_path / "alpha")
+    )
+    state.mode = "test"
+    rs.save(state)
+    after = rs.load("r-stop")
+    after.status = "stopped_gate"
+    _LoopEnv(monkeypatch, tmp_path, resume_result=after)
+    rc = spec_loop.main(["--subject", "S", "--repo", "alpha"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "dfl run" in out and "behaviour-run" not in out
