@@ -2514,6 +2514,28 @@ def _step_branch(state: RunState, ops: Ops) -> bool:
     return _step_wave_branch(state, ops)
 
 
+def _resolve_base_ref(state: RunState, ops: Ops) -> str:
+    """База волны: `state.base_ref`, а пустой — ветка по умолчанию цели.
+
+    До первого PR `base_ref` пуст, и прежний литерал `master` ломал цели
+    с `main` (живой прогон на Linux, 2026-11-11: `git switch master` rc=128).
+    Установленная ветка записывается в леджер — последующие шаги читают её
+    из `state.base_ref`. Факт не установлен — прежнее умолчание, вслух.
+    """
+    if state.base_ref:
+        return state.base_ref
+    fact = ops.default_branch_fact(state.repo_slug)
+    if not fact.established or fact.value is None:
+        print(
+            f"_step_branch: ветка по умолчанию не установлена ({fact.detail}) — "
+            "база master"
+        )
+        return "master"
+    state.base_ref = fact.value.name
+    save(state)
+    return state.base_ref
+
+
 def _step_wave_branch(state: RunState, ops: Ops) -> bool:
     """S1 волны (S9): ветка волны ОТ СВЕЖЕГО BASE, не от текущего HEAD.
 
@@ -2536,7 +2558,7 @@ def _step_wave_branch(state: RunState, ops: Ops) -> bool:
         save(state)
         return False
     _ensure_started(state, key)
-    base = state.base_ref or "master"
+    base = _resolve_base_ref(state, ops)
     ops.checkout_and_pull(state.target_dir, base)
     mode, refusal = _decide_wave_mode(state, ops, _wave_dag())
     if refusal is not None:

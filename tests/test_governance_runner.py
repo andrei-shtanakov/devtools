@@ -26,6 +26,7 @@ from governance import (
 )
 from governance import interview as iv
 from governance import run_state as rs
+from governance.facts import Fact, Outcome
 from governance.stale_adapter import blob_sha1, blob_sha1_bytes
 from tests import locked_runner
 from tests.forge_fake import C1, C2, SIGNED, consistent_world
@@ -658,6 +659,8 @@ class FakeOps:
         return self._forge().brief_pr_fact(repo_slug, pr)
 
     def default_branch_fact(self, repo_slug):
+        if self.forge is None:
+            return Fact(Outcome.UNAVAILABLE, None, "нет стенда forge")
         return self._forge().default_branch_fact(repo_slug)
 
     def pr_comments_fact(self, repo_slug, pr):
@@ -11692,3 +11695,39 @@ def test_attested_head_moved_absent_head_is_not_moved(monkeypatch) -> None:
     monkeypatch.setattr(runner.an, "pr_head", lambda state, ops, pr: None)
     moved = runner._attested_head_moved(_head_state("test"), None, "finalize-1", 801)  # type: ignore[arg-type]
     assert moved is False
+
+
+# --- база волны: ветка по умолчанию цели, а не литерал master (живой прогон Linux) ---
+
+
+def test_resolve_base_ref_reads_default_branch(tmp_path: Path, runs_root) -> None:
+    """Пустой `base_ref` — ветка по умолчанию из форджи, записанная в леджер:
+    у свежего репо GitHub это `main`, и `git switch master` падал."""
+    from governance import runner
+
+    state, ops = _wave_state(tmp_path, "r-base-main", wave=1)
+    state.base_ref = None
+    ops.forge = consistent_world()
+    assert runner._resolve_base_ref(state, ops) == "main"
+    assert rs.load("r-base-main").base_ref == "main"
+
+
+def test_resolve_base_ref_keeps_known_base(tmp_path: Path, runs_root) -> None:
+    from governance import runner
+
+    state, ops = _wave_state(tmp_path, "r-base-known", wave=1)
+    state.base_ref = "trunk"
+    assert runner._resolve_base_ref(state, ops) == "trunk"
+
+
+def test_resolve_base_ref_unavailable_falls_back(
+    tmp_path: Path, runs_root, capsys
+) -> None:
+    """Факт не установлен — прежнее умолчание `master`, вслух и без записи."""
+    from governance import runner
+
+    state, ops = _wave_state(tmp_path, "r-base-down", wave=1)
+    state.base_ref = None
+    assert runner._resolve_base_ref(state, ops) == "master"
+    assert state.base_ref is None
+    assert "ветка по умолчанию не установлена" in capsys.readouterr().out
