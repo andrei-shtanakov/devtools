@@ -8170,6 +8170,33 @@ def test_reopen_manual_stops_for_the_operator_then_resumes(
     assert resumed.ops["author-charter"]["skipped"] is True
 
 
+def test_reopen_resets_authoring_of_upper_nodes_absent_from_base(
+    tmp_path: Path,
+    runs_root,
+    monkeypatch,
+) -> None:
+    """Узел выше переоткрытого, авторенный, но не вмерженный в base, —
+    `author-*` снимается: ветка от base его файла не несёт. Узел выше,
+    который в base есть, не трогается (его ведёт reapprove)."""
+    ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
+    _fake_wave_adapters(monkeypatch, ops)
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-reopen-up", ops))
+    from governance import approval_ledger as al
+
+    al.abandon_request(state, state.ops["candidate-1"]["request"], "стенд")
+    for key in ("author-requirements", "author-design", "author-acceptance"):
+        rs.op_complete(state, key)
+    rs.save(state)
+    base = _all_approved()
+    for name in ("20-design.md", "25-acceptance.md"):
+        base = {k: v for k, v in base.items() if not k.endswith(name)}
+    ops.base_files = base
+    stopped = locked_runner.reopen("r-reopen-up", "charter", ops, manual=True)
+    assert "author-design" not in stopped.ops
+    assert "author-acceptance" not in stopped.ops
+    assert stopped.ops["author-requirements"]["status"] == "completed"
+
+
 def test_stale_level_is_reapproved_over_base_without_authoring(
     tmp_path: Path,
     runs_root,

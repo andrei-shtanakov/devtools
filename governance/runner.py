@@ -1549,12 +1549,20 @@ def reopen(
         ):
             state.ops.pop(f"{base_key}-{wave}", None)
     filename = ""
+    base = state.base_ref or "master"
     for author_key, kind, fname in _AUTHOR_STEPS:
         if kind == node:
             state.ops.pop(author_key, None)
             filename = fname
+        elif levels[kind] > levels[node] and (
+            ops.show_file(state.target_dir, base, f"{state.bundle_dir}/{fname}") is None
+        ):
+            # Узел выше, авторенный, но не дошедший до base (волна шла, когда
+            # переоткрыли ниже): ветка от base его не несёт, а завершённый
+            # `author-*` пропустил бы авторинг — файла бы не было (живой
+            # прогон на Linux 11.11: charter переоткрыт со стопа волны 4).
+            state.ops.pop(author_key, None)
     save(state)
-    base = state.base_ref or "master"
     ops.checkout_and_pull(state.target_dir, base)
     state.branch = _wave_branch(state)
     ops.switch_to(state.target_dir, state.branch, base)
