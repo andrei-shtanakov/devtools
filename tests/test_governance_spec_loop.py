@@ -2750,3 +2750,46 @@ def test_deliver_phase_test_resume_without_record_stops(
     monkeypatch.setattr(spec_loop.auto_tasks, "run_chain", boom)
     assert spec_loop._deliver_phase(state, object()) == 1
     assert "spec-loop (test): tasks-merge завершён" in capsys.readouterr().out
+
+
+def test_test_mode_resumes_crashed_running_run(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    """test: `running` под нашим замком = процесс оборван — кнопка продолжает.
+
+    Живой прогон на Linux 11.11: падение шага оставило `running`, а `dfl`
+    не умеет `make behaviour-run resume` — коллега застревал.
+    """
+    from tests.df_config_fixture import write_config
+
+    write_config(
+        Path(os.environ["XDG_CONFIG_HOME"]),
+        mode="test",
+        human="alice",
+        agent="alice",
+        workspace_root=tmp_path,
+    )
+    state = _mk_run(
+        "r-crash", "S", status="running", target_dir=str(tmp_path / "alpha")
+    )
+    state.mode = "test"
+    rs.save(state)
+    after = rs.load("r-crash")
+    after.status = "waiting_interview"
+    env = _LoopEnv(monkeypatch, tmp_path, resume_result=after)
+    rc = spec_loop.main(["--subject", "S", "--repo", "alpha"])
+    assert rc == 0
+    assert [c[0] for c in env.calls] == ["resume"]
+    assert "оборван" in capsys.readouterr().out
+
+
+def test_strict_running_run_is_not_resumed_silently(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    """strict: без скрытых ретраев — отчёт и подсказка, resume не зван."""
+    _mk_run("r-crash", "S", status="running", target_dir=str(tmp_path / "alpha"))
+    env = _LoopEnv(monkeypatch, tmp_path)
+    rc = spec_loop.main(["--subject", "S", "--repo", "alpha"])
+    assert rc == 1
+    assert env.calls == []
+    assert "behaviour-run" in capsys.readouterr().out

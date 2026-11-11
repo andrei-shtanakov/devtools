@@ -1088,22 +1088,36 @@ def _dispatch(state: rs.RunState, ops, lock: run_lock.RunLock) -> int:
             # диагностика orphan-состояния не должна зависеть от того,
             # дошёл ли вызов до runner.
             return _report_interview_stop(state)
-        after = runner.resume(state.run_id, ops, lock=lock)
-        if after.status == "brief_ready":
-            return _brief_ready(after)
-        if after.status == "waiting_interview":
-            return 0
-        if after.status == "stopped_interview":
-            return _report_interview_stop(after)
-        if after.status in WAVE_PAUSES:
-            print(_pause_message(after))
-            return 0
-        if after.status == "completed":
-            return _deliver_phase(after, ops)
-        return _report_state(after)
+        return _after_resume(runner.resume(state.run_id, ops, lock=lock), ops)
+    if state.status == "running" and state.mode == "test":
+        # Замок прогона держим МЫ, значит процесс, оставивший `running`,
+        # мёртв: в test кнопка продолжает его сама — у `dfl` нет
+        # `make behaviour-run resume` (живой прогон на Linux 11.11). В
+        # strict остаётся «без скрытых ретраев» — продолжение руками.
+        print(
+            f"spec-loop (test): прогон {state.run_id!r} оборван (статус "
+            "running, замок свободен) — продолжаю"
+        )
+        return _after_resume(runner.resume(state.run_id, ops, lock=lock), ops)
     if state.status == "completed":
         return _deliver_phase(state, ops)
     return _report_state(state)
+
+
+def _after_resume(after: rs.RunState, ops) -> int:
+    """Код кнопки по статусу, в котором остановился `runner.resume`."""
+    if after.status == "brief_ready":
+        return _brief_ready(after)
+    if after.status == "waiting_interview":
+        return 0
+    if after.status == "stopped_interview":
+        return _report_interview_stop(after)
+    if after.status in WAVE_PAUSES:
+        print(_pause_message(after))
+        return 0
+    if after.status == "completed":
+        return _deliver_phase(after, ops)
+    return _report_state(after)
 
 
 def main(argv: list[str] | None = None) -> int:
