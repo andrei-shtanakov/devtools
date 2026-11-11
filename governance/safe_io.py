@@ -153,10 +153,9 @@ def _open_walk(path: str, flags: int, dir_fd: int | None, mode: int) -> int:
         fd = dir_fd
     try:
         for comp in comps[:-1]:
-            nxt = _step(fd, comp, os.O_RDONLY | os.O_DIRECTORY, 0)
-            if fd != dir_fd:
-                os.close(fd)
-            fd = nxt
+            prev, fd = fd, _step(fd, comp, os.O_RDONLY | os.O_DIRECTORY, 0)
+            if prev != dir_fd:
+                os.close(prev)  # fd уже новый: сбой close не теряет и не дублирует
         return _step(fd, comps[-1], flags, mode)
     finally:
         if fd != dir_fd:
