@@ -147,6 +147,26 @@ def test_walk_refuses_dotdot_in_root(
     assert not (root / "a" / "x").exists()
 
 
+@pytest.mark.skipif(
+    not hasattr(os, "O_PATH") or os.geteuid() == 0,
+    reason="O_PATH (Linux) и непривилегированный пользователь",
+)
+def test_walk_passes_execute_only_ancestor(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Предок с правом входа без чтения (0711) не мешает обходу."""
+    monkeypatch.setattr(safe_io, "NOFOLLOW_ANY", None)
+    (root / "x" / "in").mkdir(parents=True)
+    (root / "x" / "in" / "f").write_bytes(b"ok")
+    (root / "x").chmod(0o111)
+    try:
+        assert safe_io.read_regular(root / "x" / "in", "f", limit=10) == b"ok"
+        safe_io.publish(root / "x" / "in", "g", b"y")
+    finally:
+        (root / "x").chmod(0o755)
+    assert (root / "x" / "in" / "g").read_bytes() == b"y"
+
+
 def test_refusal_does_not_leak_descriptors(root: Path, impl: str) -> None:
     (root / "a").mkdir()
     (root / "a" / "link").symlink_to(root)

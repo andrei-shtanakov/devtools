@@ -36,6 +36,9 @@ from pathlib import Path, PurePosixPath
 
 #: Флаг ядра Darwin; на другой ОС его нет — `_open` идёт покомпонентным обходом.
 NOFOLLOW_ANY: int | None = getattr(os, "O_NOFOLLOW_ANY", None)
+#: Промежуточные шаги обхода: `O_PATH` (Linux) не требует права чтения —
+#: каталог только с правом входа (0711) проходится, как с `O_NOFOLLOW_ANY`.
+_WALK_DIR_FLAGS = getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY
 
 _CHUNK = 65536
 #: Режим опубликованного файла узла — не зависит от umask раннера.
@@ -153,7 +156,7 @@ def _open_walk(path: str, flags: int, dir_fd: int | None, mode: int) -> int:
         fd = dir_fd
     try:
         for comp in comps[:-1]:
-            prev, fd = fd, _step(fd, comp, os.O_RDONLY | os.O_DIRECTORY, 0)
+            prev, fd = fd, _step(fd, comp, _WALK_DIR_FLAGS, 0)
             if prev != dir_fd:
                 os.close(prev)  # fd уже новый: сбой close не теряет и не дублирует
         return _step(fd, comps[-1], flags, mode)
