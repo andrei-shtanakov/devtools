@@ -3857,6 +3857,11 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         path = Path(state.target_dir) / state.bundle_dir / fname
         if not path.exists():
             continue
+        if in_scope is not None and bundle_dag.node_id(fname) not in in_scope:
+            # Узел выше волны: его пины сверит его волна. После `--reopen`
+            # нижнего узла он держит пин старых байтов до переодобрения —
+            # стоп здесь был бы тупиком (живой прогон на Linux 11.11).
+            continue
         front = _frontmatter(path.read_text(encoding="utf-8"))
         declares = re.search(
             rf"^\s*-\s+{upstream}\s*$|traces_to:.*\b{upstream}\b",

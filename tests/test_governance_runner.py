@@ -4467,6 +4467,36 @@ def test_gate_stale_draft_pin_stops_locally(
     assert f"candidate-{state.wave}" not in state.ops
 
 
+def test_gate_prospective_pins_limited_to_wave_scope(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    """Пины узлов выше текущей волны не проверяются: после `--reopen charter`
+    requirements в worktree держит пин старого charter, и его переодобряет
+    волна 2 — стоп W1 на нём был бы тупиком (живой прогон на Linux 11.11)."""
+
+    class UpperStaleOps(FakeOps):
+        def author(self, call, kind: str, subject: str, brief_context=None) -> int:
+            rc = super().author(call, kind, subject, brief_context=brief_context)
+            if kind == "charter":
+                path = Path(call.target_dir) / call.bundle_dir / "10-requirements.md"
+                path.write_text(
+                    "---\n"
+                    "spec_stage: requirements\n"
+                    "status: stale\n"
+                    "traces_to:\n  - charter\n"
+                    "upstream_hashes:\n"
+                    '  charter: "' + "a" * 40 + '"\n'
+                    "---\n"
+                    "#### FR-01: x\n"
+                )
+            return rc
+
+    ops = UpperStaleOps(facts=GREEN_PR_FACTS)
+    state = _drive_waves_to(tmp_path, "r-upper-stale", ops, monkeypatch, 1)
+    assert state.status != "stopped_gate"
+    assert state.ops["gate-candidate-1"]["status"] == "completed"
+
+
 def test_gate_inline_upstream_hashes_form_passes(
     tmp_path: Path, runs_root, monkeypatch
 ) -> None:
