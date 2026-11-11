@@ -1417,7 +1417,12 @@ def _finalize_wave(
 
     def _approve() -> bool:
         try:
-            an.approve_node(state, ops, node)
+            # Сообщение — та самая «причина в выводе approve-node», на
+            # которую ссылается пауза ниже; без печати её не видно (живой
+            # прогон на Linux 11.11: finalize ждал проверки молча).
+            outcome = an.approve_node(state, ops, node)
+            if isinstance(outcome, an.ApprovalOutcome):
+                print(f"approve-node: {outcome.message}")
         except RuntimeError as exc:
             _stop_on_refusal(state, ops, request, exc, f"finalize заявки {request}")
             return False
