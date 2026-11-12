@@ -23,23 +23,40 @@ SCHEMA_VERSION = 1
 
 
 def decide(ruleset: rules_mod.RuleSet, response: response_mod.Response) -> str:
-    """`FAIL` при блокирующей находке или проваленном пункте без находок.
+    """`FAIL` при блокирующей находке или пункте, не покрытом замечаниями.
 
     Пункт со статусом `fail`, у которого есть находки и все они
     совещательного класса (`advisory`), итог не валит: находки остаются
     замечаниями при `PASS` — так политика серьёзности ребра действует, а не
     перекрывается статусом пункта (devtools#728, W2 живого прогона на
-    Linux: три `minor` давали FAIL). Проваленный пункт без единой находки
-    («входа недостаточно») — по-прежнему `FAIL`.
+    Linux: три `minor` давали FAIL). Всё прочее, что не `pass`, — `FAIL`:
+    пункт без находок, `insufficient` («входа недостаточно») и, страховкой,
+    `fail` с причиной о нехватке входа — неизвестность не красится зелёным
+    находкой-замечанием (ревью #730). Незнакомый статус — тоже `FAIL`.
     """
     if any(f.cls in ruleset.severity.blocking for f in response.findings):
         return "FAIL"
     # Блокирующих нет: все оставшиеся находки — advisory (класс уже сверен
     # с объявленным перечнем при разборе ответа).
     remarked = {f.rule_id for f in response.findings}
-    if any(c.status != "pass" and c.id not in remarked for c in response.criteria):
+    if any(
+        c.status != "pass" and not _remark_only(c, remarked) for c in response.criteria
+    ):
         return "FAIL"
     return "PASS"
+
+
+#: Статус пункта «судить нечем» (инструкция v1): всегда `FAIL`.
+STATUS_INSUFFICIENT = "insufficient"
+
+
+def _remark_only(c: response_mod.Criterion, remarked: set[str]) -> bool:
+    """Провал пункта — лишь замечания: `fail`, есть находки, не нехватка входа."""
+    return (
+        c.status == "fail"
+        and c.id in remarked
+        and "недостат" not in c.reason.casefold()
+    )
 
 
 def _now() -> str:

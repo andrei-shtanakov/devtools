@@ -358,3 +358,40 @@ def test_failed_criterion_with_blocking_finding_gives_fail(tmp_path: Path) -> No
         tmp_path, {"R2"}, [_finding("R2", "minor"), _finding("R2", "major")]
     )
     assert out["verdict"] == "FAIL"
+
+
+def _run_criteria(tmp_path: Path, criteria_patch: dict, findings: list[dict]) -> dict:
+    b = _bundle(tmp_path)
+    rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
+    criteria = [{"id": it.id, "status": "pass", "reason": "ок"} for it in rs.items]
+    criteria[0].update(criteria_patch)
+    answer = json.dumps(
+        {"structured_output": {"criteria": criteria, "findings": findings}}
+    )
+    return c.run_check(
+        "behaviour-vs-requirements",
+        b,
+        [b / "15-behaviour-spec.md"],
+        [("requirements", b / "10-requirements.md")],
+        contracts_dir=CONTRACTS,
+        model="claude-opus-5",
+        call=lambda prompt: answer,
+    )
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"status": "insufficient", "reason": "входа недостаточно"},
+        {"status": "fail", "reason": "Входа недостаточно: раздел целей усечён"},
+        {"status": "unknown", "reason": "ок"},
+    ],
+    ids=["insufficient", "fail-insufficient-reason", "unknown-status"],
+)
+def test_insufficient_input_not_masked_by_advisory_finding(
+    tmp_path: Path, patch: dict
+) -> None:
+    """Ревью #730: нехватка входа + minor по тому же пункту — FAIL, а не
+    PASS; незнакомый статус — тоже FAIL."""
+    out = _run_criteria(tmp_path, patch, [_finding("R1", "minor")])
+    assert out["verdict"] == "FAIL"
