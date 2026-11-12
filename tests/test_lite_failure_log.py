@@ -134,3 +134,13 @@ def test_cause_prefers_refusal_then_stop_reason_then_exception_then_tail(
     assert fl.cause_from(boom, [], ["x"]) == "RuntimeError: boom"
     assert fl.cause_from(None, [], ["", "last line", ""]) == "last line"
     assert fl.cause_from(None, [], []) == "причина не записана"
+
+
+def test_cause_from_printed_refusal_block(runs_root: Path) -> None:
+    tail = [
+        "x",
+        "dfl init-repo: отказ (код 2)",
+        "  причина:     нет origin",
+        "  что сделать: y",
+    ]
+    assert fl.cause_from(None, [], tail) == "нет origin"

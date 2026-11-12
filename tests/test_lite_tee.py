@@ -103,3 +103,27 @@ def test_tee_does_not_hang_on_surviving_child(tmp_path: Path) -> None:
     )
     assert time.monotonic() - t0 < 15
     assert "done" in tail
+
+
+def test_dfl_cli_record_has_full_tail(tmp_path: Path) -> None:
+    # настоящая точка входа: отказ (конфига нет) — хвост записи не пуст
+    state, repo = tmp_path / "state", tmp_path / "repo"
+    repo.mkdir()
+    env = {
+        **__import__("os").environ,
+        "XDG_STATE_HOME": str(state),
+        "XDG_CONFIG_HOME": str(tmp_path / "cfg"),
+    }
+    done = subprocess.run(
+        [sys.executable, "-m", "lite.dfl", "--cwd", str(repo), "status"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 2, done.stderr
+    (record,) = state.glob("darkfactory/failures/*/last.json")
+    tail = json.loads(record.read_text())["output_tail"]
+    assert "dfl status: отказ (код 2)" in tail
+    assert tail[-1] == "отчёт разработчикам: dfl report"

@@ -13,9 +13,12 @@ engineer-прогон, затем проверенный PR с кодом. `dfl 
 from __future__ import annotations
 
 import argparse
+import functools
 import shutil
 import subprocess
 import sys
+import traceback
+from collections.abc import Callable
 from contextlib import ExitStack
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,7 +28,8 @@ from governance import df_config, run_lock, spec_loop, user_targets
 from governance import interview as iv
 from governance import run_state as rs
 from governance.facts import Outcome
-from lite.init_repo import DEVTOOLS, init_repo, real_gh
+from lite import failure_log as fl
+from lite.init_repo import DEVTOOLS, InitError, init_repo, real_gh
 from lite.output import refusal
 from lite.pipeline import (
     CHAIN_STOPPED_HINT,
@@ -34,12 +38,14 @@ from lite.pipeline import (
     code_merged,
     merged_unreviewed,
 )
+from lite.tee import tee_output
 
 ENGINEER_SUFFIX = bt.ENGINEER_SUFFIX
 NEW_RUN_HINT = "первый запуск: dfl run --subject '<тема>'"
 ABANDON_HINT = "dfl abandon бросит его"
 NEXT_SUBJECT_HINT = "новая тема: dfl run --subject '<тема>'"
 WAITING = "waiting_interview"
+REPORT_HINT = "отчёт разработчикам: dfl report"
 ANSWER_HINT = "ответьте: dfl answer --file answer.yaml"
 ANSWER_FORMAT = """\
 файл ответа — YAML: text (ответ своими словами) и entries (пункты темы —
@@ -65,18 +71,142 @@ class DflError(Exception):
     """Отказ `dfl` с причиной и следующим шагом (код 2)."""
 
 
-def main(argv: list[str] | None = None) -> int:
-    """CLI: `--cwd <dir>` и `run` | `answer` | `abandon` | `status` | `init-repo`."""
-    args = _parser().parse_args(argv)
+# Отказы с причиной «причина — что сделать»: печатаются блоком `refusal`.
+REFUSALS: tuple[type[Exception], ...] = (
+    DflError,
+    df_config.ConfigError,
+    user_targets.TargetsError,
+    InitError,
+)
+
+
+def cli(argv: list[str] | None = None) -> int:
+    """Точка входа обёртки `dfl`: вывод дублируется в запись сбоя.
+
+    Неперехваченное исключение печатается traceback'ом, как прежде, с кодом 1,
+    и последней строкой — подсказка `dfl report`. Запись сбоя — после выхода
+    из `tee_output`: только тогда вывод дочитан целиком."""
+    pending: list[Callable[[list[str]], None]] = []
+    with tee_output() as tail:
+        try:
+            code = main(argv, defer=pending)
+        except Exception:  # noqa: BLE001 — верхний уровень: traceback, код 1
+            traceback.print_exc()
+            print(REPORT_HINT, file=sys.stderr)
+            code = 1
+    for job in pending:
+        job(tail.lines())
+    return code
+
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    defer: list[Callable[[list[str]], None]] | None = None,
+) -> int:
+    """CLI: `--cwd <dir>` и `run` | `answer` | `abandon` | `status` | `init-repo`.
+
+    Ненулевой код и исключение пишут запись сбоя (`lite.failure_log`);
+    ненулевой код печатает подсказку `dfl report` последней строкой. С
+    `defer` запись откладывается: `cli` выполнит её с полным хвостом вывода;
+    без него — пишется сразу с пустым хвостом."""
+    raw = list(sys.argv[1:] if argv is None else argv)
+    args = _parser().parse_args(raw)
     cwd = Path(args.cwd)
+    before = fl.snapshot_runs()
+
+    def record(code: int, exc: BaseException | None) -> None:
+        job = functools.partial(_record, args, cwd, raw, code, exc, before)
+        if defer is None:
+            job([])
+        else:
+            defer.append(job)
+
+    try:
+        code, refused = _dispatch(args, cwd)
+    except Exception as exc:
+        record(1, exc)
+        raise
+    if code != 0:
+        record(code, refused)
+        print(REPORT_HINT, file=sys.stderr)
+    return code
+
+
+def _record(
+    args: argparse.Namespace,
+    cwd: Path,
+    raw: list[str],
+    code: int,
+    exc: BaseException | None,
+    before: fl.RunsSnapshot,
+    lines: list[str],
+) -> None:
+    """Записать сбой; собственная ошибка записи — одна строка, не traceback."""
+    try:
+        run_ids, note = fl.changed_runs(before, fl.snapshot_runs(), cwd)
+        cause = fl.cause_from(exc, run_ids, lines, refusals=REFUSALS)
+        fl.write(
+            cwd,
+            fl.FailureRecord(
+                command=args.command,
+                argv=_public_argv(raw),
+                exit_code=code,
+                time=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                output_tail=lines,
+                run_ids=run_ids,
+                runs_note=note,
+                cwd_repo=_origin_slug(cwd),
+                cause=cause,
+            ),
+        )
+    except OSError as err:
+        print(f"запись сбоя не удалась: {err}", file=sys.stderr)
+
+
+def _public_argv(raw: list[str]) -> list[str]:
+    """argv без `--cwd <путь>`; у `--file` — только имя файла."""
+    out: list[str] = []
+    skip = False
+    for i, arg in enumerate(raw):
+        if skip:
+            skip = False
+            continue
+        if arg == "--cwd":
+            skip = True
+            continue
+        out.append(Path(arg).name if i > 0 and raw[i - 1] == "--file" else arg)
+    return out
+
+
+def _origin_slug(cwd: Path) -> str:
+    try:
+        done = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return (
+            user_targets.slug_from_url(done.stdout.strip())
+            if done.returncode == 0
+            else ""
+        )
+    except (OSError, ValueError, user_targets.TargetsError):
+        return ""
+
+
+def _dispatch(args: argparse.Namespace, cwd: Path) -> tuple[int, BaseException | None]:
+    """Тело подкоманды: (код, отказ-исключение или `None`)."""
     try:
         _require_test_mode()
         if args.command == "status":
-            return status(cwd)
+            return status(cwd), None
         if args.command == "init-repo":
-            return init_repo(cwd, DEVTOOLS, real_gh)
+            return init_repo(cwd, DEVTOOLS, real_gh), None
         if args.command == "answer":
-            return answer(
+            code = answer(
                 cwd,
                 Path(args.file),
                 args.subject,
@@ -84,12 +214,13 @@ def main(argv: list[str] | None = None) -> int:
                 question=args.question,
                 supersede=args.supersede,
             )
+            return code, None
         if args.command == "abandon":
-            return abandon(cwd, args.subject)
-        return run(cwd, args.subject, args.stakeholder)
-    except (DflError, df_config.ConfigError, user_targets.TargetsError) as exc:
+            return abandon(cwd, args.subject), None
+        return run(cwd, args.subject, args.stakeholder), None
+    except REFUSALS as exc:
         print(refusal(f"dfl {args.command}", str(exc)), file=sys.stderr)
-        return 2
+        return 2, exc
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -501,4 +632,4 @@ def abandon(cwd: Path, subject: str | None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(cli())

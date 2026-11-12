@@ -24,6 +24,7 @@ from lite.output import split_refusal
 RunsSnapshot = dict[str, float]
 UNCHANGED_NOTE = "вызов его не менял"
 NO_CAUSE = "причина не записана"
+CAUSE_PREFIX = "  причина:"  # строка блока `lite.output.refusal`
 
 
 @dataclass(frozen=True)
@@ -136,9 +137,17 @@ def cause_from(
     *,
     refusals: tuple[type[BaseException], ...] = (),
 ) -> str:
-    """Причина сбоя: отказ → `stop-reason.txt` → исключение → хвост вывода."""
+    """Причина: отказ → блок отказа в выводе → `stop-reason.txt` → исключение
+    → последняя строка вывода.
+
+    Блок отказа в выводе — для отказов, которые печатает сама подкоманда
+    (`init_repo`), не поднимая исключения до `main`.
+    """
     if exc is not None and isinstance(exc, refusals):
         return split_refusal(str(exc))[0].strip() or NO_CAUSE
+    printed = _printed_cause(tail)
+    if printed:
+        return printed
     for run_id in run_ids:
         reason = _first_line(rs.run_dir(run_id) / "stop-reason.txt")
         if reason:
@@ -150,6 +159,13 @@ def cause_from(
         if line.strip():
             return line.strip()
     return NO_CAUSE
+
+
+def _printed_cause(tail: list[str]) -> str:
+    for line in reversed(tail):
+        if line.startswith(CAUSE_PREFIX):
+            return line.removeprefix(CAUSE_PREFIX).strip()
+    return ""
 
 
 def _first_line(path: Path) -> str:
