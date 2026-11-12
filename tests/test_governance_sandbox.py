@@ -413,7 +413,15 @@ def test_create_call_dir_for_devtools_itself_as_target(base: Path) -> None:
         devtools_root=DEVTOOLS_ROOT,
     )
     assert forbidden.target_dir == DEVTOOLS_ROOT
-    assert forbidden.common_dir == DEVTOOLS_ROOT / ".git"
+    # в git worktree общий каталог — `.git` основного чекаута, не DEVTOOLS_ROOT/.git
+    common = subprocess.run(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        cwd=DEVTOOLS_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert forbidden.common_dir == Path(common).resolve()
     call = sandbox.create_call_dir(calls, "run-1", forbidden=forbidden)
     assert call.stage.is_dir()
 
