@@ -284,7 +284,7 @@ def _accept_code(state: RunState, ops: Ops, pr: int) -> int:
     record = state.ops.get(key)
     if record is not None and record.get("status") == "completed":
         result = record.get("result") or {}
-        if result.get("head") == head:
+        if result.get("head") == head and result.get("url"):
             done = (
                 "вмержена человеком без автоматической приёмки; конвейер закончен"
                 if result.get("reviewed") is False
@@ -323,16 +323,29 @@ def _finish_merged(
     Прежний итог, если был, уходит в `prev`.
     """
     url = f"https://github.com/{state.repo_slug}/pull/{pr}"
-    op_start(state, key, pr=pr, **({"prev": prev} if prev else {}))
+    record = state.ops.get(key)
+    if record is None or record.get("status") == "completed":
+        op_start(state, key, pr=pr, **({"prev": prev} if prev else {}))
+    # Иначе started-запись живёт дальше: её `verdict` (ревью этой головы
+    # состоялось, приёмка встала после него) и `prev` сохраняет `_complete`.
+    reviewed = positive_on(state, key, head)
     _complete(
         state,
         key,
-        result={"pr": pr, "url": url, "head": head, "merged": True, "reviewed": False},
+        result={
+            "pr": pr,
+            "url": url,
+            "head": head,
+            "merged": True,
+            "reviewed": reviewed,
+        },
     )
-    print(
-        f"spec-loop (test): {url} вмержен человеком без автоматической "
-        "приёмки этой головы — конвейер закончен"
+    how = (
+        "после одобряющего ревью этой головы, приёмка не завершена"
+        if reviewed
+        else "без автоматической приёмки этой головы"
     )
+    print(f"spec-loop (test): {url} вмержен человеком {how} — конвейер закончен")
     return 0
 
 

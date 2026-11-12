@@ -672,6 +672,32 @@ def test_code_accept_strict_makes_no_calls(state):
     assert ops.calls == []
 
 
+def test_code_accept_merged_after_review_keeps_verdict_and_prev(state, capsys):
+    """Ревью #733, круг 2: ревью этой головы состоялось, приёмка встала после
+    него, человек вмержил — `verdict` и `prev` записи не теряются."""
+    state.ops["code-accept"] = {
+        "status": "started",
+        "pr": 9,
+        "prev": {"head": "old", "url": URL},
+        "verdict": {"verdict": "approve", "head": H0},
+    }
+    assert auto_tasks._accept_code(state, _merged(_accepting_ops()), 9) == 0
+    rec = state.ops["code-accept"]
+    assert rec["verdict"]["head"] == H0 and rec["prev"]["head"] == "old"
+    assert rec["result"]["reviewed"] is True and rec["result"]["url"] == URL
+    assert "после одобряющего ревью" in capsys.readouterr().out
+
+
+def test_code_accept_completed_without_url_is_finished_on_merge(state):
+    """Запись без `url` при той же голове не выдаётся за «проверена»."""
+    state.ops["code-accept"] = {
+        "status": "completed",
+        "result": {"head": H0, "merged": True},
+    }
+    assert auto_tasks._accept_code(state, _merged(_accepting_ops()), 9) == 0
+    assert state.ops["code-accept"]["result"]["url"] == URL
+
+
 def _request_changes(head: str) -> str:
     return f"t\n<!-- codex-terminal-review head={head} verdict=request-changes -->\n"
 
