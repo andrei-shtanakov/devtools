@@ -15,6 +15,8 @@ from collections import deque
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 
+JOIN_TIMEOUT = 2.0  # с: дочитать вывод после восстановления fd
+
 
 class OutputTail:
     """Последние строки вывода обоих потоков в порядке прихода."""
@@ -59,8 +61,12 @@ def _tee_fd(fd: int, stream, tail: OutputTail) -> Iterator[None]:
     finally:
         stream.flush()
         os.dup2(saved, fd)  # закрывает последний пишущий конец pipe у нас
-        reader.join()
-        os.close(read_end)
+        # Потомок, переживший вызов, держит свой пишущий конец — EOF не
+        # придёт. Не ждём его: поток-демон умрёт с процессом, read_end
+        # остаётся ему.
+        reader.join(JOIN_TIMEOUT)
+        if not reader.is_alive():
+            os.close(read_end)
         os.close(saved)
 
 

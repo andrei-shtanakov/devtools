@@ -87,3 +87,19 @@ def test_tee_keeps_partial_last_line(tmp_path: Path) -> None:
     done, tail = _scenario(tmp_path, 'sys.stdout.write("no newline")\n')
     assert done.stdout == "no newline"
     assert tail == ["no newline"]
+
+
+def test_tee_does_not_hang_on_surviving_child(tmp_path: Path) -> None:
+    # потомок пережил вызов и держит pipe — выход из блока не ждёт его
+    import time
+
+    t0 = time.monotonic()
+    _done, tail = _scenario(
+        tmp_path,
+        """
+        subprocess.Popen(["sh", "-c", "sleep 30"], start_new_session=True)
+        print("done")
+        """,
+    )
+    assert time.monotonic() - t0 < 15
+    assert "done" in tail
