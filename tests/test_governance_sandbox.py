@@ -1488,6 +1488,13 @@ def test_check_config_broken_config_named(base, tmp_path, monkeypatch):
     assert err.startswith("конфиг DarkFactory: ")
 
 
+def test_author_argv_safe_mode_only_on_request():
+    """strict: изолированный CLAUDE_CONFIG_DIR, `--safe-mode` не нужен."""
+    plain = author_launch.author_argv("/opt/claude", "", "P", safe_mode=True)
+    assert plain[:3] == ["/opt/claude", "-p", "--safe-mode"]
+    assert "--safe-mode" not in author_launch.author_argv("/opt/claude", "", "P")
+
+
 def test_author_argv_runs_admitted_binary_with_pinned_flags():
     argv = author_launch.author_argv("/opt/claude", "", "PROMPT")
     assert argv == [
@@ -1958,6 +1965,8 @@ def test_test_mode_launches_without_sandbox(plain, monkeypatch):
     assert argv[0] == os.path.realpath("/opt/c/claude")
     assert sandbox.SANDBOX_EXEC not in argv and "-f" not in argv[:3]
     assert argv[argv.index("--model") + 1] == "m-x"
+    # devtools#736: плагины и хуки оператора в авторский вызов не попадают
+    assert argv[1:3] == ["-p", "--safe-mode"]
     assert "CLAUDE_CONFIG_DIR" not in env
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
     assert env["TMPDIR"] == env["CLAUDE_CODE_TMPDIR"]

@@ -281,17 +281,23 @@ def author_claude_token() -> str:
     return token
 
 
-def author_argv(binary: str, model: str, prompt: str) -> list[str]:
+def author_argv(
+    binary: str, model: str, prompt: str, *, safe_mode: bool = False
+) -> list[str]:
     """argv авторского вызова claude; `binary` — абсолютный путь из допуска.
 
     Паритет с флотским пресетом spec-runner (`--dangerously-skip-permissions`):
     запись ограничивает профиль §12, а не разрешения харнесса.
     `--strict-mcp-config`/`--no-session-persistence` — не тащить MCP оператора
-    и не сорить сессиями.
+    и не сорить сессиями. `safe_mode` — режим test (devtools#736): claude
+    пользователя без изолированного каталога конфигурации подхватил бы его
+    плагины, хуки, CLAUDE.md и скилы; `--safe-mode` их отключает, вход
+    пользователя и встроенные инструменты остаются.
     """
     return [
         binary,
         "-p",
+        *(["--safe-mode"] if safe_mode else []),
         "--model",
         model or DEFAULT_CLAUDE_MODEL,
         "--dangerously-skip-permissions",
@@ -773,7 +779,7 @@ def _launch_in(
 ) -> LaunchOutcome:
     if ready.plain:
         prompt = make_prompt(str(cdir.stage / call.filename))
-        argv = author_argv(ready.binary, ready.model, prompt)
+        argv = author_argv(ready.binary, ready.model, prompt, safe_mode=True)
         env = plain_env(cdir)
     else:
         sandboxed = _sandbox_setup(cdir, ready, call, make_prompt)
