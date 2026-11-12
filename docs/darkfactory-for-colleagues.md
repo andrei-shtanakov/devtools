@@ -109,6 +109,11 @@ cd ~/code/my-repo
 dfl init-repo
 ```
 
+Если `origin/HEAD` нет (репо собран через `git init` и `git remote add`, а не
+`git clone`), `dfl` сам выполнит `git remote set-head origin -a` и скажет об
+этом. Отказы `dfl` печатает отдельным блоком: команда и код, «причина» и
+«что сделать».
+
 Команда открывает PR с шаблонами DarkFactory (профили, review-kit, конфиг
 spec-runner), ставит на него метку `human-merge-required` и просит вас
 **смержить его самому**. Свой уже открытый PR подготовки повторный вызов

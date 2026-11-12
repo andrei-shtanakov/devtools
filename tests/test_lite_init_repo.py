@@ -253,6 +253,27 @@ def test_dirty_tree_refused(work: Path, capsys) -> None:
     assert gh.calls == []
 
 
+def test_missing_origin_head_is_set_by_dfl(work: Path, capsys) -> None:
+    # репо из `git init` + `git remote add`: origin/HEAD нет — dfl ставит сам
+    _git(work, "remote", "set-head", "origin", "-d")
+    assert ir._default_branch(subprocess.run, work) == "main"
+    assert "set-head origin -a" in capsys.readouterr().out
+    assert _git(work, "symbolic-ref", "refs/remotes/origin/HEAD") == (
+        "refs/remotes/origin/main"
+    )
+
+
+def test_missing_origin_head_unreachable_remote_refused(
+    work: Path, tmp_path: Path, capsys
+) -> None:
+    _git(work, "remote", "set-head", "origin", "-d")
+    _git(work, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+    assert ir.init_repo(work, DEVTOOLS, FakeGh()) == 2
+    err = capsys.readouterr().err
+    assert "dfl init-repo: отказ (код 2)" in err
+    assert "set-head" in err
+
+
 def test_not_default_branch_refused(work: Path, capsys) -> None:
     _git(work, "switch", "-c", "feature")
     assert ir.init_repo(work, DEVTOOLS, FakeGh()) == 2
