@@ -168,3 +168,62 @@ def test_edge_verdict_carries_head_verdict_and_input_hashes() -> None:
         "verdict": "PASS",
         "inputs": {"design--requirements": ["b1", "s1"]},
     }
+
+
+class _LaggingForge(_Forge):
+    """Форджа, отдающая прежнюю голову PR первые `lag` чтений после push."""
+
+    def __init__(self, ancestor: bool | None) -> None:
+        super().__init__()
+        self.ancestor = ancestor
+        self.fetched: list[str] = []
+
+    def fetch_branch(self, target_dir: str, branch: str) -> None:
+        self.fetched.append(branch)
+
+    def is_ancestor(self, target_dir: str, older: str, newer: str) -> bool | None:
+        return self.ancestor
+
+
+def _lagging(monkeypatch: pytest.MonkeyPatch, lag: int, ancestor: bool | None):
+    state = _wave_state("test", monkeypatch)
+    state.ops[KEY]["branch"] = "spec/x"
+    reads: list[str] = []
+
+    def pr_head(*a, **k):  # noqa: ANN002, ANN003, ANN202
+        reads.append("r")
+        return "old" if len(reads) <= lag else HEAD
+
+    monkeypatch.setattr(publish.an, "pr_head", pr_head)
+    monkeypatch.setattr(publish.time, "sleep", lambda s: None)
+    return state, _LaggingForge(ancestor), reads
+
+
+def test_publish_wave_waits_for_forge_to_catch_up_after_push(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Живой прогон Linux 12.11: сразу после push форджа отдала прежнюю
+    голову PR — это не чужой push. Голова перечитывается."""
+    state, forge, reads = _lagging(monkeypatch, lag=2, ancestor=None)
+    assert publish.publish_wave(state, forge, KEY, PASS_RECORDS) == publish.CODE_OK
+    assert len(reads) == 3 and forge.published == ["COMMENT"]
+
+
+@pytest.mark.parametrize(
+    ("ancestor", "code"),
+    [
+        (True, publish.CODE_UNRESOLVED),
+        (None, publish.CODE_UNRESOLVED),
+        (False, publish.CODE_HEAD_MOVED),
+    ],
+    ids=["our-old-head", "ancestry-unknown", "foreign-push"],
+)
+def test_publish_wave_stale_head_after_wait(
+    monkeypatch: pytest.MonkeyPatch, ancestor: bool | None, code: int
+) -> None:
+    """Форджа так и не догнала: наша прежняя голова — повтор resume
+    (`UNRESOLVED`), чужая — `HEAD_MOVED`; ревью не публикуется."""
+    state, forge, reads = _lagging(monkeypatch, lag=99, ancestor=ancestor)
+    assert publish.publish_wave(state, forge, KEY, PASS_RECORDS) == code
+    assert len(reads) == publish._HEAD_SETTLE_TRIES
+    assert forge.fetched == ["spec/x"] and forge.published == []
