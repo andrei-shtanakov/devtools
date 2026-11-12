@@ -800,8 +800,16 @@ def interview(cwd: Path, subject: str | None) -> int:
         raise DflError(str(exc)) from exc
     reply = _discovery_status(session_id, rs.run_dir(state.run_id))
     print(f"Тема: {state.subject}")
-    print(iview.render_view(view, ic.current_question(reply)))
+    failure = _status_failure(reply)
+    print(iview.render_view(view, ic.current_question(reply), failure))
     return 0
+
+
+def _status_failure(reply: iv.DiscoveryReply) -> str | None:
+    """Причина сбоя `discovery status`; None — вопрос есть или интервью кончилось."""
+    if reply.code in (0, 10, 11, 20):
+        return None
+    return str(reply.envelope.get("operation", {}).get("reason", "") or "")
 
 
 def correct(cwd: Path, text: str, subject: str | None) -> int:

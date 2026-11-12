@@ -574,6 +574,11 @@ def quiet_interview_hints() -> Iterator[None]:
         _QUIET_HINTS.reset(token)
 
 
+def interview_hints_quiet() -> bool:
+    """Включён ли режим `quiet_interview_hints` (путь `dfl`)."""
+    return _QUIET_HINTS.get()
+
+
 #: Именованный пропуск акта человека: в `test` candidate мержит раннер.
 ACT_SKIP_TEST = "акт человека не требуется (test)"
 

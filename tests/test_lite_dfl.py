@@ -940,7 +940,8 @@ def test_dfl_run_tty_chats_then_continues(env: Env, monkeypatch, capsys) -> None
     # после интервью — тот же следующий шаг, что после dfl answer
     assert env.spec_calls[1] == ["--subject", "тема", "--repo", REPO,
                                  "--run-id", "WS-1-a"]  # fmt: skip
-    assert "dfl answer --file" not in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "dfl answer --file" not in out and "make spec-loop" not in out
 
 
 def test_dfl_run_tty_stop_says_how_to_resume(env: Env, monkeypatch, capsys) -> None:
@@ -1117,6 +1118,20 @@ def test_dfl_interview_prints_without_tty_and_agent(
     out = capsys.readouterr().out
     assert "Тема: тема" in out and "Вопрос 3 (цели): Зачем?" in out
     assert "FR-01 раз в неделю — Must; критерий: ок; → G-01" in out
+
+
+def test_dfl_interview_status_failure_is_not_no_questions(
+    env: Env, monkeypatch, capsys
+) -> None:
+    _waiting("WS-1-a", "WS-1", "customer")
+    monkeypatch.setattr(dfl, "load_session", lambda sid: _session_view())
+    reply = iv.DiscoveryReply(1, {"operation": {"reason": "упал"}}, "")
+    monkeypatch.setattr(dfl, "_discovery_status", lambda sid, cwd: reply)
+    assert env.run("interview") == 0
+    out = capsys.readouterr().out
+    assert "текущий вопрос не получен (упал)" in out
+    assert "вопросов больше нет" not in out
+    assert "FR-01 раз в неделю" in out
 
 
 def test_dfl_interview_prefers_engineer_session(env: Env, monkeypatch) -> None:

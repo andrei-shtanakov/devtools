@@ -45,9 +45,19 @@ class _Change:
     new: dict[str, Any]
 
 
-def render_view(view: SessionView, current: Question | None) -> str:
-    """Состояние интервью текстом: вопрос, темы с пунктами, помехи готовности."""
-    lines = [_question_line(view, current), ""]
+def render_view(
+    view: SessionView, current: Question | None, unavailable: str | None = None
+) -> str:
+    """Состояние интервью текстом: вопрос, темы с пунктами, помехи готовности.
+
+    `unavailable` — текущий вопрос получить не удалось (сбой `discovery
+    status`, причина или пусто): вместо «вопросов больше нет»."""
+    head = _question_line(view, current)
+    if unavailable is not None:
+        head = "текущий вопрос не получен" + (
+            f" ({unavailable})" if unavailable else ""
+        )
+    lines = [head, ""]
     covered = view.covered()
     for topics in (view.required, view.optional):
         for key, prefix in topics.items():
@@ -118,8 +128,9 @@ def correct(
         return Ask(ask)
     changes = _changes(items, view)
     _check_required(changes, view)
-    _send_all(_by_holder(changes, view), send)
-    return "\n".join(line for c in changes for line in _describe(c))
+    _send_all(_by_holder(changes, view), send, changes, view)
+    lines = [line for c in changes for line in _describe(c)]
+    return "\n".join(lines + _remaining_hints(changes, view))
 
 
 def _changed_items(
@@ -169,12 +180,36 @@ def _changes(items: list[dict[str, Any]], view: SessionView) -> list[_Change]:
     return changes
 
 
+def _gaps(entry: dict[str, Any], view: SessionView, body: str) -> list[str]:
+    """Дыры обязательных полей пункта; формулировка — по `body`."""
+    item = st.entry_as_item({**entry, "body": body})
+    return st.validate([item], Question("", "", ""), view)
+
+
 def _check_required(changes: list[_Change], view: SessionView) -> None:
-    """Поправка не должна ломать обязательные поля пункта."""
-    items = [st.entry_as_item(c.new) for c in changes]
-    gaps = st.validate(items, Question("", "", ""), view)
+    """Поправка не должна вносить дыры в обязательные поля пункта.
+
+    Прежние дыры (пункт был неполным до поправки) не мешают: поправка
+    сама по себе верна."""
+    gaps = [g for c in changes for g in _introduced_gaps(c, view)]
     if gaps:
         raise CorrectError("поправка оставила пробелы:\n" + "\n".join(gaps))
+
+
+def _introduced_gaps(change: _Change, view: SessionView) -> list[str]:
+    """Дыры нового пункта, которых не было у прежнего (с тем же телом)."""
+    body = change.new["body"]
+    before = _gaps(change.old, view, body)
+    return [g for g in _gaps(change.new, view, body) if g not in before]
+
+
+def _remaining_hints(changes: list[_Change], view: SessionView) -> list[str]:
+    """«у FR-01 по-прежнему нет: …» — прежние дыры, не закрытые поправкой."""
+    return [
+        f"у {c.new['id']} по-прежнему нет: {g} — дополните ответом или dfl correct"
+        for c in changes
+        for g in _gaps(c.new, view, c.new["body"])
+    ]
 
 
 def _by_holder(changes: list[_Change], view: SessionView) -> dict[str, dict[str, Any]]:
@@ -194,13 +229,31 @@ def _by_holder(changes: list[_Change], view: SessionView) -> dict[str, dict[str,
     return out
 
 
-def _send_all(answers: dict[str, dict[str, Any]], send: Send) -> None:
-    for qid, answer in answers.items():
+def _send_all(
+    answers: dict[str, dict[str, Any]],
+    send: Send,
+    changes: list[_Change],
+    view: SessionView,
+) -> None:
+    """Слать держателей по очереди; отказ называет применённое и нет."""
+    ids: dict[str, list[str]] = {}
+    for c in changes:
+        ids.setdefault(view.holders[c.new["id"]], []).append(c.new["id"])
+    applied: list[str] = []
+    for n, (qid, answer) in enumerate(answers.items()):
         body = yaml.safe_dump(answer, allow_unicode=True, sort_keys=False)
         reply = send(qid, body)
-        if reply.code in (1, 2):
-            reason = reply.envelope.get("operation", {}).get("reason", "") or "отказ"
+        if reply.code not in (1, 2):
+            applied += ids[qid]
+            continue
+        reason = reply.envelope.get("operation", {}).get("reason", "") or "отказ"
+        if not applied:
             raise CorrectError(f"discovery не принял поправку ({reason})")
+        rest = [i for q in list(answers)[n:] for i in ids[q]]
+        raise CorrectError(
+            f"применено: {', '.join(applied)}; "
+            f"не применено: {', '.join(rest)} (discovery: {reason})"
+        )
 
 
 def _describe(change: _Change) -> list[str]:

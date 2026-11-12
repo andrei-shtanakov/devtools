@@ -440,20 +440,45 @@ def test_correct_must_not_break_required_fields() -> None:
     assert send.sent[0][1]["entries"][0]["traces"] == ["G-01"]
 
 
-def test_correct_refuses_when_result_lacks_required(monkeypatch) -> None:
+def test_correct_refuses_gap_introduced_by_correction() -> None:
+    old = dict(FR1)
+    new = {k: v for k, v in FR1.items() if k != "Acceptance"}
+    with pytest.raises(iview.CorrectError, match="проверить"):
+        iview._check_required([iview._Change(old, new)], _corr_view())
+
+
+def test_correct_preexisting_gap_does_not_block_and_is_hinted() -> None:
     send = Sender()
     view = _corr_view()
     view.answers["q-fn"]["entries"][0].pop("Acceptance")  # уже неполный пункт
     agent = _agent({"items": [_fr1_item(acceptance=None)], "ask": None})
-    with pytest.raises(iview.CorrectError, match="проверить"):
-        iview.correct(_state(), "x", agent=agent, load=lambda s: view, send=send)
-    assert send.sent == []
+    out = iview.correct(_state(), "x", agent=agent, load=lambda s: view, send=send)
+    assert len(send.sent) == 1
+    assert "FR-01: «выгрузка раз в неделю» → «выгрузка раз в месяц»" in out
+    assert "у FR-01 по-прежнему нет:" in out
+    assert "проверить" in out and "dfl correct" in out
 
 
 def test_correct_discovery_refusal_is_error() -> None:
     agent = _agent({"items": [_fr1_item()], "ask": None})
     with pytest.raises(iview.CorrectError, match="не принял"):
         _correct(agent, Sender(code=1))
+
+
+def test_correct_partial_send_names_applied_and_not_applied() -> None:
+    class FailSecond(Sender):
+        def __call__(self, qid: str, payload: str) -> iv.DiscoveryReply:
+            super().__call__(qid, payload)
+            return iv.DiscoveryReply(0 if len(self.sent) == 1 else 2,
+                                     {"operation": {"reason": "конфликт"}}, "")  # fmt: skip
+
+    g = {"id": "G-01", "prefix": "G", "body": "Сверка за час"}
+    fr2 = _fr1_item(id="FR-02", body="письмо с отчётом", acceptance="за минуту")
+    with pytest.raises(iview.CorrectError) as exc:
+        _correct(_agent({"items": [g, fr2], "ask": None}), FailSecond())
+    assert "применено: G-01; не применено: FR-02 (discovery: конфликт)" in str(
+        exc.value
+    )
 
 
 def test_correct_agent_down_is_error() -> None:
