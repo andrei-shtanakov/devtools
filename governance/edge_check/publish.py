@@ -18,13 +18,15 @@ push + PR + одно ревью на эту голову. Повтор идем�
 ревью с маркером на эту голову уже есть ⇒ публикуется ничего.
 
 Коды: 0 — опубликовано; 1 — вердикт не PASS либо у человека действующее
-CHANGES_REQUESTED (не гасится); 3 — факт не установлен (ревью/сеть);
-4 — голова PR не равна записанной (чужой push).
+CHANGES_REQUESTED (не гасится); 3 — факт не установлен (ревью/сеть либо
+форджа не догнала наш push за отведённое ожидание — причина печатается);
+4 — голова PR не равна записанной и не наша (чужой push).
 """
 
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from governance import act_surface, bundle_dag
@@ -36,6 +38,15 @@ from governance.run_state import RunState
 
 EDGE_MARKER = "ai-prosto-edge-check"
 CODE_OK, CODE_CHANGES, CODE_UNRESOLVED, CODE_HEAD_MOVED = 0, 1, 3, 4
+
+#: Форджа догоняет push не сразу: `headRefOid` PR ещё секунды после push
+#: отдаёт прежнюю голову (живой прогон Linux 12.11: ложный «чужой push»
+#: сразу после evidence-коммита). Голова перечитывается до
+#: `_HEAD_SETTLE_TRIES` раз с паузой `_HEAD_SETTLE_DELAY` секунд.
+_HEAD_SETTLE_TRIES = 5
+_HEAD_SETTLE_DELAY = 3.0
+#: Точка подмены паузы в тестах (как `approve_node._SLEEP`).
+_SLEEP = time.sleep
 
 
 def evidence_dir(state: RunState) -> str:
@@ -236,8 +247,9 @@ def publish_wave(
     an.publish_request(state, ops, key, legacy_bundle=legacy_bundle)
     op = state.ops[key]
     pr = op["candidate_pr"]
-    if an.pr_head(state, ops, pr) != op["head_sha"]:
-        return CODE_HEAD_MOVED
+    code = _pushed_head_code(state, ops, pr, op)
+    if code is not None:
+        return code
     reviews = ops.pr_reviews(state.repo_slug, pr)
     if reviews is None:
         return CODE_UNRESOLVED
@@ -259,3 +271,33 @@ def publish_wave(
     ):
         return CODE_UNRESOLVED
     return CODE_OK
+
+
+def _pushed_head_code(state: RunState, ops: Ops, pr: int, op: dict) -> int | None:
+    """Голова PR после нашего push: `None` — равна записанной, иначе код.
+
+    Форджа может отставать (см. `_HEAD_SETTLE_TRIES`). Голова PR, оставшаяся
+    ПРЕДКОМ записанной и после ожидания, — наша же, не догнанная форджей:
+    `CODE_UNRESOLVED` (повтор resume), а не `CODE_HEAD_MOVED`. Чужой push —
+    голова, которая предком записанной не является.
+    """
+    head = op["head_sha"]
+    remote = None
+    for attempt in range(_HEAD_SETTLE_TRIES):
+        remote = an.pr_head(state, ops, pr)
+        if remote == head:
+            return None
+        if attempt + 1 < _HEAD_SETTLE_TRIES:
+            _SLEEP(_HEAD_SETTLE_DELAY)
+    if remote is None:
+        return CODE_UNRESOLVED
+    ops.fetch_branch(state.target_dir, op["branch"])
+    ours = ops.is_ancestor(state.target_dir, remote, head)
+    if ours is None or ours:
+        print(
+            f"publish: голова PR #{pr} ({remote[:8]}) не догнала наш push "
+            f"({head[:8]}) за {_HEAD_SETTLE_TRIES} чтений — форджа отстаёт, "
+            "не чужой push; повторите resume"
+        )
+        return CODE_UNRESOLVED
+    return CODE_HEAD_MOVED
