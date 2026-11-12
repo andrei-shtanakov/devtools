@@ -714,6 +714,77 @@ def test_author_prompt_names_two_paths_dsl_and_filenames():
     assert "checked_by" in beh
 
 
+def test_source_id_index_filters_the_gate_index(tmp_path):
+    """Индекс промпта — фильтр того же `bundle_node_index`, что строит гейт
+    (devtools#734, ревью #738): только `#### <ID>`, однократные определения,
+    без узла decomposition и отсутствующих файлов."""
+    (tmp_path / "00-charter.md").write_text(
+        "#### CON-01: x\n- A-01: bullet\nсм. FR-09 в прозе\n", encoding="utf-8"
+    )
+    (tmp_path / "20-design.md").write_text(
+        "#### Q-03 a\n#### Q-04\n#### Q-04\n", encoding="utf-8"
+    )
+    (tmp_path / "30-decomposition.md").write_text("#### DT-01: t\n", encoding="utf-8")
+    gate = ops_mod.bundle_node_index(tmp_path)
+    assert gate == {
+        "charter": {"CON-01": 1},
+        "design": {"Q-03": 1, "Q-04": 2},
+        "decomposition": {"DT-01": 1},
+    }
+    assert ops_mod.source_id_index(tmp_path) == {
+        "charter": ["CON-01"],
+        "design": ["Q-03"],
+    }
+
+
+def test_gate_uses_the_same_index_computer():
+    """Один вычислитель: гейт GC-DT-CONTRACT зовёт `ops.bundle_node_index`."""
+    from governance import runner
+
+    assert runner.bundle_node_index is ops_mod.bundle_node_index
+    src = Path(runner.__file__).read_text(encoding="utf-8")
+    assert "decomposition_guard.node_id_counts(" not in src
+
+
+def test_decomposition_prompt_names_valid_sources_only_for_decomposition():
+    """Живой прогон 11.11: автор писал `requirements#CON-01` (id charter) и
+    id пунктов списков — промпт называет допустимые пары и правило
+    определения (devtools#734)."""
+    ids = {"charter": ["CON-01"], "requirements": ["FR-01", "FR-02"], "design": []}
+    dec = ops_mod.author_prompt(
+        "decomposition", "s", "ws/spec", None, "/o", source_ids=ids
+    )
+    assert "\n  charter#CON-01\n" in dec
+    assert "\n  requirements#FR-01, requirements#FR-02\n" in dec
+    assert "design: (no defined ids)" in dec
+    assert "decomposition#<ID>" in dec  # свои id — правилом, не перечнем
+    assert "`#### <ID>` heading" in dec
+    assert "requirements#CON-01" in dec  # пример запрета назван дословно
+    assert "ADD one" not in dec  # автор чужие узлы править не может
+    beh = ops_mod.author_prompt(
+        "behaviour-spec", "s", "ws/spec", None, "/o", source_ids=ids
+    )
+    assert "charter#CON-01" not in beh
+
+
+def test_real_author_passes_source_index_for_decomposition(tmp_path, monkeypatch):
+    bundle = tmp_path / "ws" / "spec"
+    bundle.mkdir(parents=True)
+    (bundle / "25-acceptance.md").write_text("#### AC-07: x\n", encoding="utf-8")
+    seen: list[str] = []
+
+    def fake_launch(call, prompt):
+        seen.append(prompt("/calls/o"))
+        return ops_mod.LaunchOutcome(0)
+
+    monkeypatch.setattr(ops_mod.author_launch, "launch_author", fake_launch)
+    call = ops_mod.AuthorCall("r", "/run", str(tmp_path), "ws/spec", "30-x.md")
+    RealOps().author(call, "decomposition", "s")
+    RealOps().author(call, "design", "s")
+    assert "acceptance#AC-07" in seen[0]
+    assert "acceptance#AC-07" not in seen[1]
+
+
 def test_author_prompt_adds_brief_context_only_to_charter_and_requirements():
     charter, requirements = (
         ops_mod.author_prompt(kind, "s", "ws/spec", _BRIEF_CONTEXT, "/o")

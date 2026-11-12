@@ -66,6 +66,7 @@ from governance.ops import (
     _AUTHOR_DSL,
     Ops,
     RealOps,
+    bundle_node_index,
     disp_agent,
 )
 from governance.policy_sources import (
@@ -4215,16 +4216,7 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
         # «узла нет в бандле» — честную причину, отличную от «пункт не
         # найден». Пустой индекс (бандл без единого узла) — законный
         # вход, на котором не разрешается ни одна ссылка.
-        bundle_root = Path(state.target_dir) / state.bundle_dir
-        declared_paths = {
-            node: bundle_root / filename
-            for node, filename in bundle_dag.node_filenames(bundle_dag.dag_for(None))
-        }
-        node_index = {
-            node: decomposition_guard.node_id_counts(path.read_text(encoding="utf-8"))
-            for node, path in declared_paths.items()
-            if path.exists()
-        }
+        node_index = bundle_node_index(Path(state.target_dir) / state.bundle_dir)
         dt_errors, dt_warnings = decomposition_guard.dt_contract_findings(
             decomp_path.read_text(encoding="utf-8"),
             node_index=node_index,

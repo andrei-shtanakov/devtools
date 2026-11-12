@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Protocol, cast
 from urllib.parse import quote
 
-from governance import author_launch, df_config
+from governance import author_launch, bundle_dag, df_config
 from governance import interview as _interview
 from governance.act_git_rows import (
     FIRST_PARENT_LOG,
@@ -41,7 +41,7 @@ from governance.brief_facts import (
     PrComment,
 )
 from governance.brief_input import descriptor_source_blobs, descriptor_source_paths
-from governance.decomposition_guard import DELIVERABLE_KINDS
+from governance.decomposition_guard import DELIVERABLE_KINDS, node_id_counts
 from governance.facts import Fact, Outcome, unavailable
 
 DEVTOOLS_ROOT = Path(__file__).resolve().parent.parent
@@ -803,8 +803,14 @@ _AUTHOR_DSL = {
         "entry MUST resolve INSIDE the bundle (`acceptance#AC-07`, "
         "`design#Q-03`, `behaviour-spec#BEH-01`): line numbers and heading "
         "text are NOT identifiers, because both change under editing and a "
-        "reference must survive editing — if a design item has no stable "
-        "id, ADD one, that is part of the work. `covered_by: BEH-NN` is "
+        "reference must survive editing. An id is DEFINED only by a "
+        "`#### <ID>` heading in the file of the node named before `#`: an "
+        "id in a list bullet (`- A-01: …`) or mentioned in prose is NOT a "
+        "definition, and an id defined in one node MUST NOT be prefixed "
+        "with another node's name (`requirements#CON-01` for an id defined "
+        "in the charter is unresolvable). You cannot edit other nodes: if "
+        "the item you rely on has no defined id, cite the closest defined "
+        "id of the node that holds it. `covered_by: BEH-NN` is "
         "OPTIONAL and declares that an EXISTING checklist item already "
         "closes this result, so no duplicate item is created; it MUST name "
         "a scenario of THIS DT (one listed in its own `scenarios`), and it "
@@ -914,12 +920,59 @@ _AUTHOR_DSL = {
 }
 
 
+def bundle_node_index(bundle_root: Path) -> dict[str, dict[str, int]]:
+    """Узел бандла → его id с КРАТНОСТЬЮ определения (`node_id_counts`).
+
+    Единственный вычислитель индекса целей `sources`: его зовут и гейт
+    GC-DT-CONTRACT (`runner`), и промпт автора decomposition — иначе
+    промпт назвал бы автору перечень, который гейт уже не разрешает
+    (ревью #738). Индексируются только существующие файлы: отсутствующий
+    узел остаётся вне индекса, ссылка на него получит честный отказ
+    «узла нет в бандле».
+    """
+    declared = bundle_dag.node_filenames(bundle_dag.dag_for(None))
+    return {
+        node: node_id_counts((bundle_root / filename).read_text(encoding="utf-8"))
+        for node, filename in declared
+        if (bundle_root / filename).exists()
+    }
+
+
+def source_id_index(bundle_root: Path) -> dict[str, list[str]]:
+    """Цели `sources` для промпта: `bundle_node_index`, id ровно одного
+    определения (дважды определённый гейт отвергнет как неоднозначный).
+    Узел decomposition не перечисляется: его файл и пишет автор — старая
+    версия устарела; ссылки на собственные id промпт разрешает правилом."""
+    return {
+        node: sorted(item for item, n in counts.items() if n == 1)
+        for node, counts in bundle_node_index(bundle_root).items()
+        if node != "decomposition"
+    }
+
+
+def _source_ids_guidance(source_ids: dict[str, list[str]]) -> str:
+    lines = "".join(
+        "\n  "
+        + (", ".join(f"{node}#{item}" for item in ids) or f"{node}: (no defined ids)")
+        for node, ids in source_ids.items()
+    )
+    return (
+        "\nThe ONLY valid `sources` targets in other nodes are these refs "
+        "(ids defined exactly once by a `#### <ID>` heading), grouped by node; "
+        "copy them verbatim. A ref into the file you write "
+        "(`decomposition#<ID>` for an id you define there by a `#### <ID>` "
+        f"heading) is also valid:{lines}"
+    )
+
+
 def author_prompt(
     kind: str,
     subject: str,
     bundle_dir: str,
     brief_context: dict[str, object] | None,
     output_path: str,
+    *,
+    source_ids: dict[str, list[str]] | None = None,
 ) -> str:
     """Промпт авторского вызова: два разных пути (дизайн §11 п.1).
 
@@ -956,6 +1009,8 @@ def author_prompt(
                 f"\ntraces_to:{edges}\nand upstream_hashes maps each of "
                 "these names to its pin."
             )
+    if source_ids is not None and kind == "decomposition":
+        source_guidance += _source_ids_guidance(source_ids)
     return (
         f"kind={kind} subject={subject!r} bundle_dir={bundle_dir}\n"
         f"The bundle lives at {bundle_dir}/ (relative to the working "
@@ -968,6 +1023,27 @@ def author_prompt(
         f"{rules}\n"
         "Author the governance bundle content for this kind/subject."
         f"{source_guidance}"
+    )
+
+
+def _call_prompt(
+    call: AuthorCall,
+    kind: str,
+    subject: str,
+    brief_context: dict[str, object] | None,
+    output_path: str,
+) -> str:
+    """Промпт вызова `call`; decomposition получает индекс целей `sources`."""
+    source_ids = None
+    if kind == "decomposition":
+        source_ids = source_id_index(Path(call.target_dir) / call.bundle_dir)
+    return author_prompt(
+        kind,
+        subject,
+        call.bundle_dir,
+        brief_context,
+        output_path,
+        source_ids=source_ids,
     )
 
 
@@ -2259,9 +2335,7 @@ class RealOps(BriefFactsMixin):
         """
         return author_launch.launch_author(
             call,
-            functools.partial(
-                author_prompt, kind, subject, call.bundle_dir, brief_context
-            ),
+            functools.partial(_call_prompt, call, kind, subject, brief_context),
         )
 
     def author_disp(
