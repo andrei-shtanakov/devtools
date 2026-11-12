@@ -2,7 +2,8 @@
 
 Отчёт собирается из записи сбоя (`lite.failure_log`) и состояния машины,
 очищается (домашний каталог, токены) и уходит публичным issue в
-`REPORT_REPO` — после показа и подтверждения коллегой. Спека
+репо devtools, из которого установлен `dfl` (его `origin`), — после показа и
+подтверждения коллегой. Спека
 `docs/superpowers/specs/2026-11-12-dfl-report-design.md`.
 """
 
@@ -21,12 +22,12 @@ from pathlib import Path
 
 from governance import df_config
 from governance import run_state as rs
+from governance.user_targets import TargetsError, slug_from_url
 from lite.failure_log import FailureRecord
 from lite.failure_log import load as load_record
 from lite.install import InstallError, load_components
 from lite.output import refusal
 
-REPORT_REPO = "andrei-shtanakov/devtools"
 BODY_LIMIT = 65_536
 TITLE_CAUSE = 80
 DEVTOOLS = Path(__file__).resolve().parent.parent
@@ -342,13 +343,14 @@ def _report(
             "отчёт не отправлен: нет терминала для подтверждения — "
             "подтвердите отправку в терминале или используйте dfl report --print"
         )
+    repo = report_repo()
     profile = _profile()
-    duplicate = _find_duplicate(rep, gh, profile)
+    duplicate = _find_duplicate(rep, repo, gh, profile)
     print(f"\n{PUBLIC_WARNING}")
     question = (
         f"Добавить комментарий к {duplicate[1]}? [y/N] "
         if duplicate
-        else f"Отправить в {REPORT_REPO} как публичное issue? [y/N] "
+        else f"Отправить в {repo} как публичное issue? [y/N] "
     )
     try:
         answer = ask(question)
@@ -359,17 +361,17 @@ def _report(
         print("не отправлено")
         return 0
     if duplicate:
-        argv = ["issue", "comment", str(duplicate[0]), "-R", REPORT_REPO]
+        argv = ["issue", "comment", str(duplicate[0]), "-R", repo]
         url = _gh_ok(gh, [*argv, "--body-file", "-"], profile, rep.body)
     else:
-        argv = ["issue", "create", "-R", REPORT_REPO, "--title", rep.title]
+        argv = ["issue", "create", "-R", repo, "--title", rep.title]
         url = _gh_ok(gh, [*argv, "--body-file", "-"], profile, rep.body)
     print(f"отправлено: {url}")
     return 0
 
 
 def _find_duplicate(
-    rep: Report, gh: Gh, profile: Path | None
+    rep: Report, repo: str, gh: Gh, profile: Path | None
 ) -> tuple[int, str] | None:
     """Открытое issue с тем же отпечатком в заголовке: (номер, URL)."""
     out = _gh_ok(
@@ -378,7 +380,7 @@ def _find_duplicate(
             "issue",
             "list",
             "-R",
-            REPORT_REPO,
+            repo,
             "--state",
             "open",
             "--search",
@@ -409,6 +411,27 @@ def _gh_ok(gh: Gh, argv: list[str], profile: Path | None, body: str | None) -> s
         reason = detail[-1] if detail else f"код {done.returncode}"
         raise ReportError(f"gh {' '.join(argv[:2])}: {reason} — {PRINT_HINT}")
     return (done.stdout or "").strip()
+
+
+def report_repo() -> str:
+    """`owner/name` репо devtools, из которого установлен `dfl` (его `origin`).
+
+    Отчёт уходит туда, откуда пришёл код: у установки по памятке это репо
+    разработчиков DarkFactory, у форка — сам форк."""
+    done = subprocess.run(
+        ["git", "-C", str(DEVTOOLS), "remote", "get-url", "origin"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    try:
+        if done.returncode != 0:
+            raise TargetsError(done.stderr.strip() or "нет origin")
+        return slug_from_url(done.stdout.strip())
+    except TargetsError as exc:
+        raise ReportError(
+            f"репо для отчётов не определено: {exc} — {PRINT_HINT}"
+        ) from exc
 
 
 def _profile() -> Path | None:

@@ -193,6 +193,7 @@ def failed(tmp_path: Path, monkeypatch) -> Path:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setattr(rp, "_versions", lambda: {"devtools": "abc"})
     monkeypatch.setattr(rp, "_profile", lambda: tmp_path / "gh-human")
+    monkeypatch.setattr(rp, "report_repo", lambda: "o/devtools")
     cwd = tmp_path / "repo"
     cwd.mkdir()
     fl.write(cwd, _rec(output_tail=["вывод", "ghp_" + "q" * 36]))
@@ -239,7 +240,7 @@ def test_report_confirm_creates_issue(failed: Path, tmp_path: Path, capsys) -> N
     assert _report(failed, gh) == 0
     assert gh.verbs() == ["issue list", "issue create"]
     argv, profile, body = gh.calls[1]
-    assert argv[argv.index("-R") + 1] == "andrei-shtanakov/devtools"
+    assert argv[argv.index("-R") + 1] == "o/devtools"
     assert profile == tmp_path / "gh-human"
     assert body is not None and "## Вывод" in body
     out = capsys.readouterr().out
@@ -370,3 +371,40 @@ def test_versions_survive_broken_components(monkeypatch) -> None:
     monkeypatch.setattr(rp, "load_components", broken)
     monkeypatch.setattr(rp, "_cmd", lambda argv: "v")
     assert rp._versions()["components"] == "нет (битая комплектация)"
+
+
+def test_report_repo_is_origin_of_installed_devtools(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo = tmp_path / "devtools"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:me/devtools.git",
+        ],
+        check=True,
+    )
+    monkeypatch.setattr(rp, "DEVTOOLS", repo)
+    assert rp.report_repo() == "me/devtools"
+
+
+def test_report_without_origin_refuses_with_print_hint(
+    failed: Path, monkeypatch, capsys
+) -> None:
+    def none() -> str:
+        raise rp.ReportError(
+            "репо для отчётов не определено: нет origin — " + rp.PRINT_HINT
+        )
+
+    monkeypatch.setattr(rp, "report_repo", none)
+    gh = FakeGh()
+    assert _report(failed, gh) == 2
+    assert "dfl report --print" in capsys.readouterr().err
+    assert gh.calls == []
