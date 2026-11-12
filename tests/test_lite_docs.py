@@ -79,3 +79,26 @@ def test_doc_names_non_actions_ci_limit() -> None:
     text = _doc()
     for needle in ("GitHub Actions", "2 минут"):
         assert needle in text, needle
+
+
+def test_doc_interview_chat_final_review() -> None:
+    """Финальное ревью: Ctrl-C, добор тем, обновление пунктов, отказ correct
+    после конца интервью, честная цена и отказ без claude в терминале."""
+    from lite import dfl
+
+    flat = " ".join(_doc().split())
+    for hint in (
+        dfl.CHAT_STOPPED,
+        dfl.CHAT_HARNESS_REFUSAL,
+        dfl.INTERVIEW_COMPLETED_REFUSAL,
+        "Не хватает:",
+        "как минимум один платный вызов",
+        "агент работает",
+        "уже записанный пункт",
+        "«прервано»",
+    ):
+        assert " ".join(hint.split()) in flat, hint
+    paid = "один платный вызов"
+    assert flat.count(paid) == flat.count(f"как минимум {paid}"), paid
+    # без claude в терминале — отказ, а не только подсказка (как без tty)
+    assert "или без `harness.author = claude` разговора нет" not in flat
