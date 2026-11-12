@@ -78,10 +78,18 @@ def test_redact_hides_token(token: str) -> None:
         ("Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"),
         ("key sk-" + "A" * 24, "A" * 24),
         ("passwd: s3cret", "s3cret"),
+        ("Authorization: token abc123", "abc123"),
+        ("password=my secret phrase", "phrase"),
+        ("https://user:p@ss@github.com/o/r", "ss@github"),
     ],
 )
 def test_redact_hides_secret_forms(text: str, secret: str) -> None:
     assert secret not in rp.redact(text, Path("/h"))
+
+
+def test_redact_keeps_text_before_secret_and_other_lines() -> None:
+    out = rp.redact("x password=a b\nследующая строка", Path("/h"))
+    assert out == "x password=<скрыто>\nследующая строка"
 
 
 def test_redact_home_to_tilde() -> None:
@@ -234,7 +242,9 @@ def test_report_confirm_creates_issue(failed: Path, tmp_path: Path, capsys) -> N
     assert argv[argv.index("-R") + 1] == "andrei-shtanakov/devtools"
     assert profile == tmp_path / "gh-human"
     assert body is not None and "## Вывод" in body
-    assert ISSUE in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert ISSUE in out
+    assert rp.PUBLIC_WARNING in out
 
 
 def test_report_duplicate_goes_to_comment(failed: Path, capsys) -> None:

@@ -40,12 +40,15 @@ _TOKENS = (
     re.compile(r"xox[abp]-[A-Za-z0-9-]+"),
 )
 # Значение после префикса: группа 1 остаётся, остальное — `<скрыто>`.
+# После ключа и схемы авторизации скрывается всё до конца строки: значение
+# бывает из нескольких слов (`Authorization: token abc`, `password=a b`);
+# лишнее скрытие безопаснее утечки в публичное issue.
 _PREFIXED = (
-    re.compile(r"(?i)(\b(?:Bearer|Basic)\s+)\S+"),
-    re.compile(r"([a-z][a-z0-9+.-]*://)[^/\s@]+@"),  # userinfo в URL
+    re.compile(r"(?i)(\b(?:Bearer|Basic)\s+).*"),
+    re.compile(r"([a-z][a-z0-9+.-]*://)[^/\s]*@"),  # userinfo URL до последнего @
     re.compile(
         r"(?i)([\"']?\w*(?:token|secret|passw(?:or)?d|api[_-]?key|auth)\w*[\"']?"
-        r"\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|\S+)"
+        r"\s*[=:]\s*).*"
     ),
 )
 
@@ -246,6 +249,10 @@ def _config_line() -> str:
 
 Gh = Callable[[list[str], Path | None, str | None], subprocess.CompletedProcess]
 YES = ("y", "yes", "да", "д")
+PUBLIC_WARNING = (
+    "отчёт уйдёт ПУБЛИЧНО; токены и домашний каталог скрыты автоматически, "
+    "но это страховка — перечитайте отчёт выше"
+)
 PRINT_HINT = "используйте dfl report --print и пришлите вывод сами"
 
 
@@ -314,6 +321,7 @@ def _report(
         )
     profile = _profile()
     duplicate = _find_duplicate(rep, gh, profile)
+    print(f"\n{PUBLIC_WARNING}")
     question = (
         f"Добавить комментарий к {duplicate[1]}? [y/N] "
         if duplicate
