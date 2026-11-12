@@ -329,7 +329,10 @@ def test_status_lists_runs_no_effects(env: Env, monkeypatch, capsys) -> None:
     assert env.run("status") == 0
     out = capsys.readouterr().out
     assert "WS-1-a" in out and "WS-3-a" in out and "мерж брифа, затем dfl run" in out
-    assert "дальше: смержите https://github.com/o/alpha/pull/9, затем dfl run" in out
+    assert (
+        "дальше: смержите https://github.com/o/alpha/pull/9 — конвейер закончен; "
+        "новая тема: dfl run --subject '<тема>'"
+    ) in out
     assert "WS-2-a" in out and "разберите причину выше и dfl run" in out
     assert "WS-9-a" not in out
     assert _no_effects(env) and env.registered == 0
@@ -689,7 +692,8 @@ def test_status_merged_code_pr_is_finished(
 
 
 def test_run_after_reviewed_merge_says_finished(env: Env, capsys) -> None:
-    """Приёмка проверила, человек вмержил: dfl run не просит «мерж — за вами»."""
+    """Ревью одобрило, приёмка не завершилась, человек вмержил (ревью #739):
+    не «мерж — за вами» и не «проверен» — оговорка приёмки сохраняется."""
     _run("WS-1-a", "WS-1", "customer", "brief_ready")
     eng = _run("WS-1-eng-b", "WS-1-eng", "engineer", "completed")
     url = "https://github.com/o/alpha/pull/9"
@@ -700,6 +704,20 @@ def test_run_after_reviewed_merge_says_finished(env: Env, capsys) -> None:
     rs.save(eng)
     assert env.run("run", "--subject", "тема") == 0
     out = capsys.readouterr().out
-    assert f"PR с кодом проверен и вмержен: {url}; конвейер закончен" in out
-    assert "мерж — за вами" not in out
+    assert (
+        "PR с кодом вмержен человеком после одобряющего ревью, приёмка не "
+        f"завершена: {url}; конвейер закончен"
+    ) in out
+    assert "мерж — за вами" not in out and "проверен" not in out
     assert _no_effects(env)
+
+
+def test_status_hint_for_accepted_pr_is_runnable(env: Env, monkeypatch, capsys) -> None:
+    """Ревью #739: подсказка не ведёт в `dfl run`, который откажет кодом 2."""
+    _status_target(env, monkeypatch)
+    _accepted(_run("WS-1-eng-b", "WS-1-eng", "engineer", "completed"))
+    assert env.run("status") == 0
+    out = capsys.readouterr().out
+    assert "затем dfl run" not in out
+    assert "новая тема: dfl run --subject '<тема>'" in out
+    assert env.run("run") == 2  # и правда: без --subject продолжать нечего

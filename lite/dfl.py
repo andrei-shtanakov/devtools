@@ -37,6 +37,7 @@ from lite.pipeline import (
 ENGINEER_SUFFIX = bt.ENGINEER_SUFFIX
 NEW_RUN_HINT = "первый запуск: dfl run --subject '<тема>'"
 ABANDON_HINT = "dfl abandon бросит его"
+NEXT_SUBJECT_HINT = "новая тема: dfl run --subject '<тема>'"
 WAITING = "waiting_interview"
 ANSWER_HINT = "ответьте: dfl answer --file answer.yaml"
 ANSWER_FORMAT = """\
@@ -261,7 +262,12 @@ def _engineer_step(eng: rs.RunState, repo: str) -> int:
         )
         return 0
     if url is not None and code_merged(eng.ops):
-        print(f"PR с кодом проверен и вмержен: {url}; конвейер закончен")
+        # merged+reviewed пишет только auto_tasks._finish_merged: ревью этой
+        # головы одобрило, но приёмка не завершилась (ревью #739)
+        print(
+            f"PR с кодом вмержен человеком после одобряющего ревью, приёмка "
+            f"не завершена: {url}; конвейер закончен"
+        )
         return 0
     if url is not None:
         print(f"PR с кодом проверен: {url}; мерж — за вами")
@@ -357,11 +363,10 @@ def _registered_repo(cwd: Path) -> str:
 def _next_hint(state: rs.RunState, runs: list[rs.RunState]) -> str | None:
     url = _accepted_url(state)
     if url is not None and code_merged(state.ops):
-        return (
-            f"конвейер закончен ({url} вмержен); новая тема: dfl run --subject '<тема>'"
-        )
+        return f"конвейер закончен ({url} вмержен); {NEXT_SUBJECT_HINT}"
     if url is not None:
-        return f"смержите {url}, затем dfl run"
+        # конвейер закончен и без мержа: dfl run его не продолжает (ревью #739)
+        return f"смержите {url} — конвейер закончен; {NEXT_SUBJECT_HINT}"
     if chain_open(state.mode, _frame(state), state.status, state.ops):
         return f"{CHAIN_STOPPED_HINT} (или {ABANDON_HINT})"
     if _engineer_of(state, runs) is not None:
