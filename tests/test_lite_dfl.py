@@ -1168,3 +1168,45 @@ def test_dfl_correct_agent_down_refused(env: Env, monkeypatch, capsys) -> None:
     monkeypatch.setattr(dfl.st, "claude_agent", lambda model: down)
     assert env.run("correct", "x") == 2
     assert "нет claude" in capsys.readouterr().err
+
+
+def test_dfl_interview_finished_pipeline_without_subject(
+    env: Env, monkeypatch, capsys
+) -> None:
+    """R10: интервью смотрят и после конца конвейера, без --subject."""
+    cust = _waiting("WS-1-a", "WS-1", "customer")
+    cust.status = "brief_ready"
+    rs.save(cust)
+    eng = _run("WS-1-eng-b", "WS-1-eng", "engineer", "done")
+    _accepted(eng)
+    monkeypatch.setattr(dfl, "load_session", lambda sid: _session_view())
+    monkeypatch.setattr(
+        dfl, "_discovery_status", lambda sid, cwd: iv.DiscoveryReply(0, {}, "")
+    )
+    assert env.run("interview") == 0
+    out = capsys.readouterr().out
+    assert "вопросов больше нет" in out and "FR-01 раз в неделю" in out
+
+
+def test_dfl_interview_finished_pipelines_picks_latest_with_session(
+    env: Env, monkeypatch
+) -> None:
+    for tag in ("a", "c"):
+        _waiting(f"WS-{tag}-x", f"WS-{tag}", "customer")
+        _accepted(_run(f"WS-{tag}-eng-y", f"WS-{tag}-eng", "engineer", "done"))
+    seen: list[str] = []
+    monkeypatch.setattr(
+        dfl, "load_session", lambda sid: seen.append(sid) or _session_view()
+    )
+    monkeypatch.setattr(
+        dfl, "_discovery_status", lambda sid, cwd: iv.DiscoveryReply(0, {}, "")
+    )
+    assert env.run("interview") == 0
+    assert seen == ["sess-WS-c-x"]
+
+
+def test_dfl_interview_finished_without_any_session_refuses(env: Env, capsys) -> None:
+    _run("WS-1-a", "WS-1", "customer", "brief_ready")
+    _accepted(_run("WS-1-eng-b", "WS-1-eng", "engineer", "done"))
+    assert env.run("interview") == 2
+    assert "интервью не идёт" in capsys.readouterr().err

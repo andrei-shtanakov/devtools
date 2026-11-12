@@ -805,12 +805,24 @@ def _interview_run(cwd: Path, subject: str | None) -> rs.RunState:
     """Прогон с сессией интервью: engineer, если она у него есть, иначе customer."""
     target = user_targets.register(cwd)
     runs = _readable_runs(target.repo)
-    cust = _select_customer(runs, subject)
-    candidates = [] if cust is None else [_engineer_of(cust, runs), cust]
-    for state in candidates:
-        if state is not None and (state.interview or {}).get("session_id"):
-            return state
+    for cust in _interview_customers(runs, subject):
+        for state in (_engineer_of(cust, runs), cust):
+            if state is not None and (state.interview or {}).get("session_id"):
+                return state
     raise DflError(NO_INTERVIEW_REFUSAL)
+
+
+def _interview_customers(
+    runs: list[rs.RunState], subject: str | None
+) -> list[rs.RunState]:
+    """Customer-прогоны кандидаты: выбранный как у `dfl answer`; без `subject`
+    и без незаконченных конвейеров — все, новейший первым (интервью смотрят
+    и после конца конвейера)."""
+    customers = [s for s in runs if _frame(s) == "customer"]
+    if subject is None and all(_finished(c, runs) for c in customers):
+        return customers[::-1]
+    cust = _select_customer(runs, subject)
+    return [] if cust is None else [cust]
 
 
 def abandon(cwd: Path, subject: str | None) -> int:
