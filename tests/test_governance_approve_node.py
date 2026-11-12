@@ -4090,6 +4090,35 @@ def test_try_agent_merge_passes_target_dir_only_in_test(
     assert ops.merge_kwargs == [expected]
 
 
+def test_try_agent_merge_finalize_skips_absent_ci_in_test(monkeypatch) -> None:
+    """test, репо без CI: finalize не ждёт 1200 с проверок, которых не будет.
+
+    Живой прогон на Linux 11.11: candidate-PR пропуск получал, а finalize —
+    нет (колбэк не передавался), и мерж уходил «человеку» после потолка.
+    Пропуск пишется в заявку полем `finalize_checks_skip`.
+    """
+    from governance.pr_checks import NO_CHECKS_TEST
+
+    monkeypatch.setattr(an, "_missing_approving_review", lambda *a, **k: None)
+    seen: dict = {}
+
+    def fake_await(state, ops, pr, head, **kwargs):
+        seen.update(kwargs)
+        kwargs["on_no_checks"]("проверок нет (test): …")
+        return None
+
+    monkeypatch.setattr(an, "_await_required_checks", fake_await)
+    monkeypatch.setattr(an.rs, "save", lambda _st: None)
+    state = type("S", (), {"mode": "test", "target_dir": "/r", "repo": "repo"})()
+    op: dict = {}
+    result = an._try_agent_merge(
+        state, _MergeSpyOps(), (), op, [], 5, "a" * 40, form=lambda: None
+    )
+    assert result is None
+    assert callable(seen.get("on_no_checks"))
+    assert op["finalize_checks_skip"] == NO_CHECKS_TEST
+
+
 class _ChecksOps:
     """Последовательность rollup'ов и `workflow_files` для ожидания проверок."""
 

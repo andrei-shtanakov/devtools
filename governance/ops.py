@@ -655,7 +655,10 @@ _KINDS_LIST = ", ".join(f"`{_kind}`" for _kind in DELIVERABLE_KINDS)
 _AUTHOR_DSL = {
     "charter": (
         "YAML frontmatter (required): spec_stage: charter, status: draft, "
-        "owner_role: product. Every item that carries an id — goals G-NN, "
+        "owner_role: product. The `schema` key, if written, is the charter "
+        "grammar version: `schema: 1` — never `schema: charter` and no "
+        "`schema_version` (do not copy the discovery files' header). "
+        "Every item that carries an id — goals G-NN, "
         "personas P-NN, jobs J-NN, functional FR-NN, non-functional "
         "NFR-NN, constraints CON-NN, success metrics M-NN, out-of-scope "
         "OUT-NN, risks RK-NN, open questions Q-NN — MUST be DEFINED "
@@ -944,10 +947,14 @@ def author_prompt(
             f"The requirements source is {bundle_dir}/{requirements_source}."
         )
         if kind == "charter":
+            edges = "".join(f"\n  - {name}" for name in blobs)
             source_guidance += (
                 " Declare every discovery source as a direct traces_to "
                 "edge and pin it in upstream_hashes using the supplied "
-                "git blob pins."
+                "git blob pins. In the frontmatter, traces_to lists the "
+                "edge names, not file paths, exactly as follows:"
+                f"\ntraces_to:{edges}\nand upstream_hashes maps each of "
+                "these names to its pin."
             )
     return (
         f"kind={kind} subject={subject!r} bundle_dir={bundle_dir}\n"
@@ -1564,24 +1571,24 @@ class RealOps(BriefFactsMixin):
     def edit_pr(
         self, target_dir: str, repo_slug: str, pr: int, title: str, body: str
     ) -> None:
-        """`gh pr edit <pr> --title --body -R <slug>`; сбой — RuntimeError.
+        """`PATCH repos/<slug>/pulls/<pr>` (title, body); сбой — RuntimeError.
 
         devtools#539: текст candidate-PR обязан следовать за составом
         заявки — мерж этого PR и есть акт одобрения узлов, которые он
-        объявляет.
+        объявляет. REST, а не `gh pr edit`: тот в gh 2.70 падает на снятых
+        Projects (classic).
         """
         done = subprocess.run(
             [
                 "gh",
-                "pr",
-                "edit",
-                str(pr),
-                "-R",
-                repo_slug,
-                "--title",
-                title,
-                "--body",
-                body,
+                "api",
+                "-X",
+                "PATCH",
+                f"repos/{repo_slug}/pulls/{pr}",
+                "-f",
+                f"title={title}",
+                "-f",
+                f"body={body}",
             ],
             cwd=target_dir,
             capture_output=True,
@@ -1590,7 +1597,8 @@ class RealOps(BriefFactsMixin):
         )
         if done.returncode != 0:
             raise RuntimeError(
-                f"edit_pr: gh pr edit {pr} rc={done.returncode}: {done.stderr.strip()}"
+                f"edit_pr: gh api PATCH pulls/{pr} rc={done.returncode}: "
+                f"{done.stderr.strip()}"
             )
 
     def create_pr(

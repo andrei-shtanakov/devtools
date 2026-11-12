@@ -2750,3 +2750,120 @@ def test_deliver_phase_test_resume_without_record_stops(
     monkeypatch.setattr(spec_loop.auto_tasks, "run_chain", boom)
     assert spec_loop._deliver_phase(state, object()) == 1
     assert "spec-loop (test): tasks-merge завершён" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("status", ["running", "stopped_author", "stopped_gate"])
+def test_test_mode_resumes_crashed_running_run(
+    runs_root, tmp_path, monkeypatch, capsys, status
+) -> None:
+    """test: `running` под нашим замком = процесс оборван — кнопка продолжает.
+
+    Живой прогон на Linux 11.11: падение шага оставило `running`, а `dfl`
+    не умеет `make behaviour-run resume` — коллега застревал.
+    """
+    from tests.df_config_fixture import write_config
+
+    write_config(
+        Path(os.environ["XDG_CONFIG_HOME"]),
+        mode="test",
+        human="alice",
+        agent="alice",
+        workspace_root=tmp_path,
+    )
+    state = _mk_run("r-crash", "S", status=status, target_dir=str(tmp_path / "alpha"))
+    state.mode = "test"
+    rs.save(state)
+    after = rs.load("r-crash")
+    after.status = "waiting_interview"
+    env = _LoopEnv(monkeypatch, tmp_path, resume_result=after)
+    rc = spec_loop.main(["--subject", "S", "--repo", "alpha"])
+    assert rc == 0
+    assert [c[0] for c in env.calls] == ["resume"]
+    assert "продолжаю" in capsys.readouterr().out
+
+
+def test_strict_running_run_is_not_resumed_silently(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    """strict: без скрытых ретраев — отчёт и подсказка, resume не зван."""
+    _mk_run("r-crash", "S", status="running", target_dir=str(tmp_path / "alpha"))
+    env = _LoopEnv(monkeypatch, tmp_path)
+    rc = spec_loop.main(["--subject", "S", "--repo", "alpha"])
+    assert rc == 1
+    assert env.calls == []
+    assert "behaviour-run" in capsys.readouterr().out
+
+
+def test_test_mode_stop_after_resume_hints_dfl_run(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    """test: стоп после продолжения зовёт повтор dfl run, не make behaviour-run."""
+    from tests.df_config_fixture import write_config
+
+    write_config(
+        Path(os.environ["XDG_CONFIG_HOME"]),
+        mode="test",
+        human="alice",
+        agent="alice",
+        workspace_root=tmp_path,
+    )
+    state = _mk_run(
+        "r-stop", "S", status="stopped_author", target_dir=str(tmp_path / "alpha")
+    )
+    state.mode = "test"
+    rs.save(state)
+    after = rs.load("r-stop")
+    after.status = "stopped_gate"
+    _LoopEnv(monkeypatch, tmp_path, resume_result=after)
+    rc = spec_loop.main(["--subject", "S", "--repo", "alpha"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "dfl run" in out and "behaviour-run" not in out
+
+
+def _test_mode_stopped(tmp_path: Path, reason: str) -> rs.RunState:
+    from tests.df_config_fixture import write_config
+
+    write_config(
+        Path(os.environ["XDG_CONFIG_HOME"]),
+        mode="test",
+        human="alice",
+        agent="alice",
+        workspace_root=tmp_path,
+    )
+    state = _mk_run(
+        "r-trip", "S", status="stopped_author", target_dir=str(tmp_path / "alpha")
+    )
+    state.mode = "test"
+    rs.save(state)
+    (rs.run_dir("r-trip") / "stop-reason.txt").write_text(reason, encoding="utf-8")
+    return state
+
+
+def test_test_mode_does_not_resume_config_surface_stop(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    """Ревью #729: следующий снимок «до» включил бы подсадку — повтор кнопки
+    снял бы стоп трипвайра молча. Кнопка называет причину и не продолжает."""
+    _test_mode_stopped(
+        tmp_path,
+        f"{runner.CONFIG_SURFACE_STOP} во время вызова: /h/.claude/hooks/x.sh",
+    )
+    env = _LoopEnv(monkeypatch, tmp_path)
+    rc = spec_loop.main(["--subject", "S", "--repo", "alpha"])
+    out = capsys.readouterr().out
+    assert rc == 1 and env.calls == []
+    assert "/h/.claude/hooks/x.sh" in out and "resume --run-id r-trip" in out
+
+
+def test_test_mode_resume_prints_previous_stop_reason(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    _test_mode_stopped(tmp_path, "error EDGE-CHECK(x): R4 minor: y")
+    after = rs.load("r-trip")
+    after.status = "waiting_interview"
+    env = _LoopEnv(monkeypatch, tmp_path, resume_result=after)
+    assert spec_loop.main(["--subject", "S", "--repo", "alpha"]) == 0
+    assert [c[0] for c in env.calls] == ["resume"]
+    out = capsys.readouterr().out
+    assert "причина прошлой остановки: error EDGE-CHECK(x): R4 minor: y" in out

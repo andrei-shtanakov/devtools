@@ -335,6 +335,48 @@ def test_install_sh_syntax() -> None:
     assert res.returncode == 0
 
 
+def _stub_bin(tmp_path: Path, os_name: str, tools: list[str]) -> Path:
+    """Каталог заглушек: uname печатает os_name, прочие программы — пустышки."""
+    bin_dir = tmp_path / "stub-bin"
+    bin_dir.mkdir()
+    scripts = {"uname": f"#!/bin/sh\necho {os_name}\n"}
+    scripts.update({tool: "#!/bin/sh\nexit 0\n" for tool in tools})
+    for name, body in scripts.items():
+        path = bin_dir / name
+        path.write_text(body)
+        path.chmod(0o755)
+    return bin_dir
+
+
+def _run_install_sh(bin_dir: Path) -> subprocess.CompletedProcess[str]:
+    # PATH — только заглушки: на usrmerge-системах /bin = /usr/bin, и настоящие
+    # make/jq хоста иначе подменили бы проверку наличия.
+    return subprocess.run(
+        ["/bin/sh", str(ROOT / "install.sh")],
+        env={"PATH": str(bin_dir), "HOME": str(bin_dir)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize("os_name", ["Darwin", "Linux"])
+def test_install_sh_accepts_os_and_requires_make_jq(
+    tmp_path: Path, os_name: str
+) -> None:
+    res = _run_install_sh(_stub_bin(tmp_path, os_name, ["git", "gh", "uv", "claude"]))
+    assert res.returncode == 1
+    assert "поддерживается только" not in res.stderr
+    assert "не найдены программы: make jq" in res.stderr
+
+
+def test_install_sh_refuses_other_os(tmp_path: Path) -> None:
+    tools = ["git", "gh", "uv", "claude", "make", "jq"]
+    res = _run_install_sh(_stub_bin(tmp_path, "FreeBSD", tools))
+    assert res.returncode == 1
+    assert "поддерживается только macOS (Darwin) и Linux" in res.stderr
+
+
 # --- финальное ревью: I2 и обязательные мелочи ---
 
 

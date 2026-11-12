@@ -23,6 +23,7 @@ SLUG = "o/alpha"
 URL = f"git@github.com:{SLUG}.git"
 DEVTOOLS = Path(__file__).resolve().parent.parent
 PR_URL = "https://github.com/o/alpha/pull/1"
+LABEL_CALL = ("api", f"repos/{SLUG}/issues/1/labels")
 REVIEW_RULE = [
     {
         "type": "pull_request",
@@ -52,7 +53,7 @@ class FakeGh:
             ("pr", "create"): _done(PR_URL + "\n"),
             ("label", "list"): _done("[]"),
             ("label", "create"): _done(),
-            ("pr", "edit"): _done(),
+            LABEL_CALL: _done(),
         }
 
     def __call__(self, argv: list[str]) -> subprocess.CompletedProcess:
@@ -223,7 +224,7 @@ def test_label_created_when_absent(work: Path) -> None:
     gh = FakeGh()
     ir.init_repo(work, DEVTOOLS, gh)
     assert [c[2] for c in gh.called("label", "create")] == [bt.LABEL]
-    assert gh.called("pr", "edit")[0][-1] == bt.LABEL
+    assert gh.called(*LABEL_CALL)[0][-1] == f"labels[]={bt.LABEL}"
 
 
 def test_label_kept_when_present(work: Path) -> None:
@@ -231,7 +232,7 @@ def test_label_kept_when_present(work: Path) -> None:
     gh.answers[("label", "list")] = _done(json.dumps([{"name": bt.LABEL}]))
     ir.init_repo(work, DEVTOOLS, gh)
     assert gh.called("label", "create") == []
-    assert gh.called("pr", "edit")
+    assert gh.called(*LABEL_CALL)
 
 
 def test_existing_init_pr_is_reported(work: Path, capsys) -> None:
@@ -336,17 +337,17 @@ def test_existing_pr_run_ensures_label(work: Path) -> None:
     gh.answers[("pr", "list")] = _done(json.dumps([_pr()]))
     assert ir.init_repo(work, DEVTOOLS, gh) == 0
     assert [c[2] for c in gh.called("label", "create")] == [bt.LABEL]
-    assert gh.called("pr", "edit")[0][-1] == bt.LABEL
+    assert gh.called(*LABEL_CALL)[0][-1] == f"labels[]={bt.LABEL}"
 
 
 def test_label_failure_then_rerun_labels(work: Path) -> None:
     gh = FakeGh()
-    gh.answers[("pr", "edit")] = _done("", "boom", 1)
+    gh.answers[LABEL_CALL] = _done("", "boom", 1)
     assert ir.init_repo(work, DEVTOOLS, gh) == 2
     gh.answers[("pr", "list")] = _done(json.dumps([_pr()]))
-    gh.answers[("pr", "edit")] = _done()
+    gh.answers[LABEL_CALL] = _done()
     assert ir.init_repo(work, DEVTOOLS, gh) == 0
-    assert len(gh.called("pr", "edit")) == 2
+    assert len(gh.called(*LABEL_CALL)) == 2
 
 
 def test_leftover_branch_refused_with_cleanup(work: Path, capsys) -> None:
@@ -368,7 +369,7 @@ def test_fork_pr_refused(work: Path, capsys) -> None:
     assert ir.init_repo(work, DEVTOOLS, gh) == 2
     err = capsys.readouterr().err
     assert "https://x/fork/1" in err and "не ваши" in err
-    assert gh.called("pr", "edit") == []
+    assert gh.called(*LABEL_CALL) == []
 
 
 def test_other_author_pr_refused(work: Path, capsys) -> None:
@@ -399,7 +400,7 @@ def test_label_exists_beyond_search_window(work: Path) -> None:
     gh.answers[("label", "list")] = _done(json.dumps([{"name": "other"}]))
     gh.answers[("label", "create")] = _done("", "label already exists", 1)
     assert ir.init_repo(work, DEVTOOLS, gh) == 0
-    assert gh.called("pr", "edit")
+    assert gh.called(*LABEL_CALL)
 
 
 def test_label_search_is_exact_match(work: Path) -> None:

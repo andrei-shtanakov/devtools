@@ -2944,12 +2944,20 @@ def _try_agent_merge(
     missing = _missing_approving_review(state, ops, pr, kind=kind, retry=retry)
     if missing is not None:
         return MergeRefusal(missing, human_merge_helps=False)
+
     # Конверт finalize базу не пинует: у него нет вердикта, от базы которого
     # его можно было бы пиновать, — пин базы есть свойство вызывающего с
     # вердиктом (accept-pr). `base` передаёт вызывающий, чья форма проверена
     # против конкретной верхушки базы (stop-PR `reopen`): обвязка сверяет пин
     # с живой верхушкой текущей базы PR (devtools#223), ретаргет — отказ.
-    waited = _await_required_checks(state, ops, pr, head)
+    def record_skip(_reason: str) -> None:
+        # test, репо без CI: именованный пропуск, как у candidate и
+        # tasks-merge (живой прогон на Linux 11.11 — без колбэка finalize
+        # ждал потолок 1200 с и уходил человеку). В strict колбэк не читается.
+        op["finalize_checks_skip"] = pr_checks.NO_CHECKS_TEST
+        rs.save(state)
+
+    waited = _await_required_checks(state, ops, pr, head, on_no_checks=record_skip)
     if waited is not None:
         return waited
     code = 0

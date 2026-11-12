@@ -51,6 +51,7 @@ from governance import (
 from governance import approval_ledger as al
 from governance import approve_node as an
 from governance import interview as iv
+from governance import node_approval as na
 from governance import run_lock as rl
 from governance.act_request import ACT_REVIEW_V1
 from governance.act_time import OPS_FAILURES
@@ -59,7 +60,7 @@ from governance.edge_check import coordinator as edge_coordinator
 from governance.edge_check import publish as edge_publish
 from governance.edge_check.rules import EdgeCheckError
 from governance.facts import Outcome
-from governance.frontmatter import split_frontmatter
+from governance.frontmatter import split_frontmatter, update_frontmatter
 from governance.merge_gate import PrFacts
 from governance.ops import (
     _AUTHOR_DSL,
@@ -1417,7 +1418,12 @@ def _finalize_wave(
 
     def _approve() -> bool:
         try:
-            an.approve_node(state, ops, node)
+            # Сообщение — та самая «причина в выводе approve-node», на
+            # которую ссылается пауза ниже; без печати её не видно (живой
+            # прогон на Linux 11.11: finalize ждал проверки молча).
+            outcome = an.approve_node(state, ops, node)
+            if isinstance(outcome, an.ApprovalOutcome):
+                print(f"approve-node: {outcome.message}")
         except RuntimeError as exc:
             _stop_on_refusal(state, ops, request, exc, f"finalize заявки {request}")
             return False
@@ -1544,12 +1550,20 @@ def reopen(
         ):
             state.ops.pop(f"{base_key}-{wave}", None)
     filename = ""
+    base = state.base_ref or "master"
     for author_key, kind, fname in _AUTHOR_STEPS:
         if kind == node:
             state.ops.pop(author_key, None)
             filename = fname
+        elif levels[kind] > levels[node] and (
+            ops.show_file(state.target_dir, base, f"{state.bundle_dir}/{fname}") is None
+        ):
+            # Узел выше, авторенный, но не дошедший до base (волна шла, когда
+            # переоткрыли ниже): ветка от base его не несёт, а завершённый
+            # `author-*` пропустил бы авторинг — файла бы не было (живой
+            # прогон на Linux 11.11: charter переоткрыт со стопа волны 4).
+            state.ops.pop(author_key, None)
     save(state)
-    base = state.base_ref or "master"
     ops.checkout_and_pull(state.target_dir, base)
     state.branch = _wave_branch(state)
     ops.switch_to(state.target_dir, state.branch, base)
@@ -2514,6 +2528,30 @@ def _step_branch(state: RunState, ops: Ops) -> bool:
     return _step_wave_branch(state, ops)
 
 
+def _resolve_base_ref(state: RunState, ops: Ops) -> str:
+    """База волны: `state.base_ref`, а пустой — ветка по умолчанию цели.
+
+    До первого PR `base_ref` пуст, и прежний литерал `master` ломал цели
+    с `main` (живой прогон на Linux, 2026-11-11: `git switch master` rc=128).
+    Установленная ветка записывается в леджер — последующие шаги читают её
+    из `state.base_ref`. Факт не установлен — прежнее умолчание вслух и БЕЗ
+    записи: угадка в леджере навсегда закрепила бы несуществующую базу после
+    транзиентного сбоя (ревью #729, круг 2); следующий заход переспросит фордж.
+    """
+    if state.base_ref:
+        return state.base_ref
+    fact = ops.default_branch_fact(state.repo_slug)
+    if not fact.established or fact.value is None:
+        print(
+            f"_step_branch: ветка по умолчанию не установлена ({fact.detail}) — "
+            "база master (не закрепляется)"
+        )
+        return "master"
+    state.base_ref = fact.value.name
+    save(state)
+    return state.base_ref
+
+
 def _step_wave_branch(state: RunState, ops: Ops) -> bool:
     """S1 волны (S9): ветка волны ОТ СВЕЖЕГО BASE, не от текущего HEAD.
 
@@ -2536,7 +2574,7 @@ def _step_wave_branch(state: RunState, ops: Ops) -> bool:
         save(state)
         return False
     _ensure_started(state, key)
-    base = state.base_ref or "master"
+    base = _resolve_base_ref(state, ops)
     ops.checkout_and_pull(state.target_dir, base)
     mode, refusal = _decide_wave_mode(state, ops, _wave_dag())
     if refusal is not None:
@@ -3204,12 +3242,42 @@ _CLAUDE_WATCH_FILES = (
     # marketplaces/, data/, synced/ пишут живые сессии (ревью #489). Подмена
     # кода УЖЕ установленного плагина в cache/ не наблюдается — закроет
     # песочница (§9).
-    "plugins/installed_plugins.json",
-    "plugins/known_marketplaces.json",
     "plugins/config.json",
     "plugins/blocklist.json",
 )
 _CLAUDE_WATCH_DIRS = ("hooks", "skills", "commands", "agents")
+#: Начало причины стопа трипвайра конфиг-поверхности: по нему кнопка в test
+#: отличает этот стоп от прочих и не продолжает его сама (ревью #729).
+CONFIG_SURFACE_STOP = "конфиг-поверхность изменена"
+#: Синхронизация скиллов учётки claude.ai: CLI при каждом старте пишет в
+#: `skills/synced/` служебные файлы (`.last-complete-round`, `.bucket-*`) —
+#: живой прогон на Linux 11.11, claude 2.1.322: стоп на каждом вызове
+#: автора без песочницы. Не наблюдаются ТОЛЬКО два служебных имени на своих
+#: местах (замер на сервере: оба — файлы-маркеры): `synced/.bucket-<id>` и
+#: `synced/<acc>/.last-complete-round`. Всё прочее под `synced/`, в том числе
+#: что-либо ВНУТРИ каталога с точкой, наблюдается — подсадка скилла туда
+#: загрузилась бы в сессиях оператора (ревью #729). Цена: обновление скиллов
+#: учётки само по себе даёт один стоп, его снимает повтор кнопки.
+_CLAUDE_SYNCED = "skills/synced"
+_SYNCED_ROUND_MARK = ".last-complete-round"
+_SYNCED_BUCKET_PREFIX = ".bucket-"
+
+
+def _cli_bookkeeping(path: Path, claude_home: Path) -> bool:
+    """Служебный файл синхронизации скиллов (см. `_CLAUDE_SYNCED`)."""
+    synced = claude_home / _CLAUDE_SYNCED
+    if not path.is_relative_to(synced):
+        return False
+    parts = path.relative_to(synced).parts
+    if len(parts) == 1:
+        return parts[0].startswith(_SYNCED_BUCKET_PREFIX)
+    return (
+        len(parts) == 2
+        and not parts[0].startswith(".")
+        and parts[1] == _SYNCED_ROUND_MARK
+    )
+
+
 #: В репо, где работает агент: хук, исполняемый в сессии или при коммите.
 #: Остальные репо воркспейса вне наблюдения до песочницы (§9).
 _REPO_WATCH = (".claude", ".mcp.json", ".git/hooks")
@@ -3264,6 +3332,101 @@ def _mcp_servers_digest(path: Path) -> str:
     return hashlib.sha256(json.dumps(servers, sort_keys=True).encode()).hexdigest()
 
 
+#: Реестр плагинов наблюдается проекцией, а не байтами: CLI при
+#: автообновлении маркетплейса переписывает `lastUpdated`/`gitCommitSha`/
+#: `version` (живой прогон на Linux 11.11, claude 2.1.322: стоп вызова
+#: автора). Смысл реестра — какие плагины установлены, откуда и где их код:
+#: новый плагин, новый источник или код вне `plugins/cache/` видны.
+_PLUGIN_REGISTRY = ("installed_plugins.json", "known_marketplaces.json")
+
+
+def _plugin_registry_digest(claude_home: Path, name: str) -> str:
+    """sha256 проекции реестра плагинов; `absent`; `raw:<sha>` — иная форма."""
+    path = claude_home / "plugins" / name
+    if not path.exists():
+        return "absent"
+    try:
+        raw = path.read_bytes()
+        data = json.loads(raw)
+    except (OSError, ValueError):
+        return "unreadable"
+    projected = _project_registry(claude_home, name, data)
+    if projected is None:
+        return "raw:" + hashlib.sha256(raw).hexdigest()
+    return hashlib.sha256(json.dumps(projected, sort_keys=True).encode()).hexdigest()
+
+
+def _enabled_plugins(claude_home: Path) -> set[str]:
+    """Плагины, включённые оператором (`enabledPlugins: true`) в settings*.json."""
+    out: set[str] = set()
+    for name in ("settings.json", "settings.local.json"):
+        try:
+            data = json.loads((claude_home / name).read_text(encoding="utf-8"))
+            flags = data.get("enabledPlugins") or {}
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(flags, dict):
+            out |= {str(k) for k, v in flags.items() if v is True}
+    return out
+
+
+def _in_cache(raw: object, cache: Path) -> bool:
+    """Код плагина в кэше: без `..` и после разрешения ссылок (security
+    review: лексическое сравнение пропускало `cache/../../evil`)."""
+    if not isinstance(raw, str) or not raw or ".." in Path(raw).parts:
+        return False
+    try:
+        return Path(raw).resolve().is_relative_to(cache)
+    except OSError:
+        return False
+
+
+def _project_registry(claude_home: Path, name: str, data: object) -> object | None:
+    """Смысловая часть реестра; `None` — форма не распознана (байты целиком)."""
+    if not isinstance(data, dict):
+        return None
+    if name == "known_marketplaces.json":
+        if not all(isinstance(v, dict) and "source" in v for v in data.values()):
+            # Форма замерена (claude 2.1.322): плоская, у каждой записи
+            # `source`. Иное — не распознано, наблюдаются байты (ревью #729).
+            return None
+        return {
+            market: [entry.get("source"), entry.get("installLocation")]
+            for market, entry in data.items()
+        }
+    plugins = data.get("plugins")
+    if not isinstance(plugins, dict):
+        return None
+    cache = (claude_home / "plugins" / "cache").resolve()
+    enabled = _enabled_plugins(claude_home)
+    out: dict[str, list[list[object]]] = {}
+    for plugin, entries in plugins.items():
+        if not isinstance(entries, list) or not all(
+            isinstance(e, dict) for e in entries
+        ):
+            return None
+        if plugin in enabled and all(
+            _in_cache(e.get("installPath"), cache) for e in entries
+        ):
+            # CLI доставляет плагин, включённый оператором в settings.json
+            # (живой прогон на Linux 11.11: superpowers при старте вызова);
+            # сам settings.json наблюдается байтами — включить плагин агент
+            # незаметно не может.
+            continue
+        out[plugin] = [
+            [
+                e.get("scope"),
+                e.get("projectPath"),
+                # путь в кэше — смена версии автообновлением; вне — подсадка
+                None
+                if _in_cache(e.get("installPath"), cache)
+                else e.get("installPath"),
+            ]
+            for e in entries
+        ]
+    return out
+
+
 def _claude_home() -> Path:
     """~/.claude оператора — точка подмены для тестов (герметичность)."""
     return Path.home() / ".claude"
@@ -3285,11 +3448,21 @@ def _config_surface_snapshot(state: RunState) -> dict[str, str]:
         "~/.claude.json#mcpServers": _mcp_servers_digest(
             claude_home.parent / ".claude.json"
         ),
+        **{
+            str(claude_home / "plugins" / name): _plugin_registry_digest(
+                claude_home, name
+            )
+            for name in _PLUGIN_REGISTRY
+        },
     }
     for root in roots:
         files = sorted(root.rglob("*")) if root.is_dir() else [root]
-        present = [f for f in files if f.is_file()]
-        if not present and not root.exists():
+        present = [
+            f for f in files if f.is_file() and not _cli_bookkeeping(f, claude_home)
+        ]
+        if not present:
+            # Пустой каталог (или только неотслеживаемое) подсадить ничего
+            # не может — то же состояние, что отсутствие корня.
             snapshot[str(root)] = "absent"
         for path in present:
             try:
@@ -3412,7 +3585,7 @@ def _guard_edge_results(
         )
     if config_changed:
         findings.append(
-            "конфиг-поверхность изменена во время вызова авторского агента "
+            f"{CONFIG_SURFACE_STOP} во время вызова авторского агента "
             f"(дизайн песочницы §9): {', '.join(config_changed)}. НЕ "
             "откатывается автоматически — это файлы оператора: проверьте их до "
             "следующей интерактивной сессии и следующего коммита."
@@ -3424,6 +3597,31 @@ def _guard_edge_results(
         f"{' '.join(findings)} {outcome}; resume авторит узел заново.{suspect.hint}",
     )
     return None
+
+
+def _same_as_base(state: RunState, ops: Ops, fname: str, path: Path) -> bool:
+    """Узел в worktree совпадает с base волны с точностью до следа каскада.
+
+    Единственная допустимая разница — `status: stale`: её пишет сам раннер
+    (`an._cascade_stale` в снимке заявки S7) до мержа candidate, и повторный
+    гейт на resume видел бы её как подсадку (ревью #729, круг 3). Сравнение
+    побайтное с тем, что записал бы каскад над base (тот же
+    `update_frontmatter`), а не по разобранным словарям: разбор сглаживает
+    различия, которые читатель ниже по течению может видеть иначе. Нет в
+    base или не разбирается — не совпадает (узел сверяется по пинам).
+    """
+    base = ops.show_file(
+        state.target_dir, state.base_ref or "master", f"{state.bundle_dir}/{fname}"
+    )
+    if base is None:
+        return False
+    text = path.read_text(encoding="utf-8")
+    if base == text:
+        return True
+    try:
+        return text == update_frontmatter(base, {"status": na.STATUS_STALE})
+    except ValueError:
+        return False
 
 
 def _step_commit(state: RunState, ops: Ops) -> bool:
@@ -3702,6 +3900,28 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     for fname, upstream, upstream_fname, required in _GATE_EDGES:
         path = Path(state.target_dir) / state.bundle_dir / fname
         if not path.exists():
+            continue
+        if (
+            in_scope is not None
+            and _wave_mode(state) == "reapprove"
+            and bundle_dag.levels(_wave_dag())[bundle_dag.node_id(fname)]
+            == _wave_level(state)
+        ):
+            # reapprove (§3.4): байты узла уровня — из base, с пином старого
+            # upstream (каскад после `--reopen`); свежие пины ставит штамп
+            # candidate из `upstream_pins`. Сверка здесь — тупик (живой
+            # прогон на Linux 11.11, W2 после переоткрытия charter).
+            continue
+        if (
+            in_scope is not None
+            and bundle_dag.node_id(fname) not in in_scope
+            and _same_as_base(state, ops, fname, path)
+        ):
+            # Узел выше волны, байт в байт как в base: каскад `--reopen`
+            # нижнего узла, пин старых байтов до его переодобрения — стоп
+            # здесь был бы тупиком (живой прогон на Linux 11.11). Узел,
+            # появившийся или изменённый в этой волне (подсадка автора),
+            # сверяется как прежде (ревью #729, круг 2).
             continue
         front = _frontmatter(path.read_text(encoding="utf-8"))
         declares = re.search(

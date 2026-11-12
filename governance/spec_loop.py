@@ -1029,6 +1029,16 @@ def _report_state(state: rs.RunState) -> int:
     осталась про два), и устареет снова. Продолжаемость решает `_dispatch`,
     сюда попадает то, что он не взял.
     """
+    if state.mode == "test" and _test_resumable(state.status):
+        # В test повтор кнопки продолжает этот статус (`_dispatch`) — звать
+        # `make behaviour-run` незачем, у `dfl` его и нет.
+        print(
+            f"spec-loop (test): прогон {state.run_id!r} остановлен "
+            f"({state.status!r}); findings: out/governance-runs/"
+            f"{state.run_id}/ — после правки повторите dfl run (или make "
+            "spec-loop)"
+        )
+        return 1
     print(
         f"spec-loop: прогон {state.run_id!r} в статусе {state.status!r} — "
         "кнопка его не продолжает; без скрытых ретраев."
@@ -1088,22 +1098,67 @@ def _dispatch(state: rs.RunState, ops, lock: run_lock.RunLock) -> int:
             # диагностика orphan-состояния не должна зависеть от того,
             # дошёл ли вызов до runner.
             return _report_interview_stop(state)
-        after = runner.resume(state.run_id, ops, lock=lock)
-        if after.status == "brief_ready":
-            return _brief_ready(after)
-        if after.status == "waiting_interview":
-            return 0
-        if after.status == "stopped_interview":
-            return _report_interview_stop(after)
-        if after.status in WAVE_PAUSES:
-            print(_pause_message(after))
-            return 0
-        if after.status == "completed":
-            return _deliver_phase(after, ops)
-        return _report_state(after)
+        return _after_resume(runner.resume(state.run_id, ops, lock=lock), ops)
+    if state.mode == "test" and _test_resumable(state.status):
+        # У `dfl` нет `make behaviour-run resume` (живой прогон на Linux
+        # 11.11): в test повторный запуск кнопки — явное продолжение.
+        # `running` под НАШИМ замком = процесс оборван; `stopped_*` —
+        # `runner.resume` сам сверяет и сбрасывает шаг стопа. В strict
+        # остаётся «без скрытых ретраев» — продолжение руками.
+        reason = _stop_reason(state)
+        if runner.CONFIG_SURFACE_STOP in reason:
+            # Стоп трипвайра: следующий снимок «до» уже включит подсадку,
+            # повтор кнопки снял бы стоп молча (ревью #729). Только руками.
+            print(
+                f"spec-loop (test): прогон {state.run_id!r} остановлен "
+                f"трипвайром — сам не продолжаю.\n{reason}\nПроверьте названные "
+                "файлы; продолжить после проверки: make -C "
+                f"{shlex.quote(str(DEVTOOLS_ROOT))} behaviour-run "
+                f"ARGS='resume --run-id {state.run_id}'"
+            )
+            return 1
+        print(
+            f"spec-loop (test): прогон {state.run_id!r} в статусе "
+            f"{state.status!r} (оборван или остановлен) — продолжаю"
+        )
+        if reason:
+            print(f"причина прошлой остановки: {reason}")
+        return _after_resume(runner.resume(state.run_id, ops, lock=lock), ops)
     if state.status == "completed":
         return _deliver_phase(state, ops)
     return _report_state(state)
+
+
+def _stop_reason(state: rs.RunState) -> str:
+    """Текст `stop-reason.txt` прогона (пусто — файла нет)."""
+    path = rs.run_dir(state.run_id) / "stop-reason.txt"
+    if not state.status.startswith("stopped_") or not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8").strip()
+
+
+def _test_resumable(status: str) -> bool:
+    """test: статусы, которые повтор кнопки продолжает через `runner.resume`.
+
+    `merged_unverified` терминален (resume отказывает), `brief_ready`,
+    паузы волны и интервью разобраны в `_dispatch` раньше."""
+    return status == "running" or status.startswith("stopped_")
+
+
+def _after_resume(after: rs.RunState, ops) -> int:
+    """Код кнопки по статусу, в котором остановился `runner.resume`."""
+    if after.status == "brief_ready":
+        return _brief_ready(after)
+    if after.status == "waiting_interview":
+        return 0
+    if after.status == "stopped_interview":
+        return _report_interview_stop(after)
+    if after.status in WAVE_PAUSES:
+        print(_pause_message(after))
+        return 0
+    if after.status == "completed":
+        return _deliver_phase(after, ops)
+    return _report_state(after)
 
 
 def main(argv: list[str] | None = None) -> int:

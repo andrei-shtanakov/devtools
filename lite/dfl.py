@@ -34,9 +34,17 @@ ABANDON_HINT = "dfl abandon бросит его"
 WAITING = "waiting_interview"
 ANSWER_HINT = "ответьте: dfl answer --file answer.yaml"
 ANSWER_FORMAT = """\
-файл ответа — YAML с ключом text:
+файл ответа — YAML: text (ответ своими словами) и entries (пункты темы —
+только они засчитываются в покрытие интервью; id — с префикса темы вопроса):
   text: |
-    ваш ответ своими словами
+    команда печатает версию пакета
+  entries:
+    - id: FR-01
+      body: команда smoke --version печатает версию и выходит с кодом 0
+      traces: [G-01, J-01]
+      Priority: Must
+      Acceptance: вывод «smoke <версия>», код выхода 0
+поправить уже данный ответ: dfl answer --question <id вопроса> --supersede --file f
 (команду `discovery answer …` выше не запускайте — dfl answer сделает это сам)"""
 INIT_FILES = (
     "profiles/team-exp.yaml",
@@ -60,7 +68,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "init-repo":
             return init_repo(cwd, DEVTOOLS, real_gh)
         if args.command == "answer":
-            return answer(cwd, Path(args.file), args.subject, args.stakeholder)
+            return answer(
+                cwd,
+                Path(args.file),
+                args.subject,
+                args.stakeholder,
+                question=args.question,
+                supersede=args.supersede,
+            )
         if args.command == "abandon":
             return abandon(cwd, args.subject)
         return run(cwd, args.subject, args.stakeholder)
@@ -77,7 +92,15 @@ def _parser() -> argparse.ArgumentParser:
     p_run.add_argument("--subject", help="тема нового прогона")
     p_run.add_argument("--stakeholder", default="customer")
     p_ans = sub.add_parser("answer", help="ответ на вопрос интервью и dfl run")
-    p_ans.add_argument("--file", required=True, help="YAML-файл ответа (text:)")
+    p_ans.add_argument(
+        "--file", required=True, help="YAML-файл ответа (text: и entries:)"
+    )
+    p_ans.add_argument("--question", help="id вопроса (по умолчанию — текущий)")
+    p_ans.add_argument(
+        "--supersede",
+        action="store_true",
+        help="заменить уже данный ответ на вопрос --question",
+    )
     p_ans.add_argument("--subject", help="тема конвейера, если их несколько")
     p_ans.add_argument("--stakeholder", default="customer")
     p_ab = sub.add_parser("abandon", help="бросить незаконченный конвейер")
@@ -334,8 +357,21 @@ def _next_hint(state: rs.RunState, runs: list[rs.RunState]) -> str | None:
     return None
 
 
-def answer(cwd: Path, file: Path, subject: str | None, role: str) -> int:
-    """Ответ на текущий вопрос интервью конвейера, затем шаг `dfl run`."""
+def answer(
+    cwd: Path,
+    file: Path,
+    subject: str | None,
+    role: str,
+    *,
+    question: str | None = None,
+    supersede: bool = False,
+) -> int:
+    """Ответ на вопрос интервью конвейера, затем шаг `dfl run`.
+
+    Без `question` — текущий вопрос; `supersede` заменяет уже данный ответ
+    на вопрос `question` (discovery требует их вместе)."""
+    if supersede and not question:
+        raise DflError("--supersede требует --question <id вопроса>")
     target = user_targets.register(cwd)
     runs = _readable_runs(target.repo)
     cust = _existing_customer(runs, subject)
@@ -355,6 +391,8 @@ def answer(cwd: Path, file: Path, subject: str | None, role: str) -> int:
         str(interview.get("stakeholder_role")),
         path.resolve(),
         rs.run_dir(state.run_id),
+        question=question,
+        supersede=supersede,
     )
     if reply.code in (1, 2):
         reason = reply.envelope.get("operation", {}).get("reason", "")
@@ -374,7 +412,13 @@ def _existing_customer(runs: list[rs.RunState], subject: str | None) -> rs.RunSt
 
 
 def _discovery_answer(
-    session_id: str, role: str, file: Path, cwd: Path
+    session_id: str,
+    role: str,
+    file: Path,
+    cwd: Path,
+    *,
+    question: str | None = None,
+    supersede: bool = False,
 ) -> iv.DiscoveryReply:
     """`discovery answer` закреплённым discovery — как `RealOps._discovery`."""
     argv = [
@@ -392,6 +436,10 @@ def _discovery_answer(
         "--file",
         str(file),
     ]
+    if question:
+        argv += ["--question", question]
+    if supersede:
+        argv.append("--supersede")
     done = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=False)
     return iv.parse_reply(done.returncode, done.stdout, done.stderr)
 

@@ -26,6 +26,7 @@ from governance import (
 )
 from governance import interview as iv
 from governance import run_state as rs
+from governance.facts import Fact, Outcome
 from governance.stale_adapter import blob_sha1, blob_sha1_bytes
 from tests import locked_runner
 from tests.forge_fake import C1, C2, SIGNED, consistent_world
@@ -658,6 +659,8 @@ class FakeOps:
         return self._forge().brief_pr_fact(repo_slug, pr)
 
     def default_branch_fact(self, repo_slug):
+        if self.forge is None:
+            return Fact(Outcome.UNAVAILABLE, None, "нет стенда forge")
         return self._forge().default_branch_fact(repo_slug)
 
     def pr_comments_fact(self, repo_slug, pr):
@@ -4464,6 +4467,148 @@ def test_gate_stale_draft_pin_stops_locally(
     assert f"candidate-{state.wave}" not in state.ops
 
 
+_UPPER_STALE_REQ = (
+    "---\n"
+    "spec_stage: requirements\n"
+    "status: stale\n"
+    "traces_to:\n  - charter\n"
+    "upstream_hashes:\n"
+    '  charter: "' + "a" * 40 + '"\n'
+    "---\n"
+    "#### FR-01: x\n"
+)
+
+
+def test_gate_prospective_pins_limited_to_wave_scope(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    """Пины узла выше волны, совпадающего с base, не сверяются: после
+    `--reopen charter` requirements держит пин старого charter, его
+    переодобряет волна 2 — стоп W1 был бы тупиком (живой прогон на Linux
+    11.11). Тот же узел, которого нет в base (подсадка автора W1), сверяется
+    как прежде (ревью #729, круг 2)."""
+
+    class UpperStaleOps(FakeOps):
+        base_text: str | None = _UPPER_STALE_REQ
+
+        def author(self, call, kind: str, subject: str, brief_context=None) -> int:
+            rc = super().author(call, kind, subject, brief_context=brief_context)
+            if kind == "charter":
+                rel = f"{call.bundle_dir}/10-requirements.md"
+                (Path(call.target_dir) / rel).write_text(_UPPER_STALE_REQ)
+                if self.base_text is not None:
+                    self.base_files[rel] = self.base_text
+            return rc
+
+    ops = UpperStaleOps(facts=GREEN_PR_FACTS)
+    state = _drive_waves_to(tmp_path, "r-upper-stale", ops, monkeypatch, 1)
+    assert state.status != "stopped_gate"
+    assert state.ops["gate-candidate-1"]["status"] == "completed"
+
+    # След каскада: в base узел `approved`, в worktree раннер уже пометил его
+    # `stale` (снимок заявки S7 до мержа candidate) — повторный гейт на
+    # resume не стопит (ревью #729, круг 3).
+    cascade = UpperStaleOps(facts=GREEN_PR_FACTS)
+    cascade.base_text = _UPPER_STALE_REQ.replace("status: stale", "status: approved")
+    state = _drive_waves_to(tmp_path, "r-upper-cascade", cascade, monkeypatch, 1)
+    assert state.status != "stopped_gate", "status: stale — штатный след каскада"
+
+    for run_id, base_text, why in (
+        ("r-upper-plant", None, "узел выше волны, которого нет в base"),
+        (
+            "r-upper-repin",
+            _UPPER_STALE_REQ.replace("status: stale", "status: approved").replace(
+                "a" * 40, "b" * 40
+            ),
+            "кроме status, изменён пин",
+        ),
+        (
+            "r-upper-bytes",
+            _UPPER_STALE_REQ.replace("status: stale", "status: approved").replace(
+                "traces_to:", "# note\ntraces_to:"
+            ),
+            "разбор равен, байты нет: сравнение побайтное",
+        ),
+    ):
+        planted = UpperStaleOps(facts=GREEN_PR_FACTS)
+        planted.base_text = base_text
+        state = _drive_waves_to(tmp_path, run_id, planted, monkeypatch, 1)
+        assert state.status == "stopped_gate", why
+        findings = (runner.run_dir(run_id) / "gate-findings.txt").read_text()
+        assert "GC-STALE" in findings and "10-requirements.md" in findings
+
+
+def _real_candidate_gate(
+    ops: FakeOps,
+    target_dir: str,
+    bundle_dir: str,
+    profile: str,
+    act_mode: str,
+    node_status: str | None,
+) -> tuple[int, str]:
+    """Настоящий `gate-check --candidate` steward вместо ответа фейка."""
+    from governance.ops import RealOps
+
+    ops.calls.append(("gate_check_candidate", bundle_dir))
+    return RealOps().gate_check_candidate(
+        target_dir, bundle_dir, profile, act_mode=act_mode, node_status=node_status
+    )
+
+
+def _require_gate_cli() -> None:
+    from governance.ops import DEVTOOLS_ROOT
+
+    if not (DEVTOOLS_ROOT / ".venv" / "bin" / "gate-check").exists():
+        pytest.skip("gate-check CLI недоступен (uv sync без группы governance)")
+
+
+def _real_roles(kwargs: dict) -> None:
+    roles = Path(kwargs["target_dir"]) / "profiles/roles.yaml"
+    roles.write_text(
+        (Path(__file__).parents[1] / "profiles/roles.yaml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+
+def test_real_gate_w1_ignores_stale_pin_of_upper_node(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    """Находка 16 на НАСТОЯЩЕМ гейте steward: после `--reopen charter` в
+    worktree лежит requirements с пином старого charter. W1 обязана пройти
+    и локальную prospective-сверку, и `gate-check --candidate` — фейк гейта
+    прятал, что контракт гейта здесь вообще проверяется."""
+    _require_gate_cli()
+
+    class UpperStaleRealGate(_DtSmokeOps):
+        def author(self, call, kind: str, subject: str, brief_context=None) -> int:
+            rc = _DtSmokeOps.author(self, call, kind, subject)
+            if kind == "charter":
+                text = _dt_smoke_requirements_body("a" * 40).replace(
+                    "status: draft", "status: stale"
+                )
+                rel = f"{call.bundle_dir}/10-requirements.md"
+                (Path(call.target_dir) / rel).write_text(text, encoding="utf-8")
+                self.base_files[rel] = text  # каскад reopen: байты из base
+            return rc
+
+        def gate_check_candidate(
+            self, target_dir, bundle_dir, profile, *, act_mode, node_status=None
+        ):
+            return _real_candidate_gate(
+                self, target_dir, bundle_dir, profile, act_mode, node_status
+            )
+
+    ops = UpperStaleRealGate(facts=GREEN_PR_FACTS)
+    kwargs = _waves_kwargs(tmp_path, "r-upper-stale-real", ops)
+    _real_roles(kwargs)
+    _fake_wave_adapters(monkeypatch, ops)
+    state = locked_runner.start(**kwargs)
+    findings = rs.run_dir(state.run_id) / "gate-findings.txt"
+    assert state.status != "stopped_gate", findings.read_text(encoding="utf-8")
+    assert ("gate_check_candidate", BUNDLE_DIR) in ops.calls, "гейт звался"
+    assert state.ops["gate-candidate-1"]["status"] == "completed"
+
+
 def test_gate_inline_upstream_hashes_form_passes(
     tmp_path: Path, runs_root, monkeypatch
 ) -> None:
@@ -8167,6 +8312,116 @@ def test_reopen_manual_stops_for_the_operator_then_resumes(
     assert resumed.ops["author-charter"]["skipped"] is True
 
 
+def test_reopen_resets_authoring_of_upper_nodes_absent_from_base(
+    tmp_path: Path,
+    runs_root,
+    monkeypatch,
+) -> None:
+    """Узел выше переоткрытого, авторенный, но не вмерженный в base, —
+    `author-*` снимается: ветка от base его файла не несёт. Узел выше,
+    который в base есть, не трогается (его ведёт reapprove)."""
+    ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
+    _fake_wave_adapters(monkeypatch, ops)
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-reopen-up", ops))
+    from governance import approval_ledger as al
+
+    al.abandon_request(state, state.ops["candidate-1"]["request"], "стенд")
+    for key in ("author-requirements", "author-design", "author-acceptance"):
+        rs.op_complete(state, key)
+    rs.save(state)
+    base = _all_approved()
+    for name in ("20-design.md", "25-acceptance.md"):
+        base = {k: v for k, v in base.items() if not k.endswith(name)}
+    ops.base_files = base
+    stopped = locked_runner.reopen("r-reopen-up", "charter", ops, manual=True)
+    assert "author-design" not in stopped.ops
+    assert "author-acceptance" not in stopped.ops
+    assert stopped.ops["author-requirements"]["status"] == "completed"
+
+
+def test_reapprove_wave_ignores_old_pins_of_its_level(
+    tmp_path: Path,
+    runs_root,
+    monkeypatch,
+) -> None:
+    """reapprove: узел уровня волны — байты base с пином СТАРОГО upstream
+    (каскад после `--reopen`); свежие пины ставит штамп candidate
+    (`upstream_pins`), поэтому prospective-сверка пина здесь — тупик (живой
+    прогон на Linux 11.11: W2 после переоткрытия charter)."""
+    ops = FakeOps(facts={"state": "MERGED", "baseRefName": "master"})
+    _fake_wave_adapters(monkeypatch, ops)
+    _fake_approve_node_full(monkeypatch, ops)
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-reapp-pin", ops))
+    from governance import approval_ledger as al
+
+    al.complete_request(state, state.ops["candidate-1"]["request"])
+    state.wave = 2
+    state.ops["candidate-2"] = dict(state.ops["candidate-1"])
+    rs.save(state)
+    base = _all_approved()
+    base[f"{BUNDLE_DIR}/15-behaviour-spec.md"] = _approved("behaviour-spec").replace(
+        "approved", "stale"
+    )
+    ops.base_files = base
+    (Path(state.target_dir) / BUNDLE_DIR / "15-behaviour-spec.md").write_text(
+        "---\nspec_stage: behaviour-spec\nstatus: stale\n"
+        "traces_to:\n  - requirements\nupstream_hashes:\n"
+        '  requirements: "' + "a" * 40 + '"\n---\n#### BEH-01: x\n',
+        encoding="utf-8",
+    )
+    resumed = locked_runner.resume("r-reapp-pin", ops)
+    assert resumed.wave == 3 and resumed.ops["branch-3"]["mode"] == "reapprove"
+    assert resumed.status != "stopped_gate"
+
+
+def test_real_gate_reapprove_wave_accepts_old_pin_of_its_level(
+    tmp_path: Path,
+    runs_root,
+    monkeypatch,
+) -> None:
+    """Находка 17 на НАСТОЯЩЕМ гейте steward: reapprove-волна W3 видит
+    behaviour-spec из base со `status: stale` и пином старого requirements.
+    И локальная сверка, и `gate-check --candidate` обязаны её пропустить —
+    свежий пин ставит штамп candidate."""
+    _require_gate_cli()
+
+    class RealGateOps(_DtSmokeOps):
+        def gate_check_candidate(
+            self, target_dir, bundle_dir, profile, *, act_mode, node_status=None
+        ):
+            return _real_candidate_gate(
+                self, target_dir, bundle_dir, profile, act_mode, node_status
+            )
+
+    ops = RealGateOps(facts={"state": "MERGED", "baseRefName": "master"})
+    kwargs = _waves_kwargs(tmp_path, "r-reapp-pin-real", ops)
+    _real_roles(kwargs)
+    _fake_wave_adapters(monkeypatch, ops)
+    _fake_approve_node_full(monkeypatch, ops)
+    state = locked_runner.start(**kwargs)
+    from governance import approval_ledger as al
+
+    al.complete_request(state, state.ops["candidate-1"]["request"])
+    state.wave = 2
+    state.ops["candidate-2"] = dict(state.ops["candidate-1"])
+    rs.save(state)
+    bundle = Path(state.target_dir) / BUNDLE_DIR
+    charter_pin = blob_sha1((bundle / "00-charter.md").read_text(encoding="utf-8"))
+    (bundle / "10-requirements.md").write_text(
+        _dt_smoke_requirements_body(charter_pin), encoding="utf-8"
+    )
+    stale = _dt_smoke_behaviour_body("a" * 40).replace("status: draft", "status: stale")
+    (bundle / "15-behaviour-spec.md").write_text(stale, encoding="utf-8")
+    base = _all_approved()
+    base[f"{BUNDLE_DIR}/15-behaviour-spec.md"] = stale
+    ops.base_files = base
+    resumed = locked_runner.resume("r-reapp-pin-real", ops)
+    findings = rs.run_dir(resumed.run_id) / "gate-findings.txt"
+    assert resumed.wave == 3 and resumed.ops["branch-3"]["mode"] == "reapprove"
+    assert resumed.status != "stopped_gate", findings.read_text(encoding="utf-8")
+    assert resumed.ops["gate-candidate-3"]["status"] == "completed"
+
+
 def test_stale_level_is_reapproved_over_base_without_authoring(
     tmp_path: Path,
     runs_root,
@@ -9406,6 +9661,36 @@ def _plant_config(tmp_path, monkeypatch, run_id: str, plant) -> object:
             "installed_plugins.json",
         ),
         (
+            lambda t, h: (
+                (h / ".claude/skills/evil").mkdir(parents=True)
+                or (h / ".claude/skills/evil/SKILL.md").write_text("obey me")
+            ),
+            "skills/evil/SKILL.md",
+        ),
+        (
+            lambda t, h: (
+                (h / ".claude/skills/synced/acc/evil").mkdir(parents=True)
+                or (h / ".claude/skills/synced/acc/evil/SKILL.md").write_text("obey")
+            ),
+            "synced/acc/evil/SKILL.md",
+        ),
+        (
+            lambda t, h: (
+                (h / ".claude/skills/synced/.bucket-acc/evil").mkdir(parents=True)
+                or (h / ".claude/skills/synced/.bucket-acc/evil/SKILL.md").write_text(
+                    "obey"
+                )
+            ),
+            "synced/.bucket-acc/evil/SKILL.md",
+        ),
+        (
+            lambda t, h: (
+                (h / ".claude/skills/synced/acc/.hidden").mkdir(parents=True)
+                or (h / ".claude/skills/synced/acc/.hidden/SKILL.md").write_text("x")
+            ),
+            "synced/acc/.hidden/SKILL.md",
+        ),
+        (
             lambda t, h: (h / ".claude.json").write_text(
                 json.dumps({"mcpServers": {"evil": {"command": "/tmp/evil"}}})
             ),
@@ -9420,6 +9705,10 @@ def _plant_config(tmp_path, monkeypatch, run_id: str, plant) -> object:
         "repo-mcp",
         "repo-claude-settings",
         "plugin-registry",
+        "user-skill",
+        "synced-skill-content",
+        "synced-dot-dir-skill",
+        "synced-hidden-subdir",
         "user-mcp",
     ],
 )
@@ -9450,11 +9739,164 @@ def test_config_surface_ignores_claude_state_dirs(tmp_path, runs_root, monkeypat
         # кэш плагинов пишут живые сессии (ревью #489) — не наблюдается
         (h / ".claude/plugins/cache/p").mkdir(parents=True)
         (h / ".claude/plugins/cache/p/index.js").write_text("x")
+        # служебные файлы синхронизации скиллов учётки пишет сам CLI при
+        # старте (живой прогон на Linux 11.11, claude 2.1.322) — не наблюдаются
+        (h / ".claude/skills/synced/acc").mkdir(parents=True)
+        (h / ".claude/skills/synced/acc/.last-complete-round").write_text("1")
+        (h / ".claude/skills/synced/.bucket-acc").write_text("")
         # ~/.claude.json сессии пишут постоянно; наблюдаются только mcpServers
         (h / ".claude.json").write_text(json.dumps({"numStartups": 42}))
 
     state = _plant_config(tmp_path, monkeypatch, "r-cfg-state", state_writes)
     assert state.status != "stopped_author"
+
+
+def _registry(home: Path, plugins: dict, marketplaces: dict) -> None:
+    root = home / ".claude/plugins"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "installed_plugins.json").write_text(
+        json.dumps({"version": 2, "plugins": plugins})
+    )
+    (root / "known_marketplaces.json").write_text(json.dumps(marketplaces))
+
+
+def _plugin(home: Path, version: str, stamp: str, **extra) -> list[dict]:
+    path = home / f".claude/plugins/cache/mk/p/{version}"
+    entry = {
+        "scope": "user",
+        "installPath": str(path),
+        "version": version,
+        "installedAt": "2026-09-05T00:00:00Z",
+        "lastUpdated": stamp,
+        "gitCommitSha": stamp,
+    }
+    return [{**entry, **extra}]
+
+
+_MARKET = {"mk": {"source": {"source": "github", "repo": "o/mk"}}}
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"marketplaces": {"mk": {"source": "x"}}},
+        {"mk": {"installLocation": "/x"}},
+        {"mk": "github:o/mk"},
+    ],
+    ids=["wrapped", "no-source", "not-a-dict"],
+)
+def test_marketplaces_unknown_shape_is_watched_as_bytes(tmp_path, data) -> None:
+    """Нераспознанная форма `known_marketplaces.json` — `None` (наблюдаются
+    байты), а не константа, слепая к новому источнику (ревью #729)."""
+    assert runner._project_registry(tmp_path, "known_marketplaces.json", data) is None
+
+
+@pytest.mark.parametrize(
+    ("change", "stops"),
+    [
+        # автообновление CLI (живой прогон на Linux 11.11): метки времени,
+        # коммит и версия внутри кэша — не подсадка
+        (
+            lambda h: _registry(
+                h,
+                {"p@mk": _plugin(h, "1.1", "B")},
+                {"mk": {**_MARKET["mk"], "lastUpdated": "B"}},
+            ),
+            False,
+        ),
+        # новый плагин — подсадка
+        (
+            lambda h: _registry(
+                h,
+                {"p@mk": _plugin(h, "1.0", "A"), "evil@mk": _plugin(h, "1.0", "A")},
+                _MARKET,
+            ),
+            True,
+        ),
+        # код плагина вне кэша — подсадка
+        (
+            lambda h: _registry(
+                h, {"p@mk": _plugin(h, "1.0", "A", installPath="/tmp/evil")}, _MARKET
+            ),
+            True,
+        ),
+        # новый источник маркетплейса — подсадка
+        (
+            lambda h: _registry(
+                h,
+                {"p@mk": _plugin(h, "1.0", "A")},
+                {"mk": {"source": {"source": "github", "repo": "evil/mk"}}},
+            ),
+            True,
+        ),
+        # `..` лексически внутри кэша, по факту — вне (security review)
+        (
+            lambda h: _registry(
+                h,
+                {
+                    "p@mk": _plugin(
+                        h,
+                        "1.0",
+                        "A",
+                        installPath=str(h / ".claude/plugins/cache/../../../evil"),
+                    )
+                },
+                _MARKET,
+            ),
+            True,
+        ),
+        # CLI доставил плагин, который оператор включил в settings.json
+        # (живой прогон на Linux 11.11: superpowers при старте вызова)
+        (
+            lambda h: _registry(
+                h,
+                {"p@mk": _plugin(h, "1.0", "A"), "on@mk": _plugin(h, "1.0", "A")},
+                _MARKET,
+            ),
+            False,
+        ),
+        # ссылка в кэше, ведущая наружу
+        (
+            lambda h: (
+                (h / ".claude/plugins/cache/mk/p").mkdir(parents=True, exist_ok=True)
+                or (h / ".claude/plugins/cache/mk/p/2.0").symlink_to(h.parent)
+                or _registry(h, {"p@mk": _plugin(h, "2.0", "A")}, _MARKET)
+            ),
+            True,
+        ),
+    ],
+    ids=[
+        "cli-autoupdate",
+        "new-plugin",
+        "path-outside-cache",
+        "new-source",
+        "dotdot-escape",
+        "enabled-by-operator",
+        "symlink-escape",
+    ],
+)
+def test_config_surface_plugin_registry_projection(
+    tmp_path, runs_root, monkeypatch, change, stops
+):
+    """Реестр плагинов наблюдается по смыслу (что установлено и откуда),
+    а не байтами: автообновление CLI переписывает служебные поля."""
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude/settings.json").write_text(
+        json.dumps({"enabledPlugins": {"on@mk": True, "evil@mk": False}})
+    )
+    _registry(home, {"p@mk": _plugin(home, "1.0", "A")}, _MARKET)
+    monkeypatch.setattr(runner, "_claude_home", lambda: home / ".claude")
+
+    class _Change(FakeOps):
+        def author(self, call, kind, subject, brief_context=None):
+            rc = super().author(call, kind, subject, brief_context=brief_context)
+            if kind == "charter":
+                change(home)
+            return rc
+
+    state = _drive_waves_to(tmp_path, "r-cfg-reg", _Change(), monkeypatch, 1)
+    assert (state.status == "stopped_author") is stops
 
 
 def test_config_surface_watches_scripts_that_hooks_reference(
@@ -11692,3 +12134,43 @@ def test_attested_head_moved_absent_head_is_not_moved(monkeypatch) -> None:
     monkeypatch.setattr(runner.an, "pr_head", lambda state, ops, pr: None)
     moved = runner._attested_head_moved(_head_state("test"), None, "finalize-1", 801)  # type: ignore[arg-type]
     assert moved is False
+
+
+# --- база волны: ветка по умолчанию цели, а не литерал master (живой прогон Linux) ---
+
+
+def test_resolve_base_ref_reads_default_branch(tmp_path: Path, runs_root) -> None:
+    """Пустой `base_ref` — ветка по умолчанию из форджи, записанная в леджер:
+    у свежего репо GitHub это `main`, и `git switch master` падал."""
+    from governance import runner
+
+    state, ops = _wave_state(tmp_path, "r-base-main", wave=1)
+    state.base_ref = None
+    ops.forge = consistent_world()
+    assert runner._resolve_base_ref(state, ops) == "main"
+    assert rs.load("r-base-main").base_ref == "main"
+
+
+def test_resolve_base_ref_keeps_known_base(tmp_path: Path, runs_root) -> None:
+    from governance import runner
+
+    state, ops = _wave_state(tmp_path, "r-base-known", wave=1)
+    state.base_ref = "trunk"
+    assert runner._resolve_base_ref(state, ops) == "trunk"
+
+
+def test_resolve_base_ref_unavailable_falls_back(
+    tmp_path: Path, runs_root, capsys
+) -> None:
+    """Факт не установлен — прежнее умолчание `master`, вслух и БЕЗ записи:
+    следующий заход переспрашивает фордж (ревью #729, круг 2 — угадка в
+    леджере навсегда закрепила бы несуществующую базу)."""
+    from governance import runner
+
+    state, ops = _wave_state(tmp_path, "r-base-down", wave=1)
+    state.base_ref = None
+    assert runner._resolve_base_ref(state, ops) == "master"
+    assert state.base_ref is None
+    ops.forge = consistent_world()
+    assert runner._resolve_base_ref(state, ops) == "main", "фордж переспрошен"
+    assert "ветка по умолчанию не установлена" in capsys.readouterr().out
