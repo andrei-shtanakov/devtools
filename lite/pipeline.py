@@ -32,6 +32,13 @@ def merged_unreviewed(ops: Mapping[str, object]) -> bool:
     return isinstance(result, Mapping) and result.get("reviewed") is False
 
 
+def code_merged(ops: Mapping[str, object]) -> bool:
+    """`code-accept` записал мерж PR с кодом (`result.merged`): конвейер закончен."""
+    record = ops.get("code-accept")
+    result = record.get("result") if isinstance(record, Mapping) else None
+    return isinstance(result, Mapping) and result.get("merged") is True
+
+
 def chain_open(
     mode: object, frame: object, status: object, ops: Mapping[str, object]
 ) -> bool:

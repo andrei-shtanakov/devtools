@@ -445,3 +445,62 @@ def test_pr_body_links_colleague_doc(work: Path) -> None:
     ir.init_repo(work, DEVTOOLS, gh)
     create = gh.called("pr", "create")[0]
     assert "docs/darkfactory-for-colleagues.md" in create[create.index("--body") + 1]
+
+
+# --- .gitignore (devtools#735) ---------------------------------------------
+
+_IGNORE_LINES = ["__pycache__/", "*.pyc", ".venv/", ".pytest_cache/", ".ruff_cache/"]
+
+
+def _shown(work: Path, path: str) -> str:
+    _git(work, "fetch", "origin")
+    return _git(work, "show", f"origin/{ir.INIT_BRANCH}:{path}")
+
+
+def test_gitignore_created_when_absent(work: Path) -> None:
+    assert ir.init_repo(work, DEVTOOLS, FakeGh()) == 0
+    text = _shown(work, ".gitignore")
+    for line in _IGNORE_LINES:
+        assert line in text.splitlines()
+
+
+def test_gitignore_appends_only_missing_lines(work: Path) -> None:
+    (work / ".gitignore").write_text("dist/\n  __pycache__/  \n*.pyc", encoding="utf-8")
+    _git(work, "add", ".")
+    _git(work, "commit", "-m", "own ignore")
+    _git(work, "push", "origin", "main")
+    gh = FakeGh()
+    assert ir.init_repo(work, DEVTOOLS, gh) == 0
+    lines = _shown(work, ".gitignore").splitlines()
+    assert lines[:3] == ["dist/", "  __pycache__/  ", "*.pyc"]
+    added = lines[lines.index("# DarkFactory (dfl init-repo)") + 1 :]
+    assert added == [".venv/", ".pytest_cache/", ".ruff_cache/"]
+    body = gh.called("pr", "create")[0]
+    assert ".gitignore` (недостающие строки)" in body[body.index("--body") + 1]
+
+
+def test_gitignore_untouched_when_complete(work: Path) -> None:
+    own = "\n".join(_IGNORE_LINES) + "\n"
+    (work / ".gitignore").write_text(own, encoding="utf-8")
+    _git(work, "add", ".")
+    _git(work, "commit", "-m", "own ignore")
+    _git(work, "push", "origin", "main")
+    gh = FakeGh()
+    assert ir.init_repo(work, DEVTOOLS, gh) == 0
+    assert _shown(work, ".gitignore") + "\n" == own
+    _git(work, "fetch", "origin")
+    changed = _git(work, "diff", "--name-only", "main", f"origin/{ir.INIT_BRANCH}")
+    assert ".gitignore" not in changed.splitlines()
+    body = gh.called("pr", "create")[0]
+    assert "недостающие строки" not in body[body.index("--body") + 1]
+
+
+def test_gitignore_symlink_is_conflict(work: Path, capsys) -> None:
+    (work / "other").write_text("x\n")
+    (work / ".gitignore").symlink_to("other")
+    _git(work, "add", ".")
+    _git(work, "commit", "-m", "link")
+    _git(work, "push", "origin", "main")
+    assert ir.conflicts(work) == [".gitignore"]
+    assert ir.init_repo(work, DEVTOOLS, FakeGh()) == 2
+    assert ".gitignore" in capsys.readouterr().err

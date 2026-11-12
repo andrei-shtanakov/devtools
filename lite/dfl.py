@@ -30,6 +30,7 @@ from lite.pipeline import (
     CHAIN_STOPPED_HINT,
     accepted_url,
     chain_open,
+    code_merged,
     merged_unreviewed,
 )
 
@@ -259,6 +260,9 @@ def _engineer_step(eng: rs.RunState, repo: str) -> int:
             f"PR с кодом вмержен без автоматической приёмки: {url}; конвейер закончен"
         )
         return 0
+    if url is not None and code_merged(eng.ops):
+        print(f"PR с кодом проверен и вмержен: {url}; конвейер закончен")
+        return 0
     if url is not None:
         print(f"PR с кодом проверен: {url}; мерж — за вами")
         return 0
@@ -352,8 +356,12 @@ def _registered_repo(cwd: Path) -> str:
 
 def _next_hint(state: rs.RunState, runs: list[rs.RunState]) -> str | None:
     url = _accepted_url(state)
+    if url is not None and code_merged(state.ops):
+        return (
+            f"конвейер закончен ({url} вмержен); новая тема: dfl run --subject '<тема>'"
+        )
     if url is not None:
-        return url
+        return f"смержите {url}, затем dfl run"
     if chain_open(state.mode, _frame(state), state.status, state.ops):
         return f"{CHAIN_STOPPED_HINT} (или {ABANDON_HINT})"
     if _engineer_of(state, runs) is not None:
