@@ -146,3 +146,14 @@ def test_directive_inside_data_stays_inside_data() -> None:
     assert real_rules_idx < vhod_idx
     span_start = out.text.index(directive)
     assert span_start > vhod_idx
+
+
+def test_prompt_names_blocking_and_advisory_and_inherited_decisions() -> None:
+    """devtools#728: модель знает, какие классы не валят итог, ставит `fail`
+    только при блокирующей находке и не судит повтор решения основания."""
+    rs = r.load_rules("requirements-vs-charter", CONTRACTS)
+    out = p.build_prompt(rs, _prepared()).text
+    assert "Блокирующие: blocker, major" in out
+    assert "Совещательные (замечание, итог не валят): minor" in out
+    assert "только если по нему есть хотя бы одна находка" in out
+    assert "несёт ссылкой на основание" in out

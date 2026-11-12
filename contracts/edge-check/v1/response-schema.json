@@ -11,7 +11,7 @@
         "required": ["id", "status", "reason"],
         "properties": {
           "id": {"type": "string"},
-          "status": {"enum": ["pass", "fail"]},
+          "status": {"enum": ["pass", "fail", "insufficient"]},
           "reason": {"type": "string"}
         }
       }
