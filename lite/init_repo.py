@@ -17,6 +17,7 @@ from pathlib import Path
 from governance import user_targets
 from governance.brief_tools import LABEL
 from lite.install import Runner
+from lite.output import refusal
 
 INIT_BRANCH = "darkfactory/init-repo"
 COMMIT_MESSAGE = "DarkFactory: подготовка репо (dfl init-repo)"
@@ -191,6 +192,27 @@ def _git(run: Runner, repo: Path, *args: str) -> str:
 
 
 def _default_branch(run: Runner, repo: Path) -> str:
+    """Ветка по умолчанию из `origin/HEAD`; нет ссылки — `set-head -a` и снова.
+
+    `origin/HEAD` ставит только `git clone`; у репо из `git init` +
+    `git remote add` его нет. `git remote set-head origin -a` спрашивает
+    форджу и меняет лишь локальную ссылку — безопасно сделать самим.
+    """
+    branch = _origin_head(run, repo)
+    if branch is not None:
+        return branch
+    _git(run, repo, "remote", "set-head", "origin", "-a")
+    branch = _origin_head(run, repo)
+    if branch is None:
+        raise InitError(
+            "ветка по умолчанию неизвестна (нет origin/HEAD даже после "
+            "git remote set-head origin -a) — проверьте origin: git remote -v"
+        )
+    print("origin/HEAD не было — выполнено git remote set-head origin -a")
+    return branch
+
+
+def _origin_head(run: Runner, repo: Path) -> str | None:
     done = run(
         ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
         cwd=repo,
@@ -199,10 +221,7 @@ def _default_branch(run: Runner, repo: Path) -> str:
         check=False,
     )
     if done.returncode != 0:
-        raise InitError(
-            "ветка по умолчанию неизвестна (нет origin/HEAD) — выполните "
-            "git remote set-head origin -a и повторите"
-        )
+        return None
     return (done.stdout or "").strip().removeprefix("origin/")
 
 
@@ -428,7 +447,7 @@ def init_repo(repo: Path, devtools: Path, gh: Gh, run: Runner = subprocess.run) 
             return 0
         url = _publish(repo, devtools, slug, base, gh, run)
     except InitError as exc:
-        print(f"dfl init-repo: {exc}", file=sys.stderr)
+        print(refusal("dfl init-repo", str(exc)), file=sys.stderr)
         return 2
     print(f"PR подготовки открыт: {url} — смержите его сами, затем dfl run")
     return 0

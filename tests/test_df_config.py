@@ -487,9 +487,11 @@ def test_banner_lists_relaxations_in_test(tmp_path: Path) -> None:
         "проверок нет (test): у PR нет .github/workflows и чеков — CI не ждём; чеки CI вне GitHub Actions, пришедшие позже 2 минут, не учитываются",
         "одна учётка GitHub: accounts.human может совпадать с accounts.agent",
     )
-    assert df_config.test_banner(cfg) == (
-        "режим test: выключено — " + "; ".join(df_config.TEST_RELAXATIONS)
-    )
+    banner = df_config.test_banner(cfg)
+    assert banner is not None
+    lines = banner.splitlines()
+    assert lines[0] == "режим test: по сравнению со strict выключено"
+    assert lines[1:] == [f"  - {item}" for item in df_config.TEST_RELAXATIONS]
 
 
 SKIP_CONSTANTS = (

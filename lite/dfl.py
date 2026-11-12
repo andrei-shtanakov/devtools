@@ -26,6 +26,7 @@ from governance import interview as iv
 from governance import run_state as rs
 from governance.facts import Outcome
 from lite.init_repo import DEVTOOLS, init_repo, real_gh
+from lite.output import refusal
 from lite.pipeline import (
     CHAIN_STOPPED_HINT,
     accepted_url,
@@ -87,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
             return abandon(cwd, args.subject)
         return run(cwd, args.subject, args.stakeholder)
     except (DflError, df_config.ConfigError, user_targets.TargetsError) as exc:
-        print(f"dfl: {exc}", file=sys.stderr)
+        print(refusal(f"dfl {args.command}", str(exc)), file=sys.stderr)
         return 2
 
 
@@ -128,6 +129,7 @@ def _require_test_mode() -> None:
             "через make"
         )
     print(df_config.test_banner(cfg))
+    print()
 
 
 def run(cwd: Path, subject: str | None, role: str) -> int:

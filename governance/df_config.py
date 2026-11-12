@@ -90,6 +90,7 @@ TEST_RELAXATIONS: tuple[str, ...] = (
     "проверок нет (test): у PR нет .github/workflows и чеков — CI не ждём; чеки CI вне GitHub Actions, пришедшие позже 2 минут, не учитываются",
     "одна учётка GitHub: accounts.human может совпадать с accounts.agent",
 )
+TEST_BANNER_HEADER = "режим test: по сравнению со strict выключено"
 _LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}")
 MODES = ("strict", "test")
 
@@ -152,10 +153,11 @@ def config_home(env: Mapping[str, str]) -> Path:
 
 
 def test_banner(cfg: DfConfig) -> str | None:
-    """Баннер режима test (что выключено); в strict — `None`."""
+    """Баннер режима test списком (что выключено); в strict — `None`."""
     if cfg.mode == "strict":
         return None
-    return "режим test: выключено — " + "; ".join(TEST_RELAXATIONS)
+    items = "\n".join(f"  - {item}" for item in TEST_RELAXATIONS)
+    return f"{TEST_BANNER_HEADER}\n{items}"
 
 
 def config_path(env: Mapping[str, str]) -> Path:
