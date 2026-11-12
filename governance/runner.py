@@ -927,6 +927,23 @@ def _refuse_legacy_resume(state: RunState) -> None:
     )
 
 
+def _archive_stop_reason(state: RunState) -> None:
+    """Выход из стопа (resume, reopen) уносит его причину в архив.
+
+    Не все стопы пишут `stop-reason.txt` (стоп edge-check, preflight,
+    грязное дерево — нет), и оставленный файл выдавал бы причину прошлого
+    стопа за причину следующего: кнопка test отказала бы в продолжении стопа
+    edge-check текстом трипвайра (живой прогон Linux 12.11). Файл не
+    удаляется, а переименовывается: у трипвайра это единственная запись о
+    том, какие файлы конфиг-поверхности менялись (ревью #731).
+    """
+    path = run_dir(state.run_id) / "stop-reason.txt"
+    if not path.is_file():
+        return
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    path.rename(path.with_name(f"stop-reason.{stamp}.txt"))
+
+
 def resume(run_id: str, ops: Ops, *, lock: rl.RunLock) -> RunState:
     """Явный подхват сохранённого run'а (спека §5).
 
@@ -1001,6 +1018,8 @@ def resume(run_id: str, ops: Ops, *, lock: rl.RunLock) -> RunState:
             )
     else:
         _refuse_legacy_resume(state)
+    if state.status.startswith("stopped_"):
+        _archive_stop_reason(state)
     if state.status != "completed":
         resumed = _resume_wave(state, ops, lock=lock)
         if resumed is not None:
@@ -1523,6 +1542,7 @@ def reopen(
     stopped = act_node.reopen(state, ops, dag, node)
     if stopped is not None:
         print(f"reopen: {stopped}")
+    _archive_stop_reason(state)
     state.wave = levels[node] + 1
     count = (state.ops.get(f"reopen-{state.wave}") or {}).get("count", 0) + 1
     state.ops[f"reopen-{state.wave}"] = {
