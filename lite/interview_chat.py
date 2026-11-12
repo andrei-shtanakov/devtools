@@ -166,8 +166,10 @@ def is_skip(text: str) -> bool:
 
 
 def stdin_read(prompt: str) -> str | None:
-    """Строка из терминала; EOF (Ctrl-D) — `None`."""
+    """Строка из терминала; EOF (Ctrl-D) и Ctrl-C — `None` (выход из цикла,
+    без трассировки); строка приглашения закрывается переводом строки."""
     try:
         return input(prompt)
-    except EOFError:
+    except (EOFError, KeyboardInterrupt):
+        print()
         return None

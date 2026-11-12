@@ -259,3 +259,15 @@ def test_read_answer_lines_until_empty() -> None:
     assert ic.read_answer(_reader(" /стоп ")) is None
     assert ic.read_answer(_reader("")) == ""
     assert ic.is_skip("Не знаю") and not ic.is_skip("не знаю как")
+
+
+def test_stdin_read_ctrl_c_is_stop(monkeypatch, capsys) -> None:
+    def interrupted(prompt: str) -> str:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("builtins.input", interrupted)
+    assert ic.stdin_read("> ") is None
+    assert capsys.readouterr().out == "\n"  # строка приглашения закрыта
+    disc = Discovery()
+    assert _chat(disc, ic.stdin_read, _agent()) is ic.ChatResult.STOPPED
+    assert disc.sent == []
