@@ -61,6 +61,29 @@ class SessionView:
             if (prefix in present if prefix is not None else key in self.answered_keys)
         }
 
+    def entry_record(self, eid: str) -> dict[str, Any]:
+        """Запись пункта в ответе держателя целиком (с неизвестными dfl
+        полями); нет её там — собранная из действующего пункта."""
+        answer = self.answers.get(self.holders.get(eid, ""), {})
+        for entry in answer.get("entries") or []:
+            if isinstance(entry, dict) and entry.get("id") == eid:
+                return dict(entry)
+        current = next(e for e in self.entries if e.id == eid)
+        return {"id": eid, "body": current.body, **current.fields}
+
+    def held_answer(self, question_id: str) -> dict[str, Any]:
+        """Копия ответа на вопрос только с теми записями, которые он сейчас
+        держит: пункт, переобъявленный позже другим ответом, при пересылке
+        этого ответа не должен вернуться к старой версии."""
+        answer = self.answers.get(question_id, {})
+        copy = dict(answer)
+        copy["entries"] = [
+            dict(e)
+            for e in answer.get("entries") or []
+            if isinstance(e, dict) and self.holders.get(str(e.get("id"))) == question_id
+        ]
+        return copy
+
     def next_id(self, prefix: str) -> str:
         """Следующий свободный id: после всех когда-либо объявленных."""
         used = [

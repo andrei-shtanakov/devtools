@@ -492,3 +492,20 @@ def test_ctrl_c_while_discovery_works_stops() -> None:
         send=disc.send, load=disc.load,
     )  # fmt: skip
     assert got is ic.ChatResult.STOPPED
+
+
+def test_correct_resend_skips_entries_held_by_later_answer() -> None:
+    """I4: FR-01 позже обновлён другим ответом — пересылка ответа q-fn
+    (поправка FR-02) не возвращает старую версию FR-01."""
+    view = _corr_view()
+    view.holders["FR-01"] = "q-prio"
+    view.answers["q-prio"] = {"text": "важность", "entries": [dict(FR1)]}
+    send = Sender()
+    fr2 = _fr1_item(id="FR-02", body="письмо с отчётом", acceptance="за минуту")
+    iview.correct(
+        _state(), "x", agent=_agent({"items": [fr2], "ask": None}),
+        load=lambda s: view, send=send,
+    )  # fmt: skip
+    [(qid, payload)] = send.sent
+    assert qid == "q-fn"
+    assert [e["id"] for e in payload["entries"]] == ["FR-02"]

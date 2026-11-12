@@ -214,9 +214,10 @@ def test_parse_items_schema() -> None:
             sx.parse_items(raw)
 
 
-def test_agent_supplied_id_ignored_in_payload() -> None:
-    items = [{"prefix": "G", "body": "Цель", "traces": [], "id": "G-01"}]
-    assert _entries(sx.to_payload("t", items, _customer()))[0]["id"] == "G-03"
+def test_agent_supplied_unknown_id_is_form_error() -> None:
+    """I4: id, которого нет среди действующих пунктов, — повтор агента."""
+    items = [{"prefix": "G", "body": "Цель", "traces": [], "id": "G-07"}]
+    assert any("G-07" in e for e in sx.form_errors(items, _customer()))
 
 
 def test_feasibility_review_text_only() -> None:
@@ -342,3 +343,86 @@ def test_uncovered_topic_still_requires_prefix() -> None:
     agent = _agent({"items": [], "ask": None})
     got = sx.structure_answer(GOALS, "ответ", view, agent, may_ask=True)
     assert isinstance(got, sx.Ask) and "цели" in got.question
+
+
+# --- финальное ревью: I4 (ответ дополняет существующий пункт) ---
+
+PRIO = sx.Question("customer.functions.02", "functions", "Что подождёт?")
+FR_OLD = {
+    "id": "FR-01",
+    "body": "Выгрузка операций в CSV",
+    "traces": ["G-01"],
+    "Priority": "Must",
+    "Note": "поле, о котором dfl не знает",
+}
+
+
+def _with_fr(**fields: Any) -> SessionView:
+    raw = {**FR_OLD, **fields}
+    entry = Entry("FR-01", raw["body"],
+                  {k: v for k, v in raw.items() if k not in ("id", "body")})  # fmt: skip
+    return _customer(
+        entries=[Entry("G-01", "Сверка платежей без ручной работы", {}), entry],
+        declared=["G-01", "G-02", "FR-01"],
+        holders={"G-01": "customer.goals.01", "FR-01": "customer.functions.01"},
+        answers={"customer.functions.01": {"text": "ф", "entries": [raw]}},
+        answered_keys=["goals", "functions"],
+    )
+
+
+def test_update_by_existing_id_merges_and_keeps_id() -> None:
+    upd = {"id": "FR-01", "prefix": "FR", "body": "Выгрузка операций в CSV",
+           "acceptance": "Файл открывается в Excel"}  # fmt: skip
+    agent = _agent({"items": [upd], "ask": None})
+    got = sx.structure_answer(PRIO, "проверим в Excel", _with_fr(), agent, may_ask=True)
+    assert isinstance(got, sx.Ready)
+    assert _entries(got.payload) == [
+        {**FR_OLD, "Acceptance": "Файл открывается в Excel"}
+    ]
+
+
+def test_update_and_new_item_new_gets_next_id() -> None:
+    upd = {"id": "FR-01", "prefix": "FR", "body": "Выгрузка операций в CSV",
+           "acceptance": "Файл открывается в Excel"}  # fmt: skip
+    new = {**FR_FULL, "body": "Письмо с отчётом"}
+    agent = _agent({"items": [upd, new], "ask": None})
+    got = sx.structure_answer(PRIO, "ответ", _with_fr(), agent, may_ask=True)
+    assert isinstance(got, sx.Ready)
+    assert [e["id"] for e in _entries(got.payload)] == ["FR-01", "FR-02"]
+
+
+def test_update_validated_as_merged_result() -> None:
+    upd = {"id": "FR-01", "prefix": "FR", "body": "Выгрузка операций в CSV",
+           "priority": "Should"}  # fmt: skip
+    # критерия нет ни в прежнем пункте, ни в обновлении — спросить человека
+    got = sx.structure_answer(
+        PRIO, "ответ", _with_fr(), _agent({"items": [upd]}), may_ask=True
+    )
+    assert isinstance(got, sx.Ask) and "Как проверить" in got.question
+    # прежний пункт полный: обновление одного поля проходит без уточнений
+    full = _with_fr(Acceptance="Файл открывается в Excel")
+    got = sx.structure_answer(PRIO, "ответ", full, _agent({"items": [upd]}),
+                              may_ask=True)  # fmt: skip
+    assert isinstance(got, sx.Ready)
+    (entry,) = _entries(got.payload)
+    assert entry["Priority"] == "Should" and entry["traces"] == ["G-01"]
+
+
+def test_update_unknown_id_retries_agent() -> None:
+    bad = {"id": "FR-09", "prefix": "FR", "body": "Ф", "acceptance": "а"}
+    good = {**bad, "id": "FR-01"}
+    agent = _agent({"items": [bad]}, {"items": [good]})
+    got = sx.structure_answer(PRIO, "ответ", _with_fr(), agent, may_ask=False)
+    assert isinstance(got, sx.Ready)
+    assert "FR-09" in agent.prompts[1]
+    assert _entries(got.payload)[0]["id"] == "FR-01"
+
+
+def test_update_id_prefix_mismatch_is_form_error() -> None:
+    items = [{"id": "FR-01", "prefix": "NFR", "body": "Б", "traces": []}]
+    assert sx.form_errors(items, _with_fr())
+
+
+def test_prompt_allows_updating_existing_by_id() -> None:
+    prompt = sx.build_prompt(PRIO, "ответ", _with_fr())
+    assert '"id"' in prompt and "Priority: Must" in prompt

@@ -5,7 +5,10 @@
 `{"items": [...], "ask": str|null}`. Скрипт проверяет форму (битая форма —
 один повтор агента с текстом ошибки), смысл по правилам брифа (дыра —
 уточнение у человека), назначает id и собирает YAML для `discovery answer`.
-Человек не видит ни JSON, ни YAML, ни id пунктов.
+Пункт агента с `id` действующего пункта — обновление: его поля сливаются с
+прежней записью, id сохраняется, запись переобъявляется в текущем ответе
+(discovery записывает это как `replaces_entries`). Человек не видит ни JSON,
+ни YAML, ни id пунктов.
 """
 
 from __future__ import annotations
@@ -105,6 +108,7 @@ def structure_answer(
         return Failed(FAILED_TEXT)
     except AgentUnavailable as exc:
         return Failed(f"агент недоступен: {exc}")
+    items = [_merged(item, view) if "id" in item else item for item in items]
     if may_ask:
         if ask:
             return Ask(ask)
@@ -159,6 +163,7 @@ def build_prompt(q: Question, text: str, view: SessionView) -> str:
     allowed = "\n".join(f"- {p} — тема {k}" for p, k in topics.items())
     existing = "\n".join(
         f"- {e.id} (тема {topics.get(_prefix_of(e.id), '?')}): {e.body}"
+        + _fields_note(e.fields)
         for e in view.entries
     )
     return f"""\
@@ -174,6 +179,11 @@ def build_prompt(q: Question, text: str, view: SessionView) -> str:
 
 Уже записанные пункты (на них можно ссылаться в traces, не дублируй их):
 {existing or "- (пока нет)"}
+Если ответ дополняет или уточняет уже записанный пункт (например, его
+важность, критерий проверки, целевое значение) — не создавай новый: верни
+этот пункт с его "id" и тем же "prefix", его body (прежним или уточнённым) и
+только теми полями, которые ответ заполняет или меняет. Новым пунктам "id" не
+давай.
 
 Допустимые префиксы пунктов (пункт может относиться к любой теме, не только
 к теме вопроса):
@@ -210,7 +220,8 @@ def parse_items(raw: str) -> tuple[list[dict[str, Any]], str | None]:
 
     Пункт нормализуется: строки обрезаются, пустые поля выбрасываются,
     `traces` всегда список, `priority` приводится к написанию брифа;
-    необязательный `id` (поправки) и `ref` сохраняются, прочие ключи
+    необязательный `id` (обновление действующего пункта) и `ref` сохраняются,
+    прочие ключи
     отбрасываются. Нарушение схемы — `FormError`.
     """
     doc = _first_json_object(raw)
@@ -273,11 +284,12 @@ def _canonical_priority(value: str, n: int) -> str:
 
 
 def form_errors(items: list[dict[str, Any]], view: SessionView) -> list[str]:
-    """Нарушения формы, которые исправляет агент: префикс, ref, traces."""
+    """Нарушения формы, которые исправляет агент: префикс, ref, traces, id."""
     allowed = view.prefixes()
     known = {e.id for e in view.entries}
     refs = [i["ref"] for i in items if "ref" in i]
     errors = [f"ref «{r}» повторяется или похож на id" for r in _bad_refs(refs, known)]
+    errors += _id_errors(items, known)
     for n, item in enumerate(items, 1):
         if item["prefix"] not in allowed:
             errors.append(
@@ -289,6 +301,21 @@ def form_errors(items: list[dict[str, Any]], view: SessionView) -> list[str]:
             for t in item.get("traces", [])
             if t not in known and t not in refs
         ]
+    return errors
+
+
+def _id_errors(items: list[dict[str, Any]], known: set[str]) -> list[str]:
+    """`id` пункта — только действующий пункт того же префикса, без повторов."""
+    ids = [i["id"] for i in items if "id" in i]
+    errors = [f"id «{i}» повторяется" for i in sorted(set(ids)) if ids.count(i) > 1]
+    for n, item in enumerate(items, 1):
+        eid = item.get("id")
+        if eid is None:
+            continue
+        if eid not in known:
+            errors.append(f"пункт {n}: id «{eid}» нет среди записанных пунктов")
+        elif _prefix_of(eid) != item["prefix"]:
+            errors.append(f"пункт {n}: префикс {item['prefix']} не совпадает с {eid}")
     return errors
 
 
@@ -356,13 +383,16 @@ def _trace_prefixes(
 def to_payload(text: str, items: list[dict[str, Any]], view: SessionView) -> str:
     """YAML ответа: `text` дословно и `entries` с назначенными id.
 
-    id — следующий номер префикса после всех объявленных в сессии, по
-    порядку пунктов; присланный агентом `id` игнорируется; `ref` в traces
-    заменяется назначенным id.
+    Новому пункту — следующий номер префикса после всех объявленных в сессии,
+    по порядку пунктов; пункт с `id` (обновление) — прежняя запись держателя
+    с полями пункта, id прежний; `ref` в traces заменяется назначенным id.
     """
     ids = _assign_ids(items, view)
     by_ref = {i["ref"]: ids[n] for n, i in enumerate(items) if "ref" in i}
-    entries = [_entry(item, ids[n], by_ref) for n, item in enumerate(items)]
+    entries = [
+        _entry(item, ids[n], by_ref, view.entry_record(ids[n]) if "id" in item else {})
+        for n, item in enumerate(items)
+    ]
     doc: dict[str, Any] = {"text": text}
     if entries:
         doc["entries"] = entries
@@ -370,10 +400,14 @@ def to_payload(text: str, items: list[dict[str, Any]], view: SessionView) -> str
 
 
 def _assign_ids(items: list[dict[str, Any]], view: SessionView) -> list[str]:
-    """id по порядку пунктов; внутри ответа номера префикса растут."""
+    """id по порядку пунктов; внутри ответа номера префикса растут;
+    обновление сохраняет свой id."""
     taken: dict[str, int] = {}
     ids = []
     for item in items:
+        if "id" in item:
+            ids.append(item["id"])
+            continue
         prefix = item["prefix"]
         if prefix not in taken:
             taken[prefix] = int(view.next_id(prefix).rsplit("-", 1)[1])
@@ -382,15 +416,60 @@ def _assign_ids(items: list[dict[str, Any]], view: SessionView) -> list[str]:
     return ids
 
 
-def _entry(item: dict[str, Any], eid: str, by_ref: dict[str, str]) -> dict[str, Any]:
-    """Пункт → запись `entries` (пустые поля опущены)."""
-    entry: dict[str, Any] = {"id": eid, "body": item["body"]}
+def _entry(
+    item: dict[str, Any], eid: str, by_ref: dict[str, str], old: dict[str, Any]
+) -> dict[str, Any]:
+    """Пункт → запись `entries` поверх прежней записи `old` (пустые поля
+    опущены)."""
+    entry = merge_entry({**old, "id": eid}, item)
+    if "traces" in entry:
+        entry["traces"] = [by_ref.get(t, t) for t in entry["traces"]]
+    return entry
+
+
+def merge_entry(old: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    """Прежняя запись с полями пункта: body; traces и поля — если есть
+    (id и неизвестные dfl поля прежней записи сохраняются)."""
+    new = dict(old)
+    new["body"] = item["body"]
     if item.get("traces"):
-        entry["traces"] = [by_ref.get(t, t) for t in item["traces"]]
+        new["traces"] = item["traces"]
     for key, name in _ENTRY_FIELDS:
         if key in item:
-            entry[name] = item[key]
-    return entry
+            new[name] = item[key]
+    return new
+
+
+def entry_as_item(entry: dict[str, Any]) -> dict[str, Any]:
+    """Запись ответа → пункт в формате раскладки (для проверки полей)."""
+    item: dict[str, Any] = {
+        "prefix": _prefix_of(str(entry["id"])),
+        "body": entry["body"],
+        "traces": list(entry.get("traces") or []),
+    }
+    for key, name in _ENTRY_FIELDS:
+        if entry.get(name):
+            item[key] = entry[name]
+    return item
+
+
+def _merged(item: dict[str, Any], view: SessionView) -> dict[str, Any]:
+    """Обновление действующего пункта → пункт со слитыми полями (id и ref
+    сохраняются): проверка и YAML видят итог, а не только присланное."""
+    merged = entry_as_item(merge_entry(view.entry_record(item["id"]), item))
+    merged["id"] = item["id"]
+    if "ref" in item:
+        merged["ref"] = item["ref"]
+    return merged
+
+
+def _fields_note(fields: dict[str, Any]) -> str:
+    """` (Priority: Must; traces: G-01)` — поля пункта для промпта."""
+    parts = [
+        f"{k}: {', '.join(map(str, v)) if isinstance(v, list) else v}"
+        for k, v in fields.items()
+    ]
+    return f" ({'; '.join(parts)})" if parts else ""
 
 
 def _required_prefix(q: Question, view: SessionView) -> str | None:

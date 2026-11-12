@@ -142,28 +142,26 @@ def _ask_once(
     items, ask = st.parse_items(agent(prompt))
     if ask:
         return items, ask
-    errors = st.form_errors(items, view) + _id_errors(items, view)
+    errors = st.form_errors(items, view) + _id_errors(items)
     if errors:
         raise st.FormError("; ".join(errors))
     return items, None
 
 
-def _id_errors(items: list[dict[str, Any]], view: SessionView) -> list[str]:
+def _id_errors(items: list[dict[str, Any]]) -> list[str]:
+    """Поправка — только пункты с id (действующие id и повторы проверяет
+    `st.form_errors`)."""
     if not items:
         return ["нет ни одного изменённого пункта"]
-    ids = [i.get("id") for i in items]
-    errors = [f"id «{i}» нет среди действующих пунктов" for i in ids
-              if i not in view.holders]  # fmt: skip
-    errors += [f"id «{i}» повторяется" for i in set(ids) if ids.count(i) > 1]
-    return errors
+    return [f"пункт {n}: нет id" for n, i in enumerate(items, 1) if "id" not in i]
 
 
 def _changes(items: list[dict[str, Any]], view: SessionView) -> list[_Change]:
     """Правки с реальным отличием; ни одной — «не понял»."""
     changes = []
     for item in items:
-        old = _holder_entry(item["id"], view)
-        new = _merge(old, item)
+        old = view.entry_record(item["id"])
+        new = st.merge_entry(old, item)
         if new != old:
             changes.append(_Change(old, new))
     if not changes:
@@ -171,47 +169,12 @@ def _changes(items: list[dict[str, Any]], view: SessionView) -> list[_Change]:
     return changes
 
 
-def _holder_entry(eid: str, view: SessionView) -> dict[str, Any]:
-    """Запись пункта в ответе держателя (иначе — собранная из состояния)."""
-    answer = view.answers.get(view.holders[eid], {})
-    for entry in answer.get("entries") or []:
-        if isinstance(entry, dict) and entry.get("id") == eid:
-            return dict(entry)
-    current = next(e for e in view.entries if e.id == eid)
-    return {"id": eid, "body": current.body, **current.fields}
-
-
-def _merge(old: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
-    """Прежняя запись с полями, присланными агентом (id прежний)."""
-    new = dict(old)
-    new["body"] = item["body"]
-    if item.get("traces"):
-        new["traces"] = item["traces"]
-    for key, name in st._ENTRY_FIELDS:
-        if key in item:
-            new[name] = item[key]
-    return new
-
-
 def _check_required(changes: list[_Change], view: SessionView) -> None:
     """Поправка не должна ломать обязательные поля пункта."""
-    items = [_as_item(c.new) for c in changes]
+    items = [st.entry_as_item(c.new) for c in changes]
     gaps = st.validate(items, Question("", "", ""), view)
     if gaps:
         raise CorrectError("поправка оставила пробелы:\n" + "\n".join(gaps))
-
-
-def _as_item(entry: dict[str, Any]) -> dict[str, Any]:
-    """Запись ответа → пункт в формате `structure` (для проверки полей)."""
-    item: dict[str, Any] = {
-        "prefix": str(entry["id"]).rsplit("-", 1)[0],
-        "body": entry["body"],
-        "traces": list(entry.get("traces") or []),
-    }
-    for key, name in st._ENTRY_FIELDS:
-        if entry.get(name):
-            item[key] = entry[name]
-    return item
 
 
 def _by_holder(changes: list[_Change], view: SessionView) -> dict[str, dict[str, Any]]:
@@ -220,7 +183,7 @@ def _by_holder(changes: list[_Change], view: SessionView) -> dict[str, dict[str,
     for change in changes:
         eid = change.new["id"]
         qid = view.holders[eid]
-        answer = out.setdefault(qid, _copy_answer(view.answers.get(qid, {})))
+        answer = out.setdefault(qid, view.held_answer(qid))
         entries = answer["entries"]
         for n, entry in enumerate(entries):
             if isinstance(entry, dict) and entry.get("id") == eid:
@@ -229,14 +192,6 @@ def _by_holder(changes: list[_Change], view: SessionView) -> dict[str, dict[str,
         else:
             entries.append(change.new)
     return out
-
-
-def _copy_answer(answer: dict[str, Any]) -> dict[str, Any]:
-    copy = dict(answer)
-    copy["entries"] = [
-        dict(e) if isinstance(e, dict) else e for e in answer.get("entries") or []
-    ]
-    return copy
 
 
 def _send_all(answers: dict[str, dict[str, Any]], send: Send) -> None:

@@ -142,3 +142,23 @@ def test_probe_reads_real_session(tmp_path: Path, monkeypatch) -> None:
     assert view.next_id("G") == "G-03"
     assert view.readiness == "incomplete"
     assert view.findings
+
+
+def test_held_answer_keeps_only_entries_it_holds() -> None:
+    view = _view(
+        entries=[
+            {"id": "FR-01", "body": "a", "fields": {}},
+            {"id": "FR-02", "body": "b2", "fields": {}},
+        ],
+        holders={"FR-01": "q1", "FR-02": "q2"},
+        answers={
+            "q1": {"text": "t", "entries": [{"id": "FR-01", "body": "a"},
+                                            {"id": "FR-02", "body": "b"}]},
+            "q2": {"text": "u", "entries": [{"id": "FR-02", "body": "b2", "X": 1}]},
+        },
+    )  # fmt: skip
+    assert view.held_answer("q1") == {
+        "text": "t",
+        "entries": [{"id": "FR-01", "body": "a"}],
+    }
+    assert view.entry_record("FR-02") == {"id": "FR-02", "body": "b2", "X": 1}
