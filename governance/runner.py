@@ -18,6 +18,7 @@ PR человеку (`waiting_human_merge`), S8 не запускается са
 from __future__ import annotations
 
 import argparse
+import contextlib
 import contextvars
 import hashlib
 import json
@@ -27,7 +28,7 @@ import shlex
 import shutil
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -555,6 +556,23 @@ _LOCK_FD: contextvars.ContextVar[int | None] = contextvars.ContextVar(
 _RUN_LOCK: contextvars.ContextVar[rl.RunLock | None] = contextvars.ContextVar(
     "_RUN_LOCK", default=None
 )
+
+#: Режим dfl: вопрос интервью показывает сам dfl, поэтому раннер не печатает
+#: операторские подсказки (`discovery answer …`, шаблон `--supersede`, `make …`).
+_QUIET_HINTS: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_QUIET_HINTS", default=False
+)
+
+
+@contextlib.contextmanager
+def quiet_interview_hints() -> Iterator[None]:
+    """Внутри раннер не печатает подсказки ответа на вопрос интервью."""
+    token = _QUIET_HINTS.set(True)
+    try:
+        yield
+    finally:
+        _QUIET_HINTS.reset(token)
+
 
 #: Именованный пропуск акта человека: в `test` candidate мержит раннер.
 ACT_SKIP_TEST = "акт человека не требуется (test)"
@@ -2056,6 +2074,8 @@ def _interview_stop(state: RunState, reason: str) -> bool:
 
 def _print_answer_hint(state: RunState, reply: iv.DiscoveryReply) -> None:
     """Подсказка стейкхолдеру: на какой вопрос и какой командой отвечать."""
+    if _QUIET_HINTS.get():
+        return
     action = reply.envelope.get("next_action", {})
     print(
         f"_step_interview: вопрос {action.get('question_id')}: "
@@ -2137,8 +2157,9 @@ def _interview_after_reply(
             ),
             encoding="utf-8",
         )
-        print("повторный ответ по findings (question_id подставьте сами):")
-        print("  " + iv.supersede_template(session_id, spec.stakeholder_role))
+        if not _QUIET_HINTS.get():
+            print("повторный ответ по findings (question_id подставьте сами):")
+            print("  " + iv.supersede_template(session_id, spec.stakeholder_role))
         return _interview_stop(
             state, f"{call} вернул {reply.code}: findings в {findings_file}"
         )
@@ -4775,7 +4796,7 @@ def _print_status(state: RunState) -> None:
     print(f"pr:            {state.pr if state.pr is not None else '-'}")
     if state.remediated_by:
         print(f"remediated_by: {state.remediated_by}")
-    if state.status == "brief_ready":
+    if state.status == "brief_ready" and not _QUIET_HINTS.get():
         print(f"next:          make brief-propose RUN={state.run_id}")
     print("ops:")
     for key in sorted(state.ops):
