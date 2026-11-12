@@ -24,7 +24,52 @@
 - `git`, `gh` (залогинен: `gh auth login`), `uv`, `claude` (залогинен), `make`,
   `jq` (на Linux обычно ставятся пакетами `make` и `jq`);
 - одна учётка GitHub: она и автор, и ревьюер, и человек (см. «Что выключено»);
-- sudo не нужен.
+- sudo для самой установки DarkFactory не нужен (только для пакетов ниже).
+
+## Перед установкой
+
+Поставьте недостающие программы и войдите в `gh` и `claude`. Что уже есть —
+пропускайте; проверка: `git --version`, `gh --version`, `uv --version`,
+`claude --version`, `make --version`, `jq --version`.
+
+**macOS** (через [Homebrew](https://brew.sh)):
+
+```sh
+xcode-select --install          # git и make, если их ещё нет
+brew install gh jq uv
+curl -fsSL https://claude.ai/install.sh | bash
+```
+
+**Linux** (Ubuntu/Debian; на других дистрибутивах — те же пакеты своим
+менеджером):
+
+```sh
+sudo apt update && sudo apt install -y git make jq gh
+curl -LsSf https://astral.sh/uv/install.sh | sh
+curl -fsSL https://claude.ai/install.sh | bash
+```
+
+Если `gh` в репозитории дистрибутива нет или он сильно старый — поставьте его
+по [официальной инструкции](https://github.com/cli/cli/blob/trunk/docs/install_linux.md).
+
+**Вход** (на обеих ОС):
+
+```sh
+gh auth login      # GitHub.com, HTTPS; та учётка, под которой вы будете работать
+claude             # при первом запуске предложит войти; затем /exit
+```
+
+Проверьте, что всё видно из нового терминала: `uv` и `claude` ставятся в
+`~/.local/bin` — если команды не находятся, добавьте этот каталог в `PATH`
+(строку в `~/.zshrc` или `~/.bashrc`) и откройте терминал заново.
+
+Две ловушки, встреченные на живой установке:
+
+- **Работа по `ssh` без входа в шелл.** `ssh host 'команда'` не читает
+  `~/.bashrc`, и `~/.local/bin` в `PATH` не попадает — `dfl`, `uv`, `claude`
+  «не найдены». Запускайте через login-шелл: `ssh host 'bash -lc "dfl status"'`.
+- **Несколько копий `gh`.** Старая копия в `~/.local/bin` затеняет системную.
+  `which -a gh` покажет все; оставьте одну свежую.
 
 ## Установка
 
