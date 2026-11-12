@@ -70,7 +70,7 @@ def chat(
     `ChatError`."""
     session = str((state.interview or {}).get("session_id"))
     while True:
-        q = _current_question(status(session))
+        q = current_question(status(session))
         if q is None:
             return ChatResult.FINISHED
         try:
@@ -79,7 +79,7 @@ def chat(
             return ChatResult.STOPPED
 
 
-def _current_question(reply: iv.DiscoveryReply) -> Question | None:
+def current_question(reply: iv.DiscoveryReply) -> Question | None:
     """Код 20 → вопрос из `next_action`; любой другой — вопросов нет."""
     if reply.code != 20:
         return None

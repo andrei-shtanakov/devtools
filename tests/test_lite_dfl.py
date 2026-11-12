@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -1050,3 +1051,120 @@ def test_send_writes_temp_answer_with_question(env: Env, monkeypatch) -> None:
     file = seen["file"]
     assert isinstance(file, Path) and file.parent == rs.run_dir("WS-1-a")
     assert not file.exists()
+
+
+# --- dfl interview / dfl correct ---
+
+
+def _session_view():
+    from lite.interview_state import Entry, SessionView
+
+    fr = {"Priority": "Must", "Acceptance": "ок", "traces": ["G-01"]}
+    return SessionView(
+        frame="customer",
+        required={"goals": "G", "functions": "FR"},
+        optional={},
+        entries=[Entry("G-01", "Цель", {}), Entry("FR-01", "раз в неделю", fr)],
+        declared=["G-01", "FR-01"],
+        holders={"G-01": "q-g", "FR-01": "q-f"},
+        answers={
+            "q-g": {"text": "ц", "entries": [{"id": "G-01", "body": "Цель"}]},
+            "q-f": {
+                "text": "ф",
+                "entries": [{"id": "FR-01", "body": "раз в неделю", **fr}],
+            },
+        },
+        answered_keys=["goals", "functions"],
+        readiness="ready",
+    )
+
+
+def test_dfl_interview_without_session_refuses(env: Env, capsys) -> None:
+    _run("WS-1-a", "WS-1", "customer", "brief_ready")  # без session_id
+    assert env.run("interview") == 2
+    err = capsys.readouterr().err
+    assert "интервью не идёт" in err and "начните: dfl run --subject" in err
+
+
+def test_dfl_interview_no_runs_refuses(env: Env, capsys) -> None:
+    assert env.run("interview", "--subject", "новая") == 2
+    assert "интервью не идёт" in capsys.readouterr().err
+
+
+def test_dfl_interview_prints_without_tty_and_agent(
+    env: Env, monkeypatch, capsys
+) -> None:
+    _waiting("WS-1-a", "WS-1", "customer")
+    monkeypatch.setattr(dfl, "load_session", lambda sid: _session_view())
+    action = {"question_id": "q", "coverage_key": "goals", "question_text": "Зачем?"}
+    reply = iv.DiscoveryReply(20, {"next_action": action}, "")
+    monkeypatch.setattr(dfl, "_discovery_status", lambda sid, cwd: reply)
+    assert env.run("interview") == 0
+    out = capsys.readouterr().out
+    assert "Тема: тема" in out and "Вопрос 3 (цели): Зачем?" in out
+    assert "FR-01 раз в неделю — Must; критерий: ок; → G-01" in out
+
+
+def test_dfl_interview_prefers_engineer_session(env: Env, monkeypatch) -> None:
+    _run("WS-1-a", "WS-1", "customer", "brief_ready")
+    _waiting("WS-1-eng-b", "WS-1-eng", "engineer")
+    seen: list[str] = []
+    monkeypatch.setattr(
+        dfl, "load_session", lambda sid: seen.append(sid) or _session_view()
+    )
+    monkeypatch.setattr(
+        dfl, "_discovery_status", lambda sid, cwd: iv.DiscoveryReply(0, {}, "")
+    )
+    assert env.run("interview") == 0
+    assert seen == ["sess-WS-1-eng-b"]
+
+
+def _claude_agent_returning(monkeypatch, answer: str) -> None:
+    monkeypatch.setattr(dfl.st, "claude_agent", lambda model: lambda prompt: answer)
+
+
+def test_dfl_correct_sends_supersede_to_holder(env: Env, monkeypatch, capsys) -> None:
+    _waiting("WS-1-a", "WS-1", "customer")
+    monkeypatch.setattr(dfl, "load_session", lambda sid: _session_view())
+    item = {"id": "FR-01", "prefix": "FR", "body": "раз в месяц", "traces": ["G-01"]}
+    _claude_agent_returning(monkeypatch, json.dumps({"items": [item], "ask": None}))
+    disc = Discovery()
+    monkeypatch.setattr(dfl, "_discovery_answer", disc)
+    assert env.run("correct", "не раз в неделю, а раз в месяц") == 0
+    assert disc.flags == [("q-f", True)]
+    assert "FR-01: «раз в неделю» → «раз в месяц»" in capsys.readouterr().out
+
+
+def test_dfl_correct_ask_prints_clarification_without_send(
+    env: Env, monkeypatch, capsys
+) -> None:
+    _waiting("WS-1-a", "WS-1", "customer")
+    monkeypatch.setattr(dfl, "load_session", lambda sid: _session_view())
+    _claude_agent_returning(monkeypatch, '{"items": [], "ask": "Что поправить?"}')
+    monkeypatch.setattr(dfl, "_discovery_answer", lambda *a, **k: pytest.fail("вызов"))
+    assert env.run("correct", "поменяй") == 0
+    out = capsys.readouterr().out
+    assert "Уточните: Что поправить? — повторите dfl correct" in out
+
+
+def test_dfl_correct_non_claude_harness_refused(env: Env, capsys) -> None:
+    cfg = env.tmp / "xdg" / "darkfactory" / "config.toml"
+    cfg.write_text(
+        cfg.read_text(encoding="utf-8").replace('author = "claude"', 'author = "x"'),
+        encoding="utf-8",
+    )
+    _waiting("WS-1-a", "WS-1", "customer")
+    assert env.run("correct", "x") == 2
+    assert "harness.author = claude" in capsys.readouterr().err
+
+
+def test_dfl_correct_agent_down_refused(env: Env, monkeypatch, capsys) -> None:
+    _waiting("WS-1-a", "WS-1", "customer")
+    monkeypatch.setattr(dfl, "load_session", lambda sid: _session_view())
+
+    def down(prompt: str) -> str:
+        raise dfl.st.AgentUnavailable("нет claude")
+
+    monkeypatch.setattr(dfl.st, "claude_agent", lambda model: down)
+    assert env.run("correct", "x") == 2
+    assert "нет claude" in capsys.readouterr().err

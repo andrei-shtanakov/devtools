@@ -35,6 +35,7 @@ from governance import run_state as rs
 from governance.facts import Outcome
 from lite import failure_log as fl
 from lite import interview_chat as ic
+from lite import interview_view as iview
 from lite import structure as st
 from lite.init_repo import DEVTOOLS, InitError, init_repo, real_gh
 from lite.interview_state import InterviewStateError, load_session
@@ -74,6 +75,7 @@ CHAT_HARNESS_REFUSAL = (
     "dfl answer --file answer.yaml"
 )
 NO_TTY_REFUSAL = "без терминала: dfl answer --file answer.yaml"
+NO_INTERVIEW_REFUSAL = "интервью не идёт — начните: dfl run --subject '<тема>'"
 CHAT_STOPPED = "интервью прервано — продолжить: dfl run"
 INIT_FILES = (
     "profiles/team-exp.yaml",
@@ -119,8 +121,8 @@ def main(
     *,
     defer: list[Callable[[list[str]], None]] | None = None,
 ) -> int:
-    """CLI: `--cwd <dir>` и `run` | `answer` | `abandon` | `status` | `init-repo`
-    | `report`.
+    """CLI: `--cwd <dir>` и `run` | `answer` | `interview` | `correct` | `abandon`
+    | `status` | `init-repo` | `report`.
 
     Ненулевой код и исключение пишут запись сбоя (`lite.failure_log`);
     ненулевой код печатает подсказку `dfl report` последней строкой. С
@@ -241,6 +243,10 @@ def _dispatch(args: argparse.Namespace, cwd: Path) -> tuple[int, BaseException |
             return code, None
         if args.command == "abandon":
             return abandon(cwd, args.subject), None
+        if args.command == "interview":
+            return interview(cwd, args.subject), None
+        if args.command == "correct":
+            return correct(cwd, args.text, args.subject), None
         return run(cwd, args.subject, args.stakeholder), None
     except REFUSALS as exc:
         print(refusal(f"dfl {args.command}", str(exc)), file=sys.stderr)
@@ -269,6 +275,11 @@ def _parser() -> argparse.ArgumentParser:
     p_ans.add_argument("--stakeholder", default="customer")
     p_ab = sub.add_parser("abandon", help="бросить незаконченный конвейер")
     p_ab.add_argument("--subject", help="тема конвейера, если их несколько")
+    p_iv = sub.add_parser("interview", help="что собрано в интервью")
+    p_iv.add_argument("--subject", help="тема конвейера, если их несколько")
+    p_cor = sub.add_parser("correct", help="поправить собранное текстом")
+    p_cor.add_argument("text", help="поправка, например: не раз в неделю, а в месяц")
+    p_cor.add_argument("--subject", help="тема конвейера, если их несколько")
     sub.add_parser("status", help="прогоны репо и что дальше")
     sub.add_parser("init-repo", help="PR с шаблонами DarkFactory в репо")
     p_rep = sub.add_parser(
@@ -373,9 +384,12 @@ def _chat(state: rs.RunState) -> ic.ChatResult:
     )
 
 
-def _sender(state: rs.RunState) -> Callable[[str, str], iv.DiscoveryReply]:
+def _sender(
+    state: rs.RunState, *, supersede: bool = False
+) -> Callable[[str, str], iv.DiscoveryReply]:
     """`send(question_id, yaml)`: временный файл в каталоге прогона →
-    `discovery answer --question <id>` (без `--supersede`), файл удаляется."""
+    `discovery answer --question <id>` (`--supersede` — для поправок), файл
+    удаляется."""
     interview = state.interview or {}
     session_id = str(interview.get("session_id"))
     role = str(interview.get("stakeholder_role"))
@@ -387,7 +401,9 @@ def _sender(state: rs.RunState) -> Callable[[str, str], iv.DiscoveryReply]:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(payload)
-            return _discovery_answer(session_id, role, path, cwd, question=question_id)
+            return _discovery_answer(
+                session_id, role, path, cwd, question=question_id, supersede=supersede
+            )
         finally:
             path.unlink(missing_ok=True)
 
@@ -741,6 +757,60 @@ def _discovery(args: list[str], cwd: Path) -> iv.DiscoveryReply:
     argv = ["uv", "run", "--frozen", "--project", project, "discovery", *args]
     done = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=False)
     return iv.parse_reply(done.returncode, done.stdout, done.stderr)
+
+
+def interview(cwd: Path, subject: str | None) -> int:
+    """Состояние интервью текстом: вопрос, темы, пункты, что мешает готовности.
+
+    Агент и терминал не нужны; работает в любом статусе прогона с сессией."""
+    state = _interview_run(cwd, subject)
+    session_id = str((state.interview or {}).get("session_id"))
+    try:
+        view = load_session(session_id)
+    except InterviewStateError as exc:
+        raise DflError(str(exc)) from exc
+    reply = _discovery_status(session_id, rs.run_dir(state.run_id))
+    print(f"Тема: {state.subject}")
+    print(iview.render_view(view, ic.current_question(reply)))
+    return 0
+
+
+def correct(cwd: Path, text: str, subject: str | None) -> int:
+    """Поправка собранных пунктов текстом (`harness.author = claude`)."""
+    if not _author_is_claude():
+        raise DflError(CHAT_HARNESS_REFUSAL)
+    state = _interview_run(cwd, subject)
+    agent = st.claude_agent(df_config.load().author_model)
+    try:
+        result = iview.correct(
+            state,
+            text,
+            agent=agent,
+            load=load_session,
+            send=_sender(state, supersede=True),
+        )
+    except (iview.CorrectError, InterviewStateError) as exc:
+        raise DflError(str(exc)) from exc
+    if isinstance(result, st.Ask):
+        print(
+            f"Уточните: {result.question} — повторите "
+            "dfl correct '<текст с уточнением>'"
+        )
+        return 0
+    print(result)
+    return 0
+
+
+def _interview_run(cwd: Path, subject: str | None) -> rs.RunState:
+    """Прогон с сессией интервью: engineer, если она у него есть, иначе customer."""
+    target = user_targets.register(cwd)
+    runs = _readable_runs(target.repo)
+    cust = _select_customer(runs, subject)
+    candidates = [] if cust is None else [_engineer_of(cust, runs), cust]
+    for state in candidates:
+        if state is not None and (state.interview or {}).get("session_id"):
+            return state
+    raise DflError(NO_INTERVIEW_REFUSAL)
 
 
 def abandon(cwd: Path, subject: str | None) -> int:

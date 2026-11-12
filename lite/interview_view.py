@@ -1,0 +1,301 @@
+"""Просмотр состояния интервью и поправки собранных пунктов текстом.
+
+`render_view` печатает по-человечески тему вопроса, покрытие тем, пункты и то,
+что мешает готовности. `correct` отдаёт агенту действующие пункты и поправку,
+получает изменённые пункты (с id), пересобирает ответ каждого держателя
+целиком и отправляет его `--supersede` через `send`. Человек не видит ни
+YAML, ни JSON, ни трассировок.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
+
+import yaml
+
+from governance import interview as iv
+from lite import structure as st
+from lite.interview_state import Entry, SessionView
+from lite.structure import Agent, Ask, Question
+
+Send = Callable[[str, str], iv.DiscoveryReply]
+Load = Callable[[str], SessionView]
+
+NOT_UNDERSTOOD = "не понял, что исправить — переформулируйте поправку"
+NO_QUESTION = "вопросов больше нет"
+_FIELD_LABELS = {"Priority": "Priority", "Acceptance": "Acceptance",
+                 "Target": "Target", "traces": "Связь"}  # fmt: skip
+_TOPIC_RE = re.compile(r"required topic '(.+)' is not covered")
+_TRACE_RE = re.compile(r"(\S+) has no trace to an existing G/J entry")
+_BLOCKING_RE = re.compile(r"(\S+) is a blocking open question")
+
+
+class CorrectError(Exception):
+    """Поправку не применить; текст — для человека."""
+
+
+@dataclass(frozen=True)
+class _Change:
+    """Одна правка пункта: прежняя и новая запись ответа."""
+
+    old: dict[str, Any]
+    new: dict[str, Any]
+
+
+def render_view(view: SessionView, current: Question | None) -> str:
+    """Состояние интервью текстом: вопрос, темы с пунктами, помехи готовности."""
+    lines = [_question_line(view, current), ""]
+    covered = view.covered()
+    for topics in (view.required, view.optional):
+        for key, prefix in topics.items():
+            mark = "x" if key in covered else " "
+            lines.append(f"[{mark}] {st.TOPIC_LABELS.get(key, key)}")
+            lines += [f"    {_entry_line(e)}" for e in _topic_entries(view, prefix)]
+    findings = [_finding_text(f, view) for f in view.findings]
+    if findings:
+        lines += ["", "Мешает готовности:", *(f"  - {f}" for f in findings)]
+    return "\n".join(lines)
+
+
+def _question_line(view: SessionView, current: Question | None) -> str:
+    if current is None:
+        return NO_QUESTION
+    label = st.TOPIC_LABELS.get(current.coverage_key, current.coverage_key)
+    return f"Вопрос {len(view.answers) + 1} ({label}): {current.text}"
+
+
+def _topic_entries(view: SessionView, prefix: str | None) -> list[Entry]:
+    if prefix is None:
+        return []
+    return [e for e in view.entries if e.id.rsplit("-", 1)[0] == prefix]
+
+
+def _entry_line(entry: Entry) -> str:
+    """`FR-01 тело — Must; критерий: …; → G-01` (отсутствующее опущено)."""
+    f = entry.fields
+    parts = [str(f["Priority"])] if f.get("Priority") else []
+    if f.get("Acceptance"):
+        parts.append(f"критерий: {f['Acceptance']}")
+    elif f.get("Target"):
+        parts.append(f"цель: {f['Target']}")
+    if f.get("traces"):
+        parts.append("→ " + ", ".join(map(str, f["traces"])))
+    tail = f" — {'; '.join(parts)}" if parts else ""
+    return f"{entry.id} {entry.body}{tail}"
+
+
+def _finding_text(finding: str, view: SessionView) -> str:
+    """Находка готовности `discovery` простыми словами (неизвестная — как есть)."""
+    bodies = {e.id: e.body for e in view.entries}
+    if m := _TOPIC_RE.fullmatch(finding):
+        return f"не раскрыта тема: {st.TOPIC_LABELS.get(m[1], m[1])}"
+    if m := _TRACE_RE.fullmatch(finding):
+        return f"«{bodies.get(m[1], m[1])}» не связано ни с целью, ни с задачей"
+    if m := _BLOCKING_RE.fullmatch(finding):
+        return f"открытый вопрос мешает: «{bodies.get(m[1], m[1])}»"
+    return finding
+
+
+def correct(
+    state: Any, text: str, *, agent: Agent, load: Load, send: Send
+) -> str | Ask:
+    """Применить поправку `text`; вернуть строки «что изменено» или `Ask`.
+
+    `Ask` — агент просит уточнение: ничего не отправлено. Непонятая
+    поправка, дыра в обязательных полях, отказ `discovery` и недоступный
+    агент — `CorrectError`. Пункты держателя пересобираются целиком и уходят
+    `send(question_id, yaml)`; отправитель обязан слать с `--supersede`."""
+    session = str((state.interview or {}).get("session_id"))
+    view = load(session)
+    try:
+        items, ask = _changed_items(agent, _prompt(text, view), view)
+    except st.AgentUnavailable as exc:
+        raise CorrectError(f"агент недоступен: {exc}") from exc
+    if ask:
+        return Ask(ask)
+    changes = _changes(items, view)
+    _check_required(changes, view)
+    _send_all(_by_holder(changes, view), send)
+    return "\n".join(line for c in changes for line in _describe(c))
+
+
+def _changed_items(
+    agent: Agent, prompt: str, view: SessionView
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Вызов агента; плохая форма или чужой id — один повтор, затем отказ."""
+    try:
+        return _ask_once(agent, prompt, view)
+    except st.FormError as exc:
+        note = f"Твой предыдущий ответ отклонён: {exc}. Верни исправленный JSON."
+        try:
+            return _ask_once(agent, f"{prompt}\n\n{note}", view)
+        except st.FormError as exc2:
+            raise CorrectError(NOT_UNDERSTOOD) from exc2
+
+
+def _ask_once(
+    agent: Agent, prompt: str, view: SessionView
+) -> tuple[list[dict[str, Any]], str | None]:
+    items, ask = st.parse_items(agent(prompt))
+    if ask:
+        return items, ask
+    errors = st.form_errors(items, view) + _id_errors(items, view)
+    if errors:
+        raise st.FormError("; ".join(errors))
+    return items, None
+
+
+def _id_errors(items: list[dict[str, Any]], view: SessionView) -> list[str]:
+    if not items:
+        return ["нет ни одного изменённого пункта"]
+    ids = [i.get("id") for i in items]
+    errors = [f"id «{i}» нет среди действующих пунктов" for i in ids
+              if i not in view.holders]  # fmt: skip
+    errors += [f"id «{i}» повторяется" for i in set(ids) if ids.count(i) > 1]
+    return errors
+
+
+def _changes(items: list[dict[str, Any]], view: SessionView) -> list[_Change]:
+    """Правки с реальным отличием; ни одной — «не понял»."""
+    changes = []
+    for item in items:
+        old = _holder_entry(item["id"], view)
+        new = _merge(old, item)
+        if new != old:
+            changes.append(_Change(old, new))
+    if not changes:
+        raise CorrectError(NOT_UNDERSTOOD)
+    return changes
+
+
+def _holder_entry(eid: str, view: SessionView) -> dict[str, Any]:
+    """Запись пункта в ответе держателя (иначе — собранная из состояния)."""
+    answer = view.answers.get(view.holders[eid], {})
+    for entry in answer.get("entries") or []:
+        if isinstance(entry, dict) and entry.get("id") == eid:
+            return dict(entry)
+    current = next(e for e in view.entries if e.id == eid)
+    return {"id": eid, "body": current.body, **current.fields}
+
+
+def _merge(old: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    """Прежняя запись с полями, присланными агентом (id прежний)."""
+    new = dict(old)
+    new["body"] = item["body"]
+    if item.get("traces"):
+        new["traces"] = item["traces"]
+    for key, name in st._ENTRY_FIELDS:
+        if key in item:
+            new[name] = item[key]
+    return new
+
+
+def _check_required(changes: list[_Change], view: SessionView) -> None:
+    """Поправка не должна ломать обязательные поля пункта."""
+    items = [_as_item(c.new) for c in changes]
+    gaps = st.validate(items, Question("", "", ""), view)
+    if gaps:
+        raise CorrectError("поправка оставила пробелы:\n" + "\n".join(gaps))
+
+
+def _as_item(entry: dict[str, Any]) -> dict[str, Any]:
+    """Запись ответа → пункт в формате `structure` (для проверки полей)."""
+    item: dict[str, Any] = {
+        "prefix": str(entry["id"]).rsplit("-", 1)[0],
+        "body": entry["body"],
+        "traces": list(entry.get("traces") or []),
+    }
+    for key, name in st._ENTRY_FIELDS:
+        if entry.get(name):
+            item[key] = entry[name]
+    return item
+
+
+def _by_holder(changes: list[_Change], view: SessionView) -> dict[str, dict[str, Any]]:
+    """question_id → тело ответа, пересобранное целиком."""
+    out: dict[str, dict[str, Any]] = {}
+    for change in changes:
+        eid = change.new["id"]
+        qid = view.holders[eid]
+        answer = out.setdefault(qid, _copy_answer(view.answers.get(qid, {})))
+        entries = answer["entries"]
+        for n, entry in enumerate(entries):
+            if isinstance(entry, dict) and entry.get("id") == eid:
+                entries[n] = change.new
+                break
+        else:
+            entries.append(change.new)
+    return out
+
+
+def _copy_answer(answer: dict[str, Any]) -> dict[str, Any]:
+    copy = dict(answer)
+    copy["entries"] = [
+        dict(e) if isinstance(e, dict) else e for e in answer.get("entries") or []
+    ]
+    return copy
+
+
+def _send_all(answers: dict[str, dict[str, Any]], send: Send) -> None:
+    for qid, answer in answers.items():
+        body = yaml.safe_dump(answer, allow_unicode=True, sort_keys=False)
+        reply = send(qid, body)
+        if reply.code in (1, 2):
+            reason = reply.envelope.get("operation", {}).get("reason", "") or "отказ"
+            raise CorrectError(f"discovery не принял поправку ({reason})")
+
+
+def _describe(change: _Change) -> list[str]:
+    """Строки «что изменено»: тело `FR-01: «…» → «…»`, поля `FR-01 Поле: …`."""
+    eid = change.new["id"]
+    lines = []
+    if change.old.get("body") != change.new["body"]:
+        lines.append(f"{eid}: «{change.old.get('body')}» → «{change.new['body']}»")
+    for key, label in _FIELD_LABELS.items():
+        before, after = change.old.get(key), change.new.get(key)
+        if before != after:
+            lines.append(f"{eid} {label}: «{_plain(before)}» → «{_plain(after)}»")
+    return lines
+
+
+def _plain(value: Any) -> str:
+    if isinstance(value, list):
+        return ", ".join(map(str, value))
+    return "" if value is None else str(value)
+
+
+def _prompt(text: str, view: SessionView) -> str:
+    """Промпт агента: действующие пункты, поправка, схема ответа."""
+    prefixes = ", ".join(view.prefixes())
+    existing = "\n".join(_prompt_line(e) for e in view.entries)
+    return f"""\
+Человек поправляет уже собранные пункты интервью о требованиях.
+
+Действующие пункты:
+{existing or "- (нет)"}
+
+Поправка человека:
+<<<
+{text}
+>>>
+
+Верни только изменённые пункты: каждый с его "id" (из списка выше), тем же
+"prefix", новым "body" и полями; не затронутые поправкой пункты не включай.
+Меняй только то, что сказано в поправке, ничего не выдумывай. Поля как в
+списке: traces — id существующих пунктов, priority — одно из Must, Should,
+Could, Won't, acceptance, target. Допустимые префиксы: {prefixes}.
+Если непонятно, какой пункт или что менять, — items пустой, а в "ask" один
+короткий вопрос простыми словами, без id.
+
+Верни только JSON, без пояснений:
+{{"items": [{{"id": "FR-01", "prefix": "FR", "body": "...", "traces": ["G-01"],
+"priority": "Must", "acceptance": "...", "target": null}}], "ask": null}}
+"""
+
+
+def _prompt_line(entry: Entry) -> str:
+    fields = "; ".join(f"{k}: {_plain(v)}" for k, v in entry.fields.items())
+    return f"- {entry.id}: {entry.body}" + (f" ({fields})" if fields else "")

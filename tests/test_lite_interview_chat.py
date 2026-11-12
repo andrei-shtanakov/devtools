@@ -271,3 +271,199 @@ def test_stdin_read_ctrl_c_is_stop(monkeypatch, capsys) -> None:
     disc = Discovery()
     assert _chat(disc, ic.stdin_read, _agent()) is ic.ChatResult.STOPPED
     assert disc.sent == []
+
+
+# --- dfl interview / dfl correct (lite.interview_view) ---
+
+from lite import interview_view as iview  # noqa: E402
+from lite.structure import Ask, Question  # noqa: E402
+
+FR1 = {
+    "id": "FR-01",
+    "body": "выгрузка раз в неделю",
+    "traces": ["G-01"],
+    "Priority": "Must",
+    "Acceptance": "файл открывается в Excel",
+}
+FR2 = {
+    "id": "FR-02",
+    "body": "письмо с отчётом",
+    "traces": ["G-01"],
+    "Priority": "Should",
+    "Acceptance": "письмо приходит",
+}
+
+
+def _corr_view() -> SessionView:
+    def entry(d: dict[str, Any]) -> Entry:
+        fields = {k: v for k, v in d.items() if k not in ("id", "body")}
+        return Entry(d["id"], d["body"], fields)
+
+    return SessionView(
+        frame="customer",
+        required={"goals": "G", "functions": "FR", "nfr": "NFR"},
+        optional={"risks": "R"},
+        entries=[Entry("G-01", "Сверка", {}), entry(FR1), entry(FR2)],
+        declared=["G-01", "FR-01", "FR-02"],
+        holders={"G-01": "q-goals", "FR-01": "q-fn", "FR-02": "q-fn"},
+        answers={
+            "q-goals": {"text": "цель", "entries": [{"id": "G-01", "body": "Сверка"}]},
+            "q-fn": {"text": "функции", "entries": [dict(FR1), dict(FR2)]},
+        },
+        answered_keys=["goals", "functions"],
+        readiness="incomplete",
+        findings=[
+            "required topic 'nfr' is not covered",
+            "FR-02 has no trace to an existing G/J entry",
+            "X-01 is a blocking open question",
+        ],
+    )
+
+
+def test_render_view_topics_entries_and_findings() -> None:
+    q = Question("q-nfr", "nfr", "Какие требования к качеству?")
+    out = iview.render_view(_corr_view(), q)
+    assert "Вопрос 3 (нефункциональные требования): Какие требования" in out
+    assert "[x] цели" in out and "[ ] нефункциональные требования" in out
+    assert "[ ] риски" in out
+    assert out.index("[x] цели") < out.index("[ ] риски")
+    assert (
+        "FR-01 выгрузка раз в неделю — Must; критерий: файл открывается в Excel; → G-01"
+    ) in out
+    assert "Мешает готовности:" in out
+    assert "не раскрыта тема: нефункциональные требования" in out
+    assert "required topic" not in out and "has no trace" not in out
+
+
+def test_render_view_no_current_question_and_nfr_target() -> None:
+    view = _corr_view()
+    view.entries.append(Entry("NFR-01", "быстро", {"Target": "до 2 с"}))
+    out = iview.render_view(view, None)
+    assert "вопросов больше нет" in out
+    assert "NFR-01 быстро — цель: до 2 с" in out
+
+
+def _fr1_item(**over: Any) -> dict[str, Any]:
+    item = {
+        "id": "FR-01",
+        "prefix": "FR",
+        "body": "выгрузка раз в месяц",
+        "traces": ["G-01"],
+        "priority": "Must",
+        "acceptance": "файл открывается в Excel",
+    }
+    return item | over
+
+
+class Sender:
+    def __init__(self, code: int = 0) -> None:
+        self.sent: list[tuple[str, dict[str, Any]]] = []
+        self.code = code
+
+    def __call__(self, qid: str, payload: str) -> iv.DiscoveryReply:
+        self.sent.append((qid, yaml.safe_load(payload)))
+        env = {"operation": {"reason": "bad"}}
+        return iv.DiscoveryReply(self.code, env, "")
+
+
+def _correct(agent: Any, send: Any, text: str = "раз в месяц") -> Any:
+    return iview.correct(
+        _state(), text, agent=agent, load=lambda s: _corr_view(), send=send
+    )
+
+
+def test_correct_rebuilds_holder_answer_keeping_other_entries() -> None:
+    send = Sender()
+    agent = _agent({"items": [_fr1_item()], "ask": None})
+    out = _correct(agent, send)
+    assert out == "FR-01: «выгрузка раз в неделю» → «выгрузка раз в месяц»"
+    [(qid, payload)] = send.sent
+    assert qid == "q-fn"
+    assert payload["text"] == "функции"
+    first, second = payload["entries"]
+    assert first["id"] == "FR-01" and first["body"] == "выгрузка раз в месяц"
+    assert first["Priority"] == "Must" and first["traces"] == ["G-01"]
+    assert second == FR2  # нетронутый пункт — как был
+
+
+def test_correct_two_holders_two_sends_and_field_change() -> None:
+    send = Sender()
+    g = {"id": "G-01", "prefix": "G", "body": "Сверка за час"}
+    fr2 = _fr1_item(id="FR-02", body="письмо с отчётом", acceptance="письмо за минуту")
+    out = _correct(_agent({"items": [g, fr2], "ask": None}), send)
+    assert {qid for qid, _ in send.sent} == {"q-goals", "q-fn"}
+    assert "G-01: «Сверка» → «Сверка за час»" in out
+    assert "FR-02 Acceptance: «письмо приходит» → «письмо за минуту»" in out
+
+
+def test_correct_uses_supersede_with_holder_question() -> None:
+    """dfl передаёт `supersede=True` отправителю поправок (см. test_lite_dfl)."""
+    send = Sender()
+    _correct(_agent({"items": [_fr1_item()], "ask": None}), send)
+    assert send.sent[0][0] == "q-fn"
+
+
+def test_correct_unclear_asks_once_without_sending() -> None:
+    send = Sender()
+    agent = _agent({"items": [], "ask": "Какую функцию поправить?"})
+    out = _correct(agent, send, "поменяй")
+    assert out == Ask("Какую функцию поправить?")
+    assert send.sent == []
+
+
+def test_correct_unknown_id_retries_then_refuses() -> None:
+    send = Sender()
+    bad = _fr1_item(id="FR-09")
+    agent = _agent({"items": [bad], "ask": None}, {"items": [bad], "ask": None})
+    with pytest.raises(iview.CorrectError, match="не понял, что исправить"):
+        _correct(agent, send)
+    assert send.sent == [] and len(agent.prompts) == 2
+    assert "FR-09" in agent.prompts[1]
+
+
+def test_correct_unknown_id_then_fixed_on_retry() -> None:
+    send = Sender()
+    agent = _agent(
+        {"items": [_fr1_item(id="FR-09")], "ask": None},
+        {"items": [_fr1_item()], "ask": None},
+    )
+    _correct(agent, send)
+    assert len(send.sent) == 1
+
+
+def test_correct_must_not_break_required_fields() -> None:
+    send = Sender()
+    item = _fr1_item(traces=[])  # агент не прислал traces → берём прежние
+    out = _correct(_agent({"items": [item], "ask": None}), send)
+    assert "FR-01" in out
+    assert send.sent[0][1]["entries"][0]["traces"] == ["G-01"]
+
+
+def test_correct_refuses_when_result_lacks_required(monkeypatch) -> None:
+    send = Sender()
+    view = _corr_view()
+    view.answers["q-fn"]["entries"][0].pop("Acceptance")  # уже неполный пункт
+    agent = _agent({"items": [_fr1_item(acceptance=None)], "ask": None})
+    with pytest.raises(iview.CorrectError, match="проверить"):
+        iview.correct(_state(), "x", agent=agent, load=lambda s: view, send=send)
+    assert send.sent == []
+
+
+def test_correct_discovery_refusal_is_error() -> None:
+    agent = _agent({"items": [_fr1_item()], "ask": None})
+    with pytest.raises(iview.CorrectError, match="не принял"):
+        _correct(agent, Sender(code=1))
+
+
+def test_correct_agent_down_is_error() -> None:
+    def down(prompt: str) -> str:
+        raise AgentUnavailable("нет claude")
+
+    with pytest.raises(iview.CorrectError, match="нет claude"):
+        _correct(down, Sender())
+
+
+def test_correct_no_actual_change_is_not_understood() -> None:
+    same = _fr1_item(body="выгрузка раз в неделю")
+    with pytest.raises(iview.CorrectError, match="не понял"):
+        _correct(_agent({"items": [same], "ask": None}), Sender())
