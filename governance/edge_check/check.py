@@ -23,10 +23,21 @@ SCHEMA_VERSION = 1
 
 
 def decide(ruleset: rules_mod.RuleSet, response: response_mod.Response) -> str:
-    """`FAIL` при блокирующей находке или проваленном пункте, иначе `PASS`."""
+    """`FAIL` при блокирующей находке или проваленном пункте без находок.
+
+    Пункт со статусом `fail`, у которого есть находки и все они
+    совещательного класса (`advisory`), итог не валит: находки остаются
+    замечаниями при `PASS` — так политика серьёзности ребра действует, а не
+    перекрывается статусом пункта (devtools#728, W2 живого прогона на
+    Linux: три `minor` давали FAIL). Проваленный пункт без единой находки
+    («входа недостаточно») — по-прежнему `FAIL`.
+    """
     if any(f.cls in ruleset.severity.blocking for f in response.findings):
         return "FAIL"
-    if any(c.status != "pass" for c in response.criteria):
+    # Блокирующих нет: все оставшиеся находки — advisory (класс уже сверен
+    # с объявленным перечнем при разборе ответа).
+    remarked = {f.rule_id for f in response.findings}
+    if any(c.status != "pass" and c.id not in remarked for c in response.criteria):
         return "FAIL"
     return "PASS"
 

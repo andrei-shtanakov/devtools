@@ -296,3 +296,65 @@ def test_real_path_workdir_is_outside_the_workspace(
     assert not workdir.is_relative_to(repo_root)
     assert not workdir.is_relative_to(b.resolve())
     assert not workdir.is_relative_to(tmp_path.resolve())
+
+
+def _run_with(tmp_path: Path, fail_ids: set[str], findings: list[dict]) -> dict:
+    b = _bundle(tmp_path)
+    rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
+    criteria = [
+        {
+            "id": it.id,
+            "status": "fail" if it.id in fail_ids else "pass",
+            "reason": "ок",
+        }
+        for it in rs.items
+    ]
+    answer = json.dumps(
+        {"structured_output": {"criteria": criteria, "findings": findings}}
+    )
+    return c.run_check(
+        "behaviour-vs-requirements",
+        b,
+        [b / "15-behaviour-spec.md"],
+        [("requirements", b / "10-requirements.md")],
+        contracts_dir=CONTRACTS,
+        model="claude-opus-5",
+        call=lambda prompt: answer,
+    )
+
+
+def _finding(rule_id: str, cls: str) -> dict:
+    return {
+        "rule_id": rule_id,
+        "class": cls,
+        "path": "15-behaviour-spec.md",
+        "lines": [1, 1],
+        "statement": "замечание",
+    }
+
+
+def test_failed_criterion_with_only_advisory_findings_gives_pass(
+    tmp_path: Path,
+) -> None:
+    """devtools#728: пункт `fail`, все находки по нему `minor` — PASS с
+    замечаниями (W2 живого прогона: три minor давали FAIL)."""
+    out = _run_with(tmp_path, {"R4"}, [_finding("R4", "minor")] * 3)
+    assert out["verdict"] == "PASS"
+    assert len(out["findings"]) == 3
+    assert {x["id"]: x["status"] for x in out["criteria"]}["R4"] == "fail"
+
+
+def test_failed_criterion_with_advisory_on_other_rule_gives_fail(
+    tmp_path: Path,
+) -> None:
+    """Замечание по другому пункту не покрывает проваленный пункт без
+    собственных находок."""
+    out = _run_with(tmp_path, {"R3"}, [_finding("R4", "minor")])
+    assert out["verdict"] == "FAIL"
+
+
+def test_failed_criterion_with_blocking_finding_gives_fail(tmp_path: Path) -> None:
+    out = _run_with(
+        tmp_path, {"R2"}, [_finding("R2", "minor"), _finding("R2", "major")]
+    )
+    assert out["verdict"] == "FAIL"

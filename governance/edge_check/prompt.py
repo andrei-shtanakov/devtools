@@ -121,6 +121,12 @@ def build_prompt(
         parts.append(f"- {item.id}: {item.text}")
     parts += ["", "## Классы находок", ""]
     parts.append("Допустимые: " + ", ".join(sorted(ruleset.severity.known())))
+    parts.append("Блокирующие: " + ", ".join(sorted(ruleset.severity.blocking)))
+    if ruleset.severity.advisory:
+        parts.append(
+            "Совещательные (замечание, итог не валят): "
+            + ", ".join(sorted(ruleset.severity.advisory))
+        )
     # Пояснение размечает формат маркера словом-плейсхолдером, а не
     # реальным токеном: иначе строка сама складывалась бы в пару
     # BEGIN…END с пустым содержимым между ними и путала бы разбор границ
