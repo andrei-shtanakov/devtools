@@ -10,17 +10,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import platform
 import re
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from governance import df_config
 from governance import run_state as rs
 from lite.failure_log import FailureRecord
+from lite.failure_log import load as load_record
 from lite.install import load_components
+from lite.output import refusal
 
 REPORT_REPO = "andrei-shtanakov/devtools"
 BODY_LIMIT = 65_536
@@ -32,10 +36,18 @@ _TOKENS = (
     re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
     re.compile(r"sk-ant-[A-Za-z0-9_-]{10,}"),
+    re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
     re.compile(r"xox[abp]-[A-Za-z0-9-]+"),
 )
-_BEARER = re.compile(r"(Bearer\s+)\S+")
-_ASSIGNED = re.compile(r"(?i)\b(\w*(?:token|secret|password)\w*\s*[=:]\s*)\S+")
+# Значение после префикса: группа 1 остаётся, остальное — `<скрыто>`.
+_PREFIXED = (
+    re.compile(r"(?i)(\b(?:Bearer|Basic)\s+)\S+"),
+    re.compile(r"([a-z][a-z0-9+.-]*://)[^/\s@]+@"),  # userinfo в URL
+    re.compile(
+        r"(?i)([\"']?\w*(?:token|secret|passw(?:or)?d|api[_-]?key|auth)\w*[\"']?"
+        r"\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|\S+)"
+    ),
+)
 
 _NORMALIZE = (
     (re.compile(r"https?://\S+"), "<url>"),
@@ -85,8 +97,14 @@ def redact(text: str, home: Path) -> str:
         text = re.sub(re.escape(home_str) + r"(?=/|\b|$)", "~", text)
     for pattern in _TOKENS:
         text = pattern.sub(HIDDEN, text)
-    text = _BEARER.sub(lambda m: m.group(1) + HIDDEN, text)
-    return _ASSIGNED.sub(lambda m: m.group(1) + HIDDEN, text)
+    for pattern in _PREFIXED:
+        text = pattern.sub(lambda m: m.group(1) + HIDDEN + _at(m), text)
+    return text
+
+
+def _at(match: re.Match[str]) -> str:
+    """Для userinfo URL `@` входит в совпадение — вернуть его."""
+    return "@" if match.group(0).endswith("@") else ""
 
 
 def collect_facts(rec: FailureRecord) -> Facts:
@@ -222,3 +240,144 @@ def _config_line() -> str:
         return f"конфиг не читается: {exc}"
     acc = cfg.accounts
     return f"mode = {cfg.mode}; human = {acc.human}; agent = {acc.agent}"
+
+
+# --- отправка ---------------------------------------------------------------
+
+Gh = Callable[[list[str], Path | None, str | None], subprocess.CompletedProcess]
+YES = ("y", "yes", "да", "д")
+PRINT_HINT = "используйте dfl report --print и пришлите вывод сами"
+
+
+class ReportError(Exception):
+    """Отчёт не отправлен — причина и что сделать (код 2)."""
+
+
+def real_gh(
+    argv: list[str], profile: Path | None, body: str | None = None
+) -> subprocess.CompletedProcess:
+    """`gh <argv>` с `GH_CONFIG_DIR=<profile>` (или по умолчанию), тело в stdin."""
+    env = dict(os.environ)
+    if profile is not None:
+        env["GH_CONFIG_DIR"] = str(profile)
+    try:
+        return subprocess.run(
+            ["gh", *argv],
+            input=body,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return subprocess.CompletedProcess(argv, 1, "", str(exc))
+
+
+def run_report(
+    cwd: Path,
+    *,
+    print_only: bool,
+    gh: Gh = real_gh,
+    ask: Callable[[str], str] = input,
+    is_tty: Callable[[], bool] = sys.stdin.isatty,
+) -> int:
+    """`dfl report`: показать отчёт; после «y» в терминале — issue или комментарий.
+
+    Отказ (нет терминала, ошибка `gh`) — блок `refusal` в stderr, код 2."""
+    try:
+        return _report(cwd, print_only, gh, ask, is_tty)
+    except ReportError as exc:
+        print(refusal("dfl report", str(exc)), file=sys.stderr)
+        return 2
+
+
+def _report(
+    cwd: Path,
+    print_only: bool,
+    gh: Gh,
+    ask: Callable[[str], str],
+    is_tty: Callable[[], bool],
+) -> int:
+    rec = load_record(cwd)
+    if rec is None:
+        print("записанного сбоя нет — отправлять нечего")
+        return 0
+    rep = build(rec, collect_facts(rec))
+    print(f"{rep.title}\n\n{rep.body}")
+    if print_only:
+        return 0
+    if not is_tty():
+        raise ReportError(
+            "отчёт не отправлен: нет терминала для подтверждения — "
+            "подтвердите отправку в терминале или используйте dfl report --print"
+        )
+    profile = _profile()
+    duplicate = _find_duplicate(rep, gh, profile)
+    question = (
+        f"Добавить комментарий к {duplicate[1]}? [y/N] "
+        if duplicate
+        else f"Отправить в {REPORT_REPO} как публичное issue? [y/N] "
+    )
+    if ask(question).strip().lower() not in YES:
+        print("не отправлено")
+        return 0
+    if duplicate:
+        argv = ["issue", "comment", str(duplicate[0]), "-R", REPORT_REPO]
+        url = _gh_ok(gh, [*argv, "--body-file", "-"], profile, rep.body)
+    else:
+        argv = ["issue", "create", "-R", REPORT_REPO, "--title", rep.title]
+        url = _gh_ok(gh, [*argv, "--body-file", "-"], profile, rep.body)
+    print(f"отправлено: {url}")
+    return 0
+
+
+def _find_duplicate(
+    rep: Report, gh: Gh, profile: Path | None
+) -> tuple[int, str] | None:
+    """Открытое issue с тем же отпечатком в заголовке: (номер, URL)."""
+    out = _gh_ok(
+        gh,
+        [
+            "issue",
+            "list",
+            "-R",
+            REPORT_REPO,
+            "--state",
+            "open",
+            "--search",
+            f'"fp {rep.fp}" in:title',
+            "--json",
+            "number,url,title",
+        ],
+        profile,
+        None,
+    )
+    try:
+        items = json.loads(out or "[]")
+    except ValueError as exc:
+        raise ReportError(
+            f"ответ gh issue list не разобран: {exc} — {PRINT_HINT}"
+        ) from exc
+    marker = f"(fp {rep.fp})"
+    for item in items if isinstance(items, list) else []:
+        if isinstance(item, dict) and marker in str(item.get("title", "")):
+            return int(item["number"]), str(item["url"])
+    return None
+
+
+def _gh_ok(gh: Gh, argv: list[str], profile: Path | None, body: str | None) -> str:
+    done = gh(argv, profile, body)
+    if done.returncode != 0:
+        detail = (done.stderr or done.stdout or "").strip().splitlines()
+        reason = detail[-1] if detail else f"код {done.returncode}"
+        raise ReportError(f"gh {' '.join(argv[:2])}: {reason} — {PRINT_HINT}")
+    return (done.stdout or "").strip()
+
+
+def _profile() -> Path | None:
+    """Профиль `gh` человека из конфига; конфиг не читается — `gh` по умолчанию."""
+    try:
+        return df_config.load().accounts.human_gh_config_dir
+    except df_config.ConfigError:
+        return None

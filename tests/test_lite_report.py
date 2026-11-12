@@ -68,6 +68,22 @@ def test_redact_hides_token(token: str) -> None:
     assert "<скрыто>" in out
 
 
+@pytest.mark.parametrize(
+    ("text", "secret"),
+    [
+        ("git https://user:hunter2@github.com/o/r.git", "hunter2"),
+        ('{"token": "abc 123"}', "abc 123"),
+        ("{'api_key': 'k-1'}", "k-1"),
+        ("GH_AUTH=xyz", "xyz"),
+        ("Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"),
+        ("key sk-" + "A" * 24, "A" * 24),
+        ("passwd: s3cret", "s3cret"),
+    ],
+)
+def test_redact_hides_secret_forms(text: str, secret: str) -> None:
+    assert secret not in rp.redact(text, Path("/h"))
+
+
 def test_redact_home_to_tilde() -> None:
     assert rp.redact("/home/al/x and /home/al", Path("/home/al")) == "~/x and ~"
 
@@ -131,3 +147,152 @@ def test_collect_facts_broken_config(monkeypatch) -> None:
     facts = rp.collect_facts(_rec())
     assert facts.config == "конфиг не читается: битый toml"
     assert "devtools" in facts.versions
+
+
+# --- dfl report: показ, подтверждение, отправка (Task 5) ---
+
+import subprocess  # noqa: E402
+
+from lite import failure_log as fl  # noqa: E402
+
+ISSUE = "https://github.com/andrei-shtanakov/devtools/issues/7"
+
+
+class FakeGh:
+    def __init__(self, listing: list[dict] | None = None, rc: int = 0) -> None:
+        self.calls: list[tuple[list[str], Path | None, str | None]] = []
+        self.listing = listing or []
+        self.rc = rc
+
+    def __call__(self, argv, profile, body=None) -> subprocess.CompletedProcess:
+        self.calls.append((list(argv), profile, body))
+        if self.rc:
+            return subprocess.CompletedProcess(argv, self.rc, "", "gh: нет сети")
+        if argv[:2] == ["issue", "list"]:
+            out = json.dumps(self.listing)
+        elif argv[:2] == ["issue", "comment"]:
+            out = ISSUE + "#issuecomment-1\n"
+        else:
+            out = ISSUE + "\n"
+        return subprocess.CompletedProcess(argv, 0, out, "")
+
+    def verbs(self) -> list[str]:
+        return [" ".join(a[:2]) for a, _, _ in self.calls]
+
+
+@pytest.fixture()
+def failed(tmp_path: Path, monkeypatch) -> Path:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setattr(rp, "_versions", lambda: {"devtools": "abc"})
+    monkeypatch.setattr(rp, "_profile", lambda: tmp_path / "gh-human")
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    fl.write(cwd, _rec(output_tail=["вывод", "ghp_" + "q" * 36]))
+    return cwd
+
+
+def _report(
+    cwd: Path,
+    gh: FakeGh,
+    *,
+    answer: str = "y",
+    tty: bool = True,
+    print_only: bool = False,
+) -> int:
+    return rp.run_report(
+        cwd, print_only=print_only, gh=gh, ask=lambda _q: answer, is_tty=lambda: tty
+    )
+
+
+def test_report_without_record_says_none(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    gh = FakeGh()
+    assert _report(tmp_path, gh) == 0
+    assert "записанного сбоя нет" in capsys.readouterr().out
+    assert gh.calls == []
+
+
+def test_report_print_only_never_calls_gh(failed: Path, capsys) -> None:
+    gh = FakeGh()
+    assert _report(failed, gh, print_only=True) == 0
+    assert "[dfl-report] run:" in capsys.readouterr().out
+    assert gh.calls == []
+
+
+def test_report_no_tty_refuses_without_sending(failed: Path, capsys) -> None:
+    gh = FakeGh()
+    assert _report(failed, gh, tty=False) == 2
+    assert "--print" in capsys.readouterr().err
+    assert gh.calls == []
+
+
+def test_report_confirm_creates_issue(failed: Path, tmp_path: Path, capsys) -> None:
+    gh = FakeGh()
+    assert _report(failed, gh) == 0
+    assert gh.verbs() == ["issue list", "issue create"]
+    argv, profile, body = gh.calls[1]
+    assert argv[argv.index("-R") + 1] == "andrei-shtanakov/devtools"
+    assert profile == tmp_path / "gh-human"
+    assert body is not None and "## Вывод" in body
+    assert ISSUE in capsys.readouterr().out
+
+
+def test_report_duplicate_goes_to_comment(failed: Path, capsys) -> None:
+    fp = rp.build(fl.load(failed), rp.Facts()).fp  # type: ignore[arg-type]
+    gh = FakeGh(
+        listing=[{"number": 7, "url": ISSUE, "title": f"[dfl-report] x (fp {fp})"}]
+    )
+    asked: list[str] = []
+    code = rp.run_report(
+        failed,
+        print_only=False,
+        gh=gh,
+        ask=lambda q: asked.append(q) or "y",
+        is_tty=lambda: True,
+    )
+    assert code == 0
+    assert gh.verbs() == ["issue list", "issue comment"]
+    assert ISSUE in asked[0]
+
+
+def test_report_ignores_listing_with_other_fp(failed: Path) -> None:
+    gh = FakeGh(
+        listing=[
+            {"number": 7, "url": ISSUE, "title": "[dfl-report] x (fp 000000000000)"}
+        ]
+    )
+    assert _report(failed, gh) == 0
+    assert gh.verbs() == ["issue list", "issue create"]
+
+
+def test_report_decline_sends_nothing(failed: Path, capsys) -> None:
+    gh = FakeGh()
+    assert _report(failed, gh, answer="") == 0
+    assert gh.verbs() == ["issue list"]
+    assert "не отправлено" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("answer", ["y", "Y", "да"])
+def test_report_yes_answers(failed: Path, answer: str) -> None:
+    gh = FakeGh()
+    assert _report(failed, gh, answer=answer) == 0
+    assert gh.verbs()[-1] == "issue create"
+
+
+def test_report_gh_failure_suggests_print(failed: Path, capsys) -> None:
+    assert _report(failed, FakeGh(rc=1)) == 2
+    assert "dfl report --print" in capsys.readouterr().err
+
+
+def test_report_token_not_in_sent_body(failed: Path) -> None:
+    gh = FakeGh()
+    _report(failed, gh)
+    assert all("ghp_" not in (body or "") for _, _, body in gh.calls)
+
+
+def test_profile_falls_back_to_default_gh(monkeypatch) -> None:
+    def broken(*a, **kw):
+        raise df_config.ConfigError("x")
+
+    monkeypatch.setattr(df_config, "load", broken)
+    assert rp._profile() is None

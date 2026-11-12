@@ -38,6 +38,7 @@ from lite.pipeline import (
     code_merged,
     merged_unreviewed,
 )
+from lite.report import run_report
 from lite.tee import tee_output
 
 ENGINEER_SUFFIX = bt.ENGINEER_SUFFIX
@@ -104,7 +105,8 @@ def main(
     *,
     defer: list[Callable[[list[str]], None]] | None = None,
 ) -> int:
-    """CLI: `--cwd <dir>` и `run` | `answer` | `abandon` | `status` | `init-repo`.
+    """CLI: `--cwd <dir>` и `run` | `answer` | `abandon` | `status` | `init-repo`
+    | `report`.
 
     Ненулевой код и исключение пишут запись сбоя (`lite.failure_log`);
     ненулевой код печатает подсказку `dfl report` последней строкой. С
@@ -113,6 +115,8 @@ def main(
     raw = list(sys.argv[1:] if argv is None else argv)
     args = _parser().parse_args(raw)
     cwd = Path(args.cwd)
+    if args.command == "report":  # до режима test: сломанный конфиг — тоже сбой
+        return run_report(cwd, print_only=args.print_only)
     before = fl.snapshot_runs()
 
     def record(code: int, exc: BaseException | None) -> None:
@@ -246,6 +250,15 @@ def _parser() -> argparse.ArgumentParser:
     p_ab.add_argument("--subject", help="тема конвейера, если их несколько")
     sub.add_parser("status", help="прогоны репо и что дальше")
     sub.add_parser("init-repo", help="PR с шаблонами DarkFactory в репо")
+    p_rep = sub.add_parser(
+        "report", help="отчёт о последнем сбое — разработчикам (issue в devtools)"
+    )
+    p_rep.add_argument(
+        "--print",
+        dest="print_only",
+        action="store_true",
+        help="только показать, не отправлять",
+    )
     return parser
 
 
