@@ -22,6 +22,7 @@ from governance import (
     bundle_state,
     run_lock,
     runner,
+    spec_loop,
     task_bridge,
 )
 from governance import interview as iv
@@ -7477,6 +7478,31 @@ def test_edge_findings_do_not_outlive_the_round_they_described(
     )
 
 
+def test_resume_archives_previous_stop_reason_before_silent_edge_stop(
+    tmp_path: Path,
+    runs_root,
+) -> None:
+    """Живой прогон Linux 12.11: стоп трипвайра записал причину, оператор
+    продолжил, следующий стоп — edge-check, который своей причины не пишет.
+    Кнопка test читала прошлую причину как текущую и отказывала в
+    продолжении текстом трипвайра (ревью #731: регресс на НЕпишущем стопе)."""
+    ops = FakeOps(edge_results={"charter": "FAIL"})
+    run_id = "r-w-edge-reason"
+    state = locked_runner.start(**_waves_kwargs(tmp_path, run_id, ops))
+    assert state.status == "stopped_review"
+    reason = rs.run_dir(run_id) / "stop-reason.txt"
+    reason.write_text(f"{runner.CONFIG_SURFACE_STOP}: прошлый стоп\n")
+
+    result = locked_runner.resume(run_id, ops)
+
+    assert result.status == "stopped_review", "снова красный edge-check"
+    assert not reason.exists()
+    assert spec_loop._stop_reason(result) == ""
+    archived = list(rs.run_dir(run_id).glob("stop-reason.*.txt"))
+    assert len(archived) == 1, "причина трипвайра сохранена для аудита"
+    assert runner.CONFIG_SURFACE_STOP in archived[0].read_text()
+
+
 def test_waves_run_authors_only_level_zero_and_stops_at_edge_fail(
     tmp_path: Path,
     runs_root,
@@ -7581,11 +7607,6 @@ def test_waves_refuse_to_author_level_when_upstream_not_approved(
     assert ops.authored == ["charter", "requirements"]
     assert resumed.ops["commit-2"]["status"] == "completed"
     assert resumed.status == "waiting_human_merge" and resumed.wave == 2
-    # Причина прошлого стопа не переживает resume: следующий стоп без
-    # собственной записи (пауза волны) иначе нёс бы чужую причину, и кнопка
-    # test читала бы её как свою (живой прогон Linux 12.11: трипвайр 15:05
-    # поверх стопа edge-check 16:06).
-    assert not (rs.run_dir("r-w-up") / "stop-reason.txt").exists()
 
 
 def test_waves_stopped_gate_resume_resets_only_the_wave_range(
@@ -8301,6 +8322,9 @@ def test_reopen_manual_stops_for_the_operator_then_resumes(
 
     al.abandon_request(state, state.ops["candidate-1"]["request"], "стенд")
     rs.save(state)
+    (rs.run_dir("r-reopen-m") / "stop-reason.txt").write_text(
+        f"{runner.CONFIG_SURFACE_STOP}: прошлый стоп\n", encoding="utf-8"
+    )
     ops.base_files = _all_approved()
     authored_before = list(ops.authored)
     stopped = locked_runner.reopen("r-reopen-m", "charter", ops, manual=True)
@@ -8308,6 +8332,7 @@ def test_reopen_manual_stops_for_the_operator_then_resumes(
     assert stopped.branch == "spec/WS-1-behaviour-w1-r1"
     assert not (Path(stopped.target_dir) / BUNDLE_DIR / "00-charter.md").exists()
     assert ops.authored == authored_before
+    assert spec_loop._stop_reason(stopped) == "", "reopen уносит прошлую причину"
     (Path(stopped.target_dir) / BUNDLE_DIR / "00-charter.md").write_text(
         "# charter\n\n#### CON-01: руками\n", encoding="utf-8"
     )
