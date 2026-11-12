@@ -362,11 +362,16 @@ def _registered_repo(cwd: Path) -> str:
 
 def _next_hint(state: rs.RunState, runs: list[rs.RunState]) -> str | None:
     url = _accepted_url(state)
-    if url is not None and code_merged(state.ops):
-        return f"конвейер закончен ({url} вмержен); {NEXT_SUBJECT_HINT}"
     if url is not None:
-        # конвейер закончен и без мержа: dfl run его не продолжает (ревью #739)
-        return f"смержите {url} — конвейер закончен; {NEXT_SUBJECT_HINT}"
+        # конвейер закончен и без мержа: dfl run его не продолжает (ревью #739);
+        # новую тему предлагаем, только если её не заблокирует другой конвейер
+        done = (
+            f"конвейер закончен ({url} вмержен)"
+            if code_merged(state.ops)
+            else (f"смержите {url} — конвейер закончен")
+        )
+        busy = any(_frame(c) == "customer" and not _finished(c, runs) for c in runs)
+        return done if busy else f"{done}; {NEXT_SUBJECT_HINT}"
     if chain_open(state.mode, _frame(state), state.status, state.ops):
         return f"{CHAIN_STOPPED_HINT} (или {ABANDON_HINT})"
     if _engineer_of(state, runs) is not None:

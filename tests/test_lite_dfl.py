@@ -329,10 +329,12 @@ def test_status_lists_runs_no_effects(env: Env, monkeypatch, capsys) -> None:
     assert env.run("status") == 0
     out = capsys.readouterr().out
     assert "WS-1-a" in out and "WS-3-a" in out and "мерж брифа, затем dfl run" in out
+    # в репо есть незаконченные WS-2/WS-3: новую тему не предлагаем (#739)
     assert (
-        "дальше: смержите https://github.com/o/alpha/pull/9 — конвейер закончен; "
-        "новая тема: dfl run --subject '<тема>'"
-    ) in out
+        "дальше: смержите https://github.com/o/alpha/pull/9 — конвейер закончен\n"
+        in out
+    )
+    assert "новая тема" not in out
     assert "WS-2-a" in out and "разберите причину выше и dfl run" in out
     assert "WS-9-a" not in out
     assert _no_effects(env) and env.registered == 0
