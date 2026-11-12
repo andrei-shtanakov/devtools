@@ -1224,3 +1224,33 @@ def test_dfl_interview_finished_without_any_session_refuses(env: Env, capsys) ->
     _accepted(_run("WS-1-eng-b", "WS-1-eng", "engineer", "done"))
     assert env.run("interview") == 2
     assert "интервью не идёт" in capsys.readouterr().err
+
+
+def test_dfl_correct_refused_after_interview_completed(
+    env: Env, monkeypatch, capsys
+) -> None:
+    """I3: после completed_at бриф уже собран — поправка в него не попадёт."""
+    state = _waiting("WS-1-a", "WS-1", "customer")
+    assert state.interview is not None
+    state.interview["completed_at"] = "2026-11-12T10:00:00+00:00"
+    state.status = "brief_ready"
+    rs.save(state)
+    monkeypatch.setattr(dfl, "load_session", lambda sid: _session_view())
+    monkeypatch.setattr(dfl.st, "claude_agent", lambda model: pytest.fail("агент"))
+    monkeypatch.setattr(dfl, "_discovery_answer", lambda *a, **k: pytest.fail("вызов"))
+    assert env.run("correct", "раз в месяц") == 2
+    err = capsys.readouterr().err
+    assert "интервью завершено, бриф уже собран" in err
+    assert "поправка в бриф не попадёт" in err
+
+
+def test_dfl_interview_works_after_interview_completed(env: Env, monkeypatch) -> None:
+    state = _waiting("WS-1-a", "WS-1", "customer")
+    assert state.interview is not None
+    state.interview["completed_at"] = "2026-11-12T10:00:00+00:00"
+    rs.save(state)
+    monkeypatch.setattr(dfl, "load_session", lambda sid: _session_view())
+    monkeypatch.setattr(
+        dfl, "_discovery_status", lambda sid, cwd: iv.DiscoveryReply(0, {}, "")
+    )
+    assert env.run("interview") == 0

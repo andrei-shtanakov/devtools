@@ -78,6 +78,9 @@ NO_TTY_REFUSAL = "без терминала: dfl answer --file answer.yaml"
 NO_INTERVIEW_REFUSAL = "интервью не идёт — начните: dfl run --subject '<тема>'"
 CHAT_STOPPED = "интервью прервано — продолжить: dfl run"
 INTERRUPTED = "прервано"
+INTERVIEW_COMPLETED_REFUSAL = (
+    "интервью завершено, бриф уже собран — поправка в бриф не попадёт"
+)
 INIT_FILES = (
     "profiles/team-exp.yaml",
     "scripts/review/local.sh",
@@ -781,10 +784,15 @@ def interview(cwd: Path, subject: str | None) -> int:
 
 
 def correct(cwd: Path, text: str, subject: str | None) -> int:
-    """Поправка собранных пунктов текстом (`harness.author = claude`)."""
+    """Поправка собранных пунктов текстом (`harness.author = claude`).
+
+    После конца интервью (`interview.completed_at`) — отказ: бриф уже собран,
+    и поправка в журнале discovery в него не попадёт."""
     if not _author_is_claude():
         raise DflError(CHAT_HARNESS_REFUSAL)
     state = _interview_run(cwd, subject)
+    if (state.interview or {}).get("completed_at"):
+        raise DflError(INTERVIEW_COMPLETED_REFUSAL)
     agent = st.claude_agent(df_config.load().author_model)
     try:
         result = iview.correct(
