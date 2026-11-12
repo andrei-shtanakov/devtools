@@ -920,33 +920,48 @@ _AUTHOR_DSL = {
 }
 
 
-def source_id_index(bundle_root: Path) -> dict[str, list[str]]:
-    """Узел → id, определённые в нём ровно один раз, — цели `sources`.
+def bundle_node_index(bundle_root: Path) -> dict[str, dict[str, int]]:
+    """Узел бандла → его id с КРАТНОСТЬЮ определения (`node_id_counts`).
 
-    Тот же разбор (`node_id_counts`), что у гейта GC-DT-CONTRACT: промпт
-    называет автору ровно то, что гейт разрешит. Дважды определённый id
-    не называется — гейт откажет и ему. Сам узел decomposition вне
-    индекса: его и пишет автор. Отсутствующий файл узла — узла нет.
+    Единственный вычислитель индекса целей `sources`: его зовут и гейт
+    GC-DT-CONTRACT (`runner`), и промпт автора decomposition — иначе
+    промпт назвал бы автору перечень, который гейт уже не разрешает
+    (ревью #738). Индексируются только существующие файлы: отсутствующий
+    узел остаётся вне индекса, ссылка на него получит честный отказ
+    «узла нет в бандле».
     """
-    index: dict[str, list[str]] = {}
-    for node, filename in bundle_dag.node_filenames(bundle_dag.dag_for(None)):
-        path = bundle_root / filename
-        if node == "decomposition" or not path.is_file():
-            continue
-        counts = node_id_counts(path.read_text(encoding="utf-8"))
-        index[node] = sorted(item for item, n in counts.items() if n == 1)
-    return index
+    declared = bundle_dag.node_filenames(bundle_dag.dag_for(None))
+    return {
+        node: node_id_counts((bundle_root / filename).read_text(encoding="utf-8"))
+        for node, filename in declared
+        if (bundle_root / filename).exists()
+    }
+
+
+def source_id_index(bundle_root: Path) -> dict[str, list[str]]:
+    """Цели `sources` для промпта: `bundle_node_index`, id ровно одного
+    определения (дважды определённый гейт отвергнет как неоднозначный).
+    Узел decomposition не перечисляется: его файл и пишет автор — старая
+    версия устарела; ссылки на собственные id промпт разрешает правилом."""
+    return {
+        node: sorted(item for item, n in counts.items() if n == 1)
+        for node, counts in bundle_node_index(bundle_root).items()
+        if node != "decomposition"
+    }
 
 
 def _source_ids_guidance(source_ids: dict[str, list[str]]) -> str:
     lines = "".join(
-        f"\n  {node}: {', '.join(ids) if ids else '(no defined ids)'}"
+        "\n  "
+        + (", ".join(f"{node}#{item}" for item in ids) or f"{node}: (no defined ids)")
         for node, ids in source_ids.items()
     )
     return (
-        "\nThe ONLY valid `sources` targets are these `<node>#<id>` pairs "
-        "(ids defined exactly once by a `#### <ID>` heading, by node); "
-        f"use them verbatim:{lines}"
+        "\nThe ONLY valid `sources` targets in other nodes are these refs "
+        "(ids defined exactly once by a `#### <ID>` heading), grouped by node; "
+        "copy them verbatim. A ref into the file you write "
+        "(`decomposition#<ID>` for an id you define there by a `#### <ID>` "
+        f"heading) is also valid:{lines}"
     )
 
 
