@@ -91,6 +91,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Env:
     monkeypatch.setattr(spec_loop, "main", spec_main)
     monkeypatch.setattr(bt, "main", brief_main)
     monkeypatch.setattr(dfl, "_forge", lambda: e.forge)
+    monkeypatch.setattr(dfl, "_is_tty", lambda: False)  # и под `pytest -s`
     return e
 
 
@@ -861,3 +862,191 @@ def test_public_argv_handles_equals_form() -> None:
         "t",
     ]
     assert dfl._public_argv(raw) == ["answer", "--file=answer.yaml", "--subject", "t"]
+
+
+# --- Интервью разговором (Task 4) -------------------------------------------
+
+
+@dataclass
+class Chat:
+    """Подделка цикла интервью: итоги по очереди, запоминает прогоны."""
+
+    results: list[str] = field(default_factory=lambda: ["finished"])
+    states: list[str] = field(default_factory=list)
+    quiet: list[bool] = field(default_factory=list)
+
+    def __call__(self, state: rs.RunState) -> object:
+        from governance import runner
+
+        self.states.append(state.run_id)
+        self.quiet.append(runner._QUIET_HINTS.get())
+        rs.save(_run_status(state, "running"))
+        return dfl.ic.ChatResult(self.results.pop(0))
+
+
+def _run_status(state: rs.RunState, status: str) -> rs.RunState:
+    state.status = status
+    return state
+
+
+def _tty(monkeypatch, on: bool = True) -> None:
+    monkeypatch.setattr(dfl, "_is_tty", lambda: on)
+
+
+def _waiting_after_first_step(monkeypatch, env: Env) -> None:
+    """Первый шаг конвейера оставляет прогон ждать ответа, следующие — нет."""
+
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(list(argv))
+        if len(env.spec_calls) == 1:
+            _waiting("WS-1-a", "WS-1", "customer")
+        return 0
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+
+
+def test_dfl_run_without_tty_keeps_old_hint(env: Env, monkeypatch, capsys) -> None:
+    _tty(monkeypatch, False)
+    _waiting_after_first_step(monkeypatch, env)
+    monkeypatch.setattr(dfl, "_chat", lambda state: pytest.fail("цикл без tty"))
+    assert env.run("run", "--subject", "тема") == 0
+    out = capsys.readouterr().out
+    assert "прогон WS-1-a ждёт ответа" in out and "dfl answer --file" in out
+    assert len(env.spec_calls) == 1
+
+
+def test_dfl_run_tty_chats_then_continues(env: Env, monkeypatch, capsys) -> None:
+    _tty(monkeypatch)
+    _waiting_after_first_step(monkeypatch, env)
+    chat = Chat()
+    monkeypatch.setattr(dfl, "_chat", chat)
+    assert env.run("run", "--subject", "тема") == 0
+    assert chat.states == ["WS-1-a"] and chat.quiet == [True]
+    # после интервью — тот же следующий шаг, что после dfl answer
+    assert env.spec_calls[1] == ["--subject", "тема", "--repo", REPO,
+                                 "--run-id", "WS-1-a"]  # fmt: skip
+    assert "dfl answer --file" not in capsys.readouterr().out
+
+
+def test_dfl_run_tty_stop_says_how_to_resume(env: Env, monkeypatch, capsys) -> None:
+    _tty(monkeypatch)
+    _waiting_after_first_step(monkeypatch, env)
+    monkeypatch.setattr(dfl, "_chat", Chat(results=["stopped"]))
+    assert env.run("run", "--subject", "тема") == 0
+    assert "интервью прервано — продолжить: dfl run" in capsys.readouterr().out
+    assert len(env.spec_calls) == 1
+
+
+def test_dfl_run_tty_agent_down_refused(env: Env, monkeypatch, capsys) -> None:
+    _tty(monkeypatch)
+    _waiting_after_first_step(monkeypatch, env)
+
+    def down(state: rs.RunState) -> object:
+        raise dfl.ic.ChatError("агент недоступен: claude не найден")
+
+    monkeypatch.setattr(dfl, "_chat", down)
+    assert env.run("run", "--subject", "тема") == 2
+    assert "агент недоступен: claude не найден" in capsys.readouterr().err
+
+
+def test_dfl_run_tty_non_claude_harness_refused(env: Env, monkeypatch, capsys) -> None:
+    cfg = env.tmp / "xdg" / "darkfactory" / "config.toml"
+    cfg.write_text(
+        cfg.read_text(encoding="utf-8").replace('author = "claude"', 'author = "x"'),
+        encoding="utf-8",
+    )
+    _tty(monkeypatch)
+    _waiting_after_first_step(monkeypatch, env)
+    monkeypatch.setattr(dfl, "_chat", lambda state: pytest.fail("цикл"))
+    assert env.run("run", "--subject", "тема") == 2
+    err = capsys.readouterr().err
+    assert "интервью разговором требует harness.author = claude" in err
+    assert "dfl answer --file answer.yaml" in err
+
+
+def test_dfl_answer_file_still_works(env: Env, monkeypatch) -> None:
+    _tty(monkeypatch)
+    _waiting("WS-1-a", "WS-1", "customer")
+    _answer_file(env)
+    disc = Discovery()
+    monkeypatch.setattr(dfl, "_discovery_answer", disc)
+    monkeypatch.setattr(dfl, "_chat", lambda state: pytest.fail("цикл при --file"))
+    monkeypatch.setattr(
+        spec_loop, "main", lambda argv: env.spec_calls.append(argv) or 0
+    )
+    assert env.run("answer", "--file", "answer.yaml") == 0
+    assert disc.flags == [(None, False)] and len(disc.calls) == 1
+
+
+def test_dfl_answer_without_file_chats(env: Env, monkeypatch, capsys) -> None:
+    _tty(monkeypatch)
+    _waiting("WS-1-a", "WS-1", "customer")
+    chat = Chat()
+    monkeypatch.setattr(dfl, "_chat", chat)
+    assert env.run("answer") == 0
+    assert chat.states == ["WS-1-a"]
+    assert env.spec_calls == [
+        ["--subject", "тема", "--repo", REPO, "--run-id", "WS-1-a"]
+    ]
+
+
+def test_dfl_answer_without_file_needs_tty(env: Env, monkeypatch, capsys) -> None:
+    _tty(monkeypatch, False)
+    _waiting("WS-1-a", "WS-1", "customer")
+    monkeypatch.setattr(dfl, "_chat", lambda state: pytest.fail("цикл без tty"))
+    assert env.run("answer") == 2
+    assert "без терминала: dfl answer --file answer.yaml" in capsys.readouterr().err
+    assert _no_effects(env)
+
+
+def test_dfl_answer_question_requires_file(env: Env, monkeypatch, capsys) -> None:
+    _tty(monkeypatch)
+    _waiting("WS-1-a", "WS-1", "customer")
+    monkeypatch.setattr(dfl, "_chat", lambda state: pytest.fail("цикл"))
+    assert env.run("answer", "--question", "q-1") == 2
+    assert "только вместе с --file" in capsys.readouterr().err
+    assert env.run("answer", "--question", "q-1", "--supersede") == 2
+    assert _no_effects(env)
+
+
+def test_discovery_status_invocation(env: Env, monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_run(argv: list[str], **kw: object):
+        seen["argv"], seen["cwd"] = argv, kw.get("cwd")
+        return dfl.subprocess.CompletedProcess(argv, 1, "", "boom")
+
+    disc_dir = env.tmp / "discovery"
+    monkeypatch.setattr(dfl.df_config, "workspace_dir", lambda name: disc_dir)
+    monkeypatch.setattr(dfl.subprocess, "run", fake_run)
+    reply = dfl._discovery_status("s1", Path("/rd"))
+    assert seen["argv"] == [
+        "uv", "run", "--frozen", "--project", str(disc_dir), "discovery",
+        "status", "--session", "s1",
+    ]  # fmt: skip
+    assert seen["cwd"] == Path("/rd") and reply.code == 1
+
+
+def test_send_writes_temp_answer_with_question(env: Env, monkeypatch) -> None:
+    state = _waiting("WS-1-a", "WS-1", "customer")
+    seen: dict[str, object] = {}
+
+    def fake_answer(sid, role, file, cwd, *, question=None, supersede=False):
+        seen.update(sid=sid, role=role, cwd=cwd, question=question)
+        seen["supersede"], seen["text"] = supersede, file.read_text(encoding="utf-8")
+        seen["file"] = file
+        return iv.DiscoveryReply(0, {}, "")
+
+    monkeypatch.setattr(dfl, "_discovery_answer", fake_answer)
+    reply = dfl._sender(state)("q-1", "text: да\n")
+    assert reply.code == 0
+    assert (seen["sid"], seen["role"], seen["question"]) == (
+        "sess-WS-1-a",
+        "customer",
+        "q-1",
+    )
+    assert seen["supersede"] is False and seen["text"] == "text: да\n"
+    assert seen["cwd"] == rs.run_dir("WS-1-a")
+    file = seen["file"]
+    assert isinstance(file, Path) and file.parent == rs.run_dir("WS-1-a")
+    assert not file.exists()

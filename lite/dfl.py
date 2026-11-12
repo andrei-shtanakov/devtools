@@ -4,6 +4,9 @@
 бриф-интервью, предложение брифа, после мержа брифа — одобрение и
 engineer-прогон, затем проверенный PR с кодом. `dfl answer --file <f>` —
 ответ на вопрос интервью (закреплённым discovery) и снова шаг `dfl run`.
+В терминале (`stdin` — tty) `dfl run` и `dfl answer` без `--file` ведут
+интервью разговором (`lite.interview_chat`): вопрос, ответ своими словами,
+уточнения, отправка — до конца интервью, затем обычный шаг конвейера.
 `dfl abandon` — бросить незаконченный конвейер (каталоги прогонов уходят в
 `out/governance-runs-abandoned/<время>/`, обратимо). `dfl status` — только
 журнал, без форджи и эффектов. Конвейер исполняется в процессе
@@ -14,9 +17,11 @@ from __future__ import annotations
 
 import argparse
 import functools
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import traceback
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -24,12 +29,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from governance import brief_tools as bt
-from governance import df_config, run_lock, spec_loop, user_targets
+from governance import df_config, run_lock, runner, spec_loop, user_targets
 from governance import interview as iv
 from governance import run_state as rs
 from governance.facts import Outcome
 from lite import failure_log as fl
+from lite import interview_chat as ic
+from lite import structure as st
 from lite.init_repo import DEVTOOLS, InitError, init_repo, real_gh
+from lite.interview_state import InterviewStateError, load_session
 from lite.output import refusal
 from lite.pipeline import (
     CHAIN_STOPPED_HINT,
@@ -61,6 +69,12 @@ ANSWER_FORMAT = """\
       Acceptance: вывод «smoke <версия>», код выхода 0
 поправить уже данный ответ: dfl answer --question <id вопроса> --supersede --file f
 (команду `discovery answer …` выше не запускайте — dfl answer сделает это сам)"""
+CHAT_HARNESS_REFUSAL = (
+    "интервью разговором требует harness.author = claude — используйте "
+    "dfl answer --file answer.yaml"
+)
+NO_TTY_REFUSAL = "без терминала: dfl answer --file answer.yaml"
+CHAT_STOPPED = "интервью прервано — продолжить: dfl run"
 INIT_FILES = (
     "profiles/team-exp.yaml",
     "scripts/review/local.sh",
@@ -218,7 +232,7 @@ def _dispatch(args: argparse.Namespace, cwd: Path) -> tuple[int, BaseException |
         if args.command == "answer":
             code = answer(
                 cwd,
-                Path(args.file),
+                Path(args.file) if args.file else None,
                 args.subject,
                 args.stakeholder,
                 question=args.question,
@@ -242,7 +256,8 @@ def _parser() -> argparse.ArgumentParser:
     p_run.add_argument("--stakeholder", default="customer")
     p_ans = sub.add_parser("answer", help="ответ на вопрос интервью и dfl run")
     p_ans.add_argument(
-        "--file", required=True, help="YAML-файл ответа (text: и entries:)"
+        "--file",
+        help="YAML-файл ответа (text: и entries:); без него — интервью разговором",
     )
     p_ans.add_argument("--question", help="id вопроса (по умолчанию — текущий)")
     p_ans.add_argument(
@@ -282,12 +297,101 @@ def _require_test_mode() -> None:
     print()
 
 
-def run(cwd: Path, subject: str | None, role: str) -> int:
-    """Один шаг конвейера для репо в `cwd`; код шага или 0/2 самого `dfl`."""
+def run(cwd: Path, subject: str | None, role: str, *, chat: bool = True) -> int:
+    """Один шаг конвейера для репо в `cwd`; код шага или 0/2 самого `dfl`.
+
+    В терминале (и `chat`) при `harness.author = claude` ждущий ответа прогон
+    ведётся интервью разговором; иначе — подсказка `dfl answer --file`."""
     target = user_targets.register(cwd)
+    chatting = chat and _is_tty()
+    if chatting and _author_is_claude():
+        return _run_chatting(target, subject, role)
     code = _step(target, subject, role)
     _hint_if_waiting(target.repo)
+    if chatting and _waiting_run(target.repo, subject) is not None:
+        raise DflError(CHAT_HARNESS_REFUSAL)
     return code
+
+
+def _run_chatting(
+    target: user_targets.UserTarget, subject: str | None, role: str
+) -> int:
+    """Шаг конвейера; ждёт ответа — интервью разговором и снова шаг.
+
+    Подсказки раннера (`discovery answer …`, `make …`) не печатаются: вопрос
+    показывает сам цикл."""
+    with runner.quiet_interview_hints():
+        code = _step(target, subject, role)
+        while (state := _waiting_run(target.repo, subject)) is not None:
+            if _converse(state) is ic.ChatResult.STOPPED:
+                print(CHAT_STOPPED)
+                return 0
+            code = _step(target, subject, role)
+    return code
+
+
+def _is_tty() -> bool:
+    """stdin — терминал (подменяется в тестах)."""
+    return sys.stdin.isatty()
+
+
+def _author_is_claude() -> bool:
+    return df_config.load().author_harness == "claude"
+
+
+def _waiting_run(repo: str, subject: str | None) -> rs.RunState | None:
+    """Прогон конвейера (engineer, иначе customer), ждущий ответа, или `None`."""
+    runs, _ = _repo_runs(repo)
+    try:
+        cust = _select_customer(runs, subject)
+    except DflError:
+        return None
+    if cust is None:
+        return None
+    state = _engineer_of(cust, runs) or cust
+    return state if state.status == WAITING else None
+
+
+def _converse(state: rs.RunState) -> ic.ChatResult:
+    """Интервью разговором; сбой агента или состояния сессии — отказ `dfl`."""
+    try:
+        return _chat(state)
+    except (ic.ChatError, InterviewStateError) as exc:
+        raise DflError(str(exc)) from exc
+
+
+def _chat(state: rs.RunState) -> ic.ChatResult:
+    """Цикл интервью с настоящими терминалом, агентом и discovery."""
+    cwd = rs.run_dir(state.run_id)
+    return ic.chat(
+        state,
+        read=ic.stdin_read,
+        agent=st.claude_agent(df_config.load().author_model),
+        status=lambda session_id: _discovery_status(session_id, cwd),
+        send=_sender(state),
+        load=load_session,
+    )
+
+
+def _sender(state: rs.RunState) -> Callable[[str, str], iv.DiscoveryReply]:
+    """`send(question_id, yaml)`: временный файл в каталоге прогона →
+    `discovery answer --question <id>` (без `--supersede`), файл удаляется."""
+    interview = state.interview or {}
+    session_id = str(interview.get("session_id"))
+    role = str(interview.get("stakeholder_role"))
+    cwd = rs.run_dir(state.run_id)
+
+    def send(question_id: str, payload: str) -> iv.DiscoveryReply:
+        fd, name = tempfile.mkstemp(prefix="answer-", suffix=".yaml", dir=cwd)
+        path = Path(name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(payload)
+            return _discovery_answer(session_id, role, path, cwd, question=question_id)
+        finally:
+            path.unlink(missing_ok=True)
+
+    return send
 
 
 def _step(target: user_targets.UserTarget, subject: str | None, role: str) -> int:
@@ -539,7 +643,7 @@ def _next_hint(state: rs.RunState, runs: list[rs.RunState]) -> str | None:
 
 def answer(
     cwd: Path,
-    file: Path,
+    file: Path | None,
     subject: str | None,
     role: str,
     *,
@@ -549,9 +653,19 @@ def answer(
     """Ответ на вопрос интервью конвейера, затем шаг `dfl run`.
 
     Без `question` — текущий вопрос; `supersede` заменяет уже данный ответ
-    на вопрос `question` (discovery требует их вместе)."""
+    на вопрос `question` (discovery требует их вместе). Без `file` —
+    интервью разговором (только в терминале, `harness.author = claude`)."""
+    if file is None and (question or supersede):
+        raise DflError(
+            "--question и --supersede — только вместе с --file: "
+            "dfl answer --question <id> --supersede --file answer.yaml"
+        )
     if supersede and not question:
         raise DflError("--supersede требует --question <id вопроса>")
+    if file is None and not _is_tty():
+        raise DflError(NO_TTY_REFUSAL)
+    if file is None and not _author_is_claude():
+        raise DflError(CHAT_HARNESS_REFUSAL)
     target = user_targets.register(cwd)
     runs = _readable_runs(target.repo)
     cust = _existing_customer(runs, subject)
@@ -562,6 +676,13 @@ def answer(
             f"прогон {state.run_id} не ждёт ответа (статус {state.status}) — "
             "dfl status покажет, что дальше"
         )
+    if file is None:
+        with runner.quiet_interview_hints():
+            result = _converse(state)
+        if result is ic.ChatResult.STOPPED:
+            print(CHAT_STOPPED)
+            return 0
+        return run(cwd, cust.subject, role)
     path = file if file.is_absolute() else cwd / file
     if not path.is_file():
         raise DflError(f"нет файла ответа {path} — создайте его\n{ANSWER_FORMAT}")
@@ -580,7 +701,7 @@ def answer(
             f"discovery не принял ответ ({reason}) — исправьте {path} "
             "и повторите dfl answer"
         )
-    return run(cwd, cust.subject, role)
+    return run(cwd, cust.subject, role, chat=False)
 
 
 def _existing_customer(runs: list[rs.RunState], subject: str | None) -> rs.RunState:
@@ -601,25 +722,23 @@ def _discovery_answer(
     supersede: bool = False,
 ) -> iv.DiscoveryReply:
     """`discovery answer` закреплённым discovery — как `RealOps._discovery`."""
-    argv = [
-        "uv",
-        "run",
-        "--frozen",
-        "--project",
-        str(df_config.workspace_dir("discovery")),
-        "discovery",
-        "answer",
-        "--session",
-        session_id,
-        "--role",
-        role,
-        "--file",
-        str(file),
-    ]
+    args = ["answer", "--session", session_id, "--role", role, "--file", str(file)]
     if question:
-        argv += ["--question", question]
+        args += ["--question", question]
     if supersede:
-        argv.append("--supersede")
+        args.append("--supersede")
+    return _discovery(args, cwd)
+
+
+def _discovery_status(session_id: str, cwd: Path) -> iv.DiscoveryReply:
+    """`discovery status` сессии: журнал не меняется; 20 — ждёт ответа."""
+    return _discovery(["status", "--session", session_id], cwd)
+
+
+def _discovery(args: list[str], cwd: Path) -> iv.DiscoveryReply:
+    """Вызов закреплённого discovery (его окружение) и проверка границы."""
+    project = str(df_config.workspace_dir("discovery"))
+    argv = ["uv", "run", "--frozen", "--project", project, "discovery", *args]
     done = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=False)
     return iv.parse_reply(done.returncode, done.stdout, done.stderr)
 
