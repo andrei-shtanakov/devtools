@@ -162,14 +162,14 @@ def test_chat_max_two_follow_ups(capsys) -> None:
 
 
 def test_chat_skip_sends_what_is_there(capsys) -> None:
+    """M1: пропуск без прежнего текста — только text, агент не зовётся."""
     disc = Discovery(questions=QUESTIONS[:1])
-    # агент спросил бы, но при пропуске уточнений нет
-    ask = {"items": [], "ask": "Зачем?"}
-    assert _chat(disc, _reader("  Пропустить ", ""), _agent(ask)) is (
-        ic.ChatResult.FINISHED
-    )
+    agent = _agent()
+    assert _chat(disc, _reader("  Пропустить ", ""), agent) is (ic.ChatResult.FINISHED)
     assert "Уточнение:" not in capsys.readouterr().out
-    assert len(disc.sent) == 1 and _text(disc.sent[0][1]) == "Пропустить"
+    assert agent.prompts == []
+    assert len(disc.sent) == 1
+    assert yaml.safe_load(disc.sent[0][1]) == {"text": "Пропустить"}
 
 
 def test_chat_skip_in_follow_up_sends_earlier_text(capsys) -> None:

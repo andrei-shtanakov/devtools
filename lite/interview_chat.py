@@ -24,7 +24,9 @@ from lite.structure import (
     Ask,
     Failed,
     Question,
+    Ready,
     structure_answer,
+    to_payload,
 )
 
 Read = Callable[[str], str | None]
@@ -105,9 +107,7 @@ def _answer_question(
     skip, follow_ups, refusal = is_skip(text), 0, ""
     while True:
         may_ask = not skip and follow_ups < MAX_FOLLOW_UPS
-        result = structure_answer(
-            q, text, view, _with_note(agent, refusal), may_ask=may_ask
-        )
+        result = _structured(q, text, view, _with_note(agent, refusal), may_ask)
         if isinstance(result, Failed):
             if result.message != FAILED_TEXT:
                 raise ChatError(result.message)
@@ -128,6 +128,16 @@ def _answer_question(
             print(REFUSED_TEXT)
             return
         refusal = reply.envelope.get("operation", {}).get("reason", "") or "отказ"
+
+
+def _structured(
+    q: Question, text: str, view: SessionView, agent: Agent, may_ask: bool
+) -> Ready | Ask | Failed:
+    """Раскладка ответа; голый пропуск (другого текста нет) — только `text`,
+    без агента: раскладывать нечего, а агенту незачем что-то додумывать."""
+    if is_skip(text):
+        return Ready(to_payload(text, [], view))
+    return structure_answer(q, text, view, agent, may_ask=may_ask)
 
 
 def _with_note(agent: Agent, refusal: str) -> Agent:
