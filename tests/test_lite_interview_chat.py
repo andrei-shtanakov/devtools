@@ -119,6 +119,7 @@ def _chat(disc: Discovery, read: Any, agent: Any) -> ic.ChatResult:
         agent=agent,
         status=disc.status,
         send=disc.send,
+        resend=lambda qid, payload: pytest.fail("добор без непокрытых тем"),
         load=disc.load,
     )
 
@@ -489,7 +490,7 @@ def test_ctrl_c_while_discovery_works_stops() -> None:
 
     got = ic.chat(
         _state(), read=_reader(), agent=_agent(), status=status,
-        send=disc.send, load=disc.load,
+        send=disc.send, resend=disc.send, load=disc.load,
     )  # fmt: skip
     assert got is ic.ChatResult.STOPPED
 
@@ -509,3 +510,149 @@ def test_correct_resend_skips_entries_held_by_later_answer() -> None:
     [(qid, payload)] = send.sent
     assert qid == "q-fn"
     assert [e["id"] for e in payload["entries"]] == ["FR-02"]
+
+
+# --- финальное ревью: I5 (добор непокрытых обязательных тем) ---
+
+GOALS_ANSWER = {"text": "цели", "entries": [{"id": "G-01", "body": "Цель"}]}
+
+
+def _ended_view(**over: Any) -> SessionView:
+    """Интервью кончилось: jobs и functions не покрыты (jobs пропущен)."""
+    base: dict[str, Any] = {
+        "frame": "customer",
+        "required": {"goals": "G", "jobs": "J", "functions": "FR"},
+        "optional": {"risks": "RK"},
+        "entries": [Entry("G-01", "Цель", {})],
+        "declared": ["G-01"],
+        "holders": {"G-01": "customer.goals.01"},
+        "answers": {
+            "customer.goals.01": dict(GOALS_ANSWER),
+            "customer.jobs.01": {"text": "пропустить"},
+        },
+        "answered_keys": ["goals", "jobs"],
+        "readiness": "incomplete",
+        "asked": {"customer.goals.01": "goals", "customer.jobs.01": "jobs"},
+    }
+    return SessionView(**{**base, **over})
+
+
+@dataclass
+class Ended:
+    """discovery после последнего ответа: вопросов нет, код `code`."""
+
+    view: SessionView = field(default_factory=_ended_view)
+    code: int = 11
+    resent: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    statuses: int = 0
+
+    def status(self, session_id: str) -> iv.DiscoveryReply:
+        self.statuses += 1
+        return iv.DiscoveryReply(self.code, {"next_action": {}}, "")
+
+    def resend(self, qid: str, payload: str) -> iv.DiscoveryReply:
+        self.resent.append((qid, yaml.safe_load(payload)))
+        return iv.DiscoveryReply(11, {"operation": {"status": "ok"}}, "")
+
+    def load(self, session_id: str) -> SessionView:
+        return self.view
+
+
+def _top_up(ended: Ended, read: Any, agent: Any) -> ic.ChatResult:
+    return ic.chat(
+        _state(), read=read, agent=agent, status=ended.status,
+        send=lambda q, p: pytest.fail("send в доборе"),
+        resend=ended.resend, load=ended.load,
+    )  # fmt: skip
+
+
+FR_ITEM = {
+    "prefix": "FR", "body": "Выгрузка в CSV", "traces": ["G-01"],
+    "priority": "Must", "acceptance": "Открывается в Excel",
+}  # fmt: skip
+
+
+def test_top_up_asks_uncovered_topics_and_appends_to_holder(capsys) -> None:
+    ended = Ended()
+    read = _reader("Выгружают операции", "", "Выгрузка в CSV", "")
+    fr = {"items": [FR_ITEM], "ask": None}
+    agent = _agent(J_ITEM, fr)
+    assert _top_up(ended, read, agent) is ic.ChatResult.FINISHED
+    out = capsys.readouterr().out
+    assert "Не хватает: задачи пользователей —" in out
+    assert "Не хватает: функции —" in out
+    (q1, jobs), (q2, funcs) = ended.resent
+    # тема jobs: держатель — последний отвеченный вопрос темы
+    assert q1 == "customer.jobs.01"
+    assert jobs["text"] == "пропустить\n\nВыгружают операции"
+    assert [e["body"] for e in jobs["entries"]] == ["Выгрузить операции"]
+    # тема functions без своих вопросов: последний отвеченный вообще
+    assert q2 == "customer.jobs.01"
+    assert [e["body"] for e in funcs["entries"]] == ["Выгрузка в CSV"]
+    assert ended.statuses == 2  # добор — один раз, затем снова status
+
+
+def test_top_up_keeps_holder_entries_and_text() -> None:
+    ended = Ended(view=_ended_view(required={"goals": "G", "functions": "FR"},
+                                   answered_keys=["goals"]))  # fmt: skip
+    read = _reader("Выгрузка в CSV", "")
+    assert _top_up(ended, read, _agent({"items": [FR_ITEM]})) is (
+        ic.ChatResult.FINISHED
+    )
+    [(qid, payload)] = ended.resent
+    assert qid == "customer.jobs.01"
+    ended2 = Ended(view=_ended_view(
+        required={"goals": "G", "functions": "FR"},
+        answers={"customer.goals.01": dict(GOALS_ANSWER)},
+        asked={"customer.goals.01": "goals"},
+    ))  # fmt: skip
+    _top_up(ended2, _reader("Выгрузка в CSV", ""), _agent({"items": [FR_ITEM]}))
+    [(qid, payload)] = ended2.resent
+    assert qid == "customer.goals.01"
+    assert payload["text"] == "цели\n\nВыгрузка в CSV"
+    assert [e["id"] for e in payload["entries"]] == ["G-01", "FR-01"]
+
+
+def test_top_up_skip_leaves_topic() -> None:
+    ended = Ended()
+    agent = _agent()
+    read = _reader("пропустить", "", "не знаю", "")
+    assert _top_up(ended, read, agent) is ic.ChatResult.FINISHED
+    assert ended.resent == [] and agent.prompts == []
+
+
+def test_top_up_follow_ups_limited() -> None:
+    ended = Ended(view=_ended_view(required={"goals": "G", "jobs": "J"}))
+    ask = {"items": [{"prefix": "J", "body": "Выгрузить"}], "ask": "Когда?"}
+    read = _reader("а", "", "б", "", "в", "")
+    assert _top_up(ended, read, _agent(ask, ask, ask)) is ic.ChatResult.FINISHED
+    [(_qid, payload)] = ended.resent
+    assert "в" in payload["text"]
+
+
+@pytest.mark.parametrize("code", [0, 1, 2])
+def test_no_top_up_unless_incomplete_end(code: int) -> None:
+    ended = Ended(code=code)
+    assert _top_up(ended, _reader(), _agent()) is ic.ChatResult.FINISHED
+    assert ended.resent == []
+
+
+def test_no_top_up_when_required_covered() -> None:
+    ended = Ended(view=_ended_view(required={"goals": "G"}))
+    assert _top_up(ended, _reader(), _agent()) is ic.ChatResult.FINISHED
+    assert ended.resent == []
+
+
+def test_top_up_eof_stops() -> None:
+    ended = Ended()
+    assert _top_up(ended, _reader(), _agent()) is ic.ChatResult.STOPPED
+    assert ended.resent == []
+
+
+def test_top_up_skips_topics_without_prefix() -> None:
+    """Тему без префикса закрывает только ответ на её вопрос — добор её не
+    покроет, человека о ней не спрашиваем."""
+    view = _ended_view(required={"goals": "G", "feasibility_review": None})
+    ended = Ended(view=view)
+    assert _top_up(ended, _reader(), _agent()) is ic.ChatResult.FINISHED
+    assert ended.resent == []

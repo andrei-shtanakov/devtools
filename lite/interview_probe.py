@@ -44,11 +44,21 @@ def _declared(events: list[dict]) -> list[str]:
 
 
 def _answers(events: list[dict]) -> dict[str, dict[str, Any]]:
-    """question_id → тело последнего ответа."""
+    """question_id → тело последнего ответа; порядок — по последнему ответу."""
+    out: dict[str, dict[str, Any]] = {}
+    for e in events:
+        if e.get("event") == "answer_recorded":
+            out.pop(e["question_id"], None)
+            out[e["question_id"]] = _payload(e.get("payload"))
+    return out
+
+
+def _asked(events: list[dict]) -> dict[str, str]:
+    """question_id → coverage_key заданного вопроса (из `question_asked`)."""
     return {
-        e["question_id"]: _payload(e.get("payload"))
+        e["question_id"]: str(e["coverage_key"])
         for e in events
-        if e.get("event") == "answer_recorded"
+        if e.get("event") == "question_asked" and e.get("coverage_key") is not None
     }
 
 
@@ -73,6 +83,7 @@ def build_state(session_id: str) -> dict[str, Any]:
         "answered_keys": sorted(_answered_coverage_keys(events)),
         "readiness": verdict.verdict,
         "findings": list(verdict.findings),
+        "asked": _asked(events),
     }
 
 

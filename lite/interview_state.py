@@ -33,7 +33,10 @@ class Entry:
 
 @dataclass(frozen=True)
 class SessionView:
-    """Снимок сессии `discovery`: фрейм, темы, пункты, ответы, готовность."""
+    """Снимок сессии `discovery`: фрейм, темы, пункты, ответы, готовность.
+
+    `answers` упорядочены по последнему ответу; `asked` — тема заданных
+    вопросов (question_id → coverage_key)."""
 
     frame: str
     required: dict[str, str | None]
@@ -45,6 +48,7 @@ class SessionView:
     answered_keys: list[str]
     readiness: str
     findings: list[str] = field(default_factory=list)
+    asked: dict[str, str] = field(default_factory=dict)
 
     def prefixes(self) -> dict[str, str]:
         """prefix → coverage_key (темы без префикса не входят)."""
@@ -84,6 +88,11 @@ class SessionView:
         ]
         return copy
 
+    def uncovered_required(self) -> list[str]:
+        """Обязательные темы без покрытия (в порядке фрейма)."""
+        covered = self.covered()
+        return [key for key in self.required if key not in covered]
+
     def next_id(self, prefix: str) -> str:
         """Следующий свободный id: после всех когда-либо объявленных."""
         used = [
@@ -120,6 +129,7 @@ def _parse(raw: dict[str, Any]) -> SessionView:
         answered_keys=raw["answered_keys"],
         readiness=raw["readiness"],
         findings=raw["findings"],
+        asked=raw["asked"],
     )
 
 

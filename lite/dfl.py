@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import functools
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -78,6 +79,8 @@ NO_TTY_REFUSAL = "без терминала: dfl answer --file answer.yaml"
 NO_INTERVIEW_REFUSAL = "интервью не идёт — начните: dfl run --subject '<тема>'"
 CHAT_STOPPED = "интервью прервано — продолжить: dfl run"
 INTERRUPTED = "прервано"
+# причина стопа раннера по findings: `_interview_after_reply`, ветка 10/11
+INCOMPLETE_STOP_RE = re.compile(r"(status|brief) вернул 1[01]: ")
 INTERVIEW_COMPLETED_REFUSAL = (
     "интервью завершено, бриф уже собран — поправка в бриф не попадёт"
 )
@@ -337,11 +340,15 @@ def _run_chatting(
 ) -> int:
     """Шаг конвейера; ждёт ответа — интервью разговором и снова шаг.
 
-    Подсказки раннера (`discovery answer …`, `make …`) не печатаются: вопрос
-    показывает сам цикл."""
+    Прогон, остановленный неполным интервью (findings 10/11), тоже ведётся
+    разговором (добор тем), но один раз за вызов: человек мог оставить темы
+    пустыми. Подсказки раннера (`discovery answer …`, `make …`) не
+    печатаются: вопрос показывает сам цикл."""
     with runner.quiet_interview_hints():
         code = _step(target, subject, role)
-        while (state := _waiting_run(target.repo, subject)) is not None:
+        incomplete = True
+        while (state := _waiting_run(target.repo, subject, incomplete)) is not None:
+            incomplete = False
             if _converse(state) is ic.ChatResult.STOPPED:
                 print(CHAT_STOPPED)
                 return 0
@@ -358,8 +365,11 @@ def _author_is_claude() -> bool:
     return df_config.load().author_harness == "claude"
 
 
-def _waiting_run(repo: str, subject: str | None) -> rs.RunState | None:
-    """Прогон конвейера (engineer, иначе customer), ждущий ответа, или `None`."""
+def _waiting_run(
+    repo: str, subject: str | None, incomplete: bool = False
+) -> rs.RunState | None:
+    """Прогон конвейера (engineer, иначе customer), ждущий ответа, или `None`;
+    с `incomplete` — и остановленный неполным интервью."""
     runs, _ = _repo_runs(repo)
     try:
         cust = _select_customer(runs, subject)
@@ -368,7 +378,17 @@ def _waiting_run(repo: str, subject: str | None) -> rs.RunState | None:
     if cust is None:
         return None
     state = _engineer_of(cust, runs) or cust
-    return state if state.status == WAITING else None
+    if state.status == WAITING or (incomplete and _stopped_incomplete(state)):
+        return state
+    return None
+
+
+def _stopped_incomplete(state: rs.RunState) -> bool:
+    """Стоп стадии Need по findings discovery (10/11): интервью неполное."""
+    reason = str((state.interview or {}).get("stop_reason", ""))
+    return state.status == "stopped_interview" and bool(
+        INCOMPLETE_STOP_RE.match(reason)
+    )
 
 
 def _converse(state: rs.RunState) -> ic.ChatResult:
@@ -388,6 +408,7 @@ def _chat(state: rs.RunState) -> ic.ChatResult:
         agent=st.claude_agent(df_config.load().author_model),
         status=lambda session_id: _discovery_status(session_id, cwd),
         send=_sender(state),
+        resend=_sender(state, supersede=True),
         load=load_session,
     )
 

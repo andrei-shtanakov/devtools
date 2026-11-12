@@ -28,6 +28,7 @@ def _raw(**over: object) -> dict:
         "answered_keys": ["functions"],
         "readiness": "incomplete",
         "findings": ["required topic 'goals' is not covered"],
+        "asked": {"customer.functions.01": "functions"},
     }
     return {**base, **over}
 
@@ -61,6 +62,7 @@ def test_load_session_parses_probe_json(fake_runner) -> None:
     assert view.entries == [st.Entry("FR-02", "b", {"Priority": "Must"})]
     assert view.holders == {"FR-02": "customer.functions.01"}
     assert view.readiness == "incomplete"
+    assert view.asked == {"customer.functions.01": "functions"}
     argv = run.calls[0]
     assert argv[:5] == ["uv", "run", "--frozen", "--project", "/ws/discovery"]
     assert argv[5:8] == ["python", "-I", str(st.PROBE)]
@@ -137,6 +139,7 @@ def test_probe_reads_real_session(tmp_path: Path, monkeypatch) -> None:
     assert view.declared == ["G-01", "G-02"]
     assert view.holders == {"G-01": "customer.goals.01"}
     assert view.answers["customer.goals.01"]["text"] == "цели v2"
+    assert view.asked["customer.goals.01"] == "goals"
     assert "goals" in view.answered_keys
     assert view.covered() == {"goals"}
     assert view.next_id("G") == "G-03"

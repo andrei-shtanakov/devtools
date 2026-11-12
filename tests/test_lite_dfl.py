@@ -1254,3 +1254,60 @@ def test_dfl_interview_works_after_interview_completed(env: Env, monkeypatch) ->
         dfl, "_discovery_status", lambda sid, cwd: iv.DiscoveryReply(0, {}, "")
     )
     assert env.run("interview") == 0
+
+
+# --- финальное ревью: I5 (добор тем: замена ответа и остановленный прогон) ---
+
+
+def test_chat_wires_supersede_resend(env: Env, monkeypatch) -> None:
+    state = _waiting("WS-1-a", "WS-1", "customer")
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(dfl.ic, "chat", lambda st, **kw: seen.update(kw) or "x")
+    monkeypatch.setattr(dfl.st, "claude_agent", lambda model: lambda p: "")
+    dfl._chat(state)
+    disc = Discovery()
+    monkeypatch.setattr(dfl, "_discovery_answer", disc)
+    seen["send"]("q-1", "text: a\n")  # type: ignore[operator]
+    seen["resend"]("q-2", "text: b\n")  # type: ignore[operator]
+    assert disc.flags == [("q-1", False), ("q-2", True)]
+
+
+def _stopped(reason: str) -> rs.RunState:
+    state = _waiting("WS-1-a", "WS-1", "customer")
+    assert state.interview is not None
+    state.status = "stopped_interview"
+    state.interview["stop_reason"] = reason
+    rs.save(state)
+    return state
+
+
+def test_dfl_run_tty_incomplete_stop_gets_one_top_up(
+    env: Env, monkeypatch, capsys
+) -> None:
+    """Интервью кончилось неполным (стоп 11): dfl run в терминале — один
+    заход в разговор (добор), затем шаг; снова неполное — без петли."""
+    _tty(monkeypatch)
+    _stopped("status вернул 11: findings в /r/interview-findings.json")
+    seen: list[str] = []
+
+    def chat(state: rs.RunState) -> object:
+        seen.append(state.run_id)
+        return dfl.ic.ChatResult.FINISHED
+
+    monkeypatch.setattr(dfl, "_chat", chat)
+    monkeypatch.setattr(
+        spec_loop, "main", lambda argv: env.spec_calls.append(argv) or 0
+    )
+    assert env.run("run") == 0
+    assert seen == ["WS-1-a"] and len(env.spec_calls) == 2
+
+
+def test_dfl_run_tty_other_interview_stop_not_chatted(env: Env, monkeypatch) -> None:
+    _tty(monkeypatch)
+    _stopped("session_state_unknown: boom")
+    monkeypatch.setattr(dfl, "_chat", lambda state: pytest.fail("цикл"))
+    monkeypatch.setattr(
+        spec_loop, "main", lambda argv: env.spec_calls.append(argv) or 0
+    )
+    assert env.run("run") == 0
+    assert len(env.spec_calls) == 1
