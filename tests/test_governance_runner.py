@@ -7581,6 +7581,11 @@ def test_waves_refuse_to_author_level_when_upstream_not_approved(
     assert ops.authored == ["charter", "requirements"]
     assert resumed.ops["commit-2"]["status"] == "completed"
     assert resumed.status == "waiting_human_merge" and resumed.wave == 2
+    # Причина прошлого стопа не переживает resume: следующий стоп без
+    # собственной записи (пауза волны) иначе нёс бы чужую причину, и кнопка
+    # test читала бы её как свою (живой прогон Linux 12.11: трипвайр 15:05
+    # поверх стопа edge-check 16:06).
+    assert not (rs.run_dir("r-w-up") / "stop-reason.txt").exists()
 
 
 def test_waves_stopped_gate_resume_resets_only_the_wave_range(

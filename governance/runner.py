@@ -1001,6 +1001,13 @@ def resume(run_id: str, ops: Ops, *, lock: rl.RunLock) -> RunState:
             )
     else:
         _refuse_legacy_resume(state)
+    if state.status.startswith("stopped_"):
+        # Причина стопа принадлежит этому стопу: resume его покидает. Не все
+        # стопы пишут `stop-reason.txt` (пауза волны — нет), и оставленный
+        # файл выдавал бы чужую причину за причину следующего стопа — кнопка
+        # test отказала бы в продолжении стопа edge-check текстом трипвайра
+        # (живой прогон Linux 12.11).
+        (run_dir(state.run_id) / "stop-reason.txt").unlink(missing_ok=True)
     if state.status != "completed":
         resumed = _resume_wave(state, ops, lock=lock)
         if resumed is not None:
