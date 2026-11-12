@@ -623,17 +623,46 @@ def test_code_accept_new_head_reviews_again(state):
     assert rec["prev"]["head"] == H0
 
 
+def _merged(ops, head: str = H0):
+    ops.facts[9] = {**ops.facts[9], "state": "MERGED", "headRefOid": head}
+    return ops
+
+
 def test_code_accept_merged_pr_finishes_without_review(state, capsys):
-    """Живой прогон Linux 12.11: человек вмержил PR с кодом, повтор
-    `dfl run` шёл в ревью вмерженного PR и стопил прогон."""
-    ops = _accepting_ops()
-    ops.facts[9] = {**ops.facts[9], "state": "MERGED"}
+    """Живой прогон Linux 12.11: человек вмержил PR с кодом до приёмки,
+    повтор `dfl run` шёл в ревью вмерженного PR и стопил прогон."""
+    from lite.pipeline import accepted_url, merged_unreviewed
+
+    ops = _merged(_accepting_ops())
     for _ in range(2):
         assert auto_tasks._accept_code(state, ops, 9) == 0
     assert _reviews(ops) == []
     rec = state.ops["code-accept"]
-    assert rec["status"] == "completed" and rec["result"]["merged"] is True
-    assert "вмержен — конвейер завершён" in capsys.readouterr().out
+    assert rec["status"] == "completed"
+    assert rec["result"]["merged"] is True and rec["result"]["reviewed"] is False
+    assert accepted_url(state.ops) == URL, "признак конца для lite записан"
+    assert merged_unreviewed(state.ops)
+    out = capsys.readouterr().out
+    assert "конвейер закончен" in out and "проверена; мерж" not in out
+
+
+def test_code_accept_merge_after_check_keeps_checked_result(state):
+    """Ревью #733: проверенный итог с url не затирается мержем той же головы."""
+    auto_tasks._accept_code(state, _accepting_ops(H0), 9)
+    checked = dict(state.ops["code-accept"]["result"])
+    ops = _merged(_accepting_ops(H0))
+    assert auto_tasks._accept_code(state, ops, 9) == 0
+    assert state.ops["code-accept"]["result"] == checked
+    assert _reviews(ops) == []
+
+
+def test_code_accept_merged_new_head_keeps_prev(state):
+    auto_tasks._accept_code(state, _accepting_ops(H0), 9)
+    ops = _merged(_accepting_ops(H1), H1)
+    assert auto_tasks._accept_code(state, ops, 9) == 0
+    rec = state.ops["code-accept"]
+    assert rec["result"]["head"] == H1 and rec["result"]["reviewed"] is False
+    assert rec["prev"]["head"] == H0 and rec["prev"]["url"] == URL
 
 
 def test_code_accept_strict_makes_no_calls(state):

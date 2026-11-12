@@ -26,7 +26,12 @@ from governance import interview as iv
 from governance import run_state as rs
 from governance.facts import Outcome
 from lite.init_repo import DEVTOOLS, init_repo, real_gh
-from lite.pipeline import CHAIN_STOPPED_HINT, accepted_url, chain_open
+from lite.pipeline import (
+    CHAIN_STOPPED_HINT,
+    accepted_url,
+    chain_open,
+    merged_unreviewed,
+)
 
 ENGINEER_SUFFIX = bt.ENGINEER_SUFFIX
 NEW_RUN_HINT = "первый запуск: dfl run --subject '<тема>'"
@@ -249,6 +254,11 @@ def _select_customer(
 
 def _engineer_step(eng: rs.RunState, repo: str) -> int:
     url = _accepted_url(eng)
+    if url is not None and merged_unreviewed(eng.ops):
+        print(
+            f"PR с кодом вмержен без автоматической приёмки: {url}; конвейер закончен"
+        )
+        return 0
     if url is not None:
         print(f"PR с кодом проверен: {url}; мерж — за вами")
         return 0

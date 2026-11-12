@@ -25,6 +25,13 @@ def accepted_url(ops: Mapping[str, object]) -> str | None:
     return str(url) if url else None
 
 
+def merged_unreviewed(ops: Mapping[str, object]) -> bool:
+    """`code-accept` закрыт мержем человека без автоматической приёмки."""
+    record = ops.get("code-accept")
+    result = record.get("result") if isinstance(record, Mapping) else None
+    return isinstance(result, Mapping) and result.get("reviewed") is False
+
+
 def chain_open(
     mode: object, frame: object, status: object, ops: Mapping[str, object]
 ) -> bool:

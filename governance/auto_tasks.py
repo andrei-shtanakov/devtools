@@ -282,27 +282,24 @@ def _accept_code(state: RunState, ops: Ops, pr: int) -> int:
         return 1
     head = str(facts.get("headRefOid") or "")
     record = state.ops.get(key)
-    if facts.get("state") == "MERGED":
-        # Мерж PR с кодом в test — за человеком; после него конвейеру
-        # проверять нечего. Без этой ветки повтор `dfl run` шёл в ревью
-        # вмерженного PR и стопил прогон (живой прогон Linux 12.11).
-        if record is None:
-            op_start(state, key, pr=pr)
-        _complete(state, key, result={"head": head, "merged": True})
-        print(f"spec-loop (test): PR #{pr} с кодом вмержен — конвейер завершён")
-        return 0
-    if record is None:
-        op_start(state, key, pr=pr)
-    elif record.get("status") == "completed":
+    if record is not None and record.get("status") == "completed":
         result = record.get("result") or {}
         if result.get("head") == head:
-            print(
-                f"spec-loop (test): {result.get('url')} — голова {head[:7]} "
-                f"проверена; {accept_pr.ACCEPT_NO_MERGE_TEST}"
+            done = (
+                "вмержена человеком без автоматической приёмки; конвейер закончен"
+                if result.get("reviewed") is False
+                else f"проверена; {accept_pr.ACCEPT_NO_MERGE_TEST}"
             )
+            print(f"spec-loop (test): {result.get('url')} — голова {head[:7]} {done}")
             return 0
+        if facts.get("state") == "MERGED":
+            return _finish_merged(state, key, pr, head, prev=result)
         # Новая голова: прежний итог — в `prev`, вердикт не переносится.
         op_start(state, key, pr=pr, prev=result)
+    elif facts.get("state") == "MERGED":
+        return _finish_merged(state, key, pr, head, prev=None)
+    elif record is None:
+        op_start(state, key, pr=pr)
     test = accept_pr.NoMergeAccept(
         known_positive=lambda h: positive_on(state, key, h),
         record_verdict=lambda v: record_review(state, key, v),
@@ -311,6 +308,32 @@ def _accept_code(state: RunState, ops: Ops, pr: int) -> int:
     return accept_pr.accept(
         state.repo, state.repo_slug, pr, ops, state.target_dir, test=test
     )
+
+
+def _finish_merged(
+    state: RunState, key: str, pr: int, head: str, *, prev: dict | None
+) -> int:
+    """PR с кодом вмержен человеком до проверки этой головы: конвейер закончен.
+
+    Мерж PR с кодом в test — за человеком; после него проверять нечего, а
+    ревью вмерженного PR отказывает (живой прогон Linux 12.11: повтор
+    `dfl run` стопил прогон). Итог — в форме `accept_pr._finish_no_merge`
+    (`url` — признак конца для `lite.pipeline.accepted_url`), с честным
+    `reviewed: False`: эту голову автоматическая приёмка не проверяла.
+    Прежний итог, если был, уходит в `prev`.
+    """
+    url = f"https://github.com/{state.repo_slug}/pull/{pr}"
+    op_start(state, key, pr=pr, **({"prev": prev} if prev else {}))
+    _complete(
+        state,
+        key,
+        result={"pr": pr, "url": url, "head": head, "merged": True, "reviewed": False},
+    )
+    print(
+        f"spec-loop (test): {url} вмержен человеком без автоматической "
+        "приёмки этой головы — конвейер закончен"
+    )
+    return 0
 
 
 def run_chain(state: RunState, ops: Ops, tasks_pr: int) -> int:
