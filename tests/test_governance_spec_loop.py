@@ -1323,6 +1323,25 @@ def test_need_customer_starts_with_interview_spec(
     assert "waiting_interview" in capsys.readouterr().out
 
 
+def test_need_start_hint_printed_outside_quiet_mode(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    _LoopEnv(monkeypatch, tmp_path)
+    assert spec_loop.main(_need()) == 0
+    assert "make spec-loop" in capsys.readouterr().out
+
+
+def test_need_start_hint_suppressed_in_quiet_mode(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    """В пути `dfl` вопрос показывает сам dfl: подсказки `make …` нет."""
+    _LoopEnv(monkeypatch, tmp_path)
+    with runner.quiet_interview_hints():
+        assert spec_loop.main(_need()) == 0
+    out = capsys.readouterr().out
+    assert "waiting_interview" in out and "make spec-loop" not in out
+
+
 @pytest.mark.parametrize(
     "argv,needle",
     [

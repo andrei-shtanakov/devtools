@@ -3090,3 +3090,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       без теста. В `df/` константы утверждённого пути `git` нет (`approved_cli["git"]` —
       значение `install.toml`), поэтому путь надо передать проверяющему из конфигурации
       (запрос или окружение `precheck serve`) и закрепить тестом.
+
+## dfl — интервью разговором (devtools#748)
+
+- [ ] `lite/interview_probe.py` → публичная команда просмотра сессии discovery вместо импорта внутреннего API (`effective_entries`, `entry_holders`, `readiness`, приватный `_answered_coverage_keys`, `FRAMES`) @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:dfl-interview-probe-public-api @blocked_by:todo://discovery/discovery-session-view

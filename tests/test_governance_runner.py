@@ -12204,3 +12204,107 @@ def test_resolve_base_ref_unavailable_falls_back(
     ops.forge = consistent_world()
     assert runner._resolve_base_ref(state, ops) == "main", "фордж переспрошен"
     assert "ветка по умолчанию не установлена" in capsys.readouterr().out
+
+
+# --- quiet_interview_hints: путь dfl сам показывает вопрос (dfl-interview-chat) ---
+
+_HINT_MARKERS = ("discovery answer", "вопрос Q", "ответьте вне spec-loop")
+
+
+def _assert_no_hints(out: str) -> None:
+    assert not any(m in out for m in _HINT_MARKERS), out
+    assert "--supersede" not in out and "make " not in out
+    assert "повторный ответ по findings" not in out
+
+
+def test_quiet_hints_customer_start_stop_on_question(
+    tmp_path, runs_root, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ops = FakeOps(discovery=[("start", _reply(20))])
+    with runner.quiet_interview_hints():
+        state = locked_runner.start(
+            **_start_kwargs(tmp_path, "r-q-start", ops), interview_spec=_need_spec()
+        )
+    assert state.status == "waiting_interview"
+    _assert_no_hints(capsys.readouterr().out)
+
+
+def test_loud_hints_customer_start_unchanged(
+    tmp_path, runs_root, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ops = FakeOps(discovery=[("start", _reply(20))])
+    locked_runner.start(
+        **_start_kwargs(tmp_path, "r-l-start", ops), interview_spec=_need_spec()
+    )
+    out = capsys.readouterr().out
+    assert "discovery answer --session s-1 --role po" in out
+    assert "ответьте вне spec-loop" in out
+
+
+def test_quiet_hints_status_20_resume(
+    tmp_path, runs_root, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ops, _ = _waiting_run(tmp_path, runs_root, "r-q20", [("status", _reply(20))])
+    capsys.readouterr()
+    with runner.quiet_interview_hints():
+        state = locked_runner.resume("r-q20", ops)
+    assert state.status == "waiting_interview"
+    _assert_no_hints(capsys.readouterr().out)
+
+
+@pytest.mark.parametrize("code", [10, 11])
+def test_quiet_hints_findings_keep_stop_reason_and_path(
+    tmp_path, runs_root, code, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ops, _ = _waiting_run(
+        tmp_path, runs_root, f"r-qf{code}", [("status", _reply(code))]
+    )
+    capsys.readouterr()
+    with runner.quiet_interview_hints():
+        state = locked_runner.resume(f"r-qf{code}", ops)
+    assert state.status == "stopped_interview"
+    out = capsys.readouterr().out
+    _assert_no_hints(out)
+    assert "_step_interview:" in out and "interview-findings.txt" in out
+
+
+def test_quiet_hints_engineer_start(
+    tmp_path, runs_root, monkeypatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with runner.quiet_interview_hints():
+        _, state = _engineer_run(
+            tmp_path, monkeypatch, "r-qe", [("start", _eng_reply(20, "r-qe"))]
+        )
+    assert state.status == "waiting_interview"
+    _assert_no_hints(capsys.readouterr().out)
+
+
+def test_loud_hints_engineer_start_unchanged(
+    tmp_path, runs_root, monkeypatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _engineer_run(tmp_path, monkeypatch, "r-le", [("start", _eng_reply(20, "r-le"))])
+    assert "discovery answer" in capsys.readouterr().out
+
+
+def test_quiet_hints_print_status_brief_ready(
+    tmp_path, runs_root, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ops = _brief_only_ops()
+    locked_runner.start(
+        **_start_kwargs(tmp_path, "r-qb", ops),
+        interview_spec=_need_spec(brief_only=True),
+    )
+    state = locked_runner.resume("r-qb", ops)
+    capsys.readouterr()
+    runner._print_status(state)
+    assert "next:          make brief-propose RUN=r-qb" in capsys.readouterr().out
+    with runner.quiet_interview_hints():
+        runner._print_status(state)
+    out = capsys.readouterr().out
+    assert "brief-propose" not in out and "status:        brief_ready" in out
+
+
+def test_quiet_hints_resets_after_exit() -> None:
+    with runner.quiet_interview_hints():
+        assert runner._QUIET_HINTS.get() is True
+    assert runner._QUIET_HINTS.get() is False

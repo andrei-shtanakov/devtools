@@ -1562,11 +1562,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"статус прогона: {started.status}")
         if started.status == "waiting_interview":
-            print(
-                "интервью начато — ответьте стейкхолдеру вне spec-loop и "
-                f"повторите: make spec-loop … ARGS='--need … --run-id "
-                f"{started.run_id}'"
-            )
+            if not runner.interview_hints_quiet():
+                print(
+                    "интервью начато — ответьте стейкхолдеру вне spec-loop и "
+                    f"повторите: make spec-loop … ARGS='--need … --run-id "
+                    f"{started.run_id}'"
+                )
             return 0
         if started.status in WAVE_PAUSES:
             print(_pause_message(started))
