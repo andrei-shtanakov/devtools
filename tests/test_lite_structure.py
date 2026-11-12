@@ -105,10 +105,11 @@ def test_items_of_other_prefixes_allowed() -> None:
 
 
 def test_missing_required_prefix_asks() -> None:
-    agent = _agent({"items": [FR_FULL], "ask": None})
-    got = sx.structure_answer(GOALS, "ответ", _customer(), agent, may_ask=True)
+    # тема функций ещё не покрыта (FR нет), а ответ дал только цель
+    agent = _agent({"items": [{"prefix": "G", "body": "Цель"}], "ask": None})
+    got = sx.structure_answer(FUNCS, "ответ", _customer(), agent, may_ask=True)
     assert isinstance(got, sx.Ask)
-    assert "цели" in got.question
+    assert "функции" in got.question
     assert "G-" not in got.question and "{" not in got.question
 
 
@@ -319,3 +320,25 @@ def test_agent_unavailable_on_retry_not_retried_again() -> None:
     got = sx.structure_answer(GOALS, "ответ", _customer(), agent, may_ask=True)
     assert got == sx.Failed("агент недоступен: код 1")
     assert len(calls) == 2
+
+
+# --- финальное ревью: I2 (тема уже покрыта) ---
+
+GOALS_2 = sx.Question("customer.goals.02", "goals", "Почему сейчас?")
+
+
+def test_covered_topic_follow_up_without_new_item_is_ready() -> None:
+    """Второй вопрос покрытой темы: нового G нет — это не повод переспрашивать."""
+    agent = _agent({"items": [], "ask": None})
+    got = sx.structure_answer(
+        GOALS_2, "квартал горит", _customer(), agent, may_ask=True
+    )
+    assert isinstance(got, sx.Ready)
+    assert len(agent.prompts) == 1
+
+
+def test_uncovered_topic_still_requires_prefix() -> None:
+    view = _customer(entries=[], answered_keys=[])
+    agent = _agent({"items": [], "ask": None})
+    got = sx.structure_answer(GOALS, "ответ", view, agent, may_ask=True)
+    assert isinstance(got, sx.Ask) and "цели" in got.question

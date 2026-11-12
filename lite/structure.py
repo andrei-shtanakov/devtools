@@ -147,11 +147,15 @@ def build_prompt(q: Question, text: str, view: SessionView) -> str:
     """Промпт агента: вопрос, ответ, действующие пункты, правила, схема."""
     topics = view.prefixes()
     prefix = _required_prefix(q, view)
-    need = (
-        f"Для этой темы нужен хотя бы один пункт с префиксом {prefix}."
-        if prefix
-        else "Эта тема покрывается самим ответом: пункты не обязательны."
-    )
+    if not prefix:
+        need = "Эта тема покрывается самим ответом: пункты не обязательны."
+    elif q.coverage_key in view.covered():
+        need = (
+            f"Тема уже раскрыта: новый пункт с префиксом {prefix} — только если "
+            "ответ добавляет что-то новое."
+        )
+    else:
+        need = f"Для этой темы нужен хотя бы один пункт с префиксом {prefix}."
     allowed = "\n".join(f"- {p} — тема {k}" for p, k in topics.items())
     existing = "\n".join(
         f"- {e.id} (тема {topics.get(_prefix_of(e.id), '?')}): {e.body}"
@@ -300,10 +304,14 @@ def _bad_refs(refs: list[str], known: set[str]) -> list[str]:
 
 
 def validate(items: list[dict[str, Any]], q: Question, view: SessionView) -> list[str]:
-    """Смысловые дыры по правилам брифа — уточнения для человека (без id)."""
+    """Смысловые дыры по правилам брифа — уточнения для человека (без id).
+
+    Пункт с префиксом темы требуется, только пока тема не покрыта: на
+    следующие вопросы покрытой темы ответ может и не дать нового пункта."""
     gaps = []
     prefix = _required_prefix(q, view)
-    if prefix and not any(i["prefix"] == prefix for i in items):
+    uncovered = q.coverage_key not in view.covered()
+    if prefix and uncovered and not any(i["prefix"] == prefix for i in items):
         label = TOPIC_LABELS.get(q.coverage_key, q.coverage_key)
         gaps.append(f"Не понял из ответа {label}. {q.text}")
     targets = _trace_prefixes(items)
