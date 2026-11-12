@@ -52,6 +52,13 @@ class FormError(Exception):
     """Ответ агента не по схеме; текст — причина для повтора агента."""
 
 
+class AgentUnavailable(Exception):
+    """Агент не запустился, не уложился во время или упал; текст — причина.
+
+    Не повторяется: переформулировка человеку тут не поможет.
+    """
+
+
 @dataclass(frozen=True)
 class Question:
     """Текущий вопрос интервью."""
@@ -88,18 +95,16 @@ def structure_answer(
     """Разложить ответ человека на пункты и собрать YAML ответа.
 
     Нарушение формы ответа агента — один повтор с текстом ошибки, затем
-    `Failed`. Уточнение агента или смысловая дыра — `Ask`, если `may_ask`;
+    `Failed`; агент недоступен (`AgentUnavailable`) — сразу `Failed` с
+    причиной, без повтора. Уточнение агента или смысловая дыра — `Ask`, если `may_ask`;
     иначе отправляется то, что есть (без выдуманного).
     """
-    prompt = build_prompt(q, text, view)
     try:
-        items, ask = _ask_agent(agent, prompt, view)
-    except FormError as exc:
-        retry = f"{prompt}\n\n{_retry_note(str(exc))}"
-        try:
-            items, ask = _ask_agent(agent, retry, view)
-        except FormError:
-            return Failed(FAILED_TEXT)
+        items, ask = _ask_with_retry(agent, build_prompt(q, text, view), view)
+    except FormError:
+        return Failed(FAILED_TEXT)
+    except AgentUnavailable as exc:
+        return Failed(f"агент недоступен: {exc}")
     if may_ask:
         if ask:
             return Ask(ask)
@@ -107,6 +112,16 @@ def structure_answer(
         if gaps:
             return Ask("\n".join(gaps))
     return Ready(to_payload(text, items, view))
+
+
+def _ask_with_retry(
+    agent: Agent, prompt: str, view: SessionView
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Вызов агента; нарушение формы — один повтор с текстом ошибки."""
+    try:
+        return _ask_agent(agent, prompt, view)
+    except FormError as exc:
+        return _ask_agent(agent, f"{prompt}\n\n{_retry_note(str(exc))}", view)
 
 
 def _ask_agent(
@@ -383,8 +398,8 @@ def _prefix_of(eid: str) -> str:
 def claude_agent(model: str) -> Agent:
     """Агент на `claude -p`: без инструментов, `--safe-mode`, промпт в stdin.
 
-    Сбой запуска, таймаут или ненулевой код — пустой ответ (дальше — путь
-    повтора как у битого JSON).
+    Сбой запуска, таймаут или ненулевой код — `AgentUnavailable` с причиной
+    (первая строка stderr или ошибки), не повтор.
     """
     argv = ["claude", "-p", "--safe-mode", "--tools", "",
             "--model", model, "--output-format", "text"]  # fmt: skip
@@ -399,8 +414,18 @@ def claude_agent(model: str) -> Agent:
                 timeout=AGENT_TIMEOUT,
                 check=False,
             )
-        except (OSError, subprocess.TimeoutExpired):
-            return ""
-        return done.stdout if done.returncode == 0 else ""
+        except subprocess.TimeoutExpired as exc:
+            raise AgentUnavailable(f"нет ответа за {AGENT_TIMEOUT} с") from exc
+        except OSError as exc:
+            raise AgentUnavailable(_first_line(str(exc)) or repr(exc)) from exc
+        if done.returncode != 0:
+            reason = _first_line(done.stderr or "")
+            raise AgentUnavailable(reason or f"код {done.returncode}")
+        return done.stdout
 
     return agent
+
+
+def _first_line(text: str) -> str:
+    """Первая непустая строка текста (причина для человека)."""
+    return next((ln.strip() for ln in text.splitlines() if ln.strip()), "")

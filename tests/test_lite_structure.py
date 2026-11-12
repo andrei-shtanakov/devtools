@@ -272,18 +272,50 @@ def test_claude_agent_argv_has_safe_mode_and_model(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
-    "outcome",
+    ("outcome", "cause"),
     [
-        subprocess.TimeoutExpired(["claude"], 300),
-        OSError("нет claude"),
-        subprocess.CompletedProcess(["claude"], 1, '{"items": []}', "сбой"),
+        (subprocess.TimeoutExpired(["claude"], 300), "300"),
+        (OSError("нет claude"), "нет claude"),
+        (
+            subprocess.CompletedProcess(
+                ["claude"], 1, '{"items": []}', "Not logged in\nподробности"
+            ),
+            "Not logged in",
+        ),
+        (subprocess.CompletedProcess(["claude"], 2, "", ""), "код 2"),
     ],
 )
-def test_claude_agent_failure_is_broken_answer(monkeypatch, outcome) -> None:
+def test_claude_agent_failure_not_retried_and_named(
+    monkeypatch, outcome, cause: str
+) -> None:
+    calls: list[list[str]] = []
+
     def run(argv, **kw):
+        calls.append(argv)
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
 
     monkeypatch.setattr(sx.subprocess, "run", run)
-    assert sx.claude_agent("m")("p") == ""
+    got = sx.structure_answer(
+        GOALS, "ответ", _customer(), sx.claude_agent("m"), may_ask=True
+    )
+    assert len(calls) == 1
+    assert isinstance(got, sx.Failed)
+    assert got.message.startswith("агент недоступен: ")
+    assert cause in got.message and "\n" not in got.message
+    assert got.message != sx.FAILED_TEXT
+
+
+def test_agent_unavailable_on_retry_not_retried_again() -> None:
+    calls: list[str] = []
+
+    def agent(prompt: str) -> str:
+        calls.append(prompt)
+        if len(calls) == 1:
+            return "не JSON"
+        raise sx.AgentUnavailable("код 1")
+
+    got = sx.structure_answer(GOALS, "ответ", _customer(), agent, may_ask=True)
+    assert got == sx.Failed("агент недоступен: код 1")
+    assert len(calls) == 2
