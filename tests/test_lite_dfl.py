@@ -329,7 +329,12 @@ def test_status_lists_runs_no_effects(env: Env, monkeypatch, capsys) -> None:
     assert env.run("status") == 0
     out = capsys.readouterr().out
     assert "WS-1-a" in out and "WS-3-a" in out and "мерж брифа, затем dfl run" in out
-    assert "WS-1-eng-b" in out and "https://github.com/o/alpha/pull/9" in out
+    # в репо есть незаконченные WS-2/WS-3: новую тему не предлагаем (#739)
+    assert (
+        "дальше: смержите https://github.com/o/alpha/pull/9 — конвейер закончен\n"
+        in out
+    )
+    assert "новая тема" not in out
     assert "WS-2-a" in out and "разберите причину выше и dfl run" in out
     assert "WS-9-a" not in out
     assert _no_effects(env) and env.registered == 0
@@ -667,3 +672,54 @@ def test_resume_does_not_require_init_files(env: Env) -> None:
     _run("WS-1-a", "WS-1", "customer", "running")
     assert env.run("run") == 0
     assert env.spec_calls
+
+
+@pytest.mark.parametrize("reviewed", [True, False])
+def test_status_merged_code_pr_is_finished(
+    env: Env, monkeypatch, capsys, reviewed: bool
+) -> None:
+    """devtools#737: вмерженный PR с кодом — не «дальше: <url>», а конец."""
+    _status_target(env, monkeypatch)
+    eng = _run("WS-1-eng-b", "WS-1-eng", "engineer", "completed")
+    url = "https://github.com/o/alpha/pull/9"
+    eng.ops["code-accept"] = {
+        "status": "completed",
+        "result": {"url": url, "merged": True, "reviewed": reviewed},
+    }
+    rs.save(eng)
+    assert env.run("status") == 0
+    out = capsys.readouterr().out
+    assert f"конвейер закончен ({url} вмержен)" in out
+    assert "смержите" not in out
+
+
+def test_run_after_reviewed_merge_says_finished(env: Env, capsys) -> None:
+    """Ревью одобрило, приёмка не завершилась, человек вмержил (ревью #739):
+    не «мерж — за вами» и не «проверен» — оговорка приёмки сохраняется."""
+    _run("WS-1-a", "WS-1", "customer", "brief_ready")
+    eng = _run("WS-1-eng-b", "WS-1-eng", "engineer", "completed")
+    url = "https://github.com/o/alpha/pull/9"
+    eng.ops["code-accept"] = {
+        "status": "completed",
+        "result": {"url": url, "merged": True, "reviewed": True},
+    }
+    rs.save(eng)
+    assert env.run("run", "--subject", "тема") == 0
+    out = capsys.readouterr().out
+    assert (
+        "PR с кодом вмержен человеком после одобряющего ревью, приёмка не "
+        f"завершена: {url}; конвейер закончен"
+    ) in out
+    assert "мерж — за вами" not in out and "проверен" not in out
+    assert _no_effects(env)
+
+
+def test_status_hint_for_accepted_pr_is_runnable(env: Env, monkeypatch, capsys) -> None:
+    """Ревью #739: подсказка не ведёт в `dfl run`, который откажет кодом 2."""
+    _status_target(env, monkeypatch)
+    _accepted(_run("WS-1-eng-b", "WS-1-eng", "engineer", "completed"))
+    assert env.run("status") == 0
+    out = capsys.readouterr().out
+    assert "затем dfl run" not in out
+    assert "новая тема: dfl run --subject '<тема>'" in out
+    assert env.run("run") == 2  # и правда: без --subject продолжать нечего

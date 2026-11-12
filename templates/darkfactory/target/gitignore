@@ -1,0 +1,7 @@
+# DarkFactory (dfl init-repo): кэши, которые оставляет исполнение задач —
+# без них дерево после прогона грязное и приёмка PR останавливается.
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/

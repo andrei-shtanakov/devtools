@@ -27,6 +27,9 @@ _SPEC_RUNNER = (
     "templates/darkfactory/target/spec-runner.config.yaml",
     "spec-runner.config.yaml",
 )
+GITIGNORE = ".gitignore"
+_GITIGNORE_TEMPLATE = "templates/darkfactory/target/gitignore"
+_GITIGNORE_MARK = "# DarkFactory (dfl init-repo)"
 _REVIEW_KIT = (
     "apply-threshold.sh",
     "build-prompt.sh",
@@ -144,8 +147,39 @@ def review_rules_refusal(slug: str, branch: str, gh: Gh) -> str | None:
 
 
 def conflicts(repo: Path) -> list[str]:
-    """Пути назначения, уже существующие в рабочем дереве `repo`."""
-    return [dst for _, dst in TEMPLATE_FILES if (repo / dst).exists()]
+    """Пути назначения, уже существующие в рабочем дереве `repo`.
+
+    `.gitignore` дополняется, а не заменяется, — конфликт он лишь тогда,
+    когда это не обычный файл (ссылка, каталог): дописывать туда нельзя.
+    """
+    found = [dst for _, dst in TEMPLATE_FILES if (repo / dst).exists()]
+    ignore = repo / GITIGNORE
+    if ignore.is_symlink() or (ignore.exists() and not ignore.is_file()):
+        found.append(GITIGNORE)
+    return found
+
+
+def gitignore_update(repo: Path, devtools: Path) -> str | None:
+    """Новый текст `.gitignore` репо или `None`, если менять нечего (#735).
+
+    Нет файла — копия шаблона. Есть — в конец дописываются только строки
+    шаблона, которых в нём нет (сравнение по строке без пробелов по краям);
+    свои строки владельца не трогаются и не переупорядочиваются.
+    """
+    template = (devtools / _GITIGNORE_TEMPLATE).read_text(encoding="utf-8")
+    path = repo / GITIGNORE
+    if not path.exists():
+        return template
+    current = path.read_text(encoding="utf-8")
+    have = {line.strip() for line in current.splitlines()}
+    wanted = [
+        line for line in template.splitlines() if line and not line.startswith("#")
+    ]
+    missing = [line for line in wanted if line not in have]
+    if not missing:
+        return None
+    sep = "" if not current or current.endswith("\n") else "\n"
+    return f"{current}{sep}\n{_GITIGNORE_MARK}\n" + "\n".join(missing) + "\n"
 
 
 def _git(run: Runner, repo: Path, *args: str) -> str:
@@ -263,8 +297,11 @@ def _doc_link(run: Runner, devtools: Path) -> str:
     return f"https://github.com/{slug}/blob/master/{COLLEAGUE_DOC}"
 
 
-def _pr_body(link: str) -> str:
-    files = "\n".join(f"- `{dst}`" for _, dst in TEMPLATE_FILES)
+def _pr_body(link: str, ignore: bool) -> str:
+    lines = [f"- `{dst}`" for _, dst in TEMPLATE_FILES]
+    if ignore:
+        lines.append(f"- `{GITIGNORE}` (недостающие строки)")
+    files = "\n".join(lines)
     return (
         "Подготовка репо к конвейеру DarkFactory (`dfl init-repo`).\n\n"
         f"Добавляемые файлы:\n{files}\n\n"
@@ -316,10 +353,10 @@ def _label_pr(slug: str, url: str, gh: Gh) -> None:
         )
 
 
-def _open_pr(slug: str, base: str, gh: Gh, link: str) -> str:
+def _open_pr(slug: str, base: str, gh: Gh, body: str) -> str:
     done = gh(
         ["pr", "create", "--repo", slug, "--base", base, "--head", INIT_BRANCH,
-         "--title", COMMIT_MESSAGE, "--body", _pr_body(link)]
+         "--title", COMMIT_MESSAGE, "--body", body]
     )  # fmt: skip
     if done.returncode != 0:
         raise InitError(
@@ -338,10 +375,16 @@ def _publish(
     _git(run, repo, "switch", "-c", INIT_BRANCH)
     try:
         _copy_files(repo, devtools)
-        _git(run, repo, "add", "--", *(dst for _, dst in TEMPLATE_FILES))
+        paths = [dst for _, dst in TEMPLATE_FILES]
+        ignore = gitignore_update(repo, devtools)
+        if ignore is not None:
+            (repo / GITIGNORE).write_text(ignore, encoding="utf-8")
+            paths.append(GITIGNORE)
+        _git(run, repo, "add", "--", *paths)
         _git(run, repo, "commit", "-m", COMMIT_MESSAGE)
         _git(run, repo, "push", "-u", "origin", INIT_BRANCH)
-        return _open_pr(slug, base, gh, _doc_link(run, devtools))
+        body = _pr_body(_doc_link(run, devtools), ignore is not None)
+        return _open_pr(slug, base, gh, body)
     finally:
         _git(run, repo, "switch", base)
 
