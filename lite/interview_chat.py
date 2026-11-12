@@ -67,16 +67,20 @@ def chat(
 
     `read` — строка ввода (`None` — EOF), `status`/`load` — по `session_id`,
     `send(question_id, yaml)` — ответ на вопрос. Агент недоступен —
-    `ChatError`."""
+    `ChatError`. Ctrl-C во время работы агента или `discovery` — выход
+    (`STOPPED`), как и на вопросе: отправленное уже записано."""
     session = str((state.interview or {}).get("session_id"))
-    while True:
-        q = current_question(status(session))
-        if q is None:
-            return ChatResult.FINISHED
-        try:
+    try:
+        while True:
+            q = current_question(status(session))
+            if q is None:
+                return ChatResult.FINISHED
             _answer_question(q, load(session), read, agent, send)
-        except _Stop:
-            return ChatResult.STOPPED
+    except _Stop:
+        return ChatResult.STOPPED
+    except KeyboardInterrupt:
+        print()
+        return ChatResult.STOPPED
 
 
 def current_question(reply: iv.DiscoveryReply) -> Question | None:

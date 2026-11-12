@@ -77,6 +77,7 @@ CHAT_HARNESS_REFUSAL = (
 NO_TTY_REFUSAL = "без терминала: dfl answer --file answer.yaml"
 NO_INTERVIEW_REFUSAL = "интервью не идёт — начните: dfl run --subject '<тема>'"
 CHAT_STOPPED = "интервью прервано — продолжить: dfl run"
+INTERRUPTED = "прервано"
 INIT_FILES = (
     "profiles/team-exp.yaml",
     "scripts/review/local.sh",
@@ -101,12 +102,16 @@ def cli(argv: list[str] | None = None) -> int:
     """Точка входа обёртки `dfl`: вывод дублируется в запись сбоя.
 
     Неперехваченное исключение печатается traceback'ом, как прежде, с кодом 1,
-    и последней строкой — подсказка `dfl report`. Запись сбоя — после выхода
-    из `tee_output`: только тогда вывод дочитан целиком."""
+    и последней строкой — подсказка `dfl report`. Ctrl-C — одна строка
+    «прервано», код 130, без трассировки и записи сбоя. Запись сбоя — после
+    выхода из `tee_output`: только тогда вывод дочитан целиком."""
     pending: list[Callable[[list[str]], None]] = []
     with tee_output() as tail:
         try:
             code = main(argv, defer=pending)
+        except KeyboardInterrupt:
+            print(f"\n{INTERRUPTED}", file=sys.stderr)
+            code = 130
         except Exception:  # noqa: BLE001 — верхний уровень: traceback, код 1
             traceback.print_exc()
             print(REPORT_HINT, file=sys.stderr)

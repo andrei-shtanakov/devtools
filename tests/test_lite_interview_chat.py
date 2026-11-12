@@ -467,3 +467,28 @@ def test_correct_no_actual_change_is_not_understood() -> None:
     same = _fr1_item(body="выгрузка раз в неделю")
     with pytest.raises(iview.CorrectError, match="не понял"):
         _correct(_agent({"items": [same], "ask": None}), Sender())
+
+
+# --- финальное ревью: I1 (Ctrl-C во время работы агента и discovery) ---
+
+
+def test_ctrl_c_while_agent_works_stops_without_send() -> None:
+    def interrupted(prompt: str) -> str:
+        raise KeyboardInterrupt
+
+    disc = Discovery()
+    assert _chat(disc, _reader("Сверять", ""), interrupted) is ic.ChatResult.STOPPED
+    assert disc.sent == []
+
+
+def test_ctrl_c_while_discovery_works_stops() -> None:
+    disc = Discovery()
+
+    def status(session_id: str) -> iv.DiscoveryReply:
+        raise KeyboardInterrupt
+
+    got = ic.chat(
+        _state(), read=_reader(), agent=_agent(), status=status,
+        send=disc.send, load=disc.load,
+    )  # fmt: skip
+    assert got is ic.ChatResult.STOPPED

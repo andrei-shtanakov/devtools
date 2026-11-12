@@ -815,6 +815,20 @@ def test_cli_prints_hint_after_traceback(env: Env, monkeypatch, capsys) -> None:
     assert err.rstrip().endswith(dfl.REPORT_HINT)
 
 
+def test_cli_ctrl_c_is_quiet(env: Env, monkeypatch, capsys) -> None:
+    """I1: Ctrl-C вне разговора — одна строка «прервано», код 130, без трассировки."""
+
+    def interrupted(cwd: Path) -> int:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(dfl, "status", interrupted)
+    monkeypatch.setattr(dfl, "tee_output", _no_tee)
+    assert dfl.cli(["--cwd", str(env.tmp / "target"), "status"]) == 130
+    captured = capsys.readouterr()
+    assert captured.err.strip() == "прервано"
+    assert "Traceback" not in captured.err + captured.out
+
+
 class _NoTail:
     def lines(self) -> list[str]:
         return []
