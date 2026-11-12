@@ -306,3 +306,67 @@ def test_profile_falls_back_to_default_gh(monkeypatch) -> None:
 
     monkeypatch.setattr(df_config, "load", broken)
     assert rp._profile() is None
+
+
+# --- финальное ревью: отпечаток (I4) и Markdown публичного тела ---
+
+
+def test_fingerprint_ignores_run_id_suffix() -> None:
+    a = _rec(cause="прогон cli-x-20261111-09de97 остановлен")
+    b = _rec(cause="прогон cli-x-20261112-c4f581 остановлен")
+    assert rp.fingerprint(a, "") == rp.fingerprint(b, "")
+    assert rp.normalize("facade deface") == "facade deface"  # слова из hex-букв целы
+
+
+def test_build_last_op_only_from_runs_changed_by_call() -> None:
+    run = {
+        "run_id": "r",
+        "status": "s",
+        "wave": "1",
+        "pr": "None",
+        "last_op_name": "s4",
+        "last_op": "s4 started",
+        "stop_reason": "",
+        "note": "",
+    }
+    changed = rp.build(_rec(), rp.Facts(runs=[run]))
+    stale = rp.build(
+        _rec(runs_note="вызов его не менял"),
+        rp.Facts(runs=[{**run, "note": "вызов его не менял"}]),
+    )
+    assert changed.fp == rp.fingerprint(_rec(), "s4")
+    assert stale.fp == rp.fingerprint(_rec(), "")
+
+
+def test_build_neutralizes_mentions_and_refs() -> None:
+    rep = rp.build(_rec(cause="PR #12 от @alice"), FACTS)
+    assert "@alice" not in rep.title and "#12" not in rep.title
+    body_outside_code = rep.body.split("## Вывод")[0]
+    assert "`PR #12 от @alice`" in body_outside_code
+
+
+def test_build_fence_longer_than_backticks_in_output() -> None:
+    rep = rp.build(_rec(output_tail=["```", "after"]), FACTS)
+    assert "````\n" in rep.body
+
+
+def test_report_ctrl_d_is_decline(failed: Path, capsys) -> None:
+    def eof(_q: str) -> str:
+        raise EOFError
+
+    gh = FakeGh()
+    code = rp.run_report(failed, print_only=False, gh=gh, ask=eof, is_tty=lambda: True)
+    assert code == 0
+    assert gh.verbs() == ["issue list"]
+    assert "не отправлено" in capsys.readouterr().out
+
+
+def test_versions_survive_broken_components(monkeypatch) -> None:
+    from lite import install
+
+    def broken(*a, **kw):
+        raise install.InstallError("битая комплектация")
+
+    monkeypatch.setattr(rp, "load_components", broken)
+    monkeypatch.setattr(rp, "_cmd", lambda argv: "v")
+    assert rp._versions()["components"] == "нет (битая комплектация)"

@@ -144,3 +144,11 @@ def test_cause_from_printed_refusal_block(runs_root: Path) -> None:
         "  что сделать: y",
     ]
     assert fl.cause_from(None, [], tail) == "нет origin"
+
+
+def test_snapshot_runs_survives_bad_runs_root(tmp_path: Path, monkeypatch) -> None:
+    def bad() -> list[str]:
+        raise ValueError("битое имя")
+
+    monkeypatch.setattr(rs, "all_run_ids", bad)
+    assert fl.snapshot_runs() == {}

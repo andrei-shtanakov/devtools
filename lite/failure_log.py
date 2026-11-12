@@ -85,7 +85,11 @@ def load(cwd: Path) -> FailureRecord | None:
 def snapshot_runs() -> RunsSnapshot:
     """`run_id` → mtime `run.json` по всем прогонам."""
     out: RunsSnapshot = {}
-    for run_id in rs.all_run_ids():
+    try:
+        run_ids = rs.all_run_ids()
+    except (OSError, ValueError):
+        return out  # снимок — подсказка для отчёта, не повод менять код dfl
+    for run_id in run_ids:
         try:
             out[run_id] = (rs.run_dir(run_id) / "run.json").stat().st_mtime
         except OSError:

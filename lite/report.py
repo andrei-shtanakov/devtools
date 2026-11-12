@@ -23,7 +23,7 @@ from governance import df_config
 from governance import run_state as rs
 from lite.failure_log import FailureRecord
 from lite.failure_log import load as load_record
-from lite.install import load_components
+from lite.install import InstallError, load_components
 from lite.output import refusal
 
 REPORT_REPO = "andrei-shtanakov/devtools"
@@ -56,7 +56,8 @@ _NORMALIZE = (
     (re.compile(r"https?://\S+"), "<url>"),
     (re.compile(r"'[^']*'|\"[^\"]*\""), "<q>"),
     (re.compile(r"(?:~|(?<![\w.])/)[^\s:'\"]*"), "<path>"),
-    (re.compile(r"\b[0-9a-f]{7,40}\b"), "<sha>"),
+    # SHA и суффиксы run_id: hex-слово от 6 знаков, в котором есть цифра
+    (re.compile(r"\b(?=[0-9a-f]*\d)[0-9a-f]{6,40}\b"), "<sha>"),
     (re.compile(r"#?\d+"), "<n>"),
 )
 _TOOLS = ("claude", "gh", "uv", "git")
@@ -121,10 +122,13 @@ def collect_facts(rec: FailureRecord) -> Facts:
 
 def build(rec: FailureRecord, facts: Facts) -> Report:
     """Заголовок и Markdown-тело отчёта (очищенные), с отпечатком."""
-    last_op = facts.runs[0].get("last_op_name", "") if facts.runs else ""
+    # Операция — только прогона, изменённого вызовом: у прогона «вызов его не
+    # менял» она к сбою не относится и ломала бы склейку повторов.
+    changed = facts.runs and not rec.runs_note
+    last_op = facts.runs[0].get("last_op_name", "") if changed else ""
     fp = fingerprint(rec, last_op)
     home = Path.home()
-    cause = redact(rec.cause, home)
+    cause = _inert(redact(rec.cause, home))
     title = f"[dfl-report] {rec.command}: {cause[:TITLE_CAUSE]} (fp {fp})"
     tail = [redact(line, home) for line in rec.output_tail]
     head = redact(_head(rec, facts), home)
@@ -139,7 +143,7 @@ def _head(rec: FailureRecord, facts: Facts) -> str:
             f"**Команда:** `dfl {' '.join(rec.argv)}` — код {rec.exit_code}, "
             f"{rec.time}, репо `{rec.cwd_repo or 'неизвестно'}`"
         ),
-        f"**Причина:** {rec.cause}",
+        f"**Причина:** {_code(rec.cause)}",
         "",
         "## Где остановилось",
         "",
@@ -153,7 +157,7 @@ def _head(rec: FailureRecord, facts: Facts) -> str:
             + (f" ({run['note']})" if run["note"] else "")
         )
         if run["stop_reason"]:
-            lines.append(f"  - stop-reason: {run['stop_reason']}")
+            lines.append(f"  - stop-reason: {_code(run['stop_reason'])}")
     return "\n".join(lines)
 
 
@@ -164,15 +168,34 @@ def _foot(facts: Facts) -> str:
     return "\n".join(lines)
 
 
+_ZWSP = "\u200b"
+
+
+def _inert(text: str) -> str:
+    """Заголовок: `@имя` и `#N` не упоминают и не ссылаются (нулевой пробел)."""
+    return re.sub(r"([@#])(?=\w)", lambda m: m.group(1) + _ZWSP, text)
+
+
+def _code(text: str) -> str:
+    """Встроенный код Markdown: внутри `@`/`#N` инертны; обратные кавычки → `'`."""
+    return f"`{text.replace('`', "'")}`" if text else "—"
+
+
+def _longest_backticks(lines: list[str]) -> int:
+    runs = (len(m) for line in lines for m in re.findall(r"`+", line))
+    return max(runs, default=0)
+
+
 def _fit(head: str, tail: list[str], foot: str) -> str:
     """Собрать тело; не влезает в `BODY_LIMIT` — срезать начало хвоста."""
+    fence = "`" * max(3, _longest_backticks(tail) + 1)
     dropped = 0
     while True:
         note = f"… (обрезано {dropped} строк)\n" if dropped else ""
         out = (
-            f"{head}\n\n## Вывод\n\n```\n{note}"
+            f"{head}\n\n## Вывод\n\n{fence}\n{note}"
             + "\n".join(tail[dropped:])
-            + f"\n```\n\n{foot}"
+            + f"\n{fence}\n\n{foot}"
         )
         if len(out) <= BODY_LIMIT or dropped >= len(tail):
             return out[:BODY_LIMIT]
@@ -208,7 +231,7 @@ def _versions() -> dict[str, str]:
     out = {"devtools": _cmd(["git", "-C", str(DEVTOOLS), "rev-parse", "HEAD"])}
     try:
         components = load_components()
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, InstallError) as exc:
         out["components"] = f"нет ({exc})"
         components = []
     for comp in components:
@@ -327,7 +350,12 @@ def _report(
         if duplicate
         else f"Отправить в {REPORT_REPO} как публичное issue? [y/N] "
     )
-    if ask(question).strip().lower() not in YES:
+    try:
+        answer = ask(question)
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+        print()
+    if answer.strip().lower() not in YES:
         print("не отправлено")
         return 0
     if duplicate:

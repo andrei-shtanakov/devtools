@@ -41,7 +41,7 @@ def _scenario(tmp_path: Path, body: str) -> tuple[subprocess.CompletedProcess, l
     return done, json.loads(out.read_text())
 
 
-def test_tee_keeps_screen_and_collects_python_and_child(tmp_path: Path) -> None:
+def test_tee_keeps_screen_and_collects_python_output(tmp_path: Path) -> None:
     done, tail = _scenario(
         tmp_path,
         """
@@ -53,7 +53,9 @@ def test_tee_keeps_screen_and_collects_python_and_child(tmp_path: Path) -> None:
     assert done.returncode == 0, done.stderr
     assert "py out" in done.stdout and "child out" in done.stdout
     assert "py err" in done.stderr and "child err" in done.stderr
-    assert {"py out", "py err", "child out", "child err"} <= set(tail)
+    assert {"py out", "py err"} <= set(tail)
+    # дочерние процессы пишут в настоящие fd напрямую — вне хвоста (ревью I1–I3)
+    assert "child out" not in tail
 
 
 def test_tee_keeps_last_n_lines(tmp_path: Path) -> None:
@@ -89,20 +91,44 @@ def test_tee_keeps_partial_last_line(tmp_path: Path) -> None:
     assert tail == ["no newline"]
 
 
-def test_tee_does_not_hang_on_surviving_child(tmp_path: Path) -> None:
-    # потомок пережил вызов и держит pipe — выход из блока не ждёт его
-    import time
+def test_tee_does_not_hang_on_broken_screen(tmp_path: Path) -> None:
+    # stdout закрыт читателем (`dfl … | head`): вывод не виснет (ревью I1)
+    out = tmp_path / "tail.json"
+    script = (
+        "import json, sys\n"
+        "from lite.tee import tee_output\n"
+        "with tee_output() as tail:\n"
+        "    try:\n"
+        "        for i in range(200000):\n"
+        "            print('x' * 50)\n"
+        "    except BrokenPipeError:\n"
+        "        pass\n"
+        f"open({str(out)!r}, 'w').write(json.dumps(len(tail.lines())))\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    assert proc.stdout is not None
+    proc.stdout.read(10)
+    proc.stdout.close()
+    assert proc.wait(timeout=20) is not None
 
-    t0 = time.monotonic()
-    _done, tail = _scenario(
+
+def test_tee_wrapper_delegates_stream_attributes(tmp_path: Path) -> None:
+    done, _tail = _scenario(
         tmp_path,
         """
-        subprocess.Popen(["sh", "-c", "sleep 30"], start_new_session=True)
-        print("done")
+        assert sys.stdout.fileno() == 1 and sys.stderr.fileno() == 2
+        assert isinstance(sys.stdout.isatty(), bool)
+        sys.stdout.buffer.write(b"raw bytes\\n")
+        print(sys.stdout.encoding)
         """,
     )
-    assert time.monotonic() - t0 < 15
-    assert "done" in tail
+    assert done.returncode == 0, done.stderr
+    assert "raw bytes" in done.stdout
 
 
 def test_dfl_cli_record_has_full_tail(tmp_path: Path) -> None:
