@@ -195,7 +195,7 @@ def _lagging(monkeypatch: pytest.MonkeyPatch, lag: int, ancestor: bool | None):
         return "old" if len(reads) <= lag else HEAD
 
     monkeypatch.setattr(publish.an, "pr_head", pr_head)
-    monkeypatch.setattr(publish.time, "sleep", lambda s: None)
+    monkeypatch.setattr(publish, "_SLEEP", lambda s: None)
     return state, _LaggingForge(ancestor), reads
 
 
@@ -219,7 +219,10 @@ def test_publish_wave_waits_for_forge_to_catch_up_after_push(
     ids=["our-old-head", "ancestry-unknown", "foreign-push"],
 )
 def test_publish_wave_stale_head_after_wait(
-    monkeypatch: pytest.MonkeyPatch, ancestor: bool | None, code: int
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    ancestor: bool | None,
+    code: int,
 ) -> None:
     """Форджа так и не догнала: наша прежняя голова — повтор resume
     (`UNRESOLVED`), чужая — `HEAD_MOVED`; ревью не публикуется."""
@@ -227,3 +230,5 @@ def test_publish_wave_stale_head_after_wait(
     assert publish.publish_wave(state, forge, KEY, PASS_RECORDS) == code
     assert len(reads) == publish._HEAD_SETTLE_TRIES
     assert forge.fetched == ["spec/x"] and forge.published == []
+    lagging = "форджа отстаёт" in capsys.readouterr().out
+    assert lagging == (code == publish.CODE_UNRESOLVED), "причина названа верно"

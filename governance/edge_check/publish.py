@@ -18,8 +18,9 @@ push + PR + одно ревью на эту голову. Повтор идем�
 ревью с маркером на эту голову уже есть ⇒ публикуется ничего.
 
 Коды: 0 — опубликовано; 1 — вердикт не PASS либо у человека действующее
-CHANGES_REQUESTED (не гасится); 3 — факт не установлен (ревью/сеть);
-4 — голова PR не равна записанной (чужой push).
+CHANGES_REQUESTED (не гасится); 3 — факт не установлен (ревью/сеть либо
+форджа не догнала наш push за отведённое ожидание — причина печатается);
+4 — голова PR не равна записанной и не наша (чужой push).
 """
 
 from __future__ import annotations
@@ -44,6 +45,8 @@ CODE_OK, CODE_CHANGES, CODE_UNRESOLVED, CODE_HEAD_MOVED = 0, 1, 3, 4
 #: `_HEAD_SETTLE_TRIES` раз с паузой `_HEAD_SETTLE_DELAY` секунд.
 _HEAD_SETTLE_TRIES = 5
 _HEAD_SETTLE_DELAY = 3.0
+#: Точка подмены паузы в тестах (как `approve_node._SLEEP`).
+_SLEEP = time.sleep
 
 
 def evidence_dir(state: RunState) -> str:
@@ -285,11 +288,16 @@ def _pushed_head_code(state: RunState, ops: Ops, pr: int, op: dict) -> int | Non
         if remote == head:
             return None
         if attempt + 1 < _HEAD_SETTLE_TRIES:
-            time.sleep(_HEAD_SETTLE_DELAY)
+            _SLEEP(_HEAD_SETTLE_DELAY)
     if remote is None:
         return CODE_UNRESOLVED
     ops.fetch_branch(state.target_dir, op["branch"])
     ours = ops.is_ancestor(state.target_dir, remote, head)
     if ours is None or ours:
+        print(
+            f"publish: голова PR #{pr} ({remote[:8]}) не догнала наш push "
+            f"({head[:8]}) за {_HEAD_SETTLE_TRIES} чтений — форджа отстаёт, "
+            "не чужой push; повторите resume"
+        )
         return CODE_UNRESOLVED
     return CODE_HEAD_MOVED
