@@ -623,11 +623,79 @@ def test_code_accept_new_head_reviews_again(state):
     assert rec["prev"]["head"] == H0
 
 
+def _merged(ops, head: str = H0):
+    ops.facts[9] = {**ops.facts[9], "state": "MERGED", "headRefOid": head}
+    return ops
+
+
+def test_code_accept_merged_pr_finishes_without_review(state, capsys):
+    """Живой прогон Linux 12.11: человек вмержил PR с кодом до приёмки,
+    повтор `dfl run` шёл в ревью вмерженного PR и стопил прогон."""
+    from lite.pipeline import accepted_url, merged_unreviewed
+
+    ops = _merged(_accepting_ops())
+    for _ in range(2):
+        assert auto_tasks._accept_code(state, ops, 9) == 0
+    assert _reviews(ops) == []
+    rec = state.ops["code-accept"]
+    assert rec["status"] == "completed"
+    assert rec["result"]["merged"] is True and rec["result"]["reviewed"] is False
+    assert accepted_url(state.ops) == URL, "признак конца для lite записан"
+    assert merged_unreviewed(state.ops)
+    out = capsys.readouterr().out
+    assert "конвейер закончен" in out and "проверена; мерж" not in out
+
+
+def test_code_accept_merge_after_check_keeps_checked_result(state):
+    """Ревью #733: проверенный итог с url не затирается мержем той же головы."""
+    auto_tasks._accept_code(state, _accepting_ops(H0), 9)
+    checked = dict(state.ops["code-accept"]["result"])
+    ops = _merged(_accepting_ops(H0))
+    assert auto_tasks._accept_code(state, ops, 9) == 0
+    assert state.ops["code-accept"]["result"] == checked
+    assert _reviews(ops) == []
+
+
+def test_code_accept_merged_new_head_keeps_prev(state):
+    auto_tasks._accept_code(state, _accepting_ops(H0), 9)
+    ops = _merged(_accepting_ops(H1), H1)
+    assert auto_tasks._accept_code(state, ops, 9) == 0
+    rec = state.ops["code-accept"]
+    assert rec["result"]["head"] == H1 and rec["result"]["reviewed"] is False
+    assert rec["prev"]["head"] == H0 and rec["prev"]["url"] == URL
+
+
 def test_code_accept_strict_makes_no_calls(state):
     state.mode = "strict"
     ops = _accepting_ops()
     assert auto_tasks._accept_code(state, ops, 9) == 1
     assert ops.calls == []
+
+
+def test_code_accept_merged_after_review_keeps_verdict_and_prev(state, capsys):
+    """Ревью #733, круг 2: ревью этой головы состоялось, приёмка встала после
+    него, человек вмержил — `verdict` и `prev` записи не теряются."""
+    state.ops["code-accept"] = {
+        "status": "started",
+        "pr": 9,
+        "prev": {"head": "old", "url": URL},
+        "verdict": {"verdict": "approve", "head": H0},
+    }
+    assert auto_tasks._accept_code(state, _merged(_accepting_ops()), 9) == 0
+    rec = state.ops["code-accept"]
+    assert rec["verdict"]["head"] == H0 and rec["prev"]["head"] == "old"
+    assert rec["result"]["reviewed"] is True and rec["result"]["url"] == URL
+    assert "после одобряющего ревью" in capsys.readouterr().out
+
+
+def test_code_accept_completed_without_url_is_finished_on_merge(state):
+    """Запись без `url` при той же голове не выдаётся за «проверена»."""
+    state.ops["code-accept"] = {
+        "status": "completed",
+        "result": {"head": H0, "merged": True},
+    }
+    assert auto_tasks._accept_code(state, _merged(_accepting_ops()), 9) == 0
+    assert state.ops["code-accept"]["result"]["url"] == URL
 
 
 def _request_changes(head: str) -> str:

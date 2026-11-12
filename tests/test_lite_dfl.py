@@ -374,6 +374,23 @@ def test_code_accept_without_url_is_not_finished(env: Env, capsys) -> None:
     assert "PR с кодом проверен" not in capsys.readouterr().out
 
 
+def test_code_merged_unreviewed_is_finished(env: Env, capsys) -> None:
+    """Ревью #733: мерж человека без приёмки закрывает конвейер для dfl."""
+    _run("WS-1-a", "WS-1", "customer", "brief_ready")
+    eng = _run("WS-1-eng-b", "WS-1-eng", "engineer", "completed")
+    url = "https://github.com/o/alpha/pull/9"
+    eng.ops["code-accept"] = {
+        "status": "completed",
+        "result": {"url": url, "merged": True, "reviewed": False},
+    }
+    rs.save(eng)
+    assert env.run("run", "--subject", "тема") == 0
+    out = capsys.readouterr().out
+    assert f"PR с кодом вмержен без автоматической приёмки: {url}" in out
+    assert _no_effects(env)
+    assert "PR с кодом проверен" not in out
+
+
 def test_approve_failure_stops_before_engineer(env: Env, monkeypatch) -> None:
     _run("WS-1-a", "WS-1", "customer", "brief_ready")
     env.forge.branches["brief/WS-1"] = [5]
