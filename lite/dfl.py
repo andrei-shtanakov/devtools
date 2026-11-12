@@ -169,7 +169,7 @@ def _record(
 
 
 def _public_argv(raw: list[str]) -> list[str]:
-    """argv без `--cwd <путь>`; у `--file` — только имя файла."""
+    """argv без `--cwd`; у `--file` — только имя файла (обе формы: `--x v`, `--x=v`)."""
     out: list[str] = []
     skip = False
     for i, arg in enumerate(raw):
@@ -179,7 +179,13 @@ def _public_argv(raw: list[str]) -> list[str]:
         if arg == "--cwd":
             skip = True
             continue
-        out.append(Path(arg).name if i > 0 and raw[i - 1] == "--file" else arg)
+        if arg.startswith("--cwd="):
+            continue
+        if arg.startswith("--file="):
+            arg = "--file=" + Path(arg.removeprefix("--file=")).name  # noqa: PLW2901
+        elif i > 0 and raw[i - 1] == "--file":
+            arg = Path(arg).name  # noqa: PLW2901
+        out.append(arg)
     return out
 
 

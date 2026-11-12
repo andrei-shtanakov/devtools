@@ -850,3 +850,14 @@ def test_report_failure_has_no_report_hint(env: Env, monkeypatch, capsys) -> Non
     monkeypatch.setattr(dfl, "run_report", lambda cwd, *, print_only: 2)
     assert env.run("report") == 2
     assert dfl.REPORT_HINT not in capsys.readouterr().err
+
+
+def test_public_argv_handles_equals_form() -> None:
+    raw = [
+        "--cwd=/home/a/repo",
+        "answer",
+        "--file=/home/a/s/answer.yaml",
+        "--subject",
+        "t",
+    ]
+    assert dfl._public_argv(raw) == ["answer", "--file=answer.yaml", "--subject", "t"]
