@@ -346,6 +346,7 @@ def test_dfl_init_repo_subcommand(
         return 0
 
     monkeypatch.setattr(dfl, "init_repo", fake)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     assert dfl.main(["--cwd", str(tmp_path), "init-repo"]) == 0
     assert seen == [tmp_path]
 

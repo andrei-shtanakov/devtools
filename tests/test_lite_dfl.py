@@ -18,6 +18,7 @@ from governance import spec_loop, user_targets
 from governance.brief_facts import BriefPrFacts
 from governance.facts import Fact, Outcome
 from lite import dfl
+from lite import failure_log as fl
 from tests.conftest import _STRICT_GH_DIRS
 from tests.df_config_fixture import use_test_real_home, write_config
 
@@ -67,6 +68,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Env:
     for key, value in write_config(xdg).items():
         monkeypatch.setenv(key, value)
     monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     (tmp_path / "target").mkdir()
     for rel in dfl.INIT_FILES:
         (tmp_path / "target" / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -723,3 +725,139 @@ def test_status_hint_for_accepted_pr_is_runnable(env: Env, monkeypatch, capsys) 
     assert "затем dfl run" not in out
     assert "новая тема: dfl run --subject '<тема>'" in out
     assert env.run("run") == 2  # и правда: без --subject продолжать нечего
+
+
+# --- запись сбоя и подсказка dfl report (план dfl-report, Task 3) ---
+
+
+def test_refusal_writes_failure_record_and_hint(env: Env, capsys) -> None:
+    assert env.run("run") == 2  # первый запуск без --subject
+    rec = fl.load(env.tmp / "target")
+    assert rec is not None
+    assert (rec.command, rec.exit_code) == ("run", 2)
+    assert rec.cause.startswith("незаконченного прогона нет")
+    assert capsys.readouterr().err.rstrip().endswith(dfl.REPORT_HINT)
+
+
+def test_success_keeps_previous_record(env: Env, monkeypatch) -> None:
+    assert env.run("run") == 2
+    first = fl.load(env.tmp / "target")
+    monkeypatch.setattr(dfl, "status", lambda cwd: 0)
+    assert env.run("status") == 0
+    assert fl.load(env.tmp / "target") == first
+
+
+def test_failure_before_registration_is_recorded(env: Env, monkeypatch) -> None:
+    def refuse() -> None:
+        raise dfl.DflError("dfl работает только в режиме test — поставьте test")
+
+    monkeypatch.setattr(dfl, "_require_test_mode", refuse)
+    assert env.run("status") == 2
+    rec = fl.load(env.tmp / "target")
+    assert rec is not None and rec.cause == "dfl работает только в режиме test"
+    assert env.registered == 0
+
+
+def test_unhandled_exception_recorded_and_reraised(env: Env, monkeypatch) -> None:
+    def boom(cwd: Path) -> int:
+        raise RuntimeError("boom\nподробно")
+
+    monkeypatch.setattr(dfl, "status", boom)
+    with pytest.raises(RuntimeError):
+        env.run("status")
+    rec = fl.load(env.tmp / "target")
+    assert rec is not None
+    assert (rec.exit_code, rec.cause) == (1, "RuntimeError: boom")
+
+
+def test_file_argument_reduced_to_name(env: Env, monkeypatch) -> None:
+    def refuse(*a, **kw) -> int:
+        raise dfl.DflError("нет")
+
+    monkeypatch.setattr(dfl, "answer", refuse)
+    assert env.run("answer", "--file", "/abs/secret/dir/answer.yaml") == 2
+    rec = fl.load(env.tmp / "target")
+    assert rec is not None
+    assert rec.argv == ["answer", "--file", "answer.yaml"]
+
+
+def test_record_write_failure_keeps_exit_code(env: Env, monkeypatch, capsys) -> None:
+    def fail(cwd: Path, rec: fl.FailureRecord) -> None:
+        raise OSError("диск полон")
+
+    monkeypatch.setattr(fl, "write", fail)
+    assert env.run("run") == 2
+    assert "запись сбоя не удалась: диск полон" in capsys.readouterr().err
+
+
+def test_deferred_record_gets_tail(env: Env) -> None:
+    tail = ["шум", "dfl run: отказ (код 2)", "  причина:     нет", "  что сделать: x"]
+    pending: list = []
+    assert dfl.main(["--cwd", str(env.tmp / "target"), "run"], defer=pending) == 2
+    assert fl.load(env.tmp / "target") is None  # отложено
+    for job in pending:
+        job(list(tail))
+    rec = fl.load(env.tmp / "target")
+    assert rec is not None and rec.output_tail == tail
+
+
+def test_cli_prints_hint_after_traceback(env: Env, monkeypatch, capsys) -> None:
+    def boom(cwd: Path) -> int:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(dfl, "status", boom)
+    monkeypatch.setattr(dfl, "tee_output", _no_tee)
+    assert dfl.cli(["--cwd", str(env.tmp / "target"), "status"]) == 1
+    err = capsys.readouterr().err
+    assert "RuntimeError: boom" in err
+    assert err.rstrip().endswith(dfl.REPORT_HINT)
+
+
+class _NoTail:
+    def lines(self) -> list[str]:
+        return []
+
+
+from contextlib import contextmanager  # noqa: E402
+
+
+@contextmanager
+def _no_tee(max_lines: int = 200):
+    yield _NoTail()
+
+
+# --- dfl report: маршрут (Task 5) ---
+
+
+def test_report_routed_before_test_mode(env: Env, monkeypatch) -> None:
+    seen: list[tuple[Path, bool]] = []
+
+    def refuse() -> None:
+        raise AssertionError("report не должен требовать режим test")
+
+    def fake_report(cwd: Path, *, print_only: bool) -> int:
+        seen.append((cwd, print_only))
+        return 2
+
+    monkeypatch.setattr(dfl, "_require_test_mode", refuse)
+    monkeypatch.setattr(dfl, "run_report", fake_report)
+    assert env.run("report", "--print") == 2
+    assert seen == [(env.tmp / "target", True)]
+    assert fl.load(env.tmp / "target") is None  # отказ report не пишет запись
+
+
+def test_report_failure_has_no_report_hint(env: Env, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(dfl, "run_report", lambda cwd, *, print_only: 2)
+    assert env.run("report") == 2
+    assert dfl.REPORT_HINT not in capsys.readouterr().err
+
+
+def test_public_argv_handles_equals_form() -> None:
+    raw = [
+        "--cwd=/home/a/repo",
+        "answer",
+        "--file=/home/a/s/answer.yaml",
+        "--subject",
+        "t",
+    ]
+    assert dfl._public_argv(raw) == ["answer", "--file=answer.yaml", "--subject", "t"]
