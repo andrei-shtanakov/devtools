@@ -623,6 +623,19 @@ def test_code_accept_new_head_reviews_again(state):
     assert rec["prev"]["head"] == H0
 
 
+def test_code_accept_merged_pr_finishes_without_review(state, capsys):
+    """Живой прогон Linux 12.11: человек вмержил PR с кодом, повтор
+    `dfl run` шёл в ревью вмерженного PR и стопил прогон."""
+    ops = _accepting_ops()
+    ops.facts[9] = {**ops.facts[9], "state": "MERGED"}
+    for _ in range(2):
+        assert auto_tasks._accept_code(state, ops, 9) == 0
+    assert _reviews(ops) == []
+    rec = state.ops["code-accept"]
+    assert rec["status"] == "completed" and rec["result"]["merged"] is True
+    assert "вмержен — конвейер завершён" in capsys.readouterr().out
+
+
 def test_code_accept_strict_makes_no_calls(state):
     state.mode = "strict"
     ops = _accepting_ops()

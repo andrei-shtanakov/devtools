@@ -282,6 +282,15 @@ def _accept_code(state: RunState, ops: Ops, pr: int) -> int:
         return 1
     head = str(facts.get("headRefOid") or "")
     record = state.ops.get(key)
+    if facts.get("state") == "MERGED":
+        # Мерж PR с кодом в test — за человеком; после него конвейеру
+        # проверять нечего. Без этой ветки повтор `dfl run` шёл в ревью
+        # вмерженного PR и стопил прогон (живой прогон Linux 12.11).
+        if record is None:
+            op_start(state, key, pr=pr)
+        _complete(state, key, result={"head": head, "merged": True})
+        print(f"spec-loop (test): PR #{pr} с кодом вмержен — конвейер завершён")
+        return 0
     if record is None:
         op_start(state, key, pr=pr)
     elif record.get("status") == "completed":
