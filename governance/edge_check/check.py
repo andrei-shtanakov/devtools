@@ -30,9 +30,11 @@ def decide(ruleset: rules_mod.RuleSet, response: response_mod.Response) -> str:
     замечаниями при `PASS` — так политика серьёзности ребра действует, а не
     перекрывается статусом пункта (devtools#728, W2 живого прогона на
     Linux: три `minor` давали FAIL). Всё прочее, что не `pass`, — `FAIL`:
-    пункт без находок, `insufficient` («входа недостаточно») и, страховкой,
-    `fail` с причиной о нехватке входа — неизвестность не красится зелёным
-    находкой-замечанием (ревью #730). Незнакомый статус — тоже `FAIL`.
+    пункт без находок, `insufficient` («входа недостаточно»), `fail` без
+    причины и незнакомый статус — неизвестность не красится зелёным
+    находкой-замечанием (ревью #730). Признак нехватки входа — статус в
+    структуре ответа, не слова в причине: подстрока ловила и «детализировано
+    недостаточно», возвращая ложный FAIL (ревью #730, круг 2).
     """
     if any(f.cls in ruleset.severity.blocking for f in response.findings):
         return "FAIL"
@@ -51,12 +53,13 @@ STATUS_INSUFFICIENT = "insufficient"
 
 
 def _remark_only(c: response_mod.Criterion, remarked: set[str]) -> bool:
-    """Провал пункта — лишь замечания: `fail`, есть находки, не нехватка входа."""
-    return (
-        c.status == "fail"
-        and c.id in remarked
-        and "недостат" not in c.reason.casefold()
-    )
+    """Провал пункта — лишь замечания: `fail` с причиной и находками по нему.
+
+    `STATUS_INSUFFICIENT` и любой другой статус сюда не проходят.
+    """
+    if c.status == STATUS_INSUFFICIENT:
+        return False
+    return c.status == "fail" and c.id in remarked and bool(c.reason.strip())
 
 
 def _now() -> str:

@@ -383,10 +383,10 @@ def _run_criteria(tmp_path: Path, criteria_patch: dict, findings: list[dict]) ->
     "patch",
     [
         {"status": "insufficient", "reason": "входа недостаточно"},
-        {"status": "fail", "reason": "Входа недостаточно: раздел целей усечён"},
+        {"status": "fail", "reason": "  "},
         {"status": "unknown", "reason": "ок"},
     ],
-    ids=["insufficient", "fail-insufficient-reason", "unknown-status"],
+    ids=["insufficient", "fail-empty-reason", "unknown-status"],
 )
 def test_insufficient_input_not_masked_by_advisory_finding(
     tmp_path: Path, patch: dict
@@ -395,3 +395,16 @@ def test_insufficient_input_not_masked_by_advisory_finding(
     PASS; незнакомый статус — тоже FAIL."""
     out = _run_criteria(tmp_path, patch, [_finding("R1", "minor")])
     assert out["verdict"] == "FAIL"
+
+
+def test_advisory_fail_with_word_insufficient_in_reason_stays_pass(
+    tmp_path: Path,
+) -> None:
+    """Ревью #730, круг 2: слово «недостаточно» в причине не делает
+    замечание провалом — признак нехватки входа только статус."""
+    out = _run_criteria(
+        tmp_path,
+        {"status": "fail", "reason": "формулировка детализирована недостаточно"},
+        [_finding("R1", "minor")],
+    )
+    assert out["verdict"] == "PASS"
