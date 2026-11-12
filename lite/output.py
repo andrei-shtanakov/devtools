@@ -14,14 +14,15 @@ def refusal(command: str, message: str, code: int = 2) -> str:
     могут нести тире. Нет разделителя — только причина. Перенос строки в
     сообщении продолжается с отступом, чтобы блок не рассыпался.
     """
-    cause, sep, action = _split_outside_quotes(message)
+    cause, sep, action = split_refusal(message)
     lines = ["", f"{command}: отказ (код {code})", _field("причина:", cause)]
     if sep:
         lines.append(_field("что сделать:", action))
     return "\n".join(lines)
 
 
-def _split_outside_quotes(message: str) -> tuple[str, str, str]:
+def split_refusal(message: str) -> tuple[str, str, str]:
+    """(причина, разделитель, что сделать) — по первому « — » вне кавычек."""
     quote = ""
     for i, ch in enumerate(message):
         if quote:
