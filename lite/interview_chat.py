@@ -260,6 +260,10 @@ BROKEN_INPUT = (
     "строка не прочитана: в ней битый символ (часто — Backspace стёр полбуквы); "
     "введите эту строку ещё раз"
 )
+BROKEN_INPUT_STOP = "ввод не читается — интервью остановлено; продолжить: dfl run"
+#: попыток прочитать строку подряд, пока ввод битый (без лимита — вечный цикл,
+#: если терминал отдаёт тот же битый хвост на каждое чтение)
+MAX_BROKEN_READS = 3
 
 
 def read_answer(read: Read) -> str | None:
@@ -286,16 +290,29 @@ def stdin_read(prompt: str) -> str | None:
     Редактирование строки — через `readline`, если он есть: без него
     Backspace в терминале стирает байт, а не символ, и от кириллической буквы
     остаётся полсимвола (devtools#751). Такая строка не крах: подсказка и
-    повтор ввода этой строки."""
+    повтор ввода этой строки (`UnicodeDecodeError` при strict-stdin, одиночный
+    surrogate при surrogateescape); после `MAX_BROKEN_READS` битых чтений
+    подряд — `None`, как при EOF: интервью останавливается, а не зацикливается."""
     _enable_line_editing()
-    while True:
+    for attempt in range(1, MAX_BROKEN_READS + 1):
         try:
-            return input(prompt)
+            line = input(prompt)
         except (EOFError, KeyboardInterrupt):
             say("")
             return None
         except UnicodeDecodeError:
+            line = None
+        if line is not None and not _has_broken_bytes(line):
+            return line
+        if attempt < MAX_BROKEN_READS:
             say(BROKEN_INPUT)
+    say(BROKEN_INPUT_STOP)
+    return None
+
+
+def _has_broken_bytes(line: str) -> bool:
+    """Одиночный surrogate — непрочитанный байт (stdin с surrogateescape)."""
+    return any("\udc80" <= ch <= "\udcff" for ch in line)
 
 
 def _enable_line_editing() -> None:

@@ -713,3 +713,32 @@ def test_stdin_read_broken_utf8_asks_again(monkeypatch, capsys) -> None:
     monkeypatch.setattr("builtins.input", fake_input)
     assert ic.stdin_read("> ") == "ответ"
     assert ic.BROKEN_INPUT in capsys.readouterr().out
+
+
+def _inputs(monkeypatch, *items: object) -> None:
+    it = iter(items)
+
+    def fake_input(prompt: str) -> str:
+        item = next(it)
+        if isinstance(item, Exception):
+            raise item
+        return str(item)
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+
+def test_stdin_read_surrogate_line_asks_again(monkeypatch, capsys) -> None:
+    """surrogateescape-локаль: полбуквы приходит одиночным surrogate — повтор."""
+    _inputs(monkeypatch, "при\udcd0", "привет")
+    assert ic.stdin_read("> ") == "привет"
+    assert ic.BROKEN_INPUT in capsys.readouterr().out
+
+
+def test_stdin_read_broken_input_gives_up_after_retries(monkeypatch, capsys) -> None:
+    """Ввод не читается раз за разом — остановка интервью, а не вечный цикл."""
+    bad = UnicodeDecodeError("utf-8", b"\xd0", 0, 1, "invalid")
+    _inputs(monkeypatch, *[bad] * ic.MAX_BROKEN_READS, "не дойдёт")
+    assert ic.stdin_read("> ") is None
+    out = capsys.readouterr().out
+    assert out.count(ic.BROKEN_INPUT) == ic.MAX_BROKEN_READS - 1
+    assert ic.BROKEN_INPUT_STOP in out
