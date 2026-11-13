@@ -426,3 +426,30 @@ def test_update_id_prefix_mismatch_is_form_error() -> None:
 def test_prompt_allows_updating_existing_by_id() -> None:
     prompt = sx.build_prompt(PRIO, "ответ", _with_fr())
     assert '"id"' in prompt and "Priority: Must" in prompt
+
+
+SYSQ = sx.Question("engineer.interfaces.01", "interfaces", "Какие интерфейсы?")
+
+
+def test_validate_if_and_ap_need_system_traces() -> None:
+    """GC-13: IF → S, AP → S/CON (devtools#755)."""
+    items = [
+        {"prefix": "IF", "body": "CLI", "traces": []},
+        {"prefix": "AP", "body": "Чистое ядро", "traces": ["RK-01"]},
+    ]
+    gaps = sx.validate(items, SYSQ, _engineer())
+    assert gaps == [
+        "К какой системе относится «CLI»?",
+        "Какую систему или какое ограничение затрагивает «Чистое ядро»?",
+    ]
+    ok = [
+        {"prefix": "IF", "body": "CLI", "traces": ["S-01"]},
+        {"prefix": "AP", "body": "Ядро", "traces": ["CON-01"]},
+    ]
+    assert sx.validate(ok, SYSQ, _engineer()) == []
+
+
+def test_prompt_names_if_and_ap_trace_rules() -> None:
+    prompt = sx.build_prompt(SYSQ, "CLI", _engineer())
+    assert "IF (интерфейс): traces — список id систем S" in prompt
+    assert "AP (архитектурное предпочтение)" in prompt

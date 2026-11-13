@@ -197,6 +197,9 @@ def build_prompt(q: Question, text: str, view: SessionView) -> str:
   как проверить, что функция работает.
 - NFR: acceptance (критерий) или target (целевое значение).
 - M (метрика): traces — список id целей G, которые она измеряет.
+- IF (интерфейс): traces — список id систем S, к которым он относится.
+- AP (архитектурное предпочтение): traces — список id систем S или
+  ограничений CON, которые оно затрагивает.
 - Остальные префиксы: достаточно body.
 - traces ссылаются только на id из списка выше или на ref нового пункта
   этого же ответа: дай новому пункту поле "ref" (например "new-1") и укажи
@@ -224,7 +227,7 @@ def parse_items(raw: str) -> tuple[list[dict[str, Any]], str | None]:
     прочие ключи
     отбрасываются. Нарушение схемы — `FormError`.
     """
-    doc = _first_json_object(raw)
+    doc = first_json_object(raw)
     items = doc.get("items")
     if not isinstance(items, list):
         raise FormError('поле "items" должно быть списком')
@@ -235,7 +238,7 @@ def parse_items(raw: str) -> tuple[list[dict[str, Any]], str | None]:
     return parsed, (ask or "").strip() or None
 
 
-def _first_json_object(raw: str) -> dict[str, Any]:
+def first_json_object(raw: str) -> dict[str, Any]:
     """Первый JSON-объект в тексте (ограды ``` и проза вокруг допустимы)."""
     decoder = json.JSONDecoder()
     for match in re.finditer(r"\{", raw):
@@ -348,7 +351,7 @@ def validate(items: list[dict[str, Any]], q: Question, view: SessionView) -> lis
 
 
 def _item_gaps(item: dict[str, Any], traced: set[str]) -> list[str]:
-    """Недостающие обязательные поля пункта (GC-06…GC-08)."""
+    """Недостающие обязательные поля пункта (GC-06…GC-08, GC-13)."""
     body, prefix = item["body"], item["prefix"]
     gaps = []
     if prefix == "FR":
@@ -365,6 +368,10 @@ def _item_gaps(item: dict[str, Any], traced: set[str]) -> list[str]:
         gaps.append(f"Как проверить «{body}» — какой критерий или целевое значение?")
     elif prefix == "M" and "G" not in traced:
         gaps.append(f"Какую цель измеряет «{body}»?")
+    elif prefix == "IF" and "S" not in traced:
+        gaps.append(f"К какой системе относится «{body}»?")
+    elif prefix == "AP" and not traced & {"S", "CON"}:
+        gaps.append(f"Какую систему или какое ограничение затрагивает «{body}»?")
     return gaps
 
 
