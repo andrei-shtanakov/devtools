@@ -523,9 +523,37 @@ def test_tail_default_ignores_log(tmp_path: Path) -> None:
     assert "tail-only" in report.body and "child-line" not in report.body
 
 
-def test_default_warning_does_not_claim_child_output() -> None:
-    assert "git" not in rp.PUBLIC_WARNING
+def test_default_warning_names_dfl_and_runner_lines() -> None:
+    assert "строки dfl и раннера" in rp.PUBLIC_WARNING
     assert "перечитайте" in rp.PUBLIC_WARNING
+
+
+def test_level3_record_no_with_log_hint(tmp_path: Path, monkeypatch, capsys) -> None:
+    rec = _rec(log_path=_log_file(tmp_path, "child-line\n"), verbosity=3)
+    monkeypatch.setattr(rp, "load_record", lambda cwd: rec)
+    monkeypatch.setattr(rp, "collect_facts", lambda r: FACTS)
+    assert rp.run_report(tmp_path, print_only=True) == 0
+    assert rp.WITH_LOG_HINT not in capsys.readouterr().out
+
+
+def test_warning_follows_tail_source_not_flag(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    rec = _rec(log_path=_log_file(tmp_path, "child-line\n"), verbosity=3)
+    monkeypatch.setattr(rp, "load_record", lambda cwd: rec)
+    monkeypatch.setattr(rp, "collect_facts", lambda r: FACTS)
+    monkeypatch.setattr(rp, "report_repo", lambda: "o/devtools")
+    monkeypatch.setattr(rp, "_profile", lambda: None)
+    monkeypatch.setattr(rp, "_find_duplicate", lambda *a: None)
+    rp.run_report(
+        tmp_path,
+        print_only=False,
+        with_log=True,
+        ask=lambda q: "n",
+        is_tty=lambda: True,
+    )
+    out = capsys.readouterr().out
+    assert rp.PUBLIC_WARNING in out and rp.LOG_WARNING not in out
 
 
 def test_print_without_log_flag_hints_with_log(

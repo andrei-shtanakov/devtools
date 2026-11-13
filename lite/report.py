@@ -136,7 +136,7 @@ def tail_lines(rec: FailureRecord, *, with_log: bool = False) -> list[str]:
     (на уровне 3 раннер шёл на экран и в лог не попал). Строки `# …`
     заголовка и код выхода отбрасываются. Traceback краха печатает `cli` уже
     после закрытия лога — он добавляется из хвоста записи."""
-    if not with_log or not rec.log_path or rec.verbosity >= PASSTHROUGH_LEVEL:
+    if not with_log or not has_log_tail(rec):
         return rec.output_tail
     try:
         text = read_log(Path(rec.log_path))
@@ -146,6 +146,11 @@ def tail_lines(rec: FailureRecord, *, with_log: bool = False) -> list[str]:
     if not lines:
         return rec.output_tail  # вывод команды мимо лога (лог без тела)
     return lines[-LOG_TAIL_LINES:] + _traceback(rec.output_tail)
+
+
+def has_log_tail(rec: FailureRecord) -> bool:
+    """Есть ли у записи лог с выводом раннера (уровень ниже 3)."""
+    return bool(rec.log_path) and rec.verbosity < PASSTHROUGH_LEVEL
 
 
 def _strip_meta(lines: list[str]) -> list[str]:
@@ -327,8 +332,10 @@ def _config_line() -> str:
 Gh = Callable[[list[str], Path | None, str | None], subprocess.CompletedProcess]
 YES = ("y", "yes", "да", "д")
 PUBLIC_WARNING = (
-    "отчёт уйдёт ПУБЛИЧНО; скрыты только известные формы секретов и домашний "
-    "каталог — перечитайте отчёт выше перед отправкой"
+    "отчёт уйдёт ПУБЛИЧНО; в хвосте — строки dfl и раннера, они могут называть "
+    "файлы и PR целевого репо и пересказывать ошибки git/gh; скрыты только "
+    "известные формы секретов и домашний каталог — перечитайте отчёт выше "
+    "перед отправкой"
 )
 LOG_WARNING = (
     "отчёт уйдёт ПУБЛИЧНО; в хвосте — вывод git, gh, раннера и ревью целевого "
@@ -336,8 +343,8 @@ LOG_WARNING = (
     "домашний каталог — перечитайте отчёт выше перед отправкой"
 )
 WITH_LOG_HINT = (
-    "вывод дочерних процессов (git, gh, ревью) в отчёт не включён; "
-    "добавить: dfl report --with-log"
+    "полный вывод дочерних процессов (git, gh, ревью) из лога в отчёт не "
+    "включён; добавить: dfl report --with-log"
 )
 PRINT_HINT = "используйте dfl report --print и пришлите вывод сами"
 
@@ -402,7 +409,7 @@ def _report(
         return 0
     rep = build(rec, collect_facts(rec), with_log=with_log)
     print(f"{rep.title}\n\n{rep.body}")
-    if rec.log_path and not with_log:
+    if has_log_tail(rec) and not with_log:
         print(f"\n{WITH_LOG_HINT}")
     if print_only:
         return 0
@@ -414,7 +421,8 @@ def _report(
     repo = report_repo()
     profile = _profile()
     duplicate = _find_duplicate(rep, repo, gh, profile)
-    print(f"\n{LOG_WARNING if with_log else PUBLIC_WARNING}")
+    from_log = with_log and has_log_tail(rec)
+    print(f"\n{LOG_WARNING if from_log else PUBLIC_WARNING}")
     question = (
         f"Добавить комментарий к {duplicate[1]}? [y/N] "
         if duplicate
