@@ -1599,10 +1599,16 @@ def test_stopped_run_prints_cause_and_log_hint(env: Env, monkeypatch, capfd) -> 
 
 def test_stopped_run_nonzero_code_one_log_hint(env: Env, monkeypatch, capfd) -> None:
     _bind_streams(monkeypatch)
-    _step_leaves(monkeypatch, env, "stopped_need", code=3)
+
+    def spec_main(argv: list[str]) -> int:
+        _run("WS-1-a", "WS-1", "customer", "stopped_need")
+        (rs.run_dir("WS-1-a") / "stop-reason.txt").write_text("нет прав", "utf-8")
+        return 3
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
     assert env.run("run", "--subject", "t") == 3
     out, err = _read(capfd)
-    assert "прогон WS-1-a остановлен:" in out
+    assert "прогон WS-1-a остановлен: нет прав" in out
     assert (out + err).count(dfl.LOG_HINT) == 1
 
 
@@ -1718,3 +1724,81 @@ def test_status_vv_lists_ops(env: Env, monkeypatch, capfd) -> None:
     assert env.run("status", "-vv") == 0
     out, _ = _read(capfd)
     assert "WS-1-a  customer  running\n  need: completed\n" in out
+
+
+# --- правки ревью Task 4 ---
+
+
+def test_unchanged_resumed_run_old_cause_not_reported(
+    env: Env, monkeypatch, capfd
+) -> None:
+    """Раннер упал до записи run.json: старая причина стопа — не итог шага."""
+    _bind_streams(monkeypatch)
+    state = _run("WS-1-a", "WS-1", "customer", "stopped_need")
+    state.target_dir = str((env.tmp / "target").resolve())  # fallback сработает
+    rs.save(state)
+    (rs.run_dir("WS-1-a") / "stop-reason.txt").write_text(
+        "старая причина", encoding="utf-8"
+    )
+    monkeypatch.setattr(spec_loop, "main", lambda argv: 3)
+    assert env.run("run") == 3
+    out, err = _read(capfd)
+    assert "старая причина" not in out + err
+    assert "шаг завершился с кодом 3" in out
+    assert (out + err).count(dfl.LOG_HINT) == 1
+    monkeypatch.setattr(spec_loop, "main", lambda argv: 0)
+    assert env.run("run") == 0
+    out, err = _read(capfd)
+    assert "старая причина" not in out + err and "шаг завершился" not in out
+
+
+@pytest.mark.parametrize("code", [0, 3])
+def test_unreadable_question_points_to_log_once(
+    env: Env, monkeypatch, capfd, code: int
+) -> None:
+    _bind_streams(monkeypatch)
+    _step_leaves(monkeypatch, env, dfl.WAITING, code=code)
+
+    def status(session_id: str, cwd: Path) -> iv.DiscoveryReply:
+        raise OSError("uv не найден")
+
+    monkeypatch.setattr(dfl, "_discovery_status", status)
+    assert env.run("run", "--subject", "t") == code
+    out, err = _read(capfd)
+    assert "вопрос: dfl interview" in out
+    assert (out + err).count(dfl.LOG_HINT) == 1
+
+
+def test_readable_question_no_log_hint(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    _step_leaves(monkeypatch, env, dfl.WAITING)
+    monkeypatch.setattr(dfl, "_discovery_status", lambda s, c: _question_reply())
+    assert env.run("run", "--subject", "t") == 0
+    out, err = _read(capfd)
+    assert dfl.LOG_HINT not in out + err
+
+
+def test_stopped_without_cause_nonzero_names_code(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    _step_leaves(monkeypatch, env, "stopped_need", code=3)
+    assert env.run("run", "--subject", "t") == 3
+    out, _ = _read(capfd)
+    assert "шаг завершился с кодом 3" in out
+    assert "причина не записана" not in out
+
+
+@pytest.mark.parametrize(
+    ("failing", "merged"), [("propose", "OPEN"), ("approve", "MERGED")]
+)
+def test_brief_tool_failure_names_code(
+    env: Env, monkeypatch, capfd, failing: str, merged: str
+) -> None:
+    _bind_streams(monkeypatch)
+    _run("WS-1-a", "WS-1", "customer", "brief_ready")
+    env.forge.branches["brief/WS-1"] = [5]
+    env.forge.states[5] = merged
+    monkeypatch.setattr(bt, "main", lambda argv: 2 if argv[0] == failing else 0)
+    assert env.run("run") == 2
+    out, err = _read(capfd)
+    assert f"бриф: {failing} завершился с кодом 2" in out
+    assert (out + err).count(dfl.LOG_HINT) == 1

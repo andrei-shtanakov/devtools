@@ -585,8 +585,10 @@ def _loop(argv: list[str], cwd: Path, *, chatting: bool) -> int:
     before_ops = _ops_by_run() if verbosity() >= 2 else {}
     with runlog.captured(_LOG, verbosity()):
         code = spec_loop.main(argv)
-    run_ids, _ = fl.changed_runs(before, fl.snapshot_runs(), cwd)
-    state = _load_run(run_ids[-1]) if run_ids else None
+    run_ids, note = fl.changed_runs(before, fl.snapshot_runs(), cwd)
+    # `note` — шаг прогонов не менял, и `changed_runs` назвал свежий прогон
+    # репо наугад: его итог (старая причина стопа) был бы ложным итогом шага
+    state = _load_run(run_ids[-1]) if run_ids and not note else None
     if state is None:
         if code != 0:
             say(f"шаг завершился с кодом {code}")
@@ -599,15 +601,16 @@ def _report_step(
     state: rs.RunState, code: int, before_ops: dict[str, str], *, chatting: bool
 ) -> None:
     """Итог шага по уровням для прогона `state`, изменённого шагом."""
-    line = _outcome(state, code, chatting=chatting)
+    line = _outcome(state, code)
     if line is not None:
         say(line)
-    if state.status == WAITING and not chatting:
-        _say_question(state)
-    if state.status.startswith("stopped_") and code == 0 and _LOG is not None:
-        say(LOG_HINT)
-    for text in _state_lines(before_ops, state):
-        say(text, 2)
+    unread = state.status == WAITING and not chatting and not _say_question(state)
+    stopped = state.status.startswith("stopped_")
+    if (stopped or unread) and code == 0 and _LOG is not None:
+        say(LOG_HINT)  # при code != 0 строку печатает `main`: одна на вызов
+    if verbosity() >= 2:
+        for text in _state_lines(before_ops, state):
+            say(text, 2)
     if state.status == WAITING:
         return  # как отвечать — уже сказано (вопрос) или скажет цикл
     hint = _next_hint(state, _repo_runs(state.repo)[0])
@@ -615,23 +618,24 @@ def _report_step(
         say(f"дальше: {hint}", 1)
 
 
-def _outcome(state: rs.RunState, code: int, *, chatting: bool) -> str | None:
+def _outcome(state: rs.RunState, code: int) -> str | None:
     """Строка итога шага (спека §5); `None` — прогон ждёт ответа: вопрос
-    печатает `_say_question` или цикл интервью (`chatting`)."""
+    печатает `_say_question` или цикл интервью."""
     if state.status == WAITING:
         return None
     if state.status.startswith("stopped_"):
         cause = fl.cause_from(None, [state.run_id], [], refusals=REFUSALS)
         first = cause.strip().splitlines()[0] if cause.strip() else fl.NO_CAUSE
-        return f"прогон {state.run_id} остановлен: {first}"
+        if first != fl.NO_CAUSE or code == 0:
+            return f"прогон {state.run_id} остановлен: {first}"
     if code != 0:
         return f"шаг завершился с кодом {code}"
     return f"прогон {state.run_id}: {state.status}"
 
 
-def _say_question(state: rs.RunState) -> None:
+def _say_question(state: rs.RunState) -> bool:
     """Текст текущего вопроса интервью и как ответить; не прочитался —
-    куда смотреть вопрос."""
+    куда смотреть вопрос (и `False`: лог назовёт вызывающий)."""
     question = None
     session_id = (state.interview or {}).get("session_id")
     if session_id:
@@ -642,10 +646,11 @@ def _say_question(state: rs.RunState) -> None:
             question = None  # нет закреплённого discovery — тоже «не прочитался»
     if question is None:
         say(f"прогон {state.run_id} ждёт ответа; вопрос: dfl interview")
-        return
+        return False
     say(question.text)
     say(ANSWER_HINT)
     say(ANSWER_FORMAT, 1)
+    return True
 
 
 def _state_lines(before_ops: dict[str, str], state: rs.RunState) -> list[str]:
@@ -806,6 +811,7 @@ def _brief_step(cust: rs.RunState, role: str, loop: Callable[[list[str]], int]) 
         with runlog.captured(_LOG, verbosity()):
             code = bt.main(["propose", "--run", cust.run_id])
         if code != 0:
+            say(f"бриф: propose завершился с кодом {code}")
             return code
     pr, merged = _brief_pr(cust)
     if not approved:
@@ -816,6 +822,7 @@ def _brief_step(cust: rs.RunState, role: str, loop: Callable[[list[str]], int]) 
         with runlog.captured(_LOG, verbosity()):
             code = bt.main(["approve", "--run", cust.run_id, "--pr", str(pr)])
         if code != 0:
+            say(f"бриф: approve завершился с кодом {code}")
             return code
     return loop(bt.engineer_args(cust, pr, role))
 
