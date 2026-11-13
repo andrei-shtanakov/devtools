@@ -37,10 +37,18 @@ from governance.facts import Outcome
 from lite import failure_log as fl
 from lite import interview_chat as ic
 from lite import interview_view as iview
+from lite import runlog
 from lite import structure as st
 from lite.init_repo import DEVTOOLS, InitError, init_repo, real_gh
 from lite.interview_state import InterviewStateError, load_session
-from lite.output import refusal
+from lite.output import (
+    refusal,
+    say,
+    set_sink,
+    set_verbosity,
+    verbosity,
+    verbosity_from_env,
+)
 from lite.pipeline import (
     CHAIN_STOPPED_HINT,
     accepted_url,
@@ -89,6 +97,15 @@ INIT_FILES = (
     "scripts/review/local.sh",
     "spec-runner.config.yaml",
 )
+# команды, исполняющие шаг конвейера или discovery: только они пишут лог вызова
+LOGGED_COMMANDS = frozenset({"run", "answer", "correct", "init-repo"})
+LOG_HINT = "подробно: dfl log"
+SCREEN_MARK = "уровень 3: вывод раннера шёл на экран"
+
+# лог текущего вызова; путь переживает закрытие лога — его читает `_record`,
+# который `cli` выполняет после выхода из `main`
+_LOG: runlog.RunLog | None = None
+_LOG_PATH = ""
 
 
 class DflError(Exception):
@@ -139,8 +156,11 @@ def main(
     ненулевой код печатает подсказку `dfl report` последней строкой. С
     `defer` запись откладывается: `cli` выполнит её с полным хвостом вывода;
     без него — пишется сразу с пустым хвостом."""
+    global _LOG_PATH
     raw = list(sys.argv[1:] if argv is None else argv)
     args = _parser().parse_args(raw)
+    _set_level(args)
+    _LOG_PATH = ""
     cwd = Path(args.cwd)
     if args.command == "report":  # до режима test: сломанный конфиг — тоже сбой
         return run_report(cwd, print_only=args.print_only)
@@ -153,15 +173,78 @@ def main(
         else:
             defer.append(job)
 
+    code = 1
     try:
-        code, refused = _dispatch(args, cwd)
-    except Exception as exc:
-        record(1, exc)
-        raise
-    if code != 0:
-        record(code, refused)
-        print(REPORT_HINT, file=sys.stderr)
-    return code
+        try:
+            code, refused = _dispatch(args, cwd, raw)
+        except KeyboardInterrupt:
+            code = 130
+            raise
+        except Exception as exc:
+            record(1, exc)
+            raise
+        if code != 0:
+            record(code, refused)
+            _failure_hint()
+        return code
+    finally:
+        _close_log(code)
+
+
+def _set_level(args: argparse.Namespace) -> None:
+    """Уровень подробности: флаги `-v` до и после подкоманды складываются;
+    без флагов — `DFL_VERBOSITY` (неверное значение — одна строка
+    предупреждения и уровень 0)."""
+    flags = (args.verbose_root or 0) + (args.verbose or 0)
+    if args.verbose_root is not None or args.verbose is not None:
+        set_verbosity(flags)
+        return
+    level, warning = verbosity_from_env(os.environ)
+    set_verbosity(level)
+    if warning is not None:
+        say(warning, 0, err=True)
+
+
+def _failure_hint() -> None:
+    """Ненулевой код: с логом — `подробно: dfl log` (и `dfl report` с `-v`),
+    без лога — прежняя подсказка `dfl report`."""
+    if not _LOG_PATH:
+        say(REPORT_HINT, 0, err=True)
+        return
+    say(LOG_HINT, 0, err=True)
+    say(REPORT_HINT, 1, err=True)
+
+
+def _open_log(args: argparse.Namespace, cwd: Path, raw: list[str]) -> None:
+    """Лог вызова для `LOGGED_COMMANDS`; не пишется — предупреждение, без лога."""
+    global _LOG, _LOG_PATH
+    if args.command not in LOGGED_COMMANDS:
+        return
+    header = f"dfl {' '.join(_public_argv(raw))} уровень {verbosity()}"
+    last = fl.load(cwd)
+    protect = Path(last.log_path) if last is not None and last.log_path else None
+    try:
+        _LOG = runlog.open_log(cwd, args.command, header, protect=protect)
+    except OSError as err:
+        say(f"лог не пишется: {err}", 0, err=True)
+        return
+    _LOG_PATH = str(_LOG.path)
+    set_sink(_LOG.fh)
+    if verbosity() >= runlog.PASSTHROUGH_LEVEL:
+        say(SCREEN_MARK, 4)
+
+
+def _close_log(code: int) -> None:
+    """Код выхода в лог, лог закрыт; путь остаётся в `_LOG_PATH`."""
+    global _LOG
+    set_sink(None)
+    if _LOG is None:
+        return
+    log, _LOG = _LOG, None
+    try:
+        runlog.close_log(log, code)
+    except OSError as err:
+        say(f"лог не дописан: {err}", 0, err=True)
 
 
 def _record(
@@ -189,6 +272,8 @@ def _record(
                 runs_note=note,
                 cwd_repo=_origin_slug(cwd),
                 cause=cause,
+                log_path=_LOG_PATH,
+                verbosity=verbosity(),
             ),
         )
     except OSError as err:
@@ -234,10 +319,15 @@ def _origin_slug(cwd: Path) -> str:
         return ""
 
 
-def _dispatch(args: argparse.Namespace, cwd: Path) -> tuple[int, BaseException | None]:
-    """Тело подкоманды: (код, отказ-исключение или `None`)."""
+def _dispatch(
+    args: argparse.Namespace, cwd: Path, raw: list[str]
+) -> tuple[int, BaseException | None]:
+    """Тело подкоманды: (код, отказ-исключение или `None`).
+
+    Лог вызова открывается после строки режима test (её отказ лога не пишет)."""
     try:
         _require_test_mode()
+        _open_log(args, cwd, raw)
         if args.command == "status":
             return status(cwd), None
         if args.command == "init-repo":
@@ -260,18 +350,33 @@ def _dispatch(args: argparse.Namespace, cwd: Path) -> tuple[int, BaseException |
             return correct(cwd, args.text, args.subject), None
         return run(cwd, args.subject, args.stakeholder), None
     except REFUSALS as exc:
-        print(refusal(f"dfl {args.command}", str(exc)), file=sys.stderr)
+        say(refusal(f"dfl {args.command}", str(exc)), 0, err=True)
         return 2, exc
 
 
+def _verbose_parent(dest: str) -> argparse.ArgumentParser:
+    """`-v` (счётчик): до подкоманды и после неё — разные `dest`, складываются."""
+    parent = argparse.ArgumentParser(add_help=False)
+    parent.add_argument(
+        "-v",
+        dest=dest,
+        action="count",
+        help="подробнее: -v подсказки, -vv состояние, -vvv всё как раньше",
+    )
+    return parent
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="dfl")
+    parser = argparse.ArgumentParser(
+        prog="dfl", parents=[_verbose_parent("verbose_root")]
+    )
     parser.add_argument("--cwd", required=True, help="каталог репо цели")
     sub = parser.add_subparsers(dest="command", required=True)
-    p_run = sub.add_parser("run", help="следующий шаг конвейера")
+    add = functools.partial(sub.add_parser, parents=[_verbose_parent("verbose")])
+    p_run = add("run", help="следующий шаг конвейера")
     p_run.add_argument("--subject", help="тема нового прогона")
     p_run.add_argument("--stakeholder", default="customer")
-    p_ans = sub.add_parser("answer", help="ответ на вопрос интервью и dfl run")
+    p_ans = add("answer", help="ответ на вопрос интервью и dfl run")
     p_ans.add_argument(
         "--file",
         help="YAML-файл ответа (text: и entries:); без него — интервью разговором",
@@ -284,16 +389,16 @@ def _parser() -> argparse.ArgumentParser:
     )
     p_ans.add_argument("--subject", help="тема конвейера, если их несколько")
     p_ans.add_argument("--stakeholder", default="customer")
-    p_ab = sub.add_parser("abandon", help="бросить незаконченный конвейер")
+    p_ab = add("abandon", help="бросить незаконченный конвейер")
     p_ab.add_argument("--subject", help="тема конвейера, если их несколько")
-    p_iv = sub.add_parser("interview", help="что собрано в интервью")
+    p_iv = add("interview", help="что собрано в интервью")
     p_iv.add_argument("--subject", help="тема конвейера, если их несколько")
-    p_cor = sub.add_parser("correct", help="поправить собранное текстом")
+    p_cor = add("correct", help="поправить собранное текстом")
     p_cor.add_argument("text", help="поправка, например: не раз в неделю, а в месяц")
     p_cor.add_argument("--subject", help="тема конвейера, если их несколько")
-    sub.add_parser("status", help="прогоны репо и что дальше")
-    sub.add_parser("init-repo", help="PR с шаблонами DarkFactory в репо")
-    p_rep = sub.add_parser(
+    add("status", help="прогоны репо и что дальше")
+    add("init-repo", help="PR с шаблонами DarkFactory в репо")
+    p_rep = add(
         "report", help="отчёт о последнем сбое — разработчикам (issue в devtools)"
     )
     p_rep.add_argument(
@@ -315,8 +420,11 @@ def _require_test_mode() -> None:
             "(install.sh существующий конфиг не переписывает) или работайте "
             "через make"
         )
-    print(df_config.test_banner(cfg))
-    print()
+    full = verbosity() >= runlog.PASSTHROUGH_LEVEL
+    banner = df_config.test_banner(cfg) if full else df_config.test_banner_line(cfg)
+    if banner is not None:
+        say(banner)
+    say("")
 
 
 def run(cwd: Path, subject: str | None, role: str, *, chat: bool = True) -> int:
@@ -445,17 +553,19 @@ def _step(target: user_targets.UserTarget, subject: str | None, role: str) -> in
     cust = _select_customer(runs, subject)
     if cust is None:
         _require_init_files(target.path)
-        return spec_loop.main(
-            ["--subject", str(subject), "--repo", repo, "--need", "--frame",
-             "customer", "--stakeholder", role, "--brief-only"]
-        )  # fmt: skip
+        with runlog.captured(_LOG, verbosity()):
+            return spec_loop.main(
+                ["--subject", str(subject), "--repo", repo, "--need", "--frame",
+                 "customer", "--stakeholder", role, "--brief-only"]
+            )  # fmt: skip
     eng = _engineer_of(cust, runs)
     if eng is not None:
         return _engineer_step(eng, repo)
     if cust.status != "brief_ready":
-        return spec_loop.main(
-            ["--subject", cust.subject, "--repo", repo, "--run-id", cust.run_id]
-        )
+        with runlog.captured(_LOG, verbosity()):
+            return spec_loop.main(
+                ["--subject", cust.subject, "--repo", repo, "--run-id", cust.run_id]
+            )
     return _brief_step(cust, role)
 
 
@@ -573,9 +683,10 @@ def _engineer_step(eng: rs.RunState, repo: str) -> int:
     if url is not None:
         print(f"PR с кодом проверен: {url}; мерж — за вами")
         return 0
-    return spec_loop.main(
-        ["--subject", eng.subject, "--repo", repo, "--run-id", eng.run_id]
-    )
+    with runlog.captured(_LOG, verbosity()):
+        return spec_loop.main(
+            ["--subject", eng.subject, "--repo", repo, "--run-id", eng.run_id]
+        )
 
 
 def _brief_step(cust: rs.RunState, role: str) -> int:
@@ -583,7 +694,8 @@ def _brief_step(cust: rs.RunState, role: str) -> int:
     approved = (rs.run_dir(cust.run_id) / bt.APPROVED_REL).exists()
     if not approved:
         _refuse_closed_brief(cust)
-        code = bt.main(["propose", "--run", cust.run_id])
+        with runlog.captured(_LOG, verbosity()):
+            code = bt.main(["propose", "--run", cust.run_id])
         if code != 0:
             return code
     pr, merged = _brief_pr(cust)
@@ -592,10 +704,12 @@ def _brief_step(cust: rs.RunState, role: str) -> int:
             url = f"https://github.com/{cust.repo_slug}/pull/{pr}"
             print(f"бриф ждёт вашего мержа: {url} — после мержа снова dfl run")
             return 0
-        code = bt.main(["approve", "--run", cust.run_id, "--pr", str(pr)])
+        with runlog.captured(_LOG, verbosity()):
+            code = bt.main(["approve", "--run", cust.run_id, "--pr", str(pr)])
         if code != 0:
             return code
-    return spec_loop.main(bt.engineer_args(cust, pr, role))
+    with runlog.captured(_LOG, verbosity()):
+        return spec_loop.main(bt.engineer_args(cust, pr, role))
 
 
 def _refuse_closed_brief(cust: rs.RunState) -> None:
@@ -785,6 +899,10 @@ def _discovery(args: list[str], cwd: Path) -> iv.DiscoveryReply:
     project = str(df_config.workspace_dir("discovery"))
     argv = ["uv", "run", "--frozen", "--project", project, "discovery", *args]
     done = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=False)
+    if done.stdout:
+        say(done.stdout.rstrip("\n"), 3)
+    if done.stderr:
+        say(done.stderr.rstrip("\n"), 3, err=True)
     return iv.parse_reply(done.returncode, done.stdout, done.stderr)
 
 

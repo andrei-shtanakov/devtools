@@ -7,19 +7,21 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
 
 from governance import brief_tools as bt
+from governance import df_config, spec_loop, user_targets
 from governance import interview as iv
 from governance import run_state as rs
-from governance import spec_loop, user_targets
 from governance.brief_facts import BriefPrFacts
 from governance.facts import Fact, Outcome
-from lite import dfl
+from lite import dfl, runlog
 from lite import failure_log as fl
+from lite.output import VERBOSITY_ENV, verbosity
 from tests.conftest import _STRICT_GH_DIRS
 from tests.df_config_fixture import use_test_real_home, write_config
 
@@ -70,6 +72,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Env:
         monkeypatch.setenv(key, value)
     monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.delenv(VERBOSITY_ENV, raising=False)
     (tmp_path / "target").mkdir()
     for rel in dfl.INIT_FILES:
         (tmp_path / "target" / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -82,6 +85,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Env:
 
     def spec_main(argv: list[str]) -> int:
         e.spec_calls.append(list(argv))
+        print("runner-line")
         return 0
 
     def brief_main(argv: list[str]) -> int:
@@ -733,7 +737,7 @@ def test_status_hint_for_accepted_pr_is_runnable(env: Env, monkeypatch, capsys) 
 
 
 def test_refusal_writes_failure_record_and_hint(env: Env, capsys) -> None:
-    assert env.run("run") == 2  # первый запуск без --subject
+    assert env.run("run", "-v") == 2  # первый запуск без --subject
     rec = fl.load(env.tmp / "target")
     assert rec is not None
     assert (rec.command, rec.exit_code) == ("run", 2)
@@ -1326,3 +1330,178 @@ def test_dfl_run_tty_other_interview_stop_not_chatted(env: Env, monkeypatch) -> 
     )
     assert env.run("run") == 0
     assert len(env.spec_calls) == 1
+
+
+# --- уровни подробности, лог вызова и перехват (план dfl-clean-output, Task 3) ---
+
+
+def _bind_streams(monkeypatch: pytest.MonkeyPatch) -> None:
+    """capfd подменяет sys.stdout файлом мимо fd 1; привязываем потоки к fd."""
+    out = open(1, "w", closefd=False, encoding="utf-8")
+    err = open(2, "w", closefd=False, encoding="utf-8")
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", err)
+
+
+def _read(capfd) -> tuple[str, str]:
+    """Сбросить привязанные к fd потоки и прочитать захват."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    return capfd.readouterr()
+
+
+def _logs(env: Env) -> list[runlog.LogInfo]:
+    return runlog.list_logs(env.tmp / "target")
+
+
+def _recording_level(env: Env, monkeypatch) -> list[int]:
+    seen: list[int] = []
+
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(list(argv))
+        seen.append(verbosity())
+        return 0
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+    return seen
+
+
+def test_level0_hides_runner_output_and_logs_it(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    assert env.run("run", "--subject", "t") == 0
+    out, err = _read(capfd)
+    assert "runner-line" not in out + err
+    assert "режим test: ослаблено" in out
+    assert df_config.TEST_BANNER_HEADER not in out
+    [info] = _logs(env)
+    assert (info.command, info.code) == ("run", 0)
+    text = runlog.read_log(info.path)
+    assert "runner-line" in text
+    assert text.startswith("# dfl run --subject t уровень 0\n")
+
+
+def test_vvv_shows_runner_output_and_full_banner(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    assert env.run("run", "-vvv", "--subject", "t") == 0
+    out, _ = _read(capfd)
+    assert "runner-line" in out and df_config.TEST_BANNER_HEADER in out
+    [info] = _logs(env)
+    text = runlog.read_log(info.path)
+    assert "уровень 3: вывод раннера шёл на экран" in text
+    assert "уровень 3: вывод раннера" not in out
+
+
+def test_flag_before_and_after_subcommand_add_up(env: Env, monkeypatch) -> None:
+    seen = _recording_level(env, monkeypatch)
+    assert env.run("-v", "run", "-v", "--subject", "t") == 0
+    assert seen == [2]
+
+
+def test_flags_above_three_cap_at_three(env: Env, monkeypatch) -> None:
+    seen = _recording_level(env, monkeypatch)
+    assert env.run("-vv", "run", "-vvv", "--subject", "t") == 0
+    assert seen == [3]
+
+
+def test_env_verbosity_default_and_flag_wins(env: Env, monkeypatch) -> None:
+    seen = _recording_level(env, monkeypatch)
+    monkeypatch.setenv(VERBOSITY_ENV, "2")
+    assert env.run("run", "--subject", "t") == 0
+    assert env.run("run", "-v", "--subject", "t") == 0
+    assert seen == [2, 1]
+
+
+def test_env_verbosity_garbage_warns(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    seen = _recording_level(env, monkeypatch)
+    monkeypatch.setenv(VERBOSITY_ENV, "много")
+    assert env.run("run", "--subject", "t") == 0
+    _, err = _read(capfd)
+    warned = [line for line in err.splitlines() if VERBOSITY_ENV in line]
+    assert len(warned) == 1 and "использую уровень 0" in warned[0]
+    assert seen == [0]
+
+
+def test_level_resets_between_calls(env: Env, monkeypatch) -> None:
+    seen = _recording_level(env, monkeypatch)
+    assert env.run("run", "-vv", "--subject", "t") == 0
+    assert env.run("run", "--subject", "t") == 0
+    assert seen == [2, 0]
+
+
+def test_status_writes_no_log(env: Env, monkeypatch) -> None:
+    _status_target(env, monkeypatch)
+    assert env.run("status") == 0
+    assert _logs(env) == []
+
+
+def test_report_writes_no_log(env: Env, monkeypatch) -> None:
+    monkeypatch.setattr(dfl, "run_report", lambda cwd, *, print_only: 0)
+    assert env.run("report") == 0
+    assert _logs(env) == []
+
+
+def test_refusal_before_test_mode_writes_no_log(env: Env, capsys) -> None:
+    write_config(env.tmp / "xdg", mode="strict", **_STRICT_GH_DIRS)
+    assert env.run("run", "--subject", "s") == 2
+    err = capsys.readouterr().err
+    assert _logs(env) == []
+    assert "подробно: dfl log" not in err
+    assert err.rstrip().endswith(dfl.REPORT_HINT)  # без лога — прежняя подсказка
+
+
+def test_log_dir_unwritable_runs_without_log(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    blocker = env.tmp / "state-file"
+    blocker.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("XDG_STATE_HOME", str(blocker))
+    assert env.run("run", "--subject", "t") == 0
+    out, err = _read(capfd)
+    assert "лог не пишется:" in err
+    assert "runner-line" in out
+
+
+def test_failure_record_has_log_path_and_level(env: Env, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(spec_loop, "main", lambda argv: 3)
+    assert env.run("run", "--subject", "t") == 3
+    rec = fl.load(env.tmp / "target")
+    assert rec is not None and rec.verbosity == 0
+    assert Path(rec.log_path).is_file()
+    assert [i.path for i in _logs(env)] == [Path(rec.log_path)]
+    err = capsys.readouterr().err
+    assert "подробно: dfl log" in err and dfl.REPORT_HINT not in err
+    assert "подробно: dfl log" in runlog.read_log(Path(rec.log_path))
+    assert env.run("run", "-v", "--subject", "t") == 3
+    err = capsys.readouterr().err
+    assert "подробно: dfl log" in err and err.rstrip().endswith(dfl.REPORT_HINT)
+    rec = fl.load(env.tmp / "target")
+    assert rec is not None and rec.verbosity == 1
+
+
+def test_rotation_keeps_log_of_last_failure(env: Env, monkeypatch) -> None:
+    monkeypatch.setattr(spec_loop, "main", lambda argv: 3)
+    assert env.run("run", "--subject", "t") == 3
+    rec = fl.load(env.tmp / "target")
+    assert rec is not None
+    monkeypatch.setattr(spec_loop, "main", lambda argv: 0)
+    for _ in range(runlog.KEEP + 2):
+        assert env.run("run", "--subject", "t") == 0
+    assert Path(rec.log_path).is_file()
+
+
+def test_discovery_output_goes_to_log_only(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    _waiting("WS-1-a", "WS-1", "customer")
+    _answer_file(env)
+
+    def fake_run(argv: list[str], **kw: object):
+        return dfl.subprocess.CompletedProcess(argv, 1, "disc-out", "disc-err")
+
+    monkeypatch.setattr(dfl.df_config, "workspace_dir", lambda name: env.tmp)
+    monkeypatch.setattr(dfl.subprocess, "run", fake_run)
+    assert env.run("answer", "--file", "answer.yaml") == 2  # stdout не JSON
+    out, err = _read(capfd)
+    assert "disc-out" not in out + err and "disc-err" not in out + err
+    [info] = _logs(env)
+    text = runlog.read_log(info.path)
+    assert "disc-out" in text and "disc-err" in text

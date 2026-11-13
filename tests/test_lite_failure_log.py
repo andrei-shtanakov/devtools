@@ -152,3 +152,24 @@ def test_snapshot_runs_survives_bad_runs_root(tmp_path: Path, monkeypatch) -> No
 
     monkeypatch.setattr(rs, "all_run_ids", bad)
     assert fl.snapshot_runs() == {}
+
+
+def test_old_record_without_log_fields_loads(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    old = {
+        "command": "run",
+        "argv": ["run"],
+        "exit_code": 2,
+        "time": "2026-11-12T00:00:00Z",
+        "output_tail": [],
+        "run_ids": [],
+        "runs_note": "",
+        "cwd_repo": "",
+        "cause": "x",
+    }
+    path = fl.record_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(old), encoding="utf-8")
+    rec = fl.load(tmp_path)
+    assert rec is not None
+    assert (rec.log_path, rec.verbosity) == ("", 0)
