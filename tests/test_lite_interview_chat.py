@@ -570,10 +570,12 @@ class Ended:
     code: int = 11
     resent: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     statuses: int = 0
+    findings: list[str] = field(default_factory=list)
 
     def status(self, session_id: str) -> iv.DiscoveryReply:
         self.statuses += 1
-        return iv.DiscoveryReply(self.code, {"next_action": {}}, "")
+        envelope = {"next_action": {}, "findings": self.findings}
+        return iv.DiscoveryReply(self.code, envelope, "")
 
     def resend(self, qid: str, payload: str) -> iv.DiscoveryReply:
         self.resent.append((qid, yaml.safe_load(payload)))
@@ -614,7 +616,8 @@ def test_top_up_asks_uncovered_topics_and_appends_to_holder(capsys) -> None:
     # тема functions без своих вопросов: последний отвеченный вообще
     assert q2 == "customer.jobs.01"
     assert [e["body"] for e in funcs["entries"]] == ["Выгрузка в CSV"]
-    assert ended.statuses == 2  # добор — один раз, затем снова status
+    # добор — один раз; status: конец вопросов, находки после добора, конец
+    assert ended.statuses == 3
 
 
 def test_top_up_keeps_holder_entries_and_text() -> None:
@@ -742,3 +745,122 @@ def test_stdin_read_broken_input_gives_up_after_retries(monkeypatch, capsys) -> 
     out = capsys.readouterr().out
     assert out.count(ic.BROKEN_INPUT) == ic.MAX_BROKEN_READS - 1
     assert ic.BROKEN_INPUT_STOP in out
+
+
+# --- issue #753: проверка брифа (GC-08) после конца интервью ---
+
+GATE_FINDINGS = [
+    "GC-08 error [FR-01] нет **Acceptance**",
+    "GC-08 error [NFR-01] нет **Acceptance**/**Target**",
+]
+FUNCS_QID = "customer.functions.01"
+NFR_QID = "customer.nfr.01"
+FR_RECORD = {"id": "FR-01", "body": "Прогон спеки одной командой",
+             "traces": ["G-01"], "Priority": "Must"}  # fmt: skip
+NFR_RECORD = {"id": "NFR-01", "body": "Без чисел, пет-проект"}
+
+
+def _gate_view() -> SessionView:
+    """Все темы покрыты (готовность ready), но у FR-01 и NFR-01 нет критерия."""
+    return _ended_view(
+        required={"goals": "G", "functions": "FR", "nfr": "NFR"},
+        entries=[
+            Entry("G-01", "Цель", {}),
+            Entry("FR-01", FR_RECORD["body"], {"traces": ["G-01"], "Priority": "Must"}),
+            Entry("NFR-01", NFR_RECORD["body"], {}),
+        ],
+        holders={
+            "G-01": "customer.goals.01",
+            "FR-01": FUNCS_QID,
+            "NFR-01": NFR_QID,
+        },  # fmt: skip
+        answers={
+            "customer.goals.01": dict(GOALS_ANSWER),
+            FUNCS_QID: {"text": "функции", "entries": [dict(FR_RECORD)]},
+            NFR_QID: {"text": "в числах не сказать", "entries": [dict(NFR_RECORD)]},
+        },
+        readiness="ready",
+    )
+
+
+def _gate_ended() -> Ended:
+    return Ended(view=_gate_view(), code=10, findings=list(GATE_FINDINGS))
+
+
+def test_gate_criteria_asked_and_written_to_entries(capsys) -> None:
+    ended = _gate_ended()
+    read = _reader("тесты спеки зелёные", "", "из 10 запусков 8 доходят до конца", "")
+    agent = _agent()
+    assert _top_up(ended, read, agent) is ic.ChatResult.FINISHED
+    out = capsys.readouterr().out
+    assert "Прогон спеки одной командой" in out
+    assert "Без чисел, пет-проект" in out
+    assert agent.prompts == []  # критерий — дословно, без агента
+    (q1, funcs), (q2, nfr) = ended.resent
+    assert q1 == FUNCS_QID and q2 == NFR_QID
+    assert funcs["entries"] == [{**FR_RECORD, "Acceptance": "тесты спеки зелёные"}]
+    assert funcs["text"].startswith("функции\n\n")
+    assert "тесты спеки зелёные" in funcs["text"]
+    assert nfr["entries"] == [
+        {**NFR_RECORD, "Acceptance": "из 10 запусков 8 доходят до конца"}
+    ]
+
+
+def test_gate_criteria_skip_leaves_entry_and_says_what_remains(capsys) -> None:
+    ended = _gate_ended()
+    read = _reader("пропустить", "", "из 10 запусков 8 доходят до конца", "")
+    assert _top_up(ended, read, _agent()) is ic.ChatResult.FINISHED
+    [(qid, _payload)] = ended.resent
+    assert qid == NFR_QID
+    out = capsys.readouterr().out
+    assert ic.CRITERIA_LEFT.format(n=1) in out
+
+
+def test_gate_other_findings_not_asked() -> None:
+    ended = _gate_ended()
+    ended.findings = ["GC-06 error [FR-01] нет **Priority**"]
+    assert _top_up(ended, _reader(), _agent()) is ic.ChatResult.FINISHED
+    assert ended.resent == []
+
+
+def test_gate_priority_finding_not_asked_as_criterion() -> None:
+    """GC-08 о важности — не про критерий: Acceptance не спрашивается и не
+    затирается (ревью #754)."""
+    ended = _gate_ended()
+    ended.findings = ["GC-08 error [FR-01] нет **Priority** (Must|Should|Could|Won't)"]
+    assert _top_up(ended, _reader(), _agent()) is ic.ChatResult.FINISHED
+    assert ended.resent == []
+
+
+def test_gate_criteria_read_after_top_up() -> None:
+    """Находки берутся из status после добора тем: пункт, заведённый
+    добором без критерия, спрашивается в том же разговоре (ревью #754)."""
+    ended = _gate_ended()
+    ended.findings = []
+    statuses = ended.status
+
+    def status(session_id: str) -> iv.DiscoveryReply:
+        if ended.statuses >= 1:
+            ended.findings = GATE_FINDINGS[:1]
+        return statuses(session_id)
+
+    ended.status = status  # type: ignore[method-assign]
+    assert _top_up(ended, _reader("тест", ""), _agent()) is ic.ChatResult.FINISHED
+    [(qid, _payload)] = ended.resent
+    assert qid == FUNCS_QID
+
+
+def test_gate_criteria_eof_stops() -> None:
+    ended = _gate_ended()
+    assert _top_up(ended, _reader(), _agent()) is ic.ChatResult.STOPPED
+    assert ended.resent == []
+
+
+def test_gate_criteria_refusal_is_said(capsys) -> None:
+    ended = _gate_ended()
+    ended.findings = GATE_FINDINGS[:1]
+    ended.resend = lambda qid, payload: iv.DiscoveryReply(  # type: ignore[method-assign]
+        1, {"operation": {"reason": "bad"}}, ""
+    )
+    assert _top_up(ended, _reader("тест", ""), _agent()) is ic.ChatResult.FINISHED
+    assert "bad" in capsys.readouterr().out
