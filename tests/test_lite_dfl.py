@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1802,3 +1803,93 @@ def test_brief_tool_failure_names_code(
     out, err = _read(capfd)
     assert f"бриф: {failing} завершился с кодом 2" in out
     assert (out + err).count(dfl.LOG_HINT) == 1
+
+
+def _make_log(env: Env, command: str, body: str, code: int | None) -> Path:
+    log = runlog.open_log(
+        env.tmp / "target", command, f"dfl {command} уровень 0", protect=None
+    )
+    log.fh.write(body)
+    if code is None:
+        log.fh.close()
+    else:
+        runlog.close_log(log, code)
+    return log.path
+
+
+def test_log_prints_last_and_report_hint_on_failure(env: Env, capfd) -> None:
+    _make_log(env, "run", "старый\n", 0)
+    _make_log(env, "answer", "новый\n", 1)
+    assert env.run("log") == 0
+    out, _ = _read(capfd)
+    assert "новый" in out and "старый" not in out
+    assert out.rstrip("\n").splitlines()[-1] == dfl.REPORT_HINT
+    assert "режим test" not in out
+
+
+def test_log_success_has_no_report_hint(env: Env, capfd) -> None:
+    _make_log(env, "run", "ок\n", 0)
+    assert env.run("log") == 0
+    out, _ = _read(capfd)
+    assert dfl.REPORT_HINT not in out
+
+
+def test_log_writes_no_log_and_needs_no_registration(env: Env) -> None:
+    _make_log(env, "run", "x\n", 0)
+    before = len(_logs(env))
+    assert env.run("log") == 0
+    assert len(_logs(env)) == before
+    assert env.registered == 0
+
+
+def test_log_n_and_list(env: Env, capfd) -> None:
+    _make_log(env, "run", "первый\n", 0)
+    _make_log(env, "answer", "второй\n", 3)
+    _make_log(env, "abandon", "третий\n", None)
+    assert env.run("log", "-n", "2") == 0
+    out, _ = _read(capfd)
+    assert "второй" in out and "третий" not in out
+    assert env.run("log", "-n", "1") == 0
+    out, _ = _read(capfd)
+    assert "третий" in out
+    assert env.run("log", "--list") == 0
+    lines = _read(capfd)[0].splitlines()
+    assert len(lines) == 3
+    pattern = r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d "
+    assert re.match(pattern + r"abandon код —$", lines[0])
+    assert re.match(pattern + r"answer код 3$", lines[1])
+    assert re.match(pattern + r"run код 0$", lines[2])
+
+
+def test_log_n_too_large_refused(env: Env, capfd) -> None:
+    _make_log(env, "run", "x\n", 0)
+    assert env.run("log", "-n", "2") == 2
+    _, err = _read(capfd)
+    assert "dfl log: отказ (код 2)" in err
+    assert "что сделать:" in err
+
+
+def test_log_n_zero_refused(env: Env, capfd) -> None:
+    _make_log(env, "run", "x\n", 0)
+    assert env.run("log", "-n", "0") == 2
+    assert "dfl log: отказ (код 2)" in _read(capfd)[1]
+
+
+def test_log_empty(env: Env, capfd) -> None:
+    assert env.run("log") == 0
+    assert "логов нет" in _read(capfd)[0]
+    assert env.run("log", "--list") == 0
+    assert "логов нет" in _read(capfd)[0]
+
+
+def test_log_non_utf8_bytes(env: Env, capfd) -> None:
+    path = _make_log(env, "run", "до\n", 0)
+    with path.open("ab") as fh:
+        fh.write(b"\xff\xfe\n")
+    assert env.run("log") == 0
+    assert "до" in _read(capfd)[0]
+
+
+def test_log_n_does_not_clash_with_verbose(env: Env, capfd) -> None:
+    _make_log(env, "run", "x\n", 0)
+    assert env.run("log", "-v", "-n", "1") == 0

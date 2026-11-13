@@ -164,6 +164,8 @@ def main(
     cwd = Path(args.cwd)
     if args.command == "report":  # до режима test: сломанный конфиг — тоже сбой
         return run_report(cwd, print_only=args.print_only)
+    if args.command == "log":  # как report: без режима test, лога и регистрации
+        return run_log(cwd, list_only=args.list_only, nth=args.nth)
     before = fl.snapshot_runs()
 
     def record(code: int, exc: BaseException | None) -> None:
@@ -189,6 +191,36 @@ def main(
         return code
     finally:
         _close_log(code)
+
+
+def run_log(cwd: Path, *, list_only: bool, nth: int) -> int:
+    """`dfl log`: последний лог (или N-й с конца) целиком либо список логов."""
+    infos = runlog.list_logs(cwd)
+    if not infos:
+        say("логов нет")
+        return 0
+    if list_only:
+        for info in reversed(infos):
+            say(_list_line(info))
+        return 0
+    if not 1 <= nth <= len(infos):
+        message = (
+            f"логов {len(infos)}, а запрошен {nth}-й с конца — "
+            "dfl log --list покажет все"
+        )
+        say(refusal("dfl log", message), 0, err=True)
+        return 2
+    info = infos[-nth]
+    say(runlog.read_log(info.path).rstrip("\n"))
+    if info.code:
+        say(REPORT_HINT)
+    return 0
+
+
+def _list_line(info: runlog.LogInfo) -> str:
+    stamp = datetime.strptime(info.path.name[:15], "%Y%m%dT%H%M%S").replace(tzinfo=UTC)
+    code = "—" if info.code is None else info.code
+    return f"{stamp:%Y-%m-%d %H:%M:%S} {info.command} код {code}"
 
 
 def _set_level(args: argparse.Namespace) -> None:
@@ -406,6 +438,11 @@ def _parser() -> argparse.ArgumentParser:
         dest="print_only",
         action="store_true",
         help="только показать, не отправлять",
+    )
+    p_log = add("log", help="лог последнего вызова dfl")
+    p_log.add_argument("--list", dest="list_only", action="store_true")
+    p_log.add_argument(
+        "-n", dest="nth", type=int, default=1, help="N-й лог с конца (1 — последний)"
     )
     return parser
 

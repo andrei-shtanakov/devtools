@@ -408,3 +408,51 @@ def test_report_without_origin_refuses_with_print_hint(
     assert _report(failed, gh) == 2
     assert "dfl report --print" in capsys.readouterr().err
     assert gh.calls == []
+
+
+def _log_file(tmp_path: Path, body: str) -> str:
+    path = tmp_path / "20261113T000000000000Z-run.log"
+    path.write_text(body, encoding="utf-8")
+    return str(path)
+
+
+def test_tail_from_log_includes_child_output_redacted(tmp_path: Path) -> None:
+    body = "# dfl run уровень 0\nchild-line\ntoken=ghp_abc\n# код выхода: 1\n"
+    rec = _rec(log_path=_log_file(tmp_path, body), output_tail=["tail-only"])
+    assert rp.tail_lines(rec) == ["child-line", "token=ghp_abc"]
+    report = rp.build(rec, FACTS)
+    assert "child-line" in report.body
+    assert "tail-only" not in report.body
+    assert "ghp_abc" not in report.body
+
+
+def test_tail_level3_uses_output_tail(tmp_path: Path) -> None:
+    rec = _rec(log_path=_log_file(tmp_path, "child-line\n"), verbosity=3)
+    assert rp.tail_lines(rec) == ["строка 1", "строка 2"]
+
+
+def test_tail_missing_log_uses_output_tail(tmp_path: Path) -> None:
+    rec = _rec(log_path=str(tmp_path / "нет.log"))
+    assert rp.tail_lines(rec) == ["строка 1", "строка 2"]
+
+
+def test_tail_no_log_path_uses_output_tail() -> None:
+    assert rp.tail_lines(_rec()) == ["строка 1", "строка 2"]
+
+
+def test_tail_caps_200_lines(tmp_path: Path) -> None:
+    body = "".join(f"l{i}\n" for i in range(500))
+    tail = rp.tail_lines(_rec(log_path=_log_file(tmp_path, body)))
+    assert len(tail) == 200 and tail[-1] == "l499"
+
+
+def test_tail_appends_crash_traceback_from_output_tail(tmp_path: Path) -> None:
+    out = ["шум", "Traceback (most recent call last):", "  File x", "KeyError: 1"]
+    rec = _rec(log_path=_log_file(tmp_path, "child\n# код выхода: 1\n"))
+    rec = _rec(log_path=rec.log_path, output_tail=out)
+    assert rp.tail_lines(rec) == ["child", *out[1:]]
+
+
+def test_tail_no_traceback_nothing_appended(tmp_path: Path) -> None:
+    rec = _rec(log_path=_log_file(tmp_path, "child\n"), output_tail=["шум"])
+    assert rp.tail_lines(rec) == ["child"]

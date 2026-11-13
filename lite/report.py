@@ -27,8 +27,11 @@ from lite.failure_log import FailureRecord
 from lite.failure_log import load as load_record
 from lite.install import InstallError, load_components
 from lite.output import refusal
+from lite.runlog import EXIT_PREFIX, PASSTHROUGH_LEVEL, read_log
 
 BODY_LIMIT = 65_536
+LOG_TAIL_LINES = 200
+TRACEBACK_START = "Traceback (most recent call last):"
 TITLE_CAUSE = 80
 DEVTOOLS = Path(__file__).resolve().parent.parent
 HIDDEN = "<скрыто>"
@@ -112,6 +115,39 @@ def _at(match: re.Match[str]) -> str:
     return "@" if match.group(0).endswith("@") else ""
 
 
+def tail_lines(rec: FailureRecord) -> list[str]:
+    """Хвост вывода для отчёта: из лога вызова, иначе из записи сбоя.
+
+    Лог берётся, если он указан, читается и уровень ниже 3 (на уровне 3
+    раннер шёл на экран и в лог не попал). Строки `# …` заголовка и код
+    выхода отбрасываются. Traceback краха печатает `cli` уже после закрытия
+    лога — он добавляется из хвоста записи."""
+    if not rec.log_path or rec.verbosity >= PASSTHROUGH_LEVEL:
+        return rec.output_tail
+    try:
+        text = read_log(Path(rec.log_path))
+    except OSError:
+        return rec.output_tail
+    lines = _strip_meta(text.splitlines())
+    return lines[-LOG_TAIL_LINES:] + _traceback(rec.output_tail)
+
+
+def _strip_meta(lines: list[str]) -> list[str]:
+    """Без первой строки-заголовка `# …` и последней `# код выхода: N`."""
+    if lines and lines[0].startswith("# "):
+        lines = lines[1:]
+    if lines and lines[-1].startswith(EXIT_PREFIX):
+        lines = lines[:-1]
+    return lines
+
+
+def _traceback(lines: list[str]) -> list[str]:
+    for i, line in enumerate(lines):
+        if line.startswith(TRACEBACK_START):
+            return lines[i:]
+    return []
+
+
 def collect_facts(rec: FailureRecord) -> Facts:
     """Прогоны из записи, версии и конфиг; недоступное — строкой, не исключением."""
     return Facts(
@@ -131,7 +167,7 @@ def build(rec: FailureRecord, facts: Facts) -> Report:
     home = Path.home()
     cause = _inert(redact(rec.cause, home))
     title = f"[dfl-report] {rec.command}: {cause[:TITLE_CAUSE]} (fp {fp})"
-    tail = [redact(line, home) for line in rec.output_tail]
+    tail = [redact(line, home) for line in tail_lines(rec)]
     head = redact(_head(rec, facts), home)
     foot = redact(_foot(facts), home) + f"\n\nfp {fp}\n"
     body = _fit(head, tail, foot)
