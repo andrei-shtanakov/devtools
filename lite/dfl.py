@@ -326,7 +326,7 @@ def _dispatch(
 
     Лог вызова открывается после строки режима test (её отказ лога не пишет)."""
     try:
-        _require_test_mode()
+        _require_test_mode(status_header=args.command == "status")
         _open_log(args, cwd, raw)
         if args.command == "status":
             return status(cwd), None
@@ -410,8 +410,11 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _require_test_mode() -> None:
-    """Конфиг обязан быть в режиме test (иначе отказ); печать баннера."""
+def _require_test_mode(*, status_header: bool = False) -> None:
+    """Конфиг обязан быть в режиме test (иначе отказ); печать баннера.
+
+    Полный баннер — на уровне 3; у `dfl status` (`status_header`) — уже с
+    уровня 1, вместе с путём конфига."""
     cfg = df_config.load()
     if cfg.mode != "test":
         raise DflError(
@@ -420,10 +423,13 @@ def _require_test_mode() -> None:
             "(install.sh существующий конфиг не переписывает) или работайте "
             "через make"
         )
-    full = verbosity() >= runlog.PASSTHROUGH_LEVEL
+    level = verbosity()
+    full = level >= runlog.PASSTHROUGH_LEVEL or (status_header and level >= 1)
     banner = df_config.test_banner(cfg) if full else df_config.test_banner_line(cfg)
     if banner is not None:
         say(banner)
+    if status_header:
+        say(f"конфиг: {df_config.canonical_config_path()}", 1)
     say("")
 
 
@@ -436,8 +442,7 @@ def run(cwd: Path, subject: str | None, role: str, *, chat: bool = True) -> int:
     chatting = chat and _is_tty()
     if chatting and _author_is_claude():
         return _run_chatting(target, subject, role)
-    code = _step(target, subject, role)
-    _hint_if_waiting(target.repo)
+    code = _step(target, subject, role, chatting=False)
     if chatting and _waiting_run(target.repo, subject) is not None:
         raise DflError(CHAT_HARNESS_REFUSAL)
     return code
@@ -453,14 +458,14 @@ def _run_chatting(
     пустыми. Подсказки раннера (`discovery answer …`, `make …`) не
     печатаются: вопрос показывает сам цикл."""
     with runner.quiet_interview_hints():
-        code = _step(target, subject, role)
+        code = _step(target, subject, role, chatting=True)
         incomplete = True
         while (state := _waiting_run(target.repo, subject, incomplete)) is not None:
             incomplete = False
             if _converse(state) is ic.ChatResult.STOPPED:
-                print(CHAT_STOPPED)
+                say(CHAT_STOPPED)
                 return 0
-            code = _step(target, subject, role)
+            code = _step(target, subject, role, chatting=True)
     return code
 
 
@@ -547,26 +552,142 @@ def _sender(
     return send
 
 
-def _step(target: user_targets.UserTarget, subject: str | None, role: str) -> int:
+def _step(
+    target: user_targets.UserTarget, subject: str | None, role: str, *, chatting: bool
+) -> int:
     repo = target.repo
+    loop = functools.partial(_loop, cwd=target.path, chatting=chatting)
     runs = _readable_runs(repo)
     cust = _select_customer(runs, subject)
     if cust is None:
         _require_init_files(target.path)
-        with runlog.captured(_LOG, verbosity()):
-            return spec_loop.main(
-                ["--subject", str(subject), "--repo", repo, "--need", "--frame",
-                 "customer", "--stakeholder", role, "--brief-only"]
-            )  # fmt: skip
+        return loop(
+            ["--subject", str(subject), "--repo", repo, "--need", "--frame",
+             "customer", "--stakeholder", role, "--brief-only"]
+        )  # fmt: skip
     eng = _engineer_of(cust, runs)
     if eng is not None:
-        return _engineer_step(eng, repo)
+        return _engineer_step(eng, repo, loop)
     if cust.status != "brief_ready":
-        with runlog.captured(_LOG, verbosity()):
-            return spec_loop.main(
-                ["--subject", cust.subject, "--repo", repo, "--run-id", cust.run_id]
-            )
-    return _brief_step(cust, role)
+        return loop(
+            ["--subject", cust.subject, "--repo", repo, "--run-id", cust.run_id]
+        )
+    return _brief_step(cust, role, loop)
+
+
+def _loop(argv: list[str], cwd: Path, *, chatting: bool) -> int:
+    """`spec_loop.main` под перехватом, затем итог шага по журналу прогона.
+
+    Итог (`_outcome`) и вопрос интервью — уровень 0, подсказка `_next_hint` —
+    1, состояние (`_state_lines`) — 2. `подробно: dfl log` при остановке с
+    кодом 0 печатается здесь; при ненулевом коде — в `main`."""
+    before = fl.snapshot_runs()
+    before_ops = _ops_by_run() if verbosity() >= 2 else {}
+    with runlog.captured(_LOG, verbosity()):
+        code = spec_loop.main(argv)
+    run_ids, _ = fl.changed_runs(before, fl.snapshot_runs(), cwd)
+    state = _load_run(run_ids[-1]) if run_ids else None
+    if state is None:
+        if code != 0:
+            say(f"шаг завершился с кодом {code}")
+        return code
+    _report_step(state, code, before_ops.get(state.run_id, {}), chatting=chatting)
+    return code
+
+
+def _report_step(
+    state: rs.RunState, code: int, before_ops: dict[str, str], *, chatting: bool
+) -> None:
+    """Итог шага по уровням для прогона `state`, изменённого шагом."""
+    line = _outcome(state, code, chatting=chatting)
+    if line is not None:
+        say(line)
+    if state.status == WAITING and not chatting:
+        _say_question(state)
+    if state.status.startswith("stopped_") and code == 0 and _LOG is not None:
+        say(LOG_HINT)
+    for text in _state_lines(before_ops, state):
+        say(text, 2)
+    if state.status == WAITING:
+        return  # как отвечать — уже сказано (вопрос) или скажет цикл
+    hint = _next_hint(state, _repo_runs(state.repo)[0])
+    if hint:
+        say(f"дальше: {hint}", 1)
+
+
+def _outcome(state: rs.RunState, code: int, *, chatting: bool) -> str | None:
+    """Строка итога шага (спека §5); `None` — прогон ждёт ответа: вопрос
+    печатает `_say_question` или цикл интервью (`chatting`)."""
+    if state.status == WAITING:
+        return None
+    if state.status.startswith("stopped_"):
+        cause = fl.cause_from(None, [state.run_id], [], refusals=REFUSALS)
+        first = cause.strip().splitlines()[0] if cause.strip() else fl.NO_CAUSE
+        return f"прогон {state.run_id} остановлен: {first}"
+    if code != 0:
+        return f"шаг завершился с кодом {code}"
+    return f"прогон {state.run_id}: {state.status}"
+
+
+def _say_question(state: rs.RunState) -> None:
+    """Текст текущего вопроса интервью и как ответить; не прочитался —
+    куда смотреть вопрос."""
+    question = None
+    session_id = (state.interview or {}).get("session_id")
+    if session_id:
+        try:
+            reply = _discovery_status(str(session_id), rs.run_dir(state.run_id))
+            question = ic.current_question(reply)
+        except (InterviewStateError, OSError, df_config.ConfigError):
+            question = None  # нет закреплённого discovery — тоже «не прочитался»
+    if question is None:
+        say(f"прогон {state.run_id} ждёт ответа; вопрос: dfl interview")
+        return
+    say(question.text)
+    say(ANSWER_HINT)
+    say(ANSWER_FORMAT, 1)
+
+
+def _state_lines(before_ops: dict[str, str], state: rs.RunState) -> list[str]:
+    """Краткое состояние (уровень 2): прогон и шаги, пройденные за вызов."""
+    head = f"{state.run_id} · {_frame(state) or '-'} · {state.status}"
+    if state.pr is not None:
+        head += f" · PR #{state.pr}"
+    if state.wave:
+        head += f" · волна {state.wave}"
+    now = _op_statuses(state)
+    steps = [key for key, status in now.items() if before_ops.get(key) != status]
+    return [head, f"шаги: {', '.join(steps) if steps else '—'}"]
+
+
+def _op_statuses(state: rs.RunState) -> dict[str, str]:
+    """`ops` прогона: ключ → статус операции."""
+    return {
+        key: str(op.get("status", "")) if isinstance(op, dict) else str(op)
+        for key, op in state.ops.items()
+    }
+
+
+def _ops_by_run() -> dict[str, dict[str, str]]:
+    """Статусы `ops` всех читаемых прогонов — снимок до шага."""
+    try:
+        run_ids = rs.all_run_ids()
+    except (OSError, ValueError):
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    for run_id in run_ids:
+        state = _load_run(run_id)
+        if state is not None:
+            out[run_id] = _op_statuses(state)
+    return out
+
+
+def _load_run(run_id: str) -> rs.RunState | None:
+    """Журнал прогона или `None`, если не читается (итог — подсказка)."""
+    try:
+        return rs.load(run_id)
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
 
 
 def _readable_runs(repo: str) -> list[rs.RunState]:
@@ -589,15 +710,6 @@ def _require_init_files(top: Path) -> None:
             f"репо не подготовлен: нет {', '.join(missing)} — сначала "
             "dfl init-repo, смержите его PR и git pull"
         )
-
-
-def _hint_if_waiting(repo: str) -> None:
-    """Прогон ждёт ответа на вопрос интервью — как отвечать через dfl."""
-    runs, _ = _repo_runs(repo)
-    for state in runs:
-        if state.status == WAITING:
-            print(f"dfl: прогон {state.run_id} ждёт ответа на вопрос выше")
-            print(f"{ANSWER_HINT}\n{ANSWER_FORMAT}")
 
 
 def _repo_runs(repo: str) -> tuple[list[rs.RunState], list[str]]:
@@ -665,31 +777,28 @@ def _select_customer(
     )
 
 
-def _engineer_step(eng: rs.RunState, repo: str) -> int:
+def _engineer_step(
+    eng: rs.RunState, repo: str, loop: Callable[[list[str]], int]
+) -> int:
     url = _accepted_url(eng)
     if url is not None and merged_unreviewed(eng.ops):
-        print(
-            f"PR с кодом вмержен без автоматической приёмки: {url}; конвейер закончен"
-        )
+        say(f"PR с кодом вмержен без автоматической приёмки: {url}; конвейер закончен")
         return 0
     if url is not None and code_merged(eng.ops):
         # merged+reviewed пишет только auto_tasks._finish_merged: ревью этой
         # головы одобрило, но приёмка не завершилась (ревью #739)
-        print(
+        say(
             f"PR с кодом вмержен человеком после одобряющего ревью, приёмка "
             f"не завершена: {url}; конвейер закончен"
         )
         return 0
     if url is not None:
-        print(f"PR с кодом проверен: {url}; мерж — за вами")
+        say(f"PR с кодом проверен: {url}; мерж — за вами")
         return 0
-    with runlog.captured(_LOG, verbosity()):
-        return spec_loop.main(
-            ["--subject", eng.subject, "--repo", repo, "--run-id", eng.run_id]
-        )
+    return loop(["--subject", eng.subject, "--repo", repo, "--run-id", eng.run_id])
 
 
-def _brief_step(cust: rs.RunState, role: str) -> int:
+def _brief_step(cust: rs.RunState, role: str, loop: Callable[[list[str]], int]) -> int:
     """Бриф готов: предложение → мерж человеком → одобрение → engineer."""
     approved = (rs.run_dir(cust.run_id) / bt.APPROVED_REL).exists()
     if not approved:
@@ -702,14 +811,13 @@ def _brief_step(cust: rs.RunState, role: str) -> int:
     if not approved:
         if not merged:
             url = f"https://github.com/{cust.repo_slug}/pull/{pr}"
-            print(f"бриф ждёт вашего мержа: {url} — после мержа снова dfl run")
+            say(f"бриф ждёт вашего мержа: {url} — после мержа снова dfl run")
             return 0
         with runlog.captured(_LOG, verbosity()):
             code = bt.main(["approve", "--run", cust.run_id, "--pr", str(pr)])
         if code != 0:
             return code
-    with runlog.captured(_LOG, verbosity()):
-        return spec_loop.main(bt.engineer_args(cust, pr, role))
+    return loop(bt.engineer_args(cust, pr, role))
 
 
 def _refuse_closed_brief(cust: rs.RunState) -> None:
@@ -759,11 +867,13 @@ def status(cwd: Path) -> int:
     repo = _registered_repo(cwd)
     runs, broken = _repo_runs(repo)
     for run_id in broken:
-        print(f"{run_id}  не читается: {rs.run_dir(run_id)}/run.json")
+        say(f"{run_id}  не читается: {rs.run_dir(run_id)}/run.json")
     for state in runs:
         line = f"{state.run_id}  {_frame(state) or '-'}  {state.status}"
         hint = _next_hint(state, runs)
-        print(f"{line}  дальше: {hint}" if hint else line)
+        say(f"{line}  дальше: {hint}" if hint else line)
+        for key, op_status in _op_statuses(state).items():
+            say(f"  {key}: {op_status}", 2)
     return 0
 
 
@@ -839,7 +949,7 @@ def answer(
         with runner.quiet_interview_hints():
             result = _converse(state)
         if result is ic.ChatResult.STOPPED:
-            print(CHAT_STOPPED)
+            say(CHAT_STOPPED)
             return 0
         return run(cwd, cust.subject, role)
     path = file if file.is_absolute() else cwd / file
