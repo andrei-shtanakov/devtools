@@ -53,7 +53,7 @@ REFUSED_TEXT = "ответ не принят — ответьте на вопр�
 TOP_UP_HINT = "расскажите об этом своими словами («пропустить» — оставить так)"
 INCOMPLETE_CODES = (10, 11)
 # находка проверки брифа: у пункта нет критерия проверки (Acceptance/Target)
-NO_CRITERION_RE = re.compile(r"^GC-08 error \[([A-Z]+-\d+)\]")
+NO_CRITERION_RE = re.compile(r"^GC-08 error \[([A-Z]+-\d+)\] нет \*\*Acceptance\*\*")
 CRITERIA_INTRO = (
     "интервью окончено, но бриф не прошёл проверку: у пунктов ниже нет "
     "способа проверить, что они выполнены"
@@ -113,7 +113,8 @@ def chat(
                 return ChatResult.FINISHED
             topped_up = True
             _top_up(session, read, agent, resend, load)
-            _fill_criteria(_no_criterion(reply), session, read, resend, load)
+            # находки — после добора: добор мог завести пункты без критерия
+            _fill_criteria(_no_criterion(status(session)), session, read, resend, load)
     except _Stop:
         return ChatResult.STOPPED
     except KeyboardInterrupt:

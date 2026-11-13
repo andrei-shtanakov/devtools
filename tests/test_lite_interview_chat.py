@@ -616,7 +616,8 @@ def test_top_up_asks_uncovered_topics_and_appends_to_holder(capsys) -> None:
     # тема functions без своих вопросов: последний отвеченный вообще
     assert q2 == "customer.jobs.01"
     assert [e["body"] for e in funcs["entries"]] == ["Выгрузка в CSV"]
-    assert ended.statuses == 2  # добор — один раз, затем снова status
+    # добор — один раз; status: конец вопросов, находки после добора, конец
+    assert ended.statuses == 3
 
 
 def test_top_up_keeps_holder_entries_and_text() -> None:
@@ -820,6 +821,33 @@ def test_gate_other_findings_not_asked() -> None:
     ended.findings = ["GC-06 error [FR-01] нет **Priority**"]
     assert _top_up(ended, _reader(), _agent()) is ic.ChatResult.FINISHED
     assert ended.resent == []
+
+
+def test_gate_priority_finding_not_asked_as_criterion() -> None:
+    """GC-08 о важности — не про критерий: Acceptance не спрашивается и не
+    затирается (ревью #754)."""
+    ended = _gate_ended()
+    ended.findings = ["GC-08 error [FR-01] нет **Priority** (Must|Should|Could|Won't)"]
+    assert _top_up(ended, _reader(), _agent()) is ic.ChatResult.FINISHED
+    assert ended.resent == []
+
+
+def test_gate_criteria_read_after_top_up() -> None:
+    """Находки берутся из status после добора тем: пункт, заведённый
+    добором без критерия, спрашивается в том же разговоре (ревью #754)."""
+    ended = _gate_ended()
+    ended.findings = []
+    statuses = ended.status
+
+    def status(session_id: str) -> iv.DiscoveryReply:
+        if ended.statuses >= 1:
+            ended.findings = GATE_FINDINGS[:1]
+        return statuses(session_id)
+
+    ended.status = status  # type: ignore[method-assign]
+    assert _top_up(ended, _reader("тест", ""), _agent()) is ic.ChatResult.FINISHED
+    [(qid, _payload)] = ended.resent
+    assert qid == FUNCS_QID
 
 
 def test_gate_criteria_eof_stops() -> None:
