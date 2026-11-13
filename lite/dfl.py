@@ -100,6 +100,10 @@ INIT_FILES = (
 # команды, исполняющие шаг конвейера или discovery: только они пишут лог вызова
 LOGGED_COMMANDS = frozenset({"run", "answer", "correct", "init-repo"})
 LOG_HINT = "подробно: dfl log"
+BRIEF_READY_HINT = "dfl run — откроет PR брифа (или покажет открытый) на ваш мерж"
+# статусы, после которых конвейер стоит до действия человека (кроме URL
+# проверенного PR и остановленной цепочки — их узнают по `ops`)
+HUMAN_STEP_STATUSES = frozenset({"brief_ready", "waiting_human_merge"})
 SCREEN_MARK = "уровень 3: вывод раннера шёл на экран"
 
 # лог текущего вызова; путь переживает закрытие лога — его читает `_record`,
@@ -624,21 +628,51 @@ def _loop(argv: list[str], cwd: Path, *, chatting: bool) -> int:
         code = spec_loop.main(argv)
     run_ids, note = fl.changed_runs(before, fl.snapshot_runs(), cwd)
     # `note` — шаг прогонов не менял, и `changed_runs` назвал свежий прогон
-    # репо наугад: его итог (старая причина стопа) был бы ложным итогом шага
+    # репо наугад: его итог (старая причина стопа) был бы ложным итогом шага.
+    # Прогон, названный в `--run-id`, известен и так — его состояние и
+    # следующий шаг печатаются без причины стопа (resume без записи run.json)
     state = _load_run(run_ids[-1]) if run_ids and not note else None
+    unchanged = _argv_run(argv) if state is None else None
+    if unchanged is not None:
+        line = _unchanged_outcome(unchanged, code)
+        ops = before_ops.get(unchanged.run_id, {})
+        _report_step(unchanged, code, ops, chatting=chatting, line=line)
+        return code
     if state is None:
         if code != 0:
             say(f"шаг завершился с кодом {code}")
         return code
-    _report_step(state, code, before_ops.get(state.run_id, {}), chatting=chatting)
+    line = _outcome(state, code)
+    _report_step(
+        state, code, before_ops.get(state.run_id, {}), chatting=chatting, line=line
+    )
     return code
 
 
+def _argv_run(argv: list[str]) -> rs.RunState | None:
+    """Прогон из `--run-id` в argv шага; нет флага или не читается — `None`."""
+    if "--run-id" not in argv:
+        return None
+    i = argv.index("--run-id") + 1
+    return _load_run(argv[i]) if i < len(argv) else None
+
+
+def _unchanged_outcome(state: rs.RunState, code: int) -> str:
+    """Итог шага, не изменившего прогон: статус без причины стопа."""
+    line = f"прогон {state.run_id} шагом не изменён: {state.status}"
+    return line if code == 0 else f"шаг завершился с кодом {code}; {line}"
+
+
 def _report_step(
-    state: rs.RunState, code: int, before_ops: dict[str, str], *, chatting: bool
+    state: rs.RunState,
+    code: int,
+    before_ops: dict[str, str],
+    *,
+    chatting: bool,
+    line: str | None,
 ) -> None:
-    """Итог шага по уровням для прогона `state`, изменённого шагом."""
-    line = _outcome(state, code)
+    """Итог шага по уровням для прогона `state`: строка итога `line`, вопрос,
+    состояние, следующий шаг (на уровне 0, если он — действие человека)."""
     if line is not None:
         say(line)
     unread = state.status == WAITING and not chatting and not _say_question(state)
@@ -652,14 +686,23 @@ def _report_step(
         return  # как отвечать — уже сказано (вопрос) или скажет цикл
     hint = _next_hint(state, _repo_runs(state.repo)[0])
     if hint:
-        say(f"дальше: {hint}", 1)
+        say(f"дальше: {hint}", 0 if _awaits_human(state) else 1)
+
+
+def _awaits_human(state: rs.RunState) -> bool:
+    """Следующий шаг — действие человека: он виден на любом уровне (спека §2)."""
+    return (
+        _accepted_url(state) is not None
+        or chain_open(state.mode, _frame(state), state.status, state.ops)
+        or state.status in HUMAN_STEP_STATUSES
+    )
 
 
 def _outcome(state: rs.RunState, code: int) -> str | None:
     """Строка итога шага (спека §5); `None` — прогон ждёт ответа: вопрос
-    печатает `_say_question` или цикл интервью."""
+    печатает `_say_question` или цикл интервью (при ненулевом коде — код)."""
     if state.status == WAITING:
-        return None
+        return f"шаг завершился с кодом {code}" if code != 0 else None
     if state.status.startswith("stopped_"):
         cause = fl.cause_from(None, [state.run_id], [], refusals=REFUSALS)
         first = cause.strip().splitlines()[0] if cause.strip() else fl.NO_CAUSE
@@ -948,7 +991,10 @@ def _next_hint(state: rs.RunState, runs: list[rs.RunState]) -> str | None:
     if state.status == WAITING:
         return ANSWER_HINT
     if state.status == "brief_ready":
-        return "мерж брифа, затем dfl run"
+        return BRIEF_READY_HINT
+    if state.status == "waiting_human_merge":
+        what = f"https://github.com/{state.repo_slug}/pull/{state.pr}"
+        return f"смержите {what if state.pr else 'PR прогона'}, затем dfl run"
     if state.status.startswith("stopped_"):
         return f"разберите причину выше и dfl run (или {ABANDON_HINT})"
     return None
@@ -1106,12 +1152,12 @@ def correct(cwd: Path, text: str, subject: str | None) -> int:
     except (iview.CorrectError, InterviewStateError) as exc:
         raise DflError(str(exc)) from exc
     if isinstance(result, st.Ask):
-        print(
+        say(
             f"Уточните: {result.question} — повторите "
             "dfl correct '<текст с уточнением>'"
         )
         return 0
-    print(result)
+    say(str(result))
     return 0
 
 

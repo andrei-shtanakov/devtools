@@ -99,20 +99,39 @@ def captured(log: RunLog | None, level: int) -> Iterator[None]:
         yield
         return
     _flush_all(log)
-    saved = (os.dup(1), os.dup(2))
+    saved: list[int] = []
     old_env = {k: os.environ.get(k) for k in QUIET_ENV}
     try:
+        saved.append(os.dup(1))
+        saved.append(os.dup(2))
         os.dup2(log.fh.fileno(), 1)
         os.dup2(log.fh.fileno(), 2)
         os.environ.update(QUIET_ENV)
         yield
     finally:
-        _flush_all(log)
-        os.dup2(saved[0], 1)
-        os.dup2(saved[1], 2)
-        for fd in saved:
+        try:
+            _flush_all(log)  # Ctrl-C здесь не оставит экран на логе
+        finally:
+            _restore_fds(saved)
+            _restore_env(old_env)
+
+
+def _restore_fds(saved: list[int]) -> None:
+    """Вернуть fd 1 и 2 из копий и закрыть копии; сбой одного `dup2` не мешает
+    второму — первая ошибка поднимается после закрытия копий."""
+    error: OSError | None = None
+    for target, fd in zip((1, 2), saved, strict=False):
+        try:
+            os.dup2(fd, target)
+        except OSError as exc:
+            error = error or exc
+    for fd in saved:
+        try:
             os.close(fd)
-        _restore_env(old_env)
+        except OSError:
+            pass
+    if error is not None:
+        raise error
 
 
 def _flush_all(log: RunLog) -> None:

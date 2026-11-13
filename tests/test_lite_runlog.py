@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from lite import runlog
 from lite.failure_log import repo_key
 from lite.runlog import (
     KEEP,
@@ -185,3 +186,90 @@ def test_list_logs_parses_command_and_code(tmp_path) -> None:
 
 def test_list_logs_no_dir(tmp_path) -> None:
     assert list_logs(tmp_path) == []
+
+
+# --- правки финального ревью: fd в `captured` не утекают ---
+
+
+def _ino(fd: int) -> tuple[int, int]:
+    st = os.fstat(fd)
+    return st.st_dev, st.st_ino
+
+
+def _closed(fd: int) -> bool:
+    try:
+        os.fstat(fd)
+    except OSError:
+        return True
+    return False
+
+
+def test_captured_second_dup_failure_closes_first(tmp_path, monkeypatch) -> None:
+    log = open_log(tmp_path, "run", "h", protect=None)
+    real_dup = os.dup
+    made: list[int] = []
+
+    def dup(fd: int) -> int:
+        if made:
+            raise OSError("fd 2 закрыт")
+        made.append(real_dup(fd))
+        return made[-1]
+
+    monkeypatch.setattr(runlog.os, "dup", dup)
+    with pytest.raises(OSError):
+        with captured(log, 0):
+            pass
+    monkeypatch.undo()
+    assert made and _closed(made[0])
+    close_log(log, 0)
+
+
+def test_captured_restore_survives_one_dup2_failure(tmp_path, monkeypatch) -> None:
+    log = open_log(tmp_path, "run", "h", protect=None)
+    screen = (_ino(1), _ino(2))
+    backup = os.dup(1)
+    real_dup, real_dup2 = os.dup, os.dup2
+    dups: list[int] = []
+
+    def dup(fd: int) -> int:
+        dups.append(real_dup(fd))
+        return dups[-1]
+
+    def dup2(src: int, dst: int) -> int:
+        if dst == 1 and src in dups:
+            raise OSError("restore fd 1")
+        return real_dup2(src, dst)
+
+    monkeypatch.setattr(runlog.os, "dup", dup)
+    monkeypatch.setattr(runlog.os, "dup2", dup2)
+    try:
+        with pytest.raises(OSError):
+            with captured(log, 0):
+                pass
+        assert _ino(2) == screen[1]
+        assert all(_closed(fd) for fd in dups)
+    finally:
+        monkeypatch.undo()
+        os.dup2(backup, 1)
+        os.close(backup)
+    close_log(log, 0)
+
+
+def test_captured_interrupt_in_final_flush_restores(tmp_path, monkeypatch) -> None:
+    log = open_log(tmp_path, "run", "h", protect=None)
+    screen = (_ino(1), _ino(2))
+    real_flush = runlog._flush_all
+    calls: list[int] = []
+
+    def flush(arg: runlog.RunLog) -> None:
+        calls.append(1)
+        if len(calls) == 2:
+            raise KeyboardInterrupt
+        real_flush(arg)
+
+    monkeypatch.setattr(runlog, "_flush_all", flush)
+    with pytest.raises(KeyboardInterrupt):
+        with captured(log, 0):
+            pass
+    assert (_ino(1), _ino(2)) == screen
+    close_log(log, 0)

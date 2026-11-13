@@ -42,7 +42,18 @@ _TOKENS = (
     re.compile(r"sk-ant-[A-Za-z0-9_-]{10,}"),
     re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
     re.compile(r"xox[abp]-[A-Za-z0-9-]+"),
+    re.compile(r"glpat-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"),
 )
+# Блок приватного ключа — многострочный: скрывается целиком, вместе с
+# оборванным хвостом (начало без конца) и началом вне хвоста (конец без начала).
+_PEM_BLOCK = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?"
+    r"(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)",
+    re.DOTALL,
+)
+_PEM_HEADLESS = re.compile(r"\A.*?-----END [A-Z0-9 ]*PRIVATE KEY-----", re.DOTALL)
 # Значение после префикса: группа 1 остаётся, остальное — `<скрыто>`.
 # После ключа и схемы авторизации скрывается всё до конца строки: значение
 # бывает из нескольких слов (`Authorization: token abc`, `password=a b`);
@@ -99,7 +110,8 @@ def fingerprint(rec: FailureRecord, last_op: str) -> str:
 
 
 def redact(text: str, home: Path) -> str:
-    """Домашний каталог → `~`, токены → `<скрыто>`."""
+    """Домашний каталог → `~`, токены и блоки приватных ключей → `<скрыто>`."""
+    text = _PEM_HEADLESS.sub(HIDDEN, _PEM_BLOCK.sub(HIDDEN, text))
     home_str = str(home).rstrip("/")
     if home_str:
         text = re.sub(re.escape(home_str) + r"(?=/|\b|$)", "~", text)
@@ -129,6 +141,8 @@ def tail_lines(rec: FailureRecord) -> list[str]:
     except OSError:
         return rec.output_tail
     lines = _strip_meta(text.splitlines())
+    if not lines:
+        return rec.output_tail  # вывод команды мимо лога (лог без тела)
     return lines[-LOG_TAIL_LINES:] + _traceback(rec.output_tail)
 
 
@@ -167,7 +181,8 @@ def build(rec: FailureRecord, facts: Facts) -> Report:
     home = Path.home()
     cause = _inert(redact(rec.cause, home))
     title = f"[dfl-report] {rec.command}: {cause[:TITLE_CAUSE]} (fp {fp})"
-    tail = [redact(line, home) for line in tail_lines(rec)]
+    # хвост очищается целиком: блок приватного ключа занимает несколько строк
+    tail = redact("\n".join(tail_lines(rec)), home).splitlines()
     head = redact(_head(rec, facts), home)
     foot = redact(_foot(facts), home) + f"\n\nfp {fp}\n"
     body = _fit(head, tail, foot)
@@ -310,8 +325,9 @@ def _config_line() -> str:
 Gh = Callable[[list[str], Path | None, str | None], subprocess.CompletedProcess]
 YES = ("y", "yes", "да", "д")
 PUBLIC_WARNING = (
-    "отчёт уйдёт ПУБЛИЧНО; токены и домашний каталог скрыты автоматически, "
-    "но это страховка — перечитайте отчёт выше"
+    "отчёт уйдёт ПУБЛИЧНО; в хвосте — вывод git, gh, раннера и ревью целевого "
+    "репо (код, имена файлов и PR); скрыты только известные формы секретов и "
+    "домашний каталог — перечитайте отчёт выше перед отправкой"
 )
 PRINT_HINT = "используйте dfl report --print и пришлите вывод сами"
 

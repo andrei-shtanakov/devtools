@@ -11,7 +11,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 CHAIN_STOPPED_HINT = (
-    "конвейер после прогона остановился — причина в выводе dfl run; повторите dfl run"
+    "конвейер после прогона остановился — причина в логе вызова (dfl log); "
+    "повторите dfl run"
 )
 
 
