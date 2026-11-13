@@ -26,7 +26,7 @@ UNCHANGED_NOTE = "вызов его не менял"
 NO_CAUSE = "причина не записана"
 CAUSE_PREFIX = "  причина:"  # строка блока `lite.output.refusal`
 # хвостовые строки-подсказки dfl: причиной не бывают (devtools#755)
-HINT_PREFIXES = ("подробно:", "отчёт разработчикам:", "дальше:", "шаг завершился")
+HINT_PREFIXES = ("подробно:", "отчёт разработчикам:", "дальше:")
 
 
 @dataclass(frozen=True)
@@ -172,10 +172,13 @@ def cause_from(
 
 
 def _interview_stop(run_id: str) -> str:
-    """Первая строка `interview.stop_reason` прогона (стоп интервью пишет
-    причину в run.json, не в stop-reason.txt); нет — пусто."""
+    """Первая строка `interview.stop_reason` прогона, который СЕЙЧАС стоит в
+    стопе интервью (стоп пишет причину в run.json, не в stop-reason.txt, и
+    поле после снятия стопа остаётся); иначе — пусто."""
     try:
         raw = json.loads((rs.run_dir(run_id) / "run.json").read_text("utf-8"))
+        if raw.get("status") != "stopped_interview":
+            return ""
         reason = str((raw.get("interview") or {}).get("stop_reason") or "")
     except (OSError, ValueError, AttributeError):
         return ""
